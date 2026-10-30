@@ -4118,6 +4118,13 @@ static void vlog_lower_task_decl(mir_unit_t *mu, object_t *obj)
 
          mir_value_t init = mir_build_load(mu, param);
          mir_build_store(mu, local, init);
+
+         // The parameter does not survive the task suspending
+         mir_value_t saved = mir_add_var(mu, t_pointer, pti->stamp,
+                                         ident_sprintf("%s$out", istr(name)),
+                                         0);
+         mir_build_store(mu, saved, param);
+         mir_put_object(mu, name, saved);
       }
    }
 
@@ -4141,9 +4148,11 @@ static void vlog_lower_task_decl(mir_unit_t *mu, object_t *obj)
       assert(!mir_is_null(local));
       assert(hops == 0);
 
-      mir_value_t param = mir_get_param(mu, i + 1);
+      mir_value_t saved = mir_search_object(mu, vlog_ident(port), &hops);
+      assert(!mir_is_null(saved));
+
       mir_value_t result = mir_build_load(mu, local);
-      mir_build_store(mu, param, result);
+      mir_build_store(mu, mir_build_load(mu, saved), result);
    }
 
 

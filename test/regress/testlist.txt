@@ -1498,6 +1498,7 @@ vhpi25          vhpi
 vlog51          verilog
 vlog52          verilog
 vlog53          verilog
+vlog54          verilog
 slice8          normal,2008
 slice9          normal,2008
 slice10         normal,relaxed
