@@ -35,6 +35,7 @@
 #include "type.h"
 #include "vhdl/vhdl-phase.h"
 #include "vhdl/vhdl-util.h"
+#include "vlog/vlog-node.h"
 
 #include <string.h>
 #include <stdarg.h>
@@ -10741,6 +10742,123 @@ static tree_t p_sequential_statement(void)
    }
 }
 
+bool vlog_get_const(vlog_node_t v, int64_t *value);
+bool vlog_bounds(vlog_node_t v, int64_t *left, int64_t *right);
+
+static tree_t p_verilog_component(tree_t inst)
+{
+   // Direct instantiation of a Verilog module with entity work.name is
+   // the same as declaring a component with matching ports
+
+   ident_t id = tree_ident2(inst);
+   ident_t libname = ident_until(id, '.');
+   ident_t unit = ident_from(id, '.');
+   if (unit == NULL)
+      return NULL;
+
+   lib_t lib = libname == well_known(W_WORK) ? lib_work() : lib_find(libname);
+   if (lib == NULL)
+      return NULL;
+
+   object_t *obj = lib_get_generic(lib, ident_prefix(lib_name(lib), unit, '.'),
+                                   NULL);
+   if (obj == NULL)
+      return NULL;
+
+   vlog_node_t mod = vlog_from_object(obj);
+   if (mod == NULL || vlog_kind(mod) != V_MODULE)
+      return NULL;
+
+   tree_t comp = tree_new(T_COMPONENT);
+   tree_set_ident(comp, unit);
+   tree_set_loc(comp, CURRENT_LOC);
+
+   type_t t_integer = std_type(NULL, STD_INTEGER);
+
+   const int ndecls = vlog_decls(mod);
+   for (int i = 0; i < ndecls; i++) {
+      vlog_node_t d = vlog_decl(mod, i);
+      if (vlog_kind(d) != V_PARAM_DECL)
+         continue;
+
+      LOCAL_TEXT_BUF tb = tb_new();
+      tb_istr(tb, vlog_ident(d));
+      tb_upcase(tb);
+
+      tree_t g = tree_new(T_GENERIC_DECL);
+      tree_set_class(g, C_CONSTANT);
+      tree_set_ident(g, ident_new(tb_get(tb)));
+      tree_set_type(g, t_integer);
+      tree_set_subkind(g, PORT_IN);
+      tree_set_loc(g, CURRENT_LOC);
+
+      int64_t ival;
+      if (vlog_has_value(d) && vlog_get_const(vlog_value(d), &ival))
+         tree_set_value(g, get_int_lit(g, t_integer, ival));
+
+      tree_add_generic(comp, g);
+   }
+
+   type_t t_logic = ieee_type(IEEE_STD_LOGIC);
+   type_t t_vector = ieee_type(IEEE_STD_LOGIC_VECTOR);
+
+   const int nports = vlog_ports(mod);
+   for (int i = 0; i < nports; i++) {
+      vlog_node_t d = vlog_ref(vlog_port(mod, i));
+
+      LOCAL_TEXT_BUF tb = tb_new();
+      tb_istr(tb, vlog_ident(d));
+      tb_upcase(tb);
+
+      tree_t p = tree_new(T_PORT_DECL);
+      tree_set_class(p, C_SIGNAL);
+      tree_set_ident(p, ident_new(tb_get(tb)));
+      tree_set_loc(p, CURRENT_LOC);
+
+      switch (vlog_subkind(d)) {
+      case V_PORT_OUTPUT: tree_set_subkind(p, PORT_OUT); break;
+      case V_PORT_INOUT:  tree_set_subkind(p, PORT_INOUT); break;
+      default:            tree_set_subkind(p, PORT_IN); break;
+      }
+
+      vlog_node_t dt = vlog_type(d);
+      if (vlog_ranges(dt) == 0)
+         tree_set_type(p, t_logic);
+      else {
+         int64_t left, right;
+         if (vlog_ranges(dt) != 1
+             || !vlog_bounds(vlog_range(dt, 0), &left, &right)) {
+            parse_error(CURRENT_LOC, "port %s of Verilog module %s must have "
+                        "one dimension with constant bounds to be instantiated "
+                        "directly", tb_get(tb), istr(unit));
+            return NULL;
+         }
+
+         tree_t r = tree_new(T_RANGE);
+         tree_set_subkind(r, left >= right ? RANGE_DOWNTO : RANGE_TO);
+         tree_set_left(r, get_int_lit(p, t_integer, left));
+         tree_set_right(r, get_int_lit(p, t_integer, right));
+         tree_set_type(r, t_integer);
+         tree_set_loc(r, CURRENT_LOC);
+
+         tree_t c = tree_new(T_CONSTRAINT);
+         tree_set_subkind(c, C_INDEX);
+         tree_set_loc(c, CURRENT_LOC);
+         tree_add_range(c, r);
+
+         type_t sub = type_new(T_SUBTYPE);
+         type_set_base(sub, t_vector);
+         type_set_constraint(sub, c);
+
+         tree_set_type(p, sub);
+      }
+
+      tree_add_port(comp, p);
+   }
+
+   return comp;
+}
+
 static tree_t p_instantiated_unit(tree_t name)
 {
    // [ component ] name
@@ -10769,6 +10887,15 @@ static tree_t p_instantiated_unit(tree_t name)
       }
 
       tree_set_ident2(t, p_selected_identifier());
+
+      if (tree_class(t) == C_ENTITY) {
+         tree_t comp = p_verilog_component(t);
+         if (comp != NULL) {
+            tree_set_class(t, C_COMPONENT);
+            tree_set_ident2(t, tree_ident(comp));
+            tree_set_ref(t, comp);
+         }
+      }
    }
    else {
       tree_set_class(t, C_COMPONENT);
@@ -10807,7 +10934,9 @@ static tree_t p_component_instantiation_statement(ident_t label, tree_t name)
    tree_set_ident(t, label);
    tree_set_loc(t, CURRENT_LOC);
 
-   tree_t ref = find_binding(t);
+   tree_t ref = tree_has_ref(t) && tree_kind(tree_ref(t)) == T_COMPONENT
+      && tree_class(t) == C_COMPONENT && name == NULL
+      ? tree_ref(t) : find_binding(t);
    tree_set_ref(t, ref);
 
    tree_t entity = ref ? primary_unit_of(ref) : NULL;

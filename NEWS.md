@@ -1,4 +1,5 @@
 ## Unreleased changes
+- A Verilog module can now be instantiated directly with `entity work.name`.
 - Fixed comparing two-state Verilog values which gave an unknown result.
 - Fixed values of implicit enum names following an explicit value.
 - Fixed parsing of `if` generate with an instance and no `begin`.
