@@ -1399,7 +1399,7 @@ static bool run_test(test_t *test)
          }
       }
    }
-   else if (test->flags & F_VERILOG) {
+   else if (test->flags & (F_VERILOG | F_MIXED)) {
       outf = freopen(OUTFILE, "r", outf);
       assert(outf != NULL);
 
@@ -1418,7 +1418,7 @@ static bool run_test(test_t *test)
          failed("printed both PASSED and FAILED");
          result = false;
       }
-      else if (!found_failed && !found_passed) {
+      else if (!found_failed && !found_passed && (test->flags & F_VERILOG)) {
          failed("did not print PASSED or FAILED");
          result = false;
       }
