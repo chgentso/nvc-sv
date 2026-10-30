@@ -347,8 +347,8 @@ static vlog_node_t simp_enum_decl(vlog_node_t v)
             vlog_set_value(d, plus);
          }
       }
-      else
-         last = vlog_value(d);
+
+      last = vlog_value(d);
    }
 
    return v;

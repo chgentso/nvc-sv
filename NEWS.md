@@ -1,5 +1,6 @@
 ## Unreleased changes
 - Fixed comparing two-state Verilog values which gave an unknown result.
+- Fixed values of implicit enum names following an explicit value.
 - Fixed a crash after a severity `failure` assertion failure during
   elaboration.
 - Aliases of globally static names are now correctly treated as globally
