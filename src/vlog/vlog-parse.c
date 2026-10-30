@@ -4940,7 +4940,7 @@ static vlog_node_t p_generate_block(void)
 
    vlog_node_t b = vlog_new(V_GEN_BLOCK);
 
-   if (scan(tID, tBEGIN)) {
+   if (peek() == tBEGIN || (peek() == tID && peek_nth(2) == tCOLON)) {
       ident_t label = NULL;
       if (peek() == tID) {
          vlog_set_ident(b, (label = p_identifier()));

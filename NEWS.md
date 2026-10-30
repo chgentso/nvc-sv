@@ -1,6 +1,7 @@
 ## Unreleased changes
 - Fixed comparing two-state Verilog values which gave an unknown result.
 - Fixed values of implicit enum names following an explicit value.
+- Fixed parsing of `if` generate with an instance and no `begin`.
 - Fixed a crash after a severity `failure` assertion failure during
   elaboration.
 - Aliases of globally static names are now correctly treated as globally
