@@ -4120,7 +4120,7 @@ static jit_value_t irgen_arith_xbits(jit_irgen_t *g, jit_value_t left,
    return result;
 }
 
-static void irgen_op_binary(jit_irgen_t *g, mir_value_t n)
+static void irgen_binary_body(jit_irgen_t *g, mir_value_t n)
 {
    mir_value_t left = mir_get_arg(g->mu, n, 1);
    mir_value_t right = mir_get_arg(g->mu, n, 2);
@@ -4518,6 +4518,16 @@ static void irgen_op_binary(jit_irgen_t *g, mir_value_t n)
 
    if (is_vec4)
       j_mov(g, irgen_get_slot(g, n, 1), xbits);
+}
+
+static void irgen_op_binary(jit_irgen_t *g, mir_value_t n)
+{
+   irgen_binary_body(g, n);
+
+   // Comparisons return a vec4 even when both operands are vec2
+   if (mir_is(g->mu, n, MIR_TYPE_VEC4)
+       && !mir_is(g->mu, mir_get_arg(g->mu, n, 1), MIR_TYPE_VEC4))
+      j_mov(g, irgen_get_slot(g, n, 1), jit_value_from_int64(0));
 }
 
 static void irgen_op_unary(jit_irgen_t *g, mir_value_t n)

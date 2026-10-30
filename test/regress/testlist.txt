@@ -1495,6 +1495,7 @@ tcl6            tcl
 issue1700       normal,2019
 vhpi23          vhpi
 vhpi25          vhpi
+vlog51          verilog
 slice8          normal,2008
 slice9          normal,2008
 slice10         normal,relaxed
