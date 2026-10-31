@@ -3929,6 +3929,8 @@ static void vlog_lower_var_decl(vlog_gen_t *g, vlog_node_t v, tree_t wrap)
    }
    else if (mir_get_class(g->mu, ti->unpacked) == MIR_TYPE_REAL)
       value = mir_const_real(g->mu, ti->unpacked, 0.0);
+   else if (mir_get_class(g->mu, ti->type) == MIR_TYPE_VEC2)
+      value = mir_const(g->mu, ti->unpacked, LOGIC_0);   // Two-state type
    else
       value = mir_const(g->mu, ti->unpacked, LOGIC_X);
 
