@@ -370,16 +370,18 @@ void mir_defer(mir_context_t *mc, ident_t name, ident_t parent,
             deferred_unit_t *du = untag_pointer(ptr, deferred_unit_t);
             assert(du->fn == fn);
             assert(du->kind == kind);
-            assert(du->object == object);
+            if (du->object == object)
+               return;
          }
-         return;
+         break;   // Redefined by a later design unit
       case UNIT_GENERATED:
          {
             mir_unit_t *mu = untag_pointer(ptr, mir_unit_t);
             assert(mu->kind == kind);
-            assert(mu->object == object);
+            if (mu->object == object)
+               return;
          }
-         return;
+         break;   // Redefined by a later design unit
       case UNIT_FREED:
          {
             mir_shape_t *s = untag_pointer(ptr, mir_shape_t);
