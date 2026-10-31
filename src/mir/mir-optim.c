@@ -834,20 +834,24 @@ static void mir_do_gvn(mir_unit_t *mu, mir_optim_t *opt)
       gvn_visit_block(mu, this, opt);
    }
 
-   for (int i = 0; i < mu->num_nodes; i++) {
-      node_data_t *n = &(mu->nodes[i]);
-      const mir_value_t *args = mir_get_args(mu, n);
-      for (int j = 0; j < n->nargs; j++) {
-         if (args[j].tag == MIR_TAG_NODE) {
-            const valnum_t vn = opt->gvn->nodevn[args[j].id];
-            if (unlikely(vn == VN_INVALID)) {
-               mir_dump_optim(mu, opt);
-               fatal_trace("node %%%d has no value number", args[j].id);
-            }
+   // Walk the blocks as nodes in removed unreachable code are not numbered
+   for (int i = 0; i < mu->blocks.count; i++) {
+      const block_data_t *bd = &(mu->blocks.items[i]);
+      for (int k = 0; k < bd->num_nodes; k++) {
+         node_data_t *n = &(mu->nodes[bd->nodes[k]]);
+         const mir_value_t *args = mir_get_args(mu, n);
+         for (int j = 0; j < n->nargs; j++) {
+            if (args[j].tag == MIR_TAG_NODE) {
+               const valnum_t vn = opt->gvn->nodevn[args[j].id];
+               if (unlikely(vn == VN_INVALID)) {
+                  mir_dump_optim(mu, opt);
+                  fatal_trace("node %%%d has no value number", args[j].id);
+               }
 
-            mir_value_t canon = gvn_get_canon(args[j], opt->gvn);
-            if (!mir_equals(canon, args[j]))
-               mir_set_arg(mu, n, j, canon);
+               mir_value_t canon = gvn_get_canon(args[j], opt->gvn);
+               if (!mir_equals(canon, args[j]))
+                  mir_set_arg(mu, n, j, canon);
+            }
          }
       }
    }
