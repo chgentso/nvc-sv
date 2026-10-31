@@ -183,7 +183,19 @@ static void *fold_make_node_cb(jit_scalar_t *result, void *arg)
 
    switch (mir_get_class(mu, type)) {
    case MIR_TYPE_VEC2:
-      return NULL;   // TODO
+      {
+         const int size = mir_get_size(mu, type);
+         if (size > 64)
+            return NULL;   // TODO
+
+         const jit_scalar_t zero = { .integer = 0 };
+         number_t n = number_from_jit(size, mir_get_signed(mu, type),
+                                      result[0], zero);
+
+         vlog_node_t v = vlog_new(V_NUMBER);
+         vlog_set_number(v, n);
+         return v;
+      }
    case MIR_TYPE_VEC4:
       {
          const int size = mir_get_size(mu, type);
