@@ -1185,6 +1185,7 @@ static mir_value_t vlog_lower_binary(vlog_gen_t *g, vlog_node_t v,
    // For short-circuiting operators check if the RHS can have side effects
    mir_block_t guard_bb = MIR_NULL_BLOCK, skip_bb = MIR_NULL_BLOCK;
    mir_value_t var = MIR_NULL_VALUE;
+   mir_type_t t_logic = MIR_NULL_TYPE;
    const bool is_short_circuit =
       op == V_BINARY_LOG_AND || op == V_BINARY_LOG_OR;
 
@@ -1193,7 +1194,7 @@ static mir_value_t vlog_lower_binary(vlog_gen_t *g, vlog_node_t v,
       skip_bb = mir_add_block(g->mu);
 
       // TODO: use a phi
-      mir_type_t t_logic = mir_vec4_type(g->mu, 1, false);
+      t_logic = mir_vec4_type(g->mu, 1, false);
       var = mir_add_var(g->mu, t_logic, MIR_NULL_STAMP,
                         ident_uniq("shortcircuit"), MIR_VAR_TEMP);
 
@@ -1287,10 +1288,17 @@ static mir_value_t vlog_lower_binary(vlog_gen_t *g, vlog_node_t v,
       }
    }
 
+   // The result of comparing reals or class handles is not a vector
+   if (mir_get_class(g->mu, mir_get_type(g->mu, result)) == MIR_TYPE_INT)
+      result = mir_build_cast(g->mu, mir_vec4_type(g->mu, 1, false), result);
+
    mir_value_t loaded;
    if (mir_is_null(var))
       loaded = result;
    else {
+      if (!mir_is_vector(g->mu, result))
+         result = mir_build_cast(g->mu, t_logic, result);
+
       mir_build_store(g->mu, var, result);
       mir_build_jump(g->mu, skip_bb);
 
