@@ -2223,7 +2223,9 @@ static mir_value_t vlog_lower_trigger(vlog_gen_t *g, vlog_node_t v)
 
             mir_type_t t_context = mir_context_type(g->mu, func);
             mir_value_t context = mir_build_null(g->mu, t_context);
-            mir_value_t args[] = { context, lvalue.obj };
+            mir_value_t nets =
+               mir_build_array_ref(g->mu, lvalue.obj, lvalue.dst_offset);
+            mir_value_t args[] = { context, nets };
             return mir_build_function_trigger(g->mu, func, args, 2);
          }
       }
