@@ -366,6 +366,11 @@ void vlog_symtab_lookup(vlog_symtab_t *st, vlog_node_t v)
 void vlog_symtab_put(vlog_symtab_t *st, vlog_node_t v)
 {
    ident_t name = vlog_ident(v);
+   if (name == NULL) {
+      assert(error_count() > 0);   // Parser is recovering from an error
+      return;
+   }
+
    vlog_symbol_t *sym = fresh_symbol_for(st, name);
 
    assert(!loc_invalid_p(vlog_loc(v)));
