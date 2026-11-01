@@ -3761,8 +3761,11 @@ static void vlog_lower_tcheck(vlog_gen_t *g, vlog_node_t tcheck)
 
          mir_value_t stamp_display = stamp;
          if (fail_simul) {
-            mir_value_t stamp_cond_n = mir_build_not(g->mu, stamp_cond);
-            ok = mir_build_and(g->mu, ok, stamp_cond_n);
+            // A zero limit is an empty interval so cannot be violated
+            mir_value_t positive =
+               mir_build_cmp(g->mu, MIR_CMP_GT, limit_time, t_zero);
+            mir_value_t simul = mir_build_and(g->mu, stamp_cond, positive);
+            ok = mir_build_and(g->mu, ok, mir_build_not(g->mu, simul));
             stamp_display = mir_build_select(g->mu, t_time, stamp_cond,
                                              now, stamp);
          }
