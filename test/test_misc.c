@@ -973,6 +973,19 @@ START_TEST(test_copy2)
 }
 END_TEST
 
+START_TEST(test_ilog2)
+{
+   ck_assert_int_eq(ilog2(0), 0);
+   ck_assert_int_eq(ilog2(1), 0);
+   ck_assert_int_eq(ilog2(2), 1);
+   ck_assert_int_eq(ilog2(1024), 10);
+   ck_assert_int_eq(ilog2(1025), 11);
+   ck_assert_int_eq(ilog2(INT64_C(1) << 62), 62);
+   ck_assert_int_eq(ilog2((INT64_C(1) << 62) + 1), 63);
+   ck_assert_int_eq(ilog2(INT64_MAX), 63);
+}
+END_TEST
+
 Suite *get_misc_tests(void)
 {
    Suite *s = suite_create("misc");
@@ -1035,6 +1048,10 @@ Suite *get_misc_tests(void)
    tcase_add_test(tc_pool, test_cmp_bytes);
    tcase_add_test(tc_pool, test_copy2);
    suite_add_tcase(s, tc_copy);
+
+   TCase *tc_math = tcase_create("math");
+   tcase_add_test(tc_math, test_ilog2);
+   suite_add_tcase(s, tc_math);
 
    return s;
 }

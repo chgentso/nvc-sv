@@ -1025,8 +1025,8 @@ int ilog2(int64_t n)
       return 0;
    else {
       int r = 0;
-      int64_t c = 1;
-      while (c < n) {
+      uint64_t c = 1;
+      while (c < (uint64_t)n) {
          r += 1;
          c <<= 1;
       }
