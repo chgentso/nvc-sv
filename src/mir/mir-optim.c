@@ -784,10 +784,21 @@ static void gvn_visit_block(mir_unit_t *mu, mir_block_t block,
       case MIR_OP_LOAD:
          gvn_load(mu, node, block, opt);
          break;
+      case MIR_OP_FCALL:
+         {
+            // The function can write to a variable whose address is passed
+            const int nargs = mir_count_args(mu, node);
+            for (int j = 0; j < nargs; j++) {
+               mir_value_t arg = mir_get_arg(mu, node, j);
+               if (arg.tag == MIR_TAG_VAR)
+                  opt->gvn->varvn[arg.id] = VN_INVALID;
+            }
+         }
+         opt->gvn->nodevn[node.id] = gvn_new_value(node, opt->gvn);
+         break;
       case MIR_OP_INIT_SIGNAL:
       case MIR_OP_PROTECTED_INIT:
       case MIR_OP_INSTANCE_INIT:
-      case MIR_OP_FCALL:
       case MIR_OP_SYSCALL:
       case MIR_OP_ALLOC:
       case MIR_OP_NEW:
