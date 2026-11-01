@@ -32,7 +32,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 
-#define LOC_MAGIC 0xf00f
+#define LOC_MAGIC 0xf00e
 
 typedef struct _hint_rec hint_rec_t;
 
@@ -54,7 +54,10 @@ struct loc_wr_ctx {
    unsigned  first_column;
    unsigned  line_delta;
    unsigned  column_delta;
-   bool      have_index;
+   bool      have_header;
+   unsigned *local_map;
+   size_t    map_size;
+   unsigned  n_files;
 };
 
 struct loc_rd_ctx {
@@ -62,11 +65,12 @@ struct loc_rd_ctx {
    char       **file_map;
    file_ref_t  *ref_map;
    size_t       n_files;
+   size_t       max_files;
    unsigned     first_line;
    unsigned     first_column;
    unsigned     line_delta;
    unsigned     column_delta;
-   bool         have_index;
+   bool         have_header;
 };
 
 typedef enum {
@@ -283,32 +287,51 @@ loc_wr_ctx_t *loc_write_begin(fbuf_t *f)
 {
    loc_wr_ctx_t *ctx = xcalloc(sizeof(loc_wr_ctx_t));
    ctx->fbuf = f;
-   ctx->have_index = false;
 
    return ctx;
 }
 
 void loc_write_end(loc_wr_ctx_t *ctx)
 {
+   free(ctx->local_map);
    free(ctx);
 }
 
 void loc_write(const loc_t *loc, loc_wr_ctx_t *ctx)
 {
-   if (!ctx->have_index) {
+   if (!ctx->have_header) {
       write_u16(LOC_MAGIC, ctx->fbuf);
-      fbuf_put_uint(ctx->fbuf, loc_files.count);
-
-      for (unsigned i = 0; i < loc_files.count; i++) {
-         size_t len = strlen(loc_files.items[i].name_str) + 1;
-         fbuf_put_uint(ctx->fbuf, len);
-         write_raw(loc_files.items[i].name_str, len, ctx->fbuf);
-      }
-
-      ctx->have_index = true;
+      ctx->have_header = true;
    }
 
-   fbuf_put_uint(ctx->fbuf, loc->file_ref);
+   // A file is numbered when first used so the contents of a unit do not
+   // depend on the other files that have been read
+   if (loc->file_ref == FILE_INVALID)
+      fbuf_put_uint(ctx->fbuf, 0);
+   else {
+      if (loc->file_ref >= ctx->map_size) {
+         const size_t new_size = MAX(loc_files.count, loc->file_ref + 1);
+         ctx->local_map = xrealloc_array(ctx->local_map, new_size,
+                                         sizeof(unsigned));
+         memset(ctx->local_map + ctx->map_size, '\0',
+                (new_size - ctx->map_size) * sizeof(unsigned));
+         ctx->map_size = new_size;
+      }
+
+      unsigned *local = &(ctx->local_map[loc->file_ref]);
+      if (*local == 0) {
+         *local = ++(ctx->n_files);
+         fbuf_put_uint(ctx->fbuf, *local);
+
+         const char *name = loc_files.items[loc->file_ref].name_str;
+         const size_t len = strlen(name) + 1;
+         fbuf_put_uint(ctx->fbuf, len);
+         write_raw(name, len, ctx->fbuf);
+      }
+      else
+         fbuf_put_uint(ctx->fbuf, *local);
+   }
+
    fbuf_put_int(ctx->fbuf, loc->first_line - ctx->first_line);
    fbuf_put_int(ctx->fbuf, loc->line_delta - ctx->line_delta);
    fbuf_put_int(ctx->fbuf, loc->first_column - ctx->first_column);
@@ -340,56 +363,62 @@ void loc_read_end(loc_rd_ctx_t *ctx)
 
 void loc_read(loc_t *loc, loc_rd_ctx_t *ctx)
 {
-   if (!ctx->have_index) {
+   if (!ctx->have_header) {
       uint16_t magic = read_u16(ctx->fbuf);
       if (magic != LOC_MAGIC)
          fatal("corrupt location header in %s", fbuf_file_name(ctx->fbuf));
 
-      ctx->n_files = fbuf_get_uint(ctx->fbuf);
+      ctx->have_header = true;
+   }
 
-      ctx->file_map = xcalloc_array(ctx->n_files, sizeof(ident_t));
-      ctx->ref_map  = xcalloc_array(ctx->n_files, sizeof(file_ref_t));
+   const size_t local = fbuf_get_uint(ctx->fbuf);
+   file_ref_t new_ref = FILE_INVALID;
+   if (local != 0) {
+      if (unlikely(local > ctx->n_files + 1))
+         fatal("corrupt location file reference %zx", local);
 
-      for (size_t i = 0; i < ctx->n_files; i++) {
-         size_t len = fbuf_get_uint(ctx->fbuf);
+      if (local == ctx->n_files + 1) {
+         if (ctx->n_files == ctx->max_files) {
+            ctx->max_files = MAX(ctx->max_files * 2, 16);
+            ctx->file_map = xrealloc_array(ctx->file_map, ctx->max_files,
+                                           sizeof(char *));
+            ctx->ref_map = xrealloc_array(ctx->ref_map, ctx->max_files,
+                                          sizeof(file_ref_t));
+         }
+
+         const size_t len = fbuf_get_uint(ctx->fbuf);
          char *buf = xmalloc(len + 1);
          read_raw(buf, len, ctx->fbuf);
          buf[len] = '\0';
-         ctx->file_map[i] = buf;
-         ctx->ref_map[i]  = FILE_INVALID;
+
+         ctx->file_map[ctx->n_files] = buf;
+         ctx->ref_map[ctx->n_files]  = FILE_INVALID;
+         ctx->n_files++;
       }
 
-      ctx->have_index = true;
-   }
-
-   uint16_t old_ref = fbuf_get_uint(ctx->fbuf);
-   file_ref_t new_ref = FILE_INVALID;
-   if (old_ref != FILE_INVALID) {
-      if (unlikely(old_ref >= ctx->n_files))
-         fatal("corrupt location file reference %x", old_ref);
-
-      if (ctx->ref_map[old_ref] == FILE_INVALID) {
+      const size_t index = local - 1;
+      if (ctx->ref_map[index] == FILE_INVALID) {
          for (unsigned i = 0; i < loc_files.count; i++) {
             if (strcmp(loc_files.items[i].name_str,
-                       ctx->file_map[old_ref]) == 0)
-               ctx->ref_map[old_ref] = loc_files.items[i].ref;
+                       ctx->file_map[index]) == 0)
+               ctx->ref_map[index] = loc_files.items[i].ref;
          }
       }
 
-      if (ctx->ref_map[old_ref] == FILE_INVALID) {
+      if (ctx->ref_map[index] == FILE_INVALID) {
          loc_file_t new = {
             .linebuf  = NULL,
-            .name_str = ctx->file_map[old_ref],
+            .name_str = ctx->file_map[index],
             .ref      = loc_files.count
          };
 
          APUSH(loc_files, new);
 
-         ctx->ref_map[old_ref]  = new.ref;
-         ctx->file_map[old_ref] = NULL;   // Owned by loc_file_t now
+         ctx->ref_map[index]  = new.ref;
+         ctx->file_map[index] = NULL;   // Owned by loc_file_t now
       }
 
-      new_ref = ctx->ref_map[old_ref];
+      new_ref = ctx->ref_map[index];
    }
 
    ctx->first_line   += fbuf_get_int(ctx->fbuf);
