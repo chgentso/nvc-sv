@@ -735,6 +735,26 @@ static PLI_INT32 finish_tf(PLI_BYTE8 *userdata)
    }
 }
 
+static PLI_INT32 stop_tf(PLI_BYTE8 *userdata)
+{
+   // There is no interactive prompt so stopping ends the simulation as
+   // $finish does, the optional argument only selects diagnostics
+
+   vpiHandle call = vpi_handle(vpiSysTfCall, NULL);
+   assert(call != NULL);
+
+   vpiHandle argv = vpi_iterate(vpiArgument, call);
+   if (argv != NULL) {
+      vpiHandle arg = vpi_scan(argv);
+      if (arg != NULL)
+         vpi_release_handle(arg);
+      vpi_release_handle(argv);
+   }
+
+   notef("$stop called, simulation stopped");
+   jit_abort();
+}
+
 static PLI_INT32 diag_tf(PLI_BYTE8 *userdata)
 {
    vpiHandle call = vpi_handle(vpiSysTfCall, NULL);
@@ -1182,6 +1202,11 @@ static s_vpi_systf_data builtins[] = {
       .type   = vpiSysTask,
       .tfname = "$finish",
       .calltf = finish_tf
+   },
+   {
+      .type   = vpiSysTask,
+      .tfname = "$stop",
+      .calltf = stop_tf
    },
    {
       .type      = vpiSysTask,
