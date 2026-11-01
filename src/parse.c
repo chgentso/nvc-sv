@@ -3390,6 +3390,42 @@ static void p_parameter_map_aspect(tree_t call)
    consume(tRPAREN);
 }
 
+static bool is_slice_of_call(void)
+{
+   // True if the parenthesised list after a function name is a single
+   // discrete range which slices the result of a call with no arguments
+
+   int depth = 1;
+   for (int n = 2; n < TOKENQ_SIZE - 2; n++) {
+      switch (peek_nth(n)) {
+      case tLPAREN:
+         depth++;
+         break;
+      case tRPAREN:
+         if (--depth == 0)
+            return false;
+         break;
+      case tTO:
+      case tDOWNTO:
+         if (depth == 1)
+            return true;
+         break;
+      case tCOMMA:
+      case tASSOC:
+         if (depth == 1)
+            return false;
+         break;
+      case tSEMI:
+      case tEOF:
+         return false;
+      default:
+         break;
+      }
+   }
+
+   return false;
+}
+
 static tree_t p_function_call(ident_t id, tree_t prefix)
 {
    // name [ ( actual_parameter_part ) ]
@@ -3451,6 +3487,13 @@ static tree_t p_function_call(ident_t id, tree_t prefix)
 
    if (peek() == tPARAMETER)
       p_parameter_map_aspect(call);
+   else if (peek() == tLPAREN && (standard() >= STD_08 || relaxed_rules())
+            && is_slice_of_call()) {
+      consume(tLPAREN);
+      tree_t head = p_expression();
+      tree_set_loc(call, CURRENT_LOC);
+      return p_slice_name(call, head);
+   }
    else if (optional(tLPAREN)) {
       p_actual_parameter_part(call);
       consume(tRPAREN);
