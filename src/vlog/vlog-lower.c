@@ -3474,9 +3474,18 @@ static void vlog_lower_gate_inst(vlog_gen_t *g, vlog_node_t v)
             mir_build_binary(g->mu, MIR_VEC_CASE_EQ, t_logic, enable_cast,
                              active_value);
          mir_value_t active = vlog_lower_test(g, active_vec);
+         mir_value_t inactive_value =
+            mir_const_vec(g->mu, t_logic, !active_high, 0);
+         mir_value_t inactive_vec =
+            mir_build_binary(g->mu, MIR_VEC_CASE_EQ, t_logic, enable_cast,
+                             inactive_value);
+         mir_value_t inactive = vlog_lower_test(g, inactive_vec);
          mir_value_t highz = mir_const_vec(g->mu, t_logic, 0, 1);
+         mir_value_t unknown = mir_const_vec(g->mu, t_logic, 1, 1);
 
-         value = mir_build_select(g->mu, t_logic, active, cast, highz);
+         mir_value_t off =
+            mir_build_select(g->mu, t_logic, inactive, highz, unknown);
+         value = mir_build_select(g->mu, t_logic, active, cast, off);
       }
       break;
 

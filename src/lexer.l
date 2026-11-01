@@ -804,6 +804,10 @@ PROTECT           ?i:protect
 <VLOG>"buf"              { return tBUF; }
 <VLOG>"bufif0"           { return tBUFIF0; }
 <VLOG>"bufif1"           { return tBUFIF1; }
+<VLOG>"nmos"             { return tBUFIF1; }
+<VLOG>"rnmos"            { return tBUFIF1; }
+<VLOG>"pmos"             { return tBUFIF0; }
+<VLOG>"rpmos"            { return tBUFIF0; }
 <VLOG>"notif0"           { return tNOTIF0; }
 <VLOG>"notif1"           { return tNOTIF1; }
 <VLOG>"tran"             { return tTRAN; }
