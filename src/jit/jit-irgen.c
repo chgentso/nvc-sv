@@ -2323,6 +2323,22 @@ static void irgen_op_cast(jit_irgen_t *g, mir_value_t n)
          j_recv(g, irgen_get_slot(g, n, 0), 0);
          if (result_kind == MIR_TYPE_VEC4)
             j_recv(g, irgen_get_slot(g, n, 1), 1);
+         else if (arg_class == MIR_TYPE_VEC4) {
+            // Unknown bits of a four-state value become zero
+            jit_value_t bres = irgen_alloc_temp(g);
+            j_recv(g, bres, 1);
+
+            jit_value_t ares = irgen_get_slot(g, n, 0);
+            for (int i = 0; i < (result_size + 63) / 64; i++) {
+               jit_value_t aw = irgen_alloc_temp(g);
+               jit_value_t bw = irgen_alloc_temp(g);
+               j_load(g, JIT_SZ_64, aw, jit_addr_from_value(ares, i * 8));
+               j_load(g, JIT_SZ_64, bw, jit_addr_from_value(bres, i * 8));
+               j_and(g, bw, aw, bw);
+               j_xor(g, aw, aw, bw);
+               j_store(g, JIT_SZ_64, aw, jit_addr_from_value(ares, i * 8));
+            }
+         }
       }
       else {
          if (arg_size > 64) {
@@ -2350,6 +2366,15 @@ static void irgen_op_cast(jit_irgen_t *g, mir_value_t n)
             else
                j_mov(g, btmp, bbits);
             bbits = btmp;
+         }
+
+         if (result_kind == MIR_TYPE_VEC2 && arg_class == MIR_TYPE_VEC4) {
+            // Unknown bits of a four-state value become zero
+            jit_value_t unknown = irgen_alloc_temp(g);
+            j_and(g, unknown, abits, bbits);
+            jit_value_t tmp = irgen_alloc_temp(g);
+            j_xor(g, tmp, abits, unknown);
+            abits = tmp;
          }
 
          if (result_size < arg_size) {
