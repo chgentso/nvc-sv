@@ -1500,3 +1500,4 @@ slice9          normal,2008
 slice10         normal,relaxed
 lcall1          normal
 casechoice1     normal,2008
+compopen1       normal,2008

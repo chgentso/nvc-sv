@@ -11590,6 +11590,50 @@ static tree_t lower_get_view(tree_t name, port_mode_t *mode, bool *converse)
    }
 }
 
+static bool lower_is_open_component_port(lower_unit_t *lu, tree_t value)
+{
+   // The actual is a port of the enclosing component instance which is
+   // not associated with anything
+
+   if (tree_kind(value) != T_REF || lu->parent == NULL)
+      return false;
+
+   tree_t decl = tree_ref(value);
+   tree_t comp = lu->parent->container;
+   if (tree_kind(decl) != T_PORT_DECL || tree_kind(comp) != T_BLOCK)
+      return false;
+
+   const int nports = tree_ports(comp);
+   int pos = -1;
+   for (int i = 0; i < nports && pos < 0; i++) {
+      if (tree_port(comp, i) == decl)
+         pos = i;
+   }
+
+   if (pos < 0)
+      return false;
+
+   const int nparams = tree_params(comp);
+   for (int i = 0; i < nparams; i++) {
+      tree_t m = tree_param(comp, i);
+      switch (tree_subkind(m)) {
+      case P_POS:
+         if (tree_pos(m) == pos)
+            return tree_kind(tree_value(m)) == T_OPEN;
+         break;
+      case P_NAMED:
+         {
+            tree_t ref = name_to_ref(tree_name(m));
+            if (ref != NULL && tree_ref(ref) == decl)
+               return tree_kind(tree_value(m)) == T_OPEN;
+         }
+         break;
+      }
+   }
+
+   return false;
+}
+
 static void lower_port_map(lower_unit_t *lu, tree_t block, tree_t map,
                            vcode_reg_t value_reg)
 {
@@ -11685,8 +11729,31 @@ static void lower_port_map(lower_unit_t *lu, tree_t block, tree_t map,
             lower_converter(lu, map, PORT_INOUT, dst_reg, dst_type,
                             src_reg, src_type);
       }
-      else if (in_conv == NULL)
+      else if (in_conv == NULL) {
+         // A component port left open is not connected to the port of the
+         // entity if the lengths are different
+         vcode_block_t skip_bb = VCODE_INVALID_BLOCK;
+         if (lower_is_open_component_port(lu, value)
+             && type_is_array(src_type) && type_is_array(dst_type)
+             && dimension_of(src_type) == 1 && dimension_of(dst_type) == 1
+             && type_is_homogeneous(src_type)) {
+            vcode_reg_t slen_reg = lower_array_len(lu, src_type, 0, src_reg);
+            vcode_reg_t dlen_reg = lower_array_len(lu, dst_type, 0, dst_reg);
+            vcode_reg_t eq_reg = emit_cmp(VCODE_CMP_EQ, slen_reg, dlen_reg);
+
+            vcode_block_t map_bb = emit_block();
+            skip_bb = emit_block();
+            emit_cond(eq_reg, map_bb, skip_bb);
+            vcode_select_block(map_bb);
+         }
+
          lower_map_signal(lu, src_reg, dst_reg, src_type, dst_type, map);
+
+         if (skip_bb != VCODE_INVALID_BLOCK) {
+            emit_jump(skip_bb);
+            vcode_select_block(skip_bb);
+         }
+      }
       else
          lower_converter(lu, map, PORT_IN, src_reg, src_type, dst_reg,
                          dst_type);
