@@ -1320,12 +1320,21 @@ static mir_value_t vlog_lower_operator_assignment(vlog_gen_t *g, vlog_node_t v)
    const vlog_assign_t kind = vlog_subkind(v);
    if (kind != V_ASSIGN_EQUALS) {
       mir_type_t type = mir_get_type(g->mu, cur);
-      mir_value_t cast = mir_build_cast(g->mu, type, value);
+      mir_value_t cast = vlog_lower_cast(g, type, value);
 
       if (mir_get_class(g->mu, type) == MIR_TYPE_REAL) {
          switch (kind) {
          case V_ASSIGN_PLUS:
-            value = mir_build_add(g->mu,type, cur, cast);
+            value = mir_build_add(g->mu, type, cur, cast);
+            break;
+         case V_ASSIGN_MINUS:
+            value = mir_build_sub(g->mu, type, cur, cast);
+            break;
+         case V_ASSIGN_TIMES:
+            value = mir_build_mul(g->mu, type, cur, cast);
+            break;
+         case V_ASSIGN_DIVIDE:
+            value = mir_build_div(g->mu, type, cur, cast);
             break;
          default:
             CANNOT_HANDLE(v);
