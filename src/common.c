@@ -1619,6 +1619,112 @@ static int64_t rebase_index(type_t array_type, int dim, int64_t value)
    return (tree_subkind(r) == RANGE_TO) ? value - left : left - value;
 }
 
+static bool get_case_choice_int(tree_t t, int64_t *i)
+{
+   if (folded_int(t, i))
+      return true;
+   else if (tree_kind(t) != T_REF)
+      return false;
+
+   tree_t decl = tree_ref(t);
+   return tree_kind(decl) == T_CONST_DECL && tree_has_value(decl)
+      && get_case_choice_int(tree_value(decl), i);
+}
+
+static tree_t get_case_choice_element(tree_t value)
+{
+   // Find the aggregate element named by a record or array reference to
+   // a constant or return NULL if it cannot be determined
+
+   switch (tree_kind(value)) {
+   case T_REF:
+      {
+         tree_t decl = tree_ref(value);
+         if (tree_kind(decl) == T_CONST_DECL && tree_has_value(decl))
+            return get_case_choice_element(tree_value(decl));
+         return NULL;
+      }
+
+   case T_RECORD_REF:
+      {
+         tree_t base = get_case_choice_element(tree_value(value));
+         if (base == NULL || tree_kind(base) != T_AGGREGATE)
+            return NULL;
+
+         tree_t field = tree_ref(value);
+         const int nassocs = tree_assocs(base);
+         for (int i = 0; i < nassocs; i++) {
+            tree_t a = tree_assoc(base, i);
+            switch (tree_subkind(a)) {
+            case A_NAMED:
+               if (tree_ref(tree_name(a)) == field)
+                  return get_case_choice_element(tree_value(a));
+               break;
+            case A_POS:
+               if (i == tree_pos(field))
+                  return get_case_choice_element(tree_value(a));
+               break;
+            case A_OTHERS:
+               return get_case_choice_element(tree_value(a));
+            }
+         }
+
+         return NULL;
+      }
+
+   case T_ARRAY_REF:
+      {
+         tree_t base = get_case_choice_element(tree_value(value));
+         if (base == NULL || tree_kind(base) != T_AGGREGATE
+             || tree_params(value) != 1)
+            return NULL;
+
+         int64_t index;
+         if (!get_case_choice_int(tree_value(tree_param(value, 0)), &index))
+            return NULL;
+
+         type_t type = tree_type(base);
+         const int nassocs = tree_assocs(base);
+         for (int i = 0, pos = 0; i < nassocs; i++) {
+            tree_t a = tree_assoc(base, i);
+            switch (tree_subkind(a)) {
+            case A_NAMED:
+               {
+                  int64_t name;
+                  if (!get_case_choice_int(tree_name(a), &name))
+                     return NULL;
+                  else if (name == index)
+                     return get_case_choice_element(tree_value(a));
+               }
+               break;
+            case A_POS:
+               if (rebase_index(type, 0, index) == pos++)
+                  return get_case_choice_element(tree_value(a));
+               break;
+            case A_RANGE:
+               {
+                  int64_t low, high;
+                  if (!folded_bounds(tree_range(a, 0), &low, &high))
+                     return NULL;
+                  else if (index >= low && index <= high)
+                     return get_case_choice_element(tree_value(a));
+               }
+               break;
+            case A_OTHERS:
+               return get_case_choice_element(tree_value(a));
+            default:
+               return NULL;
+            }
+         }
+
+         return NULL;
+      }
+
+   default:
+      return value;
+   }
+}
+
 unsigned get_case_choice_char(tree_t value, int depth)
 {
    switch (tree_kind(value)) {
@@ -1707,6 +1813,17 @@ unsigned get_case_choice_char(tree_t value, int depth)
          const int64_t rleft = assume_int(tree_left(r));
          const int64_t offset = rebase_index(tree_type(base), 0, rleft);
          return get_case_choice_char(base, depth + offset);
+      }
+
+   case T_RECORD_REF:
+   case T_ARRAY_REF:
+      {
+         tree_t elem = get_case_choice_element(value);
+         if (elem == NULL)
+            fatal_at(tree_loc(value), "sorry, this expression is not "
+                     "currently supported in a case choice");
+
+         return get_case_choice_char(elem, depth);
       }
 
    default:
