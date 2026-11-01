@@ -5320,7 +5320,7 @@ static void irgen_context_struct(jit_irgen_t *g)
       }
    }
 
-   if (kind == MIR_UNIT_PROTECTED) {
+   if (kind == MIR_UNIT_PROTECTED || kind == MIR_UNIT_PACKAGE) {
       // Protected types must always be allocated on the global heap
       // as the result may be stored in an access
       macro_galloc(g, g->statereg, jit_value_from_int64(sz));
