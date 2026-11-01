@@ -31,6 +31,7 @@
 #include <inttypes.h>
 
 #define LINE_SIZE  32
+#define LARGE_OBJECT 4096
 #define LINE_WORDS (LINE_SIZE / sizeof(intptr_t))
 #define MAX_HEAP   (UINT64_C(0x100000000) * LINE_SIZE)
 
@@ -169,37 +170,50 @@ static void *mspace_try_alloc(mspace_t *m, size_t size)
 
    SCOPED_LOCK(m->lock);
 
+   // Large objects are carved from the end of the last free block that
+   // fits so they do not fragment the space between small long-lived
+   // objects, otherwise a growing array can never reuse the holes left
+   // by its own previous incarnations
+   free_list_t **fit = NULL;
    for (free_list_t **it = &(m->free_list); *it; it = &((*it)->next)) {
       assert((*it)->size % LINE_SIZE == 0);
       if ((*it)->size >= asize) {
-         char *base = (*it)->ptr;
-         assert((uintptr_t)base % LINE_SIZE == 0);
-         assert(base >= m->space);
-         assert(base < m->space + m->maxsize);
-
-         ASAN_UNPOISON(base, size + OVERRUN_MARGIN - 1);
-
-         const ptrdiff_t line = (base - m->space) / LINE_SIZE;
-         mask_set(&(m->headmask), line);
-         if (nlines > 1)
-            mask_clear_range(&(m->headmask), line + 1, nlines - 1);
-
-         if ((*it)->size == asize) {
-            free_list_t *next = (*it)->next;
-            free(*it);
-            *it = next;
-         }
-         else {
-            (*it)->size -= asize;
-            (*it)->ptr += asize;
-         }
-
-         // Make sure the first fault to the page is a write to
-         // allocate THP on Linux
-         *(volatile char *)base = 0;
-
-         return base;
+         fit = it;
+         if (asize < LARGE_OBJECT)
+            break;
       }
+   }
+
+   if (fit != NULL) {
+      free_list_t *f = *fit;
+      const bool from_end = asize >= LARGE_OBJECT && f->size > asize;
+      char *base = from_end ? f->ptr + f->size - asize : f->ptr;
+      assert((uintptr_t)base % LINE_SIZE == 0);
+      assert(base >= m->space);
+      assert(base < m->space + m->maxsize);
+
+      ASAN_UNPOISON(base, size + OVERRUN_MARGIN - 1);
+
+      const ptrdiff_t line = (base - m->space) / LINE_SIZE;
+      mask_set(&(m->headmask), line);
+      if (nlines > 1)
+         mask_clear_range(&(m->headmask), line + 1, nlines - 1);
+
+      if (f->size == asize) {
+         *fit = f->next;
+         free(f);
+      }
+      else {
+         f->size -= asize;
+         if (!from_end)
+            f->ptr += asize;
+      }
+
+      // Make sure the first fault to the page is a write to
+      // allocate THP on Linux
+      *(volatile char *)base = 0;
+
+      return base;
    }
 
    return NULL;
