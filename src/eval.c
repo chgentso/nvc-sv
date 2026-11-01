@@ -378,6 +378,17 @@ bool eval_possible(tree_t t, unit_registry_t *ur, mir_context_t *mc)
          return eval_possible(tree_value(t), ur, mc);
       }
 
+   case T_ARRAY_SLICE:
+      {
+         tree_t r = tree_range(t, 0);
+         if (tree_subkind(r) == RANGE_EXPR)
+            return eval_not_possible(t, "slice with range expression");
+
+         return eval_possible(tree_left(r), ur, mc)
+            && eval_possible(tree_right(r), ur, mc)
+            && eval_possible(tree_value(t), ur, mc);
+      }
+
    case T_AGGREGATE:
       {
          const int nassocs = tree_assocs(t);
