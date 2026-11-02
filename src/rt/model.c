@@ -772,8 +772,16 @@ rt_scope_t *create_scope(rt_model_t *m, tree_t block, rt_scope_t *parent)
       jit_scalar_t result, context = { .pointer = NULL };
       jit_scalar_t p2 = { .integer = 0 };
 
-      if (s->parent->kind != SCOPE_ROOT)
+      if (s->parent->kind != SCOPE_ROOT) {
          context.pointer = *mptr_get(s->parent->privdata);
+
+         if (context.pointer == NULL) {
+            // The parent could not be created so this cannot be either
+            m->force_stop = true;
+            thread->active_scope = NULL;
+            return s;
+         }
+      }
 
       tlab_t tlab = jit_null_tlab(m->jit);
 
