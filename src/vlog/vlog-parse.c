@@ -912,8 +912,12 @@ static vlog_node_t p_data_type(void)
 
          consume(tRBRACE);
 
-         if (peek() == tLSQUARE)
-            vlog_add_range(v, p_packed_dimension());
+         if (peek() == tLSQUARE) {
+            error_at(&state.last_loc, "sorry, a packed array of a structure "
+                     "or union is not supported");
+            while (peek() == tLSQUARE)
+               (void)p_packed_dimension();
+         }
 
          vlog_set_loc(v, CURRENT_LOC);
          return v;
