@@ -320,7 +320,9 @@ void print_centred(const char *text)
 
 void fatal_exit(int status)
 {
-   async_barrier();
+   // A worker cannot wait for the task it is running to complete
+   if (!thread_attached() || thread_id() == 0)
+      async_barrier();
 
    if (atomic_load(&crashing) != SIG_ATOMIC_MAX)
       _exit(status);   // Exit during crash
