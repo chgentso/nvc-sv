@@ -5248,6 +5248,28 @@ static void irgen_block(jit_irgen_t *g, mir_block_t block)
    DEBUG_ONLY(if (nops == 0) j_trap(g));
 }
 
+static bool irgen_temp_in_state(jit_irgen_t *g, mir_value_t var)
+{
+   // A large temporary of a unit that is re-entered after each wait
+   // would be reallocated on the heap at every resume
+   switch (mir_get_kind(g->mu)) {
+   case MIR_UNIT_PROCEDURE:
+      break;
+   case MIR_UNIT_PROCESS:
+      if (g->stateless)
+         return false;
+      break;
+   default:
+      return false;
+   }
+
+   const mir_var_flags_t flags = mir_get_var_flags(g->mu, var);
+   if ((flags & (MIR_VAR_TEMP | MIR_VAR_HEAP)) != MIR_VAR_TEMP)
+      return false;
+
+   return irgen_size_bytes(g, mir_get_var_type(g->mu, var)) > MAX_STACK_ALLOC;
+}
+
 static void irgen_stack_vars(jit_irgen_t *g)
 {
    bool all_on_stack;
@@ -5272,6 +5294,8 @@ static void irgen_stack_vars(jit_irgen_t *g)
       mir_value_t var = mir_get_var(g->mu, i);
       const mir_var_flags_t flags = mir_get_var_flags(g->mu, var);
       if (!all_on_stack && !(flags & MIR_VAR_TEMP))
+         continue;
+      else if (irgen_temp_in_state(g, var))
          continue;
 
       g->vars[i] = irgen_alloc_reg(g, 1);
@@ -5305,7 +5329,15 @@ static void irgen_context_struct(jit_irgen_t *g)
 
    for (int i = 0; i < nvars; i++) {
       mir_value_t var = mir_get_var(g->mu, i);
-      if (mir_get_var_flags(g->mu, var) & MIR_VAR_TEMP) {
+      if (irgen_temp_in_state(g, var)) {
+         mir_type_t type = mir_get_var_type(g->mu, var);
+         sz = ALIGN_UP(sz, irgen_align_of(g, type));
+         linktab[i].name = NULL;
+         linktab[i].offset = PTRDIFF_MAX;
+         g->vars[i] = jit_addr_from_value(g->statereg, sz);
+         sz += irgen_size_bytes(g, type);
+      }
+      else if (mir_get_var_flags(g->mu, var) & MIR_VAR_TEMP) {
          linktab[i].name = NULL;
          linktab[i].offset = PTRDIFF_MAX;
       }
