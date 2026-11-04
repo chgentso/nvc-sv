@@ -91,6 +91,8 @@ typedef struct {
    cfg_block_t *cfg;
    gvn_state_t *gvn;
    ra_state_t  *ra;
+   unsigned     nglobal;   // Nodes used outside the block that defines them
+   unsigned    *global;    // Bit positions in the liveness sets to nodes
 } mir_optim_t;
 
 static void mir_dump_optim(mir_unit_t *mu, mir_optim_t *an);
@@ -268,18 +270,27 @@ static void mir_do_liveness(mir_unit_t *mu, mir_optim_t *opt)
 {
    // Algorithm from "Engineering a Compiler" chapter 8.6
 
-   for (int i = 0; i < mu->blocks.count; i++) {
-      cfg_block_t *cb = &(opt->cfg[i]);
-      mask_init(&cb->livein, mu->num_nodes);
-      mask_init(&cb->varkill, mu->num_nodes);
-      mask_init(&cb->liveout, mu->num_nodes);
+   // Most nodes are only used in the block which defines them so the sets
+   // only have a bit for each of those which are not
+   int *bitpos LOCAL = xmalloc_array(mu->num_nodes, sizeof(int));
+   int *defblock LOCAL = xmalloc_array(mu->num_nodes, sizeof(int));
+   for (int i = 0; i < mu->num_nodes; i++) {
+      bitpos[i] = -1;
+      defblock[i] = -1;
+   }
 
-      const block_data_t *bd = mir_block_data(mu, cb->block);
+   for (int i = 0; i < mu->blocks.count; i++) {
+      const block_data_t *bd = mir_block_data(mu, opt->cfg[i].block);
+      for (int j = 0; j < bd->num_nodes; j++)
+         defblock[bd->nodes[j]] = i;
+   }
+
+   opt->nglobal = 0;
+   for (int i = 0; i < mu->blocks.count; i++) {
+      const block_data_t *bd = mir_block_data(mu, opt->cfg[i].block);
       for (int j = 0; j < bd->num_nodes; j++) {
          mir_value_t node = { .tag = MIR_TAG_NODE, .id = bd->nodes[j] };
          const node_data_t *n = mir_node_data(mu, node);
-
-         mask_set(&cb->varkill, node.id);
 
          if (n->op == MIR_OP_CONST || n->op == MIR_OP_CONST_REAL)
             continue;   // Arguments have special encoding
@@ -287,15 +298,49 @@ static void mir_do_liveness(mir_unit_t *mu, mir_optim_t *opt)
          const mir_value_t *args = mir_get_args(mu, n);
          for (int k = 0; k < n->nargs; k++) {
             mir_value_t arg = args[k];
-            if (arg.tag == MIR_TAG_NODE && !mask_test(&cb->varkill, arg.id))
-               mask_set(&cb->livein, arg.id);
+            if (arg.tag == MIR_TAG_NODE && bitpos[arg.id] < 0
+                && defblock[arg.id] != i)
+               bitpos[arg.id] = opt->nglobal++;
+         }
+      }
+   }
+
+   opt->global = xmalloc_array(opt->nglobal ?: 1, sizeof(unsigned));
+   for (int i = 0; i < mu->num_nodes; i++) {
+      if (bitpos[i] >= 0)
+         opt->global[bitpos[i]] = i;
+   }
+
+   for (int i = 0; i < mu->blocks.count; i++) {
+      cfg_block_t *cb = &(opt->cfg[i]);
+      mask_init(&cb->livein, opt->nglobal);
+      mask_init(&cb->varkill, opt->nglobal);
+      mask_init(&cb->liveout, opt->nglobal);
+
+      const block_data_t *bd = mir_block_data(mu, cb->block);
+      for (int j = 0; j < bd->num_nodes; j++) {
+         mir_value_t node = { .tag = MIR_TAG_NODE, .id = bd->nodes[j] };
+         const node_data_t *n = mir_node_data(mu, node);
+
+         if (bitpos[node.id] >= 0)
+            mask_set(&cb->varkill, bitpos[node.id]);
+
+         if (n->op == MIR_OP_CONST || n->op == MIR_OP_CONST_REAL)
+            continue;   // Arguments have special encoding
+
+         const mir_value_t *args = mir_get_args(mu, n);
+         for (int k = 0; k < n->nargs; k++) {
+            mir_value_t arg = args[k];
+            if (arg.tag == MIR_TAG_NODE && bitpos[arg.id] >= 0
+                && !mask_test(&cb->varkill, bitpos[arg.id]))
+               mask_set(&cb->livein, bitpos[arg.id]);
          }
       }
    }
 
    bit_mask_t new, tmp;
-   mask_init(&new, mu->num_nodes);
-   mask_init(&tmp, mu->num_nodes);
+   mask_init(&new, opt->nglobal);
+   mask_init(&tmp, opt->nglobal);
 
    bool changed;
    do {
@@ -889,7 +934,9 @@ static void mir_do_dce(mir_unit_t *mu, mir_optim_t *opt)
       mir_block_t this = { .tag = MIR_TAG_BLOCK, .id = i };
       const block_data_t *bd = mir_block_data(mu, this);
 
-      mask_copy(&live, &(opt->cfg[i].liveout));
+      mask_clearall(&live);
+      for (size_t bit = -1; mask_iter(&(opt->cfg[i].liveout), &bit); )
+         mask_set(&live, opt->global[bit]);
 
       for (int j = bd->num_nodes - 1; j >= 0; j--) {
          mir_value_t node = { .tag = MIR_TAG_NODE, .id = bd->nodes[j] };
@@ -984,7 +1031,7 @@ static void ra_build_lrg(mir_unit_t *mu, mir_optim_t *opt, mir_block_t block,
    assert(first != UINT_MAX);
 
    for (size_t bit = -1; mask_iter(&cb->livein, &bit);) {
-      mir_value_t node = { .tag = MIR_TAG_NODE, .id = bit };
+      mir_value_t node = { .tag = MIR_TAG_NODE, .id = opt->global[bit] };
       ra_grow_range(node, first, opt->ra);
    }
 
@@ -1007,7 +1054,7 @@ static void ra_build_lrg(mir_unit_t *mu, mir_optim_t *opt, mir_block_t block,
    }
 
    for (size_t bit = -1; mask_iter(&cb->liveout, &bit); ) {
-      mir_value_t node = { .tag = MIR_TAG_NODE, .id = bit };
+      mir_value_t node = { .tag = MIR_TAG_NODE, .id = opt->global[bit] };
       ra_grow_range(node, first + bd->num_nodes - 1, opt->ra);
    }
 
@@ -1186,14 +1233,15 @@ static void mir_do_ra(mir_unit_t *mu, mir_optim_t *opt)
 
 // LCOV_EXCL_START /////////////////////////////////////////////////////////////
 
-static void dump_node_set(const bit_mask_t *mask, const char *tag)
+static void dump_node_set(const mir_optim_t *opt, const bit_mask_t *mask,
+                          const char *tag)
 {
    if (mask_popcount(mask) == 0)
       return;
 
    printf(" %s:{", tag);
    for (size_t bit = -1, nth = 0; mask_iter(mask, &bit); nth++)
-      printf("%s%%%zd", nth++ > 0 ? "," : "", bit);
+      printf("%s%%%u", nth++ > 0 ? "," : "", opt->global[bit]);
    printf("}");
 }
 
@@ -1232,8 +1280,8 @@ static int begin_block_cb(mir_unit_t *mu, mir_block_t block, int col, void *ctx)
    }
 
    if (cb->livein.size > 0) {
-      dump_node_set(&cb->livein, "livein");
-      dump_node_set(&cb->liveout, "liveout");
+      dump_node_set(opt, &cb->livein, "livein");
+      dump_node_set(opt, &cb->liveout, "liveout");
    }
 
    if (cb->returns) printf(" returns");
@@ -1340,4 +1388,6 @@ void mir_optimise(mir_unit_t *mu, mir_pass_t passes)
 
    if (passes & need_cfg)
       mir_free_cfg(mu, opt.cfg);
+
+   free(opt.global);
 }
