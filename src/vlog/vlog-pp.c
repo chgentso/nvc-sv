@@ -65,6 +65,7 @@ static hash_t        *macros;
 static text_buf_t    *output;
 static ifdef_stack_t *ifdefs = NULL;
 static bool           emit_locs;
+static bool           in_macro_quote;   // Inside a string made by `" `"
 static pp_mode_t      mode;
 static parse_state_t  state;
 static hash_t        *macro_args = NULL;
@@ -846,7 +847,8 @@ static void p_text_macro_usage(void)
    if (loc_invalid_p(&loc) && macro_locs.count > 0)
       loc = ATOP(macro_locs);
 
-   const bool emit_loc = emit_locs && at_boundary && !loc_invalid_p(&loc);
+   const bool emit_loc = emit_locs && at_boundary && !in_macro_quote
+      && !loc_invalid_p(&loc);
 
    if (emit_loc)
       tb_printf(output, "\n`__nvc_push \"`%pi\",%d:%d,%d\n", name,
@@ -1142,8 +1144,10 @@ static void p_block_of_text(void)
       break;
    case tMACROQUOTE:
       consume(tMACROQUOTE);
-      if (ifdefs == NULL || ifdefs->cond)
+      if (ifdefs == NULL || ifdefs->cond) {
          tb_append(output, '"');
+         in_macro_quote = !in_macro_quote;
+      }
       break;
    case tMACROESCQUOTE:
       consume(tMACROESCQUOTE);
@@ -1184,6 +1188,7 @@ void vlog_preprocess(text_buf_t *tb, bool precise)
    assert(macro_locs.count == 0);
 
    emit_locs = precise;
+   in_macro_quote = false;
    mode = PP_INITIAL;
 
    state.n_correct = RECOVER_THRESH;
