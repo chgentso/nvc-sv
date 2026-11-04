@@ -254,9 +254,23 @@ static mir_value_t vlog_lower_x(vlog_gen_t *g, mir_type_t type)
    if (mir_get_size(g->mu, type) <= 64)
       return mir_const_vec(g->mu, type, ~UINT64_C(0), ~UINT64_C(0));
    else {
-      mir_type_t t_logic = mir_vec4_type(g->mu, 1, false);
-      mir_value_t x = mir_const_vec(g->mu, t_logic, 1, 1);
-      return mir_build_cast(g->mu, type, x);
+      const int width = mir_get_size(g->mu, type);
+      mir_type_t t_low = mir_vec4_type(g->mu, 64, false);
+      mir_value_t low = mir_const_vec(g->mu, t_low, ~UINT64_C(0), ~UINT64_C(0));
+      mir_value_t full = mir_build_cast(g->mu, type, low);
+
+      mir_type_t t_offset = mir_offset_type(g->mu);
+      for (int i = 64; i < width; i += 64) {
+         const int part_size = MIN(width - i, 64);
+         const uint64_t mask =
+            part_size < 64 ? (UINT64_C(1) << part_size) - 1 : ~UINT64_C(0);
+         mir_type_t t_part = mir_vec4_type(g->mu, part_size, false);
+         mir_value_t part = mir_const_vec(g->mu, t_part, mask, mask);
+         mir_value_t pos = mir_const(g->mu, t_offset, width - i - part_size);
+         full = mir_build_insert(g->mu, part, full, pos);
+      }
+
+      return full;
    }
 }
 

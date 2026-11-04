@@ -1330,30 +1330,29 @@ void __nvc_vec4op(jit_vec_op_t op, jit_anchor_t *anchor, jit_scalar_t *args,
             }
 
             const int opos = bitpos + i;
+            const int nbits = MIN(64, part_size - i);
 
-            uint64_t mask = ~UINT64_C(0);
-            if (part_size - i < 64)
-               mask >>= 64 - (part_size - i);
-            mask <<= opos % 64;
+            uint64_t lmask = ~UINT64_C(0);
+            if (nbits < 64)
+               lmask >>= 64 - nbits;
 
-            aresult[opos / 64] &= ~mask;
-            bresult[opos / 64] &= ~mask;
+            apart &= lmask;
+            bpart &= lmask;
 
-            aresult[opos / 64] |= apart << (opos % 64);
-            bresult[opos / 64] |= bpart << (opos % 64);
+            const int word = opos / 64, shift = opos % 64;
 
-            const int msb = opos + MIN(64, part_size - i) - 1;
+            aresult[word] = (aresult[word] & ~(lmask << shift))
+               | (apart << shift);
+            bresult[word] = (bresult[word] & ~(lmask << shift))
+               | (bpart << shift);
 
-            if (msb / 64 != opos / 64) {
-               const int shift = 64 - opos;
-               apart >>= shift;
-               bpart >>= shift;
+            if (shift + nbits > 64) {
+               const uint64_t umask = lmask >> (64 - shift);
 
-               aresult[msb / 64] &= ~UINT64_C(0) >> (64 - shift);
-               bresult[msb / 64] &= ~UINT64_C(0) >> (64 - shift);
-
-               aresult[msb / 64] |= apart;
-               bresult[msb / 64] |= bpart;
+               aresult[word + 1] = (aresult[word + 1] & ~umask)
+                  | (apart >> (64 - shift));
+               bresult[word + 1] = (bresult[word + 1] & ~umask)
+                  | (bpart >> (64 - shift));
             }
          }
 
