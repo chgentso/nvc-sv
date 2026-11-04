@@ -455,6 +455,22 @@ static ident_t p_identifier(void)
       return error_marker();
 }
 
+static void skip_formal_space(void)
+{
+   // The list of formal arguments may continue on the next line
+
+   for (;;) {
+      if (optional(tWHITESPACE))
+         continue;
+      else if (peek() == tNEWLINE) {
+         consume(tNEWLINE);
+         tb_append(output, '\n');
+      }
+      else
+         break;
+   }
+}
+
 static macro_arg_t p_formal_argument(void)
 {
    // simple_identifier [ = default_text ]
@@ -463,14 +479,14 @@ static macro_arg_t p_formal_argument(void)
 
    macro_arg_t arg = {};
 
-   optional(tWHITESPACE);
+   skip_formal_space();
 
    arg.name = p_identifier();
 
-   optional(tWHITESPACE);
+   skip_formal_space();
 
    if (optional(tEQ)) {
-      optional(tWHITESPACE);
+      skip_formal_space();
 
       LOCAL_TEXT_BUF tb = tb_new();
       while (not_at_token(tCOMMA, tRPAREN))
@@ -684,7 +700,7 @@ static void p_actual_argument(macro_t *m, int pos)
 
    BEGIN("actual argument");
 
-   optional(tWHITESPACE);
+   skip_formal_space();
 
    LOCAL_TEXT_BUF tb = tb_new();
 
