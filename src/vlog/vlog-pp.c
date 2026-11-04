@@ -311,8 +311,13 @@ static token_t lex_text(scan_buf_t buf)
    char ch;
    while (scan_peek(buf, &ch)) {
       switch (ch) {
+      case '_':
+         // Part of a number but not of an identifier following an operator
+         if (!isdigit_iso88591(buf.ptr[0]))
+            goto out;
+         // Fall-through
       case '0'...'9':
-      case '?': case '\'': case '_':
+      case '?': case '\'':
       case '+': case '-':  case '*':
          scan_advance(&buf);
          continue;
@@ -1165,12 +1170,11 @@ static void p_source_text(void)
 
 void vlog_preprocess(text_buf_t *tb, bool precise)
 {
+   // Macros defined in one file are visible in the files which follow
    if (macros == NULL) {
       macros = hash_new(64);
       pp_defines_iter(vlog_define_cb, NULL);
    }
-   else
-      assert(opt_get_int(OPT_SINGLE_UNIT));
 
    assert(output == NULL);
    output = tb;
@@ -1192,7 +1196,4 @@ void vlog_preprocess(text_buf_t *tb, bool precise)
    assert(macro_args == NULL);
    assert(macro_locs.count == 0);
    output = NULL;
-
-   if (!opt_get_int(OPT_SINGLE_UNIT))
-      free_macros();
 }
