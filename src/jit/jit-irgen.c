@@ -4748,28 +4748,29 @@ static void irgen_op_insert(jit_irgen_t *g, mir_value_t n)
    jit_value_t bbits = { .kind = JIT_VALUE_INVALID }, bpart, bfull;
    if (mir_is(g->mu, n, MIR_TYPE_VEC4)) {
       bbits = irgen_get_slot(g, n, 1);
-      bpart = irgen_get_slot(g, arg0, 1);
-      bfull = irgen_get_slot(g, arg1, 1);
+      bpart = mir_is(g->mu, arg0, MIR_TYPE_VEC4)
+         ? irgen_get_slot(g, arg0, 1) : jit_value_from_int64(0);
+      bfull = mir_is(g->mu, arg1, MIR_TYPE_VEC4)
+         ? irgen_get_slot(g, arg1, 1) : jit_value_from_int64(0);
    }
 
    if (full_size > 64) {
-      if (mir_is(g->mu, n, MIR_TYPE_VEC4)) {
-         j_send(g, 0, full);
-         j_send(g, 1, bfull);
-         j_send(g, 2, part);
-         j_send(g, 3, bpart);
-         j_send(g, 4, jit_value_from_int64(part_size));
-         j_send(g, 5, pos);
+      if (bbits.kind == JIT_VALUE_INVALID)
+         bpart = bfull = jit_value_from_int64(0);
 
-         macro_vec4op(g, JIT_VEC_INSERT, full_size);
+      j_send(g, 0, full);
+      j_send(g, 1, bfull);
+      j_send(g, 2, part);
+      j_send(g, 3, bpart);
+      j_send(g, 4, jit_value_from_int64(part_size));
+      j_send(g, 5, pos);
 
-         j_recv(g, abits, 0);
+      macro_vec4op(g, JIT_VEC_INSERT, full_size);
 
-         if (bbits.kind != JIT_VALUE_INVALID)
-            j_recv(g, bbits, 1);
-      }
-      else
-         assert(false);  // TODO
+      j_recv(g, abits, 0);
+
+      if (bbits.kind != JIT_VALUE_INVALID)
+         j_recv(g, bbits, 1);
 
       return;
    }
