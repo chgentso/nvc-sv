@@ -292,6 +292,8 @@ typedef struct {
 typedef struct {
    jit_func_t *func;
    valnum_t   *regvn;
+   unsigned   *regen;     // Block in which each value number was set
+   unsigned    curgen;
    valnum_t    nextvn;
    lvn_tab_t  *hashtab;
    size_t      tabsz;
@@ -300,6 +302,18 @@ typedef struct {
 } lvn_state_t;
 
 static void jit_lvn_mov(jit_ir_t *ir, lvn_state_t *state);
+
+static inline valnum_t *lvn_reg(lvn_state_t *state, int reg)
+{
+   // Value numbers are forgotten at the start of each block without
+   // visiting every register
+   if (state->regen[reg] != state->curgen) {
+      state->regen[reg] = state->curgen;
+      state->regvn[reg] = VN_INVALID;
+   }
+
+   return &(state->regvn[reg]);
+}
 
 static inline valnum_t lvn_new_value(lvn_state_t *state)
 {
@@ -327,7 +341,7 @@ static bool lvn_is_const(jit_value_t value, lvn_state_t *state, int64_t *cval)
       *cval = value.int64;
       return true;
    case JIT_VALUE_REG:
-      return lvn_get_const(state->regvn[value.reg], state, cval);
+      return lvn_get_const((*lvn_reg(state, value.reg)), state, cval);
    default:
       return false;
    }
@@ -365,10 +379,10 @@ static valnum_t lvn_value_num(jit_value_t value, lvn_state_t *state)
 {
    switch (value.kind) {
    case JIT_VALUE_REG:
-      if (state->regvn[value.reg] != VN_INVALID)
-         return state->regvn[value.reg];
+      if ((*lvn_reg(state, value.reg)) != VN_INVALID)
+         return (*lvn_reg(state, value.reg));
       else
-         return (state->regvn[value.reg] = lvn_new_value(state));
+         return ((*lvn_reg(state, value.reg)) = lvn_new_value(state));
 
    case JIT_VALUE_INT64:
       if (value.int64 >= 0 && value.int64 < SMALL_CONST)
@@ -406,13 +420,13 @@ static inline bool lvn_is_commutative(jit_op_t op)
 
 static inline void lvn_kill_flags(lvn_state_t *state)
 {
-   state->regvn[state->func->nregs] = VN_INVALID;
+   (*lvn_reg(state, state->func->nregs)) = VN_INVALID;
 }
 
 static void lvn_kill_args(lvn_state_t *state)
 {
    for (int i = 0; i < TRACK_ARGS; i++)
-      state->regvn[state->func->nregs + i + 1] = VN_INVALID;
+      (*lvn_reg(state, state->func->nregs + i + 1)) = VN_INVALID;
 }
 
 static void lvn_commute_const(jit_ir_t *ir, lvn_state_t *state)
@@ -462,12 +476,12 @@ static void jit_lvn_generic(jit_ir_t *ir, lvn_state_t *state, valnum_t vn)
          if (stale >= 0)  // Reuse earlier stale entry if possible
             tab = &(state->hashtab[stale]);
          tab->ir = ir;
-         tab->vn = state->regvn[ir->result] =
+         tab->vn = (*lvn_reg(state, ir->result)) =
             (vn == VN_INVALID ? lvn_new_value(state) : vn);
          memcpy(tab->tuple, tuple, sizeof(tuple));
          return;
       }
-      else if (tab->vn != state->regvn[tab->ir->result]) {
+      else if (tab->vn != (*lvn_reg(state, tab->ir->result))) {
          // Stale entry may be reused if we do not find matching value
          stale = idx;
          continue;
@@ -481,19 +495,19 @@ static void jit_lvn_generic(jit_ir_t *ir, lvn_state_t *state, valnum_t vn)
 
          // Propagate constants where possible
          int64_t cval;
-         if (lvn_get_const(state->regvn[tab->ir->result], state, &cval))
+         if (lvn_get_const((*lvn_reg(state, tab->ir->result)), state, &cval))
             ir->arg1 = LVN_CONST(cval);
          else
             ir->arg1 = LVN_REG(tab->ir->result);
 
          ir->arg2.kind = JIT_VALUE_INVALID;
 
-         state->regvn[ir->result] = tab->vn;
+         (*lvn_reg(state, ir->result)) = tab->vn;
          return;
       }
    }
 
-   state->regvn[ir->result] = VN_INVALID;   // Reached iteration limit
+   (*lvn_reg(state, ir->result)) = VN_INVALID;   // Reached iteration limit
 }
 
 static void jit_lvn_mul(jit_ir_t *ir, lvn_state_t *state)
@@ -702,7 +716,7 @@ static void jit_lvn_mov(jit_ir_t *ir, lvn_state_t *state)
    }
 
    valnum_t vn = lvn_value_num(ir->arg1, state);
-   if (state->regvn[ir->result] == vn) {
+   if ((*lvn_reg(state, ir->result)) == vn) {
       // Result register already contains this value
       lvn_convert_nop(ir);
       return;
@@ -732,15 +746,15 @@ static void jit_lvn_cmp(jit_ir_t *ir, lvn_state_t *state)
          fatal_trace("unhandled condition code in jit_lvn_cmp");
       }
 
-      state->regvn[state->func->nregs] = result;
+      (*lvn_reg(state, state->func->nregs)) = result;
    }
    else
-      state->regvn[state->func->nregs] = VN_INVALID;
+      (*lvn_reg(state, state->func->nregs)) = VN_INVALID;
 }
 
 static void jit_lvn_ccmp(jit_ir_t *ir, lvn_state_t *state)
 {
-   const int fconst = state->regvn[state->func->nregs];
+   const int fconst = (*lvn_reg(state, state->func->nregs));
    if (fconst == 0)
       lvn_convert_nop(ir);
    else if (fconst != VN_INVALID) {
@@ -753,20 +767,20 @@ static void jit_lvn_ccmp(jit_ir_t *ir, lvn_state_t *state)
 
 static void jit_lvn_csel(jit_ir_t *ir, lvn_state_t *state)
 {
-   const int fconst = state->regvn[state->func->nregs];
+   const int fconst = (*lvn_reg(state, state->func->nregs));
    if (fconst != VN_INVALID)
       lvn_convert_mov(ir, state, fconst ? ir->arg1 : ir->arg2);
    else
-      state->regvn[ir->result] = VN_INVALID;
+      (*lvn_reg(state, ir->result)) = VN_INVALID;
 }
 
 static void jit_lvn_cset(jit_ir_t *ir, lvn_state_t *state)
 {
-   const int fconst = state->regvn[state->func->nregs];
+   const int fconst = (*lvn_reg(state, state->func->nregs));
    if (fconst != VN_INVALID)
       lvn_convert_mov(ir, state, LVN_CONST(fconst));
    else
-      state->regvn[ir->result] = VN_INVALID;
+      (*lvn_reg(state, ir->result)) = VN_INVALID;
 }
 
 static void jit_lvn_jump(jit_ir_t *ir, lvn_state_t *state)
@@ -774,7 +788,7 @@ static void jit_lvn_jump(jit_ir_t *ir, lvn_state_t *state)
    assert(ir->arg1.label < state->func->nirs);
    jit_ir_t *dest = &(state->func->irbuf[ir->arg1.label]);
 
-   const int fconst = state->regvn[state->func->nregs];
+   const int fconst = (*lvn_reg(state, state->func->nregs));
    if (ir->cc != JIT_CC_NONE && fconst != VN_INVALID) {
       if (fconst == (ir->cc == JIT_CC_T))
          ir->cc = JIT_CC_NONE;
@@ -807,12 +821,12 @@ static void jit_lvn_recv(jit_ir_t *ir, lvn_state_t *state)
 
    const unsigned vreg = state->func->nregs + 1 + nth;
 
-   if (state->regvn[vreg] != VN_INVALID)
-      state->regvn[ir->result] = state->regvn[vreg];
+   if ((*lvn_reg(state, vreg)) != VN_INVALID)
+      (*lvn_reg(state, ir->result)) = (*lvn_reg(state, vreg));
    else {
       valnum_t vn = lvn_new_value(state);
-      state->regvn[vreg] = vn;
-      state->regvn[ir->result] = vn;
+      (*lvn_reg(state, vreg)) = vn;
+      (*lvn_reg(state, ir->result)) = vn;
    }
 }
 
@@ -827,7 +841,7 @@ static void jit_lvn_send(jit_ir_t *ir, lvn_state_t *state)
    const unsigned vreg = state->func->nregs + 1 + nth;
 
    valnum_t vn = lvn_value_num(ir->arg2, state);
-   if (vn != VN_INVALID && state->regvn[vreg] == vn)
+   if (vn != VN_INVALID && (*lvn_reg(state, vreg)) == vn)
       lvn_convert_nop(ir);   // Already in argument slot
 }
 
@@ -837,7 +851,7 @@ static void jit_lvn_copy(jit_ir_t *ir, lvn_state_t *state)
       ir->op = MACRO_COPY;   // Cannot overlap when copying from constant pool
 
    int64_t count;
-   if (lvn_get_const(state->regvn[ir->result], state, &count)) {
+   if (lvn_get_const((*lvn_reg(state, ir->result)), state, &count)) {
       if (count == 0) {
          lvn_convert_nop(ir);
          return;
@@ -877,13 +891,13 @@ static void jit_lvn_copy(jit_ir_t *ir, lvn_state_t *state)
    }
 
    // Clobbers the count register
-   state->regvn[ir->result] = lvn_new_value(state);
+   (*lvn_reg(state, ir->result)) = lvn_new_value(state);
 }
 
 static void jit_lvn_bzero(jit_ir_t *ir, lvn_state_t *state)
 {
    int64_t count;
-   if (lvn_get_const(state->regvn[ir->result], state, &count)) {
+   if (lvn_get_const((*lvn_reg(state, ir->result)), state, &count)) {
       if (count == 0) {
          lvn_convert_nop(ir);
          return;
@@ -900,7 +914,7 @@ static void jit_lvn_bzero(jit_ir_t *ir, lvn_state_t *state)
    }
 
    // Clobbers the count register
-   state->regvn[ir->result] = lvn_new_value(state);
+   (*lvn_reg(state, ir->result)) = lvn_new_value(state);
 }
 
 static void jit_lvn_memset(jit_ir_t *ir, lvn_state_t *state)
@@ -931,7 +945,7 @@ static void jit_lvn_memset(jit_ir_t *ir, lvn_state_t *state)
       }
 
       int64_t bytes;
-      if (lvn_get_const(state->regvn[ir->result], state, &bytes)) {
+      if (lvn_get_const((*lvn_reg(state, ir->result)), state, &bytes)) {
          if (bytes == 0) {
             lvn_convert_nop(ir);
             return;
@@ -950,7 +964,7 @@ static void jit_lvn_memset(jit_ir_t *ir, lvn_state_t *state)
    }
 
    // Clobbers the count register
-   state->regvn[ir->result] = lvn_new_value(state);
+   (*lvn_reg(state, ir->result)) = lvn_new_value(state);
 }
 
 static void jit_lvn_exp(jit_ir_t *ir, lvn_state_t *state)
@@ -980,16 +994,16 @@ void jit_do_lvn(jit_func_t *f)
    };
 
    state.regvn = xmalloc_array(f->nregs + 1 + TRACK_ARGS, sizeof(valnum_t));
+   state.regen = xcalloc_array(f->nregs + 1 + TRACK_ARGS, sizeof(unsigned));
+   state.curgen = 1;
    state.hashtab = xcalloc_array(state.tabsz, sizeof(lvn_tab_t));
 
    bool reset = true;
    for (jit_ir_t *ir = f->irbuf; ir < f->irbuf + f->nirs;
         reset = cfg_is_terminator(f, ir), ir++) {
 
-      if (reset || ir->target) {
-         for (int j = 0; j < f->nregs + 1 + TRACK_ARGS; j++)
-            state.regvn[j] = VN_INVALID;
-      }
+      if (reset || ir->target)
+         state.curgen++;
 
       switch (ir->op) {
       case J_MUL: jit_lvn_mul(ir, &state); break;
@@ -1026,31 +1040,69 @@ void jit_do_lvn(jit_func_t *f)
          // Fall-through
       default:
          if (jit_writes_flags(ir))
-            state.regvn[f->nregs] = VN_INVALID;
+            *lvn_reg(&state, f->nregs) = VN_INVALID;
          if (ir->result != JIT_REG_INVALID)
-            state.regvn[ir->result] = VN_INVALID;
+            *lvn_reg(&state, ir->result) = VN_INVALID;
       }
    }
 
    free(state.regvn);
+   free(state.regen);
    free(state.hashtab);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 // Copy propagation
 
+typedef struct {
+   jit_value_t *map;
+   int         *dirty;     // Registers which may have a copy
+   int          ndirty;
+   int         *head;      // Registers copied from each register
+   int         *entry;
+   int         *link;
+   int          nentry;
+} cprop_state_t;
+
+static void cprop_reset(cprop_state_t *state)
+{
+   for (int i = 0; i < state->ndirty; i++) {
+      const int j = state->dirty[i];
+      state->map[j].kind = JIT_VALUE_INVALID;
+      if (state->head[j] != -1)
+         state->head[j] = -1;
+   }
+
+   state->ndirty = 0;
+   state->nentry = 0;
+}
+
 void jit_do_cprop(jit_func_t *f)
 {
-   jit_value_t *map LOCAL = xmalloc_array(f->nregs, sizeof(jit_value_t));
+   // The registers with a copy are tracked so that nothing scales with the
+   // number of registers in a large function
+
+   cprop_state_t state = {
+      .map   = xmalloc_array(f->nregs, sizeof(jit_value_t)),
+      .dirty = xmalloc_array(2 * f->nirs + 2, sizeof(int)),
+      .head  = xmalloc_array(f->nregs, sizeof(int)),
+      .entry = xmalloc_array(f->nirs + 1, sizeof(int)),
+      .link  = xmalloc_array(f->nirs + 1, sizeof(int)),
+   };
+
+   for (int j = 0; j < f->nregs; j++) {
+      state.map[j].kind = JIT_VALUE_INVALID;
+      state.head[j] = -1;
+   }
+
+   jit_value_t *map = state.map;
 
    bool reset = true;
    for (jit_ir_t *ir = f->irbuf; ir < f->irbuf + f->nirs;
         reset = cfg_is_terminator(f, ir), ir++) {
 
-      if (reset || ir->target) {
-         for (int j = 0; j < f->nregs; j++)
-            map[j].kind = JIT_VALUE_INVALID;
-      }
+      if (reset || ir->target)
+         cprop_reset(&state);
 
       if (ir->arg1.kind == JIT_VALUE_REG) {
          jit_value_t copy = map[ir->arg1.reg];
@@ -1069,22 +1121,40 @@ void jit_do_cprop(jit_func_t *f)
       else if (ir->op == MACRO_MEMSET || ir->op == MACRO_COPY
                || ir->op == MACRO_MOVE || ir->op == MACRO_BZERO)
          continue;   // Does not write to result
-      else if (map[ir->result].kind != JIT_VALUE_INVALID) {
+      else if (map[ir->result].kind != JIT_VALUE_INVALID
+               || state.head[ir->result] != -1) {
          // Invalidate any existing copies of this register
-         for (int j = 0; j < f->nregs; j++) {
+         for (int e = state.head[ir->result]; e != -1; e = state.link[e]) {
+            const int j = state.entry[e];
             if (map[j].kind == JIT_VALUE_REG && map[j].reg == ir->result)
                map[j].kind = JIT_VALUE_INVALID;
          }
+         state.head[ir->result] = -1;
       }
 
       if (ir->op == J_MOV) {
          map[ir->result] = ir->arg1;
-         if (ir->arg1.kind == JIT_VALUE_REG)
-            map[ir->arg1.reg] = ir->arg1;
+         state.dirty[state.ndirty++] = ir->result;
+         if (ir->arg1.kind == JIT_VALUE_REG) {
+            const int src = ir->arg1.reg;
+            map[src] = ir->arg1;
+            state.dirty[state.ndirty++] = src;
+
+            const int e = state.nentry++;
+            state.entry[e] = ir->result;
+            state.link[e] = state.head[src];
+            state.head[src] = e;
+         }
       }
       else
          map[ir->result].kind = JIT_VALUE_INVALID;
    }
+
+   free(state.map);
+   free(state.dirty);
+   free(state.head);
+   free(state.entry);
+   free(state.link);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -1208,7 +1278,8 @@ static inline jit_reg_t get_value_reg(jit_value_t value)
    }
 }
 
-static bool try_promote_allocation(jit_func_t *f, jit_ir_t *alloc)
+static bool try_promote_allocation(jit_func_t *f, jit_ir_t *alloc,
+                                   const int *uses, int nuses)
 {
    assert(alloc->arg2.kind == JIT_VALUE_INT64);
 
@@ -1227,7 +1298,8 @@ static bool try_promote_allocation(jit_func_t *f, jit_ir_t *alloc)
    assert(reg != JIT_REG_INVALID);
 
    int first = -1, last = -1;
-   for (int i = 0; i < f->nirs; i++) {
+   for (int k = 0; k < nuses; k++) {
+      const int i = uses[k];
       jit_ir_t *ir = &(f->irbuf[i]);
       if (ir->result == reg && ir != alloc)
          return false;
@@ -1251,8 +1323,11 @@ static bool try_promote_allocation(jit_func_t *f, jit_ir_t *alloc)
    }
 
    if (first != -1) {
-      for (jit_ir_t *ir = f->irbuf + first; ir <= f->irbuf + last; ir++) {
-         if (ir->op == J_STORE && get_value_reg(ir->arg2) == reg) {
+      for (int k = 0; k < nuses; k++) {
+         jit_ir_t *ir = &(f->irbuf[uses[k]]);
+         if (uses[k] < first || uses[k] > last)
+            continue;
+         else if (ir->op == J_STORE && get_value_reg(ir->arg2) == reg) {
             ir->op        = J_MOV;
             ir->size      = JIT_SZ_UNSPEC;
             ir->cc        = JIT_CC_NONE;
@@ -1284,14 +1359,65 @@ void jit_do_mem2reg(jit_func_t *f)
    if (f->framesz == 0)
       return;
 
+   int *uses = NULL;
+
+   // The instructions which mention each allocation, as scanning the whole
+   // function for each of them is quadratic
+   int *first LOCAL = xmalloc_array(f->nregs + 1, sizeof(int));
+   int *count LOCAL = xcalloc_array(f->nregs + 1, sizeof(int));
+   bool *cand LOCAL = xcalloc_array(f->nregs + 1, sizeof(bool));
+
+   for (int i = 0; i < f->nirs; i++) {
+      jit_ir_t *ir = &(f->irbuf[i]);
+      if (ir->op == MACRO_SALLOC && ir->result != JIT_REG_INVALID)
+         cand[ir->result] = true;
+      else if (cfg_is_terminator(f, ir))
+         break;
+   }
+
+   for (int pass = 0; pass < 2; pass++) {
+      if (pass == 1) {
+         int total = 0;
+         for (int r = 0; r <= f->nregs; r++) {
+            first[r] = total;
+            total += count[r];
+            count[r] = 0;
+         }
+         uses = xmalloc_array(total + 1, sizeof(int));
+      }
+
+      for (int i = 0; i < f->nirs; i++) {
+         jit_ir_t *ir = &(f->irbuf[i]);
+         const jit_reg_t regs[] = { ir->result, get_value_reg(ir->arg1),
+                                    get_value_reg(ir->arg2) };
+         for (int k = 0; k < 3; k++) {
+            const jit_reg_t r = regs[k];
+            if (r == JIT_REG_INVALID || !cand[r])
+               continue;
+            else if (k > 0 && regs[k - 1] == r)
+               continue;
+            else if (k == 2 && regs[0] == r)
+               continue;
+            else if (pass == 0)
+               count[r]++;
+            else
+               uses[first[r] + count[r]++] = i;
+         }
+      }
+   }
+
    int replaced = 0;
    for (int i = 0; i < f->nirs; i++) {
       jit_ir_t *ir = &(f->irbuf[i]);
-      if (ir->op == MACRO_SALLOC && try_promote_allocation(f, ir))
+      if (ir->op == MACRO_SALLOC && ir->result != JIT_REG_INVALID
+          && try_promote_allocation(f, ir, uses + first[ir->result],
+                                    count[ir->result]))
          replaced++;
       else if (cfg_is_terminator(f, ir))
          break;
    }
+
+   free(uses);
 
    if (replaced == 0)
       return;
