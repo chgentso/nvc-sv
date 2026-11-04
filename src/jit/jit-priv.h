@@ -181,8 +181,8 @@ typedef enum {
    JIT_EXIT_SCHED_ZERO,
 } jit_exit_t;
 
-typedef uint16_t jit_reg_t;
-#define JIT_REG_INVALID UINT16_MAX
+typedef uint32_t jit_reg_t;
+#define JIT_REG_INVALID UINT32_MAX
 
 typedef enum {
    JIT_VALUE_INVALID,
