@@ -37,7 +37,6 @@ static mir_value_t vlog_lower_rvalue(mir_unit_t *mu, vlog_node_t v)
    case V_NUMBER:
       {
          number_t num = vlog_number(v);
-         assert(number_width(num) == 1);
 
          mir_type_t t_logic = mir_vec4_type(mu, 1, false);
          return mir_const_vec(mu, t_logic, number_bit(num, 0), 1);
