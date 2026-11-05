@@ -4518,22 +4518,47 @@ static void irgen_binary_body(jit_irgen_t *g, mir_value_t n)
       }
       break;
    case MIR_VEC_SLL:
-      j_shl(g, abits, aleft, aright);
-      j_and(g, abits, abits, mask);
-      xbits = irgen_arith_xbits(g, bleft, bright, mask);
-      break;
    case MIR_VEC_SRL:
-      j_shr(g, abits, aleft, aright);
-      j_and(g, abits, abits, mask);
-      xbits = irgen_arith_xbits(g, bleft, bright, mask);
-      break;
    case MIR_VEC_SRA:
-      assert(issigned);
-      aleft = irgen_sign_extend(g, aleft, size);
-      j_asr(g, abits, aleft, aright);
-      j_and(g, abits, abits, mask);
-      xbits = irgen_arith_xbits(g, bleft, bright, mask);
-      break;
+      {
+         // The unknown bits move with the others unless the amount is unknown
+         jit_value_t bshift = bleft;
+         if (op == MIR_VEC_SRA) {
+            assert(issigned);
+            aleft = irgen_sign_extend(g, aleft, size);
+            bshift = irgen_sign_extend(g, bleft, size);
+         }
+
+         xbits = irgen_alloc_temp(g);
+         if (op == MIR_VEC_SLL) {
+            j_shl(g, abits, aleft, aright);
+            j_shl(g, xbits, bshift, aright);
+         }
+         else if (op == MIR_VEC_SRL) {
+            j_shr(g, abits, aleft, aright);
+            j_shr(g, xbits, bshift, aright);
+         }
+         else {
+            j_asr(g, abits, aleft, aright);
+            j_asr(g, xbits, bshift, aright);
+         }
+
+         j_and(g, abits, abits, mask);
+         j_and(g, xbits, xbits, mask);
+
+         j_cmp(g, JIT_CC_NE, bright, jit_value_from_int64(0));
+         j_csel(g, abits, mask, abits);
+         j_cmp(g, JIT_CC_NE, bright, jit_value_from_int64(0));
+         j_csel(g, xbits, mask, xbits);
+
+         if (is_vec4) {
+            j_mov(g, irgen_get_slot(g, n, 0), abits);
+            j_mov(g, irgen_get_slot(g, n, 1), xbits);
+         }
+         else
+            j_mov(g, irgen_get_slot(g, n, 0), abits);
+         return;
+      }
    default:
       should_not_reach_here();
    }

@@ -1127,6 +1127,9 @@ void vec2_asr(int xsize, uint64_t *x, int ysize, const uint64_t *y)
    const int s = k / 64;
    const int r = k % 64;
 
+   if (negative && size % 64 != 0)
+      x[n - 1] |= ~UINT64_C(0) << (size % 64);
+
    if (s) {
       for (int i = 0; i < n; i++)
          x[i] = (i + s < n) ? x[i + s] : fill;
@@ -1461,22 +1464,34 @@ void vec4_exp(int size, uint64_t *a1, uint64_t *b1, const uint64_t *a2,
 void vec4_shl(int size, uint64_t *a1, uint64_t *b1, const uint64_t *a2,
               const uint64_t *b2)
 {
-   vec2_shl(size, a1, size, a2);
-   vec2_shl(size, b1, size, b2);
+   if (!vec4_defined(size, b2, NULL))
+      vec4_make_undef(size, a1, b1);
+   else {
+      vec2_shl(size, a1, size, a2);
+      vec2_shl(size, b1, size, a2);
+   }
 }
 
 void vec4_shr(int size, uint64_t *a1, uint64_t *b1, const uint64_t *a2,
               const uint64_t *b2)
 {
-   vec2_shr(size, a1, size, a2);
-   vec2_shr(size, b1, size, b2);
+   if (!vec4_defined(size, b2, NULL))
+      vec4_make_undef(size, a1, b1);
+   else {
+      vec2_shr(size, a1, size, a2);
+      vec2_shr(size, b1, size, a2);
+   }
 }
 
 void vec4_asr(int size, uint64_t *a1, uint64_t *b1, const uint64_t *a2,
               const uint64_t *b2)
 {
-   if (vec4_arith_defined(size, a1, b1, a2, b2))
+   if (!vec4_defined(size, b2, NULL))
+      vec4_make_undef(size, a1, b1);
+   else {
       vec2_asr(size, a1, size, a2);
+      vec2_asr(size, b1, size, a2);
+   }
 }
 
 void vec4_inv(int size, uint64_t *a, uint64_t *b)
