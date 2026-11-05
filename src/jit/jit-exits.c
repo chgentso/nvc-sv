@@ -1071,6 +1071,7 @@ void __nvc_vec4op(jit_vec_op_t op, jit_anchor_t *anchor, jit_scalar_t *args,
    case JIT_VEC_SGE:
    case JIT_VEC_AND1:
    case JIT_VEC_OR1:
+   case JIT_VEC_XOR1:
       {
          assert(size > 64);
 
@@ -1146,6 +1147,15 @@ void __nvc_vec4op(jit_vec_op_t op, jit_anchor_t *anchor, jit_scalar_t *args,
          case JIT_VEC_OR1:
             bresult = vec2_or1(size, xb);
             aresult = vec2_or1(size, xa) | bresult;
+            break;
+         case JIT_VEC_XOR1:
+            {
+               int parity = 0;
+               for (int i = 0; i < nwords; i++)
+                  parity ^= __builtin_parityll(xa[i]);
+               bresult = vec2_or1(size, xb);
+               aresult = parity | bresult;
+            }
             break;
          case JIT_VEC_LOG_NOT:
             {
