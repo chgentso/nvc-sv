@@ -693,7 +693,7 @@ START_TEST(test_enum1)
    expect_errors(expect);
 
    vlog_node_t m = do_parse_only(V_MODULE);
-   ck_assert_int_eq(vlog_decls(m), 8);
+   ck_assert_int_eq(vlog_decls(m), 9);
 
    fail_unless(vlog_parse() == NULL);
 
