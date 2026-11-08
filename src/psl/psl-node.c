@@ -17,7 +17,10 @@
 
 #include "util.h"
 #include "object.h"
+#include "tree.h"
 #include "psl/psl-node.h"
+
+#include <stdlib.h>
 
 static const imask_t has_map[P_LAST_PSL_KIND] = {
    // P_ASSERT
@@ -450,4 +453,136 @@ unsigned psl_visit_only(psl_node_t p, psl_visit_fn_t fn, void *context,
    object_visit(&(p->object), &ctx);
 
    return ctx.count;
+}
+
+#define PSL_PARAM_SHIFT 25
+
+psl_type_t psl_param_type(tree_t param)
+{
+   assert(tree_kind(param) == T_PARAM_DECL);
+   return (tree_flags(param) >> PSL_PARAM_SHIFT) & 0xf;
+}
+
+void psl_set_param_type(tree_t param, psl_type_t type)
+{
+   assert(tree_kind(param) == T_PARAM_DECL);
+   tree_set_flag(param, (tree_flags_t)((unsigned)type << PSL_PARAM_SHIFT));
+}
+
+bool psl_has_value(psl_node_t p)
+{
+   return lookup_item(&psl_object, p, I_VALUE)->object != NULL;
+}
+
+typedef struct {
+   psl_node_t decl;
+   psl_node_t inst;
+} subst_ctx_t;
+
+static int subst_formal_index(tree_t t, subst_ctx_t *ctx)
+{
+   if (tree_kind(t) != T_REF || !tree_has_ref(t))
+      return -1;
+
+   tree_t ref = tree_ref(t);
+   if (tree_kind(ref) != T_PARAM_DECL)
+      return -1;
+
+   const int nports = psl_ports(ctx->decl);
+   for (int i = 0; i < nports; i++) {
+      if (psl_port(ctx->decl, i) == ref)
+         return i;
+   }
+
+   return -1;
+}
+
+static bool subst_copy_pred(object_t *object, void *__ctx)
+{
+   tree_t t = container_of(object, struct _tree, object);
+   return subst_formal_index(t, __ctx) != -1;
+}
+
+static object_t *subst_tree_cb(object_t *object, void *__ctx)
+{
+   subst_ctx_t *ctx = __ctx;
+   tree_t t = container_of(object, struct _tree, object);
+
+   const int pos = subst_formal_index(t, ctx);
+   if (pos == -1 || pos >= psl_operands(ctx->inst))
+      return object;
+
+   psl_node_t actual = psl_operand(ctx->inst, pos);
+   if (psl_kind(actual) != P_HDL_EXPR || !psl_has_tree(actual))
+      return object;
+
+   switch (psl_param_type(psl_port(ctx->decl, pos))) {
+   case PSL_TYPE_SEQUENCE:
+   case PSL_TYPE_PROPERTY:
+      return object;
+   default:
+      return &(psl_tree(actual)->object);
+   }
+}
+
+static object_t *subst_psl_cb(object_t *object, void *__ctx)
+{
+   subst_ctx_t *ctx = __ctx;
+   psl_node_t p = container_of(object, struct _psl_node, object);
+
+   if (psl_kind(p) != P_HDL_EXPR || !psl_has_tree(p))
+      return object;
+
+   const int pos = subst_formal_index(psl_tree(p), ctx);
+   if (pos == -1 || pos >= psl_operands(ctx->inst))
+      return object;
+
+   switch (psl_param_type(psl_port(ctx->decl, pos))) {
+   case PSL_TYPE_SEQUENCE:
+   case PSL_TYPE_PROPERTY:
+      return &(psl_operand(ctx->inst, pos)->object);
+   default:
+      return object;
+   }
+}
+
+psl_node_t psl_expand(psl_node_t decl, psl_node_t inst)
+{
+   // Replace each use of a formal parameter in the declaration with the
+   // corresponding actual parameter of the instance
+
+   psl_node_t body = psl_value(decl);
+
+   subst_ctx_t sctx = { decl, inst };
+
+   object_copy_ctx_t *cctx = xcalloc_flex(sizeof(object_copy_ctx_t), 1,
+                                          sizeof(object_t *));
+   cctx->generation = object_next_generation();
+   cctx->pred_context = &sctx;
+   cctx->nroots = 1;
+   cctx->roots[0] = &(body->object);
+   cctx->should_copy[OBJECT_TAG_TREE] = subst_copy_pred;
+
+   object_copy_begin(cctx);
+   object_copy_finish(cctx);
+
+   object_t *copy = cctx->roots[0];
+   free(cctx);
+
+   if (copy == &(body->object))
+      return body;   // No formal parameters used
+
+   object_rewrite_ctx_t rctx = {
+      .generation = object_next_generation(),
+      .context    = &sctx,
+      .arena      = object_arena(copy),
+   };
+
+   rctx.post_fn[OBJECT_TAG_TREE] = subst_tree_cb;
+   rctx.post_fn[OBJECT_TAG_PSL] = subst_psl_cb;
+
+   object_t *result = object_rewrite(copy, &rctx);
+   free(rctx.cache);
+
+   return container_of(result, struct _psl_node, object);
 }

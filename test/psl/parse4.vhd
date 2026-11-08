@@ -17,7 +17,7 @@ begin
 
     -- Sequence_Instance(Actual_Parameter_List)
     -- psl cover seq_b(5);
-    -- psl cover seq_b(4, {a;b;c});
+    -- psl cover seq_b(4);
 
     -- Boolean [* [ Count ] ]
     -- psl cover a[*10];

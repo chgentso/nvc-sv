@@ -12935,6 +12935,7 @@ static void p_psl_formal_parameter(psl_node_t node)
       tree_set_class(p, class);
       tree_set_subkind(p, PORT_IN);
       tree_set_type(p, type);
+      psl_set_param_type(p, psl_type);
       psl_add_port(node, p);
       insert_name(nametab, p, NULL);
    } while (optional(tCOMMA));
@@ -12950,34 +12951,6 @@ static void p_psl_formal_parameter_list(psl_node_t node)
 
    while (optional(tSEMI))
       p_psl_formal_parameter(node);
-}
-
-static void p_psl_actual_parameter(psl_node_t node, bool seq)
-{
-   // Actual_Parameter ::=
-   //    AnyType | Sequence | Property
-   // sequence_Actual_Parameter ::=
-   //    AnyType | Sequence
-
-   BEGIN("PSL Actual parameter");
-
-   // "Sequence" includes "Any_Type" parsing (HDL or PSL expression)
-   // "Property" includes "Sequence" parsing
-   psl_add_operand(node, (seq) ? p_psl_sequence() : p_psl_property());
-}
-
-static void p_psl_actual_parameter_list(psl_node_t node, bool seq)
-{
-
-   // sequence_Actual_Parameter { , sequence_Actual_Parameter }
-   // Actual_Parameter { , Actual_Parameter }
-
-   BEGIN("PSL Actual parameter list");
-
-   p_psl_actual_parameter(node, seq);
-
-   while (optional(tCOMMA))
-      p_psl_actual_parameter(node, seq);
 }
 
 static psl_node_t p_psl_clocked_sere(psl_node_t head)
@@ -13234,28 +13207,58 @@ static psl_node_t p_psl_repeated_sere(psl_node_t head)
    return p;
 }
 
-static psl_node_t p_sequence_instance(tree_t decl)
+static psl_node_t p_psl_true(void)
+{
+   type_t std_bool = std_type(NULL, STD_BOOLEAN);
+   tree_t true_ref = make_ref(type_enum_literal(std_bool, 1));
+
+   psl_node_t p = psl_new(P_HDL_EXPR);
+   psl_set_tree(p, true_ref);
+   psl_set_type(p, PSL_TYPE_BOOLEAN);
+   psl_set_loc(p, CURRENT_LOC);
+   return p;
+}
+
+static psl_node_t p_psl_instance(tree_t decl, bool allow_property)
 {
    // Name [ ( Actual_Parameter_List ) ]
 
-   EXTEND("PSL Sequence Instance");
+   EXTEND("PSL Instance");
 
-   psl_node_t s_decl = tree_psl(decl);
+   psl_node_t d = tree_psl(decl);
+   const psl_kind_t dkind = psl_kind(d);
 
-   if (psl_kind(s_decl) != P_SEQUENCE_DECL)
-      parse_error(CURRENT_LOC, "%s is not a PSL sequence",
-                  istr(tree_ident(decl)));
+   const bool is_seq = dkind == P_SEQUENCE_DECL;
+   const bool is_prop = dkind == P_PROPERTY_DECL;
 
-   psl_node_t p = psl_new(P_SEQUENCE_INST);
-   psl_set_ref(p, s_decl);
+   bool valid = is_seq || (is_prop && allow_property);
+   if (!valid)
+      parse_error(CURRENT_LOC, "%s is not a PSL %s", istr(tree_ident(decl)),
+                  allow_property ? "sequence or property" : "sequence");
+
+   psl_node_t p = psl_new(is_prop ? P_PROPERTY_INST : P_SEQUENCE_INST);
+   if (valid)
+      psl_set_ref(p, d);
 
    if (optional(tLPAREN)) {
-      p_psl_actual_parameter_list(p, true);
+      int pos = 0;
+      do {
+         bool as_prop = !valid && is_prop;
+         if (valid && pos < psl_ports(d))
+            as_prop = psl_param_type(psl_port(d, pos)) == PSL_TYPE_PROPERTY;
+         psl_add_operand(p, as_prop ? p_psl_property() : p_psl_sequence());
+         pos++;
+      } while (optional(tCOMMA));
       consume(tRPAREN);
    }
 
    psl_set_loc(p, CURRENT_LOC);
-   return p;
+
+   if (!valid)
+      return p_psl_true();
+
+   psl_node_t expanded = psl_instantiate(p, nametab);
+   return expanded ?: p_psl_true();
 }
 
 static psl_node_t p_psl_sequence(void)
@@ -13277,7 +13280,7 @@ static psl_node_t p_psl_sequence(void)
          if (tree_kind(name) == T_REF && tree_has_ref(name)) {
             tree_t decl = tree_ref(name);
             if (tree_kind(decl) == T_PSL_DECL)
-               head = p_sequence_instance(decl);
+               head = p_psl_instance(decl, false);
          }
 
          if (head == NULL)
@@ -13742,8 +13745,15 @@ static psl_node_t p_psl_fl_primary(void)
                         "simulation");
             p = p_psl_fl_property_prec(PSL_PREC_SUFFIX + 1);
          }
-         else
-            p = p_hdl_expression(NULL, PSL_TYPE_BOOLEAN);
+         else {
+            tree_t name = p_name(N_PSL);
+
+            if (tree_kind(name) == T_REF && tree_has_ref(name)
+                && tree_kind(tree_ref(name)) == T_PSL_DECL)
+               p = p_psl_instance(tree_ref(name), true);
+            else
+               p = p_hdl_expression(name, PSL_TYPE_BOOLEAN);
+         }
       }
       break;
 

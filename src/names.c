@@ -6159,17 +6159,17 @@ static type_t solve_psl_value_set(nametab_t *tab, psl_node_t vs)
          psl_node_t right = psl_right(item);
          psl_set_tree(right, solve_types(tab, psl_tree(right), type));
 
-         type = tree_type(psl_tree(left));
+         type = get_type_or_null(psl_tree(left));
       }
       else {
          tree_t t = solve_types(tab, psl_tree(item), type);
          psl_set_tree(item, t);
 
-         type = tree_type(t);
+         type = get_type_or_null(t);
       }
    }
 
-   return type;
+   return type ?: type_new(T_NONE);
 }
 
 static tree_t solve_psl_fcall(nametab_t *tab, tree_t t)

@@ -13,12 +13,12 @@ entity psl51_sub is
     property p_mono is always (n < 1000);
 begin
     e1: assert p_mono report "e1 failed";
-    e2: cover s_step(2) report "entity cover hit";       -- 25 ns
+    e2: cover s_step(2) report "entity cover hit";       -- 35 ns
 end entity;
 
 architecture test of psl51_sub is
 begin
-    a1: cover s_step(6) report "architecture cover hit"; -- 65 ns
+    a1: cover s_step(6) report "architecture cover hit"; -- 75 ns
 end architecture;
 
 -------------------------------------------------------------------------------

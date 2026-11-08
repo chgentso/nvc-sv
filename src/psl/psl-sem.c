@@ -294,16 +294,6 @@ static void psl_check_range(psl_node_t p, nametab_t *tab)
                            low_i, high_i);
 }
 
-static void psl_check_property_inst(psl_node_t p)
-{
-
-}
-
-static void psl_check_sequence_inst(psl_node_t p)
-{
-
-}
-
 static void psl_check_sere(psl_node_t p, nametab_t *tab)
 {
    const int nops = psl_operands(p);
@@ -520,7 +510,10 @@ static void psl_check_value_item(psl_node_t p, nametab_t *tab)
    tree_t value = solve_types(tab, psl_tree(p), NULL);
    psl_set_tree(p, value);
 
-   if (type_is_none(tree_type(value)) || !sem_check(value, tab))
+   type_t type = get_type_or_null(value);
+   if (type != NULL && type_is_none(type))
+      return;
+   else if (!sem_check(value, tab))
       return;
 
    psl_check_static(value);
@@ -638,12 +631,6 @@ void psl_check(psl_node_t p, nametab_t *tab)
    case P_HDL_EXPR:
       psl_check_hdl_expr(p, tab);
       break;
-   case P_PROPERTY_INST:
-      psl_check_property_inst(p);
-      break;
-   case P_SEQUENCE_INST:
-      psl_check_sequence_inst(p);
-      break;
    case P_NEVER:
       psl_check_never(p, tab);
       break;
@@ -712,4 +699,100 @@ void psl_check(psl_node_t p, nametab_t *tab)
    default:
       fatal_trace("cannot check PSL kind %s", psl_kind_str(psl_kind(p)));
    }
+}
+
+static bool psl_check_actual(psl_node_t formal_decl, int pos, psl_node_t actual,
+                             nametab_t *tab)
+{
+   tree_t formal = psl_port(formal_decl, pos);
+   const psl_type_t ftype = psl_param_type(formal);
+
+   switch (ftype) {
+   case PSL_TYPE_SEQUENCE:
+   case PSL_TYPE_PROPERTY:
+      psl_check(actual, tab);
+      return true;
+   default:
+      break;
+   }
+
+   if (psl_kind(actual) != P_HDL_EXPR) {
+      error_at(psl_loc(actual), "actual for formal parameter %s must be an "
+               "expression", istr(tree_ident(formal)));
+      return false;
+   }
+
+   const int nerrors = error_count();
+
+   switch (ftype) {
+   case PSL_TYPE_BOOLEAN:
+   case PSL_TYPE_NUMERIC:
+   case PSL_TYPE_BIT:
+      psl_set_type(actual, ftype);
+      psl_check(actual, tab);
+      break;
+
+   default:
+      {
+         type_t type = tree_type(formal);
+         tree_t value = solve_types(tab, psl_tree(actual), type);
+         psl_set_tree(actual, value);
+
+         type_t vtype = get_type_or_null(value);
+         if (vtype != NULL && type_is_none(vtype))
+            return false;
+         else if (!sem_check(value, tab))
+            return false;
+
+         if (!type_eq(vtype, type))
+            error_at(tree_loc(value), "type of actual %pT does not match "
+                     "formal %s type %pT", vtype, istr(tree_ident(formal)),
+                     type);
+      }
+      break;
+   }
+
+   if (error_count() == nerrors && tree_class(formal) == C_CONSTANT)
+      psl_check_static(psl_tree(actual));
+
+   return error_count() == nerrors;
+}
+
+psl_node_t psl_instantiate(psl_node_t inst, nametab_t *tab)
+{
+   psl_node_t decl = psl_ref(inst);
+
+   const char *what =
+      psl_kind(decl) == P_PROPERTY_DECL ? "property" : "sequence";
+
+   if (!psl_has_value(decl)) {
+      error_at(psl_loc(inst), "%s %s cannot be instantiated recursively",
+               what, istr(psl_ident(decl)));
+      return NULL;
+   }
+
+   const int nformals = psl_ports(decl);
+   const int nactuals = psl_operands(inst);
+
+   bool ok = true;
+   for (int i = 0; i < nformals; i++) {
+      if (i < nactuals)
+         ok &= psl_check_actual(decl, i, psl_operand(inst, i), tab);
+      else {
+         error_at(psl_loc(inst), "missing actual for formal parameter %s",
+                  istr(tree_ident(psl_port(decl, i))));
+         ok = false;
+      }
+   }
+
+   if (nactuals > nformals) {
+      error_at(psl_loc(inst), "too many actual "
+               "parameters for %s %s", what, istr(psl_ident(decl)));
+      ok = false;
+   }
+
+   if (!ok)
+      return NULL;
+
+   return psl_expand(decl, inst);
 }

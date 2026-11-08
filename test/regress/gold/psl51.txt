@@ -1,2 +1,2 @@
-25ns+0: entity cover hit
-65ns+0: architecture cover hit
+35ns+0: entity cover hit
+75ns+0: architecture cover hit

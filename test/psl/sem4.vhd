@@ -1,7 +1,7 @@
-entity sem3 is
+entity sem4 is
 end entity;
 
-architecture test of sem3 is
+architecture test of sem4 is
     signal x, y, clk : bit;
     signal i : integer;
     signal b : boolean;

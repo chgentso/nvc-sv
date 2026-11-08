@@ -206,7 +206,7 @@ START_TEST(test_parse4)
    psl_node_t p3 = tree_psl(tree_stmt(a, 0));
    psl_node_t p3_v = psl_value(psl_value(p3));
    fail_unless(psl_kind(p3) == P_COVER);
-   fail_unless(psl_kind(p3_v) == P_SEQUENCE_INST);
+   fail_unless(psl_kind(p3_v) == P_SERE);
 
    psl_node_t p6 = tree_psl(tree_stmt(a, 3));
    psl_node_t p6_v = psl_value(psl_value(p6));
@@ -537,6 +537,27 @@ START_TEST(test_names1)
 }
 END_TEST
 
+START_TEST(test_names2)
+{
+   set_standard(STD_08);
+
+   input_from_file(TESTDIR "/psl/names2.vhd");
+
+   const error_t expect[] = {
+      { 10, "invalid use of entity NAMES2" },
+      { 11, "invalid use of entity NAMES2" },
+      { 12, "invalid use of entity NAMES2" },
+      { 13, "invalid use of entity NAMES2" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   parse_and_check(T_ENTITY, T_ARCH);
+
+   check_expected_errors();
+}
+END_TEST
+
 Suite *get_psl_tests(void)
 {
    Suite *s = suite_create("psl");
@@ -557,6 +578,7 @@ Suite *get_psl_tests(void)
    tcase_add_test(tc_core, test_sem3);
    tcase_add_test(tc_core, test_sem4);
    tcase_add_test(tc_core, test_sem5);
+   tcase_add_test(tc_core, test_names2);
    suite_add_tcase(s, tc_core);
 
    return s;

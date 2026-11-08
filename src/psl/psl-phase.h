@@ -25,6 +25,10 @@ typedef int32_t vcode_reg_t;
 // Check PSL statements for errors.
 void psl_check(psl_node_t p, nametab_t *tab);
 
+// Check the actual parameters of a sequence or property instance and
+// return the declaration expanded with them, or NULL if there is an error.
+psl_node_t psl_instantiate(psl_node_t inst, nametab_t *tab);
+
 // Print PSL expression for debugging.
 void psl_dump(psl_node_t p);
 

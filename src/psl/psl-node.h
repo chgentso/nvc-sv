@@ -198,6 +198,13 @@ typedef void (*psl_visit_fn_t)(psl_node_t p, void *context);
 unsigned psl_visit_only(psl_node_t p, psl_visit_fn_t fn, void *context,
                         psl_kind_t kind);
 
+psl_type_t psl_param_type(tree_t param);
+void psl_set_param_type(tree_t param, psl_type_t type);
+
+bool psl_has_value(psl_node_t p);
+
+psl_node_t psl_expand(psl_node_t decl, psl_node_t inst);
+
 object_t *psl_to_object(psl_node_t p);
 psl_node_t psl_from_object(object_t *obj);
 
