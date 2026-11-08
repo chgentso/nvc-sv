@@ -19,6 +19,7 @@
 - Fixed lexing of the PSL `until!_` operator in PSL comments.
 - Fixed PSL `before` and `before!` properties which did not report a
   failure when the right hand operand held first.
+- Fixed a crash when a PSL clock expression is a call to `rose` or `fell`.
 - Added a `pkg-config` configuration file to aid locating the VHPI
   headers (from @gsmecher).
 - Several other minor bugs were resolved (#1663, #1672, #1668, #1670,

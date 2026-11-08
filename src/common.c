@@ -27,6 +27,7 @@
 #include "printf.h"
 #include "scan.h"
 #include "thread.h"
+#include "psl/psl-node.h"
 #include "type.h"
 #include "vlog/vlog-phase.h"
 #include "sdf/sdf-phase.h"
@@ -2629,6 +2630,18 @@ void build_wait(tree_t expr, build_wait_fn_t fn, void *ctx)
       else {
          build_wait(tree_left(expr), fn, ctx);
          build_wait(tree_right(expr), fn, ctx);
+      }
+      break;
+
+   case T_PSL_FCALL:
+      {
+         psl_node_t p = tree_psl(expr);
+         const int nops = psl_operands(p);
+         for (int i = 0; i < nops; i++) {
+            psl_node_t op = psl_operand(p, i);
+            if (psl_kind(op) == P_HDL_EXPR)
+               build_wait(psl_tree(op), fn, ctx);
+         }
       }
       break;
 

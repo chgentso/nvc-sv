@@ -640,6 +640,36 @@ static void psl_lower_property(lower_unit_t *lu, object_t *obj)
    psl_fsm_free(fsm);
 }
 
+static vcode_reg_t psl_lower_clock_edge(lower_unit_t *lu, psl_node_t p)
+{
+   // The clock function is evaluated whenever its signals have an event
+   // so a rising or falling edge is an event on the signal with the
+   // appropriate new value
+
+   const psl_builtin_kind_t kind = psl_subkind(p);
+   if (kind != PSL_BUILTIN_ROSE && kind != PSL_BUILTIN_FELL)
+      fatal_at(psl_loc(p), "sorry, this built-in function cannot be used "
+               "as a clock expression");
+
+   tree_t expr = psl_tree(psl_operand(p, 0));
+   type_t type = tree_type(expr);
+
+   vcode_reg_t nets_reg = lower_lvalue(lu, expr);
+   vcode_reg_t count_reg = emit_const(vtype_offset(), 1);
+   vcode_reg_t event_reg = emit_event_flag(nets_reg, count_reg);
+
+   const bool is_bit = type_eq(type, std_type(NULL, STD_BIT));
+   const int64_t one = is_bit ? 1 : 3;
+   const int64_t zero = is_bit ? 0 : 2;
+
+   vcode_reg_t value_reg = lower_rvalue(lu, expr);
+   vcode_reg_t level_reg = emit_const(vcode_reg_type(value_reg),
+                                      kind == PSL_BUILTIN_ROSE ? one : zero);
+   vcode_reg_t test_reg = emit_cmp(VCODE_CMP_EQ, value_reg, level_reg);
+
+   return emit_and(event_reg, test_reg);
+}
+
 static void psl_lower_clock_func(lower_unit_t *lu, object_t *obj)
 {
    psl_node_t p = psl_from_object(obj);
@@ -653,7 +683,14 @@ static void psl_lower_clock_func(lower_unit_t *lu, object_t *obj)
 
    vcode_set_result(vtype_bool());
 
-   vcode_reg_t clk_reg = lower_rvalue(lu, psl_tree(p));
+   tree_t expr = psl_tree(p);
+
+   vcode_reg_t clk_reg;
+   if (tree_kind(expr) == T_PSL_FCALL)
+      clk_reg = psl_lower_clock_edge(lu, tree_psl(expr));
+   else
+      clk_reg = lower_rvalue(lu, expr);
+
    emit_return(clk_reg);
 }
 
