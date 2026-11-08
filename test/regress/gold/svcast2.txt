@@ -1,0 +1,3 @@
+before
+failed: the class A handle does not refer to an object of class B
+after

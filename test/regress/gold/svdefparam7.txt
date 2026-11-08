@@ -1,0 +1,4 @@
+parameter P of instance u is set by more than one defparam
+also set here
+this value is used
+PASSED
