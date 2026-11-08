@@ -1,0 +1,4 @@
+A1 pass t=0 x=0
+A1 pass t=5 x=1
+A1 pass t=15 x=2
+PASSED

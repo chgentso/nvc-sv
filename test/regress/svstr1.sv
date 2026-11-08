@@ -1,0 +1,111 @@
+// Built-in methods of the string type
+module svstr1;
+   `define CHECK(x, y) if ((x) != (y)) begin \
+      $display("FAILED %0d: %0d", y, (x)); $finish; end
+   `define CHECKS(x, y) if ((x) != (y)) begin \
+      $display("FAILED %s: %s", y, (x)); $finish; end
+
+   string s, t, u, v;
+   int i;
+   real r;
+
+   initial begin
+      s = "hello"; t = "help";
+      `CHECK(s.compare(t), -4);
+      `CHECK(t.compare(s), 4);
+      `CHECK(s.compare(s), 0);
+      `CHECK(s.compare("a"), 7);
+      u = "abc"; v = "abd";
+      `CHECK(u.compare(v), -1);
+      v = "abcde";
+      `CHECK(u.compare(v), -2);
+      u = "ABD"; v = "abc";
+      `CHECK(s.icompare("HELLO"), 0);
+      `CHECK(u.icompare(v), 1);
+      u = "A";
+      `CHECK(u.compare("a"), -32);
+      `CHECK(u.icompare("b"), -1);
+      `CHECK(s.len(), 5);
+      u = "";
+      `CHECK(u.len(), 0);
+      `CHECK(s.getc(0), 104);
+      `CHECK(s.getc(5), 0);
+      `CHECK(s.getc(-1), 0);
+      s.putc(0, "J");
+      `CHECKS(s, "Jello");
+      s.putc(10, "X");
+      `CHECKS(s, "Jello");
+      s.putc(1, 0);
+      `CHECKS(s, "Jello");
+      u = "ABc";
+      `CHECKS(s.toupper(), "JELLO");
+      `CHECKS(u.tolower(), "abc");
+      t = "0123456789";
+      `CHECKS(t.substr(2, 4), "234");
+      `CHECKS(t.substr(4, 2), "");
+      `CHECKS(t.substr(0, 10), "");
+      `CHECKS(t.substr(-1, 3), "");
+      `CHECKS(t.substr(9, 9), "9");
+      u = "123"; v = "-45";
+      `CHECK(u.atoi(), 123);
+      `CHECK(v.atoi(), -45);
+      u = "12ab"; v = "1_2";
+      `CHECK(u.atoi(), 12);
+      `CHECK(v.atoi(), 12);
+      u = "abc"; v = " 12";
+      `CHECK(u.atoi(), 0);
+      `CHECK(v.atoi(), 0);
+      u = "ff"; v = "-ff";
+      `CHECK(u.atohex(), 255);
+      `CHECK(v.atohex(), -255);
+      u = "FfG";
+      `CHECK(u.atohex(), 255);
+      u = "17"; v = "789";
+      `CHECK(u.atooct(), 15);
+      `CHECK(v.atooct(), 7);
+      u = "101"; v = "1021";
+      `CHECK(u.atobin(), 5);
+      `CHECK(v.atobin(), 2);
+      u = "3.5"; v = "-2e3";
+      `CHECK(u.atoreal(), 3.5);
+      `CHECK(v.atoreal(), -2000.0);
+      u = "1.5x"; v = "abc";
+      `CHECK(u.atoreal(), 1.5);
+      `CHECK(v.atoreal(), 0.0);
+      s.itoa(42);
+      `CHECKS(s, "42");
+      s.itoa(-42);
+      `CHECKS(s, "-42");
+      s.hextoa(255);
+      `CHECKS(s, "ff");
+      s.hextoa(-1);
+      `CHECKS(s, "ffffffff");
+      s.octtoa(8);
+      `CHECKS(s, "10");
+      s.bintoa(5);
+      `CHECKS(s, "101");
+      s.bintoa(-1);
+      `CHECKS(s, "11111111111111111111111111111111");
+      s.realtoa(3.25);
+      `CHECKS(s, "3.25");
+      s.realtoa(1.0 / 3);
+      `CHECKS(s, "0.333333");
+      s.realtoa(1e10);
+      `CHECKS(s, "1e+10");
+      s.hextoa(64'h123456789abcdef);
+      `CHECKS(s, "89abcdef");
+      s.hextoa(8'hab);
+      `CHECKS(s, "ab");
+      s = "";
+      `CHECK(s.len(), 0);
+      `CHECKS(s.toupper(), "");
+      i = s.atoi();
+      `CHECK(i, 0);
+      u = "2.5";
+      r = u.atoreal() + 1;
+      `CHECK(r, 3.5);
+      u = "7";
+      `CHECK(u.atoi() + 1, 8);
+      $display("PASSED");
+   end
+endmodule

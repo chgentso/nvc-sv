@@ -1,0 +1,2 @@
+NaN converted to an integral value gives an unknown value
+PASSED

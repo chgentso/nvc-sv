@@ -1,0 +1,9 @@
+unique if violation: more than one condition matches
+unique0 if violation: more than one condition matches
+unique if violation: no condition matches and there is no else
+priority if violation: no condition matches and there is no else
+unique case violation: more than one case item matches
+unique0 case violation: more than one case item matches
+unique case violation: no case item matches and there is no default
+priority case violation: no case item matches and there is no default
+PASSED
