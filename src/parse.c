@@ -5148,6 +5148,19 @@ static type_t p_interface_type_indication(tree_t parent)
       return p_subtype_indication();
 }
 
+static void parse_anonymous_default(type_t type, tree_t *init)
+{
+   // The default expression is parsed but not allowed for an anonymous type
+
+   if (type_kind(type) == T_GENERIC && !type_has_ident(type)) {
+      (void)p_expression();
+      parse_error(CURRENT_LOC, "interface declaration with an anonymous type "
+                  "cannot have a default expression");
+   }
+   else
+      *init = solve_types(nametab, p_expression(), type);
+}
+
 static void p_interface_constant_declaration(tree_t parent, tree_kind_t kind,
                                              bool ordered)
 {
@@ -5193,7 +5206,7 @@ static void p_interface_constant_declaration(tree_t parent, tree_kind_t kind,
 
    tree_t init = NULL;
    if (optional(tWALRUS))
-      init = solve_types(nametab, p_expression(), type);
+      parse_anonymous_default(type, &init);
 
    for (ident_list_t *it = ids; it != NULL; it = it->next) {
       tree_t d = tree_new(kind);
@@ -5302,11 +5315,17 @@ static void p_interface_signal_declaration(tree_t parent, tree_kind_t kind,
 
       type = p_interface_type_indication(parent);
 
-      if (optional(tBUS))
+      if (optional(tBUS)) {
          flags |= TREE_F_BUS;
 
+         if (type_kind(type) == T_GENERIC && !type_has_ident(type))
+            parse_error(CURRENT_LOC, "interface signal declaration with an "
+                        "anonymous type cannot include the reserved word "
+                        "BUS");
+      }
+
       if (optional(tWALRUS))
-         init = solve_types(nametab, p_expression(), type);
+         parse_anonymous_default(type, &init);
    }
 
    for (ident_list_t *it = ids; it != NULL; it = it->next) {
@@ -5352,7 +5371,7 @@ static void p_interface_variable_declaration(tree_t parent, tree_kind_t kind)
 
    tree_t init = NULL;
    if (optional(tWALRUS))
-      init = solve_types(nametab, p_expression(), type);
+      parse_anonymous_default(type, &init);
 
    for (ident_list_t *it = ids; it != NULL; it = it->next) {
       tree_t d = tree_new(kind);
@@ -6741,6 +6760,11 @@ static void p_protected_type_declarative_item(tree_t decl)
       p_alias_declaration(decl);
       break;
 
+   case tGENERIC:
+      if (standard() >= STD_19)
+         fatal_at(CURRENT_LOC, "sorry, protected types with a generic "
+                  "clause are not yet supported");
+      // Fall-through
    default:
       expect(tATTRIBUTE, tUSE, STD(08, tFUNCTION), tPROCEDURE, tIMPURE, tPURE,
              STD(19, tPRIVATE), tALIAS);
@@ -6838,6 +6862,11 @@ static type_t p_type_definition(tree_t tdecl)
    case tARRAY:
       return p_composite_type_definition(id);
 
+   case tNEW:
+      if (standard() >= STD_19)
+         fatal_at(CURRENT_LOC, "sorry, protected type instantiation is not "
+                  "yet supported");
+      // Fall-through
    default:
       expect(tRANGE, tACCESS, tFILE, tRECORD);
       return type_new(T_NONE);
