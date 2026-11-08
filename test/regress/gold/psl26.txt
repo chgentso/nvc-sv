@@ -1,0 +1,5 @@
+25ns+1: stable2
+45ns+1: rose2
+65ns+1: stable2
+85ns+1: fell2
+105ns+1: rose2
