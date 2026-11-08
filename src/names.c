@@ -6059,6 +6059,20 @@ tree_t solve_condition(nametab_t *tab, tree_t expr)
    return expr;
 }
 
+tree_t solve_psl_bit(nametab_t *tab, tree_t expr)
+{
+   type_set_t ts = {};
+   type_set_push(tab, &ts);
+
+   type_set_add(tab, std_type(NULL, STD_BIT), NULL);
+   type_set_add(tab, ieee_type(IEEE_STD_ULOGIC), NULL);
+
+   tree_t result = _solve_types(tab, expr);
+
+   type_set_pop(tab, &ts);
+   return result;
+}
+
 tree_t solve_psl_condition(nametab_t *tab, tree_t expr)
 {
    if (standard() >= STD_08)

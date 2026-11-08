@@ -222,7 +222,7 @@ static void psl_check_bit(psl_node_t p, nametab_t *tab)
 {
    type_t std_bit = std_type(NULL, STD_BIT);
    type_t std_ulogic = ieee_type(IEEE_STD_ULOGIC);
-   tree_t value = solve_types(tab, psl_tree(p), std_ulogic);
+   tree_t value = solve_psl_bit(tab, psl_tree(p));
    psl_set_tree(p, value);
 
    type_t type = get_type_or_null(value);

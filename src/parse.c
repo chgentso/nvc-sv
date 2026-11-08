@@ -11813,14 +11813,14 @@ static psl_node_t p_hdl_expression(tree_t head, psl_type_t type)
    return p;
 }
 
-static psl_node_t p_psl_boolean(tree_t head)
+static psl_node_t p_hdl_or_psl_expression(tree_t head, psl_type_t type)
 {
    // HDL_Expression | PSL_Expression | Built_In_Function_Call
    //    | Union_Expression
 
-   BEGIN_WITH_HEAD("PSL Boolean", head);
+   BEGIN_WITH_HEAD("PSL expression", head);
 
-   psl_node_t p = p_hdl_expression(head, PSL_TYPE_BOOLEAN);
+   psl_node_t p = p_hdl_expression(head, type);
 
    const token_t infix = peek();
    switch (infix) {
@@ -11829,7 +11829,7 @@ static psl_node_t p_psl_boolean(tree_t head)
       {
          consume(infix);
 
-         psl_node_t right = p_psl_boolean(NULL);
+         psl_node_t right = p_hdl_or_psl_expression(NULL, type);
 
          tree_t fcall = tree_new(T_FCALL);
          tree_set_ident(fcall, well_known(infix == tOR ? W_OP_OR : W_OP_AND));
@@ -11845,6 +11845,11 @@ static psl_node_t p_psl_boolean(tree_t head)
    default:
       return p;
    }
+}
+
+static psl_node_t p_psl_boolean(tree_t head)
+{
+   return p_hdl_or_psl_expression(head, PSL_TYPE_BOOLEAN);
 }
 
 static psl_node_t p_psl_clock_expression(void)
@@ -11925,7 +11930,7 @@ static psl_node_t p_psl_builtin_function_call(void)
    switch (kind) {
    case PSL_BUILTIN_PREV:
       {
-         psl_node_t p1 = p_hdl_expression(NULL, PSL_TYPE_ANY);
+         psl_node_t p1 = p_hdl_or_psl_expression(NULL, PSL_TYPE_ANY);
          psl_add_operand(p, p1);
 
          if (optional(tCOMMA)) {
@@ -11940,7 +11945,7 @@ static psl_node_t p_psl_builtin_function_call(void)
 
    case PSL_BUILTIN_NEXT:
       {
-         psl_node_t p1 = p_hdl_expression(NULL, PSL_TYPE_ANY);
+         psl_node_t p1 = p_hdl_or_psl_expression(NULL, PSL_TYPE_ANY);
          psl_add_operand(p, p1);
       }
       break;
@@ -11949,7 +11954,7 @@ static psl_node_t p_psl_builtin_function_call(void)
    case PSL_BUILTIN_ROSE:
    case PSL_BUILTIN_STABLE:
       {
-         psl_node_t p1 = p_hdl_expression(NULL, PSL_TYPE_BIT);
+         psl_node_t p1 = p_hdl_or_psl_expression(NULL, PSL_TYPE_BIT);
          psl_add_operand(p, p1);
 
          if (optional(tCOMMA))
