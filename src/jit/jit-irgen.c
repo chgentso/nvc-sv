@@ -916,9 +916,12 @@ static jit_value_t irgen_sign_extend(jit_irgen_t *g, jit_value_t value,
    assert(size >= 0 && size <= 64);
 
    if (size < 64) {
+      // The value may be used again so must not be changed in place
       jit_value_t shift = jit_value_from_int64(64 - size);
-      j_shl(g, value, value, shift);
-      j_asr(g, value, value, shift);
+      jit_value_t result = irgen_alloc_temp(g);
+      j_shl(g, result, value, shift);
+      j_asr(g, result, result, shift);
+      return result;
    }
 
    return value;
@@ -1865,7 +1868,8 @@ static void irgen_op_load(jit_irgen_t *g, mir_value_t n)
 
    case MIR_TYPE_UARRAY:
       {
-         const int slots = mir_get_slots(g->mu, mir_get_elem(g->mu, type));
+         const int slots = (mir_get_class(g->mu, mir_get_elem(g->mu, type)) == MIR_TYPE_SIGNAL
+                               ? 2 : 1);
          for (int i = 0; i < slots; i++) {
             jit_value_t slot = irgen_get_slot(g, n, i);
             j_load(g, JIT_SZ_PTR, slot, addr);
@@ -1947,7 +1951,8 @@ static void irgen_op_store(jit_irgen_t *g, mir_value_t n)
 
    case MIR_TYPE_UARRAY:
       {
-         const int slots = mir_get_slots(g->mu, mir_get_elem(g->mu, type));
+         const int slots = (mir_get_class(g->mu, mir_get_elem(g->mu, type)) == MIR_TYPE_SIGNAL
+                               ? 2 : 1);
          for (int i = 0; i < slots; i++) {
             j_store(g, JIT_SZ_PTR, irgen_get_slot(g, arg1, i), addr);
             addr = jit_addr_from_value(addr, sizeof(void *));
@@ -2053,7 +2058,7 @@ static void irgen_op_uarray_right(jit_irgen_t *g, mir_value_t n)
    mir_type_t elem = mir_get_elem(g->mu, mir_get_type(g->mu, arg0));
 
    const int dim = irgen_get_const(g, n, 1);
-   const int slots = mir_get_slots(g->mu, elem);
+   const int slots = mir_get_class(g->mu, elem) == MIR_TYPE_SIGNAL ? 2 : 1;
 
    jit_value_t left   = irgen_get_slot(g, arg0, slots + dim*2);
    jit_value_t length = irgen_get_slot(g, arg0, slots + 1 + dim*2);
@@ -2073,7 +2078,7 @@ static void irgen_op_uarray_left(jit_irgen_t *g, mir_value_t n)
    mir_type_t elem = mir_get_elem(g->mu, mir_get_type(g->mu, arg0));
 
    const int dim = irgen_get_const(g, n, 1);
-   const int slots = mir_get_slots(g->mu, elem);
+   const int slots = mir_get_class(g->mu, elem) == MIR_TYPE_SIGNAL ? 2 : 1;
 
    j_mov(g, g->map[n.id], irgen_get_slot(g, arg0, slots + dim*2));
 }
@@ -2084,7 +2089,7 @@ static void irgen_op_uarray_dir(jit_irgen_t *g, mir_value_t n)
    mir_type_t elem = mir_get_elem(g->mu, mir_get_type(g->mu, arg0));
 
    const int dim = irgen_get_const(g, n, 1);
-   const int slots = mir_get_slots(g->mu, elem);
+   const int slots = mir_get_class(g->mu, elem) == MIR_TYPE_SIGNAL ? 2 : 1;
 
    jit_value_t length = irgen_get_slot(g, arg0, slots + 1 + dim*2);
    j_cmp(g, JIT_CC_LT, length, jit_value_from_int64(0));
@@ -2101,7 +2106,7 @@ static void irgen_op_uarray_len(jit_irgen_t *g, mir_value_t n)
    mir_type_t elem = mir_get_elem(g->mu, mir_get_type(g->mu, arg0));
 
    const int dim = irgen_get_const(g, n, 1);
-   const int slots = mir_get_slots(g->mu, elem);
+   const int slots = mir_get_class(g->mu, elem) == MIR_TYPE_SIGNAL ? 2 : 1;
 
    jit_value_t result = g->map[n.id];
    jit_value_t length = irgen_get_slot(g, arg0, slots + 1 + dim*2);
@@ -2115,7 +2120,7 @@ static void irgen_op_unwrap(jit_irgen_t *g, mir_value_t n)
 
    mir_type_t elem = mir_get_elem(g->mu, mir_get_type(g->mu, arg0));
 
-   const int slots = mir_get_slots(g->mu, elem);
+   const int slots = mir_get_class(g->mu, elem) == MIR_TYPE_SIGNAL ? 2 : 1;
    for (int i = 0; i < slots; i++)
       j_mov(g, irgen_get_slot(g, n, i), irgen_get_slot(g, arg0, i));
 }
@@ -2281,6 +2286,16 @@ static void irgen_op_cast(jit_irgen_t *g, mir_value_t n)
       assert(mir_is(g->mu, arg, MIR_TYPE_REAL));
       j_mov(g, g->map[n.id], irgen_get_value(g, arg));
    }
+   else if (result_kind == MIR_TYPE_CONTEXT) {
+      // Class handle converted to a base class handle or the address held
+      // as the key of an associative array
+      assert(mir_is(g->mu, arg, MIR_TYPE_CONTEXT)
+             || mir_is(g->mu, arg, MIR_TYPE_OFFSET));
+      j_mov(g, g->map[n.id], irgen_get_value(g, arg));
+   }
+   else if (result_kind == MIR_TYPE_OFFSET
+            && mir_is(g->mu, arg, MIR_TYPE_CONTEXT))
+      j_mov(g, g->map[n.id], irgen_get_value(g, arg));
    else if (result_kind == MIR_TYPE_ACCESS) {
       // Casting away opaqueness
       assert(mir_is(g->mu, arg, MIR_TYPE_ACCESS));
@@ -2305,10 +2320,15 @@ static void irgen_op_cast(jit_irgen_t *g, mir_value_t n)
 
       bool arg_signed;
       int arg_size;
-      if (arg_class == MIR_TYPE_INT) {
+      if (arg_class == MIR_TYPE_INT || arg_class == MIR_TYPE_OFFSET) {
          const mir_repr_t repr = mir_get_repr(g->mu, arg_type);
          arg_signed = irgen_repr_signed(repr);
          arg_size = irgen_repr_bits(repr);
+      }
+      else if (arg_class == MIR_TYPE_REAL) {
+         // The bits of the double
+         arg_signed = false;
+         arg_size = 64;
       }
       else {
          arg_signed = mir_get_signed(g->mu, arg_type);
@@ -3154,6 +3174,8 @@ static void irgen_op_resolution_wrapper(jit_irgen_t *g, mir_value_t n)
    uint32_t flagbits = 0;
    if (mir_get_class(g->mu, type) == MIR_TYPE_POINTER)
       flagbits |= R_COMPOSITE;
+   else if (mir_get_class(g->mu, type) == MIR_TYPE_CARRAY)
+      flagbits |= R_BLOB;   // Resolves whole values of nlits elements
 
    jit_value_t flags = irgen_get_slot(g, n, 2);
    j_mov(g, flags, jit_value_from_int64(flagbits));
@@ -4104,7 +4126,12 @@ static void irgen_op_unpack(jit_irgen_t *g, mir_value_t n)
    jit_value_t strength = jit_value_from_int64(irgen_get_enum(g, n, 1));
 
    jit_value_t abits = irgen_get_value(g, arg), bbits;
-   if (mir_is(g->mu, arg, MIR_TYPE_VEC4))
+   if (mir_is(g->mu, arg, MIR_TYPE_REAL) && mir_is_scalar(g->mu, n)) {
+      // The value of a real net is the bits of the double
+      j_mov(g, g->map[n.id], abits);
+      return;
+   }
+   else if (mir_is(g->mu, arg, MIR_TYPE_VEC4))
       bbits = irgen_get_slot(g, arg, 1);
    else
       bbits = jit_value_from_int64(0);
@@ -4221,6 +4248,12 @@ static void irgen_binary_body(jit_irgen_t *g, mir_value_t n)
 
       if (is_vec4)
          j_recv(g, irgen_get_slot(g, n, 1), 1);
+      else if (size <= 64 && (op == MIR_VEC_DIV || op == MIR_VEC_MOD)) {
+         // Division by zero is unknown which is zero in a two-state result
+         jit_value_t slot = irgen_get_slot(g, n, 0);
+         j_cmp(g, JIT_CC_EQ, aright, jit_value_from_int64(0));
+         j_csel(g, slot, jit_value_from_int64(0), slot);
+      }
 
       return;
    }
@@ -4387,8 +4420,9 @@ static void irgen_binary_body(jit_irgen_t *g, mir_value_t n)
       {
          irgen_label_t *l_skip = irgen_alloc_label(g);
          jit_value_t atmp = irgen_alloc_temp(g), btmp = irgen_alloc_temp(g);
-         j_mov(g, atmp, mask);
-         j_mov(g, btmp, mask);
+         jit_value_t unknown = is_vec4 ? mask : jit_value_from_int64(0);
+         j_mov(g, atmp, unknown);
+         j_mov(g, btmp, unknown);
          j_cmp(g, JIT_CC_EQ, aright, jit_value_from_int64(0));
          j_jump(g, JIT_CC_T, l_skip);
 
@@ -4729,12 +4763,32 @@ static void irgen_op_test(jit_irgen_t *g, mir_value_t n)
 
    jit_value_t abits = irgen_get_value(g, arg);
    jit_value_t zero = jit_value_from_int64(0);
-   j_cmp(g, JIT_CC_NE, abits, zero);
 
-   if (mir_is(g->mu, arg, MIR_TYPE_VEC4)) {
-      jit_value_t bbits = irgen_get_slot(g, arg, 1);
-      j_ccmp(g, JIT_CC_EQ, bbits, zero);
+   const int size = mir_get_size(g->mu, mir_get_type(g->mu, arg));
+   if (size > 64 && mir_is(g->mu, arg, MIR_TYPE_VEC4)) {
+      // Reduction or of the bits which is one if any is known to be one
+      j_send(g, 0, abits);
+      j_send(g, 1, irgen_get_slot(g, arg, 1));
+      j_send(g, 2, zero);
+      j_send(g, 3, zero);
+      macro_vec4op(g, JIT_VEC_OR1, size);
+
+      jit_value_t ra = irgen_alloc_temp(g), rb = irgen_alloc_temp(g);
+      j_recv(g, ra, 0);
+      j_recv(g, rb, 1);
+      j_cmp(g, JIT_CC_NE, ra, zero);
+      j_ccmp(g, JIT_CC_EQ, rb, zero);
    }
+   else if (mir_is(g->mu, arg, MIR_TYPE_VEC4)) {
+      // True if any bit is known to be one
+      jit_value_t bbits = irgen_get_slot(g, arg, 1);
+      jit_value_t known = irgen_alloc_temp(g);
+      j_xor(g, known, bbits, jit_value_from_int64(-1));
+      j_and(g, known, known, abits);
+      j_cmp(g, JIT_CC_NE, known, zero);
+   }
+   else
+      j_cmp(g, JIT_CC_NE, abits, zero);
 
    j_cset(g, g->map[n.id]);
    g->flags = n;
@@ -5421,7 +5475,8 @@ static void irgen_context_struct(jit_irgen_t *g)
 
    if (kind == MIR_UNIT_PROTECTED || kind == MIR_UNIT_PACKAGE) {
       // Protected types must always be allocated on the global heap
-      // as the result may be stored in an access
+      // as the result may be stored in an access.  A package may be first
+      // used by a running process and it outlives that process.
       macro_galloc(g, g->statereg, jit_value_from_int64(sz));
    }
    else {

@@ -20,6 +20,7 @@
 #include "cov/cov-api.h"
 #include "diag.h"
 #include "ident.h"
+#include "jit/jit-dpi.h"
 #include "jit/jit.h"
 #include "lib.h"
 #include "lower.h"
@@ -301,6 +302,51 @@ static void werror_diag_cb(diag_t *d, void *ctx)
    diag_level(d, &level);
 }
 
+static bool parse_time_scale(const char **p, uint64_t *fs, unsigned *log10fs)
+{
+   char *end;
+   const unsigned long value = strtoul(*p, &end, 10);
+   if (end == *p || (value != 1 && value != 10 && value != 100))
+      return false;
+
+   static const struct { const char *name; unsigned log10; } units[] = {
+      { "fs", 0 }, { "ps", 3 }, { "ns", 6 }, { "us", 9 }, { "ms", 12 },
+      { "s", 15 },
+   };
+
+   for (int i = 0; i < ARRAY_LEN(units); i++) {
+      const size_t len = strlen(units[i].name);
+      if (strncmp(end, units[i].name, len) != 0 || isalpha((unsigned char)end[len]))
+         continue;
+
+      *log10fs = units[i].log10;
+      for (unsigned long v = value; v > 1; v /= 10)
+         (*log10fs)++;
+
+      *fs = 1;
+      for (unsigned j = 0; j < *log10fs; j++)
+         *fs *= 10;
+
+      *p = end + len;
+      return true;
+   }
+
+   return false;
+}
+
+static void set_default_timescale(const char *arg)
+{
+   const char *p = arg;
+   uint64_t unit_fs, prec_fs;
+   unsigned unit_log10, prec_log10;
+   if (!parse_time_scale(&p, &unit_fs, &unit_log10) || *p++ != '/'
+       || !parse_time_scale(&p, &prec_fs, &prec_log10) || *p != '\0'
+       || prec_log10 > unit_log10)
+      fatal("'%s' is not a valid timescale such as 1ns/1ps", arg);
+
+   vlog_set_default_timescale(unit_fs, prec_log10);
+}
+
 static int analyse(int argc, char **argv, cmd_state_t *state)
 {
    static struct option long_options[] = {
@@ -318,6 +364,7 @@ static int analyse(int argc, char **argv, cmd_state_t *state)
       { "preserve-case",   no_argument,       0, 'p' },
       { "keywords",        required_argument, 0, 'k' },
       { "relative",        required_argument, 0, 'r' },
+      { "timescale",       required_argument, 0, 'T' },
       { "warn",            required_argument, 0, 'W' },
       { 0, 0, 0, 0 }
    };
@@ -389,6 +436,9 @@ static int analyse(int argc, char **argv, cmd_state_t *state)
          break;
       case 'r':
          opt_set_str(OPT_RELATIVE_PATH, optarg);
+         break;
+      case 'T':
+         set_default_timescale(optarg);
          break;
       case 'W':
          werror = parse_warn_option(optarg);
@@ -939,6 +989,7 @@ static int run_cmd(int argc, char **argv, cmd_state_t *state)
       { "exit-severity", required_argument, 0, 'x' },
       { "dump-arrays",   optional_argument, 0, 'a' },
       { "load",          required_argument, 0, 'l' },
+      { "sv-lib",        required_argument, 0, 'Q' },
       { "vhpi-debug",    no_argument,       0, 'D' },
       { "vhpi-trace",    no_argument,       0, 'T' },
       { "gtkw",          optional_argument, 0, 'g' },
@@ -1021,6 +1072,9 @@ static int run_cmd(int argc, char **argv, cmd_state_t *state)
          break;
       case 'l':
          pli_plugins = optarg;
+         break;
+      case 'Q':
+         dpi_add_lib(optarg);
          break;
       case 'x':
          parse_exit_severity(optarg);
@@ -1117,16 +1171,20 @@ static int run_cmd(int argc, char **argv, cmd_state_t *state)
    if (state->jit == NULL)
       state->jit = get_jit(state);
 
-   if (state->model == NULL) {
-      state->model = model_new(state->jit, state->cover);
-      reheat(top, state->registry, state->mir, state->cover, state->model);
-   }
-
    if (state->vhpi == NULL)
       state->vhpi = vhpi_context_new();
 
    if (state->vpi == NULL)
       state->vpi = vpi_context_new();
+
+   if (nplusargs > 0)
+      vpi_set_plusargs(nplusargs, plusargs);
+
+   if (state->model == NULL) {
+      state->model = model_new(state->jit, state->cover);
+      vlog_set_fold_context(state->mir, state->jit);
+      reheat(top, state->registry, state->mir, state->cover, state->model);
+   }
 
    if (nplusargs > 0)
       vhpi_set_plusargs(state->vhpi, nplusargs, plusargs);
@@ -1141,6 +1199,8 @@ static int run_cmd(int argc, char **argv, cmd_state_t *state)
 
    if (pli_plugins != NULL)
       vhpi_load_plugins(pli_plugins);
+
+   dpi_load_libs();
 
    set_ctrl_c_handler(ctrl_c_handler, state->model);
 
@@ -1616,6 +1676,7 @@ static int do_cmd(int argc, char **argv, cmd_state_t *state)
 
    if (top != NULL && state->model == NULL) {
       state->model = model_new(state->jit, NULL);
+      vlog_set_fold_context(state->mir, state->jit);
       reheat(top, state->registry, state->mir, NULL, state->model);
    }
 
@@ -1707,6 +1768,7 @@ static int interact_cmd(int argc, char **argv, cmd_state_t *state)
 
    if (top != NULL && state->model == NULL) {
       state->model = model_new(state->jit, NULL);
+      vlog_set_fold_context(state->mir, state->jit);
       reheat(top, state->registry, state->mir, NULL, state->model);
    }
 
@@ -2245,7 +2307,7 @@ static void usage(void)
       struct {
          const char *args;
          const char *usage;
-      } options[16];
+      } options[20];
    } groups[] = {
       { "Commands",
         {
@@ -2280,6 +2342,7 @@ static void usage(void)
              "Enable or disable warnings from IEEE packages" },
            { "--ignore-time", "Skip source file timestamp check" },
            { "--load=PLUGIN", "Load VHPI plugin at startup" },
+           { "--sv-lib=LIB", "Load shared library with DPI-C functions" },
            { "-L PATH", "Add PATH to library search paths" },
            { "-M SIZE", "Limit design unit heap space to SIZE bytes" },
            { "--map=LIB:PATH", "Map library LIB to PATH" },
@@ -2314,6 +2377,8 @@ static void usage(void)
            { "--relaxed", "Disable certain pedantic rule checks" },
            { "--single-unit",
              "Treat all Verilog files as a single compilation unit" },
+           { "--timescale=UNIT/PREC",
+             "Default Verilog timescale for files without a directive" },
            { "-Werror", "Treat all analysis warnings as errors" },
         }
       },
@@ -2620,6 +2685,7 @@ int main(int argc, char **argv)
       { "force-init",    no_argument,       0, 'f' }, // DEPRECATED 1.7
       { "stderr",        required_argument, 0, 'E' },
       { "load",          required_argument, 0, 'l' },
+      { "sv-lib",        required_argument, 0, 'Q' },
       { "vhpi-debug",    no_argument,       0, 'D' },
       { "vhpi-trace",    no_argument,       0, 'T' },
       { "seed",          required_argument, 0, 'S' },
@@ -2684,6 +2750,9 @@ int main(int argc, char **argv)
       case 'l':
          state.plugins = optarg;
          break;
+      case 'Q':
+         dpi_add_lib(optarg);
+         break;
       case 'T':
          opt_set_str(OPT_PLI_TRACE, "1");
          opt_set_int(OPT_PLI_DEBUG, 1);
@@ -2696,6 +2765,7 @@ int main(int argc, char **argv)
          break;
       case 'S':
          opt_set_int(OPT_RANDOM_SEED, parse_int(optarg));
+         opt_set_int(OPT_RANDOM_SEED_GIVEN, 1);
          break;
       case '?':
          bad_option("global", argv);
@@ -2721,8 +2791,12 @@ int main(int argc, char **argv)
          nplusargs++, optind++;
    }
 
+   if (nplusargs > 0)
+      vpi_set_plusargs(nplusargs, plusargs);
+
    if (state.plugins != NULL) {
       state.vhpi = vhpi_context_new();
+      state.vpi = vpi_context_new();
 
       if (nplusargs > 0)
          vhpi_set_plusargs(state.vhpi, nplusargs, plusargs);

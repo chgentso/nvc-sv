@@ -77,6 +77,7 @@ typedef enum {
    OPT_DCE_VERBOSE,
    OPT_CFG_VERBOSE,
    OPT_RANDOM_SEED,
+   OPT_RANDOM_SEED_GIVEN,
    OPT_ELAB_STATS,
    OPT_RELATIVE_PATH,
    OPT_RA_VERBOSE,
@@ -96,6 +97,7 @@ void opt_set_int(opt_name_t name, int val);
 void opt_set_size(opt_name_t name, size_t val);
 void opt_set_str(opt_name_t name, const char *val);
 int opt_get_int(opt_name_t name);
+int opt_verilog_seed(void);
 size_t opt_get_size(opt_name_t name);
 const char *opt_get_str(opt_name_t name);
 bool opt_get_verbose(opt_name_t name, const char *filter);

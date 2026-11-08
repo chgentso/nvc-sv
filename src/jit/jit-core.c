@@ -494,6 +494,18 @@ static void jit_emit_trace(diag_t *d, const loc_t *loc, object_t *enclosing,
       case V_ALWAYS:
          diag_trace(d, loc, "Always procedure %pQ", vlog_ident(v));
          break;
+      case V_FINAL:
+         diag_trace(d, loc, "Final procedure");
+         break;
+      case V_ASSIGN:
+         diag_trace(d, loc, "Continuous assignment");
+         break;
+      case V_NET_DECL:
+         diag_trace(d, loc, "Net %pQ", vlog_ident(v));
+         break;
+      case V_GATE_INST:
+         diag_trace(d, loc, "Gate instance");
+         break;
       case V_PORT_MAP:
          diag_trace(d, loc, "Port connection for %pQ",
                     vlog_ident(vlog_ref(v)));
@@ -504,8 +516,16 @@ static void jit_emit_trace(diag_t *d, const loc_t *loc, object_t *enclosing,
       case V_TCHECK:
          diag_trace(d, loc, "Timing check");
          break;
-      default:
+      case V_FUNC_DECL:
+      case V_TASK_DECL:
+      case V_CONSTRUCTOR:
+      case V_CLASS_DECL:
+      case V_NAMESPACE:
+      case V_PACKAGE:
          diag_trace(d, loc, "%pQ", vlog_ident(v));
+         break;
+      default:   // Statement in a fork block
+         diag_trace(d, loc, "Forked process");
       }
    }
 }
@@ -1258,7 +1278,6 @@ bool jit_will_abort(jit_ir_t *ir)
 {
    if (ir->op == MACRO_EXIT) {
       return ir->arg1.exit == JIT_EXIT_INDEX_FAIL
-         || ir->arg1.exit == JIT_EXIT_OVERFLOW
          || ir->arg1.exit == JIT_EXIT_NULL_DEREF
          || ir->arg1.exit == JIT_EXIT_UNREACHABLE
          || ir->arg1.exit == JIT_EXIT_LENGTH_FAIL

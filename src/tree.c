@@ -81,7 +81,7 @@ static const imask_t has_map[T_LAST_TREE_KIND] = {
    (I_IDENT | I_PORTS | I_TYPE | I_FLAGS | I_IDENT2 | I_SUBKIND | I_GENERICS),
 
    // T_ELAB
-   (I_IDENT | I_DECLS | I_STMTS | I_CONTEXT),
+   (I_IDENT | I_DECLS | I_STMTS | I_CONTEXT | I_IVAL),
 
    // T_AGGREGATE
    (I_TYPE | I_ASSOCS | I_FLAGS),
@@ -334,7 +334,7 @@ static const imask_t has_map[T_LAST_TREE_KIND] = {
    (I_IDENT | I_FOREIGN),
 
    // T_VERILOG
-   (I_IDENT | I_FOREIGN),
+   (I_IDENT | I_FOREIGN | I_REF),
 
    // T_VIEW_DECL
    (I_IDENT | I_TYPE),

@@ -76,6 +76,13 @@ void opt_set_int(opt_name_t name, int val)
    opt_set_generic(name, OPT_KIND_INT, (optval_t){ .i = val });
 }
 
+int opt_verilog_seed(void)
+{
+   // The random sequence starts from a fixed seed unless one is given on
+   // the command line, so that a run can be repeated
+   return opt_get_int(OPT_RANDOM_SEED_GIVEN) ? opt_get_int(OPT_RANDOM_SEED) : 0;
+}
+
 int opt_get_int(opt_name_t name)
 {
    return opt_get_generic(name, OPT_KIND_INT).i;
@@ -148,7 +155,7 @@ void set_default_options(void)
    opt_set_str(OPT_GC_VERBOSE, getenv("NVC_GC_VERBOSE") DEBUG_ONLY(?: "1"));
    opt_set_str(OPT_EVAL_VERBOSE, getenv("NVC_EVAL_VERBOSE"));
    opt_set_str(OPT_ELAB_VERBOSE, getenv("NVC_ELAB_VERBOSE"));
-   opt_set_size(OPT_HEAP_SIZE, 16 * 1024 * 1024);
+   opt_set_size(OPT_HEAP_SIZE, 1024 * 1024 * 1024);
    opt_set_int(OPT_GC_STRESS, 0 DEBUG_ONLY(|| get_int_env("NVC_GC_STRESS", 0)));
    opt_set_int(OPT_RELAXED, 0);
    opt_set_str(OPT_JIT_VERBOSE, getenv("NVC_JIT_VERBOSE"));
@@ -183,6 +190,7 @@ void set_default_options(void)
    opt_set_str(OPT_CFG_VERBOSE, getenv("NVC_CFG_VERBOSE"));
    opt_set_str(OPT_RA_VERBOSE, getenv("NVC_RA_VERBOSE"));
    opt_set_int(OPT_RANDOM_SEED, mix_bits_32(get_timestamp_us()));
+   opt_set_int(OPT_RANDOM_SEED_GIVEN, 0);
    opt_set_int(OPT_ELAB_STATS, 0);
    opt_set_str(OPT_RELATIVE_PATH, NULL);
    opt_set_int(OPT_EXCL_VERBOSE, get_int_env("NVC_EXCL_VERBOSE", 0));

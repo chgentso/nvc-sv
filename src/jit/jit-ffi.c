@@ -578,8 +578,15 @@ void jit_do_syscall(vlog_node_t where, jit_anchor_t *caller, jit_scalar_t *args,
 {
    ident_t name = vlog_ident(where);
    vpiHandle handle = vpi_bind_foreign(name, where);
-   if (handle == NULL)
-      jit_msg(NULL, DIAG_FATAL, "system task %s not registered", istr(name));
+   if (handle == NULL) {
+      jit_msg(vlog_loc(where), DIAG_ERROR, "cannot execute undefined system "
+              "%s %s", vlog_kind(where) == V_SYS_TCALL ? "task" : "function",
+              istr(name));
+
+      // The value of a system function is zero
+      args[0].integer = args[1].integer = 0;
+      return;
+   }
 
    vpi_call_foreign(handle, args, tlab);
 }

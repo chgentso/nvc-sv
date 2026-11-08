@@ -10,6 +10,8 @@ lib_libnvc_a_SOURCES += \
 	src/jit/jit-optim.c \
 	src/jit/jit-ffi.h \
 	src/jit/jit-ffi.c \
+	src/jit/jit-dpi.h \
+	src/jit/jit-dpi.c \
 	src/jit/jit-code.c \
 	src/jit/jit-layout.h \
 	src/jit/jit-layout.c \

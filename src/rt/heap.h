@@ -30,6 +30,7 @@ typedef struct {
    heap_node_t *nodes;
    size_t       size;
    size_t       max_size;
+   uint64_t     next_seq;
    nvc_lock_t   lock;
 } heap_t;
 
@@ -42,6 +43,7 @@ void *heap_extract_min(heap_t *h);
 void *heap_min(heap_t *h);
 uint64_t heap_min_key(heap_t *h);
 void heap_insert(heap_t *h, uint64_t key, void *user);
+void heap_insert_ordered(heap_t *h, uint64_t key, void *user);
 void heap_walk(heap_t *h, heap_walk_fn_t fn, void *context);
 bool heap_delete(heap_t *h, heap_delete_fn_t fn, void *context);
 

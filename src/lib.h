@@ -59,6 +59,9 @@ void lib_put_error(lib_t lib, tree_t unit);
 void lib_put_vlog(lib_t lib, vlog_node_t module);
 void lib_put_meta(lib_t lib, tree_t unit, const unit_meta_t *meta);
 object_t *lib_get_generic(lib_t lib, ident_t ident, const unit_meta_t **meta);
+typedef bool (*lib_accept_fn_t)(object_t *obj);
+object_t *lib_search_generic(ident_t unit, lib_accept_fn_t accept,
+                             lib_t *where);
 tree_t lib_get(lib_t lib, ident_t ident);
 tree_t lib_get_allow_error(lib_t lib, ident_t ident, bool *error);
 tree_t lib_get_qualified(ident_t qual);

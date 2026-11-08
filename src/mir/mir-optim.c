@@ -782,6 +782,7 @@ static void gvn_visit_block(mir_unit_t *mu, mir_block_t block,
       case MIR_OP_BINARY:
       case MIR_OP_UNARY:
       case MIR_OP_CLOSURE:
+      case MIR_OP_RESOLUTION_WRAPPER:
       case MIR_OP_CONTEXT_UPREF:
       case MIR_OP_UNWRAP:
       case MIR_OP_INSERT:
@@ -789,6 +790,8 @@ static void gvn_visit_block(mir_unit_t *mu, mir_block_t block,
       case MIR_OP_FUNCTION_TRIGGER:
       case MIR_OP_LEVEL_TRIGGER:
       case MIR_OP_OR_TRIGGER:
+      case MIR_OP_ALL:
+      case MIR_OP_RECORD_REF:
       case MIR_OP_ARRAY_REF:
       case MIR_OP_TABLE_REF:
       case MIR_OP_TEST:
@@ -850,6 +853,8 @@ static void gvn_visit_block(mir_unit_t *mu, mir_block_t block,
       case MIR_OP_LAST_VALUE:
       case MIR_OP_LAST_EVENT:
       case MIR_OP_LAST_ACTIVE:
+      case MIR_OP_EVENT:
+      case MIR_OP_ACTIVE:
          opt->gvn->nodevn[node.id] = gvn_new_value(node, opt->gvn);
          break;
       default:

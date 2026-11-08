@@ -43,6 +43,7 @@ typedef enum {
    R_MEMO      = (1 << 0),
    R_IDENT     = (1 << 1),
    R_COMPOSITE = (1 << 2),
+   R_BLOB      = (1 << 3),
 } res_flags_t;
 
 #define NET_F_FORCED       (1 << 0)
@@ -55,7 +56,7 @@ typedef enum {
 #define NET_F_EFFECTIVE    (1 << 7)
 typedef uint8_t net_flags_t;
 
-// Unused                  (1 << 8)
+#define SIG_F_INIT_EVENT   (1 << 8)
 #define SIG_F_STD_LOGIC    (1 << 9)
 #define SIG_F_CACHE_EVENT  (1 << 10)
 #define SIG_F_EVENT_FLAG   (1 << 11)

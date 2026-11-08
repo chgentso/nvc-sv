@@ -1,0 +1,24 @@
+check_PROGRAMS += lib/vpi_test.so
+
+lib_vpi_test_so_SOURCES = \
+	test/vpi/vpi_test.c \
+	test/vpi/vpi_test.h \
+	test/vpi/vpi1.c \
+	test/vpi/vpi2.c \
+	test/vpi/vpi3.c \
+	test/vpi/vpi4.c \
+	test/vpi/vpi5.c \
+	test/vpi/vpi6.c \
+	test/vpi/vpi7.c \
+	test/vpi/vpi8.c \
+	test/vpi/vpi9.c \
+	test/vpi/vpi10.c \
+	test/vpi/vpi11.c \
+	test/vpi/vpi12.c
+
+lib_vpi_test_so_CFLAGS  = $(SHLIB_CFLAGS) -I$(top_srcdir)/src/vpi $(AM_CFLAGS)
+lib_vpi_test_so_LDFLAGS = $(SHLIB_LDFLAGS) $(AM_LDFLAGS)
+
+if IMPLIB_REQUIRED
+lib_vpi_test_so_LDADD = lib/libnvcimp.a
+endif

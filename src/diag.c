@@ -1137,6 +1137,12 @@ void diag_suppress(diag_t *d, bool suppress)
    d->suppress = suppress;
 }
 
+diag_consumer_t diag_get_consumer(void **context)
+{
+   *context = consumer_ctx;
+   return consumer_fn;
+}
+
 void diag_set_consumer(diag_consumer_t fn, void *context)
 {
    consumer_fn = fn;

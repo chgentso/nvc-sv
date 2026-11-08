@@ -17,6 +17,7 @@
 
 #include "util.h"
 #include "common.h"
+#include "array.h"
 #include "diag.h"
 #include "fbuf.h"
 #include "hash.h"
@@ -94,6 +95,7 @@ static lib_list_t    *loaded = NULL;
 static search_path_t *search_paths = NULL;
 
 static text_buf_t *lib_file_path(lib_t lib, const char *name);
+static void lib_encode_file_name(ident_t id, text_buf_t *tb);
 
 static const char *standard_suffix(vhdl_standard_t std)
 {
@@ -316,10 +318,44 @@ static void lib_obsolete_cb(object_t *obj, void *ctx)
    diag_emit(d);
 }
 
+static bool lib_vlog_duplicate(object_t *old, object_t *new)
+{
+   if (opt_get_int(OPT_RELAXED))
+      return false;
+
+   vlog_node_t vold = vlog_from_object(old), vnew = vlog_from_object(new);
+   if (vold == NULL || vnew == NULL)
+      return false;
+
+   switch (vlog_kind(vnew)) {
+   case V_MODULE:
+   case V_PRIMITIVE:
+   case V_PROGRAM:
+   case V_PACKAGE:
+      break;
+   default:
+      return false;
+   }
+
+   // Names which differ only in case are distinct but share a library unit
+   return vlog_kind(vold) == vlog_kind(vnew) && vlog_has_ident2(vold)
+      && vlog_has_ident2(vnew) && vlog_ident2(vold) == vlog_ident2(vnew);
+}
+
 static void lib_mark_obsolete(lib_t lib, lib_unit_t *lu, object_t *new)
 {
    if (lu->object == new)
       return;
+   else if (lu->dirty && lib_vlog_duplicate(lu->object, new)) {
+      // SystemVerilog has one name space for all definitions (3.13)
+      diag_t *d = diag_new(DIAG_ERROR, &new->loc);
+      diag_printf(d, "design unit %s is already defined", istr(lu->name));
+      diag_hint(d, &new->loc, "duplicate definition is here");
+      diag_hint(d, &(lu->object->loc), "previous definition is here");
+      diag_hint(d, NULL, "with $bold$--relaxed$$ the latest definition "
+                "replaces the previous one");
+      diag_emit(d);
+   }
    else if (lu->dirty) {
       diag_t *d = diag_new(DIAG_WARN, &new->loc);
       diag_printf(d, "design unit %s replaces a previously analysed unit "
@@ -678,6 +714,135 @@ lib_t lib_find(ident_t name_i)
    }
 
    return lib;
+}
+
+static bool lib_unit_usable(lib_t lib, ident_t qual)
+{
+   // Loading a unit analysed using another standard revision is a fatal
+   // error so check that without reading the whole unit
+
+   if (ghash_get(lib->lookup, qual) != NULL)
+      return true;   // Already loaded
+
+   LOCAL_TEXT_BUF tb = tb_new();
+   lib_encode_file_name(qual, tb);
+
+   fbuf_t *f = lib_fbuf_open(lib, tb_get(tb), FBUF_IN, FBUF_CS_ADLER32);
+   if (f == NULL)
+      return true;   // Not found
+
+   // Same layout as written by lib_save and object_write
+   const uint8_t tag = read_u8(f);
+   (void)read_u32(f);   // Format digest
+   const vhdl_standard_t std = fbuf_get_uint(f);
+
+   fbuf_close(f, NULL);
+
+   return tag == 'T' && std == standard();
+}
+
+static object_t *lib_search_unit(lib_t lib, ident_t unit,
+                                 lib_accept_fn_t accept)
+{
+   ident_t qual = ident_prefix(lib_name(lib), unit, '.');
+   if (!lib_unit_usable(lib, qual))
+      return NULL;
+
+   object_t *obj = lib_get_generic(lib, qual, NULL);
+   return obj != NULL && (*accept)(obj) ? obj : NULL;
+}
+
+static object_t *lib_search_loaded(ident_t unit, lib_accept_fn_t accept,
+                                   lib_t *where)
+{
+   for (lib_list_t *it = loaded; it != NULL; it = it->next) {
+      if (it->standard != standard())
+         continue;
+
+      object_t *obj = lib_search_unit(it->item, unit, accept);
+      if (obj != NULL) {
+         *where = it->item;
+         return obj;
+      }
+   }
+
+   return NULL;
+}
+
+static int lib_compare_names(const void *a, const void *b)
+{
+   return strcmp(*(char *const *)a, *(char *const *)b);
+}
+
+object_t *lib_search_generic(ident_t unit, lib_accept_fn_t accept,
+                             lib_t *where)
+{
+   // Find a design unit accepted by the callback in any library which is
+   // already loaded or can be found on the library search path
+
+   object_t *obj = lib_search_loaded(unit, accept, where);
+   if (obj != NULL)
+      return obj;
+
+   lib_default_search_paths();
+
+   const char *std_suffix = standard_suffix(standard());
+
+   for (search_path_t *sp = search_paths; sp != NULL; sp = sp->next) {
+      DIR *d = opendir(sp->path);
+      if (d == NULL)
+         continue;
+
+      // The order of directory entries depends on the file system so
+      // sort them to get the same result on every machine
+      A(char *) names = AINIT;
+
+      struct dirent *e;
+      while ((e = readdir(d))) {
+         if (!isalpha(e->d_name[0]))
+            continue;
+
+         const char *dot = strchr(e->d_name, '.');
+         if (dot != NULL && strcmp(dot + 1, std_suffix) != 0)
+            continue;
+
+         APUSH(names, xstrdup(e->d_name));
+      }
+
+      closedir(d);
+
+      qsort(names.items, names.count, sizeof(char *), lib_compare_names);
+
+      for (unsigned i = 0; obj == NULL && i < names.count; i++) {
+         const char *dot = strchr(names.items[i], '.');
+         const size_t len = dot ? dot - names.items[i]
+            : strlen(names.items[i]);
+
+         LOCAL_TEXT_BUF tb = tb_new();
+         tb_catn(tb, names.items[i], len);
+         tb_upcase(tb);
+
+         ident_t name = ident_new(tb_get(tb));
+         if (lib_loaded(name) != NULL)
+            continue;
+
+         lib_t lib = lib_find(name);
+         if (lib == NULL)
+            continue;
+
+         if ((obj = lib_search_unit(lib, unit, accept)))
+            *where = lib;
+      }
+
+      for (unsigned i = 0; i < names.count; i++)
+         free(names.items[i]);
+      ACLEAR(names);
+
+      if (obj != NULL)
+         return obj;
+   }
+
+   return NULL;
 }
 
 lib_t lib_require(ident_t name)

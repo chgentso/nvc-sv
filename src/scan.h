@@ -69,6 +69,8 @@ void pop_buffer(void);
 void push_text(const char *buf, size_t len, file_ref_t file_ref,
                unsigned line, unsigned column);
 void pop_text(void);
+void scan_text_begin(const char *text, size_t len);
+void scan_text_end(void);
 hdl_kind_t source_kind(void);
 token_t processed_yylex(void);
 const char *token_str(token_t tok);
@@ -601,5 +603,64 @@ void reset_sdf_parser(void);
 #define tVUNIT         653
 #define tVPROP         654
 #define tVMODE         655
+#define tJOINNONE      656
+#define tJOINANY       657
+#define tINTERFACE     658
+#define tENDINTERFACE  659
+#define tMODPORT       660
+#define tBREAK         661
+#define tCONTINUE      662
+#define tDOLLAR        663
+#define tVPROTECTED    664
+#define tVLOCAL        665
+#define tVPURE         666
+#define tRAND          667
+#define tRANDC         668
+#define tCONSTRAINT    669
+#define tINSIDE        670
+#define tDIST          671
+#define tSOLVE         672
+#define tVBEFORE       673
+#define tSOFT          674
+#define tFOREACH       675
+#define tRANDCASE      676
+#define tUNIQUE        677
+#define tUNIQUE0       678
+#define tPRIORITY      679
+#define tDOTSTAR       680
+#define tEXTERN        681
+#define tIMPLEMENTS    682
+#define tRANDSEQUENCE  683
+#define tENDSEQUENCE   684
+#define tTIMEUNIT      685
+#define tTIMEPRECISION 686
+#define tONESTEP       687
+#define tMATCHES       688
+#define tENDPROPERTY   689
+#define tEXPECT        690
+#define tFIRSTMATCH    691
+#define tTHROUGHOUT    692
+#define tINTERSECT     693
+#define tWEAK          694
+#define tNEXTTIME      695
+#define tSNEXTTIME     696
+#define tSALWAYS       697
+#define tSEVENTUALLY   698
+#define tIMPLIES       699
+#define tIFFKW         700
+#define tACCEPTON      701
+#define tREJECTON      702
+#define tSYNCACCEPTON  703
+#define tSYNCREJECTON  704
+#define tSUNTIL        705
+#define tUNTILWITH     706
+#define tSUNTILWITH    707
+#define tUNTYPED       708
+#define tFOLLOWBY1     709
+#define tFOLLOWBY2     710
+#define tCLOCKING      711
+#define tENDCLOCKING   712
+#define tWILDEQ        713
+#define tWILDNEQ       714
 
 #endif  // _SCAN_H

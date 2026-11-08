@@ -80,6 +80,7 @@
 
 #define KEYWORD_2001(t) verilog_keyword(t, VLOG_1364_2001);
 #define KEYWORD_2005(t) verilog_keyword(t, VLOG_1800_2005);
+#define KEYWORD_2012(t) verilog_keyword(t, VLOG_1800_2012);
 
 static int parse_id(char *str);
 static int parse_ex_id(char *str);
@@ -163,7 +164,7 @@ UDP_EDGE        [rRfFpPnN*]
 SCALAR_ZERO     ('b0|'B0|1'b0|1'B0)
 SCALAR_ONE      ('b1|'B1|1'b1|1'B1)
 PAREN_STAR      "("{SPACE}*"*"{SPACE}*")"
-TIME_LITERAL    {INTEGER}(s|ms|us|ns|ps|fs)
+TIME_LITERAL    {INTEGER}(\.{INTEGER})?(s|ms|us|ns|ps|fs)
 
 %x COMMENT C_COMMENT PSL VLOG UDP SDF SDF_EXPR CSTRING PROTECT
 %x STRING PSTRING BITSTRING PBITSTRING
@@ -720,6 +721,7 @@ PROTECT           ?i:protect
 <PSL>{ENDPOINT}          { TOKEN(tENDPOINT); }
 
 <VLOG>"module"           { return tMODULE; }
+<VLOG>"macromodule"      { return tMODULE; }
 <VLOG>"endmodule"        { return tENDMODULE; }
 <VLOG>"input"            { return tINPUT; }
 <VLOG>"output"           { return tOUTPUT; }
@@ -744,13 +746,25 @@ PROTECT           ?i:protect
 <VLOG>"trior"            { return tTRIOR; }
 <VLOG>"trireg"           { return tTRIREG; }
 <VLOG>"uwire"            { return KEYWORD_2005(tUWIRE); }
-<VLOG>"none"             { return tNONE; }
 <VLOG>"assign"           { return tASSIGN; }
 <VLOG>"deassign"         { return tDEASSIGN; }
 <VLOG>"if"               { return tIF; }
 <VLOG>"else"             { return tELSE; }
 <VLOG>"fork"             { return tFORK; }
 <VLOG>"join"             { return tJOIN; }
+<VLOG>"join_none"        { return KEYWORD_2005(tJOINNONE); }
+<VLOG>"join_any"         { return KEYWORD_2005(tJOINANY); }
+<VLOG>"interface"        { return KEYWORD_2005(tINTERFACE); }
+<VLOG>"endinterface"     { return KEYWORD_2005(tENDINTERFACE); }
+<VLOG>"const"            { return KEYWORD_2005(tCONST); }
+<VLOG>"type"             { return KEYWORD_2005(tTYPE); }
+<VLOG>"modport"          { return KEYWORD_2005(tMODPORT); }
+<VLOG>"break"            { return KEYWORD_2005(tBREAK); }
+<VLOG>"continue"         { return KEYWORD_2005(tCONTINUE); }
+<VLOG>"protected"        { return KEYWORD_2005(tVPROTECTED); }
+<VLOG>"local"            { return KEYWORD_2005(tVLOCAL); }
+<VLOG>"pure"             { return KEYWORD_2005(tVPURE); }
+<VLOG>"$"                { return KEYWORD_2005(tDOLLAR); }
 <VLOG>"automatic"        { return KEYWORD_2001(tAUTOMATIC); }
 <VLOG>"property"         { return KEYWORD_2005(tPROPERTY); }
 <VLOG>"`timescale"       { return tTIMESCALE; }
@@ -783,6 +797,8 @@ PROTECT           ?i:protect
 <VLOG>"forever"          { return tFOREVER; }
 <VLOG>"=="               { return tLOGEQ; }
 <VLOG>"!="               { return tLOGNEQ; }
+<VLOG>"==?"              { return tWILDEQ; }
+<VLOG>"!=?"              { return tWILDNEQ; }
 <VLOG>"==="              { return tCASEEQ; }
 <VLOG>"!=="              { return tCASENEQ; }
 <VLOG>"||"               { return tLOGOR; }
@@ -805,6 +821,7 @@ PROTECT           ?i:protect
 <VLOG>"~&"               { return tTILDEAMP; }
 <VLOG>"~|"               { return tTILDEBAR; }
 <VLOG>"->"               { return tIFIMPL; }
+<VLOG>"<->"              { return tIFFIMPL; }
 <VLOG>"+="               { return tPLUSEQ; }
 <VLOG>"-="               { return tMINUSEQ; }
 <VLOG>"*="               { return tTIMESEQ; }
@@ -823,6 +840,10 @@ PROTECT           ?i:protect
 <VLOG>"|->"              { return tSUFFIXOVR; }
 <VLOG>"|=>"              { return tSUFFIXNON; }
 <VLOG>"##"               { return tCYCLEDLY; }
+<VLOG>"[*"/[ \t]*[^\] \t\n]  { return tTIMESRPT; }
+<VLOG>"[+]"              { return tPLUSRPT; }
+<VLOG>"[="               { return tEQRPT; }
+<VLOG>"[->"              { return tGOTORPT; }
 <VLOG>"var"              { return KEYWORD_2005(tVAR); }
 <VLOG>"specify"          { return tSPECIFY; }
 <VLOG>"endspecify"       { return tENDSPECIFY; }
@@ -870,6 +891,7 @@ PROTECT           ?i:protect
 <VLOG>"enum"             { return KEYWORD_2005(tENUM); }
 <VLOG>"union"            { return KEYWORD_2005(tUNION); }
 <VLOG>"tagged"           { return KEYWORD_2005(tTAGGED); }
+<VLOG>"matches"          { return KEYWORD_2005(tMATCHES); }
 <VLOG>"while"            { return tWHILE; }
 <VLOG>"repeat"           { return tREPEAT; }
 <VLOG>"do"               { return KEYWORD_2005(tDO); }
@@ -933,6 +955,55 @@ PROTECT           ?i:protect
 <VLOG>"endclass"         { return KEYWORD_2005(tENDCLASS); }
 <VLOG>"virtual"          { return KEYWORD_2005(tVIRTUAL); }
 <VLOG>"final"            { return KEYWORD_2005(tFINAL); }
+<VLOG>"rand"             { return KEYWORD_2005(tRAND); }
+<VLOG>"randc"            { return KEYWORD_2005(tRANDC); }
+<VLOG>"constraint"       { return KEYWORD_2005(tCONSTRAINT); }
+<VLOG>"inside"           { return KEYWORD_2005(tINSIDE); }
+<VLOG>"dist"             { return KEYWORD_2005(tDIST); }
+<VLOG>"solve"            { return KEYWORD_2005(tSOLVE); }
+<VLOG>"before"           { return KEYWORD_2005(tVBEFORE); }
+<VLOG>"foreach"          { return KEYWORD_2005(tFOREACH); }
+<VLOG>"randcase"         { return KEYWORD_2005(tRANDCASE); }
+<VLOG>"unique"           { return KEYWORD_2005(tUNIQUE); }
+<VLOG>"unique0"          { return KEYWORD_2005(tUNIQUE0); }
+<VLOG>"priority"         { return KEYWORD_2005(tPRIORITY); }
+<VLOG>"soft"             { return KEYWORD_2012(tSOFT); }
+<VLOG>"extern"           { return KEYWORD_2005(tEXTERN); }
+<VLOG>"implements"       { return KEYWORD_2012(tIMPLEMENTS); }
+<VLOG>"randsequence"     { return KEYWORD_2005(tRANDSEQUENCE); }
+<VLOG>"endsequence"      { return KEYWORD_2005(tENDSEQUENCE); }
+<VLOG>"timeunit"         { return KEYWORD_2005(tTIMEUNIT); }
+<VLOG>"timeprecision"    { return KEYWORD_2005(tTIMEPRECISION); }
+<VLOG>"1step"            { return KEYWORD_2005(tONESTEP); }
+<VLOG>"endproperty"       { return KEYWORD_2005(tENDPROPERTY); }
+<VLOG>"expect"            { return KEYWORD_2005(tEXPECT); }
+<VLOG>"first_match"       { return KEYWORD_2005(tFIRSTMATCH); }
+<VLOG>"throughout"        { return KEYWORD_2005(tTHROUGHOUT); }
+<VLOG>"intersect"         { return KEYWORD_2005(tINTERSECT); }
+<VLOG>"weak"              { return KEYWORD_2012(tWEAK); }
+<VLOG>"nexttime"          { return KEYWORD_2012(tNEXTTIME); }
+<VLOG>"s_nexttime"        { return KEYWORD_2012(tSNEXTTIME); }
+<VLOG>"s_always"          { return KEYWORD_2012(tSALWAYS); }
+<VLOG>"s_eventually"      { return KEYWORD_2012(tSEVENTUALLY); }
+<VLOG>"implies"           { return KEYWORD_2012(tIMPLIES); }
+<VLOG>"iff"               { return KEYWORD_2005(tIFFKW); }
+<VLOG>"accept_on"         { return KEYWORD_2012(tACCEPTON); }
+<VLOG>"reject_on"         { return KEYWORD_2012(tREJECTON); }
+<VLOG>"sync_accept_on"    { return KEYWORD_2012(tSYNCACCEPTON); }
+<VLOG>"sync_reject_on"    { return KEYWORD_2012(tSYNCREJECTON); }
+<VLOG>"s_until"           { return KEYWORD_2012(tSUNTIL); }
+<VLOG>"until_with"        { return KEYWORD_2012(tUNTILWITH); }
+<VLOG>"s_until_with"      { return KEYWORD_2012(tSUNTILWITH); }
+<VLOG>"untyped"           { return KEYWORD_2012(tUNTYPED); }
+<VLOG>"#-#"               { return tFOLLOWBY1; }
+<VLOG>"#=#"               { return tFOLLOWBY2; }
+<VLOG>"clocking"          { return KEYWORD_2005(tCLOCKING); }
+<VLOG>"endclocking"       { return KEYWORD_2005(tENDCLOCKING); }
+<VLOG>"sequence"         { return KEYWORD_2005(tSEQUENCE); }
+<VLOG>"until"            { return KEYWORD_2012(tUNTIL); }
+<VLOG>"within"           { return KEYWORD_2005(tWITHIN); }
+<VLOG>"strong"           { return KEYWORD_2012(tSTRONG); }
+<VLOG>"eventually"       { return KEYWORD_2012(tEVENTUALLY); }
 <VLOG>"defparam"         { return tDEFPARAM; }
 <VLOG>"PATHPULSE$"       { return tPATHPULSE; }
 
@@ -947,8 +1018,10 @@ PROTECT           ?i:protect
 <VLOG>{INTEGER}          { yylval.str = xstrdup(yytext); return tUNSNUM; }
 <VLOG>{TIME_LITERAL}     { yylval.str = xstrdup(yytext); return tTIMELIT; }
 <VLOG>{VLOG_NUMBER}      { yylval.str = xstrdup(yytext); return tNUMBER; }
+<VLOG>\'[01xXzZ]         { yylval.str = xstrdup(yytext); return tNUMBER; }
 <VLOG>{VLOG_REAL}        { return parse_verilog_real(yytext); };
 <VLOG>{PAREN_STAR}       { return tPARENSTAR; }
+<VLOG>".*"               { return tDOTSTAR; }
 
 <INITIAL,PSL>{DECIMAL}   { return parse_decimal_literal(yytext); }
 <INITIAL,PSL>{BASED}     { return parse_based_literal(yytext); }
@@ -1583,4 +1656,29 @@ void scan_as_sdf(void)
 void scan_as_sdf_expr(void)
 {
    BEGIN(SDF_EXPR);
+}
+
+static YY_BUFFER_STATE text_saved = NULL;
+
+void scan_text_begin(const char *text, size_t len)
+{
+   // Tokens of generated source text are read before the rest of the input
+
+   assert(text_saved == NULL);
+
+   push_buffer(text, len, FILE_INVALID);
+
+   text_saved = YY_CURRENT_BUFFER;
+   yy_scan_bytes(text, len);
+}
+
+void scan_text_end(void)
+{
+   assert(text_saved != NULL);
+
+   yy_delete_buffer(YY_CURRENT_BUFFER);
+   yy_switch_to_buffer(text_saved);
+   text_saved = NULL;
+
+   pop_buffer();
 }

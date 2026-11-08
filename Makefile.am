@@ -62,6 +62,8 @@ include src/vlog/Makemodule.am
 include src/vpi/Makemodule.am
 include test/Makemodule.am
 include test/vhpi/Makemodule.am
+include test/vpi/Makemodule.am
+include test/dpi/Makemodule.am
 include lib/Makemodule.am
 include lib/std/Makemodule.am
 include lib/std.08/Makemodule.am

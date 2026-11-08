@@ -64,7 +64,7 @@ typedef struct _object_arena {
 #define OBJECT_UNMAP_UNUSED 1
 #endif
 
-#define ITEM_IDENT       (I_IDENT | I_IDENT2 | I_TEXT)
+#define ITEM_IDENT       (I_IDENT | I_IDENT2 | I_TEXT | I_IDENT3)
 #define ITEM_OBJECT      (I_VALUE | I_SEVERITY | I_MESSAGE | I_TARGET   \
                           | I_DELAY | I_REJECT | I_REF | I_FILE_MODE    \
                           | I_NAME | I_SPEC | I_RESOLUTION              \
@@ -91,7 +91,7 @@ static const char *item_text_map[] = {
    "I_PARTS"  ,  "I_CLASS",      "I_RANGES",   "I_NAME",       "I_PRAGMAS",
    "I_DVAL",     "I_SPEC",       "I_FOREIGN",  "I_INDEXES",    "I_BASE",
    "I_ELEM",     "I_DESIGNATED", "I_CHOICES",  "I_RESOLUTION", "I_RESULT",
-   "I_UNITS",    "I_LITERALS",   "I_DIMS",     "I_FIELDS",     "I_CLOCK",
+   "I_UNITS",    "I_LITERALS",   "I_DIMS",     "I_FIELDS",     "I_IDENT3",
    "I_GUARD",    "I_TEXT",       "I_CHARS",    "I_CONSTRAINT", "I_FLAGS",
    "???",        "I_LEFT",       "I_RIGHT",    "I_NUMBER",     "I_MESSAGE",
 };
@@ -1193,6 +1193,8 @@ void object_copy_finish(object_copy_ctx_t *ctx)
          }
          else if ((ITEM_INT64 | ITEM_INT32) & mask)
             to->ival = from->ival;
+         else if (ITEM_NUMBER & mask)
+            to->number = from->number;   // Interned and immutable
          else
             should_not_reach_here();
       }
@@ -1386,6 +1388,19 @@ void make_new_arena(void)
 {
    freeze_global_arena();
    global_arena = object_arena_new(object_arena_default_size(), standard());
+}
+
+object_arena_t *detach_global_arena(void)
+{
+   object_arena_t *arena = global_arena;
+   global_arena = NULL;
+   return arena;
+}
+
+void attach_global_arena(object_arena_t *arena)
+{
+   assert(global_arena == NULL);
+   global_arena = arena;
 }
 
 void discard_global_arena(void)

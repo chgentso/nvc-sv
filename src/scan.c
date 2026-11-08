@@ -60,6 +60,7 @@ typedef struct {
    int         lineno;
    int         lookahead;
    file_ref_t  file_ref;
+   char       *dir;
 } input_buf_t;
 
 typedef A(input_buf_t) buf_stack_t;
@@ -104,6 +105,7 @@ void input_from_buffer(const char *buf, size_t len, file_ref_t file_ref,
    input_buf.colno      = 0;
    input_buf.lookahead  = -1;
    input_buf.file_ref   = file_ref;
+   input_buf.dir        = NULL;
 
    src_kind = kind;
    pperrors = 0;
@@ -198,18 +200,43 @@ void push_buffer(const char *buf, size_t len, file_ref_t file_ref)
    input_buf.colno      = 0;
    input_buf.lookahead  = -1;
    input_buf.file_ref   = file_ref;
+   input_buf.dir        = NULL;
+}
+
+static char *file_directory(const char *path)
+{
+   const char *slash = strrchr(path, DIR_SEP[0]);
+   return slash != NULL ? xstrndup(path, slash - path) : NULL;
 }
 
 void push_file(const char *file, const loc_t *srcloc)
 {
+   char actual[PATH_MAX];
+   checked_sprintf(actual, sizeof(actual), "%s", file);
+
    int fd = open(file, O_RDONLY);
    if (fd < 0) {
       for (int i = 0; i < include_dirs.count; i++) {
-         char path[PATH_MAX];
-         checked_sprintf(path, sizeof(path), "%s" DIR_SEP "%s",
+         checked_sprintf(actual, sizeof(actual), "%s" DIR_SEP "%s",
                          include_dirs.items[i], file);
-         if ((fd = open(path, O_RDONLY)) != -1)
+         if ((fd = open(actual, O_RDONLY)) != -1)
             break;
+      }
+   }
+   if (fd < 0 && file[0] != DIR_SEP[0]) {
+      // Failing that relative to the directory of the file containing the
+      // directive
+      char *parent LOCAL = NULL;
+      if (input_buf.dir != NULL)
+         parent = xstrdup(input_buf.dir);
+      else if (srcloc != NULL && !loc_invalid_p(srcloc)
+               && loc_file_str(srcloc) != NULL)
+         parent = file_directory(loc_file_str(srcloc));
+
+      if (parent != NULL) {
+         checked_sprintf(actual, sizeof(actual), "%s" DIR_SEP "%s", parent,
+                         file);
+         fd = open(actual, O_RDONLY);
       }
    }
 
@@ -246,11 +273,13 @@ void push_file(const char *file, const loc_t *srcloc)
       file_ref_t file_ref = loc_file_ref(file, map);
 
       push_buffer(map, info.size, file_ref);
+      input_buf.dir = file_directory(actual);
    }
 }
 
 void pop_buffer(void)
 {
+   free(input_buf.dir);
    input_buf = APOP(buf_stack);
    yylloc = LOC_INVALID;
 }
@@ -495,6 +524,13 @@ const char *token_str(token_t tok)
          "final", "`\"", "`\\`\"", "``", "##", "time literal",
          "next_event_a", "next_event_a!", "next_event_e", "next_event_e!",
          "forall", "vunit", "vprop", "vmode",
+         "join_none", "join_any", "interface",
+         "endinterface", "modport", "break", "continue", "$", "protected",
+         "local", "pure", "rand", "randc", "constraint", "inside", "dist",
+         "solve", "before", "soft", "foreach", "randcase", "unique",
+         "unique0", "priority", ".*", "extern", "implements", "randsequence",
+         "endsequence", "timeunit", "timeprecision", "1step", "matches",
+         "endproperty", "expect", "first_match", "throughout", "intersect", "weak", "nexttime", "s_nexttime", "s_always", "s_eventually", "implies", "iff", "accept_on", "reject_on", "sync_accept_on", "sync_reject_on", "s_until", "until_with", "s_until_with", "untyped", "#-#", "#=#", "clocking", "endclocking", "==?", "!=?",
       };
 
       if (tok >= 200 && tok - 200 < ARRAY_LEN(token_strs))

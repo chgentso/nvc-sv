@@ -1,0 +1,7 @@
+check_PROGRAMS += lib/dpi_test.so
+
+lib_dpi_test_so_SOURCES = test/dpi/dpi_test.c test/dpi/dpi_export2.c \
+	test/dpi/dpi_openarr.c
+
+lib_dpi_test_so_CFLAGS  = $(SHLIB_CFLAGS) -I$(top_srcdir)/src/vpi $(AM_CFLAGS)
+lib_dpi_test_so_LDFLAGS = $(SHLIB_LDFLAGS) $(AM_LDFLAGS)

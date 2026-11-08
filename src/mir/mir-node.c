@@ -1590,10 +1590,12 @@ mir_value_t mir_build_unpack(mir_unit_t *mu, mir_value_t vec, uint8_t strength,
       mir_build_3(mu, MIR_OP_UNPACK, MIR_NULL_TYPE, MIR_NULL_STAMP,
                   vec, mir_enum(strength), dest);
 
-   MIR_ASSERT(mir_is_vector(mu, vec), "unpack argument must be vector");
+   MIR_ASSERT(mir_is_vector(mu, vec) || mir_is(mu, vec, MIR_TYPE_REAL),
+              "unpack argument must be vector or real");
    MIR_ASSERT(mir_is_null(dest) || mir_points_to(mu, dest, MIR_TYPE_INT),
               "unpack dest must be pointer to logic or null");
-   MIR_ASSERT(mir_get_size(mu, mir_get_type(mu, vec)) == 1
+   MIR_ASSERT(mir_is(mu, vec, MIR_TYPE_REAL)   // Value of a real net
+              || mir_get_size(mu, mir_get_type(mu, vec)) == 1
               || !mir_is_null(dest),
               "unpack dest must be non-null if wide vector");
    MIR_ASSERT((strength & 3) == 0, "strength lower bits must be zero");
@@ -1860,7 +1862,9 @@ mir_value_t mir_build_new(mir_unit_t *mu, mir_type_t type, mir_stamp_t stamp,
    const mir_class_t class = mir_get_class(mu, type);
    MIR_ASSERT(class == MIR_TYPE_INT || class == MIR_TYPE_RECORD
               || class == MIR_TYPE_UARRAY || class == MIR_TYPE_ACCESS
-              || class == MIR_TYPE_REAL || class == MIR_TYPE_CONTEXT,
+              || class == MIR_TYPE_REAL || class == MIR_TYPE_CONTEXT
+              || class == MIR_TYPE_VEC2 || class == MIR_TYPE_VEC4
+              || class == MIR_TYPE_OFFSET,
               "new type must be int, real, record, access, or uarray");
    MIR_ASSERT(mir_is_null(count) || mir_is_offset(mu, count),
               "new count must have offset type");
@@ -2442,7 +2446,8 @@ void mir_build_null_check(mir_unit_t *mu, mir_value_t ptr, mir_value_t locus)
    mir_build_2(mu, MIR_OP_NULL_CHECK, MIR_NULL_TYPE, MIR_NULL_STAMP,
                ptr, locus);
 
-   MIR_ASSERT(mir_is(mu, ptr, MIR_TYPE_ACCESS),
+   MIR_ASSERT(mir_is(mu, ptr, MIR_TYPE_ACCESS)
+              || mir_is(mu, ptr, MIR_TYPE_CONTEXT),
               "null check argument must be an access");
    MIR_ASSERT(mir_is(mu, locus, MIR_TYPE_LOCUS),
               "locus argument to null check must be a debug locus");
@@ -3485,8 +3490,14 @@ mir_value_t mir_build_cast(mir_unit_t *mu, mir_type_t type, mir_value_t value)
       { MIR_TYPE_REAL,   MIR_TYPE_INT     },
       { MIR_TYPE_REAL,   MIR_TYPE_OFFSET  },
       { MIR_TYPE_REAL,   MIR_TYPE_REAL    },
+      { MIR_TYPE_REAL,   MIR_TYPE_VEC2    },   // The bits of the double
+      { MIR_TYPE_REAL,   MIR_TYPE_VEC4    },
       { MIR_TYPE_ACCESS, MIR_TYPE_ACCESS  },
       { MIR_TYPE_CONTEXT, MIR_TYPE_CONTEXT },
+      { MIR_TYPE_CONTEXT, MIR_TYPE_OFFSET  },
+      { MIR_TYPE_OFFSET, MIR_TYPE_CONTEXT  },
+      { MIR_TYPE_OFFSET, MIR_TYPE_VEC2    },
+      { MIR_TYPE_OFFSET, MIR_TYPE_VEC4    },
       { MIR_TYPE_VEC4,   MIR_TYPE_VEC2    },
       { MIR_TYPE_VEC2,   MIR_TYPE_VEC4    },
       { MIR_TYPE_VEC2,   MIR_TYPE_VEC2    },

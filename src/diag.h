@@ -83,6 +83,7 @@ typedef enum {
 // Error callback for use in unit tests
 typedef void (*diag_consumer_t)(diag_t *, void *);
 void diag_set_consumer(diag_consumer_t fn, void *);
+diag_consumer_t diag_get_consumer(void **context);
 
 typedef void (*diag_hint_fn_t)(diag_t *, void *);
 void diag_add_hint_fn(diag_hint_fn_t fn, void *context);
