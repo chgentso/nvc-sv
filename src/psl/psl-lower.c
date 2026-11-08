@@ -759,7 +759,11 @@ void psl_lower_directive(unit_registry_t *ur, lower_unit_t *parent,
 {
    assert(tree_kind(wrapper) == T_PSL_DIRECT);
 
-   psl_node_t top = psl_value(tree_psl(wrapper));
+   psl_node_t decl = tree_psl(wrapper);
+   if (psl_kind(decl) == P_FAIRNESS)
+      return;   // Fairness constraints do not affect simulation
+
+   psl_node_t top = psl_value(decl);
    assert(psl_kind(top) == P_CLOCKED);
 
    if (!psl_has_ref(top)) {
