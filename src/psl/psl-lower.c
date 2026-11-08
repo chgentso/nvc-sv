@@ -307,11 +307,17 @@ static void psl_lower_state(lower_unit_t *lu, psl_fsm_t *fsm,
       else if (standard() >= STD_19)
          psl_lower_notify("NVC.SIM_PKG.PSL_ASSERT_PASS()B");
 
-      emit_return(VCODE_INVALID_REG);
+      // Later matches of a sequence are also reported
+      const bool more = psl_fsm_matches(fsm) && state->edges != NULL;
 
-      if (state->guard == NULL)
+      if (more && state->guard != NULL)
+         emit_jump(cont_bb);
+      else if (!more)
+         emit_return(VCODE_INVALID_REG);
+
+      if (state->guard == NULL && !more)
          return;
-      else
+      else if (state->guard != NULL)
          vcode_select_block(cont_bb);
    }
 

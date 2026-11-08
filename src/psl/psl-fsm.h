@@ -88,6 +88,7 @@ psl_fsm_t *psl_fsm_new_sequence(psl_node_t seq, ident_t label);
 void psl_fsm_free(psl_fsm_t *fsm);
 void psl_fsm_dump(psl_fsm_t *fsm, const char *tag);
 bool psl_fsm_repeating(psl_fsm_t *fsm);
+bool psl_fsm_matches(psl_fsm_t *fsm);
 
 guard_kind_t psl_guard_kind(psl_guard_t g);
 const guard_binop_t *psl_guard_binop(psl_guard_t g);

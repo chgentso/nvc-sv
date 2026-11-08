@@ -71,7 +71,7 @@ static bool same_guard(psl_guard_t g1, psl_guard_t g2)
       return false;
 
    const guard_binop_t *bop1 = psl_guard_binop(g1);
-   const guard_binop_t *bop2 = psl_guard_binop(g1);
+   const guard_binop_t *bop2 = psl_guard_binop(g2);
 
    if (bop1->kind != bop2->kind)
       return false;
@@ -199,21 +199,23 @@ static void connect_default(psl_fsm_t *fsm, fsm_state_t *from, fsm_state_t *to,
       add_edge(fsm, from, to, EDGE_NEXT, build_else_guard(fsm, from));
 }
 
-static fsm_state_t *intersect_fsm(psl_fsm_t *fsm, fsm_state_t *initial,
-                                  fsm_state_t *l_initial, fsm_state_t *l_final,
-                                  fsm_state_t *r_initial, fsm_state_t *r_final)
+static void intersect_prepare(psl_fsm_t *fsm, fsm_state_t *l_final,
+                              fsm_state_t *r_final)
+{
+   // Remove all epsilon transitions before building the product
+   l_final->accept = true;
+   r_final->accept = true;
+   psl_simplify(fsm);
+}
+
+static void intersect_run(psl_fsm_t *fsm, fsm_state_t *initial,
+                          fsm_state_t *l_initial, fsm_state_t *r_initial,
+                          fsm_state_t *final)
 {
    // See chapter 3.5 of "Martin, J.C. (2003) Introduction to languages
    // and the theory of computation" for basic idea.
 
-   ihash_t *map = ihash_new((fsm->next_id - initial->id) * 2);
-
-   // Remove all epsilon transitions before continuing
-   l_final->accept = true;
-   r_final->accept = true;
-   psl_simplify(fsm);
-
-   fsm_state_t *final = add_state(fsm, l_final->where);
+   ihash_t *map = ihash_new((fsm->next_id - initial->id) * 2 + 16);
 
    typedef struct {
       fsm_state_t *left;
@@ -261,6 +263,236 @@ static fsm_state_t *intersect_fsm(psl_fsm_t *fsm, fsm_state_t *initial,
    }
 
    ihash_free(map);
+}
+
+static fsm_state_t *intersect_fsm(psl_fsm_t *fsm, fsm_state_t *initial,
+                                  fsm_state_t *l_initial, fsm_state_t *l_final,
+                                  fsm_state_t *r_initial, fsm_state_t *r_final)
+{
+   intersect_prepare(fsm, l_final, r_final);
+
+   fsm_state_t *final = add_state(fsm, l_final->where);
+   intersect_run(fsm, initial, l_initial, r_initial, final);
+   return final;
+}
+
+typedef struct _dfa_node dfa_node_t;
+
+typedef struct _dfa_node {
+   fsm_state_t *state;
+   unsigned     count;
+   unsigned    *ids;
+} dfa_node_t;
+
+typedef struct {
+   fsm_state_t *from;
+   fsm_state_t *dest;
+   edge_kind_t  kind;
+   psl_guard_t  guard;
+} dfa_edge_t;
+
+typedef A(psl_node_t) atom_list_t;
+
+static void collect_atoms(psl_guard_t g, atom_list_t *list)
+{
+   if (g == NULL)
+      return;
+
+   switch (psl_guard_kind(g)) {
+   case GUARD_EXPR:
+   case GUARD_NOT:
+      {
+         psl_node_t p = psl_guard_expr(g);
+         for (int i = 0; i < list->count; i++) {
+            if (list->items[i] == p)
+               return;
+         }
+         APUSH(*list, p);
+      }
+      break;
+   case GUARD_BINOP:
+      {
+         const guard_binop_t *bop = psl_guard_binop(g);
+         collect_atoms(bop->left, list);
+         collect_atoms(bop->right, list);
+      }
+      break;
+   case GUARD_FALSE:
+      break;
+   }
+}
+
+static bool eval_guard(psl_guard_t g, const atom_list_t *atoms, unsigned bits)
+{
+   if (g == NULL)
+      return true;
+
+   switch (psl_guard_kind(g)) {
+   case GUARD_EXPR:
+   case GUARD_NOT:
+      {
+         psl_node_t p = psl_guard_expr(g);
+         bool value = false;
+         for (int i = 0; i < atoms->count; i++) {
+            if (atoms->items[i] == p) {
+               value = !!(bits & (1 << i));
+               break;
+            }
+         }
+
+         return psl_guard_kind(g) == GUARD_NOT ? !value : value;
+      }
+   case GUARD_BINOP:
+      {
+         const guard_binop_t *bop = psl_guard_binop(g);
+         const bool left = eval_guard(bop->left, atoms, bits);
+         const bool right = eval_guard(bop->right, atoms, bits);
+         return bop->kind == BINOP_AND ? (left && right) : (left || right);
+      }
+   case GUARD_FALSE:
+      return false;
+   }
+
+   return false;
+}
+
+static fsm_state_t *determinize(psl_fsm_t *fsm, fsm_state_t *root,
+                                fsm_state_t *nfa_final)
+{
+   // Convert the non-deterministic automaton starting at the root into
+   // a deterministic one by the subset construction so that the property
+   // holds if any of the matches of a sequence succeeds.  The root state
+   // is replaced by the start state of the new automaton.
+
+   nfa_final->accept = true;
+   psl_simplify(fsm);
+
+   const unsigned nnfa = fsm->next_id;
+   fsm_state_t **by_id LOCAL = xcalloc_array(nnfa, sizeof(fsm_state_t *));
+   for (fsm_state_t *s = fsm->states; s; s = s->next)
+      by_id[s->id] = s;
+
+   fsm_state_t *final = add_state(fsm, root->where);
+
+   SCOPED_A(dfa_node_t *) nodes = AINIT;
+   SCOPED_A(dfa_edge_t) pending = AINIT;
+
+   shash_t *map = shash_new(64);
+
+   dfa_node_t *start = xcalloc(sizeof(dfa_node_t));
+   start->state = root;
+   start->count = 1;
+   start->ids   = xmalloc_array(1, sizeof(unsigned));
+   start->ids[0] = root->id;
+
+   {
+      char key[32];
+      checked_sprintf(key, sizeof(key), "%u", root->id);
+      shash_put(map, key, start);
+   }
+
+   APUSH(nodes, start);
+
+   for (unsigned done = 0; done < nodes.count; done++) {
+      dfa_node_t *node = nodes.items[done];
+
+      atom_list_t atoms = AINIT;
+      for (unsigned i = 0; i < node->count; i++) {
+         fsm_state_t *s = by_id[node->ids[i]];
+         collect_atoms(s->guard, &atoms);
+         for (fsm_edge_t *e = s->edges; e; e = e->next)
+            collect_atoms(e->guard, &atoms);
+      }
+
+      if (atoms.count > 12)
+         fatal_at(psl_loc(root->where), "sorry, too many Boolean expressions "
+                  "in this sequence");
+
+      for (unsigned bits = 0; bits < (1u << atoms.count); bits++) {
+         bit_mask_t next;
+         mask_init(&next, nnfa);
+
+         bool accepted = false;
+         for (unsigned i = 0; i < node->count; i++) {
+            fsm_state_t *s = by_id[node->ids[i]];
+
+            if (s->accept && eval_guard(s->guard, &atoms, bits))
+               accepted = true;
+
+            for (fsm_edge_t *e = s->edges; e; e = e->next) {
+               if (eval_guard(e->guard, &atoms, bits))
+                  mask_set(&next, e->dest->id);
+            }
+         }
+
+         psl_guard_t minterm = NULL;
+         for (unsigned i = 0; i < atoms.count; i++) {
+            psl_guard_t lit = atoms.items[i];
+            if (!(bits & (1 << i)))
+               lit = not_guard(lit);
+            minterm = and_guard(fsm, minterm, lit);
+         }
+
+         if (accepted) {
+            const dfa_edge_t edge = { node->state, final, EDGE_EPSILON,
+                                      minterm };
+            APUSH(pending, edge);
+            mask_free(&next);
+            continue;
+         }
+
+         const size_t count = mask_popcount(&next);
+         if (count > 0) {
+            LOCAL_TEXT_BUF tb = tb_new();
+            unsigned *ids = xmalloc_array(count, sizeof(unsigned));
+
+            size_t bit = -1, n = 0;
+            while (mask_iter(&next, &bit)) {
+               ids[n++] = bit;
+               if (n > 1)
+                  tb_append(tb, ',');
+               tb_printf(tb, "%zu", bit);
+            }
+
+            dfa_node_t *dest = shash_get(map, tb_get(tb));
+            if (dest == NULL) {
+               dest = xcalloc(sizeof(dfa_node_t));
+               dest->state = add_state(fsm, root->where);
+               dest->count = count;
+               dest->ids   = ids;
+               shash_put(map, tb_get(tb), dest);
+               APUSH(nodes, dest);
+            }
+            else
+               free(ids);
+
+            const dfa_edge_t edge = { node->state, dest->state, EDGE_NEXT,
+                                      minterm };
+            APUSH(pending, edge);
+         }
+
+         mask_free(&next);
+      }
+
+      ACLEAR(atoms);
+   }
+
+   shash_free(map);
+
+   root->edges = NULL;
+   root->accept = false;
+   root->guard = NULL;
+
+   for (unsigned i = 0; i < pending.count; i++) {
+      const dfa_edge_t *e = &(pending.items[i]);
+      add_edge(fsm, e->from, e->dest, e->kind, e->guard);
+   }
+
+   for (unsigned i = 0; i < nodes.count; i++) {
+      free(nodes.items[i]->ids);
+      free(nodes.items[i]);
+   }
+
    return final;
 }
 
@@ -367,6 +599,22 @@ static fsm_state_t *build_abort(psl_fsm_t *fsm, fsm_state_t *state,
    return final;
 }
 
+static fsm_state_t *extend_fsm(psl_fsm_t *fsm, fsm_state_t *last,
+                               psl_node_t where)
+{
+   // Match {r; [*]} where r ends in the last state
+
+   fsm_state_t *final = add_state(fsm, where);
+   fsm_state_t *tail = add_state(fsm, where);
+
+   add_edge(fsm, last, final, EDGE_EPSILON, NULL);
+   add_edge(fsm, last, tail, EDGE_NEXT, NULL);
+   add_edge(fsm, tail, tail, EDGE_NEXT, NULL);
+   add_edge(fsm, tail, final, EDGE_EPSILON, NULL);
+
+   return final;
+}
+
 static fsm_state_t *build_concat(psl_fsm_t *fsm, fsm_state_t *state,
                                  psl_node_t p, unsigned skip)
 {
@@ -454,6 +702,78 @@ static fsm_state_t *build_sere(psl_fsm_t *fsm, fsm_state_t *state, psl_node_t p)
 
          fsm_state_t *l_initial = add_state(fsm, p);
          fsm_state_t *l_final = build_node(fsm, l_initial, psl_operand(p, 0));
+
+         fsm_state_t *r_initial = add_state(fsm, p);
+         fsm_state_t *r_final = build_node(fsm, r_initial, psl_operand(p, 1));
+
+         return intersect_fsm(fsm, state, l_initial, l_final,
+                              r_initial, r_final);
+      }
+
+   case PSL_SERE_OR:
+      {
+         fsm_state_t *final = add_state(fsm, p);
+
+         for (int i = 0; i < nops; i++) {
+            fsm_state_t *initial = add_state(fsm, p);
+            add_edge(fsm, state, initial, EDGE_EPSILON, NULL);
+
+            fsm_state_t *last = build_node(fsm, initial, psl_operand(p, i));
+            add_edge(fsm, last, final, EDGE_EPSILON, NULL);
+         }
+
+         return final;
+      }
+
+   case PSL_SERE_NEQ_AND:
+      {
+         assert(nops == 2);
+
+         // Either the left or the right operand is the longer one so
+         // extend the shorter one to match
+         fsm_state_t *l_initial[2], *l_final[2], *r_initial[2], *r_final[2];
+
+         for (int i = 0; i < 2; i++) {
+            l_initial[i] = add_state(fsm, p);
+            l_final[i] = build_node(fsm, l_initial[i], psl_operand(p, 0));
+            if (i == 0)
+               l_final[i] = extend_fsm(fsm, l_final[i], p);
+
+            r_initial[i] = add_state(fsm, p);
+            r_final[i] = build_node(fsm, r_initial[i], psl_operand(p, 1));
+            if (i == 1)
+               r_final[i] = extend_fsm(fsm, r_final[i], p);
+
+            intersect_prepare(fsm, l_final[i], r_final[i]);
+         }
+
+         fsm_state_t *final = add_state(fsm, p);
+
+         for (int i = 0; i < 2; i++) {
+            fsm_state_t *initial = add_state(fsm, p);
+            intersect_run(fsm, initial, l_initial[i], r_initial[i], final);
+            add_edge(fsm, state, initial, EDGE_EPSILON, NULL);
+         }
+
+         return final;
+      }
+
+   case PSL_SERE_WITHIN:
+      {
+         assert(nops == 2);
+
+         // {r1 within r2} is {[*]; r1; [*]} && {r2}
+         fsm_state_t *l_initial = add_state(fsm, p);
+         fsm_state_t *skip = add_state(fsm, p);
+         fsm_state_t *body = add_state(fsm, p);
+
+         add_edge(fsm, l_initial, body, EDGE_EPSILON, NULL);
+         add_edge(fsm, l_initial, skip, EDGE_NEXT, NULL);
+         add_edge(fsm, skip, skip, EDGE_NEXT, NULL);
+         add_edge(fsm, skip, body, EDGE_EPSILON, NULL);
+
+         fsm_state_t *l_last = build_node(fsm, body, psl_operand(p, 0));
+         fsm_state_t *l_final = extend_fsm(fsm, l_last, p);
 
          fsm_state_t *r_initial = add_state(fsm, p);
          fsm_state_t *r_final = build_node(fsm, r_initial, psl_operand(p, 1));
@@ -764,7 +1084,20 @@ static fsm_state_t *build_suffix_impl(psl_fsm_t *fsm, fsm_state_t *state,
 
    connect_default(fsm, state, vacuous, &visited);
 
-   fsm_state_t *final = build_node(fsm, right, psl_operand(p, 1));
+   psl_node_t rhs = psl_operand(p, 1);
+   fsm_state_t *final = build_node(fsm, right, rhs);
+
+   switch (psl_kind(rhs)) {
+   case P_SERE:
+   case P_REPEAT:
+   case P_PARAM_SERE:
+      // The property holds if any match of the sequence succeeds
+      final = determinize(fsm, right, final);
+      break;
+   default:
+      break;
+   }
+
    add_edge(fsm, vacuous, final, EDGE_EPSILON, NULL);
 
    return final;
@@ -820,7 +1153,7 @@ static void psl_loops_dfs(psl_fsm_t *fsm, fsm_state_t *state,
 {
    mask_set(discovered, state->id);
 
-   bool have_epsilon = false, have_unguarded = false;
+   bool have_guarded = false, have_unguarded = false;
    for (fsm_edge_t *e = state->edges; e; e = e->next) {
       if (e->kind != EDGE_EPSILON || mask_test(finished, e->dest->id))
          continue;
@@ -832,13 +1165,14 @@ static void psl_loops_dfs(psl_fsm_t *fsm, fsm_state_t *state,
       else
          psl_loops_dfs(fsm, e->dest, discovered, finished);
 
-      if (have_unguarded || (have_epsilon && e->guard == NULL)) {
+      if ((have_unguarded && e->guard != NULL)
+          || (have_guarded && e->guard == NULL)) {
          psl_fsm_dump(fsm, "unguarded");
-         fatal_trace("unguarded epsilon edge must be only epsilon edge "
-                     "(%d -> %d)", state->id, e->dest->id);
+         fatal_trace("unguarded epsilon edge cannot be mixed with guarded "
+                     "epsilon edges (%d -> %d)", state->id, e->dest->id);
       }
 
-      have_epsilon = true;
+      have_guarded |= (e->guard != NULL);
       have_unguarded |= (e->guard == NULL);
    }
 
@@ -925,7 +1259,7 @@ static void psl_prune_dfs(psl_fsm_t *fsm, fsm_state_t *state,
    *fsm->tail = state;
    fsm->tail = &(state->next);
 
-   if (state->accept && state->guard == NULL)
+   if (state->accept && state->guard == NULL && !psl_fsm_matches(fsm))
       state->edges = NULL;   // Unreachable
 
    for (fsm_edge_t *e = state->edges; e; e = e->next) {
@@ -999,6 +1333,12 @@ void psl_fsm_free(psl_fsm_t *fsm)
 {
    pool_free(fsm->pool);
    free(fsm);
+}
+
+bool psl_fsm_matches(psl_fsm_t *fsm)
+{
+   // Every match of the sequence is reported not just the first
+   return fsm->kind == FSM_COVER || fsm->kind == FSM_NEVER;
 }
 
 bool psl_fsm_repeating(psl_fsm_t *fsm)
