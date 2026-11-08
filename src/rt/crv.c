@@ -1,3 +1,68 @@
+//
+//  Copyright (C) 2026  Nick Gasson
+//
+//  This program is free software: you can redistribute it and/or modify
+//  it under the terms of the GNU General Public License as published by
+//  the Free Software Foundation, either version 3 of the License, or
+//  (at your option) any later version.
+//
+//  This program is distributed in the hope that it will be useful,
+//  but WITHOUT ANY WARRANTY; without even the implied warranty of
+//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+//  GNU General Public License for more details.
+//
+//  You should have received a copy of the GNU General Public License
+//  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+//
+
+#include "util.h"
+#include "rt/crv.h"
+
+#include <assert.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+
+// Values are held as 128-bit integers during propagation so that the
+// result of any 64-bit operation can be represented exactly before it is
+// wrapped to the width of its node.
+typedef __int128 i128;
+
+typedef struct { i128 lo, hi; } ivl_t;     // Empty if lo > hi
+typedef struct { i128 lo, hi; } range_t;
+
+#define BIG ((i128)1 << 100)
+#define MAX_SIZE (1 << 20)
+#define MAX_SIZE_CHOICES 1024
+#define MAX_NODES (1 << 24)
+#define MAX_BIND 16
+#define SMALL_HULL 4096
+#define TABU_MIN 2048
+
+#define VEC_PUSH(v, n, cap, x) do {                                     \
+      if ((n) == (cap)) {                                               \
+         (cap) = (cap) ? (cap) * 2 : 16;                                \
+         (v) = xrealloc((v), (size_t)(cap) * sizeof(*(v)));             \
+      }                                                                 \
+      (v)[(n)++] = (x);                                                 \
+   } while (0)
+
+#define NEW(T, n) ((T *)xmalloc(((n) ? (size_t)(n) : 1) * sizeof(T)))
+
+////////////////////////////////////////////////////////////////////////////////
+// Random numbers
+
+static __thread uint64_t rng_s[4];
+static __thread bool rng_ready;
+
+static uint64_t splitmix(uint64_t *x)
+{
+   uint64_t z = (*x += UINT64_C(0x9e3779b97f4a7c15));
+   z = (z ^ (z >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);
+   z = (z ^ (z >> 27)) * UINT64_C(0x94d049bb133111eb);
+   return z ^ (z >> 31);
+}
+
 void crv_seed(uint64_t seed)
 {
    for (int i = 0; i < 4; i++)
@@ -26,6 +91,47 @@ static uint64_t rnd64(void)
    rng_s[3] = rotl(rng_s[3], 45);
 
    return result;
+}
+
+#define MAX_SEED_DEPTH 16
+
+typedef struct {
+   uint64_t s[4];
+   bool     ready;
+   bool     active;
+} seed_save_t;
+
+static __thread seed_save_t seed_stack[MAX_SEED_DEPTH];
+static __thread int seed_depth;
+
+void crv_push_seed(uint64_t seed)
+{
+   // The random stream of an object replaces the global one while its
+   // constraints are solved
+
+   assert(seed_depth < MAX_SEED_DEPTH);
+   seed_save_t *e = &(seed_stack[seed_depth++]);
+
+   e->active = seed != 0;
+   if (e->active) {
+      memcpy(e->s, rng_s, sizeof(rng_s));
+      e->ready = rng_ready;
+      crv_seed(seed);
+   }
+}
+
+uint64_t crv_pop_seed(void)
+{
+   assert(seed_depth > 0);
+   seed_save_t *e = &(seed_stack[--seed_depth]);
+
+   if (!e->active)
+      return 0;
+
+   const uint64_t next = rnd64() | 1;
+   memcpy(rng_s, e->s, sizeof(rng_s));
+   rng_ready = e->ready;
+   return next;
 }
 
 static uint64_t rnd_below(uint64_t n)
@@ -188,6 +294,109 @@ static i128 pow2mask(i128 x)
    return m;
 }
 
+////////////////////////////////////////////////////////////////////////////////
+// The graph
+
+typedef enum {
+   N_CONST, N_VAR, N_BIN, N_UN, N_CAST, N_COND, N_ASIZE, N_AELEM, N_ASUM,
+   N_INSIDE, N_DIST, N_INDEX, N_FAIL,
+} nkind_t;
+
+typedef struct {
+   uint8_t kind, op, width;
+   bool    sgn;
+   bool    inst;     // Contains an index or array element to substitute
+   int32_t a, b, c;
+   int32_t aux;
+   int64_t val;
+} node_t;
+
+typedef struct {
+   unsigned  width;
+   bool      sgn;
+   int64_t   cur;
+   uint64_t *rc;
+   int64_t  *dom;
+   unsigned  ndom, cdom;
+} cvar_t;
+
+typedef struct {
+   unsigned  width;
+   bool      sgn, size_rand, elems_rand;
+   unsigned  len;
+   int64_t  *init;
+   unsigned  ninit;
+} carr_t;
+
+typedef struct {
+   crv_node_t lo, hi;      // hi is -1 for a single value
+} item_t;
+
+typedef struct {
+   item_t   *items;
+   unsigned  n, cap;
+   range_t  *rr;
+   unsigned  nrr;
+   bool      allconst, prep;
+} cset_t;
+
+typedef struct {
+   int64_t lo, hi, weight;
+   bool    per_value;
+} drange_t;
+
+typedef struct {
+   drange_t *r;
+   unsigned  n, cap;
+   bool      sgn, prep;
+   range_t  *mr;           // Merged ranges with non-zero weight
+   unsigned  nmr;
+   range_t  *pr;           // The same ranges for picking
+   double   *unit;         // Weight of each value
+   unsigned  npr;
+} cdist_t;
+
+typedef enum { C_REQ, C_FOREACH, C_UNIQUE } ckind_t;
+
+typedef struct {
+   ckind_t     kind;
+   crv_node_t  root;
+   int         soft;       // Index among soft constraints or -1
+   unsigned    nsoft;      // Soft indices of a foreach, one per element
+   crv_array_t arr;
+   crv_node_t  idx;
+   unsigned    first, count;
+   bool        dead;       // Soft constraint discarded by disable soft
+} ccons_t;
+
+typedef struct {
+   bool        array;
+   int         before;
+   crv_var_t   after;
+} edge_t;
+
+struct _crv {
+   node_t   *nodes;
+   unsigned  nnodes, cnodes;
+   cvar_t   *vars;
+   unsigned  nvars, cvars;
+   carr_t   *arrays;
+   unsigned  narrays, carrays;
+   cset_t   *sets;
+   unsigned  nsets, csets;
+   cdist_t  *dists;
+   unsigned  ndists, cdists;
+   ccons_t  *cons;
+   unsigned  ncons, ccons;
+   crv_node_t *uniq;
+   unsigned  nuniq, cuniq;
+   edge_t   *edges;
+   unsigned  nedges, cedges;
+   int       nindex;
+   int       nsoft;
+   bool      greedy;   // Soft constraints are kept one at a time
+};
+
 // The first n entries are the values, remaining ones first, and the next n
 // are the index of each value
 //
@@ -211,6 +420,54 @@ static inline uint64_t randc_hash(uint64_t k)
    k *= UINT64_C(0xff51afd7ed558ccd);
    k ^= k >> 33;
    return k;
+}
+
+static bool randc_used(const randc_t *rc, uint64_t key)
+{
+   if (rc->cap == 0 || key == 0)
+      return false;
+
+   const uint64_t mask = rc->cap - 1;
+   for (uint64_t i = randc_hash(key) & mask;; i = (i + 1) & mask) {
+      if (rc->used[i] == key)
+         return true;
+      else if (rc->used[i] == 0)
+         return false;
+   }
+}
+
+static void randc_clear(randc_t *rc)
+{
+   if (rc->cap > 0)
+      memset(rc->used, 0, rc->cap * sizeof(uint64_t));
+   rc->nused = 0;
+}
+
+static void randc_insert(randc_t *rc, uint64_t key)
+{
+   if (key == 0 || randc_used(rc, key))
+      return;
+
+   if (rc->nused * 2 >= rc->cap) {
+      uint64_t *old = rc->used, ocap = rc->cap;
+      rc->cap = ocap ? ocap * 2 : 64;
+      rc->used = xcalloc(rc->cap * sizeof(uint64_t));
+      for (uint64_t i = 0; i < ocap; i++) {
+         if (old[i] != 0) {
+            uint64_t j = randc_hash(old[i]) & (rc->cap - 1);
+            while (rc->used[j] != 0)
+               j = (j + 1) & (rc->cap - 1);
+            rc->used[j] = old[i];
+         }
+      }
+      free(old);
+   }
+
+   uint64_t i = randc_hash(key) & (rc->cap - 1);
+   while (rc->used[i] != 0)
+      i = (i + 1) & (rc->cap - 1);
+   rc->used[i] = key;
+   rc->nused++;
 }
 
 crv_t *crv_new(void)
@@ -273,6 +530,30 @@ crv_var_t crv_var(crv_t *c, unsigned width, bool is_signed, int64_t current)
    return c->nvars - 1;
 }
 
+void crv_var_randc(crv_t *c, crv_var_t v, uint64_t *state)
+{
+   cvar_t *cv = &c->vars[v];
+   if (state == NULL)
+      return;
+
+   if (cv->width > 16) {
+      if (*state == 0)
+         *state = (uint64_t)(uintptr_t)xcalloc(sizeof(randc_t));
+      cv->rc = state;
+      return;
+   }
+
+   const uint32_t n = UINT32_C(1) << cv->width;
+   if (*state == 0) {
+      randc_t *rc = xmalloc(sizeof(randc_t) + 2 * n * sizeof(uint32_t));
+      rc->n = rc->left = n;
+      for (uint32_t i = 0; i < n; i++)
+         rc->vals[i] = rc->vals[n + i] = i;
+      *state = (uint64_t)(uintptr_t)rc;
+   }
+   cv->rc = state;
+}
+
 void crv_var_domain(crv_t *c, crv_var_t v, int64_t value)
 {
    cvar_t *cv = &c->vars[v];
@@ -304,6 +585,11 @@ void crv_array_init(crv_t *c, crv_array_t a, unsigned index, int64_t value)
    ar->init[index] = norm(mathv(value, ar->sgn), ar->width, ar->sgn);
 }
 
+bool crv_array_resizable(crv_t *c, crv_array_t a)
+{
+   return c->arrays[a].size_rand;
+}
+
 crv_node_t crv_const(crv_t *c, int64_t value, unsigned width, bool is_signed)
 {
    width = clampw(width);
@@ -325,6 +611,23 @@ crv_node_t crv_binary(crv_t *c, crv_binary_t op, crv_node_t l, crv_node_t r,
                 .inst = c->nodes[l].inst || c->nodes[r].inst };
    if (op >= CRV_EQ)
       n.sgn = false;
+   return add_node(c, n);
+}
+
+crv_node_t crv_unary(crv_t *c, crv_unary_t op, crv_node_t arg)
+{
+   const node_t *a = &c->nodes[arg];
+   node_t n = { .kind = N_UN, .op = op, .a = arg, .inst = a->inst };
+   if (op == CRV_NEG || op == CRV_INV) {
+      n.width = a->width;
+      n.sgn = a->sgn;
+   }
+   else if (op == CRV_POPCNT) {
+      n.width = 32;
+      n.sgn = true;
+   }
+   else
+      n.width = 1;
    return add_node(c, n);
 }
 
@@ -450,6 +753,22 @@ crv_node_t crv_index(crv_t *c)
    return add_node(c, n);
 }
 
+void crv_foreach(crv_t *c, crv_array_t a, crv_node_t index, crv_node_t body,
+                 bool soft)
+{
+   ccons_t k = { .kind = C_FOREACH, .root = body, .arr = a, .idx = index,
+                 .soft = -1, .nsoft = 1 };
+   if (soft) {
+      // Each element is a separate soft constraint
+      const carr_t *ar = &c->arrays[a];
+      k.soft = c->nsoft;
+      k.nsoft = ar->size_rand || ar->len == 0 ? 1 : ar->len;
+      c->nsoft += k.nsoft;
+      c->greedy |= k.nsoft > 1;
+   }
+   VEC_PUSH(c->cons, c->ncons, c->ccons, k);
+}
+
 void crv_solve_before(crv_t *c, crv_var_t before, crv_var_t after)
 {
    edge_t e = { false, before, after };
@@ -537,6 +856,23 @@ static int64_t ev_bin(const node_t *nd, const node_t *an, const node_t *bn,
    case CRV_LE: return mathv(l, an->sgn) <= mathv(r, bn->sgn);
    case CRV_GT: return mathv(l, an->sgn) > mathv(r, bn->sgn);
    case CRV_GE: return mathv(l, an->sgn) >= mathv(r, bn->sgn);
+   default: should_not_reach_here();
+   }
+}
+
+static int64_t ev_un(const node_t *nd, const node_t *an, int64_t v)
+{
+   const uint64_t u = (uint64_t)v;
+   switch ((crv_unary_t)nd->op) {
+   case CRV_NEG: return norm(-u, nd->width, nd->sgn);
+   case CRV_INV: return norm(~u, nd->width, nd->sgn);
+   case CRV_LOG_NOT: return v == 0;
+   case CRV_REDUCE_AND: return (u & wmask(an->width)) == wmask(an->width);
+   case CRV_REDUCE_OR: return (u & wmask(an->width)) != 0;
+   case CRV_REDUCE_XOR:
+      return __builtin_popcountll(u & wmask(an->width)) & 1;
+   case CRV_POPCNT:
+      return __builtin_popcountll(u & wmask(an->width));
    default: should_not_reach_here();
    }
 }
@@ -1128,6 +1464,131 @@ static int rng_op(const dom_t *d, const range_t *rr, int n, bool inter,
    return m;
 }
 
+////////////////////////////////////////////////////////////////////////////////
+// The problem being solved
+
+typedef struct {
+   dom_t     dom;
+   unsigned  width;
+   bool      sgn, size;
+   int       dist, pop;
+   int      *gd;
+   int       ngd;
+   i128     *tabu;
+   int       ntabu, ctabu;
+   randc_t  *rc;
+   unsigned  level;
+   int64_t   cur;
+   bool      split, derived;
+} pvar_t;
+
+typedef struct {
+   ckind_t kind;
+   int     root;
+   int     soft;
+   int     unstart, unn;
+} pcons_t;
+
+typedef struct {
+   int     var;
+   dom_t   old;
+} trail_t;
+
+#define MAX_FIELDS 32
+
+// A variable which is split into fields at the boundaries of the bit
+// slices of it that are used in constraints
+typedef struct dec_s {
+   int      var, f0, nf;
+   unsigned width;
+   uint8_t  pos[MAX_FIELDS + 1];
+} dec_t;
+
+typedef struct {
+   crv_t    *c;
+   int       nsc, na, nv;
+   int      *ebase;
+   unsigned *sizes;
+   pvar_t   *vars;
+   pcons_t  *cons;
+   int       ncons, ccons;
+   int      *un;
+   uint8_t  *uproc;
+   int       nun, cun;
+   int      *vl, nvl, cvl;
+   int      *vstart;
+   int      *vmark;
+   int      *wstart, *wlist;
+   int       nn;
+   ivl_t    *iv;
+   uint32_t *stamp, pass;
+   uint64_t *pend;
+   int       qn;
+   int       curc;
+   trail_t  *trail;
+   int       ntrail, ctrail;
+   arena_t   ar, tmp;
+   int64_t   work, budget;
+   uint64_t  changed;
+   struct tabu_s { int var, level; } *tb;
+   int       ntb, ctb;
+   bool      oob;
+   int64_t  *vals;
+   unsigned  base_nodes, base_sets;
+   struct dec_s *dec;
+   int       ndec;
+} prob_t;
+
+typedef struct {
+   crv_t          *c;
+   const int      *ebase;
+   const unsigned *sizes;
+   int             nsc;
+   int             nb;
+   int             bidx[MAX_BIND];
+   int64_t         bval[MAX_BIND];
+   bool            toobig;
+} ictx_t;
+
+typedef void (*visit_fn)(void *ctx, const node_t *nd, int n);
+
+static void visit(const crv_t *c, int n, visit_fn fn, void *ctx)
+{
+   const node_t *nd = &c->nodes[n];
+   fn(ctx, nd, n);
+
+   switch ((nkind_t)nd->kind) {
+   case N_BIN:
+      visit(c, nd->a, fn, ctx);
+      visit(c, nd->b, fn, ctx);
+      break;
+   case N_UN:
+   case N_CAST:
+   case N_AELEM:
+   case N_DIST:
+      visit(c, nd->a, fn, ctx);
+      break;
+   case N_COND:
+      visit(c, nd->a, fn, ctx);
+      visit(c, nd->b, fn, ctx);
+      visit(c, nd->c, fn, ctx);
+      break;
+   case N_INSIDE:
+      {
+         visit(c, nd->a, fn, ctx);
+         const cset_t *cs = &c->sets[nd->aux];
+         for (unsigned i = 0; i < cs->n; i++) {
+            visit(c, cs->items[i].lo, fn, ctx);
+            if (cs->items[i].hi >= 0)
+               visit(c, cs->items[i].hi, fn, ctx);
+         }
+      }
+      break;
+   default:
+      break;
+   }
+}
+
 typedef struct {
    bool     *vars;
    unsigned  count;
@@ -1314,6 +1775,67 @@ static void add_pcons(prob_t *P, ckind_t kind, int root, int soft)
    VEC_PUSH(P->cons, P->ncons, P->ccons, pc);
 }
 
+static void expand_foreach(prob_t *P, ictx_t *I, const ccons_t *f,
+                           const bool *active)
+{
+   crv_t *c = P->c;
+
+   idxlist_t l = { .n = 0 };
+   visit(c, f->root, idx_cb, &l);
+
+   int own = c->nodes[f->idx].aux;
+   int ids[MAX_BIND];
+   int arrs[MAX_BIND];
+   int nd = 0, soft = f->soft;
+   ids[nd] = own;
+   arrs[nd++] = f->arr;
+
+   for (int i = 0; i < l.n; i++) {
+      if (l.ids[i] == own)
+         continue;
+      for (unsigned k = 0; k < c->ncons; k++) {
+         const ccons_t *o = &c->cons[k];
+         if (o->kind == C_FOREACH && c->nodes[o->idx].aux == l.ids[i]
+             && nd < MAX_BIND) {
+            ids[nd] = l.ids[i];
+            arrs[nd++] = o->arr;
+            if (soft < 0)
+               soft = o->soft;
+            break;
+         }
+      }
+   }
+
+   for (int i = 0; i < nd; i++) {
+      if (P->sizes[arrs[i]] == 0)
+         return;
+   }
+
+   unsigned cnt[MAX_BIND] = { 0 };
+   for (;;) {
+      for (int i = 0; i < nd; i++) {
+         I->bidx[i] = ids[i];
+         I->bval[i] = cnt[i];
+      }
+      I->nb = nd;
+
+      int sid = soft;
+      if (sid >= 0 && sid == f->soft && nd == 1)
+         sid += MIN(cnt[0], f->nsoft - 1);
+
+      if (sid < 0 || active[sid])
+         add_pcons(P, C_REQ, inst(I, f->root), sid);
+      if (I->toobig)
+         return;
+
+      int i = 0;
+      while (i < nd && ++cnt[i] == P->sizes[arrs[i]])
+         cnt[i++] = 0;
+      if (i == nd)
+         break;
+   }
+}
+
 typedef struct {
    prob_t *P;
    int     ci;
@@ -1390,6 +1912,691 @@ static dom_t scalar_dom(prob_t *P, const cvar_t *cv)
 
    const unsigned n = rng_merge(rs, cv->ndom);
    return dom_ranges(rs, n);
+}
+
+static void prob_free(prob_t *P)
+{
+   crv_t *c = P->c;
+   for (unsigned i = P->base_sets; i < c->nsets; i++) {
+      free(c->sets[i].items);
+      free(c->sets[i].rr);
+   }
+   c->nsets = P->base_sets;
+   c->nnodes = P->base_nodes;
+
+   free(P->dec);
+   free(P->ebase);
+   free(P->sizes);
+   free(P->cons);
+   free(P->un);
+   free(P->vl);
+   free(P->vstart);
+   free(P->vmark);
+   free(P->wstart);
+   free(P->wlist);
+   free(P->iv);
+   free(P->stamp);
+   free(P->pend);
+   free(P->uproc);
+   for (int v = 0; v < P->nv; v++) {
+      free(P->vars[v].tabu);
+      free(P->vars[v].gd);
+   }
+   free(P->tb);
+   free(P->vars);
+   free(P->trail);
+   free(P->vals);
+   arena_reset(&P->ar, (amark_t){ NULL, 0 });
+   arena_reset(&P->tmp, (amark_t){ NULL, 0 });
+   free(P);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Splitting variables into bit fields
+//
+// Bounds on a variable cannot express that some of its bits are fixed, so
+// the constraints on several slices of one variable take a long chain of
+// propagation steps, each moving one bound past a single field, and a random
+// value is almost never a solution.  Instead each slice becomes a sum of
+// independent variables for the fields.
+
+static bool is_const_tree(const crv_t *c, int n)
+{
+   const node_t *nd = &c->nodes[n];
+   switch ((nkind_t)nd->kind) {
+   case N_CONST:
+      return true;
+   case N_BIN:
+      return is_const_tree(c, nd->a) && is_const_tree(c, nd->b);
+   case N_UN:
+   case N_CAST:
+      return is_const_tree(c, nd->a);
+   default:
+      return false;
+   }
+}
+
+static bool const_of(const crv_t *c, int n, int64_t *val)
+{
+   if (!is_const_tree(c, n))
+      return false;
+
+   ectx_t E = { .c = c };
+   const int64_t v = ev(&E, n);
+   if (E.fail)
+      return false;
+
+   *val = mathv(v, c->nodes[n].sgn);
+   return true;
+}
+
+static bool slice_of(const crv_t *c, int n, int nsc, int *var, unsigned *lsb,
+                     unsigned *w)
+{
+   const node_t *cn = &c->nodes[n];
+   if (cn->kind != N_CAST || cn->sgn)
+      return false;
+
+   const node_t *sh = &c->nodes[cn->a];
+   if (sh->kind != N_BIN || sh->op != CRV_SHR)
+      return false;
+
+   const node_t *xv = &c->nodes[sh->a];
+   int64_t k;
+   if (xv->kind != N_VAR || xv->aux >= nsc || xv->sgn || xv->width > 64
+       || !const_of(c, sh->b, &k) || k < 0 || k >= xv->width)
+      return false;
+
+   *var = xv->aux;
+   *lsb = k;
+   *w = MIN(cn->width, xv->width - (unsigned)k);
+   return true;
+}
+
+typedef struct {
+   const prob_t *P;
+   uint64_t     *cut;
+   bool         *bad;
+   int          *count;
+} dcol_t;
+
+static void dcol_bad(dcol_t *D, int n)
+{
+   const crv_t *c = D->P->c;
+   const node_t *an = &c->nodes[n];
+   if (an->kind == N_CAST)
+      an = &c->nodes[an->a];
+   if (an->kind == N_VAR && an->aux < D->P->nsc)
+      D->bad[an->aux] = true;
+}
+
+static void dcol_cb(void *ctx, const node_t *nd, int n)
+{
+   dcol_t *D = ctx;
+   const crv_t *c = D->P->c;
+
+   int var;
+   unsigned lsb, w;
+   if (slice_of(c, n, D->P->nsc, &var, &lsb, &w)) {
+      const unsigned width = c->nodes[c->nodes[nd->a].a].width;
+      D->cut[var] |= UINT64_C(1) << lsb;
+      if (lsb + w < width)
+         D->cut[var] |= UINT64_C(1) << (lsb + w);
+      D->count[var]++;
+      return;
+   }
+
+   switch ((nkind_t)nd->kind) {
+   case N_INSIDE:
+   case N_DIST:
+      dcol_bad(D, nd->a);
+      break;
+   case N_UN:
+      if (nd->op == CRV_POPCNT)
+         dcol_bad(D, nd->a);
+      break;
+   case N_BIN:
+      // Shifted by an amount which is not known
+      if ((nd->op == CRV_SHR || nd->op == CRV_ASR || nd->op == CRV_SHL)
+          && !is_const_tree(c, nd->b))
+         dcol_bad(D, nd->a);
+      break;
+   default:
+      break;
+   }
+}
+
+typedef struct {
+   prob_t *P;
+   int    *memo;
+   int     n0;
+} drw_t;
+
+static const dec_t *dec_for(const drw_t *R, int var)
+{
+   for (int i = 0; i < R->P->ndec; i++) {
+      if (R->P->dec[i].var == var)
+         return &R->P->dec[i];
+   }
+   return NULL;
+}
+
+static int drw_fields(drw_t *R, const dec_t *d, unsigned lsb, unsigned w,
+                      unsigned own)
+{
+   crv_t *c = R->P->c;
+   int result = -1;
+   for (int i = 0; i < d->nf; i++) {
+      if (d->pos[i] < lsb || d->pos[i + 1] > lsb + w)
+         continue;
+
+      const unsigned fw = d->pos[i + 1] - d->pos[i];
+      node_t fn = { .kind = N_VAR, .width = fw, .aux = d->f0 + i };
+      int t = add_node(c, fn);
+      if (d->pos[i] > lsb) {
+         node_t sn = { .kind = N_BIN, .op = CRV_SHL, .width = own,
+                       .a = t, .b = mk_const(c, d->pos[i] - lsb, 32, true) };
+         t = add_node(c, sn);
+      }
+      else if (fw != own && w == fw) {
+         node_t cn = { .kind = N_CAST, .width = own, .a = t };
+         t = add_node(c, cn);
+      }
+
+      if (result < 0)
+         result = t;
+      else {
+         node_t an = { .kind = N_BIN, .op = CRV_ADD, .width = own,
+                       .a = result, .b = t };
+         result = add_node(c, an);
+      }
+   }
+   return result;
+}
+
+static int drw(drw_t *R, int n)
+{
+   crv_t *c = R->P->c;
+   if (n >= R->n0)
+      return n;
+   else if (R->memo[n] >= 0)
+      return R->memo[n];
+
+   node_t nd = c->nodes[n];
+   int res = n, var;
+   unsigned lsb, w;
+   const dec_t *d;
+
+   if (slice_of(c, n, R->P->nsc, &var, &lsb, &w)
+       && (d = dec_for(R, var)) != NULL)
+      res = drw_fields(R, d, lsb, w, nd.width);
+   else {
+      switch ((nkind_t)nd.kind) {
+      case N_VAR:
+         if (nd.aux < R->P->nsc && (d = dec_for(R, nd.aux)) != NULL)
+            res = drw_fields(R, d, 0, d->width, nd.width);
+         break;
+      case N_BIN:
+         {
+            const int a = drw(R, nd.a), b = drw(R, nd.b);
+            if (a != nd.a || b != nd.b) {
+               nd.a = a;
+               nd.b = b;
+               res = add_node(c, nd);
+            }
+         }
+         break;
+      case N_UN:
+      case N_CAST:
+      case N_DIST:
+      case N_AELEM:
+         {
+            const int a = drw(R, nd.a);
+            if (a != nd.a) {
+               nd.a = a;
+               res = add_node(c, nd);
+            }
+         }
+         break;
+      case N_COND:
+         {
+            const int a = drw(R, nd.a), b = drw(R, nd.b), cc = drw(R, nd.c);
+            if (a != nd.a || b != nd.b || cc != nd.c) {
+               nd.a = a;
+               nd.b = b;
+               nd.c = cc;
+               res = add_node(c, nd);
+            }
+         }
+         break;
+      case N_INSIDE:
+         {
+            bool changed = false;
+            const int a = drw(R, nd.a);
+            changed |= a != nd.a;
+            cset_t ns = { 0 };
+            const unsigned cnt = c->sets[nd.aux].n;
+            for (unsigned i = 0; i < cnt; i++) {
+               item_t it = c->sets[nd.aux].items[i];
+               const int lo = drw(R, it.lo);
+               const int hi = it.hi >= 0 ? drw(R, it.hi) : -1;
+               changed |= lo != it.lo || hi != it.hi;
+               it.lo = lo;
+               it.hi = hi;
+               VEC_PUSH(ns.items, ns.n, ns.cap, it);
+            }
+            if (changed) {
+               VEC_PUSH(c->sets, c->nsets, c->csets, ns);
+               nd.a = a;
+               nd.aux = c->nsets - 1;
+               res = add_node(c, nd);
+            }
+            else
+               free(ns.items);
+         }
+         break;
+      default:
+         break;
+      }
+   }
+
+   R->memo[n] = res;
+   return res;
+}
+
+static void decompose(prob_t *P)
+{
+   crv_t *c = P->c;
+   if (P->nsc == 0)
+      return;
+
+   dcol_t D = { .P = P, .cut = xcalloc(P->nsc * sizeof(uint64_t)),
+                .bad = xcalloc(P->nsc), .count = xcalloc(P->nsc * sizeof(int)) };
+
+   for (int ci = 0; ci < P->ncons; ci++) {
+      const pcons_t *pc = &P->cons[ci];
+      if (pc->kind == C_REQ)
+         visit(c, pc->root, dcol_cb, &D);
+      else {
+         for (int i = 0; i < pc->unn; i++) {
+            const int n = P->un[pc->unstart + i];
+            dcol_bad(&D, n);
+            visit(c, n, dcol_cb, &D);
+         }
+      }
+   }
+
+   int nf = 0;
+   for (int v = 0; v < P->nsc; v++) {
+      const cvar_t *cv = &c->vars[v];
+      const pvar_t *pv = &P->vars[v];
+      if (D.count[v] == 0 || D.bad[v] || cv->sgn || cv->width < 12
+          || cv->width > 64 || cv->rc || cv->ndom > 0 || pv->dist >= 0
+          || pv->ngd > 0 || pv->pop >= 0)
+         continue;
+
+      const uint64_t cut = D.cut[v] | 1;
+      const int n = __builtin_popcountll(cut);
+      if (n < 2 || n > MAX_FIELDS)
+         continue;
+
+      dec_t d = { .var = v, .nf = n, .width = cv->width, .f0 = P->nv + nf };
+      int k = 0;
+      for (unsigned b = 0; b < cv->width; b++) {
+         if (cut & (UINT64_C(1) << b))
+            d.pos[k++] = b;
+      }
+      d.pos[n] = cv->width;
+      nf += n;
+      P->dec = xrealloc(P->dec, (P->ndec + 1) * sizeof(dec_t));
+      P->dec[P->ndec++] = d;
+   }
+
+   free(D.cut);
+   free(D.bad);
+   free(D.count);
+
+   if (P->ndec == 0)
+      return;
+
+   P->vars = xrealloc(P->vars, (P->nv + nf) * sizeof(pvar_t));
+   P->vals = xrealloc(P->vals, (P->nv + nf) * sizeof(int64_t));
+   for (int i = 0; i < P->ndec; i++) {
+      const dec_t *d = &P->dec[i];
+      P->vars[d->var].derived = true;
+      for (int k = 0; k < d->nf; k++) {
+         const unsigned fw = d->pos[k + 1] - d->pos[k];
+         P->vars[d->f0 + k] = (pvar_t){
+            .dom = dom_interval(0, ((i128)1 << fw) - 1), .width = fw,
+            .dist = -1, .pop = -1,
+         };
+      }
+   }
+   P->nv += nf;
+
+   drw_t R = { .P = P, .n0 = c->nnodes };
+   R.memo = NEW(int, c->nnodes);
+   memset(R.memo, -1, c->nnodes * sizeof(int));
+
+   for (int ci = 0; ci < P->ncons; ci++) {
+      pcons_t *pc = &P->cons[ci];
+      if (pc->kind == C_REQ)
+         pc->root = drw(&R, pc->root);
+      else {
+         for (int i = 0; i < pc->unn; i++)
+            P->un[pc->unstart + i] = drw(&R, P->un[pc->unstart + i]);
+      }
+   }
+
+   for (int v = 0; v < P->nsc; v++) {
+      pvar_t *pv = &P->vars[v];
+      for (int i = 0; i < pv->ngd; i++)
+         pv->gd[i * 2] = drw(&R, pv->gd[i * 2]);
+   }
+
+   free(R.memo);
+}
+
+// Mode 1 solves for the sizes of arrays with a random size, ignoring the
+// elements of those, mode 2 has all sizes known
+static prob_t *prob_build(crv_t *c, int mode, const unsigned *sizes,
+                          const bool *active)
+{
+   prob_t *P = xcalloc(sizeof(prob_t));
+   P->c = c;
+   P->nsc = c->nvars;
+   P->na = c->narrays;
+   P->curc = -1;
+   P->pass = 1;
+
+   P->ebase = NEW(int, c->narrays);
+   P->sizes = NEW(unsigned, c->narrays);
+   int nelem = 0;
+   for (unsigned a = 0; a < c->narrays; a++) {
+      const carr_t *ar = &c->arrays[a];
+      P->sizes[a] = mode == 2 ? sizes[a] : ar->len;
+      if (mode == 2 || !ar->size_rand) {
+         P->ebase[a] = P->nsc + P->na + nelem;
+         nelem += P->sizes[a];
+      }
+      else
+         P->ebase[a] = -1;
+   }
+
+   P->nv = P->nsc + P->na + nelem;
+   P->vars = NEW(pvar_t, P->nv);
+   P->vals = NEW(int64_t, P->nv);
+
+   for (int v = 0; v < P->nsc; v++) {
+      const cvar_t *cv = &c->vars[v];
+      pvar_t *pv = &P->vars[v];
+      *pv = (pvar_t){ .dom = scalar_dom(P, cv), .width = cv->width,
+                      .sgn = cv->sgn, .dist = -1, .pop = -1, .cur = cv->cur };
+      if (cv->rc)
+         pv->rc = (randc_t *)(uintptr_t)*cv->rc;
+   }
+
+   for (unsigned a = 0; a < c->narrays; a++) {
+      const carr_t *ar = &c->arrays[a];
+      pvar_t *pv = &P->vars[P->nsc + a];
+      *pv = (pvar_t){ .width = 32, .sgn = true, .dist = -1, .pop = -1,
+                      .cur = ar->len, .size = mode == 1 && ar->size_rand };
+      if (mode == 2 || !ar->size_rand)
+         pv->dom = dom_interval(P->sizes[a], P->sizes[a]);
+      else
+         pv->dom = dom_interval(0, MAX_SIZE);
+
+      if (P->ebase[a] < 0)
+         continue;
+
+      for (unsigned i = 0; i < P->sizes[a]; i++) {
+         pvar_t *ev = &P->vars[P->ebase[a] + i];
+         const int64_t init = i < ar->ninit ? ar->init[i] : 0;
+         *ev = (pvar_t){ .width = ar->width, .sgn = ar->sgn, .dist = -1, .pop = -1,
+                         .cur = init };
+         if (ar->elems_rand)
+            ev->dom = type_dom(ar->width, ar->sgn);
+         else
+            ev->dom = dom_interval(mathv(init, ar->sgn),
+                                   mathv(init, ar->sgn));
+      }
+   }
+
+   ictx_t I = { .c = c, .ebase = P->ebase, .sizes = P->sizes,
+                .nsc = P->nsc };
+   P->base_nodes = c->nnodes;
+   P->base_sets = c->nsets;
+
+   for (unsigned k = 0; k < c->ncons; k++) {
+      const ccons_t *cc = &c->cons[k];
+      if (cc->dead)
+         continue;
+
+      if (cc->kind == C_FOREACH) {
+         if (mode == 2)
+            expand_foreach(P, &I, cc, active);
+         continue;
+      }
+
+      if (cc->soft >= 0 && !active[cc->soft])
+         continue;
+
+      bool skip = false;
+      if (mode == 1) {
+         rsize_t rs = { false, c };
+         if (cc->kind == C_REQ)
+            visit(c, cc->root, rsize_cb, &rs);
+         else {
+            for (unsigned i = 0; i < cc->count; i++)
+               visit(c, c->uniq[cc->first + i], rsize_cb, &rs);
+         }
+         skip = rs.bad;
+      }
+      if (skip)
+         continue;
+
+      I.nb = 0;
+      if (cc->kind == C_REQ)
+         add_pcons(P, C_REQ, inst(&I, cc->root), cc->soft);
+      else {
+         add_pcons(P, C_UNIQUE, -1, cc->soft);
+         P->cons[P->ncons - 1].unstart = P->nun;
+         P->cons[P->ncons - 1].unn = cc->count;
+         for (unsigned i = 0; i < cc->count; i++)
+            VEC_PUSH(P->un, P->nun, P->cun, inst(&I, c->uniq[cc->first + i]));
+      }
+   }
+
+   if (I.toobig) {
+      // Too large: leave no constraints satisfiable
+      P->ncons = 0;
+      add_pcons(P, C_REQ, mk_fail(c), -1);
+      }
+   // Weighted choice applies to a distribution at the root of a constraint
+   for (int ci = 0; ci < P->ncons; ci++) {
+      const pcons_t *pc = &P->cons[ci];
+      if (pc->kind != C_REQ || pc->soft >= 0)
+         continue;
+      const node_t *nd = &c->nodes[pc->root];
+      const node_t *an = &c->nodes[nd->a];
+      if (nd->kind == N_DIST && an->kind == N_VAR
+          && P->vars[an->aux].dist < 0)
+         P->vars[an->aux].dist = nd->aux;
+      else if (nd->kind == N_BIN && nd->op == CRV_IMPLIES
+               && c->nodes[nd->b].kind == N_DIST) {
+         const node_t *dn = &c->nodes[nd->b];
+         const node_t *dv = &c->nodes[dn->a];
+         if (dv->kind == N_VAR) {
+            pvar_t *pv = &P->vars[dv->aux];
+            pv->gd = xrealloc(pv->gd, (pv->ngd + 1) * 2 * sizeof(int));
+            pv->gd[pv->ngd * 2] = nd->a;
+            pv->gd[pv->ngd * 2 + 1] = dn->aux;
+            pv->ngd++;
+         }
+      }
+   }
+
+   // A variable counted by a constraint takes values with a suitable count
+   for (unsigned n = 0; n < c->nnodes; n++) {
+      const node_t *nd = &c->nodes[n];
+      if (nd->kind != N_UN || nd->op != CRV_POPCNT)
+         continue;
+
+      const node_t *an = &c->nodes[nd->a];
+      if (an->kind == N_CAST && !an->sgn)
+         an = &c->nodes[an->a];
+
+      if (an->kind == N_VAR && (unsigned)an->aux < (unsigned)P->nv
+          && !P->vars[an->aux].sgn && P->vars[an->aux].pop < 0
+          && P->vars[an->aux].width <= 64)
+         P->vars[an->aux].pop = n;
+   }
+
+   decompose(P);
+   P->nn = c->nnodes;
+
+   // Prepare sets and distributions now the nodes are final
+   for (unsigned i = 0; i < c->nsets; i++)
+      set_prep(c, &c->sets[i]);
+   for (unsigned i = 0; i < c->ndists; i++)
+      dist_prep(&c->dists[i]);
+
+   P->vmark = xcalloc((P->nv ? P->nv : 1) * sizeof(int));
+   P->vstart = NEW(int, P->ncons + 1);
+   for (int ci = 0; ci < P->ncons; ci++) {
+      const pcons_t *pc = &P->cons[ci];
+      vctx_t V = { P, ci };
+      P->vstart[ci] = P->nvl;
+      if (pc->kind == C_REQ)
+         visit(c, pc->root, vars_cb, &V);
+      else {
+         for (int i = 0; i < pc->unn; i++)
+            visit(c, P->un[pc->unstart + i], vars_cb, &V);
+      }
+   }
+   P->vstart[P->ncons] = P->nvl;
+
+   P->wstart = xcalloc((P->nv + 1) * sizeof(int));
+   for (int i = 0; i < P->nvl; i++)
+      P->wstart[P->vl[i] + 1]++;
+   for (int v = 0; v < P->nv; v++)
+      P->wstart[v + 1] += P->wstart[v];
+   P->wlist = NEW(int, P->nvl);
+   int *fill = NEW(int, P->nv);
+   memcpy(fill, P->wstart, P->nv * sizeof(int));
+   for (int ci = 0; ci < P->ncons; ci++) {
+      for (int i = P->vstart[ci]; i < P->vstart[ci + 1]; i++)
+         P->wlist[fill[P->vl[i]]++] = ci;
+   }
+   free(fill);
+
+   // A size that nothing constrains keeps its value
+   for (unsigned a = 0; a < c->narrays; a++) {
+      const int v = P->nsc + a;
+      if (P->vars[v].size && P->wstart[v] == P->wstart[v + 1]) {
+         P->vars[v].dom = dom_interval(P->sizes[a], P->sizes[a]);
+         P->vars[v].size = false;
+      }
+   }
+
+   P->iv = NEW(ivl_t, P->nn);
+   P->stamp = xcalloc((P->nn ? P->nn : 1) * sizeof(uint32_t));
+   P->uproc = xcalloc(P->nun ? P->nun : 1);
+   P->pend = xcalloc(((P->ncons + 63) / 64 + 1) * sizeof(uint64_t));
+
+   P->budget = 800000 + 80 * ((int64_t)P->nn + P->nv);
+   for (int ci = 0; ci < P->ncons; ci++)
+      P->budget += 24 * (int64_t)P->cons[ci].unn * P->cons[ci].unn;
+
+   return P;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Propagation
+
+static inline ivl_t dom_iv(const dom_t *d)
+{
+   return ivl(d->lo, d->hi);
+}
+
+static void enqueue(prob_t *P, int ci)
+{
+   const uint64_t bit = UINT64_C(1) << (ci & 63);
+   if (!(P->pend[ci >> 6] & bit)) {
+      P->pend[ci >> 6] |= bit;
+      P->qn++;
+   }
+}
+
+// Find a queued constraint scanning up from, or down from, a position
+static int next_pending(const prob_t *P, int pos, bool up)
+{
+   if (pos < 0 || pos >= P->ncons)
+      return -1;
+
+   int w = pos >> 6;
+   if (up) {
+      uint64_t bits = P->pend[w] & (~UINT64_C(0) << (pos & 63));
+      for (const int nw = (P->ncons + 63) / 64; ; ) {
+         if (bits)
+            return (w << 6) + __builtin_ctzll(bits);
+         else if (++w >= nw)
+            return -1;
+         bits = P->pend[w];
+      }
+   }
+   else {
+      uint64_t bits = P->pend[w];
+      if ((pos & 63) != 63)
+         bits &= (UINT64_C(1) << ((pos & 63) + 1)) - 1;
+      for (;;) {
+         if (bits)
+            return (w << 6) + 63 - __builtin_clzll(bits);
+         else if (--w < 0)
+            return -1;
+         bits = P->pend[w];
+      }
+   }
+}
+
+static void notify(prob_t *P, int v)
+{
+   for (int i = P->wstart[v]; i < P->wstart[v + 1]; i++) {
+      if (P->wlist[i] != P->curc)
+         enqueue(P, P->wlist[i]);
+   }
+}
+
+static void commit_dom(prob_t *P, int v, dom_t nd)
+{
+   const trail_t t = { v, P->vars[v].dom };
+   VEC_PUSH(P->trail, P->ntrail, P->ctrail, t);
+   P->vars[v].dom = nd;
+   P->changed++;
+   notify(P, v);
+}
+
+static void undo_to(prob_t *P, int mark)
+{
+   while (P->ntrail > mark) {
+      const trail_t *t = &P->trail[--P->ntrail];
+      if (t->var < 0)
+         P->uproc[-2 - t->var] = 0;
+      else
+         P->vars[t->var].dom = t->old;
+   }
+}
+
+static bool var_clip(prob_t *P, int v, i128 lo, i128 hi)
+{
+   dom_t d = P->vars[v].dom;
+   if (!dom_clip(&d, lo, hi))
+      return true;
+   else if (dom_empty(&d))
+      return false;
+
+   commit_dom(P, v, d);
+   return true;
 }
 
 static bool var_remove(prob_t *P, int v, i128 val)
@@ -1703,6 +2910,147 @@ static ivl_t fwd_member(prob_t *P, const node_t *nd, ivl_t x)
    return r;
 }
 
+static ivl_t fwd(prob_t *P, int n)
+{
+   if (P->stamp[n] == P->pass)
+      return P->iv[n];
+
+   const node_t *nd = &P->c->nodes[n];
+   ivl_t r;
+   P->work++;
+
+   switch ((nkind_t)nd->kind) {
+   case N_CONST:
+      r = ivl(mathv(nd->val, nd->sgn), mathv(nd->val, nd->sgn));
+      break;
+   case N_VAR:
+      r = dom_iv(&P->vars[nd->aux].dom);
+      break;
+   case N_ASIZE:
+      r = dom_iv(&P->vars[P->nsc + nd->aux].dom);
+      break;
+   case N_BIN:
+      {
+         const ivl_t a = fwd(P, nd->a);
+         const ivl_t b = fwd(P, nd->b);
+         r = fwd_bin(P, nd, a, b);
+      }
+      break;
+   case N_UN:
+      {
+         const ivl_t a = fwd(P, nd->a);
+         const node_t *an = &P->c->nodes[nd->a];
+         if (iv_empty(a))
+            r = a;
+         else if (iv_pt(a)) {
+            const i128 m = mathv(ev_un(nd, an, st(a.lo)), nd->sgn);
+            r = ivl(m, m);
+         }
+         else {
+            switch ((crv_unary_t)nd->op) {
+            case CRV_NEG:
+               r = wrap(ivl(-a.hi, -a.lo), nd->width, nd->sgn);
+               break;
+            case CRV_INV:
+               if (nd->sgn)
+                  r = ivl(-a.hi - 1, -a.lo - 1);
+               else {
+                  const i128 mx = tmax(nd->width, false);
+                  r = ivl(mx - a.hi, mx - a.lo);
+               }
+               break;
+            case CRV_LOG_NOT:
+               r = is_false(a) ? ivl(1, 1) : !can0(a) ? ivl(0, 0) : ivl(0, 1);
+               break;
+            case CRV_REDUCE_OR:
+               r = !can0(a) ? ivl(1, 1) : ivl(0, 1);
+               break;
+            case CRV_POPCNT:
+               {
+                  const node_t *an = &P->c->nodes[nd->a];
+                  r = ivl(a.lo > 0 ? 1 : 0, a.hi == 0 ? 0 : an->width);
+               }
+               break;
+            default:
+               r = ivl(0, 1);
+               break;
+            }
+         }
+      }
+      break;
+   case N_CAST:
+      {
+         const ivl_t a = fwd(P, nd->a);
+         r = wrap(a, nd->width, nd->sgn);
+      }
+      break;
+   case N_COND:
+      {
+         const ivl_t t = fwd(P, nd->a);
+         const ivl_t x = fwd(P, nd->b);
+         const ivl_t y = fwd(P, nd->c);
+         r = ivl(1, 0);
+         if (!iv_empty(t)) {
+            if (can1(t)) r = hull(r, x);
+            if (can0(t)) r = hull(r, y);
+         }
+      }
+      break;
+   case N_AELEM:
+      {
+         const ivl_t x = fwd(P, nd->a);
+         const i128 size = P->sizes[nd->aux];
+         const i128 lo = x.lo < 0 ? 0 : x.lo;
+         const i128 hi = x.hi >= size ? size - 1 : x.hi;
+         r = ivl(1, 0);
+         if (!iv_empty(x) && lo <= hi) {
+            const int base = P->ebase[nd->aux];
+            for (i128 k = lo; k <= hi; k++)
+               r = hull(r, dom_iv(&P->vars[base + (int)k].dom));
+            P->work += (int64_t)(hi - lo) / 8;
+         }
+      }
+      break;
+   case N_ASUM:
+      {
+         const int base = P->ebase[nd->aux];
+         const unsigned size = P->sizes[nd->aux];
+         i128 lo = 0, hi = 0;
+         for (unsigned i = 0; i < size; i++) {
+            lo += P->vars[base + i].dom.lo;
+            hi += P->vars[base + i].dom.hi;
+         }
+         P->work += size / 8;
+         r = wrap(ivl(lo, hi), nd->width, nd->sgn);
+      }
+      break;
+   case N_INSIDE:
+      {
+         const cset_t *cs = &P->c->sets[nd->aux];
+         const ivl_t x = fwd(P, nd->a);
+         if (!cs->allconst) {
+            for (unsigned i = 0; i < cs->n; i++) {
+               fwd(P, cs->items[i].lo);
+               if (cs->items[i].hi >= 0)
+                  fwd(P, cs->items[i].hi);
+            }
+         }
+         r = fwd_member(P, nd, x);
+      }
+      break;
+   case N_DIST:
+      r = fwd_member(P, nd, fwd(P, nd->a));
+      break;
+   default:
+      r = ivl(1, 0);
+      break;
+   }
+
+   P->iv[n] = r;
+   P->stamp[n] = P->pass;
+   return r;
+}
+
 static bool bwd_true(prob_t *P, int n)
 {
    const ivl_t x = P->iv[n];
@@ -1975,6 +3323,271 @@ static bool bwd_arith(prob_t *P, const node_t *nd, ivl_t r)
    }
 }
 
+static bool bwd_member(prob_t *P, const node_t *nd, ivl_t r)
+{
+   const int a = nd->a;
+   const node_t *an = &P->c->nodes[a];
+   const int var = node_var(P, an);
+   const amark_t m = arena_mark(&P->tmp);
+   const range_t *rr;
+   int n;
+   bool ok;
+
+   if (is_true(r) || (r.lo == 1 && r.hi == 1)) {
+      n = node_ranges(P, nd, false, &rr);
+      if (var >= 0) {
+         ok = var_apply(P, var, rr, n, true);
+         if (ok)
+            P->iv[a] = dom_iv(&P->vars[var].dom);
+      }
+      else {
+         const ivl_t x = P->iv[a];
+         i128 lo, hi;
+         if (rng_next(rr, n, x.lo, &lo) && rng_prev(rr, n, x.hi, &hi))
+            ok = bwd(P, a, ivl(lo, hi));
+         else
+            ok = false;
+      }
+   }
+   else {
+      n = node_ranges(P, nd, true, &rr);
+      if (var >= 0) {
+         ok = var_apply(P, var, rr, n, false);
+         if (ok)
+            P->iv[a] = dom_iv(&P->vars[var].dom);
+      }
+      else {
+         // Trim from the ends only
+         ivl_t x = P->iv[a];
+         for (int i = 0; i < n; i++) {
+            if (rr[i].lo <= x.lo && rr[i].hi >= x.lo)
+               x.lo = rr[i].hi + 1;
+         }
+         for (int i = n - 1; i >= 0; i--) {
+            if (rr[i].lo <= x.hi && rr[i].hi >= x.hi)
+               x.hi = rr[i].lo - 1;
+         }
+         ok = bwd(P, a, x);
+      }
+   }
+
+   arena_reset(&P->tmp, m);
+   return ok;
+}
+
+static bool bwd(prob_t *P, int n, ivl_t r)
+{
+   const ivl_t cur = P->iv[n];
+   const node_t *nd = &P->c->nodes[n];
+   r = isect(r, cur);
+   if (iv_empty(r))
+      return false;
+
+   const int var = node_var(P, nd);
+   if (var >= 0) {
+      if (!var_clip(P, var, r.lo, r.hi))
+         return false;
+      P->iv[n] = dom_iv(&P->vars[var].dom);
+      return true;
+   }
+   else if (r.lo == cur.lo && r.hi == cur.hi)
+      return true;
+
+   P->iv[n] = r;
+   P->work++;
+
+   switch ((nkind_t)nd->kind) {
+   case N_BIN:
+      switch ((crv_binary_t)nd->op) {
+      case CRV_LOG_AND:
+         if (r.lo == 1)
+            return bwd_true(P, nd->a) && bwd_true(P, nd->b);
+         else if (r.hi == 0) {
+            if (is_true(P->iv[nd->a]))
+               return bwd_false(P, nd->b);
+            else if (is_true(P->iv[nd->b]))
+               return bwd_false(P, nd->a);
+         }
+         return true;
+      case CRV_LOG_OR:
+         if (r.hi == 0)
+            return bwd_false(P, nd->a) && bwd_false(P, nd->b);
+         else if (r.lo == 1) {
+            if (is_false(P->iv[nd->a]))
+               return bwd_true(P, nd->b);
+            else if (is_false(P->iv[nd->b]))
+               return bwd_true(P, nd->a);
+            return bwd_or_union(P, n);
+         }
+         return true;
+      case CRV_IMPLIES:
+         if (r.hi == 0)
+            return bwd_true(P, nd->a) && bwd_false(P, nd->b);
+         else if (r.lo == 1) {
+            if (is_true(P->iv[nd->a]))
+               return bwd_true(P, nd->b);
+            else if (is_false(P->iv[nd->b]))
+               return bwd_false(P, nd->a);
+         }
+         return true;
+      case CRV_EQ: case CRV_NE: case CRV_LT:
+      case CRV_LE: case CRV_GT: case CRV_GE:
+         if (r.lo == 1)
+            return enforce_rel(P, nd->op, nd->a, nd->b);
+         else if (r.hi == 0)
+            return enforce_rel(P, negate_rel(nd->op), nd->a, nd->b);
+         return true;
+      default:
+         return bwd_arith(P, nd, r);
+      }
+
+   case N_UN:
+      switch ((crv_unary_t)nd->op) {
+      case CRV_NEG:
+         return bwd(P, nd->a, wrap(ivl(-r.hi, -r.lo), nd->width, nd->sgn));
+      case CRV_INV:
+         if (nd->sgn)
+            return bwd(P, nd->a, ivl(-r.hi - 1, -r.lo - 1));
+         else {
+            const i128 mx = tmax(nd->width, false);
+            return bwd(P, nd->a, ivl(mx - r.hi, mx - r.lo));
+         }
+      case CRV_LOG_NOT:
+         if (r.lo == 1)
+            return bwd_false(P, nd->a);
+         else if (r.hi == 0)
+            return bwd_true(P, nd->a);
+         return true;
+      case CRV_REDUCE_OR:
+         if (r.lo == 1)
+            return bwd_true(P, nd->a);
+         else if (r.hi == 0)
+            return bwd_false(P, nd->a);
+         return true;
+      case CRV_REDUCE_AND:
+         if (r.lo == 1) {
+            const node_t *an = &P->c->nodes[nd->a];
+            const i128 ones = an->sgn ? -1 : (i128)wmask(an->width);
+            return bwd(P, nd->a, ivl(ones, ones));
+         }
+         return true;
+      case CRV_POPCNT:
+         {
+            const node_t *an = &P->c->nodes[nd->a];
+            if (r.hi <= 0)
+               return bwd(P, nd->a, ivl(0, 0));
+            else if (r.lo >= an->width) {
+               const i128 ones = an->sgn ? -1 : (i128)wmask(an->width);
+               return bwd(P, nd->a, ivl(ones, ones));
+            }
+            return true;
+         }
+      default:
+         return true;
+      }
+
+   case N_CAST:
+      {
+         const ivl_t a = P->iv[nd->a];
+         if (a.lo >= tmin(nd->width, nd->sgn)
+             && a.hi <= tmax(nd->width, nd->sgn))
+            return bwd(P, nd->a, r);
+         else if (iv_pt(r) && a.lo >= 0 && nd->width < 64)
+            return trim_mod(P, nd->a, (i128)1 << nd->width,
+                            r.lo & (i128)wmask(nd->width));
+         else if (nd->width <= 64) {
+            // The operand is one of the values congruent to the result
+            const i128 m = (i128)1 << nd->width;
+            const i128 rl = MAX(r.lo, tmin(nd->width, nd->sgn));
+            const i128 rh = MIN(r.hi, tmax(nd->width, nd->sgn));
+            if (rl > rh)
+               return false;
+
+            const i128 kmin = cdiv(a.lo - rh, m), kmax = fdiv(a.hi - rl, m);
+            if (kmin > kmax)
+               return false;
+
+            const i128 lo = MAX(a.lo, rl + kmin * m);
+            const i128 hi = MIN(a.hi, rh + kmax * m);
+            return lo <= hi && bwd(P, nd->a, ivl(lo, hi));
+         }
+         return true;
+      }
+
+   case N_COND:
+      {
+         const ivl_t t = P->iv[nd->a];
+         if (is_true(t))
+            return bwd(P, nd->b, r);
+         else if (is_false(t))
+            return bwd(P, nd->c, r);
+
+         const bool okb = !iv_empty(isect(P->iv[nd->b], r));
+         const bool okc = !iv_empty(isect(P->iv[nd->c], r));
+         if (!okb && !okc)
+            return false;
+         else if (!okb)
+            return bwd_false(P, nd->a) && bwd(P, nd->c, r);
+         else if (!okc)
+            return bwd_true(P, nd->a) && bwd(P, nd->b, r);
+         return true;
+      }
+
+   case N_INSIDE:
+   case N_DIST:
+      if (r.lo == 1 || r.hi == 0)
+         return bwd_member(P, nd, r);
+      return true;
+
+   case N_ASUM:
+      {
+         const int base = P->ebase[nd->aux];
+         const unsigned size = P->sizes[nd->aux];
+         i128 lo = 0, hi = 0;
+         for (unsigned i = 0; i < size; i++) {
+            lo += P->vars[base + i].dom.lo;
+            hi += P->vars[base + i].dom.hi;
+         }
+         if (lo < tmin(nd->width, nd->sgn) || hi > tmax(nd->width, nd->sgn))
+            return true;
+
+         P->work += size / 8;
+         for (unsigned i = 0; i < size; i++) {
+            const dom_t *d = &P->vars[base + i].dom;
+            if (!var_clip(P, base + i, r.lo - (hi - d->hi),
+                          r.hi - (lo - d->lo)))
+               return false;
+         }
+         return true;
+      }
+
+   case N_AELEM:
+      {
+         const i128 size = P->sizes[nd->aux];
+         const int base = P->ebase[nd->aux];
+         if (!bwd(P, nd->a, ivl(0, size - 1)))
+            return false;
+
+         ivl_t x = P->iv[nd->a];
+         while (x.lo <= x.hi
+                && iv_empty(isect(dom_iv(&P->vars[base + (int)x.lo].dom), r)))
+            x.lo++;
+         while (x.lo <= x.hi
+                && iv_empty(isect(dom_iv(&P->vars[base + (int)x.hi].dom), r)))
+            x.hi--;
+         P->work += (int64_t)(P->iv[nd->a].hi - P->iv[nd->a].lo) / 8;
+         if (!bwd(P, nd->a, x))
+            return false;
+         if (iv_pt(x) && !var_clip(P, base + (int)x.lo, r.lo, r.hi))
+            return false;
+         return true;
+      }
+
+   default:
+      return true;
+   }
+}
+
 static int i128_cmp(const void *a, const void *b)
 {
    const i128 x = *(const i128 *)a, y = *(const i128 *)b;
@@ -2200,6 +3813,36 @@ static bool propagate(prob_t *P)
    return ok;
 }
 
+////////////////////////////////////////////////////////////////////////////////
+// Search
+
+typedef enum { S_SAT, S_UNSAT, S_GIVEUP } sres_t;
+
+typedef enum { F_VALUE, F_HALF1, F_HALF2 } fkind_t;
+
+typedef struct {
+   int     var;
+   i128    val, lo, hi;
+   int     trail;
+   int     pos;
+   fkind_t kind;
+} frame_t;
+
+typedef struct {
+   uint32_t a, b, c;
+   uint64_t r;
+   int      var;
+} okey_t;
+
+static int okey_cmp(const void *x, const void *y)
+{
+   const okey_t *a = x, *b = y;
+   if (a->a != b->a) return a->a < b->a ? -1 : 1;
+   if (a->b != b->b) return a->b < b->b ? -1 : 1;
+   if (a->c != b->c) return a->c < b->c ? -1 : 1;
+   return a->r < b->r ? -1 : a->r > b->r ? 1 : 0;
+}
+
 static unsigned ilog2_128(i128 n)
 {
    unsigned r = 0;
@@ -2208,6 +3851,160 @@ static unsigned ilog2_128(i128 n)
       r++;
    }
    return r;
+}
+
+static void compute_levels(prob_t *P)
+{
+   const crv_t *c = P->c;
+   for (int round = 0; round < 16; round++) {
+      bool changed = false;
+      for (unsigned i = 0; i < c->nedges; i++) {
+         const edge_t *e = &c->edges[i];
+         unsigned bl = 0;
+         if (!e->array)
+            bl = P->vars[e->before].level;
+         else {
+            bl = P->vars[P->nsc + e->before].level;
+            const int base = P->ebase[e->before];
+            for (int k = 0; base >= 0 && k < (int)P->sizes[e->before]; k++) {
+               if (P->vars[base + k].level > bl)
+                  bl = P->vars[base + k].level;
+            }
+         }
+         if (P->vars[e->after].level < bl + 1) {
+            P->vars[e->after].level = bl + 1;
+            changed = true;
+         }
+      }
+      if (!changed)
+         break;
+   }
+
+   for (int i = 0; i < P->ndec; i++) {
+      const dec_t *d = &P->dec[i];
+      for (int k = 0; k < d->nf; k++)
+         P->vars[d->f0 + k].level = P->vars[d->var].level;
+   }
+}
+
+static int build_order(prob_t *P, int attempt, int **out)
+{
+   okey_t *keys = NEW(okey_t, P->nv);
+   int n = 0;
+   for (int v = 0; v < P->nv; v++) {
+      const pvar_t *pv = &P->vars[v];
+      if (pv->dom.lo == pv->dom.hi || pv->derived)
+         continue;
+
+      okey_t *k = &keys[n++];
+      k->var = v;
+      k->a = pv->rc ? 0 : 1;
+      k->b = pv->size ? 1 << 20 : pv->level;
+      k->c = pv->dist >= 0 || pv->ngd > 0 ? 0 : pv->size ? 1 : 2;
+      if (attempt > 0)
+         k->c = k->c * 128 + ilog2_128(dom_count(&pv->dom, pv->dom.lo,
+                                                  pv->dom.hi));
+      k->r = rnd64();
+   }
+
+   qsort(keys, n, sizeof(okey_t), okey_cmp);
+
+   int *ord = NEW(int, n);
+   for (int i = 0; i < n; i++)
+      ord[i] = keys[i].var;
+   free(keys);
+
+   *out = ord;
+   return n;
+}
+
+static i128 pick_randc(prob_t *P, const pvar_t *pv)
+{
+   randc_t *rc = pv->rc;
+   const dom_t *d = &pv->dom;
+   uint32_t cnt = 0;
+
+   if (rc->n == 0) {
+      const i128 total = dom_count(d, d->lo, d->hi);
+      if (total <= 4096) {
+         i128 *unused = NEW(i128, (size_t)total);
+         int nunused = 0;
+         P->work += (int)total / 8 + 1;
+         for (int i = 0; i < (int)total; i++) {
+            const i128 v = dom_nth(d, d->lo, d->hi, i);
+            if (!randc_used(rc, randc_key((uint64_t)v, pv->width)))
+               unused[nunused++] = v;
+         }
+         i128 result;
+         if (nunused > 0)
+            result = unused[rnd_below(nunused)];
+         else {
+            randc_clear(rc);
+            result = dom_nth(d, d->lo, d->hi, rnd_i128(total));
+         }
+         free(unused);
+         return result;
+      }
+
+      i128 v = 0;
+      for (int tries = 0; tries < 32; tries++) {
+         v = dom_nth(d, d->lo, d->hi, rnd_i128(total));
+         if (!randc_used(rc, randc_key((uint64_t)v, pv->width)))
+            break;
+      }
+      return v;
+   }
+
+   if (rc->left > 0 && dom_count(d, d->lo, d->hi) == rc->n)
+      return nrm(rc->vals[rnd_below(rc->left)], pv->width, pv->sgn);
+
+   P->work += rc->left / 8 + 1;
+   for (uint32_t i = 0; i < rc->left; i++) {
+      if (dom_has(d, nrm(rc->vals[i], pv->width, pv->sgn)))
+         cnt++;
+   }
+
+   if (cnt == 0)
+      return dom_nth(d, d->lo, d->hi, rnd_i128(dom_count(d, d->lo, d->hi)));
+
+   uint32_t k = rnd_below(cnt);
+   for (uint32_t i = 0; i < rc->left; i++) {
+      const i128 v = nrm(rc->vals[i], pv->width, pv->sgn);
+      if (dom_has(d, v) && k-- == 0)
+         return v;
+   }
+   return d->lo;
+}
+
+static bool pick_dist(prob_t *P, const pvar_t *pv, int dist, i128 *out)
+{
+   const cdist_t *cd = &P->c->dists[dist];
+   const dom_t *d = &pv->dom;
+   double total = 0.0;
+
+   P->work += cd->npr / 4 + 1;
+   for (unsigned i = 0; i < cd->npr; i++)
+      total += cd->unit[i] * (double)dom_count(d, cd->pr[i].lo, cd->pr[i].hi);
+
+   if (total <= 0.0)
+      return false;
+
+   double r = rnd_dbl() * total;
+   int last = -1;
+   for (unsigned i = 0; i < cd->npr; i++) {
+      const i128 cnt = dom_count(d, cd->pr[i].lo, cd->pr[i].hi);
+      if (cnt == 0)
+         continue;
+      last = i;
+      const double w = cd->unit[i] * (double)cnt;
+      if (r < w)
+         break;
+      r -= w;
+   }
+
+   const i128 cnt = dom_count(d, cd->pr[last].lo, cd->pr[last].hi);
+   *out = dom_nth(d, cd->pr[last].lo, cd->pr[last].hi, rnd_i128(cnt));
+   return true;
 }
 
 // Values refuted for a variable in a domain too big to remove them from
@@ -2237,6 +4034,321 @@ static bool is_tabu(const pvar_t *pv, i128 x)
          return true;
    }
    return false;
+}
+
+static bool pick_popcount(prob_t *P, const pvar_t *pv, i128 *out)
+{
+   // A value with a number of one bits in the range allowed for the count
+
+   const ivl_t r = P->iv[pv->pop];
+   const unsigned width = pv->width;
+   const i128 lo = MAX(r.lo, 0), hi = MIN(r.hi, (i128)width);
+   if (lo > hi)
+      return false;
+
+   for (int attempt = 0; attempt < 8; attempt++) {
+      const unsigned k = lo + rnd_below((uint64_t)(hi - lo + 1));
+
+      uint8_t pos[64];
+      for (unsigned i = 0; i < width; i++)
+         pos[i] = i;
+
+      uint64_t bits = 0;
+      for (unsigned i = 0; i < k; i++) {
+         const unsigned j = i + rnd_below(width - i);
+         const uint8_t t = pos[i];
+         pos[i] = pos[j];
+         pos[j] = t;
+         bits |= UINT64_C(1) << pos[i];
+      }
+
+      const i128 x = nrm(bits, width, false);
+      if (dom_has(&pv->dom, x)) {
+         *out = x;
+         return true;
+      }
+   }
+
+   return false;
+}
+
+typedef struct {
+   prob_t *P;
+   bool    ok;
+} gctx_t;
+
+static void guard_cb(void *ctx, const node_t *nd, int n)
+{
+   gctx_t *g = ctx;
+   int var = -1;
+   switch ((nkind_t)nd->kind) {
+   case N_VAR:
+      var = nd->aux;
+      break;
+   case N_ASIZE:
+      var = g->P->nsc + nd->aux;
+      break;
+   case N_AELEM:
+   case N_INDEX:
+      g->ok = false;
+      return;
+   default:
+      return;
+   }
+
+   const dom_t *d = &g->P->vars[var].dom;
+   if (d->lo != d->hi)
+      g->ok = false;
+   else
+      g->P->vals[var] = st(d->lo);
+}
+
+// Whether a guard is true now that the variables it reads are all known
+static bool guard_true(prob_t *P, int node)
+{
+   gctx_t g = { P, true };
+   visit(P->c, node, guard_cb, &g);
+   if (!g.ok)
+      return false;
+
+   ectx_t E = { .c = P->c, .vals = P->vals, .nsc = P->nsc,
+                .ebase = P->ebase, .sizes = P->sizes };
+   const int64_t v = ev(&E, node);
+   return !E.fail && v != 0;
+}
+
+static i128 pick_val(prob_t *P, int v)
+{
+   const pvar_t *pv = &P->vars[v];
+   const dom_t *d = &pv->dom;
+
+   P->work += dom_nr(d) / 8;
+   if (pv->rc)
+      return pick_randc(P, pv);
+
+   i128 x;
+   if (pv->dist >= 0 && pick_dist(P, pv, pv->dist, &x))
+      return x;
+
+   for (int i = 0; i < pv->ngd; i++) {
+      if (guard_true(P, pv->gd[i * 2]) && pick_dist(P, pv, pv->gd[i * 2 + 1], &x))
+         return x;
+   }
+
+   if (pv->pop >= 0 && pick_popcount(P, pv, &x))
+      return x;
+
+   i128 n = dom_count(d, d->lo, d->hi);
+   if (pv->size && n > MAX_SIZE_CHOICES)
+      n = 32;
+   return dom_nth(d, d->lo, d->hi, rnd_i128(n));
+}
+
+static bool check_all(prob_t *P)
+{
+   for (int v = 0; v < P->nv; v++)
+      P->vals[v] = st(P->vars[v].dom.lo);
+
+   for (int i = 0; i < P->ndec; i++) {
+      const dec_t *d = &P->dec[i];
+      uint64_t x = 0;
+      for (int k = 0; k < d->nf; k++)
+         x |= (uint64_t)P->vals[d->f0 + k] << d->pos[k];
+      P->vals[d->var] = x;
+   }
+
+   ectx_t E = { .c = P->c, .vals = P->vals, .nsc = P->nsc,
+                .ebase = P->ebase, .sizes = P->sizes };
+
+   for (int ci = 0; ci < P->ncons; ci++) {
+      const pcons_t *pc = &P->cons[ci];
+      E.fail = false;
+      if (pc->kind == C_REQ) {
+         const int64_t v = ev(&E, pc->root);
+         if (E.fail || v == 0)
+            return false;
+      }
+      else {
+         const amark_t m = arena_mark(&P->tmp);
+         i128 *tmp = arena_alloc(&P->tmp, (pc->unn + 1) * sizeof(i128));
+         bool ok = true;
+         for (int i = 0; i < pc->unn; i++) {
+            const int n = P->un[pc->unstart + i];
+            tmp[i] = mathv(ev(&E, n), P->c->nodes[n].sgn);
+            if (E.fail)
+               ok = false;
+         }
+         if (ok) {
+            qsort(tmp, pc->unn, sizeof(i128), i128_cmp);
+            for (int i = 1; i < pc->unn; i++) {
+               if (tmp[i] == tmp[i - 1])
+                  ok = false;
+            }
+         }
+         arena_reset(&P->tmp, m);
+         if (!ok)
+            return false;
+      }
+   }
+   return true;
+}
+
+// Values of a variable whose domain is wider than this are bisected after
+// a conflict rather than picked from at random, as with only a few of the
+// bits constrained a random value is very unlikely to be a solution
+#define SPLIT_MIN 64
+
+static bool splittable(const pvar_t *pv)
+{
+   return !pv->rc && !pv->size && pv->dist < 0 && pv->ngd == 0 && pv->pop < 0;
+}
+
+static sres_t dfs(prob_t *P, int attempt, int limit)
+{
+   int *ord;
+   const int nord = build_order(P, attempt, &ord);
+   int cfr = nord + 1;
+   frame_t *fr = NEW(frame_t, cfr);
+   int depth = 0, pos = 0, fails = 0;
+   sres_t res = S_GIVEUP;
+   bool ok = true;
+
+   for (;;) {
+      if (P->work > P->budget) {
+         P->oob = true;
+         break;
+      }
+
+      int v = -1;
+      while (pos < nord) {
+         const dom_t *d = &P->vars[ord[pos]].dom;
+         if (d->lo != d->hi) {
+            v = ord[pos];
+            break;
+         }
+         pos++;
+      }
+
+      if (v < 0) {
+         if (check_all(P)) {
+            res = S_SAT;
+            break;
+         }
+         ok = false;
+      }
+      else {
+         if (depth == cfr) {
+            cfr *= 2;
+            fr = xrealloc(fr, cfr * sizeof(frame_t));
+         }
+
+         const pvar_t *pv = &P->vars[v];
+         const i128 n = dom_count(&pv->dom, pv->dom.lo, pv->dom.hi);
+         if (pv->split && n > SPLIT_MIN) {
+            // Pick one half in proportion to the number of values in it
+            const i128 nl = n / 2;
+            const i128 m = dom_nth(&pv->dom, pv->dom.lo, pv->dom.hi, nl - 1);
+            const i128 lo = pv->dom.lo, hi = pv->dom.hi;
+            const bool left = rnd_i128(n) < nl;
+            frame_t f = { .var = v, .trail = P->ntrail, .pos = pos,
+                          .kind = F_HALF1 };
+            if (left) {
+               f.lo = m + 1;
+               f.hi = hi;
+            }
+            else {
+               f.lo = lo;
+               f.hi = m;
+            }
+            fr[depth++] = f;
+            ok = left ? var_clip(P, v, lo, m) && propagate(P)
+               : var_clip(P, v, m + 1, hi) && propagate(P);
+         }
+         else {
+            i128 x = pick_val(P, v);
+            if (pv->ntabu > 0
+                && (i128)pv->ntabu * 64 > n) {
+               for (int k = 0; k < 8 && is_tabu(pv, x); k++)
+                  x = pick_val(P, v);
+            }
+            fr[depth++] = (frame_t){ .var = v, .val = x, .trail = P->ntrail,
+                                     .pos = pos, .kind = F_VALUE };
+            ok = var_clip(P, v, x, x) && propagate(P);
+         }
+      }
+
+      while (!ok) {
+         if (P->oob)
+            goto done;
+         else if (depth == 0) {
+            res = S_UNSAT;
+            goto done;
+         }
+
+         const frame_t f = fr[--depth];
+         undo_to(P, f.trail);
+         pos = f.pos;
+         if (++fails > limit)
+            goto done;
+
+         P->work++;
+         tabu_trunc(P, depth);
+
+         if (f.kind == F_HALF1) {
+            fr[depth++] = (frame_t){ .var = f.var, .trail = f.trail,
+                                     .pos = f.pos, .kind = F_HALF2 };
+            ok = var_clip(P, f.var, f.lo, f.hi) && propagate(P);
+            continue;
+         }
+         else if (f.kind == F_HALF2)
+            continue;
+
+         pvar_t *fv = &P->vars[f.var];
+         const dom_t *fd = &fv->dom;
+         const i128 fn = dom_count(fd, fd->lo, fd->hi);
+         if (fn > SPLIT_MIN && splittable(fv))
+            fv->split = true;
+
+         if (fn > TABU_MIN) {
+            tabu_add(P, f.var, f.val, depth);
+            ok = true;
+         }
+         else
+            ok = var_remove(P, f.var, f.val) && propagate(P);
+      }
+   }
+
+ done:
+   tabu_trunc(P, -1);
+   free(ord);
+   free(fr);
+   return res;
+}
+
+static sres_t solve_prob(prob_t *P)
+{
+   for (int ci = 0; ci < P->ncons; ci++)
+      enqueue(P, ci);
+
+   if (!propagate(P))
+      return P->oob ? S_GIVEUP : S_UNSAT;
+
+   compute_levels(P);
+
+   const int root_trail = P->ntrail;
+   const amark_t am = arena_mark(&P->ar);
+   int limit = 12;
+
+   for (int attempt = 0; ; attempt++) {
+      const sres_t r = dfs(P, attempt, limit);
+      if (r != S_GIVEUP || P->oob)
+         return r;
+
+      undo_to(P, root_trail);
+      arena_reset(&P->ar, am);
+      if (limit < 100000)
+         limit *= 2;
+   }
 }
 
 typedef struct {
@@ -2300,3 +4412,87 @@ static bool solve_once(crv_t *c, const bool *active, sol_t *out)
    return false;
 }
 
+static void commit(crv_t *c, const sol_t *s)
+{
+   for (unsigned v = 0; v < c->nvars; v++) {
+      cvar_t *cv = &c->vars[v];
+      cv->cur = s->vals[v];
+
+      if (cv->rc) {
+         randc_t *rc = (randc_t *)(uintptr_t)*cv->rc;
+         if (rc->n == 0) {
+            randc_insert(rc, randc_key((uint64_t)cv->cur, cv->width));
+            if (cv->width < 64 && rc->nused >= UINT64_C(1) << cv->width) {
+               randc_clear(rc);
+            }
+            continue;
+         }
+
+         const uint32_t x = (uint64_t)cv->cur & wmask(cv->width);
+         uint32_t *pos = rc->vals + rc->n;
+         if (pos[x] >= rc->left)
+            rc->left = rc->n;
+
+         const uint32_t last = rc->left - 1, y = rc->vals[last];
+         rc->vals[pos[x]] = y;
+         pos[y] = pos[x];
+         rc->vals[last] = x;
+         pos[x] = last;
+         rc->left--;
+      }
+   }
+
+   for (unsigned a = 0; a < c->narrays; a++) {
+      carr_t *ar = &c->arrays[a];
+      const unsigned n = s->sizes[a];
+      int64_t *init = xcalloc((n ? n : 1) * sizeof(int64_t));
+      for (unsigned i = 0; i < n; i++)
+         init[i] = s->vals[s->ebase[a] + i];
+      free(ar->init);
+      ar->init = init;
+      ar->ninit = n;
+      ar->len = n;
+   }
+}
+
+bool crv_solve(crv_t *c)
+{
+   const int nsoft = c->nsoft;
+   bool *active = NEW(bool, nsoft);
+   sol_t sol = { 0 };
+
+   for (int i = 0; i < nsoft; i++)
+      active[i] = true;
+
+   bool ok = solve_once(c, active, &sol);
+
+   if (!ok && nsoft > 0) {
+      for (int i = 0; i < nsoft; i++)
+         active[i] = false;
+
+      // Check the hard constraints alone first so that an unsatisfiable
+      // set fails after one more attempt
+      ok = solve_once(c, active, &sol);
+
+      // Keep each soft constraint in turn from the highest priority if the
+      // others still allow it
+      for (int k = nsoft - 1; ok && k >= 0; k--) {
+         active[k] = true;
+
+         sol_t next = { 0 };
+         if (solve_once(c, active, &next)) {
+            sol_free(&sol);
+            sol = next;
+         }
+         else
+            active[k] = false;
+      }
+   }
+
+   if (ok)
+      commit(c, &sol);
+
+   sol_free(&sol);
+   free(active);
+   return ok;
+}
