@@ -1,0 +1,5 @@
+NOSUCH
+assert directive is not allowed in a vmode
+assume directive is not allowed in a vprop
+NOSUCH_VU
+no visible declaration for ZZZ

@@ -1,0 +1,3 @@
+35ns+0: vu_lib instance hit
+35ns+0: vu_lib instance hit
+55ns+0: vu_main hit

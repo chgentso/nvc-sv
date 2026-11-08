@@ -1,0 +1,2 @@
+45ns+0: vu_top bound by configuration
+65ns+0: vu_sub bound by configuration

@@ -1,0 +1,2 @@
+15ns+0: vu_a sees design scope
+55ns+0: vu_b sees design scope
