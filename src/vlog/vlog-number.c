@@ -322,7 +322,7 @@ number_t number_new(const char *str, const loc_t *loc)
                bignum_set_abit(result, bit, 1);
             bignum_set_bbit(result, bit, 1);
          }
-         if (*p == '_')
+         while (*p == '_')
             p++;
          if (*p != '\0')
             error_at(loc, "invalid character '%c' in decimal number %s",
@@ -1314,27 +1314,43 @@ void vec2_itoa(int size, const uint64_t *a, bool is_signed, text_buf_t *tb)
       if (negative)
          tb_append(tb, '-');
 
-      uint64_t tmp[n], ten[n], r[n];
+      uint64_t *tmp LOCAL = xmalloc_array(n, sizeof(uint64_t));
       memcpy(tmp, a, n * sizeof(uint64_t));
-      memset(ten, '\0', n * sizeof(uint64_t));
-      ten[0] = 10;
 
       if (negative)
          vec2_neg(size, tmp);
 
-      char buf[maxdigits];
-      int ndigits = 0;
-      while (!vec2_is_zero(size, tmp)) {
-         vec2_divmod(size, tmp, r, tmp, ten);
-         buf[ndigits++] = '0' + r[0];
-      }
-      assert(ndigits <= maxdigits);
+      // Divide by the largest power of ten in 64 bits at a time
+      const uint64_t base = UINT64_C(10000000000000000000);
+      const int maxchunks = maxdigits / 19 + 2;
+      uint64_t *chunks LOCAL = xmalloc_array(maxchunks, sizeof(uint64_t));
+      int nchunks = 0;
 
-      if (ndigits == 0)
+      int top = n;
+      while (top > 0 && tmp[top - 1] == 0)
+         top--;
+
+      while (top > 0) {
+         unsigned __int128 rem = 0;
+         for (int i = top - 1; i >= 0; i--) {
+            const unsigned __int128 cur = (rem << 64) | tmp[i];
+            tmp[i] = cur / base;
+            rem = cur % base;
+         }
+
+         assert(nchunks < maxchunks);
+         chunks[nchunks++] = rem;
+
+         while (top > 0 && tmp[top - 1] == 0)
+            top--;
+      }
+
+      if (nchunks == 0)
          tb_append(tb, '0');
       else {
-         for (; ndigits > 0; ndigits--)
-            tb_append(tb, buf[ndigits - 1]);
+         tb_printf(tb, "%"PRIu64, chunks[nchunks - 1]);
+         for (int i = nchunks - 2; i >= 0; i--)
+            tb_printf(tb, "%019"PRIu64, chunks[i]);
       }
    }
 }
@@ -1611,7 +1627,7 @@ vlog_logic_t vec4_not(int size, const uint64_t *a, const uint64_t *b)
    vlog_logic_t result = LOGIC_1;
 
    for (int i = BIGNUM_WORDS(size) - 1; i >= 0; i--) {
-      if (a[i] != 0)
+      if ((a[i] & ~b[i]) != 0)
          return LOGIC_0;
       else if (b[i] != 0)
          result = LOGIC_X;

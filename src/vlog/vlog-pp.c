@@ -61,6 +61,14 @@ typedef enum {
    PP_INITIAL, PP_C_COMMENT,
 } pp_mode_t;
 
+typedef enum {
+   STRING_CONT_NONE,
+   STRING_CONT_LINE,   // Lexed a string which ends in a backslash
+   STRING_CONT_NEXT,   // The next line starts inside the string
+} string_cont_t;
+
+static string_cont_t string_cont = STRING_CONT_NONE;
+
 static hash_t        *macros;
 static text_buf_t    *output;
 static ifdef_stack_t *ifdefs = NULL;
@@ -69,6 +77,7 @@ static bool           in_macro_quote;   // Inside a string made by `" `"
 static pp_mode_t      mode;
 static parse_state_t  state;
 static hash_t        *macro_args = NULL;
+static hash_t        *caller_args = NULL;
 static loc_stack_t    macro_locs;
 
 extern loc_t yylloc;
@@ -154,23 +163,23 @@ static token_t lex_directive(scan_buf_t buf)
    // TODO: use a DFA here
 
    if (buf.len == 7 && strncmp(buf.ptr, "`define", buf.len) == 0)
-      return make_token(tDEFINE, buf, (yylval_t){});
+      return make_token(tDEFINE, buf, (yylval_t){ .span = buf });
    if (buf.len == 6 && strncmp(buf.ptr, "`ifdef", buf.len) == 0)
-      return make_token(tIFDEF, buf, (yylval_t){});
+      return make_token(tIFDEF, buf, (yylval_t){ .span = buf });
    if (buf.len == 7 && strncmp(buf.ptr, "`ifndef", buf.len) == 0)
-      return make_token(tIFNDEF, buf, (yylval_t){});
+      return make_token(tIFNDEF, buf, (yylval_t){ .span = buf });
    if (buf.len == 6 && strncmp(buf.ptr, "`endif", buf.len) == 0)
-      return make_token(tENDIF, buf, (yylval_t){});
+      return make_token(tENDIF, buf, (yylval_t){ .span = buf });
    if (buf.len == 5 && strncmp(buf.ptr, "`else", buf.len) == 0)
-      return make_token(tCONDELSE, buf, (yylval_t){});
+      return make_token(tCONDELSE, buf, (yylval_t){ .span = buf });
    if (buf.len == 6 && strncmp(buf.ptr, "`elsif", buf.len) == 0)
-      return make_token(tCONDELSIF, buf, (yylval_t){});
+      return make_token(tCONDELSIF, buf, (yylval_t){ .span = buf });
    if (buf.len == 12 && strncmp(buf.ptr, "`undefineall", buf.len) == 0)
-      return make_token(tUNDEFALL, buf, (yylval_t){});
+      return make_token(tUNDEFALL, buf, (yylval_t){ .span = buf });
    if (buf.len == 6 && strncmp(buf.ptr, "`undef", buf.len) == 0)
-      return make_token(tUNDEF, buf, (yylval_t){});
+      return make_token(tUNDEF, buf, (yylval_t){ .span = buf });
    if (buf.len == 8 && strncmp(buf.ptr, "`include", buf.len) == 0)
-      return make_token(tINCLUDE, buf, (yylval_t){});
+      return make_token(tINCLUDE, buf, (yylval_t){ .span = buf });
 
    if (buf.len == 10 && strncmp(buf.ptr, "`timescale", buf.len) == 0)
       return make_token(tTEXT, buf, (yylval_t){ .span = buf });
@@ -179,6 +188,8 @@ static token_t lex_directive(scan_buf_t buf)
    if (buf.len == 9 && strncmp(buf.ptr, "`resetall", buf.len) == 0)
       return make_token(tTEXT, buf, (yylval_t){ .span = buf });
    if (buf.len == 7 && strncmp(buf.ptr, "`pragma", buf.len) == 0)
+      return make_token(tTEXT, buf, (yylval_t){ .span = buf });
+   if (buf.len == 5 && strncmp(buf.ptr, "`line", buf.len) == 0)
       return make_token(tTEXT, buf, (yylval_t){ .span = buf });
    if (buf.len == 18 && strncmp(buf.ptr, "`unconnected_drive", buf.len) == 0)
       return make_token(tTEXT, buf, (yylval_t){ .span = buf });
@@ -194,6 +205,61 @@ static token_t lex_directive(scan_buf_t buf)
       return make_token(tTEXT, buf, (yylval_t){ .span = buf });
 
    return make_token(tMACROUSAGE, buf, (yylval_t){ .span = buf });
+}
+
+static bool is_ignored_directive(scan_buf_t span)
+{
+   return (span.len == 7 && strncmp(span.ptr, "`pragma", span.len) == 0)
+      || (span.len == 5 && strncmp(span.ptr, "`line", span.len) == 0);
+}
+
+static void check_ignored_directive(const char *name, const char *args,
+                                    const loc_t *loc)
+{
+   // IEEE 1800-2017 sections 22.11 and 22.12
+   const char *p = args;
+   while (isspace_iso88591(*p))
+      p++;
+
+   if (strcmp(name, "`pragma") == 0) {
+      if (!isalpha_iso88591(*p) && *p != '_')
+         error_at(loc, "`pragma requires a pragma name");
+      return;
+   }
+
+   bool valid = isdigit_iso88591(*p);
+   while (isdigit_iso88591(*p))
+      p++;
+
+   while (isspace_iso88591(*p))
+      p++;
+
+   if (valid && *p == '"') {
+      const char *end = strchr(p + 1, '"');
+      valid = end != NULL;
+      if (valid)
+         p = end + 1;
+   }
+   else
+      valid = false;
+
+   if (valid) {
+      while (isspace_iso88591(*p))
+         p++;
+
+      valid = *p >= '0' && *p <= '2';
+      if (valid)
+         p++;
+
+      while (isspace_iso88591(*p))
+         p++;
+
+      valid = valid && *p == '\0';
+   }
+
+   if (!valid)
+      error_at(loc, "`line requires a line number, a file name in double "
+               "quotes and a level of 0, 1 or 2");
 }
 
 static token_t lex_macro_escape(scan_buf_t buf)
@@ -249,6 +315,9 @@ static token_t lex_whitespace(scan_buf_t buf)
 
 static token_t lex_newline(scan_buf_t buf)
 {
+   if (string_cont == STRING_CONT_LINE)
+      string_cont = STRING_CONT_NEXT;
+
    make_token(tNEWLINE, buf, (yylval_t){ .ch = '\n' });
    scan_next_line();
    return tNEWLINE;
@@ -297,6 +366,16 @@ static token_t lex_string(scan_buf_t buf)
          goto out;
       case '\n':
          return make_token(tTEXT, buf, (yylval_t){ .span = buf });
+      case '\\':
+         scan_advance(&buf);
+         if (scan_peek(buf, &ch) && ch == '\n') {
+            // The string continues on the next line
+            string_cont = STRING_CONT_LINE;
+            return make_token(tTEXT, buf, (yylval_t){ .span = buf });
+         }
+         else if (scan_peek(buf, &ch))
+            scan_advance(&buf);   // Escaped quote does not end the string
+         continue;
       default:
          scan_advance(&buf);
          continue;
@@ -388,6 +467,12 @@ static token_t vlogpp_lex(void)
       return lex_c_comment(buf);
 
    char ch;
+   if (string_cont == STRING_CONT_NEXT) {
+      string_cont = STRING_CONT_NONE;
+      if (scan_peek(buf, &ch) && ch != '\n' && ch != '\r')
+         return lex_string(buf);
+   }
+
    if (!scan_next(&buf, &ch))
       return tEOF;
 
@@ -515,6 +600,25 @@ static void p_list_of_formal_arguments(macro_t *m)
    } while (optional(tCOMMA));
 }
 
+static bool is_directive_name(ident_t name)
+{
+   // The compiler directives of Clause 22
+   static const char *const names[] = {
+      "__FILE__", "__LINE__", "begin_keywords", "celldefine",
+      "default_nettype", "define", "else", "elsif", "end_keywords",
+      "endcelldefine", "endif", "ifdef", "ifndef", "include", "line",
+      "nounconnected_drive", "pragma", "resetall", "timescale",
+      "unconnected_drive", "undef", "undefineall",
+   };
+
+   for (int i = 0; i < ARRAY_LEN(names); i++) {
+      if (strcmp(istr(name), names[i]) == 0)
+         return true;
+   }
+
+   return false;
+}
+
 static macro_t *p_text_macro_name(void)
 {
    // text_macro_identifier [ ( list_of_formal_arguments ) ]
@@ -527,6 +631,10 @@ static macro_t *p_text_macro_name(void)
    m->name = p_identifier();
    m->loc  = state.last_loc;
    m->text = tb_new();
+
+   if (is_directive_name(m->name))
+      error_at(&state.last_loc, "cannot redefine compiler directive %pQ as a "
+               "text macro", m->name);
 
    if (optional(tLPAREN)) {
       m->has_args = true;
@@ -551,10 +659,22 @@ static void p_text_macro_definition(void)
    optional(tWHITESPACE);
 
    bool in_block_comment = false;
-   while (in_block_comment || not_at_token(tNEWLINE)) {
+   while (in_block_comment || not_at_token(tNEWLINE, tEOF)) {
       token_t tok = peek();
       switch (tok) {
       case tTEXT:
+         consume(tok);
+         if (state.last_lval.span.len > 0 && state.last_lval.span.ptr[0] == '"'
+             && state.last_lval.span.ptr[state.last_lval.span.len - 1] != '\\')
+            error_at(&state.last_loc, "string literal in macro text must "
+                     "end on the same line");
+         tb_catn(m->text, state.last_lval.span.ptr, state.last_lval.span.len);
+         if (peek() == tNEWLINE && string_cont == STRING_CONT_NEXT) {
+            consume(tNEWLINE);
+            tb_append(m->text, '\n');
+            tb_append(output, '\n');
+         }
+         break;
       case tWHITESPACE:
       case tID:
       case tMACROUSAGE:
@@ -562,7 +682,16 @@ static void p_text_macro_definition(void)
       case tMACROQUOTE:
       case tMACROESCQUOTE:
       case tMACROJOIN:
-         consume(tok);
+      case tDEFINE:
+      case tIFDEF:
+      case tIFNDEF:
+      case tENDIF:
+      case tCONDELSE:
+      case tCONDELSIF:
+      case tUNDEF:
+      case tUNDEFALL:
+      case tINCLUDE:
+         consume(tok);   // Directives take effect when the macro is expanded
          tb_catn(m->text, state.last_lval.span.ptr, state.last_lval.span.len);
          break;
       case tLPAREN:
@@ -589,6 +718,14 @@ static void p_text_macro_definition(void)
                     state.last_lval.span.len);
             in_block_comment = mode == PP_C_COMMENT;
          }
+         else if (state.last_lval.span.len > 0
+                  && state.last_lval.span.ptr[state.last_lval.span.len - 1]
+                  == '\\') {
+            // The comment is removed but the line continuation still counts
+            consume(tNEWLINE);
+            tb_append(m->text, '\n');
+            tb_append(output, '\n');
+         }
          break;
       case tNEWLINE:
          assert(in_block_comment);
@@ -602,7 +739,10 @@ static void p_text_macro_definition(void)
       }
    }
 
-   consume(tNEWLINE);
+   // The last line of a file need not end with a newline
+   if (peek() == tNEWLINE)
+      consume(tNEWLINE);
+
    tb_append(output, '\n');
 }
 
@@ -656,10 +796,32 @@ static void p_expression(text_buf_t *tb)
 
    switch (one_of(tTEXT, tLPAREN, tLBRACE, tLSQUARE, tWHITESPACE, tID,
                   tSTRING, tMACROUSAGE, tCOMMA, tEQ, tMACROQUOTE,
-                  tMACROESCQUOTE, tMACROJOIN)) {
+                  tMACROESCQUOTE, tMACROJOIN, tNEWLINE, tCOMMENT,
+                  tCONTINUATION)) {
+   case tNEWLINE:
+      // Arguments may be split over several lines
+      tb_append(tb, string_cont == STRING_CONT_NEXT ? '\n' : ' ');
+      tb_append(output, '\n');
+      break;
+   case tCOMMENT:
+   case tCONTINUATION:
+      break;
+   case tID:
+      {
+         // May be an argument of the macro containing this usage
+         scan_buf_t span = state.last_lval.span;
+         const char *rep = NULL;
+         if (caller_args != NULL)
+            rep = hash_get(caller_args, ident_new_n(span.ptr, span.len));
+
+         if (rep != NULL)
+            tb_cat(tb, rep);
+         else
+            tb_catn(tb, span.ptr, span.len);
+      }
+      break;
    case tTEXT:
    case tWHITESPACE:
-   case tID:
    case tSTRING:
    case tMACROUSAGE:
    case tMACROQUOTE:
@@ -773,16 +935,59 @@ static void p_text_macro_usage(void)
    scan_buf_t span = state.last_lval.span;
 
    if (span.len == 9 && strncmp(span.ptr, "`__LINE__", span.len) == 0) {
-      tb_printf(output, "\"%d\"", yylloc.first_line);
+      // Line of the outermost macro if this is in a macro or its arguments
+      const loc_t *lloc = macro_locs.count > 0 ? &(macro_locs.items[0]) : &yylloc;
+      tb_printf(output, "%d", lloc->first_line);
       return;
    }
 
    if (span.len == 9 && strncmp(span.ptr, "`__FILE__", span.len) == 0) {
-      tb_printf(output, "\"%s\"", loc_file_str(&yylloc));
+      const loc_t *floc = macro_locs.count > 0 ? &(macro_locs.items[0]) : &yylloc;
+      tb_printf(output, "\"%s\"", loc_file_str(floc));
       return;
    }
 
    ident_t name = ident_new_n(span.ptr + 1, span.len - 1);
+
+   // The name of the macro may be pasted together from arguments
+   for (;;) {
+      scan_buf_t look = get_input_buffer();
+      if (look.cap < 2 || look.ptr[0] != '`' || look.ptr[1] != '`')
+         break;
+
+      // Only an identifier can be part of the name
+      char third;
+      scan_buf_t after = look;
+      scan_advance(&after);
+      scan_advance(&after);
+      if (!scan_peek(after, &third)
+          || !(isalnum_iso88591(third) || third == '_'))
+         break;
+
+      consume(tMACROJOIN);
+
+      const token_t next = peek();
+      if (next != tID && next != tTEXT)
+         break;
+
+      consume(next);
+
+      scan_buf_t part = state.last_lval.span;
+      const char *rep = NULL;
+      if (next == tID && macro_args != NULL)
+         rep = hash_get(macro_args, ident_new_n(part.ptr, part.len));
+
+      if (rep != NULL) {
+         // Space next to the argument is not part of the name
+         size_t len = strlen(rep);
+         while (len > 0 && isspace_iso88591(rep[len - 1]))
+            len--;
+
+         name = ident_prefix(name, ident_new_n(rep, len), '\0');
+      }
+      else
+         name = ident_prefix(name, ident_new_n(part.ptr, part.len), '\0');
+   }
 
    macro_t *m = hash_get(macros, name);
    if (m == NULL) {
@@ -825,7 +1030,9 @@ static void p_text_macro_usage(void)
          optional(tWHITESPACE);
          consume(tLPAREN);
          macro_args = hash_new(16);
+         caller_args = old_args;
          p_list_of_actual_arguments(m);
+         caller_args = NULL;
          consume(tRPAREN);
       }
       else {
@@ -983,22 +1190,59 @@ static void p_include_compiler_directive(void)
 
    optional(tWHITESPACE);
 
+   char *file_name = NULL;
+   loc_t loc;
    switch (peek()) {
    case tSTRING:
       consume(tSTRING);
+      loc = state.last_loc;
+      file_name = xstrndup(state.last_lval.span.ptr + 1,
+                           state.last_lval.span.len - 2);
       break;
    case tERROR:
       // Already printed an error
       drop_token(&state);
       return;
+   case tID:
+   case tMACROUSAGE:
+      {
+         // The name of the file is the result of expanding a macro or
+         // an argument of the macro containing this directive
+         loc = *(peek() == tID ? &yylloc : &state.last_loc);
+
+         text_buf_t *saved = output;
+         const bool saved_emit = emit_locs;
+         output = tb_new();
+         emit_locs = false;
+         p_block_of_text();
+         text_buf_t *expanded = output;
+         output = saved;
+         emit_locs = saved_emit;
+
+         const char *text = tb_get(expanded);
+         size_t len = tb_len(expanded);
+         while (len > 0 && isspace_iso88591(text[0])) {
+            text++;
+            len--;
+         }
+         while (len > 0 && isspace_iso88591(text[len - 1]))
+            len--;
+
+         if (len < 2 || text[0] != '"' || text[len - 1] != '"') {
+            parse_error(&loc, "expected a string for the file name of "
+                        "`include");
+            tb_free(expanded);
+            return;
+         }
+
+         file_name = xstrndup(text + 1, len - 2);
+         tb_free(expanded);
+      }
+      break;
    default:
       expect(tSTRING);
       return;
    }
-
-   const loc_t loc = state.last_loc;
-   char *file_name = xstrndup(state.last_lval.span.ptr + 1,
-                              state.last_lval.span.len - 2);
 
    bool saw_newline = false;
    while (!saw_newline && not_at_token(tEOF)) {
@@ -1011,6 +1255,23 @@ static void p_include_compiler_directive(void)
          break;
       case tCOMMENT:
       case tWHITESPACE:
+         break;
+      case tTEXT:
+         {
+            // A semicolon after the file name is ignored
+            const char *ptr = state.last_lval.span.ptr;
+            for (size_t i = 0; i < state.last_lval.span.len; i++) {
+               if (ptr[i] == ';' || isspace_iso88591(ptr[i]))
+                  continue;
+
+               parse_error(&state.last_loc, "only white space or a comment "
+                           "may appear on the same line as an `include "
+                           "directive");
+               drop_tokens_until(&state, tNEWLINE);
+               saw_newline = true;
+               break;
+            }
+         }
          break;
       default:
          parse_error(&state.last_loc, "only white space or a comment "
@@ -1029,6 +1290,12 @@ static void p_include_compiler_directive(void)
    if (emit_locs)
       tb_printf(output, "\n`__nvc_push \"%s\",%d:%d,%d\n", file_name,
                 loc.first_line, loc.first_column, loc.column_delta);
+
+   // The directive may end the text of a macro so the lookahead is at the
+   // end of the buffer it came from: it is read again after the file
+   if (state.tokenq_head != state.tokenq_tail
+       && state.tokenq[state.tokenq_tail].token == tEOF)
+      drop_token(&state);
 
    push_file(file_name, &loc);
 
@@ -1103,7 +1370,23 @@ static void p_block_of_text(void)
       if (macro_args != NULL && (ifdefs == NULL || ifdefs->cond)) {
          ident_t name = p_identifier();
          const char *rep = hash_get(macro_args, name);
-         if (rep != NULL)
+         if (rep != NULL && strchr(rep, '`') != NULL) {
+            // Macros in the argument expand here and any arguments of the
+            // calling macro were already replaced
+            hash_t *saved_args = macro_args;
+            macro_args = NULL;
+
+            push_buffer(rep, strlen(rep), FILE_INVALID);
+
+            while (not_at_token(tEOF))
+               p_block_of_text();
+
+            consume(tEOF);
+            pop_buffer();
+
+            macro_args = saved_args;
+         }
+         else if (rep != NULL)
             tb_cat(output, rep);
          else
             tb_catn(output, state.last_lval.span.ptr, state.last_lval.span.len);
@@ -1115,7 +1398,24 @@ static void p_block_of_text(void)
    case tCOMMENT:
    case tSTRING:
       consume(tok);
-      if (ifdefs == NULL || ifdefs->cond)
+      if (tok == tTEXT && (is_ignored_directive(state.last_lval.span))) {
+         // The rest of the line holds arguments which have no effect
+         const bool is_pragma = state.last_lval.span.len == 7;
+         const loc_t loc = state.last_loc;
+         LOCAL_TEXT_BUF args = tb_new();
+         for (token_t next = peek(); next != tNEWLINE && next != tEOF;
+              next = peek()) {
+            consume(next);
+            if (next != tCOMMENT)
+               tb_catn(args, state.last_lval.span.ptr,
+                       state.last_lval.span.len);
+         }
+
+         if (ifdefs == NULL || ifdefs->cond)
+            check_ignored_directive(is_pragma ? "`pragma" : "`line",
+                                    tb_get(args), &loc);
+      }
+      else if (ifdefs == NULL || ifdefs->cond)
          tb_catn(output, state.last_lval.span.ptr, state.last_lval.span.len);
       break;
    case tNEWLINE:

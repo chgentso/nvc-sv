@@ -244,9 +244,30 @@ static void vlog_dump_var_decl(vlog_node_t v, int indent)
 {
    vlog_dump_address(v);
 
-   vlog_dump(vlog_type(v), indent);
+   if (vlog_kind(v) == V_VAR_DECL) {
+      if (vlog_flags(v) & VLOG_F_RAND)
+         print_syntax("#rand ");
+      else if (vlog_flags(v) & VLOG_F_RANDC)
+         print_syntax("#randc ");
+   }
+
+   // Dynamic dimensions are part of the type but written after the name
+   vlog_node_t dt = vlog_type(v);
+   unsigned nsuffix = 0;
+   char suffix[16];
+   while (vlog_kind(dt) == V_DATA_TYPE && nsuffix < sizeof(suffix) - 1
+          && (vlog_subkind(dt) == DT_DYNARRAY || vlog_subkind(dt) == DT_QUEUE
+              || vlog_subkind(dt) == DT_ASSOC)) {
+      suffix[nsuffix++] = vlog_subkind(dt) == DT_QUEUE ? '$' : ' ';
+      dt = vlog_type(dt);
+   }
+
+   vlog_dump(dt, indent);
    print_syntax(" %s", istr(vlog_ident(v)));
    vlog_dump_dimensions(v, indent);
+
+   for (int i = 0; i < nsuffix; i++)
+      print_syntax(suffix[i] == '$' ? " [$]" : " []");
 
    if (vlog_has_value(v)) {
       print_syntax(" = ");
@@ -417,6 +438,186 @@ static void vlog_dump_if(vlog_node_t v, int indent)
    }
 }
 
+static void vlog_dump_sva_op(vlog_node_t v)
+{
+   static const char *const infix[] = {
+      [V_SVA_AND] = "and", [V_SVA_OR] = "or", [V_SVA_INTERSECT] = "intersect",
+      [V_SVA_WITHIN] = "within", [V_SVA_THROUGHOUT] = "throughout",
+      [V_SVA_IMPL_OVER] = "|->", [V_SVA_IMPL_NON] = "|=>",
+      [V_SVA_FOLLOW_OVER] = "#-#", [V_SVA_FOLLOW_NON] = "#=#",
+      [V_SVA_UNTIL] = "until", [V_SVA_S_UNTIL] = "s_until",
+      [V_SVA_UNTIL_WITH] = "until_with", [V_SVA_S_UNTIL_WITH] = "s_until_with",
+      [V_SVA_IMPLIES] = "implies", [V_SVA_IFF] = "iff",
+   };
+
+   static const char *const prefix[] = {
+      [V_SVA_NOT] = "not", [V_SVA_STRONG] = "strong", [V_SVA_WEAK] = "weak",
+      [V_SVA_FIRST_MATCH] = "first_match", [V_SVA_NEXTTIME] = "nexttime",
+      [V_SVA_S_NEXTTIME] = "s_nexttime", [V_SVA_ALWAYS] = "always",
+      [V_SVA_S_ALWAYS] = "s_always", [V_SVA_EVENTUALLY] = "eventually",
+      [V_SVA_S_EVENTUALLY] = "s_eventually", [V_SVA_IF] = "if",
+      [V_SVA_ACCEPT_ON] = "accept_on", [V_SVA_REJECT_ON] = "reject_on",
+      [V_SVA_SYNC_ACCEPT_ON] = "sync_accept_on",
+      [V_SVA_SYNC_REJECT_ON] = "sync_reject_on",
+      [V_SVA_DISABLE] = "disable iff", [V_SVA_CLOCKED] = "clocked",
+   };
+
+   const vlog_sva_op_t op = vlog_subkind(v);
+   const int nparams = vlog_params(v);
+
+   switch (op) {
+   case V_SVA_DELAY:
+   case V_SVA_REPEAT:
+   case V_SVA_GOTO:
+   case V_SVA_NONCONS:
+      {
+         if (op == V_SVA_DELAY && nparams == 2) {
+            vlog_dump(vlog_param(v, 0), 0);
+            print_syntax(" ");
+         }
+
+         switch (op) {
+         case V_SVA_DELAY:   print_syntax("##"); break;
+         case V_SVA_REPEAT:  print_syntax("[*"); break;
+         case V_SVA_GOTO:    print_syntax("[->"); break;
+         default:            print_syntax("[="); break;
+         }
+
+         if (op == V_SVA_DELAY)
+            print_syntax("[");
+
+         vlog_dump(vlog_left(v), 0);
+         if (vlog_right(v) != vlog_left(v)) {
+            print_syntax(":");
+            vlog_dump(vlog_right(v), 0);
+         }
+
+         if (op == V_SVA_DELAY) {
+            print_syntax("]");
+            print_syntax(" ");
+            vlog_dump(vlog_param(v, nparams - 1), 0);
+         }
+         else {
+            print_syntax("]");
+            if (nparams > 1)
+               vlog_dump(vlog_param(v, 1), 0);
+         }
+      }
+      break;
+   case V_SVA_MATCH:
+      {
+         print_syntax("(");
+         vlog_dump(vlog_param(v, 0), 0);
+         for (int i = 1; i < nparams; i++) {
+            print_syntax(", ");
+            vlog_dump(vlog_param(v, i), 0);
+         }
+         print_syntax(")");
+      }
+      break;
+   default:
+      if (op < ARRAY_LEN(infix) && infix[op] != NULL) {
+         print_syntax("(");
+         vlog_dump(vlog_param(v, 0), 0);
+         print_syntax(" %s ", infix[op]);
+         vlog_dump(vlog_param(v, 1), 0);
+         print_syntax(")");
+      }
+      else {
+         print_syntax("%s ", op < ARRAY_LEN(prefix) && prefix[op] != NULL
+                      ? prefix[op] : "?");
+         if (vlog_has_value(v)) {
+            print_syntax("(");
+            vlog_dump(vlog_value(v), 0);
+            print_syntax(") ");
+         }
+         for (int i = 0; i < nparams; i++) {
+            if (i > 0)
+               print_syntax(" else ");
+            print_syntax("(");
+            vlog_dump(vlog_param(v, i), 0);
+            print_syntax(")");
+         }
+      }
+      break;
+   }
+}
+
+static void vlog_dump_prop_spec(vlog_node_t v)
+{
+   if (vlog_has_target(v)) {
+      vlog_dump(vlog_target(v), 0);
+      print_syntax(" ");
+   }
+
+   if (vlog_has_left(v)) {
+      print_syntax("#disable #iff (");
+      vlog_dump(vlog_left(v), 0);
+      print_syntax(") ");
+   }
+
+   vlog_dump(vlog_value(v), 0);
+}
+
+static void vlog_dump_assertion(vlog_node_t v, int indent)
+{
+   switch (vlog_kind(v)) {
+   case V_ASSUME: print_syntax("#assume "); break;
+   case V_COVER:  print_syntax("#cover "); break;
+   default:       print_syntax("#assert "); break;
+   }
+
+   const bool concurrent = vlog_kind(vlog_value(v)) == V_PROP_SPEC;
+   if (concurrent)
+      print_syntax("#property ");
+
+   print_syntax("(");
+   vlog_dump(vlog_value(v), 0);
+   print_syntax(")");
+
+   const int nconds = vlog_conds(v);
+   for (int i = 0; i < nconds; i++) {
+      vlog_node_t c = vlog_cond(v, i);
+      if (i == 1)
+         print_syntax(" #else");
+
+      if (vlog_stmts(c) > 0) {
+         print_syntax(" ");
+         vlog_dump_stmt_or_null(c, indent);
+      }
+   }
+
+   print_syntax(";");
+}
+
+static void vlog_dump_sva_decl(vlog_node_t v, int indent)
+{
+   const bool prop = vlog_subkind(v) == V_SVA_PROPERTY;
+
+   tab(indent);
+   print_syntax(prop ? "#property " : "#sequence ");
+   print_syntax("%s", istr(vlog_ident(v)));
+
+   const int nports = vlog_ports(v);
+   if (nports > 0) {
+      print_syntax("(");
+      for (int i = 0; i < nports; i++) {
+         if (i > 0)
+            print_syntax(", ");
+         print_syntax("%s", istr(vlog_ident(vlog_port(v, i))));
+      }
+      print_syntax(")");
+   }
+
+   print_syntax(";\n");
+   tab(indent + 2);
+   vlog_dump(vlog_value(v), 0);
+   print_syntax(";\n");
+   tab(indent);
+   print_syntax(prop ? "#endproperty" : "#endsequence");
+   print_syntax("\n");
+}
+
 static void vlog_dump_sys_tcall(vlog_node_t v, int indent)
 {
    print_syntax("%s", istr(vlog_ident(v)));
@@ -491,6 +692,8 @@ static void vlog_dump_binary(vlog_node_t v)
    case V_BINARY_NOR:      print_syntax(" ~| "); break;
    case V_BINARY_CASE_EQ:  print_syntax(" === "); break;
    case V_BINARY_CASE_NEQ: print_syntax(" !== "); break;
+   case V_BINARY_WILD_EQ:  print_syntax(" ==? "); break;
+   case V_BINARY_WILD_NEQ: print_syntax(" !=? "); break;
    case V_BINARY_LOG_EQ:   print_syntax(" == "); break;
    case V_BINARY_LOG_NEQ:  print_syntax(" != "); break;
    case V_BINARY_LOG_OR:   print_syntax(" || "); break;
@@ -695,6 +898,26 @@ static void vlog_dump_data_type(vlog_node_t v, int indent)
    case DT_BYTE: print_syntax("#byte"); atom = true; break;
    case DT_SHORTINT: print_syntax("#shortint"); atom = true; break;
    case DT_LONGINT: print_syntax("#longint"); atom = true; break;
+   case DT_TIME: print_syntax("#time"); atom = true; break;
+   case DT_EVENT: print_syntax("#event"); atom = true; break;
+   case DT_STRING: print_syntax("#string"); atom = true; break;
+   case DT_DYNARRAY:
+   case DT_QUEUE:
+      vlog_dump(vlog_type(v), indent);
+      print_syntax(vlog_subkind(v) == DT_QUEUE ? "[$]" : "[]");
+      return;
+   case DT_ASSOC:
+      vlog_dump(vlog_type(v), indent);
+      print_syntax(vlog_has_ref(v) ? "[...]" : "[*]");
+      return;
+   case DT_MAILBOX: print_syntax("mailbox"); atom = true; break;
+   case DT_CHANDLE: print_syntax("#chandle"); atom = true; break;
+   case DT_SEMAPHORE: print_syntax("semaphore"); atom = true; break;
+   case DT_PROCESS: print_syntax("process"); atom = true; break;
+   case DT_VIRTUAL:
+      print_syntax("#virtual %s", istr(vlog_ident(v)));
+      atom = true;
+      break;
    default: should_not_reach_here();
    }
 
@@ -1065,7 +1288,11 @@ static void vlog_dump_tcheck(vlog_node_t v)
 
    int n_params = vlog_params(v);
    for (int i = 0; i < n_params; i++) {
-      vlog_dump(vlog_param(v, i), 0);
+      vlog_node_t p = vlog_param(v, i);
+      if (vlog_kind(p) == V_BASSIGN)
+         vlog_dump(vlog_target(p), 0);   // Toggles the notifier
+      else
+         vlog_dump(p, 0);
       if (i < n_params - 1)
          print_syntax(", ");
    }
@@ -1105,6 +1332,232 @@ static void vlog_dump_tcheck_event(vlog_node_t v)
    }
 }
 
+static void vlog_dump_cons_set(vlog_node_t v, int indent)
+{
+   print_syntax("{\n");
+
+   const int nstmts = vlog_stmts(v);
+   for (int i = 0; i < nstmts; i++) {
+      tab(indent + 2);
+      vlog_dump(vlog_stmt(v, i), indent + 2);
+      print_syntax("\n");
+   }
+
+   tab(indent);
+   print_syntax("}");
+}
+
+static void vlog_dump_constraint(vlog_node_t v, int indent)
+{
+   if (vlog_flags(v) & VLOG_F_STATIC)
+      print_syntax("#static ");
+
+   print_syntax("#constraint %s ", istr(vlog_ident(v)));
+   vlog_dump_cons_set(v, indent);
+   print_syntax("\n");
+}
+
+static void vlog_dump_cons_expr(vlog_node_t v, int indent)
+{
+   if (vlog_flags(v) & VLOG_F_SOFT)
+      print_syntax("#soft ");
+
+   vlog_dump(vlog_value(v), indent);
+   print_syntax(";");
+}
+
+static void vlog_dump_cons_imply(vlog_node_t v, int indent)
+{
+   vlog_dump_paren(vlog_value(v), 0);
+   print_syntax(" -> ");
+   vlog_dump_cons_set(v, indent);
+}
+
+static void vlog_dump_cons_if(vlog_node_t v, int indent)
+{
+   print_syntax("#if (");
+   vlog_dump(vlog_value(v), 0);
+   print_syntax(") ");
+   vlog_dump(vlog_left(v), indent);
+
+   if (vlog_has_right(v)) {
+      print_syntax(" #else ");
+      vlog_dump(vlog_right(v), indent);
+   }
+}
+
+static void vlog_dump_cons_foreach(vlog_node_t v, int indent)
+{
+   print_syntax("#foreach (");
+   vlog_dump(vlog_value(v), 0);
+   print_syntax("[");
+
+   const int ndecls = vlog_decls(v);
+   for (int i = 0; i < ndecls; i++) {
+      if (i > 0) print_syntax(", ");
+      print_syntax("%s", istr(vlog_ident(vlog_decl(v, i))));
+   }
+
+   print_syntax("]) ");
+   vlog_dump_cons_set(v, indent);
+}
+
+static void vlog_dump_expr_list(vlog_node_t v)
+{
+   const int nparams = vlog_params(v);
+   for (int i = 0; i < nparams; i++) {
+      if (i > 0) print_syntax(", ");
+      vlog_dump(vlog_param(v, i), 0);
+   }
+}
+
+static void vlog_dump_cons_unique(vlog_node_t v, int indent)
+{
+   print_syntax("#unique {");
+   vlog_dump_expr_list(v);
+   print_syntax("};");
+}
+
+static void vlog_dump_cons_solve(vlog_node_t v, int indent)
+{
+   print_syntax("#solve ");
+   vlog_dump_expr_list(vlog_left(v));
+   print_syntax(" #before ");
+   vlog_dump_expr_list(vlog_right(v));
+   print_syntax(";");
+}
+
+static void vlog_dump_inside(vlog_node_t v, int indent)
+{
+   vlog_dump_paren(vlog_value(v), 0);
+   print_syntax(" #inside {");
+   vlog_dump_expr_list(v);
+   print_syntax("}");
+}
+
+static void vlog_dump_inside_range(vlog_node_t v, int indent)
+{
+   print_syntax("[");
+   vlog_dump(vlog_left(v), 0);
+   print_syntax(":");
+   vlog_dump(vlog_right(v), 0);
+   print_syntax("]");
+}
+
+static void vlog_dump_pattern(vlog_node_t v)
+{
+   switch (vlog_subkind(v)) {
+   case V_PAT_WILD:
+      print_syntax(".*");
+      break;
+   case V_PAT_BIND:
+      print_syntax(".%s", istr(vlog_ident(vlog_ref(v))));
+      break;
+   case V_PAT_CONST:
+      vlog_dump(vlog_value(v), 0);
+      break;
+   case V_PAT_TAGGED:
+      print_syntax("#tagged %s", vlog_has_ref(v) ? istr(vlog_ident(vlog_ref(v))) : "?");
+      if (vlog_params(v) > 0) {
+         print_syntax(" ");
+         vlog_dump_pattern(vlog_param(v, 0));
+      }
+      break;
+   case V_PAT_STRUCT:
+      print_syntax("'{");
+      for (int i = 0; i < vlog_params(v); i++) {
+         if (i > 0)
+            print_syntax(", ");
+         vlog_dump_pattern(vlog_param(v, i));
+      }
+      print_syntax("}");
+      break;
+   }
+}
+
+static void vlog_dump_matches(vlog_node_t v, int indent)
+{
+   vlog_dump_paren(vlog_value(v), 0);
+   print_syntax(" #matches ");
+   vlog_dump_pattern(vlog_left(v));
+}
+
+static void vlog_dump_dist(vlog_node_t v, int indent)
+{
+   vlog_dump_paren(vlog_value(v), 0);
+   print_syntax(" #dist {");
+   vlog_dump_expr_list(v);
+   print_syntax("}");
+}
+
+static void vlog_dump_dist_item(vlog_node_t v, int indent)
+{
+   if (vlog_has_right(v)) {
+      print_syntax("[");
+      vlog_dump(vlog_left(v), 0);
+      print_syntax(":");
+      vlog_dump(vlog_right(v), 0);
+      print_syntax("]");
+   }
+   else
+      vlog_dump(vlog_left(v), 0);
+
+   print_syntax(vlog_subkind(v) == V_DIST_PER_RANGE ? " :/ " : " := ");
+   vlog_dump(vlog_delay(v), 0);
+}
+
+static void vlog_dump_with(vlog_node_t v, int indent)
+{
+   if (vlog_stmts(v) > 0) {
+      print_syntax(" #with ");
+      vlog_dump_cons_set(v, indent);
+   }
+}
+
+static void vlog_dump_method_call(vlog_node_t v, int indent)
+{
+   vlog_dump(vlog_value(v), 0);
+   print_syntax(".%s(", istr(vlog_ident(v)));
+   vlog_dump_expr_list(v);
+   print_syntax(")");
+   vlog_dump_with(v, indent);
+}
+
+static void vlog_dump_std_randomize(vlog_node_t v, int indent)
+{
+   print_syntax("std::randomize(");
+   vlog_dump_expr_list(v);
+   print_syntax(")");
+   vlog_dump_with(v, indent);
+}
+
+static void vlog_dump_member_ref(vlog_node_t v, int indent)
+{
+   vlog_dump(vlog_value(v), 0);
+   print_syntax(".%s", istr(vlog_ident(v)));
+}
+
+static void vlog_dump_randcase(vlog_node_t v, int indent)
+{
+   print_syntax("#randcase\n");
+
+   const int nstmts = vlog_stmts(v);
+   for (int i = 0; i < nstmts; i++)
+      vlog_dump(vlog_stmt(v, i), indent + 2);
+
+   tab(indent);
+   print_syntax("#endcase");
+}
+
+static void vlog_dump_randcase_item(vlog_node_t v, int indent)
+{
+   tab(indent);
+   vlog_dump(vlog_value(v), 0);
+   print_syntax(": ");
+   vlog_dump_stmt_or_null(v, indent);
+   print_syntax("\n");
+}
+
 void vlog_dump(vlog_node_t v, int indent)
 {
    switch (vlog_kind(v)) {
@@ -1139,6 +1592,10 @@ void vlog_dump(vlog_node_t v, int indent)
       break;
    case V_GENVAR_DECL:
       vlog_dump_genvar_decl(v, indent);
+      break;
+   case V_MODPORT:
+   case V_MODPORT_PORT:
+   case V_IFACE_PORT:
       break;
    case V_ALWAYS:
       vlog_dump_always(v, indent);
@@ -1316,6 +1773,83 @@ void vlog_dump(vlog_node_t v, int indent)
       break;
    case V_TCHECK_EVENT:
       vlog_dump_tcheck_event(v);
+      break;
+   case V_CONSTRAINT:
+      vlog_dump_constraint(v, indent);
+      break;
+   case V_CONS_EXPR:
+      vlog_dump_cons_expr(v, indent);
+      break;
+   case V_CONS_IMPLY:
+      vlog_dump_cons_imply(v, indent);
+      break;
+   case V_CONS_IF:
+      vlog_dump_cons_if(v, indent);
+      break;
+   case V_CONS_BLOCK:
+      vlog_dump_cons_set(v, indent);
+      break;
+   case V_CONS_FOREACH:
+      vlog_dump_cons_foreach(v, indent);
+      break;
+   case V_CONS_UNIQUE:
+      vlog_dump_cons_unique(v, indent);
+      break;
+   case V_CONS_SOLVE:
+      vlog_dump_cons_solve(v, indent);
+      break;
+   case V_INSIDE:
+      vlog_dump_inside(v, indent);
+      break;
+   case V_INSIDE_RANGE:
+      vlog_dump_inside_range(v, indent);
+      break;
+   case V_MATCHES:
+      vlog_dump_matches(v, indent);
+      break;
+   case V_DIST:
+      vlog_dump_dist(v, indent);
+      break;
+   case V_DIST_ITEM:
+      vlog_dump_dist_item(v, indent);
+      break;
+   case V_METHOD_CALL:
+      vlog_dump_method_call(v, indent);
+      break;
+   case V_STD_RANDOMIZE:
+      vlog_dump_std_randomize(v, indent);
+      break;
+   case V_MEMBER_REF:
+      vlog_dump_member_ref(v, indent);
+      break;
+   case V_THIS:
+      print_syntax("#this");
+      break;
+   case V_NULL:
+      print_syntax("#null");
+      break;
+   case V_DOLLAR:
+      print_syntax("$");
+      break;
+   case V_ASSERT:
+   case V_ASSUME:
+   case V_COVER:
+      vlog_dump_assertion(v, indent);
+      break;
+   case V_SVA_OP:
+      vlog_dump_sva_op(v);
+      break;
+   case V_SVA_DECL:
+      vlog_dump_sva_decl(v, indent);
+      break;
+   case V_PROP_SPEC:
+      vlog_dump_prop_spec(v);
+      break;
+   case V_RANDCASE:
+      vlog_dump_randcase(v, indent);
+      break;
+   case V_RANDCASE_ITEM:
+      vlog_dump_randcase_item(v, indent);
       break;
    default:
       print_syntax("\n");

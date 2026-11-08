@@ -28,6 +28,7 @@
 #include "vlog/vlog-util.h"
 
 #include <assert.h>
+#include <inttypes.h>
 
 typedef struct {
    tree_t  out;
@@ -129,6 +130,9 @@ static type_t trans_type(trans_gen_t *g, vlog_node_t decl,
 {
    // TODO: cache decl ^ scalar_type ^ packed_type
 
+   if (vlog_is_dynamic_type(decl))
+      return NULL;
+
    switch (vlog_kind(decl)) {
    case V_TYPE_DECL:
    case V_ENUM_DECL:
@@ -212,6 +216,8 @@ static type_t trans_type(trans_gen_t *g, vlog_node_t decl,
       return trans_sized_type(decl, packed_type, 64);
 
    case DT_REAL:
+   case DT_SHORTREAL:
+   case DT_REALTIME:
       return std_type(NULL, STD_REAL);
 
    default:
@@ -237,6 +243,7 @@ static void trans_port_decl(trans_gen_t *g, vlog_node_t v)
       [V_PORT_INPUT] = PORT_IN,
       [V_PORT_OUTPUT] = PORT_OUT,
       [V_PORT_INOUT] = PORT_INOUT,
+      [V_PORT_REF] = PORT_INOUT,
    };
 
    const v_port_kind_t kind = vlog_subkind(v);
@@ -284,11 +291,193 @@ static void trans_generic(trans_gen_t *g, vlog_node_t decl)
    tree_add_decl(g->out, wrap);
 }
 
+static vlog_node_t trans_bit_select(vlog_node_t v, unsigned pos)
+{
+   // Select the bit POS places from the left of terminal V
+
+   if (vlog_width(v) == 1)
+      return v;
+
+   switch (vlog_kind(v)) {
+   case V_NUMBER:
+      {
+         number_t n = vlog_number(v);
+         static const char digits[] = { [LOGIC_0] = '0', [LOGIC_1] = '1',
+                                        [LOGIC_X] = 'x', [LOGIC_Z] = 'z' };
+         const char bit[] = { '1', '\'', 'b',
+                              digits[number_bit(n, number_width(n) - 1 - pos)],
+                              '\0' };
+
+         vlog_node_t b = vlog_new(V_NUMBER);
+         vlog_set_number(b, number_new(bit, vlog_loc(v)));
+         vlog_set_loc(b, vlog_loc(v));
+         return b;
+      }
+   case V_BINARY:
+      switch (vlog_subkind(v)) {
+      case V_BINARY_AND:
+      case V_BINARY_OR:
+      case V_BINARY_XOR:
+      case V_BINARY_XNOR:
+      case V_BINARY_NAND:
+      case V_BINARY_NOR:
+         {
+            vlog_node_t b = vlog_new(V_BINARY);
+            vlog_set_subkind(b, vlog_subkind(v));
+            vlog_set_left(b, trans_bit_select(vlog_left(v), pos));
+            vlog_set_right(b, trans_bit_select(vlog_right(v), pos));
+            vlog_set_loc(b, vlog_loc(v));
+            return b;
+         }
+      default:
+         break;
+      }
+      break;
+   case V_UNARY:
+      if (vlog_subkind(v) == V_UNARY_BITNEG) {
+         vlog_node_t u = vlog_new(V_UNARY);
+         vlog_set_subkind(u, V_UNARY_BITNEG);
+         vlog_set_value(u, trans_bit_select(vlog_value(v), pos));
+         vlog_set_loc(u, vlog_loc(v));
+         return u;
+      }
+      break;
+   case V_CONCAT:
+      {
+         if (vlog_has_value(v)) {
+            // Replication of the same bits
+            unsigned width = 0;
+            for (int i = 0; i < vlog_params(v); i++)
+               width += vlog_width(vlog_param(v, i));
+            pos %= width;
+         }
+
+         const int nparams = vlog_params(v);
+         for (int i = 0; i < nparams; i++) {
+            vlog_node_t p = vlog_param(v, i);
+            const unsigned width = vlog_width(p);
+            if (pos < width)
+               return trans_bit_select(p, pos);
+            pos -= width;
+         }
+      }
+      break;
+   case V_REF:
+   case V_PART_SELECT:
+      {
+         vlog_node_t base = v;
+         int64_t left, right;
+         bool known = false;
+         if (vlog_kind(v) == V_REF) {
+            base = v;
+            if (vlog_dimensions(vlog_ref(v)) > 0) {
+               vlog_node_t dim = vlog_get_dim(v, 0);
+               known = vlog_bounds(dim, &left, &right);
+            }
+         }
+         else if (vlog_subkind(v) == V_RANGE_CONST) {
+            base = vlog_value(v);
+            known = vlog_get_const(vlog_left(v), &left)
+               && vlog_get_const(vlog_right(v), &right);
+         }
+
+         if (!known || vlog_kind(base) != V_REF)
+            break;
+
+         vlog_node_t idx = vlog_new(V_NUMBER);
+         vlog_set_number(idx, number_from_int(left >= right
+                                              ? left - pos : left + pos));
+         vlog_set_loc(idx, vlog_loc(v));
+
+         vlog_node_t bs = vlog_new(V_BIT_SELECT);
+         vlog_node_t ref = vlog_new(V_REF);
+         vlog_set_ident(ref, vlog_ident(base));
+         vlog_set_ref(ref, vlog_ref(base));
+         vlog_set_loc(ref, vlog_loc(base));
+
+         vlog_set_value(bs, ref);
+         vlog_add_param(bs, idx);
+         vlog_set_loc(bs, vlog_loc(v));
+         return bs;
+      }
+   default:
+      break;
+   }
+
+   fatal_at(vlog_loc(v), "sorry, this terminal cannot be split across an "
+            "array of gate instances");
+}
+
+static vlog_node_t trans_gate_terminal(vlog_node_t v, unsigned count,
+                                       unsigned pos)
+{
+   const unsigned width = vlog_width(v);
+   if (width == count && count != 1)
+      return trans_bit_select(v, pos);
+   else
+      return v;
+}
+
+static void trans_gate_array(vlog_node_t mod, vlog_node_t s)
+{
+   vlog_node_t dim = vlog_gate_dimension(s);
+
+   int64_t left, right;
+   if (!vlog_bounds(dim, &left, &right)) {
+      error_at(vlog_loc(dim), "range of gate instance array is not constant");
+      return;
+   }
+
+   const unsigned count = (left > right ? left - right : right - left) + 1;
+   const int nparams = vlog_params(s);
+
+   for (int i = -1; i < nparams; i++) {
+      vlog_node_t p = i < 0 ? vlog_target(s) : vlog_param(s, i);
+      if (vlog_kind(p) == V_STRENGTH || vlog_kind(p) == V_DIMENSION)
+         continue;
+
+      const unsigned width = vlog_width(p);
+      if (width != 1 && width != count)
+         error_at(vlog_loc(p), "terminal of width %u does not match array of "
+                  "%u gate instances", width, count);
+   }
+
+   for (unsigned n = 0; n < count; n++) {
+      const int64_t index = left > right ? left - n : left + n;
+
+      vlog_node_t gate = vlog_new(V_GATE_INST);
+      vlog_set_subkind(gate, vlog_subkind(s));
+      vlog_set_ident(gate, ident_sprintf("%s_%"PRIi64, istr(vlog_ident(s)),
+                                         index));
+      vlog_set_loc(gate, vlog_loc(s));
+
+      for (int i = 0; i < nparams; i++) {
+         vlog_node_t p = vlog_param(s, i);
+         if (vlog_kind(p) == V_DIMENSION)
+            continue;
+         else if (vlog_kind(p) != V_STRENGTH)
+            p = trans_gate_terminal(p, count, n);
+         vlog_add_param(gate, p);
+      }
+
+      vlog_set_target(gate, trans_gate_terminal(vlog_target(s), count, n));
+
+      vlog_add_stmt(mod, gate);
+   }
+}
+
 void vlog_trans(vlog_node_t mod, tree_t out)
 {
    trans_gen_t gen = {
       .out = out,
    };
+
+   const int nbefore = vlog_stmts(mod);
+   for (int i = 0; i < nbefore; i++) {
+      vlog_node_t s = vlog_stmt(mod, i);
+      if (vlog_kind(s) == V_GATE_INST && vlog_gate_dimension(s) != NULL)
+         trans_gate_array(mod, s);
+   }
 
    const int ndecls = vlog_decls(mod);
    for (int i = 0; i < ndecls; i++) {
@@ -311,6 +500,11 @@ void vlog_trans(vlog_node_t mod, tree_t out)
       case V_TYPE_DECL:
       case V_CLASS_DECL:
       case V_STRUCT_DECL:
+      case V_IMPORT_DECL:
+      case V_DPI_EXPORT:
+      case V_MODPORT:
+      case V_IFACE_PORT:
+      case V_SVA_DECL:
          break;
       default:
          CANNOT_HANDLE(d);
@@ -338,9 +532,18 @@ void vlog_trans(vlog_node_t mod, tree_t out)
       case V_ALWAYS:
       case V_FINAL:
       case V_ASSIGN:
-      case V_GATE_INST:
       case V_UDP_TABLE:
          {
+            tree_t wrap = tree_new(T_VERILOG);
+            tree_set_ident(wrap, vlog_ident(s));
+            tree_set_vlog(wrap, s);
+            tree_set_loc(wrap, vlog_loc(s));
+
+            tree_add_stmt(out, wrap);
+         }
+         break;
+      case V_GATE_INST:
+         if (vlog_gate_dimension(s) == NULL) {
             tree_t wrap = tree_new(T_VERILOG);
             tree_set_ident(wrap, vlog_ident(s));
             tree_set_vlog(wrap, s);
