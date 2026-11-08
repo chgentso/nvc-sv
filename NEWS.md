@@ -37,6 +37,8 @@
   such as `{a; b[*]; c}`.
 - The right hand operand of a PSL implication or Boolean `or` is no longer
   evaluated if the left hand operand determines the result.
+- A PSL `default clock` declaration in a block now takes precedence over
+  the declaration in the enclosing region.
 - Added a `pkg-config` configuration file to aid locating the VHPI
   headers (from @gsmecher).
 - The `'IMAGE` and `to_string` of an enumeration literal that is an

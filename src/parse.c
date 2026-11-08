@@ -12413,11 +12413,11 @@ static tree_t p_psl_clock_declaration(void)
    consume(tSEMI);
 
    psl_set_loc(p, CURRENT_LOC);
+   tree_set_loc(t, CURRENT_LOC);
+
    psl_check(p, nametab);
 
    insert_name(nametab, t, NULL);
-
-   tree_set_loc(t, CURRENT_LOC);
    return t;
 }
 

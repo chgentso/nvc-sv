@@ -1467,9 +1467,16 @@ psl_node_t find_default_clock(nametab_t *tab)
    if (sym == NULL)
       return NULL;
 
-   const decl_t *dd = get_decl(sym, 0);
-   assert(dd->kind == T_PSL_DECL);
-   return tree_psl(dd->tree);
+   // Only the innermost declaration is directly visible
+   for (int i = 0; i < sym->ndecls; i++) {
+      const decl_t *dd = get_decl(sym, i);
+      if (dd->visibility == DIRECT) {
+         assert(dd->kind == T_PSL_DECL);
+         return tree_psl(dd->tree);
+      }
+   }
+
+   return NULL;
 }
 
 static bool is_predef_for_type(tree_t d, type_t type)
