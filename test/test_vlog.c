@@ -219,9 +219,9 @@ START_TEST(test_parse1)
    vlog_node_t m = vlog_parse();
    fail_if(m == NULL);
    fail_unless(vlog_kind(m) == V_MODULE);
-   ck_assert_int_eq(vlog_stmts(m), 45);
+   ck_assert_int_eq(vlog_stmts(m), 47);
    ck_assert_int_eq(vlog_ports(m), 0);
-   ck_assert_int_eq(vlog_decls(m), 39);
+   ck_assert_int_eq(vlog_decls(m), 45);
 
    vlog_node_t x = vlog_decl(m, 0);
    fail_unless(vlog_kind(x) == V_NET_DECL);
@@ -367,9 +367,9 @@ START_TEST(test_parse1)
    vlog_node_t et = vlog_stmt(s19b, 0);
    fail_unless(vlog_kind(et) == V_EVENT_TRIGGER);
 
-   vlog_node_t d28 = vlog_decl(m, 28);
-   fail_unless(vlog_kind(d28) == V_NET_DECL);
-   fail_unless(vlog_ident(d28) == ident_new("wire[x]net;"));
+   vlog_node_t d30 = vlog_decl(m, 30);
+   fail_unless(vlog_kind(d30) == V_NET_DECL);
+   fail_unless(vlog_ident(d30) == ident_new("wire[x]net;"));
 
    fail_unless(vlog_parse() == NULL);
 
