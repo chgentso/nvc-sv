@@ -384,6 +384,15 @@ static void psl_check_next_event(psl_node_t p, nametab_t *tab)
    psl_check(psl_value(p), tab);
 }
 
+static void psl_check_next_event_e(psl_node_t p, nametab_t *tab)
+{
+   psl_check_next_event(p, tab);
+
+   if (psl_kind(psl_value(p)) != P_HDL_EXPR)
+      error_at(psl_loc(p), "property is not in the simple subset as the "
+               "operand of this next_event_e operator is non-Boolean");
+}
+
 static void psl_check_next_e(psl_node_t p, nametab_t *tab)
 {
    psl_check(psl_delay(p), tab);
@@ -581,7 +590,11 @@ void psl_check(psl_node_t p, nametab_t *tab)
       psl_check_next(p, tab);
       break;
    case P_NEXT_EVENT:
+   case P_NEXT_EVENT_A:
       psl_check_next_event(p, tab);
+      break;
+   case P_NEXT_EVENT_E:
+      psl_check_next_event_e(p, tab);
       break;
    case P_NEXT_E:
       psl_check_next_e(p, tab);

@@ -1239,18 +1239,59 @@ static fsm_state_t *build_next(psl_fsm_t *fsm, fsm_state_t *state, psl_node_t p)
    return build_node(fsm, state, psl_value(p));
 }
 
+static fsm_state_t *build_property(psl_fsm_t *fsm, fsm_state_t *state,
+                                   psl_node_t p)
+{
+   // A sequence used as a property holds if any of its matches succeeds
+   // starting from the state
+
+   fsm_state_t *initial = add_state(fsm, p);
+   add_edge(fsm, state, initial, EDGE_EPSILON, NULL);
+
+   fsm_state_t *final = build_node(fsm, initial, p);
+
+   switch (psl_kind(p)) {
+   case P_SERE:
+   case P_REPEAT:
+   case P_PARAM_SERE:
+      return determinize(fsm, initial, final);
+   default:
+      return final;
+   }
+}
+
 static fsm_state_t *build_next_a(psl_fsm_t *fsm, fsm_state_t *state, psl_node_t p)
 {
    psl_node_t guard = psl_value(p);
-   if (psl_kind(guard) != P_HDL_EXPR)
-      fatal_at(psl_loc(p), "sorry, PSL next_a is supported only with expression");
-
    bool strong = (psl_flags(p) & PSL_F_STRONG) ? true : false;
-   fsm_state_t *curr = state;
 
    int64_t lo,hi = 0;
    psl_node_t range = psl_delay(p);
    get_range(fsm, range, &lo, &hi);
+
+   if (psl_kind(guard) != P_HDL_EXPR) {
+      // The operand must hold in each cycle from lo to hi
+      fsm_state_t *final = add_state(fsm, p);
+
+      for (int64_t k = lo; k <= hi; k++) {
+         fsm_state_t *curr = add_state(fsm, p);
+         add_edge(fsm, state, curr, EDGE_EPSILON, NULL);
+
+         for (int64_t i = 0; i < k; i++) {
+            fsm_state_t *new = add_state(fsm, p);
+            new->strong = strong;
+            add_edge(fsm, curr, new, EDGE_NEXT, NULL);
+            curr = new;
+         }
+
+         fsm_state_t *last = build_property(fsm, curr, guard);
+         add_edge(fsm, last, final, EDGE_EPSILON, NULL);
+      }
+
+      return final;
+   }
+
+   fsm_state_t *curr = state;
 
    for (int i = 0; i < hi; i++) {
       fsm_state_t *new = add_state(fsm, p);
@@ -1262,9 +1303,10 @@ static fsm_state_t *build_next_a(psl_fsm_t *fsm, fsm_state_t *state, psl_node_t 
       curr = new;
    }
 
-   curr->guard = guard;
+   fsm_state_t *final = add_state(fsm, p);
+   add_edge(fsm, curr, final, EDGE_EPSILON, guard);
 
-   return curr;
+   return final;
 }
 
 static fsm_state_t *build_next_e(psl_fsm_t *fsm, fsm_state_t *state, psl_node_t p)
@@ -1304,6 +1346,136 @@ static fsm_state_t *build_next_e(psl_fsm_t *fsm, fsm_state_t *state, psl_node_t 
    }
 
    return states[n_states - 1];
+}
+
+static fsm_state_t *build_next_event(psl_fsm_t *fsm, fsm_state_t *state,
+                                     psl_node_t p)
+{
+   // The property holds at the nth cycle, counting from the current one,
+   // in which the Boolean holds
+
+   psl_guard_t b = psl_operand(p, 0);
+   psl_guard_t not_b = not_guard(fsm, b);
+
+   const bool strong = !!(psl_flags(p) & PSL_F_STRONG);
+
+   int64_t count = 1;
+   if (psl_has_delay(p))
+      count = get_number(fsm, psl_tree(psl_delay(p)));
+
+   if (count < 1)
+      fatal_at(psl_loc(p), "number of occurrences in next_event must be "
+               "positive");
+
+   fsm_state_t *curr = state;
+   for (int64_t i = 0; i < count - 1; i++) {
+      fsm_state_t *wait = add_state(fsm, p);
+      wait->strong = strong;
+      add_edge(fsm, curr, curr, EDGE_NEXT, not_b);
+      add_edge(fsm, curr, wait, EDGE_NEXT, b);
+      curr->strong = strong;
+      curr = wait;
+   }
+
+   curr->strong = strong;
+   add_edge(fsm, curr, curr, EDGE_NEXT, not_b);
+
+   fsm_state_t *start = add_state(fsm, p);
+   add_edge(fsm, curr, start, EDGE_EPSILON, b);
+
+   return build_node(fsm, start, psl_value(p));
+}
+
+static fsm_state_t *build_next_event_a(psl_fsm_t *fsm, fsm_state_t *state,
+                                       psl_node_t p)
+{
+   // The property holds at each of the ith to jth cycles in which the
+   // Boolean holds
+
+   psl_guard_t b = psl_operand(p, 0);
+   psl_guard_t not_b = not_guard(fsm, b);
+
+   const bool strong = !!(psl_flags(p) & PSL_F_STRONG);
+
+   int64_t lo, hi;
+   get_range(fsm, psl_delay(p), &lo, &hi);
+
+   if (lo < 1)
+      fatal_at(psl_loc(p), "number of occurrences in next_event_a must be "
+               "positive");
+
+   fsm_state_t *final = add_state(fsm, p);
+
+   for (int64_t k = lo; k <= hi; k++) {
+      fsm_state_t *curr = add_state(fsm, p);
+      add_edge(fsm, state, curr, EDGE_EPSILON, NULL);
+
+      for (int64_t i = 0; i < k - 1; i++) {
+         fsm_state_t *wait = add_state(fsm, p);
+         wait->strong = strong;
+         curr->strong = strong;
+         add_edge(fsm, curr, curr, EDGE_NEXT, not_b);
+         add_edge(fsm, curr, wait, EDGE_NEXT, b);
+         curr = wait;
+      }
+
+      curr->strong = strong;
+      add_edge(fsm, curr, curr, EDGE_NEXT, not_b);
+
+      fsm_state_t *start = add_state(fsm, p);
+      add_edge(fsm, curr, start, EDGE_EPSILON, b);
+
+      fsm_state_t *last = build_node(fsm, start, psl_value(p));
+      add_edge(fsm, last, final, EDGE_EPSILON, NULL);
+   }
+
+   return final;
+}
+
+static fsm_state_t *build_next_event_e(psl_fsm_t *fsm, fsm_state_t *state,
+                                       psl_node_t p)
+{
+   // The Boolean operand holds at at least one of the ith to jth cycles
+   // in which the first Boolean holds
+
+   psl_guard_t b = psl_operand(p, 0);
+   psl_guard_t not_b = not_guard(fsm, b);
+   psl_guard_t f = psl_value(p);
+   psl_guard_t not_f = not_guard(fsm, f);
+
+   const bool strong = !!(psl_flags(p) & PSL_F_STRONG);
+
+   int64_t lo, hi;
+   get_range(fsm, psl_delay(p), &lo, &hi);
+
+   if (lo < 1)
+      fatal_at(psl_loc(p), "number of occurrences in next_event_e must be "
+               "positive");
+
+   fsm_state_t *final = add_state(fsm, p);
+   fsm_state_t *curr = state;
+
+   for (int64_t k = 1; k <= hi; k++) {
+      curr->strong = strong;
+      add_edge(fsm, curr, curr, EDGE_NEXT, not_b);
+
+      if (k < lo) {
+         fsm_state_t *wait = add_state(fsm, p);
+         add_edge(fsm, curr, wait, EDGE_NEXT, b);
+         curr = wait;
+      }
+      else {
+         add_edge(fsm, curr, final, EDGE_EPSILON, and_guard(fsm, b, f));
+
+         if (k < hi) {
+            fsm_state_t *wait = add_state(fsm, p);
+            add_edge(fsm, curr, wait, EDGE_NEXT, and_guard(fsm, b, not_f));
+            curr = wait;
+         }
+      }
+   }
+
+   return final;
 }
 
 static fsm_state_t *build_eventually(psl_fsm_t *fsm, fsm_state_t *state,
@@ -1435,6 +1607,12 @@ static fsm_state_t *build_node(psl_fsm_t *fsm, fsm_state_t *state, psl_node_t p)
       return build_logical(fsm, state, p);
    case P_UNTIL:
       return build_until(fsm, state, p);
+   case P_NEXT_EVENT:
+      return build_next_event(fsm, state, p);
+   case P_NEXT_EVENT_A:
+      return build_next_event_a(fsm, state, p);
+   case P_NEXT_EVENT_E:
+      return build_next_event_e(fsm, state, p);
    case P_EVENTUALLY:
       return build_eventually(fsm, state, p);
    case P_ABORT:

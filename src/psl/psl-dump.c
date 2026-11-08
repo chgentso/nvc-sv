@@ -133,6 +133,20 @@ static void psl_dump_next_event(psl_node_t p)
    print_syntax(")");
 }
 
+static void psl_dump_next_event_range(psl_node_t p, const char *name)
+{
+   print_syntax("#%s", name);
+   if (psl_flags(p) & PSL_F_STRONG)
+      print_syntax("!");
+   print_syntax(" (");
+   psl_dump(psl_operand(p, 0));
+   print_syntax(")[");
+   psl_dump(psl_delay(p));
+   print_syntax("] (");
+   psl_dump(psl_value(p));
+   print_syntax(")");
+}
+
 static void psl_dump_until(psl_node_t p)
 {
    print_syntax("(");
@@ -350,6 +364,12 @@ void psl_dump(psl_node_t p)
       break;
    case P_NEXT_EVENT:
       psl_dump_next_event(p);
+      break;
+   case P_NEXT_EVENT_A:
+      psl_dump_next_event_range(p, "next_event_a");
+      break;
+   case P_NEXT_EVENT_E:
+      psl_dump_next_event_range(p, "next_event_e");
       break;
    case P_UNTIL:
       psl_dump_until(p);

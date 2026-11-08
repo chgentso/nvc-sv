@@ -55,6 +55,8 @@ typedef enum {
    P_PARAM_SERE,
    P_CLOCKED,
    P_ENDPOINT_DECL,
+   P_NEXT_EVENT_A,
+   P_NEXT_EVENT_E,
 
    P_LAST_PSL_KIND
 } psl_kind_t;

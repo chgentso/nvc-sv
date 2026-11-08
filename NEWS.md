@@ -48,6 +48,8 @@
 - Added support for PSL parameterised SEREs (`for i in {...} : && {...}`).
 - PSL clock expressions can now be used on SEREs and properties nested
   inside other properties.
+- Added support for PSL `next_a` with a non-Boolean operand and for
+  `next_event`, `next_event_a` and `next_event_e` and their strong forms.
 - PSL Boolean implication `->` and equivalence `<->` can now be used
   inside SEREs and as the operand of other PSL operators.  The operators
   of PSL properties are now parsed with the correct precedence.

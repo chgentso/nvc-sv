@@ -13413,22 +13413,51 @@ static psl_node_t p_psl_fl_primary(void)
 
    case tNEXTEVENT:
    case tNEXTEVENT1:
+   case tNEXTEVENTA:
+   case tNEXTEVENTA1:
+   case tNEXTEVENTE:
+   case tNEXTEVENTE1:
       {
          consume(tok);
 
-         p = psl_new(P_NEXT_EVENT);
+         const bool strong = (tok == tNEXTEVENT1 || tok == tNEXTEVENTA1
+                              || tok == tNEXTEVENTE1);
 
-         if (tok == tNEXTEVENT1)
+         psl_kind_t kind;
+         switch (tok) {
+         case tNEXTEVENTA:
+         case tNEXTEVENTA1:
+            kind = P_NEXT_EVENT_A;
+            break;
+         case tNEXTEVENTE:
+         case tNEXTEVENTE1:
+            kind = P_NEXT_EVENT_E;
+            break;
+         default:
+            kind = P_NEXT_EVENT;
+            break;
+         }
+
+         p = psl_new(kind);
+
+         if (strong)
             psl_set_flag(p, PSL_F_STRONG);
 
          consume(tLPAREN);
-         psl_add_operand(p, p_hdl_expression(NULL, PSL_TYPE_BOOLEAN));
+         psl_add_operand(p, p_psl_boolean(NULL));
          consume(tRPAREN);
 
-         if (optional(tLSQUARE)) {
-            psl_node_t count = p_hdl_expression(NULL, PSL_TYPE_NUMERIC);
-            psl_set_delay(p, count);
+         if (kind == P_NEXT_EVENT) {
+            if (optional(tLSQUARE)) {
+               psl_node_t count = p_hdl_expression(NULL, PSL_TYPE_NUMERIC);
+               psl_set_delay(p, count);
 
+               consume(tRSQUARE);
+            }
+         }
+         else {
+            consume(tLSQUARE);
+            psl_set_delay(p, p_psl_range(NULL));
             consume(tRSQUARE);
          }
 

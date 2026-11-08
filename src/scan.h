@@ -589,5 +589,9 @@ void reset_sdf_parser(void);
 #define tMACROJOIN     645
 #define tCYCLEDLY      646
 #define tTIMELIT       647
+#define tNEXTEVENTA    648
+#define tNEXTEVENTA1   649
+#define tNEXTEVENTE    650
+#define tNEXTEVENTE1   651
 
 #endif  // _SCAN_H
