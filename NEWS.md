@@ -25,6 +25,8 @@
   non-literal static expressions.
 - Fixed a crash when a parameter of a PSL parameterised SERE is used in
   an expression.
+- The right hand operand of a PSL implication or Boolean `or` is no longer
+  evaluated if the left hand operand determines the result.
 - Added a `pkg-config` configuration file to aid locating the VHPI
   headers (from @gsmecher).
 - Several other minor bugs were resolved (#1663, #1672, #1668, #1670,

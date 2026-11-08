@@ -107,18 +107,36 @@ static vcode_reg_t psl_lower_guard(lower_unit_t *lu, psl_guard_t g)
       return psl_lower_boolean(lu, psl_guard_expr(g));
    case GUARD_BINOP:
       {
+         // The right hand operand is only evaluated if the left hand
+         // operand does not determine the result
          const guard_binop_t *bop = psl_guard_binop(g);
          vcode_reg_t left_reg = psl_lower_guard(lu, bop->left);
-         vcode_reg_t right_reg = psl_lower_guard(lu, bop->right);
+
+         vcode_type_t vbool = vtype_bool();
+         vcode_var_t tmp_var = emit_var(vbool, VCODE_INVALID_STAMP,
+                                        ident_uniq("guard"), VAR_TEMP);
+         emit_store(left_reg, tmp_var);
+
+         vcode_block_t right_bb = emit_block();
+         vcode_block_t done_bb = emit_block();
 
          switch (bop->kind) {
          case BINOP_AND:
-            return emit_and(left_reg, right_reg);
+            emit_cond(left_reg, right_bb, done_bb);
+            break;
          case BINOP_OR:
-            return emit_or(left_reg, right_reg);
+            emit_cond(left_reg, done_bb, right_bb);
+            break;
          default:
             should_not_reach_here();
          }
+
+         vcode_select_block(right_bb);
+         emit_store(psl_lower_guard(lu, bop->right), tmp_var);
+         emit_jump(done_bb);
+
+         vcode_select_block(done_bb);
+         return emit_load(tmp_var);
       }
    case GUARD_NOT:
       return emit_not(psl_lower_boolean(lu, psl_guard_expr(g)));
