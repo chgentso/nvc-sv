@@ -29,6 +29,7 @@
 #include "psl/psl-node.h"
 #include "thread.h"
 #include "type.h"
+#include "vhdl/vhdl-phase.h"
 #include "vhdl/vhdl-util.h"
 
 #include <assert.h>
@@ -2565,6 +2566,314 @@ tree_t resolve_pcall(nametab_t *tab, tree_t name)
    }
 }
 
+void instantiate_subprogram(nametab_t *tab, tree_t new, tree_t decl,
+                            tree_t body)
+{
+   tree_t roots[] = { decl, body };
+   ident_t prefixes[] = { tree_ident(decl) };
+   ident_t dotted = ident_prefix(scope_prefix(tab), tree_ident(new), '.');
+   vhdl_subprogram_instance(roots, body != NULL ? 2 :1, dotted, prefixes, 1);
+
+   tree_t decl_copy = roots[0], body_copy = roots[1];
+   tree_t src = body_copy ?: decl_copy;
+
+   tree_set_type(new, tree_type(src));
+   tree_set_flag(new, tree_flags(decl));
+   tree_set_global_flags(new, tree_global_flags(decl));
+
+   tree_copy_generics(new, src);
+   tree_copy_ports(new, src);
+
+   if (body != NULL) {
+      tree_copy_decls(new, body_copy);
+      tree_copy_stmts(new, body_copy);
+
+      tree_set_flag(new, tree_flags(body));
+      tree_set_global_flags(new, tree_global_flags(body));
+   }
+
+   // Allow recursive calls to the uninstantiated subprogram
+   map_generic_subprogram(tab, decl_copy, new);
+   if (body != NULL) map_generic_subprogram(tab, body_copy, new);
+}
+
+tree_t find_subprogram_body(nametab_t *tab, tree_t decl)
+{
+   const tree_kind_t decl_kind = tree_kind(decl);
+   if (decl_kind == T_FUNC_BODY || decl_kind == T_PROC_BODY)
+      return decl;
+
+   // Attempt to load the package body if available
+   tree_t pack = tree_container(decl);
+   if (tree_kind(pack) != T_PACKAGE)
+      return NULL;
+
+   tree_t du = find_enclosing(tab, S_DESIGN_UNIT);
+   if (du == pack)
+      return NULL;   // Avoid referencing old version of current package
+
+   tree_t pack_body, d;
+   if (tree_kind(du) == T_PACK_BODY && tree_primary(du) == pack)
+      pack_body = du;
+   else if ((pack_body = body_of(pack)) == NULL)
+      return NULL;
+
+   type_t type = tree_type(decl);
+   ident_t id = tree_ident(decl);
+   for (int nth = 0; (d = get_local_decl(tab, pack_body, id, nth)); nth++) {
+      if (is_subprogram(d) && is_body(d) && type_eq(tree_type(d), type))
+         return d;
+   }
+
+   return NULL;
+}
+
+static bool is_anonymous_type(type_t type)
+{
+   return type_kind(type) == T_GENERIC && !type_has_ident(type);
+}
+
+static void collect_anonymous_types(type_t type, type_list_t *list)
+{
+   if (!is_anonymous_type(type))
+      return;
+
+   for (int i = 0; i < list->count; i++) {
+      if (list->items[i] == type)
+         return;
+   }
+
+   APUSH(*list, type);
+
+   switch (type_subkind(type)) {
+   case GTYPE_ARRAY:
+      {
+         const int nindex = type_indexes(type);
+         for (int i = 0; i < nindex; i++)
+            collect_anonymous_types(type_index(type, i), list);
+
+         collect_anonymous_types(type_elem(type), list);
+      }
+      break;
+   case GTYPE_ACCESS:
+   case GTYPE_FILE:
+      collect_anonymous_types(type_designated(type), list);
+      break;
+   default:
+      break;
+   }
+}
+
+static bool anonymous_types_conform(tree_t body, tree_t decl, hash_t *map)
+{
+   // LRM 19 section 4.10: the anonymous types of a subprogram body and
+   // the corresponding declaration conform if they appear at the same
+   // positions in the interface list and have the same class
+
+   const int nports = tree_ports(body);
+   if (tree_ports(decl) != nports)
+      return false;
+
+   type_list_t btypes = AINIT, dtypes = AINIT;
+   bool match = true;
+
+   for (int i = 0; match && i < nports; i++) {
+      collect_anonymous_types(tree_type(tree_port(body, i)), &btypes);
+      collect_anonymous_types(tree_type(tree_port(decl, i)), &dtypes);
+
+      match = (btypes.count == dtypes.count);
+   }
+
+   match &= (btypes.count > 0);
+
+   for (int i = 0; match && i < btypes.count; i++) {
+      type_t btype = btypes.items[i], dtype = dtypes.items[i];
+      if ((match = (type_subkind(btype) == type_subkind(dtype))))
+         hash_put(map, btype, dtype);
+   }
+
+   ACLEAR(btypes);
+   ACLEAR(dtypes);
+
+   return match && type_eq_map(tree_type(body), tree_type(decl), map);
+}
+
+tree_t find_anonymous_forward_decl(nametab_t *tab, tree_t body, hash_t *map)
+{
+   const tree_kind_t kind =
+      tree_kind(body) == T_FUNC_BODY ? T_FUNC_DECL : T_PROC_DECL;
+
+   const symbol_t *sym = iterate_symbol_for(tab, tree_ident(body));
+   if (sym == NULL)
+      return NULL;
+
+   for (int i = 0; i < sym->ndecls; i++) {
+      const decl_t *dd = get_decl(sym, i);
+      if (dd->visibility == HIDDEN || tree_kind(dd->tree) != kind)
+         continue;
+      else if (tree_generics(dd->tree) != tree_generics(body))
+         continue;
+      else if (anonymous_types_conform(body, dd->tree, map))
+         return dd->tree;
+   }
+
+   return NULL;
+}
+
+static bool is_implicit_generic(tree_t g)
+{
+   // The implicit generic type for an anonymous type and its implicit
+   // generic subprograms
+   if (tree_flags(g) & TREE_F_PREDEFINED)
+      return true;
+   else
+      return tree_class(g) == C_TYPE && is_anonymous_type(tree_type(g));
+}
+
+static tree_t implicit_subprogram_instance(nametab_t *tab, tree_t call,
+                                           tree_t decl)
+{
+   // LRM 19 section 6.5.2: a subprogram with anonymous types in its
+   // interface list has an implicit generic type for each and a call
+   // implicitly instantiates it with the subtype of the actual
+   // associated with the corresponding formal
+
+   if (!is_uninstantiated_subprogram(decl))
+      return decl;
+
+   const int ngenerics = tree_generics(decl);
+   for (int i = 0; i < ngenerics; i++) {
+      if (!is_implicit_generic(tree_generic(decl, i)))
+         return decl;
+   }
+
+   tree_t sub = find_enclosing(tab, S_SUBPROGRAM);
+   if (sub == decl)
+      return decl;   // Recursive call
+   else if (sub != NULL && tree_has_ident2(sub) && tree_has_ident2(decl)
+            && tree_ident2(sub) == tree_ident2(decl))
+      return decl;   // Recursive call from body
+
+   // If the body has not been analysed yet the call can be checked
+   // but not elaborated
+   tree_t body = find_subprogram_body(tab, decl);
+
+   const tree_kind_t kind =
+      class_of(decl) == C_FUNCTION ? T_FUNC_INST : T_PROC_INST;
+
+   tree_t inst = tree_new(kind);
+   tree_set_ident(inst, ident_prefix(tree_ident(decl), ident_uniq("inst"),
+                                     '$'));
+   tree_set_loc(inst, tree_loc(call));
+   tree_set_ref(inst, body ?: decl);
+
+   instantiate_subprogram(tab, inst, decl, body);
+
+   const int nports = tree_ports(inst);
+   const int nparams = tree_params(call);
+   for (int i = 0; i < nparams; i++) {
+      tree_t p = tree_param(call, i);
+
+      int pos = -1;
+      if (tree_subkind(p) == P_POS)
+         pos = tree_pos(p);
+      else {
+         tree_t name = tree_name(p);
+         if (tree_kind(name) != T_REF)
+            continue;
+
+         for (int j = 0; j < nports; j++) {
+            if (tree_ident(tree_port(inst, j)) == tree_ident(name)) {
+               pos = j;
+               break;
+            }
+         }
+      }
+
+      if (pos < 0 || pos >= nports)
+         continue;
+
+      tree_t port = tree_port(inst, pos);
+      type_t ftype = tree_type(port);
+      if (!is_anonymous_type(ftype))
+         continue;
+
+      hash_t *gmap = get_generic_map(tab);
+      if (gmap != NULL && hash_get(gmap, ftype) != NULL)
+         continue;   // Already mapped by an earlier actual
+
+      int gpos = -1;
+      for (int j = 0; j < ngenerics; j++) {
+         if (tree_type(tree_generic(inst, j)) == ftype) {
+            gpos = j;
+            break;
+         }
+      }
+
+      tree_t value = tree_value(p);
+      if (gpos == -1 || !tree_has_type(value))
+         continue;
+
+      type_t atype = tree_type(value);
+      if (type_is_none(atype))
+         continue;
+      else if (type_is_universal(atype)) {
+         error_at(tree_loc(value), "the subtype of the actual for formal "
+                  "%s with an anonymous type cannot be determined",
+                  istr(tree_ident(port)));
+         continue;
+      }
+
+      map_generic_type(tab, ftype, atype);
+
+      tree_t tref = tree_new(T_TYPE_REF);
+      tree_set_ident(tref, type_ident(atype));
+      tree_set_type(tref, atype);
+      tree_set_loc(tref, tree_loc(value));
+
+      tree_t map = tree_new(T_PARAM);
+      tree_set_loc(map, tree_loc(value));
+      tree_set_subkind(map, P_POS);
+      tree_set_pos(map, gpos);
+      tree_set_value(map, tref);
+
+      tree_add_genmap(inst, map);
+   }
+
+   sem_check(inst, tab);
+
+   hash_t *gmap = get_generic_map(tab);
+   if (gmap != NULL)
+      vhdl_instance_fixup(inst, gmap);
+
+   // Named associations now denote the formals of the instance
+   for (int i = 0; i < nparams; i++) {
+      tree_t p = tree_param(call, i);
+      if (tree_subkind(p) != P_NAMED)
+         continue;
+
+      tree_t name = tree_name(p);
+      if (tree_kind(name) != T_REF)
+         continue;
+
+      for (int j = 0; j < nports; j++) {
+         tree_t port = tree_port(inst, j);
+         if (tree_ident(port) == tree_ident(name)) {
+            tree_set_ref(name, port);
+            tree_set_type(name, tree_type(port));
+            break;
+         }
+      }
+   }
+
+   mangle_func(tab, inst);
+
+   tree_t container = find_enclosing(tab, S_DECLARATIVE_REGION);
+   tree_add_decl(container, inst);
+
+   return inst;
+}
+
 tree_t resolve_uninstantiated_subprogram(nametab_t *tab, tree_t name,
                                          type_t constraint)
 {
@@ -3592,8 +3901,33 @@ static tree_t finish_overload_resolution(overload_t *o)
    return result;
 }
 
+static tree_t overload_find_port(tree_t decl, tree_t param);
+
+static type_t overload_anonymous_type(overload_t *o, type_t type, tree_t d)
+{
+   // The actual subtype for an anonymous type is determined by an
+   // argument already associated with a formal of the same type
+
+   for (int i = 0; i < o->params.count; i++) {
+      tree_t p = o->params.items[i];
+      tree_t port = overload_find_port(d, p);
+      if (port == NULL || tree_type(port) != type)
+         continue;
+
+      type_t actual = get_type_or_null(tree_value(p));
+      if (actual != NULL && !type_is_none(actual)
+          && !type_is_universal(actual))
+         return actual;
+   }
+
+   return type;
+}
+
 static void overload_add_argument_type(overload_t *o, type_t type, tree_t d)
 {
+   if (is_anonymous_type(type))
+      type = overload_anonymous_type(o, type, d);
+
    type_set_add(o->nametab, type, d);
 }
 
@@ -4290,6 +4624,8 @@ static tree_t resolve_fcall(nametab_t *tab, tree_t fcall, tree_t decl,
 
       decl = tree_ref(decl);
    }
+   else if (standard() >= STD_19)
+      decl = implicit_subprogram_instance(tab, fcall, decl);
 
    const tree_flags_t flags = tree_flags(decl);
    if ((flags & TREE_F_PROTECTED) && tree_kind(fcall) != T_PROT_FCALL) {
@@ -4467,6 +4803,9 @@ static tree_t solve_pcall(nametab_t *tab, tree_t t)
       return new;
    }
    else {
+      if (standard() >= STD_19)
+         decl = implicit_subprogram_instance(tab, t, decl);
+
       tree_set_ref(t, decl);
       return t;
    }

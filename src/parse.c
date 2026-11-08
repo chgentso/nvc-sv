@@ -1730,36 +1730,6 @@ static tree_t fcall_to_conv_func(tree_t value)
    return conv;
 }
 
-static void instantiate_subprogram(tree_t new, tree_t decl, tree_t body)
-{
-   tree_t roots[] = { decl, body };
-   ident_t prefixes[] = { tree_ident(decl) };
-   ident_t dotted = ident_prefix(scope_prefix(nametab), tree_ident(new), '.');
-   vhdl_subprogram_instance(roots, body != NULL ? 2 :1, dotted, prefixes, 1);
-
-   tree_t decl_copy = roots[0], body_copy = roots[1];
-   tree_t src = body_copy ?: decl_copy;
-
-   tree_set_type(new, tree_type(src));
-   tree_set_flag(new, tree_flags(decl));
-   tree_set_global_flags(new, tree_global_flags(decl));
-
-   tree_copy_generics(new, src);
-   tree_copy_ports(new, src);
-
-   if (body != NULL) {
-      tree_copy_decls(new, body_copy);
-      tree_copy_stmts(new, body_copy);
-
-      tree_set_flag(new, tree_flags(body));
-      tree_set_global_flags(new, tree_global_flags(body));
-   }
-
-   // Allow recursive calls to the uninstantiated subprogram
-   map_generic_subprogram(nametab, decl_copy, new);
-   if (body != NULL) map_generic_subprogram(nametab, body_copy, new);
-}
-
 static void instantiate_package(tree_t new, tree_t pack, tree_t body)
 {
    assert(body == NULL || tree_primary(body) == pack);
@@ -2568,37 +2538,6 @@ static void find_disconnect_specification(tree_t guard, tree_t target)
       tree_set_spec(guard, spec);
 }
 
-static tree_t find_subprogram_body(tree_t decl)
-{
-   const tree_kind_t decl_kind = tree_kind(decl);
-   if (decl_kind == T_FUNC_BODY || decl_kind == T_PROC_BODY)
-      return decl;
-
-   // Attempt to load the package body if available
-   tree_t pack = tree_container(decl);
-   if (tree_kind(pack) != T_PACKAGE)
-      return NULL;
-
-   tree_t du = find_enclosing(nametab, S_DESIGN_UNIT);
-   if (du == pack)
-      return NULL;   // Avoid referencing old version of current package
-
-   tree_t pack_body, d;
-   if (tree_kind(du) == T_PACK_BODY && tree_primary(du) == pack)
-      pack_body = du;
-   else if ((pack_body = body_of(pack)) == NULL)
-      return NULL;
-
-   type_t type = tree_type(decl);
-   ident_t id = tree_ident(decl);
-   for (int nth = 0; (d = get_local_decl(nametab, pack_body, id, nth)); nth++) {
-      if (is_subprogram(d) && is_body(d) && type_eq(tree_type(d), type))
-         return d;
-   }
-
-   return NULL;
-}
-
 static tree_t find_protected_body(tree_t decl)
 {
    assert(tree_kind(decl) == T_PROT_DECL);
@@ -2764,7 +2703,7 @@ static void package_body_deferred_instantiation(tree_t pack, tree_t container)
       if (is_body(ref))
          continue;
 
-      tree_t body = find_subprogram_body(ref);
+      tree_t body = find_subprogram_body(nametab, ref);
       if (body == NULL) {
          diag_t *d = diag_new(DIAG_ERROR, CURRENT_LOC);
          diag_printf(d, "subprogram %pT cannot be instantiated until its "
@@ -2783,7 +2722,7 @@ static void package_body_deferred_instantiation(tree_t pack, tree_t container)
          tree_set_ident2(inst, tree_ident2(decl));
          tree_set_ref(inst, body);
 
-         instantiate_subprogram(inst, ref, body);
+         instantiate_subprogram(nametab, inst, ref, body);
 
          const int ngenmaps = tree_genmaps(decl);
          for (int i = 0; i < ngenmaps; i++) {
@@ -2822,7 +2761,7 @@ static void package_body_deferred_instantiation(tree_t pack, tree_t container)
 
 static tree_t find_generic_subprogram_body(tree_t inst, tree_t decl)
 {
-   tree_t body = find_subprogram_body(decl);
+   tree_t body = find_subprogram_body(nametab, decl);
 
    if (body == NULL) {
       tree_t du = find_enclosing(nametab, S_DESIGN_UNIT);
@@ -3643,6 +3582,88 @@ static tree_t p_association_element(tree_t unit, int pos, tree_t formal,
    return p;
 }
 
+static void infer_anonymous_type(tree_t map, tree_t unit, tree_t elem,
+                                 formal_kind_t kind)
+{
+   // LRM 19 section 6.5.7.1: the actual for the implicit generic type
+   // of a port or generic with an anonymous type is the subtype of the
+   // actual associated with that port or generic
+
+   tree_t port = NULL;
+   if (tree_subkind(elem) == P_POS) {
+      const int pos = tree_pos(elem);
+      if (kind == F_PORT_MAP && pos < tree_ports(unit))
+         port = tree_port(unit, pos);
+      else if (kind == F_GENERIC_MAP && pos < tree_generics(unit))
+         port = tree_generic(unit, pos);
+   }
+   else {
+      tree_t name = tree_name(elem);
+      if (tree_kind(name) == T_REF && tree_has_ref(name))
+         port = tree_ref(name);
+   }
+
+   if (port == NULL)
+      return;
+   else if (tree_kind(port) == T_GENERIC_DECL) {
+      if (tree_class(port) != C_CONSTANT)
+         return;
+   }
+   else if (tree_kind(port) != T_PORT_DECL)
+      return;
+
+   type_t ftype = tree_type(port);
+   if (type_kind(ftype) != T_GENERIC || type_has_ident(ftype))
+      return;
+
+   const int ngenerics = tree_generics(unit);
+   int gpos = 0;
+   for (; gpos < ngenerics; gpos++) {
+      if (tree_type(tree_generic(unit, gpos)) == ftype)
+         break;
+   }
+
+   if (gpos == ngenerics)
+      return;
+
+   const int ngenmaps = tree_genmaps(map);
+   for (int i = 0; i < ngenmaps; i++) {
+      tree_t m = tree_genmap(map, i);
+      if (tree_subkind(m) == P_POS && tree_pos(m) == gpos)
+         return;   // Already mapped by an earlier port
+   }
+
+   tree_t value = tree_value(elem);
+   if (tree_kind(value) == T_OPEN || !tree_has_type(value))
+      return;
+
+   type_t atype = tree_type(value);
+   if (type_is_none(atype))
+      return;
+   else if (type_is_universal(atype)) {
+      parse_error(tree_loc(value), "the subtype of the actual for %s %s "
+                  "with an anonymous type cannot be determined",
+                  kind == F_PORT_MAP ? "port" : "generic",
+                  istr(tree_ident(port)));
+      return;
+   }
+
+   map_generic_type(nametab, ftype, atype);
+
+   tree_t tref = tree_new(T_TYPE_REF);
+   tree_set_ident(tref, type_ident(atype));
+   tree_set_type(tref, atype);
+   tree_set_loc(tref, tree_loc(value));
+
+   tree_t g = tree_new(T_PARAM);
+   tree_set_loc(g, tree_loc(value));
+   tree_set_subkind(g, P_POS);
+   tree_set_pos(g, gpos);
+   tree_set_value(g, tref);
+
+   tree_add_genmap(map, g);
+}
+
 static void p_port_association_list(tree_t map, tree_t unit)
 {
    // association_element { , association_element }
@@ -3656,6 +3677,9 @@ static void p_port_association_list(tree_t map, tree_t unit)
       tree_t p = pos < nports ? tree_port(unit, pos) : NULL;
       tree_t elem = p_association_element(unit, pos++, p, F_PORT_MAP);
       tree_add_param(map, elem);
+
+      if (standard() >= STD_19 && unit != NULL && tree_generics(unit) > 0)
+         infer_anonymous_type(map, unit, elem, F_PORT_MAP);
    } while (optional(tCOMMA));
 }
 
@@ -3672,6 +3696,9 @@ static void p_generic_association_list(tree_t map, tree_t unit)
       tree_t g = pos < ngenerics ? tree_generic(unit, pos) : NULL;
       tree_t elem = p_association_element(unit, pos++, g, F_GENERIC_MAP);
       tree_add_genmap(map, elem);
+
+      if (standard() >= STD_19 && unit != NULL)
+         infer_anonymous_type(map, unit, elem, F_GENERIC_MAP);
    } while (optional(tCOMMA));
 }
 
@@ -3780,7 +3807,7 @@ static tree_t p_function_call(ident_t id, tree_t prefix)
       tree_t decl = resolve_uninstantiated_subprogram(nametab, ref, NULL);
       if (decl != NULL) {
          tree_t body = find_generic_subprogram_body(inst, decl);
-         instantiate_subprogram(inst, decl, body);
+         instantiate_subprogram(nametab, inst, decl, body);
       }
       else {
          // Create a dummy subprogram type to avoid later errors
@@ -5451,7 +5478,7 @@ static inline tree_t p_expression(void)
    return p_expression_with_head(NULL);
 }
 
-static type_t p_interface_type_indication(tree_t parent)
+static type_t p_interface_type_indication(tree_t parent, ident_list_t *ids)
 {
    // subtype_indication | anonymous_type_indication
 
@@ -5462,14 +5489,25 @@ static type_t p_interface_type_indication(tree_t parent)
 
       type_t type = p_anonymous_type_indication();
 
+      // LRM 19 section 6.5.2: an anonymous type indication defines an
+      // implicit interface type declaration preceding the interface
+      // declaration.  The implicit generic is named after the first
+      // interface object so the generics of a component declaration
+      // and the corresponding entity can be matched by name.
+      ident_t id = ident_prefix(ids->ident, ident_new("anonymous"), '$');
+
       tree_t g = tree_new(T_GENERIC_DECL);
       tree_set_loc(g, CURRENT_LOC);
-      tree_set_ident(g, ident_uniq("anonymous"));
+      tree_set_ident(g, id);
       tree_set_subkind(g, PORT_IN);
       tree_set_class(g, C_TYPE);
       tree_set_type(g, type);
 
       tree_add_generic(parent, g);
+
+      // LRM 19 section 6.5.3: the predefined operators are implicitly
+      // declared as formal generic subprograms
+      declare_generic_ops(parent, type);
 
       return type;
    }
@@ -5531,7 +5569,7 @@ static void p_interface_constant_declaration(tree_t parent, tree_kind_t kind,
       }
    }
 
-   type_t type = p_interface_type_indication(parent);
+   type_t type = p_interface_type_indication(parent, ids);
 
    tree_t init = NULL;
    if (optional(tWALRUS))
@@ -5642,7 +5680,7 @@ static void p_interface_signal_declaration(tree_t parent, tree_kind_t kind,
          flags |= TREE_F_EXPLICIT_MODE;
       }
 
-      type = p_interface_type_indication(parent);
+      type = p_interface_type_indication(parent, ids);
 
       if (optional(tBUS)) {
          flags |= TREE_F_BUS;
@@ -5696,7 +5734,7 @@ static void p_interface_variable_declaration(tree_t parent, tree_kind_t kind)
       flags |= TREE_F_EXPLICIT_MODE;
    }
 
-   type_t type = p_interface_type_indication(parent);
+   type_t type = p_interface_type_indication(parent, ids);
 
    tree_t init = NULL;
    if (optional(tWALRUS))
@@ -7822,7 +7860,7 @@ static tree_t p_subprogram_instantiation_declaration(void)
 
       tree_t body = find_generic_subprogram_body(inst, decl);
 
-      instantiate_subprogram(inst, decl, body);
+      instantiate_subprogram(nametab, inst, decl, body);
    }
    else {
       // Create a dummy subprogram type to avoid later errors
@@ -8888,6 +8926,25 @@ static void p_trailing_label(ident_t label)
    }
 }
 
+static type_t rewrite_anonymous_type_cb(type_t type, void *ctx)
+{
+   hash_t *map = ctx;
+   return hash_get(map, type) ?: type;
+}
+
+static void conform_anonymous_types(tree_t body)
+{
+   // Replace the anonymous types in the interface list of a subprogram
+   // body with those of the corresponding subprogram declaration
+
+   hash_t *map = hash_new(16);
+
+   if (find_anonymous_forward_decl(nametab, body, map) != NULL)
+      tree_rewrite(body, NULL, NULL, rewrite_anonymous_type_cb, map);
+
+   hash_free(map);
+}
+
 static tree_t p_subprogram_body(tree_t spec)
 {
    // subprogram_specification is subprogram_declarative_part begin
@@ -8900,6 +8957,9 @@ static tree_t p_subprogram_body(tree_t spec)
    const tree_kind_t kind =
       (tree_kind(spec) == T_FUNC_DECL) ? T_FUNC_BODY : T_PROC_BODY;
    tree_change_kind(spec, kind);
+
+   if (standard() >= STD_19 && tree_generics(spec) > 0)
+      conform_anonymous_types(spec);
 
    insert_name(nametab, spec, NULL);
 
@@ -10947,7 +11007,7 @@ static tree_t p_procedure_call_statement(ident_t label, tree_t name)
       tree_t decl = resolve_uninstantiated_subprogram(nametab, name, NULL);
       if (decl != NULL) {
          tree_t body = find_generic_subprogram_body(inst, decl);
-         instantiate_subprogram(inst, decl, body);
+         instantiate_subprogram(nametab, inst, decl, body);
       }
       else {
          // Create a dummy subprogram type to avoid later errors

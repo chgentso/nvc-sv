@@ -10282,6 +10282,17 @@ static void lower_subprogram_defaults(lower_unit_t *lu, tree_t d)
    }
 }
 
+static void lower_missing_inst_body(tree_t scope, tree_t inst)
+{
+   // A subprogram instantiated implicitly by a call before its body was
+   // analysed has no body unless it is in a package declaration
+   const tree_kind_t kind = tree_kind(scope);
+   if (kind != T_PACKAGE && kind != T_PACK_INST)
+      fatal_at(tree_loc(inst), "sorry, the body of subprogram %s must be "
+               "analysed before a call that implicitly instantiates it",
+               istr(tree_ident(tree_ref(inst))));
+}
+
 static void lower_decls(lower_unit_t *lu, tree_t scope, gen_stack_t *gs)
 {
    const bool use_mir = opt_get_int(OPT_LOWER_MIR);
@@ -10302,8 +10313,10 @@ static void lower_decls(lower_unit_t *lu, tree_t scope, gen_stack_t *gs)
       case T_FUNC_INST:
          {
             tree_t src = tree_ref(d);
-            if (!is_body(src))
+            if (!is_body(src)) {
+               lower_missing_inst_body(scope, d);
                break;   // Deferred instantiation in package body
+            }
 
             // May need to access generics in outer scope
             lower_generics(lu, d, src);
@@ -10328,8 +10341,10 @@ static void lower_decls(lower_unit_t *lu, tree_t scope, gen_stack_t *gs)
       case T_PROC_INST:
          {
             tree_t src = tree_ref(d);
-            if (!is_body(src))
+            if (!is_body(src)) {
+               lower_missing_inst_body(scope, d);
                break;   // Deferred instantiation in package body
+            }
 
             // May need to access generics in outer scope
             lower_generics(lu, d, src);

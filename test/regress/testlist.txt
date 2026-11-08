@@ -1527,5 +1527,8 @@ stdenv7         normal,2019
 stdenv8         normal,2019
 protected16     normal,2019
 protected18     normal,2019
+anontype1       normal,2019
+anontype2       normal,2019
+anontype3       normal,2019
 vlogrealport1   verilog
 vlogcasegen3    verilog

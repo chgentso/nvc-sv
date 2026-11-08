@@ -3829,10 +3829,20 @@ START_TEST(test_vhdl2019)
    tree_t e016 = parse();
    fail_if(e016 == NULL);
    fail_unless(tree_kind(e016) == T_ENTITY);
-   fail_unless(tree_generics(e016) == 1);
+   fail_unless(tree_generics(e016) == 3);
 
    tree_t e016g0 = tree_generic(e016, 0);
    fail_unless(tree_class(e016g0) == C_TYPE);
+
+   // Implicit "=" and "/=" for the anonymous type
+   tree_t e016g1 = tree_generic(e016, 1);
+   fail_unless(tree_class(e016g1) == C_FUNCTION);
+   fail_unless(tree_flags(e016g1) & TREE_F_PREDEFINED);
+   fail_unless(type_param(tree_type(e016g1), 0) == tree_type(e016g0));
+
+   tree_t e016g2 = tree_generic(e016, 2);
+   fail_unless(tree_class(e016g2) == C_FUNCTION);
+   fail_unless(tree_flags(e016g2) & TREE_F_PREDEFINED);
 
    fail_unless(parse() == NULL);
 

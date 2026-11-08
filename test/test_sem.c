@@ -3650,11 +3650,12 @@ START_TEST(test_lcs2016_16)
          "default expression" },
       { 19, "interface declaration with an anonymous type cannot have a "
          "default expression" },
+      { 34, "does not match" },
       { -1, NULL }
    };
    expect_errors(expect);
 
-   parse_and_check(T_ENTITY, T_ENTITY, T_PACKAGE);
+   parse_and_check(T_ENTITY, T_ENTITY, T_PACKAGE, T_ENTITY, T_ARCH);
 
    check_expected_errors();
 }

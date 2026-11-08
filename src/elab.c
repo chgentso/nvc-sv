@@ -681,6 +681,38 @@ static tree_t elab_mixed_binding(tree_t comp, const elab_instance_t *ei)
    return bind;
 }
 
+static void elab_free_type_map(hash_t **map)
+{
+   if (*map != NULL)
+      hash_free(*map);
+}
+
+static void elab_map_anonymous_type(type_t ctype, type_t etype, hash_t *map)
+{
+   // Anonymous types in the component and entity correspond if they
+   // are the implicit generic types of ports with the same name
+
+   if (type_kind(ctype) != T_GENERIC || type_has_ident(ctype))
+      return;
+   else if (type_kind(etype) != T_GENERIC || type_has_ident(etype))
+      return;
+   else if (type_subkind(ctype) != type_subkind(etype))
+      return;
+
+   hash_put(map, ctype, etype);
+
+   if (type_subkind(ctype) == GTYPE_ARRAY) {
+      elab_map_anonymous_type(type_elem(ctype), type_elem(etype), map);
+
+      const int nindex = type_indexes(ctype);
+      if (type_indexes(etype) == nindex) {
+         for (int i = 0; i < nindex; i++)
+            elab_map_anonymous_type(type_index(ctype, i),
+                                    type_index(etype, i), map);
+      }
+   }
+}
+
 static tree_t elab_default_binding(tree_t inst, const elab_ctx_t *ctx)
 {
    // Default binding indication is described in LRM 93 section 5.2.2
@@ -744,17 +776,25 @@ static tree_t elab_default_binding(tree_t inst, const elab_ctx_t *ctx)
    mask_init(&ghave, c_ngenerics);
    mask_setall(&ghave);
 
+   // Map from anonymous types in the component to those in the entity
+   __attribute__((cleanup(elab_free_type_map))) hash_t *tmap = NULL;
+
    for (int i = 0; i < e_ngenerics; i++) {
       tree_t eg = tree_generic(entity, i);
 
       tree_t match = NULL;
       for (int j = 0; j < c_ngenerics; j++) {
          tree_t cg = tree_generic(comp, j);
-         if (ident_casecmp(tree_ident(eg), tree_ident(cg))) {
-            match = cg;
-            mask_clear(&ghave, j);
-            break;
-         }
+         if (!ident_casecmp(tree_ident(eg), tree_ident(cg)))
+            continue;
+         else if ((tree_flags(eg) & TREE_F_PREDEFINED)
+                  && (!mask_test(&ghave, j)
+                      || !type_eq_map(tree_type(cg), tree_type(eg), tmap)))
+            continue;   // Implicit operator for a different generic type
+
+         match = cg;
+         mask_clear(&ghave, j);
+         break;
       }
 
       tree_t value;
@@ -783,7 +823,14 @@ static tree_t elab_default_binding(tree_t inst, const elab_ctx_t *ctx)
          else {
             type_t ctype = tree_type(match);
             type_t etype = tree_type(eg);
-            if (!type_eq(ctype, etype)) {
+
+            if (class == C_TYPE) {
+               if (tmap == NULL)
+                  tmap = hash_new(16);
+               elab_map_anonymous_type(ctype, etype, tmap);
+            }
+
+            if (!type_eq_map(ctype, etype, tmap)) {
                diag_t *d = diag_new(DIAG_ERROR, tree_loc(inst));
                diag_printf(d, "generic %pI in component %pI has type %pT "
                            "which is incompatible with type %pT in entity %pI",
@@ -868,7 +915,7 @@ static tree_t elab_default_binding(tree_t inst, const elab_ctx_t *ctx)
       if (match != NULL) {
          type_t ctype = tree_type(match);
          type_t etype = tree_type(ep);
-         if (!type_eq(ctype, etype)) {
+         if (!type_eq_map(ctype, etype, tmap)) {
             diag_t *d = diag_new(DIAG_ERROR, tree_loc(inst));
             diag_printf(d, "port %pI in component %pI has type %pT which "
                         "is incompatible with type %pT in entity %pI",

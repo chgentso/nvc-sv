@@ -50,6 +50,9 @@
   instantiated with a protected type instantiation declaration or with
   a generic map aspect in a variable declaration or access type
   definition (LCS-2016-034).
+- Anonymous types in interface declarations are now supported in
+  VHDL-2019: the implicit generic types are inferred from the actuals
+  at each call or instantiation (LCS-2016-016).
 - Added the `'SIGNAL` attribute and the `'EVENT` attribute for labelled
   PSL directives, and implemented the `PslIsCovered`, `PslAssertFailed`,
   `ClearPslState`, `SetPslCoverAssert` and `GetPslCoverAssert`
