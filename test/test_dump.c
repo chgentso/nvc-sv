@@ -298,7 +298,7 @@ START_TEST(test_vhdl4)
              "    -- predefined function \"=\" : in \"=\" [T3, T3 return BOOLEAN] := <>;\n"
              "    -- predefined function \"/=\" : in \"/=\" [T3, T3 return BOOLEAN] := <>;\n"
              "    type T4 is range <>;\n"
-             "    -- predefined function \"**\" : in \"**\" [T4, T4 return T4] := <>;\n"
+             "    -- predefined function \"**\" : in \"**\" [T4, INTEGER return T4] := <>;\n"
              "    -- predefined function \"mod\" : in \"mod\" [T4, T4 return T4] := <>;\n"
              "    -- predefined function \"rem\" : in \"rem\" [T4, T4 return T4] := <>;\n"
              "    -- predefined function \"+\" : in \"+\" [T4, T4 return T4] := <>;\n"

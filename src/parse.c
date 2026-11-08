@@ -2325,8 +2325,9 @@ static attr_kind_t parse_predefined_attr(ident_t ident)
    return ATTR_USER;
 }
 
-static void add_generic_type_op(tree_t parent, int nargs, type_t type,
-                                type_t result, const char *name)
+static void add_generic_type_op2(tree_t parent, int nargs, type_t type,
+                                 type_t right, type_t result,
+                                 const char *name)
 {
    ident_t id = ident_new(name);
 
@@ -2335,7 +2336,7 @@ static void add_generic_type_op(tree_t parent, int nargs, type_t type,
    type_set_result(ftype, result);
 
    for (int i = 0; i < nargs; i++)
-      type_add_param(ftype, type);
+      type_add_param(ftype, i == 1 ? right : type);
 
    tree_t p = tree_new(T_GENERIC_DECL);
    tree_set_class(p, C_FUNCTION);
@@ -2364,7 +2365,7 @@ static void add_generic_type_op(tree_t parent, int nargs, type_t type,
    for (int j = 0; j < nargs; j++) {
       tree_t arg = tree_new(T_PARAM_DECL);
       tree_set_ident(arg, ident_new(j == 0 ? "L" : "R"));
-      tree_set_type(arg, type);
+      tree_set_type(arg, j == 1 ? right : type);
       tree_set_subkind(arg, PORT_IN);
       tree_set_class(arg, C_CONSTANT);
       tree_set_loc(arg, CURRENT_LOC);
@@ -2376,16 +2377,23 @@ static void add_generic_type_op(tree_t parent, int nargs, type_t type,
    insert_name(nametab, p, NULL);
 }
 
+static void add_generic_type_op(tree_t parent, int nargs, type_t type,
+                                type_t result, const char *name)
+{
+   add_generic_type_op2(parent, nargs, type, type, result, name);
+}
+
 static void declare_generic_ops(tree_t parent, type_t type)
 {
    type_t std_bool = std_type(NULL, STD_BOOLEAN);
    type_t std_string = std_type(NULL, STD_STRING);
+   type_t std_int = std_type(NULL, STD_INTEGER);
 
    const gtype_class_t class = type_subkind(type);
 
    switch (class) {
    case GTYPE_INTEGER:
-      add_generic_type_op(parent, 2, type, type, "\"**\"");
+      add_generic_type_op2(parent, 2, type, std_int, type, "\"**\"");
       // Fall-through
    case GTYPE_PHYSICAL:
       add_generic_type_op(parent, 2, type, type, "\"mod\"");
