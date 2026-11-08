@@ -491,7 +491,7 @@ START_TEST(test_pp1)
       "pass\n"
       "\n"
       "\""TESTDIR "/vlog/pp1.v""\"\n"
-      "\"16\"\n"
+      "16\n"
       "\n"
       "\n"
       "\n"
@@ -519,8 +519,9 @@ START_TEST(test_timescale1)
 
    const error_t expect[] = {
       {  2, "invalid order of magnitude in `timescale directive" },
-      {  3, "unexpected real while parsing timescale compiler directive, "
-         "expecting one of unsigned number or time literal" },
+      {  3, "the value in a `timescale directive must be an integer" },
+      {  3, "unexpected identifier while parsing timescale compiler "
+         "directive, expecting one of unsigned number or time literal" },
       { -1, NULL }
    };
    expect_errors(expect);
