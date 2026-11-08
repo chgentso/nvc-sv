@@ -3588,18 +3588,103 @@ START_TEST(test_genpack4)
 }
 END_TEST
 
+START_TEST(test_lcs2016_14)
+{
+   opt_set_int(OPT_MISSING_BODY, 0);
+   set_standard(STD_19);
+
+   input_from_file(TESTDIR "/sem/lcs2016_14.vhd");
+
+   const error_t expect[] = {
+      { 32, "record MIXED_T with a subelement of protected type may only "
+        "have subelements of protected type" },
+      { 43, "record MIXEDF_T with a subelement of file type may only have "
+        "subelements of file type" },
+      { 48, "record MIXEDPF_T with a subelement of file type may only have "
+        "subelements of file type" },
+      { 55, "signals may not have a type with a subelement of protected "
+        "type" },
+      { 57, "files may not be of a type with a subelement of protected "
+        "type" },
+      { 59, "function result subtype may not denote a type with a "
+        "subelement of protected type" },
+      { 60, "function result subtype may not denote a type with a "
+        "subelement of file type" },
+      { 62, "formal parameter X with a subelement of protected type must "
+        "have class VARIABLE" },
+      { 75, "formal parameter X with a subelement of file type must have "
+        "class FILE" },
+      { 79, "attributes may not have a type with a subelement of protected "
+        "type" },
+      { 82, "file FA2 with a subelement of file type cannot have file open "
+        "information" },
+      { 89, "variable V4 with a subelement of protected type may not have "
+        "an initial value" },
+      { 96, "may not assign to variable with a subelement of protected "
+        "type" },
+      { 97, "may not assign to variable of a protected type" },
+      { 98, "no matching operator \"=\" [PT_ARRAY, PT_ARRAY" },
+      { 99, "prefix of method call PROC must denote a noncomposite "
+        "subelement" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   parse_and_check(T_ENTITY, T_ARCH);
+
+   check_expected_errors();
+}
+END_TEST
+
 START_TEST(test_lcs2016_16)
 {
+   opt_set_int(OPT_MISSING_BODY, 0);
    set_standard(STD_19);
 
    input_from_file(TESTDIR "/sem/lcs2016_16.vhd");
 
    const error_t expect[] = {
+      {  8, "interface signal declaration with an anonymous type cannot "
+         "include the reserved word BUS" },
+      {  9, "interface declaration with an anonymous type cannot have a "
+         "default expression" },
+      { 19, "interface declaration with an anonymous type cannot have a "
+         "default expression" },
+      { 34, "does not match" },
       { -1, NULL }
    };
    expect_errors(expect);
 
-   parse_and_check(T_ENTITY);
+   parse_and_check(T_ENTITY, T_ENTITY, T_PACKAGE, T_ENTITY, T_ARCH);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_lcs2016_34)
+{
+   set_standard(STD_19);
+
+   input_from_file(TESTDIR "/sem/lcs2016_34.vhd");
+
+   const error_t expect[] = {
+      { 55, "missing actual for generic N without a default expression" },
+      { 56, "formal generic N already has an actual" },
+      { 57, "SIMPLE_T is not an uninstantiated protected type" },
+      { 58, "MAPPED_T is not an uninstantiated protected type" },
+      { 63, "missing actual for generic T without a default expression" },
+      { 63, "missing actual for generic N without a default expression" },
+      { 64, "SIMPLE_T is not an uninstantiated protected type" },
+      { 70, "SIMPLE_T is not an uninstantiated protected type" },
+      { 76, "INTEGER is not an uninstantiated protected type" },
+      { 84, "missing actual for generic T without a default expression" },
+      { 84, "missing actual for generic N without a default expression" },
+      { 85, "SIMPLE_T is not an uninstantiated protected type" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   parse_and_check(T_ENTITY, T_ARCH);
 
    check_expected_errors();
 }
@@ -4267,7 +4352,9 @@ Suite *get_sem_tests(void)
    tcase_add_test(tc_core, test_lcs2016_59);
    tcase_add_test(tc_core, test_issue770);
    tcase_add_test(tc_core, test_genpack4);
+   tcase_add_test(tc_core, test_lcs2016_14);
    tcase_add_test(tc_core, test_lcs2016_16);
+   tcase_add_test(tc_core, test_lcs2016_34);
    tcase_add_test(tc_core, test_spec2);
    tcase_add_test(tc_core, test_incomplete);
    tcase_add_test(tc_core, test_issue884);
