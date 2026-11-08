@@ -80,7 +80,7 @@ typedef uint64_t imask_t;
 #define I_FIELDS     ONE_HOT(43)
 // Unused            ONE_HOT(44)
 #define I_GUARD      ONE_HOT(45)
-// Unused            ONE_HOT(46)
+#define I_TEXT       ONE_HOT(46)
 #define I_CHARS      ONE_HOT(47)
 #define I_CONSTRAINT ONE_HOT(48)
 #define I_FLAGS      ONE_HOT(49)

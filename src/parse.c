@@ -66,6 +66,24 @@ static nametab_t     *nametab = NULL;
 static bool           bootstrapping = false;
 static tree_list_t    pragmas = AINIT;
 
+typedef A(ident_t) ident_array_t;
+
+typedef struct _vunit_frame vunit_frame_t;
+
+struct _vunit_frame {
+   vunit_frame_t *parent;
+   tree_t         unit;
+   ident_t        name;
+   verif_unit_t   kind;
+   bool           seen_item;
+   tree_list_t   *inherited;
+   ident_array_t *labels;
+};
+
+static vunit_frame_t *vunit_frame = NULL;
+static ident_t        config_name = NULL;
+static ident_array_t  config_vunits = AINIT;
+
 extern loc_t yylloc;
 
 #define STD(x, y) (standard() >= (STD_##x) ? y : -1)
@@ -128,6 +146,10 @@ static psl_node_t p_psl_braced_sere(void);
 static psl_node_t p_hdl_expression(tree_t head, psl_type_t type);
 static psl_node_t p_psl_builtin_function_call(void);
 static psl_node_t p_psl_union(tree_t head);
+static void p_vunit_item(tree_t unit);
+static tree_t find_vunit(ident_t name, const loc_t *loc);
+static void bind_vunits(tree_t bcfg, const tree_list_t *list);
+static void p_verification_unit_binding_indication(tree_list_t *list);
 
 static type_t get_element_subtype(tree_t expr);
 
@@ -9841,6 +9863,59 @@ static tree_t p_binding_indication(tree_t comp)
    return bind;
 }
 
+static tree_t bind_component_vunits(tree_t bind, bool have_bind, tree_t bcfg,
+                                    const tree_list_t *vunits,
+                                    const loc_t *loc)
+{
+   // Verification units are bound to the design entity bound to the
+   // component instances (IEEE 1076-2008 sections 3.4.3 and 7.3.1)
+
+   if (!have_bind) {
+      parse_error(loc, "sorry, a verification unit binding indication "
+                  "in a component configuration without a binding "
+                  "indication is not supported");
+      return bcfg;
+   }
+   else if (bind == NULL) {
+      parse_error(loc, "verification unit binding indication cannot be "
+                  "used with an open entity aspect");
+      return bcfg;
+   }
+   else if (bcfg == NULL && tree_has_ref(bind)) {
+      tree_t arch = NULL, unit = tree_ref(bind);
+      switch (tree_kind(unit)) {
+      case T_ARCH:
+         arch = unit;
+         break;
+      case T_ENTITY:
+         {
+            ident_t qual = tree_ident(unit);
+            lib_t lib = lib_find(ident_until(qual, '.'));
+            if (lib == NULL || !(arch = find_default_arch(lib, qual)))
+               parse_error(loc, "no suitable architecture for %s",
+                           istr(qual));
+         }
+         break;
+      default:
+         parse_error(loc, "sorry, a verification unit binding indication "
+                     "with a configuration entity aspect is not supported");
+         break;
+      }
+
+      if (arch != NULL) {
+         // An implicit block configuration for the architecture holds
+         // the verification units
+         bcfg = tree_new(T_BLOCK_CONFIG);
+         tree_set_ident(bcfg, ident_rfrom(tree_ident(arch), '-'));
+         tree_set_loc(bcfg, loc);
+         tree_set_ref(bcfg, arch);
+      }
+   }
+
+   bind_vunits(bcfg, vunits);
+   return bcfg;
+}
+
 static void p_configuration_specification(tree_t parent)
 {
    // for component_specification binding_indication ;
@@ -9867,6 +9942,29 @@ static void p_configuration_specification(tree_t parent)
                   "configuration specification must contain an entity aspect");
    consume(tSEMI);
 
+   // VHDL-2008 compound configuration specification
+   tree_t bcfg = NULL;
+   if (peek() == tUSE && peek_nth(2) == tVUNIT) {
+      const loc_t vunit_loc = state.tokenq[state.tokenq_tail].loc;
+
+      tree_list_t vunits = AINIT;
+      while (peek() == tUSE && peek_nth(2) == tVUNIT)
+         p_verification_unit_binding_indication(&vunits);
+
+      config_name = scope_prefix(nametab);
+      bcfg = bind_component_vunits(bind, true, NULL, &vunits, &vunit_loc);
+      ACLEAR(vunits);
+
+      consume(tEND);
+      consume(tFOR);
+      consume(tSEMI);
+   }
+   else if (standard() >= STD_08 && peek() == tEND && peek_nth(2) == tFOR) {
+      consume(tEND);
+      consume(tFOR);
+      consume(tSEMI);
+   }
+
    if (ids != NULL) {
       for (ident_list_t *it = ids; it != NULL; it = it->next) {
          tree_t t = tree_new(T_SPEC);
@@ -9875,6 +9973,7 @@ static void p_configuration_specification(tree_t parent)
          tree_set_ident2(t, comp_name);
          tree_set_value(t, bind);
          tree_set_ref(t, comp);
+         if (bcfg != NULL) tree_add_decl(t, bcfg);
 
          const spec_kind_t kind =
             it->ident == well_known(W_ALL) ? SPEC_ALL : SPEC_EXACT;
@@ -9891,6 +9990,7 @@ static void p_configuration_specification(tree_t parent)
       tree_set_ident2(t, comp_name);
       tree_set_value(t, bind);
       tree_set_ref(t, comp);
+      if (bcfg != NULL) tree_add_decl(t, bcfg);
 
       tree_add_decl(parent, t);
       insert_spec(nametab, t, SPEC_OTHERS, NULL, 1);
@@ -9900,9 +10000,9 @@ static void p_configuration_specification(tree_t parent)
    pop_scope(nametab);
 }
 
-static void p_verification_unit_binding_indication(void)
+static void p_verification_unit_binding_indication(tree_list_t *list)
 {
-   // use vunit verification_unit_name { , verification_unit_name } ;
+   // use vunit verification_unit_list ;
 
    BEGIN("verification unit binding indication");
 
@@ -9910,22 +10010,31 @@ static void p_verification_unit_binding_indication(void)
    consume(tVUNIT);
 
    do {
-      ident_t name = p_identifier();
-      ident_t qual = ident_prefix(lib_name(lib_work()), name, '.');
+      ident_t name = p_selected_identifier();
+      const loc_t loc = *CURRENT_LOC;
 
-      tree_t vu = lib_get_qualified(qual);
-      if (vu == NULL || tree_kind(vu) != T_VUNIT)
-         parse_error(CURRENT_LOC, "cannot find verification unit %s",
-                     istr(name));
+      tree_t vu = find_vunit(name, &loc);
+      if (vu == NULL)
+         continue;
+      else if (tree_has_ident2(vu)) {
+         if (state.n_correct >= RECOVER_THRESH) {
+            diag_t *d = diag_new(DIAG_ERROR, &loc);
+            diag_printf(d, "verification unit %s is already bound to a "
+                        "design unit", istr(name));
+            diag_hint(d, tree_loc(vu), "%s declared here",
+                      istr(ident_rfrom(tree_ident(vu), '.')));
+            diag_lrm(d, STD_08, "7.3.4");
+            diag_emit(d);
+         }
+      }
       else
-         parse_error(CURRENT_LOC, "sorry, binding a verification unit in a "
-                     "configuration is not supported");
+         APUSH(*list, vu);
    } while (optional(tCOMMA));
 
    consume(tSEMI);
 }
 
-static void p_configuration_declarative_part(tree_t unit)
+static void p_configuration_declarative_part(tree_t unit, tree_list_t *vunits)
 {
    // use_clause | attribute_specification | group_declaration
 
@@ -9934,7 +10043,7 @@ static void p_configuration_declarative_part(tree_t unit)
    switch (peek()) {
    case tUSE:
       if (peek_nth(2) == tVUNIT)
-         p_verification_unit_binding_indication();
+         p_verification_unit_binding_indication(vunits);
       else
          p_use_clause(unit, tree_add_decl);
       break;
@@ -9976,20 +10085,30 @@ static void p_component_configuration(tree_t unit)
    push_scope(nametab);
 
    tree_t bind = NULL;
+   bool have_bind = false;
    if (peek() != tEND && peek() != tFOR
        && !(peek() == tUSE && peek_nth(2) == tVUNIT)) {
       bind = p_binding_indication(comp);
+      have_bind = true;
       consume(tSEMI);
    }
 
+   tree_list_t vunits = AINIT;
+   peek();
+   const loc_t vunit_loc = state.tokenq[state.tokenq_tail].loc;
    while (peek() == tUSE && peek_nth(2) == tVUNIT)
-      p_verification_unit_binding_indication();
+      p_verification_unit_binding_indication(&vunits);
 
    tree_t bcfg = NULL;
    if (peek() == tFOR) {
       tree_t of = bind != NULL && tree_has_ref(bind) ? tree_ref(bind) : NULL;
       bcfg = p_block_configuration(of);
    }
+
+   if (vunits.count > 0)
+      bcfg = bind_component_vunits(bind, have_bind, bcfg, &vunits,
+                                   &vunit_loc);
+   ACLEAR(vunits);
 
    if (ids != NULL) {
       for (ident_list_t *it = ids; it != NULL; it = it->next) {
@@ -10214,10 +10333,19 @@ static void p_configuration_declaration(tree_t unit)
 
    consume(tIS);
 
-   while (not_at_token(tFOR))
-      p_configuration_declarative_part(unit);
+   config_name = ident_prefix(lib_name(lib_work()), id, '.');
 
-   tree_add_decl(unit, p_block_configuration(of));
+   tree_list_t vunits = AINIT;
+   while (not_at_token(tFOR))
+      p_configuration_declarative_part(unit, &vunits);
+
+   tree_t bcfg = p_block_configuration(of);
+   tree_add_decl(unit, bcfg);
+
+   // Verification units in the configuration declarative part are bound
+   // to the root design entity (IEEE 1076-2008 section 3.4.1)
+   bind_vunits(bcfg, &vunits);
+   ACLEAR(vunits);
 
    consume(tEND);
    optional(tCONFIGURATION);
@@ -15002,6 +15130,375 @@ static bool peek_psl_word(const char *word)
    return ident_casecmp(id, ident_new(word));
 }
 
+static token_t replay_yylex(void)
+{
+   for (;;) {
+      const token_t token = processed_yylex();
+      switch (token) {
+      case tSYNTHON:
+      case tSYNTHOFF:
+      case tCOVERAGEON:
+      case tCOVERAGEOFF:
+      case tTRANSLATEON:
+      case tTRANSLATEOFF:
+         break;   // Pragmas were handled when the unit was first analysed
+      default:
+         return token;
+      }
+   }
+}
+
+static ident_t vunit_source_text(const loc_t *start, const loc_t *end)
+{
+   // The source text of a verification unit is kept so that its items
+   // can be analysed again in the scope where it is bound by a
+   // configuration, inherited or instantiated
+
+   const char *first = loc_get_source(start);
+   if (first == NULL)
+      return NULL;
+
+   first += start->first_column;
+
+   const char *last = loc_get_source(end);
+   if (last == NULL || last + end->first_column < first)
+      return NULL;
+
+   last += end->first_column;
+
+   return ident_new_n(first, last - first);
+}
+
+static void p_vunit_replay(tree_t vu, const loc_t *where)
+{
+   // Parse the items of a previously analysed verification unit again
+   // in the current scope
+
+   if (!tree_has_text(vu)) {
+      parse_error(where, "sorry, the source text of verification unit %s "
+                  "is not available", istr(ident_rfrom(tree_ident(vu), '.')));
+      return;
+   }
+
+   ident_t text = tree_text(vu);
+   const loc_t *loc = tree_loc(vu);
+
+   const parse_state_t saved = state;
+
+   state.tokenq_head = state.tokenq_tail = 0;
+   state.lex_fn = replay_yylex;
+   state.n_correct = RECOVER_THRESH;
+
+   push_text(istr(text), ident_len(text), loc->file_ref, loc->first_line,
+             loc->first_column);
+
+   // Skip the header of the unit up to the opening brace
+   while (peek() != tLBRACE && peek() != tEOF)
+      drop_token(&state);
+
+   if (optional(tLBRACE)) {
+      while (not_at_token(tRBRACE))
+         p_vunit_item(vunit_frame->unit);
+
+      consume(tEOF);
+   }
+
+   pop_text();
+
+   state = saved;
+}
+
+static bool vunit_is_active(ident_t qual)
+{
+   for (vunit_frame_t *f = vunit_frame; f != NULL; f = f->parent) {
+      if (f->name == qual)
+         return true;
+   }
+
+   return false;
+}
+
+static tree_t find_vunit(ident_t name, const loc_t *loc)
+{
+   ident_t qual = name;
+   if (ident_runtil(name, '.') == name)
+      qual = ident_prefix(lib_name(lib_work()), name, '.');
+
+   tree_t vu = lib_get_qualified(qual);
+   if (vu == NULL || tree_kind(vu) != T_VUNIT) {
+      parse_error(loc, "cannot find verification unit %s", istr(name));
+      return NULL;
+   }
+
+   return vu;
+}
+
+static void insert_vunit_context(tree_t vu)
+{
+   insert_names_from_context(nametab, vu);
+
+   // Make the implicit library clause for the working library visible
+   // with the name WORK
+   ident_t work = lib_name(lib_work());
+   const int ncontext = tree_contexts(vu);
+   for (int i = 0; i < ncontext; i++) {
+      tree_t c = tree_context(vu, i);
+      if (tree_kind(c) == T_LIBRARY && tree_ident2(c) == work) {
+         insert_name(nametab, c, well_known(W_WORK));
+         break;
+      }
+   }
+}
+
+static ident_t vunit_label_prefix(ident_t suffix)
+{
+   ident_t outer = scope_label_prefix(nametab);
+   if (outer == NULL)
+      return ident_prefix(ident_new("_"), suffix, 0);
+   else
+      return ident_prefix(outer, suffix, '_');
+}
+
+static void p_inherit_spec(tree_t unit)
+{
+   // inherit vunit_Name { , vunit_Name } ;
+
+   BEGIN("inherit specification");
+
+   consume(tID);
+
+   if (vunit_frame->seen_item)
+      parse_error(CURRENT_LOC, "inherit specification must appear before "
+                  "any other item in a verification unit");
+
+   do {
+      ident_t name = p_identifier();
+      const loc_t loc = state.last_loc;
+
+      ident_t qual = ident_prefix(lib_name(lib_work()), name, '.');
+      if (vunit_is_active(qual)) {
+         parse_error(&loc, "verification unit %s inherits itself",
+                     istr(name));
+         continue;
+      }
+
+      tree_t vu = find_vunit(name, &loc);
+      if (vu == NULL)
+         continue;
+
+      // A unit inherited more than once directly or indirectly is only
+      // included once
+      bool seen = false;
+      for (int i = 0; i < vunit_frame->inherited->count; i++)
+         seen |= vunit_frame->inherited->items[i] == vu;
+
+      if (seen)
+         continue;
+
+      APUSH(*vunit_frame->inherited, vu);
+
+      const int ndecls = tree_decls(unit);
+      ident_t prefix = vunit_label_prefix(name);
+
+      // The names in the context clause of the inherited unit are only
+      // visible in its own items
+      push_scope(nametab);
+      insert_vunit_context(vu);
+      scope_set_label_prefix(nametab, prefix);
+
+      vunit_frame_t frame = {
+         .parent    = vunit_frame,
+         .unit      = unit,
+         .name      = tree_ident(vu),
+         .kind      = tree_subkind(vu),
+         .inherited = vunit_frame->inherited,
+         .labels    = vunit_frame->labels,
+      };
+      vunit_frame = &frame;
+
+      p_vunit_replay(vu, &loc);
+
+      vunit_frame = frame.parent;
+
+      pop_scope(nametab);
+
+      // The declarations of the inherited unit are visible in the
+      // inheriting unit
+      const int ndecls_new = tree_decls(unit);
+      for (int i = ndecls; i < ndecls_new; i++) {
+         tree_t d = tree_decl(unit, i);
+         if (tree_kind(d) == T_USE)
+            insert_names_from_use(nametab, d);
+         else
+            insert_name(nametab, d, NULL);
+      }
+   } while (optional(tCOMMA));
+
+   consume(tSEMI);
+}
+
+static void p_vunit_instance(tree_t unit)
+{
+   // label : vunit vunit_Name ;
+
+   BEGIN("verification unit instance");
+
+   ident_t label = p_identifier();
+   const loc_t label_loc = state.last_loc;
+
+   consume(tCOLON);
+   consume(tVUNIT);
+
+   ident_t name = p_identifier();
+   const loc_t loc = state.last_loc;
+
+   consume(tSEMI);
+
+   ident_t qual = ident_prefix(lib_name(lib_work()), name, '.');
+   if (vunit_is_active(qual)) {
+      parse_error(&loc, "verification unit %s instantiates itself",
+                  istr(name));
+      return;
+   }
+
+   for (int i = 0; i < vunit_frame->labels->count; i++) {
+      if (vunit_frame->labels->items[i] == label) {
+         parse_error(&label_loc, "duplicate verification unit instance "
+                     "label %s", istr(label));
+         return;
+      }
+   }
+
+   APUSH(*vunit_frame->labels, label);
+
+   tree_t vu = find_vunit(name, &loc);
+   if (vu == NULL)
+      return;
+
+   ident_t prefix = vunit_label_prefix(label);
+
+   // Each instance has its own copy of the items of the instantiated
+   // unit which are not visible outside it
+   push_scope(nametab);
+   insert_vunit_context(vu);
+   scope_set_prefix(nametab, label);
+   scope_set_label_prefix(nametab, prefix);
+
+   tree_list_t inherited = AINIT;
+   ident_array_t labels = AINIT;
+
+   vunit_frame_t frame = {
+      .parent    = vunit_frame,
+      .unit      = unit,
+      .name      = tree_ident(vu),
+      .kind      = tree_subkind(vu),
+      .inherited = &inherited,
+      .labels    = &labels,
+   };
+   vunit_frame = &frame;
+
+   p_vunit_replay(vu, &loc);
+
+   vunit_frame = frame.parent;
+
+   pop_scope(nametab);
+
+   ACLEAR(inherited);
+   ACLEAR(labels);
+}
+
+static tree_t find_labelled_stmt(tree_t container, ident_t label)
+{
+   const tree_kind_t kind = tree_kind(container);
+
+   if (kind == T_IF_GENERATE) {
+      const int nconds = tree_conds(container);
+      for (int i = 0; i < nconds; i++) {
+         tree_t s = find_labelled_stmt(tree_cond(container, i), label);
+         if (s != NULL)
+            return s;
+      }
+
+      return NULL;
+   }
+
+   const int nstmts = tree_stmts(container);
+   for (int i = 0; i < nstmts; i++) {
+      tree_t s = tree_stmt(container, i);
+      if (kind == T_CASE_GENERATE) {
+         tree_t s2 = find_labelled_stmt(s, label);
+         if (s2 != NULL)
+            return s2;
+      }
+      else if (tree_ident(s) == label)
+         return s;
+   }
+
+   return NULL;
+}
+
+static tree_t instance_design_unit(tree_t inst)
+{
+   // Find the architecture of the design entity bound to an instance
+
+   tree_t ref = tree_ref(inst);
+   switch (tree_kind(ref)) {
+   case T_ARCH:
+      return ref;
+   case T_CONFIGURATION:
+      {
+         tree_t bcfg = tree_decl(ref, 0);
+         if (tree_kind(bcfg) == T_BLOCK_CONFIG && tree_has_ref(bcfg))
+            return tree_ref(bcfg);
+         else
+            return NULL;
+      }
+   case T_COMPONENT:
+      {
+         if (tree_has_spec(inst)) {
+            tree_t spec = tree_spec(inst);
+            if (!tree_has_value(spec))
+               return NULL;
+
+            tree_t bind = tree_value(spec);
+            if (!tree_has_ref(bind))
+               return NULL;
+
+            tree_t unit = tree_ref(bind);
+            if (tree_kind(unit) == T_ARCH)
+               return unit;
+            else if (tree_kind(unit) == T_CONFIGURATION) {
+               tree_t bcfg = tree_decl(unit, 0);
+               if (tree_kind(bcfg) == T_BLOCK_CONFIG && tree_has_ref(bcfg))
+                  return tree_ref(bcfg);
+               else
+                  return NULL;
+            }
+
+            ref = unit;
+         }
+         else {
+            // Default binding to an entity with the same name as the
+            // component in the working library
+            ident_t qual = ident_prefix(lib_name(lib_work()),
+                                        tree_ident(ref), '.');
+            if ((ref = lib_get_qualified(qual)) == NULL
+                || tree_kind(ref) != T_ENTITY)
+               return NULL;
+         }
+      }
+      // Fall-through
+   case T_ENTITY:
+      {
+         ident_t qual = tree_ident(ref);
+         lib_t lib = lib_find(ident_until(qual, '.'));
+         return lib ? find_default_arch(lib, qual) : NULL;
+      }
+   default:
+      return NULL;
+   }
+}
+
 static tree_t p_vunit_binding(tree_t unit, ident_t *spec, tree_t *arch)
 {
    // Hierarchical_HDL_Name ::=
@@ -15056,7 +15553,8 @@ static tree_t p_vunit_binding(tree_t unit, ident_t *spec, tree_t *arch)
       tb_printf(tb, "-%s", istr(arch_name));
 
    // Walk down the instance path to find the design unit to which the
-   // names in the verification unit are bound
+   // names in the verification unit are bound: block and generate
+   // statement labels may appear before an instance label
    while (optional(tDOT)) {
       ident_t label = p_identifier();
       tb_printf(tb, ".%s", istr(label));
@@ -15064,39 +15562,38 @@ static tree_t p_vunit_binding(tree_t unit, ident_t *spec, tree_t *arch)
       if (scope == NULL)
          continue;
 
-      tree_t arch_scope = scope, found = NULL;
-      const int nstmts = tree_stmts(arch_scope);
-      for (int i = 0; i < nstmts && found == NULL; i++) {
-         tree_t st = tree_stmt(arch_scope, i);
-         if (tree_kind(st) == T_INSTANCE && tree_ident(st) == label)
-            found = st;
-      }
-
+      tree_t found = find_labelled_stmt(scope, label);
       if (found == NULL) {
          parse_error(CURRENT_LOC, "no instance with label %s in %s",
-                     istr(label), istr(tree_ident(arch_scope)));
+                     istr(label), istr(tree_ident(scope)));
          scope = NULL;
          continue;
       }
 
-      tree_t ref = tree_ref(found);
-      switch (tree_kind(ref)) {
-      case T_ARCH:
-         scope = ref;
+      switch (tree_kind(found)) {
+      case T_INSTANCE:
+         if ((scope = instance_design_unit(found)) == NULL)
+            parse_error(CURRENT_LOC, "cannot find the design entity bound "
+                        "to instance %s", istr(label));
          break;
-      case T_ENTITY:
-         {
-            ident_t ref_qual = tree_ident(ref);
-            lib_t ref_lib = lib_find(ident_until(ref_qual, '.'));
-            scope = ref_lib ? find_default_arch(ref_lib, ref_qual) : NULL;
-         }
+      case T_BLOCK:
+      case T_FOR_GENERATE:
+      case T_IF_GENERATE:
+      case T_CASE_GENERATE:
+         scope = found;
          break;
       default:
-         parse_error(CURRENT_LOC, "sorry, a verification unit cannot be "
-                     "bound to instance %s", istr(label));
+         parse_error(CURRENT_LOC, "%s is not an instance, block or generate "
+                     "statement label", istr(label));
          scope = NULL;
          break;
       }
+   }
+
+   if (scope != NULL && tree_kind(scope) != T_ARCH) {
+      parse_error(CURRENT_LOC, "sorry, binding a verification unit to a "
+                  "block or generate statement is not supported");
+      scope = NULL;
    }
 
    *spec = ident_new(tb_get(tb));
@@ -15111,25 +15608,14 @@ static void p_vunit_item(tree_t unit)
 
    BEGIN("verification unit item");
 
-   if (peek_psl_word("inherit")) {
-      consume(tID);
-
-      do {
-         ident_t name = p_identifier();
-         ident_t qual = ident_prefix(lib_name(lib_work()), name, '.');
-
-         tree_t vu = lib_get_qualified(qual);
-         if (vu == NULL || tree_kind(vu) != T_VUNIT)
-            parse_error(CURRENT_LOC, "cannot find verification unit %s",
-                        istr(name));
-         else
-            parse_error(CURRENT_LOC, "sorry, inheriting from a verification "
-                        "unit is not supported");
-      } while (optional(tCOMMA));
-
-      consume(tSEMI);
+   if (peek_psl_word("inherit") && peek_nth(2) == tID) {
+      p_inherit_spec(unit);
+      return;
    }
-   else if (peek_psl_word("override")) {
+
+   vunit_frame->seen_item = true;
+
+   if (peek_psl_word("override") && peek_nth(2) == tID) {
       consume(tID);
 
       do {
@@ -15147,24 +15633,8 @@ static void p_vunit_item(tree_t unit)
 
       consume(tSEMI);
    }
-   else if (peek() == tID && peek_nth(2) == tCOLON && peek_nth(3) == tVUNIT) {
-      consume(tID);
-      consume(tCOLON);
-      consume(tVUNIT);
-
-      ident_t name = p_identifier();
-      ident_t qual = ident_prefix(lib_name(lib_work()), name, '.');
-
-      tree_t vu = lib_get_qualified(qual);
-      if (vu == NULL || tree_kind(vu) != T_VUNIT)
-         parse_error(CURRENT_LOC, "cannot find verification unit %s",
-                     istr(name));
-      else
-         parse_error(CURRENT_LOC, "sorry, instantiating a verification unit "
-                     "is not supported");
-
-      consume(tSEMI);
-   }
+   else if (peek() == tID && peek_nth(2) == tCOLON && peek_nth(3) == tVUNIT)
+      p_vunit_instance(unit);
    else if (scan(tSIGNAL, tTYPE, tSUBTYPE, tCONSTANT, tFUNCTION, tIMPURE,
                  tPURE, tPROCEDURE, tALIAS, tATTRIBUTE, tFILE, tUSE,
                  tSHARED, tGROUP, tDEFAULT, tSEQUENCE, tPROPERTY))
@@ -15174,12 +15644,13 @@ static void p_vunit_item(tree_t unit)
    else {
       tree_t s = p_concurrent_statement();
 
-      const int kind = tree_subkind(unit);
+      const int kind = vunit_frame->kind;
 
       psl_kind_t pk = P_LAST_PSL_KIND;
       if (tree_kind(s) == T_PSL_DIRECT)
          pk = psl_kind(tree_psl(s));
-      else if (tree_kind(s) == T_CONCURRENT)
+      else if (tree_kind(s) == T_CONCURRENT && tree_stmts(s) > 0
+               && tree_kind(tree_stmt(s, 0)) == T_ASSERT)
          pk = P_ASSERT;
 
       if (kind == VERIF_MODE && (pk == P_ASSERT || pk == P_COVER))
@@ -15209,6 +15680,8 @@ static void p_verification_unit(tree_t unit)
    default:     tree_set_subkind(unit, VERIF_MODE); break;
    }
 
+   const loc_t start_loc = *CURRENT_LOC;
+
    ident_t name = p_identifier();
    ident_t qual = ident_prefix(lib_name(lib_work()), name, '.');
    tree_set_ident(unit, qual);
@@ -15227,7 +15700,8 @@ static void p_verification_unit(tree_t unit)
 
    if (spec == NULL) {
       // The names in an unbound verification unit cannot be resolved
-      // until it is bound to a design unit
+      // until it is bound to a design unit so only its source text is
+      // kept
       int depth = 1;
       while (depth > 0 && peek() != tEOF) {
          switch (peek()) {
@@ -15241,6 +15715,11 @@ static void p_verification_unit(tree_t unit)
 
       consume(tRBRACE);
       pop_scope(nametab);
+
+      ident_t text = vunit_source_text(&start_loc, &state.last_loc);
+      if (text != NULL)
+         tree_set_text(unit, text);
+
       tree_set_loc(unit, CURRENT_LOC);
       return;
    }
@@ -15269,10 +15748,34 @@ static void p_verification_unit(tree_t unit)
       insert_decls(nametab, arch);
    }
 
+   tree_list_t inherited = AINIT;
+   ident_array_t labels = AINIT;
+
+   vunit_frame_t frame = {
+      .parent    = NULL,
+      .unit      = unit,
+      .name      = qual,
+      .kind      = tree_subkind(unit),
+      .inherited = &inherited,
+      .labels    = &labels,
+   };
+
+   vunit_frame_t *saved_frame = vunit_frame;
+   vunit_frame = &frame;
+
    while (not_at_token(tRBRACE))
       p_vunit_item(unit);
 
+   vunit_frame = saved_frame;
+
+   ACLEAR(inherited);
+   ACLEAR(labels);
+
    consume(tRBRACE);
+
+   ident_t text = vunit_source_text(&start_loc, &state.last_loc);
+   if (text != NULL)
+      tree_set_text(unit, text);
 
    tree_set_loc(unit, CURRENT_LOC);
 
@@ -15282,6 +15785,103 @@ static void p_verification_unit(tree_t unit)
    pop_scope(nametab);
 }
 
+static tree_t p_bind_vunit(tree_t vu, tree_t arch, ident_t name)
+{
+   // Analyse the items of an unbound verification unit in the scope of
+   // the architecture it is bound to by a verification unit binding
+   // indication (IEEE 1076-2008 section 7.3.4)
+
+   tree_t entity = tree_primary(arch);
+
+   tree_t unit = tree_new(T_VUNIT);
+   tree_set_ident(unit, name);
+   tree_set_subkind(unit, tree_subkind(vu));
+   tree_set_loc(unit, tree_loc(vu));
+   tree_set_primary(unit, arch);
+
+   // The design unit containing the binding indication is not part of
+   // the scope of the verification unit
+   nametab_t *saved_nametab = nametab;
+   nametab = nametab_new();
+
+   push_scope(nametab);
+   insert_vunit_context(vu);
+   insert_names_from_context(nametab, entity);
+   insert_names_from_context(nametab, arch);
+   scope_set_prefix(nametab, name);
+
+   push_scope(nametab);
+   scope_set_container(nametab, unit);
+   scope_set_label_prefix(nametab, ident_prefix(ident_new("_"),
+                                                ident_rfrom(name, '.'), 0));
+
+   insert_generics(nametab, entity);
+   insert_ports(nametab, entity);
+   insert_decls(nametab, entity);
+   insert_decls(nametab, arch);
+
+   tree_list_t inherited = AINIT;
+   ident_array_t labels = AINIT;
+
+   vunit_frame_t frame = {
+      .unit      = unit,
+      .name      = tree_ident(vu),
+      .kind      = tree_subkind(vu),
+      .inherited = &inherited,
+      .labels    = &labels,
+   };
+
+   vunit_frame_t *saved_frame = vunit_frame;
+   vunit_frame = &frame;
+
+   p_vunit_replay(vu, tree_loc(vu));
+
+   vunit_frame = saved_frame;
+
+   ACLEAR(inherited);
+   ACLEAR(labels);
+
+   pop_scope(nametab);
+   pop_scope(nametab);
+
+   nametab_finish(nametab);
+   nametab = saved_nametab;
+
+   return unit;
+}
+
+static void bind_vunits(tree_t bcfg, const tree_list_t *list)
+{
+   if (list->count == 0 || bcfg == NULL || !tree_has_ref(bcfg))
+      return;
+
+   tree_t arch = tree_ref(bcfg);
+   if (tree_kind(arch) != T_ARCH)
+      return;
+
+   for (int i = 0; i < list->count; i++) {
+      tree_t vu = list->items[i];
+      ident_t simple = ident_rfrom(tree_ident(vu), '.');
+      ident_t name = ident_prefix(config_name, simple, '.');
+
+      // Use a distinct name each time a verification unit is bound in
+      // the same configuration so that its declarations do not collide
+      for (int n = 2; ; n++) {
+         bool clash = false;
+         for (int j = 0; j < config_vunits.count && !clash; j++)
+            clash = config_vunits.items[j] == name;
+
+         if (!clash)
+            break;
+
+         name = ident_sprintf("%s.%s.%d", istr(config_name), istr(simple), n);
+      }
+
+      APUSH(config_vunits, name);
+
+      tree_add_decl(bcfg, p_bind_vunit(vu, arch, name));
+   }
+}
 static void p_library_unit(tree_t unit)
 {
    // primary_unit | secondary_unit
@@ -15366,6 +15966,8 @@ static tree_t p_design_unit(void)
 
    p_context_clause(unit);
    p_library_unit(unit);
+
+   ACLEAR(config_vunits);
 
    pop_scope(nametab);
 

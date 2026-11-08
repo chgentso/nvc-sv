@@ -485,24 +485,32 @@ static bool config_copy_tree_pred(tree_t t, void *ctx)
    return tree_kind(t) == T_INSTANCE;
 }
 
-tree_t vhdl_config_instance(tree_t conf, tree_t bind, ident_t dotted)
+tree_t vhdl_config_instance(tree_t conf, tree_t bind, ident_t dotted,
+                            tree_t *vunits, int nvunits)
 {
    assert(tree_kind(conf) == T_BLOCK_CONFIG);
 
    tree_t arch = tree_ref(conf);
    assert(tree_kind(arch) == T_ARCH);
 
-   tree_t roots[] = { tree_primary(arch), arch, conf };
+   tree_t roots[3 + nvunits];
+   roots[0] = tree_primary(arch);
+   roots[1] = arch;
+   roots[2] = conf;
+   for (int i = 0; i < nvunits; i++)
+      roots[3 + i] = vunits[i];
+
+   const int nroots = 3 + nvunits;
 
    tree_global_flags_t gflags = 0;
-   for (int i = 0; i < ARRAY_LEN(roots); i++)
+   for (int i = 0; i < nroots; i++)
       gflags |= tree_global_flags(roots[i]);
 
-   object_copy_ctx_t *ctx = tree_copy_begin(roots, ARRAY_LEN(roots),
+   object_copy_ctx_t *ctx = tree_copy_begin(roots, nroots,
                                             config_copy_tree_pred,
                                             NULL, NULL, NULL, NULL, NULL);
 
-   tree_copy_finish(roots, ARRAY_LEN(roots), ctx);
+   tree_copy_finish(roots, nroots, ctx);
 
    tree_t b = tree_new(T_BLOCK);
    tree_set_ident(b, dotted);
@@ -513,10 +521,31 @@ tree_t vhdl_config_instance(tree_t conf, tree_t bind, ident_t dotted)
 
    tree_copy_ports(b, ent_copy);
    tree_copy_decls(b, ent_copy);
-   tree_copy_decls(b, conf_copy);
+
+   const int ndecls = tree_decls(conf_copy);
+   for (int i = 0; i < ndecls; i++) {
+      tree_t d = tree_decl(conf_copy, i);
+      if (tree_kind(d) != T_VUNIT)
+         tree_add_decl(b, d);
+   }
+
    tree_copy_decls(b, arch_copy);
-   tree_copy_stmts(b, ent_copy);
-   tree_copy_stmts(b, arch_copy);
+
+   tree_t *vcopies = roots + 3;
+   for (int i = 0; i < nvunits; i++)
+      tree_copy_decls(b, vcopies[i]);
+
+   if (nvunits == 0) {
+      tree_copy_stmts(b, ent_copy);
+      tree_copy_stmts(b, arch_copy);
+   }
+   else {
+      copy_stmts_without_overridden(b, ent_copy, vcopies, nvunits);
+      copy_stmts_without_overridden(b, arch_copy, vcopies, nvunits);
+
+      for (int i = 0; i < nvunits; i++)
+         tree_copy_stmts(b, vcopies[i]);
+   }
 
    tree_set_global_flags(b, gflags);
    return b;

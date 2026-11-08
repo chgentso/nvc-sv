@@ -392,7 +392,7 @@ static const imask_t has_map[T_LAST_TREE_KIND] = {
 
    // T_VUNIT
    (I_IDENT | I_IDENT2 | I_SUBKIND | I_DECLS | I_STMTS | I_CONTEXT
-    | I_PRIMARY | I_PRAGMAS | I_PARAMS),
+    | I_PRIMARY | I_PRAGMAS | I_PARAMS | I_TEXT),
 };
 
 static const char *kind_text_map[T_LAST_TREE_KIND] = {
@@ -507,7 +507,7 @@ static tree_kind_t decl_kinds[] = {
    T_GROUP_TEMPLATE, T_GROUP,          T_SUBTYPE_DECL,    T_PACKAGE,
    T_PACK_BODY,      T_PACK_INST,      T_GENERIC_DECL,    T_PARAM_DECL,
    T_PROC_INST,      T_FUNC_INST,      T_PSL_DECL,        T_VIEW_DECL,
-   T_PROT_DECL,      T_VERILOG,
+   T_PROT_DECL,      T_VERILOG,        T_VUNIT,
 };
 
 static void tree_assert_kind(tree_t t, const tree_kind_t *list, size_t len,
@@ -610,6 +610,23 @@ void tree_set_ident2(tree_t t, ident_t i)
 bool tree_has_ident2(tree_t t)
 {
    return lookup_item(&tree_object, t, I_IDENT2)->ident != NULL;
+}
+
+ident_t tree_text(tree_t t)
+{
+   item_t *item = lookup_item(&tree_object, t, I_TEXT);
+   assert(item->ident != NULL);
+   return item->ident;
+}
+
+void tree_set_text(tree_t t, ident_t text)
+{
+   lookup_item(&tree_object, t, I_TEXT)->ident = text;
+}
+
+bool tree_has_text(tree_t t)
+{
+   return lookup_item(&tree_object, t, I_TEXT)->ident != NULL;
 }
 
 tree_kind_t tree_kind(tree_t t)

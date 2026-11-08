@@ -64,7 +64,7 @@ typedef struct _object_arena {
 #define OBJECT_UNMAP_UNUSED 1
 #endif
 
-#define ITEM_IDENT       (I_IDENT | I_IDENT2)
+#define ITEM_IDENT       (I_IDENT | I_IDENT2 | I_TEXT)
 #define ITEM_OBJECT      (I_VALUE | I_SEVERITY | I_MESSAGE | I_TARGET   \
                           | I_DELAY | I_REJECT | I_REF | I_FILE_MODE    \
                           | I_NAME | I_SPEC | I_RESOLUTION              \
@@ -92,7 +92,7 @@ static const char *item_text_map[] = {
    "I_DVAL",     "I_SPEC",       "I_FOREIGN",  "I_INDEXES",    "I_BASE",
    "I_ELEM",     "I_DESIGNATED", "I_CHOICES",  "I_RESOLUTION", "I_RESULT",
    "I_UNITS",    "I_LITERALS",   "I_DIMS",     "I_FIELDS",     "I_CLOCK",
-   "I_GUARD",    "???",          "I_CHARS",    "I_CONSTRAINT", "I_FLAGS",
+   "I_GUARD",    "I_TEXT",       "I_CHARS",    "I_CONSTRAINT", "I_FLAGS",
    "???",        "I_LEFT",       "I_RIGHT",    "I_NUMBER",     "I_MESSAGE",
 };
 

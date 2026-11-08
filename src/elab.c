@@ -91,6 +91,7 @@ typedef struct _elab_ctx {
    hash_t           *vucache;
    const elab_vunit_pending_t *pending;
    unsigned          npending;
+   bool              via_component;
    rt_model_t       *model;
    rt_scope_t       *scope;
    mem_pool_t       *pool;
@@ -2312,7 +2313,14 @@ static void elab_bind_vunits(tree_t inst, tree_t arch, elab_ctx_t *ctx,
 
    for (unsigned i = 0; i < ctx->parent->npending; i++) {
       const elab_vunit_pending_t *p = &(ctx->parent->pending[i]);
-      if (p->vunit->labels[p->pos] != label)
+      if (ctx->parent->via_component) {
+         // The component instance label has already been matched
+         if (p->pos < p->vunit->nlabels)
+            pending[npending++] = *p;
+         else if (elab_vunit_arch_matches(p->vunit, arch, true))
+            bound[nbound++] = p->vunit->unit;
+      }
+      else if (p->vunit->labels[p->pos] != label)
          continue;
       else if (p->pos + 1 == p->vunit->nlabels) {
          if (elab_vunit_arch_matches(p->vunit, arch, true))
@@ -2339,6 +2347,63 @@ static void elab_bind_vunits(tree_t inst, tree_t arch, elab_ctx_t *ctx,
 
    *vunits = bound;
    *nvunits = nbound;
+}
+
+static void elab_pass_vunits(ident_t label, elab_ctx_t *ctx, bool component)
+{
+   // Pass on the instance paths of verification units which continue
+   // through a block, generate statement or component instance
+
+   const elab_ctx_t *parent = ctx->parent;
+   if (parent->npending == 0)
+      return;
+
+   elab_vunit_pending_t *pending =
+      pool_malloc_array(ctx->pool, parent->npending,
+                        sizeof(elab_vunit_pending_t));
+   unsigned npending = 0;
+
+   for (unsigned i = 0; i < parent->npending; i++) {
+      const elab_vunit_pending_t *p = &(parent->pending[i]);
+      if (p->vunit->labels[p->pos] != label)
+         continue;
+      else if (component || p->pos + 1 < p->vunit->nlabels)
+         pending[npending++] = (elab_vunit_pending_t){ p->vunit, p->pos + 1 };
+   }
+
+   ctx->pending = pending;
+   ctx->npending = npending;
+   ctx->via_component = component;
+}
+
+static void elab_config_vunits(tree_t config, elab_ctx_t *ctx,
+                               tree_t **vunits, unsigned *nvunits)
+{
+   // Add the verification units bound by a configuration (IEEE
+   // 1076-2008 section 7.3.4) to those bound in their declaration
+
+   unsigned count = 0;
+   const int ndecls = tree_decls(config);
+   for (int i = 0; i < ndecls; i++) {
+      if (tree_kind(tree_decl(config, i)) == T_VUNIT)
+         count++;
+   }
+
+   if (count == 0)
+      return;
+
+   tree_t *all = pool_malloc_array(ctx->pool, *nvunits + count,
+                                   sizeof(tree_t));
+   for (unsigned i = 0; i < *nvunits; i++)
+      all[i] = (*vunits)[i];
+
+   for (int i = 0; i < ndecls; i++) {
+      tree_t d = tree_decl(config, i);
+      if (tree_kind(d) == T_VUNIT)
+         all[(*nvunits)++] = d;
+   }
+
+   *vunits = all;
 }
 
 static void elab_architecture(tree_t inst, tree_t arch, const elab_ctx_t *ctx)
@@ -2439,14 +2504,22 @@ static void elab_configuration(tree_t inst, tree_t unit, const elab_ctx_t *ctx)
    mod_cache_t *mc = elab_cached_module(tree_to_object(unit), &new_ctx);
    mc->count++;
 
+   tree_t *vunits;
+   unsigned nvunits;
+   elab_bind_vunits(inst, arch, &new_ctx, &vunits, &nvunits);
+   elab_config_vunits(config, &new_ctx, &vunits, &nvunits);
+
    elab_instance_t *ei = ghash_get(mc->instances, inst);
-   if (elab_can_clone_instance(ei, &new_ctx))
+   if (nvunits == 0 && ei != NULL && !ei->has_vunits
+       && elab_can_clone_instance(ei, &new_ctx))
       new_ctx.cloned = tree_ident(ei->block);
    else {
       ei = pool_calloc(ctx->pool, sizeof(elab_instance_t));
-      ei->block = vhdl_config_instance(config, inst, new_ctx.dotted);
+      ei->block = vhdl_config_instance(config, inst, new_ctx.dotted,
+                                       vunits, nvunits);
       ei->cscope = new_ctx.cscope;
       ei->first = b;
+      ei->has_vunits = nvunits > 0;
 
       elab_bind_components(ei->block, ei->block);
       elab_fold_generics(ei->block, &new_ctx);
@@ -2505,6 +2578,7 @@ static void elab_component(tree_t inst, tree_t comp, const elab_ctx_t *ctx)
       .inst   = inst,
    };
    elab_inherit_context(&new_ctx, ctx);
+   elab_pass_vunits(tree_ident(inst), &new_ctx, true);
 
    mod_cache_t *mc = elab_cached_module(tree_to_object(comp), &new_ctx);
    mc->count++;
@@ -2724,6 +2798,7 @@ static void elab_for_generate(tree_t t, const elab_ctx_t *ctx)
          .dotted  = ndotted,
       };
       elab_inherit_context(&new_ctx, ctx);
+      elab_pass_vunits(label, &new_ctx, false);
 
       if (i == low)
          first = ndotted;
@@ -2783,6 +2858,7 @@ static void elab_if_generate(tree_t t, const elab_ctx_t *ctx)
             .dotted = ndotted,
          };
          elab_inherit_context(&new_ctx, ctx);
+         elab_pass_vunits(tree_ident(t), &new_ctx, false);
 
          elab_cover_block(&new_ctx, t);
          elab_push_scope(t, &new_ctx);
@@ -2823,6 +2899,7 @@ static void elab_case_generate(tree_t t, const elab_ctx_t *ctx)
       .dotted = ndotted,
    };
    elab_inherit_context(&new_ctx, ctx);
+   elab_pass_vunits(tree_ident(t), &new_ctx, false);
 
    elab_cover_block(&new_ctx, t);
    elab_push_scope(t, &new_ctx);
@@ -2903,6 +2980,7 @@ static void elab_vhdl_block(tree_t t, const elab_ctx_t *ctx)
       .dotted = ndotted,
    };
    elab_inherit_context(&new_ctx, ctx);
+   elab_pass_vunits(tree_ident(t), &new_ctx, false);
 
    elab_cover_block(&new_ctx, t);
    elab_push_scope(t, &new_ctx);

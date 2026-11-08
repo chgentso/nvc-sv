@@ -1,0 +1,5 @@
+35ns+0: bound through block b1
+45ns+0: bound through generate g1
+45ns+0: bound through generate g1
+55ns+0: bound through component u3
+65ns+0: bound by configuration specification

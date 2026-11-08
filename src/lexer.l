@@ -24,6 +24,7 @@
 
 %{
 #include "util.h"
+#include "array.h"
 #include "common.h"
 #include "diag.h"
 #include "ident.h"
@@ -106,6 +107,17 @@ static int string_caller = 0;
 static bool in_psl_comment = false;
 static bool preserve_case = false;
 static loc_t start_loc = LOC_INVALID;
+
+typedef struct {
+   int   start;
+   int   last_token;
+   int   comment_caller;
+   int   string_caller;
+   bool  in_psl_comment;
+   loc_t start_loc;
+} scanner_state_t;
+
+static A(scanner_state_t) scanner_stack = AINIT;
 
 extern loc_t yylloc;
 extern yylval_t yylval;
@@ -1497,6 +1509,49 @@ void reset_scanner(void)
 
    YY_FLUSH_BUFFER;
    BEGIN(INITIAL);
+}
+
+void push_scanner(void)
+{
+   // Start a new scanner on the current input buffer, saving the state
+   // of the one in use
+
+   const scanner_state_t saved = {
+      .start          = YY_START,
+      .last_token     = last_token,
+      .comment_caller = comment_caller,
+      .string_caller  = string_caller,
+      .in_psl_comment = in_psl_comment,
+      .start_loc      = start_loc,
+   };
+   APUSH(scanner_stack, saved);
+
+   yypush_buffer_state(yy_create_buffer(NULL, YY_BUF_SIZE));
+
+   last_token = -1;
+   comment_caller = 0;
+   string_caller = 0;
+   in_psl_comment = false;
+   start_loc = LOC_INVALID;
+
+   BEGIN(INITIAL);
+}
+
+void pop_scanner(void)
+{
+   yypop_buffer_state();
+
+   const scanner_state_t saved = APOP(scanner_stack);
+   last_token     = saved.last_token;
+   comment_caller = saved.comment_caller;
+   string_caller  = saved.string_caller;
+   in_psl_comment = saved.in_psl_comment;
+   start_loc      = saved.start_loc;
+
+   BEGIN(saved.start);
+
+   if (scanner_stack.count == 0)
+      ACLEAR(scanner_stack);
 }
 
 void scan_as_psl(void)

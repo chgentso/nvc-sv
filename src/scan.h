@@ -65,6 +65,10 @@ void input_from_buffer(const char *buf, size_t len, file_ref_t file_ref,
 void push_buffer(const char *buf, size_t len, file_ref_t file_ref);
 void push_file(const char *file, const loc_t *srcloc);
 void pop_buffer(void);
+
+void push_text(const char *buf, size_t len, file_ref_t file_ref,
+               unsigned line, unsigned column);
+void pop_text(void);
 hdl_kind_t source_kind(void);
 token_t processed_yylex(void);
 const char *token_str(token_t tok);

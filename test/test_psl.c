@@ -588,8 +588,8 @@ START_TEST(test_vunit1)
 
    input_from_file(TESTDIR "/psl/vunit1.vhd");
 
-   // IEEE 1850-2010 7.2, 7.2.1, 7.2.3: analysis errors in verification
-   // units
+   // IEEE 1850-2010 7.2, 7.2.1, 7.2.2, 7.2.3 and IEEE 1076-2008 7.3.4:
+   // analysis errors in verification units
    const error_t expect[] = {
       { 10, "NOSUCH" },
       { 15, "assert directive is not allowed in a vmode" },
@@ -597,20 +597,26 @@ START_TEST(test_vunit1)
       { 21, "assume directive is not allowed in a vprop" },
       { 25, "cannot find verification unit NOSUCH_VU" },
       { 30, "no visible declaration for ZZZ" },
-      { 38, "sorry, inheriting from a verification unit is not supported" },
-      { 39, "sorry, instantiating a verification unit is not supported" },
       { 44, "cannot find architecture NOSUCH_ARCH of entity VUNIT1" },
       { 47, "no instance with label NOSUCH in WORK.VUNIT1-TEST" },
-      { 51, "sorry, binding a verification unit in a configuration is not "
-        "supported" },
       { 52, "cannot find verification unit NOSUCH_VU" },
+      { 53, "verification unit VU_OK is already bound to a design unit" },
+      { 60, "inherit specification must appear before any other item" },
+      { 64, "verification unit VU_SELF inherits itself" },
+      { 68, "verification unit VU_CYC_B inherits itself" },
+      { 81, "duplicate verification unit instance label I1" },
+      { 82, "verification unit VU_INSTS instantiates itself" },
+      { 83, "cannot find verification unit NOSUCH_VU" },
+      { 88, "no visible declaration for YYY" },
+      { 97, "assert directive is not allowed in a vmode" },
       { -1, NULL }
    };
    expect_errors(expect);
 
    parse_and_check(T_ENTITY, T_ARCH, T_VUNIT, T_VUNIT, T_VUNIT, T_VUNIT,
                    T_VUNIT, T_VUNIT, T_VUNIT, T_VUNIT, T_VUNIT,
-                   T_CONFIGURATION);
+                   T_CONFIGURATION, T_VUNIT, T_VUNIT, T_VUNIT, T_VUNIT,
+                   T_VUNIT, T_VUNIT, T_VUNIT, T_VUNIT, T_VUNIT, T_VUNIT);
 
    check_expected_errors();
 }

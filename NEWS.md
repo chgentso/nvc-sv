@@ -79,6 +79,12 @@
   without using `--psl` comments.
 - Added support for PSL verification units (`vunit`, `vprop` and
   `vmode`) that are bound to a design entity, architecture or instance.
+- PSL verification units without a binding can now be bound with the
+  VHDL-2008 `use vunit` verification unit binding indication in a
+  configuration declaration, component configuration or configuration
+  specification, inherited with `inherit`, or instantiated in another
+  verification unit.  The instance path of a binding may now pass
+  through block and generate statement labels and component instances.
 - Fixed crashes when a PSL property declaration contains HDL operators
   or a PSL fairness statement is simulated.
 - Added a `pkg-config` configuration file to aid locating the VHPI

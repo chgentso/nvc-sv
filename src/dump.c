@@ -885,6 +885,10 @@ static void dump_decl(tree_t t, int indent)
       print_syntax("#end #for;\n");
       return;
 
+   case T_VUNIT:
+      print_syntax("#use #vunit %s;\n", istr(tree_ident(t)));
+      return;
+
    case T_BLOCK_CONFIG:
       print_syntax("#for %s\n", istr(tree_ident(t)));
       dump_decls(t, indent + 2);

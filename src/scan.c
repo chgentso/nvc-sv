@@ -69,6 +69,7 @@ static buf_stack_t       buf_stack;
 static hdl_kind_t        src_kind;
 static int               pperrors;
 static cond_stack_t      cond_stack;
+static A(cond_stack_t)   cond_saved;
 static shash_t          *pp_defines;
 static macro_stack_t     macro_stack;
 static vlog_version_t    default_keywords = VLOG_1800_2023;
@@ -78,6 +79,8 @@ static string_list_t     include_dirs;
 extern int yylex(void);
 
 extern void reset_scanner(void);
+extern void push_scanner(void);
+extern void pop_scanner(void);
 
 static bool pp_cond_analysis_expr(void);
 static void pp_defines_init(void);
@@ -250,6 +253,35 @@ void pop_buffer(void)
 {
    input_buf = APOP(buf_stack);
    yylloc = LOC_INVALID;
+}
+
+void push_text(const char *buf, size_t len, file_ref_t file_ref,
+               unsigned line, unsigned column)
+{
+   // Scan a fragment of source code at the given position in a file
+   // until the matching call to pop_text without disturbing the input
+   // currently being scanned
+
+   APUSH(cond_saved, cond_stack);
+   cond_stack = (cond_stack_t)AINIT;
+
+   push_buffer(buf, len, file_ref);
+   input_buf.lineno = line;
+   input_buf.colno  = column;
+
+   push_scanner();
+}
+
+void pop_text(void)
+{
+   pop_scanner();
+   pop_buffer();
+
+   ACLEAR(cond_stack);
+   cond_stack = APOP(cond_saved);
+
+   if (cond_saved.count == 0)
+      ACLEAR(cond_saved);
 }
 
 void add_include_dir(const char *str)

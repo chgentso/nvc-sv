@@ -902,17 +902,17 @@ table below.
   <tr>
     <td>7.2.1</td>
     <td>Verification unit binding</td>
-    <td class="feature-partial">1.24</td>
+    <td class="feature-done">1.24</td>
   </tr>
   <tr>
     <td>7.2.2</td>
     <td>Verification unit instantiation</td>
-    <td class="feature-missing"></td>
+    <td class="feature-done">1.24</td>
   </tr>
   <tr>
     <td>7.2.3</td>
     <td>Verification unit inheritance</td>
-    <td class="feature-missing"></td>
+    <td class="feature-done">1.24</td>
   </tr>
   <tr>
     <td>7.2.4</td>
