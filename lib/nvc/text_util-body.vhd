@@ -178,13 +178,31 @@ package body text_util is
         variable trimmed : positive := 1;
         variable char    : character;
         variable upcase  : boolean := true;
+        variable ext     : boolean := false;
+        variable i       : positive := 1;
     begin
-        for i in 1 to length loop
+        while i <= length loop
             char := ss(i);
-            if isspace(char) then
+            i := i + 1;
+            if ext then
+                -- Extended identifier: case is significant and a doubled
+                -- reverse solidus denotes a single one
+                if char = '\' then
+                    if i <= length and ss(i) = '\' then
+                        i := i + 1;
+                    else
+                        ext := false;
+                    end if;
+                end if;
+                result(trimmed) := char;
+                trimmed := trimmed + 1;
+                next;
+            elsif isspace(char) then
                 next;
             elsif char = ''' then
                 upcase := not upcase;
+            elsif char = '\' and upcase then
+                ext := true;
             end if;
             if upcase then
                 result(trimmed) := toupper(char);

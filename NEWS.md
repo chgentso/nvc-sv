@@ -29,6 +29,9 @@
   evaluated if the left hand operand determines the result.
 - Added a `pkg-config` configuration file to aid locating the VHPI
   headers (from @gsmecher).
+- The `'IMAGE` and `to_string` of an enumeration literal that is an
+  extended identifier now preserve the case and double any reverse
+  solidus inside the identifier, and `'VALUE` accepts that format.
 - Several other minor bugs were resolved (#1663, #1672, #1668, #1670,
   #1678, #1686, #1687, #1692, #1695, #1700, #1707).
 

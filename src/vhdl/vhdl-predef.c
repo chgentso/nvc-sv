@@ -1275,14 +1275,32 @@ static void enum_image_helper(vhdl_gen_t *g, type_t type, mir_value_t arg)
 
    for (int i = 0; i < nlits; i++) {
       // LRM specifies result is lowercase for enumerated types when
-      // the value is a basic identifier
+      // the value is a basic identifier and the same case with each
+      // reverse solidus doubled for an extended identifier
       ident_t id = tree_ident(type_enum_literal(type, i));
-      if (ident_char(id, 0) != '\'')
-         id = ident_downcase(id);
+      const char first = ident_char(id, 0);
 
       mir_set_cursor(g->mu, blocks[i], MIR_APPEND);
 
-      mir_value_t str = wrap_string(g->mu, istr(id));
+      mir_value_t str;
+      if (first == '\\') {
+         const char *src = istr(id);
+         const size_t len = ident_len(id);
+         LOCAL_TEXT_BUF tb = tb_new();
+         tb_append(tb, '\\');
+         for (size_t j = 1; j + 1 < len; j++) {
+            tb_append(tb, src[j]);
+            if (src[j] == '\\')
+               tb_append(tb, '\\');
+         }
+         tb_append(tb, '\\');
+         str = wrap_string(g->mu, tb_get(tb));
+      }
+      else {
+         if (first != '\'')
+            id = ident_downcase(id);
+         str = wrap_string(g->mu, istr(id));
+      }
       mir_build_return(g->mu, str);
    }
 }
