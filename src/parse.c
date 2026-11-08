@@ -13760,7 +13760,7 @@ static psl_node_t p_psl_fl_primary(void)
       break;
 
    case tNOT:
-      if (peek_nth(2) == tLPAREN) {
+      if (peek_nth(2) == tLPAREN || peek_nth(2) == tLBRACE) {
          consume(tNOT);
 
          psl_node_t operand = psl_as_boolean(p_psl_fl_primary());

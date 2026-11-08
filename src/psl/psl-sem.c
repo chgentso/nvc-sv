@@ -331,7 +331,12 @@ static void psl_check_logical(psl_node_t p, nametab_t *tab)
       psl_node_t operand = psl_operand(p, 0);
       psl_check(operand, tab);
 
-      if (psl_kind(operand) != P_HDL_EXPR)
+      if (psl_kind(operand) == P_HDL_EXPR)
+         return;
+      else if (psl_is_sequence(operand))
+         warn_at(psl_loc(p), "property is not in the simple subset as the "
+                 "operand of this logical not is non-Boolean");
+      else
          error_at(psl_loc(p), "property is not in the simple subset as the "
                   "operand of this logical not is non-Boolean");
       return;
@@ -359,8 +364,8 @@ static void psl_check_logical(psl_node_t p, nametab_t *tab)
 
    case PSL_LOGIC_OR:
       if (psl_kind(left) != P_HDL_EXPR && psl_kind(right) != P_HDL_EXPR)
-         error_at(psl_loc(p), "property is not in the simple subset as both "
-                  "operands of this logical OR are non-Boolean");
+         warn_at(psl_loc(p), "property is not in the simple subset as both "
+                 "operands of this logical OR are non-Boolean");
       break;
 
    case PSL_LOGIC_AND:

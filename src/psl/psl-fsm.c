@@ -679,11 +679,149 @@ static fsm_state_t *build_and(psl_fsm_t *fsm, fsm_state_t *state,
    return intersect_fsm(fsm, state, l_initial, l_final, r_initial, r_final);
 }
 
+static fsm_state_t *build_not(psl_fsm_t *fsm, fsm_state_t *state,
+                               psl_node_t p)
+{
+   psl_node_t value = psl_operand(p, 0);
+
+   if (psl_kind(value) == P_HDL_EXPR) {
+      fsm_state_t *new = add_state(fsm, p);
+      add_edge(fsm, state, new, EDGE_EPSILON,
+               not_guard(fsm, leaf_guard(fsm, value)));
+      return new;
+   }
+
+   // The negation of a Sequence holds if no match of the sequence starts
+   // in this cycle, like {r} |-> false: there is no edge out of the
+   // final state of r
+   (void)build_node(fsm, state, value);
+
+   fsm_state_t *vacuous = add_state(fsm, p);
+
+   LOCAL_BIT_MASK visited;
+   mask_init(&visited, fsm->next_id);
+
+   connect_default(fsm, state, vacuous, &visited);
+
+   return vacuous;
+}
+
+static void complete_fsm(psl_fsm_t *fsm, fsm_state_t *initial,
+                         fsm_state_t *fail, bit_mask_t *visited)
+{
+   // Add a transition to the fail state taken when an evaluation of the
+   // property would fail in a state
+
+   if (initial == fail || mask_test_and_set(visited, initial->id))
+      return;
+
+   if (initial->accept && initial->guard == NULL)
+      return;   // Always holds
+
+   psl_guard_t guard = build_else_guard(fsm, initial);
+   if (initial->accept)
+      guard = and_guard(fsm, guard, not_guard(fsm, initial->guard));
+
+   for (fsm_edge_t *e = initial->edges; e; e = e->next)
+      complete_fsm(fsm, e->dest, fail, visited);
+
+   add_edge(fsm, initial, fail, EDGE_NEXT, guard);
+}
+
+static fsm_state_t *build_or(psl_fsm_t *fsm, fsm_state_t *state, psl_node_t p)
+{
+   // Both properties are evaluated in parallel and the disjunction fails
+   // when both have failed and holds when either holds
+
+   fsm_state_t *l_initial = add_state(fsm, p);
+   fsm_state_t *l_final = build_property(fsm, l_initial, psl_operand(p, 0));
+
+   fsm_state_t *r_initial = add_state(fsm, p);
+   fsm_state_t *r_final = build_property(fsm, r_initial, psl_operand(p, 1));
+
+   intersect_prepare(fsm, l_initial, l_final, r_initial, r_final);
+
+   fsm_state_t *fail[2] = { add_state(fsm, p), add_state(fsm, p) };
+   add_edge(fsm, fail[0], fail[0], EDGE_NEXT, NULL);
+   add_edge(fsm, fail[1], fail[1], EDGE_NEXT, NULL);
+
+   LOCAL_BIT_MASK visited;
+   mask_init(&visited, fsm->next_id);
+
+   complete_fsm(fsm, l_initial, fail[0], &visited);
+   complete_fsm(fsm, r_initial, fail[1], &visited);
+
+   fsm_state_t *final = add_state(fsm, p);
+
+   ihash_t *map = ihash_new(64);
+
+   typedef struct {
+      fsm_state_t *left;
+      fsm_state_t *right;
+      fsm_state_t *into;
+   } work_item_t;
+
+   SCOPED_A(work_item_t) worklist = AINIT;
+
+   fsm_state_t *initial = add_state(fsm, p);
+   add_edge(fsm, state, initial, EDGE_EPSILON, NULL);
+
+   const work_item_t seed = { l_initial, r_initial, initial };
+   APUSH(worklist, seed);
+
+   while (worklist.count > 0) {
+      const work_item_t wi = APOP(worklist);
+
+      const bool l_holds = wi.left->accept && wi.left->guard == NULL;
+      const bool r_holds = wi.right->accept && wi.right->guard == NULL;
+
+      if (l_holds || r_holds) {
+         add_edge(fsm, wi.into, final, EDGE_EPSILON, NULL);
+         continue;
+      }
+      else if (wi.left->accept || wi.right->accept) {
+         psl_guard_t guard = NULL;
+         if (wi.left->accept && wi.right->accept)
+            guard = or_guard(fsm, wi.left->guard, wi.right->guard);
+         else if (wi.left->accept)
+            guard = wi.left->guard;
+         else
+            guard = wi.right->guard;
+
+         add_edge(fsm, wi.into, final, EDGE_EPSILON, guard);
+      }
+
+      for (fsm_edge_t *e1 = wi.left->edges; e1; e1 = e1->next) {
+         for (fsm_edge_t *e2 = wi.right->edges; e2; e2 = e2->next) {
+            if (e1->dest == fail[0] && e2->dest == fail[1])
+               continue;   // Both have failed
+
+            const uint64_t key = (uint64_t)e1->dest->id << 32 | e2->dest->id;
+
+            fsm_state_t *dest = ihash_get(map, key);
+            if (dest == NULL) {
+               dest = add_state(fsm, p);
+               ihash_put(map, key, dest);
+
+               const work_item_t new = { e1->dest, e2->dest, dest };
+               APUSH(worklist, new);
+            }
+
+            psl_guard_t guard = and_guard(fsm, e1->guard, e2->guard);
+            add_edge(fsm, wi.into, dest, EDGE_NEXT, guard);
+         }
+      }
+   }
+
+   ihash_free(map);
+   return final;
+}
+
 static fsm_state_t *build_logical(psl_fsm_t *fsm, fsm_state_t *state,
                                   psl_node_t p)
 {
    if (psl_subkind(p) == PSL_LOGIC_NOT)
-      fatal_at(psl_loc(p), "sorry, negation of a property is not supported");
+      return build_not(fsm, state, p);
 
    psl_node_t lhs = psl_operand(p, 0);
    psl_node_t rhs = psl_operand(p, 1);
@@ -724,8 +862,10 @@ static fsm_state_t *build_logical(psl_fsm_t *fsm, fsm_state_t *state,
 
    case PSL_LOGIC_OR:
       {
-         // At least one operand must be Boolean; the other is only
-         // checked if the Boolean does not hold
+         if (psl_kind(lhs) != P_HDL_EXPR && psl_kind(rhs) != P_HDL_EXPR)
+            return build_or(fsm, state, p);
+
+         // The other operand is only checked if the Boolean does not hold
          psl_node_t b = lhs, other = rhs;
          if (psl_kind(lhs) != P_HDL_EXPR) {
             b = rhs;
