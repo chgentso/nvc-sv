@@ -593,5 +593,6 @@ void reset_sdf_parser(void);
 #define tNEXTEVENTA1   649
 #define tNEXTEVENTE    650
 #define tNEXTEVENTE1   651
+#define tFORALL        652
 
 #endif  // _SCAN_H

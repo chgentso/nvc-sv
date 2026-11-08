@@ -167,7 +167,8 @@ static void psl_check_eventually(psl_node_t p, nametab_t *tab)
 
    if (!psl_is_sequence(value))
       error_at(psl_loc(p), "property is not in the simple subset as the "
-               "operand of eventually! is not a Boolean or Sequence");
+               "operand of %s is not a Boolean or Sequence",
+               (psl_flags(p) & PSL_F_LTL) ? "F" : "eventually!");
 }
 
 static void psl_check_boolean(psl_node_t p, nametab_t *tab)
@@ -335,6 +336,16 @@ static void psl_check_repeat(psl_node_t p, nametab_t *tab)
 
 static void psl_check_logical(psl_node_t p, nametab_t *tab)
 {
+   if (psl_subkind(p) == PSL_LOGIC_NOT) {
+      psl_node_t operand = psl_operand(p, 0);
+      psl_check(operand, tab);
+
+      if (psl_kind(operand) != P_HDL_EXPR)
+         error_at(psl_loc(p), "property is not in the simple subset as the "
+                  "operand of this logical not is non-Boolean");
+      return;
+   }
+
    assert(psl_operands(p) == 2);
 
    psl_node_t left = psl_operand(p, 0);
@@ -362,6 +373,7 @@ static void psl_check_logical(psl_node_t p, nametab_t *tab)
       break;
 
    case PSL_LOGIC_AND:
+   case PSL_LOGIC_NOT:
       break;
    }
 }
@@ -416,7 +428,13 @@ static void psl_check_until(psl_node_t p, nametab_t *tab)
    psl_check(right, tab);
 
    const psl_flags_t flags = psl_flags(p);
-   if ((flags & PSL_F_INCLUSIVE) && psl_kind(right) != P_HDL_EXPR)
+   if (flags & PSL_F_LTL) {
+      const char *name = (flags & PSL_F_STRONG) ? "U" : "W";
+      if (psl_kind(right) != P_HDL_EXPR)
+         error_at(psl_loc(p), "property is not in the simple subset as the "
+                  "right hand side of this %s operator is non-Boolean", name);
+   }
+   else if ((flags & PSL_F_INCLUSIVE) && psl_kind(right) != P_HDL_EXPR)
       error_at(psl_loc(p), "property is not in the simple subset as the right "
                "hand side of this overlapping until operator is non-Boolean");
    else if (psl_kind(left) != P_HDL_EXPR)
@@ -621,6 +639,7 @@ void psl_check(psl_node_t p, nametab_t *tab)
       psl_check_proc_block(p, tab);
       break;
    case P_PARAM_SERE:
+   case P_PARAM_PROP:
       // Already checked by the parser while the parameters are in scope
       break;
    case P_CLOCKED:

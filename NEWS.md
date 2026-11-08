@@ -53,6 +53,9 @@
 - Fixed the PSL `until!` and `until!_` operators which did not report a
   failure if the right hand operand did not hold before the end of the
   simulation, and the evaluation of `until` when both operands hold.
+- Added support for the PSL logical `and` of temporal properties,
+  replicated properties (`forall` and `for i in {...} : and (...)`) and
+  the LTL operators `X`, `X!`, `F`, `G`, `[f U g]` and `[f W g]`.
 - PSL Boolean implication `->` and equivalence `<->` can now be used
   inside SEREs and as the operand of other PSL operators.  The operators
   of PSL properties are now parsed with the correct precedence.

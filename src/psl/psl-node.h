@@ -57,6 +57,7 @@ typedef enum {
    P_ENDPOINT_DECL,
    P_NEXT_EVENT_A,
    P_NEXT_EVENT_E,
+   P_PARAM_PROP,
 
    P_LAST_PSL_KIND
 } psl_kind_t;
@@ -71,6 +72,7 @@ typedef enum {
    PSL_LOGIC_IFF,
    PSL_LOGIC_AND,
    PSL_LOGIC_OR,
+   PSL_LOGIC_NOT,
 } psl_logic_t;
 
 typedef enum {
@@ -135,6 +137,7 @@ typedef enum {
 typedef enum {
    PSL_F_STRONG    = (1 << 0),
    PSL_F_INCLUSIVE = (1 << 1),
+   PSL_F_LTL       = (1 << 2),
 } psl_flags_t;
 
 psl_node_t psl_new(psl_kind_t kind);

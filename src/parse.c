@@ -117,6 +117,8 @@ static void p_psl_declaration(tree_t parent);
 static psl_node_t p_psl_sequence(void);
 static psl_node_t p_psl_property(void);
 static psl_node_t p_psl_fl_property(void);
+static psl_node_t p_psl_fl_property_prec(int min_prec);
+static psl_node_t psl_as_boolean(psl_node_t p);
 static psl_node_t p_psl_sere(void);
 static tree_t p_psl_directive(ident_t label);
 static psl_node_t p_psl_repeated_sere(psl_node_t head);
@@ -12660,8 +12662,11 @@ static psl_node_t p_psl_parameter_definition(void)
    psl_node_t p = psl_new(P_PARAM_DECL);
    psl_set_tree(p, decl);
 
-   if (peek() == tLPAREN)
+   if (peek() == tLPAREN) {
       (void)p_psl_index_range();
+      parse_error(CURRENT_LOC, "sorry, parameters with an index range are "
+                  "not supported");
+   }
 
    consume(tIN);
 
@@ -13285,6 +13290,163 @@ static psl_node_t p_psl_sequence(void)
    }
 }
 
+typedef enum {
+   PSL_PREC_IMPL = 1,     // -> <->
+   PSL_PREC_OR,
+   PSL_PREC_AND,
+   PSL_PREC_UNTIL,        // until before
+   PSL_PREC_ABORT,
+   PSL_PREC_CLOCK,        // @
+   PSL_PREC_SUFFIX,       // |-> |=>
+} psl_prec_t;
+
+static psl_node_t p_psl_param_property(psl_logic_t kind, bool paren)
+{
+   // for Parameters_Definition : and ( FL_Property )
+   //   | for Parameters_Definition : or ( FL_Property )
+   //   | forall Parameters_Definition : Property
+
+   BEGIN("PSL replicated property");
+
+   push_scope(nametab);
+
+   psl_node_t p = psl_new(P_PARAM_PROP);
+   psl_set_subkind(p, kind);
+   p_psl_parameters_definition(p);
+
+   consume(tCOLON);
+
+   if (paren) {
+      switch (one_of(tAND, tOR)) {
+      case tAND: psl_set_subkind(p, PSL_LOGIC_AND); break;
+      case tOR:  psl_set_subkind(p, PSL_LOGIC_OR); break;
+      }
+
+      consume(tLPAREN);
+      psl_set_value(p, p_psl_fl_property());
+      consume(tRPAREN);
+   }
+   else
+      psl_set_value(p, p_psl_fl_property());
+
+   psl_set_loc(p, CURRENT_LOC);
+
+   // The parameters are only in scope here so check the property now
+   const int nparams = psl_operands(p);
+   for (int i = 0; i < nparams; i++)
+      psl_check(psl_operand(p, i), nametab);
+
+   psl_check(psl_value(p), nametab);
+
+   pop_scope(nametab);
+   return p;
+}
+
+static psl_node_t p_psl_ltl_until(void)
+{
+   // [ FL_Property U FL_Property ] | [ FL_Property W FL_Property ]
+
+   BEGIN("PSL LTL until");
+
+   consume(tLSQUARE);
+
+   psl_node_t lhs = p_psl_fl_property();
+
+   bool strong = true;
+   if (peek() == tID) {
+      consume(tID);
+      ident_t id = state.last_lval.ident;
+      if (id == ident_new("W"))
+         strong = false;
+      else if (id != ident_new("U"))
+         parse_error(&state.last_loc, "expected U or W");
+   }
+   else
+      expect(tID);
+
+   psl_node_t rhs = p_psl_fl_property();
+
+   consume(tRSQUARE);
+
+   psl_node_t until = psl_new(P_UNTIL);
+   psl_set_flag(until, PSL_F_LTL | (strong ? PSL_F_STRONG : 0));
+   psl_add_operand(until, lhs);
+   psl_add_operand(until, rhs);
+   psl_set_loc(until, CURRENT_LOC);
+   return until;
+}
+
+static bool p_psl_is_ltl_operator(ident_t *id, bool *strong)
+{
+   // Distinguish a signal named X, F or G from the LTL operators
+
+   if (peek() != tID)
+      return false;
+
+   (void)peek_nth(1);
+   const int head = state.tokenq_tail & (TOKENQ_SIZE - 1);
+   *id = state.tokenq[head].lval.ident;
+
+   static ident_t ids[3];
+   if (ids[0] == NULL) {
+      ids[0] = ident_new("X");
+      ids[1] = ident_new("F");
+      ids[2] = ident_new("G");
+   }
+
+   if (*id != ids[0] && *id != ids[1] && *id != ids[2])
+      return false;
+
+   const token_t next = peek_nth(2);
+
+   *strong = (*id == ids[0] && next == tBAR);
+   if (*strong)
+      return true;
+
+   if (query_name(nametab, *id, NULL) != 0)
+      return false;   // Refers to a declaration
+
+   switch (next) {
+   case tID:
+   case tLPAREN:
+   case tLBRACE:
+   case tLSQUARE:
+   case tPSLNEXT:
+   case tNEXT1:
+   case tNEVER:
+   case tALWAYS:
+   case tNOT:
+   case tNEXTA:
+   case tNEXTA1:
+   case tNEXTE:
+   case tNEXTE1:
+   case tNEXTEVENT:
+   case tNEXTEVENT1:
+   case tFOR:
+      return true;
+   default:
+      return false;
+   }
+}
+
+static bool p_psl_is_obe_operator(void)
+{
+   if (peek() != tID)
+      return false;
+
+   (void)peek_nth(1);
+   const int head = state.tokenq_tail & (TOKENQ_SIZE - 1);
+   ident_t id = state.tokenq[head].lval.ident;
+
+   const char *names[] = { "AG", "AF", "AX", "EG", "EF", "EX" };
+   for (int i = 0; i < ARRAY_LEN(names); i++) {
+      if (id == ident_new(names[i]) && query_name(nametab, id, NULL) == 0)
+         return true;
+   }
+
+   return false;
+}
+
 static psl_node_t p_psl_fl_primary(void)
 {
    // Boolean | ( FL_Property ) | FL_Property @ Clock_Expression
@@ -13469,6 +13631,85 @@ static psl_node_t p_psl_fl_primary(void)
       }
       break;
 
+   case tFOR:
+      consume(tFOR);
+      p = p_psl_param_property(PSL_LOGIC_AND, true);
+      break;
+
+   case tLSQUARE:
+      p = p_psl_ltl_until();
+      break;
+
+   case tNOT:
+      if (peek_nth(2) == tLPAREN) {
+         consume(tNOT);
+
+         psl_node_t operand = psl_as_boolean(p_psl_fl_primary());
+         if (psl_kind(operand) == P_HDL_EXPR) {
+            tree_t fcall = tree_new(T_FCALL);
+            tree_set_ident(fcall, well_known(W_OP_NOT));
+            tree_set_loc(fcall, CURRENT_LOC);
+            add_param(fcall, psl_tree(operand), P_POS, NULL);
+
+            psl_set_tree(operand, fcall);
+            psl_set_loc(operand, CURRENT_LOC);
+
+            if (is_vhdl_infix_op(peek())) {
+               tree_t expr = p_expression_with_head(fcall);
+               psl_set_tree(operand, expr);
+            }
+
+            p = operand;
+         }
+         else {
+            p = psl_new(P_LOGICAL);
+            psl_set_subkind(p, PSL_LOGIC_NOT);
+            psl_add_operand(p, operand);
+            psl_set_loc(p, CURRENT_LOC);
+         }
+      }
+      else
+         p = p_hdl_expression(NULL, PSL_TYPE_BOOLEAN);
+      break;
+
+   case tID:
+      {
+         ident_t id;
+         bool strong;
+         if (p_psl_is_ltl_operator(&id, &strong)) {
+            consume(tID);
+            if (strong)
+               consume(tBAR);
+
+            if (id == ident_new("X")) {
+               p = psl_new(P_NEXT);
+               if (strong)
+                  psl_set_flag(p, PSL_F_STRONG);
+               psl_set_value(p, p_psl_fl_property_prec(PSL_PREC_SUFFIX + 1));
+            }
+            else if (id == ident_new("F")) {
+               p = psl_new(P_EVENTUALLY);
+               psl_set_flag(p, PSL_F_LTL);
+               psl_set_value(p, p_psl_fl_property_prec(PSL_PREC_SUFFIX + 1));
+            }
+            else {
+               p = psl_new(P_ALWAYS);
+               psl_set_value(p, p_psl_fl_property_prec(PSL_PREC_SUFFIX + 1));
+            }
+
+            psl_set_loc(p, CURRENT_LOC);
+         }
+         else if (p_psl_is_obe_operator()) {
+            consume(tID);
+            parse_error(&state.last_loc, "OBE properties are not supported in "
+                        "simulation");
+            p = p_psl_fl_property_prec(PSL_PREC_SUFFIX + 1);
+         }
+         else
+            p = p_hdl_expression(NULL, PSL_TYPE_BOOLEAN);
+      }
+      break;
+
    case tLPAREN:
       {
          consume(tLPAREN);
@@ -13503,15 +13744,6 @@ static psl_node_t p_psl_fl_primary(void)
    return p;
 }
 
-typedef enum {
-   PSL_PREC_IMPL = 1,     // -> <->
-   PSL_PREC_OR,
-   PSL_PREC_AND,
-   PSL_PREC_UNTIL,        // until before
-   PSL_PREC_ABORT,
-   PSL_PREC_CLOCK,        // @
-   PSL_PREC_SUFFIX,       // |-> |=>
-} psl_prec_t;
 
 static int p_psl_infix_prec(token_t tok)
 {
@@ -13752,6 +13984,9 @@ static psl_node_t p_psl_property(void)
    // Replicator Property | FL_Property | OBE_Property
 
    BEGIN("property");
+
+   if (optional(tFORALL))
+      return p_psl_param_property(PSL_LOGIC_AND, false);
 
    return p_psl_fl_property();
 }

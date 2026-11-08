@@ -84,7 +84,14 @@ static void psl_dump_never(psl_node_t p)
 
 static void psl_dump_logical(psl_node_t p)
 {
-   static const char *map[] = { "->", "<->", "and", "or" };
+   static const char *map[] = { "->", "<->", "and", "or", "not" };
+
+   if (psl_subkind(p) == PSL_LOGIC_NOT) {
+      print_syntax("#not (");
+      psl_dump(psl_operand(p, 0));
+      print_syntax(")");
+      return;
+   }
 
    psl_dump(psl_operand(p, 0));
    print_syntax(" %s (", map[psl_subkind(p)]);
@@ -406,6 +413,11 @@ void psl_dump(psl_node_t p)
       break;
    case P_UNION:
       psl_dump_union(p);
+      break;
+   case P_PARAM_PROP:
+      print_syntax("#for ... : (");
+      psl_dump(psl_value(p));
+      print_syntax(")");
       break;
    default:
       print_syntax("\n");

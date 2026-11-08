@@ -271,6 +271,7 @@ NEXT_E        ?i:next_e
 NEXT_EVENT    ?i:next_event
 NEXT_EVENT_A  ?i:next_event_a
 NEXT_EVENT_E  ?i:next_event_e
+FORALL        ?i:forall
 ASSUME        ?i:assume
 ASSUME_G      ?i:assume_guarantee
 RESTRICT      ?i:restrict
@@ -660,6 +661,7 @@ PROTECT           ?i:protect
 <PSL>{NEXT_EVENT_A}!     { TOKEN(tNEXTEVENTA1); }
 <PSL>{NEXT_EVENT_E}      { TOKEN(tNEXTEVENTE); }
 <PSL>{NEXT_EVENT_E}!     { TOKEN(tNEXTEVENTE1); }
+<PSL>{FORALL}            { TOKEN(tFORALL); }
 <PSL>"[*"                { TOKEN(tTIMESRPT); }
 <PSL>"[+]"               { TOKEN(tPLUSRPT); }
 <PSL>"[="                { TOKEN(tEQRPT); }

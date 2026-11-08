@@ -57,7 +57,7 @@ static const imask_t has_map[P_LAST_PSL_KIND] = {
    (I_VALUE),
 
    // P_EVENTUALLY
-   (I_VALUE),
+   (I_VALUE | I_FLAGS),
 
    // P_NEXT_A
    (I_VALUE | I_DELAY | I_FLAGS),
@@ -127,6 +127,9 @@ static const imask_t has_map[P_LAST_PSL_KIND] = {
 
    // P_NEXT_EVENT_E
    (I_VALUE | I_DELAY | I_FLAGS | I_PARAMS),
+
+   // P_PARAM_PROP
+   (I_SUBKIND | I_PARAMS | I_VALUE),
 };
 
 static const char *kind_text_map[P_LAST_PSL_KIND] = {
@@ -137,7 +140,7 @@ static const char *kind_text_map[P_LAST_PSL_KIND] = {
    "P_BUILTIN_FCALL", "P_VALUE_SET", "P_PARAM_DECL", "P_UNTIL", "P_ABORT",
    "P_BEFORE", "P_SUFFIX_IMPL", "P_LOGICAL", "P_RANGE", "P_PROC_BLOCK",
    "P_PARAM_SERE", "P_CLOCKED", "P_ENDPOINT_DECL", "P_NEXT_EVENT_A",
-   "P_NEXT_EVENT_E",
+   "P_NEXT_EVENT_E", "P_PARAM_PROP",
 };
 
 static const change_allowed_t change_allowed[] = {
