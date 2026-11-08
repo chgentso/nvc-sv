@@ -16,9 +16,6 @@ package counters is
     type pair_vec is array (1 to 3) of counter_pair;
     type counter_mat is array (1 to 2, 1 to 3) of counter_t;
 
-    -- Package-level shared variable of a composite of protected types
-    shared variable pkg_counters : counter_vec(0 to 3);
-
     procedure add_all (variable v : inout counter_vec; n : integer);
     impure function sum (variable v : inout counter_vec) return integer;
 end package;
@@ -58,6 +55,16 @@ end package body;
 -------------------------------------------------------------------------------
 
 use work.counters.all;
+
+package counters_shared is
+    -- Package-level shared variable of a composite of protected types
+    shared variable pkg_counters : counter_vec(0 to 3);
+end package;
+
+-------------------------------------------------------------------------------
+
+use work.counters.all;
+use work.counters_shared.all;
 
 entity protected14 is
 end entity;

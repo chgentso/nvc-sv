@@ -636,10 +636,10 @@ static bool sem_check_type_decl(tree_t t, nametab_t *tab)
             return false;
          }
 
-         if (type_is_file(elem_type))
+         if (standard() < STD_19 && type_has_file(elem_type))
             sem_error(t, "array %pI cannot have element of file type",
                       tree_ident(t));
-         else if (type_is_protected(elem_type))
+         else if (standard() < STD_19 && type_has_protected(elem_type))
             sem_error(t, "array %pI cannot have element of protected type",
                       tree_ident(t));
          else if (!sem_check_incomplete(t, elem_type))
@@ -805,12 +805,36 @@ static bool sem_check_type_decl(tree_t t, nametab_t *tab)
                diag_emit(d);
                return false;
             }
-            else if (type_is_file(f_type))
+            else if (standard() < STD_19 && type_has_file(f_type))
                sem_error(f, "record field %s cannot be of file type",
                          istr(f_name));
-            else if (type_is_protected(f_type))
+            else if (standard() < STD_19 && type_has_protected(f_type))
                sem_error(f, "record field %s cannot be of protected type",
                          istr(f_name));
+         }
+
+         if (standard() >= STD_19) {
+            // A record with a subelement of file or protected type may
+            // only have subelements of that type
+            bool any_file = false, any_prot = false, any_other = false;
+            for (int i = 0; i < nfields; i++) {
+               type_t f_type = tree_type(type_field(type, i));
+               if (type_has_file(f_type))
+                  any_file = true;
+               else if (type_has_protected(f_type))
+                  any_prot = true;
+               else
+                  any_other = true;
+            }
+
+            if (any_file && (any_prot || any_other))
+               sem_error(t, "record %pI with a subelement of file type may "
+                         "only have subelements of file type",
+                         tree_ident(t));
+            else if (any_prot && any_other)
+               sem_error(t, "record %pI with a subelement of protected type "
+                         "may only have subelements of protected type",
+                         tree_ident(t));
          }
 
          return true;
@@ -837,6 +861,14 @@ static bool sem_check_type_decl(tree_t t, nametab_t *tab)
 
          if (sem_has_access(f))
             sem_error(t, "type %pT has a subelement with an access type", f);
+
+         if (type_has_protected(f))
+            sem_error(t, "files may not be of a type with a subelement of "
+                      "protected type");
+
+         if (type_has_file(f))
+            sem_error(t, "files may not be of a type with a subelement of "
+                      "file type");
 
          type_t base_f = type_base_recur(f);
          if (type_is_array(base_f) && dimension_of(base_f) > 1)
@@ -915,6 +947,14 @@ static bool sem_no_access_file_or_protected(tree_t t, type_t type, const char *w
 
    if (type_is_file(type))
       sem_error(t, "%s may not have file type", what);
+
+   if (type_has_protected(type))
+      sem_error(t, "%s may not have a type with a subelement of protected "
+                "type", what);
+
+   if (type_has_file(type))
+      sem_error(t, "%s may not have a type with a subelement of file type",
+                what);
 
    return true;
 }
@@ -1050,6 +1090,38 @@ static bool sem_check_signal_decl(tree_t t, nametab_t *tab)
    return true;
 }
 
+static bool sem_check_protected_instance(tree_t t, type_t type, nametab_t *tab)
+{
+   type_t base = type_base_recur(type);
+
+   if (type_is_array(base))
+      return sem_check_protected_instance(t, type_elem(base), tab);
+   else if (type_is_record(base)) {
+      const int nfields = type_fields(base);
+      for (int i = 0; i < nfields; i++) {
+         if (!sem_check_protected_instance(t, tree_type(type_field(base, i)),
+                                           tab))
+            return false;
+      }
+
+      return true;
+   }
+
+   ident_t typeid = ident_rfrom(type_ident(type), '.');
+   tree_t pt = get_local_decl(tab, NULL, typeid, 0);
+   if (pt != NULL && tree_kind(pt) == T_PROT_DECL) {
+      diag_t *d = diag_new(DIAG_ERROR, tree_loc(t));
+      diag_printf(d, "cannot declare instance of protected type %pT "
+                  "before its body has been elaborated", type);
+      diag_hint(d, tree_loc(pt), "%pT declared here", type);
+      diag_lrm(d, STD_08, "14.4.2");
+      diag_emit(d);
+      return false;
+   }
+
+   return true;
+}
+
 static bool sem_check_var_decl(tree_t t, nametab_t *tab)
 {
    type_t type = tree_type(t);
@@ -1086,6 +1158,9 @@ static bool sem_check_var_decl(tree_t t, nametab_t *tab)
       if (type_kind(type) == T_PROTECTED)
          sem_error(t, "variable %s with protected type may not have an "
                    "initial value", istr(tree_ident(t)));
+      else if (type_has_protected(type))
+         sem_error(t, "variable %pI with a subelement of protected type may "
+                   "not have an initial value", tree_ident(t));
 
       tree_t value = tree_value(t);
       if (!sem_check(value, tab))
@@ -1101,7 +1176,7 @@ static bool sem_check_var_decl(tree_t t, nametab_t *tab)
 
    // From VHDL-2000 onwards shared variables must be protected types
    if (standard() >= STD_00) {
-      if ((tree_flags(t) & TREE_F_SHARED) && !type_is_protected(type)) {
+      if ((tree_flags(t) & TREE_F_SHARED) && !type_has_protected(type)) {
          diag_t *d = pedantic_diag(tree_loc(t));
          if (d != NULL) {
             diag_printf(d, "shared variable %pI must have protected type",
@@ -1111,18 +1186,9 @@ static bool sem_check_var_decl(tree_t t, nametab_t *tab)
       }
    }
 
-   if (type_is_protected(type)) {
-      ident_t typeid = ident_rfrom(type_ident(type), '.');
-      tree_t pt = get_local_decl(tab, NULL, typeid, 0);
-      if (pt != NULL && tree_kind(pt) == T_PROT_DECL) {
-         diag_t *d = diag_new(DIAG_ERROR, tree_loc(t));
-         diag_printf(d, "cannot declare instance of protected type %pT "
-                     "before its body has been elaborated", type);
-         diag_hint(d, tree_loc(pt), "%pT declared here", type);
-         diag_lrm(d, STD_08, "14.4.2");
-         diag_emit(d);
+   if (type_has_protected(type)) {
+      if (!sem_check_protected_instance(t, type, tab))
          return false;
-      }
 
       // The 2019 standard needs access to the instance and path name at
       // the point of declaration
@@ -1163,9 +1229,17 @@ static bool sem_check_param_decl(tree_t t, nametab_t *tab)
       sem_error(t, "formal parameter %s with file type must have class FILE",
                 istr(tree_ident(t)));
 
-   if (kind != T_FILE && class == C_FILE)
+   if (kind != T_FILE && type_has_file(type) && class != C_FILE)
+      sem_error(t, "formal parameter %s with a subelement of file type must "
+                "have class FILE", istr(tree_ident(t)));
+
+   if (class == C_FILE && !type_has_file(type))
       sem_error(t, "formal parameter %s with class FILE must have file type",
                 istr(tree_ident(t)));
+
+   if (kind != T_PROTECTED && type_has_protected(type) && class != C_VARIABLE)
+      sem_error(t, "formal parameter %s with a subelement of protected type "
+                "must have class VARIABLE", istr(tree_ident(t)));
 
    if ((kind == T_ACCESS || kind == T_PROTECTED) && class != C_VARIABLE)
       sem_error(t, "formal parameter %s with %s type must have class VARIABLE",
@@ -1310,9 +1384,13 @@ static bool sem_check_port_decl(tree_t t, nametab_t *tab)
       return false;
    }
 
-   if (type_is_file(type))
+   if (type_is_file(type) || type_has_file(type))
       sem_error(t, "port %pI cannot be declared with file type %pT",
                 tree_ident(t), type);
+
+   if (type_has_protected(type) && !type_is_protected(type))
+      sem_error(t, "port %pI cannot be declared with type %pT which has a "
+                "subelement of protected type", tree_ident(t), type);
 
    if (mode == PORT_RECORD_VIEW || mode == PORT_ARRAY_VIEW) {
       tree_t name = tree_value(t);
@@ -1435,6 +1513,12 @@ static bool sem_check_generic_decl(tree_t t, nametab_t *tab)
                    istr(tree_ident(t)));
       else if (type_is_file(type))
          sem_error(t, "generic %s may not have file type", istr(tree_ident(t)));
+      else if (type_has_protected(type))
+         sem_error(t, "generic %s may not have a type with a subelement of "
+                   "protected type", istr(tree_ident(t)));
+      else if (type_has_file(type))
+         sem_error(t, "generic %s may not have a type with a subelement of "
+                   "file type", istr(tree_ident(t)));
    }
 
    if (class == C_CONSTANT && tree_subkind(t) != PORT_IN)
@@ -1724,6 +1808,12 @@ static bool sem_check_func_result(tree_t t)
       sem_error(t, "function result subtype may not denote a protected type");
    else if (type_is_file(result))
       sem_error(t, "function result subtype may not denote a file type");
+   else if (type_has_protected(result))
+      sem_error(t, "function result subtype may not denote a type with a "
+                "subelement of protected type");
+   else if (type_has_file(result))
+      sem_error(t, "function result subtype may not denote a type with a "
+                "subelement of file type");
    else if (!sem_check_incomplete(t, result))
       return false;
 
@@ -2417,6 +2507,9 @@ static bool sem_check_variable_target(tree_t target)
       }
       else if (type_is_protected(tree_type(target)))
          sem_error(target, "may not assign to variable of a protected type");
+      else if (type_has_protected(tree_type(target)))
+         sem_error(target, "may not assign to variable with a subelement of "
+                   "protected type");
    }
 
    return true;
@@ -6271,10 +6364,15 @@ static bool sem_check_file_decl(tree_t t, nametab_t *tab)
 {
    // Rules for file declarations are in LRM 93 section 4.3.1.4
 
-   if (!type_is_file(tree_type(t)))
+   type_t type = tree_type(t);
+   if (!type_has_file(type))
       sem_error(t, "file declarations must have file type");
 
    if (tree_has_value(t)) {
+      if (!type_is_file(type))
+         sem_error(t, "file %pI with a subelement of file type cannot have "
+                   "file open information", tree_ident(t));
+
       tree_t value = tree_value(t);
       if (!sem_check(value, tab))
          return false;

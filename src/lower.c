@@ -2293,6 +2293,10 @@ static vcode_type_t lower_param_type(type_t type, class_t class,
       else
          return vtype_pointer(lower_signal_type(type));
 
+   case C_FILE:
+      if (type_is_file(type))
+         return vtype_pointer(lower_type(type));
+      // Fall-through
    case C_VARIABLE:
    case C_DEFAULT:
    case C_CONSTANT:
@@ -2311,9 +2315,6 @@ static vcode_type_t lower_param_type(type_t type, class_t class,
             return lower_type(type);
       }
       break;
-
-   case C_FILE:
-      return vtype_pointer(lower_type(type));
 
    default:
       fatal_trace("unhandled class %s in lower_param_type", class_str(class));
@@ -4616,6 +4617,64 @@ static vcode_reg_t lower_protected_init(lower_unit_t *lu, type_t type,
    vcode_type_t vtype = lower_type(type);
    vcode_reg_t context_reg = lower_context_for_mangled(lu, type_ident(type));
    return emit_protected_init(vtype, context_reg, names[0], names[1]);
+}
+
+static void lower_init_objects(lower_unit_t *lu, type_t type,
+                               vcode_reg_t ptr_reg, vcode_reg_t count_reg,
+                               tree_t decl)
+{
+   // Initialise each protected or file subelement of an object of
+   // composite type: ptr_reg points to the object, or to the first
+   // element for an array
+
+   if (type_is_protected(type)) {
+      vcode_reg_t obj_reg = lower_protected_init(lu, type, decl);
+      emit_store_indirect(obj_reg, ptr_reg);
+   }
+   else if (type_is_file(type))
+      emit_store_indirect(emit_null(lower_type(type)), ptr_reg);
+   else if (type_is_array(type)) {
+      type_t elem_type = type_elem_recur(type);
+
+      if (count_reg == VCODE_INVALID_REG)
+         count_reg = lower_array_total_len(lu, type, VCODE_INVALID_REG);
+
+      vcode_type_t voffset = vtype_offset();
+      vcode_var_t i_var = lower_temp_var(lu, "i", voffset);
+      emit_store(emit_const(voffset, 0), i_var);
+
+      vcode_block_t body_bb = emit_block();
+      vcode_block_t exit_bb = emit_block();
+
+      vcode_reg_t null_reg = emit_cmp(VCODE_CMP_EQ, count_reg,
+                                      emit_const(voffset, 0));
+      emit_cond(null_reg, exit_bb, body_bb);
+
+      vcode_select_block(body_bb);
+
+      vcode_reg_t i_reg = emit_load(i_var);
+      vcode_reg_t elem_reg = emit_array_ref(lower_array_data(ptr_reg), i_reg);
+
+      lower_init_objects(lu, elem_type, elem_reg, VCODE_INVALID_REG, decl);
+
+      vcode_reg_t next_reg = emit_add(i_reg, emit_const(voffset, 1));
+      emit_store(next_reg, i_var);
+
+      vcode_reg_t done_reg = emit_cmp(VCODE_CMP_EQ, next_reg, count_reg);
+      emit_cond(done_reg, exit_bb, body_bb);
+
+      vcode_select_block(exit_bb);
+      lower_release_temp(lu, i_var);
+   }
+   else if (type_is_record(type)) {
+      type_t base = type_base_recur(type);
+      const int nfields = type_fields(base);
+      for (int i = 0; i < nfields; i++) {
+         type_t ftype = tree_type(type_field(base, i));
+         vcode_reg_t f_reg = emit_record_ref(ptr_reg, i);
+         lower_init_objects(lu, ftype, f_reg, VCODE_INVALID_REG, decl);
+      }
+   }
 }
 
 static void lower_new_record(lower_unit_t *lu, type_t type,
@@ -7901,6 +7960,11 @@ static void lower_var_decl(lower_unit_t *lu, tree_t decl)
       }
    }
 
+   if (type_has_protected(type)) {
+      lower_init_objects(lu, type, dest_reg, count_reg, decl);
+      return;
+   }
+
    type_t value_type = NULL;
    vcode_reg_t value_reg;
    if (tree_has_value(decl)) {
@@ -8759,7 +8823,12 @@ static void lower_file_decl(lower_unit_t *lu, tree_t decl)
    vcode_var_t var = emit_var(vtype, vbounds, tree_ident(decl), 0);
    lower_put_vcode_obj(decl, var, lu);
 
-   emit_store(emit_null(vtype), var);
+   if (type_is_file(type))
+      emit_store(emit_null(vtype), var);
+   else {
+      vcode_reg_t ptr_reg = emit_index(var, VCODE_INVALID_REG);
+      lower_init_objects(lu, type, ptr_reg, VCODE_INVALID_REG, decl);
+   }
 
    if (tree_has_value(decl)) {
       // Generate initial call to file_open

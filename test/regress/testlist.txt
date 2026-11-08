@@ -1519,5 +1519,7 @@ psl71           normal,2008
 psl76           fail,gold,2008
 psl78           fail,gold,2008
 psl84           gold,2008
+protected14     normal,2019
+file16          normal,2019
 vlogrealport1   verilog
 vlogcasegen3    verilog

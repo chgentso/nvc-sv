@@ -136,6 +136,8 @@ bool type_is_scalar(type_t t);
 bool type_is_representable(type_t t);
 bool type_is_file(type_t t);
 bool type_is_protected(type_t t);
+bool type_has_protected(type_t t);
+bool type_has_file(type_t t);
 bool type_is_access(type_t t);
 bool type_is_incomplete(type_t t);
 bool type_is_none(type_t t);

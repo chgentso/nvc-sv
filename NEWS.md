@@ -42,6 +42,8 @@
 - The `'IMAGE` and `to_string` of an enumeration literal that is an
   extended identifier now preserve the case and double any reverse
   solidus inside the identifier, and `'VALUE` accepts that format.
+- Arrays and records of protected types and of file types are now
+  supported in VHDL-2019 (LCS-2016-014).
 - Several other minor bugs were resolved (#1663, #1672, #1668, #1670,
   #1678, #1686, #1687, #1692, #1695, #1700, #1707).
 

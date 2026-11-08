@@ -3624,8 +3624,8 @@ START_TEST(test_lcs2016_14)
         "type" },
       { 97, "may not assign to variable of a protected type" },
       { 98, "no matching operator \"=\" [PT_ARRAY, PT_ARRAY" },
-      { 99, "prefix of method call PROC must denote a noncomposite "
-        "subelement" },
+      { 99, "object V1 with type PT_ARRAY cannot be the prefix of a "
+        "selected name" },
       { -1, NULL }
    };
    expect_errors(expect);

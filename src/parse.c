@@ -829,6 +829,10 @@ static void declare_predefined_ops(tree_t container, type_t t)
       break;
 
    case T_ARRAY:
+      // No predefined operators for composites of protected or file types
+      if (type_has_protected(t) || type_has_file(t))
+         break;
+
       // Operators on arrays
       declare_binary(container, eq, t, t, std_bool, S_ARRAY_EQ);
       declare_binary(container, neq, t, t, std_bool, S_ARRAY_NEQ);
@@ -883,6 +887,9 @@ static void declare_predefined_ops(tree_t container, type_t t)
 
    case T_RECORD:
       // Operators on records
+      if (type_has_protected(t) || type_has_file(t))
+         break;
+
       declare_binary(container, eq, t, t, std_bool, S_RECORD_EQ);
       declare_binary(container, neq, t, t, std_bool, S_RECORD_NEQ);
       break;

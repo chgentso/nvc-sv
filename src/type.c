@@ -620,6 +620,39 @@ bool type_is_protected(type_t t)
    return type_base_kind(t) == T_PROTECTED;
 }
 
+static bool type_has_subelement(type_t t, type_kind_t kind)
+{
+   // True if the type or a subelement of the type has the given kind
+   type_t base = type_base_recur(t);
+
+   switch (type_kind(base)) {
+   case T_ARRAY:
+      return type_has_subelement(type_elem(base), kind);
+   case T_RECORD:
+      {
+         const int nfields = type_fields(base);
+         for (int i = 0; i < nfields; i++) {
+            if (type_has_subelement(tree_type(type_field(base, i)), kind))
+               return true;
+         }
+
+         return false;
+      }
+   default:
+      return type_kind(base) == kind;
+   }
+}
+
+bool type_has_protected(type_t t)
+{
+   return type_has_subelement(t, T_PROTECTED);
+}
+
+bool type_has_file(type_t t)
+{
+   return type_is_file(t) || type_has_subelement(t, T_FILE);
+}
+
 bool type_is_file(type_t t)
 {
    const type_kind_t base = type_base_kind(t);

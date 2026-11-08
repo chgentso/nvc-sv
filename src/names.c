@@ -3118,6 +3118,8 @@ static type_t get_protected_type(nametab_t *tab, tree_t t)
    case T_ATTR_REF:
    case T_FCALL:
    case T_PROT_FCALL:
+   case T_ARRAY_REF:
+   case T_RECORD_REF:
       {
          type_t type = tree_type(t);
          for (;;) {
