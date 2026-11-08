@@ -1,0 +1,7 @@
+poll=3
+add=12
+n=13 poll=13
+who=base derived
+inherited=3
+d.n=5
+big
