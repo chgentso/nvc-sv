@@ -421,6 +421,27 @@ START_TEST(test_issue1694)
 }
 END_TEST
 
+START_TEST(test_sem3)
+{
+   set_standard(STD_19);
+
+   input_from_file(TESTDIR "/psl/sem3.vhd");
+
+   const error_t expect[] = {
+      { 20, "prefix of attribute SIGNAL must denote a PSL directive" },
+      { 21, "prefix of attribute SIGNAL must denote a PSL directive" },
+      { 22, "target of signal assignment must be a signal name or "
+        "aggregate" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   parse_and_check(T_ENTITY, T_ARCH);
+
+   check_expected_errors();
+}
+END_TEST
+
 START_TEST(test_names1)
 {
    set_standard(STD_08);
@@ -465,6 +486,7 @@ Suite *get_psl_tests(void)
    tcase_add_test(tc_core, test_sem2);
    tcase_add_test(tc_core, test_issue1694);
    tcase_add_test(tc_core, test_names1);
+   tcase_add_test(tc_core, test_sem3);
    suite_add_tcase(s, tc_core);
 
    return s;
