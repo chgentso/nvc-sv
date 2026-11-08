@@ -356,11 +356,21 @@ static vcode_reg_t psl_lower_prev_shift_reg(lower_unit_t *lu, tree_t expr,
       count_reg = emit_const(vtype_offset(), length);
    }
 
+   const bool is_record = type_is_record(type);
+   vcode_reg_t locus_reg = VCODE_INVALID_REG;
+   if (is_record)
+      locus_reg = emit_debug_locus(tree_to_object(expr));
+
    for (int i = 0; i < cycles - 1; i++) {
       if (is_array) {
          vcode_reg_t src_ptr = emit_index(vars[i + 1], VCODE_INVALID_REG);
          vcode_reg_t dst_ptr = emit_index(vars[i], VCODE_INVALID_REG);
          emit_copy(dst_ptr, src_ptr, count_reg);
+      }
+      else if (is_record) {
+         vcode_reg_t src_ptr = emit_index(vars[i + 1], VCODE_INVALID_REG);
+         vcode_reg_t dst_ptr = emit_index(vars[i], VCODE_INVALID_REG);
+         lower_copy_record(lu, type, dst_ptr, src_ptr, locus_reg);
       }
       else {
          vcode_reg_t tmp = emit_load(vars[i + 1]);
@@ -372,12 +382,16 @@ static vcode_reg_t psl_lower_prev_shift_reg(lower_unit_t *lu, tree_t expr,
       vcode_reg_t dst_ptr = emit_index(vars[cycles - 1], VCODE_INVALID_REG);
       emit_copy(dst_ptr, cur_reg, count_reg);
    }
+   else if (is_record) {
+      vcode_reg_t dst_ptr = emit_index(vars[cycles - 1], VCODE_INVALID_REG);
+      lower_copy_record(lu, type, dst_ptr, cur_reg, locus_reg);
+   }
    else
       emit_store(cur_reg, vars[cycles - 1]);
 
    vcode_state_restore(&state);
 
-   if (is_array)
+   if (is_array || is_record)
       return emit_index(vars[0], VCODE_INVALID_REG);
    else
       return emit_load(vars[0]);

@@ -129,9 +129,6 @@ static vcode_var_t lower_temp_var(lower_unit_t *lu, const char *prefix,
 static void lower_release_temp(lower_unit_t *lu, vcode_var_t tmp);
 static vcode_reg_t lower_resolved(lower_unit_t *lu, type_t type,
                                   vcode_reg_t reg);
-static void lower_copy_record(lower_unit_t *lu, type_t type,
-                              vcode_reg_t dst_ptr, vcode_reg_t src_ptr,
-                              vcode_reg_t locus);
 static bool lower_is_signal_ref(tree_t expr);
 static vcode_reg_t lower_rewrap(vcode_reg_t data, vcode_reg_t bounds);
 static void lower_predef_field_eq_cb(lower_unit_t *lu, tree_t field,
@@ -6082,9 +6079,8 @@ static void lower_fill_target_parts(lower_unit_t *lu, tree_t target,
    }
 }
 
-static void lower_copy_record(lower_unit_t *lu, type_t type,
-                              vcode_reg_t dst_ptr, vcode_reg_t src_ptr,
-                              vcode_reg_t locus)
+void lower_copy_record(lower_unit_t *lu, type_t type, vcode_reg_t dst_ptr,
+                       vcode_reg_t src_ptr, vcode_reg_t locus)
 {
    if (dst_ptr == src_ptr)
       return;

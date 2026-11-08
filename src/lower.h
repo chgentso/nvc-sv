@@ -79,6 +79,9 @@ void lower_finished(lower_unit_t *lu);
 vcode_reg_t lower_lvalue(lower_unit_t *lu, tree_t expr);
 vcode_reg_t lower_rvalue(lower_unit_t *lu, tree_t expr);
 
+void lower_copy_record(lower_unit_t *lu, type_t type, vcode_reg_t dst_ptr,
+                       vcode_reg_t src_ptr, vcode_reg_t locus);
+
 vcode_type_t lower_type(type_t type);
 vcode_stamp_t lower_bounds(type_t type);
 
