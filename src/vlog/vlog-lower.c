@@ -28,6 +28,8 @@
 #include "rt/assert.h"
 #include "rt/crv.h"
 #include "rt/defs.h"
+#include "rt/sva.h"
+#include "lib.h"
 #include "type.h"
 #include "vlog/vlog-defs.h"
 #include "vlog/vlog-node.h"
@@ -5496,6 +5498,157 @@ static void vlog_lower_sample_hier(vlog_gen_t *g, vlog_node_t v)
 
 static mir_value_t vlog_lower_sys_tfcall(vlog_gen_t *g, vlog_node_t v)
 {
+   static const struct {
+      const char *name;
+      int         ctype;
+      unsigned    atype;
+   } assert_tasks[] = {
+      // Equivalent $assertcontrol calls (20.12)
+      { "$assertcontrol", 0, 255 },
+      { "$asserton", SVA_CTRL_ON, 15 },
+      { "$assertoff", SVA_CTRL_OFF, 15 },
+      { "$assertkill", SVA_CTRL_KILL, 15 },
+      { "$assertpasson", SVA_CTRL_PASS_ON, 31 },
+      { "$assertpassoff", SVA_CTRL_PASS_OFF, 31 },
+      { "$assertfailon", SVA_CTRL_FAIL_ON, 31 },
+      { "$assertfailoff", SVA_CTRL_FAIL_OFF, 31 },
+      { "$assertnonvacuouson", SVA_CTRL_NONVACUOUS_ON, 31 },
+      { "$assertvacuousoff", SVA_CTRL_VACUOUS_OFF, 31 },
+   };
+
+   for (int i = 0; i < ARRAY_LEN(assert_tasks); i++) {
+      if (vlog_ident(v) != ident_new(assert_tasks[i].name))
+         continue;
+
+      // Only the assertions named by their labels can be selected from
+      // the list, an empty list selects all of them
+      mir_type_t t_offset = mir_offset_type(g->mu);
+      const int nparams = vlog_params(v);
+      int first = 1;
+      mir_value_t ctype = mir_const(g->mu, t_offset, assert_tasks[i].ctype);
+      mir_value_t atype = mir_const(g->mu, t_offset, assert_tasks[i].atype);
+      mir_value_t dtype = mir_const(g->mu, t_offset, 7);
+      mir_value_t levels = mir_const(g->mu, t_offset, 0);
+      if (i == 0) {
+         first = 4;
+         if (nparams > 0)
+            ctype = vlog_str_offset_arg(g, vlog_param(v, 0));
+         if (nparams > 1)
+            atype = vlog_str_offset_arg(g, vlog_param(v, 1));
+         if (nparams > 2)
+            dtype = vlog_str_offset_arg(g, vlog_param(v, 2));
+         if (nparams > 3)
+            levels = vlog_str_offset_arg(g, vlog_param(v, 3));
+      }
+      else if (nparams > 0)
+         levels = vlog_str_offset_arg(g, vlog_param(v, 0));
+
+      if (nparams <= first) {
+         mir_value_t args[] = { ctype, atype, dtype, levels };
+         vlog_str_call(g, "__sv_sva_control_all", t_offset, args, 4);
+      }
+
+      for (int j = first; j < nparams; j++) {
+         mir_value_t args[] = {
+            vlog_str_arg(g, vlog_param(v, j)), ctype, atype, dtype, levels
+         };
+         vlog_str_call(g, "__sv_sva_control", t_offset, args, 5);
+      }
+      return MIR_NULL_VALUE;
+   }
+
+   if (vlog_ident(v) == ident_new("$cast"))
+      return vlog_lower_dyn_cast(g, v);
+   else if (vlog_ident(v) == ident_new("$value$plusargs")
+            && vlog_params(v) == 2 && vlog_is_string(vlog_param(v, 1)))
+      return vlog_lower_plusarg_string(g, v);
+   else if (vlog_ident(v) == ident_new("$__program_begin")
+            || vlog_ident(v) == ident_new("$__program_end")) {
+      const bool begin = vlog_ident(v) == ident_new("$__program_begin");
+      mir_value_t res = mir_build_fcall(
+         g->mu, ident_new(begin ? "__sv_program_begin" : "__sv_program_end"),
+         mir_offset_type(g->mu), MIR_NULL_STAMP, NULL, 0);
+      if (!begin)
+         mir_build_consume(g->mu, res);
+      else {
+         // An initial procedure of a program starts in the Reactive region
+         mir_type_t t_offset = mir_offset_type(g->mu);
+         mir_block_t wait_bb = mir_add_block(g->mu);
+         mir_block_t cont_bb = mir_add_block(g->mu);
+         mir_value_t zero = mir_const(g->mu, t_offset, 0);
+         mir_build_cond(g->mu, mir_build_cmp(g->mu, MIR_CMP_EQ, res, zero),
+                        cont_bb, wait_bb);
+
+         mir_set_cursor(g->mu, wait_bb, MIR_APPEND);
+         mir_block_t resume_bb = mir_add_block(g->mu);
+         mir_build_wait(g->mu, resume_bb);
+
+         mir_set_cursor(g->mu, resume_bb, MIR_APPEND);
+         mir_build_jump(g->mu, cont_bb);
+
+         mir_set_cursor(g->mu, cont_bb, MIR_APPEND);
+      }
+      return MIR_NULL_VALUE;
+   }
+   else if (vlog_ident(v) == ident_new("$__reactive")) {
+      // The first call moves the process to the Reactive region and the
+      // second restores it
+      mir_type_t t_offset = mir_offset_type(g->mu);
+      mir_value_t res = mir_build_fcall(
+         g->mu, ident_new("__sv_reactive_yield"), t_offset, MIR_NULL_STAMP,
+         NULL, 0);
+
+      mir_block_t wait_bb = mir_add_block(g->mu);
+      mir_block_t cont_bb = mir_add_block(g->mu);
+      mir_value_t zero = mir_const(g->mu, t_offset, 0);
+      mir_build_cond(g->mu, mir_build_cmp(g->mu, MIR_CMP_EQ, res, zero),
+                     cont_bb, wait_bb);
+
+      mir_set_cursor(g->mu, wait_bb, MIR_APPEND);
+      mir_block_t resume_bb = mir_add_block(g->mu);
+      mir_build_wait(g->mu, resume_bb);
+
+      mir_set_cursor(g->mu, resume_bb, MIR_APPEND);
+      mir_value_t back = mir_build_fcall(
+         g->mu, ident_new("__sv_reactive_yield"), t_offset, MIR_NULL_STAMP,
+         NULL, 0);
+      mir_build_consume(g->mu, back);
+      mir_build_jump(g->mu, cont_bb);
+
+      mir_set_cursor(g->mu, cont_bb, MIR_APPEND);
+      return MIR_NULL_VALUE;
+   }
+   else if (vlog_ident(v) == ident_new("$__sample")) {
+      vlog_lower_sample_hier(g, v);
+      return MIR_NULL_VALUE;
+   }
+   else if (vlog_ident(v) == ident_new("$__postponed")) {
+      // The deferred assertion that forked this process reports at the end
+      // of the time step
+      mir_type_t t_offset = mir_offset_type(g->mu);
+      mir_value_t late = mir_const(g->mu, t_offset, vlog_params(v) > 0);
+      mir_value_t res = mir_build_fcall(
+         g->mu, ident_new("__sv_sched_postponed"), t_offset, MIR_NULL_STAMP,
+         &late, 1);
+      mir_build_consume(g->mu, res);
+
+      mir_block_t resume_bb = mir_add_block(g->mu);
+      mir_build_wait(g->mu, resume_bb);
+      mir_set_cursor(g->mu, resume_bb, MIR_APPEND);
+      return MIR_NULL_VALUE;
+   }
+   else if (ident_starts_with(vlog_ident(v), ident_new("$__init:"))) {
+      // Added by the parser: a package or compilation unit scope that a
+      // module uses is initialised even if nothing refers to it
+      ident_t name = ident_new(istr(vlog_ident(v)) + strlen("$__init:"));
+      if (vlog_find_scope(name) != NULL) {
+         vlog_defer_scope(g->mir, name);
+         mir_value_t pkg = mir_build_package_init(g->mu, name, MIR_NULL_VALUE);
+         mir_build_consume(g->mu, pkg);
+      }
+      return MIR_NULL_VALUE;
+   }
+
    const int nparams = vlog_params(v);
 
    if (nparams > 0) {
@@ -6738,6 +6891,260 @@ static mir_value_t vlog_lower_isunbounded(vlog_gen_t *g, vlog_node_t v)
    return mir_const_vec(g->mu, t_integer, vlog_kind(arg) == V_DOLLAR, 0);
 }
 
+typedef enum {
+   SVA_SAMPLED, SVA_PAST, SVA_ROSE, SVA_FELL, SVA_STABLE, SVA_CHANGED,
+} sva_sampled_t;
+
+#define SVA_MAX_PAST 64
+
+typedef struct {
+   int         n;
+   mir_type_t  type;
+   mir_value_t hist[SVA_MAX_PAST];
+   vlog_node_t arg;
+   vlog_node_t gate;
+   vlog_node_t call;      // Call in an action block of the assertion
+   vlog_node_t owner;     // The assertion with that action block
+   mir_value_t result;    // Value at the tick where the attempt ends
+} sva_past_t;
+
+typedef struct {
+   vlog_gen_t  *g;
+   vlog_node_t  owner;
+} sva_scan_t;
+
+static bool vlog_sva_sampled_kind(vlog_node_t v, sva_sampled_t *kind)
+{
+   static const struct {
+      const char    *name;
+      sva_sampled_t  kind;
+   } funcs[] = {
+      { "$sampled", SVA_SAMPLED }, { "$past", SVA_PAST },
+      { "$rose", SVA_ROSE }, { "$fell", SVA_FELL },
+      { "$stable", SVA_STABLE }, { "$changed", SVA_CHANGED },
+   };
+
+   for (int i = 0; i < ARRAY_LEN(funcs); i++) {
+      if (vlog_ident(v) == ident_new(funcs[i].name)) {
+         *kind = funcs[i].kind;
+         return true;
+      }
+   }
+
+   return false;
+}
+
+static vlog_node_t vlog_sva_past_param(vlog_node_t v, int nth)
+{
+   if (nth >= vlog_params(v))
+      return NULL;
+
+   vlog_node_t p = vlog_param(v, nth);
+   switch (vlog_kind(p)) {
+   case V_EMPTY:
+   case V_EVENT_CONTROL:
+      return NULL;
+   default:
+      return p;
+   }
+}
+
+static vlog_node_t vlog_sva_past_event(vlog_node_t v)
+{
+   const int nparams = vlog_params(v);
+   if (nparams == 0)
+      return NULL;
+
+   vlog_node_t last = vlog_param(v, nparams - 1);
+   return vlog_kind(last) == V_EVENT_CONTROL ? last : NULL;
+}
+
+static const char *vlog_sva_unsampled_name(vlog_node_t v)
+{
+   // A variable in an assertion is replaced by a copy sampled in the
+   // Preponed region which is not done for the clocking event
+
+   const char *name = istr(vlog_ident(v));
+   const char prefix[] = "$sampled.";
+   if (strncmp(name, prefix, sizeof(prefix) - 1) == 0)
+      name += sizeof(prefix) - 1;
+
+   return name;
+}
+
+static bool vlog_sva_same_event(vlog_node_t a, vlog_node_t b)
+{
+   if (b == NULL || vlog_params(a) != 1 || vlog_params(b) != 1)
+      return false;
+
+   vlog_node_t ea = vlog_param(a, 0), eb = vlog_param(b, 0);
+   if (vlog_kind(ea) != V_EVENT || vlog_kind(eb) != V_EVENT
+       || vlog_subkind(ea) != vlog_subkind(eb))
+      return false;
+
+   vlog_node_t va = vlog_value(ea), vb = vlog_value(eb);
+   if (vlog_kind(va) == V_HIER_REF && vlog_kind(vb) == V_HIER_REF)
+      return vlog_ident(va) == vlog_ident(vb)
+         && vlog_has_ref(va) && vlog_has_ref(vb)
+         && vlog_ref(va) == vlog_ref(vb);
+   else if (vlog_kind(va) != V_REF || vlog_kind(vb) != V_REF)
+      return false;
+
+   return strcmp(vlog_sva_unsampled_name(va), vlog_sva_unsampled_name(vb)) == 0;
+}
+
+static int vlog_sva_past_depth(vlog_node_t v, sva_sampled_t kind)
+{
+   if (kind != SVA_PAST)
+      return 1;
+
+   vlog_node_t ticks = vlog_sva_past_param(v, 1);
+   if (ticks == NULL)
+      return 1;
+
+   int64_t n;
+   if (!vlog_get_const(ticks, &n) || n < 1)
+      fatal_at(vlog_loc(v), "sorry, only $past with a constant positive "
+               "number of ticks is supported");
+   else if (n > SVA_MAX_PAST)
+      fatal_at(vlog_loc(v), "sorry, $past of more than %d ticks is not "
+               "supported", SVA_MAX_PAST);
+
+   return n;
+}
+
+static void vlog_sva_past_cb(vlog_node_t v, void *ctx)
+{
+   sva_scan_t *sc = ctx;
+   vlog_gen_t *g = sc->g;
+
+   sva_sampled_t kind;
+   if (!vlog_sva_sampled_kind(v, &kind) || kind == SVA_SAMPLED)
+      return;
+
+   if (hash_get(g->past, v) != NULL)
+      return;
+
+   vlog_node_t event = vlog_sva_past_event(v);
+   if (event != NULL && !vlog_sva_same_event(event, g->sva_clock))
+      fatal_at(vlog_loc(event), "sorry, a clocking event of a sampled value "
+               "function different from the clock of the assertion is not "
+               "supported");
+
+   mir_value_t arg = vlog_lower_rvalue(g, vlog_param(v, 0));
+   if (!mir_is_vector(g->mu, arg))
+      fatal_at(vlog_loc(v), "sorry, the argument of a sampled value function "
+               "must be an integral expression");
+
+   sva_past_t *st = xcalloc(sizeof(sva_past_t));
+   st->result = MIR_NULL_VALUE;
+   st->owner = sc->owner;
+   st->call = sc->owner != NULL ? v : NULL;
+   st->n = vlog_sva_past_depth(v, kind);
+   st->arg = vlog_param(v, 0);
+
+   if (kind == SVA_PAST)
+      st->gate = vlog_sva_past_param(v, 2);
+
+   const int size = mir_get_size(g->mu, mir_get_type(g->mu, arg));
+   st->type = mir_vec4_type(g->mu, size, false);
+
+   // Before the first tick the value is the initial value of the expression
+   mir_value_t initial = mir_build_cast(g->mu, st->type, arg);
+
+   for (int i = 0; i < st->n; i++) {
+      st->hist[i] = mir_add_var(g->mu, st->type, MIR_NULL_STAMP,
+                                ident_uniq("past"), 0);
+      mir_build_store(g->mu, st->hist[i], initial);
+   }
+
+   hash_put(g->past, v, st);
+}
+
+static void vlog_sva_prepare_past(vlog_gen_t *g, vlog_node_t expr)
+{
+   if (g->past == NULL)
+      g->past = hash_new(16);
+
+   sva_scan_t sc = { .g = g };
+   vlog_visit_only(expr, vlog_sva_past_cb, &sc, V_SYS_FCALL);
+}
+
+static mir_value_t vlog_lower_sampled(vlog_gen_t *g, vlog_node_t v);
+
+static void vlog_sva_prepare_actions(vlog_gen_t *g, vlog_node_t v)
+{
+   // Sampled value functions in the action blocks give the values at the
+   // tick where the attempt ends (16.9.3)
+
+   if (g->past == NULL)
+      g->past = hash_new(16);
+
+   sva_scan_t sc = { .g = g, .owner = v };
+
+   const int nconds = vlog_conds(v);
+   for (int i = 0; i < nconds; i++)
+      vlog_visit_only(vlog_cond(v, i), vlog_sva_past_cb, &sc, V_SYS_FCALL);
+}
+
+static void vlog_sva_action_results(vlog_gen_t *g, vlog_node_t owner)
+{
+   // Evaluated before the history is shifted for this tick
+
+   if (g->past == NULL)
+      return;
+
+   hash_iter_t it = HASH_BEGIN;
+   const void *key;
+   void *value;
+   while (hash_iter(g->past, &it, &key, &value)) {
+      sva_past_t *st = value;
+      if (st->call == NULL || st->owner != owner)
+         continue;
+
+      mir_value_t v = vlog_lower_sampled(g, st->call);
+      if (mir_is_null(st->result))
+         st->result = mir_add_var(g->mu, mir_get_type(g->mu, v),
+                                  MIR_NULL_STAMP, ident_uniq("action"), 0);
+      mir_build_store(g->mu, st->result, v);
+   }
+}
+
+static void vlog_sva_update_past(vlog_gen_t *g)
+{
+   if (g->past == NULL)
+      return;
+
+   hash_iter_t it = HASH_BEGIN;
+   const void *key;
+   void *value;
+   while (hash_iter(g->past, &it, &key, &value)) {
+      sva_past_t *st = value;
+      mir_value_t cur = mir_build_cast(g->mu, st->type,
+                                       vlog_lower_rvalue(g, st->arg));
+
+      mir_block_t shift_bb = MIR_NULL_BLOCK, skip_bb = MIR_NULL_BLOCK;
+      if (st->gate != NULL) {
+         mir_value_t gate = vlog_lower_test(g, vlog_lower_rvalue(g, st->gate));
+         shift_bb = mir_add_block(g->mu);
+         skip_bb = mir_add_block(g->mu);
+         mir_build_cond(g->mu, gate, shift_bb, skip_bb);
+         mir_set_cursor(g->mu, shift_bb, MIR_APPEND);
+      }
+
+      for (int j = st->n - 1; j > 0; j--)
+         mir_build_store(g->mu, st->hist[j],
+                         mir_build_load(g->mu, st->hist[j - 1]));
+
+      mir_build_store(g->mu, st->hist[0], cur);
+
+      if (st->gate != NULL) {
+         mir_build_jump(g->mu, skip_bb);
+         mir_set_cursor(g->mu, skip_bb, MIR_APPEND);
+      }
+   }
+}
+
 static mir_value_t vlog_sva_steady(vlog_gen_t *g)
 {
    // True if every value remembered for the sampled value functions is the
@@ -6770,6 +7177,108 @@ static mir_value_t vlog_sva_steady(vlog_gen_t *g)
                                  ident_uniq("steady"), MIR_VAR_TEMP);
    mir_build_store(g->mu, var, steady);
    return var;
+}
+
+static mir_value_t vlog_sampled_compare(vlog_gen_t *g, sva_sampled_t kind,
+                                        mir_type_t type, mir_value_t cur,
+                                        mir_value_t past)
+{
+   switch (kind) {
+   case SVA_PAST:
+      return past;
+   case SVA_STABLE:
+      return mir_build_binary(g->mu, MIR_VEC_CASE_EQ, type, cur, past);
+   case SVA_CHANGED:
+      return mir_build_binary(g->mu, MIR_VEC_CASE_NEQ, type, cur, past);
+   default:
+      {
+         mir_type_t t_bit = mir_vec4_type(g->mu, 1, false);
+         mir_value_t cur1 = mir_build_cast(g->mu, t_bit, cur);
+         mir_value_t past1 = mir_build_cast(g->mu, t_bit, past);
+         mir_value_t level =
+            mir_const_vec(g->mu, t_bit, kind == SVA_ROSE ? 1 : 0, 0);
+         mir_value_t now = mir_build_binary(g->mu, MIR_VEC_CASE_EQ, t_bit,
+                                            cur1, level);
+         mir_value_t before = mir_build_binary(g->mu, MIR_VEC_CASE_NEQ, t_bit,
+                                               past1, level);
+         return mir_build_binary(g->mu, MIR_VEC_LOG_AND,
+                                 mir_get_type(g->mu, now), now, before);
+      }
+   }
+}
+
+static mir_value_t vlog_lower_sampled_proc(vlog_gen_t *g, vlog_node_t v,
+                                           sva_sampled_t kind)
+{
+   // In procedural code each execution is a tick of the clocking event so
+   // the previous value is the one kept from the last execution (16.9.3)
+
+   mir_value_t arg = vlog_lower_rvalue(g, vlog_param(v, 0));
+   if (kind == SVA_SAMPLED)
+      return arg;
+   else if (!mir_is_vector(g->mu, arg)) {
+      error_at(vlog_loc(v), "sorry, the argument of a sampled value function "
+               "must be an integral expression");
+      return vlog_lower_zero(g, mir_vec4_type(g->mu, 1, false));
+   }
+
+   if (vlog_sva_past_depth(v, kind) != 1 || vlog_sva_past_param(v, 2) != NULL) {
+      error_at(vlog_loc(v), "sorry, only $past with one tick and no gating "
+               "expression is supported in procedural code");
+      return vlog_lower_zero(g, mir_vec4_type(g->mu, 1, false));
+   }
+
+   mir_type_t t_bool = mir_bool_type(g->mu);
+   const int size = mir_get_size(g->mu, mir_get_type(g->mu, arg));
+   mir_type_t type = mir_vec4_type(g->mu, size, false);
+
+   mir_value_t hist = mir_add_var(g->mu, type, MIR_NULL_STAMP,
+                                  ident_uniq("past"), 0);
+   mir_value_t have = mir_add_var(g->mu, t_bool, MIR_NULL_STAMP,
+                                  ident_uniq("have"), 0);
+
+   mir_value_t cur = mir_build_cast(g->mu, type, arg);
+   mir_value_t past = mir_build_select(g->mu, type,
+                                       mir_build_load(g->mu, have),
+                                       mir_build_load(g->mu, hist), cur);
+   mir_value_t result = vlog_sampled_compare(g, kind, type, cur, past);
+
+   mir_build_store(g->mu, hist, cur);
+   mir_build_store(g->mu, have, mir_const(g->mu, t_bool, 1));
+   return result;
+}
+
+static mir_value_t vlog_lower_sampled(vlog_gen_t *g, vlog_node_t v)
+{
+   sva_sampled_t kind;
+   if (!vlog_sva_sampled_kind(v, &kind))
+      return MIR_NULL_VALUE;
+
+   if (!g->in_sva) {
+      sva_past_t *act = g->past != NULL ? hash_get(g->past, v) : NULL;
+      if (act != NULL && act->call != NULL) {
+         if (!mir_is_null(act->result))
+            return mir_build_load(g->mu, act->result);
+
+         // Reported by the process before the attempts are evaluated
+         return vlog_lower_zero(g, kind == SVA_PAST ? act->type
+                                : mir_vec4_type(g->mu, 1, false));
+      }
+
+      return vlog_lower_sampled_proc(g, v, kind);
+   }
+
+   mir_value_t arg = vlog_lower_rvalue(g, vlog_param(v, 0));
+   if (kind == SVA_SAMPLED)
+      return arg;
+
+   sva_past_t *st = hash_get(g->past, v);
+   if (st == NULL || !mir_is_vector(g->mu, arg))
+      return vlog_lower_zero(g, mir_vec4_type(g->mu, 1, false));
+
+   mir_value_t cur = mir_build_cast(g->mu, st->type, arg);
+   mir_value_t past = mir_build_load(g->mu, st->hist[st->n - 1]);
+   return vlog_sampled_compare(g, kind, st->type, cur, past);
 }
 
 static mir_value_t vlog_lower_pfmt(vlog_gen_t *g, vlog_node_t v)
@@ -10318,6 +10827,34 @@ static mir_value_t vlog_lower_default_value(vlog_gen_t *g,
    }
 }
 
+static bool vlog_is_variable_target(vlog_node_t target)
+{
+   // A variable keeps the forced value when released but a net returns
+   // to the value of its drivers
+
+   for (;;) {
+      switch (vlog_kind(target)) {
+      case V_BIT_SELECT:
+      case V_PART_SELECT:
+         target = vlog_value(target);
+         break;
+      case V_REF:
+      case V_HIER_REF:
+      case V_MEMBER_REF:
+         {
+            if (!vlog_has_ref(target))
+               return false;
+
+            vlog_node_t decl = vlog_ref(target);
+            return vlog_kind(decl) == V_VAR_DECL
+               && !(vlog_flags(decl) & VLOG_F_VHDL);
+         }
+      default:
+         return false;
+      }
+   }
+}
+
 static mir_value_t vlog_force_source(vlog_gen_t *g,
                                      const vlog_select_t *lvalue,
                                      mir_value_t cast)
@@ -10386,11 +10923,38 @@ static void vlog_lower_force(vlog_gen_t *g, vlog_node_t v)
    mir_build_force(g->mu, nets, lvalue.count, src);
 }
 
+static void vlog_bind_reference(vlog_gen_t *g, vlog_node_t v)
+{
+   vlog_node_t target = vlog_target(v), rhs = vlog_value(v);
+
+   g->ref_bind = true;
+   mir_value_t link = vlog_lower_select(g, target).obj;
+   g->ref_bind = false;
+
+   vlog_node_t decl = vlog_kind(target) == V_REF
+      ? vlog_ref(target) : vlog_member_decl(target);
+   const type_info_t *ti = vlog_type_info(g, vlog_type(decl));
+   mir_build_store(g->mu, link, vlog_lower_ref_cell(g, rhs, ti));
+}
+
+static bool vlog_is_ref_target(vlog_node_t target)
+{
+   switch (vlog_kind(target)) {
+   case V_REF:
+      return vlog_has_ref(target) && vlog_is_ref_property(vlog_ref(target));
+   case V_MEMBER_REF:
+      return vlog_is_ref_property(vlog_member_decl(target));
+   default:
+      return false;
+   }
+}
+
 static void vlog_lower_blocking_assignment(vlog_gen_t *g, vlog_node_t v)
 {
-   if (vlog_has_delay(v)) {
-      vlog_node_t delay = vlog_delay(v);
-      assert(vlog_kind(delay) == V_DELAY_CONTROL);
+   if (vlog_is_ref_target(vlog_target(v))) {
+      vlog_bind_reference(g, v);
+      return;
+   }
 
    if (!vlog_has_delay(v)) {
       vlog_assign_variable(g, vlog_target(v), MIR_NULL_VALUE, vlog_value(v));
@@ -11082,10 +11646,1879 @@ static bool vlog_lower_disable(vlog_gen_t *g, vlog_node_t v, gen_stack_t *gs)
          return true;
       }
    }
+
+   // Disabling a fork from one of its forked processes stops all of them
+   // and the parent continues after the join
+
+   int depth = 1;
+   vlog_node_t root = g->fork_root;
+   while (root != NULL && sv_fork_up != NULL) {
+      const fork_up_t *up = hash_get(sv_fork_up, root);
+      if (up == NULL)
+         break;
+      else if ((vlog_has_ident(up->fork) && vlog_ident(up->fork) == name)
+               || vlog_fork_in_block(up, name)) {
+         // Disabling a block which contains a fork also resumes the parent
+         // after the block
+         const bool is_block = !vlog_has_ident(up->fork)
+            || vlog_ident(up->fork) != name;
+
+         mir_type_t t_offset = mir_offset_type(g->mu);
+         mir_value_t args[] = {
+            mir_const(g->mu, t_offset, depth),
+            mir_const(g->mu, t_offset, is_block ? vlog_label_hash(name) : 0)
+         };
+         mir_value_t res = mir_build_fcall(g->mu,
+                                           ident_new("__sv_fork_disable_group"),
+                                           t_offset, MIR_NULL_STAMP, args, 2);
+         mir_build_consume(g->mu, res);
+
+         // The caller has been killed and must not run any more statements
+         mir_block_t resume_bb = mir_add_block(g->mu);
+         mir_build_wait(g->mu, resume_bb);
+         mir_set_cursor(g->mu, resume_bb, MIR_APPEND);
+         return false;
+      }
+
+      root = up->up;
+      depth++;
+   }
+
+   // Otherwise a fork with this name may be running in the scope
+   mir_type_t t_offset = mir_offset_type(g->mu);
+   mir_value_t args[] = {
+      mir_const(g->mu, t_offset, vlog_label_hash(label))
+   };
+   mir_value_t res = mir_build_fcall(g->mu, ident_new("__sv_fork_disable_name"),
+                                     t_offset, MIR_NULL_STAMP, args, 1);
+   mir_build_consume(g->mu, res);
+
+   // A process which stops itself does not run any more statements
+   mir_block_t stop_bb = mir_add_block(g->mu);
+   mir_block_t cont_bb = mir_add_block(g->mu);
+   mir_value_t zero = mir_const(g->mu, t_offset, 0);
+   mir_build_cond(g->mu, mir_build_cmp(g->mu, MIR_CMP_EQ, res, zero),
+                  cont_bb, stop_bb);
+
+   mir_set_cursor(g->mu, stop_bb, MIR_APPEND);
+   mir_block_t resume_bb = mir_add_block(g->mu);
+   mir_build_wait(g->mu, resume_bb);
+
+   mir_set_cursor(g->mu, resume_bb, MIR_APPEND);
+   mir_build_jump(g->mu, cont_bb);
+
+   mir_set_cursor(g->mu, cont_bb, MIR_APPEND);
+   return false;
+}
+
+#define SVA_MAX_CALLS 8
+
+typedef struct {
+   vlog_gen_t  *g;
+   mir_value_t  handle;
+   bool         emit;
+   int          nnodes;
+   int          nleaves;
+   vlog_node_t  leaves[SVA_MAX_LEAVES];
+   int          nlocals;
+   vlog_node_t  locals[SVA_MAX_LOCALS];
+   int          nslots;
+   vlog_node_t  slots[SVA_MAX_SLOTS];
+   bool         slot_call[SVA_MAX_SLOTS];
+   int          nitems;
+   int          nexpr;
+   bool         local_mode;
+   int          ncalls;
+   vlog_node_t  calls[SVA_MAX_CALLS];
+   int          nfcalls;
+} sva_build_t;
+
+typedef struct {
+   int  id;
+   int  width;
+} sva_xref_t;
+
+static int vlog_sva_node(sva_build_t *b, int op, int a, int c, int leaf,
+                         int64_t lo, int64_t hi)
+{
+   if (b->emit) {
+      vlog_gen_t *g = b->g;
+      mir_type_t t_offset = mir_offset_type(g->mu);
+      mir_value_t args[] = {
+         b->handle,
+         mir_const(g->mu, t_offset, op),
+         mir_const(g->mu, t_offset, a),
+         mir_const(g->mu, t_offset, c),
+         mir_const(g->mu, t_offset, leaf),
+         mir_const(g->mu, t_offset, lo),
+         mir_const(g->mu, t_offset, hi),
+      };
+      mir_value_t res = mir_build_fcall(g->mu, ident_new("__sv_sva_node"),
+                                        t_offset, MIR_NULL_STAMP, args,
+                                        ARRAY_LEN(args));
+      mir_build_consume(g->mu, res);
+   }
+
+   return b->nnodes++;
+}
+
+static bool vlog_sva_has_call(vlog_node_t v);
+
+static unsigned vlog_sva_width(vlog_node_t v)
+{
+   sva_sampled_t kind;
+   if (vlog_kind(v) == V_SYS_FCALL && vlog_sva_sampled_kind(v, &kind)
+       && (kind == SVA_PAST || kind == SVA_SAMPLED))
+      return vlog_width(vlog_param(v, 0));
+
+   return vlog_width(v);
+}
+
+static bool vlog_sva_signed(vlog_node_t v)
+{
+   sva_sampled_t kind;
+   if (vlog_kind(v) == V_SYS_FCALL && vlog_sva_sampled_kind(v, &kind)
+       && (kind == SVA_PAST || kind == SVA_SAMPLED))
+      return vlog_is_signed(vlog_param(v, 0));
+
+   return vlog_is_signed(v);
+}
+
+static bool vlog_sva_is_local(vlog_node_t v)
+{
+   return vlog_kind(v) == V_REF && vlog_has_ref(v)
+      && vlog_kind(vlog_ref(v)) == V_VAR_DECL
+      && (vlog_flags(vlog_ref(v)) & VLOG_F_SVA_LOCAL);
+}
+
+static int vlog_sva_local_width(vlog_node_t decl)
+{
+   return vlog_size(vlog_type(decl));
+}
+
+static int vlog_sva_local_index(sva_build_t *b, vlog_node_t decl)
+{
+   for (int i = 0; i < b->nlocals; i++) {
+      if (b->locals[i] == decl)
+         return i;
+   }
+
+   if (b->nlocals == SVA_MAX_LOCALS) {
+      fatal_at(vlog_loc(decl), "sorry, a sequence or property with more than "
+               "%d local variables is not supported", SVA_MAX_LOCALS);
+      return 0;
+   }
+
+   if (vlog_sva_local_width(decl) > SVA_WORDS * 64) {
+      fatal_at(vlog_loc(decl), "sorry, a local variable wider than %d bits "
+               "is not supported", SVA_WORDS * 64);
+      return 0;
+   }
+
+   b->locals[b->nlocals] = decl;
+   return b->nlocals++;
+}
+
+static void vlog_sva_local_cb(vlog_node_t v, void *ctx)
+{
+   sva_build_t *b = ctx;
+   if (vlog_sva_is_local(v))
+      (void)vlog_sva_local_index(b, vlog_ref(v));
+}
+
+static void vlog_sva_match_cb(vlog_node_t v, void *ctx)
+{
+   if (vlog_kind(v) == V_SVA_OP && vlog_subkind(v) == V_SVA_MATCH)
+      *(bool *)ctx = true;
+}
+
+static void vlog_sva_uses_local_cb(vlog_node_t v, void *ctx)
+{
+   if (vlog_sva_is_local(v))
+      *(bool *)ctx = true;
+}
+
+static bool vlog_sva_uses_local(vlog_node_t v)
+{
+   bool found = false;
+   vlog_visit(v, vlog_sva_uses_local_cb, &found);
+   return found;
+}
+
+static int vlog_sva_xnode(sva_build_t *b, int op, int a, int c, int d,
+                          int width, int flags, int64_t value)
+{
+   if (b->emit) {
+      vlog_gen_t *g = b->g;
+      mir_type_t t_offset = mir_offset_type(g->mu);
+      mir_value_t args[] = {
+         b->handle,
+         mir_const(g->mu, t_offset, op),
+         mir_const(g->mu, t_offset, a),
+         mir_const(g->mu, t_offset, c),
+         mir_const(g->mu, t_offset, d),
+         mir_const(g->mu, t_offset, width),
+         mir_const(g->mu, t_offset, flags),
+         mir_const(g->mu, t_offset, value),
+      };
+      mir_value_t res = mir_build_fcall(g->mu, ident_new("__sv_sva_expr"),
+                                        t_offset, MIR_NULL_STAMP, args,
+                                        ARRAY_LEN(args));
+      mir_build_consume(g->mu, res);
+   }
+
+   return b->nexpr++;
+}
+
+static bool vlog_sva_binop(vlog_binary_t kind, sva_xop_t *op, bool *relation)
+{
+   *relation = false;
+   switch (kind) {
+   case V_BINARY_PLUS:      *op = SVA_X_ADD; return true;
+   case V_BINARY_MINUS:     *op = SVA_X_SUB; return true;
+   case V_BINARY_TIMES:     *op = SVA_X_MUL; return true;
+   case V_BINARY_DIVIDE:    *op = SVA_X_DIV; return true;
+   case V_BINARY_MOD:       *op = SVA_X_MOD; return true;
+   case V_BINARY_EXP:       *op = SVA_X_POW; return true;
+   case V_BINARY_AND:       *op = SVA_X_AND; return true;
+   case V_BINARY_OR:        *op = SVA_X_OR; return true;
+   case V_BINARY_XOR:       *op = SVA_X_XOR; return true;
+   case V_BINARY_XNOR:      *op = SVA_X_XNOR; return true;
+   case V_BINARY_NAND:      *op = SVA_X_NAND; return true;
+   case V_BINARY_NOR:       *op = SVA_X_NOR; return true;
+   case V_BINARY_SHIFT_LL:
+   case V_BINARY_SHIFT_LA:  *op = SVA_X_SHL; return true;
+   case V_BINARY_SHIFT_RL:  *op = SVA_X_SHR; return true;
+   case V_BINARY_SHIFT_RA:  *op = SVA_X_ASHR; return true;
+   case V_BINARY_LOG_EQ:    *op = SVA_X_EQ; *relation = true; return true;
+   case V_BINARY_LOG_NEQ:   *op = SVA_X_NE; *relation = true; return true;
+   case V_BINARY_CASE_EQ:   *op = SVA_X_CEQ; *relation = true; return true;
+   case V_BINARY_CASE_NEQ:  *op = SVA_X_CNE; *relation = true; return true;
+   case V_BINARY_LT:        *op = SVA_X_LT; *relation = true; return true;
+   case V_BINARY_GT:        *op = SVA_X_GT; *relation = true; return true;
+   case V_BINARY_LEQ:       *op = SVA_X_LE; *relation = true; return true;
+   case V_BINARY_GEQ:       *op = SVA_X_GE; *relation = true; return true;
+   case V_BINARY_LOG_AND:   *op = SVA_X_LAND; *relation = true; return true;
+   case V_BINARY_LOG_OR:    *op = SVA_X_LOR; *relation = true; return true;
+   default:                 return false;
+   }
+}
+
+static sva_xref_t vlog_sva_expr(sva_build_t *b, vlog_node_t v, int ctx);
+
+static void vlog_lower_sva_fcall(mir_unit_t *mu, object_t *obj)
+{
+   // A function called with the values of local variables of an assertion
+   // from the evaluation of its sequence expressions
+
+   vlog_node_t v = vlog_from_object(obj);
+   vlog_node_t decl = vlog_ref(v);
+
+   vlog_gen_t g = {
+      .mu  = mu,
+      .mir = mir_get_context(mu),
+   };
+
+   mir_type_t t_offset = mir_offset_type(mu);
+   mir_set_result(mu, t_offset);
+
+   mir_type_t t_context = mir_context_type(mu, mir_get_parent(mu));
+   mir_add_param(mu, t_context, MIR_NULL_STAMP, ident_new("context"));
+
+   const int nports = vlog_ports(decl);
+   mir_value_t params[SVA_MAX_FARGS];
+   for (int i = 0; i < nports; i++)
+      params[i] = mir_add_param(mu, t_offset, MIR_NULL_STAMP,
+                                vlog_ident(vlog_port(decl, i)));
+
+   mir_value_t args[SVA_MAX_FARGS + 1];
+   int pos = 0;
+
+   mir_value_t context = vlog_context_for_call(&g, decl);
+   if (!mir_is_null(context))
+      args[pos++] = context;
+
+   for (int i = 0; i < nports; i++) {
+      const type_info_t *ti = vlog_type_info(&g, vlog_type(vlog_port(decl, i)));
+      args[pos++] = vlog_lower_cast(&g, ti->type, params[i]);
+   }
+
+   const type_info_t *rti = vlog_type_info(&g, vlog_type(decl));
+   mir_value_t result = mir_build_fcall(mu, vlog_subr_name(decl), rti->type,
+                                        MIR_NULL_STAMP, args, pos);
+   mir_build_consume(mu, result);
+   mir_build_return(mu, vlog_lower_cast(&g, t_offset, result));
+
+   mir_optimise(mu, MIR_PASS_O1);
+   vlog_lower_cleanup(&g);
+}
+
+static sva_xref_t vlog_sva_fcall(sva_build_t *b, vlog_node_t v)
+{
+   vlog_gen_t *g = b->g;
+
+   vlog_node_t decl = vlog_ref(v);
+   const int nparams = vlog_params(v);
+   const int own = vlog_sva_width(v);
+
+   if (vlog_kind(decl) != V_FUNC_DECL || !vlog_has_type(decl)
+       || nparams != vlog_ports(decl) || nparams > SVA_MAX_FARGS
+       || own > 64 || vlog_is_real(v) || vlog_is_dynamic_type(vlog_type(decl))) {
+      fatal_at(vlog_loc(v), "sorry, this function call cannot be used with "
+               "local variables in an assertion");
+      return (sva_xref_t){ 0, 1 };
+   }
+
+   if (b->nfcalls == SVA_MAX_FCALLS) {
+      fatal_at(vlog_loc(v), "sorry, an assertion with more than %d function "
+               "calls with local variable arguments is not supported",
+               SVA_MAX_FCALLS);
+      return (sva_xref_t){ 0, 1 };
+   }
+
+   for (int i = 0; i < nparams; i++) {
+      vlog_node_t port = vlog_port(decl, i), arg = vlog_param(v, i);
+      const type_info_t *ti = vlog_type_info(g, vlog_type(port));
+      const mir_class_t class = mir_get_class(g->mu, ti->type);
+      if (vlog_kind(arg) == V_NAMED_ARG || vlog_subkind(port) != V_PORT_INPUT
+          || vlog_sva_width(arg) > 64 || vlog_is_real(arg)
+          || (class != MIR_TYPE_VEC2 && class != MIR_TYPE_VEC4)
+          || vlog_is_dynamic_type(vlog_type(port))) {
+         fatal_at(vlog_loc(arg), "sorry, this function argument cannot be "
+                  "used with local variables in an assertion");
+         return (sva_xref_t){ 0, 1 };
+      }
+   }
+
+   const int call = b->nfcalls++;
+
+   int ids[SVA_MAX_FARGS] = { -1, -1, -1 };
+   int sbits = 0;
+   for (int i = 0; i < nparams; i++) {
+      vlog_node_t arg = vlog_param(v, i);
+      const int w = vlog_sva_width(arg);
+      ids[i] = vlog_sva_expr(b, arg, w).id;
+      if (vlog_sva_signed(arg))
+         sbits |= 1 << i;
+   }
+
+   if (b->emit) {
+      mir_type_t t_offset = mir_offset_type(g->mu);
+
+      ident_t parent = mir_get_parent(g->mu);
+      ident_t sym = ident_uniq("%s.svacall", istr(parent));
+      mir_defer(g->mir, sym, parent, MIR_UNIT_FUNCTION,
+                vlog_lower_sva_fcall, vlog_to_object(v));
+
+      mir_value_t self[] = { mir_build_context_upref(g->mu, 1) };
+      mir_value_t closure = mir_build_closure(g->mu, sym, t_offset, self, 1);
+
+      mir_value_t args[] = {
+         b->handle, closure, mir_const(g->mu, t_offset, call)
+      };
+      mir_value_t res = mir_build_fcall(g->mu, ident_new("__sv_sva_callfn"),
+                                        t_offset, MIR_NULL_STAMP, args, 3);
+      mir_build_consume(g->mu, res);
+   }
+
+   return (sva_xref_t){
+      vlog_sva_xnode(b, SVA_X_CALL, ids[0], ids[1], ids[2], own,
+                     vlog_sva_signed(v) ? SVA_XF_SIGNED : 0,
+                     call | (nparams << 8) | (sbits << 12)), own
+   };
+}
+
+static sva_xref_t vlog_sva_expr(sva_build_t *b, vlog_node_t v, int ctx)
+{
+   const int own = vlog_sva_width(v);
+   const bool local = vlog_sva_uses_local(v);
+
+   if (vlog_sva_is_local(v)) {
+      const int idx = vlog_sva_local_index(b, vlog_ref(v));
+      return (sva_xref_t){
+         vlog_sva_xnode(b, SVA_X_LOCAL, -1, -1, -1, own, 0, idx), own
+      };
+   }
+
+   switch (vlog_kind(v)) {
+   case V_BINARY:
+      {
+         sva_xop_t op;
+         bool relation;
+         if (!vlog_sva_binop(vlog_subkind(v), &op, &relation))
+            break;
+
+         vlog_node_t l = vlog_left(v), r = vlog_right(v);
+         const bool logical = op == SVA_X_LAND || op == SVA_X_LOR;
+         const bool shift = op == SVA_X_SHL || op == SVA_X_SHR
+            || op == SVA_X_ASHR;
+
+         int cw, w;
+         if (logical) {
+            cw = 0;
+            w = 1;
+         }
+         else if (relation) {
+            cw = MAX(vlog_sva_width(l), vlog_sva_width(r));
+            w = 1;
+         }
+         else
+            cw = w = MAX(ctx, own);
+
+         const bool sign = logical ? false
+            : shift ? vlog_sva_signed(l)
+            : vlog_sva_signed(l) && vlog_sva_signed(r);
+
+         const sva_xref_t a = vlog_sva_expr(b, l, cw);
+         const sva_xref_t c = vlog_sva_expr(b, r, shift ? 0 : cw);
+         return (sva_xref_t){
+            vlog_sva_xnode(b, op, a.id, c.id, -1, w,
+                           sign ? SVA_XF_SIGNED : 0, 0), w
+         };
+      }
+
+   case V_UNARY:
+      {
+         sva_xop_t op;
+         switch (vlog_subkind(v)) {
+         case V_UNARY_NEG:      op = SVA_X_NEG; break;
+         case V_UNARY_BITNEG:   op = SVA_X_BITNEG; break;
+         case V_UNARY_NOT:      op = SVA_X_LNOT; break;
+         case V_UNARY_AND:      op = SVA_X_RAND; break;
+         case V_UNARY_OR:       op = SVA_X_ROR; break;
+         case V_UNARY_XOR:      op = SVA_X_RXOR; break;
+         case V_UNARY_NAND:     op = SVA_X_RNAND; break;
+         case V_UNARY_NOR:      op = SVA_X_RNOR; break;
+         case V_UNARY_XNOR:     op = SVA_X_RXNOR; break;
+         case V_UNARY_IDENTITY: return vlog_sva_expr(b, vlog_value(v), ctx);
+         default:               goto unsupported;
+         }
+
+         const bool arith = op == SVA_X_NEG || op == SVA_X_BITNEG;
+         const int w = arith ? MAX(ctx, own) : 1;
+         const sva_xref_t a = vlog_sva_expr(b, vlog_value(v), arith ? w : 0);
+         return (sva_xref_t){
+            vlog_sva_xnode(b, op, a.id, -1, -1, w,
+                           vlog_sva_signed(v) ? SVA_XF_SIGNED : 0, 0), w
+         };
+      }
+
+   case V_BIT_SELECT:
+      if (local && vlog_params(v) == 1) {
+         const sva_xref_t a = vlog_sva_expr(b, vlog_value(v), 0);
+         const sva_xref_t i = vlog_sva_expr(b, vlog_param(v, 0), 0);
+         return (sva_xref_t){
+            vlog_sva_xnode(b, SVA_X_BITSEL, a.id, i.id, -1, 1, 0, 0), 1
+         };
+      }
+      break;
+
+   case V_PART_SELECT:
+      {
+         int64_t msb, lsb;
+         if (local && vlog_subkind(v) == V_RANGE_CONST
+             && vlog_get_const(vlog_left(v), &msb)
+             && vlog_get_const(vlog_right(v), &lsb) && msb >= lsb) {
+            const sva_xref_t a = vlog_sva_expr(b, vlog_value(v), 0);
+            const int w = msb - lsb + 1;
+            return (sva_xref_t){
+               vlog_sva_xnode(b, SVA_X_PARTSEL, a.id, -1, -1, w, 0, lsb), w
+            };
+         }
+      }
+      break;
+
+   case V_COND_EXPR:
+      {
+         const int w = MAX(ctx, own);
+         const sva_xref_t c = vlog_sva_expr(b, vlog_value(v), 0);
+         const sva_xref_t x = vlog_sva_expr(b, vlog_left(v), w);
+         const sva_xref_t y = vlog_sva_expr(b, vlog_right(v), w);
+         return (sva_xref_t){
+            vlog_sva_xnode(b, SVA_X_COND, c.id, x.id, y.id, w,
+                           vlog_sva_signed(v) ? SVA_XF_SIGNED : 0, 0), w
+         };
+      }
+
+   case V_CAST:
+      if (vlog_subkind(v) == V_CAST_TYPE || vlog_subkind(v) == V_CAST_WIDTH) {
+         vlog_node_t arg = vlog_value(v);
+         if (vlog_is_real(arg) || vlog_is_real(v))
+            break;
+
+         const sva_xref_t a = vlog_sva_expr(b, arg, 0);
+         return (sva_xref_t){
+            vlog_sva_xnode(b, SVA_X_CAST, a.id, -1, -1, own,
+                           vlog_sva_signed(arg) ? SVA_XF_SIGNED : 0, 0), own
+         };
+      }
+      break;
+
+   case V_SYS_FCALL:
+      if (vlog_subkind(v) == V_SYSTF_SIGNED
+          || vlog_subkind(v) == V_SYSTF_UNSIGNED)
+         return vlog_sva_expr(b, vlog_param(v, 0), ctx);
+      break;
+
+   case V_USER_FCALL:
+      if (local)
+         return vlog_sva_fcall(b, v);
+      break;
+
+   case V_NUMBER:
+      {
+         int64_t value;
+         if (own <= 64 && vlog_get_const(v, &value))
+            return (sva_xref_t){
+               vlog_sva_xnode(b, SVA_X_CONST, -1, -1, -1, own, 0, value), own
+            };
+         break;
+      }
+
+   default:
+      break;
+   }
+
+   if (local)
+      goto unsupported;
+
+   if (own > SVA_WORDS * 64) {
+      fatal_at(vlog_loc(v), "sorry, an expression wider than %d bits cannot "
+               "be used with local variables in an assertion", SVA_WORDS * 64);
+      return (sva_xref_t){ 0, 1 };
+   }
+
+   if (b->nslots == SVA_MAX_SLOTS) {
+      fatal_at(vlog_loc(v), "sorry, an assertion with more than %d "
+               "sampled expressions and local variables is not supported",
+               SVA_MAX_SLOTS);
+      return (sva_xref_t){ 0, 1 };
+   }
+
+   const int slot = b->nslots++;
+   b->slots[slot] = v;
+   b->slot_call[slot] = vlog_sva_has_call(v);
+   return (sva_xref_t){
+      vlog_sva_xnode(b, SVA_X_SLOT, -1, -1, -1, own, 0, slot), own
+   };
+
+unsupported:
+   fatal_at(vlog_loc(v), "sorry, this expression cannot be used with local "
+            "variables in an assertion");
+   return (sva_xref_t){ 0, 1 };
+}
+
+static int vlog_sva_item(sva_build_t *b, vlog_node_t item)
+{
+   // Returns the expression of an assignment to a local variable
+
+   vlog_node_t target = NULL, value = NULL;
+   sva_xop_t op = SVA_X_ADD;
+   bool compound = false;
+
+   switch (vlog_kind(item)) {
+   case V_BASSIGN:
+      if (vlog_has_delay(item)) {
+         fatal_at(vlog_loc(item), "sorry, a delay in a sequence match item "
+                  "is not supported");
+         return -1;
+      }
+      target = vlog_target(item);
+      value = vlog_value(item);
+      break;
+
+   case V_OP_ASSIGN:
+      {
+         target = vlog_target(item);
+         value = vlog_value(item);
+         compound = true;
+         switch (vlog_subkind(item)) {
+         case V_ASSIGN_PLUS:     op = SVA_X_ADD; break;
+         case V_ASSIGN_MINUS:    op = SVA_X_SUB; break;
+         case V_ASSIGN_TIMES:    op = SVA_X_MUL; break;
+         case V_ASSIGN_DIVIDE:   op = SVA_X_DIV; break;
+         case V_ASSIGN_MOD:      op = SVA_X_MOD; break;
+         case V_ASSIGN_AND:      op = SVA_X_AND; break;
+         case V_ASSIGN_OR:       op = SVA_X_OR; break;
+         case V_ASSIGN_XOR:      op = SVA_X_XOR; break;
+         case V_ASSIGN_SHIFT_LL:
+         case V_ASSIGN_SHIFT_LA: op = SVA_X_SHL; break;
+         case V_ASSIGN_SHIFT_RL: op = SVA_X_SHR; break;
+         default:                op = SVA_X_ASHR; break;
+         }
+      }
+      break;
+
+   case V_SYS_TCALL:
+   case V_USER_TCALL:
+   case V_VOID_CALL:
+      {
+         if (b->ncalls == SVA_MAX_CALLS) {
+            fatal_at(vlog_loc(item), "sorry, a sequence with more than %d "
+                     "subroutine calls is not supported", SVA_MAX_CALLS);
+            return -1;
+         }
+
+         for (int i = 0; i < b->nlocals; i++) {
+            if (vlog_sva_local_width(b->locals[i]) > 64)
+               fatal_at(vlog_loc(item), "sorry, a subroutine call in a "
+                        "sequence with a local variable wider than 64 bits "
+                        "is not supported");
+         }
+
+         const int call = b->ncalls++;
+         b->calls[call] = item;
+
+         if (b->emit) {
+            vlog_gen_t *g = b->g;
+            mir_type_t t_offset = mir_offset_type(g->mu);
+            mir_value_t args[] = {
+               b->handle,
+               mir_const(g->mu, t_offset, SVA_ITEM_CALL),
+               mir_const(g->mu, t_offset, call),
+               mir_const(g->mu, t_offset, 0),
+               mir_const(g->mu, t_offset, 0),
+               mir_const(g->mu, t_offset, 0),
+            };
+            mir_value_t res = mir_build_fcall(g->mu,
+                                              ident_new("__sv_sva_item"),
+                                              t_offset, MIR_NULL_STAMP, args,
+                                              ARRAY_LEN(args));
+            mir_build_consume(g->mu, res);
+         }
+
+         return b->nitems++;
+      }
+
+   case V_PREFIX:
+   case V_POSTFIX:
+      target = vlog_target(item);
+      compound = true;
+      op = vlog_subkind(item) == V_INCDEC_PLUS ? SVA_X_ADD : SVA_X_SUB;
+      break;
+
+   default:
+      fatal_at(vlog_loc(item), "sorry, this sequence match item is not "
+               "supported");
+      return -1;
+   }
+
+   if (!vlog_sva_is_local(target)) {
+      fatal_at(vlog_loc(item), "sorry, a sequence match item can only "
+               "assign to a local variable");
+      return -1;
+   }
+
+   const int idx = vlog_sva_local_index(b, vlog_ref(target));
+   const int lw = vlog_sva_width(target);
+   const bool lsign = vlog_sva_signed(target);
+
+   sva_xref_t rhs;
+   bool rsign;
+   if (value == NULL) {
+      const int w = MAX(lw, 32);
+      const int one = vlog_sva_xnode(b, SVA_X_CONST, -1, -1, -1, 32,
+                                     SVA_XF_SIGNED, 1);
+      const int cur = vlog_sva_xnode(b, SVA_X_LOCAL, -1, -1, -1, lw, 0, idx);
+      rhs.id = vlog_sva_xnode(b, op, cur, one, -1, w,
+                              lsign ? SVA_XF_SIGNED : 0, 0);
+      rhs.width = w;
+      rsign = false;
+   }
+   else if (compound) {
+      const bool sign = lsign && vlog_sva_signed(value);
+      const int w = MAX(lw, vlog_sva_width(value));
+      const int cur = vlog_sva_xnode(b, SVA_X_LOCAL, -1, -1, -1, lw, 0, idx);
+      const sva_xref_t r = vlog_sva_expr(b, value, w);
+      rhs.id = vlog_sva_xnode(b, op, cur, r.id, -1, w,
+                              sign ? SVA_XF_SIGNED : 0, 0);
+      rhs.width = w;
+      rsign = false;
+   }
+   else {
+      rhs = vlog_sva_expr(b, value, MAX(lw, vlog_sva_width(value)));
+      rsign = vlog_sva_signed(value);
+   }
+
+   if (b->emit) {
+      vlog_gen_t *g = b->g;
+      mir_type_t t_offset = mir_offset_type(g->mu);
+      mir_value_t args[] = {
+         b->handle,
+         mir_const(g->mu, t_offset, SVA_ITEM_ASSIGN),
+         mir_const(g->mu, t_offset, idx),
+         mir_const(g->mu, t_offset, rhs.id),
+         mir_const(g->mu, t_offset, lw),
+         mir_const(g->mu, t_offset, rsign ? SVA_XF_SIGNED : 0),
+      };
+      mir_value_t res = mir_build_fcall(g->mu, ident_new("__sv_sva_item"),
+                                        t_offset, MIR_NULL_STAMP, args,
+                                        ARRAY_LEN(args));
+      mir_build_consume(g->mu, res);
+   }
+
+   return b->nitems++;
+}
+
+static int vlog_sva_leaf(sva_build_t *b, vlog_node_t expr, int *index)
+{
+   if (b->nleaves == SVA_MAX_LEAVES) {
+      fatal_at(vlog_loc(expr), "sorry, an assertion with more than %d "
+               "expressions is not supported", SVA_MAX_LEAVES);
+      b->nleaves = 0;
+   }
+
+   const int leaf = b->nleaves++;
+   b->leaves[leaf] = expr;
+
+   if (index != NULL)
+      *index = leaf;
+
+   return leaf;
+}
+
+static int64_t vlog_sva_bound(vlog_node_t v)
+{
+   if (vlog_kind(v) == V_DOLLAR)
+      return -1;
+
+   int64_t value;
+   if (!vlog_get_const(v, &value) || value < 0) {
+      fatal_at(vlog_loc(v), "bound of a sequence repetition or delay must be "
+               "a non-negative constant expression or $");
+      return 0;
+   }
+
+   return value;
+}
+
+static bool vlog_sva_property_only(vlog_node_t v)
+{
+   if (vlog_kind(v) != V_SVA_OP)
+      return false;
+
+   switch (vlog_subkind(v)) {
+   case V_SVA_IMPL_OVER:
+   case V_SVA_IMPL_NON:
+   case V_SVA_FOLLOW_OVER:
+   case V_SVA_FOLLOW_NON:
+   case V_SVA_NOT:
+   case V_SVA_IF:
+   case V_SVA_NEXTTIME:
+   case V_SVA_S_NEXTTIME:
+   case V_SVA_ALWAYS:
+   case V_SVA_S_ALWAYS:
+   case V_SVA_EVENTUALLY:
+   case V_SVA_S_EVENTUALLY:
+   case V_SVA_UNTIL:
+   case V_SVA_S_UNTIL:
+   case V_SVA_UNTIL_WITH:
+   case V_SVA_S_UNTIL_WITH:
+   case V_SVA_IMPLIES:
+   case V_SVA_IFF:
+   case V_SVA_ACCEPT_ON:
+   case V_SVA_REJECT_ON:
+   case V_SVA_SYNC_ACCEPT_ON:
+   case V_SVA_SYNC_REJECT_ON:
+      return true;
+   default:
+      return false;
+   }
+}
+
+static bool vlog_sva_local_op(vlog_sva_op_t op)
+{
+   switch (op) {
+   case V_SVA_DELAY:
+   case V_SVA_REPEAT:
+   case V_SVA_GOTO:
+   case V_SVA_NONCONS:
+   case V_SVA_AND:
+   case V_SVA_OR:
+   case V_SVA_INTERSECT:
+   case V_SVA_WITHIN:
+   case V_SVA_THROUGHOUT:
+   case V_SVA_FIRST_MATCH:
+   case V_SVA_MATCH:
+   case V_SVA_STRONG:
+   case V_SVA_WEAK:
+   case V_SVA_NOT:
+   case V_SVA_IMPL_OVER:
+   case V_SVA_IMPL_NON:
+   case V_SVA_FOLLOW_OVER:
+   case V_SVA_FOLLOW_NON:
+   case V_SVA_IF:
+   case V_SVA_NEXTTIME:
+   case V_SVA_S_NEXTTIME:
+   case V_SVA_ALWAYS:
+   case V_SVA_S_ALWAYS:
+   case V_SVA_EVENTUALLY:
+   case V_SVA_S_EVENTUALLY:
+   case V_SVA_UNTIL:
+   case V_SVA_S_UNTIL:
+   case V_SVA_UNTIL_WITH:
+   case V_SVA_S_UNTIL_WITH:
+   case V_SVA_IMPLIES:
+   case V_SVA_IFF:
+   case V_SVA_ACCEPT_ON:
+   case V_SVA_REJECT_ON:
+   case V_SVA_SYNC_ACCEPT_ON:
+   case V_SVA_SYNC_REJECT_ON:
+      return true;
+   default:
+      return false;
+   }
+}
+
+static int vlog_sva_tree(sva_build_t *b, vlog_node_t v)
+{
+   if (vlog_kind(v) != V_SVA_OP) {
+      if (vlog_sva_uses_local(v)) {
+         const sva_xref_t x = vlog_sva_expr(b, v, 0);
+         return vlog_sva_node(b, SVA_DLEAF, -1, -1, x.id, 0, 0);
+      }
+
+      const int leaf = vlog_sva_leaf(b, v, NULL);
+      return vlog_sva_node(b, SVA_LEAF, -1, -1, leaf, 0, 0);
+   }
+
+   const vlog_sva_op_t op = vlog_subkind(v);
+
+   if (b->local_mode && !vlog_sva_local_op(op)) {
+      fatal_at(vlog_loc(v), "sorry, this sequence or property operator "
+               "cannot be used with local variables");
+      return 0;
+   }
+   const int nparams = vlog_params(v);
+
+   int64_t lo = 0, hi = 0;
+   if (vlog_has_left(v)) {
+      lo = vlog_sva_bound(vlog_left(v));
+      hi = vlog_sva_bound(vlog_right(v));
+   }
+
+   switch (op) {
+   case V_SVA_DELAY:
+      {
+         for (int i = 0; i < nparams; i++) {
+            if (vlog_sva_property_only(vlog_param(v, i))) {
+               fatal_at(vlog_loc(vlog_param(v, i)), "a property operator "
+                        "cannot be used as an operand of a sequence delay");
+               return 0;
+            }
+         }
+
+         int a = -1;
+         if (nparams == 2)
+            a = vlog_sva_tree(b, vlog_param(v, 0));
+         const int c = vlog_sva_tree(b, vlog_param(v, nparams - 1));
+         return vlog_sva_node(b, op, a, c, 0, lo, hi);
+      }
+
+   case V_SVA_REPEAT:
+   case V_SVA_GOTO:
+   case V_SVA_NONCONS:
+      {
+         vlog_node_t operand = vlog_param(v, 0);
+         if (op != V_SVA_REPEAT && vlog_kind(operand) == V_SVA_OP) {
+            error_at(vlog_loc(operand), "sorry, non-consecutive repetition "
+                     "of a sequence is not supported");
+            return 0;
+         }
+
+         const int a = vlog_sva_tree(b, operand);
+         return vlog_sva_node(b, op, a, -1, 0, lo, hi);
+      }
+
+   case V_SVA_THROUGHOUT:
+      {
+         vlog_node_t guard = vlog_param(v, 0);
+         if (vlog_kind(guard) == V_SVA_OP) {
+            fatal_at(vlog_loc(guard), "left operand of throughout must be "
+                     "an expression");
+            return 0;
+         }
+
+         const int a = vlog_sva_tree(b, guard);
+         const int c = vlog_sva_tree(b, vlog_param(v, 1));
+         return vlog_sva_node(b, op, a, c, 0, 0, 0);
+      }
+
+   case V_SVA_AND:
+   case V_SVA_OR:
+   case V_SVA_INTERSECT:
+   case V_SVA_WITHIN:
+   case V_SVA_IMPL_OVER:
+   case V_SVA_IMPL_NON:
+   case V_SVA_FOLLOW_OVER:
+   case V_SVA_FOLLOW_NON:
+   case V_SVA_UNTIL:
+   case V_SVA_S_UNTIL:
+   case V_SVA_UNTIL_WITH:
+   case V_SVA_S_UNTIL_WITH:
+   case V_SVA_IMPLIES:
+   case V_SVA_IFF:
+      {
+         const int a = vlog_sva_tree(b, vlog_param(v, 0));
+         const int c = vlog_sva_tree(b, vlog_param(v, 1));
+         return vlog_sva_node(b, op, a, c, 0, 0, 0);
+      }
+
+   case V_SVA_FIRST_MATCH:
+   case V_SVA_NOT:
+   case V_SVA_STRONG:
+   case V_SVA_WEAK:
+      {
+         const int a = vlog_sva_tree(b, vlog_param(v, 0));
+         return vlog_sva_node(b, op, a, -1, 0, 0, 0);
+      }
+
+   case V_SVA_MATCH:
+      {
+         const int a = vlog_sva_tree(b, vlog_param(v, 0));
+
+         const int first = b->nitems;
+         for (int i = 1; i < nparams; i++)
+            (void)vlog_sva_item(b, vlog_param(v, i));
+
+         return vlog_sva_node(b, op, a, first, 0, nparams - 1, 0);
+      }
+
+   case V_SVA_IF:
+      {
+         if (vlog_sva_uses_local(vlog_value(v))) {
+            const sva_xref_t x = vlog_sva_expr(b, vlog_value(v), 0);
+            const int a = vlog_sva_tree(b, vlog_param(v, 0));
+            const int c = nparams > 1 ? vlog_sva_tree(b, vlog_param(v, 1)) : -1;
+            return vlog_sva_node(b, op, a, c, 0, x.id + 1, 0);
+         }
+
+         int leaf;
+         vlog_sva_leaf(b, vlog_value(v), &leaf);
+         const int a = vlog_sva_tree(b, vlog_param(v, 0));
+         const int c = nparams > 1 ? vlog_sva_tree(b, vlog_param(v, 1)) : -1;
+         return vlog_sva_node(b, op, a, c, leaf, 0, 0);
+      }
+
+   case V_SVA_NEXTTIME:
+   case V_SVA_S_NEXTTIME:
+   case V_SVA_ALWAYS:
+   case V_SVA_S_ALWAYS:
+   case V_SVA_EVENTUALLY:
+   case V_SVA_S_EVENTUALLY:
+      {
+         if (!vlog_has_left(v)) {
+            switch (op) {
+            case V_SVA_NEXTTIME:
+            case V_SVA_S_NEXTTIME:
+               lo = hi = 1;
+               break;
+            default:
+               lo = 0;
+               hi = -1;
+               break;
+            }
+         }
+
+         const int a = vlog_sva_tree(b, vlog_param(v, 0));
+         return vlog_sva_node(b, op, a, -1, 0, lo, hi);
+      }
+
+   case V_SVA_ACCEPT_ON:
+   case V_SVA_REJECT_ON:
+   case V_SVA_SYNC_ACCEPT_ON:
+   case V_SVA_SYNC_REJECT_ON:
+      {
+         if (vlog_sva_uses_local(vlog_value(v))) {
+            fatal_at(vlog_loc(vlog_value(v)), "sorry, a local variable "
+                     "cannot be used in the abort condition of a property");
+            return 0;
+         }
+
+         int leaf;
+         vlog_sva_leaf(b, vlog_value(v), &leaf);
+         const int a = vlog_sva_tree(b, vlog_param(v, 0));
+         return vlog_sva_node(b, op, a, -1, leaf, 0, 0);
+      }
+
+   case V_SVA_CLOCKED:
+      error_at(vlog_loc(v), "sorry, assertions with multiple clocks are not "
+               "supported");
+      return 0;
+
+   default:
+      error_at(vlog_loc(v), "sorry, this sequence or property operator is "
+               "not supported");
+      return 0;
+   }
+}
+
+static int vlog_sva_top(sva_build_t *b, vlog_node_t body)
+{
+   vlog_visit(body, vlog_sva_local_cb, b);
+
+   b->local_mode = b->nlocals > 0;
+   if (!b->local_mode)
+      vlog_visit(body, vlog_sva_match_cb, &b->local_mode);
+
+   return vlog_sva_tree(b, body);
+}
+
+static mir_value_t vlog_sva_handle(vlog_gen_t *g, vlog_node_t v)
+{
+   int hops = 0;
+   mir_value_t var = mir_search_object(g->mu, v, &hops);
+   assert(!mir_is_null(var) && hops == 0);
+   return mir_build_load(g->mu, var);
+}
+
+static void vlog_lower_property_init(vlog_gen_t *g, vlog_node_t v)
+{
+   mir_type_t t_offset = mir_offset_type(g->mu);
+
+   sva_kind_t kind = SVA_ASSERT;
+   if (vlog_subkind(v) == V_ASSERT_EXPECT)
+      kind = SVA_EXPECT;
+   else if (vlog_kind(v) == V_COVER)
+      kind = vlog_subkind(v) == V_ASSERT_COVER_SEQ
+         ? SVA_COVER_SEQUENCE : SVA_COVER_PROPERTY;
+
+   unsigned flags = 0;
+   if (vlog_kind(v) == V_ASSUME)
+      flags |= SVA_F_ASSUME;
+   if (vlog_conds(v) > 0 && vlog_stmts(vlog_cond(v, 0)) > 0)
+      flags |= SVA_F_PASS;
+
+   mir_value_t args[] = {
+      mir_const(g->mu, t_offset, kind), mir_const(g->mu, t_offset, flags)
+   };
+   mir_value_t handle = mir_build_fcall(g->mu, ident_new("__sv_sva_new"),
+                                        t_offset, MIR_NULL_STAMP, args, 2);
+
+   if (vlog_has_ident(v)) {
+      // Assertion control tasks refer to the assertion by its label
+      const char *label = istr(vlog_ident(v));
+      number_t n = number_from_string(label, strlen(label));
+      mir_value_t largs[] = { handle, vlog_string_const(g, n) };
+      vlog_str_call(g, "__sv_sva_label", t_offset, largs, 2);
+   }
+
+   mir_value_t var = mir_add_var(g->mu, t_offset, MIR_NULL_STAMP,
+                                 ident_uniq("sva"), 0);
+   mir_build_store(g->mu, var, handle);
+   mir_put_object(g->mu, v, var);
+
+   vlog_node_t spec = vlog_value(v);
+
+   sva_build_t b = { .g = g, .handle = handle, .emit = true };
+
+   vlog_node_t body = vlog_value(spec);
+   if (vlog_kind(body) == V_SVA_OP && vlog_subkind(body) == V_SVA_DISABLE)
+      body = vlog_param(body, 0);
+
+   const int root = vlog_sva_top(&b, body);
+
+   for (int i = 0; i < b.nleaves; i++)
+      vlog_sva_prepare_past(g, b.leaves[i]);
+
+   for (int i = 0; i < b.nslots; i++)
+      vlog_sva_prepare_past(g, b.slots[i]);
+
+   if (vlog_has_left(spec))
+      vlog_sva_prepare_past(g, vlog_left(spec));
+
+   vlog_sva_prepare_actions(g, v);
+
+   if (b.local_mode) {
+      unsigned unknown = 0;
+      for (int i = 0; i < b.nlocals; i++) {
+         if (!vlog_is_two_state(vlog_type(b.locals[i])))
+            unknown |= 1 << i;
+      }
+
+      mir_value_t cargs[] = {
+         handle,
+         mir_const(g->mu, t_offset, b.nlocals),
+         mir_const(g->mu, t_offset, b.nslots),
+         mir_const(g->mu, t_offset, unknown),
+      };
+      mir_value_t cres = mir_build_fcall(g->mu, ident_new("__sv_sva_config"),
+                                         t_offset, MIR_NULL_STAMP, cargs, 4);
+      mir_build_consume(g->mu, cres);
+
+      for (int i = 0; i < b.nlocals; i++) {
+         const int width = vlog_sva_local_width(b.locals[i]);
+         if (width <= 64)
+            continue;
+
+         mir_value_t largs[] = {
+            handle, mir_const(g->mu, t_offset, i),
+            mir_const(g->mu, t_offset, width),
+         };
+         mir_value_t lres = mir_build_fcall(
+            g->mu, ident_new("__sv_sva_localw"), t_offset, MIR_NULL_STAMP,
+            largs, ARRAY_LEN(largs));
+         mir_build_consume(g->mu, lres);
+      }
+   }
+
+   mir_value_t rargs[] = { handle, mir_const(g->mu, t_offset, root) };
+   mir_value_t res = mir_build_fcall(g->mu, ident_new("__sv_sva_root"),
+                                     t_offset, MIR_NULL_STAMP, rargs, 2);
+   mir_build_consume(g->mu, res);
+}
+
+static void vlog_lower_action(vlog_gen_t *g, vlog_node_t v, int cond,
+                              mir_value_t count, gen_stack_t *gs)
+{
+   mir_type_t t_offset = mir_offset_type(g->mu);
+
+   // The action block may wait so the count and the index are kept in
+   // variables of the process rather than temporaries
+   mir_value_t limit = mir_add_var(g->mu, t_offset, MIR_NULL_STAMP,
+                                   ident_uniq("count"), 0);
+   mir_build_store(g->mu, limit, count);
+
+   vlog_loop_t l = {
+      .index   = mir_add_var(g->mu, t_offset, MIR_NULL_STAMP,
+                             ident_uniq("i"), 0),
+      .test_bb = mir_add_block(g->mu),
+      .body_bb = mir_add_block(g->mu),
+      .next_bb = mir_add_block(g->mu),
+      .exit_bb = mir_add_block(g->mu),
+   };
+
+   mir_build_store(g->mu, l.index, mir_const(g->mu, t_offset, 0));
+   mir_build_jump(g->mu, l.test_bb);
+
+   mir_set_cursor(g->mu, l.test_bb, MIR_APPEND);
+   mir_build_cond(g->mu, mir_build_cmp(g->mu, MIR_CMP_LT,
+                                       mir_build_load(g->mu, l.index),
+                                       mir_build_load(g->mu, limit)),
+                  l.body_bb, l.exit_bb);
+
+   mir_set_cursor(g->mu, l.body_bb, MIR_APPEND);
+
+   if (cond < vlog_conds(v))
+      vlog_lower_stmts(g, vlog_cond(v, cond), gs);
+   else {
+      mir_value_t locus = mir_build_debug_locus(g->mu, vlog_to_object(v));
+      mir_type_t t_severity = mir_int_type(g->mu, 0, 3);
+      mir_value_t severity = mir_const(g->mu, t_severity, SEVERITY_ERROR);
+      mir_value_t no = mir_const(g->mu, mir_bool_type(g->mu), 0);
+      mir_build_assert(g->mu, no, MIR_NULL_VALUE, MIR_NULL_VALUE, severity,
+                       locus, MIR_NULL_VALUE, MIR_NULL_VALUE);
+   }
+
+   vlog_loop_end(g, &l);
+}
+
+static void vlog_sva_call_cb(vlog_node_t v, void *ctx)
+{
+   if (vlog_kind(v) == V_USER_FCALL || vlog_kind(v) == V_METHOD_CALL)
+      *(bool *)ctx = true;
+}
+
+static bool vlog_sva_has_call(vlog_node_t v)
+{
+   bool found = false;
+   vlog_visit(v, vlog_sva_call_cb, &found);
+   return found;
+}
+
+static bool vlog_sva_can_sleep_on(vlog_node_t v)
+{
+   // The expression only reads nets and variables held in signals so a
+   // change of value always produces an event
+
+   switch (vlog_kind(v)) {
+   case V_NUMBER:
+      return true;
+   case V_REF:
+   case V_HIER_REF:
+      if (!vlog_has_ref(v))
+         return false;
+
+      switch (vlog_kind(vlog_ref(v))) {
+      case V_PARAM_DECL:
+      case V_LOCALPARAM:
+         return vlog_kind(v) == V_REF;
+      case V_PORT_DECL:
+      case V_NET_DECL:
+      case V_VAR_DECL:
+         return !vlog_uses_memory_member(v)
+            && (vlog_kind(v) == V_REF
+                || (!vlog_is_vhdl_path(vlog_ref(v))
+                    && !vlog_is_vhdl_integer(vlog_ref(v))));
+      default:
+         return false;
+      }
+   case V_BINARY:
+      return vlog_sva_can_sleep_on(vlog_left(v))
+         && vlog_sva_can_sleep_on(vlog_right(v));
+   case V_UNARY:
+   case V_CAST:
+   case V_MIN_TYP_MAX:
+      return vlog_sva_can_sleep_on(vlog_value(v));
+   case V_COND_EXPR:
+      return vlog_sva_can_sleep_on(vlog_value(v))
+         && vlog_sva_can_sleep_on(vlog_left(v))
+         && vlog_sva_can_sleep_on(vlog_right(v));
+   case V_CONCAT:
+      {
+         const int nparams = vlog_params(v);
+         for (int i = 0; i < nparams; i++) {
+            if (!vlog_sva_can_sleep_on(vlog_param(v, i)))
+               return false;
+         }
+
+         return true;
+      }
+   case V_BIT_SELECT:
+      {
+         if (vlog_kind(vlog_value(v)) != V_REF
+             || vlog_uses_memory_member(vlog_value(v))
+             || !vlog_sva_can_sleep_on(vlog_value(v)))
+            return false;
+
+         const int nparams = vlog_params(v);
+         for (int i = 0; i < nparams; i++) {
+            if (!vlog_sva_can_sleep_on(vlog_param(v, i)))
+               return false;
+         }
+
+         return true;
+      }
+   case V_PART_SELECT:
+      return vlog_kind(vlog_value(v)) == V_REF
+         && !vlog_uses_memory_member(vlog_value(v))
+         && vlog_sva_can_sleep_on(vlog_value(v))
+         && vlog_sva_can_sleep_on(vlog_left(v))
+         && vlog_sva_can_sleep_on(vlog_right(v));
+   case V_SYS_FCALL:
+      {
+         static const char *pure[] = {
+            "$isunknown", "$countones", "$onehot", "$onehot0",
+         };
+
+         // The history of a sampled value function is steady when the
+         // assertion sleeps
+         bool known = false;
+         sva_sampled_t kind;
+         if (vlog_sva_sampled_kind(v, &kind))
+            known = true;
+
+         for (int i = 0; i < ARRAY_LEN(pure); i++)
+            known |= vlog_ident(v) == ident_new(pure[i]);
+
+         if (!known)
+            return false;
+
+         const int nparams = vlog_params(v);
+         for (int i = 0; i < nparams; i++) {
+            if (!vlog_sva_can_sleep_on(vlog_param(v, i)))
+               return false;
+         }
+
+         return true;
+      }
+   default:
+      return false;
+   }
+}
+
+static mir_value_t vlog_lower_edge_test(vlog_gen_t *g, vlog_node_t event)
+{
+   vlog_select_t lvalue = vlog_lower_select(g, vlog_value(event));
+
+   if (vlog_subkind(event) == V_EVENT_LEVEL) {
+      mir_type_t t_offset = mir_offset_type(g->mu);
+      mir_value_t nets =
+         mir_build_array_ref(g->mu, lvalue.obj, lvalue.dst_offset);
+      return mir_build_event_flag(g->mu, nets, mir_const(g->mu, t_offset, 1));
+   }
+
+   const bool vhdl = vlog_is_vhdl_signal(g, lvalue.obj);
+   const bool posedge = vlog_subkind(event) == V_EVENT_POSEDGE;
+
+   ident_t func = ident_new(posedge ? (vhdl ? "@posedge$vhdl" : "@posedge")
+                            : (vhdl ? "@negedge$vhdl" : "@negedge"));
+
+   mir_context_t *ctx = mir_get_context(g->mu);
+   if (posedge)
+      mir_defer(ctx, func, NULL, MIR_UNIT_FUNCTION,
+                vhdl ? vlog_lower_vhdl_posedge_fn : vlog_lower_posedge_fn,
+                NULL);
+   else
+      mir_defer(ctx, func, NULL, MIR_UNIT_FUNCTION,
+                vhdl ? vlog_lower_vhdl_negedge_fn : vlog_lower_negedge_fn,
+                NULL);
+
+   mir_type_t t_context = mir_context_type(g->mu, func);
+   mir_value_t context = mir_build_null(g->mu, t_context);
+   mir_value_t nets =
+      mir_build_array_ref(g->mu, lvalue.obj, lvalue.dst_offset);
+   mir_value_t args[] = { context, nets };
+   return mir_build_fcall(g->mu, func, mir_bool_type(g->mu), MIR_NULL_STAMP,
+                          args, 2);
+}
+
+static void vlog_sva_sleep(vlog_gen_t *g, vlog_node_t v, mir_block_t chk_bb)
+{
+   // An assertion with nothing pending cannot report anything until a
+   // value it samples changes, so wait for that instead of each clock edge
+
+   vlog_node_t spec = vlog_value(v);
+   if (vlog_has_left(spec) && !vlog_sva_can_sleep_on(vlog_left(spec)))
+      return;
+
+   vlog_node_t body = vlog_value(spec);
+   if (vlog_kind(body) == V_SVA_OP && vlog_subkind(body) == V_SVA_DISABLE)
+      body = vlog_param(body, 0);
+
+   sva_build_t scan = { .g = g };
+   (void)vlog_sva_top(&scan, body);
+
+   sva_build_t *b = &scan;
+   if (b->local_mode)
+      return;
+
+   for (int i = 0; i < b->nleaves; i++) {
+      if (!vlog_sva_can_sleep_on(b->leaves[i]))
+         return;
+   }
+
+   mir_type_t t_offset = mir_offset_type(g->mu);
+   mir_value_t zero = mir_const(g->mu, t_offset, 0);
+
+   mir_block_t cont_bb = mir_add_block(g->mu);
+   mir_block_t idle_bb = mir_add_block(g->mu);
+   mir_block_t resume_bb = mir_add_block(g->mu);
+   mir_block_t edge_bb = mir_add_block(g->mu);
+
+   mir_value_t iargs[] = { vlog_sva_handle(g, v) };
+   mir_value_t idle = mir_build_fcall(g->mu, ident_new("__sv_sva_idle"),
+                                      t_offset, MIR_NULL_STAMP, iargs, 1);
+   mir_value_t busy = mir_build_cmp(g->mu, MIR_CMP_EQ, idle, zero);
+   if (!mir_is_null(g->sva_steady)) {
+      mir_value_t not_steady = mir_build_not(
+         g->mu, mir_build_load(g->mu, g->sva_steady));
+      busy = mir_build_or(g->mu, busy, not_steady);
+   }
+
+   mir_build_cond(g->mu, busy, cont_bb, idle_bb);
+
+   for (int pass = 0; pass < 2; pass++) {
+      g->sens_clear = pass == 1;
+
+      if (pass == 0)
+         mir_set_cursor(g->mu, idle_bb, MIR_APPEND);
+      else
+         mir_set_cursor(g->mu, resume_bb, MIR_APPEND);
+
+      for (int i = 0; i < b->nleaves; i++)
+         vlog_lower_sensitivity(g, b->leaves[i]);
+
+      if (vlog_has_left(spec))
+         vlog_lower_sensitivity(g, vlog_left(spec));
+
+      if (pass == 0)
+         mir_build_wait(g->mu, resume_bb);
+   }
+
+   g->sens_clear = false;
+
+   // The clock edge may have come in the same delta cycle as the change
+   mir_value_t flushing = mir_build_fcall(
+      g->mu, ident_new("__sv_sva_flushing"), t_offset, MIR_NULL_STAMP, NULL, 0);
+   mir_build_cond(g->mu, mir_build_cmp(g->mu, MIR_CMP_EQ, flushing, zero),
+                  edge_bb, chk_bb);
+
+   mir_set_cursor(g->mu, edge_bb, MIR_APPEND);
+
+   mir_block_t start_bb = { .tag = MIR_TAG_BLOCK, .id = 1 };
+   mir_value_t edge = vlog_lower_edge_test(g, vlog_param(g->sva_clk, 0));
+   mir_build_cond(g->mu, edge, chk_bb, start_bb);
+
+   mir_set_cursor(g->mu, cont_bb, MIR_APPEND);
+}
+
+static void vlog_lower_to_reactive(vlog_gen_t *g, mir_value_t pending)
+{
+   // The statements which follow run in the Reactive region if PENDING
+   // is non-zero
+
+   mir_type_t t_offset = mir_offset_type(g->mu);
+   mir_value_t zero = mir_const(g->mu, t_offset, 0);
+
+   mir_block_t yield_bb = mir_add_block(g->mu);
+   mir_block_t cont_bb = mir_add_block(g->mu);
+   mir_build_cond(g->mu, mir_build_cmp(g->mu, MIR_CMP_EQ, pending, zero),
+                  cont_bb, yield_bb);
+
+   mir_set_cursor(g->mu, yield_bb, MIR_APPEND);
+
+   mir_value_t res = mir_build_fcall(
+      g->mu, ident_new("__sv_sva_yield"), t_offset, MIR_NULL_STAMP,
+      NULL, 0);
+
+   mir_block_t wait_bb = mir_add_block(g->mu);
+   mir_build_cond(g->mu, mir_build_cmp(g->mu, MIR_CMP_EQ, res, zero),
+                  cont_bb, wait_bb);
+
+   mir_set_cursor(g->mu, wait_bb, MIR_APPEND);
+   mir_block_t resume_bb = mir_add_block(g->mu);
+   mir_build_wait(g->mu, resume_bb);
+
+   mir_set_cursor(g->mu, resume_bb, MIR_APPEND);
+   mir_value_t back = mir_build_fcall(
+      g->mu, ident_new("__sv_reactive_yield"), t_offset, MIR_NULL_STAMP,
+      NULL, 0);
+   mir_build_consume(g->mu, back);
+   mir_build_jump(g->mu, cont_bb);
+
+   mir_set_cursor(g->mu, cont_bb, MIR_APPEND);
+}
+
+static void vlog_lower_sva_calls(vlog_gen_t *g, sva_build_t *b,
+                                 vlog_node_t v, gen_stack_t *gs)
+{
+   // Subroutines called by the match items of a sequence run in the
+   // Reactive region with the values the local variables had at the match
+
+   mir_type_t t_offset = mir_offset_type(g->mu);
+   mir_value_t zero = mir_const(g->mu, t_offset, 0);
+   mir_value_t handle = vlog_sva_handle(g, v);
+
+   mir_value_t vars[SVA_MAX_LOCALS];
+   for (int i = 0; i < b->nlocals; i++)
+      vars[i] = vlog_add_local_var(g, b->locals[i], ident_uniq("local"));
+
+   mir_value_t nargs[] = { handle };
+   mir_value_t count = mir_build_fcall(g->mu, ident_new("__sv_sva_nevents"),
+                                       t_offset, MIR_NULL_STAMP, nargs, 1);
+
+   vlog_loop_t l;
+   vlog_loop_begin(g, &l, zero, count);
+
+   for (int i = 0; i < b->nlocals; i++) {
+      mir_value_t largs[] = { handle, l.i, mir_const(g->mu, t_offset, i) };
+      mir_value_t raw = mir_build_fcall(
+         g->mu, ident_new("__sv_sva_event_local"), t_offset, MIR_NULL_STAMP,
+         largs, 3);
+
+      const type_info_t *ti = vlog_type_info(g, vlog_type(b->locals[i]));
+      mir_build_store(g->mu, vars[i], vlog_lower_cast(g, ti->type, raw));
+   }
+
+   mir_value_t cargs[] = { handle, l.i };
+   mir_value_t which = mir_build_fcall(
+      g->mu, ident_new("__sv_sva_event_call"), t_offset, MIR_NULL_STAMP,
+      cargs, 2);
+
+   for (int i = 0; i < b->ncalls; i++) {
+      mir_block_t call_bb = mir_add_block(g->mu);
+      mir_block_t next_bb = mir_add_block(g->mu);
+
+      mir_value_t match = mir_build_cmp(g->mu, MIR_CMP_EQ, which,
+                                        mir_const(g->mu, t_offset, i));
+      mir_build_cond(g->mu, match, call_bb, next_bb);
+
+      mir_set_cursor(g->mu, call_bb, MIR_APPEND);
+      vlog_lower_one_stmt(g, b->calls[i], gs);
+
+      if (!mir_block_finished(g->mu, MIR_NULL_BLOCK))
+         mir_build_jump(g->mu, next_bb);
+
+      mir_set_cursor(g->mu, next_bb, MIR_APPEND);
+   }
+
+   vlog_loop_end(g, &l);
+}
+
+static void vlog_lower_sva_sample(vlog_gen_t *g, vlog_node_t v,
+                                  sva_build_t *b, mir_value_t *fails,
+                                  mir_value_t *passes, mir_value_t *disable_out)
+{
+   mir_type_t t_offset = mir_offset_type(g->mu);
+
+   vlog_node_t spec = vlog_value(v);
+
+   vlog_node_t body = vlog_value(spec);
+   if (vlog_kind(body) == V_SVA_OP && vlog_subkind(body) == V_SVA_DISABLE)
+      body = vlog_param(body, 0);
+
+   (void)vlog_sva_top(b, body);
+
+   mir_value_t zero = mir_const(g->mu, t_offset, 0);
+
+   g->in_sva = true;
+
+   mir_value_t mask_var = mir_add_var(g->mu, t_offset, MIR_NULL_STAMP,
+                                      ident_uniq("leaves"), MIR_VAR_TEMP);
+   mir_build_store(g->mu, mask_var, zero);
+
+   for (int i = 0; i < b->nleaves; i++) {
+      mir_block_t eval_bb = MIR_NULL_BLOCK, next_bb = MIR_NULL_BLOCK;
+      if (vlog_sva_has_call(b->leaves[i])) {
+         // Only evaluate the function calls if an attempt reaches this
+         // expression at this tick
+         mir_value_t wargs[] = {
+            vlog_sva_handle(g, v), mir_const(g->mu, t_offset, i)
+         };
+         mir_value_t wanted = mir_build_fcall(
+            g->mu, ident_new("__sv_sva_wanted"), t_offset, MIR_NULL_STAMP,
+            wargs, 2);
+
+         eval_bb = mir_add_block(g->mu);
+         next_bb = mir_add_block(g->mu);
+         mir_build_cond(g->mu, mir_build_cmp(g->mu, MIR_CMP_EQ, wanted, zero),
+                        next_bb, eval_bb);
+         mir_set_cursor(g->mu, eval_bb, MIR_APPEND);
+      }
+
+      mir_value_t expr = vlog_lower_rvalue(g, b->leaves[i]);
+      mir_value_t test = vlog_lower_test(g, expr);
+      mir_value_t bit = mir_const(g->mu, t_offset, INT64_C(1) << i);
+      mir_value_t sel = mir_build_select(g->mu, t_offset, test, bit, zero);
+      mir_value_t sum = mir_build_add(g->mu, t_offset,
+                                      mir_build_load(g->mu, mask_var), sel);
+      mir_build_store(g->mu, mask_var, sum);
+
+      if (!mir_is_null(next_bb)) {
+         mir_build_jump(g->mu, next_bb);
+         mir_set_cursor(g->mu, next_bb, MIR_APPEND);
+      }
+   }
+
+   mir_value_t mask = mir_build_load(g->mu, mask_var);
+
+   for (int i = 0; i < b->nslots; i++) {
+      mir_block_t eval_bb = MIR_NULL_BLOCK, next_bb = MIR_NULL_BLOCK;
+      if (b->slot_call[i]) {
+         // Only evaluate the function calls if an attempt reads the value
+         // at this tick
+         mir_value_t wargs[] = {
+            vlog_sva_handle(g, v), mir_const(g->mu, t_offset, i), mask
+         };
+         mir_value_t wanted = mir_build_fcall(
+            g->mu, ident_new("__sv_sva_slotwanted"), t_offset,
+            MIR_NULL_STAMP, wargs, 3);
+
+         eval_bb = mir_add_block(g->mu);
+         next_bb = mir_add_block(g->mu);
+         mir_build_cond(g->mu, mir_build_cmp(g->mu, MIR_CMP_EQ, wanted, zero),
+                        next_bb, eval_bb);
+         mir_set_cursor(g->mu, eval_bb, MIR_APPEND);
+      }
+
+      mir_value_t expr = vlog_lower_rvalue(g, b->slots[i]);
+      mir_type_t type = mir_get_type(g->mu, expr);
+
+      mir_value_t unknown = zero, value;
+      if (mir_is_vector(g->mu, expr)) {
+         if (mir_get_class(g->mu, type) == MIR_TYPE_VEC4) {
+            mir_value_t known = mir_build_defined(g->mu, expr);
+            unknown = mir_build_select(g->mu, t_offset, known, zero,
+                                       mir_const(g->mu, t_offset, 1));
+         }
+
+         if (mir_get_size(g->mu, type) > 64) {
+            const int width = mir_get_size(g->mu, type);
+            mir_value_t wargs[] = {
+               vlog_sva_handle(g, v), mir_const(g->mu, t_offset, i),
+               mir_const(g->mu, t_offset, width),
+               vlog_lower_cast(g, mir_vec4_type(g->mu, width, false), expr),
+               unknown,
+            };
+            mir_value_t wres = mir_build_fcall(
+               g->mu, ident_new("__sv_sva_slotw"), t_offset, MIR_NULL_STAMP,
+               wargs, ARRAY_LEN(wargs));
+            mir_build_consume(g->mu, wres);
+
+            if (!mir_is_null(next_bb)) {
+               mir_build_jump(g->mu, next_bb);
+               mir_set_cursor(g->mu, next_bb, MIR_APPEND);
+            }
+            continue;
+         }
+
+         value = vlog_lower_cast(g, t_offset, expr);
+      }
+      else {
+         switch (mir_get_class(g->mu, type)) {
+         case MIR_TYPE_INT:
+         case MIR_TYPE_OFFSET:
+            value = vlog_lower_cast(g, t_offset, expr);
+            break;
+         default:
+            fatal_at(vlog_loc(b->slots[i]), "sorry, this type of expression "
+                     "cannot be used with local variables in an assertion");
+            value = zero;
+            break;
+         }
+      }
+
+      mir_value_t sargs[] = {
+         vlog_sva_handle(g, v), mir_const(g->mu, t_offset, i), value, unknown
+      };
+      mir_value_t sres = mir_build_fcall(g->mu, ident_new("__sv_sva_slot"),
+                                         t_offset, MIR_NULL_STAMP, sargs, 4);
+      mir_build_consume(g->mu, sres);
+
+      if (!mir_is_null(next_bb)) {
+         mir_build_jump(g->mu, next_bb);
+         mir_set_cursor(g->mu, next_bb, MIR_APPEND);
+      }
+   }
+
+   mir_value_t disable = zero;
+   if (vlog_has_left(spec)) {
+      vlog_node_t cond = vlog_left(spec), async = NULL;
+      if (vlog_kind(cond) == V_BINARY
+          && vlog_subkind(cond) == V_BINARY_LOG_OR
+          && vlog_kind(vlog_right(cond)) == V_REF
+          && vlog_has_ref(vlog_right(cond))
+          && ident_starts_with(vlog_ident(vlog_ref(vlog_right(cond))),
+                               ident_new("$disable"))) {
+         // The flag set when the condition was true since the last tick
+         // only aborts the attempts in progress (16.12)
+         async = vlog_right(cond);
+         cond = vlog_left(cond);
+      }
+
+      mir_value_t expr = vlog_lower_rvalue(g, cond);
+      mir_value_t test = vlog_lower_test(g, expr);
+      mir_value_t other = zero;
+      if (async != NULL) {
+         mir_value_t hit = vlog_lower_test(g, vlog_lower_rvalue(g, async));
+         other = mir_build_select(g->mu, t_offset, hit,
+                                  mir_const(g->mu, t_offset, 2), zero);
+      }
+
+      disable = mir_build_select(g->mu, t_offset, test,
+                                 mir_const(g->mu, t_offset, 1), other);
+   }
+
+   g->in_sva = false;
+
+   g->in_sva = true;
+   vlog_sva_action_results(g, v);
+   g->sva_steady = vlog_sva_steady(g);
+   vlog_sva_update_past(g);
+   g->in_sva = false;
+
+   mir_value_t handle = vlog_sva_handle(g, v);
+
+   *disable_out = disable;
+
+   mir_value_t targs[] = { handle, mask, disable };
+   *fails = mir_build_fcall(g->mu, ident_new("__sv_sva_tick"),
+                                       t_offset, MIR_NULL_STAMP, targs, 3);
+
+   mir_value_t pargs[] = {
+      handle, mir_const(g->mu, t_offset, SVA_RESULT_PASS_ACTIONS)
+   };
+   *passes = mir_build_fcall(g->mu, ident_new("__sv_sva_result"),
+                             t_offset, MIR_NULL_STAMP, pargs, 2);
+}
+
+static mir_value_t vlog_sva_result(vlog_gen_t *g, vlog_node_t v,
+                                   sva_result_t which)
+{
+   mir_type_t t_offset = mir_offset_type(g->mu);
+   mir_value_t args[] = {
+      vlog_sva_handle(g, v), mir_const(g->mu, t_offset, which)
+   };
+   return mir_build_fcall(g->mu, ident_new("__sv_sva_result"), t_offset,
+                          MIR_NULL_STAMP, args, 2);
+}
+
+static void vlog_lower_timing_ctrl(vlog_gen_t *g, vlog_node_t ctrl);
+
+static void vlog_lower_property(vlog_gen_t *g, vlog_node_t v, gen_stack_t *gs)
+{
+   mir_type_t t_offset = mir_offset_type(g->mu);
+
+   mir_block_t chk_bb = mir_add_block(g->mu);
+   mir_block_t flush_bb = mir_add_block(g->mu);
+   mir_block_t tick_bb = mir_add_block(g->mu);
+   mir_block_t done_bb = mir_add_block(g->mu);
+
+   mir_build_jump(g->mu, chk_bb);
+   mir_set_cursor(g->mu, chk_bb, MIR_APPEND);
+
+   mir_value_t flushing = mir_build_fcall(
+      g->mu, ident_new("__sv_sva_flushing"), t_offset, MIR_NULL_STAMP, NULL, 0);
+   mir_build_consume(g->mu, flushing);
+
+   mir_value_t zero_flag = mir_const(g->mu, t_offset, 0);
+   mir_build_cond(g->mu, mir_build_cmp(g->mu, MIR_CMP_EQ, flushing, zero_flag),
+                  tick_bb, flush_bb);
+
+   mir_set_cursor(g->mu, flush_bb, MIR_APPEND);
+
+   if (vlog_kind(v) == V_ASSERT) {
+      mir_value_t fargs[] = { vlog_sva_handle(g, v) };
+      mir_value_t unfinished = mir_build_fcall(
+         g->mu, ident_new("__sv_sva_finish"), t_offset, MIR_NULL_STAMP, fargs, 1);
+      vlog_lower_action(g, v, 1, unfinished, gs);
+   }
+
+   mir_build_jump(g->mu, done_bb);
+
+   mir_set_cursor(g->mu, tick_bb, MIR_APPEND);
+
+   sva_build_t b = { .g = g };
+   mir_value_t fails, passes, disable;
+   vlog_lower_sva_sample(g, v, &b, &fails, &passes, &disable);
+
+   mir_value_t handle = vlog_sva_handle(g, v);
+
+   // Assertion control tasks may have switched the fail statement off
+   mir_build_consume(g->mu, fails);
+   fails = vlog_sva_result(g, v, SVA_RESULT_FAIL_ACTIONS);
+
+   // The action blocks run in the Reactive region after the Observed
+   // region where all the assertions have been evaluated
+   mir_value_t pending = fails;
+   if (vlog_kind(v) == V_COVER ? vlog_conds(v) > 0
+       : (vlog_conds(v) > 0 && vlog_stmts(vlog_cond(v, 0)) > 0))
+      pending = mir_build_add(g->mu, t_offset, fails, passes);
+
+   if (b.ncalls > 0) {
+      mir_value_t eargs[] = { handle };
+      mir_value_t events = mir_build_fcall(
+         g->mu, ident_new("__sv_sva_nevents"), t_offset, MIR_NULL_STAMP,
+         eargs, 1);
+      pending = mir_build_add(g->mu, t_offset, pending, events);
+   }
+
+   mir_value_t fails_var = mir_add_var(g->mu, t_offset, MIR_NULL_STAMP,
+                                       ident_uniq("fails"), 0);
+   mir_value_t passes_var = mir_add_var(g->mu, t_offset, MIR_NULL_STAMP,
+                                        ident_uniq("passes"), 0);
+   mir_build_store(g->mu, fails_var, fails);
+   mir_build_store(g->mu, passes_var, passes);
+
+   vlog_lower_to_reactive(g, pending);
+
+   fails = mir_build_load(g->mu, fails_var);
+   passes = mir_build_load(g->mu, passes_var);
+
+   if (b.ncalls > 0)
+      vlog_lower_sva_calls(g, &b, v, gs);
+
+   if (vlog_kind(v) == V_COVER) {
+      mir_build_consume(g->mu, fails);
+      if (vlog_conds(v) > 0)
+         vlog_lower_action(g, v, 0, passes, gs);
+      else
+         mir_build_consume(g->mu, passes);
+   }
+   else {
+      if (vlog_conds(v) > 0 && vlog_stmts(vlog_cond(v, 0)) > 0)
+         vlog_lower_action(g, v, 0, passes, gs);
+
+      vlog_lower_action(g, v, 1, fails, gs);
+   }
+
+   mir_build_jump(g->mu, done_bb);
+
+   mir_set_cursor(g->mu, done_bb, MIR_APPEND);
+
+   g->sva_stmt = v;
+   g->sva_chk = chk_bb;
+}
+
+static void vlog_lower_expect(vlog_gen_t *g, vlog_node_t v, gen_stack_t *gs)
+{
+   // The property is evaluated from the first clock tick after the
+   // statement is reached and the process waits until it is decided
+
+   mir_type_t t_offset = mir_offset_type(g->mu);
+
+   vlog_node_t spec = vlog_value(v);
+
+   vlog_lower_property_init(g, v);
+
+   mir_block_t wait_bb = mir_add_block(g->mu);
+   mir_block_t test_bb = mir_add_block(g->mu);
+   mir_block_t pass_bb = mir_add_block(g->mu);
+   mir_block_t fail_bb = mir_add_block(g->mu);
+   mir_block_t done_bb = mir_add_block(g->mu);
+
+   mir_build_jump(g->mu, wait_bb);
+   mir_set_cursor(g->mu, wait_bb, MIR_APPEND);
+
+   gen_stack_t *saved = g->wait_gs;
+   g->wait_gs = gs;
+   vlog_lower_timing_ctrl(g, vlog_target(spec));
+   g->wait_gs = saved;
+
+   sva_build_t b = { .g = g };
+   mir_value_t fails, passes, disable;
+   vlog_lower_sva_sample(g, v, &b, &fails, &passes, &disable);
+
+   mir_value_t zero = mir_const(g->mu, t_offset, 0);
+   mir_build_cond(g->mu, mir_build_cmp(g->mu, MIR_CMP_EQ, fails, zero),
+                  test_bb, fail_bb);
+
+   mir_set_cursor(g->mu, test_bb, MIR_APPEND);
+
+   // A property which succeeds, vacuously or not, runs the pass statement
+   // (16.17) and one which was disabled ends the statement with neither
+   mir_build_consume(g->mu, passes);
+   mir_value_t succ = vlog_sva_result(g, v, SVA_RESULT_SUCCESSES);
+   mir_block_t idle_bb = mir_add_block(g->mu);
+   mir_build_cond(g->mu, mir_build_cmp(g->mu, MIR_CMP_NEQ, succ, zero),
+                  pass_bb, idle_bb);
+
+   mir_set_cursor(g->mu, idle_bb, MIR_APPEND);
+   mir_value_t iargs[] = { vlog_sva_handle(g, v) };
+   mir_value_t idle = mir_build_fcall(g->mu, ident_new("__sv_sva_idle"),
+                                      t_offset, MIR_NULL_STAMP, iargs, 1);
+   mir_build_cond(g->mu, mir_build_cmp(g->mu, MIR_CMP_NEQ, idle, zero),
+                  done_bb, wait_bb);
+
+   // Assertion control tasks may have switched the statements off
+   mir_set_cursor(g->mu, pass_bb, MIR_APPEND);
+   if (vlog_conds(v) > 0) {
+      mir_block_t run_bb = mir_add_block(g->mu);
+      mir_value_t on = vlog_sva_result(g, v, SVA_RESULT_PASS_ACTIONS);
+      mir_build_cond(g->mu, mir_build_cmp(g->mu, MIR_CMP_EQ, on, zero),
+                     done_bb, run_bb);
+      mir_set_cursor(g->mu, run_bb, MIR_APPEND);
+      vlog_lower_stmts(g, vlog_cond(v, 0), gs);
+   }
+   mir_build_jump(g->mu, done_bb);
+
+   mir_set_cursor(g->mu, fail_bb, MIR_APPEND);
+   mir_value_t on = vlog_sva_result(g, v, SVA_RESULT_FAIL_ACTIONS);
+   mir_value_t nfail = mir_build_select(
+      g->mu, t_offset, mir_build_cmp(g->mu, MIR_CMP_EQ, on, zero), zero,
+      mir_const(g->mu, t_offset, 1));
+   vlog_lower_action(g, v, 1, nfail, gs);
+   mir_build_jump(g->mu, done_bb);
+
+   mir_set_cursor(g->mu, done_bb, MIR_APPEND);
 }
 
 static void vlog_lower_assert(vlog_gen_t *g, vlog_node_t v, gen_stack_t *gs)
 {
+   if (vlog_subkind(v) == V_ASSERT_PROCEDURAL)
+      return;   // Checked by its own process
+
+   if (vlog_subkind(v) == V_ASSERT_EXPECT) {
+      vlog_lower_expect(g, v, gs);
+      return;
+   }
+
+   if (vlog_kind(vlog_value(v)) == V_PROP_SPEC) {
+      vlog_lower_property(g, v, gs);
+      return;
+   }
+
    mir_value_t expr = vlog_lower_rvalue(g, vlog_value(v));
    mir_value_t test = vlog_lower_test(g, expr);
    mir_value_t locus = mir_build_debug_locus(g->mu, vlog_to_object(v));
@@ -11095,6 +13528,26 @@ static void vlog_lower_assert(vlog_gen_t *g, vlog_node_t v, gen_stack_t *gs)
 
    const int nconds = vlog_conds(v);
    assert(nconds <= 2);
+
+   if (vlog_kind(v) == V_COVER) {
+      if (nconds == 0)
+         return;
+
+      mir_block_t then_bb = mir_add_block(g->mu);
+      mir_block_t exit_bb = mir_add_block(g->mu);
+
+      mir_build_cond(g->mu, test, then_bb, exit_bb);
+
+      mir_set_cursor(g->mu, then_bb, MIR_APPEND);
+
+      vlog_lower_stmts(g, vlog_cond(v, 0), gs);
+
+      if (!mir_block_finished(g->mu, MIR_NULL_BLOCK))
+         mir_build_jump(g->mu, exit_bb);
+
+      mir_set_cursor(g->mu, exit_bb, MIR_APPEND);
+      return;
+   }
 
    if (nconds == 0)
       mir_build_assert(g->mu, test, MIR_NULL_VALUE, MIR_NULL_VALUE, severity,
@@ -11935,6 +14388,235 @@ static mir_value_t vlog_string_concat(vlog_gen_t *g, vlog_node_t v)
       return vlog_drop_nuls(g, data, total);
 
    return vlog_wrap_array(g, data, total);
+}
+
+static bool vlog_is_ref_property(vlog_node_t decl)
+{
+   return vlog_kind(decl) == V_VAR_DECL && (vlog_flags(decl) & VLOG_F_REFVAR);
+}
+
+static bool vlog_is_const_ref(vlog_node_t port)
+{
+   return vlog_kind(port) == V_TF_PORT_DECL
+      && vlog_subkind(port) == V_PORT_REF && (vlog_flags(port) & VLOG_F_CONST);
+}
+
+static mir_type_t vlog_ref_cell_type(mir_unit_t *mu, const type_info_t *ti)
+{
+   // A reference to a variable which the holder only reads is the address
+   // of the variable or, for a signal which holds the value a bit at a time,
+   // the address of the first bit
+
+   mir_type_t t_bits = mir_pointer_type(mu, mir_int_type(mu, 0, 3));
+   mir_type_t fields[] = { mir_pointer_type(mu, ti->type), t_bits };
+   mir_type_t t_rec = mir_record_type(mu, ident_new("ref$cell"), fields, 2);
+   return mir_access_type(mu, t_rec);
+}
+
+static mir_value_t vlog_read_ref_cell(vlog_gen_t *g, mir_value_t cell,
+                                      const type_info_t *ti)
+{
+   // Pointer to a copy of the current value of the variable
+
+   mir_type_t t_ptr = mir_pointer_type(g->mu, ti->type);
+   mir_value_t tmp = mir_add_var(g->mu, ti->type, ti->stamp,
+                                 ident_uniq("ref"), MIR_VAR_TEMP);
+
+   mir_value_t rec = mir_build_all(g->mu, cell);
+   mir_value_t addr = mir_build_load(g->mu, mir_build_record_ref(g->mu, rec, 0));
+   mir_value_t bits = mir_build_load(g->mu, mir_build_record_ref(g->mu, rec, 1));
+
+   mir_block_t addr_bb = mir_add_block(g->mu);
+   mir_block_t bits_bb = mir_add_block(g->mu);
+   mir_block_t done_bb = mir_add_block(g->mu);
+
+   mir_build_cond(g->mu, mir_build_cmp(g->mu, MIR_CMP_EQ, addr,
+                                       mir_build_null(g->mu, t_ptr)),
+                  bits_bb, addr_bb);
+
+   mir_set_cursor(g->mu, addr_bb, MIR_APPEND);
+   mir_build_store(g->mu, tmp, mir_build_load(g->mu, addr));
+   mir_build_jump(g->mu, done_bb);
+
+   mir_set_cursor(g->mu, bits_bb, MIR_APPEND);
+   mir_value_t packed;
+   if (ti->size == 1) {
+      mir_value_t bit = mir_build_load(g->mu, bits);
+      packed = mir_build_pack(g->mu, ti->type, bit);
+   }
+   else
+      packed = mir_build_pack(g->mu, ti->type, bits);
+   mir_build_store(g->mu, tmp, packed);
+   mir_build_jump(g->mu, done_bb);
+
+   mir_set_cursor(g->mu, done_bb, MIR_APPEND);
+   return tmp;
+}
+
+static mir_value_t vlog_lower_ref_cell(vlog_gen_t *g, vlog_node_t actual,
+                                       const type_info_t *ti)
+{
+   mir_type_t t_cell = vlog_ref_cell_type(g->mu, ti);
+   mir_type_t t_rec = mir_get_elem(g->mu, t_cell);
+   mir_type_t t_ptr = mir_pointer_type(g->mu, ti->type);
+   mir_type_t t_bits = mir_pointer_type(g->mu, mir_int_type(g->mu, 0, 3));
+
+   // Pass on a reference which the caller itself holds
+   vlog_node_t decl = NULL;
+   if (vlog_kind(actual) == V_REF && vlog_has_ref(actual))
+      decl = vlog_ref(actual);
+   else if (vlog_kind(actual) == V_MEMBER_REF)
+      decl = vlog_member_decl(actual);
+
+   if (decl != NULL && vlog_is_const_ref(decl)) {
+      int hops;
+      mir_value_t var = mir_search_object(g->mu, decl, &hops);
+      if (!mir_is_null(var)) {
+         if (hops > 0)
+            var = mir_build_var_upref(g->mu, hops, var.id);
+         return mir_build_load(g->mu, var);
+      }
+   }
+   else if (decl != NULL && vlog_is_ref_property(decl)) {
+      g->ref_bind = true;
+      mir_value_t link = vlog_lower_select(g, actual).obj;
+      g->ref_bind = false;
+      return mir_build_load(g->mu, link);
+   }
+
+   mir_value_t addr = mir_build_null(g->mu, t_ptr);
+   mir_value_t bits = mir_build_null(g->mu, t_bits);
+   bool tracked = false;
+
+   switch (vlog_kind(actual)) {
+   case V_REF:
+   case V_MEMBER_REF:
+   case V_BIT_SELECT:
+      {
+         vlog_select_t sel = vlog_lower_select(g, actual);
+         if (mir_is_signal(g->mu, sel.obj)) {
+            mir_value_t data = mir_build_resolved(g->mu, sel.obj);
+            mir_value_t first = mir_build_array_ref(g->mu, data, sel.dst_offset);
+            if (mir_equals(mir_get_type(g->mu, first), t_ptr)) {
+               addr = first;
+               tracked = true;
+            }
+            else if (sel.size == ti->size && mir_equals(mir_get_type(g->mu,
+                                                                     first),
+                                                        t_bits)) {
+               bits = first;
+               tracked = true;
+            }
+         }
+         else if (mir_is(g->mu, sel.obj, MIR_TYPE_POINTER)
+                  && !mir_points_to(g->mu, sel.obj, MIR_TYPE_SIGNAL)
+                  && mir_equals(mir_get_type(g->mu, sel.obj), t_ptr)) {
+            addr = sel.obj;
+            tracked = true;
+         }
+      }
+      break;
+   default:
+      break;
+   }
+
+   if (!tracked) {
+      // The value of an expression has nothing to track
+      mir_type_t t_offset = mir_offset_type(g->mu);
+      mir_value_t value = vlog_lower_with_context(g, actual, ti->type);
+      addr = vlog_alloc_array(g, ti->type, mir_const(g->mu, t_offset, 1));
+      mir_build_store(g->mu, addr, vlog_lower_cast(g, ti->type, value));
+   }
+
+   mir_value_t acc = mir_build_new(g->mu, t_rec, MIR_NULL_STAMP,
+                                   MIR_NULL_VALUE);
+   mir_value_t rec = mir_build_all(g->mu, acc);
+   mir_build_store(g->mu, mir_build_record_ref(g->mu, rec, 0), addr);
+   mir_build_store(g->mu, mir_build_record_ref(g->mu, rec, 1), bits);
+   return acc;
+}
+
+static mir_value_t vlog_link_property(vlog_gen_t *g, mir_value_t base,
+                                      vlog_node_t decl, ident_t name,
+                                      const type_info_t *ti)
+{
+   // A property holding a reference stores the address of its variable
+
+   if (!vlog_is_ref_property(decl))
+      return mir_build_link_var(g->mu, base, name, ti->type);
+
+   mir_value_t link = mir_build_link_var(g->mu, base, name,
+                                         vlog_ref_cell_type(g->mu, ti));
+   if (g->ref_bind)
+      return link;
+
+   return vlog_read_ref_cell(g, mir_build_load(g->mu, link), ti);
+}
+
+static mir_value_t vlog_lower_decl_ptr(vlog_gen_t *g, vlog_node_t decl)
+{
+   int hops;
+   mir_value_t var = mir_search_object(g->mu, decl, &hops);
+
+   if ((vlog_kind(decl) == V_PARAM_DECL || vlog_kind(decl) == V_LOCALPARAM)
+       && vlog_ranges(decl) > 0) {
+      // A parameter has no storage so the array is built on each use
+      if (mir_is_null(var) || hops > 0)
+         var = vlog_add_local_var(g, decl, vlog_ident(decl));
+
+      vlog_store_local_init(g, decl, var);
+      return var;
+   }
+
+   if (!mir_is_null(var)) {
+      mir_value_t ptr = var;
+      if (hops > 0)
+         ptr = mir_build_var_upref(g->mu, hops, var.id);
+
+      // Ports passed by reference hold the address of the actual
+      // as do variables shared with the parent of a forked process
+      if (vlog_is_ref_property(decl) && !g->ref_bind)
+         return vlog_read_ref_cell(g, mir_build_load(g->mu, ptr),
+                                   vlog_type_info(g, vlog_type(decl)));
+
+      if (vlog_is_ref_property(decl))
+         return ptr;
+
+      if (vlog_kind(decl) == V_TF_PORT_DECL && vlog_is_const_ref(decl)
+          && !vlog_is_fixed_unpacked(decl))
+         return vlog_read_ref_cell(g, mir_build_load(g->mu, ptr),
+                                   vlog_type_info(g, vlog_type(decl)));
+
+      if ((vlog_kind(decl) == V_TF_PORT_DECL
+           || vlog_kind(decl) == V_LOCAL_DECL)
+          && mir_points_to(g->mu, ptr, MIR_TYPE_POINTER))
+         return mir_build_load(g->mu, ptr);
+
+      return ptr;
+   }
+
+   const vlog_kind_t kind = vlog_kind(decl);
+   const type_info_t *ti = vlog_type_info(g, vlog_type(decl));
+
+   if (kind == V_VAR_DECL && vlog_has_ident2(decl)) {
+      // Declared outside any module, or a static class property
+      ident_t scope = vlog_ident2(decl);
+      if (vlog_has_ref(decl))
+         vlog_note_spec(vlog_ref(decl));
+      vlog_defer_scope(g->mir, scope);
+
+      ident_t name = vlog_ident(decl);
+      if (vlog_has_ref(decl))
+         name = vlog_static_name(vlog_ref(decl), name);
+
+      mir_value_t pkg = mir_build_package_init(g->mu, scope, MIR_NULL_VALUE);
+      return mir_build_link_var(g->mu, pkg, name, ti->type);
+   }
+   else if (kind == V_VAR_DECL && !mir_is_null(g->this_val))
+      return vlog_link_property(g, g->this_val, decl, vlog_ident(decl), ti);
+
+   mir_dump(g->mu);
+   fatal_trace("missing variable for %pK %pi", decl, vlog_ident(decl));
 }
 
 static mir_value_t vlog_lower_queue_slice(vlog_gen_t *g, vlog_node_t v)
@@ -14944,6 +17626,20 @@ static bool vlog_method_is_virtual(vlog_node_t decl)
       && vlog_method_is_virtual(over);
 }
 
+static mir_type_t vlog_port_param_type(mir_unit_t *mu, vlog_node_t port,
+                                        const type_info_t *pti)
+{
+   // An unpacked array is always passed by address
+
+   if (vlog_is_const_ref(port) && !vlog_is_fixed_unpacked(port))
+      return vlog_ref_cell_type(mu, pti);
+
+   if (vlog_subkind(port) != V_PORT_INPUT || vlog_is_fixed_unpacked(port))
+      return mir_pointer_type(mu, pti->type);
+
+   return pti->type;
+}
+
 static mir_value_t vlog_lower_array_arg(vlog_gen_t *g, vlog_node_t port,
                                          vlog_node_t actual,
                                          const type_info_t *eti,
@@ -15106,6 +17802,282 @@ static void vlog_store_array_arg(vlog_gen_t *g, vlog_node_t target,
 
    mir_value_t flat = vlog_load_flat_array(g, tmp, count, eti, false);
    vlog_assign_variable(g, target, flat, NULL);
+}
+
+typedef struct {
+   mir_value_t  tmp;
+   vlog_node_t  target;
+   bool         array;
+} copyback_t;
+
+static bool vlog_dpi_open_port(vlog_node_t subr, vlog_node_t port)
+{
+   // A formal argument of a DPI import with an unsized dimension has the
+   // size of the actual argument
+
+   return (vlog_flags(subr) & VLOG_F_DPI) && vlog_is_open_array(port);
+}
+
+static void vlog_dpi_packed_bounds(vlog_node_t type, unsigned width,
+                                   int64_t *left, int64_t *right)
+{
+   *left = (int64_t)width - 1;
+   *right = 0;
+
+   if (type == NULL)
+      return;
+
+   while (vlog_kind(type) == V_TYPE_DECL && vlog_has_type(type))
+      type = vlog_type(type);
+
+   if (vlog_kind(type) != V_DATA_TYPE || vlog_ranges(type) != 1)
+      return;
+
+   vlog_node_t r = vlog_range(type, 0);
+   int64_t l, rr;
+   if (vlog_subkind(r) != V_DIM_UNSIZED && vlog_bounds(r, &l, &rr)
+       && (l > rr ? l - rr : rr - l) + 1 == width) {
+      *left = l;
+      *right = rr;
+   }
+}
+
+static mir_value_t vlog_lower_dpi_open_arg(vlog_gen_t *g, vlog_node_t port,
+                                           vlog_node_t actual,
+                                           copyback_t *back, int *nback)
+{
+   // Build the description of an actual argument for a formal with unsized
+   // dimensions which foreign code reaches through an open array handle
+
+   mir_type_t t_offset = mir_offset_type(g->mu);
+
+   const v_port_kind_t dir = vlog_subkind(port);
+
+   vlog_node_t felem;
+   const int fdims = vlog_open_dims(port, &felem);
+   const bool open_packed = vlog_has_open_packed(felem);
+
+   vlog_node_t fbase = felem;
+   while ((vlog_kind(fbase) == V_TYPE_DECL || vlog_kind(fbase) == V_ENUM_DECL)
+          && vlog_has_type(fbase))
+      fbase = vlog_type(fbase);
+
+   const bool is_data = vlog_kind(fbase) == V_DATA_TYPE;
+
+   if (dir == V_PORT_REF)
+      fatal_at(vlog_loc(port), "sorry, DPI arguments of this kind are not "
+               "supported");
+
+   if (vlog_kind(actual) == V_PATTERN_EXPR || vlog_kind(actual) == V_CONCAT)
+      fatal_at(vlog_loc(actual), "sorry, this value cannot be passed to an "
+               "open array argument");
+
+   const bool writes = dir == V_PORT_OUTPUT || dir == V_PORT_INOUT;
+
+   vlog_node_t adims[MAX_UNPACKED_DIMS];
+   const int andims = vlog_unpacked_dims(actual, adims);
+
+   const type_info_t *eti = NULL;
+   mir_value_t data = MIR_NULL_VALUE;
+   int64_t lefts[MAX_UNPACKED_DIMS], rights[MAX_UNPACKED_DIMS];
+   mir_value_t sizes[MAX_UNPACKED_DIMS];
+   mir_value_t rvals[MAX_UNPACKED_DIMS];
+   int ndims = 0;
+   mir_value_t packed_value = MIR_NULL_VALUE;
+
+   if (andims > 0) {
+      if (andims != fdims)
+         fatal_at(vlog_loc(actual), "sorry, this value cannot be passed to an "
+                  "open array argument");
+
+      eti = vlog_array_elem_info(g, actual);
+      ndims = andims;
+
+      for (int i = 0; i < ndims; i++) {
+         if (!vlog_bounds(adims[i], &lefts[i], &rights[i]))
+            fatal_at(vlog_loc(actual), "sorry, the bounds of this array must "
+                     "be constants to pass it to an open array argument");
+         sizes[i] = mir_const(g->mu, t_offset, vlog_size(adims[i]));
+      }
+
+      const unsigned count = vlog_unpacked_count(adims, andims);
+      const mir_class_t eclass = mir_get_class(g->mu, eti->type);
+
+      g->for_write = writes;
+      vlog_select_t sel = vlog_lower_select(g, actual);
+      g->for_write = false;
+
+      if (eclass == MIR_TYPE_REAL) {
+         mir_value_t ptr = sel.obj;
+         if (mir_is_signal(g->mu, ptr))
+            ptr = mir_build_resolved(g->mu, ptr);
+         data = mir_build_array_ref(g->mu, ptr, sel.dst_offset);
+      }
+      else if (eclass != MIR_TYPE_VEC2 && eclass != MIR_TYPE_VEC4)
+         fatal_at(vlog_loc(actual), "sorry, an array of this type cannot be "
+                  "passed to an open array argument");
+      else if (mir_points_to_vector(g->mu, sel.obj))
+         data = mir_build_array_ref(g->mu, sel.obj, sel.dst_offset);
+      else {
+         // An array held in a signal is copied in and out
+         mir_type_t t_array = mir_carray_type(g->mu, count, eti->type);
+         mir_value_t tmp = mir_add_var(
+            g->mu, t_array, eti->stamp, ident_uniq("%s.tmp", istr(vlog_ident(port))),
+            0);
+         data = mir_build_array_ref(g->mu, tmp, mir_const(g->mu, t_offset, 0));
+
+         if (dir == V_PORT_OUTPUT)
+            mir_build_set(g->mu, tmp, vlog_lower_default_value(g, eti),
+                          mir_const(g->mu, t_offset, count));
+         else {
+            mir_type_t t_flat = mir_vec4_type(g->mu, count * eti->size, false);
+            vlog_store_flat_array(
+               g, data, count, eti,
+               vlog_lower_cast(g, t_flat, vlog_lower_rvalue(g, actual)));
+         }
+
+         if (writes)
+            back[(*nback)++] = (copyback_t){ data, actual, true };
+      }
+
+      for (int i = 0; i < ndims; i++)
+         rvals[i] = MIR_NULL_VALUE;
+   }
+   else {
+      vlog_node_t atype = vlog_get_type(actual);
+      if (atype != NULL && vlog_kind(atype) == V_DATA_TYPE
+          && (vlog_subkind(atype) == DT_DYNARRAY
+              || vlog_subkind(atype) == DT_QUEUE)) {
+         if (fdims != 1 || vlog_subkind(atype) != DT_DYNARRAY
+             || vlog_ranges(atype) != 0)
+            fatal_at(vlog_loc(actual), "sorry, this value cannot be passed to "
+                     "an open array argument");
+
+         eti = vlog_type_info(g, vlog_type(atype));
+         const mir_class_t eclass = mir_get_class(g->mu, eti->type);
+         if (eclass != MIR_TYPE_REAL && eclass != MIR_TYPE_VEC2
+             && eclass != MIR_TYPE_VEC4)
+            fatal_at(vlog_loc(actual), "sorry, an array of this type cannot "
+                     "be passed to an open array argument");
+
+         mir_value_t value = vlog_lower_rvalue(g, actual);
+         data = mir_build_unwrap(g->mu, value);
+
+         mir_value_t len = mir_build_uarray_len(g->mu, value, 0);
+         ndims = 1;
+         lefts[0] = 0;
+         rights[0] = 0;
+         sizes[0] = len;
+         rvals[0] = mir_build_sub(g->mu, t_offset, len,
+                                  mir_const(g->mu, t_offset, 1));
+      }
+      else {
+         if (fdims != 0)
+            fatal_at(vlog_loc(actual), "sorry, this value cannot be passed to "
+                     "an open array argument");
+
+         mir_value_t value = vlog_lower_rvalue(g, actual);
+         if (!mir_is_vector(g->mu, value))
+            fatal_at(vlog_loc(actual), "sorry, this value cannot be passed to "
+                     "an open array argument");
+
+         mir_type_t vtype = mir_get_type(g->mu, value);
+         const unsigned width = mir_get_size(g->mu, vtype);
+         const bool issigned = mir_get_signed(g->mu, vtype);
+         const bool two_state = is_data && vlog_is_two_state(fbase);
+         mir_type_t type = two_state ? mir_vec2_type(g->mu, width, issigned)
+            : mir_vec4_type(g->mu, width, issigned);
+
+         mir_value_t tmp = mir_add_var(
+            g->mu, type, MIR_NULL_STAMP,
+            ident_uniq("%s.tmp", istr(vlog_ident(port))), 0);
+         if (dir != V_PORT_OUTPUT)
+            mir_build_store(g->mu, tmp, vlog_lower_cast(g, type, value));
+         else
+            mir_build_store(g->mu, tmp, vlog_lower_x(g, type));
+
+         if (writes)
+            back[(*nback)++] = (copyback_t){ tmp, actual, false };
+
+         data = tmp;
+         packed_value = value;
+      }
+   }
+
+   // The element kind is from the formal argument and the size from the
+   // actual argument
+
+   char kind;
+   unsigned width;
+   bool issigned = false;
+   int64_t pleft = 0, pright = 0;
+   bool has_packed = false;
+
+   if (!mir_is_null(packed_value)) {
+      mir_type_t vtype = mir_get_type(g->mu, packed_value);
+      width = mir_get_size(g->mu, vtype);
+      issigned = mir_get_signed(g->mu, vtype);
+      const bool two_state = is_data && vlog_is_two_state(fbase);
+      kind = two_state ? 'B' : 'L';
+      has_packed = true;
+      vlog_dpi_packed_bounds(vlog_get_type(actual), width, &pleft, &pright);
+   }
+   else {
+      const mir_class_t eclass = mir_get_class(g->mu, eti->type);
+      width = eti->size;
+
+      if (eclass == MIR_TYPE_REAL) {
+         kind = is_data && vlog_subkind(fbase) == DT_SHORTREAL ? 'f' : 'r';
+         width = 0;
+      }
+      else {
+         issigned = mir_get_signed(g->mu, eti->type);
+         const bool two_state = eclass == MIR_TYPE_VEC2;
+         if (is_data && vlog_subkind(fbase) >= DT_BYTE
+             && vlog_subkind(fbase) <= DT_LONGINT && two_state)
+            kind = 'i';
+         else if (width == 1 && is_data && vlog_ranges(fbase) == 0
+                  && !open_packed)
+            kind = two_state ? 'b' : 'l';
+         else {
+            kind = two_state ? 'B' : 'L';
+            has_packed = true;
+            vlog_dpi_packed_bounds(eti->node, width, &pleft, &pright);
+         }
+      }
+   }
+
+   if (kind != 'B' && kind != 'L') {
+      has_packed = false;
+      pleft = pright = 0;
+   }
+
+   mir_value_t args[9 + 3 * MAX_UNPACKED_DIMS];
+   int nargs = 0;
+   args[nargs++] = mir_const(g->mu, t_offset, kind);
+   args[nargs++] = mir_const(g->mu, t_offset, width);
+   args[nargs++] = mir_const(g->mu, t_offset, issigned);
+   args[nargs++] = mir_const(g->mu, t_offset,
+                             dir == V_PORT_INPUT ? 0
+                             : dir == V_PORT_OUTPUT ? 1 : 2);
+   args[nargs++] = data;
+   args[nargs++] = mir_const(g->mu, t_offset, ndims);
+   args[nargs++] = mir_const(g->mu, t_offset, has_packed);
+   args[nargs++] = mir_const(g->mu, t_offset, pleft);
+   args[nargs++] = mir_const(g->mu, t_offset, pright);
+
+   for (int i = 0; i < ndims; i++) {
+      args[nargs++] = mir_is_null(rvals[i])
+         ? mir_const(g->mu, t_offset, lefts[i]) : mir_const(g->mu, t_offset, 0);
+      args[nargs++] = mir_is_null(rvals[i])
+         ? mir_const(g->mu, t_offset, rights[i]) : rvals[i];
+      args[nargs++] = sizes[i];
+   }
+
+   mir_value_t res = mir_build_fcall(g->mu, ident_new("__sv_dpi_oa_make"),
+                                     t_offset, MIR_NULL_STAMP, args, nargs);
+   mir_build_consume(g->mu, res);
+   return res;
 }
 
 static mir_value_t vlog_lower_subr_call(vlog_gen_t *g, vlog_node_t decl,
@@ -15887,7 +18859,77 @@ static void vlog_lower_fork(vlog_gen_t *g, vlog_node_t v, gen_stack_t *gs)
          }
       }
 
-      ACLEAR(temps);
+      hash_free(set);
+      hash_free(written);
+      hash_put(sv_fork_caps, s, caps);
+
+      if (sv_fork_up == NULL)
+         sv_fork_up = hash_new(16);
+
+      fork_up_t *up = xmalloc(sizeof(fork_up_t));
+      up->fork = v;
+      up->up = g->fork_root;
+      up->blocks = NULL;
+      up->nblocks = 0;
+      for (gen_stack_t *it = gs; it != NULL; it = it->up) {
+         if (it->block != NULL) {
+            up->blocks = xrealloc_array(up->blocks, up->nblocks + 1,
+                                        sizeof(ident_t));
+            up->blocks[up->nblocks++] = it->block->name;
+         }
+      }
+      hash_put(sv_fork_up, s, up);
+
+      ident_t parent = mir_get_parent(g->mu);
+      mir_defer(g->mir, cap_name, parent, MIR_UNIT_PROTECTED,
+                vlog_lower_capture, vlog_to_object(s));
+      mir_defer(g->mir, base, cap_name, MIR_UNIT_PROCESS,
+                vlog_lower_fork_process, vlog_to_object(s));
+
+      mir_type_t t_frame = mir_context_type(g->mu, cap_name);
+      mir_value_t frame =
+         mir_build_protected_init(g->mu, t_frame,
+                                  mir_build_context_upref(g->mu, 1),
+                                  MIR_NULL_VALUE, MIR_NULL_VALUE);
+
+      for (int j = 0; j < caps->count; j++) {
+         vlog_node_t d = caps->decls[j];
+         const type_info_t *ti = vlog_type_info(g, vlog_type(d));
+         int hops;
+         mir_value_t var = mir_search_object(g->mu, d, &hops);
+         const bool is_ref = mir_points_to(g->mu, var, MIR_TYPE_POINTER);
+         if (is_ref && !caps->by_ref[j])
+            fatal_at(vlog_loc(s), "sorry, references cannot be captured by "
+                     "a process forked with join_none");
+
+         ident_t field = ident_sprintf("%s$%d", istr(vlog_ident(d)), j);
+
+         if (caps->by_ref[j]) {
+            mir_value_t link = mir_build_link_var(
+               g->mu, frame, field, mir_pointer_type(g->mu, ti->type));
+            mir_build_store(g->mu, link,
+                            is_ref ? mir_build_load(g->mu, var) : var);
+         }
+         else {
+            mir_value_t link = mir_build_link_var(g->mu, frame, field,
+                                                  ti->type);
+            mir_build_store(g->mu, link, mir_build_load(g->mu, var));
+         }
+      }
+
+      mir_value_t args[] = { frame };
+      mir_value_t closure = mir_build_closure(g->mu, base, t_offset, args, 1);
+
+      const int64_t label = vlog_kind(s) == V_SEQ_BLOCK && vlog_has_ident(s)
+         ? vlog_label_hash(vlog_ident(s)) : 0;
+      mir_value_t spawn_args[] = {
+         closure, mir_build_load(g->mu, group_var),
+         mir_const(g->mu, t_offset, label)
+      };
+      mir_value_t res = mir_build_fcall(g->mu, ident_new("__sv_spawn"),
+                                        t_offset, MIR_NULL_STAMP,
+                                        spawn_args, 3);
+      mir_build_consume(g->mu, res);
    }
 
    if (nstmts > 0 && kind != V_FORK_JOIN_NONE)
@@ -20189,6 +23231,23 @@ static mir_value_t vlog_lower_std_randomize(vlog_gen_t *g, vlog_node_t v)
    return vlog_offset_to_int(g, ok);
 }
 
+static vlog_node_t vlog_crv_current_class(vlog_gen_t *g)
+{
+   ident_t it = mir_get_name(g->mu, MIR_NULL_VALUE);
+   while (it != NULL) {
+      vlog_node_t c = hash_get(sv_classes, it);
+      if (c != NULL)
+         return c;
+
+      if (it == mir_get_name(g->mu, MIR_NULL_VALUE))
+         it = mir_get_parent(g->mu);
+      else
+         it = mir_get_shape_parent(mir_get_shape(g->mir, it));
+   }
+
+   should_not_reach_here();
+}
+
 static mir_value_t vlog_lower_crv_mode(vlog_gen_t *g, vlog_node_t v)
 {
    // rand_mode and constraint_mode hold a bit for each item
@@ -20685,6 +23744,117 @@ static void vlog_lower_namespace_statics(vlog_gen_t *g, vlog_node_t container)
    }
 }
 
+static void vlog_lower_dpi_export(vlog_gen_t *g, vlog_node_t exp,
+                                  vlog_node_t scope, ident_t qual,
+                                  mir_value_t self)
+{
+   // Register a subroutine which foreign code can call with the context
+   // of this scope
+
+   vlog_node_t sub = NULL;
+   const int ndecls = vlog_decls(scope);
+   for (int i = 0; i < ndecls && sub == NULL; i++) {
+      vlog_node_t d = vlog_decl(scope, i);
+      if ((vlog_kind(d) == V_FUNC_DECL || vlog_kind(d) == V_TASK_DECL)
+          && !(vlog_flags(d) & VLOG_F_DPI) && vlog_ident(d) == vlog_ident(exp))
+         sub = d;
+   }
+
+   if (sub == NULL)
+      fatal_at(vlog_loc(exp), "no function or task named %pI to export",
+               vlog_ident(exp));
+
+   const bool is_task = vlog_kind(sub) == V_TASK_DECL;
+   const int nports = vlog_ports(sub);
+   if (nports > 40)
+      fatal_at(vlog_loc(exp), "sorry, an exported subroutine with more than "
+               "40 arguments is not supported");
+
+   LOCAL_TEXT_BUF tb = tb_new();
+   tb_append(tb, is_task ? 'T' : 'F');
+   tb_append(tb, ' ');
+   tb_cat(tb, istr(vlog_ident3(exp)));
+   tb_append(tb, ' ');
+
+   if (!is_task && vlog_has_type(sub))
+      vlog_dpi_kind(g, exp, vlog_type(sub), tb);
+   else
+      tb_append(tb, 'v');
+
+   for (int i = 0; i < nports; i++) {
+      vlog_node_t port = vlog_port(sub, i);
+
+      if (vlog_subkind(port) == V_PORT_REF || vlog_is_fixed_unpacked(port))
+         fatal_at(vlog_loc(port), "sorry, DPI arguments of this kind are "
+                  "not supported");
+
+      char dir;
+      switch (vlog_subkind(port)) {
+      case V_PORT_INPUT: dir = '<'; break;
+      case V_PORT_OUTPUT: dir = '>'; break;
+      default: dir = '='; break;
+      }
+
+      tb_append(tb, ' ');
+      tb_append(tb, dir);
+      vlog_dpi_kind(g, port, vlog_type(port), tb);
+   }
+
+   tb_cat(tb, " @");
+   tb_cat(tb, istr(qual));
+
+   mir_type_t t_offset = mir_offset_type(g->mu);
+
+   const char *text = tb_get(tb);
+   ident_t unit = vlog_kind(scope) == V_INST_BODY
+      ? ident_prefix(vlog_ident2(sub), vlog_ident(sub), '.')
+      : vlog_subr_name(sub);
+   const char *uname = istr(unit);
+
+   mir_value_t sig = mir_build_address_of(g->mu, mir_const_string(g->mu, text));
+   mir_value_t name = mir_build_address_of(g->mu,
+                                           mir_const_string(g->mu, uname));
+
+   mir_value_t args[] = {
+      self, sig, mir_const(g->mu, t_offset, strlen(text)), name,
+      mir_const(g->mu, t_offset, strlen(uname)),
+   };
+
+   mir_value_t res = mir_build_fcall(g->mu, ident_new("__sv_dpi_export"),
+                                     t_offset, MIR_NULL_STAMP, args,
+                                     ARRAY_LEN(args));
+   mir_build_consume(g->mu, res);
+}
+
+static void vlog_lower_namespace(mir_unit_t *mu, object_t *obj)
+{
+   vlog_node_t v = vlog_from_object(obj);
+
+   vlog_gen_t g = {
+      .mu  = mu,
+      .mir = mir_get_context(mu),
+   };
+
+   vlog_lower_namespace_vars(&g, v);
+
+   // Exports are registered first so that foreign code called from a static
+   // initialiser can use them
+   const int ndecls = vlog_decls(v);
+   for (int i = 0; i < ndecls; i++) {
+      vlog_node_t d = vlog_decl(v, i);
+      if (vlog_kind(d) == V_DPI_EXPORT)
+         vlog_lower_dpi_export(&g, d, v, mir_get_name(mu, MIR_NULL_VALUE),
+                               mir_build_context_upref(mu, 0));
+   }
+
+   vlog_lower_namespace_statics(&g, v);
+
+   mir_build_return(mu, MIR_NULL_VALUE);
+
+   mir_optimise(mu, MIR_PASS_O0);
+   vlog_lower_cleanup(&g);
+}
+
 static void vlog_lower_spec_scope(mir_unit_t *mu, object_t *obj)
 {
    vlog_node_t c = vlog_from_object(obj);
@@ -20702,6 +23872,18 @@ static void vlog_lower_spec_scope(mir_unit_t *mu, object_t *obj)
 
    mir_optimise(mu, MIR_PASS_O0);
    vlog_lower_cleanup(&g);
+}
+
+static void vlog_lower_class_statics(vlog_gen_t *g, vlog_node_t c)
+{
+   const int ndecls = vlog_decls(c);
+   for (int i = 0; i < ndecls; i++) {
+      vlog_node_t d = vlog_decl(c, i);
+      if (vlog_kind(d) == V_VAR_DECL && (vlog_flags(d) & VLOG_F_STATIC))
+         vlog_lower_one_local(g, d, vlog_static_name(c, vlog_ident(d)));
+      else if (vlog_kind(d) == V_CLASS_DECL && !(vlog_flags(d) & VLOG_F_SPEC))
+         vlog_lower_class_statics(g, d);
+   }
 }
 
 static void vlog_check_context(mir_context_t *mc)
@@ -20925,6 +24107,9 @@ static void vlog_lower_seq_block(vlog_gen_t *g, vlog_node_t v, gen_stack_t *gs)
          .name    = vlog_ident(v),
          .exit_bb = exit_bb,
       };
+      vlog_visit(v, vlog_block_has_fork_cb, &block.has_fork);
+      if (vlog_flags(v) & VLOG_F_NAMED_DISABLE)
+         block.has_fork = true;   // Another process may disable it
 
       gen_stack_t this = vlog_push_block(gs, &block);
 
@@ -21166,6 +24351,24 @@ static void vlog_lower_always(vlog_gen_t *g, vlog_node_t v)
       if (vlog_kind(ctrl) == V_EVENT_CONTROL && !vlog_is_event_wait(ctrl)
           && !vlog_is_polled_control(ctrl))
          vlog_lower_trigger_var(g, ctrl);
+
+      if (vlog_stmts(s0) > 0) {
+         vlog_node_t s1 = vlog_stmt(s0, 0);
+         switch (vlog_kind(s1)) {
+         case V_ASSERT:
+         case V_ASSUME:
+         case V_COVER:
+            if (vlog_kind(vlog_value(s1)) == V_PROP_SPEC) {
+               vlog_node_t spec = vlog_value(s1);
+               g->sva_clock = vlog_has_target(spec) ? vlog_target(spec) : ctrl;
+               vlog_lower_property_init(g, s1);
+               g->sva_clock = NULL;
+            }
+            break;
+         default:
+            break;
+         }
+      }
    }
 
    mir_build_return(g->mu, MIR_NULL_VALUE);
@@ -22542,6 +25745,15 @@ static void vlog_lower_tcheck(vlog_gen_t *g, vlog_node_t tcheck)
 
 static void vlog_lower_cleanup(vlog_gen_t *g)
 {
+   if (g->past != NULL) {
+      hash_iter_t it = HASH_BEGIN;
+      const void *key;
+      void *value;
+      while (hash_iter(g->past, &it, &key, &value))
+         free(value);
+      hash_free(g->past);
+   }
+
    if (g->temps != NULL)
       ihash_free(g->temps);
 }
@@ -23522,6 +26734,69 @@ static void vlog_lower_genvar_decl(vlog_gen_t *g, vlog_node_t v)
    mir_put_object(g->mu, v, var);
 }
 
+static mir_value_t vlog_add_local_var(vlog_gen_t *g, vlog_node_t d,
+                                      ident_t name)
+{
+   const type_info_t *ti = vlog_type_info(g, vlog_type(d));
+
+   const int nelems = vlog_ranges(d) > 0 ? vlog_size(d) : 1;
+   mir_type_t type = ti->type;
+   if (nelems > 1) {
+      const mir_class_t eclass = mir_get_class(g->mu, ti->type);
+      vlog_node_t etype = vlog_get_type(vlog_type(d));
+      const bool is_string = etype != NULL && vlog_kind(etype) == V_DATA_TYPE
+         && vlog_subkind(etype) == DT_STRING;
+
+      if ((eclass != MIR_TYPE_VEC2 && eclass != MIR_TYPE_VEC4
+           && eclass != MIR_TYPE_REAL && eclass != MIR_TYPE_UARRAY)
+          || is_string)
+         fatal_at(vlog_loc(d), "sorry, unpacked arrays of this element type "
+                  "are not supported");
+
+      type = mir_carray_type(g->mu, nelems, ti->type);
+   }
+
+   if (vlog_is_ref_property(d))
+      type = vlog_ref_cell_type(g->mu, ti);
+
+   mir_value_t var = mir_add_var(g->mu, type, ti->stamp, name, 0);
+   mir_put_object(g->mu, d, var);
+   return var;
+}
+
+static void vlog_store_local_default(vlog_gen_t *g, vlog_node_t d,
+                                     mir_value_t var)
+{
+   const type_info_t *ti = vlog_type_info(g, vlog_type(d));
+   const int nelems = vlog_ranges(d) > 0 ? vlog_size(d) : 1;
+
+   if (vlog_is_ref_property(d)) {
+      mir_build_store(g->mu, var, mir_build_null(g->mu, vlog_ref_cell_type(
+                                                    g->mu, ti)));
+      return;
+   }
+
+   mir_value_t init = vlog_lower_default_value(g, ti);
+
+   if (nelems > 1 && mir_get_class(g->mu, ti->type) == MIR_TYPE_UARRAY) {
+      // Elements which are arrays cannot be set in bulk
+      mir_type_t t_offset = mir_offset_type(g->mu);
+
+      vlog_loop_t loop;
+      vlog_loop_begin(g, &loop, mir_const(g->mu, t_offset, 0),
+                      mir_const(g->mu, t_offset, nelems));
+      mir_build_store(g->mu, mir_build_array_ref(g->mu, var, loop.i), init);
+      vlog_loop_end(g, &loop);
+   }
+   else if (nelems > 1) {
+      mir_type_t t_offset = mir_offset_type(g->mu);
+      mir_value_t count = mir_const(g->mu, t_offset, nelems);
+      mir_build_set(g->mu, var, init, count);
+   }
+   else
+      mir_build_store(g->mu, var, init);
+}
+
 static void vlog_store_local_init(vlog_gen_t *g, vlog_node_t d, mir_value_t var)
 {
    const type_info_t *ti = vlog_type_info(g, vlog_type(d));
@@ -23594,6 +26869,11 @@ static void vlog_store_local_init(vlog_gen_t *g, vlog_node_t d, mir_value_t var)
       vlog_store_local_default(g, d, var);
 }
 
+static void vlog_lower_one_local(vlog_gen_t *g, vlog_node_t d, ident_t name)
+{
+   vlog_store_local_init(g, d, vlog_add_local_var(g, d, name));
+}
+
 static void vlog_lower_locals(vlog_gen_t *g, vlog_node_t v)
 {
    const int ndecls = vlog_decls(v);
@@ -23622,10 +26902,364 @@ static void vlog_lower_locals(vlog_gen_t *g, vlog_node_t v)
             mir_build_store(g->mu, var, init);
          }
          break;
+      case V_TYPE_DECL:
+      case V_ENUM_DECL:
+      case V_IMPORT_DECL:
+      case V_SVA_DECL:
+         break;
       default:
          CANNOT_HANDLE(d);
       }
    }
+}
+
+static bool vlog_dpi_is_string(vlog_gen_t *g, vlog_node_t type)
+{
+   return mir_get_class(g->mu, vlog_type_info(g, type)->type)
+      == MIR_TYPE_UARRAY;
+}
+
+static void vlog_dpi_kind(vlog_gen_t *g, vlog_node_t where, vlog_node_t type,
+                          text_buf_t *tb)
+{
+   // The letter and width which tell the runtime how the value is passed to
+   // the C function
+
+   vlog_node_t base = type;
+   while ((vlog_kind(base) == V_TYPE_DECL || vlog_kind(base) == V_ENUM_DECL)
+          && vlog_has_type(base))
+      base = vlog_type(base);
+
+   const bool is_data = vlog_kind(base) == V_DATA_TYPE;
+   const type_info_t *ti = vlog_type_info(g, type);
+
+   switch (mir_get_class(g->mu, ti->type)) {
+   case MIR_TYPE_REAL:
+      tb_append(tb, is_data && vlog_subkind(base) == DT_SHORTREAL ? 'f' : 'r');
+      return;
+   case MIR_TYPE_ACCESS:
+      if (is_data && vlog_subkind(base) == DT_CHANDLE) {
+         tb_append(tb, 'p');
+         return;
+      }
+      break;
+   case MIR_TYPE_UARRAY:
+      if (is_data && vlog_subkind(base) == DT_STRING) {
+         tb_append(tb, 's');
+         return;
+      }
+      break;
+   case MIR_TYPE_VEC2:
+   case MIR_TYPE_VEC4:
+      {
+         const bool two_state = mir_get_class(g->mu, ti->type) == MIR_TYPE_VEC2;
+         const bool issigned = mir_get_signed(g->mu, ti->type);
+         const unsigned size = ti->size;
+
+         if (size == 0)
+            fatal_at(vlog_loc(where), "sorry, a DPI argument with no bits "
+                     "is not supported");
+
+         char kind;
+         if (is_data && vlog_subkind(base) >= DT_BYTE
+             && vlog_subkind(base) <= DT_LONGINT && two_state) {
+            kind = 'i';
+         }
+         else if (size == 1 && is_data && vlog_ranges(base) == 0)
+            kind = two_state ? 'b' : 'l';
+         else
+            kind = two_state ? 'B' : 'L';
+
+         tb_printf(tb, "%c%u%s", kind, size, issigned ? "s" : "");
+         return;
+      }
+   default:
+      break;
+   }
+
+   fatal_at(vlog_loc(where), "sorry, this type of DPI argument is not "
+            "supported");
+}
+
+static void vlog_lower_dpi_call(vlog_gen_t *g, vlog_node_t v,
+                                mir_value_t result)
+{
+   // Call a function in a shared library given on the command line
+
+   mir_type_t t_offset = mir_offset_type(g->mu);
+   mir_type_t t_char = mir_char_type(g->mu);
+
+   const bool is_task = vlog_kind(v) == V_TASK_DECL;
+   const int nports = vlog_ports(v);
+   if (nports > 40)
+      fatal_at(vlog_loc(v), "sorry, a DPI import with more than 40 "
+               "arguments is not supported");
+
+   LOCAL_TEXT_BUF tb = tb_new();
+   tb_cat(tb, istr(vlog_has_ident3(v) ? vlog_ident3(v) : vlog_ident(v)));
+   tb_append(tb, ' ');
+
+   if (!is_task && vlog_has_type(v))
+      vlog_dpi_kind(g, v, vlog_type(v), tb);
+   else
+      tb_append(tb, 'v');
+
+   mir_value_t args[5 + 40];
+   int nargs = 0;
+
+   nargs += 3;   // The signature and context are added once all the arguments
+                 // are known
+
+   mir_type_t t_int = mir_vec2_type(g->mu, 32, true);
+   mir_value_t dummy = MIR_NULL_VALUE;
+   if (mir_is_null(result)) {
+      dummy = mir_add_var(g->mu, t_int, MIR_NULL_STAMP, ident_uniq("dpi_void"),
+                          MIR_VAR_TEMP);
+      result = dummy;
+   }
+
+   args[nargs++] = result;
+   args[nargs++] = mir_const(g->mu, t_offset, nports);
+
+   mir_value_t outs[40];
+
+   for (int i = 0; i < nports; i++) {
+      vlog_node_t port = vlog_port(v, i);
+
+      if (vlog_subkind(port) == V_PORT_REF)
+         fatal_at(vlog_loc(port), "sorry, DPI arguments of this kind are "
+                  "not supported");
+
+      char dir;
+      switch (vlog_subkind(port)) {
+      case V_PORT_INPUT: dir = '<'; break;
+      case V_PORT_OUTPUT: dir = '>'; break;
+      default: dir = '='; break;
+      }
+
+      int hops;
+      mir_value_t var = mir_search_object(g->mu, port, &hops);
+      assert(!mir_is_null(var));
+
+      if (vlog_is_open_array(port)) {
+         // The runtime keeps the direction in the description
+         tb_cat(tb, " <A");
+         outs[i] = var;
+         args[nargs++] = var;
+         continue;
+      }
+      else if (vlog_is_fixed_unpacked(port)) {
+         tb_append(tb, ' ');
+         tb_append(tb, dir);
+         tb_append(tb, 'S');
+         vlog_dpi_kind(g, port, vlog_type(port), tb);
+         tb_printf(tb, "x%u", vlog_size(port));
+
+         outs[i] = mir_build_load(g->mu, var);
+         args[nargs++] = outs[i];
+         continue;
+      }
+
+      tb_append(tb, ' ');
+      tb_append(tb, dir);
+      vlog_dpi_kind(g, port, vlog_type(port), tb);
+
+      // A function receives its outputs by address but a task copies them
+      // out of a local variable afterwards
+      outs[i] = var;
+      if (!is_task && dir != '<')
+         outs[i] = mir_build_load(g->mu, var);
+
+      args[nargs++] = outs[i];
+   }
+
+   tb_cat(tb, " #");
+   if (vlog_flags(v) & VLOG_F_CONTEXT)
+      tb_append(tb, 'c');
+   if (is_task)
+      tb_append(tb, 't');
+
+   ident_t scope = mir_get_parent(g->mu);
+   if (scope != NULL) {
+      tb_cat(tb, " @");
+      tb_cat(tb, istr(scope));
+   }
+
+   const char *text = tb_get(tb);
+   const size_t len = strlen(text);
+
+   mir_value_t buf = mir_const_string(g->mu, text);
+   args[0] = mir_build_address_of(g->mu, buf);
+   args[1] = mir_const(g->mu, t_offset, len);
+   args[2] = scope != NULL ? mir_build_context_upref(g->mu, 1)
+      : mir_const(g->mu, t_offset, 0);
+
+   mir_value_t res = mir_build_fcall(g->mu, ident_new("__sv_dpi_call"),
+                                     t_offset, MIR_NULL_STAMP, args, nargs);
+   mir_build_consume(g->mu, res);
+
+   if (is_task && (vlog_flags(v) & VLOG_F_CONTEXT)) {
+      // An exported task called from foreign code may consume time: the
+      // call returns a handle for the suspended call which is resumed each
+      // time the process wakes up
+
+      mir_value_t zero = mir_const(g->mu, t_offset, 0);
+      mir_value_t handle = mir_add_var(g->mu, t_offset, MIR_NULL_STAMP,
+                                       ident_uniq("dpi_handle"), 0);
+      mir_build_store(g->mu, handle, res);
+
+      mir_block_t test_bb = mir_add_block(g->mu);
+      mir_block_t wait_bb = mir_add_block(g->mu);
+      mir_block_t resume_bb = mir_add_block(g->mu);
+      mir_block_t done_bb = mir_add_block(g->mu);
+
+      mir_build_jump(g->mu, test_bb);
+
+      mir_set_cursor(g->mu, test_bb, MIR_APPEND);
+      mir_value_t cur = mir_build_load(g->mu, handle);
+      mir_build_cond(g->mu, mir_build_cmp(g->mu, MIR_CMP_EQ, cur, zero),
+                     done_bb, wait_bb);
+
+      mir_set_cursor(g->mu, wait_bb, MIR_APPEND);
+      mir_build_wait(g->mu, resume_bb);
+
+      mir_set_cursor(g->mu, resume_bb, MIR_APPEND);
+      mir_value_t rargs[2 + 40];
+      int nrargs = 0;
+      rargs[nrargs++] = mir_build_load(g->mu, handle);
+      rargs[nrargs++] = mir_const(g->mu, t_offset, nports);
+      for (int i = 0; i < nports; i++)
+         rargs[nrargs++] = outs[i];
+
+      mir_value_t next = mir_build_fcall(g->mu, ident_new("__sv_dpi_resume"),
+                                         t_offset, MIR_NULL_STAMP, rargs,
+                                         nrargs);
+      mir_build_consume(g->mu, next);
+      mir_build_store(g->mu, handle, next);
+      mir_build_jump(g->mu, test_bb);
+
+      mir_set_cursor(g->mu, done_bb, MIR_APPEND);
+   }
+
+   // Strings are copied from memory owned by foreign code
+   for (int i = 0; i <= nports; i++) {
+      mir_value_t dst;
+      if (i == nports) {
+         if (is_task || !vlog_has_type(v) || !vlog_dpi_is_string(g, vlog_type(v)))
+            continue;
+         dst = result;
+      }
+      else {
+         vlog_node_t port = vlog_port(v, i);
+         if (vlog_subkind(port) == V_PORT_INPUT || vlog_is_open_array(port)
+             || vlog_is_fixed_unpacked(port)
+             || !vlog_dpi_is_string(g, vlog_type(port)))
+            continue;
+         dst = outs[i];
+      }
+
+      mir_value_t idx[] = { mir_const(g->mu, t_offset, i) };
+      mir_value_t slen = mir_build_fcall(g->mu, ident_new("__sv_dpi_strlen"),
+                                         t_offset, MIR_NULL_STAMP, idx, 1);
+      mir_build_consume(g->mu, slen);
+
+      mir_value_t data = vlog_alloc_array(g, t_char, slen);
+      mir_value_t cargs[] = { mir_const(g->mu, t_offset, i), data };
+      mir_value_t cres = mir_build_fcall(g->mu, ident_new("__sv_dpi_strcopy"),
+                                         t_offset, MIR_NULL_STAMP, cargs, 2);
+      mir_build_consume(g->mu, cres);
+
+      mir_build_store(g->mu, dst, vlog_wrap_array(g, data, slen));
+   }
+}
+
+static void vlog_lower_dpi_body(vlog_gen_t *g, vlog_node_t v,
+                                mir_value_t result)
+{
+   // There is no foreign language interface but the UVM library needs the
+   // command line: everything else it uses DPI for has an alternative
+   // selected with UVM_NO_DPI
+
+   mir_type_t t_offset = mir_offset_type(g->mu);
+   mir_type_t t_char = mir_char_type(g->mu);
+   ident_t name = vlog_ident(v);
+
+   if (name == ident_new("uvm_dpi_get_next_arg_c")
+       || name == ident_new("uvm_dpi_get_next_arg")) {
+      int hops;
+      mir_value_t init = mir_search_object(g->mu, vlog_port(v, 0), &hops);
+      mir_value_t args[] = {
+         vlog_lower_cast(g, t_offset, mir_build_load(g->mu, init))
+      };
+      mir_value_t len = mir_build_fcall(g->mu, ident_new("__sv_cmdline_arg"),
+                                        t_offset, MIR_NULL_STAMP, args, 1);
+      mir_build_consume(g->mu, len);
+
+      mir_block_t copy_bb = mir_add_block(g->mu);
+      mir_block_t done_bb = mir_add_block(g->mu);
+
+      mir_build_cond(g->mu, mir_build_cmp(g->mu, MIR_CMP_GT, len,
+                                          mir_const(g->mu, t_offset, 0)),
+                     copy_bb, done_bb);
+
+      mir_set_cursor(g->mu, copy_bb, MIR_APPEND);
+
+      mir_value_t data = vlog_alloc_array(g, t_char, len);
+      mir_value_t cargs[] = { data };
+      mir_value_t res = mir_build_fcall(g->mu, ident_new("__sv_cmdline_copy"),
+                                        t_offset, MIR_NULL_STAMP, cargs, 1);
+      mir_build_consume(g->mu, res);
+      mir_build_store(g->mu, result, vlog_wrap_array(g, data, len));
+      mir_build_jump(g->mu, done_bb);
+
+      mir_set_cursor(g->mu, done_bb, MIR_APPEND);
+   }
+   else if (name == ident_new("uvm_dpi_regcomp")
+            || name == ident_new("uvm_dpi_regexec")
+            || name == ident_new("uvm_dpi_regfree")) {
+      mir_type_t t_cell = mir_int_type(g->mu, INT64_MIN, INT64_MAX);
+      mir_type_t t_handle = mir_access_type(g->mu, t_cell);
+
+      mir_value_t args[3];
+      int nargs = 0;
+      const int nports = vlog_ports(v);
+      for (int i = 0; i < nports; i++) {
+         int hops;
+         mir_value_t value = mir_build_load(
+            g->mu, mir_search_object(g->mu, vlog_port(v, i), &hops));
+         if (mir_is(g->mu, value, MIR_TYPE_UARRAY)) {
+            args[nargs++] = mir_build_unwrap(g->mu, value);
+            args[nargs++] = mir_build_uarray_len(g->mu, value, 0);
+         }
+         else
+            args[nargs++] = value;
+      }
+
+      if (name == ident_new("uvm_dpi_regcomp")) {
+         mir_value_t re = mir_build_fcall(g->mu, ident_new("__sv_regcomp"),
+                                          t_handle, MIR_NULL_STAMP, args, nargs);
+         mir_build_consume(g->mu, re);
+         mir_build_store(g->mu, result, re);
+      }
+      else if (name == ident_new("uvm_dpi_regexec")) {
+         mir_value_t res = mir_build_fcall(g->mu, ident_new("__sv_regexec"),
+                                           t_offset, MIR_NULL_STAMP, args,
+                                           nargs);
+         mir_build_consume(g->mu, res);
+
+         const type_info_t *ti = vlog_type_info(g, vlog_type(v));
+         mir_build_store(g->mu, result, vlog_lower_cast(g, ti->type, res));
+      }
+      else {
+         mir_value_t res = mir_build_fcall(g->mu, ident_new("__sv_regfree"),
+                                           t_offset, MIR_NULL_STAMP, args,
+                                           nargs);
+         mir_build_consume(g->mu, res);
+      }
+   }
+   else if (name != ident_new("uvm_dpi_get_tool_name_c")
+            && name != ident_new("uvm_dpi_get_tool_version_c"))
+      vlog_lower_dpi_call(g, v, result);
 }
 
 static void vlog_lower_func_decl(mir_unit_t *mu, object_t *obj)
@@ -23663,7 +27297,26 @@ static void vlog_lower_func_decl(mir_unit_t *mu, object_t *obj)
       vlog_node_t port = is_ctor ? vlog_param(v, i) : vlog_port(v, i);
       ident_t name = vlog_ident(port);
 
-      mir_value_t param = mir_add_param(mu, pti->type, pti->stamp,
+      if (!is_ctor && vlog_dpi_open_port(v, port)) {
+         // The description of the actual argument
+         mir_type_t t_desc = mir_offset_type(mu);
+         mir_value_t param = mir_add_param(mu, t_desc, MIR_NULL_STAMP, name);
+         mir_value_t local = mir_add_var(mu, t_desc, MIR_NULL_STAMP, name, 0);
+         mir_build_store(mu, local, param);
+         mir_put_object(mu, port, local);
+         continue;
+      }
+
+      const type_info_t *pti = vlog_type_info(&g, vlog_type(port));
+
+      mir_type_t type = is_ctor ? pti->type
+         : vlog_port_param_type(mu, port, pti);
+      if (is_ctor && vlog_is_const_ref(port))
+         type = vlog_ref_cell_type(mu, pti);
+      else if (is_ctor && vlog_subkind(port) != V_PORT_INPUT)
+         type = mir_pointer_type(mu, pti->type);
+
+      mir_value_t param = mir_add_param(mu, type, pti->stamp,
                                         vlog_ident(port));
 
       mir_value_t local = mir_add_var(mu, type, pti->stamp, name, 0);
@@ -23823,7 +27476,9 @@ static void vlog_lower_task_decl(mir_unit_t *mu, object_t *obj)
 
    for (int i = 0; i < nports; i++) {
       vlog_node_t port = vlog_port(v, i);
-      if (vlog_subkind(port) == V_PORT_INPUT)
+      if (vlog_subkind(port) == V_PORT_INPUT
+          || vlog_subkind(port) == V_PORT_REF || vlog_is_fixed_unpacked(port)
+          || vlog_dpi_open_port(v, port))
          continue;
 
       int hops;
@@ -24212,6 +27867,17 @@ void vlog_lower_instance(mir_context_t *mc, vlog_node_t body, ident_t parent,
          mir_defer(mc, ident_prefix(vlog_ident2(d), vlog_ident(d), '.'), qual,
                    MIR_UNIT_FUNCTION, vlog_lower_func_decl, vlog_to_object(d));
          break;
+      case V_TYPE_DECL:
+      case V_ENUM_DECL:
+      case V_IMPORT_DECL:
+      case V_MODPORT:
+      case V_IFACE_PORT:
+      case V_SVA_DECL:
+         break;
+      case V_DPI_EXPORT:
+         vlog_lower_dpi_export(&g, d, body, qual,
+                               mir_build_context_upref(mu, 0));
+         break;
       case V_TASK_DECL:
          mir_defer(mc, ident_prefix(vlog_ident2(d), vlog_ident(d), '.'), qual,
                    MIR_UNIT_PROCEDURE, vlog_lower_task_decl, vlog_to_object(d));
@@ -24588,7 +28254,9 @@ void vlog_lower_block(mir_context_t *mc, ident_t parent, tree_t b)
       ident_t id = tree_ident(t);
       for (; pos < vlog_ndecls; pos++) {
          vlog_node_t v = vlog_decl(body, pos);
-         if (vlog_kind(v) == V_PORT_DECL)
+         const vlog_kind_t kind = vlog_kind(v);
+         if (kind == V_PORT_DECL || kind == V_IMPORT_DECL
+             || kind == V_DPI_EXPORT)
             continue;
          else if (vlog_ident(v) == id) {
             hash_put(map, v, t);
