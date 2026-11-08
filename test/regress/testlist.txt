@@ -1519,3 +1519,4 @@ psl71           normal,2008
 psl76           fail,gold,2008
 psl78           fail,gold,2008
 psl84           gold,2008
+vlogrealport1   verilog

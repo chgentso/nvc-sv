@@ -3599,9 +3599,13 @@ static void vlog_lower_port_map(vlog_gen_t *g, vlog_node_t v)
       {
          mir_value_t value =
             vlog_lower_with_context(g, vlog_value(v), ti->type);
-         assert(mir_is_vector(g->mu, value));
+         assert(mir_is_vector(g->mu, value)
+                || mir_is(g->mu, value, MIR_TYPE_REAL));
 
-         resize = mir_build_cast(g->mu, ti->type, value);
+         if (mir_get_class(g->mu, ti->type) == MIR_TYPE_REAL)
+            resize = vlog_lower_cast(g, ti->type, value);
+         else
+            resize = mir_build_cast(g->mu, ti->type, value);
 
          mir_value_t zero = mir_const(g->mu, t_offset, 0);
 
@@ -3619,6 +3623,16 @@ static void vlog_lower_port_map(vlog_gen_t *g, vlog_node_t v)
 
    default:
       should_not_reach_here();
+   }
+
+   if (!mir_is_vector(g->mu, resize)) {
+      // A real input port is driven with the converted value
+      assert(nlvalues == 1);
+      mir_value_t nets = mir_build_array_ref(g->mu, lvalue1.obj,
+                                             lvalue1.dst_offset);
+      mir_build_put_driver(g->mu, nets, lvalue1.count, resize);
+      mir_build_wait(g->mu, start_bb);
+      return;
    }
 
    mir_value_t tmp = MIR_NULL_VALUE;
