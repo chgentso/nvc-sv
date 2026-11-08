@@ -32,9 +32,29 @@ typedef enum {
    GUARD_BINOP = 0b01,
    GUARD_NOT = 0b10,
    GUARD_FALSE = 0b11,
+   GUARD_BOUND = 0b100,
+   GUARD_NOT_BOUND = 0b101,
 } guard_kind_t;
 
 typedef void *psl_guard_t;
+
+typedef struct _psl_binding psl_binding_t;
+
+// Value of a parameter of a replicated SERE
+typedef struct _psl_binding {
+   const psl_binding_t *outer;
+   tree_t               decl;
+   int64_t              value;
+} psl_binding_t;
+
+// A Boolean expression evaluated with the values of some parameters
+typedef struct _guard_atom guard_atom_t;
+
+typedef struct _guard_atom {
+   guard_atom_t        *next;
+   psl_node_t           expr;
+   const psl_binding_t *binding;
+} guard_atom_t;
 
 typedef enum {
    BINOP_AND,
@@ -81,6 +101,8 @@ typedef struct {
    psl_node_t    src;
    unsigned      next_id;
    fsm_kind_t    kind;
+   guard_atom_t *atoms;
+   const psl_binding_t *binding;
 } psl_fsm_t;
 
 psl_fsm_t *psl_fsm_new(psl_node_t p, ident_t label);
@@ -93,5 +115,6 @@ bool psl_fsm_matches(psl_fsm_t *fsm);
 guard_kind_t psl_guard_kind(psl_guard_t g);
 const guard_binop_t *psl_guard_binop(psl_guard_t g);
 psl_node_t psl_guard_expr(psl_guard_t g);
+const guard_atom_t *psl_guard_atom(psl_guard_t g);
 
 #endif  // _PSL_FSM_H

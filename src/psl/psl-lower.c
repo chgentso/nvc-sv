@@ -112,11 +112,35 @@ static vcode_reg_t psl_assert_severity(void)
    return emit_const(vtype_int(0, 3), 2);
 }
 
+static vcode_reg_t psl_lower_bound_boolean(lower_unit_t *lu,
+                                           const guard_atom_t *atom)
+{
+   // Evaluate the expression with the values of parameters of the
+   // replicated SERE in which it appears
+
+   for (const psl_binding_t *b = atom->binding; b; b = b->outer) {
+      type_t type = tree_type(b->decl);
+      vcode_reg_t value_reg = emit_const(lower_type(type), b->value);
+      lower_put_vcode_obj(b->decl, value_reg, lu);
+   }
+
+   vcode_reg_t result_reg = psl_lower_boolean(lu, atom->expr);
+
+   for (const psl_binding_t *b = atom->binding; b; b = b->outer)
+      lower_put_vcode_obj(b->decl, VCODE_INVALID_REG, lu);
+
+   return result_reg;
+}
+
 static vcode_reg_t psl_lower_guard(lower_unit_t *lu, psl_guard_t g)
 {
    switch (psl_guard_kind(g)) {
    case GUARD_EXPR:
       return psl_lower_boolean(lu, psl_guard_expr(g));
+   case GUARD_BOUND:
+      return psl_lower_bound_boolean(lu, psl_guard_atom(g));
+   case GUARD_NOT_BOUND:
+      return emit_not(psl_lower_bound_boolean(lu, psl_guard_atom(g)));
    case GUARD_BINOP:
       {
          // The right hand operand is only evaluated if the left hand

@@ -45,6 +45,7 @@
 - Added support for the PSL `ended` built-in function.
 - Added support for the PSL SERE operators `|`, `&`, `&&` and `within`.
   Every match of a sequence in a `cover` directive is now reported.
+- Added support for PSL parameterised SEREs (`for i in {...} : && {...}`).
 - PSL Boolean implication `->` and equivalence `<->` can now be used
   inside SEREs and as the operand of other PSL operators.  The operators
   of PSL properties are now parsed with the correct precedence.

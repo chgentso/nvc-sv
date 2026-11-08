@@ -100,9 +100,16 @@ static void add_edge(psl_fsm_t *fsm, fsm_state_t *from, fsm_state_t *to,
    *p = e;
 }
 
-static int64_t get_number(tree_t t)
+static int64_t get_number(psl_fsm_t *fsm, tree_t t)
 {
    int64_t result = 0;
+   if (tree_kind(t) == T_REF) {
+      for (const psl_binding_t *b = fsm->binding; b; b = b->outer) {
+         if (tree_has_ref(t) && tree_ref(t) == b->decl)
+            return b->value;
+      }
+   }
+
    if (!folded_int(t, &result))
       error_at(tree_loc(t), "static value of PSL Number is not known");
    else if (result < 0)
@@ -111,10 +118,11 @@ static int64_t get_number(tree_t t)
    return result;
 }
 
-static void get_range(psl_node_t range, int64_t *lo, int64_t *hi)
+static void get_range(psl_fsm_t *fsm, psl_node_t range, int64_t *lo,
+                      int64_t *hi)
 {
-   *lo = get_number(psl_tree(psl_left(range)));
-   *hi = get_number(psl_tree(psl_right(range)));
+   *lo = get_number(fsm, psl_tree(psl_left(range)));
+   *hi = get_number(fsm, psl_tree(psl_right(range)));
 
    if (*lo > *hi)
       fatal_at(psl_loc(range), "left bound of PSL range (%"PRIi64") must be "
@@ -149,12 +157,58 @@ static inline psl_guard_t and_guard(psl_fsm_t *fsm, psl_guard_t left,
    return make_binop_guard(fsm, BINOP_AND, left, right);
 }
 
-static psl_guard_t not_guard(psl_guard_t g)
+static psl_guard_t not_guard(psl_fsm_t *fsm, psl_guard_t g)
 {
-   assert(psl_guard_kind(g) == GUARD_EXPR);
+   switch (psl_guard_kind(g)) {
+   case GUARD_BOUND:
+      return tag_pointer(untag_pointer(g, guard_atom_t), GUARD_NOT_BOUND);
+   case GUARD_NOT_BOUND:
+      return tag_pointer(untag_pointer(g, guard_atom_t), GUARD_BOUND);
+   case GUARD_NOT:
+      return untag_pointer(g, struct _psl_node);
+   case GUARD_FALSE:
+      return NULL;
+   case GUARD_BINOP:
+      {
+         const guard_binop_t *bop = psl_guard_binop(g);
+         psl_guard_t left = not_guard(fsm, bop->left);
+         psl_guard_t right = not_guard(fsm, bop->right);
 
-   psl_node_t p = psl_guard_expr(g);
-   return tag_pointer(p, p == NULL ? GUARD_FALSE : GUARD_NOT);
+         if (bop->kind == BINOP_OR)
+            return and_guard(fsm, left, right);
+         else if (left == NULL || right == NULL)
+            return NULL;   // A null guard is always true
+         else
+            return or_guard(fsm, left, right);
+      }
+   default:
+      {
+         psl_node_t p = psl_guard_expr(g);
+         return tag_pointer(p, p == NULL ? GUARD_FALSE : GUARD_NOT);
+      }
+   }
+}
+
+static psl_guard_t leaf_guard(psl_fsm_t *fsm, psl_node_t p)
+{
+   // Inside a replicated SERE the value of the expression depends on the
+   // parameters
+   if (fsm->binding == NULL)
+      return p;
+
+   for (guard_atom_t *a = fsm->atoms; a; a = a->next) {
+      if (a->expr == p && a->binding == fsm->binding)
+         return tag_pointer(a, GUARD_BOUND);
+   }
+
+   guard_atom_t *a = pool_malloc(fsm->pool, sizeof(guard_atom_t));
+   a->next    = fsm->atoms;
+   a->expr    = p;
+   a->binding = fsm->binding;
+
+   fsm->atoms = a;
+
+   return tag_pointer(a, GUARD_BOUND);
 }
 
 static psl_guard_t build_else_guard(psl_fsm_t *fsm, fsm_state_t *state)
@@ -162,7 +216,7 @@ static psl_guard_t build_else_guard(psl_fsm_t *fsm, fsm_state_t *state)
    psl_guard_t g = NULL;
 
    for (fsm_edge_t *e = state->edges; e; e = e->next)
-      g = and_guard(fsm, g, not_guard(e->guard));
+      g = and_guard(fsm, g, not_guard(fsm, e->guard));
 
    return g;
 }
@@ -291,7 +345,29 @@ typedef struct {
    psl_guard_t  guard;
 } dfa_edge_t;
 
-typedef A(psl_node_t) atom_list_t;
+typedef A(psl_guard_t) atom_list_t;
+
+static psl_guard_t atom_of(psl_guard_t g, bool *negated)
+{
+   // The guard of the expression without any negation
+
+   switch (psl_guard_kind(g)) {
+   case GUARD_EXPR:
+      *negated = false;
+      return g;
+   case GUARD_NOT:
+      *negated = true;
+      return psl_guard_expr(g);
+   case GUARD_BOUND:
+      *negated = false;
+      return g;
+   case GUARD_NOT_BOUND:
+      *negated = true;
+      return tag_pointer(untag_pointer(g, guard_atom_t), GUARD_BOUND);
+   default:
+      should_not_reach_here();
+   }
+}
 
 static void collect_atoms(psl_guard_t g, atom_list_t *list)
 {
@@ -301,13 +377,16 @@ static void collect_atoms(psl_guard_t g, atom_list_t *list)
    switch (psl_guard_kind(g)) {
    case GUARD_EXPR:
    case GUARD_NOT:
+   case GUARD_BOUND:
+   case GUARD_NOT_BOUND:
       {
-         psl_node_t p = psl_guard_expr(g);
+         bool negated;
+         psl_guard_t atom = atom_of(g, &negated);
          for (int i = 0; i < list->count; i++) {
-            if (list->items[i] == p)
+            if (list->items[i] == atom)
                return;
          }
-         APUSH(*list, p);
+         APUSH(*list, atom);
       }
       break;
    case GUARD_BINOP:
@@ -330,17 +409,21 @@ static bool eval_guard(psl_guard_t g, const atom_list_t *atoms, unsigned bits)
    switch (psl_guard_kind(g)) {
    case GUARD_EXPR:
    case GUARD_NOT:
+   case GUARD_BOUND:
+   case GUARD_NOT_BOUND:
       {
-         psl_node_t p = psl_guard_expr(g);
+         bool negated;
+         psl_guard_t atom = atom_of(g, &negated);
+
          bool value = false;
          for (int i = 0; i < atoms->count; i++) {
-            if (atoms->items[i] == p) {
+            if (atoms->items[i] == atom) {
                value = !!(bits & (1 << i));
                break;
             }
          }
 
-         return psl_guard_kind(g) == GUARD_NOT ? !value : value;
+         return negated ? !value : value;
       }
    case GUARD_BINOP:
       {
@@ -429,7 +512,7 @@ static fsm_state_t *determinize(psl_fsm_t *fsm, fsm_state_t *root,
          for (unsigned i = 0; i < atoms.count; i++) {
             psl_guard_t lit = atoms.items[i];
             if (!(bits & (1 << i)))
-               lit = not_guard(lit);
+               lit = not_guard(fsm, lit);
             minterm = and_guard(fsm, minterm, lit);
          }
 
@@ -615,6 +698,56 @@ static fsm_state_t *extend_fsm(psl_fsm_t *fsm, fsm_state_t *last,
    return final;
 }
 
+typedef fsm_state_t *(*build_cb_t)(psl_fsm_t *fsm, fsm_state_t *initial,
+                                   void *context);
+
+typedef struct {
+   psl_node_t where;
+   psl_node_t node;
+} build_node_ctx_t;
+
+static fsm_state_t *build_node_cb(psl_fsm_t *fsm, fsm_state_t *initial,
+                                  void *context)
+{
+   const build_node_ctx_t *ctx = context;
+   return build_node(fsm, initial, ctx->node);
+}
+
+static fsm_state_t *build_neq_and(psl_fsm_t *fsm, fsm_state_t *state,
+                                  build_cb_t left_fn, void *left_ctx,
+                                  build_cb_t right_fn, void *right_ctx)
+{
+   // Either the left or the right operand is the longer one so extend
+   // the shorter one to match
+   psl_node_t where = state->where;
+
+   fsm_state_t *l_initial[2], *l_final[2], *r_initial[2], *r_final[2];
+
+   for (int i = 0; i < 2; i++) {
+      l_initial[i] = add_state(fsm, where);
+      l_final[i] = (*left_fn)(fsm, l_initial[i], left_ctx);
+      if (i == 0)
+         l_final[i] = extend_fsm(fsm, l_final[i], where);
+
+      r_initial[i] = add_state(fsm, where);
+      r_final[i] = (*right_fn)(fsm, r_initial[i], right_ctx);
+      if (i == 1)
+         r_final[i] = extend_fsm(fsm, r_final[i], where);
+
+      intersect_prepare(fsm, l_final[i], r_final[i]);
+   }
+
+   fsm_state_t *final = add_state(fsm, where);
+
+   for (int i = 0; i < 2; i++) {
+      fsm_state_t *initial = add_state(fsm, where);
+      intersect_run(fsm, initial, l_initial[i], r_initial[i], final);
+      add_edge(fsm, state, initial, EDGE_EPSILON, NULL);
+   }
+
+   return final;
+}
+
 static fsm_state_t *build_concat(psl_fsm_t *fsm, fsm_state_t *state,
                                  psl_node_t p, unsigned skip)
 {
@@ -729,33 +862,11 @@ static fsm_state_t *build_sere(psl_fsm_t *fsm, fsm_state_t *state, psl_node_t p)
       {
          assert(nops == 2);
 
-         // Either the left or the right operand is the longer one so
-         // extend the shorter one to match
-         fsm_state_t *l_initial[2], *l_final[2], *r_initial[2], *r_final[2];
+         build_node_ctx_t left = { p, psl_operand(p, 0) };
+         build_node_ctx_t right = { p, psl_operand(p, 1) };
 
-         for (int i = 0; i < 2; i++) {
-            l_initial[i] = add_state(fsm, p);
-            l_final[i] = build_node(fsm, l_initial[i], psl_operand(p, 0));
-            if (i == 0)
-               l_final[i] = extend_fsm(fsm, l_final[i], p);
-
-            r_initial[i] = add_state(fsm, p);
-            r_final[i] = build_node(fsm, r_initial[i], psl_operand(p, 1));
-            if (i == 1)
-               r_final[i] = extend_fsm(fsm, r_final[i], p);
-
-            intersect_prepare(fsm, l_final[i], r_final[i]);
-         }
-
-         fsm_state_t *final = add_state(fsm, p);
-
-         for (int i = 0; i < 2; i++) {
-            fsm_state_t *initial = add_state(fsm, p);
-            intersect_run(fsm, initial, l_initial[i], r_initial[i], final);
-            add_edge(fsm, state, initial, EDGE_EPSILON, NULL);
-         }
-
-         return final;
+         return build_neq_and(fsm, state, build_node_cb, &left,
+                              build_node_cb, &right);
       }
 
    case PSL_SERE_WITHIN:
@@ -787,8 +898,175 @@ static fsm_state_t *build_sere(psl_fsm_t *fsm, fsm_state_t *state, psl_node_t p)
    }
 }
 
-static void get_repeat_bounds(psl_node_t p, int *low, int *high, bool *infinite,
-                              bool *noncon, bool *goto_rep)
+typedef struct {
+   const psl_binding_t **bindings;
+   int                   count;
+   psl_node_t            body;
+} param_ctx_t;
+
+static fsm_state_t *build_instance(psl_fsm_t *fsm, fsm_state_t *initial,
+                                   const psl_binding_t *binding,
+                                   psl_node_t body)
+{
+   const psl_binding_t *saved = fsm->binding;
+   fsm->binding = binding;
+
+   fsm_state_t *last = build_node(fsm, initial, body);
+
+   fsm->binding = saved;
+   return last;
+}
+
+static fsm_state_t *build_param_range_cb(psl_fsm_t *fsm, fsm_state_t *initial,
+                                         void *context)
+{
+   const param_ctx_t *ctx = context;
+   assert(ctx->count > 0);
+
+   if (ctx->count == 1)
+      return build_instance(fsm, initial, ctx->bindings[0], ctx->body);
+
+   param_ctx_t left = { ctx->bindings, ctx->count - 1, ctx->body };
+   param_ctx_t right = { ctx->bindings + ctx->count - 1, 1, ctx->body };
+
+   return build_neq_and(fsm, initial, build_param_range_cb, &left,
+                        build_param_range_cb, &right);
+}
+
+static int get_param_values(psl_fsm_t *fsm, psl_node_t decl, int64_t **values)
+{
+   psl_node_t vs = psl_value(decl);
+
+   if (psl_subkind(vs) == PSL_VALUE_SET_BOOLEAN) {
+      *values = xmalloc_array(2, sizeof(int64_t));
+      (*values)[0] = 0;
+      (*values)[1] = 1;
+      return 2;
+   }
+
+   SCOPED_A(int64_t) list = AINIT;
+
+   const int nitems = psl_operands(vs);
+   for (int i = 0; i < nitems; i++) {
+      psl_node_t item = psl_operand(vs, i);
+      if (psl_kind(item) == P_RANGE) {
+         int64_t lo, hi;
+         get_range(fsm, item, &lo, &hi);
+         for (int64_t v = lo; v <= hi; v++)
+            APUSH(list, v);
+      }
+      else
+         APUSH(list, get_number(fsm, psl_tree(item)));
+
+      if (list.count > 1024)
+         fatal_at(psl_loc(decl), "sorry, too many values in this value set");
+   }
+
+   *values = xmalloc_array(MAX(list.count, 1), sizeof(int64_t));
+   for (int i = 0; i < list.count; i++)
+      (*values)[i] = list.items[i];
+
+   return list.count;
+}
+
+static fsm_state_t *build_param_sere(psl_fsm_t *fsm, fsm_state_t *state,
+                                     psl_node_t p)
+{
+   // for i in S : op { r(i) } is r(s1) op r(s2) op ... for each value of S
+
+   const int nparams = psl_operands(p);
+
+   int64_t **values LOCAL = xmalloc_array(nparams, sizeof(int64_t *));
+   int *counts LOCAL = xmalloc_array(nparams, sizeof(int));
+
+   size_t total = 1;
+   for (int i = 0; i < nparams; i++) {
+      counts[i] = get_param_values(fsm, psl_operand(p, i), &(values[i]));
+      total *= counts[i];
+
+      if (total > 1024)
+         fatal_at(psl_loc(p), "sorry, too many instances of replicated SERE");
+   }
+
+   if (total == 0)
+      fatal_at(psl_loc(p), "sorry, empty value set in replicated SERE");
+
+   const psl_binding_t **insts LOCAL =
+      xmalloc_array(total, sizeof(psl_binding_t *));
+
+   for (size_t n = 0; n < total; n++) {
+      const psl_binding_t *chain = fsm->binding;
+
+      size_t rem = n;
+      for (int i = 0; i < nparams; i++) {
+         psl_binding_t *b = pool_malloc(fsm->pool, sizeof(psl_binding_t));
+         b->outer = chain;
+         b->decl  = psl_tree(psl_operand(p, i));
+         b->value = values[i][rem % counts[i]];
+
+         rem /= counts[i];
+         chain = b;
+      }
+
+      insts[n] = chain;
+   }
+
+   for (int i = 0; i < nparams; i++)
+      free(values[i]);
+
+   psl_node_t body = psl_value(p);
+
+   switch ((psl_sere_kind_t)psl_subkind(p)) {
+   case PSL_SERE_OR:
+      {
+         fsm_state_t *final = add_state(fsm, p);
+
+         for (size_t n = 0; n < total; n++) {
+            fsm_state_t *initial = add_state(fsm, p);
+            add_edge(fsm, state, initial, EDGE_EPSILON, NULL);
+
+            fsm_state_t *last = build_instance(fsm, initial, insts[n], body);
+            add_edge(fsm, last, final, EDGE_EPSILON, NULL);
+         }
+
+         return final;
+      }
+
+   case PSL_SERE_EQU_AND:
+      {
+         fsm_state_t *cur_initial = add_state(fsm, p);
+         fsm_state_t *cur_final =
+            build_instance(fsm, cur_initial, insts[0], body);
+
+         for (size_t n = 1; n < total; n++) {
+            fsm_state_t *r_initial = add_state(fsm, p);
+            fsm_state_t *r_final =
+               build_instance(fsm, r_initial, insts[n], body);
+
+            fsm_state_t *initial = add_state(fsm, p);
+            cur_final = intersect_fsm(fsm, initial, cur_initial, cur_final,
+                                      r_initial, r_final);
+            cur_initial = initial;
+         }
+
+         add_edge(fsm, state, cur_initial, EDGE_EPSILON, NULL);
+         return cur_final;
+      }
+
+   case PSL_SERE_NEQ_AND:
+      {
+         param_ctx_t ctx = { insts, total, body };
+         return build_param_range_cb(fsm, state, &ctx);
+      }
+
+   default:
+      CANNOT_HANDLE(p);
+   }
+}
+
+static void get_repeat_bounds(psl_fsm_t *fsm, psl_node_t p, int *low,
+                              int *high, bool *infinite, bool *noncon,
+                              bool *goto_rep)
 {
    psl_repeat_t kind = psl_subkind(p);
 
@@ -815,11 +1093,11 @@ static void get_repeat_bounds(psl_node_t p, int *low, int *high, bool *infinite,
          psl_node_t count = psl_delay(p);
          switch (psl_kind(count)) {
          case P_RANGE:
-            *low = get_number(psl_tree(psl_left(count)));
-            *high = get_number(psl_tree(psl_right(count)));
+            *low = get_number(fsm, psl_tree(psl_left(count)));
+            *high = get_number(fsm, psl_tree(psl_right(count)));
             break;
          case P_HDL_EXPR:
-            *low = *high = get_number(psl_tree(count));
+            *low = *high = get_number(fsm, psl_tree(count));
             break;
          default:
             should_not_reach_here();
@@ -850,7 +1128,7 @@ static bool is_empty_repeat(psl_fsm_t *fsm, psl_node_t p)
 
    int low, high;
    bool infinite, noncon, goto_rep;
-   get_repeat_bounds(p, &low, &high, &infinite, &noncon, &goto_rep);
+   get_repeat_bounds(fsm, p, &low, &high, &infinite, &noncon, &goto_rep);
 
    return low == 0;
 }
@@ -861,7 +1139,7 @@ static fsm_state_t *build_repeat_ex(psl_fsm_t *fsm, fsm_state_t *state,
    int low, high;
    bool infinite, noncon, goto_rep;
 
-   get_repeat_bounds(p, &low, &high, &infinite, &noncon, &goto_rep);
+   get_repeat_bounds(fsm, p, &low, &high, &infinite, &noncon, &goto_rep);
 
    if (!allow_empty && low == 0) {
       // Only the non-empty matches: the caller handles the empty one
@@ -915,7 +1193,7 @@ static fsm_state_t *build_repeat_ex(psl_fsm_t *fsm, fsm_state_t *state,
          fsm_state_t *dead = add_state(fsm, p);
          fsm_state_t *wait = add_state(fsm, p);
          add_edge(fsm, state, aux, EDGE_NEXT, NULL);
-         add_edge(fsm, aux, dead, EDGE_EPSILON, seq);
+         add_edge(fsm, aux, dead, EDGE_EPSILON, leaf_guard(fsm, seq));
          add_edge(fsm, aux, wait, EDGE_EPSILON, build_else_guard(fsm, aux));
          add_edge(fsm, wait, aux, EDGE_NEXT, NULL);
          add_edge(fsm, wait, state, EDGE_EPSILON, NULL);
@@ -944,7 +1222,7 @@ static fsm_state_t *build_repeat(psl_fsm_t *fsm, fsm_state_t *state,
 static fsm_state_t *build_next(psl_fsm_t *fsm, fsm_state_t *state, psl_node_t p)
 {
    if (psl_has_delay(p)) {
-      const int cycles = get_number(psl_tree(psl_delay(p)));
+      const int cycles = get_number(fsm, psl_tree(psl_delay(p)));
       for (int i = 0; i < cycles; i++) {
          fsm_state_t *new = add_state(fsm, p);
          add_edge(fsm, state, new, EDGE_NEXT, NULL);
@@ -971,7 +1249,7 @@ static fsm_state_t *build_next_a(psl_fsm_t *fsm, fsm_state_t *state, psl_node_t 
 
    int64_t lo,hi = 0;
    psl_node_t range = psl_delay(p);
-   get_range(range, &lo, &hi);
+   get_range(fsm, range, &lo, &hi);
 
    for (int i = 0; i < hi; i++) {
       fsm_state_t *new = add_state(fsm, p);
@@ -993,12 +1271,12 @@ static fsm_state_t *build_next_e(psl_fsm_t *fsm, fsm_state_t *state, psl_node_t 
    psl_node_t guard = psl_value(p);
    bool strong = (psl_flags(p) & PSL_F_STRONG) ? true : false;
 
-   psl_guard_t guard_n = not_guard(guard);
+   psl_guard_t guard_n = not_guard(fsm, guard);
    fsm_state_t *curr = state;
 
    int64_t lo,hi = 0;
    psl_node_t range = psl_delay(p);
-   get_range(range, &lo, &hi);
+   get_range(fsm, range, &lo, &hi);
 
    for (int i = 0; i < lo - 1; i++) {
       fsm_state_t *new = add_state(fsm, p);
@@ -1056,13 +1334,13 @@ static fsm_state_t *build_before(psl_fsm_t *fsm, fsm_state_t *state,
 
    psl_guard_t accept_guard = a;
    if (!(psl_flags(p) & PSL_F_INCLUSIVE))
-      accept_guard = and_guard(fsm, a, not_guard(b));
+      accept_guard = and_guard(fsm, a, not_guard(fsm, b));
 
    // The property fails if b holds before or, unless inclusive, in the
    // same cycle as a
    add_edge(fsm, state, accept, EDGE_EPSILON, accept_guard);
    add_edge(fsm, state, state, EDGE_NEXT,
-            and_guard(fsm, not_guard(a), not_guard(b)));
+            and_guard(fsm, not_guard(fsm, a), not_guard(fsm, b)));
 
    return accept;
 }
@@ -1115,7 +1393,7 @@ static fsm_state_t *build_node(psl_fsm_t *fsm, fsm_state_t *state, psl_node_t p)
    case P_HDL_EXPR:
       {
          fsm_state_t *new = add_state(fsm, p);
-         add_edge(fsm, state, new, EDGE_EPSILON, p);
+         add_edge(fsm, state, new, EDGE_EPSILON, leaf_guard(fsm, p));
          return new;
       }
    case P_NEXT:
@@ -1126,6 +1404,8 @@ static fsm_state_t *build_node(psl_fsm_t *fsm, fsm_state_t *state, psl_node_t p)
       return build_next_a(fsm, state, p);
    case P_SERE:
       return build_sere(fsm, state, p);
+   case P_PARAM_SERE:
+      return build_param_sere(fsm, state, p);
    case P_REPEAT:
       return build_repeat(fsm, state, p);
    case P_LOGICAL:
@@ -1355,6 +1635,8 @@ guard_kind_t psl_guard_kind(psl_guard_t g)
    case GUARD_BINOP:
    case GUARD_NOT:
    case GUARD_FALSE:
+   case GUARD_BOUND:
+   case GUARD_NOT_BOUND:
       return tag;
    default:
       should_not_reach_here();
@@ -1373,6 +1655,20 @@ psl_node_t psl_guard_expr(psl_guard_t g)
    case GUARD_EXPR:
    case GUARD_NOT:
       return untag_pointer(g, struct _psl_node);
+   case GUARD_BOUND:
+   case GUARD_NOT_BOUND:
+      return psl_guard_atom(g)->expr;
+   default:
+      should_not_reach_here();
+   }
+}
+
+const guard_atom_t *psl_guard_atom(psl_guard_t g)
+{
+   switch (pointer_tag(g)) {
+   case GUARD_BOUND:
+   case GUARD_NOT_BOUND:
+      return untag_pointer(g, guard_atom_t);
    default:
       should_not_reach_here();
    }
@@ -1384,9 +1680,11 @@ static void psl_dump_guard(psl_guard_t g, text_buf_t *tb, bool nested)
 {
    switch (psl_guard_kind(g)) {
    case GUARD_NOT:
+   case GUARD_NOT_BOUND:
       tb_cat(tb, "!");
       // Fall-through
    case GUARD_EXPR:
+   case GUARD_BOUND:
       {
          psl_node_t p = psl_guard_expr(g);
          assert(psl_kind(p) == P_HDL_EXPR);

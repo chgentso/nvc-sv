@@ -136,6 +136,7 @@ static bool psl_is_sequence(psl_node_t p)
    case P_HDL_EXPR:
    case P_SERE:
    case P_REPEAT:
+   case P_PARAM_SERE:
       return true;
    default:
       return false;
