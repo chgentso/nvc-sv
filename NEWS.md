@@ -50,6 +50,9 @@
   inside other properties.
 - Added support for PSL `next_a` with a non-Boolean operand and for
   `next_event`, `next_event_a` and `next_event_e` and their strong forms.
+- Fixed the PSL `until!` and `until!_` operators which did not report a
+  failure if the right hand operand did not hold before the end of the
+  simulation, and the evaluation of `until` when both operands hold.
 - PSL Boolean implication `->` and equivalence `<->` can now be used
   inside SEREs and as the operand of other PSL operators.  The operators
   of PSL properties are now parsed with the correct precedence.

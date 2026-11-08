@@ -645,23 +645,29 @@ static fsm_state_t *build_until(psl_fsm_t *fsm, fsm_state_t *state,
    psl_node_t lhs = psl_operand(p, 0);
    psl_node_t rhs = psl_operand(p, 1);
 
+   if (psl_kind(lhs) != P_HDL_EXPR || psl_kind(rhs) != P_HDL_EXPR)
+      fatal_at(psl_loc(p), "sorry, the operands of until must be Boolean");
+
+   // The strong forms fail if the right hand operand does not hold
+   // before the end of the simulation
+   state->strong = !!(psl_flags(p) & PSL_F_STRONG);
+
+   fsm_state_t *final = add_state(fsm, p);
+
    if (psl_flags(p) & PSL_F_INCLUSIVE) {
-      fsm_state_t *test = add_state(fsm, p);
-      add_edge(fsm, state, test, EDGE_EPSILON, lhs);
-
-      fsm_state_t *new = add_state(fsm, p);
-      add_edge(fsm, test, new, EDGE_NEXT, rhs);
-      add_edge(fsm, test, state, EDGE_NEXT, NULL);
-
-      return new;
+      // The left hand operand must also hold in the cycle where the
+      // right hand operand holds
+      add_edge(fsm, state, final, EDGE_EPSILON, and_guard(fsm, lhs, rhs));
+      add_edge(fsm, state, state, EDGE_NEXT,
+               and_guard(fsm, lhs, not_guard(fsm, rhs)));
    }
    else {
-      fsm_state_t *new = add_state(fsm, p);
-      add_edge(fsm, state, new, EDGE_NEXT, rhs);
-      add_edge(fsm, state, state, EDGE_NEXT, lhs);
-
-      return new;
+      add_edge(fsm, state, final, EDGE_EPSILON, rhs);
+      add_edge(fsm, state, state, EDGE_NEXT,
+               and_guard(fsm, not_guard(fsm, rhs), lhs));
    }
+
+   return final;
 }
 
 static fsm_state_t *build_abort(psl_fsm_t *fsm, fsm_state_t *state,
@@ -1688,8 +1694,14 @@ static void psl_simplify_dfs(psl_fsm_t *fsm, fsm_state_t *state,
             psl_simplify_dfs(fsm, e->dest, visited);
 
          if (e->dest->accept) {
+            // A null guard is always true
             psl_guard_t guard = and_guard(fsm, e->guard, e->dest->guard);
-            state->guard = or_guard(fsm, state->guard, guard);
+            if (!state->accept)
+               state->guard = guard;
+            else if (state->guard != NULL)
+               state->guard = (guard == NULL) ? NULL
+                  : or_guard(fsm, state->guard, guard);
+
             state->accept = true;
          }
 
