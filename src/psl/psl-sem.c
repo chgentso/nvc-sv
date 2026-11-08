@@ -296,15 +296,6 @@ static void psl_check_sere(psl_node_t p, nametab_t *tab)
       psl_check(psl_operand(p, i), tab);
 }
 
-static void psl_check_param_sere(psl_node_t p, nametab_t *tab)
-{
-   const int nops = psl_operands(p);
-   for (int i = 0; i < nops; i++)
-      psl_check(psl_operand(p, i), tab);
-
-   psl_check(psl_value(p), tab);
-}
-
 static void psl_check_repeat(psl_node_t p, nametab_t *tab)
 {
    psl_node_t value = psl_value(p);
@@ -457,7 +448,18 @@ static void psl_check_suffix_impl(psl_node_t p, nametab_t *tab)
 
 static void psl_check_param_decl(psl_node_t p, nametab_t *tab)
 {
-   // TODO
+   psl_node_t vs = psl_value(p);
+   if (psl_subkind(vs) == PSL_VALUE_SET_BOOLEAN)
+      return;
+
+   const int nops = psl_operands(vs);
+   for (int i = 0; i < nops; i++) {
+      psl_node_t item = psl_operand(vs, i);
+      if (psl_kind(item) == P_HDL_EXPR)
+         psl_set_type(item, PSL_TYPE_NUMERIC);
+
+      psl_check(item, tab);
+   }
 }
 
 static void psl_check_proc_block(psl_node_t p, nametab_t *tab)
@@ -595,7 +597,7 @@ void psl_check(psl_node_t p, nametab_t *tab)
       psl_check_proc_block(p, tab);
       break;
    case P_PARAM_SERE:
-      psl_check_param_sere(p, tab);
+      // Already checked by the parser while the parameters are in scope
       break;
    case P_CLOCKED:
       psl_check_clocked(p, tab, false);

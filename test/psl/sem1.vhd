@@ -41,5 +41,8 @@ begin
     -- psl endpoint e1 is {x; y};             -- Not supported
     -- psl assert always (x -> next_event(i)(y));  -- Error
     -- psl assert always (x -> next_event(x)[i](y));  -- Error
+    -- psl cover {for i in {1 to 2} : & {x[*i]}};     -- OK
+    -- psl cover {for i in {0, clk} : && {x}};        -- Error
+    -- psl cover {for i in {1 to 2} : & {x[*j]}};     -- Error
 
 end architecture;

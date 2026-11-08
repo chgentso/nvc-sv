@@ -141,6 +141,8 @@ START_TEST(test_sem1)
       { 41, "PSL endpoint declarations are not supported" },
       { 42, "expression must be a PSL Boolean but have type INTEGER" },
       { 43, "expression must be static" },
+      { 45, "expression must be a PSL Number but have type BIT" },
+      { 46, "no visible declaration for J" },
       { -1, NULL }
    };
    expect_errors(expect);

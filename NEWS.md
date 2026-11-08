@@ -23,6 +23,8 @@
 - Fixed a crash when the argument of the PSL `prev` function is a record.
 - Fixed a crash when the value set of the PSL `nondet` function contains
   non-literal static expressions.
+- Fixed a crash when a parameter of a PSL parameterised SERE is used in
+  an expression.
 - Added a `pkg-config` configuration file to aid locating the VHPI
   headers (from @gsmecher).
 - Several other minor bugs were resolved (#1663, #1672, #1668, #1670,

@@ -12007,9 +12007,7 @@ static psl_node_t p_psl_parameter_definition(void)
    BEGIN("PSL Parameter Definition");
 
    tree_t decl = tree_new(T_PARAM_DECL);
-
    tree_set_ident(decl, p_identifier());
-   insert_name(nametab, decl, NULL);
 
    psl_node_t p = psl_new(P_PARAM_DECL);
    psl_set_tree(p, decl);
@@ -12019,7 +12017,21 @@ static psl_node_t p_psl_parameter_definition(void)
 
    consume(tIN);
 
-   psl_set_value(p, p_psl_value_set());
+   psl_node_t vs = p_psl_value_set();
+   psl_set_value(p, vs);
+
+   type_t type;
+   if (psl_subkind(vs) == PSL_VALUE_SET_BOOLEAN)
+      type = std_type(NULL, STD_BOOLEAN);
+   else
+      type = std_type(NULL, STD_INTEGER);
+
+   tree_set_type(decl, type);
+   tree_set_class(decl, C_CONSTANT);
+   tree_set_subkind(decl, PORT_IN);
+   tree_set_loc(decl, CURRENT_LOC);
+
+   insert_name(nametab, decl, NULL);
 
    psl_set_loc(p, CURRENT_LOC);
    return p;
@@ -12043,6 +12055,8 @@ static psl_node_t p_psl_parametrized_sere(void)
    BEGIN("PSL Parametrized SERE");
 
    consume(tFOR);
+
+   push_scope(nametab);
 
    psl_node_t p = psl_new(P_PARAM_SERE);
    p_psl_parameters_definition(p);
@@ -12068,6 +12082,15 @@ static psl_node_t p_psl_parametrized_sere(void)
    consume(tRBRACE);
 
    psl_set_loc(p, CURRENT_LOC);
+
+   // The parameters are only in scope here so check the SERE now
+   const int nparams = psl_operands(p);
+   for (int i = 0; i < nparams; i++)
+      psl_check(psl_operand(p, i), nametab);
+
+   psl_check(psl_value(p), nametab);
+
+   pop_scope(nametab);
    return p;
 }
 
