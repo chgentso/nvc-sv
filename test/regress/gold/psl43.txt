@@ -1,0 +1,2 @@
+65ns+0: s_three hit
+95ns+0: a2 failed

@@ -1,0 +1,7 @@
+15ns+0: s0 hit
+25ns+0: s1 hit
+35ns+0: s3 hit
+45ns+0: s6 hit
+55ns+0: s4 hit
+75ns+0: s5 hit
+85ns+0: s2 hit

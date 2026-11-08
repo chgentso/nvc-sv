@@ -440,6 +440,39 @@ START_TEST(test_sem3)
 }
 END_TEST
 
+START_TEST(test_sem4)
+{
+   opt_set_int(OPT_PSL_COMMENTS, 1);
+
+   input_from_file(TESTDIR "/psl/sem4.vhd");
+
+   // IEEE 1850-2010 6.5.1, 6.5.3: actual parameters must match the
+   // number and class of the formal parameters, and declarations must
+   // not be instantiated recursively
+   const error_t expect[] = {
+      { 19, "missing actual for formal parameter Q" },
+      { 20, "too many actual parameters for sequence S1" },
+      { 21, "missing actual for formal parameter K" },
+      { 22, "expression must be a PSL Boolean but have type INTEGER" },
+      { 23, "expression must be static" },
+      { 24, "expression must be a PSL Number but have type BIT" },
+      { 25, "P1 is not a PSL sequence" },
+      { 26, "type of actual BOOLEAN does not match formal V type INTEGER" },
+      { 27, "expression must be a PSL Boolean but have type INTEGER" },
+      { 28, "missing actual for formal parameter P" },
+      { 29, "expression must be a PSL Number but have type BIT" },
+      { 30, "P2 is not a PSL sequence" },
+      { 36, "P_REC" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   parse_and_check(T_ENTITY, T_ARCH);
+
+   check_expected_errors();
+}
+END_TEST
+
 START_TEST(test_sem5)
 {
    opt_set_int(OPT_PSL_COMMENTS, 1);
@@ -522,6 +555,7 @@ Suite *get_psl_tests(void)
    tcase_add_test(tc_core, test_issue1694);
    tcase_add_test(tc_core, test_names1);
    tcase_add_test(tc_core, test_sem3);
+   tcase_add_test(tc_core, test_sem4);
    tcase_add_test(tc_core, test_sem5);
    suite_add_tcase(s, tc_core);
 
