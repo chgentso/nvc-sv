@@ -103,6 +103,7 @@ typedef struct {
    fsm_kind_t    kind;
    guard_atom_t *atoms;
    const psl_binding_t *binding;
+   psl_node_t    clock;
 } psl_fsm_t;
 
 psl_fsm_t *psl_fsm_new(psl_node_t p, ident_t label);

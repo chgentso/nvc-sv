@@ -57,8 +57,13 @@ static void psl_wait_cb(tree_t t, void *ctx)
    emit_sched_event(nets_reg, count_reg);
 }
 
+static vcode_reg_t psl_lower_clock_now(lower_unit_t *lu, psl_node_t clk);
+
 static vcode_reg_t psl_lower_boolean(lower_unit_t *lu, psl_node_t p)
 {
+   if (psl_kind(p) == P_CLOCKED || psl_kind(p) == P_CLOCK_DECL)
+      return psl_lower_clock_now(lu, p);
+
    assert(psl_kind(p) == P_HDL_EXPR);
    vcode_reg_t test_reg = lower_rvalue(lu, psl_tree(p));
 
@@ -846,21 +851,46 @@ vcode_reg_t psl_lower_fcall(lower_unit_t *lu, psl_node_t p)
    }
 }
 
-static void psl_collect_clocks_cb(psl_node_t p, void *ctx)
+typedef struct {
+   clock_list_t *list;
+   psl_node_t    top;
+} collect_clocks_t;
+
+static void psl_collect_fcall_clocks_cb(psl_node_t p, void *ctx)
 {
-   clock_list_t *list = ctx;
+   collect_clocks_t *cc = ctx;
 
    const int nops = psl_operands(p);
    for (int i = 0; i < nops; i++) {
       psl_node_t op = psl_operand(p, i);
       if (psl_kind(op) == P_CLOCK_DECL)
-         APUSH(*list, op);
+         APUSH(*cc->list, op);
    }
+}
+
+static void psl_collect_clocked_cb(psl_node_t p, void *ctx)
+{
+   collect_clocks_t *cc = ctx;
+
+   if (p != cc->top)
+      APUSH(*cc->list, p);
 }
 
 static void psl_collect_clocks(psl_node_t p, void *list)
 {
-   psl_visit_only(p, psl_collect_clocks_cb, list, P_BUILTIN_FCALL);
+   // Clocks other than the one for the whole property
+
+   collect_clocks_t cc = { list, NULL };
+
+   if (psl_kind(p) == P_COVER || psl_kind(p) == P_ASSERT
+       || psl_kind(p) == P_ASSUME || psl_kind(p) == P_RESTRICT) {
+      psl_node_t top = psl_value(p);
+      if (psl_kind(top) == P_CLOCKED)
+         cc.top = top;
+   }
+
+   psl_visit_only(p, psl_collect_fcall_clocks_cb, &cc, P_BUILTIN_FCALL);
+   psl_visit_only(p, psl_collect_clocked_cb, &cc, P_CLOCKED);
 }
 
 static void psl_lower_property(lower_unit_t *lu, object_t *obj)

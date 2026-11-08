@@ -1540,6 +1540,9 @@ psl32           gold,2008
 psl33           gold,2008
 psl34           gold,2008
 psl35           gold,2008
+psl36           gold,2008
+psl37           normal,2008
+psl38           fail,gold,2008
 psl77           fail,gold,2008
 vlogrealport1   verilog
 vlogcasegen3    verilog

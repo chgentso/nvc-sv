@@ -26,7 +26,7 @@
 #include <assert.h>
 #include <inttypes.h>
 
-static void psl_check_clocked(psl_node_t p, nametab_t *tab, bool toplevel);
+static void psl_check_clocked(psl_node_t p, nametab_t *tab);
 
 static void psl_check_static(tree_t t)
 {
@@ -85,7 +85,7 @@ static void psl_check_endpoint_decl(psl_node_t p, nametab_t *tab)
 static void psl_check_top_level(psl_node_t p, nametab_t *tab)
 {
    if (psl_kind(p) == P_CLOCKED)
-      psl_check_clocked(p, tab, true);
+      psl_check_clocked(p, tab);
    else {
       psl_check(p, tab);
 
@@ -138,6 +138,8 @@ static bool psl_is_sequence(psl_node_t p)
    case P_REPEAT:
    case P_PARAM_SERE:
       return true;
+   case P_CLOCKED:
+      return psl_is_sequence(psl_value(p));
    default:
       return false;
    }
@@ -478,16 +480,12 @@ static void psl_check_proc_block(psl_node_t p, nametab_t *tab)
    psl_check(psl_value(p), tab);
 }
 
-static void psl_check_clocked(psl_node_t p, nametab_t *tab, bool toplevel)
+static void psl_check_clocked(psl_node_t p, nametab_t *tab)
 {
    psl_check(psl_value(p), tab);
 
    if (psl_has_tree(p))
       psl_check_boolean(p, tab);
-
-   if (!toplevel)
-      error_at(psl_loc(p), "sorry, clock expressions are only supported at the "
-               "outermost level of a property");
 }
 
 static void psl_check_builtin_fcall(psl_node_t p, nametab_t *tab)
@@ -613,7 +611,7 @@ void psl_check(psl_node_t p, nametab_t *tab)
       // Already checked by the parser while the parameters are in scope
       break;
    case P_CLOCKED:
-      psl_check_clocked(p, tab, false);
+      psl_check_clocked(p, tab);
       break;
    case P_BUILTIN_FCALL:
       psl_check_builtin_fcall(p, tab);

@@ -1,6 +1,6 @@
--- IEEE 1850-2010 6.1.1.2.5, 6.2.1.6.1: a braced parameterised SERE is a
--- Sequence and can be the left hand operand of a suffix implication or
--- the operand of never.
+-- IEEE 1850-2010 6.1.1.2.5, 6.1.2.5, 6.2.1.6.1: a braced parameterised
+-- SERE and a clocked SERE are Sequences and can be the left hand operand
+-- of a suffix implication or the operand of never.
 
 entity psl77 is
 end entity;
@@ -46,5 +46,6 @@ begin
     g1: assert always {for i in {0 to 1} : && {x(i)}} |-> x(0)
         report "g1";
     g2: assert never {for i in {0 to 1} : && {x(i); x(i)}} report "g2";
+    g3: assert always {x(0); x(0)}@rising_edge(clk) |=> z report "g3";
 
 end architecture;

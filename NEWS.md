@@ -46,6 +46,8 @@
 - Added support for the PSL SERE operators `|`, `&`, `&&` and `within`.
   Every match of a sequence in a `cover` directive is now reported.
 - Added support for PSL parameterised SEREs (`for i in {...} : && {...}`).
+- PSL clock expressions can now be used on SEREs and properties nested
+  inside other properties.
 - PSL Boolean implication `->` and equivalence `<->` can now be used
   inside SEREs and as the operand of other PSL operators.  The operators
   of PSL properties are now parsed with the correct precedence.

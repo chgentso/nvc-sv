@@ -371,7 +371,6 @@ START_TEST(test_clock1)
 
    const error_t expect[] = {
       {  9, "sorry, unclocked properties are not supported" },
-      { 11, "sorry, clock expressions are only supported at the outermost" },
       { 12, "expression must be a PSL Boolean but have type "
         "universal_integer" },
       { -1, NULL }

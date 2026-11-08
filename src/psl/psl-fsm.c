@@ -50,6 +50,7 @@ static fsm_state_t *add_state(psl_fsm_t *fsm, psl_node_t where)
    fsm_state_t *s = pool_calloc(fsm->pool, sizeof(fsm_state_t));
    s->id    = fsm->next_id++;
    s->where = where;
+   s->clock = fsm->clock;
 
    *(fsm->tail) = s;
    fsm->tail = &(s->next);
@@ -1381,6 +1382,28 @@ static fsm_state_t *build_suffix_impl(psl_fsm_t *fsm, fsm_state_t *state,
    return final;
 }
 
+static fsm_state_t *build_clocked(psl_fsm_t *fsm, fsm_state_t *state,
+                                  psl_node_t p)
+{
+   // The operand is first evaluated at the first tick of its clock at or
+   // after the current cycle and its states then wait for ticks of
+   // that clock
+
+   psl_node_t saved = fsm->clock;
+   fsm->clock = p;
+
+   fsm_state_t *entry = add_state(fsm, p);
+
+   psl_guard_t tick = p;
+   add_edge(fsm, state, entry, EDGE_EPSILON, tick);
+   add_edge(fsm, state, entry, EDGE_NEXT, not_guard(fsm, tick));
+
+   fsm_state_t *last = build_node(fsm, entry, psl_value(p));
+
+   fsm->clock = saved;
+   return last;
+}
+
 static fsm_state_t *build_node(psl_fsm_t *fsm, fsm_state_t *state, psl_node_t p)
 {
    switch (psl_kind(p)) {
@@ -1421,7 +1444,7 @@ static fsm_state_t *build_node(psl_fsm_t *fsm, fsm_state_t *state, psl_node_t p)
    case P_SUFFIX_IMPL:
       return build_suffix_impl(fsm, state, p);
    case P_CLOCKED:
-      return build_node(fsm, state, psl_value(p));
+      return build_clocked(fsm, state, p);
    default:
       CANNOT_HANDLE(p);
    }
@@ -1601,7 +1624,13 @@ static psl_fsm_t *psl_fsm_build(psl_node_t src, psl_node_t root,
 psl_fsm_t *psl_fsm_new(psl_node_t p, ident_t label)
 {
    const fsm_kind_t kind = psl_kind(p) == P_COVER ? FSM_COVER : FSM_BARE;
-   return psl_fsm_build(p, psl_value(p), kind, label);
+
+   // The outermost clock expression is handled by the caller
+   psl_node_t root = psl_value(p);
+   if (psl_kind(root) == P_CLOCKED)
+      root = psl_value(root);
+
+   return psl_fsm_build(p, root, kind, label);
 }
 
 psl_fsm_t *psl_fsm_new_sequence(psl_node_t seq, ident_t label)
