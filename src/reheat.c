@@ -24,6 +24,7 @@
 #include "rt/model.h"
 #include "tree.h"
 #include "vlog/vlog-phase.h"
+#include "vlog/vlog-util.h"
 #include "vhdl/vhdl-phase.h"
 
 #include <assert.h>
@@ -136,6 +137,8 @@ void reheat(tree_t top, unit_registry_t *ur, mir_context_t *mc,
             cover_data_t *cover, rt_model_t *m)
 {
    assert(tree_kind(top) == T_ELAB);
+
+   vlog_set_design_precision(tree_ival(top));
 
    rt_scope_t *root = create_scope(m, top, NULL);
 

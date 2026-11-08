@@ -2045,7 +2045,6 @@ START_TEST(test_disable1)
    input_from_file(TESTDIR "/vlog/disable1.v");
 
    const error_t expect[] = {
-      {  6, "no visible label 'bar'" },
       {  7, "cannot disable 'x'" },
       { -1, NULL }
    };

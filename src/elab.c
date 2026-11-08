@@ -148,6 +148,11 @@ typedef struct _elab_ctx {
    rt_scope_t       *scope;
    mem_pool_t       *pool;
    cover_obj_t       cscope;
+   const elab_defparam_t *defparams;
+   unsigned          ndefparams;
+   const void       *dp_home;
+   vlog_node_t       config;
+   ident_t           cfg_path;
    unsigned          depth;
    unsigned          errors;
 } elab_ctx_t;
@@ -1708,6 +1713,8 @@ static void elab_inherit_context(elab_ctx_t *ctx, const elab_ctx_t *parent)
    ctx->iface_values = parent->iface_values;
    ctx->nshims   = parent->nshims;
    ctx->depth    = parent->depth + 1;
+   ctx->dp_home  = parent->dp_home;
+   ctx->config   = parent->config;
    ctx->model    = parent->model;
    ctx->errors   = error_count();
    ctx->pool     = parent->pool;
@@ -1761,6 +1768,9 @@ static bool elab_can_clone_instance(elab_instance_t *ei, const elab_ctx_t *ctx)
 
 static bool elab_port_name_eq(ident_t a, ident_t b, bool nocase)
 {
+   return nocase ? ident_casecmp(a, b) : a == b;
+}
+
 static vlog_node_t elab_array_iface_value(vlog_node_t inst, vlog_node_t value);
 static vlog_node_t elab_iface_element(vlog_node_t value, int pos, int count);
 static bool elab_instance_array_bounds(vlog_node_t inst, int64_t *left,
@@ -2033,6 +2043,211 @@ static vlog_node_t elab_array_iface_value(vlog_node_t inst, vlog_node_t value)
                              vlog_ival(inst) >> 32);
 }
 
+static hash_t *elab_ic_types = NULL;   // Interconnect to its port net type
+
+static vlog_node_t elab_nettype_of(vlog_node_t decl)
+{
+   // The user-defined net type of the declaration or null
+
+   if (!vlog_has_type(decl))
+      return NULL;
+
+   vlog_node_t t = vlog_type(decl);
+   if (vlog_kind(t) != V_TYPE_DECL || !(vlog_flags(t) & VLOG_F_NETTYPE))
+      return NULL;
+
+   while (vlog_has_type(t) && vlog_kind(vlog_type(t)) == V_TYPE_DECL
+          && (vlog_flags(vlog_type(t)) & VLOG_F_NETTYPE))
+      t = vlog_type(t);
+
+   return t;
+}
+
+static bool elab_is_interconnect(vlog_node_t decl)
+{
+   if (!vlog_has_type(decl))
+      return false;
+
+   vlog_node_t t = vlog_type(decl);
+   return vlog_kind(t) == V_DATA_TYPE && (vlog_flags(t) & VLOG_F_USERNET)
+      && vlog_ranges(t) == 0 && vlog_ranges(decl) == 0;
+}
+
+static object_t *elab_find_instance_unit(vlog_node_t v, const elab_ctx_t *ctx,
+                                         ident_t *qual);
+
+static vlog_node_t elab_ic_nettype(vlog_node_t scope, vlog_node_t decl,
+                                   vlog_node_t alt, int depth,
+                                   const elab_ctx_t *ctx)
+{
+   // The user-defined net type of the ports which an interconnect net
+   // connects in the instances of a module, looking through the ports of
+   // generic modules which are interconnects themselves (6.6.8)
+
+   if (depth > 16)
+      return NULL;
+
+   const int nstmts = vlog_stmts(scope);
+   for (int i = 0; i < nstmts; i++) {
+      vlog_node_t list = vlog_stmt(scope, i);
+      if (vlog_kind(list) != V_INST_LIST)
+         continue;
+
+      ident_t qual;
+      object_t *obj = elab_find_instance_unit(list, ctx, &qual);
+      vlog_node_t mod = obj != NULL ? vlog_from_object(obj) : NULL;
+      if (mod == NULL || vlog_kind(mod) != V_MODULE)
+         continue;
+
+      const int nports = vlog_ports(mod);
+      const int ninsts = vlog_stmts(list);
+      for (int j = 0; j < ninsts; j++) {
+         vlog_node_t inst = vlog_stmt(list, j);
+         const int nparams = vlog_params(inst);
+         for (int k = 0; k < nparams; k++) {
+            vlog_node_t conn = vlog_param(inst, k);
+            if (vlog_kind(conn) != V_PORT_CONN || !vlog_has_value(conn))
+               continue;
+
+            vlog_node_t value = vlog_value(conn);
+            if (vlog_kind(value) != V_REF || !vlog_has_ref(value)
+                || (vlog_ref(value) != decl && vlog_ref(value) != alt))
+               continue;
+
+            vlog_node_t port = NULL;
+            for (int n = 0; n < nports && port == NULL; n++) {
+               vlog_node_t p = vlog_ref(vlog_port(mod, n));
+               if (vlog_has_ident(conn) ? vlog_ident(p) == vlog_ident(conn)
+                   : n == k)
+                  port = p;
+            }
+
+            if (port == NULL)
+               continue;
+
+            vlog_node_t nt = elab_nettype_of(port);
+            if (nt == NULL && elab_is_interconnect(port))
+               nt = elab_ic_nettype(mod, port, vlog_has_ref(port)
+                                    ? vlog_ref(port) : NULL, depth + 1, ctx);
+
+            if (nt != NULL)
+               return nt;
+         }
+      }
+   }
+
+   return NULL;
+}
+
+static void elab_infer_interconnects(vlog_node_t body, const elab_ctx_t *ctx)
+{
+   // A scalar interconnect net becomes a net of the user-defined net type
+   // of the ports it connects (6.6.8, 23.3.3.4)
+
+   const int ndecls = vlog_decls(body);
+   for (int i = 0; i < ndecls; i++) {
+      vlog_node_t d = vlog_decl(body, i);
+      if (vlog_kind(d) != V_NET_DECL || !elab_is_interconnect(d))
+         continue;
+
+      vlog_node_t port = NULL;
+      for (int j = 0; j < ndecls && port == NULL; j++) {
+         vlog_node_t p = vlog_decl(body, j);
+         if (vlog_kind(p) == V_PORT_DECL && vlog_has_ref(p)
+             && vlog_ref(p) == d)
+            port = p;
+      }
+
+      vlog_node_t nt = elab_ic_nettype(body, d, port, 0, ctx);
+      if (nt != NULL)
+         vlog_set_interconnect_nettype(d, nt);
+   }
+}
+
+static void elab_check_nettype_conn(vlog_node_t port, vlog_node_t value,
+                                    const loc_t *where)
+{
+   // IEEE 1800-2017 23.3.3.5, 6.6.8: a port merges the nets it connects so
+   // their user-defined net types shall match
+
+   vlog_node_t root = value;
+   bool whole = true;
+   while (vlog_kind(root) == V_BIT_SELECT || vlog_kind(root) == V_PART_SELECT) {
+      root = vlog_value(root);
+      whole = false;
+   }
+
+   if (vlog_kind(root) != V_REF || !vlog_has_ref(root))
+      return;
+
+   vlog_node_t decl = vlog_ref(root);
+   switch (vlog_kind(decl)) {
+   case V_NET_DECL:
+   case V_VAR_DECL:
+   case V_PORT_DECL:
+      break;
+   default:
+      return;
+   }
+
+   vlog_node_t pt = elab_nettype_of(port), nt = elab_nettype_of(decl);
+
+   bool interconnect = false;
+   if (vlog_has_type(decl)) {
+      vlog_node_t t = vlog_type(decl);
+      interconnect = vlog_kind(t) == V_DATA_TYPE
+         && (vlog_flags(t) & VLOG_F_USERNET) && vlog_kind(decl) != V_VAR_DECL;
+   }
+
+   bool port_interconnect = false;
+   if (vlog_has_type(port)) {
+      vlog_node_t t = vlog_type(port);
+      port_interconnect = vlog_kind(t) == V_DATA_TYPE
+         && (vlog_flags(t) & VLOG_F_USERNET);
+   }
+
+   if (port_interconnect)
+      return;
+
+   if (interconnect) {
+      // The bits of an interconnect can resolve with different net types
+      if (pt == NULL || !whole)
+         return;
+
+      if (elab_ic_types == NULL)
+         elab_ic_types = hash_new(64);
+
+      vlog_node_t first = hash_get(elab_ic_types, decl);
+      if (first == NULL)
+         hash_put(elab_ic_types, decl, pt);
+      else if (first != pt)
+         error_at(where, "interconnect '%s' connects ports of incompatible "
+                  "nettypes %s and %s", istr(vlog_ident(decl)),
+                  istr(vlog_ident(first)), istr(vlog_ident(pt)));
+      return;
+   }
+
+   if (pt != NULL && nt == NULL && vlog_kind(decl) == V_NET_DECL)
+      error_at(where, "cannot connect net '%s' of a built-in net type to "
+               "port '%s' of nettype %s", istr(vlog_ident(decl)),
+               istr(vlog_ident(port)), istr(vlog_ident(pt)));
+   else if (pt != NULL && nt != NULL && pt != nt)
+      error_at(where, "cannot connect net '%s' of nettype %s to port '%s' of "
+               "nettype %s", istr(vlog_ident(decl)), istr(vlog_ident(nt)),
+               istr(vlog_ident(port)), istr(vlog_ident(pt)));
+   else if (pt == NULL && nt != NULL && vlog_kind(port) == V_PORT_DECL)
+      error_at(where, "cannot connect net '%s' of nettype %s to port '%s' of "
+               "a built-in net type", istr(vlog_ident(decl)),
+               istr(vlog_ident(nt)), istr(vlog_ident(port)));
+}
+static bool elab_is_event_formal(vlog_node_t port);
+static vlog_node_t elab_conn_event(vlog_node_t conn);
+
+static void elab_verilog_ports(vlog_node_t inst, elab_instance_t *ei,
+                               bool nocase, const elab_ctx_t *ctx)
+{
+   // Port names are case-insensitive if the module is the shim for a
+   // VHDL entity
    assert(vlog_kind(inst) == V_MOD_INST);
 
    const int nports = vlog_ports(ei->body);
@@ -2117,7 +2332,62 @@ static vlog_node_t elab_array_iface_value(vlog_node_t inst, vlog_node_t value)
          }
       }
 
-      if (conn == NULL) {
+      vlog_node_t value = NULL;
+      const loc_t *where = vlog_loc(inst);
+      if (conn != NULL) {
+         if (!vlog_has_value(conn)) {
+            if ((vlog_flags(ei->body) & VLOG_F_CHECKER) && vlog_has_value(port))
+               conn = NULL;
+            else
+               continue;
+         }
+      }
+
+      if (conn != NULL) {
+         value = vlog_value(conn);
+         where = vlog_loc(conn);
+
+         // The edge of an event connection was bound in the instance
+         vlog_node_t event = elab_conn_event(conn);
+         if (event != value && !elab_is_event_formal(port))
+            value = vlog_value(event);
+
+         if (vlog_ival(inst) != 0)
+            value = elab_array_port_value(inst, port, value);
+      }
+      else if (wildcard != NULL && vlog_has_ref(wildcard)) {
+         vlog_node_t parent = vlog_ref(wildcard);
+         const int ndecls = vlog_decls(parent);
+         for (int j = 0; j < ndecls; j++) {
+            vlog_node_t d = vlog_decl(parent, j);
+            switch (vlog_kind(d)) {
+            case V_NET_DECL:
+            case V_VAR_DECL:
+            case V_PORT_DECL:
+               if (vlog_ident(d) == port_name) {
+                  value = vlog_new(V_REF);
+                  vlog_set_ident(value, port_name);
+                  vlog_set_ref(value, d);
+                  vlog_set_loc(value, vlog_loc(wildcard));
+               }
+               break;
+            default:
+               break;
+            }
+
+            if (value != NULL)
+               break;
+         }
+
+         where = vlog_loc(wildcard);
+      }
+
+
+      // A checker argument can have a default value
+      if (value == NULL && vlog_has_value(port) && vlog_subkind(port) == V_PORT_INPUT)
+         value = vlog_value(port);
+
+      if (value == NULL) {
          diag_t *d = diag_new(DIAG_WARN, vlog_loc(inst));
          diag_printf(d, "missing port connection for %pQ", port_name);
          diag_hint(d, vlog_loc(port), "%pQ declared here", port_name);
@@ -2143,6 +2413,8 @@ static vlog_node_t elab_array_iface_value(vlog_node_t inst, vlog_node_t value)
          diag_emit(d);
          continue;
       }
+
+      elab_check_nettype_conn(port, value, where);
 
       vlog_node_t map = vlog_new(V_PORT_MAP);
       vlog_set_ident(map, port_name);
@@ -2170,6 +2442,22 @@ static vlog_node_t elab_array_iface_value(vlog_node_t inst, vlog_node_t value)
                   vlog_ident(conn), vlog_ident2(ei->body));
       }
    }
+}
+
+static void elab_vhdl_in_verilog(tree_t entity, vlog_node_t inst,
+                                 const elab_instance_t *ei, elab_ctx_t *ctx);
+
+static void elab_early_iface_conns(const elab_ctx_t *ctx, int first);
+
+static void elab_rewrite_hier_ref_pre_cb(vlog_node_t v, void *arg);
+static vlog_node_t elab_rewrite_hier_ref_cb(vlog_node_t v, void *arg);
+
+static vlog_node_t elab_find_href_cb(vlog_node_t v, void *arg)
+{
+   if (vlog_kind(v) == V_HIER_REF)
+      *(bool *)arg = true;
+
+   return v;
 }
 
 static bool elab_copy_param_pred(vlog_node_t v, void *ctx)
@@ -2461,6 +2749,271 @@ static void elab_check_defparams(vlog_node_t body, const elab_ctx_t *ctx)
    }
 }
 
+typedef struct {
+   vlog_node_t *decls;
+   vlog_node_t *actuals;
+   int          count;
+   hset_t      *ports;
+   hash_t      *sampled;
+} elab_event_formals_t;
+
+static vlog_node_t elab_conn_event(vlog_node_t conn)
+{
+   // The edge in the connection to an event formal
+
+   if (vlog_has_ref(conn) && vlog_kind(vlog_ref(conn)) == V_EVENT)
+      return vlog_ref(conn);
+
+   return vlog_value(conn);
+}
+
+static vlog_node_t elab_find_conn(vlog_node_t inst, int index,
+                                  vlog_node_t port)
+{
+   const int nparams = vlog_params(inst);
+   if (index < nparams) {
+      vlog_node_t c = vlog_param(inst, index);
+      if (!(vlog_flags(c) & VLOG_F_WILDCARD) && !vlog_has_ident(c))
+         return c;
+   }
+
+   for (int i = 0; i < nparams; i++) {
+      vlog_node_t c = vlog_param(inst, i);
+      if (vlog_has_ident(c) && vlog_ident(c) == vlog_ident(port))
+         return c;
+   }
+
+   return NULL;
+}
+
+static vlog_node_t elab_event_actual(vlog_node_t inst, vlog_node_t body,
+                                     int index, vlog_node_t port)
+{
+   // The event expression connected to a port of event type
+
+   vlog_node_t c = elab_find_conn(inst, index, port);
+   return c != NULL && vlog_has_value(c) ? elab_conn_event(c) : NULL;
+}
+
+static vlog_node_t elab_constant_actual(vlog_node_t inst, int index,
+                                        vlog_node_t port)
+{
+   // A formal of a checker given a constant is replaced by it so that it
+   // can be used where a constant expression is needed (17.2)
+
+   vlog_node_t c = elab_find_conn(inst, index, port), v = NULL;
+   if (c != NULL && vlog_has_value(c))
+      v = vlog_value(c);
+   else if (vlog_has_value(port))
+      v = vlog_value(port);
+
+   return v != NULL && vlog_kind(v) == V_NUMBER ? v : NULL;
+}
+
+static bool elab_is_event_formal(vlog_node_t port)
+{
+   if (vlog_kind(port) != V_PORT_DECL || vlog_subkind(port) != V_PORT_INPUT)
+      return false;
+
+   vlog_node_t type = vlog_get_type(vlog_type(port));
+   return type != NULL && vlog_kind(type) == V_DATA_TYPE
+      && vlog_subkind(type) == DT_EVENT;
+}
+
+static bool elab_has_event_actuals(vlog_node_t mod, vlog_node_t inst)
+{
+   if (inst == NULL || vlog_kind(mod) != V_MODULE)
+      return false;
+
+   const bool checker = !!(vlog_flags(mod) & VLOG_F_CHECKER);
+
+   const int nports = vlog_ports(mod);
+   for (int i = 0; i < nports; i++) {
+      vlog_node_t port = vlog_ref(vlog_port(mod, i));
+      if (elab_is_event_formal(port)) {
+         vlog_node_t actual = elab_event_actual(inst, mod, i, port);
+         if (actual != NULL && vlog_kind(actual) == V_EVENT)
+            return true;
+      }
+      else if (checker && vlog_subkind(port) == V_PORT_INPUT
+               && elab_constant_actual(inst, i, port) != NULL)
+         return true;
+   }
+
+   return false;
+}
+
+static vlog_node_t elab_event_formal_cb(vlog_node_t v, void *arg)
+{
+   if (vlog_kind(v) == V_REF && vlog_has_ref(v)) {
+      const elab_event_formals_t *ef = arg;
+      if (hset_contains(ef->ports, v))
+         return v;
+
+      vlog_node_t s;
+      if (ef->sampled != NULL
+          && (s = hash_get(ef->sampled, vlog_ref(v))) != NULL) {
+         vlog_node_t ref = vlog_new(V_REF);
+         vlog_set_ident(ref, vlog_ident(s));
+         vlog_set_ref(ref, s);
+         vlog_set_loc(ref, vlog_loc(v));
+         return ref;
+      }
+
+      for (int i = 0; i < ef->count; i++) {
+         if (vlog_ref(v) == ef->decls[i]
+             && vlog_kind(ef->actuals[i]) == V_NUMBER)
+            return ef->actuals[i];
+      }
+
+      return v;
+   }
+
+   if (vlog_kind(v) == V_SVA_OP) {
+      // The bounds of a delay or repetition are constants and are not
+      // sampled
+      const elab_event_formals_t *ef = arg;
+      for (int side = 0; side < 2; side++) {
+         if (!(side == 0 ? vlog_has_left(v) : vlog_has_right(v)))
+            continue;
+
+         vlog_node_t b = side == 0 ? vlog_left(v) : vlog_right(v);
+         if (vlog_kind(b) != V_REF)
+            continue;
+
+         const char *name = istr(vlog_ident(b));
+         if (strncmp(name, "$sampled.", 9) != 0)
+            continue;
+
+         for (int i = 0; i < ef->count; i++) {
+            if (vlog_kind(ef->actuals[i]) == V_NUMBER
+                && strcmp(name + 9, istr(vlog_ident(ef->decls[i]))) == 0) {
+               if (side == 0)
+                  vlog_set_left(v, ef->actuals[i]);
+               else
+                  vlog_set_right(v, ef->actuals[i]);
+            }
+         }
+      }
+
+      return v;
+   }
+
+   if (vlog_kind(v) != V_EVENT || !vlog_has_value(v)
+       || vlog_subkind(v) != V_EVENT_LEVEL)
+      return v;
+
+   vlog_node_t ref = vlog_value(v);
+   if (vlog_kind(ref) != V_REF || !vlog_has_ref(ref))
+      return v;
+
+   // The clocking event of a sampled value function is not sampled
+   const char *name = istr(vlog_ident(ref));
+   const bool sampled = strncmp(name, "$sampled.", 9) == 0;
+
+   const elab_event_formals_t *ef = arg;
+   for (int i = 0; i < ef->count; i++) {
+      if (sampled && strcmp(name + 9, istr(vlog_ident(ef->decls[i]))) == 0) {
+         ref = vlog_new(V_REF);
+         vlog_set_ident(ref, vlog_ident(ef->decls[i]));
+         vlog_set_ref(ref, ef->decls[i]);
+         vlog_set_loc(ref, vlog_loc(v));
+      }
+      else if (vlog_ref(ref) != ef->decls[i])
+         continue;
+
+      vlog_node_t e = vlog_new(V_EVENT);
+      vlog_set_loc(e, vlog_loc(v));
+      vlog_set_subkind(e, vlog_subkind(ef->actuals[i]));
+      vlog_set_value(e, ref);
+      return e;
+   }
+
+   return v;
+}
+
+static void elab_bind_event_formals(vlog_node_t body, vlog_node_t inst)
+{
+   // A formal of event type connected to an event expression such as
+   // posedge clk becomes a scalar input connected to the signal and the
+   // edge of the expression is applied where the formal is used
+
+   const int nports = vlog_ports(body);
+   elab_event_formals_t ef = {
+      .decls   = xcalloc_array(nports, sizeof(vlog_node_t)),
+      .actuals = xcalloc_array(nports, sizeof(vlog_node_t)),
+   };
+
+   for (int i = 0; i < nports; i++) {
+      vlog_node_t port = vlog_ref(vlog_port(body, i));
+      if (!elab_is_event_formal(port)) {
+         vlog_node_t k;
+         if ((vlog_flags(body) & VLOG_F_CHECKER)
+             && vlog_subkind(port) == V_PORT_INPUT
+             && (k = elab_constant_actual(inst, i, port)) != NULL) {
+            ef.decls[ef.count] = port;
+            ef.actuals[ef.count++] = k;
+         }
+         continue;
+      }
+
+      vlog_node_t actual = elab_event_actual(inst, body, i, port);
+      if (actual == NULL || vlog_kind(actual) != V_EVENT)
+         continue;
+
+      vlog_node_t type = vlog_new(V_DATA_TYPE);
+      vlog_set_subkind(type, DT_LOGIC);
+      vlog_set_loc(type, vlog_loc(port));
+
+      vlog_node_t var = vlog_new(V_VAR_DECL);
+      vlog_set_ident(var, vlog_ident(port));
+      vlog_set_type(var, type);
+      vlog_set_loc(var, vlog_loc(port));
+
+      vlog_set_type(port, type);
+      vlog_set_ref(port, var);
+      vlog_add_decl(body, var);
+
+      // The sampled copy of the formal now holds the signal
+      ident_t sid = ident_prefix(ident_new("$sampled"), vlog_ident(port), '.');
+      const int ndecls = vlog_decls(body);
+      for (int j = 0; j < ndecls; j++) {
+         vlog_node_t d = vlog_decl(body, j);
+         if (vlog_kind(d) != V_VAR_DECL || vlog_ident(d) != sid)
+            continue;
+
+         vlog_node_t s = vlog_new(V_VAR_DECL);
+         vlog_set_ident(s, sid);
+         vlog_set_type(s, type);
+         vlog_set_loc(s, vlog_loc(d));
+         vlog_add_decl(body, s);
+
+         if (ef.sampled == NULL)
+            ef.sampled = hash_new(16);
+         hash_put(ef.sampled, d, s);
+         break;
+      }
+
+      ef.decls[ef.count] = port;
+      ef.actuals[ef.count++] = actual;
+   }
+
+   if (ef.count > 0) {
+      ef.ports = hset_new(nports);
+      for (int i = 0; i < nports; i++)
+         hset_insert(ef.ports, vlog_port(body, i));
+
+      vlog_rewrite(body, NULL, elab_event_formal_cb, &ef);
+      hset_free(ef.ports);
+   }
+
+   if (ef.sampled != NULL)
+      hash_free(ef.sampled);
+
+   free(ef.decls);
+   free(ef.actuals);
+}
+
 static void elab_verilog_module(tree_t comp, ident_t label, vlog_node_t mod,
                                 vlog_node_t list, vlog_node_t inst,
                                 tree_t entity, const elab_ctx_t *ctx)
@@ -2477,7 +3030,9 @@ static void elab_verilog_module(tree_t comp, ident_t label, vlog_node_t mod,
    ident_t ndotted = ident_prefix(ctx->dotted, label, '.');
 
    elab_ctx_t new_ctx = {
-      .dotted = ndotted,
+      .dotted   = ndotted,
+      .cfg_path = ctx->cfg_path != NULL
+         ? ident_prefix(ctx->cfg_path, label, '.') : label,
    };
    elab_inherit_context(&new_ctx, ctx);
 
@@ -2493,9 +3048,66 @@ static void elab_verilog_module(tree_t comp, ident_t label, vlog_node_t mod,
    mod_cache_t *mc = elab_cached_module(vlog_to_object(mod), &new_ctx);
    mc->count++;
 
-   elab_instance_t *ei = ghash_get(mc->instances, list);
+   // The members of the interface connected to a port may differ for
+   // each instance so references to them cannot be shared
+   bool has_iface_port = false;
+   if (vlog_kind(mod) == V_MODULE) {
+      const int ndecls = vlog_decls(mod);
+      for (int i = 0; !has_iface_port && i < ndecls; i++)
+         has_iface_port = vlog_kind(vlog_decl(mod, i)) == V_IFACE_PORT;
+   }
+
+   elab_instance_t *ei = ghash_get(mc->instances, list), *chain = NULL;
+   if (vlog_kind(mod) == V_MODULE && vlog_bind_is_selective(mod))
+      ei = NULL;   // The instance may have its own bound instances
+   else if (elab_has_event_actuals(mod, inst)) {
+      // Each event expression gives a different body
+      chain = ei;
+      ei = NULL;
+   }
+   else if (has_iface_port) {
+      chain = ei;
+      ei = NULL;
+   }
+
    if (!elab_can_clone_instance(ei, &new_ctx)) {
       ident_t id = ident_sprintf("%s#%d", istr(vlog_ident(mod)), mc->unique);
+
+      vlog_set_instance_scope(ndotted);
+      vlog_node_t body = vlog_new_instance(mod, list, id);
+      bool folded = false;
+
+      if (elab_has_event_actuals(mod, inst))
+         elab_bind_event_formals(body, inst);
+
+      // The layout of an interface depends on its parameters and a virtual
+      // interface refers to it by the values of the parameters
+      const bool is_iface = vlog_kind(mod) == V_MODULE
+         && (vlog_flags(mod) & VLOG_F_INTERFACE);
+      ident_t key = NULL;
+      elab_instance_t *shared = NULL;
+      if (is_iface) {
+         const int base_errors = error_count();
+         vlog_fold(body, ctx->mir, ctx->jit);
+         folded = true;
+
+         if (error_count() == base_errors
+             && (key = vlog_instance_key(mod, body)) != NULL) {
+            id = ident_sprintf("%s#%s", istr(vlog_ident(mod)), istr(key));
+            if ((shared = hash_get(ctx->iface_units, id)) == NULL) {
+               body = vlog_new_instance(mod, list, id);
+               folded = false;
+            }
+         }
+         else
+            key = NULL;
+      }
+
+      if (shared != NULL) {
+         ghash_put(mc->instances, list, shared);
+         ei = shared;
+         goto have_instance;
+      }
 
       ei = pool_calloc(ctx->pool, sizeof(elab_instance_t));
       ei->chain = chain;
@@ -2522,6 +3134,7 @@ static void elab_verilog_module(tree_t comp, ident_t label, vlog_node_t mod,
       tree_set_ident(ei->block, ndotted);
 
       vlog_trans(ei->body, ei->block);
+      elab_infer_interconnects(ei->body, ctx);
       vlog_lower_instance(ctx->mir, ei->body, NULL, ei->block);
 
       ghash_put(mc->instances, list, ei);
@@ -2602,6 +3215,19 @@ static void elab_verilog_module(tree_t comp, ident_t label, vlog_node_t mod,
    elab_pop_scope(&new_ctx);
 }
 
+static void elab_verilog_vhdl_instance_list(vlog_node_t v, tree_t entity,
+                                            const elab_ctx_t *ctx);
+
+static bool elab_is_instantiable(object_t *obj)
+{
+   // A Verilog module or VHDL entity can be instantiated from Verilog
+   if (vlog_from_object(obj) != NULL)
+      return true;
+
+   tree_t t = tree_from_object(obj);
+   return t != NULL && tree_kind(t) == T_ENTITY;
+}
+
 static object_t *elab_find_unit_by_name(ident_t modname, const elab_ctx_t *ctx,
                                         ident_t *qual)
 {
@@ -2629,6 +3255,97 @@ static object_t *elab_find_instance_unit(vlog_node_t v, const elab_ctx_t *ctx,
                                          ident_t *qual)
 {
    return elab_find_unit_by_name(vlog_ident(v), ctx, qual);
+}
+
+static ident_t elab_config_cell(ident_t name)
+{
+   // A cell name without the library
+
+   const char *str = istr(name), *dot = strchr(str, '.');
+   return dot != NULL ? ident_new(dot + 1) : name;
+}
+
+static bool elab_config_bind(const elab_ctx_t *ctx, vlog_node_t list,
+                             vlog_node_t inst, vlog_node_t *mod,
+                             vlog_node_t *newlist)
+{
+   // Apply the instance and cell clauses of a configuration (33.4)
+
+   ident_t path = ident_prefix(ctx->cfg_path, vlog_ident(inst), '.');
+   ident_t cell = vlog_ident(list);
+
+   vlog_node_t irule = NULL, crule = NULL;
+   const int nrules = vlog_stmts(ctx->config);
+   for (int i = 0; i < nrules; i++) {
+      vlog_node_t r = vlog_stmt(ctx->config, i);
+      if (vlog_subkind(r) == V_CONFIG_INSTANCE && vlog_ident(r) == path)
+         irule = r;
+      else if (vlog_subkind(r) == V_CONFIG_CELL
+               && elab_config_cell(vlog_ident(r)) == cell)
+         crule = r;
+   }
+
+   if (irule == NULL && crule == NULL)
+      return true;
+
+   vlog_node_t rules[] = { crule, irule };
+
+   ident_t target = NULL;
+   for (int i = 0; i < 2; i++) {
+      if (rules[i] != NULL && vlog_has_ident2(rules[i]))
+         target = vlog_ident2(rules[i]);
+   }
+
+   if (target != NULL) {
+      ident_t qual;
+      object_t *obj = elab_find_unit_by_name(elab_config_cell(target), ctx,
+                                             &qual);
+      vlog_node_t m = obj != NULL ? vlog_from_object(obj) : NULL;
+      if (m == NULL || vlog_kind(m) != V_MODULE) {
+         error_at(vlog_loc(irule ?: crule), "cell %pQ of configuration "
+                  "'%s' not found in library %pI or any other library",
+                  target, istr(vlog_ident2(ctx->config)),
+                  lib_name(ctx->library));
+         return false;
+      }
+
+      *mod = m;
+   }
+
+   vlog_node_t copy = vlog_new(V_INST_LIST);
+   vlog_set_ident(copy, target ? elab_config_cell(target) : cell);
+   vlog_set_loc(copy, vlog_loc(list));
+   vlog_add_stmt(copy, inst);
+
+   // Parameters given by a clause replace those of the instance
+   const int nparams = vlog_params(list);
+   for (int i = 0; i < nparams; i++) {
+      vlog_node_t p = vlog_param(list, i);
+      bool replaced = false;
+      for (int j = 0; j < 2 && vlog_has_ident(p); j++) {
+         if (rules[j] == NULL)
+            continue;
+
+         const int ncp = vlog_params(rules[j]);
+         for (int k = 0; k < ncp; k++)
+            replaced |= vlog_ident(vlog_param(rules[j], k)) == vlog_ident(p);
+      }
+
+      if (!replaced)
+         vlog_add_param(copy, p);
+   }
+
+   for (int j = 0; j < 2; j++) {
+      if (rules[j] == NULL)
+         continue;
+
+      const int ncp = vlog_params(rules[j]);
+      for (int k = 0; k < ncp; k++)
+         vlog_add_param(copy, vlog_param(rules[j], k));
+   }
+
+   *newlist = copy;
+   return true;
 }
 
 static void elab_verilog_instance_list(vlog_node_t v, const elab_ctx_t *ctx)
@@ -2674,7 +3391,30 @@ static void elab_verilog_instance_list(vlog_node_t v, const elab_ctx_t *ctx)
       vlog_node_t inst = vlog_stmt(v, i);
       assert(vlog_kind(inst) == V_MOD_INST);
 
-      elab_verilog_module(NULL, vlog_ident(inst), mod, v, inst, ctx);
+      vlog_node_t imod = mod, ilist = v;
+      if (ctx->config != NULL && !elab_config_bind(ctx, v, inst, &imod, &ilist))
+         continue;
+
+      if (vlog_ranges(inst) == 0) {
+         elab_verilog_module(NULL, vlog_ident(inst), imod, ilist, inst, NULL,
+                             ctx);
+         continue;
+      }
+
+      int64_t left, right;
+      if (!elab_instance_array_bounds(inst, &left, &right))
+         continue;
+
+      const int count = llabs(left - right) + 1;
+      for (int j = 0; j < count; j++) {
+         const int64_t index = left >= right ? left - j : left + j;
+         vlog_node_t elem = elab_array_element(inst, j, count, index);
+         elab_verilog_module(NULL, vlog_ident(elem), imod, ilist, elem, NULL,
+                             ctx);
+      }
+   }
+}
+
 static void elab_architecture(tree_t inst, tree_t arch, const elab_ctx_t *ctx);
 
 static tree_t elab_constant_field(tree_t ref);
@@ -3841,6 +4581,333 @@ static vlog_node_t elab_vhdl_shim_module(vlog_node_t list, tree_t entity,
    return vlog_copy(mod, elab_copy_all_cb, NULL);
 }
 
+static bool elab_verilog_port_open(vlog_node_t inst, tree_t eport, int pos)
+{
+   // True if this instance has no connection for the VHDL port
+
+   const int nparams = vlog_params(inst);
+   for (int i = 0; i < nparams; i++) {
+      vlog_node_t conn = vlog_param(inst, i);
+      if (vlog_has_ident(conn)
+          ? elab_vlog_name_match(vlog_ident(conn), tree_ident(eport))
+          : i == pos)
+         return !vlog_has_value(conn);
+   }
+
+   return true;
+}
+
+static void elab_vhdl_in_verilog(tree_t entity, vlog_node_t inst_v,
+                                 const elab_instance_t *ei, elab_ctx_t *ctx)
+{
+   // Instantiate the VHDL entity inside the shim block and connect its
+   // ports to the ports of the shim
+
+   ident_t name = ident_rfrom(tree_ident(entity), '.') ?: tree_ident(entity);
+
+   tree_t inst = tree_new(T_INSTANCE);
+   tree_set_ident(inst, name);
+   tree_set_loc(inst, tree_loc(entity));
+   tree_set_class(inst, C_ENTITY);
+   tree_set_ref(inst, entity);
+
+   const int ngenerics = tree_generics(entity);
+   int64_t *gvals LOCAL = xcalloc_array(MAX(ngenerics, 1), sizeof(int64_t));
+   for (int i = 0; i < ngenerics; i++) {
+      tree_t g = tree_generic(entity, i);
+      type_t type = tree_type(g);
+
+      tree_t value = NULL;
+      const int ndecls = elab_is_simple_generic(type) ? vlog_decls(ei->body) : 0;
+      for (int j = 0; j < ndecls; j++) {
+         vlog_node_t d = vlog_decl(ei->body, j);
+         if (vlog_kind(d) != V_LOCALPARAM
+             || !elab_vlog_name_match(vlog_ident(d), tree_ident(g)))
+            continue;
+
+         int64_t ival;
+         double dval;
+         if (type_is_real(type)) {
+            if (!elab_vlog_real_value(d, &dval)) {
+               error_at(tree_loc(g), "value of parameter %pQ is not a "
+                        "constant real", vlog_ident(d));
+               return;
+            }
+
+            value = get_real_lit(g, type, dval);
+         }
+         else if (type_eq(type, std_type(NULL, STD_STRING))) {
+            LOCAL_TEXT_BUF tb = tb_new();
+            if (!elab_vlog_string_value(d, tb)) {
+               error_at(tree_loc(g), "value of parameter %pQ is not a "
+                        "constant string", vlog_ident(d));
+               return;
+            }
+
+            value = tree_new(T_STRING);
+            tree_set_loc(value, tree_loc(g));
+
+            type_t elem = type_base_recur(type_elem(type));
+            const char *str = tb_get(tb);
+            for (int k = 0; k < tb_len(tb); k++) {
+               tree_t lit = type_enum_literal(elem, (unsigned char)str[k]);
+               tree_add_char(value, make_ref(lit));
+            }
+
+            tree_set_type(value, subtype_for_string(value, type));
+         }
+         else if (elab_is_vector_generic(type)) {
+            number_t num;
+            if (!elab_vlog_number(d, &num)) {
+               error_at(tree_loc(g), "value of parameter %pQ is not a "
+                        "constant vector", vlog_ident(d));
+               return;
+            }
+
+            type_t elem = type_base_recur(type_elem(type));
+            const bool is_bit = type_eq(elem, std_type(NULL, STD_BIT));
+
+            // The override takes the width of the parameter as in a
+            // Verilog assignment unless the generic is unconstrained
+            const unsigned nbits = number_width(num);
+            const unsigned width =
+               type_is_unconstrained(type) ? nbits : vlog_width(d);
+            const vlog_logic_t ext =
+               number_signed(num) ? number_bit(num, nbits - 1) : LOGIC_0;
+
+            value = tree_new(T_STRING);
+            tree_set_loc(value, tree_loc(g));
+
+            for (int k = width - 1; k >= 0; k--) {
+               const vlog_logic_t bit = k < nbits ? number_bit(num, k) : ext;
+               const char ch = "01zx"[bit];
+               if (is_bit && ch != '0' && ch != '1') {
+                  error_at(tree_loc(g), "parameter %pQ has undefined bits "
+                           "which cannot be converted to type %pT",
+                           vlog_ident(d), type);
+                  return;
+               }
+
+               const char lname[] = { '\'', toupper_iso88591(ch), '\'', 0 };
+               tree_t lit = NULL;
+               for (int l = 0, n = type_enum_literals(elem); l < n; l++) {
+                  tree_t it = type_enum_literal(elem, l);
+                  if (strcmp(istr(tree_ident(it)), lname) == 0) {
+                     lit = it;
+                     break;
+                  }
+               }
+               assert(lit != NULL);
+
+               tree_add_char(value, make_ref(lit));
+            }
+
+            tree_set_type(value, subtype_for_string(value, type));
+         }
+         else if (!vlog_get_const(d, &ival)) {
+            error_at(tree_loc(g), "value of parameter %pQ is not a defined "
+                     "constant", vlog_ident(d));
+            return;
+         }
+         else if (type_is_integer(type))
+            value = get_int_lit(g, type, ival);
+         else if (elab_is_enum_generic(type)) {
+            value = get_discrete_lit(g, type, ival);
+            if (value == NULL) {
+               error_at(tree_loc(g), "value %"PRIi64" of parameter %pQ is out "
+                        "of range for type %pT", ival, vlog_ident(d), type);
+               return;
+            }
+         }
+         else
+            value = get_enum_lit(g, type, ival != 0);
+         break;
+      }
+
+      if (value == NULL && tree_has_value(g))
+         value = tree_value(g);
+      else if (value == NULL) {
+         error_at(tree_loc(g), "missing value for generic %pI with no "
+                  "default", tree_ident(g));
+         return;
+      }
+
+      tree_t map = tree_new(T_PARAM);
+      tree_set_loc(map, tree_loc(g));
+      tree_set_subkind(map, P_POS);
+      tree_set_pos(map, i);
+      tree_set_value(map, value);
+
+      tree_add_genmap(inst, map);
+
+      bool bval;
+      if (!folded_int(value, &gvals[i]) && folded_bool(value, &bval))
+         gvals[i] = bval;
+      else if (tree_kind(value) == T_REF && tree_has_ref(value)
+               && tree_kind(tree_ref(value)) == T_ENUM_LIT)
+         gvals[i] = tree_pos(tree_ref(value));
+   }
+
+   const generic_env_t env = { entity, gvals, ctx };
+
+   const int nports = tree_ports(entity);
+   assert(tree_ports(ei->block) == nports);
+
+   bool have_named = false;
+   for (int i = 0; i < nports; i++) {
+      tree_t eport = tree_port(entity, i);
+      tree_t vport = tree_port(ei->block, i);
+
+      type_t btype = tree_type(eport);
+      type_t vtype = tree_type(vport);
+
+      if (tree_subkind(eport) == PORT_IN && tree_has_value(eport)
+          && elab_verilog_port_open(inst_v, eport, i)) {
+         // Leave the port open so that it takes its default value
+         have_named = true;
+         continue;
+      }
+
+      if (elab_is_composite_port(btype)
+          && elab_composite_width(btype, &env) > 0) {
+         if (tree_subkind(eport) == PORT_INOUT) {
+            error_at(tree_loc(eport), "sorry, inout port %pI with composite "
+                     "type cannot be instantiated from Verilog",
+                     tree_ident(eport));
+            return;
+         }
+
+         int64_t offset = 0;
+         if (!elab_connect_composite(inst, eport, make_ref(eport), vport,
+                                     elab_composite_width(btype, &env), &offset,
+                                     &env)) {
+            error_at(tree_loc(eport), "cannot connect Verilog net to VHDL "
+                     "port %pI with type %pT", tree_ident(eport), btype);
+            return;
+         }
+
+         have_named = true;
+         continue;
+      }
+
+      tree_t conv = tree_new(T_CONV_FUNC);
+      tree_set_loc(conv, tree_loc(eport));
+
+      if (tree_subkind(eport) == PORT_INOUT) {
+         // Convert in both directions
+         tree_t in_func = elab_to_vhdl(vtype, btype, true);
+         tree_t out_func = elab_to_verilog(btype, vtype, true);
+         if (in_func == NULL || out_func == NULL) {
+            error_at(tree_loc(eport), "cannot connect Verilog net to VHDL "
+                     "inout port %pI with type %pT", tree_ident(eport), btype);
+            return;
+         }
+
+         tree_set_ref(conv, in_func);
+         tree_set_ident(conv, tree_ident(in_func));
+         tree_set_type(conv, type_result(tree_type(in_func)));
+         tree_set_value(conv, make_ref(vport));
+
+         tree_t oconv = tree_new(T_CONV_FUNC);
+         tree_set_loc(oconv, tree_loc(eport));
+         tree_set_ref(oconv, out_func);
+         tree_set_ident(oconv, tree_ident(out_func));
+         tree_set_type(oconv, type_result(tree_type(out_func)));
+         tree_set_value(oconv, make_ref(eport));
+
+         add_param(inst, conv, P_NAMED, oconv);
+         have_named = true;
+      }
+      else if (tree_subkind(eport) == PORT_IN) {
+         tree_t func = elab_to_vhdl(vtype, btype, true);
+         if (func == NULL) {
+            error_at(tree_loc(eport), "cannot connect Verilog net to VHDL "
+                     "input port %pI with type %pT", tree_ident(eport), btype);
+            return;
+         }
+
+         tree_set_ref(conv, func);
+         tree_set_ident(conv, tree_ident(func));
+         tree_set_type(conv, type_result(tree_type(func)));
+         tree_set_value(conv, make_ref(vport));
+
+         if (have_named)
+            add_param(inst, conv, P_NAMED, make_ref(eport));
+         else
+            add_param(inst, conv, P_POS, NULL);
+      }
+      else {
+         tree_t func = elab_to_verilog(btype, vtype, true);
+         if (func == NULL) {
+            error_at(tree_loc(eport), "cannot connect VHDL output port %pI "
+                     "with type %pT to Verilog net", tree_ident(eport), btype);
+            return;
+         }
+
+         tree_set_ref(conv, func);
+         tree_set_ident(conv, tree_ident(func));
+         tree_set_type(conv, type_result(tree_type(func)));
+         tree_set_value(conv, make_ref(eport));
+
+         add_param(inst, make_ref(vport), P_NAMED, conv);
+         have_named = true;
+      }
+   }
+
+   // The shim block is lowered to MIR and has no VHDL parent unit so
+   // create a placeholder that exposes its port variables to the entity
+   ident_t qual = ctx->cloned;
+   assert(qual != NULL);
+
+   mir_shape_t *shape = mir_get_shape(ctx->mir, qual);
+   assert(shape != NULL);
+
+   int *slots LOCAL = xmalloc_array(nports, sizeof(int));
+   for (int i = 0; i < nports; i++) {
+      slots[i] = mir_find_slot(shape, tree_ident(tree_port(ctx->out, i)));
+      assert(slots[i] >= 0);
+   }
+
+   ctx->lowered = lower_verilog_parent(ctx->registry, qual, ctx->dotted,
+                                       ctx->out, slots);
+
+   tree_t arch = elab_pick_arch(entity, tree_loc(entity), ctx);
+   elab_architecture(inst, arch, ctx);
+
+   ctx->lowered = NULL;   // Placeholder is never emitted
+}
+
+static void elab_verilog_vhdl_instance_list(vlog_node_t v, tree_t entity,
+                                            const elab_ctx_t *ctx)
+{
+   v = elab_resolve_param_hrefs(v, ctx);
+
+   vlog_node_t shim = elab_vhdl_shim_module(v, entity, ctx);
+   if (shim == NULL)
+      return;
+
+   const int nstmts = vlog_stmts(v);
+   for (int i = 0; i < nstmts; i++) {
+      vlog_node_t inst = vlog_stmt(v, i);
+      assert(vlog_kind(inst) == V_MOD_INST);
+
+      if (vlog_ranges(inst) == 0) {
+         elab_verilog_module(NULL, vlog_ident(inst), shim, v, inst, entity,
+                             ctx);
+         continue;
+      }
+
+      int64_t left, right;
+      if (!elab_instance_array_bounds(inst, &left, &right))
+         continue;
+
+      const int count = llabs(left - right) + 1;
+      for (int j = 0; j < count; j++) {
+         const int64_t index = left >= right ? left - j : left + j;
+         vlog_node_t elem = elab_array_element(inst, j, count, index);
+         elab_verilog_module(NULL, vlog_ident(elem), shim, v, elem, entity,
+                             ctx);
+      }
    }
 }
 
@@ -3862,11 +4929,77 @@ static void elab_verilog_block(vlog_node_t v, const elab_ctx_t *ctx)
    };
    elab_inherit_context(&new_ctx, ctx);
 
+   new_ctx.defparams  = ctx->defparams;
+   new_ctx.ndefparams = ctx->ndefparams;
+
+   if (ctx->ndefparams > 0) {
+      // A path through the block continues inside it
+      elab_defparam_t *all =
+         pool_malloc(ctx->pool, 2 * ctx->ndefparams * sizeof(elab_defparam_t));
+      unsigned nall = 0;
+      for (unsigned i = 0; i < ctx->ndefparams; i++) {
+         const elab_defparam_t *dp = &(ctx->defparams[i]);
+         all[nall++] = *dp;
+         if (dp->path[0] == id && dp->npath > 1) {
+            *dp->passed = true;
+            all[nall] = *dp;
+            all[nall].path++;
+            all[nall].npath--;
+            nall++;
+         }
+      }
+
+      new_ctx.defparams = all;
+      new_ctx.ndefparams = nall;
+   }
+
    // TODO: use elab_instance_t to cache this
 
    ident_t id2 = ident_prefix(ctx->dotted, vlog_ident(v), '%');
+   vlog_set_instance_scope(NULL);
    vlog_node_t body = vlog_new_instance(v, NULL, id2);
    vlog_fold(body, ctx->mir, ctx->jit);
+
+   unsigned nbody = 0;
+   const int nbstmts = vlog_stmts(body);
+   for (int i = 0; i < nbstmts; i++) {
+      if (vlog_kind(vlog_stmt(body, i)) == V_DEFPARAM)
+         nbody++;
+   }
+
+   if (nbody > 0) {
+      // The last defparam in a module for a parameter takes effect
+      elab_defparam_t *all = pool_malloc(
+         ctx->pool, (new_ctx.ndefparams + nbody) * sizeof(elab_defparam_t));
+      unsigned nown = 0;
+      elab_collect_defparams(body, all, &nown, ctx, ctx->dp_home);
+
+      // The name of the block containing the defparam may start the path
+      for (unsigned i = 0; i < nown; i++) {
+         elab_defparam_t *dp = &(all[i]);
+         if (dp->path[0] == id && dp->npath > 1) {
+            dp->path++;
+            dp->npath--;
+         }
+      }
+
+      unsigned nall = 0;
+      elab_defparam_t *merged = pool_malloc(
+         ctx->pool, (new_ctx.ndefparams + nown) * sizeof(elab_defparam_t));
+      unsigned next = 0;
+      for (unsigned i = 0; i < new_ctx.ndefparams; i++) {
+         const elab_defparam_t *dp = &(new_ctx.defparams[i]);
+         for (; next < nown && dp->home == all[next].home
+                 && all[next].line < dp->line; next++)
+            merged[nall++] = all[next];
+         merged[nall++] = *dp;
+      }
+      for (; next < nown; next++)
+         merged[nall++] = all[next];
+
+      new_ctx.defparams = merged;
+      new_ctx.ndefparams = nall;
+   }
 
    tree_t wrap = tree_new(T_VERILOG);
    tree_set_ident(wrap, id);
@@ -3896,6 +5029,8 @@ static void elab_verilog_block(vlog_node_t v, const elab_ctx_t *ctx)
 
    if (elab_new_errors(&new_ctx) == 0)
       elab_verilog_sub_blocks(v, &new_ctx);
+
+   elab_check_defparams(body, &new_ctx);
 
    elab_pop_scope(&new_ctx);
 }
@@ -4030,8 +5165,17 @@ static void elab_verilog_processes(vlog_node_t v, const elab_ctx_t *ctx)
       case V_FINAL:
       case V_ASSIGN:
       case V_UDP_TABLE:
-      case V_GATE_INST:
          {
+            tree_t w = tree_new(T_VERILOG);
+            tree_set_ident(w, vlog_ident(s));
+            tree_set_loc(w, vlog_loc(s));
+            tree_set_vlog(w, s);
+
+            tree_add_stmt(ctx->out, w);
+         }
+         break;
+      case V_GATE_INST:
+         if (vlog_gate_dimension(s) == NULL) {
             tree_t w = tree_new(T_VERILOG);
             tree_set_ident(w, vlog_ident(s));
             tree_set_loc(w, vlog_loc(s));
@@ -4059,6 +5203,7 @@ static void elab_verilog_processes(vlog_node_t v, const elab_ctx_t *ctx)
       case V_GEN_BLOCK:
       case V_IF_GENERATE:
       case V_FOR_GENERATE:
+      case V_DEFPARAM:
          break;
       default:
          fatal_at(vlog_loc(s), "sorry, this Verilog statement is not "
@@ -4142,20 +5287,86 @@ static vlog_node_t elab_mixed_generics(tree_t comp, vlog_node_t mod,
       }
 
       type_t ctype = tree_type(cg);
-      type_t etype = std_type(NULL, STD_INTEGER);
-
-      if (!type_eq(ctype, etype)) {
-         error_at(tree_loc(cg), "generic %pI should have type %pT to match "
-                  "corresponding Verilog parameter", tree_ident(cg), etype);
-         return NULL;
-      }
 
       tree_t value = find_generic_map(ctx->out, cpos, cg);
       if (value == NULL)
          fatal_at(tree_loc(ctx->out), "cannot get value of generic %pI",
                   tree_ident(cg));
+      else if (tree_kind(value) == T_OPEN && tree_has_value(cg))
+         value = tree_value(cg);
 
-      number_t n = number_from_int(assume_int(value));
+      switch (tree_kind(value)) {
+      case T_LITERAL:
+      case T_STRING:
+         break;
+      case T_REF:
+         if (tree_has_ref(value) && tree_kind(tree_ref(value)) == T_ENUM_LIT)
+            break;
+         // Fall-through
+      default:
+         // The actual may call a function declared in the parent
+         value = elab_eval_expr(value, ctx->parent);
+         break;
+      }
+
+      number_t n;
+      int64_t ival;
+      bool bval;
+      if (type_eq(ctype, std_type(NULL, STD_INTEGER)))
+         n = number_from_int(assume_int(value));
+      else if (type_eq(ctype, std_type(NULL, STD_BOOLEAN))
+               && folded_bool(value, &bval))
+         n = number_from_bool(bval);
+      else if (elab_is_enum_generic(ctype)
+               && elab_eval_generic_expr(value, NULL, NULL, &ival, ctx))
+         n = number_from_int(ival);
+      else if (type_eq(ctype, std_type(NULL, STD_STRING))
+               && tree_kind(value) == T_STRING) {
+         const int nchars = tree_chars(value);
+         char *bytes LOCAL = xmalloc(nchars + 1);
+         for (int j = 0; j < nchars; j++) {
+            tree_t ch = tree_char(value, j);
+            if (tree_kind(ch) != T_REF || !tree_has_ref(ch)
+                || tree_kind(tree_ref(ch)) != T_ENUM_LIT) {
+               error_at(tree_loc(cg), "sorry, the value of generic %pI cannot "
+                        "be converted to a Verilog parameter",
+                        tree_ident(cg));
+               return NULL;
+            }
+            bytes[j] = istr(tree_ident(tree_ref(ch)))[1];
+         }
+
+         n = number_from_string(bytes, nchars);
+      }
+      else if (elab_is_vector_generic(ctype) && tree_kind(value) == T_STRING
+               && tree_chars(value) > 0) {
+         LOCAL_TEXT_BUF tb = tb_new();
+         tb_printf(tb, "%d'b", tree_chars(value));
+         bool ok = true;
+         for (int j = 0, nchars = tree_chars(value); j < nchars; j++) {
+            tree_t ch = tree_char(value, j);
+            if (tree_kind(ch) != T_REF || !tree_has_ref(ch)
+                || tree_kind(tree_ref(ch)) != T_ENUM_LIT) {
+               ok = false;
+               break;
+            }
+            tb_append(tb, elab_logic_char(tree_ref(ch)));
+         }
+
+         if (!ok) {
+            error_at(tree_loc(cg), "sorry, the value of generic %pI cannot "
+                     "be converted to a Verilog parameter", tree_ident(cg));
+            return NULL;
+         }
+
+         n = number_new(tb_get(tb), tree_loc(cg));
+      }
+      else {
+         error_at(tree_loc(cg), "generic %pI should have type INTEGER, "
+                  "BOOLEAN, an enumeration type, or a bit vector to match "
+                  "corresponding Verilog parameter", tree_ident(cg));
+         return NULL;
+      }
 
       vlog_node_t num = vlog_new(V_NUMBER);
       vlog_set_number(num, n);
@@ -4678,10 +5889,24 @@ static void elab_component(tree_t inst, tree_t comp, const elab_ctx_t *ctx)
    if (!tree_has_spec(inst)) {
       tree_t bind = elab_default_binding(inst, ctx);
       if (bind == NULL) {
-         ident_t prefix = lib_name(ctx->library);
+         // The component may be declared in a package of another library
+         // which also contains the module
+         lib_t lib = ctx->library;
+         ident_t full_i = tree_ident(comp);
+         ident_t lib_i = ident_until(full_i, '.');
+         if (lib_i != full_i && lib_i != well_known(W_WORK))
+            lib = elab_find_lib(lib_i, ctx);
+
+         ident_t prefix = lib_name(lib);
          ident_t qual = ident_prefix(prefix, tree_ident2(inst), '.');
 
-         object_t *obj = lib_get_generic(ctx->library, qual, NULL);
+         object_t *obj = lib_get_generic(lib, qual, NULL);
+         if (obj == NULL) {
+            // Any other library containing a module with this name
+            lib_t other;
+            obj = lib_search_generic(ident_rfrom(qual, '.'),
+                                     elab_is_instantiable, &other);
+         }
 
          vlog_node_t mod = vlog_from_object(obj);
          if (mod != NULL) {
@@ -5218,6 +6443,16 @@ void elab_set_generic(const char *name, const char *value)
    generic_override = new;
 }
 
+typedef struct {
+   const elab_ctx_t *ctx;
+   hset_t           *seen;
+   unsigned          log10;
+   vlog_node_t       scaled;     // A module with a time unit
+   vlog_node_t       unscaled;   // A module using the default time unit
+} elab_precision_t;
+
+static void elab_scan_vhdl_precision(tree_t arch, elab_precision_t *p);
+
 static void elab_vhdl_root(tree_t t, const elab_ctx_t *ctx)
 {
    tree_t arch = t;
@@ -5249,6 +6484,52 @@ static void elab_vhdl_root(tree_t t, const elab_ctx_t *ctx)
    }
 }
 
+static void elab_scan_precision(vlog_node_t mod, elab_precision_t *p);
+static void elab_scan_vhdl_precision(tree_t arch, elab_precision_t *p);
+
+static void elab_scan_package_precision(ident_t name, elab_precision_t *p)
+{
+   // A package or compilation unit that is used by a module and every
+   // package it imports
+
+   if (name == NULL)
+      return;
+
+   lib_t lib = lib_find(ident_until(name, '.'));
+   if (lib == NULL)
+      return;
+
+   object_t *obj = lib_get_generic(lib, name, NULL);
+   vlog_node_t pack = obj != NULL ? vlog_from_object(obj) : NULL;
+   if (pack == NULL || hset_contains(p->seen, pack))
+      return;
+
+   switch (vlog_kind(pack)) {
+   case V_PACKAGE:
+      {
+         const unsigned log10 = VLOG_TIME_LOG10(vlog_ival(pack));
+         if (log10 != VLOG_TIME_UNSCALED)
+            p->log10 = MIN(p->log10, log10);
+         else
+            p->log10 = MIN(p->log10, VLOG_DEFAULT_LOG10);
+      }
+      break;
+   case V_NAMESPACE:
+      break;
+   default:
+      return;
+   }
+
+   hset_insert(p->seen, pack);
+
+   const int ndecls = vlog_decls(pack);
+   for (int i = 0; i < ndecls; i++) {
+      vlog_node_t d = vlog_decl(pack, i);
+      if (vlog_kind(d) == V_IMPORT_DECL && vlog_has_ref(d))
+         elab_scan_package_precision(vlog_ident(vlog_ref(d)), p);
+   }
+}
+
 static void elab_scan_precision_cb(vlog_node_t v, void *arg)
 {
    elab_precision_t *p = arg;
@@ -5270,6 +6551,48 @@ static void elab_scan_precision_cb(vlog_node_t v, void *arg)
                                                  p->ctx), p);
       }
    }
+}
+
+static void elab_scan_precision(vlog_node_t mod, elab_precision_t *p)
+{
+   // The time precision of the design is the smallest of any module
+   // that might be instantiated
+
+   if (hset_contains(p->seen, mod))
+      return;
+
+   hset_insert(p->seen, mod);
+
+   if (vlog_kind(mod) == V_MODULE) {
+      const unsigned log10 = VLOG_TIME_LOG10(vlog_ival(mod));
+      if (log10 != VLOG_TIME_UNSCALED) {
+         p->log10 = MIN(p->log10, log10);
+         if (p->scaled == NULL)
+            p->scaled = mod;
+      }
+      else {
+         p->log10 = MIN(p->log10, VLOG_DEFAULT_LOG10);
+         if (p->unscaled == NULL)
+            p->unscaled = mod;
+      }
+
+      const int nstmts = vlog_stmts(mod);
+      for (int i = 0; i < nstmts; i++) {
+         vlog_node_t s = vlog_stmt(mod, i);
+         if (vlog_kind(s) != V_INITIAL || vlog_stmts(s) != 1)
+            continue;
+
+         vlog_node_t call = vlog_stmt(s, 0);
+         if (vlog_kind(call) != V_SYS_TCALL)
+            continue;
+
+         const char *name = istr(vlog_ident(call));
+         if (strncmp(name, "$__init:", 8) == 0)
+            elab_scan_package_precision(ident_new(name + 8), p);
+      }
+   }
+
+   vlog_visit_only(mod, elab_scan_precision_cb, p, V_INST_LIST);
 }
 
 static void elab_scan_vhdl_instance_cb(tree_t t, void *arg)
@@ -5305,6 +6628,47 @@ static void elab_scan_vhdl_instance_cb(tree_t t, void *arg)
    }
 }
 
+static void elab_scan_vhdl_precision(tree_t arch, elab_precision_t *p)
+{
+   tree_visit_only(arch, elab_scan_vhdl_instance_cb, p, T_INSTANCE);
+}
+
+static vlog_node_t elab_vlog_generic_value(vlog_node_t decl, const char *str)
+{
+   // Value of a parameter given on the command line: a string in
+   // quotes or for a string parameter, a real number for a real
+   // parameter or with a fraction or exponent, otherwise a Verilog number
+
+   vlog_node_t type = vlog_has_type(decl) ? vlog_get_type(decl) : NULL;
+   const bool is_string = type != NULL && vlog_kind(type) == V_DATA_TYPE
+      && vlog_subkind(type) == DT_STRING;
+   const size_t len = strlen(str);
+
+   if (str[0] == '"' || is_string) {
+      const bool quoted = str[0] == '"' && len >= 2 && str[len - 1] == '"';
+      vlog_node_t v = vlog_new(V_STRING);
+      vlog_set_number(v, quoted ? number_from_string(str + 1, len - 2)
+                      : number_from_string(str, len));
+      vlog_set_loc(v, vlog_loc(decl));
+      return v;
+   }
+
+   char *end;
+   const double real = strtod(str, &end);
+   if (*end == '\0' && end != str
+       && ((type != NULL && vlog_is_real(type)) || strpbrk(str, ".eE"))) {
+      vlog_node_t v = vlog_new(V_REAL);
+      vlog_set_dval(v, real);
+      vlog_set_loc(v, vlog_loc(decl));
+      return v;
+   }
+
+   vlog_node_t v = vlog_new(V_NUMBER);
+   vlog_set_number(v, number_new(str, vlog_loc(decl)));
+   vlog_set_loc(v, vlog_loc(decl));
+   return v;
+}
+
 static void elab_verilog_root(vlog_node_t v, const elab_ctx_t *ctx)
 {
    ident_t label = vlog_ident2(v);
@@ -5312,12 +6676,46 @@ static void elab_verilog_root(vlog_node_t v, const elab_ctx_t *ctx)
    vlog_node_t stmt = vlog_new(V_MOD_INST);
    vlog_set_ident(stmt, label);
 
+   // Parameters of the top-level module may be given with -g
+   A(vlog_node_t) overrides = AINIT;
+   const int ndecls = vlog_decls(v);
+   for (int i = 0; i < ndecls && generic_override != NULL; i++) {
+      vlog_node_t d = vlog_decl(v, i);
+      if (vlog_kind(d) != V_PARAM_DECL)
+         continue;
+
+      ident_t name = vlog_ident(d);
+
+      generic_list_t **it, *tmp;
+      for (it = &generic_override;
+           *it && (*it)->name != name && !ident_casecmp((*it)->name, name);
+           it = &((*it)->next))
+         ;
+
+      if (*it == NULL)
+         continue;
+
+      vlog_node_t assign = vlog_new(V_PARAM_ASSIGN);
+      vlog_set_ident(assign, name);
+      vlog_set_value(assign, elab_vlog_generic_value(d, (*it)->value));
+      vlog_set_loc(assign, vlog_loc(d));
+      APUSH(overrides, assign);
+
+      *it = (tmp = (*it))->next;
+      free(tmp->value);
+      free(tmp);
+   }
+
    vlog_node_t list = vlog_new(V_INST_LIST);
    vlog_set_ident(list, label);
    vlog_add_stmt(list, stmt);
    vlog_set_loc(list, vlog_loc(v));
 
-   elab_verilog_module(NULL, label, v, list, stmt, ctx);
+   for (int i = 0; i < overrides.count; i++)
+      vlog_add_param(list, overrides.items[i]);
+   ACLEAR(overrides);
+
+   elab_verilog_module(NULL, label, v, list, stmt, NULL, ctx);
 }
 
 static vlog_node_t elab_hier_ref_decl(tree_t b, ident_t id)
@@ -5329,7 +6727,402 @@ static vlog_node_t elab_hier_ref_decl(tree_t b, ident_t id)
          continue;
 
       vlog_node_t vd = tree_vlog(wrap);
-      if (vlog_ident(vd) != id)
+      if (vlog_kind(vd) != V_PORT_MAP && vlog_has_ident(vd)
+          && vlog_ident(vd) == id)
+         return vd;
+   }
+
+   return NULL;
+}
+
+static bool elab_has_child_block(tree_t b, ident_t id)
+{
+   const int nstmts = tree_stmts(b);
+   for (int i = 0; i < nstmts; i++) {
+      tree_t s = tree_stmt(b, i);
+      if (tree_kind(s) == T_BLOCK && ident_casecmp(tree_ident(s), id))
+         return true;
+   }
+
+   return false;
+}
+
+static tree_t elab_find_vhdl_signal(tree_t b, ident_t id)
+{
+   b = vlog_hier_target_block(b, id);
+
+   tree_t obj = vlog_hier_vhdl_port(b, id);
+   const int ndecls = tree_decls(b);
+   for (int i = 0; obj == NULL && i < ndecls; i++) {
+      tree_t d = tree_decl(b, i);
+      if (tree_kind(d) == T_SIGNAL_DECL && ident_casecmp(tree_ident(d), id))
+         obj = d;
+   }
+
+   return obj;
+}
+
+static bool elab_mod_ref_has_block(tree_t b, vlog_node_t mr)
+{
+   // The name selects an instance or a VHDL generate block, which may be
+   // one level down in the shim of a VHDL entity instantiated from Verilog
+
+   ident_t id = vlog_ident(mr);
+
+   ident_t alt = id;
+   int64_t index;
+   if (vlog_params(mr) > 0 && vlog_get_const(vlog_param(mr, 0), &index))
+      alt = ident_sprintf("%s(%"PRIi64")", istr(id), index);
+
+   if (elab_has_child_block(b, id) || elab_has_child_block(b, alt))
+      return true;
+
+   return tree_stmts(b) == 1 && tree_kind(tree_stmt(b, 0)) == T_BLOCK
+      && (elab_has_child_block(tree_stmt(b, 0), id)
+          || elab_has_child_block(tree_stmt(b, 0), alt));
+}
+
+static bool elab_is_vhdl_record_signal(tree_t b, ident_t id)
+{
+   tree_t obj = elab_find_vhdl_signal(b, id);
+   if (obj == NULL)
+      return false;
+
+   type_t type = tree_type(obj);
+   while (type_is_array(type))
+      type = type_elem(type);
+
+   return type_is_record(type);
+}
+
+static vlog_node_t elab_vhdl_dim(const loc_t *loc, vlog_dimension_kind_t kind,
+                                 int64_t left, int64_t right)
+{
+   vlog_node_t l = vlog_new(V_NUMBER);
+   vlog_set_number(l, number_from_int(left));
+   vlog_set_loc(l, loc);
+
+   vlog_node_t r = vlog_new(V_NUMBER);
+   vlog_set_number(r, number_from_int(right));
+   vlog_set_loc(r, loc);
+
+   vlog_node_t dim = vlog_new(V_DIMENSION);
+   vlog_set_subkind(dim, kind);
+   vlog_set_left(dim, l);
+   vlog_set_right(dim, r);
+   vlog_set_loc(dim, loc);
+   return dim;
+}
+
+static bool elab_vhdl_is_logic_array(type_t type)
+{
+   // An array of standard logic with any number of nested dimensions
+
+   type_t std_ulogic = ieee_type(IEEE_STD_ULOGIC);
+
+   while (type_is_array(type))
+      type = type_elem(type);
+
+   return type_eq(type_base_recur(type), std_ulogic);
+}
+
+static vlog_node_t elab_vhdl_data_type(const loc_t *loc, ident_t name,
+                                       type_t type, vlog_node_t *bounds,
+                                       bool quiet)
+{
+   // Standard logic scalars and vectors have a Verilog equivalent
+
+   type_t std_ulogic = ieee_type(IEEE_STD_ULOGIC);
+
+   vlog_node_t dt = vlog_new(V_DATA_TYPE);
+   vlog_set_subkind(dt, DT_LOGIC);
+   vlog_set_loc(dt, loc);
+
+   *bounds = NULL;
+
+   if (type_is_array(type) && elab_vhdl_is_logic_array(type)) {
+      // Each dimension of an array of vectors is a packed dimension
+      for (type_t t = type; type_is_array(t); t = type_elem(t)) {
+         const int ndims = dimension_of(t);
+         for (int i = 0; i < ndims; i++) {
+            int64_t low, high;
+            tree_t r;
+            if (!type_const_bounds(t) || (r = range_of(t, i)) == NULL
+                || tree_subkind(r) == RANGE_EXPR
+                || !folded_bounds(r, &low, &high) || low > high) {
+               if (!quiet)
+                  error_at(loc, "sorry, the bounds of VHDL signal %pI must be "
+                           "known during elaboration to be the target of a "
+                           "hierarchical reference", name);
+               return NULL;
+            }
+
+            const bool downto = tree_subkind(r) == RANGE_DOWNTO;
+            vlog_add_range(dt, elab_vhdl_dim(loc, V_DIM_PACKED,
+                                             downto ? high : low,
+                                             downto ? low : high));
+         }
+      }
+   }
+   else if (type_is_integer(type)) {
+      // The bounds are kept to bind to the signal
+      int64_t low, high;
+      tree_t r = range_of(type, 0);
+      if (r == NULL || tree_subkind(r) == RANGE_EXPR
+          || !folded_bounds(r, &low, &high)) {
+         if (!quiet)
+            error_at(loc, "sorry, the bounds of VHDL signal %pI must be "
+                     "known during elaboration to be the target of a "
+                     "hierarchical reference", name);
+         return NULL;
+      }
+
+      vlog_set_subkind(dt, DT_INT);
+      vlog_set_flags(dt, VLOG_F_SIGNED);
+
+      *bounds = elab_vhdl_dim(loc, V_DIM_PACKED, low, high);
+   }
+   else if (!type_eq(type_base_recur(type), std_ulogic)) {
+      if (!quiet)
+         error_at(loc, "sorry, only VHDL signals of type STD_LOGIC, "
+                  "STD_LOGIC_VECTOR or INTEGER can be the target of a "
+                  "hierarchical reference");
+      return NULL;
+   }
+
+   return dt;
+}
+
+static vlog_node_t elab_hier_ref_vhdl(vlog_node_t v, tree_t obj)
+{
+   vlog_node_t d_bounds;
+   vlog_node_t dt = elab_vhdl_data_type(vlog_loc(v), tree_ident(obj),
+                                        tree_type(obj), &d_bounds, false);
+   if (dt == NULL)
+      return v;
+
+   vlog_node_t d = vlog_new(V_VAR_DECL);
+   if (d_bounds != NULL)
+      vlog_set_value(d, d_bounds);
+   vlog_set_ident(d, tree_ident(obj));
+   vlog_set_type(d, dt);
+   vlog_set_flags(d, VLOG_F_VHDL);
+   vlog_set_loc(d, vlog_loc(v));
+
+   vlog_set_ident(v, tree_ident(obj));
+   vlog_set_ref(v, d);
+   return v;
+}
+
+static bool elab_vhdl_array_dim(const loc_t *loc, ident_t name, type_t type,
+                                vlog_node_t *dim)
+{
+   // A one dimensional array of records with constant bounds
+
+   int64_t low, high;
+   tree_t r;
+   if (dimension_of(type) != 1 || !type_is_record(type_elem(type))
+       || !type_const_bounds(type) || (r = range_of(type, 0)) == NULL
+       || tree_subkind(r) == RANGE_EXPR || !folded_bounds(r, &low, &high)
+       || low > high) {
+      error_at(loc, "sorry, %pI must be a one dimensional array of records "
+               "with bounds known during elaboration to be the target of a "
+               "hierarchical reference", name);
+      return false;
+   }
+
+   const bool downto = tree_subkind(r) == RANGE_DOWNTO;
+   *dim = elab_vhdl_dim(loc, V_DIM_UNPACKED, downto ? high : low,
+                        downto ? low : high);
+   return true;
+}
+
+static vlog_node_t elab_vhdl_record_decl(const loc_t *loc, type_t type)
+{
+   // Describe a VHDL record as an unpacked structure so that the layout
+   // of the record of signals can be recreated
+
+   type_t base = type_base_recur(type);
+
+   vlog_node_t s = vlog_new(V_STRUCT_DECL);
+   vlog_set_ident(s, type_ident(base));
+   vlog_set_loc(s, loc);
+
+   const int nfields = type_fields(base);
+   for (int i = 0; i < nfields; i++) {
+      tree_t f = type_field(base, i);
+      type_t ft = tree_type(f);
+
+      vlog_node_t fd = vlog_new(V_VAR_DECL);
+      vlog_set_ident(fd, tree_ident(f));
+      vlog_set_flags(fd, VLOG_F_VHDL);
+      vlog_set_loc(fd, loc);
+
+      vlog_node_t ftype, bounds = NULL;
+      if (type_is_record(ft))
+         ftype = elab_vhdl_record_decl(loc, ft);
+      else if (type_is_array(ft) && type_is_record(type_elem_recur(ft))) {
+         vlog_node_t dim;
+         if (!elab_vhdl_array_dim(loc, tree_ident(f), ft, &dim))
+            return NULL;
+
+         vlog_add_range(fd, dim);
+         ftype = elab_vhdl_record_decl(loc, type_elem(ft));
+      }
+      else if (type_is_array(ft) && !type_const_bounds(ft)) {
+         error_at(loc, "sorry, element %pI of VHDL record type %pI has "
+                  "bounds which are not known during elaboration", tree_ident(f),
+                  type_ident(base));
+         return NULL;
+      }
+      else {
+         // Elements which cannot be named still take up space in the record
+         ftype = elab_vhdl_data_type(loc, tree_ident(f), ft, &bounds, true);
+         if (ftype == NULL) {
+            ftype = vlog_new(V_DATA_TYPE);
+            vlog_set_subkind(ftype, DT_LOGIC);
+            vlog_set_loc(ftype, loc);
+         }
+      }
+
+      if (ftype == NULL)
+         return NULL;
+
+      vlog_set_type(fd, ftype);
+      if (bounds != NULL)
+         vlog_set_value(fd, bounds);
+
+      vlog_add_decl(s, fd);
+   }
+
+   return s;
+}
+
+static vlog_node_t elab_vhdl_path_step(vlog_node_t src, ident_t id,
+                                       vlog_node_t decl, vlog_node_t prev)
+{
+   vlog_node_t step = vlog_new(V_MOD_REF);
+   vlog_set_ident(step, id);
+   vlog_set_ref(step, decl);
+   vlog_set_loc(step, vlog_loc(src));
+   if (prev != NULL)
+      vlog_set_value(step, prev);
+
+   if (vlog_kind(src) == V_MOD_REF) {
+      const int nparams = vlog_params(src);
+      for (int i = 0; i < nparams; i++)
+         vlog_add_param(step, vlog_param(src, i));
+   }
+
+   return step;
+}
+
+static bool elab_hier_ref_vhdl_path(vlog_node_t v, tree_t obj,
+                                    vlog_node_t *steps, int nsteps)
+{
+   // The first step is the VHDL signal and the others select an element
+   // of it or an element of an array of records
+
+   const loc_t *loc = vlog_loc(v);
+   type_t type = tree_type(obj);
+
+   vlog_node_t root = vlog_new(V_VAR_DECL);
+   vlog_set_ident(root, tree_ident(obj));
+   vlog_set_flags(root, VLOG_F_VHDL);
+   vlog_set_loc(root, loc);
+
+   type_t rec_type = type;
+   if (type_is_array(type)) {
+      vlog_node_t dim;
+      if (!elab_vhdl_array_dim(loc, tree_ident(obj), type, &dim))
+         return false;
+
+      vlog_add_range(root, dim);
+      rec_type = type_elem(type);
+   }
+
+   vlog_node_t s = elab_vhdl_record_decl(loc, rec_type);
+   if (s == NULL)
+      return false;
+
+   vlog_set_type(root, s);
+
+   vlog_node_t path = elab_vhdl_path_step(steps[0], tree_ident(obj), root, NULL);
+   if (vlog_params(path) != vlog_ranges(root)) {
+      error_at(vlog_loc(steps[0]), "VHDL signal %pQ %s", tree_ident(obj),
+               vlog_ranges(root) > 0 ? "is an array of records and must be "
+               "indexed" : "is not an array and cannot be indexed");
+      return false;
+   }
+
+   vlog_node_t fd = root;
+   for (int i = 1; i < nsteps; i++) {
+      vlog_node_t src = steps[i];
+      ident_t id = vlog_ident(src);
+
+      if (vlog_kind(vlog_type(fd)) != V_STRUCT_DECL) {
+         error_at(vlog_loc(src), "%pQ is not a record element", id);
+         return false;
+      }
+
+      vlog_node_t st = vlog_type(fd);
+      type_t base = type_base_recur(rec_type);
+      const int nfields = vlog_decls(st);
+
+      fd = NULL;
+      for (int j = 0; j < nfields; j++) {
+         vlog_node_t f = vlog_decl(st, j);
+         if (ident_casecmp(vlog_ident(f), id)) {
+            fd = f;
+            rec_type = tree_type(type_field(base, j));
+            break;
+         }
+      }
+
+      if (fd == NULL) {
+         error_at(vlog_loc(src), "VHDL record type %pI has no element named "
+                  "%pQ", type_ident(base), id);
+         return false;
+      }
+
+      path = elab_vhdl_path_step(src, vlog_ident(fd), fd, path);
+
+      if (vlog_params(path) != vlog_ranges(fd)) {
+         error_at(vlog_loc(src), "element %pQ of VHDL record %s", id,
+                  vlog_ranges(fd) > 0 ? "is an array of records and must be "
+                  "indexed" : "is not an array and cannot be indexed");
+         return false;
+      }
+
+      if (type_is_array(rec_type) && vlog_ranges(fd) > 0)
+         rec_type = type_elem(rec_type);
+   }
+
+   if (vlog_kind(vlog_type(fd)) == V_STRUCT_DECL) {
+      error_at(loc, "sorry, a hierarchical reference to a whole VHDL record "
+               "signal %pQ is not supported", vlog_ident(path));
+      return false;
+   }
+
+   vlog_node_t bounds;
+   vlog_node_t dt = elab_vhdl_data_type(loc, vlog_ident(fd), rec_type, &bounds,
+                                        false);
+   if (dt == NULL)
+      return false;
+
+   vlog_node_t d = vlog_new(V_VAR_DECL);
+   vlog_set_ident(d, vlog_ident(fd));
+   vlog_set_type(d, dt);
+   vlog_set_flags(d, VLOG_F_VHDL | VLOG_F_VHDL_PATH);
+   vlog_set_ref(d, root);
+   vlog_set_value(d, path);
+   vlog_set_loc(d, loc);
+
+   vlog_set_ident(v, tree_ident(obj));
+   vlog_set_ref(v, d);
+   return true;
+}
+
 static vlog_node_t elab_hier_ref_modport(tree_t b, ident_t id)
 {
    if (tree_decls(b) == 0)
@@ -5346,6 +7139,30 @@ static vlog_node_t elab_hier_ref_modport(tree_t b, ident_t id)
       vlog_node_t d = vlog_decl(body, i);
       if (vlog_kind(d) == V_MODPORT && vlog_ident(d) == id)
          return d;
+   }
+
+   return NULL;
+}
+
+static vlog_node_t elab_hier_ref_generic(tree_t b, ident_t id, const loc_t *loc)
+{
+   // The value of an integer generic of a VHDL instance
+
+   if (tree_kind(b) != T_BLOCK)
+      return NULL;
+
+   const int ngenerics = tree_generics(b);
+   for (int i = 0; i < ngenerics; i++) {
+      tree_t g = tree_generic(b, i);
+      int64_t value;
+      if (tree_class(g) == C_CONSTANT && ident_casecmp(tree_ident(g), id)
+          && type_is_integer(tree_type(g))
+          && folded_int(tree_value(tree_genmap(b, i)), &value)) {
+         vlog_node_t n = vlog_new(V_NUMBER);
+         vlog_set_number(n, number_from_int(value));
+         vlog_set_loc(n, loc);
+         return n;
+      }
    }
 
    return NULL;
@@ -5374,6 +7191,54 @@ static vlog_node_t elab_hier_ref_param(tree_t b, ident_t id)
    }
 
    return NULL;
+}
+
+static tree_t elab_walk_mod_refs(vlog_node_t v, tree_t where, hash_t *parents)
+{
+   // A name declared in an enclosing scope of a generate block
+
+   vlog_node_t root = v;
+   while (vlog_has_value(root))
+      root = vlog_value(root);
+
+   if (vlog_has_ref(root)) {
+      const bool is_port = vlog_kind(vlog_ref(root)) == V_IFACE_PORT;
+      for (tree_t it = where; it != NULL; it = hash_get(parents, it)) {
+         if (tree_kind(it) != T_BLOCK)
+            break;
+         else if (is_port
+                  ? vlog_iface_port_target(
+                     it, vlog_ref(root), vlog_ranges(vlog_ref(root)) > 0
+                     ? vlog_mod_ref_name(root) : NULL) != NULL
+                  : elab_has_child_block(it, vlog_mod_ref_name(root)))
+            return vlog_walk_mod_refs(v, it);
+      }
+   }
+   else if (vlog_kind(root) == V_MOD_REF) {
+      // The name of a generate block in this scope or one which encloses it
+      ident_t name = vlog_mod_ref_name(root);
+      for (tree_t it = where; it != NULL; it = hash_get(parents, it)) {
+         if (tree_kind(it) != T_BLOCK)
+            break;
+         else if (elab_has_child_block(it, name))
+            return vlog_walk_mod_refs(v, it);
+      }
+
+      // An upwards name can also be that of an enclosing instance or of
+      // its module
+      for (tree_t it = where; it != NULL; it = hash_get(parents, it)) {
+         if (tree_kind(it) != T_BLOCK)
+            break;
+         else if (vlog_block_is_named(it, name)) {
+            vlog_set_mod_ref_alias(name, it);
+            tree_t result = vlog_walk_mod_refs(v, where);
+            vlog_set_mod_ref_alias(NULL, NULL);
+            return result;
+         }
+      }
+   }
+
+   return vlog_walk_mod_refs(v, where);
 }
 
 static void elab_check_net_assign(vlog_node_t v)
@@ -5480,6 +7345,75 @@ static void elab_check_array_copy(vlog_node_t value, vlog_node_t target_type,
       elab_check_handle_pattern(value, ttype, hctx);
 }
 
+static vlog_node_t elab_rewrite_hier_ref_cb(vlog_node_t v, void *arg);
+
+static void elab_expand_instance_array(vlog_node_t v,
+                                       const elab_href_ctx_t *hctx)
+{
+   // An array of virtual interfaces takes the elements of an array of
+   // instances or interface ports
+
+   vlog_node_t value = vlog_value(v), ttype = vlog_get_type(vlog_target(v));
+   if (vlog_kind(value) != V_HIER_REF || vlog_ident(value) != ident_new("$self"))
+      return;
+   else if (elab_virtual_element(ttype) == NULL
+            || elab_virtual_element(ttype) == ttype)
+      return;
+
+   vlog_node_t mr = vlog_value(value);
+   if (vlog_kind(mr) != V_MOD_REF || vlog_params(mr) != 0 || !vlog_has_ref(mr)
+       || vlog_has_value(mr))
+      return;
+
+   vlog_node_t decl = vlog_ref(mr);
+   if ((vlog_kind(decl) != V_MOD_INST && vlog_kind(decl) != V_IFACE_PORT)
+       || vlog_ranges(decl) != 1)
+      return;
+
+   int64_t left, right;
+   if (!vlog_bounds(vlog_range(decl, 0), &left, &right))
+      return;
+
+   const int step = left <= right ? 1 : -1;
+
+   vlog_node_t pattern = vlog_new(V_PATTERN_EXPR);
+   vlog_set_type(pattern, ttype);
+   vlog_set_loc(pattern, vlog_loc(value));
+
+   for (int64_t i = left; step > 0 ? i <= right : i >= right; i += step) {
+      vlog_node_t index = vlog_new(V_NUMBER);
+      vlog_set_number(index, number_from_int(i));
+      vlog_set_loc(index, vlog_loc(value));
+
+      vlog_node_t emr = vlog_new(V_MOD_REF);
+      vlog_set_ident(emr, vlog_ident(mr));
+      vlog_set_ref(emr, decl);
+      vlog_set_loc(emr, vlog_loc(mr));
+      vlog_add_param(emr, index);
+
+      vlog_node_t elem = vlog_new(V_HIER_REF);
+      vlog_set_value(elem, emr);
+      vlog_set_ident(elem, ident_new("$self"));
+      vlog_set_loc(elem, vlog_loc(value));
+      vlog_set_global_flags(elem, VLOG_GF_HIER_REF);
+
+      vlog_node_t item = vlog_new(V_PATTERN_ITEM);
+      vlog_set_right(item, elab_rewrite_hier_ref_cb(elem, (void *)hctx));
+      vlog_add_param(pattern, item);
+   }
+
+   vlog_set_value(v, pattern);
+}
+
+static void elab_check_handle_assign(vlog_node_t v,
+                                     const elab_href_ctx_t *hctx)
+{
+   elab_check_net_assign(v);
+   elab_expand_instance_array(v, hctx);
+   elab_check_handle_value(vlog_value(v), vlog_get_type(vlog_target(v)), hctx);
+   elab_check_array_copy(vlog_value(v), vlog_get_type(vlog_target(v)), hctx);
+}
+
 static vlog_node_t elab_find_ctor(vlog_node_t class)
 {
    for (vlog_node_t c = class;; c = vlog_ref(c)) {
@@ -5575,15 +7509,379 @@ static void elab_check_handle_call(vlog_node_t v, const elab_href_ctx_t *hctx)
    }
 }
 
+static void elab_rewrite_hier_ref_pre_cb(vlog_node_t v, void *arg)
+{
+   // A nested generate block is rewritten from its own scope
+   elab_href_ctx_t *hctx = arg;
+   if (vlog_kind(v) == V_GEN_BLOCK && v != hctx->root)
+      hctx->gen_depth++;
+   else if (vlog_kind(v) == V_DEFPARAM) {
+      // The target is resolved when the parameter is overridden
+      if (defparam_targets == NULL)
+         defparam_targets = hset_new(16);
+      hset_insert(defparam_targets, vlog_target(v));
+   }
+   else if ((vlog_kind(v) == V_METHOD_CALL || vlog_kind(v) == V_DISABLE)
+            && vlog_has_value(v)
+            && vlog_kind(vlog_value(v)) == V_HIER_REF) {
+      if (call_values == NULL)
+         call_values = hset_new(16);
+      hset_insert(call_values, vlog_value(v));
+   }
+}
+
+static vlog_node_t elab_hier_ref_vhdl_record(vlog_node_t v,
+                                             const elab_href_ctx_t *hctx)
+{
+   // A name which selects an element of a VHDL record signal or of an
+   // array of records
+
+   vlog_node_t mods[16];
+   int nmods = 0;
+   for (vlog_node_t it = vlog_value(v); ; it = vlog_value(it)) {
+      if (nmods == ARRAY_LEN(mods))
+         return NULL;
+
+      mods[nmods++] = it;
+      if (!vlog_has_value(it))
+         break;
+   }
+
+   // The names were collected from the end of the path
+   for (int i = 0; i < nmods / 2; i++) {
+      vlog_node_t tmp = mods[i];
+      mods[i] = mods[nmods - 1 - i];
+      mods[nmods - 1 - i] = tmp;
+   }
+
+   tree_t pb = elab_walk_mod_refs(mods[0], hctx->where, hctx->parents);
+   for (int i = 1; pb != NULL && i < nmods; i++) {
+      ident_t id = vlog_ident(mods[i]);
+      if (elab_mod_ref_has_block(pb, mods[i])) {
+         pb = elab_walk_mod_refs(mods[i], hctx->where, hctx->parents);
+         continue;
+      }
+      else if (!elab_is_vhdl_record_signal(pb, id))
+         return NULL;
+
+      tree_t obj = elab_find_vhdl_signal(pb, id);
+      assert(obj != NULL);
+
+      vlog_node_t steps[nmods - i + 1];
+      for (int j = i; j < nmods; j++)
+         steps[j - i] = mods[j];
+      steps[nmods - i] = v;
+
+      if (elab_hier_ref_vhdl_path(v, obj, steps, nmods - i + 1))
+         vlog_set_value(v, mods[i - 1]);
+
+      return v;
+   }
+
+   return NULL;
+}
+
+static vlog_node_t elab_hier_ref_member(vlog_node_t base, ident_t id,
+                                        const loc_t *loc)
+{
+   // A member of a structure, union or class reached through a variable
+
+   vlog_node_t type = vlog_get_type(base), f = NULL;
+   if (type != NULL && vlog_kind(type) == V_CLASS_DECL)
+      f = vlog_class_member(type, id);
+   else if (type != NULL
+            && (vlog_kind(type) == V_STRUCT_DECL
+                || vlog_kind(type) == V_UNION_DECL)) {
+      const int nfields = vlog_decls(type);
+      for (int i = 0; i < nfields && f == NULL; i++) {
+         if (vlog_ident(vlog_decl(type, i)) == id)
+            f = vlog_decl(type, i);
+      }
+   }
+
+   if (f == NULL)
+      return NULL;
+
+   vlog_node_t member = vlog_new(V_MEMBER_REF);
+   vlog_set_value(member, base);
+   vlog_set_ident(member, id);
+   vlog_set_ref(member, f);
+   vlog_set_loc(member, loc);
+   return member;
+}
+
+static vlog_node_t elab_hier_ref_select(vlog_node_t base, vlog_node_t mr)
+{
+   // The indices select an element of an unpacked array
+
+   const int nindex = vlog_params(mr);
+   if (nindex == 0)
+      return base;
+
+   vlog_node_t bs = vlog_new(V_BIT_SELECT);
+   vlog_set_value(bs, base);
+   vlog_set_loc(bs, vlog_loc(mr));
+   for (int i = 0; i < nindex; i++)
+      vlog_add_param(bs, vlog_param(mr, i));
+
+   return bs;
+}
+
+static vlog_node_t elab_hier_ref_variable(vlog_node_t v,
+                                          const elab_href_ctx_t *hctx)
+{
+   // The path names a variable of an instance followed by members of it
+
+   vlog_node_t mods[16];
+   int nmods = 0;
+   for (vlog_node_t it = vlog_value(v); ; it = vlog_value(it)) {
+      if (nmods == ARRAY_LEN(mods))
+         return NULL;
+
+      mods[nmods++] = it;
+      if (!vlog_has_value(it))
+         break;
+   }
+
+   // The names were collected from the end of the path
+   for (int i = 0; i < nmods / 2; i++) {
+      vlog_node_t tmp = mods[i];
+      mods[i] = mods[nmods - 1 - i];
+      mods[nmods - 1 - i] = tmp;
+   }
+
+   for (int i = 1; i < nmods; i++) {
+      tree_t pb = elab_walk_mod_refs(mods[i - 1], hctx->where, hctx->parents);
+      if (pb == NULL)
+         return v;
+
+      ident_t id = vlog_ident(mods[i]);
+      if (elab_has_child_block(pb, id))
+         continue;
+
+      vlog_node_t vd = elab_hier_ref_decl(pb, id);
+      if (vd == NULL)
+         return NULL;
+      else if (vlog_kind(vd) == V_IFACE_PORT)
+         continue;
+
+      vlog_node_t base = vlog_new(V_HIER_REF);
+      vlog_set_value(base, mods[i - 1]);
+      vlog_set_ident(base, id);
+      vlog_set_ref(base, vd);
+      vlog_set_loc(base, vlog_loc(v));
+      vlog_set_global_flags(base, VLOG_GF_HIER_REF);
+
+      base = elab_hier_ref_select(base, mods[i]);
+
+      for (int j = i + 1; j < nmods; j++) {
+         vlog_node_t m = elab_hier_ref_member(base, vlog_ident(mods[j]),
+                                              vlog_loc(mods[j]));
+         if (m == NULL) {
+            error_at(vlog_loc(mods[j]), "%pQ has no member named %pQ",
+                     vlog_ident(mods[j - 1]), vlog_ident(mods[j]));
+            return v;
+         }
+
+         base = elab_hier_ref_select(m, mods[j]);
+      }
+
+      vlog_node_t m = elab_hier_ref_member(base, vlog_ident(v), vlog_loc(v));
+      if (m != NULL)
+         return m;
+      else if (call_values != NULL && hset_contains(call_values, v))
+         return base;   // A built-in method of the variable
+
+      error_at(vlog_loc(v), "%pQ has no member named %pQ",
+               vlog_ident(mods[nmods - 1]), vlog_ident(v));
+      return v;
+   }
+
+   return NULL;
+}
+
+static vlog_node_t elab_rewrite_hier_ref_cb(vlog_node_t v, void *arg)
+{
+   elab_href_ctx_t *hctx = arg;
+
+   if (vlog_kind(v) == V_GEN_BLOCK && v != hctx->root) {
+      hctx->gen_depth--;
+      return v;
+   }
+   else if (hctx->gen_depth > 0)
+      return v;
+   else if (defparam_targets != NULL && hset_contains(defparam_targets, v))
+      return v;
+   else if (vlog_kind(v) == V_METHOD_CALL) {
+      // A method of a class handle reached by a hierarchical reference
+      vlog_node_t member = vlog_value(v);
+      const bool resolved = vlog_subkind(v) != V_METHOD_USER || vlog_has_ref(v);
+      if ((vlog_kind(member) == V_HIER_REF || vlog_kind(member) == V_MEMBER_REF)
+          && vlog_has_ref(member)) {
+         vlog_node_t decl = vlog_ref(member);
+         if (vlog_kind(decl) == V_FUNC_DECL || vlog_kind(decl) == V_TASK_DECL) {
+            if (vlog_kind(member) == V_MEMBER_REF) {
+               vlog_set_value(v, vlog_value(member));
+               vlog_set_ref(v, decl);
+               vlog_set_subkind(v, V_METHOD_CLASS);
+            }
+         }
+         else if (!resolved)
+            vlog_resolve_method(v);
+      }
+      elab_check_handle_call(v, hctx);
+      return v;
+   }
+   else if (vlog_kind(v) == V_BASSIGN || vlog_kind(v) == V_NBASSIGN) {
+      elab_check_handle_assign(v, hctx);
+      return v;
+   }
+   else if (vlog_kind(v) == V_RETURN) {
+      if (vlog_has_value(v) && vlog_has_ref(v))
+         elab_check_handle_value(vlog_value(v), vlog_get_type(vlog_ref(v)),
+                                 hctx);
+      return v;
+   }
+   else if (vlog_kind(v) == V_VAR_DECL || vlog_kind(v) == V_LOCAL_DECL) {
+      if (vlog_has_value(v)) {
+         elab_check_handle_value(vlog_value(v), vlog_get_type(v), hctx);
+         elab_check_array_copy(vlog_value(v), vlog_get_type(v), hctx);
+      }
+      return v;
+   }
+   else if (vlog_kind(v) == V_USER_FCALL || vlog_kind(v) == V_USER_TCALL
+            || vlog_kind(v) == V_CLASS_NEW) {
+      elab_check_handle_call(v, hctx);
+      return v;
+   }
+   else if (vlog_kind(v) != V_HIER_REF)
+      return v;
+   else if (vlog_has_ref(v) && vlog_kind(vlog_ref(v)) == V_VAR_DECL
+            && (vlog_flags(vlog_ref(v)) & VLOG_F_VHDL_PATH))
+      return v;
+
+   if (vlog_ident(v) == ident_new("$global_clock$v") && !vlog_has_ref(v)) {
+      // The global clocking of this instance or the closest enclosing one
+      tree_t found = NULL;
+      for (tree_t it = hctx->where; it != NULL && found == NULL;
+           it = hash_get(hctx->parents, it)) {
+         if (tree_kind(it) != T_BLOCK)
+            break;
+         else if (elab_hier_ref_decl(it, vlog_ident(v)) != NULL)
+            found = it;
+      }
+
+      if (found == NULL) {
+         error_at(vlog_loc(v), "no global clocking declaration is visible "
+                  "for $global_clock");
+         return v;
+      }
+
+      vlog_node_t mr = vlog_new(V_MOD_REF);
+      vlog_set_ident(mr, tree_ident(found));
+      vlog_set_loc(mr, vlog_loc(v));
+      vlog_set_value(v, mr);
+   }
+
+   vlog_node_t prefix = vlog_value(v);
+
+   // The whole of an instance array is selected by the elements of the
+   // instance it is connected to
+   if (vlog_kind(prefix) == V_MOD_REF && vlog_params(prefix) == 0
+       && vlog_has_ref(prefix)
+       && (vlog_kind(vlog_ref(prefix)) == V_MOD_INST
+           || vlog_kind(vlog_ref(prefix)) == V_IFACE_PORT)
+       && vlog_ranges(vlog_ref(prefix)) > 0)
+      return v;
+
+   // A name before the member may be a structure variable
+   if (vlog_has_value(prefix)) {
+      vlog_node_t rec = elab_hier_ref_vhdl_record(v, hctx);
+      if (rec != NULL)
+         return rec;
+
+      rec = elab_hier_ref_variable(v, hctx);
+      if (rec != NULL)
+         return rec;
+   }
+
+   tree_t b = elab_walk_mod_refs(prefix, hctx->where, hctx->parents);
+   if (b == NULL)
+      return v;
+
+   ident_t id = vlog_ident(v);
+
+   if (id == ident_new("$self"))
+      return v;   // Context of the instance itself
+
+   vlog_node_t mp = elab_hier_ref_modport(b, id);
+   if (mp != NULL) {
+      // A modport selected from an interface instance used as a value
+      vlog_set_ident(v, ident_new("$self"));
+      return v;
+   }
+
+   if (vlog_iface_port_target(b, NULL, id) != NULL
+       || elab_has_child_block(b, id)) {
+      // An instance or interface port used as a value
+      vlog_node_t next = vlog_new(V_MOD_REF);
+      vlog_set_ident(next, id);
+      vlog_set_value(next, prefix);
+      vlog_set_loc(next, vlog_loc(v));
+
+      vlog_set_value(v, next);
+      vlog_set_ident(v, ident_new("$self"));
+      // Rewritten again and checked with the new prefix
+      return v;
+   }
+
+   b = vlog_hier_target_block(b, id);
+
+   tree_t port = vlog_hier_vhdl_port(b, id);
+   if (port != NULL)
+      return elab_hier_ref_vhdl(v, port);
+
+   vlog_node_t param = elab_hier_ref_param(b, id);
+   if (param == NULL)
+      param = elab_hier_ref_generic(b, id, vlog_loc(v));
+   if (param != NULL)
+      return param;
+
+   const int ndecls = tree_decls(b);
+   for (int i = 0; i < ndecls; i++) {
+      tree_t wrap = tree_decl(b, i);
+
+      if (tree_kind(wrap) == T_SIGNAL_DECL
+          && ident_casecmp(tree_ident(wrap), id))
+         return elab_hier_ref_vhdl(v, wrap);
+
+      if (tree_kind(wrap) != T_VERILOG)
+         continue;
+
+      vlog_node_t vd = tree_vlog(wrap);
+      if (vlog_kind(vd) == V_PORT_MAP || vlog_ident(vd) != id)
          continue;
 
       switch (vlog_kind(vd)) {
+      case V_FUNC_DECL:
+      case V_TASK_DECL:
+         vlog_set_ref(v, vd);
+
+         if (call_values == NULL || !hset_contains(call_values, v)) {
+            // A subroutine called without parentheses
+            vlog_node_t call = vlog_new(V_METHOD_CALL);
+            vlog_set_value(call, v);
+            vlog_set_ident(call, vlog_ident(v));
+            vlog_set_loc(call, vlog_loc(v));
+            vlog_set_global_flags(call, VLOG_GF_HIER_REF);
+            return call;
+         }
+
+         return v;
       case V_NET_DECL:
       case V_VAR_DECL:
          vlog_set_ref(v, vd);
          return v;
-      case V_PORT_MAP:
-         continue;
       default:
          {
             diag_t *d = diag_new(DIAG_ERROR, vlog_loc(v));
@@ -5612,22 +7910,181 @@ static void elab_fold_hrefs(mod_cache_t *mc, const elab_ctx_t *ctx)
    vlog_node_t v = vlog_from_object(mc->object);
    if (v == NULL)
       return;
-   else if (!(vlog_global_flags(v) & VLOG_GF_HIER_REF))
+   else if (!(vlog_global_flags(v) & VLOG_GF_HIER_REF)
+            && !vlog_bind_has_hier_ref(v))
       return;
 
    const void *key;
    void *value;
    for (hash_iter_t it = HASH_BEGIN;
         ghash_iter(mc->instances, &it, &key, &value); ) {
-      elab_instance_t *ei = value;
-      vlog_rewrite(ei->body, NULL, elab_rewrite_hier_ref_cb, ei->first);
-      vlog_fold(ei->body, ctx->mir, ctx->jit);
+      for (elab_instance_t *ei = value; ei != NULL; ei = ei->chain) {
+         elab_href_ctx_t hctx = {
+            .where   = ei->first,
+            .parents = ctx->block_parents,
+            .iface_first  = ctx->iface_first,
+            .iface_values = ctx->iface_values,
+            .root    = ei->body,
+         };
+         vlog_rewrite(ei->body, elab_rewrite_hier_ref_pre_cb,
+                      elab_rewrite_hier_ref_cb, &hctx);
+         vlog_fold(ei->body, ctx->mir, ctx->jit);
+      }
    }
+}
+
+static tree_t elab_iface_conn_target(const elab_iface_conn_t *c,
+                                     const elab_ctx_t *ctx)
+{
+   ident_t name = vlog_ident(c->port);
+
+   if (c->value == NULL) {
+      // Implicit connection to an instance or port with the same name
+      const int nstmts = tree_stmts(c->parent);
+      for (int i = 0; i < nstmts; i++) {
+         tree_t s = tree_stmt(c->parent, i);
+         if (tree_kind(s) == T_BLOCK && ident_casecmp(tree_ident(s), name))
+            return s;
+      }
+
+      tree_t target = vlog_iface_port_target(c->parent, NULL, name);
+      if (target == NULL)
+         error_at(&c->loc, "interface port %pQ must be connected", name);
+
+      return target;
+   }
+
+   if (vlog_kind(c->value) != V_HIER_REF) {
+      error_at(&c->loc, "interface port %pQ must be connected to an instance "
+               "of an interface or another interface port", name);
+      return NULL;
+   }
+
+   hset_insert(ctx->iface_values, c->value);
+
+   vlog_node_t prefix = vlog_value(c->value);
+   ident_t id = vlog_ident(c->value);
+
+   if (id == ident_new("$self"))
+      return elab_walk_mod_refs(prefix, c->parent, ctx->block_parents);
+
+   vlog_node_t next = vlog_new(V_MOD_REF);
+   vlog_set_ident(next, id);
+   vlog_set_value(next, prefix);
+   vlog_set_loc(next, &c->loc);
+
+   return elab_walk_mod_refs(next, c->parent, ctx->block_parents);
+}
+
+static void elab_iface_conn_resolve(const elab_iface_conn_t *c,
+                                    const elab_ctx_t *ctx)
+{
+   tree_t target = elab_iface_conn_target(c, ctx);
+   if (target == NULL)
+      return;
+
+   tree_t h = tree_decl(target, 0);
+   vlog_node_t body = NULL;
+   if (tree_kind(h) == T_HIER && tree_has_ref(h)
+       && tree_kind(tree_ref(h)) == T_VERILOG)
+      body = tree_vlog(tree_ref(h));
+
+   if (body == NULL || !(vlog_flags(body) & VLOG_F_INTERFACE)) {
+      error_at(&c->loc, "interface port %pQ must be connected to an "
+               "instance of an interface", vlog_ident(c->port));
+      return;
+   }
+
+   ident_t expect = vlog_ident2(c->port);
+   if (expect != ident_new("interface") && expect != vlog_ident2(body)) {
+      error_at(&c->loc, "interface port %pQ has interface %pQ but is "
+               "connected to an instance of %pQ", vlog_ident(c->port),
+               expect, vlog_ident2(body));
+      return;
+   }
+
+   tree_set_ref(c->wrap, target);
+}
+
+static void elab_iface_conns(const elab_ctx_t *ctx)
+{
+   // The order is such that the port of a parent is resolved first
+   for (int i = 0; i < ctx->iface_conns->count; i++)
+      elab_iface_conn_resolve(&(ctx->iface_conns->items[i]), ctx);
+}
+
+static void elab_ignore_diag(diag_t *d, void *context)
+{
+}
+
+static void elab_early_iface_conns(const elab_ctx_t *ctx, int first)
+{
+   // The interface instance may be known before the end of elaboration
+   // which allows hierarchical names through the port to be bound when
+   // the instances below this one are created.  Report any errors later.
+
+   void *saved_ctx;
+   diag_consumer_t saved = diag_get_consumer(&saved_ctx);
+   diag_set_consumer(elab_ignore_diag, NULL);
+
+   for (int i = first; i < ctx->iface_conns->count; i++) {
+      const elab_iface_conn_t *c = &(ctx->iface_conns->items[i]);
+      if (!tree_has_ref(c->wrap))
+         elab_iface_conn_resolve(c, ctx);
+   }
+
+   diag_set_consumer(saved, saved_ctx);
+}
+
+static void elab_set_design_precision(const elab_ctx_t *ctx)
+{
+   // The time precision of the design is the smallest of all the roots
+
+   elab_precision_t p = {
+      .ctx   = ctx,
+      .seen  = hset_new(16),
+      .log10 = UINT_MAX,
+   };
+
+   for (int i = 0; i < ctx->nroots; i++) {
+      tree_t vhdl = tree_from_object(ctx->roots[i]);
+      if (vhdl != NULL && tree_kind(vhdl) != T_CONFIGURATION) {
+         tree_t top = vhdl;
+         if (tree_kind(vhdl) == T_ENTITY)
+            top = elab_pick_arch(vhdl, tree_loc(vhdl), ctx);
+
+         elab_scan_vhdl_precision(top, &p);
+      }
+
+      vlog_node_t vlog = vlog_from_object(ctx->roots[i]);
+      if (vlog != NULL)
+         elab_scan_precision(vlog, &p);
+   }
+
+   hset_free(p.seen);
+
+   if (p.scaled != NULL && p.unscaled != NULL) {
+      // 3.14.2.3: a design element without a time unit takes the
+      // default of the tool, which is unlikely to be intended when other
+      // design elements have one.  IEEE 1364-2005 19.8 makes this an
+      // error; it is a warning here so that such designs still run
+      diag_t *d = diag_new(DIAG_WARN, vlog_loc(p.unscaled));
+      diag_printf(d, "%s has no time unit and uses the default time unit "
+                  "and precision of 1ns/1ns but %s has a time unit", istr(vlog_ident2(p.unscaled)),
+                  istr(vlog_ident2(p.scaled)));
+      diag_hint(d, vlog_loc(p.unscaled), "no `timescale or timeunit");
+      diag_hint(d, vlog_loc(p.scaled), "has a time unit");
+      diag_emit(d);
+   }
+
+   vlog_set_design_precision(p.log10 != UINT_MAX ? p.log10 : 6);
 }
 
 static void elab_root_cb(void *arg)
 {
    elab_ctx_t *ctx = arg;
+
+   elab_set_design_precision(ctx);
 
    for (int i = 0; i < ctx->nroots; i++) {
       tree_t vhdl = tree_from_object(ctx->roots[i]);
@@ -5639,11 +8096,32 @@ static void elab_root_cb(void *arg)
          elab_verilog_root(vlog, ctx);
    }
 
+   elab_iface_conns(ctx);
+
    const void *key;
    void *value;
    for (hash_iter_t it = HASH_BEGIN;
         hash_iter(ctx->modcache, &it, &key, &value); )
       elab_fold_hrefs(value, ctx);
+
+   for (int i = 0; i < ctx->gen_bodies->count; i++) {
+      const elab_gen_body_t *gb = &(ctx->gen_bodies->items[i]);
+      elab_href_ctx_t hctx = {
+         .where   = gb->where,
+         .parents = ctx->block_parents,
+         .iface_first  = ctx->iface_first,
+         .iface_values = ctx->iface_values,
+         .root    = gb->body,
+      };
+      vlog_rewrite(gb->body, elab_rewrite_hier_ref_pre_cb,
+                   elab_rewrite_hier_ref_cb, &hctx);
+      vlog_fold(gb->body, ctx->mir, ctx->jit);
+
+      // The instances below the block are elaborated from the original
+      hctx.root = gb->block;
+      vlog_rewrite(gb->block, elab_rewrite_hier_ref_pre_cb,
+                   elab_rewrite_hier_ref_cb, &hctx);
+   }
 }
 
 static int elab_compar_modcache(const void *a, const void *b)
@@ -5702,6 +8180,12 @@ tree_t elab(object_t **top, int ntop, jit_t *jit, unit_registry_t *ur,
 
    make_new_arena();
 
+
+   if (elab_ic_types != NULL) {
+      hash_free(elab_ic_types);
+      elab_ic_types = NULL;
+   }
+
    ident_t name = NULL;
 
    tree_t vhdl = tree_from_object(top[0]);
@@ -5712,14 +8196,60 @@ tree_t elab(object_t **top, int ntop, jit_t *jit, unit_registry_t *ur,
    if (vlog != NULL)
       name = ident_prefix(vlog_ident(vlog), well_known(W_ELAB), '.');
 
+   // A configuration is elaborated as the cells of its design statement
+   vlog_node_t config = NULL;
+   object_t **cells LOCAL = NULL;
+   if (vlog != NULL && vlog_kind(vlog) == V_CONFIG) {
+      config = vlog;
+
+      const int ncells = vlog_params(config);
+      if (ncells == 0)
+         fatal("configuration %pQ has no design statement",
+               vlog_ident2(config));
+
+      cells = xmalloc_array(ncells, sizeof(object_t *));
+      for (int i = 0; i < ncells; i++) {
+         vlog_node_t d = vlog_param(config, i);
+         const char *str = istr(vlog_ident(d)), *dot = strchr(str, '.');
+
+         lib_t lib = lib_work();
+         if (dot != NULL) {
+            char *libname LOCAL = xstrndup(str, dot - str);
+            if (ident_casecmp(ident_new(libname), ident_new("work")))
+               lib = lib_work();
+            else if ((lib = lib_find(ident_new(libname))) == NULL)
+               fatal("library %s not found", libname);
+            str = dot + 1;
+         }
+
+         LOCAL_TEXT_BUF tb = tb_new();
+         tb_cat(tb, str);
+         tb_upcase(tb);
+
+         ident_t qual = ident_prefix(lib_name(lib), ident_new(tb_get(tb)), '.');
+         if ((cells[i] = lib_get_generic(lib, qual, NULL)) == NULL)
+            fatal("cannot find unit %pI in library %pI", qual, lib_name(lib));
+      }
+
+      top = cells;
+      ntop = ncells;
+   }
+
    if (vhdl == NULL && vlog == NULL)
       fatal("top level is not a VHDL design unit or Verilog module");
+
+   vlog_set_fold_context(mc, jit);
 
    tree_t e = tree_new(T_ELAB);
    tree_set_ident(e, name);
    tree_set_loc(e, &(top[0]->loc));
 
    lib_t work = lib_work();
+   vlog_load_binds(work);
+
+   unsigned nshims = 0;
+   iface_conn_list_t iface_conns = AINIT;
+   gen_body_list_t gen_bodies = AINIT;
 
    elab_ctx_t ctx = {
       .out       = e,
@@ -5734,13 +8264,23 @@ tree_t elab(object_t **top, int ntop, jit_t *jit, unit_registry_t *ur,
       .modcache  = hash_new(16),
       .mracache  = hash_new(16),
       .vucache   = hash_new(16),
+      .iface_conns = &iface_conns,
+      .gen_bodies = &gen_bodies,
+      .block_parents = hash_new(16),
+      .iface_first = hash_new(16),
+      .iface_units = hash_new(16),
+      .iface_values = hset_new(16),
+      .nshims    = &nshims,
       .dotted    = lib_name(work),
+      .config    = config,
       .model     = m,
       .scope     = create_scope(m, e, NULL),
       .pool      = pool_new(),
    };
 
    call_with_model(m, elab_root_cb, &ctx);
+
+   tree_set_ival(e, vlog_design_precision());
 
    if (opt_get_int(OPT_ELAB_STATS))
       elab_print_stats(&ctx);
@@ -5754,6 +8294,12 @@ tree_t elab(object_t **top, int ntop, jit_t *jit, unit_registry_t *ur,
    hash_free(ctx.modcache);
    hash_free(ctx.mracache);
    hash_free(ctx.vucache);
+   ACLEAR(iface_conns);
+   ACLEAR(gen_bodies);
+   hash_free(ctx.block_parents);
+   hash_free(ctx.iface_first);
+   hash_free(ctx.iface_units);
+   hset_free(ctx.iface_values);
    pool_free(ctx.pool);
 
    if (error_count() > 0)
