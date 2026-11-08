@@ -28,7 +28,7 @@ STATIC_ASSERT(V_LAST_NODE_KIND < 256);
 
 static const imask_t has_map[V_LAST_NODE_KIND] = {
    // V_MODULE
-   (I_IDENT | I_PORTS | I_STMTS | I_DECLS | I_IDENT2),
+   (I_IDENT | I_PORTS | I_STMTS | I_DECLS | I_IDENT2 | I_FLAGS | I_IVAL),
 
    // V_PORT_DECL
    (I_IDENT | I_SUBKIND | I_IDENT2 | I_REF | I_RANGES | I_TYPE | I_VALUE),
@@ -46,43 +46,43 @@ static const imask_t has_map[V_LAST_NODE_KIND] = {
    (I_TARGET | I_VALUE | I_DELAY),
 
    // V_EVENT
-   (I_SUBKIND | I_VALUE),
+   (I_SUBKIND | I_VALUE | I_LEFT),
 
    // V_INITIAL
    (I_IDENT | I_STMTS),
 
    // V_SEQ_BLOCK
-   (I_IDENT | I_DECLS | I_STMTS),
+   (I_IDENT | I_DECLS | I_STMTS | I_FLAGS),
 
    // V_SYS_TCALL
-   (I_IDENT | I_PARAMS | I_SUBKIND),
+   (I_IDENT | I_PARAMS | I_SUBKIND | I_IVAL | I_FLAGS),
 
    // V_STRING
    (I_NUMBER),
 
    // V_NUMBER
-   (I_NUMBER),
+   (I_NUMBER | I_FLAGS),
 
    // V_NET_DECL
-   (I_IDENT | I_SUBKIND | I_TYPE | I_RANGES | I_VALUE),
+   (I_IDENT | I_SUBKIND | I_TYPE | I_RANGES | I_VALUE | I_DELAY | I_PARAMS),
 
    // V_ASSIGN
    (I_TARGET | I_VALUE | I_IDENT | I_DELAY | I_PARAMS),
 
    // V_DIMENSION
-   (I_SUBKIND | I_LEFT | I_RIGHT),
+   (I_SUBKIND | I_LEFT | I_RIGHT | I_FLAGS),
 
    // V_IF
-   (I_CONDS),
+   (I_CONDS | I_FLAGS),
 
    // V_COND
    (I_VALUE | I_STMTS),
 
    // V_VAR_DECL
-   (I_IDENT | I_TYPE | I_RANGES | I_VALUE),
+   (I_IDENT | I_TYPE | I_RANGES | I_VALUE | I_FLAGS | I_IDENT2 | I_REF),
 
    // V_DELAY_CONTROL
-   (I_VALUE),
+   (I_VALUE | I_IVAL | I_PARAMS),
 
    // V_BINARY
    (I_LEFT | I_RIGHT | I_SUBKIND),
@@ -94,19 +94,19 @@ static const imask_t has_map[V_LAST_NODE_KIND] = {
    (I_VALUE | I_SUBKIND),
 
    // V_GATE_INST
-   (I_SUBKIND | I_PARAMS | I_IDENT | I_REF | I_TARGET),
+   (I_SUBKIND | I_PARAMS | I_IDENT | I_REF | I_TARGET | I_DELAY),
 
    // V_STRENGTH
    (I_SUBKIND),
 
    // V_MOD_INST
-   (I_IDENT | I_PARAMS),
+   (I_IDENT | I_PARAMS | I_RANGES | I_IVAL),
 
    // V_BIT_SELECT
    (I_VALUE | I_PARAMS),
 
    // V_SYS_FCALL
-   (I_IDENT | I_PARAMS | I_SUBKIND),
+   (I_IDENT | I_PARAMS | I_SUBKIND | I_IVAL | I_FLAGS),
 
    // V_FOREVER
    (I_STMTS),
@@ -124,10 +124,10 @@ static const imask_t has_map[V_LAST_NODE_KIND] = {
    (I_PARAMS),
 
    // V_DATA_TYPE
-   (I_SUBKIND | I_RANGES | I_FLAGS),
+   (I_SUBKIND | I_RANGES | I_FLAGS | I_TYPE | I_REF | I_IDENT | I_PARAMS),
 
    // V_TYPE_DECL
-   (I_IDENT | I_TYPE),
+   (I_IDENT | I_IDENT2 | I_TYPE | I_FLAGS | I_REF),
 
    // V_ENUM_DECL
    (I_IDENT | I_TYPE | I_RANGES | I_DECLS),
@@ -142,7 +142,7 @@ static const imask_t has_map[V_LAST_NODE_KIND] = {
    (I_IDENT | I_DECLS | I_FLAGS),
 
    // V_EVENT_CONTROL
-   (I_PARAMS),
+   (I_PARAMS | I_VALUE),
 
    // V_EMPTY
    (0),
@@ -157,16 +157,18 @@ static const imask_t has_map[V_LAST_NODE_KIND] = {
    (I_VALUE | I_STMTS),
 
    // V_TASK_DECL
-   (I_IDENT | I_IDENT2 | I_STMTS | I_DECLS | I_PORTS),
+   (I_IDENT | I_IDENT2 | I_IDENT3 | I_STMTS | I_DECLS | I_PORTS | I_FLAGS
+    | I_REF),
 
    // V_FUNC_DECL
-   (I_IDENT | I_IDENT2 | I_STMTS | I_DECLS | I_TYPE | I_PORTS | I_FLAGS),
+   (I_IDENT | I_IDENT2 | I_IDENT3 | I_STMTS | I_DECLS | I_TYPE | I_PORTS
+    | I_FLAGS | I_REF),
 
    // V_WAIT
    (I_VALUE | I_STMTS),
 
    // V_PARAM_DECL
-   (I_IDENT | I_VALUE | I_TYPE),
+   (I_IDENT | I_VALUE | I_TYPE | I_RANGES),
 
    // V_COND_EXPR
    (I_VALUE | I_LEFT | I_RIGHT),
@@ -193,10 +195,10 @@ static const imask_t has_map[V_LAST_NODE_KIND] = {
    (I_TARGET | I_SUBKIND),
 
    // V_LOCALPARAM
-   (I_IDENT | I_VALUE | I_TYPE),
+   (I_IDENT | I_VALUE | I_TYPE | I_RANGES | I_FLAGS),
 
    // V_CASE
-   (I_SUBKIND | I_VALUE | I_STMTS),
+   (I_SUBKIND | I_VALUE | I_STMTS | I_FLAGS),
 
    // V_CASE_ITEM
    (I_PARAMS | I_STMTS),
@@ -208,10 +210,10 @@ static const imask_t has_map[V_LAST_NODE_KIND] = {
    (I_IDENT | I_VALUE),
 
    // V_INST_BODY
-   (I_IDENT | I_IDENT2 | I_PORTS | I_STMTS | I_DECLS),
+   (I_IDENT | I_IDENT2 | I_PORTS | I_STMTS | I_DECLS | I_FLAGS | I_IVAL),
 
    // V_PORT_CONN
-   (I_IDENT | I_VALUE),
+   (I_IDENT | I_VALUE | I_REF | I_FLAGS),
 
    // V_PART_SELECT
    (I_SUBKIND | I_VALUE | I_LEFT | I_RIGHT),
@@ -220,7 +222,7 @@ static const imask_t has_map[V_LAST_NODE_KIND] = {
    (I_CONDS),
 
    // V_EVENT_TRIGGER
-   (I_IDENT),
+   (I_IDENT | I_VALUE | I_SUBKIND | I_DELAY),
 
    // V_USER_FCALL
    (I_IDENT | I_REF | I_PARAMS),
@@ -235,7 +237,7 @@ static const imask_t has_map[V_LAST_NODE_KIND] = {
    (I_IDENT | I_VALUE),
 
    // V_FORK
-   (I_IDENT | I_DECLS | I_STMTS),
+   (I_IDENT | I_DECLS | I_STMTS | I_SUBKIND | I_FLAGS),
 
    // V_ATTR_INST
    (0),
@@ -262,13 +264,13 @@ static const imask_t has_map[V_LAST_NODE_KIND] = {
    (I_TARGET | I_VALUE),
 
    // V_DISABLE
-   (I_IDENT),
+   (I_IDENT | I_VALUE | I_REF),
 
    // V_HIER_REF
    (I_IDENT | I_VALUE | I_REF),
 
    // V_TF_PORT_DECL
-   (I_IDENT | I_SUBKIND | I_RANGES | I_TYPE | I_VALUE | I_REF),
+   (I_IDENT | I_SUBKIND | I_RANGES | I_TYPE | I_VALUE | I_REF | I_FLAGS),
 
    // V_RETURN
    (I_REF | I_VALUE),
@@ -280,34 +282,34 @@ static const imask_t has_map[V_LAST_NODE_KIND] = {
    (I_VALUE | I_IDENT | I_REF),
 
    // V_PACKAGE
-   (I_DECLS | I_IDENT | I_IDENT2),
+   (I_DECLS | I_IDENT | I_IDENT2 | I_IVAL),
 
    // V_MIN_TYP_MAX
    (I_LEFT | I_VALUE | I_RIGHT),
 
    // V_PROGRAM
-   (I_IDENT | I_STMTS | I_DECLS | I_IDENT2),
+   (I_IDENT | I_STMTS | I_DECLS | I_IDENT2 | I_PORTS | I_IVAL),
 
    // V_CLASS_DECL
-   (I_IDENT | I_IDENT2 | I_DECLS),
+   (I_IDENT | I_IDENT2 | I_DECLS | I_FLAGS | I_REF | I_PARAMS),
 
    // V_NULL
    (I_TYPE),
 
    // V_CLASS_NEW
-   (I_TYPE | I_PARAMS),
+   (I_TYPE | I_PARAMS | I_VALUE),
 
    // V_DYNAMIC_NEW
    (I_TYPE | I_LEFT | I_VALUE),
 
    // V_CONSTRUCTOR
-   (I_IDENT | I_PARAMS | I_STMTS | I_DECLS),
+   (I_IDENT | I_IDENT2 | I_PARAMS | I_STMTS | I_DECLS | I_REF | I_FLAGS),
 
    // V_SUPER_CALL
-   (I_PARAMS),
+   (I_PARAMS | I_REF),
 
    // V_IMPORT_DECL
-   (I_REF | I_IDENT),
+   (I_REF | I_IDENT | I_FLAGS),
 
    // V_NAMESPACE
    (I_DECLS | I_IDENT),
@@ -322,40 +324,142 @@ static const imask_t has_map[V_LAST_NODE_KIND] = {
    (I_IDENT | I_STMTS),
 
    // V_LOCAL_DECL
-   (I_IDENT | I_TYPE | I_RANGES | I_VALUE),
+   (I_IDENT | I_TYPE | I_RANGES | I_VALUE | I_FLAGS),
 
    // V_GEN_BLOCK
    (I_IDENT | I_DECLS | I_STMTS),
 
    // V_METHOD_CALL
-   (I_IDENT | I_VALUE | I_REF | I_SUBKIND | I_PARAMS),
+   (I_IDENT | I_VALUE | I_REF | I_SUBKIND | I_PARAMS | I_STMTS),
 
    // V_MOD_REF
    (I_IDENT | I_PARAMS | I_VALUE | I_REF),
 
    // V_ASSERT
-   (I_IDENT | I_VALUE | I_CONDS),
+   (I_IDENT | I_VALUE | I_CONDS | I_SUBKIND),
 
    // V_ASSUME
-   (I_IDENT | I_VALUE | I_CONDS),
+   (I_IDENT | I_VALUE | I_CONDS | I_SUBKIND),
 
    // V_COVER
-   (I_IDENT | I_VALUE | I_CONDS),
+   (I_IDENT | I_VALUE | I_CONDS | I_SUBKIND),
 
    // V_PATTERN_EXPR
    (I_TYPE | I_PARAMS),
 
    // V_PATTERN_ITEM
-   (I_LEFT | I_RIGHT),
+   (I_LEFT | I_RIGHT | I_SUBKIND),
 
    // V_CAST
-   (I_SUBKIND | I_LEFT | I_VALUE),
+   (I_SUBKIND | I_LEFT | I_VALUE | I_TYPE),
 
    // V_TCHECK
-   (I_SUBKIND | I_PARAMS),
+   (I_SUBKIND | I_PARAMS | I_IVAL),
 
    // V_TCHECK_EVENT
-   (I_PARAMS)
+   (I_PARAMS),
+
+   // V_THIS
+   (I_TYPE | I_FLAGS),
+
+   // V_DOLLAR
+   (I_FLAGS),
+
+   // V_LOOP_JUMP
+   (I_SUBKIND),
+
+   // V_FORK_CTRL
+   (I_SUBKIND),
+
+   // V_CONSTRAINT
+   (I_IDENT | I_STMTS | I_FLAGS | I_REF),
+
+   // V_CONS_EXPR
+   (I_VALUE | I_FLAGS),
+
+   // V_CONS_IMPLY
+   (I_VALUE | I_STMTS),
+
+   // V_CONS_IF
+   (I_VALUE | I_LEFT | I_RIGHT),
+
+   // V_CONS_BLOCK
+   (I_STMTS),
+
+   // V_CONS_FOREACH
+   (I_VALUE | I_DECLS | I_STMTS),
+
+   // V_CONS_UNIQUE
+   (I_PARAMS),
+
+   // V_CONS_SOLVE
+   (I_LEFT | I_RIGHT),
+
+   // V_INSIDE
+   (I_VALUE | I_PARAMS),
+
+   // V_INSIDE_RANGE
+   (I_LEFT | I_RIGHT),
+
+   // V_DIST
+   (I_VALUE | I_PARAMS),
+
+   // V_DIST_ITEM
+   (I_LEFT | I_RIGHT | I_DELAY | I_SUBKIND),
+
+   // V_STD_RANDOMIZE
+   (I_PARAMS | I_STMTS),
+
+   // V_RANDCASE
+   (I_STMTS),
+
+   // V_RANDCASE_ITEM
+   (I_VALUE | I_STMTS),
+
+   // V_STREAM
+   (I_SUBKIND | I_VALUE | I_PARAMS),
+
+   // V_NAMED_ARG
+   (I_IDENT | I_VALUE),
+
+   // V_MODPORT
+   (I_IDENT | I_DECLS),
+
+   // V_IFACE_PORT
+   (I_IDENT | I_IDENT2 | I_SUBKIND | I_REF | I_RANGES),
+
+   // V_MODPORT_PORT
+   (I_IDENT | I_SUBKIND | I_VALUE),
+
+   // V_MATCHES
+   (I_VALUE | I_DECLS | I_LEFT | I_SUBKIND),
+
+   // V_MATCH_PAT
+   (I_SUBKIND | I_VALUE | I_REF | I_PARAMS | I_TYPE),
+
+   // V_SVA_OP
+   (I_SUBKIND | I_PARAMS | I_LEFT | I_RIGHT | I_VALUE),
+
+   // V_SVA_DECL
+   (I_IDENT | I_SUBKIND | I_PORTS | I_DECLS | I_VALUE),
+
+   // V_PROP_SPEC
+   (I_VALUE | I_TARGET | I_LEFT),
+
+   // V_EXPECT
+   (I_VALUE | I_CONDS),
+
+   // V_BIND
+   (I_IDENT | I_IDENT2 | I_STMTS | I_DECLS | I_PARAMS),
+
+   // V_DPI_EXPORT
+   (I_IDENT | I_IDENT3),
+
+   // V_CONFIG
+   (I_IDENT | I_IDENT2 | I_DECLS | I_STMTS | I_PARAMS),
+
+   // V_CONFIG_RULE
+   (I_SUBKIND | I_IDENT | I_IDENT2 | I_PARAMS),
 };
 
 static const char *kind_text_map[V_LAST_NODE_KIND] = {
@@ -386,7 +490,16 @@ static const char *kind_text_map[V_LAST_NODE_KIND] = {
    "V_PORT_MAP",      "V_FINAL",        "V_LOCAL_DECL",    "V_GEN_BLOCK",
    "V_METHOD_CALL",   "V_MOD_REF",      "V_ASSERT",        "V_ASSUME",
    "V_COVER",         "V_PATTERN_EXPR", "V_PATTERN_ITEM",  "V_CAST",
-   "V_TCHECK",        "V_TCHECK_EVENT"
+   "V_TCHECK",        "V_TCHECK_EVENT",  "V_THIS",          "V_DOLLAR",
+   "V_LOOP_JUMP",     "V_FORK_CTRL",    "V_CONSTRAINT",    "V_CONS_EXPR",
+   "V_CONS_IMPLY",    "V_CONS_IF",      "V_CONS_BLOCK",    "V_CONS_FOREACH",
+   "V_CONS_UNIQUE",   "V_CONS_SOLVE",   "V_INSIDE",        "V_INSIDE_RANGE",
+   "V_DIST",          "V_DIST_ITEM",    "V_STD_RANDOMIZE", "V_RANDCASE",
+   "V_RANDCASE_ITEM", "V_STREAM",        "V_NAMED_ARG",
+   "V_MODPORT",       "V_IFACE_PORT",   "V_MODPORT_PORT",  "V_MATCHES",
+   "V_MATCH_PAT",    "V_SVA_OP",       "V_SVA_DECL",      "V_PROP_SPEC",
+   "V_EXPECT",        "V_BIND",         "V_DPI_EXPORT",
+   "V_CONFIG",        "V_CONFIG_RULE",
 };
 
 static const change_allowed_t change_allowed[] = {
@@ -402,8 +515,8 @@ object_class_t vlog_object = {
    .last_kind      = V_LAST_NODE_KIND,
    .has_loc        = true,
    .gc_roots       = { V_MODULE, V_PRIMITIVE, V_PROGRAM, V_PACKAGE,
-                       V_NAMESPACE },
-   .gc_num_roots   = 5,
+                       V_NAMESPACE, V_BIND, V_CONFIG },
+   .gc_num_roots   = 7,
 };
 
 struct _vlog_node {
@@ -471,6 +584,23 @@ void vlog_set_ident2(vlog_node_t v, ident_t i)
    lookup_item(&vlog_object, v, I_IDENT2)->ident = i;
 }
 
+ident_t vlog_ident3(vlog_node_t v)
+{
+   item_t *item = lookup_item(&vlog_object, v, I_IDENT3);
+   assert(item->ident != NULL);
+   return item->ident;
+}
+
+bool vlog_has_ident3(vlog_node_t v)
+{
+   return lookup_item(&vlog_object, v, I_IDENT3)->ident != NULL;
+}
+
+void vlog_set_ident3(vlog_node_t v, ident_t i)
+{
+   lookup_item(&vlog_object, v, I_IDENT3)->ident = i;
+}
+
 const loc_t *vlog_loc(vlog_node_t v)
 {
    assert(v != NULL);
@@ -534,6 +664,17 @@ vlog_node_t vlog_port(vlog_node_t v, unsigned n)
    return vlog_array_nth(item, n);
 }
 
+void vlog_delete_port(vlog_node_t v, unsigned n)
+{
+   obj_array_t *a = lookup_item(&vlog_object, v, I_PORTS)->obj_array;
+   assert(n < obj_array_count(a));
+
+   for (unsigned i = n + 1; i < a->count; i++)
+      a->items[i - 1] = a->items[i];
+
+   a->count--;
+}
+
 void vlog_add_port(vlog_node_t v, vlog_node_t p)
 {
    assert(p != NULL);
@@ -589,6 +730,13 @@ void vlog_add_range(vlog_node_t v, vlog_node_t r)
    assert(r->object.kind == V_DIMENSION);
    vlog_array_add(lookup_item(&vlog_object, v, I_RANGES), r);
    object_write_barrier(&(v->object), &(r->object));
+}
+
+void vlog_clear_ranges(vlog_node_t v)
+{
+   item_t *item = lookup_item(&vlog_object, v, I_RANGES);
+   if (item->obj_array != NULL)
+      item->obj_array->count = 0;
 }
 
 unsigned vlog_decls(vlog_node_t v)
@@ -730,6 +878,11 @@ bool vlog_has_left(vlog_node_t v)
    return lookup_item(&vlog_object, v, I_LEFT)->object != NULL;
 }
 
+bool vlog_has_target(vlog_node_t v)
+{
+   return lookup_item(&vlog_object, v, I_TARGET)->object != NULL;
+}
+
 void vlog_set_left(vlog_node_t v, vlog_node_t e)
 {
    lookup_item(&vlog_object, v, I_LEFT)->object = &(e->object);
@@ -741,6 +894,11 @@ vlog_node_t vlog_right(vlog_node_t v)
    item_t *item = lookup_item(&vlog_object, v, I_RIGHT);
    assert(item->object != NULL);
    return container_of(item->object, struct _vlog_node, object);
+}
+
+bool vlog_has_right(vlog_node_t v)
+{
+   return lookup_item(&vlog_object, v, I_RIGHT)->object != NULL;
 }
 
 void vlog_set_right(vlog_node_t v, vlog_node_t e)

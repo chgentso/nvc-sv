@@ -27,6 +27,8 @@ typedef enum {
    FILE_WRITE = 1,
    FILE_APPEND = 2,
    FILE_READ_WRITE = 3,
+   FILE_TRUNC_READ_WRITE = 4,    // Verilog "w+"
+   FILE_APPEND_READ_WRITE = 5,   // Verilog "a+"
 } file_mode_t;
 
 typedef uint32_t file_handle_t;

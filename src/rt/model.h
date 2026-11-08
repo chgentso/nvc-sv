@@ -60,6 +60,7 @@ bool model_can_create_delta(rt_model_t *m);
 int64_t model_now(rt_model_t *m, unsigned *deltas);
 int64_t model_next_time(rt_model_t *m);
 void model_stop(rt_model_t *m);
+void model_finish(rt_model_t *m);
 void model_interrupt(rt_model_t *m);
 int model_exit_status(rt_model_t *m);
 
@@ -85,6 +86,9 @@ void call_with_model(rt_model_t *m, void (*cb)(void *), void *arg);
 rt_model_t *get_model(void);
 rt_model_t *get_model_or_null(void);
 rt_proc_t *get_active_proc(void);
+rt_proc_t *model_defer_note(uint32_t *runs, uint32_t *seq);
+bool model_defer_live(rt_proc_t *proc, uint32_t runs, uint32_t seq,
+                      const int64_t *scopes, unsigned nscopes);
 rt_scope_t *get_active_scope(rt_model_t *m);
 cover_data_t *get_coverage(rt_model_t *m);
 
@@ -99,6 +103,8 @@ rt_scope_t *create_scope(rt_model_t *m, tree_t block, rt_scope_t *parent);
 
 void get_instance_name(rt_scope_t *s, text_buf_t *tb);
 void get_path_name(rt_scope_t *s, text_buf_t *tb);
+void get_verilog_path_name(rt_scope_t *s, text_buf_t *tb);
+rt_scope_t *scope_for_context(rt_scope_t *s, void *ctx);
 
 const void *signal_value(rt_signal_t *s);
 const void *signal_last_value(rt_signal_t *s);
@@ -108,6 +114,8 @@ size_t signal_expand(rt_signal_t *s, uint64_t *buf, size_t max);
 void force_signal(rt_model_t *m, rt_signal_t *s, const void *values,
                   int offset, size_t count);
 void release_signal(rt_model_t *m, rt_signal_t *s, int offset, size_t count);
+void release_signal_now(rt_model_t *m, rt_signal_t *s, int offset,
+                        size_t count);
 void deposit_signal(rt_model_t *m, rt_signal_t *s, const void *values,
                     int offset, size_t count);
 void sched_deposit(rt_model_t *m, rt_signal_t *s, const void *values,

@@ -21,6 +21,61 @@
 #include "prim.h"
 
 typedef enum {
+   V_SVA_DELAY,
+   V_SVA_REPEAT,
+   V_SVA_GOTO,
+   V_SVA_NONCONS,
+   V_SVA_AND,
+   V_SVA_OR,
+   V_SVA_INTERSECT,
+   V_SVA_WITHIN,
+   V_SVA_THROUGHOUT,
+   V_SVA_FIRST_MATCH,
+   V_SVA_NOT,
+   V_SVA_IMPL_OVER,
+   V_SVA_IMPL_NON,
+   V_SVA_FOLLOW_OVER,
+   V_SVA_FOLLOW_NON,
+   V_SVA_STRONG,
+   V_SVA_WEAK,
+   V_SVA_IF,
+   V_SVA_NEXTTIME,
+   V_SVA_S_NEXTTIME,
+   V_SVA_ALWAYS,
+   V_SVA_S_ALWAYS,
+   V_SVA_EVENTUALLY,
+   V_SVA_S_EVENTUALLY,
+   V_SVA_UNTIL,
+   V_SVA_S_UNTIL,
+   V_SVA_UNTIL_WITH,
+   V_SVA_S_UNTIL_WITH,
+   V_SVA_IMPLIES,
+   V_SVA_IFF,
+   V_SVA_ACCEPT_ON,
+   V_SVA_REJECT_ON,
+   V_SVA_SYNC_ACCEPT_ON,
+   V_SVA_SYNC_REJECT_ON,
+   V_SVA_CLOCKED,
+   V_SVA_DISABLE,
+   V_SVA_MATCH,
+} vlog_sva_op_t;
+
+typedef enum {
+   V_SVA_SEQUENCE,
+   V_SVA_PROPERTY,
+} vlog_sva_decl_t;
+
+typedef enum {
+   V_ASSERT_SIMPLE,
+   V_ASSERT_DEFERRED,
+   V_ASSERT_FINAL,
+   V_ASSERT_CONCURRENT,
+   V_ASSERT_COVER_SEQ,
+   V_ASSERT_PROCEDURAL,
+   V_ASSERT_EXPECT,
+} vlog_assert_t;
+
+typedef enum {
    V_EVENT_LEVEL,
    V_EVENT_POSEDGE,
    V_EVENT_NEGEDGE,
@@ -31,7 +86,24 @@ typedef enum {
    V_PORT_INPUT,
    V_PORT_OUTPUT,
    V_PORT_INOUT,
+   V_PORT_REF,
 } v_port_kind_t;
+
+typedef enum {
+   V_FORK_JOIN,
+   V_FORK_JOIN_ANY,
+   V_FORK_JOIN_NONE,
+} vlog_fork_kind_t;
+
+typedef enum {
+   V_FORK_WAIT,
+   V_FORK_DISABLE,
+} vlog_fork_ctrl_t;
+
+typedef enum {
+   V_JUMP_BREAK,
+   V_JUMP_CONTINUE,
+} vlog_jump_kind_t;
 
 typedef enum {
    V_NET_NONE,
@@ -65,6 +137,7 @@ typedef enum {
    V_CASE_NORMAL,
    V_CASE_X,
    V_CASE_Z,
+   V_CASE_INSIDE,
 } vlog_case_kind_t;
 
 typedef enum {
@@ -185,9 +258,49 @@ typedef enum {
    V_CAST,
    V_TCHECK,
    V_TCHECK_EVENT,
+   V_THIS,
+   V_DOLLAR,
+   V_LOOP_JUMP,
+   V_FORK_CTRL,
+   V_CONSTRAINT,
+   V_CONS_EXPR,
+   V_CONS_IMPLY,
+   V_CONS_IF,
+   V_CONS_BLOCK,
+   V_CONS_FOREACH,
+   V_CONS_UNIQUE,
+   V_CONS_SOLVE,
+   V_INSIDE,
+   V_INSIDE_RANGE,
+   V_DIST,
+   V_DIST_ITEM,
+   V_STD_RANDOMIZE,
+   V_RANDCASE,
+   V_RANDCASE_ITEM,
+   V_STREAM,
+   V_NAMED_ARG,
+   V_MODPORT,
+   V_IFACE_PORT,
+   V_MODPORT_PORT,
+   V_MATCHES,
+   V_MATCH_PAT,
+   V_SVA_OP,
+   V_SVA_DECL,
+   V_PROP_SPEC,
+   V_EXPECT,
+   V_BIND,
+   V_DPI_EXPORT,
+   V_CONFIG,
+   V_CONFIG_RULE,
 
    V_LAST_NODE_KIND
 } vlog_kind_t;
+
+typedef enum {
+   V_CONFIG_INSTANCE,
+   V_CONFIG_CELL,
+   V_CONFIG_DEFAULT,
+} vlog_config_rule_t;
 
 typedef enum {
    DT_IMPLICIT,
@@ -204,12 +317,29 @@ typedef enum {
    DT_REALTIME,
    DT_EVENT,
    DT_STRING,
+   DT_DYNARRAY,
+   DT_QUEUE,
+   DT_MAILBOX,
+   DT_VIRTUAL,
+   DT_ASSOC,
+   DT_PROCESS,
+   DT_CHANDLE,
+   DT_SEMAPHORE,
 } data_type_t;
+
+typedef enum {
+   V_PAT_WILD,
+   V_PAT_BIND,
+   V_PAT_CONST,
+   V_PAT_TAGGED,
+   V_PAT_STRUCT,
+} vlog_pattern_t;
 
 typedef enum {
    V_DIM_PACKED,
    V_DIM_UNPACKED,
    V_DIM_UNSIZED,
+   V_DIM_ASSOC,
 } vlog_dimension_kind_t;
 
 typedef enum {
@@ -245,6 +375,8 @@ typedef enum {
    V_BINARY_XNOR,
    V_BINARY_NAND,
    V_BINARY_NOR,
+   V_BINARY_WILD_EQ,
+   V_BINARY_WILD_NEQ,
 } vlog_binary_t;
 
 typedef enum {
@@ -330,6 +462,7 @@ typedef enum {
    V_SYSTF_RTOI,
    V_SYSTF_CEIL,
    V_SYSTF_FLOOR,
+   V_SYSTF_MATH,
 } vlog_systf_t;
 
 typedef enum {
@@ -340,7 +473,90 @@ typedef enum {
    V_METHOD_ENUM_PREV,
    V_METHOD_ENUM_NUM,
    V_METHOD_ENUM_NAME,
+   V_METHOD_SIZE,
+   V_METHOD_DELETE,
+   V_METHOD_PUSH_BACK,
+   V_METHOD_PUSH_FRONT,
+   V_METHOD_POP_BACK,
+   V_METHOD_POP_FRONT,
+   V_METHOD_MBOX_PUT,
+   V_METHOD_MBOX_GET,
+   V_METHOD_MBOX_TRY_GET,
+   V_METHOD_MBOX_NUM,
+   V_METHOD_MBOX_TRY_PUT,
+   V_METHOD_MBOX_PEEK,
+   V_METHOD_MBOX_TRY_PEEK,
+   V_METHOD_CLASS,
+   V_METHOD_RANDOMIZE,
+   V_METHOD_RAND_MODE,
+   V_METHOD_CONSTRAINT_MODE,
+   V_METHOD_STR_LEN,
+   V_METHOD_STR_PUTC,
+   V_METHOD_STR_GETC,
+   V_METHOD_STR_TOUPPER,
+   V_METHOD_STR_TOLOWER,
+   V_METHOD_STR_COMPARE,
+   V_METHOD_STR_ICOMPARE,
+   V_METHOD_STR_SUBSTR,
+   V_METHOD_STR_ATOI,
+   V_METHOD_STR_ATOHEX,
+   V_METHOD_STR_ATOOCT,
+   V_METHOD_STR_ATOBIN,
+   V_METHOD_STR_ATOREAL,
+   V_METHOD_STR_ITOA,
+   V_METHOD_STR_HEXTOA,
+   V_METHOD_STR_OCTTOA,
+   V_METHOD_STR_BINTOA,
+   V_METHOD_STR_REALTOA,
+   V_METHOD_ARR_INSERT,
+   V_METHOD_ARR_REVERSE,
+   V_METHOD_ARR_SORT,
+   V_METHOD_ARR_RSORT,
+   V_METHOD_ARR_SHUFFLE,
+   V_METHOD_ARR_SUM,
+   V_METHOD_ARR_PRODUCT,
+   V_METHOD_ARR_AND,
+   V_METHOD_ARR_OR,
+   V_METHOD_ARR_XOR,
+   V_METHOD_ARR_MIN,
+   V_METHOD_ARR_MAX,
+   V_METHOD_ARR_UNIQUE,
+   V_METHOD_ARR_UNIQUE_INDEX,
+   V_METHOD_ARR_FIND,
+   V_METHOD_ARR_FIND_INDEX,
+   V_METHOD_ARR_FIND_FIRST,
+   V_METHOD_ARR_FIND_FIRST_INDEX,
+   V_METHOD_ARR_FIND_LAST,
+   V_METHOD_ARR_FIND_LAST_INDEX,
+   V_METHOD_ASSOC_EXISTS,
+   V_METHOD_ASSOC_FIRST,
+   V_METHOD_ASSOC_LAST,
+   V_METHOD_ASSOC_NEXT,
+   V_METHOD_ASSOC_PREV,
+   V_METHOD_PROC_STATUS,
+   V_METHOD_PROC_KILL,
+   V_METHOD_PROC_AWAIT,
+   V_METHOD_PROC_SUSPEND,
+   V_METHOD_PROC_RESUME,
+   V_METHOD_RANDSTATE_GET,
+   V_METHOD_RANDSTATE_SET,
+   V_METHOD_SRANDOM,
+   V_METHOD_EVENT_TRIGGERED,
+   V_METHOD_SEM_GET,
+   V_METHOD_SEM_PUT,
+   V_METHOD_SEM_TRY_GET,
+   V_METHOD_NOP,
 } vlog_method_t;
+
+typedef enum {
+   V_STREAM_RIGHT,
+   V_STREAM_LEFT,
+} vlog_stream_t;
+
+typedef enum {
+   V_DIST_PER_VALUE,
+   V_DIST_PER_RANGE,
+} vlog_dist_t;
 
 typedef enum {
    V_CAST_TYPE,
@@ -348,6 +564,7 @@ typedef enum {
    V_CAST_SIGN,
    V_CAST_STRING,
    V_CAST_CONST,
+   V_CAST_TYPEREF,
 } vlog_cast_t;
 
 typedef enum {
@@ -355,7 +572,64 @@ typedef enum {
    VLOG_F_PACKED = (1 << 1),
    VLOG_F_CONST  = (1 << 2),
    VLOG_F_FOLDED = (1 << 3),
+   VLOG_F_VIRTUAL = (1 << 4),
+   VLOG_F_STATIC = (1 << 5),
+   VLOG_F_PURE = (1 << 6),
+   VLOG_F_INTERFACE = (1 << 7),
+   VLOG_F_GLOBAL = (1 << 8),
+   VLOG_F_VHDL = (1 << 9),
+   VLOG_F_GENERIC = (1 << 10),
+   VLOG_F_RAND = (1 << 11),
+   VLOG_F_RANDC = (1 << 12),
+   VLOG_F_SOFT = (1 << 13),
+   VLOG_F_UNIQUE = (1 << 14),
+   VLOG_F_UNIQUE0 = (1 << 15),
+   VLOG_F_PRIORITY = (1 << 16),
+   VLOG_F_FILL = (1 << 17),
+   VLOG_F_WILDCARD = (1 << 18),
+   VLOG_F_PROPERTY = (1 << 19),
+   VLOG_F_EXTERN = (1 << 20),
+   VLOG_F_DISABLE = (1 << 21),
+   VLOG_F_IMPLICIT_STATIC = (1 << 22),
+   VLOG_F_FORWARD = (1 << 23),
+   VLOG_F_SPEC = (1 << 24),
+   VLOG_F_DPI = (1 << 25),
+   VLOG_F_SYSTEMVERILOG = (1 << 26),
+   VLOG_F_TIMELIT = (1 << 27),
+   VLOG_F_ONESTEP = (1 << 28),
+   VLOG_F_IN_SUBR = (1 << 29),
+   VLOG_F_VHDL_PATH = (1 << 30),
+   VLOG_F_TAGGED = VLOG_F_PURE,      // On a union type
+   VLOG_F_SPECPARAM = VLOG_F_PURE,   // On a local parameter
+   VLOG_F_EXPORT = VLOG_F_PURE,      // On a package export declaration
+   VLOG_F_VOID = VLOG_F_PURE,        // On a void member of a tagged union
+   VLOG_F_TIMEEXPR = VLOG_F_SOFT,    // On a time literal in an expression
+   VLOG_F_TYPEPARAM = VLOG_F_CONST,  // On a type declaration which is a parameter
+   VLOG_F_NETTYPE = VLOG_F_RAND,     // On a type declaration of a net type
+   VLOG_F_USERNET = VLOG_F_PRIORITY, // On a variable which is a net of a user-defined net type
+   VLOG_F_NESTED_INST = VLOG_F_SPEC,   // On a variable for an interface instance
+   VLOG_F_CHECKER = VLOG_F_DISABLE,  // On a module which is a checker
+   VLOG_F_LET = VLOG_F_SOFT,         // On a function declaration
+   VLOG_F_NAMED_DISABLE = VLOG_F_VIRTUAL,  // On a block named by a disable
+   VLOG_F_UNPACKED_VIEW = VLOG_F_FILL, // On a packed union declared unpacked
+   VLOG_F_GEN_BODY = VLOG_F_FILL,    // On the body of a generate block
+   VLOG_F_REALVIEW = VLOG_F_ONESTEP, // On a real member of a union held as bits
+   VLOG_F_REFVAR = VLOG_F_TIMELIT,   // On a class property holding a reference
+   VLOG_F_SVA_LOCAL = VLOG_F_SOFT,   // On a local variable of a sequence
+   VLOG_F_CONTEXT = VLOG_F_RANDC,    // On a DPI import declared context
+   VLOG_F_IMPLICIT = VLOG_F_FORWARD, // On a constraint prototype without extern
+   VLOG_F_OPEN_PACKED = VLOG_F_WILDCARD,  // On an unsized packed dimension
+   VLOG_F_OVERRIDABLE = VLOG_F_GENERIC,   // On a local parameter bound to a parameter
 } vlog_flags_t;
+
+typedef enum {
+   V_MODPORT_INPUT,
+   V_MODPORT_OUTPUT,
+   V_MODPORT_INOUT,
+   V_MODPORT_REF,
+   V_MODPORT_IMPORT,
+   V_MODPORT_EXPORT,
+} vlog_modport_dir_t;
 
 typedef enum {
    VLOG_GF_HIER_REF = (1 << 0),
@@ -386,6 +660,9 @@ bool vlog_has_ident(vlog_node_t v);
 ident_t vlog_ident2(vlog_node_t v);
 void vlog_set_ident2(vlog_node_t v, ident_t i);
 bool vlog_has_ident2(vlog_node_t v);
+ident_t vlog_ident3(vlog_node_t v);
+void vlog_set_ident3(vlog_node_t v, ident_t i);
+bool vlog_has_ident3(vlog_node_t v);
 
 vlog_node_t vlog_ref(vlog_node_t v);
 void vlog_set_ref(vlog_node_t v, vlog_node_t d);
@@ -398,6 +675,7 @@ void vlog_add_stmt(vlog_node_t v, vlog_node_t s);
 unsigned vlog_ports(vlog_node_t v);
 vlog_node_t vlog_port(vlog_node_t v, unsigned n);
 void vlog_add_port(vlog_node_t v, vlog_node_t p);
+void vlog_delete_port(vlog_node_t v, unsigned n);
 
 unsigned vlog_params(vlog_node_t v);
 vlog_node_t vlog_param(vlog_node_t v, unsigned n);
@@ -407,6 +685,7 @@ void vlog_set_param(vlog_node_t v, unsigned n, vlog_node_t p);
 unsigned vlog_ranges(vlog_node_t v);
 vlog_node_t vlog_range(vlog_node_t v, unsigned n);
 void vlog_add_range(vlog_node_t v, vlog_node_t r);
+void vlog_clear_ranges(vlog_node_t v);
 
 unsigned vlog_decls(vlog_node_t v);
 vlog_node_t vlog_decl(vlog_node_t v, unsigned n);
@@ -436,9 +715,11 @@ void vlog_set_type(vlog_node_t v, vlog_node_t t);
 
 vlog_node_t vlog_left(vlog_node_t v);
 bool vlog_has_left(vlog_node_t v);
+bool vlog_has_target(vlog_node_t v);
 void vlog_set_left(vlog_node_t v, vlog_node_t e);
 
 vlog_node_t vlog_right(vlog_node_t v);
+bool vlog_has_right(vlog_node_t v);
 void vlog_set_right(vlog_node_t v, vlog_node_t e);
 
 const char *vlog_text(vlog_node_t v);
@@ -456,6 +737,42 @@ void vlog_set_ival(vlog_node_t v, int64_t i);
 vlog_flags_t vlog_flags(vlog_node_t t);
 void vlog_set_flags(vlog_node_t v, vlog_flags_t mask);
 void vlog_clear_flags(vlog_node_t v, vlog_flags_t mask);
+
+// System tasks hold the time unit of the module in femtoseconds, stored
+// as one plus its base ten logarithm in bits 0 to 5 or zero if not known,
+// with the base ten logarithm of the time precision in bits 54 to 58 and
+// the same for the whole design plus one above that, or zero if not known
+static inline int64_t vlog_time_unit_code(int64_t unit_fs)
+{
+   int code = 0;
+   for (; unit_fs > 0; unit_fs /= 10)
+      code++;
+   return code;
+}
+
+static inline int64_t vlog_time_unit_value(int64_t code)
+{
+   int64_t unit_fs = 0;
+   if (code > 0) {
+      unit_fs = 1;
+      for (; code > 1; code--)
+         unit_fs *= 10;
+   }
+   return unit_fs;
+}
+
+#define VLOG_TIME_ENCODE(unit, log10) \
+   (vlog_time_unit_code(unit) | ((int64_t)(log10) << 54))
+// The precision is this if there is no timescale in effect, in which case
+// the default unit and precision of 1ns/1ns apply
+#define VLOG_TIME_UNSCALED            31
+#define VLOG_DEFAULT_LOG10            6
+#define VLOG_TIME_UNIT(ival)          vlog_time_unit_value((ival) & 63)
+#define VLOG_TIME_LOG10(ival)         ((unsigned)(((ival) >> 54) & 31))
+#define VLOG_TIME_SET_DESIGN(ival, g) \
+   ((int64_t)((uint64_t)(ival) & ((UINT64_C(1) << 59) - 1)) \
+    | (int64_t)((uint64_t)((g) + 1) << 59))
+#define VLOG_TIME_DESIGN(ival) ((int)(((uint64_t)(ival) >> 59) & 31) - 1)
 
 typedef void (*vlog_visit_fn_t)(vlog_node_t v, void *context);
 

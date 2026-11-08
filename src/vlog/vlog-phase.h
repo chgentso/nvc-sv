@@ -22,19 +22,30 @@
 
 void vlog_preprocess(text_buf_t *tb, bool precise);
 vlog_node_t vlog_parse(void);
+void vlog_set_default_timescale(uint64_t unit_fs, unsigned precision_log10);
 void vlog_check(vlog_node_t v);
 void vlog_dump(vlog_node_t v, int indent);
 void vlog_simp(vlog_node_t mod);
 void vlog_trans(vlog_node_t mod, tree_t out);
 void vlog_lower_udp(mir_unit_t *mu, object_t *obj);
 void vlog_lower_block(mir_context_t *mc, ident_t parent, tree_t b);
+void vlog_set_interconnect_nettype(vlog_node_t decl, vlog_node_t nettype);
 void vlog_lower_instance(mir_context_t *mc, vlog_node_t body, ident_t parent,
                          tree_t trans);
 void vlog_lower_const_funcs(mir_context_t *mc, vlog_node_t inst);
 mir_unit_t *vlog_lower_thunk(mir_context_t *mc, ident_t parent, vlog_node_t v);
 vlog_node_t vlog_new_instance(vlog_node_t mod, vlog_node_t inst, ident_t id);
+void vlog_set_instance_scope(ident_t dotted);
+bool vlog_bind_is_selective(vlog_node_t mod);
 vlog_node_t vlog_generate_instance(vlog_node_t v, vlog_node_t genvar,
                                    int32_t value, ident_t prefix);
 void vlog_fold(vlog_node_t mod, mir_context_t *mc, jit_t *j);
+void vlog_set_fold_context(mir_context_t *mc, jit_t *j);
+vlog_node_t vlog_virtual_spec(vlog_node_t type);
+bool vlog_virtual_unresolved(vlog_node_t type);
+ident_t vlog_instance_key(vlog_node_t mod, vlog_node_t body);
+void vlog_load_binds(lib_t lib);
+bool vlog_bind_has_hier_ref(vlog_node_t mod);
+void vlog_resolve_method(vlog_node_t call);
 
 #endif  // _VLOG_PHASE_H

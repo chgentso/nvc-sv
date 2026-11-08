@@ -109,4 +109,44 @@ void x_enable_trigger(rt_trigger_t *trigger);
 void x_disable_trigger(rt_trigger_t *trigger);
 int32_t *x_get_counters(jit_handle_t handle);
 
+void x_sv_event_wait(void *event);
+void x_sv_queue_wait(void *event);
+int64_t x_sv_program_begin(void);
+int64_t x_sv_reactive_yield(void);
+int64_t x_sv_sva_yield(void);
+void x_sv_program_end(void);
+void x_sv_event_trigger(void *event);
+void x_sv_event_trigger_nba(void *event, int64_t after);
+void x_sv_poll_wait(void);
+void x_sv_poll_fired(void);
+int64_t x_sv_event_triggered(void *event);
+void x_sv_nba_store(void *dest, const void *value, int64_t bytes,
+                    int64_t offset, int64_t count, int64_t after,
+                    int64_t wide);
+void x_sv_spawn(const ffi_closure_t *closure, void *group, int64_t label);
+void x_sv_sched_postponed(bool late);
+int64_t x_sv_sva_flushing(void);
+void *x_sv_fork_begin(void);
+void x_sv_fork_end(void *group);
+int64_t x_sv_fork_wait(void *group, int64_t mode);
+void x_sv_fork_disable(void);
+int64_t x_sv_fork_disable_group(int64_t depth, int64_t label);
+int64_t x_sv_fork_disabled(void);
+void x_sv_wait_mark(int64_t label, int64_t first);
+void x_sv_fork_name(void *group, int64_t label);
+int64_t x_sv_fork_disable_name(int64_t label);
+int64_t x_sv_defer_disable(int64_t label);
+void x_sv_fork_finish(void);
+void *x_sv_process_self(void);
+int64_t x_sv_process_status(void *handle);
+int64_t x_sv_process_kill(void *handle);
+int64_t x_sv_process_await(void *handle);
+int64_t x_sv_process_suspend(void *handle);
+int64_t x_sv_process_resume(void *handle);
+int64_t x_sv_fread(int64_t fd, int64_t nbytes);
+int64_t x_sv_fread_count(void);
+void x_sv_hier_scope(void *context);
+void *x_sv_vif_child(void *context, int64_t label);
+int64_t x_sv_class_oid(void);
+
 #endif  // _JIT_EXITS_H

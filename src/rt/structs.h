@@ -47,9 +47,14 @@ typedef struct {
    wakeable_kind_t kind : 8;
    unsigned        pending : 1;
    unsigned        postponed : 1;
+   unsigned        latepost : 1;
+   unsigned        sampler : 1;
    unsigned        delayed : 1;
    unsigned        zombie : 1;
    unsigned        reschedule : 1;
+   unsigned        forked : 1;
+   unsigned        reactive : 1;
+   unsigned        interrupted : 1;
    rt_trigger_t   *trigger;
 } rt_wakeable_t;
 
@@ -72,6 +77,13 @@ typedef struct _rt_proc {
    tlab_t        *tlab;
    rt_scope_t    *scope;
    mptr_t         privdata;
+   uint64_t       wake_at;
+   uint64_t       wait_seq;
+   uint32_t       create_seq;
+   uint32_t       wake_iter;
+   unsigned       verilog : 1;
+   unsigned       regs : 16;   // Places that hold a pointer to this process
+   struct _sv_task *task;
    ffi_closure_t  closure;   // Has a flexible member
 } rt_proc_t;
 
@@ -161,6 +173,7 @@ STATIC_ASSERT(sizeof(rt_source_t) <= 64);
 typedef struct {
    ffi_closure_t closure;
    res_flags_t   flags;
+   int32_t       blobsz;   // Elements in each value for R_BLOB
    int8_t        tab2[16][16];
    int8_t        tab1[16];
 } res_memo_t;

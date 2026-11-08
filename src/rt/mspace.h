@@ -63,5 +63,11 @@ void **mptr_get(mptr_t ptr);
 #define MSPACE_CURRENT_FRAME __builtin_frame_address(0)
 
 void mspace_stack_limit(void *limit);
+void *mspace_get_stack_limit(void);
+
+// Memory which is scanned for roots in addition to the current stack: the
+// stacks and saved registers of suspended coroutines
+void mspace_park_range(const void *lo, const void *hi);
+void mspace_unpark_range(const void *lo);
 
 #endif   // _RT_MSPACE_H
