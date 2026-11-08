@@ -691,6 +691,36 @@ void _std_env_get_vhdl_assert_enable(jit_scalar_t *args)
    args[0].integer = get_vhdl_assert_enable(severity_level);
 }
 
+DLLEXPORT
+void _std_env_psl_is_covered(jit_scalar_t *args)
+{
+   args[0].integer = model_psl_status(get_model(), true);
+}
+
+DLLEXPORT
+void _std_env_psl_assert_failed(jit_scalar_t *args)
+{
+   args[0].integer = model_psl_status(get_model(), false);
+}
+
+DLLEXPORT
+void _std_env_psl_clear_state(void)
+{
+   model_psl_clear(get_model());
+}
+
+DLLEXPORT
+void _std_env_set_psl_cover_assert(jit_scalar_t *args)
+{
+   model_psl_set_cover_assert(get_model(), !!args[2].integer);
+}
+
+DLLEXPORT
+void _std_env_get_psl_cover_assert(jit_scalar_t *args)
+{
+   args[0].integer = model_psl_get_cover_assert(get_model());
+}
+
 void _std_env_init(void)
 {
    // Dummy function to force linking

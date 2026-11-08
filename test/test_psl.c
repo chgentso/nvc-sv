@@ -430,8 +430,7 @@ START_TEST(test_sem3)
    const error_t expect[] = {
       { 20, "prefix of attribute SIGNAL must denote a PSL directive" },
       { 21, "prefix of attribute SIGNAL must denote a PSL directive" },
-      { 22, "target of signal assignment must be a signal name or "
-        "aggregate" },
+      { 22, "cannot assign to the implicit signal of a PSL directive" },
       { -1, NULL }
    };
    expect_errors(expect);

@@ -145,8 +145,25 @@ static vcode_reg_t psl_lower_guard(lower_unit_t *lu, psl_guard_t g)
    }
 }
 
+static void psl_lower_notify(bool cover)
+{
+   // Record the event for 'SIGNAL and the STD.ENV PSL functions
+
+   ident_t func = ident_new(cover
+                            ? "NVC.SIM_PKG.PSL_COVER_HIT()B"
+                            : "NVC.SIM_PKG.PSL_ASSERT_FAIL()B");
+
+   vcode_reg_t context_reg = emit_link_package(ident_new("NVC.SIM_PKG"));
+   vcode_reg_t args[] = { context_reg };
+   emit_fcall(func, VCODE_INVALID_TYPE, VCODE_INVALID_STAMP, args,
+              ARRAY_LEN(args));
+}
+
 static void psl_lower_cover(lower_unit_t *lu, psl_node_t p)
 {
+   if (standard() >= STD_19)
+      psl_lower_notify(true);
+
    if (psl_has_message(p)) {
       tree_t m = psl_message(p);
       vcode_reg_t msg_reg = lower_rvalue(lu, m);
@@ -203,6 +220,18 @@ static void psl_lower_assert(lower_unit_t *lu, vcode_reg_t taken_reg,
    emit_assert(taken_reg, msg_reg, len_reg,
                severity_reg, locus, VCODE_INVALID_REG,
                VCODE_INVALID_REG);
+
+   if (standard() >= STD_19) {
+      vcode_block_t fail_bb = emit_block();
+      vcode_block_t cont_bb = emit_block();
+      emit_cond(taken_reg, cont_bb, fail_bb);
+
+      vcode_select_block(fail_bb);
+      psl_lower_notify(false);
+      emit_jump(cont_bb);
+
+      vcode_select_block(cont_bb);
+   }
 }
 
 static void psl_enter_state(fsm_state_t *state)

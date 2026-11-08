@@ -42,6 +42,20 @@ void _nvc_current_delta(jit_scalar_t *args, tlab_t *tlab)
    }
 }
 
+DLLEXPORT
+void _nvc_psl_cover_hit(jit_scalar_t *args, tlab_t *tlab)
+{
+   model_psl_event(get_model(), true);
+   args[0].integer = 0;
+}
+
+DLLEXPORT
+void _nvc_psl_assert_fail(jit_scalar_t *args, tlab_t *tlab)
+{
+   model_psl_event(get_model(), false);
+   args[0].integer = 0;
+}
+
 void _nvc_sim_pkg_init(void)
 {
    // Dummy function to force linking

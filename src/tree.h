@@ -259,6 +259,7 @@ typedef enum {
    ATTR_INDEX,
    ATTR_REFLECT,
    ATTR_RECORD,
+   ATTR_SIGNAL,
 } attr_kind_t;
 
 typedef enum {

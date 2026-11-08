@@ -628,24 +628,34 @@ package body env is
         return read_severity.get;
     end function;
 
+    attribute foreign of PslAssertFailed [return boolean] : function is
+        "INTERNAL _std_env_psl_assert_failed";
+
     impure function PslAssertFailed return boolean is
     begin
-        report "not implemented" severity failure;
+        return false;
     end function;
+
+    attribute foreign of PslIsCovered [return boolean] : function is
+        "INTERNAL _std_env_psl_is_covered";
 
     impure function PslIsCovered return boolean is
     begin
-        report "not implemented" severity failure;
+        return false;
     end function;
+
+    attribute foreign of SetPslCoverAssert [boolean] : procedure is
+        "INTERNAL _std_env_set_psl_cover_assert";
 
     procedure SetPslCoverAssert (Enable : boolean := TRUE) is
     begin
-        report "not implemented" severity warning;
     end procedure;
+
+    attribute foreign of GetPslCoverAssert [return boolean] : function is
+        "INTERNAL _std_env_get_psl_cover_assert";
 
     impure function GetPslCoverAssert return boolean is
     begin
-        report "not implemented" severity warning;
         return false;
     end function;
 
@@ -655,9 +665,11 @@ package body env is
         return false;
     end function;
 
+    attribute foreign of ClearPslState [] : procedure is
+        "INTERNAL _std_env_psl_clear_state";
+
     procedure ClearPslState is
     begin
-        report "not implemented" severity warning;
     end procedure;
 
 end package body;

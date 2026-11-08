@@ -4886,10 +4886,53 @@ static tree_t solve_array_slice(nametab_t *tab, tree_t t)
    return t;
 }
 
+static tree_t psl_signal_ref(nametab_t *tab, tree_t name)
+{
+   // The prefix of a PSL directive attribute is replaced with the
+   // implicit signal declared by the parser
+
+   if (tree_kind(name) != T_REF)
+      return NULL;
+
+   tree_t decl = NULL, sig = NULL;
+   if (tree_has_ref(name))
+      decl = tree_ref(name);
+   else if (query_name(tab, tree_ident(name), &decl) == 0)
+      return NULL;
+
+   if (decl == NULL || tree_kind(decl) != T_PSL_DIRECT)
+      return NULL;
+
+   ident_t id = ident_prefix(tree_ident(decl), ident_new("SIGNAL"), '$');
+   if (query_name(tab, id, &sig) == 0 || sig == NULL)
+      return NULL;
+
+   tree_t ref = tree_new(T_REF);
+   tree_set_ident(ref, tree_ident(sig));
+   tree_set_loc(ref, tree_loc(name));
+   tree_set_ref(ref, sig);
+   tree_set_type(ref, tree_type(sig));
+   return ref;
+}
+
 static tree_t try_solve_attr_ref(nametab_t *tab, tree_t t)
 {
    if (tree_has_type(t))
       return t;
+
+   tree_t psl_sig = psl_signal_ref(tab, tree_name(t));
+   if (psl_sig != NULL) {
+      if (tree_subkind(t) == ATTR_SIGNAL)
+         return psl_sig;
+
+      tree_set_name(t, psl_sig);
+   }
+   else if (tree_subkind(t) == ATTR_SIGNAL) {
+      error_at(tree_loc(t), "prefix of attribute SIGNAL must denote a PSL "
+               "directive");
+      tree_set_type(t, type_new(T_NONE));
+      return t;
+   }
 
    tree_t prefix;
    switch (tree_subkind(t)) {

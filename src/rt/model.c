@@ -116,6 +116,7 @@ typedef struct _rt_model {
    bool               next_is_delta;
    bool               force_stop;
    bool               blocking_update;
+   bool               psl_cover_assert;
    unsigned           n_signals;
    heap_t            *eventq_heap;
    ihash_t           *res_memo;
@@ -2315,6 +2316,7 @@ static void create_processes(rt_model_t *m, rt_scope_t *s)
             p->handle   = jit_lazy_compile(m->jit, sym);
             p->scope    = s;
             p->name     = sym;
+            p->label    = name;
             p->privdata = mptr_new(m->mspace, "property privdata");
 
             p->wakeable.kind    = W_PROPERTY;
@@ -4353,6 +4355,89 @@ void x_enter_state(int32_t state, bool strong)
    rt_prop_t *prop = container_of(obj, rt_prop_t, wakeable);
    mask_set(&prop->newstate, state);
    prop->strong |= strong;
+}
+
+static void psl_set_signal(rt_model_t *m, rt_prop_t *prop, bool value)
+{
+   if (!prop->sig_searched) {
+      ident_t id = ident_prefix(prop->label, ident_new("SIGNAL"), '$');
+      for (int i = 0; i < prop->scope->signals.count; i++) {
+         rt_signal_t *s = prop->scope->signals.items[i];
+         if (tree_ident(s->where) == id) {
+            prop->sig = s;
+            break;
+         }
+      }
+
+      prop->sig_searched = true;
+   }
+
+   if (prop->sig != NULL) {
+      const uint8_t byte = value;
+      sched_deposit(m, prop->sig, &byte, 0, 1, 0, false);
+   }
+}
+
+void model_psl_event(rt_model_t *m, bool cover)
+{
+   rt_wakeable_t *obj = get_active_wakeable();
+   if (obj == NULL || obj->kind != W_PROPERTY)
+      return;
+
+   rt_prop_t *prop = container_of(obj, rt_prop_t, wakeable);
+
+   TRACE("PSL %s event in property %pi", cover ? "cover" : "assert fail",
+         prop->name);
+
+   if (cover)
+      prop->covered = true;
+   else
+      prop->failed = true;
+
+   psl_set_signal(m, prop, true);
+}
+
+static void psl_scan_scope(rt_model_t *m, rt_scope_t *scope,
+                           bool *all_covered, bool *any_failed, bool clear)
+{
+   for (int i = 0; i < scope->properties.count; i++) {
+      rt_prop_t *prop = scope->properties.items[i];
+
+      if (clear) {
+         prop->covered = prop->failed = false;
+         psl_set_signal(m, prop, false);
+      }
+      else if (psl_kind(prop->where) == P_COVER)
+         *all_covered &= prop->covered;
+      else
+         *any_failed |= prop->failed;
+   }
+
+   for (int i = 0; i < scope->children.count; i++)
+      psl_scan_scope(m, scope->children.items[i], all_covered, any_failed,
+                     clear);
+}
+
+bool model_psl_status(rt_model_t *m, bool cover)
+{
+   bool all_covered = true, any_failed = false;
+   psl_scan_scope(m, m->root, &all_covered, &any_failed, false);
+   return cover ? all_covered : any_failed;
+}
+
+void model_psl_clear(rt_model_t *m)
+{
+   psl_scan_scope(m, m->root, NULL, NULL, true);
+}
+
+void model_psl_set_cover_assert(rt_model_t *m, bool enable)
+{
+   m->psl_cover_assert = enable;
+}
+
+bool model_psl_get_cover_assert(rt_model_t *m)
+{
+   return m->psl_cover_assert;
 }
 
 void x_alias_signal(sig_shared_t *ss, uint32_t offset, tree_t where)

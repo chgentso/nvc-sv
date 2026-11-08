@@ -29,4 +29,11 @@ package sim_pkg is
 
     attribute foreign of current_delta_cycle : function is "INTERNAL _nvc_current_delta";
 
+    -- Called when a PSL cover directive completes or an assertion fails
+    impure function psl_cover_hit return boolean;
+    impure function psl_assert_fail return boolean;
+
+    attribute foreign of psl_cover_hit : function is "INTERNAL _nvc_psl_cover_hit";
+    attribute foreign of psl_assert_fail : function is "INTERNAL _nvc_psl_assert_fail";
+
 end package;

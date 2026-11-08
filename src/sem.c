@@ -2688,6 +2688,11 @@ static bool sem_check_signal_target(tree_t target, nametab_t *tab, bool guarded)
          sem_error(target, "target of signal assignment must be a signal "
                    "name or aggregate");
 
+      if (tree_kind(decl) == T_SIGNAL_DECL
+          && (tree_flags(decl) & TREE_F_PREDEFINED))
+         sem_error(target, "cannot assign to the implicit signal of a PSL "
+                   "directive");
+
       if (is_guarded_signal(decl) && !guarded) {
          diag_t *d = diag_new(DIAG_ERROR, tree_loc(target));
          diag_printf(d, "guarded signal %s cannot be the target of an "
@@ -4406,6 +4411,9 @@ static bool sem_check_attr_ref(tree_t t, bool allow_range, nametab_t *tab)
       predef == ATTR_LOW || predef == ATTR_HIGH || predef == ATTR_LEFT
       || predef == ATTR_RIGHT || predef == ATTR_ASCENDING
       || predef == ATTR_VALUE;
+
+   if (predef == ATTR_SIGNAL)
+      return false;   // Error reported during name resolution
 
    if (!sem_check_attr_prefix(name, prefix_can_be_range, tab, &named_type))
       return false;

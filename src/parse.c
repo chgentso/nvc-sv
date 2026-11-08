@@ -3557,12 +3557,18 @@ static tree_t p_attribute_name(tree_t prefix)
       id = ident_new("RECORD");
       kind = ATTR_RECORD;
       break;
+   case tSIGNAL:
+      consume(tSIGNAL);
+      require_std(STD_19, "signal attribute");
+      id = ident_new("SIGNAL");
+      kind = ATTR_SIGNAL;
+      break;
    case tID:
       id = p_identifier();
       kind = parse_predefined_attr(id);
       break;
    default:
-      one_of(tRANGE, tREVRANGE, tID, tSUBTYPE, tRECORD);
+      one_of(tRANGE, tREVRANGE, tID, tSUBTYPE, tRECORD, tSIGNAL);
       kind = ATTR_USER;
       id = error_marker();
    }
@@ -13178,6 +13184,24 @@ static psl_node_t p_psl_verification_directive(void)
    }
 }
 
+static void declare_psl_signal(tree_t directive)
+{
+   // Implicit signal for the SIGNAL attribute of a labelled directive
+
+   if (standard() < STD_19)
+      return;
+
+   tree_t s = tree_new(T_SIGNAL_DECL);
+   tree_set_ident(s, ident_prefix(tree_ident(directive), ident_new("SIGNAL"),
+                                  '$'));
+   tree_set_loc(s, tree_loc(directive));
+   tree_set_type(s, std_type(NULL, STD_BOOLEAN));
+   tree_set_flag(s, TREE_F_PREDEFINED);
+
+   tree_add_decl(find_enclosing(nametab, S_DECLARATIVE_REGION), s);
+   insert_name(nametab, s, NULL);
+}
+
 static tree_t p_psl_directive(ident_t label)
 {
    // [ Label : ] Verification_Directive
@@ -13207,7 +13231,10 @@ static tree_t p_psl_directive(ident_t label)
    tree_set_loc(t, CURRENT_LOC);
    ensure_labelled(t, label);
 
-   if (label) insert_name(nametab, t, NULL);
+   if (label) {
+      insert_name(nametab, t, NULL);
+      declare_psl_signal(t);
+   }
 
    return t;
 }
@@ -13443,7 +13470,12 @@ static tree_t p_psl_or_concurrent_assert(ident_t label)
    tree_set_loc(conc, CURRENT_LOC);
    ensure_labelled(conc, label);
 
-   if (label) insert_name(nametab, conc, NULL);
+   if (label) {
+      insert_name(nametab, conc, NULL);
+      if (tree_kind(conc) == T_PSL_DIRECT)
+         declare_psl_signal(conc);
+   }
+
    sem_check(conc, nametab);
    return conc;
 }

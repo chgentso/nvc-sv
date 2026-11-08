@@ -51,6 +51,12 @@ void model_stop(rt_model_t *m);
 void model_interrupt(rt_model_t *m);
 int model_exit_status(rt_model_t *m);
 
+void model_psl_event(rt_model_t *m, bool cover);
+bool model_psl_status(rt_model_t *m, bool cover);
+void model_psl_clear(rt_model_t *m);
+void model_psl_set_cover_assert(rt_model_t *m, bool enable);
+bool model_psl_get_cover_assert(rt_model_t *m);
+
 rt_watch_t *watch_new(rt_model_t *m, sig_event_fn_t fn, void *user,
                       watch_kind_t kind, unsigned slots);
 void watch_free(rt_model_t *m, rt_watch_t *w);

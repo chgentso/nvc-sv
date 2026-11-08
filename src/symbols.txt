@@ -45,6 +45,11 @@
   _std_env_clear_vhdl_assert;
   _std_env_set_vhdl_assert_enable;
   _std_env_get_vhdl_assert_enable;
+  _std_env_psl_is_covered;
+  _std_env_psl_assert_failed;
+  _std_env_psl_clear_state;
+  _std_env_set_psl_cover_assert;
+  _std_env_get_psl_cover_assert;
 
   # Exported from src/rt/assert.c
   _std_env_get_assert_format;
@@ -59,6 +64,8 @@
 
   # Exported from src/rt/simpkg.c
   _nvc_current_delta;
+  _nvc_psl_cover_hit;
+  _nvc_psl_assert_fail;
   _nvc_ieee_warnings;
 
   # Exported from src/rt/random.c

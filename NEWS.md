@@ -46,6 +46,10 @@
   supported in VHDL-2019 (LCS-2016-014).
 - Access types may designate composites of protected types in VHDL-2019
   (LCS-2016-014a).
+- Added the `'SIGNAL` attribute and the `'EVENT` attribute for labelled
+  PSL directives, and implemented the `PslIsCovered`, `PslAssertFailed`,
+  `ClearPslState`, `SetPslCoverAssert` and `GetPslCoverAssert`
+  subprograms in `STD.ENV` for VHDL-2019 (LCS-2016-043).
 - Several other minor bugs were resolved (#1663, #1672, #1668, #1670,
   #1678, #1686, #1687, #1692, #1695, #1700, #1707).
 

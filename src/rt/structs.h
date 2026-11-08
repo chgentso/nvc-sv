@@ -87,6 +87,11 @@ typedef struct _rt_prop {
    bit_mask_t     newstate;
    mptr_t         privdata;
    bool           strong;
+   bool           covered;
+   bool           failed;
+   bool           sig_searched;
+   ident_t        label;
+   rt_signal_t   *sig;
 } rt_prop_t;
 
 typedef union {
