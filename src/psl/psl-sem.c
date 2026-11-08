@@ -129,6 +129,19 @@ static void psl_check_cover(psl_node_t p, nametab_t *tab)
    psl_check_top_level(psl_value(p), tab);
 }
 
+static bool psl_is_sequence(psl_node_t p)
+{
+   // A Boolean or a Sequence
+   switch (psl_kind(p)) {
+   case P_HDL_EXPR:
+   case P_SERE:
+   case P_REPEAT:
+      return true;
+   default:
+      return false;
+   }
+}
+
 static void psl_check_always(psl_node_t p, nametab_t *tab)
 {
    psl_check(psl_value(p), tab);
@@ -139,8 +152,7 @@ static void psl_check_never(psl_node_t p, nametab_t *tab)
    psl_node_t value = psl_value(p);
    psl_check(value, tab);
 
-   const psl_kind_t kind = psl_kind(value);
-   if (kind != P_HDL_EXPR && kind != P_SERE)
+   if (!psl_is_sequence(value))
       error_at(psl_loc(p), "property is not in the simple subset as the "
                "operand of never is not a Boolean or Sequence");
 }
@@ -150,8 +162,7 @@ static void psl_check_eventually(psl_node_t p, nametab_t *tab)
    psl_node_t value = psl_value(p);
    psl_check(value, tab);
 
-   const psl_kind_t kind = psl_kind(value);
-   if (kind != P_HDL_EXPR && kind != P_SERE)
+   if (!psl_is_sequence(value))
       error_at(psl_loc(p), "property is not in the simple subset as the "
                "operand of eventually! is not a Boolean or Sequence");
 }
@@ -437,8 +448,7 @@ static void psl_check_suffix_impl(psl_node_t p, nametab_t *tab)
    psl_node_t left = psl_operand(p, 0);
    psl_check(left, tab);
 
-   const psl_kind_t lkind = psl_kind(left);
-   if (lkind != P_HDL_EXPR && lkind != P_SERE)
+   if (!psl_is_sequence(left))
       error_at(psl_loc(left), "left hand side of suffix implication operator "
                "must be a Sequence");
 
