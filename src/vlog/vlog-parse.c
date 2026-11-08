@@ -29,6 +29,7 @@
 #include "vlog/vlog-node.h"
 #include "vlog/vlog-phase.h"
 #include "vlog/vlog-symtab.h"
+#include "vlog/vlog-cov.h"
 #include "vlog/vlog-util.h"
 
 #include <ctype.h>
@@ -4736,6 +4737,10 @@ static vlog_node_t p_tf_call(vlog_kind_t kind)
       consume(tRPAREN);
    }
 
+   if (scope != NULL && vlog_params(v) == 2
+       && vlog_ident(v) == ident_new("get_coverage"))
+      vlog_set_ident(v, ident_new("get_coverage_n"));
+
    vlog_set_loc(v, CURRENT_LOC);
 
    if (scope != NULL)
@@ -4778,6 +4783,11 @@ static void p_method_call_body(vlog_node_t v)
       p_list_of_arguments(v);
       consume(tRPAREN);
    }
+
+   if (vlog_params(v) == 2 && vlog_ident(v) == ident_new("get_inst_coverage"))
+      vlog_set_ident(v, ident_new("get_inst_coverage_n"));
+   else if (vlog_params(v) == 2 && vlog_ident(v) == ident_new("get_coverage"))
+      vlog_set_ident(v, ident_new("get_coverage_n"));
 }
 
 static vlog_node_t p_method_call(void)
@@ -8627,6 +8637,15 @@ static vlog_node_t p_class_new(vlog_node_t dt)
 
    vlog_node_t v = vlog_new(V_CLASS_NEW);
    vlog_set_type(v, dt);
+
+   if (dt != NULL && vlog_kind(dt) == V_CLASS_DECL
+       && strncmp(istr(vlog_ident(dt)), "__cvp_", 6) == 0) {
+      // The covergroup of a class evaluates its expressions in the object
+      vlog_node_t this = vlog_new(V_THIS);
+      vlog_set_type(this, vlog_symtab_class(symtab));
+      vlog_set_loc(this, &state.last_loc);
+      vlog_add_param(v, this);
+   }
 
    if (optional(tLPAREN)) {
       p_list_of_arguments(v);
@@ -13675,6 +13694,8 @@ static v_port_kind_t p_port_direction(void)
    }
 }
 
+static bool tf_port_const;
+
 static v_port_kind_t p_tf_port_direction(void)
 {
    // port_direction | const ref
@@ -13721,7 +13742,9 @@ static vlog_node_t p_tf_port_item(v_port_kind_t *kind, vlog_node_t *dt)
       *dt = p_implicit_data_type();
 
    vlog_set_subkind(v, *kind);
-   vlog_set_type(v, *dt);
+
+   if (*kind == V_PORT_REF && tf_port_const)
+      vlog_set_flags(v, vlog_flags(v) | VLOG_F_CONST);
 
    if (peek() == tID) {
       vlog_set_ident(v, p_identifier());
@@ -14668,10 +14691,80 @@ static bool at_covergroup(void)
    return peek() == tID && peek_ident_nth(1) == ident_new("covergroup");
 }
 
-   BEGIN("class method");
+////////////////////////////////////////////////////////////////////////////////
+// Functional coverage
 
-   if (scan(tVIRTUAL))
-      p_method_qualifier();
+#define COV_PUSH(arr, n, val) do {                                      \
+      (arr) = xrealloc_array((arr), (n) + 1, sizeof(*(arr)));           \
+      (arr)[(n)++] = (val);                                             \
+   } while (0)
+
+typedef struct {
+   cov_group_t group;
+   bool        failed;
+   ident_t    *enum_args;
+   int         nenum_args;
+   ident_t    *class_args;
+   vlog_node_t *class_types;
+   int         nclass_args;
+} cov_parse_t;
+
+static token_t replay_lex(void);
+static void p_class_item(vlog_node_t parent);
+static void p_package_item(vlog_node_t parent);
+extern int yylex(void);
+
+static bool cov_at_id(const char *name)
+{
+   return peek() == tID && peek_ident_nth(1) == ident_new(name);
+}
+
+static tokenq_t cov_take(void)
+{
+   (void)peek();
+   tokenq_t t = state.tokenq[state.tokenq_tail];
+   drop_token(&state);
+   return t;
+}
+
+static cov_toks_t cov_capture(const token_t *stops, bool rep_stop)
+{
+   // Take tokens up to one of the stop tokens outside any brackets
+
+   tokenq_t *t = NULL;
+   int n = 0, depth = 0;
+   for (;;) {
+      const token_t tok = peek();
+      if (tok == tEOF)
+         break;
+
+      if (depth == 0 && !(n == 0 && tok == tLBRACE)) {
+         bool stop = false;
+         for (const token_t *s = stops; *s != tEOF; s++)
+            stop |= (*s == tok);
+
+         if (stop)
+            break;
+
+         if (rep_stop && n > 0 && (tok == tTIMESRPT || tok == tGOTORPT
+                                   || tok == tEQRPT))
+            break;
+      }
+
+      if (tok == tLPAREN || tok == tLSQUARE || tok == tLBRACE)
+         depth++;
+      else if (tok == tRPAREN || tok == tRSQUARE || tok == tRBRACE) {
+         if (depth == 0)
+            break;
+         depth--;
+      }
+
+      COV_PUSH(t, n, cov_take());
+   }
+
+   return (cov_toks_t){ t, n };
+}
+
 static bool cov_sorry_at(cov_parse_t *cp, const loc_t *loc, const char *what)
 {
    if (!cp->failed)
@@ -14686,13 +14779,215 @@ static bool cov_sorry(cov_parse_t *cp, const char *what)
    return cov_sorry_at(cp, &(state.tokenq[state.tokenq_tail].loc), what);
 }
 
+static bool cov_expect_nonempty(cov_parse_t *cp, cov_toks_t t)
+{
+   if (t.n > 0)
+      return true;
+
+   if (!cp->failed)
+      parse_error(&(state.tokenq[state.tokenq_tail].loc), "expected an "
+                  "expression in the covergroup");
+
+   cp->failed = true;
+   return false;
+}
+
+static bool cov_is_dollar(cov_toks_t t)
+{
+   return t.n == 1 && t.t[0].token == tDOLLAR;
+}
+
+static void p_cov_range_list(cov_parse_t *cp, cov_item_t **items, int *n)
+{
+   // open_range_list without the braces
+
+   static const token_t stops_value[] = { tCOMMA, tRBRACE, tEOF };
+   static const token_t stops_lo[] = { tCOLON, tRSQUARE, tEOF };
+   static const token_t stops_hi[] = { tRSQUARE, tEOF };
+
+   do {
+      cov_item_t it = {};
+
+      if (peek() == tLSQUARE) {
+         consume(tLSQUARE);
+         it.range = true;
+         it.lo = cov_capture(stops_lo, false);
+         if (optional(tCOLON))
+            it.hi = cov_capture(stops_hi, false);
+         else
+            it.hi = it.lo;
+         consume(tRSQUARE);
+
+         it.hi_dollar = cov_is_dollar(it.hi);
+      }
+      else
+         it.lo = cov_capture(stops_value, false);
+
+      it.lo_dollar = cov_is_dollar(it.lo);
+
+      if (!cov_expect_nonempty(cp, it.lo))
+         return;
+
+      COV_PUSH(*items, *n, it);
+   } while (optional(tCOMMA));
+}
+
+static void p_cov_iff(cov_toks_t *iff, bool *has_iff)
+{
+   static const token_t stops[] = { tRPAREN, tEOF };
+
+   consume(tIFFKW);
+   consume(tLPAREN);
+   *iff = cov_capture(stops, false);
+   consume(tRPAREN);
+   *has_iff = true;
+}
+
+static bool p_cov_trans_list(cov_parse_t *cp, cov_bin_t *b)
+{
+   // trans_list ::= ( trans_set ) { , ( trans_set ) }
+
+   static const token_t stops_step[] = { tCOMMA, tASSOC, tRPAREN, tEOF };
+   static const token_t stops_lo[] = { tCOLON, tRSQUARE, tEOF };
+   static const token_t stops_hi[] = { tRSQUARE, tEOF };
+
+   do {
+      consume(tLPAREN);
+
+      cov_seq_t q = {};
+      do {
+         cov_step_t st = {};
+
+         do {
+            cov_item_t it = {};
+            if (peek() == tLSQUARE) {
+               consume(tLSQUARE);
+               it.range = true;
+               it.lo = cov_capture(stops_lo, false);
+               if (optional(tCOLON))
+                  it.hi = cov_capture(stops_hi, false);
+               else
+                  it.hi = it.lo;
+               consume(tRSQUARE);
+               it.hi_dollar = cov_is_dollar(it.hi);
+            }
+            else
+               it.lo = cov_capture(stops_step, true);
+
+            it.lo_dollar = cov_is_dollar(it.lo);
+
+            if (!cov_expect_nonempty(cp, it.lo))
+               return false;
+
+            COV_PUSH(st.items, st.nitems, it);
+         } while (optional(tCOMMA));
+
+         if (peek() == tTIMESRPT || peek() == tGOTORPT
+             || peek() == tEQRPT) {
+            st.rkind = peek() == tGOTORPT ? 1 : peek() == tEQRPT ? 2 : 0;
+            consume(peek());
+            st.rep = true;
+            st.rmin = cov_capture(stops_lo, false);
+            if (optional(tCOLON))
+               st.rmax = cov_capture(stops_hi, false);
+            else
+               st.rmax = st.rmin;
+            consume(tRSQUARE);
+
+            if (!cov_expect_nonempty(cp, st.rmin))
+               return false;
+         }
+
+         COV_PUSH(q.steps, q.nsteps, st);
+      } while (optional(tASSOC));
+
+      consume(tRPAREN);
+
+      COV_PUSH(b->seqs, b->nseqs, q);
+   } while (optional(tCOMMA));
+
+   return true;
+}
+
+static bool p_cov_bins(cov_parse_t *cp, cov_cp_t *c)
+{
+   // [ wildcard ] bins_keyword bin_identifier [ [ [ expression ] ] ]
+   //    = ... [ iff ( expression ) ] ;
+
+   cov_bin_t b = {};
+
+   if (cov_at_id("wildcard")) {
+      consume(tID);
+      b.wildcard = true;
+   }
+
+   const ident_t kw = p_identifier();
+   if (kw == ident_new("bins"))
+      b.kind = COV_REGULAR;
+   else if (kw == ident_new("ignore_bins"))
+      b.kind = COV_IGNORE;
+   else if (kw == ident_new("illegal_bins"))
+      b.kind = COV_ILLEGAL;
+   else {
+      parse_error(&state.last_loc, "unexpected %s in a coverpoint", istr(kw));
+      cp->failed = true;
+      return false;
+   }
+
+   b.name = p_identifier();
+
+   if (optional(tLSQUARE)) {
+      static const token_t stops[] = { tRSQUARE, tEOF };
+      if (peek() == tRSQUARE)
+         b.array = 1;
+      else {
+         b.array = 2;
+         b.size = cov_capture(stops, false);
+      }
+      consume(tRSQUARE);
+   }
+
+   consume(tEQ);
 
    switch (peek()) {
-   case tFUNCTION:
-      if (peek_nth(2) == tNEW)
-         vlog_add_decl(class, p_class_constructor_declaration());
-      else
-         vlog_add_decl(class, p_function_declaration());
+   case tLBRACE:
+      consume(tLBRACE);
+      p_cov_range_list(cp, &b.items, &b.nitems);
+      consume(tRBRACE);
+      if (peek() == tWITH) {
+         static const token_t stops[] = { tRPAREN, tEOF };
+         consume(tWITH);
+         consume(tLPAREN);
+         b.has_with = true;
+         b.with_expr = cov_capture(stops, false);
+         consume(tRPAREN);
+         if (!cov_expect_nonempty(cp, b.with_expr))
+            return false;
+         if (b.wildcard)
+            return cov_sorry(cp, "a with clause on a wildcard bin");
+      }
+      break;
+   case tLPAREN:
+      b.trans = true;
+      if (!p_cov_trans_list(cp, &b))
+         return false;
+      if (b.array == 2)
+         return cov_sorry(cp, "a sized array of transition bins");
+      if (b.array == 1) {
+         for (int i = 0; i < b.nseqs; i++) {
+            for (int j = 0; j < b.seqs[i].nsteps; j++) {
+               if (b.seqs[i].steps[j].rkind != 0)
+                  return cov_sorry(cp, "an array of transition bins with a "
+                                   "goto or non-consecutive repetition");
+            }
+         }
+      }
+      break;
+   case tDEFAULT:
+      consume(tDEFAULT);
+      if (peek() == tSEQUENCE)
+         consume(tSEQUENCE);
+      b.kind = COV_DEFAULT;
       break;
    default:
       if (peek() == tID && peek_ident_nth(1) == c->label
@@ -14730,6 +15025,591 @@ static bool cov_sorry(cov_parse_t *cp, const char *what)
                              "expression");
       }
    }
+
+   if (peek() == tIFFKW)
+      p_cov_iff(&b.iff, &b.has_iff);
+
+   consume(tSEMI);
+
+   COV_PUSH(c->bins, c->nbins, b);
+   return true;
+}
+
+static bool p_cov_option(cov_option_t **opts, int *n)
+{
+   // option . member_identifier = expression ;
+
+   static const token_t stops[] = { tSEMI, tEOF };
+
+   cov_option_t o = {};
+   o.type_option = cov_at_id("type_option");
+   consume(tID);
+   consume(tDOT);
+   o.name = p_identifier();
+   consume(tEQ);
+   o.value = cov_capture(stops, false);
+   consume(tSEMI);
+
+   COV_PUSH(*opts, *n, o);
+   return o.value.n > 0;
+}
+
+static bool cov_is_enum_type(vlog_node_t type)
+{
+   return type != NULL && vlog_kind(type) == V_ENUM_DECL;
+}
+
+static vlog_node_t cov_member_type(vlog_node_t type, ident_t name)
+{
+   for (; type != NULL; ) {
+      switch (vlog_kind(type)) {
+      case V_CLASS_DECL:
+      case V_STRUCT_DECL:
+      case V_UNION_DECL:
+         break;
+      default:
+         return NULL;
+      }
+
+      const int ndecls = vlog_decls(type);
+      for (int i = 0; i < ndecls; i++) {
+         vlog_node_t d = vlog_decl(type, i);
+         if (vlog_kind(d) == V_VAR_DECL && vlog_ident(d) == name)
+            return vlog_get_type(d);
+      }
+
+      if (vlog_kind(type) == V_CLASS_DECL && vlog_has_ref(type))
+         type = vlog_ref(type);
+      else
+         return NULL;
+   }
+
+   return NULL;
+}
+
+static bool cov_expr_is_enum(const cov_parse_t *cp, cov_toks_t e,
+                             ident_t *cast)
+{
+   // Only names, members of classes and structures and casts are recognised
+
+   if (e.n < 1 || e.t[0].token != tID)
+      return false;
+
+   const ident_t first = e.t[0].lval.ident;
+
+   vlog_node_t type = NULL;
+   if (e.n == 1) {
+      for (int i = 0; i < cp->nenum_args; i++) {
+         if (cp->enum_args[i] == first)
+            return true;
+      }
+   }
+
+   vlog_node_t decl = vlog_symtab_query(symtab, first);
+   if (decl == NULL) {
+      for (int i = 0; i < cp->nclass_args; i++) {
+         if (cp->class_args[i] == first)
+            type = cp->class_types[i];
+      }
+      if (type == NULL)
+         return false;
+   }
+   else switch (vlog_kind(decl)) {
+   case V_VAR_DECL:
+   case V_NET_DECL:
+   case V_PORT_DECL:
+   case V_TF_PORT_DECL:
+   case V_LOCAL_DECL:
+      type = vlog_get_type(decl);
+      break;
+   case V_TYPE_DECL:
+   case V_ENUM_DECL:
+      // A cast to an enumeration type
+      if (e.n > 3 && e.t[1].token == tTICK && e.t[2].token == tLPAREN
+          && e.t[e.n - 1].token == tRPAREN
+          && cov_is_enum_type(vlog_get_type(decl))) {
+         *cast = first;
+         return true;
+      }
+      return false;
+   default:
+      return false;
+   }
+
+   for (int i = 1; i + 1 < e.n && type != NULL; i += 2) {
+      if (e.t[i].token != tDOT || e.t[i + 1].token != tID)
+         return false;
+      type = cov_member_type(type, e.t[i + 1].lval.ident);
+   }
+
+   return cov_is_enum_type(type);
+}
+
+static bool p_cov_coverpoint(cov_parse_t *cp, ident_t label)
+{
+   // [ [ data_type_or_implicit ] cover_point_identifier : ] coverpoint
+   //    expression [ iff ( expression ) ] bins_or_empty
+
+   static const token_t stops_expr[] = { tIFFKW, tLBRACE, tSEMI, tEOF };
+
+   consume(tID);   // coverpoint
+
+   cov_cp_t c = {};
+   c.expr = cov_capture(stops_expr, false);
+   if (!cov_expect_nonempty(cp, c.expr))
+      return false;
+
+   if (peek() == tIFFKW)
+      p_cov_iff(&c.iff, &c.has_iff);
+
+   if (label != NULL)
+      c.label = label;
+   else if (c.expr.n == 1 && c.expr.t[0].token == tID)
+      c.label = c.expr.t[0].lval.ident;
+   else {
+      c.label = ident_sprintf("cp_%d", cp->group.ncps + 1);
+      c.implicit = true;
+   }
+
+   c.implicit |= label == NULL;
+
+   if (optional(tLBRACE)) {
+      while (not_at_token(tRBRACE, tEOF)) {
+         if (cov_at_id("option") || cov_at_id("type_option")) {
+            if (!p_cov_option(&c.opts, &c.nopts))
+               return false;
+         }
+         else if (peek() == tSEMI)
+            consume(tSEMI);
+         else if (!p_cov_bins(cp, &c))
+            return false;
+      }
+      consume(tRBRACE);
+      optional(tSEMI);
+   }
+   else
+      consume(tSEMI);
+
+   c.is_enum = cov_expr_is_enum(cp, c.expr, &c.enum_cast);
+
+   COV_PUSH(cp->group.cps, cp->group.ncps, c);
+   return true;
+}
+
+static cov_sel_t *cov_sel_new(cov_sel_kind_t kind)
+{
+   cov_sel_t *s = xcalloc(sizeof(cov_sel_t));
+   s->kind = kind;
+   return s;
+}
+
+static cov_sel_t *p_cov_select_or(cov_parse_t *cp);
+
+static cov_sel_t *p_cov_select_with(cov_parse_t *cp, cov_sel_t *s)
+{
+   static const token_t stops[] = { tRPAREN, tEOF };
+
+   while (peek() == tWITH) {
+      consume(tWITH);
+      consume(tLPAREN);
+
+      cov_sel_t *w = cov_sel_new(COV_SEL_WITH);
+      w->left = s;
+      w->with = cov_capture(stops, false);
+      consume(tRPAREN);
+
+      if (!cov_expect_nonempty(cp, w->with))
+         return NULL;
+
+      s = w;
+   }
+
+   return s;
+}
+
+static int cov_find_cp(const cov_parse_t *cp, ident_t name);
+
+static cov_sel_t *p_cov_select_base(cov_parse_t *cp)
+{
+   if (optional(tBANG)) {
+      cov_sel_t *s = cov_sel_new(COV_SEL_NOT);
+      s->left = p_cov_select_base(cp);
+      return s->left == NULL ? NULL : s;
+   }
+   else if (optional(tLPAREN)) {
+      cov_sel_t *s = p_cov_select_or(cp);
+      consume(tRPAREN);
+      return s;
+   }
+   else if (cov_at_id("binsof")) {
+      consume(tID);
+      consume(tLPAREN);
+
+      cov_sel_t *s = cov_sel_new(COV_SEL_BINSOF);
+      s->cp = p_identifier();
+
+      // The name of a coverpoint may be hierarchical so the longest prefix
+      // that names one is the coverpoint and any name after it is a bin
+      ident_t parts[16];
+      int nparts = 0;
+      while (peek() == tDOT && peek_nth(2) == tID && nparts < 16) {
+         consume(tDOT);
+         parts[nparts++] = p_identifier();
+      }
+
+      int used = nparts;
+      ident_t full = s->cp;
+      for (int i = 0; i < nparts; i++)
+         full = ident_sprintf("%s.%s", istr(full), istr(parts[i]));
+
+      while (used > 0 && cov_find_cp(cp, full) < 0) {
+         used--;
+         full = s->cp;
+         for (int i = 0; i < used; i++)
+            full = ident_sprintf("%s.%s", istr(full), istr(parts[i]));
+      }
+
+      s->cp = full;
+      if (used < nparts) {
+         s->bin = parts[used];
+         s->has_bin = true;
+      }
+
+      if (peek() == tLSQUARE) {
+         cov_sorry(cp, "a bin index in binsof");
+         return NULL;
+      }
+
+      consume(tRPAREN);
+
+      if (optional(tINTERSECT)) {
+         consume(tLBRACE);
+         s->has_isect = true;
+         p_cov_range_list(cp, &s->isect, &s->nisect);
+         consume(tRBRACE);
+      }
+
+      return s;
+   }
+   else {
+      cov_sorry(cp, "this select expression of a cross bin");
+      return NULL;
+   }
+}
+
+static cov_sel_t *p_cov_select_primary(cov_parse_t *cp)
+{
+   cov_sel_t *s = p_cov_select_base(cp);
+   return s == NULL ? NULL : p_cov_select_with(cp, s);
+}
+
+static cov_sel_t *p_cov_select_and(cov_parse_t *cp)
+{
+   cov_sel_t *s = p_cov_select_primary(cp);
+   while (s != NULL && optional(tDBLAMP)) {
+      cov_sel_t *a = cov_sel_new(COV_SEL_AND);
+      a->left = s;
+      a->right = p_cov_select_primary(cp);
+      s = a->right == NULL ? NULL : a;
+   }
+
+   return s;
+}
+
+static cov_sel_t *p_cov_select_or(cov_parse_t *cp)
+{
+   cov_sel_t *s = p_cov_select_and(cp);
+   while (s != NULL && optional(tLOGOR)) {
+      cov_sel_t *o = cov_sel_new(COV_SEL_OR);
+      o->left = s;
+      o->right = p_cov_select_and(cp);
+      s = o->right == NULL ? NULL : o;
+   }
+
+   return s;
+}
+
+static int cov_find_cp(const cov_parse_t *cp, ident_t name)
+{
+   for (int i = 0; i < cp->group.ncps; i++) {
+      if (cp->group.cps[i].label == name)
+         return i;
+   }
+
+   return -1;
+}
+
+static bool p_cov_cross(cov_parse_t *cp, ident_t label)
+{
+   // [ cross_identifier : ] cross list_of_cross_items [ iff ( expression ) ]
+   //    cross_body
+
+   consume(tID);   // cross
+
+   cov_cross_t x = {};
+   x.label = label ?: ident_sprintf("cross_%d", cp->group.ncrosses + 1);
+
+   do {
+      if (peek() != tID) {
+         parse_error(&(state.tokenq[state.tokenq_tail].loc), "expected the "
+                     "name of a coverpoint or variable in cross");
+         cp->failed = true;
+         return false;
+      }
+
+      const loc_t loc = state.tokenq[state.tokenq_tail].loc;
+
+      // A variable or a hierarchical name of one
+      tokenq_t *t = xmalloc_array(2 * 16, sizeof(tokenq_t));
+      int ntoks = 0;
+      ident_t name = p_identifier();
+
+      memset(&t[ntoks], 0, sizeof(tokenq_t));
+      t[ntoks].token = tID;
+      t[ntoks].lval.ident = name;
+      t[ntoks++].loc = loc;
+
+      while (peek() == tDOT && peek_nth(2) == tID && ntoks < 2 * 16 - 2) {
+         consume(tDOT);
+
+         memset(&t[ntoks], 0, sizeof(tokenq_t));
+         t[ntoks].token = tDOT;
+         t[ntoks++].loc = state.last_loc;
+
+         const ident_t part = p_identifier();
+         name = ident_sprintf("%s.%s", istr(name), istr(part));
+
+         memset(&t[ntoks], 0, sizeof(tokenq_t));
+         t[ntoks].token = tID;
+         t[ntoks].lval.ident = part;
+         t[ntoks++].loc = state.last_loc;
+      }
+
+      if (peek() == tLSQUARE)
+         return cov_sorry(cp, "an expression in a cross");
+
+      if (ntoks > 1) {
+         // A cross item is a coverpoint or a variable identifier
+         const loc_t *end = &(state.last_loc);
+         const loc_t span = get_loc(loc.first_line, loc.first_column,
+                                    end->first_line + end->line_delta,
+                                    end->first_column + end->column_delta,
+                                    loc.file_ref);
+         diag_t *d = pedantic_diag(&span);
+         if (d != NULL) {
+            diag_printf(d, "cross items must be coverpoints or variables; "
+                        "declare a coverpoint");
+            diag_hint(d, &span, "%s is a hierarchical name", istr(name));
+            diag_emit(d);
+         }
+      }
+
+      if (cov_find_cp(cp, name) < 0) {
+         // The implicit coverpoint of a variable
+         cov_cp_t c = {};
+         c.label = name;
+         c.implicit = true;
+         c.expr = (cov_toks_t){ t, ntoks };
+         c.is_enum = cov_expr_is_enum(cp, c.expr, &c.enum_cast);
+         COV_PUSH(cp->group.cps, cp->group.ncps, c);
+      }
+      else
+         free(t);
+
+      COV_PUSH(x.cps, x.ncps, name);
+   } while (optional(tCOMMA));
+
+   if (peek() == tIFFKW)
+      p_cov_iff(&x.iff, &x.has_iff);
+
+   if (optional(tLBRACE)) {
+      while (not_at_token(tRBRACE, tEOF)) {
+         if (cov_at_id("option") || cov_at_id("type_option")) {
+            if (!p_cov_option(&x.opts, &x.nopts))
+               return false;
+         }
+         else if (peek() == tSEMI)
+            consume(tSEMI);
+         else {
+            cov_xbin_t b = {};
+            const ident_t kw = p_identifier();
+            if (kw == ident_new("bins"))
+               b.kind = COV_REGULAR;
+            else if (kw == ident_new("ignore_bins"))
+               b.kind = COV_IGNORE;
+            else if (kw == ident_new("illegal_bins"))
+               b.kind = COV_ILLEGAL;
+            else {
+               parse_error(&state.last_loc, "unexpected %s in a cross",
+                           istr(kw));
+               cp->failed = true;
+               return false;
+            }
+
+            b.name = p_identifier();
+
+            if (peek() == tLSQUARE)
+               return cov_sorry(cp, "an array of cross bins");
+
+            consume(tEQ);
+
+            b.sel = p_cov_select_or(cp);
+            if (b.sel == NULL)
+               return false;
+
+            if (peek() == tIFFKW) {
+               if (b.kind != COV_REGULAR)
+                  return cov_sorry(cp, "an iff clause on an ignore or "
+                                   "illegal cross bin");
+               p_cov_iff(&b.iff, &b.has_iff);
+            }
+
+            consume(tSEMI);
+
+            COV_PUSH(x.bins, x.nbins, b);
+         }
+      }
+      consume(tRBRACE);
+      optional(tSEMI);
+   }
+   else
+      consume(tSEMI);
+
+   COV_PUSH(cp->group.crosses, cp->group.ncrosses, x);
+   return true;
+}
+
+static void cov_arg_names(cov_parse_t *cp, cov_toks_t args, ident_t **names,
+                          int *n, cov_toks_t **decls, int *ndecls,
+                          bool **refs, int *nrefs)
+{
+   // The name of each argument is the last identifier before any default
+   // value and its type is the identifier before that
+
+   int depth = 0, seg = 0;
+   for (int i = 0; i <= args.n; i++) {
+      token_t tok = tCOMMA;
+      if (i < args.n) {
+         tok = args.t[i].token;
+         if (tok == tLPAREN || tok == tLSQUARE || tok == tLBRACE)
+            depth++;
+         else if (tok == tRPAREN || tok == tRSQUARE || tok == tRBRACE)
+            depth--;
+      }
+
+      if (tok != tCOMMA || depth != 0)
+         continue;
+
+      int last = -1, prev = -1, d = 0;
+      for (int j = seg; j < i; j++) {
+         const token_t t = args.t[j].token;
+         if (t == tLPAREN || t == tLSQUARE || t == tLBRACE)
+            d++;
+         else if (t == tRPAREN || t == tRSQUARE || t == tRBRACE)
+            d--;
+         else if (d == 0 && t == tEQ)
+            break;
+         else if (d == 0 && t == tID) {
+            prev = last;
+            last = j;
+         }
+      }
+
+      if (last >= 0) {
+         COV_PUSH(*names, *n, args.t[last].lval.ident);
+
+         if (decls != NULL) {
+            // A local of the same type stands in for the argument
+            int start = seg, end = seg;
+            for (int j = seg; j < i && args.t[j].token != tEQ; j++)
+               end = j + 1;
+            while (start < end
+                   && (args.t[start].token == tINPUT
+                       || args.t[start].token == tOUTPUT
+                       || args.t[start].token == tINOUT
+                       || args.t[start].token == tREF))
+               start++;
+
+            cov_toks_t decl = { args.t + start, end - start };
+            COV_PUSH(*decls, *ndecls, decl);
+
+            if (refs != NULL) {
+               // A reference is a variable which is not copied
+               bool is_ref = false;
+               for (int j = seg; j < start; j++)
+                  is_ref |= args.t[j].token == tREF;
+               COV_PUSH(*refs, *nrefs, is_ref);
+            }
+         }
+
+         if (prev >= 0) {
+            vlog_node_t td = vlog_symtab_query(symtab, args.t[prev].lval.ident);
+            if (td != NULL && vlog_kind(td) == V_TYPE_DECL
+                && cov_is_enum_type(vlog_get_type(td)))
+               COV_PUSH(cp->enum_args, cp->nenum_args,
+                        args.t[last].lval.ident);
+            else if (td != NULL) {
+               vlog_node_t ct = vlog_kind(td) == V_TYPE_DECL
+                  ? vlog_get_type(td) : td;
+               if (vlog_kind(ct) == V_CLASS_DECL) {
+                  cp->class_types = xrealloc_array(cp->class_types,
+                                                   cp->nclass_args + 1,
+                                                   sizeof(vlog_node_t));
+                  cp->class_types[cp->nclass_args] = ct;
+                  COV_PUSH(cp->class_args, cp->nclass_args,
+                           args.t[last].lval.ident);
+               }
+            }
+         }
+      }
+
+      seg = i + 1;
+   }
+}
+
+static bool cov_replaying;
+
+static void cov_replay(vlog_node_t parent, tokenq_t *toks, int ntoks)
+{
+   generic_class_t tokens = {
+      .ntokens = ntoks,
+      .tokens  = toks,
+   };
+
+   parse_state_t saved = state;
+   generic_class_t *saved_class = replay_class;
+   const int saved_pos = replay_pos;
+
+   replay_class = &tokens;
+   replay_pos = 0;
+
+   state.lex_fn = replay_lex;
+   state.tokenq_head = state.tokenq_tail = 0;
+   state.start_loc = LOC_INVALID;
+
+   const bool saved_replaying = cov_replaying;
+   cov_replaying = true;
+
+   while (peek() != tEOF) {
+      switch (vlog_kind(parent)) {
+      case V_CLASS_DECL:
+         p_class_item(parent);
+         break;
+      case V_PACKAGE:
+         p_package_item(parent);
+         break;
+      default:
+         p_module_or_generate_item(parent);
+         break;
+      }
+   }
+
+   cov_replaying = saved_replaying;
+   state = saved;
+   replay_class = saved_class;
+   replay_pos = saved_pos;
+}
+
 typedef struct {
    vlog_node_t  decl;
    vlog_node_t  nettype;
@@ -14760,6 +15640,16 @@ static void register_user_net(vlog_node_t decl, vlog_node_t nettype)
       vlog_set_loc(assign, vlog_loc(decl));
       vlog_add_stmt(current_module, assign);
    }
+}
+
+static user_net_t *find_user_net(vlog_node_t decl)
+{
+   for (int i = 0; i < user_nets.count; i++) {
+      if (user_nets.items[i].decl == decl)
+         return &(user_nets.items[i]);
+   }
+
+   return NULL;
 }
 
 static void check_user_net_procedural(vlog_node_t lhs)
@@ -14869,6 +15759,465 @@ static vlog_node_t user_net_driver(vlog_node_t target)
    return ref;
 }
 
+static void expand_user_nets(vlog_node_t mod)
+{
+   // The value of the net is the result of calling the resolution function
+   // whenever the value from a driver changes
+
+   LOCAL_TEXT_BUF tb = tb_new();
+   int nresolved = 0;
+
+   for (int i = 0; i < user_nets.count; i++) {
+      user_net_t *net = &(user_nets.items[i]);
+      if (net->ndrivers > 0 && vlog_has_ident2(net->nettype)) {
+         tb_printf(tb, "always_comb %s = %s('{", istr(vlog_ident(net->decl)),
+                   istr(vlog_ident2(net->nettype)));
+         for (int j = 0; j < net->ndrivers; j++)
+            tb_printf(tb, "%s%s", j > 0 ? ", " : "",
+                      istr(vlog_ident(net->drivers[j])));
+         tb_cat(tb, "});\n");
+         nresolved++;
+      }
+
+      free(net->drivers);
+   }
+
+   user_nets.count = 0;
+
+   if (nresolved == 0)
+      return;
+
+   tb_cat(tb, "\n__cvend\n");
+
+   const size_t len = tb_len(tb);
+   char *copy = xmalloc(len + 1);
+   memcpy(copy, tb_get(tb), len + 1);
+
+   tokenq_t *toks = NULL;
+   int ntoks = 0;
+
+   scan_text_begin(copy, len);
+
+   extern yylval_t yylval;
+   extern loc_t yylloc;
+
+   const loc_t *loc = vlog_loc(mod);
+   for (;;) {
+      const token_t tok = yylex();
+      if (tok == tEOF)
+         break;
+
+      if (tok == tID && strcmp(istr(yylval.ident), "__cvend") == 0)
+         break;
+
+      yylloc = *loc;
+      tokenq_t t = { tok, yylval, *loc };
+      COV_PUSH(toks, ntoks, t);
+   }
+
+   scan_text_end();
+
+   if (ntoks > 0) {
+      tokenq_t eof = toks[ntoks - 1];
+      eof.token = tEOF;
+      COV_PUSH(toks, ntoks, eof);
+      ntoks--;
+   }
+
+   cov_replay(mod, toks, ntoks);
+}
+
+static vlog_node_t bind_replay(cov_toks_t toks, bool bind)
+{
+   // Parse the captured tokens of a bind directive or a nested module
+
+   tokenq_t *copy = NULL;
+   int ncopy = 0;
+   for (int i = 0; i < toks.n; i++)
+      COV_PUSH(copy, ncopy, toks.t[i]);
+
+   if (ncopy == 0)
+      return NULL;
+
+   tokenq_t semi = copy[ncopy - 1];
+   if (bind) {
+      semi.token = tSEMI;
+      COV_PUSH(copy, ncopy, semi);
+   }
+
+   tokenq_t eof = semi;
+   eof.token = tEOF;
+   COV_PUSH(copy, ncopy, eof);
+   ncopy--;
+
+   generic_class_t tokens = {
+      .ntokens = ncopy,
+      .tokens  = copy,
+   };
+
+   parse_state_t saved = state;
+   generic_class_t *saved_class = replay_class;
+   const int saved_pos = replay_pos;
+
+   replay_class = &tokens;
+   replay_pos = 0;
+
+   state.lex_fn = replay_lex;
+   state.tokenq_head = state.tokenq_tail = 0;
+   state.start_loc = LOC_INVALID;
+
+   vlog_node_t v = p_description();
+
+   state = saved;
+   replay_class = saved_class;
+   replay_pos = saved_pos;
+   return v;
+}
+
+static void cov_expand(vlog_node_t parent, cov_group_t *g, const loc_t *loc)
+{
+   cov_text_t text = {
+      .text = tb_new(),
+   };
+
+   const char *err = cov_generate(g, &text);
+   if (err != NULL) {
+      error_at(loc, "sorry, %s", err);
+      g->ncps = g->ncrosses = 0;
+      text.nslots = 0;
+      tb_rewind(text.text);
+      err = cov_generate(g, &text);
+      assert(err == NULL);
+   }
+
+   tb_cat(text.text, "\n__cvend\n");
+
+   // Lex the generated text and substitute the expressions of the
+   // covergroup for the identifiers that stand for them
+
+   const size_t len = tb_len(text.text);
+   char *copy = xmalloc(len + 1);
+   memcpy(copy, tb_get(text.text), len + 1);
+
+   tokenq_t *toks = NULL;
+   int ntoks = 0;
+
+   scan_text_begin(copy, len);
+
+   extern yylval_t yylval;
+   extern loc_t yylloc;
+
+   const char *prefix = cov_slot_prefix();
+   const size_t plen = strlen(prefix);
+
+   for (;;) {
+      const token_t tok = yylex();
+      if (tok == tEOF)
+         break;
+
+      if (tok == tID && strcmp(istr(yylval.ident), "__cvend") == 0)
+         break;
+
+      if (tok == tID && strncmp(istr(yylval.ident), prefix, plen) == 0) {
+         const int slot = atoi(istr(yylval.ident) + plen);
+         const cov_toks_t span = text.slots[slot];
+         for (int i = 0; i < span.n; i++)
+            COV_PUSH(toks, ntoks, span.t[i]);
+         continue;
+      }
+
+      yylloc = *loc;
+      tokenq_t t = { tok, yylval, *loc };
+      COV_PUSH(toks, ntoks, t);
+   }
+
+   scan_text_end();
+
+   if (ntoks > 0) {
+      tokenq_t eof = toks[ntoks - 1];
+      eof.token = tEOF;
+      COV_PUSH(toks, ntoks, eof);
+      ntoks--;
+   }
+
+   cov_replay(parent, toks, ntoks);
+
+   tb_free(text.text);
+}
+
+static void p_covergroup_declaration(vlog_node_t parent)
+{
+   // covergroup covergroup_identifier [ ( [ tf_port_list ] ) ]
+   //    [ coverage_event ] ; { coverage_spec_or_option } endgroup
+   //    [ : covergroup_identifier ]
+
+   BEGIN("covergroup declaration");
+
+   consume(tID);
+
+   cov_parse_t *cp = xcalloc(sizeof(cov_parse_t));
+   cov_group_t *g = &(cp->group);
+
+   g->name = p_identifier();
+   const loc_t loc = state.last_loc;
+
+   if (vlog_kind(parent) == V_CLASS_DECL) {
+      // Inside the body of a specialisation the name of the class without
+      // the parameters refers to the specialisation
+      g->owner = ident_until(vlog_ident(parent), '@');
+   }
+
+   static const token_t stops_rparen[] = { tRPAREN, tEOF };
+
+   if (optional(tLPAREN)) {
+      g->ctor_args = cov_capture(stops_rparen, false);
+      consume(tRPAREN);
+      cov_arg_names(cp, g->ctor_args, &g->ctor_names, &g->nctor,
+                    &g->ctor_decls, &g->nctor_decls, &g->ctor_ref,
+                    &g->nctor_ref);
+
+      // The covergroup only reads a reference
+      const cov_toks_t args = g->ctor_args;
+      tokenq_t *conv = NULL;
+      int nconv = 0;
+      for (int i = 0; i < args.n; i++) {
+         if (args.t[i].token == tREF) {
+            tokenq_t tok = args.t[i];
+            tok.token = tCONST;
+            COV_PUSH(conv, nconv, tok);
+         }
+         COV_PUSH(conv, nconv, args.t[i]);
+      }
+      g->ctor_args = (cov_toks_t){ conv, nconv };
+   }
+
+   if (peek() == tWITH) {
+      consume(tWITH);
+      consume(tFUNCTION);
+      if (!cov_at_id("sample")) {
+         parse_error(&(state.tokenq[state.tokenq_tail].loc), "expected "
+                     "sample after with function");
+         cp->failed = true;
+      }
+      else {
+         consume(tID);
+         consume(tLPAREN);
+         g->sample_args = cov_capture(stops_rparen, false);
+         consume(tRPAREN);
+         cov_arg_names(cp, g->sample_args, &g->sample_names, &g->nsample,
+                       &g->sample_decls, &g->nsample_decls, NULL, NULL);
+      }
+   }
+   else if (peek() == tAT) {
+      consume(tAT);
+      g->has_event = true;
+      if (optional(tLPAREN)) {
+         g->event = cov_capture(stops_rparen, false);
+         consume(tRPAREN);
+      }
+      else
+         g->event = cov_capture((const token_t[]){ tSEMI, tEOF }, false);
+
+      if (vlog_kind(parent) == V_PACKAGE)
+         cov_sorry(cp, "a clocking event on a covergroup in a package");
+   }
+
+   consume(tSEMI);
+
+   while (!cp->failed && !cov_at_id("endgroup") && peek() != tEOF) {
+      if (cov_at_id("option") || cov_at_id("type_option")) {
+         if (!p_cov_option(&g->opts, &g->nopts))
+            cp->failed = true;
+      }
+      else if (cov_at_id("coverpoint"))
+         p_cov_coverpoint(cp, NULL);
+      else if (cov_at_id("cross"))
+         p_cov_cross(cp, NULL);
+      else if (peek() == tID && peek_nth(2) == tCOLON && peek_nth(3) == tID
+               && peek_ident_nth(3) == ident_new("coverpoint")) {
+         const ident_t label = p_identifier();
+         consume(tCOLON);
+         p_cov_coverpoint(cp, label);
+      }
+      else if (peek() == tID && peek_nth(2) == tCOLON && peek_nth(3) == tID
+               && peek_ident_nth(3) == ident_new("cross")) {
+         const ident_t label = p_identifier();
+         consume(tCOLON);
+         p_cov_cross(cp, label);
+      }
+      else if (peek() == tSEMI)
+         consume(tSEMI);
+      else {
+         parse_error(&(state.tokenq[state.tokenq_tail].loc), "unexpected "
+                     "%s in covergroup", token_str(peek()));
+         cp->failed = true;
+      }
+   }
+
+   if (cp->failed)
+      g->ncps = g->ncrosses = 0;
+
+   // Skip to the end after an error
+   while (!cov_at_id("endgroup") && peek() != tEOF)
+      drop_token(&state);
+
+   if (peek() == tEOF)
+      parse_error(&loc, "missing endgroup");
+   else
+      consume(tID);
+
+   if (optional(tCOLON))
+      (void)p_identifier();
+
+   cov_expand(parent, g, &loc);
+}
+
+static vlog_flags_t p_class_item_qualifiers(void)
+{
+   // { static | protected | local | virtual | rand | randc | const | pure }
+
+   vlog_flags_t flags = 0;
+   for (;;) {
+      switch (peek()) {
+      case tCONST:
+         if (!scan_nth_qualifier())
+            return flags;
+         consume(tCONST);
+         break;
+      case tSTATIC:
+         consume(tSTATIC);
+         flags |= VLOG_F_STATIC;
+         break;
+      case tVPROTECTED:
+         consume(tVPROTECTED);
+         break;
+      case tVLOCAL:
+         consume(tVLOCAL);
+         break;
+      case tVIRTUAL:
+         if (peek_nth(2) == tCLASS || peek_nth(2) == tINTERFACE
+             || peek_nth(2) == tID)
+            return flags;
+         consume(tVIRTUAL);
+         flags |= VLOG_F_VIRTUAL;
+         break;
+      case tVPURE:
+         consume(tVPURE);
+         flags |= VLOG_F_PURE;
+         break;
+      case tEXTERN:
+         consume(tEXTERN);
+         flags |= VLOG_F_EXTERN;
+         break;
+      case tRAND:
+         consume(tRAND);
+         flags |= VLOG_F_RAND;
+         break;
+      case tRANDC:
+         consume(tRANDC);
+         flags |= VLOG_F_RANDC;
+         break;
+      case tREF:
+         if (!cov_replaying)
+            return flags;
+         consume(tREF);
+         flags |= VLOG_F_REFVAR;
+         break;
+      default:
+         return flags;
+      }
+   }
+}
+
+static bool defer_constraint_body(vlog_node_t decl)
+{
+   if (forward_classes.count == 0 || class_depth == 0 || peek() != tLBRACE)
+      return false;
+
+   deferred_body_t d = {
+      .subr           = decl,
+      .scope          = vlog_symtab_current(symtab),
+      .proc_automatic = proc_automatic,
+      .subr_automatic = subr_automatic,
+      .is_constraint  = true,
+      .container      = spec_container,
+   };
+
+   int depth = 0;
+   for (bool done = false; !done; ) {
+      const token_t tok = peek();
+      if (tok == tEOF)
+         break;
+
+      tokenq_t saved = state.tokenq[state.tokenq_tail];
+      drop_token(&state);
+
+      d.body.tokens = xrealloc_array(d.body.tokens, d.body.ntokens + 1,
+                                     sizeof(tokenq_t));
+      d.body.tokens[d.body.ntokens++] = saved;
+
+      if (tok == tLBRACE)
+         depth++;
+      else if (tok == tRBRACE && --depth == 0)
+         done = true;
+   }
+
+   APUSH(deferred_bodies, d);
+   return true;
+}
+
+static vlog_node_t p_constraint_declaration(vlog_node_t class,
+                                            vlog_flags_t flags)
+{
+   // [ static ] constraint constraint_identifier { { constraint_block_item } }
+
+   BEGIN("constraint declaration");
+
+   consume(tCONSTRAINT);
+
+   vlog_node_t v = vlog_new(V_CONSTRAINT);
+   vlog_set_ident(v, p_identifier());
+   vlog_set_ref(v, class);
+
+   if (flags & VLOG_F_STATIC)
+      vlog_set_flags(v, VLOG_F_STATIC);
+
+   if (peek() == tSEMI) {
+      // Constraint prototype: the block is defined outside of the class
+      // unless it is pure and is defined by a derived class
+      consume(tSEMI);
+      if (flags & VLOG_F_PURE)
+         vlog_set_flags(v, VLOG_F_PURE);
+      else if (flags & VLOG_F_EXTERN)
+         vlog_set_flags(v, VLOG_F_EXTERN);
+      else
+         vlog_set_flags(v, VLOG_F_EXTERN | VLOG_F_IMPLICIT);
+   }
+   else if (flags & (VLOG_F_EXTERN | VLOG_F_PURE)) {
+      error_at(&(state.tokenq[state.tokenq_tail].loc), "an extern or pure "
+               "constraint must not have a block");
+      consume(tLBRACE);
+      while (not_at_token(tRBRACE))
+         vlog_add_stmt(v, p_constraint_expression());
+      consume(tRBRACE);
+   }
+   else if (defer_constraint_body(v)) {
+      // The block may use a class which is declared later
+   }
+   else {
+      consume(tLBRACE);
+
+      while (not_at_token(tRBRACE)) {
+         if (!optional(tSEMI))   // An empty item
+            vlog_add_stmt(v, p_constraint_expression());
+      }
+
+      consume(tRBRACE);
+   }
+
+   vlog_set_loc(v, CURRENT_LOC);
+   vlog_symtab_put(symtab, v);
+   return v;
 }
 
 static void p_class_item(vlog_node_t parent)
