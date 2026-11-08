@@ -4939,6 +4939,72 @@ static void vhpi_lazy_fields(c_vhpiObject *obj)
    }
 }
 
+static bool vhpi_is_verilog_block(tree_t t)
+{
+   if (tree_kind(t) != T_BLOCK || tree_decls(t) == 0)
+      return false;
+
+   tree_t h = tree_decl(t, 0);
+   return tree_kind(h) == T_HIER && tree_subkind(h) == T_VERILOG;
+}
+
+static tree_t vhpi_vhdl_in_verilog(tree_t t)
+{
+   // The block of a VHDL entity instantiated from Verilog: the module
+   // which wraps it has the VHDL block as its only instance
+
+   const int nstmts = tree_stmts(t);
+   for (int i = 0; i < nstmts; i++) {
+      tree_t s = tree_stmt(t, i);
+      if (tree_kind(s) == T_BLOCK && tree_decls(s) > 0
+          && tree_kind(tree_decl(s, 0)) == T_HIER
+          && tree_subkind(tree_decl(s, 0)) == T_ARCH)
+         return s;
+   }
+
+   return NULL;
+}
+
+static bool vhpi_has_vhdl_below(tree_t t)
+{
+   if (vhpi_vhdl_in_verilog(t) != NULL)
+      return true;
+
+   const int nstmts = tree_stmts(t);
+   for (int i = 0; i < nstmts; i++) {
+      tree_t s = tree_stmt(t, i);
+      if (vhpi_is_verilog_block(s) && vhpi_has_vhdl_below(s))
+         return true;
+   }
+
+   return false;
+}
+
+static void build_verilogInstStmt(tree_t t, c_abstractRegion *region)
+{
+   // A Verilog instance is only visible to reach the VHDL instances below
+   // it: an instance of a VHDL entity from Verilog is seen as that
+   // entity with the name of the instance
+
+   tree_t inner = vhpi_vhdl_in_verilog(t);
+   tree_t unit = tree_ref(tree_decl(inner ?: t, 0));
+
+   c_compInstStmt *c = new_object(sizeof(c_compInstStmt), vhpiCompInstStmtK);
+   init_designInstUnit(&(c->designInstUnit), region, t,
+                       cached_designUnit(unit));
+   init_stmt(&(c->stmt), t);
+   c->outer = t;
+
+   if (inner != NULL) {
+      // Make sure all lookups happen in the VHDL block
+      (void)vhpi_get_name(&c->designInstUnit.region.object);
+      (void)vhpi_get_full_name(&c->designInstUnit.region.object);
+      c->designInstUnit.region.object.tree = inner;
+   }
+
+   vhpi_list_add(&region->Stmts.list, &(c->designInstUnit.region.object));
+}
+
 static void vhpi_lazy_stmts(c_vhpiObject *obj)
 {
    c_abstractRegion *r = is_abstractRegion(obj);
@@ -4973,6 +5039,10 @@ static void vhpi_lazy_stmts(c_vhpiObject *obj)
             case T_IF_GENERATE:
                build_ifGenerate(s, r);
                break;
+            case T_VERILOG:
+               if (vhpi_has_vhdl_below(s))
+                  build_verilogInstStmt(s, r);
+               break;
             default:
                continue;
             }
@@ -4990,6 +5060,16 @@ static void vhpi_lazy_decls(c_vhpiObject *obj)
    assert(r != NULL);
 
    int ndecls = 0, nports = 0, ngenerics = 0;
+
+   if (vhpi_is_verilog_block(r->object.tree)) {
+      // A Verilog module which is only there to reach VHDL instances
+      // below it has no visible declarations, but the ports of a Verilog
+      // module instantiated as a component are visible
+      c_compInstStmt *ci = is_compInstStmt(obj);
+      if (obj->kind == vhpiRootInstK
+          || (ci != NULL && ci->outer == r->object.tree))
+         return;
+   }
 
    switch (obj->kind) {
    case vhpiRootInstK:
@@ -5279,8 +5359,10 @@ static void vhpi_initialise_cb(rt_model_t *m, void *arg)
    tree_t h = tree_decl(b0, 0);
    assert(tree_kind(h) == T_HIER);
 
+   // The root of a design with a Verilog top-level module is that module
+   // and the instances of VHDL entities below it are its statements
    tree_t s = tree_ref(h);
-   assert(tree_kind(s) == T_ARCH);
+   assert(tree_kind(s) == T_ARCH || tree_kind(s) == T_VERILOG);
 
    c_designUnit *du = cached_designUnit(s);
 

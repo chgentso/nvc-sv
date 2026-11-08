@@ -17,6 +17,8 @@
 
 #include "util.h"
 #include "vpi/vpi-priv.h"
+#include "vpi/sv_vpi_user.h"
+#include "vpi/vpi_ext_nvc.h"
 
 // LCOV_EXCL_START /////////////////////////////////////////////////////////////
 
@@ -40,10 +42,43 @@ const char *vpi_type_str(PLI_INT32 type)
    case vpiScope: return "vpiScope";
    case vpiPort: return "vpiPort";
    case vpiNet: return "vpiNet";
+   case vpiNetBit: return "vpiNetBit";
+   case vpiNetArray: return "vpiNetArray";
    case vpiReg: return "vpiReg";
+   case vpiRegBit: return "vpiRegBit";
    case vpiRegArray: return "vpiRegArray";
+   case vpiMemory: return "vpiMemory";
+   case vpiMemoryWord: return "vpiMemoryWord";
+   case vpiIntegerVar: return "vpiIntegerVar";
+   case vpiTimeVar: return "vpiTimeVar";
+   case vpiRealVar: return "vpiRealVar";
+   case vpiNamedEvent: return "vpiNamedEvent";
+   case vpiNamedBegin: return "vpiNamedBegin";
+   case vpiNamedFork: return "vpiNamedFork";
    case vpiGenScope: return "vpiGenScope";
+   case vpiGenScopeArray: return "vpiGenScopeArray";
    case vpiParameter: return "vpiParameter";
+   case vpiRange: return "vpiRange";
+   case vpiModuleArray: return "vpiModuleArray";
+   case vpiPackage: return "vpiPackage";
+   case vpiInterface: return "vpiInterface";
+   case vpiProgram: return "vpiProgram";
+   case vpiInterfaceArray: return "vpiInterfaceArray";
+   case vpiModport: return "vpiModport";
+   case vpiRefObj: return "vpiRefObj";
+   case vpiLongIntVar: return "vpiLongIntVar";
+   case vpiShortIntVar: return "vpiShortIntVar";
+   case vpiIntVar: return "vpiIntVar";
+   case vpiShortRealVar: return "vpiShortRealVar";
+   case vpiByteVar: return "vpiByteVar";
+   case vpiStringVar: return "vpiStringVar";
+   case vpiEnumVar: return "vpiEnumVar";
+   case vpiStructVar: return "vpiStructVar";
+   case vpiUnionVar: return "vpiUnionVar";
+   case vpiBitVar: return "vpiBitVar";
+   case vpiChandleVar: return "vpiChandleVar";
+   case vpiPackedArrayVar: return "vpiPackedArrayVar";
+   case vpiForeignInst: return "vpiForeignInst";
    default: return vpi_fallback_str(type);
    }
 }
