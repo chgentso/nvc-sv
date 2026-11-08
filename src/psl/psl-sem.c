@@ -160,8 +160,8 @@ static void psl_check_boolean(psl_node_t p, nametab_t *tab)
 {
    tree_t value = solve_psl_condition(tab, psl_tree(p));
 
-   type_t type = tree_type(value);
-   if (type_is_none(type))
+   type_t type = get_type_or_null(value);
+   if (type != NULL && type_is_none(type))
       return;
 
    psl_set_tree(p, value);   // May be replaced with condition conversion
@@ -191,8 +191,8 @@ static void psl_check_number(psl_node_t p, nametab_t *tab)
    tree_t value = solve_types(tab, psl_tree(p), std_int);
    psl_set_tree(p, value);
 
-   type_t type = tree_type(value);
-   if (type_is_none(type))
+   type_t type = get_type_or_null(value);
+   if (type != NULL && type_is_none(type))
       return;   // Prevent cascading errors
 
    if (!sem_check(value, tab))
@@ -214,8 +214,8 @@ static void psl_check_bit(psl_node_t p, nametab_t *tab)
    tree_t value = solve_types(tab, psl_tree(p), std_ulogic);
    psl_set_tree(p, value);
 
-   type_t type = tree_type(value);
-   if (type_is_none(type))
+   type_t type = get_type_or_null(value);
+   if (type != NULL && type_is_none(type))
       return;   // Prevent cascading errors
 
    if (!sem_check(value, tab))
@@ -231,8 +231,8 @@ static void psl_check_any(psl_node_t p, nametab_t *tab)
    tree_t value = solve_types(tab, psl_tree(p), NULL);
    psl_set_tree(p, value);
 
-   type_t type = tree_type(value);
-   if (type_is_none(type))
+   type_t type = get_type_or_null(value);
+   if (type != NULL && type_is_none(type))
       return;   // Prevent cascading errors
 
    if (!sem_check(value, tab))
@@ -494,10 +494,12 @@ static void psl_check_union(psl_node_t p, nametab_t *tab)
    psl_check(lhs, tab);
    psl_check(rhs, tab);
 
-   type_t ltype = tree_type(psl_tree(lhs));
-   type_t rtype = tree_type(psl_tree(rhs));
+   type_t ltype = get_type_or_null(psl_tree(lhs));
+   type_t rtype = get_type_or_null(psl_tree(rhs));
 
-   if (type_is_none(ltype) || type_is_none(rtype))
+   if (ltype == NULL || rtype == NULL)
+      return;
+   else if (type_is_none(ltype) || type_is_none(rtype))
       return;
 
    if (!type_eq(ltype, rtype)) {

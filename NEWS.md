@@ -25,6 +25,8 @@
   non-literal static expressions.
 - Fixed a crash when a parameter of a PSL parameterised SERE is used in
   an expression.
+- Fixed a crash when a VHDL-2008 condition or a PSL Boolean names a
+  design unit.
 - The right hand operand of a PSL implication or Boolean `or` is no longer
   evaluated if the left hand operand determines the result.
 - Added a `pkg-config` configuration file to aid locating the VHPI

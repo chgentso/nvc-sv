@@ -421,6 +421,33 @@ START_TEST(test_issue1694)
 }
 END_TEST
 
+START_TEST(test_names1)
+{
+   set_standard(STD_08);
+
+   input_from_file(TESTDIR "/psl/names1.vhd");
+
+   const error_t expect[] = {
+      {  8, "invalid use of entity NAMES1" },
+      {  9, "invalid use of entity NAMES1" },
+      { 10, "invalid use of entity NAMES1" },
+      { 11, "invalid use of entity NAMES1" },
+      { 12, "invalid use of entity NAMES1" },
+      { 13, "invalid use of entity NAMES1" },
+      { 14, "invalid use of entity NAMES1" },
+      { 15, "invalid use of entity NAMES1" },
+      { 16, "invalid use of entity NAMES1" },
+      { 20, "invalid use of entity NAMES1" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   parse_and_check(T_ENTITY, T_ARCH);
+
+   check_expected_errors();
+}
+END_TEST
+
 Suite *get_psl_tests(void)
 {
    Suite *s = suite_create("psl");
@@ -437,6 +464,7 @@ Suite *get_psl_tests(void)
    tcase_add_test(tc_core, test_clock1);
    tcase_add_test(tc_core, test_sem2);
    tcase_add_test(tc_core, test_issue1694);
+   tcase_add_test(tc_core, test_names1);
    suite_add_tcase(s, tc_core);
 
    return s;

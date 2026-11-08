@@ -5767,7 +5767,8 @@ static tree_t solve_psl_fcall(nametab_t *tab, tree_t t)
       {
          psl_node_t arg = psl_operand(p, 0);
          assert(psl_kind(arg) == P_HDL_EXPR);
-         type = tree_type(psl_tree(arg));
+         if ((type = get_type_or_null(psl_tree(arg))) == NULL)
+            type = type_new(T_NONE);
       }
       break;
    case PSL_BUILTIN_NONDET:
@@ -5824,6 +5825,15 @@ static tree_t solve_psl_union(nametab_t *tab, tree_t t)
 
    psl_set_tree(op0, lhs);
    psl_set_tree(op1, rhs);
+
+   tree_t ops[] = { lhs, rhs };
+   for (int i = 0; i < ARRAY_LEN(ops); i++) {
+      if (get_type_or_null(ops[i]) == NULL) {
+         error_at(tree_loc(ops[i]), "invalid use of %s %pI",
+                  class_str(class_of(ops[i])), tree_ident(ops[i]));
+         tree_set_type(ops[i], type_new(T_NONE));
+      }
+   }
 
    tree_set_type(t, tree_type(lhs));
    return t;
@@ -5998,7 +6008,9 @@ tree_t solve_condition(nametab_t *tab, tree_t expr)
 
    type_set_pop(tab, &ts1);
 
-   if (try != NULL && type_eq(tree_type(try), boolean))
+   if (try != NULL && !tree_has_type(try))
+      return try;   // Not an expression: reported by sem_check
+   else if (try != NULL && type_eq(tree_type(try), boolean))
       return try;
 
    type_set_t ts2 = {};
@@ -6027,10 +6039,10 @@ tree_t solve_condition(nametab_t *tab, tree_t expr)
    else
       expr = try;
 
-   type_t type = tree_type(expr);
+   type_t type = get_type_or_null(expr);
 
    const bool do_conversion =
-      !type_eq(type, boolean) &&
+      type != NULL && !type_eq(type, boolean) &&
       tab->top_type_set->members.count > 0
       && type_set_contains(tab, type);
 
