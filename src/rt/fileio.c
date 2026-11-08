@@ -189,6 +189,8 @@ file_handle_t file_open(const char *name, file_mode_t mode)
    case FILE_WRITE: osmode = "wb"; break;
    case FILE_READ_WRITE: osmode = "r+b"; break;
    case FILE_APPEND: osmode = "ab"; break;
+   case FILE_TRUNC_READ_WRITE: osmode = "w+b"; break;
+   case FILE_APPEND_READ_WRITE: osmode = "a+b"; break;
    }
 
 #ifdef __MINGW32__
@@ -199,6 +201,9 @@ file_handle_t file_open(const char *name, file_mode_t mode)
 
    if (fp == NULL)
       return 0;
+
+   if (mode == FILE_TRUNC_READ_WRITE || mode == FILE_APPEND_READ_WRITE)
+      mode = FILE_READ_WRITE;
 
    return handle_for(fp, name, FILE_USER, mode);
 }

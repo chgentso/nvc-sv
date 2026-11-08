@@ -17,12 +17,14 @@
 
 #include "util.h"
 #include "diag.h"
+#include "hash.h"
 #include "ident.h"
 #include "jit/jit-exits.h"
 #include "jit/jit.h"
 #include "lib.h"
 #include "printf.h"
 #include "rt/model.h"
+#include "rt/mspace.h"
 #include "rt/structs.h"
 #include "tree.h"
 #include "type.h"
@@ -306,6 +308,64 @@ static void bind_external_name(tree_t name, jit_handle_t scope,
       args[0].pointer = ptr;
 }
 
+rt_scope_t *scope_for_context(rt_scope_t *s, void *ctx)
+{
+   static hash_t *cache = NULL;
+
+   if (cache == NULL)
+      cache = hash_new(64);
+   else {
+      rt_scope_t *cached = hash_get(cache, ctx);
+      if (cached != NULL)
+         return cached;
+   }
+
+   if (s->kind == SCOPE_INSTANCE && *mptr_get(s->privdata) == ctx) {
+      hash_put(cache, ctx, s);
+      return s;
+   }
+
+   for (int i = 0; i < s->children.count; i++) {
+      rt_scope_t *found = scope_for_context(s->children.items[i], ctx);
+      if (found != NULL)
+         return found;
+   }
+
+   return NULL;
+}
+
+void *x_sv_vif_child(void *context, int64_t label)
+{
+   // The context of an interface instance inside the instance of the
+   // interface which a virtual interface refers to
+
+   if (context == NULL)
+      jit_msg(NULL, DIAG_FATAL, "null virtual interface handle");
+
+   rt_model_t *m = get_model();
+   rt_scope_t *s = scope_for_context(root_scope(m), context);
+   if (s == NULL)
+      jit_msg(NULL, DIAG_FATAL, "virtual interface handle does not refer "
+              "to an interface instance");
+
+   for (int i = 0; i < s->children.count; i++) {
+      rt_scope_t *c = s->children.items[i];
+      if (c->kind != SCOPE_INSTANCE || tree_kind(c->where) != T_BLOCK)
+         continue;
+
+      uint64_t hash = UINT64_C(14695981039346656037);
+      for (const char *p = istr(tree_ident(c->where)); *p != '\0'; p++)
+         hash = (hash ^ (uint8_t)*p) * UINT64_C(1099511628211);
+
+      if ((int64_t)hash == label)
+         return *mptr_get(c->privdata);
+   }
+
+   jit_msg(NULL, DIAG_FATAL, "interface instance not found in the virtual "
+           "interface");
+   return NULL;
+}
+
 static void bind_hier_ref(vlog_node_t v, jit_handle_t scope,
                           jit_scalar_t *args)
 {
@@ -314,8 +374,84 @@ static void bind_hier_ref(vlog_node_t v, jit_handle_t scope,
    rt_model_t *m = get_model();
    rt_scope_t *s = get_active_scope(m);
 
+   if (args[2].pointer != NULL) {
+      rt_scope_t *lexical = scope_for_context(root_scope(m), args[2].pointer);
+      if (lexical != NULL)
+         s = lexical;
+   }
+
+   tree_t alias = NULL;
+   ident_t alias_id = NULL;
+
+   // Port connections are evaluated in the child instance but the name
+   // is relative to the parent where the connection was written
+   vlog_node_t root = vlog_value(v);
+   while (vlog_has_value(root))
+      root = vlog_value(root);
+
+   if (vlog_has_ref(root) || vlog_kind(root) == V_MOD_REF) {
+      for (rt_scope_t *it = s; it != NULL; it = it->parent) {
+         if (it->kind != SCOPE_INSTANCE || tree_kind(it->where) != T_BLOCK)
+            continue;
+
+         if (vlog_has_ref(root) && vlog_kind(vlog_ref(root)) == V_IFACE_PORT) {
+            vlog_node_t port = vlog_ref(root);
+            if (vlog_iface_port_target(it->where, port,
+                                       vlog_ranges(port) > 0
+                                       ? vlog_mod_ref_name(root) : NULL)) {
+               s = it;
+               goto found;
+            }
+
+            continue;
+         }
+
+         const int nstmts = tree_stmts(it->where);
+         for (int i = 0; i < nstmts; i++) {
+            tree_t c = tree_stmt(it->where, i);
+            if (tree_kind(c) == T_BLOCK
+                && ident_casecmp(tree_ident(c), vlog_mod_ref_name(root))) {
+               s = it;
+               goto found;
+            }
+         }
+      }
+   }
+
+   if (!vlog_has_ref(root) && vlog_kind(root) == V_MOD_REF) {
+      // An upwards name can be that of an enclosing instance or module
+      ident_t name = vlog_mod_ref_name(root);
+      bool child = false;
+      for (rt_scope_t *it = s; it != NULL && !child; it = it->parent) {
+         if (it->kind != SCOPE_INSTANCE || tree_kind(it->where) != T_BLOCK)
+            continue;
+
+         const int nstmts = tree_stmts(it->where);
+         for (int i = 0; i < nstmts && !child; i++) {
+            tree_t c = tree_stmt(it->where, i);
+            child = tree_kind(c) == T_BLOCK && ident_casecmp(tree_ident(c), name);
+         }
+
+         if (!child && vlog_block_is_named(it->where, name)) {
+            alias = it->where;
+            alias_id = name;
+            break;
+         }
+      }
+   }
+
+ found:
+   ;
+   vlog_set_mod_ref_alias(alias_id, alias);
    tree_t b = vlog_walk_mod_refs(vlog_value(v), s->where);
+   vlog_set_mod_ref_alias(NULL, NULL);
    assert(b != NULL);
+
+   if (vlog_ident(v) == ident_new("$self"))
+      ;   // The context of the interface instance itself
+   else if (!vlog_has_ref(v) || (vlog_kind(vlog_ref(v)) != V_FUNC_DECL
+                                 && vlog_kind(vlog_ref(v)) != V_TASK_DECL))
+      b = vlog_hier_target_block(b, vlog_ident(v));
 
    tree_t h = tree_decl(b, 0);
    assert(tree_kind(h) == T_HIER);
@@ -331,7 +467,26 @@ static void bind_hier_ref(vlog_node_t v, jit_handle_t scope,
    jit_t *j = jit_for_thread();
    jit_handle_t handle = jit_compile(j, tree_ident2(h));
 
-   args[0].pointer = jit_get_frame_var(j, handle, ctx, vlog_ident(v));
+   // Subroutines are called with the context of the instance
+   ident_t name = vlog_ident(v);
+   if (vlog_has_ref(v)) {
+      const vlog_kind_t kind = vlog_kind(vlog_ref(v));
+      if (kind == V_FUNC_DECL || kind == V_TASK_DECL)
+         name = ident_new("$self");
+   }
+
+   args[0].pointer = jit_get_frame_var(j, handle, ctx, name);
+
+   // The width of a net connected to an inout port cannot be checked
+   // before the name is bound
+   const uint32_t expect = args[3].integer;
+   if (expect > 0) {
+      sig_shared_t *ss = *(sig_shared_t **)args[0].pointer;
+      rt_signal_t *sig = container_of(ss, rt_signal_t, shared);
+      if (signal_width(sig) != expect)
+         jit_msg(vlog_loc(v), DIAG_FATAL, "sorry, an inout port connected to "
+                 "a hierarchical name of a different width is not supported");
+   }
 }
 
 void x_bind_external(object_t *where, jit_handle_t scope, jit_scalar_t *args)

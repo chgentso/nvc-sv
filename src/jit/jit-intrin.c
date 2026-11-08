@@ -17,16 +17,28 @@
 
 #include "util.h"
 #include "ident.h"
+#include "jit/jit-dpi.h"
+#include "jit/jit-exits.h"
 #include "jit/jit-priv.h"
 #include "jit/jit.h"
 #include "option.h"
 #include "rt/assert.h"
+#include "rt/crv.h"
+#include "rt/sva.h"
+#include "thirdparty/svrand.h"
+#include "vpi/vpi-model.h"
 #include "thread.h"
 
 #include <assert.h>
+#include <ctype.h>
+#include <inttypes.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#ifndef __MINGW32__
+#include <regex.h>
+#endif
 
 #ifdef ARCH_ARM64
 #define HAVE_NEON
@@ -2198,7 +2210,1157 @@ static void std_textio_shrink(jit_func_t *func, jit_anchor_t *anchor,
 #define AU "29IEEE.STD_LOGIC_ARITH.UNSIGNED"
 #define AS "27IEEE.STD_LOGIC_ARITH.SIGNED"
 
+static int sv_cmdline_pos = 0;
+
+static void sv_event_wait(jit_func_t *func, jit_anchor_t *caller,
+                          jit_scalar_t *args, tlab_t *tlab)
+{
+   x_sv_event_wait(args[0].pointer);
+   args[0].integer = 0;
+}
+
+static void sv_queue_wait(jit_func_t *func, jit_anchor_t *caller,
+                          jit_scalar_t *args, tlab_t *tlab)
+{
+   x_sv_queue_wait(args[0].pointer);
+   args[0].integer = 0;
+}
+
+static void sv_program_begin(jit_func_t *func, jit_anchor_t *caller,
+                             jit_scalar_t *args, tlab_t *tlab)
+{
+   args[0].integer = x_sv_program_begin();
+}
+
+static void sv_sva_yield(jit_func_t *func, jit_anchor_t *caller,
+                         jit_scalar_t *args, tlab_t *tlab)
+{
+   args[0].integer = x_sv_sva_yield();
+}
+
+static void sv_reactive_yield(jit_func_t *func, jit_anchor_t *caller,
+                              jit_scalar_t *args, tlab_t *tlab)
+{
+   args[0].integer = x_sv_reactive_yield();
+}
+
+static void sv_program_end(jit_func_t *func, jit_anchor_t *caller,
+                           jit_scalar_t *args, tlab_t *tlab)
+{
+   x_sv_program_end();
+   args[0].integer = 0;
+}
+
+static void sv_poll_wait(jit_func_t *func, jit_anchor_t *caller,
+                         jit_scalar_t *args, tlab_t *tlab)
+{
+   x_sv_poll_wait();
+   args[0].integer = 0;
+}
+
+static void sv_poll_fired(jit_func_t *func, jit_anchor_t *caller,
+                          jit_scalar_t *args, tlab_t *tlab)
+{
+   x_sv_poll_fired();
+   args[0].integer = 0;
+}
+
+static void sv_event_triggered(jit_func_t *func, jit_anchor_t *caller,
+                               jit_scalar_t *args, tlab_t *tlab)
+{
+   args[0].integer = x_sv_event_triggered(args[0].pointer);
+}
+
+static void sv_cmdline_arg(jit_func_t *func, jit_anchor_t *caller,
+                           jit_scalar_t *args, tlab_t *tlab)
+{
+   // Length of the next command line argument after optionally restarting
+
+   if (args[0].integer != 0)
+      sv_cmdline_pos = 0;
+
+   const char *arg = vpi_get_plusarg(sv_cmdline_pos);
+   args[0].integer = arg != NULL ? strlen(arg) : 0;
+}
+
+static const char *sv_plusarg_found = NULL;
+
+static void sv_plusarg_find(jit_func_t *func, jit_anchor_t *caller,
+                            jit_scalar_t *args, tlab_t *tlab)
+{
+   // Find a plusarg starting with the text before the conversion in the format
+   // and return one more than the length of the rest of it or zero
+
+   const char *fmt = args[0].pointer;
+   const int64_t len = ffi_array_length(args[2].integer);
+
+   int64_t plen = 0;
+   for (; plen < len && fmt[plen] != '%'; plen++);
+
+   sv_plusarg_found = NULL;
+
+   for (int i = 0;; i++) {
+      const char *arg = vpi_get_plusarg(i);
+      if (arg == NULL)
+         break;
+      else if (arg[0] == '+' && strncmp(arg + 1, fmt, plen) == 0) {
+         sv_plusarg_found = arg + 1 + plen;
+         break;
+      }
+   }
+
+   args[0].integer = sv_plusarg_found ? strlen(sv_plusarg_found) + 1 : 0;
+}
+
+static void sv_plusarg_copy(jit_func_t *func, jit_anchor_t *caller,
+                            jit_scalar_t *args, tlab_t *tlab)
+{
+   memcpy(args[0].pointer, sv_plusarg_found, strlen(sv_plusarg_found));
+   args[0].integer = 0;
+}
+
+static void sv_cmdline_copy(jit_func_t *func, jit_anchor_t *caller,
+                            jit_scalar_t *args, tlab_t *tlab)
+{
+   const char *arg = vpi_get_plusarg(sv_cmdline_pos++);
+   memcpy(args[0].pointer, arg, strlen(arg));
+   args[0].integer = 0;
+}
+
+static void sv_regcomp(jit_func_t *func, jit_anchor_t *caller,
+                       jit_scalar_t *args, tlab_t *tlab)
+{
+   // Compile an extended regular expression or return null
+
+#ifdef __MINGW32__
+   args[0].pointer = NULL;
+#else
+   const int64_t len = ffi_array_length(args[1].integer);
+   char *pattern LOCAL = xmalloc(len + 1);
+   memcpy(pattern, args[0].pointer, len);
+   pattern[len] = '\0';
+
+   regex_t *re = xmalloc(sizeof(regex_t));
+   if (regcomp(re, pattern, REG_NOSUB | REG_EXTENDED) != 0) {
+      free(re);
+      re = NULL;
+   }
+
+   args[0].pointer = re;
+#endif
+}
+
+static void sv_regexec(jit_func_t *func, jit_anchor_t *caller,
+                       jit_scalar_t *args, tlab_t *tlab)
+{
+   // Zero if the string matches
+
+#ifdef __MINGW32__
+   args[0].integer = 1;
+#else
+   const int64_t len = ffi_array_length(args[2].integer);
+   char *str LOCAL = xmalloc(len + 1);
+   memcpy(str, args[1].pointer, len);
+   str[len] = '\0';
+
+   args[0].integer = regexec(args[0].pointer, str, 0, NULL, 0);
+#endif
+}
+
+static void sv_regfree(jit_func_t *func, jit_anchor_t *caller,
+                       jit_scalar_t *args, tlab_t *tlab)
+{
+#ifndef __MINGW32__
+   if (args[0].pointer != NULL) {
+      regfree(args[0].pointer);
+      free(args[0].pointer);
+   }
+#endif
+
+   args[0].integer = 0;
+}
+
+static void sv_nba_store(jit_func_t *func, jit_anchor_t *caller,
+                         jit_scalar_t *args, tlab_t *tlab)
+{
+   x_sv_nba_store(args[0].pointer, args[1].pointer, args[2].integer,
+                  args[3].integer, args[4].integer, args[5].integer,
+                  args[6].integer);
+   args[0].integer = 0;
+}
+
+static void sv_event_trigger(jit_func_t *func, jit_anchor_t *caller,
+                             jit_scalar_t *args, tlab_t *tlab)
+{
+   x_sv_event_trigger(args[0].pointer);
+   args[0].integer = 0;
+}
+
+static void sv_event_trigger_nba(jit_func_t *func, jit_anchor_t *caller,
+                                 jit_scalar_t *args, tlab_t *tlab)
+{
+   x_sv_event_trigger_nba(args[0].pointer, args[1].integer);
+   args[0].integer = 0;
+}
+
+static void sv_spawn(jit_func_t *func, jit_anchor_t *caller,
+                     jit_scalar_t *args, tlab_t *tlab)
+{
+   x_sv_spawn(args[0].pointer, args[1].pointer, args[2].integer);
+   args[0].integer = 0;
+}
+
+static void sv_sched_postponed(jit_func_t *func, jit_anchor_t *caller,
+                               jit_scalar_t *args, tlab_t *tlab)
+{
+   x_sv_sched_postponed(args[0].integer != 0);
+   args[0].integer = 0;
+}
+
+static void sv_fork_begin(jit_func_t *func, jit_anchor_t *caller,
+                          jit_scalar_t *args, tlab_t *tlab)
+{
+   args[0].pointer = x_sv_fork_begin();
+}
+
+static void sv_fork_end(jit_func_t *func, jit_anchor_t *caller,
+                        jit_scalar_t *args, tlab_t *tlab)
+{
+   x_sv_fork_end(args[0].pointer);
+   args[0].integer = 0;
+}
+
+static void sv_fork_wait(jit_func_t *func, jit_anchor_t *caller,
+                         jit_scalar_t *args, tlab_t *tlab)
+{
+   args[0].integer = x_sv_fork_wait(args[0].pointer, args[1].integer);
+}
+
+static void sv_fork_finish(jit_func_t *func, jit_anchor_t *caller,
+                           jit_scalar_t *args, tlab_t *tlab)
+{
+   x_sv_fork_finish();
+   args[0].integer = 0;
+}
+
+static void sv_fork_disable(jit_func_t *func, jit_anchor_t *caller,
+                            jit_scalar_t *args, tlab_t *tlab)
+{
+   x_sv_fork_disable();
+   args[0].integer = 0;
+}
+
+static void sv_fork_disable_group(jit_func_t *func, jit_anchor_t *caller,
+                                  jit_scalar_t *args, tlab_t *tlab)
+{
+   args[0].integer = x_sv_fork_disable_group(args[0].integer, args[1].integer);
+}
+
+static void sv_fork_disabled(jit_func_t *func, jit_anchor_t *caller,
+                             jit_scalar_t *args, tlab_t *tlab)
+{
+   args[0].integer = x_sv_fork_disabled();
+}
+
+static void sv_wait_mark(jit_func_t *func, jit_anchor_t *caller,
+                         jit_scalar_t *args, tlab_t *tlab)
+{
+   x_sv_wait_mark(args[0].integer, args[1].integer);
+   args[0].integer = 0;
+}
+
+static void sv_fork_name(jit_func_t *func, jit_anchor_t *caller,
+                         jit_scalar_t *args, tlab_t *tlab)
+{
+   x_sv_fork_name(args[0].pointer, args[1].integer);
+   args[0].integer = 0;
+}
+
+static void sv_fork_disable_name(jit_func_t *func, jit_anchor_t *caller,
+                                 jit_scalar_t *args, tlab_t *tlab)
+{
+   args[0].integer = x_sv_fork_disable_name(args[0].integer);
+}
+
+static void sv_defer_disable(jit_func_t *func, jit_anchor_t *caller,
+                             jit_scalar_t *args, tlab_t *tlab)
+{
+   args[0].integer = x_sv_defer_disable(args[0].integer);
+}
+
+static void sv_process_self(jit_func_t *func, jit_anchor_t *caller,
+                            jit_scalar_t *args, tlab_t *tlab)
+{
+   args[0].pointer = x_sv_process_self();
+}
+
+static void sv_process_status(jit_func_t *func, jit_anchor_t *caller,
+                              jit_scalar_t *args, tlab_t *tlab)
+{
+   args[0].integer = x_sv_process_status(args[0].pointer);
+}
+
+static void sv_process_kill(jit_func_t *func, jit_anchor_t *caller,
+                            jit_scalar_t *args, tlab_t *tlab)
+{
+   args[0].integer = x_sv_process_kill(args[0].pointer);
+}
+
+static void sv_process_suspend(jit_func_t *func, jit_anchor_t *caller,
+                               jit_scalar_t *args, tlab_t *tlab)
+{
+   args[0].integer = x_sv_process_suspend(args[0].pointer);
+}
+
+static void sv_process_resume(jit_func_t *func, jit_anchor_t *caller,
+                              jit_scalar_t *args, tlab_t *tlab)
+{
+   args[0].integer = x_sv_process_resume(args[0].pointer);
+}
+
+static void sv_process_await(jit_func_t *func, jit_anchor_t *caller,
+                             jit_scalar_t *args, tlab_t *tlab)
+{
+   args[0].integer = x_sv_process_await(args[0].pointer);
+}
+
+static void sv_str_eq(jit_func_t *func, jit_anchor_t *caller,
+                      jit_scalar_t *args, tlab_t *tlab)
+{
+   const int64_t llen = ffi_array_length(args[2].integer);
+   const int64_t rlen = ffi_array_length(args[5].integer);
+
+   args[0].integer = llen == rlen
+      && (llen == 0 || memcmp(args[0].pointer, args[3].pointer, llen) == 0);
+}
+
+static void sv_assoc_badkey(jit_func_t *func, jit_anchor_t *caller,
+                            jit_scalar_t *args, tlab_t *tlab)
+{
+   const int width = args[0].integer;
+   const uint64_t abits = args[1].integer, bbits = args[2].integer;
+
+   // See 1800-2023 section 21.2.1.5 for the display of unknown values
+   char digits[17];
+   int ndigits = 0;
+   for (int pos = (width + 3) / 4 - 1; pos >= 0; pos--) {
+      const int start = pos * 4, nbits = MIN(4, width - start);
+      int nx = 0, nz = 0;
+      for (int i = start; i < start + nbits; i++) {
+         const bool a = (abits >> i) & 1, b = (bbits >> i) & 1;
+         if (b && a)
+            nx++;
+         else if (b)
+            nz++;
+      }
+
+      char d;
+      if (nx == nbits)
+         d = 'x';
+      else if (nz == nbits)
+         d = 'z';
+      else if (nx > 0)
+         d = 'X';
+      else if (nz > 0)
+         d = 'Z';
+      else
+         d = "0123456789abcdef"[(abits >> start) & 0xf];
+
+      if (ndigits > 0 || d != '0' || pos == 0)
+         digits[ndigits++] = d;
+   }
+   digits[ndigits] = '\0';
+
+   // 7.8.6: an index with x or z bits is invalid and gives a warning
+   jit_msg(NULL, DIAG_WARN, "associative array index %d'h%s has x or z "
+           "bits", width, digits);
+   args[0].integer = 0;
+}
+
+static void sv_array_badwrite(jit_func_t *func, jit_anchor_t *caller,
+                              jit_scalar_t *args, tlab_t *tlab)
+{
+   const bool is_queue = args[0].integer, known = args[1].integer;
+   const int64_t index = args[2].integer, size = args[3].integer;
+
+   const char *what = is_queue ? "queue" : "dynamic array";
+   if (known)
+      jit_msg(NULL, DIAG_WARN, "write to index %"PRIi64" of a %s of size "
+              "%"PRIi64" is ignored", index, what, size);
+   else
+      jit_msg(NULL, DIAG_WARN, "write to a %s with an index containing x or "
+              "z bits is ignored", what);
+
+   args[0].integer = 0;
+}
+
+static void sv_sva_new(jit_func_t *func, jit_anchor_t *caller,
+                       jit_scalar_t *args, tlab_t *tlab)
+{
+   args[0].pointer = sva_new(args[0].integer, args[1].integer);
+}
+
+static void sv_sva_label(jit_func_t *func, jit_anchor_t *caller,
+                         jit_scalar_t *args, tlab_t *tlab)
+{
+   const int64_t len = ffi_array_length(args[3].integer);
+   char *copy LOCAL = xmalloc(len + 1);
+   memcpy(copy, args[1].pointer, len);
+   copy[len] = '\0';
+   sva_set_label(args[0].pointer, copy);
+   args[0].integer = 0;
+}
+
+static void sv_sva_control(jit_func_t *func, jit_anchor_t *caller,
+                           jit_scalar_t *args, tlab_t *tlab)
+{
+   const int64_t len = ffi_array_length(args[2].integer);
+   char *copy LOCAL = xmalloc(len + 1);
+   memcpy(copy, args[0].pointer, len);
+   copy[len] = '\0';
+   sva_control(args[3].integer, args[4].integer, args[5].integer,
+               args[6].integer, copy);
+   args[0].integer = 0;
+}
+
+static void sv_sva_control_all(jit_func_t *func, jit_anchor_t *caller,
+                               jit_scalar_t *args, tlab_t *tlab)
+{
+   sva_control(args[0].integer, args[1].integer, args[2].integer,
+               args[3].integer, NULL);
+   args[0].integer = 0;
+}
+
+static void sv_sva_node(jit_func_t *func, jit_anchor_t *caller,
+                        jit_scalar_t *args, tlab_t *tlab)
+{
+   sva_t *s = args[0].pointer;
+   args[0].integer = sva_node(s, args[1].integer, args[2].integer,
+                              args[3].integer, args[4].integer,
+                              args[5].integer, args[6].integer);
+}
+
+static void sv_sva_config(jit_func_t *func, jit_anchor_t *caller,
+                          jit_scalar_t *args, tlab_t *tlab)
+{
+   sva_config(args[0].pointer, args[1].integer, args[2].integer,
+              args[3].integer);
+   args[0].integer = 0;
+}
+
+static void sv_sva_expr(jit_func_t *func, jit_anchor_t *caller,
+                        jit_scalar_t *args, tlab_t *tlab)
+{
+   args[0].integer = sva_expr(args[0].pointer, args[1].integer,
+                              args[2].integer, args[3].integer,
+                              args[4].integer, args[5].integer,
+                              args[6].integer, args[7].integer);
+}
+
+static void sv_sva_item(jit_func_t *func, jit_anchor_t *caller,
+                        jit_scalar_t *args, tlab_t *tlab)
+{
+   args[0].integer = sva_item(args[0].pointer, args[1].integer,
+                              args[2].integer, args[3].integer,
+                              args[4].integer, args[5].integer);
+}
+
+static void sv_sva_slot(jit_func_t *func, jit_anchor_t *caller,
+                        jit_scalar_t *args, tlab_t *tlab)
+{
+   sva_slot(args[0].pointer, args[1].integer, args[2].integer,
+            args[3].integer);
+   args[0].integer = 0;
+}
+
+static void sv_sva_slotw(jit_func_t *func, jit_anchor_t *caller,
+                         jit_scalar_t *args, tlab_t *tlab)
+{
+   // The value occupies two slots holding the pointers to the bits
+   sva_slotw(args[0].pointer, args[1].integer, args[2].integer,
+             args[3].pointer, args[5].integer != 0);
+   args[0].integer = 0;
+}
+
+static void sv_sva_localw(jit_func_t *func, jit_anchor_t *caller,
+                          jit_scalar_t *args, tlab_t *tlab)
+{
+   sva_localw(args[0].pointer, args[1].integer, args[2].integer);
+   args[0].integer = 0;
+}
+
+static void sv_sva_root(jit_func_t *func, jit_anchor_t *caller,
+                        jit_scalar_t *args, tlab_t *tlab)
+{
+   sva_set_root(args[0].pointer, args[1].integer);
+   args[0].integer = 0;
+}
+
+static bool sva_call_thunk(void *jit, int handle, void *ctx,
+                           const int64_t *in, int nargs, int64_t *result)
+{
+   jit_scalar_t argv[SVA_MAX_FARGS + 1], out[1];
+   argv[0].pointer = ctx;
+   for (int i = 0; i < nargs; i++)
+      argv[i + 1].integer = in[i];
+
+   tlab_t tlab = jit_null_tlab(jit);
+   if (!jit_vfastcall(jit, handle, argv, nargs + 1, out, 1, &tlab))
+      return false;
+
+   *result = out[0].integer;
+   return true;
+}
+
+static void sv_sva_callfn(jit_func_t *func, jit_anchor_t *caller,
+                          jit_scalar_t *args, tlab_t *tlab)
+{
+   const ffi_closure_t *c = args[1].pointer;
+   sva_set_callfn(args[0].pointer, args[2].integer, c->handle,
+                  c->args[0].pointer);
+   args[0].integer = 0;
+}
+
+static void sv_sva_tick(jit_func_t *func, jit_anchor_t *caller,
+                        jit_scalar_t *args, tlab_t *tlab)
+{
+   sva_set_caller(sva_call_thunk, func->jit);
+   args[0].integer = sva_tick(args[0].pointer, args[1].integer,
+                              args[2].integer);
+}
+
+static void sv_sva_wanted(jit_func_t *func, jit_anchor_t *caller,
+                          jit_scalar_t *args, tlab_t *tlab)
+{
+   args[0].integer = sva_wanted(args[0].pointer, args[1].integer);
+}
+
+static void sv_sva_slotwanted(jit_func_t *func, jit_anchor_t *caller,
+                              jit_scalar_t *args, tlab_t *tlab)
+{
+   args[0].integer = sva_slot_wanted(args[0].pointer, args[1].integer,
+                                     args[2].integer);
+}
+
+static void sv_sva_finish(jit_func_t *func, jit_anchor_t *caller,
+                          jit_scalar_t *args, tlab_t *tlab)
+{
+   sva_set_caller(sva_call_thunk, func->jit);
+   args[0].integer = sva_finish(args[0].pointer);
+}
+
+static void sv_sva_flushing(jit_func_t *func, jit_anchor_t *caller,
+                            jit_scalar_t *args, tlab_t *tlab)
+{
+   args[0].integer = x_sv_sva_flushing();
+}
+
+static void sv_sva_result(jit_func_t *func, jit_anchor_t *caller,
+                          jit_scalar_t *args, tlab_t *tlab)
+{
+   args[0].integer = sva_result(args[0].pointer, args[1].integer);
+}
+
+static void sv_sva_nevents(jit_func_t *func, jit_anchor_t *caller,
+                           jit_scalar_t *args, tlab_t *tlab)
+{
+   args[0].integer = sva_nevents(args[0].pointer);
+}
+
+static void sv_sva_event_call(jit_func_t *func, jit_anchor_t *caller,
+                              jit_scalar_t *args, tlab_t *tlab)
+{
+   args[0].integer = sva_event_call(args[0].pointer, args[1].integer);
+}
+
+static void sv_sva_event_local(jit_func_t *func, jit_anchor_t *caller,
+                               jit_scalar_t *args, tlab_t *tlab)
+{
+   args[0].integer = sva_event_local(args[0].pointer, args[1].integer,
+                                     args[2].integer);
+}
+
+static void sv_sva_idle(jit_func_t *func, jit_anchor_t *caller,
+                        jit_scalar_t *args, tlab_t *tlab)
+{
+   sva_set_caller(sva_call_thunk, func->jit);
+   args[0].integer = sva_idle(args[0].pointer);
+}
+
+static void sv_urandom_below(jit_func_t *func, jit_anchor_t *caller,
+                             jit_scalar_t *args, tlab_t *tlab)
+{
+   static __thread int32_t seed;
+   INIT_ONCE(seed = opt_verilog_seed());
+
+   const uint64_t range = args[0].integer;
+   const uint32_t r = rtl_dist_uniform(&seed, INT32_MIN, INT32_MAX);
+   args[0].integer = range == 0 ? 0 : r % range;
+}
+
+static void sv_str_cmp(jit_func_t *func, jit_anchor_t *caller,
+                       jit_scalar_t *args, tlab_t *tlab)
+{
+   const uint8_t *left = args[0].pointer, *right = args[3].pointer;
+   const int64_t llen = ffi_array_length(args[2].integer);
+   const int64_t rlen = ffi_array_length(args[5].integer);
+   const bool icase = args[6].integer;
+
+   int64_t result = 0;
+   for (int64_t i = 0; i < MIN(llen, rlen) && result == 0; i++) {
+      int lc = left[i], rc = right[i];
+      if (icase) {
+         lc = tolower(lc);
+         rc = tolower(rc);
+      }
+      result = lc - rc;
+   }
+
+   args[0].integer = result != 0 ? result : llen - rlen;
+}
+
+static void sv_str_ato(jit_func_t *func, jit_anchor_t *caller,
+                       jit_scalar_t *args, tlab_t *tlab)
+{
+   const uint8_t *str = args[0].pointer;
+   const int64_t len = ffi_array_length(args[2].integer);
+   const int base = args[3].integer;
+
+   int64_t i = 0, result = 0;
+   const bool negative = len > 0 && str[0] == '-';
+   if (negative)
+      i++;
+
+   for (; i < len; i++) {
+      int digit;
+      if (str[i] == '_')
+         continue;
+      else if (str[i] >= '0' && str[i] <= '9')
+         digit = str[i] - '0';
+      else if (str[i] >= 'a' && str[i] <= 'f')
+         digit = str[i] - 'a' + 10;
+      else if (str[i] >= 'A' && str[i] <= 'F')
+         digit = str[i] - 'A' + 10;
+      else
+         break;
+
+      if (digit >= base)
+         break;
+
+      result = result * base + digit;
+   }
+
+   args[0].integer = negative ? -result : result;
+}
+
+static void sv_str_atoreal(jit_func_t *func, jit_anchor_t *caller,
+                           jit_scalar_t *args, tlab_t *tlab)
+{
+   const uint8_t *str = args[0].pointer;
+   const int64_t len = ffi_array_length(args[2].integer);
+
+   char buf[128];
+   int n = 0;
+   for (int64_t i = 0; i < len && n < sizeof(buf) - 1; i++) {
+      if (str[i] != '_')
+         buf[n++] = str[i];
+   }
+   buf[n] = '\0';
+
+   args[0].real = strtod(buf, NULL);
+}
+
+static void sv_str_toa(jit_func_t *func, jit_anchor_t *caller,
+                       jit_scalar_t *args, tlab_t *tlab)
+{
+   const int64_t value = args[0].integer;
+   const int base = args[1].integer;
+   char *dest = args[2].pointer;
+
+   int len;
+   switch (base) {
+   case 16: len = snprintf(dest, 72, "%"PRIx64, value); break;
+   case 8:  len = snprintf(dest, 72, "%"PRIo64, value); break;
+   case 2:
+      {
+         uint64_t bits = value;
+         len = 0;
+         for (int i = 63; i >= 0; i--) {
+            if (len > 0 || ((bits >> i) & 1) || i == 0)
+               dest[len++] = '0' + ((bits >> i) & 1);
+         }
+      }
+      break;
+   default: len = snprintf(dest, 72, "%"PRIi64, value); break;
+   }
+
+   args[0].integer = len;
+}
+
+static void sv_str_realtoa(jit_func_t *func, jit_anchor_t *caller,
+                           jit_scalar_t *args, tlab_t *tlab)
+{
+   args[0].integer = snprintf(args[1].pointer, 72, "%g", args[0].real);
+}
+
+static void sv_str_getc(jit_func_t *func, jit_anchor_t *caller,
+                        jit_scalar_t *args, tlab_t *tlab)
+{
+   const uint8_t *str = args[0].pointer;
+   const int64_t len = ffi_array_length(args[2].integer);
+   const int64_t index = args[3].integer;
+
+   args[0].integer = index >= 0 && index < len ? str[index] : 0;
+}
+
+static void sv_str_putc(jit_func_t *func, jit_anchor_t *caller,
+                        jit_scalar_t *args, tlab_t *tlab)
+{
+   uint8_t *str = args[0].pointer;
+   const int64_t len = args[1].integer;
+   const int64_t index = args[2].integer;
+   const uint8_t ch = args[3].integer;
+
+   if (index >= 0 && index < len && ch != 0)
+      str[index] = ch;
+
+   args[0].integer = 0;
+}
+
+static void sv_str_case(jit_func_t *func, jit_anchor_t *caller,
+                        jit_scalar_t *args, tlab_t *tlab)
+{
+   const uint8_t *src = args[0].pointer;
+   const int64_t len = ffi_array_length(args[2].integer);
+   uint8_t *dest = args[3].pointer;
+   const bool upper = args[4].integer;
+
+   for (int64_t i = 0; i < len; i++)
+      dest[i] = upper ? toupper(src[i]) : tolower(src[i]);
+
+   args[0].integer = 0;
+}
+
+static int32_t dist_call(int kind, int32_t *seed, int32_t a, int32_t b)
+{
+   switch (kind) {
+   case 1:  return rtl_dist_normal(seed, a, b);
+   case 2:  return rtl_dist_exponential(seed, a);
+   case 3:  return rtl_dist_poisson(seed, a);
+   case 4:  return rtl_dist_chi_square(seed, a);
+   case 5:  return rtl_dist_t(seed, a);
+   case 6:  return rtl_dist_erlang(seed, a, b);
+   default: return rtl_dist_uniform(seed, a, b);
+   }
+}
+
+static void sv_dist(jit_func_t *func, jit_anchor_t *caller,
+                    jit_scalar_t *args, tlab_t *tlab)
+{
+   int32_t seed = args[1].integer;
+   args[0].integer = dist_call(args[0].integer, &seed, args[2].integer,
+                               args[3].integer);
+}
+
+static void sv_dist_next(jit_func_t *func, jit_anchor_t *caller,
+                         jit_scalar_t *args, tlab_t *tlab)
+{
+   int32_t seed = args[1].integer;
+   (void)dist_call(args[0].integer, &seed, args[2].integer, args[3].integer);
+   args[0].integer = seed;
+}
+
+static void sv_dist_uniform(jit_func_t *func, jit_anchor_t *caller,
+                            jit_scalar_t *args, tlab_t *tlab)
+{
+   int32_t seed = args[0].integer;
+   args[0].integer = rtl_dist_uniform(&seed, args[1].integer, args[2].integer);
+}
+
+static void sv_dist_seed(jit_func_t *func, jit_anchor_t *caller,
+                         jit_scalar_t *args, tlab_t *tlab)
+{
+   int32_t seed = args[0].integer;
+   (void)rtl_dist_uniform(&seed, args[1].integer, args[2].integer);
+   args[0].integer = seed;
+}
+
+static void sv_crv(jit_func_t *func, jit_anchor_t *caller, jit_scalar_t *args,
+                   tlab_t *tlab)
+{
+   int64_t argv[6];
+   for (int i = 0; i < ARRAY_LEN(argv); i++)
+      argv[i] = args[i + 1].integer;
+
+   args[0].integer = crv_generated(args[0].integer, argv);
+}
+
+static void sv_logic_to_std(jit_func_t *func, jit_anchor_t *caller,
+                            jit_scalar_t *args, tlab_t *tlab)
+{
+   // Strength is held in the upper bits of a Verilog logic value
+   static const uint8_t map[4] = { 2 /* 0 */, 3 /* 1 */, 4 /* Z */, 1 /* X */ };
+
+   uint8_t *dst = args[0].pointer;
+   const uint8_t *src = args[1].pointer;
+   const int64_t count = args[2].integer;
+
+   for (int64_t i = 0; i < count; i++)
+      dst[i] = map[src[i] & 3];
+
+   args[0].integer = 0;
+}
+
+static void sv_std_to_logic(jit_func_t *func, jit_anchor_t *caller,
+                            jit_scalar_t *args, tlab_t *tlab)
+{
+   // U X 0 1 Z W L H -
+   static const uint8_t map[9] = { 3, 3, 0, 1, 2, 3, 0, 1, 3 };
+
+   uint8_t *dst = args[0].pointer;
+   const uint8_t *src = args[1].pointer;
+   const int64_t count = args[2].integer;
+
+   for (int64_t i = 0; i < count; i++)
+      dst[i] = map[src[i]];
+
+   args[0].integer = 0;
+}
+
+static void sv_cstr_len(jit_func_t *func, jit_anchor_t *caller,
+                        jit_scalar_t *args, tlab_t *tlab)
+{
+   args[0].integer = strlen(args[0].pointer);
+}
+
+static void sv_fread(jit_func_t *func, jit_anchor_t *caller,
+                     jit_scalar_t *args, tlab_t *tlab)
+{
+   args[0].integer = x_sv_fread(args[0].integer, args[1].integer);
+}
+
+static void sv_fread_count(jit_func_t *func, jit_anchor_t *caller,
+                           jit_scalar_t *args, tlab_t *tlab)
+{
+   args[0].integer = x_sv_fread_count();
+}
+
+static void sv_hier_scope(jit_func_t *func, jit_anchor_t *caller,
+                          jit_scalar_t *args, tlab_t *tlab)
+{
+   x_sv_hier_scope(args[0].pointer);
+   args[0].integer = 0;
+}
+
+static void sv_vif_child(jit_func_t *func, jit_anchor_t *caller,
+                         jit_scalar_t *args, tlab_t *tlab)
+{
+   args[0].pointer = x_sv_vif_child(args[0].pointer, args[1].integer);
+}
+
+static void sv_class_oid(jit_func_t *func, jit_anchor_t *caller,
+                         jit_scalar_t *args, tlab_t *tlab)
+{
+   args[0].integer = x_sv_class_oid();
+}
+
+static void sv_dpi_call(jit_func_t *func, jit_anchor_t *caller,
+                        jit_scalar_t *args, tlab_t *tlab)
+{
+   void *argv[64];
+   const int nargs = args[4].integer;
+   for (int i = 0; i < nargs; i++)
+      argv[i] = args[5 + i].pointer;
+
+   args[0].integer = dpi_call(args[0].pointer, args[1].integer,
+                              args[2].pointer, args[3].pointer, argv);
+}
+
+static void sv_dpi_resume(jit_func_t *func, jit_anchor_t *caller,
+                          jit_scalar_t *args, tlab_t *tlab)
+{
+   void *argv[64];
+   const int nargs = args[1].integer;
+   for (int i = 0; i < nargs; i++)
+      argv[i] = args[2 + i].pointer;
+
+   args[0].integer = dpi_resume(args[0].integer, argv);
+}
+
+static void sv_dpi_export(jit_func_t *func, jit_anchor_t *caller,
+                          jit_scalar_t *args, tlab_t *tlab)
+{
+   dpi_export(func->jit, args[0].pointer, args[1].pointer, args[2].integer,
+              args[3].pointer, args[4].integer);
+   args[0].integer = 0;
+}
+
+static void sv_dpi_oa_make(jit_func_t *func, jit_anchor_t *caller,
+                           jit_scalar_t *args, tlab_t *tlab)
+{
+   args[0].integer = dpi_oa_make(args);
+}
+
+static void sv_dpi_strlen(jit_func_t *func, jit_anchor_t *caller,
+                          jit_scalar_t *args, tlab_t *tlab)
+{
+   args[0].integer = dpi_string_length(args[0].integer);
+}
+
+static void sv_dpi_strcopy(jit_func_t *func, jit_anchor_t *caller,
+                           jit_scalar_t *args, tlab_t *tlab)
+{
+   dpi_string_copy(args[0].integer, args[1].pointer);
+   args[0].integer = 0;
+}
+
+static void sv_wildcard_eq(jit_func_t *func, jit_anchor_t *caller,
+                           jit_scalar_t *args, tlab_t *tlab)
+{
+   const uint8_t *left = args[0].pointer, *right = args[1].pointer;
+   const int64_t count = args[2].integer;
+
+   bool unknown = false;
+   for (int64_t i = 0; i < count; i++) {
+      if (right[i] >= 2)
+         continue;
+      else if (left[i] >= 2)
+         unknown = true;
+      else if (left[i] != right[i]) {
+         args[0].integer = 0;
+         return;
+      }
+   }
+
+   args[0].integer = unknown ? 2 : 1;
+}
+
+static void sv_real_to_int(jit_func_t *func, jit_anchor_t *caller,
+                           jit_scalar_t *args, tlab_t *tlab)
+{
+   double x = args[0].real;
+   if (!isfinite(x)) {
+      args[0].integer = 0;
+      return;
+   }
+
+   x = round(x);
+
+   if (fabs(x) < 9.2e18)
+      args[0].integer = (int64_t)x;
+   else {
+      // The rounded value does not fit: keep its low 64 bits, the two's
+      // complement wrap of a conversion to an integral type (6.12.1)
+      double m = fmod(x, 18446744073709551616.0);
+      if (m < 0.0)
+         m += 18446744073709551616.0;
+      args[0].integer = (int64_t)(uint64_t)m;
+   }
+}
+
+static void sv_real_finite(jit_func_t *func, jit_anchor_t *caller,
+                           jit_scalar_t *args, tlab_t *tlab)
+{
+   // A NaN or infinity converted to an integral value has no defined
+   // result (6.12.1) so it is reported once for each place it happens
+
+   static uint64_t *seen = NULL;
+   static size_t nseen = 0, maxseen = 0;
+
+   const double x = args[0].real;
+   const bool four_state = args[1].integer != 0;
+
+   args[0].integer = isfinite(x);
+   if (args[0].integer)
+      return;
+
+   const uint64_t key = caller == NULL ? 0
+      : ((uintptr_t)caller->func << 20) ^ caller->irpos;
+   for (size_t i = 0; i < nseen; i++) {
+      if (seen[i] == key)
+         return;
+   }
+
+   if (nseen == maxseen) {
+      maxseen = MAX(16, maxseen * 2);
+      seen = xrealloc_array(seen, maxseen, sizeof(uint64_t));
+   }
+   seen[nseen++] = key;
+
+   jit_msg(NULL, DIAG_WARN, "%s converted to an integral value gives %s",
+           isnan(x) ? "NaN" : "infinity",
+           four_state ? "an unknown value" : "zero");
+}
+
+static void sv_real_to_word(jit_func_t *func, jit_anchor_t *caller,
+                            jit_scalar_t *args, tlab_t *tlab)
+{
+   // Word N counting from the least significant of the two's complement
+   // representation of the real rounded to an integer
+
+   double x = args[0].real;
+   const int64_t n = args[1].integer;
+
+   if (!isfinite(x)) {
+      args[0].integer = 0;
+      return;
+   }
+
+   x = round(x);
+
+   if (fabs(x) < 9.2e18) {
+      const int64_t v = (int64_t)x;
+      args[0].integer = n == 0 ? v : (v < 0 ? -1 : 0);
+      return;
+   }
+
+   // The magnitude is mant << shift with a 53-bit mantissa
+   int exp;
+   const double frac = frexp(fabs(x), &exp);
+   const uint64_t mant = (uint64_t)ldexp(frac, 53);
+   const int64_t shift = exp - 53;
+   const int64_t rel = shift - 64 * n;
+
+   uint64_t word = 0;
+   if (rel >= 0 && rel < 64)
+      word = mant << rel;
+   else if (rel < 0 && rel > -64)
+      word = mant >> -rel;
+
+   if (x < 0.0) {
+      // Negate: complement and add the carry out of the lower words,
+      // which is one only if all of them are zero
+      const bool carry = shift + __builtin_ctzll(mant) >= 64 * n;
+      word = ~word + (carry ? 1 : 0);
+   }
+
+   args[0].integer = word;
+}
+
+static void sv_words_to_real(jit_func_t *func, jit_anchor_t *caller,
+                             jit_scalar_t *args, tlab_t *tlab)
+{
+   // A 128-bit two's complement value converted with the host rounding
+
+   const uint64_t hi = args[0].integer, lo = args[1].integer;
+   const bool neg = args[2].integer != 0 && (int64_t)hi < 0;
+
+   unsigned __int128 v = ((unsigned __int128)hi << 64) | lo;
+   if (neg)
+      v = -v;
+
+   const double r = (double)v;
+   args[0].real = neg ? -r : r;
+}
+
+static void sv_bits_to_real(jit_func_t *func, jit_anchor_t *caller,
+                            jit_scalar_t *args, tlab_t *tlab)
+{
+   uint64_t bits = args[0].integer;
+   double real;
+   memcpy(&real, &bits, sizeof(real));
+   args[0].real = real;
+}
+
 static jit_intrinsic_t intrinsic_list[] = {
+   { "__sv_bits_to_real", sv_bits_to_real },
+   { "__sv_real_to_int", sv_real_to_int },
+   { "__sv_real_to_word", sv_real_to_word },
+   { "__sv_words_to_real", sv_words_to_real },
+   { "__sv_real_finite", sv_real_finite },
+   { "__sv_wildcard_eq", sv_wildcard_eq },
+   { "__sv_dpi_call", sv_dpi_call },
+   { "__sv_dpi_resume", sv_dpi_resume },
+   { "__sv_dpi_export", sv_dpi_export },
+   { "__sv_dpi_oa_make", sv_dpi_oa_make },
+   { "__sv_dpi_strlen", sv_dpi_strlen },
+   { "__sv_dpi_strcopy", sv_dpi_strcopy },
+   { "__sv_class_oid", sv_class_oid },
+   { "__sv_hier_scope", sv_hier_scope },
+   { "__sv_vif_child", sv_vif_child },
+   { "__sv_event_wait", sv_event_wait },
+   { "__sv_queue_wait", sv_queue_wait },
+   { "__sv_program_begin", sv_program_begin },
+   { "__sv_reactive_yield", sv_reactive_yield },
+   { "__sv_sva_yield", sv_sva_yield },
+   { "__sv_program_end", sv_program_end },
+   { "__sv_poll_wait", sv_poll_wait },
+   { "__sv_poll_fired", sv_poll_fired },
+   { "__sv_nba_store", sv_nba_store },
+   { "__sv_cmdline_arg", sv_cmdline_arg },
+   { "__sv_plusarg_find", sv_plusarg_find },
+   { "__sv_plusarg_copy", sv_plusarg_copy },
+   { "__sv_cmdline_copy", sv_cmdline_copy },
+   { "__sv_regcomp", sv_regcomp },
+   { "__sv_regexec", sv_regexec },
+   { "__sv_regfree", sv_regfree },
+   { "__sv_event_triggered", sv_event_triggered },
+   { "__sv_event_trigger", sv_event_trigger },
+   { "__sv_event_trigger_nba", sv_event_trigger_nba },
+   { "__sv_spawn", sv_spawn },
+   { "__sv_sched_postponed", sv_sched_postponed },
+   { "__sv_fork_begin", sv_fork_begin },
+   { "__sv_fork_end", sv_fork_end },
+   { "__sv_fork_wait", sv_fork_wait },
+   { "__sv_fork_disable", sv_fork_disable },
+   { "__sv_fork_disable_group", sv_fork_disable_group },
+   { "__sv_fork_disabled", sv_fork_disabled },
+   { "__sv_wait_mark", sv_wait_mark },
+   { "__sv_fork_name", sv_fork_name },
+   { "__sv_fork_disable_name", sv_fork_disable_name },
+   { "__sv_defer_disable", sv_defer_disable },
+   { "__sv_process_self", sv_process_self },
+   { "__sv_process_status", sv_process_status },
+   { "__sv_process_kill", sv_process_kill },
+   { "__sv_process_await", sv_process_await },
+   { "__sv_process_suspend", sv_process_suspend },
+   { "__sv_process_resume", sv_process_resume },
+   { "__sv_fork_finish", sv_fork_finish },
+   { "__sv_str_eq", sv_str_eq },
+   { "__sv_urandom_below", sv_urandom_below },
+   { "__sv_assoc_badkey", sv_assoc_badkey },
+   { "__sv_array_badwrite", sv_array_badwrite },
+   { "__sv_sva_new", sv_sva_new },
+   { "__sv_sva_node", sv_sva_node },
+   { "__sv_sva_label", sv_sva_label },
+   { "__sv_sva_control", sv_sva_control },
+   { "__sv_sva_control_all", sv_sva_control_all },
+   { "__sv_sva_config", sv_sva_config },
+   { "__sv_sva_expr", sv_sva_expr },
+   { "__sv_sva_item", sv_sva_item },
+   { "__sv_sva_slot", sv_sva_slot },
+   { "__sv_sva_slotw", sv_sva_slotw },
+   { "__sv_sva_localw", sv_sva_localw },
+   { "__sv_sva_root", sv_sva_root },
+   { "__sv_sva_tick", sv_sva_tick },
+   { "__sv_sva_callfn", sv_sva_callfn },
+   { "__sv_sva_result", sv_sva_result },
+   { "__sv_sva_wanted", sv_sva_wanted },
+   { "__sv_sva_slotwanted", sv_sva_slotwanted },
+   { "__sv_sva_finish", sv_sva_finish },
+   { "__sv_sva_flushing", sv_sva_flushing },
+   { "__sv_sva_idle", sv_sva_idle },
+   { "__sv_sva_nevents", sv_sva_nevents },
+   { "__sv_sva_event_call", sv_sva_event_call },
+   { "__sv_sva_event_local", sv_sva_event_local },
+   { "__sv_str_cmp", sv_str_cmp },
+   { "__sv_str_ato", sv_str_ato },
+   { "__sv_str_atoreal", sv_str_atoreal },
+   { "__sv_str_toa", sv_str_toa },
+   { "__sv_str_realtoa", sv_str_realtoa },
+   { "__sv_str_case", sv_str_case },
+   { "__sv_str_getc", sv_str_getc },
+   { "__sv_str_putc", sv_str_putc },
+   { "__sv_dist_uniform", sv_dist_uniform },
+   { "__sv_dist", sv_dist },
+   { "__sv_dist_next", sv_dist_next },
+   { "__sv_dist_seed", sv_dist_seed },
+   { "__sv_crv", sv_crv },
+   { "__sv_logic_to_std", sv_logic_to_std },
+   { "__sv_std_to_logic", sv_std_to_logic },
+   { "__sv_cstr_len", sv_cstr_len },
+   { "__sv_fread", sv_fread },
+   { "__sv_fread_count", sv_fread_count },
    { NS "\"+\"(" U U ")" U, ieee_plus_unsigned },
    { NS "\"+\"(" UU UU ")" UU, ieee_plus_unsigned },
    { NS "\"+\"(" U "N)" U, ieee_plus_unsigned_natural },

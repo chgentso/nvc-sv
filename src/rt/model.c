@@ -21,6 +21,7 @@
 #include "cov/cov-api.h"
 #include "debug.h"
 #include "hash.h"
+#include "jit/jit-dpi.h"
 #include "jit/jit-exits.h"
 #include "jit/jit.h"
 #include "lib.h"
@@ -39,6 +40,7 @@
 #include "tree.h"
 #include "type.h"
 #include "vlog/vlog-node.h"
+#include "vlog/vlog-util.h"
 
 #include <assert.h>
 #include <inttypes.h>
@@ -59,6 +61,7 @@ typedef enum {
    EVENT_DRIVER,
    EVENT_PROCESS,
    EVENT_PSEUDO,
+   EVENT_NONBLOCK,
 } event_kind_t;
 
 #define MEMBLOCK_ALIGN   64
@@ -100,6 +103,14 @@ typedef struct {
    unsigned      max;
 } deferq_t;
 
+typedef struct {
+   rt_signal_t *signal;
+   uint32_t     offset;
+   int32_t      count;
+} init_event_t;
+
+typedef A(init_event_t) init_event_list_t;
+
 typedef struct _rt_model {
    tree_t             top;
    hash_t            *scopes;
@@ -115,17 +126,27 @@ typedef struct _rt_model {
    bool               can_create_delta;
    bool               next_is_delta;
    bool               force_stop;
+   bool               sva_flush;
+   bool               finished;
+   rt_proc_t        **sva_procs;
+   unsigned           nsva_procs;
+   unsigned           nfinal_procs;
    bool               blocking_update;
    bool               psl_cover_assert;
    unsigned           n_signals;
    heap_t            *eventq_heap;
    ihash_t           *res_memo;
    rt_watch_t        *watches;
+   uint32_t           proc_seq;
    deferq_t           procq;
+   deferq_t           spawnq;
    deferq_t           next_procq;
    deferq_t           driverq;
    deferq_t           next_driverq;
    deferq_t           postponedq;
+   deferq_t           reactiveq;
+   uint64_t           wait_seq;
+   deferq_t           latepostq;
    deferq_t           triggerq;
    deferq_t           inactiveq;
    deferq_t           next_inactiveq;
@@ -140,6 +161,7 @@ typedef struct _rt_model {
    memblock_t        *memblocks;
    model_thread_t    *threads[MAX_THREADS];
    signal_list_t      eventsigs;
+   init_event_list_t  init_events;
    bool               shuffle;
    bool               liveness;
    rt_trigger_t      *triggertab[TRIGGER_TAB_SIZE];
@@ -166,6 +188,7 @@ static __thread rt_model_t *__model = NULL;
 static bool __trace_on = false;
 
 static void *source_value(rt_nexus_t *nexus, rt_source_t *src);
+static bool has_active_source(const rt_nexus_t *n);
 static void free_value(rt_nexus_t *n, rt_value_t v);
 static rt_nexus_t *clone_nexus(rt_model_t *m, rt_nexus_t *old, int offset);
 static void put_driving(rt_model_t *m, rt_nexus_t *n, const void *value);
@@ -174,6 +197,43 @@ static bool run_trigger(rt_model_t *m, rt_trigger_t *t);
 static void wakeup_all(rt_model_t *m, void **pending);
 static void reset_scope(rt_model_t *m, rt_scope_t *s);
 static void async_run_process(rt_model_t *m, void *arg);
+static void reset_process(rt_model_t *m, rt_proc_t *proc);
+typedef struct _sv_task sv_task_t;
+static void sv_task_destroy(rt_model_t *m, rt_proc_t *p);
+static bool sv_task_hold(rt_proc_t *p);
+static void sv_task_note_reg(rt_proc_t *p, void **pending);
+static void sv_task_drop_reg(rt_proc_t *p, void **pending);
+static void sv_task_note_run(rt_proc_t *p);
+
+#define PROC_REGS_MAX 0xffff
+
+static inline void proc_pin(rt_wakeable_t *obj)
+{
+   // Counts the places other than the scope that hold a pointer to a
+   // process so that it is not freed while they do
+
+   if (obj->kind == W_PROC) {
+      rt_proc_t *p = container_of(obj, rt_proc_t, wakeable);
+      if (p->regs != PROC_REGS_MAX)
+         p->regs++;
+   }
+}
+
+static inline void proc_unpin(rt_wakeable_t *obj)
+{
+   if (obj->kind == W_PROC) {
+      rt_proc_t *p = container_of(obj, rt_proc_t, wakeable);
+      if (p->regs != PROC_REGS_MAX) {
+         assert(p->regs > 0);
+         p->regs--;
+      }
+   }
+}
+
+static inline void proc_pin_forever(rt_proc_t *p)
+{
+   p->regs = PROC_REGS_MAX;
+}
 static void async_update_property(rt_model_t *m, void *arg);
 static void async_update_driver(rt_model_t *m, void *arg);
 static void async_fast_driver(rt_model_t *m, void *arg);
@@ -412,9 +472,22 @@ static void deferq_swap(deferq_t *a, deferq_t *b)
    *b = tmp;
 }
 
+static void run_spawned(rt_model_t *m)
+{
+   // Processes created by a fork statement start as soon as the parent
+   // blocks (IEEE 1800-2017 9.3.2), before any other process runs.  The
+   // spawn queue is first in, first out, so they start in the order they
+   // were created, and those they fork in turn start after them
+
+   for (int i = 0; i < m->spawnq.count; i++)
+      (*m->spawnq.tasks[i].fn)(m, m->spawnq.tasks[i].arg);
+   m->spawnq.count = 0;
+}
+
 static void deferq_run(rt_model_t *m, deferq_t *dq)
 {
-   assert(m->reschedq.count == 0);
+   // A Verilog process whose delay expired may already be on the reschedule
+   // queue: it is run after the tasks in this queue as if it was added by one
 
    while (dq->count > 0) {
       const defer_task_t *tasks = dq->tasks;
@@ -426,9 +499,14 @@ static void deferq_run(rt_model_t *m, deferq_t *dq)
          // when we execute it
          prefetch_read(tasks[i + 1].arg);
          (*tasks[i].fn)(m, tasks[i].arg);
+         if (m->spawnq.count > 0)
+            run_spawned(m);
       }
-      for (; i < count; i++)
+      for (; i < count; i++) {
          (*tasks[i].fn)(m, tasks[i].arg);
+         if (m->spawnq.count > 0)
+            run_spawned(m);
+      }
 
       assert(dq->tasks == tasks);
       assert(dq->count == count);
@@ -570,6 +648,8 @@ static void cleanup_scope(rt_model_t *m, rt_scope_t *scope)
       rt_proc_t *p = scope->procs.items[i];
       mptr_free(m->mspace, &(p->privdata));
       tlab_release(m->jit, p->tlab);
+      if (p->task != NULL)
+         sv_task_destroy(m, p);
       free(p);
    }
    ACLEAR(scope->procs);
@@ -599,8 +679,13 @@ static void cleanup_scope(rt_model_t *m, rt_scope_t *scope)
    free(scope);
 }
 
+static void sv_poll_free(void);
+
 void model_free(rt_model_t *m)
 {
+   sv_poll_free();
+   free(m->sva_procs);
+
    if (opt_get_int(OPT_RT_STATS)) {
       nvc_rusage_t ru;
       nvc_rusage(&ru);
@@ -629,8 +714,11 @@ void model_free(rt_model_t *m)
    }
 
    free(m->procq.tasks);
+   free(m->spawnq.tasks);
    free(m->next_procq.tasks);
    free(m->postponedq.tasks);
+   free(m->reactiveq.tasks);
+   free(m->latepostq.tasks);
    free(m->triggerq.tasks);
    free(m->inactiveq.tasks);
    free(m->next_inactiveq.tasks);
@@ -865,6 +953,27 @@ static inline void set_pending(rt_wakeable_t *wake)
    wake->pending = true;
 }
 
+typedef struct {
+   rt_proc_t *proc;
+   uint64_t   when;
+} stale_event_t;
+
+// Timed wake ups of processes which were interrupted and must be ignored
+static A(stale_event_t) stale_events = AINIT;
+
+static bool stale_event_pop(rt_proc_t *proc, uint64_t when)
+{
+   for (int i = 0; i < stale_events.count; i++) {
+      if (stale_events.items[i].proc == proc
+          && stale_events.items[i].when == when) {
+         stale_events.items[i] = stale_events.items[--stale_events.count];
+         return true;
+      }
+   }
+
+   return false;
+}
+
 static void deltaq_insert_proc(rt_model_t *m, uint64_t delta, rt_proc_t *proc)
 {
    if (delta == 0) {
@@ -875,9 +984,13 @@ static void deltaq_insert_proc(rt_model_t *m, uint64_t delta, rt_proc_t *proc)
    else {
       assert(!proc->wakeable.delayed);
       proc->wakeable.delayed = true;
+      proc->wake_at = m->now + delta;
 
       void *e = tag_pointer(proc, EVENT_PROCESS);
-      heap_insert(m->eventq_heap, m->now + delta, e);
+      if (tree_kind(proc->where) == T_VERILOG)
+         heap_insert_ordered(m->eventq_heap, m->now + delta, e);
+      else
+         heap_insert(m->eventq_heap, m->now + delta, e);
    }
 }
 
@@ -895,19 +1008,19 @@ static void deltaq_insert_driver(rt_model_t *m, uint64_t delta,
 }
 
 static void deltaq_insert_pseudo_source(rt_model_t *m, uint64_t delta,
-                                        rt_source_t *src)
+                                        rt_source_t *src, bool nonblock)
 {
    if (delta == 0) {
       deferq_do(&m->driverq, async_pseudo_source, src);
       m->next_is_delta = true;
    }
    else {
-      void *e = tag_pointer(src, EVENT_PSEUDO);
+      void *e = tag_pointer(src, nonblock ? EVENT_NONBLOCK : EVENT_PSEUDO);
       heap_insert(m->eventq_heap, m->now + delta, e);
    }
 }
 
-static void reset_process(rt_model_t *m, rt_proc_t *proc)
+static void reset_process_state(rt_model_t *m, rt_proc_t *proc)
 {
    TRACE("reset process %s", istr(proc->name));
 
@@ -932,9 +1045,21 @@ static void reset_process(rt_model_t *m, rt_proc_t *proc)
 
    thread->active_obj = NULL;
    thread->active_scope = NULL;
+}
+
+static void reset_process(rt_model_t *m, rt_proc_t *proc)
+{
+   proc->create_seq = ++(m->proc_seq);   // The order processes start
+
+   reset_process_state(m, proc);
 
    // Schedule the process to run immediately
    deferq_t *dq = proc->wakeable.reschedule ? &m->reschedq : &m->procq;
+   if (proc->wakeable.reactive && !proc->wakeable.forked) {
+      // The initial procedures of a program start in the Reactive region
+      dq = &m->reactiveq;
+      proc->wake_iter = m->iteration;
+   }
    deferq_do(dq, async_run_process, proc);
    set_pending(&proc->wakeable);
 }
@@ -975,6 +1100,29 @@ static void reset_property(rt_model_t *m, rt_prop_t *prop)
    thread->active_scope = NULL;
 }
 
+// Processes waiting for a condition on state which is not a signal
+static A(rt_proc_t *) sv_pollers = AINIT;
+static unsigned       sv_pollers_woken = 0;
+static unsigned       sv_pollers_fired = 0;
+static unsigned       sv_procs_run = 0;
+
+static bool sv_proc_finished(const rt_proc_t *proc);
+
+// Forked processes which have finished and may be freed
+static A(rt_proc_t *) sv_reap = AINIT;
+static unsigned       sv_reap_next = 256;
+
+static void sv_reap_procs(rt_model_t *m);
+
+// A process handle is an index into this table so that the process can be
+// freed once it has finished while old handles stay valid
+typedef struct {
+   sv_task_t *task;
+   bool       killed;
+} sv_handle_t;
+
+static A(sv_handle_t) sv_handles = AINIT;
+
 static void run_process(rt_model_t *m, rt_proc_t *proc)
 {
    TRACE("run %sprocess %s", *mptr_get(proc->privdata) ? "" :  "stateless ",
@@ -982,8 +1130,21 @@ static void run_process(rt_model_t *m, rt_proc_t *proc)
 
    rt_wakeable_t *obj = &(proc->wakeable);
 
-   if (obj->trigger != NULL && !run_trigger(m, obj->trigger))
+   if (obj->forked && obj->zombie)
+      return;   // Disabled by disable fork
+
+   if (obj->interrupted)
+      obj->interrupted = false;
+   else if (obj->trigger != NULL && !run_trigger(m, obj->trigger))
       return;   // Filtered
+
+   if (sv_task_hold(proc))
+      return;   // Runs once it is resumed
+
+   sv_procs_run++;
+
+   if (proc->task != NULL)
+      sv_task_note_run(proc);
 
    model_thread_t *thread = model_thread(m);
    assert(thread->tlab != NULL);
@@ -1016,17 +1177,46 @@ static void run_process(rt_model_t *m, rt_proc_t *proc)
    else if (proc->tlab == NULL)
       tlab_reset(thread->tlab);   // All data inside the TLAB is dead
 
+   if (proc->tlab != NULL && proc->wakeable.forked && sv_proc_finished(proc)) {
+      // A forked process that has finished never runs again
+      tlab_release(m->jit, proc->tlab);
+      proc->tlab = NULL;
+   }
+
    thread->active_obj = NULL;
    thread->active_scope = NULL;
 }
 
+static bool scope_precedes(rt_scope_t *child, rt_proc_t *proc)
+{
+   const loc_t *cl = tree_loc(child->where), *pl = tree_loc(proc->where);
+   if (loc_invalid_p(cl) || loc_invalid_p(pl) || cl->file_ref != pl->file_ref)
+      return true;
+   else if (cl->first_line != pl->first_line)
+      return cl->first_line < pl->first_line;
+   else
+      return cl->first_column < pl->first_column;
+}
+
 static void reset_scope(rt_model_t *m, rt_scope_t *s)
 {
-   for (int i = 0; i < s->children.count; i++)
-      reset_scope(m, s->children.items[i]);
+   // Processes start in the order of their declarations in the source
+   // text, those of an instance or a generate block at the place where it
+   // is declared.  IEEE 1800-2017 4.7 leaves this order unspecified
 
-   for (int i = 0; i < s->procs.count; i++)
-      reset_process(m, s->procs.items[i]);
+   int pi = 0, ci = 0;
+   while (pi < s->procs.count && ci < s->children.count) {
+      if (scope_precedes(s->children.items[ci], s->procs.items[pi]))
+         reset_scope(m, s->children.items[ci++]);
+      else
+         reset_process(m, s->procs.items[pi++]);
+   }
+
+   for (; ci < s->children.count; ci++)
+      reset_scope(m, s->children.items[ci]);
+
+   for (; pi < s->procs.count; pi++)
+      reset_process(m, s->procs.items[pi]);
 
    for (int i = 0; i < s->properties.count; i++)
       reset_property(m, s->properties.items[i]);
@@ -1049,6 +1239,12 @@ static res_memo_t *memo_resolution_fn(rt_model_t *m, rt_signal_t *signal,
    ffi_copy_closure(&memo->closure, closure);
 
    ihash_put(m->res_memo, memo->closure.handle, memo);
+
+   if (flags & R_BLOB) {
+      // The function resolves whole values of this many elements
+      memo->blobsz = MAX(nlits, 1);
+      return memo;
+   }
 
    if (nlits == 0 || nlits > 16)
       return memo;
@@ -1202,17 +1398,25 @@ static void check_multiple_sources(rt_nexus_t *n, source_kind_t kind)
                   tree_ident(n->signal->where), tree_ident(root->where));
       diag_hint(d, tree_loc(n->signal->where), "element %pI declared here",
                 tree_ident(n->signal->where));
-      diag_hint(d, tree_loc(root->where), "composite signal %pI declared with "
-                "unresolved type %pT", tree_ident(root->where),
-                tree_type(root->where));
+      if (tree_kind(root->where) == T_VERILOG)
+         diag_hint(d, tree_loc(root->where), "composite variable %pI declared "
+                   "here", tree_ident(root->where));
+      else
+         diag_hint(d, tree_loc(root->where), "composite signal %pI declared "
+                   "with unresolved type %pT", tree_ident(root->where),
+                   tree_type(root->where));
    }
    else {
       d = diag_new(DIAG_FATAL, tree_loc(n->signal->where));
       diag_printf(d, "unresolved signal %pI has multiple sources",
                   tree_ident(n->signal->where));
-      diag_hint(d, tree_loc(n->signal->where), "signal %pI declared with "
-                "unresolved type %pT", tree_ident(n->signal->where),
-                tree_type(n->signal->where));
+      if (tree_kind(n->signal->where) == T_VERILOG)
+         diag_hint(d, tree_loc(n->signal->where), "variable %pI declared here",
+                   tree_ident(n->signal->where));
+      else
+         diag_hint(d, tree_loc(n->signal->where), "signal %pI declared with "
+                   "unresolved type %pT", tree_ident(n->signal->where),
+                   tree_type(n->signal->where));
    }
 
    if (n->sources.tag == SOURCE_DRIVER) {
@@ -1544,7 +1748,7 @@ static void clone_source(rt_model_t *m, rt_nexus_t *nexus,
             split_value(nexus, &w_new->value, &w_old->value, offset);
 
             assert(w_old->when >= m->now);
-            deltaq_insert_pseudo_source(m, w_new->when - m->now, new);
+            deltaq_insert_pseudo_source(m, w_new->when - m->now, new, false);
          }
       }
       break;
@@ -1582,8 +1786,10 @@ static rt_nexus_t *clone_nexus(rt_model_t *m, rt_nexus_t *old, int offset)
 
    if (old->pending == NULL)
       new->pending = NULL;
-   else if (pointer_tag(old->pending) == 1)
+   else if (pointer_tag(old->pending) == 1) {
       new->pending = old->pending;
+      proc_pin(untag_pointer(old->pending, rt_wakeable_t));
+   }
    else {
       rt_pending_t *old_p = untag_pointer(old->pending, rt_pending_t);
       rt_pending_t *new_p = xmalloc_flex(sizeof(rt_pending_t), old_p->count,
@@ -1591,8 +1797,11 @@ static rt_nexus_t *clone_nexus(rt_model_t *m, rt_nexus_t *old, int offset)
 
       new_p->count = new_p->max = old_p->count;
 
-      for (int i = 0; i < old_p->count; i++)
+      for (int i = 0; i < old_p->count; i++) {
          new_p->wake[i] = old_p->wake[i];
+         if (old_p->wake[i] != NULL)
+            proc_pin(old_p->wake[i]);
+      }
 
       new->pending = tag_pointer(new_p, 0);
    }
@@ -1731,11 +1940,35 @@ static void setup_signal(rt_model_t *m, rt_signal_t *s, tree_t where,
    m->n_signals++;
 }
 
-static void setup_process(rt_proc_t *p, const char *path)
+static bool vlog_is_assertion_process(vlog_node_t v)
 {
+   if (vlog_stmts(v) != 1 || vlog_kind(vlog_stmt(v, 0)) != V_TIMING)
+      return false;
+
+   vlog_node_t timing = vlog_stmt(v, 0);
+   if (vlog_stmts(timing) != 1)
+      return false;
+
+   vlog_node_t s = vlog_stmt(timing, 0);
+   switch (vlog_kind(s)) {
+   case V_ASSERT:
+   case V_ASSUME:
+   case V_COVER:
+      return vlog_kind(vlog_value(s)) == V_PROP_SPEC;
+   default:
+      return false;
+   }
+}
+
+static void setup_process(rt_model_t *m, rt_proc_t *p, const char *path)
+{
+   p->create_seq = ++(m->proc_seq);
+
    switch (tree_kind(p->where)) {
    case T_VERILOG:
       {
+         p->verilog = true;
+
          vlog_node_t v = tree_vlog(p->where);
          switch (vlog_kind(v)) {
          case V_ASSIGN:
@@ -1751,14 +1984,47 @@ static void setup_process(rt_proc_t *p, const char *path)
             p->name = ident_sprintf("%s:_udp", path);
             break;
          case V_ALWAYS:
+            p->name = ident_sprintf("%s:%s", path, istr(tree_ident(p->where)));
+
+            if (vlog_is_assertion_process(v)) {
+               m->sva_procs = xrealloc_array(m->sva_procs, m->nsva_procs + 1,
+                                             sizeof(rt_proc_t *));
+               m->sva_procs[m->nsva_procs++] = p;
+            }
+
+            // Processes of the Postponed region: the copies made for
+            // assertions run first and then, in the order they were
+            // woken, the lines of $monitor and $strobe and the reports
+            // of final deferred assertions
+            p->wakeable.postponed =
+               ident_starts_with(tree_ident(p->where), ident_new("$postponed"));
+            p->wakeable.latepost =
+               ident_starts_with(tree_ident(p->where), ident_new("$postponed_s"));
+
+            // Copies of variables for assertions that nothing waits for,
+            // and the values of the reports of a final deferred assertion
+            // which only its own process reads
+            p->wakeable.sampler =
+               ident_starts_with(tree_ident(p->where), ident_new("$postponed_a"))
+               || p->wakeable.latepost;
+            break;
          case V_INITIAL:
+            p->name = ident_sprintf("%s:%s", path, istr(tree_ident(p->where)));
+            break;
          case V_FINAL:
+            m->nfinal_procs++;
+            p->name = ident_sprintf("%s:%s", path, istr(tree_ident(p->where)));
+            break;
+         case V_VAR_DECL:
+            // Initialiser that refers to an instance by hierarchical name
             p->name = ident_sprintf("%s:%s", path, istr(tree_ident(p->where)));
             break;
          case V_TCHECK:
             // TODO: Should names here be unique ?
             p->name = ident_sprintf("%s", path);
             p->wakeable.postponed = true;
+            // The notifier is toggled in the time step of the violation
+            p->wakeable.sampler = true;
             break;
          default:
             should_not_reach_here();
@@ -1806,6 +2072,32 @@ static void copy_sub_signal_sources(rt_scope_t *scope, void *buf, int stride)
       copy_sub_signal_sources(scope->children.items[i], buf, stride);
 }
 
+static bool has_active_source(const rt_nexus_t *n)
+{
+   // An inout port that is not driven by the architecture contributes
+   // nothing to the actual that it is connected to
+   for (const rt_source_t *s = &(n->sources); n->n_sources > 0 && s;
+        s = s->chain_input) {
+      switch (s->tag) {
+      case SOURCE_DRIVER:
+         if (!s->disconnected)
+            return true;
+         break;
+      case SOURCE_PORT:
+         if (!(s->u.port.input->flags & NET_F_INOUT)
+             || has_active_source(s->u.port.input))
+            return true;
+         break;
+      default:
+         break;
+      }
+   }
+
+   return false;
+}
+
+static __thread bool skip_undriven_ports = false;
+
 static void *source_value(rt_nexus_t *nexus, rt_source_t *src)
 {
    switch (src->tag) {
@@ -1816,7 +2108,10 @@ static void *source_value(rt_nexus_t *nexus, rt_source_t *src)
          return value_ptr(nexus, &(src->u.driver.waveforms.value));
 
    case SOURCE_PORT:
-      if (src->u.port.input->flags & NET_F_EFFECTIVE)
+      if (skip_undriven_ports && (src->u.port.input->flags & NET_F_INOUT)
+          && !has_active_source(src->u.port.input))
+         return NULL;
+      else if (src->u.port.input->flags & NET_F_EFFECTIVE)
          return nexus_driving(src->u.port.input);
       else
          return nexus_effective(src->u.port.input);
@@ -1877,6 +2172,48 @@ static void call_resolution(rt_model_t *m, rt_nexus_t *n, res_memo_t *r,
 
       for (int j = 0; j < n->width; j++)
          ((int8_t *)resolved)[j] = r->tab2[(int)p0[j]][(int)p1[j]];
+
+      put_driving(m, n, resolved);
+      tlab_trim(thread->tlab, mark);
+   }
+   else if (r->flags & R_BLOB) {
+      // The function is called with the values of all the sources for
+      // each group of elements making up one value and returns a pointer
+      // to the resolved value (user-defined net types, IEEE 1800 6.6.7)
+
+      const int k = r->blobsz;
+      if (n->width % k != 0 || (n->offset / n->size) % k != 0)
+         jit_msg(NULL, DIAG_FATAL, "sorry, part of a net of a user-defined "
+                 "net type cannot be driven on its own");
+
+      model_thread_t *thread = model_thread(m);
+      assert(thread->tlab != NULL);
+
+      const uint32_t mark = tlab_mark(thread->tlab);
+
+      const size_t valsz = k * n->size;
+      char *resolved = tlab_alloc(thread->tlab, n->width * n->size);
+      char *inputs = tlab_alloc(thread->tlab, MAX(nonnull, 1) * valsz);
+
+      for (int e = 0; e < n->width; e += k) {
+         unsigned o = 0;
+         for (rt_source_t *s = s0; s; s = s->chain_input) {
+            const char *data = source_value(n, s);
+            if (data != NULL)
+               memcpy(inputs + (o++) * valsz, data + e * n->size, valsz);
+         }
+         assert(o == nonnull);
+
+         jit_scalar_t result;
+         if (!jit_try_call(m->jit, r->closure.handle, &result,
+                           r->closure.args[0], inputs, (int64_t)nonnull)) {
+            m->force_stop = true;
+            memcpy(resolved + e * n->size, nexus_effective(n) + e * n->size,
+                   valsz);
+         }
+         else
+            memcpy(resolved + e * n->size, result.pointer, valsz);
+      }
 
       put_driving(m, n, resolved);
       tlab_trim(thread->tlab, mark);
@@ -1973,11 +2310,30 @@ static void calculate_driving_value(rt_model_t *m, rt_nexus_t *n)
 
    res_memo_t *r = n->signal->resolution;
 
+   if (n->flags & NET_F_FORCED) {
+      // A forced value has priority over an assignment scheduled earlier
+      for (rt_source_t *s = &(n->sources); s; s = s->chain_input) {
+         if (s->tag == SOURCE_FORCING) {
+            put_driving(m, n, value_ptr(n, &(s->u.pseudo.waveforms.value)));
+            return;
+         }
+      }
+   }
+
+   bool skip_undriven = true, skipped = false;
+
+ again:;
    int nonnull = 0;
    rt_source_t *s0 = NULL;
    for (rt_source_t *s = &(n->sources); s; s = s->chain_input) {
       if (s->disconnected)
          continue;
+      else if (skip_undriven && s->tag == SOURCE_PORT
+               && (s->u.port.input->flags & NET_F_INOUT)
+               && !has_active_source(s->u.port.input)) {
+         skipped = true;
+         continue;
+      }
       else if (s->tag == SOURCE_FORCING) {
          // If S is driving-value forced, the driving value of S is
          // unchanged from its previous value; no further steps are
@@ -1999,6 +2355,14 @@ static void calculate_driving_value(rt_model_t *m, rt_nexus_t *n)
          s0 = s;
       nonnull++;
    }
+
+   if (s0 == NULL && skipped && skip_undriven) {
+      // Nothing else drives this so use the value of the undriven port
+      skip_undriven = false;
+      goto again;
+   }
+
+   skip_undriven_ports = skip_undriven;
 
    if (unlikely(s0 == NULL)) {
       // If S is of signal kind register and all the sources of S have
@@ -2041,6 +2405,8 @@ static void calculate_driving_value(rt_model_t *m, rt_nexus_t *n)
       // resolution function associated with S
       call_resolution(m, n, r, nonnull, s0);
    }
+
+   skip_undriven_ports = false;
 }
 
 static void calculate_effective_value(rt_model_t *m, rt_nexus_t *n)
@@ -2349,6 +2715,7 @@ void model_reset(rt_model_t *m)
 
    // Initialisation is described in LRM 93 section 12.6.4
 
+   m->proc_seq = 0;
    reset_scope(m, m->root);
 
    if (m->force_stop)
@@ -2457,14 +2824,43 @@ static void update_property(rt_model_t *m, rt_prop_t *prop)
    m->liveness |= prop->strong;
 }
 
+static inline void reg_pin(rt_wakeable_t *obj, void **pending)
+{
+   proc_pin(obj);
+
+   if (obj->kind == W_PROC)
+      sv_task_note_reg(container_of(obj, rt_proc_t, wakeable), pending);
+}
+
+static inline void reg_unpin(rt_wakeable_t *obj, void **pending)
+{
+   proc_unpin(obj);
+
+   if (obj->kind == W_PROC)
+      sv_task_drop_reg(container_of(obj, rt_proc_t, wakeable), pending);
+}
+
+static void note_wait(rt_model_t *m, rt_proc_t *proc)
+{
+   // Gives the order in which wake_order_cmp sorts the processes
+   proc->wait_seq = ++(m->wait_seq);
+}
+
 static void sched_event(rt_model_t *m, void **pending, rt_wakeable_t *obj)
 {
-   if (*pending == NULL)
+   if (obj->kind == W_PROC)
+      note_wait(m, container_of(obj, rt_proc_t, wakeable));
+
+   if (*pending == NULL) {
       *pending = tag_pointer(obj, 1);
+      reg_pin(obj, pending);
+   }
    else if (pointer_tag(*pending) == 1) {
       rt_wakeable_t *cur = untag_pointer(*pending, rt_wakeable_t);
       if (cur == obj)
          return;
+
+      reg_pin(obj, pending);
 
       rt_pending_t *p = xmalloc_flex(sizeof(rt_pending_t), PENDING_MIN,
                                      sizeof(rt_wakeable_t *));
@@ -2479,11 +2875,16 @@ static void sched_event(rt_model_t *m, void **pending, rt_wakeable_t *obj)
       rt_pending_t *p = untag_pointer(*pending, rt_pending_t);
 
       for (int i = 0; i < p->count; i++) {
-         if (p->wake[i] == NULL || p->wake[i] == obj) {
+         if (p->wake[i] == obj)
+            return;
+         else if (p->wake[i] == NULL) {
             p->wake[i] = obj;
+            reg_pin(obj, pending);
             return;
          }
       }
+
+      reg_pin(obj, pending);
 
       if (p->count == p->max) {
          p->max = MAX(PENDING_MIN, p->max * 2);
@@ -2500,14 +2901,17 @@ static void clear_event(rt_model_t *m, void **pending, rt_wakeable_t *obj)
 {
    if (pointer_tag(*pending) == 1) {
       rt_wakeable_t *wake = untag_pointer(*pending, rt_wakeable_t);
-      if (wake == obj)
+      if (wake == obj) {
          *pending = NULL;
+         reg_unpin(obj, pending);
+      }
    }
    else if (*pending != NULL) {
       rt_pending_t *p = untag_pointer(*pending, rt_pending_t);
       for (int i = 0; i < p->count; i++) {
          if (p->wake[i] == obj) {
             p->wake[i] = NULL;
+            reg_unpin(obj, pending);
             return;
          }
       }
@@ -2807,10 +3211,16 @@ static bool run_trigger(rt_model_t *m, rt_trigger_t *t)
 static void procq_do(rt_model_t *m, rt_wakeable_t *obj, defer_fn_t fn,
                      void *arg)
 {
-   if (obj->postponed)
+   if (obj->postponed && obj->latepost)
+      deferq_do(&m->latepostq, fn, arg);
+   else if (obj->postponed)
       deferq_do(&m->postponedq, fn, arg);
    else if (obj->reschedule)
       deferq_do(&m->reschedq, fn, arg);
+   else if (obj->reactive) {
+      deferq_do(&m->reactiveq, fn, arg);
+      container_of(obj, rt_proc_t, wakeable)->wake_iter = m->iteration;
+   }
    else {
       deferq_do(&m->procq, fn, arg);
       m->next_is_delta |= m->blocking_update;
@@ -2838,7 +3248,15 @@ static void wakeup_one(rt_model_t *m, rt_wakeable_t *obj)
             proc->wakeable.delayed = false;
          }
 
-         procq_do(m, obj, async_run_process, proc);
+         if (m->blocking_update && tree_kind(proc->where) == T_PARAM) {
+            // A Verilog process changed the source of this conversion so
+            // run it with the signal updates in the next delta cycle
+            deferq_do(&m->driverq, async_run_process, proc);
+            set_pending(obj);
+            m->next_is_delta = true;
+         }
+         else
+            procq_do(m, obj, async_run_process, proc);
       }
       break;
 
@@ -2887,17 +3305,87 @@ static void wakeup_one(rt_model_t *m, rt_wakeable_t *obj)
    }
 }
 
+static int wake_order_cmp(const void *a, const void *b)
+{
+   // Verilog processes woken by the same event run in the order in which
+   // they began to wait, the order of processes that are ready at the
+   // same time being unspecified (IEEE 1800-2017 4.7).  Other kinds of
+   // wakeable go first in the order of the pending list.
+
+   const rt_wakeable_t *wa = *(rt_wakeable_t *const *)a;
+   const rt_wakeable_t *wb = *(rt_wakeable_t *const *)b;
+
+   const rt_proc_t *pa = wa->kind == W_PROC
+      ? container_of(wa, const rt_proc_t, wakeable) : NULL;
+   const rt_proc_t *pb = wb->kind == W_PROC
+      ? container_of(wb, const rt_proc_t, wakeable) : NULL;
+
+   const bool va = pa != NULL && pa->verilog;
+   const bool vb = pb != NULL && pb->verilog;
+
+   if (va != vb)
+      return va ? 1 : -1;
+   else if (!va || pa->wait_seq == pb->wait_seq)
+      return 0;
+   else
+      return pa->wait_seq < pb->wait_seq ? -1 : 1;
+}
+
 static void wakeup_all(rt_model_t *m, void **pending)
 {
    if (pointer_tag(*pending) == 1) {
       rt_wakeable_t *wake = untag_pointer(*pending, rt_wakeable_t);
-      wakeup_one(m, wake);
+      if (wake->forked && wake->zombie) {
+         // A forked process which was stopped while it waited
+         *pending = NULL;
+         proc_unpin(wake);
+      }
+      else
+         wakeup_one(m, wake);
    }
    else if (*pending != NULL) {
       rt_pending_t *p = untag_pointer(*pending, rt_pending_t);
+
       for (int i = 0; i < p->count; i++) {
-         if (p->wake[i] != NULL)
-            wakeup_one(m, p->wake[i]);
+         if (p->wake[i] != NULL && p->wake[i]->forked && p->wake[i]->zombie) {
+            proc_unpin(p->wake[i]);
+            p->wake[i] = NULL;
+         }
+      }
+
+      bool verilog = false;
+      for (int i = 0; i < p->count; i++) {
+         if (p->wake[i] != NULL && p->wake[i]->kind == W_PROC
+             && container_of(p->wake[i], rt_proc_t, wakeable)->verilog)
+            verilog = true;
+      }
+
+      if (verilog) {
+         rt_wakeable_t **order LOCAL =
+            xmalloc_array(p->count, sizeof(rt_wakeable_t *));
+         int n = 0;
+         for (int i = 0; i < p->count; i++) {
+            if (p->wake[i] != NULL)
+               order[n++] = p->wake[i];
+         }
+
+         // Stable so that other kinds of wakeable keep their order
+         for (int i = 1; i < n; i++) {
+            rt_wakeable_t *key = order[i];
+            int j = i - 1;
+            for (; j >= 0 && wake_order_cmp(&order[j], &key) > 0; j--)
+               order[j + 1] = order[j];
+            order[j + 1] = key;
+         }
+
+         for (int i = 0; i < n; i++)
+            wakeup_one(m, order[i]);
+      }
+      else {
+         for (int i = 0; i < p->count; i++) {
+            if (p->wake[i] != NULL)
+               wakeup_one(m, p->wake[i]);
+         }
       }
    }
 }
@@ -2966,10 +3454,10 @@ static void put_driving(rt_model_t *m, rt_nexus_t *n, const void *value)
 
       memcpy(nexus_driving(n), value, n->size * n->width);
 
-      assert(!(n->flags & NET_F_PENDING));
-      n->flags |= NET_F_PENDING;
       n->flags &= ~NET_F_HAS_INITIAL;
-      heap_insert(m->effective_heap, MAX_RANK - n->rank, n);
+
+      // May already be pending if a Verilog process drove this net twice
+      enqueue_effective(m, n);
    }
    else
       put_effective(m, n, value);
@@ -2977,7 +3465,9 @@ static void put_driving(rt_model_t *m, rt_nexus_t *n, const void *value)
 
 static void defer_driving_update(rt_model_t *m, rt_nexus_t *n)
 {
-   if (n->flags & NET_F_PENDING)
+   // The pending flag is also set when only the effective value is
+   // waiting to be updated, which does not recalculate the driving value
+   if ((n->flags & NET_F_PENDING) && !(n->flags & NET_F_EFFECTIVE))
       return;
 
    TRACE("defer %s driving value update", trace_nexus(n));
@@ -3228,6 +3718,85 @@ static void sync_event_cache(rt_model_t *m)
    }
 }
 
+static void sv_poll_end_cycle(rt_model_t *m)
+{
+   // Conditions are checked again in the delta cycle following any activity.
+   // A cycle where every process that ran was a poller which went straight
+   // back to waiting has changed nothing, which lets an otherwise idle
+   // simulation finish.
+
+   const bool idle = sv_pollers_woken > 0
+      && sv_procs_run == sv_pollers_woken
+      && sv_pollers.count == sv_pollers_woken
+      && sv_pollers_fired == 0
+      && m->nonblockq.count == 0 && m->inactiveq.count == 0;
+
+   sv_procs_run = 0;
+   sv_pollers_woken = 0;
+   sv_pollers_fired = 0;
+
+   if (sv_pollers.count == 0 || idle)
+      return;
+
+   // Conditions are checked again in the order they began waiting
+   for (int i = 0; i < sv_pollers.count; i++)
+      deltaq_insert_proc(m, 0, sv_pollers.items[i]);
+
+   sv_pollers_woken = sv_pollers.count;
+   ARESIZE(sv_pollers, 0);
+}
+
+static void fire_init_events(rt_model_t *m)
+{
+   // A net driven to 0 or 1 when the simulation starts has an event so
+   // processes waiting for it run in the next delta cycle whatever order
+   // they were started in.  A net which is still z has not changed from
+   // its initial value.
+
+   for (int i = 0; i < m->init_events.count; i++) {
+      const init_event_t *ev = &(m->init_events.items[i]);
+
+      int remaining = ev->count;
+      rt_nexus_t *n = split_nexus(m, ev->signal, ev->offset, ev->count);
+      for (; remaining > 0; n = n->chain) {
+         remaining -= n->width;
+
+         if (n->flags & NET_F_EFFECTIVE)
+            continue;
+
+         const unsigned char *eff = nexus_effective(n);
+         bool known = false;
+         for (int j = 0; j < n->size * n->width; j++)
+            known |= (eff[j] & 2) == 0;   // Neither x nor z
+
+         if (known) {
+            notify_event(m, n);
+            m->next_is_delta = true;
+         }
+      }
+   }
+
+   m->init_events.count = 0;
+}
+
+static void reactive_sort(deferq_t *dq)
+{
+   for (int i = 1; i < dq->count; i++) {
+      const defer_task_t key = dq->tasks[i];
+      const rt_proc_t *kp = key.arg;
+      int j = i - 1;
+      for (; j >= 0; j--) {
+         const rt_proc_t *jp = dq->tasks[j].arg;
+         if (jp->wake_iter < kp->wake_iter
+             || (jp->wake_iter == kp->wake_iter
+                 && jp->wait_seq <= kp->wait_seq))
+            break;
+         dq->tasks[j + 1] = dq->tasks[j];
+      }
+      dq->tasks[j + 1] = key;
+   }
+}
+
 static void model_cycle(rt_model_t *m)
 {
    // Simulation cycle is described in LRM 93 section 12.6.4
@@ -3251,6 +3820,9 @@ static void model_cycle(rt_model_t *m)
       deltaq_dump(m);
 #endif
 
+   if (sv_reap.count >= sv_reap_next)
+      sv_reap_procs(m);
+
    if (m->iteration == 0)
       run_callbacks(m, NEXT_TIME_STEP);
 
@@ -3263,6 +3835,8 @@ static void model_cycle(rt_model_t *m)
          case EVENT_PROCESS:
             {
                rt_proc_t *proc = untag_pointer(e, rt_proc_t);
+               if (stale_events.count > 0 && stale_event_pop(proc, m->now))
+                  break;
                assert(proc->wakeable.delayed);
                proc->wakeable.delayed = false;
                procq_do(m, &proc->wakeable, async_run_process, proc);
@@ -3284,6 +3858,14 @@ static void model_cycle(rt_model_t *m)
             {
                rt_source_t *source = untag_pointer(e, rt_source_t);
                deferq_do(&m->driverq, async_pseudo_source, source);
+            }
+            break;
+         case EVENT_NONBLOCK:
+            {
+               // A delayed non-blocking assignment updates in the
+               // non-blocking region of the time step it matures in
+               rt_source_t *source = untag_pointer(e, rt_source_t);
+               deferq_do(&m->nonblockq, async_pseudo_source, source);
             }
             break;
          }
@@ -3339,6 +3921,9 @@ static void model_cycle(rt_model_t *m)
 
    run_callbacks(m, END_OF_PROCESSES);
 
+   if (m->init_events.count > 0)
+      fire_init_events(m);
+
    // Verilog scheduling regions
 
    if (m->next_is_delta)
@@ -3356,9 +3941,22 @@ static void model_cycle(rt_model_t *m)
    if (m->nonblockq.count > 0) {
       TRACE("begin non-blocking assignment region");
       deferq_run(m, &m->nonblockq);
+      sv_procs_run++;   // May have changed state a poller depends on
+   }
+
+   if (!m->next_is_delta && m->reactiveq.count > 0) {
+      // Program processes run once nothing else is scheduled in the time
+      // step, in the order they began waiting, and may then schedule more
+      // events
+      TRACE("begin reactive region");
+      reactive_sort(&m->reactiveq);
+      deferq_swap(&m->procq, &m->reactiveq);
+      m->next_is_delta = true;
    }
 
  next_delta:
+   sv_poll_end_cycle(m);
+
    if (!m->next_is_delta)
       run_callbacks(m, LAST_KNOWN_DELTA_CYCLE);
 
@@ -3367,6 +3965,7 @@ static void model_cycle(rt_model_t *m)
 
       // Run all postponed processes and event callbacks
       deferq_run(m, &m->postponedq);
+      deferq_run(m, &m->latepostq);
 
       run_callbacks(m, END_TIME_STEP);
 
@@ -3416,6 +4015,21 @@ static void check_liveness_properties(rt_model_t *m, rt_scope_t *s)
       check_liveness_properties(m, s->children.items[i]);
 }
 
+static void run_final_procs(rt_model_t *m, rt_scope_t *s)
+{
+   // Instances are visited before their parents
+
+   for (int i = 0; i < s->children.count; i++)
+      run_final_procs(m, s->children.items[i]);
+
+   for (int i = 0; i < s->procs.count; i++) {
+      rt_proc_t *p = s->procs.items[i];
+      if (tree_kind(p->where) == T_VERILOG
+          && vlog_kind(tree_vlog(p->where)) == V_FINAL)
+         run_process(m, p);
+   }
+}
+
 void model_run(rt_model_t *m, uint64_t stop_time)
 {
    MODEL_ENTRY(m);
@@ -3427,6 +4041,23 @@ void model_run(rt_model_t *m, uint64_t stop_time)
 
    while (!should_stop_now(m, stop_time))
       model_cycle(m);
+
+   if (m->nsva_procs > 0 && (!m->force_stop || m->finished)) {
+      // Attempts of strong properties that have not completed fail
+      m->sva_flush = true;
+      for (unsigned i = 0; i < m->nsva_procs; i++)
+         run_process(m, m->sva_procs[i]);
+      m->sva_flush = false;
+   }
+
+   if (m->nfinal_procs > 0 && (!m->force_stop || m->finished)) {
+      // Final procedures run once at the end of simulation
+      if (!m->force_stop && stop_time != TIME_HIGH && m->now < stop_time)
+         m->now = stop_time;
+
+      m->nfinal_procs = 0;
+      run_final_procs(m, m->root);
+   }
 
    run_callbacks(m, END_OF_SIMULATION);
 
@@ -3501,7 +4132,7 @@ void force_signal(rt_model_t *m, rt_signal_t *s, const void *values,
 
       queue_waveform(m, &src->u.pseudo.waveforms, w);
 
-      deltaq_insert_pseudo_source(m, 0, src);
+      deltaq_insert_pseudo_source(m, 0, src, false);
 
       vptr += n->width * n->size;
    }
@@ -3523,13 +4154,48 @@ void release_signal(rt_model_t *m, rt_signal_t *s, int offset, size_t count)
       n->flags &= ~NET_F_FORCED;
 
       rt_source_t *src = get_pseudo_source(m, n, SOURCE_FORCING);
-      deltaq_insert_pseudo_source(m, 0, src);
+      deltaq_insert_pseudo_source(m, 0, src, false);
    }
 }
 
 static bool heap_delete_ptr_cb(uint64_t key, void *value, void *ctx)
 {
    return value == ctx;
+}
+
+void release_signal_now(rt_model_t *m, rt_signal_t *s, int offset,
+                        size_t count)
+{
+   // A net which is released takes the value of its drivers immediately
+   // (IEEE 1800-2017 section 10.6.2)
+
+   RT_LOCK(s->lock);
+
+   TRACE("release signal %s+%d now", istr(tree_ident(s->where)), offset);
+
+   assert(m->can_create_delta);
+
+   rt_nexus_t *n = split_nexus(m, s, offset, count);
+   for (; count > 0; n = n->chain) {
+      count -= n->width;
+      assert(count >= 0);
+
+      if (!(n->flags & NET_F_FORCED))
+         continue;
+
+      n->flags &= ~NET_F_FORCED;
+
+      rt_source_t *src = get_pseudo_source(m, n, SOURCE_FORCING);
+      src->disconnected = 1;
+
+      update_driving(m, n, true);
+
+      if (n->flags & NET_F_PENDING) {
+         // The effective value must be calculated separately
+         heap_delete(m->effective_heap, heap_delete_ptr_cb, n);
+         update_effective(m, n);
+      }
+   }
 }
 
 void deposit_signal(rt_model_t *m, rt_signal_t *s, const void *values,
@@ -3540,7 +4206,9 @@ void deposit_signal(rt_model_t *m, rt_signal_t *s, const void *values,
    TRACE("deposit signal %s+%d value=%s count=%zd", istr(tree_ident(s->where)),
          offset, fmt_values(values, count * s->nexus.size), count);
 
-   assert(!get_active_proc()->wakeable.postponed);
+   // A VPI application may deposit a value outside of any process
+   assert(get_active_proc() == NULL || !get_active_proc()->wakeable.postponed
+          || get_active_proc()->wakeable.sampler);
 
    rt_nexus_t *n = split_nexus(m, s, offset, count);
    const char *vptr = values;
@@ -3553,6 +4221,12 @@ void deposit_signal(rt_model_t *m, rt_signal_t *s, const void *values,
 
       const size_t valuesz = n->size * n->width;
 
+      if (n->flags & NET_F_FORCED) {
+         // A procedural assignment does not change a forced variable
+         vptr += valuesz;
+         continue;
+      }
+
       if (!cmp_bytes(eff, vptr, valuesz)) {
          copy2(last, eff, vptr, valuesz);
          m->trigger_epoch++;
@@ -3564,6 +4238,16 @@ void deposit_signal(rt_model_t *m, rt_signal_t *s, const void *values,
             n->signal->shared.flags |= SIG_F_EVENT_FLAG;
 
          wakeup_all(m, &(n->pending));
+
+         // The effective value of a connected port of mode inout is that
+         // of the actual
+         if (n->n_sources > 0) {
+            for (rt_source_t *s = &(n->sources); s; s = s->chain_input) {
+               if (s->tag == SOURCE_PORT
+                   && (s->u.port.input->flags & NET_F_INOUT))
+                  enqueue_effective(m, s->u.port.input);
+            }
+         }
       }
 
       if (n->flags & NET_F_PENDING) {
@@ -3587,11 +4271,38 @@ void sched_deposit(rt_model_t *m, rt_signal_t *s, const void *values,
 
    assert(m->can_create_delta);
 
+   // A negative delay gives a variable which is being released its forced
+   // value unless it is assigned in this time step
+   const bool keep = after < 0;
+   if (keep)
+      after = 0;
+
    rt_nexus_t *n = split_nexus(m, s, offset, count);
    const char *vptr = values;
    for (; count > 0; n = n->chain) {
       count -= n->width;
       assert(count >= 0);
+
+      if (keep) {
+         // A variable with a continuous assignment returns to its value
+         bool driven = false;
+         for (rt_source_t *src = &(n->sources); src != NULL && !driven;
+              src = src->chain_input)
+            driven = src->tag == SOURCE_DRIVER || src->tag == SOURCE_PORT;
+
+         if (driven) {
+            vptr += n->width * n->size;
+            continue;
+         }
+
+         // Nothing drives the variable once released so it keeps whatever
+         // value it has, including one assigned later in this time step
+         if (n->flags & NET_F_FORCED)
+            s->shared.flags |= SIG_F_REGISTER;
+
+         vptr += n->width * n->size;
+         continue;
+      }
 
       rt_source_t *src = get_pseudo_source(m, n, SOURCE_DEPOSIT);
 
@@ -3607,7 +4318,7 @@ void sched_deposit(rt_model_t *m, rt_signal_t *s, const void *values,
       if (nonblock && after == 0)
          deferq_do(&m->nonblockq, async_pseudo_source, src);
       else
-         deltaq_insert_pseudo_source(m, after, src);
+         deltaq_insert_pseudo_source(m, after, src, nonblock);
 
       vptr += n->width * n->size;
    }
@@ -3632,6 +4343,12 @@ int64_t model_next_time(rt_model_t *m)
       return TIME_HIGH;
    else
       return heap_min_key(m->eventq_heap);
+}
+
+void model_finish(rt_model_t *m)
+{
+   // Called by $finish and $stop
+   m->finished = true;
 }
 
 void model_stop(rt_model_t *m)
@@ -3999,6 +4716,19 @@ void get_path_name(rt_scope_t *s, text_buf_t *tb)
    tb_downcase(tb);
 }
 
+void get_verilog_path_name(rt_scope_t *s, text_buf_t *tb)
+{
+   if (s->kind == SCOPE_ROOT)
+      return;
+
+   get_verilog_path_name(s->parent, tb);
+
+   if (s->parent->kind != SCOPE_ROOT)
+      tb_append(tb, '.');
+
+   tb_istr(tb, tree_ident(s->where));
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // Entry points from compiled code
 
@@ -4064,6 +4794,7 @@ void x_drive_signal(sig_shared_t *ss, uint32_t offset, int32_t count)
          s = add_source(m, n, SOURCE_DRIVER);
          s->u.driver.waveforms.value = alloc_value(m, n);
          s->u.driver.proc = proc;
+         proc_pin_forever(proc);
       }
 
       count -= n->width;
@@ -4093,6 +4824,22 @@ void x_sched_inactive(void)
    set_pending(&proc->wakeable);
    deferq_do(&m->inactiveq, async_run_process, proc);
    m->next_is_delta = true;
+}
+
+int64_t x_sv_sva_flushing(void)
+{
+   return get_model()->sva_flush;
+}
+
+void x_sv_sched_postponed(bool late)
+{
+   rt_proc_t *proc = get_active_proc();
+   rt_model_t *m = get_model();
+
+   TRACE("schedule process %s in postponed region", istr(proc->name));
+
+   set_pending(&proc->wakeable);
+   deferq_do(late ? &m->latepostq : &m->postponedq, async_run_process, proc);
 }
 
 void x_sched_waveform_s(sig_shared_t *ss, uint32_t offset, uint64_t scalar,
@@ -4310,6 +5057,9 @@ void x_sched_active(sig_shared_t *ss, uint32_t offset, int32_t count)
 
    rt_wakeable_t *obj = get_active_wakeable();
    rt_model_t *m = get_model();
+
+   if (obj->kind == W_PROC)
+      proc_pin_forever(container_of(obj, rt_proc_t, wakeable));
 
    rt_nexus_t *n = split_nexus(m, s, offset, count);
    for (; count > 0; n = n->chain) {
@@ -4828,6 +5578,13 @@ void x_put_driver(sig_shared_t *ss, uint32_t offset, int32_t count,
 
    rt_proc_t *proc = get_active_proc();
    rt_model_t *m = get_model();
+
+   if ((s->shared.flags & SIG_F_INIT_EVENT) && m->now == 0
+       && m->iteration <= 0) {
+      const init_event_t ev = { s, offset, count };
+      APUSH(m->init_events, ev);
+   }
+
    rt_nexus_t *n = split_nexus(m, s, offset, count);
    const char *vptr = values;
    for (; count > 0; n = n->chain) {
@@ -4851,6 +5608,10 @@ void x_put_driver(sig_shared_t *ss, uint32_t offset, int32_t count,
       d->u.driver.waveforms.when = m->now;
 
       calculate_driving_value(m, n);
+
+      // The effective value is updated in the next delta cycle
+      if (n->flags & NET_F_EFFECTIVE)
+         m->next_is_delta = true;
 
       for (rt_source_t *o = n->outputs; o; o = o->chain_output) {
          switch (o->tag) {
@@ -4878,6 +5639,7 @@ void x_resolve_signal(sig_shared_t *ss, ffi_closure_t *closure, int32_t nlits,
    TRACE("resolve signal %pi", tree_ident(s->where));
 
    rt_model_t *m = get_model();
+   const bool replaced = s->resolution != NULL;
    s->resolution = memo_resolution_fn(m, s, closure, nlits, flags);
 
    // Copy R_IDENT into the nexus flags to avoid rt_resolve_nexus_fast
@@ -4888,6 +5650,13 @@ void x_resolve_signal(sig_shared_t *ss, ffi_closure_t *closure, int32_t nlits,
       rt_nexus_t *n = &(s->nexus);
       for (int i = 0; i < s->n_nexus; i++, n = n->chain)
          n->flags |= NET_F_R_IDENT;
+   }
+   else if (replaced && (s->shared.flags & NET_F_R_IDENT)) {
+      s->shared.flags &= ~NET_F_R_IDENT;
+
+      rt_nexus_t *n = &(s->nexus);
+      for (int i = 0; i < s->n_nexus; i++, n = n->chain)
+         n->flags &= ~NET_F_R_IDENT;
    }
 }
 
@@ -4918,9 +5687,1250 @@ void x_process_init(const ffi_closure_t *closure, tree_t where)
    p->wakeable.postponed = false;
    p->wakeable.delayed   = false;
 
-   setup_process(p, tb_get(tb));
+   setup_process(m, p, tb_get(tb));
 
    APUSH(s->procs, p);
+}
+
+typedef struct {
+   int        live;       // Children still running
+   int        finished;   // Children that ran to completion
+   bool       ended;      // Parent has finished with this group
+   rt_proc_t *waiter;
+   sv_task_t *parent;     // Task that forked the children
+} sv_group_t;
+
+typedef struct {
+   rt_scope_t *scope;
+   uint64_t    label;
+   sv_group_t *group;
+} sv_named_t;
+
+static A(sv_named_t) sv_named_groups = AINIT;
+
+static void sv_group_free(sv_group_t *g)
+{
+   for (int i = 0; i < sv_named_groups.count; i++) {
+      if (sv_named_groups.items[i].group == g) {
+         sv_named_groups.items[i] = sv_named_groups.items[--sv_named_groups.count];
+         break;
+      }
+   }
+
+   free(g);
+}
+
+struct _sv_task {
+   rt_proc_t       *proc;
+   struct _sv_task *parent;
+   struct _sv_task *first_child;
+   struct _sv_task *next_sibling;
+   sv_group_t      *group;
+   int64_t          block_label;   // Named block this process executes
+   int              live_children;
+   rt_proc_t       *waiter;        // Blocked in wait fork
+   mptr_t           frame;
+   bool             done;
+   unsigned         handle;        // Identifier given out by process::self
+   void            *wait_event;    // Event or queue it is blocked on
+   bool             killed;
+   int64_t          disabled;      // Label of block disabled by a child
+   uint32_t         runs;          // Times resumed since it was created
+   uint32_t         dseq;          // Deferred assertion evaluations so far
+   struct {
+      int64_t  label;
+      uint32_t seq;
+   }               *dis;           // Scopes disabled and when
+   unsigned         ndis, maxdis;
+   int64_t          marks[8];      // Blocks around the wait it is suspended in
+   unsigned         nmarks;
+   bool             marked;
+   bool             listed;        // On the list of processes with marks
+   bool             suspended;     // Stopped by process::suspend
+   bool             missed;        // A wake up arrived while suspended
+   rt_proc_t      **awaiters;      // Blocked in process::await
+   unsigned         nawaiters;
+   void          ***regs;           // Events the process is waiting on
+   unsigned         nregs;
+};
+
+static A(sv_task_t *) sv_marked_tasks = AINIT;
+
+static bool sv_task_hold(rt_proc_t *p)
+{
+   // A wake up of a process suspended by process::suspend is remembered
+
+   sv_task_t *t = p->task;
+   if (t == NULL || !t->suspended)
+      return false;
+
+   t->missed = true;
+   return true;
+}
+
+static void sv_task_destroy(rt_model_t *m, rt_proc_t *p)
+{
+   sv_task_t *t = p->task;
+
+   if (t->listed) {
+      for (unsigned i = 0; i < sv_marked_tasks.count; i++) {
+         if (sv_marked_tasks.items[i] == t) {
+            sv_marked_tasks.items[i] =
+               sv_marked_tasks.items[--sv_marked_tasks.count];
+            break;
+         }
+      }
+   }
+
+   if (t->frame != NULL)
+      mptr_free(m->mspace, &t->frame);
+
+   free(t->awaiters);
+   free(t->regs);
+   free(t->dis);
+   free(t);
+   p->task = NULL;
+}
+
+#define SV_MAX_REGS 64
+
+static void sv_task_note_run(rt_proc_t *p)
+{
+   p->task->runs++;
+   p->task->marked = false;
+}
+
+static void sv_task_note_reg(rt_proc_t *p, void **pending)
+{
+   // A forked process which is killed must not stay on the list of a
+   // signal that may never change
+
+   sv_task_t *t = p->task;
+   if (t == NULL || !p->wakeable.forked || t->nregs >= SV_MAX_REGS)
+      return;
+
+   if (t->regs == NULL)
+      t->regs = xmalloc_array(SV_MAX_REGS, sizeof(void **));
+
+   t->regs[t->nregs++] = pending;
+}
+
+static void sv_task_drop_reg(rt_proc_t *p, void **pending)
+{
+   sv_task_t *t = p->task;
+   if (t == NULL)
+      return;
+
+   for (unsigned i = t->nregs; i > 0; i--) {
+      if (t->regs[i - 1] == pending) {
+         t->regs[i - 1] = t->regs[--t->nregs];
+         return;
+      }
+   }
+}
+
+static bool sv_proc_finished(const rt_proc_t *proc)
+{
+   return proc->task != NULL && proc->task->done;
+}
+
+static sv_task_t *sv_task_for(rt_proc_t *proc)
+{
+   if (proc->task == NULL) {
+      proc->task = xcalloc(sizeof(sv_task_t));
+      proc->task->proc = proc;
+   }
+
+   return proc->task;
+}
+
+typedef struct _sv_waiter {
+   struct _sv_waiter *next;
+   rt_proc_t         *proc;
+} sv_waiter_t;
+
+static hash_t *sv_events = NULL;
+
+static void sv_event_forget(rt_proc_t *proc, void *event)
+{
+   // Removes a process that was stopped while blocked on an event
+
+   sv_waiter_t *head = sv_events != NULL ? hash_get(sv_events, event) : NULL;
+   for (sv_waiter_t **link = &head; *link != NULL; link = &((*link)->next)) {
+      sv_waiter_t *w = *link;
+      if (w->proc == proc) {
+         *link = w->next;
+         proc_unpin(&(proc->wakeable));
+         free(w);
+         break;
+      }
+   }
+
+   hash_put(sv_events, event, head);
+}
+
+void x_sv_queue_wait(void *event)
+{
+   // The caller suspends with no other wake up scheduled.  Processes
+   // waiting for an event, and blocked requests of a semaphore or a
+   // mailbox, are served in the order they began to wait
+
+   rt_proc_t *proc = get_active_proc();
+   assert(proc != NULL);
+
+   if (sv_events == NULL)
+      sv_events = hash_new(64);
+
+   TRACE("process %s queues for %p", istr(proc->name), event);
+
+   note_wait(get_model(), proc);
+
+   sv_waiter_t *w = xmalloc(sizeof(sv_waiter_t));
+   w->proc = proc;
+   w->next = NULL;
+   proc_pin(&(proc->wakeable));
+   sv_task_for(proc)->wait_event = event;
+
+   sv_waiter_t *head = hash_get(sv_events, event);
+   if (head == NULL)
+      hash_put(sv_events, event, w);
+   else {
+      while (head->next != NULL)
+         head = head->next;
+      head->next = w;
+   }
+}
+
+void x_sv_event_wait(void *event)
+{
+   x_sv_queue_wait(event);
+}
+
+static int sv_programs = 0;   // Program initial blocks that have started
+
+static void async_sv_program_check(rt_model_t *m, void *arg)
+{
+   // The simulation ends when every program has completed unless a program
+   // started later in the time step
+
+   if (sv_programs == 0 && !m->finished) {
+      notef("implicit $finish from program");
+      model_finish(m);
+      model_stop(m);
+   }
+}
+
+int64_t x_sv_program_begin(void)
+{
+   // Returns non-zero if the caller must suspend until the Reactive region
+
+   rt_proc_t *proc = get_active_proc();
+   if (proc == NULL)
+      return 0;
+
+   sv_programs++;
+
+   if (proc->wakeable.reactive)
+      return 0;
+
+   proc->wakeable.reactive = true;
+   procq_do(get_model(), &proc->wakeable, async_run_process, proc);
+   return 1;
+}
+
+int64_t x_sv_reactive_yield(void)
+{
+   // The first call returns non-zero and the process runs again in the
+   // Reactive region.  The next call restores its normal behaviour.
+
+   rt_proc_t *proc = get_active_proc();
+   if (proc == NULL)
+      return 0;
+
+   if (proc->wakeable.reactive) {
+      proc->wakeable.reactive = false;
+      return 0;
+   }
+
+   proc->wakeable.reactive = true;
+   procq_do(get_model(), &proc->wakeable, async_run_process, proc);
+   return 1;
+}
+
+int64_t x_sv_sva_yield(void)
+{
+   // As x_sv_reactive_yield but the action blocks of assertions in the
+   // Reactive region run in the order the assertions appear
+
+   rt_proc_t *proc = get_active_proc();
+   if (proc != NULL && !proc->wakeable.reactive)
+      proc->wait_seq = proc->create_seq;
+
+   return x_sv_reactive_yield();
+}
+
+void x_sv_program_end(void)
+{
+   assert(sv_programs > 0);
+
+   if (--sv_programs == 0) {
+      rt_model_t *m = get_model();
+      deferq_do(&m->postponedq, async_sv_program_check, NULL);
+   }
+}
+
+void x_sv_poll_wait(void)
+{
+   // The caller suspends with no other wake up scheduled
+
+   rt_proc_t *proc = get_active_proc();
+   assert(proc != NULL);
+
+   TRACE("process %s polls", istr(proc->name));
+
+   note_wait(get_model(), proc);
+   APUSH(sv_pollers, proc);
+}
+
+void x_sv_poll_fired(void)
+{
+   // A poller found its condition changed and went on to do something
+   // which may change the state another poller depends on
+
+   sv_pollers_fired++;
+}
+
+typedef struct _sv_nba {
+   struct _sv_nba  *next;
+   struct _sv_nba **pprev;
+   mptr_t           root;     // Keeps the target and new value alive
+   size_t           bytes;
+   int64_t          offset;
+   int64_t          count;
+   int64_t          wide;     // Size of a vector held in separate planes
+   bool             trigger;  // Trigger an event rather than store
+} sv_nba_t;
+
+static sv_nba_t *sv_nba_pending = NULL;
+
+static void async_sv_nba_store(rt_model_t *m, void *arg)
+{
+   sv_nba_t *n = arg;
+
+   void **block = *mptr_get(n->root);
+   char *dest = block[0];
+   const char *value = (const char *)(block + 1);
+
+   if (n->trigger)
+      x_sv_event_trigger(dest);
+   else if (n->count < 0)
+      memcpy(dest, value, n->bytes);
+   else if (n->wide != 0) {
+      // The planes of a vector wider than 64 bits are shared so the new
+      // bits go into a copy
+      const bool four = n->wide > 0;
+      const int size = four ? n->wide : -n->wide;
+      const size_t nwords = (size + 63) / 64;
+      const int lsb = n->offset;
+
+      uint64_t *planes[2] = { NULL, NULL };
+      for (int p = 0; p < (four ? 2 : 1); p++) {
+         uint64_t *old, *src;
+         memcpy(&old, dest + p * sizeof(uint64_t), sizeof(uint64_t *));
+         memcpy(&src, value + p * sizeof(uint64_t), sizeof(uint64_t *));
+
+         uint64_t *copy = mspace_alloc(m->mspace, nwords * sizeof(uint64_t));
+         if (old != NULL)
+            memcpy(copy, old, nwords * sizeof(uint64_t));
+         else
+            memset(copy, 0, nwords * sizeof(uint64_t));
+
+         for (int64_t i = 0; i < n->count; i++) {
+            const uint64_t bit = src == NULL ? 0 : (src[i / 64] >> (i % 64)) & 1;
+            const int at = lsb + i;
+            copy[at / 64] &= ~(UINT64_C(1) << (at % 64));
+            copy[at / 64] |= bit << (at % 64);
+         }
+
+         planes[p] = copy;
+      }
+
+      for (int p = 0; p < (four ? 2 : 1); p++)
+         memcpy(dest + p * sizeof(uint64_t), &planes[p], sizeof(uint64_t *));
+   }
+   else {
+      // The new bits of a part select merge with whatever other assignments
+      // in this region have written.  Each word of a vector holds one plane.
+      const uint64_t mask = n->count >= 64
+         ? ~UINT64_C(0) : (UINT64_C(1) << n->count) - 1;
+
+      for (size_t i = 0; i < n->bytes; i += sizeof(uint64_t)) {
+         uint64_t word, bits;
+         memcpy(&word, dest + i, sizeof(uint64_t));
+         memcpy(&bits, value + i, sizeof(uint64_t));
+         word &= ~(mask << n->offset);
+         word |= (bits & mask) << n->offset;
+         memcpy(dest + i, &word, sizeof(uint64_t));
+      }
+   }
+
+   mptr_free(m->mspace, &n->root);
+
+   *n->pprev = n->next;
+   if (n->next != NULL)
+      n->next->pprev = n->pprev;
+
+   free(n);
+}
+
+static void sv_nba_timeout_cb(rt_model_t *m, void *arg)
+{
+   deferq_do(&m->nonblockq, async_sv_nba_store, arg);
+}
+
+void x_sv_nba_store(void *dest, const void *value, int64_t bytes,
+                    int64_t offset, int64_t count, int64_t after,
+                    int64_t wide)
+{
+   rt_model_t *m = get_model();
+
+   TRACE("non-blocking store to %p bytes=%"PRIi64" offset=%"PRIi64
+         " count=%"PRIi64" after=%"PRIi64, dest, bytes, offset, count, after);
+
+   sv_nba_t *n = xmalloc(sizeof(sv_nba_t));
+   n->bytes  = bytes;
+   n->offset = offset;
+   n->count  = count;
+   n->wide   = wide;
+   n->trigger = false;
+   n->root   = mptr_new(m->mspace, "non-blocking store");
+
+   void **block = mspace_alloc(m->mspace, sizeof(void *) + bytes);
+   block[0] = dest;
+   memcpy(block + 1, value, bytes);
+
+   *mptr_get(n->root) = block;
+
+   n->next  = sv_nba_pending;
+   n->pprev = &sv_nba_pending;
+   if (n->next != NULL)
+      n->next->pprev = &n->next;
+   sv_nba_pending = n;
+
+   if (after == 0)
+      deferq_do(&m->nonblockq, async_sv_nba_store, n);
+   else
+      model_set_timeout_cb(m, m->now + after, sv_nba_timeout_cb, n);
+}
+
+void x_sv_event_trigger_nba(void *event, int64_t after)
+{
+   // The event is triggered in the NBA region of this or a later time step
+
+   rt_model_t *m = get_model();
+
+   sv_nba_t *n = xmalloc(sizeof(sv_nba_t));
+   n->bytes   = 0;
+   n->offset  = 0;
+   n->count   = 0;
+   n->wide    = 0;
+   n->trigger = true;
+   n->root    = mptr_new(m->mspace, "non-blocking trigger");
+
+   void **block = mspace_alloc(m->mspace, sizeof(void *));
+   block[0] = event;
+   *mptr_get(n->root) = block;
+
+   n->next  = sv_nba_pending;
+   n->pprev = &sv_nba_pending;
+   if (n->next != NULL)
+      n->next->pprev = &n->next;
+   sv_nba_pending = n;
+
+   if (after <= 0)
+      deferq_do(&m->nonblockq, async_sv_nba_store, n);
+   else
+      model_set_timeout_cb(m, m->now + after, sv_nba_timeout_cb, n);
+}
+
+static void sv_poll_free(void)
+{
+   for (sv_nba_t *it = sv_nba_pending, *tmp; it != NULL; it = tmp) {
+      tmp = it->next;
+      free(it);
+   }
+   sv_nba_pending = NULL;
+
+   ACLEAR(sv_pollers);
+   ACLEAR(sv_reap);
+   ACLEAR(sv_handles);
+   ACLEAR(stale_events);
+   sv_pollers_woken = 0;
+   sv_pollers_fired = 0;
+   sv_procs_run = 0;
+}
+
+int64_t x_sv_event_triggered(void *event)
+{
+   rt_model_t *m = get_model();
+   return *(int64_t *)event == m->now + 1;
+}
+
+void x_sv_event_trigger(void *event)
+{
+   rt_model_t *m = get_model();
+
+   // The state of the event until the end of this time step
+   *(int64_t *)event = m->now + 1;
+
+   if (sv_events == NULL)
+      return;
+
+   sv_waiter_t *keep = NULL, **tail = &keep;
+   for (sv_waiter_t *w = hash_get(sv_events, event), *next; w; w = next) {
+      next = w->next;
+      if (w->proc->task->suspended) {
+         // Still waiting for the next trigger once it is resumed
+         w->next = NULL;
+         *tail = w;
+         tail = &(w->next);
+         continue;
+      }
+
+      TRACE("event %p wakes process %s", event, istr(w->proc->name));
+      deltaq_insert_proc(m, 0, w->proc);
+      w->proc->task->wait_event = NULL;
+      proc_unpin(&(w->proc->wakeable));
+      free(w);
+   }
+
+   hash_put(sv_events, event, keep);
+}
+
+static void sv_group_child_gone(rt_model_t *m, sv_group_t *g, bool completed)
+{
+   g->live--;
+   if (completed)
+      g->finished++;
+
+   if (g->waiter != NULL) {
+      rt_proc_t *waiter = g->waiter;
+      g->waiter = NULL;
+      if (!waiter->wakeable.zombie)
+         deltaq_insert_proc(m, 0, waiter);
+   }
+   else if (g->ended && g->live == 0)
+      sv_group_free(g);
+}
+
+static void sv_task_finish(rt_model_t *m, sv_task_t *t, bool completed)
+{
+   if (t->done)
+      return;
+
+   t->done = true;
+
+   if (t->proc->wakeable.forked) {
+      t->proc->wakeable.zombie = true;
+      APUSH(sv_reap, t->proc);
+   }
+
+   if (t->frame != NULL)
+      mptr_free(m->mspace, &t->frame);
+
+   for (unsigned i = 0; i < t->nawaiters; i++) {
+      if (!t->awaiters[i]->wakeable.zombie)
+         deltaq_insert_proc(m, 0, t->awaiters[i]);
+      proc_unpin(&(t->awaiters[i]->wakeable));
+   }
+
+   free(t->awaiters);
+   t->awaiters = NULL;
+   t->nawaiters = 0;
+
+   if (t->group != NULL)
+      sv_group_child_gone(m, t->group, completed);
+
+   sv_task_t *p = t->parent;
+   if (p != NULL) {
+      p->live_children--;
+      if (p->live_children == 0 && p->waiter != NULL) {
+         rt_proc_t *waiter = p->waiter;
+         p->waiter = NULL;
+         if (!waiter->wakeable.zombie)
+            deltaq_insert_proc(m, 0, waiter);
+      }
+   }
+}
+
+static void sv_task_kill_tree(rt_model_t *m, sv_task_t *t);
+
+static void sv_task_kill(rt_model_t *m, sv_task_t *t)
+{
+   // The process may still be scheduled or waiting on a trigger so it is
+   // marked to do nothing when it next runs
+
+   t->proc->wakeable.zombie = true;
+   t->killed = true;
+
+   dpi_proc_killed(t->proc);
+
+   if (t->handle != 0)
+      sv_handles.items[t->handle - 1].killed = true;
+
+   for (int i = 0; i < sv_pollers.count; i++) {
+      if (sv_pollers.items[i] == t->proc) {
+         sv_pollers.items[i] = sv_pollers.items[--sv_pollers.count];
+         break;
+      }
+   }
+
+   if (t->wait_event != NULL) {
+      sv_event_forget(t->proc, t->wait_event);
+      t->wait_event = NULL;
+   }
+
+   while (t->nregs > 0) {
+      const unsigned before = t->nregs;
+      clear_event(m, t->regs[before - 1], &(t->proc->wakeable));
+      if (t->nregs == before)
+         t->nregs--;
+   }
+
+   if (t->proc->tlab != NULL && t->proc != get_active_proc()) {
+      tlab_release(m->jit, t->proc->tlab);
+      t->proc->tlab = NULL;
+   }
+
+   for (sv_task_t *c = t->first_child; c != NULL; c = c->next_sibling)
+      sv_task_kill_tree(m, c);
+
+   sv_task_finish(m, t, false);
+}
+
+static void sv_task_kill_tree(rt_model_t *m, sv_task_t *t)
+{
+   // A task which has finished may still have running descendants
+
+   if (!t->done)
+      sv_task_kill(m, t);
+   else {
+      for (sv_task_t *c = t->first_child; c != NULL; c = c->next_sibling)
+         sv_task_kill_tree(m, c);
+   }
+}
+
+static void sv_proc_free(rt_model_t *m, rt_proc_t *p)
+{
+   sv_task_t *t = p->task;
+
+   if (t->handle != 0)
+      sv_handles.items[t->handle - 1].task = NULL;
+
+   for (sv_task_t **link = &(t->parent->first_child); *link != NULL;
+        link = &((*link)->next_sibling)) {
+      if (*link == t) {
+         *link = t->next_sibling;
+         break;
+      }
+   }
+
+   rt_scope_t *s = p->scope;
+   for (int i = s->procs.count - 1; i >= 0; i--) {
+      if (s->procs.items[i] == p) {
+         s->procs.items[i] = s->procs.items[--s->procs.count];
+         break;
+      }
+   }
+
+   mptr_free(m->mspace, &(p->privdata));
+   tlab_release(m->jit, p->tlab);
+   sv_task_destroy(m, p);
+   free(p);
+}
+
+static void sv_reap_procs(rt_model_t *m)
+{
+   // Frees the forked processes that nothing refers to any longer
+
+   assert(get_active_proc() == NULL);
+
+   unsigned keep = 0;
+   for (unsigned i = 0; i < sv_reap.count; i++) {
+      rt_proc_t *p = sv_reap.items[i];
+      const sv_task_t *t = p->task;
+
+      if (p->regs == PROC_REGS_MAX || t->parent == NULL)
+         continue;   // Never freed
+      else if (p->wakeable.pending || p->wakeable.delayed
+               || t->first_child != NULL || p->regs > 0)
+         sv_reap.items[keep++] = p;
+      else
+         sv_proc_free(m, p);
+   }
+
+   sv_reap.count = keep;
+   sv_reap_next = MAX(256, keep * 2);
+}
+
+static void async_spawn_process(rt_model_t *m, void *arg)
+{
+   sv_task_t *task = arg;
+   rt_proc_t *proc = task->proc;
+
+   assert(proc->wakeable.pending);
+   proc->wakeable.pending = false;
+
+   if (proc->wakeable.zombie)
+      return;   // Disabled before it could start
+
+   model_thread_t *thread = model_thread(m);
+   tlab_t *saved = thread->tlab;
+   thread->tlab = NULL;
+
+   reset_process_state(m, proc);
+
+   thread->tlab = saved;
+
+   // Runs until it first blocks before any other process
+   run_process(m, proc);
+   m->next_is_delta = true;
+
+   // The state of the process now keeps the frame alive
+   mptr_free(m->mspace, &task->frame);
+}
+
+void *x_sv_fork_begin(void)
+{
+   sv_group_t *g = xcalloc(sizeof(sv_group_t));
+   rt_proc_t *proc = get_active_proc();
+   g->parent = proc != NULL ? sv_task_for(proc) : NULL;
+   return g;
+}
+
+void x_sv_fork_name(void *arg, int64_t label)
+{
+   // Allows a fork to be disabled by name from any process in the scope
+
+   rt_proc_t *proc = get_active_proc();
+   assert(proc != NULL);
+
+   const sv_named_t n = { proc->scope, label, arg };
+   for (int i = 0; i < sv_named_groups.count; i++) {
+      if (sv_named_groups.items[i].scope == n.scope
+          && sv_named_groups.items[i].label == label) {
+         sv_named_groups.items[i] = n;
+         return;
+      }
+   }
+
+   APUSH(sv_named_groups, n);
+}
+
+static void sv_task_interrupt(rt_model_t *m, sv_task_t *t);
+static bool sv_task_in_block(const sv_task_t *t, int64_t label);
+static void sv_task_defer_disable(sv_task_t *t, int64_t label);
+
+int64_t x_sv_fork_disable_name(int64_t label)
+{
+   // Returns non-zero if the caller has been stopped
+
+   rt_proc_t *proc = get_active_proc();
+   assert(proc != NULL);
+
+   for (int i = 0; i < sv_named_groups.count; i++) {
+      const sv_named_t *n = &(sv_named_groups.items[i]);
+      if (n->scope != proc->scope || n->label != label)
+         continue;
+
+      rt_model_t *m = get_model();
+      sv_group_t *g = n->group;
+      sv_task_t *parent = g->parent;
+      for (sv_task_t *c = parent->first_child; c != NULL;
+           c = c->next_sibling) {
+         if (c->group == g && !c->done)
+            sv_task_kill(m, c);
+      }
+
+      return sv_task_for(proc)->killed;
+   }
+
+   // A named block executed by a forked process
+   rt_model_t *m = get_model();
+   for (int i = proc->scope->procs.count - 1; i >= 0; i--) {
+      rt_proc_t *p = proc->scope->procs.items[i];
+      if (p == proc || !p->wakeable.forked || p->task == NULL)
+         continue;
+
+      sv_task_t *t = p->task;
+      if (t->block_label == label && !t->done && !t->killed)
+         sv_task_kill_tree(m, t);
+   }
+
+   // A named block of another process of the same scope which is
+   // suspended inside it (9.6.2)
+   sv_task_t *self = sv_task_for(proc);
+   for (unsigned i = 0; i < sv_marked_tasks.count; i++) {
+      sv_task_t *t = sv_marked_tasks.items[i];
+      if (t == self || t->proc->scope != proc->scope || t->done
+          || t->killed || !sv_task_in_block(t, label))
+         continue;
+
+      t->disabled = label;
+      sv_task_defer_disable(t, label);
+      sv_task_interrupt(get_model(), t);
+   }
+
+   return self->killed;
+}
+
+void x_sv_fork_end(void *arg)
+{
+   sv_group_t *g = arg;
+   g->ended = true;
+   if (g->live == 0)
+      sv_group_free(g);
+}
+
+int64_t x_sv_fork_wait(void *arg, int64_t mode)
+{
+   // Returns non-zero if the caller must suspend
+
+   rt_proc_t *proc = get_active_proc();
+   assert(proc != NULL);
+
+   if (mode == 2) {
+      sv_task_t *t = sv_task_for(proc);
+      if (t->live_children == 0)
+         return 0;
+
+      t->waiter = proc;
+      return 1;
+   }
+
+   sv_group_t *g = arg;
+   if (g->live == 0 || (mode == 1 && g->finished > 0))
+      return 0;
+
+   g->waiter = proc;
+   return 1;
+}
+
+void x_sv_fork_finish(void)
+{
+   // Called at the end of the forked statement
+
+   rt_proc_t *proc = get_active_proc();
+   assert(proc != NULL);
+
+   sv_task_finish(get_model(), sv_task_for(proc), true);
+}
+
+void x_sv_fork_disable(void)
+{
+   rt_proc_t *proc = get_active_proc();
+   assert(proc != NULL);
+
+   rt_model_t *m = get_model();
+   sv_task_t *t = sv_task_for(proc);
+   for (sv_task_t *c = t->first_child; c != NULL; c = c->next_sibling)
+      sv_task_kill_tree(m, c);
+}
+
+static void sv_task_interrupt(rt_model_t *m, sv_task_t *t)
+{
+   // Wakes a process suspended in a wait statement so it can unwind
+
+   rt_proc_t *proc = t->proc;
+   if (proc->wakeable.pending)
+      return;
+
+   if (proc->wakeable.delayed) {
+      proc->wakeable.delayed = false;
+      const stale_event_t stale = { proc, proc->wake_at };
+      APUSH(stale_events, stale);
+   }
+
+   for (int i = 0; i < sv_pollers.count; i++) {
+      if (sv_pollers.items[i] == proc) {
+         sv_pollers.items[i] = sv_pollers.items[--sv_pollers.count];
+         break;
+      }
+   }
+
+   if (sv_events != NULL) {
+      const void *key;
+      void *value;
+      for (hash_iter_t it = HASH_BEGIN; hash_iter(sv_events, &it, &key, &value); ) {
+         sv_waiter_t **link = (sv_waiter_t **)&value;
+         while (*link != NULL) {
+            sv_waiter_t *w = *link;
+            if (w->proc == proc) {
+               *link = w->next;
+               t->wait_event = NULL;
+               proc_unpin(&(proc->wakeable));
+               free(w);
+            }
+            else
+               link = &(w->next);
+         }
+
+         if (value != hash_get(sv_events, key))
+            hash_put(sv_events, key, value);
+      }
+   }
+
+   proc->wakeable.interrupted = true;
+   deltaq_insert_proc(m, 0, proc);
+}
+
+void x_sv_wait_mark(int64_t label, int64_t first)
+{
+   // Records the named blocks around the wait the caller suspends in
+
+   rt_proc_t *proc = get_active_proc();
+   assert(proc != NULL);
+
+   sv_task_t *t = sv_task_for(proc);
+   if (first)
+      t->nmarks = 0;
+
+   if (t->nmarks < ARRAY_LEN(t->marks))
+      t->marks[t->nmarks++] = label;
+
+   t->marked = true;
+
+   if (!t->listed) {
+      t->listed = true;
+      APUSH(sv_marked_tasks, t);
+   }
+}
+
+static bool sv_task_in_block(const sv_task_t *t, int64_t label)
+{
+   if (!t->marked)
+      return false;
+
+   for (unsigned i = 0; i < t->nmarks; i++) {
+      if (t->marks[i] == label)
+         return true;
+   }
+
+   return false;
+}
+
+int64_t x_sv_fork_disable_group(int64_t depth, int64_t label)
+{
+   // Stops every process forked by the same fork as the caller or, for
+   // a larger depth, as one of its ancestors
+
+   rt_proc_t *proc = get_active_proc();
+   assert(proc != NULL);
+
+   rt_model_t *m = get_model();
+   sv_task_t *t = sv_task_for(proc);
+   for (int64_t i = 1; i < depth && t->parent != NULL; i++)
+      t = t->parent;
+
+   sv_group_t *g = t->group;
+   sv_task_t *parent = t->parent;
+   if (g == NULL || parent == NULL)
+      return 0;
+
+   // The parent only unwinds if it is still waiting inside the block
+   const bool joining = parent->proc == g->waiter;
+   const bool interrupt = label != 0 && !joining && sv_task_in_block(parent, label);
+
+   if (label != 0 && (joining || interrupt))
+      parent->disabled = label;
+
+   for (sv_task_t *c = parent->first_child; c != NULL; c = c->next_sibling) {
+      if (c->group == g)
+         sv_task_kill_tree(m, c);
+   }
+
+   if (interrupt)
+      sv_task_interrupt(m, parent);
+
+   return 1;
+}
+
+int64_t x_sv_fork_disabled(void)
+{
+   // Label of the block which a forked process disabled, or zero
+
+   rt_proc_t *proc = get_active_proc();
+   assert(proc != NULL);
+
+   sv_task_t *t = sv_task_for(proc);
+   const int64_t label = t->disabled;
+   t->disabled = 0;
+   t->marked = false;
+   return label;
+}
+
+rt_proc_t *model_defer_note(uint32_t *runs, uint32_t *seq)
+{
+   // The process which evaluates a deferred assertion, kept until its
+   // report matures
+
+   rt_proc_t *proc = get_active_proc();
+   if (proc == NULL) {
+      *runs = *seq = 0;
+      return NULL;
+   }
+
+   sv_task_t *t = sv_task_for(proc);
+   *runs = t->runs;
+   *seq = ++t->dseq;
+   proc_pin(&(proc->wakeable));
+   return proc;
+}
+
+bool model_defer_live(rt_proc_t *proc, uint32_t runs, uint32_t seq,
+                      const int64_t *scopes, unsigned nscopes)
+{
+   // A pending deferred assertion report is discarded when its process
+   // has resumed or been killed since the evaluation, or when a block
+   // that contains it or its label has been disabled (16.4.4)
+
+   if (proc == NULL)
+      return true;
+
+   const sv_task_t *t = proc->task;
+   bool live = t != NULL && t->runs == runs && !t->killed;
+   for (unsigned i = 0; live && i < t->ndis; i++) {
+      if (t->dis[i].seq < seq)
+         continue;
+
+      for (unsigned j = 0; j < nscopes; j++) {
+         if (scopes[j] == t->dis[i].label)
+            live = false;
+      }
+   }
+
+   proc_unpin(&(proc->wakeable));
+   return live;
+}
+
+static void sv_task_defer_disable(sv_task_t *t, int64_t label)
+{
+   // Reports pending in the block with this name are cancelled
+
+   const int64_t folded = label & 0x7fffffff;
+   for (unsigned i = 0; i < t->ndis; i++) {
+      if (t->dis[i].label == folded) {
+         t->dis[i].seq = t->dseq;
+         return;
+      }
+   }
+
+   if (t->ndis == t->maxdis) {
+      t->maxdis = MAX(t->maxdis * 2, 4);
+      t->dis = xrealloc_array(t->dis, t->maxdis, sizeof(t->dis[0]));
+   }
+
+   t->dis[t->ndis].label = folded;
+   t->dis[t->ndis].seq = t->dseq;
+   t->ndis++;
+}
+
+int64_t x_sv_defer_disable(int64_t label)
+{
+   rt_proc_t *proc = get_active_proc();
+   if (proc != NULL)
+      sv_task_defer_disable(sv_task_for(proc), label);
+
+   return 0;
+}
+
+void *x_sv_process_self(void)
+{
+   // There is no process while static variables are being initialised
+   rt_proc_t *proc = get_active_proc();
+   if (proc == NULL)
+      return NULL;
+
+   sv_task_t *t = sv_task_for(proc);
+   if (t->handle == 0) {
+      sv_handle_t h = { .task = t };
+      APUSH(sv_handles, h);
+      t->handle = sv_handles.count;
+   }
+
+   return (void *)(uintptr_t)t->handle;
+}
+
+static sv_handle_t *sv_process_handle(void *arg)
+{
+   const uintptr_t id = (uintptr_t)arg;
+   if (id == 0)
+      jit_msg(NULL, DIAG_FATAL, "null process handle");
+
+   assert(id <= sv_handles.count);
+   return &(sv_handles.items[id - 1]);
+}
+
+int64_t x_sv_process_status(void *arg)
+{
+   // Matches the values of process::state
+
+   sv_handle_t *h = sv_process_handle(arg);
+   sv_task_t *t = h->task;
+
+   if (h->killed)
+      return 4;
+   else if (t == NULL || t->done)
+      return 0;
+   else if (t->suspended)
+      return 3;
+   else if (t->proc == get_active_proc())
+      return 1;
+   else
+      return 2;
+}
+
+int64_t x_sv_process_suspend(void *arg)
+{
+   // Returns non-zero if the caller suspended itself and must stop
+
+   sv_task_t *t = sv_process_handle(arg)->task;
+   if (t == NULL || t->done || t->suspended)
+      return 0;
+
+   t->suspended = true;
+
+   if (t->proc == get_active_proc()) {
+      t->missed = true;
+      return 1;
+   }
+
+   return 0;
+}
+
+int64_t x_sv_process_resume(void *arg)
+{
+   sv_task_t *t = sv_process_handle(arg)->task;
+   if (t == NULL || t->done || !t->suspended)
+      return 0;
+
+   t->suspended = false;
+
+   if (t->missed) {
+      t->missed = false;
+      deltaq_insert_proc(get_model(), 0, t->proc);
+   }
+
+   return 0;
+}
+
+int64_t x_sv_process_kill(void *arg)
+{
+   // Returns non-zero if the caller has killed itself and must stop
+
+   sv_task_t *t = sv_process_handle(arg)->task;
+   if (t == NULL || t->done)
+      return 0;
+
+   rt_model_t *m = get_model();
+
+   // The process may be one that was not forked
+   t->proc->wakeable.forked = true;
+
+   sv_task_kill(m, t);
+
+   return t->proc == get_active_proc();
+}
+
+int64_t x_sv_process_await(void *arg)
+{
+   // Returns non-zero if the caller must suspend
+
+   sv_task_t *t = sv_process_handle(arg)->task;
+   if (t == NULL || t->done)
+      return 0;
+
+   rt_proc_t *proc = get_active_proc();
+   assert(proc != NULL);
+
+   if (t->proc == proc) {
+      jit_msg(NULL, DIAG_FATAL, "a process cannot await itself");
+      return 0;
+   }
+
+   for (unsigned i = 0; i < t->nawaiters; i++) {
+      if (t->awaiters[i] == proc)
+         return 1;   // Woken for some other reason
+   }
+
+   t->awaiters = xrealloc_array(t->awaiters, t->nawaiters + 1,
+                                sizeof(rt_proc_t *));
+   t->awaiters[t->nawaiters++] = proc;
+   proc_pin(&(proc->wakeable));
+   return 1;
+}
+
+void x_sv_spawn(const ffi_closure_t *closure, void *group, int64_t label)
+{
+   rt_model_t *m = get_model();
+
+   if (get_active_proc() == NULL) {
+      // 13.4.4: the error may be given at compile time or run time
+      jit_msg(NULL, DIAG_ERROR, "fork-join_none in a function is only "
+              "allowed in a process created by an initial or always "
+              "procedure, not during initialisation of a variable");
+      return;
+   }
+
+   rt_proc_t *parent = get_active_proc();
+
+   TRACE("spawn process %pi", jit_get_name(m->jit, closure->handle));
+
+   rt_scope_t *s = parent->scope;
+
+   LOCAL_TEXT_BUF tb = tb_new();
+   get_path_name(s, tb);
+
+   rt_proc_t *p = xcalloc_flex(sizeof(rt_proc_t), closure->nargs - 1,
+                               sizeof(jit_scalar_t));
+
+   p->where    = parent->where;
+   p->scope    = s;
+   p->privdata = mptr_new(m->mspace, "process privdata");
+
+   ffi_copy_closure(&p->closure, closure);
+
+   p->wakeable.kind      = W_PROC;
+   p->wakeable.pending   = false;
+   p->wakeable.postponed = false;
+   p->wakeable.delayed   = false;
+   p->wakeable.forked    = true;
+   p->wakeable.reactive  = parent->wakeable.reactive;
+
+   setup_process(m, p, tb_get(tb));
+
+   APUSH(s->procs, p);
+
+   sv_task_t *pt = sv_task_for(parent);
+   sv_task_t *task = sv_task_for(p);
+   task->parent = pt;
+   task->group = group;
+   task->block_label = label;
+   task->next_sibling = pt->first_child;
+   pt->first_child = task;
+   pt->live_children++;
+
+   sv_group_t *g = group;
+   g->live++;
+
+   // Only the process state is a root for the garbage collector and it
+   // has not been created yet so keep the captured frame alive until then
+   task->frame = mptr_new(m->mspace, "fork frame");
+   *mptr_get(task->frame) = closure->args[0].pointer;
+
+   set_pending(&p->wakeable);
+   deferq_do(&m->spawnq, async_spawn_process, task);
+   m->next_is_delta = true;
 }
 
 void *x_function_trigger(jit_handle_t handle, unsigned nargs,

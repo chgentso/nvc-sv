@@ -27,7 +27,7 @@ begin
         wait until falling_edge(clk);
         din <= X"ab";
         wait until rising_edge(clk);
-        assert dout = X"UU" report to_hstring(dout);
+        assert dout = X"00" report to_hstring(dout);
         din <= X"cd";
         wait until rising_edge(clk);
         assert dout = X"ab" report to_hstring(dout);

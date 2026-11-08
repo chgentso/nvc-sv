@@ -161,6 +161,41 @@ void mspace_stack_limit(void *limit)
    atomic_store(&(stack_limit[thread_id()]), limit);
 }
 
+void *mspace_get_stack_limit(void)
+{
+   return atomic_load(&(stack_limit[thread_id()]));
+}
+
+#define MAX_PARKED 256
+
+static struct {
+   const intptr_t *lo;
+   const intptr_t *hi;
+} parked[MAX_PARKED];
+
+void mspace_park_range(const void *lo, const void *hi)
+{
+   for (int i = 0; i < MAX_PARKED; i++) {
+      if (atomic_cas(&(parked[i].lo), NULL, lo)) {
+         atomic_store(&(parked[i].hi), hi);
+         return;
+      }
+   }
+
+   fatal_trace("too many suspended foreign calls");
+}
+
+void mspace_unpark_range(const void *lo)
+{
+   for (int i = 0; i < MAX_PARKED; i++) {
+      if (atomic_load(&(parked[i].lo)) == lo) {
+         atomic_store(&(parked[i].hi), NULL);
+         atomic_store(&(parked[i].lo), NULL);
+         return;
+      }
+   }
+}
+
 static void *mspace_try_alloc(mspace_t *m, size_t size)
 {
    // Add one to size before rounding up to LINE_SIZE to allow a valid
@@ -411,6 +446,16 @@ static void mspace_gc(mspace_t *m)
          }
 #endif
       }
+   }
+
+   for (int i = 0; i < MAX_PARKED; i++) {
+      const intptr_t *lo = atomic_load(&(parked[i].lo));
+      const intptr_t *hi = atomic_load(&(parked[i].hi));
+      if (lo == NULL || hi == NULL)
+         continue;
+
+      for (const intptr_t *p = lo; p < hi; p++)
+         mspace_mark_root(m, *p, &state);
    }
 
    for (mptr_t p = m->roots; p; p = p->next)

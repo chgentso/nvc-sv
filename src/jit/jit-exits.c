@@ -29,7 +29,10 @@
 #include "rt/mspace.h"
 #include "rt/structs.h"
 #include "type.h"
+#include "tree.h"
+#include "vlog/vlog-node.h"
 #include "vlog/vlog-number.h"
+#include "vlog/vlog-util.h"
 
 #include <assert.h>
 #include <ctype.h>
@@ -211,6 +214,10 @@ void x_exponent_fail(int64_t value, tree_t where)
 
 void x_overflow(int64_t lhs, int64_t rhs, tree_t where)
 {
+   if (tree_kind(where) == T_FCALL
+       && (tree_flags(where) & TREE_F_WRAP_OVERFLOW))
+      return;   // The result has already wrapped around
+
    LOCAL_TEXT_BUF tb = tb_new();
    if (tree_kind(where) == T_FCALL) {
       switch (tree_subkind(tree_ref(where))) {
@@ -239,6 +246,55 @@ void x_overflow(int64_t lhs, int64_t rhs, tree_t where)
 
 void x_null_deref(tree_t where)
 {
+   // A SystemVerilog method call or property access through a null
+   // handle names the member (8.4)
+   vlog_node_t v = vlog_from_object(tree_to_object(where));
+   if (v != NULL) {
+      vlog_node_t decl = NULL, cls = NULL;
+      const char *what = "call to";
+      switch (vlog_kind(v)) {
+      case V_METHOD_CALL:
+      case V_USER_FCALL:
+      case V_USER_TCALL:
+         decl = vlog_has_ref(v) ? vlog_ref(v) : NULL;
+         break;
+      case V_MEMBER_REF:
+         decl = vlog_has_ref(v) ? vlog_ref(v) : NULL;
+         cls = vlog_get_type(vlog_value(v));
+         what = "property";
+         break;
+      default:
+         break;
+      }
+
+      if (decl != NULL && cls == NULL) {
+         switch (vlog_kind(decl)) {
+         case V_FUNC_DECL:
+         case V_TASK_DECL:
+            if (vlog_has_ref(decl))
+               cls = vlog_ref(decl);
+            break;
+         default:
+            break;
+         }
+      }
+
+      if (decl != NULL && vlog_has_ident(decl)) {
+         LOCAL_TEXT_BUF tb = tb_new();
+         if (cls != NULL && vlog_kind(cls) == V_CLASS_DECL) {
+            const char *cname = istr(vlog_ident(cls));
+            const char *at = strchr(cname, '@');
+            tb_catn(tb, cname, at != NULL ? at - cname : strlen(cname));
+            tb_cat(tb, "::");
+         }
+         tb_istr(tb, vlog_ident(decl));
+
+         jit_msg(tree_loc(where), DIAG_FATAL, "null access: %s %s", what,
+                 tb_get(tb));
+         return;
+      }
+   }
+
    jit_msg(tree_loc(where), DIAG_FATAL, "null access dereference");
 }
 
@@ -1051,6 +1107,32 @@ void __nvc_vec4op(jit_vec_op_t op, jit_anchor_t *anchor, jit_scalar_t *args,
 
    const int nwords = (size + 63) / 64;
 
+   if (size > 64 && op != JIT_VEC_EXTRACT) {
+      // Two-state operands have no X/Z plane so supply an all-zero one
+      uint64_t *zero = NULL;
+      for (int i = 1; i < 6; i += 2) {
+         if (args[i].pointer != NULL)
+            continue;
+         else if (op == JIT_VEC_TERNARY && i == 1)
+            continue;
+         else if ((op == JIT_VEC_ZEXT || op == JIT_VEC_SEXT)
+                  && (i > 1 || args[2].integer <= 64))
+            continue;
+         else if (op == JIT_VEC_INSERT && i == 3 && args[4].integer <= 64)
+            continue;
+         else if (op == JIT_VEC_INSERT && i > 3)
+            continue;
+         else if (i == 5 && op != JIT_VEC_TERNARY)
+            continue;
+
+         if (zero == NULL) {
+            zero = jit_mspace_alloc(nwords * sizeof(uint64_t));
+            memset(zero, 0, nwords * sizeof(uint64_t));
+         }
+         args[i].pointer = zero;
+      }
+   }
+
    switch (op) {
    case JIT_VEC_CASE_EQ:
    case JIT_VEC_CASE_NEQ:
@@ -1141,12 +1223,33 @@ void __nvc_vec4op(jit_vec_op_t op, jit_anchor_t *anchor, jit_scalar_t *args,
             }
             break;
          case JIT_VEC_AND1:
-            bresult = vec2_or1(size, xb);
-            aresult = vec2_and1(size, xa) | bresult;
-            break;
          case JIT_VEC_OR1:
-            bresult = vec2_or1(size, xb);
-            aresult = vec2_or1(size, xa) | bresult;
+            {
+               // A known bit decides the result whatever the others are
+               const bool is_and = op == JIT_VEC_AND1;
+               bool decided = false;
+               for (int i = 0; i < nwords; i++) {
+                  uint64_t valid = ~UINT64_C(0);
+                  if (i == nwords - 1 && size % 64 != 0)
+                     valid >>= 64 - size % 64;
+
+                  const uint64_t known = ~xb[i] & valid;
+                  decided |= is_and ? (known & ~xa[i]) != 0
+                     : (known & xa[i]) != 0;
+               }
+
+               const bool unknown = vec2_or1(size, xb) != 0;
+               if (decided) {
+                  aresult = !is_and;
+                  bresult = 0;
+               }
+               else if (unknown)
+                  aresult = bresult = 1;
+               else {
+                  aresult = is_and;
+                  bresult = 0;
+               }
+            }
             break;
          case JIT_VEC_XOR1:
             {
@@ -1615,6 +1718,16 @@ object_t *__nvc_get_object(const char *unit, ptrdiff_t offset)
    return object_from_locus(ident_new(unit), offset, lib_load_handler);
 }
 
+static inline uint64_t pack_bytes(const uint8_t *src, unsigned shift)
+{
+   // Gather bit zero or one of eight bytes into one byte, the first byte
+   // in the most significant position
+   uint64_t word;
+   memcpy(&word, src, sizeof(word));
+   const uint64_t sel = (word >> shift) & UINT64_C(0x0101010101010101);
+   return (sel * UINT64_C(0x8040201008040201)) >> 56;
+}
+
 DLLEXPORT
 void __nvc_pack(const uint8_t *src, int32_t size, jit_scalar_t *args)
 {
@@ -1626,10 +1739,21 @@ void __nvc_pack(const uint8_t *src, int32_t size, jit_scalar_t *args)
       for (int i = 0; i < nwords * 2; i++)
          mem[i] = 0;
 
-      for (int i = 0; i < size; i++) {
+      const int top = size % 64;
+      for (int i = 0; i < top; i++) {
          const int pos = size - 1 - i;
          abits[pos / 64] |= (uint64_t)(src[i] & 1) << (pos % 64);
          bbits[pos / 64] |= (uint64_t)((src[i] >> 1) & 1) << (pos % 64);
+      }
+
+      for (int w = size / 64 - 1, i = top; w >= 0; w--, i += 64) {
+         uint64_t a = 0, b = 0;
+         for (int j = 0; j < 64; j += 8) {
+            a = (a << 8) | pack_bytes(src + i + j, 0);
+            b = (b << 8) | pack_bytes(src + i + j, 1);
+         }
+         abits[w] = a;
+         bbits[w] = b;
       }
 
       args[0].pointer = abits;
@@ -1648,6 +1772,16 @@ void __nvc_pack(const uint8_t *src, int32_t size, jit_scalar_t *args)
    }
 }
 
+static inline uint64_t unpack_bits(uint64_t byte)
+{
+   // Spread the bits of a byte to the low bit of eight bytes with the most
+   // significant bit in the first byte
+   const uint64_t sel = (byte * UINT64_C(0x0101010101010101))
+      & UINT64_C(0x0102040810204080);
+   return ((sel + UINT64_C(0x7f7f7f7f7f7f7f7f)) >> 7)
+      & UINT64_C(0x0101010101010101);
+}
+
 DLLEXPORT
 void __nvc_unpack(jit_scalar_t aval, jit_scalar_t bval, jit_scalar_t *args)
 {
@@ -1659,10 +1793,25 @@ void __nvc_unpack(jit_scalar_t aval, jit_scalar_t bval, jit_scalar_t *args)
       const uint64_t *abits = aval.pointer;
       const uint64_t *bbits = bval.pointer;
 
-      for (int i = 0; i < size; i++) {
-         const uint64_t abit = (abits[i / 64] >> (i % 64)) & 1;
-         const uint64_t bbit = (bbits[i / 64] >> (i % 64)) & 1;
-         dest[size - i - 1] = abit | (bbit << 1) | strength;
+      const int top = size % 64;
+      for (int i = 0; i < top; i++) {
+         const int pos = size - 1 - i;
+         const uint64_t abit = (abits[pos / 64] >> (pos % 64)) & 1;
+         const uint64_t bbit =
+            bbits ? (bbits[pos / 64] >> (pos % 64)) & 1 : 0;
+         dest[i] = abit | (bbit << 1) | strength;
+      }
+
+      const uint64_t str8 = strength * UINT64_C(0x0101010101010101);
+      for (int w = size / 64 - 1, i = top; w >= 0; w--, i += 64) {
+         for (int j = 0; j < 64; j += 8) {
+            const unsigned shift = 56 - j;
+            const uint64_t a = unpack_bits((abits[w] >> shift) & 0xff);
+            const uint64_t b =
+               bbits ? unpack_bits((bbits[w] >> shift) & 0xff) : 0;
+            const uint64_t out = a | (b << 1) | str8;
+            memcpy(dest + i + j, &out, sizeof(out));
+         }
       }
    }
    else {

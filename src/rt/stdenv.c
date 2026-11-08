@@ -211,6 +211,10 @@ void _std_env_stop(jit_scalar_t *args)
    const int32_t have_status = args[3].integer;
    const int32_t status      = args[4].integer;
 
+   rt_model_t *m = get_model_or_null();
+   if (m != NULL)
+      model_finish(m);
+
    if (have_status) {
       notef("%s called with status %d", finish ? "FINISH" : "STOP", status);
       jit_abort_with_status(status);
