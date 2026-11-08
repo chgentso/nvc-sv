@@ -780,6 +780,9 @@ void psl_lower_decl(unit_registry_t *ur, lower_unit_t *parent, psl_node_t p,
    case P_CLOCK_DECL:
       psl_lower_clock_decl(ur, parent, p, label);
       break;
+   case P_PROPERTY_DECL:
+   case P_SEQUENCE_DECL:
+      break;   // Nothing to lower until instantiated
    default:
       fatal_at(psl_loc(p), "cannot lower PSL declaration kind %s",
                psl_kind_str(psl_kind(p)));
