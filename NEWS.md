@@ -39,6 +39,9 @@
   evaluated if the left hand operand determines the result.
 - A PSL `default clock` declaration in a block now takes precedence over
   the declaration in the enclosing region.
+- The PSL built-in functions `prev`, `rose`, `fell` and `stable` now accept
+  an explicit clock argument, `prev` and `stable` accept a value of any
+  type, and `nondet_vector` is supported.
 - Added a `pkg-config` configuration file to aid locating the VHPI
   headers (from @gsmecher).
 - The `'IMAGE` and `to_string` of an enumeration literal that is an

@@ -1531,5 +1531,8 @@ anontype1       normal,2019
 anontype2       normal,2019
 anontype3       normal,2019
 psl31           gold,2008
+psl26           gold,2008
+psl27           normal,2008
+psl29           normal,2008
 vlogrealport1   verilog
 vlogcasegen3    verilog

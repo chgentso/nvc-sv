@@ -6140,6 +6140,38 @@ static tree_t solve_range(nametab_t *tab, tree_t r)
    }
 }
 
+static type_t solve_psl_value_set(nametab_t *tab, psl_node_t vs)
+{
+   if (psl_subkind(vs) == PSL_VALUE_SET_BOOLEAN)
+      return std_type(NULL, STD_BOOLEAN);
+
+   int n_ops = psl_operands(vs);
+   assert(n_ops > 0);
+
+   type_t type = NULL;
+   for (int i = 0; i < n_ops; i++) {
+      psl_node_t item = psl_operand(vs, i);
+
+      if (psl_kind(item) == P_RANGE) {
+         psl_node_t left = psl_left(item);
+         psl_set_tree(left, solve_types(tab, psl_tree(left), type));
+
+         psl_node_t right = psl_right(item);
+         psl_set_tree(right, solve_types(tab, psl_tree(right), type));
+
+         type = tree_type(psl_tree(left));
+      }
+      else {
+         tree_t t = solve_types(tab, psl_tree(item), type);
+         psl_set_tree(item, t);
+
+         type = tree_type(t);
+      }
+   }
+
+   return type;
+}
+
 static tree_t solve_psl_fcall(nametab_t *tab, tree_t t)
 {
    if (tree_has_type(t))
@@ -6168,34 +6200,14 @@ static tree_t solve_psl_fcall(nametab_t *tab, tree_t t)
    case PSL_BUILTIN_NONDET:
       {
          assert(psl_operands(p) == 1);
-         psl_node_t vs = psl_operand(p, 0);
-         if (psl_subkind(vs) == PSL_VALUE_SET_BOOLEAN)
-            type = std_type(NULL, STD_BOOLEAN);
-         else {
-            int n_ops = psl_operands(vs);
-            assert(n_ops > 0);
-
-            type = NULL;
-            for (int i = 0; i < n_ops; i++) {
-               psl_node_t item = psl_operand(vs, i);
-
-               if (psl_kind(item) == P_RANGE) {
-                  psl_node_t left = psl_left(item);
-                  psl_set_tree(left, solve_types(tab, psl_tree(left), type));
-
-                  psl_node_t right = psl_right(item);
-                  psl_set_tree(right, solve_types(tab, psl_tree(right), type));
-
-                  type = tree_type(psl_tree(left));
-               }
-               else {
-                  tree_t t = solve_types(tab, psl_tree(item), type);
-                  psl_set_tree(item, t);
-
-                  type = tree_type(t);
-               }
-            }
-         }
+         type = solve_psl_value_set(tab, psl_operand(p, 0));
+      }
+      break;
+   case PSL_BUILTIN_NONDET_VECTOR:
+      {
+         assert(psl_operands(p) == 2);
+         (void)solve_psl_value_set(tab, psl_operand(p, 1));
+         type = std_type(NULL, STD_BIT_VECTOR);
       }
       break;
    default:

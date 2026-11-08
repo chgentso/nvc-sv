@@ -2948,6 +2948,34 @@ static type_t implicit_protected_instance(type_t type, tree_t decl,
    }
 }
 
+static tree_t make_stable_expr(psl_node_t p, tree_t call)
+{
+   // stable(x) is equivalent to prev(x) = x for a value of any type
+
+   psl_node_t prev = psl_new(P_BUILTIN_FCALL);
+   psl_set_subkind(prev, PSL_BUILTIN_PREV);
+   psl_set_loc(prev, psl_loc(p));
+
+   const int nops = psl_operands(p);
+   for (int i = 0; i < nops; i++)
+      psl_add_operand(prev, psl_operand(p, i));
+
+   tree_t cur = psl_tree(psl_operand(p, 0));
+
+   tree_t last = tree_new(T_PSL_FCALL);
+   tree_set_psl(last, prev);
+   tree_set_loc(last, tree_loc(call));
+   tree_set_type(last, tree_type(cur));
+
+   tree_t eq = tree_new(T_FCALL);
+   tree_set_ident(eq, well_known(W_OP_EQUAL));
+   tree_set_loc(eq, tree_loc(call));
+   add_param(eq, last, P_POS, NULL);
+   add_param(eq, cur, P_POS, NULL);
+
+   return solve_types(nametab, eq, std_type(NULL, STD_BOOLEAN));
+}
+
 static psl_node_t with_default_clock(psl_node_t prop)
 {
    if (psl_kind(prop) == P_CLOCKED)
@@ -5130,6 +5158,7 @@ static tree_t p_primary(tree_t head)
    case tENDED:
    case tSTABLE:
    case tNONDET:
+   case tNONDETV:
       {
          psl_node_t p = p_psl_builtin_function_call();
          psl_check(p, nametab);
@@ -5137,6 +5166,10 @@ static tree_t p_primary(tree_t head)
          tree_t t = tree_new(T_PSL_FCALL);
          tree_set_psl(t, p);
          tree_set_loc(t, CURRENT_LOC);
+
+         if (psl_subkind(p) == PSL_BUILTIN_STABLE)
+            return make_stable_expr(p, t);
+
          return t;
       }
 
@@ -12385,6 +12418,7 @@ static psl_node_t p_psl_clock_expression(void)
 
    psl_node_t p = psl_new(P_CLOCK_DECL);
    psl_set_tree(p, expr);
+   psl_set_loc(p, tree_loc(expr));
 
    return p;
 }
@@ -12464,7 +12498,7 @@ static psl_node_t p_psl_builtin_function_call(void)
             psl_add_operand(p, p2);
 
             if (optional(tCOMMA))
-               (void)p_psl_clock_expression();
+               psl_add_operand(p, p_psl_clock_expression());
          }
       }
       break;
@@ -12480,11 +12514,13 @@ static psl_node_t p_psl_builtin_function_call(void)
    case PSL_BUILTIN_ROSE:
    case PSL_BUILTIN_STABLE:
       {
-         psl_node_t p1 = p_hdl_or_psl_expression(NULL, PSL_TYPE_BIT);
+         const psl_type_t type =
+            kind == PSL_BUILTIN_STABLE ? PSL_TYPE_ANY : PSL_TYPE_BIT;
+         psl_node_t p1 = p_hdl_or_psl_expression(NULL, type);
          psl_add_operand(p, p1);
 
          if (optional(tCOMMA))
-            (void)p_psl_clock_expression();
+            psl_add_operand(p, p_psl_clock_expression());
       }
       break;
 
@@ -12494,7 +12530,7 @@ static psl_node_t p_psl_builtin_function_call(void)
          psl_add_operand(p, p1);
 
          if (optional(tCOMMA))
-            (void)p_psl_clock_expression();
+            psl_add_operand(p, p_psl_clock_expression());
       }
       break;
 

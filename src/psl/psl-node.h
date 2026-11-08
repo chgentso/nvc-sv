@@ -188,6 +188,11 @@ void psl_set_right(psl_node_t p, psl_node_t right);
 psl_flags_t psl_flags(psl_node_t p);
 void psl_set_flag(psl_node_t p, psl_flags_t mask);
 
+typedef void (*psl_visit_fn_t)(psl_node_t p, void *context);
+
+unsigned psl_visit_only(psl_node_t p, psl_visit_fn_t fn, void *context,
+                        psl_kind_t kind);
+
 object_t *psl_to_object(psl_node_t p);
 psl_node_t psl_from_object(object_t *obj);
 

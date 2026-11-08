@@ -420,3 +420,24 @@ psl_node_t psl_from_object(object_t *obj)
    else
       return NULL;
 }
+
+unsigned psl_visit_only(psl_node_t p, psl_visit_fn_t fn, void *context,
+                        psl_kind_t kind)
+{
+   assert(p != NULL);
+
+   object_visit_ctx_t ctx = {
+      .count      = 0,
+      .postorder  = (object_visit_fn_t)fn,
+      .preorder   = NULL,
+      .context    = context,
+      .kind       = kind,
+      .tag        = OBJECT_TAG_PSL,
+      .generation = object_next_generation(),
+      .deep       = false
+   };
+
+   object_visit(&(p->object), &ctx);
+
+   return ctx.count;
+}

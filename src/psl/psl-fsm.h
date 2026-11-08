@@ -59,6 +59,7 @@ typedef struct _fsm_state {
    fsm_state_t *next;
    fsm_edge_t  *edges;
    psl_node_t   where;
+   psl_node_t   clock;
    psl_guard_t  guard;
    bool         initial;
    bool         accept;

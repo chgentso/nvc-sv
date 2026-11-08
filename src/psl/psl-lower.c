@@ -16,8 +16,10 @@
 //
 
 #include "util.h"
+#include "array.h"
 #include "common.h"
 #include "cov/cov-api.h"
+#include "hash.h"
 #include "lib.h"
 #include "lower.h"
 #include "option.h"
@@ -35,6 +37,16 @@
 #define PSL_BLOCK_CASE  1
 #define PSL_BLOCK_ABORT 2
 #define PSL_BLOCK_PREV  3
+
+typedef A(psl_node_t) clock_list_t;
+
+typedef struct {
+   psl_node_t    main_clock;
+   bool          multiclock;
+   vcode_block_t prev_tail;
+} psl_ctx_t;
+
+static char psl_ctx_key;
 
 static void psl_wait_cb(tree_t t, void *ctx)
 {
@@ -242,10 +254,30 @@ static void psl_enter_state(fsm_state_t *state)
    emit_enter_state(emit_const(vint32, state->id), strong_reg);
 }
 
+static psl_ctx_t *psl_get_ctx(lower_unit_t *lu);
+static vcode_reg_t psl_lower_clock_now(lower_unit_t *lu, psl_node_t clk);
+
 static void psl_lower_state(lower_unit_t *lu, psl_fsm_t *fsm,
                             fsm_state_t *state, vcode_block_t *state_bb)
 {
    emit_comment("Property state %d", state->id);
+
+   psl_ctx_t *ctx = psl_get_ctx(lu);
+   if (ctx->multiclock) {
+      // Only evaluate the state on the ticks of its clock
+      vcode_reg_t tick_reg =
+         psl_lower_clock_now(lu, state->clock ?: ctx->main_clock);
+
+      vcode_block_t run_bb = emit_block();
+      vcode_block_t wait_bb = emit_block();
+      emit_cond(tick_reg, run_bb, wait_bb);
+
+      vcode_select_block(wait_bb);
+      psl_enter_state(state);
+      emit_return(VCODE_INVALID_REG);
+
+      vcode_select_block(run_bb);
+   }
 
    if (state->initial && psl_fsm_repeating(fsm))
       psl_enter_state(state);
@@ -373,13 +405,40 @@ static vcode_reg_t psl_lower_async_abort(unit_registry_t *ur,
    return emit_function_trigger(name, args, ARRAY_LEN(args));
 }
 
+static psl_ctx_t *psl_get_ctx(lower_unit_t *lu)
+{
+   return hash_get(lu->objects, &psl_ctx_key);
+}
+
+static psl_node_t psl_clock_operand(psl_node_t p)
+{
+   const int nops = psl_operands(p);
+   if (nops > 0 && psl_kind(psl_operand(p, nops - 1)) == P_CLOCK_DECL)
+      return psl_operand(p, nops - 1);
+   else
+      return NULL;
+}
+
+static vcode_reg_t psl_lower_clock_edge(lower_unit_t *lu, psl_node_t p);
+
+static vcode_reg_t psl_lower_clock_now(lower_unit_t *lu, psl_node_t clk)
+{
+   tree_t expr = psl_tree(clk);
+   if (tree_kind(expr) == T_PSL_FCALL)
+      return psl_lower_clock_edge(lu, tree_psl(expr));
+   else
+      return lower_rvalue(lu, expr);
+}
+
 static vcode_reg_t psl_lower_prev_shift_reg(lower_unit_t *lu, tree_t expr,
-                                            int cycles)
+                                            int cycles, psl_node_t clock)
 {
    vcode_state_t state;
    vcode_state_save(&state);
 
-   vcode_select_block(PSL_BLOCK_PREV);
+   psl_ctx_t *ctx = psl_get_ctx(lu);
+
+   vcode_select_block(ctx != NULL ? ctx->prev_tail : PSL_BLOCK_PREV);
 
    type_t type = tree_type(expr);
 
@@ -407,6 +466,21 @@ static vcode_reg_t psl_lower_prev_shift_reg(lower_unit_t *lu, tree_t expr,
    vcode_reg_t locus_reg = VCODE_INVALID_REG;
    if (is_record)
       locus_reg = emit_debug_locus(tree_to_object(expr));
+
+   // The shift register only advances on the ticks of its clock
+   if (clock == NULL && ctx != NULL && ctx->multiclock)
+      clock = ctx->main_clock;
+
+   vcode_block_t join_bb = VCODE_INVALID_BLOCK;
+   if (clock != NULL) {
+      vcode_reg_t tick_reg = psl_lower_clock_now(lu, clock);
+
+      vcode_block_t shift_bb = emit_block();
+      join_bb = emit_block();
+      emit_cond(tick_reg, shift_bb, join_bb);
+
+      vcode_select_block(shift_bb);
+   }
 
    for (int i = 0; i < cycles - 1; i++) {
       if (is_array) {
@@ -436,13 +510,167 @@ static vcode_reg_t psl_lower_prev_shift_reg(lower_unit_t *lu, tree_t expr,
    else
       emit_store(cur_reg, vars[cycles - 1]);
 
+   if (join_bb != VCODE_INVALID_BLOCK) {
+      emit_jump(join_bb);
+      vcode_select_block(join_bb);
+   }
+
+   if (ctx != NULL)
+      ctx->prev_tail = vcode_active_block();
+
    vcode_state_restore(&state);
 
    if (is_array || is_record)
       return emit_index(vars[0], VCODE_INVALID_REG);
    else
       return emit_load(vars[0]);
+}
 
+static vcode_reg_t psl_lower_edge(lower_unit_t *lu, psl_node_t p, bool rising)
+{
+   tree_t expr = psl_tree(psl_operand(p, 0));
+   type_t type = tree_type(expr);
+
+   vcode_reg_t prev_reg =
+      psl_lower_prev_shift_reg(lu, expr, 1, psl_clock_operand(p));
+   vcode_reg_t cur_reg = lower_rvalue(lu, expr);
+
+   const bool is_bit = type_eq(type, std_type(NULL, STD_BIT));
+   const int64_t one = is_bit ? 1 : 3;
+   const int64_t zero = is_bit ? 0 : 2;
+
+   vcode_type_t vtype = vcode_reg_type(cur_reg);
+   vcode_reg_t from_reg = emit_const(vtype, rising ? zero : one);
+   vcode_reg_t to_reg = emit_const(vtype, rising ? one : zero);
+
+   vcode_reg_t was_reg = emit_cmp(VCODE_CMP_EQ, prev_reg, from_reg);
+   vcode_reg_t now_reg = emit_cmp(VCODE_CMP_EQ, cur_reg, to_reg);
+   return emit_and(was_reg, now_reg);
+}
+
+static vcode_reg_t psl_lower_nondet_value(lower_unit_t *lu, psl_node_t vs)
+{
+   if (psl_subkind(vs) == PSL_VALUE_SET_BOOLEAN)
+      return lower_get_rand_bool();
+
+   int64_t candidates = 0;
+   int n_ops = psl_operands(vs);
+
+   for (int i = 0; i < n_ops; i++) {
+      psl_node_t op = psl_operand(vs, i);
+      if (psl_kind(op) == P_RANGE) {
+         const int64_t lhs = assume_int(psl_tree(psl_left(op)));
+         const int64_t rhs = assume_int(psl_tree(psl_right(op)));
+         candidates += rhs - lhs + 1;
+      }
+      else
+         candidates++;
+   }
+
+   vcode_type_t vint = vtype_int(INT64_MIN, INT64_MAX);
+
+   vcode_reg_t rnd_raw = lower_get_rand_int();
+   vcode_reg_t rnd_64bit = emit_cast(vint, VCODE_INVALID_STAMP, rnd_raw);
+   vcode_reg_t mod = emit_const(vint, candidates);
+   vcode_reg_t rnd = emit_mod(rnd_64bit, mod);
+
+   vcode_block_t test_bb[n_ops];
+   vcode_block_t ret_bb[n_ops];
+   vcode_block_t exit_bb;
+
+   for (int i = 0; i < n_ops; i++) {
+      test_bb[i] = emit_block();
+      ret_bb[i] = emit_block();
+   }
+
+   exit_bb = emit_block();
+   emit_jump(test_bb[0]);
+
+   vcode_var_t rvar = emit_var(vint, VCODE_INVALID_STAMP,
+                               ident_new("RV"), VAR_TEMP);
+   int accum = 0;
+
+   for (int i = 0; i < n_ops; i++) {
+      psl_node_t op = psl_operand(vs, i);
+
+      vcode_select_block(test_bb[i]);
+      vcode_block_t next_bb =
+         (i < (n_ops - 1)) ? test_bb[i + 1] : exit_bb;
+
+      vcode_reg_t vaccum = emit_const(vint, accum);
+
+      if (psl_kind(op) == P_RANGE) {
+         const int64_t lhs = assume_int(psl_tree(psl_left(op)));
+         const int64_t rhs = assume_int(psl_tree(psl_right(op)));
+         int64_t r = rhs - lhs;
+
+         vcode_reg_t ge = emit_cmp(VCODE_CMP_GEQ, rnd, vaccum);
+         vcode_reg_t le =
+            emit_cmp(VCODE_CMP_LEQ, rnd, emit_const(vint, accum + r));
+         vcode_reg_t sel = emit_and(ge, le);
+
+         emit_cond(sel, ret_bb[i], next_bb);
+
+         vcode_select_block(ret_bb[i]);
+         vcode_reg_t low = emit_sub(rnd, vaccum);
+         vcode_reg_t rv = emit_add(low, emit_const(vint, lhs));
+         emit_store(rv, rvar);
+         emit_jump(exit_bb);
+
+         accum += rhs - lhs + 1;
+      }
+      else {
+         vcode_reg_t sel = emit_cmp(VCODE_CMP_EQ, vaccum, rnd);
+         emit_cond(sel, ret_bb[i], next_bb);
+
+         vcode_select_block(ret_bb[i]);
+
+         emit_store(emit_const(vint, assume_int(psl_tree(op))), rvar);
+         emit_jump(exit_bb);
+
+         accum++;
+      }
+   }
+
+   vcode_select_block(exit_bb);
+   return emit_load(rvar);
+}
+
+static vcode_reg_t psl_lower_nondet_vector(lower_unit_t *lu, psl_node_t p)
+{
+   const int64_t width = assume_int(psl_tree(psl_operand(p, 0)));
+   psl_node_t vs = psl_operand(p, 1);
+
+   vcode_type_t vint = vtype_int(INT64_MIN, INT64_MAX);
+   vcode_reg_t value_reg = psl_lower_nondet_value(lu, vs);
+   if (psl_subkind(vs) == PSL_VALUE_SET_BOOLEAN)
+      value_reg = emit_cast(vint, VCODE_INVALID_STAMP, value_reg);
+
+   type_t bit = std_type(NULL, STD_BIT);
+   vcode_type_t velem = lower_type(bit);
+   vcode_type_t varray = vtype_carray(MAX(width, 1), velem);
+   vcode_var_t var = emit_var(varray, VCODE_INVALID_STAMP, ident_uniq("nondet"),
+                               VAR_TEMP);
+
+   vcode_reg_t base_reg = emit_index(var, VCODE_INVALID_REG);
+   vcode_reg_t two_reg = emit_const(vint, 2);
+
+   vcode_reg_t rem_reg = value_reg;
+   for (int64_t i = width - 1; i >= 0; i--) {
+      vcode_reg_t bit_reg = emit_cast(velem, VCODE_INVALID_STAMP,
+                                      emit_mod(rem_reg, two_reg));
+      vcode_reg_t ptr_reg =
+         emit_array_ref(base_reg, emit_const(vtype_offset(), i));
+      emit_store_indirect(bit_reg, ptr_reg);
+      rem_reg = emit_div(rem_reg, two_reg);
+   }
+
+   vcode_dim_t dim0 = {
+      .left  = emit_const(vtype_offset(), 0),
+      .right = emit_const(vtype_offset(), width - 1),
+      .dir   = emit_const(vtype_bool(), RANGE_TO)
+   };
+   return emit_wrap(base_reg, &dim0, 1);
 }
 
 vcode_reg_t psl_lower_fcall(lower_unit_t *lu, psl_node_t p)
@@ -453,7 +681,7 @@ vcode_reg_t psl_lower_fcall(lower_unit_t *lu, psl_node_t p)
    case PSL_BUILTIN_PREV:
       {
          int num = 1;
-         if (psl_operands(p) > 1)
+         if (psl_operands(p) > 1 && psl_kind(psl_operand(p, 1)) == P_HDL_EXPR)
             num = assume_int(psl_tree(psl_operand(p, 1)));
 
          if (num > 512)
@@ -461,136 +689,55 @@ vcode_reg_t psl_lower_fcall(lower_unit_t *lu, psl_node_t p)
                      "are supported");
 
          tree_t expr = psl_tree(psl_operand(p, 0));
-         return psl_lower_prev_shift_reg(lu, expr, num);
+         return psl_lower_prev_shift_reg(lu, expr, num, psl_clock_operand(p));
       }
 
    case PSL_BUILTIN_ROSE:
-      {
-         tree_t expr = psl_tree(psl_operand(p, 0));
-         vcode_reg_t prev = psl_lower_prev_shift_reg(lu, expr, 1);
-         vcode_reg_t prev_n = emit_not(prev);
-         vcode_reg_t rhs = lower_rvalue(lu, expr);
-         return emit_and(prev_n, rhs);
-      }
+      return psl_lower_edge(lu, p, true);
 
    case PSL_BUILTIN_FELL:
-      {
-         tree_t expr = psl_tree(psl_operand(p, 0));
-         vcode_reg_t prev = psl_lower_prev_shift_reg(lu, expr, 1);
-         vcode_reg_t expr_n = emit_not(lower_rvalue(lu, expr));
-         return emit_and(prev, expr_n);
-      }
-
-   case PSL_BUILTIN_STABLE:
-      {
-         tree_t expr = psl_tree(psl_operand(p, 0));
-         vcode_reg_t prev = psl_lower_prev_shift_reg(lu, expr, 1);
-         vcode_reg_t rhs = lower_rvalue(lu, expr);
-         return emit_cmp(VCODE_CMP_EQ, prev, rhs);
-      }
+      return psl_lower_edge(lu, p, false);
 
    case PSL_BUILTIN_NONDET:
       {
          assert(psl_operands(p) == 1);
          psl_node_t vs = psl_operand(p, 0);
+         vcode_reg_t value_reg = psl_lower_nondet_value(lu, vs);
 
          if (psl_subkind(vs) == PSL_VALUE_SET_BOOLEAN)
-            return lower_get_rand_bool();
-
-         int64_t candidates = 0;
-         int n_ops = psl_operands(vs);
-
-         for (int i = 0; i < n_ops; i++) {
-            psl_node_t op = psl_operand(vs, i);
-            if (psl_kind(op) == P_RANGE) {
-               const int64_t lhs = assume_int(psl_tree(psl_left(op)));
-               const int64_t rhs = assume_int(psl_tree(psl_right(op)));
-               candidates += rhs - lhs + 1;
-            }
-            else
-               candidates++;
-         }
-
-         vcode_type_t vint = vtype_int(INT64_MIN, INT64_MAX);
-
-         vcode_reg_t rnd_raw = lower_get_rand_int();
-         vcode_reg_t rnd_64bit = emit_cast(vint, VCODE_INVALID_STAMP, rnd_raw);
-         vcode_reg_t mod = emit_const(vint, candidates);
-         vcode_reg_t rnd = emit_mod(rnd_64bit, mod);
-
-         vcode_block_t test_bb[n_ops];
-         vcode_block_t ret_bb[n_ops];
-         vcode_block_t exit_bb;
-
-         for (int i = 0; i < n_ops; i++) {
-            test_bb[i] = emit_block();
-            ret_bb[i] = emit_block();
-         }
-
-         exit_bb = emit_block();
-         emit_jump(test_bb[0]);
-
-         vcode_var_t rvar = emit_var(vint, VCODE_INVALID_STAMP,
-                                     ident_new("RV"), VAR_TEMP);
-         int accum = 0;
-
-         for (int i = 0; i < n_ops; i++) {
-            psl_node_t op = psl_operand(vs, i);
-
-            vcode_select_block(test_bb[i]);
-            vcode_block_t next_bb =
-               (i < (n_ops - 1)) ? test_bb[i + 1] : exit_bb;
-
-            vcode_reg_t vaccum = emit_const(vint, accum);
-
-            if (psl_kind(op) == P_RANGE) {
-               const int64_t lhs = assume_int(psl_tree(psl_left(op)));
-               const int64_t rhs = assume_int(psl_tree(psl_right(op)));
-               int64_t r = rhs - lhs;
-
-               vcode_reg_t ge = emit_cmp(VCODE_CMP_GEQ, rnd, vaccum);
-               vcode_reg_t le =
-                  emit_cmp(VCODE_CMP_LEQ, rnd, emit_const(vint, accum + r));
-               vcode_reg_t sel = emit_and(ge, le);
-
-               emit_cond(sel, ret_bb[i], next_bb);
-
-               vcode_select_block(ret_bb[i]);
-               vcode_reg_t low = emit_sub(rnd, vaccum);
-               vcode_reg_t rv = emit_add(low, emit_const(vint, lhs));
-               emit_store(rv, rvar);
-               emit_jump(exit_bb);
-
-               accum += rhs - lhs;
-            }
-            else {
-               vcode_reg_t sel = emit_cmp(VCODE_CMP_EQ, vaccum, rnd);
-               emit_cond(sel, ret_bb[i], next_bb);
-
-               vcode_select_block(ret_bb[i]);
-
-               emit_store(emit_const(vint, assume_int(psl_tree(op))), rvar);
-               emit_jump(exit_bb);
-
-               accum++;
-            }
-         }
-
-         // TODO: Handle arbitrary type conversion (e.g. all arguments of enum type)
-         vcode_select_block(exit_bb);
+            return value_reg;
 
          psl_node_t first = psl_operand(vs, 0);
          if (psl_kind(first) == P_RANGE)
             first = psl_left(first);
 
          type_t type = tree_type(psl_tree(first));
-         return emit_cast(lower_type(type), lower_bounds(type),
-                          emit_load(rvar));
+         return emit_cast(lower_type(type), lower_bounds(type), value_reg);
       }
+
+   case PSL_BUILTIN_NONDET_VECTOR:
+      return psl_lower_nondet_vector(lu, p);
 
    default:
       fatal_at(psl_loc(p), "sorry, this built-in function is not supported");
    }
+}
+
+static void psl_collect_clocks_cb(psl_node_t p, void *ctx)
+{
+   clock_list_t *list = ctx;
+
+   const int nops = psl_operands(p);
+   for (int i = 0; i < nops; i++) {
+      psl_node_t op = psl_operand(p, i);
+      if (psl_kind(op) == P_CLOCK_DECL)
+         APUSH(*list, op);
+   }
+}
+
+static void psl_collect_clocks(psl_node_t p, void *list)
+{
+   psl_visit_only(p, psl_collect_clocks_cb, list, P_BUILTIN_FCALL);
 }
 
 static void psl_lower_property(lower_unit_t *lu, object_t *obj)
@@ -636,12 +783,34 @@ static void psl_lower_property(lower_unit_t *lu, object_t *obj)
    vcode_var_t trigger_var = lower_search_vcode_obj(clk, lu, &hops);
    assert(trigger_var != VCODE_INVALID_VAR);
 
+   SCOPED_A(psl_node_t) clocks = AINIT;
+   psl_collect_clocks(p, &clocks);
+
+   psl_ctx_t ctx = {
+      .main_clock = clk,
+      .multiclock = clocks.count > 0,
+      .prev_tail  = prev_bb,
+   };
+   hash_put(lu->objects, &psl_ctx_key, &ctx);
+
    emit_comment("Reset property");
 
    build_wait(clk_expr, psl_wait_cb, lu);
 
    vcode_reg_t trigger_ptr = emit_var_upref(hops, trigger_var);
    vcode_reg_t trigger_reg = emit_load_indirect(trigger_ptr);
+
+   for (int i = 0; i < clocks.count; i++) {
+      int extra_hops;
+      vcode_var_t var = lower_search_vcode_obj(clocks.items[i], lu,
+                                               &extra_hops);
+      assert(var != VCODE_INVALID_VAR);
+
+      build_wait(psl_tree(clocks.items[i]), psl_wait_cb, lu);
+
+      vcode_reg_t ptr_reg = emit_var_upref(extra_hops, var);
+      trigger_reg = emit_or_trigger(trigger_reg, emit_load_indirect(ptr_reg));
+   }
 
    // Only handle async_abort at the top level
    psl_node_t async_abort = psl_outer_async_abort(top);
@@ -695,6 +864,7 @@ static void psl_lower_property(lower_unit_t *lu, object_t *obj)
 
    const bool has_prev = vcode_count_ops() > 0;
 
+   vcode_select_block(ctx.prev_tail);
    emit_return(emit_const(vint32, fsm->next_id + 1));
 
    vcode_select_block(case_bb);
@@ -799,6 +969,14 @@ void psl_lower_directive(unit_registry_t *ur, lower_unit_t *parent,
       // Inline clock
       ident_t label = ident_sprintf("%s$clock", istr(tree_ident(wrapper)));
       psl_lower_clock_decl(ur, parent, top, label);
+   }
+
+   SCOPED_A(psl_node_t) clocks = AINIT;
+   psl_collect_clocks(tree_psl(wrapper), &clocks);
+
+   for (int i = 0; i < clocks.count; i++) {
+      ident_t label = ident_sprintf("%s$clock%d", istr(tree_ident(wrapper)), i);
+      psl_lower_clock_decl(ur, parent, clocks.items[i], label);
    }
 
    unit_registry_defer(ur, name,
