@@ -3786,7 +3786,18 @@ static bool sem_check_array_aggregate(tree_t t, nametab_t *tab)
 
    // If a choice is not locally static then it must be the only element
 
-   if (have_named && nassocs > 1) {
+   // The relaxed rules allow one such choice together with OTHERS
+
+   int nothers = 0;
+   for (int i = 0; i < nassocs; i++) {
+      if (tree_subkind(tree_assoc(t, i)) == A_OTHERS)
+         nothers++;
+   }
+
+   const bool one_choice_with_others =
+      relaxed_rules() && nassocs - nothers == 1;
+
+   if (have_named && nassocs > 1 && !one_choice_with_others) {
       for (int i = 0; i < nassocs; i++) {
          tree_t a = tree_assoc(t, i);
          tree_t choice = NULL;
@@ -6032,6 +6043,30 @@ static bool sem_globally_static(tree_t t)
    return false;
 }
 
+static void sem_fold_choice(tree_t t)
+{
+   // With --relaxed a globally static choice is accepted as an extension,
+   // so allow the simplifier to evaluate it
+
+   switch (tree_kind(t)) {
+   case T_TYPE_CONV:
+   case T_QUALIFIED:
+      sem_fold_choice(tree_value(t));
+      break;
+   case T_FCALL:
+      {
+         tree_set_flag(t, TREE_F_LOCALLY_STATIC);
+
+         const int nparams = tree_params(t);
+         for (int i = 0; i < nparams; i++)
+            sem_fold_choice(tree_value(tree_param(t, i)));
+      }
+      break;
+   default:
+      break;
+   }
+}
+
 static bool sem_check_case(tree_t t, nametab_t *tab)
 {
    tree_t test = tree_value(t);
@@ -6093,8 +6128,15 @@ static bool sem_check_case(tree_t t, nametab_t *tab)
             if (!sem_check_type(name, type, tab))
                sem_error(name, "case choice must have type %s but found %s",
                          type_pp(type), type_pp(tree_type(name)));
-            else if (!(*static_fn)(name))
-               sem_error(name, "case choice must be %s static", static_str);
+            else if (!(*static_fn)(name)) {
+               if (relaxed_rules() && sem_globally_static(name)) {
+                  warn_at(tree_loc(name), "case choice must be %s static",
+                          static_str);
+                  sem_fold_choice(name);
+               }
+               else
+                  sem_error(name, "case choice must be %s static", static_str);
+            }
          }
          else if (tree_ranges(a) > 0) {
             tree_t r = tree_range(a, 0);
@@ -6104,12 +6146,27 @@ static bool sem_check_case(tree_t t, nametab_t *tab)
             switch (tree_subkind(r)) {
             case RANGE_TO:
             case RANGE_DOWNTO:
-               if (!(*static_fn)(tree_left(r)))
-                  sem_error(tree_left(r), "left index of case choice "
-                            "range is not %s static", static_str);
-               else if (!(*static_fn)(tree_right(r)))
-                  sem_error(tree_right(r), "right index of case choice "
-                            "range is not %s static", static_str);
+               if (!(*static_fn)(tree_left(r))) {
+                  if (relaxed_rules() && sem_globally_static(tree_left(r))) {
+                     warn_at(tree_loc(tree_left(r)), "left index of case "
+                             "choice range is not %s static", static_str);
+                     sem_fold_choice(tree_left(r));
+                  }
+                  else
+                     sem_error(tree_left(r), "left index of case choice "
+                               "range is not %s static", static_str);
+               }
+
+               if (!(*static_fn)(tree_right(r))) {
+                  if (relaxed_rules() && sem_globally_static(tree_right(r))) {
+                     warn_at(tree_loc(tree_right(r)), "right index of case "
+                             "choice range is not %s static", static_str);
+                     sem_fold_choice(tree_right(r));
+                  }
+                  else
+                     sem_error(tree_right(r), "right index of case choice "
+                               "range is not %s static", static_str);
+               }
                break;
 
             case RANGE_EXPR:

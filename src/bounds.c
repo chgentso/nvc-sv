@@ -111,7 +111,11 @@ static void bounds_check_scalar(tree_t value, type_t type, tree_t hint)
    }
 
    if (error) {
-      diag_t *d = diag_new(DIAG_ERROR, tree_loc(value));
+      // With --relaxed an out of range literal operand is only a warning
+      // here as the call might never be executed
+      const bool lenient = relaxed_rules() && tree_kind(value) == T_LITERAL
+         && hint != NULL && tree_kind(hint) == T_PARAM_DECL;
+      diag_t *d = diag_new(lenient ? DIAG_WARN : DIAG_ERROR, tree_loc(value));
       diag_printf(d, "value ");
       to_string(diag_text_buf(d), type, folded);
       diag_printf(d, " outside of %pT range ", type);
@@ -141,7 +145,10 @@ static void bounds_check_array(tree_t value, type_t type, tree_t hint)
       else if (!folded_length(range_of(value_type, i), &value_w))
          continue;
       else if (target_w != value_w) {
-         diag_t *d = diag_new(DIAG_ERROR, tree_loc(value));
+         // With --relaxed this is only a warning as the code may never
+         // execute and the length is checked again at run time
+         diag_t *d = diag_new(relaxed_rules() ? DIAG_WARN : DIAG_ERROR,
+                              tree_loc(value));
          diag_printf(d, "length of ");
          if (i > 0)
             diag_printf(d, "dimension %d of ", i + 1);

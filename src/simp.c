@@ -337,6 +337,40 @@ static tree_t simp_literal_expr(tree_t t, subprogram_kind_t kind)
    }
 }
 
+static void simp_wrap_literal_args(tree_t t)
+{
+   // A literal operand that does not fit the type wraps around
+
+   const int nparams = tree_params(t);
+   for (int i = 0; i < nparams; i++) {
+      tree_t value = tree_value(tree_param(t, i));
+      if (tree_kind(value) != T_LITERAL || tree_subkind(value) != L_INT)
+         continue;
+
+      type_t type = tree_type(value);
+      if (!type_is_integer(type) || type_is_universal(type))
+         continue;
+
+      int64_t low, high;
+      if (!folded_bounds(range_of(type_base_recur(type), 0), &low, &high))
+         continue;
+
+      const int64_t ival = tree_ival(value);
+      if (ival >= low && ival <= high)
+         continue;
+
+      const int64_t span = high - low + 1;
+      if (span <= 0)
+         continue;
+
+      int64_t wrapped = (ival - low) % span;
+      if (wrapped < 0)
+         wrapped += span;
+
+      tree_set_ival(value, wrapped + low);
+   }
+}
+
 static tree_t simp_fcall_local(tree_t t, simp_ctx_t *ctx)
 {
    tree_t new = simp_call_args(t);
@@ -344,6 +378,23 @@ static tree_t simp_fcall_local(tree_t t, simp_ctx_t *ctx)
       return new;   // Will be called again on new tree
 
    const subprogram_kind_t kind = tree_subkind(tree_ref(t));
+
+   if (relaxed_rules() && type_is_integer(tree_type(t))) {
+      // As an extension with --relaxed, integer arithmetic wraps around
+      // on overflow
+      switch (kind) {
+      case S_ADD:
+      case S_SUB:
+      case S_MUL:
+      case S_NEGATE:
+         tree_set_flag(t, TREE_F_WRAP_OVERFLOW);
+         simp_wrap_literal_args(t);
+         break;
+      default:
+         break;
+      }
+   }
+
    if (kind == S_CONCAT)
       return simp_concat(t);
    else if (kind != S_USER) {

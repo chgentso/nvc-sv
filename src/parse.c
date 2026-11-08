@@ -5708,6 +5708,11 @@ static void p_interface_constant_declaration(tree_t parent, tree_kind_t kind,
    if (optional(tWALRUS))
       parse_anonymous_default(type, &init);
 
+   if (kind == T_PARAM_DECL && relaxed_rules() && type_is_file(type)) {
+      class = C_FILE;
+      mode = PORT_IN;
+   }
+
    for (ident_list_t *it = ids; it != NULL; it = it->next) {
       tree_t d = tree_new(kind);
       tree_set_ident(d, it->ident);
@@ -5873,13 +5878,17 @@ static void p_interface_variable_declaration(tree_t parent, tree_kind_t kind)
    if (optional(tWALRUS))
       parse_anonymous_default(type, &init);
 
+   // VHDL-87 file parameters have class VARIABLE or no class at all
+   const bool file87 = kind == T_PARAM_DECL && relaxed_rules()
+      && type_is_file(type);
+
    for (ident_list_t *it = ids; it != NULL; it = it->next) {
       tree_t d = tree_new(kind);
       tree_set_ident(d, it->ident);
       tree_set_loc(d, &(it->loc));
       tree_set_type(d, type);
-      tree_set_class(d, C_VARIABLE);
-      tree_set_subkind(d, mode);
+      tree_set_class(d, file87 ? C_FILE : C_VARIABLE);
+      tree_set_subkind(d, file87 ? PORT_IN : mode);
       tree_set_flag(d, flags);
 
       if (init != NULL)
