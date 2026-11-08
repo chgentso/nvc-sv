@@ -558,6 +558,30 @@ START_TEST(test_names2)
 }
 END_TEST
 
+START_TEST(test_local1)
+{
+   opt_set_int(OPT_PSL_COMMENTS, 1);
+
+   input_from_file(TESTDIR "/psl/local1.vhd");
+
+   tree_t a = parse_and_check(T_ENTITY, T_ARCH);
+
+   fail_if_errors();
+
+   // IEEE 1850-2010 6.3, 6.4: local variable declarations are parsed
+   // at the start of a braced SERE and a parenthesised property
+   psl_node_t c1 = tree_psl(tree_stmt(a, 0));
+   psl_node_t c1_v = psl_value(psl_value(c1));
+   fail_unless(psl_kind(c1_v) == P_PROC_BLOCK);
+   fail_unless(psl_kind(psl_value(c1_v)) == P_SERE);
+
+   psl_node_t a1 = tree_psl(tree_stmt(a, 1));
+   psl_node_t a1_v = psl_value(psl_value(a1));
+   fail_unless(psl_kind(a1_v) == P_ALWAYS);
+   fail_unless(psl_kind(psl_value(a1_v)) == P_PROC_BLOCK);
+}
+END_TEST
+
 Suite *get_psl_tests(void)
 {
    Suite *s = suite_create("psl");
@@ -579,6 +603,7 @@ Suite *get_psl_tests(void)
    tcase_add_test(tc_core, test_sem4);
    tcase_add_test(tc_core, test_sem5);
    tcase_add_test(tc_core, test_names2);
+   tcase_add_test(tc_core, test_local1);
    suite_add_tcase(s, tc_core);
 
    return s;

@@ -12801,13 +12801,16 @@ static psl_node_t p_psl_proc_block(psl_node_t value)
    tree_t b = tree_new(T_SEQUENCE);
 
    psl_node_t p = psl_new(P_PROC_BLOCK);
-   psl_set_value(p, value);
+   if (value != NULL)
+      psl_set_value(p, value);
    psl_set_tree(p, b);
 
    scan_as_vhdl();
 
    while (not_at_token(t2RSQUARE)) {
-      if (scan(tSIGNAL, tTYPE, tSUBTYPE, tFILE, tCONSTANT, tFUNCTION, tIMPURE,
+      if (peek() == tVARIABLE)
+         p_variable_declaration(b);
+      else if (scan(tSIGNAL, tTYPE, tSUBTYPE, tFILE, tCONSTANT, tFUNCTION, tIMPURE,
                tPURE, tPROCEDURE, tALIAS, tATTRIBUTE, tFOR, tCOMPONENT, tUSE,
                tSHARED, tDISCONNECT, tGROUP, tPACKAGE))
          p_block_declarative_item(b);
@@ -13127,6 +13130,7 @@ static psl_node_t p_psl_sere(void)
       case tDBLAMP:
       case tWITHIN:
       case tLSQUARE:
+      case t2LSQUARE:
       case tPLUSRPT:
       case tTIMESRPT:
       case tEQRPT:
@@ -13147,6 +13151,14 @@ static psl_node_t p_psl_braced_sere(void)
    BEGIN("PSL Braced SERE");
 
    consume(tLBRACE);
+
+   if (peek() == t2LSQUARE) {
+      psl_node_t decls = p_psl_proc_block(NULL);
+      psl_set_value(decls, p_psl_sere());
+      consume(tRBRACE);
+      psl_set_loc(decls, CURRENT_LOC);
+      return decls;
+   }
 
    psl_node_t sere = p_psl_sere();
 
@@ -13760,7 +13772,14 @@ static psl_node_t p_psl_fl_primary(void)
    case tLPAREN:
       {
          consume(tLPAREN);
-         p = p_psl_fl_property();
+
+         if (peek() == t2LSQUARE) {
+            p = p_psl_proc_block(NULL);
+            psl_set_value(p, p_psl_fl_property());
+         }
+         else
+            p = p_psl_fl_property();
+
          consume(tRPAREN);
 
          if (psl_kind(p) == P_HDL_EXPR && is_vhdl_infix_op(peek())) {

@@ -1835,6 +1835,9 @@ static fsm_state_t *build_node(psl_fsm_t *fsm, fsm_state_t *state, psl_node_t p)
       return build_suffix_impl(fsm, state, p);
    case P_CLOCKED:
       return build_clocked(fsm, state, p);
+   case P_PROC_BLOCK:
+      fatal_at(psl_loc(p), "sorry, PSL local variables and procedural "
+               "blocks are not supported");
    default:
       CANNOT_HANDLE(p);
    }
