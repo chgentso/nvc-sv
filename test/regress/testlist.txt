@@ -1520,3 +1520,4 @@ psl76           fail,gold,2008
 psl78           fail,gold,2008
 psl84           gold,2008
 vlogrealport1   verilog
+vlogcasegen3    verilog

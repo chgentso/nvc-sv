@@ -7248,6 +7248,7 @@ static void p_non_port_module_item(vlog_node_t mod)
    case tPARAMETER:
    case tEVENT:
    case tIF:
+   case tCASE:
    case tFOR:
    case tGENVAR:
    case tVAR:
