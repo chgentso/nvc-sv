@@ -1524,5 +1524,6 @@ file16          normal,2019
 protected17     normal,2019
 psl25           normal,2019
 stdenv7         normal,2019
+stdenv8         normal,2019
 vlogrealport1   verilog
 vlogcasegen3    verilog

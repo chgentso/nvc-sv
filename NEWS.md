@@ -50,6 +50,9 @@
   PSL directives, and implemented the `PslIsCovered`, `PslAssertFailed`,
   `ClearPslState`, `SetPslCoverAssert` and `GetPslCoverAssert`
   subprograms in `STD.ENV` for VHDL-2019 (LCS-2016-043).
+- Implemented `PslIsAssertCovered` in `STD.ENV`, and after
+  `SetPslCoverAssert(TRUE)` the `PslIsCovered` function also requires
+  every PSL assert directive to be covered (LCS-2016-050).
 - Several other minor bugs were resolved (#1663, #1672, #1668, #1670,
   #1678, #1686, #1687, #1692, #1695, #1700, #1707).
 

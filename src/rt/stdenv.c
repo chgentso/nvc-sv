@@ -694,13 +694,19 @@ void _std_env_get_vhdl_assert_enable(jit_scalar_t *args)
 DLLEXPORT
 void _std_env_psl_is_covered(jit_scalar_t *args)
 {
-   args[0].integer = model_psl_status(get_model(), true);
+   args[0].integer = model_psl_status(get_model(), PSL_QUERY_COVERED);
 }
 
 DLLEXPORT
 void _std_env_psl_assert_failed(jit_scalar_t *args)
 {
-   args[0].integer = model_psl_status(get_model(), false);
+   args[0].integer = model_psl_status(get_model(), PSL_QUERY_FAILED);
+}
+
+DLLEXPORT
+void _std_env_psl_is_assert_covered(jit_scalar_t *args)
+{
+   args[0].integer = model_psl_status(get_model(), PSL_QUERY_ASSERT_COVERED);
 }
 
 DLLEXPORT

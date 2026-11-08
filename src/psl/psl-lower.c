@@ -145,13 +145,11 @@ static vcode_reg_t psl_lower_guard(lower_unit_t *lu, psl_guard_t g)
    }
 }
 
-static void psl_lower_notify(bool cover)
+static void psl_lower_notify(const char *func_name)
 {
    // Record the event for 'SIGNAL and the STD.ENV PSL functions
 
-   ident_t func = ident_new(cover
-                            ? "NVC.SIM_PKG.PSL_COVER_HIT()B"
-                            : "NVC.SIM_PKG.PSL_ASSERT_FAIL()B");
+   ident_t func = ident_new(func_name);
 
    vcode_reg_t context_reg = emit_link_package(ident_new("NVC.SIM_PKG"));
    vcode_reg_t args[] = { context_reg };
@@ -162,7 +160,7 @@ static void psl_lower_notify(bool cover)
 static void psl_lower_cover(lower_unit_t *lu, psl_node_t p)
 {
    if (standard() >= STD_19)
-      psl_lower_notify(true);
+      psl_lower_notify("NVC.SIM_PKG.PSL_COVER_HIT()B");
 
    if (psl_has_message(p)) {
       tree_t m = psl_message(p);
@@ -227,7 +225,7 @@ static void psl_lower_assert(lower_unit_t *lu, vcode_reg_t taken_reg,
       emit_cond(taken_reg, cont_bb, fail_bb);
 
       vcode_select_block(fail_bb);
-      psl_lower_notify(false);
+      psl_lower_notify("NVC.SIM_PKG.PSL_ASSERT_FAIL()B");
       emit_jump(cont_bb);
 
       vcode_select_block(cont_bb);
@@ -274,6 +272,8 @@ static void psl_lower_state(lower_unit_t *lu, psl_fsm_t *fsm,
          vcode_reg_t locus = psl_debug_locus(fsm->src);
          psl_lower_assert(lu, vfalse, locus, fsm->src);
       }
+      else if (standard() >= STD_19)
+         psl_lower_notify("NVC.SIM_PKG.PSL_ASSERT_PASS()B");
 
       emit_return(VCODE_INVALID_REG);
 

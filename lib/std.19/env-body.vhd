@@ -659,9 +659,11 @@ package body env is
         return false;
     end function;
 
+    attribute foreign of PslIsAssertCovered [return boolean] : function is
+        "INTERNAL _std_env_psl_is_assert_covered";
+
     impure function PslIsAssertCovered return boolean is
     begin
-        report "not implemented" severity warning;
         return false;
     end function;
 

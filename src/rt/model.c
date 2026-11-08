@@ -4378,7 +4378,7 @@ static void psl_set_signal(rt_model_t *m, rt_prop_t *prop, bool value)
    }
 }
 
-void model_psl_event(rt_model_t *m, bool cover)
+void model_psl_event(rt_model_t *m, psl_event_t event)
 {
    rt_wakeable_t *obj = get_active_wakeable();
    if (obj == NULL || obj->kind != W_PROPERTY)
@@ -4386,19 +4386,32 @@ void model_psl_event(rt_model_t *m, bool cover)
 
    rt_prop_t *prop = container_of(obj, rt_prop_t, wakeable);
 
-   TRACE("PSL %s event in property %pi", cover ? "cover" : "assert fail",
-         prop->name);
-
-   if (cover)
+   switch (event) {
+   case PSL_EVENT_COVER:
+      TRACE("PSL cover event in property %pi", prop->name);
       prop->covered = true;
-   else
+      psl_set_signal(m, prop, true);
+      break;
+   case PSL_EVENT_FAIL:
+      TRACE("PSL assert fail event in property %pi", prop->name);
       prop->failed = true;
-
-   psl_set_signal(m, prop, true);
+      psl_set_signal(m, prop, true);
+      break;
+   case PSL_EVENT_PASS:
+      TRACE("PSL assert pass event in property %pi", prop->name);
+      prop->covered = true;
+      break;
+   }
 }
 
+typedef struct {
+   bool all_covered;
+   bool all_asserts_covered;
+   bool any_failed;
+} psl_status_t;
+
 static void psl_scan_scope(rt_model_t *m, rt_scope_t *scope,
-                           bool *all_covered, bool *any_failed, bool clear)
+                           psl_status_t *status, bool clear)
 {
    for (int i = 0; i < scope->properties.count; i++) {
       rt_prop_t *prop = scope->properties.items[i];
@@ -4406,28 +4419,50 @@ static void psl_scan_scope(rt_model_t *m, rt_scope_t *scope,
       if (clear) {
          prop->covered = prop->failed = false;
          psl_set_signal(m, prop, false);
+         continue;
       }
-      else if (psl_kind(prop->where) == P_COVER)
-         *all_covered &= prop->covered;
-      else
-         *any_failed |= prop->failed;
+
+      switch (psl_kind(prop->where)) {
+      case P_COVER:
+         status->all_covered &= prop->covered;
+         break;
+      case P_ASSERT:
+         status->all_asserts_covered &= prop->covered;
+         status->any_failed |= prop->failed;
+         if (m->psl_cover_assert)
+            status->all_covered &= prop->covered;
+         break;
+      default:
+         status->any_failed |= prop->failed;
+         break;
+      }
    }
 
    for (int i = 0; i < scope->children.count; i++)
-      psl_scan_scope(m, scope->children.items[i], all_covered, any_failed,
-                     clear);
+      psl_scan_scope(m, scope->children.items[i], status, clear);
 }
 
-bool model_psl_status(rt_model_t *m, bool cover)
+bool model_psl_status(rt_model_t *m, psl_query_t query)
 {
-   bool all_covered = true, any_failed = false;
-   psl_scan_scope(m, m->root, &all_covered, &any_failed, false);
-   return cover ? all_covered : any_failed;
+   psl_status_t status = {
+      .all_covered = true,
+      .all_asserts_covered = true,
+      .any_failed = false,
+   };
+   psl_scan_scope(m, m->root, &status, false);
+
+   switch (query) {
+   case PSL_QUERY_COVERED: return status.all_covered;
+   case PSL_QUERY_ASSERT_COVERED: return status.all_asserts_covered;
+   case PSL_QUERY_FAILED: return status.any_failed;
+   }
+
+   return false;
 }
 
 void model_psl_clear(rt_model_t *m)
 {
-   psl_scan_scope(m, m->root, NULL, NULL, true);
+   psl_scan_scope(m, m->root, NULL, true);
 }
 
 void model_psl_set_cover_assert(rt_model_t *m, bool enable)

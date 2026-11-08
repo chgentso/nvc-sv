@@ -45,14 +45,21 @@ void _nvc_current_delta(jit_scalar_t *args, tlab_t *tlab)
 DLLEXPORT
 void _nvc_psl_cover_hit(jit_scalar_t *args, tlab_t *tlab)
 {
-   model_psl_event(get_model(), true);
+   model_psl_event(get_model(), PSL_EVENT_COVER);
    args[0].integer = 0;
 }
 
 DLLEXPORT
 void _nvc_psl_assert_fail(jit_scalar_t *args, tlab_t *tlab)
 {
-   model_psl_event(get_model(), false);
+   model_psl_event(get_model(), PSL_EVENT_FAIL);
+   args[0].integer = 0;
+}
+
+DLLEXPORT
+void _nvc_psl_assert_pass(jit_scalar_t *args, tlab_t *tlab)
+{
+   model_psl_event(get_model(), PSL_EVENT_PASS);
    args[0].integer = 0;
 }
 

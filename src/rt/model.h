@@ -39,6 +39,18 @@ typedef enum {
    END_OF_SIMULATION,
 } model_phase_t;
 
+typedef enum {
+   PSL_EVENT_COVER,
+   PSL_EVENT_FAIL,
+   PSL_EVENT_PASS,
+} psl_event_t;
+
+typedef enum {
+   PSL_QUERY_COVERED,
+   PSL_QUERY_ASSERT_COVERED,
+   PSL_QUERY_FAILED,
+} psl_query_t;
+
 rt_model_t *model_new(jit_t *jit, cover_data_t *cover);
 void model_free(rt_model_t *m);
 void model_reset(rt_model_t *m);
@@ -51,8 +63,8 @@ void model_stop(rt_model_t *m);
 void model_interrupt(rt_model_t *m);
 int model_exit_status(rt_model_t *m);
 
-void model_psl_event(rt_model_t *m, bool cover);
-bool model_psl_status(rt_model_t *m, bool cover);
+void model_psl_event(rt_model_t *m, psl_event_t event);
+bool model_psl_status(rt_model_t *m, psl_query_t query);
 void model_psl_clear(rt_model_t *m);
 void model_psl_set_cover_assert(rt_model_t *m, bool enable);
 bool model_psl_get_cover_assert(rt_model_t *m);

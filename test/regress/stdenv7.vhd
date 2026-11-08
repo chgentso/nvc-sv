@@ -1,6 +1,8 @@
 -- PSL interface subprograms of STD.ENV: PslIsCovered, PslAssertFailed,
--- ClearPslState, SetPslCoverAssert and GetPslCoverAssert
--- (IEEE 1076-2019 16.5; LCS-2016-050, LCS-2016-043).
+-- PslIsAssertCovered, ClearPslState, SetPslCoverAssert and
+-- GetPslCoverAssert (IEEE 1076-2019 16.5; LCS-2016-050, LCS-2016-043).
+-- An assert directive is covered when an evaluation of its property
+-- completes without failing.
 
 entity stdenv7 is
 end entity;
@@ -25,10 +27,14 @@ begin
     -- Never fails
     a1: assert always (a -> next b);
 
+    -- Evaluation does not complete before the end of the simulation
+    a2: assert next[20] (b);
+
     check: process is
     begin
         assert not PslIsCovered;
         assert not PslAssertFailed;
+        assert not PslIsAssertCovered;
 
         SetPslCoverAssert(TRUE);
         assert GetPslCoverAssert;
@@ -41,6 +47,13 @@ begin
         wait for 10 ns;                 -- 30 ns
         assert PslIsCovered;
         assert not PslAssertFailed;
+        assert not PslIsAssertCovered;  -- A2 not complete
+
+        -- Assert directives are included in PslIsCovered
+        SetPslCoverAssert(TRUE);
+        assert not PslIsCovered;
+        SetPslCoverAssert(FALSE);
+        assert PslIsCovered;
 
         ClearPslState;
         assert not PslIsCovered;        -- Coverage state cleared

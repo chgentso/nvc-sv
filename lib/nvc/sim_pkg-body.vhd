@@ -44,4 +44,9 @@ package body sim_pkg is
         return false;                   -- Has a foreign implementation
     end function;
 
+    impure function psl_assert_pass return boolean is
+    begin
+        return false;                   -- Has a foreign implementation
+    end function;
+
 end package body;
