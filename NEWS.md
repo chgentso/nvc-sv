@@ -32,6 +32,9 @@
   `eventually!`.
 - The operands of the PSL built-in functions `prev`, `next`, `stable`,
   `rose` and `fell` can now contain the logical operators `and` and `or`.
+- Fixed the PSL repetition `r[*]` which only matched the empty sequence,
+  and the concatenation of a repetition that matches the empty sequence
+  such as `{a; b[*]; c}`.
 - The right hand operand of a PSL implication or Boolean `or` is no longer
   evaluated if the left hand operand determines the result.
 - Added a `pkg-config` configuration file to aid locating the VHPI

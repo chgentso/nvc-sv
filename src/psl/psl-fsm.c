@@ -40,6 +40,9 @@
 
 static fsm_state_t *build_node(psl_fsm_t *fsm, fsm_state_t *state,
                                psl_node_t p);
+static bool is_empty_repeat(psl_fsm_t *fsm, psl_node_t p);
+static fsm_state_t *build_repeat_ex(psl_fsm_t *fsm, fsm_state_t *state,
+                                    psl_node_t p, bool allow_empty);
 static void psl_simplify(psl_fsm_t *fsm);
 
 static fsm_state_t *add_state(psl_fsm_t *fsm, psl_node_t where)
@@ -364,6 +367,49 @@ static fsm_state_t *build_abort(psl_fsm_t *fsm, fsm_state_t *state,
    return final;
 }
 
+static fsm_state_t *build_concat(psl_fsm_t *fsm, fsm_state_t *state,
+                                 psl_node_t p, unsigned skip)
+{
+   // Bit n of skip set leaves out the nth element that can match the
+   // empty sequence, otherwise it only matches one or more times
+
+   const psl_sere_kind_t kind = psl_subkind(p);
+   const edge_kind_t ekind =
+      kind == PSL_SERE_FUSION ? EDGE_EPSILON : EDGE_NEXT;
+   const int nops = psl_operands(p);
+
+   fsm_state_t *start = state, *last = NULL;
+   unsigned nth = 0;
+   for (int i = 0; i < nops; i++) {
+      psl_node_t op = psl_operand(p, i);
+
+      const bool can_skip =
+         kind == PSL_SERE_CONCAT && is_empty_repeat(fsm, op);
+      if (can_skip && (skip & (1u << nth++)))
+         continue;
+
+      if (start == NULL) {
+         start = add_state(fsm, p);
+         add_edge(fsm, last, start, ekind, NULL);
+      }
+
+      fsm_state_t *new;
+      if (can_skip) {
+         if ((new = build_repeat_ex(fsm, start, op, false)) == NULL)
+            return NULL;   // Only matches the empty sequence
+      }
+      else
+         new = build_node(fsm, start, op);
+
+      if (new != start) {
+         last = new;
+         start = NULL;
+      }
+   }
+
+   return last ?: start;
+}
+
 static fsm_state_t *build_sere(psl_fsm_t *fsm, fsm_state_t *state, psl_node_t p)
 {
    const psl_sere_kind_t kind = psl_subkind(p);
@@ -371,21 +417,35 @@ static fsm_state_t *build_sere(psl_fsm_t *fsm, fsm_state_t *state, psl_node_t p)
 
    switch (kind) {
    case PSL_SERE_FUSION:
+      return build_concat(fsm, state, p, 0);
+
    case PSL_SERE_CONCAT:
       {
-         for (int i = 0; i < nops; i++) {
-            fsm_state_t *new = build_node(fsm, state, psl_operand(p, i));
-            if (i + 1 < nops && new != state) {
-               const edge_kind_t ekind =
-                  kind == PSL_SERE_FUSION ? EDGE_EPSILON : EDGE_NEXT;
-               state = add_state(fsm, p);
-               add_edge(fsm, new, state, ekind, NULL);
-            }
-            else
-               state = new;
+         // An element r[*] that can match the empty sequence is either
+         // left out or matches one or more times: build each
+         // combination as an alternative
+         unsigned nempty = 0;
+         for (int i = 0; i < nops; i++)
+            nempty += is_empty_repeat(fsm, psl_operand(p, i));
+
+         if (nempty == 0)
+            return build_concat(fsm, state, p, 0);
+         else if (nempty > 4)
+            fatal_at(psl_loc(p), "sorry, too many elements of this SERE "
+                     "can match the empty sequence");
+
+         fsm_state_t *final = add_state(fsm, p);
+
+         for (unsigned mask = 0; mask < (1u << nempty); mask++) {
+            fsm_state_t *initial = add_state(fsm, p);
+            add_edge(fsm, state, initial, EDGE_EPSILON, NULL);
+
+            fsm_state_t *last = build_concat(fsm, initial, p, ~mask);
+            if (last != NULL)
+               add_edge(fsm, last, final, EDGE_EPSILON, NULL);
          }
 
-         return state;
+         return final;
       }
 
    case PSL_SERE_EQU_AND:
@@ -461,13 +521,46 @@ static void get_repeat_bounds(psl_node_t p, int *low, int *high, bool *infinite,
    }
 }
 
-static fsm_state_t *build_repeat(psl_fsm_t *fsm, fsm_state_t *state,
-                                 psl_node_t p)
+static bool is_empty_repeat(psl_fsm_t *fsm, psl_node_t p)
+{
+   // True for r[*n to m] that can match the empty sequence
+
+   if (psl_kind(p) != P_REPEAT || psl_subkind(p) != PSL_TIMES_REPEAT)
+      return false;
+
+   int low, high;
+   bool infinite, noncon, goto_rep;
+   get_repeat_bounds(p, &low, &high, &infinite, &noncon, &goto_rep);
+
+   return low == 0;
+}
+
+static fsm_state_t *build_repeat_ex(psl_fsm_t *fsm, fsm_state_t *state,
+                                    psl_node_t p, bool allow_empty)
 {
    int low, high;
    bool infinite, noncon, goto_rep;
 
    get_repeat_bounds(p, &low, &high, &infinite, &noncon, &goto_rep);
+
+   if (!allow_empty && low == 0) {
+      // Only the non-empty matches: the caller handles the empty one
+      if (high == 0 && !infinite)
+         return NULL;
+
+      low = 1;
+      high = MAX(high, 1);
+   }
+   else if (infinite && low == 0)
+      high = 1;   // One or more repetitions or the empty sequence
+
+   if (infinite) {
+      // Repetitions loop back to a new state so that the other
+      // transitions of the incoming state are not taken again
+      fsm_state_t *start = add_state(fsm, p);
+      add_edge(fsm, state, start, EDGE_EPSILON, NULL);
+      state = start;
+   }
 
    fsm_state_t *skip = (high > low) ? add_state(fsm, p) : NULL;
    fsm_state_t *initial = state;
@@ -520,6 +613,12 @@ static fsm_state_t *build_repeat(psl_fsm_t *fsm, fsm_state_t *state,
    }
 
    return state;
+}
+
+static fsm_state_t *build_repeat(psl_fsm_t *fsm, fsm_state_t *state,
+                                 psl_node_t p)
+{
+   return build_repeat_ex(fsm, state, p, true);
 }
 
 static fsm_state_t *build_next(psl_fsm_t *fsm, fsm_state_t *state, psl_node_t p)

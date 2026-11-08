@@ -1518,3 +1518,4 @@ psl70           normal,2008
 psl71           normal,2008
 psl76           fail,gold,2008
 psl78           fail,gold,2008
+psl84           gold,2008
