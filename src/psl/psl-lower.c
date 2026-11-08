@@ -497,9 +497,8 @@ vcode_reg_t psl_lower_fcall(lower_unit_t *lu, psl_node_t p)
             vcode_reg_t vaccum = emit_const(vint, accum);
 
             if (psl_kind(op) == P_RANGE) {
-               int64_t lhs, rhs;
-               folded_int(psl_tree(psl_left(op)), &lhs);
-               folded_int(psl_tree(psl_right(op)), &rhs);
+               const int64_t lhs = assume_int(psl_tree(psl_left(op)));
+               const int64_t rhs = assume_int(psl_tree(psl_right(op)));
                int64_t r = rhs - lhs;
 
                vcode_reg_t ge = emit_cmp(VCODE_CMP_GEQ, rnd, vaccum);
@@ -532,7 +531,14 @@ vcode_reg_t psl_lower_fcall(lower_unit_t *lu, psl_node_t p)
 
          // TODO: Handle arbitrary type conversion (e.g. all arguments of enum type)
          vcode_select_block(exit_bb);
-         return emit_load(rvar);
+
+         psl_node_t first = psl_operand(vs, 0);
+         if (psl_kind(first) == P_RANGE)
+            first = psl_left(first);
+
+         type_t type = tree_type(psl_tree(first));
+         return emit_cast(lower_type(type), lower_bounds(type),
+                          emit_load(rvar));
       }
 
    default:
