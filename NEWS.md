@@ -61,6 +61,17 @@
 - PSL Boolean implication `->` and equivalence `<->` can now be used
   inside SEREs and as the operand of other PSL operators.  The operators
   of PSL properties are now parsed with the correct precedence.
+- Added support for parameterised PSL sequence and property
+  declarations and instances.
+- PSL `assume` directives are now checked in simulation and the
+  `restrict`, `restrict!` and `fairness` directives are accepted.
+- PSL sequence and property declarations and the `assume`, `restrict`
+  and `fairness` directives can now be written directly in VHDL-2008
+  without using `--psl` comments.
+- Added support for PSL verification units (`vunit`, `vprop` and
+  `vmode`) that are bound to a design entity, architecture or instance.
+- Fixed crashes when a PSL property declaration contains HDL operators
+  or a PSL fairness statement is simulated.
 - Added a `pkg-config` configuration file to aid locating the VHPI
   headers (from @gsmecher).
 - The `'IMAGE` and `to_string` of an enumeration literal that is an

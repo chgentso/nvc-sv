@@ -32,7 +32,7 @@ many of the new features, please consult the table below.
   </tr>
   <tr>
     <td>PSL integrated into VHDL</td>
-    <td class="feature-missing"></td>
+    <td class="feature-partial">1.24</td>
   </tr>
   <tr>
     <td>New fixed and floating point arithmetic packages</td>
@@ -808,52 +808,52 @@ table below.
   <tr>
     <td>6.5</td>
     <td>Property and sequence declarations</td>
-    <td class="feature-missing"></td>
+    <td class="feature-done">1.24</td>
   </tr>
   <tr>
     <td>6.5.1</td>
     <td>Parameters</td>
-    <td class="feature-missing"></td>
+    <td class="feature-done">1.24</td>
   </tr>
   <tr>
     <td>6.5.1.1</td>
     <td>PSL formal parameter type classes</td>
-    <td class="feature-missing"></td>
+    <td class="feature-done">1.24</td>
   </tr>
   <tr>
     <td>6.5.1.2</td>
     <td>HDL formal parameter type classes</td>
-    <td class="feature-missing"></td>
+    <td class="feature-done">1.24</td>
   </tr>
   <tr>
     <td>6.5.2</td>
     <td>Declarations</td>
-    <td class="feature-missing"></td>
+    <td class="feature-done">1.24</td>
   </tr>
   <tr>
     <td>6.5.2.1</td>
     <td>Sequence Declarations</td>
-    <td class="feature-missing"></td>
+    <td class="feature-done">1.24</td>
   </tr>
   <tr>
     <td>6.5.2.2</td>
     <td>Property Declaration</td>
-    <td class="feature-missing"></td>
+    <td class="feature-done">1.24</td>
   </tr>
   <tr>
     <td>6.5.3</td>
     <td>Instantiation</td>
-    <td class="feature-missing"></td>
+    <td class="feature-done">1.24</td>
   </tr>
   <tr>
     <td>6.5.3.1</td>
     <td>Sequence instantiation</td>
-    <td class="feature-missing"></td>
+    <td class="feature-done">1.24</td>
   </tr>
   <tr>
     <td>6.5.3.2</td>
     <td>Property instantiation</td>
-    <td class="feature-missing"></td>
+    <td class="feature-done">1.24</td>
   </tr>
   <tr class="feature-group">
     <td>7</td>
@@ -872,17 +872,17 @@ table below.
   <tr>
     <td>7.1.2</td>
     <td>assume</td>
-    <td class="feature-missing"></td>
+    <td class="feature-done">1.24</td>
   </tr>
   <tr>
     <td>7.1.3</td>
     <td>restrict</td>
-    <td class="feature-missing"></td>
+    <td class="feature-partial">1.24</td>
   </tr>
   <tr>
     <td>7.1.4</td>
     <td>restrict!</td>
-    <td class="feature-missing"></td>
+    <td class="feature-partial">1.24</td>
   </tr>
   <tr>
     <td>7.1.5</td>
@@ -892,17 +892,17 @@ table below.
   <tr>
     <td>7.1.6</td>
     <td>fairness and strong_fairness</td>
-    <td class="feature-missing"></td>
+    <td class="feature-partial">1.24</td>
   </tr>
   <tr>
     <td>7.2</td>
     <td>Verification units</td>
-    <td class="feature-missing"></td>
+    <td class="feature-partial">1.24</td>
   </tr>
   <tr>
     <td>7.2.1</td>
     <td>Verification unit binding</td>
-    <td class="feature-missing"></td>
+    <td class="feature-partial">1.24</td>
   </tr>
   <tr>
     <td>7.2.2</td>
@@ -917,17 +917,17 @@ table below.
   <tr>
     <td>7.2.4</td>
     <td>Overriding assignments</td>
-    <td class="feature-missing"></td>
+    <td class="feature-partial">1.24</td>
   </tr>
   <tr>
     <td>7.2.4.1</td>
     <td>Simple case</td>
-    <td class="feature-missing"></td>
+    <td class="feature-done">1.24</td>
   </tr>
   <tr>
     <td>7.2.4.2</td>
     <td>Multiple unrelated vunits</td>
-    <td class="feature-missing"></td>
+    <td class="feature-done">1.24</td>
   </tr>
   <tr>
     <td>7.2.4.3</td>
@@ -955,12 +955,12 @@ table below.
   <tr>
     <td>9.1</td>
     <td>Immediate scope</td>
-    <td class="feature-missing"></td>
+    <td class="feature-done">1.24</td>
   </tr>
   <tr>
     <td>9.2</td>
     <td>Extended scope</td>
-    <td class="feature-missing"></td>
+    <td class="feature-partial">1.24</td>
   </tr>
   <tr>
     <td>9.3</td>
