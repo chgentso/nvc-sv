@@ -670,7 +670,7 @@ PROTECT           ?i:protect
 <PSL>{UNION}             { TOKEN(tUNION); }
 <PSL>{UNTIL}!            { TOKEN(tUNTIL1); }
 <PSL>{UNTIL}_            { TOKEN(tUNTIL_); }
-<PSL>{UNTIL}_!           { TOKEN(tUNTIL1_); }
+<PSL>{UNTIL}!_           { TOKEN(tUNTIL1_); }
 <PSL>{ABORT}             { TOKEN(tABORT); }
 <PSL>{ASYNC_ABORT}       { TOKEN(tASYNC_ABORT); }
 <PSL>{SYNC_ABORT}        { TOKEN(tSYNC_ABORT); }

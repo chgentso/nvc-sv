@@ -16,6 +16,7 @@
 - Fixed a crash when a PSL directive has an inline clock expression
   (#1693).
 - PSL declarations are now accepted in generate blocks (#1694).
+- Fixed lexing of the PSL `until!_` operator in PSL comments.
 - Added a `pkg-config` configuration file to aid locating the VHPI
   headers (from @gsmecher).
 - Several other minor bugs were resolved (#1663, #1672, #1668, #1670,
