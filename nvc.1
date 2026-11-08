@@ -128,7 +128,7 @@ dynamic allocations by the VHDL
 operator.  The
 .Ar size
 parameter takes an optional k, m, or g suffix to indicate kilobytes,
-megabytes, and gigabytes respectively.  The default size is 16
+megabytes, and gigabytes respectively.  The default size is 1024
 megabytes.
 .\" --ieee-warnings
 .It Fl \-ieee-warnings= Ns Bo Cm on Ns | Ns Cm off Ns | Ns Cm off-at-0 Bc
@@ -142,11 +142,13 @@ Do not check the timestamps of source files when the corresponding
 design unit is loaded from a library.
 .\" --load
 .It Fl \-load= Ns Ar plugin
-Loads a VHPI plugin from the shared library
+Loads a VHPI or VPI plugin from the shared library
 .Ar plugin .
-See section
+See sections
 .Sx VHPI
-for details on the VHPI implementation.
+and
+.Sx VPI
+for details on the VHPI and VPI implementations.
 If
 .Ar plugin
 is not a valid path the directories listed in
@@ -213,6 +215,28 @@ Valid levels are
 .Cm failure ,
 and
 .Cm none .
+.\" --sv-lib
+.It Fl \-sv-lib= Ns Ar lib
+Loads the shared library
+.Ar lib
+which contains the C functions called by SystemVerilog
+.Ql import "DPI-C"
+declarations.
+The option may be repeated.
+The library is searched for as given, with the extension
+.Pa .so
+appended, and in the directories listed in
+.Ev NVC_PLUGIN_PATH .
+The functions are found by their C name when first called; arguments and
+results of type int, byte, shortint, longint, real, shortreal, bit, logic,
+string, chandle and packed vectors up to 64 bits wide are passed as defined
+by the DPI-C standard, with the types from
+.Pa svdpi.h .
+Functions and tasks declared with
+.Ql export "DPI-C"
+can be called from the C code with the scope selected by
+.Fn svSetScope
+or that of the calling context import; an exported task cannot consume time.
 .\" --version
 .It Fl v , -version
 Display version and copyright information.
@@ -348,6 +372,13 @@ section below for details.
 Treat all Verilog source files given on the command line as a single
 compilation unit.  This means macros declared in one file are visible in
 all subsequent files.
+.\" --timescale
+.It Fl \-timescale Ns = Ns Ar unit/precision
+Set the default Verilog time unit and precision, for example
+.Cm 1ns/1ps ,
+for source files that do not contain a
+.Cm `timescale
+directive.
 .\" -Werror
 .It Fl Werror
 Treat all analysis warnings as errors.
@@ -430,7 +461,9 @@ disk space overhead.  With optional argument
 only arrays with up to this many elements will be dumped.
 .\" --exit-severity
 .It Fl \-exit-severity Ns = Ns Ar level
-Terminate the simulation after an assertion failures of severity greater
+Terminate the simulation after an assertion failures (including Verilog
+.Cm $error )
+of severity greater
 than or equal to
 .Ar level .
 Valid levels are
@@ -1269,6 +1302,143 @@ are case-insensitive. You can get examples of exclude commands
 from generated Code coverage report by clicking on
 a "Get Exclude Command" button.
 .\" ------------------------------------------------------------
+.\" Verilog process order
+.\" ------------------------------------------------------------
+.Sh VERILOG PROCESS ORDER
+IEEE 1800-2017 section 4.7 leaves the order in which processes that are
+ready to run in the same region of a time step execute to the
+implementation, so a design or test bench should not depend on it.
+.Nm
+currently runs them first in, first out:
+.Bl -bullet
+.It
+At time zero processes start in the order of their declarations in the
+source text, those of an instance or a generate block at the place where
+it is declared.
+.It
+Processes woken by the same event run in the order in which they began
+to wait.  The same applies to processes waiting for a named event and to
+the conditions of wait statements, which are checked again in the order
+they began waiting.
+.It
+Processes created by a fork statement start as soon as the parent
+blocks, in the order they were created and before any other process
+runs.  Processes that they fork in turn start after them.
+.It
+Each
+.Li $monitor
+or
+.Li $fmonitor
+call is carried out by processes that start at time zero, so the lines
+that several of them print for the same change appear in the order of
+the calls in the source text.
+.It
+The lines of
+.Li $monitor ,
+.Li $fmonitor ,
+.Li $strobe
+and
+.Li $fstrobe
+are all printed in the Postponed region (sections 21.2.2 and 21.2.3)
+in one first in, first out order: the order in which the call of a
+strobe task was made or the change that a monitor reports happened
+during the time step.
+.El
+.Pp
+The order may change between releases.  The
+.Fl \-shuffle
+option of the
+.Cm run
+command runs processes in a random order to find designs that depend on
+it.
+.\" ------------------------------------------------------------
+.\" Verilog default time unit
+.\" ------------------------------------------------------------
+.Sh VERILOG DEFAULT TIME UNIT
+IEEE 1800-2017 section 3.14.2.3 leaves the time unit and precision of a
+design element that has no
+.Li `timescale
+directive in effect and no
+.Li timeunit
+or
+.Li timeprecision
+declaration to the implementation.
+.Nm
+uses a time unit of 1ns and a precision of 1ns for such modules, which
+can be changed with the
+.Fl \-timescale
+analysis option.
+A time unit of 1ns gives a delay such as
+.Li #10
+a plausible magnitude for digital logic and matches the unit most often
+written in VHDL, and a precision of 1ns keeps such delays integral.
+.Pp
+IEEE 1364-2005 section 19.8 makes it an error if some modules have a
+.Li `timescale
+specified and others do not.
+.Nm
+reports this as a warning at elaboration, naming a module without a
+time unit and one with a time unit.
+.\" ------------------------------------------------------------
+.\" Verilog variable lifetime
+.\" ------------------------------------------------------------
+.Sh VERILOG VARIABLE LIFETIME
+IEEE 1800-2017 section 6.21 requires a variable declared with an
+initial value in a static task, function or procedural block to be
+declared
+.Li static
+or
+.Li automatic
+explicitly.
+.Nm
+only warns when neither is given and gives the variable the default
+static lifetime, so its initial value is assigned once at the start of
+simulation rather than each time the block or subroutine is entered.
+.\" ------------------------------------------------------------
+.\" Verilog output formats
+.\" ------------------------------------------------------------
+.Sh VERILOG OUTPUT FORMATS
+IEEE 1800-2017 section 21.2.1 leaves some details of the formats of
+.Li $display
+and related tasks to the implementation.
+.Nm
+uses the following rules:
+.Bl -bullet
+.It
+A class handle or chandle printed with an integral format such as
+.Li %d
+or
+.Li %h
+shows the number of the object, or the value of the pointer for a
+chandle, formatted as a 32-bit unsigned value (64-bit if it does not
+fit), so
+.Li %h
+gives eight digits and
+.Li %0h
+the fewest.  A null handle prints as
+.Ql null .
+.It
+.Li %p
+of a class handle prints the values of the properties of the object as
+an assignment pattern, for example
+.Ql '{x:1, next:Node#2} .
+A handle inside an array, a queue or an object prints as the name of
+its class and the number of the object,
+.Ql Name#N ,
+where N is the number that
+.Li %0d
+of the handle prints.  A null handle prints as
+.Ql null .
+.It
+.Li %p
+prints a packed array as one integral value, whatever the number of
+its packed dimensions, the same as a vector with the same bits.
+A packed structure or an untagged packed union is printed the same way,
+as one integral value with the signing of the type, also as an element
+of an unpacked array or a member of an unpacked structure.
+An unpacked structure and a tagged union print their members.
+.El
+.\" ------------------------------------------------------------
 .\" Relaxed rules
 .\" ------------------------------------------------------------
 .Sh RELAXED RULES
@@ -1287,6 +1457,16 @@ Default expression in object interface declaration is not globally
 static.
 .It
 Shared variable is not of protected type in VHDL-2000 or later.
+.It
+Literal actual parameter of a subprogram call is outside the range of
+the subtype of the formal.
+The call fails if it is executed.
+.It
+Array value and its target have static lengths that differ.
+The length is checked again at run time.
+.It
+Case choice, or bound of a case choice range, is globally static but
+not locally static.
 .El
 .Pp
 Additionally the following languages features from VHDL-2008 and later
@@ -1309,6 +1489,26 @@ allows ranges such as
 .Ql -1 to 1
 in VHDL-1993 which otherwise must be written
 .Ql integer'(-1) to 1 .
+.El
+.Pp
+The following are also accepted as extensions:
+.Bl -bullet
+.It
+A subprogram parameter of a file type declared in the VHDL-87 style,
+with class
+.Ql variable
+or no class, is a file parameter.
+.It
+An array aggregate may have one choice that is not locally static
+together with an
+.Ql others
+choice, for example
+.Ql (n - 1 downto 0 => '0', others => '1') .
+.It
+Integer addition, subtraction, multiplication, and negation wrap around
+on overflow instead of failing at run time.
+An integer literal operand of these operators that is outside the range
+of its type wraps around in the same way.
 .El
 .\" ------------------------------------------------------------
 .\" Selecting signals
@@ -1503,6 +1703,75 @@ Foreign functions must not modify arrays passed as
 arguments.  Additionally foreign subprograms must not retain any
 pointers passed as arguments after the subprogram returns.  Violating
 these rules will result in unpredictable and hard to debug behaviour.
+.\" ------------------------------------------------------------
+.\" VPI
+.\" ------------------------------------------------------------
+.Sh VPI
+.Nm
+supports a subset of the SystemVerilog VPI (IEEE 1800-2017 clauses 36 to
+38) giving access to the Verilog and SystemVerilog parts of a design.  The
+header files
+.In vpi_user.h
+and
+.In sv_vpi_user.h
+are installed with
+.Nm .
+A VPI application is a shared library loaded with the
+.Fl \-load
+option which defines the
+.Va vlog_startup_routines
+array of functions to call when it is loaded:
+.Bd -literal -offset indent
+void (*vlog_startup_routines[])(void) = {
+   register_callbacks,
+   NULL
+};
+.Ed
+.Pp
+A library which defines both
+.Va vhpi_startup_routines
+and
+.Va vlog_startup_routines
+has the functions of both arrays called, the VHPI ones first.  The
+startup routines should only register callbacks and system tasks: the
+design can be accessed once the
+.Dv cbStartOfSimulation
+callback is called.
+.Pp
+The design is seen as instances of modules, interfaces and packages with
+their ports, nets, variables, parameters, generate scopes and named
+blocks.  An instance of a VHDL entity in a Verilog design is an object of
+type
+.Dv vpiForeignInst
+from
+.In vpi_ext_nvc.h
+with a name but no contents: its ports, signals and instances are
+reached through VHPI, where it is a component instance statement of the
+Verilog module which instantiates it.  The supported callback reasons are
+.Dv cbStartOfSimulation ,
+.Dv cbEndOfSimulation ,
+.Dv cbValueChange ,
+.Dv cbAfterDelay ,
+.Dv cbAtStartOfSimTime ,
+.Dv cbReadWriteSynch ,
+.Dv cbReadOnlySynch
+and
+.Dv cbNextSimTime .
+The time in
+.Dv vpiSimTime
+units is in steps of the smallest time precision of the Verilog modules
+in the design.  The
+.Fn vpi_control
+operations
+.Dv vpiStop
+and
+.Dv vpiFinish
+both end the simulation as there is no interactive mode.  The
+.Va argv
+returned by
+.Fn vpi_get_vlog_info
+contains the name of the tool followed by the plusargs given on the
+command line.
 .Sh ENVIRONMENT
 .Bl -tag -width "NVC_CONCURRENT_JOBS"
 .It Ev NVC_CONCURRENT_JOBS

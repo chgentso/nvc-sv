@@ -1,4 +1,31 @@
 ## Unreleased changes
+- System Verilog `import "DPI-C"` functions and tasks can now be called.  The
+  shared libraries which contain them are given with the new `--sv-lib`
+  option, which can be repeated, and the C functions are called with `int`,
+  `byte`, `shortint`, `longint`, `real`, `shortreal`, `bit`, `logic`,
+  `string`, `chandle` and packed vector arguments, including output and
+  inout arguments.  The UVM `uvm_hdl_*` and `uvm_re_*` routines are built in
+  so the UVM library no longer needs `UVM_NO_DPI`.  `export "DPI-C"`
+  functions and tasks of modules and packages can be called back from C, with
+  `svGetScope`, `svSetScope`, `svGetScopeFromName` and the other scope
+  functions of `svdpi.h`.
+- A System Verilog `$error` task now counts as a severity `error` assertion
+  failure: the simulation exits with a non-zero status unless
+  `--exit-severity` is set to `failure`, and with `--exit-severity=error` it
+  stops at the first `$error`.  `$fatal` already exited with a non-zero
+  status.
+- System Verilog `final` procedures now run once at the end of simulation:
+  after `$finish`, `$stop` or `$fatal`, when there are no more events, and
+  at the `--stop-time`.  They are also allowed in programs, and delays or
+  event controls inside them are rejected.
+- Added experimental support for System Verilog classes with inheritance
+  and virtual methods, interfaces and virtual interfaces, queues, dynamic
+  arrays, strings, mailboxes, events inside structures, `fork` with
+  `join_none`, and `ref` arguments.
+- Types declared in a VHDL package can be imported into System Verilog and
+  VHDL ports with record types can be connected from Verilog.
+- Hierarchical references from Verilog can read `std_logic` signals in VHDL
+  instances.
 - A Verilog module can now be instantiated directly with `entity work.name`.
 - Fixed comparing two-state Verilog values which gave an unknown result.
 - Fixed values of implicit enum names following an explicit value.
@@ -114,6 +141,15 @@
 - Implemented `PslIsAssertCovered` in `STD.ENV`, and after
   `SetPslCoverAssert(TRUE)` the `PslIsCovered` function also requires
   every PSL assert directive to be covered (LCS-2016-050).
+- Added support for instantiating VHDL entities from Verilog modules in
+  mixed language designs.  Ports may be of mode `in`, `out`, `buffer`,
+  or `inout` and of type `std_ulogic`, `std_logic`, `bit`, `integer`, or
+  a one-dimensional array of one of those types including `unsigned` and
+  `signed`.  Generics may be of integer, `boolean`, `real`, `string`, or
+  bit vector type and are set by parameter overrides in the Verilog
+  instance.
+- Verilog module instances are now resolved in any library on the
+  library search path, not just the library of the enclosing unit.
 - Several other minor bugs were resolved (#1663, #1672, #1668, #1670,
   #1678, #1686, #1687, #1692, #1695, #1700, #1707).
 
