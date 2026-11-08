@@ -1465,6 +1465,16 @@ START_TEST(test_mixed1)
       { 79, "generic G2 not found in Verilog module 'mod1'" },
       { 93, "VHDL port direction IN does not match corresponding Verilog "
         "port 'three' which is declared as output" },
+      { 105, "cannot connect VHDL signal with type BIT_VECTOR to Verilog "
+        "output port 'three'" },
+      { 116, "cannot connect VHDL signal with type BIT_VECTOR to Verilog "
+        "input port 'one'" },
+      { 131, "cannot connect VHDL signal with type INTEGER to Verilog "
+        "output port 'three'" },
+      { 142, "cannot connect VHDL signal with type INTEGER to Verilog "
+        "input port 'one'" },
+      { 155, "cannot connect VHDL signal with type BIT to Verilog input "
+        "port 'one'" },
       { -1, NULL }
    };
    expect_errors(expect);
@@ -2151,6 +2161,53 @@ START_TEST(test_mixed2)
 }
 END_TEST
 
+START_TEST(test_vlogshim1)
+{
+   set_standard(STD_08);
+
+   input_from_file(TESTDIR "/elab/vlogshim1.vhd");
+
+   analyse_file();
+
+   input_from_file(TESTDIR "/elab/vlogshim1.v");
+
+   const error_t expect[] = {
+      { 18, "only input, output, buffer, and inout ports are supported for "
+        "mixed language instantiation" },
+      { 28, "port A of VHDL entity WORK.UNCON1 must have constant bounds to "
+        "be instantiated from Verilog" },
+      { 38, "generic T of VHDL entity WORK.TYPE1 is not a constant" },
+      { 49, "only generics of integer, BOOLEAN, REAL, STRING, or bit vector "
+        "type are supported for mixed language instantiation" },
+      { 62, "cannot connect Verilog net to VHDL input port A with type "
+        "REC_T" },
+      { 73, "cannot compute the bounds of port A of VHDL entity WORK.REAL1 "
+        "which may only depend on integer and BOOLEAN generics to be "
+        "instantiated from Verilog" },
+      { 84, "port A of VHDL entity WORK.NULL1 has a null range which cannot "
+        "be instantiated from Verilog" },
+      { 95, "generic V of VHDL entity WORK.NULL2 has a null range which "
+        "cannot be set from Verilog" },
+      { 107, "cannot compute the bounds of port A of VHDL entity WORK.OVF1 "
+        "which may only depend on integer and BOOLEAN generics to be "
+        "instantiated from Verilog" },
+      { 119, "cannot evaluate default value of generic G of VHDL entity "
+        "WORK.DEF1 so it must be set by a parameter override in the "
+        "Verilog instance" },
+      { 130, "name \\A B\\ cannot be represented as a Verilog identifier for "
+        "mixed language instantiation" },
+      { 1, "unit WORK.SHIM1_PKG is not a Verilog module or VHDL entity" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   tree_t e = run_elab();
+   fail_unless(e == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
 START_TEST(test_clone2)
 {
    set_standard(STD_19);
@@ -2436,6 +2493,28 @@ START_TEST(test_assert8)
 }
 END_TEST
 
+START_TEST(test_udnport1)
+{
+   const error_t expect[] = {
+      { 29, "cannot connect net 'y' of nettype n2 to port 'p' of nettype n1" },
+      { 30, "cannot connect net 'x' of nettype n1 to port 'p' of nettype n2" },
+      { 32, "cannot connect net 'w' of a built-in net type to port 'p' of "
+        "nettype n1" },
+      { 36, "interconnect 'ic2' connects ports of incompatible nettypes n1 "
+        "and n2" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/elab/udnport1.sv");
+
+   tree_t top = run_elab();
+   fail_unless(top == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
 Suite *get_elab_tests(void)
 {
    Suite *s = suite_create("elab");
@@ -2548,6 +2627,7 @@ Suite *get_elab_tests(void)
    tcase_add_test(tc, test_issue1204);
    tcase_add_test(tc, test_clone1);
    tcase_add_test(tc, test_mixed2);
+   tcase_add_test(tc, test_vlogshim1);
    tcase_add_test(tc, test_clone2);
    tcase_add_test(tc, test_issue1333);
    tcase_add_test(tc, test_issue1404);
@@ -2559,6 +2639,7 @@ Suite *get_elab_tests(void)
    tcase_add_test(tc, test_issue1615);
    tcase_add_test(tc, test_issue1638);
    tcase_add_test(tc, test_assert8);
+   tcase_add_test(tc, test_udnport1);
    suite_add_tcase(s, tc);
 
    return s;

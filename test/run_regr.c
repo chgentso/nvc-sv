@@ -109,6 +109,8 @@
 #define F_SEED    (1 << 27)
 #define F_PERFILE (1 << 28)
 #define F_EXIT    (1 << 29)
+#define F_TIMESCALE (1 << 30)
+#define F_VPI     (1u << 31)
 
 typedef struct _test test_t;
 typedef struct _param param_t;
@@ -130,7 +132,7 @@ typedef struct _param {
 typedef struct _test {
    char      *name;
    test_t    *next;
-   int        flags;
+   unsigned   flags;
    char      *stop;
    param_t   *params;
    char      *relax;
@@ -139,9 +141,12 @@ typedef struct _test {
    char      *heapsz;
    char      *cover;
    char      *define;
+   char      *timescale;
    char      *export;
    char      *exit;
+   char      *top2;
    char      *plugin;
+   char      *svlib;
    unsigned   arrays;
    int        seed;
    double     duration;
@@ -432,6 +437,8 @@ static bool parse_test_list(void)
             test->flags |= F_2019;
          else if (strcmp(opt, "vhpi") == 0)
             test->flags |= F_VHPI;
+         else if (strcmp(opt, "vpi") == 0)
+            test->flags |= F_VPI;
          else if (strcmp(opt, "shell") == 0)
             test->flags |= F_SHELL | F_NOTWIN;
          else if (strcmp(opt, "slow") == 0)
@@ -478,6 +485,8 @@ static bool parse_test_list(void)
          }
          else if (strncmp(opt, "plugin=", 7) == 0)
             test->plugin = strdup(opt + 7);
+         else if (strncmp(opt, "svlib=", 6) == 0)
+            test->svlib = strdup(opt + 6);
          else if (strncmp(opt, "O", 1) == 0) {
             if (sscanf(opt + 1, "%u", &(test->olevel)) != 1) {
                fprintf(stderr, "Error on testlist line %d: invalid "
@@ -553,6 +562,17 @@ static bool parse_test_list(void)
             test->flags |= F_DEFINE;
             test->define = strdup(value + 1);
          }
+         else if (strncmp(opt, "timescale", 9) == 0) {
+            char *value = strchr(opt, '=');
+            if (value == NULL) {
+               fprintf(stderr, "Error on testlist line %d: missing argument to "
+                       "timescale option in test %s\n", lineno, name);
+               goto out_close;
+            }
+
+            test->flags |= F_TIMESCALE;
+            test->timescale = strdup(value + 1);
+         }
          else if (strncmp(opt, "export", 6) == 0) {
             char *value = strchr(opt, '=');
             if (value == NULL) {
@@ -564,6 +584,8 @@ static bool parse_test_list(void)
             test->flags |= F_EXPORT;
             test->export = strdup(value + 1);
          }
+         else if (strncmp(opt, "top2=", 5) == 0)
+            test->top2 = strdup(opt + 5);
          else if (strncmp(opt, "exit", 4) == 0) {
             char *value = strchr(opt, '=');
             if (value == NULL) {
@@ -968,8 +990,14 @@ static bool run_test(test_t *test)
       if (test->flags & F_VHPI)
          push_arg(&args, "--load=%s/../lib/vhpi_test.so%s", bin_dir, EXEEXT);
 
+      if (test->flags & F_VPI)
+         push_arg(&args, "--load=%s/../lib/vpi_test.so%s", bin_dir, EXEEXT);
+
       if (test->plugin != NULL)
          push_arg(&args, "--load=%s", test->plugin);
+
+      if (test->svlib != NULL)
+         push_arg(&args, "--sv-lib=%s", test->svlib);
 
       for (param_t *p = test->params; p != NULL; p = p->next) {
          if (p->kind == P_PLUSARG)
@@ -1006,11 +1034,16 @@ static bool run_test(test_t *test)
       if (test->flags & F_DEFINE)
          push_arg(&args, "--define=%s", test->define);
 
+      if (test->flags & F_TIMESCALE)
+         push_arg(&args, "--timescale=%s", test->timescale);
+
       if (test->flags & F_VHPI)
          push_arg(&args, "--preserve-case");
 
       push_arg(&args, "-e");
       push_arg(&args, "%s", test->name);
+      if (test->top2 != NULL)
+         push_arg(&args, "%s", test->top2);
       push_arg(&args, "-O%u", test->olevel);
 
       if (test->flags & F_NOCOLL)
@@ -1032,7 +1065,7 @@ static bool run_test(test_t *test)
             push_arg(&args, "-g%s=%s", p->name, p->value);
       }
 
-      if ((test->flags & F_FAIL) || reheat) {
+      if ((test->flags & F_FAIL) || reheat || test->top2 != NULL) {
          if (run_cmd(outf, &args) != RUN_OK) {
             failed(NULL);
             result = false;
@@ -1051,8 +1084,15 @@ static bool run_test(test_t *test)
          if (test->flags & F_VHPI)
             push_arg(&args, "--load=%s/../lib/vhpi_test.so%s", bin_dir, EXEEXT);
 
+         if (test->flags & F_VPI)
+            push_arg(&args, "--load=%s/../lib/vpi_test.so%s", bin_dir,
+                     EXEEXT);
+
          if (test->plugin != NULL)
             push_arg(&args, "--load=%s", test->plugin);
+
+         if (test->svlib != NULL)
+            push_arg(&args, "--sv-lib=%s", test->svlib);
 
          for (param_t *p = test->params; p != NULL; p = p->next) {
             if (p->kind == P_PLUSARG)
@@ -1599,6 +1639,8 @@ int main(int argc, char **argv)
          mask |= F_WAVE;
       else if (strcmp(argv[i], "vhpi") == 0)
          mask |= F_VHPI;
+      else if (strcmp(argv[i], "vpi") == 0)
+         mask |= F_VPI;
       else if (strcmp(argv[i], "psl") == 0)
          mask |= F_PSL;
       else if (strcmp(argv[i], "cover") == 0)

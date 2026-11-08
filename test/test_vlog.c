@@ -29,6 +29,7 @@
 #include "vlog/vlog-node.h"
 #include "vlog/vlog-number.h"
 #include "vlog/vlog-phase.h"
+#include "vlog/vlog-util.h"
 #include "vpi/vpi-model.h"
 
 #include <inttypes.h>
@@ -203,6 +204,27 @@ START_TEST(test_ports2)
 
    for (int i = 0; i < 6; i++)
       do_parse_check(V_MODULE);
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_ports3)
+{
+   input_from_file(TESTDIR "/vlog/ports3.v");
+
+   const error_t expect[] = {
+      { 22, "inconsistent dimensions for 'o'" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   for (int i = 0; i < 3; i++) {
+      vlog_node_t m = do_parse_check(V_MODULE);
+      vlog_fold(m, get_mir(), get_jit());
+   }
 
    fail_unless(vlog_parse() == NULL);
 
@@ -528,6 +550,53 @@ START_TEST(test_timescale1)
 
    vlog_node_t m = vlog_parse();
    fail_unless(m == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_timescale2)
+{
+   input_from_file(TESTDIR "/vlog/timescale2.v");
+
+   const error_t expect[] = {
+      {  2, "the time precision of a `timescale directive cannot be longer "
+         "than the time unit" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   vlog_node_t m = vlog_parse();
+   fail_if(m == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_modport1)
+{
+   input_from_file(TESTDIR "/vlog/modport1.v");
+
+   set_default_keywords(VLOG_1800_2023);
+
+   const error_t expect[] = {
+      {  7, "output modport expression for 'e' must be a net or variable" },
+      { 13, "interface item 'x' is not in modport 'mi'" },
+      { 14, "interface item 'g' is not in modport 'mi'" },
+      { 12, "cannot assign a which is an input of modport mi" },
+      { 22, "virtual interface element 'x' not found in modport 'mi'" },
+      { 21, "cannot assign a which is an input of modport mi" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   for (int i = 0; i < 3; i++) {
+      vlog_node_t m = vlog_parse();
+      fail_if(m == NULL);
+      vlog_check(m);
+   }
+
+   fail_unless(vlog_parse() == NULL);
 
    check_expected_errors();
 }
@@ -897,6 +966,43 @@ START_TEST(test_casename)
       lib_put_vlog(lib_work(), m);
    }
 
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_dupmod)
+{
+   input_from_file(TESTDIR "/vlog/dupmod.v");
+
+   const error_t expect[] = {
+      {  4, "design unit WORK.DUPMOD is already defined" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   for (int i = 0; i < 2; i++)
+      do_parse_only(V_MODULE);
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_staticmeth)
+{
+   input_from_file(TESTDIR "/vlog/staticmeth.sv");
+
+   const error_t expect[] = {
+      {  2, "a class method cannot have a static lifetime" },
+      {  4, "a class method cannot have a static lifetime" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   fail_if(vlog_parse() == NULL);
    fail_unless(vlog_parse() == NULL);
 
    check_expected_errors();
@@ -1811,6 +1917,18 @@ START_TEST(test_lower3)
    ck_assert_ptr_nonnull(mu);
 
    static const mir_match_t bb1[] = {
+      { MIR_OP_FCALL },
+      { MIR_OP_CMP },
+      { MIR_OP_COND, NODE(_), BLOCK(3), BLOCK(2) },
+   };
+   mir_match(mu, 1, bb1);
+
+   static const mir_match_t bb2w[] = {
+      { MIR_OP_WAIT, BLOCK(4) },
+   };
+   mir_match(mu, 2, bb2w);
+
+   static const mir_match_t bb3s[] = {
       { MIR_OP_VAR_UPREF, ENUM(1), UPREF("sum") },
       { MIR_OP_LOAD },
       { MIR_OP_CONST_VEC },
@@ -1830,6 +1948,7 @@ START_TEST(test_lower3)
       { MIR_OP_LOAD },
       { MIR_OP_RESOLVED },
       { MIR_OP_PACK },
+      { MIR_OP_LOAD, VAR("idx") },
       { MIR_OP_BINARY, ENUM(MIR_VEC_ADD) },
       { MIR_OP_LOAD },
       { MIR_OP_UNPACK },
@@ -2046,6 +2165,7 @@ START_TEST(test_disable1)
 
    const error_t expect[] = {
       {  7, "cannot disable 'x'" },
+      {  6, "no visible label 'bar'" },
       { -1, NULL }
    };
    expect_errors(expect);
@@ -2231,6 +2351,133 @@ START_TEST(test_number3)
 }
 END_TEST
 
+START_TEST(test_pp20)
+{
+   add_include_dir(TESTDIR "/vlog");
+
+   input_from_file(TESTDIR "/vlog/pp20.v");
+
+   LOCAL_TEXT_BUF tb = tb_new();
+   vlog_preprocess(tb, false);
+
+   ck_assert_str_eq(
+      tb_get(tb),
+      "\n"
+      "\n"
+      "hello\n"
+      " hello\n"
+      "\n"
+      "hello\n"
+      "end\n");
+}
+END_TEST
+
+START_TEST(test_pp19)
+{
+   input_from_file(TESTDIR "/vlog/pp19.v");
+
+   const error_t expect[] = {
+      { 1, "cannot redefine compiler directive 'define' as a text macro" },
+      { 2, "string literal in macro text must end on the same line" },
+      { 5, "cannot redefine compiler directive 'timescale' as a text macro" },
+      { 6, "cannot redefine compiler directive 'line' as a text macro" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   LOCAL_TEXT_BUF tb = tb_new();
+   vlog_preprocess(tb, false);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_pp21)
+{
+   input_from_file(TESTDIR "/vlog/pp21.v");
+
+   const error_t expect[] = {
+      {  1, "cannot redefine compiler directive 'timescale' as a "
+        "text macro" },
+      {  2, "cannot redefine compiler directive 'resetall' as a "
+        "text macro" },
+      {  3, "cannot redefine compiler directive 'celldefine' as a "
+        "text macro" },
+      {  4, "cannot redefine compiler directive 'endcelldefine' as a "
+        "text macro" },
+      {  5, "cannot redefine compiler directive 'default_nettype' as a "
+        "text macro" },
+      {  6, "cannot redefine compiler directive 'unconnected_drive' as a "
+        "text macro" },
+      {  7, "cannot redefine compiler directive 'nounconnected_drive' as a "
+        "text macro" },
+      {  8, "cannot redefine compiler directive 'begin_keywords' as a "
+        "text macro" },
+      {  9, "cannot redefine compiler directive 'end_keywords' as a "
+        "text macro" },
+      { 10, "cannot redefine compiler directive 'pragma' as a "
+        "text macro" },
+      { 11, "cannot redefine compiler directive '__FILE__' as a "
+        "text macro" },
+      { 12, "cannot redefine compiler directive '__LINE__' as a "
+        "text macro" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   LOCAL_TEXT_BUF tb = tb_new();
+   vlog_preprocess(tb, false);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_typedef1)
+{
+   const error_t expect[] = {
+      {  1, "forward type declaration of 'never_defined' is never resolved "
+         "to a data type" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/typedef1.sv");
+
+   while (vlog_parse() != NULL)
+      ;
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_inval5)
+{
+   const error_t expect[] = {
+      {  2, "enumeration name 'c' without a value cannot follow a name with "
+         "an unknown value" },
+      {  4, "the value of enumeration name 'j' cannot contain x or z as the "
+         "base type is two-state" },
+      { 24, "specparam 'sp' cannot be used in the value of a parameter" },
+      { 11, "variable 'v' cannot be written by both a continuous assignment "
+         "and a procedural assignment" },
+      { 15, "variable 'x' cannot be written by both a continuous assignment "
+         "and a procedural assignment" },
+      { 17, "variable 'r1' cannot be driven by more than one continuous "
+         "assignment" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/inval5.sv");
+
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
 START_TEST(test_pp18)
 {
    input_from_file(TESTDIR "/vlog/pp18.v");
@@ -2270,6 +2517,1352 @@ START_TEST(test_pp18)
 }
 END_TEST
 
+static vlog_node_t find_decl(vlog_node_t parent, const char *name)
+{
+   ident_t id = ident_new(name);
+   const int ndecls = vlog_decls(parent);
+   for (int i = 0; i < ndecls; i++) {
+      vlog_node_t d = vlog_decl(parent, i);
+      if (vlog_has_ident(d) && vlog_ident(d) == id)
+         return d;
+   }
+
+   ck_abort_msg("no declaration named %s", name);
+   return NULL;
+}
+
+static vlog_node_t cons_stmt(vlog_node_t c, int n, vlog_kind_t kind)
+{
+   vlog_node_t s = vlog_stmt(c, n);
+   ck_assert_vlog_kind(s, kind);
+   return s;
+}
+
+START_TEST(test_crv1)
+{
+   input_from_file(TESTDIR "/vlog/crv1.sv");
+
+   set_default_keywords(VLOG_1800_2023);
+
+   vlog_node_t m = do_parse_check(V_MODULE);
+
+   fail_unless(vlog_parse() == NULL);
+   fail_if_errors();
+
+   vlog_node_t base = find_decl(m, "base");
+   ck_assert_vlog_kind(base, V_CLASS_DECL);
+
+   vlog_node_t a = find_decl(base, "a");
+   ck_assert_int_eq(vlog_flags(a) & (VLOG_F_RAND | VLOG_F_RANDC), VLOG_F_RAND);
+
+   vlog_node_t r = find_decl(base, "r");
+   ck_assert_int_eq(vlog_flags(r) & (VLOG_F_RAND | VLOG_F_RANDC), VLOG_F_RANDC);
+
+   vlog_node_t state = find_decl(base, "state");
+   ck_assert_int_eq(vlog_flags(state) & (VLOG_F_RAND | VLOG_F_RANDC), 0);
+
+   vlog_node_t bx = find_decl(base, "x");
+
+   // Hidden properties follow the declared ones
+   vlog_node_t rand_off = find_decl(base, "$rand_off");
+   ck_assert_vlog_kind(rand_off, V_VAR_DECL);
+   ck_assert_int_eq(vlog_flags(rand_off) & (VLOG_F_RAND | VLOG_F_RANDC), 0);
+   ck_assert_int_eq(vlog_subkind(vlog_type(rand_off)), DT_LONGINT);
+   ck_assert_vlog_kind(vlog_value(rand_off), V_NUMBER);
+   ck_assert_int_eq(number_integer(vlog_number(vlog_value(rand_off))), 0);
+   find_decl(base, "$cons_off");
+   find_decl(base, "$seed");
+   find_decl(base, "r$randc");
+   ck_assert_int_eq(vlog_decl(base, vlog_decls(base) - 4) == rand_off, 1);
+
+   vlog_node_t c1 = find_decl(base, "c1");
+   ck_assert_vlog_kind(c1, V_CONSTRAINT);
+   ck_assert_ptr_eq(vlog_ref(c1), base);
+   ck_assert_int_eq(vlog_flags(c1) & VLOG_F_STATIC, 0);
+   ck_assert_int_eq(vlog_stmts(c1), 3);
+
+   vlog_node_t e0 = cons_stmt(c1, 0, V_CONS_EXPR);
+   ck_assert_int_eq(vlog_flags(e0) & VLOG_F_SOFT, 0);
+   ck_assert_vlog_kind(vlog_value(e0), V_BINARY);
+   ck_assert_int_eq(vlog_subkind(vlog_value(e0)), V_BINARY_GT);
+
+   vlog_node_t e1 = cons_stmt(c1, 1, V_CONS_EXPR);
+   ck_assert_int_eq(vlog_flags(e1) & VLOG_F_SOFT, VLOG_F_SOFT);
+
+   vlog_node_t in = vlog_value(cons_stmt(c1, 2, V_CONS_EXPR));
+   ck_assert_vlog_kind(in, V_INSIDE);
+   ck_assert_vlog_kind(vlog_value(in), V_REF);
+   ck_assert_ptr_eq(vlog_ref(vlog_value(in)), a);
+   ck_assert_int_eq(vlog_params(in), 3);
+   ck_assert_vlog_kind(vlog_param(in, 0), V_INSIDE_RANGE);
+   ck_assert_vlog_kind(vlog_param(in, 1), V_NUMBER);
+   ck_assert_vlog_kind(vlog_param(in, 2), V_INSIDE_RANGE);
+   ck_assert_vlog_kind(vlog_right(vlog_param(in, 2)), V_DOLLAR);
+
+   vlog_node_t c2 = find_decl(base, "c2");
+   vlog_node_t dist = vlog_value(cons_stmt(c2, 0, V_CONS_EXPR));
+   ck_assert_vlog_kind(dist, V_DIST);
+   ck_assert_int_eq(vlog_params(dist), 3);
+
+   vlog_node_t d0 = vlog_param(dist, 0);
+   ck_assert_vlog_kind(d0, V_DIST_ITEM);
+   ck_assert_int_eq(vlog_subkind(d0), V_DIST_PER_VALUE);
+   fail_if(vlog_has_right(d0));
+   ck_assert_int_eq(number_integer(vlog_number(vlog_delay(d0))), 2);
+
+   vlog_node_t d1 = vlog_param(dist, 1);
+   ck_assert_int_eq(vlog_subkind(d1), V_DIST_PER_RANGE);
+   ck_assert_int_eq(number_integer(vlog_number(vlog_left(d1))), 2);
+   ck_assert_int_eq(number_integer(vlog_number(vlog_right(d1))), 3);
+   ck_assert_int_eq(number_integer(vlog_number(vlog_delay(d1))), 4);
+
+   vlog_node_t d2 = vlog_param(dist, 2);
+   ck_assert_int_eq(vlog_subkind(d2), V_DIST_PER_VALUE);
+   ck_assert_int_eq(number_integer(vlog_number(vlog_delay(d2))), 1);
+
+   vlog_node_t c3 = find_decl(base, "c3");
+   ck_assert_int_eq(vlog_flags(c3) & VLOG_F_STATIC, VLOG_F_STATIC);
+   vlog_node_t imp = cons_stmt(c3, 0, V_CONS_IMPLY);
+   ck_assert_vlog_kind(vlog_value(imp), V_BINARY);
+   ck_assert_int_eq(vlog_stmts(imp), 1);
+   cons_stmt(imp, 0, V_CONS_EXPR);
+
+   vlog_node_t c4 = find_decl(base, "c4");
+   ck_assert_int_eq(vlog_stmts(c4), 1);
+   vlog_node_t if1 = cons_stmt(c4, 0, V_CONS_IF);
+   ck_assert_vlog_kind(vlog_left(if1), V_CONS_BLOCK);
+   ck_assert_int_eq(vlog_stmts(vlog_left(if1)), 1);
+   ck_assert_vlog_kind(vlog_right(if1), V_CONS_BLOCK);
+   ck_assert_int_eq(vlog_stmts(vlog_right(if1)), 1);
+   vlog_node_t if2 = cons_stmt(vlog_right(if1), 0, V_CONS_IF);
+   ck_assert_int_eq(vlog_stmts(vlog_left(if2)), 2);
+   ck_assert_int_eq(vlog_stmts(vlog_right(if2)), 1);
+
+   vlog_node_t c5 = find_decl(base, "c5");
+   vlog_node_t fe = cons_stmt(c5, 0, V_CONS_FOREACH);
+   ck_assert_vlog_kind(vlog_value(fe), V_REF);
+   ck_assert_ptr_eq(vlog_ref(vlog_value(fe)), find_decl(base, "arr"));
+   ck_assert_int_eq(vlog_decls(fe), 1);
+   vlog_node_t idx = vlog_decl(fe, 0);
+   ck_assert_vlog_kind(idx, V_LOCAL_DECL);
+   ck_assert_ptr_eq(vlog_ident(idx), ident_new("i"));
+   ck_assert_int_eq(vlog_subkind(vlog_type(idx)), DT_INT);
+   ck_assert_int_eq(vlog_stmts(fe), 1);
+   vlog_node_t fbody = vlog_value(cons_stmt(fe, 0, V_CONS_EXPR));
+   ck_assert_vlog_kind(fbody, V_BINARY);
+   vlog_node_t sel = vlog_left(fbody);
+   ck_assert_vlog_kind(sel, V_BIT_SELECT);
+   ck_assert_ptr_eq(vlog_ref(vlog_param(sel, 0)), idx);
+   cons_stmt(c5, 1, V_CONS_FOREACH);
+
+   vlog_node_t c6 = find_decl(base, "c6");
+   vlog_node_t uniq = cons_stmt(c6, 0, V_CONS_UNIQUE);
+   ck_assert_int_eq(vlog_params(uniq), 2);
+   vlog_node_t solve = cons_stmt(c6, 1, V_CONS_SOLVE);
+   ck_assert_vlog_kind(vlog_left(solve), V_CONCAT);
+   ck_assert_int_eq(vlog_params(vlog_left(solve)), 2);
+   ck_assert_vlog_kind(vlog_right(solve), V_CONCAT);
+   ck_assert_int_eq(vlog_params(vlog_right(solve)), 1);
+
+   vlog_node_t c7 = find_decl(base, "c7");
+   vlog_node_t imp2 = cons_stmt(c7, 0, V_CONS_IMPLY);
+   ck_assert_int_eq(vlog_stmts(imp2), 2);
+
+   // The caller's scope is skipped by local::
+   vlog_node_t again = find_decl(base, "again");
+   vlog_node_t ret = vlog_stmt(again, 0);
+   ck_assert_vlog_kind(ret, V_RETURN);
+   vlog_node_t call = vlog_value(ret);
+   ck_assert_vlog_kind(call, V_METHOD_CALL);
+   ck_assert_int_eq(vlog_subkind(call), V_METHOD_RANDOMIZE);
+   ck_assert_vlog_kind(vlog_value(call), V_THIS);
+   ck_assert_int_eq(vlog_params(call), 0);
+   ck_assert_int_eq(vlog_stmts(call), 1);
+   vlog_node_t eq = vlog_value(cons_stmt(call, 0, V_CONS_EXPR));
+   ck_assert_ptr_eq(vlog_ref(vlog_left(eq)), a);
+   ck_assert_ptr_eq(vlog_ref(vlog_right(eq)), bx);
+
+   // Built-in methods without a prefix in a class
+   vlog_node_t off = find_decl(base, "off");
+   ck_assert_int_eq(vlog_stmts(off), 4);
+   call = vlog_stmt(off, 0);
+   ck_assert_vlog_kind(call, V_METHOD_CALL);
+   ck_assert_int_eq(vlog_subkind(call), V_METHOD_RAND_MODE);
+   ck_assert_vlog_kind(vlog_value(call), V_THIS);
+   call = vlog_stmt(off, 1);
+   ck_assert_int_eq(vlog_subkind(call), V_METHOD_RAND_MODE);
+   ck_assert_vlog_kind(vlog_value(call), V_REF);
+   ck_assert_ptr_eq(vlog_ref(vlog_value(call)), a);
+   call = vlog_stmt(off, 2);
+   ck_assert_int_eq(vlog_subkind(call), V_METHOD_CONSTRAINT_MODE);
+   ck_assert_ptr_eq(vlog_ref(vlog_value(call)), c1);
+   call = vlog_stmt(off, 3);
+   ck_assert_int_eq(vlog_subkind(call), V_METHOD_CONSTRAINT_MODE);
+   ck_assert_vlog_kind(vlog_value(call), V_THIS);
+
+   // A derived class adds its own state only if the base has none
+   vlog_node_t derived = find_decl(m, "derived");
+   ck_assert_ptr_eq(vlog_ref(derived), base);
+   vlog_node_t b = find_decl(derived, "b");
+   ck_assert_int_eq(vlog_flags(b) & VLOG_F_RAND, VLOG_F_RAND);
+   for (int i = 0; i < vlog_decls(derived); i++) {
+      vlog_node_t d = vlog_decl(derived, i);
+      if (vlog_kind(d) == V_VAR_DECL)
+         fail_if(vlog_ident(d) == ident_new("$rand_off"));
+   }
+
+   vlog_node_t k1 = find_decl(derived, "d1");
+   vlog_node_t k1eq = vlog_value(cons_stmt(k1, 0, V_CONS_EXPR));
+   ck_assert_ptr_eq(vlog_ref(vlog_left(k1eq)), b);
+   vlog_node_t k1sum = vlog_right(k1eq);
+   ck_assert_ptr_eq(vlog_ref(vlog_left(k1sum)), a);
+   ck_assert_ptr_eq(vlog_ref(vlog_right(k1sum)), bx);
+
+   // A member of the object hides a variable of the caller
+   vlog_node_t chk = find_decl(m, "chk");
+   vlog_node_t local_a = find_decl(chk, "a");
+   ck_assert_vlog_kind(local_a, V_LOCAL_DECL);
+   call = vlog_value(vlog_stmt(chk, 0));
+   ck_assert_vlog_kind(call, V_METHOD_CALL);
+   ck_assert_int_eq(vlog_stmts(call), 3);
+   eq = vlog_value(cons_stmt(call, 0, V_CONS_EXPR));
+   ck_assert_ptr_eq(vlog_ref(vlog_left(eq)), a);
+   eq = vlog_value(cons_stmt(call, 1, V_CONS_EXPR));
+   ck_assert_ptr_eq(vlog_ref(vlog_left(eq)), b);
+   ck_assert_ptr_eq(vlog_ref(vlog_right(eq)), a);
+   eq = vlog_value(cons_stmt(call, 2, V_CONS_EXPR));
+   ck_assert_ptr_eq(vlog_ref(vlog_left(eq)), bx);
+   ck_assert_ptr_eq(vlog_ref(vlog_right(eq)), local_a);
+
+   vlog_node_t mx = find_decl(m, "x");
+   vlog_node_t my = find_decl(m, "y");
+
+   vlog_node_t init = vlog_stmt(m, 0);
+   ck_assert_vlog_kind(init, V_INITIAL);
+   vlog_node_t blk = vlog_stmt(init, 0);
+   ck_assert_vlog_kind(blk, V_SEQ_BLOCK);
+   ck_assert_int_eq(vlog_stmts(blk), 16);
+
+   vlog_node_t o = find_decl(m, "o");
+
+   call = vlog_value(cons_stmt(blk, 0, V_BASSIGN));
+   ck_assert_vlog_kind(call, V_METHOD_CALL);
+   ck_assert_int_eq(vlog_subkind(call), V_METHOD_RANDOMIZE);
+   ck_assert_ptr_eq(vlog_ref(vlog_value(call)), o);
+   ck_assert_int_eq(vlog_params(call), 0);
+   ck_assert_int_eq(vlog_stmts(call), 0);
+
+   call = cons_stmt(blk, 1, V_METHOD_CALL);
+   ck_assert_int_eq(vlog_subkind(call), V_METHOD_RANDOMIZE);
+
+   call = vlog_value(cons_stmt(blk, 2, V_VOID_CALL));
+   ck_assert_int_eq(vlog_subkind(call), V_METHOD_RANDOMIZE);
+   ck_assert_int_eq(vlog_params(call), 1);
+   ck_assert_ptr_eq(vlog_ref(vlog_param(call, 0)), a);
+
+   // Arguments are properties of the object too
+   call = vlog_value(cons_stmt(blk, 3, V_BASSIGN));
+   ck_assert_int_eq(vlog_params(call), 2);
+   ck_assert_ptr_eq(vlog_ref(vlog_param(call, 1)), r);
+   ck_assert_int_eq(vlog_stmts(call), 2);
+   eq = vlog_value(cons_stmt(call, 0, V_CONS_EXPR));
+   ck_assert_ptr_eq(vlog_ref(vlog_left(eq)), a);
+   ck_assert_ptr_eq(vlog_ref(vlog_right(eq)), my);
+   eq = vlog_value(cons_stmt(call, 1, V_CONS_EXPR));
+   ck_assert_ptr_eq(vlog_ref(vlog_left(eq)), state);
+   ck_assert_ptr_eq(vlog_ref(vlog_right(eq)), bx);
+
+   call = vlog_value(cons_stmt(blk, 4, V_BASSIGN));
+   ck_assert_int_eq(vlog_stmts(call), 2);
+   eq = vlog_value(cons_stmt(call, 0, V_CONS_EXPR));
+   ck_assert_ptr_eq(vlog_ref(vlog_left(eq)), b);
+   eq = vlog_value(cons_stmt(call, 1, V_CONS_EXPR));
+   ck_assert_vlog_kind(vlog_left(eq), V_MEMBER_REF);
+   ck_assert_vlog_kind(vlog_value(vlog_left(eq)), V_THIS);
+   ck_assert_ptr_eq(vlog_ref(vlog_left(eq)), a);
+
+   // Also for a specialisation of a generic class
+   call = vlog_value(cons_stmt(blk, 5, V_BASSIGN));
+   vlog_node_t gtype = vlog_get_type(vlog_value(call));
+   ck_assert_vlog_kind(gtype, V_CLASS_DECL);
+   eq = vlog_value(cons_stmt(call, 0, V_CONS_EXPR));
+   ck_assert_ptr_eq(vlog_ref(vlog_left(eq)), find_decl(gtype, "v"));
+   find_decl(gtype, "$rand_off");
+
+   call = vlog_value(cons_stmt(blk, 6, V_BASSIGN));
+   ck_assert_vlog_kind(call, V_STD_RANDOMIZE);
+   ck_assert_int_eq(vlog_params(call), 2);
+   ck_assert_ptr_eq(vlog_ref(vlog_param(call, 0)), mx);
+   ck_assert_ptr_eq(vlog_ref(vlog_param(call, 1)), my);
+   ck_assert_int_eq(vlog_stmts(call), 2);
+   eq = vlog_value(cons_stmt(call, 0, V_CONS_EXPR));
+   ck_assert_ptr_eq(vlog_ref(vlog_left(eq)), mx);
+   in = vlog_value(cons_stmt(call, 1, V_CONS_EXPR));
+   ck_assert_vlog_kind(in, V_INSIDE);
+
+   call = cons_stmt(blk, 7, V_STD_RANDOMIZE);
+   ck_assert_int_eq(vlog_stmts(call), 0);
+
+   call = cons_stmt(blk, 8, V_METHOD_CALL);
+   ck_assert_int_eq(vlog_subkind(call), V_METHOD_RAND_MODE);
+   ck_assert_vlog_kind(vlog_value(call), V_MEMBER_REF);
+   ck_assert_ptr_eq(vlog_ref(vlog_value(call)), a);
+   ck_assert_int_eq(vlog_params(call), 1);
+
+   call = cons_stmt(blk, 9, V_METHOD_CALL);
+   ck_assert_int_eq(vlog_subkind(call), V_METHOD_CONSTRAINT_MODE);
+   ck_assert_vlog_kind(vlog_value(call), V_MEMBER_REF);
+   ck_assert_ptr_eq(vlog_ref(vlog_value(call)), c1);
+
+   call = vlog_value(cons_stmt(blk, 10, V_BASSIGN));
+   ck_assert_int_eq(vlog_subkind(call), V_METHOD_RAND_MODE);
+   ck_assert_vlog_kind(vlog_value(call), V_REF);
+   ck_assert_int_eq(vlog_params(call), 0);
+
+   call = cons_stmt(blk, 11, V_METHOD_CALL);
+   ck_assert_int_eq(vlog_subkind(call), V_METHOD_CONSTRAINT_MODE);
+
+   call = cons_stmt(blk, 12, V_METHOD_CALL);
+   ck_assert_int_eq(vlog_subkind(call), V_METHOD_RANDOMIZE);
+
+   cons_stmt(blk, 13, V_ASSERT);
+   cons_stmt(blk, 14, V_IF);
+
+   vlog_node_t rc = cons_stmt(blk, 15, V_RANDCASE);
+   ck_assert_int_eq(vlog_stmts(rc), 2);
+   vlog_node_t ri = cons_stmt(rc, 1, V_RANDCASE_ITEM);
+   ck_assert_int_eq(number_integer(vlog_number(vlog_value(ri))), 3);
+   ck_assert_int_eq(vlog_stmts(ri), 1);
+}
+END_TEST
+
+START_TEST(test_crv2)
+{
+   input_from_file(TESTDIR "/vlog/crv2.sv");
+
+   set_default_keywords(VLOG_1800_2023);
+
+   const error_t expect[] = {
+      {  8, "sorry, skipping a loop variable in foreach is not supported" },
+      {  9, "no visible declaration for 'zzz'" },
+      { 11, "duplicate declaration of 'k3'" },
+      { 14, "sorry, more than 64 rand properties in a class are not "
+        "supported" },
+      { 26, "no visible declaration for 'zzz'" },
+      { 27, "'x' has no method named 'randomize'" },
+      { 28, "sorry, an identifier list after with is not supported" },
+      { 29, "rand_mode can only be called on an object or a random "
+        "variable" },
+      { 30, "constraint_mode can only be called on an object or a "
+        "constraint" },
+      { 35, "local:: can only be used in the constraint block of a "
+        "randomize call" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   do_parse_only(V_MODULE);
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_crv3)
+{
+   input_from_file(TESTDIR "/vlog/crv3.sv");
+
+   set_default_keywords(VLOG_1800_2023);
+
+   const error_t expect[] = {
+      { 12, "rand variable 'r' must have an integral, enum, or class handle "
+        "type or be an array of these" },
+      { 14, "randc variable 'h' must have an integral or enum type" },
+      { 15, "rand variable 's' must have an integral, enum, or class handle "
+        "type or be an array of these" },
+      { 18, "constraint expression must have an integral type" },
+      { 19, "condition must have an integral type" },
+      { 20, "inside set item must be integral or an array" },
+      { 21, "soft constraint cannot be used with dist" },
+      { 22, "inside set item must be integral or an array" },
+      { 23, "constraint expression must have an integral type" },
+      { 30, "target cannot be assigned in a procedural block" },
+      { 31, "inside set item must be integral or an array" },
+      { 32, "expression before inside must have an integral type" },
+      { 34, "randcase weight must have an integral type" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   do_parse_check(V_MODULE);
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_crv4)
+{
+   // The keywords added for constrained random are identifiers in older
+   // standards
+   input_from_file(TESTDIR "/vlog/crv4.v");
+
+   do_parse_check(V_MODULE);
+   do_parse_check(V_MODULE);
+
+   fail_unless(vlog_parse() == NULL);
+
+   fail_if_errors();
+}
+END_TEST
+
+START_TEST(test_inval1)
+{
+   const error_t expect[] = {
+      {  2, "`pragma requires a pragma name" },
+      {  3, "`line requires a line number" },
+      {  4, "`line requires a line number" },
+      {  5, "`line requires a line number" },
+      {  6, "`line requires a line number" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/inval1.sv");
+
+   LOCAL_TEXT_BUF tb = tb_new();
+   vlog_preprocess(tb, false);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_inval3)
+{
+   const error_t expect[] = {
+      {  7, "return statement in a void function cannot have an expression" },
+      { 10, "index expression cannot have real type" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/inval3.sv");
+
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_inval2)
+{
+   const error_t expect[] = {
+      {  4, "width of an indexed part-select must be positive" },
+      {  4, "width of an indexed part-select must be positive" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/inval2.sv");
+
+   vlog_node_t m = do_parse_check(V_MODULE);
+   vlog_fold(m, get_mir(), get_jit());
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_assoc1)
+{
+   const error_t expect[] = {
+      {  2, "the index of an associative array must be an integral type or "
+         "string" },
+      {  3, "the index of an associative array must be an integral type or "
+         "string" },
+      {  7, "foreach over an associative array with a wildcard index is not "
+         "allowed" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/assoc1.sv");
+
+   (void)do_parse_only(V_MODULE);
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_assoc2)
+{
+   const error_t expect[] = {
+      {  8, "index of an associative array with a string index must have "
+         "type string" },
+      {  9, "method 'exists' of an associative array expects 1 argument but "
+         "has 0" },
+      { 10, "target cannot be assigned in a procedural block" },
+      { 11, "method 'num' of an associative array expects 0 arguments but "
+         "has 1" },
+      { 12, "argument of an associative array with an integral index must "
+         "have an integral type" },
+      { 13, "value is not compatible with an associative array of a "
+         "different type" },
+      { 14, "value is not compatible with an associative array of a "
+         "different type" },
+      { 15, "operator cannot be applied to an associative array" },
+      { 16, "index of an associative array with an integral index must have "
+         "an integral type" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/assoc2.sv");
+
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_scope1)
+{
+   const error_t expect[] = {
+      {  9, "'missing' is not a member of class 'A'" },
+      { 11, "no package named 'nopkg' in working library" },
+      { 12, "'other' is not a member of class 'A'" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/scope1.sv");
+
+   (void)do_parse_only(V_MODULE);
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_extern1)
+{
+   const error_t expect[] = {
+      { 12, "ports of 'f' do not match the prototype in class 'A'" },
+      { 16, "'g' was not declared extern in class 'A'" },
+      { 20, "class 'A' has no function named 'h'" },
+      { 24, "no class named 'B'" },
+      { 28, "ports of 't' do not match the prototype in class 'A'" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/extern1.sv");
+
+   (void)do_parse_only(V_MODULE);
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_cast1)
+{
+   const error_t expect[] = {
+      { 13, "$cast expects 2 arguments but has 1" },
+      { 15, "a class handle can only be cast to a class handle" },
+      { 16, "the source of $cast to a class handle must be a class handle" },
+      { 17, "target cannot be assigned in a procedural block" },
+      { 18, "sorry, $cast to or from this type is not supported" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/cast1.sv");
+
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_ifc1)
+{
+   const error_t expect[] = {
+      {  4, "an interface class cannot have properties" },
+      {  5, "methods of an interface class must be pure virtual" },
+      { 13, "class 'NotIface' is not an interface class" },
+      { 16, "class 'C3' cannot extend the interface class 'IA': use "
+         "implements" },
+      { 19, "an interface class cannot implement another: use extends" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/ifc1.sv");
+
+   (void)do_parse_only(V_MODULE);
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_ifc2)
+{
+   const error_t expect[] = {
+      {  6, "class 'C1' does not implement method 'f' of interface class "
+         "'IA'" },
+      { 10, "method 'f' has a different number of arguments than in "
+         "interface class 'IA'" },
+      { 24, "the name 'T' must be defined in 'P3' due to having conflicting "
+         "visibility in multiple base classes" },
+      { 40, "method 'm' has a different return type than in interface class "
+         "'R2'" },
+      { 45, "cannot create an instance of interface class 'IA'" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/ifc2.sv");
+
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_invalid1)
+{
+   const error_t expect[] = {
+      { 10, "virtual method 'check' has a different number of arguments or "
+        "return type than the method in class 'base'" },
+      { 32, "constructor of class 'rect' expects 2 arguments but have 1" },
+      { 34, "constructor of class 'point' expects 0 arguments but have 1" },
+      { 39, "variable 'q' written in an always_ff process cannot be written "
+        "by any other process" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/invalid1.sv");
+
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_virtover1)
+{
+   const error_t expect[] = {
+      { 11, "virtual method 'f' has a different number of arguments or return "
+        "type than the method in class 'base'" },
+      { 14, "type of argument 's' of virtual method 'g' in class 'd2' does "
+        "not match the type of the argument in superclass 'base'" },
+      { 17, "direction of argument 'a' for virtual method 't' in class 'd3' "
+        "does not match the direction in superclass 'base'" },
+      { 20, "virtual method 'h' has a different number of arguments or return "
+        "type than the method in class 'base'" },
+      { 23, "argument name 'b' for virtual method 'k' in class 'd5' does not "
+        "match the argument name 'a' in superclass 'base'" },
+      { 26, "task 'f' in class 'd6' cannot override function in superclass "
+        "'base'" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/virtover1.sv");
+
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_process1)
+{
+   const error_t expect[] = {
+      {  3, "new class expression must have class type" },
+      {  7, "'p' has no method named 'frobnicate'" },
+      {  8, "process has no member named 'bogus'" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/process1.sv");
+
+   (void)do_parse_only(V_MODULE);
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_process2)
+{
+   const error_t expect[] = {
+      {  6, "method 'kill' of process expects no arguments but has 1" },
+      {  7, "value of type 'integral' is not compatible with 'process'" },
+      {  8, "value of type 'process' is not compatible with 'int'" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/process2.sv");
+
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_soft1)
+{
+   const error_t expect[] = {
+      {  5, "the operand of disable soft must be a random variable" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/soft1.sv");
+
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_cons1)
+{
+   const error_t expect[] = {
+      {  7, "an extern or pure constraint must not have a block" },
+      { 12, "constraint 'c3' was not declared extern in class 'A'" },
+      { 14, "class 'A' has no constraint named 'cz'" },
+      { 16, "no class named 'B'" },
+      { 18, "the static qualifier of constraint 'c2' does not match the "
+         "prototype" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/cons1.sv");
+
+   (void)do_parse_only(V_MODULE);
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_cons2)
+{
+   const error_t expect[] = {
+      {  4, "constraint 'c1' of class 'A' is declared extern but is never "
+         "defined" },
+      {  5, "constraint 'c2' of class 'A' is declared without a block but is "
+         "never defined" },
+      {  6, "method 'f' of class 'A' is declared extern but is never "
+         "defined" },
+      {  7, "a pure constraint can only be declared in a virtual class" },
+      { 16, "class 'C' does not implement the pure constraint 'p2'" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/cons2.sv");
+
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_crv5)
+{
+   const error_t expect[] = {
+      { 6, "randc variable 'b2' cannot be used in a solve before constraint" },
+      { 7, "randc variable 'b2' cannot be used in a soft constraint" },
+      { 8, "randc variable 'b3' cannot be used in a dist constraint" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/crv5.sv");
+
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_inval4)
+{
+   const error_t expect[] = {
+      {  8, "the size of the value of enumeration name 'G' is 4 but the base "
+         "type has 3 bits" },
+      {  9, "the value of enumeration name 'Q' cannot contain x or z as the "
+         "base type is two-state" },
+      { 10, "enumeration name 'U' without a value cannot follow a name with "
+         "an unknown value" },
+      { 13, "a member of a packed structure cannot have a default value" },
+      { 19, "built-in method 'rand_mode' cannot be overridden" },
+      { 22, "a pure virtual method can only be declared in a virtual class" },
+      { 26, "a return statement is not allowed inside a fork block" },
+      { 45, "cannot assign this value to a variable of enumeration type "
+         "without a cast" },
+      { 36, "cannot assign this value to a variable of enumeration type "
+         "without a cast" },
+      { 37, "an arithmetic assignment cannot be used with a variable of "
+         "enumeration type" },
+      { 38, "cannot assign this value to a variable of enumeration type "
+         "without a cast" },
+      { 39, "cannot assign this value to a variable of enumeration type "
+         "without a cast" },
+      { 41, "an edge event control cannot be used with a real value" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/inval4.sv");
+
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_final1)
+{
+   const error_t expect[] = {
+      {  5, "a delay control inside a final block is illegal as final "
+         "procedures must not block" },
+      {  6, "an event control inside a final block is illegal as final "
+         "procedures must not block" },
+      {  7, "a wait statement inside a final block is illegal as final "
+         "procedures must not block" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/final1.sv");
+
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_nba1)
+{
+   const error_t expect[] = {
+      { 10, "a non-blocking assignment cannot write to an automatic" },
+      { 11, "a non-blocking assignment cannot write to an automatic" },
+      { 12, "a non-blocking assignment cannot write to an automatic" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/nba1.sv");
+
+   (void)do_parse_only(V_NAMESPACE);
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_rs1)
+{
+   const error_t expect[] = {
+      {  5, "no production named 'nothere'" },
+      { 11, "sorry, the recursive production 'a' is not supported" },
+      { 16, "too many arguments for production 'add'" },
+      { 16, "missing argument for 'y' of production 'add'" },
+      { 20, "no production named 'missing'" },
+      { 26, "sorry, rand join of more than three productions is not "
+        "supported" },
+      { 34, "no visible declaration for 'zzz'" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/rs1.sv");
+
+   (void)do_parse_only(V_MODULE);
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_taskout1)
+{
+   const error_t expect[] = {
+      { 15, "illegal output argument for 'y'" },
+      { 16, "illegal inout argument for 'z'" },
+      { 17, "illegal inout argument for 'z'" },
+      { 18, "illegal output argument for 'y'" },
+      { 19, "illegal output argument for 'y'" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/taskout1.sv");
+
+   (void)do_parse_only(V_NAMESPACE);
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_crosshier1)
+{
+   const error_t expect[] = {
+      { 12, "cross items must be coverpoints or variables; declare a "
+        "coverpoint" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/crosshier1.sv");
+
+   for (int i = 0; i < 2; i++)
+      fail_if(vlog_parse() == NULL);
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_casereal1)
+{
+   const error_t expect[] = {
+      { 10, "case equality is not allowed on an aggregate with a real member" },
+      { 11, "case equality is not allowed on an aggregate with a real member" },
+      { 14, "invalid operands for binary expression" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/casereal1.sv");
+
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_newtype1)
+{
+   const error_t expect[] = {
+      {  7, "'Other' is a type but new must be followed by an object handle" },
+      {  8, "'C_t' is a type but new must be followed by an object handle" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/newtype1.sv");
+
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_unpackeq1)
+{
+   const error_t expect[] = {
+      { 12, "cannot assign unpacked array a to unpacked array b as their "
+        "element types are not equivalent" },
+      { 13, "cannot assign unpacked array a to unpacked array c as their "
+        "element types are not equivalent" },
+      { 14, "cannot assign unpacked array qa to unpacked array qb as their "
+        "element types are not equivalent" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/unpackeq1.sv");
+
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_discard1)
+{
+   const error_t expect[] = {
+      { 20, "return value of function 'f' is discarded" },
+      { 21, "return value of function 'm' is discarded" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/discard1.sv");
+
+   vlog_check(do_parse_only(V_NAMESPACE));
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_fwdarg1)
+{
+   const error_t expect[] = {
+      {  7, "'later_sig' is used before its declaration" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/fwdarg1.sv");
+
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_modportin1)
+{
+   const error_t expect[] = {
+      { 11, "cannot assign a which is an input of modport mp" },
+      { 13, "cannot assign a which is an input of modport mp" },
+      { 14, "cannot assign v which is an input of modport mp" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/modportin1.sv");
+
+   for (int i = 0; i < 2; i++) {
+      vlog_node_t m = vlog_parse();
+      fail_if(m == NULL);
+      vlog_check(m);
+   }
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_pkghier1)
+{
+   const error_t expect[] = {
+      { 15, "hierarchical reference to 'top' in package 'pkghier1'" },
+      {  8, "hierarchical reference to 'top' in package 'pkghier1'" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/pkghier1.sv");
+
+   vlog_check(do_parse_only(V_PACKAGE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_vifmodportin1)
+{
+   input_from_file(TESTDIR "/vlog/vifmodportin1.sv");
+
+   const error_t expect[] = {
+      { 15, "cannot assign a which is an input of modport mp" },
+      { 26, "cannot assign v which is an input of modport mp" },
+      { 31, "cannot assign a which is an input of modport mp" },
+      { 32, "cannot assign a which is an input of modport mp" },
+      { 33, "cannot assign v which is an input of modport mp" },
+      { 34, "cannot assign v which is an input of modport mp" },
+      { 35, "cannot assign a which is an input of modport mp" },
+      { 36, "cannot assign a which is an input of modport mp" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   for (int i = 0; i < 3; i++) {
+      vlog_node_t m = vlog_parse();
+      fail_if(m == NULL);
+      vlog_check(m);
+   }
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_lifetime1)
+{
+   input_from_file(TESTDIR "/vlog/lifetime1.sv");
+
+   const error_t expect[] = {
+      { 12, "initialised variable 'a' in a static subroutine must be "
+         "declared static or automatic" },
+      { 24, "initialised variable 'k' in a static block must be declared" },
+      { 26, "initialised variable 'loop3' in a static block must be" },
+      { 32, "initialised variable 'v' in a static block must be declared" },
+      { 32, "initialised variable 'w' in a static block must be declared" },
+      { 44, "initial value of static variable 'r' cannot refer to "
+         "automatic argument 'p'" },
+      { 49, "initial value of static variable 'q' cannot refer to "
+         "automatic argument 'a'" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   fail_if(vlog_parse() == NULL);
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_dpiopen1)
+{
+   input_from_file(TESTDIR "/vlog/dpiopen1.sv");
+
+   const error_t expect[] = {
+      { 12, "exported DPI subroutine 'exp_open' cannot have dynamic array "
+        "argument 'x'" },
+      { 16, "unsized packed dimension is only allowed in a formal argument "
+        "of a DPI import" },
+      { 28, "dynamic array cannot be passed to unsized output argument 'x' "
+        "of DPI import 'imp_out'" },
+      { 29, "actual argument is not compatible with open array argument "
+        "'x'" },
+      { 30, "actual argument is not compatible with open array argument "
+        "'x'" },
+      { 31, "actual argument is not compatible with open array argument "
+        "'x'" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   vlog_node_t m = vlog_parse();
+   fail_if(m == NULL);
+   vlog_check(m);
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_nettype1)
+{
+   const error_t expect[] = {
+      { 21, "return type of resolution function 'bad_ret' must be the data "
+        "type of nettype n1" },
+      { 22, "resolution function 'bad_arg' must have a single input argument "
+        "that is a dynamic array of the data type of nettype n2" },
+      { 23, "resolution function 'bad_two' must have a single input argument "
+        "that is a dynamic array of the data type of nettype n3" },
+      { 25, "resolution function 'bad_dir' must have a single input argument "
+        "that is a dynamic array of the data type of nettype n5" },
+      { 26, "'bad_task' is not a function" },
+      { 27, "invalid data type string for nettype n7" },
+      { 28, "invalid data type for nettype n8" },
+      { 29, "invalid data type for nettype n9" },
+      { 38, "net 'q' of nettype plain without a resolution function cannot "
+        "have more than one driver" },
+      { 39, "'a' cannot be assigned in a procedural block" },
+      { 40, "'p' cannot be assigned in a procedural block" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/nettype1.sv");
+
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_interconnect1)
+{
+   const error_t expect[] = {
+      {  6, "interconnect 'p' can only be used in a port connection" },
+      { 14, "interconnect 'ic' can only be used in a port connection" },
+      { 15, "interconnect 'ic' can only be used in a port connection" },
+      { 16, "interconnect 'ib' can only be used in a port connection" },
+      { 19, "interconnect 'ic' can only be used in a port connection" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/interconnect1.sv");
+
+   for (int i = 0; i < 2; i++) {
+      vlog_node_t m = vlog_parse();
+      fail_if(m == NULL);
+      vlog_check(m);
+   }
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_svalocal1)
+{
+   const error_t expect[] = {
+      { 17, "local variable 'x' cannot be used in an abort condition" },
+      { 18, "local variable 'x' cannot be used in an abort condition" },
+      { 19, "local variable 'x' cannot be used in an abort condition" },
+      { 20, "local variable 'x' cannot be used in an abort condition" },
+      { 21, "local variable 'y' cannot be used in a disable iff condition" },
+      { 22, "local variable 'x' cannot be used in a disable iff condition" },
+      { 26, "local variable 'x' may be unassigned here" },
+      { 29, "local variable 'x' is assigned in both operands of and and "
+        "cannot be referenced after it" },
+      { 30, "local variable 'x' is assigned in both operands of intersect "
+        "and cannot be referenced after it" },
+      { 31, "local variable 'x' may be unassigned here" },
+      { 37, "local variable 'x' may be unassigned here" },
+      { 38, "function 'fo' with an output argument cannot be called in a "
+        "sequence or property expression" },
+      { 39, "function 'fr' with a ref argument cannot be called in a "
+        "sequence or property expression" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/svalocal1.sv");
+
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_functask1)
+{
+   const error_t expect[] = {
+      {  6, "task 't' cannot be called from a function as functions must "
+         "not block" },
+      { 14, "task 't' cannot be called from a function as functions must "
+         "not block" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/functask1.sv");
+
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_config1)
+{
+   input_from_file(TESTDIR "/vlog/config1.sv");
+
+   const error_t expect[] = {
+      { 12, "unexpected default while parsing configuration declaration, "
+        "expecting design" },
+      { 18, "configuration 'cfg_twodefault' has more than one default "
+        "clause" },
+      { 23, "'other' is not a top-level cell of configuration 'cfg_badpath'" },
+      { 27, "unexpected parameter while parsing configuration declaration" },
+      { 33, "'cfg_wrong' does not match configuration name 'cfg_label'" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   while (vlog_parse() != NULL)
+      ;
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_refarg1)
+{
+   const error_t expect[] = {
+      { 10, "ref argument 'r' is not allowed in static task 't3'" },
+      { 13, "illegal ref argument for 'r'" },
+      { 14, "illegal ref argument for 'r'" },
+      { 15, "type of actual for ref argument 'r' is not equivalent to int" },
+      { 17, "'v' is not an event" },
+      { 18, "'v' is not an event" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/refarg1.sv");
+
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
 Suite *get_vlog_tests(void)
 {
    Suite *s = suite_create("vlog");
@@ -2279,12 +3872,14 @@ Suite *get_vlog_tests(void)
    tcase_add_test(tc, test_simple_sem);
    tcase_add_test(tc, test_ports1);
    tcase_add_test(tc, test_ports2);
+   tcase_add_test(tc, test_ports3);
    tcase_add_test(tc, test_parse1);
    tcase_add_test(tc, test_number1);
    tcase_add_test(tc, test_number2);
    tcase_add_test(tc, test_pp1);
    tcase_add_test(tc, test_empty1);
    tcase_add_test(tc, test_timescale1);
+   tcase_add_test(tc, test_timescale2);
    tcase_add_test(tc, test_gate1);
    tcase_add_test(tc, test_pp2);
    tcase_add_test(tc, test_specify1);
@@ -2301,6 +3896,8 @@ Suite *get_vlog_tests(void)
    tcase_add_test(tc, test_concat1);
    tcase_add_test(tc, test_pp4);
    tcase_add_test(tc, test_casename);
+   tcase_add_test(tc, test_dupmod);
+   tcase_add_test(tc, test_staticmeth);
    tcase_add_test(tc, test_const1);
    tcase_add_test(tc, test_case1);
    tcase_add_test(tc, test_case2);
@@ -2355,6 +3952,56 @@ Suite *get_vlog_tests(void)
    tcase_add_test(tc, test_pp17);
    tcase_add_test(tc, test_number3);
    tcase_add_test(tc, test_pp18);
+   tcase_add_test(tc, test_pp19);
+   tcase_add_test(tc, test_pp21);
+   tcase_add_test(tc, test_pp20);
+   tcase_add_test(tc, test_crv1);
+   tcase_add_test(tc, test_crv2);
+   tcase_add_test(tc, test_crv3);
+   tcase_add_test(tc, test_crv4);
+   tcase_add_test(tc, test_inval1);
+   tcase_add_test(tc, test_inval2);
+   tcase_add_test(tc, test_inval3);
+   tcase_add_test(tc, test_assoc1);
+   tcase_add_test(tc, test_assoc2);
+   tcase_add_test(tc, test_scope1);
+   tcase_add_test(tc, test_extern1);
+   tcase_add_test(tc, test_cast1);
+   tcase_add_test(tc, test_ifc1);
+   tcase_add_test(tc, test_ifc2);
+   tcase_add_test(tc, test_virtover1);
+   tcase_add_test(tc, test_process1);
+   tcase_add_test(tc, test_process2);
+   tcase_add_test(tc, test_soft1);
+   tcase_add_test(tc, test_cons1);
+   tcase_add_test(tc, test_cons2);
+   tcase_add_test(tc, test_inval4);
+   tcase_add_test(tc, test_crv5);
+   tcase_add_test(tc, test_inval5);
+   tcase_add_test(tc, test_typedef1);
+   tcase_add_test(tc, test_rs1);
+   tcase_add_test(tc, test_nba1);
+   tcase_add_test(tc, test_modport1);
+   tcase_add_test(tc, test_final1);
+   tcase_add_test(tc, test_invalid1);
+   tcase_add_test(tc, test_taskout1);
+   tcase_add_test(tc, test_crosshier1);
+   tcase_add_test(tc, test_casereal1);
+   tcase_add_test(tc, test_newtype1);
+   tcase_add_test(tc, test_unpackeq1);
+   tcase_add_test(tc, test_discard1);
+   tcase_add_test(tc, test_fwdarg1);
+   tcase_add_test(tc, test_modportin1);
+   tcase_add_test(tc, test_pkghier1);
+   tcase_add_test(tc, test_lifetime1);
+   tcase_add_test(tc, test_dpiopen1);
+   tcase_add_test(tc, test_vifmodportin1);
+   tcase_add_test(tc, test_nettype1);
+   tcase_add_test(tc, test_interconnect1);
+   tcase_add_test(tc, test_svalocal1);
+   tcase_add_test(tc, test_functask1);
+   tcase_add_test(tc, test_config1);
+   tcase_add_test(tc, test_refarg1);
    suite_add_tcase(s, tc);
 
    return s;
