@@ -515,11 +515,67 @@ static void psl_check_clocked(psl_node_t p, nametab_t *tab)
       psl_check_boolean(p, tab);
 }
 
+static void psl_check_value_item(psl_node_t p, nametab_t *tab)
+{
+   tree_t value = solve_types(tab, psl_tree(p), NULL);
+   psl_set_tree(p, value);
+
+   if (type_is_none(tree_type(value)) || !sem_check(value, tab))
+      return;
+
+   psl_check_static(value);
+}
+
+static void psl_check_value_set(psl_node_t vs, nametab_t *tab)
+{
+   if (psl_subkind(vs) == PSL_VALUE_SET_BOOLEAN)
+      return;
+
+   const int nops = psl_operands(vs);
+   for (int i = 0; i < nops; i++) {
+      psl_node_t item = psl_operand(vs, i);
+      if (psl_kind(item) == P_RANGE) {
+         psl_check_value_item(psl_left(item), tab);
+         psl_check_value_item(psl_right(item), tab);
+      }
+      else
+         psl_check_value_item(item, tab);
+   }
+}
+
 static void psl_check_builtin_fcall(psl_node_t p, nametab_t *tab)
 {
    const int nparams = psl_operands(p);
    for (int i = 0; i < nparams; i++)
       psl_check(psl_operand(p, i), tab);
+
+   switch (psl_subkind(p)) {
+   case PSL_BUILTIN_PREV:
+      if (nparams > 1 && psl_kind(psl_operand(p, 1)) == P_HDL_EXPR) {
+         int64_t cycles;
+         tree_t count = psl_tree(psl_operand(p, 1));
+         if (folded_int(count, &cycles) && cycles < 1)
+            error_at(tree_loc(count), "number of cycles for prev must be "
+                     "positive");
+      }
+      break;
+
+   case PSL_BUILTIN_NEXT:
+      error_at(psl_loc(p), "built-in function next cannot be used directly "
+               "in a property");
+      break;
+
+   case PSL_BUILTIN_NONDET:
+      psl_check_value_set(psl_operand(p, 0), tab);
+      break;
+
+   case PSL_BUILTIN_NONDET_VECTOR:
+      psl_check_value_set(psl_operand(p, 1), tab);
+      break;
+
+   default:
+      break;
+   }
 }
 
 static void psl_check_union(psl_node_t p, nametab_t *tab)

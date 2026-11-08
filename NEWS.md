@@ -56,6 +56,8 @@
 - Added support for the PSL logical `and` of temporal properties,
   replicated properties (`forall` and `for i in {...} : and (...)`) and
   the LTL operators `X`, `X!`, `F`, `G`, `[f U g]` and `[f W g]`.
+- Added more checks for PSL built-in functions and for the simple subset
+  rules of the logical and LTL operators.
 - PSL Boolean implication `->` and equivalence `<->` can now be used
   inside SEREs and as the operand of other PSL operators.  The operators
   of PSL properties are now parsed with the correct precedence.

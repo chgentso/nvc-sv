@@ -440,6 +440,43 @@ START_TEST(test_sem3)
 }
 END_TEST
 
+START_TEST(test_sem5)
+{
+   opt_set_int(OPT_PSL_COMMENTS, 1);
+
+   input_from_file(TESTDIR "/psl/sem5.vhd");
+
+   const error_t expect[] = {
+      { 10, "default clock already declared in this region" },
+      { 13, "number of cycles for prev must be positive" },
+      { 14, "built-in function next cannot be used directly in a property" },
+      { 16, "expression must be static" },
+      { 17, "expression must be static" },
+      { 19, "property is not in the simple subset as the operand of this "
+        "logical not is non-Boolean" },
+      { 20, "property is not in the simple subset as the right hand side "
+        "of this implication is non-Boolean" },
+      { 22, "property is not in the simple subset as the operand of F is "
+        "not a Boolean or Sequence" },
+      { 23, "property is not in the simple subset as the right hand side "
+        "of this U operator is non-Boolean" },
+      { 25, "property is not in the simple subset as the operand of this "
+        "next_event_e operator is non-Boolean" },
+      { 27, "expression must be static" },
+      { 28, "expression must be static" },
+      { 29, "expression must be static" },
+      { 30, "OBE properties are not supported in simulation" },
+      { 31, "unexpected forall" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   parse_and_check(T_ENTITY, T_ARCH);
+
+   check_expected_errors();
+}
+END_TEST
+
 START_TEST(test_names1)
 {
    set_standard(STD_08);
@@ -485,6 +522,7 @@ Suite *get_psl_tests(void)
    tcase_add_test(tc_core, test_issue1694);
    tcase_add_test(tc_core, test_names1);
    tcase_add_test(tc_core, test_sem3);
+   tcase_add_test(tc_core, test_sem5);
    suite_add_tcase(s, tc_core);
 
    return s;

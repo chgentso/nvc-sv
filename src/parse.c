@@ -13510,6 +13510,14 @@ static psl_node_t p_psl_fl_primary(void)
       break;
 
    case tPSLNEXT:
+      if (peek_nth(2) == tLPAREN && peek_nth(3) == tID
+          && peek_nth(4) == tRPAREN && is_vhdl_infix_op(peek_nth(5))) {
+         // Built-in function call used in an expression such as
+         // next(x) = y
+         p = p_hdl_expression(NULL, PSL_TYPE_BOOLEAN);
+         break;
+      }
+      // Fall-through
    case tNEXT1:
       {
          consume(tok);
