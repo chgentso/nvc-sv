@@ -4735,7 +4735,11 @@ static vcode_reg_t lower_new(lower_unit_t *lu, tree_t expr)
          array_reg = lower_wrap_with_new_bounds(lu, value_type, type,
                                                 bounds_reg, data_reg);
 
-      if (value == NULL)
+      if (value == NULL && type_has_protected(type)) {
+         lower_init_objects(lu, type, data_reg, length_reg, NULL);
+         init_reg = array_reg;
+      }
+      else if (value == NULL)
          init_reg = lower_default_value(lu, type, array_reg);
       else if (init_reg == VCODE_INVALID_REG)
          init_reg = lower_aggregate(lu, value, data_reg);
@@ -4754,6 +4758,13 @@ static vcode_reg_t lower_new(lower_unit_t *lu, tree_t expr)
       }
 
       return mem_reg;
+   }
+   else if (type_is_record(type) && type_has_protected(type)) {
+      vcode_reg_t result_reg =
+         emit_new(lower_type(type), VCODE_INVALID_REG);
+      vcode_reg_t all_reg = emit_all(result_reg);
+      lower_init_objects(lu, type, all_reg, VCODE_INVALID_REG, NULL);
+      return result_reg;
    }
    else if (type_is_record(type)) {
       vcode_reg_t result_reg =

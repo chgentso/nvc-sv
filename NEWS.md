@@ -44,6 +44,8 @@
   solidus inside the identifier, and `'VALUE` accepts that format.
 - Arrays and records of protected types and of file types are now
   supported in VHDL-2019 (LCS-2016-014).
+- Access types may designate composites of protected types in VHDL-2019
+  (LCS-2016-014a).
 - Several other minor bugs were resolved (#1663, #1672, #1668, #1670,
   #1678, #1686, #1687, #1692, #1695, #1700, #1707).
 

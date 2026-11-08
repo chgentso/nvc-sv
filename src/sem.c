@@ -6441,6 +6441,9 @@ static bool sem_check_new(tree_t t, nametab_t *tab)
       else if (standard() >= STD_19)
          tree_set_global_flags(t, TREE_GF_INSTANCE_NAME | TREE_GF_PATH_NAME);
    }
+   else if (type_has_protected(type) && !has_initial
+            && standard() >= STD_19)
+      tree_set_global_flags(t, TREE_GF_INSTANCE_NAME | TREE_GF_PATH_NAME);
 
    type_t designated = type_designated(access_type);
 
