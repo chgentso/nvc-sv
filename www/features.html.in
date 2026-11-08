@@ -653,7 +653,7 @@ table below.
   <tr>
     <td>6.2.1.1</td>
     <td>Sequential FL Properties</td>
-    <td class="feature-partial">1.15</td>
+    <td class="feature-done">1.24</td>
   </tr>
   <tr>
     <td>6.2.1.2</td>
@@ -773,7 +773,7 @@ table below.
   <tr>
     <td>6.2.1.7.5</td>
     <td>Logical or</td>
-    <td class="feature-partial">1.24</td>
+    <td class="feature-done">1.24</td>
   </tr>
   <tr>
     <td>6.2.1.7.6</td>
@@ -793,17 +793,17 @@ table below.
   <tr>
     <td>6.2.3</td>
     <td>Replicated properties</td>
-    <td class="feature-partial">1.24</td>
+    <td class="feature-done">1.24</td>
   </tr>
   <tr>
     <td>6.3</td>
     <td>Local variables</td>
-    <td class="feature-missing"></td>
+    <td class="feature-done">1.24</td>
   </tr>
   <tr>
     <td>6.4</td>
     <td>Procedural blocks</td>
-    <td class="feature-missing"></td>
+    <td class="feature-done">1.24</td>
   </tr>
   <tr>
     <td>6.5</td>
