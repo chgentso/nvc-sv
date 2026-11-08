@@ -196,13 +196,13 @@ table below.
     <td><a href="http://www.eda-twiki.org/cgi-bin/view.cgi/P1076/LCS2016_014">
         LCS2016-014</a></td>
     <td>Composites of protected types</td>
-    <td class="feature-missing"></td>
+    <td class="feature-done">1.24</td>
   </tr>
   <tr>
     <td><a href="http://www.eda-twiki.org/cgi-bin/view.cgi/P1076/LCS2016_014a">
         LCS2016-014a</a></td>
     <td>Pointers to composites of protected types</td>
-    <td class="feature-partial">1.10</td>
+    <td class="feature-partial">1.24</td>
   </tr>
   <tr>
     <td><a href="http://www.eda-twiki.org/cgi-bin/view.cgi/P1076/LCS2016_015">
@@ -298,7 +298,7 @@ table below.
     <td><a href="http://www.eda-twiki.org/cgi-bin/view.cgi/P1076/LCS2016_043">
         LCS2016-043</a></td>
     <td>Attributes for PSL</td>
-    <td class="feature-missing"></td>
+    <td class="feature-done">1.24</td>
   </tr>
   <tr>
     <td><a href="http://www.eda-twiki.org/cgi-bin/view.cgi/P1076/LCS2016_045a">
@@ -328,7 +328,7 @@ table below.
     <td><a href="http://www.eda-twiki.org/cgi-bin/view.cgi/P1076/LCS2016_050">
         LCS2016-050</a></td>
     <td>API for assert</td>
-    <td class="feature-done">1.11</td>
+    <td class="feature-partial">1.11</td>
   </tr>
   <tr>
     <td><a href="http://www.eda-twiki.org/cgi-bin/view.cgi/P1076/LCS2016_055a">
@@ -407,6 +407,12 @@ table below.
         LCS2016_I13</a></td>
     <td>Precedence of unary operators</td>
     <td class="feature-done">1.14</td>
+  </tr>
+  <tr>
+    <td><a href="https://www.eda-twiki.org/cgi-bin/view.cgi/P1076/LCS2016_I14">
+        LCS2016_I14</a></td>
+    <td>Strings from embedded identifiers</td>
+    <td class="feature-done">1.24</td>
   </tr>
 </table>
 
