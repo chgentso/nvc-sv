@@ -74,6 +74,7 @@ const char *port_mode_str(port_mode_t mode);
 void mangle_one_type(text_buf_t *buf, type_t type);
 ident_t get_call_context(ident_t mangled);
 tree_t primary_unit_of(tree_t unit);
+tree_t find_default_arch(lib_t lib, ident_t entity);
 unsigned get_case_choice_char(tree_t value, int depth);
 int64_t encode_case_choice(tree_t value, int length, int bits);
 void to_string(text_buf_t *tb, type_t type, int64_t value);
