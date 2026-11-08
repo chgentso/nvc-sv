@@ -13867,6 +13867,17 @@ static psl_node_t p_psl_fl_primary(void)
    case tGOTORPT:
    case tEQRPT:
       p = p_psl_sequence();
+
+      if (optional(tBAR)) {
+         // Strong sequence: the "!" replacement character is lexed as "|"
+         psl_node_t strong = psl_new(P_SERE);
+         psl_set_subkind(strong, PSL_SERE_CONCAT);
+         psl_add_operand(strong, p);
+         psl_set_flag(strong, PSL_F_STRONG);
+         psl_set_loc(strong, CURRENT_LOC);
+
+         p = strong;
+      }
       break;
 
    default:

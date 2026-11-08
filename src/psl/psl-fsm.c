@@ -603,6 +603,31 @@ static fsm_state_t *determinize(psl_fsm_t *fsm, fsm_state_t *root,
    return final;
 }
 
+static fsm_state_t *determinize_sequence(psl_fsm_t *fsm, fsm_state_t *state,
+                                         fsm_state_t *root,
+                                         fsm_state_t *nfa_final, psl_node_t p)
+{
+   const unsigned first = fsm->next_id;
+   fsm_state_t *final = determinize(fsm, root, nfa_final);
+
+   const bool strong =
+      psl_kind(p) == P_SERE && (psl_flags(p) & PSL_F_STRONG);
+
+   if (strong) {
+      // A strong sequence must complete before the end of the
+      // simulation (IEEE 1850-2010 section 6.2.1.3.1)
+      for (fsm_state_t *s = fsm->states; s; s = s->next) {
+         if (s->id >= first || s == root)
+            s->strong = true;
+      }
+
+      if (!state->initial)
+         state->strong = true;
+   }
+
+   return final;
+}
+
 typedef struct {
    psl_node_t where;
    psl_node_t node;
@@ -1449,7 +1474,7 @@ static fsm_state_t *build_property(psl_fsm_t *fsm, fsm_state_t *state,
    case P_SERE:
    case P_REPEAT:
    case P_PARAM_SERE:
-      return determinize(fsm, initial, final);
+      return determinize_sequence(fsm, state, initial, final, p);
    default:
       return final;
    }
@@ -1775,7 +1800,7 @@ static fsm_state_t *build_suffix_impl(psl_fsm_t *fsm, fsm_state_t *state,
    case P_REPEAT:
    case P_PARAM_SERE:
       // The property holds if any match of the sequence succeeds
-      final = determinize(fsm, right, final);
+      final = determinize_sequence(fsm, right, right, final, rhs);
       break;
    default:
       break;
