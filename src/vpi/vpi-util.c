@@ -111,6 +111,37 @@ void vpi_clear_error(void)
    last_error.message = 0;
 }
 
+static char unknown_digit(const uint64_t *abits, const uint64_t *bbits,
+                          int start, int nbits)
+{
+   // See 1800-2023 section 21.2.1.5 for the display of unknown values
+
+   int nx = 0, nz = 0;
+   for (int i = start; i < start + nbits; i++) {
+      const bool a = (abits[i / 64] >> (i % 64)) & 1;
+      const bool b = (bbits[i / 64] >> (i % 64)) & 1;
+      if (b && a)
+         nx++;
+      else if (b)
+         nz++;
+   }
+
+   if (nx == nbits)
+      return 'x';
+   else if (nz == nbits)
+      return 'z';
+   else if (nx > 0)
+      return 'X';
+   else if (nz > 0)
+      return 'Z';
+   else {
+      unsigned digit = 0;
+      for (int i = start + nbits - 1; i >= start; i--)
+         digit = (digit << 1) | ((abits[i / 64] >> (i % 64)) & 1);
+      return "0123456789abcdef"[digit];
+   }
+}
+
 void vpi_format_number(int size, bool is_signed, const uint64_t *abits,
                        const uint64_t *bbits, s_vpi_value *val,
                        text_buf_t *tb)
@@ -136,19 +167,21 @@ void vpi_format_number(int size, bool is_signed, const uint64_t *abits,
       if (is_defined)
          vec2_itoa(size, abits, is_signed, tb);
       else
-         tb_cat(tb, "x");
+         tb_append(tb, unknown_digit(abits, bbits, 0, size));
       val->value.str = (PLI_BYTE8 *)tb_get(tb);
       break;
 
    case vpiHexStrVal:
       if (is_defined) {
-         for (int i = nwords - 1, field = ((size % 64) + 3) / 4;
+         for (int i = nwords - 1, field = size % 64 ? ((size % 64) + 3) / 4 : 16;
               i >= 0; i--, field = 16)
             tb_printf(tb, "%0*"PRIx64, field, abits[i]);
       }
       else {
-         for (int i = 0; i < (size + 3) / 4; i++)
-            tb_append(tb, 'x');
+         for (int i = (size + 3) / 4 - 1; i >= 0; i--) {
+            const int n = MIN(4, size - i * 4);
+            tb_append(tb, unknown_digit(abits, bbits, i * 4, n));
+         }
       }
       val->value.str = (PLI_BYTE8 *)tb_get(tb);
       break;
@@ -167,16 +200,21 @@ void vpi_format_number(int size, bool is_signed, const uint64_t *abits,
          }
       }
       else {
-         for (int i = 0; i < (size + 2) / 3; i++)
-            tb_append(tb, 'x');
+         for (int i = (size + 2) / 3 - 1; i >= 0; i--) {
+            const int n = MIN(3, size - i * 3);
+            tb_append(tb, unknown_digit(abits, bbits, i * 3, n));
+         }
       }
       val->value.str = (PLI_BYTE8 *)tb_get(tb);
       break;
 
    case vpiStringVal:
       if (is_defined) {
-         for (int i = (size - 7) & ~7; i >= 0; i -= 8)
-            tb_append(tb, abits[i / 64] >> (i % 64));
+         for (int i = (size - 7) & ~7; i >= 0; i -= 8) {
+            const char ch = abits[i / 64] >> (i % 64);
+            if (ch != '\0')
+               tb_append(tb, ch);
+         }
       }
       val->value.str = (PLI_BYTE8 *)tb_get(tb);
       break;
@@ -259,6 +297,7 @@ void vpi_format_real(double value, s_vpi_value *val, text_buf_t *tb)
    }
 }
 
+DLLEXPORT
 PLI_INT32 vpi_chk_error(p_vpi_error_info error_info_p)
 {
    if (error_info_p != NULL)

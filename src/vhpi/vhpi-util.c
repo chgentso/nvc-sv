@@ -373,11 +373,21 @@ void vhpi_load_plugins(const char *plugins)
    do {
       jit_dll_t *dll = ffi_load_dll(tok);
 
+      // A library may provide both VHPI and VPI startup routines (IEEE
+      // 1800-2017 section 36.9.1) and both arrays are run
+
       void (**startup_funcs)() = ffi_find_symbol(dll, "vhpi_startup_routines");
 
       if (startup_funcs != NULL) {
          while (*startup_funcs)
             (*startup_funcs++)();
+      }
+
+      void (**vlog_funcs)(void) = ffi_find_symbol(dll, "vlog_startup_routines");
+
+      if (vlog_funcs != NULL) {
+         while (*vlog_funcs)
+            (*vlog_funcs++)();
       }
    } while ((tok = strtok(NULL, ",")));
 }
