@@ -953,19 +953,20 @@ static void psl_prune(psl_fsm_t *fsm)
       it->id = fsm->next_id++;
 }
 
-psl_fsm_t *psl_fsm_new(psl_node_t p, ident_t label)
+static psl_fsm_t *psl_fsm_build(psl_node_t src, psl_node_t root,
+                                fsm_kind_t kind, ident_t label)
 {
    psl_fsm_t *fsm = xcalloc(sizeof(psl_fsm_t));
    fsm->pool  = pool_new();
    fsm->label = label;
    fsm->tail  = &(fsm->states);
-   fsm->src   = p;
-   fsm->kind  = psl_kind(p) == P_COVER ? FSM_COVER : FSM_BARE;
+   fsm->src   = src;
+   fsm->kind  = kind;
 
-   fsm_state_t *initial = add_state(fsm, p), *final = initial;
+   fsm_state_t *initial = add_state(fsm, src), *final = initial;
    initial->initial = true;
 
-   final = build_node(fsm, initial, psl_value(p));
+   final = build_node(fsm, initial, root);
    final->accept = true;
 
    DEBUG_ONLY(psl_detect_loops(fsm));
@@ -981,6 +982,17 @@ psl_fsm_t *psl_fsm_new(psl_node_t p, ident_t label)
       psl_fsm_dump(fsm, "final");
 
    return fsm;
+}
+
+psl_fsm_t *psl_fsm_new(psl_node_t p, ident_t label)
+{
+   const fsm_kind_t kind = psl_kind(p) == P_COVER ? FSM_COVER : FSM_BARE;
+   return psl_fsm_build(p, psl_value(p), kind, label);
+}
+
+psl_fsm_t *psl_fsm_new_sequence(psl_node_t seq, ident_t label)
+{
+   return psl_fsm_build(seq, seq, FSM_COVER, label);
 }
 
 void psl_fsm_free(psl_fsm_t *fsm)

@@ -548,6 +548,96 @@ static vcode_reg_t psl_lower_edge(lower_unit_t *lu, psl_node_t p, bool rising)
    return emit_and(was_reg, now_reg);
 }
 
+static vcode_reg_t psl_lower_ended(lower_unit_t *lu, psl_node_t p)
+{
+   // The sequence is run as a non-deterministic automaton whose active
+   // states are kept in variables updated on each tick of the clock
+
+   psl_node_t clock = psl_clock_operand(p);
+   psl_ctx_t *ctx = psl_get_ctx(lu);
+
+   psl_fsm_t *fsm = psl_fsm_new_sequence(psl_operand(p, 0), ident_uniq("ended"));
+
+   vcode_type_t vbool = vtype_bool();
+   vcode_reg_t vfalse = emit_const(vbool, 0);
+   vcode_reg_t vtrue = emit_const(vbool, 1);
+
+   const int nstates = fsm->next_id;
+   vcode_var_t *vars LOCAL = xmalloc_array(nstates, sizeof(vcode_var_t));
+   for (int i = 0; i < nstates; i++)
+      vars[i] = emit_var(vbool, VCODE_INVALID_STAMP, ident_uniq("ended"), 0);
+
+   vcode_reg_t result_reg = vfalse;
+   for (fsm_state_t *s = fsm->states; s; s = s->next) {
+      if (!s->accept)
+         continue;
+
+      vcode_reg_t active_reg = s->initial ? vtrue : emit_load(vars[s->id]);
+      if (s->guard != NULL)
+         active_reg = emit_and(active_reg, psl_lower_guard(lu, s->guard));
+
+      result_reg = emit_or(result_reg, active_reg);
+   }
+
+   if (clock == NULL && ctx != NULL && ctx->multiclock)
+      clock = ctx->main_clock;
+
+   if (clock != NULL)
+      result_reg = emit_and(result_reg, psl_lower_clock_now(lu, clock));
+
+   vcode_state_t state;
+   vcode_state_save(&state);
+
+   vcode_select_block(ctx != NULL ? ctx->prev_tail : PSL_BLOCK_PREV);
+
+   vcode_block_t join_bb = VCODE_INVALID_BLOCK;
+   if (clock != NULL) {
+      vcode_reg_t tick_reg = psl_lower_clock_now(lu, clock);
+
+      vcode_block_t update_bb = emit_block();
+      join_bb = emit_block();
+      emit_cond(tick_reg, update_bb, join_bb);
+
+      vcode_select_block(update_bb);
+   }
+
+   // The constants above are not defined in this block
+   vfalse = emit_const(vbool, 0);
+   vtrue = emit_const(vbool, 1);
+
+   vcode_reg_t *next_regs LOCAL = xmalloc_array(nstates, sizeof(vcode_reg_t));
+   for (int i = 0; i < nstates; i++)
+      next_regs[i] = vfalse;
+
+   for (fsm_state_t *s = fsm->states; s; s = s->next) {
+      vcode_reg_t active_reg = s->initial ? vtrue : emit_load(vars[s->id]);
+
+      for (fsm_edge_t *e = s->edges; e; e = e->next) {
+         vcode_reg_t take_reg = active_reg;
+         if (e->guard != NULL)
+            take_reg = emit_and(take_reg, psl_lower_guard(lu, e->guard));
+
+         next_regs[e->dest->id] = emit_or(next_regs[e->dest->id], take_reg);
+      }
+   }
+
+   for (int i = 0; i < nstates; i++)
+      emit_store(next_regs[i], vars[i]);
+
+   if (join_bb != VCODE_INVALID_BLOCK) {
+      emit_jump(join_bb);
+      vcode_select_block(join_bb);
+   }
+
+   if (ctx != NULL)
+      ctx->prev_tail = vcode_active_block();
+
+   vcode_state_restore(&state);
+
+   psl_fsm_free(fsm);
+   return result_reg;
+}
+
 static vcode_reg_t psl_lower_nondet_value(lower_unit_t *lu, psl_node_t vs)
 {
    if (psl_subkind(vs) == PSL_VALUE_SET_BOOLEAN)
@@ -717,6 +807,9 @@ vcode_reg_t psl_lower_fcall(lower_unit_t *lu, psl_node_t p)
 
    case PSL_BUILTIN_NONDET_VECTOR:
       return psl_lower_nondet_vector(lu, p);
+
+   case PSL_BUILTIN_ENDED:
+      return psl_lower_ended(lu, p);
 
    default:
       fatal_at(psl_loc(p), "sorry, this built-in function is not supported");

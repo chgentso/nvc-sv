@@ -84,6 +84,7 @@ typedef struct {
 } psl_fsm_t;
 
 psl_fsm_t *psl_fsm_new(psl_node_t p, ident_t label);
+psl_fsm_t *psl_fsm_new_sequence(psl_node_t seq, ident_t label);
 void psl_fsm_free(psl_fsm_t *fsm);
 void psl_fsm_dump(psl_fsm_t *fsm, const char *tag);
 bool psl_fsm_repeating(psl_fsm_t *fsm);
