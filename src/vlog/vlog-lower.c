@@ -37,6 +37,7 @@
 #include "vpi/vpi_user.h"
 
 #include <assert.h>
+#include <ctype.h>
 #include <inttypes.h>
 #include <float.h>
 #include <math.h>
@@ -127,6 +128,8 @@ typedef struct {
 } vlog_gen_t;
 
 static void vlog_lower_locals(vlog_gen_t *g, vlog_node_t v);
+static void vlog_lower_sensitivity(vlog_gen_t *g, vlog_node_t v);
+static bool vlog_is_param_select(vlog_node_t v);
 
 typedef enum {
    NOEDGE = 0x0,
@@ -163,11 +166,38 @@ static inline ident_t vlog_subr_name(vlog_node_t d)
    return ident_prefix(vlog_ident2(d), vlog_ident(d), '.');
 }
 
+static ident_t vlog_static_name(vlog_node_t cls, ident_t name)
+{
+   // Classes with the same name can be nested in different classes
+   ident_t cname = vlog_has_ident2(cls) ? vlog_subr_name(cls) : vlog_ident(cls);
+   return ident_prefix(cname, name, '.');
+}
+
 static mir_value_t vlog_offset_to_int(vlog_gen_t *g, mir_value_t value)
 {
    mir_type_t t_int64 = mir_int_type(g->mu, INT64_MIN, INT64_MAX);
    mir_type_t t_int = mir_vec2_type(g->mu, 32, true);
    return mir_build_cast(g->mu, t_int, mir_build_cast(g->mu, t_int64, value));
+}
+
+static int vlog_instance_hops(vlog_gen_t *g)
+{
+   int hops = 0;
+   ident_t unit = mir_get_name(g->mu, MIR_NULL_VALUE);
+   ident_t it = unit;
+   while (it != NULL && ((sv_classes != NULL && hash_get(sv_classes, it) != NULL)
+                         || mir_get_kind(g->mu) != MIR_UNIT_INSTANCE)) {
+      if (it != unit && (sv_classes == NULL || hash_get(sv_classes, it) == NULL)
+          && ident_runtil(it, '$') == it)
+         break;   // Not a class or a fork frame so must be the instance
+
+      it = hops == 0 ? mir_get_parent(g->mu)
+         : mir_get_shape_parent(mir_get_shape(g->mir, it));
+      hops++;
+   }
+
+   // A class shared by all instances is not declared in any of them
+   return it == NULL ? -1 : hops;
 }
 
 static ident_t vlog_type_name(vlog_node_t v)
@@ -367,6 +397,8 @@ static const type_info_t *vlog_type_info(vlog_gen_t *g, vlog_node_t v)
 
    switch (vlog_subkind(v)) {
    case DT_REAL:
+   case DT_SHORTREAL:
+   case DT_REALTIME:
       ti->size   = 1;
       ti->type   = ti->unpacked = mir_real_type(g->mu, -DBL_MAX, DBL_MAX);
       ti->signal = mir_signal_type(g->mu, ti->type);
@@ -3187,11 +3219,92 @@ static mir_value_t vlog_lower_operator_assignment(vlog_gen_t *g, vlog_node_t v)
    return value;
 }
 
-static mir_value_t vlog_lower_systf_param(vlog_gen_t *g, vlog_node_t v)
+static bool vlog_has_hier_name(vlog_node_t v)
+{
+   // The parser marks a %m format with the name of the enclosing blocks
+
+   const int nparams = vlog_params(v);
+   for (int i = 0; i < nparams; i++) {
+      vlog_node_t p = vlog_param(v, i);
+      if (vlog_kind(p) != V_STRING)
+         continue;
+
+      number_t n = vlog_number(p);
+      const unsigned nbytes = number_width(n) / 8;
+      for (unsigned j = 1; j < nbytes; j++) {
+         // Bytes are numbered from the least significant end
+         if (number_byte(n, j) == '%' && number_byte(n, j - 1) == '{')
+            return true;
+      }
+   }
+
+   return false;
+}
+
+static mir_value_t vlog_lower_handle_id(vlog_gen_t *g, mir_value_t obj)
+{
+   // The number of an object as shown by a system task which is zero
+    // for a null handle
+
+   mir_type_t t_id = mir_int_type(g->mu, INT64_MIN, INT64_MAX);
+   mir_type_t t_obj = mir_get_type(g->mu, obj);
+
+   mir_value_t result = mir_add_var(g->mu, t_id, MIR_NULL_STAMP,
+                                    ident_uniq("oid"), MIR_VAR_TEMP);
+   mir_build_store(g->mu, result, mir_const(g->mu, t_id, 0));
+
+   mir_value_t objvar = mir_add_var(g->mu, t_obj, MIR_NULL_STAMP,
+                                    ident_uniq("obj"), MIR_VAR_TEMP);
+   mir_build_store(g->mu, objvar, obj);
+
+   mir_block_t load_bb = mir_add_block(g->mu);
+   mir_block_t done_bb = mir_add_block(g->mu);
+
+   mir_build_cond(g->mu, mir_build_cmp(g->mu, MIR_CMP_EQ, obj,
+                                       mir_build_null(g->mu, t_obj)),
+                  done_bb, load_bb);
+
+   mir_set_cursor(g->mu, load_bb, MIR_APPEND);
+   mir_value_t link = mir_build_link_var(g->mu, mir_build_load(g->mu, objvar),
+                                         ident_new("$oid"), t_id);
+   mir_build_store(g->mu, result, mir_build_load(g->mu, link));
+   mir_build_jump(g->mu, done_bb);
+
+   mir_set_cursor(g->mu, done_bb, MIR_APPEND);
+   return mir_build_load(g->mu, result);
+}
+
+static mir_value_t vlog_lower_systf_param(vlog_gen_t *g, vlog_node_t v,
+                                          bool in_subr)
 {
    switch (vlog_kind(v)) {
    case V_REF:
+   case V_MEMBER_REF:
+   case V_USER_FCALL:
+      {
+         vlog_node_t type = vlog_get_type(v);
+         if (type != NULL && (vlog_kind(type) == V_STRUCT_DECL
+                              || vlog_kind(type) == V_UNION_DECL)
+             && !(vlog_flags(type) & VLOG_F_PACKED))
+            fatal_at(vlog_loc(v), "sorry, an unpacked structure or union as "
+                     "the argument of a system task is not supported");
+         else if (type != NULL && vlog_kind(type) == V_DATA_TYPE
+                  && vlog_subkind(type) == DT_CHANDLE)
+            return vlog_lower_rvalue(g, v);   // Never a net
+      }
+      break;
+   default:
+      break;
+   }
+
+   switch (vlog_kind(v)) {
+   case V_REF:
       switch (vlog_kind(vlog_ref(v))) {
+      case V_NET_DECL:
+      case V_PORT_DECL:
+         // The VPI scope of the caller of a subroutine may not contain
+         // the declaration
+         return in_subr ? vlog_lower_rvalue(g, v) : MIR_NULL_VALUE;
       case V_TF_PORT_DECL:
       case V_FUNC_DECL:
       case V_PARAM_DECL:
@@ -3200,6 +3313,14 @@ static mir_value_t vlog_lower_systf_param(vlog_gen_t *g, vlog_node_t v)
       case V_VAR_DECL:
       case V_LOCAL_DECL:
          {
+            if (in_subr)
+               return vlog_lower_rvalue(g, v);
+
+            // May be called from another instance so has no VPI handle
+            if (vlog_kind(vlog_ref(v)) == V_VAR_DECL
+                && (vlog_flags(vlog_ref(v)) & VLOG_F_STATIC))
+               return vlog_lower_rvalue(g, v);
+
             int hops;
             mir_value_t var = mir_search_object(g->mu, vlog_ref(v), &hops);
             if (mir_is_null(var)) {
@@ -3222,6 +3343,11 @@ static mir_value_t vlog_lower_systf_param(vlog_gen_t *g, vlog_node_t v)
    case V_EMPTY:
    case V_REAL:
       return MIR_NULL_VALUE;
+   case V_HIER_REF:
+      // The name of an instance is a scope with no value
+      if (!vlog_has_ref(v))
+         return MIR_NULL_VALUE;
+      return vlog_lower_rvalue(g, v);
    case V_UNARY:
    case V_BINARY:
    case V_SYS_FCALL:
@@ -3245,13 +3371,134 @@ static mir_value_t vlog_lower_systf_param(vlog_gen_t *g, vlog_node_t v)
    }
 }
 
+static mir_value_t vlog_lower_dist(vlog_gen_t *g, vlog_node_t v, int kind)
+{
+   // The seed is updated by assignment as for $random
+
+   mir_type_t t_offset = mir_offset_type(g->mu);
+
+   const int nparams = vlog_params(v);
+   vlog_node_t target = vlog_param(v, 0);
+
+   mir_value_t args[4] = {
+      mir_const(g->mu, t_offset, kind),
+      vlog_lower_cast(g, t_offset, vlog_lower_rvalue(g, target)),
+      mir_const(g->mu, t_offset, 0),
+      mir_const(g->mu, t_offset, 0),
+   };
+
+   for (int i = 1; i < nparams && i < 3; i++)
+      args[i + 1] = vlog_lower_cast(g, t_offset,
+                                    vlog_lower_rvalue(g, vlog_param(v, i)));
+
+   mir_value_t value = mir_build_fcall(g->mu, ident_new("__sv_dist"),
+                                       t_offset, MIR_NULL_STAMP, args, 4);
+   mir_value_t next = mir_build_fcall(g->mu, ident_new("__sv_dist_next"),
+                                      t_offset, MIR_NULL_STAMP, args, 4);
+   mir_build_consume(g->mu, value);
+   mir_build_consume(g->mu, next);
+
+   vlog_assign_variable(g, target, vlog_offset_to_int(g, next), NULL);
+
+   return vlog_lower_cast(g, mir_vec4_type(g->mu, 32, true),
+                          vlog_offset_to_int(g, value));
+}
+
+static bool vlog_is_string_target(vlog_node_t v, int n)
+{
+   // A string variable which the system task assigns
+
+   const vlog_node_t p = vlog_param(v, n);
+   switch (vlog_kind(p)) {
+   case V_REF:
+   case V_MEMBER_REF:
+   case V_HIER_REF:
+   case V_BIT_SELECT:
+      break;
+   default:
+      return false;
+   }
+
+   if (!vlog_is_string(p))
+      return false;
+
+   ident_t id = vlog_ident(v);
+   if (id == ident_new("$fscanf") || id == ident_new("$sscanf"))
+      return n >= 2;
+   else if (id == ident_new("$fgets"))
+      return n == 0;
+   else if (id == ident_new("$ferror"))
+      return n == 1;
+   else
+      return false;
+}
+
 static mir_value_t vlog_lower_sys_tfcall(vlog_gen_t *g, vlog_node_t v)
 {
    const int nparams = vlog_params(v);
+
+   if (nparams > 0) {
+      switch (vlog_kind(vlog_param(v, 0))) {
+      case V_REF:
+      case V_HIER_REF:
+      case V_MEMBER_REF:
+      case V_BIT_SELECT:
+         if (vlog_ident(v) == ident_new("$random") && nparams == 1) {
+            mir_type_t t_offset = mir_offset_type(g->mu);
+            return vlog_lower_seeded_random(
+               g, v, mir_const(g->mu, t_offset, INT32_MIN),
+               mir_const(g->mu, t_offset, INT32_MAX));
+         }
+         else if (nparams >= 2) {
+            static const struct {
+               const char *name;
+               int         kind;
+               int         nparams;
+            } dists[] = {
+               { "$dist_normal",      1, 3 },
+               { "$dist_exponential", 2, 2 },
+               { "$dist_poisson",     3, 2 },
+               { "$dist_chi_square",  4, 2 },
+               { "$dist_t",           5, 2 },
+               { "$dist_erlang",      6, 3 },
+            };
+
+            for (int i = 0; i < ARRAY_LEN(dists); i++) {
+               if (vlog_ident(v) == ident_new(dists[i].name)
+                   && nparams == dists[i].nparams)
+                  return vlog_lower_dist(g, v, dists[i].kind);
+            }
+         }
+
+         if (vlog_ident(v) == ident_new("$dist_uniform")
+                  && nparams == 3) {
+            mir_type_t t_offset = mir_offset_type(g->mu);
+            mir_value_t lo = vlog_lower_cast(
+               g, t_offset, vlog_lower_rvalue(g, vlog_param(v, 1)));
+            mir_value_t hi = vlog_lower_cast(
+               g, t_offset, vlog_lower_rvalue(g, vlog_param(v, 2)));
+            return vlog_lower_seeded_random(g, v, lo, hi);
+         }
+         break;
+      default:
+         break;
+      }
+   }
+
    mir_value_t *args LOCAL =
       xmalloc_array((nparams * 3) + 1, sizeof(mir_value_t));
    int actual = 0;
    mir_type_t t_offset = mir_offset_type(g->mu);
+
+   // A string variable which is set by the task is passed as a buffer
+   // and its length, copied back to the variable after the call
+   mir_value_t *strbuf LOCAL = xmalloc_array(nparams, sizeof(mir_value_t));
+   mir_value_t *intbuf LOCAL = xmalloc_array(nparams, sizeof(mir_value_t));
+   for (int i = 0; i < nparams; i++)
+      strbuf[i] = intbuf[i] = MIR_NULL_VALUE;
+   mir_type_t t_char = mir_char_type(g->mu);
+   mir_type_t t_sbuf = mir_carray_type(g->mu, STR_TARGET_MAX, t_char);
+
    for (int i = 0; i < nparams; i++) {
       if (vlog_is_string_target(v, i)) {
          strbuf[i] = mir_add_var(g->mu, t_sbuf, MIR_NULL_STAMP,
@@ -3329,6 +3576,23 @@ static mir_value_t vlog_lower_sys_tfcall(vlog_gen_t *g, vlog_node_t v)
          args[actual++] = arg;
          args[actual++] = mir_const(g->mu, t_offset, 0); // Padding
          break;
+      case MIR_TYPE_UARRAY:
+         args[actual++] = mir_const(g->mu, t_offset, -2);
+         args[actual++] = mir_build_unwrap(g->mu, arg);
+         args[actual++] = mir_build_uarray_len(g->mu, arg, 0);
+         break;
+      case MIR_TYPE_CONTEXT:
+         args[actual++] = mir_const(g->mu, t_offset, -5);
+         args[actual++] = vlog_lower_handle_id(g, arg);
+         args[actual++] = mir_const(g->mu, t_offset, 0); // Padding
+         break;
+      case MIR_TYPE_ACCESS:
+         // A chandle is shown as a handle with the value of the pointer,
+         // or null
+         args[actual++] = mir_const(g->mu, t_offset, -5);
+         args[actual++] = arg;
+         args[actual++] = mir_const(g->mu, t_offset, 0); // Padding
+         break;
       default:
          should_not_reach_here();
       }
@@ -3337,7 +3601,9 @@ static mir_value_t vlog_lower_sys_tfcall(vlog_gen_t *g, vlog_node_t v)
    mir_value_t locus = mir_build_debug_locus(g->mu, vlog_to_object(v));
 
    mir_type_t type = MIR_NULL_TYPE;
-   if (vlog_kind(v) == V_SYS_FCALL) {
+   if (vlog_is_sformatf(vlog_ident(v)))
+      type = mir_uarray_type(g->mu, 1, mir_char_type(g->mu));
+   else if (vlog_kind(v) == V_SYS_FCALL) {
       switch (vpi_func_type(vlog_ident(v))) {
       case vpiRealFunc:
          type = mir_double_type(g->mu);
@@ -3353,6 +3619,16 @@ static mir_value_t vlog_lower_sys_tfcall(vlog_gen_t *g, vlog_node_t v)
          type = mir_vec4_type(g->mu, 32, true);
          break;
       }
+   }
+
+   const int inst_hops = vlog_has_hier_name(v) ? vlog_instance_hops(g) : -1;
+   if (inst_hops >= 0) {
+      // The name is that of the instance the code is declared in
+      mir_type_t t_int64 = mir_int_type(g->mu, INT64_MIN, INT64_MAX);
+      mir_value_t ctx[] = { mir_build_context_upref(g->mu, inst_hops) };
+      mir_value_t r = mir_build_fcall(g->mu, ident_new("__sv_hier_scope"),
+                                      t_int64, MIR_NULL_STAMP, ctx, 1);
+      mir_build_consume(g->mu, r);
    }
 
    mir_value_t result = mir_build_syscall(g->mu, vlog_ident(v), type,
@@ -3418,6 +3694,1120 @@ static mir_value_t vlog_lower_sys_tfcall(vlog_gen_t *g, vlog_node_t v)
    }
 
    return result;
+}
+
+static mir_value_t vlog_lower_fread(vlog_gen_t *g, vlog_node_t v)
+{
+   // The target may be a local variable so it cannot go through VPI
+
+   vlog_node_t target = vlog_param(v, 0);
+   const int width = vlog_width(target);
+
+   mir_type_t t_offset = mir_offset_type(g->mu);
+   mir_type_t t_int64 = mir_int_type(g->mu, INT64_MIN, INT64_MAX);
+
+   mir_value_t args[] = {
+      vlog_lower_cast(g, t_int64, vlog_lower_rvalue(g, vlog_param(v, 1))),
+      mir_const(g->mu, t_int64, width / 8),
+   };
+   mir_value_t data = mir_build_fcall(g->mu, ident_new("__sv_fread"), t_int64,
+                                      MIR_NULL_STAMP, args, 2);
+   mir_build_consume(g->mu, data);
+
+   mir_type_t t_vec = mir_vec2_type(g->mu, width, false);
+   vlog_assign_variable(g, target, mir_build_cast(g->mu, t_vec, data), NULL);
+
+   mir_value_t count = mir_build_fcall(g->mu, ident_new("__sv_fread_count"),
+                                       t_offset, MIR_NULL_STAMP, NULL, 0);
+   mir_build_consume(g->mu, count);
+
+   return vlog_offset_to_int(g, count);
+}
+
+static int vlog_query_unpacked(vlog_node_t v, const vlog_qdim_t *dims, int n)
+{
+   int count = 0;
+   for (int i = 0; i < n; i++) {
+      if (dims[i].dynamic
+          || vlog_subkind(dims[i].dim) == V_DIM_UNPACKED)
+         count++;
+      else
+         break;
+   }
+
+   return count;
+}
+
+static bool vlog_is_array_query(vlog_node_t v)
+{
+   static const char *const names[] = {
+      "$dimensions", "$unpacked_dimensions", "$left", "$right", "$low",
+      "$high", "$increment", "$size",
+   };
+
+   for (int i = 0; i < ARRAY_LEN(names); i++) {
+      if (vlog_ident(v) == ident_new(names[i]))
+         return true;
+   }
+
+   return false;
+}
+
+static mir_value_t vlog_lower_array_query(vlog_gen_t *g, vlog_node_t v)
+{
+   mir_type_t t_integer = mir_vec4_type(g->mu, 32, true);
+
+   const int nparams = vlog_params(v);
+   if (nparams < 1 || nparams > 2)
+      fatal_at(vlog_loc(v), "wrong number of arguments to %pQ", vlog_ident(v));
+
+   vlog_node_t arg = vlog_param(v, 0);
+
+   vlog_qdim_t dims[MAX_QUERY_DIMS];
+   const int n = vlog_query_dims(arg, dims);
+
+   ident_t id = vlog_ident(v);
+   if (id == ident_new("$dimensions"))
+      return mir_const_vec(g->mu, t_integer, n, 0);
+   else if (id == ident_new("$unpacked_dimensions"))
+      return mir_const_vec(g->mu, t_integer, vlog_query_unpacked(arg, dims, n),
+                           0);
+
+   int64_t which = 1;
+   if (nparams == 2 && !vlog_get_const(vlog_param(v, 1), &which))
+      fatal_at(vlog_loc(v), "sorry, the dimension argument of %pQ must be "
+               "constant", id);
+
+   if (which < 1 || which > n)
+      return vlog_lower_x(g, t_integer);
+
+   const vlog_qdim_t *q = &(dims[which - 1]);
+
+   int64_t left, right;
+   mir_value_t len = MIR_NULL_VALUE;
+   if (q->dynamic) {
+      if (which != 1 || vlog_kind(arg) == V_BIT_SELECT)
+         fatal_at(vlog_loc(v), "sorry, this dimension of a dynamic array "
+                  "cannot be queried");
+
+      len = vlog_offset_to_int(g, mir_build_uarray_len(
+                                  g->mu, vlog_lower_rvalue(g, arg), 0));
+      left = 0;
+      right = 0;
+   }
+   else if (!vlog_bounds(q->dim, &left, &right))
+      return vlog_lower_x(g, t_integer);
+
+   mir_value_t one = mir_const_vec(g->mu, t_integer, 1, 0);
+
+   if (id == ident_new("$increment"))
+      return mir_const_vec(g->mu, t_integer,
+                           q->dynamic || left < right ? UINT32_MAX : 1, 0);
+
+   if (q->dynamic) {
+      mir_value_t last = mir_build_binary(
+         g->mu, MIR_VEC_SUB, t_integer, vlog_lower_cast(g, t_integer, len),
+         one);
+      mir_value_t zero = mir_const_vec(g->mu, t_integer, 0, 0);
+      if (id == ident_new("$size"))
+         return vlog_lower_cast(g, t_integer, len);
+      else if (id == ident_new("$left") || id == ident_new("$low"))
+         return zero;
+      else
+         return last;
+   }
+
+   int64_t result;
+   if (id == ident_new("$left"))
+      result = left;
+   else if (id == ident_new("$right"))
+      result = right;
+   else if (id == ident_new("$low"))
+      result = MIN(left, right);
+   else if (id == ident_new("$high"))
+      result = MAX(left, right);
+   else
+      result = llabs(left - right) + 1;
+
+   return mir_const_vec(g->mu, t_integer, (uint64_t)result & UINT32_MAX, 0);
+}
+
+static void vlog_typename_node(vlog_node_t where, text_buf_t *tb,
+                               vlog_node_t type);
+
+static void vlog_typename_ranges_from(vlog_node_t where, text_buf_t *tb,
+                                      vlog_node_t type, int from)
+{
+   // Dimensions are listed in declaration order (20.6.1)
+
+   const int nranges = vlog_ranges(type);
+   for (int i = from; i < nranges; i++) {
+      vlog_node_t r = vlog_range(type, i);
+      if (vlog_subkind(r) == V_DIM_UNSIZED)
+         tb_cat(tb, "[]");
+      else if (vlog_subkind(r) == V_DIM_ASSOC) {
+         tb_append(tb, '[');
+         if (vlog_flags(r) & VLOG_F_WILDCARD)
+            tb_append(tb, '*');
+         else
+            vlog_typename_node(where, tb, vlog_left(r));
+         tb_append(tb, ']');
+      }
+      else {
+         int64_t left, right;
+         if (!vlog_bounds(r, &left, &right))
+            fatal_at(vlog_loc(r), "sorry, cannot determine the type name");
+         tb_printf(tb, "[%"PRIi64":%"PRIi64"]", left, right);
+      }
+   }
+}
+
+static void vlog_typename_ranges(vlog_node_t where, text_buf_t *tb,
+                                 vlog_node_t type, bool unpacked)
+{
+   vlog_typename_ranges_from(where, tb, type, 0);
+}
+
+static void vlog_typename_node(vlog_node_t where, text_buf_t *tb,
+                               vlog_node_t type);
+
+static void vlog_typename_class(vlog_node_t where, text_buf_t *tb,
+                                vlog_node_t c)
+{
+   // A class is named with the scope that holds it (20.6.1): the name of
+   // a module followed by . or a package or enclosing class followed by ::
+
+   const char *name = istr(vlog_ident(c));
+   const char *at = strchr(name, '@');
+   const bool spec = at != NULL;
+
+   tb_cat(tb, "class ");
+
+   if (vlog_has_ident2(c)) {
+      const char *scope = istr(vlog_ident2(c));
+      const char *dot = strchr(scope, '.');
+      if (dot != NULL)
+         scope = dot + 1;   // Strip the library name
+
+      if (strncmp(scope, "$spec$", 6) == 0) {
+         // A class of a module: $spec$module$name
+         scope += 6;
+         const char *end = strchr(scope, '$');
+         const size_t len = end != NULL ? end - scope : strlen(scope);
+
+         // A specialisation of a class from a package or the compilation
+         // unit has its own name here rather than that of a module
+         if (!spec || memchr(scope, '@', len) == NULL) {
+            tb_catn(tb, scope, len);
+            tb_append(tb, '.');
+            if (end != NULL && strchr(end + 1, '.') != NULL) {
+               // Nested in another class
+               tb_catn(tb, end + 1, strchr(end + 1, '.') - end - 1);
+               tb_cat(tb, "::");
+            }
+         }
+      }
+      else if (!spec && isxdigit((unsigned char)scope[0])
+               && strchr(scope, '$') != NULL) {
+         // The compilation-unit scope is called $unit (3.12.1, 26.3)
+         tb_cat(tb, "$unit::");
+      }
+      else if (!spec) {
+         // A class of a package, perhaps nested in other classes: the
+         // library unit name of the package is upper case so take the
+         // name as declared from the package itself
+         const char *full = istr(vlog_ident2(c));
+         const char *pend = strchr(scope, '.');
+         const size_t plen = pend != NULL ? pend - full : strlen(full);
+         vlog_node_t pkg = vlog_find_scope(ident_new_n(full, plen));
+         if (pkg != NULL && vlog_kind(pkg) == V_PACKAGE)
+            tb_cat(tb, istr(vlog_ident2(pkg)));
+         else
+            tb_catn(tb, scope, pend != NULL ? pend - scope : strlen(scope));
+         for (const char *p = pend; p != NULL; p = strchr(p + 1, '.')) {
+            const char *next = strchr(p + 1, '.');
+            tb_cat(tb, "::");
+            tb_catn(tb, p + 1, next != NULL ? next - p - 1 : strlen(p + 1));
+         }
+         tb_cat(tb, "::");
+      }
+   }
+
+   tb_catn(tb, name, spec ? at - name : strlen(name));
+
+   if (!spec)
+      return;
+
+   tb_cat(tb, "#(");
+   bool first = true;
+   const int ndecls = vlog_decls(c);
+   const loc_t *params_loc = NULL;
+   for (int i = 0; i < ndecls; i++) {
+      vlog_node_t d = vlog_decl(c, i);
+      if (vlog_kind(d) != V_LOCALPARAM && vlog_kind(d) != V_TYPE_DECL)
+         break;
+
+      // The parameters come first and have the location of the class
+      if (params_loc == NULL)
+         params_loc = vlog_loc(d);
+      else if (vlog_loc(d)->first_line != params_loc->first_line)
+         break;
+
+      if (!first)
+         tb_append(tb, ',');
+      first = false;
+
+      if (vlog_kind(d) == V_LOCALPARAM) {
+         int64_t value;
+         if (!vlog_has_value(d) || !vlog_get_const(vlog_value(d), &value))
+            fatal_at(vlog_loc(where), "sorry, cannot determine the type name");
+         tb_printf(tb, "%"PRIi64, value);
+      }
+      else
+         vlog_typename_node(where, tb, vlog_type(d));
+   }
+   tb_append(tb, ')');
+}
+
+static void vlog_typename_enum(vlog_node_t where, text_buf_t *tb,
+                               vlog_node_t type)
+{
+   // The base type unless it is int, then the names with their values
+   // as sized literals (20.6.1)
+
+   tb_cat(tb, "enum");
+
+   vlog_node_t base = vlog_type(type);
+   while (vlog_kind(base) == V_TYPE_DECL)
+      base = vlog_type(base);
+
+   const bool is_int = vlog_kind(base) == V_DATA_TYPE
+      && vlog_subkind(base) == DT_INT && (vlog_flags(base) & VLOG_F_SIGNED);
+   if (!is_int) {
+      tb_append(tb, ' ');
+      vlog_typename_node(where, tb, base);
+   }
+
+   const bool is_signed = vlog_is_signed(base);
+   const int width = vlog_size(base);
+
+   tb_append(tb, '{');
+   const int nnames = vlog_decls(type);
+   for (int i = 0; i < nnames; i++) {
+      vlog_node_t d = vlog_decl(type, i);
+      if (i > 0)
+         tb_append(tb, ',');
+      tb_printf(tb, "%s=", istr(vlog_ident(d)));
+
+      vlog_node_t value = vlog_value(d);
+      int64_t ival;
+      if (vlog_kind(value) == V_NUMBER
+          && !number_is_defined(vlog_number(value))) {
+         number_t n = vlog_number(value);
+         tb_printf(tb, "%d'%sb", width, is_signed ? "s" : "");
+         for (int j = width - 1; j >= 0; j--) {
+            const int bit = j < (int)number_width(n) ? number_bit(n, j) : 0;
+            tb_append(tb, "01zx"[bit & 3]);
+         }
+      }
+      else if (vlog_get_const(value, &ival)) {
+         if (!is_signed && width < 64)
+            ival &= (INT64_C(1) << width) - 1;
+         if (ival < 0)
+            tb_printf(tb, "-%d'sd%"PRIu64, width, -(uint64_t)ival);
+         else
+            tb_printf(tb, "%d'%sd%"PRIi64, width, is_signed ? "s" : "",
+                      ival);
+      }
+      else
+         fatal_at(vlog_loc(where), "sorry, cannot determine the type name");
+   }
+   tb_append(tb, '}');
+}
+
+static void vlog_typename_struct(vlog_node_t where, text_buf_t *tb,
+                                 vlog_node_t type)
+{
+   // The members are listed with their types (20.6.1)
+
+   const vlog_flags_t flags = vlog_flags(type);
+
+   tb_cat(tb, vlog_kind(type) == V_UNION_DECL ? "union" : "struct");
+   if (flags & VLOG_F_TAGGED)
+      tb_cat(tb, " tagged");
+   if ((flags & VLOG_F_PACKED) && !(flags & VLOG_F_UNPACKED_VIEW)) {
+      tb_cat(tb, " packed");
+      if (flags & VLOG_F_SIGNED)
+         tb_cat(tb, " signed");
+   }
+
+   tb_append(tb, '{');
+   const int ndecls = vlog_decls(type);
+   for (int i = 0; i < ndecls; i++) {
+      vlog_node_t d = vlog_decl(type, i);
+      if (strchr(istr(vlog_ident(d)), '$') != NULL)
+         continue;   // The tag of a tagged union
+      else if (vlog_flags(d) & VLOG_F_VOID)
+         tb_cat(tb, "void");
+      else
+         vlog_typename_node(where, tb, vlog_type(d));
+      tb_printf(tb, " %s", istr(vlog_ident(d)));
+      vlog_typename_ranges(where, tb, d, true);
+      tb_append(tb, ';');
+   }
+   tb_append(tb, '}');
+}
+
+static void vlog_typename_node(vlog_node_t where, text_buf_t *tb,
+                               vlog_node_t type)
+{
+   vlog_node_t named = NULL;
+   while (vlog_kind(type) == V_TYPE_DECL) {
+      vlog_node_t next = vlog_type(type);
+      switch (vlog_kind(next)) {
+      case V_ENUM_DECL:
+      case V_STRUCT_DECL:
+      case V_UNION_DECL:
+         named = type;
+         break;
+      default:
+         break;
+      }
+
+      type = next;
+   }
+
+   switch (vlog_kind(type)) {
+   case V_ENUM_DECL:
+      if (named == NULL && !vlog_has_ident(type))
+         fatal_at(vlog_loc(where), "sorry, $typename is not supported for an "
+                  "anonymous enumeration");
+      vlog_typename_enum(where, tb, type);
+      if (named == NULL)
+         tb_cat(tb, istr(vlog_ident(type)));
+      else
+         tb_printf(tb, "%s%s", istr(vlog_ident2(named)),
+                   istr(vlog_ident(named)));
+      return;
+   case V_STRUCT_DECL:
+   case V_UNION_DECL:
+      if (named == NULL && !vlog_has_ident(type))
+         fatal_at(vlog_loc(where), "sorry, $typename is not supported for an "
+                  "anonymous structure or union");
+      vlog_typename_struct(where, tb, type);
+      if (named == NULL)
+         tb_cat(tb, istr(vlog_ident(type)));
+      else
+         tb_printf(tb, "%s%s", istr(vlog_ident2(named)),
+                   istr(vlog_ident(named)));
+      return;
+   case V_CLASS_DECL:
+      vlog_typename_class(where, tb, type);
+      return;
+   case V_DATA_TYPE:
+      break;
+   default:
+      fatal_at(vlog_loc(where), "sorry, $typename is not supported for this "
+               "type");
+   }
+
+   const bool is_signed = !!(vlog_flags(type) & VLOG_F_SIGNED);
+   bool atom = false, vector = false;
+   switch (vlog_subkind(type)) {
+   case DT_BIT:       tb_cat(tb, "bit"); vector = true; break;
+   case DT_IMPLICIT:
+   case DT_LOGIC:
+      tb_cat(tb, "logic");
+      vector = true;
+      break;
+   case DT_BYTE:      tb_cat(tb, "byte"); atom = true; break;
+   case DT_SHORTINT:  tb_cat(tb, "shortint"); atom = true; break;
+   case DT_INT:       tb_cat(tb, "int"); atom = true; break;
+   case DT_LONGINT:   tb_cat(tb, "longint"); atom = true; break;
+   case DT_INTEGER:   tb_cat(tb, "integer"); atom = true; break;
+   case DT_TIME:      tb_cat(tb, "time"); atom = true; break;
+   case DT_REAL:
+   case DT_REALTIME:  tb_cat(tb, "real"); break;
+   case DT_SHORTREAL: tb_cat(tb, "shortreal"); break;
+   case DT_STRING:    tb_cat(tb, "string"); break;
+   case DT_EVENT:     tb_cat(tb, "event"); break;
+   case DT_CHANDLE:   tb_cat(tb, "chandle"); break;
+   case DT_MAILBOX:
+      tb_cat(tb, "class std::mailbox #(");
+      if (vlog_has_type(type)) {
+         vlog_node_t et = vlog_type(type);
+         if (!(vlog_kind(et) == V_DATA_TYPE && vlog_subkind(et) == DT_INT
+               && !(vlog_flags(et) & VLOG_F_SIGNED)))
+            vlog_typename_node(where, tb, et);
+      }
+      tb_append(tb, ')');
+      return;
+   case DT_SEMAPHORE:
+      tb_cat(tb, "class std::semaphore");
+      return;
+   case DT_QUEUE:
+   case DT_DYNARRAY:
+      vlog_typename_node(where, tb, vlog_type(type));
+      tb_append(tb, '$');
+      if (vlog_subkind(type) == DT_QUEUE)
+         tb_cat(tb, "[$]");
+      else if (vlog_ranges(type) > 0)
+         vlog_typename_ranges(where, tb, type, true);
+      else
+         tb_cat(tb, "[]");
+      return;
+   case DT_ASSOC:
+      vlog_typename_node(where, tb, vlog_type(type));
+      tb_cat(tb, "$[");
+      if (vlog_has_ref(type))
+         vlog_typename_node(where, tb, vlog_ref(type));
+      else
+         tb_append(tb, '*');
+      tb_append(tb, ']');
+      return;
+   default:
+      fatal_at(vlog_loc(where), "sorry, $typename is not supported for this "
+               "type");
+   }
+
+   (void)vector;
+
+   if (atom) {
+      if (!is_signed)
+         tb_cat(tb, " unsigned");
+   }
+   else if (is_signed && vlog_subkind(type) != DT_REAL)
+      tb_cat(tb, " signed");
+
+   if (!atom && vlog_has_type(type)) {
+      // A packed array of other types
+      vlog_typename_node(where, tb, vlog_type(type));
+   }
+
+   if (!atom)
+      vlog_typename_ranges(where, tb, type, false);
+}
+
+typedef struct {
+   char text[128];
+   bool real;
+   bool str;
+   bool four;
+   bool sign;
+   int  width;
+} typename_t;
+
+static void vlog_typename_vector(typename_t *t, bool four, bool sign, int width)
+{
+   t->real = t->str = false;
+   t->four = four;
+   t->sign = sign;
+   t->width = width;
+   snprintf(t->text, sizeof(t->text), "%s%s", four ? "logic" : "bit",
+            sign ? " signed" : "");
+   if (width > 1)
+      snprintf(t->text + strlen(t->text), sizeof(t->text) - strlen(t->text),
+               "[%d:0]", width - 1);
+}
+
+static void vlog_typename_of(vlog_node_t where, vlog_node_t e, typename_t *t);
+
+static void vlog_typename_same(typename_t *t, const typename_t *a,
+                               const typename_t *b, bool four, bool sign,
+                               int width)
+{
+   // The result has the type of an operand with the same properties
+   if (!a->real && !a->str && a->four == four && a->sign == sign
+       && a->width == width)
+      *t = *a;
+   else if (!b->real && !b->str && b->four == four && b->sign == sign
+            && b->width == width)
+      *t = *b;
+   else
+      vlog_typename_vector(t, four, sign, width);
+}
+
+static void vlog_typename_of(vlog_node_t where, vlog_node_t e, typename_t *t)
+{
+   memset(t, 0, sizeof(*t));
+
+   switch (vlog_kind(e)) {
+   case V_NUMBER:
+      {
+         number_t n = vlog_number(e);
+         const int width = number_width(n);
+         vlog_typename_vector(t, !number_is_defined(n), number_signed(n),
+                              width);
+         if (width == 1 && !t->four && !t->sign)
+            snprintf(t->text, sizeof(t->text), "bit");
+         return;
+      }
+   case V_REAL:
+      t->real = true;
+      snprintf(t->text, sizeof(t->text), "real");
+      return;
+   case V_STRING:
+      t->str = true;
+      snprintf(t->text, sizeof(t->text), "string");
+      return;
+   case V_UNARY:
+      {
+         typename_t a;
+         vlog_typename_of(where, vlog_value(e), &a);
+         switch (vlog_subkind(e)) {
+         case V_UNARY_IDENTITY:
+         case V_UNARY_NEG:
+         case V_UNARY_BITNEG:
+            *t = a;
+            return;
+         default:
+            vlog_typename_vector(t, a.four, false, 1);
+            return;
+         }
+      }
+   case V_BINARY:
+      {
+         typename_t a, b;
+         vlog_typename_of(where, vlog_left(e), &a);
+         vlog_typename_of(where, vlog_right(e), &b);
+         if (a.real || b.real) {
+            t->real = true;
+            snprintf(t->text, sizeof(t->text), "real");
+            return;
+         }
+
+         const bool four = a.four || b.four;
+         switch (vlog_subkind(e)) {
+         case V_BINARY_LOG_EQ:
+         case V_BINARY_LOG_NEQ:
+         case V_BINARY_CASE_EQ:
+         case V_BINARY_CASE_NEQ:
+         case V_BINARY_LOG_OR:
+         case V_BINARY_LOG_AND:
+         case V_BINARY_LT:
+         case V_BINARY_GT:
+         case V_BINARY_LEQ:
+         case V_BINARY_GEQ:
+            vlog_typename_vector(t, vlog_subkind(e) >= V_BINARY_CASE_EQ
+                                 && vlog_subkind(e) <= V_BINARY_CASE_NEQ
+                                 ? false : four, false, 1);
+            return;
+         case V_BINARY_SHIFT_LL:
+         case V_BINARY_SHIFT_RL:
+         case V_BINARY_SHIFT_LA:
+         case V_BINARY_SHIFT_RA:
+            *t = a;
+            return;
+         case V_BINARY_EXP:
+            // The right operand is self-determined (11.6.1)
+            *t = a;
+            return;
+         default:
+            vlog_typename_same(t, &a, &b, four, a.sign && b.sign,
+                               MAX(a.width, b.width));
+            return;
+         }
+      }
+   case V_COND_EXPR:
+      {
+         typename_t a, b;
+         vlog_typename_of(where, vlog_left(e), &a);
+         vlog_typename_of(where, vlog_right(e), &b);
+         if (a.real || b.real || a.str || b.str) {
+            *t = a;
+            return;
+         }
+         vlog_typename_same(t, &a, &b, a.four || b.four, a.sign && b.sign,
+                            MAX(a.width, b.width));
+         return;
+      }
+   case V_CONCAT:
+      {
+         int width = 0;
+         bool four = false, str = false;
+         for (int i = 0; i < vlog_params(e); i++) {
+            typename_t p;
+            vlog_typename_of(where, vlog_param(e, i), &p);
+            width += p.width;
+            four |= p.four;
+            str |= p.str;
+         }
+
+         if (str) {
+            t->str = true;
+            snprintf(t->text, sizeof(t->text), "string");
+            return;
+         }
+
+         int64_t repeat;
+         if (vlog_has_value(e) && vlog_get_const(vlog_value(e), &repeat))
+            width *= repeat;
+
+         vlog_typename_vector(t, four, false, width);
+         return;
+      }
+   case V_PREFIX:
+   case V_POSTFIX:
+      vlog_typename_of(where, vlog_target(e), t);
+      return;
+   case V_SYS_FCALL:
+      {
+         const ident_t id = vlog_ident(e);
+         if (id == ident_new("$time")) {
+            t->four = true;
+            t->width = 64;
+            snprintf(t->text, sizeof(t->text), "time");
+         }
+         else if (id == ident_new("$realtime") || id == ident_new("$bitstoreal")
+                  || id == ident_new("$itor")) {
+            t->real = true;
+            snprintf(t->text, sizeof(t->text), "real");
+         }
+         else if (id == ident_new("$random") || id == ident_new("$clog2"))
+            vlog_typename_vector(t, true, true, 32);
+         else if (id == ident_new("$urandom")
+                  || id == ident_new("$urandom_range")) {
+            // Declared as returning int unsigned (18.13.1, 18.13.2)
+            t->width = 32;
+            snprintf(t->text, sizeof(t->text), "int unsigned");
+         }
+         else if (id == ident_new("$bits"))
+            vlog_typename_vector(t, false, true, 32);
+         else if ((id == ident_new("$signed") || id == ident_new("$unsigned"))
+                  && vlog_params(e) == 1) {
+            typename_t a;
+            vlog_typename_of(where, vlog_param(e, 0), &a);
+            vlog_typename_vector(t, a.four, id == ident_new("$signed"),
+                                 a.width);
+         }
+         else
+            fatal_at(vlog_loc(where), "sorry, $typename is not supported "
+                     "for this expression");
+         return;
+      }
+   case V_CAST:
+      {
+         typename_t a;
+         vlog_typename_of(where, vlog_value(e), &a);
+         if (vlog_subkind(e) == V_CAST_WIDTH) {
+            vlog_typename_vector(t, a.four, a.sign, vlog_width(e));
+            return;
+         }
+
+         LOCAL_TEXT_BUF tb = tb_new();
+         vlog_typename_node(where, tb, vlog_type(e));
+         snprintf(t->text, sizeof(t->text), "%s", tb_get(tb));
+         t->four = !vlog_is_two_state(vlog_get_type(vlog_type(e)));
+         t->sign = vlog_is_signed(e);
+         t->width = vlog_width(e);
+         return;
+      }
+   default:
+      break;
+   }
+
+   // A variable, net, member or element
+   vlog_node_t decl = NULL;
+   if (vlog_kind(e) == V_REF && vlog_has_ref(e))
+      decl = vlog_ref(e);
+   else if (vlog_kind(e) == V_MEMBER_REF)
+      decl = vlog_member_decl(e);
+
+   if (vlog_kind(e) == V_BIT_SELECT || vlog_kind(e) == V_PART_SELECT) {
+      typename_t a;
+      vlog_typename_of(where, vlog_value(e), &a);
+      if (a.real || a.str) {
+         *t = a;
+         return;
+      }
+
+      if (vlog_kind(e) == V_BIT_SELECT) {
+         vlog_node_t type = vlog_get_type(e);
+         vlog_node_t btype = vlog_get_type(vlog_value(e));
+         if (btype != NULL && vlog_kind(btype) == V_DATA_TYPE
+             && (vlog_subkind(btype) == DT_QUEUE
+                 || vlog_subkind(btype) == DT_ASSOC
+                 || vlog_subkind(btype) == DT_DYNARRAY)) {
+            // An element of a container has the type it holds
+            LOCAL_TEXT_BUF tb = tb_new();
+            vlog_typename_node(where, tb, vlog_type(btype));
+            snprintf(t->text, sizeof(t->text), "%s", tb_get(tb));
+            t->four = !vlog_is_two_state(vlog_get_type(vlog_type(btype)));
+            t->width = vlog_width(e);
+            t->sign = vlog_is_signed(e);
+            return;
+         }
+
+         if (type != NULL && vlog_has_ref(vlog_value(e))
+             && vlog_ranges(vlog_ref(vlog_value(e))) >= vlog_params(e)
+             && vlog_params(e) > 0) {
+            // An element of an unpacked array keeps the dimensions that
+            // are not selected
+            vlog_node_t decl = vlog_ref(vlog_value(e));
+            LOCAL_TEXT_BUF tb = tb_new();
+            vlog_typename_node(where, tb, vlog_type(decl));
+            if (vlog_ranges(decl) > vlog_params(e)) {
+               tb_cat(tb, "$");
+               vlog_typename_ranges_from(where, tb, decl, vlog_params(e));
+            }
+            snprintf(t->text, sizeof(t->text), "%s", tb_get(tb));
+            t->four = !vlog_is_two_state(type);
+            t->width = vlog_width(e);
+            t->sign = vlog_is_signed(e);
+            return;
+         }
+
+         vlog_typename_vector(t, a.four, false, vlog_width(e));
+         return;
+      }
+
+      int64_t left, right;
+      const bool is_const = vlog_subkind(e) == V_RANGE_CONST
+         && vlog_get_const(vlog_left(e), &left)
+         && vlog_get_const(vlog_right(e), &right);
+
+      vlog_typename_vector(t, a.four, false, vlog_width(e));
+
+      // The selection is of the first packed dimension of an array so the
+      // remaining packed dimensions are kept (7.4.3, 11.5.1)
+      const char *tail = a.text + (a.four ? 5 : 3);
+      if (strncmp(a.text, a.four ? "logic" : "bit", tail - a.text) == 0) {
+         if (strncmp(tail, " signed", 7) == 0)
+            tail += 7;
+         if (*tail == ' ')
+            tail++;
+
+         int ndims = 0;
+         int64_t inner = 1;
+         for (const char *p = tail; *p == '['; ndims++) {
+            int64_t l, r;
+            int n;
+            if (sscanf(p, "[%"SCNi64":%"SCNi64"]%n", &l, &r, &n) != 2)
+               break;
+            if (ndims > 0)
+               inner *= llabs(l - r) + 1;
+            p += n;
+            tail = p;
+         }
+
+         if (ndims > 1 && (tail - a.text) > 0 && *tail == '\0') {
+            const char *dims = strchr(a.text, '[');
+            dims = strchr(dims + 1, '[');
+            int64_t w = vlog_width(e) / inner;
+            if (!is_const && vlog_get_const(vlog_right(e), &w))
+               w = MAX(w, 1);
+            if (is_const)
+               snprintf(t->text, sizeof(t->text), "%s[%"PRIi64":%"PRIi64"]%s",
+                        a.four ? "logic" : "bit", left, right, dims);
+            else
+               snprintf(t->text, sizeof(t->text), "%s[%"PRIi64":0]%s",
+                        a.four ? "logic" : "bit", w - 1, dims);
+            return;
+         }
+      }
+
+      if (is_const)
+         snprintf(t->text, sizeof(t->text), "%s[%"PRIi64":%"PRIi64"]",
+                  a.four ? "logic" : "bit", left, right);
+      return;
+   }
+
+   if (vlog_kind(e) == V_METHOD_CALL) {
+      vlog_typename_vector(t, false, true, 32);
+      snprintf(t->text, sizeof(t->text), "int");
+      t->width = 32;
+      return;
+   }
+
+   if (vlog_kind(e) == V_USER_FCALL && vlog_has_ref(e)
+       && vlog_kind(vlog_ref(e)) == V_FUNC_DECL && vlog_has_type(vlog_ref(e)))
+      decl = vlog_ref(e);
+
+   if (decl == NULL)
+      fatal_at(vlog_loc(where), "sorry, $typename is not supported for this "
+               "expression");
+
+   LOCAL_TEXT_BUF tb = tb_new();
+   const bool is_type = vlog_kind(decl) == V_CLASS_DECL
+      || vlog_kind(decl) == V_TYPE_DECL;
+   vlog_node_t type = is_type ? decl : vlog_type(decl);
+   vlog_typename_node(where, tb, type);
+
+   if (!is_type && vlog_kind(decl) != V_FUNC_DECL && vlog_ranges(decl) > 0) {
+      tb_cat(tb, "$");
+      vlog_typename_ranges(where, tb, decl, true);
+   }
+
+   snprintf(t->text, sizeof(t->text), "%s", tb_get(tb));
+
+   if (is_type && vlog_kind(decl) == V_TYPE_DECL) {
+      // A data type given as the argument, perhaps scoped by a class
+      t->four = !vlog_is_two_state(decl);
+      t->sign = vlog_is_signed(decl);
+      t->width = vlog_size(decl);
+      return;
+   }
+
+   t->real = vlog_is_real(e);
+   t->str = vlog_is_string(e);
+   vlog_node_t vt = vlog_get_type(e);
+   t->four = vt == NULL || !vlog_is_two_state(vt);
+   t->sign = vlog_is_signed(e);
+   t->width = vlog_width(e);
+
+   if (vlog_kind(e) == V_MEMBER_REF && !t->real && !t->str) {
+      // A member of a packed structure is four state if any member is
+      vlog_node_t pt = vlog_get_type(vlog_value(e));
+      if (pt != NULL && (vlog_kind(pt) == V_STRUCT_DECL
+                         || vlog_kind(pt) == V_UNION_DECL)
+          && (vlog_flags(pt) & VLOG_F_PACKED) && !vlog_is_two_state(pt))
+         vlog_typename_vector(t, true, t->sign, t->width);
+   }
+}
+
+static mir_value_t vlog_lower_typename(vlog_gen_t *g, vlog_node_t v)
+{
+   if (vlog_params(v) < 1)
+      fatal_at(vlog_loc(v), "wrong number of arguments to %pQ", vlog_ident(v));
+
+   typename_t t;
+   vlog_typename_of(v, vlog_param(v, 0), &t);
+
+   number_t n = number_from_string(t.text, strlen(t.text));
+   return vlog_string_const(g, n);
+}
+
+static mir_value_t vlog_lower_pfmt(vlog_gen_t *g, vlog_node_t v)
+{
+   // The elements of an array converted by %p joined into one string
+
+   mir_type_t t_offset = mir_offset_type(g->mu);
+   mir_type_t t_char = mir_char_type(g->mu);
+   mir_type_t t_str = mir_uarray_type(g->mu, 1, t_char);
+
+   int64_t left, step, plain;
+   if (!vlog_get_const(vlog_param(v, 3), &left)
+       || !vlog_get_const(vlog_param(v, 4), &step)
+       || !vlog_get_const(vlog_param(v, 5), &plain))
+      should_not_reach_here();
+
+   mir_value_t zero = mir_const(g->mu, t_offset, 0);
+
+   const bool assoc = vlog_params(v) > 6;
+
+   mir_value_t pairs_arr = MIR_NULL_VALUE, count;
+   if (assoc) {
+      mir_value_t av = vlog_lower_rvalue(g, vlog_param(v, 6));
+      count = mir_build_uarray_len(g->mu, av, 0);
+      pairs_arr = mir_build_unwrap(g->mu, av);
+   }
+   else
+      count = vlog_lower_cast(g, t_offset,
+                              vlog_lower_rvalue(g, vlog_param(v, 0)));
+
+   vlog_node_t idx = vlog_ref(vlog_param(v, 2));
+   const type_info_t *ti = vlog_type_info(g, vlog_type(idx));
+   mir_value_t idx_var = vlog_add_local_var(g, idx, ident_uniq("pidx"));
+
+   mir_value_t pieces = vlog_alloc_array(g, t_str, count);
+
+   mir_value_t total = mir_add_var(g->mu, t_offset, MIR_NULL_STAMP,
+                                   ident_uniq("total"), MIR_VAR_TEMP);
+   mir_build_store(g->mu, total, zero);
+
+   vlog_loop_t l1;
+   vlog_loop_begin(g, &l1, zero, count);
+
+   if (assoc) {
+      mir_value_t key = mir_build_load(g->mu, mir_build_record_ref(
+         g->mu, mir_build_array_ref(g->mu, pairs_arr, l1.i), 0));
+      if (mir_get_class(g->mu, ti->type) == MIR_TYPE_UARRAY)
+         mir_build_store(g->mu, idx_var, key);
+      else
+         mir_build_store(g->mu, idx_var, mir_build_cast(g->mu, ti->type, key));
+   }
+   else {
+      mir_value_t pos = mir_build_add(
+         g->mu, t_offset, mir_const(g->mu, t_offset, left),
+         mir_build_mul(g->mu, t_offset, mir_const(g->mu, t_offset, step),
+                       l1.i));
+      mir_build_store(g->mu, idx_var, mir_build_cast(g->mu, ti->type, pos));
+   }
+
+   mir_value_t piece = vlog_lower_with_context(g, vlog_param(v, 1), t_str);
+   mir_build_store(g->mu, mir_build_array_ref(g->mu, pieces, l1.i), piece);
+   mir_value_t plen = mir_build_uarray_len(g->mu, piece, 0);
+   mir_build_store(g->mu, total, mir_build_add(g->mu, t_offset,
+                                               mir_build_load(g->mu, total),
+                                               plen));
+   vlog_loop_end(g, &l1);
+
+   // The strings which surround and separate the elements
+   const char *open_s = "'{", *sep_s = plain ? "," : ", ", *close_s = "}";
+
+   mir_value_t open = vlog_string_const(
+      g, number_from_string(open_s, strlen(open_s)));
+   mir_value_t sep = vlog_string_const(
+      g, number_from_string(sep_s, strlen(sep_s)));
+   mir_value_t close = vlog_string_const(
+      g, number_from_string(close_s, strlen(close_s)));
+
+   mir_value_t olen = mir_build_uarray_len(g->mu, open, 0);
+   mir_value_t slen = mir_build_uarray_len(g->mu, sep, 0);
+   mir_value_t clen = mir_build_uarray_len(g->mu, close, 0);
+
+   mir_value_t nsep = mir_build_select(
+      g->mu, t_offset,
+      mir_build_cmp(g->mu, MIR_CMP_GT, count, zero),
+      mir_build_sub(g->mu, t_offset, count, mir_const(g->mu, t_offset, 1)),
+      zero);
+
+   mir_value_t size = mir_build_add(
+      g->mu, t_offset, mir_build_load(g->mu, total),
+      mir_build_add(g->mu, t_offset, mir_build_add(g->mu, t_offset, olen, clen),
+                    mir_build_mul(g->mu, t_offset, nsep, slen)));
+
+   mir_value_t data = vlog_alloc_array(g, t_char, size);
+
+   mir_build_copy(g->mu, mir_build_array_ref(g->mu, data, zero),
+                  mir_build_unwrap(g->mu, open), olen);
+
+   mir_value_t out = mir_add_var(g->mu, t_offset, MIR_NULL_STAMP,
+                                 ident_uniq("out"), MIR_VAR_TEMP);
+   mir_build_store(g->mu, out, olen);
+
+   vlog_loop_t l2;
+   vlog_loop_begin(g, &l2, zero, count);
+
+   mir_block_t sep_bb = mir_add_block(g->mu);
+   mir_block_t body_bb = mir_add_block(g->mu);
+   mir_build_cond(g->mu, mir_build_cmp(g->mu, MIR_CMP_GT, l2.i, zero),
+                  sep_bb, body_bb);
+
+   mir_set_cursor(g->mu, sep_bb, MIR_APPEND);
+   mir_value_t at = mir_build_load(g->mu, out);
+   mir_build_copy(g->mu, mir_build_array_ref(g->mu, data, at),
+                  mir_build_unwrap(g->mu, sep), slen);
+   mir_build_store(g->mu, out,
+                   mir_build_add(g->mu, t_offset, at, slen));
+   mir_build_jump(g->mu, body_bb);
+
+   mir_set_cursor(g->mu, body_bb, MIR_APPEND);
+   mir_value_t s = mir_build_load(g->mu,
+                                  mir_build_array_ref(g->mu, pieces, l2.i));
+   mir_value_t len = mir_build_uarray_len(g->mu, s, 0);
+   mir_value_t at2 = mir_build_load(g->mu, out);
+   mir_build_copy(g->mu, mir_build_array_ref(g->mu, data, at2),
+                  mir_build_unwrap(g->mu, s), len);
+   mir_build_store(g->mu, out, mir_build_add(g->mu, t_offset, at2, len));
+   vlog_loop_end(g, &l2);
+
+   mir_value_t at3 = mir_build_load(g->mu, out);
+   mir_build_copy(g->mu, mir_build_array_ref(g->mu, data, at3),
+                  mir_build_unwrap(g->mu, close), clen);
+
+   return vlog_wrap_array(g, data, size);
+}
+
+static bool vlog_type_bits(vlog_gen_t *g, vlog_node_t type, int64_t *bits);
+
+static bool vlog_decl_bits(vlog_gen_t *g, vlog_node_t decl, int64_t *bits)
+{
+   // Bits of a member or variable including its unpacked dimensions
+
+   if (!vlog_has_type(decl) || !vlog_type_bits(g, vlog_type(decl), bits))
+      return false;
+
+   const int nranges = vlog_ranges(decl);
+   for (int i = 0; i < nranges; i++) {
+      vlog_node_t r = vlog_range(decl, i);
+      if (vlog_subkind(r) != V_DIM_UNPACKED || vlog_size(r) == 0)
+         return false;
+      *bits *= vlog_size(r);
+   }
+
+   return true;
+}
+
+static bool vlog_type_bits(vlog_gen_t *g, vlog_node_t type, int64_t *bits)
+{
+   switch (vlog_kind(type)) {
+   case V_TYPE_DECL:
+   case V_ENUM_DECL:
+      return vlog_type_bits(g, vlog_type(type), bits);
+   case V_CLASS_DECL:
+      *bits = 64;
+      return true;
+   case V_STRUCT_DECL:
+   case V_UNION_DECL:
+      {
+         const bool is_union = vlog_kind(type) == V_UNION_DECL;
+         int64_t total = 0;
+         const int ndecls = vlog_decls(type);
+         for (int i = 0; i < ndecls; i++) {
+            int64_t member;
+            if (!vlog_decl_bits(g, vlog_decl(type, i), &member))
+               return false;
+            total = is_union ? MAX(total, member) : total + member;
+         }
+
+         if (is_union && (vlog_flags(type) & VLOG_F_TAGGED))
+            total += ilog2(ndecls);   // The tag
+
+         *bits = total;
+         return true;
+      }
+   case V_DATA_TYPE:
+      if (vlog_subkind(type) == DT_DYNARRAY && vlog_ranges(type) > 0) {
+         // Fixed size array from a typedef
+         int64_t elem;
+         if (!vlog_type_bits(g, vlog_type(type), &elem))
+            return false;
+
+         *bits = elem * vlog_size(vlog_range(type, 0));
+         return true;
+      }
+
+      switch (vlog_subkind(type)) {
+      case DT_STRING:
+      case DT_DYNARRAY:
+      case DT_QUEUE:
+      case DT_ASSOC:
+         return false;
+      case DT_EVENT:
+      case DT_CHANDLE:
+      case DT_MAILBOX:
+      case DT_SEMAPHORE:
+         *bits = 64;
+         return true;
+      case DT_REAL:
+      case DT_REALTIME:
+         *bits = 64;
+         return true;
+      case DT_SHORTREAL:
+         *bits = 32;
+         return true;
+      default:
+         if (vlog_has_type(type)) {
+            // A packed array of another type
+            int64_t elem;
+            if (!vlog_type_bits(g, vlog_type(type), &elem))
+               return false;
+
+            const int nranges = vlog_ranges(type);
+            for (int i = 0; i < nranges; i++)
+               elem *= vlog_size(vlog_range(type, i));
+
+            *bits = elem;
+            return true;
+         }
+
+         *bits = vlog_type_info(g, type)->size;
+         return true;
+      }
+   default:
+      return false;
+   }
 }
 
 static mir_value_t vlog_lower_sys_fcall(vlog_gen_t *g, vlog_node_t v)
@@ -4496,28 +5886,8 @@ static mir_value_t vlog_lower_with_context(vlog_gen_t *g, vlog_node_t v,
          if (mir_get_kind(g->mu) == MIR_UNIT_THUNK || g->constfunc)
             func = ident_sprintf("%s@const", istr(func));
 
-         const int nparams = vlog_params(v);
-         mir_value_t *args LOCAL =
-            xmalloc_array(nparams + 1, sizeof(mir_value_t));
-
-         mir_value_t context = vlog_context_for_call(g, decl);
-
-         int pos = 0;
-         if (!mir_is_null(context))
-            args[pos++] = context;
-
-         for (int i = 0; i < nparams; i++) {
-            mir_value_t value = vlog_lower_rvalue(g, vlog_param(v, i));
-            vlog_node_t dt = vlog_type(vlog_port(decl, i));
-            const type_info_t *ti = vlog_type_info(g, dt);
-            args[pos++] = vlog_lower_cast(g, ti->type, value);
-         }
-
-         const type_info_t *ti = vlog_type_info(g, vlog_type(decl));
-         mir_value_t result = mir_build_fcall(g->mu, func, ti->type,
-                                              MIR_NULL_STAMP, args, pos);
-         mir_build_consume(g->mu, result);
-         return result;
+         return vlog_widen_vector(g, vlog_lower_subr_call(g, decl, v, this_val,
+                                                          false), context);
       }
    case V_REAL:
       {
@@ -4755,6 +6125,7 @@ static mir_value_t vlog_lower_trigger(vlog_gen_t *g, vlog_node_t v)
             }
          case V_PARAM_DECL:
          case V_LOCALPARAM:
+         case V_ENUM_NAME:
             return MIR_NULL_VALUE;
          default:
             CANNOT_HANDLE(v);
@@ -4763,8 +6134,9 @@ static mir_value_t vlog_lower_trigger(vlog_gen_t *g, vlog_node_t v)
       break;
    case V_BIT_SELECT:
    case V_PART_SELECT:
+   case V_MEMBER_REF:
       {
-         mir_value_t trigger;
+         mir_value_t trigger = MIR_NULL_VALUE;
          vlog_node_t prefix = vlog_longest_static_prefix(v);
          if (prefix == v) {
             vlog_select_t lvalue = vlog_lower_select(g, v);
@@ -4776,8 +6148,12 @@ static mir_value_t vlog_lower_trigger(vlog_gen_t *g, vlog_node_t v)
          }
          else
             trigger = vlog_lower_trigger(g, prefix);
+         else if (kind != V_MEMBER_REF || vlog_is_param_select(v))
+            trigger = vlog_lower_trigger(g, vlog_value(v));   // An expression
 
-         if (kind == V_BIT_SELECT) {
+         if (kind == V_MEMBER_REF)
+            return trigger;
+         else if (kind == V_BIT_SELECT) {
             const int nparams = vlog_params(v);
             for (int i = 0; i < nparams; i++) {
                mir_value_t p = vlog_lower_trigger(g, vlog_param(v, i));
@@ -5794,6 +7170,58 @@ static void vlog_lower_return(vlog_gen_t *g, vlog_node_t v)
       mir_build_jump(g->mu, g->exit);
 }
 
+static bool vlog_is_string(vlog_node_t v)
+{
+   switch (vlog_kind(v)) {
+   case V_CONCAT:
+      for (int i = 0; i < vlog_params(v); i++) {
+         if (vlog_is_string(vlog_param(v, i)))
+            return true;
+      }
+      return false;
+   case V_COND_EXPR:
+      return vlog_is_string(vlog_left(v)) || vlog_is_string(vlog_right(v));
+   case V_BIT_SELECT:
+      {
+         // One character of a string is not a string
+         vlog_node_t pt = vlog_get_type(vlog_value(v));
+         if (pt != NULL && vlog_kind(pt) == V_DATA_TYPE
+             && vlog_subkind(pt) == DT_STRING)
+            return false;
+      }
+      // Fall-through
+   case V_REF:
+   case V_HIER_REF:
+   case V_MEMBER_REF:
+   case V_USER_FCALL:
+   case V_METHOD_CALL:
+   case V_TF_PORT_DECL:
+      {
+         if (vlog_kind(v) == V_METHOD_CALL
+             && vlog_subkind(v) == V_METHOD_ENUM_NAME)
+            return true;
+
+         vlog_node_t t = vlog_get_type(v);
+         return t != NULL && vlog_kind(t) == V_DATA_TYPE
+            && vlog_subkind(t) == DT_STRING;
+      }
+   case V_SYS_FCALL:
+      return vlog_is_sformatf(vlog_ident(v))
+         || vlog_ident(v) == ident_new("$typename")
+         || vlog_ident(v) == ident_new("$__pfmt");
+   case V_CAST:
+      if (vlog_subkind(v) == V_CAST_TYPE) {
+         // A cast to string is a string (6.24.1)
+         vlog_node_t t = vlog_get_type(vlog_type(v));
+         return t != NULL && vlog_kind(t) == V_DATA_TYPE
+            && vlog_subkind(t) == DT_STRING;
+      }
+      return false;
+   default:
+      return false;
+   }
+}
+
 static mir_value_t vlog_wrap_array(vlog_gen_t *g, mir_value_t data,
                                    mir_value_t count)
 {
@@ -5882,6 +7310,163 @@ static void vlog_init_elements(vlog_gen_t *g, mir_value_t data,
    mir_build_jump(g->mu, test_bb);
 
    mir_set_cursor(g->mu, done_bb, MIR_APPEND);
+}
+
+static mir_value_t vlog_string_const(vlog_gen_t *g, number_t n)
+{
+   mir_type_t t_offset = mir_offset_type(g->mu);
+   mir_type_t t_char = mir_char_type(g->mu);
+
+   // A string cannot hold a null character
+   const int width = number_width(n) / 8;
+   int nbytes = 0;
+   for (int i = 0; i < width; i++) {
+      if (number_byte(n, width - 1 - i) != 0)
+         nbytes++;
+   }
+
+   mir_value_t count = mir_const(g->mu, t_offset, nbytes);
+   mir_value_t data = vlog_alloc_array(g, t_char, count);
+
+   for (int i = 0, pos = 0; i < width; i++) {
+      const uint8_t ch = number_byte(n, width - 1 - i);
+      if (ch == 0)
+         continue;
+
+      mir_value_t idx = mir_const(g->mu, t_offset, pos++);
+      mir_build_store(g->mu, mir_build_array_ref(g->mu, data, idx),
+                      mir_const(g->mu, t_char, ch));
+   }
+
+   return vlog_wrap_array(g, data, count);
+}
+
+static mir_value_t vlog_vector_bytes(vlog_gen_t *g, mir_value_t value,
+                                     int nbytes)
+{
+   mir_type_t t_offset = mir_offset_type(g->mu);
+   mir_type_t t_char = mir_char_type(g->mu);
+
+   mir_value_t count = mir_const(g->mu, t_offset, nbytes);
+   mir_value_t data = vlog_alloc_array(g, t_char, count);
+   mir_type_t t_int = mir_int_type(g->mu, INT64_MIN, INT64_MAX);
+   mir_value_t ival = vlog_lower_cast(g, t_int, value);
+   for (int j = 0; j < nbytes; j++) {
+      mir_value_t shift = mir_const(g->mu, t_int,
+                                    INT64_C(1) << ((nbytes - 1 - j) * 8));
+      mir_value_t b = mir_build_rem(g->mu, t_int,
+                                    mir_build_div(g->mu, t_int, ival, shift),
+                                    mir_const(g->mu, t_int, 256));
+      mir_value_t idx = mir_const(g->mu, t_offset, j);
+      mir_build_store(g->mu, mir_build_array_ref(g->mu, data, idx),
+                      mir_build_cast(g->mu, t_char, b));
+   }
+
+   return vlog_wrap_array(g, data, count);
+}
+
+static mir_value_t vlog_drop_nuls(vlog_gen_t *g, mir_value_t data,
+                                  mir_value_t total)
+{
+   // A string cannot hold a null character
+
+   mir_type_t t_offset = mir_offset_type(g->mu);
+   mir_type_t t_char = mir_char_type(g->mu);
+
+   mir_value_t zero = mir_const(g->mu, t_offset, 0);
+   mir_value_t wvar = mir_add_var(g->mu, t_offset, MIR_NULL_STAMP,
+                                  ident_uniq("w"), MIR_VAR_TEMP);
+   mir_build_store(g->mu, wvar, zero);
+
+   vlog_loop_t c;
+   vlog_loop_begin(g, &c, zero, total);
+
+   mir_value_t ch =
+      mir_build_load(g->mu, mir_build_array_ref(g->mu, data, c.i));
+   mir_value_t nonzero = mir_build_cmp(g->mu, MIR_CMP_NEQ, ch,
+                                       mir_const(g->mu, t_char, 0));
+
+   mir_block_t keep_bb = mir_add_block(g->mu);
+   mir_block_t skip_bb = mir_add_block(g->mu);
+   mir_build_cond(g->mu, nonzero, keep_bb, skip_bb);
+
+   mir_set_cursor(g->mu, keep_bb, MIR_APPEND);
+   mir_value_t w = mir_build_load(g->mu, wvar);
+   mir_build_store(g->mu, mir_build_array_ref(g->mu, data, w), ch);
+   mir_build_store(g->mu, wvar,
+                   mir_build_add(g->mu, t_offset, w,
+                                 mir_const(g->mu, t_offset, 1)));
+   mir_build_jump(g->mu, skip_bb);
+
+   mir_set_cursor(g->mu, skip_bb, MIR_APPEND);
+   vlog_loop_end(g, &c);
+
+   return vlog_wrap_array(g, data, mir_build_load(g->mu, wvar));
+}
+
+static mir_value_t vlog_string_concat(vlog_gen_t *g, vlog_node_t v)
+{
+   mir_type_t t_offset = mir_offset_type(g->mu);
+   mir_type_t t_char = mir_char_type(g->mu);
+   mir_type_t t_str = mir_uarray_type(g->mu, 1, t_char);
+
+   const int nparams = vlog_params(v);
+   mir_value_t *parts LOCAL = xmalloc_array(nparams, sizeof(mir_value_t));
+
+   mir_value_t total = mir_const(g->mu, t_offset, 0);
+   bool has_vector = false;
+   for (int i = 0; i < nparams; i++) {
+      vlog_node_t p = vlog_param(v, i);
+      if (vlog_kind(p) == V_STRING || vlog_is_string(p)
+          || (vlog_kind(p) == V_COND_EXPR
+              && (vlog_kind(vlog_left(p)) == V_STRING
+                  || vlog_kind(vlog_right(p)) == V_STRING)))
+         parts[i] = vlog_lower_with_context(g, p, t_str);
+      else {
+         mir_value_t value = vlog_lower_rvalue(g, p);
+         if (mir_is(g->mu, value, MIR_TYPE_UARRAY)) {
+            parts[i] = value;
+            total = mir_build_add(g->mu, t_offset, total,
+                                  mir_build_uarray_len(g->mu, value, 0));
+            continue;
+         }
+
+         // Vector operands contribute one character per byte
+         has_vector = true;
+         parts[i] = vlog_vector_bytes(g, value, vlog_width(p) / 8);
+      }
+
+      total = mir_build_add(g->mu, t_offset, total,
+                            mir_build_uarray_len(g->mu, parts[i], 0));
+   }
+
+   mir_value_t once = total;
+   mir_value_t repeat = mir_const(g->mu, t_offset, 1);
+   if (vlog_has_value(v)) {
+      repeat = vlog_lower_cast(g, t_offset,
+                               vlog_lower_rvalue(g, vlog_value(v)));
+      total = mir_build_mul(g->mu, t_offset, total, repeat);
+   }
+
+   mir_value_t data = vlog_alloc_array(g, t_char, total);
+
+   vlog_loop_t l;
+   vlog_loop_begin(g, &l, mir_const(g->mu, t_offset, 0), repeat);
+
+   mir_value_t pos = mir_build_mul(g->mu, t_offset, l.i, once);
+   for (int i = 0; i < nparams; i++) {
+      mir_value_t len = mir_build_uarray_len(g->mu, parts[i], 0);
+      mir_build_copy(g->mu, mir_build_array_ref(g->mu, data, pos),
+                     mir_build_unwrap(g->mu, parts[i]), len);
+      pos = mir_build_add(g->mu, t_offset, pos, len);
+   }
+
+   vlog_loop_end(g, &l);
+
+   if (has_vector)
+      return vlog_drop_nuls(g, data, total);
+
+   return vlog_wrap_array(g, data, total);
 }
 
 static mir_value_t vlog_lower_queue_slice(vlog_gen_t *g, vlog_node_t v)
@@ -7666,36 +9251,98 @@ static void vlog_lower_user_tcall(vlog_gen_t *g, vlog_node_t v)
    mir_value_t *args LOCAL =
       xmalloc_array(nparams + 1, sizeof(mir_value_t));
 
-   SCOPED_A(mir_value_t) temps = AINIT;
+   vlog_lower_subr_call(g, decl, v, this_val, false);
+}
 
-   args[0] = vlog_context_for_call(g, decl);
-   for (int i = 0; i < nparams; i++) {
-      vlog_node_t port = vlog_port(decl, i);
-      const type_info_t *ti = vlog_type_info(g, vlog_type(port));
+static bool vlog_is_deferred_prop(vlog_node_t d)
+{
+   // The explicit initial value of a property is assigned after the base
+   // class constructor returns (8.7)
+   return vlog_kind(d) == V_VAR_DECL && !(vlog_flags(d) & VLOG_F_STATIC)
+      && vlog_has_value(d) && !vlog_is_ref_property(d)
+      && !vlog_is_fixed_unpacked(d);
+}
 
-      const v_port_kind_t dir = vlog_subkind(port);
-      if (dir == V_PORT_OUTPUT || dir == V_PORT_INOUT) {
-         ident_t name = ident_uniq("%s.tmp", istr(vlog_ident(port)));
-         mir_value_t tmp = mir_add_var(g->mu, ti->type, ti->stamp, name, 0);
+static void vlog_lower_prop_inits(vlog_gen_t *g, vlog_node_t class,
+                                  vlog_node_t stop, mir_value_t this_val)
+{
+   // Initialise the properties of each class from the one below stop
+   // down to class, in that order
 
-         mir_value_t init;
-         if (dir == V_PORT_OUTPUT)
-            init = vlog_lower_default_value(g, ti);
-         else {
-            mir_value_t value = vlog_lower_rvalue(g, vlog_param(v, i));
-            init = vlog_lower_cast(g, ti->type, value);
-         }
+   if (vlog_has_ref(class) && vlog_ref(class) != stop)
+      vlog_lower_prop_inits(g, vlog_ref(class), stop, this_val);
 
-         mir_build_store(g->mu, tmp, init);
+   const int ndecls = vlog_decls(class);
+   for (int i = 0; i < ndecls; i++) {
+      vlog_node_t d = vlog_decl(class, i);
+      if (!vlog_is_deferred_prop(d))
+         continue;
 
-         args[i + 1] = tmp;
-         APUSH(temps, tmp);
-      }
-      else {
-         mir_value_t value = vlog_lower_rvalue(g, vlog_param(v, i));
-         args[i + 1] = vlog_lower_cast(g, ti->type, value);
+      const type_info_t *ti = vlog_type_info(g, vlog_type(d));
+      ident_t name = vlog_prop_name_in(class, d);
+      mir_value_t ptr = mir_build_link_var(g->mu, this_val, name, ti->type);
+      vlog_store_local_init(g, d, ptr);
+   }
+}
+
+static bool vlog_has_deferred_props(vlog_node_t class, vlog_node_t stop)
+{
+   for (vlog_node_t c = class; c != NULL && c != stop;
+        c = vlog_has_ref(c) ? vlog_ref(c) : NULL) {
+      const int ndecls = vlog_decls(c);
+      for (int i = 0; i < ndecls; i++) {
+         if (vlog_is_deferred_prop(vlog_decl(c, i)))
+            return true;
       }
    }
+
+static void vlog_bind_props(vlog_gen_t *g, vlog_node_t class, mir_value_t obj,
+                            mir_value_t *saved, int *pos, bool restore)
+{
+   // Make the properties of the new object visible by name while its
+   // initial values are evaluated outside the class
+
+   if (vlog_has_ref(class))
+      vlog_bind_props(g, vlog_ref(class), obj, saved, pos, restore);
+
+   const int ndecls = vlog_decls(class);
+   for (int i = 0; i < ndecls; i++) {
+      vlog_node_t d = vlog_decl(class, i);
+      if (vlog_kind(d) != V_VAR_DECL || (vlog_flags(d) & VLOG_F_STATIC)
+          || vlog_is_ref_property(d))
+         continue;
+
+      const int n = (*pos)++;
+      if (restore) {
+         mir_put_object(g->mu, d, saved[n]);
+         continue;
+      }
+
+      int hops;
+      mir_value_t old = mir_search_object(g->mu, d, &hops);
+      saved[n] = hops == 0 ? old : MIR_NULL_VALUE;
+
+      const type_info_t *ti = vlog_type_info(g, vlog_type(d));
+      mir_type_t type = ti->type;
+      if (vlog_is_fixed_unpacked(d) && vlog_size(d) > 1)
+         type = mir_carray_type(g->mu, vlog_size(d), ti->type);
+
+      mir_put_object(g->mu, d, mir_build_link_var(
+                        g->mu, obj, vlog_prop_name_in(class, d), type));
+   }
+}
+
+static int vlog_count_props(vlog_node_t class)
+{
+   int count = 0;
+   for (vlog_node_t c = class; c != NULL;
+        c = vlog_has_ref(c) ? vlog_ref(c) : NULL) {
+      const int ndecls = vlog_decls(c);
+      for (int i = 0; i < ndecls; i++)
+         count += vlog_kind(vlog_decl(c, i)) == V_VAR_DECL;
+   }
+   return count;
+}
 
 static void vlog_copy_properties(vlog_gen_t *g, vlog_node_t class,
                                  mir_value_t dst, mir_value_t src)
@@ -7745,6 +9392,101 @@ static void vlog_copy_properties(vlog_gen_t *g, vlog_node_t class,
    }
 }
 
+static mir_value_t vlog_lower_class_new(vlog_gen_t *g, vlog_node_t v)
+{
+   if (!vlog_has_type(v))
+      fatal_at(vlog_loc(v), "cannot determine the type of this new expression");
+
+   vlog_node_t type = vlog_type(v);
+   const type_info_t *ti = vlog_type_info(g, type);
+
+   if (vlog_kind(type) == V_DATA_TYPE) {
+      // Mailbox
+      mir_type_t t_rec = mir_get_elem(g->mu, ti->type);
+      mir_value_t acc = mir_build_new(g->mu, t_rec, MIR_NULL_STAMP,
+                                      MIR_NULL_VALUE);
+      mir_value_t rec = mir_build_all(g->mu, acc);
+
+      const type_info_t *eti = vlog_type_info(g, vlog_type(type));
+      mir_type_t t_q = mir_uarray_type(g->mu, 1, eti->type);
+      mir_build_store(g->mu, mir_build_record_ref(g->mu, rec, 0),
+                      vlog_empty_array(g, t_q));
+
+      mir_type_t t_cell = mir_int_type(g->mu, INT64_MIN, INT64_MAX);
+      mir_build_store(g->mu, mir_build_record_ref(g->mu, rec, 1),
+                      mir_build_new(g->mu, t_cell, MIR_NULL_STAMP,
+                                    MIR_NULL_VALUE));
+
+      mir_value_t bound = mir_const(g->mu, t_cell, 0);
+      if (vlog_params(v) > 0)
+         bound = mir_build_cast(
+            g->mu, t_cell, vlog_lower_cast(g, mir_offset_type(g->mu),
+                                           vlog_lower_rvalue(g, vlog_param(v, 0))));
+      mir_build_store(g->mu, mir_build_record_ref(g->mu, rec, 2), bound);
+      mir_build_store(g->mu, mir_build_record_ref(g->mu, rec, 3),
+                      mir_const(g->mu, t_cell, 0));
+      mir_build_store(g->mu, mir_build_record_ref(g->mu, rec, 4),
+                      mir_const(g->mu, t_cell, 0));
+      mir_build_store(g->mu, mir_build_record_ref(g->mu, rec, 5),
+                      mir_const(g->mu, t_cell, 0));
+
+      return acc;
+   }
+
+   vlog_note_spec(type);
+
+   mir_value_t parent;
+   if (vlog_has_ident2(type) && vlog_find_scope(vlog_ident2(type)) != NULL)
+      parent = mir_build_null(g->mu, ti->type);
+   else
+      parent = vlog_scope_context(g, vlog_ident2(type));
+
+   if (vlog_has_value(v)) {
+      // Shallow copy of the properties of another object
+      mir_value_t src = vlog_lower_rvalue(g, vlog_value(v));
+      mir_build_null_check(g->mu, src, mir_build_debug_locus(
+                              g->mu, vlog_to_object(v)));
+
+      // The copy has the dynamic type of the original
+      vlog_node_t clone = vlog_class_member(type, ident_new("__cl"));
+      if (clone != NULL && (g->subr == NULL
+                            || vlog_ident(g->subr) != ident_new("__cl")))
+         return vlog_lower_subr_call(g, clone, NULL, src, false);
+
+      mir_value_t obj = mir_build_protected_init(
+         g->mu, ti->type, parent, MIR_NULL_VALUE, MIR_NULL_VALUE);
+      vlog_copy_properties(g, type, obj, src);
+      return obj;
+   }
+
+   mir_value_t obj = mir_build_protected_init(g->mu, ti->type, parent,
+                                              MIR_NULL_VALUE, MIR_NULL_VALUE);
+
+   vlog_node_t ctor = vlog_find_ctor(type);
+   if (ctor != NULL)
+      vlog_lower_subr_call(g, ctor, v, obj, true);
+
+   // Classes below the one whose constructor ran have no constructor of
+   // their own so their properties are initialised here
+   vlog_node_t stop = ctor != NULL ? vlog_ref(ctor) : NULL;
+   if (stop != type && vlog_has_deferred_props(type, stop)) {
+      mir_value_t *saved LOCAL =
+         xmalloc_array(vlog_count_props(type) + 1, sizeof(mir_value_t));
+      int pos = 0;
+      vlog_bind_props(g, type, obj, saved, &pos, false);
+
+      mir_value_t saved_this = g->this_val;
+      g->this_val = obj;
+      vlog_lower_prop_inits(g, type, stop, obj);
+      g->this_val = saved_this;
+
+      pos = 0;
+      vlog_bind_props(g, type, obj, saved, &pos, true);
+   }
+
+   return obj;
+}
+
 static mir_value_t vlog_lower_dynamic_new(vlog_gen_t *g, vlog_node_t v)
 {
    vlog_node_t type = vlog_type(v);
@@ -7782,6 +9524,37 @@ static mir_value_t vlog_lower_dynamic_new(vlog_gen_t *g, vlog_node_t v)
    vlog_init_elements(g, data, start, count, eti);
 
    return vlog_wrap_array(g, data, count);
+}
+
+static void vlog_lower_implicit_super(vlog_gen_t *g, vlog_node_t ctor)
+{
+   vlog_node_t class = vlog_ref(ctor);
+   if (!vlog_has_ref(class)) {
+      vlog_lower_prop_inits(g, class, NULL, vlog_lower_this(g));
+      return;
+   }
+
+   if (vlog_stmts(ctor) > 0 && vlog_kind(vlog_stmt(ctor, 0)) == V_SUPER_CALL)
+      return;
+
+   vlog_node_t base = vlog_find_ctor(vlog_ref(class));
+   if (base != NULL)
+      vlog_lower_subr_call(g, base, vlog_params(class) > 0 ? class : NULL,
+                           vlog_lower_this(g), true);
+
+   vlog_lower_prop_inits(g, class, base != NULL ? vlog_ref(base) : NULL,
+                         vlog_lower_this(g));
+}
+
+static void vlog_lower_super_call(vlog_gen_t *g, vlog_node_t v)
+{
+   vlog_node_t class = vlog_ref(g->subr);
+   vlog_node_t base = vlog_find_ctor(vlog_ref(class));
+   if (base != NULL)
+      vlog_lower_subr_call(g, base, v, vlog_lower_this(g), true);
+
+   vlog_lower_prop_inits(g, class, base != NULL ? vlog_ref(base) : NULL,
+                         vlog_lower_this(g));
 }
 
    mir_block_t resume_bb = mir_add_block(g->mu);
@@ -7959,6 +9732,7 @@ static void vlog_lower_sensitivity(vlog_gen_t *g, vlog_node_t v)
             break;
          case V_PARAM_DECL:
          case V_LOCALPARAM:
+         case V_ENUM_NAME:
             break;
          default:
             CANNOT_HANDLE(v);
@@ -8010,6 +9784,7 @@ static void vlog_lower_sensitivity(vlog_gen_t *g, vlog_node_t v)
    case V_CONCAT:
    case V_USER_FCALL:
    case V_SYS_FCALL:
+   case V_STREAM:
       {
          const int nparams = vlog_params(v);
          for (int i = 0; i < nparams; i++)
@@ -9157,6 +10932,28 @@ static void vlog_lower_task_decl(mir_unit_t *mu, object_t *obj)
    vlog_lower_cleanup(&g);
 }
 
+static void vlog_lower_class_fields(vlog_gen_t *g, vlog_node_t c)
+{
+   // A derived class has the same layout as its base with extra fields
+   // on the end so a handle can be used as any of its base classes
+
+   if (vlog_has_ref(c))
+      vlog_lower_class_fields(g, vlog_ref(c));
+
+   const int ndecls = vlog_decls(c);
+   for (int i = 0; i < ndecls; i++) {
+      vlog_node_t d = vlog_decl(c, i);
+      if (vlog_is_deferred_prop(d)) {
+         // Initialised by the constructor once the base class
+         // constructor has returned
+         mir_value_t var = vlog_add_local_var(g, d, vlog_prop_name_in(c, d));
+         vlog_store_local_default(g, d, var);
+      }
+      else if (vlog_kind(d) == V_VAR_DECL && !(vlog_flags(d) & VLOG_F_STATIC))
+         vlog_lower_one_local(g, d, vlog_prop_name_in(c, d));
+   }
+}
+
 static void vlog_lower_class_decl(mir_unit_t *mu, object_t *obj)
 {
    vlog_node_t v = vlog_from_object(obj);
@@ -9170,7 +10967,19 @@ static void vlog_lower_class_decl(mir_unit_t *mu, object_t *obj)
    mir_type_t t_context = mir_context_type(mu, mir_get_parent(mu));
    mir_add_param(mu, t_context, MIR_NULL_STAMP, ident_new("context"));
 
-   vlog_lower_locals(&g, v);
+   mir_type_t t_vid = mir_int_type(mu, INT64_MIN, INT64_MAX);
+   mir_value_t vid = mir_add_var(mu, t_vid, MIR_NULL_STAMP,
+                                 ident_new("$vid"), 0);
+   mir_build_store(mu, vid, mir_const(mu, t_vid, vlog_class_id(v)));
+
+   mir_value_t oid = mir_add_var(mu, t_vid, MIR_NULL_STAMP, ident_new("$oid"),
+                                 0);
+   mir_value_t onum = mir_build_fcall(mu, ident_new("__sv_class_oid"), t_vid,
+                                      MIR_NULL_STAMP, NULL, 0);
+   mir_build_consume(mu, onum);
+   mir_build_store(mu, oid, onum);
+
+   vlog_lower_class_fields(&g, v);
 
    if (!mir_block_finished(mu, MIR_NULL_BLOCK))
       mir_build_return(mu, MIR_NULL_VALUE);
