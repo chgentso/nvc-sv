@@ -22,6 +22,7 @@
 #include "ident.h"
 #include "printf.h"
 #include "vlog/vlog-node.h"
+#include "vlog/vlog-number.h"
 #include "vlog/vlog-symtab.h"
 #include "vlog/vlog-util.h"
 
@@ -31,7 +32,6 @@
 
 #define POISON_NODE (vlog_node_t)-1
 
-typedef struct _vlog_scope vlog_scope_t;
 typedef A(vlog_node_t) node_list_t;
 
 typedef struct _vlog_symtab {
@@ -39,12 +39,14 @@ typedef struct _vlog_symtab {
    hash_t          *scopes;
    mem_pool_t      *pool;
    vlog_net_kind_t  implicit;
+   bool             forward;
    ghash_t         *builtins;
 } vlog_symtab_t;
 
 typedef struct {
    ident_t     name;
    vlog_node_t node;
+   bool        imported;   // Made visible by a wildcard import
 } vlog_symbol_t;
 
 typedef struct _vlog_scope {
@@ -150,6 +152,30 @@ void vlog_symtab_push(vlog_symtab_t *st, vlog_node_t v)
    st->top = s;
 }
 
+static bool is_enclosing_module(const vlog_scope_t *scope, vlog_node_t v)
+{
+   // The name of the module can be used in the arguments of a system task
+
+   if (scope->container == NULL || vlog_kind(scope->container) != V_MODULE)
+      return false;
+
+   return vlog_ident2(scope->container) == vlog_ident(v);
+}
+
+static bool is_subroutine(vlog_node_t container)
+{
+   if (container == NULL)
+      return false;
+
+   switch (vlog_kind(container)) {
+   case V_FUNC_DECL:
+   case V_TASK_DECL:
+      return true;
+   default:
+      return false;
+   }
+}
+
 void vlog_symtab_pop(vlog_symtab_t *st)
 {
    assert(st->top != NULL);
@@ -167,7 +193,9 @@ void vlog_symtab_pop(vlog_symtab_t *st)
 
    for (int i = 0; i < st->top->deferred.count; i++) {
       vlog_node_t v = st->top->deferred.items[i];
-      if (st->top->parent != NULL && st->top->parent->container != NULL)
+      if (st->top->parent != NULL
+          && (st->top->parent->container != NULL
+              || is_subroutine(st->top->container)))
          APUSH(st->top->parent->deferred, v);
       else if (vlog_kind(v) != V_MOD_REF) {
          ident_t name = vlog_ident(v);
@@ -180,21 +208,130 @@ void vlog_symtab_pop(vlog_symtab_t *st)
    st->top = st->top->parent;
 }
 
+bool vlog_symtab_set_forward(vlog_symtab_t *st, bool forward)
+{
+   const bool old = st->forward;
+   st->forward = forward;
+   return old;
+}
+
 void vlog_symtab_set_implicit(vlog_symtab_t *st, vlog_net_kind_t kind)
 {
    st->implicit = kind;
 }
 
+static bool modport_has_member(vlog_node_t mp, ident_t id)
+{
+   const int nmembers = vlog_decls(mp);
+   for (int i = 0; i < nmembers; i++) {
+      if (vlog_ident(vlog_decl(mp, i)) == id)
+         return true;
+   }
+
+   return false;
+}
+
+static vlog_node_t nested_interface_decl(vlog_node_t iface, ident_t id)
+{
+   // An interface instance declared inside an interface is a member of a
+   // virtual interface whose type is the nested interface
+
+   const int nstmts = vlog_stmts(iface);
+   for (int i = 0; i < nstmts; i++) {
+      vlog_node_t list = vlog_stmt(iface, i);
+      if (vlog_kind(list) != V_INST_LIST)
+         continue;
+
+      const int ninst = vlog_stmts(list);
+      for (int j = 0; j < ninst; j++) {
+         vlog_node_t inst = vlog_stmt(list, j);
+         if (vlog_kind(inst) != V_MOD_INST || vlog_ident(inst) != id)
+            continue;
+
+         vlog_node_t type = vlog_new(V_DATA_TYPE);
+         vlog_set_subkind(type, DT_VIRTUAL);
+         vlog_set_ident(type, vlog_ident(list));
+         vlog_set_loc(type, vlog_loc(inst));
+
+         vlog_node_t mod = vlog_virtual_iface(type);
+         if (mod == NULL || vlog_kind(mod) != V_MODULE
+             || !(vlog_flags(mod) & VLOG_F_INTERFACE))
+            return NULL;
+
+         vlog_set_ref(type, mod);
+
+         const int nparams = vlog_params(list);
+         for (int k = 0; k < nparams; k++)
+            vlog_add_param(type, vlog_param(list, k));
+
+         vlog_node_t decl = vlog_new(V_VAR_DECL);
+         vlog_set_ident(decl, id);
+         vlog_set_type(decl, type);
+         vlog_set_flags(decl, VLOG_F_NESTED_INST);
+         vlog_set_loc(decl, vlog_loc(inst));
+         return vlog_ranges(inst) > 0 ? NULL : decl;
+      }
+   }
+
+   return NULL;
+}
+
 static void lookup_member(vlog_symtab_t *st, vlog_node_t v)
 {
    vlog_node_t prefix = vlog_value(v), type = vlog_get_type(prefix);
-   if (type == NULL) {  // Was earlier error
-      assert(error_count() > 0);
+   if (type == NULL) {
+      if (error_count() == 0)  // Otherwise was earlier error
+         error_at(vlog_loc(v), "sorry, the prefix of %pQ is not supported in "
+                  "this kind of hierarchical reference", vlog_ident(v));
       return;
    }
 
    const vlog_kind_t kind = vlog_kind(type);
-   if (kind != V_STRUCT_DECL && kind != V_UNION_DECL && kind != V_CLASS_DECL) {
+   ident_t id = vlog_ident(v);
+
+   if (kind == V_DATA_TYPE && vlog_subkind(type) == DT_VIRTUAL) {
+      if (!vlog_has_ref(type))
+         return;   // Interface is declared later
+
+      vlog_node_t iface = vlog_ref(type);
+      const int ndecls = vlog_decls(iface);
+      for (int i = 0; i < ndecls; i++) {
+         vlog_node_t d = vlog_decl(iface, i);
+         switch (vlog_kind(d)) {
+         case V_PORT_DECL:
+         case V_NET_DECL:
+         case V_VAR_DECL:
+         case V_PARAM_DECL:
+         case V_LOCALPARAM:
+            if (vlog_ident(d) == id) {
+               if (vlog_has_type(type) && !modport_has_member(
+                      vlog_type(type), id)) {
+                  error_at(vlog_loc(v), "virtual interface element %pQ "
+                           "not found in modport %pQ", id,
+                           vlog_ident(vlog_type(type)));
+                  return;
+               }
+
+               vlog_set_ref(v, d);
+               return;
+            }
+            break;
+         default:
+            break;
+         }
+      }
+
+      vlog_node_t nested = nested_interface_decl(iface, id);
+      if (nested != NULL) {
+         vlog_set_ref(v, nested);
+         return;
+      }
+
+      error_at(vlog_loc(v), "interface has no member named %pQ", id);
+      return;
+   }
+   else if (kind != V_STRUCT_DECL && kind != V_UNION_DECL
+            && kind != V_CLASS_DECL) {
       diag_t *d = diag_new(DIAG_ERROR, vlog_loc(prefix));
       if (vlog_kind(prefix) == V_REF)
          diag_printf(d, "%pQ", vlog_ident(prefix));
@@ -205,14 +342,29 @@ static void lookup_member(vlog_symtab_t *st, vlog_node_t v)
       return;
    }
 
-   ident_t id = vlog_ident(v);
+   if (kind == V_CLASS_DECL) {
+      vlog_node_t m = vlog_class_member(type, id);
+      if (m == NULL) {
+         // Parameters and enumeration names are constants of the class
+         m = vlog_scope_member(type, id);
+         if (m != NULL && vlog_kind(m) != V_PARAM_DECL
+             && vlog_kind(m) != V_LOCALPARAM && vlog_kind(m) != V_ENUM_NAME)
+            m = NULL;
+      }
 
-   const int ndecls = vlog_decls(type);
-   for (int i = 0; i < ndecls; i++) {
-      vlog_node_t d = vlog_decl(type, i);
-      if (vlog_ident(d) == id) {
-         vlog_set_ref(v, d);
+      if (m != NULL) {
+         vlog_set_ref(v, m);
          return;
+      }
+   }
+   else {
+      const int ndecls = vlog_decls(type);
+      for (int i = 0; i < ndecls; i++) {
+         vlog_node_t d = vlog_decl(type, i);
+         if (vlog_ident(d) == id) {
+            vlog_set_ref(v, d);
+            return;
+         }
       }
    }
 
@@ -256,6 +408,15 @@ static vlog_method_t get_builtin_method(vlog_symtab_t *st, vlog_kind_t kind,
       { "name",  V_ENUM_DECL, V_METHOD_ENUM_NAME },
    };
 
+   if (st == NULL) {
+      for (int i = 0; i < ARRAY_LEN(tab); i++) {
+         if (tab[i].kind == kind && ident_new(tab[i].name) == name)
+            return tab[i].method;
+      }
+
+      return V_METHOD_USER;
+   }
+
    if (st->builtins == NULL) {
       st->builtins = ghash_new(ARRAY_LEN(tab) * 2 + 1, hash_builtin_cb,
                                cmp_builtin_cb);
@@ -280,10 +441,44 @@ static vlog_method_t get_builtin_method(vlog_symtab_t *st, vlog_kind_t kind,
    return b->method;
 }
 
+static vlog_node_t make_atom_type(data_type_t dt, int width, vlog_flags_t flags,
+                                  const loc_t *loc)
+{
+   vlog_node_t left = vlog_new(V_NUMBER);
+   vlog_set_number(left, number_from_int(width - 1));
+
+   vlog_node_t right = vlog_new(V_NUMBER);
+   vlog_set_number(right, number_from_int(0));
+
+   vlog_node_t r = vlog_new(V_DIMENSION);
+   vlog_set_subkind(r, V_DIM_PACKED);
+   vlog_set_left(r, left);
+   vlog_set_right(r, right);
+
+   vlog_node_t t = vlog_new(V_DATA_TYPE);
+   vlog_set_subkind(t, dt);
+   vlog_set_flags(t, flags);
+   vlog_add_range(t, r);
+   vlog_set_loc(t, loc);
+   return t;
+}
+
+static vlog_node_t make_queue_type(vlog_node_t elem, const loc_t *loc)
+{
+   vlog_node_t t = vlog_new(V_DATA_TYPE);
+   vlog_set_subkind(t, DT_QUEUE);
+   vlog_set_type(t, elem);
+   vlog_set_loc(t, loc);
+   return t;
+}
+
 static void lookup_method_call(vlog_symtab_t *st, vlog_node_t v)
 {
    vlog_node_t prefix = vlog_value(v), type = vlog_get_type(prefix);
-   if (type == NULL) {  // Was earlier error
+
+   if (lookup_rand_method(v, prefix))
+      return;
+   else if (type == NULL) {  // Was earlier error
       assert(error_count() > 0);
       return;
    }
@@ -297,6 +492,42 @@ static void lookup_method_call(vlog_symtab_t *st, vlog_node_t v)
    vlog_method_t m = get_builtin_method(st, kind, vlog_ident(v));
    vlog_set_subkind(v, m);
 
+   // The reference of a built-in method holds the type of its result
+   switch (m) {
+   case V_METHOD_STR_TOUPPER:
+   case V_METHOD_STR_TOLOWER:
+   case V_METHOD_STR_SUBSTR:
+      vlog_set_ref(v, type);
+      break;
+   case V_METHOD_STR_ATOREAL:
+      {
+         vlog_node_t real = vlog_new(V_DATA_TYPE);
+         vlog_set_subkind(real, DT_REAL);
+         vlog_set_loc(real, vlog_loc(v));
+         vlog_set_ref(v, real);
+      }
+      break;
+   case V_METHOD_STR_GETC:
+      {
+         vlog_set_ref(v, make_atom_type(DT_BYTE, 8, VLOG_F_SIGNED,
+                                        vlog_loc(v)));
+      }
+      break;
+   case V_METHOD_EVENT_TRIGGERED:
+      vlog_set_ref(v, make_atom_type(DT_INT, 32, VLOG_F_SIGNED, vlog_loc(v)));
+      break;
+   case V_METHOD_ENUM_NAME:
+      {
+         vlog_node_t str = vlog_new(V_DATA_TYPE);
+         vlog_set_subkind(str, DT_STRING);
+         vlog_set_loc(str, vlog_loc(v));
+         vlog_set_ref(v, str);
+      }
+      break;
+   default:
+      break;
+   }
+
    if (m == V_METHOD_USER) {
       diag_t *d = diag_new(DIAG_ERROR, vlog_loc(prefix));
       if (vlog_kind(prefix) == V_REF)
@@ -306,6 +537,36 @@ static void lookup_method_call(vlog_symtab_t *st, vlog_node_t v)
       diag_printf(d, " has no method named %pQ", vlog_ident(v));
       diag_emit(d);
    }
+}
+
+void vlog_resolve_method(vlog_node_t v)
+{
+   // The prefix of a method call on a hierarchical name is only known
+   // after elaboration
+
+   assert(vlog_kind(v) == V_METHOD_CALL);
+   lookup_method_call(NULL, v);
+}
+
+void vlog_symtab_lookup_in(vlog_symtab_t *st, vlog_node_t v,
+                           vlog_node_t scope)
+{
+   // A name qualified with a package or class
+
+   if (vlog_has_ref(v))
+      return;
+
+   assert(!loc_invalid_p(vlog_loc(v)));
+
+   ident_t name = vlog_ident(v);
+   vlog_node_t d = vlog_scope_member(scope, name);
+   if (d == NULL) {
+      error_at(vlog_loc(v), "%pQ is not a member of %s %pQ", name,
+               vlog_kind(scope) == V_PACKAGE ? "package" : "class",
+               vlog_ident(scope));
+   }
+   else
+      vlog_set_ref(v, d);
 }
 
 void vlog_symtab_lookup(vlog_symtab_t *st, vlog_node_t v)
@@ -354,6 +615,12 @@ void vlog_symtab_lookup(vlog_symtab_t *st, vlog_node_t v)
          // May be declared later
          APUSH(st->top->deferred, v);
          break;
+      case V_REF:
+         if (st->forward) {
+            APUSH(st->top->deferred, v);
+            break;
+         }
+         // Fall-through
       default:
          error_at(vlog_loc(v), "no visible declaration for %pQ", name);
          vlog_symtab_poison(st, name);
@@ -377,6 +644,13 @@ void vlog_symtab_put(vlog_symtab_t *st, vlog_node_t v)
 
    if (sym->node == POISON_NODE || sym->node == v)
       return;
+
+   if (sym->imported) {
+      // A declaration takes precedence over a name from a wildcard import
+      sym->imported = false;
+      sym->node = v;
+      return;
+   }
 
    if (sym->node != NULL) {
       switch (vlog_kind(sym->node)) {
@@ -445,6 +719,65 @@ void vlog_symtab_suppress(vlog_symtab_t *st)
    st->top->suppress = true;
 }
 
+vlog_scope_t *vlog_symtab_current(vlog_symtab_t *st)
+{
+   return st->top;
+}
+
+vlog_scope_t *vlog_symtab_enter(vlog_symtab_t *st, vlog_scope_t *scope)
+{
+   vlog_scope_t *old = st->top;
+   st->top = scope;
+   return old;
+}
+
+vlog_node_t vlog_symtab_static_home(vlog_symtab_t *st)
+{
+   for (vlog_scope_t *s = st->top; s != NULL; s = s->parent) {
+      if (s->container != NULL) {
+         switch (vlog_kind(s->container)) {
+         case V_MODULE:
+         case V_PACKAGE:
+         case V_PROGRAM:
+         case V_CLASS_DECL:
+            return s->container;
+         default:
+            break;
+         }
+      }
+   }
+
+   return NULL;
+}
+
+vlog_node_t vlog_symtab_design_unit(vlog_symtab_t *st)
+{
+   for (vlog_scope_t *s = st->top; s != NULL; s = s->parent) {
+      if (s->container != NULL) {
+         switch (vlog_kind(s->container)) {
+         case V_MODULE:
+         case V_PACKAGE:
+         case V_PROGRAM:
+            return s->container;
+         default:
+            break;
+         }
+      }
+   }
+
+   return NULL;
+}
+
+vlog_node_t vlog_symtab_class(vlog_symtab_t *st)
+{
+   for (vlog_scope_t *s = st->top; s != NULL; s = s->parent) {
+      if (s->container != NULL && vlog_kind(s->container) == V_CLASS_DECL)
+         return s->container;
+   }
+
+   return NULL;
+}
+
 vlog_node_t vlog_symtab_subr(vlog_symtab_t *st)
 {
    for (vlog_scope_t *s = st->top; s != NULL; s = s->parent) {
@@ -452,6 +785,7 @@ vlog_node_t vlog_symtab_subr(vlog_symtab_t *st)
          switch (vlog_kind(s->container)) {
          case V_FUNC_DECL:
          case V_TASK_DECL:
+         case V_CONSTRUCTOR:
             return s->container;
          default:
             break;
@@ -473,6 +807,59 @@ ident_t vlog_symtab_qualified(vlog_symtab_t *st)
    return qual;
 }
 
+ident_t vlog_symtab_hier_suffix(vlog_symtab_t *st, hier_owner_t *owner,
+                                vlog_node_t *pkg)
+{
+   // Names of the subprograms, classes, and blocks within the enclosing
+   // module instance, package, or compilation unit
+
+   ident_t suffix = NULL;
+   *owner = HIER_UNIT;
+   *pkg = NULL;
+
+   for (vlog_scope_t *s = st->top; s != NULL; s = s->parent) {
+      vlog_node_t c = s->container;
+      if (c == NULL)
+         continue;
+
+      switch (vlog_kind(c)) {
+      case V_MODULE:
+      case V_PROGRAM:
+         *owner = HIER_INSTANCE;
+         return suffix;
+      case V_PACKAGE:
+         *owner = HIER_PACKAGE;
+         *pkg = c;
+         return suffix;
+      case V_FUNC_DECL:
+      case V_TASK_DECL:
+      case V_SEQ_BLOCK:
+      case V_FORK:
+      case V_CLASS_DECL:
+         if (vlog_has_ident(c))
+            suffix = ident_prefix(vlog_ident(c), suffix, '.');
+         break;
+      default:
+         break;
+      }
+   }
+
+   return suffix;
+}
+
+static void put_imported(vlog_symtab_t *st, vlog_node_t d)
+{
+   // Names with the same name from different wildcard imports are only an
+   // error if one is used which is not checked
+
+   vlog_symbol_t *sym = fresh_symbol_for(st, vlog_ident(d));
+   if (sym->node != NULL)
+      return;
+
+   sym->node = d;
+   sym->imported = true;
+}
+
 void vlog_symtab_import(vlog_symtab_t *st, vlog_node_t v)
 {
    assert(vlog_kind(v) == V_IMPORT_DECL);
@@ -484,13 +871,5 @@ void vlog_symtab_import(vlog_symtab_t *st, vlog_node_t v)
    if (vlog_has_ident(v))
       match = vlog_ident(v);
 
-   vlog_node_t pack = vlog_ref(v);
-   assert(vlog_kind(pack) == V_PACKAGE);
-
-   const int ndecls = vlog_decls(pack);
-   for (int i = 0; i < ndecls; i++) {
-      vlog_node_t d = vlog_decl(pack, i);
-      if (match == NULL || vlog_ident(d) == match)
-         vlog_symtab_put(st, d);
-   }
+   import_package(st, vlog_ref(v), match);
 }

@@ -1325,7 +1325,8 @@ START_TEST(test_class1)
       { 12, "'foo_t' does not match class name 'bar_t'" },
       { 18, "new class expression must have class type" },
       { 20, "class 'foo_t' has no field named 'c'" },
-      { 23, "'bob' does not match program name 'main'" },
+      { 21, "new can only be used as the value of an assignment" },
+      { 24, "'bob' does not match program name 'main'" },
       { -1, NULL }
    };
    expect_errors(expect);

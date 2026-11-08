@@ -25,6 +25,7 @@
 #include "vlog/vlog-util.h"
 
 #include <assert.h>
+#include <ctype.h>
 #include <inttypes.h>
 #include <string.h>
 #include <stdlib.h>
@@ -32,7 +33,8 @@
 static vlog_node_t simp_net_decl(vlog_node_t decl, vlog_node_t mod)
 {
    const vlog_net_kind_t kind = vlog_subkind(decl);
-   if (kind == V_NET_SUPPLY0 || kind == V_NET_SUPPLY1) {
+   if (kind == V_NET_SUPPLY0 || kind == V_NET_SUPPLY1 || kind == V_NET_TRI0
+       || kind == V_NET_TRI1) {
       vlog_node_t g = vlog_new(V_GATE_INST);
       vlog_set_loc(g, vlog_loc(decl));
 
@@ -41,11 +43,12 @@ static vlog_node_t simp_net_decl(vlog_node_t decl, vlog_node_t mod)
       vlog_set_ident(g, id);
 
       vlog_node_t s = vlog_new(V_STRENGTH);
-      vlog_set_subkind(s, ST_SUPPLY);
+      vlog_set_subkind(s, kind == V_NET_TRI0 || kind == V_NET_TRI1
+                       ? ST_PULLUP : ST_SUPPLY);
 
       vlog_add_param(g, s);
 
-      if (kind == V_NET_SUPPLY0)
+      if (kind == V_NET_SUPPLY0 || kind == V_NET_TRI0)
          vlog_set_subkind(g, V_GATE_PULLDOWN);
       else
          vlog_set_subkind(g, V_GATE_PULLUP);
@@ -80,6 +83,10 @@ static vlog_node_t simp_port_decl(vlog_node_t v, vlog_node_t mod)
    vlog_set_ident(decl, vlog_ident(v));
    vlog_set_type(decl, vlog_type(v));
 
+   const int nranges = vlog_ranges(v);
+   for (int i = 0; i < nranges; i++)
+      vlog_add_range(decl, vlog_range(v, i));
+
    if (vlog_has_value(v))
       vlog_set_value(decl, vlog_value(v));
 
@@ -95,7 +102,9 @@ static void build_sensitivity(vlog_node_t ctrl, vlog_node_t v, hset_t *set,
    switch (vlog_kind(v)) {
    case V_NBASSIGN:
    case V_BASSIGN:
+   case V_FORCE:
    case V_UNARY:
+   case V_CAST:
    case V_OP_ASSIGN:
       build_sensitivity(ctrl, vlog_value(v), set, is_comb);
       break;
@@ -127,6 +136,21 @@ static void build_sensitivity(vlog_node_t ctrl, vlog_node_t v, hset_t *set,
             vlog_set_loc(e, vlog_loc(ctrl));
 
             vlog_add_param(ctrl, e);
+
+            // The indices of a hierarchical name are also read
+            if (vlog_kind(v) == V_HIER_REF) {
+               for (vlog_node_t it = vlog_value(v); ; it = vlog_value(it)) {
+                  if (vlog_kind(it) != V_MOD_REF)
+                     break;
+
+                  const int nparams = vlog_params(it);
+                  for (int i = 0; i < nparams; i++)
+                     build_sensitivity(ctrl, vlog_param(it, i), set, is_comb);
+
+                  if (!vlog_has_value(it))
+                     break;
+               }
+            }
         }
         else {
             build_sensitivity(ctrl, vlog_value(v), set, is_comb);
@@ -154,6 +178,11 @@ static void build_sensitivity(vlog_node_t ctrl, vlog_node_t v, hset_t *set,
    case V_NUMBER:
    case V_STRING:
       break;
+   case V_ASSERT:
+   case V_ASSUME:
+   case V_COVER:
+      build_sensitivity(ctrl, vlog_value(v), set, is_comb);
+      // Fall-through
    case V_IF:
       {
          const int nconds = vlog_conds(v);
@@ -208,9 +237,13 @@ static void build_sensitivity(vlog_node_t ctrl, vlog_node_t v, hset_t *set,
       if (is_comb)
          build_sensitivity(ctrl, vlog_ref(v), set, is_comb);
       // Fall-through
+   case V_SYS_TCALL:
+      if (vlog_ident(v) == ident_new("$__defer"))
+         break;   // The variable it changes is not read
+      // Fall-through
    case V_CONCAT:
    case V_SYS_FCALL:
-   case V_SYS_TCALL:
+   case V_METHOD_CALL:
       {
          const int nparams = vlog_params(v);
          for (int i = 0; i < nparams; i++)
@@ -246,7 +279,8 @@ static void build_sensitivity(vlog_node_t ctrl, vlog_node_t v, hset_t *set,
       build_sensitivity(ctrl, vlog_target(v), set, is_comb);
       break;
    default:
-      fatal_at(vlog_loc(v), "cannot handle %s in build_sensitivity",
+      fatal_at(vlog_loc(v), "sorry, %s in an expression or procedure with an "
+               "implicit sensitivity list is not supported",
                vlog_kind_str(vlog_kind(v)));
    }
 }
@@ -379,8 +413,6 @@ static vlog_node_t simp_call_args(vlog_node_t v)
          if (vlog_kind(p) == V_EMPTY)
             vlog_set_param(v, i, vlog_value(vlog_port(sub, i)));
       }
-      else
-         vlog_add_param(v, vlog_value(vlog_port(sub, i)));
    }
 
    return v;
@@ -390,21 +422,53 @@ static vlog_node_t simp_wait(vlog_node_t v)
 {
    vlog_node_t expr = vlog_value(v);
 
-   vlog_node_t not = vlog_new(V_UNARY);
-   vlog_set_loc(not, vlog_loc(expr));
-   vlog_set_subkind(not, V_UNARY_NOT);
-   vlog_set_value(not, expr);
+   vlog_node_t type = vlog_get_type(expr), cond;
+   if (type == NULL ? !vlog_is_real(expr)
+       : vlog_kind(type) == V_DATA_TYPE && vlog_subkind(type) != DT_REAL
+       && vlog_subkind(type) != DT_SHORTREAL
+       && vlog_subkind(type) != DT_REALTIME) {
+      // The condition is true only if some bit is known to be one
+      vlog_node_t any = vlog_new(V_UNARY);
+      vlog_set_loc(any, vlog_loc(expr));
+      vlog_set_subkind(any, V_UNARY_OR);
+      vlog_set_value(any, expr);
+
+      vlog_node_t one = vlog_new(V_NUMBER);
+      vlog_set_loc(one, vlog_loc(expr));
+      vlog_set_number(one, number_from_int(1));
+
+      cond = vlog_new(V_BINARY);
+      vlog_set_loc(cond, vlog_loc(expr));
+      vlog_set_subkind(cond, V_BINARY_CASE_NEQ);
+      vlog_set_left(cond, any);
+      vlog_set_right(cond, one);
+   }
+   else {
+      cond = vlog_new(V_UNARY);
+      vlog_set_loc(cond, vlog_loc(expr));
+      vlog_set_subkind(cond, V_UNARY_NOT);
+      vlog_set_value(cond, expr);
+   }
 
    vlog_node_t wh = vlog_new(V_WHILE);
    vlog_set_loc(wh, vlog_loc(v));
-   vlog_set_value(wh, not);
+   vlog_set_value(wh, cond);
 
    vlog_node_t ctrl = vlog_new(V_EVENT_CONTROL);
    vlog_set_loc(ctrl, vlog_loc(v));
 
-   hset_t *set = hset_new(16);
-   build_sensitivity(ctrl, expr, set, false);
-   hset_free(set);
+   if (vlog_needs_polling(expr)) {
+      vlog_node_t e = vlog_new(V_EVENT);
+      vlog_set_subkind(e, V_EVENT_LEVEL);
+      vlog_set_value(e, expr);
+      vlog_set_loc(e, vlog_loc(expr));
+      vlog_add_param(ctrl, e);
+   }
+   else {
+      hset_t *set = hset_new(16);
+      build_sensitivity(ctrl, expr, set, false);
+      hset_free(set);
+   }
 
    vlog_node_t timing = vlog_new(V_TIMING);
    vlog_set_loc(timing, vlog_loc(v));
@@ -423,6 +487,123 @@ static vlog_node_t simp_wait(vlog_node_t v)
       vlog_add_stmt(block, vlog_stmt(v, i));
 
    return block;
+}
+
+static bool format_is_scalar(vlog_node_t arg)
+{
+   switch (vlog_kind(arg)) {
+   case V_REF:
+   case V_MEMBER_REF:
+   case V_HIER_REF:
+      {
+         if (!vlog_has_ref(arg))
+            return true;
+
+         vlog_node_t decl = vlog_ref(arg);
+         switch (vlog_kind(decl)) {
+         case V_VAR_DECL:
+         case V_NET_DECL:
+         case V_PORT_DECL:
+         case V_TF_PORT_DECL:
+         case V_LOCAL_DECL:
+         case V_PARAM_DECL:
+         case V_LOCALPARAM:
+            return vlog_ranges(decl) == 0;
+         default:
+            return true;
+         }
+      }
+   default:
+      return true;
+   }
+}
+
+static vlog_node_t format_enum_name(vlog_node_t v, vlog_node_t value)
+{
+   // The name of an enumeration value or its number if there is none
+
+   vlog_node_t call = vlog_new(V_METHOD_CALL);
+   vlog_set_loc(call, vlog_loc(value));
+   vlog_set_value(call, value);
+   vlog_set_ident(call, ident_new("name"));
+   vlog_resolve_method(call);
+
+   vlog_node_t fmt = vlog_new(V_STRING);
+   vlog_set_loc(fmt, vlog_loc(value));
+   vlog_set_number(fmt, number_from_string("%0d", 3));
+
+   vlog_node_t number = vlog_new(V_SYS_FCALL);
+   vlog_set_ident(number, ident_new("$sformatf"));
+   vlog_set_subkind(number, V_SYSTF_NONE);
+   vlog_set_ival(number, vlog_ival(v));
+   vlog_set_loc(number, vlog_loc(value));
+   vlog_add_param(number, fmt);
+   vlog_add_param(number, value);
+
+   vlog_add_param(call, number);
+   return call;
+}
+
+typedef struct {
+   text_buf_t  *tb;
+   vlog_node_t *args;
+   int          nargs;
+   int          maxargs;
+   bool         plain;   // The conversion is %0p
+   int          depth;
+} pfmt_t;
+
+static void pfmt_leaf(pfmt_t *c, vlog_node_t e, vlog_node_t type);
+static vlog_node_t simp_format_p(vlog_node_t v);
+
+static void pfmt_push(pfmt_t *c, vlog_node_t e)
+{
+   if (c->nargs == c->maxargs) {
+      c->maxargs = MAX(16, c->maxargs * 2);
+      c->args = xrealloc_array(c->args, c->maxargs, sizeof(vlog_node_t));
+   }
+
+   c->args[c->nargs++] = e;
+}
+
+static vlog_node_t pfmt_number(int64_t value, const loc_t *loc)
+{
+   vlog_node_t n = vlog_new(V_NUMBER);
+   vlog_set_number(n, number_from_int(value));
+   vlog_set_loc(n, loc);
+   return n;
+}
+
+static vlog_node_t pfmt_string(const char *text, const loc_t *loc)
+{
+   vlog_node_t str = vlog_new(V_STRING);
+   vlog_set_loc(str, loc);
+   vlog_set_number(str, number_from_string(text, strlen(text)));
+   return str;
+}
+
+static bool format_is_handle(vlog_node_t arg)
+{
+   if (vlog_kind(arg) == V_NULL)
+      return false;
+
+   vlog_node_t type = vlog_get_type(arg);
+   return type != NULL && vlog_kind(type) == V_CLASS_DECL
+      && !(vlog_flags(type) & VLOG_F_INTERFACE);
+}
+
+static void format_handle_warning(vlog_node_t arg, char spec)
+{
+   // A class handle is not an integral value (8.4) so only %p is
+   // defined for it
+
+   diag_t *d = diag_new(DIAG_WARN, vlog_loc(arg));
+   if (spec == 0)
+      diag_printf(d, "class handle printed as an integer");
+   else
+      diag_printf(d, "class handle printed with %%%c", spec);
+   diag_hint(d, vlog_loc(arg), "use %%p to print the object");
+   diag_emit(d);
 }
 
 static vlog_node_t vlog_simp_cb(vlog_node_t v, void *context)

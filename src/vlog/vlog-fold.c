@@ -16,6 +16,7 @@
 //
 
 #include "util.h"
+#include "array.h"
 #include "diag.h"
 #include "hash.h"
 #include "ident.h"
@@ -33,13 +34,20 @@
 #include <stdlib.h>
 
 typedef struct {
-   mir_context_t *mir;
-   jit_t         *jit;
-   vlog_node_t    func;
-   vlog_node_t    nonconst;
-   hset_t        *funcdeps;
-   unsigned       later;
-   bool           retry;
+   vlog_node_t func;
+   unsigned    later;
+} fold_saved_t;
+
+typedef struct {
+   mir_context_t  *mir;
+   jit_t          *jit;
+   vlog_node_t     func;
+   vlog_node_t     nonconst;
+   hset_t         *funcdeps;
+   unsigned        later;
+   bool            retry;
+   unsigned        gen_depth;
+   A(fold_saved_t) stack;
 } fold_ctx_t;
 
 typedef enum {
@@ -49,12 +57,36 @@ typedef enum {
    FOLD_NON_CONST,
 } fold_state_t;
 
+static bool is_array_query(vlog_node_t v)
+{
+   if (vlog_params(v) < 1)
+      return false;
+   else if (vlog_subkind(v) == V_SYSTF_BITS)
+      return true;
+   else if (vlog_subkind(v) != V_SYSTF_NONE)
+      return false;
+
+   static const char *const names[] = {
+      "$size", "$left", "$right", "$low", "$high", "$increment",
+      "$dimensions", "$unpacked_dimensions",
+   };
+
+   ident_t id = vlog_ident(v);
+   for (int i = 0; i < ARRAY_LEN(names); i++) {
+      if (id == ident_new(names[i]))
+         return true;
+   }
+
+   return false;
+}
+
 static fold_state_t get_fold_state(vlog_node_t v, fold_ctx_t *ctx)
 {
    switch (vlog_kind(v)) {
    case V_REAL:
    case V_STRING:
    case V_NUMBER:
+   case V_DOLLAR:
       return FOLD_CONST;
    case V_REF:
       {
@@ -83,6 +115,20 @@ static fold_state_t get_fold_state(vlog_node_t v, fold_ctx_t *ctx)
 
          return state == FOLD_CONST ? FOLD_POSSIBLE : state;
       }
+   case V_HIER_REF:
+      // A parameter of another instance is known after elaboration
+      if (vlog_has_ref(v)) {
+         ctx->nonconst = vlog_ref(v);
+         return FOLD_NON_CONST;
+      }
+
+      ctx->later++;
+      return FOLD_LATER;
+   case V_MEMBER_REF:
+      {
+         fold_state_t state = get_fold_state(vlog_value(v), ctx);
+         return state == FOLD_CONST ? FOLD_POSSIBLE : state;
+      }
    case V_PART_SELECT:
       {
          fold_state_t value = get_fold_state(vlog_value(v), ctx);
@@ -102,6 +148,14 @@ static fold_state_t get_fold_state(vlog_node_t v, fold_ctx_t *ctx)
    case V_MIN_TYP_MAX:
       {
          fold_state_t state = get_fold_state(vlog_value(v), ctx);
+         return state == FOLD_CONST ? FOLD_POSSIBLE : state;
+      }
+   case V_CAST:
+      {
+         fold_state_t state = get_fold_state(vlog_value(v), ctx);
+         if (vlog_subkind(v) != V_CAST_TYPE
+             && vlog_subkind(v) != V_CAST_TYPEREF)
+            state = MAX(state, get_fold_state(vlog_left(v), ctx));
          return state == FOLD_CONST ? FOLD_POSSIBLE : state;
       }
    case V_USER_FCALL:
@@ -127,8 +181,24 @@ static fold_state_t get_fold_state(vlog_node_t v, fold_ctx_t *ctx)
       }
    case V_SYS_FCALL:
       {
+         if (is_array_query(v)) {
+            // The dimensions of a variable do not depend on its value
+            if (vlog_has_static_shape(vlog_param(v, 0)))
+               return FOLD_POSSIBLE;
+
+            ctx->nonconst = v;
+            return FOLD_NON_CONST;
+         }
+
          // See 1800-2023 section 11.2.1 for list of constant system functions
+         // and 20.6.3 for $isunbounded
          switch (vlog_subkind(v)) {
+         case V_SYSTF_NONE:
+            if (vlog_ident(v) != ident_new("$isunbounded")) {
+               ctx->nonconst = v;
+               return FOLD_NON_CONST;
+            }
+            break;
          case V_SYSTF_CLOG2:
          case V_SYSTF_SIGNED:
          case V_SYSTF_UNSIGNED:
@@ -136,6 +206,7 @@ static fold_state_t get_fold_state(vlog_node_t v, fold_ctx_t *ctx)
          case V_SYSTF_SQRT:
          case V_SYSTF_CEIL:
          case V_SYSTF_FLOOR:
+         case V_SYSTF_MATH:
             break;
          default:
             ctx->nonconst = v;
@@ -156,6 +227,24 @@ static fold_state_t get_fold_state(vlog_node_t v, fold_ctx_t *ctx)
          fold_state_t right = get_fold_state(vlog_right(v), ctx);
          fold_state_t state = MAX(value, MAX(left, right));
          return state == FOLD_CONST ? FOLD_POSSIBLE : state;
+      }
+   case V_PATTERN_EXPR:
+      {
+         fold_state_t state = FOLD_CONST;
+         const int nparams = vlog_params(v);
+         for (int i = 0; i < nparams; i++) {
+            vlog_node_t item = vlog_param(v, i);
+            if (vlog_has_left(item)) {
+               // The key of a structure pattern is a member
+               vlog_node_t key = vlog_left(item);
+               if (vlog_kind(key) != V_REF || !vlog_has_ref(key)
+                   || vlog_kind(vlog_ref(key)) != V_VAR_DECL)
+                  state = MAX(state, get_fold_state(key, ctx));
+            }
+            state = MAX(state, get_fold_state(vlog_right(item), ctx));
+         }
+
+         return state;
       }
    case V_CONCAT:
       {
@@ -304,7 +393,8 @@ static vlog_node_t fold_localparam(vlog_node_t v, fold_ctx_t *ctx)
    }
 
    vlog_node_t vtype = vlog_type(v);
-   if (!is_implicit_data_type(vtype) || vlog_ranges(vtype) > 0)
+   if (!is_implicit_data_type(vtype) || vlog_ranges(vtype) > 0
+       || vlog_kind(value) == V_DOLLAR)
       return v;
 
    vlog_node_t dt = vlog_new(V_DATA_TYPE);
@@ -365,6 +455,27 @@ static vlog_node_t fold_dimension(vlog_node_t v, fold_ctx_t *ctx)
    return v;
 }
 
+static vlog_node_t fold_sva_op(vlog_node_t v, fold_ctx_t *ctx)
+{
+   if (!vlog_has_left(v))
+      return v;
+
+   // The bound may be a formal argument of a sequence or property
+   if (get_fold_state(vlog_left(v), ctx) == FOLD_NON_CONST
+       || get_fold_state(vlog_right(v), ctx) == FOLD_NON_CONST)
+      return v;
+
+   vlog_node_t left = fold_const_expr(vlog_left(v), ctx);
+   if (left != NULL)
+      vlog_set_left(v, left);
+
+   vlog_node_t right = fold_const_expr(vlog_right(v), ctx);
+   if (right != NULL)
+      vlog_set_right(v, right);
+
+   return v;
+}
+
 static vlog_node_t fold_param_decl(vlog_node_t v, fold_ctx_t *ctx)
 {
    if (vlog_has_value(v)) {
@@ -407,6 +518,21 @@ static vlog_node_t fold_enum_decl(vlog_node_t v, fold_ctx_t *ctx)
 
 static vlog_node_t fold_part_select(vlog_node_t v, fold_ctx_t *ctx)
 {
+   vlog_node_t type = vlog_get_type(vlog_value(v));
+   if (type != NULL && vlog_kind(type) == V_DATA_TYPE
+       && vlog_subkind(type) == DT_QUEUE)
+      return v;   // Queue slice bounds are evaluated at run time
+
+   if (type != NULL && vlog_kind(type) == V_DATA_TYPE
+       && vlog_subkind(type) == DT_DYNARRAY) {
+      // The slice of a streamed dynamic array need not be constant
+      fold_state_t state = get_fold_state(vlog_right(v), ctx);
+      if (vlog_subkind(v) == V_RANGE_CONST)
+         state = MAX(state, get_fold_state(vlog_left(v), ctx));
+      if (state >= FOLD_LATER)
+         return v;
+   }
+
    if (vlog_subkind(v) == V_RANGE_CONST) {
       vlog_node_t left = fold_const_expr(vlog_left(v), ctx);
       if (left != NULL)
@@ -417,12 +543,20 @@ static vlog_node_t fold_part_select(vlog_node_t v, fold_ctx_t *ctx)
    if (right != NULL)
       vlog_set_right(v, right);
 
+   // A generate block which is not selected may use values for which the
+   // width is not valid
+   int64_t width;
+   if (vlog_subkind(v) != V_RANGE_CONST && ctx->gen_depth == 0
+       && vlog_get_const(vlog_right(v), &width) && width <= 0)
+      error_at(vlog_loc(vlog_right(v)), "width of an indexed part-select must "
+               "be positive");
+
    return v;
 }
 
 static vlog_node_t fold_const_value(vlog_node_t v, fold_ctx_t *ctx)
 {
-   if (vlog_has_value(v)) {
+   if (vlog_has_value(v) && !is_data_type(vlog_value(v))) {
       vlog_node_t value = fold_const_expr(vlog_value(v), ctx);
       if (value != NULL)
          vlog_set_value(v, value);
@@ -433,7 +567,8 @@ static vlog_node_t fold_const_value(vlog_node_t v, fold_ctx_t *ctx)
 
 static vlog_node_t fold_cast(vlog_node_t v, fold_ctx_t *ctx)
 {
-   assert(vlog_subkind(v) == V_CAST_WIDTH);
+   if (vlog_subkind(v) != V_CAST_WIDTH)
+      return v;
 
    vlog_node_t width = fold_const_expr(vlog_left(v), ctx);
    if (width != NULL)
@@ -468,12 +603,20 @@ static vlog_node_t fold_if_generate(vlog_node_t v, fold_ctx_t *ctx)
 static vlog_node_t fold_func_decl(vlog_node_t v, fold_ctx_t *ctx)
 {
    assert(ctx->func == v);
-   ctx->func = NULL;
 
    if (ctx->later == 0) {
       vlog_set_flags(v, VLOG_F_FOLDED);
       ctx->retry |= hset_contains(ctx->funcdeps, v);
    }
+
+   // Back to any function which this was first reached from
+   if (ctx->stack.count > 0) {
+      const fold_saved_t saved = APOP(ctx->stack);
+      ctx->func = saved.func;
+      ctx->later = saved.later;
+   }
+   else
+      ctx->func = NULL;
 
    return v;
 }
@@ -489,11 +632,97 @@ static vlog_node_t fold_ref(vlog_node_t v, fold_ctx_t *ctx)
    return v;
 }
 
+static vlog_node_t fixed_real_array(vlog_node_t v, int64_t *left,
+                                    int64_t *right)
+{
+   // A variable which is a one dimensional unpacked array of reals
+
+   if (vlog_kind(v) != V_REF || !vlog_has_ref(v))
+      return NULL;
+
+   vlog_node_t decl = vlog_ref(v);
+   if (vlog_kind(decl) != V_VAR_DECL || vlog_ranges(decl) != 1)
+      return NULL;
+
+   vlog_node_t type = vlog_get_type(decl);
+   if (type == NULL || vlog_kind(type) != V_DATA_TYPE
+       || (vlog_subkind(type) != DT_REAL && vlog_subkind(type) != DT_SHORTREAL
+           && vlog_subkind(type) != DT_REALTIME))
+      return NULL;
+
+   return vlog_bounds(vlog_range(decl, 0), left, right) ? decl : NULL;
+}
+
+static vlog_node_t array_element(vlog_node_t ref, int64_t index)
+{
+   vlog_node_t sel = vlog_new(V_BIT_SELECT);
+   vlog_set_value(sel, ref);
+   vlog_set_loc(sel, vlog_loc(ref));
+
+   vlog_node_t num = vlog_new(V_NUMBER);
+   vlog_set_number(num, number_from_int(index));
+   vlog_set_loc(num, vlog_loc(ref));
+   vlog_add_param(sel, num);
+   return sel;
+}
+
+static vlog_node_t fold_binary(vlog_node_t v)
+{
+   // Fixed size arrays of reals are equal if every element is equal
+
+   const vlog_binary_t op = vlog_subkind(v);
+   if (op != V_BINARY_LOG_EQ && op != V_BINARY_LOG_NEQ
+       && op != V_BINARY_CASE_EQ && op != V_BINARY_CASE_NEQ)
+      return v;
+
+   int64_t ll, lr, rl, rr;
+   if (fixed_real_array(vlog_left(v), &ll, &lr) == NULL
+       || fixed_real_array(vlog_right(v), &rl, &rr) == NULL)
+      return v;
+
+   const bool ne = op == V_BINARY_LOG_NEQ || op == V_BINARY_CASE_NEQ;
+   const int64_t n = llabs(lr - ll) + 1;
+   if (n != llabs(rr - rl) + 1)
+      return v;
+
+   vlog_node_t chain = NULL;
+   for (int64_t i = 0; i < n; i++) {
+      vlog_node_t cmp = vlog_new(V_BINARY);
+      vlog_set_subkind(cmp, ne ? V_BINARY_LOG_NEQ : V_BINARY_LOG_EQ);
+      vlog_set_loc(cmp, vlog_loc(v));
+      vlog_set_left(cmp, array_element(vlog_left(v),
+                                       ll + (lr >= ll ? i : -i)));
+      vlog_set_right(cmp, array_element(vlog_right(v),
+                                        rl + (rr >= rl ? i : -i)));
+
+      if (chain == NULL)
+         chain = cmp;
+      else {
+         vlog_node_t join = vlog_new(V_BINARY);
+         vlog_set_subkind(join, ne ? V_BINARY_LOG_OR : V_BINARY_LOG_AND);
+         vlog_set_loc(join, vlog_loc(v));
+         vlog_set_left(join, chain);
+         vlog_set_right(join, cmp);
+         chain = join;
+      }
+   }
+
+   return chain;
+}
+
 static void vlog_fold_pre_cb(vlog_node_t v, void *context)
 {
    fold_ctx_t *ctx = context;
 
+   if (vlog_kind(v) == V_GEN_BLOCK)
+      ctx->gen_depth++;
+
    if (vlog_kind(v) == V_FUNC_DECL) {
+      if (ctx->func != NULL) {
+         const fold_saved_t saved = { ctx->func, ctx->later };
+         APUSH(ctx->stack, saved);
+      }
+
       ctx->func = v;
       ctx->later = 0;
    }
@@ -501,7 +730,13 @@ static void vlog_fold_pre_cb(vlog_node_t v, void *context)
 
 static vlog_node_t vlog_fold_post_cb(vlog_node_t v, void *context)
 {
+   fold_ctx_t *fctx = context;
+   if (vlog_kind(v) == V_GEN_BLOCK && fctx->gen_depth > 0)
+      fctx->gen_depth--;
+
    switch (vlog_kind(v)) {
+   case V_BINARY:
+      return fold_binary(v);
    case V_LOCALPARAM:
       return fold_localparam(v, context);
    case V_PARAM_DECL:
@@ -510,9 +745,19 @@ static vlog_node_t vlog_fold_post_cb(vlog_node_t v, void *context)
       return fold_enum_decl(v, context);
    case V_DIMENSION:
       return fold_dimension(v, context);
+   case V_SVA_OP:
+      return fold_sva_op(v, context);
    case V_PART_SELECT:
       return fold_part_select(v, context);
    case V_CONCAT:
+      if (vlog_has_value(v)) {
+         // The number of repeats of a string does not have to be constant
+         for (int i = 0; i < vlog_params(v); i++) {
+            if (vlog_kind(vlog_param(v, i)) == V_STRING)
+               return v;
+         }
+      }
+      // Fall-through
    case V_PARAM_ASSIGN:
    case V_ENUM_NAME:
    case V_DEFPARAM:
@@ -527,6 +772,49 @@ static vlog_node_t vlog_fold_post_cb(vlog_node_t v, void *context)
       return fold_ref(v, context);
    default:
       return v;
+   }
+}
+
+static void fold_check_port_ranges(vlog_node_t mod)
+{
+   // The consistency check in the semantic pass cannot evaluate calls to
+   // constant functions so compare the ranges again now they are folded
+
+   const int nports = vlog_ports(mod);
+   for (int i = 0; i < nports; i++) {
+      vlog_node_t p = vlog_port(mod, i);
+      if (vlog_kind(p) == V_REF && vlog_has_ref(p))
+         p = vlog_ref(p);   // Non-ANSI port list
+
+      if (vlog_kind(p) != V_PORT_DECL || !vlog_has_ref(p))
+         continue;
+
+      vlog_node_t ref = vlog_ref(p);
+      vlog_node_t pt = vlog_type(p), rt = vlog_type(ref);
+      if (pt == rt || vlog_ranges(pt) != vlog_ranges(rt))
+         continue;
+
+      for (int j = 0; j < vlog_ranges(pt); j++) {
+         vlog_node_t pr = vlog_range(pt, j), rr = vlog_range(rt, j);
+         if (vlog_subkind(pr) == V_DIM_UNSIZED
+             || vlog_subkind(rr) == V_DIM_UNSIZED)
+            continue;
+
+         int64_t pl, pright, rl, rright;
+         if (!vlog_get_const(vlog_left(pr), &pl)
+             || !vlog_get_const(vlog_right(pr), &pright)
+             || !vlog_get_const(vlog_left(rr), &rl)
+             || !vlog_get_const(vlog_right(rr), &rright))
+            continue;
+
+         if (pl != rl || pright != rright) {
+            diag_t *d = diag_new(DIAG_ERROR, vlog_loc(rr));
+            diag_printf(d, "inconsistent dimensions for '%s'",
+                        istr(vlog_ident(ref)));
+            diag_hint(d, vlog_loc(p), "earlier declaration here");
+            diag_emit(d);
+         }
+      }
    }
 }
 
@@ -547,4 +835,10 @@ void vlog_fold(vlog_node_t mod, mir_context_t *mc, jit_t *j)
       vlog_rewrite(mod, vlog_fold_pre_cb, vlog_fold_post_cb, &ctx);
       hset_free(ctx.funcdeps);
    } while (ctx.retry && error_count() == base_errors);
+
+   ACLEAR(ctx.stack);
+
+   if ((vlog_kind(mod) == V_MODULE || vlog_kind(mod) == V_INST_BODY)
+       && error_count() == base_errors)
+      fold_check_port_ranges(mod);
 }

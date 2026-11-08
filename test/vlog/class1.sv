@@ -18,6 +18,7 @@ program main;
     x = new;         // Error
     obj.a = x;       // OK
     obj.c = 5;       // Error
+    $display(new);   // Error
   end
 
 endprogram : bob

@@ -16,8 +16,10 @@
 //
 
 #include "util.h"
+#include "object.h"
 #include "diag.h"
 #include "hash.h"
+#include "lib.h"
 #include "ident.h"
 #include "vlog/vlog-node.h"
 #include "vlog/vlog-number.h"
@@ -25,6 +27,9 @@
 #include "vlog/vlog-util.h"
 
 #include <assert.h>
+#include <stdlib.h>
+#include <string.h>
+#include <inttypes.h>
 
 static vlog_node_t bind_parameter(vlog_node_t decl, int nth, vlog_node_t inst)
 {
@@ -77,6 +82,35 @@ static vlog_node_t bind_parameter(vlog_node_t decl, int nth, vlog_node_t inst)
    return local;
 }
 
+// Nodes inside classes shared by all instances: copying one of these
+// would copy the whole method and leave references to the original
+static hset_t *shared_nodes = NULL;
+
+static void collect_shared_cb(vlog_node_t v, void *ctx)
+{
+   hset_insert(shared_nodes, v);
+}
+
+static void collect_shared_class_cb(vlog_node_t v, void *ctx)
+{
+   if (vlog_kind(v) == V_CLASS_DECL && (vlog_flags(v) & VLOG_F_GLOBAL))
+      vlog_visit(v, collect_shared_cb, NULL);
+}
+
+// Nodes inside the generate block being instantiated: a reference to an
+// instance elsewhere in the module has already been copied with it
+static hset_t *copy_scope = NULL;
+
+static void collect_scope_cb(vlog_node_t v, void *ctx)
+{
+   hset_insert(copy_scope, v);
+}
+
+static bool is_shared(vlog_node_t v)
+{
+   return shared_nodes != NULL && hset_contains(shared_nodes, v);
+}
+
 static bool copy_instance_pred(vlog_node_t v, void *ctx)
 {
    switch (vlog_kind(v)) {
@@ -89,23 +123,90 @@ static bool copy_instance_pred(vlog_node_t v, void *ctx)
          return false;
       }
    case V_MOD_REF:
+      return copy_scope == NULL || hset_contains(copy_scope, v);
+   case V_TYPE_DECL:
+      return !!(vlog_flags(v) & VLOG_F_TYPEPARAM);
+   case V_SYS_TCALL:
+   case V_SYS_FCALL:
+      return vlog_design_precision() >= 0 && !is_shared(v);
+   case V_NUMBER:
+      return !!(vlog_flags(v) & (VLOG_F_TIMELIT | VLOG_F_ONESTEP))
+         && !is_shared(v);
    case V_FUNC_DECL:
    case V_TASK_DECL:
    case V_CLASS_DECL:
-      return true;
+   case V_CONSTRUCTOR:
+      // Declarations outside of modules are shared by all instances
+      return !(vlog_flags(v) & VLOG_F_GLOBAL);
    default:
       return false;
    }
+}
+
+static void round_delay(vlog_node_t ctrl)
+{
+   // A time literal is rounded to the time precision of the module (5.8)
+   // but 1step is the smallest precision in the design (14.4)
+
+   vlog_node_t value = vlog_value(ctrl);
+   if (vlog_kind(value) != V_NUMBER
+       || !(vlog_flags(value) & (VLOG_F_TIMELIT | VLOG_F_ONESTEP)))
+      return;
+
+   const int64_t ival = vlog_time_resolve(vlog_ival(ctrl));
+   unsigned log10 = VLOG_TIME_LOG10(ival);
+   if (vlog_design_precision() >= 0 && (vlog_flags(value) & VLOG_F_ONESTEP))
+      log10 = MIN(log10, vlog_design_precision());
+
+   vlog_node_t new = vlog_new(V_NUMBER);
+   vlog_set_loc(new, vlog_loc(value));
+
+   int64_t fs = number_integer(vlog_number(value));
+   if (vlog_flags(value) & VLOG_F_ONESTEP)
+      fs = vlog_time_quantum(log10);
+   else
+      fs = vlog_round_time(fs, log10);
+
+   vlog_set_number(new, number_from_int(fs));
+
+   vlog_set_value(ctrl, new);
+   vlog_set_ival(ctrl, VLOG_TIME_ENCODE(1, VLOG_TIME_LOG10(ival)));
 }
 
 static vlog_node_t fixup_refs_cb(vlog_node_t v, void *ctx)
 {
    hash_t *map = ctx;
 
-   if (vlog_kind(v) == V_REF) {
-      vlog_node_t new = hash_get(map, vlog_ref(v));
-      if (new != NULL)
-         vlog_set_ref(v, new);
+   switch (vlog_kind(v)) {
+   case V_NUMBER:
+      if ((vlog_flags(v) & VLOG_F_TIMEEXPR) && !is_shared(v)) {
+         vlog_node_t new = vlog_new(V_NUMBER);
+         vlog_set_loc(new, vlog_loc(v));
+         vlog_set_number(new, number_from_int(
+                            vlog_time_literal(number_integer(vlog_number(v)))));
+         return new;
+      }
+      break;
+   case V_REF:
+      {
+         vlog_node_t new = hash_get(map, vlog_ref(v));
+         if (new != NULL)
+            vlog_set_ref(v, new);
+      }
+      break;
+   case V_SYS_TCALL:
+   case V_SYS_FCALL:
+      if (vlog_design_precision() >= 0 && !is_shared(v))
+         vlog_set_ival(v, VLOG_TIME_SET_DESIGN(
+                           vlog_time_resolve(vlog_ival(v)),
+                           vlog_design_precision()));
+      break;
+   case V_DELAY_CONTROL:
+      if (!is_shared(v))
+         round_delay(v);
+      break;
+   default:
+      break;
    }
 
    return v;
@@ -119,11 +220,164 @@ static void rename_tf_decls(vlog_node_t v, ident_t prefix)
       switch (vlog_kind(d)) {
       case V_FUNC_DECL:
       case V_TASK_DECL:
-      case V_CLASS_DECL:
+      case V_CONSTRUCTOR:
          vlog_set_ident2(d, prefix);
+         break;
+      case V_CLASS_DECL:
+         if (vlog_flags(d) & VLOG_F_GLOBAL)
+            break;   // Shared by all instances
+         vlog_set_ident2(d, prefix);
+         rename_tf_decls(d, ident_prefix(prefix, vlog_ident(d), '.'));
          break;
       default:
          break;
+      }
+   }
+}
+
+static A(vlog_node_t) bind_units = AINIT;
+
+static void load_bind_cb(lib_t lib, ident_t name, int kind, void *ctx)
+{
+   if (strstr(istr(name), ".BIND#") == NULL)
+      return;
+
+   object_t *obj = lib_get_generic(lib, name, NULL);
+   vlog_node_t b = obj != NULL ? vlog_from_object(obj) : NULL;
+   if (b != NULL && vlog_kind(b) == V_BIND)
+      APUSH(bind_units, b);
+}
+
+void vlog_load_binds(lib_t lib)
+{
+   ACLEAR(bind_units);
+   lib_walk_index(lib, load_bind_cb, NULL);
+}
+
+static bool copy_bind_pred(vlog_node_t v, void *ctx)
+{
+   switch (vlog_kind(v)) {
+   case V_REF:
+   case V_HIER_REF:
+   case V_MOD_REF:
+   case V_PORT_CONN:
+      return true;
+   default:
+      return false;
+   }
+}
+
+static vlog_node_t fix_bind_ref_cb(vlog_node_t v, void *ctx)
+{
+   vlog_node_t copy = ctx;
+
+   if (vlog_kind(v) == V_PORT_CONN && (vlog_flags(v) & VLOG_F_WILDCARD)) {
+      // Implicit connections are to the module the instance is bound to
+      vlog_set_ref(v, copy);
+      return v;
+   }
+
+   if (vlog_kind(v) != V_REF || !vlog_has_ident(v))
+      return v;
+
+   ident_t id = vlog_ident(v);
+
+   const int nports = vlog_ports(copy);
+   for (int i = 0; i < nports; i++) {
+      vlog_node_t p = vlog_port(copy, i);
+      if (vlog_kind(p) == V_PORT_DECL && vlog_ident(p) == id) {
+         vlog_set_ref(v, p);
+         return v;
+      }
+   }
+
+   const int ndecls = vlog_decls(copy);
+   for (int i = 0; i < ndecls; i++) {
+      vlog_node_t d = vlog_decl(copy, i);
+      switch (vlog_kind(d)) {
+      case V_PORT_DECL:
+      case V_VAR_DECL:
+      case V_NET_DECL:
+      case V_PARAM_DECL:
+      case V_LOCALPARAM:
+         if (vlog_ident(d) == id)
+            vlog_set_ref(v, d);
+         break;
+      default:
+         break;
+      }
+   }
+
+   return v;
+}
+
+bool vlog_bind_has_hier_ref(vlog_node_t mod)
+{
+   for (unsigned i = 0; i < bind_units.count; i++) {
+      vlog_node_t b = bind_units.items[i];
+      if (vlog_ident2(b) == vlog_ident(mod)
+          && (vlog_global_flags(b) & VLOG_GF_HIER_REF))
+         return true;
+   }
+
+   return false;
+}
+
+static ident_t inst_dotted = NULL;
+
+void vlog_set_instance_scope(ident_t dotted)
+{
+   inst_dotted = dotted;
+}
+
+bool vlog_bind_is_selective(vlog_node_t mod)
+{
+   for (unsigned i = 0; i < bind_units.count; i++) {
+      vlog_node_t b = bind_units.items[i];
+      if (vlog_ident2(b) == vlog_ident(mod) && vlog_params(b) > 0)
+         return true;
+   }
+
+   return false;
+}
+
+static bool bind_matches_instance(vlog_node_t b)
+{
+   const int nsel = vlog_params(b);
+   if (nsel == 0)
+      return true;
+
+   for (int i = 0; i < nsel; i++) {
+      number_t n = vlog_number(vlog_param(b, i));
+      const int len = number_width(n) / 8;
+      char *text LOCAL = xmalloc(len + 1);
+      for (int j = 0; j < len; j++)
+         text[j] = number_byte(n, len - 1 - j);
+      text[len] = '\0';
+
+      // The dotted name starts with the library
+      const char *path = inst_dotted != NULL ? strchr(istr(inst_dotted), '.')
+         : NULL;
+      if (path != NULL && strcmp(path + 1, text) == 0)
+         return true;
+   }
+
+   return false;
+}
+
+static void add_bound_instances(vlog_node_t v, vlog_node_t mod,
+                                vlog_node_t copy)
+{
+   for (unsigned i = 0; i < bind_units.count; i++) {
+      vlog_node_t b = bind_units.items[i];
+      if (vlog_ident2(b) != vlog_ident(mod) || !bind_matches_instance(b))
+         continue;
+
+      const int nstmts = vlog_stmts(b);
+      for (int j = 0; j < nstmts; j++) {
+         vlog_node_t c = vlog_copy(vlog_stmt(b, j), copy_bind_pred, NULL);
+         vlog_rewrite(c, NULL, fix_bind_ref_cb, copy);
+         vlog_add_stmt(v, c);
       }
    }
 }
@@ -139,9 +393,16 @@ vlog_node_t vlog_new_instance(vlog_node_t mod, vlog_node_t inst, ident_t id)
    case V_PRIMITIVE:
    case V_PROGRAM:
       vlog_set_ident2(v, vlog_ident2(mod));
+      vlog_set_ival(v, vlog_ival(mod));   // Time unit and precision
+      break;
+   case V_PRIMITIVE:
+      vlog_set_ident2(v, vlog_ident2(mod));
+      vlog_set_ival(v, VLOG_TIME_ENCODE(1, VLOG_TIME_UNSCALED));
       break;
    case V_GEN_BLOCK:
+      vlog_set_flags(v, VLOG_F_GEN_BODY);
       vlog_set_ident2(v, vlog_ident(mod));
+      vlog_set_ival(v, VLOG_TIME_ENCODE(1, VLOG_TIME_UNSCALED));
       break;
    default:
       should_not_reach_here();
@@ -153,6 +414,7 @@ vlog_node_t vlog_new_instance(vlog_node_t mod, vlog_node_t inst, ident_t id)
 
    switch (vlog_kind(mod)) {
    case V_MODULE:
+   case V_PROGRAM:
    case V_PRIMITIVE:
       {
          const int nports = vlog_ports(copy);
@@ -178,6 +440,14 @@ vlog_node_t vlog_new_instance(vlog_node_t mod, vlog_node_t inst, ident_t id)
             }
          }
          break;
+      case V_TYPE_DECL:
+         if (vlog_flags(d) & VLOG_F_TYPEPARAM) {
+            vlog_node_t value = bind_type_parameter(d, pidx++, inst);
+            if (value != NULL)
+               vlog_set_type(d, value);
+         }
+         vlog_add_decl(v, d);
+         break;
       default:
          vlog_add_decl(v, d);
          break;
@@ -196,11 +466,20 @@ vlog_node_t vlog_new_instance(vlog_node_t mod, vlog_node_t inst, ident_t id)
    for (int i = 0; i < nstmts; i++)
       vlog_add_stmt(v, vlog_stmt(copy, i));
 
+   if (vlog_kind(mod) == V_MODULE)
+      add_bound_instances(v, mod, copy);
+
    rename_tf_decls(v, id);
 
    vlog_rewrite(v, NULL, fixup_refs_cb, map);
 
    hash_free(map);
+   hset_free(shared_nodes);
+   shared_nodes = NULL;
+   if (copy_scope != NULL) {
+      hset_free(copy_scope);
+      copy_scope = NULL;
+   }
    return v;
 }
 
@@ -213,7 +492,7 @@ static bool copy_generate_pred(vlog_node_t v, void *ctx)
       return v == ctx;
    case V_FUNC_DECL:
    case V_TASK_DECL:
-      return true;
+      return !(vlog_flags(v) & VLOG_F_GLOBAL);
    default:
       return false;
    }
@@ -250,4 +529,193 @@ vlog_node_t vlog_generate_instance(vlog_node_t v, vlog_node_t genvar,
 
    hash_free(map);
    return copy;
+}
+
+static mir_context_t *fold_mir = NULL;
+static jit_t         *fold_jit = NULL;
+
+void vlog_set_fold_context(mir_context_t *mc, jit_t *j)
+{
+   fold_mir = mc;
+   fold_jit = j;
+}
+
+static bool has_parameters(vlog_node_t mod)
+{
+   const int ndecls = vlog_decls(mod);
+   for (int i = 0; i < ndecls; i++) {
+      vlog_node_t d = vlog_decl(mod, i);
+      if (vlog_kind(d) == V_PARAM_DECL
+          || (vlog_kind(d) == V_TYPE_DECL && (vlog_flags(d) & VLOG_F_TYPEPARAM)))
+         return true;
+   }
+
+   return false;
+}
+
+static void key_append_type(text_buf_t *tb, vlog_node_t t)
+{
+   while (vlog_kind(t) == V_TYPE_DECL && vlog_has_type(t))
+      t = vlog_type(t);
+
+   switch (vlog_kind(t)) {
+   case V_DATA_TYPE:
+      tb_printf(tb, "%d.%u.%u", vlog_subkind(t), vlog_size(t),
+                (unsigned)(vlog_flags(t) & (VLOG_F_SIGNED | VLOG_F_PACKED)));
+      break;
+   default:
+      tb_printf(tb, "%s", vlog_has_ident(t) ? istr(vlog_ident(t)) : "?");
+      break;
+   }
+}
+
+static bool key_append_value(text_buf_t *tb, vlog_node_t v)
+{
+   if (vlog_kind(v) == V_PATTERN_EXPR) {
+      tb_append(tb, '{');
+      const int nparams = vlog_params(v);
+      for (int i = 0; i < nparams; i++) {
+         vlog_node_t item = vlog_param(v, i);
+         if (vlog_subkind(item) != 0 || !key_append_value(tb, vlog_right(item)))
+            return false;
+         tb_append(tb, ',');
+      }
+      tb_append(tb, '}');
+      return true;
+   }
+
+   if (vlog_kind(v) == V_STRING) {
+      number_print(vlog_number(v), tb);
+      return true;
+   }
+
+   int64_t value;
+   if (!vlog_get_const(v, &value))
+      return false;
+
+   tb_printf(tb, "%"PRIi64, value);
+   return true;
+}
+
+ident_t vlog_instance_key(vlog_node_t mod, vlog_node_t body)
+{
+   // The values of the parameters identify the layout of an interface
+
+   LOCAL_TEXT_BUF tb = tb_new();
+
+   const int ndecls = vlog_decls(mod);
+   for (int i = 0; i < ndecls; i++) {
+      vlog_node_t d = vlog_decl(mod, i);
+      if (vlog_kind(d) == V_TYPE_DECL && (vlog_flags(d) & VLOG_F_TYPEPARAM)) {
+         bool found = false;
+         const int nbody = vlog_decls(body);
+         for (int j = 0; j < nbody && !found; j++) {
+            vlog_node_t b = vlog_decl(body, j);
+            if (vlog_kind(b) != V_TYPE_DECL || vlog_ident(b) != vlog_ident(d)
+                || !vlog_has_type(b))
+               continue;
+
+            tb_printf(tb, "%s=type ", istr(vlog_ident(d)));
+            key_append_type(tb, vlog_type(b));
+            tb_append(tb, ';');
+            found = true;
+         }
+
+         if (!found)
+            return NULL;
+         continue;
+      }
+
+      if (vlog_kind(d) != V_PARAM_DECL)
+         continue;
+
+      bool found = false;
+      const int nbody = vlog_decls(body);
+      for (int j = 0; j < nbody && !found; j++) {
+         vlog_node_t b = vlog_decl(body, j);
+         if (vlog_kind(b) != V_LOCALPARAM || vlog_ident(b) != vlog_ident(d))
+            continue;
+
+         if (!vlog_has_value(b))
+            return NULL;
+
+         tb_printf(tb, "%s=", istr(vlog_ident(d)));
+         if (!key_append_value(tb, vlog_value(b)))
+            return NULL;
+         tb_append(tb, ';');
+         found = true;
+      }
+
+      if (!found)
+         return NULL;
+   }
+
+   if (tb_len(tb) == 0)
+      return NULL;   // No parameters so nothing distinguishes instances
+
+   return ident_new(tb_get(tb));
+}
+
+vlog_node_t vlog_virtual_spec(vlog_node_t type)
+{
+   // The elaborated declarations of the interface of a virtual interface
+   // type whose parameters are given values
+
+   static hash_t *cache = NULL;
+
+   if (fold_mir == NULL)
+      return NULL;
+
+   vlog_node_t mod = vlog_virtual_iface(type);
+   if (mod == NULL || vlog_kind(mod) != V_MODULE || !has_parameters(mod))
+      return NULL;
+
+   if (cache == NULL)
+      cache = hash_new(16);
+
+   vlog_node_t cached = hash_get(cache, type);
+   if (cached != NULL)
+      return cached == (vlog_node_t)-1 ? NULL : cached;
+
+   object_arena_t *saved = detach_global_arena();
+   make_new_arena();
+
+   vlog_node_t list = vlog_new(V_INST_LIST);
+   vlog_set_loc(list, vlog_loc(type));
+
+   const int nparams = vlog_params(type);
+   for (int i = 0; i < nparams; i++)
+      vlog_add_param(list, vlog_param(type, i));
+
+   const int base_errors = error_count();
+
+   vlog_node_t spec = NULL;
+   vlog_node_t tmp = vlog_new_instance(mod, list, ident_new("$spec"));
+   vlog_fold(tmp, fold_mir, fold_jit);
+
+   ident_t key = error_count() == base_errors
+      ? vlog_instance_key(mod, tmp) : NULL;
+   if (key != NULL) {
+      ident_t id = ident_sprintf("%s#%s", istr(vlog_ident(mod)), istr(key));
+      spec = vlog_new_instance(mod, list, id);
+      vlog_fold(spec, fold_mir, fold_jit);
+   }
+
+   // Keep the arena open as freezing would discard the unreachable nodes
+   detach_global_arena();
+   attach_global_arena(saved);
+
+   hash_put(cache, type, spec ?: (vlog_node_t)-1);
+   return spec;
+}
+
+bool vlog_virtual_unresolved(vlog_node_t type)
+{
+   // The interface has parameters whose values are not known
+
+   vlog_node_t mod = vlog_virtual_iface(type);
+   if (mod == NULL || vlog_kind(mod) != V_MODULE)
+      return false;
+
+   return has_parameters(mod) && vlog_virtual_spec(type) == NULL;
 }
