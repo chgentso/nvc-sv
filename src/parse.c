@@ -12729,19 +12729,48 @@ static psl_node_t p_psl_parameter_definition(void)
    psl_node_t p = psl_new(P_PARAM_DECL);
    psl_set_tree(p, decl);
 
-   if (peek() == tLPAREN) {
-      (void)p_psl_index_range();
-      parse_error(CURRENT_LOC, "sorry, parameters with an index range are "
-                  "not supported");
-   }
+   psl_node_t index = NULL;
+   if (peek() == tLPAREN)
+      index = p_psl_index_range();
 
    consume(tIN);
 
    psl_node_t vs = p_psl_value_set();
    psl_set_value(p, vs);
 
+   const bool is_boolean = psl_subkind(vs) == PSL_VALUE_SET_BOOLEAN;
+
    type_t type;
-   if (psl_subkind(vs) == PSL_VALUE_SET_BOOLEAN)
+   if (index != NULL && standard() < STD_08) {
+      parse_error(psl_loc(index), "sorry, parameters with an index range "
+                  "are only supported in VHDL-2008 and later");
+      type = type_new(T_NONE);
+   }
+   else if (index != NULL) {
+      // The parameter is an array whose elements take each value of
+      // the value set
+      psl_check(index, nametab);
+
+      type_t base = std_type(NULL, is_boolean ? STD_BOOLEAN_VECTOR
+                             : STD_INTEGER_VECTOR);
+
+      tree_t r = tree_new(T_RANGE);
+      tree_set_subkind(r, RANGE_TO);
+      tree_set_left(r, psl_tree(psl_left(index)));
+      tree_set_right(r, psl_tree(psl_right(index)));
+      tree_set_loc(r, psl_loc(index));
+      tree_set_type(r, index_type_of(base, 0));
+
+      tree_t c = tree_new(T_CONSTRAINT);
+      tree_set_subkind(c, C_INDEX);
+      tree_add_range(c, r);
+      tree_set_loc(c, psl_loc(index));
+
+      type = type_new(T_SUBTYPE);
+      type_set_base(type, base);
+      type_set_constraint(type, c);
+   }
+   else if (is_boolean)
       type = std_type(NULL, STD_BOOLEAN);
    else
       type = std_type(NULL, STD_INTEGER);

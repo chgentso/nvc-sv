@@ -1321,7 +1321,7 @@ static tree_t search_type_decls(tree_t container, ident_t name)
 
 type_t std_type(tree_t std, std_type_t which)
 {
-   static type_t cache[STD_RANGE_DIRECTION + 1] = {};
+   static type_t cache[STD_INTEGER_VECTOR + 1] = {};
    assert(which < ARRAY_LEN(cache));
 
    if (cache[which] == NULL) {
@@ -1342,6 +1342,8 @@ type_t std_type(tree_t std, std_type_t which)
          "FILE_ORIGIN_KIND",
          "FILE_OPEN_STATE",
          "RANGE_DIRECTION",
+         "BOOLEAN_VECTOR",
+         "INTEGER_VECTOR",
       };
 
       tree_t d = search_type_decls(cached_std(std), ident_new(names[which]));

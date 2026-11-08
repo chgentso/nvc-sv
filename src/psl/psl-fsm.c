@@ -27,6 +27,8 @@
 #include "psl/psl-fsm.h"
 #include "psl/psl-node.h"
 #include "psl/psl-phase.h"
+#include "tree.h"
+#include "type.h"
 
 #include <assert.h>
 #include <stdio.h>
@@ -1051,6 +1053,21 @@ static int get_param_values(psl_fsm_t *fsm, psl_node_t decl, int64_t **values)
    return list.count;
 }
 
+static int get_param_elements(psl_node_t decl)
+{
+   // Number of elements of a parameter with an index range or zero
+
+   type_t type = tree_type(psl_tree(decl));
+   if (!type_is_array(type))
+      return 0;
+
+   int64_t length;
+   if (!folded_length(range_of(type, 0), &length))
+      fatal_at(psl_loc(decl), "index range of parameter is not static");
+
+   return MAX(length, 0);
+}
+
 static size_t enumerate_instances(psl_fsm_t *fsm, psl_node_t p,
                                   const psl_binding_t ***result)
 {
@@ -1061,12 +1078,24 @@ static size_t enumerate_instances(psl_fsm_t *fsm, psl_node_t p,
    int64_t **values LOCAL = xmalloc_array(nparams, sizeof(int64_t *));
    int *counts LOCAL = xmalloc_array(nparams, sizeof(int));
 
+   int *nelems LOCAL = xmalloc_array(nparams, sizeof(int));
+   size_t *ncombs LOCAL = xmalloc_array(nparams, sizeof(size_t));
+
    size_t total = 1;
    for (int i = 0; i < nparams; i++) {
-      counts[i] = get_param_values(fsm, psl_operand(p, i), &(values[i]));
-      total *= counts[i];
+      psl_node_t decl = psl_operand(p, i);
+      counts[i] = get_param_values(fsm, decl, &(values[i]));
+      nelems[i] = get_param_elements(decl);
+      ncombs[i] = counts[i];
 
-      if (total > 1024)
+      // A parameter with an index range takes every combination of
+      // values for its elements
+      for (int j = 1; j < nelems[i] && ncombs[i] <= 1024; j++)
+         ncombs[i] *= counts[i];
+
+      total *= ncombs[i];
+
+      if (total > 1024 || ncombs[i] > 1024)
          fatal_at(psl_loc(p), "sorry, too many instances of replicated SERE");
    }
 
@@ -1080,12 +1109,25 @@ static size_t enumerate_instances(psl_fsm_t *fsm, psl_node_t p,
 
       size_t rem = n;
       for (int i = 0; i < nparams; i++) {
-         psl_binding_t *b = pool_malloc(fsm->pool, sizeof(psl_binding_t));
+         psl_binding_t *b = pool_calloc(fsm->pool, sizeof(psl_binding_t));
          b->outer = chain;
          b->decl  = psl_tree(psl_operand(p, i));
-         b->value = values[i][rem % counts[i]];
 
-         rem /= counts[i];
+         if (nelems[i] > 0) {
+            int64_t *set = pool_malloc_array(fsm->pool, counts[i],
+                                             sizeof(int64_t));
+            for (int j = 0; j < counts[i]; j++)
+               set[j] = values[i][j];
+
+            b->value   = rem % ncombs[i];
+            b->set     = set;
+            b->setsize = counts[i];
+            b->nelems  = nelems[i];
+         }
+         else
+            b->value = values[i][rem % counts[i]];
+
+         rem /= ncombs[i];
          chain = b;
       }
 

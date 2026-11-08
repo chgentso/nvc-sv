@@ -40,11 +40,16 @@ typedef void *psl_guard_t;
 
 typedef struct _psl_binding psl_binding_t;
 
-// Value of a parameter of a replicated SERE
+// Value of a parameter of a replicated SERE: for a parameter with an
+// index range the value is the index of a combination of the nelems
+// element values each taken from set
 typedef struct _psl_binding {
    const psl_binding_t *outer;
    tree_t               decl;
    int64_t              value;
+   const int64_t       *set;
+   int                  setsize;
+   int                  nelems;
 } psl_binding_t;
 
 // A Boolean expression evaluated with the values of some parameters

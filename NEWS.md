@@ -56,6 +56,8 @@
 - Added support for the PSL logical `and` of temporal properties,
   replicated properties (`forall` and `for i in {...} : and (...)`) and
   the LTL operators `X`, `X!`, `F`, `G`, `[f U g]` and `[f W g]`.
+- The parameters of PSL replicated properties and SEREs can have an
+  index range, as in `forall v(0 to 1) in boolean : ...`.
 - Added more checks for PSL built-in functions and for the simple subset
   rules of the logical and LTL operators.
 - PSL Boolean implication `->` and equivalence `<->` can now be used

@@ -125,7 +125,26 @@ static vcode_reg_t psl_lower_bound_boolean(lower_unit_t *lu,
 
    for (const psl_binding_t *b = atom->binding; b; b = b->outer) {
       type_t type = tree_type(b->decl);
-      vcode_reg_t value_reg = emit_const(lower_type(type), b->value);
+
+      vcode_reg_t value_reg;
+      if (b->set != NULL) {
+         vcode_type_t velem = lower_type(type_elem(type));
+         vcode_reg_t *elems LOCAL =
+            xmalloc_array(b->nelems, sizeof(vcode_reg_t));
+
+         int64_t comb = b->value;
+         for (int i = 0; i < b->nelems; i++) {
+            elems[i] = emit_const(velem, b->set[comb % b->setsize]);
+            comb /= b->setsize;
+         }
+
+         vcode_type_t varray = vtype_carray(b->nelems, velem);
+         vcode_reg_t array_reg = emit_const_array(varray, elems, b->nelems);
+         value_reg = emit_address_of(array_reg);
+      }
+      else
+         value_reg = emit_const(lower_type(type), b->value);
+
       lower_put_vcode_obj(b->decl, value_reg, lu);
    }
 
