@@ -116,6 +116,7 @@ static void p_array_constraint(type_t type, type_t base);
 static void p_psl_declaration(tree_t parent);
 static psl_node_t p_psl_sequence(void);
 static psl_node_t p_psl_property(void);
+static psl_node_t p_psl_fl_property(void);
 static psl_node_t p_psl_sere(void);
 static tree_t p_psl_directive(ident_t label);
 static psl_node_t p_psl_repeated_sere(psl_node_t head);
@@ -5015,6 +5016,75 @@ static tree_t p_aggregate(void)
    return t;
 }
 
+static tree_t make_boolean_operand(tree_t expr)
+{
+   // Before VHDL-2008 there is no condition conversion and a PSL Boolean
+   // may have type BIT or STD_ULOGIC
+
+   expr = solve_psl_condition(nametab, expr);
+
+   type_t type = tree_type(expr);
+   if (type_is_none(type) || type_eq(type, std_type(NULL, STD_BOOLEAN)))
+      return expr;
+
+   const int pos = type_eq(type, std_type(NULL, STD_BIT)) ? 1 : 3;
+
+   tree_t one = make_ref(type_enum_literal(type, pos));
+   tree_set_loc(one, tree_loc(expr));
+
+   tree_t eq = tree_new(T_FCALL);
+   tree_set_ident(eq, well_known(W_OP_EQUAL));
+   tree_set_loc(eq, tree_loc(expr));
+   add_param(eq, expr, P_POS, NULL);
+   add_param(eq, one, P_POS, NULL);
+
+   return solve_types(nametab, eq, std_type(NULL, STD_BOOLEAN));
+}
+
+static tree_t make_implication_tree(tree_t lhs, tree_t rhs, bool iff,
+                                    const loc_t *loc)
+{
+   // b1 -> b2 is (not b1) or b2 and b1 <-> b2 is b1 = b2 where the
+   // operands are PSL Booleans (IEEE Std 1850-2010 section 5.2.2)
+
+   tree_t left = make_boolean_operand(lhs);
+   tree_t right = make_boolean_operand(rhs);
+
+   tree_t result = tree_new(T_FCALL);
+   tree_set_loc(result, loc);
+
+   if (iff) {
+      tree_set_ident(result, well_known(W_OP_EQUAL));
+      add_param(result, left, P_POS, NULL);
+      add_param(result, right, P_POS, NULL);
+   }
+   else {
+      tree_t not = tree_new(T_FCALL);
+      tree_set_ident(not, well_known(W_OP_NOT));
+      tree_set_loc(not, loc);
+      add_param(not, left, P_POS, NULL);
+
+      tree_set_ident(result, well_known(W_OP_OR));
+      add_param(result, not, P_POS, NULL);
+      add_param(result, right, P_POS, NULL);
+   }
+
+   return solve_types(nametab, result, std_type(NULL, STD_BOOLEAN));
+}
+
+static tree_t p_psl_boolean_implication(tree_t lhs)
+{
+   // Boolean -> Boolean | Boolean <-> Boolean
+
+   const token_t tok = one_of(tIFIMPL, tIFFIMPL);
+
+   tree_t rhs = p_expression();
+   if (scan(tIFIMPL, tIFFIMPL))
+      rhs = p_psl_boolean_implication(rhs);
+
+   return make_implication_tree(lhs, rhs, tok == tIFFIMPL, CURRENT_LOC);
+}
+
 static tree_t p_aggregate_or_expression(void)
 {
    // aggregate | expression
@@ -5027,6 +5097,9 @@ static tree_t p_aggregate_or_expression(void)
    consume(tLPAREN);
 
    tree_t head = p_expression();
+
+   if (scan(tIFIMPL, tIFFIMPL))
+      head = p_psl_boolean_implication(head);
 
    switch (peek()) {
    case tRPAREN:
@@ -13212,7 +13285,7 @@ static psl_node_t p_psl_sequence(void)
    }
 }
 
-static psl_node_t p_psl_fl_property(void)
+static psl_node_t p_psl_fl_primary(void)
 {
    // Boolean | ( FL_Property ) | FL_Property @ Clock_Expression
    //   | always FL_Property
@@ -13398,153 +13471,242 @@ static psl_node_t p_psl_fl_property(void)
       break;
    }
 
-   const token_t infix = peek();
-   switch (infix) {
+   return p;
+}
+
+typedef enum {
+   PSL_PREC_IMPL = 1,     // -> <->
+   PSL_PREC_OR,
+   PSL_PREC_AND,
+   PSL_PREC_UNTIL,        // until before
+   PSL_PREC_ABORT,
+   PSL_PREC_CLOCK,        // @
+   PSL_PREC_SUFFIX,       // |-> |=>
+} psl_prec_t;
+
+static int p_psl_infix_prec(token_t tok)
+{
+   switch (tok) {
    case tIFIMPL:
    case tIFFIMPL:
-   case tAND:
+      return PSL_PREC_IMPL;
    case tOR:
-      {
-         consume(infix);
-
-         psl_logic_t kind;
-         switch (infix) {
-         case tAND:     kind = PSL_LOGIC_AND; break;
-         case tOR:      kind = PSL_LOGIC_OR; break;
-         case tIFIMPL:  kind = PSL_LOGIC_IF; break;
-         case tIFFIMPL: kind = PSL_LOGIC_IFF; break;
-         default: should_not_reach_here();
-         }
-
-         psl_node_t right = p_psl_fl_property();
-
-         // A logical operation where the two operands are HDL
-         // expressions should be parsed as a single HDL expression
-         const bool prefer_hdl =
-            (kind == PSL_LOGIC_OR || kind == PSL_LOGIC_AND)
-            && psl_kind(p) == P_HDL_EXPR && psl_kind(right) == P_HDL_EXPR;
-
-         if (prefer_hdl) {
-            ident_t op = well_known(kind == PSL_LOGIC_OR ? W_OP_OR : W_OP_AND);
-
-            tree_t fcall = tree_new(T_FCALL);
-            tree_set_ident(fcall, op);
-            tree_set_loc(fcall, CURRENT_LOC);
-            add_param(fcall, psl_tree(p), P_POS, NULL);
-            add_param(fcall, psl_tree(right), P_POS, NULL);
-
-            psl_set_tree(p, fcall);
-            psl_set_loc(p, CURRENT_LOC);
-            return p;
-         }
-         else {
-            psl_node_t log = psl_new(P_LOGICAL);
-            psl_set_subkind(log, kind);
-            psl_add_operand(log, p);
-            psl_add_operand(log, right);
-            psl_set_loc(log, CURRENT_LOC);
-
-            return log;
-         }
-      }
-
-   case tSUFFIXOVR:
-   case tSUFFIXNON:
-      {
-         consume(infix);
-
-         const psl_suffix_impl_t kind =
-            infix == tSUFFIXOVR ? PSL_SUFFIX_OVERLAP : PSL_SUFFIX_NON;
-
-         psl_node_t suff = psl_new(P_SUFFIX_IMPL);
-         psl_set_subkind(suff, kind);
-         psl_add_operand(suff, p);
-         psl_add_operand(suff, p_psl_fl_property());
-         psl_set_loc(suff, CURRENT_LOC);
-
-         return suff;
-      }
-
+      return PSL_PREC_OR;
+   case tAND:
+      return PSL_PREC_AND;
    case tUNTIL:
    case tUNTIL_:
    case tUNTIL1:
    case tUNTIL1_:
-      {
-         consume(infix);
-
-         psl_flags_t flags = 0;
-         if (infix == tUNTIL1 || infix == tUNTIL1_)
-            flags |= PSL_F_STRONG;
-         if (infix == tUNTIL_ || infix == tUNTIL1_)
-            flags |= PSL_F_INCLUSIVE;
-
-         psl_node_t until = psl_new(P_UNTIL);
-         psl_set_flag(until, flags);
-         psl_add_operand(until, p);
-         psl_add_operand(until, p_psl_fl_property());
-         psl_set_loc(until, CURRENT_LOC);
-
-         return until;
-      }
-
    case tBEFORE:
    case tBEFORE_:
    case tBEFORE1:
    case tBEFORE1_:
-      {
-         consume(infix);
-
-         psl_flags_t flags = 0;
-         if (infix == tBEFORE1 || infix == tBEFORE1_)
-            flags |= PSL_F_STRONG;
-         if (infix == tBEFORE_ || infix == tBEFORE1_)
-            flags |= PSL_F_INCLUSIVE;
-
-         psl_node_t until = psl_new(P_BEFORE);
-         psl_set_flag(until, flags);
-         psl_add_operand(until, p);
-         psl_add_operand(until, p_psl_fl_property());
-         psl_set_loc(until, CURRENT_LOC);
-
-         return until;
-      }
-
+      return PSL_PREC_UNTIL;
    case tABORT:
    case tASYNC_ABORT:
    case tSYNC_ABORT:
-      {
-         consume(infix);
-
-         const psl_abort_t kind =
-            infix == tSYNC_ABORT ? PSL_ABORT_SYNC : PSL_ABORT_ASYNC;
-
-         psl_node_t abort = psl_new(P_ABORT);
-         psl_set_subkind(abort, kind);
-         psl_add_operand(abort, p);
-         psl_add_operand(abort, p_hdl_expression(NULL, PSL_TYPE_BOOLEAN));
-         psl_set_loc(abort, CURRENT_LOC);
-
-         return abort;
-      }
-
+      return PSL_PREC_ABORT;
    case tAT:
-      {
-         consume(tAT);
-
-         type_t std_bool = std_type(NULL, STD_BOOLEAN);
-         tree_t expr = solve_types(nametab, p_expression(), std_bool);
-
-         psl_node_t clk = psl_new(P_CLOCKED);
-         psl_set_value(clk, p);
-         psl_set_tree(clk, expr);
-
-         psl_set_loc(clk, CURRENT_LOC);
-         return clk;
-      }
-
+      return PSL_PREC_CLOCK;
+   case tSUFFIXOVR:
+   case tSUFFIXNON:
+      return PSL_PREC_SUFFIX;
    default:
-      return p;
+      return -1;
    }
+}
+
+static psl_node_t psl_as_boolean(psl_node_t p)
+{
+   // Convert b1 -> b2 and b1 <-> b2 used as an operand of another
+   // operator into a single Boolean expression
+
+   if (psl_kind(p) != P_LOGICAL)
+      return p;
+
+   const psl_logic_t kind = psl_subkind(p);
+   if (kind != PSL_LOGIC_IF && kind != PSL_LOGIC_IFF)
+      return p;
+
+   psl_node_t left = psl_operand(p, 0);
+   psl_node_t right = psl_operand(p, 1);
+   if (psl_kind(left) != P_HDL_EXPR || psl_kind(right) != P_HDL_EXPR)
+      return p;
+
+   tree_t expr = make_implication_tree(psl_tree(left), psl_tree(right),
+                                       kind == PSL_LOGIC_IFF, psl_loc(p));
+
+   psl_node_t b = psl_new(P_HDL_EXPR);
+   psl_set_type(b, PSL_TYPE_BOOLEAN);
+   psl_set_tree(b, expr);
+   psl_set_loc(b, psl_loc(p));
+   return b;
+}
+
+static psl_node_t p_psl_fl_property_prec(int min_prec)
+{
+   psl_node_t p = p_psl_fl_primary();
+
+   for (;;) {
+      const token_t infix = peek();
+      const int prec = p_psl_infix_prec(infix);
+      if (prec < min_prec)
+         return p;
+
+      consume(infix);
+
+      p = psl_as_boolean(p);
+
+      switch (infix) {
+      case tIFIMPL:
+      case tIFFIMPL:
+      case tAND:
+      case tOR:
+         {
+            psl_logic_t kind;
+            switch (infix) {
+            case tAND:     kind = PSL_LOGIC_AND; break;
+            case tOR:      kind = PSL_LOGIC_OR; break;
+            case tIFIMPL:  kind = PSL_LOGIC_IF; break;
+            case tIFFIMPL: kind = PSL_LOGIC_IFF; break;
+            default: should_not_reach_here();
+            }
+
+            const bool right_assoc = (kind == PSL_LOGIC_IF || kind == PSL_LOGIC_IFF);
+            psl_node_t right =
+               p_psl_fl_property_prec(right_assoc ? prec : prec + 1);
+
+            if (kind == PSL_LOGIC_AND || kind == PSL_LOGIC_OR)
+               right = psl_as_boolean(right);
+
+            const bool both_hdl =
+               psl_kind(p) == P_HDL_EXPR && psl_kind(right) == P_HDL_EXPR;
+
+            if (both_hdl && (kind == PSL_LOGIC_AND || kind == PSL_LOGIC_OR)) {
+               // A logical operation where the two operands are HDL
+               // expressions should be parsed as a single HDL expression
+               ident_t op = well_known(kind == PSL_LOGIC_OR ? W_OP_OR : W_OP_AND);
+
+               tree_t fcall = tree_new(T_FCALL);
+               tree_set_ident(fcall, op);
+               tree_set_loc(fcall, CURRENT_LOC);
+               add_param(fcall, psl_tree(p), P_POS, NULL);
+               add_param(fcall, psl_tree(right), P_POS, NULL);
+
+               psl_set_tree(p, fcall);
+               psl_set_loc(p, CURRENT_LOC);
+            }
+            else {
+               psl_node_t log = psl_new(P_LOGICAL);
+               psl_set_subkind(log, kind);
+               psl_add_operand(log, p);
+               psl_add_operand(log, right);
+               psl_set_loc(log, CURRENT_LOC);
+
+               p = log;
+            }
+         }
+         break;
+
+      case tSUFFIXOVR:
+      case tSUFFIXNON:
+         {
+            const psl_suffix_impl_t kind =
+               infix == tSUFFIXOVR ? PSL_SUFFIX_OVERLAP : PSL_SUFFIX_NON;
+
+            psl_node_t suff = psl_new(P_SUFFIX_IMPL);
+            psl_set_subkind(suff, kind);
+            psl_add_operand(suff, p);
+            psl_add_operand(suff, p_psl_fl_property_prec(PSL_PREC_IMPL));
+            psl_set_loc(suff, CURRENT_LOC);
+
+            p = suff;
+         }
+         break;
+
+      case tUNTIL:
+      case tUNTIL_:
+      case tUNTIL1:
+      case tUNTIL1_:
+         {
+            psl_flags_t flags = 0;
+            if (infix == tUNTIL1 || infix == tUNTIL1_)
+               flags |= PSL_F_STRONG;
+            if (infix == tUNTIL_ || infix == tUNTIL1_)
+               flags |= PSL_F_INCLUSIVE;
+
+            psl_node_t until = psl_new(P_UNTIL);
+            psl_set_flag(until, flags);
+            psl_add_operand(until, p);
+            psl_add_operand(until, psl_as_boolean(p_psl_fl_property_prec(prec)));
+            psl_set_loc(until, CURRENT_LOC);
+
+            p = until;
+         }
+         break;
+
+      case tBEFORE:
+      case tBEFORE_:
+      case tBEFORE1:
+      case tBEFORE1_:
+         {
+            psl_flags_t flags = 0;
+            if (infix == tBEFORE1 || infix == tBEFORE1_)
+               flags |= PSL_F_STRONG;
+            if (infix == tBEFORE_ || infix == tBEFORE1_)
+               flags |= PSL_F_INCLUSIVE;
+
+            psl_node_t before = psl_new(P_BEFORE);
+            psl_set_flag(before, flags);
+            psl_add_operand(before, p);
+            psl_add_operand(before, psl_as_boolean(p_psl_fl_property_prec(prec)));
+            psl_set_loc(before, CURRENT_LOC);
+
+            p = before;
+         }
+         break;
+
+      case tABORT:
+      case tASYNC_ABORT:
+      case tSYNC_ABORT:
+         {
+            const psl_abort_t kind =
+               infix == tSYNC_ABORT ? PSL_ABORT_SYNC : PSL_ABORT_ASYNC;
+
+            psl_node_t abort = psl_new(P_ABORT);
+            psl_set_subkind(abort, kind);
+            psl_add_operand(abort, p);
+            psl_add_operand(abort, p_hdl_expression(NULL, PSL_TYPE_BOOLEAN));
+            psl_set_loc(abort, CURRENT_LOC);
+
+            p = abort;
+         }
+         break;
+
+      case tAT:
+         {
+            type_t std_bool = std_type(NULL, STD_BOOLEAN);
+            tree_t expr = solve_types(nametab, p_expression(), std_bool);
+
+            psl_node_t clk = psl_new(P_CLOCKED);
+            psl_set_value(clk, p);
+            psl_set_tree(clk, expr);
+            psl_set_loc(clk, CURRENT_LOC);
+
+            p = clk;
+         }
+         break;
+
+      default:
+         should_not_reach_here();
+      }
+   }
+}
+
+static psl_node_t p_psl_fl_property(void)
+{
+   return p_psl_fl_property_prec(PSL_PREC_IMPL);
 }
 
 static void p_psl_report(psl_node_t p)

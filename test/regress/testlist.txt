@@ -1534,5 +1534,6 @@ psl31           gold,2008
 psl26           gold,2008
 psl27           normal,2008
 psl29           normal,2008
+psl30           gold,2008
 vlogrealport1   verilog
 vlogcasegen3    verilog

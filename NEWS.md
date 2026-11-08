@@ -42,6 +42,9 @@
 - The PSL built-in functions `prev`, `rose`, `fell` and `stable` now accept
   an explicit clock argument, `prev` and `stable` accept a value of any
   type, and `nondet_vector` is supported.
+- PSL Boolean implication `->` and equivalence `<->` can now be used
+  inside SEREs and as the operand of other PSL operators.  The operators
+  of PSL properties are now parsed with the correct precedence.
 - Added a `pkg-config` configuration file to aid locating the VHPI
   headers (from @gsmecher).
 - The `'IMAGE` and `to_string` of an enumeration literal that is an
