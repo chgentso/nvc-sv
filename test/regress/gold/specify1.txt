@@ -1,4 +1,4 @@
-** Error: 5fs+0: timing check violation: $setup(4fs, 5fs, 2fs)
-** Error: 10fs+0: timing check violation: $setup(8fs, 10fs, 3fs)
-** Error: 10fs+0: timing check violation: $setup(4fs, 10fs, 7fs)
-** Note: 18fs+0: $finish called
+** Error: 5ns+0: timing check violation: $setup(4ns, 5ns, 2ns)
+** Error: 10ns+0: timing check violation: $setup(8ns, 10ns, 3ns)
+** Error: 10ns+0: timing check violation: $setup(4ns, 10ns, 7ns)
+** Note: 18ns+0: $finish called

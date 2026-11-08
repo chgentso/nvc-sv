@@ -16,6 +16,8 @@
 //
 
 #include "util.h"
+#include "common.h"
+#include "array.h"
 #include "diag.h"
 #include "hash.h"
 #include "ident.h"
@@ -52,6 +54,8 @@ static void vlog_check_decls(vlog_node_t v);
 static void vlog_check_stmts(vlog_node_t v);
 static void vlog_check_ranges(vlog_node_t v);
 static type_mask_t vlog_check_expr(vlog_node_t v);
+static void vlog_check_ref_ports(vlog_node_t v);
+static type_mask_t vlog_check_cast_call(vlog_node_t v);
 
 static void name_for_diag(diag_t *d, vlog_node_t v, const char *alt)
 {
@@ -203,6 +207,9 @@ static void vlog_check_net_lvalue(vlog_node_t v, vlog_node_t where)
       }
       else if (vlog_subkind(v) != V_PORT_INPUT)
          return;
+      else if (vlog_has_type(v) && vlog_kind(vlog_type(v)) == V_TYPE_DECL
+               && (vlog_flags(vlog_type(v)) & VLOG_F_NETTYPE))
+         return;    // Merged with the net connected to the port
       else
          break;
    case V_REF:
@@ -230,6 +237,38 @@ static void vlog_check_net_lvalue(vlog_node_t v, vlog_node_t where)
    name_for_diag(d, where, "target");
    diag_printf(d, " cannot be driven by continuous assignment");
    diag_emit(d);
+}
+
+static bool in_function = false;
+static bool in_final = false;
+static bool in_sva_expr = false;
+
+static bool vlog_is_assoc_type(vlog_node_t type)
+{
+   return type != NULL && vlog_kind(type) == V_DATA_TYPE
+      && vlog_subkind(type) == DT_ASSOC;
+}
+
+static bool vlog_same_assoc_type(vlog_node_t a, vlog_node_t b)
+{
+   vlog_node_t ka = vlog_assoc_key(a), kb = vlog_assoc_key(b);
+   if ((ka == NULL) != (kb == NULL))
+      return false;
+   else if (ka != NULL) {
+      if (get_type_mask(ka) != get_type_mask(kb))
+         return false;
+      else if (vlog_size(ka) != vlog_size(kb)
+               || vlog_is_signed(ka) != vlog_is_signed(kb))
+         return false;
+   }
+
+   vlog_node_t ea = vlog_get_type(vlog_type(a));
+   vlog_node_t eb = vlog_get_type(vlog_type(b));
+   if (vlog_is_assoc_type(ea) || vlog_is_assoc_type(eb))
+      return vlog_is_assoc_type(ea) && vlog_is_assoc_type(eb)
+         && vlog_same_assoc_type(ea, eb);
+
+   return get_type_mask(ea) == get_type_mask(eb);
 }
 
 static void vlog_check_same_type(vlog_node_t left, type_mask_t lmask,
@@ -302,11 +341,44 @@ static void vlog_check_same_type(vlog_node_t left, type_mask_t lmask,
                "'%s'", type_mask_str(rmask), type_mask_str(lmask));
 }
 
+static void vlog_check_dpi_export(vlog_node_t v, vlog_node_t scope)
+{
+   // An exported subroutine cannot have unsized arguments (35.5.6.1)
+
+   const int ndecls = vlog_decls(scope);
+   for (int i = 0; i < ndecls; i++) {
+      vlog_node_t sub = vlog_decl(scope, i);
+      const vlog_kind_t kind = vlog_kind(sub);
+      if ((kind != V_FUNC_DECL && kind != V_TASK_DECL)
+          || (vlog_flags(sub) & VLOG_F_DPI)
+          || vlog_ident(sub) != vlog_ident(v))
+         continue;
+
+      const int nports = vlog_ports(sub);
+      for (int j = 0; j < nports; j++) {
+         vlog_node_t port = vlog_port(sub, j);
+         if (vlog_kind(port) == V_TF_PORT_DECL && vlog_is_open_array(port)) {
+            error_at(vlog_loc(v), "exported DPI subroutine '%s' cannot have "
+                     "dynamic array argument '%s'", istr(vlog_ident(v)),
+                     istr(vlog_ident(port)));
+            return;
+         }
+      }
+
+      return;
+   }
+}
+
 static void vlog_check_decls(vlog_node_t v)
 {
    const int ndecls = vlog_decls(v);
-   for (int i = 0; i < ndecls; i++)
-      vlog_check(vlog_decl(v, i));
+   for (int i = 0; i < ndecls; i++) {
+      vlog_node_t d = vlog_decl(v, i);
+      vlog_check(d);
+
+      if (vlog_kind(d) == V_DPI_EXPORT)
+         vlog_check_dpi_export(d, v);
+   }
 }
 
 static void vlog_check_stmts(vlog_node_t v)
@@ -335,6 +407,47 @@ static type_mask_t vlog_check_params(vlog_node_t v)
          mask &= vlog_check_expr(p);
    }
    return mask;
+}
+
+static void vlog_check_enum_value(vlog_node_t target, vlog_node_t value)
+{
+   // An enumeration variable can only be assigned a value of the same
+   // enumeration type, but not every expression has a known type
+
+   vlog_node_t ttype = vlog_get_type(target);
+   if (ttype == NULL || vlog_kind(ttype) != V_ENUM_DECL)
+      return;
+
+   vlog_node_t vtype = vlog_get_type(value);
+   if (vtype != NULL && vlog_kind(vtype) == V_ENUM_DECL)
+      return;
+
+   bool bad = false;
+   switch (vlog_kind(value)) {
+   case V_NUMBER:
+   case V_REAL:
+   case V_STRING:
+   case V_BINARY:
+   case V_UNARY:
+      bad = true;
+      break;
+   case V_COND_EXPR:
+      vlog_check_enum_value(target, vlog_left(value));
+      vlog_check_enum_value(target, vlog_right(value));
+      return;
+   case V_REF:
+   case V_MEMBER_REF:
+   case V_BIT_SELECT:
+   case V_USER_FCALL:
+      bad = vtype != NULL;
+      break;
+   default:
+      break;
+   }
+
+   if (bad)
+      error_at(vlog_loc(value), "cannot assign this value to a variable of "
+               "enumeration type without a cast");
 }
 
 static bool vlog_nba_target_is_automatic(vlog_node_t target)
@@ -454,6 +567,89 @@ static void vlog_check_unpacked_assign(vlog_node_t target, vlog_node_t value)
              "have the same number of bits, signedness and 2-state or "
              "4-state kind as those of the target");
    diag_emit(d);
+}
+
+static bool vlog_modport_input(vlog_node_t target, ident_t name,
+                               vlog_node_t mp)
+{
+   // Report an assignment to an item that the modport lists as an input
+
+   const int nmembers = vlog_decls(mp);
+   for (int i = 0; i < nmembers; i++) {
+      vlog_node_t m = vlog_decl(mp, i);
+      if (vlog_kind(m) != V_MODPORT_PORT || !vlog_has_ident(m)
+          || vlog_ident(m) != name)
+         continue;
+      else if (vlog_subkind(m) != V_MODPORT_INPUT)
+         return false;
+
+      diag_t *d = diag_new(relaxed_rules() ? DIAG_WARN : DIAG_ERROR,
+                           vlog_loc(target));
+      diag_printf(d, "cannot assign %s which is an input of modport %s",
+                  istr(name), istr(vlog_ident(mp)));
+      diag_hint(d, vlog_loc(m), "declared as an input here");
+      diag_emit(d);
+      return true;
+   }
+
+   return false;
+}
+
+static void vlog_check_modport_write(vlog_node_t target)
+{
+   // A module cannot assign an interface item that its modport declares
+   // as an input, nor can code that uses the interface through a virtual
+   // interface with that modport (25.5, 25.9, 23.3.3.2)
+
+   vlog_node_t v = target;
+   for (;;) {
+      switch (vlog_kind(v)) {
+      case V_BIT_SELECT:
+      case V_PART_SELECT:
+         v = vlog_value(v);
+         continue;
+      case V_MEMBER_REF:
+         {
+            vlog_node_t type = vlog_get_type(vlog_value(v));
+            if (type != NULL && vlog_kind(type) == V_DATA_TYPE
+                && vlog_subkind(type) == DT_VIRTUAL && vlog_has_type(type)
+                && vlog_kind(vlog_type(type)) == V_MODPORT
+                && vlog_modport_input(target, vlog_ident(v), vlog_type(type)))
+               return;
+         }
+         v = vlog_value(v);
+         continue;
+      case V_HIER_REF:
+         if (vlog_has_value(v) && vlog_kind(vlog_value(v)) == V_MOD_REF)
+            break;
+         return;
+      case V_CONCAT:
+         {
+            const int nparams = vlog_params(v);
+            for (int i = 0; i < nparams; i++)
+               vlog_check_modport_write(vlog_param(v, i));
+         }
+         return;
+      default:
+         return;
+      }
+      break;
+   }
+
+   vlog_node_t mr = vlog_value(v);
+   if (vlog_has_value(mr) || !vlog_has_ref(mr)
+       || vlog_kind(vlog_ref(mr)) != V_IFACE_PORT)
+      return;
+
+   vlog_node_t port = vlog_ref(mr);
+   if (!vlog_has_ref(port))
+      return;
+
+   vlog_node_t mp = vlog_ref(port);
+   if (vlog_kind(mp) != V_MODPORT)
+      return;
+
+   (void)vlog_modport_input(target, vlog_ident(v), mp);
 }
 
 static void vlog_check_nbassign(vlog_node_t v)
@@ -891,6 +1087,8 @@ static void vlog_check_func_decl(vlog_node_t v)
 {
    vlog_set_flags(v, VLOG_F_CONST);
 
+   vlog_check_ref_ports(v);
+
    const int nports = vlog_ports(v);
    for (int i = 0; i < nports; i++)
       vlog_check(vlog_port(v, i));
@@ -905,8 +1103,26 @@ static void vlog_check_func_decl(vlog_node_t v)
    vlog_visit(v, vlog_const_func_cb, v);
 }
 
+static void vlog_check_ref_ports(vlog_node_t v)
+{
+   // A subroutine with ref arguments must be automatic (13.5.2)
+
+   const int nports = vlog_ports(v);
+   for (int i = 0; i < nports; i++) {
+      vlog_node_t p = vlog_port(v, i);
+      if (vlog_kind(p) == V_TF_PORT_DECL && vlog_subkind(p) == V_PORT_REF
+          && (vlog_flags(p) & VLOG_F_IMPLICIT_STATIC))
+         error_at(vlog_loc(p), "ref argument %pQ is not allowed in static "
+                  "%s %pQ", vlog_ident(p),
+                  vlog_kind(v) == V_TASK_DECL ? "task" : "function",
+                  vlog_ident(v));
+   }
+}
+
 static void vlog_check_task_decl(vlog_node_t v)
 {
+   vlog_check_ref_ports(v);
+
    const int nports = vlog_ports(v);
    for (int i = 0; i < nports; i++)
       vlog_check(vlog_port(v, i));
@@ -965,8 +1181,12 @@ static void vlog_check_primitive(vlog_node_t udp)
 
 static void vlog_check_dimension(vlog_node_t v)
 {
-   if (vlog_subkind(v) == V_DIM_UNSIZED)
+   if (vlog_subkind(v) == V_DIM_UNSIZED) {
+      if ((vlog_flags(v) & VLOG_F_OPEN_PACKED) && !(vlog_flags(v) & VLOG_F_DPI))
+         error_at(vlog_loc(v), "unsized packed dimension is only allowed in "
+                  "a formal argument of a DPI import");
       return;
+   }
 
    vlog_node_t left = vlog_left(v);
    vlog_check_expr(left);
@@ -1043,6 +1263,254 @@ static void vlog_check_while(vlog_node_t v)
    vlog_check_stmts(v);
 }
 
+static vlog_node_t vlog_simple_integral_type(vlog_node_t decl)
+{
+   // The type of a scalar or packed vector variable of a built-in type
+
+   switch (vlog_kind(decl)) {
+   case V_VAR_DECL:
+   case V_LOCAL_DECL:
+   case V_TF_PORT_DECL:
+   case V_PORT_DECL:
+      break;
+   default:
+      return NULL;
+   }
+
+   if (!vlog_has_type(decl))
+      return NULL;
+
+   const int nranges = vlog_ranges(decl);
+   for (int i = 0; i < nranges; i++) {
+      if (vlog_subkind(vlog_range(decl, i)) == V_DIM_UNPACKED)
+         return NULL;
+   }
+
+   vlog_node_t type = vlog_type(decl);
+   if (vlog_kind(type) != V_DATA_TYPE || vlog_has_type(type))
+      return NULL;
+
+   switch (vlog_subkind(type)) {
+   case DT_LOGIC:
+   case DT_INTEGER:
+   case DT_BYTE:
+   case DT_SHORTINT:
+   case DT_INT:
+   case DT_LONGINT:
+   case DT_BIT:
+   case DT_TIME:
+      return type;
+   default:
+      return NULL;
+   }
+}
+
+static const char *vlog_type_name(vlog_node_t type)
+{
+   static const char *names[] = {
+      [DT_LOGIC] = "logic", [DT_INTEGER] = "integer", [DT_BYTE] = "byte",
+      [DT_SHORTINT] = "shortint", [DT_INT] = "int", [DT_LONGINT] = "longint",
+      [DT_BIT] = "bit", [DT_TIME] = "time",
+   };
+
+   return names[vlog_subkind(type)];
+}
+
+static void vlog_check_ref_arg(vlog_node_t port, vlog_node_t arg)
+{
+   // The actual for a ref argument is a variable of an equivalent type
+   // (13.5.2)
+
+   vlog_node_t decl = NULL;
+
+   switch (vlog_kind(arg)) {
+   case V_NUMBER:
+      if (vlog_flags(port) & VLOG_F_CONST)
+         return;
+      // Fall-through
+   case V_REAL:
+   case V_STRING:
+   case V_BINARY:
+   case V_UNARY:
+   case V_COND_EXPR:
+   case V_CONCAT:
+      error_at(vlog_loc(arg), "illegal ref argument for %pQ",
+               vlog_ident(port));
+      return;
+   case V_REF:
+      if (!vlog_has_ref(arg))
+         return;
+      decl = vlog_ref(arg);
+      if (vlog_kind(decl) == V_NET_DECL) {
+         error_at(vlog_loc(arg), "illegal ref argument for %pQ",
+                  vlog_ident(port));
+         return;
+      }
+      break;
+   default:
+      return;
+   }
+
+   vlog_node_t atype = vlog_simple_integral_type(decl);
+   vlog_node_t ptype = vlog_simple_integral_type(port);
+   if (atype == NULL || ptype == NULL)
+      return;
+
+   if (vlog_size(atype) * vlog_size(decl) != vlog_size(ptype) * vlog_size(port)
+       || vlog_is_signed(atype) != vlog_is_signed(ptype)
+       || vlog_is_two_state(atype) != vlog_is_two_state(ptype)) {
+      diag_t *d = diag_new(relaxed_rules() ? DIAG_WARN : DIAG_ERROR,
+                           vlog_loc(arg));
+      diag_printf(d, "type of actual for ref argument %pQ is not equivalent "
+                  "to %s", vlog_ident(port), vlog_type_name(ptype));
+      diag_emit(d);
+   }
+}
+
+static void vlog_check_output_arg(vlog_node_t port, vlog_node_t arg)
+{
+   if (vlog_kind(port) != V_TF_PORT_DECL)
+      return;
+
+   const int dir = vlog_subkind(port);
+   if (dir == V_PORT_REF) {
+      vlog_check_ref_arg(port, arg);
+      return;
+   }
+
+   if (dir != V_PORT_OUTPUT && dir != V_PORT_INOUT)
+      return;
+
+   switch (vlog_kind(arg)) {
+   case V_NUMBER:
+   case V_REAL:
+   case V_STRING:
+   case V_BINARY:
+   case V_UNARY:
+   case V_COND_EXPR:
+      error_at(vlog_loc(arg), "illegal %s argument for %pQ",
+               dir == V_PORT_OUTPUT ? "output" : "inout", vlog_ident(port));
+      break;
+   default:
+      break;
+   }
+}
+
+static void vlog_open_actual(vlog_node_t arg, int *nfixed, int *ndyn,
+                             vlog_node_t *elem, bool *known)
+{
+   // Dimensions and element type of an actual argument
+
+   *nfixed = *ndyn = 0;
+   *elem = NULL;
+   *known = true;
+
+   vlog_node_t base = arg;
+   int nselects = 0;
+   while (vlog_kind(base) == V_BIT_SELECT || vlog_kind(base) == V_PART_SELECT) {
+      nselects += vlog_kind(base) == V_BIT_SELECT ? vlog_params(base) : 1;
+      base = vlog_value(base);
+   }
+
+   switch (vlog_kind(base)) {
+   case V_REF:
+   case V_MEMBER_REF:
+   case V_HIER_REF:
+      if (!vlog_has_ref(base))
+         break;
+      else {
+         vlog_node_t decl = vlog_ref(base);
+         switch (vlog_kind(decl)) {
+         case V_VAR_DECL:
+         case V_NET_DECL:
+         case V_PORT_DECL:
+         case V_TF_PORT_DECL:
+         case V_LOCAL_DECL:
+            break;
+         default:
+            *known = false;
+            return;
+         }
+
+         if (!vlog_has_type(decl)) {
+            *known = false;
+            return;
+         }
+
+         if (vlog_is_fixed_unpacked(decl))
+            *nfixed = vlog_ranges(decl);
+
+         vlog_node_t type = vlog_type(decl);
+         while (vlog_kind(type) == V_DATA_TYPE && vlog_has_type(type)
+                && (vlog_subkind(type) == DT_DYNARRAY
+                    || vlog_subkind(type) == DT_QUEUE)) {
+            (*ndyn)++;
+            type = vlog_type(type);
+         }
+
+         if (nselects > 0 && *ndyn > 0) {
+            *known = false;
+            return;
+         }
+
+         if (nselects > 0)
+            *nfixed = MAX(*nfixed - nselects, 0);
+
+         *elem = vlog_get_type(type);
+         return;
+      }
+   default:
+      break;
+   }
+
+   *elem = vlog_get_type(base);
+}
+
+static void vlog_check_open_arg(vlog_node_t sub, vlog_node_t port,
+                                vlog_node_t arg)
+{
+   // The actual argument for an open array formal of a DPI import must
+   // have the same number of unpacked dimensions and equivalent elements
+   // (35.5.6.1, 7.7)
+
+   if (!(vlog_flags(sub) & VLOG_F_DPI) || vlog_kind(port) != V_TF_PORT_DECL
+       || vlog_kind(arg) == V_EMPTY || vlog_kind(arg) == V_NAMED_ARG)
+      return;
+
+   vlog_node_t felem;
+   const int fdims = vlog_open_dims(port, &felem);
+   const bool open_packed = vlog_has_open_packed(felem);
+   if (fdims == 0 && !open_packed)
+      return;
+
+   int nfixed, ndyn;
+   vlog_node_t aelem;
+   bool known;
+   vlog_open_actual(arg, &nfixed, &ndyn, &aelem, &known);
+   if (!known)
+      return;
+
+   if (fdims > 0 && ndyn > 0 && vlog_subkind(port) == V_PORT_OUTPUT) {
+      error_at(vlog_loc(arg), "dynamic array cannot be passed to unsized "
+               "output argument '%s' of DPI import '%s'",
+               istr(vlog_ident(port)), istr(vlog_ident(sub)));
+      return;
+   }
+
+   bool ok = nfixed + ndyn == fdims;
+   if (ok && ndyn > 0 && nfixed > 0)
+      ok = false;
+   if (ok && aelem != NULL && !open_packed && fdims > 0) {
+      vlog_node_t fe = vlog_get_type(felem);
+      if (fe != NULL)
+         ok = vlog_equivalent_elements(fe, aelem);
+   }
+
+   if (!ok)
+      error_at(vlog_loc(arg), "actual argument is not compatible with open "
+               "array argument '%s'", istr(vlog_ident(port)));
+}
+
 static void vlog_check_call_args(vlog_node_t v, vlog_node_t sub)
 {
    const int nparams = vlog_params(v);
@@ -1057,6 +1525,75 @@ static void vlog_check_call_args(vlog_node_t v, vlog_node_t sub)
    }
 
    const int minargs = nports - mask_popcount(&optmask);
+
+   int npositional = nparams;
+   for (int i = 0; i < nparams; i++) {
+      if (vlog_kind(vlog_param(v, i)) == V_NAMED_ARG) {
+         npositional = i;
+         break;
+      }
+   }
+
+   if (npositional < nparams) {
+      // Each argument by name must match a port that has no other value
+      for (int i = npositional; i < nparams; i++) {
+         vlog_node_t p = vlog_param(v, i);
+         if (vlog_kind(p) != V_NAMED_ARG) {
+            error_at(vlog_loc(p), "an argument by position cannot follow one "
+                     "by name");
+            return;
+         }
+
+         if (vlog_has_value(p))
+            vlog_check_expr(vlog_value(p));
+
+         bool found = false;
+         for (int j = npositional; j < nports; j++) {
+            vlog_node_t port = vlog_port(sub, j);
+            if (vlog_ident(port) != vlog_ident(p))
+               continue;
+
+            found = true;
+            if (vlog_has_value(p)) {
+               vlog_check_output_arg(port, vlog_value(p));
+               vlog_check_open_arg(sub, port, vlog_value(p));
+            }
+         }
+
+         if (!found) {
+            error_at(vlog_loc(p), "%pQ has no argument named %pQ that does "
+                     "not already have a value", vlog_ident(sub),
+                     vlog_ident(p));
+            return;
+         }
+      }
+
+      for (int i = 0; i < npositional && i < nports; i++) {
+         vlog_check_expr(vlog_param(v, i));
+         vlog_check_output_arg(vlog_port(sub, i), vlog_param(v, i));
+         vlog_check_open_arg(sub, vlog_port(sub, i), vlog_param(v, i));
+      }
+
+      for (int i = npositional; i < nports; i++) {
+         vlog_node_t port = vlog_port(sub, i);
+         bool found = vlog_has_value(port);
+         for (int j = npositional; j < nparams; j++) {
+            vlog_node_t p = vlog_param(v, j);
+            found |= vlog_ident(p) == vlog_ident(port) && vlog_has_value(p);
+         }
+
+         if (!found) {
+            diag_t *d = diag_new(DIAG_ERROR, vlog_loc(v));
+            diag_printf(d, "missing %pQ argument %pQ without a default value",
+                        vlog_ident(sub), vlog_ident(port));
+            diag_hint(d, vlog_loc(port), "%pQ declared here",
+                      vlog_ident(port));
+            diag_emit(d);
+         }
+      }
+
+      return;
+   }
 
    if (nparams > nports || nparams < minargs) {
       diag_t *d = diag_new(DIAG_ERROR, vlog_loc(v));
@@ -1080,6 +1617,8 @@ static void vlog_check_call_args(vlog_node_t v, vlog_node_t sub)
       if (i < nparams) {
          vlog_node_t p = vlog_param(v, i);
          vlog_check_expr(p);
+         vlog_check_output_arg(port, p);
+         vlog_check_open_arg(sub, port, p);
 
          if (vlog_kind(p) == V_EMPTY && !vlog_has_value(port)) {
             diag_t *d = diag_new(DIAG_ERROR, vlog_loc(v));
@@ -1128,6 +1667,10 @@ static void vlog_check_user_tcall(vlog_node_t v)
       diag_emit(d);
       return;
    }
+
+   if (in_function && vlog_kind(func) == V_TASK_DECL)
+      error_at(vlog_loc(v), "task '%s' cannot be called from a function as "
+               "functions must not block", istr(vlog_ident(func)));
 
    vlog_check_call_args(v, func);
    vlog_check_discarded(v, func);
@@ -1187,6 +1730,343 @@ static void vlog_check_timing(vlog_node_t v)
    vlog_check_stmts(v);
 }
 
+static void vlog_check_sva_operand(vlog_node_t v)
+{
+   const bool saved = in_sva_expr;
+   in_sva_expr = true;
+
+   switch (vlog_kind(v)) {
+   case V_SVA_OP:
+   case V_EVENT_CONTROL:
+      vlog_check(v);
+      break;
+   default:
+      vlog_check_expr(v);
+      break;
+   }
+
+   in_sva_expr = saved;
+}
+
+static bool sva_is_tracked_local(vlog_node_t d)
+{
+   switch (vlog_kind(d)) {
+   case V_VAR_DECL:
+   case V_TF_PORT_DECL:
+      return !!(vlog_flags(d) & VLOG_F_SVA_LOCAL);
+   default:
+      return false;
+   }
+}
+
+static void sva_abort_local_cb(vlog_node_t v, void *ctx)
+{
+   if (vlog_kind(v) == V_REF && vlog_has_ref(v)
+       && sva_is_tracked_local(vlog_ref(v)))
+      error_at(vlog_loc(v), "local variable '%s' cannot be used in %s",
+               istr(vlog_ident(v)), (const char *)ctx);
+}
+
+#define SVA_MAX_LOCALS 64
+
+typedef struct {
+   uint64_t asg;     // Assigned on every path
+   uint64_t both_and;  // Assigned in both operands of and
+   uint64_t both_int;  // Assigned in both operands of intersect
+} sva_flow_t;
+
+static A(vlog_node_t) sva_locals = AINIT;
+
+static int sva_local_index(vlog_node_t d)
+{
+   for (unsigned i = 0; i < sva_locals.count; i++) {
+      if (sva_locals.items[i] == d)
+         return i;
+   }
+
+   if (sva_locals.count == SVA_MAX_LOCALS)
+      return -1;
+
+   APUSH(sva_locals, d);
+   return sva_locals.count - 1;
+}
+
+static A(vlog_node_t) sva_skip = AINIT;
+
+static void sva_skip_args_cb(vlog_node_t v, void *ctx)
+{
+   vlog_node_t func = vlog_ref(v);
+   if (vlog_kind(func) != V_FUNC_DECL)
+      return;
+
+   const int nparams = MIN(vlog_params(v), vlog_ports(func));
+   for (int i = 0; i < nparams; i++) {
+      switch (vlog_subkind(vlog_port(func, i))) {
+      case V_PORT_OUTPUT:
+      case V_PORT_INOUT:
+      case V_PORT_REF:
+         APUSH(sva_skip, vlog_param(v, i));
+         break;
+      default:
+         break;
+      }
+   }
+}
+
+static void sva_flow_ref_cb(vlog_node_t v, void *ctx)
+{
+   sva_flow_t *st = ctx;
+
+   if (vlog_kind(v) != V_REF || !vlog_has_ref(v))
+      return;
+
+   vlog_node_t d = vlog_ref(v);
+   if (!sva_is_tracked_local(d))
+      return;
+
+   for (unsigned i = 0; i < sva_skip.count; i++) {
+      if (sva_skip.items[i] == v)
+         return;
+   }
+
+   const int idx = sva_local_index(d);
+   if (idx < 0)
+      return;
+
+   const uint64_t bit = UINT64_C(1) << idx;
+   if (st->both_and & bit)
+      error_at(vlog_loc(v), "local variable '%s' is assigned in both "
+               "operands of and and cannot be referenced after it",
+               istr(vlog_ident(v)));
+   else if (st->both_int & bit)
+      error_at(vlog_loc(v), "local variable '%s' is assigned in both "
+               "operands of intersect and cannot be referenced after it",
+               istr(vlog_ident(v)));
+   else if (!(st->asg & bit))
+      error_at(vlog_loc(v), "local variable '%s' may be unassigned here",
+               istr(vlog_ident(v)));
+}
+
+static void sva_flow_mark_decls(vlog_node_t decl, sva_flow_t *st)
+{
+   const int nports = vlog_ports(decl);
+   for (int i = 0; i < nports; i++) {
+      vlog_node_t p = vlog_port(decl, i);
+      if (sva_is_tracked_local(p)) {
+         const int idx = sva_local_index(p);
+         if (idx >= 0)
+            st->asg |= UINT64_C(1) << idx;
+      }
+   }
+
+   const int ndecls = vlog_decls(decl);
+   for (int i = 0; i < ndecls; i++) {
+      vlog_node_t d = vlog_decl(decl, i);
+      if (sva_is_tracked_local(d) && vlog_has_value(d)) {
+         const int idx = sva_local_index(d);
+         if (idx >= 0)
+            st->asg |= UINT64_C(1) << idx;
+      }
+   }
+}
+
+static void sva_visit_expr(vlog_node_t v, sva_flow_t *st)
+{
+   sva_skip.count = 0;
+   vlog_visit_only(v, sva_skip_args_cb, NULL, V_USER_FCALL);
+   vlog_visit(v, sva_flow_ref_cb, st);
+}
+
+static sva_flow_t sva_flow(vlog_node_t v, sva_flow_t st);
+
+static sva_flow_t sva_flow_join(sva_flow_t in, sva_flow_t a, sva_flow_t b,
+                                bool both)
+{
+   // Combine two operands which each started from the state "in"
+
+   sva_flow_t out = in;
+   out.both_and |= a.both_and | b.both_and;
+   out.both_int |= a.both_int | b.both_int;
+
+   if (both) {
+      out.asg = a.asg & b.asg;
+      return out;
+   }
+
+   out.asg = a.asg | b.asg;
+   return out;
+}
+
+static sva_flow_t sva_flow(vlog_node_t v, sva_flow_t st)
+{
+   switch (vlog_kind(v)) {
+   case V_SVA_OP:
+      break;
+   case V_EVENT_CONTROL:
+      return st;
+   default:
+      sva_visit_expr(v, &st);
+      return st;
+   }
+
+   const int nparams = vlog_params(v);
+
+   switch (vlog_subkind(v)) {
+   case V_SVA_OR:
+   case V_SVA_IF:
+      {
+         if (vlog_has_value(v))
+            sva_visit_expr(vlog_value(v), &st);
+
+         if (nparams < 2)
+            break;
+
+         const sva_flow_t a = sva_flow(vlog_param(v, 0), st);
+         const sva_flow_t b = sva_flow(vlog_param(v, 1), st);
+         return sva_flow_join(st, a, b, true);
+      }
+   case V_SVA_AND:
+   case V_SVA_INTERSECT:
+   case V_SVA_WITHIN:
+      {
+         if (nparams < 2)
+            break;
+
+         const sva_flow_t a = sva_flow(vlog_param(v, 0), st);
+         const sva_flow_t b = sva_flow(vlog_param(v, 1), st);
+         sva_flow_t out = sva_flow_join(st, a, b, false);
+
+         const uint64_t both =
+            (a.asg & ~st.asg) & (b.asg & ~st.asg);
+         out.asg &= ~both;
+         if (vlog_subkind(v) == V_SVA_AND)
+            out.both_and |= both;
+         else
+            out.both_int |= both;
+         return out;
+      }
+   case V_SVA_REPEAT:
+   case V_SVA_GOTO:
+   case V_SVA_NONCONS:
+      {
+         const sva_flow_t body = sva_flow(vlog_param(v, 0), st);
+         if (vlog_has_left(v) && vlog_kind(vlog_left(v)) == V_NUMBER
+             && number_is_defined(vlog_number(vlog_left(v)))
+             && number_integer(vlog_number(vlog_left(v))) == 0)
+            return sva_flow_join(st, st, body, true);
+         return body;
+      }
+   case V_SVA_MATCH:
+      {
+         st = sva_flow(vlog_param(v, 0), st);
+         for (int i = 1; i < nparams; i++) {
+            vlog_node_t item = vlog_param(v, i);
+            if (vlog_kind(item) == V_BASSIGN) {
+               vlog_node_t target = vlog_target(item);
+               sva_visit_expr(vlog_value(item), &st);
+               if (vlog_kind(target) == V_REF && vlog_has_ref(target)
+                   && sva_is_tracked_local(vlog_ref(target))) {
+                  const int idx = sva_local_index(vlog_ref(target));
+                  if (idx >= 0)
+                     st.asg |= UINT64_C(1) << idx;
+               }
+               else
+                  sva_visit_expr(target, &st);
+            }
+            else
+               sva_visit_expr(item, &st);
+         }
+         return st;
+      }
+   default:
+      break;
+   }
+
+   switch (vlog_subkind(v)) {
+   case V_SVA_ACCEPT_ON:
+   case V_SVA_REJECT_ON:
+   case V_SVA_SYNC_ACCEPT_ON:
+   case V_SVA_SYNC_REJECT_ON:
+   case V_SVA_DISABLE:
+   case V_SVA_CLOCKED:
+      break;
+   default:
+      if (vlog_has_value(v) && vlog_kind(vlog_value(v)) != V_EVENT_CONTROL)
+         sva_visit_expr(vlog_value(v), &st);
+      break;
+   }
+
+   for (int i = 0; i < nparams; i++)
+      st = sva_flow(vlog_param(v, i), st);
+
+   return st;
+}
+
+static void vlog_check_sva_flow(vlog_node_t decl)
+{
+   sva_locals.count = 0;
+
+   sva_flow_t st = {};
+   sva_flow_mark_decls(decl, &st);
+   (void)sva_flow(vlog_value(decl), st);
+
+   sva_locals.count = 0;
+}
+
+static void vlog_check_sva_op(vlog_node_t v)
+{
+   switch (vlog_subkind(v)) {
+   case V_SVA_ACCEPT_ON:
+   case V_SVA_REJECT_ON:
+   case V_SVA_SYNC_ACCEPT_ON:
+   case V_SVA_SYNC_REJECT_ON:
+      if (vlog_has_value(v))
+         vlog_visit(vlog_value(v), sva_abort_local_cb,
+                    (void *)"an abort condition");
+      break;
+   case V_SVA_DISABLE:
+      if (vlog_has_value(v))
+         vlog_visit(vlog_value(v), sva_abort_local_cb,
+                    (void *)"a disable iff condition");
+      break;
+   default:
+      break;
+   }
+
+   if (vlog_has_value(v))
+      vlog_check_sva_operand(vlog_value(v));
+
+   if (vlog_has_left(v))
+      vlog_check_expr(vlog_left(v));
+
+   if (vlog_has_right(v) && vlog_right(v) != vlog_left(v))
+      vlog_check_expr(vlog_right(v));
+
+   const int nparams = vlog_params(v);
+   for (int i = 0; i < nparams; i++) {
+      if (i > 0 && vlog_subkind(v) == V_SVA_MATCH) {
+         const bool saved = in_sva_expr;
+         in_sva_expr = false;
+         vlog_check(vlog_param(v, i));
+         in_sva_expr = saved;
+      }
+      else
+         vlog_check_sva_operand(vlog_param(v, i));
+   }
+}
+
+static void vlog_check_sva_decl(vlog_node_t v)
+{
+   const int nports = vlog_ports(v);
+   for (int i = 0; i < nports; i++)
+      vlog_check(vlog_port(v, i));
+
+   if (vlog_has_value(v)) {
+      vlog_check_sva_operand(vlog_value(v));
+      vlog_check_sva_flow(v);
+   }
+}
+
 static void vlog_check_prop_spec(vlog_node_t v)
 {
    if (vlog_has_target(v))
@@ -1196,6 +2076,18 @@ static void vlog_check_prop_spec(vlog_node_t v)
       vlog_check_expr(vlog_left(v));
 
    vlog_check_sva_operand(vlog_value(v));
+}
+
+static void vlog_check_assertion(vlog_node_t v)
+{
+   if (vlog_kind(vlog_value(v)) == V_PROP_SPEC)
+      vlog_check(vlog_value(v));
+   else
+      vlog_check_expr(vlog_value(v));
+
+   const int nconds = vlog_conds(v);
+   for (int i = 0; i < nconds; i++)
+      vlog_check_stmts(vlog_cond(v, i));
 }
 
 static void vlog_check_if(vlog_node_t v)
@@ -1241,6 +2133,44 @@ static void vlog_check_delay_control(vlog_node_t v)
    vlog_check_expr(vlog_value(v));
 }
 
+static void vlog_record_driver(hash_t *map, vlog_node_t target, bool cont)
+{
+   switch (vlog_kind(target)) {
+   case V_CONCAT:
+      {
+         const int nparams = vlog_params(target);
+         for (int i = 0; i < nparams; i++)
+            vlog_record_driver(map, vlog_param(target, i), cont);
+      }
+      break;
+   case V_REF:
+      {
+         if (!vlog_has_ref(target))
+            break;
+
+         vlog_node_t decl = vlog_ref(target);
+         if (vlog_kind(decl) != V_VAR_DECL
+             || (vlog_flags(decl) & VLOG_F_USERNET))
+            break;
+
+         const uintptr_t mask = cont ? 1 : 2;
+         const uintptr_t old = (uintptr_t)hash_get(map, decl);
+         if (old == (mask ^ 3))
+            error_at(vlog_loc(target), "variable %pQ cannot be written by "
+                     "both a continuous assignment and a procedural "
+                     "assignment", vlog_ident(decl));
+         else if (old == 1 && cont)
+            error_at(vlog_loc(target), "variable %pQ cannot be driven by "
+                     "more than one continuous assignment", vlog_ident(decl));
+
+         hash_put(map, decl, (void *)(old | mask));
+      }
+      break;
+   default:
+      break;
+   }
+}
+
 static void vlog_driver_cb(vlog_node_t v, void *ctx)
 {
    switch (vlog_kind(v)) {
@@ -1253,6 +2183,48 @@ static void vlog_driver_cb(vlog_node_t v, void *ctx)
       break;
    default:
       break;
+   }
+}
+
+typedef struct {
+   hash_t      *map;
+   vlog_node_t  proc;
+} ff_driver_t;
+
+static void vlog_ff_driver_cb(vlog_node_t v, void *ctx)
+{
+   ff_driver_t *d = ctx;
+
+   switch (vlog_kind(v)) {
+   case V_ASSIGN:
+   case V_BASSIGN:
+   case V_NBASSIGN:
+      break;
+   default:
+      return;
+   }
+
+   vlog_node_t target = vlog_target(v);
+   if (vlog_kind(target) != V_REF || !vlog_has_ref(target)
+       || vlog_kind(vlog_ref(target)) != V_VAR_DECL)
+      return;
+
+   vlog_node_t decl = vlog_ref(target);
+   vlog_node_t other = hash_get(d->map, decl);
+   if (other == NULL)
+      hash_put(d->map, decl, d->proc);
+   else if (other != d->proc) {
+      const bool ff = (vlog_kind(other) == V_ALWAYS
+                       && vlog_subkind(other) == V_ALWAYS_FF)
+         || (vlog_kind(d->proc) == V_ALWAYS
+             && vlog_subkind(d->proc) == V_ALWAYS_FF);
+      if (ff) {
+         diag_t *dg = diag_new(DIAG_ERROR, vlog_loc(target));
+         diag_printf(dg, "variable %pQ written in an always_ff process cannot "
+                     "be written by any other process", vlog_ident(decl));
+         diag_hint(dg, vlog_loc(other), "also written here");
+         diag_emit(dg);
+      }
    }
 }
 
@@ -1331,10 +2303,21 @@ static void vlog_check_mod_inst(vlog_node_t v)
       vlog_check(vlog_param(v, i));
 }
 
+static vlog_node_t interconnect_ok = NULL;
+
 static void vlog_check_port_conn(vlog_node_t v)
 {
-   if (vlog_has_value(v))
-      vlog_check_expr(vlog_value(v));
+   if (!vlog_has_value(v))
+      return;
+
+   // An interconnect can be connected whole or by a select
+   vlog_node_t root = vlog_value(v);
+   while (vlog_kind(root) == V_BIT_SELECT || vlog_kind(root) == V_PART_SELECT)
+      root = vlog_value(root);
+
+   interconnect_ok = root;
+   vlog_check_expr(vlog_value(v));
+   interconnect_ok = NULL;
 }
 
 static void vlog_check_param_assign(vlog_node_t v)
@@ -1390,11 +2373,40 @@ static type_mask_t vlog_check_member_ref(vlog_node_t v)
 {
    vlog_check_expr(vlog_value(v));
 
-   return get_type_mask(vlog_ref(v));
+   if (vlog_virtual_pending(v)) {
+      // The interface may be declared later
+      vlog_node_t decl = vlog_virtual_decl_or_null(v);
+      return decl != NULL ? get_type_mask(decl) : ~TM_CONST;
+   }
+   else if (!vlog_has_ref(v))
+      return TM_ERROR;   // Reported by the lookup
+
+   return get_type_mask(vlog_member_decl(v));
+}
+
+static bool vlog_is_interconnect(vlog_node_t d)
+{
+   switch (vlog_kind(d)) {
+   case V_NET_DECL:
+   case V_PORT_DECL:
+      {
+         if (!vlog_has_type(d))
+            return false;
+         vlog_node_t t = vlog_type(d);
+         return vlog_kind(t) == V_DATA_TYPE && (vlog_flags(t) & VLOG_F_USERNET);
+      }
+   default:
+      return false;
+   }
 }
 
 static type_mask_t vlog_check_ref(vlog_node_t v)
 {
+   if (v != interconnect_ok && vlog_has_ref(v)
+       && vlog_is_interconnect(vlog_ref(v)))
+      error_at(vlog_loc(v), "interconnect '%s' can only be used in a port "
+               "connection", istr(vlog_ident(v)));
+
    return get_type_mask(vlog_ref(v));
 }
 
@@ -1601,6 +2613,29 @@ static type_mask_t vlog_check_user_fcall(vlog_node_t v)
                 istr(vlog_ident(func)));
       diag_emit(d);
       return TM_ERROR;
+   }
+
+   if (in_sva_expr) {
+      const int nports = vlog_ports(func);
+      for (int i = 0; i < nports; i++) {
+         switch (vlog_subkind(vlog_port(func, i))) {
+         case V_PORT_OUTPUT:
+         case V_PORT_INOUT:
+            error_at(vlog_loc(v), "function '%s' with an output argument "
+                     "cannot be called in a sequence or property expression",
+                     istr(vlog_ident(func)));
+            i = nports;
+            break;
+         case V_PORT_REF:
+            error_at(vlog_loc(v), "function '%s' with a ref argument cannot "
+                     "be called in a sequence or property expression",
+                     istr(vlog_ident(func)));
+            i = nports;
+            break;
+         default:
+            break;
+         }
+      }
    }
 
    vlog_check_call_args(v, func);
@@ -1889,6 +2924,46 @@ static type_mask_t vlog_check_cond_expr(vlog_node_t v)
    return TM_INTEGRAL | (vmask & lmask & rmask & TM_CONST);
 }
 
+static type_mask_t vlog_check_cast_call(vlog_node_t v)
+{
+   // $cast ( singular_variable_lvalue , singular_expression )
+
+   const int nparams = vlog_params(v);
+   if (nparams != 2) {
+      error_at(vlog_loc(v), "$cast expects 2 arguments but has %d", nparams);
+      return TM_ERROR;
+   }
+
+   vlog_node_t dest = vlog_param(v, 0), src = vlog_param(v, 1);
+   const type_mask_t dmask = vlog_check_expr(dest);
+   const type_mask_t smask = vlog_check_expr(src);
+
+   vlog_check_variable_lvalue(dest, dest);
+
+   if (dmask == TM_ERROR || smask == TM_ERROR)
+      return TM(DT_INT);
+
+   if (dmask & TM_CLASS) {
+      // Casting between unrelated classes is allowed and simply fails
+      if (!(smask & TM_CLASS))
+         error_at(vlog_loc(src), "the source of $cast to a class handle must "
+                  "be a class handle");
+   }
+   else if (smask & TM_CLASS)
+      error_at(vlog_loc(src), "a class handle can only be cast to a class "
+               "handle");
+   else if (dmask == TM(DT_STRING) && (smask & (TM_INTEGRAL | TM(DT_STRING))))
+      ;   // Converted as string'() does (6.24.2)
+   else if ((dmask & TM_ARRAY) || (smask & TM_ARRAY))
+      error_at(vlog_loc(dest), "sorry, $cast to or from this type is not "
+               "supported");
+   else if ((dmask & (TM_STRUCT | TM_UNION)) || (smask & (TM_STRUCT | TM_UNION)))
+      error_at(vlog_loc(dest), "sorry, $cast to or from this type is not "
+               "supported");
+
+   return TM(DT_INT);
+}
+
 static type_mask_t vlog_check_sys_fcall(vlog_node_t v)
 {
    if (vlog_ident(v) == ident_new("$cast"))
@@ -2090,6 +3165,106 @@ static void vlog_check_integral(vlog_node_t v, const char *what)
    diag_emit(d);
 }
 
+static vlog_node_t vlog_real_operand(vlog_node_t v)
+{
+   switch (vlog_kind(v)) {
+   case V_BINARY:
+      if (vlog_is_real(vlog_left(v)))
+         return vlog_left(v);
+      else if (vlog_is_real(vlog_right(v)))
+         return vlog_right(v);
+      else {
+         vlog_node_t r = vlog_real_operand(vlog_left(v));
+         return r ?: vlog_real_operand(vlog_right(v));
+      }
+   case V_UNARY:
+      if (vlog_is_real(vlog_value(v)))
+         return vlog_value(v);
+      return vlog_real_operand(vlog_value(v));
+   default:
+      return NULL;
+   }
+}
+
+static void vlog_check_cons_integral(vlog_node_t v, const char *what)
+{
+   // Constraint expressions may only use integral operands (18.3)
+   const type_mask_t tmask = vlog_check_expr(v);
+   if (tmask == TM_ERROR)
+      return;
+
+   vlog_node_t real = NULL;
+   if (!(tmask & TM_INTEGRAL) || (real = vlog_real_operand(v)) != NULL) {
+      diag_t *d = diag_new(DIAG_ERROR, vlog_loc(v));
+      diag_printf(d, "%s must have an integral type", what);
+      if (real != NULL)
+         diag_hint(d, vlog_loc(real), "operand has type 'real'");
+      else
+         diag_hint(d, vlog_loc(v), "have '%s'", type_mask_str(tmask));
+      diag_emit(d);
+   }
+}
+
+static type_mask_t vlog_check_inside(vlog_node_t v)
+{
+   // A real or string value is compared with each item
+   const type_mask_t vmask = vlog_check_expr(vlog_value(v));
+   const type_mask_t scalar = TM_REAL | TM(DT_STRING);
+   bool is_scalar = vmask != TM_ERROR && !(vmask & TM_INTEGRAL)
+      && (vmask & scalar);
+
+   // A class handle is compared with handles or arrays of them
+   bool is_handle = vmask != TM_ERROR && !(vmask & TM_INTEGRAL)
+      && (vmask & TM_CLASS) && !(vmask & scalar);
+   const int nparams = vlog_params(v);
+   type_mask_t *masks LOCAL = xcalloc_array(nparams + 1, sizeof(type_mask_t));
+   for (int i = 0; i < nparams; i++) {
+      vlog_node_t p = vlog_param(v, i);
+      if (vlog_kind(p) == V_INSIDE_RANGE)
+         is_handle = false;
+      else {
+         masks[i] = vlog_check_expr(p);
+         is_handle = is_handle && (masks[i] == TM_ERROR
+            || (masks[i] & (TM_CLASS | TM(DT_DYNARRAY) | TM(DT_QUEUE))));
+      }
+   }
+
+   is_scalar |= is_handle;
+
+   if (vmask != TM_ERROR && !is_scalar && !(vmask & TM_INTEGRAL)) {
+      diag_t *d = diag_new(DIAG_ERROR, vlog_loc(vlog_value(v)));
+      diag_printf(d, "expression before inside must have an integral type");
+      diag_hint(d, vlog_loc(vlog_value(v)), "have '%s'", type_mask_str(vmask));
+      diag_emit(d);
+   }
+
+   for (int i = 0; i < nparams; i++) {
+      vlog_node_t p = vlog_param(v, i);
+      if (vlog_kind(p) == V_INSIDE_RANGE) {
+         if (is_scalar) {
+            vlog_check_expr(vlog_left(p));
+            vlog_check_expr(vlog_right(p));
+         }
+         else {
+            vlog_check_integral(vlog_left(p), "range bound");
+            vlog_check_integral(vlog_right(p), "range bound");
+         }
+         continue;
+      }
+
+      const type_mask_t tmask = masks[i];
+      if (tmask != TM_ERROR && !is_scalar
+          && !(tmask & (TM_INTEGRAL | TM(DT_DYNARRAY) | TM(DT_QUEUE)))) {
+         diag_t *d = diag_new(DIAG_ERROR, vlog_loc(p));
+         diag_printf(d, "inside set item must be integral or an array");
+         diag_hint(d, vlog_loc(p), "have '%s'", type_mask_str(tmask));
+         diag_emit(d);
+      }
+   }
+
+   return TM(DT_BIT);
+}
+
 static void vlog_find_randc_cb(vlog_node_t v, void *ctx)
 {
    switch (vlog_kind(v)) {
@@ -2150,6 +3325,68 @@ static type_mask_t vlog_check_dist(vlog_node_t v)
    }
 
    return TM(DT_BIT);
+}
+
+static void vlog_check_cons_item(vlog_node_t v)
+{
+   switch (vlog_kind(v)) {
+   case V_CONS_EXPR:
+      if (vlog_flags(v) & VLOG_F_DISABLE) {
+         vlog_node_t value = vlog_value(v);
+         (void)vlog_check_expr(value);
+
+         switch (vlog_kind(value)) {
+         case V_REF:
+         case V_MEMBER_REF:
+         case V_BIT_SELECT:
+            break;
+         default:
+            error_at(vlog_loc(value), "the operand of disable soft must be "
+                     "a random variable");
+            break;
+         }
+         break;
+      }
+
+      vlog_check_cons_integral(vlog_value(v), "constraint expression");
+      if ((vlog_flags(v) & VLOG_F_SOFT) && vlog_kind(vlog_value(v)) == V_DIST)
+         error_at(vlog_loc(v), "soft constraint cannot be used with dist");
+      else if (vlog_flags(v) & VLOG_F_SOFT)
+         vlog_check_no_randc(vlog_value(v), "in a soft constraint");
+      break;
+   case V_CONS_IMPLY:
+      vlog_check_cons_integral(vlog_value(v), "implication condition");
+      vlog_check_cons_items(v);
+      break;
+   case V_CONS_IF:
+      vlog_check_cons_integral(vlog_value(v), "condition");
+      vlog_check_cons_item(vlog_left(v));
+      if (vlog_has_right(v))
+         vlog_check_cons_item(vlog_right(v));
+      break;
+   case V_CONS_BLOCK:
+      vlog_check_cons_items(v);
+      break;
+   case V_CONS_FOREACH:
+      (void)vlog_check_expr(vlog_value(v));
+      vlog_check_cons_items(v);
+      break;
+   case V_CONS_UNIQUE:
+      {
+         const int nparams = vlog_params(v);
+         for (int i = 0; i < nparams; i++)
+            (void)vlog_check_expr(vlog_param(v, i));
+      }
+      break;
+   case V_CONS_SOLVE:
+      (void)vlog_check_expr(vlog_left(v));
+      (void)vlog_check_expr(vlog_right(v));
+      vlog_check_no_randc(vlog_left(v), "in a solve before constraint");
+      vlog_check_no_randc(vlog_right(v), "in a solve before constraint");
+      break;
+   default:
+      CANNOT_HANDLE(v);
+   }
 }
 
 static void vlog_check_cons_items(vlog_node_t v)
@@ -2599,6 +3836,168 @@ static void vlog_find_return_cb(vlog_node_t v, void *context)
       *(bool *)context = true;
 }
 
+static void vlog_check_virtual_override(vlog_node_t class, vlog_node_t d)
+{
+   // A method which overrides a virtual method must have the same
+   // number of arguments, argument names and directions and return type
+
+   for (vlog_node_t c = class; vlog_has_ref(c); ) {
+      c = vlog_ref(c);
+
+      const int nbase = vlog_decls(c);
+      for (int i = 0; i < nbase; i++) {
+         vlog_node_t b = vlog_decl(c, i);
+         if (vlog_ident(b) != vlog_ident(d))
+            continue;
+         else if (vlog_kind(b) != V_FUNC_DECL && vlog_kind(b) != V_TASK_DECL)
+            continue;
+         else if (!(vlog_flags(b) & (VLOG_F_VIRTUAL | VLOG_F_PURE)))
+            return;
+         else if (vlog_kind(b) != vlog_kind(d)) {
+            diag_t *dg = diag_new(DIAG_ERROR, vlog_loc(d));
+            diag_printf(dg, "%s %pQ in class %pQ cannot override %s in "
+                        "superclass %pQ",
+                        vlog_kind(d) == V_TASK_DECL ? "task" : "function",
+                        vlog_ident(d), vlog_ident(class),
+                        vlog_kind(b) == V_TASK_DECL ? "task" : "function",
+                        vlog_ident(c));
+            diag_hint(dg, vlog_loc(b), "declared here");
+            diag_emit(dg);
+            return;
+         }
+
+         if (vlog_ports(b) != vlog_ports(d) || !vlog_same_result(d, b)) {
+            diag_t *dg = diag_new(DIAG_ERROR, vlog_loc(d));
+            diag_printf(dg, "virtual method %pQ has a different number of "
+                        "arguments or return type than the method in class "
+                        "%pQ", vlog_ident(d), vlog_ident(c));
+            diag_hint(dg, vlog_loc(b), "declared here");
+            diag_emit(dg);
+            return;
+         }
+
+         const int nports = vlog_ports(d);
+         for (int j = 0; j < nports; j++) {
+            vlog_node_t pd = vlog_port(d, j), pb = vlog_port(b, j);
+            if (vlog_ident(pd) != vlog_ident(pb)) {
+               diag_t *dg = diag_new(DIAG_ERROR, vlog_loc(pd));
+               diag_printf(dg, "argument name %pQ for virtual method %pQ in "
+                           "class %pQ does not match the argument name %pQ in "
+                           "superclass %pQ", vlog_ident(pd), vlog_ident(d),
+                           vlog_ident(class), vlog_ident(pb), vlog_ident(c));
+               diag_hint(dg, vlog_loc(pb), "declared here");
+               diag_emit(dg);
+            }
+            else if (get_type_mask(vlog_type(pd))
+                     != get_type_mask(vlog_type(pb))) {
+               diag_t *dg = diag_new(DIAG_ERROR, vlog_loc(pd));
+               diag_printf(dg, "type of argument %pQ of virtual method %pQ in "
+                           "class %pQ does not match the type of the argument "
+                           "in superclass %pQ", vlog_ident(pd), vlog_ident(d),
+                           vlog_ident(class), vlog_ident(c));
+               diag_hint(dg, vlog_loc(pb), "declared here");
+               diag_emit(dg);
+            }
+            else if (vlog_subkind(pd) != vlog_subkind(pb)) {
+               diag_t *dg = diag_new(DIAG_ERROR, vlog_loc(pd));
+               diag_printf(dg, "direction of argument %pQ for virtual method "
+                           "%pQ in class %pQ does not match the direction in "
+                           "superclass %pQ", vlog_ident(pd), vlog_ident(d),
+                           vlog_ident(class), vlog_ident(c));
+               diag_hint(dg, vlog_loc(pb), "declared here");
+               diag_emit(dg);
+            }
+         }
+
+         return;
+      }
+   }
+}
+
+static void vlog_check_class_protos(vlog_node_t v)
+{
+   // Prototypes must be defined in the same scope as the class and a pure
+   // constraint is implemented by a class derived from the one declaring it
+
+   const int ndecls = vlog_decls(v);
+   for (int i = 0; i < ndecls; i++) {
+      vlog_node_t d = vlog_decl(v, i);
+      switch (vlog_kind(d)) {
+      case V_FUNC_DECL:
+      case V_TASK_DECL:
+      case V_CONSTRUCTOR:
+      case V_CONSTRAINT:
+         break;
+      default:
+         continue;
+      }
+
+      static const char *const builtin[] = {
+         "randomize", "rand_mode", "constraint_mode", "srandom",
+         "get_randstate", "set_randstate",
+      };
+
+      if (vlog_kind(d) != V_CONSTRAINT) {
+         for (int j = 0; j < ARRAY_LEN(builtin); j++) {
+            if (vlog_ident(d) == ident_new(builtin[j]))
+               error_at(vlog_loc(d), "built-in method %pQ cannot be "
+                        "overridden", vlog_ident(d));
+         }
+      }
+
+      if ((vlog_kind(d) == V_FUNC_DECL || vlog_kind(d) == V_TASK_DECL)
+          && vlog_has_ref(v))
+         vlog_check_virtual_override(v, d);
+
+      if ((vlog_kind(d) == V_FUNC_DECL || vlog_kind(d) == V_TASK_DECL)
+          && (vlog_flags(d) & VLOG_F_PURE)
+          && !(vlog_flags(v) & VLOG_F_VIRTUAL))
+         error_at(vlog_loc(d), "a pure virtual method can only be declared "
+                  "in a virtual class");
+
+      if (vlog_flags(d) & VLOG_F_EXTERN) {
+         // The block of an implicit prototype is empty if it is not defined
+         const bool implicit = vlog_kind(d) == V_CONSTRAINT
+            && (vlog_flags(d) & VLOG_F_IMPLICIT);
+
+         diag_t *dg = diag_new(implicit ? DIAG_WARN : DIAG_ERROR, vlog_loc(d));
+         diag_printf(dg, "%s %pQ of class %pQ is declared %s but is "
+                     "never defined", vlog_kind(d) == V_CONSTRAINT
+                     ? "constraint" : "method", vlog_ident(d), vlog_ident(v),
+                     implicit ? "without a block" : "extern");
+         diag_hint(dg, vlog_loc(d), "declared here");
+         diag_emit(dg);
+      }
+      else if (vlog_kind(d) == V_CONSTRAINT && (vlog_flags(d) & VLOG_F_PURE)
+               && !(vlog_flags(v) & VLOG_F_VIRTUAL))
+         error_at(vlog_loc(d), "a pure constraint can only be declared in a "
+                  "virtual class");
+   }
+
+   if (vlog_flags(v) & VLOG_F_VIRTUAL)
+      return;
+
+   for (vlog_node_t c = v; vlog_has_ref(c); ) {
+      c = vlog_ref(c);
+
+      const int nbase = vlog_decls(c);
+      for (int i = 0; i < nbase; i++) {
+         vlog_node_t d = vlog_decl(c, i);
+         if (vlog_kind(d) != V_CONSTRAINT || !(vlog_flags(d) & VLOG_F_PURE))
+            continue;
+
+         vlog_node_t impl = vlog_class_member(v, vlog_ident(d));
+         if (impl == NULL || (vlog_flags(impl) & VLOG_F_PURE)) {
+            diag_t *dg = diag_new(DIAG_ERROR, vlog_loc(v));
+            diag_printf(dg, "class %pQ does not implement the pure "
+                        "constraint %pQ", vlog_ident(v), vlog_ident(d));
+            diag_hint(dg, vlog_loc(d), "declared here");
+            diag_emit(dg);
+         }
+      }
+   }
+}
+
 static void vlog_check_class(vlog_node_t v)
 {
    vlog_check_decls(v);
@@ -2627,8 +4026,15 @@ void vlog_check(vlog_node_t v)
       break;
    case V_PACKAGE:
    case V_NAMESPACE:
-   case V_CLASS_DECL:
       vlog_check_decls(v);
+      break;
+   case V_BIND:
+      vlog_check_stmts(v);
+      break;
+   case V_CONFIG:
+      break;
+   case V_CLASS_DECL:
+      vlog_check_class(v);
       break;
    case V_NET_DECL:
       vlog_check_net_decl(v);
@@ -2804,11 +4210,82 @@ void vlog_check(vlog_node_t v)
       vlog_check_specify(v);
       break;
    case V_IMPORT_DECL:
+   case V_DPI_EXPORT:
    case V_DISABLE:
    case V_LOOP_JUMP:
       break;
    case V_ASSERT:
    case V_ASSUME:
+   case V_COVER:
+      vlog_check_assertion(v);
+      break;
+   case V_SVA_OP:
+      vlog_check_sva_op(v);
+      break;
+   case V_SVA_DECL:
+      vlog_check_sva_decl(v);
+      break;
+   case V_PROP_SPEC:
+      vlog_check_prop_spec(v);
+      break;
+   case V_FORK_CTRL:
+      if (in_function && vlog_subkind(v) == V_FORK_WAIT)
+         error_at(vlog_loc(v), "wait fork cannot be used in a function as "
+                  "functions must not block");
+      break;
+   case V_FORK:
+      {
+         const bool blocks = vlog_subkind(v) != V_FORK_JOIN_NONE;
+         if (in_function && blocks)
+            error_at(vlog_loc(v), "fork in a function must use join_none as "
+                     "functions must not block");
+
+         vlog_check_decls(v);
+
+         bool found_return = false;
+         vlog_visit(v, vlog_find_return_cb, &found_return);
+         if (found_return)
+            error_at(vlog_loc(v), "a return statement is not allowed inside "
+                     "a fork block");
+
+         // The statements of a fork run in their own processes
+         const bool was_in_function = in_function;
+         in_function = false;
+         vlog_check_stmts(v);
+         in_function = was_in_function;
+      }
+      break;
+   case V_METHOD_CALL:
+      (void)vlog_check_expr(v);
+      if ((vlog_subkind(v) == V_METHOD_USER
+           || vlog_subkind(v) == V_METHOD_CLASS) && vlog_has_ref(v))
+         vlog_check_discarded(v, vlog_ref(v));
+      break;
+   case V_MEMBER_REF:
+   case V_STD_RANDOMIZE:
+      (void)vlog_check_expr(v);
+      break;
+   case V_CONSTRAINT:
+      vlog_check_cons_items(v);
+      break;
+   case V_RANDCASE:
+      vlog_check_stmts(v);
+      break;
+   case V_RANDCASE_ITEM:
+      vlog_check_integral(vlog_value(v), "randcase weight");
+      vlog_check_stmts(v);
+      break;
+   case V_EVENT_TRIGGER:
+      {
+         vlog_node_t value = vlog_value(v);
+         if (vlog_check_expr(value)) {
+            vlog_node_t type = vlog_get_type(value);
+            if (type != NULL && vlog_kind(type) == V_DATA_TYPE
+                && vlog_subkind(type) != DT_EVENT)
+               error_at(vlog_loc(value), "'%s' is not an event",
+                        istr(vlog_ident(v)));
+         }
+      }
       break;
    case V_DEFPARAM:
       vlog_check_defparam(v);

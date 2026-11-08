@@ -1,3 +1,4 @@
+`timescale 1fs/1fs
 module wave13;
   reg [7:0] x;
   reg       y;

@@ -152,6 +152,55 @@ void vlog_symtab_push(vlog_symtab_t *st, vlog_node_t v)
    st->top = s;
 }
 
+void vlog_symtab_push_members(vlog_symtab_t *st, vlog_node_t class,
+                              const ident_t *only, int nonly)
+{
+   // Names declared in the class or inherited from a base class hide
+   // those in the enclosing scopes: used for inline constraints.  If
+   // only is not NULL then just those names are visible.
+
+   vlog_symtab_push(st, class);
+
+   for (vlog_node_t c = class; ; c = vlog_ref(c)) {
+      const int ndecls = vlog_decls(c);
+      for (int i = 0; i < ndecls; i++) {
+         vlog_node_t d = vlog_decl(c, i);
+         if (vlog_kind(d) == V_TYPE_DECL && only == NULL
+             && vlog_ident(d) != ident_new("$implements")
+             && vlog_kind(vlog_type(d)) == V_ENUM_DECL) {
+            // The names of an enumeration declared in the class
+            vlog_node_t et = vlog_type(d);
+            const int nnames = vlog_decls(et);
+            for (int j = 0; j < nnames; j++) {
+               vlog_node_t n = vlog_decl(et, j);
+               vlog_symbol_t *sym = fresh_symbol_for(st, vlog_ident(n));
+               if (sym->node == NULL)
+                  sym->node = n;
+            }
+            continue;
+         }
+
+         if (vlog_kind(d) != V_VAR_DECL)
+            continue;
+
+         if (only != NULL) {
+            int j = 0;
+            for (; j < nonly && only[j] != vlog_ident(d); j++)
+               ;
+            if (j == nonly)
+               continue;
+         }
+
+         vlog_symbol_t *sym = fresh_symbol_for(st, vlog_ident(d));
+         if (sym->node == NULL)
+            sym->node = d;
+      }
+
+      if (!vlog_has_ref(c))
+         break;
+   }
+}
+
 static bool is_enclosing_module(const vlog_scope_t *scope, vlog_node_t v)
 {
    // The name of the module can be used in the arguments of a system task
@@ -176,6 +225,58 @@ static bool is_subroutine(vlog_node_t container)
    }
 }
 
+static void check_forward_ref(vlog_node_t v, vlog_node_t d)
+{
+   // As an extension, an argument of a system task or function may refer
+   // to a variable, net or parameter declared later, which the LRM only
+   // allows for hierarchical names (23.6)
+
+   if (vlog_kind(v) != V_REF)
+      return;
+
+   switch (vlog_kind(d)) {
+   case V_VAR_DECL:
+   case V_NET_DECL:
+   case V_PORT_DECL:
+   case V_TF_PORT_DECL:
+   case V_LOCAL_DECL:
+   case V_PARAM_DECL:
+   case V_LOCALPARAM:
+   case V_GENVAR_DECL:
+      break;
+   default:
+      return;
+   }
+
+   diag_t *dg = diag_new(DIAG_WARN, vlog_loc(v));
+   diag_printf(dg, "%pQ is used before its declaration", vlog_ident(v));
+   diag_hint(dg, vlog_loc(v), "used here");
+   diag_hint(dg, vlog_loc(d), "declared here");
+   diag_emit(dg);
+}
+
+void vlog_symtab_resolve_deferred(vlog_symtab_t *st)
+{
+   // Names used in subroutines of the compilation unit scope may be
+   // declared after the subroutine
+
+   for (int i = 0; i < st->top->deferred.count; i++) {
+      vlog_node_t v = st->top->deferred.items[i];
+      vlog_node_t d = vlog_symtab_query(st, vlog_ident(v));
+      if (d != NULL) {
+         check_forward_ref(v, d);
+         vlog_set_ref(v, d);
+      }
+      else if (vlog_kind(v) != V_MOD_REF) {
+         ident_t name = vlog_ident(v);
+         error_at(vlog_loc(v), "no visible declaration for %pQ", name);
+         vlog_symtab_poison(st, name);
+      }
+   }
+
+   ACLEAR(st->top->deferred);
+}
+
 void vlog_symtab_pop(vlog_symtab_t *st)
 {
    assert(st->top != NULL);
@@ -184,8 +285,12 @@ void vlog_symtab_pop(vlog_symtab_t *st)
    for (int i = 0; i < st->top->deferred.count; i++) {
       vlog_node_t v = st->top->deferred.items[i];
       vlog_node_t d = vlog_symtab_query(st, vlog_ident(v));
-      if (d != NULL)
+      if (d != NULL) {
+         check_forward_ref(v, d);
          vlog_set_ref(v, d);
+      }
+      else if (vlog_kind(v) == V_REF && is_enclosing_module(st->top, v))
+         vlog_set_ref(v, st->top->container);
       else
          st->top->deferred.items[wptr++] = v;
    }
@@ -441,6 +546,58 @@ static vlog_method_t get_builtin_method(vlog_symtab_t *st, vlog_kind_t kind,
    return b->method;
 }
 
+static bool lookup_rand_method(vlog_node_t v, vlog_node_t prefix)
+{
+   // Methods which are built in to every class, random variable, or
+   // constraint
+
+   ident_t id = vlog_ident(v);
+   vlog_node_t type = vlog_get_type(prefix);
+   const bool is_class = type != NULL && vlog_kind(type) == V_CLASS_DECL;
+
+   vlog_node_t decl = NULL;
+   switch (vlog_kind(prefix)) {
+   case V_REF:
+   case V_MEMBER_REF:
+      if (vlog_has_ref(prefix))
+         decl = vlog_ref(prefix);
+      break;
+   default:
+      break;
+   }
+
+   if (id == ident_new("randomize")) {
+      if (!is_class)
+         return false;
+
+      vlog_set_subkind(v, V_METHOD_RANDOMIZE);
+      return true;
+   }
+   else if (id == ident_new("rand_mode")) {
+      const bool is_rand = decl != NULL && vlog_kind(decl) == V_VAR_DECL
+         && (vlog_flags(decl) & (VLOG_F_RAND | VLOG_F_RANDC));
+
+      if (!is_class && !is_rand && (decl != NULL || type != NULL))
+         error_at(vlog_loc(prefix), "rand_mode can only be called on an "
+                  "object or a random variable");
+
+      vlog_set_subkind(v, V_METHOD_RAND_MODE);
+      return true;
+   }
+   else if (id == ident_new("constraint_mode")) {
+      const bool is_cons = decl != NULL && vlog_kind(decl) == V_CONSTRAINT;
+
+      if (!is_class && !is_cons && (decl != NULL || type != NULL))
+         error_at(vlog_loc(prefix), "constraint_mode can only be called on "
+                  "an object or a constraint");
+
+      vlog_set_subkind(v, V_METHOD_CONSTRAINT_MODE);
+      return true;
+   }
+
+   return false;
+}
+
 static vlog_node_t make_atom_type(data_type_t dt, int width, vlog_flags_t flags,
                                   const loc_t *loc)
 {
@@ -472,6 +629,129 @@ static vlog_node_t make_queue_type(vlog_node_t elem, const loc_t *loc)
    return t;
 }
 
+static bool lookup_array_method(vlog_node_t v, vlog_node_t prefix,
+                                vlog_node_t type)
+{
+   static const struct {
+      const char    *name;
+      vlog_method_t  method;
+   } tab[] = {
+      { "reverse",          V_METHOD_ARR_REVERSE },
+      { "sort",             V_METHOD_ARR_SORT },
+      { "rsort",            V_METHOD_ARR_RSORT },
+      { "shuffle",          V_METHOD_ARR_SHUFFLE },
+      { "sum",              V_METHOD_ARR_SUM },
+      { "product",          V_METHOD_ARR_PRODUCT },
+      { "and",              V_METHOD_ARR_AND },
+      { "or",               V_METHOD_ARR_OR },
+      { "xor",              V_METHOD_ARR_XOR },
+      { "min",              V_METHOD_ARR_MIN },
+      { "max",              V_METHOD_ARR_MAX },
+      { "unique",           V_METHOD_ARR_UNIQUE },
+      { "unique_index",     V_METHOD_ARR_UNIQUE_INDEX },
+      { "find",             V_METHOD_ARR_FIND },
+      { "find_index",       V_METHOD_ARR_FIND_INDEX },
+      { "find_first",       V_METHOD_ARR_FIND_FIRST },
+      { "find_first_index", V_METHOD_ARR_FIND_FIRST_INDEX },
+      { "find_last",        V_METHOD_ARR_FIND_LAST },
+      { "find_last_index",  V_METHOD_ARR_FIND_LAST_INDEX },
+      { "insert",           V_METHOD_ARR_INSERT },
+   };
+
+   vlog_node_t elem;
+   bool is_queue = false, is_assoc = false;
+   if (vlog_kind(type) == V_DATA_TYPE && vlog_subkind(type) == DT_QUEUE) {
+      elem = vlog_type(type);
+      is_queue = true;
+   }
+   else if (vlog_kind(type) == V_DATA_TYPE && vlog_subkind(type) == DT_DYNARRAY)
+      elem = vlog_type(type);
+   else if (vlog_kind(type) == V_DATA_TYPE && vlog_subkind(type) == DT_ASSOC) {
+      elem = vlog_type(type);
+      is_assoc = true;
+   }
+   else if ((vlog_kind(prefix) == V_REF || vlog_kind(prefix) == V_MEMBER_REF)
+            && vlog_has_ref(prefix) && vlog_is_fixed_unpacked(vlog_ref(prefix)))
+      elem = type;
+   else
+      return false;
+
+   vlog_method_t m = V_METHOD_USER;
+   for (int i = 0; i < ARRAY_LEN(tab); i++) {
+      if (vlog_ident(v) == ident_new(tab[i].name))
+         m = tab[i].method;
+   }
+
+   if (m == V_METHOD_USER || (m == V_METHOD_ARR_INSERT && !is_queue))
+      return false;
+
+   if (is_assoc) {
+      switch (m) {
+      case V_METHOD_ARR_FIND:
+      case V_METHOD_ARR_FIND_INDEX:
+      case V_METHOD_ARR_FIND_FIRST:
+      case V_METHOD_ARR_FIND_FIRST_INDEX:
+      case V_METHOD_ARR_FIND_LAST:
+      case V_METHOD_ARR_FIND_LAST_INDEX:
+      case V_METHOD_ARR_SUM:
+      case V_METHOD_ARR_PRODUCT:
+      case V_METHOD_ARR_AND:
+      case V_METHOD_ARR_OR:
+      case V_METHOD_ARR_XOR:
+      case V_METHOD_ARR_MIN:
+      case V_METHOD_ARR_MAX:
+      case V_METHOD_ARR_UNIQUE:
+      case V_METHOD_ARR_UNIQUE_INDEX:
+         break;
+      default:
+         return false;
+      }
+   }
+
+   vlog_set_subkind(v, m);
+
+   const loc_t *loc = vlog_loc(v);
+   const bool has_with = vlog_stmts(v) == 3;
+
+   switch (m) {
+   case V_METHOD_ARR_SUM:
+   case V_METHOD_ARR_PRODUCT:
+   case V_METHOD_ARR_AND:
+   case V_METHOD_ARR_OR:
+   case V_METHOD_ARR_XOR:
+      if (has_with)
+         vlog_set_ref(v, make_atom_type(DT_INT, 32, VLOG_F_SIGNED, loc));
+      else
+         vlog_set_ref(v, elem);
+      break;
+   case V_METHOD_ARR_MIN:
+   case V_METHOD_ARR_MAX:
+   case V_METHOD_ARR_UNIQUE:
+   case V_METHOD_ARR_FIND:
+   case V_METHOD_ARR_FIND_FIRST:
+   case V_METHOD_ARR_FIND_LAST:
+      vlog_set_ref(v, make_queue_type(elem, loc));
+      break;
+   case V_METHOD_ARR_UNIQUE_INDEX:
+   case V_METHOD_ARR_FIND_INDEX:
+   case V_METHOD_ARR_FIND_FIRST_INDEX:
+   case V_METHOD_ARR_FIND_LAST_INDEX:
+      {
+         // The indices of an associative array are its keys
+         vlog_node_t key = is_assoc ? vlog_assoc_key(type) : NULL;
+         vlog_set_ref(v, make_queue_type(
+                         key != NULL ? key
+                         : make_atom_type(DT_INT, 32, VLOG_F_SIGNED, loc),
+                         loc));
+      }
+      break;
+   default:
+      break;
+   }
+
+   return true;
+}
+
 static void lookup_method_call(vlog_symtab_t *st, vlog_node_t v)
 {
    vlog_node_t prefix = vlog_value(v), type = vlog_get_type(prefix);
@@ -484,12 +764,149 @@ static void lookup_method_call(vlog_symtab_t *st, vlog_node_t v)
    }
 
    const vlog_kind_t kind = vlog_kind(type);
-   if (kind == V_CLASS_DECL) {
-      error_at(vlog_loc(v), "sorry, class method calls are not yet supported");
+
+   if (kind == V_CLASS_DECL
+       || (kind == V_DATA_TYPE && vlog_subkind(type) == DT_PROCESS)) {
+      // Every class and process has these
+      ident_t id = vlog_ident(v);
+      if (id == ident_new("srandom")) {
+         vlog_set_subkind(v, V_METHOD_SRANDOM);
+         return;
+      }
+      else if (id == ident_new("set_randstate")) {
+         vlog_set_subkind(v, V_METHOD_RANDSTATE_SET);
+         return;
+      }
+      else if (id == ident_new("get_randstate")) {
+         vlog_node_t str = vlog_new(V_DATA_TYPE);
+         vlog_set_subkind(str, DT_STRING);
+         vlog_set_loc(str, vlog_loc(v));
+         vlog_set_ref(v, str);
+         vlog_set_subkind(v, V_METHOD_RANDSTATE_GET);
+         return;
+      }
+   }
+
+   if (kind == V_DATA_TYPE && vlog_subkind(type) == DT_VIRTUAL) {
+      if (!vlog_has_ref(type)) {
+         vlog_set_subkind(v, V_METHOD_CLASS);   // Interface is declared later
+         return;
+      }
+
+      vlog_node_t iface = vlog_ref(type);
+      const int ndecls = vlog_decls(iface);
+      for (int i = 0; i < ndecls; i++) {
+         vlog_node_t d = vlog_decl(iface, i);
+         const vlog_kind_t dk = vlog_kind(d);
+         if ((dk == V_FUNC_DECL || dk == V_TASK_DECL)
+             && vlog_ident(d) == vlog_ident(v)) {
+            vlog_set_ref(v, d);
+            vlog_set_subkind(v, V_METHOD_CLASS);
+            return;
+         }
+      }
+
+      error_at(vlog_loc(v), "interface has no method named %pQ",
+               vlog_ident(v));
+      return;
+   }
+   else if (kind == V_CLASS_DECL) {
+      vlog_node_t m = vlog_class_member(type, vlog_ident(v));
+      if (m == NULL && (vlog_ident(v) == ident_new("pre_randomize")
+                        || vlog_ident(v) == ident_new("post_randomize")))
+         vlog_set_subkind(v, V_METHOD_NOP);   // The built-in hook does nothing
+      else if (m == NULL || (vlog_kind(m) != V_FUNC_DECL
+                        && vlog_kind(m) != V_TASK_DECL))
+         error_at(vlog_loc(v), "class %pQ has no method named %pQ",
+                  vlog_ident(type), vlog_ident(v));
+      else {
+         vlog_set_ref(v, m);
+         vlog_set_subkind(v, V_METHOD_CLASS);
+      }
       return;
    }
 
-   vlog_method_t m = get_builtin_method(st, kind, vlog_ident(v));
+   if (lookup_array_method(v, prefix, type))
+      return;
+
+   vlog_method_t m;
+   if (kind == V_DATA_TYPE) {
+      static const struct {
+         const char    *name;
+         data_type_t    dt;
+         vlog_method_t  method;
+      } tab[] = {
+         { "size",       DT_DYNARRAY, V_METHOD_SIZE },
+         { "delete",     DT_DYNARRAY, V_METHOD_DELETE },
+         { "size",       DT_ASSOC,    V_METHOD_SIZE },
+         { "num",        DT_ASSOC,    V_METHOD_SIZE },
+         { "delete",     DT_ASSOC,    V_METHOD_DELETE },
+         { "exists",     DT_ASSOC,    V_METHOD_ASSOC_EXISTS },
+         { "first",      DT_ASSOC,    V_METHOD_ASSOC_FIRST },
+         { "last",       DT_ASSOC,    V_METHOD_ASSOC_LAST },
+         { "next",       DT_ASSOC,    V_METHOD_ASSOC_NEXT },
+         { "prev",       DT_ASSOC,    V_METHOD_ASSOC_PREV },
+         { "size",       DT_QUEUE,    V_METHOD_SIZE },
+         { "delete",     DT_QUEUE,    V_METHOD_DELETE },
+         { "push_back",  DT_QUEUE,    V_METHOD_PUSH_BACK },
+         { "push_front", DT_QUEUE,    V_METHOD_PUSH_FRONT },
+         { "pop_back",   DT_QUEUE,    V_METHOD_POP_BACK },
+         { "pop_front",  DT_QUEUE,    V_METHOD_POP_FRONT },
+         { "triggered",  DT_EVENT,    V_METHOD_EVENT_TRIGGERED },
+         { "status",     DT_PROCESS,  V_METHOD_PROC_STATUS },
+         { "kill",       DT_PROCESS,  V_METHOD_PROC_KILL },
+         { "await",      DT_PROCESS,  V_METHOD_PROC_AWAIT },
+         { "suspend",    DT_PROCESS,  V_METHOD_PROC_SUSPEND },
+         { "resume",     DT_PROCESS,  V_METHOD_PROC_RESUME },
+         { "get",        DT_SEMAPHORE, V_METHOD_SEM_GET },
+         { "put",        DT_SEMAPHORE, V_METHOD_SEM_PUT },
+         { "try_get",    DT_SEMAPHORE, V_METHOD_SEM_TRY_GET },
+         { "put",        DT_MAILBOX,  V_METHOD_MBOX_PUT },
+         { "get",        DT_MAILBOX,  V_METHOD_MBOX_GET },
+         { "try_get",    DT_MAILBOX,  V_METHOD_MBOX_TRY_GET },
+         { "num",        DT_MAILBOX,  V_METHOD_MBOX_NUM },
+         { "try_put",    DT_MAILBOX,  V_METHOD_MBOX_TRY_PUT },
+         { "peek",       DT_MAILBOX,  V_METHOD_MBOX_PEEK },
+         { "try_peek",   DT_MAILBOX,  V_METHOD_MBOX_TRY_PEEK },
+         { "len",        DT_STRING,   V_METHOD_STR_LEN },
+         { "putc",       DT_STRING,   V_METHOD_STR_PUTC },
+         { "getc",       DT_STRING,   V_METHOD_STR_GETC },
+         { "toupper",    DT_STRING,   V_METHOD_STR_TOUPPER },
+         { "tolower",    DT_STRING,   V_METHOD_STR_TOLOWER },
+         { "compare",    DT_STRING,   V_METHOD_STR_COMPARE },
+         { "icompare",   DT_STRING,   V_METHOD_STR_ICOMPARE },
+         { "substr",     DT_STRING,   V_METHOD_STR_SUBSTR },
+         { "atoi",       DT_STRING,   V_METHOD_STR_ATOI },
+         { "atohex",     DT_STRING,   V_METHOD_STR_ATOHEX },
+         { "atooct",     DT_STRING,   V_METHOD_STR_ATOOCT },
+         { "atobin",     DT_STRING,   V_METHOD_STR_ATOBIN },
+         { "atoreal",    DT_STRING,   V_METHOD_STR_ATOREAL },
+         { "itoa",       DT_STRING,   V_METHOD_STR_ITOA },
+         { "hextoa",     DT_STRING,   V_METHOD_STR_HEXTOA },
+         { "octtoa",     DT_STRING,   V_METHOD_STR_OCTTOA },
+         { "bintoa",     DT_STRING,   V_METHOD_STR_BINTOA },
+         { "realtoa",    DT_STRING,   V_METHOD_STR_REALTOA },
+      };
+
+      m = V_METHOD_USER;
+      for (int i = 0; i < ARRAY_LEN(tab); i++) {
+         if (tab[i].dt == vlog_subkind(type)
+             && vlog_ident(v) == ident_new(tab[i].name))
+            m = tab[i].method;
+      }
+
+      // The type is only known after elaboration if it is a parameter
+      if (m == V_METHOD_USER && vlog_kind(prefix) == V_REF
+          && vlog_has_ref(prefix) && vlog_has_type(vlog_ref(prefix))) {
+         vlog_node_t decl_type = vlog_type(vlog_ref(prefix));
+         if (vlog_kind(decl_type) == V_TYPE_DECL
+             && (vlog_flags(decl_type) & VLOG_F_TYPEPARAM))
+            m = get_builtin_method(st, V_ENUM_DECL, vlog_ident(v));
+      }
+   }
+   else
+      m = get_builtin_method(st, kind, vlog_ident(v));
+
    vlog_set_subkind(v, m);
 
    // The reference of a built-in method holds the type of its result
@@ -807,6 +1224,47 @@ ident_t vlog_symtab_qualified(vlog_symtab_t *st)
    return qual;
 }
 
+ident_t vlog_symtab_display_scope(vlog_symtab_t *st)
+{
+   // Names of the enclosing scopes as written in the source, each followed
+   // by the separator that precedes a name inside it: :: after a package or
+   // class (8.23, 26.3) and . after anything else
+
+   ident_t name = NULL;
+   for (vlog_scope_t *s = st->top; s != NULL; s = s->parent) {
+      vlog_node_t c = s->container;
+      if (c == NULL || !vlog_has_ident(c))
+         continue;
+
+      ident_t id;
+      const char *sep = ".";
+      switch (vlog_kind(c)) {
+      case V_PACKAGE:
+         sep = "::";
+         // Fall-through
+      case V_MODULE:
+      case V_PROGRAM:
+         id = vlog_has_ident2(c) ? vlog_ident2(c) : vlog_ident(c);
+         break;
+      case V_CLASS_DECL:
+         sep = "::";
+         // Fall-through
+      default:
+         id = vlog_ident(c);
+         break;
+      }
+
+      LOCAL_TEXT_BUF tb = tb_new();
+      tb_cat(tb, istr(id));
+      tb_cat(tb, sep);
+      if (name != NULL)
+         tb_cat(tb, istr(name));
+      name = ident_new(tb_get(tb));
+   }
+
+   return name;
+}
+
 ident_t vlog_symtab_hier_suffix(vlog_symtab_t *st, hier_owner_t *owner,
                                 vlog_node_t *pkg)
 {
@@ -858,6 +1316,66 @@ static void put_imported(vlog_symtab_t *st, vlog_node_t d)
 
    sym->node = d;
    sym->imported = true;
+}
+
+static void import_package(vlog_symtab_t *st, vlog_node_t pack, ident_t match)
+{
+   assert(vlog_kind(pack) == V_PACKAGE);
+
+   const int ndecls = vlog_decls(pack);
+   for (int i = 0; i < ndecls; i++) {
+      vlog_node_t d = vlog_decl(pack, i);
+      if (vlog_kind(d) == V_CLASS_DECL && (vlog_flags(d) & VLOG_F_SPEC))
+         continue;   // A specialisation has no name that can be used
+      else if (vlog_kind(d) == V_IMPORT_DECL) {
+         // Names a package imports are not visible to its users unless
+         // they are exported
+         if (!(vlog_flags(d) & VLOG_F_EXPORT))
+            continue;
+
+         ident_t item = vlog_has_ident(d) ? vlog_ident(d) : NULL;
+         if (item != NULL && match != NULL && item != match)
+            continue;
+
+         if (vlog_has_ref(d) && vlog_kind(vlog_ref(d)) == V_PACKAGE)
+            import_package(st, vlog_ref(d), item ?: match);
+         else if (!vlog_has_ref(d)) {
+            for (int j = 0; j < ndecls; j++) {
+               vlog_node_t imp = vlog_decl(pack, j);
+               if (vlog_kind(imp) == V_IMPORT_DECL
+                   && !(vlog_flags(imp) & VLOG_F_EXPORT)
+                   && vlog_has_ref(imp)
+                   && vlog_kind(vlog_ref(imp)) == V_PACKAGE)
+                  import_package(st, vlog_ref(imp),
+                                 vlog_has_ident(imp) ? vlog_ident(imp)
+                                 : match);
+            }
+         }
+         continue;
+      }
+
+      if (match == NULL)
+         put_imported(st, d);
+      else if (vlog_ident(d) == match)
+         vlog_symtab_put(st, d);
+
+      // The names of an enumeration are declared in the package too
+      if (vlog_kind(d) != V_TYPE_DECL && vlog_kind(d) != V_VAR_DECL)
+         continue;
+
+      vlog_node_t e = vlog_get_type(vlog_type(d));
+      if (e == NULL || vlog_kind(e) != V_ENUM_DECL)
+         continue;
+
+      const int nnames = vlog_decls(e);
+      for (int j = 0; j < nnames; j++) {
+         vlog_node_t n = vlog_decl(e, j);
+         if (match == NULL)
+            put_imported(st, n);
+         else if (vlog_ident(n) == match)
+            vlog_symtab_put(st, n);
+      }
+   }
 }
 
 void vlog_symtab_import(vlog_symtab_t *st, vlog_node_t v)

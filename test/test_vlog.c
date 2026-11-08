@@ -1072,7 +1072,7 @@ START_TEST(test_tfcall2)
       {  9, "expected 2 arguments for 'sum' but have 1" },
       { 10, "expected 2 arguments for 'sum' but have 3" },
       { 13, "'x4' is not a function" },
-      { 27, "'no_args' is not a task" },
+      { 27, "return value of function 'no_args' is discarded" },
       { -1, NULL }
    };
    expect_errors(expect);

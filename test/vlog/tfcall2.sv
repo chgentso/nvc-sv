@@ -24,7 +24,7 @@ module tfcall2;
   reg x, y;
   initial begin
     task1(x, y);        // OK
-    no_args();          // Error
+    no_args();          // Warning
     void'(no_args());   // OK
   end
 

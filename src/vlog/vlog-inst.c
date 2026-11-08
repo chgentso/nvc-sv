@@ -78,8 +78,36 @@ static vlog_node_t bind_parameter(vlog_node_t decl, int nth, vlog_node_t inst)
    vlog_set_ident(local, vlog_ident(decl));
    vlog_set_value(local, value);
    vlog_set_type(local, vlog_type(decl));
+   vlog_set_flags(local, VLOG_F_OVERRIDABLE);
+
+   const int nranges = vlog_ranges(decl);
+   for (int i = 0; i < nranges; i++)
+      vlog_add_range(local, vlog_range(decl, i));
 
    return local;
+}
+
+static vlog_node_t bind_type_parameter(vlog_node_t decl, int nth,
+                                       vlog_node_t inst)
+{
+   // The value of an overridden type parameter or null for the default
+
+   if (inst == NULL)
+      return NULL;
+
+   vlog_node_t p;
+   const int nparams = vlog_params(inst);
+   if (nth < nparams && !vlog_has_ident((p = vlog_param(inst, nth))))
+      return vlog_has_value(p) ? vlog_value(p) : NULL;
+
+   ident_t id = vlog_ident(decl);
+   for (int i = 0; i < nparams; i++) {
+      p = vlog_param(inst, i);
+      if (vlog_has_ident(p) && vlog_ident(p) == id)
+         return vlog_has_value(p) ? vlog_value(p) : NULL;
+   }
+
+   return NULL;
 }
 
 // Nodes inside classes shared by all instances: copying one of these
@@ -111,6 +139,24 @@ static bool is_shared(vlog_node_t v)
    return shared_nodes != NULL && hset_contains(shared_nodes, v);
 }
 
+static bool copy_checker = false;
+
+static bool is_event_formal(vlog_node_t d)
+{
+   // A formal of event type may be replaced by an event expression in
+   // the instance
+
+   vlog_node_t type;
+   if (copy_checker && vlog_subkind(d) == V_PORT_INPUT)
+      return true;   // May be replaced by a constant actual
+
+   return vlog_subkind(d) == V_PORT_INPUT
+      && vlog_has_type(d)
+      && (type = vlog_get_type(vlog_type(d))) != NULL
+      && vlog_kind(type) == V_DATA_TYPE
+      && vlog_subkind(type) == DT_EVENT;
+}
+
 static bool copy_instance_pred(vlog_node_t v, void *ctx)
 {
    switch (vlog_kind(v)) {
@@ -119,9 +165,33 @@ static bool copy_instance_pred(vlog_node_t v, void *ctx)
       case V_PARAM_DECL:
       case V_GENVAR_DECL:
          return true;
+      case V_PORT_DECL:
+         return is_event_formal(vlog_ref(v));
+      case V_VAR_DECL:
+      case V_LOCAL_DECL:
+         {
+            // A variable whose initial value refers to itself is only
+            // copied together with its type if the reference is copied too
+            vlog_node_t d = vlog_ref(v);
+            if (!vlog_has_type(d))
+               return false;
+
+            if (strncmp(istr(vlog_ident(d)), "$sampled.", 9) == 0) {
+               // Sampled copy of a formal of event type
+               vlog_node_t t = vlog_get_type(vlog_type(d));
+               return copy_checker || (t != NULL && vlog_kind(t) == V_DATA_TYPE
+                                       && vlog_subkind(t) == DT_EVENT);
+            }
+
+            vlog_node_t type = vlog_type(d);
+            return vlog_kind(type) == V_TYPE_DECL
+               && (vlog_flags(type) & VLOG_F_TYPEPARAM);
+         }
       default:
          return false;
       }
+   case V_PORT_DECL:
+      return is_event_formal(v);
    case V_MOD_REF:
       return copy_scope == NULL || hset_contains(copy_scope, v);
    case V_TYPE_DECL:
@@ -390,7 +460,9 @@ vlog_node_t vlog_new_instance(vlog_node_t mod, vlog_node_t inst, ident_t id)
 
    switch (vlog_kind(mod)) {
    case V_MODULE:
-   case V_PRIMITIVE:
+      vlog_set_flags(v, vlog_flags(mod)
+                     & (VLOG_F_INTERFACE | VLOG_F_CHECKER));
+      // Fall-through
    case V_PROGRAM:
       vlog_set_ident2(v, vlog_ident2(mod));
       vlog_set_ival(v, vlog_ival(mod));   // Time unit and precision
@@ -408,7 +480,18 @@ vlog_node_t vlog_new_instance(vlog_node_t mod, vlog_node_t inst, ident_t id)
       should_not_reach_here();
    }
 
+   shared_nodes = hset_new(64);
+   vlog_visit(mod, collect_shared_class_cb, NULL);
+
+   if (vlog_kind(mod) == V_GEN_BLOCK) {
+      copy_scope = hset_new(64);
+      vlog_visit(mod, collect_scope_cb, NULL);
+   }
+
+   copy_checker = vlog_kind(mod) == V_MODULE
+      && (vlog_flags(mod) & VLOG_F_CHECKER);
    vlog_node_t copy = vlog_copy(mod, copy_instance_pred, NULL);
+   copy_checker = false;
 
    hash_t *map = hash_new(16);
 
