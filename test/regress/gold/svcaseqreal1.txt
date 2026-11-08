@@ -1,0 +1,2 @@
+case equality is not allowed on an aggregate with a real member
+PASSED

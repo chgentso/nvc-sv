@@ -1,0 +1,2 @@
+default value of argument b refers to argument a
+PASSED
