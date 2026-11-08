@@ -1506,3 +1506,4 @@ slice10         normal,relaxed
 lcall1          normal
 casechoice1     normal,2008
 compopen1       normal,2008
+psl57           fail,gold,2008

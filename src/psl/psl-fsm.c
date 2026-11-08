@@ -629,20 +629,21 @@ static fsm_state_t *build_before(psl_fsm_t *fsm, fsm_state_t *state,
                                  psl_node_t p)
 {
    fsm_state_t *accept = add_state(fsm, p);
-   fsm_state_t *fail = add_state(fsm, p);
 
    state->strong = !!(psl_flags(p) & PSL_F_STRONG);
 
-   if (psl_flags(p) & PSL_F_INCLUSIVE) {
-      add_edge(fsm, state, accept, EDGE_EPSILON, psl_operand(p, 0));
-      add_edge(fsm, state, fail, EDGE_EPSILON, psl_operand(p, 1));
-   }
-   else {
-      add_edge(fsm, state, fail, EDGE_EPSILON, psl_operand(p, 1));
-      add_edge(fsm, state, accept, EDGE_EPSILON, psl_operand(p, 0));
-   }
+   psl_guard_t a = psl_operand(p, 0);
+   psl_guard_t b = psl_operand(p, 1);
 
-   add_edge(fsm, state, state, EDGE_NEXT, NULL);
+   psl_guard_t accept_guard = a;
+   if (!(psl_flags(p) & PSL_F_INCLUSIVE))
+      accept_guard = and_guard(fsm, a, not_guard(b));
+
+   // The property fails if b holds before or, unless inclusive, in the
+   // same cycle as a
+   add_edge(fsm, state, accept, EDGE_EPSILON, accept_guard);
+   add_edge(fsm, state, state, EDGE_NEXT,
+            and_guard(fsm, not_guard(a), not_guard(b)));
 
    return accept;
 }

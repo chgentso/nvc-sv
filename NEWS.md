@@ -17,6 +17,8 @@
   (#1693).
 - PSL declarations are now accepted in generate blocks (#1694).
 - Fixed lexing of the PSL `until!_` operator in PSL comments.
+- Fixed PSL `before` and `before!` properties which did not report a
+  failure when the right hand operand held first.
 - Added a `pkg-config` configuration file to aid locating the VHPI
   headers (from @gsmecher).
 - Several other minor bugs were resolved (#1663, #1672, #1668, #1670,
