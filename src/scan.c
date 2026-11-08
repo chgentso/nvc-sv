@@ -462,7 +462,7 @@ const char *token_str(token_t tok)
          "`undefall", "white space", "newline", "\\", "comment", "$.",
          "final", "`\"", "`\\`\"", "``", "##", "time literal",
          "next_event_a", "next_event_a!", "next_event_e", "next_event_e!",
-         "forall",
+         "forall", "vunit", "vprop", "vmode",
       };
 
       if (tok >= 200 && tok - 200 < ARRAY_LEN(token_strs))

@@ -594,5 +594,8 @@ void reset_sdf_parser(void);
 #define tNEXTEVENTE    650
 #define tNEXTEVENTE1   651
 #define tFORALL        652
+#define tVUNIT         653
+#define tVPROP         654
+#define tVMODE         655
 
 #endif  // _SCAN_H

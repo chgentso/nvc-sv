@@ -114,6 +114,8 @@ static void p_alias_declaration(tree_t parent);
 static void p_variable_declaration(tree_t parent);
 static void p_array_constraint(type_t type, type_t base);
 static void p_psl_declaration(tree_t parent);
+static tree_t p_psl_or_concurrent_assert(ident_t label);
+static void p_concurrent_statement_or_psl(tree_t parent);
 static psl_node_t p_psl_sequence(void);
 static psl_node_t p_psl_property(void);
 static psl_node_t p_psl_fl_property(void);
@@ -8907,6 +8909,17 @@ static void p_entity_declarative_item(tree_t entity)
       tree_add_decl(entity, p_mode_view_declaration());
       break;
 
+   case tSTARTPSL:
+      consume(tSTARTPSL);
+      p_psl_declaration(entity);
+      break;
+
+   case tDEFAULT:
+   case tSEQUENCE:
+   case tPROPERTY:
+      p_psl_declaration(entity);
+      break;
+
    default:
       expect(tATTRIBUTE, tTYPE, tSUBTYPE, tCONSTANT, tFUNCTION, tPROCEDURE,
              tIMPURE, tPURE, tALIAS, tUSE, tDISCONNECT, tGROUP, tSHARED,
@@ -9333,7 +9346,19 @@ static tree_t p_entity_statement(void)
 
    switch (peek()) {
    case tASSERT:
-      return p_concurrent_assertion_statement(label);
+      if (standard() >= STD_08)
+         return p_psl_or_concurrent_assert(label);
+      else
+         return p_concurrent_assertion_statement(label);
+
+   case tCOVER:
+   case tASSUME:
+   case tASSUMEG:
+   case tRESTRICT:
+   case tRESTRICTG:
+   case tFAIRNESS:
+   case tSTRONG:
+      return p_psl_directive(label);
 
    case tPROCESS:
       return p_process_statement(label);
@@ -9361,8 +9386,12 @@ static void p_entity_statement_part(tree_t entity)
 
    BEGIN("entity statement part");
 
-   while (not_at_token(tEND))
-      tree_add_stmt(entity, p_entity_statement());
+   while (not_at_token(tEND)) {
+      if (peek() == tSTARTPSL)
+         p_concurrent_statement_or_psl(entity);
+      else
+         tree_add_stmt(entity, p_entity_statement());
+   }
 }
 
 static void p_entity_declaration(tree_t unit)
@@ -14498,6 +14527,12 @@ static tree_t p_concurrent_statement(void)
          return p_concurrent_assertion_statement(label);
 
    case tCOVER:
+   case tASSUME:
+   case tASSUMEG:
+   case tRESTRICT:
+   case tRESTRICTG:
+   case tFAIRNESS:
+   case tSTRONG:
       return p_psl_directive(label);
 
    case tBLOCK:

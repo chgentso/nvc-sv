@@ -281,6 +281,9 @@ FAIRNESS      ?i:fairness
 COVER         ?i:cover
 PROPERTY      ?i:property
 SEQUENCE      ?i:sequence
+VUNIT         ?i:vunit
+VPROP         ?i:vprop
+VMODE         ?i:vmode
 CONST         ?i:const
 MUTABLE       ?i:mutable
 HDLTYPE       ?i:hdltype
@@ -525,6 +528,18 @@ PROTECT           ?i:protect
 {PARAMETER}              { TOKEN_08(tPARAMETER); }
 {DEFAULT}                { TOKEN_08(tDEFAULT); }
 {COVER}                  { TOKEN_08(tCOVER); }
+{ASSUME}                 { TOKEN_08(tASSUME); }
+{ASSUME_G}               { TOKEN_08(tASSUMEG); }
+{RESTRICT}               { TOKEN_08(tRESTRICT); }
+{RESTRICT_G}             { TOKEN_08(tRESTRICTG); }
+{RESTRICT}!              { TOKEN_08(tRESTRICTG); }
+{STRONG}                 { TOKEN_08(tSTRONG); }
+{FAIRNESS}               { TOKEN_08(tFAIRNESS); }
+{PROPERTY}               { TOKEN_08(tPROPERTY); }
+{SEQUENCE}               { TOKEN_08(tSEQUENCE); }
+{VUNIT}                  { TOKEN_08(tVUNIT); }
+{VPROP}                  { TOKEN_08(tVPROP); }
+{VMODE}                  { TOKEN_08(tVMODE); }
 {VIEW}                   { TOKEN_19(tVIEW); }
 {PRIVATE}                { TOKEN_19(tPRIVATE); }
 
@@ -626,6 +641,7 @@ PROTECT           ?i:protect
 <PSL>{ASSUME_G}          { TOKEN(tASSUMEG); }
 <PSL>{RESTRICT}          { TOKEN(tRESTRICT); }
 <PSL>{RESTRICT_G}        { TOKEN(tRESTRICTG); }
+<PSL>{RESTRICT}!         { TOKEN(tRESTRICTG); }
 <PSL>{STRONG}            { TOKEN(tSTRONG); }
 <PSL>{FAIRNESS}          { TOKEN(tFAIRNESS); }
 <PSL>{COVER}             { TOKEN(tCOVER); }
