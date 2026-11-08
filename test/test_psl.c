@@ -139,6 +139,8 @@ START_TEST(test_sem1)
       { 40, "no visible declaration for FOO" },
       { 40, "no visible declaration for Z" },
       { 41, "PSL endpoint declarations are not supported" },
+      { 42, "expression must be a PSL Boolean but have type INTEGER" },
+      { 43, "expression must be static" },
       { -1, NULL }
    };
    expect_errors(expect);

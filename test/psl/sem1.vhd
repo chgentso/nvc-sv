@@ -39,5 +39,7 @@ begin
     -- psl assert {x[*1 to clk]};             -- Error
     -- psl assert {z [[foo <= 1;]]};          -- Error
     -- psl endpoint e1 is {x; y};             -- Not supported
+    -- psl assert always (x -> next_event(i)(y));  -- Error
+    -- psl assert always (x -> next_event(x)[i](y));  -- Error
 
 end architecture;

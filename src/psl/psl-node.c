@@ -66,7 +66,7 @@ static const imask_t has_map[P_LAST_PSL_KIND] = {
    (I_VALUE | I_DELAY | I_FLAGS),
 
    // P_NEXT_EVENT
-   (I_VALUE | I_DELAY | I_FLAGS),
+   (I_VALUE | I_DELAY | I_FLAGS | I_PARAMS),
 
    // P_SERE
    (I_SUBKIND | I_PARAMS),

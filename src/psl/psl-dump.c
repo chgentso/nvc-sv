@@ -121,6 +121,14 @@ static void psl_dump_next_a(psl_node_t p)
 static void psl_dump_next_event(psl_node_t p)
 {
    print_syntax("#next_event (");
+   psl_dump(psl_operand(p, 0));
+   print_syntax(")");
+   if (psl_has_delay(p)) {
+      print_syntax("[");
+      psl_dump(psl_delay(p));
+      print_syntax("]");
+   }
+   print_syntax(" (");
    psl_dump(psl_value(p));
    print_syntax(")");
 }

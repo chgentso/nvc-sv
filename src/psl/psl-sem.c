@@ -369,6 +369,16 @@ static void psl_check_next(psl_node_t p, nametab_t *tab)
    psl_check(psl_value(p), tab);
 }
 
+static void psl_check_next_event(psl_node_t p, nametab_t *tab)
+{
+   psl_check(psl_operand(p, 0), tab);
+
+   if (psl_has_delay(p))
+      psl_check(psl_delay(p), tab);
+
+   psl_check(psl_value(p), tab);
+}
+
 static void psl_check_next_e(psl_node_t p, nametab_t *tab)
 {
    psl_check(psl_delay(p), tab);
@@ -555,8 +565,10 @@ void psl_check(psl_node_t p, nametab_t *tab)
       break;
    case P_NEXT:
    case P_NEXT_A:
-   case P_NEXT_EVENT:
       psl_check_next(p, tab);
+      break;
+   case P_NEXT_EVENT:
+      psl_check_next_event(p, tab);
       break;
    case P_NEXT_E:
       psl_check_next_e(p, tab);

@@ -12751,7 +12751,7 @@ static psl_node_t p_psl_fl_property(void)
             psl_set_flag(p, PSL_F_STRONG);
 
          consume(tLPAREN);
-         (void)p_psl_fl_property();
+         psl_add_operand(p, p_hdl_expression(NULL, PSL_TYPE_BOOLEAN));
          consume(tRPAREN);
 
          if (optional(tLSQUARE)) {
