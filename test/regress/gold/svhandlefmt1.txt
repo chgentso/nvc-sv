@@ -1,0 +1,7 @@
+** Warning: class handle printed with %x
+** Warning: class handle printed with %d
+** Warning: class handle printed with %d
+'{x:5}
+null
+[    null] [ null]
+PASSED

@@ -1,0 +1,9 @@
+cannot find module instance 'nosuch.inst' for $printtimescale
+after printtimescale
+cannot find module instance 'nosuch' for $timeunit
+after timeunit
+cannot find module instance 'a.b.c' for $timeprecision
+after timeprecision
+cannot find module instance 'u' for $printtimescale
+Time scale of (svprinttimescale4) is 1ns / 1ps
+PASSED

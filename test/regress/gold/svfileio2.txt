@@ -1,0 +1,3 @@
+$fclose: file descriptor 0x8
+$feof: argument is not a valid file descriptor 0x8
+PASSED

@@ -1,0 +1,8 @@
+A
+** Error: 0ms+0: read of tagged union member 'i' before any member was set
+B 0
+** Error: 0ms+0: read of tagged union member 'i' while the active member is 'r'
+C 0
+** Error: 0ms+0: read of tagged union member 'i' while the active member is 'n'
+D 0
+E 7 tagged i 7

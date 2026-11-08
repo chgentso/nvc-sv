@@ -1,0 +1,9 @@
+Time scale of (svprinttimescale2) is 1ms / 1us
+Time scale of (svprinttimescale2.u) is 10ps / 1fs
+Time scale of (svprinttimescale2.u.v) is 1us / 100ns
+Time scale of (svprinttimescale2.arr[1]) is 1us / 100ns
+Time scale of (svprinttimescale2.g.w) is 1us / 100ns
+Time scale of (svprinttimescale2.g) is 1ms / 1us
+Time scale of (svprinttimescale2.u) is 10ps / 1fs
+Time scale of (svprinttimescale2.u.v) is 1us / 100ns
+PASSED

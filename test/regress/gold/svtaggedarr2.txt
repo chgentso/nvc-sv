@@ -1,0 +1,9 @@
+1 2
+1 7
+5
+2 3
+tagged None
+tagged arr '{'{1, 2}, '{3, 4}}
+tagged arr '{3, 4}
+tagged p 90
+9 9

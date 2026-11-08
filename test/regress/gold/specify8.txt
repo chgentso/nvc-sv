@@ -1,0 +1,11 @@
+** Error: 5ns+0: timing check violation: $setup(4ns, 5ns, 2ns)
+** Error: 5ns+0: timing check violation: $setup(4ns, 5ns, 2ns)
+** Error: 6ns+0: timing check violation: $hold(5ns, 6ns, 2ns)
+** Error: 15ns+0: timing check violation: $setup(14ns, 15ns, 2ns)
+** Error: 15ns+0: timing check violation: $setup(14ns, 15ns, 2ns)
+** Error: 16ns+0: timing check violation: $hold(15ns, 16ns, 2ns)
+** Error: 17ns+0: timing check violation: $setup(16ns, 17ns, 2ns)
+** Error: 17ns+0: timing check violation: $setup(16ns, 17ns, 2ns)
+** Error: 17ns+0: timing check violation: $recovery(16ns, 17ns, 2ns)
+PASSED
+** Note: 27ns+0: $finish called

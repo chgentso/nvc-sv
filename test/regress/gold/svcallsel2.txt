@@ -1,0 +1,3 @@
+a select of the result of a function call is not allowed
+a member select of the result of a function call is not allowed
+PASSED

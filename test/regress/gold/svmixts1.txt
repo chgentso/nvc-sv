@@ -1,0 +1,2 @@
+svmixts1_sub has no time unit and uses the default time unit and precision of 1ns/1ns but svmixts1 has a time unit
+PASSED
