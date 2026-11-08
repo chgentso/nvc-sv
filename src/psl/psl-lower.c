@@ -255,6 +255,19 @@ static void psl_lower_assert(lower_unit_t *lu, vcode_reg_t taken_reg,
          len_reg = emit_const(vtype_offset(), type_width(tree_type(t_msg)));
       }
    }
+   else if (psl_kind(p) == P_ASSUME) {
+      static const char text[] = "PSL assumption failed";
+      const int len = sizeof(text) - 1;
+
+      vcode_type_t vchar = vtype_int(0, 255);
+      vcode_reg_t chars[len];
+      for (int i = 0; i < len; i++)
+         chars[i] = emit_const(vchar, text[i]);
+
+      vcode_type_t array_type = vtype_carray(len, vchar);
+      msg_reg = emit_address_of(emit_const_array(array_type, chars, len));
+      len_reg = emit_const(vtype_offset(), len);
+   }
 
    emit_assert(taken_reg, msg_reg, len_reg,
                severity_reg, locus, VCODE_INVALID_REG,
@@ -1112,8 +1125,13 @@ void psl_lower_directive(unit_registry_t *ur, lower_unit_t *parent,
    assert(tree_kind(wrapper) == T_PSL_DIRECT);
 
    psl_node_t decl = tree_psl(wrapper);
-   if (psl_kind(decl) == P_FAIRNESS)
-      return;   // Fairness constraints do not affect simulation
+   switch (psl_kind(decl)) {
+   case P_FAIRNESS:
+   case P_RESTRICT:
+      return;   // Constraints for formal tools do not affect simulation
+   default:
+      break;
+   }
 
    psl_node_t top = psl_value(decl);
    assert(psl_kind(top) == P_CLOCKED);

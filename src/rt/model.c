@@ -2305,7 +2305,7 @@ static void create_processes(rt_model_t *m, rt_scope_t *s)
             psl_node_t psl = tree_psl(t);
 
             const psl_kind_t kind = psl_kind(psl);
-            if (kind != P_ASSERT && kind != P_COVER)
+            if (kind != P_ASSERT && kind != P_ASSUME && kind != P_COVER)
                continue;
 
             ident_t name = tree_ident(t);
