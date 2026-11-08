@@ -74,6 +74,7 @@ extern loc_t yylloc;
 #define BEGIN(s)  BEGIN_WITH_HEAD(s, NULL)
 
 static vlog_node_t p_statement_or_null(void);
+static void p_tf_port_list(vlog_node_t tf);
 static vlog_node_t p_expression(void);
 static vlog_node_t p_constant_expression(void);
 static vlog_node_t p_mintypmax_expression(void);
@@ -231,6 +232,35 @@ static vlog_node_t peek_reference(void)
    return vlog_symtab_query(symtab, id);
 }
 
+static ident_t peek_ident_nth(int n)
+{
+   assert(peek_nth(n) == tID);
+   const int pos = (state.tokenq_tail + n - 1) & (TOKENQ_SIZE - 1);
+   return state.tokenq[pos].lval.ident;
+}
+
+static bool is_scope_randomize(void)
+{
+   // The std:: prefix may be omitted outside a class
+
+   return peek() == tID && peek_nth(2) == tLPAREN
+      && peek_ident_nth(1) == ident_new("randomize")
+      && vlog_symtab_class(symtab) == NULL
+      && vlog_symtab_query(symtab, ident_new("randomize")) == NULL;
+}
+
+static bool is_std_randomize(void)
+{
+   // [ std :: ] randomize (
+
+   if (is_scope_randomize())
+      return true;
+
+   return peek() == tID && peek_nth(2) == tSCOPE && peek_nth(3) == tID
+      && peek_nth(4) == tLPAREN && peek_ident_nth(1) == ident_new("std")
+      && peek_ident_nth(3) == ident_new("randomize");
+}
+
 static bool is_scoped_type_start(void)
 {
    // Scope resolution followed by the name of a variable: this is the type
@@ -297,6 +327,159 @@ static bool is_process_name(void)
 
    return peek() == tID && peek_ident_nth(1) == ident_new("process")
       && peek_reference() == NULL;
+}
+
+static bool is_rand_method(ident_t id)
+{
+   return id == ident_new("randomize") || id == ident_new("rand_mode")
+      || id == ident_new("constraint_mode");
+}
+
+static bool is_implicit_this_call(void)
+{
+   // A call to a built-in randomization method in a class without a prefix
+
+   if (peek() != tID || peek_nth(2) != tLPAREN)
+      return false;
+
+   ident_t id = peek_ident_nth(1);
+   return is_rand_method(id) && vlog_symtab_query(symtab, id) == NULL
+      && vlog_symtab_class(symtab) != NULL;
+}
+
+typedef struct {
+   ident_t     name;
+   bool        is_type;
+   bool        has_def;
+   ident_t     tname;    // Name of the data type of a value parameter
+   int         ndef;
+   tokenq_t   *def;
+} generic_param_t;
+
+typedef struct _generic_class {
+   ident_t          name;
+   vlog_flags_t     flags;
+   vlog_scope_t    *scope;
+   int              nparams;
+   generic_param_t *params;
+   int              ntokens;
+   tokenq_t        *tokens;
+   int              nexterns;
+   struct _generic_class **externs;
+   int              nspecs;
+   vlog_node_t     *specs;
+   vlog_scope_t   **spec_scopes;
+   vlog_node_t      home;
+   vlog_node_t      module;
+} generic_class_t;
+
+static hash_t          *generic_classes = NULL;
+static generic_class_t *replay_class = NULL;
+static int              replay_pos = 0;
+static vlog_node_t      current_namespace = NULL;
+static vlog_node_t      spec_container = NULL;
+
+// A class can be used before it is declared after "typedef class name" so
+// bodies of subroutines are only parsed once the classes they use are known
+typedef struct {
+   vlog_node_t      subr;
+   vlog_scope_t    *scope;
+   generic_class_t  body;
+   token_t          end_token;
+   bool             proc_automatic;
+   bool             subr_automatic;
+   bool             in_subroutine;
+   bool             is_init;
+   bool             is_constraint;
+   vlog_node_t      func;
+   vlog_node_t      container;
+} deferred_body_t;
+
+// A specialisation of a class where only the forward declaration is known
+typedef struct {
+   vlog_node_t      forward;
+   vlog_node_t      placeholder;
+   text_buf_t      *key;
+   generic_class_t  actuals;
+   vlog_scope_t    *scope;
+   vlog_node_t      container;
+} forward_spec_t;
+
+static A(deferred_body_t) deferred_bodies = AINIT;
+static A(forward_spec_t)  forward_specs = AINIT;
+static A(vlog_node_t)     forward_classes = AINIT;
+
+typedef struct {
+   ident_t id;
+   loc_t   loc;
+} forward_type_t;
+
+static A(forward_type_t)  forward_types = AINIT;
+static A(vlog_node_t)     unit_specs = AINIT;
+static hash_t            *spec_modules = NULL;
+static A(vlog_node_t)     unit_generics = AINIT;
+static hash_t            *generic_homes = NULL;
+static A(ident_t)         file_namespaces = AINIT;
+static int                class_depth = 0;
+static bool               flushing_bodies = false;
+static vlog_node_t        spec_into = NULL;
+static vlog_node_t        spec_extern_class = NULL;
+
+static bool capture_generic_extern(token_t end_token);
+static bool capture_generic_constraint(void);
+static vlog_node_t p_task_declaration(void);
+static vlog_node_t p_function_declaration(void);
+static vlog_node_t specialise_class(vlog_node_t generic);
+static void flush_deferred_bodies(bool end_of_unit);
+static void p_timeunits_declaration(void);
+static void p_parameter_value_assignment(vlog_node_t inst);
+static bool is_nonansi_interface_port(vlog_node_t mod);
+static void p_nonansi_interface_port_declaration(vlog_node_t mod);
+static bool defer_subr_body(vlog_node_t subr, token_t end_token);
+static vlog_node_t specialise_forward(vlog_node_t forward);
+static bool want_defer_body(void);
+static vlog_node_t resolve_forward_class(ident_t name);
+static void resolve_forward_specs(vlog_node_t class);
+static vlog_node_t p_data_type_or_implicit(void);
+
+static hash_t *interfaces = NULL;
+static hash_t *inst_modules = NULL;
+static bool parsing_prototype = false;
+static bool parsing_dpi_import = false;
+
+// Blocks which break and return leave in the code block of a production
+// and the number of loops inside it
+static ident_t rs_break_name = NULL;
+static ident_t rs_return_name = NULL;
+static int     rs_loop_depth = 0;
+
+// Package or class which qualifies the name that is about to be looked up
+static vlog_node_t qualify_scope = NULL;
+static bool pattern_array_elems = false;   // The next pattern is for the elements of an unpacked array
+static vlog_scope_t *select_scope = NULL;
+static bool        qualify_failed = false;
+
+// Set after parsing the definition of a method outside of its class
+static bool extern_definition = false;
+
+static vlog_node_t find_interface(ident_t name)
+{
+   if (interfaces != NULL) {
+      vlog_node_t v = hash_get(interfaces, name);
+      if (v != NULL)
+         return v;
+   }
+
+   LOCAL_TEXT_BUF tb = tb_new();
+   tb_istr(tb, name);
+   tb_upcase(tb);
+
+   ident_t qual = ident_prefix(lib_name(lib_work()), ident_new(tb_get(tb)), '.');
+   object_t *obj = lib_get_generic(lib_work(), qual, NULL);
+   if (obj == NULL)
+      return NULL;
+
+   return vlog_from_object(obj);
 }
 
 static void vlog_parse_error_cb(void)
@@ -2419,6 +2602,155 @@ static vlog_node_t p_hierarchical_identifier(ident_t id)
    }
 
    vlog_set_global_flags(v, VLOG_GF_HIER_REF);
+   return check_modport_member(v);
+}
+
+static void p_inline_constraints(vlog_node_t call, vlog_node_t class)
+{
+   // with [ ( [ identifier_list ] ) ] constraint_block
+
+   BEGIN("inline constraints");
+
+   consume(tWITH);
+
+   if (peek() == tLPAREN && class == NULL) {
+      error_at(&(state.tokenq[state.tokenq_tail].loc), "sorry, an identifier "
+               "list after with is not supported");
+      drop_tokens_until(&state, tLBRACE);
+   }
+   else if (optional(tLPAREN)) {
+      // Only the listed names are members of the object, all others are
+      // looked up in the scope of the call
+      ident_t *names LOCAL = NULL;
+      int nnames = 0, max = 0;
+      if (peek() != tRPAREN) {
+         do {
+            if (nnames == max)
+               names = xrealloc_array(names, max = MAX(max * 2, 4),
+                                      sizeof(ident_t));
+            names[nnames++] = p_identifier();
+         } while (optional(tCOMMA));
+      }
+      consume(tRPAREN);
+
+      vlog_symtab_pop(symtab);
+      vlog_symtab_push_members(symtab, class, names, nnames);
+
+      consume(tLBRACE);
+   }
+   else
+      consume(tLBRACE);
+
+   while (not_at_token(tRBRACE)) {
+      if (!optional(tSEMI))   // An empty item
+         vlog_add_stmt(call, p_constraint_expression());
+   }
+
+   consume(tRBRACE);
+}
+
+static vlog_node_t p_method_call_rest(vlog_node_t prefix, ident_t id)
+{
+   // method_call_body with the prefix and identifier already parsed
+
+   EXTEND("method call");
+
+   vlog_node_t v = vlog_new(V_METHOD_CALL);
+   vlog_set_value(v, prefix);
+   vlog_set_ident(v, id);
+
+   // Names in the arguments and constraints of randomize are members of
+   // the class of the object before anything in the caller's scope
+   vlog_node_t class = NULL, type = NULL;
+   const bool is_randomize = id == ident_new("randomize");
+   if (is_randomize && (type = vlog_get_type(prefix)) != NULL
+       && vlog_kind(type) == V_CLASS_DECL)
+      class = type;
+
+   vlog_scope_t *saved_local = local_scope;
+   if (class != NULL) {
+      local_scope = vlog_symtab_current(symtab);
+      vlog_symtab_push_members(symtab, class, NULL, 0);
+   }
+
+   vlog_node_t saved_iter = iter_decl, saved_index = iter_index;
+   vlog_node_t arraytype = NULL, prefix_type = NULL;
+   if (is_array_method_name(id) && (type = vlog_get_type(prefix)) != NULL
+       && vlog_kind(type) != V_CLASS_DECL) {
+      arraytype = prefix_type = type;
+      if (vlog_kind(type) == V_DATA_TYPE
+          && (vlog_subkind(type) == DT_DYNARRAY
+              || vlog_subkind(type) == DT_QUEUE
+              || vlog_subkind(type) == DT_ASSOC))
+         arraytype = vlog_type(type);   // Element type
+   }
+
+   // An optional iterator name replaces the default "item"
+   ident_t iter_name = ident_new("item");
+   if (arraytype != NULL && peek() == tLPAREN && peek_nth(2) == tID
+       && peek_nth(3) == tRPAREN) {
+      consume(tLPAREN);
+      iter_name = p_identifier();
+      consume(tRPAREN);
+   }
+   else if (optional(tLPAREN)) {
+      p_list_of_arguments(v);
+      consume(tRPAREN);
+   }
+
+   // The queries of a covergroup that report the bins have the same names
+   if (vlog_params(v) == 2 && id == ident_new("get_inst_coverage"))
+      vlog_set_ident(v, ident_new("get_inst_coverage_n"));
+   else if (vlog_params(v) == 2 && id == ident_new("get_coverage"))
+      vlog_set_ident(v, ident_new("get_coverage_n"));
+
+   if (is_randomize && peek() == tWITH)
+      p_inline_constraints(v, class);
+   else if (arraytype != NULL && peek() == tWITH) {
+      consume(tWITH);
+
+      vlog_node_t item = vlog_new(V_LOCAL_DECL);
+      vlog_set_ident(item, iter_name);
+      vlog_set_type(item, arraytype);
+      vlog_set_loc(item, &state.last_loc);
+
+      vlog_node_t index = vlog_new(V_LOCAL_DECL);
+      vlog_set_ident(index, ident_new("index"));
+      vlog_node_t inttype = make_integer_atom_type(DT_INT);
+      vlog_set_flags(inttype, VLOG_F_SIGNED);
+      vlog_node_t key = vlog_kind(prefix_type) == V_DATA_TYPE
+         && vlog_subkind(prefix_type) == DT_ASSOC
+         ? vlog_assoc_key(prefix_type) : NULL;
+      vlog_set_type(index, key != NULL ? key : inttype);
+      vlog_set_loc(index, &state.last_loc);
+
+      vlog_symtab_push(symtab, v);
+      vlog_symtab_put(symtab, item);
+
+      iter_decl = item;
+      iter_index = index;
+
+      consume(tLPAREN);
+      vlog_node_t expr = p_expression();
+      consume(tRPAREN);
+
+      iter_decl = saved_iter;
+      iter_index = saved_index;
+
+      vlog_symtab_pop(symtab);
+
+      vlog_add_stmt(v, item);
+      vlog_add_stmt(v, index);
+      vlog_add_stmt(v, expr);
+   }
+
+   if (class != NULL) {
+      vlog_symtab_pop(symtab);
+      local_scope = saved_local;
+   }
+
+   vlog_set_loc(v, CURRENT_LOC);
+   vlog_symtab_lookup(symtab, v);
    return v;
 }
 
@@ -2429,6 +2761,21 @@ static vlog_node_t p_method_call_tail(vlog_node_t prefix)
    EXTEND("method call");
 
    return p_method_call_rest(prefix, p_method_name());
+}
+
+static vlog_node_t p_implicit_this_call(void)
+{
+   // randomize ( ... ) in a class is the same as this.randomize ( ... )
+
+   BEGIN("method call");
+
+   ident_t id = p_identifier();
+
+   vlog_node_t this = vlog_new(V_THIS);
+   vlog_set_type(this, vlog_symtab_class(symtab));
+   vlog_set_loc(this, &state.last_loc);
+
+   return p_method_call_rest(this, id);
 }
 
 static void expand_randomize_args(vlog_node_t src, vlog_node_t v)
@@ -4924,6 +5271,11 @@ static vlog_node_t p_primary(void)
       }
       break;
    case tID:
+      if (is_std_randomize()) {
+         head = p_std_randomize();
+         break;
+      }
+
       switch (peek_nth(2)) {
       case tLPAREN:
       case tATTRBEGIN:
@@ -5124,6 +5476,9 @@ static vlog_node_t p_primary(void)
       break;
    case tTICK:
       head = p_assignment_pattern_expression(NULL);
+      break;
+   case tVLOCAL:
+      head = p_local_scope_select();
       break;
    default:
       one_of(tID, tSTRING, tNUMBER, tUNSNUM, tREAL, tSYSTASK, tLPAREN,
@@ -5413,7 +5768,8 @@ static bool peek_binary_operator(int *prec)
    case tLT:
    case tGT:
    case tLE:
-   case tGE:         *prec = 8;  return true;
+   case tGE:
+   case tINSIDE:     *prec = 8;  return true;
    case tCASEEQ:
    case tCASENEQ:
    case tWILDEQ:
@@ -5433,6 +5789,50 @@ static bool peek_binary_operator(int *prec)
    default:
       return false;
    }
+}
+
+static vlog_node_t p_value_range(void)
+{
+   // [ expression : expression ]
+
+   BEGIN("value range");
+
+   consume(tLSQUARE);
+
+   vlog_node_t v = vlog_new(V_INSIDE_RANGE);
+   vlog_set_left(v, p_expression());
+   consume(tCOLON);
+   vlog_set_right(v, p_expression());
+   consume(tRSQUARE);
+
+   vlog_set_loc(v, CURRENT_LOC);
+   return v;
+}
+
+static vlog_node_t p_inside_expression(vlog_node_t head)
+{
+   // expression inside { open_range_list }
+
+   BEGIN_WITH_HEAD("inside expression", head);
+
+   consume(tINSIDE);
+
+   vlog_node_t v = vlog_new(V_INSIDE);
+   vlog_set_value(v, head);
+
+   consume(tLBRACE);
+
+   do {
+      if (peek() == tLSQUARE)
+         vlog_add_param(v, p_value_range());
+      else
+         vlog_add_param(v, p_expression());
+   } while (optional(tCOMMA));
+
+   consume(tRBRACE);
+
+   vlog_set_loc(v, CURRENT_LOC);
+   return v;
 }
 
 static vlog_node_t p_binary_expression(vlog_node_t lhs, int min_prec)
@@ -5519,16 +5919,161 @@ static void p_event_expression(vlog_node_t ctrl)
    } while (optional(tOR) || optional(tCOMMA));
 }
 
+static vlog_node_t p_dist_item(void)
+{
+   // value_range [ := expression | :/ expression ]
+
+   BEGIN("dist item");
+
+   vlog_node_t v = vlog_new(V_DIST_ITEM);
+
+   if (optional(tLSQUARE)) {
+      vlog_set_left(v, p_expression());
+      consume(tCOLON);
+      vlog_set_right(v, p_expression());
+      consume(tRSQUARE);
+   }
+   else
+      vlog_set_left(v, p_expression());
+
+   vlog_set_subkind(v, V_DIST_PER_VALUE);
+
+   if (optional(tCOLON)) {
+      if (one_of(tEQ, tOVER) == tOVER)
+         vlog_set_subkind(v, V_DIST_PER_RANGE);
+
+      vlog_set_delay(v, p_expression());
+   }
+   else {
+      vlog_node_t one = vlog_new(V_NUMBER);
+      vlog_set_number(one, number_from_int(1));
+      vlog_set_loc(one, &state.last_loc);
+      vlog_set_delay(v, one);
+   }
+
+   vlog_set_loc(v, CURRENT_LOC);
+   return v;
+}
+
 static vlog_node_t p_expression_or_dist(void)
 {
    // expression [ dist { dist_list } ]
 
    BEGIN("expression or dist");
 
-   return p_expression();
+   vlog_node_t head = p_expression();
+   if (peek() != tDIST)
+      return head;
+
+   consume(tDIST);
+
+   vlog_node_t v = vlog_new(V_DIST);
+   vlog_set_value(v, head);
+
+   consume(tLBRACE);
+
+   do {
+      vlog_add_param(v, p_dist_item());
+   } while (optional(tCOMMA));
+
+   consume(tRBRACE);
+
+   vlog_set_loc(v, CURRENT_LOC);
+   return v;
 }
 
 static void p_cycle_delay_const_range_expression(void)
+static vlog_node_t p_constraint_block(void)
+{
+   // constraint_set used as a branch of a conditional constraint
+
+   BEGIN("constraint set");
+
+   vlog_node_t v = vlog_new(V_CONS_BLOCK);
+   p_constraint_set(v);
+
+   vlog_set_loc(v, CURRENT_LOC);
+   return v;
+}
+
+static vlog_node_t p_constraint_foreach(void)
+{
+   // foreach ( ps_or_hierarchical_array_identifier [ loop_variables ] )
+   //    constraint_set
+
+   BEGIN("foreach constraint");
+
+   consume(tFOREACH);
+   consume(tLPAREN);
+
+   vlog_node_t v = vlog_new(V_CONS_FOREACH);
+
+   // The index variables are visible in the body only
+   vlog_symtab_push(symtab, v);
+
+   foreach_array = true;
+   vlog_set_value(v, p_select(p_identifier()));
+   foreach_array = false;
+
+   consume(tLSQUARE);
+
+   // The index of an associative array has the type of its key
+   vlog_node_t key = NULL;
+   if ((vlog_kind(vlog_value(v)) == V_REF
+        || vlog_kind(vlog_value(v)) == V_MEMBER_REF)
+       && vlog_has_ref(vlog_value(v))) {
+      vlog_node_t decl = vlog_ref(vlog_value(v));
+      switch (vlog_kind(decl)) {
+      case V_VAR_DECL:
+      case V_LOCAL_DECL:
+      case V_TF_PORT_DECL:
+         if (vlog_has_type(decl) && vlog_ranges(decl) == 0) {
+            vlog_node_t type = vlog_get_type(vlog_type(decl));
+            if (type != NULL && vlog_kind(type) == V_DATA_TYPE
+                && vlog_subkind(type) == DT_ASSOC)
+               key = vlog_assoc_key(type);
+         }
+         break;
+      default:
+         break;
+      }
+   }
+
+   do {
+      if (peek() != tID) {
+         error_at(&(state.tokenq[state.tokenq_tail].loc), "sorry, skipping "
+                  "a loop variable in foreach is not supported");
+         continue;
+      }
+
+      vlog_node_t d = vlog_new(V_LOCAL_DECL);
+      vlog_set_ident(d, p_identifier());
+      vlog_set_loc(d, &state.last_loc);
+
+      if (key != NULL && vlog_decls(v) == 0)
+         vlog_set_type(d, key);
+      else {
+         vlog_node_t dt = make_integer_atom_type(DT_INT);
+         vlog_set_flags(dt, VLOG_F_SIGNED);
+         vlog_set_type(d, dt);
+      }
+
+      vlog_add_decl(v, d);
+      vlog_symtab_put(symtab, d);
+   } while (optional(tCOMMA));
+
+   consume(tRSQUARE);
+
+   consume(tRPAREN);
+
+   p_constraint_set(v);
+
+   vlog_symtab_pop(symtab);
+
+   vlog_set_loc(v, CURRENT_LOC);
+   return v;
+}
+
 {
    // constant_expression : constant_expression | constant_expression : $
 
@@ -6709,7 +7254,71 @@ static vlog_node_t p_for_step(void)
    return v;
 }
 
-static vlog_node_t p_loop_statement(void)
+#define MAX_FOREACH_DIMS 16
+
+typedef struct {
+   bool         dynamic;
+   bool         string;
+   vlog_node_t  assoc;
+   vlog_node_t  left;
+   vlog_node_t  right;
+} foreach_dim_t;
+
+static int foreach_dimensions(vlog_node_t decl, foreach_dim_t *dims)
+{
+   // Fixed unpacked dimensions, then dynamic ones, then packed ones
+
+   int n = 0;
+
+   // Unpacked dimensions, leftmost first
+   const int nranges = vlog_kind(decl) == V_FUNC_DECL ? 0 : vlog_ranges(decl);
+   for (int i = 0; i < nranges && n < MAX_FOREACH_DIMS; i++) {
+      vlog_node_t r = vlog_range(decl, i);
+      dims[n++] = (foreach_dim_t) {
+         .dynamic = vlog_subkind(r) == V_DIM_UNSIZED,
+         .left    = vlog_left(r),
+         .right   = vlog_right(r),
+      };
+   }
+
+   vlog_node_t t = vlog_get_type(vlog_type(decl));
+   while (t != NULL && vlog_kind(t) == V_DATA_TYPE && n < MAX_FOREACH_DIMS
+          && (vlog_subkind(t) == DT_DYNARRAY || vlog_subkind(t) == DT_QUEUE
+              || vlog_subkind(t) == DT_ASSOC)) {
+      if (vlog_subkind(t) == DT_DYNARRAY && vlog_ranges(t) == 1
+          && vlog_subkind(vlog_range(t, 0)) != V_DIM_UNSIZED) {
+         vlog_node_t r = vlog_range(t, 0);
+         dims[n++] = (foreach_dim_t) {
+            .left  = vlog_left(r),
+            .right = vlog_right(r),
+         };
+      }
+      else
+         dims[n++] = (foreach_dim_t) {
+            .dynamic = true,
+            .assoc   = vlog_subkind(t) == DT_ASSOC ? t : NULL,
+         };
+      t = vlog_get_type(vlog_type(t));
+   }
+
+   if (t != NULL && vlog_kind(t) == V_DATA_TYPE) {
+      if (vlog_subkind(t) == DT_STRING)
+         dims[n++] = (foreach_dim_t) { .string = true };
+      else {
+         const int npacked = vlog_ranges(t);
+         for (int i = 0; i < npacked && n < MAX_FOREACH_DIMS; i++) {
+            vlog_node_t r = vlog_range(t, i);
+            dims[n++] = (foreach_dim_t) {
+               .left  = vlog_left(r),
+               .right = vlog_right(r),
+            };
+         }
+      }
+   }
+
+   return n;
+}
+
 static vlog_node_t foreach_number(int64_t value, const loc_t *loc)
 {
    vlog_node_t v = vlog_new(V_NUMBER);
@@ -7112,6 +7721,7 @@ static vlog_node_t p_foreach_statement(void)
    return top;
 }
 
+static vlog_node_t p_loop_statement_body(void)
 {
    // forever statement_or_null
    //   | repeat ( expression ) statement_or_null
@@ -7925,7 +8535,35 @@ static vlog_node_t p_jump_statement(void)
 
    BEGIN("jump statement");
 
-   switch (one_of(tRETURN)) {
+   const token_t tok = one_of(tRETURN, tBREAK, tCONTINUE);
+
+   if (tok == tBREAK && rs_break_name != NULL && rs_loop_depth == 0) {
+      // Leaves the random sequence
+      vlog_node_t v = vlog_new(V_DISABLE);
+      vlog_set_ident(v, rs_break_name);
+      consume(tSEMI);
+      vlog_set_loc(v, CURRENT_LOC);
+      return v;
+   }
+   else if (tok == tRETURN && rs_return_name != NULL && peek() == tSEMI) {
+      // Leaves the production
+      vlog_node_t v = vlog_new(V_DISABLE);
+      vlog_set_ident(v, rs_return_name);
+      consume(tSEMI);
+      vlog_set_loc(v, CURRENT_LOC);
+      return v;
+   }
+
+   switch (tok) {
+   case tBREAK:
+   case tCONTINUE:
+      {
+         vlog_node_t v = vlog_new(V_LOOP_JUMP);
+         vlog_set_subkind(v, tok == tBREAK ? V_JUMP_BREAK : V_JUMP_CONTINUE);
+         consume(tSEMI);
+         vlog_set_loc(v, CURRENT_LOC);
+         return v;
+      }
    case tRETURN:
       {
          vlog_node_t v = vlog_new(V_RETURN);
@@ -7937,7 +8575,14 @@ static vlog_node_t p_jump_statement(void)
          else
             vlog_set_ref(v, subr);
 
-         if (peek() != tSEMI)
+         if (peek() == tTAGGED || peek() == tTICK) {
+            vlog_node_t rtype = NULL;
+            if (subr != NULL && vlog_kind(subr) == V_FUNC_DECL
+                && vlog_has_type(subr))
+               rtype = vlog_get_type(vlog_type(subr));
+            vlog_set_value(v, p_expression_of_type(rtype));
+         }
+         else if (peek() != tSEMI)
             vlog_set_value(v, p_expression());
 
          consume(tSEMI);
@@ -7998,6 +8643,480 @@ static vlog_node_t p_procedural_assertion_statement(void)
    BEGIN("procedural assertion statement");
 
    return p_immediate_assertion_statement();
+}
+
+typedef struct {
+   rs_item_t   **items;
+   int           nitems;
+   vlog_node_t   weight;
+   vlog_node_t   wcode;
+   bool          join;
+} rs_rule_t;
+
+typedef struct {
+   ident_t       name;
+   loc_t         loc;
+   vlog_node_t  *formals;
+   int           nformals;
+   rs_rule_t    *rules;
+   int           nrules;
+   ident_t       block;
+   bool          active;
+} rs_prod_t;
+
+typedef struct {
+   rs_prod_t    *prods;
+   int           nprods;
+   int           id;
+} rs_seq_t;
+
+static rs_item_t *p_rs_item(void);
+
+static vlog_node_t p_rs_code_block(void)
+{
+   // { { data_declaration } { statement_or_null } }
+
+   BEGIN("random sequence code block");
+
+   consume(tLBRACE);
+
+   vlog_node_t blk = vlog_new(V_SEQ_BLOCK);
+   vlog_set_loc(blk, &state.last_loc);
+
+   vlog_symtab_push(symtab, blk);
+
+   const int saved_depth = rs_loop_depth;
+   rs_loop_depth = 0;
+
+   skip_over_attributes();
+
+   while (scan_block_item_declaration()) {
+      p_block_item_declaration(blk);
+      skip_over_attributes();
+   }
+
+   while (not_at_token(tRBRACE)) {
+      vlog_node_t s = p_statement_or_null();
+      if (s != NULL)
+         vlog_add_stmt(blk, s);
+   }
+
+   rs_loop_depth = saved_depth;
+
+   vlog_symtab_pop(symtab);
+
+   consume(tRBRACE);
+
+   vlog_set_loc(blk, CURRENT_LOC);
+   return blk;
+}
+
+static bool rs_at_item(void)
+{
+   switch (peek()) {
+   case tID:
+   case tLBRACE:
+   case tIF:
+   case tREPEAT:
+   case tCASE:
+      return true;
+   default:
+      return false;
+   }
+}
+
+static rs_item_t *p_rs_production_item(void)
+{
+   // production_identifier [ ( list_of_arguments ) ]
+
+   BEGIN("production item");
+
+   rs_item_t *it = xcalloc(sizeof(rs_item_t));
+   it->kind = RS_CALL;
+   it->name = p_identifier();
+   it->loc = state.last_loc;
+
+   if (optional(tLPAREN)) {
+      vlog_node_t tmp = vlog_new(V_USER_TCALL);
+      p_list_of_arguments(tmp);
+      consume(tRPAREN);
+
+      it->nargs = vlog_params(tmp);
+      it->args = xmalloc_array(MAX(it->nargs, 1), sizeof(vlog_node_t));
+      for (int i = 0; i < it->nargs; i++)
+         it->args[i] = vlog_param(tmp, i);
+   }
+
+   return it;
+}
+
+static rs_item_t *p_rs_item(void)
+{
+   // production_item | rs_code_block | rs_if_else | rs_repeat | rs_case
+
+   BEGIN("random sequence item");
+
+   switch (peek()) {
+   case tLBRACE:
+      {
+         rs_item_t *it = xcalloc(sizeof(rs_item_t));
+         it->kind = RS_CODE;
+         it->loc = *CURRENT_LOC;
+         it->code = p_rs_code_block();
+         return it;
+      }
+   case tIF:
+   case tREPEAT:
+      {
+         rs_item_t *it = xcalloc(sizeof(rs_item_t));
+         it->loc = *CURRENT_LOC;
+         if (peek() == tIF) {
+            consume(tIF);
+            it->kind = RS_IF;
+         }
+         else {
+            consume(tREPEAT);
+            it->kind = RS_REPEAT;
+         }
+
+         it->args = xmalloc(sizeof(vlog_node_t));
+         it->nargs = 1;
+
+         consume(tLPAREN);
+         it->args[0] = it->kind == RS_IF ? p_cond_predicate() : p_expression();
+         consume(tRPAREN);
+
+         it->a = p_rs_item();
+         if (it->kind == RS_IF && optional(tELSE))
+            it->b = p_rs_item();
+         return it;
+      }
+   case tCASE:
+      {
+         rs_item_t *it = xcalloc(sizeof(rs_item_t));
+         it->kind = RS_CASE;
+         it->loc = *CURRENT_LOC;
+         consume(tCASE);
+
+         it->args = xmalloc(sizeof(vlog_node_t));
+         it->nargs = 1;
+
+         consume(tLPAREN);
+         it->args[0] = p_expression();
+         consume(tRPAREN);
+
+         while (not_at_token(tENDCASE)) {
+            rs_case_t c = { 0 };
+            if (optional(tDEFAULT))
+               optional(tCOLON);
+            else {
+               do {
+                  c.vals = xrealloc_array(c.vals, c.nvals + 1,
+                                          sizeof(vlog_node_t));
+                  c.vals[c.nvals++] = p_expression();
+               } while (optional(tCOMMA));
+               consume(tCOLON);
+            }
+
+            c.item = p_rs_item();
+            consume(tSEMI);
+
+            it->cases = xrealloc_array(it->cases, it->ncases + 1,
+                                       sizeof(rs_case_t));
+            it->cases[it->ncases++] = c;
+         }
+
+         consume(tENDCASE);
+         return it;
+      }
+   default:
+      return p_rs_production_item();
+   }
+}
+
+static void p_rs_rule(rs_prod_t *prod)
+{
+   // rs_production_list [ := weight_specification [ rs_code_block ] ]
+   //   | rand join [ ( expression ) ] production_item production_item
+   //       { production_item }
+
+   BEGIN("random sequence rule");
+
+   rs_rule_t rule = { 0 };
+
+   if (peek() == tRAND && peek_nth(2) == tJOIN) {
+      consume(tRAND);
+      consume(tJOIN);
+      rule.join = true;
+
+      if (optional(tLPAREN)) {
+         (void)p_expression();   // The ratio has no effect on atomic items
+         consume(tRPAREN);
+      }
+
+      while (peek() == tID) {
+         rule.items = xrealloc_array(rule.items, rule.nitems + 1,
+                                     sizeof(rs_item_t *));
+         rule.items[rule.nitems++] = p_rs_production_item();
+      }
+
+      if (rule.nitems < 2)
+         error_at(&state.last_loc, "rand join requires at least two "
+                  "productions");
+      else if (rule.nitems > 3)
+         error_at(&state.last_loc, "sorry, rand join of more than three "
+                  "productions is not supported");
+   }
+   else {
+      while (rs_at_item()) {
+         rule.items = xrealloc_array(rule.items, rule.nitems + 1,
+                                     sizeof(rs_item_t *));
+         rule.items[rule.nitems++] = p_rs_item();
+      }
+   }
+
+   if (optional(tWALRUS) || (peek() == tCOLON && peek_nth(2) == tEQ
+                             && consume(tCOLON) && consume(tEQ))) {
+      if (peek() == tLPAREN) {
+         consume(tLPAREN);
+         rule.weight = p_expression();
+         consume(tRPAREN);
+      }
+      else
+         rule.weight = p_primary();
+
+      if (peek() == tLBRACE)
+         rule.wcode = p_rs_code_block();
+   }
+
+   prod->rules = xrealloc_array(prod->rules, prod->nrules + 1,
+                                sizeof(rs_rule_t));
+   prod->rules[prod->nrules++] = rule;
+}
+
+static void p_rs_production(rs_seq_t *seq)
+{
+   // [ data_type_or_void ] production_identifier [ ( tf_port_list ) ] :
+   //   rs_rule { | rs_rule } ;
+
+   BEGIN("production");
+
+   bool typed = false;
+   if (optional(tVOID))
+      ;
+   else if (peek() != tID || peek_nth(2) == tID) {
+      (void)p_data_type();
+      typed = true;
+   }
+
+   seq->prods = xrealloc_array(seq->prods, seq->nprods + 1,
+                               sizeof(rs_prod_t));
+   rs_prod_t *prod = &(seq->prods[seq->nprods++]);
+   memset(prod, 0, sizeof(rs_prod_t));
+
+   prod->name = p_identifier();
+   prod->loc = state.last_loc;
+   prod->block = ident_sprintf("$rs%d$%s", seq->id, istr(prod->name));
+
+   if (typed)
+      error_at(&prod->loc, "sorry, a production which returns a value is "
+               "not supported");
+
+   // The scope holds the arguments of the production
+   vlog_node_t scope = vlog_new(V_SEQ_BLOCK);
+   vlog_set_loc(scope, &prod->loc);
+
+   if (optional(tLPAREN)) {
+      vlog_node_t hdr = vlog_new(V_TASK_DECL);
+      vlog_set_ident(hdr, prod->name);
+      vlog_set_loc(hdr, &prod->loc);
+
+      vlog_symtab_push(symtab, hdr);
+      p_tf_port_list(hdr);
+      vlog_symtab_pop(symtab);
+
+      consume(tRPAREN);
+
+      const int nports = vlog_ports(hdr);
+      prod->formals = xmalloc_array(MAX(nports, 1), sizeof(vlog_node_t));
+      for (int i = 0; i < nports; i++) {
+         vlog_node_t port = vlog_port(hdr, i);
+         vlog_node_t d = vlog_new(V_LOCAL_DECL);
+         vlog_set_ident(d, vlog_ident(port));
+         vlog_set_type(d, vlog_type(port));
+         vlog_set_loc(d, vlog_loc(port));
+         if (vlog_has_value(port))
+            vlog_set_value(d, vlog_value(port));
+         prod->formals[prod->nformals++] = d;
+      }
+   }
+
+   consume(tCOLON);
+
+   vlog_symtab_push(symtab, scope);
+   for (int i = 0; i < prod->nformals; i++)
+      vlog_symtab_put(symtab, prod->formals[i]);
+
+   ident_t saved_return = rs_return_name;
+   rs_return_name = prod->block;
+
+   do {
+      p_rs_rule(prod);
+   } while (optional(tBAR));
+
+   rs_return_name = saved_return;
+
+   vlog_symtab_pop(symtab);
+
+   consume(tSEMI);
+}
+
+static vlog_node_t rs_number(int value, const loc_t *loc)
+{
+   vlog_node_t v = vlog_new(V_NUMBER);
+   vlog_set_number(v, number_from_int(value));
+   vlog_set_loc(v, loc);
+   return v;
+}
+
+static vlog_node_t rs_block(const loc_t *loc)
+{
+   vlog_node_t v = vlog_new(V_SEQ_BLOCK);
+   vlog_set_loc(v, loc);
+   return v;
+}
+
+static vlog_node_t rs_local(const char *prefix, vlog_node_t value,
+                            const loc_t *loc)
+{
+   vlog_node_t d = vlog_new(V_LOCAL_DECL);
+   vlog_set_ident(d, ident_uniq(prefix));
+   vlog_set_type(d, make_integer_atom_type(DT_INT));
+   vlog_set_value(d, value);
+   vlog_set_loc(d, loc);
+   return d;
+}
+
+static vlog_node_t rs_if(vlog_node_t cond, vlog_node_t then,
+                         vlog_node_t otherwise, const loc_t *loc)
+{
+   vlog_node_t v = vlog_new(V_IF);
+   vlog_set_loc(v, loc);
+
+   vlog_node_t c0 = vlog_new(V_COND);
+   vlog_set_value(c0, cond);
+   vlog_set_loc(c0, loc);
+   vlog_add_stmt(c0, then);
+   vlog_add_cond(v, c0);
+
+   if (otherwise != NULL) {
+      vlog_node_t c1 = vlog_new(V_COND);
+      vlog_set_loc(c1, loc);
+      vlog_add_stmt(c1, otherwise);
+      vlog_add_cond(v, c1);
+   }
+
+   return v;
+}
+
+static vlog_node_t rs_expand_prod(rs_seq_t *seq, rs_prod_t *prod,
+                                  vlog_node_t *args, int nargs,
+                                  const loc_t *loc);
+
+static vlog_node_t rs_expand_item(rs_seq_t *seq, rs_item_t *it)
+{
+   switch (it->kind) {
+   case RS_CODE:
+      return it->code;
+
+   case RS_CALL:
+      {
+         rs_prod_t *prod = NULL;
+         for (int i = 0; i < seq->nprods; i++) {
+            if (seq->prods[i].name == it->name)
+               prod = &(seq->prods[i]);
+         }
+
+         if (prod == NULL) {
+            error_at(&it->loc, "no production named %pQ", it->name);
+            return rs_block(&it->loc);
+         }
+         else if (prod->active) {
+            error_at(&it->loc, "sorry, the recursive production %pQ is not "
+                     "supported", it->name);
+            return rs_block(&it->loc);
+         }
+
+         return rs_expand_prod(seq, prod, it->args, it->nargs, &it->loc);
+      }
+
+   case RS_IF:
+      {
+         vlog_node_t then = rs_expand_item(seq, it->a);
+         vlog_node_t otherwise = it->b ? rs_expand_item(seq, it->b) : NULL;
+         return rs_if(it->args[0], then, otherwise, &it->loc);
+      }
+
+   case RS_REPEAT:
+      {
+         vlog_node_t v = vlog_new(V_REPEAT);
+         vlog_set_value(v, it->args[0]);
+         vlog_add_stmt(v, rs_expand_item(seq, it->a));
+         vlog_set_loc(v, &it->loc);
+         return v;
+      }
+
+   case RS_CASE:
+      {
+         // The expression is evaluated once
+         vlog_node_t blk = rs_block(&it->loc);
+         vlog_node_t sel = rs_local("rscase", it->args[0], &it->loc);
+         vlog_add_decl(blk, sel);
+
+         vlog_node_t dflt = NULL;
+         vlog_node_t chain = NULL;
+         for (int i = it->ncases - 1; i >= 0; i--) {
+            rs_case_t *c = &(it->cases[i]);
+            vlog_node_t body = rs_expand_item(seq, c->item);
+
+            if (c->nvals == 0) {
+               dflt = body;
+               continue;
+            }
+
+            vlog_node_t cond = NULL;
+            for (int j = 0; j < c->nvals; j++) {
+               vlog_node_t eq = vlog_new(V_BINARY);
+               vlog_set_subkind(eq, V_BINARY_CASE_EQ);
+               vlog_set_left(eq, foreach_ref(sel, &it->loc));
+               vlog_set_right(eq, c->vals[j]);
+               vlog_set_loc(eq, &it->loc);
+
+               if (cond == NULL)
+                  cond = eq;
+               else {
+                  vlog_node_t o = vlog_new(V_BINARY);
+                  vlog_set_subkind(o, V_BINARY_LOG_OR);
+                  vlog_set_left(o, cond);
+                  vlog_set_right(o, eq);
+                  vlog_set_loc(o, &it->loc);
+                  cond = o;
+               }
+            }
+
+            chain = rs_if(cond, body, chain ?: dflt, &it->loc);
+         }
+
+         if (chain != NULL)
+            vlog_add_stmt(blk, chain);
+         else if (dflt != NULL)
+            vlog_add_stmt(blk, dflt);
+
+         return blk;
+      }
+   }
+
+   should_not_reach_here();
 }
 
 static vlog_node_t rs_expand_rule(rs_seq_t *seq, rs_rule_t *rule,
@@ -8157,6 +9276,66 @@ static vlog_node_t rs_expand_prod(rs_seq_t *seq, rs_prod_t *prod,
    return blk;
 }
 
+static vlog_node_t p_randsequence_statement(void)
+{
+   // randsequence ( [ production_identifier ] ) production { production }
+   //   endsequence
+
+   BEGIN("randsequence statement");
+
+   static int next_id = 0;
+
+   consume(tRANDSEQUENCE);
+   consume(tLPAREN);
+
+   ident_t start = NULL;
+   if (peek() == tID)
+      start = p_identifier();
+   const loc_t start_loc = state.last_loc;
+
+   consume(tRPAREN);
+
+   rs_seq_t seq = { .id = next_id++ };
+
+   ident_t saved_break = rs_break_name;
+   const int saved_depth = rs_loop_depth;
+   rs_break_name = ident_sprintf("$rs%d$break", seq.id);
+
+   do {
+      p_rs_production(&seq);
+   } while (not_at_token(tENDSEQUENCE));
+
+   consume(tENDSEQUENCE);
+
+   rs_break_name = saved_break;
+   rs_loop_depth = saved_depth;
+
+   // The block which break leaves
+   vlog_node_t top = rs_block(CURRENT_LOC);
+   vlog_set_ident(top, ident_sprintf("$rs%d$break", seq.id));
+
+   rs_prod_t *entry = NULL;
+   for (int i = 0; i < seq.nprods; i++) {
+      if (start == NULL || seq.prods[i].name == start) {
+         entry = &(seq.prods[i]);
+         break;
+      }
+   }
+
+   if (entry == NULL)
+      error_at(&start_loc, "no production named %pQ", start);
+   else
+      vlog_add_stmt(top, rs_expand_prod(&seq, entry, NULL, 0, &start_loc));
+
+   for (int i = 0; i < seq.nprods; i++) {
+      free(seq.prods[i].formals);
+      free(seq.prods[i].rules);
+   }
+   free(seq.prods);
+
+   return top;
+}
+
 static vlog_node_t p_statement_item(ident_t id)
 {
    // blocking_assignment ; | nonblocking_assignment ;
@@ -8296,6 +9475,42 @@ static vlog_node_t p_statement_item(ident_t id)
       return p_case_statement();
    case tIFIMPL:
       return p_event_trigger();
+   case tUNIQUE:
+   case tUNIQUE0:
+   case tPRIORITY:
+      {
+         vlog_flags_t flags;
+         switch (peek()) {
+         case tUNIQUE:  flags = VLOG_F_UNIQUE; break;
+         case tUNIQUE0: flags = VLOG_F_UNIQUE0; break;
+         default:       flags = VLOG_F_PRIORITY; break;
+         }
+
+         drop_token(&state);
+
+         vlog_node_t v;
+         switch (peek()) {
+         case tIF:
+            v = p_conditional_statement();
+            break;
+         case tCASE:
+         case tCASEX:
+         case tCASEZ:
+            v = p_case_statement();
+            break;
+         default:
+            one_of(tIF, tCASE, tCASEX, tCASEZ);
+            drop_tokens_until(&state, tSEMI);
+            return vlog_new(V_SEQ_BLOCK);  // Dummy statement
+         }
+
+         vlog_set_flags(v, flags);
+         return v;
+      }
+   case tRANDCASE:
+      return p_randcase_statement();
+   case tRANDSEQUENCE:
+      return p_randsequence_statement();
    case tASSIGN:
    case tDEASSIGN:
    case tFORCE:
@@ -9071,6 +10286,33 @@ static vlog_node_t p_variable_decl_assignment(vlog_node_t datatype,
    // The variable is visible in its own initial value
    vlog_set_loc(v, CURRENT_LOC);
    vlog_symtab_put(symtab, v);
+
+   if (optional(tEQ)) {
+      if (kind == V_VAR_DECL && (class_depth > 0 || forward_classes.count > 0)
+          && !in_subroutine && defer_property_init(v))
+         ;   // A call may be to a method declared later in the class
+      else if (peek() == tNEW) {
+         if (peek_nth(2) == tLSQUARE)
+            vlog_set_value(v, p_dynamic_array_new(vlog_get_type(dt)));
+         else
+            vlog_set_value(v, p_class_new(vlog_get_type(dt)));
+      }
+      else if (peek() == tLBRACE && peek_nth(2) != tSHIFTLL
+               && peek_nth(2) != tSHIFTRL && is_fixed_unpacked(v, dt)
+               && vlog_get_type(dt) != NULL) {
+         pattern_array_elems = true;
+         vlog_set_value(v, p_assignment_pattern_expression(vlog_get_type(dt)));
+         pattern_array_elems = false;
+      }
+      else {
+         pattern_array_elems = peek() == tTICK && peek_nth(2) == tLBRACE
+            && is_fixed_unpacked(v, dt);
+         vlog_set_value(v, p_expression_of_type(vlog_get_type(dt)));
+         pattern_array_elems = false;
+      }
+   }
+
+   vlog_set_loc(v, CURRENT_LOC);
    return v;
 }
 
@@ -11088,14 +12330,281 @@ static void p_class_item(vlog_node_t parent)
    }
 }
 
-static void p_class_type(void)
+static void p_extern_constraint(void)
+{
+   // [ static ] constraint class_scope constraint_identifier
+   //    constraint_block
+
+   BEGIN("out-of-class constraint definition");
+
+   if (capture_generic_constraint())
+      return;
+
+   const bool is_static = optional(tSTATIC);
+
+   consume(tCONSTRAINT);
+
+   ident_t cname = p_identifier();
+   const loc_t cloc = state.last_loc;
+   consume(tSCOPE);
+   ident_t id = p_identifier();
+   const loc_t mloc = state.last_loc;
+
+   vlog_node_t class = spec_extern_class;
+   if (class == NULL)
+      class = vlog_symtab_query(symtab, cname);
+   if (class != NULL && vlog_kind(class) == V_TYPE_DECL)
+      class = vlog_get_type(class);
+
+   vlog_node_t proto = NULL;
+   if (class == NULL || vlog_kind(class) != V_CLASS_DECL) {
+      error_at(&cloc, "no class named %pQ", cname);
+      class = NULL;
+   }
+   else if (vlog_flags(class) & VLOG_F_GENERIC) {
+      error_at(&cloc, "sorry, a constraint of a parameterised class cannot "
+               "be defined outside of the class");
+      class = NULL;
+   }
+   else {
+      const int ndecls = vlog_decls(class);
+      for (int i = 0; i < ndecls; i++) {
+         vlog_node_t d = vlog_decl(class, i);
+         if (vlog_kind(d) == V_CONSTRAINT && vlog_ident(d) == id) {
+            proto = d;
+            break;
+         }
+      }
+
+      if (proto == NULL || !(vlog_flags(proto) & VLOG_F_EXTERN)) {
+         diag_t *d = diag_new(DIAG_ERROR, &mloc);
+         if (proto == NULL)
+            diag_printf(d, "class %pQ has no constraint named %pQ", cname, id);
+         else
+            diag_printf(d, "constraint %pQ was not declared extern in class "
+                        "%pQ", id, cname);
+         if (proto != NULL)
+            diag_hint(d, vlog_loc(proto), "declared here");
+         diag_hint(d, &mloc, "definition");
+         diag_emit(d);
+         proto = NULL;
+      }
+      else if (is_static != !!(vlog_flags(proto) & VLOG_F_STATIC))
+         error_at(&mloc, "the static qualifier of constraint %pQ does not "
+                  "match the prototype", id);
+   }
+
+   if (class == NULL) {
+      // The names cannot be resolved without the class so skip the block
+      consume(tLBRACE);
+      for (int nest = 1; nest > 0 && peek() != tEOF; ) {
+         const token_t tok = peek();
+         nest += tok == tLBRACE ? 1 : tok == tRBRACE ? -1 : 0;
+         drop_token(&state);
+      }
+      return;
+   }
+
+   int depth = 0;
+   push_class_scopes(class, &depth);
+
+   consume(tLBRACE);
+
+   while (not_at_token(tRBRACE)) {
+      vlog_node_t item = p_constraint_expression();
+      if (proto != NULL)
+         vlog_add_stmt(proto, item);
+   }
+
+   consume(tRBRACE);
+
+   if (proto != NULL)
+      vlog_clear_flags(proto, VLOG_F_EXTERN);
+
+   for (int i = 0; i < depth; i++)
+      vlog_symtab_pop(symtab);
+   vlog_symtab_pop(symtab);
+}
+
+static vlog_node_t p_class_type(void)
 {
    // ps_class_identifier [ parameter_value_assignment ]
    //   { :: class_identifier [ parameter_value_assignment ] }
 
    BEGIN("class type");
 
-   (void)p_identifier();
+   return p_data_type();
+}
+
+static void put_enum_names(vlog_node_t type_decl)
+{
+   // The names of an enumeration are visible with the type
+
+   vlog_node_t t = vlog_type(type_decl);
+   if (vlog_kind(t) != V_ENUM_DECL)
+      return;
+
+   const int ndecls = vlog_decls(t);
+   for (int i = 0; i < ndecls; i++)
+      vlog_symtab_put(symtab, vlog_decl(t, i));
+}
+
+static int push_base_scopes(vlog_node_t class)
+{
+   // Inherited members are visible in a derived class, outermost base first
+
+   int depth = 0;
+
+   if (vlog_flags(class) & VLOG_F_INTERFACE) {
+      // An interface class can use the types of those it extends
+      const unsigned nifaces = vlog_class_ifaces(class);
+      for (unsigned i = 0; i < nifaces; i++) {
+         vlog_node_t iface = vlog_class_iface(class, i);
+         depth += push_base_scopes(iface);
+
+         vlog_symtab_push(symtab, iface);
+         depth++;
+
+         const int ndecls = vlog_decls(iface);
+         for (int j = 0; j < ndecls; j++) {
+            vlog_node_t d = vlog_decl(iface, j);
+            if ((vlog_kind(d) == V_TYPE_DECL
+                 && vlog_ident(d) != ident_new("$implements"))
+                || vlog_kind(d) == V_LOCALPARAM)
+               vlog_symtab_put(symtab, d);
+         }
+      }
+   }
+
+   if (vlog_has_ref(class)) {
+      vlog_node_t base = vlog_ref(class);
+      depth += push_base_scopes(base);
+
+      vlog_symtab_push(symtab, base);
+      depth++;
+
+      const int ndecls = vlog_decls(base);
+      for (int i = 0; i < ndecls; i++) {
+         vlog_node_t d = vlog_decl(base, i);
+         switch (vlog_kind(d)) {
+         case V_TYPE_DECL:
+            if (vlog_ident(d) == ident_new("$implements"))
+               break;
+            put_enum_names(d);
+            // Fall-through
+         case V_VAR_DECL:
+         case V_TASK_DECL:
+         case V_FUNC_DECL:
+         case V_CONSTRAINT:
+         case V_PARAM_DECL:
+         case V_LOCALPARAM:
+            vlog_symtab_put(symtab, d);
+            break;
+         default:
+            break;
+         }
+      }
+   }
+
+   return depth;
+}
+
+static bool class_has_decl(vlog_node_t class, ident_t id)
+{
+   const int ndecls = vlog_decls(class);
+   for (int i = 0; i < ndecls; i++) {
+      vlog_node_t d = vlog_decl(class, i);
+      if (vlog_kind(d) == V_VAR_DECL && vlog_ident(d) == id)
+         return true;
+   }
+
+   return false;
+}
+
+static void add_hidden_property(vlog_node_t class, ident_t id)
+{
+   vlog_node_t d = vlog_new(V_VAR_DECL);
+   vlog_set_ident(d, id);
+   vlog_set_loc(d, vlog_loc(class));
+
+   vlog_node_t dt = make_integer_atom_type(DT_LONGINT);
+   vlog_set_flags(dt, VLOG_F_SIGNED);
+   vlog_set_type(d, dt);
+
+   vlog_node_t zero = vlog_new(V_NUMBER);
+   vlog_set_number(zero, number_from_int(0));
+   vlog_set_loc(zero, vlog_loc(class));
+   vlog_set_value(d, zero);
+
+   vlog_add_decl(class, d);
+}
+
+static void add_rand_state(vlog_node_t class)
+{
+   // Hidden properties hold the rand_mode and constraint_mode bits and the
+   // state of each randc variable
+
+   bool own = false;
+   int nrand = 0, ncons = 0;
+   for (vlog_node_t c = class; ; c = vlog_ref(c)) {
+      const int ndecls = vlog_decls(c);
+      for (int i = 0; i < ndecls; i++) {
+         vlog_node_t d = vlog_decl(c, i);
+         switch (vlog_kind(d)) {
+         case V_VAR_DECL:
+            if (vlog_flags(d) & (VLOG_F_RAND | VLOG_F_RANDC)) {
+               nrand++;
+               own |= (c == class);
+            }
+            break;
+         case V_CONSTRAINT:
+            // An override in a derived class uses the same bit
+            if (vlog_class_member(class, vlog_ident(d)) == d)
+               ncons++;
+            own |= (c == class);
+            break;
+         default:
+            break;
+         }
+      }
+
+      if (!vlog_has_ref(c))
+         break;
+   }
+
+   if (!own)
+      return;
+
+   if (nrand > 64)
+      error_at(vlog_loc(class), "sorry, more than 64 rand properties in a "
+               "class are not supported");
+   else if (ncons > 64)
+      error_at(vlog_loc(class), "sorry, more than 64 constraints in a class "
+               "are not supported");
+
+   ident_t rand_off = ident_new("$rand_off");
+
+   bool inherited = false;
+   for (vlog_node_t c = class; vlog_has_ref(c) && !inherited; ) {
+      c = vlog_ref(c);
+      inherited = class_has_decl(c, rand_off);
+   }
+
+   const int ndecls = vlog_decls(class);
+   if (!inherited) {
+      add_hidden_property(class, rand_off);
+      add_hidden_property(class, ident_new("$cons_off"));
+      add_hidden_property(class, ident_new("$seed"));
+   }
+
+   for (int i = 0; i < ndecls; i++) {
+      vlog_node_t d = vlog_decl(class, i);
+      if (vlog_kind(d) == V_VAR_DECL && (vlog_flags(d) & VLOG_F_RANDC))
+         add_hidden_property(class, ident_prefix(vlog_ident(d),
+                                                 ident_new("randc"), '$'));
+   }
+}
+
 static void p_interface_class_type(vlog_node_t class)
 {
    // interface_class_type
@@ -12092,6 +13601,100 @@ static vlog_node_t specialise_class(vlog_node_t generic)
    return v;
 }
 
+static void replay_generic_extern(generic_class_t *ext, vlog_node_t spec,
+                                  vlog_scope_t *scope)
+{
+   // Parse a method defined outside of the class for one specialisation
+
+   parse_state_t saved = state;
+   generic_class_t *saved_class = replay_class;
+   const int saved_pos = replay_pos;
+   vlog_node_t saved_extern = spec_extern_class;
+   vlog_node_t saved_container = spec_container;
+
+   replay_class = ext;
+   replay_pos = 0;
+   spec_extern_class = spec;
+
+   state.lex_fn = replay_lex;
+   state.tokenq_head = state.tokenq_tail = 0;
+   state.start_loc = LOC_INVALID;
+
+   vlog_scope_t *saved_scope = vlog_symtab_enter(symtab, scope);
+
+   const int saved_depth = class_depth;
+   class_depth++;
+
+   if (peek() == tTASK)
+      (void)p_task_declaration();
+   else if (peek() == tCONSTRAINT || peek() == tSTATIC)
+      p_extern_constraint();
+   else
+      (void)p_function_declaration();
+
+   class_depth = saved_depth;
+
+   vlog_symtab_enter(symtab, saved_scope);
+
+   state = saved;
+   replay_class = saved_class;
+   replay_pos = saved_pos;
+   spec_extern_class = saved_extern;
+   spec_container = saved_container;
+}
+
+static bool capture_generic_constraint(void)
+{
+   // A constraint defined outside of a parameterised class is kept for each
+   // specialisation like a method
+
+   if (spec_extern_class != NULL || class_depth > 0)
+      return false;
+
+   const int n = peek() == tSTATIC ? 3 : 2;
+   if (peek_nth(n) != tID || peek_nth(n + 1) != tSCOPE)
+      return false;
+
+   const int pos = (state.tokenq_tail + n - 1) & (TOKENQ_SIZE - 1);
+   vlog_node_t d = vlog_symtab_query(symtab, state.tokenq[pos].lval.ident);
+   generic_class_t *g = NULL;
+   if (d != NULL && generic_classes != NULL)
+      g = hash_get(generic_classes, d);
+
+   if (g == NULL)
+      return false;
+
+   generic_class_t *ext = xcalloc(sizeof(generic_class_t));
+
+   int depth = 0;
+   for (bool done = false; !done; ) {
+      const token_t tok = peek();
+      if (tok == tEOF)
+         break;
+
+      tokenq_t saved = state.tokenq[state.tokenq_tail];
+      drop_token(&state);
+
+      ext->tokens = xrealloc_array(ext->tokens, ext->ntokens + 1,
+                                   sizeof(tokenq_t));
+      ext->tokens[ext->ntokens++] = saved;
+
+      if (tok == tLBRACE)
+         depth++;
+      else if (tok == tRBRACE && --depth == 0)
+         done = true;
+   }
+
+   g->externs = xrealloc_array(g->externs, g->nexterns + 1,
+                               sizeof(generic_class_t *));
+   g->externs[g->nexterns++] = ext;
+
+   for (int i = 0; i < g->nspecs; i++)
+      replay_generic_extern(ext, g->specs[i], g->spec_scopes[i]);
+
+   return true;
+}
+
 static bool capture_generic_extern(token_t end_token)
 {
    // With the next token being function or task check if this defines a
@@ -12173,6 +13776,60 @@ static void capture_tokens_until(generic_class_t *c, token_t end_token)
    }
 }
 
+static bool defer_property_init(vlog_node_t decl)
+{
+   // Only an initial value which calls something depends on what is declared
+   // later in the class and others may be needed as constants
+
+   if (peek() == tNEW || (peek() == tTICK && class_depth > 0))
+      return false;
+
+   bool has_call = false;
+   int n = 1, depth = 0;
+   for (;; n++) {
+      if (n >= TOKENQ_SIZE - 8)
+         return false;
+
+      const token_t tok = peek_nth(n);
+      if (tok == tEOF || tok == tSEMI)
+         break;
+      else if (depth == 0 && tok == tCOMMA)
+         break;
+      else if (tok == tLPAREN || tok == tLBRACE || tok == tLSQUARE) {
+         has_call |= tok == tLPAREN && n > 1 && peek_nth(n - 1) == tID;
+         depth++;
+      }
+      else if (tok == tRPAREN || tok == tRBRACE || tok == tRSQUARE)
+         depth--;
+   }
+
+   if (!has_call)
+      return false;
+
+   deferred_body_t d = {
+      .subr           = decl,
+      .scope          = vlog_symtab_current(symtab),
+      .proc_automatic = proc_automatic,
+      .subr_automatic = subr_automatic,
+      .is_init        = true,
+      .container      = spec_container,
+   };
+
+   for (int i = 1; i < n; i++) {
+      tokenq_t saved = state.tokenq[state.tokenq_tail];
+      drop_token(&state);
+
+      d.body.tokens = xrealloc_array(d.body.tokens, d.body.ntokens + 1,
+                                     sizeof(tokenq_t));
+      d.body.tokens[d.body.ntokens++] = saved;
+
+      (void)peek();
+   }
+
+   APUSH(deferred_bodies, d);
+   return true;
+}
+
 static bool defer_subr_body(vlog_node_t subr, token_t end_token)
 {
    // Called with the header parsed and the scope of the subroutine on top
@@ -12195,6 +13852,77 @@ static bool defer_subr_body(vlog_node_t subr, token_t end_token)
 
    APUSH(deferred_bodies, d);
    return true;
+}
+
+static void p_deferred_body(const deferred_body_t *d)
+{
+   BEGIN("subroutine body");
+
+   vlog_node_t subr = d->subr;
+   const vlog_kind_t kind = vlog_kind(subr);
+
+   if (d->is_constraint) {
+      consume(tLBRACE);
+
+      while (not_at_token(tRBRACE)) {
+         if (!optional(tSEMI))
+            vlog_add_stmt(subr, p_constraint_expression());
+      }
+
+      consume(tRBRACE);
+      return;
+   }
+
+   if (d->is_init) {
+      if (peek() == tTICK && vlog_has_type(subr))
+         vlog_set_value(subr, p_expression_of_type(
+                           vlog_get_type(vlog_type(subr))));
+      else
+         vlog_set_value(subr, p_expression());
+      return;
+   }
+
+   skip_over_attributes();
+
+   while (scan_block_item_declaration()) {
+      p_block_item_declaration(subr);
+      skip_over_attributes();
+   }
+
+   if (kind == V_CONSTRUCTOR && optional(tSUPER)) {
+      consume(tDOT);
+      consume(tNEW);
+
+      vlog_node_t call = vlog_new(V_SUPER_CALL);
+      vlog_set_loc(call, &state.last_loc);
+
+      if (optional(tLPAREN)) {
+         p_list_of_arguments(call);
+         consume(tRPAREN);
+      }
+
+      vlog_add_stmt(subr, call);
+   }
+
+   while (not_at_token(d->end_token)) {
+      vlog_node_t s = p_statement_or_null();
+      if (s != NULL)
+         vlog_add_stmt(subr, s);
+   }
+
+   consume(d->end_token);
+
+   if (optional(tCOLON)) {
+      if (kind == V_CONSTRUCTOR)
+         consume(tNEW);
+      else {
+         ident_t name = p_identifier(), id = vlog_ident(subr);
+         if (id != name)
+            error_at(&state.last_loc, "'%s' does not match %s name '%s'",
+                     istr(name), kind == V_FUNC_DECL ? "function" : "task",
+                     istr(id));
+      }
+   }
 }
 
 static void put_generic_tokens(text_buf_t *tb, const tokenq_t *tokens, int n)
@@ -12590,6 +14318,98 @@ static void fix_spec_scopes(void)
    }
 }
 
+static void flush_deferred_bodies(bool end_of_unit)
+{
+   if (flushing_bodies || class_depth > 0)
+      return;
+
+   // Methods in a package can use anything declared anywhere in the package
+   vlog_node_t du = vlog_symtab_design_unit(symtab);
+   if (!end_of_unit && du != NULL && vlog_kind(du) == V_PACKAGE)
+      return;
+
+   if (end_of_unit) {
+      for (int i = 0; i < forward_classes.count; i++) {
+         vlog_node_t c = forward_classes.items[i];
+         error_at(vlog_loc(c), "class %pQ has a forward declaration but is "
+                  "not declared", vlog_ident(c));
+         vlog_clear_flags(c, VLOG_F_FORWARD);
+      }
+      ARESIZE(forward_classes, 0);
+   }
+   else if (forward_classes.count > 0)
+      return;
+
+   if (deferred_bodies.count == 0) {
+      if (end_of_unit)
+         fix_spec_scopes();
+      return;
+   }
+
+   flushing_bodies = true;
+
+   parse_state_t saved = state;
+   generic_class_t *saved_class = replay_class;
+   const int saved_pos = replay_pos;
+   const bool saved_proc = proc_automatic, saved_subr = subr_automatic;
+   const bool saved_in_subr = in_subroutine, saved_proto = parsing_prototype;
+   const vlog_kind_t saved_kind = param_kind;
+   vlog_node_t saved_func = current_func, saved_container = spec_container;
+   vlog_scope_t *saved_scope = vlog_symtab_current(symtab);
+
+   for (int i = 0; i < deferred_bodies.count; i++) {
+      // More may be added if the body causes a class to be specialised
+      deferred_body_t d = deferred_bodies.items[i];
+
+      replay_class = &d.body;
+      replay_pos = 0;
+      parsing_prototype = false;
+      param_kind = V_LOCALPARAM;
+      proc_automatic = d.proc_automatic;
+      subr_automatic = d.subr_automatic;
+      in_subroutine = d.in_subroutine;
+      current_func = d.func;
+      spec_container = d.container;
+
+      state.lex_fn = replay_lex;
+      state.tokenq_head = state.tokenq_tail = 0;
+      state.start_loc = LOC_INVALID;
+
+      vlog_symtab_enter(symtab, d.scope);
+
+      p_deferred_body(&d);
+
+      // Names that were not found are resolved in the enclosing scopes
+      while (vlog_symtab_current(symtab) != saved_scope
+             && vlog_symtab_current(symtab) != NULL)
+         vlog_symtab_pop(symtab);
+
+      free(d.body.tokens);
+   }
+
+   ARESIZE(deferred_bodies, 0);
+
+   vlog_symtab_enter(symtab, saved_scope);
+
+   if (end_of_unit)
+      fix_spec_scopes();
+
+   state = saved;
+   replay_class = saved_class;
+   replay_pos = saved_pos;
+   proc_automatic = saved_proc;
+   subr_automatic = saved_subr;
+   in_subroutine = saved_in_subr;
+   parsing_prototype = saved_proto;
+   param_kind = saved_kind;
+   current_func = saved_func;
+   spec_container = saved_container;
+
+   vlog_symtab_enter(symtab, saved_scope);
+
+   flushing_bodies = false;
+}
+
 static vlog_node_t specialise_forward(vlog_node_t forward)
 {
    // [ # ( list_of_parameter_assignments ) ] of a class not yet declared
@@ -12666,6 +14486,39 @@ static vlog_node_t specialise_forward(vlog_node_t forward)
    return f.placeholder;
 }
 
+static void resolve_forward_specs(vlog_node_t class)
+{
+   for (int i = 0; i < forward_specs.count; i++) {
+      forward_spec_t f = forward_specs.items[i];
+      if (f.forward != class)
+         continue;
+
+      parse_state_t saved = state;
+      generic_class_t *saved_class = replay_class;
+      const int saved_pos = replay_pos;
+      vlog_node_t saved_container = spec_container;
+
+      replay_class = &f.actuals;
+      replay_pos = 0;
+      spec_container = f.container;
+
+      state.lex_fn = replay_lex;
+      state.tokenq_head = state.tokenq_tail = 0;
+      state.start_loc = LOC_INVALID;
+
+      vlog_scope_t *saved_scope = vlog_symtab_enter(symtab, f.scope);
+
+      spec_into = f.placeholder;
+      (void)specialise_class(class);
+      spec_into = NULL;
+
+      vlog_symtab_enter(symtab, saved_scope);
+
+      state = saved;
+      replay_class = saved_class;
+      replay_pos = saved_pos;
+      spec_container = saved_container;
+   }
 }
 
 static vlog_node_t p_class_declaration(void)
@@ -12850,8 +14703,25 @@ static void p_package_or_generate_item_declaration(vlog_node_t parent)
       consume(tSEMI);
       break;
    case tCLASS:
-   case tVIRTUAL:
       vlog_add_decl(parent, p_class_declaration());
+      break;
+   case tINTERFACE:
+      vlog_add_decl(parent, p_class_declaration());
+      break;
+   case tCONSTRAINT:
+      p_extern_constraint();
+      break;
+   case tVIRTUAL:
+      if (peek_nth(2) == tCLASS)
+         vlog_add_decl(parent, p_class_declaration());
+      else
+         p_data_declaration(parent, V_VAR_DECL);
+      break;
+   case tSTATIC:
+   case tAUTOMATIC:
+   case tCONST:
+      (void)one_of(tSTATIC, tAUTOMATIC, tCONST);
+      p_package_or_generate_item_declaration(parent);
       break;
    default:
       one_of(tWIRE, tUWIRE, tSUPPLY0, tSUPPLY1, tTRI, tTRI0, tTRI1, tTRIAND,
