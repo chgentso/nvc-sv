@@ -40,8 +40,12 @@ package verilog is
     type t_net_array is array (natural range <>) of t_net_value;
 
     function resolve_wire (inputs : t_net_array) return t_net_value;
+    function resolve_wand (inputs : t_net_array) return t_net_value;
+    function resolve_wor (inputs : t_net_array) return t_net_value;
 
     subtype t_wire is resolve_wire t_net_value;
+    subtype t_wand is resolve_wand t_net_value;
+    subtype t_wor is resolve_wor t_net_value;
 
     type t_wire_array is array (natural range <>) of t_wire;
 
@@ -69,6 +73,16 @@ package verilog is
     function to_verilog (value : std_ulogic) return t_net_value;
     function to_verilog (value : std_ulogic_vector) return t_logic_array;
     function to_verilog (value : std_ulogic_vector) return t_net_array;
+
+    function to_vhdl_bit (value : t_net_value) return bit;
+    function to_vhdl_boolean (value : t_net_value) return boolean;
+    function to_vhdl_bit_vector (value : t_wire_array) return bit_vector;
+    function to_vhdl_integer (value : t_wire_array) return integer;
+
+    function to_verilog_bit (value : bit) return t_net_value;
+    function to_verilog_boolean (value : boolean) return t_net_value;
+    function to_verilog_bit_vector (value : bit_vector) return t_net_array;
+    function to_verilog_integer (value : integer) return t_net_array;
 
     function to_string (value : t_logic_array) return string;
 

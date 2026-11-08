@@ -49,7 +49,7 @@ begin
         end component;
     begin
         u: component mod1
-            port map ( x, y, open );       -- OK
+            port map ( x, y, open );       -- Error
     end block;
 
     b5: block is
@@ -95,6 +95,71 @@ begin
     begin
         u: component mod1
             port map ( x, y, z );       -- Error
+    end block;
+
+    b9: block is
+        component mod1 is
+            generic ( g1 : integer := 0 );
+            port ( one : in std_logic;
+                   two : in std_logic;
+                   three : out bit_vector(0 to 0) );
+        end component;
+        signal s : bit_vector(0 to 0);
+    begin
+        u: component mod1
+            port map ( x, y, s );       -- Error
+    end block;
+
+    b10: block is
+        component mod1 is
+            generic ( g1 : integer := 0 );
+            port ( one : in bit_vector(0 to 0);
+                   two : in std_logic;
+                   three : out std_logic );
+        end component;
+        signal s : bit_vector(0 to 0);
+    begin
+        u: component mod1
+            port map ( s, y, z );       -- Error
+    end block;
+
+    b11: block is
+        component mod1 is
+            generic ( g1 : integer := 0 );
+            port ( one : in std_logic;
+                   two : in std_logic;
+                   three : out integer );
+        end component;
+        signal s : integer;
+    begin
+        u: component mod1
+            port map ( x, y, s );       -- Error
+    end block;
+
+    b12: block is
+        component mod1 is
+            generic ( g1 : integer := 0 );
+            port ( one : in integer;
+                   two : in std_logic;
+                   three : out std_logic );
+        end component;
+        signal s : integer;
+    begin
+        u: component mod1
+            port map ( s, y, z );       -- Error
+    end block;
+
+    b13: block is
+        component mod1 is
+            generic ( g1 : integer := 0 );
+            port ( one : in bit;
+                   two : in std_logic;
+                   three : out std_logic );
+        end component;
+        signal s : bit;
+    begin
+        u: component mod1
+            port map ( s, y, z );       -- Error
     end block;
 
 end architecture;

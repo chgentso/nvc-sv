@@ -36,7 +36,8 @@ package body verilog is
         strength1 := t_strength'val((net / 32) rem 8);
     end procedure;
 
-    function resolve_wire (inputs : t_net_array) return t_net_value is
+    function resolve (inputs : t_net_array; conflict : t_logic)
+        return t_net_value is
         variable result    : t_net_value;
         variable data      : t_logic := 'Z';
         variable strength  : t_strength := HiZ;
@@ -81,7 +82,7 @@ package body verilog is
                     data := elem;
                     strength := elem_st;
                 elsif elem_st = strength and elem /= data and elem /= 'Z' then
-                    data := 'X';
+                    data := conflict;
                 end if;
 
                 case data is
@@ -102,6 +103,21 @@ package body verilog is
         end if;
         encode_net(result, data, strength0, strength1);
         return result;
+    end function;
+
+    function resolve_wire (inputs : t_net_array) return t_net_value is
+    begin
+        return resolve(inputs, 'X');
+    end function;
+
+    function resolve_wand (inputs : t_net_array) return t_net_value is
+    begin
+        return resolve(inputs, '0');
+    end function;
+
+    function resolve_wor (inputs : t_net_array) return t_net_value is
+    begin
+        return resolve(inputs, '1');
     end function;
 
     function to_logic (value : t_net_value) return t_logic is
@@ -261,13 +277,17 @@ package body verilog is
             when 'X' =>
                 return 'U';
             when '0' =>
-                if strength0 = We or strength0 = Me or strength0 = Sm then
+                if strength0 = HiZ and strength1 /= HiZ then
+                    return 'Z';
+                elsif strength0 /= HiZ and strength0 < St then
                     return 'L';
                 else
                     return '0';
                 end if;
             when '1' =>
-                if strength1 = We or strength1 = Me or strength1 = Sm then
+                if strength1 = HiZ and strength0 /= HiZ then
+                    return 'Z';
+                elsif strength1 /= HiZ and strength1 < St then
                     return 'H';
                 else
                     return '1';
@@ -344,6 +364,101 @@ package body verilog is
             result(i) := to_verilog(xvalue(i));
         end loop;
         return result;
+    end function;
+
+    function to_vhdl_bit (value : t_net_value) return bit is
+    begin
+        case to_vhdl(value) is
+            when '1' | 'H' => return '1';
+            when others => return '0';
+        end case;
+    end function;
+
+    function to_vhdl_boolean (value : t_net_value) return boolean is
+    begin
+        return to_vhdl_bit(value) = '1';
+    end function;
+
+    function to_vhdl_bit_vector (value : t_wire_array) return bit_vector is
+        alias xvalue : t_wire_array(1 to value'length) is value;
+        variable result : bit_vector(1 to value'length);
+    begin
+        for i in 1 to value'length loop
+            result(i) := to_vhdl_bit(xvalue(i));
+        end loop;
+        return result;
+    end function;
+
+    function to_vhdl_integer (value : t_wire_array) return integer is
+        alias xvalue : t_wire_array(1 to value'length) is value;
+        variable result : integer := 0;
+    begin
+        -- Two's complement, undefined bits are read as zero
+        for i in 2 to value'length loop
+            result := result * 2;
+            if to_vhdl_bit(xvalue(i)) = '1' then
+                result := result + 1;
+            end if;
+        end loop;
+        if value'length > 1 and to_vhdl_bit(xvalue(1)) = '1' then
+            -- Avoid overflow when the width is 32
+            result := (result - 2 ** (value'length - 2))
+                      - 2 ** (value'length - 2);
+        elsif value'length = 1 and to_vhdl_bit(xvalue(1)) = '1' then
+            result := -1;
+        end if;
+        return result;
+    end function;
+
+    function to_verilog_bit (value : bit) return t_net_value is
+    begin
+        if value = '1' then
+            return to_verilog(std_ulogic'('1'));
+        else
+            return to_verilog(std_ulogic'('0'));
+        end if;
+    end function;
+
+    function to_verilog_boolean (value : boolean) return t_net_value is
+    begin
+        if value then
+            return to_verilog(std_ulogic'('1'));
+        else
+            return to_verilog(std_ulogic'('0'));
+        end if;
+    end function;
+
+    function to_verilog_bit_vector (value : bit_vector) return t_net_array is
+        alias xvalue : bit_vector(1 to value'length) is value;
+        variable result : t_net_array(1 to value'length);
+    begin
+        for i in 1 to value'length loop
+            result(i) := to_verilog_bit(xvalue(i));
+        end loop;
+        return result;
+    end function;
+
+    function to_verilog_integer (value : integer) return t_net_array is
+        variable result : t_net_array(1 to 32);
+        variable bits : bit_vector(1 to 32);
+        variable v : integer := value;
+    begin
+        -- Two's complement
+        if v < 0 then
+            bits(1) := '1';
+            v := (v + 2147483647) + 1;
+        else
+            bits(1) := '0';
+        end if;
+        for i in 32 downto 2 loop
+            if v mod 2 = 1 then
+                bits(i) := '1';
+            else
+                bits(i) := '0';
+            end if;
+            v := v / 2;
+        end loop;
+        return to_verilog_bit_vector(bits);
     end function;
 
     function to_string (value : t_logic_array) return string is

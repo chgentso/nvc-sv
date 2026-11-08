@@ -19,6 +19,7 @@
 #include "cov/cov-api.h"
 #include "hash.h"
 #include "lower.h"
+#include "mir/mir-unit.h"
 #include "phase.h"
 #include "rt/model.h"
 #include "tree.h"
@@ -52,6 +53,27 @@ static void reheat_inherit(reheat_ctx_t *ctx, const reheat_ctx_t *parent)
    ctx->instances = parent->instances;
 }
 
+static bool reheat_is_vhdl_shim(tree_t b)
+{
+   // A Verilog block containing a VHDL block is the generated shim for
+   // a VHDL entity instantiated from Verilog
+
+   const int nstmts = tree_stmts(b);
+   for (int i = 0; i < nstmts; i++) {
+      tree_t s = tree_stmt(b, i);
+      if (tree_kind(s) != T_BLOCK)
+         continue;
+
+      tree_t hier = tree_decl(s, 0);
+      assert(tree_kind(hier) == T_HIER);
+
+      if (tree_subkind(hier) != T_VERILOG)
+         return true;
+   }
+
+   return false;
+}
+
 static void reheat_block(tree_t b, const reheat_ctx_t *parent)
 {
    reheat_ctx_t ctx = {};
@@ -72,6 +94,23 @@ static void reheat_block(tree_t b, const reheat_ctx_t *parent)
       }
 
       vlog_lower_block(ctx.mir, parent->cloned, b);
+
+      if (reheat_is_vhdl_shim(b)) {
+         // Recreate the placeholder unit which exposes the ports of the
+         // shim to the VHDL entity
+         const int nports = tree_ports(b);
+         mir_shape_t *shape = mir_get_shape(ctx.mir, ctx.cloned);
+         assert(shape != NULL);
+
+         int *slots LOCAL = xmalloc_array(nports, sizeof(int));
+         for (int i = 0; i < nports; i++) {
+            slots[i] = mir_find_slot(shape, tree_ident(tree_port(b, i)));
+            assert(slots[i] >= 0);
+         }
+
+         ctx.lowered = lower_verilog_parent(ctx.registry, ctx.cloned,
+                                            ctx.dotted, b, slots);
+      }
    }
    else {
       cover_obj_t inst = cover_find(ctx.cover, ctx.dotted);

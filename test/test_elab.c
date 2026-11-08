@@ -1460,8 +1460,8 @@ START_TEST(test_mixed1)
         "port 'three'" },
       { 56, "missing matching VHDL generic declaration for Verilog parameter "
         "'g1' with no default value in component MOD1" },
-      { 67, "generic G1 should have type INTEGER to match corresponding "
-        "Verilog parameter" },
+      { 67, "generic G1 should have type INTEGER, BOOLEAN, an enumeration "
+        "type, or a bit vector to match corresponding Verilog parameter" },
       { 79, "generic G2 not found in Verilog module 'mod1'" },
       { 93, "VHDL port direction IN does not match corresponding Verilog "
         "port 'three' which is declared as output" },
@@ -1769,7 +1769,7 @@ START_TEST(test_vlog1)
       { 12, "name of Verilog module 'sub1' in library unit WORK.SUB1 does "
         "not match name 'SUB1' in module instance 'u2'" },
       { 13, "missing port connection for 'y'" },
-      { 14, "module 'bad' not found in library WORK" },
+      { 14, "module 'bad' not found in library WORK or any other library" },
       { 15, "missing value for parameter p" },
       { 16, "module sub1 has 1 parameter but 2 values given" },
       { 17, "missing port connection for 'x'" },

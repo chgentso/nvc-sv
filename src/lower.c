@@ -11239,7 +11239,8 @@ static void lower_put_signal_field_cb(lower_unit_t *lu, tree_t field,
 
 static void lower_converter_body(lower_unit_t *lu, tree_t conv, bool has_driver,
                                  put_signal_fn_t put_fn, event_fn_t event_fn,
-                                 lower_value_fn_t value_fn)
+                                 lower_value_fn_t value_fn, bool delay_first,
+                                 bool watch_dst)
 {
    type_t src_type, dst_type;
    switch (tree_kind(conv)) {
@@ -11291,9 +11292,29 @@ static void lower_converter_body(lower_unit_t *lu, tree_t conv, bool has_driver,
       (*event_fn)(data_reg, count_reg);
    }
 
+   if (watch_dst && type_is_homogeneous(dst_type)) {
+      // The effective value is lost when the drivers of the target change
+      vcode_reg_t count_reg = lower_type_width(lu, dst_type, dst_reg);
+      (*event_fn)(lower_array_data(dst_reg), count_reg);
+   }
+
+   if (delay_first) {
+      vcode_var_t var = emit_var(vtype_bool(), VCODE_INVALID_STAMP,
+                                 ident_new("first_delta"), 0);
+      emit_store(emit_const(vtype_bool(), 1), var);
+   }
+
    emit_return(VCODE_INVALID_REG);
 
    vcode_select_block(start_bb);
+
+   if (delay_first) {
+      // Do not convert until the first delta cycle after initialisation
+      start_bb = emit_block();
+      emit_sched_process(emit_const(vtype_time(), 0));
+      emit_wait(start_bb);
+      vcode_select_block(start_bb);
+   }
 
    vcode_reg_t in_reg = (*value_fn)(lu, src_type, src_reg);
    if (type_is_scalar(src_type) || have_uarray_ptr(in_reg))
@@ -11360,6 +11381,31 @@ static void lower_converter_body(lower_unit_t *lu, tree_t conv, bool has_driver,
    emit_wait(start_bb);
 }
 
+static void lower_put_first_delta(vcode_reg_t nets, vcode_reg_t count,
+                                  vcode_reg_t values)
+{
+   vcode_var_t var = vcode_find_var(ident_new("first_delta"));
+   assert(var != VCODE_INVALID_VAR);
+
+   vcode_block_t first_bb = emit_block();
+   vcode_block_t other_bb = emit_block();
+   vcode_block_t join_bb = emit_block();
+
+   emit_cond(emit_load(var), first_bb, other_bb);
+
+   vcode_select_block(first_bb);
+   vcode_reg_t zero = emit_const(vtype_time(), 0);
+   emit_sched_waveform(nets, count, values, zero, zero);
+   emit_store(emit_const(vtype_bool(), 0), var);
+   emit_jump(join_bb);
+
+   vcode_select_block(other_bb);
+   emit_put_driver(nets, count, values);
+   emit_jump(join_bb);
+
+   vcode_select_block(join_bb);
+}
+
 static void lower_in_converter(lower_unit_t *lu, object_t *obj)
 {
    tree_t map = tree_from_object(obj);
@@ -11367,8 +11413,16 @@ static void lower_in_converter(lower_unit_t *lu, object_t *obj)
 
    tree_t conv = tree_value(map);
 
-   lower_converter_body(lu, conv, true, emit_put_driver, emit_sched_active,
-                        lower_driving_value);
+   // A Verilog net updates the port with a transaction in the next delta
+   // cycle as it would with a process assignment
+   put_signal_fn_t put_fn = emit_put_driver;
+   if (tree_kind(conv) == T_CONV_FUNC
+       && strncmp(istr(tree_ident2(tree_ref(conv))), "NVC.VERILOG.TO_VHDL",
+                  19) == 0)
+      put_fn = lower_put_first_delta;
+
+   lower_converter_body(lu, conv, true, put_fn, emit_sched_active,
+                        lower_driving_value, put_fn != emit_put_driver, false);
 }
 
 static void lower_out_converter(lower_unit_t *lu, object_t *obj)
@@ -11379,7 +11433,7 @@ static void lower_out_converter(lower_unit_t *lu, object_t *obj)
    tree_t conv = tree_name(map);
 
    lower_converter_body(lu, conv, true, emit_put_driver, emit_sched_active,
-                        lower_driving_value);
+                        lower_driving_value, false, false);
 }
 
 static void lower_effective_converter(lower_unit_t *lu, object_t *obj)
@@ -11390,7 +11444,7 @@ static void lower_effective_converter(lower_unit_t *lu, object_t *obj)
    tree_t conv = tree_value(map);
 
    lower_converter_body(lu, conv, false, emit_deposit_signal, emit_sched_event,
-                        lower_resolved);
+                        lower_resolved, false, true);
 }
 
 static bool lower_is_trivial_conversion(tree_t conv)
@@ -13138,6 +13192,55 @@ lower_unit_t *lower_instance(unit_registry_t *ur, lower_unit_t *parent,
    emit_return(VCODE_INVALID_REG);
 
    lower_finished(lu);
+   return lu;
+}
+
+lower_unit_t *lower_verilog_parent(unit_registry_t *ur, ident_t name,
+                                   ident_t dotted, tree_t block,
+                                   const int *slots)
+{
+   // Create a placeholder for a Verilog block that has been lowered
+   // directly to MIR so that VHDL units nested inside it can refer to
+   // its ports.  The placeholder is never emitted: each port variable
+   // is declared at the same slot as in the real unit.
+
+   vcode_select_unit(NULL);
+
+   vcode_unit_t vu = emit_instance(name, tree_to_object(block), NULL);
+   lower_unit_t *lu = lower_unit_new(ur, NULL, vu, NULL, block);
+
+   // Nested units are named after the hierarchical path but their
+   // context is the instance unit
+   lu->name = dotted;
+
+   const int nports = tree_ports(block);
+
+   int nslots = 0;
+   for (int i = 0; i < nports; i++)
+      nslots = MAX(nslots, slots[i] + 1);
+
+   for (int k = 0; k < nslots; k++) {
+      tree_t port = NULL;
+      for (int i = 0; i < nports; i++) {
+         if (slots[i] == k) {
+            port = tree_port(block, i);
+            break;
+         }
+      }
+
+      if (port != NULL) {
+         vcode_type_t vtype = lower_signal_type(tree_type(port));
+         vcode_var_t var = emit_var(vtype, VCODE_INVALID_STAMP,
+                                    tree_ident(port), VAR_SIGNAL);
+         assert(var == k);
+         lower_put_vcode_obj(port, var, lu);
+      }
+      else {
+         vcode_type_t vbool = vtype_bool();
+         emit_var(vbool, VCODE_INVALID_STAMP, ident_uniq("pad"), 0);
+      }
+   }
+
    return lu;
 }
 
