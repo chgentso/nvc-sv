@@ -1808,6 +1808,10 @@ static tree_t simp_tree_local(tree_t t, void *_ctx)
       if (!is_uninstantiated_package(t))
          simp_generic_map(t, t);
       return t;
+   case T_PROT_DECL:
+      if (!is_uninstantiated_protected(t) && tree_generics(t) > 0)
+         simp_generic_map(t, t);
+      return t;
    case T_AGGREGATE:
       return simp_aggregate(t);
    default:

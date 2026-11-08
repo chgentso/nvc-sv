@@ -10227,7 +10227,15 @@ static void lower_protected_body(lower_unit_t *lu, object_t *obj)
       }
    }
 
-   lower_decls(lu, tree_primary(body), &gs);
+   tree_t decl = tree_primary(body);
+
+   if (is_uninstantiated_protected(decl))
+      fatal_at(tree_loc(body), "sorry, objects of uninstantiated protected "
+               "type %s are not yet supported", istr(tree_ident(decl)));
+   else if (tree_genmaps(decl) > 0)
+      lower_generics(lu, decl, NULL);
+
+   lower_decls(lu, decl, &gs);
    lower_decls(lu, body, &gs);
    emit_return(VCODE_INVALID_REG);
 }

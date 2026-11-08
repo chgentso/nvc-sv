@@ -3660,6 +3660,35 @@ START_TEST(test_lcs2016_16)
 }
 END_TEST
 
+START_TEST(test_lcs2016_34)
+{
+   set_standard(STD_19);
+
+   input_from_file(TESTDIR "/sem/lcs2016_34.vhd");
+
+   const error_t expect[] = {
+      { 55, "missing actual for generic N without a default expression" },
+      { 56, "formal generic N already has an actual" },
+      { 57, "SIMPLE_T is not an uninstantiated protected type" },
+      { 58, "MAPPED_T is not an uninstantiated protected type" },
+      { 63, "missing actual for generic type T" },
+      { 63, "missing actual for generic N without a default expression" },
+      { 64, "SIMPLE_T is not an uninstantiated protected type" },
+      { 70, "SIMPLE_T is not an uninstantiated protected type" },
+      { 76, "INTEGER is not an uninstantiated protected type" },
+      { 84, "missing actual for generic type T" },
+      { 84, "missing actual for generic N without a default expression" },
+      { 85, "SIMPLE_T is not an uninstantiated protected type" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   parse_and_check(T_ENTITY, T_ARCH);
+
+   check_expected_errors();
+}
+END_TEST
+
 START_TEST(test_spec2)
 {
    input_from_file(TESTDIR "/sem/spec2.vhd");
@@ -4324,6 +4353,7 @@ Suite *get_sem_tests(void)
    tcase_add_test(tc_core, test_genpack4);
    tcase_add_test(tc_core, test_lcs2016_14);
    tcase_add_test(tc_core, test_lcs2016_16);
+   tcase_add_test(tc_core, test_lcs2016_34);
    tcase_add_test(tc_core, test_spec2);
    tcase_add_test(tc_core, test_incomplete);
    tcase_add_test(tc_core, test_issue884);

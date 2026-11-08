@@ -1294,8 +1294,11 @@ static scope_t *private_scope_for(nametab_t *tab, tree_t unit)
             // declaration may hide an earlier incomplete type
             make_visible_slow(s, tree_ident(d), d);
          }
-         else if (dkind != T_USE)
+         else if (dkind != T_USE && dkind != T_PROT_BODY) {
+            // The body of a protected type instance may be declared in
+            // a package declaration but only the declaration is visible
             make_visible_fast(s, tree_ident(d), d);
+         }
       }
 
       switch (kind) {

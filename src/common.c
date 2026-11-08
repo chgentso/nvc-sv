@@ -1224,6 +1224,14 @@ bool is_uninstantiated_subprogram(tree_t decl)
    }
 }
 
+bool is_uninstantiated_protected(tree_t decl)
+{
+   return tree_kind(decl) == T_PROT_DECL
+      && tree_generics(decl) > 0
+      && tree_genmaps(decl) == 0
+      && !tree_has_ref(decl);
+}
+
 bool is_anonymous_subtype(type_t type)
 {
    return type_kind(type) == T_SUBTYPE && !type_has_ident(type);
@@ -1259,8 +1267,12 @@ bool package_needs_body(tree_t pack)
          return true;
       else if (dkind == T_CONST_DECL && !tree_has_value(d))
          return true;
-      else if (dkind == T_PROT_DECL)
-         return true;
+      else if (dkind == T_PROT_DECL) {
+         // A protected type instance whose body was not available is
+         // instantiated at the end of the package body
+         if (!tree_has_ref(d) || tree_kind(tree_ref(d)) == T_PROT_DECL)
+            return true;
+      }
    }
 
    return false;

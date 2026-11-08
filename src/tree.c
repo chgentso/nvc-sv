@@ -358,7 +358,7 @@ static const imask_t has_map[T_LAST_TREE_KIND] = {
    (I_IDENT | I_VALUE | I_STMTS | I_GUARD),
 
    // T_PROT_DECL
-   (I_IDENT | I_DECLS | I_TYPE),
+   (I_IDENT | I_DECLS | I_TYPE | I_GENERICS | I_GENMAPS | I_REF),
 
    // T_DUMMY_DRIVER
    (I_TARGET | I_IDENT),

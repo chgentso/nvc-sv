@@ -517,6 +517,36 @@ void vhdl_subprogram_instance(tree_t *roots, int nroots, ident_t dotted,
    rename_mangled(&copy_ctx, dotted, prefixes, nprefix);
 }
 
+void vhdl_protected_instance(tree_t *roots, int nroots, ident_t dotted,
+                             const ident_t *prefixes, int nprefix)
+{
+   copy_ctx_t copy_ctx = {};
+
+   object_copy_ctx_t *ctx = tree_copy_begin(roots, nroots,
+                                            package_copy_tree_pred, NULL,
+                                            NULL, tree_copy_cb, type_copy_cb,
+                                            &copy_ctx);
+
+   for (int i = 0; i < nroots; i++) {
+      switch (tree_kind(roots[i])) {
+      case T_PROT_DECL:
+         collect_generics(roots[i], ctx);
+         type_copy_mark(tree_type(roots[i]), ctx);
+         collect_decls(roots[i], ctx);
+         break;
+      case T_PROT_BODY:
+         collect_decls(roots[i], ctx);
+         break;
+      default:
+         should_not_reach_here();
+      }
+   }
+
+   tree_copy_finish(roots, nroots, ctx);
+
+   rename_mangled(&copy_ctx, dotted, prefixes, nprefix);
+}
+
 static type_t rewrite_generic_types_cb(type_t type, void *__ctx)
 {
    hash_t *map = __ctx;

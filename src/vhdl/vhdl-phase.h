@@ -29,6 +29,8 @@ void vhdl_package_instance(tree_t *roots, int nroots, ident_t dotted,
                            const ident_t *prefixes, int nprefix);
 void vhdl_subprogram_instance(tree_t *roots, int nroots, ident_t dotted,
                               const ident_t *prefixes, int nprefix);
+void vhdl_protected_instance(tree_t *roots, int nroots, ident_t dotted,
+                             const ident_t *prefixes, int nprefix);
 
 void vhdl_instance_fixup(tree_t inst, hash_t *map);
 

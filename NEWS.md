@@ -46,6 +46,10 @@
   supported in VHDL-2019 (LCS-2016-014).
 - Access types may designate composites of protected types in VHDL-2019
   (LCS-2016-014a).
+- Protected types may have a generic clause in VHDL-2019 and can be
+  instantiated with a protected type instantiation declaration or with
+  a generic map aspect in a variable declaration or access type
+  definition (LCS-2016-034).
 - Added the `'SIGNAL` attribute and the `'EVENT` attribute for labelled
   PSL directives, and implemented the `PslIsCovered`, `PslAssertFailed`,
   `ClearPslState`, `SetPslCoverAssert` and `GetPslCoverAssert`

@@ -2290,11 +2290,12 @@ static bool sem_check_missing_bodies(tree_t secondary, nametab_t *tab)
       switch (tree_kind(d)) {
       case T_FUNC_DECL:
       case T_PROC_DECL:
-         if (tree_flags(d) & TREE_F_PREDEFINED)
-            break;
-         // Fall-through
+         if (!(tree_flags(d) & TREE_F_PREDEFINED))
+            sem_missing_body_cb(d, secondary, tab);
+         break;
       case T_PROT_DECL:
-         sem_missing_body_cb(d, secondary, tab);
+         if (!tree_has_ref(d))   // Body of an instance is implicit
+            sem_missing_body_cb(d, secondary, tab);
          break;
       case T_CONST_DECL:
          if (!tree_has_value(d)) {
@@ -7217,6 +7218,14 @@ static bool sem_check_cond_value(tree_t t, nametab_t *tab)
 
 static bool sem_check_prot_decl(tree_t t, nametab_t *tab)
 {
+   if (tree_has_ref(t)) {
+      // Protected type instance: other declarations were checked on
+      // the uninstantiated protected type
+      return sem_check_generic_map(t, t, tab);
+   }
+   else if (tree_genmaps(t) > 0 && !sem_check_generic_map(t, t, tab))
+      return false;
+
    const int ndecls = tree_decls(t);
    for (int i = 0; i < ndecls; i++) {
       tree_t d = tree_decl(t, i);

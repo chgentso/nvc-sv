@@ -2599,6 +2599,144 @@ static tree_t find_subprogram_body(tree_t decl)
    return NULL;
 }
 
+static tree_t find_protected_body(tree_t decl)
+{
+   assert(tree_kind(decl) == T_PROT_DECL);
+
+   // Attempt to load the package body if available
+   tree_t pack = tree_container(decl);
+   if (tree_kind(pack) != T_PACKAGE)
+      return NULL;
+
+   tree_t du = find_enclosing(nametab, S_DESIGN_UNIT);
+   if (du == pack)
+      return NULL;   // Avoid referencing old version of current package
+
+   tree_t pack_body;
+   if (tree_kind(du) == T_PACK_BODY && tree_primary(du) == pack)
+      pack_body = du;
+   else if ((pack_body = body_of(pack)) == NULL)
+      return NULL;
+
+   ident_t id = tree_ident(decl);
+   const int ndecls = tree_decls(pack_body);
+   for (int i = 0; i < ndecls; i++) {
+      tree_t d = tree_decl(pack_body, i);
+      if (tree_kind(d) == T_PROT_BODY && tree_ident(d) == id)
+         return d;
+   }
+
+   return NULL;
+}
+
+static void map_protected_generics(tree_t inst)
+{
+   // Map the generics of a protected type instance or generic-mapped
+   // protected type using its generic map aspect
+
+   const int ngenmaps = tree_genmaps(inst);
+   for (int i = 0; i < ngenmaps; i++) {
+      tree_t map = tree_genmap(inst, i), g = NULL;
+
+      if (tree_subkind(map) == P_POS) {
+         if (tree_pos(map) < tree_generics(inst))
+            g = tree_generic(inst, tree_pos(map));
+      }
+      else {
+         tree_t ref = name_to_ref(tree_name(map));
+         if (ref != NULL && tree_has_ref(ref))
+            g = tree_ref(ref);
+      }
+
+      if (g == NULL || tree_kind(g) != T_GENERIC_DECL)
+         continue;
+
+      tree_t value = tree_value(map);
+
+      switch (tree_class(g)) {
+      case C_TYPE:
+         if (type_kind(tree_type(g)) == T_GENERIC)
+            map_generic_type(nametab, tree_type(g), tree_type(value));
+         break;
+      case C_FUNCTION:
+      case C_PROCEDURE:
+         if (tree_kind(value) == T_REF && tree_has_ref(value)
+             && is_subprogram(tree_ref(value)))
+            map_generic_subprogram(nametab, g, tree_ref(value));
+         break;
+      case C_CONSTANT:
+         if (tree_kind(value) != T_OPEN)
+            map_generic_const(nametab, g, value);
+         break;
+      default:
+         break;
+      }
+   }
+}
+
+static void protected_body_deferred_instantiation(tree_t decl,
+                                                  tree_t container)
+{
+   // LRM 19 section 5.6.4: if the protected type instantiation
+   // declaration occurs immediately within an enclosing package
+   // declaration, the generic-mapped protected type body occurs at the
+   // end of the package body corresponding to the enclosing package
+   // declaration
+
+   if (!tree_has_ref(decl))
+      return;
+
+   tree_t ref = tree_ref(decl);
+   if (tree_kind(ref) != T_PROT_DECL)
+      return;   // Body was instantiated with the declaration
+
+   tree_t body = find_protected_body(ref);
+   if (body == NULL) {
+      diag_t *d = diag_new(DIAG_ERROR, CURRENT_LOC);
+      diag_printf(d, "protected type %s cannot be instantiated until its "
+                  "body has been analysed", istr(tree_ident(ref)));
+      diag_hint(d, tree_loc(decl), "protected type instantiation in package "
+                "declarative part");
+      diag_hint(d, NULL, "the instantiated protected type body occurs at "
+                "the end of the package body corresponding to the "
+                "enclosing package declaration");
+      diag_lrm(d, STD_19, "5.6.4");
+      diag_emit(d);
+      return;
+   }
+
+   tree_t roots[] = { ref, body };
+   ident_t prefixes[] = { type_ident(tree_type(ref)) };
+   ident_t dotted = type_ident(tree_type(decl));
+   vhdl_protected_instance(roots, 2, dotted, prefixes, 1);
+
+   tree_t inst = roots[0], inst_body = roots[1];
+
+   tree_set_ident(inst, tree_ident(decl));
+   tree_set_ref(inst, body);
+   tree_set_loc(inst, tree_loc(decl));
+
+   const int ngenmaps = tree_genmaps(decl);
+   for (int i = 0; i < ngenmaps; i++) {
+      tree_t map = tree_genmap(decl, i);
+      assert(tree_subkind(map) == P_POS);
+      tree_add_genmap(inst, map);
+   }
+
+   map_protected_generics(inst);
+
+   hash_t *gmap = get_generic_map(nametab);
+   if (gmap != NULL) {
+      vhdl_instance_fixup(inst, gmap);
+      vhdl_instance_fixup(inst_body, gmap);
+   }
+
+   tree_set_ident(inst_body, tree_ident(decl));
+   tree_set_loc(inst_body, tree_loc(decl));
+   tree_add_decl(container, inst_body);
+   insert_name(nametab, inst_body, NULL);
+}
+
 static void package_body_deferred_instantiation(tree_t pack, tree_t container)
 {
    // LRM 08 section 4.4: if the subprogram instantiation declaration
@@ -2613,7 +2751,11 @@ static void package_body_deferred_instantiation(tree_t pack, tree_t container)
       tree_t decl = tree_decl(pack, i);
 
       const tree_kind_t dkind = tree_kind(decl);
-      if (dkind != T_FUNC_INST && dkind != T_PROC_INST)
+      if (dkind == T_PROT_DECL) {
+         protected_body_deferred_instantiation(decl, container);
+         continue;
+      }
+      else if (dkind != T_FUNC_INST && dkind != T_PROC_INST)
          continue;
       else if (!tree_has_ref(decl))
          continue;
@@ -2698,6 +2840,173 @@ static tree_t find_generic_subprogram_body(tree_t inst, tree_t decl)
       tree_set_ref(inst, body);
 
    return body;
+}
+
+static tree_t uninstantiated_protected(tree_t decl, tree_t *body)
+{
+   // Return the uninstantiated protected type declaration denoted by
+   // DECL, if any, along with its body if that is available
+
+   if (decl == NULL)
+      return NULL;
+   else if (tree_kind(decl) == T_PROT_BODY && tree_has_primary(decl)) {
+      if (!is_uninstantiated_protected(tree_primary(decl)))
+         return NULL;
+
+      *body = decl;
+      return tree_primary(decl);
+   }
+   else if (tree_kind(decl) == T_PROT_DECL
+            && is_uninstantiated_protected(decl)) {
+      *body = find_protected_body(decl);
+      return decl;
+   }
+   else
+      return NULL;
+}
+
+static void skip_generic_map_aspect(void)
+{
+   consume(tGENERIC);
+   consume(tMAP);
+   consume(tLPAREN);
+
+   for (int depth = 1; depth > 0 && peek() != tEOF; ) {
+      const token_t tok = peek();
+      if (tok == tLPAREN)
+         depth++;
+      else if (tok == tRPAREN)
+         depth--;
+      consume(tok);
+   }
+}
+
+static void remangle_protected_methods(tree_t decl)
+{
+   // The types of the method parameters may have changed after the
+   // generics of a generic-mapped protected type were mapped
+
+   const int ndecls = tree_decls(decl);
+   for (int i = 0; i < ndecls; i++) {
+      tree_t d = tree_decl(decl, i);
+      if (is_subprogram(d) && tree_kind(d) != T_GENERIC_DECL) {
+         tree_set_ident2(d, NULL);
+         mangle_func(nametab, d);
+      }
+   }
+}
+
+static tree_t instantiate_protected(ident_t id, tree_t decl, tree_t body,
+                                    tree_t container, const loc_t *loc)
+{
+   // Create a protected type instance from the uninstantiated protected
+   // type DECL with the generic map aspect that follows, if any
+
+   if (body == NULL) {
+      tree_t du = find_enclosing(nametab, S_DESIGN_UNIT);
+      if (tree_kind(du) != T_PACKAGE) {
+         diag_t *d = diag_new(DIAG_ERROR, loc);
+         diag_printf(d, "protected type %s cannot be instantiated until its "
+                     "body has been analysed", istr(tree_ident(decl)));
+         diag_hint(d, tree_loc(decl), "%s declared here",
+                   istr(tree_ident(decl)));
+         diag_emit(d);
+      }
+
+      else {
+         // The body is instantiated at the end of the package body
+         // corresponding to the enclosing package declaration
+         tree_set_global_flags(du, TREE_GF_DEFERRED_INST);
+      }
+   }
+
+   tree_t roots[] = { decl, body };
+   ident_t prefixes[] = { type_ident(tree_type(decl)) };
+   ident_t dotted = ident_prefix(scope_prefix(nametab), id, '.');
+   vhdl_protected_instance(roots, body != NULL ? 2 : 1, dotted, prefixes, 1);
+
+   tree_t inst = roots[0], inst_body = body != NULL ? roots[1] : NULL;
+
+   tree_set_ident(inst, id);
+   tree_set_ref(inst, body ?: decl);
+   tree_set_loc(inst, loc);
+
+   if (peek() == tGENERIC)
+      p_generic_map_aspect(inst, inst);
+
+   sem_check(inst, nametab);
+
+   hash_t *map = get_generic_map(nametab);
+   if (map != NULL) {
+      vhdl_instance_fixup(inst, map);
+      if (inst_body != NULL)
+         vhdl_instance_fixup(inst_body, map);
+   }
+
+   tree_add_decl(container, inst);
+   insert_name(nametab, inst, NULL);
+
+   if (inst_body != NULL) {
+      tree_set_ident(inst_body, id);
+      tree_set_loc(inst_body, loc);
+      tree_add_decl(container, inst_body);
+      insert_name(nametab, inst_body, NULL);
+   }
+
+   return inst;
+}
+
+static type_t implicit_protected_instance(type_t type, tree_t decl,
+                                          tree_t container, bool allocator)
+{
+   // LRM 19 sections 6.4.2.4, 5.4.1 and 9.3.7: a subtype indication
+   // denoting an uninstantiated protected type may be followed by a
+   // generic map aspect which is equivalent to an implicit protected
+   // type instantiation declaration
+
+   tree_t body = NULL;
+   tree_t uninst = uninstantiated_protected(decl, &body);
+
+   if (uninst == NULL) {
+      if (peek() == tGENERIC) {
+         if (!type_is_none(type))
+            parse_error(CURRENT_LOC, "%s is not an uninstantiated protected "
+                        "type", type_pp(type));
+         skip_generic_map_aspect();
+      }
+
+      return type;
+   }
+   else if (allocator) {
+      // The generic map is checked here but an allocator for an access
+      // to an uninstantiated protected type is only supported in
+      // analysis
+      tree_t dummy = tree_new(T_PROT_DECL);
+      tree_set_ident(dummy, tree_ident(uninst));
+      tree_set_type(dummy, type);
+      tree_set_ref(dummy, uninst);
+
+      const int ngenerics = tree_generics(uninst);
+      for (int i = 0; i < ngenerics; i++)
+         tree_add_generic(dummy, tree_generic(uninst, i));
+
+      push_scope(nametab);
+
+      if (peek() == tGENERIC)
+         p_generic_map_aspect(dummy, dummy);
+
+      tree_set_loc(dummy, CURRENT_LOC);
+      sem_check(dummy, nametab);
+
+      pop_scope(nametab);
+      return type;
+   }
+   else {
+      ident_t id = ident_prefix(tree_ident(uninst), ident_uniq("inst"), '$');
+      tree_t inst = instantiate_protected(id, uninst, body, container,
+                                          CURRENT_LOC);
+      return tree_type(inst);
+   }
 }
 
 static psl_node_t with_default_clock(psl_node_t prop)
@@ -3974,7 +4283,7 @@ static tree_t p_name(name_mask_t stop_mask)
    }
 }
 
-static type_t p_type_mark(tree_t head)
+static type_t p_type_mark_with_decl(tree_t head, tree_t *pdecl)
 {
    // name
 
@@ -4062,7 +4371,15 @@ static type_t p_type_mark(tree_t head)
       return type_new(T_NONE);
    }
 
+   if (pdecl != NULL)
+      *pdecl = decl;
+
    return tree_type(decl);
+}
+
+static type_t p_type_mark(tree_t head)
+{
+   return p_type_mark_with_decl(head, NULL);
 }
 
 static tree_t p_index_constraint(type_t base)
@@ -4279,7 +4596,7 @@ static tree_t p_resolution_indication(void)
    }
 }
 
-static type_t p_subtype_indication(void)
+static type_t p_subtype_indication_with_decl(tree_t *pdecl)
 {
    // [ name ] type_mark [ constraint ]
 
@@ -4308,7 +4625,7 @@ static type_t p_subtype_indication(void)
       if (peek() == tID)
          rname = prefix;
       else
-         type = p_type_mark(prefix);
+         type = p_type_mark_with_decl(prefix, pdecl);
    }
 
    if (rname != NULL) {
@@ -4333,9 +4650,17 @@ static type_t p_subtype_indication(void)
       }
 
       p_constraint(type);
+
+      if (pdecl != NULL)
+         *pdecl = NULL;
    }
 
    return type;
+}
+
+static type_t p_subtype_indication(void)
+{
+   return p_subtype_indication_with_decl(NULL);
 }
 
 static tree_t p_abstract_literal(void)
@@ -4713,7 +5038,11 @@ static tree_t p_allocator(void)
    if (peek_nth(2) == tTICK && peek_nth(3) == tLPAREN)
       value = p_qualified_expression(NULL);
    else {
-      type_t type = p_subtype_indication();
+      tree_t decl = NULL;
+      type_t type = p_subtype_indication_with_decl(&decl);
+
+      if (standard() >= STD_19)
+         type = implicit_protected_instance(type, decl, NULL, true);
 
       value = tree_new(T_QUALIFIED);
       tree_set_type(value, type);
@@ -6515,7 +6844,17 @@ static type_t p_access_type_definition(ident_t id)
 
    type_t t = type_new(T_ACCESS);
    type_set_ident(t, id);
-   type_set_designated(t, p_subtype_indication());
+
+   tree_t decl = NULL;
+   type_t designated = p_subtype_indication_with_decl(&decl);
+
+   if (standard() >= STD_19 && peek() == tGENERIC) {
+      tree_t container = find_enclosing(nametab, S_DECLARATIVE_REGION);
+      designated = implicit_protected_instance(designated, decl,
+                                               container, false);
+   }
+
+   type_set_designated(t, designated);
    mangle_type(nametab, t);
 
    return t;
@@ -6760,11 +7099,6 @@ static void p_protected_type_declarative_item(tree_t decl)
       p_alias_declaration(decl);
       break;
 
-   case tGENERIC:
-      if (standard() >= STD_19)
-         fatal_at(CURRENT_LOC, "sorry, protected types with a generic "
-                  "clause are not yet supported");
-      // Fall-through
    default:
       expect(tATTRIBUTE, tUSE, STD(08, tFUNCTION), tPROCEDURE, tIMPURE, tPURE,
              STD(19, tPRIVATE), tALIAS);
@@ -6781,9 +7115,32 @@ static void p_protected_type_declarative_part(tree_t decl)
       p_protected_type_declarative_item(decl);
 }
 
+static void p_protected_type_header(tree_t decl)
+{
+   // 2019: [ generic_clause [ generic_map_aspect ; ] ]
+
+   BEGIN("protected type header");
+
+   if (peek() == tGENERIC) {
+      require_std(STD_19, "protected type generic clause");
+
+      p_generic_clause(decl);
+
+      if (peek() == tGENERIC) {
+         p_generic_map_aspect(decl, decl);
+         consume(tSEMI);
+      }
+
+      insert_generics(nametab, decl);
+   }
+}
+
 static tree_t p_protected_type_declaration(ident_t id)
 {
    // protected protected_type_declarative_part end protected [ simple_name ]
+   //
+   // 2019: protected protected_type_header protected_type_declarative_part
+   //   end protected [ simple_name ]
 
    BEGIN("protected type declaration");
 
@@ -6804,6 +7161,7 @@ static tree_t p_protected_type_declaration(ident_t id)
    push_scope(nametab);
    scope_set_prefix(nametab, id);
 
+   p_protected_type_header(t);
    p_protected_type_declarative_part(t);
 
    const int ndecls = tree_decls(t);
@@ -6813,8 +7171,6 @@ static tree_t p_protected_type_declaration(ident_t id)
          type_add_field(type, d);
    }
 
-   pop_scope(nametab);
-
    consume(tEND);
    consume(tPROTECTED);
 
@@ -6822,6 +7178,17 @@ static tree_t p_protected_type_declaration(ident_t id)
 
    tree_set_loc(t, CURRENT_LOC);
    sem_check(t, nametab);
+
+   if (tree_genmaps(t) > 0) {
+      // Generic-mapped protected type
+      hash_t *map = get_generic_map(nametab);
+      if (map != NULL) {
+         vhdl_instance_fixup(t, map);
+         remangle_protected_methods(t);
+      }
+   }
+
+   pop_scope(nametab);
    return t;
 }
 
@@ -6862,11 +7229,6 @@ static type_t p_type_definition(tree_t tdecl)
    case tARRAY:
       return p_composite_type_definition(id);
 
-   case tNEW:
-      if (standard() >= STD_19)
-         fatal_at(CURRENT_LOC, "sorry, protected type instantiation is not "
-                  "yet supported");
-      // Fall-through
    default:
       expect(tRANGE, tACCESS, tFILE, tRECORD);
       return type_new(T_NONE);
@@ -6903,9 +7265,53 @@ static type_t p_incomplete_type_declaration(ident_t id)
    return t;
 }
 
+static void p_protected_type_instantiation_declaration(ident_t id,
+                                                       tree_t container)
+{
+   // 2019: type identifier is new uninstantiated_protected_type_name
+   //   [ generic_map_aspect ] ;
+
+   EXTEND("protected type instantiation declaration");
+
+   consume(tIS);
+   consume(tNEW);
+
+   require_std(STD_19, "protected type instantiation declarations");
+
+   const loc_t loc = *CURRENT_LOC;
+
+   ident_t name = p_selected_identifier();
+   tree_t decl = resolve_name(nametab, CURRENT_LOC, name);
+
+   tree_t body = NULL;
+   tree_t uninst = uninstantiated_protected(decl, &body);
+
+   if (uninst != NULL)
+      instantiate_protected(id, uninst, body, container, &loc);
+   else {
+      if (decl != NULL)
+         parse_error(CURRENT_LOC, "%s is not an uninstantiated protected "
+                     "type", istr(name));
+
+      if (peek() == tGENERIC)
+         skip_generic_map_aspect();
+
+      tree_t t = tree_new(T_TYPE_DECL);
+      tree_set_ident(t, id);
+      tree_set_type(t, type_new(T_NONE));
+      tree_set_loc(t, CURRENT_LOC);
+
+      tree_add_decl(container, t);
+      insert_name(nametab, t, NULL);
+   }
+
+   consume(tSEMI);
+}
+
 static void p_type_declaration(tree_t container)
 {
    // full_type_declaration | incomplete_type_declaration
+   //   | 2019: protected_type_instantiation_declaration
 
    BEGIN("type declaration");
 
@@ -6920,6 +7326,8 @@ static void p_type_declaration(tree_t container)
       tree_add_decl(container, p_protected_type_definition(id));
       consume(tSEMI);
    }
+   else if (peek_nth(1) == tIS && peek_nth(2) == tNEW)
+      p_protected_type_instantiation_declaration(id, container);
    else {
       // Insert univeral_integer and universal_real predefined functions
       // before STD.INTEGER and STD.REAL respectively
@@ -7461,7 +7869,11 @@ static void p_variable_declaration(tree_t parent)
 
    consume(tCOLON);
 
-   type_t type = p_subtype_indication();
+   tree_t decl = NULL;
+   type_t type = p_subtype_indication_with_decl(&decl);
+
+   if (standard() >= STD_19)
+      type = implicit_protected_instance(type, decl, parent, false);
 
    tree_t init = NULL;
    if (optional(tWALRUS))
@@ -8033,7 +8445,10 @@ static tree_t p_protected_type_body(ident_t id)
 
    push_scope(nametab);
 
-   if (decl != NULL) insert_decls(nametab, decl);
+   if (decl != NULL) {
+      insert_generics(nametab, decl);
+      insert_decls(nametab, decl);
+   }
 
    scope_set_prefix(nametab, id);
    scope_set_container(nametab, body);
@@ -8048,6 +8463,15 @@ static tree_t p_protected_type_body(ident_t id)
 
    tree_set_loc(body, CURRENT_LOC);
    sem_check(body, nametab);
+
+   if (decl != NULL && tree_genmaps(decl) > 0) {
+      // Body of a generic-mapped protected type
+      map_protected_generics(decl);
+
+      hash_t *map = get_generic_map(nametab);
+      if (map != NULL)
+         vhdl_instance_fixup(body, map);
+   }
 
    pop_scope(nametab);
    return body;
