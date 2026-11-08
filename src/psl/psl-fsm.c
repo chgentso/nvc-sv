@@ -181,6 +181,8 @@ static psl_guard_t not_guard(psl_fsm_t *fsm, psl_guard_t g)
       return untag_pointer(g, struct _psl_node);
    case GUARD_FALSE:
       return NULL;
+   case GUARD_ACTION:
+      return tag_pointer(NULL, GUARD_FALSE);   // An action is always true
    case GUARD_BINOP:
       {
          const guard_binop_t *bop = psl_guard_binop(g);
@@ -222,6 +224,15 @@ static psl_guard_t leaf_guard(psl_fsm_t *fsm, psl_node_t p)
    fsm->atoms = a;
 
    return tag_pointer(a, GUARD_BOUND);
+}
+
+static psl_guard_t action_guard(psl_fsm_t *fsm, psl_node_t block)
+{
+   guard_action_t *a = pool_malloc(fsm->pool, sizeof(guard_action_t));
+   a->block   = block;
+   a->binding = fsm->binding;
+
+   return tag_pointer(a, GUARD_ACTION);
 }
 
 static psl_guard_t build_else_guard(psl_fsm_t *fsm, fsm_state_t *state)
@@ -416,6 +427,7 @@ static void collect_atoms(psl_guard_t g, atom_list_t *list)
       }
       break;
    case GUARD_FALSE:
+   case GUARD_ACTION:
       break;
    }
 }
@@ -453,6 +465,8 @@ static bool eval_guard(psl_guard_t g, const atom_list_t *atoms, unsigned bits)
       }
    case GUARD_FALSE:
       return false;
+   case GUARD_ACTION:
+      return true;
    }
 
    return false;
@@ -607,6 +621,11 @@ static fsm_state_t *determinize_sequence(psl_fsm_t *fsm, fsm_state_t *state,
                                          fsm_state_t *root,
                                          fsm_state_t *nfa_final, psl_node_t p)
 {
+   // The procedural blocks of a sequence with local variables are
+   // executed along each thread so keep one thread per match
+   if (psl_visit_only(p, NULL, NULL, P_PROC_BLOCK) > 0)
+      return nfa_final;
+
    const unsigned first = fsm->next_id;
    fsm_state_t *final = determinize(fsm, root, nfa_final);
 
@@ -1854,6 +1873,46 @@ static fsm_state_t *build_clocked(psl_fsm_t *fsm, fsm_state_t *state,
    return last;
 }
 
+static fsm_state_t *build_proc_block(psl_fsm_t *fsm, fsm_state_t *state,
+                                     psl_node_t p)
+{
+   // Local variable declarations at the start of a braced SERE or a
+   // parenthesised property, or a procedural block executed when the
+   // Boolean before it holds (IEEE 1850-2010 sections 6.3 and 6.4)
+
+   tree_t block = psl_tree(p);
+
+   // A block with a single statement may be simplified to it
+   const bool is_seq = tree_kind(block) == T_SEQUENCE;
+
+   const int ndecls = is_seq ? tree_decls(block) : 0;
+   for (int i = 0; i < ndecls; i++) {
+      tree_t d = tree_decl(block, i);
+      if (tree_kind(d) != T_VAR_DECL)
+         continue;
+      else if (!type_is_scalar(tree_type(d)))
+         fatal_at(tree_loc(d), "sorry, PSL local variables must have a "
+                  "scalar type");
+
+      APUSH(fsm->locals, d);
+   }
+
+   psl_node_t value = psl_value(p);
+
+   if (is_seq && tree_stmts(block) == 0)
+      return build_node(fsm, state, value);
+   else if (psl_kind(value) != P_HDL_EXPR)
+      fatal_at(psl_loc(p), "sorry, a procedural block can only follow a "
+               "Boolean");
+
+   psl_guard_t guard = and_guard(fsm, leaf_guard(fsm, value),
+                                 action_guard(fsm, p));
+
+   fsm_state_t *new = add_state(fsm, p);
+   add_edge(fsm, state, new, EDGE_EPSILON, guard);
+   return new;
+}
+
 static fsm_state_t *build_node(psl_fsm_t *fsm, fsm_state_t *state, psl_node_t p)
 {
    switch (psl_kind(p)) {
@@ -1903,8 +1962,7 @@ static fsm_state_t *build_node(psl_fsm_t *fsm, fsm_state_t *state, psl_node_t p)
    case P_CLOCKED:
       return build_clocked(fsm, state, p);
    case P_PROC_BLOCK:
-      fatal_at(psl_loc(p), "sorry, PSL local variables and procedural "
-               "blocks are not supported");
+      return build_proc_block(fsm, state, p);
    default:
       CANNOT_HANDLE(p);
    }
@@ -2240,6 +2298,7 @@ psl_fsm_t *psl_fsm_new_sequence(psl_node_t seq, ident_t label)
 
 void psl_fsm_free(psl_fsm_t *fsm)
 {
+   ACLEAR(fsm->locals);
    pool_free(fsm->pool);
    free(fsm);
 }
@@ -2266,6 +2325,7 @@ guard_kind_t psl_guard_kind(psl_guard_t g)
    case GUARD_FALSE:
    case GUARD_BOUND:
    case GUARD_NOT_BOUND:
+   case GUARD_ACTION:
       return tag;
    default:
       should_not_reach_here();
@@ -2301,6 +2361,67 @@ const guard_atom_t *psl_guard_atom(psl_guard_t g)
    default:
       should_not_reach_here();
    }
+}
+
+const guard_action_t *psl_guard_action(psl_guard_t g)
+{
+   assert(psl_guard_kind(g) == GUARD_ACTION);
+   return untag_pointer(g, guard_action_t);
+}
+
+static int attempt_depth(fsm_state_t *s, int *depth, bit_mask_t *active)
+{
+   // Longest number of cycles a state of an evaluation can be pending or
+   // -1 if the automaton has a cycle
+
+   if (depth[s->id] != 0)
+      return depth[s->id];
+   else if (mask_test(active, s->id))
+      return -1;
+
+   mask_set(active, s->id);
+
+   int result = 1;
+   for (fsm_edge_t *e = s->edges; e; e = e->next) {
+      if (e->dest->initial)
+         continue;
+
+      const int d = attempt_depth(e->dest, depth, active);
+      if (d < 0) {
+         result = -1;
+         break;
+      }
+
+      result = MAX(result, d + 1);
+   }
+
+   mask_clear(active, s->id);
+   return (depth[s->id] = result);
+}
+
+unsigned psl_fsm_max_attempts(psl_fsm_t *fsm)
+{
+   // Maximum number of evaluations that can be in progress at once in
+   // the states after the initial state, or zero if unbounded
+
+   int *depth LOCAL = xcalloc_array(fsm->next_id, sizeof(int));
+
+   LOCAL_BIT_MASK active;
+   mask_init(&active, fsm->next_id);
+
+   int longest = 0;
+   for (fsm_edge_t *e = fsm->states->edges; e; e = e->next) {
+      if (e->dest->initial)
+         continue;
+
+      const int d = attempt_depth(e->dest, depth, &active);
+      if (d < 0)
+         return 0;
+
+      longest = MAX(longest, d);
+   }
+
+   return longest + 1;
 }
 
 // LCOV_EXCL_START /////////////////////////////////////////////////////////////
@@ -2346,6 +2467,9 @@ static void psl_dump_guard(psl_guard_t g, text_buf_t *tb, bool nested)
       break;
    case GUARD_FALSE:
       tb_cat(tb, "false");
+      break;
+   case GUARD_ACTION:
+      tb_cat(tb, "[[...]]");
       break;
    default:
       should_not_reach_here();

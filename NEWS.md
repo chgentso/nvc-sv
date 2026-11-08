@@ -59,6 +59,9 @@
 - The parameters of PSL replicated properties and SEREs can have an
   index range, as in `forall v(0 to 1) in boolean : ...`.
 - Added support for PSL strong sequences `{r}!`.
+- Added support for PSL local variables and procedural blocks.  Each
+  evaluation of a property in progress has its own copy of the local
+  variables.
 - Added more checks for PSL built-in functions and for the simple subset
   rules of the logical and LTL operators.
 - PSL Boolean implication `->` and equivalence `<->` can now be used

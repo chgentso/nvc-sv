@@ -139,6 +139,7 @@ static bool psl_is_sequence(psl_node_t p)
    case P_PARAM_SERE:
       return true;
    case P_CLOCKED:
+   case P_PROC_BLOCK:
       return psl_is_sequence(psl_value(p));
    default:
       return false;

@@ -1580,5 +1580,8 @@ psl79           fail,gold,2008
 psl64           normal,2008
 psl81           fail,gold,2008
 psl82           fail,gold,2008
+psl48           normal,2008
+psl49           gold,2008
+psl83           fail,gold,2008
 vlogrealport1   verilog
 vlogcasegen3    verilog

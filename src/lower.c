@@ -9918,6 +9918,18 @@ static cover_obj_t lower_get_cscope(lower_unit_t *lu)
    }
 }
 
+void lower_block_stmts(lower_unit_t *lu, tree_t block)
+{
+   gen_stack_t gs = {
+      .cscope = lower_get_cscope(lu),
+   };
+
+   if (tree_kind(block) == T_SEQUENCE)
+      lower_sequence(lu, block, &gs);
+   else
+      lower_stmt(lu, block, &gs);   // Simplified to a single statement
+}
+
 static void lower_instantiated_package(lower_unit_t *lu, object_t *obj)
 {
    tree_t decl = tree_from_object(obj);

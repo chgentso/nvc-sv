@@ -18,6 +18,7 @@
 #ifndef _PSL_FSM_H
 #define _PSL_FSM_H
 
+#include "array.h"
 #include "prim.h"
 
 typedef struct _fsm_edge fsm_edge_t;
@@ -34,6 +35,7 @@ typedef enum {
    GUARD_FALSE = 0b11,
    GUARD_BOUND = 0b100,
    GUARD_NOT_BOUND = 0b101,
+   GUARD_ACTION = 0b110,
 } guard_kind_t;
 
 typedef void *psl_guard_t;
@@ -60,6 +62,12 @@ typedef struct _guard_atom {
    psl_node_t           expr;
    const psl_binding_t *binding;
 } guard_atom_t;
+
+// A procedural block executed when the guard is evaluated: always true
+typedef struct {
+   psl_node_t           block;
+   const psl_binding_t *binding;
+} guard_action_t;
 
 typedef enum {
    BINOP_AND,
@@ -109,6 +117,7 @@ typedef struct {
    guard_atom_t *atoms;
    const psl_binding_t *binding;
    psl_node_t    clock;
+   A(tree_t)     locals;
 } psl_fsm_t;
 
 psl_fsm_t *psl_fsm_new(psl_node_t p, ident_t label);
@@ -122,5 +131,7 @@ guard_kind_t psl_guard_kind(psl_guard_t g);
 const guard_binop_t *psl_guard_binop(psl_guard_t g);
 psl_node_t psl_guard_expr(psl_guard_t g);
 const guard_atom_t *psl_guard_atom(psl_guard_t g);
+const guard_action_t *psl_guard_action(psl_guard_t g);
+unsigned psl_fsm_max_attempts(psl_fsm_t *fsm);
 
 #endif  // _PSL_FSM_H

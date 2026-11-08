@@ -44,6 +44,11 @@ typedef struct {
    psl_node_t    main_clock;
    bool          multiclock;
    vcode_block_t prev_tail;
+   psl_fsm_t    *fsm;
+   unsigned      copies;
+   vcode_var_t  *locals;
+   vcode_var_t  *busy;
+   vcode_var_t  *busy_next;
 } psl_ctx_t;
 
 static char psl_ctx_key;
@@ -117,13 +122,9 @@ static vcode_reg_t psl_assert_severity(void)
    return emit_const(vtype_int(0, 3), 2);
 }
 
-static vcode_reg_t psl_lower_bound_boolean(lower_unit_t *lu,
-                                           const guard_atom_t *atom)
+static void psl_bind_params(lower_unit_t *lu, const psl_binding_t *binding)
 {
-   // Evaluate the expression with the values of parameters of the
-   // replicated SERE in which it appears
-
-   for (const psl_binding_t *b = atom->binding; b; b = b->outer) {
+   for (const psl_binding_t *b = binding; b; b = b->outer) {
       type_t type = tree_type(b->decl);
 
       vcode_reg_t value_reg;
@@ -147,13 +148,37 @@ static vcode_reg_t psl_lower_bound_boolean(lower_unit_t *lu,
 
       lower_put_vcode_obj(b->decl, value_reg, lu);
    }
+}
 
-   vcode_reg_t result_reg = psl_lower_boolean(lu, atom->expr);
-
-   for (const psl_binding_t *b = atom->binding; b; b = b->outer)
+static void psl_unbind_params(lower_unit_t *lu, const psl_binding_t *binding)
+{
+   for (const psl_binding_t *b = binding; b; b = b->outer)
       lower_put_vcode_obj(b->decl, VCODE_INVALID_REG, lu);
+}
+
+static vcode_reg_t psl_lower_bound_boolean(lower_unit_t *lu,
+                                           const guard_atom_t *atom)
+{
+   // Evaluate the expression with the values of parameters of the
+   // replicated SERE in which it appears
+
+   psl_bind_params(lu, atom->binding);
+   vcode_reg_t result_reg = psl_lower_boolean(lu, atom->expr);
+   psl_unbind_params(lu, atom->binding);
 
    return result_reg;
+}
+
+static vcode_reg_t psl_lower_action(lower_unit_t *lu,
+                                    const guard_action_t *action)
+{
+   // Execute a procedural block when the Boolean before it holds
+
+   psl_bind_params(lu, action->binding);
+   lower_block_stmts(lu, psl_tree(action->block));
+   psl_unbind_params(lu, action->binding);
+
+   return emit_const(vtype_bool(), 1);
 }
 
 static vcode_reg_t psl_lower_guard(lower_unit_t *lu, psl_guard_t g)
@@ -200,6 +225,10 @@ static vcode_reg_t psl_lower_guard(lower_unit_t *lu, psl_guard_t g)
       }
    case GUARD_NOT:
       return emit_not(psl_lower_boolean(lu, psl_guard_expr(g)));
+   case GUARD_ACTION:
+      return psl_lower_action(lu, psl_guard_action(g));
+   case GUARD_FALSE:
+      return emit_const(vtype_bool(), 0);
    default:
       should_not_reach_here();
    }
@@ -305,25 +334,115 @@ static void psl_lower_assert(lower_unit_t *lu, vcode_reg_t taken_reg,
    }
 }
 
-static void psl_enter_state(fsm_state_t *state)
+static psl_ctx_t *psl_get_ctx(lower_unit_t *lu);
+static vcode_reg_t psl_lower_clock_now(lower_unit_t *lu, psl_node_t clk);
+
+static void psl_enter_state(lower_unit_t *lu, fsm_state_t *state,
+                            unsigned copy)
 {
    vcode_reg_t strong_reg = VCODE_INVALID_REG;
    if (state->strong)
       strong_reg = emit_const(vtype_bool(), 1);
 
+   // Each evaluation of a property with local variables uses one copy
+   // of the states after the initial state
+   psl_ctx_t *ctx = psl_get_ctx(lu);
+   unsigned id = state->id;
+   if (ctx->copies > 0 && !state->initial) {
+      id += copy * ctx->fsm->next_id;
+      emit_store(emit_const(vtype_bool(), 1), ctx->busy_next[copy]);
+   }
+
    vcode_type_t vint32 = vtype_int(INT32_MIN, INT32_MAX);
-   emit_enter_state(emit_const(vint32, state->id), strong_reg);
+   emit_enter_state(emit_const(vint32, id), strong_reg);
 }
 
-static psl_ctx_t *psl_get_ctx(lower_unit_t *lu);
-static vcode_reg_t psl_lower_clock_now(lower_unit_t *lu, psl_node_t clk);
-
-static void psl_lower_state(lower_unit_t *lu, psl_fsm_t *fsm,
-                            fsm_state_t *state, vcode_block_t *state_bb)
+static void psl_select_locals(lower_unit_t *lu, unsigned copy)
 {
-   emit_comment("Property state %d", state->id);
+   psl_ctx_t *ctx = psl_get_ctx(lu);
+   for (int i = 0; i < ctx->fsm->locals.count; i++) {
+      vcode_var_t var = ctx->locals[i * ctx->copies + copy];
+      lower_put_vcode_obj(ctx->fsm->locals.items[i], var, lu);
+   }
+}
+
+static void psl_lower_state_body(lower_unit_t *lu, psl_fsm_t *fsm,
+                                 fsm_state_t *state, unsigned copy);
+
+static void psl_lower_new_attempt(lower_unit_t *lu, psl_fsm_t *fsm,
+                                  fsm_state_t *state)
+{
+   // Find a copy of the local variables and states not used by an
+   // evaluation that is still in progress
 
    psl_ctx_t *ctx = psl_get_ctx(lu);
+
+   for (unsigned c = 0; c < ctx->copies; c++) {
+      vcode_block_t use_bb = emit_block();
+      vcode_block_t next_bb = emit_block();
+
+      vcode_reg_t busy_reg = emit_load(ctx->busy[c]);
+      emit_cond(busy_reg, next_bb, use_bb);
+
+      vcode_select_block(use_bb);
+
+      emit_store(emit_const(vtype_bool(), 1), ctx->busy[c]);
+
+      psl_select_locals(lu, c);
+
+      for (int i = 0; i < fsm->locals.count; i++) {
+         tree_t decl = fsm->locals.items[i];
+         type_t type = tree_type(decl);
+
+         tree_t init;
+         if (tree_has_value(decl))
+            init = tree_value(decl);
+         else
+            init = tree_left(range_of(type, 0));
+
+         vcode_reg_t init_reg = lower_rvalue(lu, init);
+         vcode_var_t var = ctx->locals[i * ctx->copies + c];
+         emit_store(emit_cast(lower_type(type), lower_bounds(type), init_reg),
+                    var);
+      }
+
+      psl_lower_state_body(lu, fsm, state, c);
+
+      vcode_select_block(next_bb);
+   }
+
+   vcode_reg_t locus = psl_debug_locus(fsm->src);
+
+   static const char text[] = "sorry, too many evaluations of this PSL "
+      "property with local variables are in progress";
+   const int len = sizeof(text) - 1;
+
+   vcode_type_t vchar = vtype_int(0, 255);
+   vcode_reg_t *chars LOCAL = xmalloc_array(len, sizeof(vcode_reg_t));
+   for (int i = 0; i < len; i++)
+      chars[i] = emit_const(vchar, text[i]);
+
+   vcode_type_t array_type = vtype_carray(len, vchar);
+   vcode_reg_t msg_reg =
+      emit_address_of(emit_const_array(array_type, chars, len));
+   vcode_reg_t len_reg = emit_const(vtype_offset(), len);
+   vcode_reg_t severity_reg = emit_const(vtype_int(0, 3), 3);
+
+   emit_assert(emit_const(vtype_bool(), 0), msg_reg, len_reg, severity_reg,
+               locus, VCODE_INVALID_REG, VCODE_INVALID_REG);
+   emit_return(VCODE_INVALID_REG);
+}
+
+static void psl_lower_state(lower_unit_t *lu, psl_fsm_t *fsm,
+                            fsm_state_t *state, unsigned copy)
+{
+   emit_comment("Property state %d copy %u", state->id, copy);
+
+   psl_ctx_t *ctx = psl_get_ctx(lu);
+
+   if (ctx->copies > 0)
+      psl_select_locals(lu, copy);
+
    if (ctx->multiclock) {
       // Only evaluate the state on the ticks of its clock
       vcode_reg_t tick_reg =
@@ -334,15 +453,24 @@ static void psl_lower_state(lower_unit_t *lu, psl_fsm_t *fsm,
       emit_cond(tick_reg, run_bb, wait_bb);
 
       vcode_select_block(wait_bb);
-      psl_enter_state(state);
+      psl_enter_state(lu, state, copy);
       emit_return(VCODE_INVALID_REG);
 
       vcode_select_block(run_bb);
    }
 
    if (state->initial && psl_fsm_repeating(fsm))
-      psl_enter_state(state);
+      psl_enter_state(lu, state, copy);
 
+   if (state->initial && ctx->copies > 0)
+      psl_lower_new_attempt(lu, fsm, state);
+   else
+      psl_lower_state_body(lu, fsm, state, copy);
+}
+
+static void psl_lower_state_body(lower_unit_t *lu, psl_fsm_t *fsm,
+                                 fsm_state_t *state, unsigned copy)
+{
    vcode_type_t vbool = vtype_bool();
    vcode_reg_t vfalse = emit_const(vbool, 0);
    vcode_reg_t vtrue = emit_const(vbool, 1);
@@ -395,7 +523,7 @@ static void psl_lower_state(lower_unit_t *lu, psl_fsm_t *fsm,
          emit_cond(guard_reg, enter_bb, skip_bb);
 
          vcode_select_block(enter_bb);
-         psl_enter_state(e->dest);
+         psl_enter_state(lu, e->dest, copy);
          emit_jump(skip_bb);
 
          vcode_select_block(skip_bb);
@@ -403,7 +531,7 @@ static void psl_lower_state(lower_unit_t *lu, psl_fsm_t *fsm,
          taken_reg = emit_or(taken_reg, guard_reg);
       }
       else {
-         psl_enter_state(e->dest);
+         psl_enter_state(lu, e->dest, copy);
          taken_reg = vtrue;
       }
    }
@@ -975,8 +1103,43 @@ static void psl_lower_property(lower_unit_t *lu, object_t *obj)
       .main_clock = clk,
       .multiclock = clocks.count > 0,
       .prev_tail  = prev_bb,
+      .fsm        = fsm,
    };
    hash_put(lu->objects, &psl_ctx_key, &ctx);
+
+   if (fsm->locals.count > 0) {
+      // Each evaluation in progress needs its own copy of the local
+      // variables (IEEE 1850-2010 section 6.3)
+      ctx.copies = psl_fsm_max_attempts(fsm) ?: 16;
+
+      if (ctx.copies > 64)
+         fatal_at(psl_loc(p), "sorry, too many evaluations of this PSL "
+                  "property with local variables can be in progress");
+
+      ctx.locals = xmalloc_array(fsm->locals.count * ctx.copies,
+                                 sizeof(vcode_var_t));
+      for (int i = 0; i < fsm->locals.count; i++) {
+         tree_t decl = fsm->locals.items[i];
+         type_t type = tree_type(decl);
+         vcode_type_t vtype = lower_type(type);
+         vcode_stamp_t vstamp = lower_bounds(type);
+
+         for (unsigned c = 0; c < ctx.copies; c++) {
+            ident_t name = ident_sprintf("%s$%u", istr(tree_ident(decl)), c);
+            ctx.locals[i * ctx.copies + c] = emit_var(vtype, vstamp, name, 0);
+         }
+      }
+
+      vcode_type_t vbool = vtype_bool();
+      ctx.busy = xmalloc_array(ctx.copies, sizeof(vcode_var_t));
+      ctx.busy_next = xmalloc_array(ctx.copies, sizeof(vcode_var_t));
+      for (unsigned c = 0; c < ctx.copies; c++) {
+         ctx.busy[c] = emit_var(vbool, VCODE_INVALID_STAMP,
+                                ident_sprintf("busy$%u", c), 0);
+         ctx.busy_next[c] = emit_var(vbool, VCODE_INVALID_STAMP,
+                                     ident_sprintf("busy_next$%u", c), 0);
+      }
+   }
 
    emit_comment("Reset property");
 
@@ -1012,24 +1175,32 @@ static void psl_lower_property(lower_unit_t *lu, object_t *obj)
 
    vcode_select_block(case_bb);
 
-   vcode_block_t *state_bb LOCAL =
-      xmalloc_array(fsm->next_id + 1, sizeof(vcode_block_t));
-   vcode_reg_t *state_ids LOCAL =
-      xmalloc_array(fsm->next_id + 1, sizeof(vcode_reg_t));
+   const unsigned ncopies = MAX(ctx.copies, 1);
+   const unsigned nstates = fsm->next_id * ncopies;
 
-   for (int i = 0; i < fsm->next_id; i++) {
+   vcode_block_t *state_bb LOCAL =
+      xmalloc_array(nstates + 1, sizeof(vcode_block_t));
+   vcode_reg_t *state_ids LOCAL =
+      xmalloc_array(nstates + 1, sizeof(vcode_reg_t));
+
+   for (int i = 0; i < nstates; i++) {
       state_bb[i] = emit_block();
       state_ids[i] = emit_const(vint32, i);
    }
 
-   state_bb[fsm->next_id] = prev_bb;
-   state_ids[fsm->next_id] = emit_const(vint32, fsm->next_id);
+   state_bb[nstates] = prev_bb;
+   state_ids[nstates] = emit_const(vint32, nstates);
 
    bool strong = false;
-   for (fsm_state_t *s = fsm->states; s; s = s->next) {
-      vcode_select_block(state_bb[s->id]);
-      psl_lower_state(lu, fsm, s, state_bb);
-      strong |= s->strong;
+   for (unsigned c = 0; c < ncopies; c++) {
+      for (fsm_state_t *s = fsm->states; s; s = s->next) {
+         vcode_select_block(state_bb[s->id + c * fsm->next_id]);
+         if (s->initial && c > 0)
+            emit_unreachable(VCODE_INVALID_REG);
+         else
+            psl_lower_state(lu, fsm, s, c);
+         strong |= s->strong;
+      }
    }
 
    vcode_select_block(abort_bb);
@@ -1045,19 +1216,35 @@ static void psl_lower_property(lower_unit_t *lu, object_t *obj)
    else
       emit_unreachable(VCODE_INVALID_REG);
 
+   vcode_select_block(ctx.prev_tail);
+
+   for (unsigned c = 0; c < ctx.copies; c++) {
+      // The evaluations in progress are those that entered a state
+      // during the last cycle
+      emit_store(emit_load(ctx.busy_next[c]), ctx.busy[c]);
+      emit_store(emit_const(vtype_bool(), 0), ctx.busy_next[c]);
+   }
+
    vcode_select_block(prev_bb);
 
-   const bool has_prev = vcode_count_ops() > 0;
+   const bool has_prev = vcode_count_ops() > 0 || ctx.copies > 0;
 
    vcode_select_block(ctx.prev_tail);
-   emit_return(emit_const(vint32, fsm->next_id + 1));
+   emit_return(emit_const(vint32, nstates + 1));
 
    vcode_select_block(case_bb);
 
    if (has_prev)
-      emit_enter_state(emit_const(vint32, fsm->next_id), VCODE_INVALID_REG);
+      emit_enter_state(emit_const(vint32, nstates), VCODE_INVALID_REG);
 
-   emit_case(state_reg, abort_bb, state_ids, state_bb, fsm->next_id + 1);
+   emit_case(state_reg, abort_bb, state_ids, state_bb, nstates + 1);
+
+   for (int i = 0; i < fsm->locals.count; i++)
+      lower_put_vcode_obj(fsm->locals.items[i], VCODE_INVALID_VAR, lu);
+
+   free(ctx.locals);
+   free(ctx.busy);
+   free(ctx.busy_next);
 
    psl_fsm_free(fsm);
 }
