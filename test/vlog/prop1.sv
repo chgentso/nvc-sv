@@ -1,6 +1,7 @@
 module prop1;
   reg x, clk;
   reg [7:0] y;
+  default clocking @(posedge clk); endclocking
 
   assert property (!(x && y));   // OK
   assume property (@(posedge clk) x |-> ##[1:2] y);  // OK

@@ -604,6 +604,13 @@ static vlog_node_t logic_type(void)
    return v;
 }
 
+static vlog_node_t bit_type(void)
+{
+   vlog_node_t v = vlog_new(V_DATA_TYPE);
+   vlog_set_subkind(v, DT_BIT);
+   return v;
+}
+
 static vlog_node_t implicit_type(void)
 {
    vlog_node_t v = vlog_new(V_DATA_TYPE);
@@ -772,7 +779,7 @@ static bool scan_block_item_declaration(void)
    if (scan_type_declaration())
       return true;
 
-   return scan(tLOCALPARAM, tPARAMETER);
+   return scan(tLOCALPARAM, tPARAMETER, tIMPORT);
 }
 
 static bool scan_tf_item_declaration(void)
@@ -2396,6 +2403,16 @@ static void p_part_select_range(vlog_node_t ps)
    vlog_set_right(ps, p_constant_expression());
 }
 
+typedef struct {
+   vlog_node_t iface;
+   vlog_node_t prefix;
+} modport_expr_t;
+
+static bool modport_expr_pred(vlog_node_t v, void *ctx)
+{
+   return vlog_kind(v) == V_REF;
+}
+
 static vlog_node_t modport_expr_cb(vlog_node_t v, void *ctx)
 {
    const modport_expr_t *me = ctx;
@@ -2545,6 +2562,88 @@ static vlog_node_t interface_as_value(ident_t id, const loc_t *loc)
    return v;
 }
 
+static bool vlog_always_true_cb(vlog_node_t v, void *ctx)
+{
+   // Copy an expression but not the declarations it refers to
+
+   switch (vlog_kind(v)) {
+   case V_REF:
+   case V_EVENT:
+   case V_EVENT_CONTROL:
+   case V_DELAY_CONTROL:
+   case V_NUMBER:
+   case V_BINARY:
+   case V_UNARY:
+      return true;
+   default:
+      return false;
+   }
+}
+
+static bool iface_declares(vlog_node_t node, ident_t id)
+{
+   // The interface or module declares an item with this name
+
+   if (node != NULL && vlog_kind(node) == V_DATA_TYPE && vlog_has_ref(node))
+      node = vlog_ref(node);
+
+   if (node == NULL || vlog_kind(node) != V_MODULE)
+      return false;
+
+   const int ndecls = vlog_decls(node);
+   for (int i = 0; i < ndecls; i++) {
+      vlog_node_t d = vlog_decl(node, i);
+      if (vlog_has_ident(d) && vlog_ident(d) == id)
+         return true;
+   }
+
+   return false;
+}
+
+static bool is_clocking_name(ident_t id, vlog_node_t owner)
+{
+   if (owner != NULL)
+      return iface_declares(owner, ident_sprintf("%s$ev", istr(id)));
+
+   return clocking_names != NULL && hset_contains(clocking_names, id);
+}
+
+static vlog_node_t hier_owner(vlog_node_t mr)
+{
+   // The interface which an instance or port refers to if it is known
+
+   if (vlog_kind(mr) != V_MOD_REF || !vlog_has_ref(mr))
+      return NULL;
+
+   vlog_node_t port = vlog_ref(mr);
+   switch (vlog_kind(port)) {
+   case V_IFACE_PORT:
+      return find_interface(vlog_ident2(port));
+   case V_MOD_INST:
+      {
+         ident_t name = inst_modules != NULL && vlog_ranges(port) == 0
+            ? hash_get(inst_modules, port) : NULL;
+         return name != NULL ? find_interface(name) : NULL;
+      }
+   default:
+      return NULL;
+   }
+}
+
+static ident_t clocking_member(ident_t cb)
+{
+   // A clockvar of a clocking block is a variable named after both, and the
+   // clocking block on its own stands for its event
+
+   if (peek() == tDOT && peek_nth(2) == tID) {
+      consume(tDOT);
+      ident_t sig = p_identifier();
+      return ident_sprintf("%s$%s", istr(cb), istr(sig));
+   }
+
+   return ident_sprintf("%s$ev", istr(cb));
+}
+
 static vlog_node_t p_hierarchical_identifier(ident_t id)
 {
    // [ $root . ] { identifier constant_bit_select . } identifier
@@ -2568,7 +2667,11 @@ static vlog_node_t p_hierarchical_identifier(ident_t id)
 
       suffix = p_identifier();
 
-      if (peek() != tDOT)
+      if (is_clocking_name(suffix, hier_owner(mr)))
+         suffix = clocking_member(suffix);
+
+      const bool indexed = at_instance_index(true);
+      if (peek() != tDOT && !indexed)
          break;
 
       vlog_node_t next = vlog_new(V_MOD_REF);
@@ -2971,12 +3074,29 @@ static vlog_node_t p_select(ident_t id)
 
    EXTEND("select");
 
-   vlog_node_t d = vlog_symtab_query(symtab, id), prefix;
-   if (d != NULL && vlog_kind(d) == V_MOD_INST)
-      prefix = p_hierarchical_identifier(id);
-   else if (d == NULL && peek() == tDOT) {
-      // Assume this is a hierarchical reference to a later instance
-      prefix = p_hierarchical_identifier(id);
+   const bool stop_at_index = foreach_array;
+   foreach_array = false;
+
+   vlog_node_t qscope = qualify_scope;
+   const bool qfailed = qualify_failed;
+   qualify_scope = NULL;
+   qualify_failed = false;
+
+   vlog_scope_t *sscope = select_scope;
+   select_scope = NULL;
+
+   vlog_node_t prefix;
+   if (id == NULL && peek() == tSUPER) {
+      consume(tSUPER);
+      prefix = vlog_new(V_THIS);
+      vlog_set_flags(prefix, VLOG_F_STATIC);   // Non-virtual calls
+      vlog_node_t class = vlog_symtab_class(symtab);
+      if (class == NULL || !vlog_has_ref(class))
+         parse_error(&state.last_loc, "super can only be used in a derived "
+                     "class");
+      else
+         vlog_set_type(prefix, vlog_ref(class));
+      vlog_set_loc(prefix, CURRENT_LOC);
    }
    else if (id == NULL) {
       consume(tTHIS);
@@ -3003,6 +3123,65 @@ static vlog_node_t p_select(ident_t id)
       vlog_set_loc(prefix, CURRENT_LOC);
 
       vlog_symtab_lookup(symtab, prefix);
+   }
+   else if (qfailed) {
+      prefix = vlog_new(V_REF);
+      vlog_set_ident(prefix, id);
+      vlog_set_loc(prefix, CURRENT_LOC);
+   }
+   else {
+      vlog_scope_t *inner = sscope != NULL
+         ? vlog_symtab_enter(symtab, sscope) : NULL;
+
+      vlog_node_t d = vlog_symtab_query(symtab, id);
+      const bool is_inst = d != NULL && (vlog_kind(d) == V_MOD_INST
+                                         || vlog_kind(d) == V_IFACE_PORT);
+      if (is_inst && peek() != tDOT && !at_instance_index(true)) {
+         if (inner != NULL)
+            vlog_symtab_enter(symtab, inner);
+         return interface_as_value(id, CURRENT_LOC);
+      }
+      else if (is_inst)
+         prefix = p_hierarchical_identifier(id);
+      else if (d == NULL && (peek() == tDOT || at_instance_index(true))) {
+         // Assume this is a hierarchical reference to a later instance
+         prefix = p_hierarchical_identifier(id);
+      }
+      else {
+         prefix = vlog_new(V_REF);
+         vlog_set_ident(prefix, id);
+         vlog_set_loc(prefix, CURRENT_LOC);
+
+         vlog_symtab_lookup(symtab, prefix);
+
+         if (d != NULL && vlog_kind(d) == V_FUNC_DECL
+             && (vlog_flags(d) & VLOG_F_LET)) {
+            // A let declaration with no arguments
+            vlog_node_t call = vlog_new(V_USER_FCALL);
+            vlog_set_ident(call, id);
+            vlog_set_loc(call, CURRENT_LOC);
+            prefix = expand_let(d, call);
+         }
+      }
+
+      if (inner != NULL)
+         vlog_symtab_enter(symtab, inner);
+   }
+
+   for (;;) {
+      if (vlog_kind(prefix) == V_HIER_REF && peek() == tLPAREN) {
+         vlog_node_t v = vlog_new(V_METHOD_CALL);
+         vlog_set_value(v, prefix);
+         vlog_set_ident(v, vlog_ident(prefix));
+
+         consume(tLPAREN);
+         p_list_of_arguments(v);
+         consume(tRPAREN);
+
+         vlog_set_loc(v, CURRENT_LOC);
+         prefix = v;
+         vlog_set_global_flags(v, VLOG_GF_HIER_REF);
+      }
 
       while (optional(tDOT)) {
          vlog_node_t ptype = vlog_get_type(prefix);
@@ -3086,7 +3265,20 @@ static vlog_node_t p_select(ident_t id)
          }
 
          vlog_node_t ref = vlog_new(V_MEMBER_REF);
-         vlog_set_ident(ref, p_identifier());
+         ident_t member = p_identifier();
+         if (is_clocking_name(member, ptype))
+            member = clocking_member(member);
+         else if (ptype != NULL && vlog_kind(ptype) == V_DATA_TYPE
+                  && vlog_subkind(ptype) == DT_VIRTUAL
+                  && !vlog_has_ref(ptype) && peek() == tDOT
+                  && peek_nth(2) == tID && peek_nth(3) != tLPAREN) {
+            // The interface is declared later so this may be a clockvar
+            // or a member through a modport: vlog_virtual_decl decides
+            consume(tDOT);
+            member = ident_sprintf("%s$%s", istr(member),
+                                   istr(p_identifier()));
+         }
+         vlog_set_ident(ref, member);
          vlog_set_value(ref, prefix);
          vlog_set_loc(ref, CURRENT_LOC);
 
@@ -3213,7 +3405,33 @@ static vlog_node_t arg_pattern_type(vlog_node_t call, int n)
    }
 }
 
-         p_part_select_range(ps);
+static bool is_assert_control(vlog_node_t call)
+{
+   // Tasks which enable or disable assertions of a scope or a label
+
+   if (vlog_kind(call) != V_SYS_TCALL)
+      return false;
+
+   static const char *const names[] = {
+      "$asserton", "$assertoff", "$assertkill", "$assertcontrol",
+      "$assertpasson", "$assertpassoff", "$assertfailon", "$assertfailoff",
+      "$assertnonvacuouson", "$assertvacuousoff",
+   };
+
+   for (int i = 0; i < ARRAY_LEN(names); i++) {
+      if (vlog_ident(call) == ident_new(names[i]))
+         return true;
+   }
+
+   return false;
+}
+
+static int assert_control_list(vlog_node_t call)
+{
+   // Position of the first scope or assertion of an assertion control task
+
+   return vlog_ident(call) == ident_new("$assertcontrol") ? 4 : 1;
+}
 
 static bool at_scope_argument(vlog_node_t call)
 {
@@ -3247,6 +3465,30 @@ static bool is_timescale_query(vlog_node_t call)
    }
 }
 
+static vlog_node_t p_timescale_query_argument(void)
+{
+   // The argument of $printtimescale, $timeunit and $timeprecision is the
+   // hierarchical name of a module instance (20.4.1, 20.4.2) which may be
+   // declared later, so it is kept as a string and resolved at run time
+
+   BEGIN("hierarchical identifier");
+
+   LOCAL_TEXT_BUF tb = tb_new();
+
+   if (peek() == tSYSTASK && peek_nth(2) == tDOT) {
+      ident_t root = p_system_tf_identifier();
+      if (root != ident_new("$root"))
+         parse_error(&state.last_loc, "unexpected system name %pi before '.'",
+                     root);
+
+      consume(tDOT);
+      tb_cat(tb, "$root.");
+   }
+
+   for (;;) {
+      tb_istr(tb, p_identifier());
+      while (optional(tLSQUARE)) {
+         tb_printf(tb, "[%"PRIu64"]", p_unsigned_integer());
          consume(tRSQUARE);
       }
 
@@ -3482,6 +3724,20 @@ static vlog_node_t p_system_tf_call(vlog_kind_t kind)
       return rewrite_monitor(v);
 
    return v;
+}
+
+static void check_monitor_arg_cb(vlog_node_t v, void *ctx)
+{
+   if (vlog_kind(v) == V_REF && vlog_has_ref(v)) {
+      switch (vlog_kind(vlog_ref(v))) {
+      case V_LOCAL_DECL:
+      case V_TF_PORT_DECL:
+         *(bool *)ctx = true;
+         break;
+      default:
+         break;
+      }
+   }
 }
 
 static bool monitor_arg_sensitive(vlog_node_t v)
@@ -3734,6 +3990,235 @@ static vlog_node_t rewrite_monitor(vlog_node_t call)
    }
 
    return start;
+}
+
+static void defer_capture_call(defer_capture_t *dc, vlog_node_t call)
+{
+   // Only arguments passed by value to an input are copied
+
+   if (!vlog_has_ref(call))
+      return;
+
+   vlog_node_t decl = vlog_ref(call);
+   if (vlog_kind(decl) != V_TASK_DECL && vlog_kind(decl) != V_FUNC_DECL)
+      return;
+
+   const int nports = vlog_ports(decl);
+   const int nparams = vlog_params(call);
+   for (int i = 0; i < nparams; i++) {
+      vlog_node_t p = vlog_param(call, i), port = NULL;
+      if (vlog_kind(p) == V_NAMED_ARG) {
+         for (int j = 0; j < nports; j++) {
+            if (vlog_ident(vlog_port(decl, j)) == vlog_ident(p)) {
+               port = vlog_port(decl, j);
+               break;
+            }
+         }
+
+         if (port != NULL && vlog_subkind(port) == V_PORT_INPUT
+             && vlog_has_value(p))
+            vlog_set_value(p, defer_capture_expr(dc, vlog_value(p)));
+      }
+      else if (i < nports) {
+         port = vlog_port(decl, i);
+         if (vlog_subkind(port) == V_PORT_INPUT)
+            vlog_set_param(call, i, defer_capture_expr(dc, p));
+      }
+   }
+}
+
+static void defer_capture_stmt(defer_capture_t *dc, vlog_node_t s)
+{
+   switch (vlog_kind(s)) {
+   case V_SYS_TCALL:
+      {
+         const int nparams = vlog_params(s);
+         for (int i = 0; i < nparams; i++)
+            vlog_set_param(s, i, defer_capture_expr(dc, vlog_param(s, i)));
+      }
+      break;
+   case V_USER_TCALL:
+      defer_capture_call(dc, s);
+      break;
+   case V_VOID_CALL:
+      if (vlog_kind(vlog_value(s)) == V_USER_FCALL)
+         defer_capture_call(dc, vlog_value(s));
+      break;
+   case V_SEQ_BLOCK:
+   case V_COND:
+      {
+         const int nstmts = vlog_stmts(s);
+         for (int i = 0; i < nstmts; i++)
+            defer_capture_stmt(dc, vlog_stmt(s, i));
+      }
+      break;
+   case V_IF:
+      {
+         const int nconds = vlog_conds(s);
+         for (int i = 0; i < nconds; i++)
+            defer_capture_stmt(dc, vlog_cond(s, i));
+      }
+      break;
+   default:
+      break;
+   }
+}
+
+static vlog_node_t defer_ref(vlog_node_t decl, const loc_t *loc)
+{
+   vlog_node_t ref = vlog_new(V_REF);
+   vlog_set_ident(ref, vlog_ident(decl));
+   vlog_set_ref(ref, decl);
+   vlog_set_loc(ref, loc);
+   return ref;
+}
+
+static vlog_node_t defer_queue_call(vlog_node_t queue, const char *name,
+                                    vlog_method_t method, const loc_t *loc)
+{
+   vlog_node_t call = vlog_new(V_METHOD_CALL);
+   vlog_set_value(call, defer_ref(queue, loc));
+   vlog_set_ident(call, ident_new(name));
+   vlog_set_subkind(call, method);
+   vlog_set_loc(call, loc);
+   return call;
+}
+
+static vlog_node_t defer_queue_decl(vlog_node_t hidden, const loc_t *loc)
+{
+   // Each evaluation of a deferred assertion queues its own report with
+   // the values it captured (16.4.2)
+
+   vlog_node_t type = vlog_new(V_DATA_TYPE);
+   vlog_set_subkind(type, DT_QUEUE);
+   vlog_set_type(type, vlog_type(hidden));
+   vlog_set_loc(type, loc);
+
+   vlog_node_t queue = vlog_new(V_VAR_DECL);
+   vlog_set_ident(queue, ident_sprintf("%s$q", istr(vlog_ident(hidden))));
+   vlog_set_type(queue, type);
+   vlog_set_loc(queue, loc);
+   vlog_add_decl(current_module, queue);
+   return queue;
+}
+
+typedef struct {
+   vlog_node_t  decl;
+   vlog_node_t *actuals;
+} let_expand_t;
+
+static bool let_formal_pred(vlog_node_t v, void *ctx)
+{
+   let_expand_t *e = ctx;
+
+   if (vlog_kind(v) != V_REF || !vlog_has_ref(v))
+      return false;
+
+   vlog_node_t d = vlog_ref(v);
+   const int nports = vlog_ports(e->decl);
+   for (int i = 0; i < nports; i++) {
+      if (vlog_port(e->decl, i) == d)
+         return true;
+   }
+
+   return false;
+}
+
+static vlog_node_t let_formal_rewrite(vlog_node_t v, void *ctx)
+{
+   let_expand_t *e = ctx;
+
+   if (!let_formal_pred(v, ctx))
+      return v;
+
+   const int nports = vlog_ports(e->decl);
+   for (int i = 0; i < nports; i++) {
+      if (vlog_port(e->decl, i) == vlog_ref(v))
+         return e->actuals[i];
+   }
+
+   return v;
+}
+
+static vlog_node_t expand_let(vlog_node_t decl, vlog_node_t call)
+{
+   // The body is expanded with the actual arguments in place of the formals
+
+   const int nports = vlog_ports(decl);
+   const int nparams = vlog_params(call);
+
+   vlog_node_t *actuals LOCAL = xcalloc_array(MAX(nports, 1),
+                                              sizeof(vlog_node_t));
+
+   for (int i = 0; i < nports; i++) {
+      vlog_node_t port = vlog_port(decl, i);
+      for (int j = 0; j < nparams; j++) {
+         vlog_node_t p = vlog_param(call, j);
+         if (vlog_kind(p) != V_NAMED_ARG) {
+            if (j == i)
+               actuals[i] = p;
+         }
+         else if (vlog_ident(p) == vlog_ident(port)) {
+            if (vlog_has_value(p))
+               actuals[i] = vlog_value(p);
+            break;
+         }
+      }
+
+      if (actuals[i] != NULL && vlog_kind(actuals[i]) == V_EMPTY)
+         actuals[i] = NULL;
+
+      if (actuals[i] == NULL) {
+         if (!vlog_has_value(port)) {
+            error_at(vlog_loc(call), "missing value for argument %pQ",
+                     vlog_ident(port));
+            return call;
+         }
+
+         actuals[i] = vlog_value(port);
+      }
+   }
+
+   let_expand_t e = { .decl = decl, .actuals = actuals };
+
+   vlog_node_t copy = vlog_copy(vlog_stmt(decl, 0), let_formal_pred, &e);
+   return vlog_rewrite(copy, NULL, let_formal_rewrite, &e);
+}
+
+static bool is_let_declaration(void)
+{
+   return peek() == tID && peek_ident_nth(1) == ident_new("let")
+      && peek_nth(2) == tID && (peek_nth(3) == tLPAREN || peek_nth(3) == tEQ);
+}
+
+static void p_let_declaration(void)
+{
+   // let let_identifier [ ( [ let_port_list ] ) ] = expression ;
+
+   BEGIN("let declaration");
+
+   consume(tID);
+
+   vlog_node_t v = vlog_new(V_FUNC_DECL);
+   vlog_set_ident(v, p_identifier());
+   vlog_set_ident2(v, vlog_symtab_qualified(symtab));
+   vlog_set_flags(v, VLOG_F_LET);
+   vlog_set_loc(v, &state.last_loc);
+
+   vlog_symtab_put(symtab, v);
+   vlog_symtab_push(symtab, v);
+
+   if (optional(tLPAREN)) {
+      if (peek() != tRPAREN)
+         p_tf_port_list(v);
+      consume(tRPAREN);
+   }
+
+   consume(tEQ);
+   vlog_add_stmt(v, p_expression());
+   consume(tSEMI);
+
+   vlog_symtab_pop(symtab);
 }
 
 static vlog_node_t p_tf_call(vlog_kind_t kind)
@@ -5228,6 +5713,63 @@ static vlog_node_t p_process_scope(void)
    return v;
 }
 
+static bool constraint_item = false;
+
+static vlog_node_t p_logical_implication(vlog_node_t lhs)
+{
+   // expression -> expression | expression <-> expression
+
+   const token_t tok = peek();
+   if (tok != tIFIMPL && tok != tIFFIMPL)
+      return lhs;
+
+   consume(tok);
+
+   vlog_node_t rhs = p_logical_implication(p_expression());
+
+   vlog_node_t not1 = vlog_new(V_UNARY);
+   vlog_set_subkind(not1, V_UNARY_NOT);
+   vlog_set_value(not1, lhs);
+   vlog_set_loc(not1, CURRENT_LOC);
+
+   vlog_node_t v = vlog_new(V_BINARY);
+   vlog_set_left(v, not1);
+   if (tok == tIFIMPL) {
+      vlog_set_subkind(v, V_BINARY_LOG_OR);
+      vlog_set_right(v, rhs);
+   }
+   else {
+      vlog_node_t not2 = vlog_new(V_UNARY);
+      vlog_set_subkind(not2, V_UNARY_NOT);
+      vlog_set_value(not2, rhs);
+      vlog_set_loc(not2, CURRENT_LOC);
+
+      vlog_set_subkind(v, V_BINARY_LOG_EQ);
+      vlog_set_right(v, not2);
+   }
+
+   vlog_set_loc(v, CURRENT_LOC);
+   return v;
+}
+
+static bool at_argless_call(vlog_node_t scope)
+{
+   // A function with no arguments can be called without parentheses
+
+   assert(peek() == tID);
+
+   ident_t id = peek_ident_nth(1);
+   vlog_node_t d = scope != NULL ? vlog_scope_member(scope, id)
+      : vlog_symtab_query(symtab, id);
+
+   if (d == NULL || vlog_kind(d) != V_FUNC_DECL || d == current_func
+       || (vlog_flags(d) & (VLOG_F_LET)) != 0
+       || vlog_ports(d) > 0 || !vlog_has_type(d))
+      return false;
+
+   return peek_nth(2) != tDOT && peek_nth(2) != tLSQUARE;
+}
+
 static vlog_node_t p_primary(void)
 {
    // primary_literal | empty_queue
@@ -5368,7 +5910,27 @@ static vlog_node_t p_primary(void)
       break;
    case tLPAREN:
       consume(tLPAREN);
-      head = p_mintypmax_expression();
+      head = p_logical_implication(p_mintypmax_expression());
+      switch (peek()) {
+      case tEQ:
+      case tPLUSEQ:
+      case tMINUSEQ:
+      case tTIMESEQ:
+      case tDIVEQ:
+      case tPERCENTEQ:
+      case tAMPEQ:
+      case tBAREQ:
+      case tCARETEQ:
+      case tLSLEQ:
+      case tLSREQ:
+      case tASLEQ:
+      case tASREQ:
+         // Assignment as an expression
+         head = p_operator_assignment(head);
+         break;
+      default:
+         break;
+      }
       consume(tRPAREN);
       break;
    case tTIMELIT:
@@ -5879,8 +6441,11 @@ static vlog_node_t p_expression(void)
 
    BEGIN("expression");
 
-   vlog_node_t head = p_nonbinary_expression();
-   return p_binary_expression(head, 0);
+   vlog_node_t head = p_binary_expression(p_nonbinary_expression(), 0);
+   if (constraint_item)
+      return head;
+
+   return p_logical_implication(head);
 }
 
 static void p_event_expression(vlog_node_t ctrl)
@@ -5901,6 +6466,18 @@ static void p_event_expression(vlog_node_t ctrl)
       else {
          vlog_node_t v = vlog_new(V_EVENT);
 
+         if (peek() == tID && sva_is_decl(peek_reference())
+             && vlog_subkind(peek_reference()) == V_SVA_SEQUENCE
+             && peek_nth(2) != tDOT) {
+            vlog_set_subkind(v, V_EVENT_POSEDGE);
+            vlog_node_t d = peek_reference();
+            consume(tID);
+            vlog_set_value(v, p_sva_trigger(d));
+            vlog_set_loc(v, CURRENT_LOC);
+            vlog_add_param(ctrl, v);
+            continue;
+         }
+
          if (optional(tPOSEDGE))
             vlog_set_subkind(v, V_EVENT_POSEDGE);
          else if (optional(tNEGEDGE))
@@ -5912,6 +6489,13 @@ static void p_event_expression(vlog_node_t ctrl)
 
          const bool saved_forward = vlog_symtab_set_forward(symtab, true);
          vlog_set_value(v, p_expression());
+         vlog_symtab_set_forward(symtab, saved_forward);
+
+         if (peek() == tIFFKW) {
+            consume(tIFFKW);
+            vlog_set_left(v, p_expression());
+         }
+
          vlog_set_loc(v, CURRENT_LOC);
 
          vlog_add_param(ctrl, v);
@@ -5982,7 +6566,24 @@ static vlog_node_t p_expression_or_dist(void)
    return v;
 }
 
-static void p_cycle_delay_const_range_expression(void)
+static void p_constraint_set(vlog_node_t parent)
+{
+   // constraint_expression | { { constraint_expression } }
+
+   BEGIN("constraint set");
+
+   if (optional(tLBRACE)) {
+      while (not_at_token(tRBRACE)) {
+         if (!optional(tSEMI))   // An empty item
+            vlog_add_stmt(parent, p_constraint_expression());
+      }
+
+      consume(tRBRACE);
+   }
+   else
+      vlog_add_stmt(parent, p_constraint_expression());
+}
+
 static vlog_node_t p_constraint_block(void)
 {
    // constraint_set used as a branch of a conditional constraint
@@ -6074,19 +6675,201 @@ static vlog_node_t p_constraint_foreach(void)
    return v;
 }
 
+static vlog_node_t p_constraint_expression(void)
+{
+   // expression_or_dist ; | soft expression_or_dist ;
+   //   | uniqueness_constraint ; | expression -> constraint_set
+   //   | if ( expression ) constraint_set [ else constraint_set ]
+   //   | foreach ( ps_or_hierarchical_array_identifier [ loop_variables ] )
+   //       constraint_set
+   //   | disable soft constraint_primary ;
+   //   | solve solve_before_list before solve_before_list ;
+
+   BEGIN("constraint expression");
+
+   switch (peek()) {
+   case tSOFT:
+      {
+         consume(tSOFT);
+
+         vlog_node_t v = vlog_new(V_CONS_EXPR);
+         vlog_set_flags(v, VLOG_F_SOFT);
+         vlog_set_value(v, p_expression_or_dist());
+
+         consume(tSEMI);
+
+         vlog_set_loc(v, CURRENT_LOC);
+         return v;
+      }
+
+   case tUNIQUE:
+      {
+         consume(tUNIQUE);
+
+         vlog_node_t v = vlog_new(V_CONS_UNIQUE);
+
+         consume(tLBRACE);
+
+         do {
+            vlog_add_param(v, p_expression());
+         } while (optional(tCOMMA));
+
+         consume(tRBRACE);
+         consume(tSEMI);
+
+         vlog_set_loc(v, CURRENT_LOC);
+         return v;
+      }
+
+   case tSOLVE:
+      {
+         consume(tSOLVE);
+
+         vlog_node_t v = vlog_new(V_CONS_SOLVE);
+
+         vlog_node_t left = vlog_new(V_CONCAT);
+         do {
+            vlog_add_param(left, p_expression());
+         } while (optional(tCOMMA));
+
+         vlog_set_loc(left, CURRENT_LOC);
+         vlog_set_left(v, left);
+
+         consume(tVBEFORE);
+
+         vlog_node_t right = vlog_new(V_CONCAT);
+         do {
+            vlog_add_param(right, p_expression());
+         } while (optional(tCOMMA));
+
+         vlog_set_right(v, right);
+
+         consume(tSEMI);
+
+         vlog_set_loc(right, CURRENT_LOC);
+         vlog_set_loc(v, CURRENT_LOC);
+         return v;
+      }
+
+   case tIF:
+      {
+         consume(tIF);
+
+         vlog_node_t v = vlog_new(V_CONS_IF);
+
+         consume(tLPAREN);
+         vlog_set_value(v, p_expression());
+         consume(tRPAREN);
+
+         vlog_set_left(v, p_constraint_block());
+
+         if (optional(tELSE))
+            vlog_set_right(v, p_constraint_block());
+
+         vlog_set_loc(v, CURRENT_LOC);
+         return v;
+      }
+
+   case tFOREACH:
+      return p_constraint_foreach();
+
+   case tDISABLE:
+      {
+         consume(tDISABLE);
+         consume(tSOFT);
+
+         vlog_node_t v = vlog_new(V_CONS_EXPR);
+         vlog_set_flags(v, VLOG_F_SOFT | VLOG_F_DISABLE);
+         vlog_set_value(v, p_expression());
+
+         consume(tSEMI);
+
+         vlog_set_loc(v, CURRENT_LOC);
+         return v;
+      }
+
+   default:
+      {
+         // The arrow of an implication constraint is not an operator here
+         const bool saved_item = constraint_item;
+         constraint_item = true;
+         vlog_node_t value = p_expression_or_dist();
+         constraint_item = saved_item;
+
+         if (optional(tIFIMPL)) {
+            vlog_node_t v = vlog_new(V_CONS_IMPLY);
+            vlog_set_value(v, value);
+            p_constraint_set(v);
+
+            vlog_set_loc(v, CURRENT_LOC);
+            return v;
+         }
+
+         vlog_node_t v = vlog_new(V_CONS_EXPR);
+         vlog_set_value(v, value);
+
+         if (peek() == tRBRACE)
+            warn_at(&state.last_loc, "missing semicolon at the end of a "
+                    "constraint expression");
+         else
+            consume(tSEMI);
+
+         vlog_set_loc(v, CURRENT_LOC);
+         return v;
+      }
+   }
+}
+
+static vlog_node_t p_sva_expr(int min_prec);
+
+static vlog_node_t sva_number(int n, const loc_t *loc)
+{
+   vlog_node_t v = vlog_new(V_NUMBER);
+   vlog_set_number(v, number_from_int(n));
+   vlog_set_loc(v, loc);
+   return v;
+}
+
+static vlog_node_t sva_dollar(void)
+{
+   vlog_node_t v = vlog_new(V_DOLLAR);
+   vlog_set_loc(v, &state.last_loc);
+   return v;
+}
+
+static vlog_node_t sva_new(vlog_sva_op_t op)
+{
+   vlog_node_t v = vlog_new(V_SVA_OP);
+   vlog_set_subkind(v, op);
+   return v;
+}
+
+static vlog_node_t sva_unary(vlog_sva_op_t op, vlog_node_t arg,
+                             const loc_t *loc)
+{
+   vlog_node_t v = sva_new(op);
+   vlog_add_param(v, arg);
+   vlog_set_loc(v, loc);
+   return v;
+}
+
+static void p_cycle_delay_const_range_expression(vlog_node_t v)
 {
    // constant_expression : constant_expression | constant_expression : $
 
    BEGIN("cycle delay constant range expression");
 
-   p_constant_expression();
+   vlog_set_left(v, p_constant_expression());
 
    consume(tCOLON);
 
-   p_constant_expression();
+   if (optional(tDOLLAR))
+      vlog_set_right(v, sva_dollar());
+   else
+      vlog_set_right(v, p_constant_expression());
 }
 
-static void p_cycle_delay_range(void)
+static void p_cycle_delay_range(vlog_node_t v)
 {
    // ## constant_primary
    //   | ## [ cycle_delay_const_range_expression ]
@@ -6097,39 +6880,55 @@ static void p_cycle_delay_range(void)
 
    consume(tCYCLEDLY);
 
-   switch (peek()) {
-   case tLSQUARE:
-      consume(tLSQUARE);
-      p_cycle_delay_const_range_expression();
+   if (optional(tTIMESRPT)) {
+      vlog_set_left(v, sva_number(0, &state.last_loc));
+      vlog_set_right(v, sva_dollar());
+   }
+   else if (optional(tPLUSRPT)) {
+      vlog_set_left(v, sva_number(1, &state.last_loc));
+      vlog_set_right(v, sva_dollar());
+   }
+   else if (optional(tLSQUARE)) {
+      switch (peek()) {
+      case tTIMESRPT:
+      case tTIMES:
+         consume(peek());
+         vlog_set_left(v, sva_number(0, &state.last_loc));
+         vlog_set_right(v, sva_dollar());
+         break;
+      case tPLUS:
+         consume(tPLUS);
+         vlog_set_left(v, sva_number(1, &state.last_loc));
+         vlog_set_right(v, sva_dollar());
+         break;
+      default:
+         p_cycle_delay_const_range_expression(v);
+         break;
+      }
       consume(tRSQUARE);
-      break;
-   default:
-      p_primary();
-      break;
+   }
+   else {
+      vlog_node_t n = p_primary();
+      vlog_set_left(v, n);
+      vlog_set_right(v, n);
    }
 }
 
-static vlog_node_t p_consecutive_repetition(vlog_node_t head)
+static void p_sva_repetition_range(vlog_node_t v, bool allow_dollar)
 {
-   // [* const_or_range_expression ] | [*] | [+]
+   // const_or_range_expression
 
-   BEGIN("consecutive repetition");
+   vlog_node_t lo = p_constant_expression();
+   vlog_set_left(v, lo);
 
-   consume(tLSQUARE);
-
-   switch (one_of(tTIMES, tPLUS)) {
-   case tTIMES:
-      if (!optional(tRSQUARE)) {
-         (void)p_constant_expression();
-         consume(tRSQUARE);
-      }
-      break;
-   case tPLUS:
-      consume(tRSQUARE);
-      break;
+   if (optional(tCOLON)) {
+      if (allow_dollar && optional(tDOLLAR))
+         vlog_set_right(v, sva_dollar());
+      else
+         vlog_set_right(v, p_constant_expression());
    }
-
-   return head;
+   else
+      vlog_set_right(v, lo);
 }
 
 static vlog_node_t p_boolean_abbrev(vlog_node_t head)
@@ -6138,41 +6937,66 @@ static vlog_node_t p_boolean_abbrev(vlog_node_t head)
 
    BEGIN("boolean abbreviation");
 
-   return p_consecutive_repetition(head);
-}
+   for (;;) {
+      vlog_node_t v;
+      switch (peek()) {
+      case tTIMESRPT:
+         consume(tTIMESRPT);
+         v = sva_unary(V_SVA_REPEAT, head, &state.last_loc);
+         if (peek() == tRSQUARE) {
+            vlog_set_left(v, sva_number(0, &state.last_loc));
+            vlog_set_right(v, sva_dollar());
+         }
+         else
+            p_sva_repetition_range(v, true);
+         consume(tRSQUARE);
+         break;
+      case tPLUSRPT:
+         consume(tPLUSRPT);
+         v = sva_unary(V_SVA_REPEAT, head, &state.last_loc);
+         vlog_set_left(v, sva_number(1, &state.last_loc));
+         vlog_set_right(v, sva_dollar());
+         break;
+      case tLSQUARE:
+         // Lexed as separate tokens when followed by a bracket or space
+         consume(tLSQUARE);
+         switch (one_of(tTIMES, tPLUS)) {
+         case tTIMES:
+            v = sva_unary(V_SVA_REPEAT, head, &state.last_loc);
+            if (peek() == tRSQUARE) {
+               vlog_set_left(v, sva_number(0, &state.last_loc));
+               vlog_set_right(v, sva_dollar());
+            }
+            else
+               p_sva_repetition_range(v, true);
+            break;
+         default:
+            v = sva_unary(V_SVA_REPEAT, head, &state.last_loc);
+            vlog_set_left(v, sva_number(1, &state.last_loc));
+            vlog_set_right(v, sva_dollar());
+            break;
+         }
+         consume(tRSQUARE);
+         break;
+      case tGOTORPT:
+         consume(tGOTORPT);
+         v = sva_unary(V_SVA_GOTO, head, &state.last_loc);
+         p_sva_repetition_range(v, false);
+         consume(tRSQUARE);
+         break;
+      case tEQRPT:
+         consume(tEQRPT);
+         v = sva_unary(V_SVA_NONCONS, head, &state.last_loc);
+         p_sva_repetition_range(v, false);
+         consume(tRSQUARE);
+         break;
+      default:
+         return head;
+      }
 
-static vlog_node_t p_sequence_expr(void)
-{
-   // cycle_delay_range sequence_expr { cycle_delay_range sequence_expr }
-   //   | sequence_expr cycle_delay_range sequence_expr
-   //       { cycle_delay_range sequence_expr }
-   //   | expression_or_dist [ boolean_abbrev ]
-   //   | sequence_instance [ sequence_abbrev ]
-   //   | ( sequence_expr { , sequence_match_item } ) [ sequence_abbrev ]
-   //   | sequence_expr and sequence_expr
-   //   | sequence_expr intersect sequence_expr
-   //   | sequence_expr or sequence_expr
-   //   | first_match ( sequence_expr { , sequence_match_item } )
-   //   | expression_or_dist throughout sequence_expr
-   //   | sequence_expr within sequence_expr
-   //   | clocking_event sequence_expr
-
-   BEGIN("sequence expression");
-
-   vlog_node_t head;
-   switch (peek()) {
-   case tCYCLEDLY:
-      (void)p_cycle_delay_range();
-      head = p_sequence_expr();
-      break;
-   default:
-      head = p_expression_or_dist();
+      vlog_set_loc(v, CURRENT_LOC);
+      head = v;
    }
-
-   if (peek() == tLSQUARE)
-      return p_boolean_abbrev(head);
-   else
-      return head;
 }
 
 static vlog_node_t p_clocking_event(void)
@@ -6187,7 +7011,13 @@ static vlog_node_t p_clocking_event(void)
 
    switch (peek()) {
    case tID:
-      (void)p_identifier();
+      {
+         vlog_node_t event = vlog_new(V_EVENT);
+         vlog_set_subkind(event, V_EVENT_LEVEL);
+         vlog_set_value(event, p_select(p_identifier()));
+         vlog_set_loc(event, CURRENT_LOC);
+         vlog_add_param(v, event);
+      }
       break;
    case tLPAREN:
       consume(tLPAREN);
@@ -6202,73 +7032,572 @@ static vlog_node_t p_clocking_event(void)
    return v;
 }
 
-static vlog_node_t p_property_expr(void)
+static bool sva_binop(token_t tok, int *prec, bool *right, vlog_sva_op_t *op)
 {
-   // sequence_expr
-   //   | strong ( sequence_expr )
-   //   | weak ( sequence_expr )
-   //   | ( property_expr )
-   //   | not property_expr
-   //   | property_expr or property_expr
-   //   | property_expr and property_expr
-   //   | sequence_expr |-> property_expr
-   //   | sequence_expr |=> property_expr
-   //   | if ( expression_or_dist ) property_expr [ else property_expr ]
-   //   | case ( expression_or_dist ) property_case_item
-   //       { property_case_item } endcase
-   //   | sequence_expr #-# property_expr
-   //   | sequence_expr #=# property_expr
-   //   | nexttime property_expr
-   //   | nexttime [ constant expression ] property_expr
-   //   | s_nexttime property_expr
-   //   | s_nexttime [ constant_expression ] property_expr
-   //   | always property_expr
-   //   | always [ cycle_delay_const_range_expression ] property_expr
-   //   | s_always [ constant_range ] property_expr
-   //   | s_eventually property_expr
-   //   | eventually [ constant_range ] property_expr
-   //   | s_eventually [ cycle_delay_const_range_expression ] property_expr
-   //   | property_expr until property_expr
-   //   | property_expr s_until property_expr
-   //   | property_expr until_with property_expr
-   //   | property_expr s_until_with property_expr
-   //   | property_expr implies property_expr
-   //   | property_expr iff property_expr
-   //   | accept_on ( expression_or_dist ) property_expr
-   //   | reject_on ( expression_or_dist ) property_expr
-   //   | sync_accept_on ( expression_or_dist ) property_expr
-   //   | sync_reject_on ( expression_or_dist ) property_expr
-   //   | property_instance
-   //   | clocking_event property_expr
+   switch (tok) {
+   case tSUFFIXOVR:  *prec = 1; *right = true;  *op = V_SVA_IMPL_OVER;   return true;
+   case tSUFFIXNON:  *prec = 1; *right = true;  *op = V_SVA_IMPL_NON;    return true;
+   case tFOLLOWBY1:  *prec = 1; *right = true;  *op = V_SVA_FOLLOW_OVER; return true;
+   case tFOLLOWBY2:  *prec = 1; *right = true;  *op = V_SVA_FOLLOW_NON;  return true;
+   case tUNTIL:      *prec = 2; *right = true;  *op = V_SVA_UNTIL;       return true;
+   case tSUNTIL:     *prec = 2; *right = true;  *op = V_SVA_S_UNTIL;     return true;
+   case tUNTILWITH:  *prec = 2; *right = true;  *op = V_SVA_UNTIL_WITH;  return true;
+   case tSUNTILWITH: *prec = 2; *right = true;  *op = V_SVA_S_UNTIL_WITH; return true;
+   case tIMPLIES:    *prec = 2; *right = true;  *op = V_SVA_IMPLIES;     return true;
+   case tIFFKW:      *prec = 3; *right = true;  *op = V_SVA_IFF;         return true;
+   case tOR:         *prec = 4; *right = false; *op = V_SVA_OR;          return true;
+   case tAND:        *prec = 5; *right = false; *op = V_SVA_AND;         return true;
+   case tINTERSECT:  *prec = 6; *right = false; *op = V_SVA_INTERSECT;   return true;
+   case tWITHIN:     *prec = 7; *right = false; *op = V_SVA_WITHIN;      return true;
+   case tTHROUGHOUT: *prec = 8; *right = true;  *op = V_SVA_THROUGHOUT;  return true;
+   case tCYCLEDLY:   *prec = 9; *right = false; *op = V_SVA_DELAY;       return true;
+   default:
+      return false;
+   }
+}
 
-   BEGIN("property expression");
+static bool sva_marker(token_t tok)
+{
+   switch (tok) {
+   case tCYCLEDLY: case tSUFFIXOVR: case tSUFFIXNON: case tFOLLOWBY1:
+   case tFOLLOWBY2: case tTIMESRPT: case tPLUSRPT: case tGOTORPT: case tEQRPT:
+   case tAND: case tOR: case tNOT: case tIF: case tINTERSECT: case tWITHIN:
+   case tTHROUGHOUT: case tFIRSTMATCH: case tIFFKW: case tUNTIL: case tSUNTIL:
+   case tUNTILWITH: case tSUNTILWITH: case tIMPLIES: case tNEXTTIME:
+   case tSNEXTTIME: case tALWAYS: case tSALWAYS: case tEVENTUALLY:
+   case tSEVENTUALLY: case tACCEPTON: case tREJECTON: case tSYNCACCEPTON:
+   case tSYNCREJECTON: case tAT: case tSTRONG: case tWEAK: case tCASE:
+      return true;
+   default:
+      return false;
+   }
+}
 
-   if (peek() == tAT) {
-      (void)p_clocking_event();
-      return p_property_expr();
+static bool sva_paren_p(void)
+{
+   // Look ahead from an opening parenthesis for an operator which
+   // cannot occur in a plain expression
+
+   int depth = 1, braces = 0;
+   for (int n = 2; ; n++) {
+      const token_t tok = peek_nth(n);
+      switch (tok) {
+      case tEOF:
+         return false;
+      case tLPAREN:
+         depth++;
+         break;
+      case tRPAREN:
+         if (--depth == 0)
+            return false;
+         break;
+      case tLBRACE:
+         braces++;
+         break;
+      case tRBRACE:
+         braces--;
+         break;
+      case tCOMMA:
+         if (depth == 1 && braces == 0)
+            return true;
+         break;
+      case tID:
+         if (sva_is_decl(vlog_symtab_query(symtab, peek_ident_nth(n))))
+            return true;
+         break;
+      default:
+         if (sva_marker(tok))
+            return true;
+         break;
+      }
+   }
+}
+
+typedef struct {
+   vlog_node_t  decl;
+   vlog_node_t *actuals;
+   A(vlog_node_t) orig;
+   A(vlog_node_t) clone;
+} sva_expand_t;
+
+static bool sva_is_local_decl(vlog_node_t d)
+{
+   return vlog_kind(d) == V_VAR_DECL && (vlog_flags(d) & VLOG_F_SVA_LOCAL);
+}
+
+static bool sva_formal_pred(vlog_node_t v, void *ctx)
+{
+   sva_expand_t *e = ctx;
+
+   if (vlog_kind(v) != V_REF || !vlog_has_ref(v))
+      return false;
+
+   vlog_node_t d = vlog_ref(v);
+   const int nports = vlog_ports(e->decl);
+   for (int i = 0; i < nports; i++) {
+      if (vlog_port(e->decl, i) == d)
+         return true;
    }
 
-   vlog_node_t head;
+   return sva_is_local_decl(d);
+}
+
+static vlog_node_t sva_local_clone(sva_expand_t *e, vlog_node_t d)
+{
+   for (unsigned i = 0; i < e->orig.count; i++) {
+      if (e->orig.items[i] == d)
+         return e->clone.items[i];
+   }
+
+   vlog_node_t c = vlog_new(V_VAR_DECL);
+   vlog_set_ident(c, vlog_ident(d));
+   vlog_set_type(c, vlog_type(d));
+   vlog_set_flags(c, vlog_flags(d) | VLOG_F_SVA_LOCAL);
+   vlog_set_loc(c, vlog_loc(d));
+
+   APUSH(e->orig, d);
+   APUSH(e->clone, c);
+   return c;
+}
+
+static vlog_node_t sva_formal_rewrite(vlog_node_t v, void *ctx)
+{
+   sva_expand_t *e = ctx;
+
+   if (!sva_formal_pred(v, ctx))
+      return v;
+
+   for (unsigned i = 0; i < e->clone.count; i++) {
+      if (e->clone.items[i] == vlog_ref(v))
+         return v;
+   }
+
+   const int nports = vlog_ports(e->decl);
+   for (int i = 0; i < nports; i++) {
+      vlog_node_t port = vlog_port(e->decl, i);
+      if (port != vlog_ref(v))
+         continue;
+      else if (!(vlog_flags(port) & VLOG_F_SVA_LOCAL))
+         return e->actuals[i];
+
+      vlog_node_t c = sva_local_clone(e, port);
+      vlog_node_t ref = vlog_new(V_REF);
+      vlog_set_ident(ref, vlog_ident(c));
+      vlog_set_ref(ref, c);
+      vlog_set_loc(ref, vlog_loc(v));
+      return ref;
+   }
+
+   vlog_set_ref(v, sva_local_clone(e, vlog_ref(v)));
+   return v;
+}
+
+static vlog_node_t sva_wrap_init(vlog_node_t decl, vlog_node_t init,
+                                 vlog_node_t body, const loc_t *loc)
+{
+   vlog_node_t v;
+   if (vlog_subkind(decl) == V_SVA_PROPERTY) {
+      v = sva_new(V_SVA_IMPL_OVER);
+      vlog_add_param(v, init);
+      vlog_add_param(v, body);
+   }
+   else {
+      v = sva_new(V_SVA_DELAY);
+      vlog_set_left(v, sva_number(0, loc));
+      vlog_set_right(v, sva_number(0, loc));
+      vlog_add_param(v, init);
+      vlog_add_param(v, body);
+   }
+
+   vlog_set_loc(v, loc);
+   return v;
+}
+
+static vlog_node_t sva_local_init(vlog_node_t decl, vlog_node_t body,
+                                  sva_expand_t *e, const loc_t *loc)
+{
+   // A local variable with an initial value and a local input formal
+   // are assigned at the start of each instance of the sequence
+
+   vlog_node_t init = NULL;
+   for (unsigned i = 0; i < e->orig.count; i++) {
+      vlog_node_t d = e->orig.items[i], value = NULL;
+
+      const int nports = vlog_ports(decl);
+      for (int j = 0; j < nports; j++) {
+         if (vlog_port(decl, j) == d)
+            value = e->actuals[j];
+      }
+
+      if (value == NULL && vlog_has_value(d)) {
+         vlog_node_t copy = vlog_copy(vlog_value(d), sva_formal_pred, e);
+         value = vlog_rewrite(copy, NULL, sva_formal_rewrite, e);
+      }
+
+      if (value == NULL)
+         continue;
+
+      if (init == NULL) {
+         init = sva_new(V_SVA_MATCH);
+         vlog_add_param(init, sva_number(1, loc));
+         vlog_set_loc(init, loc);
+      }
+
+      vlog_node_t target = vlog_new(V_REF);
+      vlog_set_ident(target, vlog_ident(e->clone.items[i]));
+      vlog_set_ref(target, e->clone.items[i]);
+      vlog_set_loc(target, loc);
+
+      vlog_node_t assign = vlog_new(V_BASSIGN);
+      vlog_set_target(assign, target);
+      vlog_set_value(assign, value);
+      vlog_set_loc(assign, loc);
+      vlog_add_param(init, assign);
+   }
+
+   if (init == NULL)
+      return body;
+
+   if (vlog_kind(body) == V_SVA_OP && (vlog_subkind(body) == V_SVA_CLOCKED
+                                       || vlog_subkind(body) == V_SVA_DISABLE)) {
+      vlog_node_t inner = vlog_param(body, 0);
+      vlog_set_param(body, 0, sva_wrap_init(decl, init, inner, loc));
+      return body;
+   }
+
+   return sva_wrap_init(decl, init, body, loc);
+}
+
+static vlog_node_t p_sva_instance(vlog_node_t decl)
+{
+   // ps_or_hierarchical_sequence_identifier [ ( [ sequence_list_of_arguments ] ) ]
+   //   | ps_or_hierarchical_property_identifier [ ( [ property_list_of_arguments ] ) ]
+
+   BEGIN("sequence or property instance");
+
+   const loc_t loc = *CURRENT_LOC;
+   consume(tID);
+
+   const int nports = vlog_ports(decl);
+   vlog_node_t *actuals LOCAL = xcalloc_array(MAX(nports, 1),
+                                              sizeof(vlog_node_t));
+
    if (optional(tLPAREN)) {
-      head = p_property_expr();
+      int pos = 0;
+      if (peek() != tRPAREN) {
+         do {
+            if (optional(tDOT)) {
+               ident_t name = p_identifier();
+               consume(tLPAREN);
+               vlog_node_t actual = NULL;
+               if (peek() != tRPAREN)
+                  actual = p_sva_expr(1);
+               consume(tRPAREN);
+
+               bool found = false;
+               for (int i = 0; i < nports; i++) {
+                  if (vlog_ident(vlog_port(decl, i)) == name) {
+                     actuals[i] = actual;
+                     found = true;
+                  }
+               }
+
+               if (!found)
+                  error_at(&state.last_loc, "%pQ is not a formal argument of "
+                           "%pQ", name, vlog_ident(decl));
+            }
+            else {
+               vlog_node_t actual = NULL;
+               if (peek() != tCOMMA && peek() != tRPAREN)
+                  actual = p_sva_expr(1);
+
+               if (pos < nports)
+                  actuals[pos] = actual;
+               else
+                  error_at(&state.last_loc, "too many actual arguments for "
+                           "%pQ", vlog_ident(decl));
+               pos++;
+            }
+         } while (optional(tCOMMA));
+      }
       consume(tRPAREN);
    }
-   else
-      head = p_sequence_expr();
+
+   for (int i = 0; i < nports; i++) {
+      vlog_node_t port = vlog_port(decl, i);
+      if (actuals[i] == NULL) {
+         if (!vlog_has_value(port)) {
+            error_at(&loc, "missing value for argument %pQ", vlog_ident(port));
+            return sva_number(0, &loc);
+         }
+
+         actuals[i] = vlog_value(port);
+      }
+   }
+
+   if (!vlog_has_value(decl))
+      return sva_number(0, &loc);
+
+   sva_expand_t e = { .decl = decl, .actuals = actuals };
+
+   vlog_node_t copy = vlog_copy(vlog_value(decl), sva_formal_pred, &e);
+   copy = vlog_rewrite(copy, NULL, sva_formal_rewrite, &e);
+   copy = sva_local_init(decl, copy, &e, &loc);
+
+   ACLEAR(e.orig);
+   ACLEAR(e.clone);
+   return copy;
+}
+
+static bool sva_is_decl(vlog_node_t d)
+{
+   return d != NULL && vlog_kind(d) == V_SVA_DECL;
+}
+
+static vlog_node_t p_sva_case(void)
+{
+   // case ( expression_or_dist ) property_case_item { property_case_item }
+   //   endcase
+
+   BEGIN("property case");
+
+   consume(tCASE);
+   consume(tLPAREN);
+
+   vlog_node_t sel = p_expression_or_dist();
+
+   consume(tRPAREN);
+
+   vlog_node_t head = NULL, tail = NULL, deflt = NULL;
+   while (not_at_token(tENDCASE)) {
+      if (optional(tDEFAULT)) {
+         optional(tCOLON);
+         deflt = p_sva_expr(1);
+         consume(tSEMI);
+         continue;
+      }
+
+      vlog_node_t cond = NULL;
+      do {
+         vlog_node_t eq = vlog_new(V_BINARY);
+         vlog_set_subkind(eq, V_BINARY_CASE_EQ);
+         vlog_set_left(eq, sel);
+         vlog_set_right(eq, p_expression());
+         vlog_set_loc(eq, &state.last_loc);
+
+         if (cond == NULL)
+            cond = eq;
+         else {
+            vlog_node_t or = vlog_new(V_BINARY);
+            vlog_set_subkind(or, V_BINARY_LOG_OR);
+            vlog_set_left(or, cond);
+            vlog_set_right(or, eq);
+            vlog_set_loc(or, &state.last_loc);
+            cond = or;
+         }
+      } while (optional(tCOMMA));
+
+      consume(tCOLON);
+
+      vlog_node_t item = sva_new(V_SVA_IF);
+      vlog_set_value(item, cond);
+      vlog_add_param(item, p_sva_expr(1));
+      consume(tSEMI);
+
+      vlog_set_loc(item, CURRENT_LOC);
+
+      if (head == NULL)
+         head = item;
+      else
+         vlog_add_param(tail, item);
+
+      tail = item;
+   }
+
+   consume(tENDCASE);
+
+   if (head == NULL) {
+      error_at(&state.last_loc, "property case must have at least one item");
+      return sva_number(1, &state.last_loc);
+   }
+
+   if (deflt != NULL)
+      vlog_add_param(tail, deflt);
+
+   return head;
+}
+
+static vlog_node_t p_sva_prefix(vlog_sva_op_t op, bool ranged, bool need_range)
+{
+   BEGIN("property operator");
+
+   const loc_t loc = *CURRENT_LOC;
+   consume(peek());
+
+   vlog_node_t v = sva_new(op);
+
+   if (ranged && optional(tLSQUARE)) {
+      p_sva_repetition_range(v, true);
+      consume(tRSQUARE);
+   }
+   else if (need_range)
+      one_of(tLSQUARE);
+
+   vlog_add_param(v, p_sva_expr(1));
+   vlog_set_loc(v, &loc);
+   return v;
+}
+
+static vlog_node_t p_sva_match_item(void)
+{
+   // variable_assignment | inc_or_dec_expression | subroutine_call
+
+   BEGIN("sequence match item");
+
+   if (peek() == tSYSTASK)
+      return p_subroutine_call(V_SYS_TCALL);
+   else if (peek() == tID && peek_nth(2) == tLPAREN)
+      return p_subroutine_call(V_USER_TCALL);
+   else if (scan(tPLUSPLUS, tMINUSMINUS))
+      return p_inc_or_dec_expression(NULL);
+
+   vlog_node_t lhs = p_variable_lvalue();
+   if (scan(tPLUSPLUS, tMINUSMINUS))
+      return p_inc_or_dec_expression(lhs);
+
+   return p_blocking_assignment(lhs);
+}
+
+static vlog_node_t p_sva_match_items(vlog_node_t seq, const loc_t *loc)
+{
+   // ( sequence_expr { , sequence_match_item } )
+
+   if (peek() != tCOMMA)
+      return seq;
+
+   vlog_node_t v = sva_new(V_SVA_MATCH);
+   vlog_add_param(v, seq);
+
+   while (optional(tCOMMA))
+      vlog_add_param(v, p_sva_match_item());
+
+   vlog_set_loc(v, loc);
+   return v;
+}
+
+static vlog_node_t p_sva_unary(void)
+{
+   BEGIN("sequence or property operand");
+
+   const loc_t loc = *CURRENT_LOC;
+   vlog_node_t head;
 
    switch (peek()) {
-   case tDBLAMP:
-   case tLOGOR:
-      consume(peek());
-      (void)p_expression();
+   case tAT:
+      {
+         vlog_node_t ctrl = p_clocking_event();
+         if (peek() == tCOMMA || peek() == tRPAREN)
+            return ctrl;   // Actual argument for an event formal
+
+         head = sva_unary(V_SVA_CLOCKED, p_sva_expr(1), &loc);
+         vlog_set_value(head, ctrl);
+         return head;
+      }
+   case tCYCLEDLY:
+      {
+         head = sva_new(V_SVA_DELAY);
+         p_cycle_delay_range(head);
+         vlog_add_param(head, p_sva_expr(10));
+         vlog_set_loc(head, CURRENT_LOC);
+         return head;
+      }
+   case tNOT:
+      consume(tNOT);
+      return sva_unary(V_SVA_NOT, p_sva_expr(1), &loc);
+   case tSTRONG:
+   case tWEAK:
+      {
+         const vlog_sva_op_t op = peek() == tSTRONG ? V_SVA_STRONG : V_SVA_WEAK;
+         consume(peek());
+         consume(tLPAREN);
+         head = sva_unary(op, p_sva_expr(1), &loc);
+         consume(tRPAREN);
+         return head;
+      }
+   case tFIRSTMATCH:
+      consume(tFIRSTMATCH);
+      consume(tLPAREN);
+      head = sva_unary(V_SVA_FIRST_MATCH,
+                       p_sva_match_items(p_sva_expr(1), &loc), &loc);
+      consume(tRPAREN);
+      return p_boolean_abbrev(head);
+   case tIF:
+      {
+         consume(tIF);
+         consume(tLPAREN);
+         head = sva_new(V_SVA_IF);
+         vlog_set_value(head, p_expression_or_dist());
+         consume(tRPAREN);
+         vlog_add_param(head, p_sva_expr(1));
+         if (optional(tELSE))
+            vlog_add_param(head, p_sva_expr(1));
+         vlog_set_loc(head, CURRENT_LOC);
+         return head;
+      }
+   case tCASE:
+      return p_sva_case();
+   case tNEXTTIME:
+      return p_sva_prefix(V_SVA_NEXTTIME, true, false);
+   case tSNEXTTIME:
+      return p_sva_prefix(V_SVA_S_NEXTTIME, true, false);
+   case tALWAYS:
+      return p_sva_prefix(V_SVA_ALWAYS, true, false);
+   case tSALWAYS:
+      return p_sva_prefix(V_SVA_S_ALWAYS, true, true);
+   case tEVENTUALLY:
+      return p_sva_prefix(V_SVA_EVENTUALLY, true, true);
+   case tSEVENTUALLY:
+      return p_sva_prefix(V_SVA_S_EVENTUALLY, true, false);
+   case tACCEPTON:
+   case tREJECTON:
+   case tSYNCACCEPTON:
+   case tSYNCREJECTON:
+      {
+         vlog_sva_op_t op;
+         switch (peek()) {
+         case tACCEPTON:     op = V_SVA_ACCEPT_ON; break;
+         case tREJECTON:     op = V_SVA_REJECT_ON; break;
+         case tSYNCACCEPTON: op = V_SVA_SYNC_ACCEPT_ON; break;
+         default:            op = V_SVA_SYNC_REJECT_ON; break;
+         }
+         consume(peek());
+         consume(tLPAREN);
+         head = sva_new(op);
+         vlog_set_value(head, p_expression_or_dist());
+         consume(tRPAREN);
+         vlog_add_param(head, p_sva_expr(1));
+         vlog_set_loc(head, CURRENT_LOC);
+         return head;
+      }
+   case tLPAREN:
+      if (sva_paren_p()) {
+         consume(tLPAREN);
+         head = p_sva_match_items(p_sva_expr(1), &loc);
+         consume(tRPAREN);
+         return p_boolean_abbrev(head);
+      }
       break;
-   case tSUFFIXOVR:
-      consume(tSUFFIXOVR);
-      (void)p_property_expr();
-      break;
-   case tSUFFIXNON:
-      consume(tSUFFIXNON);
-      (void)p_property_expr();
+   case tID:
+      {
+         vlog_node_t d = peek_reference();
+         if (sva_is_decl(d) && peek_nth(2) == tDOT)
+            parse_error(&state.last_loc, "sorry, sequence methods are not "
+                        "supported");
+         else if (sva_is_decl(d)) {
+            head = p_sva_instance(d);
+            return p_boolean_abbrev(head);
+         }
+      }
       break;
    default:
       break;
@@ -6308,7 +7637,24 @@ static vlog_node_t p_event_control(void)
 
    vlog_node_t v = vlog_new(V_EVENT_CONTROL);
 
-   switch (one_of(tLPAREN, tTIMES, tPARENSTAR)) {
+   switch (one_of(tLPAREN, tTIMES, tPARENSTAR, tID)) {
+   case tID:
+      {
+         vlog_node_t event = vlog_new(V_EVENT);
+         vlog_node_t decl = vlog_symtab_query(symtab, state.last_lval.ident);
+         if (sva_is_decl(decl) && vlog_subkind(decl) == V_SVA_SEQUENCE
+             && peek() != tDOT) {
+            vlog_set_subkind(event, V_EVENT_POSEDGE);
+            vlog_set_value(event, p_sva_trigger(decl));
+         }
+         else {
+            vlog_set_subkind(event, V_EVENT_LEVEL);
+            vlog_set_value(event, p_select(state.last_lval.ident));
+         }
+         vlog_set_loc(event, CURRENT_LOC);
+         vlog_add_param(v, event);
+      }
+      break;
    case tLPAREN:
       if (peek() == tATTREND)
          consume(tATTREND);   // Lexing ambiguity
@@ -6744,6 +8090,151 @@ static vlog_node_t p_blocking_assignment(vlog_node_t lhs)
    return v;
 }
 
+static vlog_node_t clocking_ref(vlog_node_t decl, const loc_t *loc);
+static vlog_node_t clocking_assign(vlog_node_t target, vlog_node_t value,
+                                   vlog_node_t delay, bool nba,
+                                   const loc_t *loc);
+
+static vlog_node_t clocking_event_of(vlog_node_t target)
+{
+   // The event of the clocking block which a clockvar belongs to
+
+   const char *name = NULL;
+   switch (vlog_kind(target)) {
+   case V_REF:
+   case V_MEMBER_REF:
+   case V_HIER_REF:
+      name = istr(vlog_ident(target));
+      break;
+   default:
+      return NULL;
+   }
+
+   const char *dollar = strchr(name, '$');
+   if (dollar == NULL || dollar == name)
+      return NULL;
+
+   ident_t evname = ident_sprintf("%.*s$ev", (int)(dollar - name), name);
+
+   vlog_node_t ref;
+   switch (vlog_kind(target)) {
+   case V_REF:
+      ref = vlog_new(V_REF);
+      vlog_set_ident(ref, evname);
+      vlog_set_loc(ref, vlog_loc(target));
+      vlog_symtab_lookup(symtab, ref);
+      break;
+   case V_MEMBER_REF:
+      ref = vlog_new(V_MEMBER_REF);
+      vlog_set_ident(ref, evname);
+      vlog_set_value(ref, vlog_copy(vlog_value(target), vlog_always_true_cb,
+                                    NULL));
+      vlog_set_loc(ref, vlog_loc(target));
+      vlog_symtab_lookup(symtab, ref);
+      break;
+   default:
+      ref = vlog_copy(target, vlog_always_true_cb, NULL);
+      vlog_set_ident(ref, evname);
+      break;
+   }
+
+   vlog_node_t ev = vlog_new(V_EVENT);
+   vlog_set_subkind(ev, V_EVENT_LEVEL);
+   vlog_set_value(ev, ref);
+   vlog_set_loc(ev, vlog_loc(target));
+
+   vlog_node_t ctrl = vlog_new(V_EVENT_CONTROL);
+   vlog_add_param(ctrl, ev);
+   vlog_set_loc(ctrl, vlog_loc(target));
+   return ctrl;
+}
+
+static vlog_node_t p_clocking_drive(vlog_node_t lhs)
+{
+   // clockvar_expression <= cycle_delay expression
+   //
+   // The value is evaluated now and drives the clockvar when the clocking
+   // event has occurred the number of times given
+
+   consume(tCYCLEDLY);
+
+   vlog_node_t count;
+   if (optional(tLPAREN)) {
+      count = p_expression();
+      consume(tRPAREN);
+   }
+   else
+      count = p_delay_value();
+
+   vlog_node_t rhs = p_expression_of_type(pattern_type_of(lhs));
+
+   const loc_t *loc = CURRENT_LOC;
+
+   vlog_node_t ctrl = clocking_event_of(lhs);
+   if (ctrl == NULL) {
+      parse_error(loc, "a cycle delay in an assignment is only allowed when "
+                  "driving a clocking block signal");
+      ctrl = vlog_new(V_EVENT_CONTROL);
+   }
+
+   vlog_node_t blk = vlog_new(V_SEQ_BLOCK);
+   vlog_set_loc(blk, loc);
+
+   // Variables a forked process refers to are copied when it starts but
+   // a signal outside the unit is not so the value is saved in a local
+   vlog_node_t value = rhs;
+   vlog_node_t decl = NULL;
+   if (vlog_kind(lhs) == V_REF && vlog_has_ref(lhs))
+      decl = vlog_ref(lhs);
+   else if (vlog_kind(lhs) == V_MEMBER_REF && vlog_has_ref(lhs))
+      decl = vlog_member_decl(lhs);
+   else if (vlog_kind(lhs) == V_MEMBER_REF && vlog_virtual_pending(lhs)
+            && vlog_virtual_iface(vlog_get_type(vlog_value(lhs))) != NULL)
+      decl = vlog_virtual_decl(lhs);
+   if (decl != NULL && vlog_kind(decl) == V_VAR_DECL) {
+      static unsigned count_tmp = 0;
+
+      vlog_node_t tmp = vlog_new(V_LOCAL_DECL);
+      vlog_set_ident(tmp, ident_sprintf("$cdv%u", count_tmp++));
+      vlog_set_type(tmp, vlog_type(decl));
+      vlog_set_loc(tmp, loc);
+      const int nranges = vlog_ranges(decl);
+      for (int i = 0; i < nranges; i++)
+         vlog_add_range(tmp, vlog_range(decl, i));
+      vlog_add_decl(blk, tmp);
+
+      vlog_node_t set = vlog_new(V_BASSIGN);
+      vlog_set_target(set, clocking_ref(tmp, loc));
+      vlog_set_value(set, rhs);
+      vlog_set_loc(set, loc);
+      vlog_add_stmt(blk, set);
+
+      value = clocking_ref(tmp, loc);
+   }
+
+   vlog_node_t wait = vlog_new(V_TIMING);
+   vlog_set_value(wait, ctrl);
+   vlog_set_loc(wait, loc);
+
+   vlog_node_t rpt = vlog_new(V_REPEAT);
+   vlog_set_value(rpt, count);
+   vlog_add_stmt(rpt, wait);
+   vlog_set_loc(rpt, loc);
+
+   vlog_node_t body = vlog_new(V_SEQ_BLOCK);
+   vlog_set_loc(body, loc);
+   vlog_add_stmt(body, rpt);
+   vlog_add_stmt(body, clocking_assign(lhs, value, NULL, true, loc));
+
+   vlog_node_t fork = vlog_new(V_FORK);
+   vlog_set_subkind(fork, V_FORK_JOIN_NONE);
+   vlog_set_loc(fork, loc);
+   vlog_add_stmt(fork, body);
+   vlog_add_stmt(blk, fork);
+
+   return blk;
+}
+
 static vlog_node_t p_nonblocking_assignment(vlog_node_t lhs)
 {
    // variable_lvalue <= [ delay_or_event_control ] expression
@@ -6753,6 +8244,11 @@ static vlog_node_t p_nonblocking_assignment(vlog_node_t lhs)
    check_user_net_procedural(lhs);
 
    consume(tLE);
+
+   if (peek() == tCYCLEDLY) {
+      vlog_node_t drive = p_clocking_drive(lhs);
+      return drive;
+   }
 
    vlog_node_t v = vlog_new(V_NBASSIGN);
    vlog_set_target(v, lhs);
@@ -6922,6 +8418,15 @@ static vlog_node_t p_par_block(ident_t id)
    return v;
 }
 
+static bool is_call_result(vlog_node_t head)
+{
+   while (vlog_kind(head) == V_MEMBER_REF || vlog_kind(head) == V_BIT_SELECT
+          || vlog_kind(head) == V_PART_SELECT)
+      head = vlog_value(head);
+
+   return vlog_kind(head) == V_USER_FCALL || vlog_kind(head) == V_METHOD_CALL;
+}
+
 static void call_select_warning(vlog_node_t call, const char *what)
 {
    // The primary production (A.8.4) has no select on a function call
@@ -7026,6 +8531,34 @@ static vlog_node_t real_view_call(const char *name, vlog_node_t arg)
    return call;
 }
 
+static bool call_is_chained(void)
+{
+   // A call with arguments directly followed by a method call
+
+   if (peek() != tID || peek_nth(2) != tLPAREN)
+      return false;
+
+   int depth = 0;
+   for (int n = 2; n < TOKENQ_SIZE - 8; n++) {
+      switch (peek_nth(n)) {
+      case tLPAREN:
+         depth++;
+         break;
+      case tRPAREN:
+         if (--depth == 0)
+            return peek_nth(n + 1) == tDOT && peek_nth(n + 2) == tID;
+         break;
+      case tEOF:
+      case tSEMI:
+         return false;
+      default:
+         break;
+      }
+   }
+
+   return false;
+}
+
 static vlog_node_t p_subroutine_call_statement(void)
 {
    // subroutine_call ; | void ' ( function_subroutine_call ) ;
@@ -7066,7 +8599,12 @@ static vlog_node_t p_subroutine_call_statement(void)
       break;
    case tID:
    default:
-      v = p_subroutine_call(V_USER_TCALL);
+      if (call_is_chained()) {
+         // A method of the value returned by a function
+         v = p_call_result_chain(p_subroutine_call(V_USER_FCALL));
+      }
+      else
+         v = p_subroutine_call(V_USER_TCALL);
       break;
    }
 
@@ -7180,6 +8718,10 @@ static void p_for_variable_declaration(vlog_node_t parent)
       vlog_set_type(v, dt);
 
       consume(tEQ);
+
+      // The variable is visible in its own initial value
+      vlog_set_loc(v, CURRENT_LOC);
+      vlog_symtab_put(symtab, v);
 
       vlog_set_value(v, p_expression());
 
@@ -8259,6 +9801,73 @@ static vlog_node_t pca_set(vlog_node_t var, int value, const loc_t *loc)
    return a;
 }
 
+static vlog_node_t p_sva_trigger(vlog_node_t decl)
+{
+   // The sequence named by the next token as an event or in a method call:
+   // a variable which is true in the time step where the sequence matched
+
+   static hash_t *vars = NULL;
+   static unsigned count = 0;
+
+   const loc_t loc = state.last_loc;
+
+   if (vars == NULL)
+      vars = hash_new(16);
+
+   vlog_node_t var = hash_get(vars, decl);
+   if (var == NULL) {
+      if (current_module == NULL || vlog_ports(decl) > 0
+          || !vlog_has_value(decl)) {
+         error_at(&loc, "sorry, a sequence used as an event or with the "
+                  "triggered method must be declared in a module and have no "
+                  "formal arguments");
+         return sva_number(0, &loc);
+      }
+
+      var = vlog_new(V_VAR_DECL);
+      vlog_set_ident(var, ident_sprintf("$trigger%u", count++));
+      vlog_set_type(var, logic_type());
+      vlog_set_loc(var, &loc);
+
+      vlog_node_t zero = vlog_new(V_NUMBER);
+      vlog_set_number(zero, number_from_int(0));
+      vlog_set_loc(zero, &loc);
+      vlog_set_value(var, zero);
+
+      vlog_add_decl(current_module, var);
+
+      vlog_node_t spec = vlog_new(V_PROP_SPEC);
+      vlog_set_value(spec, vlog_value(decl));
+      vlog_set_loc(spec, &loc);
+      sva_apply_defaults(spec);
+
+      vlog_node_t cover = vlog_new(V_COVER);
+      vlog_set_subkind(cover, V_ASSERT_COVER_SEQ);
+      vlog_set_value(cover, spec);
+      vlog_set_loc(cover, &loc);
+
+      vlog_node_t wait = vlog_new(V_SYS_TCALL);
+      vlog_set_ident(wait, ident_new("$__postponed"));
+      vlog_set_subkind(wait, V_SYSTF_NONE);
+      vlog_set_ival(wait, 0);
+      vlog_set_loc(wait, &loc);
+
+      vlog_node_t c0 = vlog_new(V_COND);
+      vlog_add_stmt(c0, pca_set(var, 1, &loc));
+      vlog_add_stmt(c0, wait);
+      vlog_add_stmt(c0, pca_set(var, 0, &loc));
+      vlog_add_cond(cover, c0);
+
+      vlog_node_t p = p_assertion_process(cover);
+      if (p != NULL)
+         vlog_add_stmt(current_module, p);
+
+      hash_put(vars, decl, var);
+   }
+
+   return pca_ref(var, &loc);
+}
+
 static vlog_node_t pca_var(void *base, int which, const loc_t *loc)
 {
    // One variable records the active assign and another the active force
@@ -8595,34 +10204,144 @@ static vlog_node_t p_jump_statement(void)
    }
 }
 
-static vlog_node_t p_simple_immediate_assert_statement(void)
+static vlog_node_t p_expect_statement(void)
 {
-   // assert ( expression ) action_block
+   // expect ( property_spec ) action_block
 
-   BEGIN("simple immediate assert statement");
+   BEGIN("expect statement");
 
-   consume(tASSERT);
+   consume(tEXPECT);
    consume(tLPAREN);
 
    vlog_node_t v = vlog_new(V_ASSERT);
-   vlog_set_value(v, p_expression());
+   vlog_set_subkind(v, V_ASSERT_EXPECT);
+
+   vlog_node_t spec = p_property_spec();
+   sva_apply_defaults(spec);
+   vlog_set_value(v, spec);
 
    consume(tRPAREN);
+
+   if (!vlog_has_target(spec))
+      error_at(&state.last_loc, "no clocking event specified for expect "
+               "statement and no default clocking in this scope");
 
    p_action_block(v);
 
    vlog_set_loc(v, CURRENT_LOC);
+
+   if (current_module != NULL)
+      APUSH(module_asserts, v);
+
    return v;
 }
 
-static vlog_node_t p_simple_immediate_assertion_statement(void)
+static vlog_node_t p_procedural_concurrent_assertion(void)
 {
-   // simple_immediate_assert_statement | simple_immediate_assume_statement
-   //   | simple_immediate_cover_statement
+   // assert property ( property_spec ) action_block
+   //
+   // An assertion at the top level of an always block with an event
+   // control is checked at that clock.  Anywhere else it is not checked.
 
-   BEGIN("simple immediate assertion statement");
+   BEGIN("procedural concurrent assertion");
 
-   return p_simple_immediate_assert_statement();
+   vlog_node_t v = p_concurrent_assertion_statement(NULL);
+   if (v == NULL)
+      return NULL;
+
+   vlog_node_t stub = vlog_new(vlog_kind(v));
+   vlog_set_subkind(stub, V_ASSERT_PROCEDURAL);
+   vlog_set_value(stub, vlog_value(v));
+   vlog_set_loc(stub, vlog_loc(v));
+
+   if (always_depth > 0) {
+      APUSH(proc_asserts, v);
+      APUSH(proc_asserts, stub);
+   }
+   else {
+      static bool warned = false;
+      if (!warned) {
+         warn_at(vlog_loc(v), "concurrent assertions in this procedure "
+                 "are not checked");
+         warned = true;
+      }
+   }
+
+   return stub;
+}
+
+static void check_module_scope_cb(vlog_node_t v, void *ctx)
+{
+   bool *ok = ctx;
+
+   if (!vlog_has_ref(v))
+      return;
+
+   vlog_node_t d = vlog_ref(v);
+   if (vlog_kind(d) != V_VAR_DECL)
+      return;
+
+   const int ndecls = vlog_decls(current_module);
+   for (int i = 0; i < ndecls; i++) {
+      if (vlog_decl(current_module, i) == d)
+         return;
+   }
+
+   *ok = false;
+}
+
+static vlog_node_t p_deferred_immediate_assertion_statement(void)
+{
+   // assert #0 ( expression ) action_block | assert final ( expression )
+   //   action_block | assume ... | cover ...
+
+   BEGIN("immediate assertion statement");
+
+   deferred_inner = NULL;
+
+   vlog_kind_t kind;
+   switch (one_of(tASSERT, tASSUME, tCOVER)) {
+   case tASSUME: kind = V_ASSUME; break;
+   case tCOVER:  kind = V_COVER; break;
+   default:      kind = V_ASSERT; break;
+   }
+
+   vlog_node_t v = vlog_new(kind);
+   vlog_set_subkind(v, V_ASSERT_SIMPLE);
+
+   if (optional(tHASH)) {
+      vlog_node_t delay = p_primary();
+      if (vlog_kind(delay) != V_NUMBER)
+         error_at(vlog_loc(delay), "deferred assertion delay must be 0");
+      vlog_set_subkind(v, V_ASSERT_DEFERRED);
+   }
+   else if (optional(tFINAL))
+      vlog_set_subkind(v, V_ASSERT_FINAL);
+
+   consume(tLPAREN);
+
+   vlog_set_value(v, p_expression());
+
+   consume(tRPAREN);
+
+   if (kind == V_COVER) {
+      vlog_node_t stmt = p_statement_or_null();
+      if (stmt != NULL) {
+         vlog_node_t c0 = vlog_new(V_COND);
+         vlog_add_stmt(c0, stmt);
+         vlog_add_cond(v, c0);
+      }
+   }
+   else
+      p_action_block(v);
+
+   vlog_set_loc(v, CURRENT_LOC);
+
+   if (vlog_subkind(v) != V_ASSERT_SIMPLE) {
+      return rewrite_deferred_assertion(v);
+   }
+
+   return v;
 }
 
 static vlog_node_t p_immediate_assertion_statement(void)
@@ -8632,7 +10351,7 @@ static vlog_node_t p_immediate_assertion_statement(void)
 
    BEGIN("immediate assertion statement");
 
-   return p_simple_immediate_assertion_statement();
+   return p_deferred_immediate_assertion_statement();
 }
 
 static vlog_node_t p_procedural_assertion_statement(void)
@@ -8644,6 +10363,33 @@ static vlog_node_t p_procedural_assertion_statement(void)
 
    return p_immediate_assertion_statement();
 }
+
+// ---------------------------------------------------------------------------
+// Random sequences
+//
+// The productions are parsed into a small tree and the sequence is expanded
+// into ordinary statements where every use of a production is a copy of its
+// rules, so a recursive production is not supported.
+
+typedef struct _rs_item rs_item_t;
+
+typedef struct {
+   vlog_node_t *vals;    // Empty for the default
+   int          nvals;
+   rs_item_t   *item;
+} rs_case_t;
+
+struct _rs_item {
+   enum { RS_CALL, RS_CODE, RS_IF, RS_REPEAT, RS_CASE } kind;
+   loc_t        loc;
+   ident_t      name;
+   vlog_node_t *args;
+   int          nargs;
+   vlog_node_t  code;
+   rs_item_t   *a, *b;
+   rs_case_t   *cases;
+   int          ncases;
+};
 
 typedef struct {
    rs_item_t   **items;
@@ -9336,6 +11082,49 @@ static vlog_node_t p_randsequence_statement(void)
    return top;
 }
 
+static vlog_node_t p_cycle_delay_statement(void)
+{
+   // ## integral_number | ## identifier | ## ( expression )
+
+   BEGIN("cycle delay statement");
+
+   consume(tCYCLEDLY);
+
+   vlog_node_t count;
+   if (optional(tLPAREN)) {
+      count = p_expression();
+      consume(tRPAREN);
+   }
+   else
+      count = p_delay_value();
+
+   vlog_node_t ctrl = default_cycle != NULL ? default_cycle : default_clock;
+   if (ctrl == NULL) {
+      error_at(&state.last_loc, "cycle delay requires a default clocking in "
+               "this scope");
+      ctrl = vlog_new(V_EVENT_CONTROL);
+   }
+
+   vlog_node_t wait = vlog_new(V_TIMING);
+   vlog_set_value(wait, vlog_copy(ctrl, vlog_always_true_cb, NULL));
+   vlog_set_loc(wait, CURRENT_LOC);
+
+   vlog_node_t rpt = vlog_new(V_REPEAT);
+   vlog_set_value(rpt, count);
+   vlog_add_stmt(rpt, wait);
+   vlog_set_loc(rpt, CURRENT_LOC);
+
+   vlog_node_t blk = vlog_new(V_SEQ_BLOCK);
+   vlog_add_stmt(blk, rpt);
+
+   vlog_node_t s = p_statement_or_null();
+   if (s != NULL)
+      vlog_add_stmt(blk, s);
+
+   vlog_set_loc(blk, CURRENT_LOC);
+   return blk;
+}
+
 static vlog_node_t p_statement_item(ident_t id)
 {
    // blocking_assignment ; | nonblocking_assignment ;
@@ -9451,6 +11240,8 @@ static vlog_node_t p_statement_item(ident_t id)
    case tAT:
    case tHASH:
       return p_procedural_timing_control_statement();
+   case tCYCLEDLY:
+      return p_cycle_delay_statement();
    case tBEGIN:
       return p_seq_block(id);
    case tFORK:
@@ -9524,6 +11315,8 @@ static vlog_node_t p_statement_item(ident_t id)
    case tBREAK:
    case tCONTINUE:
       return p_jump_statement();
+   case tEXPECT:
+      return p_expect_statement();
    case tASSERT:
       return p_procedural_assertion_statement();
    default:
@@ -9585,7 +11378,12 @@ static vlog_node_t p_always_construct(void)
    }
 
    vlog_set_ident(v, default_label("always"));
+
+   const int first = proc_asserts.count;
+   always_depth++;
    vlog_add_stmt(v, p_statement());
+   always_depth--;
+   hoist_procedural_assertions(v, first);
 
    vlog_set_loc(v, CURRENT_LOC);
    return v;
@@ -9645,7 +11443,7 @@ static vlog_node_t p_net_assignment(vlog_node_t delay, vlog_node_t strength)
 
    consume(tEQ);
 
-   vlog_set_value(v, p_expression());
+   vlog_set_value(v, p_expression_of_type(pattern_type_of(vlog_target(v))));
 
    vlog_set_loc(v, CURRENT_LOC);
    return v;
@@ -14613,6 +16411,70 @@ static void p_block_item_declaration(vlog_node_t parent)
    }
 }
 
+static void p_dpi_export(vlog_node_t parent)
+{
+   // export "DPI-C" [ c_identifier = ] function name ;
+   //   | export "DPI-C" [ c_identifier = ] task name ;
+
+   BEGIN("DPI export declaration");
+
+   consume(tEXPORT);
+   consume(tSTRING);
+
+   ident_t cname = NULL;
+   if (peek() == tID && peek_nth(2) == tEQ) {
+      cname = p_identifier();
+      consume(tEQ);
+   }
+
+   if (!optional(tFUNCTION))
+      consume(tTASK);
+
+   vlog_node_t v = vlog_new(V_DPI_EXPORT);
+   vlog_set_ident(v, p_identifier());
+   vlog_set_ident3(v, cname ?: vlog_ident(v));
+
+   consume(tSEMI);
+
+   vlog_set_loc(v, CURRENT_LOC);
+   vlog_add_decl(parent, v);
+}
+
+static void p_package_export_declaration(vlog_node_t parent)
+{
+   // export package_import_item { , package_import_item } ;
+   //   | export *::* ;
+
+   BEGIN("package export declaration");
+
+   consume(tEXPORT);
+
+   do {
+      vlog_node_t v = vlog_new(V_IMPORT_DECL);
+      vlog_set_flags(v, VLOG_F_EXPORT);
+
+      if (optional(tTIMES)) {
+         consume(tSCOPE);
+         consume(tTIMES);
+      }
+      else {
+         vlog_set_ref(v, p_package_identifier());
+
+         consume(tSCOPE);
+
+         if (peek() == tID)
+            vlog_set_ident(v, p_identifier());
+         else
+            one_of(tTIMES, tID);
+      }
+
+      vlog_set_loc(v, CURRENT_LOC);
+      vlog_add_decl(parent, v);
+   } while (optional(tCOMMA));
+
+   consume(tSEMI);
+}
+
 static void p_package_or_generate_item_declaration(vlog_node_t parent)
 {
    // net_declaration | data_declaration | task_declaration
@@ -14701,6 +16563,19 @@ static void p_package_or_generate_item_declaration(vlog_node_t parent)
    case tPARAMETER:
       p_parameter_declaration(parent);
       consume(tSEMI);
+      break;
+   case tSEMI:
+      consume(tSEMI);
+      break;
+   case tSEQUENCE:
+   case tPROPERTY:
+      p_assertion_item_declaration(parent);
+      break;
+   case tCLOCKING:
+      p_clocking_declaration(parent, false);
+      break;
+   case tDEFAULT:
+      p_default_declaration(parent);
       break;
    case tCLASS:
       vlog_add_decl(parent, p_class_declaration());
@@ -15185,7 +17060,49 @@ static vlog_node_t p_property_spec(void)
 
    BEGIN("property spec");
 
-   return p_property_expr();
+   vlog_node_t v = vlog_new(V_PROP_SPEC);
+
+   if (peek() == tAT)
+      vlog_set_target(v, p_clocking_event());
+
+   if (optional(tDISABLE)) {
+      consume(tIFFKW);
+      consume(tLPAREN);
+      vlog_set_left(v, p_expression_or_dist());
+      consume(tRPAREN);
+   }
+
+   vlog_set_value(v, p_property_expr());
+
+   vlog_set_loc(v, CURRENT_LOC);
+   return v;
+}
+
+static void sva_apply_defaults(vlog_node_t spec)
+{
+   // Move a clocking event or disable condition from the root of the
+   // property into the specification
+   for (;;) {
+      vlog_node_t body = vlog_value(spec);
+      if (vlog_kind(body) != V_SVA_OP)
+         break;
+      else if (vlog_subkind(body) == V_SVA_CLOCKED && !vlog_has_target(spec)) {
+         vlog_set_target(spec, vlog_value(body));
+         vlog_set_value(spec, vlog_param(body, 0));
+      }
+      else if (vlog_subkind(body) == V_SVA_DISABLE && !vlog_has_left(spec)) {
+         vlog_set_left(spec, vlog_value(body));
+         vlog_set_value(spec, vlog_param(body, 0));
+      }
+      else
+         break;
+   }
+
+   if (!vlog_has_target(spec) && default_clock != NULL)
+      vlog_set_target(spec, default_clock);
+
+   if (!vlog_has_left(spec) && default_disable != NULL)
+      vlog_set_left(spec, default_disable);
 }
 
 static void p_action_block(vlog_node_t parent)
@@ -15220,106 +17137,278 @@ static void p_action_block(vlog_node_t parent)
    }
 }
 
-static vlog_node_t p_assert_property_statement(ident_t label)
-{
-   // assert property ( property_spec ) action_block
-
-   BEGIN("assert property statement");
-
-   consume(tASSERT);
-   consume(tPROPERTY);
-   consume(tLPAREN);
-
-   vlog_node_t v = vlog_new(V_ASSERT);
-   vlog_set_ident(v, label);
-   vlog_set_value(v, p_property_spec());
-
-   consume(tRPAREN);
-
-   p_action_block(v);
-
-   vlog_set_loc(v, CURRENT_LOC);
-   return v;
-}
-
-static vlog_node_t p_assume_property_statement(ident_t label)
-{
-   // assume property ( property_spec ) action_block
-
-   BEGIN("assume property statement");
-
-   consume(tASSUME);
-   consume(tPROPERTY);
-   consume(tLPAREN);
-
-   vlog_node_t v = vlog_new(V_ASSUME);
-   vlog_set_ident(v, label);
-   vlog_set_value(v, p_property_spec());
-
-   consume(tRPAREN);
-
-   p_action_block(v);
-
-   vlog_set_loc(v, CURRENT_LOC);
-   return v;
-}
-
-static vlog_node_t p_cover_property_statement(ident_t label)
-{
-   // cover property ( property_spec ) statement_or_null
-
-   BEGIN("cover property statement");
-
-   consume(tCOVER);
-   consume(tPROPERTY);
-   consume(tLPAREN);
-
-   vlog_node_t v = vlog_new(V_ASSUME);
-   vlog_set_ident(v, label);
-   vlog_set_value(v, p_property_spec());
-
-   consume(tRPAREN);
-
-   p_action_block(v);
-
-   vlog_set_loc(v, CURRENT_LOC);
-   return v;
-}
-
 static vlog_node_t p_concurrent_assertion_statement(ident_t label)
 {
-   // assert_property_statement | assume_property_statement
-   //   | cover_property_statement | cover_sequence_statement
-   //   | restrict_property_statement
+   // assert property ( property_spec ) action_block
+   //   | assume property ( property_spec ) action_block
+   //   | cover property ( property_spec ) statement_or_null
+   //   | cover sequence ( [ clocking_event ] [ disable iff ( expression_or_dist ) ]
+   //       sequence_expr ) statement_or_null
+   //   | restrict property ( property_spec ) ;
 
    BEGIN("concurrent assertion statement");
 
-   switch (peek()) {
-   case tASSERT:
-      return p_assert_property_statement(label);
-   case tASSUME:
-      return p_assume_property_statement(label);
-   case tCOVER:
-      return p_cover_property_statement(label);
+   vlog_kind_t kind;
+   bool is_restrict = false;
+   switch (one_of(tASSERT, tASSUME, tCOVER, tRESTRICT)) {
+   case tASSERT: kind = V_ASSERT; break;
+   case tASSUME: kind = V_ASSUME; break;
+   case tCOVER:  kind = V_COVER; break;
+   default:      kind = V_ASSERT; is_restrict = true; break;
+   }
+   const bool cover_seq = kind == V_COVER && peek() == tSEQUENCE;
+
+   if (cover_seq)
+      consume(tSEQUENCE);
+   else
+      consume(tPROPERTY);
+
+   consume(tLPAREN);
+
+   vlog_node_t v = vlog_new(kind);
+   vlog_set_ident(v, label);
+   vlog_set_subkind(v, cover_seq ? V_ASSERT_COVER_SEQ : V_ASSERT_CONCURRENT);
+
+   vlog_node_t spec = p_property_spec();
+   sva_apply_defaults(spec);
+   vlog_set_value(v, spec);
+
+   consume(tRPAREN);
+
+   if (is_restrict) {
+      consume(tSEMI);
+      return NULL;
+   }
+
+   if (kind == V_COVER) {
+      vlog_node_t stmt = p_statement_or_null();
+      if (stmt != NULL) {
+         vlog_node_t c0 = vlog_new(V_COND);
+         vlog_add_stmt(c0, stmt);
+         vlog_add_cond(v, c0);
+      }
+   }
+   else
+      p_action_block(v);
+
+   vlog_set_loc(v, CURRENT_LOC);
+   return v;
+}
+
+typedef A(vlog_node_t) node_list_t;
+
+static void collect_hier_refs_cb(vlog_node_t v, void *ctx)
+{
+   node_list_t *names = ctx;
+   APUSH(*names, v);
+}
+
+static void sva_call_cb(vlog_node_t v, void *ctx)
+{
+   switch (vlog_kind(v)) {
+   case V_USER_FCALL:
+   case V_METHOD_CALL:
+   case V_SYS_FCALL:
+      *(bool *)ctx = true;
+      break;
    default:
-      should_not_reach_here();
+      break;
    }
 }
 
-static vlog_node_t p_concurrent_assertion_item(void)
+static bool expr_has_call(vlog_node_t v)
 {
-   // [ block_identifier : ] concurrent_assertion_statement
-   //    | checker_instantiation
+   bool found = false;
+   vlog_visit(v, sva_call_cb, &found);
+   return found;
+}
 
-   BEGIN("concurrent assertion item");
+static void assertion_async_disable(vlog_node_t spec, vlog_node_t timing,
+                                    unsigned count)
+{
+   // The condition of disable iff is not sampled: it aborts the attempts in
+   // progress whenever it is true, not only when the clock ticks.  A
+   // process records that it was true since the last tick.
 
-   ident_t label = NULL;
-   if (optional(tID)) {
-      label = state.last_lval.ident;
-      consume(tCOLON);
+   vlog_node_t cond = vlog_left(spec);
+   if (!monitor_arg_sensitive(cond) || expr_has_call(cond))
+      return;
+
+   const loc_t *loc = vlog_loc(cond);
+
+   vlog_node_t hit = vlog_new(V_VAR_DECL);
+   vlog_set_ident(hit, ident_sprintf("$disable%u", count));
+   vlog_set_type(hit, make_integer_atom_type(DT_INT));
+   vlog_set_loc(hit, loc);
+   vlog_add_decl(current_module, hit);
+
+   vlog_node_t ev = vlog_new(V_EVENT);
+   vlog_set_subkind(ev, V_EVENT_LEVEL);
+   vlog_set_value(ev, cond);
+   vlog_set_loc(ev, loc);
+
+   vlog_node_t ctrl = vlog_new(V_EVENT_CONTROL);
+   vlog_set_loc(ctrl, loc);
+   vlog_add_param(ctrl, ev);
+
+   vlog_node_t wait = vlog_new(V_TIMING);
+   vlog_set_value(wait, ctrl);
+   vlog_set_loc(wait, loc);
+   vlog_add_stmt(wait, rs_if(cond, pca_set(hit, 1, loc), NULL, loc));
+
+   vlog_node_t watch = vlog_new(V_ALWAYS);
+   vlog_set_subkind(watch, V_ALWAYS_PLAIN);
+   vlog_set_ident(watch, ident_sprintf("$disable_watch%u", count));
+   vlog_set_loc(watch, loc);
+   vlog_add_stmt(watch, wait);
+   vlog_add_stmt(current_module, watch);
+
+   vlog_node_t any = vlog_new(V_BINARY);
+   vlog_set_subkind(any, V_BINARY_LOG_OR);
+   vlog_set_left(any, cond);
+   vlog_set_right(any, pca_ref(hit, loc));
+   vlog_set_loc(any, loc);
+   vlog_set_left(spec, any);
+
+   vlog_add_stmt(timing, pca_set(hit, 0, loc));
+}
+
+static vlog_node_t p_assertion_process(vlog_node_t v)
+{
+   // A concurrent assertion in a module runs as its own process
+
+   static unsigned count = 0;
+
+   vlog_node_t spec = vlog_value(v);
+   if (!vlog_has_target(spec)) {
+      error_at(vlog_loc(v), "no clocking event specified for concurrent "
+               "assertion and no default clocking in this scope");
+      return NULL;
    }
 
-   return p_concurrent_assertion_statement(label);
+   APUSH(module_asserts, v);
+
+   vlog_node_t event = vlog_target(spec);
+
+   if (current_module != NULL) {
+      // The condition of disable iff has the values after the non-blocking
+      // assignments of the time step in which the clock ticked.  Assertions
+      // on the same clock share the process that detects the tick.
+      vlog_node_t tick = NULL;
+      shared_tick_t key = {};
+      if (vlog_params(event) == 1) {
+         vlog_node_t e = vlog_param(event, 0);
+         if (vlog_kind(e) == V_EVENT && !vlog_has_left(e)
+             && vlog_kind(vlog_value(e)) == V_REF
+             && vlog_has_ident(vlog_value(e))) {
+            key.scope = current_module;
+            key.clock = vlog_ident(vlog_value(e));
+            key.kind = vlog_subkind(e);
+
+            for (unsigned i = 0; i < shared_ticks.count; i++) {
+               const shared_tick_t *it = &(shared_ticks.items[i]);
+               if (it->scope == key.scope && it->clock == key.clock
+                   && it->kind == key.kind)
+                  tick = it->tick;
+            }
+         }
+      }
+
+      if (tick == NULL) {
+         tick = vlog_new(V_VAR_DECL);
+         vlog_set_ident(tick, ident_sprintf("$tick%u", count));
+         vlog_set_type(tick, logic_type());
+         vlog_set_loc(tick, vlog_loc(v));
+
+         vlog_node_t zero = vlog_new(V_NUMBER);
+         vlog_set_number(zero, number_from_int(0));
+         vlog_set_loc(zero, vlog_loc(v));
+         vlog_set_value(tick, zero);
+         vlog_add_decl(current_module, tick);
+
+         vlog_node_t flip = vlog_new(V_UNARY);
+         vlog_set_subkind(flip, V_UNARY_BITNEG);
+         vlog_set_value(flip, defer_ref(tick, vlog_loc(v)));
+         vlog_set_loc(flip, vlog_loc(v));
+
+         vlog_node_t nba = vlog_new(V_NBASSIGN);
+         vlog_set_target(nba, defer_ref(tick, vlog_loc(v)));
+         vlog_set_value(nba, flip);
+         vlog_set_loc(nba, vlog_loc(v));
+
+         vlog_node_t sync_timing = vlog_new(V_TIMING);
+         vlog_set_value(sync_timing, event);
+         vlog_set_loc(sync_timing, vlog_loc(v));
+         vlog_add_stmt(sync_timing, nba);
+
+         vlog_node_t sync = vlog_new(V_ALWAYS);
+         vlog_set_subkind(sync, V_ALWAYS_PLAIN);
+         vlog_set_ident(sync, ident_sprintf("$tick_sync%u", count));
+         vlog_set_loc(sync, vlog_loc(v));
+         vlog_add_stmt(sync, sync_timing);
+         vlog_add_stmt(current_module, sync);
+
+         if (key.scope != NULL) {
+            key.tick = tick;
+            APUSH(shared_ticks, key);
+         }
+      }
+
+      vlog_node_t ev = vlog_new(V_EVENT);
+      vlog_set_subkind(ev, V_EVENT_LEVEL);
+      vlog_set_value(ev, defer_ref(tick, vlog_loc(v)));
+      vlog_set_loc(ev, vlog_loc(v));
+
+      event = vlog_new(V_EVENT_CONTROL);
+      vlog_set_loc(event, vlog_loc(v));
+      vlog_add_param(event, ev);
+   }
+
+   vlog_node_t timing = vlog_new(V_TIMING);
+   vlog_set_value(timing, event);
+   vlog_set_loc(timing, vlog_loc(v));
+   vlog_add_stmt(timing, v);
+
+   if (current_module != NULL && vlog_has_left(spec))
+      assertion_async_disable(spec, timing, count);
+
+   vlog_node_t p = vlog_new(V_ALWAYS);
+   vlog_set_subkind(p, V_ALWAYS_PLAIN);
+   vlog_set_ident(p, vlog_has_ident(v) && vlog_ident(v) != NULL
+                  ? vlog_ident(v) : ident_sprintf("$assert%u", count));
+   count++;
+   vlog_set_loc(p, vlog_loc(v));
+
+   if (current_module != NULL) {
+      // A hierarchical name cannot be copied by a variable of the module
+      // so its value is captured when the clock ticks, before the
+      // non-blocking assignments of the time step update it
+      node_list_t names = AINIT;
+      vlog_visit_only(vlog_value(spec), collect_hier_refs_cb, &names,
+                      V_HIER_REF);
+
+      if (names.count > 0) {
+         vlog_node_t sample = vlog_new(V_SYS_TCALL);
+         vlog_set_ident(sample, ident_new("$__sample"));
+         vlog_set_subkind(sample, V_SYSTF_NONE);
+         vlog_set_ival(sample, 0);
+         vlog_set_loc(sample, vlog_loc(v));
+
+         for (unsigned i = 0; i < names.count; i++)
+            vlog_add_param(sample, names.items[i]);
+
+         vlog_node_t capture = vlog_new(V_TIMING);
+         vlog_set_value(capture, vlog_target(spec));
+         vlog_set_loc(capture, vlog_loc(v));
+         vlog_add_stmt(capture, sample);
+         vlog_add_stmt(p, capture);
+      }
+
+      ACLEAR(names);
+   }
+
+   vlog_add_stmt(p, timing);
+   return p;
 }
 
 static vlog_node_t p_assertion_item(void)
@@ -15329,6 +17418,141 @@ static vlog_node_t p_assertion_item(void)
    BEGIN("assertion item");
 
    return p_concurrent_assertion_item();
+static void p_sva_port(vlog_node_t decl)
+{
+   // [ local [ direction ] ] [ sequence | property | untyped | data_type ]
+   //    formal_port_identifier [ = actual_arg ]
+
+   BEGIN("sequence or property formal");
+
+   vlog_node_t v = vlog_new(V_TF_PORT_DECL);
+   vlog_set_subkind(v, V_PORT_INPUT);
+
+   skip_over_attributes();
+
+   if (optional(tVLOCAL)) {
+      vlog_set_flags(v, VLOG_F_SVA_LOCAL);
+      if (scan(tINPUT, tOUTPUT, tINOUT))
+         vlog_set_subkind(v, p_tf_port_direction());
+   }
+
+   vlog_node_t dt;
+   const int nports = vlog_ports(decl);
+   if (nports > 0 && peek() == tID
+       && (peek_nth(2) == tCOMMA || peek_nth(2) == tRPAREN
+           || peek_nth(2) == tEQ)) {
+      // The type, direction and locality are those of the previous formal
+      vlog_node_t prev = vlog_port(decl, nports - 1);
+      vlog_set_subkind(v, vlog_subkind(prev));
+      vlog_set_flags(v, vlog_flags(prev));
+      dt = vlog_type(prev);
+   }
+   else if (scan(tSEQUENCE, tPROPERTY, tUNTYPED)) {
+      consume(peek());
+      dt = p_implicit_data_type();
+   }
+   else if (peek() != tID || peek_nth(2) == tID || peek_nth(2) == tHASH
+            || is_scoped_type_start())
+      dt = p_data_type_or_implicit();
+   else
+      dt = p_implicit_data_type();
+
+   vlog_set_ident(v, p_identifier());
+   vlog_set_type(v, p_variable_dimensions(dt, v));
+
+   if (optional(tEQ))
+      vlog_set_value(v, p_sva_expr(1));
+
+   vlog_set_loc(v, CURRENT_LOC);
+   vlog_add_port(decl, v);
+   vlog_symtab_put(symtab, v);
+}
+
+static void p_assertion_item_declaration(vlog_node_t parent)
+{
+   // property_declaration | sequence_declaration | let_declaration
+
+   BEGIN("assertion item declaration");
+
+   const bool is_prop = peek() == tPROPERTY;
+   consume(is_prop ? tPROPERTY : tSEQUENCE);
+
+   vlog_node_t v = vlog_new(V_SVA_DECL);
+   vlog_set_subkind(v, is_prop ? V_SVA_PROPERTY : V_SVA_SEQUENCE);
+   vlog_set_ident(v, p_identifier());
+   vlog_set_loc(v, &state.last_loc);
+
+   vlog_symtab_put(symtab, v);
+   vlog_symtab_push(symtab, v);
+
+   if (optional(tLPAREN)) {
+      if (peek() != tRPAREN) {
+         do {
+            p_sva_port(v);
+         } while (optional(tCOMMA));
+      }
+      consume(tRPAREN);
+   }
+
+   consume(tSEMI);
+
+   if (!is_prop || peek() != tAT) {
+      while (scan_block_item_declaration()) {
+         const int first = vlog_decls(v);
+         if (scan(tLOCALPARAM, tPARAMETER, tIMPORT, tTYPEDEF))
+            p_block_item_declaration(v);
+         else {
+            vlog_node_t dt = p_data_type_or_implicit();
+            p_list_of_variable_decl_assignments(v, dt, V_VAR_DECL);
+            consume(tSEMI);
+         }
+
+         const int ndecls = vlog_decls(v);
+         for (int i = first; i < ndecls; i++) {
+            vlog_node_t d = vlog_decl(v, i);
+            if (vlog_kind(d) == V_VAR_DECL)
+               vlog_set_flags(d, vlog_flags(d) | VLOG_F_SVA_LOCAL);
+         }
+      }
+   }
+
+   vlog_node_t spec = p_property_spec();
+   vlog_node_t body = vlog_value(spec);
+
+   if (vlog_has_left(spec)) {
+      vlog_node_t d = sva_new(V_SVA_DISABLE);
+      vlog_set_value(d, vlog_left(spec));
+      vlog_add_param(d, body);
+      vlog_set_loc(d, vlog_loc(spec));
+      body = d;
+   }
+
+   if (vlog_has_target(spec)) {
+      vlog_node_t c = sva_unary(V_SVA_CLOCKED, body, vlog_loc(spec));
+      vlog_set_value(c, vlog_target(spec));
+      body = c;
+   }
+
+   vlog_set_value(v, body);
+
+   optional(tSEMI);
+
+   consume(is_prop ? tENDPROPERTY : tENDSEQUENCE);
+
+   if (optional(tCOLON)) {
+      ident_t name = p_identifier();
+      if (name != vlog_ident(v))
+         error_at(&state.last_loc, "'%s' does not match %s name '%s'",
+                  istr(name), is_prop ? "property" : "sequence",
+                  istr(vlog_ident(v)));
+   }
+
+   vlog_symtab_pop(symtab);
+
+   vlog_set_loc(v, CURRENT_LOC);
+   vlog_add_decl(parent, v);
+}
+
 typedef struct {
    ident_t      sig;
    bool         input, output;
