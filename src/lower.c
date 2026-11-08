@@ -624,7 +624,23 @@ vcode_type_t lower_type(type_t type)
       }
 
    case T_PROTECTED:
-      return vtype_context(type_ident(type));
+      if (is_uninstantiated_protected_type(type)) {
+         // An access to an uninstantiated protected type points to the
+         // object created by the allocator and the name of its type
+         ident_t name = ident_prefix(type_ident(type), ident_new("ref"), '$');
+         vcode_type_t record = vtype_find_named_record(name);
+         if (record == VCODE_INVALID_TYPE) {
+            vcode_type_t fields[] = {
+               vtype_context(type_ident(type)),
+               vtype_uarray(1, vtype_char())
+            };
+            record = vtype_named_record(name, fields, ARRAY_LEN(fields));
+         }
+
+         return record;
+      }
+      else
+         return vtype_context(type_ident(type));
 
    case T_FILE:
       return vtype_file(lower_type(type_designated(type)));
@@ -2409,6 +2425,44 @@ static vcode_reg_t lower_context_for_call(lower_unit_t *lu, tree_t decl)
       return emit_context_upref(hops);
 }
 
+static bool lower_is_dispatch(tree_t call)
+{
+   // A method call through an access value whose designated type is an
+   // uninstantiated protected type is dispatched to the instance that
+   // was created by the allocator
+
+   switch (tree_kind(call)) {
+   case T_PROT_FCALL:
+   case T_PROT_PCALL:
+      return tree_has_name(call)
+         && is_uninstantiated_protected_type(tree_type(tree_name(call)));
+   default:
+      return false;
+   }
+}
+
+static vcode_reg_t lower_dispatch_prefix(lower_unit_t *lu, tree_t call,
+                                         tree_t decl, vcode_reg_t *args)
+{
+   // Fill ARGS with the name of the protected type instance and the
+   // suffix of the mangled method name relative to the type name, and
+   // return the instance context
+
+   tree_t prefix = tree_name(call);
+   vcode_reg_t ref_reg = lower_expr(lu, prefix, EXPR_RVALUE);
+   assert(vcode_reg_kind(ref_reg) == VCODE_TYPE_POINTER);
+
+   type_t type = tree_type(prefix);
+   const char *prefix_str = istr(type_ident(type));
+   const char *method = istr(tree_ident2(decl));
+   assert(!strncmp(method, prefix_str, strlen(prefix_str)));
+
+   args[0] = emit_load_indirect(emit_record_ref(ref_reg, 1));
+   args[1] = lower_wrap_string(method + strlen(prefix_str));
+
+   return emit_load_indirect(emit_record_ref(ref_reg, 0));
+}
+
 static vcode_reg_t lower_fcall(lower_unit_t *lu, tree_t fcall,
                                vcode_reg_t bounds_reg)
 {
@@ -2424,7 +2478,14 @@ static vcode_reg_t lower_fcall(lower_unit_t *lu, tree_t fcall,
    ident_t name = tree_ident2(decl);
 
    vcode_reg_t context_reg;
-   if (tree_kind(fcall) == T_PROT_FCALL && tree_has_name(fcall))
+   if (lower_is_dispatch(fcall)) {
+      vcode_reg_t dispatch[2];
+      context_reg = lower_dispatch_prefix(lu, fcall, decl, dispatch);
+      APUSH(args, dispatch[0]);
+      APUSH(args, dispatch[1]);
+      name = ident_new("__nvc_protected_dispatch_func");
+   }
+   else if (tree_kind(fcall) == T_PROT_FCALL && tree_has_name(fcall))
       context_reg = lower_rvalue(lu, tree_name(fcall));
    else
       context_reg = lower_context_for_call(lu, decl);
@@ -4785,6 +4846,19 @@ static vcode_reg_t lower_new(lower_unit_t *lu, tree_t expr)
       lower_new_record(lu, type, all_reg, init_reg);
       return result_reg;
    }
+   else if (type_is_protected(type) && tree_has_ref(expr)) {
+      // Allocator with a generic map aspect for an uninstantiated type
+      type_t inst_type = tree_type(tree_ref(expr));
+      vcode_type_t vcontext = vtype_context(type_ident(type));
+      vcode_reg_t obj_reg = emit_cast(vcontext, VCODE_INVALID_STAMP,
+                                      lower_protected_init(lu, inst_type, NULL));
+      vcode_reg_t name_reg = lower_wrap_string(istr(type_ident(inst_type)));
+      vcode_reg_t result_reg = emit_new(lower_type(type), VCODE_INVALID_REG);
+      vcode_reg_t all_reg = emit_all(result_reg);
+      emit_store_indirect(obj_reg, emit_record_ref(all_reg, 0));
+      emit_store_indirect(name_reg, emit_record_ref(all_reg, 1));
+      return result_reg;
+   }
    else if (type_is_protected(type)) {
       vcode_reg_t obj_reg = lower_protected_init(lu, type, NULL);
       vcode_reg_t result_reg = emit_new(lower_type(type), VCODE_INVALID_REG);
@@ -6892,7 +6966,15 @@ static void lower_pcall(lower_unit_t *lu, tree_t pcall, gen_stack_t *gs)
    ident_t func = tree_ident2(decl);
 
    vcode_reg_t context_reg;
-   if (tree_kind(pcall) == T_PROT_PCALL && tree_has_name(pcall))
+   if (lower_is_dispatch(pcall)) {
+      vcode_reg_t dispatch[2];
+      context_reg = lower_dispatch_prefix(lu, pcall, decl, dispatch);
+      APUSH(args, dispatch[0]);
+      APUSH(args, dispatch[1]);
+      func = ident_new("__nvc_protected_dispatch_proc");
+      use_fcall = true;
+   }
+   else if (tree_kind(pcall) == T_PROT_PCALL && tree_has_name(pcall))
       context_reg = lower_rvalue(lu, tree_name(pcall));
    else
       context_reg = lower_context_for_call(lu, decl);

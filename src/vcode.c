@@ -4274,6 +4274,7 @@ vcode_reg_t emit_cast(vcode_type_t type, vcode_stamp_t stamp, vcode_reg_t reg)
       { VCODE_TYPE_REAL,   VCODE_TYPE_INT     },
       { VCODE_TYPE_REAL,   VCODE_TYPE_REAL    },
       { VCODE_TYPE_ACCESS, VCODE_TYPE_ACCESS  },
+      { VCODE_TYPE_CONTEXT, VCODE_TYPE_CONTEXT },
    };
 
    if (integral) {

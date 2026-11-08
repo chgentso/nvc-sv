@@ -66,6 +66,7 @@ bool is_body(tree_t t);
 bool is_uninstantiated_package(tree_t pack);
 bool is_uninstantiated_subprogram(tree_t decl);
 bool is_uninstantiated_protected(tree_t decl);
+bool is_uninstantiated_protected_type(type_t type);
 bool is_anonymous_subtype(type_t type);
 bool is_open_coded_builtin(subprogram_kind_t kind);
 bool attribute_has_param(attr_kind_t attr);

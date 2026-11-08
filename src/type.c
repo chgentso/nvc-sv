@@ -65,7 +65,7 @@ static const imask_t has_map[T_LAST_TYPE_KIND] = {
    (I_IDENT),
 
    // T_PROTECTED
-   (I_IDENT | I_FIELDS),
+   (I_IDENT | I_FIELDS | I_SUBKIND),
 
    // T_GENERIC
    (I_IDENT | I_SUBKIND | I_DESIGNATED | I_INDEXES | I_ELEM),

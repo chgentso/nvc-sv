@@ -94,6 +94,10 @@
   instantiated with a protected type instantiation declaration or with
   a generic map aspect in a variable declaration or access type
   definition (LCS-2016-034).
+- An allocator for an access type that designates an uninstantiated
+  protected type can have a generic map aspect, and method calls
+  through the access value are dispatched to the object created in
+  VHDL-2019 (LCS-2016-014a).
 - Anonymous types in interface declarations are now supported in
   VHDL-2019: the implicit generic types are inferred from the actuals
   at each call or instantiation (LCS-2016-016).

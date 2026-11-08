@@ -1227,6 +1227,13 @@ bool is_uninstantiated_subprogram(tree_t decl)
    }
 }
 
+bool is_uninstantiated_protected_type(type_t type)
+{
+   // The type of an uninstantiated protected type declaration is marked
+   // when it is declared
+   return type_kind(type) == T_PROTECTED && type_subkind(type) != 0;
+}
+
 bool is_uninstantiated_protected(tree_t decl)
 {
    return tree_kind(decl) == T_PROT_DECL

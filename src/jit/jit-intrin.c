@@ -2349,9 +2349,62 @@ static jit_intrinsic_t intrinsic_list[] = {
    { NULL, NULL }
 };
 
+static void protected_dispatch_call(jit_func_t *func, jit_anchor_t *anchor,
+                                    jit_scalar_t *args, tlab_t *tlab,
+                                    int first)
+{
+   // Call a method through an access to an uninstantiated protected type
+   // The arguments are the name of the protected type instance and the
+   // suffix of the method name as unconstrained strings followed by the
+   // arguments of the method itself.  FIRST is the first slot after the
+   // procedure state which is not used for functions.
+
+   size_t len[2];
+   const char *str[2];
+   for (int i = 0; i < 2; i++) {
+      const int64_t n = args[first + i * 3 + 2].integer;
+      len[i] = n < 0 ? ~n : n;
+      str[i] = args[first + i * 3].pointer;
+   }
+
+   char *buf LOCAL = xmalloc(len[0] + len[1] + 1);
+   memcpy(buf, str[0], len[0]);
+   memcpy(buf + len[0], str[1], len[1]);
+   buf[len[0] + len[1]] = '\0';
+
+   jit_handle_t handle = jit_lazy_compile(func->jit, ident_new(buf));
+   if (handle == JIT_HANDLE_INVALID)
+      fatal_trace("missing definition for %s", buf);
+
+   const int nprefix = 6;
+   memmove(args + first, args + first + nprefix,
+           (JIT_MAX_ARGS - first - nprefix) * sizeof(*args));
+
+   jit_func_t *f = jit_get_func(func->jit, handle);
+   jit_entry_fn_t entry = load_acquire(&f->entry);
+   (*entry)(f, anchor, args, tlab);
+}
+
+static void protected_dispatch_func(jit_func_t *func, jit_anchor_t *anchor,
+                                    jit_scalar_t *args, tlab_t *tlab)
+{
+   protected_dispatch_call(func, anchor, args, tlab, 0);
+}
+
+static void protected_dispatch_proc(jit_func_t *func, jit_anchor_t *anchor,
+                                    jit_scalar_t *args, tlab_t *tlab)
+{
+   protected_dispatch_call(func, anchor, args, tlab, 1);
+}
+
 jit_entry_fn_t jit_bind_intrinsic(ident_t name)
 {
+   static ident_t dispatch_func_i = NULL, dispatch_proc_i = NULL;
+
    INIT_ONCE({
+         dispatch_func_i = ident_new("__nvc_protected_dispatch_func");
+         dispatch_proc_i = ident_new("__nvc_protected_dispatch_proc");
+
          const bool want_intrinsics = !!opt_get_int(OPT_JIT_INTRINSICS);
 
 #if ASAN_ENABLED
@@ -2385,6 +2438,11 @@ jit_entry_fn_t jit_bind_intrinsic(ident_t name)
                it->ident = ident_new(it->name);
          }
       });
+
+   if (name == dispatch_func_i)
+      return protected_dispatch_func;
+   else if (name == dispatch_proc_i)
+      return protected_dispatch_proc;
 
    for (const jit_intrinsic_t *it = intrinsic_list; it->name; it++) {
       if (it->ident == name)

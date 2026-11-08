@@ -2880,6 +2880,7 @@ static tree_t instantiate_protected(ident_t id, tree_t decl, tree_t body,
    tree_set_ident(inst, id);
    tree_set_ref(inst, body ?: decl);
    tree_set_loc(inst, loc);
+   type_set_subkind(tree_type(inst), 0);
 
    if (peek() == tGENERIC)
       p_generic_map_aspect(inst, inst);
@@ -2907,7 +2908,7 @@ static tree_t instantiate_protected(ident_t id, tree_t decl, tree_t body,
 }
 
 static type_t implicit_protected_instance(type_t type, tree_t decl,
-                                          tree_t container, bool allocator)
+                                          tree_t container, tree_t *alloc)
 {
    // LRM 19 sections 6.4.2.4, 5.4.1 and 9.3.7: a subtype indication
    // denoting an uninstantiated protected type may be followed by a
@@ -2927,28 +2928,19 @@ static type_t implicit_protected_instance(type_t type, tree_t decl,
 
       return type;
    }
-   else if (allocator) {
-      // The generic map is checked here but an allocator for an access
-      // to an uninstantiated protected type is only supported in
-      // analysis
-      tree_t dummy = tree_new(T_PROT_DECL);
-      tree_set_ident(dummy, tree_ident(uninst));
-      tree_set_type(dummy, type);
-      tree_set_ref(dummy, uninst);
+   else if (alloc != NULL) {
+      // The object created by an allocator is an instance of the
+      // uninstantiated type but the type of the allocator is still the
+      // uninstantiated type: a method call through the access value is
+      // dispatched to the instance when the call is executed
+      tree_t where = find_enclosing(nametab, S_SUBPROGRAM);
+      if (where == NULL)
+         where = find_enclosing(nametab, S_PROCESS);
+      if (where == NULL)
+         where = find_enclosing(nametab, S_DECLARATIVE_REGION);
 
-      const int ngenerics = tree_generics(uninst);
-      for (int i = 0; i < ngenerics; i++)
-         tree_add_generic(dummy, tree_generic(uninst, i));
-
-      push_scope(nametab);
-
-      if (peek() == tGENERIC)
-         p_generic_map_aspect(dummy, dummy);
-
-      tree_set_loc(dummy, CURRENT_LOC);
-      sem_check(dummy, nametab);
-
-      pop_scope(nametab);
+      ident_t id = ident_prefix(tree_ident(uninst), ident_uniq("inst"), '$');
+      *alloc = instantiate_protected(id, uninst, body, where, CURRENT_LOC);
       return type;
    }
    else {
@@ -5172,7 +5164,7 @@ static tree_t p_allocator(void)
 
    tree_t new = tree_new(T_NEW);
 
-   tree_t value;
+   tree_t value, inst = NULL;
    if (peek_nth(2) == tTICK && peek_nth(3) == tLPAREN)
       value = p_qualified_expression(NULL);
    else {
@@ -5180,7 +5172,7 @@ static tree_t p_allocator(void)
       type_t type = p_subtype_indication_with_decl(&decl);
 
       if (standard() >= STD_19)
-         type = implicit_protected_instance(type, decl, NULL, true);
+         type = implicit_protected_instance(type, decl, NULL, &inst);
 
       value = tree_new(T_QUALIFIED);
       tree_set_type(value, type);
@@ -5189,6 +5181,9 @@ static tree_t p_allocator(void)
 
    tree_set_value(new, value);
    tree_set_loc(new, CURRENT_LOC);
+
+   if (inst != NULL)
+      tree_set_ref(new, inst);
 
    return new;
 }
@@ -7005,7 +7000,7 @@ static type_t p_access_type_definition(ident_t id)
    if (standard() >= STD_19 && peek() == tGENERIC) {
       tree_t container = find_enclosing(nametab, S_DECLARATIVE_REGION);
       designated = implicit_protected_instance(designated, decl,
-                                               container, false);
+                                               container, NULL);
    }
 
    type_set_designated(t, designated);
@@ -7332,6 +7327,9 @@ static tree_t p_protected_type_declaration(ident_t id)
 
    tree_set_loc(t, CURRENT_LOC);
    sem_check(t, nametab);
+
+   if (is_uninstantiated_protected(t))
+      type_set_subkind(type, 1);
 
    if (tree_genmaps(t) > 0) {
       // Generic-mapped protected type
@@ -8027,7 +8025,7 @@ static void p_variable_declaration(tree_t parent)
    type_t type = p_subtype_indication_with_decl(&decl);
 
    if (standard() >= STD_19)
-      type = implicit_protected_instance(type, decl, parent, false);
+      type = implicit_protected_instance(type, decl, parent, NULL);
 
    tree_t init = NULL;
    if (optional(tWALRUS))
