@@ -12251,7 +12251,7 @@ static void p_psl_formal_parameter(psl_node_t node)
       tree_set_ident(p, p_identifier());
       tree_set_loc(p, CURRENT_LOC);
       tree_set_class(p, class);
-      tree_set_subkind(p, psl_type);
+      tree_set_subkind(p, PORT_IN);
       tree_set_type(p, type);
       psl_add_port(node, p);
       insert_name(nametab, p, NULL);

@@ -1508,6 +1508,7 @@ casechoice1     normal,2008
 compopen1       normal,2008
 psl57           fail,gold,2008
 psl67          normal,psl,2008
+psl65          normal,psl,2008
 psl68           gold,2008
 psl69           normal,2008
 psl70           normal,2008

@@ -64,9 +64,9 @@ static void psl_check_clock_decl(psl_node_t p)
 
 }
 
-static void psl_check_property_decl(psl_node_t p)
+static void psl_check_property_decl(psl_node_t p, nametab_t *tab)
 {
-
+   psl_check(psl_value(p), tab);
 }
 
 static void psl_check_sequence_decl(psl_node_t p, nametab_t *tab)
@@ -533,7 +533,7 @@ void psl_check(psl_node_t p, nametab_t *tab)
       psl_check_clock_decl(p);
       break;
    case P_PROPERTY_DECL:
-      psl_check_property_decl(p);
+      psl_check_property_decl(p, tab);
       break;
    case P_SEQUENCE_DECL:
       psl_check_sequence_decl(p, tab);
