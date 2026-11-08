@@ -1,0 +1,2 @@
+** Fatal: 5ns+0: fatal here
+PASSED

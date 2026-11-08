@@ -1,0 +1,2 @@
+** Error: 1ns+0: boom 5
+after
