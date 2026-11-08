@@ -1,0 +1,5 @@
+0ms+0: illegal bin 'cg.cp.bad' hit with value 7
+0ms+0: illegal transition bin 'cg.ct.bt' hit
+0ms+0: illegal bin 'cg.cp.bad' hit with value 7
+0ms+0: illegal cross bin 'cg.cx.bx' hit with values (3,1)
+PASSED

@@ -1,0 +1,2 @@
+Warning: (init): a range of bin 't.up' of covergroup 'cg' has a low bound greater than its high bound and is empty
+PASSED

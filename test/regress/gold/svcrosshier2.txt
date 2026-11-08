@@ -1,0 +1,4 @@
+cross items must be coverpoints or variables; declare a coverpoint
+cfg.vif.key0_in is a hierarchical name
+83.3
+50.0 50.0
