@@ -713,6 +713,7 @@ bool is_container(tree_t t)
    case T_PROC_BODY:
    case T_ENTITY:
    case T_ARCH:
+   case T_VUNIT:
    case T_PACKAGE:
    case T_PACK_BODY:
    case T_CONFIGURATION:
@@ -732,6 +733,7 @@ bool is_concurrent_block(tree_t t)
 {
    switch (tree_kind(t)) {
    case T_ARCH:
+   case T_VUNIT:
    case T_ENTITY:
    case T_BLOCK:
    case T_IF_GENERATE:
@@ -765,6 +767,7 @@ bool is_design_unit(tree_t t)
    case T_CONFIGURATION:
    case T_CONTEXT:
    case T_PACK_INST:
+   case T_VUNIT:
       return true;
    default:
       return false;
@@ -2185,6 +2188,7 @@ type_t get_type_or_null(tree_t t)
    case T_PACK_BODY:
    case T_ENTITY:
    case T_ARCH:
+   case T_VUNIT:
    case T_PROCESS:
    case T_COMPONENT:
    case T_INSTANCE:

@@ -348,35 +348,106 @@ static bool arch_copy_tree_pred(tree_t t, void *ctx)
    }
 }
 
-tree_t vhdl_architecture_instance(tree_t arch, tree_t bind, ident_t dotted)
+static bool vunit_overrides(tree_t vunit, tree_t proc)
+{
+   // A process is replaced if all the signals it drives are overridden
+   // in the verification unit
+
+   bool any = false;
+
+   const int nstmts = tree_stmts(proc);
+   for (int i = 0; i < nstmts; i++) {
+      tree_t s = tree_stmt(proc, i);
+      if (tree_kind(s) != T_SIGNAL_ASSIGN)
+         continue;
+
+      tree_t target = tree_target(s);
+      while (tree_kind(target) == T_ARRAY_REF
+             || tree_kind(target) == T_ARRAY_SLICE
+             || tree_kind(target) == T_RECORD_REF)
+         target = tree_value(target);
+
+      if (tree_kind(target) != T_REF || !tree_has_ref(target))
+         return false;
+
+      bool found = false;
+      const int nparams = tree_params(vunit);
+      for (int j = 0; j < nparams; j++) {
+         tree_t name = tree_value(tree_param(vunit, j));
+         if (tree_ref(name) == tree_ref(target)) {
+            found = true;
+            break;
+         }
+      }
+
+      if (!found)
+         return false;
+
+      any = true;
+   }
+
+   return any;
+}
+
+static void copy_stmts_without_overridden(tree_t b, tree_t from,
+                                          tree_t *vunits, int nvunits)
+{
+   const int nstmts = tree_stmts(from);
+   for (int i = 0; i < nstmts; i++) {
+      tree_t s = tree_stmt(from, i);
+
+      bool skip = false;
+      if (tree_kind(s) == T_PROCESS) {
+         for (int j = 0; j < nvunits && !skip; j++)
+            skip = tree_params(vunits[j]) > 0 && vunit_overrides(vunits[j], s);
+      }
+
+      if (!skip)
+         tree_add_stmt(b, s);
+   }
+}
+
+tree_t vhdl_architecture_instance(tree_t arch, tree_t bind, ident_t dotted,
+                                  tree_t *vunits, int nvunits)
 {
    assert(tree_kind(arch) == T_ARCH);
    assert(tree_frozen(arch));
 
    // Architecture must be processed last
    tree_t entity = tree_primary(arch);
-   tree_t roots[] = { entity, arch };
+
+   tree_t roots[2 + nvunits];
+   roots[0] = entity;
+   roots[1] = arch;
+   for (int i = 0; i < nvunits; i++)
+      roots[2 + i] = vunits[i];
+
+   const int nroots = 2 + nvunits;
 
    tree_global_flags_t gflags = 0;
-   for (int i = 0; i < ARRAY_LEN(roots); i++)
+   for (int i = 0; i < nroots; i++)
       gflags |= tree_global_flags(roots[i]);
 
    // The order is important here because the architecture name is
    // prefixed with the entity
-   ident_t prefix[] = { tree_ident(arch), tree_ident(tree_primary(arch)) };
+   ident_t prefix[2 + nvunits];
+   prefix[0] = tree_ident(arch);
+   prefix[1] = tree_ident(tree_primary(arch));
+   for (int i = 0; i < nvunits; i++)
+      prefix[2 + i] = tree_ident(vunits[i]);
 
    copy_ctx_t copy_ctx = {};
 
-   object_copy_ctx_t *ctx = tree_copy_begin(roots, ARRAY_LEN(roots),
+   object_copy_ctx_t *ctx = tree_copy_begin(roots, nroots,
                                             arch_copy_tree_pred, NULL,
                                             NULL, tree_copy_cb, type_copy_cb,
                                             &copy_ctx);
 
    collect_generics(entity, ctx);
 
-   tree_copy_finish(roots, ARRAY_LEN(roots), ctx);
+   tree_copy_finish(roots, nroots, ctx);
 
-   rename_mangled(&copy_ctx, dotted, prefix, ARRAY_LEN(prefix));
+   rename_mangled(&copy_ctx, dotted, prefix, nroots);
 
    tree_t b = tree_new(T_BLOCK);
    tree_set_ident(b, dotted);
@@ -388,8 +459,22 @@ tree_t vhdl_architecture_instance(tree_t arch, tree_t bind, ident_t dotted)
    tree_copy_ports(b, ent_copy);
    tree_copy_decls(b, ent_copy);
    tree_copy_decls(b, arch_copy);
-   tree_copy_stmts(b, ent_copy);
-   tree_copy_stmts(b, arch_copy);
+
+   tree_t *vcopies = roots + 2;
+   for (int i = 0; i < nvunits; i++)
+      tree_copy_decls(b, vcopies[i]);
+
+   if (nvunits == 0) {
+      tree_copy_stmts(b, ent_copy);
+      tree_copy_stmts(b, arch_copy);
+   }
+   else {
+      copy_stmts_without_overridden(b, ent_copy, vcopies, nvunits);
+      copy_stmts_without_overridden(b, arch_copy, vcopies, nvunits);
+
+      for (int i = 0; i < nvunits; i++)
+         tree_copy_stmts(b, vcopies[i]);
+   }
 
    tree_set_global_flags(b, gflags);
    return b;

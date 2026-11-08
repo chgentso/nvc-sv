@@ -389,6 +389,10 @@ static const imask_t has_map[T_LAST_TREE_KIND] = {
 
    // T_CHOICE
    (I_NAME | I_RANGES),
+
+   // T_VUNIT
+   (I_IDENT | I_IDENT2 | I_SUBKIND | I_DECLS | I_STMTS | I_CONTEXT
+    | I_PRIMARY | I_PRAGMAS | I_PARAMS),
 };
 
 static const char *kind_text_map[T_LAST_TREE_KIND] = {
@@ -432,6 +436,7 @@ static const char *kind_text_map[T_LAST_TREE_KIND] = {
    "T_GUARD",           "T_INERTIAL",        "T_ELEM_RESOLUTION",
    "T_LOOP",            "T_REPORT",          "T_PSL_DIRECT",
    "T_PSL_FCALL",       "T_PSL_UNION",       "T_CHOICE",
+   "T_VUNIT",
 };
 
 static const change_allowed_t change_allowed[] = {
@@ -442,6 +447,7 @@ static const change_allowed_t change_allowed[] = {
    { T_DESIGN_UNIT, T_CONFIGURATION },
    { T_DESIGN_UNIT, T_CONTEXT       },
    { T_DESIGN_UNIT, T_PACK_INST     },
+   { T_DESIGN_UNIT, T_VUNIT         },
    { T_FUNC_DECL,   T_FUNC_BODY     },
    { T_PROC_DECL,   T_PROC_BODY     },
    { -1,            -1              }
@@ -473,8 +479,8 @@ object_class_t tree_object = {
    .has_loc        = true,
    .gc_roots       = { T_ARCH, T_ENTITY, T_PACKAGE, T_ELAB, T_PACK_BODY,
                        T_CONTEXT, T_CONFIGURATION, T_DESIGN_UNIT,
-                       T_PACK_INST },
-   .gc_num_roots   = 9
+                       T_PACK_INST, T_VUNIT },
+   .gc_num_roots   = 10
 };
 
 typedef struct {

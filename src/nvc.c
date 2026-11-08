@@ -1291,6 +1291,7 @@ static void list_walk_fn(lib_t lib, ident_t ident, int kind, void *context)
    case T_PACK_INST: pretty = "Instantiated package"; break;
    case T_CONFIGURATION: pretty = "Configuration"; break;
    case T_CONTEXT: pretty = "Context"; break;
+   case T_VUNIT: pretty = "Verification unit"; break;
    case T_LAST_TREE_KIND: pretty = "Verilog"; break;
    }
 

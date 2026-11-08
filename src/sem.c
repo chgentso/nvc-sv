@@ -2373,6 +2373,11 @@ static bool sem_check_arch(tree_t t, nametab_t *tab)
    return true;
 }
 
+static bool sem_check_vunit(tree_t t, nametab_t *tab)
+{
+   return sem_check_context_clause(t, tab);
+}
+
 static tree_t sem_check_lvalue(tree_t t)
 {
    switch (tree_kind(t)) {
@@ -7263,6 +7268,8 @@ bool sem_check(tree_t t, nametab_t *tab)
    switch (tree_kind(t)) {
    case T_ARCH:
       return sem_check_arch(t, tab);
+   case T_VUNIT:
+      return sem_check_vunit(t, tab);
    case T_PACKAGE:
       return sem_check_package(t, tab);
    case T_ENTITY:

@@ -144,8 +144,9 @@ typedef struct _lazy_sym {
 } lazy_sym_t;
 
 typedef struct {
-   int proc;
-   int loop;
+   int     proc;
+   int     loop;
+   ident_t prefix;
 } label_cnts_t;
 
 typedef struct {
@@ -1572,6 +1573,16 @@ void insert_spec(nametab_t *tab, tree_t spec, spec_kind_t kind,
    *p = s;
 }
 
+void scope_set_label_prefix(nametab_t *tab, ident_t prefix)
+{
+   tab->top_scope->lbl_cnts.prefix = prefix;
+}
+
+ident_t scope_label_prefix(nametab_t *tab)
+{
+   return tab->top_scope->lbl_cnts.prefix;
+}
+
 void continue_proc_labelling_from(tree_t t, nametab_t *tab)
 {
    if (t == NULL) {
@@ -1601,7 +1612,11 @@ ident_t get_implicit_label(tree_t t, nametab_t *tab)
    case T_CONCURRENT:
    case T_PROCESS:
    case T_PSL_DIRECT:
-      return ident_sprintf("_P%d", tab->top_scope->lbl_cnts.proc++);
+      if (tab->top_scope->lbl_cnts.prefix != NULL)
+         return ident_sprintf("%s_P%d", istr(tab->top_scope->lbl_cnts.prefix),
+                              tab->top_scope->lbl_cnts.proc++);
+      else
+         return ident_sprintf("_P%d", tab->top_scope->lbl_cnts.proc++);
    case T_INERTIAL:
       return ident_sprintf("_I%d", tab->top_scope->lbl_cnts.proc++);
    case T_FOR:

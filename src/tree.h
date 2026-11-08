@@ -406,6 +406,7 @@ typedef enum tree_kind {
    T_PSL_FCALL,
    T_PSL_UNION,
    T_CHOICE,
+   T_VUNIT,
 
    T_LAST_TREE_KIND
 } tree_kind_t;
@@ -444,6 +445,12 @@ typedef enum {
    TREE_GF_DEFERRED_INST = (1 << 2),
    TREE_GF_EXTERNAL_NAME = (1 << 3),
 } tree_global_flags_t;
+
+typedef enum {
+   VERIF_UNIT,
+   VERIF_PROP,
+   VERIF_MODE,
+} verif_unit_t;
 
 tree_t tree_new(tree_kind_t kind);
 tree_kind_t tree_kind(tree_t t);

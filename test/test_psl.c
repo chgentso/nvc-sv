@@ -582,6 +582,40 @@ START_TEST(test_local1)
 }
 END_TEST
 
+START_TEST(test_vunit1)
+{
+   set_standard(STD_08);
+
+   input_from_file(TESTDIR "/psl/vunit1.vhd");
+
+   // IEEE 1850-2010 7.2, 7.2.1, 7.2.3: analysis errors in verification
+   // units
+   const error_t expect[] = {
+      { 10, "NOSUCH" },
+      { 15, "assert directive is not allowed in a vmode" },
+      { 16, "cover directive is not allowed in a vmode" },
+      { 21, "assume directive is not allowed in a vprop" },
+      { 25, "cannot find verification unit NOSUCH_VU" },
+      { 30, "no visible declaration for ZZZ" },
+      { 38, "sorry, inheriting from a verification unit is not supported" },
+      { 39, "sorry, instantiating a verification unit is not supported" },
+      { 44, "cannot find architecture NOSUCH_ARCH of entity VUNIT1" },
+      { 47, "no instance with label NOSUCH in WORK.VUNIT1-TEST" },
+      { 51, "sorry, binding a verification unit in a configuration is not "
+        "supported" },
+      { 52, "cannot find verification unit NOSUCH_VU" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   parse_and_check(T_ENTITY, T_ARCH, T_VUNIT, T_VUNIT, T_VUNIT, T_VUNIT,
+                   T_VUNIT, T_VUNIT, T_VUNIT, T_VUNIT, T_VUNIT,
+                   T_CONFIGURATION);
+
+   check_expected_errors();
+}
+END_TEST
+
 Suite *get_psl_tests(void)
 {
    Suite *s = suite_create("psl");
@@ -604,6 +638,7 @@ Suite *get_psl_tests(void)
    tcase_add_test(tc_core, test_sem5);
    tcase_add_test(tc_core, test_names2);
    tcase_add_test(tc_core, test_local1);
+   tcase_add_test(tc_core, test_vunit1);
    suite_add_tcase(s, tc_core);
 
    return s;

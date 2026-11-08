@@ -100,6 +100,8 @@ void hide_name(nametab_t *tab, ident_t name);
 
 ident_t get_implicit_label(tree_t t, nametab_t *tab);
 void continue_proc_labelling_from(tree_t t, nametab_t *tab);
+void scope_set_label_prefix(nametab_t *tab, ident_t prefix);
+ident_t scope_label_prefix(nametab_t *tab);
 
 tree_t resolve_name(nametab_t *tab, const loc_t *loc, ident_t name);
 type_t resolve_type(nametab_t *tab, type_t incomplete);

@@ -22,7 +22,8 @@
 #include "cov/cov-api.h"
 
 tree_t vhdl_component_instance(tree_t comp, tree_t inst, ident_t dotted);
-tree_t vhdl_architecture_instance(tree_t arch, tree_t inst, ident_t dotted);
+tree_t vhdl_architecture_instance(tree_t arch, tree_t inst, ident_t dotted,
+                                  tree_t *vunits, int nvunits);
 tree_t vhdl_config_instance(tree_t conf, tree_t bind, ident_t dotted);
 
 void vhdl_package_instance(tree_t *roots, int nroots, ident_t dotted,

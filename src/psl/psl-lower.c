@@ -1105,6 +1105,11 @@ static void psl_lower_clock_decl(unit_registry_t *ur, lower_unit_t *parent,
    ident_t prefix = vcode_unit_name(context);
    ident_t name = ident_prefix(prefix, label, '.');
 
+   // Each verification unit bound to a design entity may have its own
+   // default clock declaration
+   for (int n = 2; unit_registry_query(ur, name); n++)
+      name = ident_sprintf("%s.%s%d", istr(prefix), istr(label), n);
+
    unit_registry_defer(ur, name, parent, emit_function, psl_lower_clock_func,
                        NULL, psl_to_object(p));
 

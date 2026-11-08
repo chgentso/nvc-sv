@@ -1668,6 +1668,21 @@ static void dump_arch(tree_t t)
    print_syntax("#end #architecture;\n\n");
 }
 
+static void dump_vunit(tree_t t)
+{
+   static const char *keywords[] = { "vunit", "vprop", "vmode" };
+
+   dump_context(t, 0);
+   dump_address(t);
+   print_syntax("#%s %s", keywords[tree_subkind(t)], istr(tree_ident(t)));
+   if (tree_has_ident2(t))
+      print_syntax(" (%s)", istr(tree_ident2(t)));
+   print_syntax(" {\n");
+   dump_decls(t, 2);
+   dump_stmts(t, 2);
+   print_syntax("}\n\n");
+}
+
 static void dump_package(tree_t t, int indent)
 {
    dump_context(t, indent);
@@ -1714,6 +1729,9 @@ void vhdl_dump(tree_t t, int indent)
       break;
    case T_ARCH:
       dump_arch(t);
+      break;
+   case T_VUNIT:
+      dump_vunit(t);
       break;
    case T_PACKAGE:
    case T_PACK_INST:

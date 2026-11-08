@@ -43,6 +43,7 @@
 #include <assert.h>
 #include <stdarg.h>
 #include <stdlib.h>
+#include <string.h>
 #include <inttypes.h>
 
 #define MAX_DEPTH 127    // Limited by vcode type indexes
@@ -51,6 +52,24 @@ typedef A(tree_t) tree_list_t;
 
 typedef struct _elab_ctx elab_ctx_t;
 typedef struct _generic_list generic_list_t;
+
+typedef struct {
+   tree_t    unit;
+   ident_t   entity;
+   ident_t   arch;
+   unsigned  nlabels;
+   ident_t  *labels;
+} elab_vunit_t;
+
+typedef struct {
+   const elab_vunit_t *vunit;
+   unsigned            pos;
+} elab_vunit_pending_t;
+
+typedef struct {
+   unsigned      count;
+   elab_vunit_t *items;
+} elab_vunit_list_t;
 
 typedef struct _elab_ctx {
    const elab_ctx_t *parent;
@@ -69,6 +88,9 @@ typedef struct _elab_ctx {
    sdf_file_t       *sdf;
    hash_t           *modcache;
    hash_t           *mracache;
+   hash_t           *vucache;
+   const elab_vunit_pending_t *pending;
+   unsigned          npending;
    rt_model_t       *model;
    rt_scope_t       *scope;
    mem_pool_t       *pool;
@@ -101,6 +123,7 @@ typedef struct {
    tree_t      wrap;
    tree_t      first;
    cover_obj_t cscope;
+   bool        has_vunits;
 } elab_instance_t;
 
 static void elab_vhdl_block(tree_t t, const elab_ctx_t *ctx);
@@ -1460,6 +1483,7 @@ static void elab_inherit_context(elab_ctx_t *ctx, const elab_ctx_t *parent)
    ctx->inst     = ctx->inst ?: parent->inst;
    ctx->modcache = parent->modcache;
    ctx->mracache = parent->mracache;
+   ctx->vucache  = parent->vucache;
    ctx->depth    = parent->depth + 1;
    ctx->model    = parent->model;
    ctx->errors   = error_count();
@@ -2160,6 +2184,163 @@ static void elab_cover_block(elab_ctx_t *ctx, tree_t unit)
                                  tree_ident(block), *tree_loc(block));
 }
 
+typedef struct {
+   mem_pool_t *pool;
+   A(elab_vunit_t) found;
+} vunit_search_t;
+
+static int elab_compare_vunit(const void *a, const void *b)
+{
+   const elab_vunit_t *va = a, *vb = b;
+   return strcmp(istr(tree_ident(va->unit)), istr(tree_ident(vb->unit)));
+}
+
+static void elab_find_vunit_cb(lib_t lib, ident_t name, int kind, void *context)
+{
+   vunit_search_t *params = context;
+
+   if (kind != T_VUNIT)
+      return;
+
+   tree_t unit = lib_get(lib, name);
+   if (unit == NULL || !tree_has_ident2(unit))
+      return;   // Not bound to a design unit
+
+   // The binding is LIB.ENTITY[-ARCH]{.LABEL}
+   char *spec LOCAL = xstrdup(istr(tree_ident2(unit)));
+
+   char *save;
+   const char *lib_s = strtok_r(spec, ".", &save);
+   char *entity = strtok_r(NULL, ".", &save);
+   if (lib_s == NULL || entity == NULL)
+      return;
+
+   char *arch = strchr(entity, '-');
+   if (arch != NULL)
+      *arch++ = '\0';
+
+   elab_vunit_t v = {
+      .unit   = unit,
+      .entity = ident_sprintf("%s.%s", lib_s, entity),
+      .arch   = arch != NULL ? ident_new(arch) : NULL,
+   };
+
+   A(ident_t) labels = AINIT;
+   for (char *label; (label = strtok_r(NULL, ".", &save)); )
+      APUSH(labels, ident_new(label));
+
+   v.nlabels = labels.count;
+   v.labels = pool_malloc_array(params->pool, MAX(labels.count, 1),
+                                sizeof(ident_t));
+   for (unsigned i = 0; i < labels.count; i++)
+      v.labels[i] = labels.items[i];
+
+   ACLEAR(labels);
+
+   APUSH(params->found, v);
+}
+
+static const elab_vunit_list_t *elab_find_vunits(lib_t lib,
+                                                 const elab_ctx_t *ctx)
+{
+   elab_vunit_list_t *list = hash_get(ctx->vucache, lib);
+   if (list != NULL)
+      return list;
+
+   vunit_search_t params = { .pool = ctx->pool };
+   lib_walk_index(lib, elab_find_vunit_cb, &params);
+
+   list = pool_calloc(ctx->pool, sizeof(elab_vunit_list_t));
+   list->count = params.found.count;
+   list->items = pool_malloc_array(ctx->pool, MAX(list->count, 1),
+                                   sizeof(elab_vunit_t));
+
+   if (list->count > 0) {
+      memcpy(list->items, params.found.items,
+             list->count * sizeof(elab_vunit_t));
+      qsort(list->items, list->count, sizeof(elab_vunit_t),
+            elab_compare_vunit);
+   }
+
+   ACLEAR(params.found);
+
+   hash_put(ctx->vucache, lib, list);
+   return list;
+}
+
+static bool elab_vunit_arch_matches(const elab_vunit_t *v, tree_t arch,
+                                    bool final)
+{
+   // An explicit architecture name restricts the first level of the
+   // binding; the final design unit must be the one that the names in
+   // the verification unit were resolved against
+   if (v->arch != NULL && v->nlabels == 0)
+      return ident_prefix(v->entity, v->arch, '-') == tree_ident(arch);
+   else if (final)
+      return tree_ident(tree_primary(v->unit)) == tree_ident(arch);
+   else
+      return v->arch == NULL
+         || ident_prefix(v->entity, v->arch, '-') == tree_ident(arch);
+}
+
+static void elab_bind_vunits(tree_t inst, tree_t arch, elab_ctx_t *ctx,
+                             tree_t **vunits, unsigned *nvunits)
+{
+   // Find the verification units to bind to this instance and the
+   // partially matched paths to pass on to sub-blocks
+
+   const elab_vunit_list_t *list = elab_find_vunits(ctx->library, ctx->parent);
+
+   ident_t entity = tree_ident(tree_primary(arch));
+   ident_t label = tree_ident(inst);
+
+   *vunits = NULL;
+   *nvunits = 0;
+
+   if (list->count == 0 && ctx->parent->npending == 0)
+      return;
+
+   elab_vunit_pending_t *pending =
+      pool_malloc_array(ctx->pool, list->count + ctx->parent->npending + 1,
+                        sizeof(elab_vunit_pending_t));
+   unsigned npending = 0;
+
+   tree_t *bound = pool_malloc_array(ctx->pool, list->count
+                                     + ctx->parent->npending + 1,
+                                     sizeof(tree_t));
+   unsigned nbound = 0;
+
+   for (unsigned i = 0; i < ctx->parent->npending; i++) {
+      const elab_vunit_pending_t *p = &(ctx->parent->pending[i]);
+      if (p->vunit->labels[p->pos] != label)
+         continue;
+      else if (p->pos + 1 == p->vunit->nlabels) {
+         if (elab_vunit_arch_matches(p->vunit, arch, true))
+            bound[nbound++] = p->vunit->unit;
+      }
+      else
+         pending[npending++] = (elab_vunit_pending_t){ p->vunit, p->pos + 1 };
+   }
+
+   for (unsigned i = 0; i < list->count; i++) {
+      const elab_vunit_t *v = &(list->items[i]);
+      if (v->entity != entity)
+         continue;
+      else if (v->nlabels == 0) {
+         if (elab_vunit_arch_matches(v, arch, false))
+            bound[nbound++] = v->unit;
+      }
+      else if (elab_vunit_arch_matches(v, arch, false))
+         pending[npending++] = (elab_vunit_pending_t){ v, 0 };
+   }
+
+   ctx->pending = pending;
+   ctx->npending = npending;
+
+   *vunits = bound;
+   *nvunits = nbound;
+}
+
 static void elab_architecture(tree_t inst, tree_t arch, const elab_ctx_t *ctx)
 {
    ident_t label = tree_ident(inst);
@@ -2185,14 +2366,21 @@ static void elab_architecture(tree_t inst, tree_t arch, const elab_ctx_t *ctx)
    mod_cache_t *mc = elab_cached_module(tree_to_object(arch), &new_ctx);
    mc->count++;
 
+   tree_t *vunits;
+   unsigned nvunits;
+   elab_bind_vunits(inst, arch, &new_ctx, &vunits, &nvunits);
+
    elab_instance_t *ei = ghash_get(mc->instances, inst);
-   if (elab_can_clone_instance(ei, &new_ctx))
+   if (nvunits == 0 && ei != NULL && !ei->has_vunits
+       && elab_can_clone_instance(ei, &new_ctx))
       new_ctx.cloned = tree_ident(ei->block);
    else {
       ei = pool_calloc(ctx->pool, sizeof(elab_instance_t));
-      ei->block = vhdl_architecture_instance(arch, inst, new_ctx.dotted);
+      ei->block = vhdl_architecture_instance(arch, inst, new_ctx.dotted,
+                                             vunits, nvunits);
       ei->cscope = new_ctx.cscope;
       ei->first = b;
+      ei->has_vunits = nvunits > 0;
 
       elab_fold_generics(ei->block, &new_ctx);
 
@@ -3049,6 +3237,7 @@ tree_t elab(object_t **top, int ntop, jit_t *jit, unit_registry_t *ur,
       .mir       = mc,
       .modcache  = hash_new(16),
       .mracache  = hash_new(16),
+      .vucache   = hash_new(16),
       .dotted    = lib_name(work),
       .model     = m,
       .scope     = create_scope(m, e, NULL),
@@ -3068,6 +3257,7 @@ tree_t elab(object_t **top, int ntop, jit_t *jit, unit_registry_t *ur,
 
    hash_free(ctx.modcache);
    hash_free(ctx.mracache);
+   hash_free(ctx.vucache);
    pool_free(ctx.pool);
 
    if (error_count() > 0)
