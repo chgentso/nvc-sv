@@ -1790,6 +1790,12 @@ Verilog module which instantiates it.  The supported callback reasons are
 .Dv cbReadOnlySynch
 and
 .Dv cbNextSimTime .
+A value change callback on an object held in memory rather than in a
+signal (a member of an unpacked structure, an element of an unpacked array
+in memory, a string or package variable, or a whole structure or array) is
+called at most once per time step, when the delta cycles have settled, with
+the final value.  Changes within a time step that cancel out, such as a
+glitch in a delta cycle, are not reported.
 The time in
 .Dv vpiSimTime
 units is in steps of the smallest time precision of the Verilog modules

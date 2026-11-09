@@ -3517,18 +3517,38 @@ typedef struct {
    uint8_t *data;
    size_t   len;
    size_t   cap;
+   uint8_t  small[128];   // Avoids allocating for the usual small value
 } vpi_snap_t;
+
+static void vpi_snap_init(vpi_snap_t *sn)
+{
+   sn->data = sn->small;
+   sn->len  = 0;
+   sn->cap  = sizeof(sn->small);
+}
 
 static void vpi_snap_put(vpi_snap_t *sn, const void *data, size_t len)
 {
    if (sn->len + len > sn->cap) {
-      sn->cap = MAX(MAX(sn->cap * 2, sn->len + len), 64);
-      sn->data = xrealloc(sn->data, sn->cap);
+      const size_t cap = MAX(sn->cap * 2, sn->len + len);
+      if (sn->data == sn->small) {
+         sn->data = xmalloc(cap);
+         memcpy(sn->data, sn->small, sn->len);
+      }
+      else
+         sn->data = xrealloc(sn->data, cap);
+      sn->cap = cap;
    }
 
    if (len > 0)
       memcpy(sn->data + sn->len, data, len);
    sn->len += len;
+}
+
+static void vpi_snap_free(vpi_snap_t *sn)
+{
+   if (sn->data != sn->small)
+      free(sn->data);
 }
 
 static void vpi_snap_decl(c_abstractDecl *d, vpi_snap_t *sn)
@@ -3566,6 +3586,20 @@ static void vpi_snap_decl(c_abstractDecl *d, vpi_snap_t *sn)
    case STORE_FVEC2:
    case STORE_FVEC4:
       {
+         vpi_vec_t v;
+         if (d->storage != STORE_SIGNAL && d->size <= 64
+             && vpi_mem_vec(d, &v) && v.width <= 64) {
+            // The common case of a small value: its bits and unknown bits
+            const uint64_t mask = d->size == 64
+               ? UINT64_MAX : (UINT64_C(1) << d->size) - 1;
+            const uint64_t bits[2] = {
+               (v.abits[0] >> v.lsb) & mask,
+               v.bbits != NULL ? (v.bbits[0] >> v.lsb) & mask : 0
+            };
+            vpi_snap_put(sn, bits, sizeof(bits));
+            break;
+         }
+
          const int nwords = (d->size + 63) / 64;
          uint64_t *mem LOCAL = xmalloc_array(nwords * 2, sizeof(uint64_t));
          if (!vpi_read_bits(d, mem, mem + nwords))
@@ -3613,8 +3647,8 @@ static bool vpi_is_memory_decl(c_abstractDecl *d)
 static void vpi_sample_cb(rt_model_t *m, void *user)
 {
    // An object held in memory has nothing to notify the model when it
-   // changes, so it is compared with its last value at the end of each
-   // cycle
+   // changes, so it is compared with its last value once the delta cycles
+   // of each time step have settled
 
    vpi_context_t *c = vpi_context();
    handle_slot_t *slot = decode_handle(c, user);
@@ -3630,20 +3664,22 @@ static void vpi_sample_cb(rt_model_t *m, void *user)
    if (d == NULL)
       return;
 
-   vpi_snap_t now = { 0 };
+   vpi_snap_t now;
+   vpi_snap_init(&now);
    vpi_snap_decl(d, &now);
 
-   const bool changed = now.len != cb->snaplen
-      || (now.len > 0 && memcmp(now.data, cb->snapshot, now.len) != 0);
-
-   if (changed) {
-      free(cb->snapshot);
-      cb->snapshot = now.data;
-      cb->snaplen = now.len;
-      vpi_fire_value_change(model_now(m, NULL), user);
+   if (now.len == cb->snaplen
+       && (now.len == 0 || memcmp(now.data, cb->snapshot, now.len) == 0)) {
+      vpi_snap_free(&now);
+      return;
    }
-   else
-      free(now.data);
+
+   cb->snapshot = xrealloc(cb->snapshot, MAX(now.len, 1));
+   memcpy(cb->snapshot, now.data, now.len);
+   cb->snaplen = now.len;
+   vpi_snap_free(&now);
+
+   vpi_fire_value_change(model_now(m, NULL), user);
 }
 
 static rt_sampler_t *vpi_sample_decl(vpi_context_t *c, c_callback *cb,
@@ -3652,10 +3688,13 @@ static rt_sampler_t *vpi_sample_decl(vpi_context_t *c, c_callback *cb,
    if (!vpi_is_memory_decl(d))
       return NULL;
 
-   vpi_snap_t sn = { 0 };
+   vpi_snap_t sn;
+   vpi_snap_init(&sn);
    vpi_snap_decl(d, &sn);
-   cb->snapshot = sn.data;
+   cb->snapshot = xmalloc(MAX(sn.len, 1));
+   memcpy(cb->snapshot, sn.data, sn.len);
    cb->snaplen = sn.len;
+   vpi_snap_free(&sn);
 
    return model_add_sampler(vpi_get_model(c), vpi_sample_cb, handle);
 }

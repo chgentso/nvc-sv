@@ -574,9 +574,9 @@ static void run_callbacks(rt_model_t *m, model_phase_t phase)
 
 static void run_samplers(rt_model_t *m)
 {
-   // Samplers are called at the end of every cycle, after all the
-   // regions have run, so they see the values of the variables which are
-   // not held in signals as the cycle left them
+   // Samplers are called once the delta cycles of a time step have
+   // settled, so they see the final values of the variables which are
+   // not held in signals
 
    m->sampler_depth++;
 
@@ -4001,11 +4001,12 @@ static void model_cycle(rt_model_t *m)
  next_delta:
    sv_poll_end_cycle(m);
 
-   if (m->samplers != NULL)
-      run_samplers(m);
+   if (!m->next_is_delta) {
+      if (m->samplers != NULL)
+         run_samplers(m);
 
-   if (!m->next_is_delta)
       run_callbacks(m, LAST_KNOWN_DELTA_CYCLE);
+   }
 
    if (!m->next_is_delta) {
       m->can_create_delta = false;
