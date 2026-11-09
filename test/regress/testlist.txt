@@ -2535,3 +2535,4 @@ vhpi31          vhpi
 vhpi32          mixed,vhpi
 dbgstmts1       shell
 svwidesel1 verilog
+svwidesel2 verilog
