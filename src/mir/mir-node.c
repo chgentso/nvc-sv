@@ -3524,9 +3524,10 @@ mir_value_t mir_build_cast(mir_unit_t *mu, mir_type_t type, mir_value_t value)
 #endif
 }
 
-void mir_build_stmt_probe(mir_unit_t *mu, mir_value_t locus)
+void mir_build_stmt_probe(mir_unit_t *mu, mir_value_t locus, uint32_t site)
 {
-   mir_build_1(mu, MIR_OP_STMT_PROBE, MIR_NULL_TYPE, MIR_NULL_STAMP, locus);
+   mir_build_2(mu, MIR_OP_STMT_PROBE, MIR_NULL_TYPE, MIR_NULL_STAMP,
+               locus, mir_enum(site));
 }
 
 void mir_build_debug_out(mir_unit_t *mu, mir_value_t value)

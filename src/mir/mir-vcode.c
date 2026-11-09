@@ -1304,7 +1304,7 @@ static void import_reflect_subtype(mir_unit_t *mu, mir_import_t *imp, int op)
 static void import_stmt_probe(mir_unit_t *mu, mir_import_t *imp, int op)
 {
    mir_value_t locus = imp->map[vcode_get_arg(op, 0)];
-   mir_build_stmt_probe(mu, locus);
+   mir_build_stmt_probe(mu, locus, vcode_get_tag(op));
 }
 
 static void import_debug_out(mir_unit_t *mu, mir_import_t *imp, int op)

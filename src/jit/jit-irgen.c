@@ -19,6 +19,7 @@
 #include "array.h"
 #include "diag.h"
 #include "ident.h"
+#include "jit/jit-exits.h"
 #include "jit/jit-ffi.h"
 #include "jit/jit-ffi.h"
 #include "jit/jit-priv.h"
@@ -3826,9 +3827,25 @@ static void irgen_op_active(jit_irgen_t *g, mir_value_t n)
 static void irgen_op_stmt_probe(jit_irgen_t *g, mir_value_t n)
 {
    jit_value_t locus = irgen_get_arg(g, n, 0);
+   const uint32_t site = irgen_get_const(g, n, 1);
+
+   // Take the exit only if a breakpoint is set on this statement
+   jit_value_t armed = irgen_alloc_reg(g, 1);
+   jit_value_t addr = {
+      .kind  = JIT_ADDR_ABS,
+      .int64 = (intptr_t)&(jit_stmt_armed[site < JIT_STMT_SITES ? site : 0]),
+   };
+   j_load(g, JIT_SZ_8, armed, addr);
+
+   irgen_label_t *l_skip = irgen_alloc_label(g);
+
+   j_cmp(g, JIT_CC_EQ, armed, jit_value_from_int64(0));
+   j_jump(g, JIT_CC_T, l_skip);
 
    j_send(g, 0, locus);
    macro_exit(g, JIT_EXIT_STMT_PROBE);
+
+   irgen_bind_label(g, l_skip);
 }
 
 static void irgen_op_debug_out(jit_irgen_t *g, mir_value_t n)

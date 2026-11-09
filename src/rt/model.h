@@ -96,6 +96,8 @@ typedef void (*stmt_hook_fn_t)(const char *file, int line, rt_proc_t *proc,
 void set_stmt_hook(stmt_hook_fn_t fn, void *context);
 void stmt_break_add(const char *file, int line);
 bool stmt_break_remove(const char *file, int line);
+void stmt_step_set(bool enable);
+uint32_t stmt_site_new(const char *file, int line);
 rt_proc_t *model_defer_note(uint32_t *runs, uint32_t *seq);
 bool model_defer_live(rt_proc_t *proc, uint32_t runs, uint32_t seq,
                       const int64_t *scopes, unsigned nscopes);

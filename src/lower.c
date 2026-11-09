@@ -32,6 +32,7 @@
 #include "psl/psl-phase.h"
 #include "rt/assert.h"
 #include "rt/defs.h"
+#include "rt/model.h"
 #include "type.h"
 #include "vcode.h"
 #include "vhdl/vhdl-lower.h"
@@ -7827,8 +7828,11 @@ static void lower_stmt(lower_unit_t *lu, tree_t stmt, gen_stack_t *gs)
 
    PUSH_DEBUG_INFO(stmt);
 
-   if (opt_get_int(OPT_DEBUG_STMTS))
-      emit_stmt_probe(lower_debug_locus(stmt));
+   if (opt_get_int(OPT_DEBUG_STMTS)) {
+      const loc_t *loc = tree_loc(stmt);
+      const uint32_t site = stmt_site_new(loc_file_str(loc), loc->first_line);
+      emit_stmt_probe(lower_debug_locus(stmt), site);
+   }
 
    switch (tree_kind(stmt)) {
    case T_ASSERT:

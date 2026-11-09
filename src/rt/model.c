@@ -4918,9 +4918,18 @@ typedef struct {
    int   line;
 } stmt_break_t;
 
+typedef struct {
+   const char *file;   // Owned by the identifier table
+   int         line;
+} stmt_site_t;
+
 static A(stmt_break_t)  stmt_breaks;
+static A(stmt_site_t)   stmt_sites;
+static bool             stmt_stepping;
 static stmt_hook_fn_t   stmt_hook;
 static void            *stmt_hook_context;
+
+uint8_t jit_stmt_armed[JIT_STMT_SITES] = { [0] = 1 };
 
 void set_stmt_hook(stmt_hook_fn_t fn, void *context)
 {
@@ -4943,10 +4952,51 @@ static bool same_file(const char *a, const char *b)
    return llen == slen || longer[llen - slen - 1] == '/';
 }
 
+static bool stmt_site_armed(const stmt_site_t *site)
+{
+   if (stmt_stepping)
+      return true;
+
+   for (int i = 0; i < stmt_breaks.count; i++) {
+      const stmt_break_t *b = &(stmt_breaks.items[i]);
+      if (b->line == site->line && same_file(b->file, site->file))
+         return true;
+   }
+
+   return false;
+}
+
+static void stmt_rearm(void)
+{
+   // The sites start at one: zero is the site of statements without one
+   for (int i = 0; i < stmt_sites.count; i++)
+      jit_stmt_armed[i + 1] = stmt_site_armed(&(stmt_sites.items[i]));
+}
+
+uint32_t stmt_site_new(const char *file, int line)
+{
+   if (stmt_sites.count + 1 >= JIT_STMT_SITES)
+      return 0;   // Too many: the statement always takes the exit
+
+   stmt_site_t site = { .file = file, .line = line };
+   APUSH(stmt_sites, site);
+
+   const uint32_t id = stmt_sites.count;
+   jit_stmt_armed[id] = stmt_site_armed(&site);
+   return id;
+}
+
+void stmt_step_set(bool enable)
+{
+   stmt_stepping = enable;
+   stmt_rearm();
+}
+
 void stmt_break_add(const char *file, int line)
 {
    stmt_break_t b = { .file = xstrdup(file), .line = line };
    APUSH(stmt_breaks, b);
+   stmt_rearm();
 }
 
 bool stmt_break_remove(const char *file, int line)
@@ -4956,6 +5006,7 @@ bool stmt_break_remove(const char *file, int line)
       if (b->line == line && same_file(b->file, file)) {
          free(b->file);
          stmt_breaks.items[i] = stmt_breaks.items[--stmt_breaks.count];
+         stmt_rearm();
          return true;
       }
    }
@@ -4965,29 +5016,26 @@ bool stmt_break_remove(const char *file, int line)
 
 void x_stmt_probe(object_t *where)
 {
-   // Called before every statement of code generated with --debug-stmts
-   if (likely(stmt_breaks.count == 0) || stmt_hook == NULL)
+   // Called before a statement of code generated with --debug-stmts if
+   // its site is armed
+   if (stmt_hook == NULL)
       return;
 
    const loc_t *loc = &(where->loc);
    if (loc_invalid_p(loc))
       return;
 
-   const char *file = NULL;
-   for (int i = 0; i < stmt_breaks.count; i++) {
+   const char *file = loc_file_str(loc);
+
+   bool match = stmt_stepping;
+   for (int i = 0; i < stmt_breaks.count && !match; i++) {
       const stmt_break_t *b = &(stmt_breaks.items[i]);
-      if (b->line != loc->first_line)
-         continue;
-
-      if (file == NULL)
-         file = loc_file_str(loc);
-
-      if (same_file(b->file, file)) {
-         (*stmt_hook)(file, loc->first_line, get_active_proc(),
-                      stmt_hook_context);
-         return;
-      }
+      match = b->line == loc->first_line && same_file(b->file, file);
    }
+
+   if (match)
+      (*stmt_hook)(file, loc->first_line, get_active_proc(),
+                   stmt_hook_context);
 }
 
 void x_sched_process(int64_t delay)

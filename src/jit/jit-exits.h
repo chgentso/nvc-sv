@@ -42,6 +42,13 @@ int32_t x_test_net_active(sig_shared_t *ss, uint32_t offset,
 void x_sched_event(sig_shared_t *ss, uint32_t offset, int32_t count);
 void x_sched_active(sig_shared_t *ss, uint32_t offset, int32_t count);
 void x_stmt_probe(object_t *where);
+
+// One byte per statement site of code generated with --debug-stmts: set if a
+// breakpoint may match the statement, so the code takes the exit only then.
+// Site zero belongs to every statement that has no site of its own and is
+// always set.
+#define JIT_STMT_SITES (1 << 20)
+extern uint8_t jit_stmt_armed[JIT_STMT_SITES];
 void x_alias_signal(sig_shared_t *ss, uint32_t offset, tree_t where);
 void x_sched_waveform_s(sig_shared_t *ss, uint32_t offset, uint64_t scalar,
                         int64_t after, int64_t reject);

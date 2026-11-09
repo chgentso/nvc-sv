@@ -1475,6 +1475,7 @@ void vcode_dump_with_mark(int mark_op, vcode_dump_fn_t callback, void *arg)
             {
                col += printf("%s locus ", vcode_op_string(op->kind));
                col += vcode_dump_reg(op->args.items[0]);
+               col += printf(" site %u", op->tag);
                vcode_dump_type(col, op->type, VCODE_INVALID_STAMP);
             }
             break;
@@ -5925,10 +5926,11 @@ void emit_debug_out(vcode_reg_t reg)
    vcode_add_arg(op, reg);
 }
 
-void emit_stmt_probe(vcode_reg_t locus)
+void emit_stmt_probe(vcode_reg_t locus, uint32_t site)
 {
    op_t *op = vcode_add_op(VCODE_OP_STMT_PROBE);
    vcode_add_arg(op, locus);
+   op->tag = site;
 
    VCODE_ASSERT(vcode_reg_kind(locus) == VCODE_TYPE_DEBUG_LOCUS,
                 "locus argument to stmt probe must be a debug locus");

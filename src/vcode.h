@@ -484,7 +484,7 @@ void emit_length_check(vcode_reg_t llen, vcode_reg_t rlen, vcode_reg_t locus,
 void emit_exponent_check(vcode_reg_t exp, vcode_reg_t locus);
 void emit_zero_check(vcode_reg_t denom, vcode_reg_t locus);
 void emit_debug_out(vcode_reg_t reg);
-void emit_stmt_probe(vcode_reg_t locus);
+void emit_stmt_probe(vcode_reg_t locus, uint32_t site);
 void emit_cover_stmt(vcode_reg_t counters, uint32_t tag);
 void emit_cover_branch(vcode_reg_t counters, uint32_t tag);
 void emit_cover_toggle(vcode_reg_t signal, vcode_reg_t count, uint32_t tag);

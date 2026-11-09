@@ -849,7 +849,6 @@ void mir_annotate(mir_unit_t *mu, const mir_annotate_t *cb, void *ctx)
          case MIR_OP_JUMP:
          case MIR_OP_ADD_TRIGGER:
          case MIR_OP_DEBUG_OUT:
-         case MIR_OP_STMT_PROBE:
          case MIR_OP_CONSUME:
          case MIR_OP_RESUME:
             {
@@ -1609,6 +1608,7 @@ void mir_annotate(mir_unit_t *mu, const mir_annotate_t *cb, void *ctx)
             }
             break;
 
+         case MIR_OP_STMT_PROBE:
          case MIR_OP_COVER_STMT:
          case MIR_OP_COVER_BRANCH:
          case MIR_OP_COVER_EXPR:
