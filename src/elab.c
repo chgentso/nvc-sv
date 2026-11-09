@@ -7736,6 +7736,11 @@ static vlog_node_t elab_rewrite_hier_ref_cb(vlog_node_t v, void *arg)
       elab_check_handle_assign(v, hctx);
       return v;
    }
+   else if (vlog_kind(v) == V_SYS_TCALL || vlog_kind(v) == V_SYS_FCALL) {
+      // The %p of a structure reached by a hierarchical name is expanded
+      // now that the name is bound
+      return vlog_simp_format(v);
+   }
    else if (vlog_kind(v) == V_RETURN) {
       if (vlog_has_value(v) && vlog_has_ref(v))
          elab_check_handle_value(vlog_value(v), vlog_get_type(vlog_ref(v)),

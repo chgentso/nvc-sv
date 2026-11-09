@@ -2540,3 +2540,4 @@ svconstref2 verilog
 svpollwatch1 verilog
 svpollwatch2 verilog
 svpollwatch3 verilog
+svpfmthier1 verilog

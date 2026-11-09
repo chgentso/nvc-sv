@@ -990,7 +990,7 @@ static void pfmt_leaf(pfmt_t *c, vlog_node_t e, vlog_node_t type)
 static bool pfmt_is_struct_arg(vlog_node_t arg)
 {
    if (vlog_kind(arg) != V_REF && vlog_kind(arg) != V_MEMBER_REF
-       && vlog_kind(arg) != V_BIT_SELECT)
+       && vlog_kind(arg) != V_BIT_SELECT && vlog_kind(arg) != V_HIER_REF)
       return false;
 
    if (!format_is_scalar(arg))
@@ -1200,7 +1200,8 @@ static bool pfmt_array(vlog_node_t arg, bool *dynamic, int64_t *count,
       base = vlog_value(base);
    }
 
-   if ((vlog_kind(base) != V_REF && vlog_kind(base) != V_MEMBER_REF)
+   if ((vlog_kind(base) != V_REF && vlog_kind(base) != V_MEMBER_REF
+        && vlog_kind(base) != V_HIER_REF)
        || !vlog_has_ref(base))
       return false;
 
@@ -2014,6 +2015,11 @@ static vlog_node_t simp_memory_port_ref_cb(vlog_node_t v, void *context)
       vlog_set_ref(v, d);
 
    return v;
+}
+
+vlog_node_t vlog_simp_format(vlog_node_t v)
+{
+   return simp_format_p(v);
 }
 
 void vlog_simp(vlog_node_t mod)

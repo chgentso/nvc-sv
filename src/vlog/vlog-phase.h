@@ -26,6 +26,7 @@ void vlog_set_default_timescale(uint64_t unit_fs, unsigned precision_log10);
 void vlog_check(vlog_node_t v);
 void vlog_dump(vlog_node_t v, int indent);
 void vlog_simp(vlog_node_t mod);
+vlog_node_t vlog_simp_format(vlog_node_t v);
 void vlog_trans(vlog_node_t mod, tree_t out);
 void vlog_lower_udp(mir_unit_t *mu, object_t *obj);
 void vlog_lower_block(mir_context_t *mc, ident_t parent, tree_t b);
