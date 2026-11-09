@@ -484,6 +484,47 @@ static bool        qualify_failed = false;
 // Set after parsing the definition of a method outside of its class
 static bool extern_definition = false;
 
+static bool accept_interface(object_t *obj)
+{
+   vlog_node_t v = vlog_from_object(obj);
+   return v != NULL && vlog_kind(v) == V_MODULE
+      && (vlog_flags(v) & VLOG_F_INTERFACE);
+}
+
+static bool accept_package(object_t *obj)
+{
+   vlog_node_t v = vlog_from_object(obj);
+   return v != NULL && vlog_kind(v) == V_PACKAGE;
+}
+
+static bool accept_vhdl_package(object_t *obj)
+{
+   tree_t t = tree_from_object(obj);
+   return t != NULL && tree_kind(t) == T_PACKAGE;
+}
+
+static object_t *search_other_libs(ident_t unit, lib_accept_fn_t accept)
+{
+   // Find a design unit which is not in the work library in any other
+   // library on the search path
+
+   // Misses are cached as the same names are often looked up repeatedly
+   static hset_t *misses[3];
+   const int slot = accept == accept_interface ? 0
+      : accept == accept_package ? 1 : 2;
+   if (misses[slot] == NULL)
+      misses[slot] = hset_new(16);
+   else if (hset_contains(misses[slot], unit))
+      return NULL;
+
+   lib_t where;
+   object_t *obj = lib_search_generic(unit, accept, &where);
+   if (obj == NULL)
+      hset_insert(misses[slot], unit);
+
+   return obj;
+}
+
 static vlog_node_t find_interface(ident_t name)
 {
    if (interfaces != NULL) {
@@ -496,8 +537,12 @@ static vlog_node_t find_interface(ident_t name)
    tb_istr(tb, name);
    tb_upcase(tb);
 
-   ident_t qual = ident_prefix(lib_name(lib_work()), ident_new(tb_get(tb)), '.');
+   ident_t unit = ident_new(tb_get(tb));
+   ident_t qual = ident_prefix(lib_name(lib_work()), unit, '.');
    object_t *obj = lib_get_generic(lib_work(), qual, NULL);
+   if (obj == NULL)
+      obj = search_other_libs(unit, accept_interface);
+
    if (obj == NULL)
       return NULL;
 
@@ -5051,23 +5096,36 @@ static vlog_node_t package_by_name(ident_t id)
 
    object_t *obj = lib_get_generic(lib_work(), qual, NULL);
 
-   if (obj == NULL || tree_from_object(obj) != NULL) {
-      // A VHDL package uses the upper case name
-      LOCAL_TEXT_BUF tb = tb_new();
-      tb_istr(tb, id);
-      tb_upcase(tb);
+   // A VHDL package uses the upper case name
+   LOCAL_TEXT_BUF tb = tb_new();
+   tb_istr(tb, id);
+   tb_upcase(tb);
+   ident_t upper = ident_new(tb_get(tb));
 
-      ident_t vqual = ident_prefix(lib_name(work), ident_new(tb_get(tb)), '.');
+   if (obj == NULL || tree_from_object(obj) != NULL) {
+      ident_t vqual = ident_prefix(lib_name(work), upper, '.');
       object_t *vobj = lib_get_generic(work, vqual, NULL);
       tree_t pack = tree_from_object(vobj);
       if (pack != NULL && tree_kind(pack) == T_PACKAGE)
          return import_vhdl_package(pack, id);
    }
 
+   if (obj == NULL) {
+      // Look in the other libraries on the search path
+      if ((obj = search_other_libs(id, accept_package)) == NULL) {
+         object_t *vobj = search_other_libs(upper, accept_vhdl_package);
+         if (vobj != NULL)
+            return import_vhdl_package(tree_from_object(vobj), id);
+      }
+   }
+
    vlog_node_t v = vlog_from_object(obj);
    if (v == NULL || vlog_kind(v) != V_PACKAGE) {
-      parse_error(&state.last_loc, "no package named %pQ in working "
-                  "library", id);
+      diag_t *d = diag_new(DIAG_ERROR, &state.last_loc);
+      diag_printf(d, "no package named %pQ in library %pi or any other "
+                  "library on the search path", id, lib_name(work));
+      lib_search_paths_to_diag(d);
+      diag_emit(d);
       return NULL;
    }
 

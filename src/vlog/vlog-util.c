@@ -516,6 +516,13 @@ unsigned vlog_size(vlog_node_t v)
    }
 }
 
+static bool accept_interface(object_t *obj)
+{
+   vlog_node_t v = vlog_from_object(obj);
+   return v != NULL && vlog_kind(v) == V_MODULE
+      && (vlog_flags(v) & VLOG_F_INTERFACE);
+}
+
 vlog_node_t vlog_virtual_iface(vlog_node_t type)
 {
    // The interface of a virtual interface type, which may be declared
@@ -533,6 +540,13 @@ vlog_node_t vlog_virtual_iface(vlog_node_t type)
    lib_t work = lib_work();
    ident_t qual = ident_prefix(lib_name(work), ident_new(tb_get(tb)), '.');
    object_t *obj = lib_get_generic(work, qual, NULL);
+   if (obj == NULL) {
+      // The interface may be in another library on the search path
+      lib_t where;
+      obj = lib_search_generic(ident_new(tb_get(tb)), accept_interface,
+                               &where);
+   }
+
    return obj != NULL ? vlog_from_object(obj) : NULL;
 }
 

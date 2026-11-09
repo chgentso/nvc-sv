@@ -2525,3 +2525,5 @@ vpi16           verilog,vpi
 vpi17           verilog,vpi
 svrealinport1  verilog
 wavelive1       shell
+svxlib2         shell
+svxlib3         shell

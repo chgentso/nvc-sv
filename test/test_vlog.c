@@ -3038,7 +3038,7 @@ START_TEST(test_scope1)
 {
    const error_t expect[] = {
       {  9, "'missing' is not a member of class 'A'" },
-      { 11, "no package named 'nopkg' in working library" },
+      { 11, "no package named 'nopkg' in library WORK or any other library on the search path" },
       { 12, "'other' is not a member of class 'A'" },
       { -1, NULL }
    };
