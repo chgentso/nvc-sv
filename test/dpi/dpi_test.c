@@ -187,37 +187,13 @@ void dpi_lw_inout(svLogicVecVal *v)
 }
 
 extern int sv_bump(int delta);
-#ifdef _WIN32
-#define sv_bump (*(int (*)(int delta))vpi_nvc_get_export("sv_bump"))
-#endif
 extern void sv_store(int value, int *old);
-#ifdef _WIN32
-#define sv_store (*(void (*)(int value, int *old))vpi_nvc_get_export("sv_store"))
-#endif
 extern int sv_task(int a, int b, int *result);
-#ifdef _WIN32
-#define sv_task (*(int (*)(int a, int b, int *result))vpi_nvc_get_export("sv_task"))
-#endif
 extern long long sv_wide(long long a, unsigned char b);
-#ifdef _WIN32
-#define sv_wide (*(long long (*)(long long a, unsigned char b))vpi_nvc_get_export("sv_wide"))
-#endif
 extern svLogic sv_lnot(svLogic a);
-#ifdef _WIN32
-#define sv_lnot (*(svLogic (*)(svLogic a))vpi_nvc_get_export("sv_lnot"))
-#endif
 extern void sv_lvec(const svLogicVecVal *in, svLogicVecVal *out);
-#ifdef _WIN32
-#define sv_lvec (*(void (*)(const svLogicVecVal *in, svLogicVecVal *out))vpi_nvc_get_export("sv_lvec"))
-#endif
 extern const char *sv_greet(const char *name, const char **upper);
-#ifdef _WIN32
-#define sv_greet (*(const char * (*)(const char *name, const char **upper))vpi_nvc_get_export("sv_greet"))
-#endif
 extern int pkg_twice(int a);
-#ifdef _WIN32
-#define pkg_twice (*(int (*)(int a))vpi_nvc_get_export("pkg_twice"))
-#endif
 
 int dpi_call_bump(int delta)
 {
@@ -291,9 +267,6 @@ void *dpi_user(void *key, void *data)
 }
 
 extern int sv_alias_c(int a);
-#ifdef _WIN32
-#define sv_alias_c (*(int (*)(int a))vpi_nvc_get_export("sv_alias_c"))
-#endif
 
 int dpi_call_alias(int a)
 {

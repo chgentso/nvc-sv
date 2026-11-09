@@ -36,8 +36,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
-#ifndef __MINGW32__
+#if !defined __MINGW32__ || defined HAVE_LIBSYSTRE
 #include <regex.h>
+#define HAVE_POSIX_REGEX 1
 #endif
 
 #ifdef ARCH_ARM64
@@ -2332,7 +2333,7 @@ static void sv_regcomp(jit_func_t *func, jit_anchor_t *caller,
 {
    // Compile an extended regular expression or return null
 
-#ifdef __MINGW32__
+#ifndef HAVE_POSIX_REGEX
    args[0].pointer = NULL;
 #else
    const int64_t len = ffi_array_length(args[1].integer);
@@ -2355,7 +2356,7 @@ static void sv_regexec(jit_func_t *func, jit_anchor_t *caller,
 {
    // Zero if the string matches
 
-#ifdef __MINGW32__
+#ifndef HAVE_POSIX_REGEX
    args[0].integer = 1;
 #else
    const int64_t len = ffi_array_length(args[2].integer);
@@ -2370,7 +2371,7 @@ static void sv_regexec(jit_func_t *func, jit_anchor_t *caller,
 static void sv_regfree(jit_func_t *func, jit_anchor_t *caller,
                        jit_scalar_t *args, tlab_t *tlab)
 {
-#ifndef __MINGW32__
+#ifdef HAVE_POSIX_REGEX
    if (args[0].pointer != NULL) {
       regfree(args[0].pointer);
       free(args[0].pointer);

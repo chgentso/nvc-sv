@@ -347,6 +347,50 @@ static void set_default_timescale(const char *arg)
    vlog_set_default_timescale(unit_fs, prec_log10);
 }
 
+static const char *default_surfer_plugin(void)
+{
+   // The plugin installed next to the executable, or in a lib directory of
+   // the same installation, so no environment variable is needed
+#ifdef __MINGW32__
+   static const char *const names[] = {
+      "libnvc_surfer.dll", "..\\lib\\nvc\\libnvc_surfer.dll",
+      "..\\lib\\nvc-surfer\\libnvc_surfer.dll",
+   };
+#else
+   static const char *const names[] = {
+      "libnvc_surfer.so", "../lib/nvc-surfer/libnvc_surfer.so",
+      "../lib/nvc/libnvc_surfer.so", "../lib64/nvc-surfer/libnvc_surfer.so",
+   };
+#endif
+
+   LOCAL_TEXT_BUF exe = tb_new();
+   if (get_exe_path(exe)) {
+      const char *path = tb_get(exe);
+      const char *slash = strrchr(path, '/');
+#ifdef __MINGW32__
+      const char *bslash = strrchr(path, '\\');
+      if (bslash != NULL && (slash == NULL || bslash > slash))
+         slash = bslash;
+#endif
+      if (slash != NULL) {
+         for (int i = 0; i < ARRAY_LEN(names); i++) {
+            char *cand = xasprintf("%.*s%c%s", (int)(slash - path), path,
+                                   slash[0], names[i]);
+            file_info_t info;
+            if (get_file_info(cand, &info))
+               return cand;
+            free(cand);
+         }
+      }
+   }
+
+#ifdef __MINGW32__
+   return "libnvc_surfer";
+#else
+   return "libnvc_surfer.so";
+#endif
+}
+
 static int analyse(int argc, char **argv, cmd_state_t *state)
 {
    static struct option long_options[] = {
@@ -366,6 +410,7 @@ static int analyse(int argc, char **argv, cmd_state_t *state)
       { "relative",        required_argument, 0, 'r' },
       { "timescale",       required_argument, 0, 'T' },
       { "warn",            required_argument, 0, 'W' },
+      { "dpi-stubs",       required_argument, 0, 'S' },
       { 0, 0, 0, 0 }
    };
 
@@ -386,6 +431,9 @@ static int analyse(int argc, char **argv, cmd_state_t *state)
          missing_argument("analysis", argv);
       case 'b':
          opt_set_int(OPT_BOOTSTRAP, 1);
+         break;
+      case 'S':
+         vlog_set_dpi_stubs(optarg);
          break;
       case 'v':
          opt_set_str(OPT_LOWER_VERBOSE, optarg ?: "");
@@ -1068,7 +1116,7 @@ static int run_cmd(int argc, char **argv, cmd_state_t *state)
          {
             // Load the nvc-surfer plugin and have it start Surfer
             const char *plugin = optarg ?: getenv("NVC_SURFER_PLUGIN")
-               ?: "libnvc_surfer.so";
+               ?: default_surfer_plugin();
             pli_plugins = pli_plugins == NULL ? plugin
                : xasprintf("%s,%s", pli_plugins, plugin);
             setenv("NVC_SURFER_LAUNCH", "1", 1);
@@ -2406,6 +2454,7 @@ static void usage(void)
            { "--keywords=VERSION",
              "Use keywords from specified Verilog version" },
            { "--no-save", "Do not save analysed design units" },
+           { "--dpi-stubs=FILE", "Write a C file with stubs for the DPI-exported subroutines, to link into foreign code on Windows" },
            { "--preserve-case",
              "Preserve the original case of VHDL identifiers" },
            { "--psl", "Enable parsing of PSL directives in comments" },
@@ -2454,7 +2503,7 @@ static void usage(void)
            { "--trace", "Trace simulation events" },
            { "-w, --wave[=FILE]", "Write waveform dump to FILE" },
            { "    --surfer[=PLUGIN]", "Load the nvc-surfer plugin (default "
-             "$NVC_SURFER_PLUGIN or libnvc_surfer.so) and start Surfer "
+             "$NVC_SURFER_PLUGIN or the one next to nvc) and start Surfer "
              "connected to the simulation" },
            { "    --wave-flush=SECS", "Make the FST dump readable while the "
              "simulation runs by writing a complete copy at most every SECS "

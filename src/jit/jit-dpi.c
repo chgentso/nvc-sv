@@ -42,8 +42,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#ifndef __MINGW32__
+#if !defined __MINGW32__ || defined HAVE_LIBSYSTRE
 #include <regex.h>
+#define DPI_HAVE_REGEX 1
 #endif
 
 #ifndef __MINGW32__
@@ -194,6 +195,10 @@ static void *dpi_try_open(const char *path)
    return dpi_dlopen(tb_get(tb));
 }
 
+#ifdef __MINGW32__
+static void dpi_bind_lib(dpi_lib_t *lib);
+#endif
+
 void dpi_load_libs(void)
 {
    while (dpi_pending != NULL) {
@@ -244,6 +249,10 @@ void dpi_load_libs(void)
       lib->handle = handle;
       lib->next = dpi_loaded;
       dpi_loaded = lib;
+
+#ifdef __MINGW32__
+      dpi_bind_lib(lib);
+#endif
    }
 }
 
@@ -256,7 +265,7 @@ static int uvm_re_match(const char *re, const char *str)
    // Regular expressions between slashes or a glob converted by
    // uvm_glob_to_re; zero when the string matches
 
-#ifdef __MINGW32__
+#ifndef DPI_HAVE_REGEX
    return 1;
 #else
    if (re == NULL || str == NULL)
@@ -1778,10 +1787,40 @@ static void *dpi_stub_load(const char *name, void ***slot)
 
 static shash_t *dpi_stubs = NULL;
 
+#ifdef __MINGW32__
+// Foreign code on Windows calls exported subroutines through thunks from
+// the C file written by --dpi-stubs: a jump through a slot which is filled
+// in here, when the library is loaded or the subroutine is exported,
+// whichever comes last.  vpi_nvc_get_export gives the address directly.
+
+static void dpi_bind_slot(HMODULE dll, const char *name, void *code)
+{
+   char slot[256];
+   snprintf(slot, sizeof(slot), "__nvc_dpi_slot_%s", name);
+
+   void **p = (void **)GetProcAddress(dll, slot);
+   if (p != NULL)
+      *p = code;
+}
+
+static void dpi_bind_lib(dpi_lib_t *lib)
+{
+   if (dpi_exports == NULL)
+      return;
+
+   hash_iter_t it = HASH_BEGIN;
+   const char *name;
+   void *value;
+   while (shash_iter(dpi_exports, &it, &name, &value))
+      dpi_bind_slot((HMODULE)lib->handle, name, ((dpi_export_t *)value)->code);
+}
+#endif
+
 static void dpi_stub_bind(const char *name, void *code)
 {
 #ifdef __MINGW32__
-   // Foreign code looks the address up with vpi_nvc_get_export instead
+   for (dpi_lib_t *it = dpi_loaded; it != NULL; it = it->next)
+      dpi_bind_slot((HMODULE)it->handle, name, code);
    return;
 #endif
 

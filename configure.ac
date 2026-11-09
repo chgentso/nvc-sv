@@ -296,6 +296,8 @@ case $host_os in
 esac
 if test x$implib_required = xyes ; then
   AC_DEFINE_UNQUOTED([IMPLIB_REQUIRED], [1], [Import library required])
+  # POSIX regular expressions for UVM string matching
+  AC_CHECK_LIB([systre], [regcomp])
 fi
 AC_DEFINE_UNQUOTED([DLL_EXT], ["$DLL_EXT"], [Dynamic library extension])
 AC_SUBST(DLL_EXT)
