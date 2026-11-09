@@ -1802,6 +1802,20 @@ static void clone_source(rt_model_t *m, rt_nexus_t *nexus,
    }
 }
 
+static void find_queued_nexus_cb(uint64_t key, void *user, void *context)
+{
+   void **search = context;
+   if (user == search[0])
+      search[1] = search;   // Non-NULL means found
+}
+
+static bool nexus_in_heap(heap_t *h, rt_nexus_t *n)
+{
+   void *search[2] = { n, NULL };
+   heap_walk(h, find_queued_nexus_cb, search);
+   return search[1] != NULL;
+}
+
 static rt_nexus_t *clone_nexus(rt_model_t *m, rt_nexus_t *old, int offset)
 {
    assert(offset < old->width);
@@ -1827,6 +1841,16 @@ static rt_nexus_t *clone_nexus(rt_model_t *m, rt_nexus_t *old, int offset)
 
    old->chain = new;
    old->width = offset;
+
+   if (old->flags & NET_F_PENDING) {
+      // A driving or effective value update is queued for the old nexus
+      // and must also be performed for the new one: the pending flag
+      // was copied but the queues hold only the old pointer
+      if (nexus_in_heap(m->driving_heap, old))
+         heap_insert(m->driving_heap, new->rank, new);
+      if (nexus_in_heap(m->effective_heap, old))
+         heap_insert(m->effective_heap, MAX_RANK - new->rank, new);
+   }
 
    if (old->pending == NULL)
       new->pending = NULL;
