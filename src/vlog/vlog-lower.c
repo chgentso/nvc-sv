@@ -25641,13 +25641,6 @@ static bool vlog_is_memory_port(vlog_node_t port)
        || vlog_nettype_of(port) != NULL)
       return false;
 
-   // An input of event type is connected to an event expression and the
-   // formals of a checker may be replaced by their actuals
-   vlog_node_t type = vlog_get_type(vlog_type(d));
-   if (vlog_subkind(port) == V_PORT_INPUT && vlog_kind(type) == V_DATA_TYPE
-       && vlog_subkind(type) == DT_EVENT)
-      return false;
-
    return true;
 }
 
@@ -28628,7 +28621,8 @@ static void vlog_lower_memory_port_conn(vlog_gen_t *g, vlog_node_t v,
 
    mir_value_t ptr = mir_build_link_var(g->mu, inst, vlog_ident(d), ti->type);
 
-   if (vlog_subkind(port) == V_PORT_REF || vlog_subkind(port) == V_PORT_INOUT) {
+   if (vlog_subkind(port) == V_PORT_REF || vlog_subkind(port) == V_PORT_INOUT
+       || vlog_is_event_port(port)) {
       // An event is the address of a cell shared by the copies of it so
       // a ref port of an event type names the same event as its actual
       if (!vlog_is_event_port(port) || vlog_kind(vlog_value(v)) != V_REF)

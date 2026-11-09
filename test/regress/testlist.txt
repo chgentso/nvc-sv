@@ -2550,3 +2550,6 @@ svalocallim1 verilog,fail,gold
 svalocallim2 verilog,fail,gold
 svalocallim3 verilog,fail,gold
 vpi20           verilog,vpi
+svevtport1 verilog
+svlrmmisc1 verilog
+svprogparam1 verilog
