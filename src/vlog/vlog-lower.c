@@ -12282,8 +12282,15 @@ static sva_xref_t vlog_sva_fcall(sva_build_t *b, vlog_node_t v)
    const int nparams = vlog_params(v);
    const int own = vlog_sva_width(v);
 
+   if (vlog_kind(decl) == V_FUNC_DECL && nparams > SVA_MAX_FARGS) {
+      fatal_at(vlog_loc(v), "sorry, a function called with local variables "
+               "in an assertion can have at most %d arguments",
+               SVA_MAX_FARGS);
+      return (sva_xref_t){ 0, 1 };
+   }
+
    if (vlog_kind(decl) != V_FUNC_DECL || !vlog_has_type(decl)
-       || nparams != vlog_ports(decl) || nparams > SVA_MAX_FARGS
+       || nparams != vlog_ports(decl)
        || own > 64 || vlog_is_real(v) || vlog_is_dynamic_type(vlog_type(decl))) {
       fatal_at(vlog_loc(v), "sorry, this function call cannot be used with "
                "local variables in an assertion");

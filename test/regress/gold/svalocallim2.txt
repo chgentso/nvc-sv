@@ -1,0 +1,1 @@
+sorry, this function argument cannot be used with local variables in an assertion

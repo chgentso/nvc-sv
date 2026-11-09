@@ -2546,3 +2546,6 @@ svsvaactsampled2 verilog
 svnettype9 verilog
 svnettype10 verilog
 svpollreal1 verilog
+svalocallim1 verilog,fail,gold
+svalocallim2 verilog,fail,gold
+svalocallim3 verilog,fail,gold

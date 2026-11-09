@@ -7811,7 +7811,7 @@ static bool sva_paren_p(void)
    // cannot occur in a plain expression
 
    int depth = 1, braces = 0;
-   for (int n = 2; ; n++) {
+   for (int n = 2; n < TOKENQ_SIZE - 2; n++) {
       const token_t tok = peek_nth(n);
       switch (tok) {
       case tEOF:
@@ -7843,6 +7843,8 @@ static bool sva_paren_p(void)
          break;
       }
    }
+
+   return false;
 }
 
 typedef struct {

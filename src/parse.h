@@ -24,7 +24,7 @@
 #define RECOVER_THRESH 5
 #define TRACE_PARSE    0
 #define TRACE_RECOVERY 0
-#define TOKENQ_SIZE    128
+#define TOKENQ_SIZE    2048
 
 typedef struct {
    token_t  token;
