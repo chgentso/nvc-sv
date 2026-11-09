@@ -4481,11 +4481,20 @@ static int class_handle_bits(uint64_t id)
    return id < (UINT64_C(1) << 32) ? 32 : 64;
 }
 
+static PLI_INT32 vpi_get_scope(PLI_INT32 property, c_abstractScope *s);
+
 static PLI_INT32 vpi_get_decl(PLI_INT32 property, c_abstractDecl *d)
 {
    c_regArray *arr = is_regArray(&(d->object));
 
    switch (property) {
+   case vpiTimeUnit:
+   case vpiTimePrecision:
+      // The time unit and precision of the scope that contains the object
+      // (36.19), which is also the unit of the value of a time variable
+      if (d->scope != NULL)
+         return vpi_get_scope(property, d->scope);
+      break;
    case vpiSize:
       if (arr != NULL)
          return arr->count;

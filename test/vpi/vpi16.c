@@ -118,6 +118,8 @@ static PLI_INT32 end_of_sim(p_cb_data cb)
 
    // The value of a time variable is in the time unit of its scope
    check_int(last_time, 8);
+   check_int(vpi_get(vpiTimeUnit, watches[9].obj), -9);
+   check_int(vpi_get(vpiTimePrecision, watches[9].obj), -12);
    check_int(vpi_get(vpiType, watches[9].obj), vpiTimeVar);
 
    vpi_test_pass();
