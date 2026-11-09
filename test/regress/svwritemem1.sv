@@ -33,10 +33,10 @@ module svwritemem1;
     errs = 0;
     m[0] = 16'hdead; m[1] = 16'hbeef; m[2] = 16'h0123; m[3] = 16'hxx0z;
     b[0] = 8'hab; b[1] = 8'h1x;
-    $writememh("/tmp/svwritemem1_h.txt", m);
-    $writememb("/tmp/svwritemem1_b.txt", b);
-    slurp("/tmp/svwritemem1_h.txt", hl);
-    slurp("/tmp/svwritemem1_b.txt", bl);
+    $writememh("svwritemem1_h.txt", m);
+    $writememb("svwritemem1_b.txt", b);
+    slurp("svwritemem1_h.txt", hl);
+    slurp("svwritemem1_b.txt", bl);
     if (hl.size() != 4) begin errs++; $error("hex line count %0d", hl.size()); end
     else begin
       if (hl[0] != "dead") begin errs++; $error("hex[0] '%s'", hl[0]); end
@@ -52,8 +52,8 @@ module svwritemem1;
     // round trip through $readmemh/$readmemb (21.4.1)
     foreach (m2[i]) m2[i] = 16'h5a5a;
     foreach (b2[i]) b2[i] = 8'h5a;
-    $readmemh("/tmp/svwritemem1_h.txt", m2);
-    $readmemb("/tmp/svwritemem1_b.txt", b2);
+    $readmemh("svwritemem1_h.txt", m2);
+    $readmemb("svwritemem1_b.txt", b2);
     foreach (m[i]) if (m2[i] !== m[i]) begin errs++; $error("readmemh m2[%0d]=%b", i, m2[i]); end
     foreach (b[i]) if (b2[i] !== b[i]) begin errs++; $error("readmemb b2[%0d]=%b", i, b2[i]); end
     if (errs == 0) $display("PASSED");

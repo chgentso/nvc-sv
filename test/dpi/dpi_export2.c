@@ -13,8 +13,17 @@
 // context tasks
 
 extern int sv_delay(int n, int *now);
+#ifdef _WIN32
+#define sv_delay (*(int (*)(int n, int *now))vpi_nvc_get_export("sv_delay"))
+#endif
 extern int sv_wait_ev(int *value);
+#ifdef _WIN32
+#define sv_wait_ev (*(int (*)(int *value))vpi_nvc_get_export("sv_wait_ev"))
+#endif
 extern int sv_nodelay(int a, int *b);
+#ifdef _WIN32
+#define sv_nodelay (*(int (*)(int a, int *b))vpi_nvc_get_export("sv_nodelay"))
+#endif
 
 // Calls the exported task 'count' times with delay 'step'; the export
 // returns the simulation time after its delay, which must increase by
@@ -57,6 +66,9 @@ int dpi_tmix(int a, int *r)
 // svdpiexp3: disabling an imported task blocked in an exported task (35.9)
 
 extern int sv_block(void);
+#ifdef _WIN32
+#define sv_block (*(int (*)(void))vpi_nvc_get_export("sv_block"))
+#endif
 
 static int dis_ret = -1, dis_state = -1, dis_after_ack = -1;
 static int nodis_ret = -1, nodis_state = -1;
@@ -93,7 +105,13 @@ int dpi_dis_log(int which)
 // static initialisation
 
 extern int pk2_scale(int a);
+#ifdef _WIN32
+#define pk2_scale (*(int (*)(int a))vpi_nvc_get_export("pk2_scale"))
+#endif
 extern int pk2_base(void);
+#ifdef _WIN32
+#define pk2_base (*(int (*)(void))vpi_nvc_get_export("pk2_base"))
+#endif
 
 int dpi_pk2_scale(int a)
 {
@@ -109,6 +127,9 @@ int dpi_pk2_base(void)
 // svdpiexp5: a non-context import calling an export (35.5.3)
 
 extern int sv_nc_target(int a);
+#ifdef _WIN32
+#define sv_nc_target (*(int (*)(int a))vpi_nvc_get_export("sv_nc_target"))
+#endif
 
 int dpi_noctx_call(int a)
 {
@@ -119,6 +140,9 @@ int dpi_noctx_call(int a)
 // svdpiexp6: an imported function calling an exported task (35.7)
 
 extern int sv_ftask(int a);
+#ifdef _WIN32
+#define sv_ftask (*(int (*)(int a))vpi_nvc_get_export("sv_ftask"))
+#endif
 
 int dpi_func_calls_task(int a)
 {

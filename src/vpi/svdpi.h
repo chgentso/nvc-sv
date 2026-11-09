@@ -53,6 +53,12 @@ int svIsDisabledState(void);
 void svAckDisabledState(void);
 const char *svDpiVersion(void);
 
+// nvc extension: the address of a DPI-exported subroutine by its C name, or
+// NULL if the design does not export it.  On Windows foreign code cannot
+// link against subroutines that only exist once the design is elaborated,
+// so it calls them through the pointer returned here.
+void *vpi_nvc_get_export(const char *name);
+
 svBit svGetBitselBit(const svBitVecVal *s, int i);
 svLogic svGetBitselLogic(const svLogicVecVal *s, int i);
 void svPutBitselBit(svBitVecVal *d, int i, svBit s);

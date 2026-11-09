@@ -38,7 +38,7 @@ module svlrm_c21a;
     return t.len() >= p.len() && t.substr(t.len() - p.len(), t.len() - 1) == p;
   endfunction
   initial begin
-    fd = $fopen("/tmp/c21a_out.txt", "w");
+    fd = $fopen("c21a_out.txt", "w");
     ck(fd != 0 && fd[31] == 1'b1, "fopen with mode returns a descriptor (bit 31 set)");
     $fdisplay(fd, "hello %0d", 42);
     $fwrite(fd, "no newline ");
@@ -49,7 +49,7 @@ module svlrm_c21a;
     a = 5; b = 7; #1 b = 8; #1;
     $fflush(fd);
     $fclose(fd);
-    fd = $fopen("/tmp/c21a_out.txt", "r");
+    fd = $fopen("c21a_out.txt", "r");
     while (!$feof(fd)) begin
       r = $fgets(line, fd);
       if (r > 0) begin
@@ -63,7 +63,7 @@ module svlrm_c21a;
     ck(lines[1] == "no newline str|   12|34   |   56\n", "line 2");
     ck(lines[2] == "ab 1010 777 A\n", "line 3");
     ck(lines[3] == "10 3.141590 1.234500e+03 0.0001\n", "line 4");
-    fd = $fopen("/tmp/c21a_out.txt", "r");
+    fd = $fopen("c21a_out.txt", "r");
     c = $fgetc(fd); ck(c == "h", "fgetc");
     r = $ungetc(c, fd); c = $fgetc(fd); ck(c == "h", "ungetc then fgetc");
     r = $ftell(fd); ck(r == 1, "ftell after one character");

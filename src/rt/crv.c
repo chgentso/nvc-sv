@@ -1758,12 +1758,12 @@ static void idx_cb(void *ctx, const node_t *nd, int n)
 typedef struct {
    bool bad;
    const crv_t *c;
-} rsize_t;
+} crv_rsize_t;
 
 static void rsize_cb(void *ctx, const node_t *nd, int n)
 {
    (void)n;
-   rsize_t *r = ctx;
+   crv_rsize_t *r = ctx;
    if ((nd->kind == N_AELEM || nd->kind == N_ASUM)
        && r->c->arrays[nd->aux].size_rand)
       r->bad = true;
@@ -2383,7 +2383,7 @@ static prob_t *prob_build(crv_t *c, int mode, const unsigned *sizes,
 
       bool skip = false;
       if (mode == 1) {
-         rsize_t rs = { false, c };
+         crv_rsize_t rs = { false, c };
          if (cc->kind == C_REQ)
             visit(c, cc->root, rsize_cb, &rs);
          else {

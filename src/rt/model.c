@@ -4961,6 +4961,15 @@ void set_stmt_hook(stmt_hook_fn_t fn, void *context)
    stmt_hook_context = context;
 }
 
+static inline bool is_dir_sep(char c)
+{
+#ifdef __MINGW32__
+   return c == '/' || c == '\\';
+#else
+   return c == '/';
+#endif
+}
+
 static bool same_file(const char *a, const char *b)
 {
    // One name may be a path that ends with the other
@@ -4970,10 +4979,15 @@ static bool same_file(const char *a, const char *b)
    const size_t llen = alen >= blen ? alen : blen;
    const size_t slen = alen >= blen ? blen : alen;
 
-   if (strcmp(longer + (llen - slen), shorter) != 0)
-      return false;
+   const char *tail = longer + (llen - slen);
+   for (size_t i = 0; i < slen; i++) {
+      if (is_dir_sep(tail[i]) && is_dir_sep(shorter[i]))
+         continue;
+      else if (tail[i] != shorter[i])
+         return false;
+   }
 
-   return llen == slen || longer[llen - slen - 1] == '/';
+   return llen == slen || is_dir_sep(longer[llen - slen - 1]);
 }
 
 static bool stmt_site_armed(const stmt_site_t *site)

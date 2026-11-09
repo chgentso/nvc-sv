@@ -144,6 +144,7 @@
   vpi_handle_by_name;
   vpi_iterate;
   vpi_nvc_get_delta;
+  vpi_nvc_get_export;
   vpi_nvc_set_diag_cb;
   vpi_nvc_set_stmt_cb;
   vpi_nvc_stmt_breakpoint_add;

@@ -1078,6 +1078,11 @@ static PLI_INT32 system_tf(PLI_BYTE8 *userdata)
 
       fflush(stdout);
       result = system(command);
+#ifdef __MINGW32__
+      // The exit status is not in bits 15:8 as for the POSIX wait status
+      if (result != -1)
+         result = (result & 0xff) << 8;
+#endif
 
       vpi_release_handle(cmd_arg);
       vpi_release_handle(argv);

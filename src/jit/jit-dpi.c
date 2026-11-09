@@ -15,6 +15,11 @@
 //  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //
 
+#ifdef __MINGW32__
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
+
 #include "util.h"
 #include "hash.h"
 #include "ident.h"
@@ -48,7 +53,6 @@
 #include <unistd.h>
 #define DPI_FIBERS 1
 #else
-#include <windows.h>
 #define DPI_FIBERS 1
 #endif
 
@@ -153,10 +157,29 @@ void dpi_add_lib(const char *name)
    *where = lib;
 }
 
-#ifndef __MINGW32__
+#ifdef __MINGW32__
+#define dpi_dlopen(path) ((void *)LoadLibraryA(path))
+#define dpi_dlsym(h, name) ((void *)GetProcAddress((HMODULE)(h), name))
+
+static const char *dpi_dlerror(void)
+{
+   static char buf[256];
+   const DWORD code = GetLastError();
+   if (FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM
+                      | FORMAT_MESSAGE_IGNORE_INSERTS, NULL, code, 0, buf,
+                      sizeof(buf), NULL) == 0)
+      snprintf(buf, sizeof(buf), "error %lu", (unsigned long)code);
+   return buf;
+}
+#else
+#define dpi_dlopen(path) dlopen(path, RTLD_LAZY | RTLD_GLOBAL)
+#define dpi_dlsym(h, name) dlsym(h, name)
+#define dpi_dlerror dlerror
+#endif
+
 static void *dpi_try_open(const char *path)
 {
-   void *handle = dlopen(path, RTLD_LAZY | RTLD_GLOBAL);
+   void *handle = dpi_dlopen(path);
    if (handle != NULL)
       return handle;
 
@@ -168,9 +191,8 @@ static void *dpi_try_open(const char *path)
    if (!get_file_info(tb_get(tb), &info))
       return NULL;
 
-   return dlopen(tb_get(tb), RTLD_LAZY | RTLD_GLOBAL);
+   return dpi_dlopen(tb_get(tb));
 }
-#endif
 
 void dpi_load_libs(void)
 {
@@ -178,11 +200,12 @@ void dpi_load_libs(void)
       dpi_lib_t *lib = dpi_pending;
       dpi_pending = lib->next;
 
-#ifdef __MINGW32__
-      fatal("--sv-lib is not supported on this platform");
-#else
       void *handle = NULL;
+#ifdef __MINGW32__
+      const bool has_dir = strpbrk(lib->name, "/\\:") != NULL;
+#else
       const bool has_dir = strchr(lib->name, '/') != NULL;
+#endif
 
       if (has_dir) {
          // dlopen would search the library path for a name with no slash
@@ -216,12 +239,11 @@ void dpi_load_libs(void)
 
       if (handle == NULL)
          fatal("cannot load DPI library '%s': %s", lib->name,
-               dlerror() ?: "file not found");
+               dpi_dlerror() ?: "file not found");
 
       lib->handle = handle;
       lib->next = dpi_loaded;
       dpi_loaded = lib;
-#endif
    }
 }
 
@@ -346,15 +368,16 @@ static void *dpi_find_symbol(const char *name)
          return dpi_builtins[i].fn;
    }
 
-#ifdef __MINGW32__
-   return NULL;
-#else
    for (dpi_lib_t *it = dpi_loaded; it != NULL; it = it->next) {
-      void *p = dlsym(it->handle, name);
+      void *p = dpi_dlsym(it->handle, name);
       if (p != NULL)
          return p;
    }
 
+#ifdef __MINGW32__
+   // Symbols exported by the nvc executable
+   return dpi_dlsym(GetModuleHandle(NULL), name);
+#else
    return dlsym(RTLD_DEFAULT, name);
 #endif
 }
@@ -1757,6 +1780,11 @@ static shash_t *dpi_stubs = NULL;
 
 static void dpi_stub_bind(const char *name, void *code)
 {
+#ifdef __MINGW32__
+   // Foreign code looks the address up with vpi_nvc_get_export instead
+   return;
+#endif
+
    if (dpi_stubs == NULL)
       dpi_stubs = shash_new(16);
 
@@ -1769,6 +1797,16 @@ static void dpi_stub_bind(const char *name, void *code)
    }
 
    *slot = code;
+}
+
+DLLEXPORT
+void *vpi_nvc_get_export(const char *name)
+{
+   if (dpi_exports == NULL)
+      return NULL;
+
+   dpi_export_t *e = shash_get(dpi_exports, name);
+   return e != NULL ? e->code : NULL;
 }
 
 void dpi_export(jit_t *j, void *context, const char *sig, int64_t siglen,
@@ -1936,11 +1974,13 @@ static dpi_scope_t *dpi_scope_find(const char *name)
    return NULL;
 }
 
+DLLEXPORT
 svScope svGetScope(void)
 {
    return dpi_current;
 }
 
+DLLEXPORT
 svScope svSetScope(svScope scope)
 {
    svScope old = dpi_current;
@@ -1948,16 +1988,19 @@ svScope svSetScope(svScope scope)
    return old;
 }
 
+DLLEXPORT
 const char *svGetNameFromScope(svScope scope)
 {
    return scope != NULL ? dpi_scope_fullname(scope) : NULL;
 }
 
+DLLEXPORT
 svScope svGetScopeFromName(const char *name)
 {
    return name != NULL ? dpi_scope_find(name) : NULL;
 }
 
+DLLEXPORT
 int svPutUserData(svScope scope, void *key, void *data)
 {
    dpi_scope_t *s = scope;
@@ -1979,6 +2022,7 @@ int svPutUserData(svScope scope, void *key, void *data)
    return 0;
 }
 
+DLLEXPORT
 void *svGetUserData(svScope scope, void *key)
 {
    dpi_scope_t *s = scope;
@@ -1993,11 +2037,13 @@ void *svGetUserData(svScope scope, void *key)
    return NULL;
 }
 
+DLLEXPORT
 int svGetCallerInfo(const char **file, int *line)
 {
    return 0;
 }
 
+DLLEXPORT
 int svIsDisabledState(void)
 {
 #ifdef DPI_FIBERS
@@ -2007,6 +2053,7 @@ int svIsDisabledState(void)
 #endif
 }
 
+DLLEXPORT
 void svAckDisabledState(void)
 {
 #ifdef DPI_FIBERS
@@ -2015,27 +2062,32 @@ void svAckDisabledState(void)
 #endif
 }
 
+DLLEXPORT
 const char *svDpiVersion(void)
 {
    return "1800-2005";
 }
 
+DLLEXPORT
 svBit svGetBitselBit(const svBitVecVal *s, int i)
 {
    return (s[i / 32] >> (i % 32)) & 1;
 }
 
+DLLEXPORT
 svLogic svGetBitselLogic(const svLogicVecVal *s, int i)
 {
    return ((s[i / 32].aval >> (i % 32)) & 1)
       | (((s[i / 32].bval >> (i % 32)) & 1) << 1);
 }
 
+DLLEXPORT
 void svPutBitselBit(svBitVecVal *d, int i, svBit s)
 {
    d[i / 32] = (d[i / 32] & ~(1u << (i % 32))) | ((unsigned)(s & 1) << (i % 32));
 }
 
+DLLEXPORT
 void svPutBitselLogic(svLogicVecVal *d, int i, svLogic s)
 {
    d[i / 32].aval = (d[i / 32].aval & ~(1u << (i % 32)))
@@ -2044,6 +2096,7 @@ void svPutBitselLogic(svLogicVecVal *d, int i, svLogic s)
       | ((unsigned)((s >> 1) & 1) << (i % 32));
 }
 
+DLLEXPORT
 void svGetPartselBit(svBitVecVal *d, const svBitVecVal *s, int i, int w)
 {
    for (int k = 0; k < (w + 31) / 32; k++)
@@ -2052,6 +2105,7 @@ void svGetPartselBit(svBitVecVal *d, const svBitVecVal *s, int i, int w)
       svPutBitselBit(d, k, svGetBitselBit(s, i + k));
 }
 
+DLLEXPORT
 svBitVecVal svGetBits(const svBitVecVal *s, int i, int w)
 {
    svBitVecVal v = 0;
@@ -2060,6 +2114,7 @@ svBitVecVal svGetBits(const svBitVecVal *s, int i, int w)
    return v;
 }
 
+DLLEXPORT
 void svGetPartselLogic(svLogicVecVal *d, const svLogicVecVal *s, int i, int w)
 {
    for (int k = 0; k < (w + 31) / 32; k++)
@@ -2068,12 +2123,14 @@ void svGetPartselLogic(svLogicVecVal *d, const svLogicVecVal *s, int i, int w)
       svPutBitselLogic(d, k, svGetBitselLogic(s, i + k));
 }
 
+DLLEXPORT
 void svPutPartselBit(svBitVecVal *d, const svBitVecVal s, int i, int w)
 {
    for (int k = 0; k < w && k < 32; k++)
       svPutBitselBit(d, i + k, (s >> k) & 1);
 }
 
+DLLEXPORT
 void svPutPartselLogic(svLogicVecVal *d, const svLogicVecVal s, int i, int w)
 {
    for (int k = 0; k < w && k < 32; k++)
@@ -2093,54 +2150,63 @@ static const dpi_dim_t *dpi_oa_dim(const dpi_oa_t *oa, int d)
       return NULL;
 }
 
+DLLEXPORT
 int svLeft(const svOpenArrayHandle h, int d)
 {
    const dpi_dim_t *dim = dpi_oa_dim(h, d);
    return dim != NULL ? dim->left : 0;
 }
 
+DLLEXPORT
 int svRight(const svOpenArrayHandle h, int d)
 {
    const dpi_dim_t *dim = dpi_oa_dim(h, d);
    return dim != NULL ? dim->right : 0;
 }
 
+DLLEXPORT
 int svLow(const svOpenArrayHandle h, int d)
 {
    const dpi_dim_t *dim = dpi_oa_dim(h, d);
    return dim != NULL ? MIN(dim->left, dim->right) : 0;
 }
 
+DLLEXPORT
 int svHigh(const svOpenArrayHandle h, int d)
 {
    const dpi_dim_t *dim = dpi_oa_dim(h, d);
    return dim != NULL ? MAX(dim->left, dim->right) : 0;
 }
 
+DLLEXPORT
 int svIncrement(const svOpenArrayHandle h, int d)
 {
    const dpi_dim_t *dim = dpi_oa_dim(h, d);
    return dim != NULL && dim->left < dim->right ? -1 : 1;
 }
 
+DLLEXPORT
 int svSize(const svOpenArrayHandle h, int d)
 {
    const dpi_dim_t *dim = dpi_oa_dim(h, d);
    return dim != NULL ? dim->size : 0;
 }
 
+DLLEXPORT
 int svDimensions(const svOpenArrayHandle h)
 {
    const dpi_oa_t *oa = h;
    return oa->ndims + (oa->has_packed ? 1 : 0);
 }
 
+DLLEXPORT
 void *svGetArrayPtr(const svOpenArrayHandle h)
 {
    const dpi_oa_t *oa = h;
    return oa->buf;
 }
 
+DLLEXPORT
 int svSizeOfArray(const svOpenArrayHandle h)
 {
    const dpi_oa_t *oa = h;
@@ -2173,6 +2239,7 @@ static void *dpi_oa_find_va(const dpi_oa_t *oa, int indx1, va_list ap)
    return dpi_oa_find(oa, idx);
 }
 
+DLLEXPORT
 void *svGetArrElemPtr(const svOpenArrayHandle h, int indx1, ...)
 {
    va_list ap;
@@ -2182,18 +2249,21 @@ void *svGetArrElemPtr(const svOpenArrayHandle h, int indx1, ...)
    return ptr;
 }
 
+DLLEXPORT
 void *svGetArrElemPtr1(const svOpenArrayHandle h, int indx1)
 {
    const int idx[] = { indx1 };
    return dpi_oa_find(h, idx);
 }
 
+DLLEXPORT
 void *svGetArrElemPtr2(const svOpenArrayHandle h, int indx1, int indx2)
 {
    const int idx[] = { indx1, indx2 };
    return dpi_oa_find(h, idx);
 }
 
+DLLEXPORT
 void *svGetArrElemPtr3(const svOpenArrayHandle h, int indx1, int indx2,
                        int indx3)
 {
@@ -2377,7 +2447,7 @@ static void dpi_oa_put_logic_bit(const dpi_oa_t *oa, void *p, svLogic v)
       if (p != NULL)                                                    \
          CONV(h, p, d);                                                 \
    }                                                                    \
-   void NAME(TYPE *d, const svOpenArrayHandle h, int indx1, ...)        \
+   DLLEXPORT void NAME(TYPE *d, const svOpenArrayHandle h, int indx1, ...)        \
    {                                                                    \
       va_list ap;                                                       \
       va_start(ap, indx1);                                              \
@@ -2385,15 +2455,15 @@ static void dpi_oa_put_logic_bit(const dpi_oa_t *oa, void *p, svLogic v)
       va_end(ap);                                                       \
       NAME##_at(d, h, p);                                               \
    }                                                                    \
-   void N1(TYPE *d, const svOpenArrayHandle h, int i1)             \
+   DLLEXPORT void N1(TYPE *d, const svOpenArrayHandle h, int i1)             \
    {                                                                    \
       NAME##_at(d, h, svGetArrElemPtr1(h, i1));                         \
    }                                                                    \
-   void N2(TYPE *d, const svOpenArrayHandle h, int i1, int i2)     \
+   DLLEXPORT void N2(TYPE *d, const svOpenArrayHandle h, int i1, int i2)     \
    {                                                                    \
       NAME##_at(d, h, svGetArrElemPtr2(h, i1, i2));                     \
    }                                                                    \
-   void N3(TYPE *d, const svOpenArrayHandle h, int i1, int i2,     \
+   DLLEXPORT void N3(TYPE *d, const svOpenArrayHandle h, int i1, int i2,     \
                 int i3)                                                 \
    {                                                                    \
       NAME##_at(d, h, svGetArrElemPtr3(h, i1, i2, i3));                 \
@@ -2406,7 +2476,7 @@ static void dpi_oa_put_logic_bit(const dpi_oa_t *oa, void *p, svLogic v)
       if (p != NULL)                                                    \
          CONV(h, p, s);                                                 \
    }                                                                    \
-   void NAME(const svOpenArrayHandle h, const TYPE *s, int indx1, ...)  \
+   DLLEXPORT void NAME(const svOpenArrayHandle h, const TYPE *s, int indx1, ...)  \
    {                                                                    \
       va_list ap;                                                       \
       va_start(ap, indx1);                                              \
@@ -2414,23 +2484,23 @@ static void dpi_oa_put_logic_bit(const dpi_oa_t *oa, void *p, svLogic v)
       va_end(ap);                                                       \
       NAME##_at(h, s, p);                                               \
    }                                                                    \
-   void N1(const svOpenArrayHandle h, const TYPE *s, int i1)       \
+   DLLEXPORT void N1(const svOpenArrayHandle h, const TYPE *s, int i1)       \
    {                                                                    \
       NAME##_at(h, s, svGetArrElemPtr1(h, i1));                         \
    }                                                                    \
-   void N2(const svOpenArrayHandle h, const TYPE *s, int i1,       \
+   DLLEXPORT void N2(const svOpenArrayHandle h, const TYPE *s, int i1,       \
                 int i2)                                                 \
    {                                                                    \
       NAME##_at(h, s, svGetArrElemPtr2(h, i1, i2));                     \
    }                                                                    \
-   void N3(const svOpenArrayHandle h, const TYPE *s, int i1,       \
+   DLLEXPORT void N3(const svOpenArrayHandle h, const TYPE *s, int i1,       \
                 int i2, int i3)                                         \
    {                                                                    \
       NAME##_at(h, s, svGetArrElemPtr3(h, i1, i2, i3));                 \
    }
 
 #define DPI_OA_GET_SCALAR(NAME, RET, CONV)                              \
-   RET NAME(const svOpenArrayHandle h, int indx1, ...)                  \
+   DLLEXPORT RET NAME(const svOpenArrayHandle h, int indx1, ...)                  \
    {                                                                    \
       va_list ap;                                                       \
       va_start(ap, indx1);                                              \
@@ -2438,24 +2508,24 @@ static void dpi_oa_put_logic_bit(const dpi_oa_t *oa, void *p, svLogic v)
       va_end(ap);                                                       \
       return p != NULL ? CONV(h, p) : 0;                                \
    }                                                                    \
-   RET NAME##1(const svOpenArrayHandle h, int i1)                       \
+   DLLEXPORT RET NAME##1(const svOpenArrayHandle h, int i1)                       \
    {                                                                    \
       void *p = svGetArrElemPtr1(h, i1);                                \
       return p != NULL ? CONV(h, p) : 0;                                \
    }                                                                    \
-   RET NAME##2(const svOpenArrayHandle h, int i1, int i2)               \
+   DLLEXPORT RET NAME##2(const svOpenArrayHandle h, int i1, int i2)               \
    {                                                                    \
       void *p = svGetArrElemPtr2(h, i1, i2);                            \
       return p != NULL ? CONV(h, p) : 0;                                \
    }                                                                    \
-   RET NAME##3(const svOpenArrayHandle h, int i1, int i2, int i3)       \
+   DLLEXPORT RET NAME##3(const svOpenArrayHandle h, int i1, int i2, int i3)       \
    {                                                                    \
       void *p = svGetArrElemPtr3(h, i1, i2, i3);                        \
       return p != NULL ? CONV(h, p) : 0;                                \
    }
 
 #define DPI_OA_PUT_SCALAR(NAME, TYPE, CONV)                             \
-   void NAME(const svOpenArrayHandle h, TYPE v, int indx1, ...)         \
+   DLLEXPORT void NAME(const svOpenArrayHandle h, TYPE v, int indx1, ...)         \
    {                                                                    \
       va_list ap;                                                       \
       va_start(ap, indx1);                                              \
@@ -2464,19 +2534,19 @@ static void dpi_oa_put_logic_bit(const dpi_oa_t *oa, void *p, svLogic v)
       if (p != NULL)                                                    \
          CONV(h, p, v);                                                 \
    }                                                                    \
-   void NAME##1(const svOpenArrayHandle h, TYPE v, int i1)              \
+   DLLEXPORT void NAME##1(const svOpenArrayHandle h, TYPE v, int i1)              \
    {                                                                    \
       void *p = svGetArrElemPtr1(h, i1);                                \
       if (p != NULL)                                                    \
          CONV(h, p, v);                                                 \
    }                                                                    \
-   void NAME##2(const svOpenArrayHandle h, TYPE v, int i1, int i2)      \
+   DLLEXPORT void NAME##2(const svOpenArrayHandle h, TYPE v, int i1, int i2)      \
    {                                                                    \
       void *p = svGetArrElemPtr2(h, i1, i2);                            \
       if (p != NULL)                                                    \
          CONV(h, p, v);                                                 \
    }                                                                    \
-   void NAME##3(const svOpenArrayHandle h, TYPE v, int i1, int i2,      \
+   DLLEXPORT void NAME##3(const svOpenArrayHandle h, TYPE v, int i1, int i2,      \
                 int i3)                                                 \
    {                                                                    \
       void *p = svGetArrElemPtr3(h, i1, i2, i3);                        \

@@ -997,7 +997,7 @@ static bool run_test(test_t *test)
          push_arg(&args, "--load=%s", test->plugin);
 
       if (test->svlib != NULL)
-         push_arg(&args, "--sv-lib=%s", test->svlib);
+         push_arg(&args, "--sv-lib=%s.so%s", test->svlib, EXEEXT);
 
       for (param_t *p = test->params; p != NULL; p = p->next) {
          if (p->kind == P_PLUSARG)
@@ -1092,7 +1092,7 @@ static bool run_test(test_t *test)
             push_arg(&args, "--load=%s", test->plugin);
 
          if (test->svlib != NULL)
-            push_arg(&args, "--sv-lib=%s", test->svlib);
+            push_arg(&args, "--sv-lib=%s.so%s", test->svlib, EXEEXT);
 
          for (param_t *p = test->params; p != NULL; p = p->next) {
             if (p->kind == P_PLUSARG)

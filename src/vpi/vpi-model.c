@@ -15,6 +15,11 @@
 //  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //
 
+#ifdef __MINGW32__
+// This file defines the VPI functions rather than importing them
+#define PLI_DLLISPEC
+#endif
+
 #include "util.h"
 #include "array.h"
 #include "common.h"
@@ -45,10 +50,16 @@
 #include "vpi/svdpi.h"
 
 #include <assert.h>
+#include <inttypes.h>
 #include <ctype.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef __MINGW32__
+// Must be exported before first use
+DLLEXPORT void vpi_get_value(vpiHandle handle, p_vpi_value value_p);
+#endif
 
 typedef struct {
    PLI_INT32 type;
@@ -3811,6 +3822,7 @@ static void vpi_stmt_hook(const char *file, int line, rt_proc_t *proc,
               tb_get(scope), stmt_context);
 }
 
+DLLEXPORT
 void vpi_nvc_set_stmt_cb(vpi_nvc_stmt_fn_t fn, void *user_data)
 {
    stmt_fn = fn;
@@ -3818,23 +3830,27 @@ void vpi_nvc_set_stmt_cb(vpi_nvc_stmt_fn_t fn, void *user_data)
    set_stmt_hook(fn != NULL ? vpi_stmt_hook : NULL, NULL);
 }
 
+DLLEXPORT
 PLI_INT32 vpi_nvc_stmt_breakpoint_add(const char *file, int line)
 {
    stmt_break_add(file, line);
    return opt_get_int(OPT_DEBUG_STMTS) ? 1 : 0;
 }
 
+DLLEXPORT
 PLI_INT32 vpi_nvc_stmt_step(PLI_INT32 enable)
 {
    stmt_step_set(enable != 0);
    return opt_get_int(OPT_DEBUG_STMTS) ? 1 : 0;
 }
 
+DLLEXPORT
 PLI_INT32 vpi_nvc_stmt_breakpoint_remove(const char *file, int line)
 {
    return stmt_break_remove(file, line) ? 1 : 0;
 }
 
+DLLEXPORT
 void vpi_nvc_set_diag_cb(vpi_nvc_diag_fn_t fn, void *user_data)
 {
    diag_fn = fn;

@@ -206,6 +206,12 @@ void push_buffer(const char *buf, size_t len, file_ref_t file_ref)
 static char *file_directory(const char *path)
 {
    const char *slash = strrchr(path, DIR_SEP[0]);
+#ifdef __MINGW32__
+   // Either separator may be used in a path on Windows
+   const char *fslash = strrchr(path, '/');
+   if (fslash != NULL && (slash == NULL || fslash > slash))
+      slash = fslash;
+#endif
    return slash != NULL ? xstrndup(path, slash - path) : NULL;
 }
 
