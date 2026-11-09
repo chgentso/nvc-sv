@@ -6075,6 +6075,7 @@ struct _sv_task {
    struct _sv_task *parent;
    struct _sv_task *first_child;
    struct _sv_task *next_sibling;
+   struct _sv_task *prev_sibling;
    sv_group_t      *group;
    int64_t          block_label;   // Named block this process executes
    int              live_children;
@@ -6677,13 +6678,13 @@ static void sv_proc_free(rt_model_t *m, rt_proc_t *p)
    if (t->handle != 0)
       sv_handles.items[t->handle - 1].task = NULL;
 
-   for (sv_task_t **link = &(t->parent->first_child); *link != NULL;
-        link = &((*link)->next_sibling)) {
-      if (*link == t) {
-         *link = t->next_sibling;
-         break;
-      }
-   }
+   if (t->prev_sibling != NULL)
+      t->prev_sibling->next_sibling = t->next_sibling;
+   else
+      t->parent->first_child = t->next_sibling;
+
+   if (t->next_sibling != NULL)
+      t->next_sibling->prev_sibling = t->prev_sibling;
 
    rt_scope_t *s = p->scope;
    for (int i = s->procs.count - 1; i >= 0; i--) {
@@ -7267,6 +7268,9 @@ void x_sv_spawn(const ffi_closure_t *closure, void *group, int64_t label)
    task->group = group;
    task->block_label = label;
    task->next_sibling = pt->first_child;
+   task->prev_sibling = NULL;
+   if (pt->first_child != NULL)
+      pt->first_child->prev_sibling = task;
    pt->first_child = task;
    pt->live_children++;
 
