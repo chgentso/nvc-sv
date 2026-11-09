@@ -15,10 +15,13 @@ typedef unsigned char svBit;
 typedef unsigned char svLogic;
 typedef unsigned int svBitVecVal;
 
+#ifndef VPI_VECVAL
+#define VPI_VECVAL
 typedef struct t_vpi_vecval {
    unsigned int aval;
    unsigned int bval;
 } s_vpi_vecval, *p_vpi_vecval;
+#endif
 
 typedef s_vpi_vecval svLogicVecVal;
 
