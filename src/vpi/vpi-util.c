@@ -153,12 +153,14 @@ void vpi_format_number(int size, bool is_signed, const uint64_t *abits,
 
    switch (val->format) {
    case vpiBinStrVal:
-      for (int i = size - 1; i >= 0; i--) {
-         const vlog_logic_t bit =
-            ((bbits[i / 64] >> (i % 64)) & 1) << 1
-            | ((abits[i / 64] >> (i % 64)) & 1);
+      {
          static const char map[] = "01zx";
-         tb_append(tb, map[bit]);
+         char *p = tb_reserve(tb, size);
+         for (int i = size - 1; i >= 0; i--) {
+            const unsigned bit = ((bbits[i / 64] >> (i % 64)) & 1) << 1
+               | ((abits[i / 64] >> (i % 64)) & 1);
+            *p++ = map[bit];
+         }
       }
       val->value.str = (PLI_BYTE8 *)tb_get(tb);
       break;

@@ -2634,6 +2634,35 @@ static void vpi_mem_vec_write(vpi_vec_t *v, const uint8_t *unpacked, int size)
    }
 }
 
+static inline void vpi_gather_bits(const uint8_t *vals, int size,
+                                   uint64_t *abits, uint64_t *bbits)
+{
+   // Each byte of a signal's value holds one bit of the value in bit zero
+   // and the unknown bit in bit one.  The first element is the most
+   // significant bit.  Eight elements are gathered per step.
+
+   const uint64_t lo = UINT64_C(0x0101010101010101);
+   const uint64_t magic = UINT64_C(0x8040201008040201);
+
+   for (int i = 0; i < size; i += 8) {
+      const int n = MIN(8, size - i);
+
+      uint64_t w = 0;
+      memcpy(&w, vals + i, n);
+
+      const uint64_t a = (((w & lo) * magic) >> 56) >> (8 - n);
+      const uint64_t b = ((((w >> 1) & lo) * magic) >> 56) >> (8 - n);
+
+      const int pos = size - i - n;   // Position of the least significant
+      abits[pos / 64] |= a << (pos % 64);
+      bbits[pos / 64] |= b << (pos % 64);
+      if (pos % 64 + n > 64) {
+         abits[pos / 64 + 1] |= a >> (64 - pos % 64);
+         bbits[pos / 64 + 1] |= b >> (64 - pos % 64);
+      }
+   }
+}
+
 static bool vpi_read_bits(c_abstractDecl *d, uint64_t *abits, uint64_t *bbits)
 {
    const int nwords = (d->size + 63) / 64;
@@ -2648,11 +2677,7 @@ static bool vpi_read_bits(c_abstractDecl *d, uint64_t *abits, uint64_t *bbits)
             return false;
 
          const uint8_t *vals = (const uint8_t *)signal_value(s) + d->offset;
-         for (int i = 0; i < d->size; i++) {
-            const int pos = d->size - 1 - i;
-            abits[pos / 64] |= (uint64_t)(vals[i] & 1) << (pos % 64);
-            bbits[pos / 64] |= (uint64_t)((vals[i] >> 1) & 1) << (pos % 64);
-         }
+         vpi_gather_bits(vals, d->size, abits, bbits);
       }
       return true;
 
@@ -2824,8 +2849,29 @@ static bool vpi_value_decl(c_abstractDecl *d, p_vpi_value value_p)
    case STORE_FVEC2:
    case STORE_FVEC4:
       {
+         if (d->storage == STORE_SIGNAL && value_p->format == vpiBinStrVal) {
+            // The elements of a signal are already the digits
+            rt_signal_t *s = vpi_signal(d);
+            if (s == NULL)
+               return false;
+
+            static const char map[] = "01zx";
+            const uint8_t *vals =
+               (const uint8_t *)signal_value(s) + d->offset;
+            char *p = tb_reserve(c->valuestr, d->size);
+            for (int i = 0; i < d->size; i++)
+               p[i] = map[vals[i] & 3];
+
+            value_p->value.str = (PLI_BYTE8 *)tb_get(c->valuestr);
+            return true;
+         }
+
          const int nwords = (d->size + 63) / 64;
-         uint64_t *mem LOCAL = xmalloc_array(nwords * 2, sizeof(uint64_t));
+         uint64_t small[8];
+         uint64_t *heap LOCAL = NULL;
+         uint64_t *mem = small;
+         if (nwords * 2 > ARRAY_LEN(small))
+            mem = heap = xmalloc_array(nwords * 2, sizeof(uint64_t));
          if (!vpi_read_bits(d, mem, mem + nwords))
             return false;
 
