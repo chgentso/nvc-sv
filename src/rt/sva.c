@@ -1630,8 +1630,13 @@ static xval_t xcall(const sva_t *s, const xnode_t *x, int64_t tick,
 
    const int idx = x->value & 0xff;
    const int nargs = (x->value >> 8) & 0xf;
-   const int sbits = (x->value >> 12) & 0xf;
-   const int ids[SVA_MAX_FARGS] = { x->a, x->b, x->c };
+   const int sbits = (x->value >> 12) & 0x3f;
+   const int ids[SVA_MAX_FARGS] = {
+      x->a, x->b, x->c,
+      (x->value >> 20) & 0x3fff,
+      (x->value >> 34) & 0x3fff,
+      (x->value >> 48) & 0x3fff,
+   };
 
    int64_t args[SVA_MAX_FARGS] = {};
    bool unk = false;
@@ -2807,7 +2812,8 @@ static tri_t leval_prop(const sva_t *s, int id, int64_t start,
 
          int64_t abort = -1;
          for (int64_t k = start; k < s->nticks; k++) {
-            if (sva_leaf(s, n->leaf, k)) {
+            if (n->lo > 0 ? xtrue(s, n->lo - 1, k, in)
+                : sva_leaf(s, n->leaf, k)) {
                abort = k;
                break;
             }

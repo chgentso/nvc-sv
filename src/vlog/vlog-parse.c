@@ -7951,7 +7951,10 @@ static vlog_node_t sva_local_init(vlog_node_t decl, vlog_node_t body,
    // A local variable with an initial value and a local input formal
    // are assigned at the start of each instance of the sequence
 
-   vlog_node_t init = NULL;
+   // The initial values are assigned in the order of declaration so that
+   // one may refer to an earlier local variable
+   A(vlog_node_t) assigns = AINIT;
+   A(vlog_node_t) origs = AINIT;
    for (unsigned i = 0; i < e->orig.count; i++) {
       vlog_node_t d = e->orig.items[i], value = NULL;
 
@@ -7969,12 +7972,6 @@ static vlog_node_t sva_local_init(vlog_node_t decl, vlog_node_t body,
       if (value == NULL)
          continue;
 
-      if (init == NULL) {
-         init = sva_new(V_SVA_MATCH);
-         vlog_add_param(init, sva_number(1, loc));
-         vlog_set_loc(init, loc);
-      }
-
       vlog_node_t target = vlog_new(V_REF);
       vlog_set_ident(target, vlog_ident(e->clone.items[i]));
       vlog_set_ref(target, e->clone.items[i]);
@@ -7984,8 +7981,40 @@ static vlog_node_t sva_local_init(vlog_node_t decl, vlog_node_t body,
       vlog_set_target(assign, target);
       vlog_set_value(assign, value);
       vlog_set_loc(assign, loc);
-      vlog_add_param(init, assign);
+
+      // Insertion sort by position of the declaration
+      const loc_t *dl = vlog_loc(d);
+      unsigned pos = assigns.count;
+      while (pos > 0) {
+         const loc_t *pl = vlog_loc(origs.items[pos - 1]);
+         if (pl->first_line < dl->first_line
+             || (pl->first_line == dl->first_line
+                 && pl->first_column <= dl->first_column))
+            break;
+         pos--;
+      }
+
+      APUSH(assigns, assign);
+      APUSH(origs, d);
+      for (unsigned k = assigns.count - 1; k > pos; k--) {
+         assigns.items[k] = assigns.items[k - 1];
+         origs.items[k] = origs.items[k - 1];
+      }
+      assigns.items[pos] = assign;
+      origs.items[pos] = d;
    }
+
+   vlog_node_t init = NULL;
+   if (assigns.count > 0) {
+      init = sva_new(V_SVA_MATCH);
+      vlog_add_param(init, sva_number(1, loc));
+      vlog_set_loc(init, loc);
+      for (unsigned i = 0; i < assigns.count; i++)
+         vlog_add_param(init, assigns.items[i]);
+   }
+
+   ACLEAR(assigns);
+   ACLEAR(origs);
 
    if (init == NULL)
       return body;

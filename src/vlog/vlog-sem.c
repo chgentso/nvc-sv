@@ -2016,14 +2016,6 @@ static void vlog_check_sva_flow(vlog_node_t decl)
 static void vlog_check_sva_op(vlog_node_t v)
 {
    switch (vlog_subkind(v)) {
-   case V_SVA_ACCEPT_ON:
-   case V_SVA_REJECT_ON:
-   case V_SVA_SYNC_ACCEPT_ON:
-   case V_SVA_SYNC_REJECT_ON:
-      if (vlog_has_value(v))
-         vlog_visit(vlog_value(v), sva_abort_local_cb,
-                    (void *)"an abort condition");
-      break;
    case V_SVA_DISABLE:
       if (vlog_has_value(v))
          vlog_visit(vlog_value(v), sva_abort_local_cb,

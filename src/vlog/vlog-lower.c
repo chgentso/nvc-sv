@@ -12301,14 +12301,23 @@ static sva_xref_t vlog_sva_fcall(sva_build_t *b, vlog_node_t v)
 
    const int call = b->nfcalls++;
 
-   int ids[SVA_MAX_FARGS] = { -1, -1, -1 };
+   int ids[SVA_MAX_FARGS] = { -1, -1, -1, 0, 0, 0 };
    int sbits = 0;
+   int64_t extra = 0;
    for (int i = 0; i < nparams; i++) {
       vlog_node_t arg = vlog_param(v, i);
       const int w = vlog_sva_width(arg);
       ids[i] = vlog_sva_expr(b, arg, w).id;
       if (vlog_sva_signed(arg))
          sbits |= 1 << i;
+      if (i >= 3) {
+         if (ids[i] >= 0x4000) {
+            fatal_at(vlog_loc(v), "sorry, assertion expression too large "
+                     "for a function call with local variable arguments");
+            return (sva_xref_t){ 0, 1 };
+         }
+         extra |= (int64_t)ids[i] << (20 + 14 * (i - 3));
+      }
    }
 
    if (b->emit) {
@@ -12333,7 +12342,7 @@ static sva_xref_t vlog_sva_fcall(sva_build_t *b, vlog_node_t v)
    return (sva_xref_t){
       vlog_sva_xnode(b, SVA_X_CALL, ids[0], ids[1], ids[2], own,
                      vlog_sva_signed(v) ? SVA_XF_SIGNED : 0,
-                     call | (nparams << 8) | (sbits << 12)), own
+                     call | (nparams << 8) | (sbits << 12) | extra), own
    };
 }
 
@@ -12939,9 +12948,9 @@ static int vlog_sva_tree(sva_build_t *b, vlog_node_t v)
    case V_SVA_SYNC_REJECT_ON:
       {
          if (vlog_sva_uses_local(vlog_value(v))) {
-            fatal_at(vlog_loc(vlog_value(v)), "sorry, a local variable "
-                     "cannot be used in the abort condition of a property");
-            return 0;
+            const sva_xref_t x = vlog_sva_expr(b, vlog_value(v), 0);
+            const int a = vlog_sva_tree(b, vlog_param(v, 0));
+            return vlog_sva_node(b, op, a, -1, 0, x.id + 1, 0);
          }
 
          int leaf;

@@ -72,8 +72,8 @@ typedef enum {
 #define SVA_MAX_LEAVES 64
 #define SVA_MAX_LOCALS 16
 #define SVA_MAX_SLOTS  64
-#define SVA_MAX_FCALLS 8       // Function calls in expressions with locals
-#define SVA_MAX_FARGS  3
+#define SVA_MAX_FCALLS 32      // Function calls in expressions with locals
+#define SVA_MAX_FARGS  6
 #define SVA_WORDS      16      // Largest width of a local variable is 1024
 
 // Operators of the expressions which read local variables
