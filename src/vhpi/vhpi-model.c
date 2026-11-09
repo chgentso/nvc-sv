@@ -158,6 +158,17 @@ typedef struct tag_typeDecl {
 } c_typeDecl;
 
 typedef struct {
+   // What is needed to read the value of a signal object again, once it
+   // has been found by walking the prefixes and layouts of the object
+   void        *data;
+   rt_signal_t *signal;
+   c_typeDecl  *td;
+   vhpiIntT     num_elems;
+   uint32_t     offset;
+   bool         valid;
+} vhpi_sigcache_t;
+
+typedef struct {
    c_typeDecl      typeDecl;
    c_typeDecl     *BaseType;
    c_typeDecl     *ElemType;  // TODO: elem constraint?
@@ -249,6 +260,7 @@ typedef struct {
    c_abstractDecl   decl;
    ptrdiff_t        offset;
    c_typeDecl      *Type;
+   vhpi_sigcache_t  cache;
    vhpiLazyListT    IndexedNames;
    vhpiLazyListT    SelectedNames;
    vhpiStaticnessT  Staticness;
@@ -396,6 +408,7 @@ typedef struct {
    c_prefixedName prefixedName;
    vhpiIntT       BaseIndex;
    vhpiIntT       offset;
+   vhpi_sigcache_t cache;
 } c_indexedName;
 
 DEF_CLASS(indexedName, vhpiIndexedNameK, prefixedName.name.expr.object);
@@ -403,6 +416,7 @@ DEF_CLASS(indexedName, vhpiIndexedNameK, prefixedName.name.expr.object);
 typedef struct {
    c_prefixedName  prefixedName;
    c_elemDecl     *Suffix;
+   vhpi_sigcache_t cache;
 } c_selectedName;
 
 DEF_CLASS(selectedName, vhpiSelectedNameK, prefixedName.name.expr.object);
@@ -3513,6 +3527,23 @@ static int vhpi_to_string(c_typeDecl *td, int64_t scalar, int num_elems,
    }
 }
 
+static vhpi_sigcache_t *vhpi_sigcache(c_vhpiObject *obj)
+{
+   switch (obj->kind) {
+   case vhpiSigDeclK:
+   case vhpiPortDeclK:
+      return &(container_of(obj, c_objDecl, decl.object)->cache);
+   case vhpiIndexedNameK:
+      return &(container_of(obj, c_indexedName,
+                            prefixedName.name.expr.object)->cache);
+   case vhpiSelectedNameK:
+      return &(container_of(obj, c_selectedName,
+                            prefixedName.name.expr.object)->cache);
+   default:
+      return NULL;
+   }
+}
+
 DLLEXPORT
 int vhpi_get_value(vhpiHandleT expr, vhpiValueT *value_p)
 {
@@ -3524,17 +3555,55 @@ int vhpi_get_value(vhpiHandleT expr, vhpiValueT *value_p)
    if (obj == NULL)
       return -1;
 
-   vhpi_ptr_t ptr = vhpi_get_ptr(obj);
-   VHPI_DEBUG("ptr kind=%d data=%p offset=%d", ptr.kind, ptr.data, ptr.offset);
+   vhpi_sigcache_t *cache = vhpi_sigcache(obj);
 
-   if (ptr.kind == PTR_NULL) {
-      vhpi_error(vhpiError, obj_loc(obj), "cannot get value of %s",
-                 vhpi_class_str(obj->kind));
-      return -1;
+   vhpi_ptr_t ptr;
+   c_typeDecl *td;
+   vhpiIntT num_elems;
+   if (cache != NULL && cache->valid) {
+      ptr = (vhpi_ptr_t){
+         .kind = PTR_SIGNAL,
+         .offset = cache->offset,
+         .data = cache->data,
+         .signal = cache->signal,
+      };
+      td = cache->td;
+      num_elems = cache->num_elems;
    }
+   else {
+      ptr = vhpi_get_ptr(obj);
+      VHPI_DEBUG("ptr kind=%d data=%p offset=%d", ptr.kind, ptr.data,
+                 ptr.offset);
 
-   c_typeDecl *td = vhpi_get_type(obj);
-   assert(td != NULL);
+      if (ptr.kind == PTR_NULL) {
+         vhpi_error(vhpiError, obj_loc(obj), "cannot get value of %s",
+                    vhpi_class_str(obj->kind));
+         return -1;
+      }
+
+      td = vhpi_get_type(obj);
+      assert(td != NULL);
+
+      num_elems = vhpi_get_size(obj);
+      if (num_elems == vhpiUndefined) {
+         vhpi_error(vhpiError, obj_loc(obj), "cannot get size of %s",
+                    vhpi_class_str(obj->kind));
+         return -1;
+      }
+
+      if (cache != NULL && ptr.kind == PTR_SIGNAL
+          && vhpi_context()->phase == vhpiSimulationPhase) {
+         // The storage of a signal does not move once it has been created
+         *cache = (vhpi_sigcache_t){
+            .data = ptr.data,
+            .signal = ptr.signal,
+            .td = td,
+            .num_elems = num_elems,
+            .offset = ptr.offset,
+            .valid = true,
+         };
+      }
+   }
 
    if (value_p->format == vhpiObjTypeVal)
       value_p->format = td->format;
@@ -3545,13 +3614,6 @@ int vhpi_get_value(vhpiHandleT expr, vhpiValueT *value_p)
       vhpi_error(vhpiError, obj_loc(obj), "invalid format %s for object %s: "
                  "expecting %s", vhpi_format_str(value_p->format),
                  vhpi_get_name(obj), vhpi_format_str(td->format));
-      return -1;
-   }
-
-   const vhpiIntT num_elems = vhpi_get_size(obj);
-   if (num_elems == vhpiUndefined) {
-      vhpi_error(vhpiError, obj_loc(obj), "cannot get size of %s",
-                 vhpi_class_str(obj->kind));
       return -1;
    }
 
