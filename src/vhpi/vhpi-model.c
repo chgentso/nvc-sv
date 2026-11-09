@@ -27,6 +27,7 @@
 #include "option.h"
 #include "printf.h"
 #include "rt/model.h"
+#include "rt/mtprof.h"
 #include "rt/structs.h"
 #include "tree.h"
 #include "type.h"
@@ -2572,6 +2573,7 @@ vhpiHandleT vhpi_register_cb(vhpiCbDataT *cb_data_p, int32_t flags)
          vhpi_collect_signals(obj, &slices);
 
          cb->handle = internal_handle_for(&(cb->refcounted.object));
+         mtp_tag_fn(vhpi_signal_event_cb, MTP_VPI);
          cb->watch = watch_new(m, vhpi_signal_event_cb, cb->handle,
                                WATCH_EVENT, slices.count);
 

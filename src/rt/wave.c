@@ -25,6 +25,7 @@
 #include "option.h"
 #include "rt/defs.h"
 #include "rt/model.h"
+#include "rt/mtprof.h"
 #include "rt/structs.h"
 #include "rt/wave.h"
 #include "printf.h"
@@ -1306,6 +1307,10 @@ void wave_dumper_restart(wave_dumper_t *wd, rt_model_t *m, jit_t *jit)
       fst_data_t *data = wd->dumped.items[i];
       fst_event_cb(0, data->signal, data->watch, data);
    }
+
+   mtp_tag_fn(fst_event_cb, MTP_WAVE);
+   mtp_tag_fn(fst_flush, MTP_WAVE);
+   mtp_tag_fn(fst_close, MTP_WAVE);
 
    model_set_phase_cb(m, END_OF_SIMULATION, fst_close, wd);
 

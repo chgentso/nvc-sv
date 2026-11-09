@@ -36,6 +36,7 @@
 #include "rt/assert.h"
 #include "rt/fileio.h"
 #include "rt/model.h"
+#include "rt/mtprof.h"
 #include "rt/mspace.h"
 #include "rt/structs.h"
 #include "tree.h"
@@ -3513,6 +3514,8 @@ static void vpi_arm_callback(vpi_context_t *c, vpiHandle handle)
 
    rt_model_t *m = c->model;
 
+   mtp_tag_fn(vpi_global_cb, MTP_VPI);
+
    switch (cb->data.reason) {
    case cbStartOfSimulation:
       model_set_phase_cb(m, START_OF_SIMULATION, vpi_global_cb, handle);
@@ -3568,6 +3571,7 @@ static rt_watch_t *vpi_watch_decl(vpi_context_t *c, c_abstractDecl *d,
       count = 1;
 
    rt_model_t *m = vpi_get_model(c);
+   mtp_tag_fn(vpi_value_change_cb, MTP_VPI);
    rt_watch_t *w = watch_new(m, vpi_value_change_cb, handle, WATCH_EVENT, 1);
    model_set_event_cb(m, s, d->offset, count, w);
    return w;

@@ -34,6 +34,7 @@
 #include "rt/defs.h"
 #include "rt/heap.h"
 #include "rt/model.h"
+#include "rt/mtprof.h"
 #include "rt/random.h"
 #include "rt/structs.h"
 #include "thread.h"
@@ -567,7 +568,15 @@ static void run_callbacks(rt_model_t *m, model_phase_t phase)
 
    for (rt_callback_t *it = list, *tmp; it; it = tmp) {
       tmp = it->next;
-      (*it->fn)(m, it->user);
+      if (unlikely(mtp.on)) {
+         const mtp_phase_t ph = mtp_classify_fn((void *)it->fn, MTP_PHASECB);
+         const mtp_phase_t prev = mtp_enter(ph);
+         mtp.runs[ph]++;
+         (*it->fn)(m, it->user);
+         MTP_LEAVE(prev);
+      }
+      else
+         (*it->fn)(m, it->user);
       free(it);
    }
 }
@@ -621,6 +630,8 @@ rt_model_t *model_new(jit_t *jit, cover_data_t *cover)
    m->threads[thread_id()] = static_alloc(m, sizeof(model_thread_t));
 
    __trace_on = opt_get_int(OPT_RT_TRACE);
+
+   mtp_init();
 
    return m;
 }
@@ -735,6 +746,8 @@ void model_free(rt_model_t *m)
       notef("setup:%ums run:%ums user:%ums sys:%ums maxrss:%ukB static:%ukB",
             m->ready_rusage.ms, ru.ms, ru.user, ru.sys, ru.rss, mem / 1024);
    }
+
+   mtp_report(m->root);
 
    while (heap_size(m->eventq_heap) > 0) {
       void *e = heap_extract_min(m->eventq_heap);
@@ -1167,7 +1180,7 @@ typedef struct {
 
 static A(sv_handle_t) sv_handles = AINIT;
 
-static void run_process(rt_model_t *m, rt_proc_t *proc)
+static void run_process_inner(rt_model_t *m, rt_proc_t *proc)
 {
    TRACE("run %sprocess %s", *mptr_get(proc->privdata) ? "" :  "stateless ",
          istr(proc->name));
@@ -1229,6 +1242,21 @@ static void run_process(rt_model_t *m, rt_proc_t *proc)
 
    thread->active_obj = NULL;
    thread->active_scope = NULL;
+}
+
+static void run_process(rt_model_t *m, rt_proc_t *proc)
+{
+   if (likely(!mtp.on)) {
+      run_process_inner(m, proc);
+      return;
+   }
+
+   const mtp_phase_t ph = mtp_classify_proc(proc);
+   const mtp_phase_t prev = mtp_enter(ph);
+   mtp.runs[ph]++;
+   mtp.cycle_procs++;
+   run_process_inner(m, proc);
+   MTP_LEAVE(prev);
 }
 
 static bool scope_precedes(rt_scope_t *child, rt_proc_t *proc)
@@ -3162,6 +3190,13 @@ static void async_watch_callback(rt_model_t *m, void *arg)
 
    if (w->wakeable.zombie)
       free(w);
+   else if (unlikely(mtp.on)) {
+      const mtp_phase_t ph = mtp_classify_fn((void *)w->fn, MTP_WATCH);
+      const mtp_phase_t prev = mtp_enter(ph);
+      mtp.runs[ph]++;
+      (*w->fn)(m->now, w->signals[0], w, w->user_data);
+      MTP_LEAVE(prev);
+   }
    else
       (*w->fn)(m->now, w->signals[0], w, w->user_data);
 }
@@ -3462,6 +3497,7 @@ static void notify_event(rt_model_t *m, rt_nexus_t *n)
 {
    n->last_event = m->now;
    n->event_delta = m->iteration;
+   mtp.events += mtp.on;
 
    // Triggers run synchronously in blocking update phase
    m->trigger_epoch += m->blocking_update;
@@ -3502,6 +3538,7 @@ static void update_effective(rt_model_t *m, rt_nexus_t *n)
 {
    n->active_delta = m->iteration;
    n->flags &= ~NET_F_PENDING;
+   mtp.nupd_eff += mtp.on;
 
    calculate_effective_value(m, n);
 
@@ -3548,6 +3585,7 @@ static void update_driving(rt_model_t *m, rt_nexus_t *n, bool safe)
    if (n->n_sources == 1 || safe) {
       n->active_delta = m->iteration;
       n->flags &= ~NET_F_PENDING;
+      mtp.nupd_drv += mtp.on;
 
       calculate_driving_value(m, n);
 
@@ -3865,7 +3903,7 @@ static void reactive_sort(deferq_t *dq)
    }
 }
 
-static void model_cycle(rt_model_t *m)
+static void model_cycle_body(rt_model_t *m)
 {
    // Simulation cycle is described in LRM 93 section 12.6.4
 
@@ -3895,6 +3933,8 @@ static void model_cycle(rt_model_t *m)
       run_callbacks(m, NEXT_TIME_STEP);
 
    run_callbacks(m, NEXT_CYCLE);
+
+   (void)mtp_enter(MTP_SCHED);
 
    if (!is_delta_cycle) {
       for (;;) {
@@ -3945,6 +3985,7 @@ static void model_cycle(rt_model_t *m)
       }
    }
 
+   (void)mtp_enter(MTP_DRIVERQ);
    deferq_swap(&m->next_driverq, &m->driverq);
    deferq_run(m, &m->next_driverq);
 
@@ -3953,17 +3994,21 @@ static void model_cycle(rt_model_t *m)
          (*m->reschedq.tasks[i].fn)(m, m->reschedq.tasks[i].arg);
       m->reschedq.count = 0;
 
+      (void)mtp_enter(MTP_UPD_DRV);
       while (heap_size(m->driving_heap) > 0) {
          rt_nexus_t *n = heap_extract_min(m->driving_heap);
          update_driving(m, n, true);
       }
 
+      (void)mtp_enter(MTP_UPD_EFF);
       while (heap_size(m->effective_heap) > 0) {
          rt_nexus_t *n = heap_extract_min(m->effective_heap);
          update_effective(m, n);
       }
+      (void)mtp_enter(MTP_DRIVERQ);
    } while (m->reschedq.count > 0);
 
+   (void)mtp_enter(MTP_OTHER);
    sync_event_cache(m);
 
    m->blocking_update = true;
@@ -3985,7 +4030,9 @@ static void model_cycle(rt_model_t *m)
 
    // Run all non-postponed processes and event callbacks
    deferq_swap(&m->next_procq, &m->procq);
+   (void)mtp_enter(MTP_TASKQ);
    deferq_run(m, &m->next_procq);
+   (void)mtp_enter(MTP_OTHER);
 
    run_callbacks(m, END_OF_PROCESSES);
 
@@ -4000,7 +4047,9 @@ static void model_cycle(rt_model_t *m)
    if (m->inactiveq.count > 0) {
       TRACE("begin inactive region");
       deferq_swap(&m->next_inactiveq, &m->inactiveq);
+      (void)mtp_enter(MTP_TASKQ);
       deferq_run(m, &m->next_inactiveq);
+      (void)mtp_enter(MTP_OTHER);
    }
 
    if (m->next_is_delta)
@@ -4008,7 +4057,9 @@ static void model_cycle(rt_model_t *m)
 
    if (m->nonblockq.count > 0) {
       TRACE("begin non-blocking assignment region");
+      (void)mtp_enter(MTP_NBA);
       deferq_run(m, &m->nonblockq);
+      (void)mtp_enter(MTP_OTHER);
       sv_procs_run++;   // May have changed state a poller depends on
    }
 
@@ -4026,8 +4077,11 @@ static void model_cycle(rt_model_t *m)
    sv_poll_end_cycle(m);
 
    if (!m->next_is_delta) {
-      if (m->samplers != NULL)
+      if (m->samplers != NULL) {
+         (void)mtp_enter(MTP_PHASECB);
          run_samplers(m);
+         (void)mtp_enter(MTP_OTHER);
+      }
 
       run_callbacks(m, LAST_KNOWN_DELTA_CYCLE);
    }
@@ -4036,8 +4090,10 @@ static void model_cycle(rt_model_t *m)
       m->can_create_delta = false;
 
       // Run all postponed processes and event callbacks
+      (void)mtp_enter(MTP_TASKQ);
       deferq_run(m, &m->postponedq);
       deferq_run(m, &m->latepostq);
+      (void)mtp_enter(MTP_OTHER);
 
       run_callbacks(m, END_TIME_STEP);
 
@@ -4045,6 +4101,19 @@ static void model_cycle(rt_model_t *m)
    }
    else if (m->stop_delta > 0 && m->iteration == m->stop_delta)
       reached_iteration_limit(m);
+}
+
+static void model_cycle(rt_model_t *m)
+{
+   if (likely(!mtp.on)) {
+      model_cycle_body(m);
+      return;
+   }
+
+   const bool is_delta = m->next_is_delta;
+   mtp_cycle_begin();
+   model_cycle_body(m);
+   mtp_cycle_end(is_delta);
 }
 
 static bool should_stop_now(rt_model_t *m, uint64_t stop_time)
@@ -4109,6 +4178,8 @@ void model_run(rt_model_t *m, uint64_t stop_time)
    if (m->force_stop)
       return;   // Was error during intialisation
 
+   mtp_start();
+
    run_callbacks(m, START_OF_SIMULATION);
 
    while (!should_stop_now(m, stop_time))
@@ -4135,14 +4206,19 @@ void model_run(rt_model_t *m, uint64_t stop_time)
 
    if (m->liveness)
       check_liveness_properties(m, m->root);
+
+   mtp_stop();
 }
 
 bool model_step(rt_model_t *m)
 {
    MODEL_ENTRY(m);
 
-   if (!m->force_stop)
+   if (!m->force_stop) {
+      mtp_start();
       model_cycle(m);
+      mtp_stop();
+   }
 
    return should_stop_now(m, TIME_HIGH);
 }
