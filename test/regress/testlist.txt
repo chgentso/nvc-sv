@@ -2530,3 +2530,4 @@ svxlib3         shell
 vhpi29          vhpi,2008
 vpi18           vpi
 vhpi30          vhpi,$NVC_DEBUG_STMTS=1
+vpi19           verilog,vpi,$NVC_DEBUG_STMTS=1

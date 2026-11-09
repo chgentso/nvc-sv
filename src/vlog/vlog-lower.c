@@ -24,10 +24,12 @@
 #include "ident.h"
 #include "mir/mir-node.h"
 #include "mir/mir-unit.h"
+#include "option.h"
 #include "printf.h"
 #include "rt/assert.h"
 #include "rt/crv.h"
 #include "rt/defs.h"
+#include "rt/model.h"
 #include "rt/sva.h"
 #include "lib.h"
 #include "type.h"
@@ -24127,6 +24129,17 @@ static void vlog_lower_seq_block(vlog_gen_t *g, vlog_node_t v, gen_stack_t *gs)
 static bool vlog_lower_one_stmt(vlog_gen_t *g, vlog_node_t s, gen_stack_t *gs)
 {
    mir_set_loc(g->mu, vlog_loc(s));
+
+   if (opt_get_int(OPT_DEBUG_STMTS) && vlog_kind(s) != V_SEQ_BLOCK) {
+      const loc_t *loc = vlog_loc(s);
+      if (!loc_invalid_p(loc)) {
+         const uint32_t site =
+            stmt_site_new(loc_file_str(loc), loc->first_line);
+         mir_build_stmt_probe(g->mu, mir_build_debug_locus(g->mu,
+                                                           vlog_to_object(s)),
+                              site);
+      }
+   }
 
    switch (vlog_kind(s)) {
    case V_METHOD_CALL:

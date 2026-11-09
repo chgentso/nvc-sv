@@ -20,7 +20,8 @@ lib_vpi_test_so_SOURCES = \
 	test/vpi/vpi15.c \
 	test/vpi/vpi16.c \
 	test/vpi/vpi17.c \
-	test/vpi/vpi18.c
+	test/vpi/vpi18.c \
+	test/vpi/vpi19.c
 
 lib_vpi_test_so_CFLAGS  = $(SHLIB_CFLAGS) -I$(top_srcdir)/src/vpi $(AM_CFLAGS)
 lib_vpi_test_so_LDFLAGS = $(SHLIB_LDFLAGS) $(AM_LDFLAGS)
