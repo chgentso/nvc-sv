@@ -1,4 +1,5 @@
 ## Unreleased changes
+- The names and values of the constants of a System Verilog enumeration type are available through VPI: `vpi_handle(vpiTypespec, var)` gives a `vpiEnumTypespec` and `vpi_iterate(vpiEnumConst, typespec)` its constants.
 - System Verilog `import "DPI-C"` functions and tasks can now be called.  The
   shared libraries which contain them are given with the new `--sv-lib`
   option, which can be repeated, and the C functions are called with `int`,

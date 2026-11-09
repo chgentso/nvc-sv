@@ -279,6 +279,20 @@ typedef struct {
    c_vpiObject *right;
 } c_range;
 
+typedef struct {
+   c_vpiObject object;
+   vlog_node_t dtype;     // Enumeration declaration
+} c_typespec;      // vpiEnumTypespec
+
+DEF_CLASS(typespec, vpiEnumTypespec, object);
+
+typedef struct {
+   c_vpiObject object;
+   vlog_node_t where;     // Enumeration name
+} c_enumConst;
+
+DEF_CLASS(enumConst, vpiEnumConst, object);
+
 DEF_CLASS(range, vpiRange, object);
 
 #define HANDLE_BITS      (sizeof(vpiHandle) * 8)
@@ -2199,6 +2213,14 @@ static const char *vpi_obj_name(c_vpiObject *obj)
    if (m != NULL)
       return m->name;
 
+   c_enumConst *ec = is_enumConst(obj);
+   if (ec != NULL)
+      return istr(vlog_ident(ec->where));
+
+   c_typespec *ts = is_typespec(obj);
+   if (ts != NULL)
+      return vlog_has_ident(ts->dtype) ? istr(vlog_ident(ts->dtype)) : NULL;
+
    c_abstractDecl *d = is_abstractDecl(obj);
    if (d != NULL) {
       if (d->name != NULL)
@@ -3731,6 +3753,20 @@ vpiHandle vpi_handle(PLI_INT32 type, vpiHandle refHandle)
          return NULL;
       }
 
+   case vpiTypespec:
+      {
+         // The enumeration type of a variable
+         c_abstractDecl *d = is_valueDecl(obj);
+         if (d == NULL || d->dtype == NULL
+             || vlog_kind(d->dtype) != V_ENUM_DECL)
+            return NULL;
+
+         c_typespec *ts = new_object(sizeof(c_typespec), vpiEnumTypespec);
+         ts->dtype = d->dtype;
+         ts->object.loc = *vlog_loc(d->dtype);
+         return user_handle_for(&(ts->object));
+      }
+
    case vpiModule:
       {
          c_abstractScope *s = is_abstractScope(obj);
@@ -4033,6 +4069,18 @@ static bool init_iterator(c_iterator *it, PLI_INT32 type, c_vpiObject *obj)
    else if (is_tfCall(obj) != NULL) {
       if (type == vpiArgument)
          list = &(is_tfCall(obj)->args);
+   }
+   else if (is_typespec(obj) != NULL) {
+      if (type == vpiEnumConst) {
+         vlog_node_t dtype = is_typespec(obj)->dtype;
+         const int ndecls = vlog_decls(dtype);
+         for (int i = 0; i < ndecls; i++) {
+            c_enumConst *ec = new_object(sizeof(c_enumConst), vpiEnumConst);
+            ec->where = vlog_decl(dtype, i);
+            ec->object.loc = *vlog_loc(ec->where);
+            vpi_list_push(&filtered, &(ec->object));
+         }
+      }
    }
    else if (is_abstractScope(obj) != NULL) {
       c_abstractScope *s = is_abstractScope(obj);
@@ -4587,6 +4635,20 @@ void vpi_get_value(vpiHandle handle, p_vpi_value value_p)
    c_port *p = is_port(obj);
    if (p != NULL && p->low != NULL)
       obj = p->low;
+
+   c_enumConst *ec = is_enumConst(obj);
+   if (ec != NULL) {
+      if (vlog_has_value(ec->where) && vlog_kind(vlog_value(ec->where)) == V_NUMBER) {
+         number_t n = vlog_number(vlog_value(ec->where));
+         const uint64_t *abits, *bbits;
+         number_get(n, &abits, &bbits);
+         if (value_p->format == vpiObjTypeVal)
+            value_p->format = number_width(n) <= 32 ? vpiIntVal : vpiVectorVal;
+         vpi_format_bits(NULL, number_width(n), number_signed(n), abits,
+                         bbits, value_p, c->valuestr);
+      }
+      return;
+   }
 
    c_constant *con = is_constantOrParam(obj);
    if (con != NULL) {
