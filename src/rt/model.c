@@ -48,6 +48,13 @@
 #include <string.h>
 
 typedef struct _rt_callback rt_callback_t;
+
+struct _rt_sampler {
+   rt_sampler_t *next;
+   rt_event_fn_t fn;
+   void         *user;
+   bool          removed;
+};
 typedef struct _memblock memblock_t;
 
 typedef struct _rt_callback {
@@ -155,6 +162,9 @@ typedef struct _rt_model {
    heap_t            *driving_heap;
    heap_t            *effective_heap;
    rt_callback_t     *phase_cbs[END_OF_SIMULATION + 1];
+   rt_sampler_t      *samplers;
+   unsigned           nsamplers;
+   unsigned           sampler_depth;
    cover_data_t      *cover;
    nvc_rusage_t       ready_rusage;
    nvc_lock_t         memlock;
@@ -562,6 +572,34 @@ static void run_callbacks(rt_model_t *m, model_phase_t phase)
    }
 }
 
+static void run_samplers(rt_model_t *m)
+{
+   // Samplers are called at the end of every cycle, after all the
+   // regions have run, so they see the values of the variables which are
+   // not held in signals as the cycle left them
+
+   m->sampler_depth++;
+
+   for (rt_sampler_t *it = m->samplers; it; it = it->next) {
+      if (!it->removed)
+         (*it->fn)(m, it->user);
+   }
+
+   if (--(m->sampler_depth) > 0)
+      return;
+
+   for (rt_sampler_t **p = &(m->samplers); *p != NULL; ) {
+      rt_sampler_t *it = *p;
+      if (it->removed) {
+         *p = it->next;
+         m->nsamplers--;
+         free(it);
+      }
+      else
+         p = &(it->next);
+   }
+}
+
 rt_model_t *model_new(jit_t *jit, cover_data_t *cover)
 {
    rt_model_t *m = xcalloc(sizeof(rt_model_t));
@@ -711,6 +749,12 @@ void model_free(rt_model_t *m)
       model_thread_t *thread = m->threads[i];
       if (thread != NULL)
          tlab_release(m->jit, thread->tlab);
+   }
+
+   while (m->samplers != NULL) {
+      rt_sampler_t *next = m->samplers->next;
+      free(m->samplers);
+      m->samplers = next;
    }
 
    free(m->procq.tasks);
@@ -3957,6 +4001,9 @@ static void model_cycle(rt_model_t *m)
  next_delta:
    sv_poll_end_cycle(m);
 
+   if (m->samplers != NULL)
+      run_samplers(m);
+
    if (!m->next_is_delta)
       run_callbacks(m, LAST_KNOWN_DELTA_CYCLE);
 
@@ -4383,6 +4430,42 @@ void model_set_timeout_cb(rt_model_t *m, uint64_t when, rt_event_fn_t fn,
 
    void *e = tag_pointer(cb, EVENT_TIMEOUT);
    heap_insert(m->eventq_heap, when, e);
+}
+
+rt_sampler_t *model_add_sampler(rt_model_t *m, rt_event_fn_t fn, void *user)
+{
+   rt_sampler_t *s = xcalloc(sizeof(rt_sampler_t));
+   s->fn   = fn;
+   s->user = user;
+
+   // Append so samplers are called in the order they were added
+   rt_sampler_t **p = &(m->samplers);
+   while (*p != NULL)
+      p = &((*p)->next);
+   *p = s;
+
+   m->nsamplers++;
+   return s;
+}
+
+void model_remove_sampler(rt_model_t *m, rt_sampler_t *s)
+{
+   // May be called from a sampler
+   s->removed = true;
+
+   if (m->sampler_depth > 0)
+      return;
+
+   for (rt_sampler_t **p = &(m->samplers); *p != NULL; p = &((*p)->next)) {
+      if (*p == s) {
+         *p = s->next;
+         m->nsamplers--;
+         free(s);
+         return;
+      }
+   }
+
+   should_not_reach_here();
 }
 
 rt_watch_t *watch_new(rt_model_t *m, sig_event_fn_t fn, void *user,

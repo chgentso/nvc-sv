@@ -1,4 +1,5 @@
 ## Unreleased changes
+- A VPI `cbValueChange` callback can be registered on values held in memory rather than in signals: members of unpacked structures, elements of unpacked arrays, whole structures and arrays, string variables and package variables.  The model compares such an object with its previous value at the end of every cycle, so the callback is called once for the changes of a cycle.
 - The new `--surfer` run option loads the nvc-surfer plugin and has it start the Surfer waveform viewer, connected to the simulation.
 - The new `--wave-flush` run option makes the FST file written by `--wave` readable while the simulation runs, by periodically writing a complete copy of the dump so far.
 - The VHPI property `vhpiLineNoP` gives the line of a declaration.

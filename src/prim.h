@@ -71,6 +71,7 @@ typedef struct _object_copy_ctx object_copy_ctx_t;
 
 typedef struct _rt_model      rt_model_t;
 typedef struct _rt_watch      rt_watch_t;
+typedef struct _rt_sampler    rt_sampler_t;
 typedef struct _rt_signal     rt_signal_t;
 typedef struct _rt_scope      rt_scope_t;
 typedef struct _rt_nexus      rt_nexus_t;

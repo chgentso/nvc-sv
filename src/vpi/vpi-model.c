@@ -86,6 +86,9 @@ typedef struct {
    vpiHandle        obj;       // Internal handle to the object
    vpiHandle        user;      // Handle given to the application
    rt_watch_t      *watch;
+   rt_sampler_t    *sampler;  // Samples a value held in memory
+   uint8_t         *snapshot; // Value of that object at the last sample
+   size_t           snaplen;
    uint64_t         delay;
    PLI_INT32        format;    // Of the value passed to the callback
    bool             removed;
@@ -3346,8 +3349,7 @@ static bool vpi_put_decl(c_abstractDecl *d, p_vpi_value value_p,
 static rt_watch_t *vpi_watch_decl(vpi_context_t *c, c_abstractDecl *d,
                                   vpiHandle handle);
 
-static void vpi_value_change_cb(uint64_t now, rt_signal_t *signal,
-                                rt_watch_t *watch, void *user)
+static void vpi_fire_value_change(uint64_t now, void *user)
 {
    vpi_context_t *c = vpi_context();
    handle_slot_t *slot = decode_handle(c, user);
@@ -3373,8 +3375,22 @@ static void vpi_value_change_cb(uint64_t now, rt_signal_t *signal,
    (*cb->data.cb_rtn)(&(cb->data));
 }
 
+static void vpi_value_change_cb(uint64_t now, rt_signal_t *signal,
+                                rt_watch_t *watch, void *user)
+{
+   vpi_fire_value_change(now, user);
+}
+
 static void vpi_release_callback(vpi_context_t *c, c_callback *cb)
 {
+   if (cb->sampler != NULL) {
+      model_remove_sampler(vpi_get_model(c), cb->sampler);
+      cb->sampler = NULL;
+   }
+
+   free(cb->snapshot);
+   cb->snapshot = NULL;
+
    if (cb->watch != NULL) {
       watch_free(vpi_get_model(c), cb->watch);
       cb->watch = NULL;
@@ -3495,6 +3511,153 @@ static rt_watch_t *vpi_watch_decl(vpi_context_t *c, c_abstractDecl *d,
    rt_watch_t *w = watch_new(m, vpi_value_change_cb, handle, WATCH_EVENT, 1);
    model_set_event_cb(m, s, d->offset, count, w);
    return w;
+}
+
+typedef struct {
+   uint8_t *data;
+   size_t   len;
+   size_t   cap;
+} vpi_snap_t;
+
+static void vpi_snap_put(vpi_snap_t *sn, const void *data, size_t len)
+{
+   if (sn->len + len > sn->cap) {
+      sn->cap = MAX(MAX(sn->cap * 2, sn->len + len), 64);
+      sn->data = xrealloc(sn->data, sn->cap);
+   }
+
+   if (len > 0)
+      memcpy(sn->data + sn->len, data, len);
+   sn->len += len;
+}
+
+static void vpi_snap_decl(c_abstractDecl *d, vpi_snap_t *sn)
+{
+   // Append everything that makes up the value of this object held in
+   // memory so two snapshots are the same if and only if it did not change
+
+   switch (d->storage) {
+   case STORE_REAL:
+   case STORE_PREAL:
+   case STORE_FREAL:
+      {
+         double value = 0.0;
+         if (!vpi_read_real(d, &value))
+            value = 0.0;
+         vpi_snap_put(sn, &value, sizeof(value));
+      }
+      break;
+
+   case STORE_STRING:
+   case STORE_FSTRING:
+      {
+         const ffi_uarray_t *u = d->storage == STORE_FSTRING
+            ? vpi_field_ptr(d) : vpi_get_ptr(d);
+         const int64_t len = u != NULL ? ffi_array_length(u->dims[0].length) : -1;
+         vpi_snap_put(sn, &len, sizeof(len));
+         if (len > 0)
+            vpi_snap_put(sn, u->ptr, len);
+      }
+      break;
+
+   case STORE_SIGNAL:
+   case STORE_VEC2:
+   case STORE_VEC4:
+   case STORE_FVEC2:
+   case STORE_FVEC4:
+      {
+         const int nwords = (d->size + 63) / 64;
+         uint64_t *mem LOCAL = xmalloc_array(nwords * 2, sizeof(uint64_t));
+         if (!vpi_read_bits(d, mem, mem + nwords))
+            memset(mem, '\xff', nwords * 2 * sizeof(uint64_t));
+         vpi_snap_put(sn, mem, nwords * 2 * sizeof(uint64_t));
+      }
+      break;
+
+   case STORE_RECORD:
+   case STORE_MARRAY:
+      {
+         vpiObjectList *list = expand_lazy_list(&(d->object), &(d->elems));
+         for (unsigned i = 0; i < list->count; i++) {
+            c_abstractDecl *e = is_abstractDecl(list->items[i]);
+            if (e != NULL)
+               vpi_snap_decl(e, sn);
+         }
+      }
+      break;
+
+   default:
+      break;
+   }
+}
+
+static bool vpi_is_memory_decl(c_abstractDecl *d)
+{
+   switch (d->storage) {
+   case STORE_STRING:
+   case STORE_VEC2:
+   case STORE_VEC4:
+   case STORE_PREAL:
+   case STORE_RECORD:
+   case STORE_FVEC2:
+   case STORE_FVEC4:
+   case STORE_FREAL:
+   case STORE_FSTRING:
+   case STORE_MARRAY:
+      return true;
+   default:
+      return false;
+   }
+}
+
+static void vpi_sample_cb(rt_model_t *m, void *user)
+{
+   // An object held in memory has nothing to notify the model when it
+   // changes, so it is compared with its last value at the end of each
+   // cycle
+
+   vpi_context_t *c = vpi_context();
+   handle_slot_t *slot = decode_handle(c, user);
+   if (slot == NULL)
+      return;
+
+   c_callback *cb = is_callback(slot->obj);
+   if (cb == NULL || cb->removed)
+      return;
+
+   handle_slot_t *oslot = decode_handle(c, cb->obj);
+   c_abstractDecl *d = oslot != NULL ? is_abstractDecl(oslot->obj) : NULL;
+   if (d == NULL)
+      return;
+
+   vpi_snap_t now = { 0 };
+   vpi_snap_decl(d, &now);
+
+   const bool changed = now.len != cb->snaplen
+      || (now.len > 0 && memcmp(now.data, cb->snapshot, now.len) != 0);
+
+   if (changed) {
+      free(cb->snapshot);
+      cb->snapshot = now.data;
+      cb->snaplen = now.len;
+      vpi_fire_value_change(model_now(m, NULL), user);
+   }
+   else
+      free(now.data);
+}
+
+static rt_sampler_t *vpi_sample_decl(vpi_context_t *c, c_callback *cb,
+                                     c_abstractDecl *d, vpiHandle handle)
+{
+   if (!vpi_is_memory_decl(d))
+      return NULL;
+
+   vpi_snap_t sn = { 0 };
+   vpi_snap_decl(d, &sn);
+   cb->snapshot = sn.data;
+   cb->snaplen = sn.len;
+
+   return model_add_sampler(vpi_get_model(c), vpi_sample_cb, handle);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -3620,7 +3783,12 @@ vpiHandle vpi_register_cb(p_cb_data cb_data_p)
 
    if (obj != NULL) {
       c_abstractDecl *d = is_abstractDecl(obj);
-      if (d == NULL || (cb->watch = vpi_watch_decl(c, d, handle)) == NULL) {
+      if (d != NULL && vpi_is_memory_decl(d))
+         cb->sampler = vpi_sample_decl(c, cb, d, handle);
+      else if (d != NULL)
+         cb->watch = vpi_watch_decl(c, d, handle);
+
+      if (cb->watch == NULL && cb->sampler == NULL) {
          vpi_error(vpiError, &(obj->loc), "cannot register a value change "
                    "callback for %s", handle_pp(cb_data_p->obj));
          drop_handle(c, handle);

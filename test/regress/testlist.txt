@@ -2520,5 +2520,6 @@ vpi12           verilog,vpi
 vpi13           verilog,vpi
 vpi14           verilog,vpi
 vpi15           vpi
+vpi16           verilog,vpi
 svrealinport1  verilog
 wavelive1       shell
