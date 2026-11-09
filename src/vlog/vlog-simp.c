@@ -405,7 +405,8 @@ static vlog_node_t simp_always(vlog_node_t v)
 
          vlog_node_t new = vlog_new(V_ALWAYS);
          vlog_set_loc(new, vlog_loc(v));
-         vlog_set_subkind(new, V_ALWAYS_PLAIN);
+         vlog_set_subkind(new, vlog_subkind(v) == V_ALWAYS_COMB
+                           ? V_ALWAYS_COMB_DONE : V_ALWAYS_LATCH_DONE);
          vlog_set_ident(new, vlog_ident(v));
          vlog_add_stmt(new, b);
 

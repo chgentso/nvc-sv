@@ -3100,7 +3100,7 @@ vhpiIntT vhpi_get(vhpiIntPropertyT property, vhpiHandleT handle)
             state |= vhpiNvcProcRunnable;
          if (proc->wakeable.delayed)
             state |= vhpiNvcProcTimeout;
-         if (proc->wakeable.zombie)
+         if (proc->wakeable.zombie || proc->ended)
             state |= vhpiNvcProcEnded;
          return state;
       }

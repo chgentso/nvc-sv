@@ -1278,9 +1278,14 @@ static void run_process_inner(rt_model_t *m, rt_proc_t *proc)
    };
    jit_scalar_t result;
 
+   const uint64_t wait_seq = proc->wait_seq;
+
    if (!jit_call_closure(m->jit, &proc->closure, &result, state,
                          proc->tlab ?: thread->tlab))
       m->force_stop = true;
+
+   proc->ended = proc->verilog && !obj->forked && !obj->delayed
+      && proc->wait_seq == wait_seq && proc->task == NULL;
 
    if (proc->tlab != NULL && result.pointer == NULL) {
       tlab_release(m->jit, proc->tlab);

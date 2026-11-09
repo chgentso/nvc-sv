@@ -292,7 +292,8 @@ static void vlog_dump_always(vlog_node_t v, int indent)
 {
    switch (vlog_subkind(v)) {
    case V_ALWAYS_FF:    print_syntax("#always_ff "); break;
-   case V_ALWAYS_COMB:  print_syntax("#always_comb "); break;
+   case V_ALWAYS_COMB:
+   case V_ALWAYS_COMB_DONE: print_syntax("#always_comb "); break;
    case V_ALWAYS_LATCH: print_syntax("#always_latch "); break;
    default:             print_syntax("#always "); break;
    }

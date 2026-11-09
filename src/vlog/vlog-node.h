@@ -131,6 +131,8 @@ typedef enum {
    V_ALWAYS_FF,
    V_ALWAYS_COMB,
    V_ALWAYS_LATCH,
+   V_ALWAYS_COMB_DONE,    // always_comb with its sensitivity made explicit
+   V_ALWAYS_LATCH_DONE,
 } vlog_always_kind_t;
 
 typedef enum {

@@ -117,6 +117,7 @@ struct _c_abstractScope {
    vpiLazyList      decls;     // Nets, variables, parameters and arrays
    vpiLazyList      scopes;    // Instances, generate scopes and blocks
    vpiLazyList      misc;      // Ports, interface ports and modports
+   vpiLazyList      procs;     // Initial, always and final procedures
    hash_t          *calls;     // System task calls made from this instance
    tree_t           block;
    rt_scope_t      *rtscope;
@@ -269,6 +270,15 @@ typedef struct {
 DEF_CLASS(parameter, vpiParameter, decl.object);
 
 typedef struct {
+   c_vpiObject      object;   // vpiInitial, vpiAlways or vpiFinal
+   c_abstractScope *scope;
+   vlog_node_t      where;
+   const char      *name;
+   const char      *fullname;
+   vpiLazyList      decls;    // Variables declared in the procedure
+} c_process;
+
+typedef struct {
    c_vpiObject      object;
    c_abstractScope *scope;
    vlog_node_t      where;
@@ -362,6 +372,9 @@ static void vpi_lazy_decls(c_vpiObject *obj);
 static void vpi_lazy_elems(c_vpiObject *obj);
 static void vpi_lazy_scopes(c_vpiObject *obj);
 static void vpi_lazy_misc(c_vpiObject *obj);
+static void vpi_lazy_procs(c_vpiObject *obj);
+static rt_proc_t *vpi_find_process(c_process *p);
+static void vpi_lazy_proc_decls(c_vpiObject *obj);
 static c_refcounted *is_refcounted(c_vpiObject *obj);
 static void vpi_arm_callback(vpi_context_t *c, vpiHandle handle);
 static c_abstractDecl *build_mem_value(c_abstractDecl *base, vlog_node_t type,
@@ -591,6 +604,18 @@ static c_abstractScope *is_abstractScope(c_vpiObject *obj)
    case vpiNamedFork:
    case vpiForeignInst:
       return container_of(obj, c_abstractScope, object);
+   default:
+      return NULL;
+   }
+}
+
+static c_process *is_process(c_vpiObject *obj)
+{
+   switch (obj->type) {
+   case vpiInitial:
+   case vpiAlways:
+   case vpiFinal:
+      return container_of(obj, c_process, object);
    default:
       return NULL;
    }
@@ -924,6 +949,7 @@ static void init_abstractScope(c_abstractScope *scope, vlog_node_t v)
    scope->decls.fn   = vpi_lazy_decls;
    scope->scopes.fn  = vpi_lazy_scopes;
    scope->misc.fn    = vpi_lazy_misc;
+   scope->procs.fn   = vpi_lazy_procs;
 }
 
 static c_constant *build_int_constant(int64_t value)
@@ -1616,6 +1642,122 @@ static void vpi_lazy_decls(c_vpiObject *obj)
    }
 }
 
+static bool vpi_is_assertion_proc(vlog_node_t v)
+{
+   if (vlog_kind(v) != V_ALWAYS || vlog_stmts(v) != 1
+       || vlog_kind(vlog_stmt(v, 0)) != V_TIMING)
+      return false;
+
+   vlog_node_t timing = vlog_stmt(v, 0);
+   if (vlog_stmts(timing) != 1)
+      return false;
+
+   vlog_node_t st = vlog_stmt(timing, 0);
+   switch (vlog_kind(st)) {
+   case V_ASSERT:
+   case V_ASSUME:
+   case V_COVER:
+      return vlog_kind(vlog_value(st)) == V_PROP_SPEC;
+   default:
+      return false;
+   }
+}
+
+static void vpi_lazy_procs(c_vpiObject *obj)
+{
+   c_abstractScope *s = is_abstractScope(obj);
+   assert(s != NULL);
+
+   switch (obj->type) {
+   case vpiModule:
+   case vpiInterface:
+   case vpiProgram:
+   case vpiGenScope:
+      break;
+   default:
+      return;
+   }
+
+   const int nstmts = vlog_stmts(s->where);
+   for (int i = 0; i < nstmts; i++) {
+      vlog_node_t v = vlog_stmt(s->where, i);
+
+      PLI_INT32 type;
+      switch (vlog_kind(v)) {
+      case V_INITIAL: type = vpiInitial; break;
+      case V_ALWAYS:  type = vpiAlways; break;
+      case V_FINAL:   type = vpiFinal; break;
+      default:
+         continue;
+      }
+
+      // Processes made by the compiler for assertions and reports
+      if (!vlog_has_ident(v) || istr(vlog_ident(v))[0] == '$'
+          || vpi_is_assertion_proc(v))
+         continue;
+
+      c_process *p = new_object(sizeof(c_process), type);
+      p->object.loc = *vlog_loc(v);
+      p->scope = s;
+      p->where = v;
+      p->name  = vpi_intern(istr(vlog_ident(v)));
+      p->decls.fn = vpi_lazy_proc_decls;
+
+      vpi_list_push(&(s->procs.list), &(p->object));
+   }
+}
+
+static vlog_node_t vpi_proc_block(vlog_node_t v)
+{
+   // The unnamed block which holds the declarations of a process
+
+   for (int i = 0; i < vlog_stmts(v); i++) {
+      vlog_node_t st = vlog_stmt(v, i);
+      switch (vlog_kind(st)) {
+      case V_SEQ_BLOCK:
+         return vlog_has_ident(st) ? NULL : st;
+      case V_TIMING:
+      case V_FOREVER:
+         return vpi_proc_block(st);
+      default:
+         break;
+      }
+   }
+
+   return NULL;
+}
+
+static void vpi_lazy_proc_decls(c_vpiObject *obj)
+{
+   // The static variables of the block of a process are declared in the
+   // enclosing instance with a unique name
+
+   c_process *p = is_process(obj);
+   assert(p != NULL);
+
+   vlog_node_t block = vpi_proc_block(p->where);
+   c_abstractScope *home = storage_scope(p->scope);
+   if (block == NULL || home == NULL)
+      return;
+
+   vpiObjectList *list = &(home->decls.list);
+
+   const int ndecls = vlog_decls(home->where);
+   for (int i = 0; i < ndecls; i++) {
+      vlog_node_t d = vlog_decl(home->where, i);
+      if (vlog_kind(d) != V_VAR_DECL || !(vlog_flags(d) & VLOG_F_STATIC)
+          || strstr(istr(vlog_ident(d)), "$static") == NULL
+          || !vpi_block_owns(block, vlog_loc(d)))
+         continue;
+
+      // The declaration is only a member of the procedure
+      const unsigned before = list->count;
+      build_decl(d, p->scope);
+      while (list->count > before)
+         vpi_list_push(&(p->decls.list), list->items[--list->count]);
+   }
+}
+
 static bool vpi_split_index(const char *name, size_t *len, int64_t *index)
 {
    // Name of an element of an array of instances or generate blocks
@@ -2217,6 +2359,10 @@ static const char *vpi_obj_name(c_vpiObject *obj)
    if (s != NULL)
       return s->name;
 
+   c_process *proc = is_process(obj);
+   if (proc != NULL)
+      return proc->name;
+
    c_scopeArray *sa = is_scopeArray(obj);
    if (sa != NULL)
       return sa->name;
@@ -2263,6 +2409,15 @@ static const char *vpi_obj_fullname(c_vpiObject *obj)
       return vpi_scope_fullname(s);
 
    LOCAL_TEXT_BUF tb = tb_new();
+
+   c_process *proc = is_process(obj);
+   if (proc != NULL) {
+      if (proc->fullname == NULL) {
+         tb_printf(tb, "%s.%s", vpi_scope_fullname(proc->scope), proc->name);
+         proc->fullname = vpi_intern(tb_get(tb));
+      }
+      return proc->fullname;
+   }
 
    c_scopeArray *sa = is_scopeArray(obj);
    if (sa != NULL) {
@@ -2324,6 +2479,10 @@ static c_abstractScope *vpi_obj_scope(c_vpiObject *obj)
    c_misc *m = is_misc(obj);
    if (m != NULL)
       return m->scope;
+
+   c_process *proc = is_process(obj);
+   if (proc != NULL)
+      return proc->scope;
 
    c_scopeArray *sa = is_scopeArray(obj);
    if (sa != NULL)
@@ -3800,6 +3959,41 @@ static void vpi_diag_hook(vhdl_severity_t severity, const char *text,
               valid ? loc->first_line : 0, diag_context);
 }
 
+static rt_proc_t *vpi_find_process(c_process *p)
+{
+   // The runtime process which the procedure became
+
+   rt_scope_t *rts = storage_scope(p->scope) != NULL
+      ? storage_scope(p->scope)->rtscope : NULL;
+   if (rts == NULL)
+      return NULL;
+
+   for (int i = 0; i < rts->procs.count; i++) {
+      rt_proc_t *rp = rts->procs.items[i];
+      if (tree_kind(rp->where) == T_VERILOG && tree_vlog(rp->where) == p->where)
+         return rp;
+   }
+
+   return NULL;
+}
+
+DLLEXPORT
+PLI_INT32 vpi_nvc_get_wake_time(vpiHandle process, p_vpi_time time_p)
+{
+   vpi_clear_error();
+
+   c_vpiObject *obj = from_handle(process);
+   if (obj == NULL || is_process(obj) == NULL)
+      return 0;
+
+   rt_proc_t *rp = vpi_find_process(is_process(obj));
+   if (rp == NULL || !rp->wakeable.delayed)
+      return 0;
+
+   vpi_fill_time(obj, rp->wake_at, time_p);
+   return 1;
+}
+
 DLLEXPORT
 PLI_INT32 vpi_nvc_get_delta(void)
 {
@@ -4428,10 +4622,31 @@ static bool init_iterator(c_iterator *it, PLI_INT32 type, c_vpiObject *obj)
          }
       }
    }
+   else if (is_process(obj) != NULL) {
+      c_process *p = is_process(obj);
+      vpiObjectList *decls = expand_lazy_list(obj, &(p->decls));
+      for (int i = 0; i < decls->count; i++) {
+         if (vpi_type_matches(type, decls->items[i]))
+            vpi_list_push(&filtered, decls->items[i]);
+      }
+   }
    else if (is_abstractScope(obj) != NULL) {
       c_abstractScope *s = is_abstractScope(obj);
 
       switch (type) {
+      case vpiProcess:
+      case vpiInitial:
+      case vpiAlways:
+      case vpiFinal:
+         {
+            vpiObjectList *procs = expand_lazy_list(obj, &(s->procs));
+            for (int i = 0; i < procs->count; i++) {
+               if (type == vpiProcess || procs->items[i]->type == type)
+                  vpi_list_push(&filtered, procs->items[i]);
+            }
+         }
+         break;
+
       case vpiModule:
       case vpiInterface:
       case vpiProgram:
@@ -4838,6 +5053,43 @@ PLI_INT32 vpi_get(PLI_INT32 property, vpiHandle object)
    c_abstractScope *s = is_abstractScope(obj);
    if (s != NULL && (result = vpi_get_scope(property, s)) != vpiUndefined - 1)
       return result;
+
+   c_process *proc = is_process(obj);
+   if (proc != NULL) {
+      switch (property) {
+      case vpiLineNo:
+         return proc->object.loc.first_line;
+      case vpiAlwaysType:
+         if (obj->type != vpiAlways)
+            goto missing_property;
+         switch (vlog_subkind(proc->where)) {
+         case V_ALWAYS_COMB:
+         case V_ALWAYS_COMB_DONE:  return vpiAlwaysComb;
+         case V_ALWAYS_FF:    return vpiAlwaysFF;
+         case V_ALWAYS_LATCH:
+         case V_ALWAYS_LATCH_DONE: return vpiAlwaysLatch;
+         default:             return vpiAlways;
+         }
+      case vpiNvcProcState:
+         {
+            rt_proc_t *rp = vpi_find_process(proc);
+            if (rp == NULL)
+               return 0;
+
+            int state = 0;
+            if (get_active_proc() == rp)
+               state |= vpiNvcProcRunning;
+            if (rp->wakeable.pending)
+               state |= vpiNvcProcRunnable;
+            if (rp->wakeable.delayed)
+               state |= vpiNvcProcTimeout;
+            if (rp->ended && (vlog_kind(proc->where) == V_INITIAL
+                              || vlog_kind(proc->where) == V_FINAL))
+               state |= vpiNvcProcEnded;
+            return state;
+         }
+      }
+   }
 
    c_scopeArray *sa = is_scopeArray(obj);
    if (sa != NULL) {

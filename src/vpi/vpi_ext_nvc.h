@@ -37,6 +37,19 @@
 // Use cbReadWriteSynch for the last delta cycle of a time step.
 #define cbNvcEndOfDelta 1001
 
+// Properties and flags of a process object (vpiInitial, vpiAlways or
+// vpiFinal): vpi_get(vpiNvcProcState, process) is a combination of these
+// flags, or 0 if the process is suspended in an event control or wait.
+#define vpiNvcProcState    5001
+#define vpiNvcProcRunning  0x01   // The process is executing
+#define vpiNvcProcRunnable 0x02   // It will run in the current delta cycle
+#define vpiNvcProcTimeout  0x04   // It has a time out: vpi_nvc_get_wake_time
+#define vpiNvcProcEnded    0x08   // It has finished
+
+// Time at which a process waiting for a delay resumes, in the form given by
+// time_p->type.  Returns 1 if it has a time out, otherwise 0.
+PLI_INT32 vpi_nvc_get_wake_time(vpiHandle process, p_vpi_time time_p);
+
 // The number of the current delta cycle in the time step: 0 for the first
 // cycle, which is the one where time has just advanced.
 PLI_INT32 vpi_nvc_get_delta(void);
