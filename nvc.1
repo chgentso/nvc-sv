@@ -505,6 +505,21 @@ order with separators for each scope.
 This only makes sense in combination with the
 .Fl \-wave
 option.
+.\" --surfer
+.It Fl \-surfer Ns Op = Ns Ar plugin
+Load the nvc-surfer plugin and have it start the Surfer waveform viewer
+connected to the simulation, which can then be run, paused and inspected
+from the viewer.
+The plugin is
+.Ar plugin ,
+the file named by the environment variable
+.Ev NVC_SURFER_PLUGIN
+or
+.Pa libnvc_surfer.so .
+The viewer is the program named by
+.Ev NVC_SURFER_SURFER
+or
+.Nm surfer .
 .\" --wave-flush
 .It Fl \-wave-flush= Ns Ar secs
 Make the FST file written by

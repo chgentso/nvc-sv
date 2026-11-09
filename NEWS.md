@@ -1,4 +1,5 @@
 ## Unreleased changes
+- The new `--surfer` run option loads the nvc-surfer plugin and has it start the Surfer waveform viewer, connected to the simulation.
 - The new `--wave-flush` run option makes the FST file written by `--wave` readable while the simulation runs, by periodically writing a complete copy of the dump so far.
 - The VHPI property `vhpiLineNoP` gives the line of a declaration.
 - A VPI application can call `vpi_nvc_set_diag_cb` (declared in `vpi_ext_nvc.h`) to be told about every VHDL assertion or report message and every Verilog severity task or failing assertion, with its severity, text and source location.

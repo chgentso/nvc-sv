@@ -994,6 +994,7 @@ static int run_cmd(int argc, char **argv, cmd_state_t *state)
       { "vhpi-trace",    no_argument,       0, 'T' },
       { "gtkw",          optional_argument, 0, 'g' },
       { "wave-flush",    required_argument, 0, 'F' },
+      { "surfer",        optional_argument, 0, 'U' },
       { "shuffle",       no_argument,       0, 'H' },
       { 0, 0, 0, 0 }
    };
@@ -1055,6 +1056,16 @@ static int run_cmd(int argc, char **argv, cmd_state_t *state)
             wave_fname = "";
          else
             wave_fname = optarg;
+         break;
+      case 'U':
+         {
+            // Load the nvc-surfer plugin and have it start Surfer
+            const char *plugin = optarg ?: getenv("NVC_SURFER_PLUGIN")
+               ?: "libnvc_surfer.so";
+            pli_plugins = pli_plugins == NULL ? plugin
+               : xasprintf("%s,%s", pli_plugins, plugin);
+            setenv("NVC_SURFER_LAUNCH", "1", 1);
+         }
          break;
       case 'F':
          {
@@ -2427,6 +2438,9 @@ static void usage(void)
            { "--stop-time=T", "Stop after simulation time T (e.g. 5ns)" },
            { "--trace", "Trace simulation events" },
            { "-w, --wave[=FILE]", "Write waveform dump to FILE" },
+           { "    --surfer[=PLUGIN]", "Load the nvc-surfer plugin (default "
+             "$NVC_SURFER_PLUGIN or libnvc_surfer.so) and start Surfer "
+             "connected to the simulation" },
            { "    --wave-flush=SECS", "Make the FST dump readable while the "
              "simulation runs by writing a complete copy at most every SECS "
              "seconds" },
