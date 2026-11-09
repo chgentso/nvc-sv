@@ -269,6 +269,7 @@ typedef enum {
    MIR_OP_INSTANCE_INIT,
    MIR_OP_SCHED_ACTIVE,
    MIR_OP_TCHECK,
+   MIR_OP_STMT_PROBE,
 } mir_op_t;
 
 typedef enum {
@@ -778,5 +779,6 @@ mir_value_t mir_build_resolution_wrapper(mir_unit_t *mu, mir_type_t type,
 mir_value_t mir_build_debug_locus(mir_unit_t *mu, object_t *obj);
 mir_value_t mir_build_cast(mir_unit_t *mu, mir_type_t type, mir_value_t value);
 void mir_build_debug_out(mir_unit_t *mu, mir_value_t value);
+void mir_build_stmt_probe(mir_unit_t *mu, mir_value_t locus);
 
 #endif   // _MIR_NODE_H

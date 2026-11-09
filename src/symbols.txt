@@ -145,6 +145,9 @@
   vpi_iterate;
   vpi_nvc_get_delta;
   vpi_nvc_set_diag_cb;
+  vpi_nvc_set_stmt_cb;
+  vpi_nvc_stmt_breakpoint_add;
+  vpi_nvc_stmt_breakpoint_remove;
   vpi_mcd_flush;
   vpi_mcd_printf;
   vpi_mcd_vprintf;

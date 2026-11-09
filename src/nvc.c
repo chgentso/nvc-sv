@@ -614,6 +614,7 @@ static int elaborate(int argc, char **argv, cmd_state_t *state)
       { "no-collapse",     no_argument,       0, 'C' },
       { "stats",           no_argument,       0, 'S' },
       { "trace",           no_argument,       0, 't' },
+      { "debug-stmts",     no_argument,       0, 'B' },
       { 0, 0, 0, 0 }
    };
 
@@ -675,6 +676,9 @@ static int elaborate(int argc, char **argv, cmd_state_t *state)
          break;
       case 'S':
          opt_set_int(OPT_ELAB_STATS, 1);
+         break;
+      case 'B':
+         opt_set_int(OPT_DEBUG_STMTS, 1);
          break;
       case 0:
          // Set a flag
@@ -996,6 +1000,7 @@ static int run_cmd(int argc, char **argv, cmd_state_t *state)
       { "wave-flush",    required_argument, 0, 'F' },
       { "surfer",        optional_argument, 0, 'U' },
       { "shuffle",       no_argument,       0, 'H' },
+      { "debug-stmts",   no_argument,       0, 'B' },
       { 0, 0, 0, 0 }
    };
 
@@ -1118,6 +1123,9 @@ static int run_cmd(int argc, char **argv, cmd_state_t *state)
             opt_set_int(OPT_DUMP_ARRAYS, INT_MAX);
          else
             opt_set_int(OPT_DUMP_ARRAYS, parse_int(optarg));
+         break;
+      case 'B':
+         opt_set_int(OPT_DEBUG_STMTS, 1);
          break;
       case 'H':
          warnf("the $bold$--shuffle$$ option is intended for debug use only "

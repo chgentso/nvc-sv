@@ -1301,6 +1301,12 @@ static void import_reflect_subtype(mir_unit_t *mu, mir_import_t *imp, int op)
       mir_build_reflect_subtype(mu, context, locus, bounds);
 }
 
+static void import_stmt_probe(mir_unit_t *mu, mir_import_t *imp, int op)
+{
+   mir_value_t locus = imp->map[vcode_get_arg(op, 0)];
+   mir_build_stmt_probe(mu, locus);
+}
+
 static void import_debug_out(mir_unit_t *mu, mir_import_t *imp, int op)
 {
    mir_value_t value = imp->map[vcode_get_arg(op, 0)];
@@ -1713,6 +1719,9 @@ static void import_block(mir_unit_t *mu, mir_import_t *imp)
          break;
       case VCODE_OP_DEBUG_OUT:
          import_debug_out(mu, imp, i);
+         break;
+      case VCODE_OP_STMT_PROBE:
+         import_stmt_probe(mu, imp, i);
          break;
       case VCODE_OP_SCHED_PROCESS:
          import_sched_process(mu, imp, i);

@@ -3823,6 +3823,14 @@ static void irgen_op_active(jit_irgen_t *g, mir_value_t n)
    j_recv(g, g->map[n.id], 0);
 }
 
+static void irgen_op_stmt_probe(jit_irgen_t *g, mir_value_t n)
+{
+   jit_value_t locus = irgen_get_arg(g, n, 0);
+
+   j_send(g, 0, locus);
+   macro_exit(g, JIT_EXIT_STMT_PROBE);
+}
+
 static void irgen_op_debug_out(jit_irgen_t *g, mir_value_t n)
 {
    jit_value_t value = irgen_get_arg(g, n, 0);
@@ -5279,6 +5287,9 @@ static void irgen_block(jit_irgen_t *g, mir_block_t block)
          break;
       case MIR_OP_SCHED_ACTIVE:
          irgen_op_sched_active(g, n);
+         break;
+      case MIR_OP_STMT_PROBE:
+         irgen_op_stmt_probe(g, n);
          break;
       case MIR_OP_DEBUG_OUT:
          irgen_op_debug_out(g, n);

@@ -546,6 +546,18 @@ are included in or excluded from the waveform dump.  See section
 .Sx SELECTING SIGNALS
 for details on how to select particular signals.  These options can be
 given multiple times.
+.\" --debug-stmts
+.It Fl \-debug\-stmts
+Generate code that calls the statement hook of the VPI extension
+.Fn vpi_nvc_set_stmt_cb
+before a statement on a line with a breakpoint set by
+.Fn vpi_nvc_stmt_breakpoint_add
+runs.  A debugger plugin uses this to stop in a process before a given
+source line.  The option has to be given before the code is generated, so
+either here or when elaborating, or by setting the environment variable
+.Ev NVC_DEBUG_STMTS
+to 1.  A simulation with the option runs more slowly even if no
+breakpoint is set.
 .\" --shuffle
 .It Fl \-shuffle
 Run processes in random order.  The VHDL standard does not specify the

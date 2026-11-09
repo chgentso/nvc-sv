@@ -3797,6 +3797,38 @@ PLI_INT32 vpi_nvc_get_delta(void)
    return deltas;
 }
 
+static vpi_nvc_stmt_fn_t stmt_fn;
+static void             *stmt_context;
+
+static void vpi_stmt_hook(const char *file, int line, rt_proc_t *proc,
+                          void *context)
+{
+   LOCAL_TEXT_BUF scope = tb_new();
+   if (proc != NULL && proc->scope != NULL)
+      get_path_name(proc->scope, scope);
+
+   (*stmt_fn)(file, line, proc != NULL ? istr(proc->name) : NULL,
+              tb_get(scope), stmt_context);
+}
+
+void vpi_nvc_set_stmt_cb(vpi_nvc_stmt_fn_t fn, void *user_data)
+{
+   stmt_fn = fn;
+   stmt_context = user_data;
+   set_stmt_hook(fn != NULL ? vpi_stmt_hook : NULL, NULL);
+}
+
+PLI_INT32 vpi_nvc_stmt_breakpoint_add(const char *file, int line)
+{
+   stmt_break_add(file, line);
+   return opt_get_int(OPT_DEBUG_STMTS) ? 1 : 0;
+}
+
+PLI_INT32 vpi_nvc_stmt_breakpoint_remove(const char *file, int line)
+{
+   return stmt_break_remove(file, line) ? 1 : 0;
+}
+
 void vpi_nvc_set_diag_cb(vpi_nvc_diag_fn_t fn, void *user_data)
 {
    diag_fn = fn;

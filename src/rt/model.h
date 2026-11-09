@@ -88,6 +88,14 @@ void call_with_model(rt_model_t *m, void (*cb)(void *), void *arg);
 rt_model_t *get_model(void);
 rt_model_t *get_model_or_null(void);
 rt_proc_t *get_active_proc(void);
+
+// Statement breakpoints: code generated with --debug-stmts calls the hook
+// before a statement on a line with a breakpoint runs
+typedef void (*stmt_hook_fn_t)(const char *file, int line, rt_proc_t *proc,
+                               void *context);
+void set_stmt_hook(stmt_hook_fn_t fn, void *context);
+void stmt_break_add(const char *file, int line);
+bool stmt_break_remove(const char *file, int line);
 rt_proc_t *model_defer_note(uint32_t *runs, uint32_t *seq);
 bool model_defer_live(rt_proc_t *proc, uint32_t runs, uint32_t seq,
                       const int64_t *scopes, unsigned nscopes);

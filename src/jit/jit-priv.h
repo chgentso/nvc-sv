@@ -179,6 +179,7 @@ typedef enum {
    JIT_EXIT_GET_COUNTERS,
    JIT_EXIT_SCHED_ACTIVE,
    JIT_EXIT_SCHED_ZERO,
+   JIT_EXIT_STMT_PROBE,
 } jit_exit_t;
 
 typedef uint32_t jit_reg_t;

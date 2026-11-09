@@ -179,6 +179,7 @@ const char *mir_op_string(mir_op_t op)
       [MIR_OP_PUT_DRIVER] = "put driver",
       [MIR_OP_GET_COUNTERS] = "get counters",
       [MIR_OP_INSTANCE_INIT] = "instance init",
+      [MIR_OP_STMT_PROBE] = "stmt probe",
    };
 
    return map[op];
@@ -848,6 +849,7 @@ void mir_annotate(mir_unit_t *mu, const mir_annotate_t *cb, void *ctx)
          case MIR_OP_JUMP:
          case MIR_OP_ADD_TRIGGER:
          case MIR_OP_DEBUG_OUT:
+         case MIR_OP_STMT_PROBE:
          case MIR_OP_CONSUME:
          case MIR_OP_RESUME:
             {

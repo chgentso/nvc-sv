@@ -4913,6 +4913,83 @@ void x_drive_signal(sig_shared_t *ss, uint32_t offset, int32_t count)
    }
 }
 
+typedef struct {
+   char *file;
+   int   line;
+} stmt_break_t;
+
+static A(stmt_break_t)  stmt_breaks;
+static stmt_hook_fn_t   stmt_hook;
+static void            *stmt_hook_context;
+
+void set_stmt_hook(stmt_hook_fn_t fn, void *context)
+{
+   stmt_hook = fn;
+   stmt_hook_context = context;
+}
+
+static bool same_file(const char *a, const char *b)
+{
+   // One name may be a path that ends with the other
+   const size_t alen = strlen(a), blen = strlen(b);
+   const char *longer = alen >= blen ? a : b;
+   const char *shorter = alen >= blen ? b : a;
+   const size_t llen = alen >= blen ? alen : blen;
+   const size_t slen = alen >= blen ? blen : alen;
+
+   if (strcmp(longer + (llen - slen), shorter) != 0)
+      return false;
+
+   return llen == slen || longer[llen - slen - 1] == '/';
+}
+
+void stmt_break_add(const char *file, int line)
+{
+   stmt_break_t b = { .file = xstrdup(file), .line = line };
+   APUSH(stmt_breaks, b);
+}
+
+bool stmt_break_remove(const char *file, int line)
+{
+   for (int i = 0; i < stmt_breaks.count; i++) {
+      stmt_break_t *b = &(stmt_breaks.items[i]);
+      if (b->line == line && same_file(b->file, file)) {
+         free(b->file);
+         stmt_breaks.items[i] = stmt_breaks.items[--stmt_breaks.count];
+         return true;
+      }
+   }
+
+   return false;
+}
+
+void x_stmt_probe(object_t *where)
+{
+   // Called before every statement of code generated with --debug-stmts
+   if (likely(stmt_breaks.count == 0) || stmt_hook == NULL)
+      return;
+
+   const loc_t *loc = &(where->loc);
+   if (loc_invalid_p(loc))
+      return;
+
+   const char *file = NULL;
+   for (int i = 0; i < stmt_breaks.count; i++) {
+      const stmt_break_t *b = &(stmt_breaks.items[i]);
+      if (b->line != loc->first_line)
+         continue;
+
+      if (file == NULL)
+         file = loc_file_str(loc);
+
+      if (same_file(b->file, file)) {
+         (*stmt_hook)(file, loc->first_line, get_active_proc(),
+                      stmt_hook_context);
+         return;
+      }
+   }
+}
+
 void x_sched_process(int64_t delay)
 {
    rt_proc_t *proc = get_active_proc();

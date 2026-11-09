@@ -72,7 +72,7 @@ DECLARE_AND_DEFINE_ARRAY(vcode_type);
 #define OP_HAS_TAG(x)                                                   \
    (x == VCODE_OP_COVER_STMT || x == VCODE_OP_COVER_BRANCH              \
     || x == VCODE_OP_COVER_TOGGLE || x == VCODE_OP_COVER_EXPR           \
-    || x == VCODE_OP_COVER_STATE)
+    || x == VCODE_OP_COVER_STATE || x == VCODE_OP_STMT_PROBE)
 #define OP_HAS_COMMENT(x)                                               \
    (x == VCODE_OP_COMMENT)
 #define OP_HAS_TARGET(x)                                                \
@@ -1050,7 +1050,7 @@ const char *vcode_op_string(vcode_op_t op)
       "or trigger", "cmp trigger", "instance name",
       "bind external", "array scope", "record scope",
       "dir check", "sched process", "table ref", "get counters", "put driver",
-      "deposit signal", "sched active",
+      "deposit signal", "sched active", "stmt probe",
    };
    if ((unsigned)op >= ARRAY_LEN(strs))
       return "???";
@@ -2210,6 +2210,13 @@ void vcode_dump_with_mark(int mark_op, vcode_dump_fn_t callback, void *arg)
                col += vcode_dump_reg(op->args.items[1]);
                col += printf(" locus ");
                col += vcode_dump_reg(op->args.items[2]);
+            }
+            break;
+
+         case VCODE_OP_STMT_PROBE:
+            {
+               col += printf("%s locus ", vcode_op_string(op->kind));
+               col += vcode_dump_reg(op->args.items[0]);
             }
             break;
 
@@ -5916,6 +5923,15 @@ void emit_debug_out(vcode_reg_t reg)
 {
    op_t *op = vcode_add_op(VCODE_OP_DEBUG_OUT);
    vcode_add_arg(op, reg);
+}
+
+void emit_stmt_probe(vcode_reg_t locus)
+{
+   op_t *op = vcode_add_op(VCODE_OP_STMT_PROBE);
+   vcode_add_arg(op, locus);
+
+   VCODE_ASSERT(vcode_reg_kind(locus) == VCODE_TYPE_DEBUG_LOCUS,
+                "locus argument to stmt probe must be a debug locus");
 }
 
 void emit_cover_stmt(vcode_reg_t counters, uint32_t tag)

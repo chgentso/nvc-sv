@@ -7827,6 +7827,9 @@ static void lower_stmt(lower_unit_t *lu, tree_t stmt, gen_stack_t *gs)
 
    PUSH_DEBUG_INFO(stmt);
 
+   if (opt_get_int(OPT_DEBUG_STMTS))
+      emit_stmt_probe(lower_debug_locus(stmt));
+
    switch (tree_kind(stmt)) {
    case T_ASSERT:
       lower_assert(lu, stmt, gs);

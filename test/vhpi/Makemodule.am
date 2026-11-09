@@ -50,7 +50,8 @@ lib_vhpi_test_so_SOURCES = \
 	test/vhpi/vhpi26.c \
 	test/vhpi/vhpi27.c \
 	test/vhpi/vhpi28.c \
-	test/vhpi/vhpi29.c
+	test/vhpi/vhpi29.c \
+	test/vhpi/vhpi30.c
 
 lib_vhpi_test_so_CFLAGS  = $(SHLIB_CFLAGS) -I$(top_srcdir)/src/vhpi $(AM_CFLAGS)
 lib_vhpi_test_so_LDFLAGS = $(SHLIB_LDFLAGS) $(AM_LDFLAGS)

@@ -41,6 +41,28 @@
 // cycle, which is the one where time has just advanced.
 PLI_INT32 vpi_nvc_get_delta(void);
 
+// Statement breakpoints.  The code of the design has to be generated with the
+// --debug-stmts option of nvc (at elaboration or when running): it then calls
+// the callback before a statement on a line that has a breakpoint runs.  The
+// callback runs inside the process that executes the statement, so a tool can
+// block in it and read signals and variables while the simulation is paused
+// there; process is NULL outside a process.  A line breakpoint matches the
+// statements whose first line is that line, in any process and any instance
+// that executes it.  file may be a path that ends with the name of the file
+// or the other way round.
+typedef void (*vpi_nvc_stmt_fn_t)(const char *file, int line,
+                                  const char *process, const char *scope,
+                                  void *user_data);
+
+void vpi_nvc_set_stmt_cb(vpi_nvc_stmt_fn_t fn, void *user_data);
+
+// Adds a breakpoint on a line.  Returns 1 if the code of the design is
+// instrumented (--debug-stmts), otherwise 0 and the breakpoint cannot fire.
+PLI_INT32 vpi_nvc_stmt_breakpoint_add(const char *file, int line);
+
+// Removes a breakpoint, returns 1 if there was one.
+PLI_INT32 vpi_nvc_stmt_breakpoint_remove(const char *file, int line);
+
 // Called when a VHDL assertion or report statement, or a Verilog severity
 // task or failing assertion, produces a message.  The callback runs on the
 // simulation thread inside the process that raised the message, so it should

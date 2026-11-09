@@ -628,6 +628,10 @@ void __nvc_do_exit(jit_exit_t which, jit_anchor_t *anchor, jit_scalar_t *args,
       }
       break;
 
+   case JIT_EXIT_STMT_PROBE:
+      x_stmt_probe(args[0].pointer);
+      break;
+
    case JIT_EXIT_ENABLE_TRIGGER:
       {
          rt_trigger_t *trigger = args[0].pointer;
