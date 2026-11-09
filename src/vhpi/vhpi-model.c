@@ -478,6 +478,14 @@ DEF_CLASS(compInstStmt, vhpiCompInstStmtK, designInstUnit.region.object);
 typedef struct {
    c_abstractRegion region;
    c_stmt           stmt;
+   vhpiBooleanT     IsPostponed;
+} c_processStmt;
+
+DEF_CLASS(processStmt, vhpiProcessStmtK, region.object);
+
+typedef struct {
+   c_abstractRegion region;
+   c_stmt           stmt;
    vhpiBooleanT     IsGuarded;
 } c_blockStmt;
 
@@ -757,6 +765,7 @@ static c_abstractRegion *is_abstractRegion(c_vhpiObject *obj)
    case vhpiCompInstStmtK:
    case vhpiForGenerateK:
    case vhpiIfGenerateK:
+   case vhpiProcessStmtK:
    case vhpiPackInstK:
    case vhpiEntityDeclK:
    case vhpiArchBodyK:
@@ -785,6 +794,7 @@ static c_abstractDecl *is_abstractDecl(c_vhpiObject *obj)
    case vhpiElemDeclK:
    case vhpiGenericDeclK:
    case vhpiConstDeclK:
+   case vhpiVarDeclK:
    case vhpiConstParamDeclK:
    case vhpiSigParamDeclK:
    case vhpiVarParamDeclK:
@@ -803,6 +813,7 @@ static c_objDecl *is_objDecl(c_vhpiObject *obj)
    case vhpiPortDeclK:
    case vhpiGenericDeclK:
    case vhpiConstDeclK:
+   case vhpiVarDeclK:
    case vhpiConstParamDeclK:
    case vhpiVarParamDeclK:
    case vhpiSigParamDeclK:
@@ -905,6 +916,8 @@ static c_stmt *is_stmt(c_vhpiObject *obj)
       return &(container_of(obj, c_forGenerate, region.object)->stmt);
    case vhpiIfGenerateK:
       return &(container_of(obj, c_ifGenerate, region.object)->stmt);
+   case vhpiProcessStmtK:
+      return &(container_of(obj, c_processStmt, region.object)->stmt);
    default:
       return NULL;
    }
@@ -2052,6 +2065,25 @@ static vhpi_ptr_t vhpi_ptr_from_layout(const jit_layout_t *l, void *mem)
    return ptr;
 }
 
+static rt_proc_t *vhpi_find_process(c_abstractRegion *r)
+{
+   // The runtime process which the elaborated process statement became
+   vhpi_context_t *c = vhpi_context();
+   if (c->model == NULL || r->UpperRegion == NULL)
+      return NULL;
+
+   rt_scope_t *s = find_scope(c->model, r->UpperRegion->object.tree);
+   if (s == NULL)
+      return NULL;
+
+   for (int i = 0; i < s->procs.count; i++) {
+      if (s->procs.items[i]->where == r->object.tree)
+         return s->procs.items[i];
+   }
+
+   return NULL;
+}
+
 static vhpi_ptr_t vhpi_get_ptr(c_vhpiObject *obj)
 {
    c_paramDecl *pd = is_paramDecl(obj);
@@ -2161,7 +2193,17 @@ static vhpi_ptr_t vhpi_get_ptr(c_vhpiObject *obj)
       if (c->phase != vhpiSimulationPhase)
          return (vhpi_ptr_t){};
 
-      if (is_concurrent_block(r->object.tree)) {
+      if (obj->kind == vhpiProcessStmtK) {
+         rt_proc_t *proc = vhpi_find_process(r);
+         if (proc == NULL)
+            return (vhpi_ptr_t){};
+
+         r->handle = proc->closure.handle;
+         r->privdata = *mptr_get(proc->privdata);
+         if (r->privdata == NULL)
+            return (vhpi_ptr_t){};
+      }
+      else if (is_concurrent_block(r->object.tree)) {
          tree_t h = tree_decl(r->object.tree, 0);
          assert(tree_kind(h) == T_HIER);
 
@@ -3031,6 +3073,35 @@ vhpiIntT vhpi_get(vhpiIntPropertyT property, vhpiHandleT handle)
 
          goto missing_property;
       }
+   case vhpiIsPostponedP:
+      {
+         c_processStmt *ps = is_processStmt(obj);
+         if (ps == NULL)
+            goto missing_property;
+
+         return ps->IsPostponed;
+      }
+   case vhpiNvcStateP:
+      {
+         c_processStmt *ps = is_processStmt(obj);
+         if (ps == NULL)
+            goto missing_property;
+
+         rt_proc_t *proc = vhpi_find_process(&(ps->region));
+         if (proc == NULL)
+            return 0;
+
+         int state = 0;
+         if (get_active_proc() == proc)
+            state |= vhpiNvcProcRunning;
+         if (proc->wakeable.pending)
+            state |= vhpiNvcProcRunnable;
+         if (proc->wakeable.delayed)
+            state |= vhpiNvcProcTimeout;
+         if (proc->wakeable.zombie)
+            state |= vhpiNvcProcEnded;
+         return state;
+      }
    case vhpiRandomSeedP:
       {
          c_tool *t = is_tool(obj);
@@ -3422,6 +3493,18 @@ vhpiPhysT vhpi_get_phys(vhpiPhysPropertyT property,
             return pr->PhysLeftBound;
          else
             return pr->PhysRightBound;
+      }
+   case vhpiNvcWakeTimeP:
+      {
+         c_processStmt *ps = is_processStmt(obj);
+         if (ps == NULL)
+            return invalid;
+
+         rt_proc_t *proc = vhpi_find_process(&(ps->region));
+         if (proc == NULL || !proc->wakeable.delayed)
+            return invalid;
+
+         return vhpi_phys_from_native(proc->wake_at);
       }
    case vhpiPhysPositionP:
       {
@@ -4771,6 +4854,30 @@ static c_procDecl *build_procDecl(tree_t decl, c_abstractRegion *region)
    return f;
 }
 
+static c_abstractRegion *build_processStmt(tree_t t, c_abstractRegion *region)
+{
+   c_processStmt *ps = new_object(sizeof(c_processStmt), vhpiProcessStmtK);
+   init_abstractRegion(&(ps->region), region, t);
+   init_stmt(&(ps->stmt), t);
+
+   ps->IsPostponed = !!(tree_flags(t) & TREE_F_POSTPONED);
+
+   vhpi_list_add(&region->Stmts.list, &(ps->region.object));
+
+   return &(ps->region);
+}
+
+static c_varDecl *build_varDecl(tree_t decl, c_abstractRegion *region)
+{
+   c_varDecl *vd = new_object(sizeof(c_varDecl), vhpiVarDeclK);
+   init_objDecl(&(vd->objDecl), decl, region);
+
+   vd->IsShared = !!(tree_flags(decl) & TREE_F_SHARED);
+
+   vhpi_list_add(&region->Decls.list, &(vd->objDecl.decl.object));
+   return vd;
+}
+
 static c_abstractRegion *build_blockStmt(tree_t t, c_abstractRegion *region)
 {
    c_blockStmt *bs = new_object(sizeof(c_blockStmt), vhpiBlockStmtK);
@@ -5152,8 +5259,9 @@ static void vhpi_lazy_stmts(c_vhpiObject *obj)
    c_abstractRegion *r = is_abstractRegion(obj);
    assert(r != NULL);
 
-   if (tree_kind(r->object.tree) == T_PACKAGE)
-      return;
+   if (tree_kind(r->object.tree) == T_PACKAGE
+       || tree_kind(r->object.tree) == T_PROCESS)
+      return;   // The statements of a process are not visible
 
    const int nstmts = tree_stmts(r->object.tree);
    vhpi_list_reserve(&r->Stmts.list, nstmts);
@@ -5189,6 +5297,9 @@ static void vhpi_lazy_stmts(c_vhpiObject *obj)
                continue;
             }
          }
+         break;
+      case T_PROCESS:
+         build_processStmt(s, r);
          break;
       default:
          break;
@@ -5226,6 +5337,7 @@ static void vhpi_lazy_decls(c_vhpiObject *obj)
       ndecls = tree_decls(r->object.tree);
       break;
    case vhpiForGenerateK:
+   case vhpiProcessStmtK:
       ndecls = tree_decls(r->object.tree);
       break;
    default:
@@ -5261,6 +5373,10 @@ static void vhpi_lazy_decls(c_vhpiObject *obj)
          break;
       case T_PACK_INST:
          build_packInst(d, r);
+         break;
+      case T_VAR_DECL:
+         if (obj->kind == vhpiProcessStmtK)
+            build_varDecl(d, r);
          break;
       default:
          break;

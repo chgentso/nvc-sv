@@ -140,6 +140,8 @@ const char *vhpi_property_str(int property)
    case vhpiResolutionLimitP: return "vhpiResolutionLimitP";
    case vhpiTimeP: return "vhpiTimeP";
    case vhpiRandomSeedP: return "vhpiRandomSeedP";
+   case vhpiNvcStateP: return "vhpiNvcStateP";
+   case vhpiNvcWakeTimeP: return "vhpiNvcWakeTimeP";
    default: return vhpi_fallback_str(property);
    }
 }

@@ -26,6 +26,18 @@
    vhpiVerilogModuleK = 2001
 
 #define VHPIEXTEND_INT_PROPERTIES ,             \
-   vhpiRandomSeedP = 1100
+   vhpiRandomSeedP = 1100,                      \
+   vhpiNvcStateP = 1101
+
+#define VHPIEXTEND_PHYS_PROPERTIES ,            \
+   vhpiNvcWakeTimeP = 1659
+
+// Value of vhpiNvcStateP of a process: a combination of these flags.  A
+// process with none of them is suspended in a wait statement with a
+// sensitivity to signals.
+#define vhpiNvcProcRunning  0x01   // The process is executing
+#define vhpiNvcProcRunnable 0x02   // It will run in the current delta cycle
+#define vhpiNvcProcTimeout  0x04   // It has a time out: vhpiNvcWakeTimeP
+#define vhpiNvcProcEnded    0x08   // It has finished (Verilog only)
 
 #endif  // VHPI_EXT_NVC_H
