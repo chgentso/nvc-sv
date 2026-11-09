@@ -1,4 +1,5 @@
 ## Unreleased changes
+- The VHPI property `vhpiLineNoP` gives the line of a declaration.
 - A VPI application can call `vpi_nvc_set_diag_cb` (declared in `vpi_ext_nvc.h`) to be told about every VHDL assertion or report message and every Verilog severity task or failing assertion, with its severity, text and source location.
 - The names and values of the constants of a System Verilog enumeration type are available through VPI: `vpi_handle(vpiTypespec, var)` gives a `vpiEnumTypespec` and `vpi_iterate(vpiEnumConst, typespec)` its constants.
 - System Verilog `import "DPI-C"` functions and tasks can now be called.  The

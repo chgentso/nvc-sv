@@ -2981,6 +2981,14 @@ vhpiIntT vhpi_get(vhpiIntPropertyT property, vhpiHandleT handle)
       }
    case vhpiKindP:
       return obj->kind;
+   case vhpiLineNoP:
+      {
+         const loc_t *loc = obj_loc(obj);
+         if (loc == NULL || loc_invalid_p(loc))
+            goto missing_property;
+
+         return loc->first_line;
+      }
    case vhpiIsCompositeP:
    case vhpiIsScalarP:
       {

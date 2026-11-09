@@ -2515,6 +2515,7 @@ vpi11           verilog,vpi
 vlogcasegen2    verilog
 vlogtopparam1   verilog,gWIDTH=12,gB=8'ha5,gR=2.5,gS="hello"
 vhpi26          mixed,2008,vhpi
+vhpi27          vhpi
 vpi12           verilog,vpi
 vpi13           verilog,vpi
 vpi14           verilog,vpi
