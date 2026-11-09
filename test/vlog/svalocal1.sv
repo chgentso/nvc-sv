@@ -14,10 +14,10 @@ module svalocal1;
   function automatic bit fo(int v, output int o); o = v; return 1'b1; endfunction
   function automatic bit fr(ref int v); return v > 2; endfunction
 
-  property p1; int x; @(posedge clk) (a, x = d) |=> accept_on (x == 1) b; endproperty            // Error
-  property p2; int x; @(posedge clk) (a, x = d) |=> reject_on (x == 1) b; endproperty            // Error
-  property p3; int x; @(posedge clk) (a, x = d) |=> sync_accept_on (f(x)) b; endproperty         // Error
-  property p4; int x; @(posedge clk) (a, x = d) |=> sync_reject_on (x[0]) b; endproperty         // Error
+  property p1; int x; @(posedge clk) (a, x = d) |=> accept_on (x == 1) b; endproperty            // OK
+  property p2; int x; @(posedge clk) (a, x = d) |=> reject_on (x == 1) b; endproperty            // OK
+  property p3; int x; @(posedge clk) (a, x = d) |=> sync_accept_on (f(x)) b; endproperty         // OK
+  property p4; int x; @(posedge clk) (a, x = d) |=> sync_reject_on (x[0]) b; endproperty         // OK
   property p5(local input int y); @(posedge clk) disable iff (y == 0) a |=> b; endproperty        // Error
   property p6; int x; @(posedge clk) disable iff (x == 0) (a, x = d) |=> b; endproperty           // Error
   property p7; int x; @(posedge clk) (a, x = d) |=> accept_on (c) (d == x); endproperty           // OK

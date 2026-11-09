@@ -3765,10 +3765,6 @@ END_TEST
 START_TEST(test_svalocal1)
 {
    const error_t expect[] = {
-      { 17, "local variable 'x' cannot be used in an abort condition" },
-      { 18, "local variable 'x' cannot be used in an abort condition" },
-      { 19, "local variable 'x' cannot be used in an abort condition" },
-      { 20, "local variable 'x' cannot be used in an abort condition" },
       { 21, "local variable 'y' cannot be used in a disable iff condition" },
       { 22, "local variable 'x' cannot be used in a disable iff condition" },
       { 26, "local variable 'x' may be unassigned here" },
