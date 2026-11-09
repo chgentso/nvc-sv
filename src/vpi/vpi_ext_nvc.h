@@ -24,4 +24,20 @@
 // scope but its contents are only visible through VHPI
 #define vpiForeignInst 1001
 
+// Severity levels reported to a diagnostic callback, as in VHDL
+#define vpiNvcNote    0
+#define vpiNvcWarning 1
+#define vpiNvcError   2
+#define vpiNvcFailure 3
+
+// Called when a VHDL assertion or report statement, or a Verilog severity
+// task or failing assertion, produces a message.  The callback runs on the
+// simulation thread inside the process that raised the message, so it should
+// only record the event.  file is NULL if the location is unknown.  Passing
+// a NULL function removes the callback.
+typedef void (*vpi_nvc_diag_fn_t)(int severity, const char *text,
+                                  const char *file, int line, void *user_data);
+
+void vpi_nvc_set_diag_cb(vpi_nvc_diag_fn_t fn, void *user_data);
+
 #endif  // VPI_EXT_NVC_H

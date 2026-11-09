@@ -1508,8 +1508,11 @@ static PLI_INT32 diag_tf(PLI_BYTE8 *userdata)
 
    if ((uintptr_t)userdata == DIAG_ERROR)
       emit_vhdl_diag(d, SEVERITY_ERROR);
-   else
+   else {
+      notify_assert_hook(d, (uintptr_t)userdata == DIAG_WARN
+                         ? SEVERITY_WARNING : SEVERITY_NOTE);
       diag_emit(d);
+   }
 
    vpi_release_handle(argv);
    vpi_release_handle(call);
@@ -1540,6 +1543,7 @@ static PLI_INT32 fatal_tf(PLI_BYTE8 *userdata)
    diag_t *d = diag_new(DIAG_FATAL, NULL);
    diag_write(d, tb_get(tb), tb_len(tb));
    diag_show_source(d, false);
+   notify_assert_hook(d, SEVERITY_FAILURE);
    diag_emit(d);
 
    vpi_release_handle(argv);

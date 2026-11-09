@@ -28,6 +28,7 @@
 #include "object.h"
 #include "option.h"
 #include "printf.h"
+#include "rt/assert.h"
 #include "rt/fileio.h"
 #include "rt/model.h"
 #include "rt/mspace.h"
@@ -3520,6 +3521,25 @@ vpiHandle vpi_register_systf(p_vpi_systf_data systf_data_p)
    APUSH(vpi_context()->systasks, handle);
 
    return handle;
+}
+
+static vpi_nvc_diag_fn_t  diag_fn;
+static void              *diag_context;
+
+static void vpi_diag_hook(vhdl_severity_t severity, const char *text,
+                          const loc_t *loc, void *context)
+{
+   const bool valid = loc != NULL && !loc_invalid_p(loc);
+   (*diag_fn)(severity, text, valid ? loc_file_str(loc) : NULL,
+              valid ? loc->first_line : 0, diag_context);
+}
+
+DLLEXPORT
+void vpi_nvc_set_diag_cb(vpi_nvc_diag_fn_t fn, void *user_data)
+{
+   diag_fn = fn;
+   diag_context = user_data;
+   set_assert_hook(fn != NULL ? vpi_diag_hook : NULL, NULL);
 }
 
 DLLEXPORT

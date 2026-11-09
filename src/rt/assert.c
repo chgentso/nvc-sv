@@ -378,8 +378,26 @@ diag_level_t get_diag_severity(vhdl_severity_t severity)
    return DIAG_ERROR;
 }
 
+static assert_hook_t  assert_hook;
+static void          *assert_hook_context;
+
+void set_assert_hook(assert_hook_t fn, void *context)
+{
+   assert_hook = fn;
+   assert_hook_context = context;
+}
+
+void notify_assert_hook(diag_t *d, vhdl_severity_t severity)
+{
+   if (assert_hook != NULL)
+      (*assert_hook)(severity, diag_get_text(d), diag_get_loc(d),
+                     assert_hook_context);
+}
+
 void emit_vhdl_diag(diag_t *d, vhdl_severity_t severity)
 {
+   notify_assert_hook(d, severity);
+
    if (severity >= exit_severity && severity < SEVERITY_FAILURE)
       diag_hint(d, NULL, "this will be treated as a fatal error due to "
                 "$bold$--exit-severity=%s$$",
