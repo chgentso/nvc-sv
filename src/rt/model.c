@@ -6717,12 +6717,10 @@ static void sv_proc_free(rt_model_t *m, rt_proc_t *p)
       t->next_sibling->prev_sibling = t->prev_sibling;
 
    rt_scope_t *s = p->scope;
-   for (int i = s->procs.count - 1; i >= 0; i--) {
-      if (s->procs.items[i] == p) {
-         s->procs.items[i] = s->procs.items[--s->procs.count];
-         break;
-      }
-   }
+   assert(s->procs.items[p->scope_idx] == p);
+   rt_proc_t *last = s->procs.items[--s->procs.count];
+   s->procs.items[p->scope_idx] = last;
+   last->scope_idx = p->scope_idx;
 
    mptr_free(m->mspace, &(p->privdata));
    tlab_release(m->jit, p->tlab);
@@ -7290,6 +7288,7 @@ void x_sv_spawn(const ffi_closure_t *closure, void *group, int64_t label)
 
    setup_process(m, p, tb_get(tb));
 
+   p->scope_idx = s->procs.count;
    APUSH(s->procs, p);
 
    sv_task_t *pt = sv_task_for(parent);

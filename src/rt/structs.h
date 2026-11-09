@@ -82,6 +82,7 @@ typedef struct _rt_proc {
    uint64_t       wait_seq;
    uint32_t       create_seq;
    uint32_t       wake_iter;
+   uint32_t       scope_idx;   // Index in scope->procs of a forked process
    unsigned       verilog : 1;
    unsigned       regs : 16;   // Places that hold a pointer to this process
    struct _sv_task *task;
