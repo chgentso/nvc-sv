@@ -143,6 +143,7 @@
   vpi_handle_by_multi_index;
   vpi_handle_by_name;
   vpi_iterate;
+  vpi_nvc_get_delta;
   vpi_nvc_set_diag_cb;
   vpi_mcd_flush;
   vpi_mcd_printf;

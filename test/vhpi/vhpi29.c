@@ -42,6 +42,7 @@ static void phase0(const vhpiCbDataT *cb)    // 5 ns: nothing is forced yet
    check_int(is_forced(x), 0);
 
    put_str(s, "1010", vhpiForcePropagate);
+   check_int(is_forced(s), 1);     // at once, not only in the next cycle
 
    put_str(rb, "10", vhpiDepositPropagate);
    nchecked++;

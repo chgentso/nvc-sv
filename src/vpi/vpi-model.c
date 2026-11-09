@@ -3515,6 +3515,9 @@ static void vpi_arm_callback(vpi_context_t *c, vpiHandle handle)
    case cbReadOnlySynch:
       model_set_phase_cb(m, END_TIME_STEP, vpi_global_cb, handle);
       break;
+   case cbNvcEndOfDelta:
+      model_set_phase_cb(m, END_OF_PROCESSES, vpi_global_cb, handle);
+      break;
    case cbNextSimTime:
       model_set_phase_cb(m, NEXT_TIME_STEP, vpi_global_cb, handle);
       break;
@@ -3783,6 +3786,17 @@ static void vpi_diag_hook(vhdl_severity_t severity, const char *text,
 }
 
 DLLEXPORT
+PLI_INT32 vpi_nvc_get_delta(void)
+{
+   vpi_context_t *c = vpi_context();
+   if (c->model == NULL)
+      return 0;
+
+   unsigned deltas;
+   model_now(c->model, &deltas);
+   return deltas;
+}
+
 void vpi_nvc_set_diag_cb(vpi_nvc_diag_fn_t fn, void *user_data)
 {
    diag_fn = fn;
@@ -3810,6 +3824,7 @@ vpiHandle vpi_register_cb(p_cb_data cb_data_p)
       break;
    case cbReadWriteSynch:
    case cbReadOnlySynch:
+   case cbNvcEndOfDelta:
    case cbNextSimTime:
    case cbAfterDelay:
    case cbAtStartOfSimTime:

@@ -30,6 +30,17 @@
 #define vpiNvcError   2
 #define vpiNvcFailure 3
 
+// Callback reason: the end of every delta cycle, after the processes of the
+// cycle have run.  This includes the first cycle of a time step.  Values
+// read in the callback are those of the cycle, and unlike cbReadOnlySynch the
+// callback may change signals, which then happens in the next delta cycle.
+// Use cbReadWriteSynch for the last delta cycle of a time step.
+#define cbNvcEndOfDelta 1001
+
+// The number of the current delta cycle in the time step: 0 for the first
+// cycle, which is the one where time has just advanced.
+PLI_INT32 vpi_nvc_get_delta(void);
+
 // Called when a VHDL assertion or report statement, or a Verilog severity
 // task or failing assertion, produces a message.  The callback runs on the
 // simulation thread inside the process that raised the message, so it should
