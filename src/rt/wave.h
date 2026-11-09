@@ -30,6 +30,11 @@ wave_dumper_t *wave_dumper_new(const char *file, const char *gtkw_file,
 void wave_dumper_free(wave_dumper_t *wd);
 void wave_dumper_restart(wave_dumper_t *wd, rt_model_t *m, jit_t *jit);
 
+// Write a complete copy of an FST dump at most this often (wall clock
+// seconds, checked at the end of each time step) so that it can be read
+// while the simulation runs; a negative value turns this off
+void wave_set_flush_interval(double seconds);
+
 void wave_include_glob(const char *glob);
 void wave_exclude_glob(const char *glob);
 void wave_include_file(const char *base);

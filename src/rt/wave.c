@@ -37,6 +37,7 @@
 #include <unistd.h>
 #include <limits.h>
 #include <string.h>
+#include <errno.h>
 
 #if !defined __CYGWIN__ && !defined __MINGW32__
 #include <libgen.h>
@@ -113,6 +114,9 @@ typedef struct _wave_dumper {
    gtkw_writer_t *gtkw;
    FILE          *vcdfile;
    char          *tmpfst;
+   char          *final_file;   // Where the FST goes when it is complete
+   uint64_t       last_flush_us;
+   uint64_t       last_flush_time;
    uint64_t       last_time;
    jit_t         *jit;
    hash_t        *typecache;
@@ -122,6 +126,7 @@ typedef struct _wave_dumper {
 
 static glob_array_t incl;
 static glob_array_t excl;
+static double       flush_interval = -1.0;
 
 static void fst_process_signal(wave_dumper_t *wd, rt_scope_t *scope, tree_t d,
                                type_t type, text_buf_t *tb);
@@ -151,6 +156,16 @@ static void fst_close(rt_model_t *m, void *arg)
 
    fstWriterEmitTimeChange(wd->fst_ctx, model_now(m, NULL));
    fstWriterClose(wd->fst_ctx);
+
+   if (wd->final_file != NULL) {
+      // The complete file replaces the snapshots
+      char *running = xasprintf("%s.run", wd->final_file);
+      if (rename(running, wd->final_file) != 0)
+         fatal_errno("rename: %s", running);
+      free(running);
+      free(wd->final_file);
+      wd->final_file = NULL;
+   }
 
    if (wd->vcdfile) {
       void *xc = fstReaderOpen(wd->tmpfst);
@@ -1235,6 +1250,37 @@ static void fst_walk_packages(wave_dumper_t *wd)
    }
 }
 
+static void fst_flush(rt_model_t *m, void *arg)
+{
+   wave_dumper_t *wd = arg;
+
+   // Check at the end of every time step; the callback is only run once
+   model_set_phase_cb(m, END_TIME_STEP, fst_flush, wd);
+
+   const uint64_t now_us = get_timestamp_us();
+   if (flush_interval > 0 && now_us - wd->last_flush_us < flush_interval * 1e6)
+      return;
+
+   const uint64_t now = model_now(m, NULL);
+   if (now == wd->last_flush_time)
+      return;
+
+   // Write a complete copy of the dump so far next to the file and move it
+   // into place so that a viewer never sees a partial file
+   char *snapshot = xasprintf("%s.tmp", wd->final_file);
+   if (fstWriterSnapshot(wd->fst_ctx, snapshot) == 0) {
+      if (rename(snapshot, wd->final_file) != 0)
+         warnf("cannot rename %s to %s: %s", snapshot, wd->final_file,
+               strerror(errno));
+   }
+   else
+      warnf("failed to write waveform snapshot %s", snapshot);
+   free(snapshot);
+
+   wd->last_flush_us = get_timestamp_us();
+   wd->last_flush_time = now;
+}
+
 void wave_dumper_restart(wave_dumper_t *wd, rt_model_t *m, jit_t *jit)
 {
    wd->last_time = UINT64_MAX;
@@ -1262,6 +1308,11 @@ void wave_dumper_restart(wave_dumper_t *wd, rt_model_t *m, jit_t *jit)
    }
 
    model_set_phase_cb(m, END_OF_SIMULATION, fst_close, wd);
+
+   if (wd->final_file != NULL) {
+      wd->last_flush_us = get_timestamp_us();
+      model_set_phase_cb(m, END_TIME_STEP, fst_flush, wd);
+   }
 }
 
 wave_dumper_t *wave_dumper_new(const char *file, const char *gtkw_file,
@@ -1273,6 +1324,8 @@ wave_dumper_t *wave_dumper_new(const char *file, const char *gtkw_file,
    wd->typecache = hash_new(128);
 
    if (format == WAVE_FORMAT_VCD) {
+      if (flush_interval >= 0.0)
+         warnf("$bold$--wave-flush$$ is only supported for the FST format");
 #if defined __CYGWIN__ || defined __MINGW32__
       const char *tmpdir = ".";
 #else
@@ -1293,7 +1346,16 @@ wave_dumper_t *wave_dumper_new(const char *file, const char *gtkw_file,
    else {
       wd->vcdfile = NULL;
       wd->tmpfst  = NULL;
-      wd->fst_ctx = fstWriterCreate(file, 1);
+
+      if (flush_interval >= 0.0) {
+         // The writer works on a separate file until the simulation ends
+         wd->final_file = xstrdup(file);
+         char *running = xasprintf("%s.run", file);
+         wd->fst_ctx = fstWriterCreate(running, 1);
+         free(running);
+      }
+      else
+         wd->fst_ctx = fstWriterCreate(file, 1);
    }
 
    if (wd->fst_ctx == NULL)
@@ -1326,6 +1388,11 @@ void wave_dumper_free(wave_dumper_t *wd)
 
    hash_free(wd->typecache);
    free(wd);
+}
+
+void wave_set_flush_interval(double seconds)
+{
+   flush_interval = seconds;
 }
 
 void wave_include_glob(const char *glob)

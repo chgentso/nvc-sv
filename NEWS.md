@@ -1,4 +1,5 @@
 ## Unreleased changes
+- The new `--wave-flush` run option makes the FST file written by `--wave` readable while the simulation runs, by periodically writing a complete copy of the dump so far.
 - The VHPI property `vhpiLineNoP` gives the line of a declaration.
 - A VPI application can call `vpi_nvc_set_diag_cb` (declared in `vpi_ext_nvc.h`) to be told about every VHDL assertion or report message and every Verilog severity task or failing assertion, with its severity, text and source location.
 - The names and values of the constants of a System Verilog enumeration type are available through VPI: `vpi_handle(vpiTypespec, var)` gives a `vpiEnumTypespec` and `vpi_iterate(vpiEnumConst, typespec)` its constants.

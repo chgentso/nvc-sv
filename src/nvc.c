@@ -993,6 +993,7 @@ static int run_cmd(int argc, char **argv, cmd_state_t *state)
       { "vhpi-debug",    no_argument,       0, 'D' },
       { "vhpi-trace",    no_argument,       0, 'T' },
       { "gtkw",          optional_argument, 0, 'g' },
+      { "wave-flush",    required_argument, 0, 'F' },
       { "shuffle",       no_argument,       0, 'H' },
       { 0, 0, 0, 0 }
    };
@@ -1054,6 +1055,15 @@ static int run_cmd(int argc, char **argv, cmd_state_t *state)
             wave_fname = "";
          else
             wave_fname = optarg;
+         break;
+      case 'F':
+         {
+            char *end;
+            const double secs = strtod(optarg, &end);
+            if (*end != '\0' || secs < 0.0)
+               fatal("invalid --wave-flush interval: %s", optarg);
+            wave_set_flush_interval(secs);
+         }
          break;
       case 'g':
          if (optarg == NULL)
@@ -2417,6 +2427,9 @@ static void usage(void)
            { "--stop-time=T", "Stop after simulation time T (e.g. 5ns)" },
            { "--trace", "Trace simulation events" },
            { "-w, --wave[=FILE]", "Write waveform dump to FILE" },
+           { "    --wave-flush=SECS", "Make the FST dump readable while the "
+             "simulation runs by writing a complete copy at most every SECS "
+             "seconds" },
         }
       },
       { "Coverage report options",

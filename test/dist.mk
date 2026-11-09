@@ -2534,6 +2534,8 @@ EXTRA_DIST += \
 	test/regress/wave7.vhd \
 	test/regress/wave8.vhd \
 	test/regress/wave9.vhd \
+	test/regress/wavelive1.sh \
+	test/regress/wavelive1.vhd \
 	test/regress/while1.vhd \
 	test/regress/wide1.v \
 	test/regress/wide2.v \

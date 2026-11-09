@@ -425,6 +425,7 @@ void fstWriterEmitVariableLengthValueChange(fstWriterContext *ctx,
                                             uint32_t len);
 void fstWriterEmitTimeChange(fstWriterContext *ctx, uint64_t tim);
 void fstWriterFlushContext(fstWriterContext *ctx);
+int fstWriterSnapshot(fstWriterContext *ctx, const char *snapshot_name);
 int fstWriterGetDumpSizeLimitReached(fstWriterContext *ctx);
 int fstWriterGetFseekFailed(fstWriterContext *ctx);
 int fstWriterGetFlushContextPending(fstWriterContext *ctx);

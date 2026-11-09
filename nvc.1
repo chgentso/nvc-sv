@@ -505,6 +505,24 @@ order with separators for each scope.
 This only makes sense in combination with the
 .Fl \-wave
 option.
+.\" --wave-flush
+.It Fl \-wave-flush= Ns Ar secs
+Make the FST file written by
+.Fl \-wave
+readable while the simulation runs.
+Every
+.Ar secs
+seconds of wall clock time, checked at the end of each time step, a
+complete copy of the waveform data so far is written to the file name given
+with
+.Fl \-wave
+so a viewer can load or reload it.
+The simulator writes to a second file with the extension
+.Pa .run
+which replaces the first one when the simulation ends.
+A value of zero writes a copy at the end of every time step, which is slow.
+Each copy takes time proportional to the size of the dump so far.
+This option is only supported for the FST format.
 .\" --include, --exclude
 .It Fl \-include= Ns Ar glob , Fl \-exclude= Ns Ar glob
 Signals that match
