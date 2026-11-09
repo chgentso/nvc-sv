@@ -3496,6 +3496,8 @@ static void wakeup_all(rt_model_t *m, void **pending)
    }
 }
 
+static inline void set_event_flag(rt_model_t *m, rt_signal_t *s);
+
 static void notify_event(rt_model_t *m, rt_nexus_t *n)
 {
    n->last_event = m->now;
@@ -3506,7 +3508,7 @@ static void notify_event(rt_model_t *m, rt_nexus_t *n)
    m->trigger_epoch += m->blocking_update;
 
    if (n->flags & NET_F_CACHE_EVENT)
-      n->signal->shared.flags |= SIG_F_EVENT_FLAG;
+      set_event_flag(m, n->signal);
 
    wakeup_all(m, &(n->pending));
 }
@@ -3809,11 +3811,25 @@ static void reached_iteration_limit(rt_model_t *m)
    m->force_stop = true;
 }
 
+static inline void set_event_flag(rt_model_t *m, rt_signal_t *s)
+{
+   // The signals with the flag set are kept in a list so that the flag can
+   // be cleared again without visiting every signal that caches events
+   if (!(s->shared.flags & SIG_F_EVENT_FLAG)) {
+      s->shared.flags |= SIG_F_EVENT_FLAG;
+      APUSH(m->eventsigs, s);
+   }
+}
+
 static void sync_event_cache(rt_model_t *m)
 {
+   // Only the signals whose event flag is set need to be visited
+
+   unsigned keep = 0;
    for (int i = 0; i < m->eventsigs.count; i++) {
       rt_signal_t *s = m->eventsigs.items[i];
       assert(s->shared.flags & SIG_F_CACHE_EVENT);
+      assert(s->shared.flags & SIG_F_EVENT_FLAG);
 
       const bool event = s->nexus.last_event == m->now
          && s->nexus.event_delta == m->iteration;
@@ -3821,10 +3837,12 @@ static void sync_event_cache(rt_model_t *m)
       TRACE("sync event flag %d for %s", event, istr(tree_ident(s->where)));
 
       if (event)
-         assert(s->shared.flags & SIG_F_EVENT_FLAG);   // Set by notify_event
+         m->eventsigs.items[keep++] = s;
       else
          s->shared.flags &= ~SIG_F_EVENT_FLAG;
    }
+
+   ARESIZE(m->eventsigs, keep);
 }
 
 static void sv_poll_end_cycle(rt_model_t *m)
@@ -4386,7 +4404,7 @@ void deposit_signal(rt_model_t *m, rt_signal_t *s, const void *values,
          n->event_delta = m->iteration;
 
          if (n->flags & NET_F_CACHE_EVENT)
-            n->signal->shared.flags |= SIG_F_EVENT_FLAG;
+            set_event_flag(m, n->signal);
 
          wakeup_all(m, &(n->pending));
 
@@ -5359,9 +5377,10 @@ int32_t x_test_net_event(sig_shared_t *ss, uint32_t offset, int32_t count)
 
    if (ss->size == s->nexus.size) {
       assert(!(ss->flags & SIG_F_CACHE_EVENT));   // Should have taken fast-path
-      ss->flags |= SIG_F_CACHE_EVENT | (result ? SIG_F_EVENT_FLAG : 0);
+      ss->flags |= SIG_F_CACHE_EVENT;
       s->nexus.flags |= NET_F_CACHE_EVENT;
-      APUSH(m->eventsigs, s);
+      if (result)
+         set_event_flag(m, s);
    }
 
    return result;
