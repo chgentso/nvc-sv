@@ -74,7 +74,7 @@ typedef enum {
 
 #define MEMBLOCK_ALIGN   64
 #define MEMBLOCK_PAGE_SZ 0x800000
-#define TRIGGER_TAB_SIZE 64
+#define TRIGGER_TAB_MIN 64
 
 #if ASAN_ENABLED
 #define MEMBLOCK_REDZONE 16
@@ -175,7 +175,9 @@ typedef struct _rt_model {
    init_event_list_t  init_events;
    bool               shuffle;
    bool               liveness;
-   rt_trigger_t      *triggertab[TRIGGER_TAB_SIZE];
+   rt_trigger_t     **triggertab;
+   unsigned           triggertab_size;
+   unsigned           ntriggers;
 } rt_model_t;
 
 #define FMT_VALUES_SZ   128
@@ -734,6 +736,7 @@ void model_free(rt_model_t *m)
 {
    sv_poll_free();
    free(m->sva_procs);
+   free(m->triggertab);
 
    if (opt_get_int(OPT_RT_STATS)) {
       nvc_rusage_t ru;
@@ -4809,7 +4812,31 @@ static rt_trigger_t *new_trigger(rt_model_t *m, trigger_kind_t kind,
                                  uint64_t hash, jit_handle_t handle,
                                  unsigned nargs, const jit_scalar_t *args)
 {
-   rt_trigger_t **bucket = &(m->triggertab[hash % TRIGGER_TAB_SIZE]);
+   if (m->triggertab == NULL) {
+      m->triggertab_size = TRIGGER_TAB_MIN;
+      m->triggertab = xcalloc_array(m->triggertab_size,
+                                    sizeof(rt_trigger_t *));
+   }
+   else if (m->ntriggers > m->triggertab_size * 2) {
+      // Triggers are never freed so keep the chains short
+      const unsigned nsize = m->triggertab_size * 4;
+      rt_trigger_t **ntab = xcalloc_array(nsize, sizeof(rt_trigger_t *));
+
+      for (unsigned i = 0; i < m->triggertab_size; i++) {
+         for (rt_trigger_t *t = m->triggertab[i], *next; t; t = next) {
+            next = t->chain;
+            rt_trigger_t **nb = &(ntab[t->hash % nsize]);
+            t->chain = *nb;
+            *nb = t;
+         }
+      }
+
+      free(m->triggertab);
+      m->triggertab = ntab;
+      m->triggertab_size = nsize;
+   }
+
+   rt_trigger_t **bucket = &(m->triggertab[hash % m->triggertab_size]);
 
    for (rt_trigger_t *exist = *bucket; exist; exist = exist->chain) {
       bool hit = exist->handle == handle
@@ -4833,7 +4860,10 @@ static rt_trigger_t *new_trigger(rt_model_t *m, trigger_kind_t kind,
    t->epoch  = UINT64_MAX;
    t->kind   = kind;
    t->chain  = *bucket;
+   t->hash   = hash;
    memcpy(t->args, args, argsz);
+
+   m->ntriggers++;
 
    arm_trigger(m, t, &(t->wakeable));
 
