@@ -556,8 +556,13 @@ runs.  A debugger plugin uses this to stop in a process before a given
 source line.  The option has to be given before the code is generated, so
 either here or when elaborating, or by setting the environment variable
 .Ev NVC_DEBUG_STMTS
-to 1.  A simulation with the option runs more slowly even if no
-breakpoint is set.
+to 1.  Each statement then checks a flag before it runs, so a simulation with
+the option runs more slowly even if no breakpoint is set, or one is set on
+another line.  For a loop that does nothing but trivial integer statements
+the interpreter takes about 1.7 times as long (1.7 s against 2.9 s for 200
+million statements) and compiled code about 1.25 times as long (0.82 s
+against 1.03 s for 120 million statements); designs which spend their time on
+signals are affected much less.
 .\" --shuffle
 .It Fl \-shuffle
 Run processes in random order.  The VHDL standard does not specify the
