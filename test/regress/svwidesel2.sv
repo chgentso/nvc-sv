@@ -128,7 +128,7 @@ module svwidesel2;
       c.l[3][i] = 1'b1;
       `CHECK(c.l[3][75] === 1'b1, "write bit")
 
-      if (errors == 0) $display("PASS");
+      if (errors == 0) $display("PASSED");
       else $fatal(1, "%0d errors", errors);
    end
 endmodule

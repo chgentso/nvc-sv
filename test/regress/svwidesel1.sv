@@ -57,6 +57,6 @@ module svwidesel1;
       end
       i = 20;
       if (s.l[i] !== 64'bx) $fatal(1, "l[20]");
-      $display("PASS");
+      $display("PASSED");
    end
 endmodule
