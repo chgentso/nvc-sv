@@ -14456,6 +14456,14 @@ static mir_value_t vlog_read_ref_cell(vlog_gen_t *g, mir_value_t cell,
 
    mir_value_t rec = mir_build_all(g->mu, cell);
    mir_value_t addr = mir_build_load(g->mu, mir_build_record_ref(g->mu, rec, 0));
+
+   const mir_class_t class = mir_get_class(g->mu, ti->type);
+   if (class != MIR_TYPE_VEC2 && class != MIR_TYPE_VEC4) {
+      // Only a vector can be tracked as bits of a signal
+      mir_build_store(g->mu, tmp, mir_build_load(g->mu, addr));
+      return tmp;
+   }
+
    mir_value_t bits = mir_build_load(g->mu, mir_build_record_ref(g->mu, rec, 1));
 
    mir_block_t addr_bb = mir_add_block(g->mu);
