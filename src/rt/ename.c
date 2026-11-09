@@ -475,6 +475,9 @@ static void bind_hier_ref(vlog_node_t v, jit_handle_t scope,
          name = ident_new("$self");
    }
 
+   if (args[4].integer == 1)   // The signal of a structure net
+      name = ident_prefix(name, ident_new("net"), '$');
+
    args[0].pointer = jit_get_frame_var(j, handle, ctx, name);
 
    // The width of a net connected to an inout port cannot be checked

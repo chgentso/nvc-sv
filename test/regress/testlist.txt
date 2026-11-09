@@ -2543,3 +2543,6 @@ svpollwatch3 verilog
 svpfmthier1 verilog
 svalocalext1 verilog
 svsvaactsampled2 verilog
+svnettype9 verilog
+svnettype10 verilog
+svpollreal1 verilog
