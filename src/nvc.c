@@ -772,6 +772,8 @@ static int elaborate(int argc, char **argv, cmd_state_t *state)
    if (e == NULL)
       return EXIT_FAILURE;
 
+   meta.debug_stmts = opt_get_int(OPT_DEBUG_STMTS);
+
    lib_put_meta(state->work, e, &meta);
 
    progress("elaborating design");
@@ -1161,6 +1163,11 @@ static int run_cmd(int argc, char **argv, cmd_state_t *state)
    assert(top != NULL);
 
    opt_set_int(OPT_NO_COLLAPSE, meta->no_collapse);
+
+   // The code is generated when the design is run: statement probes are
+   // wanted if the design was elaborated with --debug-stmts
+   if (meta->debug_stmts)
+      opt_set_int(OPT_DEBUG_STMTS, 1);
 
    wave_dumper_t *dumper = NULL;
    if (wave_fname != NULL) {

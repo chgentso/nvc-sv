@@ -1020,7 +1020,10 @@ static void lib_read_meta(fbuf_t *f, unit_meta_t *meta)
       read_raw(meta->cover_file, len + 1, f);
    }
 
-   meta->no_collapse = fbuf_get_uint(f);
+   // Two flags share this field so that the format has not changed
+   const uint64_t flags = fbuf_get_uint(f);
+   meta->no_collapse = flags & 1;
+   meta->debug_stmts = (flags >> 1) & 1;
 }
 
 static lib_unit_t *lib_read_unit(lib_t lib, ident_t id)
@@ -1241,7 +1244,8 @@ static void lib_save_unit(lib_t lib, lib_unit_t *unit)
 
    object_write(unit->object, f, ident_ctx, loc_ctx);
 
-   if (unit->meta.cover_file != NULL || unit->meta.no_collapse) {
+   if (unit->meta.cover_file != NULL || unit->meta.no_collapse
+       || unit->meta.debug_stmts) {
       write_u8('M', f);
 
       if (unit->meta.cover_file != NULL) {
@@ -1252,7 +1256,7 @@ static void lib_save_unit(lib_t lib, lib_unit_t *unit)
       else
          fbuf_put_uint(f, 0);
 
-      fbuf_put_uint(f, unit->meta.no_collapse);
+      fbuf_put_uint(f, unit->meta.no_collapse | (unit->meta.debug_stmts << 1));
    }
 
    write_u8('\0', f);

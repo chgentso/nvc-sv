@@ -2532,3 +2532,4 @@ vpi18           vpi
 vhpi30          vhpi,$NVC_DEBUG_STMTS=1
 vpi19           verilog,vpi,$NVC_DEBUG_STMTS=1
 vhpi31          vhpi
+dbgstmts1       shell
