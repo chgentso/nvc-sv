@@ -7853,6 +7853,36 @@ static mir_value_t vlog_lower_rvalue_select_bits(vlog_gen_t *g, vlog_node_t v)
       return mir_build_load(g->mu, result);
    }
 
+   if (!mir_is_signal(g->mu, select.obj)
+       && (mir_get_class(g->mu, select.type) == MIR_TYPE_VEC2
+           || mir_get_class(g->mu, select.type) == MIR_TYPE_VEC4)) {
+      // The selected bits may be out of range which needs the slow path
+      // unpacking the whole object.  Check at run time so the common case
+      // of an in-range index into a wide vector does not.
+      mir_type_t t_offset = mir_offset_type(g->mu);
+      mir_value_t result = mir_add_var(g->mu, select.type, MIR_NULL_STAMP,
+                                       ident_uniq("sel"), MIR_VAR_TEMP);
+
+      mir_block_t full_bb = mir_add_block(g->mu);
+      mir_block_t part_bb = mir_add_block(g->mu);
+      mir_block_t done_bb = mir_add_block(g->mu);
+
+      mir_value_t size = mir_const(g->mu, t_offset, select.size);
+      mir_build_cond(g->mu, mir_build_cmp(g->mu, MIR_CMP_EQ, select.count,
+                                          size), full_bb, part_bb);
+
+      mir_set_cursor(g->mu, full_bb, MIR_APPEND);
+      mir_build_store(g->mu, result, vlog_lower_full_select(g, &select));
+      mir_build_jump(g->mu, done_bb);
+
+      mir_set_cursor(g->mu, part_bb, MIR_APPEND);
+      mir_build_store(g->mu, result, vlog_lower_partial_select(g, &select));
+      mir_build_jump(g->mu, done_bb);
+
+      mir_set_cursor(g->mu, done_bb, MIR_APPEND);
+      return mir_build_load(g->mu, result);
+   }
+
    return vlog_lower_partial_select(g, &select);
 }
 
