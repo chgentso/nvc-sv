@@ -2252,6 +2252,13 @@ static void sv_program_end(jit_func_t *func, jit_anchor_t *caller,
    args[0].integer = 0;
 }
 
+static void sv_poll_watch(jit_func_t *func, jit_anchor_t *caller,
+                          jit_scalar_t *args, tlab_t *tlab)
+{
+   x_sv_poll_watch(args[0].pointer, args[1].integer);
+   args[0].integer = 0;
+}
+
 static void sv_poll_wait(jit_func_t *func, jit_anchor_t *caller,
                          jit_scalar_t *args, tlab_t *tlab)
 {
@@ -3285,6 +3292,7 @@ static jit_intrinsic_t intrinsic_list[] = {
    { "__sv_reactive_yield", sv_reactive_yield },
    { "__sv_sva_yield", sv_sva_yield },
    { "__sv_program_end", sv_program_end },
+   { "__sv_poll_watch", sv_poll_watch },
    { "__sv_poll_wait", sv_poll_wait },
    { "__sv_poll_fired", sv_poll_fired },
    { "__sv_nba_store", sv_nba_store },

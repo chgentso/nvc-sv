@@ -82,6 +82,8 @@ typedef struct _rt_proc {
    uint64_t       wait_seq;
    uint32_t       create_seq;
    uint32_t       wake_iter;
+   unsigned       poll_wake : 1;   // Queued by the poll at the end of a cycle
+   struct _sv_watch *watch;   // Memory a polled condition depends on
    uint32_t       scope_idx;   // Index in scope->procs of a forked process
    unsigned       verilog : 1;
    unsigned       regs : 16;   // Places that hold a pointer to this process

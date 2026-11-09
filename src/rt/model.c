@@ -709,6 +709,7 @@ static void cleanup_scope(rt_model_t *m, rt_scope_t *scope)
       tlab_release(m->jit, p->tlab);
       if (p->task != NULL)
          sv_task_destroy(m, p);
+      free(p->watch);
       free(p);
    }
    ACLEAR(scope->procs);
@@ -1191,12 +1192,44 @@ typedef struct {
 
 static A(sv_handle_t) sv_handles = AINIT;
 
+static void note_wait(rt_model_t *m, rt_proc_t *proc);
+
+#define SV_WATCH_MAX   8
+#define SV_WATCH_BYTES 32
+
+typedef struct _sv_watch {
+   unsigned  count;
+   struct {
+      const void *ptr;
+      unsigned    size;
+      uint8_t     snap[SV_WATCH_BYTES];
+   } item[SV_WATCH_MAX];
+} sv_watch_t;
+
+// Memory read by a condition the process polls, collected until it waits
+static sv_watch_t sv_watch_pending;
+static bool       sv_watch_never = false;
+
+static bool sv_watch_unchanged(const sv_watch_t *w)
+{
+   for (unsigned i = 0; i < w->count; i++) {
+      if (memcmp(w->item[i].ptr, w->item[i].snap, w->item[i].size) != 0)
+         return false;
+   }
+
+   return true;
+}
+
 static void run_process_inner(rt_model_t *m, rt_proc_t *proc)
 {
    TRACE("run %sprocess %s", *mptr_get(proc->privdata) ? "" :  "stateless ",
          istr(proc->name));
 
    rt_wakeable_t *obj = &(proc->wakeable);
+
+   const bool poll = proc->poll_wake;
+   const bool was_interrupted = obj->interrupted;
+   proc->poll_wake = 0;
 
    if (obj->forked && obj->zombie)
       return;   // Disabled by disable fork
@@ -1208,6 +1241,23 @@ static void run_process_inner(rt_model_t *m, rt_proc_t *proc)
 
    if (sv_task_hold(proc))
       return;   // Runs once it is resumed
+
+   if (poll) {
+      // A poll of a condition that reads only memory which has not changed
+      // since the process began waiting would find the same value and wait
+      // again, so do that without running the process
+      const sv_watch_t *w = proc->watch;
+      if (w != NULL && w->count > 0 && !was_interrupted
+          && sv_watch_unchanged(w)) {
+         sv_procs_run++;
+         if (proc->task != NULL)
+            sv_task_note_run(proc);
+
+         note_wait(m, proc);
+         APUSH(sv_pollers, proc);
+         return;
+      }
+   }
 
    sv_procs_run++;
 
@@ -3990,8 +4040,11 @@ static void sv_poll_end_cycle(rt_model_t *m)
       return;
 
    // Conditions are checked again in the order they began waiting
-   for (int i = 0; i < sv_pollers.count; i++)
-      deltaq_insert_proc(m, 0, sv_pollers.items[i]);
+   for (int i = 0; i < sv_pollers.count; i++) {
+      rt_proc_t *p = sv_pollers.items[i];
+      p->poll_wake = 1;
+      deltaq_insert_proc(m, 0, p);
+   }
 
    sv_pollers_woken = sv_pollers.count;
    ARESIZE(sv_pollers, 0);
@@ -6503,6 +6556,22 @@ void x_sv_program_end(void)
    }
 }
 
+void x_sv_poll_watch(const void *ptr, unsigned size)
+{
+   // The condition about to be polled reads this memory.  A null address
+   // or anything which is not simple memory makes it always polled.
+
+   if (ptr == NULL || size == 0 || size > SV_WATCH_BYTES
+       || sv_watch_pending.count == SV_WATCH_MAX)
+      sv_watch_never = true;
+   else {
+      const unsigned n = sv_watch_pending.count++;
+      sv_watch_pending.item[n].ptr = ptr;
+      sv_watch_pending.item[n].size = size;
+      memcpy(sv_watch_pending.item[n].snap, ptr, size);
+   }
+}
+
 void x_sv_poll_wait(void)
 {
    // The caller suspends with no other wake up scheduled
@@ -6511,6 +6580,20 @@ void x_sv_poll_wait(void)
    assert(proc != NULL);
 
    TRACE("process %s polls", istr(proc->name));
+
+   if (sv_watch_pending.count > 0 && !sv_watch_never) {
+      if (proc->watch == NULL)
+         proc->watch = xmalloc(sizeof(sv_watch_t));
+
+      const unsigned n = sv_watch_pending.count;
+      memcpy(proc->watch, &sv_watch_pending,
+             offsetof(sv_watch_t, item[0]) + n * sizeof(proc->watch->item[0]));
+   }
+   else if (proc->watch != NULL)
+      proc->watch->count = 0;
+
+   sv_watch_pending.count = 0;
+   sv_watch_never = false;
 
    note_wait(get_model(), proc);
    APUSH(sv_pollers, proc);
@@ -6868,6 +6951,7 @@ static void sv_proc_free(rt_model_t *m, rt_proc_t *p)
    mptr_free(m->mspace, &(p->privdata));
    tlab_release(m->jit, p->tlab);
    sv_task_destroy(m, p);
+   free(p->watch);
    free(p);
 }
 

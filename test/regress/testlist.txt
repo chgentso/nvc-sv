@@ -2537,3 +2537,5 @@ dbgstmts1       shell
 svwidesel1 verilog
 svwidesel2 verilog
 svconstref2 verilog
+svpollwatch1 verilog
+svpollwatch2 verilog

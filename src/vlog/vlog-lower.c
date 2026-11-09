@@ -10282,6 +10282,275 @@ static void vlog_lower_poll_value_wait(vlog_gen_t *g, vlog_node_t expr,
    vlog_poll_done(g, changed, loop_bb);
 }
 
+static void vlog_poll_watch_ptr(vlog_gen_t *g, mir_value_t ptr, int bytes)
+{
+   mir_type_t t_offset = mir_offset_type(g->mu);
+   mir_value_t args[] = { ptr, mir_const(g->mu, t_offset, bytes) };
+   mir_value_t res = mir_build_fcall(g->mu, ident_new("__sv_poll_watch"),
+                                     t_offset, MIR_NULL_STAMP, args, 2);
+   mir_build_consume(g->mu, res);
+}
+
+static bool vlog_poll_watch_never(vlog_gen_t *g)
+{
+   // The condition depends on something which is not simple memory so it
+   // must be polled in every delta cycle
+   mir_type_t t_bits = mir_pointer_type(g->mu, mir_int_type(g->mu, 0, 3));
+   vlog_poll_watch_ptr(g, mir_build_null(g->mu, t_bits), 0);
+   return false;
+}
+
+static int vlog_poll_watch_bytes(vlog_gen_t *g, mir_type_t type,
+                                 bool allow_uarray)
+{
+   // The size of a variable of this type if its value can be compared
+   // as raw memory, otherwise zero
+
+   switch (mir_get_class(g->mu, type)) {
+   case MIR_TYPE_VEC2:
+      return mir_get_size(g->mu, type) <= 64 ? sizeof(uint64_t) : 0;
+   case MIR_TYPE_VEC4:
+      return mir_get_size(g->mu, type) <= 64 ? 2 * sizeof(uint64_t) : 0;
+   case MIR_TYPE_ACCESS:
+   case MIR_TYPE_CONTEXT:
+      return sizeof(void *);
+   case MIR_TYPE_UARRAY:
+      // The pointer and the bounds of a queue or dynamic array
+      return allow_uarray
+         ? sizeof(void *) + 2 * sizeof(int64_t) * mir_get_dims(g->mu, type)
+         : 0;
+   default:
+      return 0;
+   }
+}
+
+static bool vlog_poll_watch_leaf(vlog_gen_t *g, vlog_node_t v,
+                                 bool allow_uarray)
+{
+   // Watch the storage of a variable or member that the expression reads.
+   // Returns false if it cannot be watched.
+
+   vlog_node_t decl = NULL;
+   if (vlog_kind(v) == V_REF && vlog_has_ref(v))
+      decl = vlog_ref(v);
+   else if (vlog_kind(v) == V_MEMBER_REF)
+      decl = vlog_member_decl(v);
+
+   if (decl == NULL)
+      return vlog_poll_watch_never(g);
+
+   // An unpacked array or structure is not held as one value
+   vlog_node_t dims[MAX_UNPACKED_DIMS];
+   if (vlog_unpacked_dims(v, dims) > 0 || vlog_is_fixed_unpacked(decl))
+      return vlog_poll_watch_never(g);
+
+   switch (vlog_kind(decl)) {
+   case V_VAR_DECL:
+   case V_NET_DECL:
+   case V_LOCAL_DECL:
+   case V_TF_PORT_DECL:
+   case V_PORT_DECL:
+      break;
+   default:
+      return vlog_poll_watch_never(g);
+   }
+
+   if (vlog_is_const_ref(decl) || vlog_is_ref_property(decl)) {
+      // The variable is reached through a reference which holds its
+      // address
+      const type_info_t *ti = vlog_type_info(g, vlog_type(decl));
+      const int bytes = vlog_poll_watch_bytes(g, ti->type, allow_uarray);
+      if (bytes == 0)
+         return vlog_poll_watch_never(g);
+
+      mir_value_t slot;
+      if (vlog_is_ref_property(decl)) {
+         g->ref_bind = true;
+         slot = vlog_lower_select(g, v).obj;
+         g->ref_bind = false;
+      }
+      else {
+         int hops;
+         mir_value_t var = mir_search_object(g->mu, decl, &hops);
+         if (mir_is_null(var))
+            return vlog_poll_watch_never(g);
+
+         slot = hops > 0 ? mir_build_var_upref(g->mu, hops, var.id) : var;
+      }
+
+      mir_value_t cell = mir_build_load(g->mu, slot);
+      if (!mir_is(g->mu, cell, MIR_TYPE_ACCESS))
+         return vlog_poll_watch_never(g);
+
+      vlog_poll_watch_ptr(g, slot, sizeof(void *));
+
+      mir_value_t rec = mir_build_all(g->mu, cell);
+      mir_value_t addr =
+         mir_build_load(g->mu, mir_build_record_ref(g->mu, rec, 0));
+      vlog_poll_watch_ptr(g, addr, bytes);   // Null if it tracks a signal
+      return true;
+   }
+
+   vlog_select_t sel = vlog_lower_select(g, v);
+
+   int64_t count;
+   if (!mir_get_const(g->mu, sel.count, &count) || count != sel.size)
+      return vlog_poll_watch_never(g);   // May be partly out of range
+
+   if (mir_is_signal(g->mu, sel.obj)) {
+      // The condition reads the resolved value which has a byte for each bit
+      if (vlog_is_vhdl_signal(g, sel.obj) || sel.size > 32)
+         return vlog_poll_watch_never(g);
+
+      mir_value_t data = mir_build_resolved(g->mu, sel.obj);
+      mir_value_t first = mir_build_array_ref(g->mu, data, sel.dst_offset);
+      if (!mir_is(g->mu, first, MIR_TYPE_POINTER))
+         return vlog_poll_watch_never(g);
+
+      mir_type_t elem = mir_get_elem(g->mu, mir_get_type(g->mu, first));
+      if (mir_get_class(g->mu, elem) != MIR_TYPE_INT
+          || (mir_get_repr(g->mu, elem) != MIR_REPR_U1
+              && mir_get_repr(g->mu, elem) != MIR_REPR_I8
+              && mir_get_repr(g->mu, elem) != MIR_REPR_U8))
+         return vlog_poll_watch_never(g);
+
+      vlog_poll_watch_ptr(g, first, sel.size);
+      return true;
+   }
+
+   if (!mir_is(g->mu, sel.obj, MIR_TYPE_POINTER))
+      return vlog_poll_watch_never(g);
+
+   mir_type_t pointee = mir_get_pointer(g->mu, mir_get_type(g->mu, sel.obj));
+   const int bytes = vlog_poll_watch_bytes(g, pointee, allow_uarray);
+   if (bytes == 0 || bytes > 32)
+      return vlog_poll_watch_never(g);
+
+   vlog_poll_watch_ptr(g, mir_build_array_ref(g->mu, sel.obj, sel.dst_offset),
+                       bytes);
+   return true;
+}
+
+static bool vlog_poll_watch_simple(vlog_node_t v)
+{
+   // An expression of variables and constants which can be read without
+   // any other effect
+
+   switch (vlog_kind(v)) {
+   case V_NUMBER:
+   case V_NULL:
+      return true;
+   case V_REF:
+      return vlog_has_ref(v);
+   case V_UNARY:
+      return vlog_poll_watch_simple(vlog_value(v));
+   case V_BINARY:
+      return vlog_poll_watch_simple(vlog_left(v))
+         && vlog_poll_watch_simple(vlog_right(v));
+   default:
+      return false;
+   }
+}
+
+static bool vlog_poll_watch_expr(vlog_gen_t *g, vlog_node_t v)
+{
+   // Tell the kernel what memory the value of this expression is read from
+   // so the process only runs when one of them changes.  Anything else
+   // makes the condition polled in every delta cycle.  Operands are only
+   // visited if they are evaluated unconditionally and nothing is emitted
+   // once one cannot be watched.
+
+   switch (vlog_kind(v)) {
+   case V_NUMBER:
+   case V_STRING:
+   case V_REAL:
+   case V_EMPTY:
+      return true;
+   case V_REF:
+      if (vlog_has_ref(v)) {
+         switch (vlog_kind(vlog_ref(v))) {
+         case V_PARAM_DECL:
+         case V_LOCALPARAM:
+         case V_ENUM_NAME:
+         case V_GENVAR_DECL:
+            return true;
+         default:
+            break;
+         }
+      }
+      return vlog_poll_watch_leaf(g, v, false);
+   case V_MEMBER_REF:
+      return vlog_poll_watch_expr(g, vlog_value(v))
+         && vlog_poll_watch_leaf(g, v, false);
+   case V_NULL:
+      return true;
+   case V_BINARY:
+      switch (vlog_subkind(v)) {
+      case V_BINARY_LOG_AND:
+      case V_BINARY_LOG_OR:
+         // The right operand may not be evaluated so it must not be able
+         // to fault, like a member of a null handle
+         if (!vlog_poll_watch_simple(vlog_right(v)))
+            return vlog_poll_watch_never(g);
+
+         return vlog_poll_watch_expr(g, vlog_left(v))
+            && vlog_poll_watch_expr(g, vlog_right(v));
+      default:
+         return vlog_poll_watch_expr(g, vlog_left(v))
+            && vlog_poll_watch_expr(g, vlog_right(v));
+      }
+   case V_UNARY:
+      return vlog_poll_watch_expr(g, vlog_value(v));
+   case V_BIT_SELECT:
+      {
+         // Only a vector or fixed size array has storage which does not move
+         vlog_node_t type = vlog_get_type(vlog_value(v));
+         if (type == NULL || vlog_is_dynamic_type(type))
+            return vlog_poll_watch_never(g);
+
+         if (!vlog_poll_watch_expr(g, vlog_value(v)))
+            return false;
+
+         const int nparams = vlog_params(v);
+         for (int i = 0; i < nparams; i++) {
+            if (!vlog_poll_watch_expr(g, vlog_param(v, i)))
+               return false;
+         }
+
+         return true;
+      }
+   case V_METHOD_CALL:
+      {
+         // The length of a queue, dynamic array or string
+         vlog_node_t prefix = vlog_value(v), type = vlog_get_type(prefix);
+         if (vlog_params(v) != 0 || type == NULL
+             || vlog_kind(type) != V_DATA_TYPE)
+            return vlog_poll_watch_never(g);
+
+         const bool len = vlog_subkind(v) == V_METHOD_STR_LEN
+            && vlog_subkind(type) == DT_STRING;
+         const bool size = vlog_subkind(v) == V_METHOD_SIZE
+            && (vlog_subkind(type) == DT_QUEUE
+                || vlog_subkind(type) == DT_DYNARRAY);
+         if (!len && !size)
+            return vlog_poll_watch_never(g);
+
+         switch (vlog_kind(prefix)) {
+         case V_REF:
+            return vlog_has_ref(prefix)
+               && vlog_poll_watch_leaf(g, prefix, true);
+         case V_MEMBER_REF:
+            return vlog_poll_watch_expr(g, vlog_value(prefix))
+               && vlog_poll_watch_leaf(g, prefix, true);
+         default:
+            return vlog_poll_watch_never(g);
+         }
+      }
+   default:
+      return vlog_poll_watch_never(g);
+   }
+}
+
 static void vlog_lower_poll_control(vlog_gen_t *g, vlog_node_t ctrl)
 {
    const int nparams = vlog_params(ctrl);
@@ -10328,6 +10597,14 @@ static void vlog_lower_poll_control(vlog_gen_t *g, vlog_node_t ctrl)
    mir_build_jump(g->mu, loop_bb);
 
    mir_set_cursor(g->mu, loop_bb, MIR_APPEND);
+
+   for (int i = 0; i < nparams; i++) {
+      vlog_node_t e = vlog_param(ctrl, i);
+      if (vlog_is_event_item(e) || vlog_poll_value_type(vlog_value(e)) != NULL)
+         vlog_poll_watch_never(g);
+      else
+         vlog_poll_watch_expr(g, vlog_value(e));
+   }
 
    mir_value_t res = mir_build_fcall(g->mu, ident_new("__sv_poll_wait"),
                                      mir_offset_type(g->mu), MIR_NULL_STAMP,
