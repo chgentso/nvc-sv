@@ -74,6 +74,7 @@ static const vhpi_test_t tests[] = {
    { "vhpi25",    vhpi25_startup },
    { "vhpi26",    vhpi26_startup },
    { "vhpi27",    vhpi27_startup },
+   { "vhpi28",    vhpi28_startup },
    { NULL,        NULL },
 };
 

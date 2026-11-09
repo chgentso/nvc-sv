@@ -2516,10 +2516,12 @@ vlogcasegen2    verilog
 vlogtopparam1   verilog,gWIDTH=12,gB=8'ha5,gR=2.5,gS="hello"
 vhpi26          mixed,2008,vhpi
 vhpi27          vhpi
+vhpi28          vhpi,2008
 vpi12           verilog,vpi
 vpi13           verilog,vpi
 vpi14           verilog,vpi
 vpi15           vpi
 vpi16           verilog,vpi
+vpi17           verilog,vpi
 svrealinport1  verilog
 wavelive1       shell
