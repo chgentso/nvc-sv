@@ -8,6 +8,7 @@ typedef void (*stmt_fn_t)(const char *file, int line, const char *process,
 void vpi_nvc_set_stmt_cb(stmt_fn_t fn, void *user_data);
 int vpi_nvc_stmt_breakpoint_add(const char *file, int line);
 int vpi_nvc_stmt_breakpoint_remove(const char *file, int line);
+int vpi_nvc_stmt_step(int enable);
 
 #define check_int(a, b) fail_unless((long)(a) == (long)(b))
 
@@ -43,6 +44,14 @@ static void on_stmt(const char *file, int line, const char *process,
       strncpy(h->scope, scope ?: "", sizeof(h->scope) - 1);
    }
    nhits++;
+
+   // Stepping: the next statement calls back too, whatever its line
+   if (nhits == 1) {
+      check_int(vpi_nvc_stmt_step(1), 1);
+   }
+   else if (nhits == 2) {
+      check_int(vpi_nvc_stmt_step(0), 1);
+   }
 }
 
 static void start_of_sim(const vhpiCbDataT *cb_data)
@@ -68,24 +77,29 @@ static void end_of_sim(const vhpiCbDataT *cb_data)
    vpi_nvc_set_stmt_cb(NULL, NULL);
 
    // line 24 was removed again, other.vhd never runs
-   check_int(nhits, 3);
+   check_int(nhits, 4);
 
    check_int(hits[0].line, 21);
    check_int(hits[0].time, 1000000);
    check_int(hits[0].s, 0);
    fail_if(strstr(hits[0].process, ":p_a") == NULL);
 
-   // Called before the assignment: s still has the value of the first
-   check_int(hits[1].line, 14);
-   check_int(hits[1].time, 2000000);
-   check_int(hits[1].s, 1);
+   // The statement after it, found by stepping
+   check_int(hits[1].line, 22);
+   check_int(hits[1].time, 1000000);
    fail_if(strstr(hits[1].process, ":p_a") == NULL);
-   fail_if(strstr(hits[1].scope, ":vhpi30") == NULL);
 
-   check_int(hits[2].line, 32);
-   check_int(hits[2].time, 3000000);
-   check_int(hits[2].s, 2);
-   fail_if(strstr(hits[2].process, ":p_b") == NULL);
+   // Called before the assignment: s still has the value of the first
+   check_int(hits[2].line, 14);
+   check_int(hits[2].time, 2000000);
+   check_int(hits[2].s, 1);
+   fail_if(strstr(hits[2].process, ":p_a") == NULL);
+   fail_if(strstr(hits[2].scope, ":vhpi30") == NULL);
+
+   check_int(hits[3].line, 32);
+   check_int(hits[3].time, 3000000);
+   check_int(hits[3].s, 2);
+   fail_if(strstr(hits[3].process, ":p_b") == NULL);
 }
 
 void vhpi30_startup(void)

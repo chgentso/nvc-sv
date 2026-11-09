@@ -60,6 +60,11 @@ void vpi_nvc_set_stmt_cb(vpi_nvc_stmt_fn_t fn, void *user_data);
 // instrumented (--debug-stmts), otherwise 0 and the breakpoint cannot fire.
 PLI_INT32 vpi_nvc_stmt_breakpoint_add(const char *file, int line);
 
+// While enabled, the callback is called before every statement, to step from
+// one statement to the next.  Returns 1 if the code of the design is
+// instrumented (--debug-stmts).
+PLI_INT32 vpi_nvc_stmt_step(PLI_INT32 enable);
+
 // Removes a breakpoint, returns 1 if there was one.
 PLI_INT32 vpi_nvc_stmt_breakpoint_remove(const char *file, int line);
 

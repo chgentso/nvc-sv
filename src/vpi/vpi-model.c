@@ -3824,6 +3824,12 @@ PLI_INT32 vpi_nvc_stmt_breakpoint_add(const char *file, int line)
    return opt_get_int(OPT_DEBUG_STMTS) ? 1 : 0;
 }
 
+PLI_INT32 vpi_nvc_stmt_step(PLI_INT32 enable)
+{
+   stmt_step_set(enable != 0);
+   return opt_get_int(OPT_DEBUG_STMTS) ? 1 : 0;
+}
+
 PLI_INT32 vpi_nvc_stmt_breakpoint_remove(const char *file, int line)
 {
    return stmt_break_remove(file, line) ? 1 : 0;
