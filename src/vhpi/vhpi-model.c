@@ -3189,6 +3189,24 @@ vhpiIntT vhpi_get(vhpiIntPropertyT property, vhpiHandleT handle)
 
          return bs->IsGuarded;
       }
+   case vhpiIsForcedP:
+      {
+         // Only signals can be forced, other objects are never forced
+         if (!vhpi_is_signal(obj))
+            return vhpiFalse;
+
+         slice_list_t slices = AINIT;
+         vhpi_collect_signals(obj, &slices);
+
+         bool forced = false;
+         for (int i = 0; i < slices.count && !forced; i++)
+            forced = signal_is_forced(slices.items[i].signal,
+                                      slices.items[i].offset,
+                                      slices.items[i].count);
+
+         ACLEAR(slices);
+         return forced ? vhpiTrue : vhpiFalse;
+      }
    case vhpiIsSeqStmtP:
       {
          c_stmt *s = is_stmt(obj);
@@ -3904,6 +3922,32 @@ int vhpi_put_value(vhpiHandleT handle,
    } scalar = { .int64_t_val = 0 };
    int num_elems = 0;
 
+   if (mode == vhpiRelease && value_p == NULL) {
+      // No value is needed to release an object
+      const vhpiIntT size = vhpi_get_size(obj);
+      if (size == vhpiUndefined) {
+         vhpi_error(vhpiError, obj_loc(obj), "cannot get size of %s object",
+                    vhpi_class_str(obj->kind));
+         return 1;
+      }
+      else if (ptr.kind != PTR_SIGNAL) {
+         vhpi_error(vhpiFailure, obj_loc(obj), "mode %s not supported for %s "
+                    "in vhpi_put_value", vhpi_put_value_mode_str(mode),
+                    vhpi_class_str(obj->kind));
+         return 1;
+      }
+
+      rt_model_t *model = vhpi_context()->model;
+      if (!model_can_create_delta(model)) {
+         vhpi_error(vhpiError, obj_loc(obj), "cannot create delta cycle "
+                    "during current simulation phase");
+         return 1;
+      }
+
+      release_signal(model, ptr.signal, ptr.offset, size);
+      return 0;
+   }
+
    switch (value_p->format) {
    case vhpiLogicVal:
       num_elems = 1;
@@ -3971,6 +4015,34 @@ int vhpi_put_value(vhpiHandleT handle,
          } while (0)
 
          FOR_ALL_SIZES(td->elem_bytes, STORE_ENUMV);
+         break;
+      }
+
+   case vhpiBinStrVal:
+      {
+         // A null terminated string of the enumeration literals of a bit or
+         // std_logic object, most significant element first
+         if (td->map_str == NULL) {
+            vhpi_error(vhpiError, obj_loc(obj), "format %s is not valid for "
+                       "object %s", vhpi_format_str(value_p->format),
+                       vhpi_get_name(obj));
+            return 1;
+         }
+
+         const char *str = (const char *)value_p->value.str;
+         num_elems = strlen(str);
+         vhpiCharT *mem = xmalloc(num_elems + 1);
+         for (int i = 0; i < num_elems; i++) {
+            const char *p = str[i] ? strchr(td->map_str, str[i]) : NULL;
+            if (p == NULL) {
+               vhpi_error(vhpiError, obj_loc(obj), "invalid logic value '%c'",
+                          str[i]);
+               free(mem);
+               return 1;
+            }
+            mem[i] = p - td->map_str;
+         }
+         ext = src = mem;
          break;
       }
 

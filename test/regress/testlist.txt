@@ -2527,3 +2527,4 @@ svrealinport1  verilog
 wavelive1       shell
 svxlib2         shell
 svxlib3         shell
+vhpi29          vhpi,2008

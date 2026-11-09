@@ -4606,6 +4606,33 @@ static uint64_t nexus_last_active(rt_model_t *m, rt_nexus_t *nexus)
    return last;
 }
 
+bool signal_is_forced(rt_signal_t *s, int offset, size_t count)
+{
+   // True if any element in the range is held by a force
+
+   RT_LOCK(s->lock);
+
+   if (count == 0)
+      return false;
+
+   for (rt_nexus_t *it = lookup_index(s, &offset); it != NULL && count > 0;
+        it = it->chain) {
+      if (offset >= it->width) {
+         offset -= it->width;
+         continue;
+      }
+
+      if (it->flags & NET_F_FORCED)
+         return true;
+
+      const size_t left = it->width - offset;
+      count = count > left ? count - left : 0;
+      offset = 0;
+   }
+
+   return false;
+}
+
 void get_forcing_value(rt_signal_t *s, uint8_t *value)
 {
    uint8_t *p = value;
