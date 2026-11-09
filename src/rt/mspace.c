@@ -59,8 +59,11 @@ typedef struct {
 
 typedef struct _free_list free_list_t;
 
+#define FREE_END ((free_list_t *)1)   // Hint: no block is large enough
+
 struct _free_list {
    free_list_t *next;
+   free_list_t *prev;
    char        *ptr;
    size_t       size;
 };
@@ -74,6 +77,9 @@ struct _mspace {
    mptr_t            roots;
    mptr_t            free_mptrs;
    free_list_t      *free_list;
+   free_list_t      *free_tail;
+   unsigned          nallocs;   // Samples the debug check of the hints
+   free_list_t      *hints[LARGE_OBJECT / LINE_SIZE + 1];
    uint64_t          create_us;
    mspace_handler_t  handler;
    unsigned          total_gc;
@@ -109,10 +115,11 @@ mspace_t *mspace_new(size_t size, const mspace_handler_t *h)
 
    free_list_t *f = xmalloc(sizeof(free_list_t));
    f->next = NULL;
+   f->prev = NULL;
    f->ptr  = m->space;
    f->size = m->maxsize - OVERRUN_MARGIN;
 
-   m->free_list = f;
+   m->free_list = m->free_tail = f;
 
    if (h != NULL)
       m->handler = *h;
@@ -196,6 +203,71 @@ void mspace_unpark_range(const void *lo)
    }
 }
 
+#ifndef NDEBUG
+static free_list_t *mspace_naive_fit(mspace_t *m, size_t asize)
+{
+   // Reference implementation of the search without hints: the first block
+   // that fits for a small object and the last for a large one
+
+   free_list_t *last = NULL;
+   for (free_list_t *it = m->free_list; it; it = it->next) {
+      if (it->size >= asize) {
+         if (asize < LARGE_OBJECT)
+            return it;
+         last = it;
+      }
+   }
+
+   return last;
+}
+#endif
+
+bool mspace_check_free_list(mspace_t *m)
+{
+   // Consistency of the free list and hints for the tests; the lock must
+   // be held or the space quiescent
+
+   SCOPED_LOCK(m->lock);
+
+   free_list_t *prev = NULL;
+   for (free_list_t *it = m->free_list; it; prev = it, it = it->next) {
+      if (it->prev != prev || it->size == 0 || it->size % LINE_SIZE != 0)
+         return false;
+      else if ((uintptr_t)it->ptr % LINE_SIZE != 0)
+         return false;
+      else if (it->ptr < m->space || it->ptr + it->size > m->space + m->maxsize)
+         return false;
+      else if (prev != NULL && prev->ptr + prev->size > it->ptr)
+         return false;   // Not in address order or overlapping
+   }
+
+   if (m->free_tail != prev)
+      return false;
+
+   // Every block before a hint is too small for its size
+   for (int n = 1; n < ARRAY_LEN(m->hints); n++) {
+      free_list_t *hint = m->hints[n];
+      if (hint == NULL)
+         continue;
+
+      for (free_list_t *it = m->free_list; it != hint && it != NULL;
+           it = it->next) {
+         if (it->size >= n * LINE_SIZE)
+            return false;
+      }
+
+      if (hint != FREE_END) {
+         bool found = false;
+         for (free_list_t *it = m->free_list; it; it = it->next)
+            found |= (it == hint);
+         if (!found)
+            return false;
+      }
+   }
+
+   return true;
+}
+
 static void *mspace_try_alloc(mspace_t *m, size_t size)
 {
    // Add one to size before rounding up to LINE_SIZE to allow a valid
@@ -209,18 +281,40 @@ static void *mspace_try_alloc(mspace_t *m, size_t size)
    // fits so they do not fragment the space between small long-lived
    // objects, otherwise a growing array can never reuse the holes left
    // by its own previous incarnations
-   free_list_t **fit = NULL;
-   for (free_list_t **it = &(m->free_list); *it; it = &((*it)->next)) {
-      assert((*it)->size % LINE_SIZE == 0);
-      if ((*it)->size >= asize) {
-         fit = it;
-         if (asize < LARGE_OBJECT)
+   // The list is in address order so the last block that fits is found
+   // by searching backwards from the tail, which is quick when the end of
+   // the space is free
+   // Blocks only shrink between collections so every block before the
+   // hint for this size is too small and need not be searched again
+   free_list_t *f = NULL;
+   if (asize < LARGE_OBJECT) {
+      free_list_t **hint = &(m->hints[nlines]);
+      free_list_t *it = *hint == NULL ? m->free_list : *hint;
+      for (; it != NULL && it != FREE_END; it = it->next) {
+         assert(it->size % LINE_SIZE == 0);
+         if (it->size >= asize) {
+            f = it;
             break;
+         }
+      }
+
+      *hint = f != NULL ? f : FREE_END;
+   }
+   else {
+      for (free_list_t *it = m->free_tail; it; it = it->prev) {
+         assert(it->size % LINE_SIZE == 0);
+         if (it->size >= asize) {
+            f = it;
+            break;
+         }
       }
    }
 
-   if (fit != NULL) {
-      free_list_t *f = *fit;
+   // Blocks never grow or merge outside a collection, which rebuilds the
+   // list and clears the hints, so the hints cannot skip a fit
+   assert((m->nallocs++ % 64) != 0 || f == mspace_naive_fit(m, asize));
+
+   if (f != NULL) {
       const bool from_end = asize >= LARGE_OBJECT && f->size > asize;
       char *base = from_end ? f->ptr + f->size - asize : f->ptr;
       assert((uintptr_t)base % LINE_SIZE == 0);
@@ -235,7 +329,21 @@ static void *mspace_try_alloc(mspace_t *m, size_t size)
          mask_clear_range(&(m->headmask), line + 1, nlines - 1);
 
       if (f->size == asize) {
-         *fit = f->next;
+         for (int i = 0; i < ARRAY_LEN(m->hints); i++) {
+            if (m->hints[i] == f)
+               m->hints[i] = f->next != NULL ? f->next : FREE_END;
+         }
+
+         if (f->prev != NULL)
+            f->prev->next = f->next;
+         else
+            m->free_list = f->next;
+
+         if (f->next != NULL)
+            f->next->prev = f->prev;
+         else
+            m->free_tail = f->prev;
+
          free(f);
       }
       else {
@@ -501,7 +609,8 @@ static void mspace_gc(mspace_t *m)
       tmp = it->next;
       free(it);
    }
-   m->free_list = NULL;
+   m->free_list = m->free_tail = NULL;
+   memset(m->hints, '\0', sizeof(m->hints));
 
    int freefrags = 0, freelines = 0;
    free_list_t **tail = &(m->free_list);
@@ -512,11 +621,13 @@ static void mspace_gc(mspace_t *m)
       else {
          free_list_t *f = xmalloc(sizeof(free_list_t));
          f->next = NULL;
+         f->prev = m->free_tail;
          f->ptr  = m->space + line * LINE_SIZE;
          f->size = clear * LINE_SIZE;
 
          *tail = f;
          tail = &(f->next);
+         m->free_tail = f;
 
          mask_set_range(&(m->headmask), line, clear);
 

@@ -20,7 +20,9 @@
 #include "option.h"
 #include "rt/mspace.h"
 
+#include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
 START_TEST(test_sanity)
 {
@@ -337,6 +339,83 @@ START_TEST(test_user_mark)
 }
 END_TEST
 
+static int cmp_ptr(const void *a, const void *b)
+{
+   const uintptr_t x = **(const uintptr_t **)a, y = **(const uintptr_t **)b;
+   return x < y ? -1 : x > y;
+}
+
+START_TEST(test_free_list_stress)
+{
+   // Mixed small and large allocations with many dead objects between the
+   // live ones so the free list has many fragments after each collection:
+   // live objects must not overlap or be corrupted and the allocation
+   // hints must always agree with a search of the whole free list
+
+   enum { NSLOTS = 1000, HEAP = 4 * 1024 * 1024 };
+
+   mspace_t *m = mspace_new(HEAP, NULL);
+   ck_assert(mspace_check_free_list(m));
+
+   mptr_t root = mptr_new(m, "slots");
+   uint8_t **slots = mspace_alloc(m, NSLOTS * sizeof(uint8_t *));
+   *mptr_get(root) = slots;
+
+   size_t *sizes = calloc(NSLOTS, sizeof(size_t));
+
+   srand(1234);
+   for (int iter = 0; iter < 4000; iter++) {
+      const int slot = rand() % NSLOTS;
+      const int kind = rand() % 100;
+      size_t size;
+      if (kind < 70)
+         size = 1 + rand() % 400;
+      else if (kind < 98)
+         size = 400 + rand() % 3700;
+      else
+         size = 4096 + rand() % 30000;
+
+      // Garbage which dies immediately
+      if (rand() % 3 == 0)
+         ck_assert_ptr_nonnull(mspace_alloc(m, 1 + rand() % 2000));
+
+      uint8_t *p = mspace_alloc(m, size);
+      ck_assert_ptr_nonnull(p);
+      memset(p, slot & 0xff, size);
+      slots[slot] = p;
+      sizes[slot] = size;
+
+      if (iter % 1000 == 999) {
+         ck_assert(mspace_check_free_list(m));
+
+         uint8_t **order[NSLOTS];
+         int n = 0;
+         for (int i = 0; i < NSLOTS; i++) {
+            if (slots[i] == NULL)
+               continue;
+
+            for (size_t j = 0; j < sizes[i]; j++)
+               ck_assert_int_eq(slots[i][j], i & 0xff);
+
+            order[n++] = &(slots[i]);
+         }
+
+         qsort(order, n, sizeof(uint8_t **), cmp_ptr);
+         for (int i = 1; i < n; i++) {
+            const uint8_t *prev = *order[i - 1], *next = *order[i];
+            ck_assert(prev + sizes[order[i - 1] - slots] <= next);
+         }
+      }
+   }
+
+   ck_assert(mspace_check_free_list(m));
+
+   free(sizes);
+   mptr_free(m, &root);
+   mspace_destroy(m);
+}
+END_TEST
+
 Suite *get_mspace_tests(void)
 {
    Suite *s = suite_create("mspace");
@@ -352,6 +431,7 @@ Suite *get_mspace_tests(void)
    tcase_add_test(tc, test_tlab);
    tcase_add_test(tc, test_end_ptr);
    tcase_add_test(tc, test_user_mark);
+   tcase_add_test(tc, test_free_list_stress);
    suite_add_tcase(s, tc);
 
    return s;

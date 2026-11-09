@@ -70,4 +70,7 @@ void *mspace_get_stack_limit(void);
 void mspace_park_range(const void *lo, const void *hi);
 void mspace_unpark_range(const void *lo);
 
+// Checks the free list and allocation hints are consistent (for tests)
+bool mspace_check_free_list(mspace_t *m);
+
 #endif   // _RT_MSPACE_H
