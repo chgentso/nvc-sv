@@ -47,6 +47,9 @@
 #include <ucontext.h>
 #include <unistd.h>
 #define DPI_FIBERS 1
+#else
+#include <windows.h>
+#define DPI_FIBERS 1
 #endif
 
 #if ASAN_ENABLED
@@ -868,9 +871,15 @@ struct _dpi_call {
    void         *result;
    dpi_scope_t  *scope;
 #ifdef DPI_FIBERS
+#ifdef __MINGW32__
+   LPVOID        uc;           // Fiber running the call
+   LPVOID        caller;       // Fiber to switch back to
+   void         *stack_top;
+#else
    ucontext_t    uc;
    ucontext_t    caller;
    void         *stack;
+#endif
    mptr_t        root;
    mspace_t     *ms;
    rt_proc_t    *proc;
@@ -900,6 +909,12 @@ static dpi_call_t *dpi_suspended = NULL;
 static void       *dpi_stack_pool[DPI_STACK_POOL];
 static int         dpi_stack_count = 0;
 
+#ifdef __MINGW32__
+// Fibers allocate their own stacks
+#define DPI_STACK_TOP(c) ((c)->stack_top)
+#else
+#define DPI_STACK_TOP(c) ((char *)(c)->stack + DPI_STACK_SIZE)
+
 static void *dpi_stack_alloc(void)
 {
    if (dpi_stack_count > 0)
@@ -923,7 +938,27 @@ static void dpi_stack_free(void *stack)
       munmap((char *)stack - DPI_STACK_GUARD,
              DPI_STACK_SIZE + DPI_STACK_GUARD);
 }
+#endif
 
+#ifdef __MINGW32__
+static VOID CALLBACK dpi_fiber_main(PVOID arg)
+{
+   dpi_call_t *c = arg;
+
+   ULONG_PTR lo, hi;
+   GetCurrentThreadStackLimits(&lo, &hi);
+   c->stack_top = (void *)hi;
+   if (mspace_get_stack_limit() != NULL)
+      mspace_stack_limit(c->stack_top);
+
+   ffi_call(&c->e->cif, FFI_FN(c->e->fn), &c->ret, c->avalues);
+   c->done = true;
+
+   // A fiber must never return as that would exit the thread
+   SwitchToFiber(c->caller);
+   abort();
+}
+#else
 static void dpi_fiber_main(unsigned lo, unsigned hi)
 {
    dpi_call_t *c = (dpi_call_t *)(((uintptr_t)hi << 32) | lo);
@@ -939,6 +974,7 @@ static void dpi_fiber_main(unsigned lo, unsigned hi)
    __sanitizer_start_switch_fiber(NULL, c->main_bottom, c->main_size);
 #endif
 }
+#endif   // __MINGW32__
 
 __attribute__((noinline))
 static void dpi_fiber_yield(dpi_call_t *c)
@@ -950,7 +986,7 @@ static void dpi_fiber_yield(dpi_call_t *c)
 
    const intptr_t *lo = (const intptr_t *)__builtin_frame_address(0) - 128;
    c->park_lo = lo;
-   mspace_park_range(lo, (char *)c->stack + DPI_STACK_SIZE);
+   mspace_park_range(lo, DPI_STACK_TOP(c));
    mspace_park_range(&c->uc, &c->uc + 1);
    c->parked = true;
 
@@ -958,7 +994,11 @@ static void dpi_fiber_yield(dpi_call_t *c)
    __sanitizer_start_switch_fiber(&fake, c->main_bottom, c->main_size);
 #endif
 
+#ifdef __MINGW32__
+   SwitchToFiber(c->caller);
+#else
    swapcontext(&c->uc, &c->caller);
+#endif
 
 #if ASAN_ENABLED
    __sanitizer_finish_switch_fiber(fake, &c->main_bottom, &c->main_size);
@@ -980,6 +1020,12 @@ static void dpi_fiber_enter(dpi_call_t *c)
 
    if (!c->started) {
       c->started = true;
+#ifdef __MINGW32__
+      c->stack_top = NULL;
+      c->uc = CreateFiberEx(64 * 1024, DPI_STACK_SIZE, 0, dpi_fiber_main, c);
+      if (c->uc == NULL)
+         jit_msg(NULL, DIAG_FATAL, "cannot allocate a stack for a DPI call");
+#else
       c->stack = dpi_stack_alloc();
       getcontext(&c->uc);
       c->uc.uc_stack.ss_sp = c->stack;
@@ -987,7 +1033,14 @@ static void dpi_fiber_enter(dpi_call_t *c)
       c->uc.uc_link = &c->caller;
       makecontext(&c->uc, (void (*)(void))dpi_fiber_main, 2,
                   (unsigned)(uintptr_t)c, (unsigned)((uintptr_t)c >> 32));
+#endif
    }
+
+#ifdef __MINGW32__
+   if (!IsThreadAFiber())
+      ConvertThreadToFiber(NULL);
+   c->caller = GetCurrentFiber();
+#endif
 
    if (c->parked) {
       mspace_unpark_range(c->park_lo);
@@ -1000,7 +1053,8 @@ static void dpi_fiber_enter(dpi_call_t *c)
    if (limit != NULL) {
       mspace_park_range(lo, limit);
       mspace_park_range(&c->caller, &c->caller + 1);
-      mspace_stack_limit((char *)c->stack + DPI_STACK_SIZE);
+      if (DPI_STACK_TOP(c) != NULL)
+         mspace_stack_limit(DPI_STACK_TOP(c));
    }
 
    void *fake = NULL;
@@ -1010,7 +1064,11 @@ static void dpi_fiber_enter(dpi_call_t *c)
    __sanitizer_start_switch_fiber(&fake, c->stack, DPI_STACK_SIZE);
 #endif
 
+#ifdef __MINGW32__
+   SwitchToFiber(c->uc);
+#else
    swapcontext(&c->caller, &c->uc);
+#endif
 
 #if ASAN_ENABLED
    __sanitizer_finish_switch_fiber(fake, NULL, NULL);
@@ -1028,8 +1086,13 @@ static void dpi_fiber_enter(dpi_call_t *c)
    dpi_fiber = saved_fiber;
 
    if (c->done) {
+#ifdef __MINGW32__
+      DeleteFiber(c->uc);
+      c->uc = NULL;
+#else
       dpi_stack_free(c->stack);
       c->stack = NULL;
+#endif
    }
 }
 
