@@ -127,6 +127,10 @@ STATIC_ASSERT(sizeof(waveform_t) <= 24);
 typedef struct {
    unsigned       count;
    unsigned       max;
+   unsigned       first_free;    // Every slot below this is in use
+   unsigned       index_size;    // Zero until the list is long
+   unsigned       index_used;    // Entries and tombstones in the index
+   uint32_t      *index;         // Hash of wakeable to slot + 1
    rt_wakeable_t *wake[];
 } rt_pending_t;
 
