@@ -2590,3 +2590,4 @@ svstreamarr1    verilog
 svforkshare1    verilog
 svcombposedge1  verilog
 svforkshare2    verilog
+svinsidestr2    verilog

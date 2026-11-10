@@ -23958,8 +23958,13 @@ static mir_value_t vlog_lower_inside_scalar(vlog_gen_t *g, vlog_node_t v,
    mir_value_t value;
    if (is_real)
       value = vlog_lower_cast(g, t_real, vlog_lower_rvalue(g, arg));
-   else
+   else if (vlog_is_string(arg))
       value = vlog_str_arg(g, arg);
+   else {
+      // An integral value compared with strings is converted to a string
+      mir_type_t t_str = mir_uarray_type(g->mu, 1, mir_char_type(g->mu));
+      value = vlog_lower_cast(g, t_str, vlog_lower_rvalue(g, arg));
+   }
 
    mir_value_t result = mir_const(g->mu, mir_bool_type(g->mu), 0);
 
@@ -24136,6 +24141,21 @@ static mir_value_t vlog_lower_inside_handle(vlog_gen_t *g, vlog_node_t v)
                            mir_const_vec(g->mu, t_bit, 0, 0));
 }
 
+static bool vlog_inside_str_array(vlog_node_t item)
+{
+   // A dynamic array or queue of strings in a set
+
+   if (vlog_kind(item) == V_INSIDE_RANGE)
+      return false;
+
+   vlog_node_t atype = vlog_inside_array_type(item);
+   if (atype == NULL)
+      return false;
+
+   vlog_node_t etype = vlog_type(atype);
+   return vlog_kind(etype) == V_DATA_TYPE && vlog_subkind(etype) == DT_STRING;
+}
+
 static mir_value_t vlog_lower_inside(vlog_gen_t *g, vlog_node_t v)
 {
    // In an ordinary expression: a one bit result which is X if no item
@@ -24147,8 +24167,13 @@ static mir_value_t vlog_lower_inside(vlog_gen_t *g, vlog_node_t v)
    if (vlog_is_class_handle(arg))
       return vlog_lower_inside_handle(g, v);
 
+   // An integral value is compared with the strings of an array as a string
+   bool str_set = false;
+   for (int i = 0; i < vlog_params(v) && !str_set; i++)
+      str_set = vlog_inside_str_array(vlog_param(v, i));
+
    const bool is_real = vlog_is_real(arg);
-   if (is_real || vlog_is_string(arg))
+   if (is_real || vlog_is_string(arg) || str_set)
       return vlog_lower_inside_scalar(g, v, is_real);
 
    unsigned width = vlog_width(arg);
