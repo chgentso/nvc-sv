@@ -2016,6 +2016,31 @@ static bool slice_of(const crv_t *c, int n, int nsc, int *var, unsigned *lsb,
    return true;
 }
 
+static bool mask_of(const crv_t *c, int n, int nsc, int *var,
+                    uint64_t *mask)
+{
+   // A variable ANDed with a constant: the bits in the mask are separate
+   // fields of the variable
+   const node_t *nd = &c->nodes[n];
+   if (nd->kind != N_BIN || nd->op != CRV_AND || nd->sgn)
+      return false;
+
+   int v = nd->a, m = nd->b;
+   if (c->nodes[v].kind != N_VAR)
+      v = nd->b, m = nd->a;
+
+   const node_t *xv = &c->nodes[v];
+   int64_t k;
+   if (xv->kind != N_VAR || xv->aux >= nsc || xv->sgn || xv->width > 64
+       || xv->width != nd->width || !const_of(c, m, &k))
+      return false;
+
+   *var = xv->aux;
+   *mask = (uint64_t)k & (xv->width == 64 ? ~UINT64_C(0)
+                          : (UINT64_C(1) << xv->width) - 1);
+   return true;
+}
+
 typedef struct {
    const prob_t *P;
    uint64_t     *cut;
@@ -2045,6 +2070,17 @@ static void dcol_cb(void *ctx, const node_t *nd, int n)
       D->cut[var] |= UINT64_C(1) << lsb;
       if (lsb + w < width)
          D->cut[var] |= UINT64_C(1) << (lsb + w);
+      D->count[var]++;
+      return;
+   }
+
+   uint64_t mask;
+   if (mask_of(c, n, D->P->nsc, &var, &mask)) {
+      const unsigned width = c->vars[var].width;
+      for (unsigned b = 1; b < width; b++) {
+         if (((mask >> b) & 1) != ((mask >> (b - 1)) & 1))
+            D->cut[var] |= UINT64_C(1) << b;
+      }
       D->count[var]++;
       return;
    }
@@ -2117,6 +2153,40 @@ static int drw_fields(drw_t *R, const dec_t *d, unsigned lsb, unsigned w,
    return result;
 }
 
+static int drw_masked(drw_t *R, const dec_t *d, uint64_t mask, unsigned own)
+{
+   // The fields of the variable inside the mask: each is wholly in or out
+   crv_t *c = R->P->c;
+   int result = -1;
+   for (int i = 0; i < d->nf; i++) {
+      if (!((mask >> d->pos[i]) & 1))
+         continue;
+
+      const unsigned fw = d->pos[i + 1] - d->pos[i];
+      node_t fn = { .kind = N_VAR, .width = fw, .aux = d->f0 + i };
+      int t = add_node(c, fn);
+      if (fw != own) {
+         node_t cn = { .kind = N_CAST, .width = own, .a = t };
+         t = add_node(c, cn);
+      }
+      if (d->pos[i] > 0) {
+         node_t sn = { .kind = N_BIN, .op = CRV_SHL, .width = own,
+                       .a = t, .b = mk_const(c, d->pos[i], 32, true) };
+         t = add_node(c, sn);
+      }
+
+      if (result < 0)
+         result = t;
+      else {
+         node_t an = { .kind = N_BIN, .op = CRV_ADD, .width = own,
+                       .a = result, .b = t };
+         result = add_node(c, an);
+      }
+   }
+
+   return result >= 0 ? result : mk_const(c, 0, own, false);
+}
+
 static int drw(drw_t *R, int n)
 {
    crv_t *c = R->P->c;
@@ -2130,9 +2200,13 @@ static int drw(drw_t *R, int n)
    unsigned lsb, w;
    const dec_t *d;
 
+   uint64_t mask;
    if (slice_of(c, n, R->P->nsc, &var, &lsb, &w)
        && (d = dec_for(R, var)) != NULL)
       res = drw_fields(R, d, lsb, w, nd.width);
+   else if (mask_of(c, n, R->P->nsc, &var, &mask)
+            && (d = dec_for(R, var)) != NULL)
+      res = drw_masked(R, d, mask, nd.width);
    else {
       switch ((nkind_t)nd.kind) {
       case N_VAR:
