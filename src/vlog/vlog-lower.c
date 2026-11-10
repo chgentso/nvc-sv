@@ -21087,9 +21087,1223 @@ static mir_value_t vlog_crv_assoc_elem(vlog_gen_t *g, vlog_node_t base,
    return mir_build_load(g->mu, var);
 }
 
+// Values wider than 64 bits (IEEE 1800-2017 18.3 to 18.5: a constraint may
+// involve any integral type).  The solver only has variables of up to 64
+// bits so a wide value is split into 64 bit chunks, each its own variable
+// or constant node, and the operators are expanded over the chunks when the
+// graph is built.  A chunk of zero is the null value so that shifts and
+// concatenations do not create nodes for the empty parts.
+
+#define CRV_WIDE_CHUNKS 128
+
+typedef struct {
+   unsigned    width;
+   unsigned    n;
+   mir_value_t c[CRV_WIDE_CHUNKS];
+} crv_wide_t;
+
+static mir_value_t vlog_crv_bool(vlog_gen_t *g, vlog_node_t v);
+static mir_value_t vlog_crv_and(vlog_gen_t *g, mir_value_t a, mir_value_t b);
+static bool vlog_crv_is_wide(vlog_gen_t *g, vlog_node_t type);
+static void vlog_crv_wide_expr(vlog_gen_t *g, vlog_node_t v, unsigned width,
+                               bool is_signed, crv_wide_t *out);
+
+static inline unsigned vlog_crv_nchunks(unsigned width)
+{
+   return (width + 63) / 64;
+}
+
+static mir_value_t vlog_crv_w_const(vlog_gen_t *g, uint64_t value)
+{
+   return CRV3(g, CRV_OP_CONST, g->crv_ctx, vlog_crv_int(g, (int64_t)value),
+               vlog_crv_flags(g, 64, false));
+}
+
+static mir_value_t vlog_crv_w_mat(vlog_gen_t *g, mir_value_t chunk)
+{
+   return mir_is_null(chunk) ? vlog_crv_w_const(g, 0) : chunk;
+}
+
+static mir_value_t vlog_crv_w_bin(vlog_gen_t *g, crv_binary_t op,
+                                  mir_value_t a, mir_value_t b)
+{
+   return CRV5(g, CRV_OP_BINARY, g->crv_ctx, vlog_crv_int(g, op),
+               vlog_crv_w_mat(g, a), vlog_crv_w_mat(g, b),
+               vlog_crv_flags(g, 64, false));
+}
+
+static mir_value_t vlog_crv_w_bit(vlog_gen_t *g, crv_binary_t op,
+                                  mir_value_t a, mir_value_t b)
+{
+   // One bit result of a relation or logical operator
+   return CRV5(g, CRV_OP_BINARY, g->crv_ctx, vlog_crv_int(g, op),
+               vlog_crv_w_mat(g, a), vlog_crv_w_mat(g, b),
+               vlog_crv_flags(g, 1, false));
+}
+
+static mir_value_t vlog_crv_w_true(vlog_gen_t *g, bool value)
+{
+   return CRV3(g, CRV_OP_CONST, g->crv_ctx, vlog_crv_int(g, value),
+               vlog_crv_flags(g, 1, false));
+}
+
+static mir_value_t vlog_crv_w_or(vlog_gen_t *g, mir_value_t a, mir_value_t b)
+{
+   if (mir_is_null(a))
+      return b;
+   else if (mir_is_null(b))
+      return a;
+   return vlog_crv_w_bin(g, CRV_OR, a, b);
+}
+
+static mir_value_t vlog_crv_w_and(vlog_gen_t *g, mir_value_t a, mir_value_t b)
+{
+   if (mir_is_null(a) || mir_is_null(b))
+      return MIR_NULL_VALUE;
+   return vlog_crv_w_bin(g, CRV_AND, a, b);
+}
+
+static mir_value_t vlog_crv_w_shl_c(vlog_gen_t *g, mir_value_t a, unsigned k)
+{
+   if (mir_is_null(a) || k == 0)
+      return a;
+   return vlog_crv_w_bin(g, CRV_SHL, a, vlog_crv_w_const(g, k));
+}
+
+static mir_value_t vlog_crv_w_shr_c(vlog_gen_t *g, mir_value_t a, unsigned k)
+{
+   if (mir_is_null(a) || k == 0)
+      return a;
+   return vlog_crv_w_bin(g, CRV_SHR, a, vlog_crv_w_const(g, k));
+}
+
+static void vlog_crv_w_mask(vlog_gen_t *g, crv_wide_t *w)
+{
+   // Keep the unused bits of the top chunk zero
+   const unsigned r = w->width % 64;
+   if (r != 0 && !mir_is_null(w->c[w->n - 1]))
+      w->c[w->n - 1] = vlog_crv_w_bin(g, CRV_AND, w->c[w->n - 1],
+                                      vlog_crv_w_const(g, (UINT64_C(1) << r) - 1));
+}
+
+static void vlog_crv_w_zero(crv_wide_t *w, unsigned width)
+{
+   if (vlog_crv_nchunks(width) > CRV_WIDE_CHUNKS)
+      fatal("sorry, values wider than %d bits are not supported in "
+            "constraints", CRV_WIDE_CHUNKS * 64);
+
+   w->width = width;
+   w->n = vlog_crv_nchunks(width);
+   for (unsigned i = 0; i < w->n; i++)
+      w->c[i] = MIR_NULL_VALUE;
+}
+
+static mir_value_t vlog_crv_w_sign_fill(vlog_gen_t *g, const crv_wide_t *w)
+{
+   // All ones if the top bit is set, otherwise zero
+   const unsigned t = (w->width - 1) / 64, r = w->width - 64 * t;
+   if (mir_is_null(w->c[t]))
+      return MIR_NULL_VALUE;
+
+   mir_value_t s = vlog_crv_w_bin(g, CRV_AND, vlog_crv_w_shr_c(g, w->c[t], r - 1),
+                                  vlog_crv_w_const(g, 1));
+   return CRV3(g, CRV_OP_UNARY, g->crv_ctx, vlog_crv_int(g, CRV_NEG), s);
+}
+
+static void vlog_crv_w_resize(vlog_gen_t *g, crv_wide_t *w, unsigned width,
+                              bool sext)
+{
+   if (vlog_crv_nchunks(width) > CRV_WIDE_CHUNKS)
+      fatal("sorry, values wider than %d bits are not supported in "
+            "constraints", CRV_WIDE_CHUNKS * 64);
+
+   const unsigned nn = vlog_crv_nchunks(width);
+   if (width > w->width) {
+      mir_value_t fill = MIR_NULL_VALUE;
+      if (sext) {
+         fill = vlog_crv_w_sign_fill(g, w);
+         const unsigned t = (w->width - 1) / 64, r = w->width - 64 * t;
+         if (r < 64 && !mir_is_null(fill))
+            w->c[t] = vlog_crv_w_or(g, w->c[t], vlog_crv_w_shl_c(g, fill, r));
+      }
+      for (unsigned i = w->n; i < nn; i++)
+         w->c[i] = fill;
+   }
+
+   const bool changed = width < w->width || (sext && width > w->width);
+   w->n = nn;
+   w->width = width;
+   if (changed)
+      vlog_crv_w_mask(g, w);
+}
+
+static mir_value_t vlog_crv_w_chunk(vlog_gen_t *g, mir_value_t full,
+                                     unsigned i)
+{
+   // The 64 bits of a wide value starting at bit i * 64 as an offset
+   mir_type_t type = mir_get_type(g->mu, full);
+   mir_type_t t_vec64 = mir_vec2_type(g->mu, 64, false);
+
+   mir_value_t part = full;
+   if (i > 0) {
+      mir_value_t amount = vlog_lower_cast(
+         g, type, mir_const_vec(g->mu, t_vec64, i * 64, 0));
+      part = mir_build_binary(g->mu, MIR_VEC_SRL, type, full, amount);
+   }
+
+   return vlog_crv_to_offset(g, vlog_lower_cast(g, t_vec64, part));
+}
+
+static void vlog_crv_w_from_value(vlog_gen_t *g, mir_value_t value,
+                                  unsigned width, crv_wide_t *w)
+{
+   // The chunks of a value known when the graph is built
+   vlog_crv_w_zero(w, width);
+
+   for (unsigned i = 0; i < w->n; i++)
+      w->c[i] = CRV3(g, CRV_OP_CONST, g->crv_ctx, vlog_crv_w_chunk(g, value, i),
+                     vlog_crv_flags(g, 64, false));
+
+   vlog_crv_w_mask(g, w);
+}
+
+static mir_value_t vlog_crv_chunk_key(vlog_gen_t *g, vlog_node_t decl,
+                                      int salt, unsigned i)
+{
+   return vlog_crv_key_n(g, decl, salt + i * 4096);
+}
+
+static mir_value_t vlog_crv_current_full(vlog_gen_t *g, vlog_node_t v)
+{
+   vlog_node_t decl = vlog_ref(v);
+
+   if (vlog_kind(v) == V_REF && vlog_crv_is_target(g, decl)) {
+      const type_info_t *ti = vlog_type_info(g, vlog_type(decl));
+      mir_value_t ptr = mir_build_link_var(g->mu, g->crv_obj,
+                                           vlog_prop_name(g->crv_class, decl),
+                                           ti->type);
+      return mir_build_load(g->mu, ptr);
+   }
+
+   return vlog_lower_rvalue(g, v);
+}
+
+static bool vlog_crv_is_wide_var(vlog_gen_t *g, vlog_node_t v)
+{
+   // A reference to a vector variable wider than 64 bits which the solver
+   // sees as a number of chunks
+
+   if ((vlog_kind(v) != V_REF && vlog_kind(v) != V_MEMBER_REF)
+       || !vlog_has_ref(v))
+      return false;
+
+   vlog_node_t decl = vlog_ref(v);
+   if (vlog_kind(decl) != V_VAR_DECL || !vlog_has_type(decl)
+       || vlog_ranges(decl) > 0 || vlog_crv_packed_type(decl) != NULL)
+      return false;
+
+   return vlog_crv_is_wide(g, vlog_type(decl));
+}
+
+static void vlog_crv_w_from_var(vlog_gen_t *g, vlog_node_t v, crv_wide_t *w)
+{
+   vlog_node_t decl = vlog_ref(v);
+   const unsigned width = vlog_size(vlog_type(decl));
+
+   vlog_crv_w_zero(w, width);
+
+   mir_value_t object = vlog_crv_object(g, v);
+   mir_value_t full = vlog_crv_current_full(g, v);
+   for (unsigned i = 0; i < w->n; i++) {
+      const unsigned cw = MIN(64, width - i * 64);
+      mir_value_t ref = CRV5(g, CRV_OP_REF, g->crv_ctx, object,
+                             vlog_crv_chunk_key(g, decl, 0, i),
+                             vlog_crv_w_chunk(g, full, i),
+                             vlog_crv_flags(g, cw, false));
+      w->c[i] = cw == 64 ? ref : CRV3(g, CRV_OP_CAST, g->crv_ctx, ref,
+                                      vlog_crv_flags(g, 64, false));
+   }
+}
+
+static void vlog_crv_w_copy_chunks(crv_wide_t *to, const crv_wide_t *from)
+{
+   memcpy(to, from, sizeof(*to));
+}
+
+static void vlog_crv_w_resolve(vlog_gen_t *g, crv_wide_t *w)
+{
+   for (unsigned i = 0; i < w->n; i++)
+      w->c[i] = vlog_crv_w_mat(g, w->c[i]);
+}
+
+static void vlog_crv_w_shift_const(vlog_gen_t *g, crv_wide_t *w, unsigned k,
+                                   bool left, bool arith)
+{
+   // Shift by a constant number of bits keeping the width
+   const unsigned n = w->n;
+   const unsigned width = w->width;
+
+   mir_value_t fill = MIR_NULL_VALUE;
+   if (arith) {
+      fill = vlog_crv_w_sign_fill(g, w);
+      vlog_crv_w_resize(g, w, n * 64, true);
+   }
+
+   if (k >= (arith ? n * 64 : width)) {
+      mir_value_t keep = fill;
+      for (unsigned i = 0; i < n; i++)
+         w->c[i] = keep;
+      w->width = width;
+      vlog_crv_w_mask(g, w);
+      return;
+   }
+
+   const unsigned q = k / 64, r = k % 64;
+   mir_value_t out[CRV_WIDE_CHUNKS];
+   for (int i = 0; i < (int)n; i++) {
+      const int src = left ? i - (int)q : i + (int)q;
+      const int nxt = left ? src - 1 : src + 1;
+      mir_value_t hi = (src >= 0 && src < (int)n) ? w->c[src] : MIR_NULL_VALUE;
+      mir_value_t lo = (nxt >= 0 && nxt < (int)n) ? w->c[nxt] : MIR_NULL_VALUE;
+
+      if (left)
+         out[i] = vlog_crv_w_or(g, vlog_crv_w_shl_c(g, hi, r),
+                                r == 0 ? MIR_NULL_VALUE
+                                : vlog_crv_w_shr_c(g, lo, 64 - r));
+      else
+         out[i] = vlog_crv_w_or(g, vlog_crv_w_shr_c(g, hi, r),
+                                r == 0 ? MIR_NULL_VALUE
+                                : vlog_crv_w_shl_c(g, lo, 64 - r));
+   }
+
+   if (arith && !mir_is_null(fill)) {
+      // Ones shift in from the top: or in the sign where the shift made room
+      crv_wide_t ones, room;
+      vlog_crv_w_zero(&ones, n * 64);
+      for (unsigned i = 0; i < n; i++)
+         ones.c[i] = vlog_crv_w_const(g, ~UINT64_C(0));
+      vlog_crv_w_copy_chunks(&room, &ones);
+      vlog_crv_w_shift_const(g, &room, k, false, false);
+      for (unsigned i = 0; i < n; i++) {
+         mir_value_t hi = CRV3(g, CRV_OP_UNARY, g->crv_ctx,
+                               vlog_crv_int(g, CRV_INV),
+                               vlog_crv_w_mat(g, room.c[i]));
+         out[i] = vlog_crv_w_or(g, out[i], vlog_crv_w_and(g, fill, hi));
+      }
+   }
+
+   for (unsigned i = 0; i < n; i++)
+      w->c[i] = out[i];
+   w->width = width;
+   vlog_crv_w_mask(g, w);
+}
+
+static mir_value_t vlog_crv_w_any(vlog_gen_t *g, const crv_wide_t *w,
+                                  unsigned from)
+{
+   // One if any chunk from this one up is not zero
+   mir_value_t acc = MIR_NULL_VALUE;
+   for (unsigned i = from; i < w->n; i++) {
+      if (mir_is_null(w->c[i]))
+         continue;
+      mir_value_t ne = vlog_crv_w_bit(g, CRV_NE, w->c[i], MIR_NULL_VALUE);
+      acc = mir_is_null(acc) ? ne : vlog_crv_w_bit(g, CRV_LOG_OR, acc, ne);
+   }
+
+   return mir_is_null(acc) ? vlog_crv_w_true(g, false) : acc;
+}
+
+static void vlog_crv_w_cond(vlog_gen_t *g, mir_value_t test, crv_wide_t *a,
+                            const crv_wide_t *b)
+{
+   // a = test ? a : b
+   for (unsigned i = 0; i < a->n; i++)
+      a->c[i] = CRV4(g, CRV_OP_COND, g->crv_ctx, test,
+                     vlog_crv_w_mat(g, a->c[i]), vlog_crv_w_mat(g, b->c[i]));
+}
+
+static void vlog_crv_w_shift_var(vlog_gen_t *g, crv_wide_t *w,
+                                 const crv_wide_t *amount, bool left,
+                                 bool arith)
+{
+   // Shift by a number of bits only known to the solver
+   const unsigned width = w->width, n = w->n;
+
+   mir_value_t fill = MIR_NULL_VALUE;
+   if (arith)
+      fill = vlog_crv_w_sign_fill(g, w);
+
+   // An amount of the width or more shifts everything out
+   mir_value_t big = vlog_crv_w_any(g, amount, 1);
+   mir_value_t a0 = vlog_crv_w_mat(g, amount->c[0]);
+   if (width < UINT64_MAX)
+      big = CRV5(g, CRV_OP_BINARY, g->crv_ctx, vlog_crv_int(g, CRV_LOG_OR),
+                 big, vlog_crv_w_bit(g, CRV_GE, a0,
+                                     vlog_crv_w_const(g, width)),
+                 vlog_crv_flags(g, 1, false));
+
+   crv_wide_t cur;
+   vlog_crv_w_copy_chunks(&cur, w);
+   vlog_crv_w_resolve(g, &cur);
+
+   for (unsigned j = 0; (UINT64_C(1) << j) < width; j++) {
+      mir_value_t bit = CRV3(g, CRV_OP_CAST, g->crv_ctx,
+                             vlog_crv_w_shr_c(g, a0, j),
+                             vlog_crv_flags(g, 1, false));
+      crv_wide_t moved;
+      vlog_crv_w_copy_chunks(&moved, &cur);
+      vlog_crv_w_shift_const(g, &moved, UINT64_C(1) << j, left, arith);
+      vlog_crv_w_resolve(g, &moved);
+      vlog_crv_w_cond(g, bit, &moved, &cur);
+      vlog_crv_w_copy_chunks(&cur, &moved);
+   }
+
+   crv_wide_t gone;
+   vlog_crv_w_zero(&gone, width);
+   if (arith) {
+      for (unsigned i = 0; i < n; i++)
+         gone.c[i] = fill;
+      vlog_crv_w_mask(g, &gone);
+   }
+   vlog_crv_w_resolve(g, &gone);
+   vlog_crv_w_cond(g, big, &gone, &cur);
+   vlog_crv_w_copy_chunks(w, &gone);
+}
+
+static void vlog_crv_w_addsub(vlog_gen_t *g, crv_wide_t *a, crv_wide_t *b,
+                              bool sub)
+{
+   // a = a + b or a - b modulo the width
+   mir_value_t carry = MIR_NULL_VALUE;
+   for (unsigned i = 0; i < a->n; i++) {
+      mir_value_t x = vlog_crv_w_mat(g, a->c[i]);
+      mir_value_t y = vlog_crv_w_mat(g, b->c[i]);
+      const bool more = i + 1 < a->n;
+
+      mir_value_t s = vlog_crv_w_bin(g, sub ? CRV_SUB : CRV_ADD, x, y);
+      mir_value_t c0 = MIR_NULL_VALUE;
+      if (more)
+         c0 = vlog_crv_w_bit(g, sub ? CRV_LT : CRV_LT, sub ? x : s,
+                             sub ? y : x);
+
+      if (!mir_is_null(carry)) {
+         mir_value_t cin = CRV3(g, CRV_OP_CAST, g->crv_ctx, carry,
+                                vlog_crv_flags(g, 64, false));
+         mir_value_t s1 = vlog_crv_w_bin(g, sub ? CRV_SUB : CRV_ADD, s, cin);
+         if (more) {
+            mir_value_t c1 = vlog_crv_w_bit(g, sub ? CRV_LT : CRV_LT,
+                                            sub ? s : s1, sub ? cin : s);
+            c0 = vlog_crv_w_bit(g, CRV_LOG_OR, c0, c1);
+         }
+         s = s1;
+      }
+
+      a->c[i] = s;
+      carry = c0;
+   }
+
+   vlog_crv_w_mask(g, a);
+}
+
+static mir_value_t vlog_crv_w_cmp(vlog_gen_t *g, crv_binary_t op,
+                                  crv_wide_t *a, crv_wide_t *b,
+                                  bool is_signed)
+{
+   // Relation between two values of the same width
+   const unsigned n = a->n;
+
+   if (op == CRV_EQ || op == CRV_NE) {
+      mir_value_t acc = MIR_NULL_VALUE;
+      for (unsigned i = 0; i < n; i++) {
+         if (mir_is_null(a->c[i]) && mir_is_null(b->c[i]))
+            continue;
+         mir_value_t r = vlog_crv_w_bit(g, op, a->c[i], b->c[i]);
+         acc = mir_is_null(acc) ? r
+            : vlog_crv_w_bit(g, op == CRV_EQ ? CRV_LOG_AND : CRV_LOG_OR,
+                             acc, r);
+      }
+
+      return mir_is_null(acc) ? vlog_crv_w_true(g, op == CRV_EQ) : acc;
+   }
+
+   if (op == CRV_GT || op == CRV_GE) {
+      op = op == CRV_GT ? CRV_LT : CRV_LE;
+      crv_wide_t *tmp = a;
+      a = b;
+      b = tmp;
+   }
+
+   // The width of the top chunk which holds the sign
+   const unsigned top_w = a->width - 64 * (n - 1);
+
+   mir_value_t r = MIR_NULL_VALUE;
+   for (unsigned i = 0; i < n; i++) {
+      mir_value_t x = vlog_crv_w_mat(g, a->c[i]);
+      mir_value_t y = vlog_crv_w_mat(g, b->c[i]);
+
+      if (is_signed && i == n - 1) {
+         // The top chunk holds the sign
+         if (top_w < 64) {
+            mir_value_t narrow = vlog_crv_flags(g, top_w, true);
+            x = CRV3(g, CRV_OP_CAST, g->crv_ctx, x, narrow);
+            y = CRV3(g, CRV_OP_CAST, g->crv_ctx, y, narrow);
+         }
+         mir_value_t flags = vlog_crv_flags(g, 64, true);
+         x = CRV3(g, CRV_OP_CAST, g->crv_ctx, x, flags);
+         y = CRV3(g, CRV_OP_CAST, g->crv_ctx, y, flags);
+      }
+
+      if (mir_is_null(r))
+         r = CRV5(g, CRV_OP_BINARY, g->crv_ctx, vlog_crv_int(g, op), x, y,
+                  vlog_crv_flags(g, 1, false));
+      else {
+         mir_value_t lt = CRV5(g, CRV_OP_BINARY, g->crv_ctx,
+                               vlog_crv_int(g, CRV_LT), x, y,
+                               vlog_crv_flags(g, 1, false));
+         mir_value_t eq = CRV5(g, CRV_OP_BINARY, g->crv_ctx,
+                               vlog_crv_int(g, CRV_EQ), x, y,
+                               vlog_crv_flags(g, 1, false));
+         r = vlog_crv_w_bit(g, CRV_LOG_OR, lt,
+                            vlog_crv_w_bit(g, CRV_LOG_AND, eq, r));
+      }
+   }
+
+   return r;
+}
+
+static void vlog_crv_w_arith(vlog_gen_t *g, vlog_node_t v, unsigned w,
+                             bool s, crv_wide_t *a, crv_wide_t *b)
+{
+   const unsigned lw = vlog_crv_width(g, vlog_left(v));
+   const unsigned rw = vlog_crv_width(g, vlog_right(v));
+
+   switch (vlog_subkind(v)) {
+   case V_BINARY_PLUS:
+   case V_BINARY_MINUS:
+      vlog_crv_w_addsub(g, a, b, vlog_subkind(v) == V_BINARY_MINUS);
+      return;
+   case V_BINARY_AND:
+   case V_BINARY_OR:
+   case V_BINARY_XOR:
+      {
+         const crv_binary_t op = vlog_subkind(v) == V_BINARY_AND ? CRV_AND
+            : vlog_subkind(v) == V_BINARY_OR ? CRV_OR : CRV_XOR;
+         for (unsigned i = 0; i < a->n; i++) {
+            if (op == CRV_AND)
+               a->c[i] = vlog_crv_w_and(g, a->c[i], b->c[i]);
+            else if (op == CRV_OR)
+               a->c[i] = vlog_crv_w_or(g, a->c[i], b->c[i]);
+            else if (mir_is_null(b->c[i]))
+               continue;
+            else
+               a->c[i] = vlog_crv_w_bin(g, CRV_XOR, a->c[i], b->c[i]);
+         }
+      }
+      return;
+   case V_BINARY_TIMES:
+   case V_BINARY_DIVIDE:
+   case V_BINARY_MOD:
+      {
+         // Only where the operands fit the 64 bit arithmetic of the solver
+         if (s || MIN(lw, 64) + MIN(rw, 64) > 64
+             || (vlog_subkind(v) == V_BINARY_TIMES && lw + rw > 64)
+             || lw > 64 || rw > 64)
+            fatal_at(vlog_loc(v), "sorry, this arithmetic on values wider "
+                     "than 64 bits is not supported in a constraint");
+
+         const crv_binary_t op = vlog_subkind(v) == V_BINARY_TIMES ? CRV_MUL
+            : vlog_subkind(v) == V_BINARY_DIVIDE ? CRV_DIV : CRV_MOD;
+         mir_value_t r = vlog_crv_w_bin(g, op, a->c[0], b->c[0]);
+         vlog_crv_w_zero(a, a->width);
+         a->c[0] = r;
+      }
+      return;
+   default:
+      fatal_at(vlog_loc(v), "sorry, this operator is not supported in a "
+               "constraint");
+   }
+}
+
+static mir_value_t vlog_crv_wide_inside(vlog_gen_t *g, vlog_node_t v);
+static mir_value_t vlog_crv_wide_dist(vlog_gen_t *g, vlog_node_t v);
+static void vlog_crv_wide_dist_parts(vlog_gen_t *g, vlog_node_t v,
+                                     mir_value_t *pick, mir_value_t *impls);
+
+static bool vlog_crv_inside_is_wide(vlog_gen_t *g, vlog_node_t v)
+{
+   if (vlog_crv_width(g, vlog_value(v)) > 64)
+      return true;
+
+   const int nparams = vlog_params(v);
+   for (int i = 0; i < nparams; i++) {
+      vlog_node_t item = vlog_param(v, i);
+      if (vlog_kind(item) == V_INSIDE_RANGE) {
+         if (vlog_crv_width(g, vlog_left(item)) > 64
+             || vlog_crv_width(g, vlog_right(item)) > 64)
+            return true;
+      }
+      else if (vlog_crv_is_array_ref(item))
+         continue;
+      else if (vlog_crv_width(g, item) > 64)
+         return true;
+   }
+
+   return false;
+}
+
+static bool vlog_crv_needs_wide(vlog_gen_t *g, vlog_node_t v)
+{
+   // An expression which the solver cannot represent as a single node
+
+   const unsigned own = vlog_crv_width(g, v);
+
+   if (vlog_crv_is_state(g, v))
+      return own > 64;
+
+   switch (vlog_kind(v)) {
+   case V_REF:
+   case V_MEMBER_REF:
+      return own > 64 && vlog_crv_is_wide_var(g, v);
+   default:
+      break;
+   }
+
+   if (own > 64)
+      return true;
+
+   switch (vlog_kind(v)) {
+   case V_BINARY:
+      switch (vlog_subkind(v)) {
+      case V_BINARY_LOG_EQ:
+      case V_BINARY_LOG_NEQ:
+      case V_BINARY_CASE_EQ:
+      case V_BINARY_CASE_NEQ:
+      case V_BINARY_LT:
+      case V_BINARY_LEQ:
+      case V_BINARY_GT:
+      case V_BINARY_GEQ:
+         return MAX(vlog_crv_width(g, vlog_left(v)),
+                    vlog_crv_width(g, vlog_right(v))) > 64;
+      default:
+         return false;
+      }
+   case V_UNARY:
+      switch (vlog_subkind(v)) {
+      case V_UNARY_AND:
+      case V_UNARY_OR:
+      case V_UNARY_XOR:
+         return vlog_crv_width(g, vlog_value(v)) > 64;
+      default:
+         return false;
+      }
+   case V_INSIDE:
+      return vlog_crv_inside_is_wide(g, v);
+   case V_DIST:
+      return vlog_crv_width(g, vlog_value(v)) > 64;
+   case V_BIT_SELECT:
+   case V_PART_SELECT:
+      {
+         vlog_node_t base = vlog_value(v);
+         return !vlog_crv_is_array_ref(base) && !vlog_crv_is_assoc_ref(base)
+            && vlog_crv_width(g, base) > 64;
+      }
+   case V_CAST:
+      return vlog_crv_width(g, vlog_value(v)) > 64;
+   case V_SYS_FCALL:
+      return vlog_crv_bit_count(v) != CRV_COUNT_NONE && vlog_params(v) == 1
+         && vlog_crv_width(g, vlog_param(v, 0)) > 64;
+   default:
+      return false;
+   }
+}
+
+static mir_value_t vlog_crv_w_reduce(vlog_gen_t *g, vlog_node_t arg,
+                                     vlog_node_t v)
+{
+   const unsigned aw = vlog_crv_width(g, arg);
+   crv_wide_t a;
+   vlog_crv_wide_expr(g, arg, aw, false, &a);
+
+   switch (vlog_subkind(v)) {
+   case V_UNARY_OR:
+      return vlog_crv_w_any(g, &a, 0);
+   case V_UNARY_AND:
+      {
+         // Every bit is set: the unused bits of the top chunk are zero
+         mir_value_t acc = MIR_NULL_VALUE;
+         for (unsigned i = 0; i < a.n; i++) {
+            const unsigned r = aw - 64 * i;
+            const uint64_t ones = r >= 64 ? ~UINT64_C(0)
+               : (UINT64_C(1) << r) - 1;
+            mir_value_t eq = vlog_crv_w_bit(g, CRV_EQ, a.c[i],
+                                            vlog_crv_w_const(g, ones));
+            acc = mir_is_null(acc) ? eq
+               : vlog_crv_w_bit(g, CRV_LOG_AND, acc, eq);
+         }
+         return acc;
+      }
+   default:
+      {
+         mir_value_t x = vlog_crv_w_mat(g, a.c[0]);
+         for (unsigned i = 1; i < a.n; i++)
+            x = vlog_crv_w_bin(g, CRV_XOR, x, a.c[i]);
+         return CRV3(g, CRV_OP_UNARY, g->crv_ctx,
+                     vlog_crv_int(g, CRV_REDUCE_XOR), x);
+      }
+   }
+}
+
+static mir_value_t vlog_crv_w_popcount(vlog_gen_t *g, vlog_node_t arg)
+{
+   const unsigned aw = vlog_crv_width(g, arg);
+   crv_wide_t a;
+   vlog_crv_wide_expr(g, arg, aw, false, &a);
+
+   mir_value_t sum = MIR_NULL_VALUE;
+   for (unsigned i = 0; i < a.n; i++) {
+      if (mir_is_null(a.c[i]))
+         continue;
+      mir_value_t bits = CRV3(g, CRV_OP_UNARY, g->crv_ctx,
+                              vlog_crv_int(g, CRV_POPCNT), a.c[i]);
+      sum = mir_is_null(sum) ? bits
+         : CRV5(g, CRV_OP_BINARY, g->crv_ctx, vlog_crv_int(g, CRV_ADD), sum,
+                bits, vlog_crv_flags(g, 32, true));
+   }
+
+   if (mir_is_null(sum))
+      sum = CRV3(g, CRV_OP_CONST, g->crv_ctx, vlog_crv_int(g, 0),
+                 vlog_crv_flags(g, 32, true));
+   return sum;
+}
+
+static void vlog_crv_w_single(vlog_gen_t *g, mir_value_t bit, crv_wide_t *out,
+                              unsigned width, bool is_signed)
+{
+   // A one bit or narrow node as the low chunk of a value
+   vlog_crv_w_zero(out, 64);
+   out->c[0] = CRV3(g, CRV_OP_CAST, g->crv_ctx, bit,
+                    vlog_crv_flags(g, 64, false));
+   (void)is_signed;
+   vlog_crv_w_resize(g, out, width, false);
+}
+
+static void vlog_crv_wide_expr(vlog_gen_t *g, vlog_node_t v, unsigned width,
+                               bool is_signed, crv_wide_t *out)
+{
+   // The value of an expression extended or truncated to this width in the
+   // context of this signedness: chunks of 64 bits
+
+   const unsigned own = vlog_crv_width(g, v);
+   const bool own_signed = vlog_crv_signed(g, v);
+
+   const unsigned saved_width = g->crv_width;
+   const bool saved_signed = g->crv_signed;
+   g->crv_width = width;
+   g->crv_signed = is_signed;
+
+   if (vlog_crv_is_state(g, v) && own > 64) {
+      vlog_crv_w_from_value(g, vlog_lower_rvalue(g, v), own, out);
+      vlog_crv_w_resize(g, out, width, is_signed);
+      goto done;
+   }
+
+   if (!vlog_crv_needs_wide(g, v)) {
+      // Narrow: extend the node of the solver
+      mir_value_t node = vlog_crv_expr(g, v, 64, is_signed);
+      vlog_crv_w_zero(out, 64);
+      out->c[0] = CRV3(g, CRV_OP_CAST, g->crv_ctx, node,
+                       vlog_crv_flags(g, 64, false));
+      vlog_crv_w_resize(g, out, width, is_signed);
+      goto done;
+   }
+
+   switch (vlog_kind(v)) {
+   case V_REF:
+   case V_MEMBER_REF:
+      vlog_crv_w_from_var(g, v, out);
+      vlog_crv_w_resize(g, out, width, is_signed);
+      break;
+   case V_BINARY:
+      {
+         vlog_node_t left = vlog_left(v), right = vlog_right(v);
+         const unsigned lw = vlog_crv_width(g, left);
+         const unsigned rw = vlog_crv_width(g, right);
+         const bool ls = vlog_crv_signed(g, left);
+         const bool rs = vlog_crv_signed(g, right);
+
+         switch (vlog_subkind(v)) {
+         case V_BINARY_LOG_EQ:
+         case V_BINARY_CASE_EQ:
+         case V_BINARY_LOG_NEQ:
+         case V_BINARY_CASE_NEQ:
+         case V_BINARY_LT:
+         case V_BINARY_LEQ:
+         case V_BINARY_GT:
+         case V_BINARY_GEQ:
+            {
+               const unsigned w = MAX(lw, rw);
+               const bool s = ls && rs;
+               crv_wide_t a, b;
+               vlog_crv_wide_expr(g, left, w, s, &a);
+               vlog_crv_wide_expr(g, right, w, s, &b);
+
+               crv_binary_t op;
+               switch (vlog_subkind(v)) {
+               case V_BINARY_LOG_EQ:
+               case V_BINARY_CASE_EQ:   op = CRV_EQ; break;
+               case V_BINARY_LOG_NEQ:
+               case V_BINARY_CASE_NEQ:  op = CRV_NE; break;
+               case V_BINARY_LT:        op = CRV_LT; break;
+               case V_BINARY_LEQ:       op = CRV_LE; break;
+               case V_BINARY_GT:        op = CRV_GT; break;
+               default:                 op = CRV_GE; break;
+               }
+
+               vlog_crv_w_single(g, vlog_crv_w_cmp(g, op, &a, &b, s), out,
+                                 width, is_signed);
+            }
+            break;
+         case V_BINARY_SHIFT_LL:
+         case V_BINARY_SHIFT_LA:
+         case V_BINARY_SHIFT_RL:
+         case V_BINARY_SHIFT_RA:
+            {
+               const unsigned w = MAX(width, lw);
+               const bool arith = vlog_subkind(v) == V_BINARY_SHIFT_RA
+                  && ls && is_signed;
+               const bool left_shift = vlog_subkind(v) == V_BINARY_SHIFT_LL
+                  || vlog_subkind(v) == V_BINARY_SHIFT_LA;
+
+               vlog_crv_wide_expr(g, left, w, ls && is_signed, out);
+
+               int64_t k;
+               if (vlog_get_const(right, &k) && k >= 0)
+                  vlog_crv_w_shift_const(g, out, k, left_shift, arith);
+               else {
+                  crv_wide_t amount;
+                  vlog_crv_wide_expr(g, right, MAX(rw, 64), false, &amount);
+                  vlog_crv_w_shift_var(g, out, &amount, left_shift, arith);
+               }
+
+               vlog_crv_w_resize(g, out, width, is_signed);
+            }
+            break;
+         case V_BINARY_EXP:
+            {
+               int64_t base;
+               if (!vlog_get_const(left, &base) || base < 1
+                   || (base & (base - 1)) != 0 || base > 2)
+                  fatal_at(vlog_loc(v), "sorry, only the powers of 2 are "
+                           "supported in a constraint");
+
+               const unsigned w = MAX(width, MAX(lw, 32));
+               vlog_crv_w_zero(out, w);
+               out->c[0] = vlog_crv_w_const(g, 1);
+               if (base == 2) {
+                  crv_wide_t amount;
+                  vlog_crv_wide_expr(g, right, MAX(rw, 64), false, &amount);
+                  vlog_crv_w_shift_var(g, out, &amount, true, false);
+               }
+               vlog_crv_w_resize(g, out, width, is_signed);
+            }
+            break;
+         case V_BINARY_LOG_AND:
+         case V_BINARY_LOG_OR:
+            // Logical operators have narrow operands: not reached
+            fatal_at(vlog_loc(v), "sorry, this operator is not supported in "
+                     "a constraint");
+         default:
+            {
+               const unsigned w = MAX(width, MAX(lw, rw));
+               const bool s = ls && rs && is_signed;
+               crv_wide_t b;
+               vlog_crv_wide_expr(g, left, w, s, out);
+               vlog_crv_wide_expr(g, right, w, s, &b);
+               vlog_crv_w_arith(g, v, w, s, out, &b);
+               vlog_crv_w_resize(g, out, width, is_signed);
+            }
+            break;
+         }
+      }
+      break;
+   case V_UNARY:
+      {
+         vlog_node_t arg = vlog_value(v);
+         switch (vlog_subkind(v)) {
+         case V_UNARY_IDENTITY:
+            vlog_crv_wide_expr(g, arg, width, is_signed, out);
+            break;
+         case V_UNARY_NEG:
+         case V_UNARY_BITNEG:
+            {
+               const unsigned w = MAX(own, width);
+               vlog_crv_wide_expr(g, arg, w, is_signed, out);
+               if (vlog_subkind(v) == V_UNARY_NEG) {
+                   crv_wide_t zero;
+                   vlog_crv_w_zero(&zero, w);
+                   vlog_crv_w_resolve(g, &zero);
+                   vlog_crv_w_addsub(g, &zero, out, true);
+                   vlog_crv_w_copy_chunks(out, &zero);
+               }
+               else {
+                  for (unsigned i = 0; i < out->n; i++)
+                     out->c[i] = CRV3(g, CRV_OP_UNARY, g->crv_ctx,
+                                      vlog_crv_int(g, CRV_INV),
+                                      vlog_crv_w_mat(g, out->c[i]));
+                  vlog_crv_w_mask(g, out);
+               }
+               vlog_crv_w_resize(g, out, width, is_signed);
+            }
+            break;
+         default:
+            {
+               // Reduction: one bit
+               mir_value_t bit = vlog_crv_w_reduce(g, arg, v);
+               vlog_crv_w_single(g, bit, out, width, is_signed);
+            }
+            break;
+         }
+      }
+      break;
+   case V_COND_EXPR:
+      {
+         const unsigned w = MAX(own, width);
+         mir_value_t test = vlog_crv_bool(g, vlog_value(v));
+         crv_wide_t b;
+         vlog_crv_wide_expr(g, vlog_left(v), w, is_signed, out);
+         vlog_crv_wide_expr(g, vlog_right(v), w, is_signed, &b);
+         vlog_crv_w_resolve(g, out);
+         vlog_crv_w_resolve(g, &b);
+         vlog_crv_w_cond(g, test, out, &b);
+         vlog_crv_w_resize(g, out, width, is_signed);
+      }
+      break;
+   case V_CONCAT:
+      {
+         const int nparams = vlog_params(v);
+         vlog_crv_w_zero(out, own);
+         unsigned shift = own;
+         for (int i = 0; i < nparams; i++) {
+            vlog_node_t p = vlog_param(v, i);
+            const unsigned pw = vlog_crv_width(g, p);
+            shift -= pw;
+
+            crv_wide_t part;
+            vlog_crv_wide_expr(g, p, pw, false, &part);
+            vlog_crv_w_resize(g, &part, own, false);
+            vlog_crv_w_shift_const(g, &part, shift, true, false);
+            for (unsigned j = 0; j < out->n; j++)
+               out->c[j] = vlog_crv_w_or(g, out->c[j], part.c[j]);
+         }
+         vlog_crv_w_resize(g, out, width, false);
+      }
+      break;
+   case V_BIT_SELECT:
+   case V_PART_SELECT:
+      {
+         vlog_node_t base = vlog_value(v);
+         const unsigned bw = vlog_crv_width(g, base);
+         vlog_crv_wide_expr(g, base, bw, false, out);
+
+         int64_t left, right;
+         if (vlog_kind(v) == V_BIT_SELECT) {
+            int64_t index;
+            if (vlog_get_const(vlog_param(v, 0), &index) && index >= 0)
+               vlog_crv_w_shift_const(g, out, index, false, false);
+            else {
+               crv_wide_t amount;
+               vlog_crv_wide_expr(g, vlog_param(v, 0),
+                                  MAX(vlog_crv_width(g, vlog_param(v, 0)), 64),
+                                  false, &amount);
+               vlog_crv_w_shift_var(g, out, &amount, false, false);
+            }
+         }
+         else if (vlog_subkind(v) != V_RANGE_CONST && vlog_has_right(v)
+                  && vlog_get_const(vlog_right(v), &right) && right > 0) {
+            // Indexed part select with a start only known to the solver
+            crv_wide_t amount;
+            vlog_crv_wide_expr(g, vlog_left(v),
+                               MAX(vlog_crv_width(g, vlog_left(v)), 64), false,
+                               &amount);
+            if (vlog_subkind(v) == V_RANGE_NEG) {
+               crv_wide_t span;
+               vlog_crv_w_zero(&span, amount.width);
+               span.c[0] = vlog_crv_w_const(g, right - 1);
+               vlog_crv_w_resolve(g, &span);
+               vlog_crv_w_resolve(g, &amount);
+               vlog_crv_w_addsub(g, &amount, &span, true);
+            }
+            vlog_crv_w_shift_var(g, out, &amount, false, false);
+         }
+         else if (vlog_get_const(vlog_left(v), &left) && vlog_has_right(v)
+                  && vlog_get_const(vlog_right(v), &right)
+                  && vlog_subkind(v) == V_RANGE_CONST)
+            vlog_crv_w_shift_const(g, out, MIN(left, right), false, false);
+         else
+            fatal_at(vlog_loc(v), "sorry, part select bounds must be "
+                     "constant in a constraint");
+
+         vlog_crv_w_resize(g, out, own, false);
+         vlog_crv_w_resize(g, out, width, false);
+      }
+      break;
+   case V_CAST:
+      {
+         vlog_node_t arg = vlog_value(v);
+         const unsigned aw = vlog_crv_width(g, arg);
+         const bool as = vlog_crv_signed(g, arg);
+         vlog_crv_wide_expr(g, arg, aw, as, out);
+         vlog_crv_w_resize(g, out, own, as);
+         vlog_crv_w_resize(g, out, width, is_signed && own_signed);
+      }
+      break;
+   case V_INSIDE:
+      vlog_crv_w_single(g, vlog_crv_wide_inside(g, v), out, width, is_signed);
+      break;
+   case V_DIST:
+      vlog_crv_w_single(g, vlog_crv_wide_dist(g, v), out, width, is_signed);
+      break;
+   case V_SYS_FCALL:
+      {
+         const crv_count_t count = vlog_crv_bit_count(v);
+         mir_value_t bits = vlog_crv_w_popcount(g, vlog_param(v, 0));
+         mir_value_t node = bits;
+         if (count != CRV_COUNT_ONES) {
+            mir_value_t one = CRV3(g, CRV_OP_CONST, g->crv_ctx,
+                                   vlog_crv_int(g, 1),
+                                   vlog_crv_flags(g, 32, true));
+            node = CRV5(g, CRV_OP_BINARY, g->crv_ctx,
+                        vlog_crv_int(g, count == CRV_COUNT_ONEHOT
+                                     ? CRV_EQ : CRV_LE),
+                        bits, one, vlog_crv_flags(g, 1, false));
+            vlog_crv_w_single(g, node, out, width, is_signed);
+         }
+         else {
+            vlog_crv_w_single(g, CRV3(g, CRV_OP_CAST, g->crv_ctx, node,
+                                      vlog_crv_flags(g, 32, false)),
+                              out, width, is_signed);
+         }
+      }
+      break;
+   default:
+      fatal_at(vlog_loc(v), "sorry, this expression is not supported in a "
+               "constraint on a value wider than 64 bits");
+   }
+
+ done:
+   g->crv_width = saved_width;
+   g->crv_signed = saved_signed;
+}
+
+static mir_value_t vlog_crv_wide_node(vlog_gen_t *g, vlog_node_t v,
+                                      unsigned width, bool is_signed)
+{
+   // An expression which needs the chunks of a wide value as a single node
+   // of 64 bits or less
+
+   if (width > 64)
+      fatal_at(vlog_loc(v), "sorry, values wider than 64 bits are not "
+               "supported in this constraint");
+
+   const unsigned own = vlog_crv_width(g, v);
+   crv_wide_t w;
+   vlog_crv_wide_expr(g, v, MAX(own, 64), vlog_crv_signed(g, v), &w);
+   mir_value_t node = vlog_crv_w_mat(g, w.c[0]);
+
+   // Narrower than the context: the low bits are the value
+   return vlog_crv_cast(g, node, 64, false, width, is_signed);
+}
+
+static mir_value_t vlog_crv_wide_bool(vlog_gen_t *g, vlog_node_t v)
+{
+   const unsigned width = vlog_crv_width(g, v);
+   crv_wide_t w;
+   vlog_crv_wide_expr(g, v, width, vlog_crv_signed(g, v), &w);
+   return vlog_crv_w_any(g, &w, 0);
+}
+
+static mir_value_t vlog_crv_wide_range(vlog_gen_t *g, vlog_node_t left,
+                                       vlog_node_t right, unsigned width,
+                                       bool is_signed, crv_wide_t *a)
+{
+   // One bit: the argument is in the range
+   mir_value_t ge = MIR_NULL_VALUE, le = MIR_NULL_VALUE;
+   if (vlog_kind(left) != V_DOLLAR) {
+      crv_wide_t lo, c;
+      vlog_crv_wide_expr(g, left, width, is_signed, &lo);
+      vlog_crv_w_copy_chunks(&c, a);
+      ge = vlog_crv_w_cmp(g, CRV_GE, &c, &lo, is_signed);
+   }
+   if (vlog_kind(right) != V_DOLLAR) {
+      crv_wide_t hi, c;
+      vlog_crv_wide_expr(g, right, width, is_signed, &hi);
+      vlog_crv_w_copy_chunks(&c, a);
+      le = vlog_crv_w_cmp(g, CRV_LE, &c, &hi, is_signed);
+   }
+
+   if (mir_is_null(ge) && mir_is_null(le))
+      return vlog_crv_w_true(g, true);
+   else if (mir_is_null(ge))
+      return le;
+   else if (mir_is_null(le))
+      return ge;
+   return vlog_crv_w_bit(g, CRV_LOG_AND, ge, le);
+}
+
+static void vlog_crv_wide_item(vlog_gen_t *g, vlog_node_t item, unsigned width,
+                               bool is_signed, crv_wide_t *a,
+                               mir_value_t *cond)
+{
+   // One bit: the argument is in the set item
+   if (vlog_kind(item) == V_INSIDE_RANGE)
+      *cond = vlog_crv_wide_range(g, vlog_left(item), vlog_right(item), width,
+                                  is_signed, a);
+   else {
+      crv_wide_t x, y;
+      vlog_crv_wide_expr(g, item, width, is_signed, &x);
+      vlog_crv_w_copy_chunks(&y, a);
+      *cond = vlog_crv_w_cmp(g, CRV_EQ, &y, &x, is_signed);
+   }
+}
+
+static void vlog_crv_inside_type(vlog_gen_t *g, vlog_node_t v, unsigned *width,
+                                 bool *is_signed)
+{
+   vlog_node_t arg = vlog_value(v);
+
+   *width = vlog_crv_width(g, arg);
+   *is_signed = vlog_crv_signed(g, arg);
+
+   const int nparams = vlog_params(v);
+   for (int i = 0; i < nparams; i++) {
+      vlog_node_t item = vlog_param(v, i);
+      if (vlog_kind(item) == V_INSIDE_RANGE) {
+         *width = MAX(*width, vlog_crv_width(g, vlog_left(item)));
+         *width = MAX(*width, vlog_crv_width(g, vlog_right(item)));
+         *is_signed &= vlog_crv_signed(g, vlog_left(item))
+            && vlog_crv_signed(g, vlog_right(item));
+      }
+      else if (vlog_crv_is_array_ref(item))
+         fatal_at(vlog_loc(item), "sorry, an array in a set with a value "
+                  "wider than 64 bits is not supported in a constraint");
+      else {
+         *width = MAX(*width, vlog_crv_width(g, item));
+         *is_signed &= vlog_crv_signed(g, item);
+      }
+   }
+}
+
+static mir_value_t vlog_crv_wide_inside(vlog_gen_t *g, vlog_node_t v)
+{
+   unsigned width;
+   bool is_signed;
+   vlog_crv_inside_type(g, v, &width, &is_signed);
+
+   crv_wide_t a;
+   vlog_crv_wide_expr(g, vlog_value(v), width, is_signed, &a);
+   vlog_crv_w_resolve(g, &a);
+
+   mir_value_t acc = MIR_NULL_VALUE;
+   const int nparams = vlog_params(v);
+   for (int i = 0; i < nparams; i++) {
+      mir_value_t cond;
+      vlog_crv_wide_item(g, vlog_param(v, i), width, is_signed, &a, &cond);
+      acc = mir_is_null(acc) ? cond
+         : vlog_crv_w_bit(g, CRV_LOG_OR, acc, cond);
+   }
+
+   return mir_is_null(acc) ? vlog_crv_w_true(g, false) : acc;
+}
+
+static void vlog_crv_wide_dist_parts(vlog_gen_t *g, vlog_node_t v,
+                                     mir_value_t *pick, mir_value_t *impls)
+{
+   // The weights choose among the items with a hidden variable: the item
+   // chosen implies that the argument is in it
+
+   vlog_node_t arg = vlog_value(v);
+   const unsigned width = vlog_crv_width(g, arg);
+   const bool is_signed = vlog_crv_signed(g, arg);
+
+   const int nparams = vlog_params(v);
+
+   static int dist_serial = 0;
+   mir_value_t key = vlog_crv_int(g, 0x7d157000 + dist_serial++);
+   mir_value_t zero = vlog_crv_int(g, 0);
+   mir_value_t flags = vlog_crv_flags(g, 32, false);
+   CRV6(g, CRV_OP_VAR, g->crv_ctx, zero, key, zero, flags, vlog_crv_int(g, 1));
+   mir_value_t sel = CRV5(g, CRV_OP_REF, g->crv_ctx, zero, key, zero, flags);
+
+   mir_value_t dist = CRV1(g, CRV_OP_DIST_NEW, g->crv_ctx);
+
+   crv_wide_t a;
+   vlog_crv_wide_expr(g, arg, width, is_signed, &a);
+   vlog_crv_w_resolve(g, &a);
+
+   mir_value_t acc = MIR_NULL_VALUE;
+   for (int i = 0; i < nparams; i++) {
+      vlog_node_t item = vlog_param(v, i);
+
+      mir_value_t weight =
+         vlog_crv_to_offset(g, vlog_lower_rvalue(g, vlog_delay(item)));
+
+      // A weight for each value of a range needs to know how many there are
+      if (vlog_subkind(item) == V_DIST_PER_VALUE && vlog_has_right(item)) {
+         int64_t lo, hi;
+         if (!vlog_get_const(vlog_left(item), &lo)
+             || !vlog_get_const(vlog_right(item), &hi))
+            fatal_at(vlog_loc(item), "sorry, a range of values wider than 64 "
+                     "bits needs constant bounds for := in dist");
+
+         weight = mir_build_mul(g->mu, mir_offset_type(g->mu), weight,
+                                vlog_crv_int(g, hi - lo + 1));
+      }
+
+      CRV5(g, CRV_OP_DIST_PER_RANGE, g->crv_ctx, dist, vlog_crv_int(g, i),
+           vlog_crv_int(g, i), weight);
+
+      mir_value_t cond;
+      if (vlog_has_right(item))
+         cond = vlog_crv_wide_range(g, vlog_left(item), vlog_right(item),
+                                    width, is_signed, &a);
+      else
+         vlog_crv_wide_item(g, vlog_left(item), width, is_signed, &a, &cond);
+
+      mir_value_t me = CRV5(g, CRV_OP_BINARY, g->crv_ctx,
+                            vlog_crv_int(g, CRV_EQ), sel,
+                            CRV3(g, CRV_OP_CONST, g->crv_ctx, vlog_crv_int(g, i),
+                                 flags),
+                            vlog_crv_flags(g, 1, false));
+      mir_value_t imp = CRV5(g, CRV_OP_BINARY, g->crv_ctx,
+                             vlog_crv_int(g, CRV_IMPLIES), me, cond,
+                             vlog_crv_flags(g, 1, false));
+      acc = mir_is_null(acc) ? imp : vlog_crv_and(g, acc, imp);
+   }
+
+   // The weights apply to the choice so it comes first
+   if (vlog_crv_is_wide_var(g, arg)) {
+      vlog_node_t decl = vlog_ref(arg);
+      for (unsigned i = 0; i < vlog_crv_nchunks(width); i++)
+         CRV5(g, CRV_OP_SOLVE_BEFORE, g->crv_ctx, zero, key,
+              vlog_crv_object(g, arg), vlog_crv_chunk_key(g, decl, 0, i));
+   }
+
+   *pick = CRV3(g, CRV_OP_DIST, g->crv_ctx, sel, dist);
+   *impls = acc;
+}
+
+static mir_value_t vlog_crv_wide_dist(vlog_gen_t *g, vlog_node_t v)
+{
+   mir_value_t pick, impls;
+   vlog_crv_wide_dist_parts(g, v, &pick, &impls);
+   return vlog_crv_and(g, impls, pick);
+}
+
 static mir_value_t vlog_crv_bool(vlog_gen_t *g, vlog_node_t v)
 {
    const unsigned width = vlog_crv_width(g, v);
+   if (width > 64 && !vlog_crv_is_state(g, v))
+      return vlog_crv_wide_bool(g, v);
    const bool is_signed = vlog_crv_signed(g, v);
 
    mir_value_t node = vlog_crv_expr(g, v, width, is_signed);
@@ -21132,6 +22346,9 @@ static mir_value_t vlog_crv_set_item(vlog_gen_t *g, mir_value_t set,
 
 static mir_value_t vlog_crv_inside(vlog_gen_t *g, vlog_node_t v)
 {
+   if (vlog_crv_inside_is_wide(g, v))
+      return vlog_crv_wide_node(g, v, 1, false);
+
    vlog_node_t arg = vlog_value(v);
 
    unsigned width = vlog_crv_width(g, arg);
@@ -21169,6 +22386,9 @@ static mir_value_t vlog_crv_inside(vlog_gen_t *g, vlog_node_t v)
 
 static mir_value_t vlog_crv_dist(vlog_gen_t *g, vlog_node_t v)
 {
+   if (vlog_crv_width(g, vlog_value(v)) > 64)
+      return vlog_crv_wide_node(g, v, 1, false);
+
    vlog_node_t arg = vlog_value(v);
 
    const unsigned width = vlog_crv_width(g, arg);
@@ -21398,6 +22618,9 @@ static mir_value_t vlog_crv_expr(vlog_gen_t *g, vlog_node_t v, unsigned width,
 
    const unsigned own = vlog_crv_width(g, v);
    const bool own_signed = vlog_crv_signed(g, v);
+
+   if (vlog_crv_needs_wide(g, v))
+      return vlog_crv_wide_node(g, v, width, is_signed);
 
    const unsigned saved_width = g->crv_width;
    const bool saved_signed = g->crv_signed;
@@ -21755,6 +22978,13 @@ static void vlog_crv_solve_items(vlog_gen_t *g, vlog_node_t v,
                };
             }
          }
+         else if (vlog_crv_is_wide_var(g, v)) {
+            const unsigned n = vlog_crv_nchunks(vlog_size(vlog_type(decl)));
+            for (unsigned i = 0; i < n && *count < CRV_MAX_LEAVES; i++)
+               items[(*count)++] = (crv_solve_item_t){
+                  vlog_crv_object(g, v), vlog_crv_chunk_key(g, decl, 0, i)
+               };
+         }
          else if (*count < CRV_MAX_LEAVES)
             items[(*count)++] = (crv_solve_item_t){
                vlog_crv_object(g, v), vlog_crv_key(g, decl)
@@ -21767,7 +22997,15 @@ static void vlog_crv_solve_items(vlog_gen_t *g, vlog_node_t v,
          // and the order only affects the distribution of values
          vlog_node_t type = vlog_get_type(vlog_value(v));
          if (type != NULL && vlog_kind(type) == V_CLASS_DECL) {
-            if (*count < CRV_MAX_LEAVES)
+            if (vlog_crv_is_wide_var(g, v)) {
+               vlog_node_t decl = vlog_ref(v);
+               const unsigned n = vlog_crv_nchunks(vlog_size(vlog_type(decl)));
+               for (unsigned i = 0; i < n && *count < CRV_MAX_LEAVES; i++)
+                  items[(*count)++] = (crv_solve_item_t){
+                     vlog_crv_object(g, v), vlog_crv_chunk_key(g, decl, 0, i)
+                  };
+            }
+            else if (*count < CRV_MAX_LEAVES)
                items[(*count)++] = (crv_solve_item_t){
                   vlog_crv_object(g, v), vlog_crv_key(g, vlog_ref(v))
                };
@@ -22226,7 +23464,18 @@ static void vlog_crv_items(vlog_gen_t *g, vlog_node_t v, mir_value_t guard,
       }
       else {
          const bool soft = !!(vlog_flags(v) & VLOG_F_SOFT);
-         vlog_crv_emit(g, guard, vlog_crv_bool(g, vlog_value(v)), soft, sink);
+         vlog_node_t e = vlog_value(v);
+         if (vlog_kind(e) == V_DIST && vlog_crv_width(g, vlog_value(e)) > 64
+             && !vlog_crv_is_state(g, e)) {
+            // The choice is a constraint of its own to have the weights
+            mir_value_t pick, impls;
+            vlog_crv_wide_dist_parts(g, e, &pick, &impls);
+            vlog_crv_emit(g, guard, pick, soft, sink);
+            if (!mir_is_null(impls))
+               vlog_crv_emit(g, guard, impls, soft, sink);
+         }
+         else
+            vlog_crv_emit(g, guard, vlog_crv_bool(g, e), soft, sink);
       }
       break;
    case V_CONS_IMPLY:
@@ -22868,8 +24117,14 @@ static void vlog_crv_build_prop(vlog_gen_t *g, mir_value_t this, mir_value_t ctx
 
    const type_info_t *ti = vlog_type_info(g, vlog_type(d));
    if (wide) {
-      CRV6(g, CRV_OP_VAR, ctx, obj, key, vlog_crv_int(g, 0),
-           vlog_crv_flags(g, 1, false), is_free);
+      // One variable for each chunk of 64 bits
+      mir_value_t full = mir_build_load(
+         g->mu, mir_build_link_var(g->mu, this,
+                                   vlog_prop_name(g->crv_class, d), ti->type));
+      for (unsigned i = 0; i * 64 < ti->size; i++)
+         CRV6(g, CRV_OP_VAR, ctx, obj, vlog_crv_chunk_key(g, d, 0, i),
+              vlog_crv_w_chunk(g, full, i),
+              vlog_crv_flags(g, MIN(64, ti->size - i * 64), false), is_free);
       return;
    }
 
@@ -23051,7 +24306,8 @@ static void vlog_crv_store_prop(vlog_gen_t *g, mir_value_t this, mir_value_t ctx
 
    const type_info_t *ti = vlog_type_info(g, vlog_type(d));
 
-   mir_value_t var = CRV3(g, CRV_OP_FIND_FREE, ctx, obj, key);
+   mir_value_t var = CRV3(g, CRV_OP_FIND_FREE, ctx, obj,
+                          wide ? vlog_crv_chunk_key(g, d, 0, 0) : key);
 
    mir_block_t store_bb = mir_add_block(g->mu);
    mir_build_cond(g->mu, mir_build_cmp(g->mu, MIR_CMP_GEQ, var,
@@ -23060,8 +24316,30 @@ static void vlog_crv_store_prop(vlog_gen_t *g, mir_value_t this, mir_value_t ctx
    mir_set_cursor(g->mu, store_bb, MIR_APPEND);
 
    mir_value_t elem;
-   if (wide)
-      elem = vlog_crv_wide_random(g, ti);
+   if (wide) {
+      mir_type_t t_int64 = mir_int_type(g->mu, INT64_MIN, INT64_MAX);
+      mir_type_t t_vec64 = mir_vec2_type(g->mu, 64, false);
+      mir_type_t t_wide = mir_vec2_type(g->mu, ti->size, false);
+
+      mir_value_t result = vlog_lower_zero(g, t_wide);
+      for (unsigned i = 0; i * 64 < ti->size; i++) {
+         mir_value_t cv = i == 0 ? var
+            : CRV3(g, CRV_OP_FIND_FREE, ctx, obj,
+                   vlog_crv_chunk_key(g, d, 0, i));
+         mir_value_t value = CRV2(g, CRV_OP_VALUE, ctx, cv);
+         mir_value_t vec = mir_build_cast(g->mu, t_vec64,
+                                          mir_build_cast(g->mu, t_int64,
+                                                         value));
+         mir_value_t part = vlog_lower_cast(g, t_wide, vec);
+         if (i > 0) {
+            mir_value_t amount = vlog_lower_cast(
+               g, t_wide, mir_const_vec(g->mu, t_vec64, i * 64, 0));
+            part = mir_build_binary(g->mu, MIR_VEC_SLL, t_wide, part, amount);
+         }
+         result = mir_build_binary(g->mu, MIR_VEC_BIT_OR, t_wide, result, part);
+      }
+      elem = vlog_lower_cast(g, ti->type, result);
+   }
    else
       elem = vlog_crv_from_offset(g, CRV2(g, CRV_OP_VALUE, ctx, var),
                                   ti->type);
