@@ -2556,3 +2556,5 @@ svprogparam1 verilog
 svportpat1      verilog
 svporthier1     verilog
 svportdt1       verilog
+svenumfill1     verilog
+svinsidefill1   verilog

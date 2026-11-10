@@ -215,6 +215,7 @@ static mir_value_t vlog_lower_decl_ptr(vlog_gen_t *g, vlog_node_t decl);
 static mir_value_t vlog_crv_guard_null(vlog_gen_t *g, mir_value_t base,
                                           vlog_node_t where);
 static bool vlog_is_ref_property(vlog_node_t decl);
+static bool vlog_is_fill_literal(vlog_node_t v);
 static bool vlog_is_const_ref(vlog_node_t port);
 static mir_type_t vlog_ref_cell_type(mir_unit_t *mu, const type_info_t *ti);
 static mir_value_t vlog_read_ref_cell(vlog_gen_t *g, mir_value_t cell,
@@ -23769,7 +23770,10 @@ static mir_value_t vlog_inside_match(vlog_gen_t *g, vlog_node_t item,
    if (vlog_kind(item) == V_NUMBER && !number_is_defined(vlog_number(item)))
       op = MIR_VEC_CASEX_EQ;
 
-   mir_value_t cmp = vlog_lower_cast(g, t_vec, vlog_lower_rvalue(g, item));
+   // An unbased unsized literal fills the width of the comparison (5.7.1)
+   mir_value_t cmp = vlog_is_fill_literal(item)
+      ? vlog_lower_with_context(g, item, t_vec)
+      : vlog_lower_cast(g, t_vec, vlog_lower_rvalue(g, item));
    return mir_build_binary(g->mu, op, t_vec, value, cmp);
 }
 

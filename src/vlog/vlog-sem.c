@@ -1007,8 +1007,9 @@ static void vlog_check_enum_decl(vlog_node_t v)
             after_unknown = true;
       }
 
-      if (vlog_kind(value) != V_NUMBER)
-         continue;
+      if (vlog_kind(value) != V_NUMBER
+          || (vlog_flags(value) & VLOG_F_FILL))
+         continue;   // An unbased unsized literal fills the base type
 
       number_t num = vlog_number(value);
 
