@@ -2595,3 +2595,4 @@ svmacroorder1   verilog
 svcrvwide2      verilog
 svcrvwide3      verilog
 svcrvmask1      verilog
+svcrvwide4      verilog
