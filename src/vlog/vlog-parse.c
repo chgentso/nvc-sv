@@ -179,6 +179,7 @@ static bool        subr_automatic = false;
 static vlog_node_t current_func = NULL;
 static vlog_node_t current_module = NULL;
 static int gen_dead = 0;   // Inside a generate branch which is not taken
+static vlog_node_t param_target;   // Module whose parameters are assigned
 static vlog_node_t module_root = NULL;
 static unsigned    gen_constructs = 0;    // Generate constructs in this scope
 static unsigned    gen_construct = 0;     // Number of the current construct
@@ -2045,7 +2046,13 @@ static vlog_node_t p_data_type(void)
 
          if (peek() == tHASH) {
             vlog_node_t list = vlog_new(V_INST_LIST);
+
+            // A type parameter of the interface takes a data type
+            vlog_node_t saved_target = param_target;
+            param_target = iface != NULL && vlog_kind(iface) == V_MODULE
+               ? iface : NULL;
             p_parameter_value_assignment(list);
+            param_target = saved_target;
 
             const int nparams = vlog_params(list);
             for (int i = 0; i < nparams; i++)
@@ -17588,6 +17595,54 @@ static bool spec_eval(vlog_node_t v, const spec_env_t *env, int nenv,
             return false;
          }
       }
+   case V_SYS_FCALL:
+      if (vlog_ident(v) == ident_new("$bits") && vlog_params(v) == 1) {
+         // The width of a type or of an object with a fixed size
+         vlog_node_t arg = vlog_param(v, 0);
+         vlog_node_t t = NULL;
+         switch (vlog_kind(arg)) {
+         case V_DATA_TYPE:
+            t = arg;
+            break;
+         case V_REF:
+            if (vlog_has_ref(arg)) {
+               vlog_node_t d = vlog_ref(arg);
+               switch (vlog_kind(d)) {
+               case V_TYPE_DECL:
+               case V_ENUM_DECL:
+               case V_STRUCT_DECL:
+               case V_UNION_DECL:
+                  t = d;
+                  break;
+               case V_VAR_DECL:
+               case V_NET_DECL:
+               case V_PORT_DECL:
+                  if (!vlog_is_dynamic_type(vlog_type(d))) {
+                     *result = vlog_size(d) * vlog_size(vlog_type(d));
+                     return *result > 0;
+                  }
+                  break;
+               default:
+                  break;
+               }
+            }
+            break;
+         default:
+            break;
+         }
+
+         if (t != NULL) {
+            while ((vlog_kind(t) == V_TYPE_DECL || vlog_kind(t) == V_ENUM_DECL)
+                   && vlog_has_type(t))
+               t = vlog_type(t);
+
+            if (vlog_kind(t) == V_DATA_TYPE && !vlog_is_dynamic_type(t)) {
+               *result = vlog_size(t);
+               return *result > 0;
+            }
+         }
+      }
+      break;
    default:
       break;
    }

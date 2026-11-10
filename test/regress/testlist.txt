@@ -2575,3 +2575,5 @@ svdpioadyn1     verilog,relaxed,svlib=dpi_test
 svinsidestr1    verilog
 svforeachsel1   verilog
 svconscomma1    verilog
+svvifbits1      verilog
+svvifptype1     verilog

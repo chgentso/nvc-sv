@@ -689,6 +689,26 @@ vlog_node_t vlog_member_decl(vlog_node_t v)
    }
 
    vlog_node_t type = vlog_get_type(vlog_value(v));
+   if (type != NULL && (vlog_kind(type) == V_STRUCT_DECL
+                        || vlog_kind(type) == V_UNION_DECL)) {
+      // The type of the prefix may be that of a parameter of a virtual
+      // interface with a value other than the default used when the name
+      // was looked up
+      const int nfields = vlog_decls(type);
+      for (int i = 0; i < nfields; i++) {
+         if (vlog_decl(type, i) == decl)
+            return decl;
+      }
+
+      for (int i = 0; i < nfields; i++) {
+         vlog_node_t d = vlog_decl(type, i);
+         if (vlog_has_ident(d) && vlog_ident(d) == vlog_ident(decl))
+            return d;
+      }
+
+      return decl;
+   }
+
    if (type == NULL || vlog_kind(type) != V_DATA_TYPE
        || vlog_subkind(type) != DT_VIRTUAL)
       return decl;

@@ -638,8 +638,14 @@ static bool has_parameters(vlog_node_t mod)
 
 static void key_append_type(text_buf_t *tb, vlog_node_t t)
 {
-   while (vlog_kind(t) == V_TYPE_DECL && vlog_has_type(t))
-      t = vlog_type(t);
+   for (;;) {
+      if (vlog_kind(t) == V_REF && vlog_has_ref(t))
+         t = vlog_ref(t);   // A name qualified with a package
+      else if (vlog_kind(t) == V_TYPE_DECL && vlog_has_type(t))
+         t = vlog_type(t);
+      else
+         break;
+   }
 
    switch (vlog_kind(t)) {
    case V_DATA_TYPE:

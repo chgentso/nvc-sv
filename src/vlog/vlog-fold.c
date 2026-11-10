@@ -556,7 +556,9 @@ static vlog_node_t fold_part_select(vlog_node_t v, fold_ctx_t *ctx)
 
 static vlog_node_t fold_const_value(vlog_node_t v, fold_ctx_t *ctx)
 {
-   if (vlog_has_value(v) && !is_data_type(vlog_value(v))) {
+   if (vlog_has_value(v) && !is_data_type(vlog_value(v))
+       && !(vlog_kind(vlog_value(v)) == V_REF && vlog_has_ref(vlog_value(v))
+            && is_data_type(vlog_ref(vlog_value(v))))) {
       vlog_node_t value = fold_const_expr(vlog_value(v), ctx);
       if (value != NULL)
          vlog_set_value(v, value);
