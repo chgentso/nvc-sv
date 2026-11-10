@@ -80,6 +80,61 @@ static bool is_array_query(vlog_node_t v)
    return false;
 }
 
+static fold_state_t get_fold_state(vlog_node_t v, fold_ctx_t *ctx);
+
+static fold_state_t get_ranges_state(vlog_node_t v, fold_ctx_t *ctx)
+{
+   fold_state_t state = FOLD_CONST;
+   const int nranges = vlog_ranges(v);
+   for (int i = 0; i < nranges; i++) {
+      vlog_node_t r = vlog_range(v, i);
+      if (vlog_subkind(r) == V_DIM_UNSIZED || !vlog_has_left(r))
+         continue;
+
+      state = MAX(state, get_fold_state(vlog_left(r), ctx));
+      if (vlog_has_right(r))
+         state = MAX(state, get_fold_state(vlog_right(r), ctx));
+   }
+
+   return state;
+}
+
+static fold_state_t get_type_state(vlog_node_t t, fold_ctx_t *ctx)
+{
+   // A dimension of a type which depends on a parameter that is not known
+   // until the design is elaborated makes the size of the type unknown
+
+   fold_state_t state = FOLD_CONST;
+   switch (vlog_kind(t)) {
+   case V_DATA_TYPE:
+      state = get_ranges_state(t, ctx);
+      if (vlog_has_type(t))
+         state = MAX(state, get_type_state(vlog_type(t), ctx));
+      break;
+   case V_TYPE_DECL:
+   case V_ENUM_DECL:
+      if (vlog_has_type(t))
+         state = get_type_state(vlog_type(t), ctx);
+      break;
+   case V_STRUCT_DECL:
+   case V_UNION_DECL:
+      {
+         const int ndecls = vlog_decls(t);
+         for (int i = 0; i < ndecls; i++) {
+            vlog_node_t m = vlog_decl(t, i);
+            state = MAX(state, get_ranges_state(m, ctx));
+            if (vlog_has_type(m))
+               state = MAX(state, get_type_state(vlog_type(m), ctx));
+         }
+      }
+      break;
+   default:
+      break;
+   }
+
+   return state;
+}
+
 static fold_state_t get_fold_state(vlog_node_t v, fold_ctx_t *ctx)
 {
    switch (vlog_kind(v)) {
@@ -183,8 +238,30 @@ static fold_state_t get_fold_state(vlog_node_t v, fold_ctx_t *ctx)
       {
          if (is_array_query(v)) {
             // The dimensions of a variable do not depend on its value
-            if (vlog_has_static_shape(vlog_param(v, 0)))
-               return FOLD_POSSIBLE;
+            vlog_node_t arg = vlog_param(v, 0);
+            if (vlog_has_static_shape(arg)) {
+               fold_state_t state = FOLD_POSSIBLE;
+               if (vlog_kind(arg) == V_REF && vlog_has_ref(arg)) {
+                  vlog_node_t d = vlog_ref(arg);
+                  switch (vlog_kind(d)) {
+                  case V_TYPE_DECL:
+                  case V_STRUCT_DECL:
+                  case V_UNION_DECL:
+                     state = MAX(state, get_type_state(d, ctx));
+                     break;
+                  case V_VAR_DECL:
+                  case V_NET_DECL:
+                  case V_PORT_DECL:
+                     if (vlog_has_type(d))
+                        state = MAX(state, get_type_state(vlog_type(d), ctx));
+                     state = MAX(state, get_ranges_state(d, ctx));
+                     break;
+                  default:
+                     break;
+                  }
+               }
+               return state;
+            }
 
             ctx->nonconst = v;
             return FOLD_NON_CONST;
