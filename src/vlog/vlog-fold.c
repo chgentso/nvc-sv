@@ -370,6 +370,45 @@ static vlog_node_t fold_const_expr(vlog_node_t v, fold_ctx_t *ctx)
    }
 }
 
+static vlog_node_t fold_pattern_items(vlog_node_t v, fold_ctx_t *ctx)
+{
+   // An assignment pattern has no value that can be returned from a thunk
+   // so fold the expression of each item and keep the pattern
+
+   vlog_node_t copy = vlog_new(V_PATTERN_EXPR);
+   vlog_set_loc(copy, vlog_loc(v));
+   if (vlog_has_type(v))
+      vlog_set_type(copy, vlog_type(v));
+
+   const int nparams = vlog_params(v);
+   for (int i = 0; i < nparams; i++) {
+      vlog_node_t item = vlog_param(v, i);
+
+      vlog_node_t right = vlog_right(item);
+      if (vlog_kind(right) == V_PATTERN_EXPR)
+         right = fold_pattern_items(right, ctx);
+      else {
+         vlog_node_t folded = fold_const_expr(right, ctx);
+         if (folded == NULL)
+            return NULL;
+         right = folded;
+      }
+
+      if (right == NULL)
+         return NULL;
+
+      vlog_node_t it = vlog_new(V_PATTERN_ITEM);
+      vlog_set_subkind(it, vlog_subkind(item));
+      vlog_set_loc(it, vlog_loc(item));
+      if (vlog_has_left(item))
+         vlog_set_left(it, vlog_left(item));
+      vlog_set_right(it, right);
+      vlog_add_param(copy, it);
+   }
+
+   return copy;
+}
+
 static vlog_node_t fold_localparam(vlog_node_t v, fold_ctx_t *ctx)
 {
    vlog_node_t value = vlog_value(v);
@@ -377,7 +416,15 @@ static vlog_node_t fold_localparam(vlog_node_t v, fold_ctx_t *ctx)
    case FOLD_CONST:
       break;
    case FOLD_POSSIBLE:
-      {
+      if (vlog_kind(value) == V_PATTERN_EXPR && vlog_ranges(v) > 0) {
+         vlog_node_t result = fold_pattern_items(value, ctx);
+         if (result == NULL)
+            return v;
+
+         vlog_set_value(v, (value = result));
+         break;
+      }
+      else {
          vlog_node_t result = fold_call_thunk(v, ctx);
          if (result == NULL)
             return v;
