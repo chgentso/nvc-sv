@@ -565,6 +565,25 @@ bool vlog_virtual_pending(vlog_node_t v)
       && vlog_subkind(type) == DT_VIRTUAL;
 }
 
+bool vlog_virtual_chain(vlog_node_t v)
+{
+   // A selection from a member of a virtual interface whose interface was
+   // not declared when the reference was parsed, possibly through elements
+   // and members of structures: nothing is known of its type until then
+
+   switch (vlog_kind(v)) {
+   case V_BIT_SELECT:
+   case V_PART_SELECT:
+      return vlog_virtual_chain(vlog_value(v));
+   case V_MEMBER_REF:
+      if (vlog_has_ref(v))
+         return false;
+      return vlog_virtual_pending(v) || vlog_virtual_chain(vlog_value(v));
+   default:
+      return false;
+   }
+}
+
 static vlog_node_t virtual_find_decl(vlog_node_t v)
 {
    assert(vlog_kind(v) == V_MEMBER_REF || vlog_kind(v) == V_METHOD_CALL);
@@ -626,6 +645,29 @@ static vlog_node_t virtual_find_decl(vlog_node_t v)
    return NULL;
 }
 
+static vlog_node_t chain_member_decl(vlog_node_t v)
+{
+   // A member of a structure selected from a member of a virtual interface
+
+   if (!vlog_virtual_chain(vlog_value(v)))
+      return NULL;
+
+   vlog_node_t type = vlog_get_type(vlog_value(v));
+   if (type == NULL || (vlog_kind(type) != V_STRUCT_DECL
+                        && vlog_kind(type) != V_UNION_DECL))
+      return NULL;
+
+   ident_t id = vlog_ident(v);
+   const int ndecls = vlog_decls(type);
+   for (int i = 0; i < ndecls; i++) {
+      vlog_node_t d = vlog_decl(type, i);
+      if (vlog_has_ident(d) && vlog_ident(d) == id)
+         return d;
+   }
+
+   return NULL;
+}
+
 static vlog_node_t member_decl_or_null(vlog_node_t v)
 {
    if (vlog_has_ref(v))
@@ -633,7 +675,7 @@ static vlog_node_t member_decl_or_null(vlog_node_t v)
    else if (vlog_virtual_pending(v))
       return virtual_find_decl(v);
    else
-      return NULL;
+      return chain_member_decl(v);
 }
 
 vlog_node_t vlog_virtual_decl_or_null(vlog_node_t v)
@@ -680,7 +722,19 @@ vlog_node_t vlog_member_decl(vlog_node_t v)
 
    assert(vlog_kind(v) == V_MEMBER_REF);
 
-   vlog_node_t decl = vlog_has_ref(v) ? vlog_ref(v) : vlog_virtual_decl(v);
+   vlog_node_t decl;
+   if (vlog_has_ref(v))
+      decl = vlog_ref(v);
+   else if (vlog_virtual_pending(v))
+      decl = vlog_virtual_decl(v);
+   else {
+      decl = chain_member_decl(v);
+      if (decl == NULL)
+         fatal_at(vlog_loc(v), "cannot find member %pQ of the element of a "
+                  "virtual interface member", vlog_ident(v));
+      return decl;
+   }
+
    switch (vlog_kind(decl)) {
    case V_NET_DECL:
    case V_VAR_DECL:

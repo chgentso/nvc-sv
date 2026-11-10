@@ -77,6 +77,7 @@ vlog_node_t vlog_virtual_iface(vlog_node_t type);
 vlog_node_t vlog_virtual_decl(vlog_node_t v);
 vlog_node_t vlog_virtual_decl_or_null(vlog_node_t v);
 bool vlog_virtual_pending(vlog_node_t v);
+bool vlog_virtual_chain(vlog_node_t v);
 void vlog_set_design_precision(int log10);
 int vlog_design_precision(void);
 int64_t vlog_time_quantum(unsigned log10);

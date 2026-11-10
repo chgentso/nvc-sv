@@ -387,7 +387,9 @@ static vlog_node_t nested_interface_decl(vlog_node_t iface, ident_t id)
 static void lookup_member(vlog_symtab_t *st, vlog_node_t v)
 {
    vlog_node_t prefix = vlog_value(v), type = vlog_get_type(prefix);
-   if (type == NULL) {
+   if (type == NULL && vlog_virtual_chain(prefix))
+      return;   // Looked up when the interface is known
+   else if (type == NULL) {
       if (error_count() == 0)  // Otherwise was earlier error
          error_at(vlog_loc(v), "sorry, the prefix of %pQ is not supported in "
                   "this kind of hierarchical reference", vlog_ident(v));

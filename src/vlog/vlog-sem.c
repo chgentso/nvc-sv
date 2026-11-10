@@ -2375,8 +2375,13 @@ static type_mask_t vlog_check_member_ref(vlog_node_t v)
       vlog_node_t decl = vlog_virtual_decl_or_null(v);
       return decl != NULL ? get_type_mask(decl) : ~TM_CONST;
    }
-   else if (!vlog_has_ref(v))
-      return TM_ERROR;   // Reported by the lookup
+   else if (!vlog_has_ref(v)) {
+      if (!vlog_virtual_chain(vlog_value(v)))
+         return TM_ERROR;   // Reported by the lookup
+
+      // The structure may be known only when the interface is declared
+      return ~TM_CONST;
+   }
 
    return get_type_mask(vlog_member_decl(v));
 }
