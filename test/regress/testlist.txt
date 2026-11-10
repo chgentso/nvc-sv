@@ -2585,3 +2585,4 @@ vests23         normal,$NVC_MAX_THREADS=16
 svbindscope1    verilog
 svhdlgenidx1    verilog
 svcombglitch1   verilog
+svfmtconcat1    verilog

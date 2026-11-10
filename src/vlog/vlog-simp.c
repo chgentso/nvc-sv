@@ -530,6 +530,44 @@ static vlog_node_t simp_concat(vlog_node_t v)
    return v;
 }
 
+static vlog_node_t simp_string_concat(vlog_node_t v)
+{
+   // A concatenation of string literals is a string literal so it can be
+   // a format string (IEEE 1800-2017 11.4.12, 21.2.1)
+
+   if (vlog_kind(v) != V_CONCAT || vlog_has_value(v))
+      return v;
+
+   const int nparams = vlog_params(v);
+   if (nparams == 0)
+      return v;
+
+   size_t total = 0;
+   for (int i = 0; i < nparams; i++) {
+      vlog_node_t p = vlog_param(v, i);
+      if (vlog_kind(p) != V_STRING || !number_is_defined(vlog_number(p)))
+         return v;
+      total += number_width(vlog_number(p)) / 8;
+   }
+
+   if (total == 0)
+      return v;
+
+   char *text LOCAL = xmalloc(total);
+   size_t pos = 0;
+   for (int i = 0; i < nparams; i++) {
+      number_t n = vlog_number(vlog_param(v, i));
+      const int len = number_width(n) / 8;
+      for (int j = 0; j < len; j++)
+         text[pos++] = number_byte(n, len - 1 - j);
+   }
+
+   vlog_node_t str = vlog_new(V_STRING);
+   vlog_set_number(str, number_from_string(text, total));
+   vlog_set_loc(str, vlog_loc(v));
+   return str;
+}
+
 static vlog_node_t simp_call_args(vlog_node_t v)
 {
    vlog_node_t sub = vlog_ref(v);
@@ -1614,7 +1652,10 @@ static vlog_node_t simp_format_p(vlog_node_t v)
    if (fmt < 0 || fmt >= vlog_params(v))
       return v;
 
-   vlog_node_t str = vlog_param(v, fmt);
+   vlog_node_t str = simp_string_concat(vlog_param(v, fmt));
+   if (str != vlog_param(v, fmt))
+      vlog_set_param(v, fmt, str);
+
    if (vlog_kind(str) != V_STRING)
       return v;
 
