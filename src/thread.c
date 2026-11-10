@@ -1129,7 +1129,7 @@ static void create_workers(int needed)
    while (relaxed_load(&running_threads) < MIN(max_workers, needed)) {
       static int counter = 0;
       thread_name_t name;
-      checked_sprintf(name, THREAD_NAME_LEN, "worker thread %d",
+      checked_sprintf(name, THREAD_NAME_LEN, "worker %d",
                       atomic_add(&counter, 1));
       SCOPED_LOCK(stop_lock);   // Avoid races with stop_world
       nvc_thread_t *thread =
