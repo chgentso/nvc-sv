@@ -97,15 +97,49 @@ static vlog_node_t simp_port_decl(vlog_node_t v, vlog_node_t mod)
 }
 
 static void build_sensitivity(vlog_node_t ctrl, vlog_node_t v, hset_t *set,
+                              bool is_comb);
+
+static void build_target_sensitivity(vlog_node_t ctrl, vlog_node_t t,
+                                     hset_t *set, bool is_comb)
+{
+   // The indices of the target of an assignment are read (9.2.2.2.1)
+
+   switch (vlog_kind(t)) {
+   case V_BIT_SELECT:
+      {
+         const int nparams = vlog_params(t);
+         for (int i = 0; i < nparams; i++)
+            build_sensitivity(ctrl, vlog_param(t, i), set, is_comb);
+      }
+      build_target_sensitivity(ctrl, vlog_value(t), set, is_comb);
+      break;
+   case V_PART_SELECT:
+      build_sensitivity(ctrl, vlog_left(t), set, is_comb);
+      if (vlog_subkind(t) != V_RANGE_CONST)
+         build_sensitivity(ctrl, vlog_right(t), set, is_comb);
+      build_target_sensitivity(ctrl, vlog_value(t), set, is_comb);
+      break;
+   case V_MEMBER_REF:
+      build_target_sensitivity(ctrl, vlog_value(t), set, is_comb);
+      break;
+   default:
+      break;
+   }
+}
+
+static void build_sensitivity(vlog_node_t ctrl, vlog_node_t v, hset_t *set,
                               bool is_comb)
 {
    switch (vlog_kind(v)) {
    case V_NBASSIGN:
    case V_BASSIGN:
+   case V_OP_ASSIGN:
+      if (vlog_has_target(v))
+         build_target_sensitivity(ctrl, vlog_target(v), set, is_comb);
+      // Fall-through
    case V_FORCE:
    case V_UNARY:
    case V_CAST:
-   case V_OP_ASSIGN:
       build_sensitivity(ctrl, vlog_value(v), set, is_comb);
       break;
    case V_BINARY:
@@ -126,6 +160,17 @@ static void build_sensitivity(vlog_node_t ctrl, vlog_node_t v, hset_t *set,
    case V_MEMBER_REF:
    case V_HIER_REF:
       {
+         // A select of a port or local variable of a called subroutine
+         vlog_node_t root = v;
+         while (vlog_kind(root) == V_BIT_SELECT
+                || vlog_kind(root) == V_PART_SELECT
+                || vlog_kind(root) == V_MEMBER_REF)
+            root = vlog_value(root);
+
+         if (v != root && vlog_kind(root) == V_REF && vlog_has_ref(root)
+             && hset_contains(set, vlog_ref(root)))
+            break;
+
          vlog_node_t lsp = vlog_longest_static_prefix(v);
          if (lsp == NULL)
             break;

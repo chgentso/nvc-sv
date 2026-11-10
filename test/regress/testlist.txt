@@ -2565,3 +2565,5 @@ svcovxdollar1   verilog
 svbindgen1      verilog
 svbindinst2     verilog
 svbindrelpath1  verilog
+svcombfuncsel1  verilog
+svcombidx1      verilog
