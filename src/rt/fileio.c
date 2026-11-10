@@ -183,7 +183,7 @@ file_handle_t file_open(const char *name, file_mode_t mode)
    if (name == NULL || *name == '\0')
       return 0;
 
-   const char *osmode;
+   const char *osmode = "rb";
    switch (mode) {
    case FILE_READ: osmode = "rb"; break;
    case FILE_WRITE: osmode = "wb"; break;

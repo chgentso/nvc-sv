@@ -5803,7 +5803,7 @@ void vhpi_context_free(vhpi_context_t *c)
 vhpiHandleT vhpi_bind_foreign(const char *obj_lib, const char *model,
                               tree_t where, tree_t region)
 {
-   c_abstractRegion *r;
+   c_abstractRegion *r = NULL;
    switch (tree_kind(region)) {
    case T_PACKAGE:
       r = &(cached_designUnit(region)->region);
