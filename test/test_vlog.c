@@ -1794,6 +1794,32 @@ START_TEST(test_const2)
 }
 END_TEST
 
+START_TEST(test_ppfile1)
+{
+#ifndef __MINGW32__
+   // A file name with a backslash and a quote (as on Windows) must be
+   // escaped in the string literal that `__FILE__ expands to (22.13)
+   const char *path = "ppfile1\\a\"b.v";
+
+   FILE *f = fopen(path, "w");
+   ck_assert_ptr_nonnull(f);
+   fputs("`__FILE__\n", f);
+   fclose(f);
+
+   input_from_file(path);
+
+   LOCAL_TEXT_BUF tb = tb_new();
+   vlog_preprocess(tb, false);
+
+   ck_assert_str_eq(tb_get(tb), "\"ppfile1\\\\a\\\"b.v\"\n");
+
+   remove(path);
+
+   fail_if_errors();
+#endif
+}
+END_TEST
+
 START_TEST(test_pp10)
 {
    input_from_file(TESTDIR "/vlog/pp10.v");
@@ -3959,6 +3985,7 @@ Suite *get_vlog_tests(void)
    tcase_add_test(tc, test_pp9);
    tcase_add_test(tc, test_const2);
    tcase_add_test(tc, test_pp10);
+   tcase_add_test(tc, test_ppfile1);
    tcase_add_test(tc, test_pp11);
    tcase_add_test(tc, test_simp2);
    tcase_add_test(tc, test_lower2);

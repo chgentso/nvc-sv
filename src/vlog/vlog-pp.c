@@ -943,7 +943,15 @@ static void p_text_macro_usage(void)
 
    if (span.len == 9 && strncmp(span.ptr, "`__FILE__", span.len) == 0) {
       const loc_t *floc = macro_locs.count > 0 ? &(macro_locs.items[0]) : &yylloc;
-      tb_printf(output, "\"%s\"", loc_file_str(floc));
+      // IEEE 1800-2017 section 22.13: the expansion is a string literal,
+      // so escape the characters a string literal would interpret
+      tb_append(output, '"');
+      for (const char *p = loc_file_str(floc); *p; p++) {
+         if (*p == '\\' || *p == '"')
+            tb_append(output, '\\');
+         tb_append(output, *p);
+      }
+      tb_append(output, '"');
       return;
    }
 
