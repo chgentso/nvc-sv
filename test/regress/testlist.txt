@@ -2560,3 +2560,5 @@ svenumfill1     verilog
 svinsidefill1   verilog
 svdynnewpat1    verilog
 svdistdollar1   verilog
+svcovbinsfn1    verilog
+svcovxdollar1   verilog

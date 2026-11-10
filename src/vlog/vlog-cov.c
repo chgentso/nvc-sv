@@ -17,6 +17,7 @@
 
 #include "util.h"
 #include "ident.h"
+#include "scan.h"
 #include "vlog/vlog-cov.h"
 
 #include <assert.h>
@@ -209,7 +210,11 @@ static void gen_cp_init(gen_t *s, int i)
          continue;
       }
 
-      if (b->has_set) {
+      bool set_is_call = false;
+      for (int k = 0; b->has_set && k < b->set_expr.n; k++)
+         set_is_call |= b->set_expr.t[k].token == tLPAREN;
+
+      if (b->has_set && !set_is_call) {
          tb_cat(tb, "foreach (");
          put_slot(s, b->set_expr);
          tb_cat(tb, "[__si]) h.__item(64'(");
@@ -217,6 +222,16 @@ static void gen_cp_init(gen_t *s, int i)
          tb_cat(tb, "[__si]), 64'(");
          put_slot(s, b->set_expr);
          tb_cat(tb, "[__si]), 0);\n");
+      }
+      else if (b->has_set) {
+         // The array is the result of a function call so is evaluated once
+         // into a variable (19.5.1)
+         tb_cat(tb, "begin\ntype(");
+         put_slot(s, b->set_expr);
+         tb_cat(tb, ") __sx;\n__sx = ");
+         put_slot(s, b->set_expr);
+         tb_cat(tb, ";\nforeach (__sx[__si]) h.__item(64'(__sx[__si]), "
+                "64'(__sx[__si]), 0);\nend\n");
       }
 
       for (int k = 0; k < b->nitems; k++) {
@@ -323,10 +338,18 @@ static void sel_sets(gen_t *s, const cov_sel_t *sel)
          const int id = sel->set;
          for (int i = 0; i < sel->nisect; i++) {
             const cov_item_t *it = &(sel->isect[i]);
+            // A $ is the smallest or largest value of the coverpoint (19.5.1)
+            const int cp = find_cp(s->g, sel->cp);
             tb_printf(s->tb, "h.__xset(%d, ", id);
-            put_val(s, it->lo);
+            if (it->lo_dollar && cp >= 0)
+               tb_printf(s->tb, "h.__cp_mn[%d]", cp);
+            else
+               put_val(s, it->lo);
             tb_cat(s->tb, ", ");
-            put_val(s, it->range ? it->hi : it->lo);
+            if (it->hi_dollar && cp >= 0)
+               tb_printf(s->tb, "h.__cp_mx[%d]", cp);
+            else
+               put_val(s, it->range ? it->hi : it->lo);
             tb_cat(s->tb, ");\n");
          }
       }
