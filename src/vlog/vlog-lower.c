@@ -265,6 +265,7 @@ static mir_value_t vlog_lower_subr_call(vlog_gen_t *g, vlog_node_t decl,
                                         vlog_node_t call, mir_value_t this_val,
                                         bool nonvirtual);
 static mir_value_t vlog_lower_this(vlog_gen_t *g);
+static bool vlog_in_class_scope(vlog_gen_t *g);
 static mir_value_t vlog_scope_context(vlog_gen_t *g, ident_t scope);
 static mir_value_t vlog_copy_value(vlog_gen_t *g, mir_value_t value,
                                    vlog_node_t type);
@@ -14961,6 +14962,9 @@ static mir_value_t vlog_lower_decl_ptr(vlog_gen_t *g, vlog_node_t decl)
    }
    else if (kind == V_VAR_DECL && !mir_is_null(g->this_val))
       return vlog_link_property(g, g->this_val, decl, vlog_ident(decl), ti);
+   else if (kind == V_VAR_DECL && vlog_in_class_scope(g))
+      return vlog_link_property(g, vlog_lower_this(g), decl, vlog_ident(decl),
+                                ti);
 
    mir_dump(g->mu);
    fatal_trace("missing variable for %pK %pi", decl, vlog_ident(decl));
@@ -24457,6 +24461,23 @@ static void vlog_defer_scope(mir_context_t *mc, ident_t name)
          break;
       }
    }
+}
+
+static bool vlog_in_class_scope(vlog_gen_t *g)
+{
+   // The unit is a class method or a process forked from one
+
+   ident_t name = mir_get_name(g->mu, MIR_NULL_VALUE);
+   if (sv_classes != NULL && hash_get(sv_classes, name) != NULL)
+      return true;
+
+   for (ident_t it = mir_get_parent(g->mu); it != NULL;
+        it = mir_get_shape_parent(mir_get_shape(g->mir, it))) {
+      if (sv_classes != NULL && hash_get(sv_classes, it) != NULL)
+         return true;
+   }
+
+   return false;
 }
 
 static mir_value_t vlog_lower_this(vlog_gen_t *g)

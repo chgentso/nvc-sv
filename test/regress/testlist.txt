@@ -2569,3 +2569,4 @@ svcombfuncsel1  verilog
 svcombidx1      verilog
 svcombnew1      verilog
 svvdispatch1    verilog
+svforkprop1     verilog
