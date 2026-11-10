@@ -28102,6 +28102,9 @@ static void vlog_find_driver_cb(vlog_node_t v, void *ctx)
    driver_search_t *s = ctx;
    switch (vlog_kind(v)) {
    case V_ASSIGN:
+      // Only the target is driven, reading the variable does not drive it
+      vlog_visit(vlog_target(v), vlog_find_ref_cb, s);
+      break;
    case V_PORT_MAP:
    case V_GATE_INST:
       vlog_visit(v, vlog_find_ref_cb, s);
