@@ -119,7 +119,7 @@ crv_node_t crv_dist(crv_t *c, crv_node_t arg, crv_dist_t d);
 
 // Constraints.  A soft constraint is dropped if it cannot be satisfied with
 // the hard constraints, trying to keep the later ones.
-void crv_require(crv_t *c, crv_node_t test, bool soft);
+void crv_require(crv_t *c, crv_node_t test, bool soft, int line);
 void crv_disable_soft(crv_t *c, crv_node_t target);
 
 // Every node given must be different.  Used by the unique constraint.

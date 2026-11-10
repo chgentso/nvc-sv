@@ -20,6 +20,7 @@
 
 #include <assert.h>
 #include <stdint.h>
+#include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -367,6 +368,7 @@ typedef struct {
    crv_node_t  idx;
    unsigned    first, count;
    bool        dead;       // Soft constraint discarded by disable soft
+   int         line;       // Source line for NVC_CRV_DEBUG
 } ccons_t;
 
 typedef struct {
@@ -730,10 +732,10 @@ crv_node_t crv_dist(crv_t *c, crv_node_t arg, crv_dist_t d)
    return add_node(c, n);
 }
 
-void crv_require(crv_t *c, crv_node_t test, bool soft)
+void crv_require(crv_t *c, crv_node_t test, bool soft, int line)
 {
    ccons_t k = { .kind = C_REQ, .root = test,
-                 .soft = soft ? c->nsoft++ : -1 };
+                 .soft = soft ? c->nsoft++ : -1, .line = line };
    VEC_PUSH(c->cons, c->ncons, c->ccons, k);
 }
 
@@ -1487,6 +1489,7 @@ typedef struct {
    int     root;
    int     soft;
    int     unstart, unn;
+   int     line;
 } pcons_t;
 
 typedef struct {
@@ -1769,9 +1772,9 @@ static void rsize_cb(void *ctx, const node_t *nd, int n)
       r->bad = true;
 }
 
-static void add_pcons(prob_t *P, ckind_t kind, int root, int soft)
+static void add_pcons(prob_t *P, ckind_t kind, int root, int soft, int line)
 {
-   pcons_t pc = { .kind = kind, .root = root, .soft = soft };
+   pcons_t pc = { .kind = kind, .root = root, .soft = soft, .line = line };
    VEC_PUSH(P->cons, P->ncons, P->ccons, pc);
 }
 
@@ -1824,7 +1827,7 @@ static void expand_foreach(prob_t *P, ictx_t *I, const ccons_t *f,
          sid += MIN(cnt[0], f->nsoft - 1);
 
       if (sid < 0 || active[sid])
-         add_pcons(P, C_REQ, inst(I, f->root), sid);
+         add_pcons(P, C_REQ, inst(I, f->root), sid, f->line);
       if (I->toobig)
          return;
 
@@ -2397,9 +2400,9 @@ static prob_t *prob_build(crv_t *c, int mode, const unsigned *sizes,
 
       I.nb = 0;
       if (cc->kind == C_REQ)
-         add_pcons(P, C_REQ, inst(&I, cc->root), cc->soft);
+         add_pcons(P, C_REQ, inst(&I, cc->root), cc->soft, cc->line);
       else {
-         add_pcons(P, C_UNIQUE, -1, cc->soft);
+         add_pcons(P, C_UNIQUE, -1, cc->soft, cc->line);
          P->cons[P->ncons - 1].unstart = P->nun;
          P->cons[P->ncons - 1].unn = cc->count;
          for (unsigned i = 0; i < cc->count; i++)
@@ -2410,7 +2413,7 @@ static prob_t *prob_build(crv_t *c, int mode, const unsigned *sizes,
    if (I.toobig) {
       // Too large: leave no constraints satisfiable
       P->ncons = 0;
-      add_pcons(P, C_REQ, mk_fail(c), -1);
+      add_pcons(P, C_REQ, mk_fail(c), -1, 0);
       }
    // Weighted choice applies to a distribution at the root of a constraint
    for (int ci = 0; ci < P->ncons; ci++) {
@@ -3797,8 +3800,12 @@ static bool propagate(prob_t *P)
       ok = prop_cons(P, &P->cons[ci]);
       P->curc = -1;
 
-      if (!ok)
+      if (!ok) {
+         if (getenv("NVC_CRV_DEBUG"))
+            fprintf(stderr, "crv: constraint %d of %d (line %d) failed "
+                    "(oob=%d)\n", ci, P->ncons, P->cons[ci].line, P->oob);
          break;
+      }
       else if (P->work > P->budget) {
          P->oob = true;
          ok = false;
@@ -4379,6 +4386,10 @@ static bool solve_once(crv_t *c, const bool *active, sol_t *out)
       if (rs) {
          prob_t *P1 = prob_build(c, 1, sizes, active);
          const sres_t r = solve_prob(P1);
+         if (getenv("NVC_CRV_DEBUG") && r != S_SAT)
+            fprintf(stderr, "crv: size problem result %d work %"PRIi64" budget "
+                    "%"PRIi64" oob %d nv %d ncons %d\n", r, P1->work,
+                    P1->budget, P1->oob, P1->nv, P1->ncons);
          if (r == S_SAT) {
             for (unsigned a = 0; a < c->narrays; a++) {
                if (c->arrays[a].size_rand)
@@ -4394,6 +4405,8 @@ static bool solve_once(crv_t *c, const bool *active, sol_t *out)
 
       prob_t *P2 = prob_build(c, 2, sizes, active);
       const sres_t r = solve_prob(P2);
+      if (getenv("NVC_CRV_DEBUG") && r != S_SAT)
+         fprintf(stderr, "crv: value problem result %d (rs=%d)\n", r, rs);
       if (r == S_SAT) {
          out->vals = P2->vals;
          out->ebase = P2->ebase;
@@ -4455,8 +4468,62 @@ static void commit(crv_t *c, const sol_t *s)
    }
 }
 
+
+static void debug_node(const crv_t *c, int n, int depth)
+{
+   if (n < 0 || depth > 8) {
+      fprintf(stderr, "_");
+      return;
+   }
+
+   const node_t *nd = &c->nodes[n];
+   switch (nd->kind) {
+   case N_CONST:
+      fprintf(stderr, "%"PRIi64, nd->val);
+      return;
+   case N_VAR:
+      fprintf(stderr, "v%d", nd->aux);
+      return;
+   default:
+      break;
+   }
+
+   if (nd->kind == N_INSIDE) {
+      const cset_t *cs = &c->sets[nd->aux];
+      fprintf(stderr, "(inside ");
+      debug_node(c, nd->a, depth + 1);
+      for (unsigned i = 0; i < cs->n; i++) {
+         fprintf(stderr, " [");
+         debug_node(c, cs->items[i].lo, depth + 1);
+         fprintf(stderr, ":");
+         debug_node(c, cs->items[i].hi, depth + 1);
+         fprintf(stderr, "]");
+      }
+      fprintf(stderr, ")");
+      return;
+   }
+
+   fprintf(stderr, "(k%d.%d ", nd->kind, nd->op);
+   debug_node(c, nd->a, depth + 1);
+   fprintf(stderr, " ");
+   debug_node(c, nd->b, depth + 1);
+   if (nd->kind == N_COND || nd->kind == N_INSIDE) {
+      fprintf(stderr, " ");
+      debug_node(c, nd->c, depth + 1);
+   }
+   fprintf(stderr, ")");
+}
+
 bool crv_solve(crv_t *c)
 {
+   if (getenv("NVC_CRV_DEBUG") && !strcmp(getenv("NVC_CRV_DEBUG"), "2")) {
+      for (unsigned i = 0; i < c->ncons; i++) {
+         fprintf(stderr, "crv: constraint %u line %d: ", i, c->cons[i].line);
+         debug_node(c, c->cons[i].root, 0);
+         fprintf(stderr, "\n");
+      }
+   }
+
    const int nsoft = c->nsoft;
    bool *active = NEW(bool, nsoft);
    sol_t sol = { 0 };
@@ -4486,6 +4553,42 @@ bool crv_solve(crv_t *c)
          }
          else
             active[k] = false;
+      }
+   }
+
+   if (!ok && getenv("NVC_CRV_DEBUG")) {
+      // Report a minimal unsatisfiable set of the constraints by removing
+      // those which are not needed to make the problem unsatisfiable
+      bool *was = NEW(bool, c->ncons);
+      for (unsigned i = 0; i < c->ncons; i++) {
+         was[i] = c->cons[i].dead;
+         if (was[i])
+            continue;
+
+         c->cons[i].dead = true;
+         sol_t t = { 0 };
+         if (solve_once(c, active, &t)) {
+            sol_free(&t);
+            c->cons[i].dead = false;   // Needed to be unsatisfiable
+         }
+      }
+
+      for (unsigned i = 0; i < c->ncons; i++) {
+         if (!was[i] && !c->cons[i].dead)
+         {
+            fprintf(stderr, "crv: unsatisfiable core includes the constraint "
+                    "on line %d: ", c->cons[i].line);
+            debug_node(c, c->cons[i].root, 0);
+            fprintf(stderr, "\n");
+         }
+         c->cons[i].dead = was[i];
+      }
+      free(was);
+
+      for (unsigned v = 0; v < c->nvars; v++) {
+         const cvar_t *cv = &c->vars[v];
+         fprintf(stderr, "crv: var %u width %u cur %"PRIi64" domain size %u\n",
+                 v, cv->width, cv->cur, cv->ndom);
       }
    }
 

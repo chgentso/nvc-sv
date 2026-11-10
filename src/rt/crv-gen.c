@@ -291,7 +291,7 @@ int64_t crv_generated(crv_op_t op, const int64_t *args)
    case CRV_OP_DIST:
       return crv_dist(c, args[1], args[2]);
    case CRV_OP_REQUIRE:
-      crv_require(c, args[1], !!args[2]);
+      crv_require(c, args[1], !!args[2], args[3]);
       return 0;
    case CRV_OP_DISABLE_SOFT:
       crv_disable_soft(c, args[1]);

@@ -19637,6 +19637,7 @@ static mir_value_t vlog_crv_expr(vlog_gen_t *g, vlog_node_t v, unsigned width,
                                  bool is_signed);
 static void vlog_crv_items(vlog_gen_t *g, vlog_node_t v, mir_value_t guard,
                            mir_value_t *sink);
+static int crv_cur_line = 0;   // Source line of the constraint item lowered
 
 static bool vlog_crv_in_objects(vlog_gen_t *g)
 {
@@ -21638,7 +21639,8 @@ static void vlog_crv_emit(vlog_gen_t *g, mir_value_t guard, mir_value_t node,
    if (sink != NULL)
       sink[soft] = vlog_crv_and(g, sink[soft], full);
    else
-      CRV3(g, CRV_OP_REQUIRE, g->crv_ctx, full, vlog_crv_int(g, soft));
+      CRV4(g, CRV_OP_REQUIRE, g->crv_ctx, full, vlog_crv_int(g, soft),
+           vlog_crv_int(g, crv_cur_line));
 }
 
 static void vlog_crv_unique(vlog_gen_t *g, vlog_node_t v)
@@ -22153,6 +22155,8 @@ static void vlog_crv_foreach(vlog_gen_t *g, vlog_node_t v, mir_value_t guard)
 static void vlog_crv_items(vlog_gen_t *g, vlog_node_t v, mir_value_t guard,
                            mir_value_t *sink)
 {
+   crv_cur_line = vlog_loc(v)->first_line;
+
    switch (vlog_kind(v)) {
    case V_CONS_EXPR:
       if (vlog_flags(v) & VLOG_F_DISABLE) {
@@ -22572,7 +22576,8 @@ static void vlog_crv_build_struct_array(vlog_gen_t *g, mir_value_t this,
                                  CRV2(g, CRV_OP_ARRAY_SIZE, ctx, arrays[0]),
                                  CRV2(g, CRV_OP_ARRAY_SIZE, ctx, arrays[k]),
                                  vlog_crv_flags(g, 1, false));
-         CRV3(g, CRV_OP_REQUIRE, ctx, same, vlog_crv_int(g, 0));
+         CRV4(g, CRV_OP_REQUIRE, ctx, same, vlog_crv_int(g, 0),
+              vlog_crv_int(g, 0));
       }
    }
 
