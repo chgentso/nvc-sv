@@ -2374,6 +2374,250 @@ static void decompose(prob_t *P)
    free(R.memo);
 }
 
+
+////////////////////////////////////////////////////////////////////////////////
+// Domains from implications
+//
+// Constraints like (s == A) -> (x == 1); (s == B) -> (x == 2); ... where the
+// antecedents between them cover every value s can take say that x is one of
+// the consequent values, but a bound on x cannot express that and nothing is
+// known about x until s is picked.  If x is searched first with a wide
+// domain it is almost never one of the values and the search thrashes, as
+// with the bounds of a variable constrained to lie below x.  Add the
+// consequence as a constraint of its own: it is implied by the others so it
+// does not change the solutions.
+
+#define MAX_IMPL     512
+#define MAX_COVER    4096
+#define MAX_SPANS    64
+
+typedef struct {
+   int     var, xnode;       // Variable tested and the node of the consequent
+   int     xvar;
+   int     line;
+   range_t ant[MAX_SPANS], cons[MAX_SPANS];
+   int     nant, ncons;
+   bool    done;
+} impl_t;
+
+static bool value_of(const prob_t *P, int n, i128 *out)
+{
+   if (!is_const_tree(P->c, n))
+      return false;
+
+   ectx_t E = { .c = P->c };
+   const int64_t v = ev(&E, n);
+   if (E.fail)
+      return false;
+
+   *out = mathv(v, P->c->nodes[n].sgn);
+   return true;
+}
+
+static int pred_var(const prob_t *P, int n, int *xnode)
+{
+   // A variable which a cast keeps whole
+
+   *xnode = n;
+   for (;;) {
+      const node_t *nd = &P->c->nodes[n];
+      if (nd->kind == N_VAR)
+         return nd->aux < P->nsc ? nd->aux : -1;
+      else if (nd->kind != N_CAST)
+         return -1;
+
+      n = nd->a;
+      // Walk to the variable then check what it can hold fits
+      const node_t *an = &P->c->nodes[n];
+      const node_t *vn = an;
+      while (vn->kind == N_CAST)
+         vn = &P->c->nodes[vn->a];
+      if (vn->kind != N_VAR || vn->aux >= P->nsc)
+         return -1;
+
+      const dom_t *d = &P->vars[vn->aux].dom;
+      if (d->lo < tmin(nd->width, nd->sgn) || d->hi > tmax(nd->width, nd->sgn))
+         return -1;
+   }
+}
+
+static bool pred_spans(const prob_t *P, int n, int *var, int *xnode,
+                       range_t *spans, int *ns)
+{
+   // Values of a variable for which a one bit node is true
+
+   const crv_t *c = P->c;
+   const node_t *nd = &c->nodes[n];
+
+   *ns = 0;
+   if (nd->kind == N_BIN && nd->op == CRV_EQ) {
+      i128 val;
+      int v = pred_var(P, nd->a, xnode);
+      if (v >= 0 && value_of(P, nd->b, &val)) {
+         *var = v;
+         spans[(*ns)++] = (range_t){ val, val };
+         return true;
+      }
+
+      v = pred_var(P, nd->b, xnode);
+      if (v >= 0 && value_of(P, nd->a, &val)) {
+         *var = v;
+         spans[(*ns)++] = (range_t){ val, val };
+         return true;
+      }
+      return false;
+   }
+   else if (nd->kind == N_INSIDE) {
+      const int v = pred_var(P, nd->a, xnode);
+      if (v < 0)
+         return false;
+
+      const cset_t *cs = &c->sets[nd->aux];
+      for (unsigned i = 0; i < cs->n; i++) {
+         i128 lo, hi;
+         if (*ns == MAX_SPANS || !value_of(P, cs->items[i].lo, &lo)
+             || (cs->items[i].hi >= 0 && !value_of(P, cs->items[i].hi, &hi)))
+            return false;
+         if (cs->items[i].hi < 0)
+            hi = lo;
+         spans[(*ns)++] = (range_t){ lo, hi };
+      }
+
+      *var = v;
+      return *ns > 0;
+   }
+
+   return false;
+}
+
+static bool in_spans(const range_t *r, int n, i128 v)
+{
+   for (int i = 0; i < n; i++) {
+      if (v >= r[i].lo && v <= r[i].hi)
+         return true;
+   }
+   return false;
+}
+
+static void derive_domains(prob_t *P)
+{
+   crv_t *c = P->c;
+   const int n0 = P->ncons;
+
+   impl_t *imps = NULL;
+   int nimp = 0;
+
+   for (int ci = 0; ci < n0 && nimp < MAX_IMPL; ci++) {
+      const pcons_t *pc = &P->cons[ci];
+      if (pc->kind != C_REQ || pc->soft >= 0)
+         continue;
+
+      const node_t *nd = &c->nodes[pc->root];
+      if (nd->kind != N_BIN || nd->op != CRV_IMPLIES)
+         continue;
+
+      impl_t im = { .line = pc->line };
+      int dummy;
+      if (!pred_spans(P, nd->a, &im.var, &dummy, im.ant, &im.nant)
+          || !pred_spans(P, nd->b, &im.xvar, &im.xnode, im.cons, &im.ncons)
+          || im.var == im.xvar)
+         continue;
+
+      if (imps == NULL)
+         imps = xmalloc_array(MAX_IMPL, sizeof(impl_t));
+      imps[nimp++] = im;
+   }
+
+   for (int i = 0; i < nimp; i++) {
+      if (imps[i].done)
+         continue;
+
+      // The implications between this pair of variables
+      int group[MAX_IMPL], ng = 0;
+      for (int j = i; j < nimp; j++) {
+         if (imps[j].var == imps[i].var && imps[j].xvar == imps[i].xvar) {
+            imps[j].done = true;
+            group[ng++] = j;
+         }
+      }
+
+      const dom_t *sd = &P->vars[imps[i].var].dom;
+      if (dom_count(sd, sd->lo, sd->hi) > MAX_COVER)
+         continue;
+
+      // Every value of the tested variable needs exactly one antecedent
+      bool used[MAX_IMPL] = { false }, ok = true;
+      for (int k = 0; k < dom_nr(sd) && ok; k++) {
+         const range_t r = dom_range(sd, k);
+         for (i128 v = r.lo; v <= r.hi && ok; v++) {
+            int match = -1;
+            for (int g = 0; g < ng; g++) {
+               if (in_spans(imps[group[g]].ant, imps[group[g]].nant, v)) {
+                  if (match >= 0)
+                     ok = false;
+                  match = g;
+               }
+            }
+            if (match < 0)
+               ok = false;
+            else
+               used[match] = true;
+         }
+      }
+
+      if (!ok)
+         continue;
+
+      range_t all[MAX_SPANS * 8];
+      int nall = 0;
+      for (int g = 0; g < ng && ok; g++) {
+         if (!used[g])
+            continue;
+         if (nall + imps[group[g]].ncons > MAX_SPANS * 8)
+            ok = false;
+         else {
+            memcpy(all + nall, imps[group[g]].cons,
+                   imps[group[g]].ncons * sizeof(range_t));
+            nall += imps[group[g]].ncons;
+         }
+      }
+
+      if (!ok)
+         continue;
+
+      nall = rng_merge(all, nall);
+
+      // Nothing to learn if x can already only take these values
+      const dom_t *xd = &P->vars[imps[i].xvar].dom;
+      bool useful = false;
+      for (int k = 0; k < dom_nr(xd) && !useful; k++) {
+         const range_t r = dom_range(xd, k);
+         useful = !rng_covers(all, nall, r.lo, r.hi);
+      }
+
+      if (!useful)
+         continue;
+
+      // Adding nodes may move them
+      const unsigned xwidth = c->nodes[imps[i].xnode].width;
+      const bool xsgn = c->nodes[imps[i].xnode].sgn;
+      crv_set_t set = crv_set_new(c);
+      for (int k = 0; k < nall; k++) {
+         crv_node_t lo = mk_const(c, all[k].lo, xwidth, xsgn);
+         if (all[k].lo == all[k].hi)
+            crv_set_value(c, set, lo);
+         else
+            crv_set_range(c, set, lo, mk_const(c, all[k].hi, xwidth,
+                                               xsgn));
+      }
+
+      const int root = crv_inside(c, imps[i].xnode, set);
+      add_pcons(P, C_REQ, root, -1, imps[i].line);
+   }
+
+   free(imps);
+}
+
 // Mode 1 solves for the sizes of arrays with a random size, ignoring the
 // elements of those, mode 2 has all sizes known
 static prob_t *prob_build(crv_t *c, int mode, const unsigned *sizes,
@@ -2489,6 +2733,8 @@ static prob_t *prob_build(crv_t *c, int mode, const unsigned *sizes,
       P->ncons = 0;
       add_pcons(P, C_REQ, mk_fail(c), -1, 0);
       }
+   derive_domains(P);
+
    // Weighted choice applies to a distribution at the root of a constraint
    for (int ci = 0; ci < P->ncons; ci++) {
       const pcons_t *pc = &P->cons[ci];
