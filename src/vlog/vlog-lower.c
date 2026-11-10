@@ -19154,6 +19154,24 @@ static void vlog_fork_written_cb(vlog_node_t v, void *context)
       hash_put(set, vlog_ref(target), vlog_ref(target));
 }
 
+typedef struct {
+   hash_t      *set;
+   const loc_t *loc;
+} fork_after_t;
+
+static void vlog_fork_after_cb(vlog_node_t v, void *context)
+{
+   // Variables assigned in the text that follows the fork
+
+   fork_after_t *a = context;
+   const loc_t *l = vlog_loc(v);
+   if (loc_invalid_p(l) || l->file_ref != a->loc->file_ref
+       || l->first_line <= a->loc->first_line + a->loc->line_delta)
+      return;
+
+   vlog_fork_written_cb(v, a->set);
+}
+
 static void vlog_fork_wait_loop(vlog_gen_t *g, mir_value_t group_var, int mode)
 {
    // Suspend until the runtime says the wait is satisfied
@@ -19242,6 +19260,14 @@ static void vlog_lower_fork(vlog_gen_t *g, vlog_node_t v, gen_stack_t *gs)
    hash_t *all_written = hash_new(16);
    for (int i = 0; i < nstmts; i++)
       vlog_visit(vlog_stmt(v, i), vlog_fork_written_cb, all_written);
+
+   // Likewise for a variable the enclosing subroutine, and so the parent
+   // after the fork, assigns.  A copy of the variable declared in the fork
+   // itself (automatic int j = i) is not assigned and is taken by value.
+   if (kind == V_FORK_JOIN_NONE && g->subr != NULL) {
+      fork_after_t after = { .set = all_written, .loc = vlog_loc(v) };
+      vlog_visit(g->subr, vlog_fork_after_cb, &after);
+   }
 
    for (int i = 0; i < nstmts; i++) {
       vlog_node_t s = vlog_stmt(v, i);
