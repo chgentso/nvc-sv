@@ -95,6 +95,7 @@ struct _diag {
    ostream_t    *ostream;
    bool          source;
    bool          suppress;
+   bool          quiet;
    bool          prefix;
 };
 
@@ -105,6 +106,8 @@ typedef struct _hint_rec {
 
 static unsigned    n_diags[DIAG_FATAL + 1];
 static unsigned    error_limit = 0;
+static bool        scan_filter = false;
+static unsigned    scan_visible = 0;
 static file_list_t loc_files;
 static nvc_lock_t  diag_lock   = 0;
 
@@ -533,6 +536,7 @@ diag_t *diag_new(diag_level_t level, const loc_t *loc)
    d->level    = level;
    d->source   = loc != NULL && !loc_invalid_p(loc);
    d->suppress = false;
+   d->quiet    = scan_filter && (level == DIAG_WARN || level == DIAG_ERROR);
    d->prefix   = true;
 
    diag_set_ostream(d);
@@ -1086,6 +1090,9 @@ void diag_emit(diag_t *d)
 {
    if (d->suppress)
       goto cleanup;
+   else if (d->quiet) {
+      // Counted but not shown: see diag_set_scan_filter
+   }
    else if (consumer_fn != NULL && d->level > DIAG_DEBUG)
       (*consumer_fn)(d, consumer_ctx);
    else if (d->level == DIAG_DEBUG && opt_get_int(OPT_UNIT_TEST)
@@ -1111,6 +1118,9 @@ void diag_emit(diag_t *d)
 
    const unsigned count = relaxed_add(&n_diags[d->level], 1);
 
+   if (!d->quiet && d->level >= DIAG_ERROR)
+      relaxed_add(&scan_visible, 1);
+
    if (d->level == DIAG_ERROR && count == error_limit)
       fatal("too many errors, giving up");
 
@@ -1135,6 +1145,21 @@ void diag_show_source(diag_t *d, bool show)
 void diag_suppress(diag_t *d, bool suppress)
 {
    d->suppress = suppress;
+}
+
+void diag_set_scan_filter(bool on)
+{
+   scan_filter = on;
+}
+
+void diag_scan_visible(diag_t *d)
+{
+   d->quiet = false;
+}
+
+unsigned diag_scan_errors(void)
+{
+   return relaxed_load(&scan_visible);
 }
 
 diag_consumer_t diag_get_consumer(void **context)

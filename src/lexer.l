@@ -1398,6 +1398,7 @@ static int report_unterminated_string(void)
    const token_t tok = string_end();
 
    diag_t *d = diag_new(DIAG_ERROR, &yylloc);
+   diag_scan_visible(d);
    diag_printf(d, "unterminated string literal");
    diag_hint(d, NULL, "a string literal must fit on one line since it "
              "is a lexical element, longer strings can be formed using "
@@ -1411,6 +1412,7 @@ static int report_unterminated_string(void)
 static int report_bad_identifier(char *str)
 {
    diag_t *d = diag_new(DIAG_ERROR, &yylloc);
+   diag_scan_visible(d);
    diag_printf(d, "a VHDL basic identifier must not start or end with an "
                "underscore, or contain multiple consecutive underscores");
    diag_lrm(d, STD_08, "15.4.2");

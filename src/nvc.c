@@ -34,6 +34,7 @@
 #include "rt/mspace.h"
 #include "rt/wave.h"
 #include "scan.h"
+#include "scandeps.h"
 #include "sdf/sdf-phase.h"
 #include "tcl/tcl-shell.h"
 #include "thread.h"
@@ -73,6 +74,8 @@ typedef struct {
    ident_t          top_level;
    const char      *top_level_arg;
    lib_t            work;
+   bool             scan;
+   unsigned         scan_errors;
 } cmd_state_t;
 
 const char copy_string[] =
@@ -118,7 +121,7 @@ static int scan_cmd(int start, int argc, char **argv)
       "-a", "-e", "-r", "-c", "--dump", "--make", "--syntax", "--list",
       "--init", "--install", "--print-deps", "--do", "-i",
       "--cover-export", "--preprocess", "--cover-merge",
-      "--cover-report",
+      "--cover-report", "--scan",
    };
 
    for (int i = start; i < argc; i++) {
@@ -175,6 +178,17 @@ static bool parse_warn_option(char *optarg)
 
 static void analyse_file(const char *file, cmd_state_t *state)
 {
+   if (state->scan) {
+      LOCAL_TEXT_BUF json = tb_new();
+      if (scan_file_deps(file, json) > 0)
+         state->scan_errors++;
+
+      fflush(stderr);
+      fputs(tb_get(json), stdout);
+      fflush(stdout);
+      return;
+   }
+
    input_from_file(file);
 
    switch (source_kind()) {
@@ -391,7 +405,8 @@ static const char *default_surfer_plugin(void)
 #endif
 }
 
-static int analyse(int argc, char **argv, cmd_state_t *state)
+static int analyse_files(int argc, char **argv, cmd_state_t *state,
+                         bool scan)
 {
    static struct option long_options[] = {
       { "bootstrap",       no_argument,       0, 'b' },
@@ -501,19 +516,23 @@ static int analyse(int argc, char **argv, cmd_state_t *state)
    if (werror)
       diag_add_hint_fn(werror_diag_cb, NULL);
 
-   if (state->mir == NULL)
-      state->mir = mir_context_new();
+   if (scan)
+      state->scan = true;
+   else {
+      if (state->mir == NULL)
+         state->mir = mir_context_new();
 
-   if (state->registry == NULL)
-      state->registry = unit_registry_new(state->mir);
+      if (state->registry == NULL)
+         state->registry = unit_registry_new(state->mir);
 
-   if (state->jit != NULL)
-      jit_free(state->jit);
+      if (state->jit != NULL)
+         jit_free(state->jit);
 
-   state->jit = jit_new(state->registry, state->mir);
+      state->jit = jit_new(state->registry, state->mir);
 
-   if (state->vhpi != NULL)
-      vhpi_run_callbacks(vhpiCbStartOfAnalysis);
+      if (state->vhpi != NULL)
+         vhpi_run_callbacks(vhpiCbStartOfAnalysis);
+   }
 
    if (file_list != NULL)
       do_file_list(file_list, state);
@@ -525,6 +544,19 @@ static int analyse(int argc, char **argv, cmd_state_t *state)
          do_file_list(argv[i] + 1, state);
       else
          analyse_file(argv[i], state);
+   }
+
+   if (scan) {
+      const unsigned errors = state->scan_errors;
+      state->scan = false;
+      state->scan_errors = 0;
+
+      if (werror)
+         diag_remove_hint_fn(werror_diag_cb, NULL);
+
+      set_error_limit(0);
+
+      return errors > 0 ? EXIT_FAILURE : EXIT_SUCCESS;
    }
 
    if (state->vhpi != NULL)
@@ -551,6 +583,16 @@ static int analyse(int argc, char **argv, cmd_state_t *state)
    argv += next_cmd - 1;
 
    return argc > 1 ? process_command(argc, argv, state) : EXIT_SUCCESS;
+}
+
+static int analyse(int argc, char **argv, cmd_state_t *state)
+{
+   return analyse_files(argc, argv, state, false);
+}
+
+static int scan_files_cmd(int argc, char **argv, cmd_state_t *state)
+{
+   return analyse_files(argc, argv, state, true);
 }
 
 static void parse_generic(const char *str)
@@ -2416,6 +2458,8 @@ static void usage(void)
              "Expand FILEs with Verilog preprocessor" },
            { "--print-deps [UNIT]...",
              "Print dependencies in Makefile format" },
+           { "--scan [OPTION]... FILE...",
+             "Print units provided and required by FILEs as JSON" },
         }
       },
       { "Global options",
@@ -2703,6 +2747,7 @@ static int process_command(int argc, char **argv, cmd_state_t *state)
       { "cover-merge",  no_argument, 0, 'M' },
       { "cover-report", no_argument, 0, 'p' },
       { "preprocess",   no_argument, 0, 'R' },
+      { "scan",         no_argument, 0, 'Z' },
       { 0, 0, 0, 0 }
    };
 
@@ -2746,6 +2791,8 @@ static int process_command(int argc, char **argv, cmd_state_t *state)
       return cover_report_cmd(argc, argv, state);
    case 'R':
       return preprocess_cmd(argc, argv, state);
+   case 'Z':
+      return scan_files_cmd(argc, argv, state);
    default:
       fatal("missing command, try $bold$%s --help$$ for usage", PACKAGE);
       return EXIT_FAILURE;
@@ -2869,7 +2916,13 @@ int main(int argc, char **argv)
 
    srand(opt_get_int(OPT_RANDOM_SEED));
 
-   state.work = lib_new(work_name);
+   if (next_cmd < argc && strcmp(argv[next_cmd], "--scan") == 0) {
+      // Scanning must not create or require any library
+      state.work = lib_new_memory(work_name);
+   }
+   else
+      state.work = lib_new(work_name);
+
    lib_set_work(state.work);
 
    // Shuffle the arguments to put all the plusargs first

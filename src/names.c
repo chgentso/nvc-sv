@@ -1114,6 +1114,8 @@ static symbol_t *lazy_lib_cb(scope_t *s, ident_t name, void *context)
    lib_t lib = context;
    ident_t qual = ident_prefix(lib_name(lib), name, '.');
 
+   lib_scan_note(qual);
+
    bool error;
    tree_t unit = lib_get_allow_error(lib, qual, &error);
    if (unit == NULL || error)
@@ -1122,11 +1124,26 @@ static symbol_t *lazy_lib_cb(scope_t *s, ident_t name, void *context)
    return make_visible(s, name, unit, DIRECT, s);
 }
 
-static void make_library_visible(scope_t *s, lib_t lib)
+static symbol_t *lazy_lib_all_cb(scope_t *s, ident_t name, void *context)
+{
+   // The library was made visible with a use clause so a name found here
+   // is not necessarily a reference to a design unit
+   lib_t lib = context;
+   ident_t qual = ident_prefix(lib_name(lib), name, '.');
+
+   bool error;
+   tree_t unit = lib_get_allow_error(lib, qual, &error);
+   if (unit == NULL || error)
+      return NULL;
+
+   return make_visible(s, name, unit, DIRECT, s);
+}
+
+static void make_library_visible(scope_t *s, lib_t lib, bool use_all)
 {
    lazy_sym_t *l = xmalloc(sizeof(lazy_sym_t));
    l->next = s->lazy;
-   l->fn   = lazy_lib_cb;
+   l->fn   = use_all ? lazy_lib_all_cb : lazy_lib_cb;
    l->ctx  = lib;
 
    s->lazy = l;
@@ -1277,7 +1294,7 @@ static scope_t *private_scope_for(nametab_t *tab, tree_t unit)
    }
 
    if (kind == T_LIBRARY)
-      make_library_visible(s, lib);
+      make_library_visible(s, lib, false);
    else {
       // For package instances do not export the names declared only in
       // the body
@@ -3099,8 +3116,12 @@ void insert_names_from_use(nametab_t *tab, tree_t use)
       ident_t unit_name = ident_prefix(lib_name, what, '.');
       lib_t lib = lib_require(lib_name);
       bool error;
+
+      if (what != well_known(W_ALL))
+         lib_scan_note(unit_name);
+
       if (what == well_known(W_ALL)) {
-         make_library_visible(tab->top_scope, lib);
+         make_library_visible(tab->top_scope, lib, true);
          return;
       }
       else if ((unit = lib_get_allow_error(lib, unit_name, &error)) == NULL) {

@@ -91,6 +91,9 @@ struct _search_path {
 };
 
 static lib_t          work = NULL;
+static bool           scan_mode = false;
+static ident_t       *scan_refs = NULL;
+static unsigned       scan_nrefs = 0, scan_maxrefs = 0;
 static lib_list_t    *loaded = NULL;
 static search_path_t *search_paths = NULL;
 
@@ -615,6 +618,61 @@ lib_t lib_new(const char *spec)
    return lib_init(name, path, fd);
 }
 
+void lib_set_scan_mode(bool on)
+{
+   scan_mode = on;
+}
+
+lib_t lib_new_memory(const char *spec)
+{
+   // Like lib_new but never touches the file system
+
+   const char *colon = strchr(spec, ':');
+   if (colon == NULL) {
+      const char *slash = strrchr(spec, '/');
+#ifdef __MINGW32__
+      const char *bslash = strrchr(spec, '\\');
+      if (bslash != NULL && (slash == NULL || bslash > slash))
+         slash = bslash;
+#endif
+      char *name LOCAL = xstrdup(slash ? slash + 1 : spec);
+      return lib_tmp(name);
+   }
+   else {
+      char *name LOCAL = xstrndup(spec, colon - spec);
+      return lib_tmp(name);
+   }
+}
+
+void lib_scan_note(ident_t qual)
+{
+   if (!scan_mode)
+      return;
+
+   for (unsigned i = 0; i < scan_nrefs; i++) {
+      if (scan_refs[i] == qual)
+         return;
+   }
+
+   if (scan_nrefs == scan_maxrefs) {
+      scan_maxrefs = MAX(16, scan_maxrefs * 2);
+      scan_refs = xrealloc_array(scan_refs, scan_maxrefs, sizeof(ident_t));
+   }
+
+   scan_refs[scan_nrefs++] = qual;
+}
+
+const ident_t *lib_scan_refs(unsigned *count)
+{
+   *count = scan_nrefs;
+   return scan_refs;
+}
+
+void lib_scan_clear(void)
+{
+   scan_nrefs = 0;
+}
+
 lib_t lib_tmp(const char *name)
 {
    // For unit tests, avoids creating files
@@ -699,11 +757,28 @@ void lib_search_paths_to_diag(diag_t *d)
              "the $bold$-L$$ option");
 }
 
+static bool lib_scan_is_installed(ident_t name_i)
+{
+   // Libraries which are always installed with the tool and are
+   // therefore safe to load while scanning
+   static const char *const names[] = { "STD", "IEEE", "NVC", "VITAL" };
+
+   for (size_t i = 0; i < ARRAY_LEN(names); i++) {
+      if (strcmp(istr(name_i), names[i]) == 0)
+         return true;
+   }
+
+   return false;
+}
+
 lib_t lib_find(ident_t name_i)
 {
    lib_t lib = lib_loaded(name_i);
    if (lib != NULL)
       return lib;
+
+   if (scan_mode && !lib_scan_is_installed(name_i))
+      return lib_tmp(istr(name_i));   // Empty placeholder
 
    lib_default_search_paths();
 

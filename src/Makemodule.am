@@ -47,6 +47,8 @@ lib_libnvc_a_SOURCES = \
 	src/diag.c \
 	src/scan.h \
 	src/scan.c \
+	src/scandeps.c \
+	src/scandeps.h \
 	src/mask.h \
 	src/mask.c \
 	src/thread.h \

@@ -104,6 +104,13 @@ void diag_lrm(diag_t *d, vhdl_standard_t std, const char *section);
 void diag_show_source(diag_t *d, bool show);
 void diag_emit(diag_t *d);
 void diag_suppress(diag_t *d, bool suppress);
+
+// While the scan filter is on, warnings and errors are counted but not
+// shown unless the creator calls diag_scan_visible: only genuine syntax
+// errors are reported when scanning files whose dependencies are missing
+void diag_set_scan_filter(bool on);
+void diag_scan_visible(diag_t *d);
+unsigned diag_scan_errors(void);
 void diag_clear(diag_t *d);
 diag_level_t diag_level(diag_t *d, const diag_level_t *new);
 unsigned diag_count(diag_level_t level);

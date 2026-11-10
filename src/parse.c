@@ -208,6 +208,7 @@ void parse_vexpect(parse_state_t *state, va_list ap)
    if (state->n_correct >= RECOVER_THRESH) {
       tokenq_t tail = state->tokenq[state->tokenq_tail];
       diag_t *d = diag_new(DIAG_ERROR, &(tail.loc));
+      diag_scan_visible(d);
       diag_printf(d, "unexpected $yellow$%s$$ while parsing %s, expecting ",
                   token_str(tail.token), state->hint_str);
 

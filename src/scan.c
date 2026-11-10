@@ -248,6 +248,7 @@ void push_file(const char *file, const loc_t *srcloc)
 
    if (fd < 0) {
       diag_t *d = diag_new(DIAG_ERROR, srcloc);
+      diag_scan_visible(d);
       if (errno != ENOENT)
          diag_printf(d, "opening %s: %s", file, strerror(errno));
       else {
@@ -650,6 +651,7 @@ static void pp_error(const char *fmt, ...)
 
    if (pperrors++ == 0 || opt_get_int(OPT_UNIT_TEST)) {
       diag_t *d = diag_new(DIAG_ERROR, &yylloc);
+      diag_scan_visible(d);
       diag_vprintf(d, fmt, ap);
       diag_emit(d);
    }
@@ -999,6 +1001,7 @@ token_t processed_yylex(void)
                   const diag_level_t level =
                      token == tCONDWARN ? DIAG_WARN : DIAG_ERROR;
                   diag_t *d = diag_new(level, &loc);
+                  diag_scan_visible(d);
                   diag_printf(d, "%s", tb_get(yylval.text));
                   diag_emit(d);
                }
@@ -1010,8 +1013,10 @@ token_t processed_yylex(void)
 
       case tEOF:
          while (cond_stack.count > 0) {
-            error_at(&(ATOP(cond_stack).loc), "unterminated conditional "
-                     "analysis block");
+            diag_t *d = diag_new(DIAG_ERROR, &(ATOP(cond_stack).loc));
+            diag_scan_visible(d);
+            diag_printf(d, "unterminated conditional analysis block");
+            diag_emit(d);
             APOP(cond_stack);
          }
          return tEOF;
