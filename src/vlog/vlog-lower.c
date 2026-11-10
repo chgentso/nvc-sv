@@ -19236,6 +19236,13 @@ static void vlog_lower_fork(vlog_gen_t *g, vlog_node_t v, gen_stack_t *gs)
    }
 
    const int nstmts = vlog_stmts(v);
+
+   // A variable one forked process assigns is shared with the siblings that
+   // read it (IEEE 1800-2017 9.3.2)
+   hash_t *all_written = hash_new(16);
+   for (int i = 0; i < nstmts; i++)
+      vlog_visit(vlog_stmt(v, i), vlog_fork_written_cb, all_written);
+
    for (int i = 0; i < nstmts; i++) {
       vlog_node_t s = vlog_stmt(v, i);
 
@@ -19285,7 +19292,8 @@ static void vlog_lower_fork(vlog_gen_t *g, vlog_node_t v, gen_stack_t *gs)
                                              sizeof(bool));
             }
             caps->by_ref[caps->count] = caps->shared
-               || (hash_get(written, d) != NULL
+               || ((hash_get(written, d) != NULL
+                    || hash_get(all_written, d) != NULL)
                    && mir_get_kind(g->mu) != MIR_UNIT_FUNCTION);
             caps->decls[caps->count++] = d;
          }
@@ -19363,6 +19371,8 @@ static void vlog_lower_fork(vlog_gen_t *g, vlog_node_t v, gen_stack_t *gs)
                                         spawn_args, 3);
       mir_build_consume(g->mu, res);
    }
+
+   hash_free(all_written);
 
    if (nstmts > 0 && kind != V_FORK_JOIN_NONE)
       vlog_fork_wait_loop(g, group_var, kind == V_FORK_JOIN ? 0 : 1);

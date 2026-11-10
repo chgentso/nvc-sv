@@ -2587,3 +2587,4 @@ svhdlgenidx1    verilog
 svcombglitch1   verilog
 svfmtconcat1    verilog
 svstreamarr1    verilog
+svforkshare1    verilog
