@@ -119,6 +119,8 @@ typedef struct {
 
 typedef A(init_event_t) init_event_list_t;
 
+#define DEFER_MAX 4096
+
 typedef struct _rt_model {
    tree_t             top;
    hash_t            *scopes;
@@ -172,6 +174,9 @@ typedef struct _rt_model {
    memblock_t        *memblocks;
    model_thread_t    *threads[MAX_THREADS];
    signal_list_t      eventsigs;
+   unsigned           ndeferred;
+   bool               skip_comb;
+   struct { rt_nexus_t *nexus; unsigned char *init; } deferred[DEFER_MAX];
    init_event_list_t  init_events;
    bool               shuffle;
    bool               liveness;
@@ -1220,6 +1225,8 @@ static bool sv_watch_unchanged(const sv_watch_t *w)
    return true;
 }
 
+static void flush_deferred(rt_model_t *m);
+
 static void run_process_inner(rt_model_t *m, rt_proc_t *proc)
 {
    TRACE("run %sprocess %s", *mptr_get(proc->privdata) ? "" :  "stateless ",
@@ -1308,6 +1315,9 @@ static void run_process_inner(rt_model_t *m, rt_proc_t *proc)
 
    thread->active_obj = NULL;
    thread->active_scope = NULL;
+
+   if (unlikely(m->ndeferred > 0))
+      flush_deferred(m);
 }
 
 static void run_process(rt_model_t *m, rt_proc_t *proc)
@@ -2153,6 +2163,8 @@ static void setup_process(rt_model_t *m, rt_proc_t *p, const char *path)
             break;
          case V_ALWAYS:
             p->name = ident_sprintf("%s:%s", path, istr(tree_ident(p->where)));
+            p->comb = vlog_subkind(v) == V_ALWAYS_COMB_DONE
+               || vlog_subkind(v) == V_ALWAYS_LATCH_DONE;
 
             if (vlog_is_assertion_process(v)) {
                m->sva_procs = xrealloc_array(m->sva_procs, m->nsva_procs + 1,
@@ -3523,6 +3535,9 @@ static void wakeup_one(rt_model_t *m, rt_wakeable_t *obj)
    case W_PROC:
       {
          rt_proc_t *proc = container_of(obj, rt_proc_t, wakeable);
+         if (proc->comb && m->skip_comb)
+            break;
+
          TRACE("%s %sprocess %s", obj->reschedule ? "reschedule" : "wakeup",
                obj->postponed ? "postponed " : "", istr(proc->name));
 
@@ -4549,6 +4564,53 @@ void release_signal_now(rt_model_t *m, rt_signal_t *s, int offset,
    }
 }
 
+static void deposit_notify(rt_model_t *m, rt_nexus_t *n)
+{
+   // A cached result of a trigger may predate the event
+   m->trigger_epoch++;
+
+   n->last_event = m->now;
+   n->event_delta = m->iteration;
+
+   if (n->flags & NET_F_CACHE_EVENT)
+      set_event_flag(m, n->signal);
+
+   wakeup_all(m, &(n->pending));
+
+   // The effective value of a connected port of mode inout is that
+   // of the actual
+   if (n->n_sources > 0) {
+      for (rt_source_t *s = &(n->sources); s; s = s->chain_input) {
+         if (s->tag == SOURCE_PORT
+             && (s->u.port.input->flags & NET_F_INOUT))
+            enqueue_effective(m, s->u.port.input);
+      }
+   }
+}
+
+static void flush_deferred(rt_model_t *m)
+{
+   const unsigned n = m->ndeferred;
+   m->ndeferred = 0;
+
+   for (unsigned i = 0; i < n; i++) {
+      rt_nexus_t *nx = m->deferred[i].nexus;
+      if (!cmp_bytes(nexus_effective(nx), m->deferred[i].init,
+                     nx->size * nx->width))
+         deposit_notify(m, nx);
+      else {
+         // The update events of a variable which an always_comb process
+         // assigned and restored still resume an explicit event control or
+         // wait (IEEE 1800-2017 9.4.2) but not the always_comb and
+         // always_latch processes which see only the final value
+         m->skip_comb = true;
+         deposit_notify(m, nx);
+         m->skip_comb = false;
+      }
+      free(m->deferred[i].init);
+   }
+}
+
 void deposit_signal(rt_model_t *m, rt_signal_t *s, const void *values,
                     int offset, size_t count)
 {
@@ -4579,26 +4641,32 @@ void deposit_signal(rt_model_t *m, rt_signal_t *s, const void *values,
       }
 
       if (!cmp_bytes(eff, vptr, valuesz)) {
+         rt_proc_t *ap = get_active_proc();
+         bool defer = false;
+         if (ap != NULL && ap->comb) {
+            // The always_comb process runs to completion before any
+            // process that waits on its variables resumes, so those see
+            // only the final value: a change that is reverted within the
+            // same activation raises no event (IEEE 1800-2017 9.2.2.2.1)
+            unsigned i = 0;
+            while (i < m->ndeferred && m->deferred[i].nexus != n)
+               i++;
+            if (i < m->ndeferred)
+               defer = true;
+            else if (m->ndeferred < DEFER_MAX) {
+               m->deferred[i].nexus = n;
+               m->deferred[i].init = xmalloc(valuesz);
+               memcpy(m->deferred[i].init, eff, valuesz);
+               m->ndeferred++;
+               defer = true;
+            }
+         }
+
          copy2(last, eff, vptr, valuesz);
          m->trigger_epoch++;
 
-         n->last_event = m->now;
-         n->event_delta = m->iteration;
-
-         if (n->flags & NET_F_CACHE_EVENT)
-            set_event_flag(m, n->signal);
-
-         wakeup_all(m, &(n->pending));
-
-         // The effective value of a connected port of mode inout is that
-         // of the actual
-         if (n->n_sources > 0) {
-            for (rt_source_t *s = &(n->sources); s; s = s->chain_input) {
-               if (s->tag == SOURCE_PORT
-                   && (s->u.port.input->flags & NET_F_INOUT))
-                  enqueue_effective(m, s->u.port.input);
-            }
-         }
+         if (!defer)
+            deposit_notify(m, n);
       }
 
       if (n->flags & NET_F_PENDING) {

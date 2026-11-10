@@ -86,6 +86,7 @@ typedef struct _rt_proc {
    struct _sv_watch *watch;   // Memory a polled condition depends on
    uint32_t       scope_idx;   // Index in scope->procs of a forked process
    unsigned       verilog : 1;
+   unsigned       comb : 1;    // always_comb or always_latch
    unsigned       ended : 1;   // Returned without waiting for anything
    unsigned       regs : 16;   // Places that hold a pointer to this process
    struct _sv_task *task;
