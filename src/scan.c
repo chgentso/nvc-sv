@@ -376,6 +376,32 @@ void scan_next_line(void)
    input_buf.lineno += 1;
 }
 
+static loc_t macro_expand_loc(void)
+{
+   // Text from a macro is reported at the use of the outermost macro in
+   // the file being read: macros used in an enclosing file are skipped
+
+   int first = 0;
+   for (int i = macro_stack.count - 1; i >= 0; i--) {
+      if (macro_stack.items[i].include != NULL) {
+         first = i + 1;
+         break;
+      }
+   }
+
+   for (int i = first; i < macro_stack.count; i++) {
+      if (!loc_invalid_p(&(macro_stack.items[i].expandloc)))
+         return macro_stack.items[i].expandloc;
+   }
+
+   for (int i = 0; i < first; i++) {
+      if (!loc_invalid_p(&(macro_stack.items[i].expandloc)))
+         return macro_stack.items[i].expandloc;
+   }
+
+   return LOC_INVALID;
+}
+
 token_t make_token(token_t tok, scan_buf_t buf, yylval_t lval)
 {
    assert(buf.len <= buf.cap);
@@ -393,9 +419,7 @@ token_t make_token(token_t tok, scan_buf_t buf, yylval_t lval)
                        last_col, input_buf.file_ref);
    }
    else {
-      yylloc = LOC_INVALID;
-      for (int i = 0; i < macro_stack.count && loc_invalid_p(&yylloc); i++)
-         yylloc = macro_stack.items[i].expandloc;
+      yylloc = macro_expand_loc();
    }
 
    input_buf.read_ptr += buf.len;
@@ -442,9 +466,7 @@ void begin_token(char *tok, int length)
                        last_col, input_buf.file_ref);
    }
    else {
-      yylloc = LOC_INVALID;
-      for (int i = 0; i < macro_stack.count && loc_invalid_p(&yylloc); i++)
-         yylloc = macro_stack.items[i].expandloc;
+      yylloc = macro_expand_loc();
    }
 }
 

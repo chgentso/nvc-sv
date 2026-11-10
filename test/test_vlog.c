@@ -1362,6 +1362,39 @@ START_TEST(test_pp6)
 }
 END_TEST
 
+START_TEST(test_pp22)
+{
+   add_include_dir(TESTDIR "/vlog");
+
+   input_from_file(TESTDIR "/vlog/pp22.v");
+
+   const error_t expect[] = {
+      {  6, "unexpected module while parsing expression" },
+      {  0, "this token was unexpected" },
+      {  0, "while processing `include \"pp22.vh\" directive" },
+      {  0, "while expanding macro BAD" },
+      { 11, "unexpected wire while parsing net declaration assignment" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   LOCAL_TEXT_BUF tb = tb_new();
+   vlog_preprocess(tb, true);
+
+   file_ref_t file_ref = loc_file_ref(TESTDIR "/vlog/pp22.v", NULL);
+
+   input_from_buffer(tb_get(tb), tb_len(tb), file_ref, SOURCE_VERILOG);
+
+   vlog_node_t m = vlog_parse();
+   fail_if(m == NULL);
+   fail_unless(vlog_kind(m) == V_MODULE);
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
 START_TEST(test_label1)
 {
    input_from_file(TESTDIR "/vlog/label1.v");
@@ -3950,6 +3983,7 @@ Suite *get_vlog_tests(void)
    tcase_add_test(tc, test_pp18);
    tcase_add_test(tc, test_pp19);
    tcase_add_test(tc, test_pp21);
+   tcase_add_test(tc, test_pp22);
    tcase_add_test(tc, test_pp20);
    tcase_add_test(tc, test_crv1);
    tcase_add_test(tc, test_crv2);
