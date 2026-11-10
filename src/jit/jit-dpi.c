@@ -1085,8 +1085,9 @@ static void dpi_fiber_enter(dpi_call_t *c)
    if (limit != NULL) {
       mspace_park_range(lo, limit);
       mspace_park_range(&c->caller, &c->caller + 1);
-      if (DPI_STACK_TOP(c) != NULL)
-         mspace_stack_limit(DPI_STACK_TOP(c));
+      void *top = DPI_STACK_TOP(c);
+      if (top != NULL)
+         mspace_stack_limit(top);
    }
 
    void *fake = NULL;
