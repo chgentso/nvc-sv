@@ -3656,6 +3656,24 @@ static void vlog_assign_variable(vlog_gen_t *g, vlog_node_t target,
 
    const bool copy = mir_is_null(value);
 
+   if (!copy && vlog_kind(target) != V_CONCAT && mir_is_vector(g->mu, value)
+       && mir_points_to_vector(g->mu, lvalue1.obj)) {
+      // The target of a streaming concatenation which is a whole array
+      vlog_node_t sdims[MAX_UNPACKED_DIMS];
+      const int sn = vlog_unpacked_dims(target, sdims);
+      if (sn > 0) {
+         const type_info_t *eti = vlog_array_elem_info(g, target);
+         const unsigned count = vlog_unpacked_count(sdims, sn);
+         if (mir_get_size(g->mu, mir_get_type(g->mu, value))
+             == count * eti->size) {
+            mir_type_t t_flat = mir_vec4_type(g->mu, count * eti->size, false);
+            vlog_store_flat_array(g, lvalue1.obj, count, eti,
+                                  vlog_lower_cast(g, t_flat, value));
+            return;
+         }
+      }
+   }
+
    if (mir_is_null(value)) {
       vlog_node_t dims[MAX_UNPACKED_DIMS];
       int ndims;
