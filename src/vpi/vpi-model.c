@@ -6246,6 +6246,21 @@ static bool hdl_lookup(const char *path, hdl_target_t *t)
       while (*end != '\0' && *end != '.' && *end != '[')
          end++;
 
+      // A block of a generate loop is named with its index: gen[0].x
+      if (*end == '[') {
+         const char *close = strchr(end, ']');
+         if (close != NULL && close[1] == '.') {
+            c_abstractScope *child = hdl_child_scope(rt, path, close + 1 - path);
+            rt_scope_t *crt = child ? hdl_rt_scope(child) : NULL;
+            if (crt != NULL) {
+               scope = child;
+               rt = crt;
+               path = close + 2;
+               continue;
+            }
+         }
+      }
+
       const size_t len = end - path;
       if (len == 0)
          return false;

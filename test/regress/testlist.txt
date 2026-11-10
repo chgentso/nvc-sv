@@ -2583,3 +2583,4 @@ svenumidx1      verilog
 svstreamtype1   verilog
 vests23         normal,$NVC_MAX_THREADS=16
 svbindscope1    verilog
+svhdlgenidx1    verilog
