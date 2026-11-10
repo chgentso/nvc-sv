@@ -6166,7 +6166,23 @@ static vlog_node_t p_streaming_concatenation(void)
    }
 
    int width = 0;
-   switch (peek()) {
+   bool type_name = false;
+   if (peek() == tID && peek_nth(2) == tLBRACE) {
+      // The size of a slice may be the width of a type (11.4.14.1)
+      vlog_node_t d = vlog_symtab_query(symtab, peek_ident_nth(1));
+      if (d != NULL && vlog_kind(d) == V_TYPE_DECL && vlog_has_type(d)) {
+         vlog_node_t t = vlog_get_type(d);
+         if (t != NULL && !vlog_is_dynamic_type(t)) {
+            width = vlog_size(t);
+            type_name = width > 0;
+         }
+      }
+   }
+
+   switch (type_name ? tLBRACE : peek()) {
+   case tBIT:
+   case tLOGIC:
+   case tREG:      width = 1; break;
    case tBYTE:     width = 8; break;
    case tSHORTINT: width = 16; break;
    case tSVINT:
@@ -6181,7 +6197,7 @@ static vlog_node_t p_streaming_concatenation(void)
    }
 
    if (width != 0) {
-      drop_token(&state);
+      drop_token(&state);   // The type or its name
 
       vlog_node_t size = vlog_new(V_NUMBER);
       vlog_set_number(size, number_from_int(width));
