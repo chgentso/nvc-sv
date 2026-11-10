@@ -1492,10 +1492,14 @@ static void vlog_check_open_arg(vlog_node_t sub, vlog_node_t port,
       return;
 
    if (fdims > 0 && ndyn > 0 && vlog_subkind(port) == V_PORT_OUTPUT) {
-      error_at(vlog_loc(arg), "dynamic array cannot be passed to unsized "
-               "output argument '%s' of DPI import '%s'",
-               istr(vlog_ident(port)), istr(vlog_ident(sub)));
-      return;
+      diag_t *d = diag_new(relaxed_rules() ? DIAG_WARN : DIAG_ERROR,
+                           vlog_loc(arg));
+      diag_printf(d, "dynamic array cannot be passed to unsized output "
+                  "argument '%s' of DPI import '%s'",
+                  istr(vlog_ident(port)), istr(vlog_ident(sub)));
+      diag_emit(d);
+      if (!relaxed_rules())
+         return;
    }
 
    bool ok = nfixed + ndyn == fdims;

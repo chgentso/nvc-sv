@@ -2571,3 +2571,4 @@ svcombnew1      verilog
 svvdispatch1    verilog
 svforkprop1     verilog
 svstrcmpchar1   verilog,relaxed
+svdpioadyn1     verilog,relaxed,svlib=dpi_test
