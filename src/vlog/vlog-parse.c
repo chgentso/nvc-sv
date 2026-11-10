@@ -7226,6 +7226,39 @@ static vlog_node_t p_expression(void)
    return p_logical_implication(head);
 }
 
+static void hoist_edge_expression(vlog_node_t event)
+{
+   // An edge of an expression which is not a signal is an edge of the least
+   // significant bit of its value (1800-2017 9.4.2.1): make that the value
+   // of a net so the edge can be detected
+
+   vlog_node_t expr = vlog_value(event);
+   switch (vlog_kind(expr)) {
+   case V_REF:
+   case V_HIER_REF:
+   case V_BIT_SELECT:
+   case V_PART_SELECT:
+   case V_MEMBER_REF:
+      return;
+   default:
+      break;
+   }
+
+   vlog_node_t d = vlog_new(V_NET_DECL);
+   vlog_set_subkind(d, V_NET_WIRE);
+   vlog_set_type(d, implicit_type());
+   vlog_set_ident(d, ident_uniq("edge"));
+   vlog_set_value(d, expr);
+   vlog_set_loc(d, vlog_loc(expr));
+   APUSH(pending_statics, d);   // Added at the end of the unit
+
+   vlog_node_t ref = vlog_new(V_REF);
+   vlog_set_ident(ref, vlog_ident(d));
+   vlog_set_ref(ref, d);
+   vlog_set_loc(ref, vlog_loc(expr));
+   vlog_set_value(event, ref);
+}
+
 static void p_event_expression(vlog_node_t ctrl)
 {
    // [ edge_identifier ] expression [ iff expression ]
@@ -7268,6 +7301,9 @@ static void p_event_expression(vlog_node_t ctrl)
          const bool saved_forward = vlog_symtab_set_forward(symtab, true);
          vlog_set_value(v, p_expression());
          vlog_symtab_set_forward(symtab, saved_forward);
+
+         if (vlog_subkind(v) != V_EVENT_LEVEL && !in_subroutine)
+            hoist_edge_expression(v);
 
          if (peek() == tIFFKW) {
             consume(tIFFKW);

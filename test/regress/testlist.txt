@@ -2600,3 +2600,4 @@ svcrvwide5      verilog
 svcrvimpl2      verilog
 svbitsparam1    verilog
 svvifelem1      verilog
+svedgeexpr1     verilog
