@@ -60,6 +60,8 @@ typedef enum {
 } vlog_version_t;
 
 void input_from_file(const char *file);
+void input_record_includes(bool on);
+const char *const *input_included_files(unsigned *count);
 void input_from_buffer(const char *buf, size_t len, file_ref_t file_ref,
                        hdl_kind_t hdl);
 void push_buffer(const char *buf, size_t len, file_ref_t file_ref);

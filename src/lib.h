@@ -39,6 +39,7 @@ lib_t lib_tmp(const char *name);
 // Support for scanning files without any libraries present: unknown
 // libraries are empty placeholders and requested units are recorded
 void lib_set_scan_mode(bool on);
+bool lib_scan_active(void);
 lib_t lib_new_memory(const char *spec);
 void lib_scan_note(ident_t qual);
 const ident_t *lib_scan_refs(unsigned *count);

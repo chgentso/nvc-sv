@@ -618,6 +618,11 @@ lib_t lib_new(const char *spec)
    return lib_init(name, path, fd);
 }
 
+bool lib_scan_active(void)
+{
+   return scan_mode;
+}
+
 void lib_set_scan_mode(bool on)
 {
    scan_mode = on;

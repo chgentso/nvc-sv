@@ -20,6 +20,7 @@
 #include "diag.h"
 #include "lib.h"
 #include "option.h"
+#include "scan.h"
 #include "scandeps.h"
 
 #include <stdlib.h>
@@ -153,6 +154,107 @@ START_TEST(test_work_name)
 }
 END_TEST
 
+START_TEST(test_sv1)
+{
+   // Packages, interfaces and modules with the files included found
+   // with -I
+
+   set_standard(STD_19);
+   add_include_dir(SCAN_FILE("inc"));
+
+   const char *expect =
+      "{\"file\":\"" SCAN_FILE("sv1.sv") "\",\"language\":\"verilog\","
+      "\"units\":["
+      "{\"name\":\"WORK.MY_PKG\",\"kind\":\"package\","
+      "\"instantiates\":[]},"
+      "{\"name\":\"WORK.BUS_IF\",\"kind\":\"interface\",\"ports\":true,"
+      "\"instantiates\":[]},"
+      "{\"name\":\"WORK.LEAF\",\"kind\":\"module\",\"ports\":true,"
+      "\"instantiates\":[]},"
+      "{\"name\":\"WORK.TOP\",\"kind\":\"module\",\"ports\":true,"
+      "\"instantiates\":[\"leaf\",\"missing_mod\"]},"
+      "{\"name\":\"WORK.TB_PROG\",\"kind\":\"program\",\"ports\":false,"
+      "\"instantiates\":[]},"
+      "{\"name\":\"WORK.INV\",\"kind\":\"primitive\","
+      "\"instantiates\":[]}],"
+      "\"requires\":[\"?other_pkg\",\"?vif_if\",\"?ext_pkg\"],"
+      "\"includes\":[\"" SCAN_FILE("inc/defs.svh") "\","
+      "\"" SCAN_FILE("inc/nested.svh") "\"]}\n";
+
+   ck_assert_uint_eq(scan(SCAN_FILE("sv1.sv"), expect), 0);
+}
+END_TEST
+
+START_TEST(test_sv2)
+{
+   // An interface used as the type of a port is a requirement but an
+   // interface instance or a module instance is not
+
+   set_standard(STD_19);
+
+   const char *expect =
+      "{\"file\":\"" SCAN_FILE("sv4.sv") "\",\"language\":\"verilog\","
+      "\"units\":[{\"name\":\"WORK.M1\",\"kind\":\"module\","
+      "\"ports\":true,\"instantiates\":[\"ext2_if\"]}],"
+      "\"requires\":[\"?ext_if\",\"?other_if\"],\"includes\":[]}\n";
+
+   ck_assert_uint_eq(scan(SCAN_FILE("sv4.sv"), expect), 0);
+}
+END_TEST
+
+START_TEST(test_sv_ifdef_a)
+{
+   // The first branch of a conditional is taken with -D
+
+   set_standard(STD_19);
+   pp_defines_add("USE_A", "");
+
+   const char *expect =
+      "{\"file\":\"" SCAN_FILE("sv2.sv") "\",\"language\":\"verilog\","
+      "\"units\":[{\"name\":\"WORK.COND\",\"kind\":\"module\","
+      "\"ports\":false,\"instantiates\":[]}],"
+      "\"requires\":[\"?pkg_a\"],\"includes\":[]}\n";
+
+   ck_assert_uint_eq(scan(SCAN_FILE("sv2.sv"), expect), 0);
+}
+END_TEST
+
+START_TEST(test_sv_ifdef_b)
+{
+   // And the second without
+
+   set_standard(STD_19);
+
+   const char *expect =
+      "{\"file\":\"" SCAN_FILE("sv2.sv") "\",\"language\":\"verilog\","
+      "\"units\":[{\"name\":\"WORK.COND\",\"kind\":\"module\","
+      "\"ports\":false,\"instantiates\":[]}],"
+      "\"requires\":[\"?pkg_b\"],\"includes\":[]}\n";
+
+   ck_assert_uint_eq(scan(SCAN_FILE("sv2.sv"), expect), 0);
+}
+END_TEST
+
+START_TEST(test_sv_syntax)
+{
+   set_standard(STD_19);
+
+   const error_t expect_err[] = {
+      { 1, "unexpected ; while parsing list of port declarations" },
+      { -1, NULL }
+   };
+   expect_errors(expect_err);
+
+   const char *expect =
+      "{\"file\":\"" SCAN_FILE("sv3.sv") "\",\"language\":\"verilog\","
+      "\"units\":[{\"name\":\"WORK.BAD\",\"kind\":\"module\","
+      "\"ports\":true,\"instantiates\":[]}],"
+      "\"requires\":[],\"includes\":[],\"errors\":1}\n";
+
+   ck_assert_uint_eq(scan(SCAN_FILE("sv3.sv"), expect), 1);
+}
+END_TEST
+
 Suite *get_scan_tests(void)
 {
    Suite *s = suite_create("scan");
@@ -163,6 +265,11 @@ Suite *get_scan_tests(void)
    tcase_add_test(tc, test_vhdl3);
    tcase_add_test(tc, test_vhdl4);
    tcase_add_test(tc, test_work_name);
+   tcase_add_test(tc, test_sv1);
+   tcase_add_test(tc, test_sv2);
+   tcase_add_test(tc, test_sv_ifdef_a);
+   tcase_add_test(tc, test_sv_ifdef_b);
+   tcase_add_test(tc, test_sv_syntax);
    suite_add_tcase(s, tc);
 
    return s;

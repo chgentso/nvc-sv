@@ -96,7 +96,7 @@ static bool is_fixed_unpacked(vlog_node_t decl, vlog_node_t dt);
 static vlog_node_t foreach_number(int64_t value, const loc_t *loc);
 static vlog_node_t rewrite_monitor(vlog_node_t call);
 static vlog_node_t expand_let(vlog_node_t decl, vlog_node_t call);
-static vlog_node_t find_interface(ident_t name);
+static vlog_node_t lookup_interface(ident_t name);
 static vlog_node_t p_modport_name(vlog_node_t iface);
 static void set_decl_scopes(vlog_node_t container, ident_t prefix);
 static void register_user_net(vlog_node_t decl, vlog_node_t nettype);
@@ -527,7 +527,42 @@ static object_t *search_other_libs(ident_t unit, lib_accept_fn_t accept)
    return obj;
 }
 
-static vlog_node_t find_interface(ident_t name)
+static void scan_note_name(ident_t name)
+{
+   // When scanning for dependencies a name without a library is recorded
+   // for the caller to resolve
+   if (!lib_scan_active())
+      return;
+
+   LOCAL_TEXT_BUF tb = tb_new();
+   tb_cat(tb, "?");
+   tb_istr(tb, name);
+   lib_scan_note(ident_new(tb_get(tb)));
+}
+
+static void scan_skip_parameters(void)
+{
+   // When scanning for dependencies the class being specialised may be
+   // in a package which is not available: skip the parameter value list
+   consume(tHASH);
+
+   if (peek() != tLPAREN)
+      return;
+
+   int depth = 0;
+   do {
+      const token_t tok = peek();
+      if (tok == tEOF)
+         break;
+      else if (tok == tLPAREN)
+         depth++;
+      else if (tok == tRPAREN)
+         depth--;
+      consume(tok);
+   } while (depth > 0);
+}
+
+static vlog_node_t lookup_interface(ident_t name)
 {
    if (interfaces != NULL) {
       vlog_node_t v = hash_get(interfaces, name);
@@ -2036,10 +2071,11 @@ static vlog_node_t p_data_type(void)
          vlog_set_subkind(v, DT_VIRTUAL);
          vlog_set_ident(v, p_identifier());
          vlog_set_loc(v, &state.last_loc);
+         scan_note_name(vlog_ident(v));
 
          // An interface from an earlier analysis is found again when the
          // type is used as it may be declared again later in this one
-         vlog_node_t iface = find_interface(vlog_ident(v));
+         vlog_node_t iface = lookup_interface(vlog_ident(v));
          if (iface != NULL && interfaces != NULL
              && hash_get(interfaces, vlog_ident(v)) == iface)
             vlog_set_ref(v, iface);
@@ -2137,7 +2173,9 @@ static vlog_node_t p_data_type(void)
          }
 
          vlog_node_t d = vlog_symtab_query(symtab, id);
-         if (d != NULL && vlog_kind(d) == V_CLASS_DECL
+         if (d == NULL && peek() == tHASH && lib_scan_active())
+            scan_skip_parameters();
+         else if (d != NULL && vlog_kind(d) == V_CLASS_DECL
              && (vlog_flags(d) & VLOG_F_GENERIC))
             return specialise_class(d);
          else if (d != NULL && peek() == tHASH && vlog_kind(d) == V_TYPE_DECL
@@ -2556,7 +2594,7 @@ static vlog_node_t check_modport_member(vlog_node_t v)
       vlog_node_t m = vlog_decl(mp, i);
       if (vlog_ident(m) != vlog_ident(v))
          continue;
-      vlog_node_t iface = find_interface(vlog_ident2(port));
+      vlog_node_t iface = lookup_interface(vlog_ident2(port));
       if (iface == NULL)
          return v;
       else if (!vlog_has_value(m)) {
@@ -2569,7 +2607,7 @@ static vlog_node_t check_modport_member(vlog_node_t v)
       return vlog_rewrite(expr, NULL, modport_expr_cb, &me);
    }
 
-   vlog_node_t iface = find_interface(vlog_ident2(port));
+   vlog_node_t iface = lookup_interface(vlog_ident2(port));
    if (iface == NULL)
       return v;
 
@@ -2693,12 +2731,12 @@ static vlog_node_t hier_owner(vlog_node_t mr)
    vlog_node_t port = vlog_ref(mr);
    switch (vlog_kind(port)) {
    case V_IFACE_PORT:
-      return find_interface(vlog_ident2(port));
+      return lookup_interface(vlog_ident2(port));
    case V_MOD_INST:
       {
          ident_t name = inst_modules != NULL && vlog_ranges(port) == 0
             ? hash_get(inst_modules, port) : NULL;
-         return name != NULL ? find_interface(name) : NULL;
+         return name != NULL ? lookup_interface(name) : NULL;
       }
    default:
       return NULL;
@@ -5124,6 +5162,8 @@ static vlog_node_t package_by_name(ident_t id)
        && (vlog_ident(du) == qual || vlog_ident2(du) == id))
       return du;
 
+   scan_note_name(id);
+
    object_t *obj = lib_get_generic(lib_work(), qual, NULL);
 
    // A VHDL package uses the upper case name
@@ -5183,6 +5223,20 @@ static vlog_node_t p_scope_prefix(void)
 
    vlog_node_t scope = NULL;
    do {
+      if (scope == NULL && peek_nth(2) == tHASH && lib_scan_active()
+          && vlog_symtab_query(symtab, peek_ident_nth(1)) == NULL) {
+         // Specialisation of a class which is not available
+         consume(tID);
+         scan_skip_parameters();
+         consume(tSCOPE);
+         while (peek() == tID && peek_nth(2) == tSCOPE) {
+            consume(tID);
+            consume(tSCOPE);
+         }
+         qualify_failed = true;
+         return NULL;
+      }
+
       if (scope == NULL && peek_nth(2) == tHASH) {
          // Specialisation of a parameterised class
          vlog_node_t c = vlog_get_type(p_data_type());
@@ -5228,9 +5282,15 @@ static vlog_node_t p_scope_prefix(void)
 
       if (scope == NULL) {
          // Skip the rest of the qualified name
-         while (peek() == tID && peek_nth(2) == tSCOPE) {
+         while (peek() == tID && (peek_nth(2) == tSCOPE
+                                  || (lib_scan_active()
+                                      && peek_nth(2) == tHASH))) {
+            const bool special = peek_nth(2) == tHASH;
             consume(tID);
-            consume(tSCOPE);
+            if (special)
+               scan_skip_parameters();
+            if (peek() == tSCOPE)
+               consume(tSCOPE);
          }
          qualify_failed = true;
          return NULL;
@@ -5685,7 +5745,7 @@ static vlog_node_t hier_member_decl(vlog_node_t v)
          ? hash_get(inst_modules, vlog_ref(first)) : NULL;
       if (name == NULL)
          return NULL;
-      container = find_interface(name);
+      container = lookup_interface(name);
    }
    else if (current_module != NULL && vlog_kind(current_module) == V_MODULE
             && ident_casecmp(names[0], vlog_ident2(current_module)))
@@ -5727,7 +5787,7 @@ static vlog_node_t hier_member_decl(vlog_node_t v)
          }
       }
 
-      container = name != NULL ? find_interface(name) : NULL;
+      container = name != NULL ? lookup_interface(name) : NULL;
    }
 
    return NULL;
@@ -22760,6 +22820,14 @@ static vlog_node_t p_hierarchical_instance(void)
    if (peek() == tLSQUARE)
       vlog_add_range(v, p_unpacked_dimension());
 
+   if (lib_scan_active() && (peek() == tSEMI || peek() == tCOMMA)) {
+      // Most likely a variable of a type from a package which is not
+      // available rather than an instance
+      vlog_set_loc(v, CURRENT_LOC);
+      vlog_symtab_put(symtab, v);
+      return v;
+   }
+
    consume(tLPAREN);
 
    if (peek() != tRPAREN)
@@ -22945,7 +23013,7 @@ static void p_module_or_udp_instantiation(vlog_node_t mod)
    vlog_set_ident(v, p_identifier());
 
    if (peek() == tHASH) {
-      vlog_node_t target = find_interface(vlog_ident(v));
+      vlog_node_t target = lookup_interface(vlog_ident(v));
       if (target != NULL && vlog_kind(target) != V_MODULE)
          target = NULL;
 
@@ -22954,7 +23022,7 @@ static void p_module_or_udp_instantiation(vlog_node_t mod)
       param_target = NULL;
    }
 
-   vlog_node_t ptarget = find_interface(vlog_ident(v));
+   vlog_node_t ptarget = lookup_interface(vlog_ident(v));
    port_target = ptarget != NULL && vlog_kind(ptarget) == V_MODULE
       ? ptarget : NULL;
 
@@ -23567,7 +23635,7 @@ static bool is_nonansi_interface_port(vlog_node_t mod)
 
    if (peek_nth(nth) != tID)
       return false;
-   else if (find_interface(peek_ident_nth(1)) == NULL
+   else if (lookup_interface(peek_ident_nth(1)) == NULL
             && vlog_symtab_query(symtab, peek_ident_nth(1)) != NULL)
       return false;   // Name of a data type
 
@@ -23581,7 +23649,8 @@ static void p_nonansi_interface_port_declaration(vlog_node_t mod)
    BEGIN("interface port declaration");
 
    ident_t name = p_identifier();
-   vlog_node_t decl = find_interface(name), mp = NULL;
+   scan_note_name(name);
+   vlog_node_t decl = lookup_interface(name), mp = NULL;
 
    if (optional(tDOT))
       mp = p_modport_name(decl);
@@ -23642,7 +23711,8 @@ static void p_interface_port_declaration(vlog_node_t mod, ident_t iface)
          name = ident_new("interface");
       else {
          name = p_identifier();
-         decl = find_interface(name);
+         scan_note_name(name);
+         decl = lookup_interface(name);
       }
 
       if (optional(tDOT))
@@ -24111,7 +24181,7 @@ static vlog_node_t sample_iface_member(vlog_node_t v)
    if (name == NULL)
       return NULL;
 
-   vlog_node_t iface = find_interface(name);
+   vlog_node_t iface = lookup_interface(name);
    if (iface == NULL || vlog_kind(iface) != V_MODULE
        || !(vlog_flags(iface) & VLOG_F_INTERFACE))
       return NULL;
@@ -25710,7 +25780,7 @@ static vlog_node_t bind_child_module(vlog_node_t mod, ident_t id)
       for (int j = 0; j < ninst; j++) {
          vlog_node_t inst = vlog_stmt(list, j);
          if (vlog_kind(inst) == V_MOD_INST && vlog_ident(inst) == id) {
-            vlog_node_t next = find_interface(vlog_ident(list));
+            vlog_node_t next = lookup_interface(vlog_ident(list));
             return next != NULL && vlog_kind(next) == V_MODULE ? next : NULL;
          }
       }
@@ -25761,18 +25831,18 @@ static vlog_node_t p_bind_directive(void)
    // The first name may be an instance in the module with the directive
    vlog_node_t mod = NULL, scope_mod = NULL;
    if (peek() == tDOT && bind_scope != NULL) {
-      scope_mod = find_interface(bind_scope);
+      scope_mod = lookup_interface(bind_scope);
       if (scope_mod != NULL && vlog_kind(scope_mod) == V_MODULE)
          mod = bind_child_module(scope_mod, target);
    }
 
    bool relative = mod != NULL;
    if (!relative)
-      mod = find_interface(target);
+      mod = lookup_interface(target);
 
    if (mod == NULL && peek() != tDOT && peek() != tCOLON && bind_scope != NULL) {
       // The target is an instance in the module with the directive (23.11)
-      scope_mod = find_interface(bind_scope);
+      scope_mod = lookup_interface(bind_scope);
       if (scope_mod != NULL && vlog_kind(scope_mod) == V_MODULE)
          mod = bind_child_module(scope_mod, target);
 
@@ -25823,7 +25893,7 @@ static vlog_node_t p_bind_directive(void)
          // starts with the name of an instance there
          if (bind_scope != NULL && peek() == tID) {
             ident_t first = peek_ident_nth(1);
-            vlog_node_t sm = find_interface(bind_scope);
+            vlog_node_t sm = lookup_interface(bind_scope);
             if (sm != NULL && vlog_kind(sm) == V_MODULE
                 && bind_child_module(sm, first) != NULL) {
                tb_istr(path, bind_scope);

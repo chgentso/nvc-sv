@@ -91,6 +91,86 @@ Print all analysed and elaborated units in the work library.
 Print dependencies of
 .Ar unit
 in Makefile format.
+.\" --scan
+.It Fl \-scan Op Ar option ... Ar file ...
+Print the design units which each source file provides and the units it
+requires, without analysing it, so that the order in which files must be
+analysed can be worked out before anything is analysed.  The command
+takes the same options as
+.Fl a
+and the same global options such as
+.Fl \-std ,
+.Fl \-work
+and
+.Fl L .
+The files are preprocessed and parsed as for analysis, so conditional
+compilation and
+.Ql `include
+work as usual, but no library other than the standard ones needs to exist,
+nothing is written to any library, and a design unit which cannot be found
+is not an error.  Only syntax errors are reported.
+.Pp
+One line of JSON is written to standard output for each file:
+.Bd -literal -offset indent
+{"file":"top.sv","language":"verilog",
+ "units":[{"name":"WORK.TOP","kind":"module","ports":true,
+           "instantiates":["leaf"]}],
+ "requires":["?my_pkg"],"includes":["defs.svh"]}
+.Ed
+.Pp
+The
+.Ql units
+array has an element for each unit defined in the file with its
+.Ql name
+and
+.Ql kind ,
+which is one of
+.Ql entity ,
+.Ql architecture ,
+.Ql package ,
+.Ql package-body ,
+.Ql configuration ,
+.Ql context ,
+.Ql module ,
+.Ql interface ,
+.Ql program ,
+.Ql checker ,
+.Ql primitive
+or
+.Ql vunit .
+The
+.Ql ports
+member is present for entities, modules and programs and is true if they
+have any ports.  The
+.Ql instantiates
+member lists the components, entities, configurations and modules which
+are instantiated; these are needed at elaboration, not for analysis.
+VHDL names are upper case and qualified with the library to which they
+resolve, so a reference to
+.Ql work
+is replaced with the name of the work library.
+.Pp
+The
+.Ql requires
+array lists the units which must be analysed before the file and does not
+include units defined in the same file.  An architecture requires its
+entity, a package body its package, and a configuration its entity.  A
+VHDL entity or configuration instantiated directly is also required.  For
+Verilog and System Verilog the library is not known so a name has the form
+.Ql ?name :
+it is a package which is imported or used with
+.Ql ::
+or an interface used as the type of a port or a virtual interface.  The
+.Ql includes
+array lists the files read by
+.Ql `include .
+.Pp
+If the file has syntax errors they are reported on standard error as usual
+and the object has an additional
+.Ql errors
+member with their number.  The exit status is 1 if any file had errors.
+A construct which depends on a unit that is not available, such as a type
+from a missing package, can sometimes cause a spurious syntax error.
 .El
 .\"
 .Pp

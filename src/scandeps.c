@@ -23,7 +23,10 @@
 #include "phase.h"
 #include "scan.h"
 #include "scandeps.h"
+#include "vlog/vlog-util.h"
 #include "tree.h"
+#include "vlog/vlog-node.h"
+#include "vlog/vlog-phase.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -206,6 +209,93 @@ static void scan_vhdl_unit(tree_t unit, text_buf_t *units, unsigned *nunits,
    }
 }
 
+static void scan_inst_list_cb(vlog_node_t v, void *context)
+{
+   scan_ctx_t *ctx = context;
+
+   if (vlog_stmts(v) == 0 || !vlog_has_ident(v))
+      return;   // Not an instantiation
+
+   ident_t name = vlog_ident(v);
+
+   for (unsigned i = 0; i < ctx->nseen; i++) {
+      if (ctx->seen[i] == name)
+         return;
+   }
+
+   if (ctx->nseen == ctx->maxseen) {
+      ctx->maxseen = MAX(8, ctx->maxseen * 2);
+      ctx->seen = xrealloc_array(ctx->seen, ctx->maxseen, sizeof(ident_t));
+   }
+
+   ctx->seen[ctx->nseen++] = name;
+
+   if (ctx->nseen > 1)
+      tb_append(ctx->inst, ',');
+   scan_json_string(ctx->inst, istr(name));
+}
+
+static void scan_vlog_unit(vlog_node_t unit, text_buf_t *units,
+                           unsigned *nunits, ident_t **provided,
+                           unsigned *nprovided)
+{
+   const char *kind = NULL;
+   bool has_ports = false;
+
+   switch (vlog_kind(unit)) {
+   case V_MODULE:
+      if (vlog_flags(unit) & VLOG_F_INTERFACE)
+         kind = "interface";
+      else if (vlog_flags(unit) & VLOG_F_CHECKER)
+         kind = "checker";
+      else
+         kind = "module";
+      has_ports = vlog_ports(unit) > 0;
+      break;
+   case V_PROGRAM:
+      kind = "program";
+      has_ports = vlog_ports(unit) > 0;
+      break;
+   case V_PACKAGE:
+      kind = "package";
+      break;
+   case V_PRIMITIVE:
+      kind = "primitive";
+      break;
+   case V_CONFIG:
+      kind = "configuration";
+      break;
+   default:
+      return;
+   }
+
+   ident_t name = vlog_ident(unit);
+   ident_t simple = vlog_has_ident2(unit) ? vlog_ident2(unit)
+      : ident_rfrom(name, '.');
+
+   scan_ctx_t ctx = { .tb = units, .inst = tb_new() };
+   vlog_visit_only(unit, scan_inst_list_cb, &ctx, V_INST_LIST);
+
+   if ((*nunits)++ > 0)
+      tb_append(units, ',');
+
+   tb_cat(units, "{\"name\":");
+   scan_json_string(units, istr(name));
+   tb_printf(units, ",\"kind\":\"%s\"", kind);
+   if (vlog_kind(unit) == V_MODULE || vlog_kind(unit) == V_PROGRAM)
+      tb_printf(units, ",\"ports\":%s", has_ports ? "true" : "false");
+   tb_printf(units, ",\"instantiates\":[%s]}", tb_get(ctx.inst));
+
+   tb_free(ctx.inst);
+   free(ctx.seen);
+
+   // A reference to the unit by name from the same file is satisfied
+   char *ref LOCAL = xasprintf("?%s", istr(simple));
+   *provided = xrealloc_array(*provided, *nprovided + 2, sizeof(ident_t));
+   (*provided)[(*nprovided)++] = name;
+   (*provided)[(*nprovided)++] = ident_new(ref);
+}
+
 unsigned scan_file_deps(const char *file, text_buf_t *json)
 {
    // Parse the file as analysis would but without any libraries present:
@@ -242,7 +332,25 @@ unsigned scan_file_deps(const char *file, text_buf_t *json)
       break;
 
    case SOURCE_VERILOG:
-      fatal("scanning of Verilog files is not yet supported");
+      {
+         language = "verilog";
+
+         LOCAL_TEXT_BUF tb = tb_new();
+         input_record_includes(true);
+         vlog_preprocess(tb, true);
+         input_record_includes(false);
+
+         file_ref_t file_ref = loc_file_ref(file, NULL);
+         input_from_buffer(tb_get(tb), tb_len(tb), file_ref, SOURCE_VERILOG);
+
+         vlog_node_t unit;
+         while ((unit = vlog_parse())) {
+            if (is_top_level(unit))
+               lib_put_vlog(work, unit);
+            scan_vlog_unit(unit, units, &nunits, &provided, &nprovided);
+         }
+      }
+      break;
 
    case SOURCE_SDF:
       language = "sdf";
@@ -276,7 +384,17 @@ unsigned scan_file_deps(const char *file, text_buf_t *json)
    free(done);
    free(provided);
 
-   tb_cat(json, "],\"includes\":[]");
+   tb_cat(json, "],\"includes\":[");
+
+   unsigned nincl = 0;
+   if (!strcmp(language, "verilog")) {
+      unsigned n;
+      const char *const *files = input_included_files(&n);
+      for (unsigned i = 0; i < n; i++)
+         scan_json_list_item(json, &nincl, files[i]);
+   }
+
+   tb_cat(json, "]");
 
    const unsigned errors = diag_scan_errors() - base_errors;
    if (errors > 0)

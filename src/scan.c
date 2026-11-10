@@ -215,6 +215,42 @@ static char *file_directory(const char *path)
    return slash != NULL ? xstrndup(path, slash - path) : NULL;
 }
 
+static bool  record_includes = false;
+static char **included = NULL;
+static unsigned nincluded = 0, maxincluded = 0;
+
+void input_record_includes(bool on)
+{
+   if (on) {
+      for (unsigned i = 0; i < nincluded; i++)
+         free(included[i]);
+      nincluded = 0;
+   }
+
+   record_includes = on;
+}
+
+const char *const *input_included_files(unsigned *count)
+{
+   *count = nincluded;
+   return (const char *const *)included;
+}
+
+static void note_include(const char *path)
+{
+   for (unsigned i = 0; i < nincluded; i++) {
+      if (strcmp(included[i], path) == 0)
+         return;
+   }
+
+   if (nincluded == maxincluded) {
+      maxincluded = MAX(8, maxincluded * 2);
+      included = xrealloc_array(included, maxincluded, sizeof(char *));
+   }
+
+   included[nincluded++] = xstrdup(path);
+}
+
 void push_file(const char *file, const loc_t *srcloc)
 {
    char actual[PATH_MAX];
@@ -278,6 +314,9 @@ void push_file(const char *file, const loc_t *srcloc)
          map = map_file(fd, info.size);
 
       file_ref_t file_ref = loc_file_ref(file, map);
+
+      if (record_includes)
+         note_include(actual);
 
       push_buffer(map, info.size, file_ref);
       input_buf.dir = file_directory(actual);
