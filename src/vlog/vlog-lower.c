@@ -313,6 +313,7 @@ static void vlog_defer_class(mir_context_t *mc, vlog_node_t c, ident_t parent);
 static void vlog_lower_class_statics(vlog_gen_t *g, vlog_node_t c);
 static vlog_node_t vlog_find_scope(ident_t name);
 static hash_t *sv_spec_scopes = NULL;   // Scope of class specialisation
+static void vlog_check_context(mir_context_t *mc);
 static void vlog_note_spec(vlog_node_t class);
 static void vlog_lower_event_or_delay(vlog_gen_t *g, vlog_node_t ctrl);
 static mir_value_t vlog_add_local_var(vlog_gen_t *g, vlog_node_t d,
@@ -19405,6 +19406,36 @@ static void vlog_scan_namespace_cb(lib_t lib, ident_t name, int kind, void *ctx)
    vlog_defer_scope(mc, name);
 }
 
+static void vlog_scan_namespace(mir_context_t *mc)
+{
+   // Every class that an object can have must be known before the code which
+   // dispatches on the class of an object is generated.  A specialisation
+   // declared in an instance is only initialised when its scope runs.
+
+   lib_walk_index(lib_work(), vlog_scan_namespace_cb, mc);
+
+   vlog_check_context(mc);
+
+   if (sv_spec_scopes == NULL)
+      return;
+
+   unsigned known;
+   do {
+      known = hash_members(sv_spec_scopes);
+
+      ident_t *names LOCAL = xmalloc_array(known, sizeof(ident_t));
+      unsigned n = 0;
+      const void *key;
+      void *value;
+      for (hash_iter_t it = HASH_BEGIN;
+           n < known && hash_iter(sv_spec_scopes, &it, &key, &value); )
+         names[n++] = (ident_t)key;
+
+      for (unsigned i = 0; i < n; i++)
+         vlog_defer_scope(mc, names[i]);
+   } while (hash_members(sv_spec_scopes) != known);
+}
+
 static bool vlog_is_subclass(vlog_node_t c, vlog_node_t base)
 {
    for (;; c = vlog_ref(c)) {
@@ -19436,7 +19467,7 @@ static void vlog_lower_cast_unit(mir_unit_t *mu, object_t *obj)
       .mir = mir_get_context(mu),
    };
 
-   lib_walk_index(lib_work(), vlog_scan_namespace_cb, g.mir);
+   vlog_scan_namespace(g.mir);
 
    mir_type_t t_offset = mir_offset_type(mu);
    mir_set_result(mu, t_offset);
@@ -19489,7 +19520,7 @@ static void vlog_lower_dispatch(mir_unit_t *mu, object_t *obj)
 
    // Classes outside modules are found in the library and those inside
    // modules have been seen by now as this runs after elaboration
-   lib_walk_index(lib_work(), vlog_scan_namespace_cb, g.mir);
+   vlog_scan_namespace(g.mir);
 
    const int nports = vlog_ports(decl);
    mir_value_t *args LOCAL = xmalloc_array(nports + 1, sizeof(mir_value_t));
@@ -23252,7 +23283,7 @@ static void vlog_lower_crv_dispatch(mir_unit_t *mu, object_t *obj)
       .mir = mir_get_context(mu),
    };
 
-   lib_walk_index(lib_work(), vlog_scan_namespace_cb, g.mir);
+   vlog_scan_namespace(g.mir);
 
    mir_type_t t_offset = mir_offset_type(mu);
    mir_set_result(mu, t_offset);

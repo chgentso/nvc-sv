@@ -42,6 +42,7 @@ typedef struct _reheat_ctx {
    ident_t             dotted;
    ident_t             cloned;
    hset_t             *instances;
+   hset_t             *lowered_blocks;
 } reheat_ctx_t;
 
 static void reheat_inherit(reheat_ctx_t *ctx, const reheat_ctx_t *parent)
@@ -52,6 +53,7 @@ static void reheat_inherit(reheat_ctx_t *ctx, const reheat_ctx_t *parent)
    ctx->registry  = parent->registry;
    ctx->cover     = parent->cover;
    ctx->instances = parent->instances;
+   ctx->lowered_blocks = parent->lowered_blocks;
 }
 
 static bool reheat_is_vhdl_shim(tree_t b)
@@ -75,6 +77,37 @@ static bool reheat_is_vhdl_shim(tree_t b)
    return false;
 }
 
+static void reheat_lower_verilog(tree_t b, const reheat_ctx_t *parent,
+                                 ident_t parent_cloned)
+{
+   // Every Verilog instance whose parents are also Verilog is lowered before
+   // any code runs as the code which dispatches on the class of an object
+   // needs all of the classes
+
+   tree_t hier = tree_decl(b, 0);
+   assert(tree_kind(hier) == T_HIER);
+
+   if (tree_subkind(hier) != T_VERILOG || reheat_is_vhdl_shim(b))
+      return;
+
+   vlog_node_t body = tree_vlog(tree_ref(hier));
+
+   if (!hset_contains(parent->instances, body)) {
+      vlog_lower_instance(parent->mir, body, parent_cloned, b);
+      hset_insert(parent->instances, body);
+   }
+
+   vlog_lower_block(parent->mir, parent_cloned, b);
+   hset_insert(parent->lowered_blocks, b);
+
+   const int nstmts = tree_stmts(b);
+   for (int i = 0; i < nstmts; i++) {
+      tree_t s = tree_stmt(b, i);
+      if (tree_kind(s) == T_BLOCK)
+         reheat_lower_verilog(s, parent, tree_ident2(hier));
+   }
+}
+
 static void reheat_block(tree_t b, const reheat_ctx_t *parent)
 {
    reheat_ctx_t ctx = {};
@@ -87,14 +120,16 @@ static void reheat_block(tree_t b, const reheat_ctx_t *parent)
    ctx.cloned = tree_ident2(hier);
 
    if (tree_subkind(hier) == T_VERILOG) {
-      vlog_node_t body = tree_vlog(tree_ref(hier));
+      if (!hset_contains(ctx.lowered_blocks, b)) {
+         vlog_node_t body = tree_vlog(tree_ref(hier));
 
-      if (!hset_contains(ctx.instances, body)) {
-         vlog_lower_instance(ctx.mir, body, parent->cloned, b);
-         hset_insert(ctx.instances, body);
+         if (!hset_contains(ctx.instances, body)) {
+            vlog_lower_instance(ctx.mir, body, parent->cloned, b);
+            hset_insert(ctx.instances, body);
+         }
+
+         vlog_lower_block(ctx.mir, parent->cloned, b);
       }
-
-      vlog_lower_block(ctx.mir, parent->cloned, b);
 
       if (reheat_is_vhdl_shim(b)) {
          // Recreate the placeholder unit which exposes the ports of the
@@ -149,11 +184,16 @@ void reheat(tree_t top, unit_registry_t *ur, mir_context_t *mc,
       .registry  = ur,
       .mir       = mc,
       .instances = hset_new(16),
+      .lowered_blocks = hset_new(16),
    };
 
    const int ntops = tree_stmts(top);
    for (int i = 0; i < ntops; i++)
+      reheat_lower_verilog(tree_stmt(top, i), &ctx, NULL);
+
+   for (int i = 0; i < ntops; i++)
       reheat_block(tree_stmt(top, i), &ctx);
 
    hset_free(ctx.instances);
+   hset_free(ctx.lowered_blocks);
 }
