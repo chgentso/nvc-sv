@@ -1215,6 +1215,7 @@ static bool elab_port_value_is_variable(vlog_node_t value)
          return nparams > 0 && !vlog_has_value(value);
       }
    case V_REF:
+   case V_HIER_REF:
       {
          if (!vlog_has_ref(value))
             return false;
@@ -1240,6 +1241,18 @@ static bool elab_port_drives_variable(vlog_node_t value)
    case V_PART_SELECT:
    case V_MEMBER_REF:
       return elab_port_drives_variable(vlog_value(value));
+   case V_CONCAT:
+      {
+         const int nparams = vlog_params(value);
+         for (int i = 0; i < nparams; i++) {
+            vlog_node_t p = vlog_param(value, i);
+            if (!elab_port_drives_variable(p) && !elab_port_value_is_variable(p)
+                && !vlog_is_net(p))
+               return false;
+         }
+
+         return nparams > 0 && !vlog_has_value(value);
+      }
    case V_REF:
       {
          vlog_node_t type = vlog_get_type(value);

@@ -23511,7 +23511,9 @@ static void p_ansi_port_declaration(vlog_node_t mod, v_port_kind_t *kind,
 
    *iface = NULL;
 
-   if (peek() != tID)
+   // A data type name or package scope can follow the direction of the
+   // previous port without a direction of its own
+   if (peek() != tID || peek_nth(2) == tID || peek_nth(2) == tSCOPE)
       p_net_port_header(kind, dt);
    else if (*dt == NULL)
       *dt = implicit_type();

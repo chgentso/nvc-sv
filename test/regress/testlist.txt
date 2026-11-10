@@ -2554,3 +2554,5 @@ svevtport1 verilog
 svlrmmisc1 verilog
 svprogparam1 verilog
 svportpat1      verilog
+svporthier1     verilog
+svportdt1       verilog
