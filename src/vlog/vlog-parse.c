@@ -3135,6 +3135,25 @@ static void resolve_pending_lookups(vlog_node_t scope)
    }
    npending_lookups = wr;
 }
+static bool foreach_at_last_index(void)
+{
+   // The next bracket is the last of the foreach array and so is followed
+   // by the closing parenthesis
+
+   int n = 2;
+   for (int depth = 1; depth > 0 && n < TOKENQ_SIZE - 8; n++) {
+      const token_t tok = peek_nth(n);
+      if (tok == tLSQUARE)
+         depth++;
+      else if (tok == tRSQUARE)
+         depth--;
+      else if (tok == tEOF)
+         break;
+   }
+
+   return peek_nth(n) == tRPAREN;
+}
+
 static vlog_node_t p_select(ident_t id)
 {
    // [ { . member_identifier bit_select } . member_identifier ]
@@ -3411,6 +3430,9 @@ static vlog_node_t p_select(ident_t id)
          }
 
          consume(tRSQUARE);
+
+         if (stop_at_index && peek() == tLSQUARE && foreach_at_last_index())
+            return prefix;   // The loop variables follow an element
       } while (optional(tLSQUARE));
 
       if (peek() != tDOT)
@@ -9748,7 +9770,7 @@ static vlog_node_t p_foreach_statement(void)
    const loc_t *loc = CURRENT_LOC;
 
    foreach_dim_t dims[MAX_FOREACH_DIMS];
-   int ndims = 0;
+   int ndims = 0, nselected = 0;
    vlog_node_t decl = NULL;
    switch (vlog_kind(arr)) {
    case V_REF:
@@ -9761,6 +9783,22 @@ static vlog_node_t p_foreach_statement(void)
       if (decl == NULL)
          error_at(loc, "sorry, the array of this foreach cannot be found "
                   "from its hierarchical name");
+      break;
+   case V_BIT_SELECT:
+      {
+         // The loop variables are for the dimensions of an element
+         vlog_node_t root = arr;
+         while (vlog_kind(root) == V_BIT_SELECT) {
+            nselected += vlog_params(root);
+            root = vlog_value(root);
+         }
+
+         if ((vlog_kind(root) == V_REF || vlog_kind(root) == V_MEMBER_REF)
+             && vlog_has_ref(root))
+            decl = vlog_ref(root);
+         else
+            error_at(loc, "foreach requires the name of an array");
+      }
       break;
    default:
       error_at(loc, "foreach requires the name of an array");
@@ -9798,6 +9836,17 @@ static vlog_node_t p_foreach_statement(void)
       case V_TF_PORT_DECL:
       case V_FUNC_DECL:   // The return value variable
          ndims = foreach_dimensions(decl, dims);
+         if (nselected > 0 && nselected < ndims) {
+            memmove(dims, dims + nselected,
+                    (ndims - nselected) * sizeof(foreach_dim_t));
+            ndims -= nselected;
+         }
+         else if (nselected > 0) {
+            error_at(loc, "foreach has more loop variables than the element "
+                     "has dimensions");
+            ndims = 0;
+         }
+
          if (nvars > ndims) {
             error_at(loc, "foreach has more loop variables than the array "
                      "has dimensions");
