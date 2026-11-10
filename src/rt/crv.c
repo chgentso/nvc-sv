@@ -4524,6 +4524,19 @@ bool crv_solve(crv_t *c)
       }
    }
 
+   if (getenv("NVC_CRV_SKIP")) {
+      // Debugging aid: ignore the constraints with these indices
+      for (const char *p = getenv("NVC_CRV_SKIP"); *p; ) {
+         char *end;
+         const long i = strtol(p, &end, 10);
+         if (end == p)
+            break;
+         if (i >= 0 && i < (long)c->ncons)
+            c->cons[i].dead = true;
+         p = *end ? end + 1 : end;
+      }
+   }
+
    const int nsoft = c->nsoft;
    bool *active = NEW(bool, nsoft);
    sol_t sol = { 0 };
