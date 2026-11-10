@@ -23909,6 +23909,62 @@ static mir_value_t vlog_lower_inside_scalar(vlog_gen_t *g, vlog_node_t v,
       vlog_node_t item = vlog_param(v, i);
 
       mir_value_t test;
+      vlog_node_t atype = is_real || vlog_kind(item) == V_INSIDE_RANGE
+         ? NULL : vlog_get_type(item);
+      if (atype != NULL && vlog_kind(atype) == V_DATA_TYPE
+          && (vlog_subkind(atype) == DT_DYNARRAY
+              || vlog_subkind(atype) == DT_QUEUE)
+          && vlog_crv_is_array_ref(item)) {
+         // Any string in the array or queue is equal (11.4.13)
+         mir_value_t arr = vlog_lower_rvalue(g, item);
+         mir_value_t data = mir_build_unwrap(g->mu, arr);
+         mir_value_t len = mir_build_uarray_len(g->mu, arr, 0);
+
+         mir_type_t t_bool = mir_bool_type(g->mu);
+         mir_value_t acc = mir_add_var(g->mu, t_bool, MIR_NULL_STAMP,
+                                       ident_uniq("inside"), MIR_VAR_TEMP);
+         mir_build_store(g->mu, acc, mir_const(g->mu, t_bool, 0));
+
+         mir_value_t idx = mir_add_var(g->mu, t_offset, MIR_NULL_STAMP,
+                                       ident_uniq("idx"), MIR_VAR_TEMP);
+         mir_build_store(g->mu, idx, mir_const(g->mu, t_offset, 0));
+
+         mir_block_t test_bb = mir_add_block(g->mu);
+         mir_block_t body_bb = mir_add_block(g->mu);
+         mir_block_t done_bb = mir_add_block(g->mu);
+
+         mir_build_jump(g->mu, test_bb);
+
+         mir_set_cursor(g->mu, test_bb, MIR_APPEND);
+         mir_value_t k = mir_build_load(g->mu, idx);
+         mir_build_cond(g->mu, mir_build_cmp(g->mu, MIR_CMP_LT, k, len),
+                        body_bb, done_bb);
+
+         mir_set_cursor(g->mu, body_bb, MIR_APPEND);
+         mir_value_t elem = mir_build_load(
+            g->mu, mir_build_array_ref(g->mu, data, k));
+         mir_value_t args[] = { value, elem };
+         mir_value_t eq = mir_build_fcall(g->mu, ident_new("__sv_str_eq"),
+                                          t_offset, MIR_NULL_STAMP, args, 2);
+         mir_build_consume(g->mu, eq);
+         mir_value_t hit = mir_build_cmp(g->mu, MIR_CMP_NEQ, eq,
+                                         mir_const(g->mu, t_offset, 0));
+         mir_build_store(g->mu, acc, mir_build_or(
+                            g->mu, mir_build_load(g->mu, acc), hit));
+         mir_build_store(g->mu, idx, mir_build_add(
+                            g->mu, t_offset, k, mir_const(g->mu, t_offset, 1)));
+         mir_build_jump(g->mu, test_bb);
+
+         mir_set_cursor(g->mu, done_bb, MIR_APPEND);
+         result = mir_build_or(g->mu, result, mir_build_load(g->mu, acc));
+         continue;
+      }
+
+      if (!is_real && vlog_kind(item) != V_INSIDE_RANGE
+          && vlog_crv_is_array_ref(item))
+         fatal_at(vlog_loc(item), "sorry, a fixed size array in an inside "
+                  "expression of a string is not supported");
+
       if (vlog_kind(item) == V_INSIDE_RANGE) {
          if (!is_real)
             fatal_at(vlog_loc(item), "sorry, a range in an inside expression "
