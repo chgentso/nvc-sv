@@ -2559,3 +2559,4 @@ svportdt1       verilog
 svenumfill1     verilog
 svinsidefill1   verilog
 svdynnewpat1    verilog
+svdistdollar1   verilog

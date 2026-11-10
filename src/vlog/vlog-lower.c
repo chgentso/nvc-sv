@@ -21066,9 +21066,21 @@ static mir_value_t vlog_crv_dist(vlog_gen_t *g, vlog_node_t v)
    for (int i = 0; i < nparams; i++) {
       vlog_node_t item = vlog_param(v, i);
 
-      mir_value_t lo = vlog_crv_to_offset(g, vlog_lower_rvalue(g, vlog_left(item)));
-      mir_value_t hi = vlog_has_right(item)
-         ? vlog_crv_to_offset(g, vlog_lower_rvalue(g, vlog_right(item))) : lo;
+      // A $ in a range is the smallest or largest value of the variable
+      mir_value_t lo;
+      if (vlog_kind(vlog_left(item)) == V_DOLLAR)
+         lo = vlog_crv_int(g, is_signed ? INT64_MIN >> (64 - MIN(width, 64))
+                           : 0);
+      else
+         lo = vlog_crv_to_offset(g, vlog_lower_rvalue(g, vlog_left(item)));
+
+      mir_value_t hi = lo;
+      if (vlog_has_right(item) && vlog_kind(vlog_right(item)) == V_DOLLAR)
+         hi = vlog_crv_int(g, is_signed ? INT64_MAX >> (64 - MIN(width, 64))
+                           : width >= 63 ? INT64_MAX
+                           : (INT64_C(1) << width) - 1);
+      else if (vlog_has_right(item))
+         hi = vlog_crv_to_offset(g, vlog_lower_rvalue(g, vlog_right(item)));
       mir_value_t weight =
          vlog_crv_to_offset(g, vlog_lower_rvalue(g, vlog_delay(item)));
 
