@@ -318,10 +318,108 @@ static void load_bind_cb(lib_t lib, ident_t name, int kind, void *ctx)
       APUSH(bind_units, b);
 }
 
-void vlog_load_binds(lib_t lib)
+static void collect_insts_cb(vlog_node_t v, void *ctx)
+{
+   if (vlog_kind(v) == V_INST_LIST)
+      APUSH(*(A(ident_t) *)ctx, vlog_ident(v));
+}
+
+static ident_t bind_key(ident_t name)
+{
+   // The name of a module without its library, in upper case
+
+   const char *str = istr(name), *dot = strrchr(str, '.');
+   LOCAL_TEXT_BUF tb = tb_new();
+   tb_cat(tb, dot != NULL ? dot + 1 : str);
+   tb_upcase(tb);
+   return ident_new(tb_get(tb));
+}
+
+static unsigned reached = 0;
+
+static void reach_module(lib_t lib, ident_t name, hset_t *seen)
+{
+   ident_t key = bind_key(name);
+   if (hset_contains(seen, key))
+      return;
+
+   hset_insert(seen, key);
+   reached++;
+
+   ident_t qual = ident_prefix(lib_name(lib), key, '.');
+   object_t *obj = lib_get_generic(lib, qual, NULL);
+   vlog_node_t mod = obj != NULL ? vlog_from_object(obj) : NULL;
+   if (mod == NULL || vlog_kind(mod) != V_MODULE)
+      return;
+
+   A(ident_t) insts = AINIT;
+   vlog_visit(mod, collect_insts_cb, &insts);
+
+   for (unsigned i = 0; i < insts.count; i++)
+      reach_module(lib, insts.items[i], seen);
+
+   ACLEAR(insts);
+}
+
+void vlog_load_binds(lib_t lib, object_t **tops, int ntops)
 {
    ACLEAR(bind_units);
    lib_walk_index(lib, load_bind_cb, NULL);
+
+   // A bind directive in a module only applies if the module is in the
+   // elaborated design.  If a top level is not a Verilog module the
+   // hierarchy is not known so every directive applies.
+   hset_t *seen = hset_new(64);
+   bool known = true;
+   for (int i = 0; i < ntops; i++) {
+      vlog_node_t top = vlog_from_object(tops[i]);
+      if (top == NULL || vlog_kind(top) != V_MODULE)
+         known = false;
+      else
+         reach_module(lib, vlog_ident2(top), seen);
+   }
+
+   if (known) {
+      bool *done LOCAL = xcalloc_array(MAX(bind_units.count, 1), sizeof(bool));
+      bool changed;
+      do {
+         changed = false;
+         for (unsigned i = 0; i < bind_units.count; i++) {
+            if (done[i])
+               continue;
+
+            vlog_node_t b = bind_units.items[i];
+            const char *name = istr(vlog_ident(b));
+            const char *scope = strchr(strstr(name, ".BIND#") + 6, '#');
+            scope = scope != NULL ? strchr(scope + 1, '#') : NULL;
+
+            const bool active = scope == NULL
+               || hset_contains(seen, bind_key(ident_new(scope + 1)));
+            if (active) {
+               done[i] = true;
+
+               // The bound instances may contain others
+               A(ident_t) insts = AINIT;
+               vlog_visit(b, collect_insts_cb, &insts);
+               for (unsigned j = 0; j < insts.count; j++) {
+                  const unsigned before = reached;
+                  reach_module(lib, insts.items[j], seen);
+                  changed |= reached != before;
+               }
+               ACLEAR(insts);
+            }
+         }
+      } while (changed);
+
+      unsigned wptr = 0;
+      for (unsigned i = 0; i < bind_units.count; i++) {
+         if (done[i])
+            bind_units.items[wptr++] = bind_units.items[i];
+      }
+      ATRIM(bind_units, wptr);
+   }
+
+   hset_free(seen);
 }
 
 static bool copy_bind_pred(vlog_node_t v, void *ctx)

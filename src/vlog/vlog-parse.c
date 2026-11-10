@@ -25820,7 +25820,11 @@ static vlog_node_t p_bind_directive(void)
 
    char hash[SHA_HEX_LEN];
    get_hex_hash(loc_file_str(&state.last_loc), hash);
-   ident_t name = ident_sprintf("BIND#%s#%d", hash, next_bind++);
+   // The module with the directive is part of the name: the bind only
+   // applies if that module is in the design (23.11)
+   ident_t name = bind_scope != NULL
+      ? ident_sprintf("BIND#%s#%d#%s", hash, next_bind++, istr(bind_scope))
+      : ident_sprintf("BIND#%s#%d", hash, next_bind++);
    vlog_set_ident(v, ident_prefix(lib_name(lib_work()), name, '.'));
 
    vlog_symtab_push(symtab, v);

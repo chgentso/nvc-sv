@@ -45,7 +45,7 @@ void vlog_set_fold_context(mir_context_t *mc, jit_t *j);
 vlog_node_t vlog_virtual_spec(vlog_node_t type);
 bool vlog_virtual_unresolved(vlog_node_t type);
 ident_t vlog_instance_key(vlog_node_t mod, vlog_node_t body);
-void vlog_load_binds(lib_t lib);
+void vlog_load_binds(lib_t lib, object_t **tops, int ntops);
 bool vlog_bind_has_hier_ref(vlog_node_t mod);
 void vlog_resolve_method(vlog_node_t call);
 void vlog_set_dpi_stubs(const char *path);

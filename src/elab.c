@@ -8276,7 +8276,7 @@ tree_t elab(object_t **top, int ntop, jit_t *jit, unit_registry_t *ur,
    tree_set_loc(e, &(top[0]->loc));
 
    lib_t work = lib_work();
-   vlog_load_binds(work);
+   vlog_load_binds(work, top, ntop);
 
    unsigned nshims = 0;
    iface_conn_list_t iface_conns = AINIT;
