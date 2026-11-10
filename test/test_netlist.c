@@ -1,0 +1,672 @@
+//
+//  Copyright (C) 2025  Nick Gasson
+//
+//  This program is free software: you can redistribute it and/or modify
+//  it under the terms of the GNU General Public License as published by
+//  the Free Software Foundation, either version 3 of the License, or
+//  (at your option) any later version.
+//
+//  This program is distributed in the hope that it will be useful,
+//  but WITHOUT ANY WARRANTY; without even the implied warranty of
+//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+//  GNU General Public License for more details.
+//
+//  You should have received a copy of the GNU General Public License
+//  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+//
+
+#include "test_util.h"
+#include "conn.h"
+#include "netlist.h"
+#include "option.h"
+#include "rt/model.h"
+#include "rt/structs.h"
+#include "scan.h"
+#include "tree.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+////////////////////////////////////////////////////////////////////////////////
+// Helpers
+
+static conn_inst_t *get_inst(conn_block_t *b, const char *label)
+{
+   for (unsigned i = 0; i < b->ninsts; i++) {
+      if (strcmp(b->insts[i]->label, label) == 0)
+         return b->insts[i];
+   }
+
+   ck_abort_msg("no instance %s in %s", label, b->name);
+   return NULL;
+}
+
+static const conn_pconn_t *get_conn(const conn_inst_t *inst, const char *port)
+{
+   for (unsigned i = 0; i < inst->nconns; i++) {
+      if (strcmp(inst->conns[i].formal->name, port) == 0)
+         return &(inst->conns[i]);
+   }
+
+   ck_abort_msg("no connection for %s of %s", port, inst->label);
+   return NULL;
+}
+
+static conn_proc_t *get_proc(conn_block_t *b, const char *name)
+{
+   for (unsigned i = 0; i < b->nprocs; i++) {
+      if (strcmp(b->procs[i]->name, name) == 0)
+         return b->procs[i];
+   }
+
+   ck_abort_msg("no process %s in %s", name, b->name);
+   return NULL;
+}
+
+static conn_net_t *get_net(conn_block_t *b, const char *name)
+{
+   for (unsigned i = 0; i < b->nnets; i++) {
+      if (strcmp(b->nets[i]->name, name) == 0)
+         return b->nets[i];
+   }
+
+   ck_abort_msg("no net %s in %s", name, b->name);
+   return NULL;
+}
+
+typedef struct {
+   conn_end_t ends[16];
+   unsigned   count;
+} ends_t;
+
+static void collect_cb(const conn_end_t *end, void *ctx)
+{
+   ends_t *e = ctx;
+   ck_assert_uint_lt(e->count, ARRAY_LEN(e->ends));
+   e->ends[e->count++] = *end;
+}
+
+static const conn_end_t *find_end(const ends_t *e, conn_end_kind_t kind,
+                                  const char *name)
+{
+   for (unsigned i = 0; i < e->count; i++) {
+      const conn_end_t *end = &(e->ends[i]);
+      if (end->kind != kind)
+         continue;
+
+      switch (kind) {
+      case CONN_END_PROC:
+         if (strcmp(end->proc->name, name) == 0)
+            return end;
+         break;
+      case CONN_END_CHILD:
+      case CONN_END_EXPR:
+         if (strcmp(end->inst->label, name) == 0)
+            return end;
+         break;
+      case CONN_END_PARENT:
+         if (strcmp(end->port->name, name) == 0)
+            return end;
+         break;
+      }
+   }
+
+   return NULL;
+}
+
+// Minimal JSON syntax check: returns pointer after the value or NULL
+static const char *json_skip_ws(const char *p)
+{
+   while (*p == ' ' || *p == '\n' || *p == '\t' || *p == '\r')
+      p++;
+   return p;
+}
+
+static const char *json_value(const char *p, int depth);
+
+static const char *json_string(const char *p)
+{
+   if (*p != '"')
+      return NULL;
+
+   for (p++; *p != '"'; p++) {
+      if (*p == '\0' || (unsigned char)*p < 0x20)
+         return NULL;
+      else if (*p == '\\')
+         p++;
+   }
+
+   return p + 1;
+}
+
+static const char *json_value(const char *p, int depth)
+{
+   if (depth > 32)
+      return NULL;
+
+   p = json_skip_ws(p);
+
+   if (*p == '{') {
+      p = json_skip_ws(p + 1);
+      if (*p == '}')
+         return p + 1;
+
+      for (;;) {
+         p = json_skip_ws(p);
+         if ((p = json_string(p)) == NULL)
+            return NULL;
+         p = json_skip_ws(p);
+         if (*p++ != ':')
+            return NULL;
+         if ((p = json_value(p, depth + 1)) == NULL)
+            return NULL;
+         p = json_skip_ws(p);
+         if (*p == ',')
+            p++;
+         else if (*p == '}')
+            return p + 1;
+         else
+            return NULL;
+      }
+   }
+   else if (*p == '[') {
+      p = json_skip_ws(p + 1);
+      if (*p == ']')
+         return p + 1;
+
+      for (;;) {
+         if ((p = json_value(p, depth + 1)) == NULL)
+            return NULL;
+         p = json_skip_ws(p);
+         if (*p == ',')
+            p++;
+         else if (*p == ']')
+            return p + 1;
+         else
+            return NULL;
+      }
+   }
+   else if (*p == '"')
+      return json_string(p);
+   else if ((*p >= '0' && *p <= '9') || *p == '-') {
+      while ((*p >= '0' && *p <= '9') || *p == '-' || *p == '.')
+         p++;
+      return p;
+   }
+   else
+      return NULL;
+}
+
+static char *write_json(const conn_design_t *cd, int max_depth)
+{
+   netlist_opts_t opts = { .max_depth = max_depth };
+
+   FILE *f = tmpfile();
+   ck_assert_ptr_nonnull(f);
+
+   netlist_write(cd, &opts, f);
+
+   const long size = ftell(f);
+   rewind(f);
+
+   char *buf = xmalloc(size + 1);
+   ck_assert_uint_eq(fread(buf, 1, size, f), size);
+   buf[size] = '\0';
+   fclose(f);
+
+   const char *end = json_value(buf, 0);
+   ck_assert_msg(end != NULL && *json_skip_ws(end) == '\0',
+                 "malformed JSON:\n%s", buf);
+
+   return buf;
+}
+
+#define ck_has(buf, text) \
+   ck_assert_msg(strstr((buf), (text)) != NULL, "missing '%s' in:\n%s", \
+                 (text), (buf))
+#define ck_has_not(buf, text) \
+   ck_assert_msg(strstr((buf), (text)) == NULL, "unexpected '%s' in:\n%s", \
+                 (text), (buf))
+
+static unsigned count_substr(const char *buf, const char *text)
+{
+   unsigned n = 0;
+   for (const char *p = buf; (p = strstr(p, text)) != NULL; p += strlen(text))
+      n++;
+   return n;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// VHDL
+
+START_TEST(test_vhdl1)
+{
+   set_standard(STD_08);
+   input_from_file(TESTDIR "/netlist/vhdl1.vhd");
+
+   tree_t e = run_elab();
+   fail_if_errors();
+
+   conn_design_t *cd = conn_build(e);
+   ck_assert_ptr_nonnull(cd);
+
+   ck_assert_uint_eq(conn_roots(cd), 1);
+   conn_block_t *top = conn_root(cd, 0);
+   ck_assert_str_eq(top->name, "VHDL1");
+   ck_assert_int_eq(top->lang, CONN_VHDL);
+   ck_assert_uint_eq(top->nports, 0);
+   ck_assert_uint_eq(top->ninsts, 4);   // Generate blocks are inlined
+
+   conn_net_t *q = get_net(top, "Q");
+   ck_assert_uint_eq(q->width, 4);
+   ck_assert(q->descending);
+   ck_assert_int_eq(q->left, 3);
+   ck_assert_int_eq(q->right, 0);
+   conn_net_t *e_net = get_net(top, "E");
+   ck_assert(!e_net->descending);
+   ck_assert_uint_eq(get_net(top, "CLK")->width, 1);
+
+   // Slice depending on the generate index
+   conn_inst_t *g0 = get_inst(top, "G(0).U_LEAF");
+   conn_inst_t *g1 = get_inst(top, "G(1).U_LEAF");
+   ck_assert_str_eq(g0->child->name, "VHDL1.G(0).U_LEAF");
+   ck_assert_uint_eq(g0->child->nports, 3);
+   ck_assert_uint_eq(g0->child->nnets, 4);   // Ports and TMP
+
+   const conn_pconn_t *a0 = get_conn(g0, "A");
+   ck_assert_uint_eq(a0->nsegs, 1);
+   ck_assert_int_eq(a0->segs[0].kind, CONN_SEG_NET);
+   ck_assert_ptr_eq(a0->segs[0].range.net, q);
+   ck_assert_uint_eq(a0->segs[0].range.lo, 2);   // Q(1 downto 0)
+   ck_assert_uint_eq(a0->segs[0].range.hi, 3);
+   ck_assert(!a0->segs[0].approx);
+
+   const conn_pconn_t *a1 = get_conn(g1, "A");
+   ck_assert_uint_eq(a1->segs[0].range.lo, 0);   // Q(3 downto 2)
+   ck_assert_uint_eq(a1->segs[0].range.hi, 1);
+
+   const conn_pconn_t *io = get_conn(g0, "IO");
+   ck_assert_int_eq(io->formal->dir, CONN_INOUT);
+   ck_assert_ptr_eq(io->segs[0].range.net, get_net(top, "X"));
+
+   // Constant and open
+   conn_inst_t *uc = get_inst(top, "U_CONST");
+   const conn_pconn_t *ca = get_conn(uc, "A");
+   ck_assert_uint_eq(ca->nsegs, 1);
+   ck_assert_int_eq(ca->segs[0].kind, CONN_SEG_CONST);
+   ck_assert_str_eq(ca->segs[0].bits, "1010");
+   const conn_pconn_t *cb = get_conn(uc, "B");
+   ck_assert_int_eq(cb->segs[0].kind, CONN_SEG_OPEN);
+   ck_assert_uint_eq(cb->segs[0].width, 4);
+
+   // Expression
+   conn_inst_t *ue = get_inst(top, "U_EXPR");
+   const conn_pconn_t *ea = get_conn(ue, "A");
+   ck_assert_int_eq(ea->segs[0].kind, CONN_SEG_EXPR);
+   ck_assert_uint_eq(ea->segs[0].width, 4);
+   ck_assert_uint_eq(ea->segs[0].nreads, 1);
+   ck_assert_ptr_eq(ea->segs[0].reads[0].net, get_net(top, "D"));
+   ck_assert_str_eq(ea->segs[0].text, "D and \"0011\"");
+
+   // Process sets
+   conn_proc_t *pc = get_proc(top, "P_COUNT");
+   ck_assert_int_eq(pc->kind, CONN_PROC_VHDL);
+   ck_assert_uint_eq(pc->nreads, 2);
+   ck_assert_uint_eq(pc->ndrives, 1);
+   ck_assert_ptr_eq(pc->drives[0].net, q);
+   ck_assert_uint_eq(pc->drives[0].lo, 0);   // Q(3 downto 2)
+   ck_assert_uint_eq(pc->drives[0].hi, 1);
+   ck_assert_ptr_nonnull(pc->src);
+   ck_assert_uint_eq(pc->line, 60);
+   ck_assert(!pc->approx);
+
+   conn_proc_t *po = get_proc(g1->child, "P_OUT");
+   ck_assert_uint_eq(po->nreads, 1);
+   ck_assert_str_eq(po->reads[0].net->name, "TMP");
+   ck_assert_uint_eq(po->ndrives, 1);
+   ck_assert_str_eq(po->drives[0].net->name, "B");
+
+   // Lookup by path
+   ck_assert_ptr_eq(conn_find_net(cd, "vhdl1.q"), q);
+   ck_assert_ptr_eq(conn_find_net(cd, ":VHDL1:Q"), q);
+   ck_assert_ptr_eq(conn_find_block(cd, "vhdl1.g(1).u_leaf"), g1->child);
+   ck_assert_ptr_eq(conn_find_net(cd, "vhdl1.G(1).U_LEAF.TMP"),
+                    get_net(g1->child, "TMP"));
+   ck_assert_ptr_eq(conn_find_net(cd, ":vhdl1:u_expr:a"),
+                    get_net(ue->child, "A"));
+   ck_assert_ptr_null(conn_find_net(cd, "vhdl1.nothere"));
+   ck_assert_ptr_null(conn_find_net(cd, "other.q"));
+   ck_assert_str_eq(conn_net_path(cd, q), "VHDL1.Q");
+
+   conn_free(cd);
+}
+END_TEST
+
+START_TEST(test_vhdl1_query)
+{
+   set_standard(STD_08);
+   input_from_file(TESTDIR "/netlist/vhdl1.vhd");
+
+   tree_t e = run_elab();
+   fail_if_errors();
+
+   conn_design_t *cd = conn_build(e);
+   ck_assert_ptr_nonnull(cd);
+
+   conn_block_t *top = conn_root(cd, 0);
+   conn_net_t *q = get_net(top, "Q");
+   conn_net_t *d = get_net(top, "D");
+
+   // Q: driven by P_COUNT for bits 3 downto 2 only
+   ends_t ends = {};
+   ck_assert_uint_eq(conn_drivers(cd, q, 0, 3, collect_cb, &ends), 1);
+   const conn_end_t *end = find_end(&ends, CONN_END_PROC, "P_COUNT");
+   ck_assert_ptr_nonnull(end);
+   ck_assert_uint_eq(end->lo, 0);
+   ck_assert_uint_eq(end->hi, 1);
+   ck_assert_uint_eq(end->line, 60);
+
+   // Nothing drives the other half
+   ends = (ends_t){};
+   ck_assert_uint_eq(conn_drivers(cd, q, 2, 3, collect_cb, &ends), 0);
+
+   // Readers of Q: the two leaves through port A and the process
+   // for LO.  Only the low half is read by the process
+   ends = (ends_t){};
+   ck_assert_uint_eq(conn_readers(cd, q, 0, 3, collect_cb, &ends), 3);
+   end = find_end(&ends, CONN_END_CHILD, "G(0).U_LEAF");
+   ck_assert_ptr_nonnull(end);
+   ck_assert_str_eq(end->port->name, "A");
+   ck_assert_uint_eq(end->lo, 2);
+   ck_assert_uint_eq(end->hi, 3);
+   ck_assert_uint_eq(end->other.lo, 0);
+   ck_assert_uint_eq(end->other.hi, 1);
+   ck_assert_ptr_eq(end->other.net, end->port);
+   end = find_end(&ends, CONN_END_CHILD, "G(1).U_LEAF");
+   ck_assert_ptr_nonnull(end);
+   ck_assert_uint_eq(end->lo, 0);
+   ck_assert_uint_eq(end->hi, 1);
+
+   // Only the second leaf reads Q(3 downto 2)
+   ends = (ends_t){};
+   ck_assert_uint_eq(conn_readers(cd, q, 0, 1, collect_cb, &ends), 1);
+   ck_assert_ptr_nonnull(find_end(&ends, CONN_END_CHILD, "G(1).U_LEAF"));
+
+   // D is driven by the output ports of the leaves and read by an
+   // expression and the process
+   ends = (ends_t){};
+   ck_assert_uint_eq(conn_drivers(cd, d, 0, 3, collect_cb, &ends), 2);
+   ck_assert_ptr_nonnull(find_end(&ends, CONN_END_CHILD, "G(0).U_LEAF"));
+   ck_assert_ptr_nonnull(find_end(&ends, CONN_END_CHILD, "G(1).U_LEAF"));
+
+   ends = (ends_t){};
+   ck_assert_uint_eq(conn_readers(cd, d, 0, 3, collect_cb, &ends), 2);
+   ck_assert_ptr_nonnull(find_end(&ends, CONN_END_PROC, "P_COUNT"));
+   end = find_end(&ends, CONN_END_EXPR, "U_EXPR");
+   ck_assert_ptr_nonnull(end);
+   ck_assert_str_eq(end->port->name, "A");
+
+   // From inside a leaf: the driver of input A is the connection in
+   // the parent, which names Q
+   conn_block_t *leaf = get_inst(top, "G(0).U_LEAF")->child;
+   conn_net_t *a = get_net(leaf, "A");
+   ends = (ends_t){};
+   ck_assert_uint_eq(conn_drivers(cd, a, 0, 1, collect_cb, &ends), 1);
+   end = find_end(&ends, CONN_END_PARENT, "A");
+   ck_assert_ptr_nonnull(end);
+   ck_assert_ptr_eq(end->block, top);
+   ck_assert_ptr_eq(end->other.net, q);
+   ck_assert_uint_eq(end->other.lo, 2);
+   ck_assert_uint_eq(end->other.hi, 3);
+   ck_assert_ptr_nonnull(strstr(conn_end_describe(cd, end),
+                                "connection of port A in VHDL1 ("));
+   ck_assert_ptr_nonnull(strstr(conn_end_describe(cd, end),
+                                "/netlist/vhdl1.vhd:45)"));
+
+   // ... and the reader is the process inside
+   ends = (ends_t){};
+   ck_assert_uint_eq(conn_readers(cd, a, 0, 1, collect_cb, &ends), 1);
+   ck_assert_ptr_nonnull(find_end(&ends, CONN_END_PROC, "process@14"));
+
+   // Output B is read by the parent connection (D) and driven by the process
+   conn_net_t *b = get_net(leaf, "B");
+   ends = (ends_t){};
+   ck_assert_uint_eq(conn_readers(cd, b, 0, 1, collect_cb, &ends), 1);
+   end = find_end(&ends, CONN_END_PARENT, "B");
+   ck_assert_ptr_nonnull(end);
+   ck_assert_ptr_eq(end->other.net, d);
+   ends = (ends_t){};
+   ck_assert_uint_eq(conn_drivers(cd, b, 0, 1, collect_cb, &ends), 1);
+   ck_assert_ptr_nonnull(find_end(&ends, CONN_END_PROC, "P_OUT"));
+
+   // The inout port of a leaf is driven by its process and by the
+   // connection of X in the parent which has several instances
+   conn_net_t *x = get_net(top, "X");
+   ends = (ends_t){};
+   ck_assert_uint_eq(conn_drivers(cd, x, 0, 0, collect_cb, &ends), 2);
+
+   conn_free(cd);
+}
+END_TEST
+
+START_TEST(test_vhdl1_json)
+{
+   set_standard(STD_08);
+   input_from_file(TESTDIR "/netlist/vhdl1.vhd");
+
+   tree_t e = run_elab();
+   fail_if_errors();
+
+   conn_design_t *cd = conn_build(e);
+   ck_assert_ptr_nonnull(cd);
+
+   char *json = write_json(cd, -1);
+
+   ck_has(json, "\"VHDL1\":{");
+   ck_has(json, "\"VHDL1.G(0).U_LEAF\":{");
+   ck_has(json, "\"VHDL1.G(1).U_LEAF\":{");
+   ck_has(json, "\"VHDL1.U_CONST\":{");
+   ck_has(json, "\"VHDL1.U_EXPR\":{");
+   ck_has(json, "\"top\":1");
+   ck_has(json, "\"type\":\"VHDL1.G(0).U_LEAF\"");
+   ck_has(json, "\"type\":\"$process\"");
+   ck_has(json, "\"type\":\"$expr\"");
+   ck_has(json, "\"label\":\"P_COUNT\"");
+   ck_has(json, "\"IO\":\"inout\"");
+   ck_has(json, "\"language\":\"vhdl\"");
+
+   // Constant actual, least significant bit first
+   ck_has(json, "\"A\":[\"0\",\"1\",\"0\",\"1\"]");
+
+   // Q(1 downto 0) of the first leaf is Q[0], Q[1] and Q(3 downto 2) of
+   // the second; Q is "Q":[bits] with bit 0 first
+   ck_has(json, "\"Q[3:2]\":");
+   ck_has(json, "\"process@");
+
+   ck_assert_uint_eq(count_substr(json, "\"top\":1"), 1);
+
+   free(json);
+
+   // Depth limit
+   json = write_json(cd, 0);
+   ck_has(json, "\"VHDL1\":{");
+   ck_has_not(json, "\"VHDL1.G(0).U_LEAF\":{");
+   ck_has(json, "\"type\":\"VHDL1.G(0).U_LEAF\"");   // Still a cell
+   free(json);
+
+   json = write_json(cd, 1);
+   ck_has(json, "\"VHDL1.G(0).U_LEAF\":{");
+   free(json);
+
+   conn_free(cd);
+}
+END_TEST
+
+START_TEST(test_runtime)
+{
+   // The elaborated tree is available to a running simulation as the
+   // `where` of the root scope
+   set_standard(STD_08);
+   input_from_file(TESTDIR "/netlist/vhdl1.vhd");
+
+   rt_model_t *m = model_new(get_jit(), NULL);
+   tree_t e = run_elab_with_model(m);
+   fail_if_errors();
+   ck_assert_ptr_nonnull(e);
+
+   rt_scope_t *root = root_scope(m);
+   ck_assert_ptr_eq(root->where, e);
+
+   conn_design_t *cd = conn_build(root->where);
+   ck_assert_ptr_nonnull(cd);
+
+   // Query by the path of a signal as the model names it
+   conn_net_t *q = conn_find_net(cd, ":vhdl1:q");
+   ck_assert_ptr_nonnull(q);
+
+   ends_t ends = {};
+   ck_assert_uint_eq(conn_drivers(cd, q, 0, 3, collect_cb, &ends), 1);
+   ck_assert_ptr_nonnull(find_end(&ends, CONN_END_PROC, "P_COUNT"));
+
+   conn_free(cd);
+   model_free(m);
+}
+END_TEST
+
+////////////////////////////////////////////////////////////////////////////////
+// Verilog
+
+START_TEST(test_sv1)
+{
+   input_from_file(TESTDIR "/netlist/sv1.sv");
+
+   tree_t e = run_elab();
+   fail_if_errors();
+
+   conn_design_t *cd = conn_build(e);
+   ck_assert_ptr_nonnull(cd);
+
+   ck_assert_uint_eq(conn_roots(cd), 1);
+   conn_block_t *top = conn_root(cd, 0);
+   ck_assert_str_eq(top->name, "sv1");
+   ck_assert_int_eq(top->lang, CONN_VERILOG);
+   ck_assert_uint_eq(top->ninsts, 5);
+
+   conn_net_t *w = get_net(top, "w");
+   ck_assert_uint_eq(w->width, 8);
+   ck_assert(w->descending);
+
+   conn_inst_t *i0 = get_inst(top, "i0");
+   ck_assert_uint_eq(i0->child->nports, 3);
+   ck_assert_int_eq(get_net(i0->child, "a")->dir, CONN_IN);
+   ck_assert_int_eq(get_net(i0->child, "y")->dir, CONN_OUT);
+   ck_assert_int_eq(get_net(i0->child, "io")->dir, CONN_INOUT);
+   ck_assert_uint_eq(get_net(i0->child, "a")->width, 4);
+
+   // w[3:0] is the low half: positions 4 to 7 as position 0 is the MSB
+   const conn_pconn_t *a = get_conn(i0, "a");
+   ck_assert_uint_eq(a->nsegs, 1);
+   ck_assert_ptr_eq(a->segs[0].range.net, w);
+   ck_assert_uint_eq(a->segs[0].range.lo, 4);
+   ck_assert_uint_eq(a->segs[0].range.hi, 7);
+   ck_assert_ptr_eq(get_conn(i0, "y")->segs[0].range.net,
+                    get_net(top, "lo"));
+   ck_assert_ptr_eq(get_conn(i0, "io")->segs[0].range.net,
+                    get_net(top, "t"));
+
+   // Concatenation of single bits is four segments
+   const conn_pconn_t *a1 = get_conn(get_inst(top, "i1"), "a");
+   ck_assert_uint_eq(a1->nsegs, 4);
+   ck_assert_uint_eq(a1->segs[0].range.lo, 0);   // w[7]
+   ck_assert_uint_eq(a1->segs[3].range.lo, 3);   // w[4]
+
+   // Constant
+   const conn_pconn_t *a2 = get_conn(get_inst(top, "i2"), "a");
+   ck_assert_int_eq(a2->segs[0].kind, CONN_SEG_CONST);
+   ck_assert_str_eq(a2->segs[0].bits, "1010");
+
+   // An empty connection leaves the port without an entry
+   conn_inst_t *i2 = get_inst(top, "i2");
+   for (unsigned i = 0; i < i2->nconns; i++)
+      ck_assert_str_ne(i2->conns[i].formal->name, "y");
+
+   // Indexed part select in a generate loop
+   const conn_pconn_t *g0 = get_conn(get_inst(top, "gg[0].ig"), "a");
+   ck_assert_uint_eq(g0->segs[0].range.lo, 4);   // w[0 +: 4] is w[3:0]
+   ck_assert_uint_eq(g0->segs[0].range.hi, 7);
+   const conn_pconn_t *g1 = get_conn(get_inst(top, "gg[1].ig"), "a");
+   ck_assert_uint_eq(g1->segs[0].range.lo, 3);   // w[1 +: 4] is w[4:1]
+   ck_assert_uint_eq(g1->segs[0].range.hi, 6);
+   ck_assert(!g1->segs[0].approx);
+
+   // Processes
+   conn_proc_t *ff = get_proc(top, "always_ff@15");
+   ck_assert_int_eq(ff->kind, CONN_PROC_ALWAYS_FF);
+   ck_assert_uint_eq(ff->nreads, 2);   // clk and w[3:0]
+   ck_assert_uint_eq(ff->ndrives, 1);
+   ck_assert_ptr_eq(ff->drives[0].net, get_net(top, "r"));
+   ck_assert_uint_eq(ff->line, 15);
+   ck_assert(!ff->approx);
+
+   conn_proc_t *as = get_proc(i0->child, "assign@3");
+   ck_assert_int_eq(as->kind, CONN_PROC_ASSIGN);
+   ck_assert_uint_eq(as->nreads, 1);
+   ck_assert_str_eq(as->reads[0].net->name, "a");
+   ck_assert_uint_eq(as->ndrives, 1);
+   ck_assert_str_eq(as->drives[0].net->name, "y");
+
+   // Queries
+   ends_t ends = {};
+   conn_net_t *lo = get_net(top, "lo");
+   ck_assert_uint_eq(conn_drivers(cd, lo, 0, 3, collect_cb, &ends), 1);
+   const conn_end_t *end = find_end(&ends, CONN_END_CHILD, "i0");
+   ck_assert_ptr_nonnull(end);
+   ck_assert_str_eq(end->port->name, "y");
+
+   ends = (ends_t){};
+   ck_assert_uint_eq(conn_readers(cd, w, 4, 4, collect_cb, &ends), 4);
+   ck_assert_ptr_nonnull(find_end(&ends, CONN_END_PROC, "always_ff@15"));
+   ck_assert_ptr_nonnull(find_end(&ends, CONN_END_CHILD, "i0"));
+   ck_assert_ptr_nonnull(find_end(&ends, CONN_END_CHILD, "gg[0].ig"));
+   ck_assert_ptr_nonnull(find_end(&ends, CONN_END_CHILD, "gg[1].ig"));
+
+   // Inside the instance, the input is driven from w[3:0] in the parent
+   ends = (ends_t){};
+   ck_assert_uint_eq(conn_drivers(cd, get_net(i0->child, "a"), 0, 3,
+                                  collect_cb, &ends), 1);
+   end = find_end(&ends, CONN_END_PARENT, "a");
+   ck_assert_ptr_nonnull(end);
+   ck_assert_ptr_eq(end->other.net, w);
+   ck_assert_uint_eq(end->other.lo, 4);
+
+   ck_assert_ptr_eq(conn_find_net(cd, "sv1.gg[1].ig.a"),
+                    get_net(get_inst(top, "gg[1].ig")->child, "a"));
+
+   char *json = write_json(cd, -1);
+   ck_has(json, "\"sv1.gg[1].ig\":{");
+   ck_has(json, "\"language\":\"verilog\"");
+   ck_has(json, "\"kind\":\"always_ff\"");
+   ck_has(json, "\"kind\":\"assign\"");
+   ck_has(json, "\"a\":[\"0\",\"1\",\"0\",\"1\"]");
+   ck_has(json, "\"w[3:0]\":");
+   free(json);
+
+   conn_free(cd);
+}
+END_TEST
+
+Suite *get_netlist_tests(void)
+{
+   Suite *s = suite_create("netlist");
+
+   TCase *tc = nvc_unit_test();
+   tcase_add_test(tc, test_vhdl1);
+   tcase_add_test(tc, test_vhdl1_query);
+   tcase_add_test(tc, test_vhdl1_json);
+   tcase_add_test(tc, test_runtime);
+   tcase_add_test(tc, test_sv1);
+   suite_add_tcase(s, tc);
+
+   return s;
+}

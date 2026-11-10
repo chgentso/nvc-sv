@@ -1,0 +1,2754 @@
+//
+//  Copyright (C) 2025  Nick Gasson
+//
+//  This program is free software: you can redistribute it and/or modify
+//  it under the terms of the GNU General Public License as published by
+//  the Free Software Foundation, either version 3 of the License, or
+//  (at your option) any later version.
+//
+//  This program is distributed in the hope that it will be useful,
+//  but WITHOUT ANY WARRANTY; without even the implied warranty of
+//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+//  GNU General Public License for more details.
+//
+//  You should have received a copy of the GNU General Public License
+//  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+//
+
+#include "util.h"
+#include "array.h"
+#include "common.h"
+#include "conn.h"
+#include "diag.h"
+#include "driver.h"
+#include "hash.h"
+#include "ident.h"
+#include "phase.h"
+#include "tree.h"
+#include "type.h"
+#include "vlog/vlog-node.h"
+#include "vlog/vlog-number.h"
+#include "vlog/vlog-phase.h"
+#include "vlog/vlog-util.h"
+
+#include <assert.h>
+#include <ctype.h>
+#include <inttypes.h>
+#include <stdlib.h>
+#include <string.h>
+
+typedef A(conn_range_t) range_list_t;
+typedef A(conn_seg_t) seg_list_t;
+typedef A(conn_pconn_t) pconn_list_t;
+typedef A(conn_net_t *) net_list_t;
+typedef A(conn_inst_t *) inst_list_t;
+typedef A(conn_proc_t *) proc_list_t;
+
+#define SCOPED_LIST(type, name) \
+   type name __attribute__((cleanup(__cleanup_array))) = AINIT
+
+typedef struct _chunk chunk_t;
+
+struct _chunk {
+   chunk_t *next;
+   size_t   used;
+   size_t   size;
+   char     data[];
+};
+
+// The port and generic declarations of a VHDL entity are shared by every
+// instance of it so the mapping from declarations to nets and values has
+// to be kept separately for each instance
+typedef struct {
+   tree_t  value;
+   bool    has_int;
+   int64_t ival;
+} gen_value_t;
+
+typedef struct {
+   hash_t *net;
+   hash_t *gen;
+} inst_maps_t;
+
+struct proc_ref {
+   conn_proc_t *proc;
+   tree_t       tree;      // T_PROCESS or T_VERILOG
+};
+
+struct _conn_design {
+   conn_block_t **roots;
+   unsigned       nroots;
+   conn_block_t **blocks;      // All blocks in creation order
+   unsigned       nblocks;
+   unsigned       maxblocks;
+   hash_t        *netmap;      // Declaration -> conn_net_t (current instance)
+   hash_t        *genval;      // Generic declaration -> gen_value_t (ditto)
+   hash_t        *gmap;        // Declaration -> conn_net_t (all instances)
+   hash_t        *blkmaps;     // conn_block_t -> inst_maps_t
+   conn_proc_t  **xprocs;      // Processes touching nets of other blocks
+   unsigned       nxprocs;
+   unsigned       maxxprocs;
+   chunk_t       *chunks;
+   char         **strings;     // Strings returned from describe functions
+   unsigned       nstrings;
+   unsigned       maxstrings;
+};
+
+#define CHUNK_SIZE 65536
+
+static void *dalloc(conn_design_t *cd, size_t size)
+{
+   size = (size + 15) & ~(size_t)15;
+
+   if (cd->chunks == NULL || cd->chunks->used + size > cd->chunks->size) {
+      const size_t csize = MAX(size, CHUNK_SIZE);
+      chunk_t *c = xmalloc(sizeof(chunk_t) + csize);
+      c->next = cd->chunks;
+      c->used = 0;
+      c->size = csize;
+      cd->chunks = c;
+   }
+
+   void *p = cd->chunks->data + cd->chunks->used;
+   cd->chunks->used += size;
+   memset(p, 0, size);
+   return p;
+}
+
+static char *dstr(conn_design_t *cd, const char *s)
+{
+   const size_t len = strlen(s);
+   char *p = dalloc(cd, len + 1);
+   memcpy(p, s, len + 1);
+   return p;
+}
+
+static char *dstrf(conn_design_t *cd, const char *fmt, ...)
+   __attribute__((format(printf, 2, 3)));
+
+static char *dstrf(conn_design_t *cd, const char *fmt, ...)
+{
+   va_list ap;
+   va_start(ap, fmt);
+   char *tmp = xvasprintf(fmt, ap);
+   va_end(ap);
+
+   char *p = dstr(cd, tmp);
+   free(tmp);
+   return p;
+}
+
+#define DDUP(cd, list, type) ({                                   \
+         type *_p = dalloc((cd), MAX((list).count, 1) * sizeof(type)); \
+         if ((list).count > 0)                                    \
+            memcpy(_p, (list).items, (list).count * sizeof(type)); \
+         _p;                                                      \
+      })
+
+////////////////////////////////////////////////////////////////////////////////
+// Helpers
+
+static bool name_eq(const char *a, const char *b)
+{
+   return strcasecmp(a, b) == 0;
+}
+
+static const char *loc_file(conn_design_t *cd, const loc_t *loc)
+{
+   if (loc == NULL || loc_invalid_p(loc))
+      return NULL;
+
+   const char *f = loc_file_str(loc);
+   return f ? dstr(cd, f) : NULL;
+}
+
+static unsigned loc_line(const loc_t *loc)
+{
+   return (loc == NULL || loc_invalid_p(loc)) ? 0 : loc->first_line;
+}
+
+static void print_vhdl(text_buf_t *tb, tree_t t, int depth)
+{
+   // Compact source text of an expression.  This does not use the dumper
+   // as that cannot print every kind of tree that can appear in a port map.
+   if (depth > 6) {
+      tb_cat(tb, "...");
+      return;
+   }
+
+   switch (tree_kind(t)) {
+   case T_REF:
+      tb_cat(tb, istr(tree_ident(t)));
+      break;
+   case T_LITERAL:
+      {
+         int64_t i;
+         if (folded_int(t, &i))
+            tb_printf(tb, "%"PRIi64, i);
+         else
+            tb_cat(tb, "<literal>");
+      }
+      break;
+   case T_STRING:
+      {
+         tb_append(tb, '"');
+         const int n = tree_chars(t);
+         for (int i = 0; i < n; i++) {
+            tree_t c = tree_char(t, i);
+            const char *id = tree_kind(c) == T_REF ? istr(tree_ident(c)) : "'?'";
+            tb_append(tb, strlen(id) == 3 ? id[1] : '?');
+         }
+         tb_append(tb, '"');
+      }
+      break;
+   case T_FCALL:
+      {
+         const char *name = istr(tree_ident(t));
+         const int n = tree_params(t);
+         if (n == 2 && name[0] == '"') {
+            print_vhdl(tb, tree_value(tree_param(t, 0)), depth + 1);
+            tb_printf(tb, " %.*s ", (int)strlen(name) - 2, name + 1);
+            print_vhdl(tb, tree_value(tree_param(t, 1)), depth + 1);
+         }
+         else {
+            if (name[0] == '"')
+               tb_printf(tb, "%.*s ", (int)strlen(name) - 2, name + 1);
+            else
+               tb_printf(tb, "%s(", name);
+            for (int i = 0; i < n; i++) {
+               if (i > 0)
+                  tb_cat(tb, ", ");
+               print_vhdl(tb, tree_value(tree_param(t, i)), depth + 1);
+            }
+            if (name[0] != '"')
+               tb_append(tb, ')');
+         }
+      }
+      break;
+   case T_ARRAY_REF:
+   case T_ARRAY_SLICE:
+   case T_RECORD_REF:
+      print_vhdl(tb, tree_value(t), depth + 1);
+      tb_cat(tb, tree_kind(t) == T_RECORD_REF ? ".field" : "(...)");
+      break;
+   case T_QUALIFIED:
+   case T_TYPE_CONV:
+   case T_INERTIAL:
+      print_vhdl(tb, tree_value(t), depth + 1);
+      break;
+   case T_CONV_FUNC:
+      tb_printf(tb, "%s(", istr(tree_ident(t)));
+      print_vhdl(tb, tree_value(t), depth + 1);
+      tb_append(tb, ')');
+      break;
+   case T_AGGREGATE:
+      tb_cat(tb, "(...)");
+      break;
+   default:
+      tb_cat(tb, "<expression>");
+      break;
+   }
+}
+
+static char *expr_text_vhdl(conn_design_t *cd, tree_t t)
+{
+   LOCAL_TEXT_BUF tb = tb_new();
+   print_vhdl(tb, t, 0);
+   return dstr(cd, tb_get(tb));
+}
+
+static void print_vlog(text_buf_t *tb, vlog_node_t v, int depth)
+{
+   if (depth > 6) {
+      tb_cat(tb, "...");
+      return;
+   }
+
+   switch (vlog_kind(v)) {
+   case V_REF:
+   case V_HIER_REF:
+      tb_cat(tb, istr(vlog_ident(v)));
+      break;
+   case V_NUMBER:
+      number_print(vlog_number(v), tb);
+      break;
+   case V_BIT_SELECT:
+   case V_PART_SELECT:
+   case V_MEMBER_REF:
+      print_vlog(tb, vlog_value(v), depth + 1);
+      tb_cat(tb, vlog_kind(v) == V_MEMBER_REF ? ".member" : "[...]");
+      break;
+   case V_UNARY:
+      {
+         static const char *const ops[] = {
+            [V_UNARY_BITNEG] = "~", [V_UNARY_NOT] = "!", [V_UNARY_NEG] = "-",
+            [V_UNARY_IDENTITY] = "+", [V_UNARY_AND] = "&", [V_UNARY_OR] = "|",
+            [V_UNARY_XOR] = "^", [V_UNARY_NAND] = "~&", [V_UNARY_NOR] = "~|",
+            [V_UNARY_XNOR] = "~^",
+         };
+         const unsigned op = vlog_subkind(v);
+         tb_cat(tb, op < ARRAY_LEN(ops) && ops[op] ? ops[op] : "?");
+         print_vlog(tb, vlog_value(v), depth + 1);
+      }
+      break;
+   case V_BINARY:
+      {
+         static const char *const ops[] = {
+            [V_BINARY_OR] = "|", [V_BINARY_AND] = "&", [V_BINARY_PLUS] = "+",
+            [V_BINARY_MINUS] = "-", [V_BINARY_TIMES] = "*",
+            [V_BINARY_DIVIDE] = "/", [V_BINARY_MOD] = "%",
+            [V_BINARY_LOG_EQ] = "==", [V_BINARY_LOG_NEQ] = "!=",
+            [V_BINARY_CASE_EQ] = "===", [V_BINARY_CASE_NEQ] = "!==",
+            [V_BINARY_LOG_OR] = "||", [V_BINARY_LOG_AND] = "&&",
+            [V_BINARY_SHIFT_LL] = "<<", [V_BINARY_SHIFT_RL] = ">>",
+            [V_BINARY_SHIFT_LA] = "<<<", [V_BINARY_SHIFT_RA] = ">>>",
+            [V_BINARY_LT] = "<", [V_BINARY_GT] = ">", [V_BINARY_LEQ] = "<=",
+            [V_BINARY_GEQ] = ">=", [V_BINARY_EXP] = "**",
+            [V_BINARY_XOR] = "^", [V_BINARY_XNOR] = "~^",
+            [V_BINARY_NAND] = "~&", [V_BINARY_NOR] = "~|",
+         };
+         const unsigned op = vlog_subkind(v);
+         print_vlog(tb, vlog_left(v), depth + 1);
+         tb_printf(tb, " %s ", op < ARRAY_LEN(ops) && ops[op] ? ops[op] : "?");
+         print_vlog(tb, vlog_right(v), depth + 1);
+      }
+      break;
+   case V_COND_EXPR:
+      print_vlog(tb, vlog_value(v), depth + 1);
+      tb_cat(tb, " ? ");
+      print_vlog(tb, vlog_left(v), depth + 1);
+      tb_cat(tb, " : ");
+      print_vlog(tb, vlog_right(v), depth + 1);
+      break;
+   case V_CONCAT:
+      {
+         tb_append(tb, '{');
+         const int n = vlog_params(v);
+         for (int i = 0; i < n; i++) {
+            if (i > 0)
+               tb_cat(tb, ", ");
+            print_vlog(tb, vlog_param(v, i), depth + 1);
+         }
+         tb_append(tb, '}');
+      }
+      break;
+   case V_USER_FCALL:
+   case V_SYS_FCALL:
+      tb_printf(tb, "%s(...)", vlog_has_ident(v) ? istr(vlog_ident(v)) : "call");
+      break;
+   default:
+      tb_cat(tb, "<expression>");
+      break;
+   }
+}
+
+static char *expr_text_vlog(conn_design_t *cd, vlog_node_t v)
+{
+   LOCAL_TEXT_BUF tb = tb_new();
+   print_vlog(tb, v, 0);
+   return dstr(cd, tb_get(tb));
+}
+
+static void add_range(range_list_t *l, conn_net_t *net, unsigned lo,
+                      unsigned hi)
+{
+   if (net == NULL || hi < lo)
+      return;
+
+   conn_range_t r = { net, lo, hi };
+   APUSH(*l, r);
+}
+
+static int range_cmp(const void *a, const void *b)
+{
+   const conn_range_t *ra = a, *rb = b;
+   if (ra->net != rb->net)
+      return ra->net < rb->net ? -1 : 1;
+   else if (ra->lo != rb->lo)
+      return ra->lo < rb->lo ? -1 : 1;
+   else
+      return ra->hi < rb->hi ? -1 : (ra->hi > rb->hi ? 1 : 0);
+}
+
+static void merge_ranges(range_list_t *l)
+{
+   // Sort and merge overlapping or adjacent ranges of the same net
+   if (l->count < 2)
+      return;
+
+   qsort(l->items, l->count, sizeof(conn_range_t), range_cmp);
+
+   unsigned out = 0;
+   for (unsigned i = 1; i < l->count; i++) {
+      conn_range_t *cur = &(l->items[out]), *r = &(l->items[i]);
+      if (r->net == cur->net && r->lo <= cur->hi + 1)
+         cur->hi = MAX(cur->hi, r->hi);
+      else
+         l->items[++out] = *r;
+   }
+
+   l->count = out + 1;
+}
+
+// Declarations of cloned instances are shared, so a declaration found
+// outside the current instance (a hierarchical reference) is only
+// meaningful if it was mapped exactly once
+static conn_net_t ambiguous;
+
+static conn_net_t *lookup_net(conn_design_t *cd, const void *decl)
+{
+   conn_net_t *n = cd->netmap ? hash_get(cd->netmap, decl) : NULL;
+   if (n != NULL)
+      return n;
+
+   n = hash_get(cd->gmap, decl);
+   return n == &ambiguous ? NULL : n;
+}
+
+static void map_decl(conn_design_t *cd, const void *decl, conn_net_t *n)
+{
+   if (cd->netmap != NULL)
+      hash_put(cd->netmap, decl, n);
+
+   conn_net_t *old = hash_get(cd->gmap, decl);
+   hash_put(cd->gmap, decl, old != NULL && old != n ? &ambiguous : n);
+}
+
+static void add_design_block(conn_design_t *cd, conn_block_t *b)
+{
+   if (cd->nblocks == cd->maxblocks) {
+      cd->maxblocks = MAX(16, cd->maxblocks * 2);
+      cd->blocks = xrealloc_array(cd->blocks, cd->maxblocks,
+                                  sizeof(conn_block_t *));
+   }
+   cd->blocks[cd->nblocks++] = b;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Build context
+
+typedef struct {
+   conn_design_t *cd;
+   conn_block_t  *block;       // Instance being built
+   net_list_t   nets;
+   inst_list_t  insts;
+   proc_list_t  procs;
+   unsigned         nports;
+} bctx_t;
+
+static conn_net_t *new_net(bctx_t *bc, const char *name, conn_dir_t dir,
+                           unsigned width, const loc_t *loc)
+{
+   conn_design_t *cd = bc->cd;
+   conn_net_t *n = dalloc(cd, sizeof(conn_net_t));
+   n->name  = dstr(cd, name);
+   n->block = bc->block;
+   n->dir   = dir;
+   n->width = MAX(width, 1);
+   n->src   = loc_file(cd, loc);
+   n->line  = loc_line(loc);
+
+   APUSH(bc->nets, n);
+   return n;
+}
+
+static conn_net_t *find_net_by_name(bctx_t *bc, const char *name)
+{
+   for (unsigned i = 0; i < bc->nets.count; i++) {
+      if (name_eq(bc->nets.items[i]->name, name))
+         return bc->nets.items[i];
+   }
+
+   return NULL;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// VHDL evaluation and layout
+
+static bool eval_int(conn_design_t *cd, tree_t e, int64_t *out, int depth);
+
+static bool eval_range(conn_design_t *cd, tree_t r, int64_t *left,
+                       int64_t *right, bool *down)
+{
+   switch (tree_subkind(r)) {
+   case RANGE_TO:
+      *down = false;
+      break;
+   case RANGE_DOWNTO:
+      *down = true;
+      break;
+   default:
+      return false;
+   }
+
+   return eval_int(cd, tree_left(r), left, 0)
+      && eval_int(cd, tree_right(r), right, 0);
+}
+
+static bool eval_int(conn_design_t *cd, tree_t e, int64_t *out, int depth)
+{
+   if (depth > 32)
+      return false;
+
+   if (folded_int(e, out))
+      return true;
+
+   switch (tree_kind(e)) {
+   case T_REF:
+      {
+         if (!tree_has_ref(e))
+            return false;
+
+         tree_t decl = tree_ref(e);
+         switch (tree_kind(decl)) {
+         case T_GENERIC_DECL:
+            {
+               gen_value_t *gv = cd->genval ? hash_get(cd->genval, decl) : NULL;
+               if (gv != NULL && gv->has_int) {
+                  *out = gv->ival;
+                  return true;
+               }
+
+               tree_t v = gv ? gv->value : NULL;
+               if (v == NULL && tree_has_value(decl))
+                  v = tree_value(decl);
+               return v != NULL && eval_int(cd, v, out, depth + 1);
+            }
+         case T_CONST_DECL:
+            return tree_has_value(decl)
+               && eval_int(cd, tree_value(decl), out, depth + 1);
+         case T_ENUM_LIT:
+            *out = tree_pos(decl);
+            return true;
+         default:
+            return false;
+         }
+      }
+   case T_QUALIFIED:
+   case T_TYPE_CONV:
+      return eval_int(cd, tree_value(e), out, depth + 1);
+   case T_FCALL:
+      {
+         if (!tree_has_ref(e))
+            return false;
+
+         tree_t decl = tree_ref(e);
+         const subprogram_kind_t kind = tree_subkind(decl);
+         const int nparams = tree_params(e);
+
+         int64_t a, b = 0;
+         if (nparams < 1 || nparams > 2
+             || !eval_int(cd, tree_value(tree_param(e, 0)), &a, depth + 1))
+            return false;
+         if (nparams == 2
+             && !eval_int(cd, tree_value(tree_param(e, 1)), &b, depth + 1))
+            return false;
+
+         switch (kind) {
+         case S_ADD: *out = a + b; return nparams == 2;
+         case S_SUB: *out = a - b; return nparams == 2;
+         case S_MUL: *out = a * b; return nparams == 2;
+         case S_DIV: if (b == 0) return false; *out = a / b; return true;
+         case S_MOD:
+            if (b == 0)
+               return false;
+            *out = a % b;
+            if (*out != 0 && ((*out < 0) != (b < 0)))
+               *out += b;
+            return true;
+         case S_REM: if (b == 0) return false; *out = a % b; return true;
+         case S_NEGATE: *out = -a; return nparams == 1;
+         case S_IDENTITY: *out = a; return nparams == 1;
+         case S_ABS: *out = a < 0 ? -a : a; return nparams == 1;
+         case S_EXP:
+            {
+               if (b < 0 || b > 62)
+                  return false;
+               int64_t r = 1;
+               for (; b > 0; b--)
+                  r *= a;
+               *out = r;
+               return true;
+            }
+         default:
+            return false;
+         }
+      }
+   default:
+      return false;
+   }
+}
+
+typedef struct {
+   int64_t left, right;
+   bool    down;
+   int64_t length;
+} dim_t;
+
+static bool vhdl_dim(conn_design_t *cd, type_t type, int n, dim_t *d)
+{
+   if (type_is_unconstrained(type))
+      return false;
+
+   tree_t r = range_of(type, n);
+   if (!eval_range(cd, r, &d->left, &d->right, &d->down))
+      return false;
+
+   d->length = d->down ? d->left - d->right + 1 : d->right - d->left + 1;
+   if (d->length < 0)
+      d->length = 0;
+   return true;
+}
+
+static bool vhdl_width(conn_design_t *cd, type_t type, unsigned *w)
+{
+   if (type_is_array(type)) {
+      unsigned ew;
+      if (!vhdl_width(cd, type_elem(type), &ew))
+         return false;
+
+      unsigned n = 1;
+      const int ndims = dimension_of(type);
+      for (int i = 0; i < ndims; i++) {
+         dim_t d;
+         if (!vhdl_dim(cd, type, i, &d))
+            return false;
+         n *= d.length;
+      }
+
+      *w = n * ew;
+      return true;
+   }
+   else if (type_is_record(type)) {
+      unsigned total = 0;
+      const int nf = type_fields(type);
+      for (int i = 0; i < nf; i++) {
+         unsigned fw;
+         if (!vhdl_width(cd, tree_type(type_field(type, i)), &fw))
+            return false;
+         total += fw;
+      }
+
+      *w = total;
+      return true;
+   }
+   else {
+      *w = 1;
+      return true;
+   }
+}
+
+static bool type_has_record(type_t type)
+{
+   if (type_is_record(type))
+      return true;
+   else if (type_is_array(type))
+      return type_has_record(type_elem(type));
+   else
+      return false;
+}
+
+static unsigned dim_position(const dim_t *d, int64_t idx)
+{
+   return d->down ? d->left - idx : idx - d->left;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// VHDL name resolution
+
+static bool vhdl_select(conn_design_t *cd, tree_t name, conn_range_t *out,
+                        bool *approx)
+{
+   switch (tree_kind(name)) {
+   case T_REF:
+      {
+         if (!tree_has_ref(name))
+            return false;
+
+         conn_net_t *net = lookup_net(cd, tree_ref(name));
+         if (net == NULL)
+            return false;
+
+         out->net = net;
+         out->lo = 0;
+         out->hi = net->width - 1;
+         return true;
+      }
+
+   case T_ARRAY_REF:
+   case T_ARRAY_SLICE:
+      {
+         tree_t value = tree_value(name);
+         if (!vhdl_select(cd, value, out, approx))
+            return false;
+
+         type_t type = tree_type(value);
+         if (!type_is_array(type))
+            return true;
+
+         unsigned ew;
+         if (!vhdl_width(cd, type_elem(type), &ew))
+            goto whole;
+
+         if (tree_kind(name) == T_ARRAY_SLICE) {
+            dim_t d;
+            if (!vhdl_dim(cd, type, 0, &d))
+               goto whole;
+
+            int64_t l, r;
+            bool down;
+            if (!eval_range(cd, tree_range(name, 0), &l, &r, &down))
+               goto whole;
+
+            const int64_t low = MIN(l, r), high = MAX(l, r);
+            if (high < low)
+               goto whole;
+
+            const unsigned p1 = dim_position(&d, low);
+            const unsigned p2 = dim_position(&d, high);
+            const unsigned plo = MIN(p1, p2), phi = MAX(p1, p2);
+
+            const unsigned base = out->lo;
+            if (base + (phi + 1) * ew - 1 > out->hi)
+               goto whole;
+
+            out->lo = base + plo * ew;
+            out->hi = base + (phi + 1) * ew - 1;
+            return true;
+         }
+         else {
+            const int ndims = dimension_of(type);
+            if (tree_params(name) != ndims)
+               goto whole;
+
+            uint64_t offset = 0;
+            for (int i = 0; i < ndims; i++) {
+               dim_t d;
+               int64_t idx;
+               if (!vhdl_dim(cd, type, i, &d)
+                   || !eval_int(cd, tree_value(tree_param(name, i)), &idx, 0)
+                   || idx < MIN(d.left, d.right)
+                   || idx > MAX(d.left, d.right))
+                  goto whole;
+
+               offset = offset * d.length + dim_position(&d, idx);
+            }
+
+            const unsigned base = out->lo;
+            if (base + (offset + 1) * ew - 1 > out->hi)
+               goto whole;
+
+            out->lo = base + offset * ew;
+            out->hi = out->lo + ew - 1;
+            return true;
+         }
+
+      whole:
+         *approx = true;
+         return true;
+      }
+
+   case T_RECORD_REF:
+      {
+         tree_t value = tree_value(name);
+         if (!vhdl_select(cd, value, out, approx))
+            return false;
+
+         type_t type = tree_type(value);
+         if (!type_is_record(type))
+            return true;
+
+         tree_t field = tree_ref(name);
+         const unsigned pos = tree_pos(field);
+
+         unsigned offset = 0, fw;
+         for (unsigned i = 0; i < pos; i++) {
+            if (!vhdl_width(cd, tree_type(type_field(type, i)), &fw)) {
+               *approx = true;
+               return true;
+            }
+            offset += fw;
+         }
+
+         if (!vhdl_width(cd, tree_type(field), &fw)
+             || out->lo + offset + fw - 1 > out->hi) {
+            *approx = true;
+            return true;
+         }
+
+         out->lo += offset;
+         out->hi = out->lo + fw - 1;
+         return true;
+      }
+
+   default:
+      return false;
+   }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// VHDL actuals
+
+static char std_logic_bit(ident_t id)
+{
+   const char *s = istr(id);
+   if (strlen(s) != 3 || s[0] != '\'' || s[2] != '\'')
+      return 0;
+
+   switch (s[1]) {
+   case '0': case 'L': return '0';
+   case '1': case 'H': return '1';
+   case 'Z': return 'z';
+   case 'U': case 'X': case 'W': case '-': return 'x';
+   default: return 0;
+   }
+}
+
+static void push_seg(seg_list_t *l, conn_seg_t s)
+{
+   APUSH(*l, s);
+}
+
+static void push_open(seg_list_t *l, unsigned width)
+{
+   conn_seg_t s = { .kind = CONN_SEG_OPEN, .width = width };
+   push_seg(l, s);
+}
+
+static bool vhdl_const_bits(conn_design_t *cd, tree_t e, text_buf_t *tb,
+                            unsigned width_hint, int depth)
+{
+   // Append one character per bit for a constant std_logic-like value
+   if (depth > 8)
+      return false;
+
+   switch (tree_kind(e)) {
+   case T_REF:
+      {
+         if (!tree_has_ref(e))
+            return false;
+         tree_t decl = tree_ref(e);
+         switch (tree_kind(decl)) {
+         case T_ENUM_LIT:
+            {
+               const char c = std_logic_bit(tree_ident(decl));
+               if (c == 0)
+                  return false;
+               tb_append(tb, c);
+               return true;
+            }
+         case T_CONST_DECL:
+            return tree_has_value(decl)
+               && vhdl_const_bits(cd, tree_value(decl), tb, width_hint,
+                                  depth + 1);
+         case T_GENERIC_DECL:
+            {
+               gen_value_t *gv = cd->genval ? hash_get(cd->genval, decl) : NULL;
+               return gv != NULL && gv->value != NULL
+                  && vhdl_const_bits(cd, gv->value, tb, width_hint, depth + 1);
+            }
+         default:
+            return false;
+         }
+      }
+   case T_STRING:
+      {
+         const int n = tree_chars(e);
+         for (int i = 0; i < n; i++) {
+            tree_t c = tree_char(e, i);
+            if (tree_kind(c) != T_REF || !tree_has_ref(c)
+                || tree_kind(tree_ref(c)) != T_ENUM_LIT)
+               return false;
+            const char b = std_logic_bit(tree_ident(tree_ref(c)));
+            if (b == 0)
+               return false;
+            tb_append(tb, b);
+         }
+         return true;
+      }
+   case T_QUALIFIED:
+   case T_TYPE_CONV:
+      return vhdl_const_bits(cd, tree_value(e), tb, width_hint, depth + 1);
+   case T_AGGREGATE:
+      {
+         type_t type = tree_type(e);
+         unsigned total = 0;
+         const bool have_total = type_is_array(type)
+            && !type_is_unconstrained(type) && vhdl_width(cd, type, &total);
+
+         const int nassocs = tree_assocs(e);
+         int npos = 0;
+         tree_t others = NULL;
+         for (int i = 0; i < nassocs; i++) {
+            tree_t a = tree_assoc(e, i);
+            switch (tree_subkind(a)) {
+            case A_POS: npos++; break;
+            case A_OTHERS: others = a; break;
+            default: return false;
+            }
+         }
+
+         const unsigned want = have_total ? total : width_hint;
+
+         for (int i = 0; i < nassocs; i++) {
+            tree_t a = tree_assoc(e, i);
+            if (tree_subkind(a) == A_POS
+                && !vhdl_const_bits(cd, tree_value(a), tb, 1, depth + 1))
+               return false;
+         }
+
+         if (others != NULL) {
+            if (want <= (unsigned)npos)
+               return want == (unsigned)npos;
+            for (unsigned i = npos; i < want; i++) {
+               if (!vhdl_const_bits(cd, tree_value(others), tb, 1, depth + 1))
+                  return false;
+            }
+         }
+
+         return true;
+      }
+   default:
+      return false;
+   }
+}
+
+static void actual_expr_reads(conn_design_t *cd, tree_t e, range_list_t *reads);
+
+static void vhdl_actual(conn_design_t *cd, tree_t e, unsigned width_hint,
+                        seg_list_t *segs, const char *conv)
+{
+   switch (tree_kind(e)) {
+   case T_OPEN:
+      push_open(segs, width_hint);
+      return;
+
+   case T_CONV_FUNC:
+   case T_TYPE_CONV:
+      {
+         const char *name = tree_kind(e) == T_CONV_FUNC
+            ? istr(tree_ident(e)) : "type conversion";
+         unsigned before = segs->count;
+         vhdl_actual(cd, tree_value(e), width_hint, segs, dstr(cd, name));
+         (void)before;
+         return;
+      }
+
+   case T_QUALIFIED:
+      vhdl_actual(cd, tree_value(e), width_hint, segs, conv);
+      return;
+
+   case T_FCALL:
+      if (tree_has_ref(e) && tree_subkind(tree_ref(e)) == S_CONCAT) {
+         const int n = tree_params(e);
+         for (int i = 0; i < n; i++)
+            vhdl_actual(cd, tree_value(tree_param(e, i)), 1, segs, conv);
+         return;
+      }
+      break;
+
+   default:
+      break;
+   }
+
+   switch (tree_kind(e)) {
+   case T_REF:
+   case T_ARRAY_REF:
+   case T_ARRAY_SLICE:
+   case T_RECORD_REF:
+      {
+         conn_range_t r;
+         bool approx = false;
+         if (vhdl_select(cd, e, &r, &approx)) {
+            conn_seg_t s = {
+               .kind   = CONN_SEG_NET,
+               .width  = r.hi - r.lo + 1,
+               .range  = r,
+               .conv   = conv,
+               .approx = approx,
+            };
+            push_seg(segs, s);
+            return;
+         }
+         break;
+      }
+   default:
+      break;
+   }
+
+   // Constant bits
+   {
+      LOCAL_TEXT_BUF tb = tb_new();
+      if (vhdl_const_bits(cd, e, tb, width_hint, 0) && tb_len(tb) > 0) {
+         conn_seg_t s = {
+            .kind  = CONN_SEG_CONST,
+            .width = tb_len(tb),
+            .bits  = dstr(cd, tb_get(tb)),
+            .conv  = conv,
+         };
+         push_seg(segs, s);
+         return;
+      }
+   }
+
+   // General expression
+   {
+      SCOPED_LIST(range_list_t, reads);
+      actual_expr_reads(cd, e, &reads);
+      merge_ranges(&reads);
+
+      unsigned w = 0;
+      if (!vhdl_width(cd, tree_type(e), &w) || w == 0)
+         w = MAX(width_hint, 1);
+
+      conn_seg_t s = {
+         .kind   = CONN_SEG_EXPR,
+         .width  = w,
+         .text   = expr_text_vhdl(cd, e),
+         .reads  = DDUP(cd, reads, conn_range_t),
+         .nreads = reads.count,
+         .conv   = conv,
+      };
+      push_seg(segs, s);
+   }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// VHDL reads
+
+typedef struct {
+   conn_design_t *cd;
+   hash_t        *covered;     // Names handled as part of a larger name
+   range_list_t  *reads;
+   bool           approx;
+} vread_t;
+
+static void vhdl_cover_chain(vread_t *vr, tree_t name)
+{
+   for (;;) {
+      switch (tree_kind(name)) {
+      case T_ARRAY_REF:
+      case T_ARRAY_SLICE:
+      case T_RECORD_REF:
+         name = tree_value(name);
+         hash_put(vr->covered, name, name);
+         continue;
+      default:
+         return;
+      }
+   }
+}
+
+static void vhdl_read_names_cb(tree_t t, void *ctx)
+{
+   vread_t *vr = ctx;
+
+   switch (tree_kind(t)) {
+   case T_ARRAY_REF:
+   case T_ARRAY_SLICE:
+   case T_RECORD_REF:
+      {
+         if (hash_get(vr->covered, t) != NULL)
+            return;   // Part of a longer name
+
+         conn_range_t r;
+         bool approx = false;
+         if (vhdl_select(vr->cd, t, &r, &approx)) {
+            add_range(vr->reads, r.net, r.lo, r.hi);
+            vhdl_cover_chain(vr, t);
+            hash_put(vr->covered, t, t);
+         }
+      }
+      break;
+   default:
+      break;
+   }
+}
+
+static void vhdl_read_refs_cb(tree_t t, void *ctx)
+{
+   vread_t *vr = ctx;
+
+   if (tree_kind(t) != T_REF || hash_get(vr->covered, t) != NULL)
+      return;
+
+   conn_range_t r;
+   bool approx = false;
+   if (vhdl_select(vr->cd, t, &r, &approx))
+      add_range(vr->reads, r.net, r.lo, r.hi);
+}
+
+static void vhdl_cover_cb(tree_t t, void *ctx)
+{
+   // Names appearing as the target of an assignment are not read
+   vread_t *vr = ctx;
+
+   switch (tree_kind(t)) {
+   case T_SIGNAL_ASSIGN:
+   case T_FORCE:
+   case T_DUMMY_DRIVER:
+   case T_RELEASE:
+      {
+         tree_t target = tree_target(t);
+         hash_put(vr->covered, target, target);
+         vhdl_cover_chain(vr, target);
+      }
+      break;
+   default:
+      break;
+   }
+}
+
+static void vhdl_cover_pre(tree_t t, void *ctx)
+{
+   vhdl_cover_cb(t, ctx);
+}
+
+static void vhdl_collect_reads(conn_design_t *cd, tree_t root,
+                               range_list_t *reads, bool targets_are_writes)
+{
+   vread_t vr = {
+      .cd      = cd,
+      .covered = hash_new(64),
+      .reads   = reads,
+   };
+
+   if (targets_are_writes)
+      tree_visit(root, vhdl_cover_pre, &vr);
+
+   // Names with selects first, so that the plain references inside them
+   // are not counted as reads of the whole signal
+   tree_visit(root, vhdl_read_names_cb, &vr);
+   tree_visit(root, vhdl_read_refs_cb, &vr);
+
+   hash_free(vr.covered);
+}
+
+static void actual_expr_reads(conn_design_t *cd, tree_t e, range_list_t *reads)
+{
+   vhdl_collect_reads(cd, e, reads, false);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Verilog name resolution
+
+static void vlog_net_shape(vlog_node_t decl, unsigned *width, bool *desc,
+                           bool *has_bounds, int64_t *left, int64_t *right,
+                           bool *record)
+{
+   *width = 1;
+   *desc = true;
+   *has_bounds = false;
+   *left = *right = 0;
+   *record = false;
+
+   if (!vlog_has_type(decl))
+      return;
+
+   vlog_node_t dt = vlog_get_type(vlog_type(decl));
+   if (dt == NULL)
+      dt = vlog_type(decl);
+
+   unsigned w = 1;
+   switch (vlog_kind(dt)) {
+   case V_DATA_TYPE:
+      if (!vlog_is_dynamic_type(dt))
+         w = MAX(vlog_size(dt), 1);
+      break;
+   default:
+      break;
+   }
+
+   const unsigned nunpacked = vlog_ranges(decl);
+   unsigned total = w;
+   for (unsigned i = 0; i < nunpacked; i++)
+      total *= MAX(vlog_size(vlog_range(decl, i)), 1);
+
+   *width = MAX(total, 1);
+
+   if (nunpacked == 0 && vlog_kind(dt) == V_DATA_TYPE && vlog_ranges(dt) == 1
+       && !vlog_has_type(dt)) {
+      int64_t l, r;
+      if (vlog_bounds(vlog_range(dt, 0), &l, &r)) {
+         *left = l;
+         *right = r;
+         *desc = l >= r;
+         *has_bounds = true;
+      }
+   }
+   else if (vlog_kind(dt) == V_DATA_TYPE && vlog_has_type(dt))
+      *record = true;
+}
+
+static bool vlog_select(conn_design_t *cd, vlog_node_t v, conn_range_t *out,
+                        bool *approx)
+{
+   switch (vlog_kind(v)) {
+   case V_REF:
+   case V_HIER_REF:
+      {
+         if (!vlog_has_ref(v))
+            return false;
+
+         conn_net_t *net = lookup_net(cd, vlog_ref(v));
+         if (net == NULL)
+            return false;
+
+         out->net = net;
+         out->lo = 0;
+         out->hi = net->width - 1;
+         return true;
+      }
+
+   case V_MEMBER_REF:
+      if (!vlog_select(cd, vlog_value(v), out, approx))
+         return false;
+      *approx = true;
+      return true;
+
+   case V_BIT_SELECT:
+   case V_PART_SELECT:
+      {
+         if (!vlog_select(cd, vlog_value(v), out, approx))
+            return false;
+
+         const conn_net_t *net = out->net;
+         if (*approx || !net->has_bounds || out->lo != 0
+             || out->hi != net->width - 1) {
+            *approx = true;
+            return true;
+         }
+
+         int64_t a, b;
+         if (vlog_kind(v) == V_BIT_SELECT) {
+            if (vlog_params(v) != 1 || !vlog_get_const(vlog_param(v, 0), &a))
+               goto whole;
+            b = a;
+         }
+         else {
+            int64_t l, r;
+            if (!vlog_get_const(vlog_left(v), &l)
+                || !vlog_get_const(vlog_right(v), &r))
+               goto whole;
+
+            switch (vlog_subkind(v)) {
+            case V_RANGE_CONST: a = l; b = r; break;
+            case V_RANGE_POS: a = l + r - 1; b = l; break;   // [l +: r]
+            case V_RANGE_NEG: a = l; b = l - r + 1; break;   // [l -: r]
+            default: goto whole;
+            }
+         }
+
+         {
+            const bool desc = net->left >= net->right;
+            const int64_t lo = MIN(a, b), hi = MAX(a, b);
+            const int64_t lo_n = MIN(net->left, net->right);
+            const int64_t hi_n = MAX(net->left, net->right);
+            if (lo < lo_n || hi > hi_n)
+               goto whole;
+
+            const unsigned p1 = desc ? net->left - hi : lo - net->left;
+            const unsigned p2 = desc ? net->left - lo : hi - net->left;
+            out->lo = p1;
+            out->hi = p2;
+            return true;
+         }
+
+      whole:
+         *approx = true;
+         return true;
+      }
+
+   default:
+      return false;
+   }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Verilog actuals
+
+static void vlog_expr_reads(conn_design_t *cd, vlog_node_t e,
+                            range_list_t *reads);
+
+static void vlog_actual(conn_design_t *cd, vlog_node_t e, unsigned width_hint,
+                        seg_list_t *segs)
+{
+   switch (vlog_kind(e)) {
+   case V_CONCAT:
+      if (!vlog_has_value(e)) {
+         const int n = vlog_params(e);
+         for (int i = 0; i < n; i++)
+            vlog_actual(cd, vlog_param(e, i), 1, segs);
+         return;
+      }
+      break;
+
+   case V_REF:
+   case V_HIER_REF:
+   case V_BIT_SELECT:
+   case V_PART_SELECT:
+   case V_MEMBER_REF:
+      {
+         conn_range_t r;
+         bool approx = false;
+         if (vlog_select(cd, e, &r, &approx)) {
+            conn_seg_t s = {
+               .kind   = CONN_SEG_NET,
+               .width  = r.hi - r.lo + 1,
+               .range  = r,
+               .approx = approx,
+            };
+            push_seg(segs, s);
+            return;
+         }
+         break;
+      }
+
+   case V_NUMBER:
+      {
+         number_t n = vlog_number(e);
+         const unsigned w = number_width(n);
+         char *bits = dalloc(cd, w + 1);
+         for (unsigned i = 0; i < w; i++) {
+            static const char digits[] = {
+               [LOGIC_0] = '0', [LOGIC_1] = '1', [LOGIC_X] = 'x',
+               [LOGIC_Z] = 'z'
+            };
+            bits[i] = digits[number_bit(n, w - 1 - i)];
+         }
+
+         conn_seg_t s = { .kind = CONN_SEG_CONST, .width = w, .bits = bits };
+         push_seg(segs, s);
+         return;
+      }
+
+   default:
+      break;
+   }
+
+   unsigned w = 0;
+   switch (vlog_kind(e)) {
+   case V_CONCAT:
+   case V_BINARY:
+   case V_UNARY:
+   case V_COND_EXPR:
+   case V_BIT_SELECT:
+   case V_PART_SELECT:
+   case V_REF:
+   case V_SYS_FCALL:
+   case V_USER_FCALL:
+   case V_CAST:
+      w = vlog_width(e);
+      break;
+   default:
+      break;
+   }
+   if (w == 0)
+      w = MAX(width_hint, 1);
+
+   SCOPED_LIST(range_list_t, reads);
+   vlog_expr_reads(cd, e, &reads);
+   merge_ranges(&reads);
+
+   conn_seg_t s = {
+      .kind   = CONN_SEG_EXPR,
+      .width  = w,
+      .text   = expr_text_vlog(cd, e),
+      .reads  = DDUP(cd, reads, conn_range_t),
+      .nreads = reads.count,
+   };
+   push_seg(segs, s);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Verilog read and write sets
+
+typedef struct {
+   conn_design_t *cd;
+   hash_t        *skel;      // Nodes making up the target of an assignment
+   hash_t        *covered;   // References counted as part of a select
+   range_list_t  *reads;
+   range_list_t  *drives;
+   bool           approx;
+   A(vlog_node_t) callees;
+   hash_t        *seen;
+} vscan_t;
+
+static void vscan_mark_skel(vscan_t *vs, vlog_node_t v)
+{
+   for (;;) {
+      hash_put(vs->skel, v, v);
+
+      switch (vlog_kind(v)) {
+      case V_BIT_SELECT:
+      case V_PART_SELECT:
+      case V_MEMBER_REF:
+         v = vlog_value(v);
+         continue;
+      default:
+         return;
+      }
+   }
+}
+
+static void vscan_lvalue(vscan_t *vs, vlog_node_t t, bool also_read)
+{
+   switch (vlog_kind(t)) {
+   case V_CONCAT:
+      {
+         hash_put(vs->skel, t, t);
+         const int n = vlog_params(t);
+         for (int i = 0; i < n; i++)
+            vscan_lvalue(vs, vlog_param(t, i), also_read);
+      }
+      break;
+
+   case V_REF:
+   case V_HIER_REF:
+   case V_BIT_SELECT:
+   case V_PART_SELECT:
+   case V_MEMBER_REF:
+      {
+         vscan_mark_skel(vs, t);
+
+         conn_range_t r;
+         bool approx = false;
+         if (vlog_select(vs->cd, t, &r, &approx)) {
+            add_range(vs->drives, r.net, r.lo, r.hi);
+            if (also_read)
+               add_range(vs->reads, r.net, r.lo, r.hi);
+         }
+         // Else a local variable or an unresolved reference
+      }
+      break;
+
+   default:
+      vs->approx = true;
+      break;
+   }
+}
+
+static void vscan_writes_cb(vlog_node_t v, void *ctx)
+{
+   vscan_t *vs = ctx;
+
+   switch (vlog_kind(v)) {
+   case V_BASSIGN:
+   case V_NBASSIGN:
+   case V_ASSIGN:
+   case V_FORCE:
+   case V_GATE_INST:
+      if (vlog_has_target(v))
+         vscan_lvalue(vs, vlog_target(v), false);
+      break;
+   case V_OP_ASSIGN:
+   case V_PREFIX:
+   case V_POSTFIX:
+      vscan_lvalue(vs, vlog_target(v), true);
+      break;
+   case V_SYS_TCALL:
+      {
+         const int n = vlog_params(v);
+         for (int i = 0; i < n; i++) {
+            if (vlog_is_scan_target(v, i))
+               vscan_lvalue(vs, vlog_param(v, i), false);
+         }
+      }
+      break;
+   case V_USER_FCALL:
+   case V_USER_TCALL:
+      if (vlog_has_ref(v) && hash_get(vs->seen, vlog_ref(v)) == NULL) {
+         hash_put(vs->seen, vlog_ref(v), vlog_ref(v));
+         APUSH(vs->callees, vlog_ref(v));
+      }
+      break;
+   case V_METHOD_CALL:
+   case V_CLASS_NEW:
+   case V_DYNAMIC_NEW:
+      vs->approx = true;
+      break;
+   case V_HIER_REF:
+      if (!vlog_has_ref(v))
+         vs->approx = true;
+      break;
+   default:
+      break;
+   }
+}
+
+static void vscan_cover_chain(vscan_t *vs, vlog_node_t v)
+{
+   for (;;) {
+      switch (vlog_kind(v)) {
+      case V_BIT_SELECT:
+      case V_PART_SELECT:
+      case V_MEMBER_REF:
+         v = vlog_value(v);
+         hash_put(vs->covered, v, v);
+         continue;
+      default:
+         return;
+      }
+   }
+}
+
+static void vscan_selects_cb(vlog_node_t v, void *ctx)
+{
+   vscan_t *vs = ctx;
+
+   switch (vlog_kind(v)) {
+   case V_BIT_SELECT:
+   case V_PART_SELECT:
+   case V_MEMBER_REF:
+      {
+         if (hash_get(vs->skel, v) != NULL || hash_get(vs->covered, v) != NULL)
+            return;
+
+         conn_range_t r;
+         bool approx = false;
+         if (vlog_select(vs->cd, v, &r, &approx)) {
+            add_range(vs->reads, r.net, r.lo, r.hi);
+            vscan_cover_chain(vs, v);
+            hash_put(vs->covered, v, v);
+         }
+      }
+      break;
+   default:
+      break;
+   }
+}
+
+static void vscan_refs_cb(vlog_node_t v, void *ctx)
+{
+   vscan_t *vs = ctx;
+
+   switch (vlog_kind(v)) {
+   case V_REF:
+   case V_HIER_REF:
+      {
+         if (hash_get(vs->skel, v) != NULL || hash_get(vs->covered, v) != NULL)
+            return;
+
+         conn_range_t r;
+         bool approx = false;
+         if (vlog_select(vs->cd, v, &r, &approx))
+            add_range(vs->reads, r.net, r.lo, r.hi);
+      }
+      break;
+   default:
+      break;
+   }
+}
+
+static void vscan_run(vscan_t *vs, vlog_node_t root)
+{
+   vlog_visit(root, vscan_writes_cb, vs);
+   vlog_visit(root, vscan_selects_cb, vs);
+   vlog_visit(root, vscan_refs_cb, vs);
+}
+
+static void vlog_scan(conn_design_t *cd, vlog_node_t root, range_list_t *reads,
+                      range_list_t *drives, bool *approx)
+{
+   vscan_t vs = {
+      .cd      = cd,
+      .skel    = hash_new(64),
+      .covered = hash_new(64),
+      .reads   = reads,
+      .drives  = drives,
+      .seen    = hash_new(16),
+   };
+
+   vscan_run(&vs, root);
+
+   // Subroutines called may access signals of the enclosing module
+   for (unsigned i = 0; i < vs.callees.count; i++) {
+      vlog_node_t callee = vs.callees.items[i];
+      switch (vlog_kind(callee)) {
+      case V_FUNC_DECL:
+      case V_TASK_DECL:
+         vscan_run(&vs, callee);
+         break;
+      default:
+         break;
+      }
+   }
+
+   ACLEAR(vs.callees);
+   hash_free(vs.skel);
+   hash_free(vs.covered);
+   hash_free(vs.seen);
+
+   *approx |= vs.approx;
+}
+
+static void vlog_expr_reads(conn_design_t *cd, vlog_node_t e,
+                            range_list_t *reads)
+{
+   range_list_t drives = AINIT;
+   bool approx = false;
+   vlog_scan(cd, e, reads, &drives, &approx);
+   ACLEAR(drives);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Block construction
+
+static void register_generics(conn_design_t *cd, tree_t b, hash_t *dst)
+{
+   // Values are evaluated in the context of the parent but stored in DST
+   const int ngenmaps = tree_genmaps(b);
+   for (int i = 0; i < ngenmaps; i++) {
+      tree_t m = tree_genmap(b, i);
+
+      tree_t decl = NULL;
+      if (tree_subkind(m) == P_POS) {
+         if (tree_pos(m) < tree_generics(b))
+            decl = tree_generic(b, tree_pos(m));
+      }
+      else {
+         tree_t ref = name_to_ref(tree_name(m));
+         if (ref != NULL && tree_has_ref(ref))
+            decl = tree_ref(ref);
+      }
+
+      if (decl == NULL)
+         continue;
+
+      gen_value_t *gv = hash_get(dst, decl);
+      if (gv == NULL) {
+         gv = xcalloc(sizeof(gen_value_t));
+         hash_put(dst, decl, gv);
+      }
+
+      gv->value = tree_value(m);
+      gv->has_int = eval_int(cd, gv->value, &gv->ival, 0);
+   }
+}
+
+static bool is_generate_block(tree_t b)
+{
+   if (tree_decls(b) == 0)
+      return false;
+
+   tree_t hier = tree_decl(b, 0);
+   if (tree_kind(hier) != T_HIER)
+      return false;
+
+   switch (tree_subkind(hier)) {
+   case T_FOR_GENERATE:
+   case T_IF_GENERATE:
+   case T_CASE_GENERATE:
+   case T_COND_STMT:
+   case T_ALTERNATIVE:
+      return true;
+   case T_BLOCK:
+      // A generate statement whose condition is constant is replaced by a
+      // block; a block statement with ports is an instance in its own right
+      return tree_ports(b) == 0 && tree_params(b) == 0
+         && tree_generics(b) == 0;
+   case T_VERILOG:
+      {
+         if (!tree_has_ref(hier))
+            return false;
+         tree_t wrap = tree_ref(hier);
+         if (tree_kind(wrap) != T_VERILOG)
+            return false;
+         return !!(vlog_flags(tree_vlog(wrap)) & VLOG_F_GEN_BODY);
+      }
+   default:
+      return false;
+   }
+}
+
+static vlog_node_t block_vlog_body(tree_t b)
+{
+   if (tree_decls(b) == 0)
+      return NULL;
+
+   tree_t hier = tree_decl(b, 0);
+   if (tree_kind(hier) != T_HIER || tree_subkind(hier) != T_VERILOG
+       || !tree_has_ref(hier))
+      return NULL;
+
+   tree_t wrap = tree_ref(hier);
+   return tree_kind(wrap) == T_VERILOG ? tree_vlog(wrap) : NULL;
+}
+
+static void set_vhdl_bounds(conn_design_t *cd, conn_net_t *n, type_t type)
+{
+   n->record = type_has_record(type);
+
+   if (type_is_array(type) && dimension_of(type) == 1
+       && !type_is_array(type_elem(type)) && !type_is_record(type_elem(type))) {
+      dim_t d;
+      if (vhdl_dim(cd, type, 0, &d)) {
+         n->has_bounds = true;
+         n->left = d.left;
+         n->right = d.right;
+         n->descending = d.down;
+      }
+   }
+}
+
+static conn_net_t *add_vhdl_net(bctx_t *bc, tree_t decl, const char *prefix,
+                                conn_dir_t dir)
+{
+   conn_design_t *cd = bc->cd;
+   type_t type = tree_type(decl);
+
+   unsigned width = 1;
+   if (!vhdl_width(cd, type, &width))
+      width = 1;
+
+   char *name = dstrf(cd, "%s%s", prefix, istr(tree_ident(decl)));
+   conn_net_t *n = new_net(bc, name, dir, width, tree_loc(decl));
+   n->descending = true;
+   set_vhdl_bounds(cd, n, type);
+
+   map_decl(cd, decl, n);
+   return n;
+}
+
+static conn_dir_t vhdl_port_dir(tree_t p)
+{
+   switch (tree_subkind(p)) {
+   case PORT_IN: return CONN_IN;
+   case PORT_OUT:
+   case PORT_BUFFER: return CONN_OUT;
+   default: return CONN_INOUT;
+   }
+}
+
+static conn_net_t *add_vlog_net(bctx_t *bc, vlog_node_t decl,
+                                const char *prefix, conn_dir_t dir)
+{
+   conn_design_t *cd = bc->cd;
+
+   unsigned width;
+   bool desc, has_bounds, record;
+   int64_t left, right;
+   vlog_net_shape(decl, &width, &desc, &has_bounds, &left, &right, &record);
+
+   char *name = dstrf(cd, "%s%s", prefix, istr(vlog_ident(decl)));
+   conn_net_t *n = new_net(bc, name, dir, width, vlog_loc(decl));
+   n->descending = desc;
+   n->has_bounds = has_bounds;
+   n->left = left;
+   n->right = right;
+   n->record = record;
+
+   map_decl(cd, decl, n);
+   return n;
+}
+
+static bool vlog_decl_is_netlike(vlog_node_t d)
+{
+   if (!vlog_has_type(d))
+      return true;
+
+   vlog_node_t dt = vlog_get_type(vlog_type(d));
+   if (dt == NULL)
+      dt = vlog_type(d);
+
+   if (vlog_kind(dt) != V_DATA_TYPE)
+      return vlog_kind(dt) != V_CLASS_DECL;
+
+   if (vlog_is_dynamic_type(dt))
+      return false;
+
+   switch (vlog_subkind(dt)) {
+   case DT_REAL:
+   case DT_SHORTREAL:
+   case DT_REALTIME:
+   case DT_EVENT:
+   case DT_STRING:
+   case DT_DYNARRAY:
+   case DT_QUEUE:
+   case DT_MAILBOX:
+   case DT_VIRTUAL:
+   case DT_ASSOC:
+   case DT_PROCESS:
+   case DT_CHANDLE:
+   case DT_SEMAPHORE:
+      return false;
+   default:
+      return true;
+   }
+}
+
+static void build_ports(bctx_t *bc, tree_t b, vlog_node_t body)
+{
+   conn_design_t *cd = bc->cd;
+
+   if (body != NULL) {
+      const int nports = vlog_ports(body);
+      for (int i = 0; i < nports; i++) {
+         vlog_node_t ref = vlog_port(body, i);
+         if (vlog_kind(ref) != V_REF || !vlog_has_ref(ref))
+            continue;
+
+         vlog_node_t pd = vlog_ref(ref);
+         if (vlog_kind(pd) != V_PORT_DECL || !vlog_has_ref(pd))
+            continue;
+
+         conn_dir_t dir = CONN_INOUT;
+         switch ((v_port_kind_t)vlog_subkind(pd)) {
+         case V_PORT_INPUT: dir = CONN_IN; break;
+         case V_PORT_OUTPUT: dir = CONN_OUT; break;
+         default: break;
+         }
+
+         vlog_node_t nd = vlog_ref(pd);
+         conn_net_t *n = add_vlog_net(bc, nd, "", dir);
+         map_decl(cd, pd, n);
+         n->name = dstr(cd, istr(vlog_ident(pd)));
+      }
+   }
+
+   // Ports of the block as seen from VHDL: for a shim of a Verilog module
+   // these have the same names as the Verilog ports
+   const int nports = tree_ports(b);
+   for (int i = 0; i < nports; i++) {
+      tree_t p = tree_port(b, i);
+      conn_net_t *n = find_net_by_name(bc, istr(tree_ident(p)));
+      if (n != NULL)
+         map_decl(cd, p, n);
+      else
+         add_vhdl_net(bc, p, "", vhdl_port_dir(p));
+   }
+
+   bc->nports = bc->nets.count;
+}
+
+static void scan_decls(bctx_t *bc, tree_t blk, const char *prefix)
+{
+   conn_design_t *cd = bc->cd;
+
+   const int ndecls = tree_decls(blk);
+   for (int i = 0; i < ndecls; i++) {
+      tree_t d = tree_decl(blk, i);
+      switch (tree_kind(d)) {
+      case T_SIGNAL_DECL:
+         add_vhdl_net(bc, d, prefix, CONN_LOCAL);
+         break;
+      case T_VERILOG:
+         {
+            vlog_node_t v = tree_vlog(d);
+            const vlog_kind_t kind = vlog_kind(v);
+            if (kind != V_NET_DECL && kind != V_VAR_DECL)
+               break;
+            else if (lookup_net(cd, v) != NULL)
+               break;   // Already declared as a port
+
+            conn_net_t *n = prefix[0] == '\0'
+               ? find_net_by_name(bc, istr(vlog_ident(v))) : NULL;
+            if (n != NULL)
+               map_decl(cd, v, n);
+            else if (vlog_decl_is_netlike(v))
+               add_vlog_net(bc, v, prefix, CONN_LOCAL);
+         }
+         break;
+      default:
+         break;
+      }
+   }
+
+   const int nstmts = tree_stmts(blk);
+   for (int i = 0; i < nstmts; i++) {
+      tree_t s = tree_stmt(blk, i);
+      if (tree_kind(s) == T_BLOCK && is_generate_block(s)) {
+         register_generics(cd, s, cd->genval);
+         char *np = dstrf(cd, "%s%s.", prefix, istr(tree_ident(s)));
+         scan_decls(bc, s, np);
+      }
+   }
+}
+
+static const char *block_label(tree_t b)
+{
+   const char *id = istr(tree_ident(b));
+   const char *dot = strrchr(id, '.');
+   return dot ? dot + 1 : id;
+}
+
+static void compute_process_sets(conn_design_t *cd, struct proc_ref *pp);
+
+static conn_proc_t *add_process(bctx_t *bc, const char *prefix, ident_t id,
+                                conn_proc_kind_t kind, tree_t where)
+{
+   conn_design_t *cd = bc->cd;
+   conn_proc_t *p = dalloc(cd, sizeof(conn_proc_t));
+   p->block = bc->block;
+   p->kind  = kind;
+   p->src   = loc_file(cd, tree_loc(where));
+   p->line  = loc_line(tree_loc(where));
+
+   // Compiler generated names such as "_P3" or "always#12#4" are replaced
+   // by the kind of process and the line number
+   const char *base = id ? istr(id) : "";
+   const bool generated = base[0] == '\0' || strchr(base, '#') != NULL
+      || (base[0] == '_' && (base[1] == 'P' || base[1] == 'p'))
+      || strncmp(base, "line__", 6) == 0;
+
+   static const char *const kind_names[] = {
+      [CONN_PROC_VHDL] = "process", [CONN_PROC_ALWAYS] = "always",
+      [CONN_PROC_ALWAYS_FF] = "always_ff",
+      [CONN_PROC_ALWAYS_COMB] = "always_comb",
+      [CONN_PROC_ALWAYS_LATCH] = "always_latch",
+      [CONN_PROC_INITIAL] = "initial", [CONN_PROC_FINAL] = "final",
+      [CONN_PROC_ASSIGN] = "assign", [CONN_PROC_GATE] = "gate",
+      [CONN_PROC_OTHER] = "other",
+   };
+
+   if (generated)
+      p->name = dstrf(cd, "%s%s@%u", prefix, kind_names[kind], p->line);
+   else
+      p->name = dstrf(cd, "%s%s", prefix, base);
+
+   APUSH(bc->procs, p);
+
+   // Evaluated now as the declarations of cloned instances are shared
+   struct proc_ref pp = { p, where };
+   compute_process_sets(cd, &pp);
+
+   return p;
+}
+
+static conn_block_t *build_instance(conn_design_t *cd, tree_t b,
+                                    conn_block_t *parent, const char *label);
+
+static void normalise_segs(conn_design_t *cd, seg_list_t *segs, unsigned want)
+{
+   unsigned total = 0;
+   unsigned keep = 0;
+   for (; keep < segs->count && total < want; keep++) {
+      conn_seg_t *s = &(segs->items[keep]);
+      if (total + s->width > want) {
+         // Truncate the last segment
+         s->width = want - total;
+         if (s->kind == CONN_SEG_NET)
+            s->range.hi = s->range.lo + s->width - 1;
+         else if (s->kind == CONN_SEG_CONST)
+            ((char *)s->bits)[s->width] = '\0';
+      }
+      total += s->width;
+   }
+
+   segs->count = keep;
+   if (total < want)
+      push_open(segs, want - total);
+
+   (void)cd;
+}
+
+static void add_conn(bctx_t *bc, pconn_list_t *conns, conn_net_t *formal,
+                     unsigned lo, unsigned hi, seg_list_t *segs,
+                     const loc_t *loc)
+{
+   conn_design_t *cd = bc->cd;
+
+   unsigned total = 0;
+   for (unsigned i = 0; i < segs->count; i++)
+      total += segs->items[i].width;
+
+   if (total > 0 && total != hi - lo + 1) {
+      // The actual has a different number of elements to the formal, for
+      // example through a conversion from integer to a vector: show it as
+      // a single expression reading all the bits
+      SCOPED_LIST(range_list_t, reads);
+      const char *conv = NULL;
+      for (unsigned i = 0; i < segs->count; i++) {
+         const conn_seg_t *s = &(segs->items[i]);
+         if (s->kind == CONN_SEG_NET)
+            add_range(&reads, s->range.net, s->range.lo, s->range.hi);
+         else if (s->kind == CONN_SEG_EXPR) {
+            for (unsigned j = 0; j < s->nreads; j++)
+               add_range(&reads, s->reads[j].net, s->reads[j].lo,
+                         s->reads[j].hi);
+         }
+         if (s->conv != NULL)
+            conv = s->conv;
+      }
+      merge_ranges(&reads);
+
+      conn_seg_t e = {
+         .kind   = CONN_SEG_EXPR,
+         .width  = hi - lo + 1,
+         .text   = conv ?: "resize",
+         .reads  = DDUP(cd, reads, conn_range_t),
+         .nreads = reads.count,
+         .conv   = conv,
+      };
+      segs->count = 0;
+      APUSH(*segs, e);
+   }
+
+   normalise_segs(cd, segs, hi - lo + 1);
+
+   conn_pconn_t c = {
+      .formal = formal,
+      .lo     = lo,
+      .hi     = hi,
+      .segs   = DDUP(cd, *segs, conn_seg_t),
+      .nsegs  = segs->count,
+      .src    = loc_file(cd, loc),
+      .line   = loc_line(loc),
+   };
+   APUSH(*conns, c);
+}
+
+static conn_range_t formal_range(conn_design_t *cd, conn_block_t *child,
+                                 tree_t cb, tree_t p, const char **conv)
+{
+   // Resolve the formal of a port map element in the context of the child
+   conn_range_t fr = {};
+
+   inst_maps_t *im = hash_get(cd->blkmaps, child);
+   hash_t *saved_net = cd->netmap, *saved_gen = cd->genval;
+   cd->netmap = im->net;
+   cd->genval = im->gen;
+
+   if (tree_subkind(p) == P_POS) {
+      if (tree_pos(p) < tree_ports(cb)) {
+         conn_net_t *n = lookup_net(cd, tree_port(cb, tree_pos(p)));
+         if (n != NULL)
+            fr = (conn_range_t){ n, 0, n->width - 1 };
+      }
+   }
+   else {
+      tree_t name = tree_name(p);
+      while (tree_kind(name) == T_CONV_FUNC
+             || tree_kind(name) == T_TYPE_CONV) {
+         *conv = tree_kind(name) == T_CONV_FUNC
+            ? dstr(cd, istr(tree_ident(name))) : "type conversion";
+         name = tree_value(name);
+      }
+
+      bool approx = false;
+      if (!vhdl_select(cd, name, &fr, &approx))
+         fr.net = NULL;
+   }
+
+   cd->netmap = saved_net;
+   cd->genval = saved_gen;
+   return fr;
+}
+
+static void build_conns(bctx_t *bc, conn_inst_t *inst, tree_t cb)
+{
+   conn_design_t *cd = bc->cd;
+   SCOPED_LIST(pconn_list_t, conns);
+
+   const int nparams = tree_params(cb);
+   for (int i = 0; i < nparams; i++) {
+      tree_t p = tree_param(cb, i);
+
+      const char *conv = NULL;
+      conn_range_t fr = formal_range(cd, inst->child, cb, p, &conv);
+      if (fr.net == NULL)
+         continue;
+
+      SCOPED_LIST(seg_list_t, segs);
+      vhdl_actual(cd, tree_value(p), fr.hi - fr.lo + 1,
+                  &segs, NULL);
+
+      if (conv != NULL) {
+         for (unsigned j = 0; j < segs.count; j++) {
+            if (segs.items[j].conv == NULL)
+               segs.items[j].conv = conv;
+         }
+      }
+
+      add_conn(bc, &conns, fr.net, fr.lo, fr.hi, &segs,
+               tree_loc(p));
+   }
+
+   const int ndecls = tree_decls(cb);
+   for (int i = 0; i < ndecls; i++) {
+      tree_t d = tree_decl(cb, i);
+      if (tree_kind(d) != T_VERILOG)
+         continue;
+
+      vlog_node_t map = tree_vlog(d);
+      if (vlog_kind(map) != V_PORT_MAP || !vlog_has_value(map))
+         continue;
+
+      vlog_node_t pd = vlog_ref(map);
+      conn_net_t *n = lookup_net(cd, pd);
+      if (n == NULL) {
+         conn_net_t *byname = NULL;
+         for (unsigned j = 0; j < inst->child->nports; j++) {
+            if (name_eq(inst->child->nets[j]->name, istr(vlog_ident(pd))))
+               byname = inst->child->nets[j];
+         }
+         n = byname;
+      }
+
+      if (n == NULL)
+         continue;
+
+      SCOPED_LIST(seg_list_t, segs);
+      vlog_actual(cd, vlog_value(map), n->width, &segs);
+      add_conn(bc, &conns, n, 0, n->width - 1, &segs,
+               vlog_loc(map));
+   }
+
+   inst->conns = DDUP(cd, conns, conn_pconn_t);
+   inst->nconns = conns.count;
+}
+
+static void scan_stmts(bctx_t *bc, tree_t blk, const char *prefix)
+{
+   conn_design_t *cd = bc->cd;
+
+   const int nstmts = tree_stmts(blk);
+   for (int i = 0; i < nstmts; i++) {
+      tree_t s = tree_stmt(blk, i);
+      switch (tree_kind(s)) {
+      case T_PROCESS:
+         add_process(bc, prefix, tree_ident(s), CONN_PROC_VHDL, s);
+         break;
+
+      case T_VERILOG:
+         {
+            vlog_node_t v = tree_vlog(s);
+            conn_proc_kind_t kind = CONN_PROC_OTHER;
+            switch (vlog_kind(v)) {
+            case V_ALWAYS:
+               switch ((vlog_always_kind_t)vlog_subkind(v)) {
+               case V_ALWAYS_FF: kind = CONN_PROC_ALWAYS_FF; break;
+               case V_ALWAYS_COMB:
+               case V_ALWAYS_COMB_DONE: kind = CONN_PROC_ALWAYS_COMB; break;
+               case V_ALWAYS_LATCH:
+               case V_ALWAYS_LATCH_DONE: kind = CONN_PROC_ALWAYS_LATCH; break;
+               default: kind = CONN_PROC_ALWAYS; break;
+               }
+               break;
+            case V_INITIAL: kind = CONN_PROC_INITIAL; break;
+            case V_FINAL: kind = CONN_PROC_FINAL; break;
+            case V_ASSIGN: kind = CONN_PROC_ASSIGN; break;
+            case V_GATE_INST:
+            case V_UDP_TABLE: kind = CONN_PROC_GATE; break;
+            case V_TCHECK: continue;   // Timing check
+            default: break;
+            }
+
+            ident_t id = vlog_has_ident(v) ? vlog_ident(v)
+               : (tree_has_ident(s) ? tree_ident(s) : NULL);
+            if (id != NULL && istr(id)[0] == '$')
+               continue;   // Compiler generated process
+
+            add_process(bc, prefix, id, kind, s);
+         }
+         break;
+
+      case T_BLOCK:
+         if (is_generate_block(s)) {
+            // The index of a generate loop is not unique to one iteration
+            register_generics(cd, s, cd->genval);
+            char *np = dstrf(cd, "%s%s.", prefix, istr(tree_ident(s)));
+            scan_stmts(bc, s, np);
+         }
+         else {
+            const char *label = dstrf(cd, "%s%s", prefix, block_label(s));
+            conn_block_t *child = build_instance(cd, s, bc->block, label);
+
+            conn_inst_t *inst = child->inst;
+            build_conns(bc, inst, s);
+            APUSH(bc->insts, inst);
+         }
+         break;
+
+      default:
+         break;
+      }
+   }
+}
+
+static conn_block_t *build_instance(conn_design_t *cd, tree_t b,
+                                    conn_block_t *parent, const char *label)
+{
+   conn_block_t *blk = dalloc(cd, sizeof(conn_block_t));
+   blk->label  = dstr(cd, label);
+   blk->name   = parent ? dstrf(cd, "%s.%s", parent->name, label) : blk->label;
+   blk->parent = parent;
+   blk->src    = loc_file(cd, tree_loc(b));
+   blk->line   = loc_line(tree_loc(b));
+   blk->lang   = CONN_VHDL;
+
+   conn_inst_t *inst = NULL;
+   if (parent != NULL) {
+      inst = dalloc(cd, sizeof(conn_inst_t));
+      inst->parent = parent;
+      inst->child  = blk;
+      inst->label  = blk->label;
+      inst->src    = blk->src;
+      inst->line   = blk->line;
+      blk->inst    = inst;
+   }
+
+   add_design_block(cd, blk);
+
+   // Declarations are mapped to nets in a table private to this instance
+   inst_maps_t *im = xcalloc(sizeof(inst_maps_t));
+   im->net = hash_new(64);
+   im->gen = hash_new(16);
+   hash_put(cd->blkmaps, blk, im);
+
+   register_generics(cd, b, im->gen);
+
+   hash_t *saved_net = cd->netmap, *saved_gen = cd->genval;
+   cd->netmap = im->net;
+   cd->genval = im->gen;
+
+   vlog_node_t body = block_vlog_body(b);
+   if (body != NULL)
+      blk->lang = CONN_VERILOG;
+
+   if (tree_decls(b) > 0 && tree_kind(tree_decl(b, 0)) == T_HIER) {
+      tree_t hier = tree_decl(b, 0);
+      if (body != NULL && vlog_has_ident2(body))
+         blk->unit = dstr(cd, istr(vlog_ident2(body)));
+      else if (tree_has_ref(hier)) {
+         tree_t ref = tree_ref(hier);
+         switch (tree_kind(ref)) {
+         case T_ARCH:
+            blk->unit = dstr(cd, istr(tree_ident2(ref)));
+            break;
+         case T_COMPONENT:
+            blk->unit = dstr(cd, istr(tree_ident(ref)));
+            break;
+         default:
+            break;
+         }
+      }
+   }
+
+   bctx_t bc = { .cd = cd, .block = blk };
+
+   build_ports(&bc, b, body);
+   scan_decls(&bc, b, "");
+   scan_stmts(&bc, b, "");
+
+   blk->nets   = DDUP(cd, bc.nets, conn_net_t *);
+   blk->nnets  = bc.nets.count;
+   blk->nports = bc.nports;
+   blk->insts  = DDUP(cd, bc.insts, conn_inst_t *);
+   blk->ninsts = bc.insts.count;
+   blk->procs  = DDUP(cd, bc.procs, conn_proc_t *);
+   blk->nprocs = bc.procs.count;
+
+   ACLEAR(bc.nets);
+   ACLEAR(bc.insts);
+   ACLEAR(bc.procs);
+
+   cd->netmap = saved_net;
+   cd->genval = saved_gen;
+
+   return blk;
+}
+
+static void compute_process_sets(conn_design_t *cd, struct proc_ref *pp)
+{
+   conn_proc_t *p = pp->proc;
+   tree_t t = pp->tree;
+
+   SCOPED_LIST(range_list_t, reads);
+   SCOPED_LIST(range_list_t, drives);
+   bool approx = false;
+
+   if (tree_kind(t) == T_PROCESS) {
+      driver_set_t *ds = find_drivers(t);
+      for (driver_info_t *di = get_drivers(ds, t); di; di = di->chain_proc) {
+         conn_range_t r;
+         bool ap = false;
+         if (vhdl_select(cd, di->prefix, &r, &ap))
+            add_range(&drives, r.net, r.lo, r.hi);
+      }
+      free_drivers(ds);
+
+      vhdl_collect_reads(cd, t, &reads, true);
+   }
+   else {
+      vlog_node_t v = tree_vlog(t);
+      vlog_scan(cd, v, &reads, &drives,
+                &approx);
+
+      switch (vlog_kind(v)) {
+      case V_UDP_TABLE:
+         approx = true;
+         break;
+      default:
+         break;
+      }
+   }
+
+   merge_ranges(&reads);
+   merge_ranges(&drives);
+
+   p->reads   = DDUP(cd, reads, conn_range_t);
+   p->nreads  = reads.count;
+   p->drives  = DDUP(cd, drives, conn_range_t);
+   p->ndrives = drives.count;
+   p->approx  = approx;
+
+   bool foreign = false;
+   for (unsigned i = 0; i < reads.count; i++)
+      foreign |= reads.items[i].net->block != p->block;
+   for (unsigned i = 0; i < drives.count; i++)
+      foreign |= drives.items[i].net->block != p->block;
+
+   if (foreign) {
+      if (cd->nxprocs == cd->maxxprocs) {
+         cd->maxxprocs = MAX(8, cd->maxxprocs * 2);
+         cd->xprocs = xrealloc_array(cd->xprocs, cd->maxxprocs,
+                                     sizeof(conn_proc_t *));
+      }
+      cd->xprocs[cd->nxprocs++] = p;
+   }
+}
+
+conn_design_t *conn_build(tree_t root)
+{
+   const tree_kind_t kind = tree_kind(root);
+   if (kind != T_ELAB && kind != T_BLOCK)
+      return NULL;
+
+   conn_design_t *cd = xcalloc(sizeof(conn_design_t));
+   cd->gmap = hash_new(1024);
+   cd->blkmaps = hash_new(64);
+
+   A(conn_block_t *) roots = AINIT;
+
+   if (kind == T_BLOCK)
+      APUSH(roots, build_instance(cd, root, NULL, block_label(root)));
+   else {
+      const int nstmts = tree_stmts(root);
+      for (int i = 0; i < nstmts; i++) {
+         tree_t s = tree_stmt(root, i);
+         if (tree_kind(s) == T_BLOCK)
+            APUSH(roots, build_instance(cd, s, NULL, block_label(s)));
+      }
+   }
+
+   cd->roots = DDUP(cd, roots, conn_block_t *);
+   cd->nroots = roots.count;
+   ACLEAR(roots);
+
+
+   return cd;
+}
+
+void conn_free(conn_design_t *cd)
+{
+   if (cd == NULL)
+      return;
+
+   for (chunk_t *c = cd->chunks, *tmp; c; c = tmp) {
+      tmp = c->next;
+      free(c);
+   }
+
+   for (unsigned i = 0; i < cd->nstrings; i++)
+      free(cd->strings[i]);
+
+   free(cd->strings);
+   free(cd->blocks);
+   free(cd->xprocs);
+   const void *key;
+   void *value;
+   for (hash_iter_t it = HASH_BEGIN;
+        hash_iter(cd->blkmaps, &it, &key, &value); ) {
+      inst_maps_t *im = value;
+      hash_iter_t it2 = HASH_BEGIN;
+      const void *k2;
+      void *v2;
+      while (hash_iter(im->gen, &it2, &k2, &v2))
+         free(v2);
+      hash_free(im->net);
+      hash_free(im->gen);
+      free(im);
+   }
+
+   hash_free(cd->blkmaps);
+   hash_free(cd->gmap);
+   free(cd);
+}
+
+unsigned conn_roots(const conn_design_t *cd)
+{
+   return cd->nroots;
+}
+
+conn_block_t *conn_root(const conn_design_t *cd, unsigned n)
+{
+   assert(n < cd->nroots);
+   return cd->roots[n];
+}
+
+void conn_walk(const conn_design_t *cd, conn_block_fn_t fn, void *ctx)
+{
+   for (unsigned i = 0; i < cd->nblocks; i++)
+      (*fn)(cd->blocks[i], ctx);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Lookup by path
+
+static const char *skip_sep(const char *p)
+{
+   while (*p == '.' || *p == ':')
+      p++;
+   return p;
+}
+
+static bool prefix_match(const char *label, const char *path, const char **rest)
+{
+   // True if PATH starts with LABEL followed by a separator or the end
+   const size_t n = strlen(label);
+   if (strncasecmp(label, path, n) != 0)
+      return false;
+
+   if (path[n] == '\0' || path[n] == '.' || path[n] == ':') {
+      *rest = path + n;
+      return true;
+   }
+
+   return false;
+}
+
+static conn_block_t *find_block_in(conn_block_t *b, const char *path,
+                                   conn_net_t **net_out)
+{
+   // PATH is relative to B and has no leading separator
+   if (*path == '\0')
+      return b;
+
+   if (net_out != NULL) {
+      for (unsigned i = 0; i < b->nnets; i++) {
+         if (name_eq(b->nets[i]->name, path)) {
+            *net_out = b->nets[i];
+            return b;
+         }
+      }
+
+      // The path may use ':' for the separators within a generate prefix
+      for (unsigned i = 0; i < b->nnets; i++) {
+         const char *n = b->nets[i]->name, *p = path;
+         for (; *n && *p; n++, p++) {
+            if (tolower((unsigned char)*n) != tolower((unsigned char)*p)
+                && !(*n == '.' && *p == ':'))
+               break;
+         }
+         if (*n == '\0' && *p == '\0') {
+            *net_out = b->nets[i];
+            return b;
+         }
+      }
+   }
+
+   for (unsigned i = 0; i < b->ninsts; i++) {
+      const char *rest;
+      conn_block_t *c = b->insts[i]->child;
+      if (prefix_match(b->insts[i]->label, path, &rest)) {
+         conn_block_t *r = find_block_in(c, skip_sep(rest), net_out);
+         if (r != NULL)
+            return r;
+      }
+   }
+
+   return NULL;
+}
+
+conn_block_t *conn_find_block(const conn_design_t *cd, const char *path)
+{
+   path = skip_sep(path);
+
+   for (unsigned i = 0; i < cd->nroots; i++) {
+      const char *rest;
+      if (prefix_match(cd->roots[i]->label, path, &rest)) {
+         conn_block_t *b = find_block_in(cd->roots[i], skip_sep(rest), NULL);
+         if (b != NULL)
+            return b;
+      }
+   }
+
+   return NULL;
+}
+
+conn_net_t *conn_find_net(const conn_design_t *cd, const char *path)
+{
+   path = skip_sep(path);
+
+   for (unsigned i = 0; i < cd->nroots; i++) {
+      const char *rest;
+      if (prefix_match(cd->roots[i]->label, path, &rest)) {
+         conn_net_t *net = NULL;
+         find_block_in(cd->roots[i], skip_sep(rest), &net);
+         if (net != NULL)
+            return net;
+      }
+   }
+
+   return NULL;
+}
+
+static const char *keep_string(conn_design_t *cd, char *s)
+{
+   if (cd->nstrings == cd->maxstrings) {
+      cd->maxstrings = MAX(16, cd->maxstrings * 2);
+      cd->strings = xrealloc_array(cd->strings, cd->maxstrings,
+                                   sizeof(char *));
+   }
+
+   cd->strings[cd->nstrings++] = s;
+   return s;
+}
+
+const char *conn_net_path(const conn_design_t *cd, const conn_net_t *net)
+{
+   return keep_string((conn_design_t *)cd,
+                      xasprintf("%s.%s", net->block->name, net->name));
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Queries
+
+static bool overlap(unsigned alo, unsigned ahi, unsigned blo, unsigned bhi,
+                    unsigned *lo, unsigned *hi)
+{
+   *lo = MAX(alo, blo);
+   *hi = MIN(ahi, bhi);
+   return *lo <= *hi;
+}
+
+typedef struct {
+   const conn_design_t *cd;
+   const conn_net_t    *net;
+   unsigned             lo, hi;
+   conn_end_fn_t        fn;
+   void                *ctx;
+   unsigned             count;
+   bool                 drivers;
+} query_t;
+
+static void report(query_t *q, const conn_end_t *end)
+{
+   q->count++;
+   (*q->fn)(end, q->ctx);
+}
+
+static void query_proc(query_t *q, conn_proc_t *p)
+{
+   const conn_range_t *list = q->drivers ? p->drives : p->reads;
+   const unsigned n = q->drivers ? p->ndrives : p->nreads;
+
+   for (unsigned i = 0; i < n; i++) {
+      unsigned lo, hi;
+      if (list[i].net == q->net
+          && overlap(list[i].lo, list[i].hi, q->lo, q->hi, &lo, &hi)) {
+         conn_end_t end = {
+            .kind   = CONN_END_PROC,
+            .block  = p->block,
+            .proc   = p,
+            .src    = p->src,
+            .line   = p->line,
+            .lo     = lo,
+            .hi     = hi,
+            .approx = p->approx,
+         };
+         report(q, &end);
+      }
+   }
+}
+
+static void query_children(query_t *q, conn_block_t *b)
+{
+   for (unsigned i = 0; i < b->ninsts; i++) {
+      conn_inst_t *inst = b->insts[i];
+      for (unsigned j = 0; j < inst->nconns; j++) {
+         const conn_pconn_t *c = &(inst->conns[j]);
+         const conn_dir_t dir = c->formal->dir;
+
+         const bool drives = dir == CONN_OUT || dir == CONN_INOUT;
+         const bool reads = dir == CONN_IN || dir == CONN_INOUT;
+
+         unsigned pos = c->lo;
+         for (unsigned k = 0; k < c->nsegs; k++) {
+            const conn_seg_t *s = &(c->segs[k]);
+            unsigned lo, hi;
+
+            if (s->kind == CONN_SEG_NET && s->range.net == q->net
+                && (q->drivers ? drives : reads)
+                && overlap(s->range.lo, s->range.hi, q->lo, q->hi, &lo, &hi)) {
+               const unsigned flo = pos + (lo - s->range.lo);
+               conn_end_t end = {
+                  .kind   = CONN_END_CHILD,
+                  .block  = b,
+                  .inst   = inst,
+                  .port   = c->formal,
+                  .src    = c->src,
+                  .line   = c->line,
+                  .lo     = lo,
+                  .hi     = hi,
+                  .other  = { c->formal, flo, flo + (hi - lo) },
+                  .approx = s->approx,
+               };
+               report(q, &end);
+            }
+            else if (s->kind == CONN_SEG_EXPR && !q->drivers && reads) {
+               for (unsigned r = 0; r < s->nreads; r++) {
+                  if (s->reads[r].net == q->net
+                      && overlap(s->reads[r].lo, s->reads[r].hi,
+                                 q->lo, q->hi, &lo, &hi)) {
+                     conn_end_t end = {
+                        .kind   = CONN_END_EXPR,
+                        .block  = b,
+                        .inst   = inst,
+                        .port   = c->formal,
+                        .src    = c->src,
+                        .line   = c->line,
+                        .lo     = lo,
+                        .hi     = hi,
+                        .other  = { c->formal, pos, pos + s->width - 1 },
+                        .approx = true,
+                     };
+                     report(q, &end);
+                  }
+               }
+            }
+
+            pos += s->width;
+         }
+      }
+   }
+}
+
+static void query_parent(query_t *q)
+{
+   const conn_net_t *net = q->net;
+   conn_block_t *b = net->block;
+   conn_inst_t *inst = b->inst;
+   if (inst == NULL)
+      return;
+
+   bool is_port = false;
+   for (unsigned i = 0; i < b->nports; i++)
+      is_port |= b->nets[i] == net;
+
+   if (!is_port)
+      return;
+
+   if (q->drivers ? (net->dir == CONN_OUT) : (net->dir == CONN_IN))
+      return;
+
+   for (unsigned j = 0; j < inst->nconns; j++) {
+      const conn_pconn_t *c = &(inst->conns[j]);
+      if (c->formal != net)
+         continue;
+
+      unsigned pos = c->lo;
+      for (unsigned k = 0; k < c->nsegs; k++) {
+         const conn_seg_t *s = &(c->segs[k]);
+         unsigned lo, hi;
+         if (overlap(pos, pos + s->width - 1, q->lo, q->hi, &lo, &hi)
+             && s->kind != CONN_SEG_OPEN) {
+            conn_end_t end = {
+               .kind   = CONN_END_PARENT,
+               .block  = inst->parent,
+               .inst   = inst,
+               .port   = net,
+               .src    = c->src,
+               .line   = c->line,
+               .lo     = lo,
+               .hi     = hi,
+               .approx = s->approx || s->kind == CONN_SEG_EXPR,
+            };
+
+            if (s->kind == CONN_SEG_NET) {
+               const unsigned off = lo - pos;
+               end.other.net = s->range.net;
+               end.other.lo = s->range.lo + off;
+               end.other.hi = end.other.lo + (hi - lo);
+            }
+
+            report(q, &end);
+         }
+
+         pos += s->width;
+      }
+   }
+}
+
+static unsigned run_query(const conn_design_t *cd, const conn_net_t *net,
+                          unsigned lo, unsigned hi, conn_end_fn_t fn,
+                          void *ctx, bool drivers)
+{
+   if (hi >= net->width)
+      hi = net->width - 1;
+   if (lo > hi)
+      return 0;
+
+   query_t q = {
+      .cd = cd, .net = net, .lo = lo, .hi = hi, .fn = fn, .ctx = ctx,
+      .drivers = drivers,
+   };
+
+   conn_block_t *b = net->block;
+   for (unsigned i = 0; i < b->nprocs; i++)
+      query_proc(&q, b->procs[i]);
+
+   for (unsigned i = 0; i < cd->nxprocs; i++) {
+      if (cd->xprocs[i]->block != b)
+         query_proc(&q, cd->xprocs[i]);
+   }
+
+   query_children(&q, b);
+   query_parent(&q);
+
+   return q.count;
+}
+
+unsigned conn_drivers(const conn_design_t *cd, const conn_net_t *net,
+                      unsigned lo, unsigned hi, conn_end_fn_t fn, void *ctx)
+{
+   return run_query(cd, net, lo, hi, fn, ctx, true);
+}
+
+unsigned conn_readers(const conn_design_t *cd, const conn_net_t *net,
+                      unsigned lo, unsigned hi, conn_end_fn_t fn, void *ctx)
+{
+   return run_query(cd, net, lo, hi, fn, ctx, false);
+}
+
+const char *conn_end_describe(const conn_design_t *cd, const conn_end_t *end)
+{
+   conn_design_t *mcd = (conn_design_t *)cd;   // String table is a cache
+
+   char *s = NULL;
+   switch (end->kind) {
+   case CONN_END_PROC:
+      s = xasprintf("process %s.%s", end->block->name, end->proc->name);
+      break;
+   case CONN_END_CHILD:
+      s = xasprintf("port %s of %s", end->port->name, end->inst->child->name);
+      break;
+   case CONN_END_EXPR:
+      s = xasprintf("expression connected to port %s of %s",
+                    end->port->name, end->inst->child->name);
+      break;
+   case CONN_END_PARENT:
+      s = xasprintf("connection of port %s in %s", end->port->name,
+                    end->block->name);
+      break;
+   }
+
+   if (end->src != NULL) {
+      char *t = xasprintf("%s (%s:%u)", s, end->src, end->line);
+      free(s);
+      s = t;
+   }
+
+   return keep_string(mcd, s);
+}

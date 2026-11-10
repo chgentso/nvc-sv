@@ -1,0 +1,688 @@
+//
+//  Copyright (C) 2025  Nick Gasson
+//
+//  This program is free software: you can redistribute it and/or modify
+//  it under the terms of the GNU General Public License as published by
+//  the Free Software Foundation, either version 3 of the License, or
+//  (at your option) any later version.
+//
+//  This program is distributed in the hope that it will be useful,
+//  but WITHOUT ANY WARRANTY; without even the implied warranty of
+//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+//  GNU General Public License for more details.
+//
+//  You should have received a copy of the GNU General Public License
+//  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+//
+
+#include "util.h"
+#include "array.h"
+#include "conn.h"
+#include "hash.h"
+#include "netlist.h"
+
+#include <assert.h>
+#include <inttypes.h>
+#include <stdlib.h>
+#include <string.h>
+
+// A bit is a net number (at least two) or a negated constant character
+typedef int32_t bit_t;
+
+#define CONST_BIT(c) (-(bit_t)(unsigned char)(c))
+
+typedef struct {
+   FILE          *f;
+   conn_block_t  *block;
+   bit_t          next;
+   bit_t         *base;       // First bit number of each net
+   bool           first;      // No comma needed before next item
+   shash_t       *names;      // Cell names already used
+   A(char *)      owned;      // Strings to free with the name table
+   int            depth;
+} wctx_t;
+
+typedef A(bit_t) bit_list_t;
+
+static bool valid_utf8(const char *s)
+{
+   for (const unsigned char *p = (const unsigned char *)s; *p; ) {
+      int extra;
+      if (*p < 0x80)
+         extra = 0;
+      else if ((*p & 0xe0) == 0xc0 && *p >= 0xc2)
+         extra = 1;
+      else if ((*p & 0xf0) == 0xe0)
+         extra = 2;
+      else if ((*p & 0xf8) == 0xf0)
+         extra = 3;
+      else
+         return false;
+
+      p++;
+      for (; extra > 0; extra--, p++) {
+         if ((*p & 0xc0) != 0x80)
+            return false;
+      }
+   }
+
+   return true;
+}
+
+static void json_string(FILE *f, const char *s)
+{
+   // Identifiers in VHDL are ISO 8859-1 so convert them unless the string
+   // is already valid UTF-8 as a file name might be
+   const bool latin1 = !valid_utf8(s);
+
+   fputc('"', f);
+   for (; *s; s++) {
+      const unsigned char c = *s;
+      switch (c) {
+      case '"': fputs("\\\"", f); break;
+      case '\\': fputs("\\\\", f); break;
+      case '\n': fputs("\\n", f); break;
+      case '\t': fputs("\\t", f); break;
+      case '\r': fputs("\\r", f); break;
+      default:
+         if (c < 0x20)
+            fprintf(f, "\\u%04x", c);
+         else if (c >= 0x80 && latin1) {
+            fputc(0xc0 | (c >> 6), f);
+            fputc(0x80 | (c & 0x3f), f);
+         }
+         else
+            fputc(c, f);
+      }
+   }
+   fputc('"', f);
+}
+
+static void comma(wctx_t *w)
+{
+   if (!w->first)
+      fputc(',', w->f);
+   w->first = false;
+}
+
+static void key(wctx_t *w, const char *k)
+{
+   comma(w);
+   fputc('\n', w->f);
+   json_string(w->f, k);
+   fputc(':', w->f);
+}
+
+static void write_bit(FILE *f, bit_t b)
+{
+   if (b >= 2)
+      fprintf(f, "%d", b);
+   else
+      fprintf(f, "\"%c\"", (char)-b);
+}
+
+static void write_bits(FILE *f, const bit_t *bits, unsigned n)
+{
+   fputc('[', f);
+   for (unsigned i = 0; i < n; i++) {
+      if (i > 0)
+         fputc(',', f);
+      write_bit(f, bits[i]);
+   }
+   fputc(']', f);
+}
+
+static bit_t net_bit(wctx_t *w, const conn_net_t *net, unsigned pos)
+{
+   // Nets of other blocks cannot be connected within this module: they
+   // are left unconnected rather than shared with an unrelated net
+   unsigned idx = 0;
+   for (; idx < w->block->nnets; idx++) {
+      if (w->block->nets[idx] == net)
+         return w->base[idx] + pos;
+   }
+
+   return w->next++;
+}
+
+// Bits of positions lo..hi of NET in the order used by Yosys: least
+// significant first, which is the right-most element for a descending
+// range
+static void net_bits(wctx_t *w, const conn_net_t *net, unsigned lo,
+                     unsigned hi, bit_list_t *out)
+{
+   if (net->descending) {
+      for (int p = hi; p >= (int)lo; p--)
+         APUSH(*out, net_bit(w, net, p));
+   }
+   else {
+      for (unsigned p = lo; p <= hi; p++)
+         APUSH(*out, net_bit(w, net, p));
+   }
+}
+
+static const char *dir_string(conn_dir_t dir)
+{
+   switch (dir) {
+   case CONN_IN: return "input";
+   case CONN_OUT: return "output";
+   default: return "inout";
+   }
+}
+
+static const char *lang_string(conn_lang_t lang)
+{
+   return lang == CONN_VHDL ? "vhdl" : "verilog";
+}
+
+static char *src_string(const char *file, unsigned line)
+{
+   if (file == NULL)
+      return NULL;
+   return xasprintf("%s:%u", file, line);
+}
+
+static void write_attr_str(wctx_t *w, const char *k, const char *v)
+{
+   if (v == NULL)
+      return;
+   key(w, k);
+   json_string(w->f, v);
+}
+
+static void begin_obj(wctx_t *w)
+{
+   fputc('{', w->f);
+   w->first = true;
+}
+
+static void end_obj(wctx_t *w)
+{
+   fputc('\n', w->f);
+   fputc('}', w->f);
+   w->first = false;
+}
+
+static char *unique_name(wctx_t *w, const char *base)
+{
+   char *name = xstrdup(base);
+   for (int n = 2; shash_get(w->names, name) != NULL; n++) {
+      free(name);
+      name = xasprintf("%s#%d", base, n);
+   }
+
+   shash_put(w->names, name, name);
+   APUSH(w->owned, name);
+   return name;
+}
+
+static const char *proc_kind_string(conn_proc_kind_t kind)
+{
+   switch (kind) {
+   case CONN_PROC_VHDL: return "process";
+   case CONN_PROC_ALWAYS: return "always";
+   case CONN_PROC_ALWAYS_FF: return "always_ff";
+   case CONN_PROC_ALWAYS_COMB: return "always_comb";
+   case CONN_PROC_ALWAYS_LATCH: return "always_latch";
+   case CONN_PROC_INITIAL: return "initial";
+   case CONN_PROC_FINAL: return "final";
+   case CONN_PROC_ASSIGN: return "assign";
+   case CONN_PROC_GATE: return "gate";
+   default: return "other";
+   }
+}
+
+// Printable name of a range of a net such as "q[3:2]"
+static char *range_label(const conn_net_t *net, unsigned lo, unsigned hi)
+{
+   if (lo == 0 && hi == net->width - 1)
+      return xstrdup(net->name);
+   else if (net->has_bounds) {
+      const int64_t a = net->descending ? net->left - lo : net->left + lo;
+      const int64_t b = net->descending ? net->left - hi : net->left + hi;
+      if (a == b)
+         return xasprintf("%s[%"PRIi64"]", net->name, a);
+      else
+         return xasprintf("%s[%"PRIi64":%"PRIi64"]", net->name, a, b);
+   }
+   else if (lo == hi)
+      return xasprintf("%s[%u]", net->name, lo);
+   else
+      return xasprintf("%s[%u:%u]", net->name, lo, hi);
+}
+
+typedef struct {
+   char       *name;
+   bool        output;
+   bit_list_t  bits;
+} pin_t;
+
+typedef A(pin_t) pin_list_t;
+
+static void free_pins(pin_list_t *pins)
+{
+   for (unsigned i = 0; i < pins->count; i++) {
+      free(pins->items[i].name);
+      ACLEAR(pins->items[i].bits);
+   }
+   ACLEAR(*pins);
+}
+
+typedef struct {
+   const char *key;
+   const char *value;
+} attr_t;
+
+static void write_cell(wctx_t *w, const char *name, const char *type,
+                       const pin_list_t *pins, const char *src,
+                       const char *label, const attr_t *extra, int nextra,
+                       bool approx)
+{
+   key(w, name);
+   begin_obj(w);
+
+   write_attr_str(w, "type", type);
+
+   key(w, "attributes");
+   begin_obj(w);
+   write_attr_str(w, "src", src);
+   write_attr_str(w, "label", label);
+   for (int i = 0; i < nextra; i++)
+      write_attr_str(w, extra[i].key, extra[i].value);
+   if (approx) {
+      key(w, "approx");
+      fputs("1", w->f);
+   }
+   end_obj(w);
+
+   key(w, "port_directions");
+   begin_obj(w);
+   for (unsigned i = 0; i < pins->count; i++) {
+      key(w, pins->items[i].name);
+      json_string(w->f, pins->items[i].output ? "output" : "input");
+   }
+   end_obj(w);
+
+   key(w, "connections");
+   begin_obj(w);
+   for (unsigned i = 0; i < pins->count; i++) {
+      key(w, pins->items[i].name);
+      write_bits(w->f, pins->items[i].bits.items, pins->items[i].bits.count);
+   }
+   end_obj(w);
+
+   end_obj(w);
+}
+
+static void add_pin(pin_list_t *pins, char *name, bool output)
+{
+   // Output and input pins on the same signal need different names
+   for (unsigned i = 0; i < pins->count; i++) {
+      if (strcmp(pins->items[i].name, name) == 0) {
+         if (pins->items[i].output == output)
+            return;
+         char *n2 = xasprintf("%s$%s", name, output ? "out" : "in");
+         free(name);
+         name = n2;
+         break;
+      }
+   }
+
+   pin_t p = { .name = name, .output = output };
+   APUSH(*pins, p);
+}
+
+static void write_process(wctx_t *w, const conn_proc_t *p)
+{
+   pin_list_t pins = AINIT;
+   LOCAL_TEXT_BUF hier = tb_new();
+
+   for (unsigned i = 0; i < p->nreads + p->ndrives; i++) {
+      const bool is_read = i < p->nreads;
+      const conn_range_t *r = is_read
+         ? &(p->reads[i]) : &(p->drives[i - p->nreads]);
+
+      if (r->net->block != w->block) {
+         // Hierarchical reference to another block
+         char *l = range_label(r->net, r->lo, r->hi);
+         if (tb_len(hier) > 0)
+            tb_append(hier, ',');
+         tb_printf(hier, "%s%s.%s", is_read ? "" : "->",
+                   r->net->block->name, l);
+         free(l);
+         continue;
+      }
+
+      add_pin(&pins, range_label(r->net, r->lo, r->hi), !is_read);
+      net_bits(w, r->net, r->lo, r->hi, &(pins.items[pins.count - 1].bits));
+   }
+
+   const char *label = p->name;
+
+   char *src = src_string(p->src, p->line);
+   char *name = unique_name(w, label);
+   attr_t attrs[] = {
+      { "kind", proc_kind_string(p->kind) },
+      { "hier", tb_len(hier) > 0 ? tb_get(hier) : NULL },
+   };
+   write_cell(w, name, "$process", &pins, src, label, attrs, 2, p->approx);
+   free(src);
+   free_pins(&pins);
+}
+
+static void write_expr_cell(wctx_t *w, const conn_seg_t *s, const char *src,
+                            unsigned *serial, const bit_t *out, bool reverse)
+{
+   // An expression normally reads nets of this block and drives the formal
+   // of the instance through pin Y.  If the formal is an output the
+   // expression is a conversion in the other direction: it reads the
+   // formal through pin A and drives the nets.
+   pin_list_t pins = AINIT;
+
+   for (unsigned i = 0; i < s->nreads; i++) {
+      const conn_range_t *r = &(s->reads[i]);
+      add_pin(&pins, range_label(r->net, r->lo, r->hi), reverse);
+      net_bits(w, r->net, r->lo, r->hi, &(pins.items[pins.count - 1].bits));
+   }
+
+   add_pin(&pins, xstrdup(reverse ? "A" : "Y"), !reverse);
+   for (unsigned i = 0; i < s->width; i++)
+      APUSH(pins.items[pins.count - 1].bits, out[i]);
+
+   char *base = xasprintf("expr#%u", ++*serial);
+   char *name = unique_name(w, base);
+   attr_t attrs[] = { { "expr", s->text } };
+   write_cell(w, name, "$expr", &pins, src, s->text, attrs, 1, false);
+   free(base);
+   free_pins(&pins);
+}
+
+static void collect_conv(const conn_inst_t *inst, text_buf_t *tb)
+{
+   for (unsigned i = 0; i < inst->nconns; i++) {
+      const conn_pconn_t *c = &(inst->conns[i]);
+      for (unsigned j = 0; j < c->nsegs; j++) {
+         const char *conv = c->segs[j].conv;
+         if (conv == NULL)
+            continue;
+
+         // Avoid repeating a name
+         const char *have = tb_get(tb);
+         const size_t n = strlen(conv);
+         bool found = false;
+         for (const char *p = have; (p = strstr(p, conv)) != NULL; p += n) {
+            if ((p == have || p[-1] == ',') && (p[n] == ',' || p[n] == '\0')) {
+               found = true;
+               break;
+            }
+         }
+
+         if (!found) {
+            if (tb_len(tb) > 0)
+               tb_append(tb, ',');
+            tb_cat(tb, conv);
+         }
+      }
+   }
+}
+
+static void write_instance(wctx_t *w, const conn_inst_t *inst,
+                           unsigned *serial)
+{
+   const conn_block_t *child = inst->child;
+   pin_list_t pins = AINIT;
+   char *src = src_string(inst->src, inst->line);
+
+   for (unsigned i = 0; i < child->nports; i++) {
+      conn_net_t *formal = child->nets[i];
+
+      bit_t *byposition = xmalloc_array(formal->width, sizeof(bit_t));
+      for (unsigned p = 0; p < formal->width; p++)
+         byposition[p] = 0;
+
+      for (unsigned j = 0; j < inst->nconns; j++) {
+         const conn_pconn_t *c = &(inst->conns[j]);
+         if (c->formal != formal)
+            continue;
+
+         unsigned pos = c->lo;
+         for (unsigned k = 0; k < c->nsegs; k++) {
+            const conn_seg_t *s = &(c->segs[k]);
+            bit_t *dst = &(byposition[pos]);
+
+            switch (s->kind) {
+            case CONN_SEG_NET:
+               for (unsigned b = 0; b < s->width; b++)
+                  dst[b] = net_bit(w, s->range.net, s->range.lo + b);
+               break;
+            case CONN_SEG_CONST:
+               for (unsigned b = 0; b < s->width; b++)
+                  dst[b] = CONST_BIT(s->bits[b]);
+               break;
+            case CONN_SEG_EXPR:
+               {
+                  bit_t *out = xmalloc_array(s->width, sizeof(bit_t));
+                  for (unsigned b = 0; b < s->width; b++) {
+                     out[b] = w->next++;
+                     dst[b] = out[b];
+                  }
+                  // The expression cell outputs in position order
+                  char *esrc = src_string(c->src, c->line);
+                  write_expr_cell(w, s, esrc, serial, out, formal->dir == CONN_OUT);
+                  free(esrc);
+                  free(out);
+               }
+               break;
+            case CONN_SEG_OPEN:
+               break;
+            }
+
+            pos += s->width;
+         }
+      }
+
+      for (unsigned p = 0; p < formal->width; p++) {
+         if (byposition[p] == 0)
+            byposition[p] = w->next++;   // Not connected
+      }
+
+      add_pin(&pins, xstrdup(formal->name), formal->dir == CONN_OUT);
+
+      bit_list_t *bits = &(pins.items[pins.count - 1].bits);
+      if (formal->descending) {
+         for (int p = formal->width - 1; p >= 0; p--)
+            APUSH(*bits, byposition[p]);
+      }
+      else {
+         for (unsigned p = 0; p < formal->width; p++)
+            APUSH(*bits, byposition[p]);
+      }
+
+      free(byposition);
+   }
+
+   // The direction of each pin is written below as it is for the child
+   // module's ports: input, output or inout
+   key(w, inst->label);
+   begin_obj(w);
+   write_attr_str(w, "type", child->name);
+
+   LOCAL_TEXT_BUF convs = tb_new();
+   collect_conv(inst, convs);
+
+   key(w, "attributes");
+   begin_obj(w);
+   write_attr_str(w, "src", src);
+   write_attr_str(w, "language", lang_string(child->lang));
+   write_attr_str(w, "unit", child->unit);
+   if (tb_len(convs) > 0)
+      write_attr_str(w, "conversions", tb_get(convs));
+   end_obj(w);
+
+   key(w, "port_directions");
+   begin_obj(w);
+   for (unsigned i = 0; i < child->nports; i++) {
+      key(w, pins.items[i].name);
+      json_string(w->f, dir_string(child->nets[i]->dir));
+   }
+   end_obj(w);
+
+   key(w, "connections");
+   begin_obj(w);
+   for (unsigned i = 0; i < child->nports; i++) {
+      key(w, pins.items[i].name);
+      write_bits(w->f, pins.items[i].bits.items, pins.items[i].bits.count);
+   }
+   end_obj(w);
+
+   end_obj(w);
+
+   free(src);
+   free_pins(&pins);
+}
+
+static void write_module(wctx_t *w, conn_block_t *b, bool is_top)
+{
+   w->block = b;
+   w->next = 2;
+   w->base = xmalloc_array(MAX(b->nnets, 1), sizeof(bit_t));
+   w->names = shash_new(64);
+
+   for (unsigned i = 0; i < b->nnets; i++) {
+      w->base[i] = w->next;
+      w->next += b->nets[i]->width;
+   }
+
+   key(w, b->name);
+   begin_obj(w);
+
+   key(w, "attributes");
+   begin_obj(w);
+   if (is_top) {
+      key(w, "top");
+      fputs("1", w->f);
+   }
+   write_attr_str(w, "language", lang_string(b->lang));
+   write_attr_str(w, "unit", b->unit);
+   char *src = src_string(b->src, b->line);
+   write_attr_str(w, "src", src);
+   free(src);
+   end_obj(w);
+
+   key(w, "ports");
+   begin_obj(w);
+   for (unsigned i = 0; i < b->nports; i++) {
+      conn_net_t *n = b->nets[i];
+      key(w, n->name);
+      begin_obj(w);
+      write_attr_str(w, "direction", dir_string(n->dir));
+      key(w, "bits");
+      bit_list_t bits = AINIT;
+      net_bits(w, n, 0, n->width - 1, &bits);
+      write_bits(w->f, bits.items, bits.count);
+      ACLEAR(bits);
+      end_obj(w);
+   }
+   end_obj(w);
+
+   key(w, "cells");
+   begin_obj(w);
+
+   // Reserve instance names first so process names cannot collide
+   for (unsigned i = 0; i < b->ninsts; i++)
+      shash_put(w->names, b->insts[i]->label, (void *)b->insts[i]->label);
+
+   unsigned serial = 0;
+   for (unsigned i = 0; i < b->ninsts; i++)
+      write_instance(w, b->insts[i], &serial);
+
+   for (unsigned i = 0; i < b->nprocs; i++)
+      write_process(w, b->procs[i]);
+
+   end_obj(w);
+
+   key(w, "netnames");
+   begin_obj(w);
+   for (unsigned i = 0; i < b->nnets; i++) {
+      conn_net_t *n = b->nets[i];
+      key(w, n->name);
+      begin_obj(w);
+      key(w, "hide_name");
+      fputs("0", w->f);
+      key(w, "bits");
+      bit_list_t bits = AINIT;
+      net_bits(w, n, 0, n->width - 1, &bits);
+      write_bits(w->f, bits.items, bits.count);
+      ACLEAR(bits);
+      key(w, "attributes");
+      begin_obj(w);
+      char *nsrc = src_string(n->src, n->line);
+      write_attr_str(w, "src", nsrc);
+      free(nsrc);
+      if (n->record) {
+         key(w, "record");
+         fputs("1", w->f);
+      }
+      end_obj(w);
+      end_obj(w);
+   }
+   end_obj(w);
+
+   end_obj(w);
+
+   free(w->base);
+   w->base = NULL;
+
+   // The name table borrows the instance labels
+   shash_free(w->names);
+   w->names = NULL;
+   for (unsigned i = 0; i < w->owned.count; i++)
+      free(w->owned.items[i]);
+   ACLEAR(w->owned);
+}
+
+static int block_depth(const conn_block_t *b)
+{
+   int d = 0;
+   for (; b->parent != NULL; b = b->parent)
+      d++;
+   return d;
+}
+
+typedef struct {
+   wctx_t *w;
+   int     max_depth;
+} walk_ctx_t;
+
+static void module_cb(conn_block_t *b, void *ctx)
+{
+   walk_ctx_t *wc = ctx;
+
+   const int depth = block_depth(b);
+   if (wc->max_depth >= 0 && depth > wc->max_depth)
+      return;
+
+   write_module(wc->w, b, b->parent == NULL);
+}
+
+void netlist_write(const conn_design_t *cd, const netlist_opts_t *opts,
+                   FILE *f)
+{
+   wctx_t w = { .f = f, .first = true };
+
+   fputs("{", f);
+   key(&w, "creator");
+   json_string(f, "nvc --netlist");
+
+   key(&w, "modules");
+   begin_obj(&w);
+
+   walk_ctx_t wc = {
+      .w = &w,
+      .max_depth = opts ? opts->max_depth : -1,
+   };
+   conn_walk(cd, module_cb, &wc);
+
+   end_obj(&w);
+   fputs("\n}\n", f);
+}

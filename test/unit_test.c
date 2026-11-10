@@ -118,6 +118,7 @@ int main(int argc, char **argv)
 #endif
    nfail += RUN_TESTS(dump);
    nfail += RUN_TESTS(driver);
+   nfail += RUN_TESTS(netlist);
    nfail += RUN_TESTS(mir);
    nfail += RUN_TESTS(cover);
    nfail += RUN_TESTS(scan);

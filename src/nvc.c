@@ -24,6 +24,8 @@
 #include "jit/jit.h"
 #include "lib.h"
 #include "lower.h"
+#include "conn.h"
+#include "netlist.h"
 #include "mir/mir-unit.h"
 #include "option.h"
 #include "phase.h"
@@ -121,7 +123,7 @@ static int scan_cmd(int start, int argc, char **argv)
       "-a", "-e", "-r", "-c", "--dump", "--make", "--syntax", "--list",
       "--init", "--install", "--print-deps", "--do", "-i",
       "--cover-export", "--preprocess", "--cover-merge",
-      "--cover-report", "--scan",
+      "--cover-report", "--scan", "--netlist",
    };
 
    for (int i = start; i < argc; i++) {
@@ -1749,6 +1751,79 @@ static int dump_cmd(int argc, char **argv, cmd_state_t *state)
    return argc > 1 ? process_command(argc, argv, state) : EXIT_SUCCESS;
 }
 
+static int netlist_cmd(int argc, char **argv, cmd_state_t *state)
+{
+   static struct option long_options[] = {
+      { "output",   required_argument, 0, 'o' },
+      { "top-only", no_argument,       0, 't' },
+      { "depth",    required_argument, 0, 'd' },
+      { 0, 0, 0, 0 }
+   };
+
+   const int next_cmd = scan_cmd(2, argc, argv);
+   const char *output = NULL;
+   netlist_opts_t opts = { .max_depth = -1 };
+   int c, index = 0;
+   const char *spec = ":o:td:";
+   while ((c = getopt_long(next_cmd, argv, spec, long_options, &index)) != -1) {
+      switch (c) {
+      case 0:
+         // Set a flag
+         break;
+      case '?':
+         bad_option("netlist", argv);
+      case ':':
+         missing_argument("netlist", argv);
+      case 'o':
+         output = optarg;
+         break;
+      case 't':
+         opts.max_depth = 0;
+         break;
+      case 'd':
+         opts.max_depth = parse_int(optarg);
+         if (opts.max_depth < 0)
+            fatal("invalid depth '%s': must not be negative", optarg);
+         break;
+      default:
+         abort();
+      }
+   }
+
+   set_top_level(argv, next_cmd, state);
+
+   ident_t ename = ident_prefix(state->top_level, well_known(W_ELAB), '.');
+   object_t *obj = lib_get_generic(state->work, ename, NULL);
+   if (obj == NULL)
+      fatal("%s not elaborated", istr(state->top_level));
+
+   tree_t top = tree_from_object(obj);
+   assert(top != NULL);
+
+   conn_design_t *cd = conn_build(top);
+   if (cd == NULL)
+      fatal("%s is not an elaborated design", istr(state->top_level));
+
+   FILE *f = stdout;
+   if (output != NULL && (f = fopen(output, "w")) == NULL)
+      fatal_errno("%s", output);
+
+   netlist_write(cd, &opts, f);
+
+   if (fflush(f) != 0 || ferror(f))
+      fatal("failed to write netlist");
+
+   if (f != stdout)
+      fclose(f);
+
+   conn_free(cd);
+
+   argc -= next_cmd - 1;
+   argv += next_cmd - 1;
+
+   return argc > 1 ? process_command(argc, argv, state) : EXIT_SUCCESS;
+}
+
 static int do_cmd(int argc, char **argv, cmd_state_t *state)
 {
    static struct option long_options[] = {
@@ -2454,6 +2529,8 @@ static void usage(void)
            { "--init", "Initialise work library directory" },
            { "--install PKG", "Install third-party packages" },
            { "--list", "Print all units in the library" },
+           { "--netlist [OPTION]... TOP",
+             "Write block schematic of elaborated TOP as Yosys JSON" },
            { "--preprocess FILE...",
              "Expand FILEs with Verilog preprocessor" },
            { "--print-deps [UNIT]...",
@@ -2736,6 +2813,7 @@ static int process_command(int argc, char **argv, cmd_state_t *state)
 {
    static struct option long_options[] = {
       { "dump",         no_argument, 0, 'd' },
+      { "netlist",      no_argument, 0, 'N' },
       { "make",         no_argument, 0, 'm' },   // DEPRECATED 1.8
       { "syntax",       no_argument, 0, 's' },   // DEPRECATED 1.15
       { "list",         no_argument, 0, 'l' },
@@ -2767,6 +2845,8 @@ static int process_command(int argc, char **argv, cmd_state_t *state)
       return coverage_cmd(argc, argv, state);
    case 'd':
       return dump_cmd(argc, argv, state);
+   case 'N':
+      return netlist_cmd(argc, argv, state);
    case 'm':
       return make_cmd(argc, argv, state);
    case 's':
