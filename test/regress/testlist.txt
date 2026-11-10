@@ -2579,3 +2579,4 @@ svvifbits1      verilog
 svvifptype1     verilog
 svparamarr2     verilog
 svfwdfunc2      verilog
+svenumidx1      verilog

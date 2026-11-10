@@ -121,6 +121,8 @@ bool vlog_is_const(vlog_node_t v)
    case V_LOCALPARAM:
    case V_PARAM_DECL:
       return vlog_is_const(vlog_value(v));
+   case V_ENUM_NAME:
+      return vlog_has_value(v) && vlog_is_const(vlog_value(v));
    case V_CONCAT:
       if (vlog_params(v) == 1 && !vlog_has_value(v))
          return vlog_is_const(vlog_param(v, 0));
