@@ -20280,6 +20280,8 @@ typedef struct {
    vlog_node_t decl;
    unsigned    off;     // From the most significant bit of the property
    unsigned    size;
+   unsigned    chunk;   // Which 64 bits of a member wider than that
+   bool        wide;
 } crv_leaf_t;
 
 static vlog_node_t vlog_crv_packed_type(vlog_node_t d)
@@ -20327,10 +20329,28 @@ static bool vlog_crv_leaves(vlog_node_t type, unsigned base,
          continue;
       }
 
-      if (vlog_size(vlog_type(m)) > 64 || *count == CRV_MAX_LEAVES)
+      if (*count == CRV_MAX_LEAVES)
          return false;
 
-      leaves[(*count)++] = (crv_leaf_t){ m, off, vlog_size(vlog_type(m)) };
+      // A member wider than 64 bits is solved in chunks of 64 bits
+      const unsigned msize = vlog_size(vlog_type(m));
+      if (msize > 64) {
+         if (mtype != NULL && (vlog_kind(mtype) == V_STRUCT_DECL
+                               || vlog_kind(mtype) == V_UNION_DECL))
+            return false;
+
+         for (unsigned j = 0; j * 64 < msize; j++) {
+            const unsigned sz = MIN(64, msize - j * 64);
+            if (*count == CRV_MAX_LEAVES)
+               return false;
+            leaves[(*count)++] = (crv_leaf_t){
+               m, off + msize - j * 64 - sz, sz, j, true
+            };
+         }
+         continue;
+      }
+
+      leaves[(*count)++] = (crv_leaf_t){ m, off, msize };
    }
 
    return true;
@@ -20370,12 +20390,24 @@ static bool vlog_crv_is_wide_packed(vlog_gen_t *g, vlog_node_t d)
    return vlog_crv_leaves(type, 0, leaves, &nleaves);
 }
 
-static mir_value_t vlog_crv_leaf_key(vlog_gen_t *g, vlog_node_t prop,
-                                     vlog_node_t leaf)
+static mir_value_t vlog_crv_leaf_key_c(vlog_gen_t *g, vlog_node_t prop,
+                                       vlog_node_t leaf, unsigned chunk)
 {
    const loc_t *loc = vlog_loc(prop);
    return vlog_crv_key_n(g, leaf, 1 + loc->first_line * 4099
-                         + loc->first_column);
+                         + loc->first_column + chunk * 1000003);
+}
+
+static mir_value_t vlog_crv_leaf_key(vlog_gen_t *g, vlog_node_t prop,
+                                     vlog_node_t leaf)
+{
+   return vlog_crv_leaf_key_c(g, prop, leaf, 0);
+}
+
+static bool vlog_crv_leaf_signed(const crv_leaf_t *l)
+{
+   // Only the top piece of a wide member has the sign
+   return !l->wide && vlog_is_signed(l->decl);
 }
 
 static mir_value_t vlog_crv_extract(vlog_gen_t *g, mir_value_t full,
@@ -20411,9 +20443,9 @@ static mir_value_t vlog_crv_leaf_ref(vlog_gen_t *g, vlog_node_t root,
                                      mir_value_t full, const crv_leaf_t *leaf)
 {
    vlog_node_t decl = vlog_ref(root);
-   const bool is_signed = vlog_is_signed(leaf->decl);
+   const bool is_signed = vlog_crv_leaf_signed(leaf);
    return CRV5(g, CRV_OP_REF, g->crv_ctx, vlog_crv_object(g, root),
-               vlog_crv_leaf_key(g, decl, leaf->decl),
+               vlog_crv_leaf_key_c(g, decl, leaf->decl, leaf->chunk),
                vlog_crv_extract(g, full, leaf->off, leaf->size, is_signed),
                vlog_crv_flags(g, leaf->size, is_signed));
 }
@@ -21107,6 +21139,8 @@ static mir_value_t vlog_crv_and(vlog_gen_t *g, mir_value_t a, mir_value_t b);
 static bool vlog_crv_is_wide(vlog_gen_t *g, vlog_node_t type);
 static void vlog_crv_wide_expr(vlog_gen_t *g, vlog_node_t v, unsigned width,
                                bool is_signed, crv_wide_t *out);
+static void vlog_crv_w_shift_const(vlog_gen_t *g, crv_wide_t *w, unsigned k,
+                                   bool left, bool arith);
 
 static inline unsigned vlog_crv_nchunks(unsigned width)
 {
@@ -21375,6 +21409,76 @@ static void vlog_crv_w_from_elem(vlog_gen_t *g, vlog_node_t v, vlog_node_t decl,
                              vlog_crv_flags(g, cw, false));
       w->c[i] = cw == 64 ? ref : CRV3(g, CRV_OP_CAST, g->crv_ctx, ref,
                                       vlog_crv_flags(g, 64, false));
+   }
+}
+
+static bool vlog_crv_packed_sel(vlog_gen_t *g, vlog_node_t v, vlog_node_t *root,
+                                unsigned *off, unsigned *size)
+{
+   // A reference to a rand packed structure or to a member of one which
+   // the solver sees as one variable per member
+
+   if (vlog_kind(v) == V_MEMBER_REF && vlog_crv_is_packed_member(v)) {
+      *root = vlog_crv_packed_root(v, off);
+      if ((vlog_kind(*root) != V_REF && vlog_kind(*root) != V_MEMBER_REF)
+          || !vlog_has_ref(*root))
+         return false;
+
+      vlog_node_t decl = vlog_ref(*root);
+      const bool is_target = vlog_kind(*root) == V_REF
+         && vlog_crv_is_target(g, decl);
+      *size = vlog_size(vlog_type(vlog_ref(v)));
+      return (vlog_crv_is_packed_rand(decl)
+              && (is_target || vlog_kind(*root) == V_MEMBER_REF))
+         || (vlog_kind(*root) == V_REF && vlog_crv_is_wide_packed(g, decl));
+   }
+   else if (vlog_kind(v) == V_REF && vlog_has_ref(v)) {
+      vlog_node_t decl = vlog_ref(v);
+      if (vlog_kind(decl) != V_VAR_DECL || !vlog_has_type(decl))
+         return false;
+
+      *root = v;
+      *off = 0;
+      *size = vlog_size(vlog_type(decl));
+      return (vlog_crv_is_target(g, decl) && vlog_crv_is_packed_rand(decl))
+         || vlog_crv_is_wide_packed(g, decl);
+   }
+
+   return false;
+}
+
+static void vlog_crv_w_from_packed(vlog_gen_t *g, vlog_node_t root,
+                                   unsigned off, unsigned size,
+                                   crv_wide_t *w)
+{
+   // The bits of a packed structure: the pieces of each member go where
+   // they belong
+   vlog_crv_w_zero(w, size);
+
+   crv_leaf_t leaves[CRV_MAX_LEAVES];
+   int nleaves = 0;
+   vlog_crv_leaves(vlog_crv_packed_type(vlog_ref(root)), 0, leaves, &nleaves);
+
+   mir_value_t full = vlog_crv_full_value(g, root);
+
+   for (int i = 0; i < nleaves; i++) {
+      const crv_leaf_t *l = &(leaves[i]);
+      if (l->off < off || l->off + l->size > off + size)
+         continue;
+
+      mir_value_t ref = vlog_crv_leaf_ref(g, root, full, l);
+      if (l->size < 64 || vlog_crv_leaf_signed(l))
+         ref = CRV3(g, CRV_OP_CAST, g->crv_ctx, ref,
+                    vlog_crv_flags(g, l->size, false));
+      ref = CRV3(g, CRV_OP_CAST, g->crv_ctx, ref, vlog_crv_flags(g, 64, false));
+
+      crv_wide_t part;
+      vlog_crv_w_zero(&part, size);
+      part.c[0] = ref;
+      vlog_crv_w_shift_const(g, &part, off + size - l->off - l->size, true,
+                             false);
+      for (unsigned j = 0; j < w->n; j++)
+         w->c[j] = vlog_crv_w_or(g, w->c[j], part.c[j]);
    }
 }
 
@@ -21716,7 +21820,12 @@ static bool vlog_crv_needs_wide(vlog_gen_t *g, vlog_node_t v)
    switch (vlog_kind(v)) {
    case V_REF:
    case V_MEMBER_REF:
-      return own > 64 && vlog_crv_is_wide_var(g, v);
+      {
+         vlog_node_t root;
+         unsigned off, size;
+         return own > 64 && (vlog_crv_packed_sel(g, v, &root, &off, &size)
+                             || vlog_crv_is_wide_var(g, v));
+      }
    default:
       break;
    }
@@ -21877,8 +21986,15 @@ static void vlog_crv_wide_expr(vlog_gen_t *g, vlog_node_t v, unsigned width,
    switch (vlog_kind(v)) {
    case V_REF:
    case V_MEMBER_REF:
-      vlog_crv_w_from_var(g, v, out);
-      vlog_crv_w_resize(g, out, width, is_signed);
+      {
+         vlog_node_t root;
+         unsigned off, size;
+         if (vlog_crv_packed_sel(g, v, &root, &off, &size))
+            vlog_crv_w_from_packed(g, root, off, size, out);
+         else
+            vlog_crv_w_from_var(g, v, out);
+         vlog_crv_w_resize(g, out, width, is_signed);
+      }
       break;
    case V_BINARY:
       {
@@ -22071,14 +22187,49 @@ static void vlog_crv_wide_expr(vlog_gen_t *g, vlog_node_t v, unsigned width,
 
          int64_t left, right;
          if (vlog_kind(v) == V_BIT_SELECT) {
-            int64_t index;
-            if (vlog_get_const(vlog_param(v, 0), &index) && index >= 0)
-               vlog_crv_w_shift_const(g, out, index, false, false);
+            // Each index selects an element of a dimension of the base
+            unsigned seg = bw, lsb_pos = 0;
+            mir_value_t var_pos = MIR_NULL_VALUE;
+            const int nidx = vlog_params(v);
+            for (int i = 0; i < nidx; i++) {
+               vlog_node_t dim = vlog_get_dim(base, i);
+               const unsigned dim_size = dim != NULL ? vlog_size(dim) : seg;
+               const unsigned unit = seg / dim_size;
+
+               int64_t dl = dim_size - 1, dr = 0;
+               if (dim != NULL && vlog_subkind(dim) != V_DIM_UNSIZED)
+                  vlog_bounds(dim, &dl, &dr);
+
+               int64_t index;
+               if (vlog_get_const(vlog_param(v, i), &index))
+                  lsb_pos += ((dl >= dr ? index - dr : dr - index)) * unit;
+               else {
+                  vlog_node_t ip = vlog_param(v, i);
+                  crv_wide_t iw;
+                  vlog_crv_wide_expr(g, ip, MAX(vlog_crv_width(g, ip), 64),
+                                     false, &iw);
+                  mir_value_t pos = vlog_crv_w_mat(g, iw.c[0]);
+                  mir_value_t base_idx = vlog_crv_w_const(g, dr);
+                  pos = dl >= dr ? vlog_crv_w_bin(g, CRV_SUB, pos, base_idx)
+                     : vlog_crv_w_bin(g, CRV_SUB, base_idx, pos);
+                  if (unit != 1)
+                     pos = vlog_crv_w_bin(g, CRV_MUL, pos,
+                                          vlog_crv_w_const(g, unit));
+                  var_pos = mir_is_null(var_pos) ? pos
+                     : vlog_crv_w_bin(g, CRV_ADD, var_pos, pos);
+               }
+
+               seg = unit;
+            }
+
+            if (mir_is_null(var_pos))
+               vlog_crv_w_shift_const(g, out, lsb_pos, false, false);
             else {
                crv_wide_t amount;
-               vlog_crv_wide_expr(g, vlog_param(v, 0),
-                                  MAX(vlog_crv_width(g, vlog_param(v, 0)), 64),
-                                  false, &amount);
+               vlog_crv_w_zero(&amount, 64);
+               amount.c[0] = lsb_pos == 0 ? var_pos
+                  : vlog_crv_w_bin(g, CRV_ADD, var_pos,
+                                   vlog_crv_w_const(g, lsb_pos));
                vlog_crv_w_shift_var(g, out, &amount, false, false);
             }
          }
@@ -23037,8 +23188,9 @@ static void vlog_crv_solve_items(vlog_gen_t *g, vlog_node_t v,
             vlog_crv_leaves(vlog_crv_packed_type(decl), 0, leaves, &nleaves);
             for (int i = 0; i < nleaves && *count < CRV_MAX_LEAVES; i++) {
                items[(*count)++] = (crv_solve_item_t){
-                  vlog_crv_object(g, v), vlog_crv_leaf_key(g, decl,
-                                                           leaves[i].decl)
+                  vlog_crv_object(g, v),
+                  vlog_crv_leaf_key_c(g, decl, leaves[i].decl,
+                                      leaves[i].chunk)
                };
             }
          }
@@ -23093,7 +23245,8 @@ static void vlog_crv_solve_items(vlog_gen_t *g, vlog_node_t v,
                    <= off + size)
                   items[(*count)++] = (crv_solve_item_t){
                      vlog_crv_object(g, root),
-                     vlog_crv_leaf_key(g, decl, leaves[i].decl)
+                     vlog_crv_leaf_key_c(g, decl, leaves[i].decl,
+                                         leaves[i].chunk)
                   };
             }
          }
@@ -24112,9 +24265,9 @@ static void vlog_crv_build_prop(vlog_gen_t *g, mir_value_t this, mir_value_t ctx
 
       for (int i = 0; i < nleaves; i++) {
          const crv_leaf_t *l = &(leaves[i]);
-         const bool is_signed = vlog_is_signed(l->decl);
+         const bool is_signed = vlog_crv_leaf_signed(l);
          mir_value_t var = CRV6(g, CRV_OP_VAR, ctx, obj,
-                                vlog_crv_leaf_key(g, d, l->decl),
+                                vlog_crv_leaf_key_c(g, d, l->decl, l->chunk),
                                 vlog_crv_extract(g, full, l->off, l->size,
                                                  is_signed),
                                 vlog_crv_flags(g, l->size, is_signed), is_free);
@@ -24304,7 +24457,7 @@ static void vlog_crv_store_prop(vlog_gen_t *g, mir_value_t this, mir_value_t ctx
       for (int i = 0; i < nleaves; i++) {
          const crv_leaf_t *l = &(leaves[i]);
          mir_value_t var = CRV3(g, CRV_OP_FIND_FREE, ctx, obj,
-                                vlog_crv_leaf_key(g, d, l->decl));
+                                vlog_crv_leaf_key_c(g, d, l->decl, l->chunk));
 
          mir_block_t store_bb = mir_add_block(g->mu);
          mir_block_t skip_bb = mir_add_block(g->mu);
@@ -24314,8 +24467,8 @@ static void vlog_crv_store_prop(vlog_gen_t *g, mir_value_t this, mir_value_t ctx
          mir_set_cursor(g->mu, store_bb, MIR_APPEND);
 
          mir_type_t t_part = two_state
-            ? mir_vec2_type(g->mu, l->size, vlog_is_signed(l->decl))
-            : mir_vec4_type(g->mu, l->size, vlog_is_signed(l->decl));
+            ? mir_vec2_type(g->mu, l->size, vlog_crv_leaf_signed(l))
+            : mir_vec4_type(g->mu, l->size, vlog_crv_leaf_signed(l));
          mir_value_t part = vlog_crv_from_offset(
             g, CRV2(g, CRV_OP_VALUE, ctx, var), t_part);
          mir_value_t full = mir_build_load(g->mu, ptr);
@@ -25013,9 +25166,10 @@ static mir_value_t vlog_lower_std_randomize(vlog_gen_t *g, vlog_node_t v)
          vars = xrealloc_array(vars, nvars + nleaves, sizeof(mir_value_t));
          for (int j = 0; j < nleaves; j++) {
             const crv_leaf_t *l = &(leaves[j]);
-            const bool is_signed = vlog_is_signed(l->decl);
+            const bool is_signed = vlog_crv_leaf_signed(l);
             vars[nvars++] = CRV6(g, CRV_OP_VAR, ctx, vlog_crv_int(g, 0),
-                                 vlog_crv_leaf_key(g, decl, l->decl),
+                                 vlog_crv_leaf_key_c(g, decl, l->decl,
+                                                     l->chunk),
                                  vlog_crv_extract(g, value, l->off, l->size,
                                                   is_signed),
                                  vlog_crv_flags(g, l->size, is_signed),
@@ -25099,7 +25253,7 @@ static mir_value_t vlog_lower_std_randomize(vlog_gen_t *g, vlog_node_t v)
          result = vlog_lower_rvalue(g, p);
          for (int j = 0; j < nleaves; j++) {
             const crv_leaf_t *l = &(leaves[j]);
-            const bool is_signed = vlog_is_signed(l->decl);
+            const bool is_signed = vlog_crv_leaf_signed(l);
             mir_type_t t_part = two_state
                ? mir_vec2_type(g->mu, l->size, is_signed)
                : mir_vec4_type(g->mu, l->size, is_signed);
