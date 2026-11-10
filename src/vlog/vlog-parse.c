@@ -7566,6 +7566,12 @@ static vlog_node_t p_constraint_expression(void)
          if (peek() == tRBRACE)
             warn_at(&state.last_loc, "missing semicolon at the end of a "
                     "constraint expression");
+         else if (peek() == tCOMMA) {
+            // Not allowed by the grammar but accepted as a separator
+            consume(tCOMMA);
+            warn_at(&state.last_loc, "comma used instead of a semicolon "
+                    "after a constraint expression");
+         }
          else
             consume(tSEMI);
 
