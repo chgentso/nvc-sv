@@ -178,6 +178,7 @@ static bool        proc_automatic = false;
 static bool        subr_automatic = false;
 static vlog_node_t current_func = NULL;
 static vlog_node_t current_module = NULL;
+static int gen_dead = 0;   // Inside a generate branch which is not taken
 static vlog_node_t module_root = NULL;
 static unsigned    gen_constructs = 0;    // Generate constructs in this scope
 static unsigned    gen_construct = 0;     // Number of the current construct
@@ -19364,6 +19365,13 @@ static vlog_node_t p_generate_block(void)
    return b;
 }
 
+static bool gen_literal(vlog_node_t v, int64_t *value)
+{
+   // A number which is not the value of a parameter that can be overridden
+
+   return vlog_kind(v) == V_NUMBER && vlog_get_const(v, value);
+}
+
 static vlog_node_t p_if_generate_construct(void)
 {
    // if ( constant_expression ) generate_block
@@ -19382,8 +19390,16 @@ static vlog_node_t p_if_generate_construct(void)
 
    consume(tRPAREN);
 
+   // The branch is never taken if the condition is a constant zero and the
+   // later ones are not if it is a constant true
+   int64_t cv;
+   const int dead = gen_literal(vlog_value(c0), &cv) && cv == 0;
+   bool taken = gen_literal(vlog_value(c0), &cv) && cv != 0;
+
    vlog_set_loc(c0, CURRENT_LOC);
+   gen_dead += dead;
    vlog_add_stmt(c0, p_generate_block());
+   gen_dead -= dead;
 
    vlog_add_cond(v, c0);
 
@@ -19398,8 +19414,15 @@ static vlog_node_t p_if_generate_construct(void)
 
          consume(tRPAREN);
 
+         const bool zero = gen_literal(vlog_value(cn), &cv) && cv == 0;
+         const int dead_n = taken || zero;
+         if (gen_literal(vlog_value(cn), &cv) && cv != 0)
+            taken = true;
+
          vlog_set_loc(cn, CURRENT_LOC);
+         gen_dead += dead_n;
          vlog_add_stmt(cn, p_generate_block());
+         gen_dead -= dead_n;
 
          vlog_add_cond(v, cn);
       }
@@ -19407,7 +19430,9 @@ static vlog_node_t p_if_generate_construct(void)
          // else generate_block (no condition = default branch)
          vlog_node_t ce = vlog_new(V_COND);
          vlog_set_loc(ce, &state.last_loc);
+         gen_dead += taken;
          vlog_add_stmt(ce, p_generate_block());
+         gen_dead -= taken;
 
          vlog_add_cond(v, ce);
          break;
@@ -22888,8 +22913,14 @@ static void p_module_or_generate_item(vlog_node_t mod)
       static const token_t stops[] = { tSEMI, tEOF };
       cov_toks_t toks = cov_capture(stops, false);
       consume(tSEMI);
-      APUSH(pending_binds, toks);
-      APUSH(pending_bind_scopes, vlog_ident2(mod));
+
+      // A branch of a generate construct which is known not to be taken
+      // does not bind anything
+      if (gen_dead == 0) {
+         APUSH(pending_binds, toks);
+         APUSH(pending_bind_scopes, vlog_kind(mod) == V_GEN_BLOCK
+               ? vlog_ident2(module_root) : vlog_ident2(mod));
+      }
       return;
    }
 
@@ -25573,9 +25604,29 @@ static vlog_node_t p_bind_directive(void)
          mod = bind_child_module(scope_mod, target);
    }
 
-   const bool relative = mod != NULL;
+   bool relative = mod != NULL;
    if (!relative)
       mod = find_interface(target);
+
+   if (mod == NULL && peek() != tDOT && peek() != tCOLON && bind_scope != NULL) {
+      // The target is an instance in the module with the directive (23.11)
+      scope_mod = find_interface(bind_scope);
+      if (scope_mod != NULL && vlog_kind(scope_mod) == V_MODULE)
+         mod = bind_child_module(scope_mod, target);
+
+      if (mod != NULL) {
+         LOCAL_TEXT_BUF path = tb_new();
+         tb_istr(path, bind_scope);
+         tb_append(path, '.');
+         tb_istr(path, target);
+
+         vlog_node_t sel = vlog_new(V_STRING);
+         vlog_set_number(sel, number_from_string(tb_get(path), tb_len(path)));
+         vlog_set_loc(sel, &target_loc);
+         vlog_add_param(v, sel);
+         relative = true;
+      }
+   }
 
    if (peek() == tDOT && mod != NULL && vlog_kind(mod) == V_MODULE) {
       // The target is the instance at the end of a hierarchical path
@@ -25605,6 +25656,19 @@ static vlog_node_t p_bind_directive(void)
       do {
          LOCAL_TEXT_BUF path = tb_new();
          const loc_t loc = *CURRENT_LOC;
+
+         // The path is relative to the module with the directive if it
+         // starts with the name of an instance there
+         if (bind_scope != NULL && peek() == tID) {
+            ident_t first = peek_ident_nth(1);
+            vlog_node_t sm = find_interface(bind_scope);
+            if (sm != NULL && vlog_kind(sm) == V_MODULE
+                && bind_child_module(sm, first) != NULL) {
+               tb_istr(path, bind_scope);
+               tb_append(path, '.');
+            }
+         }
+
          tb_istr(path, p_identifier());
          while (optional(tDOT)) {
             tb_append(path, '.');

@@ -2562,3 +2562,6 @@ svdynnewpat1    verilog
 svdistdollar1   verilog
 svcovbinsfn1    verilog
 svcovxdollar1   verilog
+svbindgen1      verilog
+svbindinst2     verilog
+svbindrelpath1  verilog
