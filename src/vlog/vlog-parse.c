@@ -8765,7 +8765,8 @@ static vlog_node_t p_dynamic_array_new(vlog_node_t dt)
    consume(tRSQUARE);
 
    if (optional(tLPAREN)) {
-      vlog_set_value(v, p_expression());
+      // The initial value is an array of the type being created
+      vlog_set_value(v, dt != NULL ? p_expression_of_type(dt) : p_expression());
       consume(tRPAREN);
    }
 

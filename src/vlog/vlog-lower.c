@@ -18963,6 +18963,45 @@ static mir_value_t vlog_lower_dynamic_new(vlog_gen_t *g, vlog_node_t v)
 
    mir_value_t start = mir_const(g->mu, t_offset, 0);
 
+   if (vlog_has_value(v) && vlog_kind(vlog_value(v)) == V_PATTERN_EXPR
+       && vlog_params(vlog_value(v)) == 1
+       && vlog_subkind(vlog_param(vlog_value(v), 0)) == 1) {
+      // A pattern with only a default gives every element of the new array
+      // that value (10.9.1)
+      vlog_node_t expr = vlog_right(vlog_param(vlog_value(v), 0));
+      mir_value_t def = vlog_lower_cast(
+         g, eti->type,
+         vlog_lower_with_context(g, expr,
+                                 vlog_assign_context(g, eti->type, expr)));
+
+      mir_value_t ivar = mir_add_var(g->mu, t_offset, MIR_NULL_STAMP,
+                                     ident_uniq("i"), 0);
+      mir_build_store(g->mu, ivar, start);
+
+      mir_block_t test_bb = mir_add_block(g->mu);
+      mir_block_t body_bb = mir_add_block(g->mu);
+      mir_block_t done_bb = mir_add_block(g->mu);
+
+      mir_build_jump(g->mu, test_bb);
+      mir_set_cursor(g->mu, test_bb, MIR_APPEND);
+
+      mir_value_t i = mir_build_load(g->mu, ivar);
+      mir_build_cond(g->mu, mir_build_cmp(g->mu, MIR_CMP_LT, i, count),
+                     body_bb, done_bb);
+
+      mir_set_cursor(g->mu, body_bb, MIR_APPEND);
+
+      mir_build_store(g->mu, mir_build_array_ref(g->mu, data, i),
+                      vlog_copy_value(g, def, vlog_type(type)));
+      mir_build_store(g->mu, ivar,
+                      mir_build_add(g->mu, t_offset, i,
+                                    mir_const(g->mu, t_offset, 1)));
+      mir_build_jump(g->mu, test_bb);
+
+      mir_set_cursor(g->mu, done_bb, MIR_APPEND);
+      return vlog_wrap_array(g, data, count);
+   }
+
    if (vlog_has_value(v)) {
       // Keep as many of the existing elements as will fit
       vlog_node_t dims[MAX_UNPACKED_DIMS];
