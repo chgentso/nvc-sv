@@ -2852,6 +2852,30 @@ static type_mask_t vlog_check_binary(vlog_node_t v)
       return result;
    }
 
+   if (relaxed_rules() && !((lmask | rmask) & ~(TM(DT_STRING) | TM_INTEGRAL
+                                                | TM_CONST))
+       && ((lmask & TM(DT_STRING)) || (rmask & TM(DT_STRING)))) {
+      // Not allowed by table 11-1 but a character compared with a string is
+      // converted to a string like in an assignment to a string (6.16)
+      switch (binop) {
+      case V_BINARY_LOG_EQ:
+      case V_BINARY_LOG_NEQ:
+      case V_BINARY_CASE_EQ:
+      case V_BINARY_CASE_NEQ:
+      case V_BINARY_LT:
+      case V_BINARY_LEQ:
+      case V_BINARY_GT:
+      case V_BINARY_GEQ:
+         diag_t *w = diag_new(DIAG_WARN, vlog_loc(v));
+         diag_printf(w, "comparison of an integral value with a string "
+                     "converts it to a string");
+         diag_emit(w);
+         return TM(DT_BIT);
+      default:
+         break;
+      }
+   }
+
    diag_t *d = diag_new(DIAG_ERROR, vlog_loc(v));
    diag_printf(d, "invalid operands for binary expression");
    diag_hint(d, vlog_loc(v), "have '%s' and '%s'", type_mask_str(lmask),

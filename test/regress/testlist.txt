@@ -2570,3 +2570,4 @@ svcombidx1      verilog
 svcombnew1      verilog
 svvdispatch1    verilog
 svforkprop1     verilog
+svstrcmpchar1   verilog,relaxed

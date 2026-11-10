@@ -296,6 +296,7 @@ static mir_value_t vlog_vector_bytes(vlog_gen_t *g, mir_value_t value,
 static mir_value_t vlog_drop_nuls(vlog_gen_t *g, mir_value_t data,
                                   mir_value_t total);
 static bool vlog_is_string(vlog_node_t v);
+static mir_value_t vlog_integral_string(vlog_gen_t *g, vlog_node_t p);
 
 static hash_t *sv_classes = NULL;
 static uint32_t vlog_class_id(vlog_node_t c);
@@ -4640,8 +4641,17 @@ static mir_value_t vlog_lower_binary(vlog_gen_t *g, vlog_node_t v,
 
    // A string literal compared with an integral value is a number
    vlog_node_t lexpr = vlog_left(v), rexpr = vlog_right(v);
-   const bool lstr = vlog_is_string(lexpr) && vlog_kind(lexpr) != V_STRING;
-   const bool rstr = vlog_is_string(rexpr) && vlog_kind(rexpr) != V_STRING;
+   bool lstr = vlog_is_string(lexpr) && vlog_kind(lexpr) != V_STRING;
+   bool rstr = vlog_is_string(rexpr) && vlog_kind(rexpr) != V_STRING;
+   bool lconv = false, rconv = false;
+   if (lstr != rstr && vlog_kind(lexpr) != V_STRING
+       && vlog_kind(rexpr) != V_STRING) {
+      // An integral operand compared with a string is a string of its
+      // characters
+      lconv = !lstr;
+      rconv = !rstr;
+      lstr = rstr = true;
+   }
    if ((lstr && (rstr || vlog_kind(rexpr) == V_STRING))
        || (rstr && vlog_kind(lexpr) == V_STRING)) {
       const vlog_binary_t op = vlog_subkind(v);
@@ -4649,8 +4659,10 @@ static mir_value_t vlog_lower_binary(vlog_gen_t *g, vlog_node_t v,
           || op == V_BINARY_GEQ) {
          mir_type_t t_str = mir_uarray_type(g->mu, 1, mir_char_type(g->mu));
          mir_type_t t_offset = mir_offset_type(g->mu);
-         mir_value_t l = vlog_lower_with_context(g, vlog_left(v), t_str);
-         mir_value_t r = vlog_lower_with_context(g, vlog_right(v), t_str);
+         mir_value_t l = lconv ? vlog_integral_string(g, lexpr)
+            : vlog_lower_with_context(g, lexpr, t_str);
+         mir_value_t r = rconv ? vlog_integral_string(g, rexpr)
+            : vlog_lower_with_context(g, rexpr, t_str);
          mir_value_t zero = mir_const(g->mu, t_offset, 0);
          mir_value_t args[] = { l, r, zero };
          mir_value_t sc = vlog_str_call(g, "__sv_str_cmp", t_offset, args, 3);
@@ -4674,8 +4686,10 @@ static mir_value_t vlog_lower_binary(vlog_gen_t *g, vlog_node_t v,
           || op == V_BINARY_CASE_EQ || op == V_BINARY_CASE_NEQ) {
          mir_type_t t_str = mir_uarray_type(g->mu, 1, mir_char_type(g->mu));
          mir_type_t t_offset = mir_offset_type(g->mu);
-         mir_value_t l = vlog_lower_with_context(g, vlog_left(v), t_str);
-         mir_value_t r = vlog_lower_with_context(g, vlog_right(v), t_str);
+         mir_value_t l = lconv ? vlog_integral_string(g, lexpr)
+            : vlog_lower_with_context(g, lexpr, t_str);
+         mir_value_t r = rconv ? vlog_integral_string(g, rexpr)
+            : vlog_lower_with_context(g, rexpr, t_str);
          mir_value_t args[] = { l, r };
          mir_value_t eq = mir_build_fcall(g->mu, ident_new("__sv_str_eq"),
                                           t_offset, MIR_NULL_STAMP, args, 2);
@@ -14663,6 +14677,16 @@ static mir_value_t vlog_drop_nuls(vlog_gen_t *g, mir_value_t data,
    vlog_loop_end(g, &c);
 
    return vlog_wrap_array(g, data, mir_build_load(g->mu, wvar));
+}
+
+static mir_value_t vlog_integral_string(vlog_gen_t *g, vlog_node_t p)
+{
+   // The string of the characters of an integral value, without NULs
+
+   mir_value_t value = vlog_lower_rvalue(g, p);
+   mir_value_t bytes = vlog_vector_bytes(g, value, MAX(vlog_width(p) / 8, 1));
+   return vlog_drop_nuls(g, mir_build_unwrap(g->mu, bytes),
+                         mir_build_uarray_len(g->mu, bytes, 0));
 }
 
 static mir_value_t vlog_string_concat(vlog_gen_t *g, vlog_node_t v)
