@@ -1343,7 +1343,7 @@ static bool scope_precedes(rt_scope_t *child, rt_proc_t *proc)
    else if (cl->first_line != pl->first_line)
       return cl->first_line < pl->first_line;
    else
-      return cl->first_column < pl->first_column;
+      return cl->first_column <= pl->first_column;   // Same place: a macro
 }
 
 static void reset_scope(rt_model_t *m, rt_scope_t *s)

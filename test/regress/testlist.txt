@@ -2591,3 +2591,4 @@ svforkshare1    verilog
 svcombposedge1  verilog
 svforkshare2    verilog
 svinsidestr2    verilog
+svmacroorder1   verilog
