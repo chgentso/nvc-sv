@@ -25743,6 +25743,15 @@ static void vlog_lower_port_map(vlog_gen_t *g, vlog_node_t v)
    // wait for an event on it
    const bool in_memory = vlog_uses_memory_member(vlog_value(v));
 
+   // An assignment pattern for an unpacked array port is a flat vector with
+   // a signal element for each element of the array
+   const bool pattern_array = vlog_subkind(port) == V_PORT_INPUT
+      && vlog_kind(vlog_value(v)) == V_PATTERN_EXPR
+      && vlog_is_fixed_unpacked(vlog_ref(port))
+      && mir_get_class(g->mu, ti->type) != MIR_TYPE_REAL;
+   const unsigned psize = pattern_array
+      ? ti->size * vlog_size(vlog_ref(port)) : ti->size;
+
    {
       switch (vlog_subkind(port)) {
       case V_PORT_INPUT:
@@ -25750,7 +25759,7 @@ static void vlog_lower_port_map(vlog_gen_t *g, vlog_node_t v)
             if (!in_memory)
                vlog_lower_sensitivity(g, vlog_value(v));
 
-            mir_value_t count = mir_const(g->mu, t_offset, ti->size);
+            mir_value_t count = mir_const(g->mu, t_offset, psize);
             mir_build_drive_signal(g->mu, signal, count);
          }
          break;
@@ -25839,6 +25848,14 @@ static void vlog_lower_port_map(vlog_gen_t *g, vlog_node_t v)
             value = vlog_flatten_dynarray(
                g, vlog_value(v), vlog_lower_rvalue(g, vlog_value(v)),
                vlog_ranges(port) == 0);
+         else if (pattern_array) {
+            vlog_node_t decl = vlog_ref(port);
+            vlog_node_t dims[MAX_UNPACKED_DIMS];
+            const int ndims = MIN(vlog_ranges(decl), MAX_UNPACKED_DIMS);
+            for (int i = 0; i < ndims; i++)
+               dims[i] = vlog_range(decl, i);
+            value = vlog_lower_array_pattern(g, vlog_value(v), dims, ndims, ti);
+         }
          else
             value = vlog_lower_with_context(g, vlog_value(v), ti->type);
          assert(mir_is_vector(g->mu, value)
@@ -25846,17 +25863,20 @@ static void vlog_lower_port_map(vlog_gen_t *g, vlog_node_t v)
 
          if (mir_get_class(g->mu, ti->type) == MIR_TYPE_REAL)
             resize = vlog_lower_cast(g, ti->type, value);
+         else if (pattern_array)
+            resize = vlog_lower_cast(
+               g, mir_vec4_type(g->mu, psize, false), value);
          else
             resize = mir_build_cast(g->mu, ti->type, value);
 
          mir_value_t zero = mir_const(g->mu, t_offset, 0);
 
-         targetsz = ti->size;
+         targetsz = psize;
          lvalue1 = (vlog_select_t){
             .obj        = signal,
-            .size       = ti->size,
+            .size       = psize,
             .dst_offset = zero,
-            .count      = mir_const(g->mu, t_offset, ti->size),
+            .count      = mir_const(g->mu, t_offset, psize),
             .src_offset = zero,
             .type       = ti->type,
          };

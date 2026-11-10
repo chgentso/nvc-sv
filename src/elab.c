@@ -2354,6 +2354,19 @@ static void elab_verilog_ports(vlog_node_t inst, elab_instance_t *ei,
 
          if (vlog_ival(inst) != 0)
             value = elab_array_port_value(inst, port, value);
+
+         // An assignment pattern has the type of the formal as it is in
+         // this instance, after the parameters have been overridden
+         if (vlog_kind(value) == V_PATTERN_EXPR && vlog_has_type(port)
+             && vlog_get_type(vlog_type(port)) != NULL) {
+            vlog_node_t pat = vlog_new(V_PATTERN_EXPR);
+            vlog_set_type(pat, vlog_get_type(vlog_type(port)));
+            vlog_set_loc(pat, vlog_loc(value));
+            const int nitems = vlog_params(value);
+            for (int j = 0; j < nitems; j++)
+               vlog_add_param(pat, vlog_param(value, j));
+            value = pat;
+         }
       }
       else if (wildcard != NULL && vlog_has_ref(wildcard)) {
          vlog_node_t parent = vlog_ref(wildcard);

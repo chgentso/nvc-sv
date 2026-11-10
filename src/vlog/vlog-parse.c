@@ -22372,12 +22372,51 @@ static void p_port_conn_flags(vlog_node_t v)
 
 static vlog_node_t conn_event = NULL;
 
-static vlog_node_t p_connection_expression(void)
+// The module or interface whose ports are being connected
+static vlog_node_t port_target = NULL;
+static int port_pos = 0;
+
+static vlog_node_t port_formal(ident_t name, int pos)
+{
+   // The declaration of the formal a connection is for if known
+
+   if (port_target == NULL)
+      return NULL;
+
+   const int nports = vlog_ports(port_target);
+   for (int i = 0; i < nports; i++) {
+      vlog_node_t p = vlog_port(port_target, i);
+      if (vlog_kind(p) != V_REF || !vlog_has_ref(p))
+         continue;
+
+      vlog_node_t d = vlog_ref(p);
+      if (vlog_kind(d) != V_PORT_DECL || !vlog_has_type(d))
+         continue;
+      else if (name != NULL ? vlog_ident(d) == name : i == pos)
+         return d;
+   }
+
+   return NULL;
+}
+
+static vlog_node_t p_connection_expression(ident_t name, int index)
 {
    // An edge of a signal connected to an event port is an event which a
    // process triggers when the edge occurs
 
    conn_event = NULL;
+
+   if (peek() == tTICK && peek_nth(2) == tLBRACE) {
+      // The type of an assignment pattern is that of the formal
+      vlog_node_t formal = port_formal(name, index);
+      if (formal != NULL && vlog_get_type(vlog_type(formal)) != NULL) {
+         vlog_node_t dt = vlog_type(formal);
+         pattern_array_elems = is_fixed_unpacked(formal, dt);
+         vlog_node_t v = p_assignment_pattern_expression(vlog_get_type(dt));
+         pattern_array_elems = false;
+         return v;
+      }
+   }
 
    if ((peek() != tPOSEDGE && peek() != tNEGEDGE) || current_module == NULL)
       return p_expression();
@@ -22430,10 +22469,11 @@ static vlog_node_t p_ordered_port_connection(void)
    p_port_conn_flags(v);
 
    if (not_at_token(tCOMMA, tRPAREN)) {
-      vlog_set_value(v, p_connection_expression());
+      vlog_set_value(v, p_connection_expression(NULL, port_pos));
       if (conn_event != NULL)
          vlog_set_ref(v, conn_event);   // Substituted for an event formal
    }
+   port_pos++;
 
    vlog_set_loc(v, CURRENT_LOC);
    return v;
@@ -22471,7 +22511,7 @@ static vlog_node_t p_named_port_connection(void)
    if (optional(tLPAREN)) {
 
       if (peek() != tRPAREN) {
-         vlog_set_value(v, p_connection_expression());
+         vlog_set_value(v, p_connection_expression(id, 0));
          if (conn_event != NULL)
             vlog_set_ref(v, conn_event);
       }
@@ -22505,6 +22545,8 @@ static void p_list_of_port_connections(vlog_node_t inst)
    BEGIN("list of port connections");
 
    vlog_symtab_set_implicit(symtab, implicit_kind);
+
+   port_pos = 0;
 
    do {
       skip_over_attributes();
@@ -22724,12 +22766,18 @@ static void p_module_or_udp_instantiation(vlog_node_t mod)
       param_target = NULL;
    }
 
+   vlog_node_t ptarget = find_interface(vlog_ident(v));
+   port_target = ptarget != NULL && vlog_kind(ptarget) == V_MODULE
+      ? ptarget : NULL;
+
    do {
       if (peek() == tLPAREN)
          vlog_add_stmt(v, p_udp_instance());
       else
          vlog_add_stmt(v, p_hierarchical_instance());
    } while (optional(tCOMMA));
+
+   port_target = NULL;
 
    consume(tSEMI);
 
