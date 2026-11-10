@@ -384,6 +384,19 @@ static void build_sensitivity(vlog_node_t ctrl, vlog_node_t v, hset_t *set,
    case V_PATTERN_ITEM:
       build_sensitivity(ctrl, vlog_right(v), set, is_comb);
       break;
+   case V_CLASS_NEW:
+      {
+         // The arguments of the constructor are read
+         const int nparams = vlog_params(v);
+         for (int i = 0; i < nparams; i++)
+            build_sensitivity(ctrl, vlog_param(v, i), set, is_comb);
+      }
+      break;
+   case V_DYNAMIC_NEW:
+      build_sensitivity(ctrl, vlog_left(v), set, is_comb);
+      if (vlog_has_value(v))
+         build_sensitivity(ctrl, vlog_value(v), set, is_comb);
+      break;
    case V_STREAM:
       {
          if (vlog_has_value(v))

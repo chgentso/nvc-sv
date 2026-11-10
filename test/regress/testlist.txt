@@ -2567,3 +2567,4 @@ svbindinst2     verilog
 svbindrelpath1  verilog
 svcombfuncsel1  verilog
 svcombidx1      verilog
+svcombnew1      verilog
