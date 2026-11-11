@@ -5003,6 +5003,19 @@ static void irgen_op_test(jit_irgen_t *g, mir_value_t n)
       j_cmp(g, JIT_CC_NE, ra, zero);
       j_ccmp(g, JIT_CC_EQ, rb, zero);
    }
+   else if (size > 64) {
+      // A wide two-state value is held in memory so the address is not the
+      // value: true unless every bit is zero
+      j_send(g, 0, abits);
+      j_send(g, 1, zero);
+      j_send(g, 2, zero);
+      j_send(g, 3, zero);
+      macro_vec4op(g, JIT_VEC_LOG_NOT, size);
+
+      jit_value_t ra = irgen_alloc_temp(g);
+      j_recv(g, ra, 0);
+      j_cmp(g, JIT_CC_EQ, ra, zero);
+   }
    else if (mir_is(g->mu, arg, MIR_TYPE_VEC4)) {
       // True if any bit is known to be one
       jit_value_t bbits = irgen_get_slot(g, arg, 1);
