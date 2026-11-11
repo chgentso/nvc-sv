@@ -7,10 +7,10 @@ which nvc
 nvc -a $TESTDIR/netlist/iface1.sv -e iface1
 nvc --netlist iface1 > iface.json
 
-# An interface instance is a module whose ports are its signals
-grep -q '^"iface1.bi0":{' iface.json
-grep -q '^"iface1.bi1":{' iface.json
-grep -q '^"data":"inout"' iface.json
+# An interface instance whose signals are all nets of the enclosing module
+# is not drawn as a cell of its own
+[ $(grep -c '^"iface1.bi0":{' iface.json) = 0 ]
+[ $(grep -c '^"bi0":{' iface.json) = 0 ]
 
 # The signals are nets of the enclosing module named for the instance
 grep -q '^"bi0.data":{' iface.json

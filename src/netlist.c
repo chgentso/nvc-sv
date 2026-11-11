@@ -579,6 +579,8 @@ static void write_instance(wctx_t *w, const conn_inst_t *inst,
    free_pins(&pins);
 }
 
+static bool hidden_interface(const conn_block_t *b);
+
 static void write_module(wctx_t *w, conn_block_t *b, bool is_top)
 {
    w->block = b;
@@ -633,8 +635,10 @@ static void write_module(wctx_t *w, conn_block_t *b, bool is_top)
       shash_put(w->names, b->insts[i]->label, (void *)b->insts[i]->label);
 
    unsigned serial = 0;
-   for (unsigned i = 0; i < b->ninsts; i++)
-      write_instance(w, b->insts[i], &serial);
+   for (unsigned i = 0; i < b->ninsts; i++) {
+      if (!hidden_interface(b->insts[i]->child))
+         write_instance(w, b->insts[i], &serial);
+   }
 
    for (unsigned i = 0; i < b->nprocs; i++)
       write_process(w, b->procs[i]);
@@ -707,6 +711,15 @@ static void write_module(wctx_t *w, conn_block_t *b, bool is_top)
    ACLEAR(w->owned);
 }
 
+// An interface instance whose signals are all nets of the enclosing module
+// would only be a box with dangling pins: it is not drawn unless it has
+// processes or instances of its own
+static bool hidden_interface(const conn_block_t *b)
+{
+   return b->interface && b->parent != NULL && b->nprocs == 0
+      && b->ninsts == 0;
+}
+
 static int block_depth(const conn_block_t *b)
 {
    int d = 0;
@@ -723,6 +736,9 @@ typedef struct {
 static void module_cb(conn_block_t *b, void *ctx)
 {
    walk_ctx_t *wc = ctx;
+
+   if (hidden_interface(b))
+      return;
 
    const int depth = block_depth(b);
    if (wc->max_depth >= 0 && depth > wc->max_depth)

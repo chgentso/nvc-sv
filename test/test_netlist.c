@@ -806,7 +806,7 @@ START_TEST(test_iface1)
    ck_assert_ptr_eq(conn_find_net(cd, "iface1.bi1.data"), data1);
 
    char *json = write_json(cd, -1);
-   ck_has(json, "\"iface1.bi0\":{");
+   ck_has_not(json, "\"iface1.bi0\":{");   // Only nets of the parent
    ck_has(json, "\"b/data\":\"output\"");
    ck_has(json, "\"hdr.kind\":{");
    ck_has(json, "\"interface\":1");

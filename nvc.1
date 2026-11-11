@@ -868,9 +868,13 @@ the attribute
 .Ql conversions
 lists the functions.
 .Pp
-A SystemVerilog interface instance is a module whose ports are its signals
-and the signals are also nets of the enclosing module named
-.Ql instance.signal .
+The signals of a SystemVerilog interface instance are nets of the enclosing
+module named
+.Ql instance.signal
+with the attribute
+.Ql interface .
+The instance is not drawn as a cell unless it has processes or instances of
+its own.
 A module with an interface port has one port for each signal visible
 through the modport, named
 .Ql port.signal ,
