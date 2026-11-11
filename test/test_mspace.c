@@ -432,6 +432,9 @@ Suite *get_mspace_tests(void)
    tcase_add_test(tc, test_end_ptr);
    tcase_add_test(tc, test_user_mark);
    tcase_add_test(tc, test_free_list_stress);
+   // The free list stress test takes several seconds under ASan and
+   // exceeds the default timeout when the machine is busy
+   tcase_set_timeout(tc, 60.0);
    suite_add_tcase(s, tc);
 
    return s;
