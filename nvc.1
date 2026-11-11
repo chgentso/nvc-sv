@@ -1988,7 +1988,16 @@ from
 .In vpi_ext_nvc.h
 with a name but no contents: its ports, signals and instances are
 reached through VHPI, where it is a component instance statement of the
-Verilog module which instantiates it.  The supported callback reasons are
+Verilog module which instantiates it.  The same type is used for the VHDL
+instances above Verilog modules in a design with a VHDL top level: they are
+named and contain the Verilog instances below them, so that
+.Fn vpi_handle_by_name
+finds for example
+.Ql top.u_sub.net
+for a module instantiated through a component with label
+.Ql u_sub ,
+with VHDL names matched without regard to case.  The module takes the
+name of the component instance.  The supported callback reasons are
 .Dv cbStartOfSimulation ,
 .Dv cbEndOfSimulation ,
 .Dv cbValueChange ,

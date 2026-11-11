@@ -134,5 +134,6 @@ void vpi19_startup(void);
 void vpi20_startup(void);
 void vpi21_startup(void);
 void vpi22_startup(void);
+void vpi23_startup(void);
 
 #endif  // _VPI_TEST_H

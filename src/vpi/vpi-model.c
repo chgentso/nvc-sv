@@ -126,6 +126,7 @@ struct _c_abstractScope {
    const char      *name;
    const char      *fullname;
    void            *frame;     // Context of a package
+   bool             vhdl_name; // Named by a VHDL instance: not case sensitive
 };
 
 typedef struct {
@@ -368,6 +369,10 @@ typedef struct _vpi_context {
 
 static c_vpiObject *build_expr(vlog_node_t v, c_abstractScope *scope);
 static c_abstractScope *cached_scope(tree_t block, rt_scope_t *s);
+static c_abstractScope *cached_vhdl_scope(rt_scope_t *s);
+static bool vpi_vlog_below(rt_scope_t *s);
+static ident_t vpi_scope_ident(rt_scope_t *s);
+static bool vpi_is_hier_kind(rt_scope_t *s, tree_kind_t kind);
 static c_abstractScope *parent_scope(c_abstractScope *scope);
 static void vpi_lazy_decls(c_vpiObject *obj);
 static void vpi_lazy_elems(c_vpiObject *obj);
@@ -1389,7 +1394,95 @@ static c_abstractScope *cached_scope(tree_t block, rt_scope_t *s)
          should_not_reach_here();
       }
 
-      as->name = vpi_name_str(istr(tree_ident(block)), true);
+      as->name = vpi_name_str(istr(vpi_scope_ident(s)), true);
+      as->vhdl_name = s->parent != NULL
+         && vpi_is_hier_kind(s->parent, T_COMPONENT);
+
+      hash_put(cache, block, as);
+   }
+
+   return as;
+}
+
+static bool vpi_is_hier_kind(rt_scope_t *s, tree_kind_t kind)
+{
+   if (s->kind != SCOPE_INSTANCE || s->where == NULL
+       || tree_kind(s->where) != T_BLOCK || tree_decls(s->where) == 0)
+      return false;
+
+   tree_t hier = tree_decl(s->where, 0);
+   return tree_kind(hier) == T_HIER && tree_kind(tree_ref(hier)) == kind;
+}
+
+static bool vpi_is_hidden(rt_scope_t *s)
+{
+   // The block for a component has the instance of the entity or module
+   // bound to it as its only child: the instance takes the name of the
+   // component and the block itself is not visible.  The same goes for a
+   // VHDL entity instantiated from Verilog which is seen as the Verilog
+   // instance that wraps it.
+
+   if (vpi_is_hier_kind(s, T_COMPONENT))
+      return true;
+
+   rt_scope_t *p = s->parent;
+   return p != NULL && vpi_tree_vlog(p) != NULL
+      && vpi_vhdl_block(p->where) == s->where;
+}
+
+static rt_scope_t *vpi_logical_parent(rt_scope_t *s)
+{
+   rt_scope_t *p = s->parent;
+   while (p != NULL && p->kind == SCOPE_INSTANCE && vpi_is_hidden(p))
+      p = p->parent;
+   return p;
+}
+
+static ident_t vpi_scope_ident(rt_scope_t *s)
+{
+   if (s->parent != NULL && vpi_is_hier_kind(s->parent, T_COMPONENT))
+      return tree_ident(s->parent->where);
+   else
+      return tree_ident(s->where);
+}
+
+static bool vpi_vlog_below(rt_scope_t *s)
+{
+   // Whether there is a Verilog instance somewhere below a VHDL scope
+
+   for (int i = 0; i < s->children.count; i++) {
+      rt_scope_t *c = child_scope_at(s, i);
+      if (c->kind != SCOPE_INSTANCE)
+         continue;
+      else if (vpi_tree_vlog(c) != NULL || vpi_vlog_below(c))
+         return true;
+   }
+
+   return false;
+}
+
+static c_abstractScope *cached_vhdl_scope(rt_scope_t *s)
+{
+   // A VHDL scope seen from VPI: it has a name and Verilog instances
+   // below it but its contents are only visible through VHPI
+
+   tree_t block = s->where;
+   assert(tree_kind(block) == T_BLOCK);
+
+   hash_t *cache = vpi_context()->objcache;
+   c_abstractScope *as = hash_get(cache, block);
+   if (as == NULL) {
+      as = new_object(sizeof(c_module), vpiForeignInst);
+      as->object.loc = *tree_loc(block);
+      as->handle     = JIT_HANDLE_INVALID;
+      as->decls.fn   = vpi_lazy_decls;
+      as->scopes.fn  = vpi_lazy_scopes;
+      as->misc.fn    = vpi_lazy_misc;
+      as->procs.fn   = vpi_lazy_procs;
+      as->block      = block;
+      as->rtscope    = s;
+      as->name       = vpi_name_str(istr(vpi_scope_ident(s)), true);
+      as->vhdl_name  = true;
 
       hash_put(cache, block, as);
    }
@@ -1402,14 +1495,14 @@ static c_abstractScope *parent_scope(c_abstractScope *scope)
    if (scope->parent != NULL || scope->rtscope == NULL)
       return scope->parent;
 
-   rt_scope_t *rtscope = scope->rtscope;
-   if (rtscope->parent == NULL || rtscope->parent->where == NULL
-       || tree_kind(rtscope->parent->where) != T_BLOCK
-       || vpi_tree_vlog(rtscope->parent) == NULL)
+   rt_scope_t *parent = vpi_logical_parent(scope->rtscope);
+   if (parent == NULL || parent->kind != SCOPE_INSTANCE
+       || parent->where == NULL || tree_kind(parent->where) != T_BLOCK)
       return NULL;
-
-   return (scope->parent =
-           cached_scope(rtscope->parent->where, rtscope->parent));
+   else if (vpi_tree_vlog(parent) != NULL)
+      return (scope->parent = cached_scope(parent->where, parent));
+   else
+      return (scope->parent = cached_vhdl_scope(parent));
 }
 
 static c_abstractScope *storage_scope(c_abstractScope *s)
@@ -1803,6 +1896,48 @@ static c_scopeArray *vpi_scope_array(vpiObjectList *list, PLI_INT32 type,
    return sa;
 }
 
+static void vpi_scope_children(c_abstractScope *s, rt_scope_t *from,
+                               vpiObjectList *list)
+{
+   for (int i = 0; i < from->children.count; i++) {
+      rt_scope_t *child = child_scope_at(from, i);
+      if (child->kind != SCOPE_INSTANCE)
+         continue;
+      else if (vpi_is_hidden(child)) {
+         vpi_scope_children(s, child, list);
+         continue;
+      }
+
+      // The contents of a VHDL scope are only visible through VHPI but
+      // the Verilog instances below it are visible here
+      c_abstractScope *cs;
+      if (vpi_tree_vlog(child) != NULL)
+         cs = cached_scope(child->where, child);
+      else if (vpi_vlog_below(child))
+         cs = cached_vhdl_scope(child);
+      else
+         continue;
+
+      cs->parent = s;
+
+      size_t len;
+      int64_t index;
+      if (cs->object.type != vpiForeignInst
+          && vpi_split_index(istr(vpi_scope_ident(child)), &len, &index)) {
+         PLI_INT32 atype = vpiModuleArray;
+         if (cs->object.type == vpiGenScope)
+            atype = vpiGenScopeArray;
+         else if (cs->object.type == vpiInterface)
+            atype = vpiInterfaceArray;
+
+         c_scopeArray *sa = vpi_scope_array(list, atype, s, cs->name, len);
+         vpi_list_push(&(sa->elems), &(cs->object));
+      }
+      else
+         vpi_list_push(list, &(cs->object));
+   }
+}
+
 static void vpi_lazy_scopes(c_vpiObject *obj)
 {
    c_abstractScope *s = is_abstractScope(obj);
@@ -1810,34 +1945,8 @@ static void vpi_lazy_scopes(c_vpiObject *obj)
 
    vpiObjectList *list = &(s->scopes.list);
 
-   if (obj->type == vpiForeignInst)
-      return;   // Only visible through VHPI
-
-   if (s->rtscope != NULL) {
-      for (int i = 0; i < s->rtscope->children.count; i++) {
-         rt_scope_t *child = child_scope_at(s->rtscope, i);
-         if (child->kind != SCOPE_INSTANCE || vpi_tree_vlog(child) == NULL)
-            continue;
-
-         c_abstractScope *cs = cached_scope(child->where, child);
-         cs->parent = s;
-
-         size_t len;
-         int64_t index;
-         if (vpi_split_index(istr(tree_ident(child->where)), &len, &index)) {
-            PLI_INT32 atype = vpiModuleArray;
-            if (cs->object.type == vpiGenScope)
-               atype = vpiGenScopeArray;
-            else if (cs->object.type == vpiInterface)
-               atype = vpiInterfaceArray;
-
-            c_scopeArray *sa = vpi_scope_array(list, atype, s, cs->name, len);
-            vpi_list_push(&(sa->elems), &(cs->object));
-         }
-         else
-            vpi_list_push(list, &(cs->object));
-      }
-   }
+   if (s->rtscope != NULL)
+      vpi_scope_children(s, s->rtscope, list);
 
    switch (obj->type) {
    case vpiModule:
@@ -2499,7 +2608,8 @@ static int64_t vpi_scope_ival(c_abstractScope *s)
    for (; s != NULL; s = parent_scope(s)) {
       if (s->object.type == vpiPackage)
          return vlog_time_resolve(vlog_ival(s->where));
-      else if (s->rtscope != NULL && vlog_kind(s->where) == V_INST_BODY
+      else if (s->rtscope != NULL && s->where != NULL
+               && vlog_kind(s->where) == V_INST_BODY
                && !(vlog_flags(s->where) & VLOG_F_GEN_BODY))
          return vlog_time_resolve(vlog_ival(s->where));
    }
@@ -2611,8 +2721,12 @@ static vpiObjectList *vpi_top_objects(void)
 
    for (int i = 0; root != NULL && i < root->children.count; i++) {
       rt_scope_t *s = child_scope_at(root, i);
-      if (s->kind == SCOPE_INSTANCE && vpi_tree_vlog(s) != NULL)
+      if (s->kind != SCOPE_INSTANCE)
+         continue;
+      else if (vpi_tree_vlog(s) != NULL)
          vpi_list_push(&(c->tops), &(cached_scope(s->where, s)->object));
+      else if (vpi_vlog_below(s))
+         vpi_list_push(&(c->tops), &(cached_vhdl_scope(s)->object));
    }
 
    if (c->top != NULL) {
@@ -4744,13 +4858,14 @@ vpiHandle vpi_handle_by_multi_index(vpiHandle obj, PLI_INT32 num_index,
    return o != NULL ? user_handle_for(o) : NULL;
 }
 
-static size_t vpi_match_name(const char *path, const char *name)
+static size_t vpi_match_name(const char *path, const char *name, bool fold)
 {
    // Length of the name at the start of the path or zero if it does not
    // match a whole path element
 
    const size_t len = strlen(name);
-   if (len == 0 || strncmp(path, name, len) != 0)
+   if (len == 0 || (fold ? strncasecmp(path, name, len)
+                    : strncmp(path, name, len)) != 0)
       return 0;
    else if (name[0] == '\\')
       return len;   // Escaped name ends with a space
@@ -4768,12 +4883,15 @@ static void vpi_consider(c_vpiObject *cand, const char *path,
    if (name == NULL)
       return;
 
-   size_t len = vpi_match_name(path, name);
+   c_abstractScope *as = is_abstractScope(cand);
+   const bool fold = as != NULL && as->vhdl_name;
+
+   size_t len = vpi_match_name(path, name, fold);
    if (len == 0 && name[0] == '\\') {
       // Also match the identifier without escaping
       const size_t n = strlen(name);
       char *raw LOCAL = xstrndup(name + 1, n - 2);
-      len = vpi_match_name(path, raw);
+      len = vpi_match_name(path, raw, fold);
    }
 
    if (len > *bestlen) {
@@ -5488,8 +5606,17 @@ PLI_BYTE8 *vpi_get_str(PLI_INT32 property, vpiHandle object)
          if (s == NULL)
             break;
          else if (obj->type == vpiForeignInst) {
-            tree_t vb = vpi_vhdl_block(s->block);
-            return (PLI_BYTE8 *)istr(tree_ident(vb));
+            tree_t vb = s->where != NULL ? vpi_vhdl_block(s->block) : NULL;
+            if (vb != NULL)
+               return (PLI_BYTE8 *)istr(tree_ident(vb));
+
+            // A VHDL scope above Verilog instances: the unit it is an
+            // instance of
+            tree_t u = tree_ref(tree_decl(s->block, 0));
+            if (tree_kind(u) == T_ARCH)
+               u = tree_primary(u);
+            return (PLI_BYTE8 *)istr(ident_rfrom(tree_ident(u), '.')
+                                     ?: tree_ident(u));
          }
          else if (is_instance(obj) != NULL || obj->type == vpiPackage)
             return (PLI_BYTE8 *)istr(vlog_ident2(s->where));

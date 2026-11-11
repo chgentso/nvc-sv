@@ -2552,6 +2552,7 @@ svalocallim3 verilog,fail,gold
 vpi20           verilog,vpi
 vpi21           mixed,vpi
 vpi22           verilog,vpi
+vpi23           mixed,2008,vpi
 svevtport1 verilog
 svlrmmisc1 verilog
 svprogparam1 verilog

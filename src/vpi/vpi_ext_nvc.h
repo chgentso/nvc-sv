@@ -21,7 +21,9 @@
 // Object types outside the range used by the IEEE 1800 headers
 
 // Instance of a VHDL entity in a Verilog design: it has a name and a
-// scope but its contents are only visible through VHPI
+// scope but its contents are only visible through VHPI.  The same type is
+// used for the VHDL instances which contain Verilog instances in a design
+// with a VHDL top level: those instances are its children.
 #define vpiForeignInst 1001
 
 // Severity levels reported to a diagnostic callback, as in VHDL
