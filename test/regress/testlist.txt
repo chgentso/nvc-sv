@@ -2618,3 +2618,4 @@ netlist4        shell
 svforkelem1     verilog
 svoutvarnet1    verilog
 svvifstruct1    verilog
+svrandreduce1   verilog

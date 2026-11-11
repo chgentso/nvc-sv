@@ -21897,6 +21897,9 @@ static bool vlog_crv_needs_wide(vlog_gen_t *g, vlog_node_t v)
       case V_UNARY_AND:
       case V_UNARY_OR:
       case V_UNARY_XOR:
+      case V_UNARY_NAND:
+      case V_UNARY_NOR:
+      case V_UNARY_XNOR:
          return vlog_crv_width(g, vlog_value(v)) > 64;
       default:
          return false;
@@ -21926,6 +21929,9 @@ static bool vlog_crv_needs_wide(vlog_gen_t *g, vlog_node_t v)
    }
 }
 
+static mir_value_t vlog_crv_w_reduce_plain(vlog_gen_t *g, crv_wide_t *pa,
+                                           unsigned aw, vlog_unary_t kind);
+
 static mir_value_t vlog_crv_w_reduce(vlog_gen_t *g, vlog_node_t arg,
                                      vlog_node_t v)
 {
@@ -21933,7 +21939,28 @@ static mir_value_t vlog_crv_w_reduce(vlog_gen_t *g, vlog_node_t arg,
    crv_wide_t a;
    vlog_crv_wide_expr(g, arg, aw, false, &a);
 
-   switch (vlog_subkind(v)) {
+   // The inverting reductions are the plain ones negated
+   vlog_unary_t kind = vlog_subkind(v);
+   bool invert = false;
+   switch (kind) {
+   case V_UNARY_NAND: kind = V_UNARY_AND; invert = true; break;
+   case V_UNARY_NOR:  kind = V_UNARY_OR;  invert = true; break;
+   case V_UNARY_XNOR: kind = V_UNARY_XOR; invert = true; break;
+   default: break;
+   }
+
+   mir_value_t r = vlog_crv_w_reduce_plain(g, &a, aw, kind);
+   if (invert)
+      r = CRV3(g, CRV_OP_UNARY, g->crv_ctx, vlog_crv_int(g, CRV_LOG_NOT), r);
+   return r;
+}
+
+static mir_value_t vlog_crv_w_reduce_plain(vlog_gen_t *g, crv_wide_t *pa,
+                                           unsigned aw, vlog_unary_t kind)
+{
+   crv_wide_t a = *pa;
+
+   switch (kind) {
    case V_UNARY_OR:
       return vlog_crv_w_any(g, &a, 0);
    case V_UNARY_AND:
@@ -22973,6 +23000,21 @@ static mir_value_t vlog_crv_expr(vlog_gen_t *g, vlog_node_t v, unsigned width,
                node = CRV3(g, CRV_OP_UNARY, g->crv_ctx,
                            vlog_crv_int(g, CRV_REDUCE_XOR),
                            vlog_crv_expr(g, arg, vlog_crv_width(g, arg), false));
+               break;
+            case V_UNARY_NAND:
+            case V_UNARY_NOR:
+            case V_UNARY_XNOR:
+               {
+                  const int red = vlog_subkind(v) == V_UNARY_NAND
+                     ? CRV_REDUCE_AND
+                     : vlog_subkind(v) == V_UNARY_NOR ? CRV_REDUCE_OR
+                     : CRV_REDUCE_XOR;
+                  mir_value_t r = CRV3(
+                     g, CRV_OP_UNARY, g->crv_ctx, vlog_crv_int(g, red),
+                     vlog_crv_expr(g, arg, vlog_crv_width(g, arg), false));
+                  node = CRV3(g, CRV_OP_UNARY, g->crv_ctx,
+                              vlog_crv_int(g, CRV_LOG_NOT), r);
+               }
                break;
             default:
                fatal_at(vlog_loc(v), "sorry, this operator is not supported "
