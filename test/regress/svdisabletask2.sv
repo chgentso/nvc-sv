@@ -7,6 +7,8 @@ endinterface
 
 module svdisabletask2;
    svdisabletask2_if bif();
+   logic clk = 1'b0;
+   always #5 clk = ~clk;
 
    class cfg_c;
       virtual svdisabletask2_if bif;
@@ -15,6 +17,7 @@ module svdisabletask2;
    class drv;
       cfg_c cfg;
       bit   flag;
+      virtual svdisabletask2_if vbif;
       bit   timed_out;
       int   reached;
       int   r;
@@ -62,6 +65,35 @@ module svdisabletask2;
          end join
       endtask
 
+      int touch;
+
+      // The disable runs just after other activity, while the poll of the
+      // wait in the task has been scheduled in the next delta cycle
+      task run_pending();
+         fork begin : isolation_fork
+            fork
+               begin
+                  repeat (4) #10;
+                  touch++;
+                  disable get_flag_wait;
+               end
+               get_flag_wait();
+            join
+         end join
+      endtask
+
+      task run_clocked();
+         fork begin : isolation_fork
+            fork
+               begin
+                  repeat (4) @(posedge svdisabletask2.clk);
+                  disable get_flag_wait;
+               end
+               get_flag_wait();
+            join
+         end join
+      endtask
+
       task run_event();
          fork begin : isolation_fork
             fork
@@ -89,7 +121,19 @@ module svdisabletask2;
       d.run_event();
       if ($time != 120 || d.reached != 0)
          $fatal(1, "event not disabled at %0t", $time);
+      begin
+         automatic time t0 = $time;
+         d.run_pending();
+         if ($time - t0 != 40 || d.reached != 0)
+            $fatal(1, "pending wait not disabled at %0t", $time);
+      end
+      for (int i = 0; i < 3; i++) begin
+         #(1 + i);
+         d.run_clocked();
+         if (d.reached != 0) $fatal(1, "clocked wait not disabled");
+      end
       if (d.r != 0) $fatal(1, "tasks completed");
       $display("PASSED");
+      $finish;
    end
 endmodule

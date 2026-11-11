@@ -8094,8 +8094,12 @@ static void sv_task_interrupt(rt_model_t *m, sv_task_t *t)
    // Wakes a process suspended in a wait statement so it can unwind
 
    rt_proc_t *proc = t->proc;
-   if (proc->wakeable.pending)
+   if (proc->wakeable.pending) {
+      // Already scheduled to run, perhaps to poll its wait which would
+      // otherwise be skipped as nothing it reads has changed
+      proc->wakeable.interrupted = true;
       return;
+   }
 
    if (proc->wakeable.delayed) {
       proc->wakeable.delayed = false;
