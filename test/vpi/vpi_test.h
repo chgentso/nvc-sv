@@ -58,6 +58,44 @@ void __check_string(const char *v, const char *s, const char *file,
                     int lineno);
 void __check_int(PLI_INT64 v, PLI_INT64 n, const char *file, int lineno);
 
+// The connections of a signal found by vpi_nvc_connections, collected
+typedef struct {
+   vpi_nvc_conn_t c;
+   char           name[96];
+   char           kind[32];
+   char           scope[96];
+   char           file[96];
+   char           other[96];
+} vpi_test_conn_t;
+
+typedef struct {
+   int             n;
+   vpi_test_conn_t item[16];
+} vpi_test_conns_t;
+
+// Ask for the connections of a path (first and count as in the call, 0 for
+// all), fail on an error and return the number found
+int vpi_test_connections(vpi_test_conns_t *out, const char *path, int first,
+                         int count);
+
+// The signals of a process found by vpi_nvc_process_signals, collected
+typedef struct {
+   int  n;
+   struct {
+      char path[96];
+      int  first, count, width, write;
+   } item[16];
+} vpi_test_procsigs_t;
+
+// Fails if there is no such process
+int vpi_test_process_signals(vpi_test_procsigs_t *out, const char *scope,
+                             const char *name);
+
+// The connection that concerns the line of a file whose name ends as given,
+// or NULL
+const vpi_test_conn_t *vpi_test_conn_at(const vpi_test_conns_t *cs,
+                                        const char *file, int line);
+
 // Register a callback with no object and an optional relative delay
 vpiHandle vpi_test_cb(PLI_INT32 reason, PLI_INT32 (*fn)(p_cb_data),
                       PLI_UINT64 delay, void *user);
@@ -88,5 +126,7 @@ void vpi17_startup(void);
 void vpi18_startup(void);
 void vpi19_startup(void);
 void vpi20_startup(void);
+void vpi21_startup(void);
+void vpi22_startup(void);
 
 #endif  // _VPI_TEST_H

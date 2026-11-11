@@ -426,6 +426,7 @@ EXTRA_DIST += \
 	test/misc/ramb_test.vhd \
 	test/model/alias1.vhd \
 	test/model/basic1.vhd \
+	test/model/drivers1.vhd \
 	test/model/event1.vhd \
 	test/model/fast1.vhd \
 	test/model/fast2.vhd \

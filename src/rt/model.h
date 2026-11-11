@@ -134,6 +134,64 @@ void sched_deposit(rt_model_t *m, rt_signal_t *s, const void *values,
                    int offset, size_t count, int64_t after, bool nonblock);
 rt_watch_t *find_watch(rt_nexus_t *n, sig_event_fn_t fn);
 bool signal_is_forced(rt_signal_t *s, int offset, size_t count);
+
+// What drives a range of a signal, for debuggers.  Offsets and counts are in
+// scalar elements from the start of the signal.
+typedef enum {
+   RT_CONN_DRIVER,    // A process drives the range
+   RT_CONN_PORT,      // The value comes from another signal through a port
+   RT_CONN_FORCE,     // The range is forced
+   RT_CONN_DEPOSIT,   // A deposit is pending on the range
+} rt_conn_kind_t;
+
+typedef struct {
+   rt_conn_kind_t  kind;
+   rt_proc_t      *proc;        // RT_CONN_DRIVER
+   rt_scope_t     *scope;       // Where the process is, or the instance that
+                                // the port connection belongs to
+   rt_scope_t     *other_scope; // RT_CONN_PORT: the signal on the other side
+   ident_t         other_name;
+   uint32_t        other_first; // The element of it that matches first
+   uint32_t        other_width; // The number of elements of that signal
+   uint32_t        first;       // The range of the signal that was asked for
+   uint32_t        count;
+   bool            approx;      // Found from the code, the range is the whole
+                                // range asked for
+   bool            collapsed;   // A port connection that the model has lost
+   bool            from_child;  // The other side is in an instance below
+} rt_conn_t;
+
+typedef void (*rt_conn_fn_t)(const rt_conn_t *conn, void *ctx);
+
+// A signal found by its name for a query
+typedef struct {
+   rt_signal_t *signal;    // Where the value is held
+   uint32_t     offset;    // The first element of the item in the signal
+   rt_scope_t  *scope;     // The scope that declares the item
+   ident_t      name;
+   bool         hop;       // An input port: a hop to the signal it is
+                           // connected to is all there is
+   rt_scope_t  *up_scope;  // For a port of a Verilog instance
+   ident_t      up_name;   // the net or variable connected to it
+} rt_found_t;
+
+void model_nexus_drivers(rt_signal_t *s, uint32_t offset, uint32_t count,
+                         rt_conn_fn_t fn, void *ctx);
+void model_item_drivers(const rt_found_t *f, uint32_t first, uint32_t count,
+                        rt_conn_fn_t fn, void *ctx);
+const char *model_proc_kind(const rt_proc_t *p);
+
+// The signals a process waits for and drives, as ranges of elements
+typedef void (*rt_procsig_fn_t)(rt_signal_t *s, uint32_t first, uint32_t count,
+                                bool write, void *ctx);
+
+rt_proc_t *model_lookup_proc(rt_model_t *m, const char *scope_path,
+                             const char *name);
+void model_process_signals(rt_model_t *m, rt_proc_t *p, rt_procsig_fn_t fn,
+                           void *ctx);
+bool model_lookup_signal(rt_model_t *m, const char *path, rt_found_t *out);
+void model_scope_path(rt_scope_t *s, text_buf_t *tb);
+void model_item_path(rt_scope_t *scope, ident_t name, text_buf_t *tb);
 void get_forcing_value(rt_signal_t *s, uint8_t *value);
 
 void _std_standard_init(void);

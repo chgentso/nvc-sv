@@ -91,4 +91,85 @@ typedef void (*vpi_nvc_diag_fn_t)(int severity, const char *text,
 
 void vpi_nvc_set_diag_cb(vpi_nvc_diag_fn_t fn, void *user_data);
 
+// Drivers and loads of a signal, found from the model of the simulation (so
+// for VHDL and for Verilog alike).  path names the signal by the names of its
+// scopes and its own name separated by spaces (top u_sub q; VHDL names are
+// matched without regard to case).  The range is counted in the scalar
+// elements of the signal from its first element (the bits of a vector, the
+// leftmost one of the declaration first); a count of 0 means up to the end,
+// and a count that is too large is cut.  The ranges in the connections are
+// relative to the start of the range asked for.  The callback is called once for every
+// driver and then once for every load with
+// the information below; strings are valid only during the call.  Only the
+// drivers of the range itself are reported, a driver that is a port
+// connection names the signal on the other side, which can be queried in its
+// turn.  Must be called with the simulation paused, from its thread.
+//
+// Returns -1 if there is no such signal, otherwise a combination of the
+// vpiNvcConnLoadsMissing flag (this nvc does not list loads, so none were
+// reported) and 0.
+
+#define vpiNvcConnProcess   0   // A process drives the signal
+#define vpiNvcConnPort      1   // Its value comes from another signal
+#define vpiNvcConnForce     2   // It is forced
+#define vpiNvcConnDeposit   3   // A deposit on it is pending
+
+// Flags of a connection
+#define vpiNvcConnCollapsed 0x1  // The port was merged with the signal it is
+                                 // connected to, this hop is not in the model
+#define vpiNvcConnFromChild 0x2  // The other signal is in an instance below
+                                 // that of the signal (an output port)
+
+#define vpiNvcConnApprox    0x4  // Found from the code of a Verilog process
+                                 // that assigns to the variable, which has
+                                 // no driver in the model: the range is the
+                                 // whole range that was asked for
+
+#define vpiNvcConnLoadsMissing 0x1
+
+typedef struct {
+   PLI_INT32   kind;         // vpiNvcConn*
+   PLI_INT32   is_load;      // 0 for a driver
+   const char *name;         // Process name, for a process
+   const char *proc_kind;    // process, always_ff, assign, initial, ... or NULL
+   const char *scope;        // Scope of the process (spaces as in path); for a
+                             // port the scope of the port connection
+   const char *file;         // Where it is, or NULL
+   PLI_INT32   line;
+   PLI_INT32   first;        // The range it concerns, relative to the start of
+   PLI_INT32   count;        // the range that was asked for
+   PLI_INT32   total;        // The length of the range that was asked for
+   const char *other;        // For a port: path of the signal on the other side
+   PLI_INT32   other_first;  // and the element where the range starts there
+   PLI_INT32   other_width;  // and the number of elements of that signal
+   PLI_INT32   flags;        // vpiNvcConn* flags
+} vpi_nvc_conn_t;
+
+typedef void (*vpi_nvc_conn_fn_t)(const vpi_nvc_conn_t *conn, void *user_data);
+
+PLI_INT32 vpi_nvc_connections(const char *path, PLI_INT32 first,
+                              PLI_INT32 count, vpi_nvc_conn_fn_t fn,
+                              void *user_data);
+
+// The signals a process reads and drives, for debuggers.  scope_path is the
+// scope of the process as in vpi_nvc_connections and name its name as
+// reported there.  The callback is called for every range of a signal that
+// the process drives (is_write) or is waiting for, which is its sensitivity
+// while it is suspended; a process that is runnable or running reports only
+// what it drives and the waits that it began since.  Returns -1 if there is
+// no such process.
+typedef struct {
+   const char *path;         // As in vpi_nvc_connections
+   PLI_INT32   first;        // The range of elements of the signal
+   PLI_INT32   count;
+   PLI_INT32   width;        // The number of elements of the signal
+   PLI_INT32   is_write;
+} vpi_nvc_procsig_t;
+
+typedef void (*vpi_nvc_procsig_fn_t)(const vpi_nvc_procsig_t *sig,
+                                     void *user_data);
+
+PLI_INT32 vpi_nvc_process_signals(const char *scope_path, const char *name,
+                                  vpi_nvc_procsig_fn_t fn, void *user_data);
+
 #endif  // VPI_EXT_NVC_H

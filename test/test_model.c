@@ -497,6 +497,153 @@ START_TEST(test_split1)
 }
 END_TEST
 
+typedef struct {
+   rt_conn_t item[8];
+   int       n;
+} conn_set_t;
+
+static void collect_conn(const rt_conn_t *c, void *ctx)
+{
+   conn_set_t *set = ctx;
+   ck_assert_int_lt(set->n, 8);
+   set->item[set->n++] = *c;
+}
+
+static const rt_conn_t *find_conn_proc(const conn_set_t *set, const char *name)
+{
+   for (int i = 0; i < set->n; i++) {
+      const rt_conn_t *c = &(set->item[i]);
+      if (c->kind == RT_CONN_DRIVER && c->proc != NULL
+          && strstr(istr(c->proc->name), name) != NULL)
+         return c;
+   }
+
+   return NULL;
+}
+
+static void get_drivers(rt_model_t *m, conn_set_t *set, const char *path,
+                        uint32_t first, uint32_t count)
+{
+   memset(set, 0, sizeof(*set));
+
+   rt_found_t f;
+   ck_assert_msg(model_lookup_signal(m, path, &f), "cannot find %s", path);
+   model_item_drivers(&f, first, count, collect_conn, set);
+}
+
+START_TEST(test_drivers1)
+{
+   input_from_file(TESTDIR "/model/drivers1.vhd");
+
+   rt_model_t *m = model_new(get_jit(), NULL);
+
+   tree_t top = run_elab_with_model(m);
+   fail_if(top == NULL);
+
+   model_reset(m);
+
+   conn_set_t set;
+
+   // Two processes drive different parts of a vector; the elements count
+   // from the leftmost bit
+   get_drivers(m, &set, "drivers1 x", 0, 4);
+   ck_assert_int_eq(set.n, 2);
+   const rt_conn_t *c = find_conn_proc(&set, "p1");
+   ck_assert_ptr_nonnull(c);
+   ck_assert_int_eq(c->first, 2);
+   ck_assert_int_eq(c->count, 2);
+   ck_assert(!c->approx);
+   c = find_conn_proc(&set, "p2");
+   ck_assert_ptr_nonnull(c);
+   ck_assert_int_eq(c->first, 0);
+   ck_assert_int_eq(c->count, 2);
+
+   // A part of it, counted from the start of the part
+   get_drivers(m, &set, "DRIVERS1 X", 1, 2);
+   ck_assert_int_eq(set.n, 2);
+   c = find_conn_proc(&set, "p2");
+   ck_assert_ptr_nonnull(c);
+   ck_assert_int_eq(c->first, 0);
+   ck_assert_int_eq(c->count, 1);
+   c = find_conn_proc(&set, "p1");
+   ck_assert_ptr_nonnull(c);
+   ck_assert_int_eq(c->first, 1);
+   ck_assert_int_eq(c->count, 1);
+
+   get_drivers(m, &set, "drivers1 x", 2, 1);
+   ck_assert_int_eq(set.n, 1);
+   ck_assert_ptr_nonnull(find_conn_proc(&set, "p1"));
+
+   // Several drivers of a resolved signal
+   get_drivers(m, &set, "drivers1 r", 0, 0);
+   ck_assert_int_eq(set.n, 2);
+   ck_assert_ptr_nonnull(find_conn_proc(&set, "pa"));
+   ck_assert_ptr_nonnull(find_conn_proc(&set, "pb"));
+
+   // A scalar that is not an element of a vector
+   get_drivers(m, &set, "drivers1 i", 0, 0);
+   ck_assert_int_eq(set.n, 1);
+   ck_assert_ptr_nonnull(find_conn_proc(&set, "p2"));
+
+   // Nothing drives it
+   get_drivers(m, &set, "drivers1 u", 0, 0);
+   ck_assert_int_eq(set.n, 0);
+
+   // The output port of a block is driven by a process, and the signal it
+   // is connected to by the port
+   get_drivers(m, &set, "drivers1 b o", 0, 2);
+   ck_assert_int_eq(set.n, 1);
+   ck_assert_int_eq(set.item[0].kind, RT_CONN_DRIVER);
+
+   get_drivers(m, &set, "drivers1 z", 0, 2);
+   ck_assert_int_eq(set.n, 1);
+   ck_assert_int_eq(set.item[0].kind, RT_CONN_PORT);
+   ck_assert_str_eq(istr(set.item[0].other_name), "O");
+   ck_assert(set.item[0].from_child);
+   ck_assert(!set.item[0].collapsed);
+   ck_assert_int_eq(set.item[0].count, 2);
+
+   // An input port is merged with x(3 downto 2): the hop is restored
+   get_drivers(m, &set, "drivers1 b n", 0, 2);
+   ck_assert_int_eq(set.n, 1);
+   ck_assert_int_eq(set.item[0].kind, RT_CONN_PORT);
+   ck_assert_str_eq(istr(set.item[0].other_name), "X");
+   ck_assert_int_eq(set.item[0].other_first, 0);
+   ck_assert_int_eq(set.item[0].count, 2);
+   ck_assert(set.item[0].collapsed);
+   ck_assert(!set.item[0].from_child);
+
+   // The scope and the path of a signal
+   rt_found_t f;
+   ck_assert(model_lookup_signal(m, "drivers1 b n", &f));
+   LOCAL_TEXT_BUF tb = tb_new();
+   model_item_path(f.up_scope ?: f.scope, f.name, tb);
+   ck_assert_str_eq(tb_get(tb), "drivers1 b n");
+
+   ck_assert(!model_lookup_signal(m, "drivers1 nosuch", &f));
+   ck_assert(!model_lookup_signal(m, "drivers1", &f));
+   ck_assert(!model_lookup_signal(m, "", &f));
+
+   // A force is a source of its own
+   rt_found_t fx;
+   ck_assert(model_lookup_signal(m, "drivers1 x", &fx));
+   const uint8_t one = 1;
+   force_signal(m, fx.signal, &one, 3, 1);
+   get_drivers(m, &set, "drivers1 x", 0, 4);
+   ck_assert_int_eq(set.n, 3);
+   for (int i = 0; i < set.n; i++) {
+      if (set.item[i].kind == RT_CONN_FORCE) {
+         ck_assert_int_eq(set.item[i].first, 3);
+         ck_assert_int_eq(set.item[i].count, 1);
+      }
+   }
+
+   model_free(m);
+
+   fail_if_errors();
+}
+END_TEST
+
 Suite *get_model_tests(void)
 {
    Suite *s = suite_create("model");
@@ -512,6 +659,7 @@ Suite *get_model_tests(void)
    tcase_add_test(tc, test_event1);
    tcase_add_test(tc, test_process1);
    tcase_add_test(tc, test_split1);
+   tcase_add_test(tc, test_drivers1);
    suite_add_tcase(s, tc);
 
    return s;

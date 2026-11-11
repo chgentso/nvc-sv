@@ -32,6 +32,8 @@ static const vpi_test_t tests[] = {
    { "vpi18", vpi18_startup },
    { "vpi19", vpi19_startup },
    { "vpi20", vpi20_startup },
+   { "vpi21", vpi21_startup },
+   { "vpi22", vpi22_startup },
    { NULL,    NULL },
 };
 
@@ -93,6 +95,77 @@ void __check_int(PLI_INT64 v, PLI_INT64 n, const char *file, int lineno)
 {
    if (v != n)
       vpi_test_fail(file, lineno, "%" PRIi64 " != %" PRIi64, v, n);
+}
+
+static void collect_conn(const vpi_nvc_conn_t *c, void *user)
+{
+   vpi_test_conns_t *out = user;
+   if (out->n >= 16)
+      return;
+
+   vpi_test_conn_t *it = &(out->item[out->n++]);
+   it->c = *c;
+
+   // The strings are only valid during the callback
+#define COPY(field, buf)                                                \
+   do {                                                                 \
+      snprintf(it->buf, sizeof(it->buf), "%s", c->field ?: "");         \
+      it->c.field = c->field ? it->buf : NULL;                          \
+   } while (0)
+   COPY(name, name);
+   COPY(proc_kind, kind);
+   COPY(scope, scope);
+   COPY(file, file);
+   COPY(other, other);
+#undef COPY
+}
+
+int vpi_test_connections(vpi_test_conns_t *out, const char *path, int first,
+                         int count)
+{
+   memset(out, 0, sizeof(*out));
+   const PLI_INT32 r = vpi_nvc_connections(path, first, count, collect_conn,
+                                           out);
+   if (r < 0)
+      vpi_test_fail(__FILE__, __LINE__, "no signal %s", path);
+   return out->n;
+}
+
+static void collect_procsig(const vpi_nvc_procsig_t *sig, void *user)
+{
+   vpi_test_procsigs_t *out = user;
+   if (out->n >= 16)
+      return;
+
+   int i = out->n++;
+   snprintf(out->item[i].path, sizeof(out->item[i].path), "%s", sig->path);
+   out->item[i].first = sig->first;
+   out->item[i].count = sig->count;
+   out->item[i].width = sig->width;
+   out->item[i].write = sig->is_write;
+}
+
+int vpi_test_process_signals(vpi_test_procsigs_t *out, const char *scope,
+                             const char *name)
+{
+   memset(out, 0, sizeof(*out));
+   if (vpi_nvc_process_signals(scope, name, collect_procsig, out) < 0)
+      vpi_test_fail(__FILE__, __LINE__, "no process %s in %s", name, scope);
+   return out->n;
+}
+
+const vpi_test_conn_t *vpi_test_conn_at(const vpi_test_conns_t *cs,
+                                        const char *file, int line)
+{
+   for (int i = 0; i < cs->n; i++) {
+      const vpi_test_conn_t *c = &(cs->item[i]);
+      const size_t flen = strlen(file), len = strlen(c->file);
+      if (c->c.line == line && len >= flen
+          && strcmp(c->file + len - flen, file) == 0)
+         return c;
+   }
+
+   return NULL;
 }
 
 vpiHandle vpi_test_cb(PLI_INT32 reason, PLI_INT32 (*fn)(p_cb_data),

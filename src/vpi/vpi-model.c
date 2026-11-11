@@ -4056,6 +4056,156 @@ void vpi_nvc_set_diag_cb(vpi_nvc_diag_fn_t fn, void *user_data)
    set_assert_hook(fn != NULL ? vpi_diag_hook : NULL, NULL);
 }
 
+typedef struct {
+   vpi_nvc_conn_fn_t fn;
+   void             *user;
+   uint32_t          total;
+} conn_query_t;
+
+static void conn_set_loc(vpi_nvc_conn_t *out, tree_t where)
+{
+   const loc_t *loc = tree_loc(where);
+   if (loc != NULL && !loc_invalid_p(loc)) {
+      out->file = loc_file_str(loc);
+      out->line = loc->first_line;
+   }
+}
+
+static void conn_report(const rt_conn_t *c, void *arg)
+{
+   conn_query_t *q = arg;
+
+   LOCAL_TEXT_BUF scope = tb_new();
+   LOCAL_TEXT_BUF other = tb_new();
+
+   vpi_nvc_conn_t out = {
+      .first = c->first,
+      .count = c->count,
+      .total = q->total,
+   };
+
+   if (c->scope != NULL)
+      model_scope_path(c->scope, scope);
+
+   switch (c->kind) {
+   case RT_CONN_DRIVER:
+      {
+         if (c->proc == NULL)
+            return;
+
+         out.kind = vpiNvcConnProcess;
+         out.proc_kind = model_proc_kind(c->proc);
+
+         // The name without the path of the scope
+         const char *full = istr(c->proc->name);
+         const char *colon = strrchr(full, ':');
+         out.name = colon != NULL ? colon + 1 : full;
+         conn_set_loc(&out, c->proc->where);
+      }
+      break;
+
+   case RT_CONN_PORT:
+      out.kind = vpiNvcConnPort;
+      model_item_path(c->other_scope, c->other_name, other);
+      out.other = tb_get(other);
+      out.other_first = c->other_first;
+      out.other_width = c->other_width;
+      if (c->scope != NULL && c->scope->kind == SCOPE_INSTANCE)
+         conn_set_loc(&out, c->scope->where);
+      break;
+
+   case RT_CONN_FORCE:
+      out.kind = vpiNvcConnForce;
+      break;
+
+   case RT_CONN_DEPOSIT:
+      out.kind = vpiNvcConnDeposit;
+      break;
+   }
+
+   if (c->approx)
+      out.flags |= vpiNvcConnApprox;
+   if (c->collapsed)
+      out.flags |= vpiNvcConnCollapsed;
+   if (c->from_child)
+      out.flags |= vpiNvcConnFromChild;
+
+   out.scope = tb_get(scope);
+   (*q->fn)(&out, q->user);
+}
+
+DLLEXPORT
+PLI_INT32 vpi_nvc_connections(const char *path, PLI_INT32 first,
+                              PLI_INT32 count, vpi_nvc_conn_fn_t fn,
+                              void *user_data)
+{
+   vpi_clear_error();
+
+   vpi_context_t *c = vpi_context();
+   if (c->model == NULL || path == NULL || fn == NULL || first < 0)
+      return -1;
+
+   rt_found_t found;
+   if (!model_lookup_signal(c->model, path, &found))
+      return -1;
+
+   const uint32_t width = signal_width(found.signal);
+   if (found.offset + first >= width)
+      return 0;
+
+   const uint32_t avail = width - found.offset - first;
+   conn_query_t q = {
+      .fn    = fn,
+      .user  = user_data,
+      .total = count > 0 ? MIN((uint32_t)count, avail) : avail,
+   };
+
+   model_item_drivers(&found, first, count, conn_report, &q);
+   return vpiNvcConnLoadsMissing;
+}
+
+typedef struct {
+   vpi_nvc_procsig_fn_t fn;
+   void                *user;
+} procsig_query_t;
+
+static void procsig_report(rt_signal_t *s, uint32_t first, uint32_t count,
+                           bool write, void *ctx)
+{
+   const procsig_query_t *q = ctx;
+
+   LOCAL_TEXT_BUF path = tb_new();
+   model_item_path(s->parent, tree_ident(s->where), path);
+
+   vpi_nvc_procsig_t out = {
+      .path     = tb_get(path),
+      .first    = first,
+      .count    = count,
+      .width    = signal_width(s),
+      .is_write = write,
+   };
+   (*q->fn)(&out, q->user);
+}
+
+DLLEXPORT
+PLI_INT32 vpi_nvc_process_signals(const char *scope_path, const char *name,
+                                  vpi_nvc_procsig_fn_t fn, void *user_data)
+{
+   vpi_clear_error();
+
+   vpi_context_t *c = vpi_context();
+   if (c->model == NULL || scope_path == NULL || name == NULL || fn == NULL)
+      return -1;
+
+   rt_proc_t *p = model_lookup_proc(c->model, scope_path, name);
+   if (p == NULL)
+      return -1;
+
+   procsig_query_t q = { fn, user_data };
+   model_process_signals(c->model, p, procsig_report, &q);
+   return 0;
+}
+
 DLLEXPORT
 vpiHandle vpi_register_cb(p_cb_data cb_data_p)
 {

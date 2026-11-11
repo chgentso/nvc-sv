@@ -5004,6 +5004,699 @@ bool signal_is_forced(rt_signal_t *s, int offset, size_t count)
    return false;
 }
 
+////////////////////////////////////////////////////////////////////////////////
+// Connectivity queries for debuggers
+
+static bool scope_is_verilog(const rt_scope_t *s)
+{
+   for (; s != NULL; s = s->parent) {
+      if (s->kind == SCOPE_INSTANCE) {
+         tree_t hier = tree_decl(s->where, 0);
+         return tree_kind(hier) == T_HIER && tree_subkind(hier) == T_VERILOG;
+      }
+   }
+
+   return false;
+}
+
+static bool scope_is_component(const rt_scope_t *s)
+{
+   if (s->kind != SCOPE_INSTANCE)
+      return false;
+
+   tree_t hier = tree_decl(s->where, 0);
+   return tree_kind(hier) == T_HIER && tree_subkind(hier) == T_COMPONENT;
+}
+
+static const char *scope_local_name(const rt_scope_t *s, char *buf, size_t max)
+{
+   // The last component of the name a user sees for this scope
+   const char *full = istr(s->kind == SCOPE_INSTANCE
+                           ? tree_ident(s->where) : s->name);
+   const char *dot = strrchr(full, '.');
+   if (s->kind != SCOPE_INSTANCE && dot != NULL && strchr(dot, '(') == NULL)
+      full = dot + 1;
+
+   checked_sprintf(buf, max, "%s", full);
+   return buf;
+}
+
+static void append_component(text_buf_t *tb, const char *name, bool verilog)
+{
+   if (tb_len(tb) > 0)
+      tb_append(tb, ' ');
+
+   if (verilog)
+      tb_cat(tb, name);
+   else {
+      for (const char *p = name; *p; p++)
+         tb_append(tb, (*p >= 'A' && *p <= 'Z') ? *p + ('a' - 'A') : *p);
+   }
+}
+
+void model_scope_path(rt_scope_t *s, text_buf_t *tb)
+{
+   // The path of a scope with the names separated by spaces, as in the
+   // scope names of the CXXRTL protocol; Verilog names keep their case and
+   // VHDL names are lower case.  The implicit block of a component
+   // instantiation has no name.
+
+   if (s->kind == SCOPE_ROOT)
+      return;
+
+   model_scope_path(s->parent, tb);
+
+   if (s->parent->kind != SCOPE_ROOT && scope_is_component(s->parent))
+      return;
+
+   char buf[256];
+   append_component(tb, scope_local_name(s, buf, sizeof(buf)),
+                    scope_is_verilog(s));
+}
+
+void model_item_path(rt_scope_t *scope, ident_t name, text_buf_t *tb)
+{
+   model_scope_path(scope, tb);
+   append_component(tb, istr(name), scope_is_verilog(scope));
+}
+
+static bool path_match(const char *want, const char *have, bool verilog)
+{
+   return verilog ? strcmp(want, have) == 0 : strcasecmp(want, have) == 0;
+}
+
+static vlog_node_t port_map_for(const rt_scope_t *scope, ident_t name)
+{
+   // The connection of a port of a Verilog instance to the signal in the
+   // scope above
+
+   if (scope->kind != SCOPE_INSTANCE || !scope_is_verilog(scope))
+      return NULL;
+
+   const int ndecls = tree_decls(scope->where);
+   for (int i = 0; i < ndecls; i++) {
+      tree_t d = tree_decl(scope->where, i);
+      if (tree_kind(d) != T_VERILOG)
+         continue;
+
+      vlog_node_t v = tree_vlog(d);
+      if (vlog_kind(v) == V_PORT_MAP && vlog_ident(v) == name)
+         return v;
+   }
+
+   return NULL;
+}
+
+static bool find_in_scope(rt_scope_t *scope, ident_t name, rt_found_t *out)
+{
+   for (int i = 0; i < scope->signals.count; i++) {
+      rt_signal_t *s = scope->signals.items[i];
+      if (tree_ident(s->where) == name) {
+         *out = (rt_found_t){ .signal = s, .scope = scope, .name = name };
+         return true;
+      }
+   }
+
+   for (int i = 0; i < scope->aliases.count; i++) {
+      rt_alias_t *a = scope->aliases.items[i];
+      if (tree_ident(a->where) == name) {
+         // A port that was merged with the signal it is connected to
+         *out = (rt_found_t){
+            .signal = a->signal,
+            .offset = a->offset,
+            .scope  = scope,
+            .name   = name,
+            .hop    = true,
+         };
+         return true;
+      }
+   }
+
+   vlog_node_t map = port_map_for(scope, name);
+   if (map != NULL && vlog_kind(vlog_value(map)) == V_REF) {
+      // A port that shares the storage of the net or variable it is
+      // connected to
+      rt_found_t up;
+      if (!find_in_scope(scope->parent, vlog_ident(vlog_value(map)), &up))
+         return false;
+
+      *out = (rt_found_t){
+         .signal = up.signal,
+         .offset = up.offset,
+         .scope  = scope,
+         .name   = name,
+         .hop    = vlog_subkind(vlog_ref(map)) == V_PORT_INPUT,
+         .up_scope = up.scope,
+         .up_name  = up.name,
+      };
+      return true;
+   }
+
+   return false;
+}
+
+static bool lookup_in(rt_scope_t *scope, char *const *names, int n,
+                      rt_found_t *out)
+{
+   char buf[256];
+
+   if (n == 1) {
+      // Names are interned in the case they were declared in
+      const bool verilog = scope_is_verilog(scope);
+      for (int i = 0; i < scope->signals.count; i++) {
+         rt_signal_t *s = scope->signals.items[i];
+         if (path_match(names[0], istr(tree_ident(s->where)), verilog))
+            return find_in_scope(scope, tree_ident(s->where), out);
+      }
+
+      for (int i = 0; i < scope->aliases.count; i++) {
+         rt_alias_t *a = scope->aliases.items[i];
+         if (path_match(names[0], istr(tree_ident(a->where)), verilog))
+            return find_in_scope(scope, tree_ident(a->where), out);
+      }
+
+      if (verilog) {
+         const int ndecls = tree_decls(scope->where);
+         for (int i = 0; i < ndecls; i++) {
+            tree_t d = tree_decl(scope->where, i);
+            if (tree_kind(d) != T_VERILOG)
+               continue;
+
+            vlog_node_t v = tree_vlog(d);
+            if (vlog_kind(v) == V_PORT_MAP
+                && path_match(names[0], istr(vlog_ident(v)), true)
+                && find_in_scope(scope, vlog_ident(v), out))
+               return true;
+         }
+      }
+   }
+   else {
+      for (int i = 0; i < scope->children.count; i++) {
+         rt_scope_t *c = scope->children.items[i];
+         if (c->kind == SCOPE_PACKAGE)
+            continue;
+
+         const char *local = scope_local_name(c, buf, sizeof(buf));
+         if (path_match(names[0], local, scope_is_verilog(c))
+             && lookup_in(c, names + 1, n - 1, out))
+            return true;
+      }
+   }
+
+   if (scope_is_component(scope)) {
+      // The block inside a component instance has no name of its own
+      for (int i = 0; i < scope->children.count; i++) {
+         if (lookup_in(scope->children.items[i], names, n, out))
+            return true;
+      }
+   }
+
+   return false;
+}
+
+bool model_lookup_signal(rt_model_t *m, const char *path, rt_found_t *out)
+{
+   // Find a signal from the names of its scopes separated by spaces (see
+   // model_scope_path).  A port that was merged with the signal it is
+   // connected to is found too, with the signal it was merged with.
+
+   char *copy LOCAL = xstrdup(path);
+   char *names[64], *saveptr = NULL;
+   int n = 0;
+   for (char *t = strtok_r(copy, " ", &saveptr); t != NULL && n < 64;
+        t = strtok_r(NULL, " ", &saveptr))
+      names[n++] = t;
+
+   if (n == 0)
+      return false;
+
+   return lookup_in(root_scope(m), names, n, out);
+}
+
+const char *model_proc_kind(const rt_proc_t *p)
+{
+   switch (tree_kind(p->where)) {
+   case T_PROCESS:
+      return "process";
+   case T_IMPLICIT_SIGNAL:
+      return "implicit";
+   case T_INERTIAL:
+      return "inertial";
+   case T_PARAM:
+      return "conversion";
+   case T_VERILOG:
+      switch (vlog_kind(tree_vlog(p->where))) {
+      case V_ASSIGN:    return "assign";
+      case V_PORT_MAP:  return "port_map";
+      case V_GATE_INST: return "gate";
+      case V_NET_DECL:  return "net_init";
+      case V_UDP_TABLE: return "udp";
+      case V_INITIAL:   return "initial";
+      case V_FINAL:     return "final";
+      case V_VAR_DECL:  return "var_init";
+      case V_ALWAYS:
+         switch (vlog_subkind(tree_vlog(p->where))) {
+         case V_ALWAYS_COMB_DONE:  return "always_comb";
+         case V_ALWAYS_LATCH_DONE: return "always_latch";
+         case V_ALWAYS_FF:         return "always_ff";
+         default:                  return "always";
+         }
+      default:
+         return "process";
+      }
+   default:
+      return "process";
+   }
+}
+
+typedef A(rt_conn_t) conn_list_t;
+
+typedef struct {
+   ident_t name;
+   bool    found;
+} vlog_write_t;
+
+static void vlog_target_writes(vlog_node_t t, vlog_write_t *w)
+{
+   switch (vlog_kind(t)) {
+   case V_REF:
+      w->found |= (vlog_ident(t) == w->name);
+      break;
+   case V_BIT_SELECT:
+   case V_PART_SELECT:
+   case V_MEMBER_REF:
+      vlog_target_writes(vlog_value(t), w);
+      break;
+   case V_CONCAT:
+      for (int i = 0; i < vlog_params(t); i++)
+         vlog_target_writes(vlog_param(t, i), w);
+      break;
+   default:
+      break;
+   }
+}
+
+static void vlog_assign_writes(vlog_node_t v, void *ctx)
+{
+   vlog_target_writes(vlog_target(v), ctx);
+}
+
+static bool proc_assigns_to(const rt_proc_t *p, ident_t name)
+{
+   // Variables are written directly by procedural assignments, they have
+   // no driver in the model, so look at the code of the process
+
+   if (tree_kind(p->where) != T_VERILOG)
+      return false;
+
+   vlog_node_t v = tree_vlog(p->where);
+   switch (vlog_kind(v)) {
+   case V_ALWAYS:
+   case V_INITIAL:
+   case V_FINAL:
+      break;
+   default:
+      return false;
+   }
+
+   vlog_write_t w = { .name = name };
+   vlog_visit_only(v, vlog_assign_writes, &w, V_BASSIGN);
+   vlog_visit_only(v, vlog_assign_writes, &w, V_NBASSIGN);
+   return w.found;
+}
+
+static bool scope_below(const rt_scope_t *s, const rt_scope_t *above)
+{
+   for (; s != NULL; s = s->parent) {
+      if (s == above)
+         return true;
+   }
+
+   return false;
+}
+
+static void conn_add(conn_list_t *list, const rt_conn_t *c)
+{
+   // Join the pieces of a driver that spans several nexuses
+   for (int i = 0; i < list->count; i++) {
+      rt_conn_t *o = &(list->items[i]);
+      if (o->kind == c->kind && o->proc == c->proc
+          && o->other_scope == c->other_scope && o->other_name == c->other_name
+          && o->first + o->count == c->first
+          && (c->other_scope == NULL
+              || o->other_first + o->count == c->other_first)) {
+         o->count += c->count;
+         return;
+      }
+   }
+
+   APUSH(*list, *c);
+}
+
+void model_nexus_drivers(rt_signal_t *s, uint32_t offset, uint32_t count,
+                         rt_conn_fn_t fn, void *ctx)
+{
+   // Pure read of the sources of the nexuses that overlap a range of
+   // elements of the signal, without splitting any nexus
+
+   RT_LOCK(s->lock);
+
+   const uint32_t total = signal_width(s);
+   if (offset >= total)
+      return;
+   else if (count == 0 || count > total - offset)
+      count = total - offset;
+
+   conn_list_t list = AINIT;
+
+   uint32_t start = 0;
+   rt_nexus_t *n = &(s->nexus);
+   for (unsigned j = 0; j < s->n_nexus; j++, n = n->chain) {
+      const uint32_t end = start + n->width;
+      if (end > offset && start < offset + count && n->n_sources > 0) {
+         const uint32_t lo = MAX(start, offset);
+         const uint32_t hi = MIN(end, offset + count);
+
+         for (rt_source_t *src = &(n->sources); src; src = src->chain_input) {
+            rt_conn_t c = { .first = lo, .count = hi - lo };
+            switch (src->tag) {
+            case SOURCE_DRIVER:
+               c.kind = RT_CONN_DRIVER;
+               c.proc = src->u.driver.proc;
+               c.scope = c.proc != NULL ? c.proc->scope : NULL;
+               break;
+            case SOURCE_PORT:
+               {
+                  rt_nexus_t *in = src->u.port.input;
+                  if (in == NULL)
+                     continue;
+                  c.kind = RT_CONN_PORT;
+                  c.other_scope = in->signal->parent;
+                  c.other_name = tree_ident(in->signal->where);
+                  c.other_first = in->offset / in->size + (lo - start);
+                  c.other_width = signal_width(in->signal);
+
+                  // The connection belongs to the instance that is lower in
+                  // the hierarchy
+                  if (scope_below(c.other_scope, s->parent)) {
+                     c.scope = c.other_scope;
+                     c.from_child = true;
+                  }
+                  else
+                     c.scope = s->parent;
+               }
+               break;
+            case SOURCE_FORCING:
+               c.kind = RT_CONN_FORCE;
+               c.scope = s->parent;
+               break;
+            case SOURCE_DEPOSIT:
+               c.kind = RT_CONN_DEPOSIT;
+               c.scope = s->parent;
+               break;
+            default:
+               continue;
+            }
+
+            conn_add(&list, &c);
+         }
+      }
+
+      start = end;
+   }
+
+   for (int i = 0; i < list.count; i++)
+      (*fn)(&(list.items[i]), ctx);
+
+   ACLEAR(list);
+}
+
+typedef struct {
+   rt_conn_fn_t fn;
+   void        *ctx;
+   uint32_t     base;
+   bool         have_driver;
+} conn_relay_t;
+
+static rt_scope_t *lookup_scope_in(rt_scope_t *scope, char *const *names,
+                                   int n)
+{
+   char buf[256];
+
+   if (n == 0)
+      return scope;
+
+   for (int i = 0; i < scope->children.count; i++) {
+      rt_scope_t *c = scope->children.items[i];
+      if (c->kind == SCOPE_PACKAGE)
+         continue;
+
+      const char *local = scope_local_name(c, buf, sizeof(buf));
+      if (path_match(names[0], local, scope_is_verilog(c))) {
+         rt_scope_t *r = lookup_scope_in(c, names + 1, n - 1);
+         if (r != NULL)
+            return r;
+      }
+   }
+
+   if (scope_is_component(scope)) {
+      for (int i = 0; i < scope->children.count; i++) {
+         rt_scope_t *r = lookup_scope_in(scope->children.items[i], names, n);
+         if (r != NULL)
+            return r;
+      }
+   }
+
+   return NULL;
+}
+
+static rt_proc_t *scope_find_proc(rt_scope_t *scope, const char *name)
+{
+   for (int i = 0; i < scope->procs.count; i++) {
+      rt_proc_t *p = scope->procs.items[i];
+      const char *full = istr(p->name);
+      const char *colon = strrchr(full, ':');
+      if (path_match(name, colon != NULL ? colon + 1 : full,
+                     scope_is_verilog(scope)))
+         return p;
+   }
+
+   if (scope_is_component(scope)) {
+      for (int i = 0; i < scope->children.count; i++) {
+         rt_proc_t *p = scope_find_proc(scope->children.items[i], name);
+         if (p != NULL)
+            return p;
+      }
+   }
+
+   return NULL;
+}
+
+rt_proc_t *model_lookup_proc(rt_model_t *m, const char *scope_path,
+                             const char *name)
+{
+   char *copy LOCAL = xstrdup(scope_path);
+   char *names[64], *saveptr = NULL;
+   int n = 0;
+   for (char *t = strtok_r(copy, " ", &saveptr); t != NULL && n < 64;
+        t = strtok_r(NULL, " ", &saveptr))
+      names[n++] = t;
+
+   rt_scope_t *scope = lookup_scope_in(root_scope(m), names, n);
+   return scope != NULL ? scope_find_proc(scope, name) : NULL;
+}
+
+static bool wakeable_is_proc(const rt_wakeable_t *w, const rt_proc_t *p)
+{
+   // A signal assignment that nvc turns into a transfer waits on behalf of
+   // the process that made it
+   switch (w->kind) {
+   case W_PROC:
+      return w == &(p->wakeable);
+   case W_TRANSFER:
+      return container_of(w, const rt_transfer_t, wakeable)->proc == p;
+   default:
+      return false;
+   }
+}
+
+static bool nexus_waited_on_by(const rt_nexus_t *n, const rt_proc_t *p)
+{
+   if (n->pending == NULL)
+      return false;
+   else if (pointer_tag(n->pending) == 1)
+      return wakeable_is_proc(untag_pointer(n->pending, rt_wakeable_t), p);
+
+   const rt_pending_t *l = untag_pointer(n->pending, rt_pending_t);
+   for (int i = 0; i < l->count; i++) {
+      if (l->wake[i] != NULL
+          && wakeable_is_proc(untag_pointer(l->wake[i], rt_wakeable_t), p))
+         return true;
+   }
+
+   return false;
+}
+
+static bool nexus_driven_by(const rt_nexus_t *n, const rt_proc_t *p)
+{
+   if (n->n_sources == 0)
+      return false;
+
+   for (const rt_source_t *src = &(n->sources); src; src = src->chain_input) {
+      if (src->tag == SOURCE_DRIVER && src->u.driver.proc == p)
+         return true;
+   }
+
+   return false;
+}
+
+static void procsig_scan(rt_scope_t *scope, rt_proc_t *p, rt_procsig_fn_t fn,
+                         void *ctx)
+{
+   for (int i = 0; i < scope->signals.count; i++) {
+      rt_signal_t *s = scope->signals.items[i];
+
+      // Runs of elements, as reads and as writes
+      uint32_t run[2] = { 0, 0 }, len[2] = { 0, 0 }, start = 0;
+      const rt_nexus_t *n = &(s->nexus);
+      for (unsigned j = 0; j < s->n_nexus; j++, n = n->chain) {
+         const bool hit[2] = { nexus_waited_on_by(n, p), nexus_driven_by(n, p) };
+         for (int k = 0; k < 2; k++) {
+            if (hit[k]) {
+               if (len[k] == 0)
+                  run[k] = start;
+               len[k] += n->width;
+            }
+            else if (len[k] > 0) {
+               (*fn)(s, run[k], len[k], k == 1, ctx);
+               len[k] = 0;
+            }
+         }
+
+         start += n->width;
+      }
+
+      for (int k = 0; k < 2; k++) {
+         if (len[k] > 0)
+            (*fn)(s, run[k], len[k], k == 1, ctx);
+      }
+   }
+
+   for (int i = 0; i < scope->children.count; i++)
+      procsig_scan(scope->children.items[i], p, fn, ctx);
+}
+
+void model_process_signals(rt_model_t *m, rt_proc_t *p, rt_procsig_fn_t fn,
+                           void *ctx)
+{
+   // The signals a process drives are known from its drivers.  What it
+   // waits for is what it is registered with at the moment, which is its
+   // sensitivity while it is suspended in a wait.
+
+   procsig_scan(root_scope(m), p, fn, ctx);
+}
+
+static void conn_relay(const rt_conn_t *c, void *arg)
+{
+   conn_relay_t *r = arg;
+   rt_conn_t shifted = *c;
+   shifted.first -= r->base;
+   r->have_driver |= (c->kind == RT_CONN_DRIVER);
+   (*r->fn)(&shifted, r->ctx);
+}
+
+void model_item_drivers(const rt_found_t *f, uint32_t first, uint32_t count,
+                        rt_conn_fn_t fn, void *ctx)
+{
+   // The drivers of a signal, a port or a range of it.  Beside the sources
+   // of the model this restores what the model has lost or never had:
+   // ports that were merged with the signal they are connected to, and the
+   // processes which assign to a Verilog variable (it has no driver).
+
+   const uint32_t width = signal_width(f->signal);
+   if (f->offset + first >= width)
+      return;
+
+   const uint32_t base = f->offset + first;
+   const uint32_t n =
+      count > 0 ? MIN(count, width - base) : width - base;
+
+   if (f->hop) {
+      rt_conn_t hop = {
+         .kind        = RT_CONN_PORT,
+         .other_scope = f->up_scope ?: f->signal->parent,
+         .other_name  = f->up_name ?: tree_ident(f->signal->where),
+         .other_first = base,
+         .other_width = width,
+         .scope       = f->scope,
+         .first       = 0,
+         .count       = n,
+         .collapsed   = true,
+      };
+      (*fn)(&hop, ctx);
+      return;
+   }
+
+   // Drivers that are in the model
+
+   conn_relay_t r = { .fn = fn, .ctx = ctx, .base = base };
+   model_nexus_drivers(f->signal, base, n, conn_relay, &r);
+
+   rt_scope_t *scope = f->scope;
+   if (!scope_is_verilog(scope) || scope->kind != SCOPE_INSTANCE)
+      return;
+
+   if (!r.have_driver) {
+      for (int i = 0; i < scope->procs.count; i++) {
+         rt_proc_t *p = scope->procs.items[i];
+         if (proc_assigns_to(p, f->name)) {
+            rt_conn_t c = {
+               .kind   = RT_CONN_DRIVER,
+               .proc   = p,
+               .scope  = scope,
+               .first  = 0,
+               .count  = n,
+               .approx = true,
+            };
+            (*fn)(&c, ctx);
+         }
+      }
+   }
+
+   // An output of an instance below that is connected to this signal
+   for (int i = 0; i < scope->children.count; i++) {
+      rt_scope_t *c = scope->children.items[i];
+      const int ndecls = c->kind == SCOPE_INSTANCE && scope_is_verilog(c)
+         ? tree_decls(c->where) : 0;
+      for (int j = 0; j < ndecls; j++) {
+         tree_t d = tree_decl(c->where, j);
+         if (tree_kind(d) != T_VERILOG)
+            continue;
+
+         vlog_node_t map = tree_vlog(d);
+         if (vlog_kind(map) != V_PORT_MAP
+             || vlog_kind(vlog_value(map)) != V_REF
+             || vlog_ident(vlog_value(map)) != f->name
+             || vlog_subkind(vlog_ref(map)) == V_PORT_INPUT)
+            continue;
+
+         rt_conn_t hop = {
+            .kind        = RT_CONN_PORT,
+            .other_scope = c,
+            .other_name  = vlog_ident(map),
+            .other_first = 0,
+            .other_width = width,
+            .scope       = c,
+            .first       = 0,
+            .count       = n,
+            .collapsed   = true,
+            .from_child  = true,
+         };
+         (*fn)(&hop, ctx);
+      }
+   }
+}
+
 void get_forcing_value(rt_signal_t *s, uint8_t *value)
 {
    uint8_t *p = value;
