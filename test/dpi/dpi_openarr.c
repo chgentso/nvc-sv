@@ -185,7 +185,7 @@ int oa_q_bit(const svOpenArrayHandle h, int d, int what)
 
 long long oa_wsum_b8(const svOpenArrayHandle h)
 {
-   OA_CHECK(svDimensions(h) == 2);
+   OA_CHECK(svDimensions(h) == 1);
    oa_check_dim(h, 0);
    oa_check_dim(h, 1);
    OA_CHECK(svSize(h, 0) == 8);
@@ -206,7 +206,7 @@ long long oa_wsum_b8(const svOpenArrayHandle h)
 // Each element contributes (p + 1) * (aval + (bval << 16)) of its 12 bits
 long long oa_wsum_l12(const svOpenArrayHandle h)
 {
-   OA_CHECK(svDimensions(h) == 2);
+   OA_CHECK(svDimensions(h) == 1);
    oa_check_dim(h, 1);
    OA_CHECK(svSize(h, 0) == 12);
 
@@ -229,7 +229,7 @@ long long oa_wsum_l12(const svOpenArrayHandle h)
 // element p contributes (p + 1) * (a0 + 3*a1 + 5*b0 + 7*b1)
 long long oa_wsum_l40(const svOpenArrayHandle h)
 {
-   OA_CHECK(svDimensions(h) == 2);
+   OA_CHECK(svDimensions(h) == 1);
    OA_CHECK(svSize(h, 0) == 40);
 
    long long sum = 0;
@@ -247,7 +247,7 @@ long long oa_wsum_l40(const svOpenArrayHandle h)
 // 70 bit elements: element p contributes (p + 1) * (w0 + 3*w1 + 5*w2)
 long long oa_wsum_b70(const svOpenArrayHandle h)
 {
-   OA_CHECK(svDimensions(h) == 2);
+   OA_CHECK(svDimensions(h) == 1);
    OA_CHECK(svLeft(h, 0) == 69 && svRight(h, 0) == 0);
 
    long long sum = 0;
@@ -342,7 +342,7 @@ long long oa_wsum_int2(const svOpenArrayHandle h)
 
 long long oa_wsum_b8x3(const svOpenArrayHandle h)
 {
-   OA_CHECK(svDimensions(h) == 4);
+   OA_CHECK(svDimensions(h) == 3);
    OA_CHECK(svSize(h, 0) == 8);
    for (int d = 1; d <= 3; d++)
       oa_check_dim(h, d);
@@ -607,7 +607,7 @@ void oa_lpk_inv(const svOpenArrayHandle h)
 // (p + 1) * value (elements up to 32 bits wide)
 long long oa_pku_wsum(const svOpenArrayHandle h)
 {
-   OA_CHECK(svDimensions(h) == 2);
+   OA_CHECK(svDimensions(h) == 1);
    const int width = svSize(h, 0);
    OA_CHECK(width <= 32);
 

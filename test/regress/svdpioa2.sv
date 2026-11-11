@@ -1,7 +1,8 @@
 // DPI open array formals whose elements are packed bit/logic vectors or
 // scalars (input direction).
 // IEEE 1800-2017 35.5.6.1, Annex H.12: dimension 0 is the packed dimension
-// of a vector element and svDimensions counts it; elements are read in the
+// of a vector element and svDimensions counts only the unpacked
+// dimensions (as existing DPI code expects); elements are read in the
 // canonical svBitVecVal / svLogicVecVal form (H.7.7, 0=(a0,b0) 1=(a1,b0)
 // z=(a0,b1) x=(a1,b1)) with svGetBitArrElem1VecVal / svGetBitArrElemVecVal,
 // svGetLogicArrElem1VecVal / svGetLogicArrElemVecVal; scalar elements with
@@ -45,7 +46,7 @@ module svdpioa2;
   longint e;
 
   initial begin
-    `CHK(oa_q_b8(b8, 0, 6) == 2, "svDimensions of bit [7:0] x[]")
+    `CHK(oa_q_b8(b8, 0, 6) == 1, "svDimensions of bit [7:0] x[]")
     `CHK(oa_q_b8(b8, 0, 0) == 7 && oa_q_b8(b8, 0, 1) == 0, "packed left/right")
     `CHK(oa_q_b8(b8, 0, 5) == 8, "packed size")
     `CHK(oa_q_b8(b8d, 1, 0) == 2 && oa_q_b8(b8d, 1, 1) == 1, "unpacked left/right")

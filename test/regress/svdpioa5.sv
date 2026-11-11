@@ -68,7 +68,7 @@ module svdpioa5;
     oa_lpk_inv(io6);
     `CHK(io6 === 6'b10zx01, "inout logic [5:0]")
 
-    `CHK(oa_q_pku(u, 0, 6) == 2, "svDimensions of bit [] x[]")
+    `CHK(oa_q_pku(u, 0, 6) == 1, "svDimensions of bit [] x[]")
     `CHK(oa_q_pku(u, 0, 5) == 12 && oa_q_pku(u, 1, 5) == 3, "sizes")
     `CHK(oa_q_pku(u, 1, 0) == 3 && oa_q_pku(u, 1, 1) == 1, "unpacked range")
     `CHK(oa_pku_wsum(u) == 12'h001 + 2 * 12'h010 + 3 * 12'h100, "bit [] x[] 12 bits")

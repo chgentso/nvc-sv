@@ -1,8 +1,8 @@
 // DPI open array formals with several unpacked dimensions.
 // IEEE 1800-2017 35.5.6.1 (each unsized unpacked dimension takes the range
 // of the corresponding dimension of the actual), Annex H.12: unpacked
-// dimensions numbered 1.. from the left, svDimensions counts the packed
-// dimension of a vector element, svGetArrElemPtr2 / svGetArrElemPtr,
+// dimensions numbered 1.. from the left, svDimensions counts only the
+// unpacked dimensions, svGetArrElemPtr2 / svGetArrElemPtr,
 // svGetBitArrElem3VecVal / svGetBitArrElemVecVal, svGetLogicArrElem2 /
 // svGetLogicArrElem, svGetArrayPtr in row-major order from the leftmost
 // element (H.7.5).
@@ -46,7 +46,7 @@ module svdpioa3;
       e += (p + 1) * c3[i][j][k];
       p++;
     end
-    `CHK(oa_q_b8x3(c3, 0, 6) == 4, "svDimensions of bit [7:0] x[][][]")
+    `CHK(oa_q_b8x3(c3, 0, 6) == 3, "svDimensions of bit [7:0] x[][][]")
     `CHK(oa_q_b8x3(c3, 3, 5) == 3, "dim 3 size")
     `CHK(oa_wsum_b8x3(c3) == e, "bit [7:0] [2][2][3]")
 

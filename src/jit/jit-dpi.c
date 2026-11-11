@@ -2235,8 +2235,14 @@ int svSize(const svOpenArrayHandle h, int d)
 DLLEXPORT
 int svDimensions(const svOpenArrayHandle h)
 {
+   // H.12.2 says the query functions follow $dimensions, which would
+   // also count the packed part, but existing DPI C code expects only
+   // the unpacked dimensions: OpenTitan's cryptoc_dpi.c asserts that
+   // svDimensions is 1 for a bit [7:0] x[] formal.  Follow that de facto
+   // behaviour.  Dimension 0 still describes the packed part, and an
+   // open array with no unpacked dimension has one dimension.
    const dpi_oa_t *oa = h;
-   return oa->ndims + (oa->has_packed ? 1 : 0);
+   return oa->ndims > 0 ? oa->ndims : (oa->has_packed ? 1 : 0);
 }
 
 DLLEXPORT
