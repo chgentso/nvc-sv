@@ -131,6 +131,7 @@ rt_scope_t *create_scope(rt_model_t *m, tree_t block, rt_scope_t *parent);
 void get_instance_name(rt_scope_t *s, text_buf_t *tb);
 void get_path_name(rt_scope_t *s, text_buf_t *tb);
 void get_verilog_path_name(rt_scope_t *s, text_buf_t *tb);
+bool scope_is_wrapper(const rt_scope_t *s);
 rt_scope_t *scope_for_context(rt_scope_t *s, void *ctx);
 
 const void *signal_value(rt_signal_t *s);

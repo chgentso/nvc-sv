@@ -2631,3 +2631,5 @@ svassertctlgen1 verilog
 blackbox1       shell
 blackbox2       shell
 svbitstreamcast1 verilog
+wrapnames1      mixed,2008
+wrapnames2      mixed,2008

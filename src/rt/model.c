@@ -5028,6 +5028,14 @@ static bool scope_is_component(const rt_scope_t *s)
    return tree_kind(hier) == T_HIER && tree_subkind(hier) == T_COMPONENT;
 }
 
+static bool scope_has_wrapper_child(const rt_scope_t *s)
+{
+   // The scope which a user sees as the one containing the contents of
+   // its only child
+   return scope_is_component(s)
+      || (s->kind == SCOPE_INSTANCE && find_vhdl_shim_entity(s->where) != NULL);
+}
+
 static const char *scope_local_name(const rt_scope_t *s, char *buf, size_t max)
 {
    // The last component of the name a user sees for this scope
@@ -5059,14 +5067,15 @@ void model_scope_path(rt_scope_t *s, text_buf_t *tb)
    // The path of a scope with the names separated by spaces, as in the
    // scope names of the CXXRTL protocol; Verilog names keep their case and
    // VHDL names are lower case.  The implicit block of a component
-   // instantiation has no name.
+   // instantiation and the entity inside the shim for a Verilog parent have
+   // no name.
 
    if (s->kind == SCOPE_ROOT)
       return;
 
    model_scope_path(s->parent, tb);
 
-   if (s->parent->kind != SCOPE_ROOT && scope_is_component(s->parent))
+   if (scope_is_wrapper(s))
       return;
 
    char buf[256];
@@ -5203,8 +5212,9 @@ static bool lookup_in(rt_scope_t *scope, char *const *names, int n,
       }
    }
 
-   if (scope_is_component(scope)) {
-      // The block inside a component instance has no name of its own
+   if (scope_has_wrapper_child(scope)) {
+      // The block inside a component instance or the entity inside the
+      // shim of a Verilog parent has no name of its own
       for (int i = 0; i < scope->children.count; i++) {
          if (lookup_in(scope->children.items[i], names, n, out))
             return true;
@@ -5459,7 +5469,7 @@ static rt_scope_t *lookup_scope_in(rt_scope_t *scope, char *const *names,
       }
    }
 
-   if (scope_is_component(scope)) {
+   if (scope_has_wrapper_child(scope)) {
       for (int i = 0; i < scope->children.count; i++) {
          rt_scope_t *r = lookup_scope_in(scope->children.items[i], names, n);
          if (r != NULL)
@@ -5481,7 +5491,7 @@ static rt_proc_t *scope_find_proc(rt_scope_t *scope, const char *name)
          return p;
    }
 
-   if (scope_is_component(scope)) {
+   if (scope_has_wrapper_child(scope)) {
       for (int i = 0; i < scope->children.count; i++) {
          rt_proc_t *p = scope_find_proc(scope->children.items[i], name);
          if (p != NULL)
@@ -5520,7 +5530,7 @@ static rt_proc_t *scope_find_proc_at(rt_scope_t *scope, const char *file,
          return p;
    }
 
-   if (scope_is_component(scope)) {
+   if (scope_has_wrapper_child(scope)) {
       for (int i = 0; i < scope->children.count; i++) {
          rt_proc_t *p = scope_find_proc_at(scope->children.items[i], file, line);
          if (p != NULL)
@@ -5879,6 +5889,27 @@ void call_with_model(rt_model_t *m, void (*cb)(void *), void *arg)
    (*cb)(arg);
 }
 
+bool scope_is_wrapper(const rt_scope_t *s)
+{
+   // Elaboration adds a scope at the boundary between Verilog and VHDL
+   // that has no counterpart in the source: the block of the module bound
+   // to a component and the block of an entity instantiated from Verilog.
+   // The parent takes the name of the instance and the wrapper is not
+   // shown in hierarchical names.
+
+   const rt_scope_t *p = s->parent;
+   if (p == NULL || p->kind != SCOPE_INSTANCE)
+      return false;
+
+   tree_t hier = tree_decl(p->where, 0);
+   if (tree_kind(hier) != T_HIER)
+      return false;
+   else if (tree_subkind(hier) == T_COMPONENT)
+      return true;
+
+   return s->kind == SCOPE_INSTANCE && is_vhdl_shim_entity(p->where, s->where);
+}
+
 void get_instance_name(rt_scope_t *s, text_buf_t *tb)
 {
    if (s->kind == SCOPE_ROOT)
@@ -5895,10 +5926,7 @@ void get_instance_name(rt_scope_t *s, text_buf_t *tb)
          get_instance_name(s->parent, tb);
 
          if (s->parent->kind != SCOPE_ROOT) {
-            tree_t hier2 = tree_decl(s->parent->where, 0);
-            assert(tree_kind(hier2) == T_HIER);
-
-            if (tree_subkind(hier2) != T_COMPONENT) {
+            if (!scope_is_wrapper(s)) {
                tb_append(tb, ':');
                tb_istr(tb, tree_ident(s->where));
             }
@@ -5930,7 +5958,8 @@ void get_instance_name(rt_scope_t *s, text_buf_t *tb)
    // TODO: Should Verilog hierarchy have the same format as VHDL ?
    case T_VERILOG:
       get_instance_name(s->parent, tb);
-      tb_printf(tb, ":%s", istr(tree_ident(s->where)));
+      if (!scope_is_wrapper(s))
+         tb_printf(tb, ":%s", istr(tree_ident(s->where)));
       break;
 
    default:
@@ -5947,13 +5976,8 @@ void get_path_name(rt_scope_t *s, text_buf_t *tb)
 
    get_path_name(s->parent, tb);
 
-   if (s->parent->kind != SCOPE_ROOT) {
-      tree_t hier = tree_decl(s->parent->where, 0);
-      assert(tree_kind(hier) == T_HIER);
-
-      if (tree_subkind(hier) == T_COMPONENT)
-         return;   // Skip implicit block for components
-   }
+   if (scope_is_wrapper(s))
+      return;
 
    tb_append(tb, ':');
    tb_istr(tb, tree_ident(s->where));
@@ -5966,6 +5990,9 @@ void get_verilog_path_name(rt_scope_t *s, text_buf_t *tb)
       return;
 
    get_verilog_path_name(s->parent, tb);
+
+   if (scope_is_wrapper(s))
+      return;
 
    if (s->parent->kind != SCOPE_ROOT)
       tb_append(tb, '.');
