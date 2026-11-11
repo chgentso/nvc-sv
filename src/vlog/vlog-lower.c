@@ -4073,11 +4073,27 @@ static bool vlog_has_side_effects(vlog_node_t v)
          // Reading an entry of an associative array which does not exist
          // is reported
          vlog_node_t type = vlog_get_type(vlog_value(v));
-         return type != NULL && vlog_kind(type) == V_DATA_TYPE
-            && vlog_subkind(type) == DT_ASSOC;
+         if (type != NULL && vlog_kind(type) == V_DATA_TYPE
+             && vlog_subkind(type) == DT_ASSOC)
+            return true;
+
+         // The operand and the indices may dereference a null handle
+         if (vlog_has_side_effects(vlog_value(v)))
+            return true;
+
+         const int nparams = vlog_params(v);
+         for (int i = 0; i < nparams; i++) {
+            if (vlog_has_side_effects(vlog_param(v, i)))
+               return true;
+         }
+
+         return false;
       }
-   case V_REF:
    case V_PART_SELECT:
+      return vlog_has_side_effects(vlog_value(v))
+         || vlog_has_side_effects(vlog_left(v))
+         || (vlog_has_right(v) && vlog_has_side_effects(vlog_right(v)));
+   case V_REF:
    case V_NUMBER:
       return false;
    case V_UNARY:

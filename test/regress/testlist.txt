@@ -2636,3 +2636,4 @@ wrapnames1      mixed,2008
 wrapnames2      mixed,2008
 wrapnames3      wave,mixed,2008
 wrapnames4      wave,mixed,2008
+svshortcirc1    verilog
