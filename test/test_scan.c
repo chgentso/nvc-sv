@@ -235,6 +235,23 @@ START_TEST(test_sv_ifdef_b)
 }
 END_TEST
 
+START_TEST(test_sv_decls)
+{
+   // Only a name followed by a port list is an instance: declarations of
+   // variables whose type is not available are not
+
+   set_standard(STD_19);
+
+   const char *expect =
+      "{\"file\":\"" SCAN_FILE("sv5.sv") "\",\"language\":\"verilog\","
+      "\"units\":[{\"name\":\"WORK.DECLS\",\"kind\":\"module\","
+      "\"ports\":false,\"instantiates\":[\"counter\"]}],"
+      "\"requires\":[\"?unk_pkg\"],\"includes\":[]}\n";
+
+   ck_assert_uint_eq(scan(SCAN_FILE("sv5.sv"), expect), 0);
+}
+END_TEST
+
 START_TEST(test_sv_syntax)
 {
    set_standard(STD_19);
@@ -269,6 +286,7 @@ Suite *get_scan_tests(void)
    tcase_add_test(tc, test_sv2);
    tcase_add_test(tc, test_sv_ifdef_a);
    tcase_add_test(tc, test_sv_ifdef_b);
+   tcase_add_test(tc, test_sv_decls);
    tcase_add_test(tc, test_sv_syntax);
    suite_add_tcase(s, tc);
 

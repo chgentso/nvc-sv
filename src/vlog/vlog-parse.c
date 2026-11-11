@@ -22820,12 +22820,25 @@ static vlog_node_t p_hierarchical_instance(void)
    if (peek() == tLSQUARE)
       vlog_add_range(v, p_unpacked_dimension());
 
-   if (lib_scan_active() && (peek() == tSEMI || peek() == tCOMMA)) {
-      // Most likely a variable of a type from a package which is not
-      // available rather than an instance
+   if (lib_scan_active() && peek() != tLPAREN) {
+      // An instance always has a port list so this must be a declaration
+      // of a variable whose type is not available: skip any initial value
+      // and do not record it as an instance
+      int depth = 0;
+      for (;;) {
+         const token_t tok = peek();
+         if (tok == tEOF || (depth <= 0 && (tok == tSEMI || tok == tCOMMA)))
+            break;
+         else if (tok == tLPAREN || tok == tLSQUARE || tok == tLBRACE)
+            depth++;
+         else if (tok == tRPAREN || tok == tRSQUARE || tok == tRBRACE)
+            depth--;
+         consume(tok);
+      }
+
       vlog_set_loc(v, CURRENT_LOC);
       vlog_symtab_put(symtab, v);
-      return v;
+      return NULL;
    }
 
    consume(tLPAREN);
@@ -23026,11 +23039,29 @@ static void p_module_or_udp_instantiation(vlog_node_t mod)
    port_target = ptarget != NULL && vlog_kind(ptarget) == V_MODULE
       ? ptarget : NULL;
 
+   // A packed dimension can only follow the type of a declaration
+   while (lib_scan_active() && peek() == tLSQUARE) {
+      int depth = 0;
+      do {
+         const token_t tok = peek();
+         if (tok == tEOF)
+            break;
+         else if (tok == tLSQUARE)
+            depth++;
+         else if (tok == tRSQUARE)
+            depth--;
+         consume(tok);
+      } while (depth > 0);
+   }
+
    do {
       if (peek() == tLPAREN)
          vlog_add_stmt(v, p_udp_instance());
-      else
-         vlog_add_stmt(v, p_hierarchical_instance());
+      else {
+         vlog_node_t i = p_hierarchical_instance();
+         if (i != NULL)   // Null for a declaration when scanning
+            vlog_add_stmt(v, i);
+      }
    } while (optional(tCOMMA));
 
    port_target = NULL;
