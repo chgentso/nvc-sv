@@ -816,6 +816,129 @@ START_TEST(test_iface1)
 }
 END_TEST
 
+START_TEST(test_mixed_vlog_top)
+{
+   // The wrapper elaboration puts around a VHDL entity instantiated from
+   // Verilog and around a Verilog module bound to a component is merged
+   // with the unit inside: one block for each instance
+
+   set_standard(STD_08);
+
+   input_from_file(TESTDIR "/netlist/vhdl1.vhd");
+   analyse_file();
+
+   input_from_file(TESTDIR "/netlist/mixed1.v");
+   analyse_file();
+
+   input_from_file(TESTDIR "/netlist/mixed1.vhd");
+   analyse_file();
+
+   input_from_file(TESTDIR "/netlist/mixed3.v");
+
+   tree_t e = run_elab();
+   fail_if_errors();
+
+   conn_design_t *cd = conn_build(e);
+   ck_assert_ptr_nonnull(cd);
+
+   conn_block_t *top = conn_root(cd, 0);
+   ck_assert_str_eq(top->name, "mixed3");
+   ck_assert_uint_eq(top->ninsts, 5);
+
+   // Instance array element and generate loop
+   const char *labels[] = { "ua[0]", "ua[1]", "g[0].u", "g[1].u" };
+   for (int i = 0; i < ARRAY_LEN(labels); i++) {
+      conn_inst_t *u = get_inst(top, labels[i]);
+      conn_block_t *b = u->child;
+      ck_assert_str_eq(b->label, labels[i]);
+      ck_assert_str_eq(b->unit, "LEAF");
+      ck_assert_int_eq(b->lang, CONN_VHDL);
+      ck_assert_int_eq(b->label_lang, CONN_VERILOG);
+      ck_assert_uint_eq(b->ninsts, 0);
+      ck_assert_uint_eq(b->nports, 3);
+      ck_assert_ptr_nonnull(get_proc(b, "P_OUT"));
+      ck_assert_uint_eq(u->nconns, 3);
+      ck_assert_int_eq(get_conn(u, "A")->segs[0].kind, CONN_SEG_NET);
+      if (labels[i][0] == 'g')
+         ck_assert_ptr_eq(get_conn(u, "A")->segs[0].range.net,
+                          get_net(top, "a"));
+      else
+         ck_assert_ptr_nonnull(get_conn(u, "A"));
+
+      // The instantiation is the source location of the instance
+      ck_assert_ptr_nonnull(strstr(u->src, "mixed3.v"));
+      ck_assert_ptr_nonnull(strstr(b->src, "vhdl1.vhd"));
+
+      char *path LOCAL = xasprintf("mixed3.%s", labels[i]);
+      ck_assert_ptr_eq(conn_find_block(cd, path), b);
+      char *inner LOCAL = xasprintf("%s.LEAF", path);
+      ck_assert_ptr_null(conn_find_block(cd, inner));
+   }
+
+   // Verilog above VHDL above a component bound to a Verilog module
+   conn_inst_t *mid = get_inst(top, "u_mid");
+   ck_assert_str_eq(mid->child->unit, "MIXED1");
+   ck_assert_uint_eq(mid->child->ninsts, 1);
+
+   conn_inst_t *sub = get_inst(mid->child, "U_SUB");
+   ck_assert_str_eq(sub->child->name, "mixed3.u_mid.U_SUB");
+   ck_assert_str_eq(sub->child->unit, "vsub");
+   ck_assert_int_eq(sub->child->lang, CONN_VERILOG);
+   ck_assert_int_eq(sub->child->label_lang, CONN_VHDL);
+   ck_assert(!sub->child->component);
+   ck_assert_uint_eq(sub->child->ninsts, 0);
+   ck_assert_ptr_nonnull(get_net(sub->child, "clk"));
+   ck_assert_ptr_eq(get_conn(sub, "clk")->segs[0].range.net,
+                    get_net(mid->child, "CLK"));
+   ck_assert_ptr_nonnull(get_conn(sub, "d")->segs[0].conv);
+
+   char *json = write_json(cd, -1);
+   ck_has(json, "\"mixed3.ua[0]\":{");
+   ck_has(json, "\"mixed3.g[1].u\":{");
+   ck_has(json, "\"mixed3.u_mid.U_SUB\":{");
+   ck_has(json, "\"conversions\":\"TO_VHDL,TO_VERILOG\"");
+   ck_has(json, "\"unit\":\"LEAF\"");
+   ck_has_not(json, "leaf$");
+   ck_has_not(json, ".LEAF\":{");
+   ck_has_not(json, "\"mixed3.u_mid.U_SUB.vsub\"");
+   free(json);
+
+   conn_free(cd);
+}
+END_TEST
+
+START_TEST(test_mixed_vhdl_top)
+{
+   set_standard(STD_08);
+
+   input_from_file(TESTDIR "/netlist/mixed1.v");
+   analyse_file();
+
+   input_from_file(TESTDIR "/netlist/mixed1.vhd");
+
+   tree_t e = run_elab();
+   fail_if_errors();
+
+   conn_design_t *cd = conn_build(e);
+   ck_assert_ptr_nonnull(cd);
+
+   conn_block_t *top = conn_root(cd, 0);
+   ck_assert_int_eq(top->lang, CONN_VHDL);
+   ck_assert_uint_eq(top->ninsts, 1);
+
+   conn_inst_t *sub = get_inst(top, "U_SUB");
+   ck_assert_str_eq(sub->child->name, "MIXED1.U_SUB");
+   ck_assert_str_eq(sub->child->unit, "vsub");
+   ck_assert_int_eq(sub->child->lang, CONN_VERILOG);
+   ck_assert_uint_eq(sub->child->nports, 4);
+   ck_assert_ptr_nonnull(get_proc(sub->child, "always @5"));
+   ck_assert_ptr_eq(conn_find_block(cd, "MIXED1.U_SUB"), sub->child);
+   ck_assert_ptr_null(conn_find_block(cd, "MIXED1.U_SUB.vsub"));
+
+   conn_free(cd);
+}
+END_TEST
+
 Suite *get_netlist_tests(void)
 {
    Suite *s = suite_create("netlist");
@@ -828,6 +951,8 @@ Suite *get_netlist_tests(void)
    tcase_add_test(tc, test_sv1);
    tcase_add_test(tc, test_vhdl2);
    tcase_add_test(tc, test_iface1);
+   tcase_add_test(tc, test_mixed_vlog_top);
+   tcase_add_test(tc, test_mixed_vhdl_top);
    suite_add_tcase(s, tc);
 
    return s;

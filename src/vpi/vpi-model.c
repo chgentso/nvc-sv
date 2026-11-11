@@ -5753,7 +5753,7 @@ static void conn_block_path(text_buf_t *tb, const conn_block_t *b)
       tb_append(tb, ' ');
    }
 
-   const bool fold = b->lang != CONN_VERILOG;
+   const bool fold = b->label_lang != CONN_VERILOG;
    for (const char *p = b->label; *p; p++)
       tb_append(tb, fold && *p >= 'A' && *p <= 'Z' ? *p + 'a' - 'A' : *p);
 }

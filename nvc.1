@@ -974,7 +974,11 @@ label of the generate block as a prefix to the name.  Each module has the
 ports of the instance, a cell for each child instance whose type is the name
 of the child's module, and a net for each port and signal.  Every scalar
 element of a signal is one bit, numbered so that the least significant
-bit, which is the element with the lowest index, comes first.
+bit, which is the element with the lowest index, comes first.  The
+instance of a VHDL entity in Verilog and of a Verilog module bound to a
+component in VHDL is one module and one cell, named by the instance label,
+with the name of the entity or module as the attribute
+.Ql unit .
 .Pp
 A process is a cell whose type, and so the text drawn in the box, is the
 label of the process or, for a process without one, the kind of process and

@@ -2619,6 +2619,7 @@ netlist1        shell
 netlist2        shell
 netlist3        shell
 netlist4        shell
+netlist5        shell
 svforkelem1     verilog
 svoutvarnet1    verilog
 svvifstruct1    verilog

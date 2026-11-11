@@ -9,10 +9,12 @@ nvc --std=08 -a $TESTDIR/netlist/mixed1.v $TESTDIR/netlist/mixed1.vhd \
 
 nvc --std=08 --netlist mixed1 --output=vhdl_top.json
 
-# The component and the Verilog module bound to it are separate modules
+# The Verilog module bound to a component is one module named by the
+# instance of the component, with the name of the module as its unit
 grep -q '^"MIXED1":{' vhdl_top.json
 grep -q '^"MIXED1.U_SUB":{' vhdl_top.json
-grep -q '^"MIXED1.U_SUB.vsub":{' vhdl_top.json
+grep -q '^"unit":"vsub"' vhdl_top.json
+[ $(grep -c '^"MIXED1.U_SUB.vsub":{' vhdl_top.json) = 0 ]
 grep -q '^"language":"verilog"' vhdl_top.json
 grep -q '^"language":"vhdl"' vhdl_top.json
 
@@ -32,5 +34,11 @@ nvc --std=08 --netlist mixed2 > verilog_top.json
 
 grep -q '^"mixed2":{' verilog_top.json
 grep -q '^"mixed2.u_vhdl":{' verilog_top.json
-grep -q '^"mixed2.u_vhdl.LEAF":{' verilog_top.json
+grep -q '^"unit":"LEAF"' verilog_top.json
+grep -q '^"language":"vhdl"' verilog_top.json
+grep -q '^"conversions":"TO_VHDL,TO_VERILOG"' verilog_top.json
+
+# The generated module wrapping the entity is not shown
+[ $(grep -c '^"mixed2.u_vhdl.LEAF":{' verilog_top.json) = 0 ]
+[ $(grep -c 'leaf\$' verilog_top.json) = 0 ]
 grep -q '^"label":"P_OUT"' verilog_top.json

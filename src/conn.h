@@ -168,6 +168,10 @@ struct _conn_block {
    const char   *label;      // Last component of path
    const char   *unit;       // Design unit, e.g. "WORK.SUB" or NULL
    conn_lang_t   lang;
+   conn_lang_t   label_lang; // Language of the instance label, which differs
+                            // from LANG for the unit that is merged with
+                            // the wrapper elaboration put around it: it
+                            // keeps the name of the wrapper
    bool          component; // Block of a component: its only instance is
                             // the entity or module bound to it
    bool          blackbox;  // Stands for a unit that is missing

@@ -2176,7 +2176,8 @@ static conn_proc_t *add_process(bctx_t *bc, const char *prefix, ident_t id,
 }
 
 static conn_block_t *build_instance(conn_design_t *cd, tree_t b,
-                                    conn_block_t *parent, const char *label);
+                                    conn_block_t *parent, const char *label,
+                                    tree_t outer);
 
 static void normalise_segs(conn_design_t *cd, seg_list_t *segs, unsigned want)
 {
@@ -2295,12 +2296,16 @@ static conn_range_t formal_range(conn_design_t *cd, conn_block_t *child,
    return fr;
 }
 
-static void build_conns(bctx_t *bc, conn_inst_t *inst, tree_t cb)
+static void build_conns(bctx_t *bc, conn_inst_t *inst, tree_t cb, tree_t via)
 {
    conn_design_t *cd = bc->cd;
    SCOPED_LIST(pconn_list_t, conns);
 
-   const int nparams = tree_params(cb);
+   // The ports of the module generated for a VHDL entity are left open at
+   // this level: they are connected by the port map of the Verilog instance
+   const bool shim = via != NULL && find_vhdl_shim_entity(cb) != NULL;
+
+   const int nparams = shim ? 0 : tree_params(cb);
    for (int i = 0; i < nparams; i++) {
       tree_t p = tree_param(cb, i);
 
@@ -2353,6 +2358,42 @@ static void build_conns(bctx_t *bc, conn_inst_t *inst, tree_t cb)
       vlog_actual(cd, vlog_value(map), n->width, &segs);
       add_conn(bc, &conns, n, 0, n->width - 1, &segs,
                vlog_loc(map));
+   }
+
+   if (via != NULL) {
+      // The connections from the ports of the wrapper to those of the unit
+      // it contains are not shown but they are where the conversions are
+      const int nvia = tree_params(via);
+      for (int i = 0; i < nvia; i++) {
+         tree_t p = tree_param(via, i);
+
+         const char *conv = NULL;
+         conn_range_t fr = formal_range(cd, inst->child, via, p, &conv);
+         if (fr.net == NULL)
+            continue;
+
+         if (conv == NULL) {
+            tree_t value = tree_value(p);
+            if (tree_kind(value) == T_CONV_FUNC)
+               conv = dstr(cd, istr(tree_ident(value)));
+            else if (tree_kind(value) == T_TYPE_CONV)
+               conv = "type conversion";
+         }
+
+         if (conv == NULL)
+            continue;
+
+         for (unsigned j = 0; j < conns.count; j++) {
+            conn_pconn_t *c = &(conns.items[j]);
+            if (c->formal != fr.net)
+               continue;
+
+            for (unsigned k = 0; k < c->nsegs; k++) {
+               if (c->segs[k].conv == NULL)
+                  c->segs[k].conv = conv;
+            }
+         }
+      }
    }
 
    conn_block_t *child = inst->child;
@@ -2435,6 +2476,33 @@ static void build_conns(bctx_t *bc, conn_inst_t *inst, tree_t cb)
    inst->nconns = conns.count;
 }
 
+static tree_t wrapped_unit(tree_t b)
+{
+   // Block for the VHDL entity inside the Verilog module generated to
+   // instantiate it from Verilog, or for the Verilog module inside the
+   // block of the component it is bound to: the wrapper and the instance
+   // inside are one instance as far as the user is concerned.
+
+   tree_t shim = find_vhdl_shim_entity(b);
+   if (shim != NULL)
+      return shim;
+
+   if (tree_decls(b) == 0 || tree_kind(tree_decl(b, 0)) != T_HIER
+       || tree_subkind(tree_decl(b, 0)) != T_COMPONENT)
+      return NULL;
+
+   if (tree_stmts(b) != 1)
+      return NULL;
+
+   tree_t s = tree_stmt(b, 0);
+   if (tree_kind(s) != T_BLOCK || tree_decls(s) == 0
+       || tree_kind(tree_decl(s, 0)) != T_HIER
+       || tree_subkind(tree_decl(s, 0)) != T_VERILOG)
+      return NULL;
+
+   return s;
+}
+
 static bool is_interface_block(tree_t b)
 {
    vlog_node_t body = block_vlog_body(b);
@@ -2500,10 +2568,17 @@ static void scan_stmts(bctx_t *bc, tree_t blk, const char *prefix, int pass)
             break;
          else {
             const char *label = dstrf(cd, "%s%s", prefix, block_label(s));
-            conn_block_t *child = build_instance(cd, s, bc->block, label);
+
+            // A wrapper added by elaboration at the boundary between VHDL
+            // and Verilog is merged with the unit it contains
+            tree_t inner = wrapped_unit(s);
+
+            conn_block_t *child =
+               build_instance(cd, inner ?: s, bc->block, label,
+                              inner ? s : NULL);
 
             conn_inst_t *inst = child->inst;
-            build_conns(bc, inst, s);
+            build_conns(bc, inst, s, inner);
             APUSH(bc->insts, inst);
          }
          break;
@@ -2515,7 +2590,8 @@ static void scan_stmts(bctx_t *bc, tree_t blk, const char *prefix, int pass)
 }
 
 static conn_block_t *build_instance(conn_design_t *cd, tree_t b,
-                                    conn_block_t *parent, const char *label)
+                                    conn_block_t *parent, const char *label,
+                                    tree_t outer)
 {
    conn_block_t *blk = dalloc(cd, sizeof(conn_block_t));
    blk->label  = dstr(cd, label);
@@ -2524,6 +2600,7 @@ static conn_block_t *build_instance(conn_design_t *cd, tree_t b,
    blk->src    = loc_file(cd, tree_loc(b));
    blk->line   = loc_line(tree_loc(b));
    blk->lang   = CONN_VHDL;
+   blk->label_lang = CONN_VHDL;
 
    conn_inst_t *inst = NULL;
    if (parent != NULL) {
@@ -2534,10 +2611,18 @@ static conn_block_t *build_instance(conn_design_t *cd, tree_t b,
       inst->src    = blk->src;
       inst->line   = blk->line;
       blk->inst    = inst;
+
+      if (outer != NULL) {
+         // Where the wrapper was instantiated
+         inst->src  = loc_file(cd, tree_loc(outer));
+         inst->line = loc_line(tree_loc(outer));
+      }
    }
 
    add_design_block(cd, blk);
    hash_put(cd->tree_blocks, b, blk);
+   if (outer != NULL)
+      hash_put(cd->tree_blocks, outer, blk);
 
    // Declarations are mapped to nets in a table private to this instance
    inst_maps_t *im = xcalloc(sizeof(inst_maps_t));
@@ -2546,6 +2631,8 @@ static conn_block_t *build_instance(conn_design_t *cd, tree_t b,
    hash_put(cd->blkmaps, blk, im);
 
    register_generics(cd, b, im->gen);
+   if (outer != NULL)
+      register_generics(cd, outer, im->gen);
 
    hash_t *saved_net = cd->netmap, *saved_gen = cd->genval;
    cd->netmap = im->net;
@@ -2554,6 +2641,7 @@ static conn_block_t *build_instance(conn_design_t *cd, tree_t b,
    vlog_node_t body = block_vlog_body(b);
    if (body != NULL) {
       blk->lang = CONN_VERILOG;
+      blk->label_lang = CONN_VERILOG;
       blk->interface = !!(vlog_flags(body) & VLOG_F_INTERFACE);
    }
 
@@ -2599,6 +2687,23 @@ static conn_block_t *build_instance(conn_design_t *cd, tree_t b,
    cd->names = bc.names;
 
    build_ports(&bc, b, body);
+
+   if (outer != NULL) {
+      // The wrapper of a Verilog module bound to a component is named by the
+      // VHDL label of the component instance and that of a VHDL entity
+      // instantiated from Verilog by the Verilog label
+      blk->label_lang = blk->lang == CONN_VERILOG ? CONN_VHDL : CONN_VERILOG;
+
+      // The ports of the wrapper are those of the unit inside
+      const int nports = tree_ports(outer);
+      for (int i = 0; i < nports; i++) {
+         tree_t p = tree_port(outer, i);
+         conn_net_t *n = find_net_by_name(&bc, istr(tree_ident(p)));
+         if (n != NULL)
+            map_decl(cd, p, n);
+      }
+   }
+
    scan_decls(&bc, b, "");
 
    if (blk->interface) {
@@ -2712,13 +2817,13 @@ conn_design_t *conn_build(tree_t root)
    A(conn_block_t *) roots = AINIT;
 
    if (kind == T_BLOCK)
-      APUSH(roots, build_instance(cd, root, NULL, block_label(root)));
+      APUSH(roots, build_instance(cd, root, NULL, block_label(root), NULL));
    else {
       const int nstmts = tree_stmts(root);
       for (int i = 0; i < nstmts; i++) {
          tree_t s = tree_stmt(root, i);
          if (tree_kind(s) == T_BLOCK)
-            APUSH(roots, build_instance(cd, s, NULL, block_label(s)));
+            APUSH(roots, build_instance(cd, s, NULL, block_label(s), NULL));
       }
    }
 
