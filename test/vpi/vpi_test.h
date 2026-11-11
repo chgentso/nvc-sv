@@ -138,5 +138,9 @@ void vpi23_startup(void);
 void vpi24_startup(void);
 void vpi25_startup(void);
 void vpi26_startup(void);
+void vpicls1_startup(void);
+void vpicls2_startup(void);
+void vpicls3_startup(void);
+void vpicls4_startup(void);
 
 #endif  // _VPI_TEST_H

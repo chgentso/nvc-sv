@@ -53,6 +53,7 @@ void *mspace_alloc(mspace_t *m, size_t size);
 void *mspace_alloc_array(mspace_t *m, int nelems, size_t size);
 void *mspace_alloc_flex(mspace_t *m, size_t fixed, int nelems, size_t size);
 void *mspace_find(mspace_t *m, void *ptr, size_t *size);
+void *mspace_find_live(mspace_t *m, void *ptr, size_t *size);
 
 void mspace_user_mark(mspace_t *m, void *cookie, const void *ptr, size_t size);
 

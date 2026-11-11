@@ -684,3 +684,25 @@ void *mspace_find(mspace_t *m, void *ptr, size_t *size)
    *size = objlen * LINE_SIZE;
    return m->space + line * LINE_SIZE;
 }
+
+void *mspace_find_live(mspace_t *m, void *ptr, size_t *size)
+{
+   // Like mspace_find but also checks that the block has been allocated
+   // and not freed by a collection, for a pointer of unknown origin.  The
+   // block memory is not read so this is safe for a stale pointer.
+
+   void *start = mspace_find(m, ptr, size);
+   if (start == NULL)
+      return NULL;
+
+   SCOPED_LOCK(m->lock);
+
+   for (free_list_t *it = m->free_list; it != NULL; it = it->next) {
+      if ((char *)start >= it->ptr && (char *)start < it->ptr + it->size) {
+         *size = 0;
+         return NULL;
+      }
+   }
+
+   return start;
+}

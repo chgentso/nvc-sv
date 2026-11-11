@@ -3,6 +3,7 @@ check_PROGRAMS += lib/vpi_test.so
 lib_vpi_test_so_SOURCES = \
 	test/vpi/vpi_test.c \
 	test/vpi/vpi_test.h \
+	test/vpi/vpicls_util.h \
 	test/vpi/vpi1.c \
 	test/vpi/vpi2.c \
 	test/vpi/vpi3.c \
@@ -28,7 +29,11 @@ lib_vpi_test_so_SOURCES = \
 	test/vpi/vpi23.c \
 	test/vpi/vpi24.c \
 	test/vpi/vpi25.c \
-	test/vpi/vpi26.c
+	test/vpi/vpi26.c \
+	test/vpi/vpicls1.c \
+	test/vpi/vpicls2.c \
+	test/vpi/vpicls3.c \
+	test/vpi/vpicls4.c
 
 lib_vpi_test_so_CFLAGS  = $(SHLIB_CFLAGS) -I$(top_srcdir)/src/vpi $(AM_CFLAGS)
 lib_vpi_test_so_LDFLAGS = $(SHLIB_LDFLAGS) $(AM_LDFLAGS)

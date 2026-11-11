@@ -149,6 +149,13 @@
   vpi_nvc_get_export;
   vpi_nvc_get_frames;
   vpi_nvc_get_wake_time;
+  vpi_nvc_object_addr;
+  vpi_nvc_object_at;
+  vpi_nvc_object_members;
+  vpi_nvc_object_valid;
+  vpi_nvc_dynamic_type;
+  vpi_nvc_pin;
+  vpi_nvc_unpin;
   vpi_nvc_process_signals;
   vpi_nvc_set_diag_cb;
   vpi_nvc_set_stmt_cb;

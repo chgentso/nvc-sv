@@ -56,6 +56,97 @@ PLI_INT32 vpi_nvc_get_wake_time(vpiHandle process, p_vpi_time time_p);
 // cycle, which is the one where time has just advanced.
 PLI_INT32 vpi_nvc_get_delta(void);
 
+// SystemVerilog class objects.  The standard model is available through
+// vpi_iterate(vpiVariables, scope): a variable of a class type has type
+// vpiClassVar, vpi_get(vpiObjId, var) is the object number ($oid, 0 for
+// null) and vpi_handle(vpiClassObj, var) is the object (NULL for null) which
+// has vpiVariables for its properties, the base class ones first, and
+// vpi_handle(vpiClassTypespec, ...) for its class (the dynamic class for an
+// object).  The static properties are those of the class typespec.
+// Dynamic arrays, queues and associative arrays are vpiArrayVar with
+// vpiArrayType vpiDynamicArray, vpiQueueArray or vpiAssocArray.  Objects
+// are reclaimed by a collection which happens only while allocating, so a
+// handle found by one call is valid while the simulation is paused, and it
+// is re-read from where it was found on every access.
+
+// What kind of property a member is
+#define vpiNvcMemScalar    1   // Integer, enum or other packed value
+#define vpiNvcMemString    2
+#define vpiNvcMemReal      3
+#define vpiNvcMemHandle    4   // Class handle
+#define vpiNvcMemDynArray  5
+#define vpiNvcMemQueue     6
+#define vpiNvcMemAssoc     7
+#define vpiNvcMemStruct    8   // Unpacked structure
+#define vpiNvcMemEvent     9
+#define vpiNvcMemMailbox   10
+#define vpiNvcMemSemaphore 11
+#define vpiNvcMemOpaque    12  // Cannot be read
+
+// Flags of a member
+#define vpiNvcMemStatic    0x1
+#define vpiNvcMemConst     0x2
+#define vpiNvcMemRand      0x4
+
+typedef struct {
+   const char *name;       // Property name
+   const char *type_name;  // As declared: int, string, base, int[$], int[string]
+   const char *owner;      // The class which declares it
+   PLI_INT32   kind;       // vpiNvcMem*
+   PLI_INT32   size;       // Bits of a vector, characters of a string or
+                           // elements of a container, -1 if not known
+   PLI_INT32   flags;      // vpiNvcMem* flags
+   PLI_INT32   unknown;    // A four-state value has x or z bits
+   PLI_INT64   ival;       // Value of a vector of up to 64 bits (sign
+                           // extended if signed); for a handle the object
+                           // number, 0 for null
+   double      rval;       // Value of a real
+   const char *sval;       // Value of a string, valid during the call
+   PLI_INT64   addr;       // For a handle the address of the object (for
+                           // vpi_nvc_object_at), else 0
+   vpiHandle   handle;     // For a handle, container, structure, mailbox or
+                           // semaphore the variable, to be released by the
+                           // caller, otherwise NULL
+} vpi_nvc_member_t;
+
+typedef void (*vpi_nvc_member_fn_t)(const vpi_nvc_member_t *member,
+                                    void *user_data);
+
+// Reads all the properties of the object a class variable or class object
+// refers to with one call per property, base class first and then the
+// static properties.  Returns the number of properties, or -1 if the handle
+// is not a class variable or object or refers to null or to an object
+// that is not valid.
+PLI_INT32 vpi_nvc_object_members(vpiHandle object, vpi_nvc_member_fn_t fn,
+                                 void *user_data);
+
+// The name of the class of the object (the dynamic class), such as base or
+// pcls#(real,8), or NULL for null.  The string is valid until the handle is
+// released.
+const char *vpi_nvc_dynamic_type(vpiHandle object);
+
+// The address of the object, for diagnostics and for vpi_nvc_object_at.
+PLI_INT64 vpi_nvc_object_addr(vpiHandle object);
+
+// Whether there is a live object of a class of the design at addr, and its
+// number is oid (any number if oid is 0).  No memory of the object is read
+// unless the address is the start of a block that has been allocated and not
+// reclaimed, so it is safe with a stale or invented value.  Frames that the
+// simulator allocates in the same way, such as those of fork, are not
+// objects.
+PLI_INT32 vpi_nvc_object_valid(PLI_INT64 addr, PLI_INT64 oid);
+
+// A class object handle for the object at addr, or NULL if
+// vpi_nvc_object_valid fails.
+vpiHandle vpi_nvc_object_at(PLI_INT64 addr, PLI_INT64 oid);
+
+// Keeps the object alive across the resume of the simulation, like a
+// variable which refers to it, and returns a class object handle for it
+// that stays valid until vpi_nvc_unpin, which also invalidates the handles
+// derived from it.  NULL if the object is not valid.
+vpiHandle vpi_nvc_pin(vpiHandle object);
+void vpi_nvc_unpin(vpiHandle pinned);
+
 // Statement breakpoints.  The code of the design has to be generated with the
 // --debug-stmts option of nvc (at elaboration or when running): it then calls
 // the callback before a statement on a line that has a breakpoint runs.  The

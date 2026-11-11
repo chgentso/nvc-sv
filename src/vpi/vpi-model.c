@@ -44,6 +44,7 @@
 #include "tree.h"
 #include "vlog/vlog-node.h"
 #include "vlog/vlog-number.h"
+#include "vlog/vlog-phase.h"
 #include "vlog/vlog-util.h"
 #include "vpi/vpi-macros.h"
 #include "vpi/vpi-model.h"
@@ -186,6 +187,7 @@ typedef struct {
    PLI_INT32 subtype;
    PLI_INT32 size;
    int64_t   ival;      // Value when there is no node
+   const char *str;     // Value of a string constant
 } c_constant;
 
 DEF_CLASS(constant, vpiConstant, expr.object);
@@ -221,11 +223,15 @@ typedef enum {
    STORE_FSTRING,    // String member of an unpacked structure
    STORE_MARRAY,     // Unpacked array held in memory
    STORE_NONE,
+   STORE_HANDLE,     // Class handle or mailbox held in memory
+   STORE_DARRAY,     // Dynamic array, queue or associative array in memory
 } storage_t;
 
 typedef struct {
    uint32_t offset;
    bool     deref;
+   bool     obj;       // The pointer that is followed is a class object
+   uint32_t esz;       // Follows the data of an array with this element size
 } vpi_step_t;
 
 typedef struct {
@@ -263,6 +269,11 @@ typedef struct {
    c_vpiObject    *right;
    uint32_t        elemsz;   // Elements of storage in each array element
    uint32_t        count;
+   PLI_INT32       dyn;      // vpiDynamicArray, vpiQueueArray or vpiAssocArray
+   vlog_node_t     etype;    // Element type of a dynamic array
+   vlog_node_t     key;      // Index type of an associative array
+   uint32_t        esize;    // Bytes in memory of an element (or record)
+   uint32_t        valoff;   // Offset of the value in an associative record
 } c_regArray;
 
 typedef struct {
@@ -316,6 +327,28 @@ typedef struct {
 DEF_CLASS(typespec, vpiEnumTypespec, object);
 
 typedef struct {
+   c_vpiObject      object;    // vpiClassTypespec
+   vlog_node_t      cls;       // Class, NULL for mailbox and semaphore
+   vlog_node_t      type;      // Data type of a mailbox or semaphore
+   vpiLazyList      statics;   // Static properties
+   const char      *name;
+} c_classTypespec;
+
+DEF_CLASS(classTypespec, vpiClassTypespec, object);
+
+typedef struct {
+   c_vpiObject      object;    // vpiClassObj
+   c_abstractDecl  *var;       // Variable which holds the pointer
+   void            *addr;      // Pointer when the handle was made
+   uint64_t         oid;
+   vlog_node_t      cls;       // Dynamic class
+   vpiLazyList      members;
+   mptr_t           pin;       // Roots the object while it is pinned
+} c_classObj;
+
+DEF_CLASS(classObj, vpiClassObj, object);
+
+typedef struct {
    c_vpiObject object;
    vlog_node_t where;     // Enumeration name
 } c_enumConst;
@@ -366,6 +399,8 @@ typedef struct _vpi_context {
    s_vpi_vecval  *vecbuf;
    size_t         veclen;
    bool           readonly;    // In a read-only synchronisation callback
+   hash_t        *classdesc;   // Layout of each class
+   vpiObjectList  pins;        // Objects kept alive for a debugger
 } vpi_context_t;
 
 static c_vpiObject *build_expr(vlog_node_t v, c_abstractScope *scope);
@@ -391,6 +426,14 @@ static c_abstractDecl *build_mem_array(c_abstractDecl *base, vlog_node_t rnode,
                                        vlog_node_t etype, int dim, bool deref,
                                        uint32_t offset);
 static storage_t vpi_mem_layout(vlog_node_t type, unsigned *size);
+static const char *vpi_obj_name(c_vpiObject *obj);
+static const char *vpi_obj_fullname(c_vpiObject *obj);
+static c_abstractDecl *build_dyn_array(c_abstractDecl *base, vlog_node_t where,
+                                       c_abstractScope *scope,
+                                       vlog_node_t type, PLI_INT32 kind,
+                                       bool deref, uint32_t offset);
+static PLI_INT32 vpi_container_kind(vlog_node_t type);
+static c_regArray *vpi_dyn_array(c_vpiObject *obj);
 
 static vpi_context_t *global_context = NULL;   // TODO: thread local
 
@@ -568,6 +611,7 @@ static bool is_value_type(PLI_INT32 type)
    case vpiPackedArrayVar:
    case vpiNamedEvent:
    case vpiChandleVar:
+   case vpiClassVar:
       return true;
    default:
       return false;
@@ -993,8 +1037,12 @@ static PLI_INT32 vpi_data_type(vlog_node_t dtype)
       case DT_STRING:    return vpiStringVar;
       case DT_EVENT:     return vpiNamedEvent;
       case DT_CHANDLE:   return vpiChandleVar;
+      case DT_MAILBOX:
+      case DT_SEMAPHORE: return vpiClassVar;
       default:           return 0;
       }
+   case V_CLASS_DECL:
+      return vpiClassVar;
    case V_ENUM_DECL:
       return vpiEnumVar;
    case V_STRUCT_DECL:
@@ -1038,6 +1086,8 @@ static storage_t vpi_storage(c_abstractScope *scope, PLI_INT32 type,
    case vpiChandleVar:
    case 0:
       return STORE_NONE;
+   case vpiClassVar:
+      return STORE_HANDLE;
    default:
       if (vlog_kind(dtype) == V_STRUCT_DECL
           && !(vlog_flags(dtype) & VLOG_F_PACKED))
@@ -1073,6 +1123,7 @@ static c_abstractDecl *build_value(vlog_node_t where, c_abstractScope *scope,
    case STORE_STRING:
    case STORE_RECORD:
    case STORE_NONE:
+   case STORE_HANDLE:
       decl->size = 1;
       break;
    default:
@@ -1155,6 +1206,10 @@ static void build_decl(vlog_node_t v, c_abstractScope *scope)
       if (decl != NULL)
          decl->parent = NULL;
    }
+   else if (vlog_kind(v) == V_VAR_DECL
+            && vpi_container_kind(vlog_get_type(v)) != 0)
+      decl = build_dyn_array(NULL, v, scope, vlog_get_type(v),
+                             vpi_container_kind(vlog_get_type(v)), false, 0);
    else
       decl = build_value(v, scope, vlog_get_type(v),
                          vlog_kind(v) == V_NET_DECL);
@@ -2285,6 +2340,7 @@ static c_abstractDecl *build_mem_value(c_abstractDecl *base, vlog_node_t type,
       ? vlog_size(type) : 1;
    e->path    = vpi_path_add(base, deref, offset);
    e->npath   = base->npath + 1;
+   e->mptr    = base->mptr;
 
    return e;
 }
@@ -2310,6 +2366,7 @@ static c_abstractDecl *build_mem_array(c_abstractDecl *base, vlog_node_t rnode,
    arr->decl.storage  = STORE_MARRAY;
    arr->decl.path     = vpi_path_add(base, deref, offset);
    arr->decl.npath    = base->npath + 1;
+   arr->decl.mptr     = base->mptr;
    arr->decl.elems.fn = vpi_lazy_elems;
 
    int64_t left, right;
@@ -2371,6 +2428,8 @@ static void vpi_record_members(c_abstractDecl *base, vpiObjectList *list)
    }
 }
 
+static bool vpi_object_check(void *ptr, uint64_t *oid, vlog_node_t *cls);
+
 static void *vpi_field_ptr(c_abstractDecl *d)
 {
    // The memory which holds this value: the variable in the frame of
@@ -2378,9 +2437,27 @@ static void *vpi_field_ptr(c_abstractDecl *d)
 
    uint8_t *ptr = vpi_get_ptr(d);
    for (unsigned i = 0; ptr != NULL && i < d->npath; i++) {
-      if (d->path[i].deref && (ptr = *(uint8_t **)ptr) == NULL) {
-         vpi_error(vpiError, &(d->object.loc), "structure has no storage");
-         return NULL;
+      if (d->path[i].deref) {
+         if (d->path[i].esz != 0) {
+            // The data of a dynamic array or queue: check the element exists
+            const ffi_uarray_t *u = (const ffi_uarray_t *)ptr;
+            if (u->ptr == NULL || d->path[i].offset / d->path[i].esz
+                >= ffi_array_length(u->dims[0].length)) {
+               vpi_error(vpiError, &(d->object.loc), "array element does "
+                         "not exist");
+               return NULL;
+            }
+         }
+
+         if ((ptr = *(uint8_t **)ptr) == NULL) {
+            vpi_error(vpiError, &(d->object.loc), "structure has no storage");
+            return NULL;
+         }
+
+         if (d->path[i].obj && !vpi_object_check(ptr, NULL, NULL)) {
+            vpi_error(vpiError, &(d->object.loc), "object is not valid");
+            return NULL;
+         }
       }
 
       ptr += d->path[i].offset;
@@ -2395,6 +2472,9 @@ static void vpi_lazy_elems(c_vpiObject *obj)
    assert(decl != NULL);
 
    vpiObjectList *list = &(decl->elems.list);
+
+   if (vpi_dyn_array(obj) != NULL)
+      return;   // The elements are found from memory when asked for
 
    c_regArray *arr = is_regArray(obj);
    if (arr != NULL) {
@@ -2449,9 +2529,1145 @@ static void vpi_lazy_elems(c_vpiObject *obj)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-// Names, units and top-level objects
+// SystemVerilog classes
 
-static const char *vpi_obj_name(c_vpiObject *obj);
+typedef struct {
+   vlog_node_t decl;       // Declaration of the property
+   vlog_node_t type;       // Its data type
+   vlog_node_t owner;      // Class which declares it
+   const char *name;
+   const char *type_name;
+   const char *owner_name;
+   uint32_t    offset;     // In the context of the object
+   PLI_INT32   kind;       // vpiNvcMem*
+   PLI_INT32   flags;
+   ident_t     home;       // Unit of the namespace that holds a static
+   ident_t     slot;       // Variable of a static in the context of the home
+} class_member_t;
+
+typedef struct {
+   vlog_node_t     cls;
+   const char     *name;       // As $typename shows it, without the scope
+   const char     *fullname;   // With the scope
+   unsigned        count;      // Properties of an object, base class first
+   class_member_t *items;
+   unsigned        nstatic;    // Static properties, base class first
+   class_member_t *statics;
+   uint32_t        minsize;    // Size in bytes of an object at least
+} class_desc_t;
+
+typedef enum {
+   KEY_INT,        // Held in 64 bits
+   KEY_STRING,
+   KEY_CLASS,      // Address of an object
+   KEY_OTHER,
+} vpi_key_t;
+
+static PLI_INT32 vpi_container_kind(vlog_node_t type)
+{
+   // The kind of array that a variable of this type is, if it is dynamic
+
+   if (type == NULL || vlog_kind(type) != V_DATA_TYPE)
+      return 0;
+
+   switch (vlog_subkind(type)) {
+   case DT_DYNARRAY: return vpiDynamicArray;
+   case DT_QUEUE:    return vpiQueueArray;
+   case DT_ASSOC:    return vpiAssocArray;
+   default:          return 0;
+   }
+}
+
+static bool vpi_is_builtin_class(vlog_node_t type)
+{
+   return type != NULL && vlog_kind(type) == V_DATA_TYPE
+      && (vlog_subkind(type) == DT_MAILBOX
+          || vlog_subkind(type) == DT_SEMAPHORE);
+}
+
+static c_regArray *vpi_dyn_array(c_vpiObject *obj)
+{
+   c_regArray *arr = is_regArray(obj);
+   return arr != NULL && arr->dyn != 0 ? arr : NULL;
+}
+
+static unsigned vpi_mem_size(vlog_node_t type)
+{
+   // Bytes that a value of this type takes in a context, record or array
+   // in memory, zero if not known
+
+   if (type == NULL)
+      return 0;
+   else if (vlog_kind(type) == V_CLASS_DECL)
+      return sizeof(void *);
+   else if (vlog_kind(type) == V_DATA_TYPE) {
+      switch (vlog_subkind(type)) {
+      case DT_STRING:
+      case DT_DYNARRAY:
+      case DT_QUEUE:
+      case DT_ASSOC:
+         return sizeof(void *) + 2 * sizeof(int64_t);
+      case DT_MAILBOX:
+      case DT_SEMAPHORE:
+      case DT_EVENT:
+      case DT_CHANDLE:
+      case DT_PROCESS:
+      case DT_VIRTUAL:
+         return sizeof(void *);
+      default:
+         break;
+      }
+   }
+
+   unsigned size;
+   vpi_mem_layout(type, &size);
+   return size;
+}
+
+static PLI_INT32 vpi_member_kind(vlog_node_t type, vlog_node_t decl)
+{
+   if (type == NULL || (decl != NULL && (vlog_flags(decl) & VLOG_F_REFVAR)))
+      return vpiNvcMemOpaque;
+   else if (vlog_kind(type) == V_CLASS_DECL)
+      return vpiNvcMemHandle;
+
+   switch (vpi_container_kind(type)) {
+   case vpiDynamicArray: return vpiNvcMemDynArray;
+   case vpiQueueArray:   return vpiNvcMemQueue;
+   case vpiAssocArray:   return vpiNvcMemAssoc;
+   }
+
+   if (vlog_kind(type) == V_DATA_TYPE) {
+      switch (vlog_subkind(type)) {
+      case DT_STRING:    return vpiNvcMemString;
+      case DT_EVENT:     return vpiNvcMemEvent;
+      case DT_MAILBOX:   return vpiNvcMemMailbox;
+      case DT_SEMAPHORE: return vpiNvcMemSemaphore;
+      case DT_CHANDLE:
+      case DT_PROCESS:
+      case DT_VIRTUAL:   return vpiNvcMemOpaque;
+      default:           break;
+      }
+   }
+
+   switch (vpi_data_type(type)) {
+   case vpiRealVar:
+   case vpiShortRealVar:
+      return vpiNvcMemReal;
+   case vpiStructVar:
+   case vpiUnionVar:
+      return vpi_is_packed_type(type) ? vpiNvcMemScalar
+         : vlog_kind(type) == V_STRUCT_DECL ? vpiNvcMemStruct
+         : vpiNvcMemOpaque;
+   case 0:
+      return vpiNvcMemOpaque;
+   default:
+      return vpiNvcMemScalar;
+   }
+}
+
+static void vpi_type_text(vlog_node_t raw, vlog_node_t type, text_buf_t *tb)
+{
+   // The type of a property as it is written, without the scope
+
+   if (raw != NULL && vlog_kind(raw) == V_TYPE_DECL && vlog_has_ident(raw)) {
+      tb_cat(tb, istr(vlog_ident(raw)));
+      return;
+   }
+
+   if (type == NULL) {
+      tb_cat(tb, "?");
+      return;
+   }
+
+   switch (vlog_kind(type)) {
+   case V_CLASS_DECL:
+      vlog_class_typename(type, tb, false);
+      return;
+   case V_ENUM_DECL:
+   case V_STRUCT_DECL:
+   case V_UNION_DECL:
+      if (vlog_has_ident(type))
+         tb_cat(tb, istr(vlog_ident(type)));
+      else
+         tb_cat(tb, vlog_kind(type) == V_ENUM_DECL ? "enum"
+                : vlog_kind(type) == V_STRUCT_DECL ? "struct" : "union");
+      return;
+   case V_DATA_TYPE:
+      break;
+   default:
+      tb_cat(tb, "?");
+      return;
+   }
+
+   switch (vlog_subkind(type)) {
+   case DT_DYNARRAY:
+   case DT_QUEUE:
+   case DT_ASSOC:
+      vpi_type_text(vlog_type(type), vlog_get_type(vlog_type(type)), tb);
+      if (vlog_subkind(type) == DT_QUEUE)
+         tb_cat(tb, "[$]");
+      else if (vlog_subkind(type) == DT_DYNARRAY)
+         tb_cat(tb, "[]");
+      else {
+         tb_append(tb, '[');
+         if (vlog_has_ref(type))
+            vpi_type_text(vlog_ref(type), vlog_get_type(vlog_ref(type)), tb);
+         else
+            tb_append(tb, '*');
+         tb_append(tb, ']');
+      }
+      return;
+   case DT_MAILBOX:
+      tb_cat(tb, "mailbox");
+      return;
+   case DT_SEMAPHORE:
+      tb_cat(tb, "semaphore");
+      return;
+   case DT_STRING:    tb_cat(tb, "string"); return;
+   case DT_EVENT:     tb_cat(tb, "event"); return;
+   case DT_CHANDLE:   tb_cat(tb, "chandle"); return;
+   case DT_PROCESS:   tb_cat(tb, "process"); return;
+   case DT_VIRTUAL:   tb_cat(tb, "virtual interface"); return;
+   case DT_REAL:      tb_cat(tb, "real"); return;
+   case DT_REALTIME:  tb_cat(tb, "realtime"); return;
+   case DT_SHORTREAL: tb_cat(tb, "shortreal"); return;
+   case DT_BYTE:      tb_cat(tb, "byte"); break;
+   case DT_SHORTINT:  tb_cat(tb, "shortint"); break;
+   case DT_INT:       tb_cat(tb, "int"); break;
+   case DT_LONGINT:   tb_cat(tb, "longint"); break;
+   case DT_INTEGER:   tb_cat(tb, "integer"); break;
+   case DT_TIME:      tb_cat(tb, "time"); break;
+   case DT_BIT:       tb_cat(tb, "bit"); break;
+   default:           tb_cat(tb, "logic"); break;
+   }
+
+   switch (vlog_subkind(type)) {
+   case DT_BIT:
+   case DT_LOGIC:
+   case DT_IMPLICIT:
+      if (vlog_size(type) > 1)
+         tb_printf(tb, "[%u:0]", vlog_size(type) - 1);
+      break;
+   default:
+      break;
+   }
+}
+
+static jit_func_t *vpi_class_func(vlog_node_t cls)
+{
+   // The compiled unit of a class, whose table of variables gives the
+   // layout of an object
+
+   if (!vlog_class_known(cls))
+      return NULL;
+
+   jit_t *jit = vpi_get_jit(vpi_context());
+   jit_handle_t handle = jit_lazy_compile(jit, vlog_class_unit(cls));
+   if (handle == JIT_HANDLE_INVALID)
+      return NULL;
+
+   jit_func_t *f = jit_get_func(jit, handle);
+   jit_fill_irbuf(f);
+   return f;
+}
+
+static bool vpi_slot_offset(jit_func_t *f, ident_t name, uint32_t *offset)
+{
+   for (unsigned i = 0; i < f->nvars; i++) {
+      if (f->linktab[i].name == name) {
+         *offset = f->linktab[i].offset;
+         return true;
+      }
+   }
+
+   return false;
+}
+
+static const char *vpi_class_name(vlog_node_t cls, bool qualified)
+{
+   LOCAL_TEXT_BUF tb = tb_new();
+   vlog_class_typename(cls, tb, qualified);
+   return vpi_intern(tb_get(tb));
+}
+
+static void vpi_describe_member(class_member_t *m, vlog_node_t owner,
+                                vlog_node_t d, vlog_node_t type)
+{
+   m->decl       = d;
+   m->type       = type;
+   m->owner      = owner;
+   m->name       = vpi_name_str(istr(vlog_ident(d)), false);
+   m->kind       = vpi_member_kind(type, d);
+   m->owner_name = vpi_class_name(owner, false);
+
+   if (vlog_flags(d) & VLOG_F_STATIC)
+      m->flags |= vpiNvcMemStatic;
+   if (vlog_flags(d) & VLOG_F_CONST)
+      m->flags |= vpiNvcMemConst;
+   if (vlog_flags(d) & (VLOG_F_RAND | VLOG_F_RANDC))
+      m->flags |= vpiNvcMemRand;
+
+   LOCAL_TEXT_BUF tb = tb_new();
+   vpi_type_text(vlog_type(d), type, tb);
+   m->type_name = vpi_intern(tb_get(tb));
+}
+
+static const class_desc_t *vpi_class_desc(vlog_node_t cls)
+{
+   vpi_context_t *c = vpi_context();
+
+   if (c->classdesc == NULL)
+      c->classdesc = hash_new(64);
+
+   class_desc_t *d = hash_get(c->classdesc, cls);
+   if (d != NULL)
+      return d;
+
+   d = pool_calloc(c->pool, sizeof(class_desc_t));
+   d->cls      = cls;
+   d->name     = vpi_class_name(cls, false);
+   d->fullname = vpi_class_name(cls, true);
+
+   hash_put(c->classdesc, cls, d);
+
+   // The base class comes first
+   vlog_node_t chain[64];
+   int nchain = 0;
+   for (vlog_node_t it = cls; it != NULL && nchain < ARRAY_LEN(chain);
+        it = vlog_has_ref(it) && vlog_kind(vlog_ref(it)) == V_CLASS_DECL
+           ? vlog_ref(it) : NULL)
+      chain[nchain++] = it;
+
+   unsigned nprops = 0, nstatics = 0;
+   for (int i = 0; i < nchain; i++) {
+      const int ndecls = vlog_decls(chain[i]);
+      for (int j = 0; j < ndecls; j++) {
+         vlog_node_t m = vlog_decl(chain[i], j);
+         if (vlog_kind(m) != V_VAR_DECL)
+            continue;
+         else if (vlog_flags(m) & VLOG_F_STATIC)
+            nstatics++;
+         else
+            nprops++;
+      }
+   }
+
+   d->items   = pool_calloc(c->pool, MAX(nprops, 1) * sizeof(class_member_t));
+   d->statics = pool_calloc(c->pool, MAX(nstatics, 1) * sizeof(class_member_t));
+
+   jit_func_t *f = vpi_class_func(cls);
+
+   uint32_t vid_off, oid_off;
+   const bool have_ids = f != NULL
+      && vpi_slot_offset(f, ident_new("$vid"), &vid_off)
+      && vpi_slot_offset(f, ident_new("$oid"), &oid_off);
+   d->minsize = have_ids ? MAX(vid_off, oid_off) + sizeof(uint64_t) : 0;
+
+   for (int i = nchain - 1; i >= 0; i--) {
+      const int ndecls = vlog_decls(chain[i]);
+      for (int j = 0; j < ndecls; j++) {
+         vlog_node_t m = vlog_decl(chain[i], j);
+         if (vlog_kind(m) != V_VAR_DECL)
+            continue;
+
+         vlog_node_t type = vlog_get_type(m);
+         if (type == NULL)
+            continue;
+
+         if (vlog_flags(m) & VLOG_F_STATIC) {
+            class_member_t *s = &(d->statics[d->nstatic]);
+            vpi_describe_member(s, chain[i], m, type);
+            s->home = vlog_class_home(chain[i]);
+            s->slot = vlog_class_static(chain[i], vlog_ident(m));
+            d->nstatic++;
+         }
+         else if (f != NULL) {
+            uint32_t offset;
+            if (!vpi_slot_offset(f, vlog_class_slot(chain[i], m), &offset))
+               continue;   // Not part of the layout
+
+            class_member_t *p = &(d->items[d->count]);
+            vpi_describe_member(p, chain[i], m, type);
+            p->offset = offset;
+            d->count++;
+
+            const unsigned size = vpi_mem_size(type);
+            d->minsize = MAX(d->minsize, offset + MAX(size, 8u));
+         }
+      }
+   }
+
+   return d;
+}
+
+static bool vpi_class_ids(uint32_t *vid_off, uint32_t *oid_off)
+{
+   // Where every object keeps its class and number, as given by the layout
+   // of any class (each begins with the layout of its base)
+
+   static jit_t *known;
+   static uint32_t vid, oid;
+
+   jit_t *jit = vpi_get_jit(vpi_context());
+   if (known != jit) {
+      vlog_node_t any = vlog_class_any();
+      jit_func_t *f = any != NULL ? vpi_class_func(any) : NULL;
+      if (f == NULL || !vpi_slot_offset(f, ident_new("$vid"), &vid)
+          || !vpi_slot_offset(f, ident_new("$oid"), &oid))
+         return false;
+      known = jit;
+   }
+
+   *vid_off = vid;
+   *oid_off = oid;
+   return true;
+}
+
+static bool vpi_object_check(void *ptr, uint64_t *oid, vlog_node_t *cls)
+{
+   // Whether this is a live object of a class of the design.  The memory
+   // is not touched until the block it points into is known to be a
+   // block that was allocated and has not been freed.
+
+   uint32_t vid_off, oid_off;
+   if (ptr == NULL || ((uintptr_t)ptr & (sizeof(void *) - 1)) != 0
+       || !vpi_class_ids(&vid_off, &oid_off))
+      return false;
+
+   mspace_t *mspace = jit_get_mspace(vpi_get_jit(vpi_context()));
+
+   size_t size;
+   if (mspace_find_live(mspace, ptr, &size) != ptr
+       || size < MAX(vid_off, oid_off) + sizeof(uint64_t))
+      return false;
+
+   const uint64_t vid = *(const uint64_t *)((const char *)ptr + vid_off);
+   vlog_node_t c = vlog_class_by_id(vid);
+   if (c == NULL || size < vpi_class_desc(c)->minsize)
+      return false;
+
+   if (oid != NULL)
+      *oid = *(const uint64_t *)((const char *)ptr + oid_off);
+   if (cls != NULL)
+      *cls = c;
+
+   return true;
+}
+
+static void vpi_mark_step(c_abstractDecl *e, bool obj, uint32_t esz)
+{
+   // The last step of the path is made when the declaration is built
+
+   assert(e->npath > 0);
+   vpi_step_t *step = (vpi_step_t *)&(e->path[e->npath - 1]);
+   step->obj = obj;
+   step->esz = esz;
+}
+
+static c_abstractDecl *build_dyn_array(c_abstractDecl *base, vlog_node_t where,
+                                       c_abstractScope *scope,
+                                       vlog_node_t type, PLI_INT32 kind,
+                                       bool deref, uint32_t offset)
+{
+   // A dynamic array, queue or associative array in memory: base is the
+   // variable which holds it, or the object or other structure with the
+   // pointer step, or NULL for a variable of the scope
+
+   c_regArray *arr = new_object(sizeof(c_regArray), vpiRegArray);
+   init_abstractDecl(&(arr->decl), where, scope);
+   arr->decl.dtype   = type;
+   arr->decl.storage = STORE_DARRAY;
+   arr->dyn          = kind;
+   arr->etype        = vlog_get_type(vlog_type(type));
+   arr->esize        = vpi_mem_size(arr->etype);
+
+   if (base != NULL) {
+      arr->decl.parent = &(base->object);
+      arr->decl.path   = vpi_path_add(base, deref, offset);
+      arr->decl.npath  = base->npath + 1;
+      arr->decl.mptr   = base->mptr;
+   }
+
+   if (kind == vpiAssocArray) {
+      arr->key = vlog_assoc_key(type);
+
+      unsigned ksize = sizeof(int64_t);
+      if (arr->key != NULL && vlog_kind(arr->key) == V_DATA_TYPE
+          && vlog_subkind(arr->key) == DT_STRING)
+         ksize = sizeof(void *) + 2 * sizeof(int64_t);
+      else if (arr->key != NULL && vlog_kind(arr->key) == V_STRUCT_DECL
+               && !(vlog_flags(arr->key) & VLOG_F_PACKED))
+         ksize = 0;
+
+      if (ksize == 0 || arr->esize == 0)
+         arr->esize = 0;   // The layout of the pairs is not known
+      else {
+         arr->valoff = ALIGN_UP(ksize, 8);
+         arr->esize  = ALIGN_UP(arr->valoff + arr->esize, 8);
+      }
+   }
+
+   return &(arr->decl);
+}
+
+static vpi_key_t vpi_assoc_key_kind(c_regArray *arr)
+{
+   vlog_node_t k = arr->key;
+   if (k == NULL)
+      return KEY_INT;
+   else if (vlog_kind(k) == V_CLASS_DECL)
+      return KEY_CLASS;
+   else if (vlog_kind(k) == V_DATA_TYPE && vlog_subkind(k) == DT_STRING)
+      return KEY_STRING;
+   else if (vlog_kind(k) == V_STRUCT_DECL && !(vlog_flags(k) & VLOG_F_PACKED))
+      return KEY_OTHER;
+   else if (vlog_kind(k) == V_DATA_TYPE || vlog_kind(k) == V_ENUM_DECL
+            || vlog_kind(k) == V_STRUCT_DECL || vlog_kind(k) == V_UNION_DECL)
+      return vlog_size(k) > 64 ? KEY_OTHER : KEY_INT;
+   else
+      return KEY_OTHER;
+}
+
+static c_abstractDecl *vpi_mem_decl(c_abstractDecl *base, vlog_node_t type,
+                                    vlog_node_t where, const char *name,
+                                    bool deref, uint32_t offset)
+{
+   // A member or element at one more step from base
+
+   c_abstractDecl *e = NULL;
+
+   // Everything is found from the variable at the root of the path
+   if (base->mptr == NULL && base->scope != NULL)
+      vpi_get_ptr(base);
+
+   const PLI_INT32 ck = vpi_container_kind(type);
+   if (ck != 0)
+      e = build_dyn_array(base, base->where, base->scope, type, ck, deref,
+                          offset);
+   else if (vlog_kind(type) == V_CLASS_DECL || vpi_is_builtin_class(type))
+      e = build_mem_value(base, type, STORE_HANDLE, deref, offset);
+   else {
+      unsigned size;
+      const storage_t storage = vpi_mem_layout(type, &size);
+      const PLI_INT32 dt = vpi_data_type(type);
+      if (dt == 0 || (storage == STORE_NONE && dt != vpiNamedEvent
+                      && dt != vpiChandleVar))
+         return NULL;
+
+      e = build_mem_value(base, type, storage, deref, offset);
+   }
+
+   if (e == NULL)
+      return NULL;
+
+   e->mptr = base->mptr;
+   e->name = name;
+
+   if (where != NULL) {
+      e->where = where;
+      e->object.loc = *vlog_loc(where);
+   }
+
+   return e;
+}
+
+static c_abstractDecl *vpi_synthetic(vlog_node_t where, vlog_node_t type,
+                                     PLI_INT32 objtype, const char *name,
+                                     void *cell)
+{
+   // A variable that is not in the design: a cell that holds a pointer or
+   // the context of a namespace
+
+   c_abstractDecl *d = new_object(sizeof(c_reg), objtype);
+   init_abstractDecl(d, where, NULL);
+   d->dtype    = type;
+   d->storage  = objtype == vpiClassVar ? STORE_HANDLE : STORE_NONE;
+   d->size     = 1;
+   d->mptr     = cell;
+   d->name     = name;
+   d->fullname = name;
+   return d;
+}
+
+static const char *vpi_member_fullname(const char *prefix, const char *sep,
+                                       const char *name)
+{
+   LOCAL_TEXT_BUF tb = tb_new();
+   tb_printf(tb, "%s%s%s", prefix, sep, name);
+   return vpi_intern(tb_get(tb));
+}
+
+static void *vpi_static_ptr(const class_member_t *m, void **ctx)
+{
+   // The context of the namespace which holds a static property
+
+   if (m->home == NULL)
+      return NULL;
+
+   jit_t *jit = vpi_get_jit(vpi_context());
+   jit_handle_t handle = jit_lazy_compile(jit, m->home);
+   if (handle == JIT_HANDLE_INVALID)
+      return NULL;
+
+   *ctx = jit_link(jit, handle);
+   if (*ctx == NULL)
+      return NULL;
+
+   jit_func_t *f = jit_get_func(jit, handle);
+   jit_fill_irbuf(f);
+
+   uint32_t offset;
+   if (!vpi_slot_offset(f, m->slot, &offset))
+      return NULL;
+
+   return (char *)*ctx + offset;
+}
+
+static c_abstractDecl *vpi_static_decl(const class_member_t *m)
+{
+   // A static property is a variable in the context of its namespace
+
+   void *ctx;
+   void *ptr = vpi_static_ptr(m, &ctx);
+   if (ptr == NULL)
+      return NULL;
+
+   c_abstractDecl *frame =
+      vpi_synthetic(m->decl, NULL, vpiClassVar, "frame", ctx);
+   c_abstractDecl *e = vpi_mem_decl(frame, m->type, m->decl, m->name, false,
+                                    (char *)ptr - (char *)ctx);
+   if (e == NULL)
+      return NULL;
+
+   e->parent   = NULL;
+   e->fullname = vpi_member_fullname(vpi_class_name(m->owner, true), "::",
+                                     m->name);
+   return e;
+}
+
+static void vpi_class_statics(c_vpiObject *obj)
+{
+   c_classTypespec *ts = is_classTypespec(obj);
+   assert(ts != NULL);
+
+   if (ts->cls == NULL)
+      return;
+
+   const class_desc_t *d = vpi_class_desc(ts->cls);
+   for (unsigned i = 0; i < d->nstatic; i++) {
+      c_abstractDecl *e = vpi_static_decl(&(d->statics[i]));
+      if (e != NULL)
+         vpi_list_push(&(ts->statics.list), &(e->object));
+   }
+}
+
+static c_classTypespec *vpi_class_typespec(vlog_node_t cls, vlog_node_t type)
+{
+   c_classTypespec *ts =
+      new_object(sizeof(c_classTypespec), vpiClassTypespec);
+   ts->cls = cls;
+   ts->type = type;
+   ts->statics.fn = vpi_class_statics;
+
+   if (cls != NULL) {
+      ts->object.loc = *vlog_loc(cls);
+      ts->name = vpi_class_desc(cls)->name;
+   }
+   else
+      ts->name = vlog_subkind(type) == DT_MAILBOX ? "mailbox" : "semaphore";
+
+   return ts;
+}
+
+typedef enum {
+   VAR_NULL,       // Holds null
+   VAR_OBJECT,
+   VAR_BAD,        // Holds a pointer which is not a live object
+} var_state_t;
+
+static var_state_t vpi_var_object(c_abstractDecl *var, void **ptr,
+                                  uint64_t *oid, vlog_node_t *cls)
+{
+   // Follow a variable of a class type to the object it refers to
+
+   *ptr = NULL;
+   if (oid != NULL)
+      *oid = 0;
+   if (cls != NULL)
+      *cls = NULL;
+
+   void **slot = vpi_field_ptr(var);
+   if (slot == NULL)
+      return VAR_BAD;
+   else if (*slot == NULL)
+      return VAR_NULL;
+
+   *ptr = *slot;
+
+   if (vpi_is_builtin_class(var->dtype))
+      return VAR_OBJECT;   // Has no class or number
+
+   return vpi_object_check(*ptr, oid, cls) ? VAR_OBJECT : VAR_BAD;
+}
+
+static PLI_INT64 vpi_pointer_id(void *ptr)
+{
+   // A mailbox or semaphore has no number so is known by its line of heap
+   return (PLI_INT64)(((uintptr_t)ptr / 32) & 0x7fffffff);
+}
+
+static void vpi_class_members(c_vpiObject *obj);
+
+static c_classObj *vpi_make_object(c_abstractDecl *var)
+{
+   // The object that a variable refers to, NULL if it is null or the pointer
+   // is not a valid object
+
+   void *ptr;
+   uint64_t oid;
+   vlog_node_t cls;
+   switch (vpi_var_object(var, &ptr, &oid, &cls)) {
+   case VAR_NULL:
+      return NULL;
+   case VAR_BAD:
+      vpi_error(vpiWarning, &(var->object.loc), "%s does not refer to a "
+                "valid object", vpi_obj_fullname(&(var->object)));
+      return NULL;
+   case VAR_OBJECT:
+      break;
+   }
+
+   if (cls == NULL)
+      return NULL;   // A mailbox
+
+   c_classObj *o = new_object(sizeof(c_classObj), vpiClassObj);
+   o->object.loc = var->object.loc;
+   o->var  = var;
+   o->addr = ptr;
+   o->oid  = oid;
+   o->cls  = cls;
+   o->members.fn = vpi_class_members;
+   return o;
+}
+
+static c_abstractDecl *vpi_member_decl(c_classObj *o, const class_member_t *m)
+{
+   // A property of an object is found from the variable that holds it
+
+   c_abstractDecl *e = vpi_mem_decl(o->var, m->type, m->decl, m->name, true,
+                                    m->offset);
+   if (e != NULL)
+      vpi_mark_step(e, true, 0);
+
+   return e;
+}
+
+static void vpi_class_members(c_vpiObject *obj)
+{
+   c_classObj *o = is_classObj(obj);
+   assert(o != NULL);
+
+   const class_desc_t *d = vpi_class_desc(o->cls);
+   for (unsigned i = 0; i < d->count; i++) {
+      c_abstractDecl *e = vpi_member_decl(o, &(d->items[i]));
+      if (e != NULL)
+         vpi_list_push(&(o->members.list), &(e->object));
+   }
+}
+
+static c_abstractDecl *vpi_object_cell(vlog_node_t cls, void *cell,
+                                       const char *name)
+{
+   return vpi_synthetic(cls, cls, vpiClassVar, name, cell);
+}
+
+static c_classObj *vpi_object_at(void *ptr)
+{
+   uint64_t oid;
+   vlog_node_t cls;
+   if (!vpi_object_check(ptr, &oid, &cls))
+      return NULL;
+
+   void **cell = pool_malloc(vpi_context()->pool, sizeof(void *));
+   *cell = ptr;
+
+   LOCAL_TEXT_BUF tb = tb_new();
+   tb_printf(tb, "%s#%"PRIu64, vpi_class_desc(cls)->name, oid);
+
+   c_classObj *o = vpi_make_object(vpi_object_cell(cls, cell,
+                                                   vpi_intern(tb_get(tb))));
+   return o;
+}
+
+// Elements of dynamic arrays
+
+static const ffi_uarray_t *vpi_dyn_uarray(c_regArray *arr)
+{
+   return vpi_field_ptr(&(arr->decl));
+}
+
+static int64_t vpi_dyn_count(c_regArray *arr)
+{
+   const ffi_uarray_t *u = vpi_dyn_uarray(arr);
+   if (u == NULL || u->ptr == NULL)
+      return 0;
+
+   return ffi_array_length(u->dims[0].length);
+}
+
+static const char *vpi_key_text(c_regArray *arr, const uint8_t *key,
+                                int64_t *ival)
+{
+   // The index of an element of an associative array held in memory
+
+   *ival = 0;
+   switch (vpi_assoc_key_kind(arr)) {
+   case KEY_INT:
+      {
+         int64_t v = *(const int64_t *)key;
+         if (arr->key != NULL && vlog_size(arr->key) < 64
+             && vlog_is_signed(arr->key)) {
+            const int sh = 64 - vlog_size(arr->key);
+            v = (int64_t)((uint64_t)v << sh) >> sh;
+         }
+         *ival = v;
+         return NULL;
+      }
+   case KEY_STRING:
+      {
+         const ffi_uarray_t *u = (const ffi_uarray_t *)key;
+         const int64_t len = ffi_array_length(u->dims[0].length);
+         char *text = pool_malloc(vpi_context()->pool, len + 3);
+         text[0] = '"';
+         if (len > 0)
+            memcpy(text + 1, u->ptr, len);
+         text[len + 1] = '"';
+         text[len + 2] = '\0';
+         return text;
+      }
+   case KEY_CLASS:
+      {
+         *ival = *(const int64_t *)key;
+         return NULL;
+      }
+   default:
+      return NULL;
+   }
+}
+
+static c_abstractDecl *vpi_dyn_element(c_regArray *arr, int64_t pos,
+                                       const uint8_t *data)
+{
+   // Element number pos counting from the first in memory: for a queue or
+   // dynamic array its index, for an associative array its place in key order
+
+   if (arr->esize == 0)
+      return NULL;
+
+   const bool assoc = arr->dyn == vpiAssocArray;
+   const uint32_t offset = pos * arr->esize + (assoc ? arr->valoff : 0);
+
+   c_abstractDecl *e = vpi_mem_decl(&(arr->decl), arr->etype, NULL, NULL, true,
+                                    offset);
+   if (e == NULL)
+      return NULL;
+
+   vpi_mark_step(e, false, arr->esize);
+   e->index = pos;
+
+   if (assoc && data != NULL) {
+      int64_t ival;
+      const char *text = vpi_key_text(arr, data + pos * arr->esize, &ival);
+      LOCAL_TEXT_BUF sel = tb_new();
+      if (text != NULL)
+         tb_printf(sel, "[%s]", text);
+      else if (vpi_assoc_key_kind(arr) == KEY_CLASS) {
+         uint64_t oid;
+         vlog_node_t cls;
+         if (vpi_object_check((void *)(uintptr_t)ival, &oid, &cls))
+            tb_printf(sel, "[%s#%"PRIu64"]", vpi_class_desc(cls)->name, oid);
+         else
+            tb_printf(sel, "[invalid]");
+      }
+      else {
+         e->index = ival;
+         return e;
+      }
+
+      LOCAL_TEXT_BUF tb = tb_new();
+      tb_printf(tb, "%s%s", vpi_obj_name(&(arr->decl.object)), tb_get(sel));
+      e->name = vpi_intern(tb_get(tb));
+
+      tb_rewind(tb);
+      tb_printf(tb, "%s%s", vpi_obj_fullname(&(arr->decl.object)), tb_get(sel));
+      e->fullname = vpi_intern(tb_get(tb));
+   }
+
+   return e;
+}
+
+static void vpi_dyn_elements(c_regArray *arr, vpiObjectList *list)
+{
+   const ffi_uarray_t *u = vpi_dyn_uarray(arr);
+   if (u == NULL || u->ptr == NULL)
+      return;
+
+   const int64_t count = ffi_array_length(u->dims[0].length);
+   for (int64_t i = 0; i < count; i++) {
+      c_abstractDecl *e = vpi_dyn_element(arr, i, u->ptr);
+      if (e != NULL)
+         vpi_list_push(list, &(e->object));
+   }
+}
+
+static c_vpiObject *vpi_dyn_select(c_regArray *arr, int64_t index)
+{
+   const ffi_uarray_t *u = vpi_dyn_uarray(arr);
+   if (u == NULL || u->ptr == NULL)
+      return NULL;
+
+   const int64_t count = ffi_array_length(u->dims[0].length);
+
+   if (arr->dyn != vpiAssocArray) {
+      if (index < 0 || index >= count)
+         return NULL;
+
+      c_abstractDecl *e = vpi_dyn_element(arr, index, u->ptr);
+      return e != NULL ? &(e->object) : NULL;
+   }
+
+   // An associative array is found by key in a sorted array
+   if (arr->esize == 0 || vpi_assoc_key_kind(arr) != KEY_INT)
+      return NULL;
+
+   for (int64_t i = 0; i < count; i++) {
+      int64_t ival;
+      vpi_key_text(arr, (const uint8_t *)u->ptr + i * arr->esize, &ival);
+      if (ival == index) {
+         c_abstractDecl *e = vpi_dyn_element(arr, i, u->ptr);
+         return e != NULL ? &(e->object) : NULL;
+      }
+   }
+
+   return NULL;
+}
+
+static c_vpiObject *vpi_dyn_index(c_abstractDecl *e)
+{
+   // The index of an element of an associative array as an expression
+
+   c_regArray *arr = e->parent != NULL ? vpi_dyn_array(e->parent) : NULL;
+   if (arr == NULL)
+      return NULL;
+   else if (arr->dyn != vpiAssocArray) {
+      return &(build_int_constant(e->index)->expr.object);
+   }
+
+   const uint8_t *val = vpi_field_ptr(e);
+   if (val == NULL)
+      return NULL;
+
+   const uint8_t *key = val - arr->valoff;
+   int64_t ival;
+   const char *text = vpi_key_text(arr, key, &ival);
+   if (text != NULL) {
+      c_constant *con = new_object(sizeof(c_constant), vpiConstant);
+      const size_t len = strlen(text) - 2;
+      char *copy = pool_malloc(vpi_context()->pool, len + 1);
+      memcpy(copy, text + 1, len);
+      copy[len] = '\0';
+      con->subtype = vpiStringConst;
+      con->size    = len * 8;
+      con->str     = copy;
+      return &(con->expr.object);
+   }
+
+   switch (vpi_assoc_key_kind(arr)) {
+   case KEY_INT:
+      return &(build_int_constant(ival)->expr.object);
+   case KEY_CLASS:
+      {
+         c_classObj *o = vpi_object_at((void *)(uintptr_t)ival);
+         return o != NULL ? &(o->object) : NULL;
+      }
+   default:
+      return NULL;
+   }
+}
+
+static int64_t vpi_mailbox_count(c_abstractDecl *var)
+{
+   // The messages waiting in a mailbox: the first field of its record is
+   // the queue of them
+
+   void **slot = vpi_field_ptr(var);
+   if (slot == NULL || *slot == NULL)
+      return 0;
+
+   mspace_t *mspace = jit_get_mspace(vpi_get_jit(vpi_context()));
+   size_t size;
+   if (mspace_find_live(mspace, *slot, &size) != *slot
+       || size < sizeof(ffi_uarray_t))
+      return 0;
+
+   const ffi_uarray_t *u = *slot;
+   return u->ptr != NULL ? ffi_array_length(u->dims[0].length) : 0;
+}
+
+static bool vpi_get_class(PLI_INT32 property, c_vpiObject *obj, int64_t *result)
+{
+   // Properties of the class model and of dynamic arrays
+
+   c_regArray *arr = vpi_dyn_array(obj);
+   if (arr != NULL) {
+      switch (property) {
+      case vpiSize:      *result = vpi_dyn_count(arr); return true;
+      case vpiArrayType: *result = arr->dyn; return true;
+      case vpiArray:     *result = 1; return true;
+      default:           return false;
+      }
+   }
+
+   c_classObj *o = is_classObj(obj);
+   if (o != NULL && property == vpiObjId) {
+      void *ptr;
+      uint64_t oid;
+      *result = vpi_var_object(o->var, &ptr, &oid, NULL) == VAR_OBJECT
+         ? oid : 0;
+      return true;
+   }
+
+   if (obj->type != vpiClassVar)
+      return false;
+
+   c_abstractDecl *d = container_of(obj, c_abstractDecl, object);
+   switch (property) {
+   case vpiObjId:
+      {
+         void *ptr;
+         uint64_t oid;
+         switch (vpi_var_object(d, &ptr, &oid, NULL)) {
+         case VAR_OBJECT:
+            *result = vpi_is_builtin_class(d->dtype)
+               ? vpi_pointer_id(ptr) : (int64_t)oid;
+            break;
+         case VAR_BAD:
+            vpi_error(vpiWarning, &(obj->loc), "%s does not refer to a valid "
+                      "object", vpi_obj_fullname(obj));
+            // Fall-through
+         default:
+            *result = 0;
+            break;
+         }
+      }
+      return true;
+
+   case vpiSize:
+      if (!vpi_is_builtin_class(d->dtype))
+         return false;
+      *result = vlog_subkind(d->dtype) == DT_MAILBOX ? vpi_mailbox_count(d) : 0;
+      return true;
+
+   case vpiClassType:
+      if (!vpi_is_builtin_class(d->dtype))
+         return false;
+      *result = vlog_subkind(d->dtype) == DT_MAILBOX
+         ? vpiMailboxClass : vpiSemaphoreClass;
+      return true;
+
+   default:
+      return false;
+   }
+}
+
+static bool vpi_handle_class(PLI_INT32 type, c_vpiObject *obj,
+                             vpiHandle *result)
+{
+   // Relations of the class model
+
+   c_classTypespec *ts = is_classTypespec(obj);
+   if (ts != NULL) {
+      if (type != vpiExtends)
+         return false;
+
+      vlog_node_t base = ts->cls != NULL && vlog_has_ref(ts->cls)
+         && vlog_kind(vlog_ref(ts->cls)) == V_CLASS_DECL
+         ? vlog_ref(ts->cls) : NULL;
+      *result = base != NULL
+         ? user_handle_for(&(vpi_class_typespec(base, NULL)->object)) : NULL;
+      return true;
+   }
+
+   c_classObj *o = is_classObj(obj);
+   if (o != NULL) {
+      switch (type) {
+      case vpiClassTypespec:
+      case vpiTypespec:
+         {
+            void *ptr;
+            vlog_node_t cls;
+            if (vpi_var_object(o->var, &ptr, NULL, &cls) != VAR_OBJECT)
+               return (*result = NULL), true;
+            *result = user_handle_for(&(vpi_class_typespec(cls, NULL)->object));
+         }
+         return true;
+      case vpiParent:
+         *result = user_handle_for(&(o->var->object));
+         return true;
+      default:
+         return false;
+      }
+   }
+
+   c_abstractDecl *d = is_abstractDecl(obj);
+   if (d == NULL)
+      return false;
+
+   if (type == vpiIndex && d->parent != NULL
+       && vpi_dyn_array(d->parent) != NULL) {
+      c_vpiObject *index = vpi_dyn_index(d);
+      *result = index != NULL ? user_handle_for(index) : NULL;
+      return true;
+   }
+
+   if (obj->type == vpiClassVar) {
+      switch (type) {
+      case vpiClassObj:
+         {
+            c_classObj *co = vpi_is_builtin_class(d->dtype)
+               ? NULL : vpi_make_object(d);
+            *result = co != NULL ? user_handle_for(&(co->object)) : NULL;
+         }
+         return true;
+      case vpiClassTypespec:
+      case vpiTypespec:
+         {
+            const bool builtin = vpi_is_builtin_class(d->dtype);
+            c_classTypespec *cts = vpi_class_typespec(
+               builtin ? NULL : d->dtype, builtin ? d->dtype : NULL);
+            *result = user_handle_for(&(cts->object));
+         }
+         return true;
+      default:
+         return false;
+      }
+   }
+
+   c_regArray *darr = vpi_dyn_array(obj);
+   if (darr != NULL && (type == vpiLeftRange || type == vpiRightRange)) {
+      const int64_t count = vpi_dyn_count(darr);
+      c_constant *con = build_int_constant(type == vpiLeftRange ? 0
+                                           : MAX(count, 1) - 1);
+      *result = user_handle_for(&(con->expr.object));
+      return true;
+   }
+
+   return false;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Names, units and top-level objects
 
 static bool vpi_is_member(c_abstractDecl *d)
 {
@@ -2461,7 +3677,8 @@ static bool vpi_is_member(c_abstractDecl *d)
    c_abstractDecl *p = is_valueDecl(d->parent);
    return p != NULL && p->dtype != NULL
       && (vlog_kind(p->dtype) == V_STRUCT_DECL
-          || vlog_kind(p->dtype) == V_UNION_DECL);
+          || vlog_kind(p->dtype) == V_UNION_DECL
+          || vlog_kind(p->dtype) == V_CLASS_DECL);
 }
 
 static const char *vpi_obj_name(c_vpiObject *obj)
@@ -2493,6 +3710,17 @@ static const char *vpi_obj_name(c_vpiObject *obj)
    c_typespec *ts = is_typespec(obj);
    if (ts != NULL)
       return vlog_has_ident(ts->dtype) ? istr(vlog_ident(ts->dtype)) : NULL;
+
+   c_classTypespec *cts = is_classTypespec(obj);
+   if (cts != NULL)
+      return cts->name;
+
+   c_classObj *co = is_classObj(obj);
+   if (co != NULL) {
+      LOCAL_TEXT_BUF tb = tb_new();
+      tb_printf(tb, "%s#%"PRIu64, vpi_class_desc(co->cls)->name, co->oid);
+      return vpi_intern(tb_get(tb));
+   }
 
    c_abstractDecl *d = is_abstractDecl(obj);
    if (d != NULL) {
@@ -2550,6 +3778,14 @@ static const char *vpi_obj_fullname(c_vpiObject *obj)
       }
       return m->fullname;
    }
+
+   c_classTypespec *cts = is_classTypespec(obj);
+   if (cts != NULL)
+      return cts->cls != NULL ? vpi_class_desc(cts->cls)->fullname : cts->name;
+
+   c_classObj *co = is_classObj(obj);
+   if (co != NULL)
+      return vpi_obj_fullname(&(co->var->object));
 
    c_abstractDecl *d = is_abstractDecl(obj);
    if (d != NULL) {
@@ -3193,6 +4429,14 @@ static bool vpi_value_decl(c_abstractDecl *d, p_vpi_value value_p)
 static void vpi_format_constant(c_constant *con, p_vpi_value value_p)
 {
    vpi_context_t *c = vpi_context();
+
+   if (con->str != NULL) {
+      // The index of an element of an associative array
+      value_p->format = vpiStringVal;
+      tb_cat(c->valuestr, con->str);
+      value_p->value.str = (PLI_BYTE8 *)tb_get(c->valuestr);
+      return;
+   }
 
    if (con->expr.where == NULL) {
       uint64_t abits[1] = { con->ival }, bbits[1] = { 0 };
@@ -4719,6 +5963,283 @@ PLI_INT32 vpi_nvc_process_signals(const char *scope_path, const char *name,
    return 0;
 }
 
+////////////////////////////////////////////////////////////////////////////////
+// Class objects for debuggers
+
+static c_classObj *vpi_object_of(vpiHandle handle)
+{
+   // The object that a class variable or class object handle refers to now
+
+   if (handle == NULL)
+      return NULL;
+
+   c_vpiObject *obj = from_handle(handle);
+   if (obj == NULL)
+      return NULL;
+
+   c_classObj *o = is_classObj(obj);
+   if (o != NULL)
+      return vpi_make_object(o->var);
+
+   if (obj->type == vpiClassVar)
+      return vpi_make_object(container_of(obj, c_abstractDecl, object));
+
+   return NULL;
+}
+
+static void vpi_report_member(c_abstractDecl *e, const class_member_t *m,
+                              vpi_nvc_member_fn_t fn, void *user)
+{
+   vpi_context_t *c = vpi_context();
+
+   vpi_nvc_member_t r = {
+      .name      = m->name,
+      .type_name = m->type_name,
+      .owner     = m->owner_name,
+      .kind      = e != NULL ? m->kind : vpiNvcMemOpaque,
+      .size      = -1,
+      .flags     = m->flags,
+   };
+
+   switch (r.kind) {
+   case vpiNvcMemScalar:
+      {
+         r.size = e->size;
+
+         const int nwords = (e->size + 63) / 64;
+         uint64_t mem[32];
+         if (nwords * 2 <= ARRAY_LEN(mem)
+             && vpi_read_bits(e, mem, mem + nwords)) {
+            r.ival = mem[0];
+            for (int i = 0; i < nwords; i++)
+               r.unknown |= mem[nwords + i] != 0;
+
+            if (e->size < 64 && vpi_is_signed(e) && ((mem[0] >> (e->size - 1)) & 1))
+               r.ival |= ~UINT64_C(0) << e->size;
+         }
+      }
+      break;
+
+   case vpiNvcMemReal:
+      {
+         double value;
+         if (vpi_read_real(e, &value))
+            r.rval = value;
+      }
+      break;
+
+   case vpiNvcMemString:
+      {
+         const ffi_uarray_t *u = vpi_field_ptr(e);
+         if (u != NULL) {
+            const int64_t len = ffi_array_length(u->dims[0].length);
+            tb_rewind(c->valuestr);
+            if (len > 0)
+               tb_catn(c->valuestr, u->ptr, len);
+            r.sval = tb_get(c->valuestr);
+            r.size = len;
+         }
+      }
+      break;
+
+   case vpiNvcMemHandle:
+      {
+         void *ptr;
+         uint64_t oid;
+         switch (vpi_var_object(e, &ptr, &oid, NULL)) {
+         case VAR_OBJECT:
+            r.ival = oid;
+            r.addr = (PLI_INT64)(uintptr_t)ptr;
+            break;
+         case VAR_BAD:
+            r.ival = -1;
+            r.addr = (PLI_INT64)(uintptr_t)ptr;
+            break;
+         case VAR_NULL:
+            break;
+         }
+
+         r.handle = user_handle_for(&(e->object));
+      }
+      break;
+
+   case vpiNvcMemDynArray:
+   case vpiNvcMemQueue:
+   case vpiNvcMemAssoc:
+      {
+         c_regArray *arr = vpi_dyn_array(&(e->object));
+         if (arr != NULL)
+            r.size = vpi_dyn_count(arr);
+         r.handle = user_handle_for(&(e->object));
+      }
+      break;
+
+   case vpiNvcMemMailbox:
+      r.size = vpi_mailbox_count(e);
+      r.handle = user_handle_for(&(e->object));
+      break;
+
+   case vpiNvcMemSemaphore:
+   case vpiNvcMemStruct:
+      r.handle = user_handle_for(&(e->object));
+      break;
+
+   default:
+      break;
+   }
+
+   (*fn)(&r, user);
+}
+
+DLLEXPORT
+PLI_INT32 vpi_nvc_object_members(vpiHandle object, vpi_nvc_member_fn_t fn,
+                                 void *user_data)
+{
+   vpi_clear_error();
+
+   c_classObj *o = vpi_object_of(object);
+   if (o == NULL)
+      return -1;
+
+   const class_desc_t *d = vpi_class_desc(o->cls);
+
+   int count = 0;
+   for (unsigned i = 0; i < d->count; i++, count++) {
+      const class_member_t *m = &(d->items[i]);
+      vpi_report_member(vpi_member_decl(o, m), m, fn, user_data);
+   }
+
+   for (unsigned i = 0; i < d->nstatic; i++, count++) {
+      const class_member_t *m = &(d->statics[i]);
+      vpi_report_member(vpi_static_decl(m), m, fn, user_data);
+   }
+
+   return count;
+}
+
+DLLEXPORT
+const char *vpi_nvc_dynamic_type(vpiHandle object)
+{
+   vpi_clear_error();
+
+   if (object == NULL)
+      return NULL;
+
+   c_vpiObject *obj = from_handle(object);
+   if (obj == NULL)
+      return NULL;
+
+   c_abstractDecl *var = NULL;
+   c_classObj *co = is_classObj(obj);
+   if (co != NULL)
+      var = co->var;
+   else if (obj->type == vpiClassVar)
+      var = container_of(obj, c_abstractDecl, object);
+   else
+      return NULL;
+
+   void *ptr;
+   vlog_node_t cls;
+   if (vpi_var_object(var, &ptr, NULL, &cls) != VAR_OBJECT)
+      return NULL;
+   else if (cls == NULL)
+      return vlog_subkind(var->dtype) == DT_MAILBOX ? "mailbox" : "semaphore";
+
+   return vpi_class_desc(cls)->name;
+}
+
+DLLEXPORT
+PLI_INT64 vpi_nvc_object_addr(vpiHandle object)
+{
+   vpi_clear_error();
+
+   c_classObj *o = vpi_object_of(object);
+   return o != NULL ? (PLI_INT64)(uintptr_t)o->addr : 0;
+}
+
+DLLEXPORT
+PLI_INT32 vpi_nvc_object_valid(PLI_INT64 addr, PLI_INT64 oid)
+{
+   vpi_clear_error();
+
+   uint64_t found;
+   if (!vpi_object_check((void *)(uintptr_t)addr, &found, NULL))
+      return 0;
+
+   return oid == 0 || (uint64_t)oid == found;
+}
+
+DLLEXPORT
+vpiHandle vpi_nvc_object_at(PLI_INT64 addr, PLI_INT64 oid)
+{
+   vpi_clear_error();
+
+   if (!vpi_nvc_object_valid(addr, oid))
+      return NULL;
+
+   c_classObj *o = vpi_object_at((void *)(uintptr_t)addr);
+   return o != NULL ? user_handle_for(&(o->object)) : NULL;
+}
+
+DLLEXPORT
+vpiHandle vpi_nvc_pin(vpiHandle object)
+{
+   vpi_clear_error();
+
+   c_classObj *o = vpi_object_of(object);
+   if (o == NULL)
+      return NULL;
+
+   vpi_context_t *c = vpi_context();
+   mspace_t *mspace = jit_get_mspace(vpi_get_jit(c));
+
+   // The pointer in the table of roots keeps the object alive
+   mptr_t pin = mptr_new(mspace, "vpi pin");
+   *mptr_get(pin) = o->addr;
+
+   c_classObj *p = vpi_make_object(
+      vpi_object_cell(o->cls, mptr_get(pin), vpi_obj_name(&(o->object))));
+   if (p == NULL) {
+      mptr_free(mspace, &pin);
+      return NULL;
+   }
+
+   p->pin = pin;
+   vpi_list_push(&(c->pins), &(p->object));
+
+   return user_handle_for(&(p->object));
+}
+
+DLLEXPORT
+void vpi_nvc_unpin(vpiHandle pinned)
+{
+   vpi_clear_error();
+
+   c_vpiObject *obj = pinned != NULL ? from_handle(pinned) : NULL;
+   c_classObj *o = obj != NULL ? is_classObj(obj) : NULL;
+   if (o == NULL || o->pin == NULL) {
+      vpi_error(vpiError, NULL, "handle is not a pinned object");
+      return;
+   }
+
+   vpi_context_t *c = vpi_context();
+   mspace_t *mspace = jit_get_mspace(vpi_get_jit(c));
+
+   // The handles derived from it now see a null variable
+   void **cell = pool_calloc(c->pool, sizeof(void *));
+   o->var->mptr = cell;
+
+   *mptr_get(o->pin) = NULL;
+   mptr_free(mspace, &(o->pin));
+
+   for (int i = 0; i < c->pins.count; i++) {
+      if (c->pins.items[i] == &(o->object)) {
+         c->pins.items[i] = c->pins.items[--(c->pins.count)];
+         break;
+      }
+   }
+}
+
 DLLEXPORT
 vpiHandle vpi_register_cb(p_cb_data cb_data_p)
 {
@@ -4924,6 +6445,10 @@ vpiHandle vpi_handle(PLI_INT32 type, vpiHandle refHandle)
    if (obj == NULL)
       return NULL;
 
+   vpiHandle class_result;
+   if (vpi_handle_class(type, obj, &class_result))
+      return class_result;
+
    switch (type) {
    case vpiLeftRange:
    case vpiRightRange:
@@ -5053,6 +6578,10 @@ static c_vpiObject *vpi_select_index(c_vpiObject *obj, int64_t index)
    c_port *p = is_port(obj);
    if (p != NULL && p->low != NULL)
       obj = p->low;
+
+   c_regArray *darr = vpi_dyn_array(obj);
+   if (darr != NULL)
+      return vpi_dyn_select(darr, index);
 
    c_abstractDecl *d = is_abstractDecl(obj);
    if (d == NULL || d->object.type == vpiParameter)
@@ -5253,8 +6782,8 @@ static bool vpi_type_matches(PLI_INT32 rel, c_vpiObject *obj)
 {
    switch (rel) {
    case vpiVariables:
-      return is_valueDecl(obj) != NULL && !is_valueDecl(obj)->is_net
-         && obj->type != vpiNamedEvent;
+      return (is_valueDecl(obj) != NULL && !is_valueDecl(obj)->is_net
+              && obj->type != vpiNamedEvent) || vpi_dyn_array(obj) != NULL;
    default:
       return obj->type == rel;
    }
@@ -5276,6 +6805,33 @@ static bool init_iterator(c_iterator *it, PLI_INT32 type, c_vpiObject *obj)
    else if (is_tfCall(obj) != NULL) {
       if (type == vpiArgument)
          list = &(is_tfCall(obj)->args);
+   }
+   else if (is_classObj(obj) != NULL) {
+      c_classObj *o = is_classObj(obj);
+      vpiObjectList *members = expand_lazy_list(obj, &(o->members));
+      for (int i = 0; i < members->count; i++) {
+         c_vpiObject *m = members->items[i];
+         const bool event = m->type == vpiNamedEvent;
+         if ((type == vpiNamedEvent && event)
+             || (type == vpiVariables && !event)
+             || (type == vpiRegArray && vpi_dyn_array(m) != NULL))
+            vpi_list_push(&filtered, m);
+      }
+   }
+   else if (is_classTypespec(obj) != NULL) {
+      c_classTypespec *ts = is_classTypespec(obj);
+      if (type == vpiVariables || type == vpiNamedEvent
+          || type == vpiRegArray) {
+         vpiObjectList *statics = expand_lazy_list(obj, &(ts->statics));
+         for (int i = 0; i < statics->count; i++) {
+            c_vpiObject *m = statics->items[i];
+            const bool event = m->type == vpiNamedEvent;
+            if ((type == vpiNamedEvent && event)
+                || (type == vpiVariables && !event)
+                || (type == vpiRegArray && vpi_dyn_array(m) != NULL))
+               vpi_list_push(&filtered, m);
+         }
+      }
    }
    else if (is_typespec(obj) != NULL) {
       if (type == vpiEnumConst) {
@@ -5388,6 +6944,12 @@ static bool init_iterator(c_iterator *it, PLI_INT32 type, c_vpiObject *obj)
          if (type == vpiInternalScope || e->type == type)
             vpi_list_push(&filtered, e);
       }
+   }
+   else if (vpi_dyn_array(obj) != NULL) {
+      c_regArray *darr = vpi_dyn_array(obj);
+      if (type == vpiVarSelect || type == vpiElement || type == vpiMemoryWord
+          || type == vpiReg || type == vpiRegArray)
+         vpi_dyn_elements(darr, &filtered);
    }
    else if (is_abstractDecl(obj) != NULL && obj->type != vpiParameter) {
       c_abstractDecl *d = is_abstractDecl(obj);
@@ -5536,12 +7098,15 @@ static PLI_INT32 vpi_get_decl(PLI_INT32 property, c_abstractDecl *d)
          return vpi_get_scope(property, d->scope);
       break;
    case vpiSize:
-      if (arr != NULL)
+      if (arr != NULL && arr->dyn != 0)
+         return vpi_dyn_count(arr);
+      else if (arr != NULL)
          return arr->count;
       else if (d->storage == STORE_REAL || d->storage == STORE_PREAL)
          return d->object.type == vpiShortRealVar ? 32 : 64;
-      else if (d->storage == STORE_STRING) {
-         const ffi_uarray_t *u = vpi_get_ptr(d);
+      else if (d->storage == STORE_STRING || d->storage == STORE_FSTRING) {
+         const ffi_uarray_t *u = d->storage == STORE_FSTRING
+            ? vpi_field_ptr(d) : vpi_get_ptr(d);
          return u != NULL ? ffi_array_length(u->dims[0].length) : 0;
       }
       else
@@ -5562,7 +7127,8 @@ static PLI_INT32 vpi_get_decl(PLI_INT32 property, c_abstractDecl *d)
    case vpiArray:
       return arr != NULL;
    case vpiArrayType:
-      return arr != NULL ? vpiStaticArray : vpiUndefined;
+      return arr == NULL ? vpiUndefined : arr->dyn != 0 ? arr->dyn
+         : vpiStaticArray;
    case vpiPacked:
       return d->dtype != NULL && arr == NULL && vpi_is_packed_type(d->dtype);
    case vpiNetType:
@@ -5663,6 +7229,10 @@ PLI_INT32 vpi_get(PLI_INT32 property, vpiHandle object)
       return obj->type;
 
    PLI_INT32 result = vpiUndefined - 1;
+
+   int64_t cvalue;
+   if (vpi_get_class(property, obj, &cvalue))
+      return (PLI_INT32)cvalue;
 
    c_constant *con = obj->type == vpiConstant ? is_constantOrParam(obj) : NULL;
    if (con != NULL) {
@@ -5818,6 +7388,13 @@ PLI_INT32 vpi_get(PLI_INT32 property, vpiHandle object)
 DLLEXPORT
 PLI_INT64 vpi_get64(PLI_INT32 property, vpiHandle object)
 {
+   if (object != NULL && property == vpiObjId) {
+      c_vpiObject *obj = from_handle(object);
+      int64_t cvalue;
+      if (obj != NULL && vpi_get_class(property, obj, &cvalue))
+         return cvalue;
+   }
+
    return vpi_get(property, object);
 }
 
@@ -6406,6 +7983,8 @@ void vpi_context_free(vpi_context_t *c)
    ACLEAR(c->syscalls);
    ACLEAR(c->systasks);
    ACLEAR(c->recycle);
+   if (c->classdesc != NULL)
+      hash_free(c->classdesc);
    ACLEAR(c->pending);
 
 #ifdef DEBUG

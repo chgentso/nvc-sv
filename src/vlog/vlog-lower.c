@@ -26200,6 +26200,138 @@ static void vlog_defer_class(mir_context_t *mc, vlog_node_t c, ident_t parent)
    }
 }
 
+vlog_node_t vlog_class_by_id(uint64_t vid)
+{
+   // The class with this run-time identifier, if an object of it can exist
+
+   static hash_t *by_id = NULL;
+   static unsigned known = 0;
+
+   if (sv_classes == NULL)
+      return NULL;
+
+   if (by_id == NULL || known != hash_members(sv_classes)) {
+      if (by_id != NULL)
+         hash_free(by_id);
+      by_id = hash_new(hash_members(sv_classes) * 2 + 16);
+
+      const void *key;
+      void *value;
+      for (hash_iter_t it = HASH_BEGIN;
+           hash_iter(sv_classes, &it, &key, &value); ) {
+         vlog_node_t c = value;
+         const uint32_t id = vlog_class_id(c);
+         if (hash_get(by_id, (void *)(uintptr_t)id) == NULL)
+            hash_put(by_id, (void *)(uintptr_t)id, c);
+      }
+
+      known = hash_members(sv_classes);
+   }
+
+   if (vid > UINT32_MAX)
+      return NULL;
+
+   return hash_get(by_id, (void *)(uintptr_t)vid);
+}
+
+bool vlog_class_known(vlog_node_t c)
+{
+   // Whether the unit of an object of this class exists
+   return sv_classes != NULL && hash_get(sv_classes, vlog_subr_name(c)) != NULL;
+}
+
+vlog_node_t vlog_class_any(void)
+{
+   // Some class of the design, for finding what all objects have in common
+
+   if (sv_classes == NULL)
+      return NULL;
+
+   const void *key;
+   void *value;
+   hash_iter_t it = HASH_BEGIN;
+   if (hash_iter(sv_classes, &it, &key, &value))
+      return value;
+
+   return NULL;
+}
+
+ident_t vlog_class_unit(vlog_node_t c)
+{
+   // Name of the unit whose context is an object of this class
+
+   return vlog_subr_name(c);
+}
+
+ident_t vlog_class_slot(vlog_node_t owner, vlog_node_t decl)
+{
+   // Name of the variable that holds a property in the context of the
+   // class unit
+
+   return vlog_prop_name_in(owner, decl);
+}
+
+ident_t vlog_class_static(vlog_node_t c, ident_t name)
+{
+   // Name of the variable that holds a static property in the context of
+   // the scope that declares the class
+   return vlog_static_name(c, name);
+}
+
+ident_t vlog_class_home(vlog_node_t c)
+{
+   // The namespace unit (package, compilation unit or specialisation scope)
+   // whose context holds the static properties of a class
+
+   if (!vlog_has_ident2(c))
+      return NULL;
+
+   const char *full = istr(vlog_ident2(c));
+   size_t len = strlen(full);
+   for (;;) {
+      ident_t name = ident_new_n(full, len);
+      if (vlog_find_scope(name) != NULL)
+         return name;
+
+      while (len > 0 && full[len - 1] != '.')
+         len--;
+      if (len == 0)
+         return NULL;
+      len--;   // Remove the dot
+   }
+}
+
+bool vlog_class_typename(vlog_node_t c, text_buf_t *tb, bool qualified)
+{
+   // The name of a class as $typename gives it, without "class " and
+   // without the scope unless qualified
+
+   LOCAL_TEXT_BUF tmp = tb_new();
+   vlog_typename_class(c, tmp, c);
+
+   const char *text = tb_get(tmp);
+   if (strncmp(text, "class ", 6) == 0)
+      text += 6;
+
+   if (qualified) {
+      tb_cat(tb, text);
+      return true;
+   }
+
+   const char *args = strstr(text, "#(");
+   const char *end = args != NULL ? args : text + strlen(text);
+   const char *start = text;
+   for (const char *p = text; p + 1 < end; p++) {
+      if (p[0] == ':' && p[1] == ':')
+         start = p + 2;
+      else if (p[0] == '.')
+         start = p + 1;
+   }
+
+   tb_cat(tb, start);
+   return true;
+}
+
 static vlog_node_t vlog_find_scope(ident_t name)
 {
    // Find a namespace or package by name

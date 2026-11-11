@@ -73,6 +73,9 @@ const char *vpi_type_str(PLI_INT32 type)
    case vpiByteVar: return "vpiByteVar";
    case vpiStringVar: return "vpiStringVar";
    case vpiEnumVar: return "vpiEnumVar";
+   case vpiClassVar: return "vpiClassVar";
+   case vpiClassObj: return "vpiClassObj";
+   case vpiClassTypespec: return "vpiClassTypespec";
    case vpiEnumTypespec: return "vpiEnumTypespec";
    case vpiEnumConst: return "vpiEnumConst";
    case vpiStructVar: return "vpiStructVar";

@@ -38,6 +38,10 @@ static const vpi_test_t tests[] = {
    { "vpi24", vpi24_startup },
    { "vpi25", vpi25_startup },
    { "vpi26", vpi26_startup },
+   { "vpicls1", vpicls1_startup },
+   { "vpicls2", vpicls2_startup },
+   { "vpicls3", vpicls3_startup },
+   { "vpicls4", vpicls4_startup },
    { NULL,    NULL },
 };
 

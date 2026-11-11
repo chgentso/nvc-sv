@@ -2559,6 +2559,10 @@ vpi23           mixed,2008,vpi
 vpi24           verilog,vpi,$NVC_DEBUG_STMTS=1
 vpi25           verilog,vpi,$NVC_DEBUG_STMTS=1
 vpi26           verilog,vpi,$NVC_DEBUG_STMTS=1
+vpicls1         verilog,vpi
+vpicls2         verilog,vpi
+vpicls3         verilog,vpi,H=4m
+vpicls4         verilog,vpi
 svevtport1 verilog
 svlrmmisc1 verilog
 svprogparam1 verilog

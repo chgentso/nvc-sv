@@ -50,4 +50,18 @@ bool vlog_bind_has_hier_ref(vlog_node_t mod);
 void vlog_resolve_method(vlog_node_t call);
 void vlog_set_dpi_stubs(const char *path);
 
+// The classes of the design, for debuggers: the class that an object with
+// this $vid belongs to, the name of the unit that is the context of its
+// objects, the name of the variable in that context that holds a property,
+// the same for a static property in the context of the namespace unit given
+// by vlog_class_home, and the name of the class as $typename shows it
+vlog_node_t vlog_class_by_id(uint64_t vid);
+bool vlog_class_known(vlog_node_t c);
+vlog_node_t vlog_class_any(void);
+ident_t vlog_class_unit(vlog_node_t c);
+ident_t vlog_class_slot(vlog_node_t owner, vlog_node_t decl);
+ident_t vlog_class_static(vlog_node_t c, ident_t name);
+ident_t vlog_class_home(vlog_node_t c);
+bool vlog_class_typename(vlog_node_t c, text_buf_t *tb, bool qualified);
+
 #endif  // _VLOG_PHASE_H
