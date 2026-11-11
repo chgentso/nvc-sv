@@ -6448,8 +6448,16 @@ static bool at_argless_call(vlog_node_t scope)
 
    if (d == NULL || vlog_kind(d) != V_FUNC_DECL || d == current_func
        || (vlog_flags(d) & (VLOG_F_LET)) != 0
-       || vlog_ports(d) > 0 || !vlog_has_type(d))
+       || !vlog_has_type(d))
       return false;
+
+   // Every argument must have a default value (13.5.3)
+   const int nports = vlog_ports(d);
+   for (int i = 0; i < nports; i++) {
+      vlog_node_t p = vlog_port(d, i);
+      if (!vlog_has_value(p))
+         return false;
+   }
 
    return peek_nth(2) != tDOT && peek_nth(2) != tLSQUARE;
 }

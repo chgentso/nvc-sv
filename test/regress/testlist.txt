@@ -2619,3 +2619,4 @@ svforkelem1     verilog
 svoutvarnet1    verilog
 svvifstruct1    verilog
 svrandreduce1   verilog
+svfuncdefarg1   verilog
