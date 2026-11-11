@@ -3702,7 +3702,8 @@ static void p_list_of_arguments(vlog_node_t call)
                && vlog_params(call) >= assert_control_list(call)) {
          // The assertion or scope to control is a hierarchical name which
          // is not evaluated: it is kept as a string, and a name which is
-         // not a simple path as a string which matches nothing
+         // not a simple path (names with constant selects of generate
+         // blocks are simple) as a string which matches nothing
          LOCAL_TEXT_BUF path = tb_new();
          bool simple = true, expect_id = true;
          int depth = 0;
@@ -3718,6 +3719,14 @@ static void p_list_of_arguments(vlog_node_t call)
             else if (tok == tDOT && !expect_id) {
                tb_append(path, '.');
                expect_id = true;
+            }
+            else if (tok == tLSQUARE && !expect_id && depth == 0
+                     && peek_nth(2) == tUNSNUM && peek_nth(3) == tRSQUARE) {
+               // A selected generate block
+               consume(tLSQUARE);
+               tb_printf(path, "[%"PRIu64"]", p_unsigned_integer());
+               consume(tRSQUARE);
+               continue;
             }
             else
                simple = false;
