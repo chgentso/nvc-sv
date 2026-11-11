@@ -210,6 +210,7 @@ static mir_value_t vlog_inside_match(vlog_gen_t *g, vlog_node_t item,
                                      mir_value_t value, mir_type_t t_vec);
 static void vlog_lower_randcase(vlog_gen_t *g, vlog_node_t v, gen_stack_t *gs);
 static void vlog_lower_capture(mir_unit_t *mu, object_t *obj);
+static bool vlog_is_class_handle(vlog_node_t v);
 static void vlog_lower_fork_process(mir_unit_t *mu, object_t *obj);
 static mir_value_t vlog_lower_decl_ptr(vlog_gen_t *g, vlog_node_t decl);
 static mir_value_t vlog_crv_guard_null(vlog_gen_t *g, mir_value_t base,
@@ -19150,8 +19151,32 @@ static void vlog_fork_written_cb(vlog_node_t v, void *context)
       return;
    }
 
+   // An element, slice or field of a variable is an assignment to it, but
+   // a write through a class handle does not change the handle itself
+   for (;;) {
+      const vlog_kind_t tk = vlog_kind(target);
+      if (tk == V_BIT_SELECT || tk == V_PART_SELECT)
+         target = vlog_value(target);
+      else if (tk == V_MEMBER_REF && !vlog_is_class_handle(vlog_value(target)))
+         target = vlog_value(target);
+      else
+         break;
+   }
+
    if (vlog_kind(target) == V_REF && vlog_has_ref(target))
       hash_put(set, vlog_ref(target), vlog_ref(target));
+}
+
+static void vlog_fork_siblings_cb(vlog_node_t v, void *context)
+{
+   // Variables assigned by the processes of any fork in the subroutine
+
+   if (vlog_kind(v) != V_FORK)
+      return;
+
+   const int nstmts = vlog_stmts(v);
+   for (int i = 0; i < nstmts; i++)
+      vlog_visit(vlog_stmt(v, i), vlog_fork_written_cb, context);
 }
 
 typedef struct {
@@ -19267,6 +19292,7 @@ static void vlog_lower_fork(vlog_gen_t *g, vlog_node_t v, gen_stack_t *gs)
    if (kind == V_FORK_JOIN_NONE && g->subr != NULL) {
       fork_after_t after = { .set = all_written, .loc = vlog_loc(v) };
       vlog_visit(g->subr, vlog_fork_after_cb, &after);
+      vlog_visit(g->subr, vlog_fork_siblings_cb, all_written);
    }
 
    for (int i = 0; i < nstmts; i++) {
