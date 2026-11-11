@@ -4000,7 +4000,15 @@ static void irgen_probe_frame(jit_irgen_t *g, frame_layout_t *l)
       if (v->carrier == FRAME_MEM) {
          // The address of the variable
          mir_value_t var = mir_get_var(g->mu, v->index);
-         j_send(g, v->first, irgen_get_slot(g, var, 0));
+         jit_value_t addr = irgen_get_value(g, var);
+         if (jit_value_is_addr(addr)) {
+            // Held in the context struct: take the address
+            jit_value_t tmp = irgen_alloc_temp(g);
+            j_lea(g, tmp, addr);
+            addr = tmp;
+         }
+         // else a stack variable: the register holds its address
+         j_send(g, v->first, addr);
       }
       else {
          mir_value_t p = mir_get_param(g->mu, v->index);
