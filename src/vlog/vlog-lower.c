@@ -19223,6 +19223,7 @@ typedef struct {
    bool         shared;
    vlog_node_t *decls;
    bool        *by_ref;
+   bool        *is_sigref;   // The variable holds the signal of the actual
 } fork_caps_t;
 
 static void vlog_fork_written_cb(vlog_node_t v, void *context)
@@ -19437,7 +19438,11 @@ static void vlog_lower_fork(vlog_gen_t *g, vlog_node_t v, gen_stack_t *gs)
                                             sizeof(vlog_node_t));
                caps->by_ref = xrealloc_array(caps->by_ref, caps->capacity,
                                              sizeof(bool));
+               caps->is_sigref = xrealloc_array(caps->is_sigref,
+                                                caps->capacity, sizeof(bool));
             }
+            caps->is_sigref[caps->count] =
+               mir_points_to(g->mu, var, MIR_TYPE_SIGNAL);
             caps->by_ref[caps->count] = caps->shared
                || ((hash_get(written, d) != NULL
                     || hash_get(all_written, d) != NULL)
@@ -19491,7 +19496,14 @@ static void vlog_lower_fork(vlog_gen_t *g, vlog_node_t v, gen_stack_t *gs)
 
          ident_t field = ident_sprintf("%s$%d", istr(vlog_ident(d)), j);
 
-         if (caps->by_ref[j]) {
+         if (caps->is_sigref[j]) {
+            // The signal of a task argument is shared by the process
+            mir_value_t sig = mir_build_load(g->mu, var);
+            mir_value_t link = mir_build_link_var(g->mu, frame, field,
+                                                  mir_get_type(g->mu, sig));
+            mir_build_store(g->mu, link, sig);
+         }
+         else if (caps->by_ref[j]) {
             mir_value_t link = mir_build_link_var(
                g->mu, frame, field, mir_pointer_type(g->mu, ti->type));
             mir_build_store(g->mu, link,
@@ -19554,7 +19566,8 @@ static void vlog_lower_capture(mir_unit_t *mu, object_t *obj)
    for (int j = 0; j < caps->count; j++) {
       vlog_node_t d = caps->decls[j];
       const type_info_t *ti = vlog_type_info(&g, vlog_type(d));
-      mir_type_t type = caps->by_ref[j] ? mir_pointer_type(mu, ti->type) : ti->type;
+      mir_type_t type = caps->is_sigref[j] ? ti->signal
+         : caps->by_ref[j] ? mir_pointer_type(mu, ti->type) : ti->type;
       mir_value_t var =
          mir_add_var(mu, type, ti->stamp,
                      ident_sprintf("%s$%d", istr(vlog_ident(d)), j), 0);
