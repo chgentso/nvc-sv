@@ -2639,3 +2639,4 @@ wrapnames4      wave,mixed,2008
 svshortcirc1    verilog
 svdisabletask2  verilog
 svforkref1      verilog
+svrandenum2     verilog

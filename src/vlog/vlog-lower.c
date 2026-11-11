@@ -25373,6 +25373,19 @@ static mir_value_t vlog_lower_std_randomize(vlog_gen_t *g, vlog_node_t v)
                               vlog_crv_flags(g, chunk, ti->size <= 64
                                              && mir_get_signed(g->mu, ti->type)),
                               vlog_crv_int(g, 1));
+
+         // A variable of an enumerated type only takes the values of its names
+         vlog_node_t dtype = vlog_get_type(vlog_type(decl));
+         if (bit == 0 && ti->size <= 64 && dtype != NULL
+             && vlog_kind(dtype) == V_ENUM_DECL) {
+            const int nnames = vlog_decls(dtype);
+            for (int j = 0; j < nnames; j++) {
+               vlog_node_t en = vlog_decl(dtype, j);
+               CRV3(g, CRV_OP_VAR_DOMAIN, ctx, vars[nvars - 1],
+                    vlog_crv_to_offset(
+                       g, vlog_lower_rvalue(g, vlog_value(en))));
+            }
+         }
       }
    }
    firstvar[nparams] = nvars;
