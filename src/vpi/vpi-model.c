@@ -4278,6 +4278,26 @@ static void conn_space_path(text_buf_t *tb, const char *dotted, bool verilog)
    }
 }
 
+static void conn_block_path(text_buf_t *tb, const conn_block_t *b)
+{
+   // The path of a block in the protocol.  The entity or module bound to
+   // a component is seen with the name of the component instance.
+
+   if (b->parent != NULL && b->parent->component) {
+      conn_block_path(tb, b->parent);
+      return;
+   }
+
+   if (b->parent != NULL) {
+      conn_block_path(tb, b->parent);
+      tb_append(tb, ' ');
+   }
+
+   const bool fold = b->lang != CONN_VERILOG;
+   for (const char *p = b->label; *p; p++)
+      tb_append(tb, fold && *p >= 'A' && *p <= 'Z' ? *p + 'a' - 'A' : *p);
+}
+
 typedef struct {
    conn_query_t       *q;
    vpi_context_t      *ctx;
@@ -4291,7 +4311,6 @@ static void conn_load_report(const conn_end_t *e, void *arg)
    LOCAL_TEXT_BUF scope = tb_new();
    LOCAL_TEXT_BUF other = tb_new();
 
-   const bool verilog = e->block->lang == CONN_VERILOG;
 
    vpi_nvc_conn_t out = {
       .is_load = 1,
@@ -4309,7 +4328,7 @@ static void conn_load_report(const conn_end_t *e, void *arg)
    case CONN_END_PROC:
       {
          out.kind = vpiNvcConnProcess;
-         conn_space_path(scope, e->block->name, verilog);
+         conn_block_path(scope, e->block);
 
          // Use the process of the model, which has the name that the
          // other queries take
@@ -4343,10 +4362,8 @@ static void conn_load_report(const conn_end_t *e, void *arg)
       // The net feeds a port of an instance below
       out.kind = vpiNvcConnPort;
       out.flags |= vpiNvcConnFromChild;
-      conn_space_path(scope, e->port->block->name, e->port->block->lang
-                      == CONN_VERILOG);
-      conn_space_path(other, e->port->block->name,
-                      e->port->block->lang == CONN_VERILOG);
+      conn_block_path(scope, e->port->block);
+      conn_block_path(other, e->port->block);
       tb_append(other, ' ');
       conn_space_path(other, e->port->name, e->port->block->lang == CONN_VERILOG);
       out.other = tb_get(other);
@@ -4357,11 +4374,11 @@ static void conn_load_report(const conn_end_t *e, void *arg)
    case CONN_END_PARENT:
       // The port is connected to an actual in the block above
       out.kind = vpiNvcConnPort;
-      conn_space_path(scope, e->block->name, verilog);
+      conn_block_path(scope, e->block);
       if (e->other.net != NULL) {
          const conn_block_t *pb = e->other.net->block;
          const bool pv = pb->lang == CONN_VERILOG;
-         conn_space_path(other, pb->name, pv);
+         conn_block_path(other, pb);
          tb_append(other, ' ');
          conn_space_path(other, e->other.net->name, pv);
          out.other = tb_get(other);

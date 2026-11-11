@@ -52,6 +52,41 @@ static int count(vpiHandle it)
 
 static PLI_INT32 start_of_sim(p_cb_data cb)
 {
+   // The drivers of Verilog nets below VHDL, by the path of the instances as
+   // seen through VPI
+   vpi_test_conns_t cs;
+   check_int(vpi_test_connections(&cs, "vpi23 u_sub t", 0, 4), 1);
+   check_string(cs.item[0].kind, "assign");
+   check_string(cs.item[0].scope, "vpi23 u_sub");
+   check_int(cs.item[0].c.line, 13);
+   // ... and what reads it: the process of the module and the port of the
+   // instance below, with the path seen through VPI
+   check_int(cs.nloads, 2);
+   int ports = 0;
+   for (int i = 0; i < cs.nloads; i++) {
+      if (cs.load[i].c.kind == vpiNvcConnPort) {
+         ports++;
+         check_string(cs.load[i].scope, "vpi23 u_sub u_leaf");
+         check_string(cs.load[i].other, "vpi23 u_sub u_leaf a");
+      }
+      else
+         check_string(cs.load[i].scope, "vpi23 u_sub");
+   }
+   check_int(ports, 1);
+   check_int(vpi_test_connections(&cs, "vpi23 u_sub u_leaf n", 0, 4), 1);
+   check_string(cs.item[0].kind, "assign");
+   check_string(cs.item[0].scope, "vpi23 u_sub u_leaf");
+   check_int(vpi_test_connections(&cs, "vpi23 u_sub u_leaf a", 0, 4), 1);
+   check_int(cs.item[0].c.kind, vpiNvcConnPort);
+   check_string(cs.item[0].other, "vpi23 u_sub t");
+   check_int(vpi_test_connections(&cs, "vpi23 u_mid u_in t", 0, 4), 1);
+   check_string(cs.item[0].kind, "assign");
+   check_string(cs.item[0].scope, "vpi23 u_mid u_in");
+   check_int(vpi_test_connections(&cs, "vpi23 u_mid u_in q", 0, 4), 1);
+   check_string(cs.item[0].kind, "conversion");
+   check_int(vpi_test_connections(&cs, "vpi23 u_mid q", 0, 4), 1);
+   check_string(cs.item[0].other, "vpi23 u_mid u_in q");
+
    // The top level is VHDL: it is seen as a foreign instance which is not
    // a module but the Verilog instances below it are
    fail_unless(vpi_iterate(vpiModule, NULL) == NULL);

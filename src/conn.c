@@ -2569,6 +2569,7 @@ static conn_block_t *build_instance(conn_design_t *cd, tree_t b,
             break;
          case T_COMPONENT:
             blk->unit = dstr(cd, istr(tree_ident(ref)));
+            blk->component = true;
             break;
          default:
             break;
@@ -2826,6 +2827,11 @@ static conn_block_t *find_block_in(conn_block_t *b, const char *path,
       conn_block_t *c = b->insts[i]->child;
       if (prefix_match(b->insts[i]->label, path, &rest)) {
          conn_block_t *r = find_block_in(c, skip_sep(rest), net_out);
+         if (r == NULL && c->ninsts == 1) {
+            // A component instance is seen as the entity or module bound
+            // to it, which is the only instance in the block
+            r = find_block_in(c->insts[0]->child, skip_sep(rest), net_out);
+         }
          if (r != NULL)
             return r;
       }

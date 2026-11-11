@@ -168,6 +168,8 @@ struct _conn_block {
    const char   *label;      // Last component of path
    const char   *unit;       // Design unit, e.g. "WORK.SUB" or NULL
    conn_lang_t   lang;
+   bool          component; // Block of a component: its only instance is
+                            // the entity or module bound to it
    bool          interface; // SystemVerilog interface instance: all of its
                             // signals are ports and are also nets of the
                             // parent named LABEL.SIGNAL
