@@ -330,6 +330,7 @@ static vlog_node_t vlog_nettype_of(vlog_node_t decl);
 static vlog_node_t vlog_struct_nettype_of(vlog_node_t decl);
 static bool vlog_lower_struct_net_driver(vlog_gen_t *g, vlog_node_t v);
 static void vlog_lower_struct_net_process(vlog_gen_t *g, vlog_node_t v);
+static hset_t *sv_multi_driver_nets = NULL;
 static hash_t *sv_fork_caps = NULL;     // Forked statement to captured decls
 static hash_t *sv_fork_up = NULL;       // Forked statement to enclosing fork
 
@@ -28147,6 +28148,59 @@ static void vlog_find_driver_cb(vlog_node_t v, void *ctx)
    }
 }
 
+typedef struct {
+   hset_t *once;
+} driver_count_t;
+
+static void vlog_count_ref_cb(vlog_node_t v, void *ctx)
+{
+   driver_count_t *c = ctx;
+   if (vlog_kind(v) != V_REF || !vlog_has_ref(v))
+      return;
+
+   vlog_node_t d = vlog_ref(v);
+   if (vlog_kind(d) != V_NET_DECL)
+      return;
+
+   if (hset_contains(c->once, d))
+      hset_insert(sv_multi_driver_nets, d);
+   else
+      hset_insert(c->once, d);
+}
+
+static void vlog_count_driver_cb(vlog_node_t v, void *ctx)
+{
+   // A continuous assignment or a connection to an instance, which might
+   // be an output or inout, is a possible driver of a net
+
+   switch (vlog_kind(v)) {
+   case V_ASSIGN:
+      vlog_visit(vlog_target(v), vlog_count_ref_cb, ctx);
+      break;
+   case V_GATE_INST:
+      vlog_visit(v, vlog_count_ref_cb, ctx);
+      break;
+   case V_PORT_CONN:
+      if (vlog_has_value(v))
+         vlog_visit(vlog_value(v), vlog_count_ref_cb, ctx);
+      break;
+   default:
+      break;
+   }
+}
+
+static void vlog_find_multi_driver_nets(vlog_node_t body)
+{
+   // Nets of the body with more than one driver
+
+   if (sv_multi_driver_nets == NULL)
+      sv_multi_driver_nets = hset_new(64);
+
+   driver_count_t c = { .once = hset_new(64) };
+   vlog_visit(body, vlog_count_driver_cb, &c);
+   hset_free(c.once);
+}
+
 static bool vlog_has_net_driver(vlog_node_t body, vlog_node_t decl,
                                 vlog_node_t port)
 {
@@ -30040,6 +30094,8 @@ void vlog_lower_instance(mir_context_t *mc, vlog_node_t body, ident_t parent,
    mir_unit_t *mu = mir_unit_new(mc, qual, vlog_to_object(body),
                                  MIR_UNIT_INSTANCE, shape);
 
+   vlog_find_multi_driver_nets(body);
+
    hash_t *map = hash_new(16);
 
    const int vhdl_ndecls = tree_decls(trans);
@@ -30565,6 +30621,8 @@ void vlog_lower_block(mir_context_t *mc, ident_t parent, tree_t b)
       .mir = mc,
    };
 
+   vlog_find_multi_driver_nets(body);
+
    hash_t *map = hash_new(16);
 
    const int vhdl_ndecls = tree_decls(b);
@@ -30683,6 +30741,18 @@ void vlog_lower_block(mir_context_t *mc, ident_t parent, tree_t b)
             vlog_select_t lvalue = vlog_lower_select(&g, vlog_value(v));
             if (!mir_is_signal(mu, lvalue.obj))
                break;    // Port tied to constant
+
+            // A procedural assignment to a variable output port is a
+            // deposit, which another driver of the net connected to it
+            // would override the next time the net is resolved, so the
+            // variable needs its own driver of that net
+            if (vlog_subkind(port) == V_PORT_OUTPUT
+                && vlog_kind(vlog_ref(port)) == V_VAR_DECL
+                && vlog_kind(root) == V_REF && vlog_has_ref(root)
+                && vlog_kind(vlog_ref(root)) == V_NET_DECL
+                && hset_contains(sv_multi_driver_nets, vlog_ref(root))
+                && !vlog_has_net_driver(body, vlog_ref(port), port))
+               break;
 
             // A variable which starts with a known value gives the net of
             // an input port an event in the first time step

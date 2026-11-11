@@ -2616,3 +2616,4 @@ netlist2        shell
 netlist3        shell
 netlist4        shell
 svforkelem1     verilog
+svoutvarnet1    verilog
