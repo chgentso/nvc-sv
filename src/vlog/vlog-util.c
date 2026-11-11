@@ -299,6 +299,28 @@ static bool type_is_four_state(vlog_node_t type)
    return !vlog_is_two_state(type);
 }
 
+static bool vlog_sampled_value_call(vlog_node_t v)
+{
+   // The sampled value functions that return the type of their argument
+   // (16.9.3)
+   if (vlog_params(v) == 0)
+      return false;
+
+   ident_t id = vlog_ident(v);
+   return id == ident_new("$past") || id == ident_new("$sampled");
+}
+
+static bool vlog_sampled_bool_call(vlog_node_t v)
+{
+   // The sampled value functions that return a single bit (16.9.3)
+   if (vlog_params(v) == 0)
+      return false;
+
+   ident_t id = vlog_ident(v);
+   return id == ident_new("$rose") || id == ident_new("$fell")
+      || id == ident_new("$stable") || id == ident_new("$changed");
+}
+
 bool vlog_is_four_state(vlog_node_t v)
 {
    // An operation is four-state if any of its operands is (11.8.1)
@@ -357,6 +379,8 @@ bool vlog_is_four_state(vlog_node_t v)
       case V_SYSTF_UNSIGNED:
          return vlog_is_four_state(vlog_param(v, 0));
       default:
+         if (vlog_sampled_value_call(v))
+            return vlog_is_four_state(vlog_param(v, 0));
          {
             // Declared to return int, int unsigned or bit (18.13, 20.9)
             static const char *const names[] = {
@@ -1135,6 +1159,10 @@ unsigned vlog_width(vlog_node_t v)
       case V_SYSTF_SIGNED:
          return vlog_width(vlog_param(v, 0));
       default:
+         if (vlog_sampled_value_call(v))
+            return vlog_width(vlog_param(v, 0));   // Type of the expression
+         else if (vlog_sampled_bool_call(v))
+            return 1;
          if (vlog_ident(v) == ident_new("$onehot")
              || vlog_ident(v) == ident_new("$onehot0")
              || vlog_ident(v) == ident_new("$isunknown"))
@@ -1264,6 +1292,10 @@ bool vlog_is_signed(vlog_node_t v)
       case V_SYSTF_SIGNED:   return true;
       case V_SYSTF_UNSIGNED: return false;
       default:
+         if (vlog_sampled_value_call(v))
+            return vlog_is_signed(vlog_param(v, 0));
+         else if (vlog_sampled_bool_call(v))
+            return false;
          {
             static const char *const names[] = {
                "$random", "$dist_uniform", "$dist_normal", "$dist_exponential",

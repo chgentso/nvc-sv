@@ -2620,3 +2620,4 @@ svoutvarnet1    verilog
 svvifstruct1    verilog
 svrandreduce1   verilog
 svfuncdefarg1   verilog
+svsvawidth1     verilog
