@@ -227,6 +227,7 @@ static bool sv_task_hold(rt_proc_t *p);
 static void sv_task_note_reg(rt_proc_t *p, void **pending);
 static void sv_task_drop_reg(rt_proc_t *p, void **pending);
 static void sv_task_note_run(rt_proc_t *p);
+static void sv_task_note_skipped_poll(rt_proc_t *p);
 
 #define PROC_REGS_MAX 0xffff
 
@@ -1258,7 +1259,7 @@ static void run_process_inner(rt_model_t *m, rt_proc_t *proc)
           && sv_watch_unchanged(w)) {
          sv_procs_run++;
          if (proc->task != NULL)
-            sv_task_note_run(proc);
+            sv_task_note_skipped_poll(proc);
 
          note_wait(m, proc);
          APUSH(sv_pollers, proc);
@@ -7313,6 +7314,13 @@ static void sv_task_note_run(rt_proc_t *p)
 {
    p->task->runs++;
    p->task->marked = false;
+}
+
+static void sv_task_note_skipped_poll(rt_proc_t *p)
+{
+   // The process is still suspended in the same wait so the named blocks
+   // around it that it recorded remain valid
+   p->task->runs++;
 }
 
 static void sv_task_note_reg(rt_proc_t *p, void **pending)

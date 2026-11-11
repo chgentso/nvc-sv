@@ -19,3 +19,7 @@
   that net.  A procedural write to the aliased variable is a deposit, so it is still lost when the net is
   resolved again if the other driver is not visible in the parent text: a hierarchical assignment from
   elsewhere (`top.w = ...` via assign), a force, or a tran/inout path.
+- A `ref` argument of a task or function used inside a fork block of that task (for example `fork get(r); join`
+  with `task t(ref int r)`) is captured with a store whose source and destination types differ; the debug (ASan)
+  build stops with "source and destination have different types" in vlog_lower_fork while the release build
+  appears to work.  Found while testing disable of a task from a sibling process (svdisabletask2 avoids it).
