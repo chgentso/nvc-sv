@@ -429,6 +429,7 @@ static int analyse_files(int argc, char **argv, cmd_state_t *state,
       { "warn",            required_argument, 0, 'W' },
       { "dpi-stubs",       required_argument, 0, 'S' },
       { "black-box-missing", optional_argument, 0, 'K' },
+      { "symbols",         no_argument,       0, 'Y' },
       { 0, 0, 0, 0 }
    };
 
@@ -436,6 +437,7 @@ static int analyse_files(int argc, char **argv, cmd_state_t *state,
    int c, index = 0, error_limit = 20;
    const char *file_list = NULL;
    const char *spec = ":D:f:I:W:";
+   bool symbols = false;
    bool no_save = false, werror = false;
 
    while ((c = getopt_long(next_cmd, argv, spec, long_options, &index)) != -1) {
@@ -514,12 +516,20 @@ static int analyse_files(int argc, char **argv, cmd_state_t *state,
          if (optarg != NULL)
             opt_set_str(OPT_BLACK_BOX_LIBS, optarg);
          break;
+      case 'Y':
+         if (!scan)
+            fatal("the --symbols option is only valid with --scan");
+         symbols = true;
+         break;
       default:
          should_not_reach_here();
       }
    }
 
    set_error_limit(error_limit);
+
+   if (scan)
+      scan_set_symbols(symbols);
 
    if (werror)
       diag_add_hint_fn(werror_diag_cb, NULL);

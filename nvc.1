@@ -99,7 +99,7 @@ Print dependencies of
 .Ar unit
 in Makefile format.
 .\" --scan
-.It Fl \-scan Op Ar option ... Ar file ...
+.It Fl \-scan Op Fl \-symbols Op Ar option ... Ar file ...
 Print the design units which each source file provides and the units it
 requires, without analysing it, so that the order in which files must be
 analysed can be worked out before anything is analysed.  The command
@@ -171,6 +171,110 @@ or an interface used as the type of a port or a virtual interface.  The
 .Ql includes
 array lists the files read by
 .Ql `include .
+.Pp
+With the
+.Fl \-symbols
+option each object also has the members
+.Ql symbols
+and
+.Ql refs ,
+and each element of
+.Ql units
+the members
+.Ql line ,
+.Ql col
+and
+.Ql len
+(the position of the unit name, lines and columns count from 1, the length is in
+bytes) and
+.Ql span
+(first line, first column and, if known, last line of the unit).
+An element of
+.Ql symbols
+is a declaration:
+.Bd -literal -offset indent
+{"name":"CLK","kind":"port","detail":"in BIT","container":"WORK.E",
+ "line":24,"col":9,"len":3,"span":[24,9,24]}
+.Ed
+.Pp
+.Ql kind
+is one of
+.Ql port ,
+.Ql param ,
+.Ql generic ,
+.Ql parameter ,
+.Ql localparam ,
+.Ql signal ,
+.Ql net ,
+.Ql variable ,
+.Ql constant ,
+.Ql file ,
+.Ql alias ,
+.Ql attribute ,
+.Ql type ,
+.Ql subtype ,
+.Ql typedef ,
+.Ql field ,
+.Ql enum-literal ,
+.Ql function ,
+.Ql procedure ,
+.Ql task ,
+.Ql component ,
+.Ql protected ,
+.Ql package ,
+.Ql class ,
+.Ql modport ,
+.Ql genvar ,
+.Ql process ,
+.Ql block ,
+.Ql generate
+or
+.Ql instance .
+.Ql detail
+is the type, or for Verilog the text of the declaration before the name, and
+.Ql container
+the name of the unit, as in
+.Ql units ,
+followed by the names of the enclosing declarations.
+When the declaration is in a file other than the scanned one, as for an
+included file, the member
+.Ql file
+gives it.
+.Pp
+An element of
+.Ql refs
+is a use of a name:
+.Bd -literal -offset indent
+{"name":"S","kind":"name","line":37,"col":5,"len":1,"to":[28,10]}
+{"name":"LEAF","kind":"component","line":32,"col":7,"len":4,"hint":"LEAF"}
+.Ed
+.Pp
+.Ql to
+is the line and column of the name in the declaration which the parser
+resolved the name to, in the same file unless
+.Ql to_file
+is given.  Names declared in a unit which is not part of the file are not
+resolved, as no library is read.  For the use of a design unit (a component,
+entity or module instantiation, a
+.Ql use
+clause or an
+.Ql import )
+the member
+.Ql hint
+gives its name, qualified with the library for VHDL and in the form
+.Ql ?name
+for Verilog.  The
+.Ql kind
+is
+.Ql name ,
+.Ql call ,
+.Ql field ,
+.Ql component ,
+.Ql entity ,
+.Ql module ,
+.Ql use
+or
+.Ql import .
 .Pp
 If the file has syntax errors they are reported on standard error as usual
 and the object has an additional

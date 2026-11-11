@@ -25,12 +25,15 @@
 #include "scandeps.h"
 #include "vlog/vlog-util.h"
 #include "tree.h"
+#include "type.h"
 #include "vlog/vlog-node.h"
 #include "vlog/vlog-phase.h"
 
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>
+#include <ctype.h>
+#include <strings.h>
 
 typedef struct {
    text_buf_t *tb;
@@ -128,8 +131,796 @@ static void scan_instance_cb(tree_t inst, void *context)
    scan_json_string(ctx->inst, istr(name));
 }
 
+
+// ---------------------------------------------------------------------
+// Symbols and references (--scan --symbols)
+
+typedef struct {
+   text_buf_t *syms;
+   text_buf_t *refs;
+   unsigned    nsyms, nrefs;
+   const char *file;
+   bool        vhdl;
+   bool        any_case;   // Compare names without regard to case
+   loc_t       uses[256];
+   unsigned    nuses;
+} sym_ctx_t;
+
+static bool scan_want_symbols = false;
+
+void scan_set_symbols(bool enable)
+{
+   scan_want_symbols = enable;
+}
+
+static bool sym_word_char(char c)
+{
+   return isalnum((unsigned char)c) || c == '_' || c == '$';
+}
+
+// Find NAME as a whole word within the source range of LOC and return
+// its 1-based line and column and length in bytes
+static bool sym_name_pos(const loc_t *loc, const char *name, bool ci,
+                         bool last, unsigned *line, unsigned *col,
+                         unsigned *len)
+{
+   if (loc_invalid_p(loc))
+      return false;
+
+   const char *src = loc_get_source(loc);
+   if (src == NULL)
+      return false;
+
+   const size_t nlen = strlen(name);
+   if (nlen == 0)
+      return false;
+
+   const unsigned end_line = loc->first_line + loc->line_delta;
+   const unsigned end_col = loc->first_column + loc->column_delta;
+   const bool single = loc->line_delta == 0;
+
+   bool found = false;
+   unsigned cur = loc->first_line;
+   const char *ptr = src;
+   while (cur <= end_line && cur < loc->first_line + 40) {
+      const char *eol = strchr(ptr, '\n');
+      size_t linelen = eol ? (size_t)(eol - ptr) : strlen(ptr);
+      size_t from = cur == loc->first_line ? loc->first_column : 0;
+      size_t to = linelen;
+      if (single && end_col + 1 < to)
+         to = end_col + 1;
+      for (size_t i = from; i + nlen <= to; i++) {
+         if (i > 0 && sym_word_char(ptr[i - 1]))
+            continue;
+         if (i + nlen < linelen && sym_word_char(ptr[i + nlen]))
+            continue;
+         if (ci ? strncasecmp(ptr + i, name, nlen) : strncmp(ptr + i, name, nlen))
+            continue;
+         *line = cur;
+         *col = i + 1;
+         *len = nlen;
+         found = true;
+         if (!last)
+            return true;
+      }
+      if (eol == NULL)
+         break;
+      ptr = eol + 1;
+      cur++;
+   }
+
+   return found;
+}
+
+static void sym_json_pos(text_buf_t *tb, const loc_t *loc, const char *file,
+                         const char *name, bool ci, bool last)
+{
+   unsigned line = 0, col = 0, len = 0;
+   if (!sym_name_pos(loc, name, ci, last, &line, &col, &len)) {
+      if (loc_invalid_p(loc))
+         return;
+      line = loc->first_line;
+      col = loc->first_column + 1;
+      len = loc->line_delta == 0 ? loc->column_delta + 1 : 0;
+   }
+   tb_printf(tb, ",\"line\":%u,\"col\":%u,\"len\":%u", line, col, len);
+   const char *f = loc_file_str(loc);
+   if (f != NULL && strcmp(f, file) != 0) {
+      tb_cat(tb, ",\"file\":");
+      scan_json_string(tb, f);
+   }
+}
+
+static void sym_json_span(text_buf_t *tb, const loc_t *loc)
+{
+   if (loc_invalid_p(loc))
+      return;
+   tb_printf(tb, ",\"span\":[%u,%u", loc->first_line, loc->first_column + 1);
+   // The end is clamped for very long constructs
+   if (loc->line_delta < DELTA_INVALID)
+      tb_printf(tb, ",%u", loc->first_line + loc->line_delta);
+   tb_append(tb, ']');
+}
+
+// The declaration text in front of NAME (the type, direction and so on of a
+// Verilog declaration) up to the previous delimiter on the same line
+static char *sym_prefix_text(const loc_t *loc, unsigned line, unsigned col)
+{
+   loc_t at = *loc;
+   at.first_line = line;
+   at.line_delta = 0;
+   at.first_column = 0;
+   const char *src = loc_get_source(&at);
+   if (src == NULL || col < 2)
+      return NULL;
+
+   const char *end = src + col - 1;
+   const char *start = end;
+   while (start > src && !strchr("(,;", start[-1]))
+      start--;
+   while (start < end && isspace((unsigned char)*start))
+      start++;
+   while (end > start && isspace((unsigned char)end[-1]))
+      end--;
+   if (end <= start || end - start > 80)
+      return NULL;
+
+   char *copy = xmalloc(end - start + 1);
+   char *out = copy;
+   bool space = false;
+   for (const char *p = start; p < end; p++) {
+      if (isspace((unsigned char)*p))
+         space = true;
+      else {
+         if (space && out > copy)
+            *out++ = ' ';
+         space = false;
+         *out++ = *p;
+      }
+   }
+   *out = '\0';
+   return copy;
+}
+
+static void sym_add(sym_ctx_t *sc, const char *name, const char *kind,
+                    const char *detail, const char *container,
+                    const loc_t *loc)
+{
+   if (loc_invalid_p(loc) || *name == '\0')
+      return;
+
+   unsigned l, c, n;
+   if (!sym_name_pos(loc, name, sc->vhdl, false, &l, &c, &n))
+      return;
+
+   char *prefix LOCAL = NULL;
+   if (!sc->vhdl && detail == NULL && strcmp(kind, "typedef") != 0
+       && strcmp(kind, "class") != 0 && strcmp(kind, "modport") != 0
+       && strcmp(kind, "enum-literal") != 0 && strcmp(kind, "instance") != 0) {
+      prefix = sym_prefix_text(loc, l, c);
+      detail = prefix;
+   }
+
+   if (sc->nsyms++ > 0)
+      tb_append(sc->syms, ',');
+
+   tb_cat(sc->syms, "{\"name\":");
+   scan_json_string(sc->syms, name);
+   tb_printf(sc->syms, ",\"kind\":\"%s\"", kind);
+   if (detail != NULL && *detail) {
+      tb_cat(sc->syms, ",\"detail\":");
+      scan_json_string(sc->syms, detail);
+   }
+   tb_cat(sc->syms, ",\"container\":");
+   scan_json_string(sc->syms, container);
+   sym_json_pos(sc->syms, loc, sc->file, name, sc->vhdl, false);
+   sym_json_span(sc->syms, loc);
+   tb_append(sc->syms, '}');
+}
+
+static void sym_add_ref(sym_ctx_t *sc, const char *name, const char *kind,
+                        const loc_t *loc, bool last, const loc_t *target,
+                        const char *target_name, const char *hint)
+{
+   if (loc_invalid_p(loc))
+      return;
+
+   unsigned l, c, n;
+   if (!sym_name_pos(loc, name, sc->vhdl || sc->any_case, last, &l, &c, &n))
+      return;
+
+   if (sc->nrefs++ > 0)
+      tb_append(sc->refs, ',');
+
+   tb_cat(sc->refs, "{\"name\":");
+   scan_json_string(sc->refs, name);
+   tb_printf(sc->refs, ",\"kind\":\"%s\"", kind);
+   tb_printf(sc->refs, ",\"line\":%u,\"col\":%u,\"len\":%u", l, c, n);
+   const char *f = loc_file_str(loc);
+   if (f != NULL && strcmp(f, sc->file) != 0) {
+      tb_cat(sc->refs, ",\"file\":");
+      scan_json_string(sc->refs, f);
+   }
+
+   if (target != NULL && target_name != NULL
+       && sym_name_pos(target, target_name, sc->vhdl, false, &l, &c, &n)) {
+      tb_printf(sc->refs, ",\"to\":[%u,%u]", l, c);
+      const char *tf = loc_file_str(target);
+      if (tf != NULL && strcmp(tf, sc->file) != 0) {
+         tb_cat(sc->refs, ",\"to_file\":");
+         scan_json_string(sc->refs, tf);
+      }
+   }
+
+   if (hint != NULL) {
+      tb_cat(sc->refs, ",\"hint\":");
+      scan_json_string(sc->refs, hint);
+   }
+
+   tb_append(sc->refs, '}');
+}
+
+static const char *sym_simple(ident_t id)
+{
+   // The part after the last dot, for a name qualified with its library
+   const char *s = istr(id);
+   if (s[0] == '\\')
+      return s;
+   const char *dot = strrchr(s, '.');
+   return dot ? dot + 1 : s;
+}
+
+static const char *sym_mode_str(unsigned mode)
+{
+   switch (mode) {
+   case PORT_IN:      return "in";
+   case PORT_OUT:     return "out";
+   case PORT_INOUT:   return "inout";
+   case PORT_BUFFER:  return "buffer";
+   case PORT_LINKAGE: return "linkage";
+   default:           return "";
+   }
+}
+
+static void vhdl_sym_scope(sym_ctx_t *sc, tree_t t, const char *path);
+
+static void vhdl_sym_decl(sym_ctx_t *sc, tree_t d, const char *path)
+{
+   const char *kind = NULL, *detail = NULL;
+   char *tmp LOCAL = NULL;
+   bool scope = false;
+
+   switch (tree_kind(d)) {
+   case T_PORT_DECL:
+      kind = "port";
+      tmp = xasprintf("%s %s", sym_mode_str(tree_subkind(d)),
+                      type_pp(tree_type(d)));
+      detail = tmp;
+      break;
+   case T_PARAM_DECL:
+      kind = "param";
+      tmp = xasprintf("%s %s", sym_mode_str(tree_subkind(d)),
+                      type_pp(tree_type(d)));
+      detail = tmp;
+      break;
+   case T_GENERIC_DECL:
+      kind = "generic";
+      detail = type_pp(tree_type(d));
+      break;
+   case T_SIGNAL_DECL:
+      kind = "signal";
+      detail = type_pp(tree_type(d));
+      break;
+   case T_VAR_DECL:
+      kind = "variable";
+      detail = type_pp(tree_type(d));
+      break;
+   case T_CONST_DECL:
+      kind = "constant";
+      detail = type_pp(tree_type(d));
+      break;
+   case T_FILE_DECL:
+      kind = "file";
+      detail = type_pp(tree_type(d));
+      break;
+   case T_ALIAS:
+      kind = "alias";
+      if (tree_has_type(d))
+         detail = type_pp(tree_type(d));
+      break;
+   case T_ATTR_DECL:
+      kind = "attribute";
+      detail = type_pp(tree_type(d));
+      break;
+   case T_TYPE_DECL:
+   case T_SUBTYPE_DECL:
+      kind = tree_kind(d) == T_TYPE_DECL ? "type" : "subtype";
+      scope = true;
+      break;
+   case T_FUNC_DECL:
+   case T_FUNC_BODY:
+      if (tree_subkind(d) != S_USER)
+         return;
+      kind = "function";
+      scope = true;
+      detail = type_pp(tree_type(d));
+      break;
+   case T_PROC_DECL:
+   case T_PROC_BODY:
+      if (tree_subkind(d) != S_USER)
+         return;
+      kind = "procedure";
+      scope = true;
+      detail = type_pp(tree_type(d));
+      break;
+   case T_COMPONENT:
+      kind = "component";
+      scope = true;
+      break;
+   case T_PROT_DECL:
+   case T_PROT_BODY:
+      kind = "protected";
+      scope = true;
+      break;
+   case T_PACKAGE:
+   case T_PACK_INST:
+      kind = "package";
+      scope = true;
+      break;
+   case T_ENUM_LIT:
+      kind = "enum-literal";
+      break;
+   case T_FIELD_DECL:
+      kind = "field";
+      detail = type_pp(tree_type(d));
+      break;
+   case T_VIEW_DECL:
+      kind = "view";
+      break;
+   default:
+      return;
+   }
+
+   const char *name = sym_simple(tree_ident(d));
+   sym_add(sc, name, kind, detail, path, tree_loc(d));
+
+   if (!scope)
+      return;
+
+   char *sub LOCAL = xasprintf("%s.%s", path, name);
+   if (tree_kind(d) == T_TYPE_DECL || tree_kind(d) == T_SUBTYPE_DECL) {
+      type_t type = tree_type(d);
+      switch (type_kind(type)) {
+      case T_RECORD:
+         for (unsigned i = 0; i < type_fields(type); i++)
+            vhdl_sym_decl(sc, type_field(type, i), sub);
+         break;
+      case T_ENUM:
+         for (unsigned i = 0; i < type_enum_literals(type); i++)
+            vhdl_sym_decl(sc, type_enum_literal(type, i), sub);
+         break;
+      default:
+         break;
+      }
+   }
+   else if (tree_kind(d) != T_PACK_INST)
+      vhdl_sym_scope(sc, d, sub);
+}
+
+static void vhdl_sym_stmt(sym_ctx_t *sc, tree_t s, const char *path)
+{
+   const char *kind = NULL;
+   switch (tree_kind(s)) {
+   case T_PROCESS:      kind = "process"; break;
+   case T_BLOCK:        kind = "block"; break;
+   case T_FOR_GENERATE:
+   case T_IF_GENERATE:
+   case T_CASE_GENERATE: kind = "generate"; break;
+   case T_INSTANCE:     kind = "instance"; break;
+   default:
+      return;
+   }
+
+   if (!tree_has_ident(s))
+      return;
+
+   const char *name = sym_simple(tree_ident(s));
+   // Implicit labels given to unlabelled statements
+   if (strncmp(name, "line_", 5) == 0 || name[0] == '_')
+      return;
+
+   const char *detail = NULL;
+   char *tmp LOCAL = NULL;
+   if (tree_kind(s) == T_INSTANCE && tree_has_ident2(s)) {
+      tmp = xasprintf("%s", sym_simple(scan_unit_name(tree_ident2(s))));
+      detail = tmp;
+   }
+
+   sym_add(sc, name, kind, detail, path, tree_loc(s));
+
+   if (tree_kind(s) != T_INSTANCE) {
+      char *sub LOCAL = xasprintf("%s.%s", path, name);
+      vhdl_sym_scope(sc, s, sub);
+   }
+}
+
+static void vhdl_sym_scope(sym_ctx_t *sc, tree_t t, const char *path)
+{
+   bool generics = false, ports = false, decls = false, stmts = false;
+   switch (tree_kind(t)) {
+   case T_ENTITY:
+   case T_BLOCK:
+      generics = ports = decls = stmts = true;
+      break;
+   case T_ARCH:
+      decls = stmts = true;
+      break;
+   case T_PACKAGE:
+      generics = decls = true;
+      break;
+   case T_PACK_BODY:
+   case T_PROT_DECL:
+   case T_PROT_BODY:
+      decls = true;
+      break;
+   case T_PROCESS:
+   case T_FOR_GENERATE:
+      decls = stmts = true;
+      break;
+   case T_FUNC_BODY:
+   case T_PROC_BODY:
+      ports = decls = true;
+      break;
+   case T_FUNC_DECL:
+   case T_PROC_DECL:
+      ports = true;
+      break;
+   case T_COMPONENT:
+      generics = ports = true;
+      break;
+   case T_IF_GENERATE:
+      for (unsigned i = 0; i < tree_conds(t); i++) {
+         tree_t c = tree_cond(t, i);
+         for (unsigned j = 0; j < tree_decls(c); j++)
+            vhdl_sym_decl(sc, tree_decl(c, j), path);
+         for (unsigned j = 0; j < tree_stmts(c); j++)
+            vhdl_sym_stmt(sc, tree_stmt(c, j), path);
+      }
+      return;
+   default:
+      return;
+   }
+
+   if (generics)
+      for (unsigned i = 0; i < tree_generics(t); i++)
+         vhdl_sym_decl(sc, tree_generic(t, i), path);
+   if (ports)
+      for (unsigned i = 0; i < tree_ports(t); i++)
+         vhdl_sym_decl(sc, tree_port(t, i), path);
+   if (decls)
+      for (unsigned i = 0; i < tree_decls(t); i++)
+         vhdl_sym_decl(sc, tree_decl(t, i), path);
+   if (stmts)
+      for (unsigned i = 0; i < tree_stmts(t); i++)
+         vhdl_sym_stmt(sc, tree_stmt(t, i), path);
+}
+
+static bool vhdl_sym_decl_p(tree_t d)
+{
+   switch (tree_kind(d)) {
+   case T_PORT_DECL:
+   case T_PARAM_DECL:
+   case T_GENERIC_DECL:
+   case T_SIGNAL_DECL:
+   case T_VAR_DECL:
+   case T_CONST_DECL:
+   case T_FILE_DECL:
+   case T_ALIAS:
+   case T_ATTR_DECL:
+   case T_TYPE_DECL:
+   case T_SUBTYPE_DECL:
+   case T_COMPONENT:
+   case T_ENUM_LIT:
+   case T_FIELD_DECL:
+   case T_PROT_DECL:
+   case T_PROT_BODY:
+      return true;
+   case T_FUNC_DECL:
+   case T_FUNC_BODY:
+   case T_PROC_DECL:
+   case T_PROC_BODY:
+      return tree_subkind(d) == S_USER;
+   default:
+      return false;
+   }
+}
+
+static void vhdl_ref_cb(tree_t t, void *context)
+{
+   sym_ctx_t *sc = context;
+
+   switch (tree_kind(t)) {
+   case T_REF:
+      {
+         if (!tree_has_ident(t))
+            return;
+         const char *name = sym_simple(tree_ident(t));
+         const loc_t *target = NULL;
+         const char *tname = NULL;
+         if (tree_has_ref(t)) {
+            tree_t d = tree_ref(t);
+            if (vhdl_sym_decl_p(d) && tree_has_ident(d)) {
+               target = tree_loc(d);
+               tname = sym_simple(tree_ident(d));
+            }
+         }
+         sym_add_ref(sc, name, "name", tree_loc(t), false, target, tname, NULL);
+      }
+      break;
+
+   case T_FCALL:
+   case T_PCALL:
+   case T_PROT_FCALL:
+   case T_PROT_PCALL:
+      {
+         if (!tree_has_ident(t))
+            return;
+         const char *name = sym_simple(tree_ident(t));
+         if (!isalpha((unsigned char)name[0]))
+            return;   // Operator
+         const loc_t *target = NULL;
+         const char *tname = NULL;
+         if (tree_has_ref(t)) {
+            tree_t d = tree_ref(t);
+            if (vhdl_sym_decl_p(d)) {
+               target = tree_loc(d);
+               tname = sym_simple(tree_ident(d));
+            }
+         }
+         sym_add_ref(sc, name, "call", tree_loc(t), false, target, tname, NULL);
+      }
+      break;
+
+   case T_RECORD_REF:
+      {
+         if (!tree_has_ref(t))
+            return;
+         tree_t d = tree_ref(t);
+         if (tree_kind(d) != T_FIELD_DECL)
+            return;
+         const char *name = sym_simple(tree_ident(d));
+         sym_add_ref(sc, name, "field", tree_loc(t), true, tree_loc(d), name,
+                     NULL);
+      }
+      break;
+
+   case T_INSTANCE:
+      {
+         if (!tree_has_ident2(t))
+            return;
+         ident_t unit = scan_resolve_work(scan_unit_name(tree_ident2(t)));
+         const char *simple = sym_simple(unit);
+         // Skip the label which comes first
+         loc_t loc = *tree_loc(t);
+         const char *kind = tree_class(t) == C_COMPONENT ? "component"
+            : "entity";
+         sym_add_ref(sc, simple, kind, &loc, tree_class(t) == C_COMPONENT,
+                     NULL, NULL, istr(unit));
+      }
+      break;
+
+   case T_USE:
+      {
+         // The context clause is shared by the units which follow it
+         const loc_t *loc = tree_loc(t);
+         for (unsigned i = 0; i < sc->nuses; i++) {
+            if (sc->uses[i].first_line == loc->first_line
+                && sc->uses[i].first_column == loc->first_column
+                && sc->uses[i].file_ref == loc->file_ref)
+               return;
+         }
+         if (sc->nuses < ARRAY_LEN(sc->uses))
+            sc->uses[sc->nuses++] = *loc;
+         ident_t unit = tree_ident(t);
+         ident_t u = scan_resolve_work(unit);
+         const char *simple = sym_simple(u);
+         sym_add_ref(sc, simple, "use", tree_loc(t), false, NULL, NULL, istr(u));
+      }
+      break;
+
+   default:
+      break;
+   }
+}
+
+static void vlog_sym_scope(sym_ctx_t *sc, vlog_node_t v, const char *path);
+
+static void vlog_sym_decl(sym_ctx_t *sc, vlog_node_t d, const char *path)
+{
+   const char *kind = NULL, *detail = NULL;
+   bool scope = false;
+
+   switch (vlog_kind(d)) {
+   case V_PORT_DECL:
+      kind = "port";
+      switch (vlog_subkind(d)) {
+      case V_PORT_INPUT:  detail = "input"; break;
+      case V_PORT_OUTPUT: detail = "output"; break;
+      case V_PORT_INOUT:  detail = "inout"; break;
+      default: break;
+      }
+      detail = NULL;   // Taken from the source text
+      break;
+   case V_TF_PORT_DECL:
+      kind = "param";
+      break;
+   case V_PARAM_DECL:
+      kind = "parameter";
+      break;
+   case V_LOCALPARAM:
+      kind = "localparam";
+      break;
+   case V_NET_DECL:
+      kind = "net";
+      break;
+   case V_VAR_DECL:
+      kind = "variable";
+      break;
+   case V_GENVAR_DECL:
+      kind = "genvar";
+      break;
+   case V_TYPE_DECL:
+      kind = "typedef";
+      break;
+   case V_FUNC_DECL:
+      kind = "function";
+      scope = true;
+      break;
+   case V_TASK_DECL:
+      kind = "task";
+      scope = true;
+      break;
+   case V_CLASS_DECL:
+      kind = "class";
+      scope = true;
+      break;
+   case V_MODPORT:
+      kind = "modport";
+      break;
+   case V_ENUM_NAME:
+      kind = "enum-literal";
+      break;
+   case V_ENUM_DECL:
+      // Members of an anonymous enumeration are declared in the scope
+      for (unsigned i = 0; i < vlog_decls(d); i++)
+         vlog_sym_decl(sc, vlog_decl(d, i), path);
+      return;
+   case V_CONSTRUCTOR:
+      kind = "function";
+      scope = true;
+      break;
+   case V_IMPORT_DECL:
+      // Not reached by vlog_visit, so the reference is made here
+      if (vlog_has_ref(d) && vlog_has_ident(vlog_ref(d))) {
+         const char *pname = sym_simple(vlog_ident(vlog_ref(d)));
+         char *hint LOCAL = xasprintf("?%s", pname);
+         // The location may be only the part after the package name
+         loc_t line = *vlog_loc(d);
+         line.first_column = 0;
+         line.line_delta = 0;
+         line.column_delta = DELTA_INVALID;
+         sc->any_case = true;   // Package names are folded to upper case
+         sym_add_ref(sc, pname, "import", &line, false, NULL, NULL, hint);
+         sc->any_case = false;
+      }
+      return;
+   default:
+      return;
+   }
+
+   if (!vlog_has_ident(d))
+      return;
+
+   const char *name = sym_simple(vlog_ident(d));
+   sym_add(sc, name, kind, detail, path, vlog_loc(d));
+
+   if (scope) {
+      char *sub LOCAL = xasprintf("%s.%s", path, name);
+      vlog_sym_scope(sc, d, sub);
+   }
+}
+
+static void vlog_sym_scope(sym_ctx_t *sc, vlog_node_t v, const char *path)
+{
+   bool ports = false, decls = false, stmts = false;
+   switch (vlog_kind(v)) {
+   case V_MODULE:
+   case V_PROGRAM:
+      ports = decls = stmts = true;
+      break;
+   case V_PACKAGE:
+   case V_CLASS_DECL:
+      decls = true;
+      break;
+   case V_FUNC_DECL:
+   case V_TASK_DECL:
+   case V_CONSTRUCTOR:
+      ports = decls = true;
+      break;
+   default:
+      return;
+   }
+
+   if (ports && vlog_kind(v) != V_CONSTRUCTOR)
+      for (unsigned i = 0; i < vlog_ports(v); i++)
+         vlog_sym_decl(sc, vlog_port(v, i), path);
+   if (decls)
+      for (unsigned i = 0; i < vlog_decls(v); i++)
+         vlog_sym_decl(sc, vlog_decl(v, i), path);
+   if (stmts) {
+      for (unsigned i = 0; i < vlog_stmts(v); i++) {
+         vlog_node_t s = vlog_stmt(v, i);
+         if (vlog_kind(s) != V_INST_LIST)
+            continue;
+         for (unsigned j = 0; j < vlog_stmts(s); j++) {
+            vlog_node_t inst = vlog_stmt(s, j);
+            if (vlog_kind(inst) == V_MOD_INST && vlog_has_ident(inst))
+               sym_add(sc, sym_simple(vlog_ident(inst)), "instance",
+                       vlog_has_ident(s) ? istr(vlog_ident(s)) : NULL, path,
+                       vlog_loc(inst));
+         }
+      }
+   }
+}
+
+static void vlog_ref_cb(vlog_node_t v, void *context)
+{
+   sym_ctx_t *sc = context;
+
+   switch (vlog_kind(v)) {
+   case V_REF:
+   case V_USER_FCALL:
+   case V_USER_TCALL:
+   case V_MEMBER_REF:
+      {
+         if (!vlog_has_ident(v))
+            return;
+         const char *name = sym_simple(vlog_ident(v));
+         const loc_t *target = NULL;
+         const char *tname = NULL;
+         if (vlog_has_ref(v)) {
+            vlog_node_t d = vlog_ref(v);
+            if (vlog_has_ident(d)) {
+               target = vlog_loc(d);
+               tname = sym_simple(vlog_ident(d));
+            }
+         }
+         sym_add_ref(sc, name,
+                     vlog_kind(v) == V_REF ? "name"
+                     : vlog_kind(v) == V_MEMBER_REF ? "field" : "call",
+                     vlog_loc(v), vlog_kind(v) == V_MEMBER_REF, target, tname,
+                     NULL);
+      }
+      break;
+
+   case V_INST_LIST:
+      {
+         if (!vlog_has_ident(v) || vlog_stmts(v) == 0)
+            return;
+         char *hint LOCAL = xasprintf("?%s", istr(vlog_ident(v)));
+         sym_add_ref(sc, istr(vlog_ident(v)), "module", vlog_loc(v), false,
+                     NULL, NULL, hint);
+      }
+      break;
+
+   default:
+      break;
+   }
+}
+
 static void scan_vhdl_unit(tree_t unit, text_buf_t *units, unsigned *nunits,
-                           ident_t **provided, unsigned *nprovided)
+                           ident_t **provided, unsigned *nprovided,
+                           sym_ctx_t *sc)
 {
    const char *kind = NULL;
    bool has_ports = false;
@@ -182,7 +973,24 @@ static void scan_vhdl_unit(tree_t unit, text_buf_t *units, unsigned *nunits,
    tb_printf(units, ",\"kind\":\"%s\"", kind);
    if (tree_kind(unit) == T_ENTITY)
       tb_printf(units, ",\"ports\":%s", has_ports ? "true" : "false");
-   tb_printf(units, ",\"instantiates\":[%s]}", tb_get(ctx.inst));
+   tb_printf(units, ",\"instantiates\":[%s]", tb_get(ctx.inst));
+
+   if (sc != NULL) {
+      const char *simple = sym_simple(name);
+      if (tree_kind(unit) == T_ARCH) {
+         const char *dash = strrchr(simple, '-');
+         if (dash != NULL)
+            simple = dash + 1;
+      }
+      else if (tree_kind(unit) == T_PACK_BODY)
+         simple = sym_simple(scan_unit_name(name));
+      sym_json_pos(units, tree_loc(unit), sc->file, simple, true, false);
+      sym_json_span(units, tree_loc(unit));
+      vhdl_sym_scope(sc, unit, istr(name));
+      tree_visit(unit, vhdl_ref_cb, sc);
+   }
+
+   tb_append(units, '}');
 
    tb_free(ctx.inst);
    free(ctx.seen);
@@ -237,7 +1045,7 @@ static void scan_inst_list_cb(vlog_node_t v, void *context)
 
 static void scan_vlog_unit(vlog_node_t unit, text_buf_t *units,
                            unsigned *nunits, ident_t **provided,
-                           unsigned *nprovided)
+                           unsigned *nprovided, sym_ctx_t *sc)
 {
    const char *kind = NULL;
    bool has_ports = false;
@@ -284,7 +1092,16 @@ static void scan_vlog_unit(vlog_node_t unit, text_buf_t *units,
    tb_printf(units, ",\"kind\":\"%s\"", kind);
    if (vlog_kind(unit) == V_MODULE || vlog_kind(unit) == V_PROGRAM)
       tb_printf(units, ",\"ports\":%s", has_ports ? "true" : "false");
-   tb_printf(units, ",\"instantiates\":[%s]}", tb_get(ctx.inst));
+   tb_printf(units, ",\"instantiates\":[%s]", tb_get(ctx.inst));
+
+   if (sc != NULL) {
+      sym_json_pos(units, vlog_loc(unit), sc->file, istr(simple), false, false);
+      sym_json_span(units, vlog_loc(unit));
+      vlog_sym_scope(sc, unit, istr(name));
+      vlog_visit(unit, vlog_ref_cb, sc);
+   }
+
+   tb_append(units, '}');
 
    tb_free(ctx.inst);
    free(ctx.seen);
@@ -318,6 +1135,14 @@ unsigned scan_file_deps(const char *file, text_buf_t *json)
    ident_t *provided = NULL;
    const char *language = "vhdl";
 
+   sym_ctx_t sctx = { .file = file };
+   sym_ctx_t *sc = NULL;
+   if (scan_want_symbols) {
+      sc = &sctx;
+      sctx.syms = tb_new();
+      sctx.refs = tb_new();
+   }
+
    input_from_file(file);
 
    switch (source_kind()) {
@@ -326,7 +1151,8 @@ unsigned scan_file_deps(const char *file, text_buf_t *json)
          tree_t unit;
          while ((unit = parse())) {
             lib_put(work, unit);
-            scan_vhdl_unit(unit, units, &nunits, &provided, &nprovided);
+            sctx.vhdl = true;
+            scan_vhdl_unit(unit, units, &nunits, &provided, &nprovided, sc);
          }
       }
       break;
@@ -347,7 +1173,8 @@ unsigned scan_file_deps(const char *file, text_buf_t *json)
          while ((unit = vlog_parse())) {
             if (is_top_level(unit))
                lib_put_vlog(work, unit);
-            scan_vlog_unit(unit, units, &nunits, &provided, &nprovided);
+            sctx.vhdl = false;
+            scan_vlog_unit(unit, units, &nunits, &provided, &nprovided, sc);
          }
       }
       break;
@@ -395,6 +1222,13 @@ unsigned scan_file_deps(const char *file, text_buf_t *json)
    }
 
    tb_cat(json, "]");
+
+   if (sc != NULL) {
+      tb_printf(json, ",\"symbols\":[%s],\"refs\":[%s]", tb_get(sctx.syms),
+                tb_get(sctx.refs));
+      tb_free(sctx.syms);
+      tb_free(sctx.refs);
+   }
 
    const unsigned errors = diag_scan_errors() - base_errors;
    if (errors > 0)

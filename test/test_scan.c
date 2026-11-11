@@ -272,6 +272,129 @@ START_TEST(test_sv_syntax)
 }
 END_TEST
 
+
+static void scan_symbols_contain(const char *file, const char *const *parts,
+                                 unsigned nparts, bool expect)
+{
+   LOCAL_TEXT_BUF tb = tb_new();
+   scan_set_symbols(true);
+   const unsigned errors = scan_file_deps(file, tb);
+   scan_set_symbols(false);
+   ck_assert_uint_eq(errors, 0);
+
+   const char *json = tb_get(tb);
+   for (unsigned i = 0; i < nparts; i++) {
+      if ((strstr(json, parts[i]) != NULL) != expect) {
+         printf("%s: %s\n%s", expect ? "missing" : "unexpected", parts[i],
+                json);
+         ck_abort_msg("symbols differ for %s", file);
+      }
+   }
+}
+
+START_TEST(test_symbols_vhdl)
+{
+   set_standard(STD_08);
+
+   static const char *const parts[] = {
+      // Units carry the position of their name and the extent
+      "\"name\":\"WORK.E\",\"kind\":\"entity\",\"ports\":true,"
+      "\"instantiates\":[],\"line\":22,\"col\":8,\"len\":1,\"span\":[22,1,25]}",
+      "\"name\":\"WORK.E-RTL\",\"kind\":\"architecture\","
+      "\"instantiates\":[\"LEAF\"],\"line\":27,\"col\":14,",
+      // Declarations with kind, type and container
+      "{\"name\":\"CLK\",\"kind\":\"port\",\"detail\":\"in BIT\","
+      "\"container\":\"WORK.E\",\"line\":24,\"col\":9,\"len\":3,",
+      "{\"name\":\"N\",\"kind\":\"generic\",\"detail\":\"NATURAL\","
+      "\"container\":\"WORK.E\",\"line\":23,\"col\":12,",
+      "{\"name\":\"S\",\"kind\":\"signal\",\"detail\":\"INTEGER\","
+      "\"container\":\"WORK.E-RTL\",\"line\":28,\"col\":10,",
+      "{\"name\":\"REC_T\",\"kind\":\"type\",\"container\":\"WORK.MYPKG\",",
+      "{\"name\":\"A\",\"kind\":\"field\",\"detail\":\"INTEGER\","
+      "\"container\":\"WORK.MYPKG.REC_T\",\"line\":8,\"col\":5,",
+      "{\"name\":\"IDLE\",\"kind\":\"enum-literal\","
+      "\"container\":\"WORK.MYPKG.STATE_T\",",
+      "{\"name\":\"F\",\"kind\":\"function\",\"detail\":\"F [INTEGER return "
+      "INTEGER]\",\"container\":\"WORK.MYPKG\",\"line\":11,\"col\":12,",
+      "{\"name\":\"X\",\"kind\":\"param\",\"detail\":\"in INTEGER\","
+      "\"container\":\"WORK.MYPKG-body.F\",",
+      "{\"name\":\"Y\",\"kind\":\"variable\",\"detail\":\"INTEGER\","
+      "\"container\":\"WORK.MYPKG-body.F\",",
+      "{\"name\":\"U1\",\"kind\":\"instance\",\"detail\":\"LEAF\","
+      "\"container\":\"WORK.E-RTL\",\"line\":32,\"col\":3,",
+      "{\"name\":\"P\",\"kind\":\"process\",\"container\":\"WORK.E-RTL\","
+      "\"line\":33,\"col\":3,\"len\":1,\"span\":[33,3,39]}",
+      "{\"name\":\"V\",\"kind\":\"variable\",\"detail\":\"INTEGER\","
+      "\"container\":\"WORK.E-RTL.P\",",
+      // References resolved while parsing point at the declaration
+      "{\"name\":\"S\",\"kind\":\"name\",\"line\":37,\"col\":5,\"len\":1,"
+      "\"to\":[28,10]}",
+      "{\"name\":\"CLK\",\"kind\":\"name\",\"line\":32,\"col\":27,\"len\":3,"
+      "\"to\":[24,9]}",
+      "{\"name\":\"A\",\"kind\":\"field\",\"line\":38,\"col\":12,\"len\":1,"
+      "\"to\":[8,5]}",
+      // Units are named by a hint
+      "{\"name\":\"LEAF\",\"kind\":\"component\",\"line\":32,\"col\":7,"
+      "\"len\":4,\"hint\":\"LEAF\"}",
+      "{\"name\":\"MYPKG\",\"kind\":\"use\",\"line\":3,\"col\":10,\"len\":5,"
+      "\"hint\":\"WORK.MYPKG\"}",
+      "{\"name\":\"STD_LOGIC_1164\",\"kind\":\"use\",\"line\":2,\"col\":10,"
+      "\"len\":14,\"hint\":\"IEEE.STD_LOGIC_1164\"}",
+   };
+
+   scan_symbols_contain(SCAN_FILE("sym1.vhd"), parts, ARRAY_LEN(parts), true);
+
+   // Without the option nothing extra is written
+   static const char *const none[] = { "\"symbols\"", "\"refs\"", "\"line\"" };
+   LOCAL_TEXT_BUF tb = tb_new();
+   scan_file_deps(SCAN_FILE("sym1.vhd"), tb);
+   for (unsigned i = 0; i < ARRAY_LEN(none); i++)
+      ck_assert_ptr_null(strstr(tb_get(tb), none[i]));
+}
+END_TEST
+
+START_TEST(test_symbols_vlog)
+{
+   static const char *const parts[] = {
+      "\"name\":\"WORK.LEAF\",\"kind\":\"module\",\"ports\":true,"
+      "\"instantiates\":[],\"line\":14,\"col\":8,\"len\":4,",
+      "{\"name\":\"base\",\"kind\":\"class\","
+      "\"container\":\"WORK.P\",",
+      "{\"name\":\"f\",\"kind\":\"function\",\"detail\":\"function void\","
+      "\"container\":\"WORK.P.base\",\"line\":5,\"col\":19,",
+      "{\"name\":\"x\",\"kind\":\"variable\",\"detail\":\"int\","
+      "\"container\":\"WORK.P.base\",",
+      "{\"name\":\"data\",\"kind\":\"variable\",\"detail\":\"logic [7:0]\","
+      "\"container\":\"WORK.BUS_IF\",",
+      "{\"name\":\"m\",\"kind\":\"modport\",\"container\":\"WORK.BUS_IF\",",
+      "{\"name\":\"W\",\"kind\":\"parameter\",\"detail\":\"parameter\","
+      "\"container\":\"WORK.LEAF\",\"line\":14,\"col\":25,",
+      "{\"name\":\"q\",\"kind\":\"port\",\"detail\":\"output logic [W-1:0]\","
+      "\"container\":\"WORK.LEAF\",\"line\":14,\"col\":71,",
+      "{\"name\":\"K\",\"kind\":\"localparam\",\"detail\":\"localparam\","
+      "\"container\":\"WORK.LEAF\",",
+      "{\"name\":\"v\",\"kind\":\"param\",\"detail\":\"int\","
+      "\"container\":\"WORK.LEAF.g\",",
+      "{\"name\":\"u\",\"kind\":\"instance\",\"detail\":\"leaf\","
+      "\"container\":\"WORK.TOP\",\"line\":34,\"col\":17,",
+      "{\"name\":\"cnt\",\"kind\":\"name\",\"line\":24,\"col\":12,\"len\":3,"
+      "\"to\":[15,15]}",
+      "{\"name\":\"g\",\"kind\":\"call\",\"line\":25,\"col\":10,\"len\":1,"
+      "\"to\":[18,26]}",
+      "{\"name\":\"x\",\"kind\":\"name\",\"line\":5,\"col\":29,\"len\":1,"
+      "\"to\":[4,9]}",
+      "{\"name\":\"leaf\",\"kind\":\"module\",\"line\":34,\"col\":3,\"len\":4,"
+      "\"hint\":\"?leaf\"}",
+      "{\"name\":\"bus_if\",\"kind\":\"module\",\"line\":33,\"col\":3,"
+      "\"len\":6,\"hint\":\"?bus_if\"}",
+      "{\"name\":\"P\",\"kind\":\"import\",\"line\":30,\"col\":10,"
+      "\"len\":1,\"hint\":\"?P\"}",
+   };
+
+   scan_symbols_contain(SCAN_FILE("sym2.sv"), parts, ARRAY_LEN(parts), true);
+}
+END_TEST
+
 Suite *get_scan_tests(void)
 {
    Suite *s = suite_create("scan");
@@ -288,6 +411,8 @@ Suite *get_scan_tests(void)
    tcase_add_test(tc, test_sv_ifdef_b);
    tcase_add_test(tc, test_sv_decls);
    tcase_add_test(tc, test_sv_syntax);
+   tcase_add_test(tc, test_symbols_vhdl);
+   tcase_add_test(tc, test_symbols_vlog);
    suite_add_tcase(s, tc);
 
    return s;

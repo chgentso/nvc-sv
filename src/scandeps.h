@@ -26,4 +26,7 @@
 // Returns the number of syntax errors found.
 unsigned scan_file_deps(const char *file, text_buf_t *json);
 
+// Also report the declarations and references of each file (--symbols)
+void scan_set_symbols(bool enable);
+
 #endif   // _SCANDEPS_H
