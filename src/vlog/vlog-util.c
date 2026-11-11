@@ -584,6 +584,82 @@ bool vlog_virtual_chain(vlog_node_t v)
    }
 }
 
+static vlog_node_t virtual_joined(vlog_node_t iface, ident_t id,
+                                  vlog_node_t *field)
+{
+   // The member of an interface and its field for a joined name member$field
+
+   const char *dollar = strchr(istr(id), '$');
+   if (dollar == NULL || dollar == istr(id))
+      return NULL;
+
+   ident_t first = ident_new_n(istr(id), dollar - istr(id));
+   ident_t second = ident_new(dollar + 1);
+
+   const int ndecls = vlog_decls(iface);
+   for (int i = 0; i < ndecls; i++) {
+      vlog_node_t d = vlog_decl(iface, i);
+      switch (vlog_kind(d)) {
+      case V_PORT_DECL:
+      case V_NET_DECL:
+      case V_VAR_DECL:
+         break;
+      default:
+         continue;
+      }
+
+      if (vlog_ident(d) != first)
+         continue;
+
+      vlog_node_t type = vlog_get_type(d);
+      if (type == NULL || (vlog_kind(type) != V_STRUCT_DECL
+                           && vlog_kind(type) != V_UNION_DECL))
+         return NULL;
+
+      const int nfields = vlog_decls(type);
+      for (int j = 0; j < nfields; j++) {
+         vlog_node_t f = vlog_decl(type, j);
+         if (vlog_has_ident(f) && vlog_ident(f) == second) {
+            *field = f;
+            return d;
+         }
+      }
+
+      return NULL;
+   }
+
+   return NULL;
+}
+
+vlog_node_t vlog_virtual_joined_base(vlog_node_t v)
+{
+   // For a member of a virtual interface selected as member.field the
+   // member of the interface, otherwise NULL
+
+   if (vlog_kind(v) != V_MEMBER_REF || !vlog_virtual_pending(v))
+      return NULL;
+
+   vlog_node_t iface = vlog_virtual_iface(vlog_get_type(vlog_value(v)));
+   if (iface == NULL)
+      return NULL;
+
+   ident_t id = vlog_ident(v);
+   if (strchr(istr(id), '$') == NULL)
+      return NULL;
+
+   // A modport or clocking block name takes precedence
+   const char *dollar = strchr(istr(id), '$');
+   ident_t mp = ident_new_n(istr(id), dollar - istr(id));
+   for (int i = 0; i < vlog_decls(iface); i++) {
+      vlog_node_t d = vlog_decl(iface, i);
+      if (vlog_kind(d) == V_MODPORT && vlog_ident(d) == mp)
+         return NULL;
+   }
+
+   vlog_node_t field;
+   return virtual_joined(iface, id, &field);
+}
+
 static vlog_node_t virtual_find_decl(vlog_node_t v)
 {
    assert(vlog_kind(v) == V_MEMBER_REF || vlog_kind(v) == V_METHOD_CALL);
@@ -640,6 +716,16 @@ static vlog_node_t virtual_find_decl(vlog_node_t v)
          hash_put(cache, v, d);
          return d;
       }
+   }
+
+   // The parser joined `vif.name.field` into one name as it could not tell
+   // a modport or clocking block from a member of a structure: if the first
+   // name is a member of the interface with a structure type then this is
+   // the field of that member
+   vlog_node_t field;
+   if (!method && virtual_joined(iface, id, &field) != NULL) {
+      hash_put(cache, v, field);
+      return field;
    }
 
    return NULL;

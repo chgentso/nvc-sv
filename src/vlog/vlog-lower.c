@@ -2037,7 +2037,12 @@ static vlog_select_t vlog_lower_select(vlog_gen_t *g, vlog_node_t v)
       }
    case V_MEMBER_REF:
       {
-         vlog_node_t decl = vlog_member_decl(v);
+         // A field of a structure member of a virtual interface whose type
+         // was not known when the reference was parsed is the member with
+         // the field selected from it
+         vlog_node_t joined = vlog_virtual_joined_base(v);
+         vlog_node_t field = joined != NULL ? vlog_member_decl(v) : NULL;
+         vlog_node_t decl = joined != NULL ? joined : vlog_member_decl(v);
 
          // A parameter or enumeration name of a class
          if (vlog_kind(decl) == V_PARAM_DECL || vlog_kind(decl) == V_LOCALPARAM
@@ -2169,6 +2174,17 @@ static vlog_select_t vlog_lower_select(vlog_gen_t *g, vlog_node_t v)
                .type       = type,
                .size       = size,
             };
+
+            if (field != NULL) {
+               vlog_node_t stype = vlog_get_type(decl);
+               const type_info_t *fi = vlog_type_info(g, vlog_type(field));
+               result.dst_offset =
+                  mir_const(g->mu, t_offset, vlog_packed_offset(stype, field));
+               result.count = mir_const(g->mu, t_offset, fi->size);
+               result.type = fi->type;
+               result.size = fi->size;
+            }
+
             return result;
          }
 

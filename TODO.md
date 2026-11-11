@@ -14,3 +14,8 @@
   through a task output/ref argument or by a method call (queue push_back, associative delete) and read by the
   forked process, and forks directly in an initial/always block (no enclosing subroutine to scan), where a
   variable written by a sibling fork is not shared.
+- Variable output port connected to a net (IEEE 1800-2017 23.3.3: a continuous driver of the net): the port is
+  aliased to the net unless the parent has more than one assign target, gate or instance connection naming
+  that net.  A procedural write to the aliased variable is a deposit, so it is still lost when the net is
+  resolved again if the other driver is not visible in the parent text: a hierarchical assignment from
+  elsewhere (`top.w = ...` via assign), a force, or a tran/inout path.
