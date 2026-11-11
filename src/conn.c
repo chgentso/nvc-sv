@@ -2559,7 +2559,17 @@ static conn_block_t *build_instance(conn_design_t *cd, tree_t b,
 
    if (tree_decls(b) > 0 && tree_kind(tree_decl(b, 0)) == T_HIER) {
       tree_t hier = tree_decl(b, 0);
-      if (body != NULL && vlog_has_ident2(body))
+      if (body != NULL && (vlog_flags(body) & VLOG_F_BLACKBOX)) {
+         // The name of the module is that of the missing unit and a number
+         char *name LOCAL = xstrdup(istr(vlog_ident2(body)));
+         char *suffix = strstr(name, "$bb");
+         if (suffix != NULL)
+            *suffix = '\0';
+         blk->unit = dstr(cd, name);
+         blk->blackbox = true;
+         blk->inferred = true;
+      }
+      else if (body != NULL && vlog_has_ident2(body))
          blk->unit = dstr(cd, istr(vlog_ident2(body)));
       else if (tree_has_ref(hier)) {
          tree_t ref = tree_ref(hier);
@@ -2570,6 +2580,13 @@ static conn_block_t *build_instance(conn_design_t *cd, tree_t b,
          case T_COMPONENT:
             blk->unit = dstr(cd, istr(tree_ident(ref)));
             blk->component = true;
+
+            // A component that nothing is bound to
+            blk->blackbox = tree_stmts(b) == 0;
+
+            // ... which was made from the port map of an instance
+            blk->inferred = blk->blackbox && tree_ports(ref) > 0
+               && (tree_flags(tree_port(ref, 0)) & TREE_F_BLACK_BOX);
             break;
          default:
             break;

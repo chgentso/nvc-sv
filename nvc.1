@@ -507,6 +507,45 @@ dotted path to the generic.  For example
 .Fl g\ INIT='1' ,
 and
 .Fl g\ UUT.STR="hello" .
+.\" --black-box-missing
+.It Fl \-black-box-missing Ns Op = Ns Ar lib Ns Op , Ns Ar lib ...
+Elaborate an instance of a unit that cannot be found as an empty black box
+rather than failing.  The unit may be a VHDL component that has no entity
+bound to it, an entity instantiated as
+.Sy entity lib.unit ,
+or a Verilog module.  For a component the ports and generics are those of
+the declaration.  Otherwise they are inferred from the instance: the
+formals of the association lists, or
+.Sy P0 ,
+.Sy P1 ...
+and
+.Sy p0 ,
+.Sy p1 ...
+for positional associations, with the types or widths of the actuals and the
+direction of an actual signal or port (an
+.Sy inout
+for a signal or Verilog net, the mode of a port of the enclosing entity, and
+.Sy in
+for a constant or expression).  A black box has no contents and drives
+nothing, so a design that has one cannot be simulated:
+.Fl r
+refuses to run it.  It can be viewed with
+.Fl \-netlist ,
+which draws each black box as a cell whose type is the name of the missing
+unit, with the attribute
+.Sy blackbox
+and for inferred ports
+.Sy inferred_ports .
+.Pp
+An instantiation of a missing entity cannot be analysed without the option,
+so it has to be given to
+.Fl a
+as well, which also ignores the library clause of a library that does not
+exist.  With a comma separated list of libraries only units of those
+libraries are made black boxes (a Verilog module belongs to the library
+.Sy work ) ,
+which keeps a mistake in the name of a library of the project an error.
+Each missing unit is reported once with a note.
 .\" --no-collapse
 .It Fl \-no-collapse
 Do not collapse ports into a single signal.  Normally if a signal at one
@@ -890,6 +929,20 @@ in the TerosHDL viewer or with netlistsvg:
 $ nvc -a design.vhd -e top
 $ nvc \-\-netlist \-\-output=top.json top
 .Ed
+.Pp
+A design elaborated with
+.Fl \-black-box-missing
+can be drawn although it cannot be run.  An instance of a missing unit is a
+cell whose
+.Sy type
+is the name of the unit, with the attributes
+.Sy blackbox
+(1) and, if its ports and directions were inferred from the instance rather
+than declared by a component,
+.Sy inferred_ports
+(1).  There is one module with that name for all the instances, with the
+ports and no cells, and the same attribute
+.Sy blackbox .
 .\" ------------------------------------------------------------
 .\" Libraries
 .\" ------------------------------------------------------------

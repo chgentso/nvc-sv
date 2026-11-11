@@ -428,6 +428,7 @@ static int analyse_files(int argc, char **argv, cmd_state_t *state,
       { "timescale",       required_argument, 0, 'T' },
       { "warn",            required_argument, 0, 'W' },
       { "dpi-stubs",       required_argument, 0, 'S' },
+      { "black-box-missing", optional_argument, 0, 'K' },
       { 0, 0, 0, 0 }
    };
 
@@ -507,6 +508,11 @@ static int analyse_files(int argc, char **argv, cmd_state_t *state,
          break;
       case 'W':
          werror = parse_warn_option(optarg);
+         break;
+      case 'K':
+         opt_set_int(OPT_BLACK_BOX, 1);
+         if (optarg != NULL)
+            opt_set_str(OPT_BLACK_BOX_LIBS, optarg);
          break;
       default:
          should_not_reach_here();
@@ -707,6 +713,7 @@ static int elaborate(int argc, char **argv, cmd_state_t *state)
       { "stats",           no_argument,       0, 'S' },
       { "trace",           no_argument,       0, 't' },
       { "debug-stmts",     no_argument,       0, 'B' },
+      { "black-box-missing", optional_argument, 0, 'K' },
       { 0, 0, 0, 0 }
    };
 
@@ -771,6 +778,11 @@ static int elaborate(int argc, char **argv, cmd_state_t *state)
          break;
       case 'B':
          opt_set_int(OPT_DEBUG_STMTS, 1);
+         break;
+      case 'K':
+         opt_set_int(OPT_BLACK_BOX, 1);
+         if (optarg != NULL)
+            opt_set_str(OPT_BLACK_BOX_LIBS, optarg);
          break;
       case 0:
          // Set a flag
@@ -865,6 +877,7 @@ static int elaborate(int argc, char **argv, cmd_state_t *state)
       return EXIT_FAILURE;
 
    meta.debug_stmts = opt_get_int(OPT_DEBUG_STMTS);
+   meta.black_boxes = elab_black_boxes() > 0;
 
    lib_put_meta(state->work, e, &meta);
 
@@ -1255,6 +1268,11 @@ static int run_cmd(int argc, char **argv, cmd_state_t *state)
    assert(top != NULL);
 
    opt_set_int(OPT_NO_COLLAPSE, meta->no_collapse);
+
+   if (meta->black_boxes)
+      fatal("%s contains black boxes for missing units and cannot be run: "
+            "elaborate it again without --black-box-missing once the units "
+            "are available", istr(state->top_level));
 
    // The code is generated when the design is run: statement probes are
    // wanted if the design was elaborated with --debug-stmts
@@ -2575,6 +2593,8 @@ static void usage(void)
            { "--keywords=VERSION",
              "Use keywords from specified Verilog version" },
            { "--no-save", "Do not save analysed design units" },
+           { "--black-box-missing[=LIB,...]",
+             "Instantiate entities that cannot be found as black boxes" },
            { "--dpi-stubs=FILE", "Write a C file with stubs for the DPI-exported subroutines, to link into foreign code on Windows" },
            { "--preserve-case",
              "Preserve the original case of VHDL identifiers" },
@@ -2607,6 +2627,9 @@ static void usage(void)
            { "-g NAME=VALUE", "Set top level generic NAME to VALUE" },
            { "-j, --jit", "Enable just-in-time compilation during simulation" },
            { "-O0, -O1, -O2, -O3", "Set optimisation level (default is -O2)" },
+           { "--black-box-missing[=LIB,...]",
+             "Elaborate instances of missing units as empty black boxes "
+             "(the design cannot be run)" },
            { "--no-collapse", "Do not collapse multiple signals into one" },
            { "--no-save", "Do not save the elaborated design to disk" },
            { "--stats", "Print statistics about instantiated design units" },

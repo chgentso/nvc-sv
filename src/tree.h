@@ -438,6 +438,8 @@ typedef enum {
    TREE_F_IMPURE_SHARED   = (1 << 23),
    TREE_F_CALL_NO_ARGS    = (1 << 24),
    TREE_F_WRAP_OVERFLOW   = (1 << 25),
+   TREE_F_BLACK_BOX       = (1 << 26),   // Port or generic inferred for a
+                                         // missing unit
 } tree_flags_t;
 
 typedef enum {

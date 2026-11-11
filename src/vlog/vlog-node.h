@@ -609,6 +609,7 @@ typedef enum {
    VLOG_F_TYPEPARAM = VLOG_F_CONST,  // On a type declaration which is a parameter
    VLOG_F_NETTYPE = VLOG_F_RAND,     // On a type declaration of a net type
    VLOG_F_USERNET = VLOG_F_PRIORITY, // On a variable which is a net of a user-defined net type
+   VLOG_F_BLACKBOX = VLOG_F_UNIQUE0,   // On a module made for a missing unit
    VLOG_F_NESTED_INST = VLOG_F_SPEC,   // On a variable for an interface instance
    VLOG_F_CHECKER = VLOG_F_DISABLE,  // On a module which is a checker
    VLOG_F_LET = VLOG_F_SOFT,         // On a function declaration

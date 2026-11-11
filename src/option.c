@@ -21,6 +21,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <assert.h>
 #include <ctype.h>
 
@@ -196,4 +197,27 @@ void set_default_options(void)
    opt_set_str(OPT_RELATIVE_PATH, NULL);
    opt_set_int(OPT_EXCL_VERBOSE, get_int_env("NVC_EXCL_VERBOSE", 0));
    opt_set_int(OPT_LOWER_MIR, get_int_env("NVC_LOWER_MIR", 0));
+   opt_set_int(OPT_BLACK_BOX, 0);
+   opt_set_str(OPT_BLACK_BOX_LIBS, NULL);
+}
+
+bool opt_black_box_allowed(const char *lib)
+{
+   if (!opt_get_int(OPT_BLACK_BOX))
+      return false;
+
+   const char *list = opt_get_str(OPT_BLACK_BOX_LIBS);
+   if (list == NULL || *list == '\0')
+      return true;
+
+   const size_t len = strlen(lib);
+   for (const char *p = list; *p; ) {
+      const char *end = strchr(p, ',');
+      const size_t n = end ? (size_t)(end - p) : strlen(p);
+      if (n == len && strncasecmp(p, lib, n) == 0)
+         return true;
+      p = end ? end + 1 : p + n;
+   }
+
+   return false;
 }

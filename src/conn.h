@@ -170,6 +170,10 @@ struct _conn_block {
    conn_lang_t   lang;
    bool          component; // Block of a component: its only instance is
                             // the entity or module bound to it
+   bool          blackbox;  // Stands for a unit that is missing
+                            // (--black-box-missing): it has no contents
+   bool          inferred;  // ... and its ports and their directions were
+                            // inferred from the instances
    bool          interface; // SystemVerilog interface instance: all of its
                             // signals are ports and are also nets of the
                             // parent named LABEL.SIGNAL

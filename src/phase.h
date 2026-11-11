@@ -43,6 +43,10 @@ tree_t elab(object_t **top, int ntop, jit_t *jit, unit_registry_t *ur,
             mir_context_t *mc, cover_data_t *cover, sdf_file_t *sdf,
             rt_model_t *m);
 
+// The number of black boxes made for missing units by the last elaboration
+// with --black-box-missing
+unsigned elab_black_boxes(void);
+
 // Set the value of a top-level generic
 void elab_set_generic(const char *name, const char *value);
 

@@ -845,6 +845,36 @@ static void elab_map_anonymous_type(type_t ctype, type_t etype, hash_t *map)
    }
 }
 
+static unsigned  elab_nblack;
+static hset_t   *elab_black_seen;
+
+unsigned elab_black_boxes(void)
+{
+   return elab_nblack;
+}
+
+static bool elab_black_box_allowed(ident_t lib)
+{
+   return opt_black_box_allowed(istr(lib));
+}
+
+static void elab_black_box(const loc_t *loc, ident_t unit, ident_t lib)
+{
+   // Instances of a missing unit are black boxes with --black-box-missing:
+   // this is reported once for each unit but every instance counts
+   elab_nblack++;
+
+   if (elab_black_seen == NULL)
+      elab_black_seen = hset_new(16);
+
+   if (hset_contains(elab_black_seen, unit))
+      return;
+
+   hset_insert(elab_black_seen, unit);
+
+   note_at(loc, "black box for missing unit %pI (library %pI)", unit, lib);
+}
+
 static tree_t elab_default_binding(tree_t inst, const elab_ctx_t *ctx)
 {
    // Default binding indication is described in LRM 93 section 5.2.2
@@ -889,8 +919,11 @@ static tree_t elab_default_binding(tree_t inst, const elab_ctx_t *ctx)
    }
 
    if (entity == NULL) {
-      warn_at(tree_loc(inst), "cannot find entity for component %pI "
-              "without binding indication", tree_ident(comp));
+      // With --black-box-missing this is reported where the instance is
+      // elaborated, as the unit may be a Verilog module
+      if (!elab_black_box_allowed(lib_name(lib)))
+         warn_at(tree_loc(inst), "cannot find entity for component %pI "
+                 "without binding indication", tree_ident(comp));
       return NULL;
    }
 
@@ -1696,7 +1729,12 @@ static void elab_context(tree_t t)
       // Make sure any referenced libraries are loaded to allow synth
       // binding to search for entities in them
       tree_t c = tree_context(t, i);
-      if (tree_kind(c) == T_LIBRARY)
+      if (tree_kind(c) != T_LIBRARY)
+         continue;
+      else if (lib_find(tree_ident(c)) == NULL
+               && opt_black_box_allowed(istr(tree_ident(c))))
+         continue;   // Its units are black boxes
+      else
          lib_require(tree_ident(c));
    }
 }
@@ -3374,6 +3412,151 @@ static bool elab_config_bind(const elab_ctx_t *ctx, vlog_node_t list,
    return true;
 }
 
+static bool elab_copy_all_cb(vlog_node_t v, void *ctx);
+
+typedef struct {
+   ident_t name;
+   int     width;
+   bool    input;   // The actual is not something that can be driven
+} bb_port_t;
+
+static bool elab_black_box_vlog_allowed(const elab_ctx_t *ctx)
+{
+   // A Verilog module has no library, so a list of libraries has to name
+   // the work library to include it
+   return elab_black_box_allowed(lib_name(ctx->library));
+}
+
+static vlog_node_t elab_black_box_module(vlog_node_t list, ident_t modname,
+                                         const elab_ctx_t *ctx)
+{
+   // Generate a module for an instance list whose module cannot be found:
+   // its ports are those that the instances connect, with the widths of
+   // the actuals and no direction known, and its parameters those that
+   // the instances set
+
+   A(bb_port_t) ports = AINIT;
+   A(ident_t) params = AINIT;
+
+   const int ninst = vlog_stmts(list);
+   for (int i = 0; i < ninst; i++) {
+      vlog_node_t inst = vlog_stmt(list, i);
+      const int nconns = vlog_params(inst);
+      for (int j = 0; j < nconns; j++) {
+         vlog_node_t conn = vlog_param(inst, j);
+         if (vlog_flags(conn) & VLOG_F_WILDCARD)
+            continue;
+
+         ident_t name;
+         if (vlog_has_ident(conn))
+            name = vlog_ident(conn);
+         else
+            name = ident_sprintf("p%d", j);
+
+         int width = 1;
+         bool input = false;
+         if (vlog_has_value(conn)) {
+            vlog_node_t value = vlog_value(conn);
+            const unsigned size = vlog_width(value);
+            if (size > 0 && size < (1 << 20))
+               width = size;
+
+            switch (vlog_kind(value)) {
+            case V_REF:
+            case V_BIT_SELECT:
+            case V_PART_SELECT:
+            case V_CONCAT:
+            case V_MEMBER_REF:
+            case V_HIER_REF:
+               break;
+            default:
+               input = true;   // A constant or an expression
+               break;
+            }
+         }
+
+         bool have = false;
+         for (int k = 0; k < ports.count && !have; k++) {
+            if (ports.items[k].name == name) {
+               ports.items[k].width = MAX(ports.items[k].width, width);
+               ports.items[k].input &= input;
+               have = true;
+            }
+         }
+
+         if (!have) {
+            bb_port_t p = { .name = name, .width = width, .input = input };
+            APUSH(ports, p);
+         }
+      }
+   }
+
+   const int nparams = vlog_params(list);
+   for (int i = 0; i < nparams; i++) {
+      vlog_node_t p = vlog_param(list, i);
+      ident_t name = vlog_has_ident(p) ? vlog_ident(p) : ident_sprintf("P%d", i);
+
+      bool have = false;
+      for (int k = 0; k < params.count && !have; k++)
+         have = params.items[k] == name;
+
+      if (!have)
+         APUSH(params, name);
+   }
+
+   LOCAL_TEXT_BUF tb = tb_new();
+   tb_printf(tb, "module \\%s$bb%u ", istr(modname), (*ctx->nshims)++);
+
+   for (int i = 0; i < params.count; i++)
+      tb_printf(tb, "%s \\%s = 0", i == 0 ? "#(parameter" : ", parameter",
+                istr(params.items[i]));
+   if (params.count > 0)
+      tb_cat(tb, ") ");
+
+   tb_cat(tb, "(");
+   for (int i = 0; i < ports.count; i++) {
+      tb_printf(tb, "%s%s wire", i > 0 ? ", " : "",
+                ports.items[i].input ? "input" : "inout");
+      if (ports.items[i].width > 1)
+         tb_printf(tb, " [%d:0]", ports.items[i].width - 1);
+      tb_printf(tb, " \\%s ", istr(ports.items[i].name));
+   }
+   tb_cat(tb, ");\nendmodule\n");
+
+   ACLEAR(ports);
+   ACLEAR(params);
+
+   const int base_errors = error_count();
+
+   // The parser allocates objects in its own arena so set aside the one
+   // used for the elaborated design while it runs
+   object_arena_t *saved = detach_global_arena();
+
+   file_ref_t file_ref = loc_file_ref("<black-box>", NULL);
+   input_from_buffer(tb_get(tb), tb_len(tb), file_ref, SOURCE_VERILOG);
+
+   vlog_node_t mod = vlog_parse();
+   if (mod != NULL && vlog_parse() != NULL   // Consume end of file
+       && error_count() == base_errors)
+      fatal_trace("more than one module in generated black box");
+
+   if (mod != NULL && error_count() == base_errors) {
+      vlog_check(mod);
+      if (error_count() == base_errors) {
+         vlog_simp(mod);
+         vlog_set_flags(mod, vlog_flags(mod) | VLOG_F_BLACKBOX);
+      }
+   }
+
+   freeze_global_arena();
+   attach_global_arena(saved);
+
+   if (error_count() != base_errors)
+      return NULL;
+
+   return vlog_copy(mod, elab_copy_all_cb, NULL);
+}
+
 static void elab_verilog_instance_list(vlog_node_t v, const elab_ctx_t *ctx)
 {
    ident_t modname = vlog_ident(v);
@@ -3382,14 +3565,27 @@ static void elab_verilog_instance_list(vlog_node_t v, const elab_ctx_t *ctx)
    ident_t qual;
    object_t *obj = elab_find_instance_unit(v, ctx, &qual);
 
-   if (obj == NULL) {
+   vlog_node_t mod = NULL;
+   bool black_box = false;
+   if (obj == NULL && elab_black_box_vlog_allowed(ctx)) {
+      mod = elab_black_box_module(v, modname, ctx);
+      if (mod == NULL)
+         return;
+
+      elab_black_box(vlog_loc(v), modname, libname);
+      black_box = true;
+   }
+   else if (obj == NULL) {
       error_at(vlog_loc(v), "module %pQ not found in library %pI or any "
                "other library", modname, libname);
       return;
    }
+   else
+      mod = vlog_from_object(obj);
 
-   vlog_node_t mod = vlog_from_object(obj);
-   if (mod == NULL) {
+   if (black_box)
+      ;
+   else if (mod == NULL) {
       tree_t entity = tree_from_object(obj);
       if (entity != NULL && tree_kind(entity) == T_ENTITY) {
          elab_verilog_vhdl_instance_list(v, entity, ctx);
@@ -5912,7 +6108,24 @@ static void elab_configuration(tree_t inst, tree_t unit, const elab_ctx_t *ctx)
 
 static void elab_component(tree_t inst, tree_t comp, const elab_ctx_t *ctx)
 {
-   if (!tree_has_spec(inst)) {
+   if (tree_has_spec(inst) && !tree_has_value(tree_spec(inst))
+       && tree_has_ident2(tree_spec(inst))) {
+      // An entity that was missing when the instance was analysed with
+      // --black-box-missing, its ports those of the port map
+      ident_t full = ident_until(tree_ident2(tree_spec(inst)), '-');
+      ident_t lib_i = ident_until(full, '.');
+      ident_t lib_n = lib_i != full ? lib_i : lib_name(ctx->library);
+      if (!elab_black_box_allowed(lib_n)) {
+         error_at(tree_loc(inst), "cannot find entity %pI in library %pI: it "
+                  "was missing when the design was analysed with "
+                  "--black-box-missing, elaborate with the option too",
+                  ident_from(full, '.') ?: full, lib_n);
+         return;
+      }
+
+      elab_black_box(tree_loc(inst), ident_from(full, '.') ?: full, lib_n);
+   }
+   else if (!tree_has_spec(inst)) {
       tree_t bind = elab_default_binding(inst, ctx);
       if (bind == NULL) {
          // The component may be declared in a package of another library
@@ -5939,6 +6152,14 @@ static void elab_component(tree_t inst, tree_t comp, const elab_ctx_t *ctx)
             elab_mixed_instance(inst, comp, mod, ctx);
             return;
          }
+      }
+
+      if (bind == NULL) {
+         ident_t full_i = tree_ident(comp);
+         ident_t lib_i = ident_until(full_i, '.');
+         ident_t lib_n = lib_i != full_i ? lib_i : lib_name(ctx->library);
+         if (elab_black_box_allowed(lib_n))
+            elab_black_box(tree_loc(inst), tree_ident2(inst), lib_n);
       }
 
       tree_t spec = tree_new(T_SPEC);
@@ -8210,6 +8431,12 @@ tree_t elab(object_t **top, int ntop, jit_t *jit, unit_registry_t *ur,
    assert(ntop >= 1);
 
    make_new_arena();
+
+   elab_nblack = 0;
+   if (elab_black_seen != NULL) {
+      hset_free(elab_black_seen);
+      elab_black_seen = NULL;
+   }
 
 
    if (elab_ic_types != NULL) {

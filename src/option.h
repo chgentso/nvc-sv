@@ -84,6 +84,8 @@ typedef enum {
    OPT_RA_VERBOSE,
    OPT_EXCL_VERBOSE,
    OPT_LOWER_MIR,
+   OPT_BLACK_BOX,
+   OPT_BLACK_BOX_LIBS,
 
    OPT_LAST_NAME
 } opt_name_t;
@@ -101,6 +103,10 @@ int opt_get_int(opt_name_t name);
 int opt_verilog_seed(void);
 size_t opt_get_size(opt_name_t name);
 const char *opt_get_str(opt_name_t name);
+
+// True if --black-box-missing applies to units of this library: it was given
+// without a list of libraries or the list has the library in it
+bool opt_black_box_allowed(const char *lib);
 bool opt_get_verbose(opt_name_t name, const char *filter);
 
 void set_default_options(void);

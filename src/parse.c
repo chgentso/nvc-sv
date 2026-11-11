@@ -3094,6 +3094,12 @@ static void p_library_clause(tree_t unit)
       tree_add_context(unit, l);
 
       lib_t lib = lib_find(it->ident);
+      if (lib == NULL && opt_black_box_allowed(istr(it->ident))) {
+         // The units that are instantiated from the library become black
+         // boxes: there is nothing in it to find
+         lib = lib_tmp(istr(it->ident));
+      }
+
       if (lib == NULL) {
          LOCAL_TEXT_BUF tb = tb_new();
          lib_print_search_paths(tb);
@@ -3718,6 +3724,153 @@ static void infer_anonymous_type(tree_t map, tree_t unit, tree_t elem,
    tree_add_genmap(map, g);
 }
 
+static tree_t black_box_comp;   // Component being inferred from a port map
+
+static tree_t p_black_box_component(tree_t inst)
+{
+   // With --black-box-missing the instantiation of an entity that cannot be
+   // found is a component of that name whose ports and generics are those
+   // of the association lists, which are added to as the lists are parsed
+
+   ident_t full = ident_until(tree_ident2(inst), '-');
+
+   if (query_name(nametab, full, NULL) != 0)
+      return NULL;   // Found: the usual error is for another reason
+
+   ident_t lib = ident_until(full, '.');
+   if (!opt_black_box_allowed(istr(lib == full ? well_known(W_WORK) : lib)))
+      return NULL;
+
+   tree_t comp = tree_new(T_COMPONENT);
+   tree_set_ident(comp, ident_from(full, '.') ?: full);
+   tree_set_loc(comp, CURRENT_LOC);
+   return comp;
+}
+
+static bool is_black_box_actual_signal(tree_t value, port_mode_t *mode)
+{
+   // Direction of the formal that an actual can be connected to
+   *mode = PORT_IN;
+
+   if (tree_kind(value) != T_REF || !tree_has_ref(value))
+      return false;
+
+   tree_t decl = tree_ref(value);
+   switch (tree_kind(decl)) {
+   case T_SIGNAL_DECL:
+      *mode = PORT_INOUT;
+      return true;
+   case T_PORT_DECL:
+      switch (tree_subkind(decl)) {
+      case PORT_OUT:    *mode = PORT_OUT; break;
+      case PORT_BUFFER: *mode = PORT_BUFFER; break;
+      case PORT_INOUT:  *mode = PORT_INOUT; break;
+      default:          *mode = PORT_IN; break;
+      }
+      return true;
+   default:
+      return false;
+   }
+}
+
+static tree_t p_inferred_association(tree_t comp, int pos, formal_kind_t kind)
+{
+   // [ formal_name => ] actual: the formal is declared by its first use
+
+   BEGIN("association element");
+
+   tree_t p = tree_new(T_PARAM);
+
+   ident_t name = NULL;
+   if (peek() == tID && peek_nth(2) == tASSOC) {
+      name = p_identifier();
+      consume(tASSOC);
+   }
+   else
+      name = ident_sprintf("%c%d", kind == F_PORT_MAP ? 'P' : 'G', pos);
+
+   // The width of an open port is not known: it is one bit
+   const bool open = peek() == tOPEN;
+   tree_t value;
+   if (open) {
+      consume(tOPEN);
+      value = tree_new(T_OPEN);
+      tree_set_loc(value, CURRENT_LOC);
+      tree_set_type(value, std_type(NULL, STD_BIT));
+   }
+   else {
+      // A character literal can only be told from std_ulogic and bit by its
+      // context: guess the type that is the most likely
+      type_t guess = NULL;
+      if (kind == F_PORT_MAP) {
+         guess = lib_find(ident_new("IEEE")) != NULL
+            ? ieee_type(IEEE_STD_LOGIC) : std_type(NULL, STD_BIT);
+      }
+
+      value = p_actual_part(C_DEFAULT, guess, NULL, kind);
+   }
+
+   type_t type = tree_kind(value) == T_OPEN || !tree_has_type(value)
+      ? NULL : tree_type(value);
+
+   if (type != NULL && type_is_universal(type)) {
+      type = std_type(NULL, type_is_real(type) ? STD_REAL : STD_INTEGER);
+      tree_t conv = tree_new(T_TYPE_CONV);
+      tree_set_loc(conv, tree_loc(value));
+      tree_set_type(conv, type);
+      tree_set_value(conv, value);
+      value = conv;
+   }
+
+   if (kind == F_PORT_MAP && open)
+      type = std_type(NULL, STD_BIT);
+
+   if (kind == F_PORT_MAP && type != NULL && !type_is_none(type)) {
+      tree_t port = tree_new(T_PORT_DECL);
+      tree_set_ident(port, name);
+      tree_set_loc(port, tree_loc(value));
+      tree_set_class(port, C_SIGNAL);
+      tree_set_type(port, type);
+      tree_set_flag(port, TREE_F_BLACK_BOX);
+
+      port_mode_t mode;
+      is_black_box_actual_signal(value, &mode);
+      if (open)
+         mode = PORT_OUT;
+      tree_set_subkind(port, mode);
+
+      tree_add_port(comp, port);
+
+      tree_t ref = make_ref(port);
+      tree_set_subkind(p, P_NAMED);
+      tree_set_name(p, ref);
+   }
+   else if (kind == F_GENERIC_MAP && type != NULL && !type_is_none(type)
+            && type_is_scalar(type)) {
+      tree_t g = tree_new(T_GENERIC_DECL);
+      tree_set_ident(g, name);
+      tree_set_loc(g, tree_loc(value));
+      tree_set_class(g, C_CONSTANT);
+      tree_set_type(g, type);
+      tree_set_subkind(g, PORT_IN);
+      tree_set_flag(g, TREE_F_BLACK_BOX);
+
+      tree_add_generic(comp, g);
+
+      tree_set_subkind(p, P_NAMED);
+      tree_set_name(p, make_ref(g));
+   }
+   else {
+      // Open, or of a type that cannot be inferred: not part of the box
+      tree_set_subkind(p, P_POS);
+      tree_set_pos(p, pos);
+   }
+
+   tree_set_value(p, value);
+   tree_set_loc(p, CURRENT_LOC);
+   return p;
+}
+
 static void p_port_association_list(tree_t map, tree_t unit)
 {
    // association_element { , association_element }
@@ -3729,7 +3882,9 @@ static void p_port_association_list(tree_t map, tree_t unit)
    int pos = 0;
    do {
       tree_t p = pos < nports ? tree_port(unit, pos) : NULL;
-      tree_t elem = p_association_element(unit, pos++, p, F_PORT_MAP);
+      tree_t elem = unit != NULL && unit == black_box_comp
+         ? p_inferred_association(unit, pos++, F_PORT_MAP)
+         : p_association_element(unit, pos++, p, F_PORT_MAP);
       tree_add_param(map, elem);
 
       if (standard() >= STD_19 && unit != NULL && tree_generics(unit) > 0)
@@ -3748,7 +3903,9 @@ static void p_generic_association_list(tree_t map, tree_t unit)
    int pos = 0;
    do {
       tree_t g = pos < ngenerics ? tree_generic(unit, pos) : NULL;
-      tree_t elem = p_association_element(unit, pos++, g, F_GENERIC_MAP);
+      tree_t elem = unit != NULL && unit == black_box_comp
+         ? p_inferred_association(unit, pos++, F_GENERIC_MAP)
+         : p_association_element(unit, pos++, g, F_GENERIC_MAP);
       tree_add_genmap(map, elem);
 
       if (standard() >= STD_19 && unit != NULL)
@@ -11779,6 +11936,16 @@ static tree_t p_component_instantiation_statement(ident_t label, tree_t name)
    tree_set_ident(t, label);
    tree_set_loc(t, CURRENT_LOC);
 
+   // An entity that is missing is a black box with --black-box-missing:
+   // a component without a binding that has no ports until the port map
+   tree_t black = NULL;
+   if (name == NULL && tree_class(t) == C_ENTITY && !tree_has_ref(t)
+       && opt_get_int(OPT_BLACK_BOX)
+       && (black = p_black_box_component(t)) != NULL) {
+      tree_set_class(t, C_COMPONENT);
+      tree_set_ref(t, black);
+   }
+
    tree_t ref = tree_has_ref(t) && tree_kind(tree_ref(t)) == T_COMPONENT
       && tree_class(t) == C_COMPONENT && name == NULL
       ? tree_ref(t) : find_binding(t);
@@ -11787,6 +11954,16 @@ static tree_t p_component_instantiation_statement(ident_t label, tree_t name)
    tree_t entity = ref ? primary_unit_of(ref) : NULL;
 
    tree_t spec = query_spec(nametab, t);
+   if (black != NULL) {
+      // The unit that is missing is in the specification
+      spec = tree_new(T_SPEC);
+      tree_set_loc(spec, tree_loc(t));
+      tree_set_ident(spec, label);
+      tree_set_ident2(spec, tree_ident2(t));
+      tree_set_ref(spec, black);
+      black_box_comp = black;
+   }
+
    if (spec != NULL)
       tree_set_spec(t, spec);
 
@@ -11804,6 +11981,8 @@ static tree_t p_component_instantiation_statement(ident_t label, tree_t name)
       p_port_map_aspect(t, entity);
 
    consume(tSEMI);
+
+   black_box_comp = NULL;
 
    tree_set_loc(t, CURRENT_LOC);
 

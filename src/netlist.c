@@ -38,6 +38,7 @@ typedef struct {
    bit_t         *base;       // First bit number of each net
    bool           first;      // No comma needed before next item
    shash_t       *names;      // Cell names already used
+   shash_t       *boxes;      // Black box modules already written
    A(char *)      owned;      // Strings to free with the name table
    int            depth;
 } wctx_t;
@@ -543,7 +544,8 @@ static void write_instance(wctx_t *w, const conn_inst_t *inst,
    // module's ports: input, output or inout
    key(w, inst->label);
    begin_obj(w);
-   write_attr_str(w, "type", child->name);
+   write_attr_str(w, "type", child->blackbox && child->unit
+                  ? child->unit : child->name);
 
    LOCAL_TEXT_BUF convs = tb_new();
    collect_conv(inst, convs);
@@ -553,6 +555,14 @@ static void write_instance(wctx_t *w, const conn_inst_t *inst,
    write_attr_str(w, "src", src);
    write_attr_str(w, "language", lang_string(child->lang));
    write_attr_str(w, "unit", child->unit);
+   if (child->blackbox) {
+      key(w, "blackbox");
+      fputs("1", w->f);
+      if (child->inferred) {
+         key(w, "inferred_ports");
+         fputs("1", w->f);
+      }
+   }
    if (tb_len(convs) > 0)
       write_attr_str(w, "conversions", tb_get(convs));
    end_obj(w);
@@ -593,11 +603,21 @@ static void write_module(wctx_t *w, conn_block_t *b, bool is_top)
       w->next += b->nets[i]->width;
    }
 
-   key(w, b->name);
+   // A black box is a module of the name of the missing unit, which all its
+   // instances are cells of
+   key(w, b->blackbox && b->unit ? b->unit : b->name);
    begin_obj(w);
 
    key(w, "attributes");
    begin_obj(w);
+   if (b->blackbox) {
+      key(w, "blackbox");
+      fputs("1", w->f);
+      if (b->inferred) {
+         key(w, "inferred_ports");
+         fputs("1", w->f);
+      }
+   }
    if (is_top) {
       key(w, "top");
       fputs("1", w->f);
@@ -740,6 +760,16 @@ static void module_cb(conn_block_t *b, void *ctx)
    if (hidden_interface(b))
       return;
 
+   if (b->blackbox && b->unit != NULL) {
+      // One module for all the instances of the unit
+      if (wc->w->boxes == NULL)
+         wc->w->boxes = shash_new(16);
+      else if (shash_get(wc->w->boxes, b->unit) != NULL)
+         return;
+
+      shash_put(wc->w->boxes, b->unit, (void *)b);
+   }
+
    const int depth = block_depth(b);
    if (wc->max_depth >= 0 && depth > wc->max_depth)
       return;
@@ -764,6 +794,9 @@ void netlist_write(const conn_design_t *cd, const netlist_opts_t *opts,
       .max_depth = opts ? opts->max_depth : -1,
    };
    conn_walk(cd, module_cb, &wc);
+
+   if (w.boxes != NULL)
+      shash_free(w.boxes);
 
    end_obj(&w);
    fputs("\n}\n", f);

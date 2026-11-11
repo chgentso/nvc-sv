@@ -2628,3 +2628,5 @@ svsvawidth1     verilog
 svwidetest1     verilog
 svwidetest2     verilog
 svassertctlgen1 verilog
+blackbox1       shell
+blackbox2       shell
