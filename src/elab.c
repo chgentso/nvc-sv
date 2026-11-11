@@ -6109,10 +6109,12 @@ static void elab_configuration(tree_t inst, tree_t unit, const elab_ctx_t *ctx)
 static void elab_component(tree_t inst, tree_t comp, const elab_ctx_t *ctx)
 {
    if (tree_has_spec(inst) && !tree_has_value(tree_spec(inst))
-       && tree_has_ident2(tree_spec(inst))) {
+       && tree_has_ident2(tree_spec(inst))
+       && strncmp(istr(tree_ident2(tree_spec(inst))), "(MISSING).", 10) == 0) {
       // An entity that was missing when the instance was analysed with
       // --black-box-missing, its ports those of the port map
-      ident_t full = ident_until(tree_ident2(tree_spec(inst)), '-');
+      ident_t full = ident_until(ident_from(tree_ident2(tree_spec(inst)),
+                                            '.'), '-');
       ident_t lib_i = ident_until(full, '.');
       ident_t lib_n = lib_i != full ? lib_i : lib_name(ctx->library);
       if (!elab_black_box_allowed(lib_n)) {

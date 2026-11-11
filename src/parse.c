@@ -11959,7 +11959,10 @@ static tree_t p_component_instantiation_statement(ident_t label, tree_t name)
       spec = tree_new(T_SPEC);
       tree_set_loc(spec, tree_loc(t));
       tree_set_ident(spec, label);
-      tree_set_ident2(spec, tree_ident2(t));
+      // Marked by the prefix as component specifications have the name of
+      // the component here
+      tree_set_ident2(spec, ident_prefix(ident_new("(MISSING)"),
+                                         tree_ident2(t), '.'));
       tree_set_ref(spec, black);
       black_box_comp = black;
    }
