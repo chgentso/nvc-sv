@@ -26309,9 +26309,17 @@ bool vlog_class_typename(vlog_node_t c, text_buf_t *tb, bool qualified)
    LOCAL_TEXT_BUF tmp = tb_new();
    vlog_typename_class(c, tmp, c);
 
-   const char *text = tb_get(tmp);
-   if (strncmp(text, "class ", 6) == 0)
-      text += 6;
+   // Types of the parameters of a specialisation are classes too: leave the
+   // word out of all of them to keep the name short
+   LOCAL_TEXT_BUF plain = tb_new();
+   for (const char *p = tb_get(tmp); *p != '\0'; ) {
+      if (strncmp(p, "class ", 6) == 0)
+         p += 6;
+      else
+         tb_append(plain, *p++);
+   }
+
+   const char *text = tb_get(plain);
 
    if (qualified) {
       tb_cat(tb, text);

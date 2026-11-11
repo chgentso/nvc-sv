@@ -4,7 +4,7 @@
 // a package and from a static property
 
 typedef struct {
-   char path[128];
+   char path[512];
    char dyn[32];
    int  level;
    int  count;
@@ -32,7 +32,7 @@ static void walk(vpiHandle comp, const char *path, int level)
       check_int(vpicls_oid(parent), vpicls_oid(comp));
       check_int(vpi_nvc_object_addr(parent), vpi_nvc_object_addr(comp));
 
-      char full[128];
+      char full[512];
       snprintf(full, sizeof(full), "%s%s%s", path, path[0] ? "." : "",
                vpicls_str(name, vpiStringVal));
 
