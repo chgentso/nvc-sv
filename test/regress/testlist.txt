@@ -2563,6 +2563,7 @@ vpicls1         verilog,vpi
 vpicls2         verilog,vpi
 vpicls3         verilog,vpi,H=4m
 vpicls4         verilog,vpi
+vpicls6         verilog,vpi,$NVC_DEBUG_STMTS=1
 svevtport1 verilog
 svlrmmisc1 verilog
 svprogparam1 verilog

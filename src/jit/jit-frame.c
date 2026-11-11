@@ -614,7 +614,7 @@ static void describe_vhdl(const frame_var_t *v, tree_t decl,
                           const jit_scalar_t *args, out_t *o)
 {
    type_t type = tree_type(decl);
-   if (!layoutable(type)) {
+   if (v->class == FRAME_OBJECT || !layoutable(type)) {
       tb_cat(o->text, "<unsupported>");
       return;
    }
@@ -865,6 +865,16 @@ static void describe_verilog(const frame_var_t *v, const jit_scalar_t *args,
          o->bits = b;
          info->kind = FRAME_K_STRING;
          info->width = len * 8;
+      }
+      break;
+
+   case FRAME_OBJECT:
+      {
+         const void *ptr = v->carrier == FRAME_VALUE
+            ? slot->pointer : *(const void *const *)image;
+         info->kind = FRAME_K_OBJECT;
+         info->addr = (uintptr_t)ptr;
+         tb_cat(o->text, ptr == NULL ? "null" : "<object>");
       }
       break;
 

@@ -5597,8 +5597,39 @@ static void vpi_frame_var_cb(const frame_info_t *info, void *ctx)
       out.line = info->loc->first_line;
    }
 
+   text_buf_t *text = NULL;
+   if (info->kind == FRAME_K_OBJECT) {
+      // The variable holds a class handle if what it points to is an object
+      uint64_t oid;
+      vlog_node_t cls;
+      if (info->addr == 0) {
+         out.text = "null";
+      }
+      else if (vpi_object_check((void *)info->addr, &oid, &cls)) {
+         const class_desc_t *d = vpi_class_desc(cls);
+         text = tb_new();
+         tb_printf(text, "%s#%"PRIu64, d->name, oid);
+         out.text       = tb_get(text);
+         out.addr       = (PLI_INT64)info->addr;
+         out.oid        = oid;
+         out.class_name = d->name;
+      }
+      else {
+         out.kind = vpiNvcVarNone;
+         out.text = "<unsupported>";
+         (*fv->fn)(&out, fv->user);
+         fv->count++;
+         return;
+      }
+      out.kind = vpiNvcVarObject;
+      out.type_name = info->addr == 0 ? NULL : out.class_name;
+   }
+
    fv->count++;
    (*fv->fn)(&out, fv->user);
+
+   if (text != NULL)
+      tb_free(text);
 }
 
 DLLEXPORT

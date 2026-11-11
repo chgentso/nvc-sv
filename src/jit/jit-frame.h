@@ -46,6 +46,7 @@ typedef enum {
    FRAME_CARRAY,   // Array of constant size held in place
    FRAME_RECORD,
    FRAME_POINTER,  // Pointer to a value described by the declared type
+   FRAME_OBJECT,   // Context pointer: a class handle
 } frame_class_t;
 
 typedef struct {
@@ -81,6 +82,7 @@ typedef enum {
    FRAME_K_REAL,
    FRAME_K_TIME,
    FRAME_K_STRING,   // Eight bits per character
+   FRAME_K_OBJECT,   // Context pointer in addr: whether it is an object is for the caller
 } frame_vkind_t;
 
 typedef struct {
@@ -97,6 +99,7 @@ typedef struct {
    bool               has_range;
    int64_t            low, high;
    const loc_t       *loc;
+   uintptr_t          addr;        // FRAME_K_OBJECT
 } frame_info_t;
 
 typedef void (*frame_fn_t)(const frame_info_t *info, void *ctx);

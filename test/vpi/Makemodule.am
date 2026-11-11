@@ -34,7 +34,8 @@ lib_vpi_test_so_SOURCES = \
 	test/vpi/vpicls2.c \
 	test/vpi/vpicls3.c \
 	test/vpi/vpicls4.c \
-	test/vpi/vpicls5.c
+	test/vpi/vpicls5.c \
+	test/vpi/vpicls6.c
 
 lib_vpi_test_so_CFLAGS  = $(SHLIB_CFLAGS) -I$(top_srcdir)/src/vpi $(AM_CFLAGS)
 lib_vpi_test_so_LDFLAGS = $(SHLIB_LDFLAGS) $(AM_LDFLAGS)

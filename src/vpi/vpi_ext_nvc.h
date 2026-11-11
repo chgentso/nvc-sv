@@ -273,6 +273,9 @@ PLI_INT32 vpi_nvc_get_frames(vpi_nvc_frame_fn_t fn, void *user_data);
 #define vpiNvcVarReal    5
 #define vpiNvcVarTime    6   // Femtoseconds
 #define vpiNvcVarString  7
+#define vpiNvcVarObject  8   // Class handle: addr, oid and class_name; text is
+                             // null or class#oid; vpi_nvc_object_at(addr,
+                             // oid) gives the object
 
 typedef struct {
    const char        *name;
@@ -290,6 +293,9 @@ typedef struct {
    PLI_INT64          high;
    const char        *file;         // Declaration, or NULL
    PLI_INT32          line;
+   PLI_INT64          addr;         // vpiNvcVarObject: the object, 0 for null
+   PLI_INT64          oid;
+   const char        *class_name;
 } vpi_nvc_var_t;
 
 typedef void (*vpi_nvc_var_fn_t)(const vpi_nvc_var_t *var, void *user_data);

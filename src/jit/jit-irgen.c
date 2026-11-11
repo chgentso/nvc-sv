@@ -3890,6 +3890,13 @@ static bool irgen_frame_class(jit_irgen_t *g, mir_type_t type, bool is_param,
       v->nslots  = 1;
       return true;
 
+   case MIR_TYPE_CONTEXT:
+      // A class handle (or a virtual interface, which the debugger finds out)
+      v->class   = FRAME_OBJECT;
+      v->carrier = is_param ? FRAME_VALUE : FRAME_MEM;
+      v->nslots  = 1;
+      return true;
+
    case MIR_TYPE_POINTER:
       if (!is_param)
          return false;
