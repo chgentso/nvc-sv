@@ -5506,6 +5506,48 @@ rt_proc_t *model_lookup_proc(rt_model_t *m, const char *scope_path,
    return scope != NULL ? scope_find_proc(scope, name) : NULL;
 }
 
+static rt_proc_t *scope_find_proc_at(rt_scope_t *scope, const char *file,
+                                     unsigned line)
+{
+   for (int i = 0; i < scope->procs.count; i++) {
+      rt_proc_t *p = scope->procs.items[i];
+      const loc_t *loc = tree_loc(p->where);
+      if (loc == NULL || loc_invalid_p(loc) || loc->first_line != line)
+         continue;
+
+      // The conn layer has the file as it was analysed, so does the loc
+      if (file == NULL || strcmp(loc_file_str(loc), file) == 0)
+         return p;
+   }
+
+   if (scope_is_component(scope)) {
+      for (int i = 0; i < scope->children.count; i++) {
+         rt_proc_t *p = scope_find_proc_at(scope->children.items[i], file, line);
+         if (p != NULL)
+            return p;
+      }
+   }
+
+   return NULL;
+}
+
+rt_proc_t *model_lookup_proc_at(rt_model_t *m, const char *scope_path,
+                                const char *file, unsigned line)
+{
+   // The process of a scope that starts at a line, for matching what the
+   // static description of the design says with the model
+
+   char *copy LOCAL = xstrdup(scope_path);
+   char *names[64], *saveptr = NULL;
+   int n = 0;
+   for (char *t = strtok_r(copy, " ", &saveptr); t != NULL && n < 64;
+        t = strtok_r(NULL, " ", &saveptr))
+      names[n++] = t;
+
+   rt_scope_t *scope = lookup_scope_in(root_scope(m), names, n);
+   return scope != NULL ? scope_find_proc_at(scope, file, line) : NULL;
+}
+
 static bool wakeable_is_proc(const rt_wakeable_t *w, const rt_proc_t *p)
 {
    // A signal assignment that nvc turns into a transfer waits on behalf of

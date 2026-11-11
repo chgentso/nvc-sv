@@ -100,10 +100,12 @@ void __check_int(PLI_INT64 v, PLI_INT64 n, const char *file, int lineno)
 static void collect_conn(const vpi_nvc_conn_t *c, void *user)
 {
    vpi_test_conns_t *out = user;
-   if (out->n >= 16)
+   int *n = c->is_load ? &(out->nloads) : &(out->n);
+   if (*n >= 16)
       return;
 
-   vpi_test_conn_t *it = &(out->item[out->n++]);
+   vpi_test_conn_t *it = c->is_load ? &(out->load[(*n)++])
+      : &(out->item[(*n)++]);
    it->c = *c;
 
    // The strings are only valid during the callback
@@ -159,6 +161,20 @@ const vpi_test_conn_t *vpi_test_conn_at(const vpi_test_conns_t *cs,
 {
    for (int i = 0; i < cs->n; i++) {
       const vpi_test_conn_t *c = &(cs->item[i]);
+      const size_t flen = strlen(file), len = strlen(c->file);
+      if (c->c.line == line && len >= flen
+          && strcmp(c->file + len - flen, file) == 0)
+         return c;
+   }
+
+   return NULL;
+}
+
+const vpi_test_conn_t *vpi_test_load_at(const vpi_test_conns_t *cs,
+                                        const char *file, int line)
+{
+   for (int i = 0; i < cs->nloads; i++) {
+      const vpi_test_conn_t *c = &(cs->load[i]);
       const size_t flen = strlen(file), len = strlen(c->file);
       if (c->c.line == line && len >= flen
           && strcmp(c->file + len - flen, file) == 0)

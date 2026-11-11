@@ -106,8 +106,13 @@ void vpi_nvc_set_diag_cb(vpi_nvc_diag_fn_t fn, void *user_data);
 // turn.  Must be called with the simulation paused, from its thread.
 //
 // Returns -1 if there is no such signal, otherwise a combination of the
-// vpiNvcConnLoadsMissing flag (this nvc does not list loads, so none were
-// reported) and 0.
+// vpiNvcConnLoadsMissing flag (the static description of the design could not
+// give the loads of this signal, so none were reported) and 0.  The loads are
+// the processes that read the range and the ports of instances below, or the
+// actual in the instance above, that it is connected to, from the static
+// description of the design (conn.h) rather than from the model, so a
+// process is a load whether or not it is waiting at the moment.  A load that
+// is a port has vpiNvcConnFromChild if the other signal is below.
 
 #define vpiNvcConnProcess   0   // A process drives the signal
 #define vpiNvcConnPort      1   // Its value comes from another signal
@@ -129,7 +134,7 @@ void vpi_nvc_set_diag_cb(vpi_nvc_diag_fn_t fn, void *user_data);
 
 typedef struct {
    PLI_INT32   kind;         // vpiNvcConn*
-   PLI_INT32   is_load;      // 0 for a driver
+   PLI_INT32   is_load;      // 0 for a driver, 1 for a load
    const char *name;         // Process name, for a process
    const char *proc_kind;    // process, always_ff, assign, initial, ... or NULL
    const char *scope;        // Scope of the process (spaces as in path); for a

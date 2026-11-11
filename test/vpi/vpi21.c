@@ -140,11 +140,53 @@ static PLI_INT32 start_of_sim(p_cb_data cb)
    check_string(cs.item[0].other, "vpi21 u_sub q");
    check_int(cs.item[0].c.flags, vpiNvcConnFromChild);
 
-   // Unknown names; the loads are not reported by this nvc
+   // The loads, from the static description of the design: the processes
+   // that read a signal, whether or not they wait for it, and the ports it
+   // is connected to
+   check_int(vpi_test_connections(&cs, "vpi21 clk", 0, 1), 1);
+   check_int(cs.nloads, 3);
+   c = vpi_test_load_at(&cs, "vpi21.vhd", 49);       // p_lo
+   fail_if(c == NULL);
+   check_string(c->name, "p_lo");
+   check_string(c->kind, "process");
+   check_string(c->scope, "vpi21");
+   fail_unless(c->c.is_load);
+   fail_if(vpi_test_load_at(&cs, "vpi21.vhd", 47) == NULL);  // clk <= not clk
+   int ports = 0;
+   for (int i = 0; i < cs.nloads; i++) {
+      if (cs.load[i].c.kind == vpiNvcConnPort) {
+         ports++;
+         check_string(cs.load[i].other, "vpi21 u_sub clk");
+         check_string(cs.load[i].scope, "vpi21 u_sub");
+         check_int(cs.load[i].c.flags & vpiNvcConnFromChild,
+                   vpiNvcConnFromChild);
+      }
+   }
+   check_int(ports, 1);
+
+   // A vector read through a port, part of it by a process of the instance
+   check_int(vpi_test_connections(&cs, "vpi21 q", 0, 4), 2);
+   check_int(cs.nloads, 1);
+   check_int(cs.load[0].c.kind, vpiNvcConnPort);
+   check_string(cs.load[0].other, "vpi21 u_leaf a");
+   check_int(cs.load[0].c.first, 0);
+   check_int(cs.load[0].c.count, 2);
+   check_int(cs.load[0].c.other_width, 2);
+   check_int(vpi_test_connections(&cs, "vpi21 u_leaf a", 0, 2), 1);
+   check_int(cs.nloads, 1);
+   check_string(cs.load[0].kind, "process");
+   check_string(cs.load[0].scope, "vpi21 u_leaf");
+   check_int(vpi_test_connections(&cs, "vpi21 u_leaf tmp", 0, 2), 1);
+   check_int(cs.nloads, 1);
+   check_string(cs.load[0].name, "p_out");
+   // nothing reads it
+   check_int(vpi_test_connections(&cs, "vpi21 w", 0, 2), 1);
+   check_int(cs.nloads, 0);
+
+   // Unknown names
    check_int(vpi_nvc_connections("vpi21 nosuch", 0, 0, ignore, NULL), -1);
    check_int(vpi_nvc_connections("vpi21", 0, 0, ignore, NULL), -1);
-   check_int(vpi_nvc_connections("vpi21 q", 0, 4, ignore, NULL),
-             vpiNvcConnLoadsMissing);
+   check_int(vpi_nvc_connections("vpi21 q", 0, 4, ignore, NULL), 0);
 
    vpi_test_cb(cbReadWriteSynch, end_of_step, 0, NULL);
    return 0;

@@ -64,6 +64,50 @@ static PLI_INT32 start_of_sim(p_cb_data cb)
    check_int(vpi_test_connections(&cs, "vpi22 u_cnt clk", 0, 1), 1);
    check_string(cs.item[0].other, "vpi22 clk");
 
+   // Loads: a continuous assignment reads a net, an always_comb the net it
+   // computes from
+   check_int(vpi_test_connections(&cs, "vpi22 q", 0, 4), 1);
+   check_int(cs.nloads, 1);
+   check_string(cs.load[0].kind, "assign");
+   check_int(cs.load[0].c.line, 22);
+   check_int(vpi_test_connections(&cs, "vpi22 n", 0, 4), 1);
+   check_int(cs.nloads, 1);
+   check_string(cs.load[0].kind, "always_comb");
+   check_int(cs.load[0].c.line, 26);
+
+   // part of a net, and the port of an instance it is connected to
+   check_int(vpi_test_connections(&cs, "vpi22 d", 0, 4), 0);
+   check_int(cs.nloads, 3);
+   const vpi_test_conn_t *l = vpi_test_load_at(&cs, "vpi22.sv", 23);
+   fail_if(l == NULL);
+   check_int(l->c.first, 3);
+   check_int(l->c.count, 1);
+   l = vpi_test_load_at(&cs, "vpi22.sv", 24);
+   fail_if(l == NULL);
+   check_int(l->c.first, 2);
+   int ports = 0;
+   for (int i = 0; i < cs.nloads; i++) {
+      if (cs.load[i].c.kind == vpiNvcConnPort) {
+         ports++;
+         check_string(cs.load[i].other, "vpi22 u_cnt d");
+         check_string(cs.load[i].scope, "vpi22 u_cnt");
+         check_int(cs.load[i].c.flags, vpiNvcConnFromChild);
+      }
+   }
+   check_int(ports, 1);
+
+   // inside the instance: read by the always_ff; the output port is read in
+   // the instance above, where the net is
+   check_int(vpi_test_connections(&cs, "vpi22 u_cnt d", 0, 4), 1);
+   check_int(cs.nloads, 1);
+   check_string(cs.load[0].kind, "always_ff");
+   check_int(vpi_test_connections(&cs, "vpi22 u_cnt q", 0, 4), 1);
+   check_int(cs.nloads, 1);
+   check_int(cs.load[0].c.kind, vpiNvcConnPort);
+   check_string(cs.load[0].other, "vpi22 q");
+   check_string(cs.load[0].scope, "vpi22");
+   check_int(cs.load[0].c.flags, 0);
+
    // Verilog names are case sensitive
    check_int(vpi_nvc_connections("vpi22 N", 0, 0, ignore, NULL), -1);
 

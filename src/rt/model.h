@@ -187,6 +187,8 @@ typedef void (*rt_procsig_fn_t)(rt_signal_t *s, uint32_t first, uint32_t count,
 
 rt_proc_t *model_lookup_proc(rt_model_t *m, const char *scope_path,
                              const char *name);
+rt_proc_t *model_lookup_proc_at(rt_model_t *m, const char *scope_path,
+                                const char *file, unsigned line);
 void model_process_signals(rt_model_t *m, rt_proc_t *p, rt_procsig_fn_t fn,
                            void *ctx);
 bool model_lookup_signal(rt_model_t *m, const char *path, rt_found_t *out);

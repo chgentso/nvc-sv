@@ -69,8 +69,10 @@ typedef struct {
 } vpi_test_conn_t;
 
 typedef struct {
-   int             n;
+   int             n;          // Drivers
    vpi_test_conn_t item[16];
+   int             nloads;
+   vpi_test_conn_t load[16];
 } vpi_test_conns_t;
 
 // Ask for the connections of a path (first and count as in the call, 0 for
@@ -94,6 +96,10 @@ int vpi_test_process_signals(vpi_test_procsigs_t *out, const char *scope,
 // The connection that concerns the line of a file whose name ends as given,
 // or NULL
 const vpi_test_conn_t *vpi_test_conn_at(const vpi_test_conns_t *cs,
+                                        const char *file, int line);
+
+// The load that concerns the line of a file, as vpi_test_conn_at
+const vpi_test_conn_t *vpi_test_load_at(const vpi_test_conns_t *cs,
                                         const char *file, int line);
 
 // Register a callback with no object and an optional relative delay

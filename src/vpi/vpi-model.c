@@ -23,6 +23,7 @@
 #include "util.h"
 #include "array.h"
 #include "common.h"
+#include "conn.h"
 #include "diag.h"
 #include "hash.h"
 #include "ident.h"
@@ -4134,6 +4135,158 @@ static void conn_report(const rt_conn_t *c, void *arg)
    (*q->fn)(&out, q->user);
 }
 
+static conn_design_t *conn_design(vpi_context_t *c)
+{
+   // The static description of the design, built when first asked for
+
+   static conn_design_t *cd;
+   static rt_model_t    *built_for;
+
+   if (cd == NULL || built_for != c->model) {
+      if (cd != NULL)
+         conn_free(cd);
+      cd = conn_build(root_scope(c->model)->where);
+      built_for = c->model;
+   }
+
+   return cd;
+}
+
+static void conn_space_path(text_buf_t *tb, const char *dotted, bool verilog)
+{
+   // "TOP.U_SUB.Q" as the path of the protocol: spaces and, for VHDL, lower
+   // case
+   for (const char *p = dotted; *p; p++) {
+      char ch = *p == '.' ? ' ' : *p;
+      if (!verilog && ch >= 'A' && ch <= 'Z')
+         ch += 'a' - 'A';
+      tb_append(tb, ch);
+   }
+}
+
+typedef struct {
+   conn_query_t       *q;
+   vpi_context_t      *ctx;
+   conn_design_t      *cd;
+} conn_load_t;
+
+static void conn_load_report(const conn_end_t *e, void *arg)
+{
+   conn_load_t *l = arg;
+
+   LOCAL_TEXT_BUF scope = tb_new();
+   LOCAL_TEXT_BUF other = tb_new();
+
+   const bool verilog = e->block->lang == CONN_VERILOG;
+
+   vpi_nvc_conn_t out = {
+      .is_load = 1,
+      .first   = e->lo,
+      .count   = e->hi - e->lo + 1,
+      .total   = l->q->total,
+      .file    = e->src,
+      .line    = e->line,
+   };
+
+   if (e->approx)
+      out.flags |= vpiNvcConnApprox;
+
+   switch (e->kind) {
+   case CONN_END_PROC:
+      {
+         out.kind = vpiNvcConnProcess;
+         conn_space_path(scope, e->block->name, verilog);
+
+         // Use the process of the model, which has the name that the
+         // other queries take
+         rt_proc_t *rp = model_lookup_proc_at(l->ctx->model, tb_get(scope),
+                                              e->proc->src, e->proc->line);
+         const char *name = NULL;
+         if (rp != NULL) {
+            tb_rewind(scope);
+            if (rp->scope != NULL)
+               model_scope_path(rp->scope, scope);
+            const char *full = istr(rp->name);
+            const char *colon = strrchr(full, ':');
+            name = colon != NULL ? colon + 1 : full;
+            out.proc_kind = model_proc_kind(rp);
+         }
+         else {
+            name = e->proc->name;
+            out.proc_kind = "process";
+         }
+
+         out.name = name;
+         if (e->proc->src != NULL) {
+            out.file = e->proc->src;
+            out.line = e->proc->line;
+         }
+      }
+      break;
+
+   case CONN_END_CHILD:
+   case CONN_END_EXPR:
+      // The net feeds a port of an instance below
+      out.kind = vpiNvcConnPort;
+      out.flags |= vpiNvcConnFromChild;
+      conn_space_path(scope, e->port->block->name, e->port->block->lang
+                      == CONN_VERILOG);
+      conn_space_path(other, e->port->block->name,
+                      e->port->block->lang == CONN_VERILOG);
+      tb_append(other, ' ');
+      conn_space_path(other, e->port->name, e->port->block->lang == CONN_VERILOG);
+      out.other = tb_get(other);
+      out.other_first = e->kind == CONN_END_CHILD ? e->other.lo : 0;
+      out.other_width = e->port->width;
+      break;
+
+   case CONN_END_PARENT:
+      // The port is connected to an actual in the block above
+      out.kind = vpiNvcConnPort;
+      conn_space_path(scope, e->block->name, verilog);
+      if (e->other.net != NULL) {
+         const conn_block_t *pb = e->other.net->block;
+         const bool pv = pb->lang == CONN_VERILOG;
+         conn_space_path(other, pb->name, pv);
+         tb_append(other, ' ');
+         conn_space_path(other, e->other.net->name, pv);
+         out.other = tb_get(other);
+         out.other_first = e->other.lo;
+         out.other_width = e->other.net->width;
+      }
+      break;
+   }
+
+   out.scope = tb_get(scope);
+   (*l->q->fn)(&out, l->q->user);
+}
+
+static bool conn_loads(vpi_context_t *c, const char *path, conn_query_t *q,
+                       PLI_INT32 first, PLI_INT32 count)
+{
+   // The readers of the range, from the static description of the design:
+   // the model knows only what is waiting at the moment
+
+   conn_design_t *cd = conn_design(c);
+   if (cd == NULL)
+      return false;
+
+   LOCAL_TEXT_BUF dotted = tb_new();
+   for (const char *p = path; *p; p++)
+      tb_append(dotted, *p == ' ' ? '.' : *p);
+
+   const conn_net_t *net = conn_find_net(cd, tb_get(dotted));
+   if (net == NULL || net->width == 0 || (unsigned)first >= net->width)
+      return false;
+
+   const unsigned hi = count > 0
+      ? MIN((unsigned)(first + count - 1), net->width - 1) : net->width - 1;
+
+   conn_load_t l = { .q = q, .ctx = c, .cd = cd };
+   conn_readers(cd, net, first, hi, conn_load_report, &l);
+   return true;
+}
+
 DLLEXPORT
 PLI_INT32 vpi_nvc_connections(const char *path, PLI_INT32 first,
                               PLI_INT32 count, vpi_nvc_conn_fn_t fn,
@@ -4161,7 +4314,10 @@ PLI_INT32 vpi_nvc_connections(const char *path, PLI_INT32 first,
    };
 
    model_item_drivers(&found, first, count, conn_report, &q);
-   return vpiNvcConnLoadsMissing;
+
+   // A signal that was found by an alias path (a merged port) is asked for by
+   // the name given
+   return conn_loads(c, path, &q, first, count) ? 0 : vpiNvcConnLoadsMissing;
 }
 
 typedef struct {
