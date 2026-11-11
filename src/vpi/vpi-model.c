@@ -4063,6 +4063,7 @@ vpiHandle vpi_register_systf(p_vpi_systf_data systf_data_p)
    return handle;
 }
 
+static const loc_t       *diag_where;
 static vpi_nvc_diag_fn_t  diag_fn;
 static void              *diag_context;
 
@@ -4070,8 +4071,13 @@ static void vpi_diag_hook(vhdl_severity_t severity, const char *text,
                           const loc_t *loc, void *context)
 {
    const bool valid = loc != NULL && !loc_invalid_p(loc);
+
+   // The frames asked for in the callback have this as the innermost line
+   const loc_t *saved = diag_where;
+   diag_where = valid ? loc : NULL;
    (*diag_fn)(severity, text, valid ? loc_file_str(loc) : NULL,
               valid ? loc->first_line : 0, diag_context);
+   diag_where = saved;
 }
 
 static rt_proc_t *vpi_find_process(c_process *p)
@@ -4161,6 +4167,162 @@ DLLEXPORT
 PLI_INT32 vpi_nvc_stmt_breakpoint_remove(const char *file, int line)
 {
    return stmt_break_remove(file, line) ? 1 : 0;
+}
+
+DLLEXPORT
+PLI_INT32 vpi_nvc_stmt_step_process(void)
+{
+   return stmt_step_process() ? 1 : 0;
+}
+
+DLLEXPORT
+PLI_INT32 vpi_nvc_stmt_site_query(const char *file, PLI_INT32 line,
+                                  PLI_INT32 *nearest)
+{
+   if (!opt_get_int(OPT_DEBUG_STMTS))
+      return -1;
+
+   int near = 0;
+   const int result = stmt_site_query(file, line, &near);
+   if (nearest != NULL)
+      *nearest = near;
+   return result;
+}
+
+static void vpi_describe_frame(const jit_frame_t *f, const char **kind,
+                               const char **name)
+{
+   *kind = "code";
+   *name = istr(f->symbol);
+
+   tree_t tree = f->object ? tree_from_object(f->object) : NULL;
+   if (tree != NULL) {
+      switch (tree_kind(tree)) {
+      case T_PROCESS:
+         {
+            rt_proc_t *proc = get_active_proc();
+            *kind = "process";
+            *name = istr(proc ? proc->name : tree_ident(tree));
+         }
+         break;
+      case T_FUNC_BODY:
+      case T_FUNC_DECL:
+         *kind = "function";
+         *name = istr(tree_ident(tree));
+         break;
+      case T_PROC_BODY:
+      case T_PROC_DECL:
+         *kind = "procedure";
+         *name = istr(tree_ident(tree));
+         break;
+      case T_PACKAGE:
+      case T_PACK_BODY:
+      case T_PACK_INST:
+         *kind = "package";
+         *name = istr(tree_ident(tree));
+         break;
+      case T_BLOCK:
+         *kind = "block";
+         *name = istr(tree_ident(tree));
+         break;
+      case T_TYPE_DECL:
+         *kind = "type";
+         *name = istr(tree_ident(tree));
+         break;
+      default:
+         if (tree_has_ident(tree))
+            *name = istr(tree_ident(tree));
+         break;
+      }
+      return;
+   }
+
+   vlog_node_t v = f->object ? vlog_from_object(f->object) : NULL;
+   if (v == NULL)
+      return;
+
+   switch (vlog_kind(v)) {
+   case V_INITIAL:
+   case V_ALWAYS:
+      {
+         rt_proc_t *proc = get_active_proc();
+         *kind = vlog_kind(v) == V_INITIAL ? "initial" : "always";
+         *name = istr(proc ? proc->name : vlog_ident(v));
+      }
+      break;
+   case V_FINAL:
+      *kind = "final";
+      *name = "final";
+      break;
+   case V_FUNC_DECL:
+      *kind = "function";
+      *name = istr(vlog_ident(v));
+      break;
+   case V_TASK_DECL:
+      *kind = "task";
+      *name = istr(vlog_ident(v));
+      break;
+   case V_CONSTRUCTOR:
+      *kind = "constructor";
+      *name = istr(vlog_ident(v));
+      break;
+   case V_CLASS_DECL:
+      *kind = "class";
+      *name = istr(vlog_ident(v));
+      break;
+   case V_PACKAGE:
+      *kind = "package";
+      *name = istr(vlog_ident(v));
+      break;
+   case V_ASSIGN:
+      *kind = "assign";
+      *name = "assign";
+      break;
+   default:   // Statement in a fork block
+      *kind = "fork";
+      *name = "fork";
+      break;
+   }
+}
+
+DLLEXPORT
+PLI_INT32 vpi_nvc_get_frames(vpi_nvc_frame_fn_t fn, void *user_data)
+{
+   // The thread that runs the code has to be inside it: the statement
+   // callback and the diagnostic callback are
+   if (jit_thread_local()->state != JIT_RUNNING
+       || jit_thread_local()->anchor == NULL)
+      return -1;
+
+   jit_stack_trace_t *stack LOCAL = jit_stack_trace();
+
+   loc_t probe = LOC_INVALID;
+   bool have_probe = stmt_probe_where(&probe);
+   if (!have_probe && diag_where != NULL) {
+      probe = *diag_where;
+      have_probe = true;
+   }
+
+   for (size_t i = 0; i < stack->count; i++) {
+      const jit_frame_t *f = &(stack->frames[i]);
+
+      // The statement that the callback is for is the line of the
+      // innermost frame
+      const loc_t *loc = (i == 0 && have_probe) ? &probe : &(f->loc);
+      const bool valid = !loc_invalid_p(loc);
+
+      vpi_nvc_frame_t out = {
+         .index  = (PLI_INT32)i,
+         .symbol = istr(f->symbol),
+         .file   = valid ? loc_file_str(loc) : NULL,
+         .line   = valid ? loc->first_line : 0,
+      };
+      vpi_describe_frame(f, &out.kind, &out.name);
+
+      (*fn)(&out, user_data);
+   }
+
+   return (PLI_INT32)stack->count;
 }
 
 DLLEXPORT

@@ -309,6 +309,62 @@ static mir_unit_t *mir_lazy_build(mir_context_t *mc, deferred_unit_t *du)
    return mu;
 }
 
+static struct {
+   mir_file_fn_t fn;
+   void         *ctx;
+   ident_t      *names;
+   int           count, limit;
+} lower_file_state;
+
+static void mir_lower_file_cb(const void *key, void *value)
+{
+   if (pointer_tag(value) != UNIT_DEFERRED)
+      return;
+
+   deferred_unit_t *du = untag_pointer(value, deferred_unit_t);
+   if (du->object == NULL || loc_invalid_p(&(du->object->loc)))
+      return;
+
+   const char *file = loc_file_str(&(du->object->loc));
+   if (file == NULL || !(*lower_file_state.fn)(file, lower_file_state.ctx))
+      return;
+
+   if (lower_file_state.count == lower_file_state.limit) {
+      lower_file_state.limit = MAX(64, lower_file_state.limit * 2);
+      lower_file_state.names = xrealloc_array(lower_file_state.names,
+                                              lower_file_state.limit,
+                                              sizeof(ident_t));
+   }
+
+   lower_file_state.names[lower_file_state.count++] = (ident_t)key;
+}
+
+void mir_lower_file(mir_context_t *mc, mir_file_fn_t fn, void *ctx)
+{
+   // Build every unit that is still deferred and declared in a file that
+   // fn accepts, and those that building them defers in turn
+   for (;;) {
+      lower_file_state.fn = fn;
+      lower_file_state.ctx = ctx;
+      lower_file_state.count = 0;
+
+      chash_iter(mc->map, mir_lower_file_cb);
+
+      const int count = lower_file_state.count;
+      ident_t *names = lower_file_state.names;
+      lower_file_state.names = NULL;
+      lower_file_state.limit = 0;
+
+      for (int i = 0; i < count; i++)
+         (void)mir_get_unit(mc, names[i]);
+
+      free(names);
+
+      if (count == 0)
+         break;
+   }
+}
+
 mir_unit_t *mir_get_unit(mir_context_t *mc, ident_t name)
 {
    void *ptr = chash_get(mc->map, name);

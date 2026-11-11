@@ -89,6 +89,12 @@ void tlab_release(jit_t *j, tlab_t *t);
 void *jit_mspace_alloc(size_t size) RETURNS_NONNULL;
 void *tlab_alloc(tlab_t *t, size_t size) RETURNS_NONNULL;
 jit_stack_trace_t *jit_stack_trace(void);
+
+// Lowers the subprograms and other units that have not been called yet and
+// are declared in a file that the function accepts, so that their statement
+// sites exist
+typedef bool (*jit_file_fn_t)(const char *file, void *ctx);
+void jit_lower_file(jit_t *j, jit_file_fn_t fn, void *ctx);
 jit_t *jit_for_thread(void);
 
 typedef void *(*thunk_result_fn_t)(jit_scalar_t *, void *);

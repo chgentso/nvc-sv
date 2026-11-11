@@ -146,13 +146,16 @@
   vpi_nvc_connections;
   vpi_nvc_get_delta;
   vpi_nvc_get_export;
+  vpi_nvc_get_frames;
   vpi_nvc_get_wake_time;
   vpi_nvc_process_signals;
   vpi_nvc_set_diag_cb;
   vpi_nvc_set_stmt_cb;
   vpi_nvc_stmt_breakpoint_add;
   vpi_nvc_stmt_breakpoint_remove;
+  vpi_nvc_stmt_site_query;
   vpi_nvc_stmt_step;
+  vpi_nvc_stmt_step_process;
   vpi_mcd_flush;
   vpi_mcd_printf;
   vpi_mcd_vprintf;

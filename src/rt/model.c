@@ -6059,6 +6059,8 @@ typedef struct {
 static A(stmt_break_t)  stmt_breaks;
 static A(stmt_site_t)   stmt_sites;
 static bool             stmt_stepping;
+static rt_proc_t       *stmt_step_proc;   // Step only in this process
+static const loc_t     *stmt_probe_loc;   // Statement that the hook is for
 static stmt_hook_fn_t   stmt_hook;
 static void            *stmt_hook_context;
 
@@ -6106,7 +6108,8 @@ static bool stmt_site_armed(const stmt_site_t *site)
 
    for (int i = 0; i < stmt_breaks.count; i++) {
       const stmt_break_t *b = &(stmt_breaks.items[i]);
-      if (b->line == site->line && same_file(b->file, site->file))
+      if (b->line == site->line && site->file != NULL
+          && same_file(b->file, site->file))
          return true;
    }
 
@@ -6136,7 +6139,58 @@ uint32_t stmt_site_new(const char *file, int line)
 void stmt_step_set(bool enable)
 {
    stmt_stepping = enable;
+   stmt_step_proc = NULL;
    stmt_rearm();
+}
+
+bool stmt_step_process(void)
+{
+   // Called from the hook: limit the stepping that follows to the process
+   // that the statement belongs to
+   rt_proc_t *proc = get_active_proc();
+   if (proc == NULL || !stmt_stepping)
+      return false;
+
+   stmt_step_proc = proc;
+   return true;
+}
+
+bool stmt_probe_where(loc_t *loc)
+{
+   if (stmt_probe_loc == NULL)
+      return false;
+
+   *loc = *stmt_probe_loc;
+   return true;
+}
+
+static bool stmt_file_match(const char *file, void *ctx)
+{
+   return same_file(file, ctx);
+}
+
+int stmt_site_query(const char *file, int line, int *nearest)
+{
+   // The sites are created when a unit is lowered and subprograms are not
+   // lowered before they are called, so do that for the file first
+   if (__model != NULL)
+      jit_lower_file(__model->jit, stmt_file_match, (void *)file);
+
+   int result = 0, best = 0;
+   for (int i = 0; i < stmt_sites.count; i++) {
+      const stmt_site_t *site = &(stmt_sites.items[i]);
+      if (site->file == NULL || !same_file(file, site->file))
+         continue;
+
+      result |= STMT_SITE_FILE;
+      if (site->line == line)
+         result |= STMT_SITE_EXACT;
+      else if (site->line > line && (best == 0 || site->line < best))
+         best = site->line;
+   }
+
+   *nearest = (result & STMT_SITE_EXACT) ? line : best;
+   return result;
 }
 
 void stmt_break_add(const char *file, int line)
@@ -6174,15 +6228,25 @@ void x_stmt_probe(object_t *where)
 
    const char *file = loc_file_str(loc);
 
-   bool match = stmt_stepping;
+   rt_proc_t *proc = get_active_proc();
+
+   // A step stops only in a process, and in the one that it started in if
+   // that was asked for: statements outside a process are those of the
+   // functions that evaluate the conditions of waits in the scheduler and
+   // other code that no process is running
+   bool match = stmt_stepping && proc != NULL
+      && (stmt_step_proc == NULL || stmt_step_proc == proc);
    for (int i = 0; i < stmt_breaks.count && !match; i++) {
       const stmt_break_t *b = &(stmt_breaks.items[i]);
       match = b->line == loc->first_line && same_file(b->file, file);
    }
 
-   if (match)
-      (*stmt_hook)(file, loc->first_line, get_active_proc(),
-                   stmt_hook_context);
+   if (match) {
+      const loc_t *saved = stmt_probe_loc;
+      stmt_probe_loc = loc;
+      (*stmt_hook)(file, loc->first_line, proc, stmt_hook_context);
+      stmt_probe_loc = saved;
+   }
 }
 
 void x_sched_process(int64_t delay)

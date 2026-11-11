@@ -83,6 +83,60 @@ PLI_INT32 vpi_nvc_stmt_step(PLI_INT32 enable);
 // Removes a breakpoint, returns 1 if there was one.
 PLI_INT32 vpi_nvc_stmt_breakpoint_remove(const char *file, int line);
 
+// While stepping from the statement callback, limit the stepping to the
+// process that the statement belongs to: the callback is then called only for
+// the statements that this process runs (and for breakpoints in any process).
+// Call it from the callback after vpi_nvc_stmt_step(1); the limit ends with
+// the next vpi_nvc_stmt_step.  Returns 0, and nothing is limited, if the
+// callback is not in a process or stepping is off.  Stepping, with or
+// without the limit, does not call the callback for statements that run
+// outside a process, such as the functions that the simulator calls to
+// evaluate the condition of a wait.
+PLI_INT32 vpi_nvc_stmt_step_process(void);
+
+// Asks whether a breakpoint on file:line can fire: whether a statement of the
+// code that is instrumented (--debug-stmts) begins on that line.  Returns -1
+// if the code is not instrumented, otherwise a combination of
+// vpiNvcSiteLine (there is a statement on the line) and vpiNvcSiteFile
+// (there are statements in the file).  *nearest is the line itself if it has a
+// statement, otherwise the first following line that has one, or 0 if there
+// is none.  file is matched as for breakpoints.  A statement is known once
+// its unit has been lowered, so the answer for a unit that the design has not
+// needed yet is 0 and may change.
+#define vpiNvcSiteLine 0x1
+#define vpiNvcSiteFile 0x2
+
+PLI_INT32 vpi_nvc_stmt_site_query(const char *file, PLI_INT32 line,
+                                  PLI_INT32 *nearest);
+
+// The call stack of the code that is running, innermost frame first, for the
+// callbacks that run inside it (the statement callback, and the diagnostic
+// callback).  The callback is called once for every frame: a process (or
+// initial, always block) is the last, subprograms and methods called from it
+// come before it.  kind is process, initial, always, final, function,
+// procedure, task, constructor, package, block, assign, fork, class or code;
+// name is the process name (as the statement callback has it) or the name of
+// the subprogram, and symbol the unique name of the compiled unit.  file and
+// line are the statement the frame is at: for the innermost frame of a
+// statement callback that is the statement the callback is for, for the
+// others the call they are waiting in; for a diagnostic callback the
+// innermost line is the place of the diagnostic.  file is NULL if unknown.  Strings are valid
+// during the call.  Returns the number of frames, or -1 if called outside
+// such a callback.  Costs nothing unless called.
+typedef struct {
+   PLI_INT32   index;        // 0 for the innermost frame
+   const char *kind;
+   const char *name;
+   const char *symbol;
+   const char *file;
+   PLI_INT32   line;
+} vpi_nvc_frame_t;
+
+typedef void (*vpi_nvc_frame_fn_t)(const vpi_nvc_frame_t *frame,
+                                   void *user_data);
+
+PLI_INT32 vpi_nvc_get_frames(vpi_nvc_frame_fn_t fn, void *user_data);
+
 // Called when a VHDL assertion or report statement, or a Verilog severity
 // task or failing assertion, produces a message.  The callback runs on the
 // simulation thread inside the process that raised the message, so it should

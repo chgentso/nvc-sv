@@ -2533,6 +2533,7 @@ vhpi30          vhpi,$NVC_DEBUG_STMTS=1
 vpi19           verilog,vpi,$NVC_DEBUG_STMTS=1
 vhpi31          vhpi
 vhpi32          mixed,vhpi
+vhpi33          vhpi,$NVC_DEBUG_STMTS=1
 dbgstmts1       shell
 svwidesel1 verilog
 svwidesel2 verilog
@@ -2553,6 +2554,7 @@ vpi20           verilog,vpi
 vpi21           mixed,vpi
 vpi22           verilog,vpi
 vpi23           mixed,2008,vpi
+vpi24           verilog,vpi,$NVC_DEBUG_STMTS=1
 svevtport1 verilog
 svlrmmisc1 verilog
 svprogparam1 verilog

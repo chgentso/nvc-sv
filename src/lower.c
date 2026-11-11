@@ -13367,6 +13367,47 @@ bool unit_registry_query(unit_registry_t *ur, ident_t ident)
    return hash_get(ur->map, ident) != NULL;
 }
 
+void unit_registry_lower_file(unit_registry_t *ur, mir_file_fn_t fn,
+                              void *ctx)
+{
+   // Subprograms are lowered the first time they are called: do it now for
+   // all those declared in the files that fn accepts, and those they declare
+   hset_t *done = hset_new(64);
+
+   for (;;) {
+      A(ident_t) todo = AINIT;
+
+      hash_iter_t it = HASH_BEGIN;
+      const void *key;
+      void *value;
+      while (hash_iter(ur->map, &it, &key, &value)) {
+         if (pointer_tag(value) != UNIT_DEFERRED || hset_contains(done, key))
+            continue;
+
+         deferred_unit_t *du = untag_pointer(value, deferred_unit_t);
+         if (du->object == NULL || loc_invalid_p(&(du->object->loc)))
+            continue;
+
+         const char *file = loc_file_str(&(du->object->loc));
+         if (file != NULL && (*fn)(file, ctx)) {
+            hset_insert(done, key);
+            APUSH(todo, (ident_t)key);
+         }
+      }
+
+      for (int i = 0; i < todo.count; i++)
+         (void)unit_registry_get(ur, todo.items[i]);
+
+      const bool progress = todo.count > 0;
+      ACLEAR(todo);
+
+      if (!progress)
+         break;
+   }
+
+   hset_free(done);
+}
+
 static void walk_dependency_cb(ident_t name, void *ctx)
 {
    unit_registry_t *ur = ctx;

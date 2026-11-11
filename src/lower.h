@@ -65,6 +65,11 @@ void unit_registry_defer2(unit_registry_t *ur, ident_t name,
                           lower_unit_t *parent, mir_unit_kind_t kind,
                           mir_lower_fn_t fn, object_t *object);
 bool unit_registry_query(unit_registry_t *ur, ident_t ident);
+
+// Lowers every unit that is still deferred and declared in a file that the
+// function accepts
+void unit_registry_lower_file(unit_registry_t *ur, mir_file_fn_t fn,
+                              void *ctx);
 void unit_registry_finalise(unit_registry_t *ur, lower_unit_t *lu);
 void unit_registry_flush(unit_registry_t *ur, ident_t name);
 vcode_unit_t unit_registry_get_parent(unit_registry_t *ur, ident_t name);

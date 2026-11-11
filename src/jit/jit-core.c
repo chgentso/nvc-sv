@@ -530,6 +530,17 @@ static void jit_emit_trace(diag_t *d, const loc_t *loc, object_t *enclosing,
    }
 }
 
+void jit_lower_file(jit_t *j, jit_file_fn_t fn, void *ctx)
+{
+   SCOPED_LOCK(j->lock);
+
+   if (j->registry != NULL)
+      unit_registry_lower_file(j->registry, fn, ctx);
+
+   if (j->mir != NULL)
+      mir_lower_file(j->mir, fn, ctx);
+}
+
 jit_stack_trace_t *jit_stack_trace(void)
 {
    jit_thread_local_t *thread = jit_thread_local();
@@ -581,6 +592,18 @@ static void jit_diag_cb(diag_t *d, void *arg)
    }
 
    jit_stack_trace_t *stack LOCAL = jit_stack_trace();
+
+   // The innermost frame has no debug info before the operation that raised
+   // the diagnostic so its location falls back to the declaration of the
+   // subprogram or process: the diagnostic knows the statement
+   const loc_t *dloc = diag_get_loc(d);
+   if (stack->count > 0 && dloc != NULL && !loc_invalid_p(dloc)) {
+      jit_frame_t *inner = &(stack->frames[0]);
+      if (inner->object != NULL && inner->loc.first_line == inner->object->loc.first_line
+          && inner->loc.first_column == inner->object->loc.first_column
+          && inner->loc.file_ref == inner->object->loc.file_ref)
+         inner->loc = *dloc;
+   }
 
    for (int i = 0; i < stack->count; i++) {
       jit_frame_t *frame = &(stack->frames[i]);

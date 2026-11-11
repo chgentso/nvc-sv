@@ -97,6 +97,13 @@ void set_stmt_hook(stmt_hook_fn_t fn, void *context);
 void stmt_break_add(const char *file, int line);
 bool stmt_break_remove(const char *file, int line);
 void stmt_step_set(bool enable);
+bool stmt_step_process(void);
+bool stmt_probe_where(loc_t *loc);
+
+// Result of stmt_site_query: bit set
+#define STMT_SITE_EXACT 0x1   // There is a statement on the line
+#define STMT_SITE_FILE  0x2   // There are statements in the file
+int stmt_site_query(const char *file, int line, int *nearest);
 uint32_t stmt_site_new(const char *file, int line);
 rt_proc_t *model_defer_note(uint32_t *runs, uint32_t *seq);
 bool model_defer_live(rt_proc_t *proc, uint32_t runs, uint32_t seq,

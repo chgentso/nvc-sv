@@ -47,6 +47,9 @@ void mir_context_free(mir_context_t *mc);
 
 void mir_put_unit(mir_context_t *mc, mir_unit_t *mu);
 mir_unit_t *mir_get_unit(mir_context_t *mc, ident_t name);
+
+typedef bool (*mir_file_fn_t)(const char *file, void *ctx);
+void mir_lower_file(mir_context_t *mc, mir_file_fn_t fn, void *ctx);
 mir_shape_t *mir_get_shape(mir_context_t *mc, ident_t name);
 void mir_defer(mir_context_t *mc, ident_t name, ident_t parent,
                mir_unit_kind_t kind, mir_lower_fn_t fn, object_t *object);
