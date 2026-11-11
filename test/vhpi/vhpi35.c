@@ -133,6 +133,7 @@ static void start_of_sim(const vhpiCbDataT *cb_data)
    check_int(vpi_nvc_stmt_breakpoint_add("vhpi35.vhd", 47), 1);
    check_int(vpi_nvc_stmt_breakpoint_add("vhpi35.vhd", 57), 1);
    check_int(vpi_nvc_stmt_breakpoint_add("vhpi35.vhd", 66), 1);
+   check_int(vpi_nvc_stmt_breakpoint_add("vhpi35.vhd", 74), 1);
 }
 
 static void end_of_sim(const vhpiCbDataT *cb_data)
@@ -146,7 +147,7 @@ static void end_of_sim(const vhpiCbDataT *cb_data)
       printf("\n");
    }
 
-   check_int(nhits, 6);
+   check_int(nhits, 8);
 
    // scale (pt, 2): a record parameter, an integer and two variables
    check_int(hits[0].line, 25);
@@ -202,6 +203,14 @@ static void end_of_sim(const vhpiCbDataT *cb_data)
    check_int(hits[5].line, 66);
    expect(5, "X", 1, K_INTEGER, "7", "00000000000000000000000000000111");
    expect(5, "LOCAL", 0, K_INTEGER, "15", "00000000000000000000000000001111");
+
+   // init: variables initialised from a parameter, from another variable
+   // and from a function call, at the first statement
+   check_int(hits[7].line, 74);
+   expect(7, "X", 1, K_INTEGER, "3", "00000000000000000000000000000011");
+   expect(7, "R", 0, K_INTEGER, "3", "00000000000000000000000000000011");
+   expect(7, "S", 0, K_INTEGER, "4", "00000000000000000000000000000100");
+   expect(7, "T", 0, K_INTEGER, "8", "00000000000000000000000000001000");
 }
 
 void vhpi35_startup(void)

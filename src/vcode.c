@@ -3849,7 +3849,8 @@ void emit_store(vcode_reg_t reg, vcode_var_t var)
             xasprintf("Dead store to %s", istr(vcode_var_name(var)));
          vcode_reg_array_resize(&(other->args), 0, VCODE_INVALID_REG);
       }
-      else if (other->kind == VCODE_OP_FCALL || other->kind == VCODE_OP_PCALL)
+      else if (other->kind == VCODE_OP_FCALL || other->kind == VCODE_OP_PCALL
+               || other->kind == VCODE_OP_STMT_PROBE)
          break;   // Needs to get variable for display
       else if ((other->kind == VCODE_OP_INDEX || other->kind == VCODE_OP_LOAD)
                && other->address == var)

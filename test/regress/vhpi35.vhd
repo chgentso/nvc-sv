@@ -66,6 +66,15 @@ architecture test of vhpi35 is
         assert local > 0;
     end procedure;
 
+    function init (x : integer) return integer is
+        variable r : integer := x;
+        variable s : integer := r + 1;
+        variable t : integer := scale((x, 2, red), 2);
+    begin
+        r := r + 2;
+        return r + s + t;
+    end function;
+
     signal clk : bit := '0';
     signal sig : integer := 0;
 begin
@@ -81,6 +90,7 @@ begin
         res := fact(3);
         bump(n, 5, sig);
         waits(7, clk);
+        res := init(3);
         wait;
     end process;
 end architecture;

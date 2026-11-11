@@ -87,7 +87,8 @@ static PLI_INT32 start_of_sim(p_cb_data cb)
 
    check_int(vpi_nvc_stmt_breakpoint_add("vpi26.sv", 18), 1);
    check_int(vpi_nvc_stmt_breakpoint_add("vpi26.sv", 24), 1);
-   check_int(vpi_nvc_stmt_breakpoint_add("vpi26.sv", 35), 1);
+   check_int(vpi_nvc_stmt_breakpoint_add("vpi26.sv", 42), 1);
+   check_int(vpi_nvc_stmt_breakpoint_add("vpi26.sv", 30), 1);
    return 0;
 }
 
@@ -95,7 +96,7 @@ static PLI_INT32 end_of_sim(p_cb_data cb)
 {
    vpi_nvc_set_stmt_cb(NULL, NULL);
 
-   check_int(nhits, 4);
+   check_int(nhits, 5);
 
    // mix: the arguments, the result and the locals
    check_int(hits[0].line, 18);
@@ -134,13 +135,19 @@ static PLI_INT32 end_of_sim(p_cb_data cb)
    check_int(find(2, "w")->kind, vpiNvcVarLogic);
    fail_unless(strchr(find(2, "wide")->text, 'x') != NULL);
 
+   // initv: variables initialised from an argument and from another variable
+   check_int(hits[3].line, 30);
+   expect(3, "x", 1, vpiNvcVarInteger, "6", "00000000000000000000000000000110");
+   expect(3, "r", 0, vpiNvcVarInteger, "6", "00000000000000000000000000000110");
+   expect(3, "s", 0, vpiNvcVarInteger, "7", "00000000000000000000000000000111");
+
    // waiter, after the wait: an input and an output argument, the locals
-   check_int(hits[3].line, 35);
-   expect(3, "n", 1, vpiNvcVarInteger, "4", "00000000000000000000000000000100");
-   expect(3, "result", 1, vpiNvcVarInteger, "8",
+   check_int(hits[4].line, 42);
+   expect(4, "n", 1, vpiNvcVarInteger, "4", "00000000000000000000000000000100");
+   expect(4, "result", 1, vpiNvcVarInteger, "8",
           "00000000000000000000000000001000");
-   expect(3, "i", 0, vpiNvcVarInteger, "8", "00000000000000000000000000001000");
-   expect(3, "nib", 0, vpiNvcVarLogic, "4'b10x1", "10x1");
+   expect(4, "i", 0, vpiNvcVarInteger, "8", "00000000000000000000000000001000");
+   expect(4, "nib", 0, vpiNvcVarLogic, "4'b10x1", "10x1");
 
    vpi_test_pass();
    return 0;

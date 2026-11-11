@@ -24,6 +24,13 @@ module vpi26;
     return w;
   endfunction
 
+  function automatic int initv(int x);
+    int r = x;
+    int s = r + 1;
+    r = r + 2;
+    return r + s;
+  endfunction
+
   task automatic waiter(input int n, output int result);
     int i;
     logic [3:0] nib;
@@ -41,6 +48,7 @@ module vpi26;
     r = mix(5, 8'hf0, 2.5, "hey");
     r = mix(7, 8'h01, 1.5, "yo");
     t = wide(100'd3, -8'sd2);
+    r = initv(6);
     waiter(4, r);
   end
 
