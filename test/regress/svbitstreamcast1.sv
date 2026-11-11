@@ -38,6 +38,33 @@ module svbitstreamcast1;
       if (h.size() != 2 || h[0] !== 16'h8006 || h[1] !== 16'h01ff)
          $fatal(1, "bytes to halfwords %0d", h.size());
 
+      begin
+         byte unsigned fixed[3] = '{8'h80, 8'h06, 8'h01};
+         bit [15:0] hf[2] = '{16'h8006, 16'h01ff};
+         byte unsigned dyn[] = '{8'h80, 8'h06, 8'h01, 8'hff};
+
+         b = bit_arr_t'(fixed);
+         if (bits(b) != "100000000000011000000001")
+            $fatal(1, "fixed to bits %s", bits(b));
+
+         b = bit_arr_t'(dyn[0:1]);
+         if (bits(b) != "1000000000000110")
+            $fatal(1, "slice to bits %s", bits(b));
+
+         h = half_arr_t'(dyn[0:1]);
+         if (h.size() != 1 || h[0] !== 16'h8006)
+            $fatal(1, "slice to halfwords");
+
+         by = byte_arr_t'(hf);
+         if (by.size() != 4 || by[0] !== 8'h80 || by[1] !== 8'h06
+             || by[2] !== 8'h01 || by[3] !== 8'hff)
+            $fatal(1, "fixed halfwords to bytes");
+
+         by = byte_arr_t'(fixed);
+         if (by.size() != 3 || by[2] !== 8'h01)
+            $fatal(1, "fixed to bytes");
+      end
+
       $display("PASSED");
    end
 endmodule
