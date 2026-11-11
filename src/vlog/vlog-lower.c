@@ -9351,6 +9351,37 @@ static mir_value_t vlog_lower_with_context(vlog_gen_t *g, vlog_node_t v,
                                             g->mu, mir_get_size(g->mu, ti->type),
                                             vlog_is_signed(arg))));
 
+            // A cast between dynamic arrays or queues with elements of
+            // different widths converts the bit-stream (6.24.3)
+            vlog_node_t dtype = vlog_get_type(vlog_type(v));
+            vlog_node_t stype = vlog_get_type(arg);
+            if (dtype != NULL && stype != NULL
+                && vlog_kind(dtype) == V_DATA_TYPE
+                && vlog_kind(stype) == V_DATA_TYPE
+                && (vlog_subkind(dtype) == DT_DYNARRAY
+                    || vlog_subkind(dtype) == DT_QUEUE)
+                && (vlog_subkind(stype) == DT_DYNARRAY
+                    || vlog_subkind(stype) == DT_QUEUE)
+                && mir_get_class(g->mu, ti->type) == MIR_TYPE_UARRAY) {
+               const int dsize = vlog_type_info(g, vlog_type(dtype))->size;
+               const int ssize = vlog_type_info(g, vlog_type(stype))->size;
+               mir_type_t t_elem = mir_get_elem(g->mu, ti->type);
+               if (dsize != ssize && dsize > 0 && ssize > 0
+                   && !mir_equals(t_elem, mir_char_type(g->mu))) {
+                  mir_type_t t_offset = mir_offset_type(g->mu);
+                  const int saved = g->stream_ubits;
+                  g->stream_ubits = (dsize % 8 == 0 && ssize % 8 == 0) ? 8 : 1;
+                  mir_value_t bytes = vlog_stream_value_bytes(
+                     g, vlog_lower_rvalue(g, arg), vlog_loc(v));
+                  mir_value_t result = vlog_stream_to_array(
+                     g, mir_build_unwrap(g->mu, bytes),
+                     mir_const(g->mu, t_offset, 0),
+                     mir_build_uarray_len(g->mu, bytes, 0), t_elem);
+                  g->stream_ubits = saved;
+                  return result;
+               }
+            }
+
             return vlog_lower_cast(g, ti->type, vlog_lower_rvalue(g, arg));
          }
 
