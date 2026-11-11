@@ -157,6 +157,55 @@ typedef void (*vpi_nvc_frame_fn_t)(const vpi_nvc_frame_t *frame,
 
 PLI_INT32 vpi_nvc_get_frames(vpi_nvc_frame_fn_t fn, void *user_data);
 
+// The parameters and variables of a subprogram (VHDL function or procedure,
+// Verilog function or task) that a frame of the call stack is in, from the
+// statement callback.  Only the innermost frame (frame 0) has them, and only
+// if the statement is in a subprogram: for a process, use its variables
+// through VHPI or VPI.  The values are read-only copies of what the code
+// holds at this statement.  The callback is called once for every variable
+// that the user declared (parameters first), with strings that are valid
+// during the call.  The values are formatted for display: text is always
+// set; for a value that has a simple form (scalar, array of std_logic, bit
+// or characters, Verilog vector, string) kind says which and bits is its
+// value, one char per bit, most significant bit first (vpiNvcVarLogic: from
+// 01zx for Verilog and uxz01wlh- for VHDL; the others 0 and 1; a string has
+// eight bits for every character).  literals gives the names of the literals
+// of an enumeration.  Returns the number of variables, 0 if the frame has
+// none (including every frame but 0), or -1 if called outside a statement
+// callback or if the code is not instrumented with --debug-stmts.  The cost
+// is only paid by the code of an armed statement.
+#define vpiNvcVarNone    0
+#define vpiNvcVarLogic   1
+#define vpiNvcVarBit     2
+#define vpiNvcVarInteger 3
+#define vpiNvcVarEnum    4
+#define vpiNvcVarReal    5
+#define vpiNvcVarTime    6   // Femtoseconds
+#define vpiNvcVarString  7
+
+typedef struct {
+   const char        *name;
+   PLI_INT32          is_param;     // A parameter (argument) of the subprogram
+   PLI_INT32          kind;         // vpiNvcVar*
+   PLI_INT32          is_signed;
+   PLI_INT32          width;        // Number of chars in bits
+   const char        *type_name;    // Or NULL
+   const char        *bits;         // Or NULL
+   const char        *text;
+   PLI_INT32          nliterals;
+   const char *const *literals;
+   PLI_INT32          has_range;    // Integer subtype range: low and high
+   PLI_INT64          low;
+   PLI_INT64          high;
+   const char        *file;         // Declaration, or NULL
+   PLI_INT32          line;
+} vpi_nvc_var_t;
+
+typedef void (*vpi_nvc_var_fn_t)(const vpi_nvc_var_t *var, void *user_data);
+
+PLI_INT32 vpi_nvc_frame_variables(PLI_INT32 frame, vpi_nvc_var_fn_t fn,
+                                  void *user_data);
+
 // Called when a VHDL assertion or report statement, or a Verilog severity
 // task or failing assertion, produces a message.  The callback runs on the
 // simulation thread inside the process that raised the message, so it should

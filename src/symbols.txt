@@ -144,6 +144,7 @@
   vpi_handle_by_name;
   vpi_iterate;
   vpi_nvc_connections;
+  vpi_nvc_frame_variables;
   vpi_nvc_get_delta;
   vpi_nvc_get_export;
   vpi_nvc_get_frames;

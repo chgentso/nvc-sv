@@ -41,7 +41,7 @@ int32_t x_test_net_active(sig_shared_t *ss, uint32_t offset,
                           int32_t count);
 void x_sched_event(sig_shared_t *ss, uint32_t offset, int32_t count);
 void x_sched_active(sig_shared_t *ss, uint32_t offset, int32_t count);
-void x_stmt_probe(object_t *where);
+void x_stmt_probe(object_t *where, const jit_scalar_t *args);
 
 // One byte per statement site of code generated with --debug-stmts: set if a
 // breakpoint may match the statement, so the code takes the exit only then.

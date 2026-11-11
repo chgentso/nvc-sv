@@ -21,7 +21,7 @@
 #include "ident.h"
 #include "jit/jit-exits.h"
 #include "jit/jit-ffi.h"
-#include "jit/jit-ffi.h"
+#include "jit/jit-frame.h"
 #include "jit/jit-priv.h"
 #include "mask.h"
 #include "mir/mir-node.h"
@@ -79,6 +79,8 @@ typedef struct {
    bool            used_tlab;
    bool            stateless;
    bool            needs_context;
+   bool            have_frame;   // The layout of the frame has been made
+   frame_layout_t *frame;
 } jit_irgen_t;
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -3824,6 +3826,190 @@ static void irgen_op_active(jit_irgen_t *g, mir_value_t n)
    j_recv(g, g->map[n.id], 0);
 }
 
+#define FRAME_MAX_SLOTS 48   // Arguments of the probe exit after the location
+
+static bool irgen_frame_class(jit_irgen_t *g, mir_type_t type, bool is_param,
+                              frame_var_t *v)
+{
+   // Says how the value of a variable or parameter of this type is passed
+   // to the probe exit, or false if it is not
+   const mir_class_t class = mir_get_class(g->mu, type);
+   switch (class) {
+   case MIR_TYPE_INT:
+   case MIR_TYPE_OFFSET:
+      {
+         const mir_repr_t repr = mir_get_repr(g->mu, type);
+         v->class     = FRAME_INT;
+         v->carrier   = is_param ? FRAME_VALUE : FRAME_MEM;
+         v->nslots    = 1;
+         v->bits      = irgen_repr_bits(repr);
+         v->size      = ALIGN_UP(v->bits, 8) / 8;
+         v->is_signed = irgen_repr_signed(repr);
+         return true;
+      }
+
+   case MIR_TYPE_REAL:
+      v->class   = FRAME_REAL;
+      v->carrier = is_param ? FRAME_VALUE : FRAME_MEM;
+      v->nslots  = 1;
+      v->bits    = 64;
+      return true;
+
+   case MIR_TYPE_VEC2:
+   case MIR_TYPE_VEC4:
+      v->class     = class == MIR_TYPE_VEC2 ? FRAME_VEC2 : FRAME_VEC4;
+      v->carrier   = is_param ? FRAME_SLOTS : FRAME_MEM;
+      v->nslots    = is_param ? mir_get_slots(g->mu, type) : 1;
+      v->bits      = mir_get_size(g->mu, type);
+      v->is_signed = mir_get_signed(g->mu, type);
+      return true;
+
+   case MIR_TYPE_UARRAY:
+      if (mir_get_class(g->mu, mir_get_elem(g->mu, type)) == MIR_TYPE_SIGNAL)
+         return false;
+
+      v->class   = FRAME_UARRAY;
+      v->carrier = is_param ? FRAME_SLOTS : FRAME_MEM;
+      v->nslots  = is_param ? mir_get_slots(g->mu, type) : 1;
+      v->ndims   = mir_get_dims(g->mu, type);
+      return true;
+
+   case MIR_TYPE_CARRAY:
+      if (is_param)
+         return false;
+      v->class   = FRAME_CARRAY;
+      v->carrier = FRAME_MEM;
+      v->nslots  = 1;
+      return true;
+
+   case MIR_TYPE_RECORD:
+      if (is_param)
+         return false;
+      v->class   = FRAME_RECORD;
+      v->carrier = FRAME_MEM;
+      v->nslots  = 1;
+      return true;
+
+   case MIR_TYPE_POINTER:
+      if (!is_param)
+         return false;
+      v->class   = FRAME_POINTER;
+      v->carrier = FRAME_PTR;
+      v->nslots  = 1;
+      return true;
+
+   default:
+      return false;
+   }
+}
+
+static frame_layout_t *irgen_frame_layout(jit_irgen_t *g)
+{
+   // The parameters and variables that the user declared in a subprogram,
+   // which the probe passes to the debugger when it is armed
+   if (g->have_frame)
+      return g->frame;
+
+   g->have_frame = true;
+
+   switch (mir_get_kind(g->mu)) {
+   case MIR_UNIT_FUNCTION:
+   case MIR_UNIT_PROCEDURE:
+      break;
+   default:
+      return NULL;
+   }
+
+   object_t *object = mir_get_object(g->mu);
+   if (object == NULL)
+      return NULL;
+
+   const int nvars = mir_count_vars(g->mu);
+   const int nparams = mir_count_params(g->mu);
+
+   frame_var_t *list LOCAL =
+      xmalloc_array(nvars + nparams, sizeof(frame_var_t));
+   int count = 0, nslots = 0;
+
+   for (int i = 0; i < nparams && nslots < FRAME_MAX_SLOTS; i++) {
+      mir_value_t p = mir_get_param(g->mu, i);
+      ident_t name = mir_get_name(g->mu, p);
+      if (name == NULL)
+         continue;
+
+      // A parameter that is copied to a variable is shown as the variable
+      bool copied = false;
+      for (int j = 0; j < nvars && !copied; j++)
+         copied = mir_get_name(g->mu, mir_get_var(g->mu, j)) == name;
+
+      bool is_param;
+      frame_var_t v = { .name = name, .is_param = true };
+      if (copied || !frame_find_decl(object, name, &is_param)
+          || !irgen_frame_class(g, mir_get_type(g->mu, p), true, &v)
+          || nslots + v.nslots > FRAME_MAX_SLOTS)
+         continue;
+
+      v.first = 1 + nslots;
+      v.index = i;
+      nslots += v.nslots;
+      list[count++] = v;
+   }
+
+   for (int i = 0; i < nvars && nslots < FRAME_MAX_SLOTS; i++) {
+      mir_value_t var = mir_get_var(g->mu, i);
+      if (mir_get_var_flags(g->mu, var) & MIR_VAR_TEMP)
+         continue;
+
+      ident_t name = mir_get_name(g->mu, var);
+      if (name == NULL)
+         continue;
+
+      bool is_param = false;
+      frame_var_t v = { .name = name };
+      if (!frame_find_decl(object, name, &is_param)
+          || !irgen_frame_class(g, mir_get_var_type(g->mu, var), false, &v)
+          || nslots + v.nslots > FRAME_MAX_SLOTS)
+         continue;
+
+      v.is_param = is_param;
+      v.first = 1 + nslots;
+      v.index = i;
+      nslots += v.nslots;
+      list[count++] = v;
+   }
+
+   if (count == 0)
+      return NULL;
+
+   frame_layout_t *l = xmalloc_flex(sizeof(frame_layout_t), count,
+                                    sizeof(frame_var_t));
+   l->count  = count;
+   l->nslots = nslots;
+   memcpy(l->vars, list, count * sizeof(frame_var_t));
+
+   store_release(&(g->func->frame), l);
+   return (g->frame = l);
+}
+
+static void irgen_probe_frame(jit_irgen_t *g, frame_layout_t *l)
+{
+   // The variables of the frame follow the location in the arguments
+   for (unsigned i = 0; i < l->count; i++) {
+      const frame_var_t *v = &(l->vars[i]);
+
+      if (v->carrier == FRAME_MEM) {
+         // The address of the variable
+         mir_value_t var = mir_get_var(g->mu, v->index);
+         j_send(g, v->first, irgen_get_slot(g, var, 0));
+      }
+      else {
+         mir_value_t p = mir_get_param(g->mu, v->index);
+         for (int k = 0; k < v->nslots; k++)
+            j_send(g, v->first + k, irgen_get_slot(g, p, k));
+      }
+   }
+}
+
 static void irgen_op_stmt_probe(jit_irgen_t *g, mir_value_t n)
 {
    jit_value_t locus = irgen_get_arg(g, n, 0);
@@ -3843,6 +4029,11 @@ static void irgen_op_stmt_probe(jit_irgen_t *g, mir_value_t n)
    j_jump(g, JIT_CC_T, l_skip);
 
    j_send(g, 0, locus);
+
+   frame_layout_t *frame = irgen_frame_layout(g);
+   if (frame != NULL)
+      irgen_probe_frame(g, frame);
+
    macro_exit(g, JIT_EXIT_STMT_PROBE);
 
    irgen_bind_label(g, l_skip);

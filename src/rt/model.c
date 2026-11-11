@@ -6063,6 +6063,7 @@ static rt_proc_t       *stmt_step_proc;   // Step only in this process
 static int              stmt_step_mode;   // STMT_STEP_* when depth-aware
 static int              stmt_step_depth;  // Call depth the step started at
 static const loc_t     *stmt_probe_loc;   // Statement that the hook is for
+static const jit_scalar_t *stmt_probe_args;   // Arguments of the probe exit
 static stmt_hook_fn_t   stmt_hook;
 static void            *stmt_hook_context;
 
@@ -6186,6 +6187,11 @@ bool stmt_probe_where(loc_t *loc)
    return true;
 }
 
+const jit_scalar_t *stmt_probe_frame_args(void)
+{
+   return stmt_probe_args;
+}
+
 static bool stmt_file_match(const char *file, void *ctx)
 {
    return same_file(file, ctx);
@@ -6237,7 +6243,7 @@ bool stmt_break_remove(const char *file, int line)
    return false;
 }
 
-void x_stmt_probe(object_t *where)
+void x_stmt_probe(object_t *where, const jit_scalar_t *args)
 {
    // Called before a statement of code generated with --debug-stmts if
    // its site is armed
@@ -6273,9 +6279,12 @@ void x_stmt_probe(object_t *where)
 
    if (match) {
       const loc_t *saved = stmt_probe_loc;
+      const jit_scalar_t *saved_args = stmt_probe_args;
       stmt_probe_loc = loc;
+      stmt_probe_args = args;
       (*stmt_hook)(file, loc->first_line, proc, stmt_hook_context);
       stmt_probe_loc = saved;
+      stmt_probe_args = saved_args;
    }
 }
 

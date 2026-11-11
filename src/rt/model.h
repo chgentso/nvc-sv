@@ -20,6 +20,7 @@
 
 #include "prim.h"
 #include "rt/defs.h"
+#include "jit/jit.h"
 
 typedef enum {
    WATCH_EVENT,
@@ -105,6 +106,7 @@ bool stmt_step_process(void);
 #define STMT_STEP_OUT  2   // Next statement at a lower depth
 bool stmt_step_depth_set(int mode);
 bool stmt_probe_where(loc_t *loc);
+const jit_scalar_t *stmt_probe_frame_args(void);
 
 // Result of stmt_site_query: bit set
 #define STMT_SITE_EXACT 0x1   // There is a statement on the line

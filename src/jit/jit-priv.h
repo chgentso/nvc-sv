@@ -21,6 +21,7 @@
 #include "util.h"
 #include "jit/jit.h"
 #include "jit/jit-ffi.h"
+#include "jit/jit-frame.h"
 #include "mask.h"
 #include "rt/mspace.h"
 #include "thread.h"
@@ -349,6 +350,7 @@ typedef struct _jit_func {
    jit_tier_t     *next_tier;
    ffi_spec_t      spec;
    object_t       *object;
+   frame_layout_t *frame;    // Variables passed to the statement probe
 } jit_func_t;
 
 // The code generator knows the layout of this struct

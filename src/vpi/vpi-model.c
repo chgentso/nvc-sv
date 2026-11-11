@@ -28,6 +28,7 @@
 #include "hash.h"
 #include "ident.h"
 #include "jit/jit-ffi.h"
+#include "jit/jit-frame.h"
 #include "jit/jit-priv.h"
 #include "jit/jit.h"
 #include "lib.h"
@@ -4329,6 +4330,63 @@ PLI_INT32 vpi_nvc_get_frames(vpi_nvc_frame_fn_t fn, void *user_data)
    }
 
    return (PLI_INT32)stack->count;
+}
+
+typedef struct {
+   vpi_nvc_var_fn_t fn;
+   void            *user;
+   PLI_INT32        count;
+} frame_vars_t;
+
+static void vpi_frame_var_cb(const frame_info_t *info, void *ctx)
+{
+   frame_vars_t *fv = ctx;
+
+   vpi_nvc_var_t out = {
+      .name      = info->name,
+      .is_param  = info->is_param,
+      .kind      = info->kind,
+      .is_signed = info->is_signed,
+      .width     = info->width,
+      .type_name = info->type_name,
+      .bits      = info->bits,
+      .text      = info->text,
+      .nliterals = info->nliterals,
+      .literals  = info->literals,
+      .has_range = info->has_range,
+      .low       = info->low,
+      .high      = info->high,
+   };
+
+   if (info->loc != NULL && !loc_invalid_p(info->loc)) {
+      out.file = loc_file_str(info->loc);
+      out.line = info->loc->first_line;
+   }
+
+   fv->count++;
+   (*fv->fn)(&out, fv->user);
+}
+
+DLLEXPORT
+PLI_INT32 vpi_nvc_frame_variables(PLI_INT32 frame, vpi_nvc_var_fn_t fn,
+                                  void *user_data)
+{
+   const jit_scalar_t *args = stmt_probe_frame_args();
+   if (jit_thread_local()->state != JIT_RUNNING
+       || jit_thread_local()->anchor == NULL || args == NULL)
+      return -1;
+
+   // Only the innermost frame has passed its variables
+   if (frame != 0)
+      return 0;
+
+   jit_func_t *f = jit_thread_local()->anchor->func;
+   if (f == NULL)
+      return 0;
+
+   frame_vars_t fv = { .fn = fn, .user = user_data };
+   frame_describe(f, args, vpi_frame_var_cb, &fv);
+   return fv.count;
 }
 
 DLLEXPORT
