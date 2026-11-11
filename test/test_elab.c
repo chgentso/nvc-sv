@@ -2208,6 +2208,49 @@ START_TEST(test_vlogshim1)
 }
 END_TEST
 
+START_TEST(test_shimentity)
+{
+   // The generated Verilog module around a VHDL entity instantiated from
+   // Verilog is recognised so it can be hidden in hierarchical names
+
+   set_standard(STD_08);
+
+   input_from_file(TESTDIR "/netlist/vhdl1.vhd");
+
+   analyse_file();
+
+   input_from_file(TESTDIR "/netlist/mixed2.v");
+
+   tree_t e = run_elab();
+   fail_if(e == NULL);
+
+   tree_t top = tree_stmt(e, 0);
+   fail_unless(tree_kind(top) == T_BLOCK);
+   fail_unless(find_vhdl_shim_entity(top) == NULL);
+
+   tree_t shim = NULL;
+   const int nstmts = tree_stmts(top);
+   for (int i = 0; i < nstmts; i++) {
+      tree_t s = tree_stmt(top, i);
+      if (tree_kind(s) == T_BLOCK)
+         shim = s;
+   }
+
+   fail_if(shim == NULL);
+   fail_unless(tree_ident(shim) == ident_new("u_vhdl"));
+   fail_if(is_vhdl_shim_entity(top, shim));
+
+   tree_t ent = find_vhdl_shim_entity(shim);
+   fail_if(ent == NULL);
+   fail_unless(tree_ident(ent) == ident_new("LEAF"));
+   fail_unless(is_vhdl_shim_entity(shim, ent));
+   fail_if(is_vhdl_shim_entity(ent, shim));
+   fail_unless(find_vhdl_shim_entity(ent) == NULL);
+
+   fail_if_errors();
+}
+END_TEST
+
 START_TEST(test_clone2)
 {
    set_standard(STD_19);
@@ -2628,6 +2671,7 @@ Suite *get_elab_tests(void)
    tcase_add_test(tc, test_clone1);
    tcase_add_test(tc, test_mixed2);
    tcase_add_test(tc, test_vlogshim1);
+   tcase_add_test(tc, test_shimentity);
    tcase_add_test(tc, test_clone2);
    tcase_add_test(tc, test_issue1333);
    tcase_add_test(tc, test_issue1404);

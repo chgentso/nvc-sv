@@ -16,6 +16,7 @@
 //
 
 #include "util.h"
+#include "common.h"
 #include "cov/cov-api.h"
 #include "hash.h"
 #include "lower.h"
@@ -60,21 +61,7 @@ static bool reheat_is_vhdl_shim(tree_t b)
 {
    // A Verilog block containing a VHDL block is the generated shim for
    // a VHDL entity instantiated from Verilog
-
-   const int nstmts = tree_stmts(b);
-   for (int i = 0; i < nstmts; i++) {
-      tree_t s = tree_stmt(b, i);
-      if (tree_kind(s) != T_BLOCK)
-         continue;
-
-      tree_t hier = tree_decl(s, 0);
-      assert(tree_kind(hier) == T_HIER);
-
-      if (tree_subkind(hier) != T_VERILOG)
-         return true;
-   }
-
-   return false;
+   return find_vhdl_shim_entity(b) != NULL;
 }
 
 static void reheat_lower_verilog(tree_t b, const reheat_ctx_t *parent,

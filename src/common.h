@@ -61,6 +61,8 @@ bool is_type_decl(tree_t t);
 tree_t aliased_type_decl(tree_t decl);
 bool is_loop_stmt(tree_t t);
 bool is_design_unit(tree_t t);
+bool is_vhdl_shim_entity(tree_t parent, tree_t block);
+tree_t find_vhdl_shim_entity(tree_t block);
 bool is_literal(tree_t t);
 bool is_body(tree_t t);
 bool is_uninstantiated_package(tree_t pack);

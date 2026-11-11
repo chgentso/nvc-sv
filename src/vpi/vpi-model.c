@@ -1404,17 +1404,7 @@ static tree_t vpi_vhdl_block(tree_t block)
 {
    // The block of a VHDL entity instantiated from Verilog is the only
    // instance in the module which wraps it
-
-   const int nstmts = tree_stmts(block);
-   for (int i = 0; i < nstmts; i++) {
-      tree_t s = tree_stmt(block, i);
-      if (tree_kind(s) == T_BLOCK && tree_decls(s) > 0
-          && tree_kind(tree_decl(s, 0)) == T_HIER
-          && tree_subkind(tree_decl(s, 0)) == T_ARCH)
-         return s;
-   }
-
-   return NULL;
+   return find_vhdl_shim_entity(block);
 }
 
 static c_abstractScope *cached_scope(tree_t block, rt_scope_t *s)

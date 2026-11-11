@@ -757,6 +757,41 @@ bool is_package(tree_t t)
    }
 }
 
+static tree_kind_t block_hier_subkind(tree_t block)
+{
+   if (tree_kind(block) != T_BLOCK || tree_decls(block) == 0)
+      return 0;
+
+   tree_t hier = tree_decl(block, 0);
+   return tree_kind(hier) == T_HIER ? tree_subkind(hier) : 0;
+}
+
+bool is_vhdl_shim_entity(tree_t parent, tree_t block)
+{
+   // The elaborator wraps a VHDL entity instantiated from Verilog in a
+   // generated Verilog module with the entity as the only block of VHDL
+   // architecture kind inside it.  The wrapper is an implementation detail
+   // so the entity is not given a name of its own in hierarchical names.
+
+   return block_hier_subkind(block) == T_ARCH
+      && block_hier_subkind(parent) == T_VERILOG;
+}
+
+tree_t find_vhdl_shim_entity(tree_t block)
+{
+   if (block_hier_subkind(block) != T_VERILOG)
+      return NULL;
+
+   const int nstmts = tree_stmts(block);
+   for (int i = 0; i < nstmts; i++) {
+      tree_t s = tree_stmt(block, i);
+      if (is_vhdl_shim_entity(block, s))
+         return s;
+   }
+
+   return NULL;
+}
+
 bool is_design_unit(tree_t t)
 {
    switch (tree_kind(t)) {
