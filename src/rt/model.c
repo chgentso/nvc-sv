@@ -6060,6 +6060,8 @@ static A(stmt_break_t)  stmt_breaks;
 static A(stmt_site_t)   stmt_sites;
 static bool             stmt_stepping;
 static rt_proc_t       *stmt_step_proc;   // Step only in this process
+static int              stmt_step_mode;   // STMT_STEP_* when depth-aware
+static int              stmt_step_depth;  // Call depth the step started at
 static const loc_t     *stmt_probe_loc;   // Statement that the hook is for
 static stmt_hook_fn_t   stmt_hook;
 static void            *stmt_hook_context;
@@ -6140,6 +6142,7 @@ void stmt_step_set(bool enable)
 {
    stmt_stepping = enable;
    stmt_step_proc = NULL;
+   stmt_step_mode = STMT_STEP_IN;
    stmt_rearm();
 }
 
@@ -6152,6 +6155,25 @@ bool stmt_step_process(void)
       return false;
 
    stmt_step_proc = proc;
+   return true;
+}
+
+bool stmt_step_depth_set(int mode)
+{
+   // Called from the hook after stmt_step_set(true): step in the current
+   // process but only to statements at the call depth that mode asks for,
+   // relative to the depth of the statement that the hook is for
+   if (mode < STMT_STEP_IN || mode > STMT_STEP_OUT || !stmt_step_process())
+      return false;
+
+   stmt_step_depth = (mode == STMT_STEP_IN) ? 0 : jit_stack_depth();
+
+   // Nothing to return to from the outermost frame: stop at the next
+   // statement of the process, as over does
+   if (mode == STMT_STEP_OUT && stmt_step_depth <= 1)
+      mode = STMT_STEP_OVER;
+
+   stmt_step_mode = mode;
    return true;
 }
 
@@ -6236,6 +6258,14 @@ void x_stmt_probe(object_t *where)
    // other code that no process is running
    bool match = stmt_stepping && proc != NULL
       && (stmt_step_proc == NULL || stmt_step_proc == proc);
+
+   // The depth is only needed, and only computed, by a depth-aware step of
+   // the process that it is for
+   if (match && stmt_step_mode != STMT_STEP_IN && stmt_step_proc == proc) {
+      const int depth = jit_stack_depth();
+      match = (stmt_step_mode == STMT_STEP_OVER && depth <= stmt_step_depth)
+         || (stmt_step_mode == STMT_STEP_OUT && depth < stmt_step_depth);
+   }
    for (int i = 0; i < stmt_breaks.count && !match; i++) {
       const stmt_break_t *b = &(stmt_breaks.items[i]);
       match = b->line == loc->first_line && same_file(b->file, file);

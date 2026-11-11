@@ -94,6 +94,26 @@ PLI_INT32 vpi_nvc_stmt_breakpoint_remove(const char *file, int line);
 // evaluate the condition of a wait.
 PLI_INT32 vpi_nvc_stmt_step_process(void);
 
+// Like vpi_nvc_stmt_step_process, and in addition the stepping stops only at
+// statements of the call depth that mode asks for, counted from the
+// statement that the callback is for: vpiNvcStepIn is the next statement
+// of the process, also in the subprograms that it calls, vpiNvcStepOver is
+// the next statement at the same or a lower depth (calls are run without
+// stopping, a task or procedure that waits is stepped over until it returns,
+// other processes run meanwhile), vpiNvcStepOut is the next statement at a
+// lower depth, that is in the caller once the current subprogram has
+// returned.  Out from a statement of the process itself has no caller to
+// return to and so stops as over does, at the next statement of the
+// process, after its next activation if it has to.  Breakpoints still stop in any depth.  Call after
+// vpi_nvc_stmt_step(1); returns 0, and does nothing, if the callback is not
+// in a process, stepping is off or mode is not one of these.  The cost is
+// only paid while the step is armed.
+#define vpiNvcStepIn   0
+#define vpiNvcStepOver 1
+#define vpiNvcStepOut  2
+
+PLI_INT32 vpi_nvc_stmt_step_depth(PLI_INT32 mode);
+
 // Asks whether a breakpoint on file:line can fire: whether a statement of the
 // code that is instrumented (--debug-stmts) begins on that line.  Returns -1
 // if the code is not instrumented, otherwise a combination of

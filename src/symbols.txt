@@ -156,6 +156,7 @@
   vpi_nvc_stmt_site_query;
   vpi_nvc_stmt_step;
   vpi_nvc_stmt_step_process;
+  vpi_nvc_stmt_step_depth;
   vpi_mcd_flush;
   vpi_mcd_printf;
   vpi_mcd_vprintf;

@@ -98,6 +98,12 @@ void stmt_break_add(const char *file, int line);
 bool stmt_break_remove(const char *file, int line);
 void stmt_step_set(bool enable);
 bool stmt_step_process(void);
+
+// Modes of stmt_step_depth_set
+#define STMT_STEP_IN   0   // Next statement, also in called subprograms
+#define STMT_STEP_OVER 1   // Next statement at the same or a lower depth
+#define STMT_STEP_OUT  2   // Next statement at a lower depth
+bool stmt_step_depth_set(int mode);
 bool stmt_probe_where(loc_t *loc);
 
 // Result of stmt_site_query: bit set

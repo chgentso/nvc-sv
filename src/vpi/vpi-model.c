@@ -4176,6 +4176,12 @@ PLI_INT32 vpi_nvc_stmt_step_process(void)
 }
 
 DLLEXPORT
+PLI_INT32 vpi_nvc_stmt_step_depth(PLI_INT32 mode)
+{
+   return stmt_step_depth_set(mode) ? 1 : 0;
+}
+
+DLLEXPORT
 PLI_INT32 vpi_nvc_stmt_site_query(const char *file, PLI_INT32 line,
                                   PLI_INT32 *nearest)
 {

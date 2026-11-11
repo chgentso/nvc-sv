@@ -541,6 +541,15 @@ void jit_lower_file(jit_t *j, jit_file_fn_t fn, void *ctx)
       mir_lower_file(j->mir, fn, ctx);
 }
 
+int jit_stack_depth(void)
+{
+   // Number of frames of jit_stack_trace without building them
+   int count = 0;
+   for (jit_anchor_t *a = jit_thread_local()->anchor; a; a = a->caller)
+      count++;
+   return count;
+}
+
 jit_stack_trace_t *jit_stack_trace(void)
 {
    jit_thread_local_t *thread = jit_thread_local();

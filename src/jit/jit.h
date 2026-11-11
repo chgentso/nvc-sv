@@ -89,6 +89,7 @@ void tlab_release(jit_t *j, tlab_t *t);
 void *jit_mspace_alloc(size_t size) RETURNS_NONNULL;
 void *tlab_alloc(tlab_t *t, size_t size) RETURNS_NONNULL;
 jit_stack_trace_t *jit_stack_trace(void);
+int jit_stack_depth(void);
 
 // Lowers the subprograms and other units that have not been called yet and
 // are declared in a file that the function accepts, so that their statement
