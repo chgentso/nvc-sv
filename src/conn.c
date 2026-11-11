@@ -83,8 +83,10 @@ struct _conn_design {
    unsigned       maxblocks;
    hash_t        *netmap;      // Declaration -> conn_net_t (current instance)
    hash_t        *genval;      // Generic declaration -> gen_value_t (ditto)
+   shash_t       *names;       // Net names of the current instance
    hash_t        *gmap;        // Declaration -> conn_net_t (all instances)
    hash_t        *blkmaps;     // conn_block_t -> inst_maps_t
+   hash_t        *tree_blocks; // T_BLOCK -> conn_block_t
    conn_proc_t  **xprocs;      // Processes touching nets of other blocks
    unsigned       nxprocs;
    unsigned       maxxprocs;
@@ -399,10 +401,20 @@ static conn_net_t *lookup_net(conn_design_t *cd, const void *decl)
 {
    conn_net_t *n = cd->netmap ? hash_get(cd->netmap, decl) : NULL;
    if (n != NULL)
-      return n;
+      return n == &ambiguous ? NULL : n;
 
    n = hash_get(cd->gmap, decl);
    return n == &ambiguous ? NULL : n;
+}
+
+static void map_local(conn_design_t *cd, const void *decl, conn_net_t *n)
+{
+   // Declarations of a cloned interface are shared by all of its instances
+   if (decl == NULL)
+      return;
+
+   conn_net_t *old = hash_get(cd->netmap, decl);
+   hash_put(cd->netmap, decl, old != NULL && old != n ? &ambiguous : n);
 }
 
 static void map_decl(conn_design_t *cd, const void *decl, conn_net_t *n)
@@ -428,11 +440,19 @@ static void add_design_block(conn_design_t *cd, conn_block_t *b)
 // Build context
 
 typedef struct {
+   conn_block_t *x;        // Interface instance
+   const char   *member;
+   conn_net_t   *net;      // Net of the block being built
+} ifalias_t;
+
+typedef struct {
    conn_design_t *cd;
    conn_block_t  *block;       // Instance being built
    net_list_t   nets;
    inst_list_t  insts;
    proc_list_t  procs;
+   shash_t     *names;     // Net names in use
+   A(ifalias_t) aliases;   // Nets standing for signals of interfaces
    unsigned         nports;
 } bctx_t;
 
@@ -441,7 +461,17 @@ static conn_net_t *new_net(bctx_t *bc, const char *name, conn_dir_t dir,
 {
    conn_design_t *cd = bc->cd;
    conn_net_t *n = dalloc(cd, sizeof(conn_net_t));
-   n->name  = dstr(cd, name);
+
+   // Names must be unique in the block to be usable as keys of netnames
+   char *uniq = NULL;
+   for (int k = 2; shash_get(bc->names, uniq ?: name) != NULL; k++) {
+      free(uniq);
+      uniq = xasprintf("%s#%d", name, k);
+   }
+
+   n->name  = dstr(cd, uniq ?: name);
+   shash_put(bc->names, n->name, n);
+   free(uniq);
    n->block = bc->block;
    n->dir   = dir;
    n->width = MAX(width, 1);
@@ -1155,6 +1185,10 @@ static void vlog_net_shape(vlog_node_t decl, unsigned *width, bool *desc,
       if (!vlog_is_dynamic_type(dt))
          w = MAX(vlog_size(dt), 1);
       break;
+   case V_STRUCT_DECL:
+      w = MAX(vlog_size(dt), 1);   // Zero if not packed
+      *record = true;
+      break;
    default:
       break;
    }
@@ -1187,6 +1221,26 @@ static bool vlog_select(conn_design_t *cd, vlog_node_t v, conn_range_t *out,
    case V_REF:
    case V_HIER_REF:
       {
+         if (vlog_kind(v) == V_HIER_REF && vlog_has_value(v)
+             && cd->names != NULL) {
+            // The signal of an interface instance or port of this block
+            // named with the instance or port as prefix: more reliable
+            // than the declaration as that is shared by cloned interfaces
+            vlog_node_t prefix = vlog_value(v);
+            if (vlog_kind(prefix) == V_MOD_REF && !vlog_has_value(prefix)) {
+               char *name = xasprintf("%s.%s", istr(vlog_ident(prefix)),
+                                      istr(vlog_ident(v)));
+               conn_net_t *net = shash_get(cd->names, name);
+               free(name);
+               if (net != NULL) {
+                  out->net = net;
+                  out->lo = 0;
+                  out->hi = net->width - 1;
+                  return true;
+               }
+            }
+         }
+
          if (!vlog_has_ref(v))
             return false;
 
@@ -1201,10 +1255,29 @@ static bool vlog_select(conn_design_t *cd, vlog_node_t v, conn_range_t *out,
       }
 
    case V_MEMBER_REF:
-      if (!vlog_select(cd, vlog_value(v), out, approx))
-         return false;
-      *approx = true;
-      return true;
+      {
+         if (!vlog_select(cd, vlog_value(v), out, approx))
+            return false;
+
+         // Member of a packed structure that is the whole of a net
+         const conn_net_t *net = out->net;
+         if (!*approx && out->lo == 0 && out->hi == net->width - 1
+             && vlog_has_ident(v)) {
+            char *name = xasprintf(".%s", istr(vlog_ident(v)));
+            for (unsigned i = 0; i < net->nfields; i++) {
+               if (strcmp(net->fields[i].name, name) == 0) {
+                  out->lo = net->fields[i].lo;
+                  out->hi = net->fields[i].hi;
+                  free(name);
+                  return true;
+               }
+            }
+            free(name);
+         }
+
+         *approx = true;
+         return true;
+      }
 
    case V_BIT_SELECT:
    case V_PART_SELECT:
@@ -1675,6 +1748,115 @@ static vlog_node_t block_vlog_body(tree_t b)
    return tree_kind(wrap) == T_VERILOG ? tree_vlog(wrap) : NULL;
 }
 
+
+////////////////////////////////////////////////////////////////////////////////
+// Fields of records and structures
+
+#define MAX_FIELDS 512
+
+typedef A(conn_field_t) field_list_t;
+
+static void push_field(conn_design_t *cd, field_list_t *l, const char *prefix,
+                       const char *name, unsigned lo, unsigned hi)
+{
+   conn_field_t f = { dstrf(cd, "%s%s", prefix, name), lo, hi };
+   APUSH(*l, f);
+}
+
+static void vhdl_fields_rec(conn_design_t *cd, field_list_t *l, type_t type,
+                            const char *prefix, unsigned off)
+{
+   if (l->count >= MAX_FIELDS)
+      return;
+
+   if (type_is_record(type)) {
+      const int nf = type_fields(type);
+      for (int i = 0; i < nf; i++) {
+         tree_t f = type_field(type, i);
+         type_t ft = tree_type(f);
+         unsigned fw;
+         if (!vhdl_width(cd, ft, &fw))
+            return;
+
+         char *name = dstrf(cd, ".%s", istr(tree_ident(f)));
+         if (type_has_record(ft)) {
+            char *np = dstrf(cd, "%s%s", prefix, name);
+            vhdl_fields_rec(cd, l, ft, np, off);
+         }
+         else if (fw > 0)
+            push_field(cd, l, prefix, name, off, off + fw - 1);
+
+         off += fw;
+      }
+   }
+   else if (type_is_array(type) && dimension_of(type) == 1) {
+      type_t elem = type_elem(type);
+      unsigned ew;
+      dim_t d;
+      if (!vhdl_width(cd, elem, &ew) || !vhdl_dim(cd, type, 0, &d))
+         return;
+
+      for (int64_t k = 0; k < d.length && l->count < MAX_FIELDS; k++) {
+         const int64_t idx = d.down ? d.left - k : d.left + k;
+         char *np = dstrf(cd, "%s(%"PRIi64")", prefix, idx);
+         if (type_has_record(elem) && ew > 0)
+            push_field(cd, l, np, "", off + k * ew, off + (k + 1) * ew - 1);
+         vhdl_fields_rec(cd, l, elem, np, off + k * ew);
+      }
+   }
+}
+
+static void vhdl_fields(conn_design_t *cd, conn_net_t *n, type_t type)
+{
+   SCOPED_LIST(field_list_t, fields);
+   vhdl_fields_rec(cd, &fields, type, "", 0);
+
+   n->fields = DDUP(cd, fields, conn_field_t);
+   n->nfields = fields.count;
+}
+
+static void vlog_fields_rec(conn_design_t *cd, field_list_t *l,
+                            vlog_node_t st, const char *prefix, unsigned off)
+{
+   if (st == NULL || vlog_kind(st) != V_STRUCT_DECL
+       || !(vlog_flags(st) & VLOG_F_PACKED))
+      return;
+
+   const int n = vlog_decls(st);
+   for (int i = 0; i < n && l->count < MAX_FIELDS; i++) {
+      vlog_node_t m = vlog_decl(st, i);
+      if (!vlog_has_type(m))
+         return;
+
+      const unsigned w = vlog_size(vlog_type(m));
+      char *name = dstrf(cd, ".%s", istr(vlog_ident(m)));
+
+      vlog_node_t sub = vlog_get_type(vlog_type(m));
+      if (sub != NULL && vlog_kind(sub) == V_STRUCT_DECL)
+         vlog_fields_rec(cd, l, sub, dstrf(cd, "%s%s", prefix, name), off);
+      else if (w > 0)
+         push_field(cd, l, prefix, name, off, off + w - 1);
+
+      off += w;
+   }
+}
+
+static void vlog_fields(conn_design_t *cd, conn_net_t *n, vlog_node_t decl)
+{
+   if (!vlog_has_type(decl))
+      return;
+
+   vlog_node_t dt = vlog_get_type(vlog_type(decl));
+   if (dt == NULL || vlog_kind(dt) != V_STRUCT_DECL)
+      return;
+
+   SCOPED_LIST(field_list_t, fields);
+   vlog_fields_rec(cd, &fields, dt, "", 0);
+
+   n->fields = DDUP(cd, fields, conn_field_t);
+   n->nfields = fields.count;
+}
+
 static void set_vhdl_bounds(conn_design_t *cd, conn_net_t *n, type_t type)
 {
    n->record = type_has_record(type);
@@ -1704,7 +1886,10 @@ static conn_net_t *add_vhdl_net(bctx_t *bc, tree_t decl, const char *prefix,
    char *name = dstrf(cd, "%s%s", prefix, istr(tree_ident(decl)));
    conn_net_t *n = new_net(bc, name, dir, width, tree_loc(decl));
    n->descending = true;
+   n->decl = decl;
    set_vhdl_bounds(cd, n, type);
+   if (n->record)
+      vhdl_fields(cd, n, type);
 
    map_decl(cd, decl, n);
    return n;
@@ -1737,6 +1922,8 @@ static conn_net_t *add_vlog_net(bctx_t *bc, vlog_node_t decl,
    n->left = left;
    n->right = right;
    n->record = record;
+   n->decl = decl;
+   vlog_fields(cd, n, decl);
 
    map_decl(cd, decl, n);
    return n;
@@ -1801,6 +1988,7 @@ static void build_ports(bctx_t *bc, tree_t b, vlog_node_t body)
 
          vlog_node_t nd = vlog_ref(pd);
          conn_net_t *n = add_vlog_net(bc, nd, "", dir);
+         n->decl2 = pd;
          map_decl(cd, pd, n);
          n->name = dstr(cd, istr(vlog_ident(pd)));
       }
@@ -1816,6 +2004,78 @@ static void build_ports(bctx_t *bc, tree_t b, vlog_node_t body)
          map_decl(cd, p, n);
       else
          add_vhdl_net(bc, p, "", vhdl_port_dir(p));
+   }
+
+   // Interface ports: one port for each signal of the interface visible
+   // through the modport, standing for the signal of the instance
+   const int ndecls = tree_decls(b);
+   for (int i = 0; i < ndecls; i++) {
+      tree_t wrap = tree_decl(b, i);
+      if (tree_kind(wrap) != T_VERILOG)
+         continue;
+
+      vlog_node_t ip = tree_vlog(wrap);
+      if (vlog_kind(ip) != V_IFACE_PORT || !tree_has_ref(wrap))
+         continue;
+
+      conn_block_t *x = hash_get(cd->tree_blocks, tree_ref(wrap));
+      if (x == NULL || !x->interface)
+         continue;   // Not found or not built yet
+
+      const char *pname = istr(tree_ident(wrap));
+      vlog_node_t mp = vlog_has_ref(ip) ? vlog_ref(ip) : NULL;
+
+      const int nmp = mp ? vlog_decls(mp) : (int)x->nnets;
+      for (int j = 0; j < nmp; j++) {
+         conn_net_t *xn = NULL;
+         conn_dir_t dir = CONN_INOUT;
+         if (mp != NULL) {
+            vlog_node_t e = vlog_decl(mp, j);
+            if (vlog_kind(e) != V_MODPORT_PORT)
+               continue;
+
+            switch ((vlog_modport_dir_t)vlog_subkind(e)) {
+            case V_MODPORT_INPUT: dir = CONN_IN; break;
+            case V_MODPORT_OUTPUT: dir = CONN_OUT; break;
+            case V_MODPORT_INOUT:
+            case V_MODPORT_REF: break;
+            default: continue;   // Task import or export
+            }
+
+            for (unsigned k = 0; k < x->nnets; k++) {
+               if (name_eq(x->nets[k]->name, istr(vlog_ident(e))))
+                  xn = x->nets[k];
+            }
+         }
+         else
+            xn = x->nets[j];
+
+         if (xn == NULL)
+            continue;
+
+         char *name = dstrf(cd, "%s.%s", pname, xn->name);
+         conn_net_t *n = new_net(bc, name, dir, xn->width, NULL);
+         n->descending = xn->descending;
+         n->has_bounds = xn->has_bounds;
+         n->left = xn->left;
+         n->right = xn->right;
+         n->record = xn->record;
+         n->fields = xn->fields;
+         n->nfields = xn->nfields;
+         n->iface = true;
+         n->ifblock = x;
+         n->member = xn->name;
+         n->decl = xn->decl;
+         n->decl2 = xn->decl2;
+         n->src = xn->src;
+         n->line = xn->line;
+
+         ifalias_t al = { x, xn->name, n };
+         APUSH(bc->aliases, al);
+
+         map_local(cd, xn->decl, n);
+         map_local(cd, xn->decl2, n);
+      }
    }
 
    bc->nports = bc->nets.count;
@@ -1838,7 +2098,7 @@ static void scan_decls(bctx_t *bc, tree_t blk, const char *prefix)
             const vlog_kind_t kind = vlog_kind(v);
             if (kind != V_NET_DECL && kind != V_VAR_DECL)
                break;
-            else if (lookup_net(cd, v) != NULL)
+            else if (hash_get(cd->netmap, v) != NULL)
                break;   // Already declared as a port
 
             conn_net_t *n = prefix[0] == '\0'
@@ -1902,7 +2162,7 @@ static conn_proc_t *add_process(bctx_t *bc, const char *prefix, ident_t id,
    };
 
    if (generated)
-      p->name = dstrf(cd, "%s%s@%u", prefix, kind_names[kind], p->line);
+      p->name = dstrf(cd, "%s%s @%u", prefix, kind_names[kind], p->line);
    else
       p->name = dstrf(cd, "%s%s", prefix, base);
 
@@ -2074,16 +2334,17 @@ static void build_conns(bctx_t *bc, conn_inst_t *inst, tree_t cb)
       if (vlog_kind(map) != V_PORT_MAP || !vlog_has_value(map))
          continue;
 
+      // Find the port by name as the declarations are shared by instances
+      // cloned from the same module
       vlog_node_t pd = vlog_ref(map);
-      conn_net_t *n = lookup_net(cd, pd);
-      if (n == NULL) {
-         conn_net_t *byname = NULL;
-         for (unsigned j = 0; j < inst->child->nports; j++) {
-            if (name_eq(inst->child->nets[j]->name, istr(vlog_ident(pd))))
-               byname = inst->child->nets[j];
-         }
-         n = byname;
+      conn_net_t *n = NULL;
+      for (unsigned j = 0; j < inst->child->nports; j++) {
+         if (name_eq(inst->child->nets[j]->name, istr(vlog_ident(pd))))
+            n = inst->child->nets[j];
       }
+
+      if (n == NULL)
+         n = lookup_net(cd, pd);
 
       if (n == NULL)
          continue;
@@ -2094,11 +2355,93 @@ static void build_conns(bctx_t *bc, conn_inst_t *inst, tree_t cb)
                vlog_loc(map));
    }
 
+   conn_block_t *child = inst->child;
+
+   if (child->interface) {
+      // A port of the interface connected to a whole net of this block
+      // is that net as far as users of the interface are concerned
+      for (unsigned i = 0; i < conns.count; i++) {
+         const conn_pconn_t *c = &(conns.items[i]);
+         if (c->nsegs != 1 || c->segs[0].kind != CONN_SEG_NET)
+            continue;
+
+         conn_net_t *an = c->segs[0].range.net;
+         if (c->segs[0].range.lo != 0 || c->segs[0].range.hi != an->width - 1
+             || an->width != c->formal->width)
+            continue;
+
+         ifalias_t al = { child, c->formal->name, an };
+         APUSH(bc->aliases, al);
+
+         map_local(cd, c->formal->decl, an);
+         map_local(cd, c->formal->decl2, an);
+      }
+   }
+
+   for (unsigned i = 0; i < child->nports; i++) {
+      conn_net_t *n = child->nets[i];
+      if (!n->iface)
+         continue;
+
+      conn_net_t *actual;
+      if (child->interface) {
+         // The signal of the interface instance is a net of this block
+         char *name = dstrf(cd, "%s.%s", inst->label, n->name);
+         actual = new_net(bc, name, CONN_LOCAL, n->width, NULL);
+         actual->descending = n->descending;
+         actual->has_bounds = n->has_bounds;
+         actual->left = n->left;
+         actual->right = n->right;
+         actual->record = n->record;
+         actual->fields = n->fields;
+         actual->nfields = n->nfields;
+         actual->decl = n->decl;
+         actual->src = n->src;
+         actual->line = n->line;
+         actual->iface = true;
+         actual->ifblock = child;
+         actual->member = n->name;
+
+         ifalias_t al = { child, n->name, actual };
+         APUSH(bc->aliases, al);
+
+         map_local(cd, n->decl, actual);
+         map_local(cd, n->decl2, actual);
+      }
+      else {
+         // The net of this block standing for the same signal
+         actual = NULL;
+         for (unsigned k = 0; k < bc->aliases.count; k++) {
+            const ifalias_t *al = &(bc->aliases.items[k]);
+            if (al->x == n->ifblock && strcmp(al->member, n->member) == 0)
+               actual = al->net;
+         }
+
+         if (actual == NULL)
+            continue;
+      }
+
+      SCOPED_LIST(seg_list_t, segs);
+      conn_seg_t seg = {
+         .kind  = CONN_SEG_NET,
+         .width = actual->width,
+         .range = { actual, 0, actual->width - 1 },
+      };
+      APUSH(segs, seg);
+      add_conn(bc, &conns, n, 0, n->width - 1, &segs, NULL);
+   }
+
    inst->conns = DDUP(cd, conns, conn_pconn_t);
    inst->nconns = conns.count;
 }
 
-static void scan_stmts(bctx_t *bc, tree_t blk, const char *prefix)
+static bool is_interface_block(tree_t b)
+{
+   vlog_node_t body = block_vlog_body(b);
+   return body != NULL && (vlog_flags(body) & VLOG_F_INTERFACE);
+}
+
+static void scan_stmts(bctx_t *bc, tree_t blk, const char *prefix, int pass)
 {
    conn_design_t *cd = bc->cd;
 
@@ -2107,10 +2450,13 @@ static void scan_stmts(bctx_t *bc, tree_t blk, const char *prefix)
       tree_t s = tree_stmt(blk, i);
       switch (tree_kind(s)) {
       case T_PROCESS:
-         add_process(bc, prefix, tree_ident(s), CONN_PROC_VHDL, s);
+         if (pass == 2)
+            add_process(bc, prefix, tree_ident(s), CONN_PROC_VHDL, s);
          break;
 
       case T_VERILOG:
+         if (pass != 2)
+            break;
          {
             vlog_node_t v = tree_vlog(s);
             conn_proc_kind_t kind = CONN_PROC_OTHER;
@@ -2148,8 +2494,10 @@ static void scan_stmts(bctx_t *bc, tree_t blk, const char *prefix)
             // The index of a generate loop is not unique to one iteration
             register_generics(cd, s, cd->genval);
             char *np = dstrf(cd, "%s%s.", prefix, istr(tree_ident(s)));
-            scan_stmts(bc, s, np);
+            scan_stmts(bc, s, np, pass);
          }
+         else if (pass != (is_interface_block(s) ? 0 : 1))
+            break;
          else {
             const char *label = dstrf(cd, "%s%s", prefix, block_label(s));
             conn_block_t *child = build_instance(cd, s, bc->block, label);
@@ -2189,6 +2537,7 @@ static conn_block_t *build_instance(conn_design_t *cd, tree_t b,
    }
 
    add_design_block(cd, blk);
+   hash_put(cd->tree_blocks, b, blk);
 
    // Declarations are mapped to nets in a table private to this instance
    inst_maps_t *im = xcalloc(sizeof(inst_maps_t));
@@ -2203,8 +2552,10 @@ static conn_block_t *build_instance(conn_design_t *cd, tree_t b,
    cd->genval = im->gen;
 
    vlog_node_t body = block_vlog_body(b);
-   if (body != NULL)
+   if (body != NULL) {
       blk->lang = CONN_VERILOG;
+      blk->interface = !!(vlog_flags(body) & VLOG_F_INTERFACE);
+   }
 
    if (tree_decls(b) > 0 && tree_kind(tree_decl(b, 0)) == T_HIER) {
       tree_t hier = tree_decl(b, 0);
@@ -2225,11 +2576,28 @@ static conn_block_t *build_instance(conn_design_t *cd, tree_t b,
       }
    }
 
-   bctx_t bc = { .cd = cd, .block = blk };
+   bctx_t bc = { .cd = cd, .block = blk, .names = shash_new(64) };
+   shash_t *saved_names = cd->names;
+   cd->names = bc.names;
 
    build_ports(&bc, b, body);
    scan_decls(&bc, b, "");
-   scan_stmts(&bc, b, "");
+
+   if (blk->interface) {
+      // The signals of an interface are its ports as far as the parent is
+      // concerned: they are connected to nets of the parent
+      for (unsigned i = bc.nports; i < bc.nets.count; i++) {
+         bc.nets.items[i]->dir = CONN_INOUT;
+         bc.nets.items[i]->iface = true;
+      }
+      bc.nports = bc.nets.count;
+   }
+
+   // Interface instances first as other blocks refer to their signals,
+   // then the other instances, then processes which can refer to signals
+   // of the instances through hierarchical names
+   for (int pass = 0; pass < 3; pass++)
+      scan_stmts(&bc, b, "", pass);
 
    blk->nets   = DDUP(cd, bc.nets, conn_net_t *);
    blk->nnets  = bc.nets.count;
@@ -2242,6 +2610,9 @@ static conn_block_t *build_instance(conn_design_t *cd, tree_t b,
    ACLEAR(bc.nets);
    ACLEAR(bc.insts);
    ACLEAR(bc.procs);
+   shash_free(bc.names);
+   ACLEAR(bc.aliases);
+   cd->names = saved_names;
 
    cd->netmap = saved_net;
    cd->genval = saved_gen;
@@ -2318,6 +2689,7 @@ conn_design_t *conn_build(tree_t root)
    conn_design_t *cd = xcalloc(sizeof(conn_design_t));
    cd->gmap = hash_new(1024);
    cd->blkmaps = hash_new(64);
+   cd->tree_blocks = hash_new(64);
 
    A(conn_block_t *) roots = AINIT;
 
@@ -2372,6 +2744,7 @@ void conn_free(conn_design_t *cd)
    }
 
    hash_free(cd->blkmaps);
+   hash_free(cd->tree_blocks);
    hash_free(cd->gmap);
    free(cd);
 }

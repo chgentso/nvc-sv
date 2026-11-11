@@ -21,9 +21,12 @@ grep -q '^"VHDL1.U_EXPR":{' out.json
 # Cells and their pin directions
 grep -q '^"type":"VHDL1.G(1).U_LEAF"' out.json
 grep -q '^"IO":"inout"' out.json
-grep -q '^"type":"\$process"' out.json
+grep -q '^"cell":"\$process"' out.json
+grep -q '^"type":"P_COUNT"' out.json
+grep -q "^\"CLK'\":\"output\"" out.json
 grep -q '^"label":"P_COUNT"' out.json
-grep -q '^"type":"\$expr"' out.json
+grep -q '^"cell":"\$expr"' out.json
+grep -q '^"type":"D and \\"0011\\""' out.json
 grep -q '^"expr":"D and \\"0011\\""' out.json
 
 # Constant actual, least significant bit first

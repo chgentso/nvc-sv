@@ -2588,6 +2588,13 @@ static void usage(void)
            { "-Werror", "Treat all analysis warnings as errors" },
         }
       },
+      { "Netlist options",
+        {
+           { "--depth=N", "Write modules only down to level N" },
+           { "--output=FILE", "Write the netlist to FILE" },
+           { "--top-only", "Write only the top-level module" },
+        }
+      },
       { "Elaboration options",
         {
            { "--cover[={statement,branch,expression,toggle,...}]",

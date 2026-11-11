@@ -74,6 +74,11 @@ typedef struct {
    unsigned    lo, hi;       // Bit positions, inclusive
 } conn_range_t;
 
+typedef struct {
+   const char *name;       // Appended to the net name: ".FIELD", "(1).FIELD"
+   unsigned    lo, hi;     // Bit positions in the net
+} conn_field_t;
+
 struct _conn_net {
    const char   *name;      // Name in block, with generate prefix
    conn_block_t *block;
@@ -81,6 +86,13 @@ struct _conn_net {
    unsigned      width;     // Number of bits
    bool          descending;// Declared range goes high downto low
    bool          record;    // Declared type contains a record
+   conn_field_t *fields;    // Scalar and array fields of a record or packed
+   unsigned      nfields;   // structure, for display only
+   bool          iface;     // Stands for a member of an interface instance
+   conn_block_t *ifblock;   // ... that instance
+   const char   *member;    // ... and the name of the member in it
+   const void   *decl;      // Declaration (internal)
+   const void   *decl2;     // Port declaration (internal)
    int64_t       left, right;  // Declared bounds of a one-dimensional net
    bool          has_bounds;
    const char   *src;       // File name or NULL
@@ -156,6 +168,9 @@ struct _conn_block {
    const char   *label;      // Last component of path
    const char   *unit;       // Design unit, e.g. "WORK.SUB" or NULL
    conn_lang_t   lang;
+   bool          interface; // SystemVerilog interface instance: all of its
+                            // signals are ports and are also nets of the
+                            // parent named LABEL.SIGNAL
    conn_block_t *parent;
    conn_inst_t  *inst;       // Instance in parent, NULL for a root
    const char   *src;

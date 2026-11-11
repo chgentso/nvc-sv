@@ -2605,3 +2605,4 @@ svreginit1      verilog
 netlist1        shell
 netlist2        shell
 netlist3        shell
+netlist4        shell

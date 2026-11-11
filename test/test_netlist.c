@@ -427,7 +427,7 @@ START_TEST(test_vhdl1_query)
    // ... and the reader is the process inside
    ends = (ends_t){};
    ck_assert_uint_eq(conn_readers(cd, a, 0, 1, collect_cb, &ends), 1);
-   ck_assert_ptr_nonnull(find_end(&ends, CONN_END_PROC, "process@14"));
+   ck_assert_ptr_nonnull(find_end(&ends, CONN_END_PROC, "process @14"));
 
    // Output B is read by the parent connection (D) and driven by the process
    conn_net_t *b = get_net(leaf, "B");
@@ -470,8 +470,8 @@ START_TEST(test_vhdl1_json)
    ck_has(json, "\"VHDL1.U_EXPR\":{");
    ck_has(json, "\"top\":1");
    ck_has(json, "\"type\":\"VHDL1.G(0).U_LEAF\"");
-   ck_has(json, "\"type\":\"$process\"");
-   ck_has(json, "\"type\":\"$expr\"");
+   ck_has(json, "\"cell\":\"$process\"");
+   ck_has(json, "\"cell\":\"$expr\"");
    ck_has(json, "\"label\":\"P_COUNT\"");
    ck_has(json, "\"IO\":\"inout\"");
    ck_has(json, "\"language\":\"vhdl\"");
@@ -482,7 +482,7 @@ START_TEST(test_vhdl1_json)
    // Q(1 downto 0) of the first leaf is Q[0], Q[1] and Q(3 downto 2) of
    // the second; Q is "Q":[bits] with bit 0 first
    ck_has(json, "\"Q[3:2]\":");
-   ck_has(json, "\"process@");
+   ck_has(json, "\"process @");
 
    ck_assert_uint_eq(count_substr(json, "\"top\":1"), 1);
 
@@ -601,7 +601,7 @@ START_TEST(test_sv1)
    ck_assert(!g1->segs[0].approx);
 
    // Processes
-   conn_proc_t *ff = get_proc(top, "always_ff@15");
+   conn_proc_t *ff = get_proc(top, "always_ff @15");
    ck_assert_int_eq(ff->kind, CONN_PROC_ALWAYS_FF);
    ck_assert_uint_eq(ff->nreads, 2);   // clk and w[3:0]
    ck_assert_uint_eq(ff->ndrives, 1);
@@ -609,7 +609,7 @@ START_TEST(test_sv1)
    ck_assert_uint_eq(ff->line, 15);
    ck_assert(!ff->approx);
 
-   conn_proc_t *as = get_proc(i0->child, "assign@3");
+   conn_proc_t *as = get_proc(i0->child, "assign @3");
    ck_assert_int_eq(as->kind, CONN_PROC_ASSIGN);
    ck_assert_uint_eq(as->nreads, 1);
    ck_assert_str_eq(as->reads[0].net->name, "a");
@@ -626,7 +626,7 @@ START_TEST(test_sv1)
 
    ends = (ends_t){};
    ck_assert_uint_eq(conn_readers(cd, w, 4, 4, collect_cb, &ends), 4);
-   ck_assert_ptr_nonnull(find_end(&ends, CONN_END_PROC, "always_ff@15"));
+   ck_assert_ptr_nonnull(find_end(&ends, CONN_END_PROC, "always_ff @15"));
    ck_assert_ptr_nonnull(find_end(&ends, CONN_END_CHILD, "i0"));
    ck_assert_ptr_nonnull(find_end(&ends, CONN_END_CHILD, "gg[0].ig"));
    ck_assert_ptr_nonnull(find_end(&ends, CONN_END_CHILD, "gg[1].ig"));
@@ -656,6 +656,166 @@ START_TEST(test_sv1)
 }
 END_TEST
 
+START_TEST(test_vhdl2)
+{
+   set_standard(STD_08);
+   input_from_file(TESTDIR "/netlist/vhdl2.vhd");
+
+   tree_t e = run_elab();
+   fail_if_errors();
+
+   conn_design_t *cd = conn_build(e);
+   ck_assert_ptr_nonnull(cd);
+
+   conn_block_t *top = conn_root(cd, 0);
+
+   // A record is one net with its fields kept for display
+   conn_net_t *r = get_net(top, "R");
+   ck_assert_uint_eq(r->width, 5);
+   ck_assert(r->record);
+   ck_assert_uint_eq(r->nfields, 2);
+   ck_assert_str_eq(r->fields[0].name, ".A");
+   ck_assert_uint_eq(r->fields[0].lo, 0);
+   ck_assert_uint_eq(r->fields[0].hi, 3);
+   ck_assert_str_eq(r->fields[1].name, ".B");
+   ck_assert_uint_eq(r->fields[1].lo, 4);
+
+   conn_net_t *arr = get_net(top, "ARR");
+   ck_assert_uint_eq(arr->width, 10);
+   ck_assert_ptr_nonnull(arr->fields);
+
+   // Port of record type connected to a whole record and to an element
+   // of an array of records
+   const conn_pconn_t *p0 = get_conn(get_inst(top, "U0"), "P");
+   ck_assert_ptr_eq(p0->segs[0].range.net, r);
+   ck_assert_uint_eq(p0->segs[0].range.hi, 4);
+   const conn_pconn_t *p1 = get_conn(get_inst(top, "U1"), "P");
+   ck_assert_ptr_eq(p1->segs[0].range.net, arr);
+   ck_assert_uint_eq(p1->segs[0].range.lo, 0);
+   ck_assert_uint_eq(p1->segs[0].range.hi, 4);
+
+   // Assignment to a field is a partial driver
+   ends_t ends = {};
+   ck_assert_uint_eq(conn_drivers(cd, r, 0, 4, collect_cb, &ends), 2);
+   ends = (ends_t){};
+   ck_assert_uint_eq(conn_drivers(cd, r, 4, 4, collect_cb, &ends), 1);
+
+   char *json = write_json(cd, -1);
+   ck_has(json, "\"R.A\":{");
+   ck_has(json, "\"ARR(1).B\":{");
+   ck_has(json, "\"R/B\":\"output\"");
+   free(json);
+
+   conn_free(cd);
+}
+END_TEST
+
+START_TEST(test_iface1)
+{
+   input_from_file(TESTDIR "/netlist/iface1.sv");
+
+   tree_t e = run_elab();
+   fail_if_errors();
+
+   conn_design_t *cd = conn_build(e);
+   ck_assert_ptr_nonnull(cd);
+
+   conn_block_t *top = conn_root(cd, 0);
+   ck_assert_uint_eq(top->ninsts, 6);
+
+   // An interface instance has all of its signals as ports
+   conn_inst_t *bi0 = get_inst(top, "bi0");
+   ck_assert(bi0->child->interface);
+   ck_assert_uint_eq(bi0->child->nports, 3);   // clk, data and valid
+   ck_assert(!get_net(bi0->child, "clk")->iface);
+   ck_assert(get_net(bi0->child, "data")->iface);
+
+   // ... and nets of the enclosing block with the instance as prefix
+   conn_net_t *data0 = get_net(top, "bi0.data");
+   conn_net_t *data1 = get_net(top, "bi1.data");
+   ck_assert_uint_eq(data0->width, 8);
+   ck_assert(data0->iface);
+   ck_assert_ptr_eq(get_conn(bi0, "data")->segs[0].range.net, data0);
+   ck_assert_ptr_eq(get_conn(bi0, "clk")->segs[0].range.net,
+                    get_net(top, "clk"));
+
+   // A module with an interface port has a port for each signal in the
+   // modport, with the direction it gives
+   conn_inst_t *p0 = get_inst(top, "p0"), *p1 = get_inst(top, "p1");
+   conn_inst_t *c0 = get_inst(top, "c0");
+   ck_assert_uint_eq(p0->child->nports, 3);
+   ck_assert_int_eq(get_net(p0->child, "b.data")->dir, CONN_OUT);
+   ck_assert_int_eq(get_net(p0->child, "b.clk")->dir, CONN_IN);
+   ck_assert_int_eq(get_net(c0->child, "b.data")->dir, CONN_IN);
+   ck_assert_uint_eq(c0->child->nports, 4);   // And o
+
+   // Each instance is connected to its own interface instance although
+   // the declarations are shared
+   ck_assert_ptr_eq(get_conn(p0, "b.data")->segs[0].range.net, data0);
+   ck_assert_ptr_eq(get_conn(p1, "b.data")->segs[0].range.net, data1);
+   ck_assert_ptr_eq(get_conn(get_inst(top, "c1"), "b.valid")->segs[0].range.net,
+                    get_net(top, "bi1.valid"));
+   ck_assert_ptr_eq(get_conn(p1, "b.clk")->segs[0].range.net,
+                    get_net(top, "clk"));
+
+   // The process in the module reads and writes through the port
+   conn_proc_t *pp = get_proc(p0->child, "always @14");
+   ck_assert_uint_eq(pp->ndrives, 2);
+   ck_assert_ptr_eq(pp->drives[0].net, get_net(p0->child, "b.data"));
+   ck_assert_ptr_eq(pp->drives[1].net, get_net(p0->child, "b.valid"));
+   ck_assert_uint_eq(pp->nreads, 2);   // b.clk and b.data
+
+   // A hierarchical name in the parent reads the signal of each instance
+   conn_proc_t *as = get_proc(top, "assign @36");
+   ck_assert_uint_eq(as->nreads, 2);
+   ck_assert_ptr_eq(as->reads[0].net, get_net(top, "bi0.valid"));
+   ck_assert_ptr_eq(as->reads[1].net, get_net(top, "bi1.valid"));
+
+   // Packed structure
+   conn_net_t *hdr = get_net(top, "hdr");
+   ck_assert_uint_eq(hdr->width, 5);
+   ck_assert_uint_eq(hdr->nfields, 2);
+   ck_assert_str_eq(hdr->fields[0].name, ".kind");
+   ck_assert_uint_eq(hdr->fields[0].hi, 3);
+   ck_assert_str_eq(hdr->fields[1].name, ".last");
+   ck_assert_ptr_eq(as->drives[0].net, hdr);
+   ck_assert_uint_eq(as->drives[0].lo, 4);
+
+   // Queries see the producer, the consumer and the interface instance
+   ends_t ends = {};
+   ck_assert_uint_eq(conn_drivers(cd, data0, 0, 7, collect_cb, &ends), 2);
+   ck_assert_ptr_nonnull(find_end(&ends, CONN_END_CHILD, "p0"));
+   ck_assert_ptr_nonnull(find_end(&ends, CONN_END_CHILD, "bi0"));
+
+   ends = (ends_t){};
+   ck_assert_uint_eq(conn_readers(cd, data0, 0, 7, collect_cb, &ends), 2);
+   ck_assert_ptr_nonnull(find_end(&ends, CONN_END_CHILD, "c0"));
+
+   // Inside the producer: the process drives the port, read by the parent
+   ends = (ends_t){};
+   ck_assert_uint_eq(conn_drivers(cd, get_net(p0->child, "b.data"), 0, 7,
+                                  collect_cb, &ends), 1);
+   ck_assert_ptr_nonnull(find_end(&ends, CONN_END_PROC, "always @14"));
+   ends = (ends_t){};
+   ck_assert_uint_eq(conn_readers(cd, get_net(p0->child, "b.data"), 0, 7,
+                                  collect_cb, &ends), 2);
+   const conn_end_t *end = find_end(&ends, CONN_END_PARENT, "b.data");
+   ck_assert_ptr_nonnull(end);
+   ck_assert_ptr_eq(end->other.net, data0);
+
+   ck_assert_ptr_eq(conn_find_net(cd, "iface1.bi1.data"), data1);
+
+   char *json = write_json(cd, -1);
+   ck_has(json, "\"iface1.bi0\":{");
+   ck_has(json, "\"b/data\":\"output\"");
+   ck_has(json, "\"hdr.kind\":{");
+   ck_has(json, "\"interface\":1");
+   free(json);
+
+   conn_free(cd);
+}
+END_TEST
+
 Suite *get_netlist_tests(void)
 {
    Suite *s = suite_create("netlist");
@@ -666,6 +826,8 @@ Suite *get_netlist_tests(void)
    tcase_add_test(tc, test_vhdl1_json);
    tcase_add_test(tc, test_runtime);
    tcase_add_test(tc, test_sv1);
+   tcase_add_test(tc, test_vhdl2);
+   tcase_add_test(tc, test_iface1);
    suite_add_tcase(s, tc);
 
    return s;

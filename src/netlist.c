@@ -237,7 +237,13 @@ static char *range_label(const conn_net_t *net, unsigned lo, unsigned hi)
 {
    if (lo == 0 && hi == net->width - 1)
       return xstrdup(net->name);
-   else if (net->has_bounds) {
+
+   for (unsigned i = 0; i < net->nfields; i++) {
+      if (net->fields[i].lo == lo && net->fields[i].hi == hi)
+         return xasprintf("%s%s", net->name, net->fields[i].name);
+   }
+
+   if (net->has_bounds) {
       const int64_t a = net->descending ? net->left - lo : net->left + lo;
       const int64_t b = net->descending ? net->left - hi : net->left + hi;
       if (a == b)
@@ -272,6 +278,19 @@ typedef struct {
    const char *key;
    const char *value;
 } attr_t;
+
+// Short form of an expression to draw in a box: at most 24 characters
+static char *short_text(const char *text)
+{
+   if (strlen(text) <= 24)
+      return xstrdup(text);
+
+   // Do not cut a multi-byte character
+   size_t n = 21;
+   while (n > 0 && ((unsigned char)text[n] & 0xc0) == 0x80)
+      n--;
+   return xasprintf("%.*s...", (int)n, text);
+}
 
 static void write_cell(wctx_t *w, const char *name, const char *type,
                        const pin_list_t *pins, const char *src,
@@ -314,14 +333,29 @@ static void write_cell(wctx_t *w, const char *name, const char *type,
    end_obj(w);
 }
 
+// netlistsvg builds identifiers from cell and pin names with dots as the
+// separator and fails to draw a pin with a dot in its name, so pins and
+// ports use a slash instead: b/data for the signal data of interface port b
+static char *pin_name(char *name)
+{
+   for (char *p = name; *p; p++) {
+      if (*p == '.')
+         *p = '/';
+   }
+   return name;
+}
+
 static void add_pin(pin_list_t *pins, char *name, bool output)
 {
-   // Output and input pins on the same signal need different names
+   pin_name(name);
+
+   // A process that reads and drives the same signal has an input pin
+   // named for the signal and an output pin with a prime appended: count'
    for (unsigned i = 0; i < pins->count; i++) {
       if (strcmp(pins->items[i].name, name) == 0) {
          if (pins->items[i].output == output)
             return;
-         char *n2 = xasprintf("%s$%s", name, output ? "out" : "in");
+         char *n2 = xasprintf("%s'", name);
          free(name);
          name = n2;
          break;
@@ -364,8 +398,10 @@ static void write_process(wctx_t *w, const conn_proc_t *p)
    attr_t attrs[] = {
       { "kind", proc_kind_string(p->kind) },
       { "hier", tb_len(hier) > 0 ? tb_get(hier) : NULL },
+      { "cell", "$process" },
    };
-   write_cell(w, name, "$process", &pins, src, label, attrs, 2, p->approx);
+   // The label is the cell type as that is what is drawn inside the box
+   write_cell(w, name, label, &pins, src, label, attrs, 3, p->approx);
    free(src);
    free_pins(&pins);
 }
@@ -391,8 +427,10 @@ static void write_expr_cell(wctx_t *w, const conn_seg_t *s, const char *src,
 
    char *base = xasprintf("expr#%u", ++*serial);
    char *name = unique_name(w, base);
-   attr_t attrs[] = { { "expr", s->text } };
-   write_cell(w, name, "$expr", &pins, src, s->text, attrs, 1, false);
+   attr_t attrs[] = { { "expr", s->text }, { "cell", "$expr" } };
+   char *type = short_text(s->text);
+   write_cell(w, name, type, &pins, src, s->text, attrs, 2, false);
+   free(type);
    free(base);
    free_pins(&pins);
 }
@@ -573,7 +611,9 @@ static void write_module(wctx_t *w, conn_block_t *b, bool is_top)
    begin_obj(w);
    for (unsigned i = 0; i < b->nports; i++) {
       conn_net_t *n = b->nets[i];
-      key(w, n->name);
+      char *pname = pin_name(xstrdup(n->name));
+      key(w, pname);
+      free(pname);
       begin_obj(w);
       write_attr_str(w, "direction", dir_string(n->dir));
       key(w, "bits");
@@ -623,8 +663,34 @@ static void write_module(wctx_t *w, conn_block_t *b, bool is_top)
          key(w, "record");
          fputs("1", w->f);
       }
+      if (n->iface) {
+         key(w, "interface");
+         fputs("1", w->f);
+      }
       end_obj(w);
       end_obj(w);
+
+      // Fields of a record as nets of their own
+      for (unsigned j = 0; j < n->nfields; j++) {
+         const conn_field_t *f = &(n->fields[j]);
+         char *fname = xasprintf("%s%s", n->name, f->name);
+         key(w, fname);
+         begin_obj(w);
+         key(w, "hide_name");
+         fputs("0", w->f);
+         key(w, "bits");
+         bit_list_t fbits = AINIT;
+         net_bits(w, n, f->lo, f->hi, &fbits);
+         write_bits(w->f, fbits.items, fbits.count);
+         ACLEAR(fbits);
+         key(w, "attributes");
+         begin_obj(w);
+         key(w, "field");
+         fputs("1", w->f);
+         end_obj(w);
+         end_obj(w);
+         free(fname);
+      }
    }
    end_obj(w);
 

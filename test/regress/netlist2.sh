@@ -12,7 +12,7 @@ grep -q '^"sv1":{' out.json
 grep -q '^"sv1.i0":{' out.json
 grep -q '^"sv1.gg\[1\].ig":{' out.json
 grep -q '^"language":"verilog"' out.json
-grep -q '^"label":"always_ff@15"' out.json
+grep -q '^"label":"always_ff @15"' out.json
 grep -q '^"kind":"always_ff"' out.json
 grep -q '^"kind":"assign"' out.json
 

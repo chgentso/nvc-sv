@@ -86,6 +86,13 @@ vendor libraries.
 .\" --list
 .It Fl \-list
 Print all analysed and elaborated units in the work library.
+.\" --netlist
+.It Fl \-netlist Ar unit
+Write a block schematic of the elaborated design
+.Ar unit
+as Yosys JSON, which can be drawn by netlistsvg and so by the TerosHDL
+schematic viewer.  See
+.Sx NETLIST OUTPUT .
 .\" --print-deps
 .It Fl \-print-deps Ar unit ...
 Print dependencies of
@@ -767,6 +774,27 @@ is 5000.
 Create source file code coverage report instead of hierarchy coverage report.
 .El
 .\" ------------------------------------------------------------
+.\" Netlist options
+.\" ------------------------------------------------------------
+.Ss Netlist options
+.Bl -tag -width Ds
+.\" --depth
+.It Fl \-depth= Ns Ar N
+Write modules only for the instances at most
+.Ar N
+levels below the top level; deeper instances appear as cells whose type is
+not defined.  The default is to write all levels.
+.\" --output
+.It Fl \-output= Ns Ar file
+Write the netlist to
+.Ar file
+instead of the standard output.
+.\" --top-only
+.It Fl \-top-only
+Write only the module for the top level, the same as
+.Fl \-depth=0 .
+.El
+.\" ------------------------------------------------------------
 .\" Install options
 .\" ------------------------------------------------------------
 .Ss Install options
@@ -779,6 +807,85 @@ instead of the default
 .Pa $HOME/.nvc/lib .
 .\" --posix
 .El
+.\" ------------------------------------------------------------
+.\" Netlist output
+.\" ------------------------------------------------------------
+.Sh NETLIST OUTPUT
+The
+.Fl \-netlist
+command reads a design which has already been elaborated, so it can be
+run after
+.Fl e
+or chained with it, and needs no simulation.  VHDL, Verilog and
+SystemVerilog instances, including those across a language boundary, are
+described in the same way.
+.Pp
+One module is written for each elaborated instance and is named by the
+hierarchical path of the instance, for example
+.Ql TOP.G(0).U_LEAF .
+The module of the top level has the attribute
+.Ql top .
+Generate blocks and blocks without ports are not modules: their signals,
+processes and instances are part of the enclosing instance and have the
+label of the generate block as a prefix to the name.  Each module has the
+ports of the instance, a cell for each child instance whose type is the name
+of the child's module, and a net for each port and signal.  Every scalar
+element of a signal is one bit, numbered so that the least significant
+bit, which is the element with the lowest index, comes first.
+.Pp
+A process is a cell whose type, and so the text drawn in the box, is the
+label of the process or, for a process without one, the kind of process and
+its line number such as
+.Ql always_ff @15 .
+Its pins have the name of each signal it reads (input) or drives (output)
+with the range if only part of the signal is used, such as
+.Ql q[3:2] .
+A process which both reads and drives a signal has an input pin named
+.Ql count
+and an output pin named
+.Ql count' .
+The attributes of the cell give the original type
+.Ql $process ,
+the kind of process and the
+.Ql src
+file name and line.  A Verilog process which refers to a signal of another
+instance by a hierarchical name that cannot be drawn lists it in the
+attribute
+.Ql hier .
+An attribute
+.Ql approx
+is set if the sets of signals may be incomplete.
+.Pp
+An expression in a port map is a cell whose type is a shortened form of the
+expression and whose original type
+.Ql $expr
+and complete text are attributes, with the signals it reads as inputs and
+the connected value as pin
+.Ql Y .
+Constants are written as constant bits.  Conversion functions between
+VHDL and Verilog are transparent: the instance is connected directly and
+the attribute
+.Ql conversions
+lists the functions.
+.Pp
+A SystemVerilog interface instance is a module whose ports are its signals
+and the signals are also nets of the enclosing module named
+.Ql instance.signal .
+A module with an interface port has one port for each signal visible
+through the modport, named
+.Ql port.signal ,
+with the direction given by the modport.  Fields of a VHDL record or packed
+structure are extra nets such as
+.Ql R.A
+which share the bits of the whole signal.
+.Pp
+For example, to draw the design
+.Ql top
+in the TerosHDL viewer or with netlistsvg:
+.Bd -literal -offset indent
+$ nvc -a design.vhd -e top
+$ nvc \-\-netlist \-\-output=top.json top
+.Ed
 .\" ------------------------------------------------------------
 .\" Libraries
 .\" ------------------------------------------------------------
