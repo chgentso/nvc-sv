@@ -1,0 +1,10 @@
+#0 wrapnames4.u_v.t[1:0] 10
+#0 wrapnames4.u_v.b[1:0] 10
+#0 wrapnames4.u_v.a[1:0] 01
+#0 wrapnames4.b[1:0] 10
+#0 wrapnames4.a[1:0] 01
+#1000000 wrapnames4.a[1:0] 10
+#1000000 wrapnames4.b[1:0] 01
+#1000000 wrapnames4.u_v.a[1:0] 10
+#1000000 wrapnames4.u_v.b[1:0] 01
+#1000000 wrapnames4.u_v.t[1:0] 01

@@ -1,0 +1,10 @@
+#0 wrapnames3.u_e.t[1:0] 10
+#0 wrapnames3.u_e.b[1:0] 10
+#0 wrapnames3.u_e.a[1:0] 01
+#0 wrapnames3.b[1:0] 10
+#0 wrapnames3.a[1:0] 01
+#1000000 wrapnames3.a[1:0] 10
+#1000000 wrapnames3.b[1:0] 01
+#1000000 wrapnames3.u_e.a[1:0] 10
+#1000000 wrapnames3.u_e.b[1:0] 01
+#1000000 wrapnames3.u_e.t[1:0] 01

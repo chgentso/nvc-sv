@@ -806,6 +806,12 @@ static void gtkw_print_scope_comment(gtkw_writer_t *gtkw, rt_scope_t *scope,
                                      rt_scope_kind_t kind, text_buf_t *tb,
                                      bool leaf)
 {
+   if (scope_is_wrapper(scope)) {
+      // Implicit scope with no counterpart in the source
+      gtkw_print_scope_comment(gtkw, scope->parent, kind, tb, leaf);
+      return;
+   }
+
    if (scope->parent != NULL && scope->parent->kind == kind) {
       gtkw_print_scope_comment(gtkw, scope->parent, kind, tb, false);
       fputc(kind == SCOPE_INSTANCE ? '/' : '.', gtkw->file);
@@ -1159,8 +1165,13 @@ static void fst_walk_design(wave_dumper_t *wd, tree_t block)
    if (scope == NULL)
       fatal_trace("missing scope for %s", istr(tree_ident(block)));
 
+   // The generated shim for a VHDL entity instantiated from Verilog is
+   // shown as the entity
+   tree_t inner = find_vhdl_shim_entity(block);
+
    LOCAL_TEXT_BUF tb = tb_new();
-   fst_enter_scope(wd, tree_ref(h), scope, tb);
+   fst_enter_scope(wd, inner ? tree_ref(tree_decl(inner, 0)) : tree_ref(h),
+                   scope, tb);
 
    if (tree_subkind(h) == T_COMPONENT && tree_stmts(block) > 0) {
       // Skip over implicit block statement created for component
@@ -1168,6 +1179,11 @@ static void fst_walk_design(wave_dumper_t *wd, tree_t block)
       block = tree_stmt(block, 0);
       assert(tree_kind(block) == T_BLOCK);
 
+      scope = find_scope(wd->model, block);
+   }
+   else if (inner != NULL) {
+      // The signals of the shim are the ports of the entity
+      block = inner;
       scope = find_scope(wd->model, block);
    }
 
