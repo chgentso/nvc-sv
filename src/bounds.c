@@ -1303,9 +1303,43 @@ static void bounds_check_array_case(tree_t t, type_t type, bool matching)
    }
 }
 
+static bool bounds_case_generate_static(tree_t t)
+{
+   // The choices of a case generate statement need only be globally
+   // static so they may not be known until elaboration
+   const int nstmts = tree_stmts(t);
+   for (int i = 0; i < nstmts; i++) {
+      tree_t alt = tree_stmt(t, i);
+
+      const int nchoices = tree_choices(alt);
+      for (int j = 0; j < nchoices; j++) {
+         tree_t a = tree_choice(alt, j);
+         int64_t tmp;
+         if (tree_has_name(a)) {
+            tree_t name = tree_name(a);
+            if (tree_kind(name) != T_STRING && tree_kind(name) != T_AGGREGATE
+                && !folded_int(name, &tmp))
+               return false;
+         }
+         else if (tree_ranges(a) > 0) {
+            tree_t r = tree_range(a, 0);
+            if (tree_subkind(r) == RANGE_EXPR
+                || !folded_int(tree_left(r), &tmp)
+                || !folded_int(tree_right(r), &tmp))
+               return false;
+         }
+      }
+   }
+
+   return true;
+}
+
 static void bounds_check_case(tree_t t)
 {
    type_t type = tree_type(tree_value(t));
+
+   if (tree_kind(t) == T_CASE_GENERATE && !bounds_case_generate_static(t))
+      return;
 
    if (type_is_scalar(type))
       bounds_check_scalar_case(t, type, false);
@@ -1572,6 +1606,7 @@ static tree_t bounds_visit_fn(tree_t t, void *context)
       bounds_check_var_assign(t);
       break;
    case T_CASE:
+   case T_CASE_GENERATE:
       bounds_check_case(t);
       break;
    case T_MATCH_CASE:

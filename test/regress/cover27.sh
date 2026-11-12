@@ -1,10 +1,10 @@
 set -xe
 
-nvc -a $TESTDIR/regress/cover27.vhd -e -gG_PAR=0 --cover=statement --cover-file=cover27_a.ncdb cover27 -r
+nvc -a --relaxed $TESTDIR/regress/cover27.vhd -e -gG_PAR=0 --cover=statement --cover-file=cover27_a.ncdb cover27 -r
 nvc --cover-export --format=xml -o cover27_a.xml cover27_a.ncdb
 sed -i -e "s/[^ ]*regress//g" cover27_a.xml
 
-nvc -a $TESTDIR/regress/cover27.vhd -e -gG_PAR=1 --cover=statement --cover-file=cover27_b.ncdb cover27 -r
+nvc -a --relaxed $TESTDIR/regress/cover27.vhd -e -gG_PAR=1 --cover=statement --cover-file=cover27_b.ncdb cover27 -r
 nvc --cover-export --format=xml -o cover27_b.xml cover27_b.ncdb
 sed -i -e "s/[^ ]*regress//g" cover27_b.xml
 

@@ -1070,6 +1070,24 @@ START_TEST(test_issue1666)
 }
 END_TEST
 
+START_TEST(test_casegen1)
+{
+   set_standard(STD_08);
+
+   input_from_file(TESTDIR "/bounds/casegen1.vhd");
+
+   const error_t expect[] = {
+      {  8, "missing choice for element 3 of type INTEGER range 0 to 3" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   parse_check_and_simplify(T_ENTITY, T_ARCH);
+
+   check_expected_errors();
+}
+END_TEST
+
 Suite *get_bounds_tests(void)
 {
    Suite *s = suite_create("bounds");
@@ -1123,6 +1141,7 @@ Suite *get_bounds_tests(void)
    tcase_add_test(tc_core, test_issue1460);
    tcase_add_test(tc_core, test_gtype1);
    tcase_add_test(tc_core, test_issue1666);
+   tcase_add_test(tc_core, test_casegen1);
    suite_add_tcase(s, tc_core);
 
    return s;
