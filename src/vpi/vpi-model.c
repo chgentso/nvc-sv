@@ -8475,7 +8475,7 @@ static bool hdl_select(hdl_target_t *t, vlog_node_t decl, int size,
    return true;
 }
 
-static bool hdl_lookup(const char *path, hdl_target_t *t)
+static bool hdl_lookup_ex(const char *path, hdl_target_t *t, bool whole_array)
 {
    vpi_context_t *c = vpi_context();
    rt_model_t *model = vpi_get_model(c);
@@ -8536,6 +8536,10 @@ static bool hdl_lookup(const char *path, hdl_target_t *t)
       sig_shared_t **ss;
       c_regArray *arr = is_regArray(&(decl->object));
       if (arr != NULL) {
+         // The name of a whole array is a valid path but cannot be accessed
+         if (*end == '\0' && whole_array)
+            return true;
+
          if (*end != '[' || !hdl_parse_select(&end, &hi, &lo) || hi != lo)
             return false;
 
@@ -8627,6 +8631,11 @@ static bool hdl_lookup(const char *path, hdl_target_t *t)
    }
 }
 
+static bool hdl_lookup(const char *path, hdl_target_t *t)
+{
+   return hdl_lookup_ex(path, t, false);
+}
+
 static int hdl_read(hdl_target_t *t, svLogicVecVal *value)
 {
    const uint8_t *vals = signal_value(t->signal);
@@ -8688,7 +8697,7 @@ static void hdl_release(hdl_target_t *t)
 int uvm_hdl_check_path(const char *path)
 {
    hdl_target_t t;
-   return hdl_lookup(path, &t);
+   return hdl_lookup_ex(path, &t, true);
 }
 
 int uvm_hdl_read(const char *path, svLogicVecVal *value)
