@@ -160,6 +160,9 @@ static vlog_node_t vlog_const_element(vlog_node_t v)
 
 bool vlog_get_const(vlog_node_t v, int64_t *value)
 {
+   if (v == NULL)
+      return false;
+
    switch (vlog_kind(v)) {
    case V_BIT_SELECT:
    case V_MEMBER_REF:
@@ -178,10 +181,10 @@ bool vlog_get_const(vlog_node_t v, int64_t *value)
             return false;
       }
    case V_REF:
-      return vlog_get_const(vlog_ref(v), value);
+      return vlog_has_ref(v) && vlog_get_const(vlog_ref(v), value);
    case V_LOCALPARAM:
    case V_PARAM_DECL:
-      return vlog_get_const(vlog_value(v), value);
+      return vlog_has_value(v) && vlog_get_const(vlog_value(v), value);
    case V_ENUM_NAME:
       return vlog_has_value(v) && vlog_get_const(vlog_value(v), value);
    case V_CONCAT:
