@@ -820,6 +820,20 @@ START_TEST(test_m5_vlog_fields)
 }
 END_TEST
 
+START_TEST(test_m5_vlog_requires)
+{
+   // Names declared in the file are not units which are required, nor are
+   // the later names of a chain of scopes
+
+   LOCAL_TEXT_BUF tb = tb_new();
+   ck_assert_uint_eq(scan_file_deps(SCAN_FILE("m5g_requires.sv"), tb), 0);
+
+   const char *json = tb_get(tb);
+   ck_assert_ptr_nonnull(strstr(
+      json, "\"requires\":[\"?uvm_pkg\",\"?user_pkg\",\"?uvm_report_cb\"]"));
+}
+END_TEST
+
 Suite *get_scan_tests(void)
 {
    Suite *s = suite_create("scan");
@@ -850,6 +864,7 @@ Suite *get_scan_tests(void)
    tcase_add_test(tc, test_symbols_vhdl);
    tcase_add_test(tc, test_symbols_vlog);
    tcase_add_test(tc, test_bigarena);
+   tcase_add_test(tc, test_m5_vlog_requires);
    tcase_add_test(tc, test_m5_vlog_generate);
    tcase_add_test(tc, test_m5_vlog_fields);
    suite_add_tcase(s, tc);

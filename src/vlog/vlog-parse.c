@@ -138,6 +138,28 @@ static void p_module_or_generate_item(vlog_node_t mod);
 static void p_block_item_declaration(vlog_node_t parent);
 static int push_base_scopes(vlog_node_t class);
 static void put_enum_names(vlog_node_t type_decl);
+// Is the name before a scope resolution operator a type, class or
+// parameter declared in the file being scanned rather than a package that
+// is to be found elsewhere?
+static bool is_scope_declaration(vlog_node_t d)
+{
+   if (d == NULL)
+      return false;
+
+   switch (vlog_kind(d)) {
+   case V_TYPE_DECL:
+   case V_CLASS_DECL:
+   case V_PARAM_DECL:
+   case V_LOCALPARAM:
+   case V_ENUM_DECL:
+   case V_STRUCT_DECL:
+   case V_UNION_DECL:
+      return true;
+   default:
+      return false;
+   }
+}
+
 static vlog_node_t p_scope_prefix(void);
 static void p_class_constructor_arg_list(vlog_node_t parent);
 static vlog_node_t p_attribute_instance(void);
@@ -302,7 +324,11 @@ static bool is_scoped_type_start(void)
 
    if (n == 3 && peek_nth(n + 1) == tLSQUARE) {
       // Packed dimensions after the name of a type in a package
-      vlog_node_t pack = package_by_name(peek_ident_nth(1));
+      vlog_node_t pack = NULL;
+      if (!lib_scan_active()
+          || !is_scope_declaration(vlog_symtab_query(symtab,
+                                                     peek_ident_nth(1))))
+         pack = package_by_name(peek_ident_nth(1));
       vlog_node_t d = pack ? vlog_scope_member(pack, peek_ident_nth(3)) : NULL;
       return d != NULL && is_data_type(d);
    }
@@ -5276,12 +5302,14 @@ static vlog_node_t p_scope_prefix(void)
       consume(tSCOPE);
 
       if (scope == NULL) {
-         vlog_node_t d = vlog_symtab_query(symtab, id);
+         vlog_node_t declared = vlog_symtab_query(symtab, id), d = declared;
          if (d != NULL && vlog_kind(d) == V_TYPE_DECL)
             d = vlog_get_type(d);
 
          if (d != NULL && vlog_kind(d) == V_CLASS_DECL)
             scope = d;
+         else if (lib_scan_active() && is_scope_declaration(declared))
+            scope = NULL;   // Declared here: not a package to be found
          else
             scope = package_by_name(id);
       }
