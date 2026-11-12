@@ -317,6 +317,42 @@ START_TEST(test_sv_syntax)
 END_TEST
 
 
+
+START_TEST(test_sv_no_unit)
+{
+   // A file which gives no unit because of a syntax error must not leave
+   // anything behind for the next one
+
+   set_standard(STD_19);
+
+   const error_t expect_err[] = {
+      { 1, "unexpected string while parsing description, expecting one of "
+        "primitive, module, package, program, class, typedef, import or "
+        "parameter" },
+      { -1, NULL }
+   };
+   expect_errors(expect_err);
+
+   const char *expect =
+      "{\"file\":\"" SCAN_FILE("sv7.sv") "\",\"language\":\"verilog\","
+      "\"units\":[],\"requires\":[],\"includes\":[],\"errors\":1}\n";
+
+   ck_assert_uint_eq(scan(SCAN_FILE("sv7.sv"), expect), 1);
+
+   const char *expect2 =
+      "{\"file\":\"" SCAN_FILE("sv8.sv") "\",\"language\":\"verilog\","
+      "\"units\":[{\"name\":\"WORK.LEAK_A\",\"kind\":\"module\","
+      "\"ports\":false,\"instantiates\":[]}],"
+      "\"requires\":[],\"includes\":[]}\n";
+
+   ck_assert_uint_eq(scan(SCAN_FILE("sv8.sv"), expect2), 0);
+}
+END_TEST
+
+
+
+
+
 static void scan_symbols_contain(const char *file, const char *const *parts,
                                  unsigned nparts, bool expect)
 {
@@ -488,6 +524,7 @@ Suite *get_scan_tests(void)
    tcase_add_test(tc, test_sv_ifdef_b);
    tcase_add_test(tc, test_sv_decls);
    tcase_add_test(tc, test_sv_syntax);
+   tcase_add_test(tc, test_sv_no_unit);
    tcase_add_test(tc, test_symbols_vhdl);
    tcase_add_test(tc, test_symbols_vlog);
    tcase_add_test(tc, test_bigarena);

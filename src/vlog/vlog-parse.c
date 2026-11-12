@@ -26533,7 +26533,13 @@ static vlog_node_t p_source_text(void)
       }
 
       vlog_node_t v = p_description();
-      if (v == NULL || is_top_level(v))
+      if (v == NULL) {
+         // Syntax error: nothing in this arena can be used and the
+         // symbol table must not leak into the next file
+         discard_global_arena();
+         return end_of_file();
+      }
+      else if (is_top_level(v))
          return v;
    }
 }
