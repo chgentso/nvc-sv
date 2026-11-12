@@ -11522,7 +11522,10 @@ static void lower_converter(lower_unit_t *parent, tree_t map,
                             type_t src_type, vcode_reg_t dst_reg,
                             type_t dst_type)
 {
-   tree_t conv = dir == PORT_IN ? tree_value(map) : tree_name(map);
+   // The effective value of an inout port is converted using the
+   // conversion in the actual
+   tree_t conv = (dir == PORT_IN || dir == PORT_INOUT)
+      ? tree_value(map) : tree_name(map);
 
    const char *suffix;
    lower_fn_t fn;
