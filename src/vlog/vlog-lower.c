@@ -2128,6 +2128,9 @@ static vlog_select_t vlog_lower_select(vlog_gen_t *g, vlog_node_t v)
                   break;
                default:   // Virtual interface
                   {
+                     mir_build_null_check(g->mu, base, mir_build_debug_locus(
+                                             g->mu, vlog_to_object(v)));
+
                      vlog_node_t tdecl = vlog_type(decl);
                      if (vlog_kind(tdecl) == V_DATA_TYPE
                          && !vlog_is_dynamic_type(tdecl)

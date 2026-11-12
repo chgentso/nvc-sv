@@ -2668,3 +2668,4 @@ svassertoffstr1 verilog
 svassertoffrel1 verilog
 svstmtlabel1 verilog
 svnullcast1 verilog
+svnullvif1 verilog,fail,gold
