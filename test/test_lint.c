@@ -17,8 +17,70 @@
 
 
 #include "test_util.h"
+#include "common.h"
+#include "ident.h"
+#include "lib.h"
 #include "lint.h"
 #include "option.h"
+#include "phase.h"
+#include "rt/model.h"
+#include "scan.h"
+#include "tree.h"
+#include "vhdl/vhdl-phase.h"
+#include "vlog/vlog-node.h"
+#include "vlog/vlog-phase.h"
+
+static void analyse_verilog(void)
+{
+   while (true) {
+      vlog_node_t v = vlog_parse();
+      if (v == NULL)
+         break;
+
+      fail_if(error_count() > 0);
+
+      lib_put_vlog(lib_work(), v);
+      vlog_check(v);
+      fail_if(error_count() > 0);
+
+      vlog_simp(v);
+      vlog_fold(v, get_mir(), get_jit());
+      fail_if(error_count() > 0);
+   }
+}
+
+static void analyse_vhdl(void)
+{
+   while (true) {
+      tree_t t = parse();
+      if (t == NULL)
+         break;
+
+      fail_if(error_count() > 0);
+
+      lib_put(lib_work(), t);
+      simplify_local(t, get_jit(), get_registry(), get_mir());
+      bounds_check(t);
+      fail_if(error_count() > 0);
+
+      vhdl_lint(t);
+   }
+}
+
+static void elaborate_verilog(const char *name)
+{
+   object_t *obj = lib_get_generic(lib_work(), ident_new(name), NULL);
+   ck_assert_ptr_nonnull(obj);
+
+   rt_model_t *m = model_new(get_jit(), NULL);
+
+   object_t *tops[1] = { obj };
+   tree_t e = elab(tops, 1, get_jit(), get_registry(), get_mir(),
+                   NULL, NULL, m);
+   fail_if(e == NULL);
+
+   model_free(m);
+}
 
 START_TEST(test_option)
 {
@@ -41,12 +103,71 @@ START_TEST(test_option)
 }
 END_TEST
 
+START_TEST(test_unused_vlog)
+{
+   const error_t expect[] = {
+      { 10, "variable 'r_unused' is never read [lint:unused]" },
+      { 11, "variable 'r_undriven' is never assigned [lint:undriven]" },
+      { 14, "net 'w_unused' is never read [lint:unused]" },
+      { 15, "net 'w_undriven' is never assigned [lint:undriven]" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   lint_parse_option("unused,undriven");
+
+   input_from_file(TESTDIR "/lint/unused1.sv");
+
+   analyse_verilog();
+   elaborate_verilog("WORK.UNUSED1");
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_unused_vlog_off)
+{
+   // Nothing is reported unless the rules are enabled
+   expect_errors((const error_t[]){ { -1, NULL } });
+
+   input_from_file(TESTDIR "/lint/unused1.sv");
+
+   analyse_verilog();
+   elaborate_verilog("WORK.UNUSED1");
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_unused_vhdl)
+{
+   const error_t expect[] = {
+      { 20, "signal 'S_UNUSED' is never read [lint:unused]" },
+      { 21, "signal 'S_UNDRIVEN' is never assigned [lint:undriven]" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   set_standard(STD_08);
+   lint_parse_option("unused,undriven");
+
+   input_from_file(TESTDIR "/lint/unused1.vhd");
+
+   analyse_vhdl();
+
+   check_expected_errors();
+}
+END_TEST
+
 Suite *get_lint_tests(void)
 {
    Suite *s = suite_create("lint");
 
    TCase *tc = nvc_unit_test();
    tcase_add_test(tc, test_option);
+   tcase_add_test(tc, test_unused_vlog);
+   tcase_add_test(tc, test_unused_vlog_off);
+   tcase_add_test(tc, test_unused_vhdl);
    suite_add_tcase(s, tc);
 
    return s;

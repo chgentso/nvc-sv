@@ -42,6 +42,7 @@
 #include "tcl/tcl-shell.h"
 #include "thread.h"
 #include "vhpi/vhpi-model.h"
+#include "vhdl/vhdl-phase.h"
 #include "vlog/vlog-node.h"
 #include "vlog/vlog-phase.h"
 #include "vpi/vpi-model.h"
@@ -207,6 +208,8 @@ static void analyse_file(const char *file, cmd_state_t *state)
                simplify_local(unit, state->jit, state->registry, state->mir);
                bounds_check(unit);
 
+               if (opt_get_int(OPT_LINT))
+                  vhdl_lint(unit);
             }
             else
                lib_put_error(work, unit);

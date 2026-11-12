@@ -23,6 +23,7 @@
 #include "eval.h"
 #include "hash.h"
 #include "lib.h"
+#include "lint.h"
 #include "lower.h"
 #include "mask.h"
 #include "mir/mir-unit.h"
@@ -3088,6 +3089,9 @@ static void elab_verilog_module(tree_t comp, ident_t label, vlog_node_t mod,
                                 tree_t entity, const elab_ctx_t *ctx)
 {
    list = elab_resolve_param_hrefs(list, ctx);
+
+   if (opt_get_int(OPT_LINT))
+      vlog_lint_design(mod);
 
    elab_defparam_t *down = NULL;
    unsigned ndown = 0;
@@ -8546,6 +8550,8 @@ tree_t elab(object_t **top, int ntop, jit_t *jit, unit_registry_t *ur,
    call_with_model(m, elab_root_cb, &ctx);
 
    tree_set_ival(e, vlog_design_precision());
+
+   lint_flush();
 
    if (opt_get_int(OPT_ELAB_STATS))
       elab_print_stats(&ctx);

@@ -20,7 +20,8 @@ lib_libnvc_a_SOURCES += \
 	src/vlog/vlog-pp.c \
 	src/vlog/vlog-fold.c \
 	src/vlog/vlog-cov.h \
-	src/vlog/vlog-cov.c
+	src/vlog/vlog-cov.c \
+	src/vlog/vlog-lint.c
 
 EXTRA_DIST += src/vlog/vlog-cov-core.inc
 
