@@ -27,6 +27,11 @@
 #include <string.h>
 #include <stdlib.h>
 
+#define MAX_INCLUDE_DEPTH 100
+#define MAX_MACRO_DEPTH   256
+
+static int include_depth = 0;
+
 typedef struct _ifdef_stack ifdef_stack_t;
 
 #define BEGIN(s)                                         \
@@ -1011,6 +1016,16 @@ static void p_text_macro_usage(void)
       hash_put(macros, name, (m = dummy));
    }
 
+   if (macro_locs.count >= MAX_MACRO_DEPTH) {
+      const loc_t *eloc = &state.last_loc;
+      if (loc_invalid_p(eloc) && macro_locs.count > 0)
+         eloc = &ATOP(macro_locs);
+
+      error_at(eloc, "macro %pQ is nested too deeply: it may expand "
+               "itself recursively", name);
+      return;
+   }
+
    hash_t *old_args = macro_args;
 
    if (!m->has_args)
@@ -1295,6 +1310,13 @@ static void p_include_compiler_directive(void)
       return;
    }
 
+   if (include_depth >= MAX_INCLUDE_DEPTH) {
+      error_at(&loc, "`include nested too deeply: file %s may include "
+               "itself", file_name);
+      free(file_name);
+      return;
+   }
+
    if (emit_locs)
       tb_printf(output, "\n`__nvc_push \"%s\",%d:%d,%d\n", file_name,
                 loc.first_line, loc.first_column, loc.column_delta);
@@ -1309,10 +1331,14 @@ static void p_include_compiler_directive(void)
 
    free(file_name);
 
+   include_depth++;
+
    while (not_at_token(tEOF))
       p_block_of_text();
 
    consume(tEOF);
+
+   include_depth--;
 
    pop_buffer();
 

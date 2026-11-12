@@ -4005,6 +4005,79 @@ START_TEST(test_crash5)
 }
 END_TEST
 
+START_TEST(test_crash6)
+{
+   const error_t expect[] = {
+      {  1, "class 'self_ext' cannot be derived from itself" },
+      { 13, "class 'c' cannot be derived from itself" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/crash6.sv");
+
+   while (vlog_parse() != NULL)
+      ;
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_crash7)
+{
+   const error_t expect[] = {
+      {  8, "specialisations of class 'cls_a' are nested too deeply: the "
+        "parameters may be circular" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/crash7.sv");
+
+   while (vlog_parse() != NULL)
+      ;
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_crash8)
+{
+   input_from_file(TESTDIR "/vlog/crash8.sv");
+
+   const error_t expect[] = {
+      {  3, "macro 'e' is nested too deeply: it may expand itself "
+         "recursively" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   LOCAL_TEXT_BUF tb = tb_new();
+   vlog_preprocess(tb, true);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_crash9)
+{
+   add_include_dir(TESTDIR "/vlog");
+
+   input_from_file(TESTDIR "/vlog/crash9.sv");
+
+   const error_t expect[] = {
+      {  2, "`include nested too deeply: file crash9.sv may include itself" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   LOCAL_TEXT_BUF tb = tb_new();
+   vlog_preprocess(tb, true);
+
+   check_expected_errors();
+}
+END_TEST
+
 Suite *get_vlog_tests(void)
 {
    Suite *s = suite_create("vlog");
@@ -4151,6 +4224,10 @@ Suite *get_vlog_tests(void)
    tcase_add_test(tc, test_crash3);
    tcase_add_test(tc, test_crash4);
    tcase_add_test(tc, test_crash5);
+   tcase_add_test(tc, test_crash6);
+   tcase_add_test(tc, test_crash7);
+   tcase_add_test(tc, test_crash8);
+   tcase_add_test(tc, test_crash9);
    suite_add_tcase(s, tc);
 
    return s;

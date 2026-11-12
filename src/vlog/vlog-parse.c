@@ -454,6 +454,9 @@ static bool capture_generic_constraint(void);
 static vlog_node_t p_task_declaration(void);
 static vlog_node_t p_function_declaration(void);
 static vlog_node_t specialise_class(vlog_node_t generic);
+
+#define MAX_SPEC_DEPTH 50
+static int spec_depth = 0;
 static void flush_deferred_bodies(bool end_of_unit);
 static void p_timeunits_declaration(void);
 static void p_parameter_value_assignment(vlog_node_t inst);
@@ -17190,8 +17193,18 @@ static void p_class_body(vlog_node_t v, ident_t name, generic_class_t *g,
              && (vlog_flags(bt) & VLOG_F_INTERFACE))
             error_at(&state.last_loc, "class %pQ cannot extend the interface "
                      "class %pQ: use implements", name, vlog_ident(bt));
-         else if (bt != NULL && vlog_kind(bt) == V_CLASS_DECL)
-            vlog_set_ref(v, bt);
+         else if (bt != NULL && vlog_kind(bt) == V_CLASS_DECL) {
+            // The chain of base classes must not lead back to this class
+            vlog_node_t it = bt;
+            for (int n = 0; it != v && it != NULL && n < 1000; n++)
+               it = vlog_has_ref(it) ? vlog_ref(it) : NULL;
+
+            if (it == v)
+               error_at(&state.last_loc, "class %pQ cannot be derived from "
+                        "itself", name);
+            else
+               vlog_set_ref(v, bt);
+         }
          else
             error_at(&state.last_loc, "base of class must be a class type");
 
@@ -18194,6 +18207,12 @@ static vlog_node_t specialise_class(vlog_node_t generic)
       }
    }
 
+   if (spec_depth >= MAX_SPEC_DEPTH) {
+      error_at(&state.last_loc, "specialisations of class %pQ are nested too "
+               "deeply: the parameters may be circular", g->name);
+      return logic_type();
+   }
+
    vlog_node_t v = into ?: vlog_new(V_CLASS_DECL);
    vlog_set_ident(v, spec_name);
    vlog_clear_flags(v, VLOG_F_FORWARD);
@@ -18228,7 +18247,9 @@ static vlog_node_t specialise_class(vlog_node_t generic)
    state.tokenq_head = state.tokenq_tail = 0;
    state.start_loc = LOC_INVALID;
 
+   spec_depth++;
    p_class_body(v, g->name, g, actuals);
+   spec_depth--;
 
    state = saved;
    replay_class = saved_class;
@@ -26555,6 +26576,7 @@ void reset_verilog_parser(void)
    in_subroutine = false;
    ACLEAR(pending_statics);
    ACLEAR(pending_disables);
+   spec_depth = 0;
    ACLEAR(deferred_bodies);
    ACLEAR(forward_classes);
    ACLEAR(forward_specs);
