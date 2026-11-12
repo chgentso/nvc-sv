@@ -21219,8 +21219,7 @@ static void p_clocking_declaration(vlog_node_t parent, bool is_default)
       else {
          parse_error(&state.last_loc, "sorry, this item is not supported in "
                      "a clocking block");
-         drop_tokens_until(&state, tSEMI);
-         consume(tSEMI);
+         drop_tokens_until(&state, tSEMI);   // Also drops the semicolon
       }
    }
 
@@ -26095,8 +26094,7 @@ static vlog_node_t p_bind_directive(void)
 
       mod = bind_walk_path(mod, path);
       if (mod == NULL) {
-         drop_tokens_until(&state, tSEMI);
-         consume(tSEMI);
+         drop_tokens_until(&state, tSEMI);   // Also drops the semicolon
          return NULL;
       }
 
@@ -26141,8 +26139,7 @@ static vlog_node_t p_bind_directive(void)
    if (mod == NULL || vlog_kind(mod) != V_MODULE) {
       error_at(&target_loc, "cannot find module or interface %pI to bind into",
                target);
-      drop_tokens_until(&state, tSEMI);
-      consume(tSEMI);
+      drop_tokens_until(&state, tSEMI);   // Also drops the semicolon
       return NULL;
    }
 

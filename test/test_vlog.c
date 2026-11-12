@@ -4157,7 +4157,44 @@ END_TEST
 
 
 
+START_TEST(test_crash16)
+{
+   // Skipping a bind directive after an error must not consume the next
+   // semicolon
 
+   const error_t expect[] = {
+      {  4, "cannot find module or interface NOSUCH to bind into" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/crash16.sv");
+
+   while (vlog_parse() != NULL)
+      ;
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_crash17)
+{
+   // The same for an item in a clocking block
+
+   const error_t expect[] = {
+      {  3, "sorry, this item is not supported in a clocking block" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/crash17.sv");
+
+   while (vlog_parse() != NULL)
+      ;
+
+   check_expected_errors();
+}
+END_TEST
 
 Suite *get_vlog_tests(void)
 {
@@ -4313,6 +4350,8 @@ Suite *get_vlog_tests(void)
    tcase_add_test(tc, test_crash11);
    tcase_add_test(tc, test_crash12);
    tcase_add_test(tc, test_crash13);
+   tcase_add_test(tc, test_crash16);
+   tcase_add_test(tc, test_crash17);
    suite_add_tcase(s, tc);
 
    return s;
