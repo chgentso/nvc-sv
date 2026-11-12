@@ -249,6 +249,8 @@ static number_t number_intern(const bignum_t *in)
    return (number_t){ .big = bn };
 }
 
+#define MAX_NUMBER_WIDTH (1 << 24)
+
 number_t number_new(const char *str, const loc_t *loc)
 {
    int width = 32;
@@ -263,13 +265,27 @@ number_t number_new(const char *str, const loc_t *loc)
          unsized = true;
       }
       else if (tick != NULL) {
-         width = 0;
+         int64_t big = 0;
          for (const char *p = str; p < tick; p++) {
-            if (*p >= '0' && *p <= '9')
-               width = (width * 10) + (*p - '0');
+            if (*p >= '0' && *p <= '9') {
+               if (big <= MAX_NUMBER_WIDTH)
+                  big = (big * 10) + (*p - '0');
+            }
             else
                assert(*p == '_' || isspace_iso88591(*p));
          }
+
+         if (big == 0) {
+            error_at(loc, "the size of a number must be greater than zero");
+            width = 1;
+         }
+         else if (big > MAX_NUMBER_WIDTH) {
+            error_at(loc, "the size of a number cannot be greater than %d "
+                     "bits", MAX_NUMBER_WIDTH);
+            width = 1;
+         }
+         else
+            width = big;
 
          p = tick + 1;
          issigned = false;

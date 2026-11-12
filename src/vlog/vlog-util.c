@@ -1060,6 +1060,9 @@ unsigned vlog_packed_offset(vlog_node_t type, vlog_node_t member)
 
 unsigned vlog_width(vlog_node_t v)
 {
+   if (v == NULL)
+      return 0;   // Undefined
+
    switch (vlog_kind(v)) {
    case V_NUMBER:
    case V_STRING:

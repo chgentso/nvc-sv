@@ -3967,6 +3967,44 @@ START_TEST(test_crash3)
 }
 END_TEST
 
+START_TEST(test_crash4)
+{
+   const error_t expect[] = {
+      {  2, "the size of a number cannot be greater than 16777216 bits" },
+      {  3, "the size of a number must be greater than zero" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/crash4.sv");
+
+   while (vlog_parse() != NULL)
+      ;
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_crash5)
+{
+   const error_t expect[] = {
+      {  7, "'if0' is not a data type" },
+      {  7, "unexpected . while parsing package or generate item "
+         "declaration, expecting ;" },
+      {  8, "sorry, the type operator is not supported for this expression" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/crash5.sv");
+
+   while (vlog_parse() != NULL)
+      ;
+
+   check_expected_errors();
+}
+END_TEST
+
 Suite *get_vlog_tests(void)
 {
    Suite *s = suite_create("vlog");
@@ -4111,6 +4149,8 @@ Suite *get_vlog_tests(void)
    tcase_add_test(tc, test_crash1);
    tcase_add_test(tc, test_crash2);
    tcase_add_test(tc, test_crash3);
+   tcase_add_test(tc, test_crash4);
+   tcase_add_test(tc, test_crash5);
    suite_add_tcase(s, tc);
 
    return s;
