@@ -5355,13 +5355,21 @@ static bool sem_check_generic_actual(formal_map_t *formals, int nformals,
                       "formal generic %pI", tree_type(value), type,
                       tree_ident(decl));
 
-         assert(tree_kind(value) == T_REF);
+         if (tree_kind(value) == T_ATTR_REF)
+            sem_error(value, "association of a predefined attribute with "
+                      "generic subprogram %pI is not supported",
+                      tree_ident(decl));
+         else if (tree_kind(value) != T_REF)
+            sem_error(value, "actual for generic subprogram %pI must be the "
+                      "name of a subprogram", tree_ident(decl));
 
          if (!tree_has_ref(value))
             return false;
 
          tree_t sub = tree_ref(value);
-         assert(is_subprogram(sub));
+         if (!is_subprogram(sub))
+            sem_error(value, "actual for generic subprogram %pI must be the "
+                      "name of a subprogram", tree_ident(decl));
 
          const bool pure_formal = !(tree_flags(decl) & TREE_F_IMPURE);
          const bool pure_actual = !(tree_flags(sub) & TREE_F_IMPURE);
