@@ -1886,6 +1886,9 @@ bool vlog_is_dynamic_type(vlog_node_t type)
 {
    // Types which have no representation as a signal
 
+   if (type == NULL)
+      return false;   // A bit or part select has no declared type
+
    switch (vlog_kind(type)) {
    case V_TYPE_DECL:
    case V_ENUM_DECL:
