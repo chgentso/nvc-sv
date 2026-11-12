@@ -4802,6 +4802,21 @@ static mir_value_t vlog_lower_binary(vlog_gen_t *g, vlog_node_t v,
    }
 
    const vlog_binary_t op = vlog_subkind(v);
+
+   if (vlog_kind(vlog_left(v)) == V_NULL
+       && vlog_kind(vlog_right(v)) == V_NULL) {
+      // Neither operand has a type to take the null from
+      if (op != V_BINARY_LOG_EQ && op != V_BINARY_LOG_NEQ
+          && op != V_BINARY_CASE_EQ && op != V_BINARY_CASE_NEQ)
+         fatal_at(vlog_loc(v), "sorry, this operator is not supported for "
+                  "null handles");
+
+      const bool equal = op == V_BINARY_LOG_EQ || op == V_BINARY_CASE_EQ;
+      mir_type_t t_bit = mir_vec2_type(g->mu, 1, false);
+      return vlog_widen_vector(g, mir_const_vec(g->mu, t_bit, equal, 0),
+                               context);
+   }
+
    const bool propagate_context =
       op == V_BINARY_AND || op == V_BINARY_OR || op == V_BINARY_XOR
       || op == V_BINARY_XNOR || op == V_BINARY_NAND || op == V_BINARY_NOR
@@ -5345,7 +5360,10 @@ static mir_value_t vlog_lower_dyn_cast(vlog_gen_t *g, vlog_node_t v)
    mir_block_t done_bb = mir_add_block(g->mu);
 
    if (vlog_kind(dt) == V_CLASS_DECL) {
-      mir_value_t obj = vlog_lower_rvalue(g, src);
+      // The type of a null handle comes from the destination
+      mir_value_t obj = vlog_kind(src) == V_NULL
+         ? vlog_lower_with_context(g, src, vlog_type_info(g, dt)->type)
+         : vlog_lower_rvalue(g, src);
       mir_type_t t_obj = mir_get_type(g->mu, obj);
 
       mir_value_t objvar = mir_add_var(g->mu, t_obj, MIR_NULL_STAMP,
@@ -9371,7 +9389,12 @@ static mir_value_t vlog_lower_with_context(vlog_gen_t *g, vlog_node_t v,
                  || mir_get_class(g->mu, context) == MIR_TYPE_ACCESS))
             return mir_build_null(g->mu, context);
 
-         const type_info_t *ti = vlog_type_info(g, vlog_type(v));
+         vlog_node_t nt = vlog_get_type(v);
+         if (nt == NULL)
+            fatal_at(vlog_loc(v), "sorry, the type of this null handle "
+                     "cannot be determined");
+
+         const type_info_t *ti = vlog_type_info(g, nt);
          return mir_build_null(g->mu, ti->type);
       }
    case V_PATTERN_EXPR:
@@ -9389,6 +9412,9 @@ static mir_value_t vlog_lower_with_context(vlog_gen_t *g, vlog_node_t v,
             // An interface instance has the type of the handle it is
             // converted to
             vlog_node_t arg = vlog_value(v);
+            if (vlog_kind(arg) == V_NULL)
+               return vlog_lower_with_context(g, arg, ti->type);
+
             if (vlog_kind(arg) == V_HIER_REF && !vlog_has_ref(arg))
                return vlog_lower_with_context(g, arg, ti->type);
 
