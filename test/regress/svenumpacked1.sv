@@ -24,7 +24,10 @@ module svenumpacked1;
     if (arr[3].first() != A || arr[3].last() != C || arr[3].num() != 3) $fatal(1, "first/last/num");
     for (int i = 0; i < 4; i++) begin
       s = arr[i].name();
-      if (s != ((i == 1) ? "C" : "A")) $fatal(1, "element %0d is %s", i, s);
+      if (i == 1) begin
+        if (s != "C") $fatal(1, "element %0d is %s", i, s);
+      end
+      else if (s != "A") $fatal(1, "element %0d is %s", i, s);
     end
     arr = {4{B}};
     if (arr != {B, B, B, B}) $fatal(1, "equality");

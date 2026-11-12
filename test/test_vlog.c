@@ -2905,8 +2905,6 @@ START_TEST(test_crv2)
       {  8, "sorry, skipping a loop variable in foreach is not supported" },
       {  9, "no visible declaration for 'zzz'" },
       { 11, "duplicate declaration of 'k3'" },
-      { 14, "sorry, more than 64 rand properties in a class are not "
-        "supported" },
       { 26, "no visible declaration for 'zzz'" },
       { 27, "'x' has no method named 'randomize'" },
       { 28, "sorry, an identifier list after with is not supported" },
