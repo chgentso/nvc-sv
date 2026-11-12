@@ -43,3 +43,7 @@
   than 64 bits is only reliably solved when the slice lies inside one 64-bit chunk of the variable: a slice that
   crosses a chunk boundary is an expression of two solver variables and randomize() often fails on it (about 8 in
   10 attempts for `rand bit [107:0] v; v[71:54] == 18'h1234`).  It would need the equality split per chunk.
+- A constraint on a very wide variable with several parts, for example OpenTitan's mem_bkdr_util.inject_errors on
+  `logic [1023:0]` (`$countones(m) == n; (m >> width) == '0;`), often fails (randomize returns 0 for roughly two
+  calls in three).  The pieces solve on their own; the shift by a state variable builds a barrel shifter of
+  stages whose conditions are constants, folding those in crv_cond helps only a little.
