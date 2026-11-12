@@ -2115,9 +2115,231 @@ static vlog_node_t block_vlog_body(tree_t b)
 ////////////////////////////////////////////////////////////////////////////////
 // Verilog instance parameters
 
+static bool vlog_param_is_integer(vlog_node_t type)
+{
+   if (type == NULL || vlog_kind(type) != V_DATA_TYPE || vlog_has_type(type))
+      return false;
+
+   switch (vlog_subkind(type)) {
+   case DT_INT:
+   case DT_INTEGER:
+   case DT_SHORTINT:
+   case DT_LONGINT:
+   case DT_BYTE:
+      return vlog_ranges(type) <= 1;   // An atom type has its range
+   default:
+      return false;
+   }
+}
+
+static void vlog_param_literal(text_buf_t *tb, number_t n, unsigned width)
+{
+   static const char hex[] = "0123456789abcdef";
+
+   const unsigned nw = number_width(n);
+   const bool sign = number_signed(n);
+   if (width == 0)
+      width = nw;
+
+   // Bits beyond those of the value are zero or a copy of the sign
+   vlog_logic_t bits[64 * 4];
+   if (width > ARRAY_LEN(bits)) {
+      tb_cat(tb, "<wide>");
+      return;
+   }
+
+   bool has_xz = false;
+   for (unsigned i = 0; i < width; i++) {
+      if (i < nw)
+         bits[i] = number_bit(n, i);
+      else if (sign && nw > 0)
+         bits[i] = number_bit(n, nw - 1);
+      else
+         bits[i] = LOGIC_0;
+      has_xz |= bits[i] == LOGIC_X || bits[i] == LOGIC_Z;
+   }
+
+   tb_printf(tb, "%u'%s", width, sign ? "s" : "");
+   if (has_xz) {
+      tb_append(tb, 'b');
+      for (int i = width - 1; i >= 0; i--)
+         tb_append(tb, "01zx"[bits[i]]);
+   }
+   else {
+      tb_append(tb, 'h');
+      for (int d = (width + 3) / 4 - 1; d >= 0; d--) {
+         unsigned v = 0;
+         for (int b = 3; b >= 0; b--) {
+            const unsigned pos = d * 4 + b;
+            v = (v << 1) | (pos < width && bits[pos] == LOGIC_1);
+         }
+         tb_append(tb, hex[v]);
+      }
+   }
+}
+
+static void vlog_param_type_text(text_buf_t *tb, vlog_node_t t)
+{
+   static const char *const names[] = {
+      [DT_IMPLICIT] = "", [DT_LOGIC] = "logic", [DT_INTEGER] = "integer",
+      [DT_REAL] = "real", [DT_BYTE] = "byte", [DT_SHORTINT] = "shortint",
+      [DT_INT] = "int", [DT_LONGINT] = "longint", [DT_TIME] = "time",
+      [DT_BIT] = "bit", [DT_SHORTREAL] = "shortreal",
+      [DT_REALTIME] = "realtime", [DT_STRING] = "string",
+   };
+
+   if (t == NULL)
+      return;
+
+   switch (vlog_kind(t)) {
+   case V_DATA_TYPE:
+      if (vlog_has_type(t))
+         vlog_param_type_text(tb, vlog_type(t));
+      else if (vlog_subkind(t) < ARRAY_LEN(names) && names[vlog_subkind(t)]) {
+         tb_cat(tb, names[vlog_subkind(t)]);
+         const int nranges = vlog_ranges(t);
+         const bool atom = vlog_subkind(t) != DT_LOGIC
+            && vlog_subkind(t) != DT_BIT && vlog_subkind(t) != DT_IMPLICIT;
+         for (int i = 0; i < nranges && !atom; i++) {
+            int64_t l, r;
+            vlog_node_t d = vlog_range(t, i);
+            if (vlog_subkind(d) != V_DIM_UNSIZED && vlog_bounds(d, &l, &r))
+               tb_printf(tb, "%s[%"PRIi64":%"PRIi64"]", i == 0 ? " " : "", l, r);
+         }
+      }
+      break;
+   case V_TYPE_DECL:
+   case V_STRUCT_DECL:
+   case V_ENUM_DECL:
+      if (vlog_has_ident(t))
+         tb_cat(tb, istr(ident_rfrom(vlog_ident(t), '.')));
+      break;
+   default:
+      break;
+   }
+}
+
+// The value of a parameter in this instance as text, see the rules in the
+// description of the netlist
+static const char *vlog_param_value(conn_design_t *cd, vlog_node_t d)
+{
+   LOCAL_TEXT_BUF tb = tb_new();
+
+   if (vlog_kind(d) == V_TYPE_DECL) {
+      vlog_param_type_text(tb, vlog_type(d));
+      return dstr(cd, tb_get(tb));
+   }
+
+   vlog_node_t value = vlog_value(d);
+   vlog_node_t type = vlog_has_type(d) ? vlog_type(d) : NULL;
+   if (type != NULL && vlog_kind(type) == V_DATA_TYPE && vlog_has_type(type)
+       && vlog_get_type(type) != NULL)
+      type = vlog_get_type(type);
+
+   int64_t v;
+   switch (vlog_kind(value)) {
+   case V_NUMBER:
+      {
+         number_t n = vlog_number(value);
+         const bool intlike = vlog_param_is_integer(type)
+            || (type == NULL && number_width(n) == 32 && number_signed(n))
+            || (type != NULL && vlog_kind(type) == V_DATA_TYPE
+                && vlog_subkind(type) == DT_IMPLICIT && vlog_ranges(type) == 0
+                && number_width(n) == 32 && number_signed(n));
+         if (intlike && number_is_defined(n) && number_width(n) <= 64)
+            tb_printf(tb, "%"PRIi64, number_integer(n));
+         else {
+            unsigned width = 0;
+            if (type != NULL && vlog_kind(type) == V_DATA_TYPE
+                && !vlog_has_type(type) && vlog_ranges(type) > 0) {
+               const unsigned w = vlog_size(type);
+               if (w > 0)
+                  width = w;
+            }
+            vlog_param_literal(tb, n, width);
+         }
+      }
+      break;
+   case V_REAL:
+      {
+         const double r = vlog_dval(value);
+         char buf[32];
+         for (int prec = 15; prec <= 17; prec++) {
+            snprintf(buf, sizeof(buf), "%.*g", prec, r);
+            if (strtod(buf, NULL) == r)
+               break;
+         }
+         tb_cat(tb, buf);
+      }
+      break;
+   case V_STRING:
+      {
+         number_t n = vlog_number(value);
+         tb_append(tb, '"');
+         for (int i = number_width(n) / 8 - 1; i >= 0; i--) {
+            const uint8_t c = number_byte(n, i);
+            if (c == '"' || c == '\\')
+               tb_append(tb, '\\');
+            if (c >= ' ' && c != 0x7f)
+               tb_append(tb, c);
+         }
+         tb_append(tb, '"');
+      }
+      break;
+   default:
+      if (vlog_get_const(value, &v))
+         tb_printf(tb, "%"PRIi64, v);
+      else {
+         LOCAL_TEXT_BUF e = tb_new();
+         print_vlog(e, value, 0);
+         if (tb_len(e) > 200) {
+            tb_trim(e, 200);
+            tb_cat(e, "...");
+         }
+         tb_cat(tb, tb_get(e));
+      }
+      break;
+   }
+
+   return dstr(cd, tb_get(tb));
+}
+
 static void vlog_block_params(conn_design_t *cd, conn_block_t *blk,
                               vlog_node_t body)
 {
+   if (vlog_flags(body) & (VLOG_F_BLACKBOX | VLOG_F_GEN_BODY))
+      return;
+
+   param_list_t list = AINIT;
+
+   // A parameter that can be overridden is a local parameter of the
+   // instance bound to its value
+   const int ndecls = vlog_decls(body);
+   for (int i = 0; i < ndecls; i++) {
+      vlog_node_t d = vlog_decl(body, i);
+      switch (vlog_kind(d)) {
+      case V_LOCALPARAM:
+         if ((vlog_flags(d) & VLOG_F_OVERRIDABLE) && vlog_has_value(d))
+            add_block_param(cd, &list, istr(vlog_ident(d)),
+                            vlog_param_value(cd, d));
+         break;
+      case V_TYPE_DECL:
+         if (vlog_flags(d) & VLOG_F_TYPEPARAM)
+            add_block_param(cd, &list, istr(vlog_ident(d)),
+                            vlog_param_value(cd, d));
+         break;
+      default:
+         break;
+      }
+   }
+
+   if (list.count > 0) {
+      blk->params = dalloc(cd, list.count * sizeof(conn_param_t));
+      memcpy(blk->params, list.items, list.count * sizeof(conn_param_t));
+      blk->nparams = list.count;
+   }
+
+   ACLEAR(list);
 }
 
 ////////////////////////////////////////////////////////////////////////////////

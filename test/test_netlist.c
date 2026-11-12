@@ -1067,6 +1067,100 @@ START_TEST(test_mixed_vhdl_top)
 }
 END_TEST
 
+static void check_param(conn_block_t *b, const char *name,
+                        const char *value)
+{
+   for (unsigned i = 0; i < b->nparams; i++) {
+      if (strcmp(b->params[i].name, name) == 0) {
+         ck_assert_str_eq(b->params[i].value, value);
+         return;
+      }
+   }
+
+   ck_abort_msg("no parameter %s in %s", name, b->name);
+}
+
+START_TEST(test_m5_vlog_params)
+{
+   set_standard(STD_19);
+   input_from_file(TESTDIR "/netlist/m5g_params.sv");
+
+   tree_t e = run_elab();
+   fail_if_errors();
+
+   conn_design_t *cd = conn_build(e);
+   ck_assert_ptr_nonnull(cd);
+
+   conn_block_t *top = conn_root(cd, 0);
+   ck_assert_uint_eq(top->nparams, 0);
+
+   // Defaults, in declaration order, without the local parameter
+   conn_block_t *lu = conn_find_block(cd, "top.lu");
+   ck_assert_ptr_nonnull(lu);
+   ck_assert_uint_eq(lu->nparams, 8);
+   ck_assert_str_eq(lu->params[0].name, "W");
+   ck_assert_str_eq(lu->params[7].name, "UT");
+   check_param(lu, "W", "4");
+   check_param(lu, "INIT", "4'ha");
+   check_param(lu, "SV", "8'sh80");
+   check_param(lu, "XZ", "4'b10xz");
+   check_param(lu, "S", "\"hi\"");
+   check_param(lu, "R", "0.5");
+   check_param(lu, "T", "logic [1:0]");
+   check_param(lu, "UT", "7");
+
+   // Overrides by position
+   conn_block_t *lo = conn_find_block(cd, "top.lo");
+   check_param(lo, "W", "3");
+   check_param(lo, "INIT", "4'h3");
+   check_param(lo, "SV", "8'shff");
+   check_param(lo, "XZ", "4'bzzzz");
+   check_param(lo, "S", "\"abc\"");
+   check_param(lo, "R", "1e-09");
+   check_param(lo, "T", "int");
+   check_param(lo, "UT", "12");
+
+   // Overrides by name through two levels
+   check_param(conn_find_block(cd, "top.mu"), "N", "2");
+   check_param(conn_find_block(cd, "top.mu.u"), "W", "2");
+
+   // defparam
+   check_param(conn_find_block(cd, "top.dp"), "W", "5");
+
+   // Instances in a generate loop have their own values
+   check_param(conn_find_block(cd, "top.g[1].u"), "W", "1");
+   check_param(conn_find_block(cd, "top.g[2].u"), "W", "2");
+
+   conn_free(cd);
+}
+END_TEST
+
+START_TEST(test_m5_vlog_params_mixed)
+{
+   set_standard(STD_08);
+
+   input_from_file(TESTDIR "/netlist/m5g_mixed.v");
+   analyse_file();
+
+   input_from_file(TESTDIR "/netlist/m5g_mixed.vhd");
+
+   tree_t e = run_elab();
+   fail_if_errors();
+
+   conn_design_t *cd = conn_build(e);
+   ck_assert_ptr_nonnull(cd);
+
+   // A Verilog module instantiated with a generic map from VHDL
+   conn_block_t *u = conn_find_block(cd, "M5G_MIXED.U_VP");
+   ck_assert_ptr_nonnull(u);
+   ck_assert_uint_eq(u->nparams, 2);
+   check_param(u, "W", "6");
+   check_param(u, "K", "1");
+
+   conn_free(cd);
+}
+END_TEST
+
 Suite *get_netlist_tests(void)
 {
    Suite *s = suite_create("netlist");
@@ -1083,6 +1177,8 @@ Suite *get_netlist_tests(void)
    tcase_add_test(tc, test_iface1);
    tcase_add_test(tc, test_mixed_vlog_top);
    tcase_add_test(tc, test_mixed_vhdl_top);
+   tcase_add_test(tc, test_m5_vlog_params);
+   tcase_add_test(tc, test_m5_vlog_params_mixed);
    suite_add_tcase(s, tc);
 
    return s;
