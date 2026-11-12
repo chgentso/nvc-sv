@@ -152,6 +152,26 @@ START_TEST(test_vhdl5)
 }
 END_TEST
 
+START_TEST(test_vhdl6)
+{
+   // Named association with a formal that no overload has
+
+   set_standard(STD_08);
+
+   const char *expect =
+      "{\"file\":\"" SCAN_FILE("vhdl6.vhd") "\",\"language\":\"vhdl\","
+      "\"units\":["
+      "{\"name\":\"WORK.VHDL6\",\"kind\":\"package\","
+      "\"instantiates\":[]},"
+      "{\"name\":\"WORK.VHDL6-body\",\"kind\":\"package-body\","
+      "\"instantiates\":[]}],"
+      "\"requires\":[\"IEEE.NUMERIC_STD\",\"WORK.MISSING_PKG\"],"
+      "\"includes\":[]}\n";
+
+   scan(SCAN_FILE("vhdl6.vhd"), expect);
+}
+END_TEST
+
 START_TEST(test_work_name)
 {
    // The name WORK is replaced by the name of the work library
@@ -460,6 +480,7 @@ Suite *get_scan_tests(void)
    tcase_add_test(tc, test_vhdl3);
    tcase_add_test(tc, test_vhdl4);
    tcase_add_test(tc, test_vhdl5);
+   tcase_add_test(tc, test_vhdl6);
    tcase_add_test(tc, test_work_name);
    tcase_add_test(tc, test_sv1);
    tcase_add_test(tc, test_sv2);

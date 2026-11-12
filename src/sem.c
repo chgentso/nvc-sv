@@ -3248,6 +3248,12 @@ static bool sem_check_call_args(tree_t t, tree_t decl, nametab_t *tab)
             if (tree_ref(ref) != port)
                tree_set_name(param, (name = change_ref(name, port)));
 
+            if (!tree_has_type(name)) {
+               // The overload resolution failed earlier
+               assert(error_count() > 0);
+               return false;
+            }
+
             port_type = tree_type(name);
          }
       }
