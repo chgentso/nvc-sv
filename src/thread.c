@@ -575,6 +575,10 @@ static void *thread_wrapper(void *arg)
    assert(my_thread == NULL);
    my_thread = arg;
 
+#ifndef __MINGW32__
+   register_thread_signal_stack();
+#endif
+
    void *result = (*my_thread->fn)(my_thread->arg);
 
    // Avoid races with stop_world

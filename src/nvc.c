@@ -2936,6 +2936,7 @@ int main(int argc, char **argv)
    thread_init();
    set_default_options();
    intern_strings();
+   raise_stack_limit(64 * 1024 * 1024);
    register_signal_handlers();
    mspace_stack_limit(MSPACE_CURRENT_FRAME);
    check_cpu_features();

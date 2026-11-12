@@ -256,6 +256,7 @@ void fatal_at(const loc_t *loc, const char *fmt, ...)
 void fatal_exit(int status) __attribute__((noreturn));
 void show_stacktrace(void);
 void register_signal_handlers(void);
+void raise_stack_limit(size_t bytes);
 void set_ctrl_c_handler(void (*fn)(void *), void *arg);
 
 void term_init(void);
@@ -409,6 +410,10 @@ void remove_fault_handler(fault_fn_t fn, void *context);
 
 struct cpu_state;
 void capture_registers(struct cpu_state *cpu);
+
+#ifndef __MINGW32__
+void register_thread_signal_stack(void);
+#endif
 
 mem_pool_t *pool_new(void);
 void pool_free(mem_pool_t *mp);

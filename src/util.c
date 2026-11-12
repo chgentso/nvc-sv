@@ -691,6 +691,8 @@ static void print_fatal_signal(int sig, siginfo_t *info, struct cpu_state *cpu)
 }
 #endif  // !__SANITIZE_THREAD__
 
+#define STACK_GUARD_RANGE (64 * 1024)
+
 static __thread struct cpu_state *thread_regs = NULL;
 
 static void signal_handler(int sig, siginfo_t *info, void *context)
@@ -718,6 +720,19 @@ static void signal_handler(int sig, siginfo_t *info, void *context)
    abort();
 #else
 
+   if (sig == SIGSEGV && info->si_code != SI_USER
+       && (uintptr_t)info->si_addr + STACK_GUARD_RANGE >= cpu.sp
+       && (uintptr_t)info->si_addr <= cpu.sp + STACK_GUARD_RANGE) {
+      // The faulting address is next to the stack pointer: this is
+      // almost certainly unbounded recursion in the design
+      static const char msg[] =
+         "\n** Fatal: stack overflow: possible infinite recursion\n";
+      for (int n, o = 0; o < (int)sizeof(msg) - 1
+              && (n = write(STDERR_FILENO, msg + o, sizeof(msg) - 1 - o)) > 0;
+           o += n);
+      _exit(EXIT_FAILURE);
+   }
+
    for (fault_handler_t *f = fault_handlers; f; f = f->next)
       (*f->fn)(sig, info->si_addr, &cpu, f->context);
 
@@ -733,6 +748,52 @@ static void signal_handler(int sig, siginfo_t *info, void *context)
 }
 #endif  // ! __MINGW32__
 
+#ifndef __MINGW32__
+#define ALT_STACK_SIZE    (2 * 1024 * 1024)
+
+void register_thread_signal_stack(void)
+{
+   // Run the signal handler on a separate stack so that stack overflow
+   // can be reported rather than killing the process outright
+   static __thread bool done = false;
+   if (done)
+      return;
+
+   done = true;
+
+   stack_t ss = {
+      .ss_sp    = mmap(NULL, ALT_STACK_SIZE, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0),
+      .ss_size  = ALT_STACK_SIZE,
+      .ss_flags = 0
+   };
+
+   if (ss.ss_sp != MAP_FAILED)
+      sigaltstack(&ss, NULL);
+}
+#endif
+
+void raise_stack_limit(size_t bytes)
+{
+   // Deeply nested expressions are processed recursively so the default
+   // limit of 8MB is not always enough.  The main thread stack grows on
+   // demand up to the current soft limit.
+#if !defined __MINGW32__ && defined RLIMIT_STACK
+   struct rlimit rl;
+   if (getrlimit(RLIMIT_STACK, &rl) != 0 || rl.rlim_cur == RLIM_INFINITY)
+      return;
+
+   rlim_t want = bytes;
+   if (rl.rlim_max != RLIM_INFINITY && want > rl.rlim_max)
+      want = rl.rlim_max;
+
+   if (want > rl.rlim_cur) {
+      rl.rlim_cur = want;
+      setrlimit(RLIMIT_STACK, &rl);
+   }
+#endif
+}
+
 void register_signal_handlers(void)
 {
 #ifdef __MINGW32__
@@ -741,9 +802,11 @@ void register_signal_handlers(void)
 
    struct sigaction sa = {
       .sa_sigaction = signal_handler,
-      .sa_flags = SA_RESTART | SA_SIGINFO
+      .sa_flags = SA_RESTART | SA_SIGINFO | SA_ONSTACK
    };
    sigemptyset(&sa.sa_mask);
+
+   register_thread_signal_stack();
 
 #ifndef __SANITIZE_THREAD__
    sigaction(SIGSEGV, &sa, NULL);
