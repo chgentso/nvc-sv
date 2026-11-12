@@ -12670,7 +12670,8 @@ static vlog_net_kind_t p_net_type(void)
 
 static vlog_node_t p_net_decl_assignment(vlog_net_kind_t kind,
                                          vlog_node_t datatype,
-                                         vlog_node_t strength)
+                                         vlog_node_t strength,
+                                         vlog_node_t *array_init)
 {
    // net_identifier { unpacked_dimension } [ = expression ]
 
@@ -12693,15 +12694,24 @@ static vlog_node_t p_net_decl_assignment(vlog_net_kind_t kind,
       vlog_add_range(v, p_unpacked_dimension());
 
    if (optional(tEQ)) {
+      vlog_node_t init;
       if (peek() == tTICK && peek_nth(2) == tLBRACE
           && vlog_get_type(datatype) != NULL)
-         vlog_set_value(v, p_assignment_pattern_expression(
-                           vlog_get_type(datatype)));
+         init = p_assignment_pattern_expression(vlog_get_type(datatype));
       else
-         vlog_set_value(v, p_expression());
+         init = p_expression();
 
-      if (strength != NULL && vlog_kind(v) == V_NET_DECL)
-         vlog_add_param(v, strength);
+      if (vlog_kind(v) == V_NET_DECL && vlog_ranges(v) > 0) {
+         // The value of an array of nets is a continuous assignment to the
+         // whole array
+         *array_init = init;
+      }
+      else {
+         vlog_set_value(v, init);
+
+         if (strength != NULL && vlog_kind(v) == V_NET_DECL)
+            vlog_add_param(v, strength);
+      }
    }
 
    vlog_set_loc(v, CURRENT_LOC);
@@ -12720,10 +12730,29 @@ static void p_list_of_net_decl_assignments(vlog_node_t mod,
    BEGIN("list of net declaration assignments");
 
    do {
-      vlog_node_t v = p_net_decl_assignment(kind, datatype, strength);
-      if (delay != NULL)
+      vlog_node_t init = NULL;
+      vlog_node_t v = p_net_decl_assignment(kind, datatype, strength, &init);
+      if (init == NULL && delay != NULL)
          vlog_set_delay(v, delay);
       vlog_add_decl(mod, v);
+
+      if (init != NULL) {
+         vlog_node_t target = vlog_new(V_REF);
+         vlog_set_ident(target, vlog_ident(v));
+         vlog_set_ref(target, v);
+         vlog_set_loc(target, vlog_loc(v));
+
+         vlog_node_t a = vlog_new(V_ASSIGN);
+         vlog_set_target(a, target);
+         vlog_set_ident(a, default_label("assign"));
+         if (delay != NULL)
+            vlog_set_delay(a, delay);
+         if (strength != NULL)
+            vlog_add_param(a, strength);
+         vlog_set_value(a, init);
+         vlog_set_loc(a, vlog_loc(v));
+         vlog_add_stmt(mod, a);
+      }
    } while (optional(tCOMMA));
 }
 
