@@ -15541,8 +15541,17 @@ static bool p_cov_coverpoint(cov_parse_t *cp, ident_t label)
    if (peek() == tIFFKW)
       p_cov_iff(&c.iff, &c.has_iff);
 
-   if (label != NULL)
+   if (label != NULL) {
+      // The label becomes a variable of the covergroup which would hide
+      // the name in the expression
+      for (int i = 0; i < c.expr.n; i++) {
+         if (c.expr.t[i].token == tID && c.expr.t[i].lval.ident == label)
+            return cov_sorry(cp, "a coverpoint label that is also a name in "
+                             "its expression");
+      }
+
       c.label = label;
+   }
    else if (c.expr.n == 1 && c.expr.t[0].token == tID)
       c.label = c.expr.t[0].lval.ident;
    else {
