@@ -4121,6 +4121,8 @@ START_TEST(test_crash12)
    const error_t expect[] = {
       {  4, "always procedure has no timing control, delay or blocking "
          "statement so it would loop forever without advancing time" },
+      { 10, "always procedure has no timing control, delay or blocking "
+         "statement so it would loop forever without advancing time" },
       { -1, NULL }
    };
    expect_errors(expect);

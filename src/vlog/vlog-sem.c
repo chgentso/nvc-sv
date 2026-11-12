@@ -29,7 +29,6 @@
 
 #include <assert.h>
 #include <stdlib.h>
-#include <string.h>
 
 typedef uint32_t type_mask_t;
 #define TM(x) (1u << (x))
@@ -397,14 +396,6 @@ static void vlog_blocking_cb(vlog_node_t v, void *ctx)
    case V_EVENT_CONTROL:
    case V_DELAY_CONTROL:
       *(bool *)ctx = true;
-      break;
-   case V_SYS_TCALL:
-      {
-         const char *name = istr(vlog_ident(v));
-         if (!strcmp(name, "$finish") || !strcmp(name, "$stop")
-             || !strcmp(name, "$fatal"))
-            *(bool *)ctx = true;
-      }
       break;
    default:
       break;

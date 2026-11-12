@@ -7,5 +7,5 @@ module top;
     #1 a[0] = 1;
   end
 
-  always if (a[0] == 2) $finish;
+  always if (a[0] == 2) a[1] = 3;
 endmodule
