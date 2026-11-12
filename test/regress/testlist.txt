@@ -2660,3 +2660,4 @@ svreleasenoforce1 verilog
 svstreamslicecls1 verilog
 svrandinsideaq1 verilog
 svinsidefixed1  verilog
+svcombparamidx1 verilog

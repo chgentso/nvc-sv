@@ -172,8 +172,32 @@ static void build_sensitivity(vlog_node_t ctrl, vlog_node_t v, hset_t *set,
             break;
 
          vlog_node_t lsp = vlog_longest_static_prefix(v);
-         if (lsp == NULL)
+         if (lsp == NULL) {
+            // A select of a constant such as a parameter: the indices are
+            // still read
+            switch (vlog_kind(v)) {
+            case V_BIT_SELECT:
+               {
+                  const int nparams = vlog_params(v);
+                  for (int i = 0; i < nparams; i++)
+                     build_sensitivity(ctrl, vlog_param(v, i), set, is_comb);
+               }
+               build_sensitivity(ctrl, vlog_value(v), set, is_comb);
+               break;
+            case V_PART_SELECT:
+               build_sensitivity(ctrl, vlog_left(v), set, is_comb);
+               if (vlog_subkind(v) != V_RANGE_CONST)
+                  build_sensitivity(ctrl, vlog_right(v), set, is_comb);
+               build_sensitivity(ctrl, vlog_value(v), set, is_comb);
+               break;
+            case V_MEMBER_REF:
+               build_sensitivity(ctrl, vlog_value(v), set, is_comb);
+               break;
+            default:
+               break;
+            }
             break;
+         }
          else if (lsp == v) {
             vlog_node_t e = vlog_new(V_EVENT);
             vlog_set_subkind(e, V_EVENT_LEVEL);
