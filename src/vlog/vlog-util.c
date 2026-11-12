@@ -1078,6 +1078,8 @@ unsigned vlog_width(vlog_node_t v)
       }
    case V_REF:
    case V_USER_FCALL:
+      if (!vlog_has_ref(v))
+         return 0;   // Not declared: an error was reported
       return vlog_width(vlog_ref(v));
    case V_PORT_DECL:
    case V_VAR_DECL:
