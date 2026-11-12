@@ -19,6 +19,6 @@ module svwideidx1;
     if (g(64'h8000_0000_0000_0000) !== 0) $fatal(1, "g far");
     if (g(64'h2) !== 7) $fatal(1, "g in range");
     if (P !== 21) $fatal(1, "P %0d", P);
-    $display("PASS");
+    $display("PASSED");
   end
 endmodule

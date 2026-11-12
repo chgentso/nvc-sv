@@ -17,7 +17,7 @@ module svclkdrive1;
     #25 vbus.ecb.e <= ##2 1;
     #5 if (vbus.e !== 1'b0) $fatal(1, "driven too early");
     #20 if (vbus.e !== 1'b1) $fatal(1, "not driven: %b", vbus.e);
-    $display("PASS");
+    $display("PASSED");
     $finish;
   end
 endmodule

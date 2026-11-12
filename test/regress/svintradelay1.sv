@@ -13,6 +13,6 @@ module svintradelay1;
     a[0] = 0;
     a[0][1] = #1 1;
     if (a[0] !== 4'b0010) $fatal(1, "a[0][1] = %b", a[0]);
-    $display("PASS");
+    $display("PASSED");
   end
 endmodule

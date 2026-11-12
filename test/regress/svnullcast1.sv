@@ -26,6 +26,6 @@ module svnullcast1;
     if (!(null == null)) $fatal(1, "null == null");
     if (null != null) $fatal(1, "null != null");
     if ((null == null) && (d != null)) $fatal(1, "logical");
-    $display("PASS");
+    $display("PASSED");
   end
 endmodule

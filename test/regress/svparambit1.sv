@@ -8,6 +8,6 @@ module svparambit1;
   initial begin
     #1;
     if (a !== 1'b0 || b !== 1'b1) $fatal(1, "a=%b b=%b", a, b);
-    $display("PASS");
+    $display("PASSED");
   end
 endmodule

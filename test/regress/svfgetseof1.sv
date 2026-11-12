@@ -20,6 +20,6 @@ module svfgetseof1;
     $fclose(fd);
 
     if (n != 2 || all != "one\ntwo\n") $fatal(1, "n=%0d all='%s'", n, all);
-    $display("PASS");
+    $display("PASSED");
   end
 endmodule

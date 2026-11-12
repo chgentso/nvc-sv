@@ -6,7 +6,7 @@ module svparamport1_sub (input int a[1], input int b[2]);
     #1;
     if (a[0] != 1 || b[0] != 3 || b[1] != 4)
       $fatal(1, "a=%0d b=%0d %0d", a[0], b[0], b[1]);
-    $display("PASS");
+    $display("PASSED");
   end
 endmodule
 

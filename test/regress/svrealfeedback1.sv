@@ -15,7 +15,7 @@ module svrealfeedback1;
     #1;
     if (sum == 0.0 && difference == 0.0 && product == 0.0 &&
         quotient == 0.0 && power == 0.0 && negative == 0.0) begin
-      $display("PASS");
+      $display("PASSED");
     end else begin
       $display("FAILED: expected zero-valued feedback loops");
     end

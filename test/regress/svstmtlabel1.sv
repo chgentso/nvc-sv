@@ -16,6 +16,6 @@ module svstmtlabel1;
     end
 
     if (value !== 21) $fatal(1, "bad value %0d", value);
-    $display("PASS");
+    $display("PASSED");
   end
 endmodule
