@@ -2210,7 +2210,7 @@ static vlog_node_t vlog_dim_of_type(vlog_node_t dt, int n)
 {
    // A packed structure has no declared dimension: it is selected from
    // as though declared [size-1:0]
-   if (vlog_kind(dt) == V_STRUCT_DECL)
+   if (dt == NULL || vlog_kind(dt) == V_STRUCT_DECL)
       return NULL;
 
    if (vlog_kind(dt) == V_ENUM_DECL) {
@@ -2223,6 +2223,10 @@ static vlog_node_t vlog_dim_of_type(vlog_node_t dt, int n)
       return n - nranges < (int)vlog_ranges(base)
          ? vlog_range(base, n - nranges) : NULL;
    }
+
+   // A scalar or an implicit type has fewer dimensions than selects
+   if (n >= (int)vlog_ranges(dt))
+      return NULL;
 
    return vlog_range(dt, n);
 }
