@@ -10252,6 +10252,10 @@ static void lower_decl(lower_unit_t *lu, tree_t decl, gen_stack_t *gs)
    case T_PACK_BODY:
    case T_PACK_INST:
       if (unit_needs_cgen(decl)) {
+         if (tree_kind(decl) != T_PACK_INST)
+            fatal_at(tree_loc(decl), "sorry, nested package declarations "
+                     "are not currently supported");
+
          ident_t name = ident_prefix(lu->name, tree_ident(decl), '.');
          object_t *obj = tree_to_object(decl);
 

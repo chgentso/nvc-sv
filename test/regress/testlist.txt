@@ -2697,3 +2697,4 @@ vcrash_deepexpr shell
 vcrash_conv2d1  normal,2008
 vcrash_casechoice shell
 vcrash_config1  normal,2008
+vcrash_nestedpkg shell
