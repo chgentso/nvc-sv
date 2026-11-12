@@ -19,6 +19,10 @@ module svhdlarr1;
       $fatal(1, "array word path rejected");
     if (uvm_hdl_check_path("svhdlarr1.gen_a.u_mem.nope") != 0)
       $fatal(1, "bad path accepted");
+    // A path built by a macro that spans several lines has white space
+    // around it
+    if (uvm_hdl_check_path("    svhdlarr1.gen_a.u_mem.mem\n") != 1)
+      $fatal(1, "path with white space rejected");
     $display("PASSED");
   end
 endmodule

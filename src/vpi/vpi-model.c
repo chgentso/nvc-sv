@@ -8480,6 +8480,20 @@ static bool hdl_lookup_ex(const char *path, hdl_target_t *t, bool whole_array)
    vpi_context_t *c = vpi_context();
    rt_model_t *model = vpi_get_model(c);
 
+   // White space around the path comes from a macro that spans several lines
+   while (isspace((unsigned char)*path))
+      path++;
+
+   const size_t plen = strlen(path);
+   char *trimmed LOCAL = NULL;
+   if (plen > 0 && isspace((unsigned char)path[plen - 1])) {
+      size_t n = plen;
+      while (n > 0 && isspace((unsigned char)path[n - 1]))
+         n--;
+      trimmed = xstrndup(path, n);
+      path = trimmed;
+   }
+
    if (!strncmp(path, "$root.", 6))
       path += 6;
 
