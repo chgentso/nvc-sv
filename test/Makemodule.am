@@ -41,7 +41,8 @@ bin_unit_test_SOURCES = \
 	test/test_mir.h \
 	test/test_mir.c \
 	test/test_cover.c \
-	test/test_scan.c
+	test/test_scan.c \
+	test/test_lint.c
 
 if ARCH_X86_64
 bin_unit_test_SOURCES += test/test_native.c

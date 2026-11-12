@@ -198,6 +198,7 @@ void set_default_options(void)
    opt_set_int(OPT_EXCL_VERBOSE, get_int_env("NVC_EXCL_VERBOSE", 0));
    opt_set_int(OPT_LOWER_MIR, get_int_env("NVC_LOWER_MIR", 0));
    opt_set_int(OPT_BLACK_BOX, 0);
+   opt_set_int(OPT_LINT, 0);
    opt_set_str(OPT_BLACK_BOX_LIBS, NULL);
 }
 

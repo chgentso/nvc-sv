@@ -43,6 +43,8 @@ lib_libnvc_a_SOURCES = \
 	src/eval.c \
 	src/option.h \
 	src/option.c \
+	src/lint.h \
+	src/lint.c \
 	src/diag.h \
 	src/diag.c \
 	src/scan.h \

@@ -23,6 +23,7 @@
 #include "jit/jit-dpi.h"
 #include "jit/jit.h"
 #include "lib.h"
+#include "lint.h"
 #include "lower.h"
 #include "conn.h"
 #include "netlist.h"
@@ -205,6 +206,7 @@ static void analyse_file(const char *file, cmd_state_t *state)
 
                simplify_local(unit, state->jit, state->registry, state->mir);
                bounds_check(unit);
+
             }
             else
                lib_put_error(work, unit);
@@ -2574,6 +2576,9 @@ static void usage(void)
            { "--ieee-warnings={on,off,off-at-0}",
              "Enable or disable warnings from IEEE packages" },
            { "--ignore-time", "Skip source file timestamp check" },
+           { "--lint[=RULES]",
+             "Warn about suspicious code: RULES is a list of unused, "
+             "undriven, width, latch, all, none or -RULE to remove one" },
            { "--load=PLUGIN", "Load VHPI plugin at startup" },
            { "--sv-lib=LIB", "Load shared library with DPI-C functions" },
            { "-L PATH", "Add PATH to library search paths" },
@@ -2947,6 +2952,7 @@ int main(int argc, char **argv)
       { "vhpi-debug",    no_argument,       0, 'D' },
       { "vhpi-trace",    no_argument,       0, 'T' },
       { "seed",          required_argument, 0, 'S' },
+      { "lint",          optional_argument, 0, 'N' },
       { 0, 0, 0, 0 }
    };
 
@@ -3020,6 +3026,9 @@ int main(int argc, char **argv)
          break;
       case 'W':
          opt_set_int(OPT_IEEE_WARNINGS, parse_ieee_warnings(optarg));
+         break;
+      case 'N':
+         lint_parse_option(optarg);
          break;
       case 'S':
          opt_set_int(OPT_RANDOM_SEED, parse_int(optarg));

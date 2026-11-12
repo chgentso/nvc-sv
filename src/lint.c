@@ -1,0 +1,293 @@
+//
+//  Copyright (C) 2025  Nick Gasson
+//
+//  This program is free software: you can redistribute it and/or modify
+//  it under the terms of the GNU General Public License as published by
+//  the Free Software Foundation, either version 3 of the License, or
+//  (at your option) any later version.
+//
+//  This program is distributed in the hope that it will be useful,
+//  but WITHOUT ANY WARRANTY; without even the implied warranty of
+//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+//  GNU General Public License for more details.
+//
+//  You should have received a copy of the GNU General Public License
+//  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+//
+
+
+#include "util.h"
+#include "array.h"
+#include "diag.h"
+#include "hash.h"
+#include "ident.h"
+#include "lint.h"
+#include "option.h"
+
+#include <ctype.h>
+#include <stdarg.h>
+#include <stdlib.h>
+#include <string.h>
+
+typedef struct {
+   loc_t       loc;
+   lint_rule_t rule;
+   ident_t     name;
+   const char *what;
+} lint_decl_t;
+
+typedef A(lint_decl_t) decl_list_t;
+
+static decl_list_t  pending = AINIT;
+static hset_t      *hier_names = NULL;
+static hset_t      *visited = NULL;
+
+static const struct {
+   const char *name;
+   lint_rule_t rule;
+} rule_names[] = {
+   { "unused",   LINT_UNUSED },
+   { "undriven", LINT_UNDRIVEN },
+   { "width",    LINT_WIDTH },
+   { "latch",    LINT_LATCH },
+};
+
+static const char *rule_name(lint_rule_t rule)
+{
+   for (int i = 0; i < ARRAY_LEN(rule_names); i++) {
+      if (rule_names[i].rule == rule)
+         return rule_names[i].name;
+   }
+
+   return "all";
+}
+
+static bool lookup_rule(const char *name, size_t len, lint_rule_t *rule)
+{
+   if (len == 3 && strncasecmp(name, "all", 3) == 0) {
+      *rule = LINT_ALL;
+      return true;
+   }
+
+   for (int i = 0; i < ARRAY_LEN(rule_names); i++) {
+      if (strlen(rule_names[i].name) == len
+          && strncasecmp(name, rule_names[i].name, len) == 0) {
+         *rule = rule_names[i].rule;
+         return true;
+      }
+   }
+
+   return false;
+}
+
+void lint_parse_option(const char *arg)
+{
+   int mask = 0;
+   bool first = true;
+
+   if (arg == NULL || *arg == '\0')
+      mask = LINT_ALL;
+   else {
+      for (const char *p = arg; *p != '\0'; first = false) {
+         const char *end = strchr(p, ',') ?: p + strlen(p);
+
+         bool remove = false;
+         const char *word = p;
+         if (*word == '-' || *word == '+') {
+            remove = *word == '-';
+            word++;
+         }
+
+         lint_rule_t rule;
+         if (end - word == 4 && strncasecmp(word, "none", 4) == 0) {
+            mask = 0;
+            rule = 0;
+         }
+         else if (!lookup_rule(word, end - word, &rule))
+            fatal("invalid lint rule '%.*s': valid rules are unused, "
+                  "undriven, width, latch, all and none",
+                  (int)(end - p), p);
+
+         if (remove) {
+            // A list starting with a removal means all rules but those
+            if (first)
+               mask = LINT_ALL;
+            mask &= ~rule;
+         }
+         else
+            mask |= rule;
+
+         p = *end == ',' ? end + 1 : end;
+      }
+   }
+
+   opt_set_int(OPT_LINT, mask);
+}
+
+bool lint_enabled(lint_rule_t rule)
+{
+   return (opt_get_int(OPT_LINT) & rule) != 0;
+}
+
+static bool line_suppresses(const loc_t *loc, int delta, lint_rule_t rule)
+{
+   if (loc->first_line < delta)
+      return false;
+
+   loc_t at = *loc;
+   at.first_line -= delta;
+   at.line_delta = 0;
+
+   const char *line = loc_get_source(&at);
+   if (line == NULL)
+      return false;
+
+   const char *eol = line;
+   while (*eol != '\0' && *eol != '\n')
+      eol++;
+
+   static const char key[] = "nvc lint_off";
+   const size_t klen = sizeof(key) - 1;
+
+   for (const char *p = line; p + klen <= eol; p++) {
+      if (strncmp(p, key, klen) != 0)
+         continue;
+
+      // An empty list of rules suppresses everything
+      const char *w = p + klen;
+      bool any = false;
+      for (;;) {
+         while (w < eol && (*w == ' ' || *w == '\t' || *w == ','))
+            w++;
+
+         const char *start = w;
+         while (w < eol && (isalnum((unsigned char)*w) || *w == '_'))
+            w++;
+
+         if (w == start)
+            break;
+
+         any = true;
+
+         lint_rule_t named;
+         if (lookup_rule(start, w - start, &named) && (named & rule))
+            return true;
+      }
+
+      if (!any)
+         return true;
+   }
+
+   return false;
+}
+
+bool lint_suppressed(const loc_t *loc, lint_rule_t rule)
+{
+   if (loc_invalid_p(loc))
+      return false;
+
+   return line_suppresses(loc, 0, rule) || line_suppresses(loc, 1, rule);
+}
+
+bool lint_name_at(const loc_t *loc, const char *name)
+{
+   // Declarations made up by the compiler are not at a place where
+   // their name is written
+   const char *line = loc_get_source(loc);
+   if (line == NULL)
+      return true;
+
+   const char *dollar = strchr(name, '$');
+   const size_t len = dollar != NULL ? dollar - name : strlen(name);
+
+   for (unsigned i = 0; i < loc->first_column; i++) {
+      if (line[i] == '\0' || line[i] == '\n')
+         return true;
+   }
+
+   return strncasecmp(line + loc->first_column, name, len) == 0;
+}
+
+void lint_warn(const loc_t *loc, lint_rule_t rule, const char *fmt, ...)
+{
+   if (!lint_enabled(rule) || lint_suppressed(loc, rule))
+      return;
+
+   diag_t *d = diag_new(DIAG_WARN, loc);
+
+   va_list ap;
+   va_start(ap, fmt);
+   diag_vprintf(d, fmt, ap);
+   va_end(ap);
+
+   diag_printf(d, " [lint:%s]", rule_name(rule));
+   diag_emit(d);
+}
+
+void lint_declaration(const loc_t *loc, lint_rule_t rule, ident_t name,
+                      const char *what)
+{
+   if (!lint_enabled(rule))
+      return;
+
+   lint_decl_t d = { *loc, rule, name, what };
+   APUSH(pending, d);
+}
+
+void lint_hier_name(ident_t name)
+{
+   if (hier_names == NULL)
+      hier_names = hset_new(64);
+
+   hset_insert(hier_names, name);
+}
+
+bool lint_first_visit(const void *key)
+{
+   if (visited == NULL)
+      visited = hset_new(64);
+
+   if (hset_contains(visited, key))
+      return false;
+
+   hset_insert(visited, key);
+   return true;
+}
+
+void lint_flush(void)
+{
+   for (unsigned i = 0; i < pending.count; i++) {
+      const lint_decl_t *d = &(pending.items[i]);
+
+      if (hier_names != NULL && hset_contains(hier_names, d->name))
+         continue;   // May be referenced from another scope
+
+      if (lint_suppressed(&d->loc, d->rule))
+         continue;
+
+      // Names of variables hoisted out of a process have a suffix
+      const char *str = istr(d->name);
+      const char *dollar = strchr(str, '$');
+      const int len = dollar != NULL ? dollar - str : (int)strlen(str);
+
+      const char *msg = d->rule == LINT_UNUSED
+         ? "%s '%.*s' is never read" : "%s '%.*s' is never assigned";
+
+      diag_t *diag = diag_new(DIAG_WARN, &d->loc);
+      diag_printf(diag, msg, d->what, len, str);
+      diag_printf(diag, " [lint:%s]", rule_name(d->rule));
+      diag_emit(diag);
+   }
+
+   ACLEAR(pending);
+
+   if (hier_names != NULL) {
+      hset_free(hier_names);
+      hier_names = NULL;
+   }
+
+   if (visited != NULL) {
+      hset_free(visited);
+      visited = NULL;
+   }
+}

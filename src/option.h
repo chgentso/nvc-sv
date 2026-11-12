@@ -86,6 +86,7 @@ typedef enum {
    OPT_LOWER_MIR,
    OPT_BLACK_BOX,
    OPT_BLACK_BOX_LIBS,
+   OPT_LINT,
 
    OPT_LAST_NAME
 } opt_name_t;

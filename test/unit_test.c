@@ -122,6 +122,7 @@ int main(int argc, char **argv)
    nfail += RUN_TESTS(mir);
    nfail += RUN_TESTS(cover);
    nfail += RUN_TESTS(scan);
+   nfail += RUN_TESTS(lint);
 
    return nfail == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }
