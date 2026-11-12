@@ -26039,8 +26039,22 @@ static vlog_node_t p_bind_directive(void)
          case V_TYPE_DECL:
          case V_ENUM_DECL:
          case V_STRUCT_DECL:
-            if (pass == 0)
+            if (pass == 0) {
                vlog_symtab_put(symtab, d);
+
+               // The names of an enumeration are visible in the module
+               if (vlog_kind(d) == V_TYPE_DECL && vlog_has_type(d)) {
+                  vlog_node_t et = vlog_type(d);
+                  if (vlog_kind(et) == V_ENUM_DECL) {
+                     const int nenum = vlog_decls(et);
+                     for (int k = 0; k < nenum; k++) {
+                        vlog_node_t en = vlog_decl(et, k);
+                        if (vlog_kind(en) == V_ENUM_NAME)
+                           vlog_symtab_put(symtab, en);
+                     }
+                  }
+               }
+            }
             break;
          case V_PORT_DECL:
             if (pass == 1 && vlog_symtab_query(symtab, vlog_ident(d)) == NULL)

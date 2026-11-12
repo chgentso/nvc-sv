@@ -2641,3 +2641,4 @@ svdisabletask2  verilog
 svforkref1      verilog
 svrandenum2     verilog
 svbindgen2      verilog
+svbindenum1     verilog
