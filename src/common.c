@@ -634,6 +634,8 @@ class_t class_of(tree_t t)
       }
    case T_CONTEXT:
       return C_CONTEXT;
+   case T_GROUP:
+      return C_GROUP;
    default:
       fatal_trace("missing class_of for %s", tree_kind_str(tree_kind(t)));
    }
@@ -649,6 +651,7 @@ bool class_has_type(class_t c)
    case C_CONFIGURATION:
    case C_PACKAGE:
    case C_LIBRARY:
+   case C_GROUP:
       return false;
    default:
       return true;
@@ -661,7 +664,7 @@ const char *class_str(class_t c)
       "default", "signal", "variable", "constant", "file", "entity",
       "component", "configuration", "architecture", "function", "package",
       "type", "subtype", "label", "procedure", "literal", "units", "library",
-      "context", "view",
+      "context", "view", "group",
    };
    assert(c < ARRAY_LEN(strs));
    return strs[c];

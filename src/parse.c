@@ -6823,7 +6823,7 @@ static class_t p_entity_class(void)
    case tLABEL:
       return C_LABEL;
    case tGROUP:
-      return C_DEFAULT;
+      return C_GROUP;
    case tARCHITECTURE:
       return C_ARCHITECTURE;
    case tFUNCTION:
