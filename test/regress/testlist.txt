@@ -2663,3 +2663,4 @@ svinsidefixed1  verilog
 svcombparamidx1 verilog
 svrandrepl1     verilog
 svranddistunsigned1 verilog
+svassertoffstr1 verilog

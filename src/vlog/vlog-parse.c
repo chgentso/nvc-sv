@@ -3699,7 +3699,8 @@ static void p_list_of_arguments(vlog_node_t call)
          vlog_add_param(call, v);
       }
       else if (is_assert_control(call)
-               && vlog_params(call) >= assert_control_list(call)) {
+               && vlog_params(call) >= assert_control_list(call)
+               && peek() != tSTRING) {   // A string is the path as it is
          // The assertion or scope to control is a hierarchical name which
          // is not evaluated: it is kept as a string, and a name which is
          // not a simple path (names with constant selects of generate
