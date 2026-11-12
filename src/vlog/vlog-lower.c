@@ -7888,6 +7888,29 @@ static mir_value_t vlog_lower_partial_select(vlog_gen_t *g,
 
 static mir_value_t vlog_lower_rvalue_select_bits(vlog_gen_t *g, vlog_node_t v)
 {
+   if (vlog_kind(v) == V_PART_SELECT) {
+      // A slice of an array held in memory, such as a property of a class
+      vlog_node_t base = vlog_value(v);
+      vlog_node_t bdims[MAX_UNPACKED_DIMS];
+      if (vlog_unpacked_dims(base, bdims) == 1) {
+         vlog_select_t whole = vlog_lower_select(g, base);
+         if (!mir_is_signal(g->mu, whole.obj)
+             && mir_points_to_vector(g->mu, whole.obj)) {
+            mir_type_t t_offset = mir_offset_type(g->mu);
+            mir_value_t start = vlog_lower_array_off(
+               g, bdims[0], vlog_lower_rvalue(g, vlog_left(v)));
+            if (vlog_subkind(v) == V_RANGE_NEG)
+               start = mir_build_sub(
+                  g->mu, t_offset, start,
+                  mir_const(g->mu, t_offset, vlog_size(v) - 1));
+            mir_value_t obj = mir_build_array_ref(g->mu, whole.obj, start);
+            return vlog_load_flat_array(
+               g, obj, vlog_size(v),
+               vlog_array_elem_info(g, base), false);
+         }
+      }
+   }
+
    vlog_select_t select = vlog_lower_select(g, v);
 
    if (vlog_is_vhdl_signal(g, select.obj))
