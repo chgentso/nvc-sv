@@ -86,6 +86,8 @@ struct _conn_design {
    hash_t        *genval;      // Generic declaration -> gen_value_t (ditto)
    shash_t       *names;       // Net names of the current instance
    hash_t        *gmap;        // Declaration -> conn_net_t (all instances)
+   hash_t        *genmaps;     // Generate block -> its netmap (see enter_gen)
+   hash_t        *netparents;  // Map of a generate block -> enclosing map
    hash_t        *blkmaps;     // conn_block_t -> inst_maps_t
    hash_t        *tree_blocks; // T_BLOCK -> conn_block_t
    conn_proc_t  **xprocs;      // Processes touching nets of other blocks
@@ -405,9 +407,21 @@ static void merge_ranges(range_list_t *l)
 // meaningful if it was mapped exactly once
 static conn_net_t ambiguous;
 
+// The declaration of a net in the instance or an enclosing generate block
+static conn_net_t *scope_net(conn_design_t *cd, const void *decl)
+{
+   for (hash_t *h = cd->netmap; h != NULL; h = hash_get(cd->netparents, h)) {
+      conn_net_t *n = hash_get(h, decl);
+      if (n != NULL)
+         return n;
+   }
+
+   return NULL;
+}
+
 static conn_net_t *lookup_net(conn_design_t *cd, const void *decl)
 {
-   conn_net_t *n = cd->netmap ? hash_get(cd->netmap, decl) : NULL;
+   conn_net_t *n = scope_net(cd, decl);
    if (n != NULL)
       return n == &ambiguous ? NULL : n;
 
@@ -2674,6 +2688,24 @@ static void build_ports(bctx_t *bc, tree_t b, vlog_node_t body)
    bc->nports = bc->nets.count;
 }
 
+// Each iteration of a Verilog generate loop has its own nets but the
+// elaborated blocks share the declarations in them, so the map from a
+// declaration to its net has a level for each generate block.  Returns the
+// map to restore when leaving the block.
+static hash_t *enter_gen(conn_design_t *cd, tree_t blk)
+{
+   hash_t *saved = cd->netmap;
+   hash_t *map = hash_get(cd->genmaps, blk);
+   if (map == NULL) {
+      map = hash_new(16);
+      hash_put(cd->genmaps, blk, map);
+      hash_put(cd->netparents, map, saved);
+   }
+
+   cd->netmap = map;
+   return saved;
+}
+
 static void scan_decls(bctx_t *bc, tree_t blk, const char *prefix)
 {
    conn_design_t *cd = bc->cd;
@@ -2691,7 +2723,7 @@ static void scan_decls(bctx_t *bc, tree_t blk, const char *prefix)
             const vlog_kind_t kind = vlog_kind(v);
             if (kind != V_NET_DECL && kind != V_VAR_DECL)
                break;
-            else if (hash_get(cd->netmap, v) != NULL)
+            else if (scope_net(cd, v) != NULL)
                break;   // Already declared as a port
 
             conn_net_t *n = prefix[0] == '\0'
@@ -2713,7 +2745,9 @@ static void scan_decls(bctx_t *bc, tree_t blk, const char *prefix)
       if (tree_kind(s) == T_BLOCK && is_generate_block(s)) {
          register_generics(cd, s, cd->genval);
          char *np = dstrf(cd, "%s%s.", prefix, istr(tree_ident(s)));
+         hash_t *saved = enter_gen(cd, s);
          scan_decls(bc, s, np);
+         cd->netmap = saved;
       }
    }
 }
@@ -3155,7 +3189,9 @@ static void scan_stmts(bctx_t *bc, tree_t blk, const char *prefix, int pass)
             // The index of a generate loop is not unique to one iteration
             register_generics(cd, s, cd->genval);
             char *np = dstrf(cd, "%s%s.", prefix, istr(tree_ident(s)));
+            hash_t *saved = enter_gen(cd, s);
             scan_stmts(bc, s, np, pass);
+            cd->netmap = saved;
          }
          else if (pass != (is_interface_block(s) ? 0 : 1))
             break;
@@ -3410,6 +3446,8 @@ conn_design_t *conn_build(tree_t root)
    conn_design_t *cd = xcalloc(sizeof(conn_design_t));
    cd->gmap = hash_new(1024);
    cd->blkmaps = hash_new(64);
+   cd->genmaps = hash_new(64);
+   cd->netparents = hash_new(64);
    cd->tree_blocks = hash_new(64);
 
    A(conn_block_t *) roots = AINIT;
@@ -3464,6 +3502,12 @@ void conn_free(conn_design_t *cd)
       free(im);
    }
 
+   for (hash_iter_t it = HASH_BEGIN;
+        hash_iter(cd->genmaps, &it, &key, &value); )
+      hash_free(value);
+
+   hash_free(cd->genmaps);
+   hash_free(cd->netparents);
    hash_free(cd->blkmaps);
    hash_free(cd->tree_blocks);
    hash_free(cd->gmap);

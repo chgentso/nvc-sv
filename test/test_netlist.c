@@ -1161,6 +1161,36 @@ START_TEST(test_m5_vlog_params_mixed)
 }
 END_TEST
 
+START_TEST(test_m5_vlog_genloop)
+{
+   set_standard(STD_19);
+   input_from_file(TESTDIR "/netlist/m5g_genloop.sv");
+
+   tree_t e = run_elab();
+   fail_if_errors();
+
+   conn_design_t *cd = conn_build(e);
+   ck_assert_ptr_nonnull(cd);
+
+   conn_block_t *top = conn_root(cd, 0);
+   conn_net_t *r0 = get_net(top, "g[0].r");
+   conn_net_t *r1 = get_net(top, "g[1].r");
+   ck_assert_ptr_ne(r0, r1);
+   ck_assert_ptr_eq(conn_find_net(cd, "m5g_genloop.g[1].r"), r1);
+
+   // Each iteration has its own processes reading and driving its net
+   ck_assert_ptr_nonnull(get_proc(top, "g[1].always @9"));
+   conn_proc_t *a0 = get_proc(top, "g[0].always @9");
+   conn_proc_t *a1 = get_proc(top, "g[1].always @9");
+   ck_assert_uint_gt(a0->ndrives, 0);
+   ck_assert_ptr_eq(a0->drives[0].net, r0);
+   ck_assert_uint_gt(a1->ndrives, 0);
+   ck_assert_ptr_eq(a1->drives[0].net, r1);
+
+   conn_free(cd);
+}
+END_TEST
+
 Suite *get_netlist_tests(void)
 {
    Suite *s = suite_create("netlist");
@@ -1179,6 +1209,7 @@ Suite *get_netlist_tests(void)
    tcase_add_test(tc, test_mixed_vhdl_top);
    tcase_add_test(tc, test_m5_vlog_params);
    tcase_add_test(tc, test_m5_vlog_params_mixed);
+   tcase_add_test(tc, test_m5_vlog_genloop);
    suite_add_tcase(s, tc);
 
    return s;

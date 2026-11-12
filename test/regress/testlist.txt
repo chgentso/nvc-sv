@@ -2623,6 +2623,7 @@ netlist4        shell
 netlist5        shell
 m5gen1          shell
 m5gen2          shell
+m5gen3          shell
 svforkelem1     verilog
 svoutvarnet1    verilog
 svvifstruct1    verilog
