@@ -28,6 +28,7 @@
 #include "tree.h"
 #include "type.h"
 #include "vlog/vlog-node.h"
+#include "vlog/vlog-number.h"
 #include "vlog/vlog-phase.h"
 
 #include <stdlib.h>
@@ -1358,6 +1359,324 @@ static void vhdl_ref_cb(tree_t t, void *context)
 static void vlog_sym_scope(sym_ctx_t *sc, vlog_node_t v, const char *path);
 static void vlog_sym_stmts(sym_ctx_t *sc, vlog_node_t v, const char *path);
 
+// Evaluate a constant expression made only of literals: a parameter has no
+// value that is known without elaborating an instance
+static bool vlog_sym_eval(vlog_node_t v, int64_t *value, int depth)
+{
+   if (v == NULL || depth > 32)
+      return false;
+
+   switch (vlog_kind(v)) {
+   case V_NUMBER:
+      {
+         number_t n = vlog_number(v);
+         if (!number_is_defined(n) || number_width(n) > 63)
+            return false;
+         *value = number_integer(n);
+         return true;
+      }
+   case V_UNARY:
+      {
+         int64_t a;
+         if (!vlog_sym_eval(vlog_value(v), &a, depth + 1))
+            return false;
+         switch (vlog_subkind(v)) {
+         case V_UNARY_IDENTITY: *value = a; return true;
+         case V_UNARY_NEG:      *value = -(uint64_t)a; return true;
+         default:               return false;
+         }
+      }
+   case V_BINARY:
+      {
+         int64_t a, b;
+         if (!vlog_sym_eval(vlog_left(v), &a, depth + 1)
+             || !vlog_sym_eval(vlog_right(v), &b, depth + 1))
+            return false;
+         switch (vlog_subkind(v)) {
+         case V_BINARY_PLUS:  *value = (uint64_t)a + (uint64_t)b; return true;
+         case V_BINARY_MINUS: *value = (uint64_t)a - (uint64_t)b; return true;
+         case V_BINARY_TIMES: return !__builtin_mul_overflow(a, b, value);
+         case V_BINARY_DIVIDE:
+            if (b == 0 || (a == INT64_MIN && b == -1))
+               return false;
+            *value = a / b;
+            return true;
+         case V_BINARY_MOD:
+            if (b == 0 || (a == INT64_MIN && b == -1))
+               return false;
+            *value = a % b;
+            return true;
+         case V_BINARY_SHIFT_LL:
+         case V_BINARY_SHIFT_LA:
+            if (b < 0 || b > 62)
+               return false;
+            *value = (uint64_t)a << b;
+            return true;
+         case V_BINARY_SHIFT_RL:
+         case V_BINARY_SHIFT_RA:
+            if (b < 0 || b > 62)
+               return false;
+            *value = a >> b;
+            return true;
+         case V_BINARY_EXP:
+            {
+               if (b < 0 || b > 62)
+                  return false;
+               int64_t r = 1;
+               for (int64_t i = 0; i < b; i++) {
+                  if (__builtin_mul_overflow(r, a, &r))
+                     return false;
+               }
+               *value = r;
+               return true;
+            }
+         default:
+            return false;
+         }
+      }
+   case V_SYS_FCALL:
+      if (vlog_has_ident(v) && vlog_ident(v) == ident_new("$clog2")
+          && vlog_params(v) == 1) {
+         int64_t a;
+         if (!vlog_sym_eval(vlog_param(v, 0), &a, depth + 1) || a < 0)
+            return false;
+         int64_t r = 0;
+         while (r < 62 && ((int64_t)1 << r) < a)
+            r++;
+         *value = r;
+         return true;
+      }
+      return false;
+   case V_CONCAT:
+      return vlog_params(v) == 1 && !vlog_has_value(v)
+         && vlog_sym_eval(vlog_param(v, 0), value, depth + 1);
+   default:
+      return false;
+   }
+}
+
+// Bits of a declaration of a type made of bits if all the bounds are
+// literals; unpacked dimensions are not counted
+static bool vlog_sym_width(vlog_node_t d, int64_t *width)
+{
+   if (!vlog_has_type(d))
+      return false;
+
+   vlog_node_t dt = vlog_type(d);
+   if (vlog_kind(dt) != V_DATA_TYPE || vlog_has_type(dt))
+      return false;
+
+   int64_t w;
+   switch (vlog_subkind(dt)) {
+   case DT_IMPLICIT:
+   case DT_LOGIC:
+   case DT_BIT:      w = 1; break;
+   case DT_BYTE:     w = 8; break;
+   case DT_SHORTINT: w = 16; break;
+   case DT_INT:
+   case DT_INTEGER:  w = 32; break;
+   case DT_LONGINT:
+   case DT_TIME:     w = 64; break;
+   default:          return false;
+   }
+
+   const int nranges = vlog_ranges(dt);
+   if (nranges > 0)
+      w = 1;   // The range of an integer atom type is explicit
+
+   for (int i = 0; i < nranges; i++) {
+      vlog_node_t r = vlog_range(dt, i);
+      int64_t left, right;
+      if (vlog_subkind(r) == V_DIM_UNSIZED || !vlog_has_left(r)
+          || !vlog_sym_eval(vlog_left(r), &left, 0)
+          || !vlog_sym_eval(vlog_right(r), &right, 0))
+         return false;
+      const int64_t n = (left > right ? left - right : right - left) + 1;
+      if (__builtin_mul_overflow(w, n, &w) || w > INT_MAX)
+         return false;
+   }
+
+   *width = w;
+   return true;
+}
+
+// Like sym_prefix_text but a delimiter inside the parentheses of a call in
+// a packed dimension does not end the text
+static char *vlog_sym_prefix_text(const loc_t *loc, unsigned line,
+                                  unsigned col)
+{
+   loc_t at = *loc;
+   at.first_line = line;
+   at.line_delta = 0;
+   at.first_column = 0;
+   const char *src = loc_get_source(&at);
+   if (src == NULL || col < 2)
+      return NULL;
+
+   const char *end = src + col - 1;
+   const char *start = end;
+   int depth = 0;
+   while (start > src) {
+      const char ch = start[-1];
+      if (ch == ')')
+         depth++;
+      else if (ch == '(' && depth > 0)
+         depth--;
+      else if (depth == 0 && strchr("(,;", ch))
+         break;
+      start--;
+   }
+   while (start < end && isspace((unsigned char)*start))
+      start++;
+   while (end > start && isspace((unsigned char)end[-1]))
+      end--;
+   if (end <= start || end - start > 120)
+      return NULL;
+
+   char *copy = xmalloc(end - start + 1);
+   char *out = copy;
+   bool space = false;
+   for (const char *p = start; p < end; p++) {
+      if (isspace((unsigned char)*p))
+         space = true;
+      else {
+         if (space && out > copy)
+            *out++ = ' ';
+         space = false;
+         *out++ = *p;
+      }
+   }
+   *out = '\0';
+   return copy;
+}
+
+// The words of a declaration that precede its type: direction, parameter
+static char *vlog_sym_type_text(const char *prefix, bool strip_dir)
+{
+   if (prefix == NULL)
+      return NULL;
+
+   static const char *const words[] = {
+      "input", "output", "inout", "ref", "parameter", "localparam", "var",
+      "type",
+   };
+
+   const char *p = prefix;
+   for (bool again = true; again; ) {
+      again = false;
+      while (*p == ' ')
+         p++;
+      for (unsigned i = 0; i < ARRAY_LEN(words); i++) {
+         const size_t n = strlen(words[i]);
+         if (strncmp(p, words[i], n) == 0 && (p[n] == ' ' || p[n] == '\0')
+             && (strip_dir || i >= 4)) {
+            p += n;
+            again = true;
+            break;
+         }
+      }
+   }
+
+   return *p ? xstrdup(p) : NULL;
+}
+
+// Unpacked dimensions written after the name of a declaration
+static char *vlog_sym_unpacked_text(const loc_t *loc, const char *name)
+{
+   unsigned l, c, n;
+   if (!sym_name_pos(loc, name, false, false, &l, &c, &n))
+      return NULL;
+
+   loc_t at = *loc;
+   at.first_line = l;
+   at.line_delta = 0;
+   at.first_column = 0;
+   const char *src = loc_get_source(&at);
+   if (src == NULL)
+      return NULL;
+
+   const char *p = src + c - 1 + n;
+   const char *eol = strchr(p, '\n');
+   const char *end = eol ? eol : p + strlen(p);
+   while (p < end && isspace((unsigned char)*p))
+      p++;
+
+   LOCAL_TEXT_BUF tb = tb_new();
+   while (p < end && *p == '[') {
+      int depth = 0;
+      for (; p < end; p++) {
+         if (*p == '[')
+            depth++;
+         else if (*p == ']' && --depth == 0) {
+            tb_append(tb, *p++);
+            break;
+         }
+         if (!isspace((unsigned char)*p))
+            tb_append(tb, *p);
+      }
+      while (p < end && isspace((unsigned char)*p))
+         p++;
+   }
+
+   return tb_len(tb) > 0 ? tb_claim(tb) : NULL;
+}
+
+// The extra fields of a declaration of the kinds the scan describes
+static void vlog_sym_fields(sym_ctx_t *sc, vlog_node_t d, const char *name,
+                            const char *kind)
+{
+   const loc_t *loc = vlog_loc(d);
+   unsigned l, c, n;
+   if (!sym_name_pos(loc, name, false, false, &l, &c, &n))
+      return;
+
+   const bool is_port = vlog_kind(d) == V_PORT_DECL;
+   const bool is_param = !strcmp(kind, "parameter")
+      || !strcmp(kind, "localparam");
+
+   if (is_port) {
+      switch (vlog_subkind(d)) {
+      case V_PORT_INPUT:  sym_extra_str(sc, "direction", "input"); break;
+      case V_PORT_OUTPUT: sym_extra_str(sc, "direction", "output"); break;
+      case V_PORT_INOUT:  sym_extra_str(sc, "direction", "inout"); break;
+      case V_PORT_REF:    sym_extra_str(sc, "direction", "ref"); break;
+      }
+   }
+
+   if (is_port || is_param) {
+      char *prefix LOCAL = vlog_sym_prefix_text(loc, l, c);
+      char *type LOCAL = vlog_sym_type_text(prefix, is_port);
+      sym_extra_str(sc, "type", type);
+   }
+
+   if (is_port) {
+      char *unpacked LOCAL = vlog_sym_unpacked_text(loc, name);
+      sym_extra_str(sc, "unpacked", unpacked);
+
+      int64_t w;
+      if (vlog_sym_width(d, &w))
+         sym_extra_int(sc, "width", w);
+   }
+
+   if (is_param) {
+      if (vlog_kind(d) == V_TYPE_DECL) {
+         // The default of a type parameter is the text after the equals
+         char *text LOCAL = sym_loc_text(sc, loc, 200);
+         const char *eq = text ? strchr(text, '=') : NULL;
+         sym_extra_str(sc, "class", "type");
+         if (eq != NULL) {
+            while (*++eq == ' ')
+               ;
+            sym_extra_str(sc, "default", eq);
+         }
+      }
+      else if (vlog_has_value(d)) {
+         char *text LOCAL = sym_loc_text(sc, vlog_loc(vlog_value(d)), 200);
+         sym_extra_str(sc, "default", text);
+      }
+   }
+}
+
 static void vlog_sym_decl(sym_ctx_t *sc, vlog_node_t d, const char *path)
 {
    const char *kind = NULL, *detail = NULL;
@@ -1393,7 +1712,7 @@ static void vlog_sym_decl(sym_ctx_t *sc, vlog_node_t d, const char *path)
       kind = "genvar";
       break;
    case V_TYPE_DECL:
-      kind = "typedef";
+      kind = (vlog_flags(d) & VLOG_F_TYPEPARAM) ? "parameter" : "typedef";
       break;
    case V_FUNC_DECL:
       kind = "function";
@@ -1445,6 +1764,7 @@ static void vlog_sym_decl(sym_ctx_t *sc, vlog_node_t d, const char *path)
       return;
 
    const char *name = sym_simple(vlog_ident(d));
+   vlog_sym_fields(sc, d, name, kind);
    sym_add(sc, name, kind, detail, path, vlog_loc(d));
 
    if (scope) {
@@ -1453,11 +1773,83 @@ static void vlog_sym_decl(sym_ctx_t *sc, vlog_node_t d, const char *path)
    }
 }
 
+// The text of the parentheses of a for generate: i = 0; i < N; i++
+static char *vlog_sym_for_range(sym_ctx_t *sc, vlog_node_t v)
+{
+   char *text LOCAL = sym_loc_text(sc, vlog_loc(v), 0);
+   if (text == NULL)
+      return NULL;
+
+   const char *open = strchr(text, '(');
+   if (open == NULL)
+      return NULL;
+
+   int depth = 0;
+   for (const char *p = open; *p; p++) {
+      if (*p == '(')
+         depth++;
+      else if (*p == ')' && --depth == 0) {
+         char *range = xstrndup(open + 1, p - open - 1);
+         char *start = range;
+         while (*start == ' ')
+            start++;
+         size_t len = strlen(start);
+         while (len > 0 && start[len - 1] == ' ')
+            start[--len] = '\0';
+         char *result = xstrdup(start);
+         free(range);
+         return result;
+      }
+   }
+
+   return NULL;
+}
+
+// The unit and parameter assignments of an instantiation
+static void vlog_sym_inst_fields(sym_ctx_t *sc, vlog_node_t list)
+{
+   if (vlog_has_ident(list))
+      sym_extra_str(sc, "unit", sym_simple(vlog_ident(list)));
+
+   const int nparams = vlog_params(list);
+   if (nparams == 0)
+      return;
+
+   LOCAL_TEXT_BUF tb = tb_new();
+   tb_append(tb, '[');
+   int count = 0;
+   for (int i = 0; i < nparams; i++) {
+      vlog_node_t p = vlog_param(list, i);
+      if (vlog_kind(p) != V_PARAM_ASSIGN || !vlog_has_value(p))
+         continue;
+
+      char *value LOCAL = sym_loc_text(sc, vlog_loc(vlog_value(p)), 200);
+      if (value == NULL)
+         continue;
+
+      if (count++ > 0)
+         tb_append(tb, ',');
+      tb_append(tb, '{');
+      if (vlog_has_ident(p)) {
+         tb_cat(tb, "\"name\":");
+         scan_json_string(tb, sym_simple(vlog_ident(p)));
+         tb_append(tb, ',');
+      }
+      tb_cat(tb, "\"value\":");
+      scan_json_string(tb, value);
+      tb_append(tb, '}');
+   }
+   tb_append(tb, ']');
+
+   if (count > 0)
+      sym_extra_raw(sc, "generic_map", tb_get(tb));
+}
+
 // A generate block is a symbol of its own.  The name of an unnamed block
 // is the one the elaborator gives it and does not appear in the source so
 // the symbol is placed at the start of the block.
 static void vlog_sym_gen_block(sym_ctx_t *sc, vlog_node_t b, const char *gen,
-                               const char *path)
+                               const char *range, const char *path)
 {
    if (vlog_kind(b) != V_GEN_BLOCK || !vlog_has_ident(b))
       return;
@@ -1470,9 +1862,13 @@ static void vlog_sym_gen_block(sym_ctx_t *sc, vlog_node_t b, const char *gen,
 
       tb_cat(sc->syms, "{\"name\":");
       scan_json_string(sc->syms, name);
-      tb_printf(sc->syms, ",\"kind\":\"generate\",\"gen\":\"%s\"", gen);
-      tb_cat(sc->syms, ",\"container\":");
+      tb_cat(sc->syms, ",\"kind\":\"generate\",\"container\":");
       scan_json_string(sc->syms, path);
+      tb_printf(sc->syms, ",\"gen\":\"%s\"", gen);
+      if (range != NULL) {
+         tb_cat(sc->syms, ",\"range\":");
+         scan_json_string(sc->syms, range);
+      }
       sym_json_pos(sc->syms, loc, sc->file, name, false, false);
       sym_json_span(sc->syms, loc);
       tb_append(sc->syms, '}');
@@ -1510,18 +1906,23 @@ static void vlog_sym_stmts(sym_ctx_t *sc, vlog_node_t v, const char *path)
       case V_INST_LIST:
          for (unsigned j = 0; j < vlog_stmts(s); j++) {
             vlog_node_t inst = vlog_stmt(s, j);
-            if (vlog_kind(inst) == V_MOD_INST && vlog_has_ident(inst))
+            if (vlog_kind(inst) == V_MOD_INST && vlog_has_ident(inst)) {
+               vlog_sym_inst_fields(sc, s);
                sym_add(sc, sym_simple(vlog_ident(inst)), "instance",
                        vlog_has_ident(s) ? istr(vlog_ident(s)) : NULL, path,
                        vlog_loc(inst));
+            }
          }
          break;
       case V_GEN_BLOCK:
-         vlog_sym_gen_block(sc, s, "block", path);
+         vlog_sym_gen_block(sc, s, "block", NULL, path);
          break;
       case V_FOR_GENERATE:
-         for (unsigned j = 0; j < vlog_stmts(s); j++)
-            vlog_sym_gen_block(sc, vlog_stmt(s, j), "for", path);
+         {
+            char *range LOCAL = vlog_sym_for_range(sc, s);
+            for (unsigned j = 0; j < vlog_stmts(s); j++)
+               vlog_sym_gen_block(sc, vlog_stmt(s, j), "for", range, path);
+         }
          break;
       case V_IF_GENERATE:
          {
@@ -1529,7 +1930,7 @@ static void vlog_sym_stmts(sym_ctx_t *sc, vlog_node_t v, const char *path)
             for (unsigned j = 0; j < vlog_conds(s); j++) {
                vlog_node_t c = vlog_cond(s, j);
                for (unsigned k = 0; k < vlog_stmts(c); k++)
-                  vlog_sym_gen_block(sc, vlog_stmt(c, k), gen, path);
+                  vlog_sym_gen_block(sc, vlog_stmt(c, k), gen, NULL, path);
             }
          }
          break;

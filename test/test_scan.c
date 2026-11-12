@@ -672,15 +672,18 @@ START_TEST(test_symbols_vlog)
       "\"container\":\"WORK.BUS_IF\",",
       "{\"name\":\"m\",\"kind\":\"modport\",\"container\":\"WORK.BUS_IF\",",
       "{\"name\":\"W\",\"kind\":\"parameter\",\"detail\":\"parameter\","
-      "\"container\":\"WORK.LEAF\",\"line\":14,\"col\":25,",
+      "\"container\":\"WORK.LEAF\",\"default\":\"4\",\"line\":14,\"col\":25,",
       "{\"name\":\"q\",\"kind\":\"port\",\"detail\":\"output logic [W-1:0]\","
-      "\"container\":\"WORK.LEAF\",\"line\":14,\"col\":71,",
+      "\"container\":\"WORK.LEAF\",\"direction\":\"output\","
+      "\"type\":\"logic [W-1:0]\",\"line\":14,\"col\":71,",
       "{\"name\":\"K\",\"kind\":\"localparam\",\"detail\":\"localparam\","
       "\"container\":\"WORK.LEAF\",",
       "{\"name\":\"v\",\"kind\":\"param\",\"detail\":\"int\","
       "\"container\":\"WORK.LEAF.g\",",
       "{\"name\":\"u\",\"kind\":\"instance\",\"detail\":\"leaf\","
-      "\"container\":\"WORK.TOP\",\"line\":34,\"col\":17,",
+      "\"container\":\"WORK.TOP\",\"unit\":\"leaf\","
+      "\"generic_map\":[{\"name\":\"W\",\"value\":\"4\"}],\"line\":34,"
+      "\"col\":17,",
       "{\"name\":\"cnt\",\"kind\":\"name\",\"line\":24,\"col\":12,\"len\":3,"
       "\"to\":[15,15]}",
       "{\"name\":\"g\",\"kind\":\"call\",\"line\":25,\"col\":10,\"len\":1,"
@@ -733,31 +736,86 @@ END_TEST
 START_TEST(test_m5_vlog_generate)
 {
    static const char *const parts[] = {
-      "{\"name\":\"g\",\"kind\":\"generate\",\"gen\":\"for\",\"container\":\"WORK.TOP\""
-      ",\"line\":8,\"col\":35,",
+      "{\"name\":\"g\",\"kind\":\"generate\",\"container\":\"WORK.TOP\",\"gen\":\"for\""
+      ",\"range\":\"i = 0; i < N; i++\"",
       "{\"name\":\"u\",\"kind\":\"instance\",\"detail\":\"leaf\",\"container\":\"WORK."
-      "TOP.g\",\"line\":9,",
-      "{\"name\":\"h\",\"kind\":\"generate\",\"gen\":\"for\",\"container\":\"WORK.TOP."
-      "g\",\"line\":10,",
+      "TOP.g\",\"unit\":\"leaf\"",
+      "{\"name\":\"h\",\"kind\":\"generate\",\"container\":\"WORK.TOP.g\",\"gen\":\"fo"
+      "r\",\"range\":\"j = 0; j < 2; j++\"",
       "{\"name\":\"v\",\"kind\":\"instance\",\"detail\":\"leaf\",\"container\":\"WORK."
-      "TOP.g.h\",\"line\":11,",
-      "{\"name\":\"yes\",\"kind\":\"generate\",\"gen\":\"if\",\"container\":\"WORK.TOP"
-      "\",\"line\":14,",
+      "TOP.g.h\",\"unit\":\"leaf\"",
+      "{\"name\":\"yes\",\"kind\":\"generate\",\"container\":\"WORK.TOP\",\"gen\":\"if"
+      "\"",
       "{\"name\":\"c2\",\"kind\":\"instance\",\"detail\":\"leaf\",\"container\":\"WORK"
-      ".TOP.no\",\"line\":18,",
-      "{\"name\":\"genblk3\",\"kind\":\"generate\",\"gen\":\"case\",\"container\":\"WO"
-      "RK.TOP\",\"line\":21,",
-      "{\"name\":\"two\",\"kind\":\"generate\",\"gen\":\"case\",\"container\":\"WORK.T"
-      "OP\",\"line\":22,",
+      ".TOP.no\",\"unit\":\"leaf\"",
+      "{\"name\":\"genblk3\",\"kind\":\"generate\",\"container\":\"WORK.TOP\",\"gen\""
+      ":\"case\"",
+      "{\"name\":\"two\",\"kind\":\"generate\",\"container\":\"WORK.TOP\",\"gen\":\"ca"
+      "se\"",
       "{\"name\":\"c6\",\"kind\":\"instance\",\"detail\":\"leaf\",\"container\":\"WORK"
-      ".TOP.genblk4\",\"line\":30,",
-      "{\"name\":\"genblk5\",\"kind\":\"generate\",\"gen\":\"if\",\"container\":\"WORK"
-      ".TOP\",\"line\":31,",
+      ".TOP.genblk4\",\"unit\":\"leaf\"",
+      "{\"name\":\"genblk5\",\"kind\":\"generate\",\"container\":\"WORK.TOP\",\"gen\""
+      ":\"if\"",
       "{\"name\":\"c8\",\"kind\":\"instance\",\"detail\":\"leaf\",\"container\":\"WORK"
-      ".TOP.genblk6\",\"line\":35,",
+      ".TOP.genblk6\",\"unit\":\"leaf\"",
    };
 
    scan_symbols_contain(SCAN_FILE("m5g_generate.sv"), parts, ARRAY_LEN(parts),
+                        true);
+}
+END_TEST
+
+START_TEST(test_m5_vlog_fields)
+{
+   static const char *const parts[] = {
+      "{\"name\":\"W\",\"kind\":\"parameter\",\"detail\":\"parameter int\",\"contain"
+      "er\":\"WORK.SUB\",\"type\":\"int\",\"default\":\"8\"",
+      "{\"name\":\"INIT\",\"kind\":\"parameter\",\"detail\":\"parameter logic [3:0"
+      "]\",\"container\":\"WORK.SUB\",\"type\":\"logic [3:0]\",\"default\":\"4'hA\"",
+      "{\"name\":\"T\",\"kind\":\"parameter\",\"detail\":\"parameter type\",\"contai"
+      "ner\":\"WORK.SUB\",\"class\":\"type\",\"default\":\"logic [1:0]\"",
+      "{\"name\":\"V\",\"kind\":\"parameter\",\"detail\":\"parameter\",\"container\":"
+      "\"WORK.SUB\"",
+      "{\"name\":\"L\",\"kind\":\"localparam\",\"detail\":\"localparam int\",\"conta"
+      "iner\":\"WORK.SUB\",\"type\":\"int\",\"default\":\"W * 2\"",
+      "{\"name\":\"d\",\"kind\":\"port\",\"detail\":\"input wire [W-1:0]\",\"contain"
+      "er\":\"WORK.SUB\",\"direction\":\"input\",\"type\":\"wire [W-1:0]\"",
+      "{\"name\":\"q\",\"kind\":\"port\",\"detail\":\"output logic [7:0]\",\"contain"
+      "er\":\"WORK.SUB\",\"direction\":\"output\",\"type\":\"logic [7:0]\",\"unpack"
+      "ed\":\"[0:1]\",\"width\":8",
+      "{\"name\":\"m\",\"kind\":\"port\",\"detail\":\"input logic [3:0][1:0]\",\"con"
+      "tainer\":\"WORK.SUB\",\"direction\":\"input\",\"type\":\"logic [3:0][1:0]\""
+      ",\"width\":8",
+      "{\"name\":\"t\",\"kind\":\"port\",\"detail\":\"inout tri\",\"container\":\"WORK"
+      ".SUB\",\"direction\":\"inout\",\"type\":\"tri\",\"width\":1",
+      "{\"name\":\"c\",\"kind\":\"port\",\"detail\":\"input int\",\"container\":\"WORK"
+      ".SUB\",\"direction\":\"input\",\"type\":\"int\",\"width\":32",
+      "{\"name\":\"n\",\"kind\":\"port\",\"detail\":\"input pk::nib_t\",\"container\""
+      ":\"WORK.SUB\",\"direction\":\"input\",\"type\":\"pk::nib_t\"",
+      "{\"name\":\"e\",\"kind\":\"port\",\"detail\":\"input\",\"container\":\"WORK.SUB"
+      "\",\"direction\":\"input\",\"width\":1",
+      "{\"name\":\"f\",\"kind\":\"port\",\"detail\":",
+      "\"container\":\"WORK.SUB\",\"direction\":\"input\",",
+      "\"type\":\"logic [$clog2(16)-1:0]\",\"width\":4",
+      "\"unit\":\"sub\",\"generic_map\":[{\"name\":\"W\",\"value\":\"8\"},"
+      "{\"name\":\"INIT\",\"value\":\"4'h5\"}]",
+      "{\"name\":\"u2\",\"kind\":\"instance\",\"detail\":\"sub\","
+      "\"container\":\"WORK.TOP.yes\",\"unit\":\"sub\","
+      "\"generic_map\":[{\"value\":\"4\"}]",
+      "{\"name\":\"a\",\"kind\":\"port\",\"detail\":\"input [7:0]\",\"container\":\"WO"
+      "RK.OLD\",\"direction\":\"input\",\"type\":\"[7:0]\",\"width\":8",
+      "{\"name\":\"b\",\"kind\":\"port\",\"detail\":\"output byte\",\"container\":\"WO"
+      "RK.SUB\",\"direction\":\"output\",\"type\":\"byte\",\"width\":8",
+      "{\"name\":\"b\",\"kind\":\"port\",\"detail\":\"output reg [15:0]\",\"containe"
+      "r\":\"WORK.OLD\",\"direction\":\"output\",\"type\":\"reg [15:0]\",\"width\":1"
+      "6",
+      "{\"name\":\"g\",\"kind\":\"generate\",\"container\":\"WORK.TOP\","
+      "\"gen\":\"for\",\"range\":\"i = 0; i < 4; i = i + 1\"",
+      "{\"name\":\"uo\",\"kind\":\"instance\",\"detail\":\"old\",\"container\":\"WORK."
+      "TOP\",\"unit\":\"old\"",
+   };
+
+   scan_symbols_contain(SCAN_FILE("m5g_fields.sv"), parts, ARRAY_LEN(parts),
                         true);
 }
 END_TEST
@@ -793,6 +851,7 @@ Suite *get_scan_tests(void)
    tcase_add_test(tc, test_symbols_vlog);
    tcase_add_test(tc, test_bigarena);
    tcase_add_test(tc, test_m5_vlog_generate);
+   tcase_add_test(tc, test_m5_vlog_fields);
    suite_add_tcase(s, tc);
 
    // Expanding covergroups is slow with the debug and sanitiser options
