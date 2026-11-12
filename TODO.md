@@ -38,3 +38,8 @@
 - A constraint can look up a member of an element of a parameter array of packed structures with a random
   index; the table is passed to the solver as an array each time randomize() is called.  Unpacked structures
   in a parameter array have not been tried with a random index.
+- A foreach constraint over a packed array of packed structures is unrolled while the constraint is built and a
+  member of an element is a slice of the array (vlog_crv_slice_node).  An equality on a slice of a variable wider
+  than 64 bits is only reliably solved when the slice lies inside one 64-bit chunk of the variable: a slice that
+  crosses a chunk boundary is an expression of two solver variables and randomize() often fails on it (about 8 in
+  10 attempts for `rand bit [107:0] v; v[71:54] == 18'h1234`).  It would need the equality split per chunk.

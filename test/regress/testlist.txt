@@ -2655,3 +2655,4 @@ svrandparamtab1 verilog
 svenumpacked1   verilog
 svassignmemberidx1 verilog
 svrandwideslice1 verilog
+svrandforeachpacked1 verilog

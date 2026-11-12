@@ -124,6 +124,8 @@ typedef struct {
       mir_value_t key;     // Key if this is unrolled at run time
       vlog_node_t aref;    // Reference to the associative array
       bool        known;   // Has a value at run time
+      bool        has_sval;   // Index of a foreach unrolled while building
+      int64_t     sval;
    }              crv_index[8];
    mir_value_t    last_index;
    vlog_node_t    subr;
@@ -20662,6 +20664,59 @@ static vlog_node_t vlog_crv_packed_root(vlog_node_t v, unsigned *off)
    return v;
 }
 
+static bool vlog_crv_const_index(vlog_gen_t *g, vlog_node_t e, int64_t *value)
+{
+   // A constant, or the index of a foreach whose iterations are unrolled
+
+   if (vlog_get_const(e, value))
+      return true;
+   else if (vlog_kind(e) == V_REF && vlog_has_ref(e)) {
+      for (int i = 0; i < g->crv_nindex; i++) {
+         if (g->crv_index[i].decl == vlog_ref(e) && g->crv_index[i].has_sval) {
+            *value = g->crv_index[i].sval;
+            return true;
+         }
+      }
+   }
+
+   return false;
+}
+
+static bool vlog_crv_packed_elems(vlog_node_t arr, unsigned *width,
+                                  int64_t *left, int64_t *right)
+{
+   // A variable which is a packed array of packed structures: the width of
+   // an element and the bounds of the first dimension
+
+   if ((vlog_kind(arr) != V_REF && vlog_kind(arr) != V_MEMBER_REF)
+       || !vlog_has_ref(arr))
+      return false;
+
+   vlog_node_t decl = vlog_ref(arr);
+   if ((vlog_kind(decl) != V_VAR_DECL && vlog_kind(decl) != V_LOCAL_DECL)
+       || !vlog_has_type(decl) || vlog_ranges(decl) > 0)
+      return false;
+
+   vlog_node_t t = vlog_get_type(decl);
+   if (t == NULL || vlog_kind(t) != V_DATA_TYPE || !vlog_has_type(t)
+       || vlog_ranges(t) < 1 || vlog_is_dynamic_type(t))
+      return false;
+
+   vlog_node_t et = vlog_get_type(vlog_type(t));
+   if (et == NULL || vlog_kind(et) != V_STRUCT_DECL
+       || !(vlog_flags(et) & VLOG_F_PACKED))
+      return false;
+
+   *width = vlog_size(et);
+   return vlog_bounds(vlog_range(t, 0), left, right);
+}
+
+static mir_value_t vlog_crv_wide_node(vlog_gen_t *g, vlog_node_t v,
+                                      unsigned width, bool is_signed);
+static mir_value_t vlog_crv_slice_node(vlog_gen_t *g, vlog_node_t base,
+                                       int64_t lsb, unsigned nbits,
+                                       bool is_signed);
+
 static mir_value_t vlog_crv_packed_member(vlog_gen_t *g, vlog_node_t v)
 {
    unsigned off;
@@ -20671,9 +20726,24 @@ static mir_value_t vlog_crv_packed_member(vlog_gen_t *g, vlog_node_t v)
       // An element of an array of packed structures is one value
       const unsigned size = vlog_size(vlog_type(vlog_ref(v)));
       const bool is_signed = vlog_is_signed(v);
+
+      // With a known index the member is a slice of the array
+      unsigned ew;
+      int64_t left, right, index;
+      if (vlog_params(root) == 1
+          && vlog_crv_packed_elems(vlog_value(root), &ew, &left, &right)
+          && vlog_crv_const_index(g, vlog_param(root, 0), &index)) {
+         const int64_t pos = left >= right ? index - right : right - index;
+         const int64_t lsb = pos * ew + (ew - off - size);
+
+         return vlog_crv_slice_node(g, vlog_value(root), lsb, size, is_signed);
+      }
       const unsigned bw = vlog_crv_width(g, root);
       mir_value_t flags = vlog_crv_flags(g, bw, false);
-      mir_value_t value = vlog_crv_expr(g, root, bw, false);
+      // The element of a packed array wider than 64 bits comes from its chunks
+      mir_value_t value = vlog_crv_width(g, vlog_value(root)) > 64
+         ? vlog_crv_wide_node(g, root, bw, false)
+         : vlog_crv_expr(g, root, bw, false);
       mir_value_t amount = CRV3(g, CRV_OP_CONST, g->crv_ctx,
                                 vlog_crv_int(g, bw - off - size), flags);
       value = CRV5(g, CRV_OP_BINARY, g->crv_ctx, vlog_crv_int(g, CRV_SHR),
@@ -22538,6 +22608,21 @@ static mir_value_t vlog_crv_wide_node(vlog_gen_t *g, vlog_node_t v,
    return vlog_crv_cast(g, node, 64, false, width, is_signed);
 }
 
+static mir_value_t vlog_crv_slice_node(vlog_gen_t *g, vlog_node_t base,
+                                       int64_t lsb, unsigned nbits,
+                                       bool is_signed)
+{
+   // The bits lsb + nbits - 1 down to lsb of a variable as a single node
+
+   const unsigned bw = vlog_crv_width(g, base);
+   crv_wide_t w;
+   vlog_crv_wide_expr(g, base, bw, false, &w);
+   vlog_crv_w_shift_keep(g, &w, lsb, false, false, nbits);
+   vlog_crv_w_resize(g, &w, nbits, false);
+   return vlog_crv_cast(g, vlog_crv_w_mat(g, w.c[0]), 64, false, nbits,
+                        is_signed);
+}
+
 static mir_value_t vlog_crv_wide_bool(vlog_gen_t *g, vlog_node_t v)
 {
    const unsigned width = vlog_crv_width(g, v);
@@ -23550,6 +23635,7 @@ static void vlog_crv_foreach_unroll(vlog_gen_t *g, vlog_node_t v,
       CRV3(g, CRV_OP_CONST, g->crv_ctx, i, flags32);
    g->crv_index[g->crv_nindex].key = key;
    g->crv_index[g->crv_nindex].known = false;
+   g->crv_index[g->crv_nindex].has_sval = false;
    g->crv_nindex++;
 
    const int nstmts = vlog_stmts(v);
@@ -23588,12 +23674,51 @@ static void vlog_crv_foreach_bits(vlog_gen_t *g, vlog_node_t v,
       g->crv_index[saved_nindex].assoc = NULL;
       g->crv_index[saved_nindex].key = MIR_NULL_VALUE;
       g->crv_index[saved_nindex].known = false;
+      g->crv_index[saved_nindex].has_sval = false;
       g->crv_nindex = saved_nindex + 1;
 
       for (int i = 0; i < nstmts; i++)
          vlog_crv_items(g, vlog_stmt(v, i), guard, NULL);
    }
 
+   g->crv_nindex = saved_nindex;
+}
+
+static void vlog_crv_foreach_elems(vlog_gen_t *g, vlog_node_t v,
+                                   mir_value_t guard, int64_t left,
+                                   int64_t right)
+{
+   // The elements of a packed array are known so each gets its own constraints
+
+   if (g->crv_nindex == ARRAY_LEN(g->crv_index))
+      fatal_at(vlog_loc(v), "sorry, foreach constraints are nested too "
+               "deeply");
+
+   mir_value_t flags32 = vlog_crv_flags(g, 32, true);
+
+   const int saved_nindex = g->crv_nindex;
+   const int nstmts = vlog_stmts(v);
+   const int step = left <= right ? 1 : -1;
+
+   for (int64_t i = left; ; i += step) {
+      g->crv_index[saved_nindex].decl = vlog_decl(v, 0);
+      g->crv_index[saved_nindex].node =
+         CRV3(g, CRV_OP_CONST, g->crv_ctx, vlog_crv_int(g, i), flags32);
+      g->crv_index[saved_nindex].assoc = NULL;
+      g->crv_index[saved_nindex].key = MIR_NULL_VALUE;
+      g->crv_index[saved_nindex].known = false;
+      g->crv_index[saved_nindex].has_sval = true;
+      g->crv_index[saved_nindex].sval = i;
+      g->crv_nindex = saved_nindex + 1;
+
+      for (int k = 0; k < nstmts; k++)
+         vlog_crv_items(g, vlog_stmt(v, k), guard, NULL);
+
+      if (i == right)
+         break;
+   }
+
+   g->crv_index[saved_nindex].has_sval = false;
    g->crv_nindex = saved_nindex;
 }
 
@@ -23721,6 +23846,7 @@ static void vlog_crv_objects_level(vlog_gen_t *g, vlog_node_t v,
    g->crv_index[g->crv_nindex].assoc = NULL;
    g->crv_index[g->crv_nindex].key = MIR_NULL_VALUE;
    g->crv_index[g->crv_nindex].known = true;
+   g->crv_index[g->crv_nindex].has_sval = false;
    g->crv_nindex++;
 
    if (level + 1 < nvars) {
@@ -23788,6 +23914,13 @@ static void vlog_crv_foreach(vlog_gen_t *g, vlog_node_t v, mir_value_t guard)
           && vlog_has_ref(arr) && vlog_decls(v) == 1
           && vlog_crv_is_integral(g, vlog_type(vlog_ref(arr)))) {
          vlog_crv_foreach_bits(g, v, guard);
+         return;
+      }
+
+      unsigned ew;
+      int64_t pleft, pright;
+      if (vlog_decls(v) == 1 && vlog_crv_packed_elems(arr, &ew, &pleft, &pright)) {
+         vlog_crv_foreach_elems(g, v, guard, pleft, pright);
          return;
       }
 
@@ -23861,6 +23994,7 @@ static void vlog_crv_foreach(vlog_gen_t *g, vlog_node_t v, mir_value_t guard)
       g->crv_index[g->crv_nindex].assoc = NULL;
       g->crv_index[g->crv_nindex].key = MIR_NULL_VALUE;
       g->crv_index[g->crv_nindex].known = false;
+      g->crv_index[g->crv_nindex].has_sval = false;
       g->crv_nindex++;
    }
 
