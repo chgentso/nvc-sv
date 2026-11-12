@@ -331,6 +331,10 @@ bool eval_possible(tree_t t, unit_registry_t *ur, mir_context_t *mc)
       }
 
    case T_LITERAL:
+      if (tree_subkind(t) == L_NULL)
+         return eval_not_possible(t, "null literal");   // Not a scalar value
+      return true;
+
    case T_STRING:
    case T_OPEN:
       return true;

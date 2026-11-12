@@ -2681,3 +2681,4 @@ svfgetseof1 verilog
 svtypecast1 verilog
 vcrash_foreign1 normal
 vcrash_group1   normal
+vcrash_null1    normal,2008
