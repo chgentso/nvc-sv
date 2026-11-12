@@ -2678,3 +2678,4 @@ svwideidx1 verilog
 svstructcast1 verilog,fail,gold
 svrealfeedback1 verilog
 svfgetseof1 verilog
+svtypecast1 verilog

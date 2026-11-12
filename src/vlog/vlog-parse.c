@@ -6181,6 +6181,13 @@ static void p_casting_type(vlog_node_t cast, vlog_node_t head)
       return;
    }
 
+   if (vlog_kind(head) == V_CAST && vlog_subkind(head) == V_CAST_TYPEREF) {
+      // The type of an expression: type(expr)'(value)
+      vlog_set_subkind(cast, V_CAST_TYPE);
+      vlog_set_type(cast, vlog_type(head));
+      return;
+   }
+
    vlog_set_subkind(cast, V_CAST_WIDTH);
    vlog_set_left(cast, head);
 }
