@@ -48,6 +48,9 @@ void vlog_lint_port(vlog_node_t port, vlog_node_t value, const loc_t *loc);
 void vlog_set_fold_context(mir_context_t *mc, jit_t *j);
 vlog_node_t vlog_virtual_spec(vlog_node_t type);
 bool vlog_virtual_unresolved(vlog_node_t type);
+typedef vlog_node_t (*vlog_port_body_fn_t)(vlog_node_t port, void *ctx);
+bool vlog_resolve_iface_params(vlog_node_t body, vlog_port_body_fn_t fn,
+                               void *ctx);
 ident_t vlog_instance_key(vlog_node_t mod, vlog_node_t body);
 void vlog_load_binds(lib_t lib, object_t **tops, int ntops);
 bool vlog_bind_has_hier_ref(vlog_node_t mod);

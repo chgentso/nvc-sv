@@ -650,18 +650,10 @@ static bool accept_interface(object_t *obj)
       && (vlog_flags(v) & VLOG_F_INTERFACE);
 }
 
-vlog_node_t vlog_virtual_iface(vlog_node_t type)
+vlog_node_t vlog_find_interface(ident_t name)
 {
-   // The interface of a virtual interface type, which may be declared
-   // after the type is used
-
-   assert(vlog_kind(type) == V_DATA_TYPE && vlog_subkind(type) == DT_VIRTUAL);
-
-   if (vlog_has_ref(type))
-      return vlog_ref(type);
-
    LOCAL_TEXT_BUF tb = tb_new();
-   tb_istr(tb, vlog_ident(type));
+   tb_istr(tb, name);
    tb_upcase(tb);
 
    lib_t work = lib_work();
@@ -675,6 +667,19 @@ vlog_node_t vlog_virtual_iface(vlog_node_t type)
    }
 
    return obj != NULL ? vlog_from_object(obj) : NULL;
+}
+
+vlog_node_t vlog_virtual_iface(vlog_node_t type)
+{
+   // The interface of a virtual interface type, which may be declared
+   // after the type is used
+
+   assert(vlog_kind(type) == V_DATA_TYPE && vlog_subkind(type) == DT_VIRTUAL);
+
+   if (vlog_has_ref(type))
+      return vlog_ref(type);
+
+   return vlog_find_interface(vlog_ident(type));
 }
 
 bool vlog_virtual_pending(vlog_node_t v)

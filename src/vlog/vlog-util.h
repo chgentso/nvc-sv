@@ -74,6 +74,7 @@ ident_t vlog_mod_ref_name(vlog_node_t v);
 vlog_node_t vlog_member_decl(vlog_node_t v);
 vlog_node_t vlog_method_decl(vlog_node_t v);
 vlog_node_t vlog_virtual_iface(vlog_node_t type);
+vlog_node_t vlog_find_interface(ident_t name);
 vlog_node_t vlog_virtual_decl(vlog_node_t v);
 vlog_node_t vlog_virtual_decl_or_null(vlog_node_t v);
 bool vlog_virtual_pending(vlog_node_t v);

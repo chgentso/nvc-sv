@@ -907,3 +907,238 @@ bool vlog_virtual_unresolved(vlog_node_t type)
 
    return has_parameters(mod) && vlog_virtual_spec(type) == NULL;
 }
+
+typedef struct {
+   vlog_node_t        body;
+   vlog_port_body_fn_t port_fn;
+   void              *port_ctx;
+   hash_t            *specs;
+   hash_t            *hidden;
+   unsigned           depth;
+   bool               changed;
+} iface_res_t;
+
+static bool copy_all_pred(vlog_node_t v, void *ctx)
+{
+   return true;
+}
+
+static vlog_node_t find_inst_list(vlog_node_t body, ident_t name,
+                                  vlog_node_t *inst)
+{
+   // The instance list of an instance declared at the top level of the body
+
+   const int nstmts = vlog_stmts(body);
+   for (int i = 0; i < nstmts; i++) {
+      vlog_node_t list = vlog_stmt(body, i);
+      if (vlog_kind(list) != V_INST_LIST)
+         continue;
+
+      const int ninst = vlog_stmts(list);
+      for (int j = 0; j < ninst; j++) {
+         vlog_node_t it = vlog_stmt(list, j);
+         if (vlog_kind(it) == V_MOD_INST && vlog_ident(it) == name
+             && vlog_ranges(it) == 0) {
+            *inst = it;
+            return list;
+         }
+      }
+   }
+
+   return NULL;
+}
+
+static vlog_node_t resolve_href_cb(vlog_node_t v, void *ctx);
+
+static vlog_node_t iface_instance_spec(iface_res_t *res, vlog_node_t list)
+{
+   // The elaborated declarations of an interface instance declared in a
+   // body whose parameters have already been given values
+
+   vlog_node_t cached = hash_get(res->specs, list);
+   if (cached != NULL)
+      return cached == (vlog_node_t)-1 ? NULL : cached;
+
+   hash_put(res->specs, list, (vlog_node_t)-1);   // Also breaks cycles
+
+   vlog_node_t mod = vlog_find_interface(vlog_ident(list));
+   if (mod == NULL || vlog_kind(mod) != V_MODULE || fold_mir == NULL
+       || res->depth > 8)
+      return NULL;
+
+   // The overrides may themselves be names inside other interfaces
+   vlog_node_t plist = vlog_new(V_INST_LIST);
+   vlog_set_loc(plist, vlog_loc(list));
+   vlog_set_ident(plist, vlog_ident(list));
+
+   res->depth++;
+   const int nparams = vlog_params(list);
+   for (int i = 0; i < nparams; i++) {
+      vlog_node_t p = vlog_param(list, i);
+      if (vlog_has_value(p)) {
+         p = vlog_copy(p, copy_all_pred, NULL);
+         vlog_set_value(p, vlog_rewrite(vlog_value(p), NULL, resolve_href_cb,
+                                        res));
+      }
+      vlog_add_param(plist, p);
+   }
+   res->depth--;
+
+   object_arena_t *saved = detach_global_arena();
+   make_new_arena();
+
+   const int base_errors = error_count();
+
+   vlog_node_t spec = vlog_new_instance(mod, plist, ident_new("$spec"));
+   vlog_fold(spec, fold_mir, fold_jit);
+
+   iface_res_t sub = {
+      .body  = spec,
+      .specs  = res->specs,
+      .hidden = hash_new(4),
+      .depth  = res->depth + 1,
+   };
+   vlog_rewrite(spec, NULL, resolve_href_cb, &sub);
+   if (sub.changed)
+      vlog_fold(spec, fold_mir, fold_jit);
+
+   hash_free(sub.hidden);
+
+   if (error_count() != base_errors)
+      spec = NULL;
+
+   // Keep the arena open as freezing would discard the unreachable nodes
+   detach_global_arena();
+   attach_global_arena(saved);
+
+   hash_put(res->specs, list, spec ?: (vlog_node_t)-1);
+   return spec;
+}
+
+static vlog_node_t iface_path_body(iface_res_t *res, vlog_node_t body,
+                                   vlog_node_t mr)
+{
+   // The body of the interface instance named by a component of the path
+
+   ident_t name = vlog_ident(mr);
+
+   if (body == res->body) {
+      const int ndecls = vlog_decls(body);
+      for (int i = 0; i < ndecls; i++) {
+         vlog_node_t d = vlog_decl(body, i);
+         if (vlog_kind(d) == V_IFACE_PORT && vlog_ident(d) == name) {
+            if (vlog_ranges(d) > 0 || res->port_fn == NULL)
+               return NULL;
+
+            return res->port_fn(d, res->port_ctx);
+         }
+      }
+   }
+
+   vlog_node_t inst;
+   vlog_node_t list = find_inst_list(body, name, &inst);
+   if (list == NULL)
+      return NULL;
+
+   return iface_instance_spec(res, list);
+}
+
+static vlog_node_t resolve_href_cb(vlog_node_t v, void *ctx)
+{
+   iface_res_t *res = ctx;
+
+   if (vlog_kind(v) != V_HIER_REF || vlog_ident(v) == ident_new("$self"))
+      return v;
+
+   // The path of instance names that the member is selected from
+   vlog_node_t path[8];
+   int npath = 0;
+   for (vlog_node_t it = vlog_value(v); ; it = vlog_value(it)) {
+      if (vlog_kind(it) != V_MOD_REF || vlog_params(it) > 0
+          || npath == ARRAY_LEN(path))
+         return v;
+
+      path[npath++] = it;
+      if (!vlog_has_value(it))
+         break;
+   }
+
+   vlog_node_t cur = res->body;
+   for (int i = npath - 1; i >= 0; i--) {
+      if ((cur = iface_path_body(res, cur, path[i])) == NULL)
+         return v;
+   }
+
+   ident_t id = vlog_ident(v);
+   const int ndecls = vlog_decls(cur);
+   for (int i = 0; i < ndecls; i++) {
+      vlog_node_t d = vlog_decl(cur, i);
+      switch (vlog_kind(d)) {
+      case V_LOCALPARAM:
+      case V_PARAM_DECL:
+         if (vlog_ident(d) != id || !vlog_has_value(d) || vlog_ranges(d) > 0)
+            continue;
+
+         switch (vlog_kind(vlog_value(d))) {
+         case V_NUMBER:
+         case V_REAL:
+         case V_STRING:
+            res->changed = true;
+            return vlog_copy(vlog_value(d), copy_all_pred, NULL);
+         case V_PATTERN_EXPR:
+            {
+               // An aggregate is a parameter of this body from now on so
+               // that members of it can be selected
+               vlog_node_t lp = hash_get(res->hidden, d);
+               if (lp == NULL) {
+                  lp = vlog_new(V_LOCALPARAM);
+                  vlog_set_loc(lp, vlog_loc(v));
+                  vlog_set_ident(lp, ident_sprintf("$iface.%s", istr(id)));
+                  vlog_set_type(lp, vlog_type(d));
+                  vlog_set_value(lp, vlog_copy(vlog_value(d), copy_all_pred,
+                                               NULL));
+                  vlog_add_decl(res->body, lp);
+                  hash_put(res->hidden, d, lp);
+               }
+
+               vlog_node_t ref = vlog_new(V_REF);
+               vlog_set_ident(ref, vlog_ident(lp));
+               vlog_set_ref(ref, lp);
+               vlog_set_loc(ref, vlog_loc(v));
+               res->changed = true;
+               return ref;
+            }
+         default:
+            return v;
+         }
+      default:
+         break;
+      }
+   }
+
+   return v;
+}
+
+bool vlog_resolve_iface_params(vlog_node_t body, vlog_port_body_fn_t fn,
+                               void *ctx)
+{
+   // The value of a parameter of an interface instance or port is known
+   // before the body is translated and its dimensions may depend on it
+
+   if (fold_mir == NULL)
+      return false;
+
+   iface_res_t res = {
+      .body     = body,
+      .port_fn  = fn,
+      .port_ctx = ctx,
+      .specs    = hash_new(8),
+      .hidden   = hash_new(4),
+   };
+
+   vlog_rewrite(body, NULL, resolve_href_cb, &res);
+
+   hash_free(res.specs);
+   hash_free(res.hidden);
+   return res.changed;
+}

@@ -3099,6 +3099,75 @@ static void elab_bind_event_formals(vlog_node_t body, vlog_node_t inst)
    free(ef.actuals);
 }
 
+static tree_t elab_iface_conn_target(const elab_iface_conn_t *c,
+                                     const elab_ctx_t *ctx);
+static void elab_ignore_diag(diag_t *d, void *context);
+
+typedef struct {
+   vlog_node_t       inst;
+   const elab_ctx_t *ctx;
+} elab_port_body_t;
+
+static vlog_node_t elab_early_port_body(vlog_node_t port, void *arg)
+{
+   // The body of the interface instance connected to a port, if that
+   // instance is already known
+
+   const elab_port_body_t *pb = arg;
+   vlog_node_t inst = pb->inst;
+   if (inst == NULL || vlog_kind(inst) != V_MOD_INST)
+      return NULL;
+
+   ident_t name = vlog_ident(port);
+   vlog_node_t conn = NULL, wildcard = NULL;
+   const int pos = vlog_subkind(port), nparams = vlog_params(inst);
+   if (pos < nparams) {
+      vlog_node_t c = vlog_param(inst, pos);
+      if (!(vlog_flags(c) & VLOG_F_WILDCARD) && !vlog_has_ident(c))
+         conn = c;
+   }
+
+   for (int i = 0; i < nparams; i++) {
+      vlog_node_t c = vlog_param(inst, i);
+      if (vlog_flags(c) & VLOG_F_WILDCARD)
+         wildcard = c;
+      else if (conn == NULL && vlog_has_ident(c) && vlog_ident(c) == name)
+         conn = c;
+   }
+
+   if (conn != NULL && !vlog_has_value(conn))
+      return NULL;
+   else if (conn == NULL && wildcard == NULL)
+      return NULL;
+
+   elab_iface_conn_t c = {
+      .parent = pb->ctx->out,
+      .port   = port,
+      .value  = conn != NULL
+         ? elab_array_iface_value(inst, vlog_value(conn)) : NULL,
+      .loc    = *vlog_loc(conn ?: inst),
+   };
+
+   void *saved_ctx;
+   diag_consumer_t saved = diag_get_consumer(&saved_ctx);
+   diag_set_consumer(elab_ignore_diag, NULL);
+
+   tree_t target = elab_iface_conn_target(&c, pb->ctx);
+
+   diag_set_consumer(saved, saved_ctx);
+
+   if (target == NULL || tree_decls(target) == 0)
+      return NULL;
+
+   tree_t h = tree_decl(target, 0);
+   if (tree_kind(h) != T_HIER || !tree_has_ref(h)
+       || tree_kind(tree_ref(h)) != T_VERILOG)
+      return NULL;
+
+   vlog_node_t body = tree_vlog(tree_ref(h));
+   return (vlog_flags(body) & VLOG_F_INTERFACE) ? body : NULL;
+}
+
 static void elab_verilog_module(tree_t comp, ident_t label, vlog_node_t mod,
                                 vlog_node_t list, vlog_node_t inst,
                                 tree_t entity, const elab_ctx_t *ctx)
@@ -3211,6 +3280,14 @@ static void elab_verilog_module(tree_t comp, ident_t label, vlog_node_t mod,
 
       if (!folded)
          vlog_fold(ei->body, ctx->mir, ctx->jit);
+
+      if (vlog_kind(mod) == V_MODULE
+          && (vlog_global_flags(mod) & VLOG_GF_HIER_REF)) {
+         // A parameter of an interface may give the size of a variable
+         elab_port_body_t pb = { .inst = inst, .ctx = ctx };
+         if (vlog_resolve_iface_params(ei->body, elab_early_port_body, &pb))
+            vlog_fold(ei->body, ctx->mir, ctx->jit);
+      }
 
       ei->wrap = tree_new(T_VERILOG);
       tree_set_loc(ei->wrap, vlog_loc(mod));
