@@ -258,8 +258,22 @@ static char *sym_prefix_text(const loc_t *loc, unsigned line, unsigned col)
 
    const char *end = src + col - 1;
    const char *start = end;
-   while (start > src && !strchr("(,;", start[-1]))
+   // Back to the previous delimiter that is not inside brackets, such as the
+   // call in [$clog2(N)-1:0]
+   int depth = 0;
+   while (start > src) {
+      const char c = start[-1];
+      if (strchr(")]}", c))
+         depth++;
+      else if (strchr("([{", c)) {
+         if (depth == 0)
+            break;
+         depth--;
+      }
+      else if (depth == 0 && strchr(",;", c))
+         break;
       start--;
+   }
    while (start < end && isspace((unsigned char)*start))
       start++;
    while (end > start && isspace((unsigned char)end[-1]))

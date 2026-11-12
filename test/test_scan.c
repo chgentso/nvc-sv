@@ -294,6 +294,32 @@ START_TEST(test_m5_vhdl_generate)
 }
 END_TEST
 
+START_TEST(test_m5_vhdl_calls)
+{
+   // A call inside the range of a port does not cut the declaration text
+
+   set_standard(STD_19);
+
+   static const char *const vlog[] = {
+      "\"detail\":\"input wire [$clog2(16)-1:0]\"",
+      "\"detail\":\"output logic [$clog2(N+1)-1:0][3:0]\"",
+      "\"detail\":\"input logic [(N>4 ? 8 : 4)-1:0]\"",
+      "\"detail\":\"input wire [3:0]\"",
+   };
+   scan_symbols_contain(SCAN_FILE("m5v_calls.sv"), vlog, ARRAY_LEN(vlog),
+                        true);
+
+   static const char *const vhdl[] = {
+      "\"detail\":\"in BIT_VECTOR\",\"container\":\"WORK.M5V_CALLS\","
+      "\"direction\":\"input\",\"type\":\"bit_vector(f(N) - 1 downto 0)\"",
+      "\"type\":\"bit_vector(f(f(N)) - 1 downto 0)\"",
+   };
+   scan_symbols_contain(SCAN_FILE("m5v_calls.vhd"), vhdl, ARRAY_LEN(vhdl),
+                        true);
+}
+END_TEST
+
+
 
 
 START_TEST(test_sv1)
@@ -719,6 +745,7 @@ Suite *get_scan_tests(void)
    tcase_add_test(tc, test_m5_vhdl_comments);
    tcase_add_test(tc, test_m5_vhdl_fields);
    tcase_add_test(tc, test_m5_vhdl_generate);
+   tcase_add_test(tc, test_m5_vhdl_calls);
    tcase_add_test(tc, test_sv1);
    tcase_add_test(tc, test_sv2);
    tcase_add_test(tc, test_sv_ifdef_a);
