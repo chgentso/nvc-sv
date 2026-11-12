@@ -174,6 +174,20 @@ static bool vlog_is_context_operand(vlog_node_t v)
 }
 
 static mir_value_t vlog_lower_rvalue(vlog_gen_t *g, vlog_node_t v);
+static bool vlog_is_unpacked_struct(vlog_node_t type)
+{
+   if (type == NULL)
+      return false;
+
+   switch (vlog_kind(type)) {
+   case V_STRUCT_DECL:
+   case V_UNION_DECL:
+      return !(vlog_flags(type) & VLOG_F_PACKED);
+   default:
+      return false;
+   }
+}
+
 static mir_value_t vlog_lower_with_context(vlog_gen_t *g, vlog_node_t v,
                                            mir_type_t context);
 static mir_value_t vlog_lower_net_delay(vlog_gen_t *g, vlog_node_t ctrl,
@@ -9502,6 +9516,13 @@ static mir_value_t vlog_lower_with_context(vlog_gen_t *g, vlog_node_t v,
                   return result;
                }
             }
+
+            // The members of an unpacked structure are not a bit vector
+            const bool d_unpacked = vlog_is_unpacked_struct(dtype);
+            const bool s_unpacked = vlog_is_unpacked_struct(stype);
+            if ((d_unpacked || s_unpacked) && dtype != stype)
+               fatal_at(vlog_loc(v), "sorry, a cast between an unpacked "
+                        "structure and another type is not supported");
 
             return vlog_lower_cast(g, ti->type, vlog_lower_rvalue(g, arg));
          }
