@@ -20840,7 +20840,9 @@ static void clocking_synthesise(vlog_node_t parent, ident_t name,
       }
       if (sig == NULL) {
          sig = vlog_symtab_query(symtab, cv->sig);
-         if (sig != NULL && vlog_has_type(sig))
+         if (sig != NULL && vlog_kind(sig) == V_MOD_INST)
+            sig = NULL;   // Type name not declared so parsed as instance
+         else if (sig != NULL && vlog_has_type(sig))
             sigtype = vlog_type(sig);
       }
 

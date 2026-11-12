@@ -372,6 +372,21 @@ START_TEST(test_sv_macro_isolation)
 }
 END_TEST
 
+START_TEST(test_sv_clocking_unknown)
+{
+   // A clocking block may name a variable whose type is not available
+
+   set_standard(STD_19);
+
+   const char *expect =
+      "{\"file\":\"" SCAN_FILE("sv10.sv") "\",\"language\":\"verilog\","
+      "\"units\":[{\"name\":\"WORK.UNK_IF\",\"kind\":\"interface\","
+      "\"ports\":true,\"instantiates\":[]}],"
+      "\"requires\":[\"?unk_pkg\"],\"includes\":[]}\n";
+
+   ck_assert_uint_eq(scan(SCAN_FILE("sv10.sv"), expect), 0);
+}
+END_TEST
 
 
 START_TEST(test_sv_pending_binds)
@@ -571,6 +586,7 @@ Suite *get_scan_tests(void)
    tcase_add_test(tc, test_sv_syntax);
    tcase_add_test(tc, test_sv_no_unit);
    tcase_add_test(tc, test_sv_macro_isolation);
+   tcase_add_test(tc, test_sv_clocking_unknown);
    tcase_add_test(tc, test_sv_pending_binds);
    tcase_add_test(tc, test_symbols_vhdl);
    tcase_add_test(tc, test_symbols_vlog);
