@@ -27090,8 +27090,23 @@ static void vlog_lower_sensitivity(vlog_gen_t *g, vlog_node_t v)
 
             vlog_sensitivity_event(g, nets, lvalue.count);
          }
-         else if (prefix != NULL)
+         else if (prefix != NULL) {
             vlog_lower_sensitivity(g, prefix);
+
+            // The indices of the selects in front of a member are also read
+            if (kind == V_MEMBER_REF) {
+               vlog_node_t base = vlog_value(v);
+               switch (vlog_kind(base)) {
+               case V_BIT_SELECT:
+               case V_PART_SELECT:
+               case V_MEMBER_REF:
+                  vlog_lower_sensitivity(g, base);
+                  break;
+               default:
+                  break;
+               }
+            }
+         }
          else if (kind != V_MEMBER_REF || vlog_is_param_select(v))
             vlog_lower_sensitivity(g, vlog_value(v));   // An expression
 

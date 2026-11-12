@@ -2653,3 +2653,4 @@ svpartparam1    verilog
 svctordef1      verilog
 svrandparamtab1 verilog
 svenumpacked1   verilog
+svassignmemberidx1 verilog
