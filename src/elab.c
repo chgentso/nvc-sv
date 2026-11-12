@@ -8310,8 +8310,18 @@ static vlog_node_t elab_rewrite_hier_ref_cb(vlog_node_t v, void *arg)
       return elab_hier_ref_vhdl(v, port);
 
    vlog_node_t param = elab_hier_ref_param(b, id);
-   if (param == NULL)
-      param = elab_hier_ref_generic(b, id, vlog_loc(v));
+   if (param != NULL) {
+      // The value may contain names that are only bound relative to the
+      // instance it belongs to and that instance may not be rewritten yet
+      elab_href_ctx_t sub = *hctx;
+      sub.where = b;
+      sub.root = NULL;
+      sub.gen_depth = 0;
+      return vlog_rewrite(param, elab_rewrite_hier_ref_pre_cb,
+                          elab_rewrite_hier_ref_cb, &sub);
+   }
+
+   param = elab_hier_ref_generic(b, id, vlog_loc(v));
    if (param != NULL)
       return param;
 
