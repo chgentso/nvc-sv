@@ -519,7 +519,316 @@ static const char *sym_mode_str(unsigned mode)
    }
 }
 
+// Text of a VHDL interface declaration read from the source: the subtype
+// indication (without mode) and the default expression, whitespace and
+// comments squeezed out.  Constraints and defaults are not kept in a form
+// that prints back to source so the text is taken from the file.
+static void vhdl_sym_squeeze(text_buf_t *tb, const char *start, const char *end)
+{
+   bool space = false;
+   for (const char *p = start; p < end; p++) {
+      if (p[0] == '-' && p + 1 < end && p[1] == '-') {
+         while (p < end && *p != '\n')
+            p++;
+         space = true;
+         continue;
+      }
+      if (isspace((unsigned char)*p))
+         space = true;
+      else {
+         if (space && tb_len(tb) > 0)
+            tb_append(tb, ' ');
+         space = false;
+         tb_append(tb, *p);
+      }
+   }
+}
+
+static bool vhdl_sym_word_at(const char *p, const char *end, const char *word)
+{
+   const size_t n = strlen(word);
+   return p + n <= end && strncasecmp(p, word, n) == 0
+      && (p + n == end || !sym_word_char(p[n]))
+      && !sym_word_char(p[-1]);
+}
+
+static bool vhdl_sym_decl_text(const loc_t *loc, const char *name,
+                           text_buf_t *type)
+{
+   unsigned l, c, n;
+   if (!sym_name_pos(loc, name, true, false, &l, &c, &n))
+      return false;
+
+   loc_t at = *loc;
+   at.first_line = l;
+   at.line_delta = 0;
+   at.first_column = 0;
+   const char *src = loc_get_source(&at);
+   if (src == NULL)
+      return false;
+
+   const char *p = src + c - 1 + n;
+   const char *limit = p + 4000;
+   const char *end = p;
+   while (end < limit && *end != '\0')
+      end++;
+
+   // Skip the rest of the identifier list up to the colon
+   while (p < end && *p != ':') {
+      if (*p == ';' || *p == ')' || *p == '(')
+         return false;
+      p++;
+   }
+   if (p >= end)
+      return false;
+   p++;
+
+   // The extent of the declaration: to a semicolon or unbalanced
+   // parenthesis at depth zero
+   const char *tstart = p, *istart = NULL, *stop = end;
+   int depth = 0;
+   bool instr = false;
+   for (const char *q = p; q < end; q++) {
+      if (q[0] == '-' && q + 1 < end && q[1] == '-') {
+         while (q < end && *q != '\n')
+            q++;
+         continue;
+      }
+      if (*q == '"') {
+         instr = !instr;
+         continue;
+      }
+      if (instr)
+         continue;
+      if (*q == '\'' && q + 2 < end && q[2] == '\'') {
+         q += 2;
+         continue;
+      }
+      if (*q == '(')
+         depth++;
+      else if (*q == ')') {
+         if (depth-- == 0) {
+            stop = q;
+            break;
+         }
+      }
+      else if (*q == ';' && depth == 0) {
+         stop = q;
+         break;
+      }
+      else if (*q == ':' && depth == 0 && q + 1 < end && q[1] == '='
+               && istart == NULL)
+         istart = q;
+   }
+
+   const char *tend = istart ?: stop;
+
+   // Mode and class words in front of the subtype indication
+   static const char *const words[] =
+      { "in", "out", "inout", "buffer", "linkage", "signal", "constant",
+        "variable" };
+   bool more = true;
+   while (more) {
+      more = false;
+      while (tstart < tend && isspace((unsigned char)*tstart))
+         tstart++;
+      for (size_t i = 0; i < ARRAY_LEN(words); i++) {
+         if (vhdl_sym_word_at(tstart, tend, words[i])) {
+            tstart += strlen(words[i]);
+            more = true;
+            break;
+         }
+      }
+   }
+   if (tend - tstart > 400)
+      return false;
+   vhdl_sym_squeeze(type, tstart, tend);
+   if (tb_len(type) >= 4) {
+      const char *t = tb_get(type);
+      const size_t len = tb_len(type);
+      if (len > 4 && strcasecmp(t + len - 4, " bus") == 0)
+         tb_trim(type, len - 4);
+   }
+
+   return true;
+}
+
+// Is TYPE made of bits: BIT or STD_ULOGIC or an array of them
+static bool vhdl_sym_bits_p(type_t type)
+{
+   if (type_is_array(type))
+      type = type_elem(type);
+
+   if (type_is_array(type) || !type_is_enum(type))
+      return false;
+
+   ident_t id = type_ident(type_base_recur(type));
+   const char *name = istr(id);
+   return strcmp(name, "STD.STANDARD.BIT") == 0
+      || strcmp(name, "IEEE.STD_LOGIC_1164.STD_ULOGIC") == 0;
+}
+
+// Value of an integer expression made of literals and constants whose
+// value is such an expression; the scan does not fold them
+static bool vhdl_sym_int(tree_t e, int64_t *value, int depth)
+{
+   if (depth > 16)
+      return false;
+
+   if (folded_int(e, value))
+      return true;
+
+   switch (tree_kind(e)) {
+   case T_REF:
+      if (tree_has_ref(e)) {
+         tree_t d = tree_ref(e);
+         if (tree_kind(d) == T_CONST_DECL && tree_has_value(d))
+            return vhdl_sym_int(tree_value(d), value, depth + 1);
+      }
+      return false;
+
+   case T_QUALIFIED:
+   case T_TYPE_CONV:
+      return vhdl_sym_int(tree_value(e), value, depth + 1);
+
+   case T_FCALL:
+      {
+         if (!tree_has_ident(e))
+            return false;
+         const char *op = istr(tree_ident(e));
+         const unsigned n = tree_params(e);
+         int64_t a, b = 0;
+         if (n < 1 || n > 2 || !vhdl_sym_int(tree_value(tree_param(e, 0)),
+                                             &a, depth + 1))
+            return false;
+         if (n == 2 && !vhdl_sym_int(tree_value(tree_param(e, 1)), &b,
+                                     depth + 1))
+            return false;
+         if (n == 2 && strcmp(op, "\"+\"") == 0)
+            *value = a + b;
+         else if (n == 2 && strcmp(op, "\"-\"") == 0)
+            *value = a - b;
+         else if (n == 2 && strcmp(op, "\"*\"") == 0)
+            *value = a * b;
+         else if (n == 1 && strcmp(op, "\"-\"") == 0)
+            *value = -a;
+         else
+            return false;
+         return true;
+      }
+
+   default:
+      return false;
+   }
+}
+
+static bool vhdl_sym_length(tree_t r, int64_t *length)
+{
+   if (tree_kind(r) != T_RANGE)
+      return false;
+
+   const range_kind_t dir = tree_subkind(r);
+   if (dir != RANGE_TO && dir != RANGE_DOWNTO)
+      return false;
+
+   int64_t left, right;
+   if (!vhdl_sym_int(tree_left(r), &left, 0)
+       || !vhdl_sym_int(tree_right(r), &right, 0))
+      return false;
+
+   const int64_t n = (dir == RANGE_TO ? right - left : left - right) + 1;
+   *length = MAX(n, 0);
+   return true;
+}
+
+// Number of bits when the type is made of bits and every bound is known
+static bool vhdl_sym_width(type_t type, int64_t *width)
+{
+   if (!vhdl_sym_bits_p(type))
+      return false;
+
+   if (!type_is_array(type)) {
+      *width = 1;
+      return true;
+   }
+
+   while (type_kind(type) == T_SUBTYPE && !type_has_constraint(type))
+      type = type_base(type);
+
+   if (type_kind(type) != T_SUBTYPE)
+      return false;
+
+   tree_t c = type_constraint(type);
+   if (tree_subkind(c) != C_INDEX)
+      return false;
+
+   int64_t total = 1;
+   const int nr = tree_ranges(c);
+   for (int i = 0; i < nr; i++) {
+      int64_t len;
+      if (!vhdl_sym_length(tree_range(c, i), &len))
+         return false;
+      total *= len;
+   }
+
+   *width = total;
+   return *width >= 1;
+}
+
+static const char *vhdl_sym_direction(unsigned mode)
+{
+   switch (mode) {
+   case PORT_IN:      return "input";
+   case PORT_OUT:     return "output";
+   case PORT_INOUT:   return "inout";
+   case PORT_BUFFER:  return "buffer";
+   case PORT_LINKAGE: return "linkage";
+   default:           return NULL;
+   }
+}
+
+// The parameter of the for-generate being listed: it is declared as a
+// generic but has no type indication of its own in the source
+static tree_t vhdl_sym_gen_param = NULL;
+
+// Fields of a port or generic taken from the source text and the tree
+static void vhdl_sym_interface(sym_ctx_t *sc, tree_t d, const char *name)
+{
+   if (tree_kind(d) == T_PORT_DECL)
+      sym_extra_str(sc, "direction", vhdl_sym_direction(tree_subkind(d)));
+   else {
+      const char *class = NULL;
+      switch (tree_class(d)) {
+      case C_TYPE:      class = "type"; break;
+      case C_PACKAGE:   class = "package"; break;
+      case C_FUNCTION:
+      case C_PROCEDURE: class = "subprogram"; break;
+      default: break;
+      }
+      if (class != NULL) {
+         sym_extra_str(sc, "class", class);
+         return;
+      }
+   }
+
+   LOCAL_TEXT_BUF type = tb_new();
+   if (vhdl_sym_decl_text(tree_loc(d), name, type))
+      sym_extra_str(sc, "type", tb_get(type));
+
+   int64_t width;
+   if (tree_kind(d) == T_PORT_DECL && tree_has_type(d)
+       && vhdl_sym_width(tree_type(d), &width))
+      sym_extra_int(sc, "width", width);
+
+   if (tree_kind(d) == T_GENERIC_DECL && tree_has_value(d)) {
+      char *text LOCAL = sym_loc_text(sc, tree_loc(tree_value(d)), 200);
+      sym_extra_str(sc, "default", text);
+   }
+}
+
+
 static void vhdl_sym_scope(sym_ctx_t *sc, tree_t t, const char *path);
+static void vhdl_sym_stmt(sym_ctx_t *sc, tree_t s, const char *path);
 
 static void vhdl_sym_decl(sym_ctx_t *sc, tree_t d, const char *path)
 {
@@ -542,7 +851,8 @@ static void vhdl_sym_decl(sym_ctx_t *sc, tree_t d, const char *path)
       break;
    case T_GENERIC_DECL:
       kind = "generic";
-      detail = type_pp(tree_type(d));
+      if (tree_has_type(d))
+         detail = type_pp(tree_type(d));
       break;
    case T_SIGNAL_DECL:
       kind = "signal";
@@ -620,10 +930,9 @@ static void vhdl_sym_decl(sym_ctx_t *sc, tree_t d, const char *path)
 
    const char *name = sym_simple(tree_ident(d));
 
-   if (tree_kind(d) == T_GENERIC_DECL && tree_has_value(d)) {
-      char *text LOCAL = sym_loc_text(sc, tree_loc(tree_value(d)), 200);
-      sym_extra_str(sc, "default", text);
-   }
+   if ((tree_kind(d) == T_PORT_DECL || tree_kind(d) == T_GENERIC_DECL)
+       && d != vhdl_sym_gen_param)
+      vhdl_sym_interface(sc, d, name);
 
    sym_add(sc, name, kind, detail, path, tree_loc(d));
 
@@ -648,6 +957,130 @@ static void vhdl_sym_decl(sym_ctx_t *sc, tree_t d, const char *path)
    }
    else if (tree_kind(d) != T_PACK_INST)
       vhdl_sym_scope(sc, d, sub);
+}
+
+// The generation scheme of a generate statement as written: "for I in 0
+// to N - 1", "if W > 4" or "case N"
+static bool vhdl_sym_scheme(const loc_t *loc, const char *name,
+                            text_buf_t *tb)
+{
+   unsigned l, c, n;
+   if (!sym_name_pos(loc, name, true, false, &l, &c, &n))
+      return false;
+
+   loc_t at = *loc;
+   at.first_line = l;
+   at.line_delta = 0;
+   at.first_column = 0;
+   const char *src = loc_get_source(&at);
+   if (src == NULL)
+      return false;
+
+   const char *p = src + c - 1 + n;
+   const char *end = p;
+   while (end < p + 400 && *end != '\0')
+      end++;
+
+   while (p < end && (isspace((unsigned char)*p) || *p == ':'))
+      p++;
+
+   for (const char *q = p; q < end; q++) {
+      if (q[0] == '-' && q + 1 < end && q[1] == '-') {
+         while (q < end && *q != '\n')
+            q++;
+         continue;
+      }
+      if (vhdl_sym_word_at(q, end, "generate")) {
+         // An alternative label is not part of the condition
+         if (vhdl_sym_word_at(p, q, "if")) {
+            const char *a = p + 2;
+            while (a < q && isspace((unsigned char)*a))
+               a++;
+            const char *e = a;
+            while (e < q && sym_word_char(*e))
+               e++;
+            const char *f = e;
+            while (f < q && isspace((unsigned char)*f))
+               f++;
+            if (e > a && f < q && *f == ':' && (f + 1 == q || f[1] != '=')) {
+               tb_cat(tb, "if");
+               p = f + 1;
+            }
+         }
+         vhdl_sym_squeeze(tb, p, q);
+         return tb_len(tb) > 0;
+      }
+   }
+
+   return false;
+}
+
+static void vhdl_sym_branch(sym_ctx_t *sc, tree_t b, const char *gen,
+                            const char *path, const char *parent)
+{
+   // An alternative label replaces the generate label in the instance path
+   const char *sub = path;
+   char *tmp LOCAL = NULL;
+   if (tree_has_ident(b)) {
+      const char *name = sym_simple(tree_ident(b));
+      if (strcasecmp(name, gen) != 0) {
+         sym_extra_str(sc, "gen", tree_kind(b) == T_COND_STMT ? "if" : "case");
+         sym_add(sc, name, "generate", "alternative", parent, tree_loc(b));
+         tmp = xasprintf("%s.%s", parent, name);
+         sub = tmp;
+      }
+   }
+
+   for (unsigned j = 0; j < tree_decls(b); j++)
+      vhdl_sym_decl(sc, tree_decl(b, j), sub);
+   for (unsigned j = 0; j < tree_stmts(b); j++)
+      vhdl_sym_stmt(sc, tree_stmt(b, j), sub);
+}
+
+// The generic map of an instance as written, for the generic_map field
+static void vhdl_sym_generic_map(sym_ctx_t *sc, tree_t s)
+{
+   const int n = tree_genmaps(s);
+   if (n == 0)
+      return;
+
+   LOCAL_TEXT_BUF tb = tb_new();
+   tb_append(tb, '[');
+   for (int i = 0; i < n; i++) {
+      tree_t m = tree_genmap(s, i);
+      if (!tree_has_value(m) || tree_kind(tree_value(m)) == T_OPEN)
+         continue;
+
+      // Defaults added by the parser for what is not mapped have the
+      // location of the whole instance
+      const loc_t *vloc = tree_loc(tree_value(m));
+      if (vloc->first_line == tree_loc(s)->first_line
+          && vloc->first_column == tree_loc(s)->first_column)
+         continue;
+
+      char *value LOCAL = sym_loc_text(sc, vloc, 200);
+      if (value == NULL)
+         continue;
+
+      if (tb_len(tb) > 1)
+         tb_append(tb, ',');
+      tb_append(tb, '{');
+      if (tree_subkind(m) == P_NAMED) {
+         char *name LOCAL = sym_loc_text(sc, tree_loc(tree_name(m)), 100);
+         if (name != NULL) {
+            tb_cat(tb, "\"name\":");
+            scan_json_string(tb, name);
+            tb_append(tb, ',');
+         }
+      }
+      tb_cat(tb, "\"value\":");
+      scan_json_string(tb, value);
+      tb_append(tb, '}');
+   }
+   tb_append(tb, ']');
+
+   if (tb_len(tb) > 2)
+      sym_extra_raw(sc, "generic_map", tb_get(tb));
 }
 
 static void vhdl_sym_stmt(sym_ctx_t *sc, tree_t s, const char *path)
@@ -675,8 +1108,31 @@ static void vhdl_sym_stmt(sym_ctx_t *sc, tree_t s, const char *path)
    const char *detail = NULL;
    char *tmp LOCAL = NULL;
    if (tree_kind(s) == T_INSTANCE && tree_has_ident2(s)) {
-      tmp = xasprintf("%s", sym_simple(scan_unit_name(tree_ident2(s))));
+      ident_t unit = scan_unit_name(tree_ident2(s));
+      tmp = xasprintf("%s", sym_simple(unit));
       detail = tmp;
+      sym_extra_str(sc, "unit", istr(unit));
+      vhdl_sym_generic_map(sc, s);
+   }
+
+   LOCAL_TEXT_BUF scheme = tb_new();
+   switch (tree_kind(s)) {
+   case T_FOR_GENERATE:
+   case T_IF_GENERATE:
+   case T_CASE_GENERATE:
+      sym_extra_str(sc, "gen", tree_kind(s) == T_FOR_GENERATE ? "for"
+                    : tree_kind(s) == T_IF_GENERATE ? "if" : "case");
+      if (tree_kind(s) == T_FOR_GENERATE
+          && vhdl_sym_scheme(tree_loc(s), name, scheme)) {
+         // Without the keyword
+         const char *text = tb_get(scheme);
+         if (strncasecmp(text, "for ", 4) == 0)
+            text += 4;
+         sym_extra_str(sc, "range", text);
+      }
+      break;
+   default:
+      break;
    }
 
    sym_add(sc, name, kind, detail, path, tree_loc(s));
@@ -722,12 +1178,16 @@ static void vhdl_sym_scope(sym_ctx_t *sc, tree_t t, const char *path)
       generics = ports = true;
       break;
    case T_IF_GENERATE:
-      for (unsigned i = 0; i < tree_conds(t); i++) {
-         tree_t c = tree_cond(t, i);
-         for (unsigned j = 0; j < tree_decls(c); j++)
-            vhdl_sym_decl(sc, tree_decl(c, j), path);
-         for (unsigned j = 0; j < tree_stmts(c); j++)
-            vhdl_sym_stmt(sc, tree_stmt(c, j), path);
+   case T_CASE_GENERATE:
+      {
+         const char *dot = strrchr(path, '.');
+         char *parent LOCAL = dot ? xstrndup(path, dot - path) : xstrdup(path);
+         const char *gen = dot ? dot + 1 : path;
+         const bool is_if = tree_kind(t) == T_IF_GENERATE;
+         const unsigned n = is_if ? tree_conds(t) : tree_stmts(t);
+         for (unsigned i = 0; i < n; i++)
+            vhdl_sym_branch(sc, is_if ? tree_cond(t, i) : tree_stmt(t, i),
+                            gen, path, parent);
       }
       return;
    default:
@@ -740,9 +1200,14 @@ static void vhdl_sym_scope(sym_ctx_t *sc, tree_t t, const char *path)
    if (ports)
       for (unsigned i = 0; i < tree_ports(t); i++)
          vhdl_sym_decl(sc, tree_port(t, i), path);
-   if (decls)
-      for (unsigned i = 0; i < tree_decls(t); i++)
+   if (decls) {
+      for (unsigned i = 0; i < tree_decls(t); i++) {
+         if (tree_kind(t) == T_FOR_GENERATE && i == 0)
+            vhdl_sym_gen_param = tree_decl(t, i);
          vhdl_sym_decl(sc, tree_decl(t, i), path);
+      }
+      vhdl_sym_gen_param = NULL;
+   }
    if (stmts)
       for (unsigned i = 0; i < tree_stmts(t); i++)
          vhdl_sym_stmt(sc, tree_stmt(t, i), path);

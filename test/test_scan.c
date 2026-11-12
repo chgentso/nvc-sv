@@ -209,11 +209,11 @@ START_TEST(test_m5_vhdl_comments)
    set_standard(STD_08);
 
    static const char *const parts[] = {
-      "\"container\":\"WORK.M5VC\",\"default\":\"1 + 2\",\"line\":2,",
-      "\"container\":\"WORK.M5VC\",\"default\":\"\\\"x -- y\\\"\","
+      "\"container\":\"WORK.M5VC\",\"type\":\"integer\",\"default\":\"1 + 2\",\"line\":2,",
+      "\"container\":\"WORK.M5VC\",\"type\":\"string\",\"default\":\"\\\"x -- y\\\"\","
       "\"line\":4,",
-      "\"container\":\"WORK.M5VC\",\"default\":\"'-'\",\"line\":5,",
-      "\"container\":\"WORK.M5VC\",\"default\":\"\\\"10\\\" & \\\"10\\\"\","
+      "\"container\":\"WORK.M5VC\",\"type\":\"character\",\"default\":\"'-'\",\"line\":5,",
+      "\"container\":\"WORK.M5VC\",\"type\":\"bit_vector(3 downto 0)\",\"default\":\"\\\"10\\\" & \\\"10\\\"\","
       "\"line\":6,",
    };
 
@@ -221,6 +221,79 @@ START_TEST(test_m5_vhdl_comments)
                         ARRAY_LEN(parts), true);
 }
 END_TEST
+
+START_TEST(test_m5_vhdl_fields)
+{
+   set_standard(STD_08);
+
+   // Direction, type as written and width of ports; type, default and
+   // class of generics; the unit and generic map of instances.  The detail
+   // text is unchanged.
+   static const char *const parts[] = {
+      "{\"name\":\"W\",\"kind\":\"generic\",\"detail\":\"POSITIVE\",\"container\":\"WORK.M5V_FIELDS\",\"type\":\"positive\",\"default\":\"8\"",
+      "{\"name\":\"NAME\",\"kind\":\"generic\",\"detail\":\"STRING\",\"container\":\"WORK.M5V_FIELDS\",\"type\":\"string\",\"default\":\"\\\"x\\\"\"",
+      "{\"name\":\"T\",\"kind\":\"generic\",\"detail\":\"T\",\"container\":\"WORK.M5V_FIELDS\",\"class\":\"type\"",
+      "{\"name\":\"P\",\"kind\":\"generic\",\"container\":\"WORK.M5V_FIELDS\",\"class\":\"package\"",
+      "{\"name\":\"F\",\"kind\":\"generic\",\"detail\":\"F [INTEGER return INTEGER]\",\"container\":\"WORK.M5V_FIELDS\",\"class\":\"subprogram\"",
+      "{\"name\":\"NODEF\",\"kind\":\"generic\",\"detail\":\"INTEGER\",\"container\":\"WORK.M5V_FIELDS\",\"type\":\"integer\"",
+      "{\"name\":\"CLK\",\"kind\":\"port\",\"detail\":\"in STD_LOGIC\",\"container\":\"WORK.M5V_FIELDS\",\"direction\":\"input\",\"type\":\"std_logic\",\"width\":1",
+      "{\"name\":\"D\",\"kind\":\"port\",\"detail\":\"in STD_LOGIC_VECTOR\",\"container\":\"WORK.M5V_FIELDS\",\"direction\":\"input\",\"type\":\"std_logic_vector(7 downto 0)\",\"width\":8",
+      "{\"name\":\"Q\",\"kind\":\"port\",\"detail\":\"out STD_LOGIC_VECTOR\",\"container\":\"WORK.M5V_FIELDS\",\"direction\":\"output\",\"type\":\"std_logic_vector(W - 1 downto 0)\"",
+      "{\"name\":\"S\",\"kind\":\"port\",\"detail\":\"out SIGNED\",\"container\":\"WORK.M5V_FIELDS\",\"direction\":\"output\",\"type\":\"signed(15 downto 0)\",\"width\":16",
+      "{\"name\":\"U\",\"kind\":\"port\",\"detail\":\"out UNSIGNED\",\"container\":\"WORK.M5V_FIELDS\",\"direction\":\"output\",\"type\":\"unsigned(0 to 3)\",\"width\":4",
+      "{\"name\":\"W2\",\"kind\":\"port\",\"detail\":\"in STD_LOGIC_VECTOR\",\"container\":\"WORK.M5V_FIELDS\",\"direction\":\"input\",\"type\":\"std_logic_vector(WIDTH - 1 downto 0)\",\"width\":12",
+      "{\"name\":\"BY\",\"kind\":\"port\",\"detail\":\"in BYTE_T\",\"container\":\"WORK.M5V_FIELDS\",\"direction\":\"input\",\"type\":\"byte_t\",\"width\":8",
+      "{\"name\":\"FLAG\",\"kind\":\"port\",\"detail\":\"in BOOLEAN\",\"container\":\"WORK.M5V_FIELDS\",\"direction\":\"input\",\"type\":\"boolean\"",
+      "{\"name\":\"N\",\"kind\":\"port\",\"detail\":\"out INTEGER\",\"container\":\"WORK.M5V_FIELDS\",\"direction\":\"output\",\"type\":\"integer range 0 to 15\"",
+      "{\"name\":\"R\",\"kind\":\"port\",\"detail\":\"in REC_T\",\"container\":\"WORK.M5V_FIELDS\",\"direction\":\"input\",\"type\":\"rec_t\"",
+      "{\"name\":\"ANY\",\"kind\":\"port\",\"detail\":\"in STD_LOGIC_VECTOR\",\"container\":\"WORK.M5V_FIELDS\",\"direction\":\"input\",\"type\":\"std_logic_vector\"",
+      "{\"name\":\"B\",\"kind\":\"port\",\"detail\":\"inout BIT\",\"container\":\"WORK.M5V_FIELDS\",\"direction\":\"inout\",\"type\":\"bit\",\"width\":1",
+      "{\"name\":\"BI\",\"kind\":\"port\",\"detail\":\"buffer STD_ULOGIC\",\"container\":\"WORK.M5V_FIELDS\",\"direction\":\"buffer\",\"type\":\"std_ulogic\",\"width\":1",
+      "{\"name\":\"UE\",\"kind\":\"instance\",\"detail\":\"M5V_FIELDS\",\"container\":\"WORK.M5V_FIELDS-RTL\",\"unit\":\"WORK.M5V_FIELDS\",\"generic_map\":[{\"name\":\"NODEF\",\"value\":\"1\"}]",
+      "{\"name\":\"UC\",\"kind\":\"instance\",\"detail\":\"M5V_COMP\",\"container\":\"WORK.M5V_FIELDS-RTL\",\"unit\":\"M5V_COMP\"",
+   };
+
+   scan_symbols_contain(SCAN_FILE("m5v_fields.vhd"), parts,
+                        ARRAY_LEN(parts), true);
+
+   // No width when a bound depends on a generic or the type is not bits
+   static const char *const none[] = {
+      "\"type\":\"std_logic_vector(W - 1 downto 0)\",\"width\"",
+      "\"type\":\"integer range 0 to 15\",\"width\"",
+      "\"type\":\"rec_t\",\"width\"",
+      "\"type\":\"std_logic_vector\",\"width\"",
+   };
+   scan_symbols_contain(SCAN_FILE("m5v_fields.vhd"), none, ARRAY_LEN(none),
+                        false);
+}
+END_TEST
+
+START_TEST(test_m5_vhdl_generate)
+{
+   set_standard(STD_08);
+
+   // For, if (with alternative labels) and case generate statements, their
+   // scheme and the instances inside them; an alternative label replaces
+   // the label of the statement in the path
+   static const char *const parts[] = {
+      "{\"name\":\"G1\",\"kind\":\"generate\",\"container\":\"WORK.M5V_GEN-RTL\",\"gen\":\"for\",\"range\":\"i in 0 to W - 1\"",
+      "{\"name\":\"U1\",\"kind\":\"instance\",\"detail\":\"M5V_GEN\",\"container\":\"WORK.M5V_GEN-RTL.G1\",\"unit\":\"WORK.M5V_GEN\",\"generic_map\":[{\"name\":\"W\",\"value\":\"4\"}]",
+      "{\"name\":\"G2\",\"kind\":\"generate\",\"container\":\"WORK.M5V_GEN-RTL\",\"gen\":\"if\"",
+      "{\"name\":\"U3\",\"kind\":\"instance\",\"detail\":\"M5V_GEN\",\"container\":\"WORK.M5V_GEN-RTL.G2\",\"unit\":\"WORK.M5V_GEN\"",
+      "{\"name\":\"G3\",\"kind\":\"generate\",\"container\":\"WORK.M5V_GEN-RTL\",\"gen\":\"case\"",
+      "{\"name\":\"ALT1\",\"kind\":\"generate\",\"detail\":\"alternative\",\"container\":\"WORK.M5V_GEN-RTL\",\"gen\":\"case\"",
+      "{\"name\":\"U4\",\"kind\":\"instance\",\"detail\":\"M5V_GEN\",\"container\":\"WORK.M5V_GEN-RTL.ALT1\",\"unit\":\"WORK.M5V_GEN\"",
+      "{\"name\":\"U5\",\"kind\":\"instance\",\"detail\":\"M5V_GEN\",\"container\":\"WORK.M5V_GEN-RTL.G3\",\"unit\":\"WORK.M5V_GEN\"",
+      "{\"name\":\"G4\",\"kind\":\"generate\",\"container\":\"WORK.M5V_GEN-RTL\",\"gen\":\"if\"",
+      "{\"name\":\"A1\",\"kind\":\"generate\",\"detail\":\"alternative\",\"container\":\"WORK.M5V_GEN-RTL\",\"gen\":\"if\"",
+      "{\"name\":\"U7\",\"kind\":\"instance\",\"detail\":\"M5V_GEN\",\"container\":\"WORK.M5V_GEN-RTL.A2\",\"unit\":\"WORK.M5V_GEN\"",
+   };
+
+   scan_symbols_contain(SCAN_FILE("m5v_generate.vhd"), parts,
+                        ARRAY_LEN(parts), true);
+}
+END_TEST
+
 
 
 START_TEST(test_sv1)
@@ -507,9 +580,10 @@ START_TEST(test_symbols_vhdl)
       "\"instantiates\":[\"LEAF\"],\"line\":27,\"col\":14,",
       // Declarations with kind, type and container
       "{\"name\":\"CLK\",\"kind\":\"port\",\"detail\":\"in BIT\","
-      "\"container\":\"WORK.E\",\"line\":24,\"col\":9,\"len\":3,",
+      "\"container\":\"WORK.E\",\"direction\":\"input\",\"type\":\"bit\","
+      "\"width\":1,\"line\":24,\"col\":9,\"len\":3,",
       "{\"name\":\"N\",\"kind\":\"generic\",\"detail\":\"NATURAL\","
-      "\"container\":\"WORK.E\",\"default\":\"4\",\"line\":23,"
+      "\"container\":\"WORK.E\",\"type\":\"natural\",\"default\":\"4\",\"line\":23,"
       "\"col\":12,",
       "{\"name\":\"S\",\"kind\":\"signal\",\"detail\":\"INTEGER\","
       "\"container\":\"WORK.E-RTL\",\"line\":28,\"col\":10,",
@@ -525,7 +599,7 @@ START_TEST(test_symbols_vhdl)
       "{\"name\":\"Y\",\"kind\":\"variable\",\"detail\":\"INTEGER\","
       "\"container\":\"WORK.MYPKG-body.F\",",
       "{\"name\":\"U1\",\"kind\":\"instance\",\"detail\":\"LEAF\","
-      "\"container\":\"WORK.E-RTL\",\"line\":32,\"col\":3,",
+      "\"container\":\"WORK.E-RTL\",\"unit\":\"LEAF\",\"line\":32,\"col\":3,",
       "{\"name\":\"P\",\"kind\":\"process\",\"container\":\"WORK.E-RTL\","
       "\"line\":33,\"col\":3,\"len\":1,\"span\":[33,3,39]}",
       "{\"name\":\"V\",\"kind\":\"variable\",\"detail\":\"INTEGER\","
@@ -643,6 +717,8 @@ Suite *get_scan_tests(void)
    tcase_add_test(tc, test_vhdl6);
    tcase_add_test(tc, test_work_name);
    tcase_add_test(tc, test_m5_vhdl_comments);
+   tcase_add_test(tc, test_m5_vhdl_fields);
+   tcase_add_test(tc, test_m5_vhdl_generate);
    tcase_add_test(tc, test_sv1);
    tcase_add_test(tc, test_sv2);
    tcase_add_test(tc, test_sv_ifdef_a);
