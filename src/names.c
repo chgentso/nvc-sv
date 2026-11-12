@@ -116,6 +116,7 @@ typedef struct {
    ident_t           name;
    tree_t            tree;
    tree_list_t       candidates;
+   tree_list_t       prot_refs;   // Aliases of protected type methods
    tree_list_t       params;
    nametab_t        *nametab;
    const symbol_t   *symbol;
@@ -3498,6 +3499,20 @@ static type_t get_protected_type(nametab_t *tab, tree_t t)
    }
 }
 
+static tree_t overload_unwrap_prot_ref(overload_t *o, tree_t d)
+{
+   // An alias of a protected type method is represented by a T_PROT_REF
+   // which has none of the properties of a subprogram.  Use the method
+   // itself as the candidate and remember the alias so it can be
+   // returned if that candidate is selected.
+
+   if (tree_kind(d) != T_PROT_REF || !tree_has_ref(d))
+      return d;
+
+   APUSH(o->prot_refs, d);
+   return tree_ref(d);
+}
+
 static void begin_overload_resolution(overload_t *o)
 {
    if (o->prefix != NULL) {
@@ -3513,7 +3528,7 @@ static void begin_overload_resolution(overload_t *o)
       if (tree_kind(decl) == T_ALIAS)
          decl = get_aliased_subprogram(decl);
 
-      overload_add_candidate(o, decl);
+      overload_add_candidate(o, overload_unwrap_prot_ref(o, decl));
    }
    else
       o->symbol = iterate_symbol_for(o->nametab, o->name);
@@ -3530,7 +3545,7 @@ static void begin_overload_resolution(overload_t *o)
          if (dd->kind == T_ALIAS && !(next = get_aliased_subprogram(next)))
             continue;
 
-         overload_add_candidate(o, next);
+         overload_add_candidate(o, overload_unwrap_prot_ref(o, next));
       }
    }
 
@@ -3935,10 +3950,19 @@ static tree_t finish_overload_resolution(overload_t *o)
 
       diag_emit(d);
    }
-   else if (o->candidates.count == 1 && !o->cancelled)
+   else if (o->candidates.count == 1 && !o->cancelled) {
       result = o->candidates.items[0];
 
+      for (unsigned i = 0; i < o->prot_refs.count; i++) {
+         if (tree_ref(o->prot_refs.items[i]) == result) {
+            result = o->prot_refs.items[i];
+            break;
+         }
+      }
+   }
+
    ACLEAR(o->candidates);
+   ACLEAR(o->prot_refs);
    ACLEAR(o->params);
 
    return result;
