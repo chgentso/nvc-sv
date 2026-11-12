@@ -2699,3 +2699,4 @@ vcrash_casechoice shell
 vcrash_config1  normal,2008
 vcrash_nestedpkg shell
 vcrash_anontype1 normal,2019
+vcrash_genmap1 normal,2019

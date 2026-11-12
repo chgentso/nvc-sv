@@ -12641,6 +12641,9 @@ static void lower_pack_inst_generics(lower_unit_t *lu, tree_t inst, tree_t map)
    case PACKAGE_MAP_DEFAULT:
       for (int i = 0; i < ngenerics; i++) {
          tree_t g = tree_generic(inst, i);
+         if (tree_class(g) != C_CONSTANT)
+            continue;   // Default is not a value, e.g. a subprogram name
+
          tree_t g0 = tree_generic(tree_ref(map), i);
 
          vcode_reg_t locus = lower_debug_locus(map);
