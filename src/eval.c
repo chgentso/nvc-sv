@@ -264,7 +264,15 @@ tree_t eval_try_fold(jit_t *jit, tree_t expr, unit_registry_t *registry,
    const bool verbose = opt_get_verbose(OPT_EVAL_VERBOSE, NULL);
    jit_set_silent(jit, !verbose);
 
+   const unsigned suppressed = jit_suppressed_count(jit);
+
    tree_t result = eval_do_fold(jit, expr, parent, registry, context);
+
+   if (result != expr && jit_suppressed_count(jit) != suppressed) {
+      // The evaluation produced a message such as a report statement
+      // which would be lost if the call was replaced by its result
+      result = expr;
+   }
 
    jit_set_silent(jit, false);
    jit_reset_exit_status(jit);

@@ -74,6 +74,7 @@ typedef struct _jit {
    mspace_t         *mspace;
    void             *lower_ctx;
    bool              silent;
+   unsigned          suppressed;
    bool              shutdown;
    int               exit_status;
    jit_tier_t       *tiers;
@@ -597,6 +598,7 @@ static void jit_diag_cb(diag_t *d, void *arg)
       return;
    else if (j->silent) {
       diag_suppress(d, true);
+      j->suppressed++;
       return;
    }
 
@@ -848,6 +850,11 @@ tlab_t jit_null_tlab(jit_t *j)
 {
    tlab_t t = { .mspace = j->mspace };
    return t;
+}
+
+unsigned jit_suppressed_count(jit_t *j)
+{
+   return j->suppressed;
 }
 
 void jit_set_silent(jit_t *j, bool silent)
