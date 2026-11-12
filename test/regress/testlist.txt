@@ -2672,3 +2672,4 @@ svnullvif1 verilog,fail,gold
 svintradelay1 verilog
 svnetarrinit1 verilog
 svparambit1 verilog
+svparamport1 verilog

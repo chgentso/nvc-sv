@@ -2489,6 +2489,18 @@ static void elab_verilog_ports(vlog_node_t inst, elab_instance_t *ei,
       if (opt_get_int(OPT_LINT))
          vlog_lint_port(port, value, where);
 
+      if (vlog_subkind(port) == V_PORT_INPUT && vlog_kind(value) == V_REF
+          && vlog_has_ref(value)) {
+         // An unpacked array parameter has no signal: connect the pattern
+         // that is its value
+         vlog_node_t decl = vlog_ref(value);
+         if ((vlog_kind(decl) == V_PARAM_DECL
+              || vlog_kind(decl) == V_LOCALPARAM)
+             && vlog_ranges(decl) > 0 && vlog_has_value(decl)
+             && vlog_kind(vlog_value(decl)) == V_PATTERN_EXPR)
+            value = vlog_value(decl);
+      }
+
       vlog_node_t map = vlog_new(V_PORT_MAP);
       vlog_set_ident(map, port_name);
       vlog_set_ref(map, port);
