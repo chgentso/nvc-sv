@@ -129,6 +129,29 @@ START_TEST(test_vhdl4)
 }
 END_TEST
 
+START_TEST(test_vhdl5)
+{
+   // Binding to an architecture whose entity is not in the library
+
+   set_standard(STD_08);
+
+   const char *expect =
+      "{\"file\":\"" SCAN_FILE("vhdl5.vhd") "\",\"language\":\"vhdl\","
+      "\"units\":["
+      "{\"name\":\"WORK.LOST_ENTITY-IMPL\",\"kind\":\"architecture\","
+      "\"instantiates\":[]},"
+      "{\"name\":\"WORK.TOP\",\"kind\":\"entity\",\"ports\":false,"
+      "\"instantiates\":[]},"
+      "{\"name\":\"WORK.TOP-RTL\",\"kind\":\"architecture\","
+      "\"instantiates\":[\"LEAF\"]},"
+      "{\"name\":\"WORK.CFG\",\"kind\":\"configuration\","
+      "\"instantiates\":[]}],"
+      "\"requires\":[\"WORK.LOST_ENTITY\"],\"includes\":[]}\n";
+
+   scan(SCAN_FILE("vhdl5.vhd"), expect);
+}
+END_TEST
+
 START_TEST(test_work_name)
 {
    // The name WORK is replaced by the name of the work library
@@ -436,6 +459,7 @@ Suite *get_scan_tests(void)
    tcase_add_test(tc, test_vhdl2);
    tcase_add_test(tc, test_vhdl3);
    tcase_add_test(tc, test_vhdl4);
+   tcase_add_test(tc, test_vhdl5);
    tcase_add_test(tc, test_work_name);
    tcase_add_test(tc, test_sv1);
    tcase_add_test(tc, test_sv2);

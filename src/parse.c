@@ -9998,8 +9998,14 @@ static tree_t p_binding_indication(tree_t comp)
    tree_t bind = NULL, unit = NULL;
    if (optional(tUSE)) {
       if ((bind = p_entity_aspect()) && (unit = find_binding(bind))) {
-         tree_set_ref(bind, unit);
-         unit = primary_unit_of(unit);
+         if (tree_kind(unit) == T_ARCH && !tree_has_primary(unit)) {
+            // In a scan the entity of the architecture may be missing
+            unit = NULL;
+         }
+         else {
+            tree_set_ref(bind, unit);
+            unit = primary_unit_of(unit);
+         }
       }
    }
 
