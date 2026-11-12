@@ -2313,15 +2313,20 @@ static void elab_verilog_ports(vlog_node_t inst, elab_instance_t *ei,
    // declaration with the same name in the parent
    vlog_node_t wildcard = NULL;
    int nparams = vlog_params(inst);
+   bool positional = false;
    for (int i = 0; i < vlog_params(inst); i++) {
       vlog_node_t conn = vlog_param(inst, i);
       if (vlog_flags(conn) & VLOG_F_WILDCARD) {
          wildcard = conn;
          nparams--;
       }
+      else if (!vlog_has_ident(conn))
+         positional = true;
    }
 
-   if (nparams > nports + niface) {
+   // Named connections to ports that do not exist are reported by name
+   // below
+   if (positional && nparams > nports + niface) {
       error_at(vlog_loc(inst), "expected at most %d port connections for "
                "module %pQ but found %d", nports + niface,
                vlog_ident2(ei->body), nparams);

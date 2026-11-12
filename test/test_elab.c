@@ -1787,6 +1787,7 @@ START_TEST(test_vlog1)
       { 18, "'z' cannot be driven by continuous assignment from port 'y'" },
       { 19, "expression cannot be driven by continuous assignment from "
         "port 'y'" },
+      { 21, "port 'hello' not found in 'sub1'" },
       { -1, NULL }
    };
    expect_errors(expect);
