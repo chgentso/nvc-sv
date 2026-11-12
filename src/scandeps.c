@@ -20,6 +20,7 @@
 #include "diag.h"
 #include "ident.h"
 #include "lib.h"
+#include "option.h"
 #include "phase.h"
 #include "scan.h"
 #include "scandeps.h"
@@ -1126,6 +1127,11 @@ unsigned scan_file_deps(const char *file, text_buf_t *json)
    diag_set_scan_filter(true);
    const unsigned old_limit = set_error_limit(UINT_MAX);
 
+   // Generated sources such as large ROM initialisers can exceed the
+   // default arena size and a scan must not die on those
+   const size_t old_arena = opt_get_size(OPT_ARENA_SIZE);
+   opt_set_size(OPT_ARENA_SIZE, MAX(old_arena, (size_t)1 << 28));
+
    lib_scan_clear();
 
    const unsigned base_errors = diag_scan_errors();
@@ -1236,6 +1242,7 @@ unsigned scan_file_deps(const char *file, text_buf_t *json)
 
    tb_cat(json, "}\n");
 
+   opt_set_size(OPT_ARENA_SIZE, old_arena);
    set_error_limit(old_limit);
    diag_set_scan_filter(false);
    lib_set_scan_mode(false);

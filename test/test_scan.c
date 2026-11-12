@@ -24,6 +24,7 @@
 #include "scandeps.h"
 
 #include <stdlib.h>
+#include <unistd.h>
 #include <string.h>
 
 #define SCAN_FILE(name) TESTDIR "/scan/" name
@@ -395,6 +396,37 @@ START_TEST(test_symbols_vlog)
 }
 END_TEST
 
+START_TEST(test_bigarena)
+{
+   // An aggregate too large for the default arena must not be fatal
+
+   set_standard(STD_08);
+
+   char path[] = "/tmp/nvc-scan-XXXXXX";
+   int fd = mkstemp(path);
+   ck_assert_int_ge(fd, 0);
+   FILE *f = fdopen(fd, "w");
+   fputs("library ieee; use ieee.std_logic_1164.all;\n"
+         "entity bigrom is\n"
+         "  generic (w : integer := 1; r : integer := 80000);\n"
+         "end entity;\n"
+         "architecture a of bigrom is\n"
+         "  type mem_t is array (0 to r - 1) of std_logic_vector(w - 1 downto 0);\n"
+         "  signal mem : mem_t := (\n", f);
+   for (int i = 0; i < 80000; i++)
+      fprintf(f, "    %d => \"1\"%s\n", i, i == 79999 ? "" : ",");
+   fputs("  );\nbegin\nend architecture;\n", f);
+   fclose(f);
+
+   LOCAL_TEXT_BUF tb = tb_new();
+   const unsigned errors = scan_file_deps(path, tb);
+   unlink(path);
+
+   ck_assert_int_eq(errors, 0);
+   ck_assert_ptr_nonnull(strstr(tb_get(tb), "\"name\":\"WORK.BIGROM\""));
+}
+END_TEST
+
 Suite *get_scan_tests(void)
 {
    Suite *s = suite_create("scan");
@@ -413,6 +445,7 @@ Suite *get_scan_tests(void)
    tcase_add_test(tc, test_sv_syntax);
    tcase_add_test(tc, test_symbols_vhdl);
    tcase_add_test(tc, test_symbols_vlog);
+   tcase_add_test(tc, test_bigarena);
    suite_add_tcase(s, tc);
 
    return s;
