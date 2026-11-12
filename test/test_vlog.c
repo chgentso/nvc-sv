@@ -3950,6 +3950,23 @@ START_TEST(test_crash2)
 }
 END_TEST
 
+START_TEST(test_crash3)
+{
+   const error_t expect[] = {
+      {  2, "recursive use of let 'recurse' is not allowed" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/crash3.sv");
+
+   while (vlog_parse() != NULL)
+      ;
+
+   check_expected_errors();
+}
+END_TEST
+
 Suite *get_vlog_tests(void)
 {
    Suite *s = suite_create("vlog");
@@ -4093,6 +4110,7 @@ Suite *get_vlog_tests(void)
    tcase_add_test(tc, test_refarg1);
    tcase_add_test(tc, test_crash1);
    tcase_add_test(tc, test_crash2);
+   tcase_add_test(tc, test_crash3);
    suite_add_tcase(s, tc);
 
    return s;

@@ -4755,6 +4755,13 @@ static vlog_node_t expand_let(vlog_node_t decl, vlog_node_t call)
 {
    // The body is expanded with the actual arguments in place of the formals
 
+   if (vlog_stmts(decl) == 0) {
+      // Called from its own body
+      error_at(vlog_loc(call), "recursive use of let %pQ is not allowed",
+               vlog_ident(decl));
+      return call;
+   }
+
    const int nports = vlog_ports(decl);
    const int nparams = vlog_params(call);
 
