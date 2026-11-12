@@ -2658,3 +2658,4 @@ svrandwideslice1 verilog
 svrandforeachpacked1 verilog
 svreleasenoforce1 verilog
 svstreamslicecls1 verilog
+svrandinsideaq1 verilog

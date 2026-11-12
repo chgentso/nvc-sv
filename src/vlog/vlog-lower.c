@@ -21003,6 +21003,45 @@ static mir_value_t vlog_crv_state_array(vlog_gen_t *g, vlog_node_t v)
    return array;
 }
 
+static bool vlog_crv_is_array_value(vlog_gen_t *g, vlog_node_t v)
+{
+   // An expression whose value is a dynamic array or queue of integral
+   // values which is not a variable, such as an element of an associative
+   // array of queues
+
+   const vlog_kind_t kind = vlog_kind(v);
+   if (kind != V_BIT_SELECT && kind != V_METHOD_CALL && kind != V_USER_FCALL)
+      return false;
+
+   vlog_node_t type = vlog_get_type(v);
+   if (type == NULL || vlog_kind(type) != V_DATA_TYPE
+       || (vlog_subkind(type) != DT_DYNARRAY && vlog_subkind(type) != DT_QUEUE))
+      return false;
+
+   const type_info_t *eti = vlog_type_info(g, vlog_type(type));
+   const mir_class_t eclass = mir_get_class(g->mu, eti->type);
+   return eclass == MIR_TYPE_VEC2 || eclass == MIR_TYPE_VEC4;
+}
+
+static mir_value_t vlog_crv_value_array(vlog_gen_t *g, vlog_node_t v)
+{
+   // Read only solver array holding the current value of such an expression
+
+   vlog_node_t type = vlog_get_type(v);
+   const type_info_t *eti = vlog_type_info(g, vlog_type(type));
+
+   mir_value_t ua = vlog_lower_rvalue(g, v);
+   mir_value_t data = mir_build_unwrap(g->mu, ua);
+   mir_value_t len = mir_build_uarray_len(g->mu, ua, 0);
+
+   mir_value_t flags = vlog_crv_flags(g, eti->size,
+                                      mir_get_signed(g->mu, eti->type));
+   mir_value_t array = CRV5(g, CRV_OP_ARRAY, g->crv_ctx, vlog_crv_int(g, 0),
+                            vlog_crv_int(g, 0), flags, len);
+   vlog_crv_array_load(g, g->crv_ctx, array, data, len, false);
+   return array;
+}
+
 static mir_value_t vlog_crv_array(vlog_gen_t *g, vlog_node_t v)
 {
    // Rand arrays were registered when the object was added and anything
@@ -22870,6 +22909,10 @@ static mir_value_t vlog_crv_set_item(vlog_gen_t *g, mir_value_t set,
       mir_value_t array = vlog_crv_array(g, item);
       return CRV3(g, CRV_OP_SET_ARRAY, g->crv_ctx, set, array);
    }
+   else if (vlog_crv_is_array_value(g, item)) {
+      mir_value_t array = vlog_crv_value_array(g, item);
+      return CRV3(g, CRV_OP_SET_ARRAY, g->crv_ctx, set, array);
+   }
    else {
       mir_value_t value = vlog_crv_expr(g, item, width, is_signed);
       return CRV3(g, CRV_OP_SET_VALUE, g->crv_ctx, set, value);
@@ -22898,6 +22941,12 @@ static mir_value_t vlog_crv_inside(vlog_gen_t *g, vlog_node_t v)
       else if (vlog_crv_is_array_ref(item)) {
          vlog_node_t decl = vlog_ref(item);
          const type_info_t *eti = vlog_type_info(g, vlog_crv_elem_type(decl));
+         width = MAX(width, eti->size);
+         is_signed &= mir_get_signed(g->mu, eti->type);
+      }
+      else if (vlog_crv_is_array_value(g, item)) {
+         const type_info_t *eti = vlog_type_info(
+            g, vlog_type(vlog_get_type(item)));
          width = MAX(width, eti->size);
          is_signed &= mir_get_signed(g->mu, eti->type);
       }
