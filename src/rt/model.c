@@ -3288,6 +3288,26 @@ static bool will_observe_active(rt_nexus_t *n, const void *value, waveform_t *w)
    return false;
 }
 
+static void unfast_driver(rt_model_t *m, rt_nexus_t *n, rt_source_t *d)
+{
+   if ((n->flags & NET_F_FAST_DRIVER) && d->fastqueued) {
+      // A fast update to this driver is already scheduled so convert the
+      // pending value to an ordinary transaction before queueing others
+      waveform_t *w0 = alloc_waveform(m);
+      w0->when  = m->now;
+      w0->next  = NULL;
+      w0->value = alloc_value(m, n);
+
+      const uint8_t *prev = value_ptr(n, &(d->u.driver.waveforms.value));
+      copy_value_ptr(n, &w0->value, prev);
+
+      assert(d->u.driver.waveforms.next == NULL);
+      d->u.driver.waveforms.next = w0;
+   }
+
+   n->flags &= ~NET_F_FAST_DRIVER;
+}
+
 static void sched_driver(rt_model_t *m, rt_nexus_t *n, uint64_t after,
                          uint64_t reject, const void *value, rt_proc_t *proc)
 {
@@ -3332,21 +3352,7 @@ static void sched_driver(rt_model_t *m, rt_nexus_t *n, uint64_t after,
       rt_source_t *d = find_driver(n, proc);
       assert(d != NULL);
 
-      if ((n->flags & NET_F_FAST_DRIVER) && d->fastqueued) {
-         // A fast update to this driver is already scheduled
-         waveform_t *w0 = alloc_waveform(m);
-         w0->when  = m->now;
-         w0->next  = NULL;
-         w0->value = alloc_value(m, n);
-
-         const uint8_t *prev = value_ptr(n, &(d->u.driver.waveforms.value));
-         copy_value_ptr(n, &w0->value, prev);
-
-         assert(d->u.driver.waveforms.next == NULL);
-         d->u.driver.waveforms.next = w0;
-      }
-
-      n->flags &= ~NET_F_FAST_DRIVER;
+      unfast_driver(m, n, d);
 
       waveform_t *w = alloc_waveform(m);
       w->when  = m->now + after;
@@ -3369,7 +3375,7 @@ static void sched_disconnect(rt_model_t *m, rt_nexus_t *nexus, uint64_t after,
    const uint64_t when = m->now + after;
 
    // Need update_driver to clear disconnected flag
-   nexus->flags &= ~NET_F_FAST_DRIVER;
+   unfast_driver(m, nexus, d);
 
    waveform_t *w = alloc_waveform(m);
    w->when = -when;   // Use sign bit to represent null
