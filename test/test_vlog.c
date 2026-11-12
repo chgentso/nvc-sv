@@ -4078,6 +4078,26 @@ START_TEST(test_crash9)
 }
 END_TEST
 
+START_TEST(test_crash10)
+{
+   const error_t expect[] = {
+      { 3, "method 'getc' of a string expects 1 argument but has 0" },
+      { 4, "method 'getc' of a string expects 1 argument but has 2" },
+      { 5, "method 'len' of a string expects 0 arguments but has 1" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/crash10.sv");
+
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
 Suite *get_vlog_tests(void)
 {
    Suite *s = suite_create("vlog");
@@ -4228,6 +4248,7 @@ Suite *get_vlog_tests(void)
    tcase_add_test(tc, test_crash7);
    tcase_add_test(tc, test_crash8);
    tcase_add_test(tc, test_crash9);
+   tcase_add_test(tc, test_crash10);
    suite_add_tcase(s, tc);
 
    return s;

@@ -3459,6 +3459,44 @@ static void vlog_check_process_method(vlog_node_t v)
    }
 }
 
+static void vlog_check_string_method(vlog_node_t v)
+{
+   int want;
+   switch ((vlog_method_t)vlog_subkind(v)) {
+   case V_METHOD_STR_LEN:
+   case V_METHOD_STR_TOUPPER:
+   case V_METHOD_STR_TOLOWER:
+   case V_METHOD_STR_ATOI:
+   case V_METHOD_STR_ATOHEX:
+   case V_METHOD_STR_ATOOCT:
+   case V_METHOD_STR_ATOBIN:
+   case V_METHOD_STR_ATOREAL:
+      want = 0;
+      break;
+   case V_METHOD_STR_GETC:
+   case V_METHOD_STR_COMPARE:
+   case V_METHOD_STR_ICOMPARE:
+   case V_METHOD_STR_ITOA:
+   case V_METHOD_STR_HEXTOA:
+   case V_METHOD_STR_OCTTOA:
+   case V_METHOD_STR_BINTOA:
+   case V_METHOD_STR_REALTOA:
+      want = 1;
+      break;
+   case V_METHOD_STR_PUTC:
+   case V_METHOD_STR_SUBSTR:
+      want = 2;
+      break;
+   default:
+      return;
+   }
+
+   if (vlog_params(v) != want)
+      error_at(vlog_loc(v), "method %pQ of a string expects %d argument%s "
+               "but has %d", vlog_ident(v), want, want == 1 ? "" : "s",
+               vlog_params(v));
+}
+
 static void vlog_check_assoc_method(vlog_node_t v)
 {
    vlog_node_t aty = vlog_get_type(vlog_value(v));
@@ -3615,6 +3653,7 @@ static type_mask_t vlog_check_expr(vlog_node_t v)
 
          vlog_check_assoc_method(v);
          vlog_check_process_method(v);
+         vlog_check_string_method(v);
 
          const int nparams = vlog_params(v);
          for (int i = 0; i < nparams; i++) {
