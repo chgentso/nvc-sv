@@ -1910,8 +1910,13 @@ static vlog_select_t vlog_lower_select(vlog_gen_t *g, vlog_node_t v)
                                               zero);
 
          mir_value_t obj = prefix.obj;
-         if (unpacked_var)
+         if (unpacked_var) {
+            // Nothing is accessed if the index is out of range but the
+            // address must still point into the array
+            array_off = mir_build_select(g->mu, t_offset, in_range, array_off,
+                                         zero);
             obj = mir_build_array_ref(g->mu, prefix.obj, array_off);
+         }
 
          const bool is_real = mir_get_class(g->mu, prefix.type)
             == MIR_TYPE_REAL;
