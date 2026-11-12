@@ -72,9 +72,101 @@ unsigned vlog_dimensions(vlog_node_t v)
    return vlog_ranges(vlog_type(v)) + vlog_ranges(v);
 }
 
+static vlog_node_t vlog_param_pattern(vlog_node_t v)
+{
+   // The assignment pattern which is the value of a parameter
+
+   if (vlog_kind(v) != V_REF || !vlog_has_ref(v))
+      return NULL;
+
+   vlog_node_t decl = vlog_ref(v);
+   if (vlog_kind(decl) != V_LOCALPARAM && vlog_kind(decl) != V_PARAM_DECL)
+      return NULL;
+   else if (!vlog_has_value(decl) || vlog_kind(vlog_value(decl)) != V_PATTERN_EXPR)
+      return NULL;
+
+   return decl;
+}
+
+static vlog_node_t vlog_const_element(vlog_node_t v)
+{
+   // The expression of an element of a parameter array, or of a member of
+   // a structure in a parameter, where the index is constant
+
+   switch (vlog_kind(v)) {
+   case V_BIT_SELECT:
+      {
+         if (vlog_params(v) != 1)
+            return NULL;
+
+         vlog_node_t decl = vlog_param_pattern(vlog_value(v));
+         if (decl == NULL || vlog_ranges(decl) != 1)
+            return NULL;
+
+         int64_t index, left, right;
+         if (!vlog_get_const(vlog_param(v, 0), &index)
+             || !vlog_bounds(vlog_range(decl, 0), &left, &right))
+            return NULL;
+
+         vlog_node_t pattern = vlog_value(decl);
+         const int64_t pos = left <= right ? index - left : left - index;
+         if (pos < 0 || pos >= vlog_params(pattern))
+            return NULL;
+
+         vlog_node_t item = vlog_param(pattern, pos);
+         if (vlog_subkind(item) != 0 || vlog_has_left(item))
+            return NULL;
+
+         return vlog_right(item);
+      }
+   case V_MEMBER_REF:
+      {
+         if (!vlog_has_ref(v))
+            return NULL;
+
+         vlog_node_t base = vlog_const_element(vlog_value(v));
+         if (base == NULL || vlog_kind(base) != V_PATTERN_EXPR)
+            return NULL;
+
+         vlog_node_t member = vlog_ref(v);
+         const int nitems = vlog_params(base);
+         for (int i = 0; i < nitems; i++) {
+            vlog_node_t item = vlog_param(base, i);
+            if (vlog_has_left(item) && vlog_kind(vlog_left(item)) == V_REF
+                && vlog_has_ref(vlog_left(item))
+                && vlog_ref(vlog_left(item)) == member)
+               return vlog_right(item);
+         }
+
+         // Positional items follow the order of the members
+         vlog_node_t st = vlog_get_type(vlog_value(v));
+         if (st == NULL || vlog_kind(st) != V_STRUCT_DECL
+             || vlog_decls(st) != nitems)
+            return NULL;
+
+         for (int i = 0; i < nitems; i++) {
+            vlog_node_t item = vlog_param(base, i);
+            if (vlog_decl(st, i) == member && vlog_subkind(item) == 0
+                && !vlog_has_left(item))
+               return vlog_right(item);
+         }
+
+         return NULL;
+      }
+   default:
+      return NULL;
+   }
+}
+
 bool vlog_get_const(vlog_node_t v, int64_t *value)
 {
    switch (vlog_kind(v)) {
+   case V_BIT_SELECT:
+   case V_MEMBER_REF:
+      {
+         vlog_node_t e = vlog_const_element(v);
+         return e != NULL && vlog_get_const(e, value);
+      }
    case V_NUMBER:
       {
          number_t n = vlog_number(v);
@@ -114,6 +206,12 @@ int64_t vlog_must_be_const(vlog_node_t v)
 bool vlog_is_const(vlog_node_t v)
 {
    switch (vlog_kind(v)) {
+   case V_BIT_SELECT:
+   case V_MEMBER_REF:
+      {
+         vlog_node_t e = vlog_const_element(v);
+         return e != NULL && vlog_is_const(e);
+      }
    case V_NUMBER:
       return true;
    case V_REF:

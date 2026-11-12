@@ -2649,3 +2649,4 @@ svrandmany1     verilog
 svforeachparam1 verilog
 svspecvif1      verilog
 svfatalconst1   verilog
+svpartparam1    verilog
