@@ -1102,6 +1102,11 @@ void tree_set_spec(tree_t t, tree_t s)
    object_write_barrier(&(t->object), &(s->object));
 }
 
+void tree_clear_spec(tree_t t)
+{
+   lookup_item(&tree_object, t, I_SPEC)->object = NULL;
+}
+
 unsigned tree_contexts(tree_t t)
 {
    item_t *item = lookup_item(&tree_object, t, I_CONTEXT);

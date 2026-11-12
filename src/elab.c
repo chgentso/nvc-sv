@@ -5670,7 +5670,47 @@ static void elab_mixed_instance(tree_t inst, tree_t comp, vlog_node_t mod,
    elab_pop_scope(&new_ctx);
 }
 
+typedef struct {
+   tree_t gen;
+   tree_t config;
+} elab_index_config_t;
+
+typedef struct {
+   tree_t inst;
+   tree_t spec;
+} elab_saved_spec_t;
+
+typedef struct {
+   elab_saved_spec_t *items;
+   unsigned           count, limit;
+} elab_spec_save_t;
+
+static elab_index_config_t *index_configs = NULL;
+static unsigned             n_index_configs = 0, max_index_configs = 0;
+
+static void elab_note_index_config(tree_t gen, tree_t config)
+{
+   // A block configuration with an index specification applies to only
+   // some iterations of a for generate statement
+   if (n_index_configs == max_index_configs) {
+      max_index_configs = MAX(16, max_index_configs * 2);
+      index_configs = xrealloc_array(index_configs, max_index_configs,
+                                     sizeof(elab_index_config_t));
+   }
+
+   index_configs[n_index_configs++] = (elab_index_config_t){ gen, config };
+}
+
+static void elab_bind_components_save(tree_t block, tree_t config,
+                                      elab_spec_save_t *save);
+
 static void elab_bind_components(tree_t block, tree_t config)
+{
+   elab_bind_components_save(block, config, NULL);
+}
+
+static void elab_bind_components_save(tree_t block, tree_t config,
+                                      elab_spec_save_t *save)
 {
    const int nstmts = tree_stmts(block);
    for (int i = 0; i < nstmts; i++) {
@@ -5678,7 +5718,9 @@ static void elab_bind_components(tree_t block, tree_t config)
       switch (tree_kind(s)) {
       case T_INSTANCE:
          {
-            if (tree_class(s) != C_COMPONENT || tree_has_spec(s))
+            if (tree_class(s) != C_COMPONENT)
+               break;
+            else if (tree_has_spec(s) && save == NULL)
                break;
 
             tree_t spec = NULL;
@@ -5704,13 +5746,25 @@ static void elab_bind_components(tree_t block, tree_t config)
                if (apply) spec = d;
             }
 
-            if (spec != NULL)
+            if (spec != NULL) {
+               if (save != NULL) {
+                  if (save->count == save->limit) {
+                     save->limit = MAX(8, save->limit * 2);
+                     save->items = xrealloc_array(save->items, save->limit,
+                                                  sizeof(elab_saved_spec_t));
+                  }
+
+                  save->items[save->count++] = (elab_saved_spec_t) {
+                     s, tree_has_spec(s) ? tree_spec(s) : NULL
+                  };
+               }
+
                tree_set_spec(s, spec);
+            }
          }
          break;
 
       case T_FOR_GENERATE:
-      case T_IF_GENERATE:
       case T_BLOCK:
          {
             const int ndecls = tree_decls(config);
@@ -5718,12 +5772,73 @@ static void elab_bind_components(tree_t block, tree_t config)
                tree_t d = tree_decl(config, j);
                if (tree_kind(d) != T_BLOCK_CONFIG)
                   continue;
-               else if (ident_casecmp(tree_ident(d), tree_ident(s))) {
-                  if (tree_kind(s) == T_IF_GENERATE)
-                     elab_bind_components(tree_cond(s, 0), d);
-                  else
-                     elab_bind_components(s, d);
-                  break;
+               else if (!ident_casecmp(tree_ident(d), tree_ident(s)))
+                  continue;
+               else if (tree_kind(s) == T_FOR_GENERATE
+                        && (tree_has_value(d) || tree_ranges(d) > 0)) {
+                  // Applies to only some of the iterations
+                  if (save == NULL)
+                     elab_note_index_config(s, d);
+                  continue;
+               }
+
+               elab_bind_components_save(s, d, save);
+               break;
+            }
+         }
+         break;
+
+      case T_IF_GENERATE:
+         {
+            const int nconds = tree_conds(s);
+            const int ndecls = tree_decls(config);
+            for (int j = 0; j < ndecls; j++) {
+               tree_t d = tree_decl(config, j);
+               if (tree_kind(d) != T_BLOCK_CONFIG)
+                  continue;
+               else if (!ident_casecmp(tree_ident(d), tree_ident(s)))
+                  continue;
+
+               tree_t alt = NULL;
+               if (tree_has_value(d) && tree_kind(tree_value(d)) == T_REF) {
+                  ident_t label = tree_ident(tree_value(d));
+                  for (int k = 0; k < nconds; k++) {
+                     tree_t c = tree_cond(s, k);
+                     if (tree_has_ident(c)
+                         && ident_casecmp(tree_ident(c), label)) {
+                        alt = c;
+                        break;
+                     }
+                  }
+               }
+               else if (!tree_has_value(d))
+                  alt = tree_cond(s, 0);
+
+               if (alt != NULL)
+                  elab_bind_components_save(alt, d, save);
+            }
+         }
+         break;
+
+      case T_CASE_GENERATE:
+         {
+            const int nalts = tree_stmts(s);
+            const int ndecls = tree_decls(config);
+            for (int j = 0; j < ndecls; j++) {
+               tree_t d = tree_decl(config, j);
+               if (tree_kind(d) != T_BLOCK_CONFIG)
+                  continue;
+               else if (!ident_casecmp(tree_ident(d), tree_ident(s)))
+                  continue;
+               else if (!tree_has_value(d)
+                        || tree_kind(tree_value(d)) != T_REF)
+                  continue;
+
+               ident_t label = tree_ident(tree_value(d));
+               for (int k = 0; k < nalts; k++) {
+                  tree_t a = tree_stmt(s, k);
+                  if (tree_has_ident(a) && ident_casecmp(tree_ident(a), label))
+                     elab_bind_components_save(a, d, save);
                }
             }
          }
@@ -6386,6 +6501,53 @@ static void elab_generate_range(tree_t r, int64_t *low, int64_t *high,
    }
 }
 
+static tree_t elab_find_index_config(tree_t gen, int64_t index,
+                                    const elab_ctx_t *ctx)
+{
+   for (unsigned i = 0; i < n_index_configs; i++) {
+      if (index_configs[i].gen != gen)
+         continue;
+
+      tree_t d = index_configs[i].config;
+
+      if (tree_has_value(d)) {
+         tree_t value = tree_value(d);
+
+         if (tree_kind(value) == T_REF && tree_has_ref(value)
+             && is_type_decl(tree_ref(value))) {
+            // Subtype name as discrete range
+            int64_t low, high;
+            elab_generate_range(range_of(tree_type(value), 0), &low, &high,
+                                ctx);
+
+            if (index >= low && index <= high)
+               return d;
+            else
+               continue;
+         }
+
+         int64_t folded;
+         if (!folded_int(value, &folded)) {
+            tree_t result = elab_eval_expr(value, ctx);
+            if (!folded_int(result, &folded))
+               continue;
+         }
+
+         if (folded == index)
+            return d;
+      }
+      else if (tree_ranges(d) > 0) {
+         int64_t low, high;
+         elab_generate_range(tree_range(d, 0), &low, &high, ctx);
+
+         if (index >= low && index <= high)
+            return d;
+      }
+   }
+
+   return NULL;
+}
+
 static void elab_for_generate(tree_t t, const elab_ctx_t *ctx)
 {
    int64_t low, high;
@@ -6441,7 +6603,25 @@ static void elab_for_generate(tree_t t, const elab_ctx_t *ctx)
       if (elab_new_errors(&new_ctx) == 0) {
          vhdl_cover_block(b, new_ctx.cover, new_ctx.cscope);
          elab_lower(b, &new_ctx);
+
+         // A block configuration for this iteration overrides the
+         // bindings of the instances in the statement for its duration
+         elab_spec_save_t save = {};
+         tree_t icfg = elab_find_index_config(t, i, ctx);
+         if (icfg != NULL)
+            elab_bind_components_save(t, icfg, &save);
+
          elab_vhdl_sub_blocks(t, &new_ctx);
+
+         for (unsigned k = save.count; k > 0; k--) {
+            elab_saved_spec_t *it = &(save.items[k - 1]);
+            if (it->spec != NULL)
+               tree_set_spec(it->inst, it->spec);
+            else
+               tree_clear_spec(it->inst);
+         }
+
+         free(save.items);
       }
 
       elab_pop_scope(&new_ctx);

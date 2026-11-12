@@ -1661,7 +1661,7 @@ static bool is_implicit_block(tree_t t)
 {
    const tree_kind_t kind = tree_kind(t);
    return kind == T_ARCH || kind == T_BLOCK || kind == T_IF_GENERATE
-      || kind == T_FOR_GENERATE;
+      || kind == T_FOR_GENERATE || kind == T_CASE_GENERATE;
 }
 
 static void make_universal_type(tree_t container, type_kind_t kind,
@@ -10357,9 +10357,56 @@ static void p_block_specification(tree_t b)
    tree_set_ident(b, id);
 
    if (optional(tLPAREN)) {
-      (void)p_index_specification();    // XXX: not used
+      tree_t index = p_index_specification();
+      if (tree_kind(index) == T_RANGE)
+         tree_add_range(b, index);
+      else
+         tree_set_value(b, index);
       consume(tRPAREN);
    }
+}
+
+static tree_t find_generate_alternative(tree_t config, tree_t gen)
+{
+   // The index specification of a block configuration for an if or case
+   // generate statement is the label of an alternative
+
+   ident_t label = NULL;
+   if (tree_has_value(config)) {
+      tree_t value = tree_value(config);
+      if (tree_kind(value) == T_REF)
+         label = tree_ident(value);
+   }
+
+   if (tree_kind(gen) == T_IF_GENERATE) {
+      const int nconds = tree_conds(gen);
+      if (label == NULL)
+         return tree_cond(gen, 0);
+
+      for (int i = 0; i < nconds; i++) {
+         tree_t c = tree_cond(gen, i);
+         if (tree_has_ident(c) && ident_casecmp(tree_ident(c), label)) {
+            tree_set_ref(tree_value(config), c);
+            return c;
+         }
+      }
+   }
+   else {
+      const int nalts = tree_stmts(gen);
+      for (int i = 0; i < nalts; i++) {
+         tree_t a = tree_stmt(gen, i);
+         if (label != NULL && tree_has_ident(a)
+             && ident_casecmp(tree_ident(a), label)) {
+            tree_set_ref(tree_value(config), a);
+            return a;
+         }
+      }
+   }
+
+   parse_error(tree_loc(config), "no alternative with label %s in "
+               "generate statement %s", label ? istr(label) : "(none)",
+               istr(tree_ident(gen)));
+   return NULL;
 }
 
 static tree_t p_block_configuration(tree_t of)
@@ -10416,10 +10463,31 @@ static tree_t p_block_configuration(tree_t of)
    if (sub != NULL) {
       tree_set_ref(b, sub);
 
-      if (tree_kind(sub) == T_IF_GENERATE)
-         sub = tree_cond(sub, 0);
+      switch (tree_kind(sub)) {
+      case T_IF_GENERATE:
+         sub = find_generate_alternative(b, sub);
+         break;
+      case T_CASE_GENERATE:
+         sub = find_generate_alternative(b, sub);
+         break;
+      case T_FOR_GENERATE:
+         if (tree_has_value(b)) {
+            // Index specification of a single iteration
+            type_t index_type = tree_type(tree_decl(sub, 0));
+            tree_set_value(b, solve_types(nametab, tree_value(b), index_type));
+         }
+         else if (tree_ranges(b) > 0) {
+            tree_t r = tree_range(b, 0);
+            if (tree_subkind(r) != RANGE_EXPR)
+               solve_types(nametab, r, NULL);
+         }
+         break;
+      default:
+         break;
+      }
 
-      insert_names_for_config(nametab, sub);
+      if (sub != NULL)
+         insert_names_for_config(nametab, sub);
    }
    else
       suppress_errors(nametab);

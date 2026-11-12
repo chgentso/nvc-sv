@@ -3339,10 +3339,28 @@ void insert_names_for_config(nametab_t *tab, tree_t unit)
       break;
    }
 
+   // Index specifications can refer to constants and generics
+   tree_t entity = NULL;
+   switch (tree_kind(unit)) {
+   case T_ARCH:   entity = tree_primary(unit); break;
+   case T_ENTITY: entity = unit; break;
+   default: break;
+   }
+
+   if (entity != NULL) {
+      const int ngenerics = tree_generics(entity);
+      for (int i = 0; i < ngenerics; i++) {
+         tree_t g = tree_generic(entity, i);
+         if (tree_class(g) == C_CONSTANT)
+            insert_name(tab, g, NULL);
+      }
+   }
+
    const int ndecls = tree_decls(unit);
    for (int i = 0; i < ndecls; i++) {
       tree_t d = tree_decl(unit, i);
-      if (tree_kind(d) == T_COMPONENT)
+      const tree_kind_t kind = tree_kind(d);
+      if (kind == T_COMPONENT || kind == T_CONST_DECL)
          insert_name(tab, d, NULL);
    }
 

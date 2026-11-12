@@ -611,6 +611,7 @@ bool tree_has_name(tree_t t);
 tree_t tree_spec(tree_t t);
 bool tree_has_spec(tree_t t);
 void tree_set_spec(tree_t t, tree_t s);
+void tree_clear_spec(tree_t t);
 
 unsigned tree_chars(tree_t t);
 tree_t tree_char(tree_t t, unsigned n);
