@@ -612,9 +612,332 @@ void vlog_lint_port(vlog_node_t port, vlog_node_t value, const loc_t *loc)
 }
 
 
+////////////////////////////////////////////////////////////////////////////////
+// Latches in combinational processes
+
+typedef struct {
+   vlog_node_t decl;
+   loc_t       loc;
+} assigned_t;
+
+typedef A(assigned_t) assigned_list_t;
+
+typedef struct {
+   assigned_list_t possible;   // Assigned on at least one path
+} latch_ctx_t;
+
+static bool set_has(const assigned_list_t *set, vlog_node_t decl)
+{
+   for (unsigned i = 0; i < set->count; i++) {
+      if (set->items[i].decl == decl)
+         return true;
+   }
+
+   return false;
+}
+
+static void set_add(assigned_list_t *set, vlog_node_t decl, const loc_t *loc)
+{
+   if (!set_has(set, decl)) {
+      assigned_t a = { .decl = decl, .loc = *loc };
+      APUSH(*set, a);
+   }
+}
+
+static void set_union(assigned_list_t *dst, const assigned_list_t *src)
+{
+   for (unsigned i = 0; i < src->count; i++)
+      set_add(dst, src->items[i].decl, &(src->items[i].loc));
+}
+
+static void set_intersect(assigned_list_t *dst, const assigned_list_t *other)
+{
+   unsigned out = 0;
+   for (unsigned i = 0; i < dst->count; i++) {
+      if (set_has(other, dst->items[i].decl))
+         dst->items[out++] = dst->items[i];
+   }
+
+   dst->count = out;
+}
+
+static void target_decls(vlog_node_t v, assigned_list_t *set, const loc_t *loc)
+{
+   switch (vlog_kind(v)) {
+   case V_REF:
+      if (vlog_has_ref(v)) {
+         vlog_node_t decl = vlog_ref(v);
+         switch (vlog_kind(decl)) {
+         case V_VAR_DECL:
+         case V_NET_DECL:
+         case V_PORT_DECL:
+            // Variables hoisted out of the process are named with a '$'
+            if (strchr(istr(vlog_ident(decl)), '$') == NULL)
+               set_add(set, decl, loc);
+            break;
+         default:
+            break;
+         }
+      }
+      break;
+   case V_BIT_SELECT:
+   case V_PART_SELECT:
+   case V_MEMBER_REF:
+      target_decls(vlog_value(v), set, loc);
+      break;
+   case V_CONCAT:
+      {
+         const int nparams = vlog_params(v);
+         for (int i = 0; i < nparams; i++)
+            target_decls(vlog_param(v, i), set, loc);
+      }
+      break;
+   default:
+      break;
+   }
+}
+
+static bool label_matches(vlog_node_t label, unsigned value, int width,
+                          vlog_case_kind_t kind, bool *known)
+{
+   if (vlog_kind(label) != V_NUMBER) {
+      int64_t c;
+      if (!vlog_get_const(label, &c)) {
+         *known = false;
+         return false;
+      }
+
+      return c >= 0 && (uint64_t)c == value;
+   }
+
+   number_t n = vlog_number(label);
+   const int nw = number_width(n);
+   for (int i = 0; i < nw || i < width; i++) {
+      const vlog_logic_t lb = i < nw ? number_bit(n, i) : LOGIC_0;
+      const int vb = i < 32 ? (value >> i) & 1 : 0;
+
+      if (lb == LOGIC_0 || lb == LOGIC_1) {
+         if (lb != vb)
+            return false;
+      }
+      else if (lb == LOGIC_Z && kind != V_CASE_NORMAL)
+         continue;
+      else if (lb == LOGIC_X && kind == V_CASE_X)
+         continue;
+      else
+         return false;
+   }
+
+   return true;
+}
+
+static bool case_complete(vlog_node_t v)
+{
+   const int nitems = vlog_stmts(v);
+   for (int i = 0; i < nitems; i++) {
+      vlog_node_t item = vlog_stmt(v, i);
+      if (vlog_kind(item) != V_CASE_ITEM || vlog_params(item) == 0)
+         return true;   // Has a default
+   }
+
+   const vlog_case_kind_t kind = vlog_subkind(v);
+   if (kind == V_CASE_INSIDE)
+      return true;   // Cannot tell
+
+   vlog_node_t sel = vlog_value(v);
+   vlog_node_t type = vlog_get_type(sel);
+
+   int width;
+   if (type != NULL && vlog_kind(type) == V_ENUM_DECL) {
+      // Complete if every name of the enumeration is a label
+      const int nnames = vlog_decls(type);
+      int found = 0;
+      for (int i = 0; i < nnames; i++) {
+         vlog_node_t name = vlog_decl(type, i);
+         bool seen = false;
+         for (int j = 0; !seen && j < nitems; j++) {
+            vlog_node_t item = vlog_stmt(v, j);
+            const int nlabels = vlog_params(item);
+            for (int k = 0; !seen && k < nlabels; k++) {
+               vlog_node_t l = vlog_param(item, k);
+               seen = vlog_kind(l) == V_REF && vlog_has_ref(l)
+                  && vlog_ref(l) == name;
+            }
+         }
+         found += seen;
+      }
+
+      return found >= nnames;
+   }
+   else if ((width = expr_width(sel)) <= 0)
+      return true;   // Cannot tell
+   else if (width > 12)
+      return false;
+
+   bool known = true;
+   for (unsigned value = 0; value < (1u << width); value++) {
+      bool matched = false;
+      for (int i = 0; i < nitems && !matched; i++) {
+         vlog_node_t item = vlog_stmt(v, i);
+         const int nlabels = vlog_params(item);
+         for (int j = 0; j < nlabels && !matched; j++)
+            matched = label_matches(vlog_param(item, j), value, width,
+                                    kind, &known);
+      }
+
+      if (!known)
+         return true;
+      else if (!matched)
+         return false;
+   }
+
+   return true;
+}
+
+static void walk_stmts(vlog_node_t v, assigned_list_t *def, latch_ctx_t *ctx);
+
+static void walk_stmt(vlog_node_t v, assigned_list_t *def, latch_ctx_t *ctx)
+{
+   switch (vlog_kind(v)) {
+   case V_BASSIGN:
+   case V_NBASSIGN:
+   case V_OP_ASSIGN:
+   case V_PREFIX:
+   case V_POSTFIX:
+      target_decls(vlog_target(v), def, vlog_loc(v));
+      set_union(&ctx->possible, def);
+      break;
+
+   case V_SEQ_BLOCK:
+   case V_TIMING:
+   case V_FOR_LOOP:
+   case V_WHILE:
+   case V_REPEAT:
+   case V_DO_WHILE:
+   case V_FOREVER:
+      // Loops are assumed to run at least once
+      walk_stmts(v, def, ctx);
+      break;
+
+   case V_IF:
+      {
+         assigned_list_t all = AINIT;
+         bool first = true, has_else = false;
+
+         const int nconds = vlog_conds(v);
+         for (int i = 0; i < nconds; i++) {
+            vlog_node_t c = vlog_cond(v, i);
+            assigned_list_t branch = AINIT;
+            walk_stmts(c, &branch, ctx);
+
+            if (first)
+               set_union(&all, &branch);
+            else
+               set_intersect(&all, &branch);
+
+            first = false;
+            has_else |= !vlog_has_value(c);
+            ACLEAR(branch);
+         }
+
+         if (has_else)
+            set_union(def, &all);
+
+         ACLEAR(all);
+      }
+      break;
+
+   case V_CASE:
+      {
+         assigned_list_t all = AINIT;
+         bool first = true;
+
+         const int nitems = vlog_stmts(v);
+         for (int i = 0; i < nitems; i++) {
+            assigned_list_t branch = AINIT;
+            walk_stmts(vlog_stmt(v, i), &branch, ctx);
+
+            if (first)
+               set_union(&all, &branch);
+            else
+               set_intersect(&all, &branch);
+
+            first = false;
+            ACLEAR(branch);
+         }
+
+         if (case_complete(v))
+            set_union(def, &all);
+
+         ACLEAR(all);
+      }
+      break;
+
+   default:
+      break;
+   }
+}
+
+static void walk_stmts(vlog_node_t v, assigned_list_t *def, latch_ctx_t *ctx)
+{
+   const int nstmts = vlog_stmts(v);
+   for (int i = 0; i < nstmts; i++)
+      walk_stmt(vlog_stmt(v, i), def, ctx);
+}
+
+static void check_latches(vlog_node_t body, const loc_t *loc, const char *what)
+{
+   latch_ctx_t ctx = { .possible = AINIT };
+   assigned_list_t def = AINIT;
+
+   walk_stmt(body, &def, &ctx);
+
+   for (unsigned i = 0; i < ctx.possible.count; i++) {
+      const assigned_t *a = &(ctx.possible.items[i]);
+      if (set_has(&def, a->decl))
+         continue;
+      else if (lint_suppressed(&a->loc, LINT_LATCH))
+         continue;
+
+      lint_warn(loc, LINT_LATCH, "latch inferred for '%s': not assigned on "
+                "every path through this %s", istr(vlog_ident(a->decl)),
+                what);
+   }
+
+   ACLEAR(ctx.possible);
+   ACLEAR(def);
+}
+
+static void latch_cb(vlog_node_t v, void *context)
+{
+   if (vlog_kind(v) != V_ALWAYS || vlog_stmts(v) != 1)
+      return;
+
+   switch (vlog_subkind(v)) {
+   case V_ALWAYS_COMB:
+      check_latches(vlog_stmt(v, 0), vlog_loc(v), "always_comb");
+      break;
+   case V_ALWAYS_PLAIN:
+      {
+         vlog_node_t t = vlog_stmt(v, 0);
+         if (vlog_kind(t) != V_TIMING)
+            break;
+
+         vlog_node_t ctrl = vlog_value(t);
+         if (vlog_kind(ctrl) == V_EVENT_CONTROL && vlog_params(ctrl) == 0)
+            check_latches(t, vlog_loc(v), "always @* block");
+      }
+      break;
+   default:
+      break;
+   }
+}
 
 void vlog_lint(vlog_node_t unit)
 {
    if (lint_enabled(LINT_WIDTH))
       vlog_visit(unit, width_cb, NULL);
+
+   if (lint_enabled(LINT_LATCH))
+      vlog_visit_only(unit, latch_cb, NULL, V_ALWAYS);
 }

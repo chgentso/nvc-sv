@@ -169,6 +169,49 @@ START_TEST(test_width)
 }
 END_TEST
 
+START_TEST(test_latch_vlog)
+{
+   const error_t expect[] = {
+      {  5, "latch inferred for 'y1': not assigned on every path through "
+        "this always_comb [lint:latch]" },
+      { 12, "latch inferred for 'y3': not assigned on every path through "
+        "this always @* block [lint:latch]" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   lint_parse_option("latch");
+
+   input_from_file(TESTDIR "/lint/latch1.sv");
+
+   analyse_verilog();
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_latch_vhdl)
+{
+   const error_t expect[] = {
+      {  9, "latch inferred for signal L1: not assigned on every path "
+        "through this process [lint:latch]" },
+      { 39, "latch inferred for signal L5: not assigned on every path "
+        "through this process [lint:latch]" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   set_standard(STD_08);
+   lint_parse_option("latch");
+
+   input_from_file(TESTDIR "/lint/latch1.vhd");
+
+   analyse_vhdl();
+
+   check_expected_errors();
+}
+END_TEST
+
 START_TEST(test_unused_vhdl)
 {
    const error_t expect[] = {
@@ -198,6 +241,8 @@ Suite *get_lint_tests(void)
    tcase_add_test(tc, test_unused_vlog);
    tcase_add_test(tc, test_unused_vlog_off);
    tcase_add_test(tc, test_width);
+   tcase_add_test(tc, test_latch_vlog);
+   tcase_add_test(tc, test_latch_vhdl);
    tcase_add_test(tc, test_unused_vhdl);
    suite_add_tcase(s, tc);
 
