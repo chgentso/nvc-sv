@@ -8172,14 +8172,24 @@ static void lower_resolution_wrapper(lower_unit_t *lu, object_t *obj)
    vcode_reg_t cast_reg = emit_cast(voffset, VCODE_INVALID_STAMP, count_reg);
    vcode_reg_t right_reg = emit_sub(emit_add(left_reg, cast_reg), one_reg);
 
-   vcode_dim_t dims[] = {
-      {
-         .left = left_reg,
-         .right = right_reg,
-         .dir = emit_const(vtype_bool(), RANGE_TO)
-      }
-   };
-   vcode_reg_t wrap_reg = emit_wrap(data_reg, dims, 1);
+   // If the elements of the parameter are themselves arrays then the
+   // extra dimensions are those of the element subtype of the parameter
+   type_t pelem = type_elem(uarray_param);
+   const int nelem_dims =
+      (type_is_array(pelem) && !type_is_unconstrained(pelem))
+      ? nested_dimension_of(pelem) : 0;
+   vcode_dim_t *dims LOCAL = xmalloc_array(1 + nelem_dims, sizeof(vcode_dim_t));
+   dims[0].left  = left_reg;
+   dims[0].right = right_reg;
+   dims[0].dir   = emit_const(vtype_bool(), RANGE_TO);
+
+   for (int i = 0; i < nelem_dims; i++) {
+      dims[i + 1].left  = lower_array_left(lu, pelem, i, VCODE_INVALID_REG);
+      dims[i + 1].right = lower_array_right(lu, pelem, i, VCODE_INVALID_REG);
+      dims[i + 1].dir   = lower_array_dir(lu, pelem, i, VCODE_INVALID_REG);
+   }
+
+   vcode_reg_t wrap_reg = emit_wrap(data_reg, dims, 1 + nelem_dims);
 
    vcode_reg_t args[2];
    int nargs = 0;
