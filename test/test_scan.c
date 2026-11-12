@@ -730,6 +730,38 @@ START_TEST(test_bigarena)
 }
 END_TEST
 
+START_TEST(test_m5_vlog_generate)
+{
+   static const char *const parts[] = {
+      "{\"name\":\"g\",\"kind\":\"generate\",\"gen\":\"for\",\"container\":\"WORK.TOP\""
+      ",\"line\":8,\"col\":35,",
+      "{\"name\":\"u\",\"kind\":\"instance\",\"detail\":\"leaf\",\"container\":\"WORK."
+      "TOP.g\",\"line\":9,",
+      "{\"name\":\"h\",\"kind\":\"generate\",\"gen\":\"for\",\"container\":\"WORK.TOP."
+      "g\",\"line\":10,",
+      "{\"name\":\"v\",\"kind\":\"instance\",\"detail\":\"leaf\",\"container\":\"WORK."
+      "TOP.g.h\",\"line\":11,",
+      "{\"name\":\"yes\",\"kind\":\"generate\",\"gen\":\"if\",\"container\":\"WORK.TOP"
+      "\",\"line\":14,",
+      "{\"name\":\"c2\",\"kind\":\"instance\",\"detail\":\"leaf\",\"container\":\"WORK"
+      ".TOP.no\",\"line\":18,",
+      "{\"name\":\"genblk3\",\"kind\":\"generate\",\"gen\":\"case\",\"container\":\"WO"
+      "RK.TOP\",\"line\":21,",
+      "{\"name\":\"two\",\"kind\":\"generate\",\"gen\":\"case\",\"container\":\"WORK.T"
+      "OP\",\"line\":22,",
+      "{\"name\":\"c6\",\"kind\":\"instance\",\"detail\":\"leaf\",\"container\":\"WORK"
+      ".TOP.genblk4\",\"line\":30,",
+      "{\"name\":\"genblk5\",\"kind\":\"generate\",\"gen\":\"if\",\"container\":\"WORK"
+      ".TOP\",\"line\":31,",
+      "{\"name\":\"c8\",\"kind\":\"instance\",\"detail\":\"leaf\",\"container\":\"WORK"
+      ".TOP.genblk6\",\"line\":35,",
+   };
+
+   scan_symbols_contain(SCAN_FILE("m5g_generate.sv"), parts, ARRAY_LEN(parts),
+                        true);
+}
+END_TEST
+
 Suite *get_scan_tests(void)
 {
    Suite *s = suite_create("scan");
@@ -760,6 +792,7 @@ Suite *get_scan_tests(void)
    tcase_add_test(tc, test_symbols_vhdl);
    tcase_add_test(tc, test_symbols_vlog);
    tcase_add_test(tc, test_bigarena);
+   tcase_add_test(tc, test_m5_vlog_generate);
    suite_add_tcase(s, tc);
 
    // Expanding covergroups is slow with the debug and sanitiser options

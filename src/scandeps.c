@@ -1356,6 +1356,7 @@ static void vhdl_ref_cb(tree_t t, void *context)
 }
 
 static void vlog_sym_scope(sym_ctx_t *sc, vlog_node_t v, const char *path);
+static void vlog_sym_stmts(sym_ctx_t *sc, vlog_node_t v, const char *path);
 
 static void vlog_sym_decl(sym_ctx_t *sc, vlog_node_t d, const char *path)
 {
@@ -1452,6 +1453,92 @@ static void vlog_sym_decl(sym_ctx_t *sc, vlog_node_t d, const char *path)
    }
 }
 
+// A generate block is a symbol of its own.  The name of an unnamed block
+// is the one the elaborator gives it and does not appear in the source so
+// the symbol is placed at the start of the block.
+static void vlog_sym_gen_block(sym_ctx_t *sc, vlog_node_t b, const char *gen,
+                               const char *path)
+{
+   if (vlog_kind(b) != V_GEN_BLOCK || !vlog_has_ident(b))
+      return;
+
+   const char *name = sym_simple(vlog_ident(b));
+   const loc_t *loc = vlog_loc(b);
+   if (!loc_invalid_p(loc)) {
+      if (sc->nsyms++ > 0)
+         tb_append(sc->syms, ',');
+
+      tb_cat(sc->syms, "{\"name\":");
+      scan_json_string(sc->syms, name);
+      tb_printf(sc->syms, ",\"kind\":\"generate\",\"gen\":\"%s\"", gen);
+      tb_cat(sc->syms, ",\"container\":");
+      scan_json_string(sc->syms, path);
+      sym_json_pos(sc->syms, loc, sc->file, name, false, false);
+      sym_json_span(sc->syms, loc);
+      tb_append(sc->syms, '}');
+   }
+
+   char *sub LOCAL = xasprintf("%s.%s", path, name);
+   for (unsigned i = 0; i < vlog_decls(b); i++)
+      vlog_sym_decl(sc, vlog_decl(b, i), sub);
+   vlog_sym_stmts(sc, b, sub);
+}
+
+// Is the conditional generate construct a case generate?  Both are the
+// same node kind but the source of a case starts with the keyword.
+static bool vlog_sym_is_case(vlog_node_t v)
+{
+   const loc_t *loc = vlog_loc(v);
+   if (loc_invalid_p(loc))
+      return false;
+
+   loc_t at = *loc;
+   at.line_delta = 0;
+   const char *src = loc_get_source(&at);
+   if (src == NULL)
+      return false;
+
+   src += loc->first_column;
+   return strncmp(src, "case", 4) == 0 && !sym_word_char(src[4]);
+}
+
+static void vlog_sym_stmts(sym_ctx_t *sc, vlog_node_t v, const char *path)
+{
+   for (unsigned i = 0; i < vlog_stmts(v); i++) {
+      vlog_node_t s = vlog_stmt(v, i);
+      switch (vlog_kind(s)) {
+      case V_INST_LIST:
+         for (unsigned j = 0; j < vlog_stmts(s); j++) {
+            vlog_node_t inst = vlog_stmt(s, j);
+            if (vlog_kind(inst) == V_MOD_INST && vlog_has_ident(inst))
+               sym_add(sc, sym_simple(vlog_ident(inst)), "instance",
+                       vlog_has_ident(s) ? istr(vlog_ident(s)) : NULL, path,
+                       vlog_loc(inst));
+         }
+         break;
+      case V_GEN_BLOCK:
+         vlog_sym_gen_block(sc, s, "block", path);
+         break;
+      case V_FOR_GENERATE:
+         for (unsigned j = 0; j < vlog_stmts(s); j++)
+            vlog_sym_gen_block(sc, vlog_stmt(s, j), "for", path);
+         break;
+      case V_IF_GENERATE:
+         {
+            const char *gen = vlog_sym_is_case(s) ? "case" : "if";
+            for (unsigned j = 0; j < vlog_conds(s); j++) {
+               vlog_node_t c = vlog_cond(s, j);
+               for (unsigned k = 0; k < vlog_stmts(c); k++)
+                  vlog_sym_gen_block(sc, vlog_stmt(c, k), gen, path);
+            }
+         }
+         break;
+      default:
+         break;
+      }
+   }
+}
+
 static void vlog_sym_scope(sym_ctx_t *sc, vlog_node_t v, const char *path)
 {
    bool ports = false, decls = false, stmts = false;
@@ -1479,20 +1566,8 @@ static void vlog_sym_scope(sym_ctx_t *sc, vlog_node_t v, const char *path)
    if (decls)
       for (unsigned i = 0; i < vlog_decls(v); i++)
          vlog_sym_decl(sc, vlog_decl(v, i), path);
-   if (stmts) {
-      for (unsigned i = 0; i < vlog_stmts(v); i++) {
-         vlog_node_t s = vlog_stmt(v, i);
-         if (vlog_kind(s) != V_INST_LIST)
-            continue;
-         for (unsigned j = 0; j < vlog_stmts(s); j++) {
-            vlog_node_t inst = vlog_stmt(s, j);
-            if (vlog_kind(inst) == V_MOD_INST && vlog_has_ident(inst))
-               sym_add(sc, sym_simple(vlog_ident(inst)), "instance",
-                       vlog_has_ident(s) ? istr(vlog_ident(s)) : NULL, path,
-                       vlog_loc(inst));
-         }
-      }
-   }
+   if (stmts)
+      vlog_sym_stmts(sc, v, path);
 }
 
 static void vlog_ref_cb(vlog_node_t v, void *context)
