@@ -1,28 +1,39 @@
-// Slice of a dynamic array as an argument and as the source of an assignment.
-// Expected values: IEEE 1800-2017 7.4.3 (array slices: a slice [a:b] has b-a+1 elements),
-// 7.5 (dynamic arrays), 13.5 (argument passing).  A slice that lies partly outside the
-// array is not specified in the standard and is not checked.
-`define CHK(c, m) if (!(c)) begin err++; $error(m); end
-typedef int unsigned wrtd_data[];
+// An indexed part select (base +: width, base -: width) of a dynamic array
+// or queue is an lvalue that replaces that many elements in place
+// (IEEE 1800-2017 7.4.6 and 11.5.1).
 module svdynslice1;
-  function automatic int sum(wrtd_data d);
-    int s = 0;
-    foreach (d[i]) s += d[i];
-    return s;
-  endfunction
-  wrtd_data data, e;
-  int a[];
-  int err = 0;
+  logic data[] = new[16];
+  logic part[] = new[4];
+  int q[$] = '{0, 1, 2, 3, 4, 5};
+  int errs = 0;
+
   initial begin
-    data = new[8];
-    for (int i = 0; i < 8; i++) data[i] = i * 10;
-    `CHK(sum(data[1:4]) == 100, "sum of slice")
-    a = new[5];
-    foreach (a[i]) a[i] = i + 1;
-    a = a[1:3];
-    `CHK(a.size() == 3 && a[0] == 2 && a[1] == 3 && a[2] == 4, "a = a[1:3]")
-    e = data[0:0];
-    `CHK(e.size() == 1 && e[0] == 0, "single element slice")
-    if (err == 0) $display("PASSED");
+    foreach (data[i]) data[i] = 1'b0;
+    part = '{1'b1, 1'b0, 1'b1, 1'b1};
+    data[4 +: 4] = part;
+    for (int i = 0; i < 16; i++) begin
+      automatic logic exp = (i == 4 || i == 6 || i == 7);
+      if (data[i] !== exp) begin errs++; $error("data[%0d]=%b", i, data[i]); end
+    end
+
+    data[11 -: 4] = part;
+    for (int i = 0; i < 16; i++) begin
+      automatic logic exp = (i == 4 || i == 6 || i == 7 || i == 8 || i == 10 || i == 11);
+      if (data[i] !== exp) begin errs++; $error("b data[%0d]=%b", i, data[i]); end
+    end
+
+    for (int k = 0; k < 2; k++) begin
+      automatic logic byte_p[] = new[8];
+      foreach (byte_p[i]) byte_p[i] = 1'b1;
+      data[k*8 +: 8] = byte_p;
+    end
+    foreach (data[i]) if (data[i] !== 1'b1) begin errs++; $error("c data[%0d]=%b", i, data[i]); end
+
+    q[2 +: 2] = '{20, 30};
+    if (q[1] != 1 || q[2] != 20 || q[3] != 30 || q[4] != 4) begin
+      errs++; $error("queue %p", q);
+    end
+
+    if (errs == 0) $display("PASSED");
   end
 endmodule

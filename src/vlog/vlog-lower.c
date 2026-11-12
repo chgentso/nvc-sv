@@ -3570,8 +3570,7 @@ static void vlog_assign_variable(vlog_gen_t *g, vlog_node_t target,
       return;
    }
 
-   if (vlog_kind(target) == V_PART_SELECT
-       && vlog_subkind(target) == V_RANGE_CONST) {
+   if (vlog_kind(target) == V_PART_SELECT) {
       vlog_node_t ptype = vlog_get_type(vlog_value(target));
       if (ptype != NULL && vlog_kind(ptype) == V_DATA_TYPE
           && (vlog_subkind(ptype) == DT_DYNARRAY
@@ -3591,9 +3590,23 @@ static void vlog_assign_variable(vlog_gen_t *g, vlog_node_t target,
          mir_value_t arr = vlog_lower_rvalue(g, vlog_value(target));
          mir_value_t len = mir_build_uarray_len(g->mu, arr, 0);
          vlog_node_t sized = vlog_sized_dimension(ptype);
+         const vlog_range_kind_t rkind = vlog_subkind(target);
          mir_value_t left = vlog_lower_rvalue(g, vlog_left(target));
          mir_value_t right = vlog_lower_rvalue(g, vlog_right(target));
-         if (sized != NULL) {
+         if (rkind != V_RANGE_CONST) {
+            // base +: width or base -: width
+            left = vlog_lower_cast(g, t_offset, left);
+            mir_value_t width = vlog_lower_cast(g, t_offset, right);
+            mir_value_t adj = mir_build_sub(g->mu, t_offset, width,
+                                            mir_const(g->mu, t_offset, 1));
+            if (rkind == V_RANGE_POS)
+               right = mir_build_add(g->mu, t_offset, left, adj);
+            else {
+               right = left;
+               left = mir_build_sub(g->mu, t_offset, left, adj);
+            }
+         }
+         else if (sized != NULL) {
             left = vlog_lower_array_off(g, sized, left);
             right = vlog_lower_array_off(g, sized, right);
          }

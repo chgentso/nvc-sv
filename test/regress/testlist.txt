@@ -2643,3 +2643,4 @@ svrandenum2     verilog
 svbindgen2      verilog
 svbindenum1     verilog
 svhdlarr1       verilog
+svdynslice1     verilog
