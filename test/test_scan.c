@@ -388,6 +388,21 @@ START_TEST(test_sv_clocking_unknown)
 }
 END_TEST
 
+START_TEST(test_sv_large_unit)
+{
+   // Covergroups are expanded to classes so a few of them need more than
+   // the default arena size
+
+   set_standard(STD_19);
+
+   const char *expect =
+      "{\"file\":\"" SCAN_FILE("sv11.sv") "\",\"language\":\"verilog\","
+      "\"units\":[{\"name\":\"WORK.BIG_PKG\",\"kind\":\"package\","
+      "\"instantiates\":[]}],\"requires\":[],\"includes\":[]}\n";
+
+   ck_assert_uint_eq(scan(SCAN_FILE("sv11.sv"), expect), 0);
+}
+END_TEST
 
 START_TEST(test_sv_pending_binds)
 {
@@ -592,6 +607,12 @@ Suite *get_scan_tests(void)
    tcase_add_test(tc, test_symbols_vlog);
    tcase_add_test(tc, test_bigarena);
    suite_add_tcase(s, tc);
+
+   // Expanding covergroups is slow with the debug and sanitiser options
+   TCase *tc_large = nvc_unit_test();
+   tcase_set_timeout(tc_large, 60.0);
+   tcase_add_test(tc_large, test_sv_large_unit);
+   suite_add_tcase(s, tc_large);
 
    return s;
 }

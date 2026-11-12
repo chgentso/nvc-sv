@@ -1119,6 +1119,13 @@ unsigned scan_file_deps(const char *file, text_buf_t *json)
    // Parse the file as analysis would but without any libraries present:
    // references to missing units are recorded instead of being errors
 
+   // Source which depends on libraries that are not present can create
+   // much more than the usual amount per unit (a covergroup is expanded
+   // to a class): the address space is only committed when used so use a
+   // larger limit unless -M asked for more
+   if (opt_get_size(OPT_ARENA_SIZE) < ((size_t)256 << 20))
+      opt_set_size(OPT_ARENA_SIZE, (size_t)256 << 20);
+
    lib_t prev = lib_work();
    lib_t work = lib_tmp(istr(lib_name(prev)));   // Fresh for each file
    lib_set_work(work);
