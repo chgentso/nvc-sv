@@ -25861,10 +25861,25 @@ static vlog_node_t vlog_inside_array_type(vlog_node_t item)
    vlog_node_t type = vlog_get_type(item);
    if (type == NULL || vlog_kind(type) != V_DATA_TYPE
        || (vlog_subkind(type) != DT_DYNARRAY && vlog_subkind(type) != DT_QUEUE))
-      fatal_at(vlog_loc(item), "sorry, a fixed size array in an inside "
-               "expression is not supported here");
+      return NULL;   // A fixed size array
 
    return type;
+}
+
+static bool vlog_inside_fixed_array(vlog_node_t item, unsigned *esize)
+{
+   // A one dimensional fixed size array in a set: any of its elements
+
+   if (vlog_kind(item) == V_INSIDE_RANGE || !vlog_crv_is_array_ref(item)
+       || vlog_inside_array_type(item) != NULL)
+      return false;
+
+   vlog_node_t decl = vlog_ref(item);
+   if (vlog_ranges(decl) != 1 || !vlog_has_type(decl))
+      return false;
+
+   *esize = vlog_size(vlog_type(decl));
+   return *esize > 0;
 }
 
 static void vlog_inside_context(vlog_gen_t *g, vlog_node_t item,
@@ -25881,6 +25896,12 @@ static void vlog_inside_context(vlog_gen_t *g, vlog_node_t item,
       if (atype != NULL) {
          const type_info_t *eti = vlog_type_info(g, vlog_type(atype));
          *width = MAX(*width, eti->size);
+         return;
+      }
+
+      unsigned fsize;
+      if (vlog_inside_fixed_array(item, &fsize)) {
+         *width = MAX(*width, fsize);
          return;
       }
 
@@ -25945,6 +25966,30 @@ static mir_value_t vlog_inside_match(vlog_gen_t *g, vlog_node_t item,
 
       mir_set_cursor(g->mu, done_bb, MIR_APPEND);
       return mir_build_load(g->mu, acc);
+   }
+
+   unsigned fsize;
+   if (vlog_inside_fixed_array(item, &fsize)) {
+      // Any element of the array, taken from the vector of all of them
+      mir_type_t t_offset = mir_offset_type(g->mu);
+      mir_value_t flat = vlog_lower_rvalue(g, item);
+      if (!mir_is_vector(g->mu, flat))
+         fatal_at(vlog_loc(item), "sorry, this array is not supported in an "
+                  "inside expression");
+
+      const unsigned total = mir_get_size(g->mu, mir_get_type(g->mu, flat));
+      mir_type_t t_part = mir_vec4_type(g->mu, fsize, false);
+
+      mir_value_t acc = mir_const_vec(g->mu, t_bit, 0, 0);
+      for (unsigned i = 0; i * fsize < total; i++) {
+         mir_value_t part = mir_build_extract(
+            g->mu, t_part, flat, mir_const(g->mu, t_offset, i * fsize));
+         mir_value_t cmp = mir_build_binary(
+            g->mu, MIR_VEC_LOG_EQ, t_vec, value, vlog_lower_cast(g, t_vec, part));
+         acc = mir_build_binary(g->mu, MIR_VEC_BIT_OR, t_bit, acc, cmp);
+      }
+
+      return acc;
    }
 
    // Unknown bits in a constant item are wildcards
