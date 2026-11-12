@@ -465,6 +465,19 @@ static void collect_conv(const conn_inst_t *inst, text_buf_t *tb)
    }
 }
 
+// Generics or parameters of an instance with their values as text
+static void write_params(wctx_t *w, const conn_block_t *b)
+{
+   if (b->nparams == 0)
+      return;
+
+   key(w, "parameters");
+   begin_obj(w);
+   for (unsigned i = 0; i < b->nparams; i++)
+      write_attr_str(w, b->params[i].name, b->params[i].value);
+   end_obj(w);
+}
+
 static void write_instance(wctx_t *w, const conn_inst_t *inst,
                            unsigned *serial)
 {
@@ -567,6 +580,8 @@ static void write_instance(wctx_t *w, const conn_inst_t *inst,
       write_attr_str(w, "conversions", tb_get(convs));
    end_obj(w);
 
+   write_params(w, child);
+
    key(w, "port_directions");
    begin_obj(w);
    for (unsigned i = 0; i < child->nports; i++) {
@@ -628,6 +643,8 @@ static void write_module(wctx_t *w, conn_block_t *b, bool is_top)
    write_attr_str(w, "src", src);
    free(src);
    end_obj(w);
+
+   write_params(w, b);
 
    key(w, "ports");
    begin_obj(w);

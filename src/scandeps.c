@@ -139,6 +139,7 @@ static void scan_instance_cb(tree_t inst, void *context)
 typedef struct {
    text_buf_t *syms;
    text_buf_t *refs;
+   text_buf_t *extra;  // Fields for the next symbol, see sym_extra_str
    unsigned    nsyms, nrefs;
    const char *file;
    bool        vhdl;
@@ -283,16 +284,104 @@ static char *sym_prefix_text(const loc_t *loc, unsigned line, unsigned col)
    return copy;
 }
 
+
+// Extra fields for the next symbol written by sym_add: call these zero or
+// more times and then sym_add, which writes and clears them
+static void sym_extra_key(sym_ctx_t *sc, const char *key)
+{
+   tb_printf(sc->extra, ",\"%s\":", key);
+}
+
+static void UNUSED sym_extra_str(sym_ctx_t *sc, const char *key,
+                                 const char *text)
+{
+   if (text == NULL || *text == '\0')
+      return;
+
+   sym_extra_key(sc, key);
+   scan_json_string(sc->extra, text);
+}
+
+static void UNUSED sym_extra_int(sym_ctx_t *sc, const char *key,
+                                 int64_t value)
+{
+   sym_extra_key(sc, key);
+   tb_printf(sc->extra, "%lld", (long long)value);
+}
+
+static void UNUSED sym_extra_raw(sym_ctx_t *sc, const char *key,
+                                 const char *json)
+{
+   sym_extra_key(sc, key);
+   tb_cat(sc->extra, json);
+}
+
+// The source text covered by LOC with white space collapsed to single
+// spaces and cut at MAX characters (zero for no limit); comments are
+// removed.  Returns NULL if the source cannot be read.
+static char UNUSED *sym_loc_text(const loc_t *loc, unsigned max)
+{
+   if (loc_invalid_p(loc))
+      return NULL;
+
+   loc_t at = *loc;
+   at.line_delta = 0;
+   at.first_column = 0;
+   const char *src = loc_get_source(&at);
+   if (src == NULL)
+      return NULL;
+
+   // Skip to the first line then to the first column
+   const char *p = src + loc->first_column;
+   // The end column of a location that spans lines may not be known
+   const bool clip = loc->column_delta < DELTA_INVALID;
+   const unsigned end_line = loc->line_delta < DELTA_INVALID
+      ? loc->first_line + loc->line_delta : UINT_MAX;
+   const unsigned end_col = loc->first_column + loc->column_delta;
+
+   text_buf_t *tb = tb_new();
+   bool space = false;
+   unsigned line = loc->first_line, col = loc->first_column;
+   for (; *p != '\0' && line <= end_line; p++, col++) {
+      if (*p == '\n') {
+         line++;
+         col = (unsigned)-1;
+         space = true;
+         continue;
+      }
+      if (clip && line == end_line && col > end_col)
+         break;
+      if (isspace((unsigned char)*p)) {
+         space = true;
+         continue;
+      }
+      if (space && tb_len(tb) > 0)
+         tb_append(tb, ' ');
+      space = false;
+      if (max > 0 && tb_len(tb) >= max) {
+         tb_cat(tb, "...");
+         break;
+      }
+      tb_append(tb, *p);
+   }
+
+   return tb_claim(tb);
+}
+
 static void sym_add(sym_ctx_t *sc, const char *name, const char *kind,
                     const char *detail, const char *container,
                     const loc_t *loc)
 {
-   if (loc_invalid_p(loc) || *name == '\0')
+   if (loc_invalid_p(loc) || *name == '\0') {
+      tb_rewind(sc->extra);
       return;
+   }
 
    unsigned l, c, n;
-   if (!sym_name_pos(loc, name, sc->vhdl, false, &l, &c, &n))
+   if (!sym_name_pos(loc, name, sc->vhdl, false, &l, &c, &n)) {
+      tb_rewind(sc->extra);
       return;
+   }
 
    char *prefix LOCAL = NULL;
    if (!sc->vhdl && detail == NULL && strcmp(kind, "typedef") != 0
@@ -314,6 +403,8 @@ static void sym_add(sym_ctx_t *sc, const char *name, const char *kind,
    }
    tb_cat(sc->syms, ",\"container\":");
    scan_json_string(sc->syms, container);
+   tb_cat(sc->syms, tb_get(sc->extra));
+   tb_rewind(sc->extra);
    sym_json_pos(sc->syms, loc, sc->file, name, sc->vhdl, false);
    sym_json_span(sc->syms, loc);
    tb_append(sc->syms, '}');
@@ -1154,6 +1245,7 @@ unsigned scan_file_deps(const char *file, text_buf_t *json)
       sc = &sctx;
       sctx.syms = tb_new();
       sctx.refs = tb_new();
+      sctx.extra = tb_new();
    }
 
    input_from_file(file);
@@ -1246,6 +1338,7 @@ unsigned scan_file_deps(const char *file, text_buf_t *json)
                 tb_get(sctx.refs));
       tb_free(sctx.syms);
       tb_free(sctx.refs);
+      tb_free(sctx.extra);
    }
 
    const unsigned errors = diag_scan_errors() - base_errors;

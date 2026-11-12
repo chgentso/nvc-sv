@@ -163,6 +163,11 @@ struct _conn_proc {
    bool             approx;   // Sets may be over- or under-approximated
 };
 
+typedef struct {
+   const char *name;       // Generic or parameter as declared
+   const char *value;      // Value of this instance as text
+} conn_param_t;
+
 struct _conn_block {
    const char   *name;       // Hierarchical path, e.g. "TOP.U_SUB"
    const char   *label;      // Last component of path
@@ -185,6 +190,8 @@ struct _conn_block {
    conn_inst_t  *inst;       // Instance in parent, NULL for a root
    const char   *src;
    unsigned      line;
+   conn_param_t *params;     // Generics or parameters with the value of this
+   unsigned      nparams;    // instance, in declaration order
    conn_net_t  **nets;       // Ports first, then local signals
    unsigned      nnets;
    unsigned      nports;

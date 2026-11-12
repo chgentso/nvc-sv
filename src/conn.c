@@ -40,6 +40,7 @@
 typedef A(conn_range_t) range_list_t;
 typedef A(conn_seg_t) seg_list_t;
 typedef A(conn_pconn_t) pconn_list_t;
+typedef A(conn_param_t) param_list_t;
 typedef A(conn_net_t *) net_list_t;
 typedef A(conn_inst_t *) inst_list_t;
 typedef A(conn_proc_t *) proc_list_t;
@@ -146,6 +147,13 @@ static char *dstrf(conn_design_t *cd, const char *fmt, ...)
             memcpy(_p, (list).items, (list).count * sizeof(type)); \
          _p;                                                      \
       })
+
+static void UNUSED add_block_param(conn_design_t *cd, param_list_t *l,
+                                 const char *name, const char *value)
+{
+   conn_param_t p = { dstr(cd, name), dstr(cd, value) };
+   APUSH(*l, p);
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 // Helpers
@@ -1699,6 +1707,14 @@ static void register_generics(conn_design_t *cd, tree_t b, hash_t *dst)
    }
 }
 
+////////////////////////////////////////////////////////////////////////////////
+// VHDL instance parameters
+
+static void vhdl_block_params(conn_design_t *cd, conn_block_t *blk, tree_t b,
+                              tree_t outer)
+{
+}
+
 static bool is_generate_block(tree_t b)
 {
    if (tree_decls(b) == 0)
@@ -1748,6 +1764,14 @@ static vlog_node_t block_vlog_body(tree_t b)
    return tree_kind(wrap) == T_VERILOG ? tree_vlog(wrap) : NULL;
 }
 
+
+////////////////////////////////////////////////////////////////////////////////
+// Verilog instance parameters
+
+static void vlog_block_params(conn_design_t *cd, conn_block_t *blk,
+                              vlog_node_t body)
+{
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 // Fields of records and structures
@@ -2644,6 +2668,11 @@ static conn_block_t *build_instance(conn_design_t *cd, tree_t b,
       blk->label_lang = CONN_VERILOG;
       blk->interface = !!(vlog_flags(body) & VLOG_F_INTERFACE);
    }
+
+   if (body != NULL)
+      vlog_block_params(cd, blk, body);
+   else
+      vhdl_block_params(cd, blk, b, outer);
 
    if (tree_decls(b) > 0 && tree_kind(tree_decl(b, 0)) == T_HIER) {
       tree_t hier = tree_decl(b, 0);
