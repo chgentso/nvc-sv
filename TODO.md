@@ -19,3 +19,22 @@
   that net.  A procedural write to the aliased variable is a deposit, so it is still lost when the net is
   resolved again if the other driver is not visible in the parent text: a hierarchical assignment from
   elsewhere (`top.w = ...` via assign), a force, or a tran/inout path.
+- A class may have more than 64 rand properties, but only the first 64 have a rand_mode bit: the others are
+  always random and rand_mode() on one of them is rejected at lowering ("sorry, rand_mode of the property ...").
+  The bits are held in one 64-bit hidden property; a wider mask needs more than one word.
+- $fatal (and a failed constant function) inside a function evaluated while elaborating, such as the value of a
+  parameter, is shown as a warning and evaluation carries on; 1800-2017 13.4.3 does not allow system tasks in a
+  constant function so a conforming program does not rely on either behaviour.  OpenTitan's lc_ctrl_dv_utils_pkg
+  calls $fatal on a path its own parameter initialisers take.
+- A bind directive is resolved as if written in the target module, but only for the names that module declares:
+  a name the target gets from a wildcard package import (for example `bind alert_handler ... #(.N(NLpg))`
+  with NLpg from `import alert_handler_reg_pkg::*` in the module header) is not found.
+- The key of a class specialisation is made from the folded constant value of the parameters.  An expression of
+  other parameters is evaluated by spec_eval (+ - * /), a parameter given by anything else (function call,
+  conditional, shift) still gets a key that depends on where it is written.
+- vlog_get_const / vlog_is_const evaluate an element of a parameter array (positional '{...} patterns of one
+  dimension) and a member of a structure in one (named or positional); keyed '{0: ..}' items, default items
+  and multidimensional arrays are not evaluated, so an index taken from them is not a static prefix.
+- A constraint can look up a member of an element of a parameter array of packed structures with a random
+  index; the table is passed to the solver as an array each time randomize() is called.  Unpacked structures
+  in a parameter array have not been tried with a random index.
