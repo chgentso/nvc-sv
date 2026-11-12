@@ -47,3 +47,8 @@
   `logic [1023:0]` (`$countones(m) == n; (m >> width) == '0;`), often fails (randomize returns 0 for roughly two
   calls in three).  The pieces solve on their own; the shift by a state variable builds a barrel shifter of
   stages whose conditions are constants, folding those in crv_cond helps only a little.
+- Signed constants and unsigned operands (IEEE 1800-2017 11.8.2): a comparison with a constant such as `t <= -1` where t is an
+  unsigned 64 bit variable is true although -1 is a 32 bit signed value that is converted to unsigned before it is extended,
+  and `u inside {s}` with a signed 32 bit s compares the sign extended value; the same comparison of two variables is
+  right.  The dist of a constraint is converted correctly since vlog_crv_dist_bound, the other constraint operators
+  are not checked for this.
