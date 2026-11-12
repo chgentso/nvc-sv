@@ -17700,6 +17700,12 @@ static bool spec_eval(vlog_node_t v, const spec_env_t *env, int nenv,
                return env[i].known;
             }
          }
+
+         // A parameter with an expression which has not been folded yet
+         vlog_node_t d = vlog_ref(v);
+         if ((vlog_kind(d) == V_PARAM_DECL || vlog_kind(d) == V_LOCALPARAM)
+             && vlog_has_value(d) && vlog_kind(vlog_value(d)) == V_BINARY)
+            return spec_eval(vlog_value(d), env, nenv, result);
       }
       break;
    case V_BINARY:
@@ -18098,7 +18104,7 @@ static vlog_node_t specialise_class(vlog_node_t generic)
          spec_key_for(key, actuals[i]);
       else if (vlog_kind(actuals[i]) == V_STRING)
          tb_printf(key, "s%x", number_hash(vlog_number(actuals[i])));
-      else if (vlog_get_const(actuals[i], &ival))
+      else if (spec_eval(actuals[i], NULL, 0, &ival))
          tb_printf(key, "%"PRIi64, ival);
       else {
          const loc_t *loc = vlog_loc(actuals[i]);

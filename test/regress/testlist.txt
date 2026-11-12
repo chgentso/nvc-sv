@@ -2647,3 +2647,4 @@ svdynslice1     verilog
 svrandwide2     verilog
 svrandmany1     verilog
 svforeachparam1 verilog
+svspecvif1      verilog
