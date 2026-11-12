@@ -2230,27 +2230,31 @@ static void setup_process(rt_model_t *m, rt_proc_t *p, const char *path)
    }
 }
 
-static void copy_sub_signal_sources(rt_scope_t *scope, void *buf, int stride)
+static void copy_sub_signal_sources(rt_scope_t *scope, void *buf, int stride,
+                                    unsigned limit)
 {
    assert(is_signal_scope(scope));
 
    for (int i = 0; i < scope->signals.count; i++) {
       rt_signal_t *s = scope->signals.items[i];
       rt_nexus_t *n = &(s->nexus);
-      for (unsigned i = 0; i < s->n_nexus; i++) {
+      for (unsigned j = 0; j < s->n_nexus; j++, n = n->chain) {
          unsigned o = 0;
          for (rt_source_t *src = &(n->sources); src; src = src->chain_input) {
             const void *data = source_value(n, src);
             if (data == NULL)
                continue;
+            else if (o >= limit)
+               break;
 
-            memcpy(buf + s->offset + (o++ * stride), data, n->size * n->width);
+            memcpy(buf + s->offset + n->offset + (o++ * stride), data,
+                   n->size * n->width);
          }
       }
    }
 
    for (int i = 0; i < scope->children.count; i++)
-      copy_sub_signal_sources(scope->children.items[i], buf, stride);
+      copy_sub_signal_sources(scope->children.items[i], buf, stride, limit);
 }
 
 static bool has_active_source(const rt_nexus_t *n)
@@ -2417,7 +2421,7 @@ static void call_resolution(rt_model_t *m, rt_nexus_t *n, res_memo_t *r,
       const uint32_t mark = tlab_mark(thread->tlab);
 
       uint8_t *inputs = tlab_alloc(thread->tlab, nonnull * scope->size);
-      copy_sub_signal_sources(scope, inputs, scope->size);
+      copy_sub_signal_sources(scope, inputs, scope->size, nonnull);
 
       jit_scalar_t result;
       if (jit_try_call(m->jit, r->closure.handle, &result,
