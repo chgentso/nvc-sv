@@ -25816,25 +25816,68 @@ static bool p_repeated_design_unit(void)
    return true;
 }
 
-static vlog_node_t bind_child_module(vlog_node_t mod, ident_t id)
+static vlog_node_t bind_find_child(vlog_node_t scope, ident_t id)
 {
-   const int nstmts = vlog_stmts(mod);
-   for (int i = 0; i < nstmts; i++) {
-      vlog_node_t list = vlog_stmt(mod, i);
-      if (vlog_kind(list) != V_INST_LIST)
-         continue;
+   // An instance named id or a generate block named id in the statements
+   // of scope, looking through if-generate branches; the result is the
+   // module of the instance or the generate block
 
-      const int ninst = vlog_stmts(list);
-      for (int j = 0; j < ninst; j++) {
-         vlog_node_t inst = vlog_stmt(list, j);
-         if (vlog_kind(inst) == V_MOD_INST && vlog_ident(inst) == id) {
-            vlog_node_t next = lookup_interface(vlog_ident(list));
-            return next != NULL && vlog_kind(next) == V_MODULE ? next : NULL;
+   const int nstmts = vlog_stmts(scope);
+   for (int i = 0; i < nstmts; i++) {
+      vlog_node_t s = vlog_stmt(scope, i);
+      switch (vlog_kind(s)) {
+      case V_INST_LIST:
+         {
+            const int ninst = vlog_stmts(s);
+            for (int j = 0; j < ninst; j++) {
+               vlog_node_t inst = vlog_stmt(s, j);
+               if (vlog_kind(inst) == V_MOD_INST && vlog_ident(inst) == id) {
+                  vlog_node_t next = lookup_interface(vlog_ident(s));
+                  return next != NULL && vlog_kind(next) == V_MODULE
+                     ? next : NULL;
+               }
+            }
          }
+         break;
+
+      case V_GEN_BLOCK:
+         if (vlog_has_ident(s) && vlog_ident(s) == id)
+            return s;
+         break;
+
+      case V_IF_GENERATE:
+         {
+            const int nconds = vlog_conds(s);
+            for (int j = 0; j < nconds; j++) {
+               vlog_node_t c = vlog_cond(s, j);
+               if (vlog_stmts(c) == 0)
+                  continue;
+
+               vlog_node_t blk = vlog_stmt(c, 0);
+               if (vlog_kind(blk) == V_GEN_BLOCK) {
+                  if (vlog_has_ident(blk) && vlog_ident(blk) == id)
+                     return blk;
+
+                  vlog_node_t r = bind_find_child(blk, id);
+                  if (r != NULL)
+                     return r;
+               }
+            }
+         }
+         break;
+
+      default:
+         break;
       }
    }
 
    return NULL;
+}
+
+static vlog_node_t bind_child_module(vlog_node_t mod, ident_t id)
+{
+   vlog_node_t next = bind_find_child(mod, id);
+   return next != NULL && vlog_kind(next) == V_MODULE ? next : NULL;
 }
 
 static vlog_node_t bind_walk_path(vlog_node_t mod, text_buf_t *path)
@@ -25847,7 +25890,7 @@ static vlog_node_t bind_walk_path(vlog_node_t mod, text_buf_t *path)
       tb_append(path, '.');
       tb_istr(path, id);
 
-      vlog_node_t next = bind_child_module(mod, id);
+      vlog_node_t next = bind_find_child(mod, id);
       if (next == NULL) {
          error_at(&state.last_loc, "cannot find instance %pI in module %pI "
                   "to bind into", id, vlog_ident(mod));
