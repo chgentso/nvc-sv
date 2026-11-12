@@ -1216,6 +1216,22 @@ static void bounds_check_array_case(tree_t t, type_t type, bool matching)
 
          tree_t name = choices[hptr] = tree_name(a);
 
+         if (tree_kind(name) == T_REF && tree_has_ref(name)) {
+            // A choice that is not locally static (this is an error unless
+            // relaxed rules are enabled) cannot be checked here
+            tree_t decl = tree_ref(name);
+            switch (tree_kind(decl)) {
+            case T_CONST_DECL:
+            case T_ALIAS:
+               if (tree_has_value(decl))
+                  break;
+               // Fall-through
+            default:
+               choices[hptr] = NULL;
+               continue;
+            }
+         }
+
          int64_t covered = 1, pos;
          if (matching && tree_kind(name) == T_STRING) {
             const int nchars = tree_chars(name);

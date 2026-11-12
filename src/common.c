@@ -267,7 +267,7 @@ bool parse_value(type_t type, const char *str, parsed_value_t *value)
       for (int i = 0; i < ARRAY_LEN(map); i++)
          map[i] = INT_MAX;
 
-      type_t elem = type_elem(base);
+      type_t elem = type_base_recur(type_elem(base));
 
       const int nlits = type_enum_literals(elem);
       for (int i = 0; i < nlits; i++) {
@@ -1864,8 +1864,11 @@ unsigned get_case_choice_char(tree_t value, int depth)
    case T_REF:
       {
          tree_t decl = tree_ref(value);
-         assert(tree_kind(decl) == T_CONST_DECL || tree_kind(decl) == T_ALIAS);
-         assert(tree_has_value(decl));
+         if ((tree_kind(decl) != T_CONST_DECL && tree_kind(decl) != T_ALIAS)
+             || !tree_has_value(decl))
+            fatal_at(tree_loc(value), "sorry, a case choice that is not "
+                     "locally static is not currently supported");
+
          return get_case_choice_char(tree_value(decl), depth);
       }
 

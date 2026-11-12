@@ -2695,3 +2695,4 @@ vcrash_pkgalias1 normal,2008
 vcrash_recurse  shell
 vcrash_deepexpr shell
 vcrash_conv2d1  normal,2008
+vcrash_casechoice shell
