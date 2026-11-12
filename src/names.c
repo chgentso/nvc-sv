@@ -4521,6 +4521,16 @@ static bool solve_one_param(nametab_t *tab, tree_t p, overload_t *o, bool trial)
    return true;
 }
 
+static void solve_erroneous_param(nametab_t *tab, tree_t p)
+{
+   // Avoid cascading errors from an undefined subprogram but still
+   // solve the actual so that all its subexpressions have types
+   type_t none = type_new(T_NONE);
+   tree_t solved = solve_types(tab, tree_value(p), none);
+   tree_set_type(solved, none);
+   tree_set_value(p, solved);
+}
+
 static void solve_subprogram_params(nametab_t *tab, tree_t call, overload_t *o)
 {
    const int nparams = tree_params(call);
@@ -4551,8 +4561,7 @@ static void solve_subprogram_params(nametab_t *tab, tree_t call, overload_t *o)
          || (o->candidates.count > 1 && mask_popcount(&pmask) + 1 < nparams);
 
       if (o->error) {
-         // Avoid cascading errors from an undefined subprogram
-         tree_set_type(value, type_new(T_NONE));
+         solve_erroneous_param(tab, p);
          mask_set(&pmask, i);
       }
       else if (solve_one_param(tab, p, o, trial))
@@ -4572,7 +4581,7 @@ static void solve_subprogram_params(nametab_t *tab, tree_t call, overload_t *o)
 
       tree_t p = tree_param(call, i);
       if (o->error)
-         tree_set_type(tree_value(p), type_new(T_NONE));
+         solve_erroneous_param(tab, p);
       else
          solve_one_param(tab, p, o, false);
    }

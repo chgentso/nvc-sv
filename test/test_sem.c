@@ -4188,6 +4188,26 @@ START_TEST(test_issue1686)
 }
 END_TEST
 
+START_TEST(test_undefarg)
+{
+   set_standard(STD_08);
+
+   input_from_file(TESTDIR "/sem/undefarg.vhd");
+
+   const error_t expect[] = {
+      {  4, "no visible declaration for MISSING_T" },
+      { 13, "no visible declaration for MISSING_T" },
+      { 17, "cannot index non-array type INTEGER" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   parse_and_check(T_PACKAGE, T_PACK_BODY);
+
+   check_expected_errors();
+}
+END_TEST
+
 Suite *get_sem_tests(void)
 {
    Suite *s = suite_create("sem");
@@ -4383,6 +4403,7 @@ Suite *get_sem_tests(void)
    tcase_add_test(tc_core, test_issue1594);
    tcase_add_test(tc_core, test_issue1683);
    tcase_add_test(tc_core, test_issue1686);
+   tcase_add_test(tc_core, test_undefarg);
    suite_add_tcase(s, tc_core);
 
    return s;
