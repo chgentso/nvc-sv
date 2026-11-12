@@ -1167,6 +1167,11 @@ unsigned scan_file_deps(const char *file, text_buf_t *json)
       {
          language = "verilog";
 
+         // Each file is scanned as if it were alone unless the files are
+         // to be treated as one compilation unit
+         if (!opt_get_int(OPT_SINGLE_UNIT))
+            vlog_preprocess_reset();
+
          LOCAL_TEXT_BUF tb = tb_new();
          input_record_includes(true);
          vlog_preprocess(tb, true);

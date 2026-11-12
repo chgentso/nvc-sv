@@ -1506,6 +1506,14 @@ static void p_source_text(void)
       p_block_of_text();
 }
 
+void vlog_preprocess_reset(void)
+{
+   // Forget macros defined by earlier files: the next file sees only the
+   // command line definitions
+   if (macros != NULL)
+      free_macros();
+}
+
 void vlog_preprocess(text_buf_t *tb, bool precise)
 {
    // Macros defined in one file are visible in the files which follow

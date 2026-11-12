@@ -21,6 +21,7 @@
 #include "prim.h"
 
 void vlog_preprocess(text_buf_t *tb, bool precise);
+void vlog_preprocess_reset(void);
 vlog_node_t vlog_parse(void);
 void vlog_set_default_timescale(uint64_t unit_fs, unsigned precision_log10);
 void vlog_check(vlog_node_t v);

@@ -349,6 +349,28 @@ START_TEST(test_sv_no_unit)
 }
 END_TEST
 
+START_TEST(test_sv_macro_isolation)
+{
+   // Macros defined by one file are not visible in the next
+
+   set_standard(STD_19);
+
+   const char *expect_a =
+      "{\"file\":\"" SCAN_FILE("sv8.sv") "\",\"language\":\"verilog\","
+      "\"units\":[{\"name\":\"WORK.LEAK_A\",\"kind\":\"module\","
+      "\"ports\":false,\"instantiates\":[]}],"
+      "\"requires\":[],\"includes\":[]}\n";
+
+   const char *expect_b =
+      "{\"file\":\"" SCAN_FILE("sv9.sv") "\",\"language\":\"verilog\","
+      "\"units\":[{\"name\":\"WORK.LEAK_B\",\"kind\":\"module\","
+      "\"ports\":false,\"instantiates\":[]}],"
+      "\"requires\":[],\"includes\":[]}\n";
+
+   ck_assert_uint_eq(scan(SCAN_FILE("sv8.sv"), expect_a), 0);
+   ck_assert_uint_eq(scan(SCAN_FILE("sv9.sv"), expect_b), 0);
+}
+END_TEST
 
 
 
@@ -525,6 +547,7 @@ Suite *get_scan_tests(void)
    tcase_add_test(tc, test_sv_decls);
    tcase_add_test(tc, test_sv_syntax);
    tcase_add_test(tc, test_sv_no_unit);
+   tcase_add_test(tc, test_sv_macro_isolation);
    tcase_add_test(tc, test_symbols_vhdl);
    tcase_add_test(tc, test_symbols_vlog);
    tcase_add_test(tc, test_bigarena);
