@@ -2972,9 +2972,14 @@ static vcode_reg_t lower_link_var(lower_unit_t *lu, tree_t decl)
       }
    }
    else if (is_package(container)) {
-      // XXX: this should be impossible but can be triggered since
-      // record subtypes do not currently have bounds variables
-      context = emit_link_package(container_name);
+      // This package is not in the context of the unit being lowered,
+      // for example when it is only visible in a configuration that
+      // supplies a generic map, so make sure it has been initialised
+      const vunit_kind_t kind = vcode_unit_kind(lu->vunit);
+      if (kind == VCODE_UNIT_INSTANCE && !is_type_decl(decl))
+         context = emit_package_init(container_name, VCODE_INVALID_REG);
+      else
+         context = emit_link_package(container_name);
    }
    else {
       vcode_dump();
