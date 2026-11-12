@@ -1367,7 +1367,7 @@ static void bounds_check_conv_array(tree_t value, type_t from, type_t to)
          if (type_is_generic(index_type))
             continue;
 
-         tree_t r_to = range_of(index_type, i);
+         tree_t r_to = range_of(index_type, 0);
          tree_t r_from = range_of(from, i);
 
          if (tree_subkind(r_from) == RANGE_EXPR)
