@@ -413,10 +413,12 @@ static void vlog_check_always_blocks(vlog_node_t v)
    bool blocks = false;
    vlog_visit(v, vlog_blocking_cb, &blocks);
 
+   // Legal, but the procedure never lets time advance: a warning, not an
+   // error, so that nothing the standard allows is refused
    if (!blocks)
-      error_at(vlog_loc(v), "always procedure has no timing control, delay "
-               "or blocking statement so it would loop forever without "
-               "advancing time");
+      warn_at(vlog_loc(v), "always procedure has no timing control, delay "
+              "or blocking statement so it would loop forever without "
+              "advancing time");
 }
 
 static void vlog_check_stmts(vlog_node_t v)
