@@ -12057,9 +12057,22 @@ static void lower_port_map(lower_unit_t *lu, tree_t block, tree_t map,
    }
 }
 
+static void lower_force_in_cb(tree_t t, void *ctx)
+{
+   // A force of mode in on a port changes the effective value of the port
+   // only, so it must not share its nets with the actual
+   if (tree_subkind(t) != PORT_IN)
+      return;
+
+   tree_t ref = name_to_ref(tree_target(t));
+   if (ref != NULL && tree_has_ref(ref)
+       && tree_kind(tree_ref(ref)) == T_PORT_DECL)
+      hset_insert(ctx, tree_ref(ref));
+}
+
 static void lower_direct_mapped_port(lower_unit_t *lu, tree_t block, tree_t map,
                                      hset_t *direct, hset_t **poison,
-                                     vcode_reg_t src_reg)
+                                     hset_t *forced, vcode_reg_t src_reg)
 {
    tree_t port = NULL;
    int field = -1;
@@ -12114,6 +12127,8 @@ static void lower_direct_mapped_port(lower_unit_t *lu, tree_t block, tree_t map,
    }
    else if (tree_subkind(port) != PORT_IN)
       return;    // Not safe in general
+   else if (hset_contains(forced, port))
+      return;    // Port is the target of a force in
    else if (!lower_is_signal_ref(value) || tree_kind(value) == T_TYPE_CONV) {
       if (field != -1) {
          // We can't use direct mapping for this record element so make
@@ -12502,9 +12517,14 @@ static void lower_ports(lower_unit_t *lu, tree_t block, tree_t src,
    if (!opt_get_int(OPT_NO_COLLAPSE)) {
       // Filter out "direct mapped" inputs which can be aliased to
       // signals in the scope above
+      hset_t *forced = hset_new(16);
+      tree_visit_only(block, lower_force_in_cb, forced, T_FORCE);
+
       for (int i = 0; i < nparams; i++)
          lower_direct_mapped_port(lu, block, tree_param(block, i), direct,
-                                  &poison, map_regs[i]);
+                                  &poison, forced, map_regs[i]);
+
+      hset_free(forced);
    }
 
    for (int i = 0; i < nports; i++) {

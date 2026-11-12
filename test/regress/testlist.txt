@@ -2704,3 +2704,4 @@ vcrash_proccall shell
 vcrash_predefop1 normal,2008
 vcrash_nullwave1 normal,2008
 vcrash_elabreport shell
+vcrash_forcein1 normal,2008
