@@ -21479,7 +21479,8 @@ static bool vlog_crv_is_wide_var(vlog_gen_t *g, vlog_node_t v)
       return false;
 
    vlog_node_t decl = vlog_ref(v);
-   if (vlog_kind(decl) != V_VAR_DECL || !vlog_has_type(decl)
+   if ((vlog_kind(decl) != V_VAR_DECL && vlog_kind(decl) != V_LOCAL_DECL)
+       || !vlog_has_type(decl)
        || vlog_ranges(decl) > 0 || vlog_crv_packed_type(decl) != NULL)
       return false;
 
