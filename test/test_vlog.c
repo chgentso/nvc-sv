@@ -4135,6 +4135,24 @@ START_TEST(test_crash12)
 }
 END_TEST
 
+START_TEST(test_crash13)
+{
+   // A hierarchical name which is not resolved until elaboration is the
+   // target of an assignment
+   const error_t expect[] = {
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/crash13.sv");
+
+   while (vlog_parse() != NULL)
+      ;
+
+   check_expected_errors();
+}
+END_TEST
+
 Suite *get_vlog_tests(void)
 {
    Suite *s = suite_create("vlog");
@@ -4288,6 +4306,7 @@ Suite *get_vlog_tests(void)
    tcase_add_test(tc, test_crash10);
    tcase_add_test(tc, test_crash11);
    tcase_add_test(tc, test_crash12);
+   tcase_add_test(tc, test_crash13);
    suite_add_tcase(s, tc);
 
    return s;

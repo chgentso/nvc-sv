@@ -279,6 +279,8 @@ static void vlog_check_same_type(vlog_node_t left, type_mask_t lmask,
       return;   // Suppress cascading errors
    else if (vlog_kind(right) == V_HIER_REF && !vlog_has_ref(right))
       return;   // Type not known until elaboration
+   else if (vlog_kind(left) == V_HIER_REF && !vlog_has_ref(left))
+      return;
 
    vlog_node_t ltype = vlog_get_type(left), rtype = vlog_get_type(right);
    if (ltype != NULL && rtype != NULL && vlog_kind(ltype) == V_DATA_TYPE
