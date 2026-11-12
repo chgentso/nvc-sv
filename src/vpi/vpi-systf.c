@@ -1545,6 +1545,21 @@ static PLI_INT32 fatal_tf(PLI_BYTE8 *userdata)
 
    verilog_printf(&os, 'd', argv);
 
+   if (get_model_or_null() == NULL) {
+      // A constant function called while elaborating, such as the value
+      // of a parameter, has no simulation to end: the message is shown
+      // and evaluation carries on
+      diag_t *d = diag_new(DIAG_WARN, NULL);
+      diag_printf(d, "ignored $fatal during elaboration: ");
+      diag_write(d, tb_get(tb), tb_len(tb));
+      diag_show_source(d, false);
+      diag_emit(d);
+
+      vpi_release_handle(argv);
+      vpi_release_handle(call);
+      return 0;
+   }
+
    diag_t *d = diag_new(DIAG_FATAL, NULL);
    diag_write(d, tb_get(tb), tb_len(tb));
    diag_show_source(d, false);
