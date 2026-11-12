@@ -4156,6 +4156,26 @@ START_TEST(test_crash13)
 END_TEST
 
 
+START_TEST(test_crash15)
+{
+   // The width of an unresolved hierarchical reference in a clocking
+   // block is not known
+
+   const error_t expect[] = {
+      {  3, "cannot determine the width of the expression for clocking "
+         "signal q" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/crash15.sv");
+
+   while (vlog_parse() != NULL)
+      ;
+
+   check_expected_errors();
+}
+END_TEST
 
 START_TEST(test_crash16)
 {
@@ -4350,6 +4370,7 @@ Suite *get_vlog_tests(void)
    tcase_add_test(tc, test_crash11);
    tcase_add_test(tc, test_crash12);
    tcase_add_test(tc, test_crash13);
+   tcase_add_test(tc, test_crash15);
    tcase_add_test(tc, test_crash16);
    tcase_add_test(tc, test_crash17);
    suite_add_tcase(s, tc);

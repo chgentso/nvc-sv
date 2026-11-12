@@ -20783,6 +20783,20 @@ static vlog_node_t clocking_edge_control(vlog_node_t ctrl, int kind,
    return c;
 }
 
+static void clocking_unbound_cb(vlog_node_t v, void *ctx)
+{
+   if (!vlog_has_ref(v))
+      *(bool *)ctx = true;
+}
+
+static bool clocking_unbound(vlog_node_t expr)
+{
+   // A hierarchical reference which has not been resolved has no width
+   bool unbound = false;
+   vlog_visit_only(expr, clocking_unbound_cb, &unbound, V_HIER_REF);
+   return unbound;
+}
+
 static void clocking_synthesise(vlog_node_t parent, ident_t name,
                                 vlog_node_t ctrl, const clock_var_t *vars,
                                 int nvars, const loc_t *loc)
@@ -20822,6 +20836,11 @@ static void clocking_synthesise(vlog_node_t parent, ident_t name,
 
       vlog_node_t sig = cv->expr;
       vlog_node_t sigtype = sig != NULL ? vlog_get_type(sig) : NULL;
+      if (sig != NULL && sigtype == NULL && clocking_unbound(sig)) {
+         error_at(loc, "cannot determine the width of the expression for "
+                  "clocking signal %pi", cv->sig);
+         continue;
+      }
       if (sig != NULL && sigtype == NULL) {
          // A bit or part select or concatenation is a vector of its width
          const int width = vlog_width(sig);
