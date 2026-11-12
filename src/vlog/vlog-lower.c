@@ -21662,10 +21662,13 @@ static void vlog_crv_w_resolve(vlog_gen_t *g, crv_wide_t *w)
       w->c[i] = vlog_crv_w_mat(g, w->c[i]);
 }
 
-static void vlog_crv_w_shift_const(vlog_gen_t *g, crv_wide_t *w, unsigned k,
-                                   bool left, bool arith)
+static void vlog_crv_w_shift_keep(vlog_gen_t *g, crv_wide_t *w, unsigned k,
+                                  bool left, bool arith, unsigned keep)
 {
-   // Shift by a constant number of bits keeping the width
+   // Shift by a constant number of bits keeping the width. Only the low
+   // keep bits of a right shift are wanted so a term which can only reach
+   // the bits above them is left out: the solver does not see that the bits
+   // a term shifts in are cleared again by a later truncation.
    const unsigned n = w->n;
    const unsigned width = w->width;
 
@@ -21696,6 +21699,10 @@ static void vlog_crv_w_shift_const(vlog_gen_t *g, crv_wide_t *w, unsigned k,
          out[i] = vlog_crv_w_or(g, vlog_crv_w_shl_c(g, hi, r),
                                 r == 0 ? MIR_NULL_VALUE
                                 : vlog_crv_w_shr_c(g, lo, 64 - r));
+      else if (!arith && 64 * (unsigned)i >= keep)
+         out[i] = MIR_NULL_VALUE;
+      else if (!arith && r != 0 && 64 - r >= keep - 64 * (unsigned)i)
+         out[i] = vlog_crv_w_shr_c(g, hi, r);
       else
          out[i] = vlog_crv_w_or(g, vlog_crv_w_shr_c(g, hi, r),
                                 r == 0 ? MIR_NULL_VALUE
@@ -21722,6 +21729,12 @@ static void vlog_crv_w_shift_const(vlog_gen_t *g, crv_wide_t *w, unsigned k,
       w->c[i] = out[i];
    w->width = width;
    vlog_crv_w_mask(g, w);
+}
+
+static void vlog_crv_w_shift_const(vlog_gen_t *g, crv_wide_t *w, unsigned k,
+                                   bool left, bool arith)
+{
+   vlog_crv_w_shift_keep(g, w, k, left, arith, w->width);
 }
 
 static mir_value_t vlog_crv_w_any(vlog_gen_t *g, const crv_wide_t *w,
@@ -22419,7 +22432,7 @@ static void vlog_crv_wide_expr(vlog_gen_t *g, vlog_node_t v, unsigned width,
             }
 
             if (mir_is_null(var_pos))
-               vlog_crv_w_shift_const(g, out, lsb_pos, false, false);
+               vlog_crv_w_shift_keep(g, out, lsb_pos, false, false, own);
             else {
                crv_wide_t amount;
                vlog_crv_w_zero(&amount, 64);
@@ -22449,7 +22462,7 @@ static void vlog_crv_wide_expr(vlog_gen_t *g, vlog_node_t v, unsigned width,
          else if (vlog_get_const(vlog_left(v), &left) && vlog_has_right(v)
                   && vlog_get_const(vlog_right(v), &right)
                   && vlog_subkind(v) == V_RANGE_CONST)
-            vlog_crv_w_shift_const(g, out, MIN(left, right), false, false);
+            vlog_crv_w_shift_keep(g, out, MIN(left, right), false, false, own);
          else
             fatal_at(vlog_loc(v), "sorry, part select bounds must be "
                      "constant in a constraint");
