@@ -4207,6 +4207,23 @@ START_TEST(test_idxrange)
 }
 END_TEST
 
+START_TEST(test_entbody)
+{
+   input_from_file(TESTDIR "/sem/entbody.vhd");
+
+   const error_t expect[] = {
+      {  2, "missing body for function F1 [INTEGER return INTEGER]" },
+      {  8, "missing body for procedure P1 [INTEGER]" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   parse_and_check(T_ENTITY);
+
+   check_expected_errors();
+}
+END_TEST
+
 START_TEST(test_undefarg)
 {
    set_standard(STD_08);
@@ -4424,6 +4441,7 @@ Suite *get_sem_tests(void)
    tcase_add_test(tc_core, test_issue1686);
    tcase_add_test(tc_core, test_undefarg);
    tcase_add_test(tc_core, test_idxrange);
+   tcase_add_test(tc_core, test_entbody);
    suite_add_tcase(s, tc_core);
 
    return s;

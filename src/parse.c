@@ -9620,6 +9620,7 @@ static void p_entity_declaration(tree_t unit)
 
    ident_t qual = ident_prefix(lib_name(lib_work()), id, '.');
    scope_set_prefix(nametab, qual);
+   scope_set_container(nametab, unit);
 
    p_entity_header(unit);
    p_entity_declarative_part(unit);
