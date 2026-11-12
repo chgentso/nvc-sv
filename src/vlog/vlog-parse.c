@@ -9120,8 +9120,14 @@ static vlog_node_t clocking_event_of(vlog_node_t target)
       vlog_symtab_lookup(symtab, ref);
       break;
    default:
-      ref = vlog_copy(target, vlog_always_true_cb, NULL);
+      // A new reference as the copy would keep the declaration of the
+      // clockvar and so refer to it instead of the event
+      ref = vlog_new(V_HIER_REF);
       vlog_set_ident(ref, evname);
+      if (vlog_has_value(target))
+         vlog_set_value(ref, vlog_copy(vlog_value(target),
+                                       vlog_always_true_cb, NULL));
+      vlog_set_loc(ref, vlog_loc(target));
       break;
    }
 

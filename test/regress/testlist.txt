@@ -2673,3 +2673,4 @@ svintradelay1 verilog
 svnetarrinit1 verilog
 svparambit1 verilog
 svparamport1 verilog
+svclkdrive1 verilog
