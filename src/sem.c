@@ -6378,7 +6378,7 @@ static bool sem_check_attr_spec(tree_t t, nametab_t *tab)
       break;
 
    case W_FOREIGN:
-      if (!tree_frozen(decl))
+      if ((class == C_FUNCTION || class == C_PROCEDURE) && !tree_frozen(decl))
          tree_set_flag(decl, TREE_F_NEVER_WAITS);
       break;
 
