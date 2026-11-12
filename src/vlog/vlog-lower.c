@@ -22972,6 +22972,28 @@ static mir_value_t vlog_crv_inside(vlog_gen_t *g, vlog_node_t v)
    return CRV3(g, CRV_OP_INSIDE, g->crv_ctx, node, set);
 }
 
+static mir_value_t vlog_crv_dist_bound(vlog_gen_t *g, vlog_node_t e,
+                                       bool is_signed)
+{
+   // A value in a dist of an unsigned variable is converted to unsigned
+   // before it is extended (IEEE 1800-2017 11.8.2), so -1 is 32'hffffffff
+   // for a 64 bit variable and not all ones
+
+   mir_value_t value = vlog_lower_rvalue(g, e);
+   if (!is_signed && mir_is_vector(g->mu, value)) {
+      mir_type_t type = mir_get_type(g->mu, value);
+      if (mir_get_signed(g->mu, type)) {
+         const unsigned size = mir_get_size(g->mu, type);
+         mir_type_t t_uns = mir_get_class(g->mu, type) == MIR_TYPE_VEC2
+            ? mir_vec2_type(g->mu, size, false)
+            : mir_vec4_type(g->mu, size, false);
+         value = mir_build_cast(g->mu, t_uns, value);
+      }
+   }
+
+   return vlog_crv_to_offset(g, value);
+}
+
 static mir_value_t vlog_crv_dist(vlog_gen_t *g, vlog_node_t v)
 {
    if (vlog_crv_width(g, vlog_value(v)) > 64)
@@ -22994,7 +23016,7 @@ static mir_value_t vlog_crv_dist(vlog_gen_t *g, vlog_node_t v)
          lo = vlog_crv_int(g, is_signed ? INT64_MIN >> (64 - MIN(width, 64))
                            : 0);
       else
-         lo = vlog_crv_to_offset(g, vlog_lower_rvalue(g, vlog_left(item)));
+         lo = vlog_crv_dist_bound(g, vlog_left(item), is_signed);
 
       mir_value_t hi = lo;
       if (vlog_has_right(item) && vlog_kind(vlog_right(item)) == V_DOLLAR)
@@ -23002,7 +23024,7 @@ static mir_value_t vlog_crv_dist(vlog_gen_t *g, vlog_node_t v)
                            : width >= 63 ? INT64_MAX
                            : (INT64_C(1) << width) - 1);
       else if (vlog_has_right(item))
-         hi = vlog_crv_to_offset(g, vlog_lower_rvalue(g, vlog_right(item)));
+         hi = vlog_crv_dist_bound(g, vlog_right(item), is_signed);
       mir_value_t weight =
          vlog_crv_to_offset(g, vlog_lower_rvalue(g, vlog_delay(item)));
 

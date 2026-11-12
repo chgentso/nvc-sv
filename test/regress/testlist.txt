@@ -2662,3 +2662,4 @@ svrandinsideaq1 verilog
 svinsidefixed1  verilog
 svcombparamidx1 verilog
 svrandrepl1     verilog
+svranddistunsigned1 verilog
