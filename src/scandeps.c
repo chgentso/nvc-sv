@@ -317,9 +317,11 @@ static void UNUSED sym_extra_raw(sym_ctx_t *sc, const char *key,
 }
 
 // The source text covered by LOC with white space collapsed to single
-// spaces and cut at MAX characters (zero for no limit); comments are
-// removed.  Returns NULL if the source cannot be read.
-static char UNUSED *sym_loc_text(const loc_t *loc, unsigned max)
+// spaces and cut at MAX characters (zero for no limit); comments (-- in
+// VHDL, // in Verilog, /* */ in both) are removed.  Returns NULL if the
+// source cannot be read.
+static char UNUSED *sym_loc_text(sym_ctx_t *sc, const loc_t *loc,
+                                 unsigned max)
 {
    if (loc_invalid_p(loc))
       return NULL;
@@ -340,17 +342,51 @@ static char UNUSED *sym_loc_text(const loc_t *loc, unsigned max)
    const unsigned end_col = loc->first_column + loc->column_delta;
 
    text_buf_t *tb = tb_new();
-   bool space = false;
+   bool space = false, instr = false;
    unsigned line = loc->first_line, col = loc->first_column;
    for (; *p != '\0' && line <= end_line; p++, col++) {
       if (*p == '\n') {
          line++;
          col = (unsigned)-1;
          space = true;
+         instr = false;
          continue;
       }
       if (clip && line == end_line && col > end_col)
          break;
+
+      if (!instr) {
+         // A comment is white space
+         const bool eol = sc->vhdl ? (p[0] == '-' && p[1] == '-')
+            : (p[0] == '/' && p[1] == '/');
+         if (eol) {
+            while (p[1] != '\0' && p[1] != '\n') {
+               p++;
+               col++;
+            }
+            space = true;
+            continue;
+         }
+         else if (p[0] == '/' && p[1] == '*') {
+            p += 2;
+            col += 2;
+            while (*p != '\0' && !(p[0] == '*' && p[1] == '/')) {
+               if (*p == '\n') {
+                  line++;
+                  col = (unsigned)-1;
+               }
+               p++;
+               col++;
+            }
+            if (*p == '\0')
+               break;
+            p++;
+            col++;
+            space = true;
+            continue;
+         }
+      }
+
       if (isspace((unsigned char)*p)) {
          space = true;
          continue;
@@ -362,6 +398,15 @@ static char UNUSED *sym_loc_text(const loc_t *loc, unsigned max)
          tb_cat(tb, "...");
          break;
       }
+      if (sc->vhdl && !instr && p[0] == '\'' && p[1] != '\0' && p[2] == '\'') {
+         // Character literal such as '"' or '-'
+         tb_append(tb, p[0]);
+         tb_append(tb, p[1]);
+         p += 2;
+         col += 2;
+      }
+      else if (*p == '"')
+         instr = !instr;
       tb_append(tb, *p);
    }
 
@@ -574,6 +619,12 @@ static void vhdl_sym_decl(sym_ctx_t *sc, tree_t d, const char *path)
    }
 
    const char *name = sym_simple(tree_ident(d));
+
+   if (tree_kind(d) == T_GENERIC_DECL && tree_has_value(d)) {
+      char *text LOCAL = sym_loc_text(sc, tree_loc(tree_value(d)), 200);
+      sym_extra_str(sc, "default", text);
+   }
+
    sym_add(sc, name, kind, detail, path, tree_loc(d));
 
    if (!scope)

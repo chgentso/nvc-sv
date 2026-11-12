@@ -172,6 +172,9 @@ START_TEST(test_vhdl6)
 }
 END_TEST
 
+static void scan_symbols_contain(const char *file, const char *const *parts,
+                                 unsigned nparts, bool expect);
+
 START_TEST(test_work_name)
 {
    // The name WORK is replaced by the name of the work library
@@ -197,6 +200,28 @@ START_TEST(test_work_name)
    lib_free(other);
 }
 END_TEST
+
+START_TEST(test_m5_vhdl_comments)
+{
+   // Comments inside a declaration are not part of the text taken from the
+   // source, but comment markers in literals are
+
+   set_standard(STD_08);
+
+   static const char *const parts[] = {
+      "\"container\":\"WORK.M5VC\",\"default\":\"1 + 2\",\"line\":2,",
+      "\"container\":\"WORK.M5VC\",\"default\":\"\\\"x -- y\\\"\","
+      "\"line\":4,",
+      "\"container\":\"WORK.M5VC\",\"default\":\"'-'\",\"line\":5,",
+      "\"container\":\"WORK.M5VC\",\"default\":\"\\\"10\\\" & \\\"10\\\"\","
+      "\"line\":6,",
+   };
+
+   scan_symbols_contain(SCAN_FILE("m5v_comments.vhd"), parts,
+                        ARRAY_LEN(parts), true);
+}
+END_TEST
+
 
 START_TEST(test_sv1)
 {
@@ -484,7 +509,8 @@ START_TEST(test_symbols_vhdl)
       "{\"name\":\"CLK\",\"kind\":\"port\",\"detail\":\"in BIT\","
       "\"container\":\"WORK.E\",\"line\":24,\"col\":9,\"len\":3,",
       "{\"name\":\"N\",\"kind\":\"generic\",\"detail\":\"NATURAL\","
-      "\"container\":\"WORK.E\",\"line\":23,\"col\":12,",
+      "\"container\":\"WORK.E\",\"default\":\"4\",\"line\":23,"
+      "\"col\":12,",
       "{\"name\":\"S\",\"kind\":\"signal\",\"detail\":\"INTEGER\","
       "\"container\":\"WORK.E-RTL\",\"line\":28,\"col\":10,",
       "{\"name\":\"REC_T\",\"kind\":\"type\",\"container\":\"WORK.MYPKG\",",
@@ -616,6 +642,7 @@ Suite *get_scan_tests(void)
    tcase_add_test(tc, test_vhdl5);
    tcase_add_test(tc, test_vhdl6);
    tcase_add_test(tc, test_work_name);
+   tcase_add_test(tc, test_m5_vhdl_comments);
    tcase_add_test(tc, test_sv1);
    tcase_add_test(tc, test_sv2);
    tcase_add_test(tc, test_sv_ifdef_a);
