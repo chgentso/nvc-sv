@@ -20334,6 +20334,8 @@ static unsigned vlog_crv_width(vlog_gen_t *g, vlog_node_t v)
          const int nparams = vlog_params(v);
          for (int i = 0; i < nparams; i++)
             total += vlog_crv_width(g, vlog_param(v, i));
+         if (vlog_has_value(v))   // A replication
+            total *= vlog_must_be_const(vlog_value(v));
          return total;
       }
    case V_BIT_SELECT:
@@ -22497,17 +22499,22 @@ static void vlog_crv_wide_expr(vlog_gen_t *g, vlog_node_t v, unsigned width,
          const int nparams = vlog_params(v);
          vlog_crv_w_zero(out, own);
          unsigned shift = own;
-         for (int i = 0; i < nparams; i++) {
-            vlog_node_t p = vlog_param(v, i);
-            const unsigned pw = vlog_crv_width(g, p);
-            shift -= pw;
+         int64_t reps = 1;
+         if (vlog_has_value(v))   // A replication
+            reps = vlog_must_be_const(vlog_value(v));
+         for (int64_t r = 0; r < reps; r++) {
+            for (int i = 0; i < nparams; i++) {
+               vlog_node_t p = vlog_param(v, i);
+               const unsigned pw = vlog_crv_width(g, p);
+               shift -= pw;
 
-            crv_wide_t part;
-            vlog_crv_wide_expr(g, p, pw, false, &part);
-            vlog_crv_w_resize(g, &part, own, false);
-            vlog_crv_w_shift_const(g, &part, shift, true, false);
-            for (unsigned j = 0; j < out->n; j++)
-               out->c[j] = vlog_crv_w_or(g, out->c[j], part.c[j]);
+               crv_wide_t part;
+               vlog_crv_wide_expr(g, p, pw, false, &part);
+               vlog_crv_w_resize(g, &part, own, false);
+               vlog_crv_w_shift_const(g, &part, shift, true, false);
+               for (unsigned j = 0; j < out->n; j++)
+                  out->c[j] = vlog_crv_w_or(g, out->c[j], part.c[j]);
+            }
          }
          vlog_crv_w_resize(g, out, width, false);
       }
@@ -23349,17 +23356,22 @@ static mir_value_t vlog_crv_expr(vlog_gen_t *g, vlog_node_t v, unsigned width,
             mir_value_t flags = vlog_crv_flags(g, total, false);
             node = CRV3(g, CRV_OP_CONST, g->crv_ctx, vlog_crv_int(g, 0), flags);
             unsigned shift = total;
-            for (int i = 0; i < nparams; i++) {
-               vlog_node_t p = vlog_param(v, i);
-               shift -= vlog_crv_width(g, p);
-               mir_value_t part = vlog_crv_expr(g, p, total, false);
-               mir_value_t amount =
-                  CRV3(g, CRV_OP_CONST, g->crv_ctx, vlog_crv_int(g, shift),
-                       flags);
-               part = CRV5(g, CRV_OP_BINARY, g->crv_ctx,
-                           vlog_crv_int(g, CRV_SHL), part, amount, flags);
-               node = CRV5(g, CRV_OP_BINARY, g->crv_ctx, vlog_crv_int(g, CRV_OR),
-                           node, part, flags);
+            int64_t reps = 1;
+            if (vlog_has_value(v))   // A replication
+               reps = vlog_must_be_const(vlog_value(v));
+            for (int64_t r = 0; r < reps; r++) {
+               for (int i = 0; i < nparams; i++) {
+                  vlog_node_t p = vlog_param(v, i);
+                  shift -= vlog_crv_width(g, p);
+                  mir_value_t part = vlog_crv_expr(g, p, total, false);
+                  mir_value_t amount =
+                     CRV3(g, CRV_OP_CONST, g->crv_ctx, vlog_crv_int(g, shift),
+                          flags);
+                  part = CRV5(g, CRV_OP_BINARY, g->crv_ctx,
+                              vlog_crv_int(g, CRV_SHL), part, amount, flags);
+                  node = CRV5(g, CRV_OP_BINARY, g->crv_ctx,
+                              vlog_crv_int(g, CRV_OR), node, part, flags);
+               }
             }
          }
          break;
