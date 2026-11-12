@@ -331,6 +331,79 @@ warnings enabled.
 .It Fl \-ignore-time
 Do not check the timestamps of source files when the corresponding
 design unit is loaded from a library.
+.\" --lint
+.It Fl \-lint Ns Bo = Ns Ar rules Bc
+Report legal but suspicious code as warnings.  The warnings come from
+both VHDL and Verilog sources and each ends with the name of the rule
+that gave it in brackets, such as
+.Ql [lint:width] .
+The option applies when source files are analysed, which finds
+the truncating assignments and the latches in Verilog and VHDL and the
+unused and undriven VHDL signals, and when a design is elaborated, which
+finds the unused and undriven Verilog declarations and the port connections
+that truncate, so it is given before both of the commands
+.Fl a
+and
+.Fl e .
+Without it nothing is checked.
+.Pp
+.Ar rules
+is a list of rule names separated by commas, where
+.Cm all
+is every rule,
+.Cm none
+removes all rules so far and a name preceded by a minus sign removes that
+rule.  A list that starts with a removal starts from all the rules.  The
+default when no list is given is
+.Cm all .
+The rules are:
+.Bl -tag -width Ds
+.It Cm unused
+A signal, net or variable that is declared in a VHDL architecture or
+Verilog module, including in a block or process, but never read.  Ports,
+and declarations in packages, classes, interfaces and subprograms, are not
+checked.  Each declaration is reported once however many times its design
+unit is instantiated.  A name that is also used in a hierarchical reference
+or a VHDL external name is assumed to be read.  A connection to a Verilog
+module instance is assumed both to read and drive.
+.It Cm undriven
+A signal, net or variable that is read but never assigned and has no
+initial value.
+.It Cm width
+A Verilog assignment, continuous assignment or port connection where the
+value is wider than the target so that the high bits are lost.  The width of
+an unsized or constant operand is the number of bits it needs, so constants
+that fit are accepted, and explicit casts, part selects and operands that are
+not integral types such as reals, strings and structures are not checked.
+.It Cm latch
+A Verilog
+.Ql always_comb
+or
+.Ql always @*
+block, or a VHDL process with a sensitivity list but no clock edge, that
+assigns a signal or variable on some path through its statements but not
+all, because an
+.Ql if
+has no
+.Ql else
+or a Verilog
+.Ql case
+does not cover every value and has no
+.Ql default .
+Conditions are not evaluated and loops are assumed to run at least once.
+.El
+.Pp
+A warning is suppressed by a comment
+.Ql // nvc lint_off Ar rule
+in Verilog or
+.Ql -- nvc lint_off Ar rule
+in VHDL on the line of the declaration or statement it is reported
+against or on the line before it.  Several rules can be listed and with
+no rule every lint warning there is suppressed.
+.Pp
+See also
+.Fl \-check\-synthesis ,
+which warns about signals missing from VHDL sensitivity lists.
 .\" --load
 .It Fl \-load= Ns Ar plugin
 Loads a VHPI or VPI plugin from the shared library
