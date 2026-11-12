@@ -20206,7 +20206,10 @@ static bool vlog_crv_is_dynamic_array(vlog_node_t decl)
 static bool vlog_crv_is_array_decl(vlog_node_t decl)
 {
    const vlog_kind_t kind = vlog_kind(decl);
-   if (kind != V_VAR_DECL && kind != V_LOCAL_DECL && kind != V_TF_PORT_DECL)
+   if (kind == V_PARAM_DECL || kind == V_LOCALPARAM)
+      return vlog_ranges(decl) > 0;   // A constant table
+   else if (kind != V_VAR_DECL && kind != V_LOCAL_DECL
+            && kind != V_TF_PORT_DECL)
       return false;
 
    return vlog_crv_is_dynamic_array(decl) || vlog_ranges(decl) > 0;
@@ -20663,6 +20666,21 @@ static mir_value_t vlog_crv_packed_member(vlog_gen_t *g, vlog_node_t v)
 {
    unsigned off;
    vlog_node_t root = vlog_crv_packed_root(v, &off);
+
+   if (vlog_kind(root) == V_BIT_SELECT) {
+      // An element of an array of packed structures is one value
+      const unsigned size = vlog_size(vlog_type(vlog_ref(v)));
+      const bool is_signed = vlog_is_signed(v);
+      const unsigned bw = vlog_crv_width(g, root);
+      mir_value_t flags = vlog_crv_flags(g, bw, false);
+      mir_value_t value = vlog_crv_expr(g, root, bw, false);
+      mir_value_t amount = CRV3(g, CRV_OP_CONST, g->crv_ctx,
+                                vlog_crv_int(g, bw - off - size), flags);
+      value = CRV5(g, CRV_OP_BINARY, g->crv_ctx, vlog_crv_int(g, CRV_SHR),
+                   value, amount, flags);
+      return CRV3(g, CRV_OP_CAST, g->crv_ctx, value,
+                  vlog_crv_flags(g, size, is_signed));
+   }
 
    if ((vlog_kind(root) != V_REF && vlog_kind(root) != V_MEMBER_REF)
        || !vlog_has_ref(root))

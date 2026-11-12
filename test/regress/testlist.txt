@@ -2651,3 +2651,4 @@ svspecvif1      verilog
 svfatalconst1   verilog
 svpartparam1    verilog
 svctordef1      verilog
+svrandparamtab1 verilog
