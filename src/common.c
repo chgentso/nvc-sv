@@ -1892,6 +1892,10 @@ unsigned get_case_choice_char(tree_t value, int depth)
          return get_case_choice_char(elem, depth);
       }
 
+   case T_FCALL:
+      fatal_at(tree_loc(value), "sorry, a case choice that is not "
+               "locally static is not currently supported");
+
    default:
       fatal_at(tree_loc(value), "unsupported tree type %s in case choice",
                tree_kind_str(tree_kind(value)));

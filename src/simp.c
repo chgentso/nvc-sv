@@ -407,7 +407,7 @@ static tree_t simp_fcall_local(tree_t t, simp_ctx_t *ctx)
       return t;
 
    if (eval_possible(t, ctx->registry, ctx->mir))
-      return eval_try_fold(ctx->jit, t, ctx->registry, NULL, NULL);
+      return eval_try_fold_static(ctx->jit, t, ctx->registry, NULL, NULL);
 
    return t;
 }

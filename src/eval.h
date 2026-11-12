@@ -23,6 +23,9 @@
 
 tree_t eval_try_fold(jit_t *jit, tree_t expr, unit_registry_t *registry,
                      lower_unit_t *parent, void *context);
+tree_t eval_try_fold_static(jit_t *jit, tree_t expr,
+                            unit_registry_t *registry, lower_unit_t *parent,
+                            void *context);
 tree_t eval_must_fold(jit_t *jit, tree_t expr, unit_registry_t *registry,
                       lower_unit_t *parent, void *context);
 bool eval_possible(tree_t t, unit_registry_t *ur, mir_context_t *mc);

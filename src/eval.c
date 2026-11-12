@@ -258,8 +258,10 @@ static tree_t eval_do_fold(jit_t *jit, tree_t expr, lower_unit_t *parent,
    return expr;
 }
 
-tree_t eval_try_fold(jit_t *jit, tree_t expr, unit_registry_t *registry,
-                     lower_unit_t *parent, void *context)
+static tree_t eval_try_fold_common(jit_t *jit, tree_t expr,
+                                   unit_registry_t *registry,
+                                   lower_unit_t *parent, void *context,
+                                   bool keep_messages)
 {
    const bool verbose = opt_get_verbose(OPT_EVAL_VERBOSE, NULL);
    jit_set_silent(jit, !verbose);
@@ -268,7 +270,8 @@ tree_t eval_try_fold(jit_t *jit, tree_t expr, unit_registry_t *registry,
 
    tree_t result = eval_do_fold(jit, expr, parent, registry, context);
 
-   if (result != expr && jit_suppressed_count(jit) != suppressed) {
+   if (keep_messages && result != expr
+       && jit_suppressed_count(jit) != suppressed) {
       // The evaluation produced a message such as a report statement
       // which would be lost if the call was replaced by its result
       result = expr;
@@ -280,6 +283,22 @@ tree_t eval_try_fold(jit_t *jit, tree_t expr, unit_registry_t *registry,
    clear_vhdl_assert();
 
    return result;
+}
+
+tree_t eval_try_fold(jit_t *jit, tree_t expr, unit_registry_t *registry,
+                     lower_unit_t *parent, void *context)
+{
+   return eval_try_fold_common(jit, expr, registry, parent, context, true);
+}
+
+tree_t eval_try_fold_static(jit_t *jit, tree_t expr,
+                            unit_registry_t *registry, lower_unit_t *parent,
+                            void *context)
+{
+   // A locally static expression must be replaced by its value, such as
+   // when it is used as a case choice, even if evaluating it produced a
+   // message
+   return eval_try_fold_common(jit, expr, registry, parent, context, false);
 }
 
 tree_t eval_must_fold(jit_t *jit, tree_t expr, unit_registry_t *registry,
