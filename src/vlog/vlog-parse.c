@@ -13824,6 +13824,21 @@ static vlog_node_t p_typedef_dimensions(vlog_node_t dt)
 
    vlog_node_t vec = base;
    if (vlog_kind(base) == V_ENUM_DECL && vlog_has_type(base)) {
+      // A packed array of enumeration values is a vector of elements which
+      // are the enumeration, so that an element has the methods of one
+      vlog_node_t bt = vlog_get_type(vlog_type(base));
+      if (bt != NULL && vlog_kind(bt) == V_DATA_TYPE) {
+         vlog_node_t v = vlog_new(V_DATA_TYPE);
+         vlog_set_subkind(v, vlog_is_two_state(bt) ? DT_BIT : DT_LOGIC);
+         vlog_set_type(v, dt);
+         vlog_set_loc(v, vlog_loc(dt));
+
+         while (peek() == tLSQUARE)
+            vlog_add_range(v, p_packed_dimension());
+
+         return v;
+      }
+
       // A packed array of enumeration values is a vector of their base type
       vec = vlog_get_type(vlog_type(base));
       if (vec != NULL && vlog_kind(vec) == V_DATA_TYPE
