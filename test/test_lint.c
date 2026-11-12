@@ -43,6 +43,7 @@ static void analyse_verilog(void)
       vlog_check(v);
       fail_if(error_count() > 0);
 
+      vlog_lint(v);
       vlog_simp(v);
       vlog_fold(v, get_mir(), get_jit());
       fail_if(error_count() > 0);
@@ -139,6 +140,35 @@ START_TEST(test_unused_vlog_off)
 }
 END_TEST
 
+START_TEST(test_width)
+{
+   const error_t expect[] = {
+      { 15, "assignment truncates 8 bits to 4 bits [lint:width]" },
+      { 19, "assignment truncates 8 bits to 4 bits [lint:width]" },
+      { 23, "assignment truncates 8 bits to 4 bits [lint:width]" },
+      { 26, "assignment truncates 8 bits to 4 bits [lint:width]" },
+      { 30, "assignment truncates 32 bits to 4 bits [lint:width]" },
+      { 33, "continuous assignment truncates 8 bits to 4 bits "
+        "[lint:width]" },
+      { 34, "connection to input port 'a' truncates 8 bits to 4 bits "
+        "[lint:width]" },
+      { 34, "connection to output port 'y' truncates 8 bits to 4 bits "
+        "[lint:width]" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   lint_parse_option("width");
+
+   input_from_file(TESTDIR "/lint/width1.sv");
+
+   analyse_verilog();
+   elaborate_verilog("WORK.WIDTH1");
+
+   check_expected_errors();
+}
+END_TEST
+
 START_TEST(test_unused_vhdl)
 {
    const error_t expect[] = {
@@ -167,6 +197,7 @@ Suite *get_lint_tests(void)
    tcase_add_test(tc, test_option);
    tcase_add_test(tc, test_unused_vlog);
    tcase_add_test(tc, test_unused_vlog_off);
+   tcase_add_test(tc, test_width);
    tcase_add_test(tc, test_unused_vhdl);
    suite_add_tcase(s, tc);
 

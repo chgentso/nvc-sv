@@ -235,6 +235,9 @@ static void analyse_file(const char *file, cmd_state_t *state)
                vlog_check(module);
 
                if (error_count() == 0) {
+                  if (opt_get_int(OPT_LINT))
+                     vlog_lint(module);
+
                   vlog_simp(module);
                   vlog_fold(module, state->mir, state->jit);
                   lib_put_vlog(work, module);

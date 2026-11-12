@@ -311,3 +311,310 @@ void vlog_lint_design(vlog_node_t mod)
    hash_free(ctx.ports);
 }
 
+////////////////////////////////////////////////////////////////////////////////
+// Truncating assignments and connections
+
+static int bits_needed(uint64_t value)
+{
+   int bits = 1;
+   for (; value > 1; value >>= 1)
+      bits++;
+   return bits;
+}
+
+static bool integral_decl(vlog_node_t decl)
+{
+   switch (vlog_kind(decl)) {
+   case V_VAR_DECL:
+   case V_NET_DECL:
+   case V_PORT_DECL:
+      break;
+   default:
+      return false;
+   }
+
+   if (vlog_kind(decl) != V_PORT_DECL && vlog_ranges(decl) > 0)
+      return false;   // Unpacked array
+
+   vlog_node_t type = vlog_get_type(decl);
+   if (type == NULL || vlog_kind(type) != V_DATA_TYPE)
+      return false;
+
+   switch (vlog_subkind(type)) {
+   case DT_IMPLICIT:
+   case DT_LOGIC:
+   case DT_INTEGER:
+   case DT_BYTE:
+   case DT_SHORTINT:
+   case DT_INT:
+   case DT_LONGINT:
+   case DT_TIME:
+   case DT_BIT:
+      break;
+   default:
+      return false;
+   }
+
+   if (vlog_has_type(type))
+      return false;   // Packed array of structures
+
+   return vlog_size(type) > 0;
+}
+
+// The width of the bits of an expression that can matter or -1 if it is
+// not known: an unsized literal or constant has the number of bits it
+// needs and an operand that adapts to the context has width zero
+static int expr_width(vlog_node_t v)
+{
+   switch (vlog_kind(v)) {
+   case V_NUMBER:
+      {
+         number_t n = vlog_number(v);
+         int w = number_width(n);
+         while (w > 1 && number_bit(n, w - 1) == LOGIC_0)
+            w--;
+
+         // A value of all unknown bits such as 32'bx fits anywhere
+         bool known = false;
+         for (int i = 0; !known && i < w; i++) {
+            const vlog_logic_t bit = number_bit(n, i);
+            known = bit == LOGIC_0 || bit == LOGIC_1;
+         }
+
+         return known ? w : 0;
+      }
+
+   case V_REF:
+      {
+         if (!vlog_has_ref(v))
+            return -1;
+
+         vlog_node_t decl = vlog_ref(v);
+         switch (vlog_kind(decl)) {
+         case V_PARAM_DECL:
+         case V_LOCALPARAM:
+            {
+               int64_t value;
+               if (vlog_get_const(decl, &value))
+                  return value < 0 ? 0 : bits_needed(value);
+               else
+                  return -1;
+            }
+         default:
+            return integral_decl(decl) ? (int)vlog_width(decl) : -1;
+         }
+      }
+
+   case V_BIT_SELECT:
+   case V_PART_SELECT:
+      {
+         vlog_node_t base = vlog_value(v);
+         if (vlog_kind(base) != V_REF || !vlog_has_ref(base))
+            return -1;
+
+         vlog_node_t decl = vlog_ref(base);
+         if (!integral_decl(decl))
+            return -1;
+
+         vlog_node_t type = vlog_get_type(decl);
+         if (type == NULL || vlog_ranges(type) > 1)
+            return -1;   // Select of a packed array of vectors
+         else if (vlog_kind(v) == V_BIT_SELECT) {
+            return vlog_params(v) == 1 ? 1 : -1;
+         }
+         else if (vlog_subkind(v) == V_RANGE_CONST) {
+            int64_t l, r;
+            if (vlog_get_const(vlog_left(v), &l)
+                && vlog_get_const(vlog_right(v), &r))
+               return (l > r ? l - r : r - l) + 1;
+            return -1;
+         }
+         else {
+            int64_t w;
+            if (vlog_get_const(vlog_right(v), &w) && w > 0)
+               return w;
+            return -1;
+         }
+      }
+
+   case V_CONCAT:
+      {
+         int sum = 0;
+         const int nparams = vlog_params(v);
+         for (int i = 0; i < nparams; i++) {
+            const int w = expr_width(vlog_param(v, i));
+            if (w < 0)
+               return -1;
+            sum += w;
+         }
+
+         if (vlog_has_value(v)) {
+            int64_t count;
+            if (!vlog_get_const(vlog_value(v), &count))
+               return -1;
+            sum *= count;
+         }
+
+         return sum;
+      }
+
+   case V_BINARY:
+      {
+         const int lw = expr_width(vlog_left(v));
+         switch (vlog_subkind(v)) {
+         case V_BINARY_LOG_EQ:
+         case V_BINARY_LOG_NEQ:
+         case V_BINARY_CASE_EQ:
+         case V_BINARY_CASE_NEQ:
+         case V_BINARY_LOG_OR:
+         case V_BINARY_LOG_AND:
+         case V_BINARY_LT:
+         case V_BINARY_GT:
+         case V_BINARY_LEQ:
+         case V_BINARY_GEQ:
+         case V_BINARY_WILD_EQ:
+         case V_BINARY_WILD_NEQ:
+            return 1;
+         case V_BINARY_SHIFT_LL:
+         case V_BINARY_SHIFT_RL:
+         case V_BINARY_SHIFT_LA:
+         case V_BINARY_SHIFT_RA:
+         case V_BINARY_EXP:
+            return lw;
+         default:
+            {
+               const int rw = expr_width(vlog_right(v));
+               return lw < 0 || rw < 0 ? -1 : MAX(lw, rw);
+            }
+         }
+      }
+
+   case V_UNARY:
+      switch (vlog_subkind(v)) {
+      case V_UNARY_BITNEG:
+      case V_UNARY_NEG:
+      case V_UNARY_IDENTITY:
+         return expr_width(vlog_value(v));
+      default:
+         return 1;
+      }
+
+   case V_COND_EXPR:
+      {
+         const int lw = expr_width(vlog_left(v));
+         const int rw = expr_width(vlog_right(v));
+         return lw < 0 || rw < 0 ? -1 : MAX(lw, rw);
+      }
+
+   case V_CAST:
+      return 0;   // Explicit conversion
+
+   default:
+      return -1;
+   }
+}
+
+static int target_width(vlog_node_t v)
+{
+   switch (vlog_kind(v)) {
+   case V_REF:
+      {
+         if (!vlog_has_ref(v) || !integral_decl(vlog_ref(v)))
+            return -1;
+
+         return vlog_width(vlog_ref(v));
+      }
+   case V_BIT_SELECT:
+   case V_PART_SELECT:
+      return expr_width(v);
+   case V_CONCAT:
+      {
+         if (vlog_has_value(v))
+            return -1;
+
+         int sum = 0;
+         const int nparams = vlog_params(v);
+         for (int i = 0; i < nparams; i++) {
+            const int w = target_width(vlog_param(v, i));
+            if (w < 0)
+               return -1;
+            sum += w;
+         }
+         return sum;
+      }
+   default:
+      return -1;
+   }
+}
+
+static void check_assign_width(vlog_node_t target, vlog_node_t value,
+                               const char *what)
+{
+   const int lw = target_width(target);
+   if (lw <= 0)
+      return;
+
+   const int rw = expr_width(value);
+   if (rw <= lw)
+      return;
+
+   const loc_t *loc = vlog_loc(value);
+   if (lint_suppressed(vlog_loc(target), LINT_WIDTH))
+      return;
+
+   lint_warn(loc, LINT_WIDTH, "%s truncates %d bits to %d bits", what,
+             rw, lw);
+}
+
+static void width_cb(vlog_node_t v, void *context)
+{
+   switch (vlog_kind(v)) {
+   case V_BASSIGN:
+   case V_NBASSIGN:
+      check_assign_width(vlog_target(v), vlog_value(v), "assignment");
+      break;
+   case V_ASSIGN:
+      check_assign_width(vlog_target(v), vlog_value(v),
+                         "continuous assignment");
+      break;
+   default:
+      break;
+   }
+}
+
+void vlog_lint_port(vlog_node_t port, vlog_node_t value, const loc_t *loc)
+{
+   if (!lint_enabled(LINT_WIDTH))
+      return;
+
+   const int pw = integral_decl(port) ? (int)vlog_width(port) : -1;
+   if (pw <= 0)
+      return;
+
+   int vw;
+   if (vlog_subkind(port) == V_PORT_OUTPUT) {
+      // The actual is the target of the connection
+      vw = target_width(value);
+      if (vw <= 0 || pw <= vw)
+         return;
+
+      lint_warn(loc, LINT_WIDTH, "connection to output port '%s' truncates "
+                "%d bits to %d bits", istr(vlog_ident(port)), pw, vw);
+   }
+   else if (vlog_subkind(port) == V_PORT_INPUT) {
+      vw = expr_width(value);
+      if (vw <= pw)
+         return;
+
+      lint_warn(loc, LINT_WIDTH, "connection to input port '%s' truncates "
+                "%d bits to %d bits", istr(vlog_ident(port)), vw, pw);
+   }
+}
+
+
+
+void vlog_lint(vlog_node_t unit)
+{
+   if (lint_enabled(LINT_WIDTH))
+      vlog_visit(unit, width_cb, NULL);
+}

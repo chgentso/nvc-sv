@@ -2486,6 +2486,9 @@ static void elab_verilog_ports(vlog_node_t inst, elab_instance_t *ei,
 
       elab_check_nettype_conn(port, value, where);
 
+      if (opt_get_int(OPT_LINT))
+         vlog_lint_port(port, value, where);
+
       vlog_node_t map = vlog_new(V_PORT_MAP);
       vlog_set_ident(map, port_name);
       vlog_set_ref(map, port);
