@@ -1196,6 +1196,23 @@ static vcode_reg_t lower_signal_array_aggregate(lower_unit_t *lu, tree_t expr)
       return a0_reg;
 }
 
+static bool is_arith_operator(tree_t decl)
+{
+   if (!(tree_flags(decl) & TREE_F_PREDEFINED))
+      return false;
+
+   switch (tree_subkind(decl)) {
+   case S_MUL: case S_MUL_PR: case S_MUL_RP: case S_MUL_PI: case S_MUL_IP:
+   case S_MUL_RI: case S_MUL_IR:
+   case S_DIV: case S_DIV_PR: case S_DIV_PP: case S_DIV_PI: case S_DIV_RI:
+   case S_ADD: case S_SUB: case S_IDENTITY: case S_NEGATE: case S_ABS:
+   case S_MOD: case S_REM: case S_EXP:
+      return true;
+   default:
+      return false;
+   }
+}
+
 static vcode_reg_t lower_subprogram_arg(lower_unit_t *lu, tree_t fcall,
                                         unsigned nth, vcode_reg_t context_reg)
 {
@@ -1260,6 +1277,8 @@ static vcode_reg_t lower_subprogram_arg(lower_unit_t *lu, tree_t fcall,
       return reg;
    else if (mode == PORT_OUT || !type_is_scalar(port_type))
       return reg;
+   else if (is_arith_operator(decl))
+      return reg;   // Predefined operators work on the base type
    else if (mode == PORT_INOUT) {
       vcode_reg_t scalar_reg = emit_load_indirect(reg);
       lower_check_scalar_bounds(lu, scalar_reg, port_type, value, port);

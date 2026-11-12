@@ -294,8 +294,8 @@ static tree_t bounds_check_call_args(tree_t t)
             }
          }
       }
-      else if (type_is_scalar(ftype))
-         bounds_check_scalar(value, ftype, port);
+      else if (type_is_scalar(ftype) && !(tree_flags(decl) & TREE_F_PREDEFINED))
+         bounds_check_scalar(value, ftype, port);   // Operators use base type
    }
 
    if (tree_kind(decl) == T_GENERIC_DECL)

@@ -2701,3 +2701,4 @@ vcrash_nestedpkg shell
 vcrash_anontype1 normal,2019
 vcrash_genmap1 normal,2019
 vcrash_proccall shell
+vcrash_predefop1 normal,2008
