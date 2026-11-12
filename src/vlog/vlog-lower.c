@@ -257,7 +257,9 @@ static void vlog_bind_default_cb(vlog_node_t v, void *ctx)
 
    for (int j = 0; j < b->nbound; j++) {
       if (!mir_is_null(b->argvars[j])
-          && vlog_ident(vlog_ref(v)) == vlog_ident(vlog_port(b->subr, j)))
+          && vlog_ident(vlog_ref(v)) == vlog_ident(
+             vlog_kind(b->subr) == V_CONSTRUCTOR ? vlog_param(b->subr, j)
+             : vlog_port(b->subr, j)))
          mir_put_object(b->g->mu, vlog_ref(v), b->argvars[j]);
    }
 }
@@ -18627,7 +18629,8 @@ static mir_value_t vlog_lower_subr_call(vlog_gen_t *g, vlog_node_t decl,
    bool any_default = false;
    for (int i = 0; i <= nports; i++) {
       argvars[i] = MIR_NULL_VALUE;
-      if (!is_ctor && i < nports && i > 0 && vlog_has_value(vlog_port(decl, i)))
+      if (i < nports && i > 0
+          && vlog_has_value(is_ctor ? vlog_param(decl, i) : vlog_port(decl, i)))
          any_default = true;
    }
 
@@ -18663,7 +18666,7 @@ static mir_value_t vlog_lower_subr_call(vlog_gen_t *g, vlog_node_t decl,
 
          // The default is evaluated in the scope of the subroutine
          actual = vlog_value(port);
-         if (!is_ctor && i > 0) {
+         if (i > 0) {
             // It can use the arguments before it
             bind_defaults_t b = {
                .g = g, .subr = decl, .argvars = argvars, .nbound = i
@@ -18741,7 +18744,7 @@ static mir_value_t vlog_lower_subr_call(vlog_gen_t *g, vlog_node_t decl,
          mir_value_t cast = vlog_lower_cast(g, ti->type, value);
          args[pos] = vlog_copy_value(g, cast, vlog_type(port));
 
-         if (any_default && !is_ctor) {
+         if (any_default) {
             argvars[i] = mir_add_var(g->mu, mir_get_type(g->mu, args[pos]),
                                      MIR_NULL_STAMP, ident_uniq("arg"),
                                      MIR_VAR_TEMP);
