@@ -27721,6 +27721,16 @@ static void vlog_lower_assign_process(vlog_gen_t *g, vlog_node_t v)
    mir_value_t resize = vlog_lower_cast(g, type, value);
    assert(mir_is_vector(g->mu, resize) || mir_is(g->mu, resize, MIR_TYPE_REAL));
 
+   if (mir_is(g->mu, resize, MIR_TYPE_REAL)) {
+      // A zero is replaced by 0.0 as -0.0 compares equal to it but
+      // differ in representation so feedback such as a = -a would never
+      // become stable
+      mir_type_t t_real = mir_get_type(g->mu, resize);
+      mir_value_t zero = mir_const_real(g->mu, t_real, 0.0);
+      mir_value_t is_zero = mir_build_cmp(g->mu, MIR_CMP_EQ, resize, zero);
+      resize = mir_build_select(g->mu, t_real, is_zero, zero, resize);
+   }
+
    mir_value_t tmp = MIR_NULL_VALUE;
    if (targetsz != 1) {
       mir_type_t t_elem = mir_logic_type(g->mu);
