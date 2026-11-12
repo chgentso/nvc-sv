@@ -5396,9 +5396,13 @@ static mir_value_t vlog_lower_dyn_cast(vlog_gen_t *g, vlog_node_t v)
       mir_block_t test_bb = mir_add_block(g->mu);
 
       // A null handle can be assigned to any class
-      mir_value_t is_null = mir_build_cmp(g->mu, MIR_CMP_EQ, obj,
-                                          mir_build_null(g->mu, t_obj));
-      mir_build_cond(g->mu, is_null, null_bb, test_bb);
+      if (vlog_kind(src) == V_NULL)
+         mir_build_jump(g->mu, null_bb);   // Comparing two constants
+      else {
+         mir_value_t is_null = mir_build_cmp(g->mu, MIR_CMP_EQ, obj,
+                                             mir_build_null(g->mu, t_obj));
+         mir_build_cond(g->mu, is_null, null_bb, test_bb);
+      }
 
       mir_set_cursor(g->mu, test_bb, MIR_APPEND);
 
