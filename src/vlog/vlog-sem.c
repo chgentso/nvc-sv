@@ -29,6 +29,7 @@
 
 #include <assert.h>
 #include <stdlib.h>
+#include <string.h>
 
 typedef uint32_t type_mask_t;
 #define TM(x) (1u << (x))
@@ -379,6 +380,50 @@ static void vlog_check_decls(vlog_node_t v)
       if (vlog_kind(d) == V_DPI_EXPORT)
          vlog_check_dpi_export(d, v);
    }
+}
+
+static void vlog_blocking_cb(vlog_node_t v, void *ctx)
+{
+   switch (vlog_kind(v)) {
+   case V_TIMING:
+   case V_WAIT:
+   case V_FORK:
+   case V_FORK_CTRL:
+   case V_USER_TCALL:
+   case V_METHOD_CALL:
+   case V_DISABLE:
+   case V_EVENT_CONTROL:
+   case V_DELAY_CONTROL:
+      *(bool *)ctx = true;
+      break;
+   case V_SYS_TCALL:
+      {
+         const char *name = istr(vlog_ident(v));
+         if (!strcmp(name, "$finish") || !strcmp(name, "$stop")
+             || !strcmp(name, "$fatal"))
+            *(bool *)ctx = true;
+      }
+      break;
+   default:
+      break;
+   }
+}
+
+static void vlog_check_always_blocks(vlog_node_t v)
+{
+   // A plain always procedure which can never wait would loop forever
+   // without time advancing
+
+   if (vlog_subkind(v) != V_ALWAYS_PLAIN)
+      return;
+
+   bool blocks = false;
+   vlog_visit(v, vlog_blocking_cb, &blocks);
+
+   if (!blocks)
+      error_at(vlog_loc(v), "always procedure has no timing control, delay "
+               "or blocking statement so it would loop forever without "
+               "advancing time");
 }
 
 static void vlog_check_stmts(vlog_node_t v)
@@ -4140,8 +4185,11 @@ void vlog_check(vlog_node_t v)
    case V_ENUM_NAME:
       vlog_check_enum_name(v);
       break;
-   case V_INITIAL:
    case V_ALWAYS:
+      vlog_check_always_blocks(v);
+      vlog_check_stmts(v);
+      break;
+   case V_INITIAL:
    case V_FOREVER:
       vlog_check_stmts(v);
       break;

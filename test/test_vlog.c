@@ -4116,6 +4116,25 @@ START_TEST(test_crash11)
 }
 END_TEST
 
+START_TEST(test_crash12)
+{
+   const error_t expect[] = {
+      {  4, "always procedure has no timing control, delay or blocking "
+         "statement so it would loop forever without advancing time" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/crash12.sv");
+
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
 Suite *get_vlog_tests(void)
 {
    Suite *s = suite_create("vlog");
@@ -4268,6 +4287,7 @@ Suite *get_vlog_tests(void)
    tcase_add_test(tc, test_crash9);
    tcase_add_test(tc, test_crash10);
    tcase_add_test(tc, test_crash11);
+   tcase_add_test(tc, test_crash12);
    suite_add_tcase(s, tc);
 
    return s;
