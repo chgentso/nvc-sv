@@ -317,6 +317,29 @@ START_TEST(test_sv_syntax)
 END_TEST
 
 
+START_TEST(test_sv_bad_name)
+{
+   // A module whose name is a syntax error is not a unit and the error
+   // marker is not an instance
+
+   set_standard(STD_19);
+
+   const error_t expect_err[] = {
+      { 2, "unexpected ( while parsing module declaration, expecting "
+        "identifier" },
+      { -1, NULL }
+   };
+   expect_errors(expect_err);
+
+   const char *expect =
+      "{\"file\":\"" SCAN_FILE("sv6.sv") "\",\"language\":\"verilog\","
+      "\"units\":[{\"name\":\"WORK.AFTER_BAD\",\"kind\":\"module\","
+      "\"ports\":true,\"instantiates\":[\"child\"]}],"
+      "\"requires\":[],\"includes\":[],\"errors\":1}\n";
+
+   ck_assert_uint_eq(scan(SCAN_FILE("sv6.sv"), expect), 1);
+}
+END_TEST
 
 START_TEST(test_sv_no_unit)
 {
@@ -599,6 +622,7 @@ Suite *get_scan_tests(void)
    tcase_add_test(tc, test_sv_ifdef_b);
    tcase_add_test(tc, test_sv_decls);
    tcase_add_test(tc, test_sv_syntax);
+   tcase_add_test(tc, test_sv_bad_name);
    tcase_add_test(tc, test_sv_no_unit);
    tcase_add_test(tc, test_sv_macro_isolation);
    tcase_add_test(tc, test_sv_clocking_unknown);

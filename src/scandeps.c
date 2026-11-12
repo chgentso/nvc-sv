@@ -1026,6 +1026,8 @@ static void scan_inst_list_cb(vlog_node_t v, void *context)
       return;   // Not an instantiation
 
    ident_t name = vlog_ident(v);
+   if (name == error_marker())
+      return;
 
    for (unsigned i = 0; i < ctx->nseen; i++) {
       if (ctx->seen[i] == name)
@@ -1081,6 +1083,9 @@ static void scan_vlog_unit(vlog_node_t unit, text_buf_t *units,
    ident_t name = vlog_ident(unit);
    ident_t simple = vlog_has_ident2(unit) ? vlog_ident2(unit)
       : ident_rfrom(name, '.');
+
+   if (simple == error_marker())
+      return;   // Syntax error in the name: there is no unit to report
 
    scan_ctx_t ctx = { .tb = units, .inst = tb_new() };
    vlog_visit_only(unit, scan_inst_list_cb, &ctx, V_INST_LIST);
