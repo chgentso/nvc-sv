@@ -17417,6 +17417,12 @@ static vlog_node_t p_generic_class(ident_t name, vlog_flags_t flags)
             p->def = xrealloc_array(p->def, p->ndef + 1, sizeof(tokenq_t));
             p->def[p->ndef++] = saved;
          }
+
+         if (p->ndef == 0) {
+            error_at(&state.last_loc, "missing default value for parameter "
+                     "%pi", p->name);
+            p->has_def = false;
+         }
       }
 
       if (!optional(tCOMMA))

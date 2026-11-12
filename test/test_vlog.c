@@ -4155,6 +4155,25 @@ START_TEST(test_crash13)
 }
 END_TEST
 
+START_TEST(test_crash14)
+{
+   // A default value for a class parameter is missing
+
+   const error_t expect[] = {
+      {  2, "missing default value for parameter W" },
+      {  7, "parameter 'W' of class 'gen' has no default value" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/crash14.sv");
+
+   while (vlog_parse() != NULL)
+      ;
+
+   check_expected_errors();
+}
+END_TEST
 
 START_TEST(test_crash15)
 {
@@ -4370,6 +4389,7 @@ Suite *get_vlog_tests(void)
    tcase_add_test(tc, test_crash11);
    tcase_add_test(tc, test_crash12);
    tcase_add_test(tc, test_crash13);
+   tcase_add_test(tc, test_crash14);
    tcase_add_test(tc, test_crash15);
    tcase_add_test(tc, test_crash16);
    tcase_add_test(tc, test_crash17);
