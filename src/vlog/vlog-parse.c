@@ -26504,6 +26504,11 @@ static vlog_node_t end_of_file(void)
 
    ACLEAR(forward_types);
 
+   // Anything still waiting to be replayed belongs to this file
+   ACLEAR(pending_units);
+   ACLEAR(pending_binds);
+   ACLEAR(pending_bind_scopes);
+
    vlog_symtab_pop(symtab);
    vlog_symtab_free(symtab);
    symtab = NULL;
