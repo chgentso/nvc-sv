@@ -307,10 +307,44 @@ static bool is_std_randomize(void)
       && peek_ident_nth(3) == ident_new("randomize");
 }
 
+static vlog_node_t hier_owner(vlog_node_t mr);
+
+static bool is_hier_type_name(int *len)
+{
+   // The name of an interface instance or port followed by the names of
+   // nested instances and a type declared in the interface
+
+   if (peek() != tID || peek_nth(2) != tDOT || peek_nth(3) != tID)
+      return false;
+
+   vlog_node_t d = peek_reference();
+   if (d == NULL)
+      return false;
+
+   switch (vlog_kind(d)) {
+   case V_MOD_INST:
+   case V_IFACE_PORT:
+      break;
+   default:
+      return false;
+   }
+
+   int n = 1;
+   while (peek_nth(n + 1) == tDOT && peek_nth(n + 2) == tID)
+      n += 2;
+
+   *len = n;
+   return true;
+}
+
 static bool is_scoped_type_start(void)
 {
    // Scope resolution followed by the name of a variable: this is the type
    // in a declaration like pkg::type_t name
+
+   int hlen;
+   if (is_hier_type_name(&hlen) && peek_nth(hlen + 1) == tID)
+      return true;   // A type declared in an interface: ifc.type_t name
 
    if (peek() != tID || peek_nth(2) != tSCOPE)
       return false;
@@ -497,6 +531,7 @@ static vlog_node_t p_data_type_or_implicit(void);
 
 static hash_t *interfaces = NULL;
 static hash_t *inst_modules = NULL;
+static hash_t *inst_lists = NULL;   // Instance to the list declaring it
 static bool parsing_prototype = false;
 static bool parsing_dpi_import = false;
 
@@ -1875,6 +1910,153 @@ static void pack_unpacked_union(vlog_node_t v)
    vlog_set_flags(v, vlog_flags(v) | VLOG_F_PACKED | VLOG_F_UNPACKED_VIEW);
 }
 
+typedef struct {
+   vlog_node_t iface;
+   vlog_node_t prefix;
+} iface_type_t;
+
+static bool iface_type_pred(vlog_node_t v, void *ctx)
+{
+   const iface_type_t *it = ctx;
+
+   if (vlog_kind(v) != V_REF || !vlog_has_ref(v))
+      return false;
+
+   vlog_node_t d = vlog_ref(v);
+   switch (vlog_kind(d)) {
+   case V_PARAM_DECL:
+   case V_LOCALPARAM:
+      break;
+   default:
+      return false;
+   }
+
+   // The declaration may be a copy
+   const int ndecls = vlog_decls(it->iface);
+   for (int i = 0; i < ndecls; i++) {
+      vlog_node_t p = vlog_decl(it->iface, i);
+      if (p == d || (vlog_kind(p) == vlog_kind(d)
+                     && vlog_ident(p) == vlog_ident(d)))
+         return true;
+   }
+
+   return false;
+}
+
+static vlog_node_t iface_type_cb(vlog_node_t v, void *ctx)
+{
+   const iface_type_t *it = ctx;
+
+   if (!iface_type_pred(v, ctx))
+      return v;
+
+   // The value of the parameter is known once the instance is elaborated
+   vlog_node_t h = vlog_new(V_HIER_REF);
+   vlog_set_value(h, it->prefix);
+   vlog_set_ident(h, vlog_ident(v));
+   vlog_set_loc(h, vlog_loc(v));
+   vlog_set_global_flags(h, VLOG_GF_HIER_REF);
+   return h;
+}
+
+static vlog_node_t nested_iface_module(vlog_node_t iface, ident_t id)
+{
+   const int nstmts = vlog_stmts(iface);
+   for (int i = 0; i < nstmts; i++) {
+      vlog_node_t list = vlog_stmt(iface, i);
+      if (vlog_kind(list) != V_INST_LIST)
+         continue;
+
+      const int ninst = vlog_stmts(list);
+      for (int j = 0; j < ninst; j++) {
+         vlog_node_t inst = vlog_stmt(list, j);
+         if (vlog_kind(inst) == V_MOD_INST && vlog_ident(inst) == id)
+            return lookup_interface(vlog_ident(list));
+      }
+   }
+
+   return NULL;
+}
+
+static vlog_node_t p_hier_type(void)
+{
+   // ifc_name { . nested_instance } . type_identifier
+
+   BEGIN("type declared in an interface");
+
+   ident_t id = p_identifier();
+
+   vlog_node_t prefix = vlog_new(V_MOD_REF);
+   vlog_set_ident(prefix, id);
+   vlog_set_loc(prefix, &state.last_loc);
+   vlog_symtab_lookup(symtab, prefix);
+
+   vlog_node_t iface = hier_owner(prefix);
+   if (iface == NULL && vlog_has_ref(prefix) && inst_lists != NULL
+       && vlog_kind(vlog_ref(prefix)) == V_MOD_INST) {
+      vlog_node_t list = hash_get(inst_lists, vlog_ref(prefix));
+      if (list != NULL)
+         iface = lookup_interface(vlog_ident(list));
+   }
+
+   ident_t last = NULL;
+   loc_t last_loc = state.last_loc;
+   for (;;) {
+      consume(tDOT);
+
+      ident_t name = p_identifier();
+      last_loc = state.last_loc;
+
+      if (peek() != tDOT || peek_nth(2) != tID) {
+         last = name;
+         break;
+      }
+
+      if (iface != NULL)
+         iface = nested_iface_module(iface, name);
+
+      vlog_node_t next = vlog_new(V_MOD_REF);
+      vlog_set_ident(next, name);
+      vlog_set_loc(next, &last_loc);
+      vlog_set_value(next, prefix);
+      prefix = next;
+   }
+
+   if (iface == NULL) {
+      error_at(&last_loc, "sorry, cannot find the interface that %pQ is "
+               "declared in", last);
+      return logic_type();
+   }
+
+   vlog_node_t decl = NULL;
+   const int ndecls = vlog_decls(iface);
+   for (int i = 0; i < ndecls && decl == NULL; i++) {
+      vlog_node_t d = vlog_decl(iface, i);
+      if (vlog_has_ident(d) && vlog_ident(d) == last)
+         decl = d;
+   }
+
+   if (decl == NULL) {
+      error_at(&last_loc, "no type named %pQ in interface %pQ", last,
+               vlog_ident2(iface));
+      return logic_type();
+   }
+   else if (!is_data_type(decl)) {
+      error_at(&last_loc, "%pQ is not a data type", last);
+      return logic_type();
+   }
+
+   iface_type_t it = { .iface = iface, .prefix = prefix };
+   vlog_node_t copy = vlog_copy(decl, iface_type_pred, &it);
+   if (copy != decl)
+      copy = vlog_rewrite(copy, NULL, iface_type_cb, &it);
+
+   if (peek() == tLSQUARE)
+      copy = p_typedef_dimensions(copy);
+
+   return copy;
+}
+
 static vlog_node_t p_data_type(void)
 {
    // integer_vector_type [ signing ] { packed_dimension }
@@ -2135,6 +2317,10 @@ static vlog_node_t p_data_type(void)
 
    case tID:
       {
+         int hlen;
+         if (is_hier_type_name(&hlen))
+            return p_hier_type();
+
          if (peek_nth(2) == tSCOPE && !is_process_name()) {
             vlog_node_t scope = p_scope_prefix();
             ident_t id = p_identifier();
@@ -23273,6 +23459,12 @@ static void p_module_or_udp_instantiation(vlog_node_t mod)
    consume(tSEMI);
 
    vlog_set_loc(v, CURRENT_LOC);
+
+   if (inst_lists == NULL)
+      inst_lists = hash_new(16);
+
+   for (int i = 0; i < vlog_stmts(v); i++)
+      hash_put(inst_lists, vlog_stmt(v, i), v);
 
    if (vlog_params(v) == 0) {
       if (inst_modules == NULL)

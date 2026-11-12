@@ -2722,3 +2722,4 @@ attrfunc1       normal
 attralias1      normal
 attrgroup1      normal
 svifaceparam1 verilog
+svifacetype1 verilog
