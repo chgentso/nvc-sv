@@ -2709,3 +2709,4 @@ vcrash_genconfig1 normal,2008
 vcrash_inoutconv1 normal,2008
 svhierlp1 verilog
 vreg_casefold   normal,2008
+m5v_gen1        shell
