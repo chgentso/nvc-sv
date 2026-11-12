@@ -1423,6 +1423,15 @@ static PLI_INT32 fgets_tf(PLI_BYTE8 *userdata)
          };
          vpi_put_value(str_arg, &value, NULL, vpiNoDelay);
       }
+      else if (vpi_get(vpiSize, str_arg) == -3) {   // A string variable
+         // At the end of the file the string is empty so that a loop
+         // which stops on an empty line terminates
+         s_vpi_value value = {
+            .format = vpiStringVal,
+            .value = { .str = (PLI_BYTE8 *)"" },
+         };
+         vpi_put_value(str_arg, &value, NULL, vpiNoDelay);
+      }
    }
 
    put_int_result(result);
