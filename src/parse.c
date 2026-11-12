@@ -6925,6 +6925,103 @@ static class_t p_entity_specification(tree_list_t *list)
    return p_entity_class();
 }
 
+static bool is_declared_in_interface(tree_t unit, tree_t decl)
+{
+   // False if the interface object DECL definitely does not belong to
+   // the interface list of UNIT
+
+   const bool generic = tree_kind(decl) == T_GENERIC_DECL;
+
+   switch (tree_kind(unit)) {
+   case T_ENTITY:
+   case T_BLOCK:
+   case T_FUNC_BODY:
+   case T_PROC_BODY:
+   case T_FUNC_DECL:
+   case T_PROC_DECL:
+      break;
+   case T_PACKAGE:
+      if (!generic)
+         return false;
+      break;
+   case T_ARCH:
+      return false;
+   default:
+      return true;   // Not checked
+   }
+
+   if (generic) {
+      const int ngenerics = tree_generics(unit);
+      for (int i = 0; i < ngenerics; i++) {
+         if (tree_generic(unit, i) == decl)
+            return true;
+      }
+   }
+   else if (tree_kind(unit) != T_PACKAGE) {
+      const int nports = tree_ports(unit);
+      for (int i = 0; i < nports; i++) {
+         if (tree_port(unit, i) == decl)
+            return true;
+      }
+   }
+
+   return false;
+}
+
+static void check_attribute_specification(tree_t parent, tree_t t)
+{
+   // LRM 08 section 7.2: an attribute specification for a design unit or
+   // an interface object must appear immediately within the declarative
+   // part of that unit or the unit that declares the interface
+
+   if (tree_subkind(t) != SPEC_OTHERS) {
+      // An entity name list OTHERS must be the last in the declarative
+      // part for a given attribute and entity class
+      const int ndecls = tree_decls(parent);
+      for (int i = 0; i < ndecls; i++) {
+         tree_t d = tree_decl(parent, i);
+         if (tree_kind(d) == T_ATTR_SPEC
+             && tree_subkind(d) == SPEC_OTHERS
+             && tree_ident(d) == tree_ident(t)
+             && tree_class(d) == tree_class(t)) {
+            parse_error(tree_loc(t), "attribute specification for %pI follows "
+                        "an earlier specification with entity name list "
+                        "OTHERS", tree_ident(t));
+            break;
+         }
+      }
+   }
+
+   if (tree_subkind(t) != SPEC_EXACT || !tree_has_ref(t))
+      return;
+
+   tree_t decl = tree_ref(t);
+   switch (tree_kind(decl)) {
+   case T_ENTITY:
+   case T_ARCH:
+   case T_PACKAGE:
+   case T_PACK_BODY:
+   case T_CONFIGURATION:
+      if (decl != parent && tree_kind(parent) != T_CONFIGURATION)
+         parse_error(tree_loc(t), "an attribute specification for design "
+                     "unit %pI must appear immediately within its own "
+                     "declarative part", tree_ident2(t));
+      break;
+
+   case T_PORT_DECL:
+   case T_GENERIC_DECL:
+   case T_PARAM_DECL:
+      if (!is_declared_in_interface(parent, decl))
+         parse_error(tree_loc(t), "an attribute specification for %pI must "
+                     "appear in the declarative part of the unit that "
+                     "declares it", tree_ident2(t));
+      break;
+
+   default:
+      break;
+   }
+}
+
 static void p_attribute_specification(tree_t parent)
 {
    // attribute attribute_designator of entity_specification is expression ;
@@ -6972,6 +7069,8 @@ static void p_attribute_specification(tree_t parent)
       tree_set_ident(t, head);
       tree_set_value(t, value);
       tree_set_type(t, type);
+
+      check_attribute_specification(parent, t);
 
       insert_name(nametab, t, NULL);
       tree_add_decl(parent, t);

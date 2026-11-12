@@ -785,6 +785,8 @@ START_TEST(test_attr)
       { 267, "attribute HIGH cannot be used with scalar objects in VHDL-1993" },
       { 310, "expression must be a BOOLEAN literal" },
       { 312, "NEVER_WAITS attribute can only be applied to procedures" },
+      { 317, "the value of the FOREIGN attribute of a subprogram must be "
+        "locally static" },
       { 325, "cannot read output port X" },
       { 326, "cannot read output port X" },
       { 327, "cannot read output port X" },
@@ -4242,6 +4244,35 @@ START_TEST(test_incfull)
 }
 END_TEST
 
+START_TEST(test_attrspec)
+{
+   set_standard(STD_08);
+
+   input_from_file(TESTDIR "/sem/attrspec.vhd");
+
+   const error_t expect[] = {
+      { 13, "an attribute specification for design unit ATTRSPEC must "
+        "appear immediately within its own declarative part" },
+      { 14, "an attribute specification for P must appear in the "
+        "declarative part of the unit that declares it" },
+      { 18, "attribute specification for PIN follows an earlier "
+        "specification with entity name list OTHERS" },
+      { 33, "the value of the FOREIGN attribute of a subprogram must be "
+        "locally static" },
+      { 36, "an attribute specification for design unit TEST must appear "
+        "immediately within its own declarative part" },
+      { 44, "the value of an attribute of a design unit must be locally "
+        "static" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   parse_and_check(T_ENTITY, T_ARCH, T_ENTITY);
+
+   check_expected_errors();
+}
+END_TEST
+
 START_TEST(test_undefarg)
 {
    set_standard(STD_08);
@@ -4461,6 +4492,7 @@ Suite *get_sem_tests(void)
    tcase_add_test(tc_core, test_idxrange);
    tcase_add_test(tc_core, test_entbody);
    tcase_add_test(tc_core, test_incfull);
+   tcase_add_test(tc_core, test_attrspec);
    suite_add_tcase(s, tc_core);
 
    return s;

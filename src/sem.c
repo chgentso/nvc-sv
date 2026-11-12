@@ -6402,6 +6402,20 @@ static bool sem_check_attr_spec(tree_t t, nametab_t *tab)
                 istr(tree_ident(decl)), class_str(class_of(decl)),
                 class_str(class));
 
+   switch (tree_kind(decl)) {
+   case T_ENTITY:
+   case T_ARCH:
+   case T_PACKAGE:
+   case T_PACK_BODY:
+   case T_CONFIGURATION:
+      if (!sem_locally_static(value))
+         sem_error(value, "the value of an attribute of a design unit must "
+                   "be locally static");
+      break;
+   default:
+      break;
+   }
+
    switch (is_well_known(tree_ident(t))) {
    case W_NEVER_WAITS:
       {
@@ -6417,7 +6431,12 @@ static bool sem_check_attr_spec(tree_t t, nametab_t *tab)
       break;
 
    case W_FOREIGN:
-      if ((class == C_FUNCTION || class == C_PROCEDURE) && !tree_frozen(decl))
+      if (class != C_FUNCTION && class != C_PROCEDURE)
+         break;
+      else if (!sem_locally_static(value))
+         sem_error(value, "the value of the FOREIGN attribute of a "
+                   "subprogram must be locally static");
+      else if (!tree_frozen(decl))
          tree_set_flag(decl, TREE_F_NEVER_WAITS);
       break;
 
