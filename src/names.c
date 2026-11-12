@@ -2354,8 +2354,10 @@ static tree_t resolve_record_ref_or_call(nametab_t *tab, tree_t t, bool pcall)
          return NULL;
    }
 
-   type_t prefix_type = tree_type(prefix);
-   if (type_is_none(prefix_type)) {
+   type_t prefix_type = get_type_or_null(prefix);
+   if (prefix_type == NULL)
+      return NULL;   // Prefix such as a component name has no type
+   else if (type_is_none(prefix_type)) {
       tree_set_type(t, prefix_type);
       return NULL;
    }
