@@ -9977,6 +9977,8 @@ static vlog_node_t p_foreach_statement(void)
       case V_PORT_DECL:
       case V_TF_PORT_DECL:
       case V_FUNC_DECL:   // The return value variable
+      case V_PARAM_DECL:
+      case V_LOCALPARAM:
          ndims = foreach_dimensions(decl, dims);
          if (nselected > 0 && nselected < ndims) {
             memmove(dims, dims + nselected,
