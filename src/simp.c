@@ -1670,8 +1670,9 @@ static void simp_generic_map(tree_t t, tree_t unit)
 
    int last_pos = 0;
    for (; last_pos < ngenmaps; last_pos++) {
-      if (tree_subkind(tree_genmap(t, last_pos)) != P_POS)
-         break;
+      tree_t m = tree_genmap(t, last_pos);
+      if (tree_subkind(m) != P_POS || tree_pos(m) != last_pos)
+         break;   // Entries added for defaulted interface subprograms
    }
 
    if (last_pos == ngenmaps && ngenmaps == ngenerics)
