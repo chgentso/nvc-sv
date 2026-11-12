@@ -5988,6 +5988,7 @@ static tree_t solve_all(nametab_t *tab, tree_t t)
       return t;
 
    tree_t prefix = solve_types(tab, tree_value(t), NULL);
+   tree_set_value(t, prefix);   // May have been rewritten to a function call
 
    type_t type = tree_type(prefix);
    if (type_is_access(type)) {

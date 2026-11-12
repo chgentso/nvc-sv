@@ -2689,3 +2689,4 @@ vcrash_resolved2 normal,2008
 vcrash_resolved3 normal,2008
 vcrash_resolved1 normal,2008
 vcrash_genattr  shell
+vcrash_fcall_all1 normal,2008
