@@ -11463,7 +11463,8 @@ static tree_t p_procedure_call_statement(ident_t label, tree_t name)
    tree_t call = resolve_pcall(nametab, name);
    if (call == NULL) {
       // Only print an error if name is a valid expression
-      if (!type_is_none(tree_type(solve_types(nametab, name, NULL))))
+      tree_t solved = solve_types(nametab, name, NULL);
+      if (!tree_has_type(solved) || !type_is_none(tree_type(solved)))
          parse_error(CURRENT_LOC, "invalid procedure call statement");
 
       call = tree_new(T_PCALL);
