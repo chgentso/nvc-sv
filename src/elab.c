@@ -5685,6 +5685,9 @@ typedef struct {
    unsigned           count, limit;
 } elab_spec_save_t;
 
+// Set while elaborating an iteration with overridden component bindings
+// as the instance trees are shared so cannot be used as cache keys
+static bool                 bindings_overridden = false;
 static elab_index_config_t *index_configs = NULL;
 static unsigned             n_index_configs = 0, max_index_configs = 0;
 
@@ -6323,7 +6326,8 @@ static void elab_component(tree_t inst, tree_t comp, const elab_ctx_t *ctx)
    mod_cache_t *mc = elab_cached_module(tree_to_object(comp), &new_ctx);
    mc->count++;
 
-   elab_instance_t *ei = ghash_get(mc->instances, inst);
+   elab_instance_t *ei =
+      bindings_overridden ? NULL : ghash_get(mc->instances, inst);
    if (elab_can_clone_instance(ei, &new_ctx))
       new_ctx.cloned = tree_ident(ei->block);
    else {
@@ -6333,7 +6337,8 @@ static void elab_component(tree_t inst, tree_t comp, const elab_ctx_t *ctx)
 
       elab_fold_generics(ei->block, ctx);
 
-      ghash_put(mc->instances, inst, ei);
+      if (!bindings_overridden)
+         ghash_put(mc->instances, inst, ei);
       mc->unique++;
 
       // XXX: workaround for potentially different layouts
@@ -6608,10 +6613,15 @@ static void elab_for_generate(tree_t t, const elab_ctx_t *ctx)
          // bindings of the instances in the statement for its duration
          elab_spec_save_t save = {};
          tree_t icfg = elab_find_index_config(t, i, ctx);
-         if (icfg != NULL)
+         const bool was_overridden = bindings_overridden;
+         if (icfg != NULL) {
             elab_bind_components_save(t, icfg, &save);
+            bindings_overridden = true;
+         }
 
          elab_vhdl_sub_blocks(t, &new_ctx);
+
+         bindings_overridden = was_overridden;
 
          for (unsigned k = save.count; k > 0; k--) {
             elab_saved_spec_t *it = &(save.items[k - 1]);
