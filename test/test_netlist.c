@@ -343,6 +343,134 @@ START_TEST(test_vhdl1)
 }
 END_TEST
 
+START_TEST(test_m5_vhdl_params)
+{
+   // Generics of each instance with the value it was elaborated with, in
+   // declaration order and including those left at their default
+
+   set_standard(STD_08);
+   input_from_file(TESTDIR "/netlist/m5v_params.vhd");
+
+   tree_t e = run_elab();
+   fail_if_errors();
+
+   conn_design_t *cd = conn_build(e);
+   ck_assert_ptr_nonnull(cd);
+
+   conn_block_t *top = conn_root(cd, 0);
+   ck_assert_uint_eq(top->nparams, 0);
+
+   conn_block_t *u1 = get_inst(top, "U1")->child;
+   ck_assert_uint_eq(u1->nparams, 10);
+   ck_assert_str_eq(u1->params[0].name, "W");
+   ck_assert_str_eq(u1->params[0].value, "8");
+   ck_assert_str_eq(u1->params[1].name, "NAME");
+   ck_assert_str_eq(u1->params[1].value, "\"def\"");
+   ck_assert_str_eq(u1->params[2].value, "0.5");
+   ck_assert_str_eq(u1->params[3].value, "true");
+   ck_assert_str_eq(u1->params[4].value, "green");
+   ck_assert_str_eq(u1->params[5].value, "\"1010\"");
+   ck_assert_str_eq(u1->params[6].value, "10 ns");
+   ck_assert_str_eq(u1->params[7].value, "'x'");
+   ck_assert_str_eq(u1->params[9].name, "NEG");
+   ck_assert_str_eq(u1->params[9].value, "-1");
+
+   // Values that depend on the generate index
+   conn_block_t *g0 = get_inst(top, "G(0).U2")->child;
+   conn_block_t *g1 = get_inst(top, "G(1).U2")->child;
+   ck_assert_str_eq(g0->params[0].value, "5");
+   ck_assert_str_eq(g1->params[0].value, "6");
+   ck_assert_str_eq(g0->params[1].value, "\"xy\"");
+   ck_assert_str_eq(g0->params[2].value, "1e-09");
+   ck_assert_str_eq(g0->params[3].value, "false");
+   ck_assert_str_eq(g0->params[4].value, "blue");
+   ck_assert_str_eq(g0->params[5].value, "\"0011\"");
+   ck_assert_str_eq(g0->params[6].value, "2 us");
+   ck_assert_str_eq(g0->params[8].name, "IV");
+   ck_assert_str_eq(g0->params[8].value, "(i, i + 1)");   // As written
+   ck_assert_str_eq(g0->params[9].value, "0");
+   ck_assert_str_eq(g1->params[9].value, "-1");
+
+   // Generic of an if generate
+   conn_block_t *u3 = get_inst(top, "C.U3")->child;
+   ck_assert_str_eq(u3->params[0].value, "6");
+   ck_assert_str_eq(u3->params[1].value, "\"def\"");
+
+   // A component bound to an entity shows the generics of the entity
+   conn_block_t *uc = get_inst(top, "UC")->child;
+   ck_assert_uint_eq(uc->nparams, 10);
+   ck_assert_str_eq(uc->params[0].value, "8");
+
+   // Passed down two levels
+   conn_block_t *um = get_inst(top, "UM")->child;
+   ck_assert_uint_eq(um->nparams, 2);
+   ck_assert_str_eq(um->params[0].value, "3");
+   ck_assert_str_eq(um->params[1].value, "\"mid\"");
+   conn_block_t *umu = get_inst(um, "U")->child;
+   ck_assert_str_eq(umu->params[0].value, "6");
+   ck_assert_str_eq(umu->params[1].value, "\"mid!\"");
+
+   char *json = write_json(cd, 1);
+   ck_has(json, "\"type\":\"M5V_TOP.G(0).U2\"");
+   ck_has(json, "\"parameters\":{\n\"W\":\"5\",\n\"NAME\":\"\\\"xy\\\"\"");
+   ck_has(json, "\"M5V_TOP.G(1).U2\":{");
+   free(json);
+
+   // At the depth cut the cell still has them
+   json = write_json(cd, 0);
+   ck_has_not(json, "\"M5V_TOP.G(0).U2\":{");
+   ck_has(json, "\"parameters\":{\n\"W\":\"5\",");
+   free(json);
+
+   conn_free(cd);
+}
+END_TEST
+
+START_TEST(test_m5_vhdl_mixed)
+{
+   // Generics of a VHDL entity instantiated from Verilog with parameters,
+   // in an instance array and a generate loop, and of a component bound to
+   // a Verilog module under VHDL
+
+   set_standard(STD_08);
+
+   input_from_file(TESTDIR "/netlist/vhdl1.vhd");
+   analyse_file();
+
+   input_from_file(TESTDIR "/netlist/mixed1.v");
+   analyse_file();
+
+   input_from_file(TESTDIR "/netlist/mixed1.vhd");
+   analyse_file();
+
+   input_from_file(TESTDIR "/netlist/mixed3.v");
+
+   tree_t e = run_elab();
+   fail_if_errors();
+
+   conn_design_t *cd = conn_build(e);
+   ck_assert_ptr_nonnull(cd);
+
+   conn_block_t *top = conn_root(cd, 0);
+
+   const char *labels[] = { "ua[0]", "ua[1]", "g[0].u", "g[1].u" };
+   for (int i = 0; i < ARRAY_LEN(labels); i++) {
+      conn_block_t *b = get_inst(top, labels[i])->child;
+      ck_assert_int_eq(b->lang, CONN_VHDL);
+      ck_assert_uint_eq(b->nparams, 1);
+      ck_assert_str_eq(b->params[0].name, "N");
+      ck_assert_str_eq(b->params[0].value, "4");
+   }
+
+   conn_block_t *mid = get_inst(top, "u_mid")->child;
+   ck_assert_uint_eq(mid->nparams, 0);
+
+   conn_free(cd);
+}
+END_TEST
+
+
+
 START_TEST(test_vhdl1_query)
 {
    set_standard(STD_08);
@@ -945,6 +1073,8 @@ Suite *get_netlist_tests(void)
 
    TCase *tc = nvc_unit_test();
    tcase_add_test(tc, test_vhdl1);
+   tcase_add_test(tc, test_m5_vhdl_params);
+   tcase_add_test(tc, test_m5_vhdl_mixed);
    tcase_add_test(tc, test_vhdl1_query);
    tcase_add_test(tc, test_vhdl1_json);
    tcase_add_test(tc, test_runtime);

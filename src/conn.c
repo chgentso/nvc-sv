@@ -148,7 +148,7 @@ static char *dstrf(conn_design_t *cd, const char *fmt, ...)
          _p;                                                      \
       })
 
-static void UNUSED add_block_param(conn_design_t *cd, param_list_t *l,
+static void add_block_param(conn_design_t *cd, param_list_t *l,
                                  const char *name, const char *value)
 {
    conn_param_t p = { dstr(cd, name), dstr(cd, value) };
@@ -1710,9 +1710,356 @@ static void register_generics(conn_design_t *cd, tree_t b, hash_t *dst)
 ////////////////////////////////////////////////////////////////////////////////
 // VHDL instance parameters
 
+// The source text a location covers, white space collapsed and cut at 200
+// characters; comments are not removed so only used for single values
+static char *vhdl_param_source(const loc_t *loc)
+{
+   if (loc_invalid_p(loc) || loc->line_delta != 0)
+      return NULL;
+
+   const char *src = loc_get_source(loc);
+   if (src == NULL)
+      return NULL;
+
+   text_buf_t *tb = tb_new();
+   bool space = false;
+   const char *p = src + loc->first_column;
+   for (unsigned i = 0; i <= loc->column_delta && p[i] != '\0'
+           && p[i] != '\n'; i++) {
+      if (isspace((unsigned char)p[i]))
+         space = true;
+      else {
+         if (space && tb_len(tb) > 0)
+            tb_append(tb, ' ');
+         space = false;
+         if (tb_len(tb) >= 200) {
+            tb_cat(tb, "...");
+            break;
+         }
+         tb_append(tb, p[i]);
+      }
+   }
+
+   return tb_claim(tb);
+}
+
+static void vhdl_param_real(text_buf_t *tb, double value)
+{
+   // The shortest decimal text that reads back as the same number
+   char buf[40];
+   for (int prec = 1; prec <= 17; prec++) {
+      snprintf(buf, sizeof(buf), "%.*g", prec, value);
+      if (strtod(buf, NULL) == value)
+         break;
+   }
+   tb_cat(tb, buf);
+}
+
+static bool vhdl_param_char(tree_t e, char *c)
+{
+   // An element of a string: a character literal
+   if (tree_kind(e) != T_REF || !tree_has_ref(e)
+       || tree_kind(tree_ref(e)) != T_ENUM_LIT)
+      return false;
+
+   const char *name = istr(tree_ident(tree_ref(e)));
+   if (strlen(name) != 3 || name[0] != '\'' || name[2] != '\'')
+      return false;
+
+   *c = name[1];
+   return true;
+}
+
+static void vhdl_param_lower(text_buf_t *tb, const char *name)
+{
+   if (name[0] == '\'' || name[0] == '\\')
+      tb_cat(tb, name);   // Character literal or extended identifier
+   else {
+      for (const char *p = name; *p; p++)
+         tb_append(tb, tolower((unsigned char)*p));
+   }
+}
+
+// The characters of a string made of literals, constants and generics
+// joined by &
+static bool vhdl_param_string(conn_design_t *cd, tree_t e, text_buf_t *tb,
+                              int depth)
+{
+   char c;
+   if (depth > 16)
+      return false;
+
+
+   switch (tree_kind(e)) {
+   case T_STRING:
+      for (int i = 0; i < tree_chars(e); i++) {
+         if (!vhdl_param_char(tree_char(e, i), &c))
+            return false;
+         tb_append(tb, c);
+      }
+      return true;
+
+   case T_REF:
+      if (vhdl_param_char(e, &c)) {
+         tb_append(tb, c);
+         return true;
+      }
+      else if (tree_has_ref(e)) {
+         tree_t d = tree_ref(e);
+         tree_t v = NULL;
+         if (tree_kind(d) == T_GENERIC_DECL) {
+            gen_value_t *gv = cd->genval ? hash_get(cd->genval, d) : NULL;
+            v = gv ? gv->value : NULL;
+            if (v == NULL || tree_kind(v) == T_OPEN)
+               v = tree_has_value(d) ? tree_value(d) : NULL;
+         }
+         else if (tree_kind(d) == T_CONST_DECL && tree_has_value(d))
+            v = tree_value(d);
+         return v != NULL && vhdl_param_string(cd, v, tb, depth + 1);
+      }
+      return false;
+
+   case T_FCALL:
+      return tree_has_ident(e) && tree_params(e) == 2
+         && strcmp(istr(tree_ident(e)), "\"&\"") == 0
+         && vhdl_param_string(cd, tree_value(tree_param(e, 0)), tb, depth + 1)
+         && vhdl_param_string(cd, tree_value(tree_param(e, 1)), tb, depth + 1);
+
+   case T_AGGREGATE:
+      // Concatenation as elaboration leaves it
+      for (int i = 0; i < tree_assocs(e); i++) {
+         tree_t a = tree_assoc(e, i);
+         if (tree_subkind(a) != A_CONCAT
+             || !vhdl_param_string(cd, tree_value(a), tb, depth + 1))
+            return false;
+      }
+      return tree_assocs(e) > 0;
+
+   case T_QUALIFIED:
+   case T_TYPE_CONV:
+      return vhdl_param_string(cd, tree_value(e), tb, depth + 1);
+
+   default:
+      return false;
+   }
+}
+
+static void vhdl_param_text(conn_design_t *cd, text_buf_t *tb, tree_t value)
+{
+   int64_t ival;
+
+   if (tree_kind(value) == T_FCALL
+       || (tree_kind(value) == T_AGGREGATE && tree_assocs(value) > 0
+           && tree_subkind(tree_assoc(value, 0)) == A_CONCAT)) {
+      // Concatenation of strings
+      LOCAL_TEXT_BUF str = tb_new();
+      if (vhdl_param_string(cd, value, str, 0)) {
+         tb_append(tb, '"');
+         for (const char *p = tb_get(str); *p; p++) {
+            if (*p == '"')
+               tb_append(tb, '"');
+            tb_append(tb, *p);
+         }
+         tb_append(tb, '"');
+         return;
+      }
+   }
+
+   switch (tree_kind(value)) {
+   case T_LITERAL:
+      switch (tree_subkind(value)) {
+      case L_INT:
+         tb_printf(tb, "%"PRIi64, tree_ival(value));
+         return;
+      case L_REAL:
+         vhdl_param_real(tb, tree_dval(value));
+         return;
+      case L_PHYSICAL:
+         {
+            // As written if it is a simple literal
+            char *src LOCAL = vhdl_param_source(tree_loc(value));
+            if (src != NULL && isdigit((unsigned char)src[0])
+                && strchr(src, ' ') != NULL && strchr(src, '(') == NULL) {
+               tb_cat(tb, src);
+               return;
+            }
+
+            tb_printf(tb, "%"PRIi64, tree_ival(value));
+            if (tree_has_ident(value)) {
+               tb_append(tb, ' ');
+               vhdl_param_lower(tb, istr(tree_ident(value)));
+            }
+            return;
+         }
+      default:
+         break;
+      }
+      break;
+
+   case T_STRING:
+      {
+         tb_append(tb, '"');
+         const int nchars = tree_chars(value);
+         for (int i = 0; i < nchars; i++) {
+            char c;
+            if (!vhdl_param_char(tree_char(value, i), &c))
+               c = '?';
+            if (c == '"')
+               tb_append(tb, '"');
+            tb_append(tb, c);
+         }
+         tb_append(tb, '"');
+      }
+      return;
+
+   case T_AGGREGATE:
+      {
+         // Positional aggregate of character literals is a string
+         const int nassocs = tree_assocs(value);
+         bool chars = nassocs > 0;
+         for (int i = 0; i < nassocs && chars; i++) {
+            tree_t a = tree_assoc(value, i);
+            char c;
+            chars = tree_subkind(a) == A_POS
+               && vhdl_param_char(tree_value(a), &c);
+         }
+
+         if (chars) {
+            tb_append(tb, '"');
+            for (int i = 0; i < nassocs; i++) {
+               char c = '?';
+               vhdl_param_char(tree_value(tree_assoc(value, i)), &c);
+               tb_append(tb, c);
+            }
+            tb_append(tb, '"');
+            return;
+         }
+      }
+      break;
+
+   case T_REF:
+      if (tree_has_ref(value)) {
+         tree_t decl = tree_ref(value);
+         switch (tree_kind(decl)) {
+         case T_ENUM_LIT:
+            vhdl_param_lower(tb, istr(tree_ident(decl)));
+            return;
+         case T_GENERIC_DECL:
+         case T_CONST_DECL:
+            if (eval_int(cd, value, &ival, 0)) {
+               tb_printf(tb, "%"PRIi64, ival);
+               return;
+            }
+            break;
+         default:
+            break;
+         }
+      }
+      break;
+
+   case T_TYPE_CONV:
+   case T_QUALIFIED:
+      vhdl_param_text(cd, tb, tree_value(value));
+      return;
+
+   default:
+      break;
+   }
+
+   if (eval_int(cd, value, &ival, 0)) {
+      tb_printf(tb, "%"PRIi64, ival);
+      return;
+   }
+
+   // Anything else as written
+   char *src LOCAL = vhdl_param_source(tree_loc(value));
+   if (src != NULL && *src != '\0')
+      tb_cat(tb, src);
+   else
+      tb_cat(tb, "...");
+}
+
 static void vhdl_block_params(conn_design_t *cd, conn_block_t *blk, tree_t b,
                               tree_t outer)
 {
+   // The generics of the instance, defaults included, in declaration order
+   param_list_t list = AINIT;
+
+   // The values are written in terms of the generics of the parent
+   hash_t *saved_gen = cd->genval;
+   if (blk->parent != NULL) {
+      inst_maps_t *pm = hash_get(cd->blkmaps, blk->parent);
+      if (pm != NULL)
+         cd->genval = pm->gen;
+   }
+
+   // A component bound to an entity shows the generics of the entity,
+   // whose values are written in terms of those of the component
+   if (tree_decls(b) > 0 && tree_kind(tree_decl(b, 0)) == T_HIER
+       && tree_has_ref(tree_decl(b, 0))
+       && tree_kind(tree_ref(tree_decl(b, 0))) == T_COMPONENT) {
+      for (int i = 0; i < tree_stmts(b); i++) {
+         tree_t s = tree_stmt(b, i);
+         if (tree_kind(s) == T_BLOCK && tree_generics(s) > 0) {
+            b = s;
+            cd->genval = saved_gen;
+            break;
+         }
+      }
+   }
+
+   const int ngenerics = tree_generics(b);
+   const int ngenmaps = tree_genmaps(b);
+   for (int i = 0; i < ngenerics; i++) {
+      tree_t g = tree_generic(b, i);
+
+      tree_t value = NULL;
+      for (int j = 0; j < ngenmaps && value == NULL; j++) {
+         tree_t m = tree_genmap(b, j);
+         if (tree_subkind(m) == P_POS && tree_pos(m) == i)
+            value = tree_value(m);
+      }
+
+      LOCAL_TEXT_BUF tb = tb_new();
+      switch (tree_class(g)) {
+      case C_CONSTANT:
+         if ((value == NULL || tree_kind(value) == T_OPEN)
+             && tree_has_value(g))
+            value = tree_value(g);   // Not mapped: the default is used
+         if (value == NULL || tree_kind(value) == T_OPEN)
+            continue;
+         else {
+            // The value was evaluated in the context of the parent when
+            // the block was registered: it may depend on a generate index
+            inst_maps_t *im = hash_get(cd->blkmaps, blk);
+            gen_value_t *gv = im ? hash_get(im->gen, g) : NULL;
+            if (gv != NULL && gv->has_int && gv->value == value
+                && type_is_integer(tree_type(g)))
+               tb_printf(tb, "%"PRIi64, gv->ival);
+            else
+               vhdl_param_text(cd, tb, value);
+         }
+         break;
+
+      case C_TYPE:
+         if (value == NULL || tree_kind(value) != T_REF
+             || !tree_has_type(value))
+            continue;
+         tb_printf(tb, "%s", type_pp(tree_type(value)));
+         break;
+
+      default:
+         continue;
+      }
+
+      add_block_param(cd, &list, istr(tree_ident(g)), tb_get(tb));
+   }
+
+   cd->genval = saved_gen;
+
+   blk->params  = DDUP(cd, list, conn_param_t);
+   blk->nparams = list.count;
+   ACLEAR(list);
 }
 
 static bool is_generate_block(tree_t b)
