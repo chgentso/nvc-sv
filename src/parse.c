@@ -8396,6 +8396,12 @@ static void p_alias_declaration(tree_t parent)
       tree_t decl = tree_ref(value);
       if (is_type_decl(decl))
          type_alias = true;
+      else if (!nonobject_alias
+               && (is_design_unit(decl) || tree_kind(decl) == T_COMPONENT)) {
+         // Selected name denoting a design unit, such as LIB.UNIT
+         tree_set_flag(t, TREE_F_NONOBJECT_ALIAS);
+         nonobject_alias = true;
+      }
    }
 
    if ((type_alias || nonobject_alias) && has_subtype_indication)

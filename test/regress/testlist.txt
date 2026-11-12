@@ -2691,3 +2691,4 @@ vcrash_resolved1 normal,2008
 vcrash_genattr  shell
 vcrash_fcall_all1 normal,2008
 vcrash_component_prefix shell
+vcrash_pkgalias1 normal,2008
