@@ -4518,6 +4518,11 @@ void release_signal(rt_model_t *m, rt_signal_t *s, int offset, size_t count)
       count -= n->width;
       assert(count >= 0);
 
+      // Releasing a net which is not forced has no effect (IEEE 1800-2017
+      // 10.6.2): it must not take the value of a source it never had
+      if (!(n->flags & NET_F_FORCED))
+         continue;
+
       n->flags &= ~NET_F_FORCED;
 
       rt_source_t *src = get_pseudo_source(m, n, SOURCE_FORCING);
