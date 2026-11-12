@@ -25568,8 +25568,13 @@ static mir_value_t vlog_lower_crv_mode(vlog_gen_t *g, vlog_node_t v)
 
    int bit = -1;
    if (decl != NULL) {
-      if (is_rand)
+      if (is_rand) {
          bit = vlog_crv_rand_bit(class, decl);
+         if (bit >= 64)
+            fatal_at(vlog_loc(v), "sorry, rand_mode of the property %s which "
+                     "is not among the first 64 rand properties of its class "
+                     "is not supported", istr(vlog_ident(decl)));
+      }
       else {
          vlog_node_t list[64];
          int count = 0;

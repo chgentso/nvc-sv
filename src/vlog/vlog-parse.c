@@ -16817,17 +16817,15 @@ static void add_rand_state(vlog_node_t class)
    // state of each randc variable
 
    bool own = false;
-   int nrand = 0, ncons = 0;
+   int ncons = 0;
    for (vlog_node_t c = class; ; c = vlog_ref(c)) {
       const int ndecls = vlog_decls(c);
       for (int i = 0; i < ndecls; i++) {
          vlog_node_t d = vlog_decl(c, i);
          switch (vlog_kind(d)) {
          case V_VAR_DECL:
-            if (vlog_flags(d) & (VLOG_F_RAND | VLOG_F_RANDC)) {
-               nrand++;
+            if (vlog_flags(d) & (VLOG_F_RAND | VLOG_F_RANDC))
                own |= (c == class);
-            }
             break;
          case V_CONSTRAINT:
             // An override in a derived class uses the same bit
@@ -16847,10 +16845,8 @@ static void add_rand_state(vlog_node_t class)
    if (!own)
       return;
 
-   if (nrand > 64)
-      error_at(vlog_loc(class), "sorry, more than 64 rand properties in a "
-               "class are not supported");
-   else if (ncons > 64)
+   // Only the first 64 rand properties have a rand_mode bit
+   if (ncons > 64)
       error_at(vlog_loc(class), "sorry, more than 64 constraints in a class "
                "are not supported");
 

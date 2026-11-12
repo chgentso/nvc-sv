@@ -84,8 +84,10 @@ int64_t crv_generated(crv_op_t op, const int64_t *args)
    case CRV_OP_OBJECT_ID:
       return args[0];
    case CRV_OP_TEST_BIT:
-      if (args[1] < 0)
+      if (args[1] == -1)
          return args[0] != 0;
+      else if (args[1] < 0 || args[1] >= 64)
+         return 0;   // Not one of the properties with a rand_mode bit
       return ((uint64_t)args[0] >> args[1]) & 1;
    case CRV_OP_SET_BIT:
       {
@@ -168,7 +170,7 @@ int64_t crv_generated(crv_op_t op, const int64_t *args)
       }
       else if (!args[3])
          return 0;
-      else if (args[5] < 0)
+      else if (args[5] < 0 || args[5] >= 64)
          return 1;
       else
          return !((args[4] >> args[5]) & 1);

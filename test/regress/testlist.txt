@@ -2645,3 +2645,4 @@ svbindenum1     verilog
 svhdlarr1       verilog
 svdynslice1     verilog
 svrandwide2     verilog
+svrandmany1     verilog
