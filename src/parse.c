@@ -2524,6 +2524,8 @@ static void convert_universal_bounds(tree_t r)
    const range_kind_t kind = tree_subkind(r);
    if (kind != RANGE_TO && kind != RANGE_DOWNTO)
       return;
+   else if (!type_is_universal(tree_type(r)))
+      return;   // Range has an explicit type mark
 
    tree_t left = tree_left(r);
    tree_t right = tree_right(r);

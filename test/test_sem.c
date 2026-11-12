@@ -4188,6 +4188,25 @@ START_TEST(test_issue1686)
 }
 END_TEST
 
+START_TEST(test_idxrange)
+{
+   input_from_file(TESTDIR "/sem/idxrange.vhd");
+
+   const error_t expect[] = {
+      {  5, "expected type of range bounds to be CHARACTER but have "
+         "universal_integer" },
+      {  8, "expected type of range bounds to be BOOLEAN but have "
+         "universal_integer" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   parse_and_check(T_ENTITY, T_ARCH);
+
+   check_expected_errors();
+}
+END_TEST
+
 START_TEST(test_undefarg)
 {
    set_standard(STD_08);
@@ -4404,6 +4423,7 @@ Suite *get_sem_tests(void)
    tcase_add_test(tc_core, test_issue1683);
    tcase_add_test(tc_core, test_issue1686);
    tcase_add_test(tc_core, test_undefarg);
+   tcase_add_test(tc_core, test_idxrange);
    suite_add_tcase(s, tc_core);
 
    return s;
