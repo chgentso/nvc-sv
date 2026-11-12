@@ -2684,3 +2684,4 @@ vcrash_group1   normal
 vcrash_null1    normal,2008
 vcrash_protalias1 normal,2008
 vcrash_protalias2 shell
+vcrash_portconv1 normal,2008
