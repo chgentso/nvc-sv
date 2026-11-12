@@ -11044,7 +11044,7 @@ static void check_pending_disables(void)
 
    for (int i = 0; i < pending_disables.count; i++) {
       vlog_node_t d = pending_disables.items[i];
-      if (!hset_contains(block_names, vlog_ident(d)))
+      if (block_names == NULL || !hset_contains(block_names, vlog_ident(d)))
          error_at(vlog_loc(d), "no visible label %pQ", vlog_ident(d));
    }
 
@@ -12459,9 +12459,43 @@ static vlog_node_t p_statement(void)
 
    optional_attributes();
 
+   // A label on a statement other than a block names the statement so that
+   // a disable can leave it: treat as a block holding only that statement
+   bool wrap = false;
+   switch (peek()) {
+   case tIF:
+   case tFOREVER:
+   case tWHILE:
+   case tREPEAT:
+   case tDO:
+   case tFOR:
+   case tFOREACH:
+   case tCASE:
+   case tCASEX:
+   case tCASEZ:
+   case tUNIQUE:
+   case tUNIQUE0:
+   case tPRIORITY:
+      wrap = id != NULL;
+      break;
+   default:
+      break;
+   }
+
    const int depth = match_depth;
    vlog_node_t v = p_statement_item(id);
    match_unwind(depth);
+
+   if (wrap && v != NULL) {
+      vlog_node_t b = vlog_new(V_SEQ_BLOCK);
+      vlog_set_ident(b, id);
+      vlog_set_loc(b, vlog_loc(v));
+      vlog_add_stmt(b, v);
+      vlog_symtab_put(symtab, b);
+      note_block_name(id);
+      return b;
+   }
+
    return v;
 }
 

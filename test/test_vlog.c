@@ -3933,6 +3933,23 @@ START_TEST(test_crash1)
 }
 END_TEST
 
+START_TEST(test_crash2)
+{
+   const error_t expect[] = {
+      {  3, "no visible label 'abcd'" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/crash2.sv");
+
+   while (vlog_parse() != NULL)
+      ;
+
+   check_expected_errors();
+}
+END_TEST
+
 Suite *get_vlog_tests(void)
 {
    Suite *s = suite_create("vlog");
@@ -4075,6 +4092,7 @@ Suite *get_vlog_tests(void)
    tcase_add_test(tc, test_config1);
    tcase_add_test(tc, test_refarg1);
    tcase_add_test(tc, test_crash1);
+   tcase_add_test(tc, test_crash2);
    suite_add_tcase(s, tc);
 
    return s;

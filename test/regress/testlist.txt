@@ -2666,3 +2666,4 @@ svrandrepl1     verilog
 svranddistunsigned1 verilog
 svassertoffstr1 verilog
 svassertoffrel1 verilog
+svstmtlabel1 verilog
