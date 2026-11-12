@@ -1220,8 +1220,11 @@ static int parse_ex_id(char *str)
    TOKEN(tID);
 }
 
-static void strip_underscores(char *s)
+static void strip_underscores(char *s, int base)
 {
+   // An underscore must be followed by a digit in the same base
+   // (zero if no check) as the literal
+
    bool error = false;
    char *p;
    for (p = s; *s; s++) {
@@ -1230,6 +1233,12 @@ static void strip_underscores(char *s)
       else if ((s[1] == '\0' || s[1] == '_') && !error) {
          error_at(&yylloc, "a literal may not end with an underscore or "
                   "contain multiple consecutive underscores");
+         error = true;
+      }
+      else if (((base == 10 && !isdigit((unsigned char)s[1]))
+                || (base == 16 && !isxdigit((unsigned char)s[1]))) && !error) {
+         error_at(&yylloc, "an underscore in a literal must be followed by "
+                  "a digit");
          error = true;
       }
    }
@@ -1243,7 +1252,7 @@ static int parse_decimal_literal(const char *str)
 
    int tok = tERROR;
    char *tmp LOCAL = xstrdup(str);
-   strip_underscores(tmp);
+   strip_underscores(tmp, 10);
 
    char *dot = strpbrk(tmp, ".");
 
@@ -1290,7 +1299,7 @@ static int parse_based_literal(const char *str)
 
    int tok = tERROR;
    char *tmp LOCAL = xstrdup(str);
-   strip_underscores(tmp);
+   strip_underscores(tmp, 16);
 
    char *dot  = strpbrk(tmp, ".");
    char *sign = strpbrk(tmp, "-");
@@ -1387,7 +1396,7 @@ static int parse_verilog_real(const char *str)
    // unsigned_number [ . unsigned_number ] exp [ sign ] unsigned_number
 
    char *tmp LOCAL = xstrdup(str);
-   strip_underscores(tmp);
+   strip_underscores(tmp, 0);
 
    yylval.real = strtod(tmp, NULL);
    return tREAL;

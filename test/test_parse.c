@@ -880,6 +880,8 @@ START_TEST(test_literal)
         "consecutive underscores" },
       { 40, "a literal may not end with an underscore or contain multiple "
         "consecutive underscores" },
+      { 41, "an underscore in a literal must be followed by a digit" },
+      { 42, "an underscore in a literal must be followed by a digit" },
       { -1, NULL }
    };
    expect_errors(expect);

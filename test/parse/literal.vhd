@@ -38,6 +38,9 @@ ARCHITECTURE aa OF ee IS
 
   constant u1 : integer := 1__;         -- Error
   constant u2 : integer := 1__2;        -- Error
+  constant u3 : integer := 1234_E2;     -- Error
+  constant u4 : integer := 16#F_#;      -- Error
+  constant u5 : integer := 1_2E1_0;     -- OK
 BEGIN
 
 END ARCHITECTURE;
