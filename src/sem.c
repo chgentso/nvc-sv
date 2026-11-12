@@ -596,13 +596,38 @@ static bool sem_has_access(type_t t)
    return false;
 }
 
+static void sem_incomplete_type_cb(tree_t t, tree_t parent, nametab_t *tab)
+{
+   type_t type = tree_type(t);
+   if (parent == NULL || !opt_get_int(OPT_MISSING_BODY))
+      return;
+   else if (type_kind(type) != T_INCOMPLETE)
+      return;
+   else if (have_name_errors(tab))
+      return;   // May be missing due to parse errors
+
+   const tree_kind_t kind = tree_kind(parent);
+   if (kind == T_PACKAGE || kind == T_PROT_DECL)
+      return;   // May be completed in the body
+
+   if (type_kind(resolve_type(tab, type)) == T_INCOMPLETE) {
+      diag_t *d = diag_new(DIAG_ERROR, tree_loc(t));
+      diag_printf(d, "missing full type declaration for incomplete type %pI",
+                  tree_ident(t));
+      diag_lrm(d, STD_08, "5.4.2");
+      diag_emit(d);
+   }
+}
+
 static bool sem_check_type_decl(tree_t t, nametab_t *tab)
 {
    type_t type = tree_type(t);
 
    // Nothing more to do for incomplete types
-   if (type_kind(type) == T_INCOMPLETE)
+   if (type_kind(type) == T_INCOMPLETE) {
+      defer_check(tab, sem_incomplete_type_cb, t);
       return true;
+   }
 
    type_kind_t kind = type_kind(type);
 

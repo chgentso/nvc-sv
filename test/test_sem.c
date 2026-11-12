@@ -907,6 +907,7 @@ END_TEST
 
 START_TEST(test_access)
 {
+   opt_set_int(OPT_MISSING_BODY, 0);
    set_standard(STD_00);
 
    input_from_file(TESTDIR "/sem/access.vhd");
@@ -4224,6 +4225,23 @@ START_TEST(test_entbody)
 }
 END_TEST
 
+START_TEST(test_incfull)
+{
+   input_from_file(TESTDIR "/sem/incfull.vhd");
+
+   const error_t expect[] = {
+      { 13, "missing full type declaration for incomplete type LOCAL" },
+      {  5, "missing full type declaration for incomplete type MISSING" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   parse_and_check(T_ENTITY, T_ARCH);
+
+   check_expected_errors();
+}
+END_TEST
+
 START_TEST(test_undefarg)
 {
    set_standard(STD_08);
@@ -4442,6 +4460,7 @@ Suite *get_sem_tests(void)
    tcase_add_test(tc_core, test_undefarg);
    tcase_add_test(tc_core, test_idxrange);
    tcase_add_test(tc_core, test_entbody);
+   tcase_add_test(tc_core, test_incfull);
    suite_add_tcase(s, tc_core);
 
    return s;
