@@ -247,6 +247,22 @@ static bool sva_matches(const sva_t *s, const control_t *c)
       *cut = '\0';
    }
 
+   // A name with a scope in front of the assertion, taken from a subroutine
+   // of another scope (a task of an interface called from the testbench)
+   // cannot be resolved from the scope that called it: select the assertion
+   // by the end of its path
+   if (dot != NULL && s->path != NULL && s->label != NULL) {
+      LOCAL_TEXT_BUF full = tb_new();
+      tb_cat(full, s->path);
+      tb_append(full, '.');
+      tb_cat(full, s->label);
+
+      const size_t flen = tb_len(full), llen = strlen(c->label);
+      if (flen > llen && strcmp(tb_get(full) + flen - llen, c->label) == 0
+          && tb_get(full)[flen - llen - 1] == '.')
+         return true;
+   }
+
    return false;
 }
 
