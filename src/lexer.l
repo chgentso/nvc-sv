@@ -1496,9 +1496,9 @@ static void cstring_append(const char *text)
                if (ch >= '0' && ch <= '9')
                   num = num * 16 + (ch - '0');
                else if (ch >= 'a' && ch <= 'f')
-                  num = num * 16 + (ch - 'a');
+                  num = num * 16 + 10 + (ch - 'a');
                else if (ch >= 'A' && ch <= 'F')
-                  num = num * 16 + (ch - 'A');
+                  num = num * 16 + 10 + (ch - 'A');
                else
                   break;
             }

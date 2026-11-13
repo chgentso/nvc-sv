@@ -2728,3 +2728,4 @@ svifaceparam2 verilog
 svqmarklit1 verilog
 svsignedlit1 verilog
 svportsigned1 verilog
+svstrhex1 verilog
