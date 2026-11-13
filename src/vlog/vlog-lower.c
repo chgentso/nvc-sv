@@ -26134,10 +26134,14 @@ static void vlog_inside_context(vlog_gen_t *g, vlog_node_t item,
                                 unsigned *width, bool *is_signed)
 {
    if (vlog_kind(item) == V_INSIDE_RANGE) {
-      *width = MAX(*width, vlog_width(vlog_left(item)));
-      *width = MAX(*width, vlog_width(vlog_right(item)));
-      *is_signed &= vlog_is_signed(vlog_left(item))
-         && vlog_is_signed(vlog_right(item));
+      vlog_node_t bounds[] = { vlog_left(item), vlog_right(item) };
+      for (int i = 0; i < 2; i++) {
+         if (vlog_kind(bounds[i]) == V_DOLLAR)
+            continue;   // The limit of the type
+
+         *width = MAX(*width, vlog_width(bounds[i]));
+         *is_signed &= vlog_is_signed(bounds[i]);
+      }
    }
    else {
       vlog_node_t atype = vlog_inside_array_type(item);
@@ -26164,12 +26168,19 @@ static mir_value_t vlog_inside_match(vlog_gen_t *g, vlog_node_t item,
    mir_type_t t_bit = mir_vec4_type(g->mu, 1, false);
 
    if (vlog_kind(item) == V_INSIDE_RANGE) {
-      mir_value_t lo =
-         vlog_lower_cast(g, t_vec, vlog_lower_rvalue(g, vlog_left(item)));
-      mir_value_t hi =
-         vlog_lower_cast(g, t_vec, vlog_lower_rvalue(g, vlog_right(item)));
-      mir_value_t ge = mir_build_binary(g->mu, MIR_VEC_GEQ, t_vec, value, lo);
-      mir_value_t le = mir_build_binary(g->mu, MIR_VEC_LEQ, t_vec, value, hi);
+      // A $ bound is the smallest or largest value of the type (11.4.13)
+      mir_value_t ge = mir_const_vec(g->mu, t_bit, 1, 0);
+      mir_value_t le = ge;
+      if (vlog_kind(vlog_left(item)) != V_DOLLAR) {
+         mir_value_t lo =
+            vlog_lower_cast(g, t_vec, vlog_lower_rvalue(g, vlog_left(item)));
+         ge = mir_build_binary(g->mu, MIR_VEC_GEQ, t_vec, value, lo);
+      }
+      if (vlog_kind(vlog_right(item)) != V_DOLLAR) {
+         mir_value_t hi =
+            vlog_lower_cast(g, t_vec, vlog_lower_rvalue(g, vlog_right(item)));
+         le = mir_build_binary(g->mu, MIR_VEC_LEQ, t_vec, value, hi);
+      }
       return mir_build_binary(g->mu, MIR_VEC_BIT_AND, t_bit, ge, le);
    }
 
