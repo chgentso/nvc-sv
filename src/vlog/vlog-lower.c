@@ -4052,7 +4052,8 @@ static mir_value_t vlog_lower_unary(vlog_gen_t *g, vlog_node_t v,
       const bool is_signed = mir_get_signed(g->mu, itype);
 
       int size = mir_get_size(g->mu, itype);
-      if (propagate_context && !mir_is_null(context))
+      if (propagate_context && !mir_is_null(context)
+          && mir_is_vector_type(g->mu, context))
          size = MAX(mir_get_size(g->mu, context), size);
 
       mir_type_t type;
