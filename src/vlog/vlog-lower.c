@@ -9334,7 +9334,13 @@ static mir_value_t vlog_lower_with_context(vlog_gen_t *g, vlog_node_t v,
             size = MAX(vlog_width(left_expr), vlog_width(right_expr));
 
          mir_type_t type;
-         if (!mir_is_null(context)) {
+         if (optype == NULL
+             && (vlog_is_real(left_expr) || vlog_is_real(right_expr))
+             && (mir_is_null(context) || mir_is_vector_type(g->mu, context))) {
+            // The result is real whatever the context (11.4.11)
+            type = mir_double_type(g->mu);
+         }
+         else if (!mir_is_null(context)) {
             mir_class_t class = mir_get_class(g->mu, context);
             if (class == MIR_TYPE_VEC2 || class == MIR_TYPE_VEC4) {
                size = MAX(size, mir_get_size(g->mu, context));

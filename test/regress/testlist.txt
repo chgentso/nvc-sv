@@ -2731,3 +2731,4 @@ svportsigned1 verilog
 svstrhex1 verilog
 svrealmix1 verilog
 svrealconv1 verilog
+svrealcond1 verilog
