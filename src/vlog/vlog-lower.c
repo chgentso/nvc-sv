@@ -7687,6 +7687,14 @@ static mir_value_t vlog_lower_sys_fcall(vlog_gen_t *g, vlog_node_t v)
       return vlog_lower_typename(g, v);
    else if (vlog_ident(v) == ident_new("$isunbounded"))
       return vlog_lower_isunbounded(g, v);
+   else if (vlog_ident(v) == ident_new("$itor") && vlog_params(v) == 1) {
+      // Any width of integral value is converted, not just 32 bits
+      mir_value_t arg = vlog_lower_rvalue(g, vlog_param(v, 0));
+      if (mir_is_vector(g->mu, arg))
+         return vlog_lower_cast(g, mir_double_type(g->mu), arg);
+
+      return vlog_lower_sys_tfcall(g, v);
+   }
 
    sva_sampled_t sampled;
    if (vlog_sva_sampled_kind(v, &sampled))
