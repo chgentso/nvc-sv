@@ -57,6 +57,8 @@ static const struct {
      "Assignment or connection that truncates a value" },
    { "latch",    LINT_LATCH,    "vhdl,verilog", "analysis",
      "Combinational process that infers a latch" },
+   { "sensitivity", LINT_SENSITIVITY, "vhdl", "analysis",
+     "Signal read in a process but missing from its sensitivity list" },
 };
 
 void lint_list_rules(void)
@@ -127,7 +129,7 @@ void lint_parse_option(const char *arg)
          }
          else if (!lookup_rule(word, end - word, &rule))
             fatal("invalid lint rule '%.*s': valid rules are unused, "
-                  "undriven, width, latch, all and none",
+                  "undriven, width, latch, sensitivity, all and none",
                   (int)(end - p), p);
 
          if (remove) {

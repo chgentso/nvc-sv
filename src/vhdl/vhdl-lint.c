@@ -32,6 +32,205 @@
 #include <strings.h>
 
 ////////////////////////////////////////////////////////////////////////////////
+// Sensitivity lists
+
+typedef struct {
+   tree_t        decl;
+   loc_t         loc;
+} read_t;
+
+typedef A(read_t) read_list_t;
+
+typedef struct {
+   hash_t      *lvalues;   // T_REF nodes that are only written
+   hash_t      *skip;      // T_REF nodes that are not reads of the value
+   read_list_t  reads;
+} sens_ctx_t;
+
+static void sens_lvalue_mark(tree_t v, sens_ctx_t *ctx, bool also_read)
+{
+   switch (tree_kind(v)) {
+   case T_AGGREGATE:
+      {
+         const int nassocs = tree_assocs(v);
+         for (int i = 0; i < nassocs; i++)
+            sens_lvalue_mark(tree_value(tree_assoc(v, i)), ctx, also_read);
+      }
+      break;
+   case T_TYPE_CONV:
+      sens_lvalue_mark(tree_value(v), ctx, also_read);
+      break;
+   default:
+      {
+         tree_t ref = name_to_ref(v);
+         if (ref != NULL && !also_read)
+            hash_put(ctx->lvalues, ref, ref);
+      }
+      break;
+   }
+}
+
+static void sens_lvalue_cb(tree_t t, void *context)
+{
+   sens_ctx_t *ctx = context;
+
+   switch (tree_kind(t)) {
+   case T_SIGNAL_ASSIGN:
+   case T_VAR_ASSIGN:
+   case T_COND_ASSIGN:
+   case T_FORCE:
+   case T_RELEASE:
+      sens_lvalue_mark(tree_target(t), ctx, false);
+      break;
+   case T_ATTR_REF:
+      // The prefix of an attribute is not a read of the value
+      if (tree_has_name(t)) {
+         tree_t ref = name_to_ref(tree_name(t));
+         if (ref != NULL)
+            hash_put(ctx->skip, ref, ref);
+      }
+      break;
+   default:
+      break;
+   }
+}
+
+static void sens_ref_cb(tree_t t, void *context)
+{
+   sens_ctx_t *ctx = context;
+
+   if (!tree_has_ref(t) || hash_get(ctx->lvalues, t) != NULL
+       || hash_get(ctx->skip, t) != NULL)
+      return;
+
+   tree_t decl = tree_ref(t);
+   switch (tree_kind(decl)) {
+   case T_SIGNAL_DECL:
+   case T_PORT_DECL:
+      break;
+   default:
+      return;
+   }
+
+   if (tree_kind(decl) == T_PORT_DECL && tree_class(decl) != C_SIGNAL)
+      return;
+
+   for (unsigned i = 0; i < ctx->reads.count; i++) {
+      if (ctx->reads.items[i].decl == decl)
+         return;
+   }
+
+   read_t r = { .decl = decl, .loc = *tree_loc(t) };
+   APUSH(ctx->reads, r);
+}
+
+static bool loc_text(const loc_t *loc, char *buf, size_t max)
+{
+   // The text at a location that is on a single line
+
+   if (loc_invalid_p(loc) || loc->line_delta != 0)
+      return false;
+
+   const char *line = loc_get_source(loc);
+   if (line == NULL)
+      return false;
+
+   const size_t len = loc->column_delta + 1;
+   if (len + 1 > max)
+      return false;
+
+   for (size_t i = 0; i < loc->first_column + len; i++) {
+      if (line[i] == '\0' || line[i] == '\n')
+         return false;
+   }
+
+   memcpy(buf, line + loc->first_column, len);
+   buf[len] = '\0';
+   return true;
+}
+
+static void sensitivity_check(tree_t proc, tree_t wait)
+{
+   if (!lint_enabled(LINT_SENSITIVITY) || lint_suppressed(tree_loc(proc),
+                                                         LINT_SENSITIVITY))
+      return;
+
+   sens_ctx_t ctx = {
+      .lvalues = hash_new(32),
+      .skip    = hash_new(32),
+      .reads   = AINIT,
+   };
+
+   // Everything but the wait statement at the end that stands for the list
+   const int nstmts = tree_stmts(proc);
+   for (int i = 0; i < nstmts - 1; i++)
+      tree_visit(tree_stmt(proc, i), sens_lvalue_cb, &ctx);
+   for (int i = 0; i < nstmts - 1; i++)
+      tree_visit_only(tree_stmt(proc, i), sens_ref_cb, &ctx, T_REF);
+
+   // Signals in the list
+   const int ntriggers = tree_triggers(wait);
+   read_list_t missing = AINIT;
+   for (unsigned i = 0; i < ctx.reads.count; i++) {
+      bool found = false;
+      for (int j = 0; j < ntriggers && !found; j++) {
+         tree_t ref = name_to_ref(tree_trigger(wait, j));
+         found = ref != NULL && tree_has_ref(ref)
+            && tree_ref(ref) == ctx.reads.items[i].decl;
+      }
+
+      if (!found && !lint_suppressed(&ctx.reads.items[i].loc, LINT_SENSITIVITY))
+         APUSH(missing, ctx.reads.items[i]);
+   }
+
+   if (missing.count > 0) {
+      diag_t *d = lint_diag(tree_loc(proc), LINT_SENSITIVITY);
+      if (d != NULL) {
+         LOCAL_TEXT_BUF names = tb_new();
+         for (unsigned i = 0; i < missing.count; i++)
+            tb_printf(names, "%s%s", i > 0 ? ", " : "",
+                      istr(tree_ident(missing.items[i].decl)));
+
+         if (missing.count == 1)
+            diag_printf(d, "signal %s is read in this process but is not in "
+                        "its sensitivity list", tb_get(names));
+         else
+            diag_printf(d, "signals %s are read in this process but are not "
+                        "in its sensitivity list", tb_get(names));
+
+         for (unsigned i = 0; i < missing.count; i++)
+            diag_hint(d, &(missing.items[i].loc), "%s is read here",
+                      istr(tree_ident(missing.items[i].decl)));
+
+         // The fix appends the signals to the list
+         const loc_t *last = tree_loc(tree_trigger(wait, ntriggers - 1));
+         char text[256];
+         if (loc_text(last, text, sizeof(text) - 1)) {
+            LOCAL_TEXT_BUF fix = tb_new();
+            tb_cat(fix, text);
+            for (unsigned i = 0; i < missing.count; i++) {
+               char name[128];
+               if (!loc_text(&(missing.items[i].loc), name, sizeof(name)))
+                  strcpy(name, istr(tree_ident(missing.items[i].decl)));
+               tb_printf(fix, ", %s", name);
+            }
+
+            diag_fix(d, last, tb_get(fix), missing.count == 1
+                     ? "Add the signal to the sensitivity list"
+                     : "Add the signals to the sensitivity list");
+         }
+
+         diag_emit(d);
+      }
+   }
+
+   ACLEAR(missing);
+   ACLEAR(ctx.reads);
+   hash_free(ctx.lvalues);
+   hash_free(ctx.skip);
+}
+
+////////////////////////////////////////////////////////////////////////////////
 // Latches in combinational processes
 
 typedef struct {
@@ -304,6 +503,9 @@ static void process_cb(tree_t proc, void *context)
    tree_visit(proc, clock_edge_cb, &ctx.clocked);
    walk_stmts(proc, &def, &ctx);
 
+   if (!ctx.clocked && ctx.waits == 1)
+      sensitivity_check(proc, last);
+
    if (!ctx.clocked && ctx.waits == 1) {
       for (unsigned i = 0; i < ctx.possible.count; i++) {
          const assigned_t *a = &(ctx.possible.items[i]);
@@ -490,7 +692,7 @@ void vhdl_lint(tree_t unit)
    if (tree_kind(unit) != T_ARCH)
       return;
 
-   if (lint_enabled(LINT_LATCH))
+   if (lint_enabled(LINT_LATCH | LINT_SENSITIVITY))
       tree_visit_only(unit, process_cb, NULL, T_PROCESS);
 
    if (lint_enabled(LINT_UNUSED | LINT_UNDRIVEN)) {

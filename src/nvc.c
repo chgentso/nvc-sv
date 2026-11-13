@@ -2588,7 +2588,8 @@ static void usage(void)
            { "--ignore-time", "Skip source file timestamp check" },
            { "--lint[=RULES]",
              "Warn about suspicious code: RULES is a list of unused, "
-             "undriven, width, latch, all, none or -RULE to remove one, "
+             "undriven, width, latch, sensitivity, all, none or -RULE to remove "
+             "one, "
              "or list to show the available rules" },
            { "--load=PLUGIN", "Load VHPI plugin at startup" },
            { "--sv-lib=LIB", "Load shared library with DPI-C functions" },

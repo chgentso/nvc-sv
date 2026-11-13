@@ -31,7 +31,13 @@ grep -q '"message":"signal .A1. is never read"' multi
 nvc --lint=list > rules
 grep -q '^unused	vhdl,verilog	elaboration	off	' rules
 grep -q '^latch	' rules
-test $(wc -l < rules) = 4
+test $(wc -l < rules) = 5
+grep -q '^sensitivity	vhdl	analysis	off	' rules
+
+# A missing signal has a fix that adds it to the list
+nvc --std=08 --lint=sensitivity --messages=json -a $TESTDIR/lint/sens1.vhd 2>sens
+grep -q '"rule":"sensitivity"' sens
+grep -q '"fix":{"title":"Add the signal to the sensitivity list","edits":\[{"file":".*sens1.vhd","line":6,"col":16,"end_line":6,"end_col":17,"text":"a, b"}\]}' sens
 
 # Reports from the simulation keep the text form
 nvc --std=08 --messages=json -a $TESTDIR/regress/lintjson2.vhd -e lintjson2 -r 2>run

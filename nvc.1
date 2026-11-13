@@ -395,7 +395,14 @@ or a Verilog
 .Ql case
 does not cover every value and has no
 .Ql default .
-Conditions are not evaluated and loops are assumed to run at least once.
+Conditions are not evaluated and loops are assumed to run at least once,
+except that a branch whose condition depends only on generics and constants
+is taken to be always or never taken.
+.It Cm sensitivity
+A VHDL process with a sensitivity list but no clock edge that reads a signal
+that is not in the list.  The signals read in the statements of the process
+are checked, except for the prefixes of attributes and signals that are only
+assigned, and the message offers a fix that adds the signals to the list.
 .El
 .Pp
 A warning is suppressed by a comment

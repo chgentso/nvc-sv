@@ -271,6 +271,28 @@ START_TEST(test_unused_attribute)
 }
 END_TEST
 
+START_TEST(test_sensitivity)
+{
+   const error_t expect[] = {
+      {  6, "signal B is read in this process but is not in its sensitivity "
+         "list [lint:sensitivity]" },
+      { 23, "signals C, Y are read in this process but are not in its "
+        "sensitivity list [lint:sensitivity]" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   set_standard(STD_08);
+   lint_parse_option("sensitivity");
+
+   input_from_file(TESTDIR "/lint/sens1.vhd");
+
+   analyse_vhdl();
+
+   check_expected_errors();
+}
+END_TEST
+
 Suite *get_lint_tests(void)
 {
    Suite *s = suite_create("lint");
@@ -284,6 +306,7 @@ Suite *get_lint_tests(void)
    tcase_add_test(tc, test_latch_vhdl);
    tcase_add_test(tc, test_unused_vhdl);
    tcase_add_test(tc, test_latch_static);
+   tcase_add_test(tc, test_sensitivity);
    tcase_add_test(tc, test_unused_attribute);
    suite_add_tcase(s, tc);
 

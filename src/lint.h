@@ -27,7 +27,8 @@ typedef enum {
    LINT_UNDRIVEN = (1 << 1),   // Read but never assigned
    LINT_WIDTH    = (1 << 2),   // Assignment or connection truncates
    LINT_LATCH    = (1 << 3),   // Combinational process infers a latch
-   LINT_ALL      = (1 << 4) - 1
+   LINT_SENSITIVITY = (1 << 4),   // Signal read but not in sensitivity list
+   LINT_ALL      = (1 << 5) - 1
 } lint_rule_t;
 
 // Parse the argument of --lint: a comma separated list of rule names,
