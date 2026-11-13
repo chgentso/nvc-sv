@@ -2748,3 +2748,4 @@ wavevlogport1 wave,verilog
 lintjson1       shell
 guard9          normal
 svclassfn1 verilog
+svmodportexpr2 verilog

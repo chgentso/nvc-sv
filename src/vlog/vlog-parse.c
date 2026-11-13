@@ -2865,10 +2865,14 @@ static vlog_node_t modport_expr_cb(vlog_node_t v, void *ctx)
    if (vlog_kind(v) != V_REF || !vlog_has_ref(v))
       return v;
 
+   // The declaration may have been copied with a parameter of the interface
    vlog_node_t decl = vlog_ref(v);
    const int ndecls = vlog_decls(me->iface);
    for (int i = 0; i < ndecls; i++) {
-      if (vlog_decl(me->iface, i) != decl)
+      vlog_node_t d = vlog_decl(me->iface, i);
+      if (d != decl && (!vlog_has_ident(d) || !vlog_has_ident(decl)
+                        || vlog_ident(d) != vlog_ident(decl)
+                        || vlog_kind(d) != vlog_kind(decl)))
          continue;
 
       vlog_node_t h = vlog_new(V_HIER_REF);
