@@ -1383,6 +1383,12 @@ static void bounds_check_case(tree_t t)
       bounds_check_array_case(t, type, false);
 }
 
+void bounds_check_case_stmt(tree_t t)
+{
+   assert(tree_kind(t) == T_CASE);
+   bounds_check_case(t);
+}
+
 static void bounds_check_match_case(tree_t t)
 {
    type_t type = tree_type(tree_value(t)), elem = type_elem_recur(type);

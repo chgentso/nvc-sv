@@ -1106,6 +1106,23 @@ START_TEST(test_recagg)
 }
 END_TEST
 
+START_TEST(test_constcase)
+{
+   input_from_file(TESTDIR "/bounds/constcase.vhd");
+
+   const error_t expect[] = {
+      { 10, "duplicate choice for TRUE" },
+      { 18, "value 2 is already covered" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   parse_check_and_simplify(T_ENTITY, T_ARCH);
+
+   check_expected_errors();
+}
+END_TEST
+
 Suite *get_bounds_tests(void)
 {
    Suite *s = suite_create("bounds");
@@ -1161,6 +1178,7 @@ Suite *get_bounds_tests(void)
    tcase_add_test(tc_core, test_issue1666);
    tcase_add_test(tc_core, test_casegen1);
    tcase_add_test(tc_core, test_recagg);
+   tcase_add_test(tc_core, test_constcase);
    suite_add_tcase(s, tc_core);
 
    return s;

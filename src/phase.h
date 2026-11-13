@@ -37,6 +37,7 @@ void simplify_global(tree_t top, hash_t *generics, jit_t *jit,
 
 // Perform static bounds checking
 void bounds_check(tree_t top);
+void bounds_check_case_stmt(tree_t t);
 
 // Elaborate top level design units
 tree_t elab(object_t **top, int ntop, jit_t *jit, unit_registry_t *ur,

@@ -1018,6 +1018,25 @@ static tree_t simp_case(tree_t t)
    if (!folded_int(tree_value(t), &ival))
       return t;
 
+   // The case statement will be replaced so check the choices now if
+   // they are all constant
+   bool all_folded = true;
+   for (int i = 0; i < nstmts && all_folded; i++) {
+      tree_t alt = tree_stmt(t, i);
+      const int nchoices = tree_choices(alt);
+      for (int j = 0; j < nchoices; j++) {
+         tree_t a = tree_choice(alt, j);
+         int64_t low, high;
+         if (tree_has_name(a))
+            all_folded &= folded_int(tree_name(a), &low);
+         else if (tree_ranges(a) > 0)
+            all_folded &= folded_bounds(tree_range(a, 0), &low, &high);
+      }
+   }
+
+   if (all_folded)
+      bounds_check_case_stmt(t);
+
    for (int i = 0; i < nstmts; i++) {
       tree_t alt = tree_stmt(t, i);
       if (!simp_match_case_choice(alt, ival))
