@@ -39,7 +39,6 @@
 // block or declaration they are about to report on.
 static struct {
    bool         partial;
-   bool         syntax;    // The unit has a syntax error
    const loc_t *unit;
    hset_t      *seen;      // Constructs that were not checked
    unsigned     skipped;
@@ -1096,8 +1095,8 @@ static void implicit_cb(vlog_node_t v, void *context)
       return;
    else if (istr(vlog_ident(v))[0] == '$')
       return;
-   else if (partial_ctx.partial && (partial_ctx.syntax || !trusted(v)))
-      return;
+   else if (partial_ctx.partial)
+      return;   // A name may be missing because of an error
 
    lint_warn(vlog_loc(v), LINT_IMPLICIT, "net '%s' is declared implicitly by "
              "its use", istr(vlog_ident(v)));
@@ -1382,7 +1381,6 @@ void vlog_lint_partial(vlog_node_t unit)
 
    partial_ctx.partial = true;
    partial_ctx.unit = loc;
-   partial_ctx.syntax = lint_unit_has_syntax_error(loc);
    partial_ctx.seen = hset_new(16);
 
    lint_unit(unit);
