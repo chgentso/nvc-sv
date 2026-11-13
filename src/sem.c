@@ -1297,8 +1297,9 @@ static bool sem_check_param_decl(tree_t t, nametab_t *tab)
    if (class == C_CONSTANT && mode != PORT_IN)
       sem_error(t, "parameter of class CONSTANT must have mode IN");
 
-   // LRM 08 section 4.2.2.3
-   if (class == C_SIGNAL && tree_flags(t) & TREE_F_BUS)
+   // LRM 08 section 4.2.2.3: allowed by earlier standards
+   if (class == C_SIGNAL && (tree_flags(t) & TREE_F_BUS)
+       && standard() >= STD_08)
       sem_error(t, "formal signal parameter declaration may "
                 "not include the reserved word BUS");
 
