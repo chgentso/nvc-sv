@@ -13057,7 +13057,7 @@ static void p_continuous_assign(vlog_node_t mod)
       if (peek() == tHASH)
          delay = p_delay3();
    } else if (peek() == tHASH)
-      delay = p_delay_control();
+      delay = p_delay3();
 
    p_list_of_net_assignments(mod, delay, strength);
 
@@ -22386,6 +22386,8 @@ static vlog_node_t p_specify_terminal_descriptor(void)
 
    if (optional(tLSQUARE)) {
       (void)p_constant_range_expression();
+      if (optional(tCOLON) || optional(tINDEXPOS) || optional(tINDEXNEG))
+         (void)p_constant_expression();   // Part select
       consume(tRSQUARE);
    }
 
@@ -22840,7 +22842,7 @@ static vlog_node_t p_setup_or_hold_timing_check(void)
    consume(tCOMMA);
    vlog_add_param(v, p_timing_check_event());
    consume(tCOMMA);
-   vlog_add_param(v, p_expression());
+   vlog_add_param(v, p_mintypmax_expression());
 
    if (optional(tCOMMA))
       p_notifier(v);
@@ -22886,7 +22888,7 @@ static vlog_node_t p_recovery_or_removal_timing_check(void)
 
    consume(tCOMMA);
 
-   vlog_add_param(v, p_expression());
+   vlog_add_param(v, p_mintypmax_expression());
 
    if (optional(tCOMMA))
       p_notifier(v);
@@ -22913,7 +22915,7 @@ static vlog_node_t p_width_timing_check(void)
 
    consume(tCOMMA);
 
-   (void)p_expression();
+   (void)p_mintypmax_expression();
 
    consume(tCOMMA);
 
@@ -22956,7 +22958,7 @@ static vlog_node_t p_period_timing_check(void)
 
    consume(tCOMMA);
 
-   (void)p_expression();
+   (void)p_mintypmax_expression();
 
    if (optional(tCOMMA)) {
       if (peek() == tID)
@@ -22989,11 +22991,11 @@ static vlog_node_t p_setuphold_or_recrem_timing_check(void)
 
    consume(tCOMMA);
 
-   (void)p_expression();
+   (void)p_mintypmax_expression();
 
    consume(tCOMMA);
 
-   (void)p_expression();
+   (void)p_mintypmax_expression();
 
    if (optional(tCOMMA)) {
       if (peek() == tID)
