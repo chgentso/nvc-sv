@@ -861,6 +861,11 @@ static void bounds_check_aggregate(tree_t t)
                   ilow = (rkind == RANGE_TO ? ileft : iright);
                   ihigh = (rkind == RANGE_TO ? iright : ileft);
 
+                  if (ilow > ihigh && akind == A_RANGE && nassocs > 1)
+                     bounds_error(a, "a null range choice is only allowed "
+                                  "if the aggregate has a single element "
+                                  "association");
+
                   // Cannot check either index unless both are known
                   // since the range may be null
                   if (ilow <= ihigh) {

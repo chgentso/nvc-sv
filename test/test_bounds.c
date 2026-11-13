@@ -1139,6 +1139,27 @@ START_TEST(test_recothers)
 }
 END_TEST
 
+START_TEST(test_nullchoice)
+{
+   input_from_file(TESTDIR "/bounds/nullchoice.vhd");
+
+   const error_t expect[] = {
+      { 12, "a null range choice is only allowed if the aggregate has a "
+        "single element association" },
+      { 14, "a null range choice is only allowed if the aggregate has a "
+        "single element association" },
+      { 15, "a null range choice is only allowed if the aggregate has a "
+        "single element association" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   parse_check_and_simplify(T_ENTITY, T_ARCH);
+
+   check_expected_errors();
+}
+END_TEST
+
 Suite *get_bounds_tests(void)
 {
    Suite *s = suite_create("bounds");
@@ -1196,6 +1217,7 @@ Suite *get_bounds_tests(void)
    tcase_add_test(tc_core, test_recagg);
    tcase_add_test(tc_core, test_constcase);
    tcase_add_test(tc_core, test_recothers);
+   tcase_add_test(tc_core, test_nullchoice);
    suite_add_tcase(s, tc_core);
 
    return s;
