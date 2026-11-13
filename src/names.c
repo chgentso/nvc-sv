@@ -443,6 +443,19 @@ void pop_scope(nametab_t *tab)
    tab->top_scope = tmp;
 }
 
+bool suppress_formal_errors(nametab_t *tab, bool suppress)
+{
+   // Used when parsing a formal part before it is known to be one
+
+   overload_t *o = tab->top_scope->overload;
+   if (o == NULL)
+      return false;
+
+   const bool old = o->error;
+   o->error = suppress;
+   return old;
+}
+
 void suppress_errors(nametab_t *tab)
 {
    tab->top_scope->suppress = true;
@@ -3685,7 +3698,7 @@ static void begin_overload_resolution(overload_t *o)
                for (int j = first_named; j < o->nactuals; j++) {
                   tree_t p = tree_param(o->tree, j);
                   if (tree_subkind(p) == P_NAMED) {
-                     tree_t ref = name_to_ref(tree_name(p));
+                     tree_t ref = formal_to_ref(tree_name(p));
                      if (ref != NULL && tree_ident(ref) == id) {
                         nrequired++;
                         break;
@@ -3869,7 +3882,7 @@ static tree_t finish_overload_resolution(overload_t *o)
 
                case P_NAMED:
                   {
-                     tree_t ref = name_to_ref(tree_name(param));
+                     tree_t ref = formal_to_ref(tree_name(param));
                      if (ref != NULL)
                         match = compare_name(tree_ident(ref), tree_ident(port));
                   }
@@ -4159,12 +4172,17 @@ static void overload_named_argument(overload_t *o, tree_t name)
    o->nametab->top_scope->formal_kind = F_SUBPROGRAM;
    o->nametab->top_scope->overload = o;
 
-   tree_t ref = name_to_ref(name);
+   // The formal may be wrapped in a conversion function or type
+   // conversion in which case the type of the actual is not that of the
+   // formal
+   tree_t ref = formal_to_ref(name);
+   const bool conv = ref != NULL && name_to_ref(name) == NULL;
    if (ref == NULL) {
-      // TODO: conversion functions not yet supported for formals
       o->state = O_NAMED;
       return;
    }
+   else if (conv)
+      name = ref;
 
    ident_t ident = tree_ident(ref);
 
@@ -4187,7 +4205,8 @@ static void overload_named_argument(overload_t *o, tree_t name)
             make_visible_slow(o->nametab->top_scope, tree_ident(p), p);
          }
 
-         overload_add_argument_type(o, ntype, o->candidates.items[i]);
+         if (!conv)
+            overload_add_argument_type(o, ntype, o->candidates.items[i]);
          first_match = i;
          break;
       }
@@ -4224,6 +4243,7 @@ static void overload_named_argument(overload_t *o, tree_t name)
             if (ntype == NULL)
                continue;
 
+            if (!conv)
             overload_add_argument_type(o, ntype, o->candidates.items[i]);
 
             port = p;
@@ -4260,7 +4280,7 @@ static tree_t overload_find_port(tree_t decl, tree_t param)
       }
    case P_NAMED:
       {
-         tree_t ref = name_to_ref(tree_name(param));
+         tree_t ref = formal_to_ref(tree_name(param));
          if (ref != NULL) {
             ident_t name = tree_ident(ref);
             const int nports = tree_ports(decl);

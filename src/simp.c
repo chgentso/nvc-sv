@@ -188,6 +188,17 @@ static tree_t simp_call_args(tree_t t)
                break;
             }
          }
+         else if (name_kind == T_FCALL || name_kind == T_TYPE_CONV) {
+            // Conversion of the formal which is kept as the name of the
+            // positional parameter
+            tree_t ref = formal_to_ref(name);
+            assert(ref != NULL);   // Checked by sem
+            if (tree_ref(ref) == port) {
+               tree_set_name(add_param(new, tree_value(p), P_POS, NULL), name);
+               found = true;
+               break;
+            }
+         }
          else {
             // Must be a partial association: a chain of selections from
             // the formal built up into nested aggregates

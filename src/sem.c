@@ -3199,6 +3199,8 @@ static bool sem_check_call_args(tree_t t, tree_t decl, nametab_t *tab)
    for (int i = 0; i < nparams; i++) {
       tree_t param = tree_param(t, i), port = NULL;
       type_t port_type = NULL;
+      tree_t formal_conv = NULL;
+      type_t conv_type = NULL;
       bool partial = false;
       int index = -1;
       switch (tree_subkind(param)) {
@@ -3230,34 +3232,46 @@ static bool sem_check_call_args(tree_t t, tree_t decl, nametab_t *tab)
 
             tree_t name = tree_name(param);
             const tree_kind_t name_kind = tree_kind(name);
-            if (name_kind == T_TYPE_CONV || name_kind == T_FCALL)
-               sem_error(name, "sorry, conversions are not yet supported here");
-            else if (!sem_check(name, tab))
+
+            // The argument of a conversion function in the formal part
+            // is the formal itself which may have mode OUT
+            if (name_kind != T_FCALL && !sem_check(name, tab))
                return false;
 
-            if (tree_kind(name) == T_TYPE_CONV) {
-               type_t to_type = tree_type(name);
-               type_t from_type = tree_type(tree_value(name));
+            tree_t ref;
+            if (name_kind == T_TYPE_CONV || name_kind == T_FCALL) {
+               // Conversion of the formal in the formal part
+               if ((ref = formal_to_ref(name)) == NULL)
+                  sem_error(name, "sorry, this form of conversion is not "
+                            "supported here");
 
-               const bool missing_constraints =
-                  type_is_unconstrained(from_type)
-                  && type_is_unconstrained(to_type);
+               formal_conv = name;
+               conv_type = tree_type(name);
 
-               if (missing_constraints) {
-                  diag_t *d = diag_new(DIAG_ERROR, tree_loc(name));
-                  diag_printf(d, "result of conversion for unconstrained "
-                              "formal %s must be a constrained array type",
-                              istr(tree_ident(decl)));
-                  diag_lrm(d, STD_93, "3.2.1.1");
-                  diag_emit(d);
-                  return false;
+               if (name_kind == T_TYPE_CONV) {
+                  type_t from_type = tree_type(tree_value(name));
+
+                  const bool missing_constraints =
+                     type_is_unconstrained(from_type)
+                     && type_is_unconstrained(conv_type);
+
+                  if (missing_constraints) {
+                     diag_t *d = diag_new(DIAG_ERROR, tree_loc(name));
+                     diag_printf(d, "result of conversion for unconstrained "
+                                 "formal %s must be a constrained array type",
+                                 istr(tree_ident(decl)));
+                     diag_lrm(d, STD_93, "3.2.1.1");
+                     diag_emit(d);
+                     return false;
+                  }
                }
             }
+            else
+               ref = name_to_ref(name);
 
-            tree_t ref = name_to_ref(name);
             assert(ref != NULL);
 
-            if ((partial = (ref != name))) {
+            if ((partial = (formal_conv == NULL && ref != name))) {
                // Partial association of a formal: a chain of element,
                // slice and field selections of the formal
                for (tree_t n = name; n != ref; n = tree_value(n)) {
@@ -3297,7 +3311,7 @@ static bool sem_check_call_args(tree_t t, tree_t decl, nametab_t *tab)
 
             // Set the ref again here because solve_types may have set it
             // to the wrong overload
-            if (tree_ref(ref) != port)
+            if (tree_ref(ref) != port && formal_conv == NULL)
                tree_set_name(param, (name = change_ref(name, port)));
 
             if (!tree_has_type(name)) {
@@ -3306,7 +3320,8 @@ static bool sem_check_call_args(tree_t t, tree_t decl, nametab_t *tab)
                return false;
             }
 
-            port_type = tree_type(name);
+            port_type = formal_conv != NULL ? tree_type(port)
+               : tree_type(name);
          }
       }
 
@@ -3323,7 +3338,42 @@ static bool sem_check_call_args(tree_t t, tree_t decl, nametab_t *tab)
       if (!sem_check(value, tab))
          return false;
 
-      if (!sem_check_type(value, port_type, tab))
+      // The object that the actual designates which differs from the
+      // actual if that is a conversion of the object
+      tree_t actual = value;
+
+      if (formal_conv != NULL) {
+         // LRM 08 section 6.5.7.1: conversion in the formal part
+         if (mode == PORT_IN)
+            sem_error(formal_conv, "a conversion in the formal part is not "
+                      "allowed for formal parameter %pI of mode IN",
+                      tree_ident(port));
+         else if (class != C_VARIABLE)
+            sem_error(formal_conv, "sorry, a conversion in the formal part "
+                      "is only supported for parameters of class VARIABLE");
+
+         if (mode == PORT_INOUT) {
+            // The actual must convert the object to the type of the formal
+            const tree_kind_t vkind = tree_kind(value);
+            if (vkind == T_TYPE_CONV)
+               actual = tree_value(value);
+            else if (vkind == T_FCALL && tree_params(value) == 1)
+               actual = tree_value(tree_param(value, 0));
+            else
+               sem_error(value, "an actual associated with an INOUT formal "
+                         "%pI with a conversion in the formal part must be "
+                         "a conversion of the object", tree_ident(port));
+         }
+
+         if (!type_eq(tree_type(actual), conv_type))
+            sem_error(actual, "type of actual %pT does not match the result "
+                      "type %pT of the conversion of formal %pI",
+                      tree_type(actual), conv_type, tree_ident(port));
+      }
+
+      if (formal_conv != NULL && mode == PORT_OUT)
+         ;   // Type of the actual checked above
+      else if (!sem_check_type(value, port_type, tab))
          sem_error(value, "type of actual %pT does not match formal %pI "
                    "type %pT", tree_type(value), tree_ident(port), port_type);
 
@@ -3333,8 +3383,8 @@ static bool sem_check_call_args(tree_t t, tree_t decl, nametab_t *tab)
 
       // LRM 08 sections 4.2.2.2 and 4.2.2.3
       if (class == C_VARIABLE || class == C_SIGNAL) {
-         tree_t decl = sem_check_lvalue(value);
-         if (decl == NULL || class_of(value) != class) {
+         tree_t decl = sem_check_lvalue(actual);
+         if (decl == NULL || class_of(actual) != class) {
             diag_t *d = diag_new(DIAG_ERROR, tree_loc(value));
             diag_printf(d, "actual for formal %s with class %s must be "
                         "a name denoting a %s", istr(tree_ident(port)),

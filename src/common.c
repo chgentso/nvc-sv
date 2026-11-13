@@ -1602,6 +1602,28 @@ tree_t name_to_ref(tree_t name)
    return name;
 }
 
+tree_t formal_to_ref(tree_t name)
+{
+   // The reference to the formal in the formal part of an association
+   // element which may be wrapped in conversion functions and type
+   // conversions
+
+   for (;;) {
+      switch (tree_kind(name)) {
+      case T_FCALL:
+         if (tree_params(name) != 1)
+            return NULL;
+         name = tree_value(tree_param(name, 0));
+         break;
+      case T_TYPE_CONV:
+         name = tree_value(name);
+         break;
+      default:
+         return name_to_ref(name);
+      }
+   }
+}
+
 const char *port_mode_str(port_mode_t mode)
 {
    const char *mode_str[] = {

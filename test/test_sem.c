@@ -3927,8 +3927,8 @@ START_TEST(test_issue1020)
    input_from_file(TESTDIR "/sem/issue1020.vhd");
 
    const error_t expect[] = {
-      { 13, "no possible overload of XYZZY has formal V" },
-      { 13, "sorry, conversions are not yet supported here" },
+      { 13, "result of conversion for unconstrained formal XYZZY must be a "
+        "constrained array type" },
       { -1, NULL }
    };
    expect_errors(expect);
@@ -4373,6 +4373,29 @@ START_TEST(test_incpack)
 }
 END_TEST
 
+START_TEST(test_convparam)
+{
+   set_standard(STD_08);
+
+   input_from_file(TESTDIR "/sem/convparam.vhd");
+
+   const error_t expect[] = {
+      { 34, "type of actual INTEGER does not match the result type REAL of "
+        "the conversion of formal B" },
+      { 35, "an actual associated with an INOUT formal B with a conversion "
+        "in the formal part must be a conversion of the object" },
+      { 36, "a conversion in the formal part is not allowed for formal "
+        "parameter A of mode IN" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   parse_and_check(T_ENTITY, T_ARCH);
+
+   check_expected_errors();
+}
+END_TEST
+
 START_TEST(test_undefarg)
 {
    set_standard(STD_08);
@@ -4594,6 +4617,7 @@ Suite *get_sem_tests(void)
    tcase_add_test(tc_core, test_incfull);
    tcase_add_test(tc_core, test_incpack);
    tcase_add_test(tc_core, test_attrspec);
+   tcase_add_test(tc_core, test_convparam);
    tcase_add_test(tc_core, test_accessinc);
    tcase_add_test(tc_core, test_enumhomo);
    tcase_add_test(tc_core, test_attrspec_relaxed);

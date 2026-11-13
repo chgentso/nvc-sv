@@ -1213,6 +1213,98 @@ static bool is_arith_operator(tree_t decl)
    }
 }
 
+static void lower_copy_array(lower_unit_t *lu, type_t dst_type, type_t src_type,
+                             vcode_reg_t dst_array, vcode_reg_t src_array,
+                             vcode_reg_t locus);
+
+static vcode_reg_t lower_conv_arg(lower_unit_t *lu, tree_t param,
+                                  tree_t port)
+{
+   // A variable formal with a conversion in the formal part is passed as
+   // a temporary: the actual is converted into it before the call if the
+   // formal is an INOUT parameter and the temporary is converted back
+   // into the actual after the call
+
+   type_t type = tree_type(port);
+   if (type_is_scalar(type)) {
+      vcode_type_t vtype = lower_type(type);
+      vcode_var_t var = lower_temp_var(lu, "conv", vtype);
+      vcode_reg_t ptr_reg = emit_index(var, VCODE_INVALID_REG);
+
+      if (tree_subkind(port) == PORT_INOUT)
+         emit_store_indirect(lower_rvalue(lu, tree_value(param)), ptr_reg);
+      else
+         emit_store_indirect(lower_default_value(lu, type, VCODE_INVALID_REG),
+                             ptr_reg);
+
+      return ptr_reg;
+   }
+   else if (type_is_unconstrained(type) || !type_const_bounds(type)
+            || !(type_is_array(type) || type_is_record(type)))
+      fatal_at(tree_loc(param), "sorry, a conversion in the formal part is "
+               "only supported for parameters of scalar type or constrained "
+               "composite type");
+
+   vcode_type_t vtype = lower_type(type);
+   vcode_var_t var = lower_temp_var(lu, "conv", vtype);
+   vcode_reg_t ptr_reg = emit_index(var, VCODE_INVALID_REG);
+
+   if (tree_subkind(port) == PORT_INOUT) {
+      tree_t value = tree_value(param);
+      vcode_reg_t src_reg = lower_rvalue(lu, value);
+      vcode_reg_t locus = lower_debug_locus(value);
+      if (type_is_array(type))
+         lower_copy_array(lu, type, tree_type(value), ptr_reg, src_reg, locus);
+      else
+         lower_copy_record(lu, type, ptr_reg, src_reg, locus);
+   }
+
+   return ptr_reg;
+}
+
+static void lower_conv_result(lower_unit_t *lu, tree_t param, tree_t port,
+                              vcode_reg_t ptr_reg)
+{
+   // Copy a temporary back into the actual applying the conversion in
+   // the formal part
+
+   tree_t name = tree_name(param);
+   tree_t value = tree_value(param);
+
+   tree_t actual = value;
+   if (tree_subkind(port) == PORT_INOUT) {
+      switch (tree_kind(value)) {
+      case T_TYPE_CONV:
+         actual = tree_value(value);
+         break;
+      case T_FCALL:
+         actual = tree_value(tree_param(value, 0));
+         break;
+      default:
+         should_not_reach_here();
+      }
+   }
+
+   // The formal in the name refers to the temporary
+   lower_put_vcode_obj(port, ptr_reg, lu);
+
+   vcode_reg_t result_reg = lower_rvalue(lu, name);
+   type_t atype = tree_type(actual);
+   if (type_is_scalar(atype)) {
+      lower_check_scalar_bounds(lu, result_reg, atype, actual, NULL);
+      emit_store_indirect(result_reg, lower_lvalue(lu, actual));
+   }
+   else {
+      vcode_reg_t dest_reg = lower_lvalue(lu, actual);
+      vcode_reg_t locus = lower_debug_locus(actual);
+      if (type_is_array(atype))
+         lower_copy_array(lu, atype, tree_type(name), dest_reg, result_reg,
+                          locus);
+      else
+         lower_copy_record(lu, atype, dest_reg, result_reg, locus);
+   }
+}
+
 static vcode_reg_t lower_subprogram_arg(lower_unit_t *lu, tree_t fcall,
                                         unsigned nth, vcode_reg_t context_reg)
 {
@@ -1241,6 +1333,8 @@ static vcode_reg_t lower_subprogram_arg(lower_unit_t *lu, tree_t fcall,
       else
          reg = lower_signal_array_aggregate(lu, value);
    }
+   else if (class == C_VARIABLE && tree_has_name(param))
+      reg = lower_conv_arg(lu, param, port);
    else if (class == C_SIGNAL || class == C_FILE || mode != PORT_IN)
       reg = lower_lvalue(lu, value);
    else if (tree_kind(value) == T_OPEN) {
@@ -7136,7 +7230,13 @@ static void lower_pcall(lower_unit_t *lu, tree_t pcall, gen_stack_t *gs)
       if (tree_class(p) != C_VARIABLE || tree_subkind(p) == PORT_IN)
          continue;
 
-      tree_t value = tree_value(tree_param(pcall, i));
+      tree_t param = tree_param(pcall, i);
+      if (tree_has_name(param)) {
+         lower_conv_result(lu, param, p, args.items[arg0 + i]);
+         continue;
+      }
+
+      tree_t value = tree_value(param);
       if (tree_kind(value) != T_AGGREGATE)
          continue;
 

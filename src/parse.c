@@ -3574,6 +3574,40 @@ static tree_t p_actual_part(class_t class, type_t constraint, tree_t head,
    return actual;
 }
 
+static bool is_formal_part_ahead(void)
+{
+   // True if the association element starting at the current token has
+   // a formal part
+
+   int depth = 0;
+   for (int n = 1; n < TOKENQ_SIZE - 2; n++) {
+      switch (peek_nth(n)) {
+      case tLPAREN:
+         depth++;
+         break;
+      case tRPAREN:
+         if (--depth < 0)
+            return false;
+         break;
+      case tCOMMA:
+         if (depth == 0)
+            return false;
+         break;
+      case tASSOC:
+         if (depth == 0)
+            return true;
+         break;
+      case tSEMI:
+      case tEOF:
+         return false;
+      default:
+         break;
+      }
+   }
+
+   return false;
+}
+
 static tree_t p_association_element(tree_t unit, int pos, tree_t formal,
                                     formal_kind_t kind)
 {
@@ -3599,7 +3633,17 @@ static tree_t p_association_element(tree_t unit, int pos, tree_t formal,
       || tok2 == tASSOC;
 
    if (maybe_named) {
+      // A conversion function or type conversion in a formal part names
+      // the formal as its argument which is not visible here
+      const bool suppress = kind == F_SUBPROGRAM && tok1 == tID
+         && tok2 == tLPAREN && is_formal_part_ahead();
+      const bool old_error = suppress ? suppress_formal_errors(nametab, true)
+         : false;
+
       head = p_name(0);
+
+      if (suppress)
+         suppress_formal_errors(nametab, old_error);
 
       if (scan(tASSOC, tLSQUARE)) {
          push_scope_for_formals(nametab, kind, unit);
