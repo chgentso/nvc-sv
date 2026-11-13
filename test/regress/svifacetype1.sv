@@ -12,6 +12,11 @@ interface svifacetype1_if #(parameter int W = 4, parameter int N = 1) ();
   svifacetype1_in #(N) inner ();
 endinterface
 
+interface svifacetype1_wrap #(parameter int N = 1) ();
+  svifacetype1_if #(3, N) w ();
+  typedef w.data_t data_t;
+endinterface
+
 module svifacetype1_sub(svifacetype1_if i, output bit [7:0] bits);
   typedef i.data_t data_t;
   typedef i.pair_t pair_t;
@@ -44,6 +49,10 @@ module svifacetype1;
   pair_t p;
   i0.inner.id_t id;
   bit [7:0] bits;
+  svifacetype1_if #(2) arr[2] ();
+  typedef arr[1].data_t adata_t;
+  svifacetype1_wrap #(4) wr();
+  typedef wr.data_t wdata_t;
   svifacetype1_sub s(i0, bits);
   initial begin
     #2;
@@ -53,6 +62,10 @@ module svifacetype1;
       $error("FAIL top p %0d", $bits(p));
     else if ($bits(id) !== 3)
       $error("FAIL top id %0d", $bits(id));
+    else if ($bits(adata_t) !== 2 || $bits(wr.data_t) !== 3
+             || $bits(i0.data_t) !== 5 || $bits(wdata_t) !== 3)
+      $error("FAIL nested %0d %0d %0d", $bits(adata_t), $bits(wr.data_t),
+             $bits(wdata_t));
     else if (bits !== 8'd1)
       $error("FAIL sub");
     else

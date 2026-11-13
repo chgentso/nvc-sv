@@ -308,13 +308,18 @@ static bool is_std_randomize(void)
 }
 
 static vlog_node_t hier_owner(vlog_node_t mr);
+static vlog_node_t p_instance_index(vlog_node_t mr);
+static vlog_node_t hier_type_decl(int len);
 
 static bool is_hier_type_name(int *len)
 {
    // The name of an interface instance or port followed by the names of
    // nested instances and a type declared in the interface
 
-   if (peek() != tID || peek_nth(2) != tDOT || peek_nth(3) != tID)
+   if (peek() != tID)
+      return false;
+   else if (peek_nth(2) == tDOT ? peek_nth(3) != tID
+            : peek_nth(2) != tLSQUARE)
       return false;
 
    vlog_node_t d = peek_reference();
@@ -330,11 +335,33 @@ static bool is_hier_type_name(int *len)
    }
 
    int n = 1;
-   while (peek_nth(n + 1) == tDOT && peek_nth(n + 2) == tID)
-      n += 2;
+   for (;;) {
+      if (peek_nth(n + 1) == tLSQUARE) {
+         // The element of an array of instances
+         int depth = 1, m = n + 2;
+         for (; depth > 0 && m < TOKENQ_SIZE - 2; m++) {
+            const token_t tok = peek_nth(m);
+            if (tok == tLSQUARE)
+               depth++;
+            else if (tok == tRSQUARE)
+               depth--;
+            else if (tok == tEOF || tok == tSEMI)
+               return false;
+         }
+
+         if (depth > 0 || peek_nth(m) != tDOT || peek_nth(m + 1) != tID)
+            return false;
+
+         n = m + 1;
+      }
+      else if (peek_nth(n + 1) == tDOT && peek_nth(n + 2) == tID)
+         n += 2;
+      else
+         break;
+   }
 
    *len = n;
-   return true;
+   return n > 1;
 }
 
 static bool is_scoped_type_start(void)
@@ -343,7 +370,8 @@ static bool is_scoped_type_start(void)
    // in a declaration like pkg::type_t name
 
    int hlen;
-   if (is_hier_type_name(&hlen) && peek_nth(hlen + 1) == tID)
+   if (is_hier_type_name(&hlen) && peek_nth(hlen + 1) == tID
+       && hier_type_decl(hlen) != NULL)
       return true;   // A type declared in an interface: ifc.type_t name
 
    if (peek() != tID || peek_nth(2) != tSCOPE)
@@ -1919,6 +1947,26 @@ static bool iface_type_pred(vlog_node_t v, void *ctx)
 {
    const iface_type_t *it = ctx;
 
+   if (vlog_kind(v) == V_MOD_REF && !vlog_has_value(v)) {
+      // The name of an instance inside the interface
+      const int nstmts = vlog_stmts(it->iface);
+      for (int i = 0; i < nstmts; i++) {
+         vlog_node_t list = vlog_stmt(it->iface, i);
+         if (vlog_kind(list) != V_INST_LIST)
+            continue;
+
+         const int ninst = vlog_stmts(list);
+         for (int j = 0; j < ninst; j++) {
+            vlog_node_t inst = vlog_stmt(list, j);
+            if (vlog_kind(inst) == V_MOD_INST
+                && vlog_ident(inst) == vlog_ident(v))
+               return true;
+         }
+      }
+
+      return false;
+   }
+
    if (vlog_kind(v) != V_REF || !vlog_has_ref(v))
       return false;
 
@@ -1949,6 +1997,11 @@ static vlog_node_t iface_type_cb(vlog_node_t v, void *ctx)
 
    if (!iface_type_pred(v, ctx))
       return v;
+   else if (vlog_kind(v) == V_MOD_REF) {
+      // Relative to the instance which the type is selected from
+      vlog_set_value(v, it->prefix);
+      return v;
+   }
 
    // The value of the parameter is known once the instance is elaborated
    vlog_node_t h = vlog_new(V_HIER_REF);
@@ -1978,6 +2031,57 @@ static vlog_node_t nested_iface_module(vlog_node_t iface, ident_t id)
    return NULL;
 }
 
+static vlog_node_t hier_type_decl(int len)
+{
+   // Find the type that the tokens name without consuming them
+
+   vlog_node_t root = peek_reference(), iface = NULL;
+   if (root == NULL)
+      return NULL;
+   else if (vlog_kind(root) == V_IFACE_PORT)
+      iface = lookup_interface(vlog_ident2(root));
+   else if (inst_lists != NULL && vlog_kind(root) == V_MOD_INST) {
+      vlog_node_t list = hash_get(inst_lists, root);
+      if (list != NULL)
+         iface = lookup_interface(vlog_ident(list));
+   }
+
+   ident_t last = NULL;
+   for (int n = 1; iface != NULL && n <= len; n++) {
+      const token_t tok = peek_nth(n);
+      if (tok == tLSQUARE) {
+         for (int depth = 1; depth > 0 && n < len; ) {
+            n++;
+            if (peek_nth(n) == tLSQUARE)
+               depth++;
+            else if (peek_nth(n) == tRSQUARE)
+               depth--;
+         }
+      }
+      else if (tok == tID && n > 1 && peek_nth(n - 1) == tDOT) {
+         ident_t name = peek_ident_nth(n);
+         if (n == len) {
+            last = name;
+            break;
+         }
+
+         iface = nested_iface_module(iface, name);
+      }
+   }
+
+   if (iface == NULL || last == NULL)
+      return NULL;
+
+   const int ndecls = vlog_decls(iface);
+   for (int i = 0; i < ndecls; i++) {
+      vlog_node_t d = vlog_decl(iface, i);
+      if (vlog_has_ident(d) && vlog_ident(d) == last)
+         return is_data_type(d) ? d : NULL;
+   }
+
+   return NULL;
+}
+
 static vlog_node_t p_hier_type(void)
 {
    // ifc_name { . nested_instance } . type_identifier
@@ -1990,6 +2094,9 @@ static vlog_node_t p_hier_type(void)
    vlog_set_ident(prefix, id);
    vlog_set_loc(prefix, &state.last_loc);
    vlog_symtab_lookup(symtab, prefix);
+
+   if (peek() == tLSQUARE)
+      p_instance_index(prefix);
 
    vlog_node_t iface = hier_owner(prefix);
    if (iface == NULL && vlog_has_ref(prefix) && inst_lists != NULL
@@ -2007,7 +2114,7 @@ static vlog_node_t p_hier_type(void)
       ident_t name = p_identifier();
       last_loc = state.last_loc;
 
-      if (peek() != tDOT || peek_nth(2) != tID) {
+      if (peek() != tDOT && peek() != tLSQUARE) {
          last = name;
          break;
       }
@@ -2020,6 +2127,9 @@ static vlog_node_t p_hier_type(void)
       vlog_set_loc(next, &last_loc);
       vlog_set_value(next, prefix);
       prefix = next;
+
+      if (peek() == tLSQUARE)
+         p_instance_index(prefix);
    }
 
    if (iface == NULL) {
@@ -2045,6 +2155,10 @@ static vlog_node_t p_hier_type(void)
       error_at(&last_loc, "%pQ is not a data type", last);
       return logic_type();
    }
+
+   // Hierarchical references copied from the interface may be in an
+   // arena without the flag
+   vlog_set_global_flags(prefix, VLOG_GF_HIER_REF);
 
    iface_type_t it = { .iface = iface, .prefix = prefix };
    vlog_node_t copy = vlog_copy(decl, iface_type_pred, &it);
@@ -4089,6 +4203,27 @@ static vlog_node_t p_system_tf_call(vlog_kind_t kind)
          vlog_node_t n = vlog_param(v, 0);
          consume(tRPAREN);
          return n;
+      }
+
+      int hlen;
+      if (subk == V_SYSTF_BITS && is_hier_type_name(&hlen)
+          && peek_nth(hlen + 1) == tRPAREN
+          && hier_type_decl(hlen) != NULL) {
+         // A type declared in an interface
+         vlog_node_t orig = hier_type_decl(hlen);
+         vlog_node_t dt = p_hier_type();
+         if (dt != orig && current_module != NULL)
+            vlog_add_decl(current_module, dt);   // Bound with the instance
+
+         vlog_node_t ref = vlog_new(V_REF);
+         vlog_set_ident(ref, vlog_ident(dt));
+         vlog_set_ref(ref, dt);
+         vlog_set_loc(ref, &state.last_loc);
+         vlog_add_param(v, ref);
+
+         consume(tRPAREN);
+         vlog_set_loc(v, CURRENT_LOC);
+         return v;
       }
 
       if (id == ident_new("$typename")
