@@ -2217,7 +2217,8 @@ static vlog_node_t vlog_dim_of_type(vlog_node_t dt, int n)
 {
    // A packed structure has no declared dimension: it is selected from
    // as though declared [size-1:0]
-   if (dt == NULL || vlog_kind(dt) == V_STRUCT_DECL)
+   if (dt == NULL || vlog_kind(dt) == V_STRUCT_DECL
+       || vlog_kind(dt) == V_UNION_DECL)
       return NULL;
 
    if (vlog_kind(dt) == V_ENUM_DECL) {

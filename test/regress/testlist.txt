@@ -2749,3 +2749,4 @@ lintjson1       shell
 guard9          normal
 svclassfn1 verilog
 svmodportexpr2 verilog
+svunionsel1 verilog
