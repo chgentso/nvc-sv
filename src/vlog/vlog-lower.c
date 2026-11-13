@@ -4331,7 +4331,7 @@ static mir_value_t vlog_lower_vector_binary(vlog_gen_t *g, vlog_binary_t binop,
    case V_BINARY_TIMES:    mop = MIR_VEC_MUL; break;
    case V_BINARY_DIVIDE:   mop = MIR_VEC_DIV; break;
    case V_BINARY_MOD:      mop = MIR_VEC_MOD; break;
-   case V_BINARY_EXP:      mop = MIR_VEC_EXP; break;
+   case V_BINARY_EXP:      mop = rsigned ? MIR_VEC_SEXP : MIR_VEC_EXP; break;
    default:                should_not_reach_here();
    }
 
@@ -4932,8 +4932,8 @@ static mir_value_t vlog_lower_binary(vlog_gen_t *g, vlog_node_t v,
    }
 
    mir_value_t right;
-   if (rhs_self_determined)
-      right = vlog_lower_rvalue(g, rhs_expr);
+   if (rhs_self_determined || op == V_BINARY_EXP)
+      right = vlog_lower_rvalue(g, rhs_expr);   // The exponent is too (11.6.1)
    else if (vlog_kind(rhs_expr) == V_NULL && !mir_is_vector(g->mu, left))
       right = mir_build_null(g->mu, mir_get_type(g->mu, left));
    else if (is_logical && !mir_is_null(type)) {

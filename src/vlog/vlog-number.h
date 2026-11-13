@@ -140,6 +140,8 @@ void vec4_sdiv(int size, uint64_t *a1, uint64_t *b1, const uint64_t *a2,
                const uint64_t *b2);
 void vec4_smod(int size, uint64_t *a1, uint64_t *b1, const uint64_t *a2,
                const uint64_t *b2);
+void vec4_sexp(int size, bool base_signed, uint64_t *a1, uint64_t *b1,
+               const uint64_t *a2, const uint64_t *b2);
 void vec4_exp(int size, uint64_t *a1, uint64_t *b1, const uint64_t *a2,
               const uint64_t *b2);
 void vec4_shl(int size, uint64_t *a1, uint64_t *b1, const uint64_t *a2,

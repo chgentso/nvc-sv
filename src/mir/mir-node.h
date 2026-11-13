@@ -357,6 +357,7 @@ typedef enum {
    MIR_VEC_SRL,
    MIR_VEC_SRA,
    MIR_VEC_EXP,
+   MIR_VEC_SEXP,     // Exponent is signed
 } mir_vec_op_t;
 
 #define MIR_APPEND UINT_MAX

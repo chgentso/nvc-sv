@@ -1649,6 +1649,12 @@ void __nvc_vec4op(jit_vec_op_t op, jit_anchor_t *anchor, jit_scalar_t *args,
          case JIT_VEC_EXP:
             vec4_exp(size, aresult, bresult, a2, b2);
             break;
+         case JIT_VEC_SEXP:
+            vec4_sexp(size, false, aresult, bresult, a2, b2);
+            break;
+         case JIT_VEC_SSEXP:
+            vec4_sexp(size, true, aresult, bresult, a2, b2);
+            break;
          case JIT_VEC_NEGATE:
             vec4_neg(size, aresult, bresult);
             break;

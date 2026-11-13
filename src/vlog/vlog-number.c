@@ -1495,6 +1495,52 @@ void vec4_exp(int size, uint64_t *a1, uint64_t *b1, const uint64_t *a2,
       vec2_exp(size, a1, a2);
 }
 
+void vec4_sexp(int size, bool base_signed, uint64_t *a1, uint64_t *b1,
+               const uint64_t *a2, const uint64_t *b2)
+{
+   // The exponent is signed (11.4.3)
+
+   if (!vec4_arith_defined(size, a1, b1, a2, b2))
+      return;
+
+   const int nwords = BIGNUM_WORDS(size);
+   const int top = (size - 1) % 64;
+   if (!((a2[nwords - 1] >> top) & 1)) {
+      vec2_exp(size, a1, a2);
+      return;
+   }
+
+   // A negative exponent
+   bool is_zero = true, is_one = a1[0] == 1, is_ones = true;
+   for (int i = 0; i < nwords; i++) {
+      const uint64_t mask = (i == nwords - 1 && top != 63)
+         ? (UINT64_C(1) << (top + 1)) - 1 : ~UINT64_C(0);
+      if (a1[i] & mask)
+         is_zero = false;
+      if ((a1[i] & mask) != mask)
+         is_ones = false;
+      if (i > 0 && a1[i] != 0)
+         is_one = false;
+   }
+
+   const bool odd = a2[0] & 1;
+   if (is_zero)
+      vec4_make_undef(size, a1, b1);
+   else if (is_one)
+      ;   // One
+   else if (base_signed && is_ones) {
+      // Minus one is one if the exponent is even
+      if (!odd) {
+         memset(a1, 0, nwords * sizeof(uint64_t));
+         a1[0] = 1;
+      }
+   }
+   else
+      memset(a1, 0, nwords * sizeof(uint64_t));
+
+   vec2_mask(size, a1);
+}
+
 void vec4_shl(int size, uint64_t *a1, uint64_t *b1, const uint64_t *a2,
               const uint64_t *b2)
 {
