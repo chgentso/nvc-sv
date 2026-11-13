@@ -476,6 +476,7 @@ static int analyse_files(int argc, char **argv, cmd_state_t *state,
       { "dpi-stubs",       required_argument, 0, 'S' },
       { "black-box-missing", optional_argument, 0, 'K' },
       { "symbols",         no_argument,       0, 'Y' },
+      { "fsm",             no_argument,       0, 'Z' },
       { 0, 0, 0, 0 }
    };
 
@@ -483,7 +484,7 @@ static int analyse_files(int argc, char **argv, cmd_state_t *state,
    int c, index = 0, error_limit = 20;
    const char *file_list = NULL;
    const char *spec = ":D:f:I:W:";
-   bool symbols = false;
+   bool symbols = false, fsm = false;
    bool no_save = false, werror = false;
 
    while ((c = getopt_long(next_cmd, argv, spec, long_options, &index)) != -1) {
@@ -567,6 +568,11 @@ static int analyse_files(int argc, char **argv, cmd_state_t *state,
             fatal("the --symbols option is only valid with --scan");
          symbols = true;
          break;
+      case 'Z':
+         if (!scan)
+            fatal("the --fsm option is only valid with --scan");
+         fsm = true;
+         break;
       default:
          should_not_reach_here();
       }
@@ -574,8 +580,10 @@ static int analyse_files(int argc, char **argv, cmd_state_t *state,
 
    set_error_limit(error_limit);
 
-   if (scan)
+   if (scan) {
       scan_set_symbols(symbols);
+      scan_set_fsm(fsm);
+   }
 
    // Registered before the -Werror callback so it sees the real level
    const bool lint_regions = opt_get_int(OPT_LINT) != 0;

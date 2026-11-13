@@ -99,7 +99,7 @@ Print dependencies of
 .Ar unit
 in Makefile format.
 .\" --scan
-.It Fl \-scan Op Fl \-symbols Op Ar option ... Ar file ...
+.It Fl \-scan Op Fl \-symbols Op Fl \-fsm Op Ar option ... Ar file ...
 Print the design units which each source file provides and the units it
 requires, without analysing it, so that the order in which files must be
 analysed can be worked out before anything is analysed.  The command
@@ -276,6 +276,19 @@ is
 or
 .Ql import .
 .Pp
+.Pp
+With the
+.Fl \-fsm
+option, independent of
+.Fl \-symbols ,
+each object that contains state machines also has the member
+.Ql fsms ,
+an array with one element per machine found by looking at the source: a
+register of an enumeration type with a case statement on it that assigns
+literals of the type.  Each element gives the state object, the clock, the
+states, and the transitions with their source states, target and the text and
+position of the conditions guarding them.  Names and positions follow those of
+.Ql symbols .
 If the file has syntax errors they are reported on standard error as usual
 and the object has an additional
 .Ql errors

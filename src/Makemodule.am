@@ -50,6 +50,8 @@ lib_libnvc_a_SOURCES = \
 	src/scan.h \
 	src/scan.c \
 	src/scandeps.c \
+	src/fsm.h \
+	src/fsm.c \
 	src/scandeps.h \
 	src/mask.h \
 	src/mask.c \

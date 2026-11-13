@@ -18,6 +18,7 @@
 #include "util.h"
 #include "common.h"
 #include "diag.h"
+#include "fsm.h"
 #include "ident.h"
 #include "lib.h"
 #include "option.h"
@@ -44,7 +45,7 @@ typedef struct {
    unsigned    nseen, maxseen;
 } scan_ctx_t;
 
-static void scan_json_string(text_buf_t *tb, const char *str)
+void scan_json_string(text_buf_t *tb, const char *str)
 {
    tb_append(tb, '"');
    for (const unsigned char *p = (const unsigned char *)str; *p; p++) {
@@ -154,6 +155,13 @@ static bool scan_want_symbols = false;
 void scan_set_symbols(bool enable)
 {
    scan_want_symbols = enable;
+}
+
+static bool scan_want_fsm = false;
+
+void scan_set_fsm(bool enable)
+{
+   scan_want_fsm = enable;
 }
 
 static bool sym_word_char(char c)
@@ -2337,6 +2345,9 @@ unsigned scan_file_deps(const char *file, text_buf_t *json)
       sctx.extra = tb_new();
    }
 
+   LOCAL_TEXT_BUF fsms = scan_want_fsm ? tb_new() : NULL;
+   unsigned nfsms = 0;
+
    input_from_file(file);
 
    switch (source_kind()) {
@@ -2347,6 +2358,8 @@ unsigned scan_file_deps(const char *file, text_buf_t *json)
             lib_put(work, unit);
             sctx.vhdl = true;
             scan_vhdl_unit(unit, units, &nunits, &provided, &nprovided, sc);
+            if (fsms != NULL)
+               vhdl_fsm_scan(unit, fsms, &nfsms);
          }
       }
       break;
@@ -2374,6 +2387,8 @@ unsigned scan_file_deps(const char *file, text_buf_t *json)
                lib_put_vlog(work, unit);
             sctx.vhdl = false;
             scan_vlog_unit(unit, units, &nunits, &provided, &nprovided, sc);
+            if (fsms != NULL)
+               vlog_fsm_scan(unit, fsms, &nfsms);
          }
       }
       break;
@@ -2429,6 +2444,9 @@ unsigned scan_file_deps(const char *file, text_buf_t *json)
       tb_free(sctx.refs);
       tb_free(sctx.extra);
    }
+
+   if (nfsms > 0)
+      tb_printf(json, ",\"fsms\":[%s]", tb_get(fsms));
 
    const unsigned errors = diag_scan_errors() - base_errors;
    if (errors > 0)

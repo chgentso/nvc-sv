@@ -172,6 +172,25 @@ START_TEST(test_vhdl6)
 }
 END_TEST
 
+START_TEST(test_fsm_option)
+{
+   // The option alone changes nothing for a file without state machines
+
+   set_standard(STD_08);
+
+   LOCAL_TEXT_BUF plain = tb_new();
+   LOCAL_TEXT_BUF with_fsm = tb_new();
+   ck_assert_uint_eq(scan_file_deps(SCAN_FILE("vhdl1.vhd"), plain), 0);
+
+   scan_set_fsm(true);
+   ck_assert_uint_eq(scan_file_deps(SCAN_FILE("vhdl1.vhd"), with_fsm), 0);
+   scan_set_fsm(false);
+
+   ck_assert_str_eq(tb_get(plain), tb_get(with_fsm));
+   ck_assert_ptr_null(strstr(tb_get(with_fsm), "\"fsms\""));
+}
+END_TEST
+
 static void scan_symbols_contain(const char *file, const char *const *parts,
                                  unsigned nparts, bool expect);
 
@@ -910,6 +929,7 @@ Suite *get_scan_tests(void)
    tcase_add_test(tc, test_m5_vlog_requires);
    tcase_add_test(tc, test_m5_vlog_generate);
    tcase_add_test(tc, test_m5_vlog_fields);
+   tcase_add_test(tc, test_fsm_option);
    suite_add_tcase(s, tc);
 
    // Expanding covergroups is slow with the debug and sanitiser options

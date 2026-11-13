@@ -29,4 +29,10 @@ unsigned scan_file_deps(const char *file, text_buf_t *json);
 // Also report the declarations and references of each file (--symbols)
 void scan_set_symbols(bool enable);
 
+// Also report the state machines of each file (--fsm)
+void scan_set_fsm(bool enable);
+
+// Append STR to TB as a quoted JSON string
+void scan_json_string(text_buf_t *tb, const char *str);
+
 #endif   // _SCANDEPS_H
