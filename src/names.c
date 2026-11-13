@@ -917,6 +917,31 @@ static void warn_hidden_decl(scope_t *s, decl_t *outer, tree_t inner)
    diag_emit(d);
 }
 
+static bool is_enum_literal_homograph(tree_t a, tree_t b)
+{
+   // An enumeration literal is a homograph of a parameterless function
+   // that returns the enumeration type (LRM 08 section 12.3)
+
+   if (tree_kind(b) == T_ENUM_LIT) {
+      tree_t tmp = a;
+      a = b;
+      b = tmp;
+   }
+
+   if (tree_kind(a) != T_ENUM_LIT)
+      return false;
+
+   const tree_kind_t bkind = tree_kind(b);
+   if (bkind != T_FUNC_DECL && bkind != T_FUNC_BODY)
+      return false;
+   else if (tree_ports(b) != 0 || !tree_has_type(b))
+      return false;
+
+   type_t btype = tree_type(b);
+   return type_is_subprogram(btype) && type_has_result(btype)
+      && type_eq(type_result(btype), tree_type(a));
+}
+
 static symbol_t *make_visible(scope_t *s, ident_t name, tree_t decl,
                               visibility_t kind, scope_t *origin)
 {
@@ -988,6 +1013,17 @@ static symbol_t *make_visible(scope_t *s, ident_t name, tree_t decl,
       else if (denotes_same_object(dd->tree, decl) && standard() >= STD_08) {
          // According LRM 08 section 12.3 two declarations are not
          // homographs if they denote different named entities
+         return sym;
+      }
+      else if (kind == DIRECT && dd->origin == s
+               && is_enum_literal_homograph(dd->tree, decl)) {
+         diag_t *d = diag_new(DIAG_ERROR, tree_loc(decl));
+         diag_printf(d, "%s is a homograph of an enumeration literal "
+                     "already declared in this region", istr(name));
+         diag_hint(d, tree_loc(dd->tree), "previous declaration was here");
+         diag_hint(d, tree_loc(decl), "duplicate declaration");
+         diag_suppress(d, s->suppress);
+         diag_emit(d);
          return sym;
       }
       else if (overload && kind == DIRECT && type != NULL

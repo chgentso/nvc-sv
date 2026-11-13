@@ -4318,6 +4318,25 @@ START_TEST(test_attrspec_relaxed)
 }
 END_TEST
 
+START_TEST(test_enumhomo)
+{
+   input_from_file(TESTDIR "/sem/enumhomo.vhd");
+
+   const error_t expect[] = {
+      {  8, "ONE is a homograph of an enumeration literal already declared "
+         "in this region" },
+      { 23, "GREEN is a homograph of an enumeration literal already declared "
+         "in this region" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   parse_and_check(T_ENTITY, T_ARCH);
+
+   check_expected_errors();
+}
+END_TEST
+
 START_TEST(test_undefarg)
 {
    set_standard(STD_08);
@@ -4538,6 +4557,7 @@ Suite *get_sem_tests(void)
    tcase_add_test(tc_core, test_entbody);
    tcase_add_test(tc_core, test_incfull);
    tcase_add_test(tc_core, test_attrspec);
+   tcase_add_test(tc_core, test_enumhomo);
    tcase_add_test(tc_core, test_attrspec_relaxed);
    tcase_add_test(tc_core, test_protop);
    suite_add_tcase(s, tc_core);
