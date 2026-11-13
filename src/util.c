@@ -2024,6 +2024,34 @@ void get_libexec_dir(text_buf_t *tb)
    get_relative_prefix(tb);
    tb_cat(tb, DIR_SEP "libexec" DIR_SEP "nvc");
 #else
+#if defined __linux__
+   // A relocated installation keeps its scripts next to the binary
+   LOCAL_TEXT_BUF exe = tb_new();
+   if (get_exe_path(exe)) {
+      char *str = tb_claim(exe);
+      char *slash = strrchr(str, '/');
+      if (slash != NULL) {
+         *slash = '\0';
+         if ((slash = strrchr(str, '/')) != NULL) {
+            *slash = '\0';
+
+            char *dir = xasprintf("%s/libexec/nvc", str);
+            file_info_t info;
+            const bool found =
+               get_file_info(dir, &info) && info.type == FILE_DIR;
+            if (found)
+               tb_cat(tb, dir);
+
+            free(dir);
+            if (found) {
+               free(str);
+               return;
+            }
+         }
+      }
+      free(str);
+   }
+#endif
    tb_cat(tb, LIBEXECDIR);
 #endif
 }
