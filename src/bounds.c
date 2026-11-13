@@ -639,10 +639,46 @@ static void bounds_free_intervals(interval_t **list)
    *list = NULL;
 }
 
+static void bounds_check_record_aggregate(tree_t t, type_t type)
+{
+   const int nassocs = tree_assocs(t);
+   for (int i = 0; i < nassocs; i++) {
+      tree_t a = tree_assoc(t, i);
+
+      tree_t field = NULL;
+      switch (tree_subkind(a)) {
+      case A_POS:
+         if (i < type_fields(type))
+            field = type_field(type, i);
+         break;
+      case A_NAMED:
+         {
+            tree_t name = tree_name(a);
+            if (tree_kind(name) == T_REF && tree_has_ref(name))
+               field = tree_ref(name);
+         }
+         break;
+      default:
+         break;
+      }
+
+      if (field == NULL || tree_kind(field) != T_FIELD_DECL)
+         continue;
+
+      type_t ftype = tree_type(field);
+      if (type_is_scalar(ftype))
+         bounds_check_scalar(tree_value(a), ftype, NULL);
+   }
+}
+
 static void bounds_check_aggregate(tree_t t)
 {
    type_t type = tree_type(t);
-   if (!type_is_array(type))
+   if (type_is_record(type)) {
+      bounds_check_record_aggregate(t, type);
+      return;
+   }
+   else if (!type_is_array(type))
       return;
 
    // Find the tightest bounds for the index

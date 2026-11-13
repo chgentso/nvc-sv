@@ -27,7 +27,7 @@ package test_pkg is
       segment_type            => TYPE_0,
       word_length             => 1,
       crc_check               => false,
-      table                   => 16#a0#),
+      table                   => 1),
     TYPE_1                    => (
       data_word               => (others => '0'),
       word_idx                => (others => '0'),
@@ -41,28 +41,28 @@ package test_pkg is
       segment_type            => TYPE_2,
       word_length             => 1,
       crc_check               => false,
-      table                   => 16#a1#),
+      table                   => 1),
     TYPE_3                    => (
       data_word               => (others => '0'),
       word_idx                => (others => '0'),
       segment_type            => TYPE_3,
       word_length             => 2,
       crc_check               => true,
-      table                   => 16#a2#),
+      table                   => 1),
     TYPE_4                    => (
       data_word               => (others => '0'),
       word_idx                => (others => '0'),
       segment_type            => TYPE_4,
       word_length             => 2,
       crc_check               => true,
-      table                   => 16#a3#),
+      table                   => 1),
     TYPE_5                    => (
       data_word               => (others => '0'),
       word_idx                => (others => '0'),
       segment_type            => TYPE_5,
       word_length             => 2,
       crc_check               => true,
-      table                   => 16#a4#)
+      table                   => 1)
   );
 
   constant C_DATA_INVALID_VERSION : bit_vector(7 downto 0)  := x"FF";

@@ -1088,6 +1088,24 @@ START_TEST(test_casegen1)
 }
 END_TEST
 
+START_TEST(test_recagg)
+{
+   input_from_file(TESTDIR "/bounds/recagg.vhd");
+
+   const error_t expect[] = {
+      { 12, "value 0 outside of POSITIVE range 1 to 2147483647" },
+      { 13, "value 0 outside of POSITIVE range 1 to 2147483647" },
+      { 19, "value 4 outside of SMALL range 0 to 3" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   parse_check_and_simplify(T_ENTITY, T_ARCH);
+
+   check_expected_errors();
+}
+END_TEST
+
 Suite *get_bounds_tests(void)
 {
    Suite *s = suite_create("bounds");
@@ -1142,6 +1160,7 @@ Suite *get_bounds_tests(void)
    tcase_add_test(tc_core, test_gtype1);
    tcase_add_test(tc_core, test_issue1666);
    tcase_add_test(tc_core, test_casegen1);
+   tcase_add_test(tc_core, test_recagg);
    suite_add_tcase(s, tc_core);
 
    return s;
