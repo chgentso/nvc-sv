@@ -293,6 +293,68 @@ START_TEST(test_sensitivity)
 }
 END_TEST
 
+static loc_t make_loc(file_ref_t file, unsigned line, unsigned delta,
+                      unsigned col)
+{
+   loc_t loc = LOC_INVALID;
+   loc.file_ref = file;
+   loc.first_line = line;
+   loc.line_delta = delta;
+   loc.first_column = col;
+   loc.column_delta = 1;
+   return loc;
+}
+
+START_TEST(test_regions)
+{
+   lint_parse_option(NULL);
+   lint_errors_reset();
+
+   const file_ref_t f = loc_file_ref("regions.sv", NULL);
+   const loc_t unit = make_loc(f, 10, 20, 0);
+   const loc_t before = make_loc(f, 12, 2, 4);
+   const loc_t inside = make_loc(f, 20, 1, 4);
+   const loc_t after = make_loc(f, 25, 2, 4);
+
+   ck_assert(lint_trusted(&unit, &before));
+   ck_assert(!lint_span_has_error(&before));
+
+   const loc_t err = make_loc(f, 21, 0, 8);
+   lint_note_error(&err);
+   ck_assert(lint_span_has_error(&inside));
+   ck_assert(!lint_span_has_error(&before));
+   ck_assert(!lint_span_has_syntax_error(&inside));
+   ck_assert(!lint_trusted(&unit, &inside));
+   ck_assert(lint_trusted(&unit, &after));   // Not a syntax error
+
+   const loc_t syn = make_loc(f, 21, 0, 6);
+   lint_note_syntax_error(&syn);
+   ck_assert(lint_span_has_syntax_error(&inside));
+   ck_assert(lint_trusted(&unit, &before));
+   ck_assert(lint_after_syntax_error(&unit, &after));
+   ck_assert(!lint_trusted(&unit, &after));
+
+   // A syntax error in another unit of the file does not matter
+   const loc_t other = make_loc(f, 40, 5, 0);
+   ck_assert(!lint_after_syntax_error(&other, &after));
+
+   // An error without a location makes everything untrusted
+   lint_errors_reset();
+   ck_assert(lint_trusted(&unit, &after));
+   lint_note_error(NULL);
+   ck_assert(!lint_trusted(&unit, &after));
+
+   lint_errors_reset();
+   ck_assert(lint_trusted(&unit, &after));
+
+   // Nothing is recorded when lint is off
+   lint_parse_option("none");
+   lint_note_error(&err);
+   lint_note_syntax_error(&syn);
+   ck_assert(lint_trusted(&unit, &after));
+}
+END_TEST
+
 Suite *get_lint_tests(void)
 {
    Suite *s = suite_create("lint");
@@ -308,6 +370,7 @@ Suite *get_lint_tests(void)
    tcase_add_test(tc, test_latch_static);
    tcase_add_test(tc, test_sensitivity);
    tcase_add_test(tc, test_unused_attribute);
+   tcase_add_test(tc, test_regions);
    suite_add_tcase(s, tc);
 
    return s;

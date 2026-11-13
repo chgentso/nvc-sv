@@ -20,6 +20,7 @@
 #include "common.h"
 #include "diag.h"
 #include "hash.h"
+#include "lint.h"
 #include "lib.h"
 #include "names.h"
 #include "object.h"
@@ -442,6 +443,7 @@ static token_t wrapped_yylex(void)
 
 static void vhdl_parse_error_cb(void)
 {
+   lint_note_syntax_error(&state.last_loc);
    suppress_errors(nametab);
 }
 

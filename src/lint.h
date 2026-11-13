@@ -33,7 +33,8 @@ typedef enum {
    LINT_CASEDEF  = (1 << 7),   // Case without default in combinational code
    LINT_UNCONN   = (1 << 8),   // Input port left open in an instance
    LINT_MULTI    = (1 << 9),   // Variable assigned by two always blocks
-   LINT_ALL      = (1 << 10) - 1
+   LINT_PARTIAL  = (1 << 10),  // Only part of a unit with errors was checked
+   LINT_ALL      = (1 << 11) - 1
 } lint_rule_t;
 
 // Parse the argument of --lint: a comma separated list of rule names,
@@ -73,5 +74,29 @@ void lint_flush(void);
 
 // True the first time it is called with this key
 bool lint_first_visit(const void *key);
+
+// Where the errors of the file being analysed are, so that a unit with
+// errors can still be checked for the constructs they do not touch.  All
+// of this only has an effect when lint is enabled.  A span is the lines
+// of a location.
+void lint_errors_reset(void);
+void lint_note_error(const loc_t *loc);
+void lint_note_syntax_error(const loc_t *loc);
+
+// An error lies inside the lines of the span
+bool lint_span_has_error(const loc_t *span);
+
+// A syntax error lies inside the lines of the span
+bool lint_span_has_syntax_error(const loc_t *span);
+
+// The location is at or after the first syntax error inside the unit
+bool lint_after_syntax_error(const loc_t *unit, const loc_t *at);
+
+// Neither an error in the construct nor a syntax error before it in the
+// unit make it unreliable
+bool lint_trusted(const loc_t *unit, const loc_t *construct);
+
+// A note that only part of a unit with errors was checked
+void lint_partial_note(const loc_t *loc, unsigned skipped);
 
 #endif  // _LINT_H

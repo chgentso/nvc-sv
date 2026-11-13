@@ -193,6 +193,9 @@ static void analyse_file(const char *file, cmd_state_t *state)
       return;
    }
 
+   if (opt_get_int(OPT_LINT))
+      lint_errors_reset();
+
    input_from_file(file);
 
    switch (source_kind()) {
@@ -311,6 +314,12 @@ static void do_file_list(const char *file, cmd_state_t *state)
 
    free(line);
    fclose(f);
+}
+
+static void lint_error_diag_cb(diag_t *d, void *ctx)
+{
+   if (diag_level(d, NULL) >= DIAG_ERROR)
+      lint_note_error(diag_get_loc(d));
 }
 
 static void werror_diag_cb(diag_t *d, void *ctx)
@@ -539,6 +548,11 @@ static int analyse_files(int argc, char **argv, cmd_state_t *state,
    if (scan)
       scan_set_symbols(symbols);
 
+   // Registered before the -Werror callback so it sees the real level
+   const bool lint_regions = opt_get_int(OPT_LINT) != 0;
+   if (lint_regions)
+      diag_add_hint_fn(lint_error_diag_cb, NULL);
+
    if (werror)
       diag_add_hint_fn(werror_diag_cb, NULL);
 
@@ -580,6 +594,9 @@ static int analyse_files(int argc, char **argv, cmd_state_t *state,
       if (werror)
          diag_remove_hint_fn(werror_diag_cb, NULL);
 
+      if (lint_regions)
+         diag_remove_hint_fn(lint_error_diag_cb, NULL);
+
       set_error_limit(0);
 
       return errors > 0 ? EXIT_FAILURE : EXIT_SUCCESS;
@@ -590,6 +607,9 @@ static int analyse_files(int argc, char **argv, cmd_state_t *state,
 
    if (werror)
       diag_remove_hint_fn(werror_diag_cb, NULL);
+
+   if (lint_regions)
+      diag_remove_hint_fn(lint_error_diag_cb, NULL);
 
    jit_free(state->jit);
    state->jit = NULL;

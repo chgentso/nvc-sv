@@ -70,6 +70,8 @@ static const struct {
      "Input port left open in an instantiation" },
    { "multidriven", LINT_MULTI, "verilog",      "analysis",
      "Variable assigned as a whole by more than one always block" },
+   { "partial",  LINT_PARTIAL,  "vhdl,verilog", "analysis",
+     "Note that only part of a unit with errors was checked" },
 };
 
 void lint_list_rules(void)
@@ -139,9 +141,14 @@ void lint_parse_option(const char *arg)
             rule = 0;
          }
          else if (!lookup_rule(word, end - word, &rule))
-            fatal("invalid lint rule '%.*s': valid rules are unused, "
-                  "undriven, width, latch, sensitivity, all and none",
-                  (int)(end - p), p);
+         {
+            LOCAL_TEXT_BUF tb = tb_new();
+            for (int i = 0; i < ARRAY_LEN(rule_names); i++)
+               tb_printf(tb, "%s, ", rule_names[i].name);
+
+            fatal("invalid lint rule '%.*s': valid rules are %sall and none",
+                  (int)(end - p), p, tb_get(tb));
+         }
 
          if (remove) {
             // A list starting with a removal means all rules but those
@@ -157,6 +164,146 @@ void lint_parse_option(const char *arg)
    }
 
    opt_set_int(OPT_LINT, mask);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Error regions
+
+typedef struct {
+   file_ref_t file;
+   unsigned   first_line;
+   unsigned   last_line;
+   unsigned   first_column;
+} error_region_t;
+
+typedef A(error_region_t) region_list_t;
+
+static region_list_t errors = AINIT;
+static region_list_t syntax_errors = AINIT;
+static bool          unlocated_error = false;
+
+void lint_errors_reset(void)
+{
+   ACLEAR(errors);
+   ACLEAR(syntax_errors);
+   unlocated_error = false;
+}
+
+static void note_region(region_list_t *list, const loc_t *loc)
+{
+   const error_region_t r = {
+      .file         = loc->file_ref,
+      .first_line   = loc->first_line,
+      .last_line    = loc->first_line + loc->line_delta,
+      .first_column = loc->first_column,
+   };
+   APUSH(*list, r);
+}
+
+void lint_note_error(const loc_t *loc)
+{
+   if (!lint_enabled(LINT_ALL))
+      return;
+   else if (loc == NULL || loc_invalid_p(loc))
+      unlocated_error = true;
+   else
+      note_region(&errors, loc);
+}
+
+void lint_note_syntax_error(const loc_t *loc)
+{
+   if (!lint_enabled(LINT_ALL))
+      return;
+   else if (loc == NULL || loc_invalid_p(loc))
+      unlocated_error = true;
+   else
+      note_region(&syntax_errors, loc);
+}
+
+static bool span_overlaps(const region_list_t *list, const loc_t *span)
+{
+   const unsigned last = span->first_line + span->line_delta;
+
+   for (unsigned i = 0; i < list->count; i++) {
+      const error_region_t *r = &(list->items[i]);
+      if (r->file == span->file_ref && r->first_line <= last
+          && r->last_line >= span->first_line)
+         return true;
+   }
+
+   return false;
+}
+
+bool lint_span_has_error(const loc_t *span)
+{
+   if (unlocated_error || loc_invalid_p(span))
+      return true;
+
+   return span_overlaps(&errors, span) || span_overlaps(&syntax_errors, span);
+}
+
+bool lint_span_has_syntax_error(const loc_t *span)
+{
+   if (unlocated_error || loc_invalid_p(span))
+      return true;
+
+   return span_overlaps(&syntax_errors, span);
+}
+
+bool lint_after_syntax_error(const loc_t *unit, const loc_t *at)
+{
+   if (unlocated_error || loc_invalid_p(unit) || loc_invalid_p(at))
+      return true;
+
+   const unsigned ulast = unit->first_line + unit->line_delta;
+
+   // Find the first syntax error that lies inside the unit
+   bool found = false;
+   unsigned line = 0, col = 0;
+   for (unsigned i = 0; i < syntax_errors.count; i++) {
+      const error_region_t *r = &(syntax_errors.items[i]);
+      if (r->file != unit->file_ref || r->first_line < unit->first_line
+          || r->first_line > ulast)
+         continue;
+
+      if (!found || r->first_line < line
+          || (r->first_line == line && r->first_column < col)) {
+         found = true;
+         line = r->first_line;
+         col = r->first_column;
+      }
+   }
+
+   if (!found || at->file_ref != unit->file_ref)
+      return false;
+
+   return at->first_line > line
+      || (at->first_line == line && at->first_column >= col);
+}
+
+bool lint_trusted(const loc_t *unit, const loc_t *construct)
+{
+   return !lint_span_has_error(construct)
+      && !lint_after_syntax_error(unit, construct);
+}
+
+void lint_partial_note(const loc_t *loc, unsigned skipped)
+{
+   if (!lint_enabled(LINT_PARTIAL) || lint_suppressed(loc, LINT_PARTIAL))
+      return;
+
+   diag_t *d = diag_new(DIAG_NOTE, loc);
+   diag_rule(d, rule_name(LINT_PARTIAL));
+
+   if (skipped > 0)
+      diag_printf(d, "lint is partial for this unit: whole-unit rules and "
+                  "%u construct%s with errors were not checked", skipped,
+                  skipped == 1 ? "" : "s");
+   else
+      diag_printf(d, "lint is partial for this unit: whole-unit rules were "
+                  "not checked");
+
+   diag_emit(d);
 }
 
 bool lint_enabled(lint_rule_t rule)

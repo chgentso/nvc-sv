@@ -19,6 +19,7 @@
 #include "tree.h"
 #include "common.h"
 #include "hash.h"
+#include "lint.h"
 #include "util.h"
 #include "diag.h"
 #include "ident.h"
@@ -704,6 +705,7 @@ static vlog_node_t lookup_interface(ident_t name)
 
 static void vlog_parse_error_cb(void)
 {
+   lint_note_syntax_error(&state.last_loc);
    vlog_symtab_suppress(symtab);
 }
 
