@@ -6206,7 +6206,47 @@ static void lower_fill_target_parts(lower_unit_t *lu, tree_t target,
       vcode_reg_t sum_reg = emit_const(vtype_offset(), 0);
 
       const int nassocs = tree_assocs(target);
+
+      // Parts of an array aggregate with named choices must be in the
+      // order of the array elements rather than the order they are
+      // written
+      int *order LOCAL = xmalloc_array(MAX(nassocs, 1), sizeof(int));
+      int64_t *key LOCAL = xmalloc_array(MAX(nassocs, 1), sizeof(int64_t));
+      bool sortable = !is_record && ndims == 1;
+      int64_t left = 0;
+      bool downto = false;
+      if (sortable) {
+         tree_t r = range_of(target_type, 0);
+         const range_kind_t dir = tree_subkind(r);
+         int64_t low, high;
+         sortable = (dir == RANGE_TO || dir == RANGE_DOWNTO)
+            && folded_bounds(r, &low, &high);
+         downto = dir == RANGE_DOWNTO;
+         left = downto ? high : low;
+      }
+
       for (int i = 0; i < nassocs; i++) {
+         order[i] = i;
+         tree_t a = tree_assoc(target, i);
+         int64_t name;
+         if (tree_subkind(a) != A_NAMED || !folded_int(tree_name(a), &name))
+            sortable = false;
+         else
+            key[i] = downto ? left - name : name - left;
+      }
+
+      if (sortable) {
+         for (int i = 1; i < nassocs; i++) {
+            const int o = order[i];
+            int j = i - 1;
+            for (; j >= 0 && key[order[j]] > key[o]; j--)
+               order[j + 1] = order[j];
+            order[j + 1] = o;
+         }
+      }
+
+      for (int n = 0; n < nassocs; n++) {
+         const int i = order[n];
          tree_t assoc = tree_assoc(target, i);
 
          if (is_record) {

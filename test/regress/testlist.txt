@@ -2734,3 +2734,4 @@ svrealconv1 verilog
 svrealcond1 verilog
 config16        normal,2008
 config17        normal,2008
+aggtarget3      normal
