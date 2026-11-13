@@ -4319,11 +4319,15 @@ static void overload_next_argument(overload_t *o, tree_t p)
    if (o->trace)
       nvc_printf("%pI: next argument %pK %pT\n", o->name, value, type);
 
-   const bool is_partial =
-      tree_subkind(p) == P_NAMED
-      && tree_kind(tree_name(p)) != T_REF;
+   // The type of the actual for a partial association of a formal
+   // is that of the element, slice or field when it is a single selection
+   const bool is_named = tree_subkind(p) == P_NAMED;
+   const bool is_partial = is_named && tree_kind(tree_name(p)) != T_REF;
+   const bool is_simple_partial = is_partial
+      && name_to_ref(tree_name(p)) != NULL
+      && tree_kind(tree_value(tree_name(p))) == T_REF;
 
-   if (o->initial > 1 && !is_partial) {
+   if (o->initial > 1 && (!is_partial || is_simple_partial)) {
       unsigned wptr = 0;
       int first_match = -1;
       bool found_port = false;
@@ -4331,6 +4335,13 @@ static void overload_next_argument(overload_t *o, tree_t p)
          tree_t port = overload_find_port(o->candidates.items[i], p);
          if (port != NULL && type != NULL) {
             type_t ptype = tree_type(port);
+            if (is_simple_partial) {
+               ptype = overload_get_name_type(port, tree_ident(port),
+                                              tree_name(p));
+               if (ptype == NULL)
+                  ptype = tree_type(port);
+            }
+
             found_port = true;
 
             if (type_eq(ptype, type)) {
