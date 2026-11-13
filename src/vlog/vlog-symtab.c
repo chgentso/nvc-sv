@@ -1020,6 +1020,7 @@ void vlog_symtab_lookup(vlog_symtab_t *st, vlog_node_t v)
 
       vlog_node_t dt = vlog_new(V_DATA_TYPE);
       vlog_set_subkind(dt, DT_LOGIC);
+      vlog_set_flags(dt, VLOG_F_IMPLICIT_NET);
 
       vlog_set_type(decl, dt);
 

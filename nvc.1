@@ -403,6 +403,37 @@ A VHDL process with a sensitivity list but no clock edge that reads a signal
 that is not in the list.  The signals read in the statements of the process
 are checked, except for the prefixes of attributes and signals that are only
 assigned, and the message offers a fix that adds the signals to the list.
+Conditions are not evaluated and loops are assumed to run at least once.
+.It Cm implicit-net
+A Verilog net that is declared implicitly because a name that is not
+declared is connected to a port or assigned by a continuous assignment.
+.It Cm blocking
+A Verilog variable that is assigned with both blocking and non-blocking
+assignments in
+.Ql always
+blocks.
+.It Cm case-default
+A Verilog
+.Ql case
+statement without a
+.Ql default
+item in an
+.Ql always_comb
+or
+.Ql always @*
+block, unless it is
+.Ql unique
+or
+.Ql priority
+or lists every value of the selector.
+.It Cm unconnected
+An input port of a Verilog module that is left open in an instantiation
+by writing it as
+.Ql .name() .
+.It Cm multidriven
+A whole Verilog variable that is assigned by more than one
+.Ql always
+block.  Selects of a variable are not checked.
 .El
 .Pp
 A warning is suppressed by a comment

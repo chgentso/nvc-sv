@@ -978,6 +978,238 @@ static void latch_cb(vlog_node_t v, void *context)
    }
 }
 
+////////////////////////////////////////////////////////////////////////////////
+// Implicit nets, mixed assignments and cases without a default
+
+static void implicit_cb(vlog_node_t v, void *context)
+{
+   if (!vlog_has_type(v) || vlog_kind(vlog_type(v)) != V_DATA_TYPE
+       || !(vlog_flags(vlog_type(v)) & VLOG_F_IMPLICIT_NET))
+      return;
+
+   lint_warn(vlog_loc(v), LINT_IMPLICIT, "net '%s' is declared implicitly by "
+             "its use", istr(vlog_ident(v)));
+}
+
+typedef struct {
+   vlog_node_t decl;
+   loc_t       blocking;
+   loc_t       nonblocking;
+   bool        has_blocking;
+   bool        has_nonblocking;
+} mixed_t;
+
+typedef A(mixed_t) mixed_list_t;
+
+static vlog_node_t assigned_decl(vlog_node_t target)
+{
+   while (vlog_kind(target) == V_BIT_SELECT
+          || vlog_kind(target) == V_PART_SELECT
+          || vlog_kind(target) == V_MEMBER_REF)
+      target = vlog_value(target);
+
+   if (vlog_kind(target) != V_REF || !vlog_has_ref(target))
+      return NULL;
+
+   vlog_node_t decl = vlog_ref(target);
+   switch (vlog_kind(decl)) {
+   case V_VAR_DECL:
+   case V_NET_DECL:
+      return decl;
+   case V_PORT_DECL:
+      return vlog_has_ref(decl) ? vlog_ref(decl) : NULL;
+   default:
+      return NULL;
+   }
+}
+
+static void mixed_record(mixed_list_t *list, vlog_node_t stmt, bool blocking)
+{
+   vlog_node_t decl = assigned_decl(vlog_target(stmt));
+   if (decl == NULL)
+      return;
+
+   mixed_t *m = NULL;
+   for (unsigned i = 0; i < list->count && m == NULL; i++) {
+      if (list->items[i].decl == decl)
+         m = &(list->items[i]);
+   }
+
+   if (m == NULL) {
+      mixed_t new = { .decl = decl };
+      APUSH(*list, new);
+      m = &(list->items[list->count - 1]);
+   }
+
+   if (blocking && !m->has_blocking) {
+      m->has_blocking = true;
+      m->blocking = *vlog_loc(stmt);
+   }
+   else if (!blocking && !m->has_nonblocking) {
+      m->has_nonblocking = true;
+      m->nonblocking = *vlog_loc(stmt);
+   }
+}
+
+static void mixed_cb(vlog_node_t v, void *context)
+{
+   mixed_list_t *list = context;
+
+   switch (vlog_kind(v)) {
+   case V_BASSIGN:
+      mixed_record(list, v, true);
+      break;
+   case V_NBASSIGN:
+      mixed_record(list, v, false);
+      break;
+   default:
+      break;
+   }
+}
+
+static void check_mixed(vlog_node_t unit)
+{
+   mixed_list_t list = AINIT;
+
+   // Initial blocks and tasks often assign variables the other way
+   const int nstmts = vlog_stmts(unit);
+   for (int i = 0; i < nstmts; i++) {
+      vlog_node_t s = vlog_stmt(unit, i);
+      if (vlog_kind(s) == V_ALWAYS)
+         vlog_visit(s, mixed_cb, &list);
+   }
+
+   for (unsigned i = 0; i < list.count; i++) {
+      const mixed_t *m = &(list.items[i]);
+      if (!m->has_blocking || !m->has_nonblocking)
+         continue;
+
+      const loc_t *at = &(m->nonblocking);
+      if (lint_suppressed(at, LINT_BLOCKING)
+          || lint_suppressed(&(m->blocking), LINT_BLOCKING))
+         continue;
+
+      diag_t *d = lint_diag(at, LINT_BLOCKING);
+      if (d == NULL)
+         continue;
+
+      diag_printf(d, "'%s' is assigned with both blocking and non-blocking "
+                  "assignments", istr(vlog_ident(m->decl)));
+      diag_hint(d, &(m->blocking), "blocking assignment");
+      diag_emit(d);
+   }
+
+   ACLEAR(list);
+}
+
+static void case_default_cb(vlog_node_t v, void *context)
+{
+   if (vlog_kind(v) != V_CASE
+       || (vlog_flags(v) & (VLOG_F_UNIQUE | VLOG_F_UNIQUE0 | VLOG_F_PRIORITY)))
+      return;
+   else if (case_complete(v))
+      return;
+
+   lint_warn(vlog_loc(v), LINT_CASEDEF, "case statement in combinational "
+             "code has no default");
+}
+
+static void case_comb_cb(vlog_node_t v, void *context)
+{
+   if (vlog_kind(v) != V_ALWAYS || vlog_stmts(v) != 1)
+      return;
+
+   switch (vlog_subkind(v)) {
+   case V_ALWAYS_COMB:
+      vlog_visit_only(vlog_stmt(v, 0), case_default_cb, NULL, V_CASE);
+      break;
+   case V_ALWAYS_PLAIN:
+      {
+         vlog_node_t t = vlog_stmt(v, 0);
+         if (vlog_kind(t) != V_TIMING)
+            break;
+
+         vlog_node_t ctrl = vlog_value(t);
+         if (vlog_kind(ctrl) == V_EVENT_CONTROL && vlog_params(ctrl) == 0)
+            vlog_visit_only(t, case_default_cb, NULL, V_CASE);
+      }
+      break;
+   default:
+      break;
+   }
+}
+
+typedef struct {
+   vlog_node_t decl;
+   vlog_node_t block;
+} driver_t;
+
+typedef A(driver_t) driver_list_t;
+
+typedef struct {
+   driver_list_t *list;
+   vlog_node_t    block;
+} driver_ctx_t;
+
+static void driver_cb(vlog_node_t v, void *context)
+{
+   driver_ctx_t *ctx = context;
+
+   if (vlog_kind(v) != V_BASSIGN && vlog_kind(v) != V_NBASSIGN)
+      return;
+
+   // Only a whole variable: different bits can have different drivers
+   vlog_node_t target = vlog_target(v);
+   if (vlog_kind(target) != V_REF || !vlog_has_ref(target))
+      return;
+
+   vlog_node_t decl = vlog_ref(target);
+   if (vlog_kind(decl) == V_PORT_DECL && vlog_has_ref(decl))
+      decl = vlog_ref(decl);
+
+   if (vlog_kind(decl) != V_VAR_DECL)
+      return;
+
+   for (unsigned i = 0; i < ctx->list->count; i++) {
+      const driver_t *d = &(ctx->list->items[i]);
+      if (d->decl != decl)
+         continue;
+      else if (d->block == ctx->block)
+         return;
+
+      diag_t *diag = lint_diag(vlog_loc(v), LINT_MULTI);
+      if (diag == NULL)
+         return;
+
+      diag_printf(diag, "variable '%s' is assigned by more than one always "
+                  "block", istr(vlog_ident(decl)));
+      diag_hint(diag, vlog_loc(d->block), "also assigned in this block");
+      diag_emit(diag);
+      return;
+   }
+
+   const driver_t d = { decl, ctx->block };
+   APUSH(*ctx->list, d);
+}
+
+static void check_multidriven(vlog_node_t unit)
+{
+   driver_list_t list = AINIT;
+   driver_ctx_t ctx = { .list = &list };
+
+   const int nstmts = vlog_stmts(unit);
+   for (int i = 0; i < nstmts; i++) {
+      vlog_node_t s = vlog_stmt(unit, i);
+      if (vlog_kind(s) != V_ALWAYS)
+         continue;
+
+      ctx.block = s;
+      vlog_visit(s, driver_cb, &ctx);
+   }
+
+   ACLEAR(list);
+}
+
 void vlog_lint(vlog_node_t unit)
 {
    if (lint_enabled(LINT_WIDTH))
@@ -985,4 +1217,16 @@ void vlog_lint(vlog_node_t unit)
 
    if (lint_enabled(LINT_LATCH))
       vlog_visit_only(unit, latch_cb, NULL, V_ALWAYS);
+
+   if (lint_enabled(LINT_IMPLICIT))
+      vlog_visit_only(unit, implicit_cb, NULL, V_NET_DECL);
+
+   if (lint_enabled(LINT_BLOCKING) && vlog_kind(unit) == V_MODULE)
+      check_mixed(unit);
+
+   if (lint_enabled(LINT_CASEDEF))
+      vlog_visit_only(unit, case_comb_cb, NULL, V_ALWAYS);
+
+   if (lint_enabled(LINT_MULTI) && vlog_kind(unit) == V_MODULE)
+      check_multidriven(unit);
 }

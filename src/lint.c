@@ -60,6 +60,16 @@ static const struct {
      "Combinational process that infers a latch" },
    { "sensitivity", LINT_SENSITIVITY, "vhdl", "analysis",
      "Signal read in a process but missing from its sensitivity list" },
+   { "implicit-net", LINT_IMPLICIT, "verilog",    "analysis",
+     "Net that is declared implicitly by its use" },
+   { "blocking", LINT_BLOCKING, "verilog",      "analysis",
+     "Variable assigned with blocking and non-blocking assignments" },
+   { "case-default", LINT_CASEDEF, "verilog",   "analysis",
+     "Case statement in combinational code without a default" },
+   { "unconnected", LINT_UNCONN, "verilog",     "elaboration",
+     "Input port left open in an instantiation" },
+   { "multidriven", LINT_MULTI, "verilog",      "analysis",
+     "Variable assigned as a whole by more than one always block" },
 };
 
 void lint_list_rules(void)
@@ -186,7 +196,8 @@ static bool line_suppresses(const loc_t *loc, int delta, lint_rule_t rule)
             w++;
 
          const char *start = w;
-         while (w < eol && (isalnum((unsigned char)*w) || *w == '_'))
+         while (w < eol && (isalnum((unsigned char)*w) || *w == '_'
+                            || *w == '-'))
             w++;
 
          if (w == start)

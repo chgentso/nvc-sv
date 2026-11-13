@@ -2760,3 +2760,5 @@ partial3        normal
 visibility24    normal
 lintvlogfix1 shell
 lintvlogfix2 shell
+lintvlogrules1 shell
+lintvlogrules2 shell

@@ -2395,8 +2395,13 @@ static void elab_verilog_ports(vlog_node_t inst, elab_instance_t *ei,
          if (!vlog_has_value(conn)) {
             if ((vlog_flags(ei->body) & VLOG_F_CHECKER) && vlog_has_value(port))
                conn = NULL;
-            else
+            else {
+               if (vlog_subkind(port) == V_PORT_INPUT)
+                  lint_warn(vlog_loc(conn), LINT_UNCONN, "input port '%s' of "
+                            "'%s' is left unconnected", istr(port_name),
+                            istr(vlog_ident2(ei->body)));
                continue;
+            }
          }
       }
 

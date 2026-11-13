@@ -31,7 +31,7 @@ grep -q '"message":"signal .A1. is never read"' multi
 nvc --lint=list > rules
 grep -q '^unused	vhdl,verilog	elaboration	off	' rules
 grep -q '^latch	' rules
-test $(wc -l < rules) = 5
+test $(wc -l < rules) = 10
 grep -q '^sensitivity	vhdl	analysis	off	' rules
 
 # A missing signal has a fix that adds it to the list

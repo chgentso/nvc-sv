@@ -28,7 +28,12 @@ typedef enum {
    LINT_WIDTH    = (1 << 2),   // Assignment or connection truncates
    LINT_LATCH    = (1 << 3),   // Combinational process infers a latch
    LINT_SENSITIVITY = (1 << 4),   // Signal read but not in sensitivity list
-   LINT_ALL      = (1 << 5) - 1
+   LINT_IMPLICIT = (1 << 5),   // Net declared implicitly by its use
+   LINT_BLOCKING = (1 << 6),   // Blocking and non-blocking assignments
+   LINT_CASEDEF  = (1 << 7),   // Case without default in combinational code
+   LINT_UNCONN   = (1 << 8),   // Input port left open in an instance
+   LINT_MULTI    = (1 << 9),   // Variable assigned by two always blocks
+   LINT_ALL      = (1 << 10) - 1
 } lint_rule_t;
 
 // Parse the argument of --lint: a comma separated list of rule names,
