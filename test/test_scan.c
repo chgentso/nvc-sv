@@ -510,6 +510,174 @@ START_TEST(test_g0_unknown_type_decl)
 }
 END_TEST
 
+static void scan_fsm_contain(const char *file, const char *const *parts,
+                             unsigned nparts, bool expect)
+{
+   add_include_dir(SCAN_FILE("."));
+
+   LOCAL_TEXT_BUF tb = tb_new();
+   scan_set_fsm(true);
+   (void)scan_file_deps(file, tb);
+   scan_set_fsm(false);
+
+   const char *json = tb_get(tb);
+   for (unsigned i = 0; i < nparts; i++) {
+      if ((strstr(json, parts[i]) != NULL) != expect) {
+         printf("%s: %s\n%s", expect ? "missing" : "unexpected", parts[i],
+                json);
+         ck_abort_msg("fsms differ for %s", file);
+      }
+   }
+}
+
+START_TEST(test_fsm_vlog_one_process)
+{
+   // One process machines: reset, guards, conditional value, default, nested case and computed targets
+
+   static const char *const parts[] = {
+      "\"unit\":\"WORK.G1\",\"container\":\"WORK.G1\",\"kind\":\"enum\",\"style\":\"one-process\","
+      "\"typed\":true,\"state\":{\"name\":\"st\",\"line\":3,\"col\":8,\"len\":2,"
+      "\"type\":\"st_e\"},\"clock\":{\"name\":\"clk\",\"edge\":\"rising\"}",
+      "{\"name\":\"C\",\"line\":2,\"col\":43,\"len\":1,\"value\":\"3'd5\","
+      "\"branch\":{\"line\":9,\"end_line\":10}}",
+      "{\"from\":[\"A\"],\"to\":\"C\",\"kind\":\"case\",\"line\":8,\"col\":43,"
+      "\"end_col\":50,\"guards\":[{\"text\":\"go\",\"line\":8,\"col\":16,\"neg\":true}"
+      ",{\"text\":\"fin\",\"line\":8,\"col\":38,\"neg\":false}]}",
+      "{\"from\":[\"B\",\"C\"],\"to\":\"B\",\"kind\":\"case\",\"line\":10,"
+      "\"col\":12,\"end_col\":40,\"guards\":[{\"text\":\"fin\",\"line\":10,"
+      "\"col\":18,\"neg\":true},{\"text\":\"go\",\"line\":10,\"col\":29,\"neg\":false}"
+      "]}",
+      "{\"from\":[\"*others\"],\"to\":\"A\",\"kind\":\"default\",\"line\":12,"
+      "\"col\":18,\"end_col\":25,\"guards\":[]}",
+      "{\"from\":[\"*\"],\"to\":\"A\",\"kind\":\"reset\",\"line\":5,\"col\":17,"
+      "\"end_col\":24,\"guards\":[{\"text\":\"!rst_n\",\"line\":5,\"col\":9,"
+      "\"neg\":false}]}],\"initial\":\"A\"",
+   };
+   scan_fsm_contain(SCAN_FILE("fsm_g1.sv"), parts, ARRAY_LEN(parts),
+                    true);
+}
+END_TEST
+
+START_TEST(test_fsm_vlog_untyped)
+{
+   // The type name is not known when it comes from a package that is not available
+
+   static const char *const parts[] = {
+      "\"unit\":\"WORK.G1B\",\"container\":\"WORK.G1B\",\"kind\":\"enum\","
+      "\"style\":\"one-process\",\"typed\":false,\"state\":{\"name\":\"s2\","
+      "\"line\":20,\"col\":8,\"len\":2,\"type\":\"st_e\"}",
+      "{\"from\":[\"IDLE\"],\"to\":\"IDLE\",\"kind\":\"case\",\"line\":26,"
+      "\"col\":20,\"end_col\":30,\"guards\":[{\"text\":\"mode == 2'd0\",\"line\":25,"
+      "\"col\":11,\"neg\":true}]}",
+      "{\"from\":[\"DONE\"],\"expr\":\"nxt(s2)\",\"kind\":\"case\",\"line\":30,"
+      "\"col\":13,\"end_col\":26,\"guards\":[]}",
+      "\"text\":\"{bus[1:0], bus[3:2]} == 4'b0101\"",
+   };
+   scan_fsm_contain(SCAN_FILE("fsm_g1.sv"), parts, ARRAY_LEN(parts),
+                    true);
+}
+END_TEST
+
+START_TEST(test_fsm_vlog_two_process)
+{
+   // A state register and a next state in separate processes: default assignment and abort
+
+   static const char *const parts[] = {
+      "\"unit\":\"WORK.G2\",\"container\":\"WORK.G2\",\"kind\":\"enum\",\"style\":\"two-process\","
+      "\"typed\":true,\"state\":{\"name\":\"st\",\"line\":2,\"col\":21,\"len\":2,"
+      "\"type\":\"enum\"},\"next\":{\"name\":\"nx\",\"line\":2,\"col\":25,"
+      "\"len\":2,\"type\":\"enum\"}",
+      "\"processes\":[{\"role\":\"register\",\"line\":12,\"end_line\":12},"
+      "{\"role\":\"next\",\"line\":3,\"end_line\":11}]",
+      "{\"from\":[\"*\"],\"to\":\"S0\",\"kind\":\"any\",\"line\":10,\"col\":16,"
+      "\"end_col\":23,\"guards\":[{\"text\":\"abort\",\"line\":10,\"col\":9,"
+      "\"neg\":false}]}",
+      "{\"from\":[\"*\"],\"to\":\"S0\",\"kind\":\"reset\",\"line\":12,\"col\":37,"
+      "\"end_col\":45,\"guards\":[{\"text\":\"rst\",\"line\":12,\"col\":32,"
+      "\"neg\":false}]}",
+   };
+   scan_fsm_contain(SCAN_FILE("fsm_g2.sv"), parts, ARRAY_LEN(parts),
+                    true);
+}
+END_TEST
+
+START_TEST(test_fsm_vlog_macro)
+{
+   // The state register is a macro that is not defined
+
+   static const char *const parts[] = {
+      "\"unit\":\"WORK.G2B\"",
+      "{\"from\":[\"*\"],\"to\":\"IDLE\",\"kind\":\"any\",\"line\":19,\"col\":5,"
+      "\"end_col\":19,\"guards\":[]}",
+      "\"initial\":\"IDLE\",\"notes\":[\"the state register is a macro\",\"default assignment before the case at line 20\"]",
+   };
+   scan_fsm_contain(SCAN_FILE("fsm_g2.sv"), parts, ARRAY_LEN(parts),
+                    true);
+}
+END_TEST
+
+START_TEST(test_fsm_vlog_generate)
+{
+   // A machine in a generate block
+
+   static const char *const parts[] = {
+      "\"unit\":\"WORK.G2C\",\"container\":\"WORK.G2C\",\"kind\":\"enum\","
+      "\"style\":\"one-process\",\"typed\":true,\"state\":{\"name\":\"s\","
+      "\"line\":32,\"col\":9,\"len\":1,\"type\":\"t_e\"}",
+   };
+   scan_fsm_contain(SCAN_FILE("fsm_g2.sv"), parts, ARRAY_LEN(parts),
+                    true);
+}
+END_TEST
+
+START_TEST(test_fsm_vlog_constants)
+{
+   // States held as localparam constants
+
+   static const char *const parts[] = {
+      "\"unit\":\"WORK.G3\",\"container\":\"WORK.G3\",\"kind\":\"constants\","
+      "\"style\":\"two-process\",\"typed\":true,\"state\":{\"name\":\"state_reg\",",
+      "{\"name\":\"RUN\",\"line\":2,\"col\":27,\"len\":3,\"value\":\"2'd1\","
+      "\"branch\":{\"line\":8,\"end_line\":8}}",
+      "{\"from\":[\"*\"],\"to\":\"IDLE\",\"kind\":\"reset\",\"line\":13,\"col\":14,"
+      "\"end_col\":31,\"guards\":[{\"text\":\"rst\",\"line\":13,\"col\":9,"
+      "\"neg\":false}]}",
+      "\"default assignment before the case at line 6\"",
+   };
+   scan_fsm_contain(SCAN_FILE("fsm_g3.sv"), parts, ARRAY_LEN(parts),
+                    true);
+}
+END_TEST
+
+START_TEST(test_fsm_vlog_errors)
+{
+   // Errors before, inside and after the machine
+
+   static const char *const parts[] = {
+      "\"unit\":\"WORK.G5B\"",
+      "\"expr\":\"%%%\"",
+   };
+   scan_fsm_contain(SCAN_FILE("fsm_g5.sv"), parts, ARRAY_LEN(parts),
+                    true);
+}
+END_TEST
+
+START_TEST(test_fsm_vlog_negative)
+{
+   // Decoders, enum registers without a case, a case on the next state only,
+   // two constants without a reset and a case from an included file
+
+   static const char *const parts[] = {
+      "\"unit\":\"WORK.G4A\"", "\"unit\":\"WORK.G4B\"",
+      "\"unit\":\"WORK.G4C\"", "\"unit\":\"WORK.G4D\"",
+   };
+   scan_fsm_contain(SCAN_FILE("fsm_g4.sv"), parts, ARRAY_LEN(parts), false);
+
+   static const char *const inc[] = { "\"unit\":\"WORK.G5A\"" };
+   scan_fsm_contain(SCAN_FILE("fsm_g5.sv"), inc, ARRAY_LEN(inc), false);
+}
+END_TEST
+
 START_TEST(test_g0_undefined_macro)
 {
    // The arguments of a macro which is not defined are skipped without
@@ -1135,7 +1303,14 @@ Suite *get_scan_tests(void)
    tcase_add_test(tc, test_fsm_vhdl_constants);
    tcase_add_test(tc, test_fsm_vhdl_negative);
    tcase_add_test(tc, test_fsm_vhdl_errors);
-   tcase_add_test(tc, test_g0_unknown_type_decl);
+   tcase_add_test(tc, test_fsm_vlog_one_process);
+   tcase_add_test(tc, test_fsm_vlog_untyped);
+   tcase_add_test(tc, test_fsm_vlog_two_process);
+   tcase_add_test(tc, test_fsm_vlog_macro);
+   tcase_add_test(tc, test_fsm_vlog_generate);
+   tcase_add_test(tc, test_fsm_vlog_constants);
+   tcase_add_test(tc, test_fsm_vlog_errors);
+   tcase_add_test(tc, test_fsm_vlog_negative);
    suite_add_tcase(s, tc);
 
    // Expanding covergroups is slow with the debug and sanitiser options
