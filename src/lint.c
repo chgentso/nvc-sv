@@ -284,6 +284,74 @@ bool lint_first_visit(const void *key)
    return true;
 }
 
+static bool lint_removable_signal(const loc_t *loc, loc_t *line_loc)
+{
+   // True if the VHDL signal declaration of a single name is alone on its
+   // line so that the line can be removed, and the location of the line
+   // without its newline
+
+   const char *line = loc_get_source(loc);
+   if (line == NULL)
+      return false;
+
+   const char *eol = line;
+   while (*eol != '\0' && *eol != '\n')
+      eol++;
+
+   // Only "signal" before the name
+   const char *p = line;
+   while (p < eol && isspace((unsigned char)*p))
+      p++;
+   if (eol - p < 7 || strncasecmp(p, "signal", 6) != 0
+       || !isspace((unsigned char)p[6]))
+      return false;
+
+   p += 6;
+   while (p < eol && isspace((unsigned char)*p))
+      p++;
+   if (p != line + loc->first_column)
+      return false;
+
+   // The declaration has a single name and ends on this line
+   const char *colon = NULL;
+   for (const char *q = p; q < eol; q++) {
+      if (*q == ',')
+         return false;
+      else if (*q == ':') {
+         colon = q;
+         break;
+      }
+   }
+
+   if (colon == NULL)
+      return false;
+
+   const char *semi = memchr(colon, ';', eol - colon);
+   if (semi == NULL)
+      return false;
+
+   // Nothing but a comment follows
+   const char *r = semi + 1;
+   while (r < eol && isspace((unsigned char)*r))
+      r++;
+   if (r != eol && !(eol - r >= 2 && r[0] == '-' && r[1] == '-'))
+      return false;
+
+   // No other quote or comment before the semicolon that could hide it
+   for (const char *q = colon; q < semi; q++) {
+      if (*q == '-' && q[1] == '-')
+         return false;
+   }
+
+   const size_t len = eol - line;
+   if (len == 0)
+      return false;
+
+   *line_loc = get_loc(loc->first_line, 0, loc->first_line, len - 1,
+                       loc->file_ref);
+   return !loc_invalid_p(line_loc);
+}
+
 void lint_flush(void)
 {
    for (unsigned i = 0; i < pending.count; i++) {
@@ -306,6 +374,12 @@ void lint_flush(void)
       diag_t *diag = diag_new(DIAG_WARN, &d->loc);
       diag_rule(diag, rule_name(d->rule));
       diag_printf(diag, msg, d->what, len, str);
+
+      loc_t line_loc;
+      if (d->rule == LINT_UNUSED && strcmp(d->what, "signal") == 0
+          && lint_removable_signal(&d->loc, &line_loc))
+         diag_fix(diag, &line_loc, "", "Remove the unused signal");
+
       diag_emit(diag);
    }
 

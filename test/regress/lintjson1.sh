@@ -20,6 +20,13 @@ grep -q '"level":"warning"' lint
 grep -q '"rule":"unused"' lint
 ! grep -q 'lint:' lint
 
+# A signal that is alone on its line has a fix that removes the line and
+# one declared with another does not
+grep -q '"message":"signal .S_UNUSED. is never read".*"fix":{"title":"Remove the unused signal","edits":\[{"file":".*unused1.vhd","line":20,"col":1,"end_line":20,"end_col":[0-9]*,"text":""}\]}' lint
+nvc --std=08 --lint --messages=json -a $TESTDIR/regress/lintjson3.vhd 2>multi
+grep -q '"message":"signal .A1. is never read"' multi
+! grep -q '"fix"' multi
+
 # The list of rules
 nvc --lint=list > rules
 grep -q '^unused	vhdl,verilog	elaboration	off	' rules
