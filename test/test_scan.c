@@ -191,6 +191,155 @@ START_TEST(test_fsm_option)
 }
 END_TEST
 
+static char *scan_fsm_json(const char *file, unsigned *errors)
+{
+   LOCAL_TEXT_BUF tb = tb_new();
+   scan_set_fsm(true);
+   *errors = scan_file_deps(file, tb);
+   scan_set_fsm(false);
+   return xstrdup(tb_get(tb));
+}
+
+static unsigned count_of(const char *json, const char *what)
+{
+   unsigned n = 0;
+   for (const char *p = json; (p = strstr(p, what)) != NULL; p += strlen(what))
+      n++;
+   return n;
+}
+
+static void fsm_check(const char *file, unsigned nmachines,
+                      const char *const *parts, unsigned nparts,
+                      unsigned nerrors)
+{
+   unsigned errors;
+   char *json LOCAL = scan_fsm_json(file, &errors);
+   ck_assert_uint_eq(errors, nerrors);
+
+   const char *fsms = strstr(json, "\"fsms\":");
+   if (nmachines == 0)
+      ck_assert_ptr_null(fsms);
+   else {
+      ck_assert_ptr_nonnull(fsms);
+      ck_assert_uint_eq(count_of(fsms, "\"container\":"), nmachines);
+   }
+
+   for (unsigned i = 0; i < nparts; i++) {
+      if (strstr(json, parts[i]) == NULL) {
+         printf("missing: %s\n%s", parts[i], json);
+         ck_abort_msg("fsm output differs for %s", file);
+      }
+   }
+}
+
+START_TEST(test_fsm_vhdl_enum)
+{
+   set_standard(STD_08);
+
+   const char *parts[] = {
+      // Two-process machine with an asynchronous reset
+      "\"style\":\"two-process\",\"typed\":true,\"state\":{\"name\":\"state\","
+      "\"line\":5,\"col\":10,\"len\":5,\"type\":\"st_t\"},"
+      "\"next\":{\"name\":\"nxt\",",
+      "\"clock\":{\"name\":\"clk\",\"edge\":\"rising\"}",
+      "{\"role\":\"register\",\"label\":\"p_reg\"",
+      "{\"from\":[\"*\"],\"to\":\"IDLE\",\"kind\":\"reset\"",
+      "\"guards\":[{\"text\":\"rst = '1'\"",
+      // A guard spanning two lines and the negation in the elsif
+      "{\"text\":\"fin = '1' and go = '0'\",\"line\":17,\"col\":12,"
+      "\"neg\":false}",
+      "{\"text\":\"fin = '1' and go = '0'\",\"line\":17,\"col\":12,"
+      "\"neg\":true},{\"text\":\"abort = '1'\"",
+      // others is the states without a branch
+      "{\"from\":[\"DONE\"],\"to\":\"IDLE\",\"kind\":\"default\"",
+      // One-process machine: several choices, conditional value, initial
+      "\"style\":\"one-process\"",
+      "{\"from\":[\"IDLE\",\"DONE\"],\"to\":\"RUN\",\"kind\":\"case\"",
+      "{\"from\":[\"RUN\"],\"to\":\"RUN\",\"kind\":\"case\"",
+      "\"initial\":\"IDLE\"",
+      // The hold in the default assignment is not an edge
+      "\"states\":[{\"name\":\"IDLE\",\"line\":4,\"col\":17,\"len\":4,"
+      "\"branch\":{\"line\":15,\"end_line\":15}}",
+   };
+
+   fsm_check(SCAN_FILE("fsm1.vhd"), 2, parts, ARRAY_LEN(parts), 0);
+}
+END_TEST
+
+START_TEST(test_fsm_vhdl_record)
+{
+   set_standard(STD_08);
+
+   const char *parts[] = {
+      // The register is a record field copied through a variable
+      "\"state\":{\"name\":\"r.state\"",
+      "\"next\":{\"name\":\"v.state\"",
+      "{\"from\":[\"IDLE\"],\"to\":\"RUN\",\"kind\":\"case\"",
+      // The next-state record is assigned in the case process
+      "\"state\":{\"name\":\"ctrl.state\"",
+      "\"next\":{\"name\":\"ctrl_nxt.state\"",
+      "{\"from\":[\"RUN\",\"DONE\"],\"to\":\"IDLE\",\"kind\":\"default\"",
+   };
+
+   fsm_check(SCAN_FILE("fsm2.vhd"), 2, parts, ARRAY_LEN(parts), 0);
+}
+END_TEST
+
+START_TEST(test_fsm_vhdl_constants)
+{
+   set_standard(STD_08);
+
+   const char *parts[] = {
+      "\"kind\":\"constants\"",
+      "{\"name\":\"S_IDLE\",\"line\":4,\"col\":12,\"len\":6,"
+      "\"value\":\"\\\"00\\\"\"",
+      "{\"from\":[\"*others\"],\"to\":\"S_IDLE\",\"kind\":\"default\"",
+   };
+
+   fsm_check(SCAN_FILE("fsm3.vhd"), 1, parts, ARRAY_LEN(parts), 0);
+}
+END_TEST
+
+START_TEST(test_fsm_vhdl_negative)
+{
+   // Enum register without a case, decoder on a port, case on the
+   // next-state signal only, standard logic subject, two constants without
+   // a reset: none of these is a machine.  The one machine is the type
+   // that the scan cannot see, which has a computed target.
+
+   set_standard(STD_08);
+
+   const char *parts[] = {
+      "\"typed\":false,\"state\":{\"name\":\"ext\",\"line\":8,\"col\":10,"
+      "\"len\":3,\"type\":\"ext_t\"}",
+      "{\"from\":[\"E_TWO\"],\"expr\":\"ret_state\",\"kind\":\"case\"",
+      "\"notes\":[\"a next state is computed\"]",
+   };
+
+   fsm_check(SCAN_FILE("fsm4.vhd"), 1, parts, ARRAY_LEN(parts), 0);
+}
+END_TEST
+
+START_TEST(test_fsm_vhdl_errors)
+{
+   // A syntax error before, inside and after the machine
+
+   set_standard(STD_08);
+
+   const char *before[] = {
+      "\"typed\":false,\"state\":{\"name\":\"state\"",
+      "\"style\":\"one-process\"",
+   };
+   fsm_check(SCAN_FILE("fsm5b.vhd"), 2, before, ARRAY_LEN(before), 1);
+
+   const char *inside[] = { "\"typed\":true,\"state\":{\"name\":\"state\"" };
+   fsm_check(SCAN_FILE("fsm5i.vhd"), 1, inside, ARRAY_LEN(inside), 2);
+
+   const char *after[] = { "\"kind\":\"enum\"" };
+   fsm_check(SCAN_FILE("fsm5a.vhd"), 1, after, ARRAY_LEN(after), 3);
+}
+END_TEST
+
 static void scan_symbols_contain(const char *file, const char *const *parts,
                                  unsigned nparts, bool expect);
 
@@ -930,6 +1079,11 @@ Suite *get_scan_tests(void)
    tcase_add_test(tc, test_m5_vlog_generate);
    tcase_add_test(tc, test_m5_vlog_fields);
    tcase_add_test(tc, test_fsm_option);
+   tcase_add_test(tc, test_fsm_vhdl_enum);
+   tcase_add_test(tc, test_fsm_vhdl_record);
+   tcase_add_test(tc, test_fsm_vhdl_constants);
+   tcase_add_test(tc, test_fsm_vhdl_negative);
+   tcase_add_test(tc, test_fsm_vhdl_errors);
    suite_add_tcase(s, tc);
 
    // Expanding covergroups is slow with the debug and sanitiser options
