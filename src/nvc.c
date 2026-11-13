@@ -95,9 +95,29 @@ static int process_command(int argc, char **argv, cmd_state_t *state);
 static int parse_int(const char *str);
 static jit_t *get_jit(cmd_state_t *state);
 
-static ident_t to_unit_name(const char *str)
+static ident_t to_unit_name_in(const char *str, lib_t *lib)
 {
+   // A name may be qualified with the library containing the unit
+
    char *name LOCAL = xstrdup(str);
+   *lib = lib_work();
+
+   char *dot = strchr(name, '.');
+   if (dot != NULL && dot != name && dot[1] != '\0'
+       && (strchr(name, '(') == NULL || strchr(name, '(') > dot)) {
+      *dot = '\0';
+      for (char *p = name; *p; p++) {
+         if (!isalnum_iso88591(*p) && (p == name || (*p != '_' && *p != '-')))
+            fatal("'%s' is not a valid design unit name", str);
+         *p = toupper_iso88591(*p);
+      }
+
+      *lib = lib_find(ident_new(name));
+      if (*lib == NULL)
+         fatal("library %s not found for design unit '%s'", name, str);
+
+      memmove(name, dot + 1, strlen(dot + 1) + 1);
+   }
 
    char *lparen = strchr(name, '(');
    if (lparen != NULL) {
@@ -116,7 +136,13 @@ static ident_t to_unit_name(const char *str)
       *p = toupper_iso88591(*p);
    }
 
-   return ident_prefix(lib_name(lib_work()), ident_new(name), '.');
+   return ident_prefix(lib_name(*lib), ident_new(name), '.');
+}
+
+static ident_t to_unit_name(const char *str)
+{
+   lib_t lib;
+   return to_unit_name_in(str, &lib);
 }
 
 static int scan_cmd(int start, int argc, char **argv)
@@ -879,12 +905,12 @@ static int elaborate(int argc, char **argv, cmd_state_t *state)
 
    object_t **tops LOCAL = xmalloc_array(ntops, sizeof(object_t *));
    for (int i = 0; i < ntops; i++) {
-      ident_t name = to_unit_name(argv[optind + i]);
+      lib_t lib;
+      ident_t name = to_unit_name_in(argv[optind + i], &lib);
 
-      tops[i] = lib_get_generic(state->work, name, NULL);
+      tops[i] = lib_get_generic(lib, name, NULL);
       if (tops[i] == NULL)
-         fatal("cannot find unit %pI in library %pI", name,
-               lib_name(state->work));
+         fatal("cannot find unit %pI in library %pI", name, lib_name(lib));
 
       if (i == 0) {
          state->top_level = name;
