@@ -2762,3 +2762,4 @@ lintvlogfix1 shell
 lintvlogfix2 shell
 lintvlogrules1 shell
 lintvlogrules2 shell
+lintvlogrules3 shell
