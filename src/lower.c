@@ -6292,7 +6292,7 @@ static void lower_fill_target_parts(lower_unit_t *lu, tree_t target,
       if (kind != PART_ALL) {
          (*ptr)->reg    = VCODE_INVALID_REG;
          (*ptr)->off    = VCODE_INVALID_REG;
-         (*ptr)->target = NULL;
+         (*ptr)->target = kind == PART_FIELD ? NULL : target;
          (*ptr)->kind   = kind == PART_FIELD ? PART_PUSH_FIELD : PART_PUSH_ELEM;
          ++(*ptr);
       }
@@ -6473,14 +6473,26 @@ static void lower_var_assign_target(lower_unit_t *lu, target_part_t **ptr,
       }
 
       if (p->kind == PART_PUSH_ELEM) {
-         // Nested aggregate for one element of the array
+         // Nested aggregate for one element of the array or one row of a
+         // multi-dimensional array
          vcode_reg_t data_reg = lower_array_data(src_reg);
-         type_t elem_type = type_elem(src_type);
+         type_t elem_type;
+         vcode_reg_t stride_reg;
+         if (dimension_of(src_type) > 1) {
+            // Each element of the outer aggregate is a row of the array
+            elem_type = tree_type(p->target);
+            vcode_reg_t total_reg =
+               lower_array_total_len(lu, src_type, src_reg);
+            stride_reg = emit_div(total_reg, lower_array_len(
+                                     lu, src_type, 0, src_reg));
+         }
+         else {
+            elem_type = type_elem(src_type);
+            stride_reg = type_is_array(elem_type)
+               ? lower_array_total_len(lu, elem_type, VCODE_INVALID_REG)
+               : emit_const(vtype_offset(), 1);
+         }
          lower_var_assign_target(lu, ptr, where, data_reg, elem_type);
-
-         vcode_reg_t stride_reg = type_is_array(elem_type)
-            ? lower_array_total_len(lu, elem_type, VCODE_INVALID_REG)
-            : emit_const(vtype_offset(), 1);
          rhs = emit_array_ref(data_reg, stride_reg);
          continue;
       }
