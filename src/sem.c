@@ -3258,10 +3258,15 @@ static bool sem_check_call_args(tree_t t, tree_t decl, nametab_t *tab)
             assert(ref != NULL);
 
             if ((partial = (ref != name))) {
-               tree_t value = tree_value(name);
-               if (tree_kind(value) != T_REF)
-                  sem_error(name, "sorry, this form of named parameter is "
-                            "not supported");
+               // Partial association of a formal: a chain of element,
+               // slice and field selections of the formal
+               for (tree_t n = name; n != ref; n = tree_value(n)) {
+                  const tree_kind_t k = tree_kind(n);
+                  if (k != T_ARRAY_REF && k != T_ARRAY_SLICE
+                      && k != T_RECORD_REF)
+                     sem_error(name, "sorry, this form of named parameter "
+                               "is not supported");
+               }
             }
 
             ident_t id = tree_ident(ref);

@@ -6377,7 +6377,19 @@ static void lower_var_assign_target(lower_unit_t *lu, target_part_t **ptr,
          fieldno++;
       }
 
-      if (p->kind == PART_PUSH_FIELD || p->kind == PART_PUSH_ELEM) {
+      if (p->kind == PART_PUSH_ELEM) {
+         // Nested aggregate for one element of the array
+         vcode_reg_t data_reg = lower_array_data(src_reg);
+         type_t elem_type = type_elem(src_type);
+         lower_var_assign_target(lu, ptr, where, data_reg, elem_type);
+
+         vcode_reg_t stride_reg = type_is_array(elem_type)
+            ? lower_array_total_len(lu, elem_type, VCODE_INVALID_REG)
+            : emit_const(vtype_offset(), 1);
+         rhs = emit_array_ref(data_reg, stride_reg);
+         continue;
+      }
+      else if (p->kind == PART_PUSH_FIELD) {
          lower_var_assign_target(lu, ptr, where, src_reg, src_type);
          continue;
       }

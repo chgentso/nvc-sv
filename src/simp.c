@@ -42,6 +42,94 @@ typedef struct {
 
 typedef A(tree_t) tree_list_t;
 
+static tree_t simp_partial_choice(tree_t node)
+{
+   switch (tree_kind(node)) {
+   case T_RECORD_REF:
+      return make_ref(tree_ref(node));
+   case T_ARRAY_SLICE:
+      return tree_value(node);
+   default:
+      return tree_value(tree_param(node, 0));
+   }
+}
+
+static bool simp_same_choice(tree_t a, tree_t node)
+{
+   // True if the association A names the same element or field as the
+   // selection NODE
+
+   if (tree_subkind(a) != A_NAMED)
+      return false;
+
+   tree_t name = tree_name(a);
+   if (tree_kind(node) == T_RECORD_REF)
+      return tree_kind(name) == T_REF && tree_has_ref(name)
+         && tree_ref(name) == tree_ref(node);
+   else if (tree_kind(node) == T_ARRAY_REF) {
+      int64_t i1, i2;
+      return folded_int(name, &i1)
+         && folded_int(tree_value(tree_param(node, 0)), &i2) && i1 == i2;
+   }
+
+   return false;
+}
+
+static void simp_add_partial(tree_t agg, tree_t name, tree_t ref, tree_t value,
+                             tree_t loc)
+{
+   // Add the association of VALUE with the partial formal NAME to the
+   // aggregate AGG for the formal REF creating the aggregates for any
+   // intermediate selections
+
+   tree_t chain[16];
+   int depth = 0;
+   for (tree_t n = name; n != ref; n = tree_value(n)) {
+      if (depth == ARRAY_LEN(chain))
+         fatal_at(tree_loc(name), "sorry, this form of named parameter is "
+                  "not supported");
+      chain[depth++] = n;
+   }
+
+   tree_t cur = agg;
+   for (int level = depth - 1; level >= 0; level--) {
+      tree_t node = chain[level];
+
+      if (level == 0) {
+         tree_t a = tree_new(T_ASSOC);
+         tree_set_loc(a, tree_loc(loc));
+         tree_set_subkind(a, A_NAMED);
+         tree_set_value(a, value);
+         tree_set_name(a, simp_partial_choice(node));
+         tree_add_assoc(cur, a);
+         break;
+      }
+
+      tree_t sub = NULL;
+      const int nassocs = tree_assocs(cur);
+      for (int i = 0; i < nassocs && sub == NULL; i++) {
+         tree_t a = tree_assoc(cur, i);
+         if (simp_same_choice(a, node) && tree_kind(tree_value(a)) == T_AGGREGATE)
+            sub = tree_value(a);
+      }
+
+      if (sub == NULL) {
+         sub = tree_new(T_AGGREGATE);
+         tree_set_loc(sub, tree_loc(loc));
+         tree_set_type(sub, tree_type(node));
+
+         tree_t a = tree_new(T_ASSOC);
+         tree_set_loc(a, tree_loc(loc));
+         tree_set_subkind(a, A_NAMED);
+         tree_set_value(a, sub);
+         tree_set_name(a, simp_partial_choice(node));
+         tree_add_assoc(cur, a);
+      }
+
+      cur = sub;
+   }
+}
+
 static tree_t simp_call_args(tree_t t)
 {
    tree_t decl = tree_ref(t);
@@ -101,9 +189,10 @@ static tree_t simp_call_args(tree_t t)
             }
          }
          else {
-            // Must be a partial association
-            tree_t ref = tree_value(name);
-            assert(tree_kind(ref) == T_REF);   // Checked by sem
+            // Must be a partial association: a chain of selections from
+            // the formal built up into nested aggregates
+            tree_t ref = name_to_ref(name);
+            assert(ref != NULL);   // Checked by sem
             if (tree_ref(ref) == port) {
                if (agg == NULL) {
                   agg = tree_new(T_AGGREGATE);
@@ -113,19 +202,7 @@ static tree_t simp_call_args(tree_t t)
                   add_param(new, agg, P_POS, NULL);
                }
 
-               tree_t a = tree_new(T_ASSOC);
-               tree_set_loc(a, tree_loc(p));
-               tree_set_subkind(a, A_NAMED);
-               tree_set_value(a, tree_value(p));
-
-               if (name_kind == T_RECORD_REF)
-                  tree_set_name(a, make_ref(tree_ref(name)));
-               else if (name_kind == T_ARRAY_SLICE)
-                  tree_set_name(a, tree_value(name));
-               else
-                  tree_set_name(a, tree_value(tree_param(name, 0)));
-
-               tree_add_assoc(agg, a);
+               simp_add_partial(agg, name, ref, tree_value(p), p);
 
                found = true;
             }
