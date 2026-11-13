@@ -141,6 +141,11 @@ typedef struct {
    mir_block_t    sva_chk;
    mir_value_t    sva_steady;
    bool           sens_clear;
+   struct {
+      vlog_node_t expr;
+      mir_value_t var;
+   }              spills[4];
+   int            nspills;
 } vlog_gen_t;
 
 static void vlog_lower_locals(vlog_gen_t *g, vlog_node_t v);
@@ -5055,9 +5060,62 @@ static mir_value_t vlog_lower_update_target(vlog_gen_t *g, vlog_node_t target)
    return value;
 }
 
+static void vlog_spill_index(vlog_gen_t *g, vlog_node_t expr)
+{
+   // Evaluate an expression once and remember the value in a temporary
+   // which is used where the expression is lowered again
+
+   if (g->nspills == ARRAY_LEN(g->spills))
+      return;
+
+   mir_value_t value = vlog_lower_rvalue(g, expr);
+   mir_type_t type = mir_get_type(g->mu, value);
+   mir_value_t var = mir_add_var(g->mu, type, MIR_NULL_STAMP,
+                                 ident_uniq("spill"), MIR_VAR_TEMP);
+   mir_build_store(g->mu, var, value);
+
+   g->spills[g->nspills].expr = expr;
+   g->spills[g->nspills].var = var;
+   g->nspills++;
+}
+
+static void vlog_spill_target(vlog_gen_t *g, vlog_node_t target)
+{
+   // The indices of the target of an operator assignment are evaluated
+   // once, before the right hand side (11.4.1)
+
+   switch (vlog_kind(target)) {
+   case V_BIT_SELECT:
+      {
+         vlog_spill_target(g, vlog_value(target));
+         const int nparams = vlog_params(target);
+         for (int i = 0; i < nparams; i++) {
+            if (vlog_has_side_effects(vlog_param(target, i)))
+               vlog_spill_index(g, vlog_param(target, i));
+         }
+      }
+      break;
+   case V_PART_SELECT:
+      vlog_spill_target(g, vlog_value(target));
+      if (vlog_has_side_effects(vlog_left(target)))
+         vlog_spill_index(g, vlog_left(target));
+      if (vlog_has_right(target) && vlog_has_side_effects(vlog_right(target)))
+         vlog_spill_index(g, vlog_right(target));
+      break;
+   case V_MEMBER_REF:
+      vlog_spill_target(g, vlog_value(target));
+      break;
+   default:
+      break;
+   }
+}
+
 static mir_value_t vlog_lower_operator_assignment(vlog_gen_t *g, vlog_node_t v)
 {
    vlog_node_t target = vlog_target(v);
+   const int saved_spills = g->nspills;
+   if (vlog_subkind(v) != V_ASSIGN_EQUALS)
+      vlog_spill_target(g, target);
 
    mir_value_t cur = vlog_lower_update_target(g, target);
 
@@ -5130,6 +5188,7 @@ static mir_value_t vlog_lower_operator_assignment(vlog_gen_t *g, vlog_node_t v)
    }
 
    vlog_assign_variable(g, target, value, NULL);
+   g->nspills = saved_spills;
    return value;
 }
 
@@ -8986,6 +9045,12 @@ static mir_value_t vlog_lower_with_context(vlog_gen_t *g, vlog_node_t v,
                                            mir_type_t context)
 {
    PUSH_DEBUG_INFO(g->mu, v);
+
+   for (int i = 0; i < g->nspills; i++) {
+      if (g->spills[i].expr == v)
+         return vlog_widen_vector(g, mir_build_load(g->mu, g->spills[i].var),
+                                  context);
+   }
 
    if ((vlog_kind(v) == V_PART_SELECT || vlog_kind(v) == V_BIT_SELECT)
        && vlog_kind(vlog_value(v)) == V_CONCAT)
