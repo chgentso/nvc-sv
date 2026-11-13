@@ -2773,3 +2773,4 @@ linterr6 shell
 linterr7 shell
 linterrvhdl1 shell
 svpcast1 verilog,gold
+svalwaysnull1 verilog,gold

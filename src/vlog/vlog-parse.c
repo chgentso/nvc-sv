@@ -12951,8 +12951,13 @@ static vlog_node_t p_always_construct(void)
 
    const int first = proc_asserts.count;
    always_depth++;
-   vlog_add_stmt(v, p_statement());
+   // Strictly the body is a statement but generators emit a null one
+   vlog_node_t body = p_statement_or_null();
    always_depth--;
+   if (body == NULL)
+      return NULL;   // Does nothing
+
+   vlog_add_stmt(v, body);
    hoist_procedural_assertions(v, first);
 
    vlog_set_loc(v, CURRENT_LOC);
@@ -21771,7 +21776,11 @@ static void p_module_common_item(vlog_node_t mod)
    case tALWAYSCOMB:
    case tALWAYSFF:
    case tALWAYSLATCH:
-      vlog_add_stmt(mod, p_always_construct());
+      {
+         vlog_node_t always = p_always_construct();
+         if (always != NULL)
+            vlog_add_stmt(mod, always);
+      }
       break;
    case tINITIAL:
       vlog_add_stmt(mod, p_initial_construct());
