@@ -1052,6 +1052,30 @@ void vlog_symtab_lookup(vlog_symtab_t *st, vlog_node_t v)
       vlog_set_ref(v, sym->node);
 }
 
+static bool copy_data_type_pred(vlog_node_t v, void *ctx)
+{
+   return vlog_kind(v) == V_DATA_TYPE;
+}
+
+static void merge_port_signed(vlog_node_t port, vlog_node_t decl)
+{
+   // A signed net or variable declared for a port makes the port signed
+   // even if the port declaration did not say so (23.2.2.1)
+
+   if (!vlog_has_type(port) || !vlog_has_type(decl))
+      return;
+
+   vlog_node_t pt = vlog_type(port), dt = vlog_type(decl);
+   if (vlog_kind(pt) != V_DATA_TYPE || vlog_kind(dt) != V_DATA_TYPE
+       || (vlog_flags(pt) & VLOG_F_SIGNED) || !(vlog_flags(dt) & VLOG_F_SIGNED))
+      return;
+
+   // The type may be shared with other ports in the same declaration
+   vlog_node_t copy = vlog_copy(pt, copy_data_type_pred, NULL);
+   vlog_set_flags(copy, vlog_flags(copy) | VLOG_F_SIGNED);
+   vlog_set_type(port, copy);
+}
+
 void vlog_symtab_put(vlog_symtab_t *st, vlog_node_t v)
 {
    ident_t name = vlog_ident(v);
@@ -1084,6 +1108,7 @@ void vlog_symtab_put(vlog_symtab_t *st, vlog_node_t v)
          case V_TF_PORT_DECL:
             if (!vlog_has_ref(v)) {
                vlog_set_ref(v, sym->node);
+               merge_port_signed(v, sym->node);
                sym->node = v;
                return;
             }
@@ -1100,6 +1125,7 @@ void vlog_symtab_put(vlog_symtab_t *st, vlog_node_t v)
             case V_NET_DECL:
             case V_LOCAL_DECL:
                vlog_set_ref(sym->node, v);
+               merge_port_signed(sym->node, v);
                return;
             default:
                break;
