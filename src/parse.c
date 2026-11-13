@@ -3608,6 +3608,52 @@ static bool is_formal_part_ahead(void)
    return false;
 }
 
+static bool is_signature_attribute_ahead(void)
+{
+   // True if the current token starts a signature followed by a tick
+
+   if (peek() != tLSQUARE)
+      return false;
+
+   for (int n = 2; n < TOKENQ_SIZE - 2; n++) {
+      switch (peek_nth(n)) {
+      case tRSQUARE:
+         return peek_nth(n + 1) == tTICK;
+      case tSEMI:
+      case tEOF:
+         return false;
+      default:
+         break;
+      }
+   }
+
+   return false;
+}
+
+static bool is_signature_formal_ahead(void)
+{
+   // True if the current token starts a signature that is followed by
+   // the association arrow, as opposed to an attribute name whose prefix
+   // is an overloaded enumeration literal or subprogram with a signature
+
+   if (peek() != tLSQUARE)
+      return false;
+
+   for (int n = 2; n < TOKENQ_SIZE - 2; n++) {
+      switch (peek_nth(n)) {
+      case tRSQUARE:
+         return peek_nth(n + 1) == tASSOC;
+      case tSEMI:
+      case tEOF:
+         return false;
+      default:
+         break;
+      }
+   }
+
+   return false;
+}
+
 static tree_t p_association_element(tree_t unit, int pos, tree_t formal,
                                     formal_kind_t kind)
 {
@@ -3645,7 +3691,7 @@ static tree_t p_association_element(tree_t unit, int pos, tree_t formal,
       if (suppress)
          suppress_formal_errors(nametab, old_error);
 
-      if (scan(tASSOC, tLSQUARE)) {
+      if (scan(tASSOC) || is_signature_formal_ahead()) {
          push_scope_for_formals(nametab, kind, unit);
 
          type_t signature = NULL;
@@ -4503,6 +4549,14 @@ static tree_t p_name(name_mask_t stop_mask)
 
       case tDOT:
          prefix = p_selected_name(prefix, &mask);
+         continue;
+
+      case tLSQUARE:
+         // Attribute name with a signature in the prefix
+         if (!is_signature_attribute_ahead())
+            return prefix;
+         prefix = p_attribute_name(prefix);
+         mask = is_type_attribute(tree_subkind(prefix)) ? N_TYPE : N_OBJECT;
          continue;
 
       case tTICK:

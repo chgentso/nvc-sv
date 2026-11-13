@@ -2754,3 +2754,4 @@ svinsidedollar1 verilog
 svstrrepl1 verilog
 svrealneg1 verilog
 wavevlogport2 wave,verilog
+attrsig1        normal
