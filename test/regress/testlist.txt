@@ -2720,3 +2720,4 @@ aggtarget2      normal
 aggothers1      normal,2008
 attrfunc1       normal
 attralias1      normal
+attrgroup1      normal
