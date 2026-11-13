@@ -9141,6 +9141,7 @@ static mir_value_t vlog_lower_with_context(vlog_gen_t *g, vlog_node_t v,
 
          if (vlog_kind(v) == V_NUMBER && issigned && width <= 64
              && !(vlog_flags(v) & VLOG_F_FILL) && !mir_is_null(context)
+             && mir_is_vector_type(g->mu, context)
              && !mir_get_signed(g->mu, context)) {
             // A signed literal is only sign extended if the expression
             // it is part of is signed (11.8.1)
