@@ -9,12 +9,12 @@ nvc --std=19 --lint --messages=compact -a $TESTDIR/regress/lintvlogwidth2.sv 2>c
 grep -q "lintvlogwidth2.sv:3:.*parameter value truncates 8 bits to 4 bits \[lint:width\]" compact
 grep -q "lintvlogwidth2.sv:4:.*parameter value truncates 33 bits to 32 bits \[lint:width\]" compact
 # An untyped parameter takes the width of its value
-! grep -q "lintvlogwidth2.sv:5:" compact
+if grep -q "lintvlogwidth2.sv:5:" compact; then exit 1; fi
 
 # Initial values of variables
 grep -q "lintvlogwidth2.sv:6:.*initial value truncates 2 bits to 1 bits \[lint:width\]" compact
 grep -q "lintvlogwidth2.sv:7:.*initial value truncates 8 bits to 4 bits \[lint:width\]" compact
-! grep -q "lintvlogwidth2.sv:[89]:" compact
+if grep -q "lintvlogwidth2.sv:[89]:" compact; then exit 1; fi
 
 # The net declaration assignment
 grep -q "lintvlogwidth2.sv:10:.*continuous assignment truncates 2 bits to 1 bits" compact
@@ -24,8 +24,8 @@ grep '"message":"parameter value truncates 8 bits to 4 bits' lint | grep -q '"fi
 grep '"message":"initial value truncates 8 bits to 4 bits' lint | grep -q '"text":"in\[3:0\]"'
 
 # Nothing for the generated declarations
-! grep -q 'lintvlogwidth2.sv:1[3-9]:' compact
+if grep -q 'lintvlogwidth2.sv:1[3-9]:' compact; then exit 1; fi
 
 # The port connection check still reports
 nvc --std=19 --lint=-width -a $TESTDIR/regress/lintvlogwidth2.sv 2>quiet || true
-! grep -q 'lint:' quiet
+if grep -q 'lint:' quiet; then exit 1; fi

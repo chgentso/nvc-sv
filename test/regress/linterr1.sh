@@ -17,10 +17,10 @@ grep -q "linterr1.sv:1:.*lint is partial for this unit" lint
 
 # The note can be switched off, the rest stays
 if nvc --std=19 --lint=-partial --messages=compact -a $TESTDIR/regress/linterr1.sv 2>quiet; then exit 1; fi
-! grep -q 'lint:partial' quiet
+if grep -q 'lint:partial' quiet; then exit 1; fi
 grep -q 'lint:width' quiet
 
 # Without --lint only the error is reported
 if nvc --std=19 -a $TESTDIR/regress/linterr1.sv 2>plain; then exit 1; fi
-! grep -q 'lint:' plain
+if grep -q 'lint:' plain; then exit 1; fi
 grep -q "cannot be assigned" plain
