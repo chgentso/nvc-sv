@@ -5079,6 +5079,20 @@ static void vlog_spill_index(vlog_gen_t *g, vlog_node_t expr)
    g->nspills++;
 }
 
+static bool vlog_needs_spill(vlog_node_t expr)
+{
+   switch (vlog_kind(expr)) {
+   case V_NUMBER:
+   case V_STRING:
+   case V_REAL:
+   case V_REF:
+      return false;
+   default:
+      return vlog_has_side_effects(expr) && !vlog_is_string(expr)
+         && !vlog_is_real(expr);
+   }
+}
+
 static void vlog_spill_target(vlog_gen_t *g, vlog_node_t target)
 {
    // The indices of the target of an operator assignment are evaluated
@@ -5088,18 +5102,23 @@ static void vlog_spill_target(vlog_gen_t *g, vlog_node_t target)
    case V_BIT_SELECT:
       {
          vlog_spill_target(g, vlog_value(target));
+         vlog_node_t type = vlog_get_type(vlog_value(target));
+         if (type != NULL && vlog_kind(type) == V_DATA_TYPE
+             && vlog_subkind(type) == DT_ASSOC)
+            break;   // The key is handled with the default value
+
          const int nparams = vlog_params(target);
          for (int i = 0; i < nparams; i++) {
-            if (vlog_has_side_effects(vlog_param(target, i)))
+            if (vlog_needs_spill(vlog_param(target, i)))
                vlog_spill_index(g, vlog_param(target, i));
          }
       }
       break;
    case V_PART_SELECT:
       vlog_spill_target(g, vlog_value(target));
-      if (vlog_has_side_effects(vlog_left(target)))
+      if (vlog_needs_spill(vlog_left(target)))
          vlog_spill_index(g, vlog_left(target));
-      if (vlog_has_right(target) && vlog_has_side_effects(vlog_right(target)))
+      if (vlog_has_right(target) && vlog_needs_spill(vlog_right(target)))
          vlog_spill_index(g, vlog_right(target));
       break;
    case V_MEMBER_REF:
