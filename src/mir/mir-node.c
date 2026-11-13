@@ -3446,6 +3446,8 @@ mir_value_t mir_build_cast(mir_unit_t *mu, mir_type_t type, mir_value_t value)
          if (n->op == MIR_OP_CONST_VEC && mir_get_size(mu, type) <= 64) {
             uint64_t abits = n->bits[0];
             uint64_t bbits = class == MIR_TYPE_VEC2 ? 0 : n->bits[1];
+            if (class == MIR_TYPE_VEC2)
+               abits &= ~n->bits[1];   // X and Z become zero
             if (mir_get_signed(mu, n->type)) {
                const int arg_size = mir_get_size(mu, n->type);
                if (arg_size > 0 && arg_size < 64) {
