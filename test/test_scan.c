@@ -726,6 +726,34 @@ START_TEST(test_fsm_vlog_port_and_reg)
 }
 END_TEST
 
+START_TEST(test_fsm_vlog_guard_text)
+{
+   // The text of a condition comes from the tree when a macro on the line
+   // before makes the location miss the source
+
+   static const char *const parts[] = {
+      "{\"text\":\"en && !mask[2] && !act\",\"line\":",
+   };
+   scan_fsm_contain(SCAN_FILE("fsm_g6.sv"), parts, 1, true);
+
+   static const char *const none[] = { "\"text\":\"?\"" };
+   scan_fsm_contain(SCAN_FILE("fsm_g6.sv"), none, ARRAY_LEN(none), false);
+}
+END_TEST
+
+START_TEST(test_fsm_vlog_untyped_target)
+{
+   // A plain name which nothing declares is a state of the type we cannot
+   // see: a target of a transition and one of the states
+
+   static const char *const parts[] = {
+      "{\"from\":[\"RUN\"],\"to\":\"DONE\",\"kind\":\"case\"",
+      "{\"name\":\"DONE\"}",
+   };
+   scan_fsm_contain(SCAN_FILE("fsm_g6.sv"), parts, ARRAY_LEN(parts), true);
+}
+END_TEST
+
 START_TEST(test_sv1)
 {
    // Packages, interfaces and modules with the files included found
@@ -1347,6 +1375,8 @@ Suite *get_scan_tests(void)
    tcase_add_test(tc, test_fsm_vlog_errors);
    tcase_add_test(tc, test_fsm_vlog_negative);
    tcase_add_test(tc, test_fsm_vlog_port_and_reg);
+   tcase_add_test(tc, test_fsm_vlog_untyped_target);
+   tcase_add_test(tc, test_fsm_vlog_guard_text);
    suite_add_tcase(s, tc);
 
    // Expanding covergroups is slow with the debug and sanitiser options

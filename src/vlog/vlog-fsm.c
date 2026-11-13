@@ -21,6 +21,7 @@
 #include "fsm.h"
 #include "ident.h"
 #include "vlog/vlog-node.h"
+#include "vlog/vlog-number.h"
 
 #include <ctype.h>
 #include <stdlib.h>
@@ -213,19 +214,148 @@ static loc_t expr_loc(vlog_node_t v)
    return loc;
 }
 
+// Text of an expression built from the tree, for when the location does not
+// match the source, as after a macro on the same line.  False if the
+// expression has a form that is not handled.
+static bool unparse_in(text_buf_t *tb, vlog_node_t v, unsigned parent);
+
+static bool unparse(text_buf_t *tb, vlog_node_t v)
+{
+   return unparse_in(tb, v, 0);
+}
+
+// PARENT is the kind and subkind of the operator around the expression, which
+// needs no brackets when it is the same
+static bool unparse_in(text_buf_t *tb, vlog_node_t v, unsigned parent)
+{
+   if (v == NULL)
+      return false;
+
+   switch (vlog_kind(v)) {
+   case V_REF:
+      if (!vlog_has_ident(v))
+         return false;
+      tb_cat(tb, istr(vlog_ident(v)));
+      return true;
+   case V_NUMBER:
+      number_print(vlog_number(v), tb);
+      return true;
+   case V_UNARY:
+      {
+         static const char *const ops[] = {
+            [V_UNARY_BITNEG] = "~", [V_UNARY_NOT] = "!", [V_UNARY_NEG] = "-",
+            [V_UNARY_IDENTITY] = "+", [V_UNARY_AND] = "&", [V_UNARY_OR] = "|",
+            [V_UNARY_XOR] = "^", [V_UNARY_NAND] = "~&", [V_UNARY_NOR] = "~|",
+            [V_UNARY_XNOR] = "~^",
+         };
+         const unsigned k = vlog_subkind(v);
+         if (k >= ARRAY_LEN(ops) || ops[k] == NULL)
+            return false;
+         tb_cat(tb, ops[k]);
+         vlog_node_t o = vlog_value(v);
+         const bool simple = o != NULL && (vlog_kind(o) == V_REF
+                                           || vlog_kind(o) == V_NUMBER
+                                           || vlog_kind(o) == V_BIT_SELECT);
+         if (!simple)
+            tb_append(tb, '(');
+         const bool ok = unparse_in(tb, o, 0);
+         if (!simple)
+            tb_append(tb, ')');
+         return ok;
+      }
+   case V_BINARY:
+      {
+         static const char *const ops[] = {
+            [V_BINARY_OR] = "|", [V_BINARY_AND] = "&", [V_BINARY_PLUS] = "+",
+            [V_BINARY_MINUS] = "-", [V_BINARY_TIMES] = "*",
+            [V_BINARY_DIVIDE] = "/", [V_BINARY_MOD] = "%",
+            [V_BINARY_LOG_EQ] = "==", [V_BINARY_LOG_NEQ] = "!=",
+            [V_BINARY_CASE_EQ] = "===", [V_BINARY_CASE_NEQ] = "!==",
+            [V_BINARY_LOG_OR] = "||", [V_BINARY_LOG_AND] = "&&",
+            [V_BINARY_SHIFT_LL] = "<<", [V_BINARY_SHIFT_RL] = ">>",
+            [V_BINARY_SHIFT_LA] = "<<<", [V_BINARY_SHIFT_RA] = ">>>",
+            [V_BINARY_LT] = "<", [V_BINARY_GT] = ">", [V_BINARY_LEQ] = "<=",
+            [V_BINARY_GEQ] = ">=", [V_BINARY_EXP] = "**",
+            [V_BINARY_XOR] = "^", [V_BINARY_XNOR] = "~^",
+            [V_BINARY_NAND] = "~&", [V_BINARY_NOR] = "~|",
+            [V_BINARY_WILD_EQ] = "==?", [V_BINARY_WILD_NEQ] = "!=?",
+         };
+         const unsigned k = vlog_subkind(v);
+         if (k >= ARRAY_LEN(ops) || ops[k] == NULL)
+            return false;
+         const unsigned me = (V_BINARY << 8) | (k + 1);
+         const bool paren = parent != 0 && parent != me;
+         if (paren)
+            tb_append(tb, '(');
+         const bool ok = unparse_in(tb, vlog_left(v), me);
+         tb_printf(tb, " %s ", ops[k]);
+         const bool ok2 = unparse_in(tb, vlog_right(v), me);
+         if (paren)
+            tb_append(tb, ')');
+         return ok && ok2;
+      }
+   case V_COND_EXPR:
+      {
+         const unsigned me = V_COND_EXPR << 8;
+         const bool paren = parent != 0;
+         if (paren)
+            tb_append(tb, '(');
+         bool ok = unparse_in(tb, vlog_value(v), me);
+         tb_cat(tb, " ? ");
+         ok &= unparse_in(tb, vlog_left(v), me);
+         tb_cat(tb, " : ");
+         ok &= unparse_in(tb, vlog_right(v), me);
+         if (paren)
+            tb_append(tb, ')');
+         return ok;
+      }
+   case V_BIT_SELECT:
+      {
+         bool ok = unparse_in(tb, vlog_value(v), 0);
+         for (unsigned i = 0; i < vlog_params(v); i++) {
+            tb_append(tb, '[');
+            ok &= unparse_in(tb, vlog_param(v, i), 0);
+            tb_append(tb, ']');
+         }
+         return ok;
+      }
+   default:
+      return false;
+   }
+}
+
+// Is the single line location inside the line of source
+static bool loc_in_source(const loc_t *loc)
+{
+   if (loc_invalid_p(loc) || loc->line_delta != 0
+       || loc->column_delta >= DELTA_INVALID)
+      return true;
+
+   loc_t at = *loc;
+   at.first_column = 0;
+   const char *line = loc_get_source(&at);
+   if (line == NULL)
+      return false;
+
+   return loc->first_column + loc->column_delta < strcspn(line, "\n");
+}
+
 // Source text of an expression or NULL
 static char *expr_text(vlog_node_t v)
 {
-   if (v == NULL || loc_invalid_p(vlog_loc(v)))
+   if (v == NULL)
       return NULL;
 
-   loc_t loc = expr_loc(v);
-   char *t = fsm_source_text(&loc);
-   if (t != NULL && *t == '\0') {
+   if (!loc_invalid_p(vlog_loc(v)) && loc_in_source(vlog_loc(v))) {
+      loc_t loc = expr_loc(v);
+      char *t = fsm_source_text(&loc);
+      if (t != NULL && *t != '\0')
+         return t;
       free(t);
-      return NULL;
    }
-   return t;
+
+   LOCAL_TEXT_BUF tb = tb_new();
+   return unparse(tb, v) ? tb_claim(tb) : NULL;
 }
 
 static bool is_keyword_type(const char *w, size_t n)
