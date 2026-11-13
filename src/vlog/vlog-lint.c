@@ -267,7 +267,8 @@ static void candidate_cb(vlog_node_t v, void *context)
 
    const char *what = is_net ? "net" : "variable";
    if (!(use & USE_READ))
-      lint_declaration(loc, LINT_UNUSED, vlog_ident(v), what);
+      lint_declaration_written(loc, LINT_UNUSED, vlog_ident(v), what,
+                               !!(use & USE_WRITTEN));
    else if (!(use & USE_WRITTEN) && !init)
       lint_declaration(loc, LINT_UNDRIVEN, vlog_ident(v), what);
 }

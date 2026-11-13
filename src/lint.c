@@ -34,6 +34,7 @@ typedef struct {
    lint_rule_t rule;
    ident_t     name;
    const char *what;
+   bool        written;   // Removing it would leave assignments
 } lint_decl_t;
 
 typedef A(lint_decl_t) decl_list_t;
@@ -259,10 +260,16 @@ void lint_warn(const loc_t *loc, lint_rule_t rule, const char *fmt, ...)
 void lint_declaration(const loc_t *loc, lint_rule_t rule, ident_t name,
                       const char *what)
 {
+   lint_declaration_written(loc, rule, name, what, false);
+}
+
+void lint_declaration_written(const loc_t *loc, lint_rule_t rule, ident_t name,
+                              const char *what, bool written)
+{
    if (!lint_enabled(rule))
       return;
 
-   lint_decl_t d = { *loc, rule, name, what };
+   lint_decl_t d = { *loc, rule, name, what, written };
    APUSH(pending, d);
 }
 
@@ -354,6 +361,69 @@ static bool lint_removable_signal(const loc_t *loc, loc_t *line_loc)
    return !loc_invalid_p(line_loc);
 }
 
+static bool lint_removable_vlog_decl(const loc_t *loc, loc_t *line_loc)
+{
+   // True if the Verilog net or variable declaration of a single name is
+   // alone on its line so that the line can be removed
+
+   const char *line = loc_get_source(loc);
+   if (line == NULL)
+      return false;
+
+   const char *eol = line;
+   while (*eol != '\0' && *eol != '\n')
+      eol++;
+
+   const char *name = line + loc->first_column;
+   if (name > eol)
+      return false;
+
+   const char *p = line;
+   while (p < name && isspace((unsigned char)*p))
+      p++;
+
+   // The text before the name is a type with no list, port or initial value
+   if (p >= name)
+      return false;
+
+   static const char *const not_decl[] = {
+      "input", "output", "inout", "parameter", "localparam", "ref", "task",
+      "function", "typedef", "module", "interface", "class",
+   };
+
+   for (unsigned i = 0; i < ARRAY_LEN(not_decl); i++) {
+      const size_t n = strlen(not_decl[i]);
+      if (strncmp(p, not_decl[i], n) == 0 && !isalnum((unsigned char)p[n])
+          && p[n] != '_')
+         return false;
+   }
+
+   for (const char *q = p; q < name; q++) {
+      if (strchr(",;(){}=/", *q))
+         return false;
+   }
+
+   // Only the end of the declaration follows
+   const char *r = name;
+   while (r < eol && (isalnum((unsigned char)*r) || *r == '_' || *r == '$'))
+      r++;
+   while (r < eol && isspace((unsigned char)*r))
+      r++;
+   if (r >= eol || *r != ';')
+      return false;
+
+   r++;
+   while (r < eol && isspace((unsigned char)*r))
+      r++;
+   if (r != eol && !(eol - r >= 2 && r[0] == '/' && r[1] == '/'))
+      return false;
+
+   const size_t len = eol - line;
+   *line_loc = get_loc(loc->first_line, 0, loc->first_line, len - 1,
+                       loc->file_ref);
+   return !loc_invalid_p(line_loc);
+}
+
 void lint_flush(void)
 {
    for (unsigned i = 0; i < pending.count; i++) {
@@ -381,6 +451,12 @@ void lint_flush(void)
       if (d->rule == LINT_UNUSED && strcmp(d->what, "signal") == 0
           && lint_removable_signal(&d->loc, &line_loc))
          diag_fix(diag, &line_loc, "", "Remove the unused signal");
+      else if (d->rule == LINT_UNUSED && !d->written
+               && (strcmp(d->what, "net") == 0
+                   || strcmp(d->what, "variable") == 0)
+               && lint_removable_vlog_decl(&d->loc, &line_loc))
+         diag_fix(diag, &line_loc, "", d->what[0] == 'n'
+                  ? "Remove the unused net" : "Remove the unused variable");
 
       diag_emit(diag);
    }

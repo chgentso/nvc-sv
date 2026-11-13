@@ -61,6 +61,8 @@ void lint_warn(const loc_t *loc, lint_rule_t rule, const char *fmt, ...)
 // has been seen so that hierarchical names can be taken into account
 void lint_declaration(const loc_t *loc, lint_rule_t rule, ident_t name,
                       const char *what);
+void lint_declaration_written(const loc_t *loc, lint_rule_t rule, ident_t name,
+                              const char *what, bool written);
 void lint_hier_name(ident_t name);
 void lint_flush(void);
 
