@@ -18,7 +18,10 @@ package body reflection is
 
     type string_ptr is access string;
 
-    type internal_type;
+    -- Opaque type only ever referenced through an access value
+    type internal_type is record
+        f_unused : integer;
+    end record;
     type type_ptr is access internal_type;
 
     type cache_elem_t is record

@@ -4357,6 +4357,22 @@ START_TEST(test_accessinc)
 }
 END_TEST
 
+START_TEST(test_incpack)
+{
+   input_from_file(TESTDIR "/sem/incpack.vhd");
+
+   const error_t expect[] = {
+      { 11, "missing full type declaration for incomplete type OPAQUE" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   parse_and_check(T_PACKAGE, T_PACK_BODY);
+
+   check_expected_errors();
+}
+END_TEST
+
 START_TEST(test_undefarg)
 {
    set_standard(STD_08);
@@ -4576,6 +4592,7 @@ Suite *get_sem_tests(void)
    tcase_add_test(tc_core, test_idxrange);
    tcase_add_test(tc_core, test_entbody);
    tcase_add_test(tc_core, test_incfull);
+   tcase_add_test(tc_core, test_incpack);
    tcase_add_test(tc_core, test_attrspec);
    tcase_add_test(tc_core, test_accessinc);
    tcase_add_test(tc_core, test_enumhomo);
