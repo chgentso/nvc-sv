@@ -16,10 +16,12 @@
 //
 
 #include "util.h"
+#include "array.h"
 #include "diag.h"
 #include "fsm.h"
 #include "scandeps.h"
 #include "tree.h"
+#include "type.h"
 #include "vlog/vlog-node.h"
 
 #include <assert.h>
@@ -334,7 +336,7 @@ void fsm_discard(fsm_out_t *f)
    fsm_free(f);
 }
 
-char *fsm_source_text(const loc_t *loc)
+static char *fsm_text(const loc_t *loc, bool vhdl)
 {
    if (loc_invalid_p(loc))
       return NULL;
@@ -358,6 +360,8 @@ char *fsm_source_text(const loc_t *loc)
       if (cur == end_line && end_col + 1 < to)
          to = end_col + 1;
       for (size_t i = from; i < to; i++) {
+         if (vhdl && ptr[i] == '-' && i + 1 < to && ptr[i + 1] == '-')
+            break;   // Comment
          if (isspace((unsigned char)ptr[i])) {
             space = tb_len(tb) > 0;
             continue;
@@ -377,7 +381,1172 @@ char *fsm_source_text(const loc_t *loc)
    return tb_claim(tb);
 }
 
+
+char *fsm_source_text(const loc_t *loc)
+{
+   return fsm_text(loc, false);
+}
+
+char *fsm_source_text_vhdl(const loc_t *loc)
+{
+   return fsm_text(loc, true);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// VHDL
+
+#define MAX_GUARDS 16
+#define MAX_RESETS 16
+#define MAX_STATES 512
+
+typedef struct {
+   tree_t   assign;
+   tree_t   cond;       // Condition of the reset, or NULL
+} reset_t;
+
+typedef struct {
+   ident_t  key;
+   char    *spell;
+   loc_t    decl;
+   loc_t    branch;
+   bool     has_decl, has_branch;
+} state_t;
+
+typedef struct {
+   tree_t   proc;
+   bool     clocked;
+   tree_t   clk;        // The reference to the clock
+   bool     rising;
+} proc_info_t;
+
+typedef struct {
+   tree_t       cs;
+   proc_info_t *proc;
+   bool         in_region;
+} case_info_t;
+
+typedef struct {
+   tree_t       target;    // Register (signal or variable)
+   tree_t       partner;   // Signal assigned to it, or NULL
+   proc_info_t *proc;
+} reg_assign_t;
+
+typedef struct {
+   fsm_out_t    *out;
+   tree_t        state;       // Object of the case
+   tree_t        target;      // Object assigned by the transitions
+   tree_t        cs;
+   bool          typed;
+   type_t        type;
+   state_t       states[MAX_STATES];
+   unsigned      nstates;
+   tree_t        guards[MAX_GUARDS];
+   bool          negs[MAX_GUARDS];
+   unsigned      nguards;
+   reset_t       resets[MAX_RESETS];
+   unsigned      nresets;
+   tree_t        reset_ifs[MAX_RESETS];
+   unsigned      nreset_ifs;
+   bool          case_seen;
+   bool          computed;
+   unsigned      ntrans;
+   loc_t         fallback;   // For an assignment without a location
+} walk_t;
+
+typedef A(case_info_t) case_list_t;
+typedef A(reg_assign_t) reg_list_t;
+typedef A(proc_info_t *) proc_list_t;
+
+static char *vhdl_text(tree_t t)
+{
+   return fsm_source_text_vhdl(tree_loc(t));
+}
+
+static const char *vhdl_tail(ident_t id)
+{
+   const char *s = istr(id);
+   const char *dot = strrchr(s, '.');
+   return dot ? dot + 1 : s;
+}
+
+static bool vhdl_ci_eq(const char *s, const char *word)
+{
+   // Operator names may be quoted
+   if (*s == '"')
+      s++;
+   const size_t n = strlen(word);
+   return strncasecmp(s, word, n) == 0 && (s[n] == '\0' || s[n] == '"');
+}
+
+static bool vhdl_others_p(tree_t ch)
+{
+   return !tree_has_name(ch) && tree_ranges(ch) == 0;
+}
+
+static tree_t vhdl_strip(tree_t e)
+{
+   while (e != NULL) {
+      switch (tree_kind(e)) {
+      case T_QUALIFIED:
+      case T_TYPE_CONV:
+         e = tree_value(e);
+         break;
+      default:
+         return e;
+      }
+   }
+   return e;
+}
+
+// The declaration a plain name refers to
+static tree_t vhdl_decl_of(tree_t e)
+{
+   e = vhdl_strip(e);
+   if (e == NULL || tree_kind(e) != T_REF || !tree_has_ref(e))
+      return NULL;
+   return tree_ref(e);
+}
+
+static bool vhdl_object_p(tree_t d)
+{
+   if (d == NULL)
+      return false;
+   switch (tree_kind(d)) {
+   case T_SIGNAL_DECL:
+   case T_PORT_DECL:
+   case T_VAR_DECL:
+      return true;
+   default:
+      return false;
+   }
+}
+
+static bool vhdl_predefined_p(type_t type)
+{
+   return type_has_ident(type)
+      && strncmp(istr(type_ident(type)), "STD.", 4) == 0;
+}
+
+static tree_t vhdl_param_value(tree_t call, unsigned n)
+{
+   if (n >= tree_params(call))
+      return NULL;
+   tree_t p = tree_param(call, n);
+   return tree_has_value(p) ? tree_value(p) : NULL;
+}
+
+static bool vhdl_is_literal_one(tree_t e, bool *one)
+{
+   e = vhdl_strip(e);
+   if (e == NULL)
+      return false;
+   if (tree_kind(e) == T_REF || tree_kind(e) == T_LITERAL) {
+      char *txt LOCAL = vhdl_text(e);
+      if (txt == NULL)
+         return false;
+      if (!strcmp(txt, "'1'") || !strcmp(txt, "'0'")) {
+         *one = txt[1] == '1';
+         return true;
+      }
+   }
+   return false;
+}
+
+static bool vhdl_ref_name(tree_t e, ident_t *name)
+{
+   e = vhdl_strip(e);
+   if (e == NULL || tree_kind(e) != T_REF || !tree_has_ident(e))
+      return false;
+   *name = tree_ident(e);
+   return true;
+}
+
+// Does the expression test for a clock edge
+static bool vhdl_edge(tree_t e, tree_t *clk, bool *rising)
+{
+   e = vhdl_strip(e);
+   if (e == NULL)
+      return false;
+
+   if (tree_kind(e) != T_FCALL || !tree_has_ident(e))
+      return false;
+
+   const char *tail = vhdl_tail(tree_ident(e));
+   if (vhdl_ci_eq(tail, "rising_edge") || vhdl_ci_eq(tail, "falling_edge")) {
+      tree_t arg = vhdl_param_value(e, 0);
+      if (arg != NULL && vhdl_strip(arg) != NULL
+          && tree_kind(vhdl_strip(arg)) == T_REF) {
+         *clk = vhdl_strip(arg);
+         *rising = vhdl_ci_eq(tail, "rising_edge");
+         return true;
+      }
+      return false;
+   }
+
+   if (vhdl_ci_eq(tail, "and") && tree_params(e) == 2) {
+      // clk'event and clk = '1'  or  clk = '1' and clk'event
+      for (int i = 0; i < 2; i++) {
+         tree_t ev = vhdl_strip(vhdl_param_value(e, i));
+         tree_t cmp = vhdl_strip(vhdl_param_value(e, 1 - i));
+         if (ev == NULL || cmp == NULL || tree_kind(ev) != T_ATTR_REF
+             || !vhdl_ci_eq(istr(tree_ident(ev)), "event"))
+            continue;
+         if (tree_kind(cmp) != T_FCALL || tree_params(cmp) != 2
+             || !tree_has_ident(cmp) || !vhdl_ci_eq(tree_ident(cmp) ? istr(tree_ident(cmp)) : "", "="))
+            continue;
+         bool one;
+         tree_t l = vhdl_strip(vhdl_param_value(cmp, 0));
+         tree_t r = vhdl_param_value(cmp, 1);
+         if (l != NULL && tree_kind(l) == T_REF && vhdl_is_literal_one(r, &one)) {
+            *clk = l;
+            *rising = one;
+            return true;
+         }
+      }
+   }
+
+   return false;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Pass 1: processes, cases and registered assignments
+
+typedef struct {
+   case_list_t  cases;
+   reg_list_t   regs;
+   proc_list_t  procs;
+} scope_t;
+
+static void vhdl_collect_stmts(scope_t *sc, proc_info_t *pi, tree_t parent,
+                               bool in_region);
+
+static void vhdl_collect_stmt(scope_t *sc, proc_info_t *pi, tree_t s,
+                              bool in_region)
+{
+   switch (tree_kind(s)) {
+   case T_IF:
+      for (unsigned i = 0; i < tree_conds(s); i++) {
+         tree_t c = tree_cond(s, i);
+         bool region = in_region;
+         tree_t clk;
+         bool rising;
+         if (tree_has_value(c) && vhdl_edge(tree_value(c), &clk, &rising)) {
+            if (!pi->clocked) {
+               pi->clocked = true;
+               pi->clk = clk;
+               pi->rising = rising;
+            }
+            region = true;
+         }
+         vhdl_collect_stmts(sc, pi, c, region);
+      }
+      break;
+
+   case T_CASE:
+   case T_MATCH_CASE:
+      {
+         case_info_t ci = { s, pi, in_region };
+         APUSH(sc->cases, ci);
+         for (unsigned i = 0; i < tree_stmts(s); i++)
+            vhdl_collect_stmts(sc, pi, tree_stmt(s, i), in_region);
+      }
+      break;
+
+   case T_COND_ASSIGN:
+      {
+         tree_t target = tree_has_target(s) ? tree_target(s) : NULL;
+         if (in_region && target != NULL && vhdl_object_p(vhdl_decl_of(target))) {
+            reg_assign_t ra = { vhdl_decl_of(target), NULL, pi };
+            APUSH(sc->regs, ra);
+         }
+         for (unsigned i = 0; i < tree_conds(s); i++)
+            vhdl_collect_stmts(sc, pi, tree_cond(s, i), in_region);
+      }
+      break;
+
+   case T_SIGNAL_ASSIGN:
+   case T_VAR_ASSIGN:
+      if (in_region && tree_has_target(s)) {
+         tree_t d = vhdl_decl_of(tree_target(s));
+         if (vhdl_object_p(d)) {
+            reg_assign_t ra = { d, NULL, pi };
+            tree_t value = NULL;
+            if (tree_kind(s) == T_VAR_ASSIGN)
+               value = tree_has_value(s) ? tree_value(s) : NULL;
+            else if (tree_waveforms(s) == 1) {
+               tree_t w = tree_waveform(s, 0);
+               value = tree_has_value(w) ? tree_value(w) : NULL;
+            }
+            tree_t pd = value ? vhdl_decl_of(value) : NULL;
+            if (vhdl_object_p(pd) && pd != d)
+               ra.partner = pd;
+            APUSH(sc->regs, ra);
+         }
+      }
+      break;
+
+   case T_WAIT:
+      break;
+
+   case T_FOR:
+   case T_WHILE:
+   case T_LOOP:
+   case T_SEQUENCE:
+      vhdl_collect_stmts(sc, pi, s, in_region);
+      break;
+
+   default:
+      break;
+   }
+}
+
+static void vhdl_collect_stmts(scope_t *sc, proc_info_t *pi, tree_t parent,
+                               bool in_region)
+{
+   const unsigned n = tree_stmts(parent);
+   bool region = in_region;
+   for (unsigned i = 0; i < n; i++) {
+      tree_t s = tree_stmt(parent, i);
+      if (tree_kind(s) == T_WAIT && tree_has_value(s)) {
+         tree_t clk;
+         bool rising;
+         if (vhdl_edge(tree_value(s), &clk, &rising)) {
+            if (!pi->clocked) {
+               pi->clocked = true;
+               pi->clk = clk;
+               pi->rising = rising;
+            }
+            region = true;
+         }
+         continue;
+      }
+      vhdl_collect_stmt(sc, pi, s, region);
+   }
+}
+
+static void vhdl_collect_scope(scope_t *sc, tree_t parent)
+{
+   const tree_kind_t pk = tree_kind(parent);
+   if (pk == T_IF_GENERATE) {
+      for (unsigned i = 0; i < tree_conds(parent); i++)
+         vhdl_collect_scope(sc, tree_cond(parent, i));
+      return;
+   }
+
+   for (unsigned i = 0; i < tree_stmts(parent); i++) {
+      tree_t s = tree_stmt(parent, i);
+      switch (tree_kind(s)) {
+      case T_PROCESS:
+         {
+            proc_info_t *pi = xcalloc(sizeof(proc_info_t));
+            pi->proc = s;
+            APUSH(sc->procs, pi);
+            vhdl_collect_stmts(sc, pi, s, false);
+         }
+         break;
+      case T_BLOCK:
+      case T_FOR_GENERATE:
+      case T_IF_GENERATE:
+      case T_CASE_GENERATE:
+      case T_ALTERNATIVE:
+      case T_COND_STMT:
+         vhdl_collect_scope(sc, s);
+         break;
+      default:
+         break;
+      }
+   }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Pass 2: the machine
+
+static state_t *vhdl_state(walk_t *w, ident_t key, const char *spell,
+                           const loc_t *decl)
+{
+   for (unsigned i = 0; i < w->nstates; i++)
+      if (w->states[i].key == key)
+         return &w->states[i];
+
+   if (w->nstates == MAX_STATES)
+      return NULL;
+
+   state_t *st = &w->states[w->nstates++];
+   st->key = key;
+   st->spell = xstrdup(spell);
+   st->has_decl = decl != NULL && !loc_invalid_p(decl);
+   if (st->has_decl)
+      st->decl = *decl;
+   st->has_branch = false;
+   return st;
+}
+
+// A name that denotes a state: a literal of the type, or an unresolved
+// name when the type is not visible
+static bool vhdl_state_name(walk_t *w, tree_t e, ident_t *key,
+                            char **spell)
+{
+   e = vhdl_strip(e);
+   if (e == NULL || tree_kind(e) != T_REF || !tree_has_ident(e))
+      return false;
+
+   if (tree_has_ref(e)) {
+      tree_t d = tree_ref(e);
+      if (tree_kind(d) != T_ENUM_LIT)
+         return false;
+      if (w->typed && type_eq(tree_type(d), w->type) == false)
+         return false;
+   }
+   else if (w->typed)
+      return false;
+
+   const char *name = istr(tree_ident(e));
+   if (!isalpha((unsigned char)name[0]) && name[0] != '\\')
+      return false;   // Character literal
+
+   *key = tree_ident(e);
+   *spell = vhdl_text(e);
+   if (*spell == NULL)
+      *spell = xstrdup(name);
+   return true;
+}
+
+static void vhdl_emit(walk_t *w, const char *kind, tree_t assign,
+                      const char *to, const char *expr,
+                      const ident_t *from, unsigned nfrom,
+                      bool others)
+{
+   fsm_trans_begin(w->out, kind, loc_invalid_p(tree_loc(assign))
+                   ? &w->fallback : tree_loc(assign), to, expr);
+
+   if (others) {
+      // The states not named by another alternative
+      bool listed = false;
+      if (w->typed) {
+         for (unsigned i = 0; i < w->nstates; i++) {
+            if (!w->states[i].has_branch) {
+               fsm_trans_from(w->out, w->states[i].spell);
+               listed = true;
+            }
+         }
+      }
+      if (!listed)
+         fsm_trans_from(w->out, "*others");
+   }
+   else {
+      for (unsigned i = 0; i < nfrom; i++) {
+         if (from[i] == NULL)
+            fsm_trans_from(w->out, "*");
+         else {
+            for (unsigned j = 0; j < w->nstates; j++) {
+               if (w->states[j].key == from[i]) {
+                  fsm_trans_from(w->out, w->states[j].spell);
+                  break;
+               }
+            }
+         }
+      }
+   }
+
+   for (unsigned i = 0; i < w->nguards; i++) {
+      char *txt LOCAL = vhdl_text(w->guards[i]);
+      fsm_trans_guard(w->out, txt ?: "?", tree_loc(w->guards[i]), w->negs[i]);
+   }
+
+   fsm_trans_end(w->out);
+   w->ntrans++;
+}
+
+typedef struct {
+   const ident_t *from;
+   unsigned       nfrom;
+   bool           others;
+   const char    *kind;
+} from_t;
+
+static void vhdl_value(walk_t *w, tree_t assign, tree_t value,
+                       const from_t *from)
+{
+   if (value == NULL)
+      return;
+
+   value = vhdl_strip(value);
+
+   if (vhdl_decl_of(value) == w->state)
+      return;   // Hold
+
+   ident_t key;
+   char *spell = NULL;
+   if (vhdl_state_name(w, value, &key, &spell)) {
+      state_t *st = vhdl_state(w, key, spell, NULL);
+      if (st != NULL)
+         vhdl_emit(w, from->kind, assign, st->spell, NULL, from->from,
+                   from->nfrom, from->others);
+      free(spell);
+      return;
+   }
+
+   if (vhdl_decl_of(value) == w->target)
+      return;
+
+   char *txt LOCAL = vhdl_text(value);
+   w->computed = true;
+   vhdl_emit(w, from->kind, assign, NULL, txt ?: "?", from->from, from->nfrom,
+             from->others);
+}
+
+static bool vhdl_is_target(walk_t *w, tree_t t)
+{
+   return vhdl_decl_of(t) == w->target;
+}
+
+static bool vhdl_reset_assign_p(walk_t *w, tree_t s)
+{
+   for (unsigned i = 0; i < w->nresets; i++)
+      if (w->resets[i].assign == s)
+         return true;
+   return false;
+}
+
+static bool vhdl_reset_if_p(walk_t *w, tree_t s)
+{
+   for (unsigned i = 0; i < w->nreset_ifs; i++)
+      if (w->reset_ifs[i] == s)
+         return true;
+   return false;
+}
+
+static void vhdl_walk_stmts(walk_t *w, tree_t parent, const from_t *from,
+                            bool in_case);
+
+static void vhdl_walk_assign(walk_t *w, tree_t s, const from_t *from)
+{
+   tree_t target = tree_has_target(s) ? tree_target(s) : NULL;
+   if (target == NULL || !vhdl_is_target(w, target))
+      return;
+   if (vhdl_reset_assign_p(w, s))
+      return;
+
+   if (tree_kind(s) == T_VAR_ASSIGN) {
+      if (tree_has_value(s))
+         vhdl_value(w, s, tree_value(s), from);
+   }
+   else if (tree_waveforms(s) > 0) {
+      tree_t wv = tree_waveform(s, 0);
+      if (tree_has_value(wv))
+         vhdl_value(w, s, tree_value(wv), from);
+   }
+}
+
+static void vhdl_push_guard(walk_t *w, tree_t cond, bool neg)
+{
+   if (w->nguards < MAX_GUARDS) {
+      w->guards[w->nguards] = cond;
+      w->negs[w->nguards++] = neg;
+   }
+}
+
+static void vhdl_walk_stmt(walk_t *w, tree_t s, const from_t *from)
+{
+   switch (tree_kind(s)) {
+   case T_SIGNAL_ASSIGN:
+   case T_VAR_ASSIGN:
+      vhdl_walk_assign(w, s, from);
+      break;
+
+   case T_COND_ASSIGN:
+      {
+         if (!tree_has_target(s) || !vhdl_is_target(w, tree_target(s)))
+            break;
+         const unsigned saved = w->nguards;
+         w->fallback = *tree_loc(s);
+         for (unsigned i = 0; i < tree_conds(s); i++) {
+            tree_t c = tree_cond(s, i);
+            const unsigned inner = w->nguards;
+            if (tree_has_value(c))
+               vhdl_push_guard(w, tree_value(c), false);
+            vhdl_walk_stmts(w, c, from, false);
+            w->nguards = inner;
+            if (tree_has_value(c))
+               vhdl_push_guard(w, tree_value(c), true);
+         }
+         w->nguards = saved;
+      }
+      break;
+
+   case T_IF:
+      {
+         const unsigned saved = w->nguards;
+         const bool reset_if = vhdl_reset_if_p(w, s);
+         for (unsigned i = 0; i < tree_conds(s); i++) {
+            tree_t c = tree_cond(s, i);
+            const unsigned inner = w->nguards;
+            tree_t clk;
+            bool rising;
+            const bool edge = tree_has_value(c)
+               && vhdl_edge(tree_value(c), &clk, &rising);
+            const bool skip = edge || (reset_if && i == 0);
+            if (tree_has_value(c) && !skip)
+               vhdl_push_guard(w, tree_value(c), false);
+            vhdl_walk_stmts(w, c, from, false);
+            w->nguards = inner;
+            if (tree_has_value(c) && !skip)
+               vhdl_push_guard(w, tree_value(c), true);
+         }
+         w->nguards = saved;
+      }
+      break;
+
+   case T_CASE:
+   case T_MATCH_CASE:
+      if (s == w->cs) {
+         w->case_seen = true;
+         for (unsigned i = 0; i < tree_stmts(s); i++) {
+            tree_t alt = tree_stmt(s, i);
+            ident_t names[64];
+            unsigned nnames = 0;
+            bool others = false;
+            for (unsigned j = 0; j < tree_choices(alt); j++) {
+               tree_t ch = tree_choice(alt, j);
+               if (vhdl_others_p(ch))
+                  others = true;
+               else if (tree_has_name(ch)) {
+                  ident_t key;
+                  char *spell;
+                  if (vhdl_state_name(w, tree_name(ch), &key, &spell)) {
+                     state_t *st = vhdl_state(w, key, spell, NULL);
+                     free(spell);
+                     if (st != NULL && nnames < ARRAY_LEN(names))
+                        names[nnames++] = key;
+                  }
+               }
+            }
+            from_t f = { names, nnames, others, others ? "default" : "case" };
+            vhdl_walk_stmts(w, alt, &f, true);
+         }
+      }
+      else {
+         // Another case: its choices become guards
+         tree_t subject = tree_value(s);
+         (void)subject;
+         for (unsigned i = 0; i < tree_stmts(s); i++) {
+            const unsigned saved = w->nguards;
+            tree_t alt = tree_stmt(s, i);
+            if (tree_choices(alt) > 0) {
+               tree_t ch = tree_choice(alt, 0);
+               if (tree_has_name(ch))
+                  vhdl_push_guard(w, tree_name(ch), false);
+            }
+            vhdl_walk_stmts(w, alt, from, false);
+            w->nguards = saved;
+         }
+      }
+      break;
+
+   case T_FOR:
+   case T_WHILE:
+   case T_LOOP:
+   case T_SEQUENCE:
+      vhdl_walk_stmts(w, s, from, false);
+      break;
+
+   default:
+      break;
+   }
+}
+
+static void vhdl_walk_stmts(walk_t *w, tree_t parent, const from_t *from,
+                            bool in_case)
+{
+   (void)in_case;
+   const unsigned n = tree_stmts(parent);
+   for (unsigned i = 0; i < n; i++)
+      vhdl_walk_stmt(w, tree_stmt(parent, i), from);
+}
+
+static bool vhdl_literal_assign_p(walk_t *w, tree_t s)
+{
+   tree_t target = tree_has_target(s) ? tree_target(s) : NULL;
+   if (target == NULL || !vhdl_is_target(w, target))
+      return false;
+
+   tree_t value = NULL;
+   if (tree_kind(s) == T_VAR_ASSIGN)
+      value = tree_has_value(s) ? tree_value(s) : NULL;
+   else if (tree_kind(s) == T_SIGNAL_ASSIGN && tree_waveforms(s) > 0) {
+      tree_t wv = tree_waveform(s, 0);
+      value = tree_has_value(wv) ? tree_value(wv) : NULL;
+   }
+
+   ident_t key;
+   char *spell;
+   if (value != NULL && vhdl_state_name(w, value, &key, &spell)) {
+      free(spell);
+      return true;
+   }
+   return false;
+}
+
+// Does any statement below PARENT assign a state literal to the target
+static bool vhdl_assigns_literal(walk_t *w, tree_t parent)
+{
+   const unsigned n = tree_stmts(parent);
+   for (unsigned i = 0; i < n; i++) {
+      tree_t s = tree_stmt(parent, i);
+      switch (tree_kind(s)) {
+      case T_SIGNAL_ASSIGN:
+      case T_VAR_ASSIGN:
+         if (vhdl_literal_assign_p(w, s))
+            return true;
+         break;
+      case T_IF:
+      case T_COND_ASSIGN:
+         for (unsigned j = 0; j < tree_conds(s); j++)
+            if (vhdl_assigns_literal(w, tree_cond(s, j)))
+               return true;
+         break;
+      case T_CASE:
+      case T_MATCH_CASE:
+      case T_ALTERNATIVE:
+      case T_FOR:
+      case T_WHILE:
+      case T_LOOP:
+      case T_SEQUENCE:
+         if (vhdl_assigns_literal(w, s))
+            return true;
+         break;
+      default:
+         break;
+      }
+   }
+   return false;
+}
+
+// Find the reset assignments to the register of the machine in PARENT
+static void vhdl_add_reset(walk_t *w, tree_t assign, tree_t cond)
+{
+   if (w->nresets < MAX_RESETS) {
+      w->resets[w->nresets].assign = assign;
+      w->resets[w->nresets++].cond = cond;
+   }
+}
+
+static void vhdl_reset_literals(walk_t *w, tree_t reg, tree_t parent,
+                                tree_t cond)
+{
+   // The literal assignments to the register directly in PARENT
+   const unsigned n = tree_stmts(parent);
+   for (unsigned i = 0; i < n; i++) {
+      tree_t s = tree_stmt(parent, i);
+      if (tree_kind(s) != T_SIGNAL_ASSIGN && tree_kind(s) != T_VAR_ASSIGN)
+         continue;
+      tree_t save = w->target;
+      w->target = reg;
+      const bool lit = vhdl_literal_assign_p(w, s);
+      w->target = save;
+      if (lit)
+         vhdl_add_reset(w, s, cond);
+   }
+}
+
+static bool vhdl_has_edge_below(tree_t parent);
+
+static bool vhdl_stmt_edge(tree_t s)
+{
+   if (tree_kind(s) != T_IF)
+      return false;
+   for (unsigned i = 0; i < tree_conds(s); i++) {
+      tree_t c = tree_cond(s, i);
+      tree_t clk;
+      bool rising;
+      if (tree_has_value(c) && vhdl_edge(tree_value(c), &clk, &rising))
+         return true;
+      if (vhdl_has_edge_below(c))
+         return true;
+   }
+   return false;
+}
+
+static bool vhdl_has_edge_below(tree_t parent)
+{
+   for (unsigned i = 0; i < tree_stmts(parent); i++)
+      if (vhdl_stmt_edge(tree_stmt(parent, i)))
+         return true;
+   return false;
+}
+
+static void vhdl_find_resets(walk_t *w, tree_t reg, tree_t parent, int depth)
+{
+   if (depth > 6)
+      return;
+
+   for (unsigned i = 0; i < tree_stmts(parent); i++) {
+      tree_t s = tree_stmt(parent, i);
+      if (tree_kind(s) != T_IF)
+         continue;
+
+      // Find the branch with the clock edge, directly or nested
+      int edge = -1;
+      for (unsigned j = 0; j < tree_conds(s) && edge < 0; j++) {
+         tree_t c = tree_cond(s, j);
+         tree_t clk;
+         bool rising;
+         if (tree_has_value(c) && vhdl_edge(tree_value(c), &clk, &rising))
+            edge = j;
+         else if (vhdl_has_edge_below(c))
+            edge = j;
+      }
+
+      if (edge < 0)
+         continue;
+
+      // Branches before the edge are asynchronous resets
+      for (int j = 0; j < edge; j++) {
+         tree_t c = tree_cond(s, j);
+         vhdl_reset_literals(w, reg, c, tree_has_value(c) ? tree_value(c) : NULL);
+      }
+      if (edge > 0 && w->nreset_ifs < MAX_RESETS)
+         w->reset_ifs[w->nreset_ifs++] = s;
+
+      tree_t ec = tree_cond(s, edge);
+      tree_t clk;
+      bool rising;
+      if (tree_has_value(ec) && vhdl_edge(tree_value(ec), &clk, &rising)) {
+         // Synchronous reset: an if directly under the edge whose first
+         // branch holds the literal and which has another branch
+         for (unsigned j = 0; j < tree_stmts(ec); j++) {
+            tree_t inner = tree_stmt(ec, j);
+            if (tree_kind(inner) != T_IF || tree_conds(inner) < 2)
+               continue;
+            tree_t c0 = tree_cond(inner, 0);
+            const unsigned before = w->nresets;
+            vhdl_reset_literals(w, reg, c0,
+                                tree_has_value(c0) ? tree_value(c0) : NULL);
+            if (w->nresets > before && w->nreset_ifs < MAX_RESETS)
+               w->reset_ifs[w->nreset_ifs++] = inner;
+            break;
+         }
+      }
+      else
+         vhdl_find_resets(w, reg, ec, depth + 1);
+      return;
+   }
+}
+
+static void vhdl_free_states(walk_t *w)
+{
+   for (unsigned i = 0; i < w->nstates; i++)
+      free(w->states[i].spell);
+}
+
+static char *vhdl_spelling(tree_t decl)
+{
+   const char *name = istr(tree_ident(decl));
+   const loc_t *loc = tree_loc(decl);
+   if (name[0] != '\\' && !loc_invalid_p(loc)) {
+      // As written at the declaration
+      const char *src = loc_get_source(loc);
+      const size_t n = strlen(name);
+      if (src != NULL) {
+         unsigned cur = loc->first_line;
+         const unsigned end = loc->first_line + loc->line_delta;
+         const char *ptr = src;
+         while (cur <= end && cur < loc->first_line + 40) {
+            const char *eol = strchr(ptr, '\n');
+            size_t linelen = eol ? (size_t)(eol - ptr) : strlen(ptr);
+            for (size_t i = cur == loc->first_line ? loc->first_column : 0;
+                 i + n <= linelen; i++) {
+               if (i > 0 && fsm_word_char(ptr[i - 1]))
+                  continue;
+               if (i + n < linelen && fsm_word_char(ptr[i + n]))
+                  continue;
+               if (strncasecmp(ptr + i, name, n) == 0)
+                  return xstrndup(ptr + i, n);
+            }
+            if (eol == NULL)
+               break;
+            ptr = eol + 1;
+            cur++;
+         }
+      }
+   }
+   return xstrdup(name);
+}
+
+// The label of a process as written, or NULL when it has none
+static char *vhdl_label(tree_t proc)
+{
+   if (!tree_has_ident(proc))
+      return NULL;
+   const char *name = istr(tree_ident(proc));
+   if (name[0] == '_' || strncmp(name, "line_", 5) == 0)
+      return NULL;
+   return vhdl_spelling(proc);
+}
+
+static bool vhdl_machine(tree_t unit, scope_t *sc, case_info_t *ci,
+                         tree_t state, tree_t target, bool two_process,
+                         proc_info_t *reg_proc, text_buf_t *out,
+                         unsigned *count)
+{
+   walk_t *w = xcalloc(sizeof(walk_t));
+   w->state = state;
+   w->target = target;
+   w->cs = ci->cs;
+
+   type_t type = tree_type(state);
+   w->typed = type_kind(type) == T_ENUM && !vhdl_predefined_p(type);
+   w->type = type;
+
+   if (w->typed) {
+      for (unsigned i = 0; i < type_enum_literals(type); i++) {
+         tree_t lit = type_enum_literal(type, i);
+         char *sp = vhdl_spelling(lit);
+         vhdl_state(w, tree_ident(lit), sp, tree_loc(lit));
+         free(sp);
+      }
+      if (w->nstates < 2) {
+         free(w);
+         return false;
+      }
+   }
+
+   if (!vhdl_assigns_literal(w, ci->cs)) {
+      vhdl_free_states(w);
+      free(w);
+      return false;
+   }
+
+   // Branch of each state
+   for (unsigned i = 0; i < tree_stmts(ci->cs); i++) {
+      tree_t alt = tree_stmt(ci->cs, i);
+      for (unsigned j = 0; j < tree_choices(alt); j++) {
+         tree_t ch = tree_choice(alt, j);
+         ident_t key;
+         char *spell;
+         if (tree_has_name(ch)
+             && vhdl_state_name(w, tree_name(ch), &key, &spell)) {
+            state_t *st = vhdl_state(w, key, spell, NULL);
+            free(spell);
+            if (st != NULL && !st->has_branch) {
+               st->branch = *tree_loc(alt);
+               st->has_branch = true;
+            }
+         }
+      }
+   }
+
+   tree_t proc = ci->proc->proc;
+   char *typename LOCAL = NULL;
+   {
+      LOCAL_TEXT_BUF tb = tb_new();
+      char *nm LOCAL = vhdl_spelling(state);
+      if (vhdl_sym_decl_text(tree_loc(state), nm, tb) && tb_len(tb) > 0)
+         typename = xstrdup(tb_get(tb));
+      else if (w->typed && type_has_ident(type))
+         typename = xstrdup(vhdl_tail(type_ident(type)));
+   }
+
+   fsm_out_t *f = fsm_begin(out, count, istr(tree_ident(unit)),
+                            istr(tree_ident(unit)), "enum",
+                            two_process ? "two-process" : "one-process",
+                            w->typed);
+   fsm_set_vhdl(f, true);
+   w->out = f;
+
+   {
+      char *nm LOCAL = vhdl_spelling(state);
+      fsm_object(f, "state", nm, tree_loc(state), typename);
+   }
+   if (target != state) {
+      char *nm LOCAL = vhdl_spelling(target);
+      fsm_object(f, "next", nm, tree_loc(target), NULL);
+   }
+
+   proc_info_t *clk_proc = two_process ? reg_proc : ci->proc;
+   if (clk_proc->clocked) {
+      char *clk LOCAL = vhdl_text(clk_proc->clk);
+      fsm_clock(f, clk ?: istr(tree_ident(clk_proc->clk)), clk_proc->rising);
+   }
+
+   if (two_process) {
+      const loc_t *l = tree_loc(clk_proc->proc);
+      char *label LOCAL = vhdl_label(clk_proc->proc);
+      fsm_process(f, "register", label, l);
+      fsm_process(f, "next", NULL, tree_loc(proc));
+   }
+   else
+      fsm_process(f, "register", NULL, tree_loc(proc));
+   fsm_case(f, tree_loc(ci->cs));
+
+   // Reset assignments to the register of the machine
+   vhdl_find_resets(w, state, clk_proc->proc, 0);
+
+   // The states first seen as targets are added during the walk, so walk
+   // the process once before writing them
+   fsm_out_t *saved = w->out;
+   (void)saved;
+
+   // Resets
+   for (unsigned i = 0; i < w->nresets; i++) {
+      tree_t s = w->resets[i].assign;
+      tree_t value;
+      if (tree_kind(s) == T_VAR_ASSIGN)
+         value = tree_value(s);
+      else
+         value = tree_value(tree_waveform(s, 0));
+      ident_t key;
+      char *spell;
+      if (!vhdl_state_name(w, value, &key, &spell))
+         continue;
+      state_t *st = vhdl_state(w, key, spell, NULL);
+      free(spell);
+      if (st == NULL)
+         continue;
+      fsm_trans_begin(f, "reset", tree_loc(s), st->spell, NULL);
+      fsm_trans_from(f, "*");
+      if (w->resets[i].cond != NULL) {
+         char *txt LOCAL = vhdl_text(w->resets[i].cond);
+         fsm_trans_guard(f, txt ?: "?", tree_loc(w->resets[i].cond), false);
+      }
+      fsm_trans_end(f);
+   }
+
+   // Transitions of the machine: the whole process holding the case
+   {
+      from_t any = { NULL, 1, false, "any" };
+      ident_t star[1] = { NULL };
+      any.from = star;
+      // Statements outside the case: the guards of enclosing conditions
+      // apply to the case as well
+      vhdl_walk_stmts(w, proc, &any, false);
+   }
+
+   // States first seen as targets only
+   for (unsigned i = 0; i < w->nstates; i++) {
+      state_t *st = &w->states[i];
+      fsm_state(f, st->spell, st->has_decl ? &st->decl : NULL, NULL,
+                st->has_branch ? &st->branch : NULL);
+   }
+
+   const char *initial = NULL;
+   char *init LOCAL = NULL;
+   if (tree_kind(state) != T_PORT_DECL && tree_has_value(state)) {
+      ident_t key;
+      char *spell;
+      if (vhdl_state_name(w, tree_value(state), &key, &spell)) {
+         init = spell;
+         initial = init;
+      }
+   }
+
+   if (w->computed)
+      fsm_note(f, "a next state is computed");
+
+   if (w->ntrans == 0 && w->nresets == 0) {
+      fsm_discard(f);
+      vhdl_free_states(w);
+      free(w);
+      return false;
+   }
+
+   (void)sc;
+   fsm_end(f, initial);
+   vhdl_free_states(w);
+   free(w);
+   return true;
+}
+
+static bool vhdl_seen(tree_t *seen, unsigned n, tree_t d)
+{
+   for (unsigned i = 0; i < n; i++)
+      if (seen[i] == d)
+         return true;
+   return false;
+}
+
 void vhdl_fsm_scan(tree_t unit, text_buf_t *out, unsigned *count)
 {
-   // The walker follows in a later commit
+   if (tree_kind(unit) != T_ARCH)
+      return;
+
+   scope_t sc = {};
+   vhdl_collect_scope(&sc, unit);
+
+   tree_t *seen = xmalloc_array(MAX(sc.cases.count, 1), sizeof(tree_t));
+   unsigned nseen = 0;
+
+   for (unsigned i = 0; i < sc.cases.count; i++) {
+      case_info_t *ci = &(sc.cases.items[i]);
+      tree_t value = tree_value(ci->cs);
+      tree_t d = vhdl_decl_of(value);
+      if (!vhdl_object_p(d) || vhdl_seen(seen, nseen, d))
+         continue;
+
+      type_t type = tree_type(d);
+      const bool enum_type = type_kind(type) == T_ENUM
+         && !vhdl_predefined_p(type);
+      if (!enum_type && !type_is_none(type))
+         continue;
+
+      // The untyped case needs all the choices to be simple names
+      if (!enum_type) {
+         bool names = true;
+         for (unsigned a = 0; a < tree_stmts(ci->cs) && names; a++) {
+            tree_t alt = tree_stmt(ci->cs, a);
+            for (unsigned c = 0; c < tree_choices(alt); c++) {
+               tree_t ch = tree_choice(alt, c);
+               if (vhdl_others_p(ch))
+                  continue;
+               tree_t v = tree_has_name(ch) ? vhdl_strip(tree_name(ch)) : NULL;
+               if (v == NULL || tree_kind(v) != T_REF || tree_has_ref(v)
+                   || !tree_has_ident(v) || !isalpha((unsigned char)istr(tree_ident(v))[0])) {
+                  names = false;
+                  break;
+               }
+            }
+         }
+         if (!names)
+            continue;
+      }
+
+      // Registered?  One process: the case is in the clocked region and
+      // the register is assigned there.  Two processes: a clocked process
+      // assigns the register from a partner signal.  A partner assigned in
+      // the same process (a variable holding the next state) is also
+      // accepted
+      bool done = false;
+
+      if (ci->in_region) {
+         bool assigned = false;
+         for (unsigned r = 0; r < sc.regs.count && !assigned; r++)
+            assigned = sc.regs.items[r].proc == ci->proc
+               && sc.regs.items[r].target == d;
+         if (assigned)
+            done = vhdl_machine(unit, &sc, ci, d, d, false, NULL, out, count);
+      }
+
+      tree_t tried[8];
+      unsigned ntried = 0;
+      for (unsigned r = 0; r < sc.regs.count && !done; r++) {
+         reg_assign_t *ra = &(sc.regs.items[r]);
+         if (ra->target != d || ra->partner == NULL
+             || vhdl_seen(tried, ntried, ra->partner) || ntried == ARRAY_LEN(tried))
+            continue;
+         tried[ntried++] = ra->partner;
+         const bool same = ra->proc == ci->proc;
+         done = vhdl_machine(unit, &sc, ci, d, ra->partner, !same,
+                             same ? NULL : ra->proc, out, count);
+      }
+
+      if (done)
+         seen[nseen++] = d;
+   }
+
+   free(seen);
+   for (unsigned i = 0; i < sc.procs.count; i++)
+      free(sc.procs.items[i]);
+   ACLEAR(sc.cases);
+   ACLEAR(sc.regs);
+   ACLEAR(sc.procs);
 }

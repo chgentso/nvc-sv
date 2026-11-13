@@ -35,4 +35,8 @@ void scan_set_fsm(bool enable);
 // Append STR to TB as a quoted JSON string
 void scan_json_string(text_buf_t *tb, const char *str);
 
+// The subtype indication of a VHDL object declaration as written, for the
+// declaration of NAME within LOC
+bool vhdl_sym_decl_text(const loc_t *loc, const char *name, text_buf_t *type);
+
 #endif   // _SCANDEPS_H

@@ -575,7 +575,7 @@ static bool vhdl_sym_word_at(const char *p, const char *end, const char *word)
       && !sym_word_char(p[-1]);
 }
 
-static bool vhdl_sym_decl_text(const loc_t *loc, const char *name,
+bool vhdl_sym_decl_text(const loc_t *loc, const char *name,
                            text_buf_t *type)
 {
    unsigned l, c, n;

@@ -1051,6 +1051,11 @@ void tree_add_trigger(tree_t t, tree_t s)
    object_write_barrier(&(t->object), &(s->object));
 }
 
+bool tree_has_target(tree_t t)
+{
+   return lookup_item(&tree_object, t, I_TARGET)->object != NULL;
+}
+
 tree_t tree_target(tree_t t)
 {
    item_t *item = lookup_item(&tree_object, t, I_TARGET);

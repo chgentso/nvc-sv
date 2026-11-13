@@ -80,4 +80,7 @@ void fsm_discard(fsm_out_t *f);
 // NULL when the source is not available.
 char *fsm_source_text(const loc_t *loc);
 
+// As above for VHDL: comments are removed
+char *fsm_source_text_vhdl(const loc_t *loc);
+
 #endif   // _FSM_H

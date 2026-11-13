@@ -546,6 +546,7 @@ unsigned tree_triggers(tree_t t);
 tree_t tree_trigger(tree_t t, unsigned n);
 void tree_add_trigger(tree_t t, tree_t s);
 
+bool tree_has_target(tree_t t);
 tree_t tree_target(tree_t t);
 void tree_set_target(tree_t t, tree_t lhs);
 
