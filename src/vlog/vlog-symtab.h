@@ -26,6 +26,7 @@ void vlog_symtab_free(vlog_symtab_t *st);
 
 void vlog_symtab_push(vlog_symtab_t *st, vlog_node_t v);
 void vlog_symtab_pop(vlog_symtab_t *st);
+bool vlog_symtab_top_is(vlog_symtab_t *st, vlog_kind_t kind);
 void vlog_symtab_push_members(vlog_symtab_t *st, vlog_node_t class,
                               const ident_t *only, int nonly);
 void vlog_symtab_resolve_deferred(vlog_symtab_t *st);

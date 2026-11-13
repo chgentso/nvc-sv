@@ -115,6 +115,19 @@ static vlog_node_t p_nonbinary_expression(void);
 static vlog_node_t p_binary_expression(vlog_node_t lhs, int min_prec);
 static vlog_node_t p_case_matches(vlog_case_kind_t kind, vlog_node_t expr);
 static int match_depth = 0;
+
+static void scope_leave(void)
+{
+   // The scopes of the variables bound by patterns are popped when the
+   // statement or expression ends, but a syntax error can skip that: they
+   // are above the scope being left so are dropped with it
+   while (match_depth > 0 && vlog_symtab_top_is(symtab, V_MATCHES)) {
+      vlog_symtab_pop(symtab);
+      match_depth--;
+   }
+
+   vlog_symtab_pop(symtab);
+}
 static vlog_node_t p_expression_of_type(vlog_node_t dt);
 static vlog_node_t arm_type = NULL;   // Type of patterns in a conditional
 static vlog_node_t p_constant_expression(void);
@@ -2271,7 +2284,7 @@ static vlog_node_t p_data_type(void)
             p_struct_union_member(v);
          } while (not_at_token(tRBRACE));
 
-         vlog_symtab_pop(symtab);
+         scope_leave();
 
          consume(tRBRACE);
 
@@ -3214,7 +3227,7 @@ static void p_inline_constraints(vlog_node_t call, vlog_node_t class)
       }
       consume(tRPAREN);
 
-      vlog_symtab_pop(symtab);
+      scope_leave();
       vlog_symtab_push_members(symtab, class, names, nnames);
 
       consume(tLBRACE);
@@ -3318,7 +3331,7 @@ static vlog_node_t p_method_call_rest(vlog_node_t prefix, ident_t id)
       iter_decl = saved_iter;
       iter_index = saved_index;
 
-      vlog_symtab_pop(symtab);
+      scope_leave();
 
       vlog_add_stmt(v, item);
       vlog_add_stmt(v, index);
@@ -3326,7 +3339,7 @@ static vlog_node_t p_method_call_rest(vlog_node_t prefix, ident_t id)
    }
 
    if (class != NULL) {
-      vlog_symtab_pop(symtab);
+      scope_leave();
       local_scope = saved_local;
    }
 
@@ -5222,7 +5235,7 @@ static void p_let_declaration(void)
    vlog_add_stmt(v, p_expression());
    consume(tSEMI);
 
-   vlog_symtab_pop(symtab);
+   scope_leave();
 }
 
 static vlog_node_t p_tf_call(vlog_kind_t kind)
@@ -7963,7 +7976,7 @@ static vlog_node_t p_constraint_foreach(void)
 
    p_constraint_set(v);
 
-   vlog_symtab_pop(symtab);
+   scope_leave();
 
    vlog_set_loc(v, CURRENT_LOC);
    return v;
@@ -9725,7 +9738,7 @@ static vlog_node_t p_seq_block(ident_t id)
          vlog_add_stmt(v, s);
    }
 
-   vlog_symtab_pop(symtab);
+   scope_leave();
 
    consume(tEND);
 
@@ -9783,7 +9796,7 @@ static vlog_node_t p_par_block(ident_t id)
          vlog_add_stmt(v, s);
    }
 
-   vlog_symtab_pop(symtab);
+   scope_leave();
 
    switch (one_of(tJOIN, tJOINNONE, tJOINANY)) {
    case tJOINNONE: vlog_set_subkind(v, V_FORK_JOIN_NONE); break;
@@ -10660,7 +10673,7 @@ static vlog_node_t p_foreach_statement(void)
    vlog_node_t body = p_statement_or_null();
 
    for (int i = 0; i < depth; i++)
-      vlog_symtab_pop(symtab);
+      scope_leave();
 
    if (top == NULL) {
       // Nothing to iterate over or an earlier error
@@ -10795,7 +10808,7 @@ static vlog_node_t p_loop_statement_body(void)
          if (s != NULL)
             vlog_add_stmt(v, s);
 
-         vlog_symtab_pop(symtab);
+         scope_leave();
 
          vlog_set_loc(v, CURRENT_LOC);
          return v;
@@ -11950,7 +11963,7 @@ static vlog_node_t p_rs_code_block(void)
 
    rs_loop_depth = saved_depth;
 
-   vlog_symtab_pop(symtab);
+   scope_leave();
 
    consume(tRBRACE);
 
@@ -12180,7 +12193,7 @@ static void p_rs_production(rs_seq_t *seq)
 
       vlog_symtab_push(symtab, hdr);
       p_tf_port_list(hdr);
-      vlog_symtab_pop(symtab);
+      scope_leave();
 
       consume(tRPAREN);
 
@@ -12213,7 +12226,7 @@ static void p_rs_production(rs_seq_t *seq)
 
    rs_return_name = saved_return;
 
-   vlog_symtab_pop(symtab);
+   scope_leave();
 
    consume(tSEMI);
 }
@@ -14767,7 +14780,7 @@ static void p_extern_subr_body(vlog_node_t tmp)
       vlog_symtab_push(symtab, hdr);
       if (peek() != tRPAREN)
          p_tf_port_list(hdr);
-      vlog_symtab_pop(symtab);
+      scope_leave();
 
       consume(tRPAREN);
 
@@ -14808,10 +14821,10 @@ static void p_extern_subr_body(vlog_node_t tmp)
 
    vlog_clear_flags(proto, VLOG_F_EXTERN);
 
-   vlog_symtab_pop(symtab);
-   vlog_symtab_pop(symtab);
+   scope_leave();
+   scope_leave();
    for (int i = 0; i < depth; i++)
-      vlog_symtab_pop(symtab);
+      scope_leave();
 
    proc_automatic = saved_proc;
    subr_automatic = saved_subr;
@@ -14867,7 +14880,7 @@ static void p_extern_constructor(void)
       vlog_symtab_push(symtab, hdr);
       if (not_at_token(tRPAREN))
          p_class_constructor_arg_list(hdr);
-      vlog_symtab_pop(symtab);
+      scope_leave();
 
       consume(tRPAREN);
 
@@ -14909,10 +14922,10 @@ static void p_extern_constructor(void)
 
    vlog_clear_flags(proto, VLOG_F_EXTERN);
 
-   vlog_symtab_pop(symtab);
-   vlog_symtab_pop(symtab);
+   scope_leave();
+   scope_leave();
    for (int i = 0; i < depth; i++)
-      vlog_symtab_pop(symtab);
+      scope_leave();
 
    proc_automatic = saved_proc;
    subr_automatic = saved_subr;
@@ -14996,7 +15009,7 @@ static void p_task_body_declaration(vlog_node_t task)
       }
    }
 
-   vlog_symtab_pop(symtab);
+   scope_leave();
    param_kind = old_param_kind;
 }
 
@@ -15191,7 +15204,7 @@ static void p_function_body_declaration(vlog_node_t func)
       }
    }
 
-   vlog_symtab_pop(symtab);
+   scope_leave();
    param_kind = old_param_kind;
 }
 
@@ -15426,7 +15439,7 @@ static vlog_node_t p_class_constructor_declaration(bool prototype)
    consume(tSEMI);
 
    if (prototype) {
-      vlog_symtab_pop(symtab);
+      scope_leave();
       vlog_set_flags(v, VLOG_F_EXTERN);
       vlog_set_loc(v, CURRENT_LOC);
       return v;
@@ -15437,7 +15450,7 @@ static vlog_node_t p_class_constructor_declaration(bool prototype)
    if (!defer_subr_body(v, tENDFUNCTION))
       should_not_reach_here();   // Always in a class
 
-   vlog_symtab_pop(symtab);
+   scope_leave();
 
    vlog_set_loc(v, &loc);
    return v;
@@ -17192,8 +17205,8 @@ static void p_extern_constraint(void)
       vlog_clear_flags(proto, VLOG_F_EXTERN);
 
    for (int i = 0; i < depth; i++)
-      vlog_symtab_pop(symtab);
-   vlog_symtab_pop(symtab);
+      scope_leave();
+   scope_leave();
 }
 
 static vlog_node_t p_class_type(void)
@@ -17688,13 +17701,13 @@ static void p_class_body(vlog_node_t v, ident_t name, generic_class_t *g,
    add_pfmt_methods(v);
    add_rand_state(v);
 
-   vlog_symtab_pop(symtab);
+   scope_leave();
 
    for (int i = 0; i < depth; i++)
-      vlog_symtab_pop(symtab);
+      scope_leave();
 
    if (g != NULL)
-      vlog_symtab_pop(symtab);
+      scope_leave();
 
    consume(tENDCLASS);
 
@@ -18507,7 +18520,7 @@ static vlog_node_t replay_default(vlog_node_t generic, generic_class_t *g,
    vlog_node_t result =
       g->params[pos].is_type ? p_data_type() : p_expression();
 
-   vlog_symtab_pop(symtab);
+   scope_leave();
    vlog_symtab_enter(symtab, saved_scope);
 
    state = saved;
@@ -19498,7 +19511,7 @@ static void flush_deferred_bodies(bool end_of_unit)
       // Names that were not found are resolved in the enclosing scopes
       while (vlog_symtab_current(symtab) != saved_scope
              && vlog_symtab_current(symtab) != NULL)
-         vlog_symtab_pop(symtab);
+         scope_leave();
 
       free(d.body.tokens);
    }
@@ -20100,7 +20113,7 @@ static vlog_node_t p_generate_block(void)
       shared_ticks.count = first_tick;
       current_module = saved_scope;
 
-      vlog_symtab_pop(symtab);
+      scope_leave();
 
       consume(tEND);
 
@@ -20421,7 +20434,7 @@ static void p_loop_generate_construct(vlog_node_t parent)
 
    gen_construct = saved_construct;
 
-   vlog_symtab_pop(symtab);
+   scope_leave();
 
    vlog_set_loc(v, CURRENT_LOC);
    vlog_add_stmt(parent, v);
@@ -20953,7 +20966,7 @@ static void p_assertion_item_declaration(vlog_node_t parent)
                   istr(vlog_ident(v)));
    }
 
-   vlog_symtab_pop(symtab);
+   scope_leave();
 
    vlog_set_loc(v, CURRENT_LOC);
    vlog_add_decl(parent, v);
@@ -23162,7 +23175,7 @@ static vlog_node_t p_specify_block(void)
    while (not_at_token(tENDSPECIFY))
       p_specify_item(v);
 
-   vlog_symtab_pop(symtab);
+   scope_leave();
 
    consume(tENDSPECIFY);
 
@@ -25224,7 +25237,7 @@ static vlog_node_t p_module_declaration(void)
    default_clock = saved_clock;
    default_disable = saved_disable;
 
-   vlog_symtab_pop(symtab);
+   scope_leave();
 
    sample_assertions(mod, first_assert);
    module_asserts.count = first_assert;
@@ -25800,7 +25813,7 @@ static vlog_node_t p_udp_declaration(void)
 
    vlog_add_stmt(udp, p_udp_body(has_reg));
 
-   vlog_symtab_pop(symtab);
+   scope_leave();
 
    consume(tENDPRIMITIVE);
 
@@ -25873,7 +25886,7 @@ static vlog_node_t p_package_declaration(void)
 
    current_package = saved_package;
 
-   vlog_symtab_pop(symtab);
+   scope_leave();
 
    consume(tENDPACKAGE);
 
@@ -26201,7 +26214,7 @@ static vlog_node_t p_config_declaration(void)
       consume(tSEMI);
    }
 
-   vlog_symtab_pop(symtab);
+   scope_leave();
 
    consume(tID);   // endconfig
 
@@ -26242,7 +26255,7 @@ static vlog_node_t p_program_declaration(void)
 
    consume(tENDPROGRAM);
 
-   vlog_symtab_pop(symtab);
+   scope_leave();
 
    subr_automatic = saved_subr;
 
@@ -26651,7 +26664,7 @@ static vlog_node_t p_bind_directive(void)
 
    p_module_or_udp_instantiation(v);
 
-   vlog_symtab_pop(symtab);
+   scope_leave();
 
    vlog_set_loc(v, CURRENT_LOC);
    return v;
@@ -26959,7 +26972,7 @@ static vlog_node_t end_of_file(void)
    ACLEAR(pending_binds);
    ACLEAR(pending_bind_scopes);
 
-   vlog_symtab_pop(symtab);
+   scope_leave();
    vlog_symtab_free(symtab);
    symtab = NULL;
    return NULL;

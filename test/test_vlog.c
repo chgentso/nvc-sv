@@ -4231,6 +4231,30 @@ START_TEST(test_crash17)
 }
 END_TEST
 
+START_TEST(test_crash18)
+{
+   // A pattern match in a statement that is not allowed at this level must
+   // not leave the scope of its variables open at the end of the file
+
+   const error_t expect[] = {
+      {  2, "no visible declaration for 'u'" },
+      {  2, "the value matched by a tagged pattern must have a tagged "
+         "union type" },
+      {  2, "unexpected = while parsing hierarchical instance, expecting "
+         "identifier" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/crash18.sv");
+
+   while (vlog_parse() != NULL)
+      ;
+
+   check_expected_errors();
+}
+END_TEST
+
 Suite *get_vlog_tests(void)
 {
    Suite *s = suite_create("vlog");
@@ -4389,6 +4413,7 @@ Suite *get_vlog_tests(void)
    tcase_add_test(tc, test_crash15);
    tcase_add_test(tc, test_crash16);
    tcase_add_test(tc, test_crash17);
+   tcase_add_test(tc, test_crash18);
    suite_add_tcase(s, tc);
 
    return s;

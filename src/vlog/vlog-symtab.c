@@ -277,6 +277,12 @@ void vlog_symtab_resolve_deferred(vlog_symtab_t *st)
    ACLEAR(st->top->deferred);
 }
 
+bool vlog_symtab_top_is(vlog_symtab_t *st, vlog_kind_t kind)
+{
+   assert(st->top != NULL);
+   return st->top->container != NULL && vlog_kind(st->top->container) == kind;
+}
+
 void vlog_symtab_pop(vlog_symtab_t *st)
 {
    assert(st->top != NULL);
