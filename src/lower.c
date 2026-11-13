@@ -6199,7 +6199,9 @@ static void lower_fill_target_parts(lower_unit_t *lu, tree_t target,
 
       const int nassocs = tree_assocs(target);
       for (int i = 0; i < nassocs; i++) {
-         tree_t value = tree_value(tree_assoc(target, i));
+         tree_t assoc = tree_assoc(target, i);
+
+         tree_t value = tree_value(assoc);
 
          part_kind_t newkind;
          if (is_record)
@@ -6429,6 +6431,27 @@ static void lower_var_assign(lower_unit_t *lu, tree_t stmt, gen_stack_t *gs)
       assert(ptr == parts + nparts);
 
       vcode_reg_t rhs = lower_rvalue(lu, value);
+
+      type_t value_type = tree_type(value);
+      if (type_is_record(value_type) && !type_is_unconstrained(value_type)) {
+         switch (tree_kind(value)) {
+         case T_REF:
+         case T_RECORD_REF:
+         case T_ARRAY_REF:
+            {
+               // The value is evaluated before any target is updated so
+               // take a copy as the right hand side may overlap the target
+               vcode_type_t vtype = lower_type(value_type);
+               vcode_type_t vbounds = lower_bounds(value_type);
+               vcode_reg_t tmp = emit_alloc(vtype, vbounds, emit_const(vtype_offset(), 1));
+               lower_copy_record(lu, value_type, tmp, rhs, lower_debug_locus(value));
+               rhs = tmp;
+            }
+            break;
+         default:
+            break;
+         }
+      }
 
       if (type_is_array(type)) {
          vcode_reg_t rhs_len = lower_array_len(lu, tree_type(value), 0, rhs);
