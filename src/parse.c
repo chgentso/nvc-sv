@@ -8730,7 +8730,25 @@ static void p_disconnection_specification(tree_t container)
 
    consume(tDISCONNECT);
 
-   LOCAL_IDENT_LIST ids = p_identifier_list();
+   // The signals named in the specification or, for ALL and OTHERS, those
+   // of the type already declared in this region
+   LOCAL_IDENT_LIST ids = NULL;
+   bool all = false, others = false;
+   switch (peek()) {
+   case tALL:
+      consume(tALL);
+      all = true;
+      break;
+   case tOTHERS:
+      consume(tOTHERS);
+      others = true;
+      break;
+   default:
+      ids = p_identifier_list();
+      break;
+   }
+
+   const loc_t spec_loc = *CURRENT_LOC;
 
    consume(tCOLON);
 
@@ -8742,6 +8760,44 @@ static void p_disconnection_specification(tree_t container)
    tree_t delay = solve_types(nametab, p_expression(), std_time);
 
    consume(tSEMI);
+
+   if (all || others) {
+      const int ndecls = tree_decls(container);
+      for (int i = 0; i < ndecls; i++) {
+         tree_t sig = tree_decl(container, i);
+         if (tree_kind(sig) != T_SIGNAL_DECL || !is_guarded_signal(sig)
+             || !type_eq(tree_type(sig), type))
+            continue;
+
+         bool have = false;
+         for (int j = 0; j < ndecls && !have; j++) {
+            tree_t other = tree_decl(container, j);
+            have = tree_kind(other) == T_DISCONNECT
+               && tree_ident(other) == tree_ident(sig);
+         }
+
+         if (have && others)
+            continue;
+         else if (have)
+            continue;   // An earlier specification takes precedence
+
+         tree_t d = tree_new(T_DISCONNECT);
+         tree_set_loc(d, &spec_loc);
+         tree_set_ident(d, tree_ident(sig));
+         tree_set_type(d, type);
+         tree_set_delay(d, delay);
+         tree_set_ref(d, sig);
+
+         ident_t name = ident_prefix(tree_ident(sig), ident_new("disconnect"),
+                                     '$');
+         insert_name(nametab, d, name);
+
+         tree_add_decl(container, d);
+         sem_check(d, nametab);
+      }
+
+      return;
+   }
 
    for (ident_list_t *it = ids; it != NULL; it = it->next) {
       tree_t d = tree_new(T_DISCONNECT);

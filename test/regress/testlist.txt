@@ -2746,3 +2746,4 @@ svpowneg1 verilog
 svinsidesign1 verilog
 wavevlogport1 wave,verilog
 lintjson1       shell
+guard9          normal
