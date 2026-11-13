@@ -320,7 +320,8 @@ number_t number_new(const char *str, const loc_t *loc)
    while (isspace_iso88591(*p))
       p++;
 
-   if (unsized && (*p == 'x' || *p == 'X' || *p == 'z' || *p == 'Z'))
+   if (unsized && (*p == 'x' || *p == 'X' || *p == 'z' || *p == 'Z'
+                    || *p == '?'))
       result->issigned = true;
 
    if (radix == RADIX_DEC) {
@@ -512,6 +513,7 @@ number_t number_new(const char *str, const loc_t *loc)
             break;
          case 'z':
          case 'Z':
+         case '?':
             bignum_set_abit(result, bit, 0);
             bignum_set_bbit(result, bit, 1);
             break;
