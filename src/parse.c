@@ -7121,7 +7121,15 @@ static void check_attribute_specification(tree_t parent, tree_t t)
    case T_PORT_DECL:
    case T_GENERIC_DECL:
    case T_PARAM_DECL:
-      if (!is_declared_in_interface(parent, decl))
+      if (tree_kind(parent) == T_ARCH
+          && is_declared_in_interface(tree_primary(parent), decl)) {
+         // Not allowed by the LRM but accepted by other tools and used
+         // in widely available libraries
+         warn_at(tree_loc(t), "an attribute specification for %pI should "
+                 "appear in the entity that declares "
+                 "it", tree_ident2(t));
+      }
+      else if (!is_declared_in_interface(parent, decl))
          parse_error(tree_loc(t), "an attribute specification for %pI must "
                      "appear in the declarative part of the unit that "
                      "declares it", tree_ident2(t));

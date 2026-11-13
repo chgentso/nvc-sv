@@ -36,6 +36,8 @@ architecture test of attrspec is
 begin
     blk: block is
         attribute other of test : architecture is 10;  -- Error
+        attribute extra : integer;
+        attribute extra of p : signal is 11;  -- Error
     begin
     end block;
 end architecture;

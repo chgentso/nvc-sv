@@ -4253,15 +4253,17 @@ START_TEST(test_attrspec)
    const error_t expect[] = {
       { 15, "an attribute specification for design unit ATTRSPEC must "
         "appear immediately within its own declarative part" },
-      { 16, "an attribute specification for P must appear in the "
-        "declarative part of the unit that declares it" },
+      { 16, "an attribute specification for P should appear in the "
+        "entity that declares it" },
       { 20, "attribute specification for PIN follows an earlier "
         "specification with entity name list OTHERS" },
       { 35, "the value of the FOREIGN attribute of a subprogram must be "
         "locally static" },
       { 38, "an attribute specification for design unit TEST must appear "
         "immediately within its own declarative part" },
-      { 46, "the value of an attribute of a design unit must be locally "
+      { 40, "an attribute specification for P must appear in the "
+        "declarative part of the unit that declares it" },
+      { 48, "the value of an attribute of a design unit must be locally "
         "static" },
       { -1, NULL }
    };
