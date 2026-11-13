@@ -7080,6 +7080,31 @@ static void p_attribute_specification(tree_t parent)
       tree_set_value(t, value);
       tree_set_type(t, type);
 
+      if (tree_subkind(t) == SPEC_EXACT && tree_has_ref(t)) {
+         // LRM 08 section 7.2: an attribute of an alias of a whole object
+         // is an attribute of the object itself
+         tree_t decl = tree_ref(t);
+         while (tree_kind(decl) == T_ALIAS) {
+            tree_t value = tree_value(decl);
+            if (tree_kind(value) != T_REF || !tree_has_ref(value))
+               break;
+
+            tree_t obj = tree_ref(value);
+            const tree_kind_t okind = tree_kind(obj);
+            if (okind != T_SIGNAL_DECL && okind != T_VAR_DECL
+                && okind != T_CONST_DECL && okind != T_PORT_DECL
+                && okind != T_ALIAS)
+               break;
+
+            decl = obj;
+         }
+
+         if (decl != tree_ref(t)) {
+            tree_set_ref(t, decl);
+            tree_set_ident2(t, tree_ident(decl));
+         }
+      }
+
       check_attribute_specification(parent, t);
 
       insert_name(nametab, t, NULL);
