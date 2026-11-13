@@ -939,6 +939,8 @@ static void vhdl_sym_decl(sym_ctx_t *sc, tree_t d, const char *path)
       break;
    case T_ENUM_LIT:
       kind = "enum-literal";
+      if (tree_has_type(d) && type_has_ident(tree_type(d)))
+         sym_extra_str(sc, "type", sym_simple(type_ident(tree_type(d))));
       break;
    case T_FIELD_DECL:
       kind = "field";

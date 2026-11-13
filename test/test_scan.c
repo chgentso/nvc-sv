@@ -762,6 +762,20 @@ static void scan_symbols_contain(const char *file, const char *const *parts,
    }
 }
 
+START_TEST(test_symbols_enum_literal_type)
+{
+   // The literal of a VHDL enumeration carries the name of its type
+
+   set_standard(STD_08);
+
+   const char *parts[] = {
+      "{\"name\":\"RUN\",\"kind\":\"enum-literal\","
+      "\"container\":\"WORK.FSM1-RTL.ST_T\",\"type\":\"ST_T\",",
+   };
+   scan_symbols_contain(SCAN_FILE("fsm1.vhd"), parts, ARRAY_LEN(parts), true);
+}
+END_TEST
+
 START_TEST(test_symbols_vhdl)
 {
    set_standard(STD_08);
@@ -1079,6 +1093,7 @@ Suite *get_scan_tests(void)
    tcase_add_test(tc, test_m5_vlog_generate);
    tcase_add_test(tc, test_m5_vlog_fields);
    tcase_add_test(tc, test_fsm_option);
+   tcase_add_test(tc, test_symbols_enum_literal_type);
    tcase_add_test(tc, test_fsm_vhdl_enum);
    tcase_add_test(tc, test_fsm_vhdl_record);
    tcase_add_test(tc, test_fsm_vhdl_constants);
