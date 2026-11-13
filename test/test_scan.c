@@ -510,6 +510,20 @@ START_TEST(test_g0_unknown_type_decl)
 }
 END_TEST
 
+START_TEST(test_g0_undefined_macro)
+{
+   // The arguments of a macro which is not defined are skipped without
+   // taking the declaration which follows
+
+   static const char *const parts[] = {
+      "{\"name\":\"seen_after\",\"kind\":\"variable\",\"detail\":\"logic\"",
+      "{\"name\":\"seen_last\",\"kind\":\"variable\",\"detail\":\"logic\"",
+   };
+   scan_symbols_contain(SCAN_FILE("fsm_g0_macro.sv"), parts, ARRAY_LEN(parts),
+                        true);
+}
+END_TEST
+
 START_TEST(test_sv1)
 {
    // Packages, interfaces and modules with the files included found
@@ -1112,6 +1126,8 @@ Suite *get_scan_tests(void)
    tcase_add_test(tc, test_m5_vlog_requires);
    tcase_add_test(tc, test_m5_vlog_generate);
    tcase_add_test(tc, test_m5_vlog_fields);
+   tcase_add_test(tc, test_g0_unknown_type_decl);
+   tcase_add_test(tc, test_g0_undefined_macro);
    tcase_add_test(tc, test_fsm_option);
    tcase_add_test(tc, test_symbols_enum_literal_type);
    tcase_add_test(tc, test_fsm_vhdl_enum);

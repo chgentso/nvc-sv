@@ -23703,6 +23703,30 @@ static void p_parameter_override(vlog_node_t parent)
    consume(tSEMI);
 }
 
+static bool scan_skip_macro_args(void)
+{
+   // The arguments of a macro which is not defined when scanning a file on
+   // its own, such as `FF(q, d, rst): skip them without taking the
+   // declaration which follows
+   if (!lib_scan_active() || peek() != tLPAREN)
+      return false;
+
+   int depth = 0;
+   do {
+      const token_t tok = peek();
+      if (tok == tEOF)
+         break;
+      else if (tok == tLPAREN)
+         depth++;
+      else if (tok == tRPAREN)
+         depth--;
+      consume(tok);
+   } while (depth > 0);
+
+   optional(tSEMI);
+   return true;
+}
+
 static bool scan_unknown_type_declaration(void)
 {
    // When scanning a file on its own the type of a declaration may come
@@ -23748,6 +23772,9 @@ static void p_module_or_generate_item(vlog_node_t mod)
 
    if (optional(tSEMI))
       return;   // Null item
+
+   if (scan_skip_macro_args())
+      return;
 
    if (peek() == tSYSTASK) {
       // Elaboration system task: reported when the simulation starts
@@ -24052,6 +24079,9 @@ static void p_non_port_module_item(vlog_node_t mod)
    //   | module_declaration | interface_declaration | timeunits_declaration
 
    BEGIN("non-port module item");
+
+   if (scan_skip_macro_args())
+      return;
 
    if (peek() == tEXPORT && peek_nth(2) == tSTRING) {
       p_dpi_export(mod);
