@@ -1407,7 +1407,8 @@ static vlog_select_t vlog_lower_param_value(vlog_gen_t *g, vlog_node_t decl)
       value = mir_const_vec(g->mu, t_all, UINT32_MAX, 0);
    }
    else if (vlog_is_fill_literal(vlog_value(decl))
-       && !is_implicit_data_type(vlog_type(decl)))
+            && (!is_implicit_data_type(vlog_type(decl))
+                || vlog_ranges(vlog_type(decl)) > 0))
       value = vlog_lower_with_context(g, vlog_value(decl), ti->type);
    else
       value = vlog_lower_rvalue(g, vlog_value(decl));
