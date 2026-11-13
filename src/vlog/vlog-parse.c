@@ -395,7 +395,28 @@ static bool is_scoped_type_start(void)
                                                      peek_ident_nth(1))))
          pack = package_by_name(peek_ident_nth(1));
       vlog_node_t d = pack ? vlog_scope_member(pack, peek_ident_nth(3)) : NULL;
-      return d != NULL && is_data_type(d);
+      if (d != NULL)
+         return is_data_type(d);
+      else if (pack != NULL)
+         return false;
+
+      // The package is not known, as when scanning a file on its own, so
+      // the dimensions followed by a name make a declaration
+      int m = n + 1;
+      while (peek_nth(m) == tLSQUARE) {
+         int depth = 1;
+         for (m++; depth > 0 && m < TOKENQ_SIZE - 2; m++) {
+            const token_t tok = peek_nth(m);
+            if (tok == tLSQUARE)
+               depth++;
+            else if (tok == tRSQUARE)
+               depth--;
+            else if (tok == tEOF || tok == tSEMI)
+               return false;
+         }
+      }
+
+      return m < TOKENQ_SIZE - 2 && peek_nth(m) == tID;
    }
 
    return n > 1 && (peek_nth(n + 1) == tID || peek_nth(n + 1) == tHASH);
@@ -2456,8 +2477,14 @@ static vlog_node_t p_data_type(void)
 
             if (d != NULL && peek() == tLSQUARE)
                d = p_typedef_dimensions(d);
+            else if (d == NULL) {
+               // The type is not known, as when scanning on its own
+               d = logic_type();
+               while (peek() == tLSQUARE)
+                  vlog_add_range(d, p_packed_dimension());
+            }
 
-            return d ?: logic_type();
+            return d;
          }
 
          ident_t id = p_identifier();

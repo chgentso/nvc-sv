@@ -702,6 +702,23 @@ START_TEST(test_symbols_vlog)
 }
 END_TEST
 
+START_TEST(test_symbols_ports)
+{
+   static const char *const parts[] = {
+      // Ports after one with a type from a package that is not known
+      "{\"name\":\"cfg_i\",\"kind\":\"port\",\"detail\":\"input other_pkg::cfg_t "
+      "[N-1:0]\",\"container\":\"WORK.SM_TOP\",\"direction\":\"input\",\"type\":"
+      "\"other_pkg::cfg_t [N-1:0]\"",
+      "{\"name\":\"rst_ni\",\"kind\":\"port\",\"detail\":\"input logic\",\"container"
+      "\":\"WORK.SM_TOP\",\"direction\":\"input\",\"type\":\"logic\",\"width\":1",
+      "{\"name\":\"data_o\",\"kind\":\"port\",\"detail\":\"output logic [3:0]\"",
+   };
+
+   scan_symbols_contain(SCAN_FILE("symmembers.sv"), parts, ARRAY_LEN(parts),
+                        true);
+}
+END_TEST
+
 START_TEST(test_bigarena)
 {
    // An aggregate too large for the default arena must not be fatal
@@ -863,6 +880,7 @@ Suite *get_scan_tests(void)
    tcase_add_test(tc, test_sv_pending_binds);
    tcase_add_test(tc, test_symbols_vhdl);
    tcase_add_test(tc, test_symbols_vlog);
+   tcase_add_test(tc, test_symbols_ports);
    tcase_add_test(tc, test_bigarena);
    tcase_add_test(tc, test_m5_vlog_requires);
    tcase_add_test(tc, test_m5_vlog_generate);
