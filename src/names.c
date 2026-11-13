@@ -5646,12 +5646,21 @@ static tree_t try_solve_attr_ref(nametab_t *tab, tree_t t)
             // Hack to strip off any WORK. prefix
             id = ident_rfrom(id, '.') ?: id;
 
-            scope_t *s = tab->top_scope;
+            // The specification may be in the current scope or, for a
+            // design unit, in the private scope of the unit
+            scope_t *scopes[2] = { tab->top_scope, NULL };
             if (is_container(decl))
-               s = private_scope_for(tab, decl);
+               scopes[1] = private_scope_for(tab, decl);
 
-            const symbol_t *sym = symbol_for(s, attr);
-            if (sym != NULL) {
+            for (int pass = 0; pass < 2 && a == NULL; pass++) {
+               scope_t *s = scopes[pass];
+               if (s == NULL)
+                  continue;
+
+               const symbol_t *sym = symbol_for(s, attr);
+               if (sym == NULL)
+                  continue;
+
                for (int i = 0; i < sym->ndecls; i++) {
                   const decl_t *dd = get_decl(sym, i);
                   if (dd->visibility != ATTRIBUTE)
