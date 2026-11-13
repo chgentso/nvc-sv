@@ -654,7 +654,9 @@ static void width_cb(vlog_node_t v, void *context)
       break;
    case V_NET_DECL:
    case V_VAR_DECL:
-      if (vlog_has_value(v) && integral_decl(v))
+      // Nets and variables the compiler makes up are not reported
+      if (vlog_has_value(v) && istr(vlog_ident(v))[0] != '$'
+          && integral_decl(v))
          check_width(vlog_loc(v), vlog_width(v), vlog_value(v),
                      vlog_kind(v) == V_NET_DECL
                      ? "continuous assignment" : "initial value");

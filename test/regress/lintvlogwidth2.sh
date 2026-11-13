@@ -23,6 +23,9 @@ grep -q "lintvlogwidth2.sv:10:.*continuous assignment truncates 2 bits to 1 bits
 grep '"message":"parameter value truncates 8 bits to 4 bits' lint | grep -q '"fix":{"title":"Select the low bits","edits":\[{"file":".*","line":3,.*"text":"Q\[3:0\]"'
 grep '"message":"initial value truncates 8 bits to 4 bits' lint | grep -q '"text":"in\[3:0\]"'
 
+# Nothing for the generated declarations
+! grep -q 'lintvlogwidth2.sv:1[3-9]:' compact
+
 # The port connection check still reports
 nvc --std=19 --lint=-width -a $TESTDIR/regress/lintvlogwidth2.sv 2>quiet || true
 ! grep -q 'lint:' quiet

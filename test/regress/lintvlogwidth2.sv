@@ -11,3 +11,10 @@ module lintvlogwidth2(input logic [7:0] in, output logic [3:0] o);
   wire [1:0] d = in[3:0];
   assign o = b;
 endmodule
+
+// The net made for the expression of an edge event is not reported
+module lintvlogwidth2_edge(input logic clk);
+  logic [3:0] cnt;
+  logic odd;
+  always @(posedge (cnt + 1)) odd <= !odd;
+endmodule
