@@ -4281,7 +4281,8 @@ static mir_value_t vlog_lower_vector_binary(vlog_gen_t *g, vlog_binary_t binop,
    }
 
    // Division by zero is unknown even if both operands are two-state
-   const bool may_be_unknown = binop == V_BINARY_DIVIDE || binop == V_BINARY_MOD;
+   const bool may_be_unknown = binop == V_BINARY_DIVIDE || binop == V_BINARY_MOD
+      || (is_exp && rsigned);   // Zero to a negative power
 
    mir_type_t type;
    if (lclass == MIR_TYPE_VEC4 || rclass == MIR_TYPE_VEC4 || may_be_unknown)
@@ -5079,18 +5080,28 @@ static void vlog_spill_index(vlog_gen_t *g, vlog_node_t expr)
    g->nspills++;
 }
 
+static void vlog_call_cb(vlog_node_t v, void *ctx)
+{
+   switch (vlog_kind(v)) {
+   case V_USER_FCALL:
+   case V_METHOD_CALL:
+   case V_PREFIX:
+   case V_POSTFIX:
+   case V_OP_ASSIGN:
+      *(bool *)ctx = true;
+      break;
+   default:
+      break;
+   }
+}
+
 static bool vlog_needs_spill(vlog_node_t expr)
 {
-   switch (vlog_kind(expr)) {
-   case V_NUMBER:
-   case V_STRING:
-   case V_REAL:
-   case V_REF:
-      return false;
-   default:
-      return vlog_has_side_effects(expr) && !vlog_is_string(expr)
-         && !vlog_is_real(expr);
-   }
+   // A call or an assignment in the index must be evaluated once
+
+   bool found = false;
+   vlog_visit(expr, vlog_call_cb, &found);
+   return found && !vlog_is_string(expr) && !vlog_is_real(expr);
 }
 
 static void vlog_spill_target(vlog_gen_t *g, vlog_node_t target)
