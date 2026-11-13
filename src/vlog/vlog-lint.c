@@ -560,6 +560,8 @@ static void width_fix(diag_t *d, vlog_node_t value, int lw)
    case V_VAR_DECL:
    case V_NET_DECL:
    case V_PORT_DECL:
+   case V_PARAM_DECL:
+   case V_LOCALPARAM:
       break;
    default:
       return;
@@ -581,10 +583,9 @@ static void width_fix(diag_t *d, vlog_node_t value, int lw)
    diag_fix(d, vlog_loc(value), text, "Select the low bits");
 }
 
-static void check_assign_width(vlog_node_t target, vlog_node_t value,
-                               const char *what)
+static void check_width(const loc_t *tloc, int lw, vlog_node_t value,
+                        const char *what)
 {
-   const int lw = target_width(target);
    if (lw <= 0)
       return;
 
@@ -593,7 +594,7 @@ static void check_assign_width(vlog_node_t target, vlog_node_t value,
       return;
 
    const loc_t *loc = vlog_loc(value);
-   if (lint_suppressed(vlog_loc(target), LINT_WIDTH))
+   if (lint_suppressed(tloc, LINT_WIDTH))
       return;
 
    diag_t *d = lint_diag(loc, LINT_WIDTH);
@@ -603,6 +604,41 @@ static void check_assign_width(vlog_node_t target, vlog_node_t value,
    diag_printf(d, "%s truncates %d bits to %d bits", what, rw, lw);
    width_fix(d, value, lw);
    diag_emit(d);
+}
+
+static void check_assign_width(vlog_node_t target, vlog_node_t value,
+                               const char *what)
+{
+   check_width(vlog_loc(target), target_width(target), value, what);
+}
+
+static int param_width(vlog_node_t decl)
+{
+   // Only a parameter with an explicit integral type has a known width
+   if (!vlog_has_type(decl) || vlog_ranges(decl) > 0)
+      return -1;
+
+   vlog_node_t type = vlog_type(decl);
+   if (vlog_kind(type) != V_DATA_TYPE || vlog_has_type(type))
+      return -1;
+
+   switch (vlog_subkind(type)) {
+   case DT_IMPLICIT:
+      if (vlog_ranges(type) == 0)
+         return -1;
+      // Fall-through
+   case DT_LOGIC:
+   case DT_INTEGER:
+   case DT_BYTE:
+   case DT_SHORTINT:
+   case DT_INT:
+   case DT_LONGINT:
+   case DT_TIME:
+   case DT_BIT:
+      return vlog_size(type);
+   default:
+      return -1;
+   }
 }
 
 static void width_cb(vlog_node_t v, void *context)
@@ -615,6 +651,19 @@ static void width_cb(vlog_node_t v, void *context)
    case V_ASSIGN:
       check_assign_width(vlog_target(v), vlog_value(v),
                          "continuous assignment");
+      break;
+   case V_NET_DECL:
+   case V_VAR_DECL:
+      if (vlog_has_value(v) && integral_decl(v))
+         check_width(vlog_loc(v), vlog_width(v), vlog_value(v),
+                     vlog_kind(v) == V_NET_DECL
+                     ? "continuous assignment" : "initial value");
+      break;
+   case V_PARAM_DECL:
+   case V_LOCALPARAM:
+      if (vlog_has_value(v))
+         check_width(vlog_loc(v), param_width(v), vlog_value(v),
+                     "parameter value");
       break;
    default:
       break;

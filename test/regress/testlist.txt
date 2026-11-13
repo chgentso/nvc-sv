@@ -2763,3 +2763,4 @@ lintvlogfix2 shell
 lintvlogrules1 shell
 lintvlogrules2 shell
 lintvlogrules3 shell
+lintvlogwidth2 shell
