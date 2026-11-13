@@ -356,6 +356,11 @@ removes all rules so far and a name preceded by a minus sign removes that
 rule.  A list that starts with a removal starts from all the rules.  The
 default when no list is given is
 .Cm all .
+The list
+.Cm list
+prints the available rules, one on each line with tab separated fields: the
+name, the languages, the phase at which it is checked (analysis or
+elaboration), whether it is on by default and a description, and exits.
 The rules are:
 .Bl -tag -width Ds
 .It Cm unused
@@ -443,10 +448,44 @@ Specify exactly the location of the logical library
 .Ar name .
 Libraries mapped in this way will not use the normal search path.
 .\" --messages
-.It Fl \-messages Ns = Ns Bo Cm full Ns | Ns Cm compact Bc
+.It Fl \-messages Ns = Ns Bo Cm full Ns | Ns Cm compact Ns | Ns Cm json Bc
 Select the format used for printing error and informational messages.
 The default full message format is designed for readability whereas the
 compact messages can be easily parsed by tools.
+With
+.Cm json
+each message of the analysis and elaboration phases is one JSON object on
+a line of standard error with the members
+.Ql level
+(note, warning, error, failure or fatal),
+.Ql message ,
+.Ql rule
+(only for messages from
+.Fl \-lint ,
+which then have no
+.Ql [lint:RULE]
+suffix),
+.Ql file ,
+.Ql line ,
+.Ql col ,
+.Ql end_line
+and
+.Ql end_col
+(one based, columns count bytes and the end column is exclusive),
+.Ql related
+(an array of objects with a location and a
+.Ql message
+for the hints that have a location) and optionally
+.Ql fix
+with a
+.Ql title
+and an array of
+.Ql edits
+each with a location and the replacement
+.Ql text .
+Hints without a location are appended to the message after a newline.
+Readers should ignore members they do not know.  Messages from the
+simulation, such as those from assertions, are printed in the full format.
 .\" --seed
 .It Fl \-seed Ns = Ns Ar N
 Seed for random number generation.  Affects the

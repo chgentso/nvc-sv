@@ -105,6 +105,16 @@ void diag_show_source(diag_t *d, bool show);
 void diag_emit(diag_t *d);
 void diag_suppress(diag_t *d, bool suppress);
 
+// Name the lint rule that produced the diagnostic: shown as a suffix of
+// the text, or as the "rule" field with --messages=json
+void diag_rule(diag_t *d, const char *rule);
+
+// Offer a fix for the diagnostic: replace the source text at LOC with
+// REPLACEMENT.  Each diagnostic has at most one fix whose title is that of
+// the first call and whose edits must not overlap.
+void diag_fix(diag_t *d, const loc_t *loc, const char *replacement,
+              const char *title);
+
 // While the scan filter is on, warnings and errors are counted but not
 // shown unless the creator calls diag_scan_visible: only genuine syntax
 // errors are reported when scanning files whose dependencies are missing
@@ -135,6 +145,9 @@ const char *diag_get_hint(diag_t *d, int nth);
 const char *diag_get_trace(diag_t *d, int nth);
 const loc_t *diag_get_loc(diag_t *d);
 int diag_hints(diag_t *d);
+const char *diag_get_rule(diag_t *d);
+const char *diag_get_fix_title(diag_t *d);
+int diag_edits(diag_t *d);
 int diag_traces(diag_t *d);
 
 #endif  // _DIAG_H

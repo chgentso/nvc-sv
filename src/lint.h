@@ -44,6 +44,13 @@ bool lint_suppressed(const loc_t *loc, lint_rule_t rule);
 // declarations the compiler makes up
 bool lint_name_at(const loc_t *loc, const char *name);
 
+// Print the available rules, one per line, for --lint=list
+void lint_list_rules(void);
+
+// A warning tagged with the rule name for the caller to add hints and
+// fixes to and emit, or NULL if the rule is disabled or suppressed
+diag_t *lint_diag(const loc_t *loc, lint_rule_t rule);
+
 // Emit a warning tagged with the rule name unless the rule is disabled or
 // suppressed by a comment at the location
 void lint_warn(const loc_t *loc, lint_rule_t rule, const char *fmt, ...)

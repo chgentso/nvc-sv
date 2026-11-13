@@ -87,11 +87,21 @@ typedef struct {
 
 typedef A(diag_hint_t) hint_list_t;
 
+typedef struct {
+   loc_t  loc;
+   char  *text;
+} diag_edit_t;
+
+typedef A(diag_edit_t) edit_list_t;
+
 struct _diag {
    text_buf_t   *msg;
    diag_level_t  level;
    hint_list_t   hints;
    hint_list_t   trace;
+   edit_list_t   edits;
+   char         *rule;
+   char         *fix_title;
    ostream_t    *ostream;
    bool          source;
    bool          suppress;
@@ -560,6 +570,44 @@ diag_t *diag_new(diag_level_t level, const loc_t *loc)
    }
 
    return d;
+}
+
+void diag_rule(diag_t *d, const char *rule)
+{
+   free(d->rule);
+   d->rule = rule != NULL ? xstrdup(rule) : NULL;
+}
+
+const char *diag_get_rule(diag_t *d)
+{
+   return d->rule;
+}
+
+void diag_fix(diag_t *d, const loc_t *loc, const char *replacement,
+              const char *title)
+{
+   // Replace the text at LOC with REPLACEMENT as one edit of the single
+   // fix offered for the diagnostic: the title is that of the first call
+   // and edits must not overlap
+
+   if (loc_invalid_p(loc))
+      return;
+
+   diag_edit_t e = { .loc = *loc, .text = xstrdup(replacement ?: "") };
+   APUSH(d->edits, e);
+
+   if (d->fix_title == NULL && title != NULL)
+      d->fix_title = xstrdup(title);
+}
+
+int diag_edits(diag_t *d)
+{
+   return d->edits.count;
+}
+
+const char *diag_get_fix_title(diag_t *d)
+{
+   return d->fix_title;
 }
 
 void diag_clear(diag_t *d)
@@ -1050,6 +1098,155 @@ static void diag_format_compact(diag_t *d, ostream_t *os)
    ostream_putc(os, '\n');
 }
 
+static void json_string(text_buf_t *tb, const char *str, size_t len,
+                        bool latin1)
+{
+   tb_append(tb, '"');
+
+   for (const unsigned char *p = (const unsigned char *)str;
+        p < (const unsigned char *)str + len; p++) {
+      switch (*p) {
+      case '"':  tb_cat(tb, "\\\""); break;
+      case '\\': tb_cat(tb, "\\\\"); break;
+      case '\n': tb_cat(tb, "\\n"); break;
+      case '\r': tb_cat(tb, "\\r"); break;
+      case '\t': tb_cat(tb, "\\t"); break;
+      default:
+         if (*p < 0x20 || *p == 0x7f)
+            tb_printf(tb, "\\u%04x", *p);
+         else if (*p >= 0x80 && latin1) {
+            // Convert the ISO-8859-1 internal encoding to UTF-8
+            tb_append(tb, 0xc2 + (*p > 0xbf));
+            tb_append(tb, (*p & 0x3f) + 0x80);
+         }
+         else
+            tb_append(tb, *p);
+      }
+   }
+
+   tb_append(tb, '"');
+}
+
+static void json_loc(text_buf_t *tb, const loc_t *loc)
+{
+   // Lines and columns are one-based, columns are in bytes and the end
+   // column is exclusive
+
+   loc_file_t *file_data = loc_file_data(loc);
+
+   tb_cat(tb, "\"file\":");
+   json_string(tb, file_data->name_str, strlen(file_data->name_str), false);
+
+   const unsigned line = loc->first_line;
+   const unsigned col = loc->first_column + 1;
+
+   unsigned end_line = line, end_col = col + 1;
+   if (loc->line_delta == 0 && loc->column_delta != DELTA_INVALID)
+      end_col = col + loc->column_delta + 1;
+   else if (loc->line_delta != DELTA_INVALID && loc->line_delta > 0) {
+      // The end column of a location spanning several lines is not
+      // reliable so use the end of the last line
+      end_line = line + loc->line_delta;
+
+      loc_t last = *loc;
+      last.first_line = end_line;
+      last.first_column = 0;
+      last.line_delta = 0;
+      const char *src = loc_get_source(&last);
+      if (src != NULL) {
+         const char *eol = src;
+         while (*eol != '\0' && *eol != '\n')
+            eol++;
+         end_col = (eol - src) + 1;
+      }
+      else
+         end_col = 2;
+   }
+
+   tb_printf(tb, ",\"line\":%u,\"col\":%u,\"end_line\":%u,\"end_col\":%u",
+             line, col, end_line, end_col);
+}
+
+static void diag_format_json(diag_t *d, ostream_t *os)
+{
+   LOCAL_TEXT_BUF tb = tb_new();
+
+   const char *level = "note";
+   switch (d->level) {
+   case DIAG_DEBUG:   level = "debug"; break;
+   case DIAG_NOTE:    level = "note"; break;
+   case DIAG_WARN:    level = "warning"; break;
+   case DIAG_ERROR:   level = "error"; break;
+   case DIAG_FAILURE: level = "failure"; break;
+   case DIAG_FATAL:   level = "fatal"; break;
+   }
+
+   tb_printf(tb, "{\"level\":\"%s\",\"message\":", level);
+
+   // Hints without a location are part of the message
+   LOCAL_TEXT_BUF msg = tb_new();
+   tb_catn(msg, tb_get(d->msg), tb_len(d->msg));
+   for (int i = 0; i < d->hints.count; i++) {
+      const diag_hint_t *h = &(d->hints.items[i]);
+      if (h->text != NULL && loc_invalid_p(&(h->loc)))
+         tb_printf(msg, "\n%s", h->text);
+   }
+
+   json_string(tb, tb_get(msg), tb_len(msg), true);
+
+   if (d->rule != NULL) {
+      tb_cat(tb, ",\"rule\":");
+      json_string(tb, d->rule, strlen(d->rule), false);
+   }
+
+   const loc_t *primary = NULL;
+   if (d->hints.count > 0 && !loc_invalid_p(&(d->hints.items[0].loc)))
+      primary = &(d->hints.items[0].loc);
+
+   if (primary != NULL) {
+      tb_append(tb, ',');
+      json_loc(tb, primary);
+   }
+
+   bool first = true;
+   for (int i = 0; i < d->hints.count; i++) {
+      const diag_hint_t *h = &(d->hints.items[i]);
+      if (h->text == NULL || loc_invalid_p(&(h->loc)))
+         continue;
+
+      tb_cat(tb, first ? ",\"related\":[{" : ",{");
+      first = false;
+      json_loc(tb, &(h->loc));
+      tb_cat(tb, ",\"message\":");
+      json_string(tb, h->text, strlen(h->text), true);
+      tb_append(tb, '}');
+   }
+
+   if (!first)
+      tb_append(tb, ']');
+
+   if (d->edits.count > 0) {
+      tb_cat(tb, ",\"fix\":{\"title\":");
+      const char *title = d->fix_title ?: "Fix";
+      json_string(tb, title, strlen(title), true);
+      tb_cat(tb, ",\"edits\":[");
+      for (int i = 0; i < d->edits.count; i++) {
+         const diag_edit_t *e = &(d->edits.items[i]);
+         if (i > 0)
+            tb_append(tb, ',');
+         tb_append(tb, '{');
+         json_loc(tb, &(e->loc));
+         tb_cat(tb, ",\"text\":");
+         json_string(tb, e->text, strlen(e->text), true);
+         tb_append(tb, '}');
+      }
+      tb_cat(tb, "]}");
+   }
+
+   tb_cat(tb, "}\n");
+   ostream_write(os, tb_get(tb), tb_len(tb));
+}
+
 static inline bool diag_has_message(diag_t *d)
 {
    return tb_len(d->msg) > 0;
@@ -1088,6 +1285,11 @@ static void diag_format_full(diag_t *d, ostream_t *os)
 
 void diag_emit(diag_t *d)
 {
+   // The rule is part of the text unless the message style carries it
+   // as a separate field
+   if (d->rule != NULL && get_message_style() != MESSAGE_JSON)
+      tb_printf(d->msg, " [lint:%s]", d->rule);
+
    if (d->suppress)
       goto cleanup;
    else if (d->quiet) {
@@ -1110,6 +1312,8 @@ void diag_emit(diag_t *d)
 
       if (get_message_style() == MESSAGE_COMPACT)
          diag_format_compact(d, d->ostream);
+      else if (get_message_style() == MESSAGE_JSON)
+         diag_format_json(d, d->ostream);
       else
          diag_format_full(d, d->ostream);
 
@@ -1132,6 +1336,13 @@ void diag_emit(diag_t *d)
    for (int i = 0; i < d->trace.count; i++)
       free(d->trace.items[i].text);
    ACLEAR(d->trace);
+
+   for (int i = 0; i < d->edits.count; i++)
+      free(d->edits.items[i].text);
+   ACLEAR(d->edits);
+
+   free(d->rule);
+   free(d->fix_title);
 
    tb_free(d->msg);
    free(d);

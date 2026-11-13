@@ -1104,6 +1104,10 @@ static void enable_ieee_warnings_cb(rt_model_t *m, void *ctx)
 
 static int run_cmd(int argc, char **argv, cmd_state_t *state)
 {
+   // Reports from the simulation keep their text form
+   if (get_message_style() == MESSAGE_JSON)
+      set_message_style(MESSAGE_FULL);
+
    static struct option long_options[] = {
       { "trace",         no_argument,       0, 't' },
       { "profile",       no_argument,       0, 'p' },   // DEPRECATED 1.14
@@ -2584,14 +2588,16 @@ static void usage(void)
            { "--ignore-time", "Skip source file timestamp check" },
            { "--lint[=RULES]",
              "Warn about suspicious code: RULES is a list of unused, "
-             "undriven, width, latch, all, none or -RULE to remove one" },
+             "undriven, width, latch, all, none or -RULE to remove one, "
+             "or list to show the available rules" },
            { "--load=PLUGIN", "Load VHPI plugin at startup" },
            { "--sv-lib=LIB", "Load shared library with DPI-C functions" },
            { "-L PATH", "Add PATH to library search paths" },
            { "-M SIZE", "Limit design unit heap space to SIZE bytes" },
            { "--map=LIB:PATH", "Map library LIB to PATH" },
-           { "--messages={full,compact}",
-             "Diagnostic message style, compact is less verbose" },
+           { "--messages={full,compact,json}",
+             "Diagnostic message style, compact is less verbose and json "
+             "gives one object per line" },
            { "--seed=N", "Seed for random number generation" },
            { "--std={1993,..,2019}", "VHDL standard revision to use" },
            { "--stderr={note,warning,error,failure,none}",
@@ -2817,8 +2823,11 @@ static message_style_t parse_message_style(const char *str)
       return MESSAGE_FULL;
    else if (strcmp(optarg, "compact") == 0)
       return MESSAGE_COMPACT;
+   else if (strcmp(optarg, "json") == 0)
+      return MESSAGE_JSON;
 
-   fatal("invalid message style '%s' (allowed are 'full' and 'compact')", str);
+   fatal("invalid message style '%s' (allowed are 'full', 'compact' and "
+         "'json')", str);
 }
 
 static size_t parse_size(const char *str)

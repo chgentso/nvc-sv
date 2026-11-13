@@ -1482,7 +1482,7 @@ void set_message_style(message_style_t style)
 {
    message_style = style;
 
-   if (style == MESSAGE_COMPACT)
+   if (style != MESSAGE_FULL)
       want_color = false;
 }
 

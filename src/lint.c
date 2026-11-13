@@ -43,14 +43,32 @@ static hset_t      *hier_names = NULL;
 static hset_t      *visited = NULL;
 
 static const struct {
-   const char *name;
-   lint_rule_t rule;
+   const char  *name;
+   lint_rule_t  rule;
+   const char  *languages;   // vhdl, verilog or both
+   const char  *phase;       // analysis or elaboration
+   const char  *description;
 } rule_names[] = {
-   { "unused",   LINT_UNUSED },
-   { "undriven", LINT_UNDRIVEN },
-   { "width",    LINT_WIDTH },
-   { "latch",    LINT_LATCH },
+   { "unused",   LINT_UNUSED,   "vhdl,verilog", "elaboration",
+     "Declaration that is never read" },
+   { "undriven", LINT_UNDRIVEN, "vhdl,verilog", "elaboration",
+     "Signal or variable that is read but never assigned" },
+   { "width",    LINT_WIDTH,    "verilog",      "analysis",
+     "Assignment or connection that truncates a value" },
+   { "latch",    LINT_LATCH,    "vhdl,verilog", "analysis",
+     "Combinational process that infers a latch" },
 };
+
+void lint_list_rules(void)
+{
+   // One line per rule: name, languages, phase, default and description
+   // separated by tabs
+
+   for (int i = 0; i < ARRAY_LEN(rule_names); i++)
+      printf("%s\t%s\t%s\toff\t%s\n", rule_names[i].name,
+             rule_names[i].languages, rule_names[i].phase,
+             rule_names[i].description);
+}
 
 static const char *rule_name(lint_rule_t rule)
 {
@@ -85,7 +103,11 @@ void lint_parse_option(const char *arg)
    int mask = 0;
    bool first = true;
 
-   if (arg == NULL || *arg == '\0')
+   if (arg != NULL && strcmp(arg, "list") == 0) {
+      lint_list_rules();
+      exit(EXIT_SUCCESS);
+   }
+   else if (arg == NULL || *arg == '\0')
       mask = LINT_ALL;
    else {
       for (const char *p = arg; *p != '\0'; first = false) {
@@ -208,19 +230,27 @@ bool lint_name_at(const loc_t *loc, const char *name)
    return strncasecmp(line + loc->first_column, name, len) == 0;
 }
 
-void lint_warn(const loc_t *loc, lint_rule_t rule, const char *fmt, ...)
+diag_t *lint_diag(const loc_t *loc, lint_rule_t rule)
 {
    if (!lint_enabled(rule) || lint_suppressed(loc, rule))
-      return;
+      return NULL;
 
    diag_t *d = diag_new(DIAG_WARN, loc);
+   diag_rule(d, rule_name(rule));
+   return d;
+}
+
+void lint_warn(const loc_t *loc, lint_rule_t rule, const char *fmt, ...)
+{
+   diag_t *d = lint_diag(loc, rule);
+   if (d == NULL)
+      return;
 
    va_list ap;
    va_start(ap, fmt);
    diag_vprintf(d, fmt, ap);
    va_end(ap);
 
-   diag_printf(d, " [lint:%s]", rule_name(rule));
    diag_emit(d);
 }
 
@@ -274,8 +304,8 @@ void lint_flush(void)
          ? "%s '%.*s' is never read" : "%s '%.*s' is never assigned";
 
       diag_t *diag = diag_new(DIAG_WARN, &d->loc);
+      diag_rule(diag, rule_name(d->rule));
       diag_printf(diag, msg, d->what, len, str);
-      diag_printf(diag, " [lint:%s]", rule_name(d->rule));
       diag_emit(diag);
    }
 

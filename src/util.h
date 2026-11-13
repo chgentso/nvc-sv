@@ -339,7 +339,8 @@ void _local_free(void *ptr);
 
 typedef enum {
    MESSAGE_FULL,
-   MESSAGE_COMPACT
+   MESSAGE_COMPACT,
+   MESSAGE_JSON
 } message_style_t;
 
 void set_message_style(message_style_t style);
