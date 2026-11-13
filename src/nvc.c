@@ -233,9 +233,14 @@ static void analyse_file(const char *file, cmd_state_t *state)
 
          lib_t work = lib_work();
          vlog_node_t module;
-         int base_errors = 0, base_syntax = 0;
-         while (base_errors = error_count(),
-                base_syntax = lint_syntax_error_count(),
+         int base_errors = 0;
+         unsigned base_all = 0;
+
+         // Errors from the preprocessor leave a module that looks correct
+         // to the parser but cannot be checked
+         const bool pp_errors = opt_get_int(OPT_LINT) && lint_error_count() > 0;
+
+         while (base_errors = error_count(), base_all = lint_error_count(),
                 (module = vlog_parse())) {
             if (error_count() == 0) {
                vlog_check(module);
@@ -254,8 +259,8 @@ static void analyse_file(const char *file, cmd_state_t *state)
             else if (opt_get_int(OPT_LINT)) {
                // With errors in the file the rest of the module is still
                // checked for what they do not touch.  Nothing is stored.
-               if (error_count() == base_errors
-                   && lint_syntax_error_count() == base_syntax) {
+               if (!pp_errors && error_count() == base_errors
+                   && lint_error_count() == base_all) {
                   vlog_check(module);
 
                   if (error_count() == base_errors)

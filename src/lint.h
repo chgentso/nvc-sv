@@ -93,6 +93,9 @@ bool lint_span_has_syntax_error(const loc_t *span);
 // reported because the parser was recovering
 unsigned lint_syntax_error_count(void);
 
+// All the errors seen in the file so far, including those that were muted
+unsigned lint_error_count(void);
+
 // The unit has a syntax error.  A unit is linted as soon as it is parsed, so
 // the errors seen at or after the line where it starts are its own: its
 // location is not used for its end.

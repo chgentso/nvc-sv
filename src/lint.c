@@ -285,6 +285,11 @@ unsigned lint_syntax_error_count(void)
    return syntax_errors.count;
 }
 
+unsigned lint_error_count(void)
+{
+   return errors.count + syntax_errors.count + (unlocated_error ? 1 : 0);
+}
+
 bool lint_unit_has_syntax_error(const loc_t *unit)
 {
    if (unlocated_error || loc_invalid_p(unit))

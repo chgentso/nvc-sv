@@ -2769,3 +2769,4 @@ linterr2 shell
 linterr3 shell
 linterr4 shell
 linterr5 shell
+linterr6 shell
