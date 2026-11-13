@@ -106,14 +106,70 @@ static void target_decls(tree_t target, assigned_list_t *set, const loc_t *loc)
    }
 }
 
+static bool is_static_condition(tree_t e)
+{
+   // True if the value depends only on generics and constants so that the
+   // same branch is taken for the whole life of the process
+
+   switch (tree_kind(e)) {
+   case T_LITERAL:
+   case T_STRING:
+      return true;
+
+   case T_REF:
+      if (!tree_has_ref(e))
+         return false;
+
+      switch (tree_kind(tree_ref(e))) {
+      case T_GENERIC_DECL:
+      case T_CONST_DECL:
+      case T_ENUM_LIT:
+      case T_UNIT_DECL:
+         return true;
+      default:
+         return false;
+      }
+
+   case T_FCALL:
+      {
+         const int nparams = tree_params(e);
+         for (int i = 0; i < nparams; i++) {
+            if (!is_static_condition(tree_value(tree_param(e, i))))
+               return false;
+         }
+         return true;
+      }
+
+   case T_QUALIFIED:
+   case T_TYPE_CONV:
+   case T_RECORD_REF:
+      return is_static_condition(tree_value(e));
+
+   case T_ARRAY_REF:
+      {
+         if (!is_static_condition(tree_value(e)))
+            return false;
+         const int nparams = tree_params(e);
+         for (int i = 0; i < nparams; i++) {
+            if (!is_static_condition(tree_value(tree_param(e, i))))
+               return false;
+         }
+         return true;
+      }
+
+   default:
+      return false;
+   }
+}
+
 static void walk_stmts(tree_t parent, assigned_list_t *def, latch_ctx_t *ctx);
 
 static void walk_branches(tree_t v, assigned_list_t *def, latch_ctx_t *ctx,
                           bool complete)
 {
    // Statements assigned on every branch are assigned on the whole
-   assigned_list_t all = AINIT;
-   bool first = true;
+   assigned_list_t all = AINIT, any = AINIT;
+   bool first = true, is_static = false;
 
    const int nbranches = tree_kind(v) == T_IF || tree_kind(v) == T_COND_ASSIGN
       ? tree_conds(v) : tree_stmts(v);
@@ -123,7 +179,11 @@ static void walk_branches(tree_t v, assigned_list_t *def, latch_ctx_t *ctx,
       case T_IF:
       case T_COND_ASSIGN:
          b = tree_cond(v, i);
-         complete |= !tree_has_value(b);
+         // A branch with a static condition is always or never taken
+         // so the signals assigned in it are not latches
+         if (i == 0 && tree_has_value(b) && is_static_condition(tree_value(b)))
+            is_static = true;
+         complete |= !tree_has_value(b) || is_static;
          break;
       default:
          b = tree_stmt(v, i);
@@ -132,6 +192,8 @@ static void walk_branches(tree_t v, assigned_list_t *def, latch_ctx_t *ctx,
 
       assigned_list_t branch = AINIT;
       walk_stmts(b, &branch, ctx);
+
+      set_union(&any, &branch);
 
       if (first)
          set_union(&all, &branch);
@@ -142,10 +204,16 @@ static void walk_branches(tree_t v, assigned_list_t *def, latch_ctx_t *ctx,
       ACLEAR(branch);
    }
 
-   if (complete)
+   if (is_static) {
+      // Only one branch is ever taken so a signal assigned in any of
+      // them is not a latch
+      set_union(def, &any);
+   }
+   else if (complete)
       set_union(def, &all);
 
    ACLEAR(all);
+   ACLEAR(any);
 }
 
 static void walk_stmt(tree_t s, assigned_list_t *def, latch_ctx_t *ctx)
@@ -401,6 +469,22 @@ static void signal_cb(tree_t t, void *context)
       lint_declaration(loc, LINT_UNDRIVEN, tree_ident(t), "signal");
 }
 
+static void attr_spec_cb(tree_t t, void *context)
+{
+   use_ctx_t *ctx = context;
+
+   // A signal with an attribute specification such as keep or dont_touch
+   // is deliberately left in the design
+   if (tree_subkind(t) != SPEC_EXACT || !tree_has_ref(t))
+      return;
+
+   tree_t decl = tree_ref(t);
+   if (tree_kind(decl) == T_SIGNAL_DECL) {
+      const uintptr_t old = (uintptr_t)hash_get(ctx->uses, decl);
+      hash_put(ctx->uses, decl, (void *)(old | USE_READ | USE_WRITTEN));
+   }
+}
+
 void vhdl_lint(tree_t unit)
 {
    if (tree_kind(unit) != T_ARCH)
@@ -417,6 +501,7 @@ void vhdl_lint(tree_t unit)
 
       tree_visit(unit, lvalue_cb, &ctx);
       tree_visit_only(unit, ref_cb, &ctx, T_REF);
+      tree_visit_only(unit, attr_spec_cb, &ctx, T_ATTR_SPEC);
       tree_visit_only(unit, signal_cb, &ctx, T_SIGNAL_DECL);
 
       hash_free(ctx.lvalues);

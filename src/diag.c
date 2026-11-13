@@ -101,6 +101,7 @@ struct _diag {
    hint_list_t   trace;
    edit_list_t   edits;
    char         *rule;
+   bool          rule_shown;
    char         *fix_title;
    ostream_t    *ostream;
    bool          source;
@@ -1287,8 +1288,11 @@ void diag_emit(diag_t *d)
 {
    // The rule is part of the text unless the message style carries it
    // as a separate field
-   if (d->rule != NULL && get_message_style() != MESSAGE_JSON)
+   if (d->rule != NULL && !d->rule_shown
+       && get_message_style() != MESSAGE_JSON) {
       tb_printf(d->msg, " [lint:%s]", d->rule);
+      d->rule_shown = true;
+   }
 
    if (d->suppress)
       goto cleanup;

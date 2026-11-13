@@ -232,6 +232,45 @@ START_TEST(test_unused_vhdl)
 }
 END_TEST
 
+START_TEST(test_latch_static)
+{
+   const error_t expect[] = {
+      { 37, "latch inferred for signal S4: not assigned on every path "
+        "through this process [lint:latch]" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   set_standard(STD_08);
+   lint_parse_option("latch");
+
+   input_from_file(TESTDIR "/lint/latch2.vhd");
+
+   analyse_vhdl();
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_unused_attribute)
+{
+   const error_t expect[] = {
+      { 10, "signal 'S_UNUSED' is never read [lint:unused]" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   set_standard(STD_08);
+   lint_parse_option("unused,undriven");
+
+   input_from_file(TESTDIR "/lint/unused2.vhd");
+
+   analyse_vhdl();
+
+   check_expected_errors();
+}
+END_TEST
+
 Suite *get_lint_tests(void)
 {
    Suite *s = suite_create("lint");
@@ -244,6 +283,8 @@ Suite *get_lint_tests(void)
    tcase_add_test(tc, test_latch_vlog);
    tcase_add_test(tc, test_latch_vhdl);
    tcase_add_test(tc, test_unused_vhdl);
+   tcase_add_test(tc, test_latch_static);
+   tcase_add_test(tc, test_unused_attribute);
    suite_add_tcase(s, tc);
 
    return s;
