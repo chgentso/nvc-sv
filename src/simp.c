@@ -42,19 +42,24 @@ typedef struct {
 
 typedef A(tree_t) tree_list_t;
 
-static tree_t simp_partial_choice(tree_t node)
+typedef struct {
+   tree_t node;
+   int    dim;   // Index of the subscript for a multi-dimensional array
+} partial_sel_t;
+
+static tree_t simp_partial_choice(partial_sel_t sel)
 {
-   switch (tree_kind(node)) {
+   switch (tree_kind(sel.node)) {
    case T_RECORD_REF:
-      return make_ref(tree_ref(node));
+      return make_ref(tree_ref(sel.node));
    case T_ARRAY_SLICE:
-      return tree_value(node);
+      return tree_value(sel.node);
    default:
-      return tree_value(tree_param(node, 0));
+      return tree_value(tree_param(sel.node, sel.dim));
    }
 }
 
-static bool simp_same_choice(tree_t a, tree_t node)
+static bool simp_same_choice(tree_t a, partial_sel_t sel)
 {
    // True if the association A names the same element or field as the
    // selection NODE
@@ -62,14 +67,15 @@ static bool simp_same_choice(tree_t a, tree_t node)
    if (tree_subkind(a) != A_NAMED)
       return false;
 
-   tree_t name = tree_name(a);
+   tree_t name = tree_name(a), node = sel.node;
    if (tree_kind(node) == T_RECORD_REF)
       return tree_kind(name) == T_REF && tree_has_ref(name)
          && tree_ref(name) == tree_ref(node);
    else if (tree_kind(node) == T_ARRAY_REF) {
       int64_t i1, i2;
       return folded_int(name, &i1)
-         && folded_int(tree_value(tree_param(node, 0)), &i2) && i1 == i2;
+         && folded_int(tree_value(tree_param(node, sel.dim)), &i2)
+         && i1 == i2;
    }
 
    return false;
@@ -82,18 +88,23 @@ static void simp_add_partial(tree_t agg, tree_t name, tree_t ref, tree_t value,
    // aggregate AGG for the formal REF creating the aggregates for any
    // intermediate selections
 
-   tree_t chain[16];
+   // A subscript with several indices selects one dimension at a time
+   partial_sel_t chain[16];
    int depth = 0;
    for (tree_t n = name; n != ref; n = tree_value(n)) {
-      if (depth == ARRAY_LEN(chain))
-         fatal_at(tree_loc(name), "sorry, this form of named parameter is "
-                  "not supported");
-      chain[depth++] = n;
+      const int ndims =
+         tree_kind(n) == T_ARRAY_REF ? tree_params(n) : 1;
+      for (int d = ndims - 1; d >= 0; d--) {
+         if (depth == ARRAY_LEN(chain))
+            fatal_at(tree_loc(name), "sorry, this form of named parameter "
+                     "is not supported");
+         chain[depth++] = (partial_sel_t){ n, d };
+      }
    }
 
    tree_t cur = agg;
    for (int level = depth - 1; level >= 0; level--) {
-      tree_t node = chain[level];
+      partial_sel_t node = chain[level];
 
       if (level == 0) {
          tree_t a = tree_new(T_ASSOC);
@@ -116,7 +127,12 @@ static void simp_add_partial(tree_t agg, tree_t name, tree_t ref, tree_t value,
       if (sub == NULL) {
          sub = tree_new(T_AGGREGATE);
          tree_set_loc(sub, tree_loc(loc));
-         tree_set_type(sub, tree_type(node));
+         if (tree_kind(node.node) == T_ARRAY_REF
+             && node.dim + 1 < tree_params(node.node))
+            tree_set_type(sub, array_aggregate_type(tree_type(tree_value(node.node)),
+                                                   node.dim + 1));
+         else
+            tree_set_type(sub, tree_type(node.node));
 
          tree_t a = tree_new(T_ASSOC);
          tree_set_loc(a, tree_loc(loc));
