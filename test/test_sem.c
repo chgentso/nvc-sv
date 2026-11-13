@@ -4251,17 +4251,17 @@ START_TEST(test_attrspec)
    input_from_file(TESTDIR "/sem/attrspec.vhd");
 
    const error_t expect[] = {
-      { 13, "an attribute specification for design unit ATTRSPEC must "
+      { 15, "an attribute specification for design unit ATTRSPEC must "
         "appear immediately within its own declarative part" },
-      { 14, "an attribute specification for P must appear in the "
+      { 16, "an attribute specification for P must appear in the "
         "declarative part of the unit that declares it" },
-      { 18, "attribute specification for PIN follows an earlier "
+      { 20, "attribute specification for PIN follows an earlier "
         "specification with entity name list OTHERS" },
-      { 33, "the value of the FOREIGN attribute of a subprogram must be "
+      { 35, "the value of the FOREIGN attribute of a subprogram must be "
         "locally static" },
-      { 36, "an attribute specification for design unit TEST must appear "
+      { 38, "an attribute specification for design unit TEST must appear "
         "immediately within its own declarative part" },
-      { 44, "the value of an attribute of a design unit must be locally "
+      { 46, "the value of an attribute of a design unit must be locally "
         "static" },
       { -1, NULL }
    };

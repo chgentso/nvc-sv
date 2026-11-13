@@ -6,6 +6,8 @@ entity attrspec is
     attribute pin of p : signal is 2;         -- OK
     attribute pin of g : constant is 3;       -- OK
     attribute other : integer;
+    attribute delay : time;
+    attribute delay of attrspec : entity is 10 ns;  -- OK
 end entity;
 
 architecture test of attrspec is
