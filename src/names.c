@@ -5783,6 +5783,20 @@ static tree_t solve_array_aggregate(nametab_t *tab, tree_t t, type_t type)
 
    const bool unconstrained = type_is_unconstrained(type);
 
+   // An others choice only needs the index range which may be known
+   // when the element subtype is still unconstrained
+   bool index_unconstrained = unconstrained;
+   if (unconstrained && type_kind(type) == T_SUBTYPE) {
+      index_unconstrained = true;
+      for (type_t t = type; type_kind(t) == T_SUBTYPE; t = type_base(t)) {
+         if (type_has_constraint(t)
+             && tree_subkind(type_constraint(t)) == C_INDEX) {
+            index_unconstrained = false;
+            break;
+         }
+      }
+   }
+
    bool have_named = false, have_others = false;
    const int nassocs = tree_assocs(t);
    for (int i = 0; i < nassocs; i++) {
@@ -5794,7 +5808,8 @@ static tree_t solve_array_aggregate(nametab_t *tab, tree_t t, type_t type)
          break;
       case A_OTHERS:
          have_others = true;
-         if (unconstrained && ts.down->target != NULL && relaxed_rules()) {
+         if (index_unconstrained && ts.down->target != NULL
+             && relaxed_rules()) {
             // Non-standard but supported by many other implementations
             tree_t aref = tree_new(T_ATTR_REF);
             tree_set_subkind(aref, ATTR_RANGE);
@@ -5811,7 +5826,7 @@ static tree_t solve_array_aggregate(nametab_t *tab, tree_t t, type_t type)
 
             tree_add_range(a, r);
          }
-         else if (unconstrained) {
+         else if (index_unconstrained) {
             diag_t *d = diag_new(DIAG_ERROR, tree_loc(t));
             diag_printf(d, "index range of array aggregate with others choice "
                         "cannot be determined from the context");
@@ -5900,7 +5915,9 @@ static tree_t solve_array_aggregate(nametab_t *tab, tree_t t, type_t type)
    type_set_pop(tab, &ts);
 
    bool bounds_from_context = true;
-   if (unconstrained)
+   if (unconstrained && have_others && !index_unconstrained)
+      bounds_from_context = true;   // Element subtype is unconstrained
+   else if (unconstrained)
       bounds_from_context = false;
    else if (have_named && !have_others && is_anonymous_subtype(type))
       bounds_from_context = false;

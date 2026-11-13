@@ -4008,7 +4008,15 @@ static vcode_reg_t lower_aggregate_bounds(lower_unit_t *lu, tree_t expr,
             dir_reg = lower_range_dir(lu, range_of(index_type, 0));
             break;
          case A_OTHERS:
-            assert(tree_ranges(a) > 0);   // With relaxed rules
+            if (tree_ranges(a) == 0) {
+               // The index range is constrained but the element subtype
+               // is not
+               tree_t r = range_of(type, 0);
+               left_reg = lower_range_left(lu, r);
+               right_reg = lower_range_right(lu, r);
+               dir_reg = lower_range_dir(lu, r);
+               break;
+            }
             // Fall-through
          case A_RANGE:
          case A_SLICE:

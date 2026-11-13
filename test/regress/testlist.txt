@@ -2717,3 +2717,4 @@ protop1         normal,2019
 relaxed1        normal,relaxed
 aggtarget1      normal
 aggtarget2      normal
+aggothers1      normal,2008
