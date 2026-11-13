@@ -2726,3 +2726,4 @@ svifacetype1 verilog
 svbitstype1 verilog
 svifaceparam2 verilog
 svqmarklit1 verilog
+svsignedlit1 verilog

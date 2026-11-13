@@ -9119,6 +9119,21 @@ static mir_value_t vlog_lower_with_context(vlog_gen_t *g, vlog_node_t v,
          int width = number_width(num);
          const bool issigned = number_signed(num);
 
+         if (vlog_kind(v) == V_NUMBER && issigned && width <= 64
+             && !(vlog_flags(v) & VLOG_F_FILL) && !mir_is_null(context)
+             && !mir_get_signed(g->mu, context)) {
+            // A signed literal is only sign extended if the expression
+            // it is part of is signed (11.8.1)
+            uint64_t a, b;
+            number_word(num, 0, &a, &b);
+            mir_class_t class = mir_get_class(g->mu, context);
+            if (b == 0 && (class == MIR_TYPE_VEC2 || class == MIR_TYPE_VEC4)) {
+               mir_type_t t_own = mir_vec4_type(g->mu, width, true);
+               mir_value_t vec = mir_const_vec(g->mu, t_own, a, b);
+               return vlog_widen_vector(g, vec, context);
+            }
+         }
+
          if (!mir_is_null(context)) {
             mir_class_t class = mir_get_class(g->mu, context);
             if (class == MIR_TYPE_VEC2 || class == MIR_TYPE_VEC4)
