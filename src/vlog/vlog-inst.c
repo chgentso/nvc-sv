@@ -915,6 +915,7 @@ typedef struct {
    hash_t            *specs;
    hash_t            *hidden;
    unsigned           depth;
+   unsigned           in_params;
    bool               changed;
 } iface_res_t;
 
@@ -967,12 +968,18 @@ static vlog_node_t iface_instance_spec(iface_res_t *res, vlog_node_t list)
        || res->depth > 8)
       return NULL;
 
+   // The nodes of the new instance may only refer to nodes of the same
+   // arena or one that is frozen so copy the overrides
+   object_arena_t *saved = detach_global_arena();
+   make_new_arena();
+
    // The overrides may themselves be names inside other interfaces
    vlog_node_t plist = vlog_new(V_INST_LIST);
    vlog_set_loc(plist, vlog_loc(list));
    vlog_set_ident(plist, vlog_ident(list));
 
    res->depth++;
+   res->in_params++;
    const int nparams = vlog_params(list);
    for (int i = 0; i < nparams; i++) {
       vlog_node_t p = vlog_param(list, i);
@@ -983,10 +990,8 @@ static vlog_node_t iface_instance_spec(iface_res_t *res, vlog_node_t list)
       }
       vlog_add_param(plist, p);
    }
+   res->in_params--;
    res->depth--;
-
-   object_arena_t *saved = detach_global_arena();
-   make_new_arena();
 
    const int base_errors = error_count();
 
@@ -1103,6 +1108,12 @@ static vlog_node_t resolve_href_cb(vlog_node_t v, void *ctx)
             res->changed = true;
             return vlog_copy(vlog_value(d), copy_all_pred, NULL);
          case V_PATTERN_EXPR:
+            if (res->in_params > 0) {
+               // The value of a parameter of another interface
+               res->changed = true;
+               return vlog_copy(vlog_value(d), copy_all_pred, NULL);
+            }
+
             {
                // An aggregate is a parameter of this body from now on so
                // that members of it can be selected
@@ -1112,7 +1123,8 @@ static vlog_node_t resolve_href_cb(vlog_node_t v, void *ctx)
                   vlog_set_loc(lp, vlog_loc(v));
                   vlog_set_ident(lp, ident_sprintf("$iface.%s#%u", istr(id),
                                                  hash_members(res->hidden)));
-                  vlog_set_type(lp, vlog_type(d));
+                  vlog_set_type(lp, vlog_copy(vlog_type(d), copy_all_pred,
+                                              NULL));
                   vlog_set_value(lp, vlog_copy(vlog_value(d), copy_all_pred,
                                                NULL));
                   vlog_add_decl(res->body, lp);
