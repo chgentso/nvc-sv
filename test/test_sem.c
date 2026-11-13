@@ -4396,6 +4396,38 @@ START_TEST(test_convparam)
 }
 END_TEST
 
+START_TEST(test_buffer93)
+{
+   set_standard(STD_93);
+
+   input_from_file(TESTDIR "/sem/buffer93.vhd");
+
+   const error_t expect[] = {
+      { 17, "port Q with mode BUFFER cannot be associated with formal port "
+        "A with mode IN" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   parse_and_check(T_ENTITY, T_ARCH, T_ENTITY, T_ARCH);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_buffer93_relaxed)
+{
+   set_standard(STD_93);
+   opt_set_int(OPT_RELAXED, 1);
+
+   input_from_file(TESTDIR "/sem/buffer93.vhd");
+
+   parse_and_check(T_ENTITY, T_ARCH, T_ENTITY, T_ARCH);
+
+   fail_if_errors();
+}
+END_TEST
+
 START_TEST(test_undefarg)
 {
    set_standard(STD_08);
@@ -4617,6 +4649,8 @@ Suite *get_sem_tests(void)
    tcase_add_test(tc_core, test_incfull);
    tcase_add_test(tc_core, test_incpack);
    tcase_add_test(tc_core, test_attrspec);
+   tcase_add_test(tc_core, test_buffer93);
+   tcase_add_test(tc_core, test_buffer93_relaxed);
    tcase_add_test(tc_core, test_convparam);
    tcase_add_test(tc_core, test_accessinc);
    tcase_add_test(tc_core, test_enumhomo);

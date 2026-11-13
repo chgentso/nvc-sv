@@ -5107,26 +5107,26 @@ static bool sem_check_port_actual(formal_map_t *formals, int nformals,
          switch (mode) {
          case PORT_IN:
             ok |= omode == PORT_IN || omode == PORT_INOUT;
-            if (standard() >= STD_02)
+            if (standard() >= STD_02 || relaxed_rules())
                ok |= omode == PORT_BUFFER;
             if (standard() >= STD_08)
                ok |= omode == PORT_OUT;
             break;
          case PORT_OUT:
             ok |= omode == PORT_OUT || omode == PORT_INOUT;
-            if (standard() >= STD_02)
+            if (standard() >= STD_02 || relaxed_rules())
                ok |= omode == PORT_BUFFER;
             break;
          case PORT_INOUT:
             ok |= omode == PORT_INOUT;
-            if (standard() >= STD_02)
+            if (standard() >= STD_02 || relaxed_rules())
                ok |= omode == PORT_BUFFER;
             if (standard() >= STD_08)
                ok |= omode == PORT_OUT;
             break;
          case PORT_BUFFER:
             ok |= omode == PORT_BUFFER;
-            if (standard() >= STD_02)
+            if (standard() >= STD_02 || relaxed_rules())
                ok |= omode == PORT_OUT || omode == PORT_INOUT;
             break;
          default:
