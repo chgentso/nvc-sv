@@ -121,6 +121,7 @@ typedef struct _wave_dumper {
    uint64_t       last_time;
    jit_t         *jit;
    hash_t        *typecache;
+   hash_t        *vlog_data;    // Net declaration to the dumped data
    fst_type_t    *datatypes[DT_STRING + 1];
    data_array_t   dumped;
 } wave_dumper_t;
@@ -1022,16 +1023,49 @@ static fst_type_t *fst_get_data_type(wave_dumper_t *wd, data_type_t dt)
    return NULL;
 }
 
+static fst_data_t *fst_port_source(wave_dumper_t *wd, tree_t block,
+                                   vlog_node_t v)
+{
+   // The data of the net connected to a port of an instance in the parent
+   // where it is a whole net
+
+   if (wd->vlog_data == NULL)
+      return NULL;
+
+   const int ndecls = tree_decls(block);
+   for (int i = 0; i < ndecls; i++) {
+      tree_t d = tree_decl(block, i);
+      if (tree_kind(d) != T_VERILOG)
+         continue;
+
+      vlog_node_t m = tree_vlog(d);
+      if (vlog_kind(m) != V_PORT_MAP || vlog_ident(m) != vlog_ident(v))
+         continue;
+
+      vlog_node_t value = vlog_value(m);
+      if (vlog_kind(value) != V_REF || !vlog_has_ref(value))
+         return NULL;
+
+      vlog_node_t decl = vlog_ref(value);
+      if (vlog_kind(decl) == V_PORT_DECL && vlog_has_ref(decl))
+         decl = vlog_ref(decl);
+
+      return hash_get(wd->vlog_data, decl);
+   }
+
+   return NULL;
+}
+
 static void fst_process_verilog(wave_dumper_t *wd, rt_scope_t *scope,
-                                tree_t wrap, vlog_node_t v, text_buf_t *tb)
+                                tree_t block, tree_t wrap, vlog_node_t v,
+                                text_buf_t *tb)
 {
    gtkw_start_of_signal(wd->gtkw);
 
    rt_signal_t *s = find_signal(scope, wrap, NULL);
-   if (s == NULL)
+   fst_data_t *source = NULL;
+   if (s == NULL && (source = fst_port_source(wd, block, v)) == NULL)
       return;
-   else if (s->where != wrap)
-      return;  // Collapsed with another signal
 
    vlog_node_t type = vlog_type(v);
    if (vlog_kind(type) != V_DATA_TYPE)
@@ -1071,10 +1105,32 @@ static void fst_process_verilog(wave_dumper_t *wd, rt_scope_t *scope,
    }
 
 
+   const unsigned size = ft->size * vlog_size(type);
+
+   rt_watch_t *primary = s != NULL ? find_watch(&(s->nexus), fst_event_cb)
+      : NULL;
+   if (source != NULL || primary != NULL) {
+      // A port shares the net of the signal connected to it in the parent
+      // so it is shown in this scope as an alias of the same data
+      fst_data_t *pd = source ?: primary->user_data;
+      if (pd->count != 1 || pd->size != size)
+         return;
+
+      if (wd->vlog_data != NULL)
+         hash_put(wd->vlog_data, v, pd);
+
+      fstWriterCreateVar2(wd->fst_ctx, pd->type->vartype, FST_VD_IMPLICIT,
+                          size, tb_get(tb), pd->handle[0], NULL,
+                          FST_SVT_NONE, pd->type->sdt);
+
+      gtkw_end_of_signal(wd->gtkw, tb_get(tb));
+      return;
+   }
+
    fst_data_t *data = xcalloc(sizeof(fst_data_t) + sizeof(fstHandle));
    data->type   = ft;
    data->count  = 1;
-   data->size   = ft->size * vlog_size(type);
+   data->size   = size;
    data->dumper = wd;
 
    enum fstVarDir dir = FST_VD_IMPLICIT;
@@ -1100,6 +1156,10 @@ static void fst_process_verilog(wave_dumper_t *wd, rt_scope_t *scope,
    model_set_event_cb(wd->model, data->signal, 0, width, data->watch);
 
    APUSH(wd->dumped, data);
+
+   if (wd->vlog_data == NULL)
+      wd->vlog_data = hash_new(64);
+   hash_put(wd->vlog_data, v, data);
 
    gtkw_end_of_signal(wd->gtkw, tb_get(tb));
 }
@@ -1209,7 +1269,7 @@ static void fst_walk_design(wave_dumper_t *wd, tree_t block)
             if (kind != V_NET_DECL && kind != V_VAR_DECL)
                continue;
             else if (wave_should_dump(scope, vlog_ident(v)))
-               fst_process_verilog(wd, scope, d, v, tb);
+               fst_process_verilog(wd, scope, block, d, v, tb);
          }
          break;
       default:

@@ -1,0 +1,29 @@
+$comment wavevlogport1.p.clk is aliased to clk $end
+$comment wavevlogport1.p.a[3:0] is aliased to w[3:0] $end
+$comment wavevlogport1.p.z[3:0] is aliased to o[3:0] $end
+$comment wavevlogport1.p.s1.clk is aliased to clk $end
+$comment wavevlogport1.p.s1.in_word[3:0] is aliased to w[3:0] $end
+$comment wavevlogport1.p.s1.out_word[3:0] is aliased to mid[3:0] $end
+$comment wavevlogport1.p.s2.clk is aliased to clk $end
+$comment wavevlogport1.p.s2.in_word[3:0] is aliased to mid[3:0] $end
+$comment wavevlogport1.p.s2.out_word[3:0] is aliased to o[3:0] $end
+#0 wavevlogport1.p.s2.r[3:0] xxxx
+#0 wavevlogport1.p.s1.r[3:0] xxxx
+#0 wavevlogport1.p.mid[3:0] xxxx
+#0 wavevlogport1.o[3:0] xxxx
+#0 wavevlogport1.w[3:0] 0000
+#0 wavevlogport1.clk 0
+#1 wavevlogport1.clk 1
+#1 wavevlogport1.p.mid[3:0] 0000
+#1 wavevlogport1.p.s1.r[3:0] 0000
+#2 wavevlogport1.clk 0
+#3 wavevlogport1.w[3:0] 0101
+#4 wavevlogport1.clk 1
+#4 wavevlogport1.p.s1.r[3:0] 0101
+#4 wavevlogport1.p.mid[3:0] 0101
+#4 wavevlogport1.o[3:0] 0000
+#4 wavevlogport1.p.s2.r[3:0] 0000
+#5 wavevlogport1.clk 0
+#6 wavevlogport1.clk 1
+#6 wavevlogport1.p.s2.r[3:0] 0101
+#6 wavevlogport1.o[3:0] 0101

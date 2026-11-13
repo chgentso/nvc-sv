@@ -2744,3 +2744,4 @@ svopassign2 verilog
 svopassign3 verilog
 svpowneg1 verilog
 svinsidesign1 verilog
+wavevlogport1 wave,verilog
