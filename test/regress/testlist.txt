@@ -2753,3 +2753,4 @@ svunionsel1 verilog
 svinsidedollar1 verilog
 svstrrepl1 verilog
 svrealneg1 verilog
+wavevlogport2 wave,verilog

@@ -1,0 +1,16 @@
+$comment wavevlogport2.s.z[3:0] is aliased to o[3:0] $end
+#0 wavevlogport2.s.lo[3:0] 1010
+#0 wavevlogport2.s.hi[3:0] 0101
+#0 wavevlogport2.s.a 0
+#0 wavevlogport2.o[3:0] 1111
+#0 wavevlogport2.w[7:0] 01011010
+#1 wavevlogport2.w[7:0] 00110001
+#1 wavevlogport2.o[3:0] 0010
+#1 wavevlogport2.s.a 1
+#1 wavevlogport2.s.hi[3:0] 0011
+#1 wavevlogport2.s.lo[3:0] 0001
+#2 wavevlogport2.s.lo[3:0] 0000
+#2 wavevlogport2.s.hi[3:0] 1111
+#2 wavevlogport2.s.a 0
+#2 wavevlogport2.o[3:0] 1111
+#2 wavevlogport2.w[7:0] 11110000

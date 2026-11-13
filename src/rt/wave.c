@@ -89,6 +89,7 @@ typedef struct _fst_data {
    rt_signal_t   *signal;
    unsigned       size;
    unsigned       count;
+   unsigned       offset;   // First bit of the signal which is shown
    fstHandle      handle[];
 } fst_data_t;
 
@@ -282,7 +283,7 @@ static void fst_fmt_enum(rt_watch_t *w, fst_data_t *data)
 
 static void fst_fmt_verilog(rt_watch_t *w, fst_data_t *data)
 {
-   const uint8_t *p = signal_value(data->signal);
+   const uint8_t *p = signal_value(data->signal) + data->offset;
    for (int i = 0; i < data->count; i++, p += data->size) {
       char buf[data->size];
       for (int j = 0; j < data->size; j++)
@@ -1024,10 +1025,14 @@ static fst_type_t *fst_get_data_type(wave_dumper_t *wd, data_type_t dt)
 }
 
 static fst_data_t *fst_port_source(wave_dumper_t *wd, tree_t block,
-                                   vlog_node_t v)
+                                   vlog_node_t v, unsigned *offset,
+                                   unsigned *width)
 {
    // The data of the net connected to a port of an instance in the parent
-   // where it is a whole net
+   // where it is a whole net or a constant select of one
+
+   *offset = 0;
+   *width = 0;
 
    if (wd->vlog_data == NULL)
       return NULL;
@@ -1042,7 +1047,12 @@ static fst_data_t *fst_port_source(wave_dumper_t *wd, tree_t block,
       if (vlog_kind(m) != V_PORT_MAP || vlog_ident(m) != vlog_ident(v))
          continue;
 
-      vlog_node_t value = vlog_value(m);
+      vlog_node_t value = vlog_value(m), sel = NULL;
+      if (vlog_kind(value) == V_BIT_SELECT || vlog_kind(value) == V_PART_SELECT) {
+         sel = value;
+         value = vlog_value(sel);
+      }
+
       if (vlog_kind(value) != V_REF || !vlog_has_ref(value))
          return NULL;
 
@@ -1050,7 +1060,41 @@ static fst_data_t *fst_port_source(wave_dumper_t *wd, tree_t block,
       if (vlog_kind(decl) == V_PORT_DECL && vlog_has_ref(decl))
          decl = vlog_ref(decl);
 
-      return hash_get(wd->vlog_data, decl);
+      fst_data_t *pd = hash_get(wd->vlog_data, decl);
+      if (pd == NULL || sel == NULL)
+         return pd;
+
+      // The bits are numbered from the left of the declared range
+      vlog_node_t type = vlog_type(decl);
+      if (vlog_kind(type) != V_DATA_TYPE || vlog_ranges(type) != 1)
+         return NULL;
+
+      int64_t dleft, dright, sleft, sright;
+      if (!vlog_bounds(vlog_range(type, 0), &dleft, &dright))
+         return NULL;
+
+      if (vlog_kind(sel) == V_BIT_SELECT) {
+         if (vlog_params(sel) != 1 || !vlog_get_const(vlog_param(sel, 0), &sleft))
+            return NULL;
+         sright = sleft;
+      }
+      else if (vlog_subkind(sel) == V_RANGE_CONST) {
+         if (!vlog_get_const(vlog_left(sel), &sleft)
+             || !vlog_get_const(vlog_right(sel), &sright))
+            return NULL;
+      }
+      else
+         return NULL;
+
+      const bool down = dleft >= dright;
+      const int64_t first = down ? dleft - sleft : sleft - dleft;
+      const int64_t count = llabs(sleft - sright) + 1;
+      if (first < 0 || first + count > pd->size)
+         return NULL;
+
+      *offset = first;
+      *width = count;
+      return pd;
    }
 
    return NULL;
@@ -1064,7 +1108,9 @@ static void fst_process_verilog(wave_dumper_t *wd, rt_scope_t *scope,
 
    rt_signal_t *s = find_signal(scope, wrap, NULL);
    fst_data_t *source = NULL;
-   if (s == NULL && (source = fst_port_source(wd, block, v)) == NULL)
+   unsigned soff = 0, swidth = 0;
+   if (s == NULL
+       && (source = fst_port_source(wd, block, v, &soff, &swidth)) == NULL)
       return;
 
    vlog_node_t type = vlog_type(v);
@@ -1109,6 +1155,18 @@ static void fst_process_verilog(wave_dumper_t *wd, rt_scope_t *scope,
 
    rt_watch_t *primary = s != NULL ? find_watch(&(s->nexus), fst_event_cb)
       : NULL;
+   if (source != NULL && swidth > 0) {
+      // A port connected to some of the bits of a net shows those bits
+      if (swidth != size)
+         return;
+
+      s = source->signal;
+      primary = NULL;
+      source = NULL;
+   }
+   else
+      swidth = 0;
+
    if (source != NULL || primary != NULL) {
       // A port shares the net of the signal connected to it in the parent
       // so it is shown in this scope as an alias of the same data
@@ -1146,14 +1204,15 @@ static void fst_process_verilog(wave_dumper_t *wd, rt_scope_t *scope,
       FST_SVT_NONE,
       data->type->sdt);
 
-   assert(find_watch(&(s->nexus), fst_event_cb) == NULL);
+   assert(swidth > 0 || find_watch(&(s->nexus), fst_event_cb) == NULL);
 
    data->decl   = wrap;
    data->signal = s;
+   data->offset = soff;
    data->watch  = watch_new(wd->model, fst_event_cb, data, WATCH_POSTPONED, 1);
 
-   const int width = signal_width(data->signal);
-   model_set_event_cb(wd->model, data->signal, 0, width, data->watch);
+   const int width = swidth > 0 ? swidth : signal_width(data->signal);
+   model_set_event_cb(wd->model, data->signal, soff, width, data->watch);
 
    APUSH(wd->dumped, data);
 
