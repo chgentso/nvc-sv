@@ -6201,6 +6201,24 @@ static void lower_fill_target_parts(lower_unit_t *lu, tree_t target,
       for (int i = 0; i < nassocs; i++) {
          tree_t assoc = tree_assoc(target, i);
 
+         if (is_record) {
+            // Parts must be in the order of the fields of the record
+            // which can differ from the order of the named associations
+            for (int j = 0; j < nassocs; j++) {
+               tree_t a = tree_assoc(target, j);
+               int pos = j;
+               if (tree_subkind(a) == A_NAMED) {
+                  tree_t name = tree_name(a);
+                  assert(tree_kind(name) == T_REF);
+                  pos = tree_pos(tree_ref(name));
+               }
+               if (pos == i) {
+                  assoc = a;
+                  break;
+               }
+            }
+         }
+
          tree_t value = tree_value(assoc);
 
          part_kind_t newkind;
