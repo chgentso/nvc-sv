@@ -6413,7 +6413,8 @@ static bool sem_check_attr_spec(tree_t t, nametab_t *tab)
    case T_CONFIGURATION:
       // A literal of type TIME is accepted although it is not locally
       // static in the LRM definition
-      if (tree_kind(value) != T_LITERAL && !sem_locally_static(value))
+      if (tree_kind(value) != T_LITERAL && !relaxed_rules()
+          && !sem_locally_static(value))
          sem_error(value, "the value of an attribute of a design unit must "
                    "be locally static");
       break;

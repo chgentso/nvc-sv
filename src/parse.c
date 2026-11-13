@@ -6994,6 +6994,8 @@ static void check_attribute_specification(tree_t parent, tree_t t)
 
    if (tree_subkind(t) != SPEC_EXACT || !tree_has_ref(t))
       return;
+   else if (relaxed_rules())
+      return;   // Some tools accept the specification in another region
 
    tree_t decl = tree_ref(t);
    switch (tree_kind(decl)) {

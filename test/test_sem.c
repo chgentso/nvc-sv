@@ -4296,6 +4296,28 @@ START_TEST(test_protop)
 }
 END_TEST
 
+START_TEST(test_attrspec_relaxed)
+{
+   set_standard(STD_08);
+   opt_set_int(OPT_RELAXED, 1);
+
+   input_from_file(TESTDIR "/sem/attrspec.vhd");
+
+   const error_t expect[] = {
+      { 20, "attribute specification for PIN follows an earlier "
+        "specification with entity name list OTHERS" },
+      { 35, "the value of the FOREIGN attribute of a subprogram must be "
+        "locally static" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   parse_and_check(T_ENTITY, T_ARCH, T_ENTITY);
+
+   check_expected_errors();
+}
+END_TEST
+
 START_TEST(test_undefarg)
 {
    set_standard(STD_08);
@@ -4516,6 +4538,7 @@ Suite *get_sem_tests(void)
    tcase_add_test(tc_core, test_entbody);
    tcase_add_test(tc_core, test_incfull);
    tcase_add_test(tc_core, test_attrspec);
+   tcase_add_test(tc_core, test_attrspec_relaxed);
    tcase_add_test(tc_core, test_protop);
    suite_add_tcase(s, tc_core);
 
