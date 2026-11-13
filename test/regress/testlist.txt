@@ -2714,3 +2714,4 @@ svhierlp1 verilog
 vreg_casefold   normal,2008
 m5v_gen1        shell
 protop1         normal,2019
+relaxed1        normal,relaxed

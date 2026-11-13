@@ -337,9 +337,57 @@ static tree_t simp_literal_expr(tree_t t, subprogram_kind_t kind)
    }
 }
 
-static void simp_wrap_literal_args(tree_t t)
+static bool simp_literal_result_fits(tree_t t, subprogram_kind_t kind)
 {
-   // A literal operand that does not fit the type wraps around
+   // True if all the operands are integer literals and the exact result
+   // of the operation is within the bounds of the result type
+
+   const int nparams = tree_params(t);
+   if (nparams < 1 || nparams > 2)
+      return false;
+
+   int64_t arg[2] = { 0, 0 };
+   for (int i = 0; i < nparams; i++) {
+      tree_t value = tree_value(tree_param(t, i));
+      if (tree_kind(value) != T_LITERAL || tree_subkind(value) != L_INT)
+         return false;
+      arg[i] = tree_ival(value);
+   }
+
+   int64_t result;
+   bool overflow;
+   switch (kind) {
+   case S_NEGATE:
+      overflow = __builtin_sub_overflow(INT64_C(0), arg[0], &result);
+      break;
+   case S_ADD:
+      overflow = __builtin_add_overflow(arg[0], arg[1], &result);
+      break;
+   case S_SUB:
+      overflow = __builtin_sub_overflow(arg[0], arg[1], &result);
+      break;
+   case S_MUL:
+      overflow = __builtin_mul_overflow(arg[0], arg[1], &result);
+      break;
+   default:
+      return false;
+   }
+
+   int64_t low, high;
+   if (overflow || !folded_bounds(range_of(type_base_recur(tree_type(t)), 0),
+                                  &low, &high))
+      return false;
+
+   return result >= low && result <= high;
+}
+
+static void simp_wrap_literal_args(tree_t t, subprogram_kind_t kind)
+{
+   // A literal operand that does not fit the type wraps around unless
+   // the result of the operation is within the bounds of the type
+
+   if (simp_literal_result_fits(t, kind))
+      return;
 
    const int nparams = tree_params(t);
    for (int i = 0; i < nparams; i++) {
@@ -388,7 +436,7 @@ static tree_t simp_fcall_local(tree_t t, simp_ctx_t *ctx)
       case S_MUL:
       case S_NEGATE:
          tree_set_flag(t, TREE_F_WRAP_OVERFLOW);
-         simp_wrap_literal_args(t);
+         simp_wrap_literal_args(t, kind);
          break;
       default:
          break;
