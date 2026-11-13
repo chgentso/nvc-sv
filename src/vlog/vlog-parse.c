@@ -309,6 +309,7 @@ static bool is_std_randomize(void)
 
 static vlog_node_t hier_owner(vlog_node_t mr);
 static vlog_node_t p_instance_index(vlog_node_t mr);
+static bool at_instance_index(bool dot);
 static vlog_node_t hier_type_decl(int len);
 
 static bool is_hier_type_name(int *len)
@@ -349,8 +350,10 @@ static bool is_hier_type_name(int *len)
                return false;
          }
 
-         if (depth > 0 || peek_nth(m) != tDOT || peek_nth(m + 1) != tID)
+         if (depth > 0)
             return false;
+         else if (peek_nth(m) != tDOT || peek_nth(m + 1) != tID)
+            break;   // Packed dimensions after the type
 
          n = m + 1;
       }
@@ -2114,7 +2117,7 @@ static vlog_node_t p_hier_type(void)
       ident_t name = p_identifier();
       last_loc = state.last_loc;
 
-      if (peek() != tDOT && peek() != tLSQUARE) {
+      if (peek() != tDOT && !at_instance_index(true)) {
          last = name;
          break;
       }
@@ -2128,7 +2131,7 @@ static vlog_node_t p_hier_type(void)
       vlog_set_value(next, prefix);
       prefix = next;
 
-      if (peek() == tLSQUARE)
+      if (at_instance_index(true))
          p_instance_index(prefix);
    }
 

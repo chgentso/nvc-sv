@@ -48,6 +48,8 @@ module svifacetype1;
   data_t d;
   pair_t p;
   i0.inner.id_t id;
+  localparam type packed2_t = i0.data_t[1:0];
+  packed2_t pk;
   bit [7:0] bits;
   svifacetype1_if #(2) arr[2] ();
   typedef arr[1].data_t adata_t;
@@ -66,6 +68,8 @@ module svifacetype1;
              || $bits(i0.data_t) !== 5 || $bits(wdata_t) !== 3)
       $error("FAIL nested %0d %0d %0d", $bits(adata_t), $bits(wr.data_t),
              $bits(wdata_t));
+    else if ($bits(pk) !== 10)
+      $error("FAIL packed %0d", $bits(pk));
     else if (bits !== 8'd1)
       $error("FAIL sub");
     else
