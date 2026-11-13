@@ -6,7 +6,7 @@ architecture test of incomplete is
     function func1 return t1;           -- Error
 
     type t2;
-    type t3 is access t2;               -- OK
+    type t3 is access t2;               -- Error before VHDL-2019
 
     type t2 is protected
         function func2 return integer;

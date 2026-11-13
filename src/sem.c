@@ -619,6 +619,23 @@ static void sem_incomplete_type_cb(tree_t t, tree_t parent, nametab_t *tab)
    }
 }
 
+static void sem_access_incomplete_cb(tree_t t, tree_t parent, nametab_t *tab)
+{
+   // The designated type was incomplete when the access type was declared
+
+   type_t designated = type_designated(tree_type(t));
+   if (type_kind(designated) != T_INCOMPLETE)
+      return;
+
+   type_t full = resolve_type(tab, designated);
+   if (type_is_file(full))
+      error_at(tree_loc(t), "access type %s cannot designate file type",
+               istr(tree_ident(t)));
+   else if (type_is_protected(full))
+      error_at(tree_loc(t), "access type %s cannot designate protected type",
+               istr(tree_ident(t)));
+}
+
 static bool sem_check_type_decl(tree_t t, nametab_t *tab)
 {
    type_t type = tree_type(t);
@@ -910,7 +927,9 @@ static bool sem_check_type_decl(tree_t t, nametab_t *tab)
          if (!sem_check_subtype(t, designated, tab))
             return false;
 
-         if (standard() < STD_19) {
+         if (standard() < STD_19 && type_is_incomplete(designated))
+            defer_check(tab, sem_access_incomplete_cb, t);
+         else if (standard() < STD_19) {
             if (type_is_file(designated))
                sem_error(t, "access type %s cannot designate file type",
                          istr(tree_ident(t)));

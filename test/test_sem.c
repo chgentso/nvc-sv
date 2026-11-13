@@ -3732,6 +3732,7 @@ START_TEST(test_incomplete)
       { 46, "invalid use of incomplete type T1" },
       { 50, "invalid use of incomplete type T1" },
       { 51, "invalid use of incomplete type T1" },
+      {  9, "access type T3 cannot designate protected type" },
       { -1, NULL }
    };
    expect_errors(expect);
@@ -4337,6 +4338,25 @@ START_TEST(test_enumhomo)
 }
 END_TEST
 
+START_TEST(test_accessinc)
+{
+   set_standard(STD_08);
+
+   input_from_file(TESTDIR "/sem/accessinc.vhd");
+
+   const error_t expect[] = {
+      {  3, "access type A1 cannot designate file type" },
+      {  5, "access type FOO_ACC cannot designate file type" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   parse_and_check(T_PACKAGE);
+
+   check_expected_errors();
+}
+END_TEST
+
 START_TEST(test_undefarg)
 {
    set_standard(STD_08);
@@ -4557,6 +4577,7 @@ Suite *get_sem_tests(void)
    tcase_add_test(tc_core, test_entbody);
    tcase_add_test(tc_core, test_incfull);
    tcase_add_test(tc_core, test_attrspec);
+   tcase_add_test(tc_core, test_accessinc);
    tcase_add_test(tc_core, test_enumhomo);
    tcase_add_test(tc_core, test_attrspec_relaxed);
    tcase_add_test(tc_core, test_protop);
