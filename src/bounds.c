@@ -639,8 +639,103 @@ static void bounds_free_intervals(interval_t **list)
    *list = NULL;
 }
 
+static void bounds_check_record_choice_lengths(tree_t t, type_t type)
+{
+   // LRM 08 section 9.3.3.3: all the elements covered by a choice list
+   // or others must have the same subtype so the value must have the
+   // length of each array field
+
+   const int nassocs = tree_assocs(t);
+   const int nfields = type_fields(type);
+
+   bool *covered LOCAL = xcalloc_array(nfields, sizeof(bool));
+   for (int i = 0; i < nassocs; i++) {
+      tree_t a = tree_assoc(t, i);
+      switch (tree_subkind(a)) {
+      case A_POS:
+         if (i < nfields)
+            covered[i] = true;
+         break;
+      case A_NAMED:
+         {
+            tree_t name = tree_name(a);
+            if (tree_kind(name) == T_REF && tree_has_ref(name)
+                && tree_kind(tree_ref(name)) == T_FIELD_DECL)
+               covered[tree_pos(tree_ref(name))] = true;
+         }
+         break;
+      default:
+         break;
+      }
+   }
+
+   for (int i = 0; i < nassocs; i++) {
+      tree_t a = tree_assoc(t, i);
+      const assoc_kind_t kind = tree_subkind(a);
+      if (kind != A_NAMED && kind != A_OTHERS)
+         continue;
+
+      tree_t value = tree_value(a);
+      if (tree_kind(value) != T_STRING)
+         continue;   // An aggregate takes its subtype from each element
+
+      type_t vtype = tree_type(value);
+      if (!type_is_array(vtype) || type_is_unconstrained(vtype))
+         continue;
+
+      int64_t vlen;
+      if (!folded_length(range_of(vtype, 0), &vlen))
+         continue;
+
+      int count = 0;
+      for (int j = 0; j < nassocs; j++) {
+         if (tree_value(tree_assoc(t, j)) == value)
+            count++;
+      }
+
+      if (kind == A_NAMED && count < 2)
+         continue;
+      else if (kind == A_OTHERS) {
+         int uncovered = 0;
+         for (int f = 0; f < nfields; f++)
+            uncovered += !covered[f];
+         if (uncovered < 2)
+            continue;
+      }
+
+      for (int f = 0; f < nfields; f++) {
+         tree_t field = type_field(type, f);
+         if (kind == A_NAMED) {
+            tree_t name = tree_name(a);
+            if (tree_kind(name) != T_REF || !tree_has_ref(name)
+                || tree_ref(name) != field)
+               continue;
+         }
+         else if (covered[f])
+            continue;
+
+         type_t ftype = tree_type(field);
+         int64_t flen;
+         if (!type_is_array(ftype) || type_is_unconstrained(ftype)
+             || !folded_length(range_of(ftype, 0), &flen) || flen == vlen)
+            continue;
+
+         diag_t *d = diag_new(DIAG_ERROR, tree_loc(value));
+         diag_printf(d, "length of value %"PRIi64" does not match length "
+                     "%"PRIi64" of record element %pI", vlen, flen,
+                     tree_ident(field));
+         diag_hint(d, tree_loc(field), "element %pI declared here",
+                   tree_ident(field));
+         diag_emit(d);
+         break;
+      }
+   }
+}
+
 static void bounds_check_record_aggregate(tree_t t, type_t type)
 {
+   bounds_check_record_choice_lengths(t, type);
+
    const int nassocs = tree_assocs(t);
    for (int i = 0; i < nassocs; i++) {
       tree_t a = tree_assoc(t, i);
