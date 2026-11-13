@@ -2169,6 +2169,31 @@ START_TEST(test_based)
 }
 END_TEST
 
+START_TEST(test_bitstring2)
+{
+   set_standard(STD_08);
+
+   input_from_file(TESTDIR "/parse/bitstring2.vhd");
+
+   const error_t expect[] = {
+      {  6, "digit '2' is not valid in a base 2 bit string" },
+      {  7, "digit '8' is not valid in a base 8 bit string" },
+      {  8, "digit '2' is not valid in a base 2 bit string" },
+      {  9, "signed bit string literal with length zero must be empty" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   tree_t p = parse();
+   fail_if(p == NULL);
+   fail_unless(tree_kind(p) == T_PACKAGE);
+
+   fail_unless(parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
 START_TEST(test_bitstring)
 {
    tree_t p, a;
@@ -2409,7 +2434,7 @@ START_TEST(test_bitstring_2008)
 
    const error_t expect[] = {
       { 13, "replacement character \% is not permitted in VHDL-2008" },
-      { 22, "invalid character '9' in string literal of type BIT_VECTOR" },
+      { 22, "digit '9' is not valid in a base 8 bit string" },
       { 24, "a bit string literal may not start or end with an underscore" },
       { 25, "a bit string literal may not start or end with an underscore" },
       { 26, "a bit string literal may not contain multiple consecutive "
@@ -7840,6 +7865,7 @@ Suite *get_parse_tests(void)
    tcase_add_test(tc_core, test_ir1045);
    tcase_add_test(tc_core, test_concat);
    tcase_add_test(tc_core, test_based);
+   tcase_add_test(tc_core, test_bitstring2);
    tcase_add_test(tc_core, test_bitstring);
    tcase_add_test(tc_core, test_bitstring_2008);
    tcase_add_test(tc_core, test_block);

@@ -649,6 +649,11 @@ static tree_t bit_string_to_literal(const char *str, const loc_t *loc)
             parse_error(loc, "invalid digit '%c' in bit string", *p);
             return t;
          }
+         else if (isdigit_iso88591(*p)) {
+            parse_error(loc, "digit '%c' is not valid in a base %d bit "
+                        "string", *p, base);
+            return t;
+         }
          else {
             const char rune[] = { '\'', *p, '\'', '\0' };
             digit = tree_new(T_REF);
@@ -681,7 +686,10 @@ static tree_t bit_string_to_literal(const char *str, const loc_t *loc)
       }
    }
 
-   if (pad == NULL && nbits < length)
+   if (mode == SIGNED && length == 0 && pad != NULL)
+      parse_error(CURRENT_LOC, "signed bit string literal with length zero "
+                  "must be empty");
+   else if (pad == NULL && nbits < length)
       parse_error(CURRENT_LOC, "signed bit string literal cannot be an "
                   "empty string");
    else if (length >= 0) {
