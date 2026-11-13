@@ -27862,7 +27862,8 @@ static void vlog_lower_var_init_process(vlog_gen_t *g, vlog_node_t v)
    assert(hops > 0);
 
    const type_info_t *ti = vlog_type_info(g, vlog_type(v));
-   mir_value_t value = vlog_lower_with_context(g, vlog_value(v), ti->type);
+   mir_value_t value = vlog_lower_with_context(
+      g, vlog_value(v), vlog_assign_context(g, ti->type, vlog_value(v)));
    mir_value_t upref = mir_build_var_upref(g->mu, hops, var.id);
    mir_build_store(g->mu, upref, vlog_lower_cast(g, ti->type, value));
 
@@ -27901,7 +27902,8 @@ static void vlog_lower_net_process(vlog_gen_t *g, vlog_node_t v)
    mir_set_cursor(g->mu, start_bb, MIR_APPEND);
 
    {
-      mir_value_t value = vlog_lower_with_context(g, vlog_value(v), ti->type);
+      mir_value_t value = vlog_lower_with_context(
+         g, vlog_value(v), vlog_assign_context(g, ti->type, vlog_value(v)));
       mir_value_t resize = vlog_lower_cast(g, ti->type, value);
 
       mir_value_t tmp = MIR_NULL_VALUE;
@@ -28491,7 +28493,8 @@ static void vlog_lower_port_map(vlog_gen_t *g, vlog_node_t v)
             value = vlog_lower_array_pattern(g, vlog_value(v), dims, ndims, ti);
          }
          else
-            value = vlog_lower_with_context(g, vlog_value(v), ti->type);
+            value = vlog_lower_with_context(
+               g, vlog_value(v), vlog_assign_context(g, ti->type, vlog_value(v)));
          assert(mir_is_vector(g->mu, value)
                 || mir_is(g->mu, value, MIR_TYPE_REAL));
 
@@ -29631,7 +29634,8 @@ static bool vlog_lower_struct_net_driver(vlog_gen_t *g, vlog_node_t v)
 
    const type_info_t *ti = vlog_type_info(g, vlog_type(nt));
    mir_value_t value = vlog_lower_cast(
-      g, ti->type, vlog_lower_with_context(g, vlog_value(v), ti->type));
+      g, ti->type, vlog_lower_with_context(
+         g, vlog_value(v), vlog_assign_context(g, ti->type, vlog_value(v))));
 
    mir_type_t t_array = mir_carray_type(g->mu, f.count, f.elem);
    mir_value_t buf = mir_build_array_ref(g->mu, vlog_get_temp(g, t_array),
@@ -29782,7 +29786,8 @@ static void vlog_lower_var_decl(vlog_gen_t *g, vlog_node_t v, tree_t wrap,
       }
       else {
          mir_value_t packed =
-            vlog_lower_with_context(g, vlog_value(v), ti->type);
+            vlog_lower_with_context(
+               g, vlog_value(v), vlog_assign_context(g, ti->type, vlog_value(v)));
          cast = vlog_lower_cast(g, ti->type, packed);
       }
       if (mir_get_class(g->mu, ti->unpacked) == MIR_TYPE_REAL)
@@ -29985,7 +29990,8 @@ static void vlog_store_local_init(vlog_gen_t *g, vlog_node_t d, mir_value_t var)
                   "not supported");
    }
    else if (vlog_has_value(d)) {
-      mir_value_t value = vlog_lower_with_context(g, vlog_value(d), ti->type);
+      mir_value_t value = vlog_lower_with_context(
+         g, vlog_value(d), vlog_assign_context(g, ti->type, vlog_value(d)));
       mir_value_t init = vlog_lower_cast(g, ti->type, value);
       const vlog_kind_t vk = vlog_kind(vlog_value(d));
       if (vlog_is_dynamic_type(vlog_type(d)) && vk != V_CLASS_NEW
@@ -31862,8 +31868,9 @@ mir_unit_t *vlog_lower_thunk(mir_context_t *mc, ident_t parent, vlog_node_t v)
          }
          else {
             const type_info_t *ti = vlog_type_info(&g, dt);
-            mir_value_t value = vlog_lower_with_context(&g, vlog_value(v),
-                                                        ti->type);
+            mir_value_t value = vlog_lower_with_context(
+               &g, vlog_value(v), vlog_assign_context(&g, ti->type,
+                                                      vlog_value(v)));
 
             mir_value_t cast = vlog_lower_cast(&g, ti->type, value);
 
