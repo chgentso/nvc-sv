@@ -4273,6 +4273,29 @@ START_TEST(test_attrspec)
 }
 END_TEST
 
+START_TEST(test_protop)
+{
+   set_standard(STD_19);
+
+   input_from_file(TESTDIR "/sem/protop.vhd");
+
+   const error_t expect[] = {
+      {  6, "binary operator must have two operands" },
+      {  7, "unary operator must have one operand" },
+      { 10, "binary operator must have two operands" },
+      { 14, "binary operator must have two operands" },
+      { 18, "unary operator must have one operand" },
+      { 30, "binary operator must have two operands" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   parse_and_check(T_ENTITY, T_ARCH);
+
+   check_expected_errors();
+}
+END_TEST
+
 START_TEST(test_undefarg)
 {
    set_standard(STD_08);
@@ -4493,6 +4516,7 @@ Suite *get_sem_tests(void)
    tcase_add_test(tc_core, test_entbody);
    tcase_add_test(tc_core, test_incfull);
    tcase_add_test(tc_core, test_attrspec);
+   tcase_add_test(tc_core, test_protop);
    suite_add_tcase(s, tc_core);
 
    return s;

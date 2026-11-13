@@ -1719,7 +1719,10 @@ static bool sem_check_func_ports(tree_t t, nametab_t *tab)
 
    ident_t id = tree_ident(t);
    if (is_operator_symbol(id)) {
-      const int nports = tree_ports(t);
+      // LRM 19 section 4.5.2: an operator declared as a method of a
+      // protected type has the protected object as its left operand
+      const bool method = (tree_flags(t) & TREE_F_PROTECTED) && std >= STD_19;
+      const int nports = tree_ports(t) + (method ? 1 : 0);
       const well_known_t wk = is_well_known(id);
       if (wk >= W_OP_AND && wk <= W_OP_XNOR) {
          if (std >= STD_08 && (nports < 1 || nports > 2))
