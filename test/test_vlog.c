@@ -3988,10 +3988,6 @@ END_TEST
 START_TEST(test_crash5)
 {
    const error_t expect[] = {
-      {  7, "'if0' is not a data type" },
-      {  7, "unexpected . while parsing package or generate item "
-         "declaration, expecting ;" },
-      {  8, "sorry, the type operator is not supported for this expression" },
       { -1, NULL }
    };
    expect_errors(expect);

@@ -924,7 +924,7 @@ static bool copy_all_pred(vlog_node_t v, void *ctx)
 }
 
 static vlog_node_t find_inst_list(vlog_node_t body, ident_t name,
-                                  vlog_node_t *inst)
+                                  bool indexed, vlog_node_t *inst)
 {
    // The instance list of an instance declared at the top level of the body
 
@@ -938,7 +938,7 @@ static vlog_node_t find_inst_list(vlog_node_t body, ident_t name,
       for (int j = 0; j < ninst; j++) {
          vlog_node_t it = vlog_stmt(list, j);
          if (vlog_kind(it) == V_MOD_INST && vlog_ident(it) == name
-             && vlog_ranges(it) == 0) {
+             && (vlog_ranges(it) > 0) == indexed) {
             *inst = it;
             return list;
          }
@@ -962,7 +962,8 @@ static vlog_node_t iface_instance_spec(iface_res_t *res, vlog_node_t list)
    hash_put(res->specs, list, (vlog_node_t)-1);   // Also breaks cycles
 
    vlog_node_t mod = vlog_find_interface(vlog_ident(list));
-   if (mod == NULL || vlog_kind(mod) != V_MODULE || fold_mir == NULL
+   if (mod == NULL || vlog_kind(mod) != V_MODULE
+       || !(vlog_flags(mod) & VLOG_F_INTERFACE) || fold_mir == NULL
        || res->depth > 8)
       return NULL;
 
@@ -1036,11 +1037,23 @@ static vlog_node_t iface_path_body(iface_res_t *res, vlog_node_t body,
    }
 
    vlog_node_t inst;
-   vlog_node_t list = find_inst_list(body, name, &inst);
+   vlog_node_t list = find_inst_list(body, name, vlog_params(mr) > 0, &inst);
    if (list == NULL)
       return NULL;
 
    return iface_instance_spec(res, list);
+}
+
+static bool is_aggregate_param(vlog_node_t d)
+{
+   if (!vlog_has_type(d))
+      return false;
+
+   vlog_node_t t = vlog_type(d);
+   while (vlog_kind(t) == V_TYPE_DECL && vlog_has_type(t))
+      t = vlog_type(t);
+
+   return vlog_kind(t) == V_STRUCT_DECL || vlog_kind(t) == V_UNION_DECL;
 }
 
 static vlog_node_t resolve_href_cb(vlog_node_t v, void *ctx)
@@ -1054,7 +1067,7 @@ static vlog_node_t resolve_href_cb(vlog_node_t v, void *ctx)
    vlog_node_t path[8];
    int npath = 0;
    for (vlog_node_t it = vlog_value(v); ; it = vlog_value(it)) {
-      if (vlog_kind(it) != V_MOD_REF || vlog_params(it) > 0
+      if (vlog_kind(it) != V_MOD_REF || vlog_params(it) > 1
           || npath == ARRAY_LEN(path))
          return v;
 
@@ -1079,7 +1092,11 @@ static vlog_node_t resolve_href_cb(vlog_node_t v, void *ctx)
          if (vlog_ident(d) != id || !vlog_has_value(d) || vlog_ranges(d) > 0)
             continue;
 
-         switch (vlog_kind(vlog_value(d))) {
+         vlog_kind_t vkind = vlog_kind(vlog_value(d));
+         if (vkind == V_NUMBER && is_aggregate_param(d))
+            vkind = V_PATTERN_EXPR;   // A packed structure has a number
+
+         switch (vkind) {
          case V_NUMBER:
          case V_REAL:
          case V_STRING:
@@ -1093,7 +1110,8 @@ static vlog_node_t resolve_href_cb(vlog_node_t v, void *ctx)
                if (lp == NULL) {
                   lp = vlog_new(V_LOCALPARAM);
                   vlog_set_loc(lp, vlog_loc(v));
-                  vlog_set_ident(lp, ident_sprintf("$iface.%s", istr(id)));
+                  vlog_set_ident(lp, ident_sprintf("$iface.%s#%u", istr(id),
+                                                 hash_members(res->hidden)));
                   vlog_set_type(lp, vlog_type(d));
                   vlog_set_value(lp, vlog_copy(vlog_value(d), copy_all_pred,
                                                NULL));
