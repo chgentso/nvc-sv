@@ -2751,3 +2751,4 @@ svclassfn1 verilog
 svmodportexpr2 verilog
 svunionsel1 verilog
 svinsidedollar1 verilog
+svstrrepl1 verilog

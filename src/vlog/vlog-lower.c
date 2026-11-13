@@ -15071,6 +15071,9 @@ static mir_value_t vlog_string_concat(vlog_gen_t *g, vlog_node_t v)
    for (int i = 0; i < nparams; i++) {
       vlog_node_t p = vlog_param(v, i);
       if (vlog_kind(p) == V_STRING || vlog_is_string(p)
+          || (vlog_kind(p) == V_CONCAT && vlog_has_value(p)
+              && vlog_params(p) > 0 && vlog_kind(vlog_param(p, 0)) == V_STRING
+              && !vlog_get_const(vlog_value(p), &(int64_t){ 0 }))
           || (vlog_kind(p) == V_COND_EXPR
               && (vlog_kind(vlog_left(p)) == V_STRING
                   || vlog_kind(vlog_right(p)) == V_STRING)))
