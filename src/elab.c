@@ -5781,6 +5781,158 @@ static void elab_note_index_config(tree_t gen, tree_t config)
    index_configs[n_index_configs++] = (elab_index_config_t){ gen, config };
 }
 
+static bool elab_is_incremental_binding(tree_t spec)
+{
+   // A binding indication with no entity aspect from a component
+   // configuration or a configuration specification
+
+   if (!tree_has_value(spec))
+      return false;
+
+   tree_t bind = tree_value(spec);
+   return tree_kind(bind) == T_BINDING && tree_class(bind) == C_DEFAULT
+      && !tree_has_ref(bind);
+}
+
+static void elab_merge_maps(tree_t out, tree_t entity, tree_t base,
+                            tree_t incr, bool generics)
+{
+   // Combine the generic or port maps of two binding indications
+   // according to LRM 08 section 7.3.2.1: an association in the
+   // incremental binding indication replaces any association in the
+   // primary binding indication for the same formal
+
+   const int nformals = generics ? tree_generics(entity) : tree_ports(entity);
+
+   tree_t *values LOCAL = xcalloc_array(MAX(nformals, 1), sizeof(tree_t));
+   tree_t src[2] = { base, incr };
+
+   tree_list_t extra = AINIT;
+
+   for (int pass = 0; pass < 2; pass++) {
+      const int nmaps = generics ? tree_genmaps(src[pass])
+         : tree_params(src[pass]);
+      for (int i = 0; i < nmaps; i++) {
+         tree_t m = generics ? tree_genmap(src[pass], i)
+            : tree_param(src[pass], i);
+
+         int pos = -1;
+         if (tree_subkind(m) == P_POS)
+            pos = tree_pos(m);
+         else {
+            tree_t name = tree_name(m);
+            if (tree_kind(name) == T_REF) {
+               ident_t id = tree_ident(name);
+               for (int j = 0; j < nformals; j++) {
+                  tree_t f = generics ? tree_generic(entity, j)
+                     : tree_port(entity, j);
+                  if (ident_casecmp(tree_ident(f), id)) {
+                     pos = j;
+                     break;
+                  }
+               }
+            }
+         }
+
+         if (pos >= 0 && pos < nformals)
+            values[pos] = tree_value(m);
+         else if (pass == 0)
+            APUSH(extra, m);   // Partial association of a formal
+         else {
+            error_at(tree_loc(m), "formal %s of the incremental binding "
+                     "indication is not %s of entity %pI",
+                     tree_subkind(m) == P_POS ? "(positional)"
+                     : istr(tree_ident(name_to_ref(tree_name(m)))),
+                     generics ? "a generic" : "a port", tree_ident(entity));
+         }
+      }
+   }
+
+   bool dense = true;
+   for (int i = 0; i < nformals; i++) {
+      if (values[i] == NULL) {
+         dense = false;
+         continue;
+      }
+
+      tree_t formal = generics ? tree_generic(entity, i) : tree_port(entity, i);
+
+      tree_t m = tree_new(T_PARAM);
+      tree_set_loc(m, tree_loc(values[i]));
+      tree_set_value(m, values[i]);
+
+      if (dense) {
+         tree_set_subkind(m, P_POS);
+         tree_set_pos(m, i);
+      }
+      else {
+         tree_set_subkind(m, P_NAMED);
+         tree_set_name(m, make_ref(formal));
+      }
+
+      if (generics)
+         tree_add_genmap(out, m);
+      else
+         tree_add_param(out, m);
+   }
+
+   for (int i = 0; i < extra.count; i++) {
+      if (generics)
+         tree_add_genmap(out, extra.items[i]);
+      else
+         tree_add_param(out, extra.items[i]);
+   }
+
+   ACLEAR(extra);
+}
+
+static tree_t elab_merge_binding(tree_t base, tree_t incr)
+{
+   // Result of combining the primary binding indication BASE with the
+   // incremental binding indication INCR
+
+   assert(tree_has_ref(base));
+
+   tree_t entity = primary_unit_of(tree_ref(base));
+
+   tree_t bind = tree_new(T_BINDING);
+   tree_set_loc(bind, tree_loc(base));
+   tree_set_class(bind, tree_class(base));
+   tree_set_ref(bind, tree_ref(base));
+   if (tree_has_ident(base))
+      tree_set_ident(bind, tree_ident(base));
+   if (tree_has_ident2(base))
+      tree_set_ident2(bind, tree_ident2(base));
+
+   elab_merge_maps(bind, entity, base, incr, true);
+   elab_merge_maps(bind, entity, base, incr, false);
+
+   return bind;
+}
+
+static tree_t elab_merge_spec(tree_t spec, tree_t base, tree_t bind)
+{
+   // New configuration specification with the binding BIND and the
+   // block configuration of SPEC
+
+   tree_t t = tree_new(T_SPEC);
+   tree_set_loc(t, tree_loc(spec));
+   if (tree_has_ident(spec))
+      tree_set_ident(t, tree_ident(spec));
+   if (tree_has_ident2(spec))
+      tree_set_ident2(t, tree_ident2(spec));
+   if (tree_has_ref(spec))
+      tree_set_ref(t, tree_ref(spec));
+   tree_set_value(t, bind);
+
+   tree_t from = tree_decls(spec) > 0 || base == NULL ? spec : base;
+   const int ndecls = tree_decls(from);
+   for (int i = 0; i < ndecls; i++)
+      tree_add_decl(t, tree_decl(from, i));
+
+   return t;
+}
+
 static void elab_bind_components_save(tree_t block, tree_t config,
                                       elab_spec_save_t *save);
 
@@ -5800,10 +5952,8 @@ static void elab_bind_components_save(tree_t block, tree_t config,
          {
             if (tree_class(s) != C_COMPONENT)
                break;
-            else if (tree_has_spec(s) && save == NULL)
-               break;
 
-            tree_t spec = NULL;
+            tree_t spec = NULL, incr = NULL;
             const int ndecls = tree_decls(config);
             for (int j = 0; j < ndecls; j++) {
                tree_t d = tree_decl(config, j);
@@ -5820,11 +5970,37 @@ static void elab_bind_components_save(tree_t block, tree_t config,
                   else if (ident_casecmp(match, tree_ident(s)))
                      apply = true;
                }
-               else if (spec == NULL)
+               else if (elab_is_incremental_binding(d) ? incr == NULL
+                        : spec == NULL)
                   apply = true;
 
-               if (apply) spec = d;
+               if (apply) {
+                  if (elab_is_incremental_binding(d))
+                     incr = d;
+                  else
+                     spec = d;
+               }
             }
+
+            if (incr != NULL) {
+               // Combine the incremental binding indication with the
+               // binding indication of a configuration specification;
+               // the default binding indication is combined when the
+               // component is elaborated
+               tree_t base = spec ?: tree_has_spec(s) ? tree_spec(s) : NULL;
+               if (base == NULL)
+                  spec = incr;
+               else if (!tree_has_value(base) || !tree_has_ref(tree_value(base)))
+                  spec = tree_decls(incr) == 0 ? NULL : elab_merge_spec(
+                     incr, base, tree_has_value(base) ? tree_value(base) : NULL);
+               else {
+                  tree_t bind = elab_merge_binding(tree_value(base),
+                                                   tree_value(incr));
+                  spec = elab_merge_spec(incr, base, bind);
+               }
+            }
+            else if (spec != NULL && tree_has_spec(s) && save == NULL)
+               break;   // Configuration specification takes precedence
 
             if (spec != NULL) {
                if (save != NULL) {
@@ -6345,6 +6521,17 @@ static void elab_component(tree_t inst, tree_t comp, const elab_ctx_t *ctx)
       }
 
       elab_black_box(tree_loc(inst), ident_from(full, '.') ?: full, lib_n);
+   }
+   else if (tree_has_spec(inst) && elab_is_incremental_binding(tree_spec(inst))) {
+      // Incremental binding indication of a component configuration
+      // combined with the default binding indication
+      tree_t spec = tree_spec(inst);
+      tree_t base = elab_default_binding(inst, ctx);
+      if (base == NULL)
+         return;   // Error already reported
+
+      tree_t bind = elab_merge_binding(base, tree_value(spec));
+      tree_set_spec(inst, elab_merge_spec(spec, NULL, bind));
    }
    else if (!tree_has_spec(inst)) {
       tree_t bind = elab_default_binding(inst, ctx);

@@ -598,9 +598,11 @@ static void dump_generic_map(tree_t t, int indent, const char *trailer)
 static void dump_binding(tree_t t, int indent)
 {
    dump_address(t);
-   print_syntax("#use %s", istr(tree_ident(t)));
-   if (tree_has_ident2(t))
-      print_syntax("(%s)", istr(tree_ident2(t)));
+   if (tree_has_ident(t)) {
+      print_syntax("#use %s", istr(tree_ident(t)));
+      if (tree_has_ident2(t))
+         print_syntax("(%s)", istr(tree_ident2(t)));
+   }
    if (tree_genmaps(t) > 0 || tree_params(t) > 0)
       print_syntax("\n");
    dump_generic_map(t, indent + 2, tree_params(t) > 0 ? "\n" : "");

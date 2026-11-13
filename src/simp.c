@@ -1907,8 +1907,11 @@ static tree_t simp_tree_local(tree_t t, void *_ctx)
       if (tree_subkind(t) != PACKAGE_MAP_MATCHING)
          return t;
       // Fall-through
-   case T_INSTANCE:
    case T_BINDING:
+      if (!tree_has_ref(t))
+         return t;   // Incremental binding indication
+      // Fall-through
+   case T_INSTANCE:
       simp_generic_map(t, tree_ref(t));
       return t;
    case T_BLOCK:

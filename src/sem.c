@@ -6676,6 +6676,9 @@ static bool sem_check_spec(tree_t t, nametab_t *tab)
    tree_t bind = tree_value(t);
    assert(tree_kind(bind) == T_BINDING);
 
+   if (!tree_has_ref(bind))
+      return true;   // Incremental binding checked when elaborated
+
    if (!sem_check(bind, tab))
       return false;
 

@@ -10126,7 +10126,7 @@ static tree_t p_entity_aspect(void)
    }
 }
 
-static tree_t p_binding_indication(tree_t comp)
+static tree_t p_binding_indication(tree_t comp, tree_t inherit)
 {
    // [ use entity_aspect ] [ generic_map_aspect ] [ port_map_aspect ]
 
@@ -10144,6 +10144,18 @@ static tree_t p_binding_indication(tree_t comp)
             unit = primary_unit_of(unit);
          }
       }
+   }
+   else if (comp != NULL && (peek() == tGENERIC || peek() == tPORT)) {
+      // LRM 08 section 7.3.2.1: an incremental binding indication has no
+      // entity aspect and is combined with the binding indication of
+      // the configuration specification or the default binding
+      // indication when the design is elaborated.  The formals are
+      // looked up in the component here and by name in the bound entity
+      // later.
+      bind = tree_new(T_BINDING);
+      tree_set_class(bind, C_DEFAULT);
+      tree_set_loc(bind, CURRENT_LOC);
+      unit = inherit != NULL ? primary_unit_of(inherit) : comp;
    }
 
    if (comp) {
@@ -10252,8 +10264,8 @@ static void p_configuration_specification(tree_t parent)
    push_scope(nametab);
 
    bool is_open = (peek() == tUSE && peek_nth(2) == tOPEN);
-   tree_t bind = p_binding_indication(comp);
-   if (!is_open && bind == NULL)
+   tree_t bind = p_binding_indication(comp, NULL);
+   if (!is_open && (bind == NULL || tree_class(bind) == C_DEFAULT))
       parse_error(CURRENT_LOC, "a binding indication in an explicit "
                   "configuration specification must contain an entity aspect");
    consume(tSEMI);
@@ -10380,6 +10392,63 @@ static void p_configuration_declarative_part(tree_t unit, tree_list_t *vunits)
    }
 }
 
+static tree_t find_inherited_binding_unit(tree_t config, ident_list_t *ids,
+                                          tree_t comp, bool for_block)
+{
+   // For a component configuration with no entity aspect find the design
+   // unit the instances are bound to by a configuration specification so
+   // a block configuration within can be resolved
+
+   if (comp == NULL || !tree_has_ref(config))
+      return NULL;
+
+   tree_t block = tree_ref(config);
+   switch (tree_kind(block)) {
+   case T_ARCH:
+   case T_BLOCK:
+   case T_FOR_GENERATE:
+      break;
+   default:
+      return NULL;
+   }
+
+   const int nstmts = tree_stmts(block);
+   for (int i = 0; i < nstmts; i++) {
+      tree_t s = tree_stmt(block, i);
+      if (tree_kind(s) != T_INSTANCE || tree_class(s) != C_COMPONENT
+          || !tree_has_ref(s) || tree_ref(s) != comp)
+         continue;
+
+      bool match = ids == NULL;
+      for (ident_list_t *it = ids; it != NULL && !match; it = it->next)
+         match = it->ident == well_known(W_ALL)
+            || ident_casecmp(it->ident, tree_ident(s));
+      if (!match)
+         continue;
+
+      if (tree_has_spec(s)) {
+         tree_t spec = tree_spec(s);
+         if (tree_has_value(spec) && tree_has_ref(tree_value(spec)))
+            return tree_ref(tree_value(spec));
+         return NULL;
+      }
+
+      // Default binding indication.  The choice of architecture is not
+      // specified there so a block configuration is not resolved
+      if (for_block)
+         return NULL;
+
+      ident_t name = ident_rfrom(tree_ident(comp), '.') ?: tree_ident(comp);
+      ident_t qual = ident_prefix(lib_name(lib_work()), name, '.');
+      tree_t entity = lib_get_qualified(qual);
+      if (entity != NULL && tree_kind(entity) == T_ENTITY)
+         return entity;
+      return NULL;
+   }
+
+   return NULL;
+}
+
 static void p_component_configuration(tree_t unit)
 {
    // for component_specification [ binding_indication ; ]
@@ -10400,14 +10469,33 @@ static void p_component_configuration(tree_t unit)
 
    push_scope(nametab);
 
+   // Without an entity aspect the binding is inherited from the
+   // configuration specification or default binding indication
+   tree_t inherit_unit = NULL, inherit_block = NULL;
+   if (peek() != tUSE) {
+      inherit_unit = find_inherited_binding_unit(unit, ids, comp, false);
+      inherit_block = find_inherited_binding_unit(unit, ids, comp, true);
+   }
+
    tree_t bind = NULL;
    bool have_bind = false;
    if (peek() != tEND && peek() != tFOR
        && !(peek() == tUSE && peek_nth(2) == tVUNIT)) {
-      bind = p_binding_indication(comp);
+      bind = p_binding_indication(comp, inherit_unit);
       have_bind = true;
       consume(tSEMI);
    }
+
+   if (comp != NULL && (!have_bind || (bind != NULL && !tree_has_ref(bind)
+                                       && !tree_has_ident(bind)))) {
+      if (bind == NULL) {
+         bind = tree_new(T_BINDING);
+         tree_set_class(bind, C_DEFAULT);
+         tree_set_loc(bind, CURRENT_LOC);
+      }
+   }
+   else
+      inherit_block = NULL;
 
    tree_list_t vunits = AINIT;
    peek();
@@ -10417,7 +10505,8 @@ static void p_component_configuration(tree_t unit)
 
    tree_t bcfg = NULL;
    if (peek() == tFOR) {
-      tree_t of = bind != NULL && tree_has_ref(bind) ? tree_ref(bind) : NULL;
+      tree_t of = bind != NULL && tree_has_ref(bind) ? tree_ref(bind)
+         : inherit_block;
       bcfg = p_block_configuration(of);
    }
 

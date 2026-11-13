@@ -20,7 +20,7 @@ end architecture arch;
 
 configuration conf of top is
   for arch
-    for others : ent                    -- OK (not yet supported)
+    for others : ent                    -- OK, incremental binding indication
       generic map (A => 4);
     end for;
   end for;

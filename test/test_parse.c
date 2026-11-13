@@ -7193,18 +7193,11 @@ START_TEST(test_issue1096)
 {
    input_from_file(TESTDIR "/parse/issue1096.vhd");
 
-   const error_t expect[] = {
-      { 24, "sorry, binding indication with generic map aspect and OPEN "
-        "entity aspect is not yet supported" },
-      { -1, NULL }
-   };
-   expect_errors(expect);
-
    parse_and_check(T_ENTITY, T_ENTITY, T_ARCH, T_CONFIGURATION);
 
    fail_unless(parse() == NULL);
 
-   check_expected_errors();
+   fail_if_errors();
 }
 END_TEST
 
