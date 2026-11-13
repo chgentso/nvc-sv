@@ -27428,6 +27428,10 @@ static void vlog_lower_sensitivity(vlog_gen_t *g, vlog_node_t v)
          case V_PARAM_DECL:
          case V_LOCALPARAM:
          case V_ENUM_NAME:
+         case V_TYPE_DECL:     // The argument of $bits
+         case V_STRUCT_DECL:
+         case V_UNION_DECL:
+         case V_ENUM_DECL:
             break;
          default:
             CANNOT_HANDLE(v);
