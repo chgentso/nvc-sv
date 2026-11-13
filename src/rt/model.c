@@ -4290,6 +4290,11 @@ static void model_cycle_body(rt_model_t *m)
       deferq_run(m, &m->nonblockq);
       (void)mtp_enter(MTP_OTHER);
       sv_procs_run++;   // May have changed state a poller depends on
+
+      // A net with several sources updates its driving value in the
+      // next delta cycle
+      if (heap_size(m->driving_heap) > 0)
+         m->next_is_delta = true;
    }
 
    if (!m->next_is_delta && m->reactiveq.count > 0) {
