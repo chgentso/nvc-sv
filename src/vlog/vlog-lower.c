@@ -14334,7 +14334,8 @@ static void vlog_lower_case_inside(vlog_gen_t *g, vlog_node_t v,
    }
 
    mir_type_t t_vec = mir_vec4_type(g->mu, width, is_signed);
-   mir_value_t value = vlog_lower_cast(g, t_vec, vlog_lower_rvalue(g, arg));
+   mir_value_t value = vlog_lower_cast(
+      g, t_vec, vlog_lower_with_context(g, arg, t_vec));
 
    mir_value_t *tests LOCAL = xmalloc_array(nitems, sizeof(mir_value_t));
    mir_block_t *blocks LOCAL = xmalloc_array(nitems, sizeof(mir_block_t));
@@ -26215,9 +26216,8 @@ static mir_value_t vlog_inside_match(vlog_gen_t *g, vlog_node_t item,
       op = MIR_VEC_CASEX_EQ;
 
    // An unbased unsized literal fills the width of the comparison (5.7.1)
-   mir_value_t cmp = vlog_is_fill_literal(item)
-      ? vlog_lower_with_context(g, item, t_vec)
-      : vlog_lower_cast(g, t_vec, vlog_lower_rvalue(g, item));
+   mir_value_t cmp = vlog_lower_cast(g, t_vec,
+                                     vlog_lower_with_context(g, item, t_vec));
    return mir_build_binary(g->mu, op, t_vec, value, cmp);
 }
 
@@ -26461,7 +26461,8 @@ static mir_value_t vlog_lower_inside(vlog_gen_t *g, vlog_node_t v)
    mir_type_t t_vec = mir_vec4_type(g->mu, width, is_signed);
    mir_type_t t_bit = mir_vec4_type(g->mu, 1, false);
 
-   mir_value_t value = vlog_lower_cast(g, t_vec, vlog_lower_rvalue(g, arg));
+   mir_value_t value = vlog_lower_cast(
+      g, t_vec, vlog_lower_with_context(g, arg, t_vec));
    mir_value_t result = mir_const_vec(g->mu, t_bit, 0, 0);
 
    for (int i = 0; i < nparams; i++) {
