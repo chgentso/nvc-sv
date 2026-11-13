@@ -1630,11 +1630,12 @@ static void vlog_sym_fields(sym_ctx_t *sc, vlog_node_t d, const char *name,
    if (!sym_name_pos(loc, name, false, false, &l, &c, &n))
       return;
 
-   const bool is_port = vlog_kind(d) == V_PORT_DECL;
+   const bool is_iface = vlog_kind(d) == V_IFACE_PORT;
+   const bool is_port = vlog_kind(d) == V_PORT_DECL || is_iface;
    const bool is_param = !strcmp(kind, "parameter")
       || !strcmp(kind, "localparam");
 
-   if (is_port) {
+   if (is_port && !is_iface) {
       switch (vlog_subkind(d)) {
       case V_PORT_INPUT:  sym_extra_str(sc, "direction", "input"); break;
       case V_PORT_OUTPUT: sym_extra_str(sc, "direction", "output"); break;
@@ -1649,7 +1650,7 @@ static void vlog_sym_fields(sym_ctx_t *sc, vlog_node_t d, const char *name,
       sym_extra_str(sc, "type", type);
    }
 
-   if (is_port) {
+   if (is_port && !is_iface) {
       char *unpacked LOCAL = vlog_sym_unpacked_text(loc, name);
       sym_extra_str(sc, "unpacked", unpacked);
 
@@ -1677,6 +1678,68 @@ static void vlog_sym_fields(sym_ctx_t *sc, vlog_node_t d, const char *name,
    }
 }
 
+static void vlog_sym_type_members(sym_ctx_t *sc, vlog_node_t type,
+                                  const char *tname, const char *path,
+                                  const char *tdecl);
+
+static vlog_node_t vlog_sym_last_type = NULL;
+
+// The literals of an enumeration and the members of a structure or union
+// which a declaration gives names to
+static void vlog_sym_type_members(sym_ctx_t *sc, vlog_node_t type,
+                                  const char *tname, const char *path,
+                                  const char *tdecl)
+{
+   switch (vlog_kind(type)) {
+   case V_ENUM_DECL:
+      {
+         if (tdecl == NULL && vlog_sym_last_type == type)
+            return;   // Shared by several variables
+
+         vlog_sym_last_type = type;
+
+         const int ndecls = vlog_decls(type);
+         for (int i = 0; i < ndecls; i++) {
+            vlog_node_t lit = vlog_decl(type, i);
+            if (!vlog_has_ident(lit))
+               continue;
+
+            sym_extra_str(sc, "type", tname);
+            sym_add(sc, sym_simple(vlog_ident(lit)), "enum-literal", NULL,
+                    path, vlog_loc(lit));
+         }
+      }
+      break;
+   case V_STRUCT_DECL:
+   case V_UNION_DECL:
+      {
+         if (tdecl == NULL && vlog_sym_last_type == type)
+            return;
+
+         vlog_sym_last_type = type;
+
+         char *container LOCAL = tdecl != NULL
+            ? xasprintf("%s.%s", path, tdecl) : xstrdup(path);
+
+         const int ndecls = vlog_decls(type);
+         for (int i = 0; i < ndecls; i++) {
+            vlog_node_t m = vlog_decl(type, i);
+            if (!vlog_has_ident(m))
+               continue;
+
+            sym_add(sc, sym_simple(vlog_ident(m)), "field", NULL, container,
+                    vlog_loc(m));
+
+            if (vlog_has_type(m) && vlog_kind(vlog_type(m)) != V_TYPE_DECL)
+               vlog_sym_type_members(sc, vlog_type(m), NULL, container, NULL);
+         }
+      }
+      break;
+   default:
+      break;
+   }
+}
+
 static void vlog_sym_decl(sym_ctx_t *sc, vlog_node_t d, const char *path)
 {
    const char *kind = NULL, *detail = NULL;
@@ -1692,6 +1755,9 @@ static void vlog_sym_decl(sym_ctx_t *sc, vlog_node_t d, const char *path)
       default: break;
       }
       detail = NULL;   // Taken from the source text
+      break;
+   case V_IFACE_PORT:
+      kind = "port";
       break;
    case V_TF_PORT_DECL:
       kind = "param";
@@ -1766,6 +1832,23 @@ static void vlog_sym_decl(sym_ctx_t *sc, vlog_node_t d, const char *path)
    const char *name = sym_simple(vlog_ident(d));
    vlog_sym_fields(sc, d, name, kind);
    sym_add(sc, name, kind, detail, path, vlog_loc(d));
+
+   switch (vlog_kind(d)) {
+   case V_TYPE_DECL:
+      if (!(vlog_flags(d) & VLOG_F_TYPEPARAM) && vlog_has_type(d))
+         vlog_sym_type_members(sc, vlog_type(d), name, path, name);
+      break;
+   case V_VAR_DECL:
+   case V_NET_DECL:
+   case V_PORT_DECL:
+      // The members of an enumeration or structure declared with the
+      // variable
+      if (vlog_has_type(d) && vlog_kind(vlog_type(d)) != V_TYPE_DECL)
+         vlog_sym_type_members(sc, vlog_type(d), NULL, path, NULL);
+      break;
+   default:
+      break;
+   }
 
    if (scope) {
       char *sub LOCAL = xasprintf("%s.%s", path, name);

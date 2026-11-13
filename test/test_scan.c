@@ -719,6 +719,30 @@ START_TEST(test_symbols_ports)
 }
 END_TEST
 
+START_TEST(test_symbols_members)
+{
+   static const char *const parts[] = {
+      "{\"name\":\"SM_A\",\"kind\":\"enum-literal\",\"container\":\"WORK.SM_PKG\","
+      "\"type\":\"sm_e_t\"",
+      "{\"name\":\"SM_B\",\"kind\":\"enum-literal\",\"container\":\"WORK.SM_PKG\","
+      "\"type\":\"sm_e_t\"",
+      "{\"name\":\"SM_ANON\",\"kind\":\"enum-literal\",\"container\":\"WORK.SM_PKG\"",
+      "{\"name\":\"x\",\"kind\":\"field\",\"detail\":\"logic [3:0]\",\"container\":"
+      "\"WORK.SM_PKG.sm_s_t\"",
+      "{\"name\":\"y\",\"kind\":\"field\",\"detail\":\"logic\",\"container\":"
+      "\"WORK.SM_PKG.sm_s_t\"",
+      // Interface ports
+      "{\"name\":\"bi\",\"kind\":\"port\",\"detail\":\"sm_if.mp\",\"container\":"
+      "\"WORK.SM_TOP\",\"type\":\"sm_if.mp\"",
+      "{\"name\":\"other\",\"kind\":\"port\",\"detail\":\"sm_if\",\"container\":"
+      "\"WORK.SM_TOP\",\"type\":\"sm_if\"",
+   };
+
+   scan_symbols_contain(SCAN_FILE("symmembers.sv"), parts, ARRAY_LEN(parts),
+                        true);
+}
+END_TEST
+
 START_TEST(test_bigarena)
 {
    // An aggregate too large for the default arena must not be fatal
@@ -881,6 +905,7 @@ Suite *get_scan_tests(void)
    tcase_add_test(tc, test_symbols_vhdl);
    tcase_add_test(tc, test_symbols_vlog);
    tcase_add_test(tc, test_symbols_ports);
+   tcase_add_test(tc, test_symbols_members);
    tcase_add_test(tc, test_bigarena);
    tcase_add_test(tc, test_m5_vlog_requires);
    tcase_add_test(tc, test_m5_vlog_generate);
