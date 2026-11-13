@@ -548,6 +548,39 @@ static int target_width(vlog_node_t v)
    }
 }
 
+static void width_fix(diag_t *d, vlog_node_t value, int lw)
+{
+   // Select the low bits of a vector which is named on its own
+
+   if (vlog_kind(value) != V_REF || !vlog_has_ref(value) || lw <= 0)
+      return;
+
+   vlog_node_t decl = vlog_ref(value);
+   switch (vlog_kind(decl)) {
+   case V_VAR_DECL:
+   case V_NET_DECL:
+   case V_PORT_DECL:
+      break;
+   default:
+      return;
+   }
+
+   if (vlog_ranges(decl) != 0 || !vlog_has_type(decl))
+      return;
+
+   vlog_node_t type = vlog_type(decl);
+   if (vlog_kind(type) != V_DATA_TYPE || vlog_ranges(type) != 1)
+      return;
+
+   int64_t left, right;
+   if (!vlog_bounds(vlog_range(type, 0), &left, &right) || right != 0
+       || left < lw)
+      return;
+
+   char *text LOCAL = xasprintf("%s[%d:0]", istr(vlog_ident(value)), lw - 1);
+   diag_fix(d, vlog_loc(value), text, "Select the low bits");
+}
+
 static void check_assign_width(vlog_node_t target, vlog_node_t value,
                                const char *what)
 {
@@ -563,8 +596,13 @@ static void check_assign_width(vlog_node_t target, vlog_node_t value,
    if (lint_suppressed(vlog_loc(target), LINT_WIDTH))
       return;
 
-   lint_warn(loc, LINT_WIDTH, "%s truncates %d bits to %d bits", what,
-             rw, lw);
+   diag_t *d = lint_diag(loc, LINT_WIDTH);
+   if (d == NULL)
+      return;
+
+   diag_printf(d, "%s truncates %d bits to %d bits", what, rw, lw);
+   width_fix(d, value, lw);
+   diag_emit(d);
 }
 
 static void width_cb(vlog_node_t v, void *context)
@@ -607,8 +645,14 @@ void vlog_lint_port(vlog_node_t port, vlog_node_t value, const loc_t *loc)
       if (vw <= pw)
          return;
 
-      lint_warn(loc, LINT_WIDTH, "connection to input port '%s' truncates "
-                "%d bits to %d bits", istr(vlog_ident(port)), vw, pw);
+      diag_t *d = lint_diag(loc, LINT_WIDTH);
+      if (d == NULL)
+         return;
+
+      diag_printf(d, "connection to input port '%s' truncates %d bits to "
+                  "%d bits", istr(vlog_ident(port)), vw, pw);
+      width_fix(d, value, pw);
+      diag_emit(d);
    }
 }
 
