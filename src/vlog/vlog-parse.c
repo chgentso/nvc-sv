@@ -23500,6 +23500,30 @@ static bool param_is_type(ident_t name, int pos)
    return false;
 }
 
+static bool scan_type_cast(void)
+{
+   // A data type followed by a tick is a cast expression
+
+   int n = 2;
+   if (peek_nth(n) == tSIGNED || peek_nth(n) == tUNSIGNED)
+      n++;
+
+   while (peek_nth(n) == tLSQUARE) {
+      int depth = 0;
+      do {
+         const token_t tok = peek_nth(n++);
+         if (tok == tEOF)
+            return false;
+         else if (tok == tLSQUARE)
+            depth++;
+         else if (tok == tRSQUARE)
+            depth--;
+      } while (depth > 0);
+   }
+
+   return peek_nth(n) == tTICK && peek_nth(n + 1) == tLPAREN;
+}
+
 static vlog_node_t p_param_expression(ident_t name, int pos)
 {
    // mintypmax_expression | data_type | $
@@ -23515,7 +23539,7 @@ static vlog_node_t p_param_expression(ident_t name, int pos)
    if (param_is_type(name, pos)
        || (param_target == NULL
            && !scan(tCONST, tVAR, tAUTOMATIC, tSTATIC)
-           && scan_type_declaration()))
+           && scan_type_declaration() && !scan_type_cast()))
       return p_data_type();
 
    return p_expression();   // TODO
