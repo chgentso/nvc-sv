@@ -6212,7 +6212,8 @@ static void lower_fill_target_parts(lower_unit_t *lu, tree_t target,
       // written
       int *order LOCAL = xmalloc_array(MAX(nassocs, 1), sizeof(int));
       int64_t *key LOCAL = xmalloc_array(MAX(nassocs, 1), sizeof(int64_t));
-      bool sortable = !is_record && ndims == 1;
+      bool sortable = !is_record && ndims == 1
+         && !type_is_unconstrained(target_type);
       int64_t left = 0;
       bool downto = false;
       if (sortable) {
