@@ -5,7 +5,7 @@ architecture rtl of fsm4 is
   type st_t is (IDLE, RUN);
   signal reg_only : st_t;
   signal n1, n2 : st_t;
-  signal ext : ext_t;
+  signal ext, ret_state : ext_t;
   constant A : std_logic_vector(1 downto 0) := "00";
   constant B : std_logic_vector(1 downto 0) := "01";
   signal two : std_logic_vector(1 downto 0);

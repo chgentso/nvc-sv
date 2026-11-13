@@ -320,6 +320,24 @@ START_TEST(test_fsm_vhdl_negative)
 }
 END_TEST
 
+START_TEST(test_fsm_vhdl_untyped_target)
+{
+   // A name that nothing declares is a state of the type we cannot see, one
+   // that is declared is a computed target
+
+   set_standard(STD_08);
+
+   const char *parts[] = {
+      "\"typed\":false",
+      "{\"from\":[\"RUN\"],\"to\":\"DONE\",\"kind\":\"case\"",
+      "{\"name\":\"DONE\"}",
+      "{\"from\":[\"RUN\"],\"expr\":\"other\",\"kind\":\"case\"",
+   };
+
+   fsm_check(SCAN_FILE("fsm6.vhd"), 1, parts, ARRAY_LEN(parts), 0);
+}
+END_TEST
+
 START_TEST(test_fsm_vhdl_errors)
 {
    // A syntax error before, inside and after the machine
@@ -1302,6 +1320,7 @@ Suite *get_scan_tests(void)
    tcase_add_test(tc, test_fsm_vhdl_record);
    tcase_add_test(tc, test_fsm_vhdl_constants);
    tcase_add_test(tc, test_fsm_vhdl_negative);
+   tcase_add_test(tc, test_fsm_vhdl_untyped_target);
    tcase_add_test(tc, test_fsm_vhdl_errors);
    tcase_add_test(tc, test_fsm_vlog_one_process);
    tcase_add_test(tc, test_fsm_vlog_untyped);

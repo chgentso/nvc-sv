@@ -925,18 +925,6 @@ typedef struct {
    const char    *kind;
 } from_t;
 
-// Without the type, a name that is not a choice of the case may be a
-// signal rather than a literal
-static bool vhdl_unknown_name(walk_t *w, ident_t key)
-{
-   if (w->typed || w->consts)
-      return false;
-   for (unsigned i = 0; i < w->nstates; i++)
-      if (w->states[i].key == key)
-         return false;
-   return true;
-}
-
 static void vhdl_value(walk_t *w, tree_t assign, tree_t value,
                        const from_t *from)
 {
@@ -950,7 +938,7 @@ static void vhdl_value(walk_t *w, tree_t assign, tree_t value,
 
    ident_t key;
    char *spell = NULL;
-   if (vhdl_state_name(w, value, &key, &spell) && !vhdl_unknown_name(w, key)) {
+   if (vhdl_state_name(w, value, &key, &spell)) {
       state_t *st = vhdl_state(w, key, spell, NULL);
       if (st != NULL)
          vhdl_emit(w, from->kind, assign, st->spell, NULL, from->from,
