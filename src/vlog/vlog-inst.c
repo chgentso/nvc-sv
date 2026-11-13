@@ -167,6 +167,9 @@ static bool copy_instance_pred(vlog_node_t v, void *ctx)
          return true;
       case V_PORT_DECL:
          return is_event_formal(vlog_ref(v));
+      case V_FUNC_DECL:
+         // The name of a function assigned to give its result
+         return true;
       case V_VAR_DECL:
       case V_LOCAL_DECL:
          {
