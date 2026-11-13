@@ -2757,3 +2757,4 @@ wavevlogport2 wave,verilog
 attrsig1        normal
 aggtarget2d     normal
 partial3        normal
+visibility24    normal

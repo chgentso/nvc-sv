@@ -984,6 +984,8 @@ static symbol_t *make_visible(scope_t *s, ident_t name, tree_t decl,
       else if (dd->kind == T_LIBRARY) {
          if (tkind == T_LIBRARY && tree_ident(decl) == name)
             return sym;   // Ignore redundant library declarations
+         else if (kind == POTENTIAL && name == well_known(W_WORK))
+            kind = HIDDEN;   // Implicit library clause hides use-visible name
          else
             dd->visibility = HIDDEN;
       }
