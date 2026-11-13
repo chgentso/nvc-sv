@@ -3,6 +3,8 @@
 // a negative signed integer stays negative.
 module svrealmix1;
   real r;
+  reg [7:0] u = 8'hff;
+  reg signed [7:0] sg = 8'hff;
   initial begin
     r = -1 * 1.5;
     if (r != -1.5) $error("FAIL a %f", r);
@@ -10,6 +12,10 @@ module svrealmix1;
     if (r != 1.17) $error("FAIL b %f", r);
     if ((1'bx >= (-1 * -1.17)) !== 1'b0) $error("FAIL c");
     if ((-2 + 0.5) != -1.5) $error("FAIL d");
+    r = u * 1.0;
+    if (r != 255.0) $error("FAIL e %f", r);
+    r = sg * 1.0;
+    if (r != -1.0) $error("FAIL f %f", r);
     $display("PASSED");
   end
 endmodule

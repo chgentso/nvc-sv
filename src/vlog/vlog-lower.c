@@ -4853,6 +4853,7 @@ static mir_value_t vlog_lower_binary(vlog_gen_t *g, vlog_node_t v,
    const bool is_logical = op == V_BINARY_LOG_AND || op == V_BINARY_LOG_OR;
 
    mir_type_t type = context;
+   mir_type_t ltype_ctx = MIR_NULL_TYPE, rtype_ctx = MIR_NULL_TYPE;
    if (!rhs_self_determined) {
       int size = MAX(vlog_width(lhs_expr), vlog_width(rhs_expr));
       // The operands of a relational or equality operator are signed
@@ -4868,11 +4869,15 @@ static mir_value_t vlog_lower_binary(vlog_gen_t *g, vlog_node_t v,
       }
 
       type = mir_vec4_type(g->mu, size, issigned);
+      ltype_ctx = rtype_ctx = type;
 
-      // An integral operand is converted to real as it is, not as an
-      // operand of the width and signedness of the expression
-      if (vlog_is_real(lhs_expr) || vlog_is_real(rhs_expr))
-         type = MIR_NULL_TYPE;
+      // An integral operand is converted to real by its own signedness,
+      // not by that of the expression, which is not signed unless all of
+      // its operands are
+      if (vlog_is_real(lhs_expr) || vlog_is_real(rhs_expr)) {
+         ltype_ctx = mir_vec4_type(g->mu, size, vlog_is_signed(lhs_expr));
+         rtype_ctx = mir_vec4_type(g->mu, size, vlog_is_signed(rhs_expr));
+      }
    }
 
    // The type of null comes from the other operand
@@ -4888,7 +4893,8 @@ static mir_value_t vlog_lower_binary(vlog_gen_t *g, vlog_node_t v,
          left = vlog_lower_cast(g, type, left);
    }
    else
-      left = vlog_lower_with_context(g, lhs_expr, type);
+      left = vlog_lower_with_context(g, lhs_expr,
+                                     mir_is_null(ltype_ctx) ? type : ltype_ctx);
 
    // For short-circuiting operators check if the RHS can have side effects
    mir_block_t guard_bb = MIR_NULL_BLOCK, skip_bb = MIR_NULL_BLOCK;
@@ -4930,7 +4936,8 @@ static mir_value_t vlog_lower_binary(vlog_gen_t *g, vlog_node_t v,
          right = vlog_lower_cast(g, type, right);
    }
    else
-      right = vlog_lower_with_context(g, rhs_expr, type);
+      right = vlog_lower_with_context(g, rhs_expr,
+                                      mir_is_null(rtype_ctx) ? type : rtype_ctx);
 
    mir_value_t result;
    if (mir_is_vector(g->mu, left) && mir_is_vector(g->mu, right)) {
