@@ -2764,3 +2764,8 @@ lintvlogrules1 shell
 lintvlogrules2 shell
 lintvlogrules3 shell
 lintvlogwidth2 shell
+linterr1 shell
+linterr2 shell
+linterr3 shell
+linterr4 shell
+linterr5 shell

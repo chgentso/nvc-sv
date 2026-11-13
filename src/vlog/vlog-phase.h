@@ -43,6 +43,7 @@ vlog_node_t vlog_generate_instance(vlog_node_t v, vlog_node_t genvar,
                                    int32_t value, ident_t prefix);
 void vlog_fold(vlog_node_t mod, mir_context_t *mc, jit_t *j);
 void vlog_lint(vlog_node_t unit);
+void vlog_lint_partial(vlog_node_t unit);
 void vlog_lint_design(vlog_node_t mod);
 void vlog_lint_port(vlog_node_t port, vlog_node_t value, const loc_t *loc);
 void vlog_set_fold_context(mir_context_t *mc, jit_t *j);

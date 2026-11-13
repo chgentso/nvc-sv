@@ -32,6 +32,47 @@
 #include <string.h>
 
 ////////////////////////////////////////////////////////////////////////////////
+// Units with errors
+
+// When a unit has errors only the constructs that they do not touch are
+// checked: the analysis-phase rules ask trusted() about the statement,
+// block or declaration they are about to report on.
+static struct {
+   bool         partial;
+   bool         syntax;    // The unit has a syntax error
+   const loc_t *unit;
+   hset_t      *seen;      // Constructs that were not checked
+   unsigned     skipped;
+} partial_ctx;
+
+static void unresolved_cb(vlog_node_t v, void *context)
+{
+   bool *bad = context;
+   if (vlog_kind(v) == V_REF && !vlog_has_ref(v))
+      *bad = true;
+}
+
+static bool trusted(vlog_node_t v)
+{
+   if (!partial_ctx.partial)
+      return true;
+
+   bool ok = lint_trusted(partial_ctx.unit, vlog_loc(v));
+   if (ok) {
+      bool bad = false;
+      vlog_visit_only(v, unresolved_cb, &bad, V_REF);
+      ok = !bad;
+   }
+
+   if (!ok && !hset_contains(partial_ctx.seen, v)) {
+      hset_insert(partial_ctx.seen, v);
+      partial_ctx.skipped++;
+   }
+
+   return ok;
+}
+
+////////////////////////////////////////////////////////////////////////////////
 // Unused and undriven declarations
 
 enum {
@@ -646,6 +687,21 @@ static void width_cb(vlog_node_t v, void *context)
    switch (vlog_kind(v)) {
    case V_BASSIGN:
    case V_NBASSIGN:
+   case V_ASSIGN:
+   case V_NET_DECL:
+   case V_VAR_DECL:
+   case V_PARAM_DECL:
+   case V_LOCALPARAM:
+      if (!trusted(v))
+         return;
+      break;
+   default:
+      return;
+   }
+
+   switch (vlog_kind(v)) {
+   case V_BASSIGN:
+   case V_NBASSIGN:
       check_assign_width(vlog_target(v), vlog_value(v), "assignment");
       break;
    case V_ASSIGN:
@@ -654,7 +710,6 @@ static void width_cb(vlog_node_t v, void *context)
       break;
    case V_NET_DECL:
    case V_VAR_DECL:
-      // Nets and variables the compiler makes up are not reported
       if (vlog_has_value(v) && istr(vlog_ident(v))[0] != '$'
           && integral_decl(v))
          check_width(vlog_loc(v), vlog_width(v), vlog_value(v),
@@ -1006,7 +1061,7 @@ static void check_latches(vlog_node_t body, const loc_t *loc, const char *what)
 
 static void latch_cb(vlog_node_t v, void *context)
 {
-   if (vlog_kind(v) != V_ALWAYS || vlog_stmts(v) != 1)
+   if (vlog_kind(v) != V_ALWAYS || vlog_stmts(v) != 1 || !trusted(v))
       return;
 
    switch (vlog_subkind(v)) {
@@ -1038,6 +1093,8 @@ static void implicit_cb(vlog_node_t v, void *context)
        || !(vlog_flags(vlog_type(v)) & VLOG_F_IMPLICIT_NET))
       return;
    else if (istr(vlog_ident(v))[0] == '$')
+      return;
+   else if (partial_ctx.partial && (partial_ctx.syntax || !trusted(v)))
       return;
 
    lint_warn(vlog_loc(v), LINT_IMPLICIT, "net '%s' is declared implicitly by "
@@ -1134,7 +1191,7 @@ static void check_mixed(vlog_node_t unit)
    const int nstmts = vlog_stmts(unit);
    for (int i = 0; i < nstmts; i++) {
       vlog_node_t s = vlog_stmt(unit, i);
-      if (vlog_kind(s) == V_ALWAYS)
+      if (vlog_kind(s) == V_ALWAYS && trusted(s))
          vlog_visit(s, mixed_cb, &list);
    }
 
@@ -1175,7 +1232,7 @@ static void case_default_cb(vlog_node_t v, void *context)
 
 static void case_comb_cb(vlog_node_t v, void *context)
 {
-   if (vlog_kind(v) != V_ALWAYS || vlog_stmts(v) != 1)
+   if (vlog_kind(v) != V_ALWAYS || vlog_stmts(v) != 1 || !trusted(v))
       return;
 
    switch (vlog_subkind(v)) {
@@ -1274,7 +1331,7 @@ static void check_multidriven(vlog_node_t unit)
    const int nstmts = vlog_stmts(unit);
    for (int i = 0; i < nstmts; i++) {
       vlog_node_t s = vlog_stmt(unit, i);
-      if (vlog_kind(s) != V_ALWAYS)
+      if (vlog_kind(s) != V_ALWAYS || !trusted(s))
          continue;
 
       ctx.block = s;
@@ -1287,7 +1344,7 @@ static void check_multidriven(vlog_node_t unit)
    ACLEAR(list);
 }
 
-void vlog_lint(vlog_node_t unit)
+static void lint_unit(vlog_node_t unit)
 {
    if (lint_enabled(LINT_WIDTH))
       vlog_visit(unit, width_cb, NULL);
@@ -1306,4 +1363,35 @@ void vlog_lint(vlog_node_t unit)
 
    if (lint_enabled(LINT_MULTI) && vlog_kind(unit) == V_MODULE)
       check_multidriven(unit);
+}
+
+void vlog_lint(vlog_node_t unit)
+{
+   lint_unit(unit);
+}
+
+void vlog_lint_partial(vlog_node_t unit)
+{
+   // The unit has errors: only report what they do not touch
+
+   const loc_t *loc = vlog_loc(unit);
+   if (!lint_enabled(LINT_ALL) || loc_invalid_p(loc))
+      return;
+
+   partial_ctx.partial = true;
+   partial_ctx.unit = loc;
+   partial_ctx.syntax = lint_unit_has_syntax_error(loc);
+   partial_ctx.seen = hset_new(16);
+
+   lint_unit(unit);
+
+   const unsigned skipped = partial_ctx.skipped;
+
+   hset_free(partial_ctx.seen);
+   memset(&partial_ctx, 0, sizeof(partial_ctx));
+
+   // The note goes at the start of the unit
+   loc_t at = *loc;
+   at.line_delta = 0;
+   lint_partial_note(&at, skipped);
 }

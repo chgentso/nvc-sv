@@ -233,7 +233,10 @@ static void analyse_file(const char *file, cmd_state_t *state)
 
          lib_t work = lib_work();
          vlog_node_t module;
-         while ((module = vlog_parse())) {
+         int base_errors = 0, base_syntax = 0;
+         while (base_errors = error_count(),
+                base_syntax = lint_syntax_error_count(),
+                (module = vlog_parse())) {
             if (error_count() == 0) {
                vlog_check(module);
 
@@ -245,6 +248,23 @@ static void analyse_file(const char *file, cmd_state_t *state)
                   vlog_fold(module, state->mir, state->jit);
                   lib_put_vlog(work, module);
                }
+               else if (opt_get_int(OPT_LINT))
+                  vlog_lint_partial(module);
+            }
+            else if (opt_get_int(OPT_LINT)) {
+               // With errors in the file the rest of the module is still
+               // checked for what they do not touch.  Nothing is stored.
+               if (error_count() == base_errors
+                   && lint_syntax_error_count() == base_syntax) {
+                  vlog_check(module);
+
+                  if (error_count() == base_errors)
+                     vlog_lint(module);
+                  else
+                     vlog_lint_partial(module);
+               }
+               else
+                  vlog_lint_partial(module);
             }
          }
       }

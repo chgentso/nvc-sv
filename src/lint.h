@@ -89,7 +89,16 @@ bool lint_span_has_error(const loc_t *span);
 // A syntax error lies inside the lines of the span
 bool lint_span_has_syntax_error(const loc_t *span);
 
-// The location is at or after the first syntax error inside the unit
+// Syntax errors seen in the file so far, including those that were not
+// reported because the parser was recovering
+unsigned lint_syntax_error_count(void);
+
+// The unit has a syntax error.  A unit is linted as soon as it is parsed, so
+// the errors seen at or after the line where it starts are its own: its
+// location is not used for its end.
+bool lint_unit_has_syntax_error(const loc_t *unit);
+
+// The location is at or after the first syntax error of the unit
 bool lint_after_syntax_error(const loc_t *unit, const loc_t *at);
 
 // Neither an error in the construct nor a syntax error before it in the

@@ -255,15 +255,14 @@ bool lint_after_syntax_error(const loc_t *unit, const loc_t *at)
    if (unlocated_error || loc_invalid_p(unit) || loc_invalid_p(at))
       return true;
 
-   const unsigned ulast = unit->first_line + unit->line_delta;
-
-   // Find the first syntax error that lies inside the unit
+   // A unit is checked as soon as it has been parsed so the errors seen
+   // so far at or after its start are the ones inside it.  The location of
+   // the unit is not reliable for its end.
    bool found = false;
    unsigned line = 0, col = 0;
    for (unsigned i = 0; i < syntax_errors.count; i++) {
       const error_region_t *r = &(syntax_errors.items[i]);
-      if (r->file != unit->file_ref || r->first_line < unit->first_line
-          || r->first_line > ulast)
+      if (r->file != unit->file_ref || r->first_line < unit->first_line)
          continue;
 
       if (!found || r->first_line < line
@@ -279,6 +278,25 @@ bool lint_after_syntax_error(const loc_t *unit, const loc_t *at)
 
    return at->first_line > line
       || (at->first_line == line && at->first_column >= col);
+}
+
+unsigned lint_syntax_error_count(void)
+{
+   return syntax_errors.count;
+}
+
+bool lint_unit_has_syntax_error(const loc_t *unit)
+{
+   if (unlocated_error || loc_invalid_p(unit))
+      return true;
+
+   for (unsigned i = 0; i < syntax_errors.count; i++) {
+      const error_region_t *r = &(syntax_errors.items[i]);
+      if (r->file == unit->file_ref && r->first_line >= unit->first_line)
+         return true;
+   }
+
+   return false;
 }
 
 bool lint_trusted(const loc_t *unit, const loc_t *construct)
