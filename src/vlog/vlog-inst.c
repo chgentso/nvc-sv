@@ -1033,8 +1033,9 @@ static vlog_node_t iface_path_body(iface_res_t *res, vlog_node_t body,
       for (int i = 0; i < ndecls; i++) {
          vlog_node_t d = vlog_decl(body, i);
          if (vlog_kind(d) == V_IFACE_PORT && vlog_ident(d) == name) {
-            if (vlog_ranges(d) > 0 || res->port_fn == NULL)
-               return NULL;
+            if ((vlog_ranges(d) > 0) != (vlog_params(mr) > 0)
+                || res->port_fn == NULL)
+               return NULL;   // Elements of an array have the same layout
 
             return res->port_fn(d, res->port_ctx);
          }

@@ -3140,17 +3140,30 @@ static vlog_node_t elab_early_port_body(vlog_node_t port, void *arg)
    else if (conn == NULL && wildcard == NULL)
       return NULL;
 
-   elab_iface_conn_t c = {
-      .parent = pb->ctx->out,
-      .port   = port,
-      .value  = conn != NULL
-         ? elab_array_iface_value(inst, vlog_value(conn)) : NULL,
-      .loc    = *vlog_loc(conn ?: inst),
-   };
-
    void *saved_ctx;
    diag_consumer_t saved = diag_get_consumer(&saved_ctx);
    diag_set_consumer(elab_ignore_diag, NULL);
+
+   vlog_node_t value = conn != NULL
+      ? elab_array_iface_value(inst, vlog_value(conn)) : NULL;
+
+   if (vlog_ranges(port) > 0) {
+      // The elements of an array of ports all have the same layout
+      int64_t left, right;
+      if (value == NULL || !elab_instance_array_bounds(port, &left, &right)) {
+         diag_set_consumer(saved, saved_ctx);
+         return NULL;
+      }
+
+      value = elab_iface_element(value, 0, llabs(left - right) + 1);
+   }
+
+   elab_iface_conn_t c = {
+      .parent = pb->ctx->out,
+      .port   = port,
+      .value  = value,
+      .loc    = *vlog_loc(conn ?: inst),
+   };
 
    tree_t target = elab_iface_conn_target(&c, pb->ctx);
 

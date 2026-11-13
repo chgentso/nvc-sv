@@ -41,6 +41,12 @@ module svifacetype1_sub(svifacetype1_if i, output bit [7:0] bits);
   end
 endmodule
 
+module svifacetype1_arr(svifacetype1_if ports[1:0], output bit [7:0] bits);
+  localparam type data_t = ports[1].data_t;
+  data_t d;
+  initial begin #1; bits = $bits(d); end
+endmodule
+
 module svifacetype1;
   svifacetype1_if #(5, 8) i0();
   typedef i0.data_t data_t;
@@ -52,6 +58,8 @@ module svifacetype1;
   packed2_t pk;
   bit [7:0] bits;
   svifacetype1_if #(2) arr[2] ();
+  bit [7:0] abits;
+  svifacetype1_arr ua(arr, abits);
   typedef arr[1].data_t adata_t;
   svifacetype1_wrap #(4) wr();
   typedef wr.data_t wdata_t;
@@ -68,6 +76,8 @@ module svifacetype1;
              || $bits(i0.data_t) !== 5 || $bits(wdata_t) !== 3)
       $error("FAIL nested %0d %0d %0d", $bits(adata_t), $bits(wr.data_t),
              $bits(wdata_t));
+    else if (abits !== 8'd2)
+      $error("FAIL array port %0d", abits);
     else if ($bits(pk) !== 10)
       $error("FAIL packed %0d", $bits(pk));
     else if (bits !== 8'd1)
