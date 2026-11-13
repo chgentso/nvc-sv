@@ -5183,7 +5183,23 @@ static mir_value_t vlog_lower_operator_assignment(vlog_gen_t *g, vlog_node_t v)
             CANNOT_HANDLE(v);
          }
 
-         value = mir_build_binary(g->mu, op, type, cur, cast);
+         // The operation is signed only if both operands are (11.4.1)
+         const bool both_signed = vlog_is_signed(vlog_target(v))
+            && vlog_is_signed(vlog_value(v));
+         const bool is_shift = op == MIR_VEC_SLL || op == MIR_VEC_SRL
+            || op == MIR_VEC_SRA;
+         if (!both_signed && !is_shift && mir_get_signed(g->mu, type)) {
+            const int size = mir_get_size(g->mu, type);
+            mir_type_t utype = mir_get_class(g->mu, type) == MIR_TYPE_VEC2
+               ? mir_vec2_type(g->mu, size, false)
+               : mir_vec4_type(g->mu, size, false);
+            mir_value_t uval = mir_build_binary(
+               g->mu, op, utype, mir_build_cast(g->mu, utype, cur),
+               mir_build_cast(g->mu, utype, cast));
+            value = mir_build_cast(g->mu, type, uval);
+         }
+         else
+            value = mir_build_binary(g->mu, op, type, cur, cast);
       }
    }
 
