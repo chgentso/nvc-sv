@@ -446,7 +446,23 @@ static void collect_objects(vlog_node_t unit, sobjs_t *out)
       }
 
       o.inner = true;
-      APUSH(*out, o);
+
+      // A port redeclared as a variable is one object, at the variable
+      bool replaced = false;
+      if (k == V_VAR_DECL) {
+         for (unsigned j = 0; j < out->count; j++) {
+            if (out->items[j].name == o.name
+                && vlog_kind(out->items[j].decl) == V_PORT_DECL) {
+               free(out->items[j].type_text);
+               out->items[j] = o;
+               replaced = true;
+               break;
+            }
+         }
+      }
+
+      if (!replaced)
+         APUSH(*out, o);
    }
 }
 

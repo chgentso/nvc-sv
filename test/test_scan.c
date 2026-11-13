@@ -710,6 +710,22 @@ START_TEST(test_g0_undefined_macro)
 }
 END_TEST
 
+START_TEST(test_fsm_vlog_port_and_reg)
+{
+   // A port declared again as a reg is one machine, at the reg
+
+   static const char *const parts[] = {
+      "\"state\":{\"name\":\"tstate\",\"line\":24,",
+   };
+   scan_fsm_contain(SCAN_FILE("fsm_g6.sv"), parts, ARRAY_LEN(parts), true);
+
+   static const char *const none[] = {
+      "\"state\":{\"name\":\"tstate\",\"line\":22,",
+   };
+   scan_fsm_contain(SCAN_FILE("fsm_g6.sv"), none, ARRAY_LEN(none), false);
+}
+END_TEST
+
 START_TEST(test_sv1)
 {
    // Packages, interfaces and modules with the files included found
@@ -1330,6 +1346,7 @@ Suite *get_scan_tests(void)
    tcase_add_test(tc, test_fsm_vlog_constants);
    tcase_add_test(tc, test_fsm_vlog_errors);
    tcase_add_test(tc, test_fsm_vlog_negative);
+   tcase_add_test(tc, test_fsm_vlog_port_and_reg);
    suite_add_tcase(s, tc);
 
    // Expanding covergroups is slow with the debug and sanitiser options
