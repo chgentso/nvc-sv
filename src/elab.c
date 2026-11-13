@@ -4077,6 +4077,14 @@ static bool elab_is_vector_generic(type_t type)
       || type_eq(elem, std_type(NULL, STD_BIT));
 }
 
+static bool elab_is_logic_generic(type_t type)
+{
+   // A scalar std_ulogic or std_logic generic takes a one bit parameter
+
+   return type_is_enum(type)
+      && type_eq(type_base_recur(type), ieee_type(IEEE_STD_ULOGIC));
+}
+
 static char elab_logic_char(tree_t lit)
 {
    // Map an element of a bit string to a Verilog four-state value
@@ -4622,7 +4630,7 @@ static bool elab_is_simple_generic(type_t type)
 
    return type_is_real(type) || type_eq(type, std_type(NULL, STD_STRING))
       || elab_is_vector_generic(type) || type_is_integer(type)
-      || elab_is_enum_generic(type)
+      || elab_is_enum_generic(type) || elab_is_logic_generic(type)
       || type_eq(type, std_type(NULL, STD_BOOLEAN));
 }
 
@@ -4716,6 +4724,16 @@ static vlog_node_t elab_vhdl_shim_module(vlog_node_t list, tree_t entity,
             tb_append(tb, '"');
          }
          else if (!overridden && tree_has_value(g))
+            return elab_no_default(g, entity);
+      }
+      else if (elab_is_logic_generic(type)) {
+         tb_printf(tb, "[0:0] %s", name);
+
+         tree_t def = overridden || !tree_has_value(g) ? NULL : tree_value(g);
+         if (def != NULL && tree_kind(def) == T_REF && tree_has_ref(def)
+             && tree_kind(tree_ref(def)) == T_ENUM_LIT)
+            tb_printf(tb, " = 1'b%c", elab_logic_char(tree_ref(def)));
+         else if (def != NULL)
             return elab_no_default(g, entity);
       }
       else if (elab_is_vector_generic(type)) {
@@ -4996,6 +5014,26 @@ static void elab_vhdl_in_verilog(tree_t entity, vlog_node_t inst_v,
             }
 
             tree_set_type(value, subtype_for_string(value, type));
+         }
+         else if (elab_is_logic_generic(type)) {
+            number_t num;
+            if (!elab_vlog_number(d, &num)) {
+               error_at(tree_loc(g), "value of parameter %pQ is not a "
+                        "constant vector", vlog_ident(d));
+               return;
+            }
+
+            const char lname[] =
+               { '\'', toupper_iso88591("01zx"[number_bit(num, 0)]), '\'', 0 };
+            type_t base = type_base_recur(type);
+            for (int l = 0, n = type_enum_literals(base); l < n; l++) {
+               tree_t it = type_enum_literal(base, l);
+               if (strcmp(istr(tree_ident(it)), lname) == 0) {
+                  value = make_ref(it);
+                  break;
+               }
+            }
+            assert(value != NULL);
          }
          else if (elab_is_vector_generic(type)) {
             number_t num;
