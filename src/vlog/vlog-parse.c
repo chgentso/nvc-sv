@@ -12952,7 +12952,9 @@ static vlog_node_t p_always_construct(void)
    const int first = proc_asserts.count;
    always_depth++;
    // Strictly the body is a statement but generators emit a null one
+   const bool saved_forward = vlog_symtab_set_forward_net(symtab, true);
    vlog_node_t body = p_statement_or_null();
+   vlog_symtab_set_forward_net(symtab, saved_forward);
    always_depth--;
    if (body == NULL)
       return NULL;   // Does nothing
@@ -13018,7 +13020,10 @@ static vlog_node_t p_net_assignment(vlog_node_t delay, vlog_node_t strength)
 
    consume(tEQ);
 
+   // The net may be declared implicitly by a later port connection
+   const bool saved_forward = vlog_symtab_set_forward_net(symtab, true);
    vlog_set_value(v, p_expression_of_type(pattern_type_of(vlog_target(v))));
+   vlog_symtab_set_forward_net(symtab, saved_forward);
 
    vlog_set_loc(v, CURRENT_LOC);
    return v;

@@ -40,6 +40,7 @@ typedef struct _vlog_symtab {
    mem_pool_t      *pool;
    vlog_net_kind_t  implicit;
    bool             forward;
+   bool             forward_net;
    ghash_t         *builtins;
 } vlog_symtab_t;
 
@@ -56,6 +57,7 @@ typedef struct _vlog_scope {
    size_t         num_symbols;
    vlog_symbol_t *symbols;
    node_list_t    deferred;
+   node_list_t    net_deferred;   // May be declared implicitly later
    bool           suppress;
 } vlog_scope_t;
 
@@ -283,9 +285,34 @@ bool vlog_symtab_top_is(vlog_symtab_t *st, vlog_kind_t kind)
    return st->top->container != NULL && vlog_kind(st->top->container) == kind;
 }
 
+static bool is_implicit_net(vlog_node_t d)
+{
+   return vlog_kind(d) == V_NET_DECL && vlog_has_type(d)
+      && vlog_kind(vlog_type(d)) == V_DATA_TYPE
+      && (vlog_flags(vlog_type(d)) & VLOG_F_IMPLICIT_NET);
+}
+
 void vlog_symtab_pop(vlog_symtab_t *st)
 {
    assert(st->top != NULL);
+
+   // A net declared implicitly by a later port connection
+   for (int i = 0; i < st->top->net_deferred.count; i++) {
+      vlog_node_t v = st->top->net_deferred.items[i];
+      vlog_node_t d = vlog_symtab_query(st, vlog_ident(v));
+      if (d != NULL && is_implicit_net(d))
+         vlog_set_ref(v, d);
+      else if (st->top->parent != NULL
+               && (st->top->parent->container != NULL
+                   || is_subroutine(st->top->container)))
+         APUSH(st->top->parent->net_deferred, v);
+      else {
+         ident_t name = vlog_ident(v);
+         error_at(vlog_loc(v), "no visible declaration for %pQ", name);
+         vlog_symtab_poison(st, name);
+      }
+   }
+   ACLEAR(st->top->net_deferred);
 
    unsigned wptr = 0;
    for (int i = 0; i < st->top->deferred.count; i++) {
@@ -320,6 +347,13 @@ void vlog_symtab_pop(vlog_symtab_t *st)
    ACLEAR(st->top->deferred);
 
    st->top = st->top->parent;
+}
+
+bool vlog_symtab_set_forward_net(vlog_symtab_t *st, bool forward)
+{
+   const bool old = st->forward_net;
+   st->forward_net = forward;
+   return old;
 }
 
 bool vlog_symtab_set_forward(vlog_symtab_t *st, bool forward)
@@ -1047,6 +1081,10 @@ void vlog_symtab_lookup(vlog_symtab_t *st, vlog_node_t v)
       case V_REF:
          if (st->forward) {
             APUSH(st->top->deferred, v);
+            break;
+         }
+         else if (st->forward_net) {
+            APUSH(st->top->net_deferred, v);
             break;
          }
          // Fall-through

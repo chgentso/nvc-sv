@@ -31,6 +31,7 @@ void vlog_symtab_push_members(vlog_symtab_t *st, vlog_node_t class,
                               const ident_t *only, int nonly);
 void vlog_symtab_resolve_deferred(vlog_symtab_t *st);
 bool vlog_symtab_set_forward(vlog_symtab_t *st, bool forward);
+bool vlog_symtab_set_forward_net(vlog_symtab_t *st, bool forward);
 void vlog_symtab_set_implicit(vlog_symtab_t *st, vlog_net_kind_t kind);
 
 void vlog_symtab_lookup(vlog_symtab_t *st, vlog_node_t v);
