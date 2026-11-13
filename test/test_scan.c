@@ -490,6 +490,26 @@ END_TEST
 
 
 
+START_TEST(test_g0_unknown_type_decl)
+{
+   // A declaration whose type comes from a package that is not available
+   // is a variable, not an instance, and so are all its names
+
+   static const char *const parts[] = {
+      "{\"name\":\"state_q\",\"kind\":\"variable\",\"detail\":\"st_e\"",
+      "{\"name\":\"state_d\",\"kind\":\"variable\",\"detail\":\"st_e\"",
+      "{\"name\":\"v1\",\"kind\":\"variable\",\"detail\":\"foo_t\"",
+      "{\"name\":\"v2\",\"kind\":\"variable\",\"detail\":\"foo_t\"",
+      "{\"name\":\"arr\",\"kind\":\"variable\",\"detail\":\"foo_t\"",
+      "{\"name\":\"y\",\"kind\":\"variable\",\"detail\":\"logic [3:0]\"",
+      "{\"name\":\"inst\",\"kind\":\"instance\"",
+      "{\"name\":\"state_q\",\"kind\":\"name\",\"line\":7,",
+   };
+   scan_symbols_contain(SCAN_FILE("fsm_g0_decl.sv"), parts, ARRAY_LEN(parts),
+                        true);
+}
+END_TEST
+
 START_TEST(test_sv1)
 {
    // Packages, interfaces and modules with the files included found
@@ -1099,6 +1119,7 @@ Suite *get_scan_tests(void)
    tcase_add_test(tc, test_fsm_vhdl_constants);
    tcase_add_test(tc, test_fsm_vhdl_negative);
    tcase_add_test(tc, test_fsm_vhdl_errors);
+   tcase_add_test(tc, test_g0_unknown_type_decl);
    suite_add_tcase(s, tc);
 
    // Expanding covergroups is slow with the debug and sanitiser options

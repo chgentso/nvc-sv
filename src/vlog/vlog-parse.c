@@ -23690,6 +23690,37 @@ static void p_parameter_override(vlog_node_t parent)
    consume(tSEMI);
 }
 
+static bool scan_unknown_type_declaration(void)
+{
+   // When scanning a file on its own the type of a declaration may come
+   // from a package which is not available: type_name name [dims] followed
+   // by a comma, semicolon or initial value cannot be an instance as that
+   // has a port list
+
+   if (!lib_scan_active() || peek() != tID || peek_nth(2) != tID)
+      return false;
+
+   int n = 3;
+   while (peek_nth(n) == tLSQUARE) {
+      int depth = 1;
+      for (n++; depth > 0 && n < TOKENQ_SIZE - 2; n++) {
+         const token_t tok = peek_nth(n);
+         if (tok == tLSQUARE)
+            depth++;
+         else if (tok == tRSQUARE)
+            depth--;
+         else if (tok == tEOF || tok == tSEMI)
+            return false;
+      }
+   }
+
+   if (n >= TOKENQ_SIZE - 2)
+      return false;
+
+   const token_t next = peek_nth(n);
+   return next == tCOMMA || next == tSEMI || next == tEQ;
+}
+
 static void p_module_or_generate_item(vlog_node_t mod)
 {
    // { attribute_instance } parameter_override
@@ -23916,6 +23947,10 @@ static void p_module_or_generate_item(vlog_node_t mod)
          else if (ref == NULL && peek_nth(2) == tID
                   && (peek_ident_nth(1) == ident_new("semaphore")
                       || peek_ident_nth(1) == ident_new("mailbox"))) {
+            p_module_common_item(mod);
+            break;
+         }
+         else if (ref == NULL && scan_unknown_type_declaration()) {
             p_module_common_item(mod);
             break;
          }

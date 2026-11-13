@@ -308,6 +308,105 @@ static char *sym_prefix_text(const loc_t *loc, unsigned line, unsigned col)
 }
 
 
+// The type shared by the names of a declaration such as pkg::t_e a, b;
+// for the second and later names: the text before the first name
+static char *sym_shared_type_text(const loc_t *loc, unsigned line,
+                                  unsigned col)
+{
+   loc_t at = *loc;
+   at.first_line = line;
+   at.line_delta = 0;
+   at.first_column = 0;
+   const char *src = loc_get_source(&at);
+   if (src == NULL || col < 2)
+      return NULL;
+
+   const char *end = src + col - 1;
+   const char *start = end;
+   int depth = 0;
+   while (start > src) {
+      const char c = start[-1];
+      if (strchr(")]}", c))
+         depth++;
+      else if (strchr("([{", c)) {
+         if (depth == 0)
+            break;
+         depth--;
+      }
+      else if (depth == 0 && c == ';')
+         break;
+      start--;
+   }
+
+   // The first declarator ends at the first comma outside brackets
+   const char *comma = NULL;
+   depth = 0;
+   for (const char *p = start; p < end && comma == NULL; p++) {
+      if (strchr("([{", *p))
+         depth++;
+      else if (strchr(")]}", *p))
+         depth--;
+      else if (depth == 0 && *p == ',')
+         comma = p;
+      else if (depth == 0 && *p == '=')
+         break;   // Initial value: not a type
+   }
+
+   if (comma == NULL)
+      return NULL;
+
+   // Drop the first name with its dimensions and initial value
+   const char *stop = comma;
+   depth = 0;
+   for (const char *p = start; p < comma; p++) {
+      if (strchr("([{", *p))
+         depth++;
+      else if (strchr(")]}", *p))
+         depth--;
+      else if (depth == 0 && *p == '=') {
+         stop = p;
+         break;
+      }
+   }
+   while (stop > start && isspace((unsigned char)stop[-1]))
+      stop--;
+   while (stop > start && stop[-1] == ']') {
+      int d = 0;
+      while (stop > start) {
+         stop--;
+         if (*stop == ']')
+            d++;
+         else if (*stop == '[' && --d == 0)
+            break;
+      }
+      while (stop > start && isspace((unsigned char)stop[-1]))
+         stop--;
+   }
+   while (stop > start && (isalnum((unsigned char)stop[-1])
+                           || stop[-1] == '_' || stop[-1] == '$'))
+      stop--;
+   while (stop > start && isspace((unsigned char)stop[-1]))
+      stop--;
+   if (stop <= start || stop - start > 80)
+      return NULL;
+
+   // Must look like a type: not a list of names
+   bool space = false;
+   char *copy = xmalloc(stop - start + 1), *out = copy;
+   for (const char *p = start; p < stop; p++) {
+      if (isspace((unsigned char)*p))
+         space = true;
+      else {
+         if (space && out > copy)
+            *out++ = ' ';
+         space = false;
+         *out++ = *p;
+      }
+   }
+   *out = '\0';
+   return copy;
+}
+
 // Extra fields for the next symbol written by sym_add: call these zero or
 // more times and then sym_add, which writes and clears them
 static void sym_extra_key(sym_ctx_t *sc, const char *key)
@@ -456,6 +555,9 @@ static void sym_add(sym_ctx_t *sc, const char *name, const char *kind,
        && strcmp(kind, "class") != 0 && strcmp(kind, "modport") != 0
        && strcmp(kind, "enum-literal") != 0 && strcmp(kind, "instance") != 0) {
       prefix = sym_prefix_text(loc, l, c);
+      if (prefix == NULL && (strcmp(kind, "variable") == 0
+                             || strcmp(kind, "net") == 0))
+         prefix = sym_shared_type_text(loc, l, c);
       detail = prefix;
    }
 
