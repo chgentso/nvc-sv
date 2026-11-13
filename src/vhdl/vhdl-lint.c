@@ -23,7 +23,9 @@
 #include "hash.h"
 #include "ident.h"
 #include "lint.h"
+#include "scan.h"
 #include "tree.h"
+#include "type.h"
 #include "vhdl/vhdl-phase.h"
 
 #include <assert.h>
@@ -149,7 +151,8 @@ static bool loc_text(const loc_t *loc, char *buf, size_t max)
    return true;
 }
 
-static void sensitivity_check(tree_t proc, tree_t wait)
+static void sensitivity_check_list(tree_t proc, int nbody,
+                                   tree_t *triggers, int ntriggers)
 {
    if (!lint_enabled(LINT_SENSITIVITY) || lint_suppressed(tree_loc(proc),
                                                          LINT_SENSITIVITY))
@@ -161,20 +164,17 @@ static void sensitivity_check(tree_t proc, tree_t wait)
       .reads   = AINIT,
    };
 
-   // Everything but the wait statement at the end that stands for the list
-   const int nstmts = tree_stmts(proc);
-   for (int i = 0; i < nstmts - 1; i++)
+   for (int i = 0; i < nbody; i++)
       tree_visit(tree_stmt(proc, i), sens_lvalue_cb, &ctx);
-   for (int i = 0; i < nstmts - 1; i++)
+   for (int i = 0; i < nbody; i++)
       tree_visit_only(tree_stmt(proc, i), sens_ref_cb, &ctx, T_REF);
 
    // Signals in the list
-   const int ntriggers = tree_triggers(wait);
    read_list_t missing = AINIT;
    for (unsigned i = 0; i < ctx.reads.count; i++) {
       bool found = false;
       for (int j = 0; j < ntriggers && !found; j++) {
-         tree_t ref = name_to_ref(tree_trigger(wait, j));
+         tree_t ref = name_to_ref(triggers[j]);
          found = ref != NULL && tree_has_ref(ref)
             && tree_ref(ref) == ctx.reads.items[i].decl;
       }
@@ -203,7 +203,7 @@ static void sensitivity_check(tree_t proc, tree_t wait)
                       istr(tree_ident(missing.items[i].decl)));
 
          // The fix appends the signals to the list
-         const loc_t *last = tree_loc(tree_trigger(wait, ntriggers - 1));
+         const loc_t *last = tree_loc(triggers[ntriggers - 1]);
          char text[256];
          if (loc_text(last, text, sizeof(text) - 1)) {
             LOCAL_TEXT_BUF fix = tb_new();
@@ -228,6 +228,18 @@ static void sensitivity_check(tree_t proc, tree_t wait)
    ACLEAR(ctx.reads);
    hash_free(ctx.lvalues);
    hash_free(ctx.skip);
+}
+
+static void sensitivity_check(tree_t proc, tree_t wait)
+{
+   // Everything but the wait statement at the end that stands for the list
+   const int ntriggers = tree_triggers(wait);
+   tree_t *triggers = xmalloc_array(ntriggers, sizeof(tree_t));
+   for (int i = 0; i < ntriggers; i++)
+      triggers[i] = tree_trigger(wait, i);
+
+   sensitivity_check_list(proc, tree_stmts(proc) - 1, triggers, ntriggers);
+   free(triggers);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -485,6 +497,20 @@ static void clock_edge_cb(tree_t t, void *context)
    }
 }
 
+static void latch_report(tree_t proc, const latch_ctx_t *ctx,
+                         const assigned_list_t *def)
+{
+   for (unsigned i = 0; i < ctx->possible.count; i++) {
+      const assigned_t *a = &(ctx->possible.items[i]);
+      if (set_has(def, a->decl) || lint_suppressed(&a->loc, LINT_LATCH))
+         continue;
+
+      lint_warn(tree_loc(proc), LINT_LATCH, "latch inferred for signal "
+                "%s: not assigned on every path through this process",
+                istr(tree_ident(a->decl)));
+   }
+}
+
 static void process_cb(tree_t proc, void *context)
 {
    // The simplifier has replaced the sensitivity list with a wait
@@ -506,20 +532,226 @@ static void process_cb(tree_t proc, void *context)
    if (!ctx.clocked && ctx.waits == 1)
       sensitivity_check(proc, last);
 
-   if (!ctx.clocked && ctx.waits == 1) {
-      for (unsigned i = 0; i < ctx.possible.count; i++) {
-         const assigned_t *a = &(ctx.possible.items[i]);
-         if (set_has(&def, a->decl) || lint_suppressed(&a->loc, LINT_LATCH))
-            continue;
-
-         lint_warn(tree_loc(proc), LINT_LATCH, "latch inferred for signal "
-                   "%s: not assigned on every path through this process",
-                   istr(tree_ident(a->decl)));
-      }
-   }
+   if (!ctx.clocked && ctx.waits == 1)
+      latch_report(proc, &ctx, &def);
 
    ACLEAR(ctx.possible);
    ACLEAR(def);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Units with errors
+//
+// The tree of a unit with errors has not been simplified, so a sensitivity
+// list is still on the process and concurrent statements have not been
+// turned into processes.  Only constructs that are free of errors are
+// checked and the rules that need the whole unit are not run.
+
+typedef A(tree_t) tree_list_t;
+
+typedef struct {
+   tree_t   unit;
+   unsigned skipped;
+} partial_ctx_t;
+
+static void trigger_collect_cb(tree_t expr, void *context)
+{
+   tree_list_t *list = context;
+
+   for (unsigned i = 0; i < list->count; i++) {
+      if (same_tree(list->items[i], expr))
+         return;
+   }
+
+   APUSH(*list, expr);
+}
+
+static bool decl_is_reliable(tree_t decl)
+{
+   const loc_t *loc = tree_loc(decl);
+   if (loc_invalid_p(loc))
+      return true;
+
+   return !lint_span_has_error(loc);
+}
+
+static void clean_cb(tree_t t, void *context)
+{
+   bool *clean = context;
+
+   switch (tree_kind(t)) {
+   case T_REF:
+      if (!tree_has_ref(t) || tree_ident(t) == error_marker()
+          || !decl_is_reliable(tree_ref(t)))
+         *clean = false;
+      break;
+   case T_FCALL:
+   case T_PCALL:
+      if (!tree_has_ref(t) || tree_ident(t) == error_marker())
+         *clean = false;
+      break;
+   default:
+      break;
+   }
+
+   switch (tree_kind(t)) {
+   case T_REF:
+   case T_FCALL:
+   case T_ARRAY_REF:
+   case T_ARRAY_SLICE:
+   case T_RECORD_REF:
+   case T_LITERAL:
+   case T_STRING:
+   case T_AGGREGATE:
+   case T_ATTR_REF:
+   case T_QUALIFIED:
+   case T_TYPE_CONV:
+   case T_SIGNAL_DECL:
+   case T_VAR_DECL:
+   case T_CONST_DECL:
+      if (tree_has_type(t) && type_is_none(tree_type(t)))
+         *clean = false;
+      break;
+   default:
+      break;
+   }
+}
+
+static bool construct_is_trusted(partial_ctx_t *pc, tree_t t)
+{
+   if (!lint_trusted(tree_loc(pc->unit), tree_loc(t)))
+      return false;
+
+   bool clean = true;
+   tree_visit(t, clean_cb, &clean);
+   return clean;
+}
+
+static void partial_process(tree_t proc, partial_ctx_t *pc)
+{
+   const int nstmts = tree_stmts(proc);
+   const int ntriggers = tree_triggers(proc);
+
+   // Which statements are the body and where the sensitivity list is
+   tree_t last = nstmts > 0 ? tree_stmt(proc, nstmts - 1) : NULL;
+   bool all = false, final_wait = false;
+   if (ntriggers > 0) {
+      all = ntriggers == 1 && tree_kind(tree_trigger(proc, 0)) == T_ALL;
+      if (nstmts < 1)
+         return;
+   }
+   else if (nstmts >= 2 && tree_kind(last) == T_WAIT
+            && (tree_triggers(last) > 0 || tree_has_value(last)))
+      final_wait = true;
+   else
+      return;
+
+   if (!construct_is_trusted(pc, proc)) {
+      pc->skipped++;
+      return;
+   }
+
+   latch_ctx_t ctx = { .possible = AINIT };
+   assigned_list_t def = AINIT;
+
+   tree_visit(proc, clock_edge_cb, &ctx.clocked);
+   walk_stmts(proc, &def, &ctx);
+
+   // The wait statement that the simplifier would have added
+   const int expected_waits = final_wait ? 1 : 0;
+
+   if (!ctx.clocked && ctx.waits == expected_waits && !all) {
+      tree_list_t triggers = AINIT;
+      if (final_wait && tree_triggers(last) > 0) {
+         for (int i = 0; i < tree_triggers(last); i++)
+            APUSH(triggers, tree_trigger(last, i));
+      }
+      else if (final_wait)
+         build_wait(tree_value(last), trigger_collect_cb, &triggers);
+      else {
+         for (int i = 0; i < ntriggers; i++)
+            APUSH(triggers, tree_trigger(proc, i));
+      }
+
+      if (triggers.count > 0)
+         sensitivity_check_list(proc, final_wait ? nstmts - 1 : nstmts,
+                                triggers.items, triggers.count);
+      ACLEAR(triggers);
+   }
+
+   if (!ctx.clocked && ctx.waits == expected_waits)
+      latch_report(proc, &ctx, &def);
+
+   ACLEAR(ctx.possible);
+   ACLEAR(def);
+}
+
+static void partial_concurrent(tree_t conc, partial_ctx_t *pc)
+{
+   if (tree_stmts(conc) == 0)
+      return;
+
+   // The simplifier turns the statement into a process that waits on
+   // every signal it reads, so only a latch can be found
+   tree_t s0 = tree_stmt(conc, 0);
+   switch (tree_kind(s0)) {
+   case T_SIGNAL_ASSIGN:
+      return;   // Always assigns
+   case T_COND_ASSIGN:
+   case T_SELECT:
+   case T_MATCH_SELECT:
+      if (tree_has_guard(s0))
+         return;
+      break;
+   default:
+      return;
+   }
+
+   if (!construct_is_trusted(pc, conc)) {
+      pc->skipped++;
+      return;
+   }
+
+   latch_ctx_t ctx = { .possible = AINIT };
+   assigned_list_t def = AINIT;
+
+   tree_visit(conc, clock_edge_cb, &ctx.clocked);
+   walk_stmt(s0, &def, &ctx);
+
+   if (!ctx.clocked)
+      latch_report(conc, &ctx, &def);
+
+   ACLEAR(ctx.possible);
+   ACLEAR(def);
+}
+
+static void partial_cb(tree_t t, void *context)
+{
+   partial_ctx_t *pc = context;
+
+   switch (tree_kind(t)) {
+   case T_PROCESS:
+      partial_process(t, pc);
+      break;
+   case T_CONCURRENT:
+      partial_concurrent(t, pc);
+      break;
+   default:
+      break;
+   }
+}
+
+void vhdl_lint_partial(tree_t unit)
+{
+   if (tree_kind(unit) != T_ARCH)
+      return;
+
+   partial_ctx_t pc = { .unit = unit };
+
+   if (lint_enabled(LINT_LATCH | LINT_SENSITIVITY))
+      tree_visit(unit, partial_cb, &pc);
+
+   lint_partial_note(tree_loc(unit), pc.skipped);
 }
 
 ////////////////////////////////////////////////////////////////////////////////

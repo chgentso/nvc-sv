@@ -214,8 +214,12 @@ static void analyse_file(const char *file, cmd_state_t *state)
                if (opt_get_int(OPT_LINT))
                   vhdl_lint(unit);
             }
-            else
+            else {
                lib_put_error(work, unit);
+
+               if (opt_get_int(OPT_LINT))
+                  vhdl_lint_partial(unit);
+            }
          }
       }
       break;

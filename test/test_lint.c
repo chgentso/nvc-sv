@@ -68,6 +68,39 @@ static void analyse_vhdl(void)
    }
 }
 
+static void lint_error_cb(diag_t *d, void *ctx)
+{
+   if (diag_level(d, NULL) >= DIAG_ERROR)
+      lint_note_error(diag_get_loc(d));
+}
+
+static void analyse_vhdl_errors(void)
+{
+   // As analyse_file does with --lint
+   lint_errors_reset();
+   diag_add_hint_fn(lint_error_cb, NULL);
+
+   while (true) {
+      const int base = error_count();
+      tree_t t = parse();
+      if (t == NULL)
+         break;
+
+      if (error_count() == base) {
+         lib_put(lib_work(), t);
+         simplify_local(t, get_jit(), get_registry(), get_mir());
+         bounds_check(t);
+         vhdl_lint(t);
+      }
+      else {
+         lib_put_error(lib_work(), t);
+         vhdl_lint_partial(t);
+      }
+   }
+
+   diag_remove_hint_fn(lint_error_cb, NULL);
+}
+
 static void elaborate_verilog(const char *name)
 {
    object_t *obj = lib_get_generic(lib_work(), ident_new(name), NULL);
@@ -355,6 +388,114 @@ START_TEST(test_regions)
 }
 END_TEST
 
+START_TEST(test_partial_vhdl)
+{
+   const error_t expect[] = {
+      { 16, "no visible declaration for NOSUCH" },
+      { 24, "no visible declaration for NOSUCH2" },
+      {  8, "signal B is read in this process but is not in its "
+        "sensitivity list [lint:sensitivity]" },
+      { 11, "latch inferred for signal L: not assigned on every path "
+        "through this process [lint:latch]" },
+      { 19, "latch inferred for signal M: not assigned on every path "
+        "through this process [lint:latch]" },
+      { 22, "latch inferred for signal N: not assigned on every path "
+        "through this process [lint:latch]" },
+      {  5, "lint is partial for this unit: whole-unit rules and 2 "
+        "constructs with errors were not checked [lint:partial]" },
+      { 34, "signal B is read in this process but is not in its "
+        "sensitivity list [lint:sensitivity]" },
+      { 32, "signal 'UNUSED_S' is never read [lint:unused]" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   set_standard(STD_08);
+   lint_parse_option(NULL);
+
+   input_from_file(TESTDIR "/lint/vhderr1.vhd");
+
+   analyse_vhdl_errors();
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_partial_syntax)
+{
+   const error_t expect[] = {
+      { 12, "unexpected if while parsing signal assignment statement, "
+        "expecting one of **, after, , or ;" },
+      {  7, "signal B is read in this process but is not in its "
+        "sensitivity list [lint:sensitivity]" },
+      {  5, "lint is partial for this unit: whole-unit rules and 1 "
+        "construct with errors were not checked [lint:partial]" },
+      { 13, "unexpected ; while parsing library unit, expecting one of "
+        "entity, configuration, architecture, package or context" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   set_standard(STD_08);
+   lint_parse_option(NULL);
+
+   input_from_file(TESTDIR "/lint/vhderr2.vhd");
+
+   analyse_vhdl_errors();
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_partial_decl)
+{
+   const error_t expect[] = {
+      {  6, "no visible declaration for NOSUCH_TYPE" },
+      { 13, "signal B is read in this process but is not in its "
+        "sensitivity list [lint:sensitivity]" },
+      {  5, "lint is partial for this unit: whole-unit rules and 1 "
+        "construct with errors were not checked [lint:partial]" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   set_standard(STD_08);
+   lint_parse_option(NULL);
+
+   input_from_file(TESTDIR "/lint/vhderr3.vhd");
+
+   analyse_vhdl_errors();
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_partial_none)
+{
+   // A rule that is not enabled stays quiet in a unit with errors
+   const error_t expect[] = {
+      { 16, "no visible declaration for NOSUCH" },
+      { 24, "no visible declaration for NOSUCH2" },
+      {  8, "signal B is read in this process but is not in its "
+        "sensitivity list [lint:sensitivity]" },
+      { 34, "signal B is read in this process but is not in its "
+        "sensitivity list [lint:sensitivity]" },
+      { 32, "signal 'UNUSED_S' is never read [lint:unused]" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   set_standard(STD_08);
+   lint_parse_option("sensitivity,unused");
+
+   input_from_file(TESTDIR "/lint/vhderr1.vhd");
+
+   analyse_vhdl_errors();
+
+   check_expected_errors();
+}
+END_TEST
+
 Suite *get_lint_tests(void)
 {
    Suite *s = suite_create("lint");
@@ -371,6 +512,10 @@ Suite *get_lint_tests(void)
    tcase_add_test(tc, test_sensitivity);
    tcase_add_test(tc, test_unused_attribute);
    tcase_add_test(tc, test_regions);
+   tcase_add_test(tc, test_partial_vhdl);
+   tcase_add_test(tc, test_partial_syntax);
+   tcase_add_test(tc, test_partial_decl);
+   tcase_add_test(tc, test_partial_none);
    suite_add_tcase(s, tc);
 
    return s;
