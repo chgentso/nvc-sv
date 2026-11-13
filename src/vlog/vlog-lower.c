@@ -4868,6 +4868,11 @@ static mir_value_t vlog_lower_binary(vlog_gen_t *g, vlog_node_t v,
       }
 
       type = mir_vec4_type(g->mu, size, issigned);
+
+      // An integral operand is converted to real as it is, not as an
+      // operand of the width and signedness of the expression
+      if (vlog_is_real(lhs_expr) || vlog_is_real(rhs_expr))
+         type = MIR_NULL_TYPE;
    }
 
    // The type of null comes from the other operand
