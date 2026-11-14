@@ -72,7 +72,12 @@ static vlog_node_t simp_port_decl(vlog_node_t v, vlog_node_t mod)
       return v;
 
    vlog_node_t dt = vlog_type(v), decl;
-   if (is_implicit_data_type(dt)) {
+   // An inout port with a four-state data type is a net as only an output
+   // port with a data type is a variable (1800-2017 23.2.2.3)
+   const bool inout_logic = vlog_subkind(v) == V_PORT_INOUT
+      && vlog_kind(dt) == V_DATA_TYPE && vlog_subkind(dt) == DT_LOGIC;
+
+   if (is_implicit_data_type(dt) || inout_logic) {
       decl = vlog_new(V_NET_DECL);
       vlog_set_subkind(decl, V_NET_WIRE);
    }
