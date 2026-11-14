@@ -5691,8 +5691,21 @@ static vlog_node_t elab_mixed_generics(tree_t comp, vlog_node_t mod,
       number_t n;
       int64_t ival;
       bool bval;
-      if (type_eq(ctype, std_type(NULL, STD_INTEGER)))
-         n = number_from_int(assume_int(value));
+      if (type_eq(ctype, std_type(NULL, STD_INTEGER))) {
+         const int64_t ival = assume_int(value);
+
+         vlog_node_t pdt = vlog_type(d);
+         if (vlog_kind(pdt) == V_DATA_TYPE && vlog_ranges(pdt) == 0
+             && (vlog_subkind(pdt) == DT_BIT || vlog_subkind(pdt) == DT_LOGIC)
+             && (ival < 0 || ival > 1)) {
+            error_at(tree_loc(cg), "value %"PRIi64" of generic %pI is outside "
+                     "the range 0 to 1 of the one bit Verilog parameter",
+                     ival, tree_ident(cg));
+            return NULL;
+         }
+
+         n = number_from_int(ival);
+      }
       else if (type_eq(ctype, std_type(NULL, STD_BOOLEAN))
                && folded_bool(value, &bval))
          n = number_from_bool(bval);

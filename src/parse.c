@@ -115,6 +115,7 @@ static type_t p_type_mark(tree_t head);
 static tree_t p_function_call(ident_t id, tree_t prefix);
 static tree_t p_resolution_indication(void);
 static void p_conditional_waveforms(tree_t stmt, tree_t target, tree_t s0);
+static hset_t *onebit_generics = NULL;   // Generics from one bit parameters
 static void p_generic_map_aspect(tree_t inst, tree_t unit);
 static ident_t p_designator(void);
 static void p_interface_list(tree_t parent, tree_kind_t kind, bool ordered);
@@ -3656,6 +3657,63 @@ static bool is_signature_formal_ahead(void)
    return false;
 }
 
+static tree_t p_onebit_actual(tree_t formal)
+{
+   // The actual of a generic for a one bit Verilog parameter may be a
+   // character literal of type bit or std_logic, optionally qualified,
+   // which is converted to the integer 0 or 1
+
+   int n = 1;
+   if (peek() == tID && peek_nth(2) == tTICK && peek_nth(3) == tLPAREN
+       && peek_nth(5) == tRPAREN)
+      n = 4;
+   else if (peek() != tID)
+      return NULL;
+
+   if (peek_nth(n) != tID)
+      return NULL;
+   else if (n == 1 && peek_nth(2) != tCOMMA && peek_nth(2) != tRPAREN)
+      return NULL;
+
+   int pos = (state.tokenq_tail + n - 1) & (TOKENQ_SIZE - 1);
+   ident_t lit = state.tokenq[pos].lval.ident;
+   const char *str = istr(lit);
+   if (str[0] != '\'' || str[1] == '\0' || str[2] != '\'' || str[3] != '\0')
+      return NULL;
+
+   if (n == 4) {
+      pos = state.tokenq_tail & (TOKENQ_SIZE - 1);
+      const char *mark = istr(state.tokenq[pos].lval.ident);
+      if (strcasecmp(mark, "bit") != 0 && strcasecmp(mark, "std_logic") != 0
+          && strcasecmp(mark, "std_ulogic") != 0)
+         return NULL;
+   }
+
+   int value;
+   switch (str[1]) {
+   case '0': case 'L': value = 0; break;
+   case '1': case 'H': value = 1; break;
+   default:
+      value = -1;
+      break;
+   }
+
+   for (int i = 0; i < (n == 4 ? 5 : 1); i++)
+      consume(peek());
+
+   tree_t lit_tree = tree_new(T_LITERAL);
+   tree_set_loc(lit_tree, CURRENT_LOC);
+   tree_set_subkind(lit_tree, L_INT);
+   tree_set_type(lit_tree, std_type(NULL, STD_INTEGER));
+   tree_set_ival(lit_tree, value < 0 ? 0 : value);
+
+   if (value < 0)
+      parse_error(CURRENT_LOC, "value %s cannot be converted to the one bit "
+                  "Verilog parameter %pI", str, tree_ident(formal));
+
+   return lit_tree;
+}
+
 static tree_t p_association_element(tree_t unit, int pos, tree_t formal,
                                     formal_kind_t kind)
 {
@@ -3732,7 +3790,13 @@ static tree_t p_association_element(tree_t unit, int pos, tree_t formal,
       tree_set_pos(p, pos);
    }
 
-   tree_t value = p_actual_part(class, type, head, kind);
+   tree_t value = NULL;
+   if (kind == F_GENERIC_MAP && formal != NULL && onebit_generics != NULL
+       && hset_contains(onebit_generics, formal))
+      value = p_onebit_actual(formal);
+
+   if (value == NULL)
+      value = p_actual_part(class, type, head, kind);
 
    // Make the mapped type available immediately as it may be used in
    // later actuals
@@ -12262,6 +12326,15 @@ static tree_t p_verilog_component(tree_t inst)
       tree_set_class(g, C_CONSTANT);
       tree_set_ident(g, ident_new(tb_get(tb)));
       tree_set_type(g, t_integer);
+
+      // A one bit parameter also accepts a bit or std_logic literal
+      vlog_node_t pdt = vlog_type(d);
+      if (vlog_kind(pdt) == V_DATA_TYPE && vlog_ranges(pdt) == 0
+          && (vlog_subkind(pdt) == DT_BIT || vlog_subkind(pdt) == DT_LOGIC)) {
+         if (onebit_generics == NULL)
+            onebit_generics = hset_new(16);
+         hset_insert(onebit_generics, g);
+      }
       tree_set_subkind(g, PORT_IN);
       tree_set_loc(g, CURRENT_LOC);
 
