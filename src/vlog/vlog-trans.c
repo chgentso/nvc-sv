@@ -254,8 +254,10 @@ static void trans_port_decl(trans_gen_t *g, vlog_node_t v)
    tree_set_class(t, C_SIGNAL);
    tree_set_loc(t, vlog_loc(v));
 
+   // A variable driven by a continuous assignment or an instance output
+   // holds net values so is seen as a net from outside
    vlog_node_t net = vlog_ref(v);
-   if (vlog_is_net(net)) {
+   if (vlog_is_net(net) || kind != V_PORT_INPUT) {
       type_t type = trans_net_type(g, net);
       tree_set_type(t, type);
    }
