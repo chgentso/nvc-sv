@@ -24,6 +24,7 @@
 #include "jit/jit.h"
 #include "lib.h"
 #include "lint.h"
+#include "parse.h"
 #include "lower.h"
 #include "conn.h"
 #include "netlist.h"
@@ -642,12 +643,19 @@ static int analyse_files(int argc, char **argv, cmd_state_t *state,
    else if (optind == next_cmd)
       fatal("missing file name");
 
+   const bool recovery = !scan && opt_get_int(OPT_LINT) != 0;
+   if (recovery)
+      parse_set_recovery(true);
+
    for (int i = optind; i < next_cmd; i++) {
       if (argv[i][0] == '@')
          do_file_list(argv[i] + 1, state);
       else
          analyse_file(argv[i], state);
    }
+
+   if (recovery)
+      parse_set_recovery(false);
 
    if (scan) {
       const unsigned errors = state->scan_errors;

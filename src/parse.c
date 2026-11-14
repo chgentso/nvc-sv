@@ -190,6 +190,26 @@ void drop_token(parse_state_t *state)
    state->nopt_hist = 0;
 }
 
+static bool recovery_mode = false;
+
+void parse_set_recovery(bool on)
+{
+   recovery_mode = on;
+}
+
+bool parse_recovery(void)
+{
+#ifdef DEBUG
+   // Test-only switch to force recovery without --lint
+   static int forced = -1;
+   if (forced < 0)
+      forced = getenv("NVC_FORCE_RECOVERY") != NULL;
+   if (forced)
+      return true;
+#endif
+   return recovery_mode;
+}
+
 void drop_tokens_until(parse_state_t *state, token_t tok)
 {
    token_t next = tEOF;
