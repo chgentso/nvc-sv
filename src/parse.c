@@ -227,7 +227,7 @@ void drop_tokens_until(parse_state_t *state, token_t tok)
 
 void parse_vexpect(parse_state_t *state, va_list ap)
 {
-   if (state->n_correct >= RECOVER_THRESH) {
+   if (state->n_correct >= RECOVER_THRESH && !state->mute) {
       tokenq_t tail = state->tokenq[state->tokenq_tail];
       diag_t *d = diag_new(DIAG_ERROR, &(tail.loc));
       diag_scan_visible(d);
@@ -261,9 +261,34 @@ void parse_vexpect(parse_state_t *state, va_list ap)
       diag_emit(d);
    }
 
+   bool keep = false;
+   if (state->rank_fn != NULL && parse_recovery()) {
+      // Rule K: a token that ends or starts a construct is not dropped
+      // so that the construct it belongs to can use it
+      if (state->n_correct > 0)
+         state->stall = 0;
+
+      const int rank = (*state->rank_fn)(state->tokenq[state->tokenq_tail].token);
+      const int limit = rank >= 2 ? 32 : (rank == 1 ? 4 : (rank < 0 ? 1 : 0));
+      keep = state->stall < limit;
+   }
+
    state->n_correct = 0;
 
-   drop_token(state);
+   if (keep) {
+      state->stall++;
+
+      // Nothing has been consumed in this rule: the token that was not
+      // dropped still gives it a location
+      if (state->start_loc.first_line == LINE_INVALID) {
+         state->start_loc = state->tokenq[state->tokenq_tail].loc;
+         state->last_loc  = state->start_loc;
+      }
+   }
+   else {
+      drop_token(state);
+      state->stall = 0;
+   }
 
    if (state->error_fn != NULL)
       (*state->error_fn)();
@@ -286,6 +311,8 @@ bool parse_consume(parse_state_t *state, token_t tok)
    }
    else {
       state->n_correct++;
+      if (state->mute && (*state->rank_fn)(tok) >= 3)
+         state->mute = false;
       drop_token(state);
       return true;
    }
@@ -295,6 +322,8 @@ bool parse_optional(parse_state_t *state, token_t tok)
 {
    if (parse_peek_nth(state, 1) == tok) {
       state->n_correct++;
+      if (state->mute && (*state->rank_fn)(tok) >= 3)
+         state->mute = false;
       drop_token(state);
       return true;
    }
@@ -303,6 +332,62 @@ bool parse_optional(parse_state_t *state, token_t tok)
          state->opt_hist[state->nopt_hist++] = tok;
       return false;
    }
+}
+
+void parse_sync(parse_state_t *state, int level)
+{
+   // Rule S: skip to the end of the broken construct.  Stops after a
+   // semicolon outside brackets or before a token of this level or an
+   // enclosing one.
+   if (state->rank_fn == NULL || !parse_recovery()) {
+      drop_tokens_until(state, tSEMI);
+      return;
+   }
+
+   int depth = 0;
+   bool dropped = false;
+   loc_t first = LOC_INVALID, last = LOC_INVALID;
+
+   for (;;) {
+      const token_t next = parse_peek_nth(state, 1);
+      if (next == tEOF)
+         break;
+      else if (depth <= 0 && (*state->rank_fn)(next) >= level)
+         break;
+
+      switch (next) {
+      case tLPAREN: case tLSQUARE: case tLBRACE: case tBEGIN: case tFORK:
+      case tCASE: case tCASEX: case tCASEZ:
+         depth++;
+         break;
+      case tRPAREN: case tRSQUARE: case tRBRACE: case tEND: case tENDCASE:
+      case tJOIN: case tJOINANY: case tJOINNONE:
+         depth--;
+         break;
+      default:
+         break;
+      }
+
+      if (!dropped) {
+         first = state->tokenq[state->tokenq_tail].loc;
+         dropped = true;
+      }
+      last = state->tokenq[state->tokenq_tail].loc;
+
+      drop_token(state);
+      state->stall = 0;
+
+      if (next == tSEMI && depth <= 0)
+         break;
+   }
+
+   if (dropped)
+      lint_note_damage(&first, &last);
+
+   // What follows may be statements read as module items: stay quiet until
+   // something that starts an item is accepted
+   if (level >= 3)
+      state->mute = true;
 }
 
 bool parse_scan(parse_state_t *state, ...)
@@ -345,6 +430,8 @@ token_t parse_one_of(parse_state_t *state, ...)
 
    if (found) {
       state->n_correct++;
+      if (state->mute && (*state->rank_fn)(p) >= 3)
+         state->mute = false;
       drop_token(state);
       return p;
    }
@@ -365,15 +452,37 @@ bool parse_not_at_token(parse_state_t *state, ...)
    if (p == tEOF)
       return false;
 
+   const bool recover = state->rank_fn != NULL && state->stall > 0
+      && state->n_correct == 0 && parse_recovery();
+
+   int minrank = 99;
    for (;;) {
       const int tok = va_arg(ap, token_t);
       if (tok == -1)
          break;
       else if (p == tok)
          return false;
+      else if (recover) {
+         const int r = (*state->rank_fn)(tok);
+         if (r < minrank)
+            minrank = r;
+      }
    }
 
    va_end(ap);
+
+   if (recover) {
+      // Rule X: after an error at a token that nothing in this list can
+      // use, a token of an enclosing construct ends the list
+      const int r = (*state->rank_fn)(p);
+      if (r >= 2 && r >= minrank) {
+         // The end of the construct that was closed by insertion: what
+         // it holds that was closed properly is not affected
+         lint_note_damage(&state->last_loc, &state->last_loc);
+         return false;
+      }
+   }
+
    return true;
 }
 

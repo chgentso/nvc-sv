@@ -83,6 +83,9 @@ void lint_errors_reset(void);
 void lint_note_error(const loc_t *loc);
 void lint_note_syntax_error(const loc_t *loc);
 
+// The parser skipped or closed by insertion the text between two locations
+void lint_note_damage(const loc_t *from, const loc_t *to);
+
 // An error lies inside the lines of the span
 bool lint_span_has_error(const loc_t *span);
 

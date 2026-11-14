@@ -22,6 +22,7 @@
 #include "hash.h"
 #include "ident.h"
 #include "lint.h"
+#include "parse.h"
 #include "option.h"
 
 #include <ctype.h>
@@ -220,6 +221,24 @@ void lint_note_syntax_error(const loc_t *loc)
       note_region(&syntax_errors, loc);
 }
 
+void lint_note_damage(const loc_t *from, const loc_t *to)
+{
+   if (!lint_enabled(LINT_ALL))
+      return;
+   else if (loc_invalid_p(from) || loc_invalid_p(to)
+            || from->file_ref != to->file_ref)
+      return;
+
+   const error_region_t r = {
+      .file         = from->file_ref,
+      .first_line   = from->first_line,
+      .last_line    = MAX(from->first_line + from->line_delta,
+                          to->first_line + to->line_delta),
+      .first_column = from->first_column,
+   };
+   APUSH(syntax_errors, r);
+}
+
 static bool span_overlaps(const region_list_t *list, const loc_t *span)
 {
    const unsigned last = span->first_line + span->line_delta;
@@ -306,6 +325,12 @@ bool lint_unit_has_syntax_error(const loc_t *unit)
 
 bool lint_trusted(const loc_t *unit, const loc_t *construct)
 {
+   // Level B: when the parser recovers a construct that starts after an
+   // error is as good as any other unless the error or a place where the
+   // parser skipped or closed text overlaps it
+   if (parse_recovery())
+      return !lint_span_has_error(construct);
+
    return !lint_span_has_error(construct)
       && !lint_after_syntax_error(unit, construct);
 }

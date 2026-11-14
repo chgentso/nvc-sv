@@ -43,6 +43,7 @@ typedef struct {
    const char *hint_str;
    int         n_correct;
    int         stall;
+   bool        mute;
    int       (*rank_fn)(token_t);
    tokenq_t    tokenq[TOKENQ_SIZE];
    int         tokenq_head;
@@ -93,6 +94,7 @@ void parse_trace_out(parse_state_t *state);
 token_t parse_peek_nth(parse_state_t *state, int n);
 void drop_token(parse_state_t *state);
 void drop_tokens_until(parse_state_t *state, token_t tok);
+void parse_sync(parse_state_t *state, int level);
 void parse_set_recovery(bool on);
 bool parse_recovery(void);
 void parse_vexpect(parse_state_t *state, va_list ap);

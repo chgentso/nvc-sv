@@ -2784,5 +2784,8 @@ mixed55         mixed,2008
 mixedlogic1 shell
 mixedparam1 shell
 vlogimplgen1    verilog,gold
+linterr8 shell
+linterr9 shell
 linterr10 shell
+linterr11 shell
 linterr12 shell

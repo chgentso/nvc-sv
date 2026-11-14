@@ -47,8 +47,20 @@ static struct {
 static void unresolved_cb(vlog_node_t v, void *context)
 {
    bool *bad = context;
-   if (vlog_kind(v) == V_REF && !vlog_has_ref(v))
+   if (vlog_kind(v) != V_REF)
+      return;
+   else if (!vlog_has_ref(v))
       *bad = true;
+   else {
+      // After a syntax error the declaration that was meant to be there
+      // may have been skipped and the name become an implicit net
+      vlog_node_t d = vlog_ref(v);
+      if (vlog_kind(d) == V_NET_DECL && vlog_has_type(d)
+          && vlog_kind(vlog_type(d)) == V_DATA_TYPE
+          && (vlog_flags(vlog_type(d)) & VLOG_F_IMPLICIT_NET)
+          && lint_unit_has_syntax_error(partial_ctx.unit))
+         *bad = true;
+   }
 }
 
 static bool trusted(vlog_node_t v)

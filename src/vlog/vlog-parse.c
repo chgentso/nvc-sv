@@ -716,6 +716,42 @@ static vlog_node_t lookup_interface(ident_t name)
    return vlog_from_object(obj);
 }
 
+static int vlog_token_rank(token_t tok)
+{
+   // How far up the grammar a token reaches, used to recover from errors:
+   // negative closes or separates a bracketed list, 1 ends a statement or
+   // declaration, 2 closes a statement level construct, 3 starts or closes
+   // a module level item and 4 starts or closes a design unit
+   switch (tok) {
+   case tRPAREN: case tCOMMA: case tRSQUARE: case tRBRACE:
+      return -1;
+   case tSEMI:
+      return 1;
+   case tEND: case tENDCASE: case tJOIN: case tJOINANY: case tJOINNONE:
+      return 2;
+   case tALWAYS: case tALWAYSCOMB: case tALWAYSFF: case tALWAYSLATCH:
+   case tASSIGN: case tINITIAL: case tFINAL: case tGENERATE:
+   case tENDGENERATE: case tFUNCTION: case tENDFUNCTION: case tTASK:
+   case tENDTASK: case tLOCALPARAM: case tPARAMETER: case tINPUT:
+   case tOUTPUT: case tINOUT: case tWIRE: case tREG: case tLOGIC:
+   case tGENVAR: case tTYPEDEF: case tSVINT: case tINTEGER: case tBIT:
+   case tSHORTINT: case tLONGINT: case tBYTE: case tSTRINGK: case tREAL:
+   case tTIME: case tUWIRE: case tSUPPLY0: case tSUPPLY1: case tTRI:
+   case tIMPORT: case tDEFPARAM: case tSPECIFY: case tENDSPECIFY:
+   case tMODPORT: case tCLOCKING: case tENDCLOCKING:
+   case tPROPERTY: case tENDPROPERTY: case tSEQUENCE:
+   case tENDSEQUENCE:
+      return 3;
+   case tMODULE: case tENDMODULE: case tPACKAGE:
+   case tENDPACKAGE: case tINTERFACE: case tENDINTERFACE: case tPROGRAM:
+   case tENDPROGRAM: case tPRIMITIVE: case tENDPRIMITIVE: case tENDCLASS:
+   case tEOF:
+      return 4;
+   default:
+      return 0;
+   }
+}
+
 static void vlog_parse_error_cb(void)
 {
    lint_note_syntax_error(&state.last_loc);
@@ -12820,7 +12856,7 @@ static vlog_node_t p_statement_item(ident_t id)
             break;
          default:
             one_of(tIF, tCASE, tCASEX, tCASEZ);
-            drop_tokens_until(&state, tSEMI);
+            parse_sync(&state, 2);
             return vlog_new(V_SEQ_BLOCK);  // Dummy statement
          }
 
@@ -12861,7 +12897,7 @@ static vlog_node_t p_statement_item(ident_t id)
              tASSIGN, tDEASSIGN, tFORCE, tRELEASE, tRETURN, tASSERT, tBREAK,
              tCONTINUE, tTHIS, tSUPER, tRANDCASE, tFOREACH, tUNIQUE,
              tUNIQUE0, tPRIORITY);
-      drop_tokens_until(&state, tSEMI);
+      parse_sync(&state, 2);
       return vlog_new(V_SEQ_BLOCK);  // Dummy statement
    }
 }
@@ -24062,7 +24098,7 @@ static void p_module_or_generate_item(vlog_node_t mod)
              tBYTE, tSTRINGK, tIMPORT, tFINAL, tASSERT, tASSUME, tCOVER,
              tPULLDOWN, tPULLUP, tID, tAND, tNAND, tOR, tNOR, tXOR, tXNOR,
              tNOT, tBUF, tBUFIF0, tBUFIF1, tNOTIF0, tNOTIF1, tDEFPARAM, tID);
-      drop_tokens_until(&state, tSEMI);
+      parse_sync(&state, 3);
    }
 }
 
@@ -24258,7 +24294,7 @@ static void p_non_port_module_item(vlog_node_t mod)
              tGENVAR, tVAR, tLOGIC, tBIT, tSHORTINT, tLONGINT, tBYTE, tSTRINGK,
              tIMPORT, tDEFPARAM, tFINAL, tASSERT, tASSUME, tCOVER, tSPECIFY,
              tGENERATE);
-      drop_tokens_until(&state, tSEMI);
+      parse_sync(&state, 3);
    }
 }
 
@@ -27159,6 +27195,9 @@ void reset_verilog_parser(void)
    state.tokenq_head = state.tokenq_tail = 0;
    state.lex_fn = processed_yylex;
    state.error_fn = vlog_parse_error_cb;
+   state.rank_fn = vlog_token_rank;
+   state.stall = 0;
+   state.mute = false;
 
    implicit_kind = V_NET_WIRE;
    last_attr = NULL;
