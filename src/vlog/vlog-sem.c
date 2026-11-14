@@ -2449,6 +2449,9 @@ static type_mask_t vlog_check_ref(vlog_node_t v)
       error_at(vlog_loc(v), "interconnect '%s' can only be used in a port "
                "connection", istr(vlog_ident(v)));
 
+   if (!vlog_has_ref(v))
+      return TM_ERROR;   // The lookup failed and was reported
+
    return get_type_mask(vlog_ref(v));
 }
 
