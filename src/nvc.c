@@ -644,8 +644,10 @@ static int analyse_files(int argc, char **argv, cmd_state_t *state,
       fatal("missing file name");
 
    const bool recovery = !scan && opt_get_int(OPT_LINT) != 0;
-   if (recovery)
+   if (recovery) {
       parse_set_recovery(true);
+      diag_set_soft_limit(true);
+   }
 
    for (int i = optind; i < next_cmd; i++) {
       if (argv[i][0] == '@')
@@ -654,8 +656,10 @@ static int analyse_files(int argc, char **argv, cmd_state_t *state,
          analyse_file(argv[i], state);
    }
 
-   if (recovery)
+   if (recovery) {
       parse_set_recovery(false);
+      diag_set_soft_limit(false);
+   }
 
    if (scan) {
       const unsigned errors = state->scan_errors;

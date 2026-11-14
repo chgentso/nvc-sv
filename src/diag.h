@@ -129,6 +129,10 @@ unsigned error_count(void);
 void reset_error_count(void);
 unsigned set_error_limit(unsigned limit);
 
+// The error limit only limits what is printed: later errors are counted
+// and the run continues up to a larger hard limit
+bool diag_set_soft_limit(bool on);
+
 void wrapped_printf(const char *fmt, ...);
 void wrapped_vprintf(const char *fmt, va_list ap);
 
