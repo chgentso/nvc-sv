@@ -1051,7 +1051,12 @@ void vlog_symtab_lookup(vlog_symtab_t *st, vlog_node_t v)
 
    ident_t name = vlog_ident(v);
    const vlog_symbol_t *sym = symbol_for(st, name);
-   if (sym == NULL && vlog_kind(v) == V_REF && st->implicit != V_NET_NONE) {
+   vlog_node_t home = NULL;
+   for (vlog_scope_t *s = st->top; s != NULL && home == NULL; s = s->parent)
+      home = s->container;   // The scope of a generate loop has none
+
+   if (sym == NULL && vlog_kind(v) == V_REF && st->implicit != V_NET_NONE
+       && home != NULL) {
       // See 1800-2017 section 6.10 "Implicit declarations"
       vlog_node_t decl = vlog_new(V_NET_DECL);
       vlog_set_ident(decl, name);
@@ -1066,7 +1071,7 @@ void vlog_symtab_lookup(vlog_symtab_t *st, vlog_node_t v)
 
       vlog_set_ref(v, decl);
 
-      vlog_add_decl(st->top->container, decl);
+      vlog_add_decl(home, decl);
 
       fresh_symbol_for(st, name)->node = decl;
    }
