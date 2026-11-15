@@ -3991,6 +3991,30 @@ START_TEST(test_binnand1)
 }
 END_TEST
 
+START_TEST(test_netdtype1)
+{
+   const error_t expect[] = {
+      { 10, "net 'bad_real' cannot have a real data type" },
+      { 11, "net 'bad_class' cannot have a class handle data type" },
+      { 12, "net 'bad_string' cannot have a string data type" },
+      { 13, "net 'bad_bit' cannot have a 2-state data type" },
+      { 14, "net 'bad_vec' cannot have a 2-state data type" },
+      { 15, "net 'bad_int' cannot have a 2-state data type" },
+      { 16, "net 'bad_struct' cannot have a 2-state packed data type" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/netdtype1.sv");
+
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
 START_TEST(test_crash1)
 {
    const error_t expect[] = {
@@ -4510,6 +4534,7 @@ Suite *get_vlog_tests(void)
    tcase_add_test(tc, test_refarg1);
 
    tcase_add_test(tc, test_binnand1);
+   tcase_add_test(tc, test_netdtype1);
    tcase_add_test(tc, test_crash1);
    tcase_add_test(tc, test_crash2);
    tcase_add_test(tc, test_crash3);

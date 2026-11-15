@@ -1289,10 +1289,65 @@ static void vlog_check_port_decl(vlog_node_t v)
       vlog_check_expr(vlog_value(v));
 }
 
+static const char *vlog_bad_net_type(vlog_node_t type)
+{
+   // The data type of a net must be 4-state integral or an array, union or
+   // structure of such (6.7.1)
+
+   if (type == NULL)
+      return NULL;
+
+   switch (vlog_kind(type)) {
+   case V_CLASS_DECL:
+      return "class handle";
+   case V_STRUCT_DECL:
+   case V_UNION_DECL:
+      if ((vlog_flags(type) & VLOG_F_PACKED) && vlog_is_two_state(type))
+         return "2-state packed";
+      return NULL;
+   case V_DATA_TYPE:
+      switch (vlog_subkind(type)) {
+      case DT_REAL:
+      case DT_SHORTREAL:
+      case DT_REALTIME:
+         return "real";
+      case DT_STRING:
+         return "string";
+      case DT_QUEUE:
+      case DT_DYNARRAY:
+      case DT_ASSOC:
+         return "dynamically sized array";
+      case DT_BIT:
+      case DT_BYTE:
+      case DT_SHORTINT:
+      case DT_INT:
+      case DT_LONGINT:
+         return "2-state";
+      default:
+         return NULL;
+      }
+   default:
+      return NULL;
+   }
+}
+
 static void vlog_check_net_decl(vlog_node_t v)
 {
    vlog_check_type(v);
    vlog_check_ranges(v);
+
+   if (vlog_has_type(v)) {
+      const char *bad = vlog_bad_net_type(vlog_get_type(vlog_type(v)));
+      if (bad != NULL) {
+         diag_t *d = diag_new(relaxed_rules() ? DIAG_WARN : DIAG_ERROR,
+                              vlog_loc(v));
+         diag_printf(d, "net %pQ cannot have a %s data type", vlog_ident(v),
+                     bad);
+         diag_hint(d, NULL, "the data type of a net must be 4-state integral "
+                   "or an array, union or structure of such");
+         diag_emit(d);
+      }
+   }
 
    if (vlog_has_value(v))
       vlog_check_expr(vlog_value(v));
