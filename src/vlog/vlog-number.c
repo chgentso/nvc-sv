@@ -751,7 +751,8 @@ bool number_equal(number_t a, number_t b)
    else if (a.big->issigned != b.big->issigned)
       return false;
 
-   const int nwords = bignum_words(a.big);
+   // The words are the a bits followed by the b bits
+   const int nwords = 2 * bignum_words(a.big);
    for (int i = 0; i < nwords; i++) {
       if (a.big->words[i] != b.big->words[i])
          return false;
