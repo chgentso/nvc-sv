@@ -5106,6 +5106,12 @@ static bool sem_check_port_actual(formal_map_t *formals, int nformals,
       if ((mode != PORT_IN) && type_is_unconstrained(tree_type(decl)))
          sem_error(value, "port %pI of unconstrained type %pT cannot "
                    "be unconnected", tree_ident(decl), type);
+
+      if (mode == PORT_IN && tree_has_value(decl)
+          && is_unbounded_default(tree_value(decl)))
+         sem_error(value, "port %pI of unconstrained type %pT cannot be "
+                   "unconnected as its default value has an others choice "
+                   "and no index range", tree_ident(decl), type);
    }
 
    // Check for type conversions and conversion functions
@@ -5330,6 +5336,12 @@ static bool sem_check_port_map(tree_t t, tree_t unit, nametab_t *tab)
          if (mode != PORT_IN && type_is_unconstrained(ftype))
             error_at(tree_loc(t), "missing actual for port %pI with "
                      "unconstrained array type", tree_ident(formals[i].decl));
+         else if (mode == PORT_IN && tree_has_value(formals[i].decl)
+                  && is_unbounded_default(tree_value(formals[i].decl)))
+            error_at(tree_loc(t), "missing actual for port %pI of "
+                     "unconstrained type %pT whose default value has an "
+                     "others choice and no index range",
+                     tree_ident(formals[i].decl), ftype);
       }
    }
 

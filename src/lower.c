@@ -8616,7 +8616,7 @@ static void lower_sub_signals(lower_unit_t *lu, type_t type, type_t var_type,
 
       if (init_reg == VCODE_INVALID_REG)
          init_reg = lower_scalar_type_left(lu, type_elem_recur(type));
-      else {
+      else if (!type_is_scalar(init_type)) {
          lower_check_array_sizes(lu, type, init_type, bounds_reg,
                                  init_reg, locus);
          init_reg = lower_array_data(init_reg);
@@ -12477,7 +12477,14 @@ static void lower_port_signal(lower_unit_t *lu, tree_t port,
    else if (tree_has_value(port)) {
       tree_t value = tree_value(port);
       value_type = tree_type(value);
-      init_reg = lower_rvalue(lu, value);
+      if (is_unbounded_default(value)) {
+         // Non-standard default of an unconstrained port with only an
+         // others choice: every element has the same initial value
+         value_type = type_elem(value_type);
+         init_reg = lower_rvalue(lu, tree_value(tree_assoc(value, 0)));
+      }
+      else
+         init_reg = lower_rvalue(lu, value);
    }
 
    sig_flags_t flags = 0;

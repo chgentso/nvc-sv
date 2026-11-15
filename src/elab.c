@@ -7342,8 +7342,15 @@ static tree_t elab_top_level_binding(tree_t arch, const elab_ctx_t *ctx)
          diag_lrm(d, STD_19, "6.5.6.3");
          diag_emit(d);
       }
-      else if (tree_subkind(p) == PORT_IN && tree_has_value(p))
+      else if (tree_subkind(p) == PORT_IN && tree_has_value(p)) {
+         if (is_unbounded_default(tree_value(p)))
+            error_at(tree_loc(p), "unconnected top-level port %pI cannot "
+                     "have unconstrained type %pT with a default value "
+                     "that has an others choice and no index range",
+                     tree_ident(p), tree_type(p));
+
          tree_set_value(m, tree_value(p));
+      }
       else {
          type_t type = tree_type(p);
          if (type_is_unconstrained(type))

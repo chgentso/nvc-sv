@@ -131,6 +131,7 @@ typedef void (*predef_cb_t)(tree_t, void *);
 void walk_predefs(nametab_t *tab, ident_t name, predef_cb_t fn, void *context);
 
 tree_t solve_types(nametab_t *tab, tree_t expr, type_t constraint);
+tree_t solve_port_default(nametab_t *tab, tree_t expr, type_t type);
 tree_t solve_known_subtype(nametab_t *tab, tree_t expr, tree_t target);
 tree_t solve_target(nametab_t *tab, tree_t target, tree_t value);
 tree_t solve_condition(nametab_t *tab, tree_t expr);

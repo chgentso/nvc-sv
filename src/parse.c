@@ -6385,7 +6385,8 @@ static type_t p_interface_type_indication(tree_t parent, ident_list_t *ids)
       return p_subtype_indication();
 }
 
-static void parse_anonymous_default(type_t type, tree_t *init)
+static void parse_anonymous_default(type_t type, tree_t *init,
+                                    tree_kind_t kind)
 {
    // The default expression is parsed but not allowed for an anonymous type
 
@@ -6394,6 +6395,8 @@ static void parse_anonymous_default(type_t type, tree_t *init)
       parse_error(CURRENT_LOC, "interface declaration with an anonymous type "
                   "cannot have a default expression");
    }
+   else if (kind == T_PORT_DECL)
+      *init = solve_port_default(nametab, p_expression(), type);
    else
       *init = solve_types(nametab, p_expression(), type);
 }
@@ -6443,7 +6446,7 @@ static void p_interface_constant_declaration(tree_t parent, tree_kind_t kind,
 
    tree_t init = NULL;
    if (optional(tWALRUS))
-      parse_anonymous_default(type, &init);
+      parse_anonymous_default(type, &init, kind);
 
    if (kind == T_PARAM_DECL && relaxed_rules() && type_is_file(type)) {
       class = C_FILE;
@@ -6567,7 +6570,7 @@ static void p_interface_signal_declaration(tree_t parent, tree_kind_t kind,
       }
 
       if (optional(tWALRUS))
-         parse_anonymous_default(type, &init);
+         parse_anonymous_default(type, &init, kind);
    }
 
    for (ident_list_t *it = ids; it != NULL; it = it->next) {
@@ -6613,7 +6616,7 @@ static void p_interface_variable_declaration(tree_t parent, tree_kind_t kind)
 
    tree_t init = NULL;
    if (optional(tWALRUS))
-      parse_anonymous_default(type, &init);
+      parse_anonymous_default(type, &init, kind);
 
    // VHDL-87 file parameters have class VARIABLE or no class at all
    const bool file87 = kind == T_PARAM_DECL && relaxed_rules()
