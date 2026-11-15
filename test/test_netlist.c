@@ -1238,6 +1238,259 @@ START_TEST(test_ev_option)
 }
 END_TEST
 
+static const char *get_attr(const conn_attr_t *attrs, unsigned n,
+                            const char *name)
+{
+   for (unsigned i = 0; i < n; i++) {
+      if (strcmp(attrs[i].name, name) == 0)
+         return attrs[i].value;
+   }
+
+   return NULL;
+}
+
+static const conn_out_ev_t *get_out(const conn_proc_t *p, const char *net)
+{
+   for (unsigned i = 0; i < p->ev->nouts; i++) {
+      const conn_out_ev_t *o = &(p->ev->outs[i]);
+      if (strcmp(p->drives[o->drive].net->name, net) == 0)
+         return o;
+   }
+
+   ck_abort_msg("no output %s of %s", net, p->name);
+   return NULL;
+}
+
+static void ck_range(const conn_range_t *r, conn_net_t *net, unsigned lo,
+                     unsigned hi)
+{
+   ck_assert_ptr_eq(r->net, net);
+   ck_assert_uint_eq(r->lo, lo);
+   ck_assert_uint_eq(r->hi, hi);
+}
+
+START_TEST(test_ev_sv)
+{
+   set_standard(STD_19);
+   input_from_file(TESTDIR "/netlist/ev_sv1.sv");
+
+   tree_t e = run_elab();
+   fail_if_errors();
+
+   const conn_build_opts_t bopts = { .evidence = true };
+   conn_design_t *cd = conn_build_with(e, &bopts);
+   ck_assert_ptr_nonnull(cd);
+
+   conn_block_t *top = conn_root(cd, 0);
+   conn_net_t *clk_a = get_net(top, "clk_a");
+   conn_net_t *clk_b = get_net(top, "clk_b");
+   conn_net_t *rst_n = get_net(top, "rst_n");
+   conn_net_t *en = get_net(top, "en");
+   conn_net_t *din = get_net(top, "din");
+
+   // Every process has evidence
+   for (unsigned i = 0; i < top->nprocs; i++)
+      ck_assert_ptr_nonnull(top->procs[i]->ev);
+
+   // Attributes of the module, of nets, and the location of the top level
+   ck_assert_str_eq(get_attr(top->attrs, top->nattrs, "keep_hierarchy"), "yes");
+   ck_assert_str_eq(get_attr(top->attrs, top->nattrs, "cdc_group"), "g1");
+   ck_assert_ptr_nonnull(top->src);
+   ck_assert_uint_eq(top->line, 22);
+   conn_net_t *meta = get_net(top, "meta");
+   ck_assert_str_eq(get_attr(meta->attrs, meta->nattrs, "async_reg"), "1");
+   ck_assert_ptr_null(get_attr(en->attrs, en->nattrs, "async_reg"));
+
+   // Asynchronous reset, low active
+   {
+      const conn_evidence_t *ev = get_proc(top, "always_ff @33")->ev;
+      ck_assert_int_eq(ev->cls, CONN_EV_SEQ);
+      ck_assert(!ev->approx);
+      ck_assert_uint_eq(ev->nclocks, 1);
+      ck_range(&ev->clocks[0].sig, clk_a, 0, 0);
+      ck_assert_int_eq(ev->clocks[0].edge, CONN_EDGE_RISE);
+      ck_assert_uint_eq(ev->nasync, 1);
+      ck_range(&ev->async[0].sig, rst_n, 0, 0);
+      ck_assert_int_eq(ev->async[0].level, CONN_LEVEL_LOW);
+      ck_assert_int_eq(ev->async[0].role, CONN_ROLE_RESET);
+      ck_assert_uint_eq(ev->nsync_reset, 0);
+
+      const conn_out_ev_t *ra = get_out(get_proc(top, "always_ff @33"), "ra");
+      ck_assert_int_eq(ra->cls, CONN_EV_SEQ);
+      ck_assert_int_eq(ra->clock, 0);
+      ck_assert_uint_eq(ra->ndata, 1);
+      ck_range(&ra->data[0], din, 0, 3);
+      ck_assert_uint_eq(ra->nctrl, 0);
+      ck_assert(ra->has_copy);
+      ck_range(&ra->copy, din, 0, 3);
+
+      const conn_out_ev_t *ta = get_out(get_proc(top, "always_ff @33"), "t_a");
+      ck_assert_uint_eq(ta->nctrl, 1);
+      ck_range(&ta->ctrl[0], en, 0, 0);
+      ck_assert(!ta->has_copy);
+   }
+
+   // Parenthesised edge, set to one
+   {
+      const conn_evidence_t *ev = get_proc(top, "always @38")->ev;
+      ck_assert_uint_eq(ev->nclocks, 1);
+      ck_range(&ev->clocks[0].sig, clk_b, 0, 0);
+      ck_assert_uint_eq(ev->nasync, 1);
+      ck_assert_int_eq(ev->async[0].level, CONN_LEVEL_HIGH);
+      ck_assert_int_eq(ev->async[0].role, CONN_ROLE_SET);
+   }
+
+   // Falling edge
+   {
+      const conn_evidence_t *ev = get_proc(top, "always @43")->ev;
+      ck_assert_int_eq(ev->clocks[0].edge, CONN_EDGE_FALL);
+      ck_assert_uint_eq(ev->nasync, 1);
+   }
+
+   // iff makes the enable a control
+   {
+      conn_proc_t *p = get_proc(top, "always_ff @47");
+      ck_assert_uint_eq(p->ev->nasync, 0);
+      const conn_out_ev_t *a3 = get_out(p, "a3");
+      ck_assert_uint_eq(a3->nctrl, 1);
+      ck_range(&a3->ctrl[0], en, 0, 0);
+      ck_assert(!a3->has_copy);
+   }
+
+   // Synchronous reset
+   {
+      conn_proc_t *p = get_proc(top, "always_ff @50");
+      ck_assert_uint_eq(p->ev->nsync_reset, 1);
+      ck_range(&p->ev->sync_reset[0], get_net(top, "srst"), 0, 0);
+      ck_assert_uint_eq(p->ev->nasync, 0);
+   }
+
+   // Blocking temporary
+   {
+      const conn_out_ev_t *a5 = get_out(get_proc(top, "always_ff @56"), "a5");
+      ck_assert_uint_eq(a5->ndata, 2);
+      ck_assert_ptr_eq(a5->data[0].net, get_net(top, "a3"));
+      ck_assert_ptr_eq(a5->data[1].net, get_net(top, "a4"));
+      ck_assert(!a5->has_copy);
+   }
+
+   // Both edges and two clocks
+   {
+      const conn_evidence_t *ev = get_proc(top, "always @62")->ev;
+      ck_assert_int_eq(ev->clocks[0].edge, CONN_EDGE_BOTH);
+      const conn_out_ev_t *o1 = get_out(get_proc(top, "always @62"), "o1");
+      ck_assert(o1->has_copy);
+      // Bit 2 of a descending net is position 1
+      ck_range(&o1->copy, get_net(top, "ra"), 1, 1);
+
+      ev = get_proc(top, "always @65")->ev;
+      ck_assert_uint_eq(ev->nclocks, 2);
+      ck_range(&ev->clocks[0].sig, clk_a, 0, 0);
+      ck_range(&ev->clocks[1].sig, clk_b, 0, 0);
+   }
+
+   // Combinational, latch, select that depends on a signal
+   {
+      conn_proc_t *c = get_proc(top, "always_comb @68");
+      ck_assert_int_eq(c->ev->cls, CONN_EV_COMB);
+      ck_assert_uint_eq(c->ev->nclocks, 0);
+      const conn_out_ev_t *o3 = get_out(c, "o3");
+      ck_assert_int_eq(o3->cls, CONN_EV_COMB);
+      ck_assert_int_eq(o3->clock, -1);
+      ck_assert_uint_eq(o3->ndata, 3);
+
+      ck_assert_int_eq(get_proc(top, "always @69")->ev->cls, CONN_EV_COMB);
+      ck_assert_int_eq(get_proc(top, "always_latch @70")->ev->cls,
+                       CONN_EV_LATCH);
+      ck_assert(get_proc(top, "always @72")->ev->approx);
+   }
+
+   // Continuous assignments and gates
+   {
+      conn_proc_t *a = get_proc(top, "assign @76");
+      ck_assert_int_eq(a->ev->cls, CONN_EV_COMB);
+      ck_assert(get_out(a, "dout")->has_copy);
+      ck_assert(!get_out(get_proc(top, "assign @74"), "gclk")->has_copy);
+      ck_assert(get_out(get_proc(top, "gate @77"), "meta")->has_copy);
+   }
+
+   // Each iteration of a generate loop has its own evidence and attributes
+   for (int i = 0; i < 4; i++) {
+      char *label LOCAL = xasprintf("g[%d].u", i);
+      conn_block_t *u = get_inst(top, label)->child;
+      conn_proc_t *p = get_proc(u, "always_ff @5");
+      ck_assert_int_eq(p->ev->cls, CONN_EV_SEQ);
+      ck_range(&p->ev->clocks[0].sig, get_net(u, "clk"), 0, 0);
+      conn_net_t *s0 = get_net(u, "s0");
+      ck_assert_str_eq(get_attr(s0->attrs, s0->nattrs, "async_reg"), "TRUE");
+      ck_assert(get_out(p, "s1")->has_copy);
+      ck_range(&get_out(p, "s1")->copy, s0, 0, 0);
+   }
+
+   // Without the attribute there is none
+   {
+      conn_block_t *up = get_inst(top, "up")->child;
+      conn_net_t *s0 = get_net(up, "s0");
+      ck_assert_ptr_null(get_attr(s0->attrs, s0->nattrs, "async_reg"));
+      ck_assert_int_eq(get_proc(up, "always_ff @14")->ev->cls, CONN_EV_SEQ);
+   }
+
+   conn_free(cd);
+}
+END_TEST
+
+START_TEST(test_ev_sv2)
+{
+   set_standard(STD_19);
+   input_from_file(TESTDIR "/netlist/ev_sv2.sv");
+
+   tree_t e = run_elab();
+   fail_if_errors();
+
+   const conn_build_opts_t bopts = { .evidence = true };
+   conn_design_t *cd = conn_build_with(e, &bopts);
+   ck_assert_ptr_nonnull(cd);
+
+   conn_block_t *top = conn_root(cd, 0);
+
+   // Set and reset in one process
+   {
+      const conn_evidence_t *ev = get_proc(top, "always @31")->ev;
+      ck_assert_int_eq(ev->cls, CONN_EV_SEQ);
+      ck_assert_uint_eq(ev->nclocks, 1);
+      ck_assert_uint_eq(ev->nasync, 2);
+      ck_assert_int_eq(ev->async[0].role, CONN_ROLE_RESET);
+      ck_assert_int_eq(ev->async[0].level, CONN_LEVEL_HIGH);
+      ck_assert_int_eq(ev->async[1].role, CONN_ROLE_SET);
+      ck_assert_int_eq(ev->async[1].level, CONN_LEVEL_LOW);
+   }
+
+   // Reset to a value that is neither all zeros nor all ones
+   ck_assert_int_eq(get_proc(top, "always @18")->ev->async[0].role,
+                    CONN_ROLE_UNKNOWN);
+
+   // Calls are approximated
+   ck_assert(get_proc(top, "always @37")->ev->approx);
+   ck_assert(get_proc(top, "always @40")->ev->approx);
+
+   // The clock read as data
+   {
+      conn_proc_t *p = get_proc(top, "always @46");
+      const conn_out_ev_t *o = get_out(p, "gated");
+      ck_assert_uint_eq(o->ndata, 2);
+      ck_assert_ptr_eq(o->data[0].net, get_net(top, "clk"));
+   }
+
+   // Bench-like code
+   ck_assert_int_eq(get_proc(top, "initial @49")->ev->cls, CONN_EV_OTHER);
+   ck_assert_int_eq(get_proc(top, "always @50")->ev->cls, CONN_EV_OTHER);
+   ck_assert_int_eq(get_proc(top, "always @51")->ev->cls, CONN_EV_OTHER);
+   ck_assert_uint_eq(get_proc(top, "always @51")->ev->nouts, 0);
+
+   conn_free(cd);
+}
+END_TEST
+
 Suite *get_netlist_tests(void)
 {
    Suite *s = suite_create("netlist");
@@ -1258,6 +1511,8 @@ Suite *get_netlist_tests(void)
    tcase_add_test(tc, test_m5_vlog_params_mixed);
    tcase_add_test(tc, test_m5_vlog_genloop);
    tcase_add_test(tc, test_ev_option);
+   tcase_add_test(tc, test_ev_sv);
+   tcase_add_test(tc, test_ev_sv2);
    suite_add_tcase(s, tc);
 
    return s;
