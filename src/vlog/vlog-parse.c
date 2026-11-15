@@ -775,6 +775,7 @@ static bool vlog_token_stray(token_t tok, const char *hint)
 }
 
 static unsigned syntax_errors_seen = 0;
+static bool     skipped_unit = false;   // Names may be in what was skipped
 static bool     header_damaged = false;
 
 static void vlog_parse_error_cb(void)
@@ -1023,7 +1024,8 @@ static vlog_node_t get_data_type(ident_t id)
 {
    vlog_node_t v = vlog_symtab_query(symtab, id);
    if (v == NULL) {
-      error_at(&state.last_loc, "no data type declaration for %pQ", id);
+      if (!(skipped_unit && parse_recovery()))
+         error_at(&state.last_loc, "no data type declaration for %pQ", id);
       return logic_type();
    }
    else if (!is_data_type(v)) {
@@ -9367,7 +9369,7 @@ static vlog_node_t p_class_new(vlog_node_t dt)
                       && !(vlog_kind(dt) == V_DATA_TYPE
                            && (vlog_subkind(dt) == DT_MAILBOX
                                || vlog_subkind(dt) == DT_SEMAPHORE)))) {
-      if (dt != NULL)
+      if (dt != NULL && !(skipped_unit && parse_recovery()))
          error_at(&state.last_loc, "new class expression must have class "
                   "type");
       dt = NULL;
@@ -27177,6 +27179,8 @@ static vlog_node_t p_source_text(void)
 
          lint_note_damage(&first, &last);
          state.mute = false;
+         skipped_unit = true;
+         vlog_symtab_lenient(symtab);
          make_new_arena();
          p_directive_list();
          continue;
@@ -27275,6 +27279,7 @@ void reset_verilog_parser(void)
    state.mute = false;
    syntax_errors_seen = 0;
    header_damaged = false;
+   skipped_unit = false;
 
    implicit_kind = V_NET_WIRE;
    last_attr = NULL;

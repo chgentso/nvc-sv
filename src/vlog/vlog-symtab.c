@@ -43,6 +43,7 @@ typedef struct _vlog_symtab {
    bool             forward;
    bool             forward_net;
    ghash_t         *builtins;
+   bool             lenient;        // A unit of this file was skipped
    bool             syntax_error;   // Seen in this file in recovery mode
    hset_t          *reported;      // Names missing since that happened
 } vlog_symtab_t;
@@ -93,6 +94,10 @@ void vlog_symtab_free(vlog_symtab_t *st)
 
 static void report_missing(vlog_symtab_t *st, vlog_node_t v, ident_t name)
 {
+   // A name may be declared in a unit that was skipped
+   if (st->lenient && parse_recovery())
+      return;
+
    // After a syntax error the declaration may be one that was skipped: say
    // so once for each name
    if (st->syntax_error && parse_recovery()) {
@@ -1232,6 +1237,11 @@ vlog_node_t vlog_symtab_query(vlog_symtab_t *st, ident_t name)
       return NULL;
 
    return sym->node;
+}
+
+void vlog_symtab_lenient(vlog_symtab_t *st)
+{
+   st->lenient = true;
 }
 
 void vlog_symtab_suppress(vlog_symtab_t *st)

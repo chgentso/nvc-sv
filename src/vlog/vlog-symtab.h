@@ -42,6 +42,7 @@ void vlog_symtab_poison(vlog_symtab_t *st, ident_t name);
 void vlog_symtab_import(vlog_symtab_t *st, vlog_node_t v);
 
 void vlog_symtab_suppress(vlog_symtab_t *st);
+void vlog_symtab_lenient(vlog_symtab_t *st);
 
 vlog_node_t vlog_symtab_query(vlog_symtab_t *st, ident_t name);
 
