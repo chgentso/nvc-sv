@@ -24830,7 +24830,11 @@ static vlog_node_t p_named_port_connection(void)
          vlog_node_t ref = vlog_new(V_REF);
          vlog_set_ident(ref, id);
          vlog_set_loc(ref, &state.last_loc);
+
+         // The name must be declared as an implicit net is not made (23.3.2.3)
+         vlog_symtab_set_implicit(symtab, V_NET_NONE);
          vlog_symtab_lookup(symtab, ref);
+         vlog_symtab_set_implicit(symtab, implicit_kind);
          vlog_set_value(v, ref);
       }
    }
