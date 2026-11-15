@@ -33,10 +33,11 @@ grep -q '"level":"note","message":"lint is partial for this unit.*"rule":"partia
 ! grep -q "lint:partial" nopartial
 grep -q "lint:sensitivity" nopartial
 
-# Only the part of the unit before a syntax error is trusted
+# The process after a syntax error is trusted when the parser read on
 ! nvc --std=08 --lint --messages=compact -a $TESTDIR/lint/vhderr2.vhd 2>syn
 grep -q "vhderr2.vhd:7:.*lint:sensitivity" syn
-test $(grep -c "lint:sensitivity" syn) = 1
+grep -q "vhderr2.vhd:14:.*lint:sensitivity" syn
+test $(grep -c "lint:sensitivity" syn) = 2
 ! grep -q "lint:latch" syn
 
 # A signal with a bad declaration hides the processes that use it

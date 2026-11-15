@@ -213,7 +213,8 @@ static void vlog_check_net_lvalue(vlog_node_t v, vlog_node_t where)
       else
          break;
    case V_REF:
-      vlog_check_net_lvalue(vlog_ref(v), v);
+      if (vlog_has_ref(v))
+         vlog_check_net_lvalue(vlog_ref(v), v);
       return;
    case V_BIT_SELECT:
    case V_PART_SELECT:
@@ -2448,6 +2449,9 @@ static type_mask_t vlog_check_ref(vlog_node_t v)
        && vlog_is_interconnect(vlog_ref(v)))
       error_at(vlog_loc(v), "interconnect '%s' can only be used in a port "
                "connection", istr(vlog_ident(v)));
+
+   if (!vlog_has_ref(v))
+      return TM_ERROR;   // The lookup failed and was reported
 
    return get_type_mask(vlog_ref(v));
 }

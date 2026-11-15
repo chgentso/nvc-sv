@@ -22,6 +22,10 @@
 #include "scan.h"
 
 #define RECOVER_THRESH 5
+
+// Recovery from syntax errors stops when a unit has used this much of its
+// arena
+#define RECOVERY_ARENA_PCT 50
 #define TRACE_PARSE    0
 #define TRACE_RECOVERY 0
 #define TOKENQ_SIZE    2048
@@ -35,13 +39,21 @@ typedef struct {
 typedef token_t (*lex_fn_t)(void);
 typedef void (*error_fn_t)(void);
 
-typedef struct {
+typedef struct _parse_state {
    lex_fn_t    lex_fn;
    error_fn_t  error_fn;
    loc_t       start_loc;
    loc_t       last_loc;
    const char *hint_str;
    int         n_correct;
+   int         stall;
+   bool        mute;
+   int       (*rank_fn)(token_t);
+   bool      (*stray_fn)(token_t, const char *);
+   int       (*group_fn)(token_t);   // +1 opens, -1 closes a nested group
+   int       (*rank_at_fn)(struct _parse_state *);   // Rank of the next token with what follows
+   bool        end_clause;   // end is followed by more that goes with it
+   int         end_missing;  // That much of it is taken as already read
    tokenq_t    tokenq[TOKENQ_SIZE];
    int         tokenq_head;
    int         tokenq_tail;
@@ -63,6 +75,7 @@ typedef struct {
 #define expect(...) parse_expect(&state, __VA_ARGS__, -1)
 #define one_of(...) parse_one_of(&state, __VA_ARGS__, -1)
 #define not_at_token(...) parse_not_at_token(&state, __VA_ARGS__, -1)
+#define not_at_items(...) parse_not_at_items(&state, __VA_ARGS__, -1)
 #define peek() peek_nth(1)
 #define peek_nth(n) parse_peek_nth(&state, (n))
 #define optional(tok) parse_optional(&state, (tok))
@@ -91,11 +104,17 @@ void parse_trace_out(parse_state_t *state);
 token_t parse_peek_nth(parse_state_t *state, int n);
 void drop_token(parse_state_t *state);
 void drop_tokens_until(parse_state_t *state, token_t tok);
+void parse_sync(parse_state_t *state, int level);
+void parse_rearm(parse_state_t *state);
+void parse_skip_close(parse_state_t *state);
+void parse_set_recovery(bool on);
+bool parse_recovery(void);
 void parse_vexpect(parse_state_t *state, va_list ap);
 void parse_expect(parse_state_t *state, ...);
 bool parse_optional(parse_state_t *state, token_t tok);
 bool parse_scan(parse_state_t *state, ...);
 bool parse_not_at_token(parse_state_t *state, ...);
+bool parse_not_at_items(parse_state_t *state, ...);
 bool parse_consume(parse_state_t *state, token_t tok);
 token_t parse_one_of(parse_state_t *state, ...);
 const loc_t *parse_current_loc(parse_state_t *state);

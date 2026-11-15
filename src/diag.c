@@ -117,6 +117,7 @@ typedef struct _hint_rec {
 
 static unsigned    n_diags[DIAG_FATAL + 1];
 static unsigned    error_limit = 0;
+static bool        soft_limit = false;
 static bool        scan_filter = false;
 static unsigned    scan_visible = 0;
 static file_list_t loc_files;
@@ -1294,6 +1295,17 @@ void diag_emit(diag_t *d)
       d->rule_shown = true;
    }
 
+   bool limit_note = false;
+   if (soft_limit && error_limit > 0 && d->level == DIAG_ERROR
+       && !d->suppress && !d->quiet) {
+      // The limit only decides what is shown: the rest of the run goes on
+      const unsigned shown = relaxed_load(&n_diags[DIAG_ERROR]);
+      if (shown >= error_limit)
+         d->quiet = true;
+      else if (shown + 1 == error_limit)
+         limit_note = true;
+   }
+
    if (d->suppress)
       goto cleanup;
    else if (d->quiet) {
@@ -1329,8 +1341,20 @@ void diag_emit(diag_t *d)
    if (!d->quiet && d->level >= DIAG_ERROR)
       relaxed_add(&scan_visible, 1);
 
-   if (d->level == DIAG_ERROR && count == error_limit)
+   if (soft_limit && error_limit > 0) {
+      const unsigned hard = MAX(1000, error_limit * 50);
+      if (d->level == DIAG_ERROR && count == hard)
+         fatal("too many errors, giving up");
+   }
+   else if (d->level == DIAG_ERROR && count == error_limit)
       fatal("too many errors, giving up");
+
+   if (limit_note) {
+      diag_t *n = diag_new(DIAG_NOTE, NULL);
+      diag_printf(n, "%u errors shown; further errors in this run are not "
+                  "shown", error_limit);
+      diag_emit(n);
+   }
 
  cleanup:
    for (int i = 0; i < d->hints.count; i++)
@@ -1473,6 +1497,13 @@ void reset_error_count(void)
 {
    for (int i = 0; i <= DIAG_FATAL; i++)
       relaxed_store(&n_diags[i], 0);
+}
+
+bool diag_set_soft_limit(bool on)
+{
+   const bool old = soft_limit;
+   soft_limit = on;
+   return old;
 }
 
 unsigned set_error_limit(unsigned limit)

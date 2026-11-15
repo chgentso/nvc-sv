@@ -24,6 +24,7 @@
 #include "jit/jit.h"
 #include "lib.h"
 #include "lint.h"
+#include "parse.h"
 #include "lower.h"
 #include "conn.h"
 #include "netlist.h"
@@ -503,6 +504,7 @@ static int analyse_files(int argc, char **argv, cmd_state_t *state,
       { "black-box-missing", optional_argument, 0, 'K' },
       { "symbols",         no_argument,       0, 'Y' },
       { "fsm",             no_argument,       0, 'Z' },
+      { "recover",         no_argument,       0, 'C' },
       { 0, 0, 0, 0 }
    };
 
@@ -510,7 +512,7 @@ static int analyse_files(int argc, char **argv, cmd_state_t *state,
    int c, index = 0, error_limit = 20;
    const char *file_list = NULL;
    const char *spec = ":D:f:I:W:";
-   bool symbols = false, fsm = false;
+   bool symbols = false, fsm = false, scan_recover = false;
    bool no_save = false, werror = false;
 
    while ((c = getopt_long(next_cmd, argv, spec, long_options, &index)) != -1) {
@@ -599,6 +601,11 @@ static int analyse_files(int argc, char **argv, cmd_state_t *state,
             fatal("the --fsm option is only valid with --scan");
          fsm = true;
          break;
+      case 'C':
+         if (!scan)
+            fatal("the --recover option is only valid with --scan");
+         scan_recover = true;
+         break;
       default:
          should_not_reach_here();
       }
@@ -612,7 +619,7 @@ static int analyse_files(int argc, char **argv, cmd_state_t *state,
    }
 
    // Registered before the -Werror callback so it sees the real level
-   const bool lint_regions = opt_get_int(OPT_LINT) != 0;
+   const bool lint_regions = opt_get_int(OPT_LINT) != 0 || scan_recover;
    if (lint_regions)
       diag_add_hint_fn(lint_error_diag_cb, NULL);
 
@@ -642,6 +649,17 @@ static int analyse_files(int argc, char **argv, cmd_state_t *state,
    else if (optind == next_cmd)
       fatal("missing file name");
 
+   const bool recovery = !scan && opt_get_int(OPT_LINT) != 0;
+   if (recovery) {
+      parse_set_recovery(true);
+      diag_set_soft_limit(true);
+   }
+
+   if (scan && scan_recover) {
+      parse_set_recovery(true);
+      lint_set_regions(true);
+   }
+
    for (int i = optind; i < next_cmd; i++) {
       if (argv[i][0] == '@')
          do_file_list(argv[i] + 1, state);
@@ -649,7 +667,17 @@ static int analyse_files(int argc, char **argv, cmd_state_t *state,
          analyse_file(argv[i], state);
    }
 
+   if (recovery) {
+      parse_set_recovery(false);
+      diag_set_soft_limit(false);
+   }
+
    if (scan) {
+      if (scan_recover) {
+         parse_set_recovery(false);
+         lint_set_regions(false);
+      }
+
       const unsigned errors = state->scan_errors;
       state->scan = false;
       state->scan_errors = 0;

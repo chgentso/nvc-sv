@@ -16,6 +16,8 @@
 //
 
 #include "util.h"
+#include "lint.h"
+#include "parse.h"
 #include "array.h"
 #include "diag.h"
 #include "fsm.h"
@@ -1585,6 +1587,18 @@ static void vhdl_add_cand(cand_t *cands, unsigned *n, obj_t target, bool two,
       cands[(*n)++] = (cand_t){ target, two, proc };
 }
 
+static unsigned vhdl_skipped = 0;
+
+void vhdl_fsm_reset_skipped(void)
+{
+   vhdl_skipped = 0;
+}
+
+unsigned vhdl_fsm_skipped(void)
+{
+   return vhdl_skipped;
+}
+
 void vhdl_fsm_scan(tree_t unit, text_buf_t *out, unsigned *count)
 {
    if (tree_kind(unit) != T_ARCH)
@@ -1602,6 +1616,12 @@ void vhdl_fsm_scan(tree_t unit, text_buf_t *out, unsigned *count)
       obj_t subject;
       if (!vhdl_obj(value, &subject))
          continue;
+
+      // A state graph with missing transitions is worse than none
+      if (parse_recovery() && lint_span_syntax_damaged(tree_loc(ci->cs))) {
+         vhdl_skipped++;
+         continue;
+      }
 
       type_t type = obj_type(subject);
       const bool enum_type = type_kind(type) == T_ENUM

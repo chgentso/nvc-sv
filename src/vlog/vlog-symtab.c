@@ -20,6 +20,7 @@
 #include "diag.h"
 #include "hash.h"
 #include "ident.h"
+#include "parse.h"
 #include "printf.h"
 #include "vlog/vlog-node.h"
 #include "vlog/vlog-number.h"
@@ -42,6 +43,9 @@ typedef struct _vlog_symtab {
    bool             forward;
    bool             forward_net;
    ghash_t         *builtins;
+   bool             lenient;        // A unit of this file was skipped
+   bool             syntax_error;   // Seen in this file in recovery mode
+   hset_t          *reported;      // Names missing since that happened
 } vlog_symtab_t;
 
 typedef struct {
@@ -83,7 +87,30 @@ void vlog_symtab_free(vlog_symtab_t *st)
    pool_free(st->pool);
    hash_free(st->scopes);
    ghash_free(st->builtins);
+   if (st->reported != NULL)
+      hset_free(st->reported);
    free(st);
+}
+
+static void report_missing(vlog_symtab_t *st, vlog_node_t v, ident_t name)
+{
+   // A name may be declared in a unit that was skipped
+   if (st->lenient && parse_recovery())
+      return;
+
+   // After a syntax error the declaration may be one that was skipped: say
+   // so once for each name
+   if (st->syntax_error && parse_recovery()) {
+      if (st->reported == NULL)
+         st->reported = hset_new(16);
+
+      if (hset_contains(st->reported, name))
+         return;
+
+      hset_insert(st->reported, name);
+   }
+
+   error_at(vlog_loc(v), "no visible declaration for %pQ", name);
 }
 
 static vlog_symbol_t *fresh_symbol_for(vlog_symtab_t *st, ident_t name)
@@ -271,7 +298,7 @@ void vlog_symtab_resolve_deferred(vlog_symtab_t *st)
       }
       else if (vlog_kind(v) != V_MOD_REF) {
          ident_t name = vlog_ident(v);
-         error_at(vlog_loc(v), "no visible declaration for %pQ", name);
+         report_missing(st, v, name);
          vlog_symtab_poison(st, name);
       }
    }
@@ -308,7 +335,7 @@ void vlog_symtab_pop(vlog_symtab_t *st)
          APUSH(st->top->parent->net_deferred, v);
       else {
          ident_t name = vlog_ident(v);
-         error_at(vlog_loc(v), "no visible declaration for %pQ", name);
+         report_missing(st, v, name);
          vlog_symtab_poison(st, name);
       }
    }
@@ -340,7 +367,7 @@ void vlog_symtab_pop(vlog_symtab_t *st)
          APUSH(st->top->parent->deferred, v);
       else if (vlog_kind(v) != V_MOD_REF) {
          ident_t name = vlog_ident(v);
-         error_at(vlog_loc(v), "no visible declaration for %pQ", name);
+         report_missing(st, v, name);
          vlog_symtab_poison(st, name);
       }
    }
@@ -1094,7 +1121,7 @@ void vlog_symtab_lookup(vlog_symtab_t *st, vlog_node_t v)
          }
          // Fall-through
       default:
-         error_at(vlog_loc(v), "no visible declaration for %pQ", name);
+         report_missing(st, v, name);
          vlog_symtab_poison(st, name);
       }
    }
@@ -1212,9 +1239,15 @@ vlog_node_t vlog_symtab_query(vlog_symtab_t *st, ident_t name)
    return sym->node;
 }
 
+void vlog_symtab_lenient(vlog_symtab_t *st)
+{
+   st->lenient = true;
+}
+
 void vlog_symtab_suppress(vlog_symtab_t *st)
 {
    st->top->suppress = true;
+   st->syntax_error = true;
 }
 
 vlog_scope_t *vlog_symtab_current(vlog_symtab_t *st)

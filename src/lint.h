@@ -19,6 +19,7 @@
 #ifndef _LINT_H
 #define _LINT_H
 
+#include "diag.h"
 #include "prim.h"
 
 // Rules of the lint pass enabled by the global --lint option
@@ -83,8 +84,23 @@ void lint_errors_reset(void);
 void lint_note_error(const loc_t *loc);
 void lint_note_syntax_error(const loc_t *loc);
 
+// The parser skipped or closed by insertion the text between two locations
+void lint_note_damage(const loc_t *from, const loc_t *to);
+
 // An error lies inside the lines of the span
 bool lint_span_has_error(const loc_t *span);
+
+// Keep the error regions for a scan without lint being enabled
+void lint_set_regions(bool on);
+
+// The parser could not read something in the span (not any other error)
+bool lint_span_syntax_damaged(const loc_t *span);
+
+// Append the merged line spans of syntax errors in a file as "[a,b],[c,d]"
+void lint_damaged_spans(file_ref_t file, text_buf_t *out);
+
+// The parser skipped or closed by insertion something in the span
+bool lint_span_has_damage(const loc_t *span);
 
 // A syntax error lies inside the lines of the span
 bool lint_span_has_syntax_error(const loc_t *span);

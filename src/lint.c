@@ -22,6 +22,7 @@
 #include "hash.h"
 #include "ident.h"
 #include "lint.h"
+#include "parse.h"
 #include "option.h"
 
 #include <ctype.h>
@@ -180,12 +181,25 @@ typedef A(error_region_t) region_list_t;
 
 static region_list_t errors = AINIT;
 static region_list_t syntax_errors = AINIT;
+static region_list_t damage = AINIT;   // Skipped or closed by insertion
 static bool          unlocated_error = false;
+static bool          regions_on = false;   // Kept for a scan
+
+void lint_set_regions(bool on)
+{
+   regions_on = on;
+}
+
+static bool regions_active(void)
+{
+   return regions_on || lint_enabled(LINT_ALL);
+}
 
 void lint_errors_reset(void)
 {
    ACLEAR(errors);
    ACLEAR(syntax_errors);
+   ACLEAR(damage);
    unlocated_error = false;
 }
 
@@ -202,7 +216,7 @@ static void note_region(region_list_t *list, const loc_t *loc)
 
 void lint_note_error(const loc_t *loc)
 {
-   if (!lint_enabled(LINT_ALL))
+   if (!regions_active())
       return;
    else if (loc == NULL || loc_invalid_p(loc))
       unlocated_error = true;
@@ -212,12 +226,31 @@ void lint_note_error(const loc_t *loc)
 
 void lint_note_syntax_error(const loc_t *loc)
 {
-   if (!lint_enabled(LINT_ALL))
+   if (!regions_active())
       return;
    else if (loc == NULL || loc_invalid_p(loc))
       unlocated_error = true;
    else
       note_region(&syntax_errors, loc);
+}
+
+void lint_note_damage(const loc_t *from, const loc_t *to)
+{
+   if (!regions_active())
+      return;
+   else if (loc_invalid_p(from) || loc_invalid_p(to)
+            || from->file_ref != to->file_ref)
+      return;
+
+   const error_region_t r = {
+      .file         = from->file_ref,
+      .first_line   = from->first_line,
+      .last_line    = MAX(from->first_line + from->line_delta,
+                          to->first_line + to->line_delta),
+      .first_column = from->first_column,
+   };
+   APUSH(syntax_errors, r);
+   APUSH(damage, r);
 }
 
 static bool span_overlaps(const region_list_t *list, const loc_t *span)
@@ -240,6 +273,49 @@ bool lint_span_has_error(const loc_t *span)
       return true;
 
    return span_overlaps(&errors, span) || span_overlaps(&syntax_errors, span);
+}
+
+bool lint_span_syntax_damaged(const loc_t *span)
+{
+   // Only what the parser could not read: errors for what is missing from
+   // a scan do not count
+   return !loc_invalid_p(span) && span_overlaps(&syntax_errors, span);
+}
+
+static int cmp_region(const void *a, const void *b)
+{
+   const error_region_t *x = a, *y = b;
+   return x->first_line < y->first_line ? -1 : x->first_line > y->first_line;
+}
+
+void lint_damaged_spans(file_ref_t file, text_buf_t *out)
+{
+   region_list_t list = AINIT;
+   for (unsigned i = 0; i < syntax_errors.count; i++) {
+      if (syntax_errors.items[i].file == file)
+         APUSH(list, syntax_errors.items[i]);
+   }
+
+   qsort(list.items, list.count, sizeof(error_region_t), cmp_region);
+
+   unsigned n = 0;
+   for (unsigned i = 0; i < list.count; ) {
+      unsigned first = list.items[i].first_line, last = list.items[i].last_line;
+      for (i++; i < list.count && list.items[i].first_line <= last + 1; i++)
+         last = MAX(last, list.items[i].last_line);
+
+      tb_printf(out, "%s[%u,%u]", n++ > 0 ? "," : "", first, last);
+   }
+
+   ACLEAR(list);
+}
+
+bool lint_span_has_damage(const loc_t *span)
+{
+   if (unlocated_error || loc_invalid_p(span))
+      return true;
+
+   return span_overlaps(&damage, span);
 }
 
 bool lint_span_has_syntax_error(const loc_t *span)
@@ -306,6 +382,12 @@ bool lint_unit_has_syntax_error(const loc_t *unit)
 
 bool lint_trusted(const loc_t *unit, const loc_t *construct)
 {
+   // Level B: when the parser recovers a construct that starts after an
+   // error is as good as any other unless the error or a place where the
+   // parser skipped or closed text overlaps it
+   if (parse_recovery())
+      return !lint_span_has_error(construct);
+
    return !lint_span_has_error(construct)
       && !lint_after_syntax_error(unit, construct);
 }

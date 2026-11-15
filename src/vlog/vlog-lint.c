@@ -40,6 +40,8 @@
 static struct {
    bool         partial;
    const loc_t *unit;
+   vlog_node_t  node;
+   int          process_damage;   // An error touches a process: -1 unknown
    hset_t      *seen;      // Constructs that were not checked
    unsigned     skipped;
 } partial_ctx;
@@ -47,8 +49,20 @@ static struct {
 static void unresolved_cb(vlog_node_t v, void *context)
 {
    bool *bad = context;
-   if (vlog_kind(v) == V_REF && !vlog_has_ref(v))
+   if (vlog_kind(v) != V_REF)
+      return;
+   else if (!vlog_has_ref(v))
       *bad = true;
+   else {
+      // After a syntax error the declaration that was meant to be there
+      // may have been skipped and the name become an implicit net
+      vlog_node_t d = vlog_ref(v);
+      if (vlog_kind(d) == V_NET_DECL && vlog_has_type(d)
+          && vlog_kind(vlog_type(d)) == V_DATA_TYPE
+          && (vlog_flags(vlog_type(d)) & VLOG_F_IMPLICIT_NET)
+          && lint_unit_has_syntax_error(partial_ctx.unit))
+         *bad = true;
+   }
 }
 
 static bool trusted(vlog_node_t v)
@@ -69,6 +83,44 @@ static bool trusted(vlog_node_t v)
    }
 
    return ok;
+}
+
+static bool process_damaged(void)
+{
+   if (partial_ctx.process_damage < 0) {
+      partial_ctx.process_damage = 0;
+
+      const int nstmts = vlog_stmts(partial_ctx.node);
+      for (int i = 0; i < nstmts; i++) {
+         vlog_node_t s = vlog_stmt(partial_ctx.node, i);
+         switch (vlog_kind(s)) {
+         case V_ALWAYS:
+         case V_INITIAL:
+         case V_FINAL:
+            if (lint_span_has_damage(vlog_loc(s)))
+               partial_ctx.process_damage = 1;
+            break;
+         default:
+            break;
+         }
+      }
+   }
+
+   return partial_ctx.process_damage;
+}
+
+// A rule that compares blocks with each other cannot tell that a block
+// after an error that touches a process is complete, so it only uses the
+// blocks before the error then
+static bool trusted_before_errors(vlog_node_t v)
+{
+   if (!trusted(v))
+      return false;
+   else if (partial_ctx.partial && process_damaged()
+            && lint_after_syntax_error(partial_ctx.unit, vlog_loc(v)))
+      return false;
+   else
+      return true;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -1192,7 +1244,7 @@ static void check_mixed(vlog_node_t unit)
    const int nstmts = vlog_stmts(unit);
    for (int i = 0; i < nstmts; i++) {
       vlog_node_t s = vlog_stmt(unit, i);
-      if (vlog_kind(s) == V_ALWAYS && trusted(s))
+      if (vlog_kind(s) == V_ALWAYS && trusted_before_errors(s))
          vlog_visit(s, mixed_cb, &list);
    }
 
@@ -1332,7 +1384,7 @@ static void check_multidriven(vlog_node_t unit)
    const int nstmts = vlog_stmts(unit);
    for (int i = 0; i < nstmts; i++) {
       vlog_node_t s = vlog_stmt(unit, i);
-      if (vlog_kind(s) != V_ALWAYS || !trusted(s))
+      if (vlog_kind(s) != V_ALWAYS || !trusted_before_errors(s))
          continue;
 
       ctx.block = s;
@@ -1381,6 +1433,8 @@ void vlog_lint_partial(vlog_node_t unit)
 
    partial_ctx.partial = true;
    partial_ctx.unit = loc;
+   partial_ctx.node = unit;
+   partial_ctx.process_damage = -1;
    partial_ctx.seen = hset_new(16);
 
    lint_unit(unit);
