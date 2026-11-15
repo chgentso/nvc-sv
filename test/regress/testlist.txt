@@ -2862,4 +2862,5 @@ vlogcover7      verilog,cover=branch
 vlogcover8      verilog,cover=branch
 vlogcover9      shell
 vlogcover10     verilog,cover=statement
+vlogcover11     verilog,cover=branch
 netlist6        shell

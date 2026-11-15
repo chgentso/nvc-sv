@@ -20,11 +20,11 @@
             <branch hier="WORK.vlogcover6._P1._S0._S3._B0.BIN_TRUE" data="1"/>
             <branch hier="WORK.vlogcover6._P1._S0._S3._B0.BIN_FALSE" data="2"/>
           </scope>
-          <scope name="_B1">
+          <scope name="_B1" line="29">
             <branch hier="WORK.vlogcover6._P1._S0._S3._B1.BIN_TRUE" data="1"/>
             <branch hier="WORK.vlogcover6._P1._S0._S3._B1.BIN_FALSE" data="1"/>
           </scope>
-          <scope name="_B2">
+          <scope name="_B2" line="31">
             <branch hier="WORK.vlogcover6._P1._S0._S3._B2.BIN_TRUE" data="0"/>
             <branch hier="WORK.vlogcover6._P1._S0._S3._B2.BIN_FALSE" data="1"/>
           </scope>
@@ -56,7 +56,7 @@
             <branch hier="WORK.vlogcover6._P2._S0._S0._B0.BIN_TRUE" data="1"/>
             <branch hier="WORK.vlogcover6._P2._S0._S0._B0.BIN_FALSE" data="2"/>
           </scope>
-          <scope name="_B1">
+          <scope name="_B1" line="52">
             <branch hier="WORK.vlogcover6._P2._S0._S0._B1.BIN_TRUE" data="2"/>
             <branch hier="WORK.vlogcover6._P2._S0._S0._B1.BIN_FALSE" data="0"/>
           </scope>

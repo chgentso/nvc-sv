@@ -34,27 +34,27 @@
               <statement hier="WORK.COVER1.TEST_PROC.LOOP1.IF_COND_1._B0._S0" data="1"/>
             </scope>
           </scope>
-          <scope name="_B1">
+          <scope name="_B1" line="51">
             <scope name="_S0" line="52">
               <statement hier="WORK.COVER1.TEST_PROC.LOOP1.IF_COND_1._B1._S0" data="1"/>
             </scope>
           </scope>
-          <scope name="_B2">
+          <scope name="_B2" line="53">
             <scope name="_S0" line="54">
               <statement hier="WORK.COVER1.TEST_PROC.LOOP1.IF_COND_1._B2._S0" data="1"/>
             </scope>
           </scope>
-          <scope name="_B3">
+          <scope name="_B3" line="55">
             <scope name="_S0" line="56">
               <statement hier="WORK.COVER1.TEST_PROC.LOOP1.IF_COND_1._B3._S0" data="1"/>
             </scope>
           </scope>
-          <scope name="_B4">
+          <scope name="_B4" line="57">
             <scope name="_S0" line="58">
               <statement hier="WORK.COVER1.TEST_PROC.LOOP1.IF_COND_1._B4._S0" data="1"/>
             </scope>
           </scope>
-          <scope name="_B5">
+          <scope name="_B5" line="59">
             <scope name="_S0" line="61">
               <statement hier="WORK.COVER1.TEST_PROC.LOOP1.IF_COND_1._B5._S0" data="0"/>
             </scope>

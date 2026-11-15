@@ -15,7 +15,7 @@
           <branch hier="WORK.COVER3._P2.L_IF_1._B0.BIN_TRUE" data="1"/>
           <branch hier="WORK.COVER3._P2.L_IF_1._B0.BIN_FALSE" data="20"/>
         </scope>
-        <scope name="_B1">
+        <scope name="_B1" line="43">
           <branch hier="WORK.COVER3._P2.L_IF_1._B1.BIN_TRUE" data="1"/>
           <branch hier="WORK.COVER3._P2.L_IF_1._B1.BIN_FALSE" data="19"/>
         </scope>
@@ -25,7 +25,7 @@
           <branch hier="WORK.COVER3._P2.L_IF_2._B0.BIN_TRUE" data="1"/>
           <branch hier="WORK.COVER3._P2.L_IF_2._B0.BIN_FALSE" data="20"/>
         </scope>
-        <scope name="_B1">
+        <scope name="_B1" line="52">
           <branch hier="WORK.COVER3._P2.L_IF_2._B1.BIN_TRUE" data="1"/>
           <branch hier="WORK.COVER3._P2.L_IF_2._B1.BIN_FALSE" data="19"/>
         </scope>
@@ -35,11 +35,11 @@
           <branch hier="WORK.COVER3._P2.L_IF_3._B0.BIN_TRUE" data="0"/>
           <branch hier="WORK.COVER3._P2.L_IF_3._B0.BIN_FALSE" data="21"/>
         </scope>
-        <scope name="_B1">
+        <scope name="_B1" line="57">
           <branch hier="WORK.COVER3._P2.L_IF_3._B1.BIN_TRUE" data="1"/>
           <branch hier="WORK.COVER3._P2.L_IF_3._B1.BIN_FALSE" data="20"/>
         </scope>
-        <scope name="_B2">
+        <scope name="_B2" line="58">
           <branch hier="WORK.COVER3._P2.L_IF_3._B2.BIN_TRUE" data="0"/>
           <branch hier="WORK.COVER3._P2.L_IF_3._B2.BIN_FALSE" data="20"/>
         </scope>

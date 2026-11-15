@@ -63,9 +63,14 @@ static cover_obj_t get_cover_scope(vhdl_cover_t *g, lazy_cscope_t *lcs)
    else {
       cover_obj_t parent = get_cover_scope(g, lcs->parent);
       ident_t name = vhdl_scope_name(lcs->tree, lcs->nth);
+      // The location of an elsif extends from the start of the whole if
+      // statement so use the condition to get the line of the branch
+      loc_t loc = *tree_loc(lcs->tree);
+      if (tree_kind(lcs->tree) == T_COND_STMT && tree_has_value(lcs->tree))
+         loc = *tree_loc(tree_value(lcs->tree));
+
       return (lcs->cscope = cover_scope_new(g->data, g->inst, parent,
-                                            CSCOPE_NONE, name,
-                                            *tree_loc(lcs->tree)));
+                                            CSCOPE_NONE, name, loc));
    }
 }
 

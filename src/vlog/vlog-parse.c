@@ -10225,11 +10225,15 @@ static vlog_node_t p_conditional_statement(void)
    vlog_node_t v = vlog_new(V_IF);
 
    consume(tIF);
+
+   const loc_t if_loc = state.last_loc;
+
    consume(tLPAREN);
 
    const int depth = match_depth;
 
    vlog_node_t c0 = vlog_new(V_COND);
+   vlog_set_loc(c0, &if_loc);
    vlog_set_value(c0, p_cond_predicate());
    vlog_add_cond(v, c0);
 
@@ -10245,8 +10249,10 @@ static vlog_node_t p_conditional_statement(void)
    while (!stop && optional(tELSE)) {
       vlog_node_t c = vlog_new(V_COND);
       vlog_add_cond(v, c);
+      vlog_set_loc(c, &state.last_loc);
 
       if (optional(tIF)) {
+         vlog_set_loc(c, &state.last_loc);
          consume(tLPAREN);
          vlog_set_value(c, p_cond_predicate());
          consume(tRPAREN);

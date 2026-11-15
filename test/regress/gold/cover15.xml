@@ -38,30 +38,30 @@
               <statement hier="WORK.COVER15._P0.CROP_AND_SATURATE_TIME._S0._B0._S0" data="1"/>
             </scope>
           </scope>
-          <scope name="_B1">
+          <scope name="_B1" line="12">
             <expression hier="WORK.COVER15._P0.CROP_AND_SATURATE_TIME._S0._B1._E0.BIN_FALSE" data="1"/>
             <expression hier="WORK.COVER15._P0.CROP_AND_SATURATE_TIME._S0._B1._E0.BIN_TRUE" data="1"/>
             <branch hier="WORK.COVER15._P0.CROP_AND_SATURATE_TIME._S0._B1.BIN_TRUE" data="1"/>
             <branch hier="WORK.COVER15._P0.CROP_AND_SATURATE_TIME._S0._B1.BIN_FALSE" data="1"/>
-            <scope name="_S0" line="12">
+            <scope name="_S0">
               <statement hier="WORK.COVER15._P0.CROP_AND_SATURATE_TIME._S0._B1._S0" data="1"/>
             </scope>
           </scope>
-          <scope name="_B2">
+          <scope name="_B2" line="13">
             <expression hier="WORK.COVER15._P0.CROP_AND_SATURATE_TIME._S0._B2._E0.BIN_FALSE" data="0"/>
             <expression hier="WORK.COVER15._P0.CROP_AND_SATURATE_TIME._S0._B2._E0.BIN_TRUE" data="1"/>
             <branch hier="WORK.COVER15._P0.CROP_AND_SATURATE_TIME._S0._B2.BIN_TRUE" data="1"/>
             <branch hier="WORK.COVER15._P0.CROP_AND_SATURATE_TIME._S0._B2.BIN_FALSE" data="0"/>
-            <scope name="_S0" line="13">
+            <scope name="_S0">
               <statement hier="WORK.COVER15._P0.CROP_AND_SATURATE_TIME._S0._B2._S0" data="1"/>
             </scope>
           </scope>
-          <scope name="_B3">
+          <scope name="_B3" line="14">
             <expression hier="WORK.COVER15._P0.CROP_AND_SATURATE_TIME._S0._B3._E0.BIN_FALSE" data="0"/>
             <expression hier="WORK.COVER15._P0.CROP_AND_SATURATE_TIME._S0._B3._E0.BIN_TRUE" data="0"/>
             <branch hier="WORK.COVER15._P0.CROP_AND_SATURATE_TIME._S0._B3.BIN_TRUE" data="0"/>
             <branch hier="WORK.COVER15._P0.CROP_AND_SATURATE_TIME._S0._B3.BIN_FALSE" data="0"/>
-            <scope name="_S0" line="14">
+            <scope name="_S0">
               <statement hier="WORK.COVER15._P0.CROP_AND_SATURATE_TIME._S0._B3._S0" data="0"/>
             </scope>
           </scope>

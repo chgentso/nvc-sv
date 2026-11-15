@@ -12,7 +12,7 @@
             <statement hier="WORK.vlogcover3.fact._S0._B0._S0" data="1"/>
           </scope>
         </scope>
-        <scope name="_B1">
+        <scope name="_B1" line="15">
           <scope name="_S0" line="16">
             <statement hier="WORK.vlogcover3.fact._S0._B1._S0" data="3"/>
           </scope>
@@ -76,7 +76,7 @@
             <statement hier="WORK.vlogcover3._P2._S5._B0._S0" data="0"/>
           </scope>
         </scope>
-        <scope name="_B1">
+        <scope name="_B1" line="52">
           <scope name="_S0" line="53">
             <statement hier="WORK.vlogcover3._P2._S5._B1._S0" data="1"/>
           </scope>
