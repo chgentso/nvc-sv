@@ -4245,6 +4245,25 @@ START_TEST(test_forcesel1)
 }
 END_TEST
 
+START_TEST(test_castsize1)
+{
+   const error_t expect[] = {
+      {  6, "the width of a size cast must be positive but is -1" },
+      {  7, "the width of a size cast must be positive but is 0" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/castsize1.sv");
+
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
 START_TEST(test_crash1)
 {
    const error_t expect[] = {
@@ -4778,6 +4797,7 @@ Suite *get_vlog_tests(void)
    tcase_add_test(tc, test_genvar3);
    tcase_add_test(tc, test_waitevent1);
    tcase_add_test(tc, test_forcesel1);
+   tcase_add_test(tc, test_castsize1);
    tcase_add_test(tc, test_crash1);
    tcase_add_test(tc, test_crash2);
    tcase_add_test(tc, test_crash3);

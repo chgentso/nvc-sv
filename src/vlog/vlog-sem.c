@@ -4297,7 +4297,15 @@ static type_mask_t vlog_check_cast(vlog_node_t v)
       return dmask;
    }
 
-   vlog_check_expr(vlog_left(v));
+   vlog_node_t width = vlog_left(v);
+   vlog_check_expr(width);
+
+   // The width of a size cast must be positive (6.24.1)
+   int64_t size;
+   if (vlog_stable_const(width, &size) && size <= 0)
+      error_at(vlog_loc(width), "the width of a size cast must be positive "
+               "but is %"PRIi64, size);
+
    return vlog_check_expr(vlog_value(v));
 }
 
