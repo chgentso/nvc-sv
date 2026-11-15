@@ -1491,6 +1491,51 @@ START_TEST(test_ev_sv2)
 }
 END_TEST
 
+START_TEST(test_ev_svmix)
+{
+   set_standard(STD_08);
+   input_from_file(TESTDIR "/netlist/ev_svmix_leaf.vhd");
+   analyse_file();
+
+   input_from_file(TESTDIR "/netlist/ev_svmix.v");
+   analyse_file();
+
+   input_from_file(TESTDIR "/netlist/ev_svmix.vhd");
+
+   tree_t e = run_elab();
+   fail_if_errors();
+
+   const conn_build_opts_t bopts = { .evidence = true };
+   conn_design_t *cd = conn_build_with(e, &bopts);
+   ck_assert_ptr_nonnull(cd);
+
+   conn_block_t *top = conn_root(cd, 0);
+   ck_assert_int_eq(top->lang, CONN_VHDL);
+
+   // A Verilog module below the VHDL top level, a VHDL entity inside it and
+   // a Verilog module below that
+   conn_block_t *vtop = get_inst(top, "U_TOP")->child;
+   ck_assert_int_eq(vtop->lang, CONN_VERILOG);
+   conn_proc_t *r = get_proc(vtop, "always @14");
+   ck_assert_int_eq(r->ev->cls, CONN_EV_SEQ);
+   ck_range(&r->ev->clocks[0].sig, get_net(vtop, "clk_a"), 0, 0);
+
+   conn_block_t *leaf = get_inst(vtop, "u_leaf")->child;
+   ck_assert_int_eq(leaf->lang, CONN_VHDL);
+   ck_assert_ptr_nonnull(leaf->procs[0]->ev);
+
+   conn_block_t *sync = get_inst(vtop, "u_sync")->child;
+   ck_assert_int_eq(sync->lang, CONN_VERILOG);
+   conn_proc_t *p = get_proc(sync, "always @4");
+   ck_assert_int_eq(p->ev->cls, CONN_EV_SEQ);
+   ck_range(&p->ev->clocks[0].sig, get_net(sync, "clk"), 0, 0);
+   conn_net_t *s1 = get_net(sync, "s1");
+   ck_assert_str_eq(get_attr(s1->attrs, s1->nattrs, "async_reg"), "TRUE");
+
+   conn_free(cd);
+}
+END_TEST
+
 Suite *get_netlist_tests(void)
 {
    Suite *s = suite_create("netlist");
@@ -1513,6 +1558,7 @@ Suite *get_netlist_tests(void)
    tcase_add_test(tc, test_ev_option);
    tcase_add_test(tc, test_ev_sv);
    tcase_add_test(tc, test_ev_sv2);
+   tcase_add_test(tc, test_ev_svmix);
    suite_add_tcase(s, tc);
 
    return s;
