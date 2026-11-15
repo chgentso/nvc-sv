@@ -45,6 +45,15 @@ static int              systf_depth;
 static vlog_net_kind_t  implicit_kind;
 static vlog_symtab_t   *symtab;
 static vlog_node_t      last_attr;
+typedef struct {
+   ident_t name;
+   ident_t value;
+   loc_t   loc;
+} pending_attr_t;
+
+// Attribute instances parsed for the declarations that follow.  They are
+// not nodes until attached, as the first node of a unit must be its root.
+static A(pending_attr_t) pending_attrs = AINIT;
 static vlog_node_t      last_modport;
 static vlog_node_t      atom_types[DT_BIT + 1];
 static unsigned         next_namespace;
@@ -149,6 +158,7 @@ static vlog_node_t p_select(ident_t id);
 static void p_list_of_arguments(vlog_node_t call);
 static vlog_net_kind_t p_net_type(void);
 static void p_module_or_generate_item(vlog_node_t mod);
+static void p_module_or_generate_item_1(vlog_node_t mod);
 static void p_block_item_declaration(vlog_node_t parent);
 static int push_base_scopes(vlog_node_t class);
 static void put_enum_names(vlog_node_t type_decl);
@@ -1196,16 +1206,83 @@ static ident_t p_system_tf_identifier(void)
       return error_marker();
 }
 
+static ident_t attr_value_text(vlog_node_t e)
+{
+   // The value of an attribute as text: a string, an integer or "1"
+   // for the attribute without a value as in 1800-2017 section 5.12
+
+   if (e == NULL)
+      return ident_new("1");
+
+   switch (vlog_kind(e)) {
+   case V_STRING:
+      {
+         number_t n = vlog_number(e);
+         if (!number_is_defined(n))
+            return NULL;
+
+         const int len = number_width(n) / 8;
+         char *text LOCAL = xmalloc(len + 1);
+         for (int j = 0; j < len; j++)
+            text[j] = number_byte(n, len - 1 - j);
+         text[len] = '\0';
+         return ident_new(text);
+      }
+   case V_NUMBER:
+      {
+         number_t n = vlog_number(e);
+         if (!number_is_defined(n))
+            return NULL;
+         LOCAL_TEXT_BUF tb = tb_new();
+         tb_printf(tb, "%"PRIi64, number_integer(n));
+         return ident_new(tb_get(tb));
+      }
+   default:
+      return NULL;
+   }
+}
+
 static void p_attr_spec(void)
 {
    // attr_name [ = constant_expression ]
 
    BEGIN("attribute specification");
 
-   (void)p_identifier();
+   ident_t name = p_identifier();
 
+   vlog_node_t value = NULL;
    if (optional(tEQ))
-      (void)p_constant_expression();
+      value = p_constant_expression();
+
+   ident_t text = attr_value_text(value);
+   if (name == error_marker() || text == NULL)
+      return;
+
+   // Attached to the declarations of the item that follows by
+   // attach_attributes()
+   pending_attr_t pa = { name, text, state.last_loc };
+   APUSH(pending_attrs, pa);
+}
+
+static void attach_attributes(vlog_node_t v, const pending_attr_t *attrs,
+                              int n)
+{
+   switch (vlog_kind(v)) {
+   case V_NET_DECL:
+   case V_VAR_DECL:
+   case V_PORT_DECL:
+   case V_MODULE:
+      for (int i = 0; i < n; i++) {
+         vlog_node_t a = vlog_new(V_ATTR_INST);
+         vlog_set_ident(a, attrs[i].name);
+         vlog_set_ident2(a, attrs[i].value);
+         vlog_set_loc(a, &attrs[i].loc);
+         vlog_add_pragma(v, a);
+      }
+      break;
+   default:
+      break;
+   }
 }
 
 static vlog_node_t p_attribute_instance(void)
@@ -23985,7 +24062,7 @@ static bool scan_unknown_type_declaration(void)
    return next == tCOMMA || next == tSEMI || next == tEQ;
 }
 
-static void p_module_or_generate_item(vlog_node_t mod)
+static void p_module_or_generate_item_1(vlog_node_t mod)
 {
    // { attribute_instance } parameter_override
    //   | { attribute_instance } gate_instantiation
@@ -24449,7 +24526,7 @@ static void p_non_port_module_item(vlog_node_t mod)
    }
 }
 
-static void p_module_item(vlog_node_t mod)
+static void p_module_item_1(vlog_node_t mod)
 {
    // port_declaration ; | non_port_module_item
 
@@ -24470,6 +24547,43 @@ static void p_module_item(vlog_node_t mod)
    }
    else
       p_non_port_module_item(mod);
+}
+
+static void parse_item_attributes(vlog_node_t mod, void (*fn)(vlog_node_t))
+{
+   // Attribute instances before an item, or inside it, belong to the nets,
+   // variables and ports it declares
+
+   A(pending_attr_t) attrs = AINIT;
+   for (unsigned i = 0; i < pending_attrs.count; i++)
+      APUSH(attrs, pending_attrs.items[i]);
+   pending_attrs.count = 0;
+
+   const int first = vlog_decls(mod);
+
+   (*fn)(mod);
+
+   for (unsigned i = 0; i < pending_attrs.count; i++)
+      APUSH(attrs, pending_attrs.items[i]);
+   pending_attrs.count = 0;
+
+   if (attrs.count > 0) {
+      const int ndecls = vlog_decls(mod);
+      for (int i = first; i < ndecls; i++)
+         attach_attributes(vlog_decl(mod, i), attrs.items, attrs.count);
+   }
+
+   ACLEAR(attrs);
+}
+
+static void p_module_or_generate_item(vlog_node_t mod)
+{
+   parse_item_attributes(mod, p_module_or_generate_item_1);
+}
+
+static void p_module_item(vlog_node_t mod)
+{
+   parse_item_attributes(mod, p_module_item_1);
 }
 
 static vlog_node_t p_modport_name(vlog_node_t iface)
@@ -24741,9 +24855,19 @@ static void p_list_of_port_declarations(vlog_node_t mod)
       v_port_kind_t kind = V_PORT_INPUT;
       vlog_node_t dt = NULL;
       ident_t iface = NULL;
+      pending_attrs.count = 0;
       do {
+         const int first = vlog_decls(mod);
          optional_attributes();
          p_ansi_port_declaration(mod, &kind, &dt, &iface);
+
+         if (pending_attrs.count > 0) {
+            const int ndecls = vlog_decls(mod);
+            for (int i = first; i < ndecls; i++)
+               attach_attributes(vlog_decl(mod, i), pending_attrs.items,
+                                 pending_attrs.count);
+            pending_attrs.count = 0;
+         }
       } while (optional(tCOMMA));
    }
 
@@ -25389,6 +25513,11 @@ static vlog_node_t p_module_declaration(void)
    const bool saved_time_unscaled = time_unscaled;
 
    optional_attributes();
+
+   if (pending_attrs.count > 0) {
+      attach_attributes(mod, pending_attrs.items, pending_attrs.count);
+      pending_attrs.count = 0;
+   }
 
    const bool is_iface = peek() == tINTERFACE;
    const bool is_checker = at_checker();
@@ -26954,6 +27083,7 @@ static vlog_node_t p_description(void)
 
    BEGIN("description");
 
+   pending_attrs.count = 0;
    skip_over_attributes();
 
    if (at_checker())
@@ -27404,6 +27534,7 @@ void reset_verilog_parser(void)
 
    implicit_kind = V_NET_WIRE;
    last_attr = NULL;
+   ACLEAR(pending_attrs);
    next_namespace = 1;
    time_scale = default_time_scale;
    time_precision_log10 = default_precision_log10;

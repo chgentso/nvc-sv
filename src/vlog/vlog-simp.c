@@ -95,6 +95,10 @@ static vlog_node_t simp_port_decl(vlog_node_t v, vlog_node_t mod)
    if (vlog_has_value(v))
       vlog_set_value(decl, vlog_value(v));
 
+   const int npragmas = vlog_pragmas(v);
+   for (int i = 0; i < npragmas; i++)
+      vlog_add_pragma(decl, vlog_pragma(v, i));
+
    vlog_set_ref(v, decl);
    vlog_add_decl(mod, decl);
 

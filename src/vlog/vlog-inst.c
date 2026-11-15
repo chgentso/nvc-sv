@@ -654,6 +654,12 @@ vlog_node_t vlog_new_instance(vlog_node_t mod, vlog_node_t inst, ident_t id)
       break;
    }
 
+   if (vlog_kind(mod) == V_MODULE) {
+      const int npragmas = vlog_pragmas(mod);
+      for (int i = 0; i < npragmas; i++)
+         vlog_add_pragma(v, vlog_pragma(mod, i));
+   }
+
    int pidx = 0;
    const int ndecls = vlog_decls(copy);
    for (int i = 0; i < ndecls; i++) {
