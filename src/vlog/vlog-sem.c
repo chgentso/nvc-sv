@@ -2266,6 +2266,39 @@ static void vlog_ff_driver_cb(vlog_node_t v, void *ctx)
    }
 }
 
+static void vlog_genvar_loop_cb(vlog_node_t v, void *ctx)
+{
+   if (vlog_kind(v) == V_REF && vlog_has_ref(v)
+       && vlog_kind(vlog_ref(v)) == V_GENVAR_DECL)
+      hset_insert(ctx, v);
+}
+
+static void vlog_genvar_for_cb(vlog_node_t v, void *ctx)
+{
+   if (vlog_kind(v) == V_FOR_GENERATE)
+      vlog_visit(v, vlog_genvar_loop_cb, ctx);
+}
+
+static void vlog_genvar_use_cb(vlog_node_t v, void *ctx)
+{
+   if (vlog_kind(v) == V_REF && vlog_has_ref(v)
+       && vlog_kind(vlog_ref(v)) == V_GENVAR_DECL
+       && !hset_contains(ctx, v))
+      error_at(vlog_loc(v), "genvar '%s' used outside generate for loop",
+               istr(vlog_ident(v)));
+}
+
+static void vlog_check_genvar_uses(vlog_node_t v)
+{
+   // A genvar is only used in the generate loop which declares it
+   // (IEEE 1800-2017 27.4)
+
+   hset_t *legit = hset_new(16);
+   vlog_visit(v, vlog_genvar_for_cb, legit);
+   vlog_visit(v, vlog_genvar_use_cb, legit);
+   hset_free(legit);
+}
+
 static void vlog_check_module(vlog_node_t v)
 {
    const int nports = vlog_ports(v);
@@ -2278,6 +2311,7 @@ static void vlog_check_module(vlog_node_t v)
 
    vlog_check_decls(v);
    vlog_check_stmts(v);
+   vlog_check_genvar_uses(v);
 
    // Do not look inside generate blocks as only one branch is elaborated
    hash_t *drivers = hash_new(64);
