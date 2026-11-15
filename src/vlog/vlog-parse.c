@@ -1781,6 +1781,20 @@ static vlog_node_t p_unpacked_dimension(void)
    if (optional(tCOLON))
       right = p_constant_expression();
    else {
+      // The size must be positive (7.4.2)
+      vlog_node_t lit = left;
+      bool neg = false;
+      if (vlog_kind(lit) == V_UNARY && vlog_subkind(lit) == V_UNARY_NEG) {
+         lit = vlog_value(lit);
+         neg = true;
+      }
+
+      if (vlog_kind(lit) == V_NUMBER && number_is_defined(vlog_number(lit))
+          && (neg || number_integer(vlog_number(lit)) <= 0)
+          && number_integer(vlog_number(lit)) >= 0)
+         error_at(vlog_loc(left), "the size of an unpacked array dimension "
+                  "must be positive");
+
       // A single size is the same as [0:size-1]
       vlog_node_t one = vlog_new(V_NUMBER);
       vlog_set_number(one, number_from_int(1));
