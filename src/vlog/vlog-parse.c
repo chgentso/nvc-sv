@@ -247,6 +247,8 @@ static A(shared_tick_t) shared_ticks;
 static vlog_node_t default_clock = NULL;
 static vlog_node_t last_clocking_ctrl = NULL;
 static vlog_node_t default_disable = NULL;
+static vlog_node_t default_clock_scope = NULL;     // Where each was declared
+static vlog_node_t default_disable_scope = NULL;
 static hash_t     *clocking_blocks = NULL;
 static hset_t     *clocking_names = NULL;
 static vlog_node_t default_cycle = NULL;
@@ -23135,10 +23137,19 @@ static void p_default_declaration(vlog_node_t parent)
 
    consume(tDEFAULT);
 
-   if (peek() == tCLOCKING)
+   if (peek() == tCLOCKING) {
+      if (default_clock_scope == parent)
+         parse_error(&state.last_loc, "only one default clocking block is "
+                     "allowed in a module or generate block");
+      default_clock_scope = parent;
       p_clocking_declaration(parent, true);
+   }
    else {
       consume(tDISABLE);
+      if (default_disable_scope == parent)
+         parse_error(&state.last_loc, "only one default disable iff is "
+                     "allowed in a module or generate block");
+      default_disable_scope = parent;
       consume(tIFFKW);
       default_disable = p_expression_or_dist();
       consume(tSEMI);
@@ -26703,7 +26714,10 @@ static vlog_node_t p_module_declaration(void)
 
    vlog_node_t saved_clock = default_clock;
    vlog_node_t saved_disable = default_disable;
+   vlog_node_t saved_clock_scope = default_clock_scope;
+   vlog_node_t saved_disable_scope = default_disable_scope;
    default_clock = default_disable = NULL;
+   default_clock_scope = default_disable_scope = NULL;
 
    const uint64_t saved_time_scale = time_scale;
    const unsigned saved_time_precision = time_precision_log10;
@@ -26830,6 +26844,8 @@ static vlog_node_t p_module_declaration(void)
    gen_construct = saved_construct;
    default_clock = saved_clock;
    default_disable = saved_disable;
+   default_clock_scope = saved_clock_scope;
+   default_disable_scope = saved_disable_scope;
 
    scope_leave();
 
