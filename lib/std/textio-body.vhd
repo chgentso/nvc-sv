@@ -187,6 +187,21 @@ package body textio is
                 exit;
             end if;
             consumed := consumed + 1;
+
+            -- A single underscore may separate two digits
+            if i /= value'right and consumed < l.all'length
+                and get_char(l.all, consumed + 1) = '_'
+            then
+                if consumed + 1 < l.all'length
+                    and (get_char(l.all, consumed + 2) = '0'
+                         or get_char(l.all, consumed + 2) = '1')
+                then
+                    consumed := consumed + 1;
+                else
+                    good := false;
+                    exit;
+                end if;
+            end if;
         end loop;
 
         consume(l, consumed);
@@ -249,45 +264,160 @@ package body textio is
         assert good report "character read failed" severity read_severity;
     end procedure;
 
+    function ext_digit (x : character) return integer is
+    begin
+        case x is
+            when '0' to '9' => return character'pos(x) - character'pos('0');
+            when 'a' to 'f' => return character'pos(x) - character'pos('a') + 10;
+            when 'A' to 'F' => return character'pos(x) - character'pos('A') + 10;
+            when others     => return 99;
+        end case;
+    end function;
+
+    -- Returns the position of the number sign closing the base of a based
+    -- literal that starts at position POS or zero if there is none
+    function based_literal_hash (str : string; pos : positive) return natural is
+        alias s : string(1 to str'length) is str;
+        variable p : natural := pos;
+    begin
+        while p <= s'length and ((s(p) >= '0' and s(p) <= '9') or s(p) = '_') loop
+            p := p + 1;
+        end loop;
+        if p > pos and p <= s'length and (s(p) = '#' or s(p) = ':') then
+            return p;
+        else
+            return 0;
+        end if;
+    end function;
+
+    procedure read_decimal (l      : inout line;
+                            pos    : inout integer;
+                            value  : out integer;
+                            ndig   : out natural ) is
+        variable digit  : integer;
+        variable result : integer := 0;
+        variable count  : natural := 0;
+        variable peek   : character;
+    begin
+        -- Accumulate negated to avoid problems around INTEGER'LOW
+        while pos <= l.all'length loop
+            peek := get_char(l.all, pos);
+            if peek >= '0' and peek <= '9' then
+                digit := character'pos(peek) - character'pos('0');
+                result := (result * 10) - digit;
+                count := count + 1;
+                pos := pos + 1;
+            elsif peek = '_' and count > 0 and pos < l.all'length
+                and get_char(l.all, pos + 1) >= '0'
+                and get_char(l.all, pos + 1) <= '9'
+            then
+                pos := pos + 1;
+            else
+                exit;
+            end if;
+        end loop;
+        value := result;
+        ndig := count;
+    end procedure;
+
     procedure read (l     : inout line;
                     value : out integer;
                     good  : out boolean ) is
         variable pos         : integer := 1;
         variable digit       : integer;
         variable result      : integer := 0;
+        variable base        : integer := 10;
+        variable ndig        : natural;
+        variable exp         : integer;
         variable is_negative : boolean := false;
         variable peek        : character;
+        variable hash        : natural;
     begin
+        good := false;
         skip_whitespace(l);
 
+        if l = null or l.all'length = 0 then
+            return;
+        end if;
+
+        case get_char(l.all, pos) is
+            when '-' =>
+                pos := pos + 1;
+                is_negative := true;
+            when '+' =>
+                pos := pos + 1;
+            when others =>
+        end case;
+
+        read_decimal(l, pos, result, ndig);
+        if ndig = 0 then
+            return;
+        end if;
+
+        hash := 0;
         if pos <= l.all'length then
-            case get_char(l.all, pos) is
-                when '-' =>
-                    pos := pos + 1;
-                    is_negative := true;
-                when '+' =>
-                    pos := pos + 1;
-                when others =>
-            end case;
-        end if;
-
-        while pos <= l.all'length loop
             peek := get_char(l.all, pos);
-            exit when peek < '0' or peek > '9';
-            digit := character'pos(peek) - character'pos('0');
-            if is_negative then
-              digit := -digit;
+            if peek = '#' or peek = ':' then
+                hash := pos;
             end if;
-            result := (result * 10) + digit;
-            pos := pos + 1;
-        end loop;
-
-        if is_negative and pos = 2 then
-          -- Single dash without trailing digit is not good
-          pos := 1;
         end if;
 
-        good := pos > 1;
+        if hash > 0 then
+            -- Based literal
+            base := -result;
+            if base < 2 or base > 16 then
+                return;
+            end if;
+            result := 0;
+            ndig := 0;
+            pos := pos + 1;
+            while pos <= l.all'length loop
+                peek := get_char(l.all, pos);
+                digit := ext_digit(peek);
+                if digit < base then
+                    result := (result * base) - digit;
+                    ndig := ndig + 1;
+                elsif peek = '_' and ndig > 0 and pos < l.all'length
+                    and ext_digit(get_char(l.all, pos + 1)) < base
+                then
+                    null;
+                else
+                    exit;
+                end if;
+                pos := pos + 1;
+            end loop;
+            if ndig = 0 or pos > l.all'length
+                or get_char(l.all, pos) /= get_char(l.all, hash)
+            then
+                return;
+            end if;
+            pos := pos + 1;
+        end if;
+
+        -- Optional exponent
+        if pos < l.all'length and (get_char(l.all, pos) = 'e'
+                                   or get_char(l.all, pos) = 'E')
+        then
+            digit := pos + 1;
+            if get_char(l.all, digit) = '+' then
+                digit := digit + 1;
+            end if;
+            if digit <= l.all'length and get_char(l.all, digit) >= '0'
+                and get_char(l.all, digit) <= '9'
+            then
+                pos := digit;
+                read_decimal(l, pos, exp, ndig);
+                for i in 1 to -exp loop
+                    result := result * base;
+                end loop;
+            end if;
+        end if;
+
+        if not is_negative then
+            result := -result;
+        end if;
+
+        good := true;
         value := result;
         consume(l, pos - 1);
     end procedure;
@@ -299,6 +429,83 @@ package body textio is
     begin
         read(l, value, good);
         assert good report "integer read failed" severity read_severity;
+    end procedure;
+
+    procedure read_based_real (l      : inout line;
+                               value  : out real;
+                               good   : out boolean ) is
+        variable pos    : integer := 1;
+        variable ibase  : integer;
+        variable ndig   : natural;
+        variable base   : real;
+        variable result : real := 0.0;
+        variable scale  : real := 1.0;
+        variable digit  : integer;
+        variable exp    : integer;
+        variable seen_point : boolean := false;
+        variable closing    : character;
+        variable peek       : character;
+    begin
+        good := false;
+        read_decimal(l, pos, ibase, ndig);
+        ibase := -ibase;
+        if ibase < 2 or ibase > 16 then
+            return;
+        end if;
+        base := real(ibase);
+        closing := get_char(l.all, pos);
+        pos := pos + 1;
+        ndig := 0;
+        while pos <= l.all'length loop
+            peek := get_char(l.all, pos);
+            digit := ext_digit(peek);
+            if digit < ibase then
+                if seen_point then
+                    scale := scale / base;
+                    result := result + real(digit) * scale;
+                else
+                    result := result * base + real(digit);
+                end if;
+                ndig := ndig + 1;
+            elsif peek = '.' and not seen_point and ndig > 0 then
+                seen_point := true;
+            elsif peek = '_' and ndig > 0 and pos < l.all'length
+                and ext_digit(get_char(l.all, pos + 1)) < ibase
+            then
+                null;
+            else
+                exit;
+            end if;
+            pos := pos + 1;
+        end loop;
+        if ndig = 0 or pos > l.all'length or get_char(l.all, pos) /= closing then
+            return;
+        end if;
+        pos := pos + 1;
+
+        if pos < l.all'length and (get_char(l.all, pos) = 'e'
+                                   or get_char(l.all, pos) = 'E')
+        then
+            digit := pos + 1;
+            if get_char(l.all, digit) = '+' or get_char(l.all, digit) = '-' then
+                digit := digit + 1;
+            end if;
+            if digit <= l.all'length and get_char(l.all, digit) >= '0'
+                and get_char(l.all, digit) <= '9'
+            then
+                read_decimal(l, digit, exp, ndig);
+                if get_char(l.all, pos + 1) = '-' then
+                    result := result * (base ** exp);   -- EXP is negated
+                else
+                    result := result * (base ** (-exp));
+                end if;
+                pos := digit;
+            end if;
+        end if;
+
+        consume(l, pos - 1);
+        value := result;
+        good := true;
     end procedure;
 
     procedure read (l     : inout line;
@@ -319,6 +526,21 @@ package body textio is
         if l.all'length > 0 and (peek = '-' or peek = '+') then
             sign := get_char(l.all, 1);
             consume(l, 1);
+        end if;
+        if l.all'length > 0 and based_literal_hash(l.all, 1) > 0 then
+            -- Based literal such as 16#F.8#E1
+            read_based_real(l, result, rgood);
+            if not rgood then
+                good := false;
+                return;
+            end if;
+            good := true;
+            if sign = '-' then
+                value := -result;
+            else
+                value := result;
+            end if;
+            return;
         end if;
         read(l, whole, rgood);
         if not rgood then
