@@ -476,6 +476,13 @@ is not a valid path the directories listed in
 will be searched for a shared library with
 .Ar plugin
 as the basename.
+The option can be repeated to load several plugins: they are loaded in
+the order of the options and for each library the
+.Va vhpi_startup_routines
+are called before its
+.Va vlog_startup_routines ,
+so the startup routines of the first plugin all run before those of the
+second.
 .\" -L
 .It Fl L Ar path
 Add
