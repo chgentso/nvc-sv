@@ -2836,3 +2836,4 @@ vlogincdec1     verilog
 vlogforgen1     verilog
 vlogclasstype1  verilog
 vlogportdecl1   verilog
+vlogifgen1      verilog

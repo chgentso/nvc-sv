@@ -20278,12 +20278,21 @@ static vlog_node_t p_generate_block(void)
    else {
       vlog_set_ident(b, generate_block_name());
 
+      // The item is in an implicit block with its own scope
+      vlog_symtab_push(symtab, b);
+
+      vlog_node_t saved_scope = current_module;
+      current_module = b;
+
       const unsigned saved_constructs = gen_constructs;
       gen_constructs = 0;
 
       p_generate_item(b);
 
       gen_constructs = saved_constructs;
+      current_module = saved_scope;
+
+      scope_leave();
    }
 
    vlog_set_loc(b, CURRENT_LOC);
