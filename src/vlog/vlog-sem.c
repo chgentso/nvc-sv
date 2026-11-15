@@ -5269,6 +5269,15 @@ void vlog_check(vlog_node_t v)
       {
          vlog_check_decls(v);
 
+         // The call of the constructor of the base class is first (8.15)
+         const int nstmts = vlog_stmts(v);
+         for (int i = 1; i < nstmts; i++) {
+            vlog_node_t s = vlog_stmt(v, i);
+            if (vlog_kind(s) == V_SUPER_CALL)
+               error_at(vlog_loc(s), "super.new must be the first statement "
+                        "in the constructor");
+         }
+
          const bool was_in_function = in_function;
          in_function = true;
          vlog_check_stmts(v);

@@ -18016,6 +18016,15 @@ static void p_class_item(vlog_node_t parent)
                   "constraints");
       vlog_add_decl(parent, p_constraint_declaration(parent, flags));
       break;
+   case tIMPORT:
+      {
+         // Not allowed by the footnotes of the syntax of class items (26.3)
+         const loc_t loc = state.tokenq[state.tokenq_tail].loc;
+         error_at(&loc, "an import statement is not allowed directly "
+                  "within a class scope");
+         p_package_import_declaration(parent);
+      }
+      break;
    case tVIRTUAL:
    case tINTERFACE:
       if (peek_nth(2) == tCLASS) {
@@ -18031,6 +18040,10 @@ static void p_class_item(vlog_node_t parent)
       // Fall-through
    default:
       {
+         if (flags & VLOG_F_VIRTUAL)
+            error_at(&state.last_loc, "only a class method can be declared "
+                     "virtual");
+
          const int first = vlog_decls(parent);
          p_class_property(parent);
 

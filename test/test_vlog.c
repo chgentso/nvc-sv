@@ -4124,6 +4124,28 @@ START_TEST(test_defdup1)
 }
 END_TEST
 
+START_TEST(test_classitem1)
+{
+   const error_t expect[] = {
+      { 16, "only a class method can be declared virtual" },
+      { 17, "an import statement is not allowed directly within a class "
+        "scope" },
+      { 20, "super.new must be the first statement in the constructor" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/classitem1.sv");
+
+   do_parse_only(V_PACKAGE);
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
 START_TEST(test_crash1)
 {
    const error_t expect[] = {
@@ -4651,6 +4673,7 @@ Suite *get_vlog_tests(void)
    tcase_add_test(tc, test_finaltask1);
    tcase_add_test(tc, test_repl2);
    tcase_add_test(tc, test_defdup1);
+   tcase_add_test(tc, test_classitem1);
    tcase_add_test(tc, test_crash1);
    tcase_add_test(tc, test_crash2);
    tcase_add_test(tc, test_crash3);
