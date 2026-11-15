@@ -3218,6 +3218,48 @@ static bool sem_check_compatible_view(tree_t formal, tree_t actual)
    return true;
 }
 
+static bool sem_check_signal_subtypes(tree_t actual, tree_t formal,
+                                      port_mode_t mode)
+{
+   // LRM 08 section 4.2.2.3: the subtypes of a scalar signal actual and the
+   // formal signal parameter must be compatible: for mode IN the actual
+   // must lie within the formal and for mode OUT the formal must lie
+   // within the actual
+
+   type_t atype = tree_type(actual), ftype = tree_type(formal);
+   if (!type_is_scalar(atype) || !type_is_scalar(ftype)
+       || type_is_real(atype) || type_is_none(atype) || type_is_none(ftype)
+       || !type_eq(atype, ftype))
+      return true;
+
+   int64_t alow, ahigh, flow, fhigh;
+   if (!folded_bounds(range_of(atype, 0), &alow, &ahigh)
+       || !folded_bounds(range_of(ftype, 0), &flow, &fhigh))
+      return true;
+
+   if (alow > ahigh || flow > fhigh)
+      return true;   // Null range
+
+   const bool in_ok = alow >= flow && ahigh <= fhigh;
+   const bool out_ok = flow >= alow && fhigh <= ahigh;
+
+   if ((mode == PORT_IN && !in_ok) || (mode == PORT_OUT && !out_ok)
+       || (mode == PORT_INOUT && (!in_ok || !out_ok))) {
+      diag_t *d = pedantic_diag(tree_loc(actual));
+      if (d != NULL) {
+         diag_printf(d, "subtype %pT of the actual is not compatible with "
+                     "the subtype %pT of formal signal parameter %pI of mode "
+                     "%s", atype, ftype, tree_ident(formal),
+                     port_mode_str(mode));
+         diag_lrm(d, STD_08, "4.2.2.3");
+         diag_emit(d);
+         return false;
+      }
+   }
+
+   return true;
+}
+
 static bool sem_check_call_args(tree_t t, tree_t decl, nametab_t *tab)
 {
    const int nparams = tree_params(t);
@@ -3483,6 +3525,10 @@ static bool sem_check_call_args(tree_t t, tree_t decl, nametab_t *tab)
                   && !sem_check_compatible_view(port, value))
             return false;
       }
+
+      if (class == C_SIGNAL && formal_conv == NULL && !partial
+          && !sem_check_signal_subtypes(value, port, mode))
+         return false;
 
       if (class == C_SIGNAL && !sem_static_name(value, sem_globally_static)) {
          diag_t *d = pedantic_diag(tree_loc(value));

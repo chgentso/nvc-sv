@@ -4321,6 +4321,27 @@ START_TEST(test_purefunc)
 }
 END_TEST
 
+START_TEST(test_sigparam)
+{
+   set_standard(STD_08);
+
+   input_from_file(TESTDIR "/sem/sigparam.vhd");
+
+   const error_t expect[] = {
+      { 31, "subtype INTEGER of the actual is not compatible with the "
+        "subtype NATURAL of formal signal parameter X of mode IN" },
+      { 33, "subtype NATURAL of the actual is not compatible with the "
+        "subtype INTEGER of formal signal parameter X of mode OUT" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   parse_and_check(T_ENTITY, T_ARCH);
+
+   check_expected_errors();
+}
+END_TEST
+
 START_TEST(test_attrspec_relaxed)
 {
    set_standard(STD_08);
@@ -4716,6 +4737,7 @@ Suite *get_sem_tests(void)
    tcase_add_test(tc_core, test_attrspec_relaxed);
    tcase_add_test(tc_core, test_protop);
    tcase_add_test(tc_core, test_purefunc);
+   tcase_add_test(tc_core, test_sigparam);
    suite_add_tcase(s, tc_core);
 
    return s;
