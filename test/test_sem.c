@@ -4382,6 +4382,25 @@ START_TEST(test_protself)
 }
 END_TEST
 
+START_TEST(test_gaccess)
+{
+   set_standard(STD_19);
+
+   input_from_file(TESTDIR "/sem/gaccess.vhd");
+
+   const error_t expect[] = {
+      { 15, "cannot map type LINE to generic interface type ACC as the "
+        "designated type STRING is not the actual INTEGER of generic type D" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   parse_and_check(T_PACKAGE, T_ENTITY, T_ARCH);
+
+   check_expected_errors();
+}
+END_TEST
+
 START_TEST(test_attrspec_relaxed)
 {
    set_standard(STD_08);
@@ -4780,6 +4799,7 @@ Suite *get_sem_tests(void)
    tcase_add_test(tc_core, test_sigparam);
    tcase_add_test(tc_core, test_discmark);
    tcase_add_test(tc_core, test_protself);
+   tcase_add_test(tc_core, test_gaccess);
    suite_add_tcase(s, tc_core);
 
    return s;

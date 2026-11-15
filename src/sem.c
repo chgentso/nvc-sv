@@ -5467,11 +5467,18 @@ static bool sem_check_generic_actual(formal_map_t *formals, int nformals,
 
          if (type_is_generic(expect)) {
             const gtype_class_t expect_class = type_subkind(expect);
+            type_t mapped = get_generic_type_map(tab, expect);
             if (!type_matches_class(actual, expect_class))
                sem_error(param, "cannot map type %s to generic interface type "
                          "%s as the designated type %s is not %s type",
                          type_pp(map), istr(tree_ident(decl)),
                          type_pp(actual), class_strings[expect_class]);
+            else if (mapped != NULL && !type_eq(actual, mapped))
+               sem_error(param, "cannot map type %s to generic interface type "
+                         "%s as the designated type %s is not the actual %s "
+                         "of generic type %s", type_pp(map),
+                         istr(tree_ident(decl)), type_pp(actual),
+                         type_pp(mapped), type_pp(expect));
          }
          else if (!type_eq(actual, expect))
             sem_error(param, "cannot map type %s to generic interface type "

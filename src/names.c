@@ -513,6 +513,21 @@ void map_generic_type(nametab_t *tab, type_t generic, type_t actual)
    hash_put(tab->top_scope->gmap, generic, actual);
 }
 
+type_t get_generic_type_map(nametab_t *tab, type_t generic)
+{
+   // Returns the actual type earlier associated with a formal generic type
+
+   for (scope_t *s = tab->top_scope; s != NULL; s = s->parent) {
+      if (s->gmap != NULL) {
+         type_t actual = hash_get(s->gmap, generic);
+         if (actual != NULL)
+            return actual;
+      }
+   }
+
+   return NULL;
+}
+
 void map_generic_subprogram(nametab_t *tab, tree_t decl, tree_t actual)
 {
    assert(is_subprogram(actual));
