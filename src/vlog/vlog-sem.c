@@ -218,6 +218,8 @@ static bool vlog_is_handle_member(vlog_node_t v)
           || (vlog_kind(pt) == V_DATA_TYPE && vlog_subkind(pt) == DT_VIRTUAL));
 }
 
+static vlog_node_t stmt_method_call = NULL;
+
 static void vlog_check_variable_lvalue(vlog_node_t v, vlog_node_t where)
 {
    switch (vlog_kind(v)) {
@@ -4626,6 +4628,12 @@ static type_mask_t vlog_check_expr(vlog_node_t v)
             break;
          }
 
+         if ((vlog_subkind(v) == V_METHOD_USER
+              || vlog_subkind(v) == V_METHOD_CLASS) && vlog_has_ref(v)
+             && vlog_kind(vlog_ref(v)) == V_TASK_DECL && v != stmt_method_call)
+            error_at(vlog_loc(v), "task %pQ cannot be called in an "
+                     "expression", vlog_ident(v));
+
          vlog_check_assoc_method(v);
          vlog_check_process_method(v);
          vlog_check_string_method(v);
@@ -5308,6 +5316,7 @@ void vlog_check(vlog_node_t v)
       }
       break;
    case V_METHOD_CALL:
+      stmt_method_call = v;
       (void)vlog_check_expr(v);
       if ((vlog_subkind(v) == V_METHOD_USER
            || vlog_subkind(v) == V_METHOD_CLASS) && vlog_has_ref(v))
