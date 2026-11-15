@@ -28,8 +28,11 @@
 #include "rt/model.h"
 #include "scan.h"
 #include "tree.h"
+#include "vlog/vlog-node.h"
+#include "vlog/vlog-phase.h"
 
 #include <limits.h>
+#include <stdlib.h>
 
 static cover_data_t *run_cover(tree_t top)
 {
@@ -54,6 +57,40 @@ static cover_data_t *run_cover(tree_t top)
    mir_context_free(mc);
 
    // TODO: shouldn't need to do this to sync counters
+   fbuf_t *tmp = fbuf_open("/dev/null", FBUF_OUT, FBUF_CS_NONE);
+   cover_write(db, tmp, COV_DUMP_RUNTIME);
+   fbuf_close(tmp, NULL);
+
+   return db;
+}
+
+static cover_data_t *run_cover_vlog(vlog_node_t *tops, int ntops,
+                                    cover_mask_t mask)
+{
+   cover_data_t *db = cover_data_init(mask, 0, 1);
+   mir_context_t *mc = mir_context_new();
+   unit_registry_t *ur = unit_registry_new(mc);
+   jit_t *j = jit_new(ur, mc);
+
+   rt_model_t *m = model_new(j, db);
+
+   object_t *objs[4];
+   ck_assert(ntops <= ARRAY_LEN(objs));
+   for (int i = 0; i < ntops; i++)
+      objs[i] = vlog_to_object(tops[i]);
+
+   tree_t e = elab(objs, ntops, j, ur, mc, db, NULL, m);
+   ck_assert_ptr_nonnull(e);
+   ck_assert_int_eq(error_count(), 0);
+
+   model_reset(m);
+   model_run(m, 22 * UINT64_C(1000000));   // 22ns
+
+   model_free(m);
+   jit_free(j);
+   unit_registry_free(ur);
+   mir_context_free(mc);
+
    fbuf_t *tmp = fbuf_open("/dev/null", FBUF_OUT, FBUF_CS_NONE);
    cover_write(db, tmp, COV_DUMP_RUNTIME);
    fbuf_close(tmp, NULL);
@@ -588,6 +625,135 @@ START_TEST(test_merge5)
 }
 END_TEST
 
+static vlog_node_t parse_vlog_module(void)
+{
+   vlog_node_t m = vlog_parse();
+   ck_assert_ptr_nonnull(m);
+   ck_assert_vlog_kind(m, V_MODULE);
+   lib_put_vlog(lib_work(), m);
+   vlog_check(m);
+   vlog_simp(m);
+   return m;
+}
+
+static uint32_t ck_bin_data(const cover_data_t *db, cover_obj_t scope,
+                            cover_item_kind_t kind, int nth, int bin)
+{
+   cover_obj_t item = cover_get_item(db, scope, kind, nth);
+   ck_assert_msg(!cover_is_null(item), "no item %d", nth);
+   cover_obj_t b = cover_at(db, item, COV_REL_BINS, bin);
+   ck_assert(!cover_is_null(b));
+   return cover_get_u32(db, b, COV_ATTR_DATA, 0);
+}
+
+START_TEST(test_vlog1)
+{
+   input_from_file(TESTDIR "/cover/vlog1.sv");
+
+   vlog_node_t top[2];
+   top[0] = parse_vlog_module();    // sub
+   top[1] = parse_vlog_module();    // top
+   ck_assert_ptr_null(vlog_parse());
+
+   // The names of the scopes of the statements
+   {
+      vlog_node_t func = NULL, blk = NULL, always = NULL;
+      const int ndecls = vlog_decls(top[0]);
+      for (int i = 0; i < ndecls; i++) {
+         if (vlog_kind(vlog_decl(top[0], i)) == V_FUNC_DECL)
+            func = vlog_decl(top[0], i);
+      }
+
+      const int nstmts = vlog_stmts(top[0]);
+      for (int i = 0; i < nstmts; i++) {
+         vlog_node_t s = vlog_stmt(top[0], i);
+         if (vlog_kind(s) == V_ALWAYS)
+            always = s;
+         else if (vlog_kind(s) == V_INITIAL)
+            blk = vlog_stmt(s, 0);
+      }
+
+      ck_assert_ptr_nonnull(func);
+      ck_assert_ptr_nonnull(blk);
+      ck_assert_ptr_nonnull(always);
+
+      ck_assert_str_eq(istr(vlog_cover_scope_name(func, 0)), "twice");
+      ck_assert_str_eq(istr(vlog_cover_scope_name(blk, 0)), "blk");
+      ck_assert_str_eq(istr(vlog_cover_scope_name(always, 3)), "_P3");
+      ck_assert_str_eq(istr(vlog_cover_scope_name(vlog_stmt(always, 0), 4)),
+                       "_S4");
+
+      // Statements which can be counted
+      ck_assert(vlog_cover_wants_stmt(vlog_stmt(always, 0)));
+      ck_assert(!vlog_cover_wants_stmt(blk));
+   }
+
+   cover_data_t *db =
+      run_cover_vlog(&top[1], 1, COVER_MASK_STMT);
+
+   // The scopes are at the instance paths of the hierarchy
+   cover_obj_t top_inst = ck_cover_find(db, "WORK.top");
+   cover_obj_t u1_inst = ck_cover_find(db, "WORK.top.u1");
+   cover_obj_t u2_inst = ck_cover_find(db, "WORK.top.u2");
+   cover_obj_t g0_inst = ck_cover_find(db, "WORK.top.g[0]");
+   cover_obj_t g1u_inst = ck_cover_find(db, "WORK.top.g[1].u");
+
+   ck_assert_str_eq(istr(cover_get_ident(db, top_inst, COV_ATTR_NAME)), "top");
+   ck_assert_str_eq(istr(cover_get_ident(db, u1_inst, COV_ATTR_NAME)), "u1");
+   ck_assert_str_eq(istr(cover_get_ident(db, u1_inst, COV_ATTR_BLOCK_NAME)),
+                    "sub");
+   ck_assert_str_eq(istr(cover_get_ident(db, g0_inst, COV_ATTR_BLOCK_NAME)),
+                    "g");
+   ck_assert_str_eq(istr(cover_get_ident(db, g1u_inst, COV_ATTR_NAME)), "u");
+
+   // Modules are marked, generate blocks are not
+   cover_obj_t u1 = cover_get_obj(db, u1_inst, COV_ATTR_ROOT);
+   ck_assert_int_eq(cover_get_kind(db, u1), CSCOPE_MODULE);
+   ck_assert_int_eq(cover_get_kind(db, cover_get_obj(db, g0_inst,
+                                                     COV_ATTR_ROOT)),
+                    CSCOPE_INSTANCE);
+
+   // The counters are found again for each instance with the same code
+   cover_obj_t u2 = cover_get_obj(db, u2_inst, COV_ATTR_ROOT);
+
+   cover_obj_t p1_1 = cover_get_child(db, u1, ident_new("_P1"));
+   cover_obj_t p1_2 = cover_get_child(db, u2, ident_new("_P1"));
+   ck_assert(!cover_is_null(p1_1));
+   ck_assert(!cover_is_null(p1_2));
+
+   // The always statement is reached once at the start and for each edge
+   cover_obj_t ev1 = cover_get_child(db, p1_1, ident_new("_S0"));
+   cover_obj_t ev2 = cover_get_child(db, p1_2, ident_new("_S0"));
+   ck_assert_int_eq(ck_bin_data(db, ev1, COV_ITEM_STMT, 0, 0), 3);
+   ck_assert_int_eq(ck_bin_data(db, ev2, COV_ITEM_STMT, 0, 0), 3);
+
+   // The XML export marks the modules
+   {
+      FILE *f = tmpfile();
+      ck_assert_ptr_nonnull(f);
+      cover_export_xml(db, f, NULL);
+
+      const long size = ftell(f);
+      ck_assert_int_gt(size, 0);
+      rewind(f);
+
+      char *tmp = xmalloc(size + 1);
+      ck_assert_int_eq(fread(tmp, 1, size, f), size);
+      tmp[size] = '\0';
+      fclose(f);
+
+      ck_assert_ptr_nonnull(strstr(tmp, "<scope name=\"u1\" "
+                                   "block_name=\"sub\" kind=\"module\""));
+      ck_assert_ptr_nonnull(strstr(tmp, "<scope name=\"g[0]\" "
+                                   "block_name=\"g\""));
+      ck_assert_ptr_null(strstr(tmp, "block_name=\"g\" kind"));
+      free(tmp);
+   }
+
+   cover_data_free(db);
+}
+END_TEST
+
 Suite *get_cover_tests(void)
 {
    Suite *s = suite_create("cover");
@@ -606,6 +772,7 @@ Suite *get_cover_tests(void)
    tcase_add_test(tc, test_merge3);
    tcase_add_test(tc, test_merge4);
    tcase_add_test(tc, test_merge5);
+   tcase_add_test(tc, test_vlog1);
    suite_add_tcase(s, tc);
 
    return s;

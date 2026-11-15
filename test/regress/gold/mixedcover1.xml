@@ -1,0 +1,71 @@
+<?xml version="1.0"?>
+<scope name="WORK">
+  <scope name="MIXEDCOVER1" block_name="MIXEDCOVER1-TEST" file="mixedcover1.vhd" line="10">
+    <scope name="STIM" line="22">
+      <scope name="_S0" line="24">
+        <statement hier="WORK.MIXEDCOVER1.STIM._S0" data="1"/>
+      </scope>
+      <scope name="_S1" line="25">
+        <statement hier="WORK.MIXEDCOVER1.STIM._S1" data="1"/>
+      </scope>
+      <scope name="_S2" line="26">
+        <statement hier="WORK.MIXEDCOVER1.STIM._S2" data="1"/>
+      </scope>
+      <scope name="_S3" line="27">
+        <statement hier="WORK.MIXEDCOVER1.STIM._S3" data="1"/>
+      </scope>
+      <scope name="_S4" line="28">
+        <statement hier="WORK.MIXEDCOVER1.STIM._S4" data="1"/>
+      </scope>
+      <scope name="_S5" line="29">
+        <statement hier="WORK.MIXEDCOVER1.STIM._S5" data="1"/>
+      </scope>
+      <scope name="_S6" line="30">
+        <statement hier="WORK.MIXEDCOVER1.STIM._S6" data="1"/>
+      </scope>
+      <scope name="_S7" line="31">
+        <statement hier="WORK.MIXEDCOVER1.STIM._S7" data="1"/>
+      </scope>
+    </scope>
+    <scope name="U1" block_name="mixedcover1_sub" kind="module" line="19">
+      <scope name="_P0" file="mixedcover1.sv" line="2">
+        <scope name="_S0">
+          <statement hier="WORK.MIXEDCOVER1.U1._P0._S0" data="3"/>
+          <scope name="_S0" line="3">
+            <statement hier="WORK.MIXEDCOVER1.U1._P0._S0._S0" data="2"/>
+            <scope name="_B0">
+              <scope name="_S0" file="mixedcover1.sv" line="4">
+                <statement hier="WORK.MIXEDCOVER1.U1._P0._S0._S0._B0._S0" data="1"/>
+              </scope>
+            </scope>
+            <scope name="_B1">
+              <scope name="_S0" file="mixedcover1.sv" line="6">
+                <statement hier="WORK.MIXEDCOVER1.U1._P0._S0._S0._B1._S0" data="1"/>
+              </scope>
+            </scope>
+          </scope>
+        </scope>
+      </scope>
+    </scope>
+    <scope name="U2" block_name="mixedcover1_sub" kind="module" line="20">
+      <scope name="_P0" file="mixedcover1.sv" line="2">
+        <scope name="_S0">
+          <statement hier="WORK.MIXEDCOVER1.U2._P0._S0" data="4"/>
+          <scope name="_S0" line="3">
+            <statement hier="WORK.MIXEDCOVER1.U2._P0._S0._S0" data="3"/>
+            <scope name="_B0">
+              <scope name="_S0" file="mixedcover1.sv" line="4">
+                <statement hier="WORK.MIXEDCOVER1.U2._P0._S0._S0._B0._S0" data="1"/>
+              </scope>
+            </scope>
+            <scope name="_B1">
+              <scope name="_S0" file="mixedcover1.sv" line="6">
+                <statement hier="WORK.MIXEDCOVER1.U2._P0._S0._S0._B1._S0" data="2"/>
+              </scope>
+            </scope>
+          </scope>
+        </scope>
+      </scope>
+    </scope>
+  </scope>
+</scope>

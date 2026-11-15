@@ -108,6 +108,7 @@ typedef enum {
    CSCOPE_PROCESS,
    CSCOPE_USER,
    CSCOPE_PROPERTY,
+   CSCOPE_MODULE,   // Root of a Verilog module instance
 } cover_scope_kind_t;
 
 typedef enum {

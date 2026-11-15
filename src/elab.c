@@ -138,6 +138,7 @@ typedef struct _elab_ctx {
    const elab_vunit_pending_t *pending;
    unsigned          npending;
    bool              via_component;
+   bool              shim;     // Verilog shim of a VHDL entity
    iface_conn_list_t *iface_conns;
    gen_body_list_t  *gen_bodies;
    hash_t           *block_parents;
@@ -189,6 +190,8 @@ typedef struct _elab_instance {
    elab_instance_t *chain;   // Others with the same key, not cloned
 } elab_instance_t;
 
+static void elab_cover_inst(elab_ctx_t *ctx, ident_t block_name,
+                            cover_scope_kind_t kind);
 static void elab_vhdl_block(tree_t t, const elab_ctx_t *ctx);
 static void elab_vhdl_processes(tree_t t, const elab_ctx_t *ctx);
 static void elab_vhdl_sub_blocks(tree_t t, const elab_ctx_t *ctx);
@@ -1814,6 +1817,8 @@ static bool elab_can_clone_instance(elab_instance_t *ei, const elab_ctx_t *ctx)
       return false;
    else if (cover_is_null(ei->cscope) && cover_is_null(ctx->cscope))
       return true;
+   else if (cover_is_null(ei->cscope) || cover_is_null(ctx->cscope))
+      return false;
 
    return cover_compatible_spec(ctx->cover, ei->cscope, ctx->cscope);
 }
@@ -3311,6 +3316,15 @@ static void elab_verilog_module(tree_t comp, ident_t label, vlog_node_t mod,
 
    hash_put(ctx->block_parents, b, ctx->out);
 
+   if (entity != NULL) {
+      // The shim has no coverage of its own, the VHDL architecture inside
+      // it is counted at the place of the instance
+      new_ctx.shim = true;
+      new_ctx.cscope = COVER_NULL_OBJ;
+   }
+   else
+      elab_cover_inst(&new_ctx, vlog_ident2(mod), CSCOPE_MODULE);
+
    mod_cache_t *mc = elab_cached_module(vlog_to_object(mod), &new_ctx);
    mc->count++;
 
@@ -3323,6 +3337,7 @@ static void elab_verilog_module(tree_t comp, ident_t label, vlog_node_t mod,
          has_iface_port = vlog_kind(vlog_decl(mod, i)) == V_IFACE_PORT;
    }
 
+   bool cover_made = false;
    elab_instance_t *ei = ghash_get(mc->instances, list), *chain = NULL;
    if (vlog_kind(mod) == V_MODULE && vlog_bind_is_selective(mod))
       ei = NULL;   // The instance may have its own bound instances
@@ -3409,13 +3424,22 @@ static void elab_verilog_module(tree_t comp, ident_t label, vlog_node_t mod,
 
       vlog_trans(ei->body, ei->block);
       elab_infer_interconnects(ei->body, ctx);
-      vlog_lower_instance(ctx->mir, ei->body, NULL, ei->block);
+
+      ei->cscope = new_ctx.cscope;
+      vlog_cover_block(ei->body, ctx->cover, new_ctx.cscope);
+      cover_made = true;
+
+      vlog_lower_instance(ctx->mir, ei->body, NULL, ei->block, ctx->cover,
+                          new_ctx.cscope);
 
       ghash_put(mc->instances, list, ei);
       mc->unique++;
    }
 
  have_instance:
+   if (!cover_made)
+      vlog_cover_block(ei->body, ctx->cover, new_ctx.cscope);
+
    new_ctx.cloned = vlog_ident(ei->body);
    new_ctx.dp_home = ei->body;
 
@@ -5471,7 +5495,12 @@ static void elab_verilog_block(vlog_node_t v, const elab_ctx_t *ctx)
    tree_set_ident(block, ndotted);
 
    vlog_trans(body, block);
-   vlog_lower_instance(ctx->mir, body, ctx->cloned, block);
+
+   elab_cover_inst(&new_ctx, ident_until(id, '['), CSCOPE_INSTANCE);
+   vlog_cover_block(body, ctx->cover, new_ctx.cscope);
+
+   vlog_lower_instance(ctx->mir, body, ctx->cloned, block, ctx->cover,
+                       new_ctx.cscope);
 
    hash_put(ctx->block_parents, b, ctx->out);
 
@@ -6256,7 +6285,8 @@ static void elab_bind_components_save(tree_t block, tree_t config,
    }
 }
 
-static void elab_cover_block(elab_ctx_t *ctx, tree_t unit)
+static void elab_cover_inst(elab_ctx_t *ctx, ident_t block_name,
+                            cover_scope_kind_t kind)
 {
    if (ctx->cover == NULL)
       return;
@@ -6264,7 +6294,13 @@ static void elab_cover_block(elab_ctx_t *ctx, tree_t unit)
    tree_t block = ctx->out;
    cover_obj_t parent = ctx->cscope;
 
-   if (ctx->parent != NULL && tree_decls(ctx->parent->out) > 0) {
+   if (ctx->parent != NULL && ctx->parent->shim) {
+      // The architecture of a VHDL entity instantiated from Verilog takes
+      // the place of the generated Verilog shim in the hierarchy
+      block = ctx->parent->out;
+      parent = ctx->parent->parent->cscope;
+   }
+   else if (ctx->parent != NULL && tree_decls(ctx->parent->out) > 0) {
       tree_t hier = tree_decl(ctx->parent->out, 0);
       assert(tree_kind(hier) == T_HIER);
 
@@ -6276,8 +6312,6 @@ static void elab_cover_block(elab_ctx_t *ctx, tree_t unit)
       }
    }
 
-   ident_t block_name = ident_rfrom(tree_ident(unit), '.');
-
    cover_obj_t parent_inst = cover_get_obj(ctx->cover, parent, COV_ATTR_INST);
 
    if (cover_is_null(parent))
@@ -6286,8 +6320,13 @@ static void elab_cover_block(elab_ctx_t *ctx, tree_t unit)
    cover_obj_t inst = cover_inst_new(ctx->cover, tree_ident(block), parent_inst,
                                      block_name, lib_name(ctx->library),
                                      ctx->dotted);
-   ctx->cscope = cover_scope_new(ctx->cover, inst, parent, CSCOPE_INSTANCE,
+   ctx->cscope = cover_scope_new(ctx->cover, inst, parent, kind,
                                  tree_ident(block), *tree_loc(block));
+}
+
+static void elab_cover_block(elab_ctx_t *ctx, tree_t unit)
+{
+   elab_cover_inst(ctx, ident_rfrom(tree_ident(unit), '.'), CSCOPE_INSTANCE);
 }
 
 typedef struct {

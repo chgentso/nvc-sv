@@ -1,0 +1,202 @@
+<?xml version="1.0"?>
+<scope name="WORK">
+  <scope name="vlogcover2" block_name="vlogcover2" kind="module">
+    <scope name="_P7" file="vlogcover2.sv" line="52">
+      <scope name="_S0">
+        <statement hier="WORK.vlogcover2._P7._S0" data="8"/>
+        <scope name="_S0">
+          <statement hier="WORK.vlogcover2._P7._S0._S0" data="6"/>
+        </scope>
+      </scope>
+    </scope>
+    <scope name="_P8" file="vlogcover2.sv" line="53">
+      <scope name="_S0" line="54">
+        <statement hier="WORK.vlogcover2._P8._S0" data="2"/>
+      </scope>
+      <scope name="_S1" line="55">
+        <statement hier="WORK.vlogcover2._P8._S1" data="0"/>
+      </scope>
+    </scope>
+    <scope name="u1" block_name="vlogcover2_sub" kind="module" file="vlogcover2.sv" line="31">
+      <scope name="_P0" line="19">
+        <scope name="_S0">
+          <statement hier="WORK.vlogcover2.u1._P0._S0" data="2"/>
+        </scope>
+      </scope>
+      <scope name="_P1" line="20">
+        <scope name="_S0">
+          <statement hier="WORK.vlogcover2.u1._P1._S0" data="6"/>
+          <scope name="_S0" line="21">
+            <statement hier="WORK.vlogcover2.u1._P1._S0._S0" data="4"/>
+          </scope>
+          <scope name="_S1" line="22">
+            <statement hier="WORK.vlogcover2.u1._P1._S0._S1" data="4"/>
+            <scope name="_B0">
+              <scope name="_S0" file="vlogcover2.sv" line="23">
+                <statement hier="WORK.vlogcover2.u1._P1._S0._S1._B0._S0" data="0"/>
+              </scope>
+            </scope>
+          </scope>
+        </scope>
+      </scope>
+    </scope>
+    <scope name="u2" block_name="vlogcover2_sub" kind="module" file="vlogcover2.sv" line="32">
+      <scope name="_P0" line="19">
+        <scope name="_S0">
+          <statement hier="WORK.vlogcover2.u2._P0._S0" data="2"/>
+        </scope>
+      </scope>
+      <scope name="_P1" line="20">
+        <scope name="_S0">
+          <statement hier="WORK.vlogcover2.u2._P1._S0" data="6"/>
+          <scope name="_S0" line="21">
+            <statement hier="WORK.vlogcover2.u2._P1._S0._S0" data="4"/>
+          </scope>
+          <scope name="_S1" line="22">
+            <statement hier="WORK.vlogcover2.u2._P1._S0._S1" data="4"/>
+            <scope name="_B0">
+              <scope name="_S0" file="vlogcover2.sv" line="23">
+                <statement hier="WORK.vlogcover2.u2._P1._S0._S1._B0._S0" data="4"/>
+              </scope>
+            </scope>
+          </scope>
+        </scope>
+      </scope>
+    </scope>
+    <scope name="g[0]" block_name="g" file="vlogcover2.sv" line="34">
+      <scope name="u" block_name="vlogcover2_sub" kind="module" line="35">
+        <scope name="_P0" line="19">
+          <scope name="_S0">
+            <statement hier="WORK.vlogcover2.g[0].u._P0._S0" data="2"/>
+          </scope>
+        </scope>
+        <scope name="_P1" line="20">
+          <scope name="_S0">
+            <statement hier="WORK.vlogcover2.g[0].u._P1._S0" data="6"/>
+            <scope name="_S0" line="21">
+              <statement hier="WORK.vlogcover2.g[0].u._P1._S0._S0" data="4"/>
+            </scope>
+            <scope name="_S1" line="22">
+              <statement hier="WORK.vlogcover2.g[0].u._P1._S0._S1" data="4"/>
+              <scope name="_B0">
+                <scope name="_S0" file="vlogcover2.sv" line="23">
+                  <statement hier="WORK.vlogcover2.g[0].u._P1._S0._S1._B0._S0" data="0"/>
+                </scope>
+              </scope>
+            </scope>
+          </scope>
+        </scope>
+      </scope>
+    </scope>
+    <scope name="g[1]" block_name="g" file="vlogcover2.sv" line="34">
+      <scope name="u" block_name="vlogcover2_sub" kind="module" line="35">
+        <scope name="_P0" line="19">
+          <scope name="_S0">
+            <statement hier="WORK.vlogcover2.g[1].u._P0._S0" data="2"/>
+          </scope>
+        </scope>
+        <scope name="_P1" line="20">
+          <scope name="_S0">
+            <statement hier="WORK.vlogcover2.g[1].u._P1._S0" data="6"/>
+            <scope name="_S0" line="21">
+              <statement hier="WORK.vlogcover2.g[1].u._P1._S0._S0" data="4"/>
+            </scope>
+            <scope name="_S1" line="22">
+              <statement hier="WORK.vlogcover2.g[1].u._P1._S0._S1" data="4"/>
+              <scope name="_B0">
+                <scope name="_S0" file="vlogcover2.sv" line="23">
+                  <statement hier="WORK.vlogcover2.g[1].u._P1._S0._S1._B0._S0" data="4"/>
+                </scope>
+              </scope>
+            </scope>
+          </scope>
+        </scope>
+      </scope>
+    </scope>
+    <scope name="gi" block_name="gi" file="vlogcover2.sv" line="38">
+      <scope name="_P0" line="40">
+        <scope name="_S0">
+          <statement hier="WORK.vlogcover2.gi._P0._S0" data="2"/>
+        </scope>
+      </scope>
+    </scope>
+    <scope name="arr[0]" block_name="vlogcover2_sub" kind="module" file="vlogcover2.sv" line="47">
+      <scope name="_P0" line="19">
+        <scope name="_S0">
+          <statement hier="WORK.vlogcover2.arr[0]._P0._S0" data="2"/>
+        </scope>
+      </scope>
+      <scope name="_P1" line="20">
+        <scope name="_S0">
+          <statement hier="WORK.vlogcover2.arr[0]._P1._S0" data="6"/>
+          <scope name="_S0" line="21">
+            <statement hier="WORK.vlogcover2.arr[0]._P1._S0._S0" data="4"/>
+          </scope>
+          <scope name="_S1" line="22">
+            <statement hier="WORK.vlogcover2.arr[0]._P1._S0._S1" data="4"/>
+            <scope name="_B0">
+              <scope name="_S0" file="vlogcover2.sv" line="23">
+                <statement hier="WORK.vlogcover2.arr[0]._P1._S0._S1._B0._S0" data="0"/>
+              </scope>
+            </scope>
+          </scope>
+        </scope>
+      </scope>
+    </scope>
+    <scope name="arr[1]" block_name="vlogcover2_sub" kind="module" file="vlogcover2.sv" line="47">
+      <scope name="_P0" line="19">
+        <scope name="_S0">
+          <statement hier="WORK.vlogcover2.arr[1]._P0._S0" data="2"/>
+        </scope>
+      </scope>
+      <scope name="_P1" line="20">
+        <scope name="_S0">
+          <statement hier="WORK.vlogcover2.arr[1]._P1._S0" data="6"/>
+          <scope name="_S0" line="21">
+            <statement hier="WORK.vlogcover2.arr[1]._P1._S0._S0" data="4"/>
+          </scope>
+          <scope name="_S1" line="22">
+            <statement hier="WORK.vlogcover2.arr[1]._P1._S0._S1" data="4"/>
+            <scope name="_B0">
+              <scope name="_S0" file="vlogcover2.sv" line="23">
+                <statement hier="WORK.vlogcover2.arr[1]._P1._S0._S1._B0._S0" data="0"/>
+              </scope>
+            </scope>
+          </scope>
+        </scope>
+      </scope>
+    </scope>
+    <scope name="ifc" block_name="vlogcover2_if" kind="module" file="vlogcover2.sv" line="49">
+      <scope name="_P0" line="7">
+        <scope name="_S0">
+          <statement hier="WORK.vlogcover2.ifc._P0._S0" data="6"/>
+          <scope name="_S0">
+            <statement hier="WORK.vlogcover2.ifc._P0._S0._S0" data="4"/>
+          </scope>
+        </scope>
+      </scope>
+    </scope>
+    <scope name="prg" block_name="vlogcover2_prg" kind="module" file="vlogcover2.sv" line="50">
+      <scope name="_P0" line="12">
+        <scope name="_S0">
+          <statement hier="WORK.vlogcover2.prg._P0._S0" data="2"/>
+        </scope>
+        <scope name="_S1" line="13">
+          <statement hier="WORK.vlogcover2.prg._P0._S1" data="2"/>
+          <scope name="_S0">
+            <statement hier="WORK.vlogcover2.prg._P0._S1._S0" data="4"/>
+            <scope name="_S0">
+              <statement hier="WORK.vlogcover2.prg._P0._S1._S0._S0" data="4"/>
+            </scope>
+          </scope>
+        </scope>
+        <scope name="_S2" line="14">
+          <statement hier="WORK.vlogcover2.prg._P0._S2" data="2"/>
+        </scope>
+        <scope name="_S3">
+          <statement hier="WORK.vlogcover2.prg._P0._S3" data="2"/>
+        </scope>
+      </scope>
+    </scope>
+  </scope>
+</scope>

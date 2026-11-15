@@ -438,6 +438,9 @@ static void dump_inst_xml(const cover_data_t *db, cover_obj_t inst, int indent,
    if (block_name != NULL)
       fprintf(f, " block_name=\"%s\"", istr(block_name));
 
+   if (cover_get_kind(db, root) == CSCOPE_MODULE)
+      fprintf(f, " kind=\"module\"");
+
    if (scope_loc.file_ref != FILE_INVALID
        && scope_loc.file_ref != loc->file_ref) {
       LOCAL_TEXT_BUF tb = tb_new();

@@ -64,6 +64,20 @@ static bool reheat_is_vhdl_shim(tree_t b)
    return find_vhdl_shim_entity(b) != NULL;
 }
 
+static cover_obj_t reheat_cover_scope(cover_data_t *cover, ident_t dotted)
+{
+   // The root scope of the coverage instance made for the block, if any
+
+   if (cover == NULL)
+      return COVER_NULL_OBJ;
+
+   cover_obj_t inst = cover_find(cover, dotted);
+   if (cover_is_null(inst))
+      return COVER_NULL_OBJ;
+
+   return cover_get_obj(cover, inst, COV_ATTR_ROOT);
+}
+
 static void reheat_lower_verilog(tree_t b, const reheat_ctx_t *parent,
                                  ident_t parent_cloned)
 {
@@ -80,7 +94,8 @@ static void reheat_lower_verilog(tree_t b, const reheat_ctx_t *parent,
    vlog_node_t body = tree_vlog(tree_ref(hier));
 
    if (!hset_contains(parent->instances, body)) {
-      vlog_lower_instance(parent->mir, body, parent_cloned, b);
+      vlog_lower_instance(parent->mir, body, parent_cloned, b, parent->cover,
+                          reheat_cover_scope(parent->cover, tree_ident(hier)));
       hset_insert(parent->instances, body);
    }
 
@@ -111,7 +126,8 @@ static void reheat_block(tree_t b, const reheat_ctx_t *parent)
          vlog_node_t body = tree_vlog(tree_ref(hier));
 
          if (!hset_contains(ctx.instances, body)) {
-            vlog_lower_instance(ctx.mir, body, parent->cloned, b);
+            vlog_lower_instance(ctx.mir, body, parent->cloned, b, ctx.cover,
+                                reheat_cover_scope(ctx.cover, ctx.dotted));
             hset_insert(ctx.instances, body);
          }
 
@@ -136,10 +152,7 @@ static void reheat_block(tree_t b, const reheat_ctx_t *parent)
       }
    }
    else {
-      cover_obj_t inst = cover_find(ctx.cover, ctx.dotted);
-      cover_obj_t scope = COVER_NULL_OBJ;
-      if (!cover_is_null(inst))
-         scope = cover_get_obj(ctx.cover, inst, COV_ATTR_ROOT);
+      cover_obj_t scope = reheat_cover_scope(ctx.cover, ctx.dotted);
 
       ctx.lowered = lower_instance(ctx.registry, parent->lowered, ctx.cover,
                                    scope, b);

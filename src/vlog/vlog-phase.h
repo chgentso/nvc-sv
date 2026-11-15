@@ -19,6 +19,7 @@
 #define _VLOG_PHASE_H
 
 #include "prim.h"
+#include "cov/cov-api.h"
 
 void vlog_preprocess(text_buf_t *tb, bool precise);
 void vlog_preprocess_reset(void);
@@ -33,7 +34,12 @@ void vlog_lower_udp(mir_unit_t *mu, object_t *obj);
 void vlog_lower_block(mir_context_t *mc, ident_t parent, tree_t b);
 void vlog_set_interconnect_nettype(vlog_node_t decl, vlog_node_t nettype);
 void vlog_lower_instance(mir_context_t *mc, vlog_node_t body, ident_t parent,
-                         tree_t trans);
+                         tree_t trans, cover_data_t *cover, cover_obj_t cscope);
+void vlog_cover_block(vlog_node_t body, cover_data_t *db, cover_obj_t cs);
+void vlog_cover_bind(vlog_node_t body, cover_data_t *db, cover_obj_t cs);
+bool vlog_cover_tag(vlog_node_t v, cover_item_kind_t kind, uint32_t *tag);
+bool vlog_cover_wants_stmt(vlog_node_t s);
+ident_t vlog_cover_scope_name(vlog_node_t v, int nth);
 void vlog_lower_const_funcs(mir_context_t *mc, vlog_node_t inst);
 mir_unit_t *vlog_lower_thunk(mir_context_t *mc, ident_t parent, vlog_node_t v);
 vlog_node_t vlog_new_instance(vlog_node_t mod, vlog_node_t inst, ident_t id);

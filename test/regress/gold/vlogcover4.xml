@@ -1,0 +1,45 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<!DOCTYPE coverage SYSTEM 'http://cobertura.sourceforge.net/xml/coverage-04.dtd'>
+<coverage version="TEST" line-rate="1.000000" branch-rate="1.000000" complexity="0.0" lines-valid="7" lines-covered="7" branches-valid="0" branches-covered="0" timestamp="0">
+<sources>
+<source>.</source>
+</sources>
+<packages>
+<package name="WORK" line-rate="1.000000" branch-rate="1.000000" complexity="0.0">
+<classes>
+<class name="blk" filename="vlogcover4.sv" line-rate="1.000000" branch-rate="1.000000" complexity="0.0" >
+<methods/>
+<lines>
+<line number="18" hits="1" branch="false"/>
+<line number="19" hits="1" branch="false"/>
+</lines>
+</class>
+<class name="vlogcover4_b" filename="vlogcover4.sv" line-rate="1.000000" branch-rate="1.000000" complexity="0.0" >
+<methods/>
+<lines>
+</lines>
+</class>
+<class name="blk" filename="vlogcover4.svh" line-rate="1.000000" branch-rate="1.000000" complexity="0.0" >
+<methods/>
+<lines>
+<line number="4" hits="2" branch="false"/>
+<line number="5" hits="2" branch="false"/>
+</lines>
+</class>
+<class name="vlogcover4_a" filename="vlogcover4.sv" line-rate="1.000000" branch-rate="1.000000" complexity="0.0" >
+<methods/>
+<lines>
+<line number="9" hits="1" branch="false"/>
+</lines>
+</class>
+<class name="vlogcover4" filename="vlogcover4.sv" line-rate="1.000000" branch-rate="1.000000" complexity="0.0" >
+<methods/>
+<lines>
+<line number="29" hits="1" branch="false"/>
+<line number="30" hits="1" branch="false"/>
+</lines>
+</class>
+</classes>
+</package>
+</packages>
+</coverage>

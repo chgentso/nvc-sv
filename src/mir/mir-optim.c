@@ -847,6 +847,7 @@ static void gvn_visit_block(mir_unit_t *mu, mir_block_t block,
       case MIR_OP_INIT_SIGNAL:
       case MIR_OP_PROTECTED_INIT:
       case MIR_OP_INSTANCE_INIT:
+      case MIR_OP_GET_COUNTERS:
       case MIR_OP_SYSCALL:
       case MIR_OP_ALLOC:
       case MIR_OP_NEW:

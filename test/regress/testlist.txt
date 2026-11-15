@@ -2847,3 +2847,10 @@ vlogenumbase1   verilog
 vlogenumx1      verilog
 vlogtypeparam1  verilog
 cover31         shell
+vlogcover1      verilog,cover=statement
+vlogcover2      verilog,cover=statement
+vlogcover3      verilog,cover=statement
+vlogcover4      verilog,cover=statement,export=cobertura
+vlogcover5      shell
+mixedcover1     mixed,cover=statement
+mixedcover2     mixed,cover=statement

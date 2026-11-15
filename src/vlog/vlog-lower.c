@@ -148,6 +148,45 @@ typedef struct {
    int            nspills;
 } vlog_gen_t;
 
+static mir_type_t vlog_counters_type(mir_unit_t *mu)
+{
+   mir_type_t t_int32 = mir_int_type(mu, INT32_MIN, INT32_MAX);
+   return mir_pointer_type(mu, t_int32);
+}
+
+static mir_value_t vlog_cover_counters(vlog_gen_t *g)
+{
+   // The coverage counters of the instance enclosing this unit, or null if
+   // it has none or the code is evaluated at elaboration time
+
+   if (g->constfunc || mir_get_kind(g->mu) == MIR_UNIT_THUNK)
+      return MIR_NULL_VALUE;
+
+   int hops;
+   mir_value_t var = mir_search_object(g->mu, well_known(W_COUNTERS), &hops);
+   if (mir_is_null(var))
+      return MIR_NULL_VALUE;
+
+   mir_value_t ptr = hops > 0 ? mir_build_var_upref(g->mu, hops, var.id) : var;
+   return mir_build_load(g->mu, ptr);
+}
+
+static void vlog_cover_count(vlog_gen_t *g, vlog_node_t v,
+                             cover_item_kind_t kind, uint32_t add)
+{
+   // Count one execution of an item bound to this syntax node
+
+   uint32_t tag;
+   if (!vlog_cover_tag(v, kind, &tag))
+      return;
+
+   mir_value_t counters = vlog_cover_counters(g);
+   if (mir_is_null(counters))
+      return;
+
+   mir_build_cover_stmt(g->mu, counters, tag + add);
+}
+
 static void vlog_lower_locals(vlog_gen_t *g, vlog_node_t v);
 static void vlog_lower_sensitivity(vlog_gen_t *g, vlog_node_t v);
 static bool vlog_is_param_select(vlog_node_t v);
@@ -27278,6 +27317,8 @@ static bool vlog_lower_one_stmt(vlog_gen_t *g, vlog_node_t s, gen_stack_t *gs)
       }
    }
 
+   vlog_cover_count(g, s, COV_ITEM_STMT, 0);
+
    switch (vlog_kind(s)) {
    case V_METHOD_CALL:
       vlog_lower_method_call(g, s);
@@ -27855,6 +27896,8 @@ static void vlog_lower_assign_process(vlog_gen_t *g, vlog_node_t v)
 
    mir_set_cursor(g->mu, start_bb, MIR_APPEND);
 
+   vlog_cover_count(g, v, COV_ITEM_STMT, 0);
+
    vlog_node_t target = vlog_target(v);
 
    if (in_memory && adelay != NULL) {
@@ -28089,6 +28132,8 @@ static void vlog_lower_net_process(vlog_gen_t *g, vlog_node_t v)
    }
 
    mir_set_cursor(g->mu, start_bb, MIR_APPEND);
+
+   vlog_cover_count(g, v, COV_ITEM_STMT, 0);
 
    {
       mir_value_t value = vlog_lower_with_context(
@@ -31048,7 +31093,7 @@ static void vlog_lower_convert_out(mir_unit_t *mu, object_t *obj)
 }
 
 void vlog_lower_instance(mir_context_t *mc, vlog_node_t body, ident_t parent,
-                         tree_t trans)
+                         tree_t trans, cover_data_t *cover, cover_obj_t cscope)
 {
    assert(vlog_kind(body) == V_INST_BODY);
 
@@ -31119,6 +31164,21 @@ void vlog_lower_instance(mir_context_t *mc, vlog_node_t body, ident_t parent,
          vlog_node_t var = vlog_ref(d);
          vlog_lower_var_decl(&g, var, hash_get(map, var), 0);
       }
+   }
+
+   if (cover_enabled(cover, COVER_MASK_STMT) && !cover_is_null(cscope)) {
+      // The counters of the instance are passed by the block which
+      // creates it as the body is shared by instances with the same
+      // parameters
+      mir_type_t t_counters = vlog_counters_type(mu);
+      mir_value_t p = mir_add_param(mu, t_counters, MIR_NULL_STAMP,
+                                    well_known(W_COUNTERS));
+      mir_value_t var = mir_add_var(mu, t_counters, MIR_NULL_STAMP,
+                                    well_known(W_COUNTERS), 0);
+      mir_build_store(mu, var, p);
+      mir_put_object(mu, well_known(W_COUNTERS), var);
+
+      vlog_cover_bind(body, cover, cscope);
    }
 
    if (vlog_flags(body) & VLOG_F_INTERFACE) {
@@ -31857,7 +31917,7 @@ void vlog_lower_block(mir_context_t *mc, ident_t parent, tree_t b)
    }
 
    mir_value_t *args LOCAL =
-      xmalloc_array(vlog_nports + 1, sizeof(mir_value_t));
+      xmalloc_array(vlog_nports + 2, sizeof(mir_value_t));
 
    if (mir_is_null(context))
       args[0] = mir_build_null(mu, mir_context_type(mu, qual));
@@ -31885,6 +31945,10 @@ void vlog_lower_block(mir_context_t *mc, ident_t parent, tree_t b)
 
       args[nargs++] = nets;
    }
+
+   mir_shape_t *bshape = mir_get_shape(mc, vlog_ident(body));
+   if (bshape != NULL && mir_find_slot(bshape, well_known(W_COUNTERS)) >= 0)
+      args[nargs++] = mir_build_get_counters(mu, qual);
 
    mir_value_t inst = mir_build_instance_init(mu, vlog_ident(body),
                                               args, nargs);
