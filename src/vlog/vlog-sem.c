@@ -599,8 +599,7 @@ static void vlog_check_unpacked_assign(vlog_node_t target, vlog_node_t value)
    else if (vlog_equivalent_elements(te, ve))
       return;
 
-   diag_t *d = diag_new(relaxed_rules() ? DIAG_WARN : DIAG_ERROR,
-                        vlog_loc(value));
+   diag_t *d = diag_new_relaxable(vlog_loc(value));
    diag_printf(d, "cannot assign unpacked array %s to unpacked array %s as "
                "their element types are not equivalent",
                istr(vlog_ident(value)), istr(vlog_ident(target)));
@@ -624,8 +623,7 @@ static bool vlog_modport_input(vlog_node_t target, ident_t name,
       else if (vlog_subkind(m) != V_MODPORT_INPUT)
          return false;
 
-      diag_t *d = diag_new(relaxed_rules() ? DIAG_WARN : DIAG_ERROR,
-                           vlog_loc(target));
+      diag_t *d = diag_new_relaxable(vlog_loc(target));
       diag_printf(d, "cannot assign %s which is an input of modport %s",
                   istr(name), istr(vlog_ident(mp)));
       diag_hint(d, vlog_loc(m), "declared as an input here");
@@ -1401,8 +1399,7 @@ static void vlog_check_ref_arg(vlog_node_t port, vlog_node_t arg)
    if (vlog_size(atype) * vlog_size(decl) != vlog_size(ptype) * vlog_size(port)
        || vlog_is_signed(atype) != vlog_is_signed(ptype)
        || vlog_is_two_state(atype) != vlog_is_two_state(ptype)) {
-      diag_t *d = diag_new(relaxed_rules() ? DIAG_WARN : DIAG_ERROR,
-                           vlog_loc(arg));
+      diag_t *d = diag_new_relaxable(vlog_loc(arg));
       diag_printf(d, "type of actual for ref argument %pQ is not equivalent "
                   "to %s", vlog_ident(port), vlog_type_name(ptype));
       diag_emit(d);
@@ -1533,8 +1530,7 @@ static void vlog_check_open_arg(vlog_node_t sub, vlog_node_t port,
       return;
 
    if (fdims > 0 && ndyn > 0 && vlog_subkind(port) == V_PORT_OUTPUT) {
-      diag_t *d = diag_new(relaxed_rules() ? DIAG_WARN : DIAG_ERROR,
-                           vlog_loc(arg));
+      diag_t *d = diag_new_relaxable(vlog_loc(arg));
       diag_printf(d, "dynamic array cannot be passed to unsized output "
                   "argument '%s' of DPI import '%s'",
                   istr(vlog_ident(port)), istr(vlog_ident(sub)));
@@ -2939,11 +2935,9 @@ static type_mask_t vlog_check_binary(vlog_node_t v)
       return result;
    }
 
-   if (relaxed_rules() && !((lmask | rmask) & ~(TM(DT_STRING) | TM_INTEGRAL
-                                                | TM_CONST))
+   bool string_compare = false;
+   if (!((lmask | rmask) & ~(TM(DT_STRING) | TM_INTEGRAL | TM_CONST))
        && ((lmask & TM(DT_STRING)) || (rmask & TM(DT_STRING)))) {
-      // Not allowed by table 11-1 but a character compared with a string is
-      // converted to a string like in an assignment to a string (6.16)
       switch (binop) {
       case V_BINARY_LOG_EQ:
       case V_BINARY_LOG_NEQ:
@@ -2953,20 +2947,29 @@ static type_mask_t vlog_check_binary(vlog_node_t v)
       case V_BINARY_LEQ:
       case V_BINARY_GT:
       case V_BINARY_GEQ:
-         diag_t *w = diag_new(DIAG_WARN, vlog_loc(v));
-         diag_printf(w, "comparison of an integral value with a string "
-                     "converts it to a string");
-         diag_emit(w);
-         return TM(DT_BIT);
+         string_compare = true;
+         break;
       default:
          break;
       }
+   }
+
+   if (relaxed_rules() && string_compare) {
+      // Not allowed by table 11-1 but a character compared with a string is
+      // converted to a string like in an assignment to a string (6.16)
+      diag_t *w = diag_new(DIAG_WARN, vlog_loc(v));
+      diag_printf(w, "comparison of an integral value with a string "
+                  "converts it to a string");
+      diag_emit(w);
+      return TM(DT_BIT);
    }
 
    diag_t *d = diag_new(DIAG_ERROR, vlog_loc(v));
    diag_printf(d, "invalid operands for binary expression");
    diag_hint(d, vlog_loc(v), "have '%s' and '%s'", type_mask_str(lmask),
              type_mask_str(rmask));
+   if (string_compare)
+      diag_hint_relaxable(d);
    diag_emit(d);
 
    return TM_ERROR;

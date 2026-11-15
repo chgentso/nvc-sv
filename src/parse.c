@@ -7616,10 +7616,15 @@ static void check_attribute_specification(tree_t parent, tree_t t)
    case T_PACKAGE:
    case T_PACK_BODY:
    case T_CONFIGURATION:
-      if (decl != parent && tree_kind(parent) != T_CONFIGURATION)
-         parse_error(tree_loc(t), "an attribute specification for design "
+      if (decl != parent && tree_kind(parent) != T_CONFIGURATION
+          && state.n_correct >= RECOVER_THRESH) {
+         diag_t *d = diag_new(DIAG_ERROR, tree_loc(t));
+         diag_printf(d, "an attribute specification for design "
                      "unit %pI must appear immediately within its own "
                      "declarative part", tree_ident2(t));
+         diag_hint_relaxable(d);
+         diag_emit(d);
+      }
       break;
 
    case T_PORT_DECL:
@@ -7633,10 +7638,15 @@ static void check_attribute_specification(tree_t parent, tree_t t)
                  "appear in the entity that declares "
                  "it", tree_ident2(t));
       }
-      else if (!is_declared_in_interface(parent, decl))
-         parse_error(tree_loc(t), "an attribute specification for %pI must "
+      else if (!is_declared_in_interface(parent, decl)
+               && state.n_correct >= RECOVER_THRESH) {
+         diag_t *d = diag_new(DIAG_ERROR, tree_loc(t));
+         diag_printf(d, "an attribute specification for %pI must "
                      "appear in the declarative part of the unit that "
                      "declares it", tree_ident2(t));
+         diag_hint_relaxable(d);
+         diag_emit(d);
+      }
       break;
 
    default:

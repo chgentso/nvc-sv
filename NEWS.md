@@ -1,4 +1,5 @@
 ## Unreleased changes
+- An error that `--relaxed` would accept or downgrade to a warning now has the hint that says so in every case, and the JSON messages of `--messages=json` carry `"relaxable":true` for it so that tools can offer the option.
 - With `--relaxed`, an unconstrained port may have a default value such as `(others => '0')` which has no index range of its own: this gives a warning and the port takes the range of its actual.  An unconnected port with such a default is still an error.
 - The pins of a `--netlist` cell and the order of merged ranges no longer depend on memory addresses, so the output is the same for the same design from one build of `nvc` to the next.
 - The `--load` option can be repeated to load several VHPI or VPI plugins, in command line order, rather than only the last one.  The startup routines of each library are run before the next library is loaded.

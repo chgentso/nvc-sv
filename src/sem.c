@@ -62,6 +62,15 @@ static bool sem_check_port_map(tree_t t, tree_t unit, nametab_t *tab);
 static bool sem_check_subtype(tree_t decl, type_t type, nametab_t *tab);
 static bool sem_check_incomplete(tree_t t, type_t type);
 
+// An error which --relaxed would accept: see diag_hint_relaxable
+#define sem_relaxable_error(t, ...) do {              \
+      diag_t *_d = diag_new(DIAG_ERROR, tree_loc(t)); \
+      diag_printf(_d, __VA_ARGS__);                   \
+      diag_hint_relaxable(_d);                        \
+      diag_emit(_d);                                  \
+      return false;                                   \
+   } while (0)
+
 #define sem_error(t, ...) do {                        \
       error_at(t ? tree_loc(t) : NULL , __VA_ARGS__); \
       return false;                                   \
@@ -253,8 +262,8 @@ static bool sem_check_discrete_range(tree_t r, type_t expect, nametab_t *tab)
             && rkind != T_LITERAL && rkind != T_ATTR_REF;
 
          if (invalid)
-            sem_error(r, "universal integer bound must be numeric"
-                      " literal or attribute");
+            sem_relaxable_error(r, "universal integer bound must be numeric"
+                                " literal or attribute");
       }
    }
 
@@ -1306,9 +1315,17 @@ static bool sem_check_param_decl(tree_t t, nametab_t *tab)
       break;
    }
 
-   if (kind == T_FILE && class != C_FILE)
-      sem_error(t, "formal parameter %s with file type must have class FILE",
-                istr(tree_ident(t)));
+   if (kind == T_FILE && class != C_FILE) {
+      // The relaxed rules accept a VHDL-87 file parameter with class
+      // VARIABLE or no class
+      diag_t *d = diag_new(DIAG_ERROR, tree_loc(t));
+      diag_printf(d, "formal parameter %s with file type must have class "
+                  "FILE", istr(tree_ident(t)));
+      if (!relaxed_rules() && (class == C_VARIABLE || class == C_CONSTANT))
+         diag_hint_relaxable(d);
+      diag_emit(d);
+      return false;
+   }
 
    if (kind != T_FILE && type_has_file(type) && class != C_FILE)
       sem_error(t, "formal parameter %s with a subelement of file type must "
@@ -4011,10 +4028,16 @@ static bool sem_check_array_aggregate(tree_t t, nametab_t *tab)
          case A_RANGE: choice = tree_range(a, 0); break;
          }
 
-         if (choice && !sem_locally_static(choice))
-            sem_error(choice, "a choice that is not locally static is allowed"
-                      " only if the array aggregate contains a single element"
-                      " association");
+         if (choice && !sem_locally_static(choice)) {
+            diag_t *d = diag_new(DIAG_ERROR, tree_loc(choice));
+            diag_printf(d, "a choice that is not locally static is allowed"
+                        " only if the array aggregate contains a single "
+                        "element association");
+            if (!relaxed_rules() && nassocs - nothers == 1)
+               diag_hint_relaxable(d);
+            diag_emit(d);
+            return false;
+         }
       }
    }
 
@@ -5256,6 +5279,15 @@ static bool sem_check_port_actual(formal_map_t *formals, int nformals,
                       tree_ident(decl));
             diag_hint(d, tree_loc(odecl), "port %pI declared here",
                       tree_ident(odecl));
+
+            // Mode BUFFER can be associated with IN, OUT and INOUT ports
+            // in the relaxed rules before VHDL-2002
+            if (!relaxed_rules() && standard() < STD_02
+                && ((mode != PORT_BUFFER && omode == PORT_BUFFER)
+                    || (mode == PORT_BUFFER
+                        && (omode == PORT_OUT || omode == PORT_INOUT))))
+               diag_hint_relaxable(d);
+
             diag_emit(d);
             return false;
          }
@@ -6388,6 +6420,9 @@ static bool sem_check_case(tree_t t, nametab_t *tab)
                           static_str);
                   sem_fold_choice(name);
                }
+               else if (sem_globally_static(name))
+                  sem_relaxable_error(name, "case choice must be %s static",
+                                      static_str);
                else
                   sem_error(name, "case choice must be %s static", static_str);
             }
@@ -6406,6 +6441,10 @@ static bool sem_check_case(tree_t t, nametab_t *tab)
                              "choice range is not %s static", static_str);
                      sem_fold_choice(tree_left(r));
                   }
+                  else if (sem_globally_static(tree_left(r)))
+                     sem_relaxable_error(tree_left(r), "left index of case "
+                                         "choice range is not %s static",
+                                         static_str);
                   else
                      sem_error(tree_left(r), "left index of case choice "
                                "range is not %s static", static_str);
@@ -6417,6 +6456,10 @@ static bool sem_check_case(tree_t t, nametab_t *tab)
                              "choice range is not %s static", static_str);
                      sem_fold_choice(tree_right(r));
                   }
+                  else if (sem_globally_static(tree_right(r)))
+                     sem_relaxable_error(tree_right(r), "right index of case "
+                                         "choice range is not %s static",
+                                         static_str);
                   else
                      sem_error(tree_right(r), "right index of case choice "
                                "range is not %s static", static_str);
@@ -6627,8 +6670,8 @@ static bool sem_check_attr_spec(tree_t t, nametab_t *tab)
       // static in the LRM definition
       if (tree_kind(value) != T_LITERAL && !relaxed_rules()
           && !sem_locally_static(value))
-         sem_error(value, "the value of an attribute of a design unit must "
-                   "be locally static");
+         sem_relaxable_error(value, "the value of an attribute of a design "
+                             "unit must be locally static");
       break;
    default:
       break;

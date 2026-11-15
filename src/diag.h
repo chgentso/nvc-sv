@@ -141,6 +141,13 @@ void wrapped_vprintf(const char *fmt, va_list ap);
          _pedantic_diag(loc, &_warned, NULL);          \
       })
 
+// Mark an error as one that --relaxed would accept or downgrade to a
+// warning so that tools can offer the option: the flag appears as
+// "relaxable" in JSON output.  The second form also adds the hint.
+void diag_set_relaxable(diag_t *d);
+void diag_hint_relaxable(diag_t *d);
+diag_t *diag_new_relaxable(const loc_t *loc);
+
 diag_t *_pedantic_diag(const loc_t *loc, int *warned, bool *error);
 
 // Accessors for use in unit tests
