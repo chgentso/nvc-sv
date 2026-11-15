@@ -1881,7 +1881,10 @@ static vlog_node_t p_enum_base_type(void)
       }
 
    default:
-      return get_data_type(p_identifier());
+      if (peek() == tID && peek_nth(2) == tSCOPE && !is_process_name())
+         return p_data_type();   // A type declared in a package or class
+      else
+         return get_data_type(p_identifier());
    }
 }
 

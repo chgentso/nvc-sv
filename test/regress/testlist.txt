@@ -2843,3 +2843,4 @@ vlogenumsel1    verilog
 vlogiarray2d    verilog
 vlogiarrayslice1 verilog
 vlogsideeff1    verilog
+vlogenumbase1   verilog
