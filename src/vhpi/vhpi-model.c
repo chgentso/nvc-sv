@@ -5377,7 +5377,11 @@ static void vhpi_lazy_decls(c_vhpiObject *obj)
          build_packInst(d, r);
          break;
       case T_VAR_DECL:
-         if (obj->kind == vhpiProcessStmtK)
+         // Variables of a process and shared variables of packages and
+         // architectures, but not protected type instances
+         if (obj->kind == vhpiProcessStmtK
+             || ((tree_flags(d) & TREE_F_SHARED)
+                 && !type_has_protected(tree_type(d))))
             build_varDecl(d, r);
          break;
       default:
