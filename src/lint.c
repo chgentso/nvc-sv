@@ -181,12 +181,14 @@ typedef A(error_region_t) region_list_t;
 
 static region_list_t errors = AINIT;
 static region_list_t syntax_errors = AINIT;
+static region_list_t damage = AINIT;   // Skipped or closed by insertion
 static bool          unlocated_error = false;
 
 void lint_errors_reset(void)
 {
    ACLEAR(errors);
    ACLEAR(syntax_errors);
+   ACLEAR(damage);
    unlocated_error = false;
 }
 
@@ -237,6 +239,7 @@ void lint_note_damage(const loc_t *from, const loc_t *to)
       .first_column = from->first_column,
    };
    APUSH(syntax_errors, r);
+   APUSH(damage, r);
 }
 
 static bool span_overlaps(const region_list_t *list, const loc_t *span)
@@ -259,6 +262,14 @@ bool lint_span_has_error(const loc_t *span)
       return true;
 
    return span_overlaps(&errors, span) || span_overlaps(&syntax_errors, span);
+}
+
+bool lint_span_has_damage(const loc_t *span)
+{
+   if (unlocated_error || loc_invalid_p(span))
+      return true;
+
+   return span_overlaps(&damage, span);
 }
 
 bool lint_span_has_syntax_error(const loc_t *span)

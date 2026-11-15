@@ -89,6 +89,9 @@ void lint_note_damage(const loc_t *from, const loc_t *to);
 // An error lies inside the lines of the span
 bool lint_span_has_error(const loc_t *span);
 
+// The parser skipped or closed by insertion something in the span
+bool lint_span_has_damage(const loc_t *span);
+
 // A syntax error lies inside the lines of the span
 bool lint_span_has_syntax_error(const loc_t *span);
 
