@@ -27156,7 +27156,32 @@ static vlog_node_t p_source_text(void)
       }
 
       vlog_node_t v = p_description();
-      if (v == NULL) {
+      if (v == NULL && parse_recovery() && peek() != tEOF) {
+         // Nothing in this arena can be used: skip to the next design unit
+         // and carry on in a new one
+         discard_global_arena();
+
+         loc_t first = LOC_INVALID, last = LOC_INVALID;
+         for (;;) {
+            const token_t next = peek();
+            if (next == tEOF || next == tMODULE || next == tINTERFACE
+                || next == tPROGRAM || next == tPACKAGE || next == tPRIMITIVE)
+               break;
+
+            if (first.first_line == LINE_INVALID)
+               first = state.tokenq[state.tokenq_tail].loc;
+            last = state.tokenq[state.tokenq_tail].loc;
+            drop_token(&state);
+            state.stall = 0;
+         }
+
+         lint_note_damage(&first, &last);
+         state.mute = false;
+         make_new_arena();
+         p_directive_list();
+         continue;
+      }
+      else if (v == NULL) {
          // Syntax error: nothing in this arena can be used and the
          // symbol table must not leak into the next file
          discard_global_arena();
