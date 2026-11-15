@@ -3,7 +3,7 @@ clas k;
 endclass
 
 module linterr22;
-  automatic k a = new, b = new;
+  static k a = new, b = new;
   k q[$];
   initial begin
     a = b;

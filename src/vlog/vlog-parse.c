@@ -15318,6 +15318,11 @@ static void p_data_declaration(vlog_node_t parent, vlog_kind_t kind)
          if (scan(tSTATIC, tAUTOMATIC)) {
             is_static = one_of(tSTATIC, tAUTOMATIC) == tSTATIC;
             is_automatic = !is_static;
+
+            if (is_automatic && (vlog_kind(parent) == V_MODULE
+                                 || vlog_kind(parent) == V_PACKAGE))
+               error_at(&state.last_loc, "a variable declared in a module, "
+                        "interface, program or package cannot be automatic");
          }
 
          ACLEAR(typedef_dims);
@@ -21163,8 +21168,14 @@ static void p_package_or_generate_item_declaration(vlog_node_t parent)
       break;
    case tSTATIC:
    case tAUTOMATIC:
-      (void)one_of(tSTATIC, tAUTOMATIC);
-      p_package_or_generate_item_declaration(parent);
+      {
+         const token_t qual = one_of(tSTATIC, tAUTOMATIC);
+         if (qual == tAUTOMATIC && (vlog_kind(parent) == V_MODULE
+                                    || vlog_kind(parent) == V_PACKAGE))
+            error_at(&state.last_loc, "a variable declared in a module, "
+                     "interface, program or package cannot be automatic");
+         p_package_or_generate_item_declaration(parent);
+      }
       break;
    case tCONST:
       p_data_declaration(parent, V_VAR_DECL);
