@@ -1286,7 +1286,10 @@ void vlog_proc_evidence(conn_design_t *cd, conn_proc_t *proc, vlog_node_t v)
    case V_GATE_INST:
       break;
    default:
-      return;   // initial, final, UDP tables
+      // initial, final, UDP tables
+      ev->approx = proc->approx;
+      ev->reasons = proc->approx ? CONN_WHY_OTHER : 0;
+      return;
    }
 
    wk_t w;
