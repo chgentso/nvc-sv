@@ -2690,8 +2690,10 @@ static vlog_node_t p_implicit_data_type(void)
    vlog_node_t v = vlog_new(V_DATA_TYPE);
    vlog_set_subkind(v, DT_IMPLICIT);
 
-   if (scan(tSIGNED, tUNSIGNED))
-      vlog_set_flags(v, p_signing());
+   if (scan(tSIGNED, tUNSIGNED)) {
+      const bool is_unsigned = peek() == tUNSIGNED;
+      vlog_set_flags(v, p_signing() | (is_unsigned ? VLOG_F_UNSIGNED : 0));
+   }
 
    while (peek() == tLSQUARE)
       vlog_add_range(v, p_packed_dimension());

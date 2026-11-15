@@ -608,6 +608,26 @@ number_t number_from_jit(int width, bool issigned, jit_scalar_t abits,
    return number_intern(result);
 }
 
+number_t number_with_sign(number_t val, bool issigned)
+{
+   const unsigned width = number_width(val);
+   if (number_signed(val) == issigned)
+      return val;
+
+   const uint64_t *abits, *bbits;
+   number_get(val, &abits, &bbits);
+
+   bignum_t *result;
+   bignum_scratch(width, issigned, 1, &result);
+
+   for (size_t i = 0; i < BIGNUM_WORDS(width); i++) {
+      bignum_abits(result)[i] = abits[i];
+      bignum_bbits(result)[i] = bbits[i];
+   }
+
+   return number_intern(result);
+}
+
 void number_print(number_t val, text_buf_t *tb)
 {
    if (number_is_defined(val)) {

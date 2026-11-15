@@ -1445,6 +1445,17 @@ static vlog_select_t vlog_lower_param_value(vlog_gen_t *g, vlog_node_t decl)
       mir_type_t vtype = mir_get_type(g->mu, value);
       const int size = mir_get_size(g->mu, vtype);
 
+      // Only the signing of the type is declared (6.20.2)
+      const vlog_flags_t sign = vlog_flags(dt) & (VLOG_F_SIGNED | VLOG_F_UNSIGNED);
+      if (sign != 0 && mir_get_signed(g->mu, vtype) != !!(sign & VLOG_F_SIGNED)) {
+         const bool is_signed = sign & VLOG_F_SIGNED;
+         mir_type_t stype = mir_get_class(g->mu, vtype) == MIR_TYPE_VEC2
+            ? mir_vec2_type(g->mu, size, is_signed)
+            : mir_vec4_type(g->mu, size, is_signed);
+         value = mir_build_cast(g->mu, stype, value);
+         vtype = stype;
+      }
+
       vlog_select_t result = {
          .obj        = value,
          .type       = vtype,
