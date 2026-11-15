@@ -5454,6 +5454,37 @@ static tree_t p_abstract_literal(void)
    }
 
    tree_set_loc(t, CURRENT_LOC);
+
+   // LRM 08 section 15.3: a separator is required between an abstract
+   // literal and an adjacent reserved word
+   switch (peek()) {
+   case tMOD: case tREM: case tAND: case tOR: case tXOR: case tNAND:
+   case tNOR: case tXNOR: case tTO: case tDOWNTO: case tTHEN: case tLOOP:
+   case tSLL: case tSRL: case tSLA: case tSRA: case tROL: case tROR:
+   case tAFTER: case tGENERATE: case tELSE: case tELSIF: case tWHEN:
+   case tIS: case tUNITS: case tOF:
+      {
+         const loc_t *next = &(state.tokenq[state.tokenq_tail].loc);
+         const loc_t *last = &state.last_loc;
+         if (next->first_line == last->first_line + last->line_delta
+             && next->first_column == last->first_column
+                + last->column_delta + 1)
+         {
+            diag_t *d = pedantic_diag(next);
+            if (d != NULL) {
+               diag_printf(d, "a separator is required between an abstract "
+                           "literal and the reserved word %s",
+                           token_str(peek()));
+               diag_lrm(d, STD_08, "15.3");
+               diag_emit(d);
+            }
+         }
+      }
+      break;
+   default:
+      break;
+   }
+
    return t;
 }
 
