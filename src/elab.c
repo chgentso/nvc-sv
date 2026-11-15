@@ -1825,8 +1825,11 @@ static bool elab_port_name_eq(ident_t a, ident_t b, bool nocase)
 
 static vlog_node_t elab_array_iface_value(vlog_node_t inst, vlog_node_t value);
 static vlog_node_t elab_iface_element(vlog_node_t value, int pos, int count);
-static bool elab_instance_array_bounds(vlog_node_t inst, int64_t *left,
-                                       int64_t *right);
+static int elab_instance_array_count(vlog_node_t inst);
+static int elab_array_indices(vlog_node_t decl, int pos, int count,
+                              int64_t *index);
+
+#define MAX_INST_DIMS 8
 
 static void elab_verilog_iface_port(vlog_node_t inst, vlog_node_t port,
                                     vlog_node_t wildcard, bit_mask_t *used,
@@ -1865,17 +1868,21 @@ static void elab_verilog_iface_port(vlog_node_t inst, vlog_node_t port,
    vlog_node_t value = conn != NULL
       ? elab_array_iface_value(inst, vlog_value(conn)) : NULL;
 
-   int64_t left = 0, right = 0;
    const int count = vlog_ranges(port) > 0
-      && elab_instance_array_bounds(port, &left, &right)
-      ? llabs(left - right) + 1 : 0;
+      ? elab_instance_array_count(port) : 0;
 
    for (int i = 0; i < MAX(count, 1); i++) {
       ident_t id = name;
       vlog_node_t elem = value;
       if (count > 0) {
-         id = ident_sprintf("%s[%"PRIi64"]", istr(name),
-                            left >= right ? left - i : left + i);
+         int64_t index[MAX_INST_DIMS];
+         const int ndims = elab_array_indices(port, i, count, index);
+
+         LOCAL_TEXT_BUF tb = tb_new();
+         tb_cat(tb, istr(name));
+         for (int d = 0; d < ndims; d++)
+            tb_printf(tb, "[%"PRIi64"]", index[d]);
+         id = ident_new(tb_get(tb));
          if (value != NULL) {
             elem = elab_iface_element(value, i, count);
             if (elem == value) {
@@ -1918,12 +1925,6 @@ static bool elab_instance_array_dim(vlog_node_t inst, int n, int64_t *left,
    return false;
 }
 
-static bool elab_instance_array_bounds(vlog_node_t inst, int64_t *left,
-                                       int64_t *right)
-{
-   return elab_instance_array_dim(inst, 0, left, right);
-}
-
 static int elab_instance_array_count(vlog_node_t inst)
 {
    // The number of elements in all the dimensions or zero if the bounds
@@ -1942,20 +1943,17 @@ static int elab_instance_array_count(vlog_node_t inst)
    return count;
 }
 
-static vlog_node_t elab_array_element(vlog_node_t inst, int pos, int count)
+static int elab_array_indices(vlog_node_t decl, int pos, int count,
+                              int64_t *index)
 {
-   // A copy of an element of an instance array which remembers its position:
-   // the position is counted over all the dimensions with the last varying
-   // fastest
-
-   LOCAL_TEXT_BUF tb = tb_new();
-   tb_cat(tb, istr(vlog_ident(inst)));
+   // The indices of an element of an array of instances counted over all
+   // the dimensions with the last varying fastest
 
    int rem = pos, total = count;
-   const int ndims = vlog_ranges(inst);
+   const int ndims = MIN(vlog_ranges(decl), MAX_INST_DIMS);
    for (int i = 0; i < ndims; i++) {
       int64_t left, right;
-      (void)elab_instance_array_dim(inst, i, &left, &right);
+      (void)elab_instance_array_dim(decl, i, &left, &right);
 
       const int size = llabs(left - right) + 1;
       total /= size;
@@ -1963,8 +1961,23 @@ static vlog_node_t elab_array_element(vlog_node_t inst, int pos, int count)
       const int j = rem / total;
       rem %= total;
 
-      tb_printf(tb, "[%"PRIi64"]", left >= right ? left - j : left + j);
+      index[i] = left >= right ? left - j : left + j;
    }
+
+   return ndims;
+}
+
+static vlog_node_t elab_array_element(vlog_node_t inst, int pos, int count)
+{
+   // A copy of an element of an instance array which remembers its position
+
+   int64_t index[MAX_INST_DIMS];
+   const int ndims = elab_array_indices(inst, pos, count, index);
+
+   LOCAL_TEXT_BUF tb = tb_new();
+   tb_cat(tb, istr(vlog_ident(inst)));
+   for (int i = 0; i < ndims; i++)
+      tb_printf(tb, "[%"PRIi64"]", index[i]);
 
    vlog_node_t e = vlog_new(V_MOD_INST);
    vlog_set_ident(e, ident_new(tb_get(tb)));
@@ -2097,17 +2110,19 @@ static vlog_node_t elab_iface_element(vlog_node_t value, int pos, int count)
        || vlog_ranges(decl) == 0)
       return value;
 
-   int64_t left, right;
-   if (!elab_instance_array_bounds(decl, &left, &right))
+   const int total = elab_instance_array_count(decl);
+   if (total == 0)
       return value;
 
-   if (llabs(left - right) + 1 != count) {
-      error_at(vlog_loc(value), "array of interface instances %pQ has %lld "
+   if (total != count) {
+      error_at(vlog_loc(value), "array of interface instances %pQ has %d "
                "elements but the port is connected to an array of %d "
-               "instances", vlog_ident(mr), (long long)(llabs(left - right) + 1),
-               count);
+               "instances", vlog_ident(mr), total, count);
       return value;
    }
+
+   int64_t index[MAX_INST_DIMS];
+   const int ndims = elab_array_indices(decl, pos, count, index);
 
    vlog_node_t emr = vlog_new(V_MOD_REF);
    vlog_set_ident(emr, vlog_ident(mr));
@@ -2115,8 +2130,8 @@ static vlog_node_t elab_iface_element(vlog_node_t value, int pos, int count)
    vlog_set_loc(emr, vlog_loc(mr));
    if (vlog_has_value(mr))
       vlog_set_value(emr, vlog_value(mr));
-   vlog_add_param(emr, elab_number(left >= right ? left - pos : left + pos,
-                                   vlog_loc(mr)));
+   for (int i = 0; i < ndims; i++)
+      vlog_add_param(emr, elab_number(index[i], vlog_loc(mr)));
 
    vlog_node_t href = vlog_new(V_HIER_REF);
    vlog_set_ident(href, vlog_ident(value));
@@ -3196,13 +3211,13 @@ static vlog_node_t elab_early_port_body(vlog_node_t port, void *arg)
 
    if (vlog_ranges(port) > 0) {
       // The elements of an array of ports all have the same layout
-      int64_t left, right;
-      if (value == NULL || !elab_instance_array_bounds(port, &left, &right)) {
+      const int count = value != NULL ? elab_instance_array_count(port) : 0;
+      if (count == 0) {
          diag_set_consumer(saved, saved_ctx);
          return NULL;
       }
 
-      value = elab_iface_element(value, 0, llabs(left - right) + 1);
+      value = elab_iface_element(value, 0, count);
    }
 
    elab_iface_conn_t c = {

@@ -9,6 +9,10 @@ module leaf (output logic [7:0] o);
    assign o = 8'h40;
 endmodule
 
+module sink (simple_if b[1:0][2:0], output logic [7:0] sum);
+   always_comb sum = b[0][0].data + b[1][2].data;
+endmodule
+
 module vlogiarray2d;
    localparam int A = 2;
    localparam int B = 3;
@@ -21,6 +25,18 @@ module vlogiarray2d;
       for (gj = 0; gj < B; gj++) begin : g_b
          initial bus[gi][gj].data = 8'(gi * B + gj + 1);
       end
+   end
+
+   simple_if neg[1:-1][-2:0] ();
+   simple_if pb[1:0][2:0] ();
+   logic [7:0] sum;
+   sink snk (.b(pb), .sum);
+
+   initial begin
+      neg[-1][-2].data = 8'd5;
+      neg[1][0].data = 8'd7;
+      pb[0][0].data = 8'd1;
+      pb[1][2].data = 8'd2;
    end
 
    logic [7:0] chk [A-1:0][B-1:0];
@@ -36,6 +52,9 @@ module vlogiarray2d;
          for (int j = 0; j < B; j++)
             if (chk[i][j] !== 8'(i * B + j + 1))
                $fatal(1, "bus[%0d][%0d] = %0d", i, j, chk[i][j]);
+      if (neg[-1][-2].data !== 8'd5 || neg[1][0].data !== 8'd7)
+         $fatal(1, "negative indices");
+      if (sum !== 8'd3) $fatal(1, "sum %0d", sum);
       if (l[2][4].o !== 8'h40 || l[1][5].o !== 8'h40)
          $fatal(1, "leaf");
       $display("PASSED");

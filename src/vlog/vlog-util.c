@@ -192,6 +192,14 @@ bool vlog_get_const(vlog_node_t v, int64_t *value)
          return vlog_get_const(vlog_param(v, 0), value);
       else
          return false;
+   case V_UNARY:
+      if (vlog_subkind(v) == V_UNARY_NEG
+          && vlog_get_const(vlog_value(v), value)) {
+         *value = -*value;
+         return true;
+      }
+      else
+         return false;
    default:
       return false;
    }
