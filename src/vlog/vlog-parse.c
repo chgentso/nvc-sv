@@ -591,6 +591,8 @@ static bool is_nonansi_interface_port(vlog_node_t mod);
 static void p_nonansi_interface_port_declaration(vlog_node_t mod);
 static bool defer_subr_body(vlog_node_t subr, token_t end_token);
 static vlog_node_t specialise_forward(vlog_node_t forward);
+static vlog_node_t p_scoped_member_type(vlog_node_t scope);
+static bool keep_class_scope = false;
 static bool want_defer_body(void);
 static vlog_node_t resolve_forward_class(ident_t name);
 static void resolve_forward_specs(vlog_node_t class);
@@ -2566,7 +2568,7 @@ static vlog_node_t p_data_type(void)
             }
             else if (d != NULL && vlog_kind(d) == V_CLASS_DECL
                      && (vlog_flags(d) & VLOG_F_GENERIC))
-               return specialise_class(d);
+               return p_scoped_member_type(specialise_class(d));
 
             if (d != NULL && peek() == tLSQUARE)
                d = p_typedef_dimensions(d);
@@ -2629,13 +2631,13 @@ static vlog_node_t p_data_type(void)
             scan_skip_parameters();
          else if (d != NULL && vlog_kind(d) == V_CLASS_DECL
              && (vlog_flags(d) & VLOG_F_GENERIC))
-            return specialise_class(d);
+            return p_scoped_member_type(specialise_class(d));
          else if (d != NULL && peek() == tHASH && vlog_kind(d) == V_TYPE_DECL
                   && generic_classes != NULL && hash_get(generic_classes, d))
-            return specialise_class(d);   // Own name inside class body
+            return p_scoped_member_type(specialise_class(d));   // Own name
          else if (d != NULL && peek() == tHASH && vlog_kind(d) == V_CLASS_DECL
                   && (vlog_flags(d) & VLOG_F_FORWARD))
-            return specialise_forward(d);
+            return p_scoped_member_type(specialise_forward(d));
 
          if (d != NULL && vlog_kind(d) == V_TYPE_DECL
              && (vlog_flags(d) & VLOG_F_NETTYPE))
@@ -5739,7 +5741,9 @@ static vlog_node_t p_scope_prefix(void)
 
       if (scope == NULL && peek_nth(2) == tHASH) {
          // Specialisation of a parameterised class
+         keep_class_scope = true;
          vlog_node_t c = vlog_get_type(p_data_type());
+         keep_class_scope = false;
          consume(tSCOPE);
 
          if (c != NULL && vlog_kind(c) == V_CLASS_DECL) {
@@ -18623,6 +18627,44 @@ static vlog_node_t replay_default(vlog_node_t generic, generic_class_t *g,
    spec_container = saved_container;
 
    return result;
+}
+
+static vlog_node_t p_scoped_member_type(vlog_node_t type)
+{
+   // A type declared in a specialisation of a class: C #(int)::t
+
+   vlog_node_t scope = vlog_kind(type) == V_CLASS_DECL ? type : NULL;
+   if (keep_class_scope)
+      return type;   // The scope prefix takes the name which follows
+
+   while (scope != NULL && peek() == tSCOPE && peek_nth(2) == tID) {
+      consume(tSCOPE);
+      ident_t id = p_identifier();
+      const loc_t loc = state.last_loc;
+      vlog_node_t d = vlog_scope_member(scope, id);
+      if (d == NULL) {
+         error_at(&loc, "%pQ is not a member of class %pQ", id,
+                  vlog_ident(scope));
+         return logic_type();
+      }
+      else if (!is_data_type(d)) {
+         error_at(&loc, "%pQ is not a data type", id);
+         return logic_type();
+      }
+
+      type = d;
+      scope = vlog_kind(d) == V_CLASS_DECL ? d : NULL;
+      if (scope == NULL && vlog_kind(d) == V_TYPE_DECL) {
+         vlog_node_t t = vlog_get_type(d);
+         if (t != NULL && vlog_kind(t) == V_CLASS_DECL)
+            scope = t;
+      }
+   }
+
+   if (type != NULL && peek() == tLSQUARE && vlog_kind(type) != V_CLASS_DECL)
+      type = p_typedef_dimensions(type);
+
+   return type;
 }
 
 static vlog_node_t specialise_class(vlog_node_t generic)
