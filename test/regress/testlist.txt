@@ -2806,3 +2806,4 @@ linterr23 shell
 linterrvhdl6 shell
 linterrvhdl7 shell
 concat_null normal
+expname_func normal,2008

@@ -2368,6 +2368,34 @@ tree_t resolve_field_name(nametab_t *tab, const loc_t *loc, ident_t name,
    return decl;
 }
 
+static tree_t solve_selected_prefix(nametab_t *tab, tree_t t)
+{
+   // Solve the prefix of a selected name
+
+   tree_t prefix = tree_value(t);
+   if (tree_kind(prefix) == T_REF && !tree_has_type(prefix)) {
+      // A function name may be an expanded name prefix inside the
+      // function itself (LRM 08 section 8.3) in which case it must not
+      // be interpreted as a call with no arguments
+      const symbol_t *sym = iterate_symbol_for(tab, tree_ident(prefix));
+      for (int i = 0; sym != NULL && i < sym->ndecls; i++) {
+         const decl_t *dd = get_decl(sym, i);
+         if (dd->visibility == HIDDEN || !(dd->mask & N_SUBPROGRAM)
+             || !is_container(dd->tree) || !is_enclosing(tab, dd->tree))
+            continue;
+
+         scope_t *s = private_scope_for(tab, dd->tree);
+         if (symbol_for(s, tree_ident(t)) != NULL) {
+            tree_set_ref(prefix, dd->tree);
+            tree_set_type(prefix, tree_type(dd->tree));
+            break;
+         }
+      }
+   }
+
+   return solve_types(tab, prefix, NULL);
+}
+
 static tree_t resolve_record_ref_or_call(nametab_t *tab, tree_t t, bool pcall)
 {
    assert(tree_kind(t) == T_RECORD_REF);
@@ -2375,7 +2403,7 @@ static tree_t resolve_record_ref_or_call(nametab_t *tab, tree_t t, bool pcall)
    if (tree_has_type(t))
       return NULL;
 
-   tree_t prefix = solve_types(tab, tree_value(t), NULL);
+   tree_t prefix = solve_selected_prefix(tab, t);
 
    if (get_library_ref(prefix) != NULL)
       return NULL;
@@ -5226,7 +5254,7 @@ static tree_t solve_record_ref(nametab_t *tab, tree_t t)
    if (tree_has_type(t))
       return t;
 
-   tree_t prefix = solve_types(tab, tree_value(t), NULL);
+   tree_t prefix = solve_selected_prefix(tab, t);
    tree_set_value(t, (prefix = implicit_dereference(tab, prefix)));
 
    tree_t select = resolve_selected_name(tab, t);
