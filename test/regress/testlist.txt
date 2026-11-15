@@ -2819,3 +2819,4 @@ config_default_arch normal,2008
 value_based normal,2008
 textio_based normal
 lex_lineend normal
+math_domain normal,2019

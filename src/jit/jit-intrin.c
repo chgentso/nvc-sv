@@ -2100,13 +2100,18 @@ static void byte_vector_equal(jit_func_t *func, jit_anchor_t *anchor,
 static void ieee_math_sin(jit_func_t *func, jit_anchor_t *anchor,
                           jit_scalar_t *args, tlab_t *tlab)
 {
-   args[0].real = sin(args[1].real);
+   // IEEE Std 1076.2 prescribes exact zero at multiples of pi
+   const double x = args[1].real, k = round(x / M_PI);
+   args[0].real = (isfinite(x) && k * M_PI == x) ? 0.0 : sin(x);
 }
 
 static void ieee_math_cos(jit_func_t *func, jit_anchor_t *anchor,
                           jit_scalar_t *args, tlab_t *tlab)
 {
-   args[0].real = cos(args[1].real);
+   // Also exact zero at odd multiples of pi / 2
+   const double x = args[1].real, k = round(x / M_PI_2);
+   args[0].real = (isfinite(x) && fmod(k, 2.0) != 0.0 && k * M_PI_2 == x)
+      ? 0.0 : cos(x);
 }
 
 static void ieee_math_log(jit_func_t *func, jit_anchor_t *anchor,
@@ -3470,14 +3475,14 @@ static jit_intrinsic_t intrinsic_list[] = {
    { ST "\"=\"(SS)B$predef", byte_vector_equal },
    { MR "SIN(R)R", ieee_math_sin },
    { MR "COS(R)R", ieee_math_cos },
-   { MR "LOG(R)R", ieee_math_log },
-   { MR "LOG2(R)R", ieee_math_log2 },
-   { MR "LOG10(R)R", ieee_math_log10 },
+   { MR "LOG_LIBM(R)R", ieee_math_log },
+   { MR "LOG2_LIBM(R)R", ieee_math_log2 },
+   { MR "LOG10_LIBM(R)R", ieee_math_log10 },
    { MR "ROUND(R)R", ieee_math_round },
    { MR "TRUNC(R)R", ieee_math_trunc },
    { MR "FLOOR(R)R", ieee_math_floor },
-   { MR "\"**\"(RR)R", ieee_math_pow_real },
-   { MR "\"**\"(IR)R", ieee_math_pow_integer },
+   { MR "POW_RR_LIBM(RR)R", ieee_math_pow_real },
+   { MR "POW_IR_LIBM(IR)R", ieee_math_pow_integer },
    { MR "EXP(R)R", ieee_math_exp },
    { TI "CONSUME(" LN "N)", std_textio_consume },
    { TI "SHRINK(" LN "N)", std_textio_shrink },
