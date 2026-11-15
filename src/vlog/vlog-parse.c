@@ -3102,9 +3102,11 @@ static vlog_node_t p_instance_index(vlog_node_t mr)
 {
    // [ constant_expression ]
 
-   consume(tLSQUARE);
-   vlog_add_param(mr, p_expression());
-   consume(tRSQUARE);
+   do {
+      consume(tLSQUARE);
+      vlog_add_param(mr, p_expression());
+      consume(tRSQUARE);
+   } while (peek() == tLSQUARE);
 
    return mr;
 }
@@ -3117,16 +3119,19 @@ static bool at_instance_index(bool dot)
    if (peek() != tLSQUARE)
       return false;
 
-   int n = 2;
-   for (int depth = 1; depth > 0 && n < TOKENQ_SIZE - 2; n++) {
-      const token_t tok = peek_nth(n);
-      if (tok == tLSQUARE)
-         depth++;
-      else if (tok == tRSQUARE)
-         depth--;
-      else if (tok == tEOF || tok == tSEMI)
-         return false;
-   }
+   int n = 1;
+   do {
+      n++;
+      for (int depth = 1; depth > 0 && n < TOKENQ_SIZE - 2; n++) {
+         const token_t tok = peek_nth(n);
+         if (tok == tLSQUARE)
+            depth++;
+         else if (tok == tRSQUARE)
+            depth--;
+         else if (tok == tEOF || tok == tSEMI)
+            return false;
+      }
+   } while (peek_nth(n) == tLSQUARE && n < TOKENQ_SIZE - 2);
 
    return !dot || peek_nth(n) == tDOT;
 }
@@ -23574,7 +23579,7 @@ static vlog_node_t p_hierarchical_instance(void)
    vlog_node_t v = vlog_new(V_MOD_INST);
    vlog_set_ident(v, p_identifier());
 
-   if (peek() == tLSQUARE)
+   while (peek() == tLSQUARE)
       vlog_add_range(v, p_unpacked_dimension());
 
    if (lib_scan_active() && peek() != tLPAREN) {

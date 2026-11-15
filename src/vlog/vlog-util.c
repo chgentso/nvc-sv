@@ -2432,14 +2432,22 @@ ident_t vlog_mod_ref_name(vlog_node_t v)
    if (vlog_params(v) == 0)
       return vlog_ident(v);
 
-   int64_t index;
-   if (!vlog_get_const(vlog_param(v, 0), &index)) {
-      error_at(vlog_loc(v), "nonconstant index into instance array %pQ",
-               vlog_ident(v));
-      return vlog_ident(v);
+   LOCAL_TEXT_BUF tb = tb_new();
+   tb_cat(tb, istr(vlog_ident(v)));
+
+   const int nparams = vlog_params(v);
+   for (int i = 0; i < nparams; i++) {
+      int64_t index;
+      if (!vlog_get_const(vlog_param(v, i), &index)) {
+         error_at(vlog_loc(v), "nonconstant index into instance array %pQ",
+                  vlog_ident(v));
+         return vlog_ident(v);
+      }
+
+      tb_printf(tb, "[%"PRIi64"]", index);
    }
 
-   return ident_sprintf("%s[%"PRIi64"]", istr(vlog_ident(v)), index);
+   return ident_new(tb_get(tb));
 }
 
 bool vlog_block_is_named(tree_t b, ident_t name)

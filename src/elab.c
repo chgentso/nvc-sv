@@ -1906,10 +1906,10 @@ static void elab_verilog_iface_port(vlog_node_t inst, vlog_node_t port,
    }
 }
 
-static bool elab_instance_array_bounds(vlog_node_t inst, int64_t *left,
-                                       int64_t *right)
+static bool elab_instance_array_dim(vlog_node_t inst, int n, int64_t *left,
+                                    int64_t *right)
 {
-   vlog_node_t r = vlog_range(inst, 0);
+   vlog_node_t r = vlog_range(inst, n);
    if (vlog_get_const(vlog_left(r), left) && vlog_get_const(vlog_right(r), right))
       return true;
 
@@ -1918,14 +1918,56 @@ static bool elab_instance_array_bounds(vlog_node_t inst, int64_t *left,
    return false;
 }
 
-static vlog_node_t elab_array_element(vlog_node_t inst, int pos, int count,
-                                      int64_t index)
+static bool elab_instance_array_bounds(vlog_node_t inst, int64_t *left,
+                                       int64_t *right)
 {
-   // A copy of an element of an instance array which remembers its position
+   return elab_instance_array_dim(inst, 0, left, right);
+}
+
+static int elab_instance_array_count(vlog_node_t inst)
+{
+   // The number of elements in all the dimensions or zero if the bounds
+   // are not constant
+
+   int count = 1;
+   const int ndims = vlog_ranges(inst);
+   for (int i = 0; i < ndims; i++) {
+      int64_t left, right;
+      if (!elab_instance_array_dim(inst, i, &left, &right))
+         return 0;
+
+      count *= llabs(left - right) + 1;
+   }
+
+   return count;
+}
+
+static vlog_node_t elab_array_element(vlog_node_t inst, int pos, int count)
+{
+   // A copy of an element of an instance array which remembers its position:
+   // the position is counted over all the dimensions with the last varying
+   // fastest
+
+   LOCAL_TEXT_BUF tb = tb_new();
+   tb_cat(tb, istr(vlog_ident(inst)));
+
+   int rem = pos, total = count;
+   const int ndims = vlog_ranges(inst);
+   for (int i = 0; i < ndims; i++) {
+      int64_t left, right;
+      (void)elab_instance_array_dim(inst, i, &left, &right);
+
+      const int size = llabs(left - right) + 1;
+      total /= size;
+
+      const int j = rem / total;
+      rem %= total;
+
+      tb_printf(tb, "[%"PRIi64"]", left >= right ? left - j : left + j);
+   }
 
    vlog_node_t e = vlog_new(V_MOD_INST);
-   vlog_set_ident(e, ident_sprintf("%s[%"PRIi64"]", istr(vlog_ident(inst)),
-                                   index));
+   vlog_set_ident(e, ident_new(tb_get(tb)));
    vlog_set_loc(e, vlog_loc(inst));
    vlog_set_ival(e, ((int64_t)count << 32) | pos);
 
@@ -3742,14 +3784,9 @@ static void elab_verilog_instance_list(vlog_node_t v, const elab_ctx_t *ctx)
          continue;
       }
 
-      int64_t left, right;
-      if (!elab_instance_array_bounds(inst, &left, &right))
-         continue;
-
-      const int count = llabs(left - right) + 1;
+      const int count = elab_instance_array_count(inst);
       for (int j = 0; j < count; j++) {
-         const int64_t index = left >= right ? left - j : left + j;
-         vlog_node_t elem = elab_array_element(inst, j, count, index);
+         vlog_node_t elem = elab_array_element(inst, j, count);
          elab_verilog_module(NULL, vlog_ident(elem), imod, ilist, elem, NULL,
                              ctx);
       }
@@ -5276,14 +5313,9 @@ static void elab_verilog_vhdl_instance_list(vlog_node_t v, tree_t entity,
          continue;
       }
 
-      int64_t left, right;
-      if (!elab_instance_array_bounds(inst, &left, &right))
-         continue;
-
-      const int count = llabs(left - right) + 1;
+      const int count = elab_instance_array_count(inst);
       for (int j = 0; j < count; j++) {
-         const int64_t index = left >= right ? left - j : left + j;
-         vlog_node_t elem = elab_array_element(inst, j, count, index);
+         vlog_node_t elem = elab_array_element(inst, j, count);
          elab_verilog_module(NULL, vlog_ident(elem), shim, v, elem, entity,
                              ctx);
       }
