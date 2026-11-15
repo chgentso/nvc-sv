@@ -6886,6 +6886,22 @@ static tree_t elab_find_index_config(tree_t gen, int64_t index,
    return NULL;
 }
 
+static ident_t elab_generate_label(ident_t label, tree_t g, int64_t i)
+{
+   // The index of an iteration is given by its enumeration literal for
+   // enumeration types
+   type_t type = tree_type(g);
+   if (type_is_enum(type)) {
+      type_t base = type_base_recur(type);
+      if (i >= 0 && i < type_enum_literals(base)) {
+         ident_t lit = tree_ident(type_enum_literal(base, i));
+         return ident_sprintf("%s(%s)", istr(label), istr(lit));
+      }
+   }
+
+   return ident_sprintf("%s(%"PRIi64")", istr(label), i);
+}
+
 static void elab_for_generate(tree_t t, const elab_ctx_t *ctx)
 {
    int64_t low, high;
@@ -6898,7 +6914,10 @@ static void elab_for_generate(tree_t t, const elab_ctx_t *ctx)
    ident_t label = tree_ident(t), first = NULL;
 
    for (int64_t i = low; i <= high; i++) {
-      ident_t id = ident_sprintf("%s(%"PRIi64")", istr(label), i);
+      tree_t g = tree_decl(t, 0);
+      assert(tree_kind(g) == T_GENERIC_DECL);
+
+      ident_t id = elab_generate_label(label, g, i);
       ident_t ndotted = ident_prefix(ctx->dotted, id, '.');
 
       tree_t b = tree_new(T_BLOCK);
@@ -6906,9 +6925,6 @@ static void elab_for_generate(tree_t t, const elab_ctx_t *ctx)
       tree_set_loc(b, tree_loc(t));
 
       tree_add_stmt(ctx->out, b);
-
-      tree_t g = tree_decl(t, 0);
-      assert(tree_kind(g) == T_GENERIC_DECL);
 
       tree_t map = tree_new(T_PARAM);
       tree_set_subkind(map, P_POS);
