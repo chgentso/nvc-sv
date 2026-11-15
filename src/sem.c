@@ -1176,6 +1176,18 @@ static bool sem_check_protected_instance(tree_t t, type_t type, nametab_t *tab)
       return true;
    }
 
+   tree_t body = find_enclosing(tab, S_PROTECTED);
+   if (body != NULL && type_is_protected(type) && tree_has_type(body)
+       && find_enclosing(tab, S_SUBPROGRAM) == NULL
+       && type_eq(tree_type(body), type)) {
+      diag_t *d = diag_new(DIAG_ERROR, tree_loc(t));
+      diag_printf(d, "cannot declare an object of protected type %pT "
+                  "within its own body", type);
+      diag_lrm(d, STD_08, "6.4.2.4");
+      diag_emit(d);
+      return false;
+   }
+
    ident_t typeid = ident_rfrom(type_ident(type), '.');
    tree_t pt = get_local_decl(tab, NULL, typeid, 0);
    if (pt != NULL && tree_kind(pt) == T_PROT_DECL) {
