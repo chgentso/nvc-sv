@@ -43,6 +43,10 @@ fsm_out_t *fsm_begin(text_buf_t *tb, unsigned *count, const char *unit,
                      const char *container, const char *kind,
                      const char *style, bool typed);
 
+// Does the VHDL expression test for a clock edge: rising_edge, falling_edge
+// or clk'event and clk = '1'.  CLK is the reference to the signal.
+bool fsm_vhdl_edge(tree_t e, tree_t *clk, bool *rising);
+
 // Names are matched without regard to case when finding a position in the
 // source: call with true for VHDL (the default is case sensitive)
 void fsm_set_vhdl(fsm_out_t *f, bool vhdl);

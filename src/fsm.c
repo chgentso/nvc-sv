@@ -593,6 +593,16 @@ static bool vhdl_is_literal_one(tree_t e, bool *one)
    e = vhdl_strip(e);
    if (e == NULL)
       return false;
+   if (tree_kind(e) == T_REF && tree_has_ref(e)
+       && tree_kind(tree_ref(e)) == T_ENUM_LIT) {
+      // Elaborated trees may no longer have the source text
+      const char *id = istr(tree_ident(tree_ref(e)));
+      if (!strcmp(id, "'1'") || !strcmp(id, "'0'")) {
+         *one = id[1] == '1';
+         return true;
+      }
+      return false;
+   }
    if (tree_kind(e) == T_REF || tree_kind(e) == T_LITERAL) {
       char *txt LOCAL = vhdl_text(e);
       if (txt == NULL)
@@ -650,6 +660,11 @@ static bool vhdl_edge(tree_t e, tree_t *clk, bool *rising)
    }
 
    return false;
+}
+
+bool fsm_vhdl_edge(tree_t e, tree_t *clk, bool *rising)
+{
+   return vhdl_edge(e, clk, rising);
 }
 
 ////////////////////////////////////////////////////////////////////////////////

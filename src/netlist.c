@@ -389,24 +389,28 @@ static void write_pin_list(wctx_t *w, const evid_t *e,
    A(const char *) seen = AINIT;
 
    fputc('[', w->f);
-   for (unsigned i = 0; i < n; i++) {
-      for (unsigned j = 0; j < p->nreads; j++) {
-         const conn_range_t *pr = &(p->reads[j]);
-         if (e->rnames[j] == NULL || pr->net != ranges[i].net
-             || pr->lo > ranges[i].hi || ranges[i].lo > pr->hi)
-            continue;
+   for (unsigned j = 0; j < p->nreads; j++) {
+      const conn_range_t *pr = &(p->reads[j]);
+      if (e->rnames[j] == NULL)
+         continue;
 
-         bool dup = false;
-         for (unsigned k = 0; k < seen.count; k++)
-            dup |= seen.items[k] == e->rnames[j];
-         if (dup)
-            continue;
+      bool hit = false;
+      for (unsigned i = 0; i < n && !hit; i++)
+         hit = pr->net == ranges[i].net && pr->lo <= ranges[i].hi
+            && ranges[i].lo <= pr->hi;
+      if (!hit)
+         continue;
 
-         if (seen.count > 0)
-            fputc(',', w->f);
-         json_string(w->f, e->rnames[j]);
-         APUSH(seen, e->rnames[j]);
-      }
+      bool dup = false;
+      for (unsigned k = 0; k < seen.count; k++)
+         dup |= seen.items[k] == e->rnames[j];
+      if (dup)
+         continue;
+
+      if (seen.count > 0)
+         fputc(',', w->f);
+      json_string(w->f, e->rnames[j]);
+      APUSH(seen, e->rnames[j]);
    }
    fputc(']', w->f);
    ACLEAR(seen);

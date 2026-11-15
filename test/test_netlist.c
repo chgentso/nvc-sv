@@ -1229,11 +1229,353 @@ START_TEST(test_ev_option)
    char *ev = write_json_ev(cd, -1, true);
    ck_has(ev, "\"evidence_version\":1");
    ck_assert_uint_eq(count_substr(ev, "\"evidence\":{"), nproc);
-   ck_assert_uint_eq(count_substr(ev, "\"class\":\""), nproc);
+   ck_assert_uint_eq(count_substr(ev, "\"evidence\":{\n\"class\":\""), nproc);
 
    free(plain);
    free(same);
    free(ev);
+   conn_free(cd);
+}
+END_TEST
+
+
+////////////////////////////////////////////////////////////////////////////////
+// Clocking evidence
+
+static const conn_evidence_t *get_ev(conn_block_t *b, const char *name)
+{
+   conn_proc_t *p = get_proc(b, name);
+   ck_assert_ptr_nonnull(p->ev);
+   return p->ev;
+}
+
+// The evidence of the output that drives net NAME
+static const conn_out_ev_t *get_out(conn_block_t *b, const conn_proc_t *p,
+                                    const char *name)
+{
+   for (unsigned i = 0; i < p->ev->nouts; i++) {
+      const conn_out_ev_t *o = &(p->ev->outs[i]);
+      if (strcmp(p->drives[o->drive].net->name, name) == 0)
+         return o;
+   }
+
+   ck_abort_msg("no output %s of %s", name, p->name);
+   return NULL;
+}
+
+static const char *attr_value(const conn_attr_t *attrs, unsigned n,
+                              const char *name)
+{
+   for (unsigned i = 0; i < n; i++) {
+      if (strcmp(attrs[i].name, name) == 0)
+         return attrs[i].value;
+   }
+
+   return NULL;
+}
+
+static bool in_ranges(const conn_range_t *r, unsigned n, const conn_net_t *net)
+{
+   for (unsigned i = 0; i < n; i++) {
+      if (r[i].net == net)
+         return true;
+   }
+
+   return false;
+}
+
+static const conn_out_ev_t *ev_out(conn_block_t *b, const char *proc,
+                                   const char *net)
+{
+   return get_out(b, get_proc(b, proc), net);
+}
+
+START_TEST(test_ev_vhdl)
+{
+   set_standard(STD_08);
+   input_from_file(TESTDIR "/netlist/ev_vhdl1.vhd");
+
+   tree_t e = run_elab();
+   fail_if_errors();
+
+   const conn_build_opts_t bopts = { .evidence = true };
+   conn_design_t *cd = conn_build_with(e, &bopts);
+   ck_assert_ptr_nonnull(cd);
+
+   conn_block_t *top = conn_root(cd, 0);
+   conn_net_t *clk = get_net(top, "CLK"), *clk2 = get_net(top, "CLK2");
+   conn_net_t *d = get_net(top, "D"), *a = get_net(top, "A");
+   conn_net_t *b = get_net(top, "B"), *en = get_net(top, "EN");
+
+   // Edges
+   const conn_evidence_t *ev = get_ev(top, "P_RISE");
+   ck_assert_int_eq(ev->cls, CONN_EV_SEQ);
+   ck_assert_int_eq(ev->approx, 0);
+   ck_assert_uint_eq(ev->nclocks, 1);
+   ck_assert_ptr_eq(ev->clocks[0].sig.net, clk);
+   ck_assert_int_eq(ev->clocks[0].edge, CONN_EDGE_RISE);
+   ck_assert_uint_eq(ev->nasync, 0);
+   ck_assert_uint_eq(ev->nouts, 1);
+   ck_assert_int_eq(ev->outs[0].cls, CONN_EV_SEQ);
+   ck_assert_int_eq(ev->outs[0].clock, 0);
+   ck_assert_uint_eq(ev->outs[0].ndata, 1);
+   ck_assert_ptr_eq(ev->outs[0].data[0].net, d);
+   ck_assert_uint_eq(ev->outs[0].nctrl, 0);
+   ck_assert(ev->outs[0].has_copy);
+   ck_assert_ptr_eq(ev->outs[0].copy.net, d);
+
+   ck_assert_int_eq(get_ev(top, "P_FALL")->clocks[0].edge, CONN_EDGE_FALL);
+   ck_assert_int_eq(get_ev(top, "P_EVENT")->clocks[0].edge, CONN_EDGE_RISE);
+   ck_assert_int_eq(get_ev(top, "P_EVENT")->cls, CONN_EV_SEQ);
+   ck_assert_int_eq(get_ev(top, "P_WAIT")->clocks[0].edge, CONN_EDGE_RISE);
+   ck_assert_int_eq(get_ev(top, "P_WAIT")->cls, CONN_EV_SEQ);
+   ck_assert(ev_out(top, "P_WAIT", "Q_WAIT")->has_copy);
+
+   // Asynchronous controls before the edge
+   ev = get_ev(top, "P_ARL");
+   ck_assert_uint_eq(ev->nasync, 1);
+   ck_assert_ptr_eq(ev->async[0].sig.net, get_net(top, "RST_N"));
+   ck_assert_int_eq(ev->async[0].level, CONN_LEVEL_LOW);
+   ck_assert_int_eq(ev->async[0].role, CONN_ROLE_RESET);
+   ck_assert_uint_eq(ev->outs[0].ndata, 1);
+   ck_assert_uint_eq(ev->outs[0].nctrl, 0);
+   ck_assert(ev->outs[0].has_copy);
+
+   ev = get_ev(top, "P_ARH");
+   ck_assert_int_eq(ev->async[0].level, CONN_LEVEL_HIGH);
+   ck_assert_int_eq(ev->async[0].role, CONN_ROLE_RESET);
+
+   ev = get_ev(top, "P_ARS");
+   ck_assert_int_eq(ev->async[0].level, CONN_LEVEL_LOW);
+   ck_assert_int_eq(ev->async[0].role, CONN_ROLE_SET);
+
+   // Synchronous reset and enable
+   ev = get_ev(top, "P_SRST");
+   ck_assert_uint_eq(ev->nasync, 0);
+   ck_assert_uint_eq(ev->nsync_reset, 1);
+   ck_assert_ptr_eq(ev->sync_reset[0].net, get_net(top, "RST"));
+   ck_assert_uint_eq(ev->outs[0].nctrl, 1);
+   ck_assert(!ev->outs[0].has_copy);   // The reset is a clocked assignment
+
+   ev = get_ev(top, "P_EN");
+   ck_assert_uint_eq(ev->outs[0].nctrl, 1);
+   ck_assert_ptr_eq(ev->outs[0].ctrl[0].net, en);
+   ck_assert(ev->outs[0].has_copy);
+
+   ev = get_ev(top, "P_CLKAND");
+   ck_assert_uint_eq(ev->nclocks, 1);
+   ck_assert_uint_eq(ev->outs[0].nctrl, 1);
+   ck_assert_ptr_eq(ev->outs[0].ctrl[0].net, en);
+
+   // Copy chain
+   conn_proc_t *pc = get_proc(top, "P_CHAIN");
+   const conn_out_ev_t *o0 = get_out(top, pc, "S0");
+   const conn_out_ev_t *o1 = get_out(top, pc, "S1");
+   ck_assert(o0->has_copy);
+   ck_assert_ptr_eq(o0->copy.net, d);
+   ck_assert(o1->has_copy);
+   ck_assert_ptr_eq(o1->copy.net, get_net(top, "S0"));
+   ck_assert_uint_eq(pc->ev->nasync, 1);
+
+   // A slice copied to a slice
+   const conn_out_ev_t *os = ev_out(top, "P_SLICE", "QV");
+   ck_assert(os->has_copy);
+   ck_assert_uint_eq(os->copy.lo, 4);
+   ck_assert_uint_eq(os->copy.hi, 7);
+   ck_assert_ptr_eq(os->copy.net, get_net(top, "DV"));
+
+   // Logic in front of the register, variables
+   const conn_out_ev_t *ol = ev_out(top, "P_LOGIC", "Q_LOGIC");
+   ck_assert_uint_eq(ol->ndata, 2);
+   ck_assert(in_ranges(ol->data, ol->ndata, a));
+   ck_assert(in_ranges(ol->data, ol->ndata, b));
+   ck_assert(!ol->has_copy);
+
+   const conn_out_ev_t *ot = ev_out(top, "P_TMP", "Q_TMP");
+   ck_assert_uint_eq(ot->ndata, 2);
+   ck_assert(in_ranges(ot->data, ot->ndata, a));
+   ck_assert(!ot->has_copy);
+   ck_assert_int_eq(get_ev(top, "P_TMP")->approx, 0);
+
+   // A variable read before it is assigned is a register
+   ev = get_ev(top, "P_REG");
+   ck_assert_int_eq(ev->approx, 1);
+   ck_assert_int_eq(ev->cls, CONN_EV_SEQ);
+   ck_assert_uint_eq(ev->outs[0].ndata, 1);
+   ck_assert_ptr_eq(ev->outs[0].data[0].net, d);
+   ck_assert(ev->outs[0].has_copy);
+
+   // Two clocks
+   ev = get_ev(top, "P_TWO");
+   ck_assert_uint_eq(ev->nclocks, 2);
+   ck_assert_ptr_eq(ev->clocks[1].sig.net, clk2);
+   ck_assert_int_eq(ev_out(top, "P_TWO", "QA")->clock, 0);
+   ck_assert_int_eq(ev_out(top, "P_TWO", "QB")->clock, 1);
+
+   // Both edges of a clock
+   ev = get_ev(top, "P_DDR");
+   ck_assert_int_eq(ev->cls, CONN_EV_SEQ);
+   ck_assert_uint_eq(ev->nclocks, 2);
+   ck_assert_ptr_eq(ev->clocks[0].sig.net, clk);
+   ck_assert_ptr_eq(ev->clocks[1].sig.net, clk);
+   ck_assert_int_eq(ev->clocks[0].edge, CONN_EDGE_RISE);
+   ck_assert_int_eq(ev->clocks[1].edge, CONN_EDGE_FALL);
+   ck_assert_int_eq(ev->approx, 1);
+
+   // Clocked and combinational outputs
+   ev = get_ev(top, "P_MIX");
+   ck_assert_int_eq(ev->cls, CONN_EV_MIXED);
+   ck_assert_int_eq(ev_out(top, "P_MIX", "C_MIX")->cls, CONN_EV_COMB);
+   ck_assert_int_eq(ev_out(top, "P_MIX", "Q_MIX")->cls, CONN_EV_SEQ);
+
+   // The clock read as data
+   const conn_out_ev_t *oc = ev_out(top, "P_CLK", "Q_CLK");
+   ck_assert(in_ranges(oc->data, oc->ndata, clk));
+
+   // Procedure call
+   ev = get_ev(top, "P_PROC");
+   ck_assert_int_eq(ev->approx, 1);
+   ck_assert_int_eq(ev->cls, CONN_EV_SEQ);
+   ck_assert(in_ranges(ev->outs[0].data, ev->outs[0].ndata, d));
+   ck_assert(!in_ranges(ev->outs[0].data, ev->outs[0].ndata, clk));
+
+   // Case statement and loop
+   const conn_out_ev_t *ocs = ev_out(top, "P_CASE", "Q_CASE");
+   ck_assert(in_ranges(ocs->ctrl, ocs->nctrl, get_net(top, "SEL")));
+   ck_assert(in_ranges(ocs->data, ocs->ndata, a));
+   ck_assert(in_ranges(ocs->data, ocs->ndata, b));
+
+   ev = get_ev(top, "P_LOOP");
+   ck_assert_int_eq(ev->approx, 0);
+   ck_assert(in_ranges(ev->outs[0].data, ev->outs[0].ndata,
+                       get_net(top, "DV")));
+
+   // Combinational and bench-like processes
+   ev = get_ev(top, "P_COMB");
+   ck_assert_int_eq(ev->cls, CONN_EV_COMB);
+   ck_assert_uint_eq(ev->nclocks, 0);
+   ck_assert_int_eq(get_ev(top, "P_OTHER")->cls, CONN_EV_OTHER);
+
+   unsigned ncopy = 0, nexpr = 0;
+   for (unsigned i = 0; i < top->nprocs; i++) {
+      const conn_proc_t *p = top->procs[i];
+      if (strncmp(p->name, "process @", 9) != 0 || p->ndrives != 1)
+         continue;
+      ck_assert_int_eq(p->ev->cls, CONN_EV_COMB);
+      if (strcmp(p->drives[0].net->name, "C_COPY") == 0) {
+         ck_assert(p->ev->outs[0].has_copy);
+         ncopy++;
+      }
+      else if (strcmp(p->drives[0].net->name, "C_EXPR") == 0) {
+         ck_assert(!p->ev->outs[0].has_copy);
+         ck_assert_uint_eq(p->ev->outs[0].ndata, 2);
+         nexpr++;
+      }
+   }
+   ck_assert_uint_eq(ncopy, 1);
+   ck_assert_uint_eq(nexpr, 1);
+
+   // Generate loop
+   ev = get_ev(top, "GEN(1).P_G");
+   ck_assert_int_eq(ev->cls, CONN_EV_SEQ);
+   ck_assert_uint_eq(ev->outs[0].ndata, 1);
+   ck_assert_uint_eq(ev->outs[0].data[0].lo, 6);
+   ck_assert(ev->outs[0].has_copy);
+
+   // Attributes
+   conn_net_t *s0 = get_net(top, "S0"), *s1 = get_net(top, "S1");
+   ck_assert_uint_eq(s0->nattrs, 2);
+   ck_assert_str_eq(attr_value(s0->attrs, s0->nattrs, "async_reg"), "true");
+   ck_assert_str_eq(attr_value(s0->attrs, s0->nattrs, "shreg_extract"), "no");
+   ck_assert_uint_eq(s1->nattrs, 2);
+   ck_assert_str_eq(attr_value(s1->attrs, s1->nattrs, "cdc_depth"), "2");
+   ck_assert_str_eq(attr_value(s1->attrs, s1->nattrs, "async_reg"), "true");
+   conn_net_t *qr = get_net(top, "Q_RISE");
+   ck_assert_uint_eq(qr->nattrs, 1);
+   ck_assert_str_eq(attr_value(qr->attrs, qr->nattrs, "keep"), "true");
+   ck_assert_uint_eq(d->nattrs, 0);
+   conn_net_t *t0 = get_net(top, "T0"), *t1 = get_net(top, "T1");
+   ck_assert_str_eq(attr_value(t0->attrs, t0->nattrs, "dont_touch"), "yes");
+   ck_assert_str_eq(attr_value(t1->attrs, t1->nattrs, "dont_touch"), "no");
+   ck_assert_uint_eq(top->nattrs, 2);
+   ck_assert_str_eq(attr_value(top->attrs, top->nattrs, "keep_hierarchy"),
+                    "true");
+   ck_assert_str_eq(attr_value(top->attrs, top->nattrs, "cdc_domain"), "clk");
+
+   // The JSON
+   char *json = write_json_ev(cd, -1, true);
+   ck_has(json, "\"keep_hierarchy\":\"true\"");
+   ck_has(json, "\"async_reg\":\"true\"");
+   free(json);
+
+   conn_free(cd);
+}
+END_TEST
+
+START_TEST(test_ev_cdc)
+{
+   set_standard(STD_08);
+   input_from_file(TESTDIR "/netlist/ev_cdc1.vhd");
+
+   tree_t e = run_elab();
+   fail_if_errors();
+
+   const conn_build_opts_t bopts = { .evidence = true };
+   conn_design_t *cd = conn_build_with(e, &bopts);
+   ck_assert_ptr_nonnull(cd);
+
+   conn_block_t *sync = conn_find_block(cd, "ev_cdc1.u_sync.cmp_gc_sync");
+   ck_assert_ptr_nonnull(sync);
+   ck_assert_str_eq(sync->unit, "GC_SYNC");
+
+   // The synchroniser: two registers in a chain on one clock, an
+   // asynchronous reset and the attributes of the registers
+   conn_proc_t *p = sync->procs[0];
+   ck_assert_ptr_nonnull(p->ev);
+   ck_assert_int_eq(p->ev->cls, CONN_EV_SEQ);
+   ck_assert_int_eq(p->ev->approx, 0);
+   ck_assert_uint_eq(p->ev->nclocks, 1);
+   ck_assert_str_eq(p->ev->clocks[0].sig.net->name, "CLK_I");
+   ck_assert_uint_eq(p->ev->nasync, 1);
+   ck_assert_str_eq(p->ev->async[0].sig.net->name, "RST_N_A_I");
+   ck_assert_uint_eq(p->ev->nouts, 2);
+   ck_assert(get_out(sync, p, "SYNC0")->has_copy);
+   ck_assert(get_out(sync, p, "SYNC1")->has_copy);
+   ck_assert_str_eq(get_out(sync, p, "SYNC1")->copy.net->name, "SYNC0");
+
+   conn_net_t *s0 = get_net(sync, "SYNC0");
+   ck_assert_uint_eq(s0->nattrs, 2);
+   ck_assert_str_eq(attr_value(s0->attrs, s0->nattrs, "async_reg"), "true");
+   ck_assert_uint_eq(sync->nattrs, 1);
+   ck_assert_str_eq(sync->attrs[0].name, "keep_hierarchy");
+
+   // Registers in two domains, each clocked by its own port
+   conn_block_t *pulse = conn_find_block(cd, "ev_cdc1.u_pulse");
+   unsigned nclk_in = 0, nclk_out = 0;
+   for (unsigned i = 0; i < pulse->nprocs; i++) {
+      const conn_evidence_t *ev = pulse->procs[i]->ev;
+      if (ev->nclocks == 0)
+         continue;
+      const char *n = ev->clocks[0].sig.net->name;
+      nclk_in += strcmp(n, "CLK_IN_I") == 0;
+      nclk_out += strcmp(n, "CLK_OUT_I") == 0;
+   }
+   ck_assert_uint_eq(nclk_in, 1);
+   ck_assert_uint_eq(nclk_out, 1);
+
+   // A word whose enable is the synchronised request
+   conn_block_t *word = conn_find_block(cd, "ev_cdc1.u_word");
+   conn_proc_t *rd = NULL;
+   for (unsigned i = 0; i < word->nprocs; i++) {
+      if (word->procs[i]->ndrives > 0
+          && strcmp(word->procs[i]->drives[0].net->name, "DATA_OUT_O") == 0)
+         rd = word->procs[i];
+   }
+   ck_assert_ptr_nonnull(rd);
+   const conn_out_ev_t *wo = get_out(word, rd, "DATA_OUT_O");
+   ck_assert_uint_eq(wo->nctrl, 2);
+   ck_assert(wo->has_copy);
+
    conn_free(cd);
 }
 END_TEST
@@ -1258,6 +1600,8 @@ Suite *get_netlist_tests(void)
    tcase_add_test(tc, test_m5_vlog_params_mixed);
    tcase_add_test(tc, test_m5_vlog_genloop);
    tcase_add_test(tc, test_ev_option);
+   tcase_add_test(tc, test_ev_vhdl);
+   tcase_add_test(tc, test_ev_cdc);
    suite_add_tcase(s, tc);
 
    return s;

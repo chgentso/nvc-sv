@@ -88,6 +88,7 @@ struct _conn_design {
    hash_t        *netparents;  // Map of a generate block -> enclosing map
    hash_t        *blkmaps;     // conn_block_t -> inst_maps_t
    hash_t        *tree_blocks; // T_BLOCK -> conn_block_t
+   hash_t        *specs;       // VHDL declaration -> attribute specifications
    conn_proc_t  **xprocs;      // Processes touching nets of other blocks
    unsigned       nxprocs;
    unsigned       maxxprocs;
@@ -139,6 +140,13 @@ static char *dstrf(conn_design_t *cd, const char *fmt, ...)
    char *p = dstr(cd, tmp);
    free(tmp);
    return p;
+}
+
+hash_t *conn_specs(conn_design_t *cd)
+{
+   if (cd->specs == NULL)
+      cd->specs = hash_new(64);
+   return cd->specs;
 }
 
 void conn_add_attr(conn_design_t *cd, conn_attr_t **list, unsigned *count,
@@ -1166,8 +1174,8 @@ static void vhdl_cover_pre(tree_t t, void *ctx)
    vhdl_cover_cb(t, ctx);
 }
 
-static void vhdl_collect_reads(conn_design_t *cd, tree_t root,
-                               range_list_t *reads, bool targets_are_writes)
+void vhdl_collect_reads(conn_design_t *cd, tree_t root,
+                        range_list_t *reads, bool targets_are_writes)
 {
    vread_t vr = {
       .cd      = cd,
@@ -3521,6 +3529,9 @@ void conn_free(conn_design_t *cd)
 
    for (unsigned i = 0; i < cd->nstrings; i++)
       free(cd->strings[i]);
+
+   if (cd->specs != NULL)
+      hash_free(cd->specs);
 
    free(cd->strings);
    free(cd->blocks);

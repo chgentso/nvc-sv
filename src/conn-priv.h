@@ -21,6 +21,7 @@
 #include "prim.h"
 #include "array.h"
 #include "conn.h"
+#include "hash.h"
 
 #include <string.h>
 
@@ -60,6 +61,11 @@ bool vhdl_select(conn_design_t *cd, tree_t name, conn_range_t *out,
 bool vlog_select(conn_design_t *cd, vlog_node_t v, conn_range_t *out,
                  bool *approx);
 
+// Append the ranges of the nets that a VHDL tree reads.  If
+// TARGETS_ARE_WRITES the targets of signal assignments in it are not reads.
+void vhdl_collect_reads(conn_design_t *cd, tree_t root, range_list_t *reads,
+                        bool targets_are_writes);
+
 // Walkers: compute the evidence of one process and store it in
 // proc->ev (called after the reads and drives of the process are known),
 // and the attributes of nets and blocks.  Allocate with dalloc.
@@ -70,6 +76,9 @@ void vlog_net_attrs(conn_design_t *cd, conn_net_t *net, vlog_node_t decl);
 void vhdl_block_attrs(conn_design_t *cd, conn_block_t *blk, tree_t block,
                       tree_t outer);
 void vlog_block_attrs(conn_design_t *cd, conn_block_t *blk, vlog_node_t body);
+
+// Declaration -> list of attribute specifications, for the VHDL walker
+hash_t *conn_specs(conn_design_t *cd);
 
 // Helper for the walkers: append an attribute, replacing one of the same
 // name
