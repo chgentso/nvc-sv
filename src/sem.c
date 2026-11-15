@@ -4346,6 +4346,9 @@ static bool sem_check_signal_attr(tree_t t)
    if (tree_kind(name) == T_ATTR_REF)
       return sem_check_signal_attr(name);
 
+   if (tree_kind(name) == T_EXTERNAL_NAME && tree_class(name) == C_SIGNAL)
+      return true;
+
    tree_t ref = name_to_ref(name);
    if (ref != NULL && class_of(ref) == C_SIGNAL)
       return true;

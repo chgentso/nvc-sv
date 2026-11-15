@@ -2810,3 +2810,4 @@ expname_func normal,2008
 alloc_overload normal
 case_static_rec normal,2008
 attr_dim_length normal
+extname_attr normal,2008
