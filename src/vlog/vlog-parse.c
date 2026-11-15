@@ -3104,7 +3104,19 @@ static vlog_node_t p_instance_index(vlog_node_t mr)
 
    do {
       consume(tLSQUARE);
-      vlog_add_param(mr, p_expression());
+
+      vlog_node_t index = p_expression();
+      if (optional(tCOLON)) {
+         // A slice of an array of instances
+         vlog_node_t slice = vlog_new(V_DIMENSION);
+         vlog_set_subkind(slice, V_DIM_UNPACKED);
+         vlog_set_left(slice, index);
+         vlog_set_right(slice, p_expression());
+         vlog_set_loc(slice, CURRENT_LOC);
+         index = slice;
+      }
+
+      vlog_add_param(mr, index);
       consume(tRSQUARE);
    } while (peek() == tLSQUARE);
 

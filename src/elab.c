@@ -2102,7 +2102,14 @@ static vlog_node_t elab_iface_element(vlog_node_t value, int pos, int count)
       return value;
 
    vlog_node_t mr = vlog_value(value);
-   if (vlog_kind(mr) != V_MOD_REF || vlog_params(mr) > 0 || !vlog_has_ref(mr))
+   if (vlog_kind(mr) != V_MOD_REF || !vlog_has_ref(mr))
+      return value;
+
+   // A slice of the array selects some of the elements
+   int64_t sleft = 0, sright = 0;
+   const bool slice = vlog_params(mr) == 1
+      && vlog_kind(vlog_param(mr, 0)) == V_DIMENSION;
+   if (vlog_params(mr) > 0 && !slice)
       return value;
 
    vlog_node_t decl = vlog_ref(mr);
@@ -2110,7 +2117,19 @@ static vlog_node_t elab_iface_element(vlog_node_t value, int pos, int count)
        || vlog_ranges(decl) == 0)
       return value;
 
-   const int total = elab_instance_array_count(decl);
+   if (slice) {
+      vlog_node_t dim = vlog_param(mr, 0);
+      if (vlog_ranges(decl) != 1 || !vlog_get_const(vlog_left(dim), &sleft)
+          || !vlog_get_const(vlog_right(dim), &sright)) {
+         error_at(vlog_loc(value), "sorry, this slice of an array of "
+                  "interface instances is not supported");
+         return value;
+      }
+
+   }
+
+   const int total = slice ? (int)(llabs(sleft - sright) + 1)
+      : elab_instance_array_count(decl);
    if (total == 0)
       return value;
 
@@ -2122,7 +2141,13 @@ static vlog_node_t elab_iface_element(vlog_node_t value, int pos, int count)
    }
 
    int64_t index[MAX_INST_DIMS];
-   const int ndims = elab_array_indices(decl, pos, count, index);
+   int ndims;
+   if (slice) {
+      index[0] = sleft >= sright ? sleft - pos : sleft + pos;
+      ndims = 1;
+   }
+   else
+      ndims = elab_array_indices(decl, pos, count, index);
 
    vlog_node_t emr = vlog_new(V_MOD_REF);
    vlog_set_ident(emr, vlog_ident(mr));
@@ -8651,7 +8676,10 @@ static vlog_node_t elab_rewrite_hier_ref_cb(vlog_node_t v, void *arg)
 
    // The whole of an instance array is selected by the elements of the
    // instance it is connected to
-   if (vlog_kind(prefix) == V_MOD_REF && vlog_params(prefix) == 0
+   if (vlog_kind(prefix) == V_MOD_REF
+       && (vlog_params(prefix) == 0
+           || (vlog_params(prefix) == 1
+               && vlog_kind(vlog_param(prefix, 0)) == V_DIMENSION))
        && vlog_has_ref(prefix)
        && (vlog_kind(vlog_ref(prefix)) == V_MOD_INST
            || vlog_kind(vlog_ref(prefix)) == V_IFACE_PORT)

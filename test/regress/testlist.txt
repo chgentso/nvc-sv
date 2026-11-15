@@ -2841,3 +2841,4 @@ vlogparamtype1  verilog
 vlogparamtype2  verilog
 vlogenumsel1    verilog
 vlogiarray2d    verilog
+vlogiarrayslice1 verilog
