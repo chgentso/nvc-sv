@@ -2802,3 +2802,4 @@ linterr22 shell
 linterrvhdl2 shell
 linterrvhdl4 shell
 linterrvhdl5 shell
+linterr23 shell

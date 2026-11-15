@@ -203,10 +203,12 @@ static int rank_of_head(parse_state_t *state)
 {
    // The rank of the next token, looking at what follows it if the language
    // needs that to tell
+   const token_t head = parse_peek_nth(state, 1);
+
    if (state->rank_at_fn != NULL)
       return (*state->rank_at_fn)(state);
 
-   return (*state->rank_fn)(state->tokenq[state->tokenq_tail].token);
+   return (*state->rank_fn)(head);
 }
 
 bool parse_recovery(void)
