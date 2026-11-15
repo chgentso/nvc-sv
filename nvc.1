@@ -1439,6 +1439,47 @@ is the name of the top-level unit with an
 extension in the current working directory, but can be changed with the
 .Fl \-cover\-file
 elaboration option.
+.Pp
+In Verilog and SystemVerilog code the
+.Cm statement
+and
+.Cm branch
+kinds count the procedural statements of
+.Ql initial ,
+.Ql always ,
+.Ql always_ff ,
+.Ql always_comb ,
+.Ql always_latch
+and
+.Ql final
+blocks, continuous assignments, net declaration assignments, and the
+statements of functions and tasks declared in a module, interface,
+program or generate block, the two outcomes of each
+.Ql if
+condition and of each conditional operator
+.Ql ?: ,
+and each item of a
+.Ql case
+statement.  A
+.Ql case
+statement without a default item which is not
+.Ql unique ,
+.Ql unique0
+or
+.Ql priority
+has a further bin, named
+.Ql _B_OTHERS ,
+for no item matching.  A condition with an unknown value is false for an
+.Ql if
+statement and neither outcome of a conditional operator.  Code in classes
+and packages is not counted.  Each module instance and generate block is a
+coverage scope with the path of the instance in the hierarchy, such as
+.Ql top.g[0].u ,
+and a VHDL entity or component instantiated from Verilog or the other way
+round is one scope at the place of the instance.  In the XML format of
+.Fl \-cover\-export
+the scope of an instance of a Verilog module has the attribute
+.Ql kind="module" .
 .Ss Code coverage merging
 To merge code coverage data from multiple simulations run:
 .Bd -literal -offset indent
