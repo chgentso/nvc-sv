@@ -1629,8 +1629,10 @@ static void character_array_image_helper(mir_unit_t *mu, type_t type,
    mir_value_t *map LOCAL = xmalloc_array(nlits, sizeof(mir_value_t));
    for (int i = 0; i < nlits; i++) {
       const ident_t id = tree_ident(type_enum_literal(elem, i));
-      assert(ident_char(id, 0) == '\'');
-      map[i] = mir_const(mu, t_char, ident_char(id, 1));
+      if (ident_char(id, 0) == '\'')
+         map[i] = mir_const(mu, t_char, ident_char(id, 1));
+      else
+         map[i] = mir_const(mu, t_char, i);   // Non-graphic CHARACTER
    }
 
    mir_type_t t_map = mir_carray_type(mu, nlits, t_char);
@@ -1737,7 +1739,8 @@ void vhdl_lower_image_helper(mir_unit_t *mu, object_t *obj)
    case T_ARRAY:
       {
          type_t elem = type_elem(type);
-         if (type_is_enum(elem) && all_character_literals(elem))
+         if (type_is_enum(elem) && (all_character_literals(elem)
+                                    || type_eq(elem, type_elem(std_type(NULL, STD_STRING)))))
             character_array_image_helper(mu, type, arg, true);
          else
             array_image_helper(&g, type, arg);
