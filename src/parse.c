@@ -5318,6 +5318,8 @@ static void p_constraint(type_t type)
          type_set_constraint(type, p_index_constraint(base));
       else if (type_is_record(base))
          type_set_constraint(type, p_record_constraint(base));
+      else if (type_is_access(base) && type_is_record(type_designated(base)))
+         type_set_constraint(type, p_record_constraint(type_designated(base)));
       else
          p_array_constraint(type, base);
       break;
