@@ -531,6 +531,14 @@ static void ieee_resize_unsigned(jit_func_t *func, jit_anchor_t *anchor,
    const int newsize = args[4].integer;
    const uint8_t *input = args[1].pointer;
 
+   if (newsize < 1) {
+      // The null array returned by the VHDL function is 0 downto 1
+      args[0].pointer = NULL;
+      args[1].integer = 0;
+      args[2].integer = -1;
+      return;
+   }
+
    args[0].pointer = __resize_unsigned(tlab, input, size, newsize);
    args[1].integer = newsize - 1;
    args[2].integer = ~newsize;
@@ -542,6 +550,14 @@ static void ieee_resize_signed(jit_func_t *func, jit_anchor_t *anchor,
    const int size = args[3].integer ^ (args[3].integer >> 63);
    const int newsize = args[4].integer;
    const uint8_t *input = args[1].pointer;
+
+   if (newsize < 1) {
+      // The null array returned by the VHDL function is 0 downto 1
+      args[0].pointer = NULL;
+      args[1].integer = 0;
+      args[2].integer = -1;
+      return;
+   }
 
    args[0].pointer = __resize_signed(tlab, input, size, newsize);
    args[1].integer = newsize - 1;

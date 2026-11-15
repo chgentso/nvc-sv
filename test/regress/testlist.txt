@@ -2820,3 +2820,4 @@ value_based normal,2008
 textio_based normal
 lex_lineend normal
 math_domain normal,2019
+numeric_resize0 normal,2008
