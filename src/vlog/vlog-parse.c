@@ -21640,6 +21640,10 @@ static vlog_node_t p_genvar_initialization(vlog_node_t *var)
 
    vlog_symtab_lookup(symtab, ref);
 
+   if (vlog_has_ref(ref) && vlog_kind(vlog_ref(ref)) != V_GENVAR_DECL)
+      error_at(vlog_loc(ref), "the loop variable %pQ of a generate for must "
+               "be a genvar", id);
+
    consume(tEQ);
 
    vlog_node_t a = vlog_new(V_BASSIGN);
