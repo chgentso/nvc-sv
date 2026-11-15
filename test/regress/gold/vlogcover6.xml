@@ -33,7 +33,7 @@
           <scope name="_B0">
             <branch hier="WORK.vlogcover6._P1._S0._S4._B0.BIN_TRUE" data="2"/>
             <branch hier="WORK.vlogcover6._P1._S0._S4._B0.BIN_FALSE" data="1"/>
-            <scope name="_S0" file="vlogcover6.sv" line="38">
+            <scope name="_S0" line="38">
               <scope name="_B0">
                 <branch hier="WORK.vlogcover6._P1._S0._S4._B0._S0._B0.BIN_TRUE" data="0"/>
                 <branch hier="WORK.vlogcover6._P1._S0._S4._B0._S0._B0.BIN_FALSE" data="2"/>

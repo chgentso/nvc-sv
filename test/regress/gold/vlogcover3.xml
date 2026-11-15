@@ -8,12 +8,12 @@
       <scope name="_S0" line="13">
         <statement hier="WORK.vlogcover3.fact._S0" data="4"/>
         <scope name="_B0">
-          <scope name="_S0" file="vlogcover3.sv" line="14">
+          <scope name="_S0" line="14">
             <statement hier="WORK.vlogcover3.fact._S0._B0._S0" data="1"/>
           </scope>
         </scope>
         <scope name="_B1">
-          <scope name="_S0" file="vlogcover3.sv" line="16">
+          <scope name="_S0" line="16">
             <statement hier="WORK.vlogcover3.fact._S0._B1._S0" data="3"/>
           </scope>
         </scope>
@@ -72,12 +72,12 @@
       <scope name="_S5" line="50">
         <statement hier="WORK.vlogcover3._P2._S5" data="1"/>
         <scope name="_B0">
-          <scope name="_S0" file="vlogcover3.sv" line="51">
+          <scope name="_S0" line="51">
             <statement hier="WORK.vlogcover3._P2._S5._B0._S0" data="0"/>
           </scope>
         </scope>
         <scope name="_B1">
-          <scope name="_S0" file="vlogcover3.sv" line="53">
+          <scope name="_S0" line="53">
             <statement hier="WORK.vlogcover3._P2._S5._B1._S0" data="1"/>
           </scope>
         </scope>
@@ -93,7 +93,7 @@
         <scope name="_S0" line="36">
           <statement hier="WORK.vlogcover3.gen[0]._P0._S0" data="1"/>
           <scope name="_B0">
-            <scope name="_S0" file="vlogcover3.sv" line="37">
+            <scope name="_S0" line="37">
               <statement hier="WORK.vlogcover3.gen[0]._P0._S0._B0._S0" data="0"/>
             </scope>
           </scope>
@@ -110,7 +110,7 @@
         <scope name="_S0" line="36">
           <statement hier="WORK.vlogcover3.gen[1]._P0._S0" data="1"/>
           <scope name="_B0">
-            <scope name="_S0" file="vlogcover3.sv" line="37">
+            <scope name="_S0" line="37">
               <statement hier="WORK.vlogcover3.gen[1]._P0._S0._B0._S0" data="1"/>
             </scope>
           </scope>

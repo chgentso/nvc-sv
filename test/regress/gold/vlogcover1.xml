@@ -29,7 +29,7 @@
       <scope name="_S0" line="37">
         <statement hier="WORK.vlogcover1._P4._S0" data="4"/>
         <scope name="_B0">
-          <scope name="_S0" file="vlogcover1.sv" line="38">
+          <scope name="_S0" line="38">
             <statement hier="WORK.vlogcover1._P4._S0._B0._S0" data="2"/>
           </scope>
         </scope>

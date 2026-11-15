@@ -34,12 +34,12 @@
           <scope name="_S0" line="3">
             <statement hier="WORK.MIXEDCOVER1.U1._P0._S0._S0" data="2"/>
             <scope name="_B0">
-              <scope name="_S0" file="mixedcover1.sv" line="4">
+              <scope name="_S0" line="4">
                 <statement hier="WORK.MIXEDCOVER1.U1._P0._S0._S0._B0._S0" data="1"/>
               </scope>
             </scope>
             <scope name="_B1">
-              <scope name="_S0" file="mixedcover1.sv" line="6">
+              <scope name="_S0" line="6">
                 <statement hier="WORK.MIXEDCOVER1.U1._P0._S0._S0._B1._S0" data="1"/>
               </scope>
             </scope>
@@ -54,12 +54,12 @@
           <scope name="_S0" line="3">
             <statement hier="WORK.MIXEDCOVER1.U2._P0._S0._S0" data="3"/>
             <scope name="_B0">
-              <scope name="_S0" file="mixedcover1.sv" line="4">
+              <scope name="_S0" line="4">
                 <statement hier="WORK.MIXEDCOVER1.U2._P0._S0._S0._B0._S0" data="1"/>
               </scope>
             </scope>
             <scope name="_B1">
-              <scope name="_S0" file="mixedcover1.sv" line="6">
+              <scope name="_S0" line="6">
                 <statement hier="WORK.MIXEDCOVER1.U2._P0._S0._S0._B1._S0" data="2"/>
               </scope>
             </scope>

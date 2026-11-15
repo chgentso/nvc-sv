@@ -85,10 +85,14 @@ static cover_obj_t get_cover_scope(vlog_cover_t *g, lazy_cscope_t *lcs)
       return lcs->cscope = COVER_NULL_OBJ;
    else if (g->bind)
       return lcs->cscope = cover_get_child(g->db, parent, lcs->name);
-   else
-      return lcs->cscope = cover_scope_new(g->db, g->inst, parent,
-                                           CSCOPE_NONE, lcs->name,
-                                           *vlog_loc(lcs->node));
+
+   // A condition or item without a location is where the scope above it is
+   loc_t loc = *vlog_loc(lcs->node);
+   if (loc.file_ref == FILE_INVALID)
+      loc = cover_get_loc(g->db, parent, COV_ATTR_LOC);
+
+   return lcs->cscope = cover_scope_new(g->db, g->inst, parent, CSCOPE_NONE,
+                                        lcs->name, loc);
 }
 
 static void vlog_cover_remember(hash_t **map, vlog_node_t v, uint32_t tag)
