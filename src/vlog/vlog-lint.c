@@ -83,6 +83,19 @@ static bool trusted(vlog_node_t v)
    return ok;
 }
 
+// A rule that compares blocks with each other cannot tell that a block
+// after a syntax error is complete, so it only uses those before it
+static bool trusted_before_errors(vlog_node_t v)
+{
+   if (!trusted(v))
+      return false;
+   else if (partial_ctx.partial
+            && lint_after_syntax_error(partial_ctx.unit, vlog_loc(v)))
+      return false;
+   else
+      return true;
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // Unused and undriven declarations
 
@@ -1204,7 +1217,7 @@ static void check_mixed(vlog_node_t unit)
    const int nstmts = vlog_stmts(unit);
    for (int i = 0; i < nstmts; i++) {
       vlog_node_t s = vlog_stmt(unit, i);
-      if (vlog_kind(s) == V_ALWAYS && trusted(s))
+      if (vlog_kind(s) == V_ALWAYS && trusted_before_errors(s))
          vlog_visit(s, mixed_cb, &list);
    }
 
@@ -1344,7 +1357,7 @@ static void check_multidriven(vlog_node_t unit)
    const int nstmts = vlog_stmts(unit);
    for (int i = 0; i < nstmts; i++) {
       vlog_node_t s = vlog_stmt(unit, i);
-      if (vlog_kind(s) != V_ALWAYS || !trusted(s))
+      if (vlog_kind(s) != V_ALWAYS || !trusted_before_errors(s))
          continue;
 
       ctx.block = s;
