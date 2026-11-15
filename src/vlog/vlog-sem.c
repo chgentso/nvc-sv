@@ -213,7 +213,8 @@ static void vlog_check_net_lvalue(vlog_node_t v, vlog_node_t where)
       else
          break;
    case V_REF:
-      vlog_check_net_lvalue(vlog_ref(v), v);
+      if (vlog_has_ref(v))
+         vlog_check_net_lvalue(vlog_ref(v), v);
       return;
    case V_BIT_SELECT:
    case V_PART_SELECT:
