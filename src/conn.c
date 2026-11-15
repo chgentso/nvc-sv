@@ -400,7 +400,7 @@ static int range_cmp(const void *a, const void *b)
       return ra->hi < rb->hi ? -1 : (ra->hi > rb->hi ? 1 : 0);
 }
 
-void merge_ranges(range_list_t *l)
+static void merge_ranges_adj(range_list_t *l, bool adjacent)
 {
    // Sort and merge overlapping or adjacent ranges of the same net
    if (l->count < 2)
@@ -411,7 +411,7 @@ void merge_ranges(range_list_t *l)
    unsigned out = 0;
    for (unsigned i = 1; i < l->count; i++) {
       conn_range_t *cur = &(l->items[out]), *r = &(l->items[i]);
-      if (r->net == cur->net && r->lo <= cur->hi + 1)
+      if (r->net == cur->net && r->lo <= cur->hi + (adjacent ? 1 : 0))
          cur->hi = MAX(cur->hi, r->hi);
       else
          l->items[++out] = *r;
@@ -419,6 +419,12 @@ void merge_ranges(range_list_t *l)
 
    l->count = out + 1;
 }
+
+void merge_ranges(range_list_t *l)
+{
+   merge_ranges_adj(l, true);
+}
+
 
 // Declarations of cloned instances are shared, so a declaration found
 // outside the current instance (a hierarchical reference) is only
@@ -536,6 +542,8 @@ static conn_net_t *find_net_by_name(bctx_t *bc, const char *name)
 // VHDL evaluation and layout
 
 static bool eval_int(conn_design_t *cd, tree_t e, int64_t *out, int depth);
+static bool vhdl_dim_len(conn_design_t *cd, tree_t name, int64_t *out,
+                         int depth);
 
 static bool eval_range(conn_design_t *cd, tree_t r, int64_t *left,
                        int64_t *right, bool *down)
@@ -597,6 +605,12 @@ static bool eval_int(conn_design_t *cd, tree_t e, int64_t *out, int depth)
    case T_QUALIFIED:
    case T_TYPE_CONV:
       return eval_int(cd, tree_value(e), out, depth + 1);
+   case T_ATTR_REF:
+      // The length of an object whose value is known is only evaluated with
+      // evidence: the width of the nets it sizes must not change the output
+      // without it
+      return cd->evidence && tree_subkind(e) == ATTR_LENGTH
+         && tree_params(e) == 0 && vhdl_dim_len(cd, tree_name(e), out, depth);
    case T_FCALL:
       {
          if (!tree_has_ref(e))
@@ -654,6 +668,69 @@ typedef struct {
    bool    down;
    int64_t length;
 } dim_t;
+
+static bool vhdl_dim(conn_design_t *cd, type_t type, int n, dim_t *d);
+
+// The number of elements of the value of an expression
+static bool value_length(conn_design_t *cd, tree_t v, int64_t *out, int depth)
+{
+   if (depth > 16 || v == NULL)
+      return false;
+
+   switch (tree_kind(v)) {
+   case T_STRING:
+      *out = tree_chars(v);
+      return true;
+   case T_AGGREGATE:
+      {
+         const int n = tree_assocs(v);
+         for (int i = 0; i < n; i++) {
+            if (tree_subkind(tree_assoc(v, i)) != A_POS)
+               return false;
+         }
+         *out = n;
+         return true;
+      }
+   case T_QUALIFIED:
+   case T_TYPE_CONV:
+      return value_length(cd, tree_value(v), out, depth + 1);
+   case T_REF:
+      if (tree_has_ref(v)) {
+         tree_t d = tree_ref(v);
+         if (tree_kind(d) == T_GENERIC_DECL) {
+            gen_value_t *gv = cd->genval ? hash_get(cd->genval, d) : NULL;
+            tree_t gval = gv ? gv->value : NULL;
+            if (gval == NULL && tree_has_value(d))
+               gval = tree_value(d);
+            return value_length(cd, gval, out, depth + 1);
+         }
+         else if (tree_kind(d) == T_CONST_DECL && tree_has_value(d))
+            return value_length(cd, tree_value(d), out, depth + 1);
+      }
+      return false;
+   default:
+      return false;
+   }
+}
+
+// 'length of a name with a constrained type or a known value
+static bool vhdl_dim_len(conn_design_t *cd, tree_t name, int64_t *out,
+                         int depth)
+{
+   if (depth > 16 || name == NULL)
+      return false;
+
+   type_t type = tree_type(name);
+   if (type_is_array(type) && !type_is_unconstrained(type)) {
+      dim_t d;
+      if (vhdl_dim(cd, type, 0, &d)) {
+         *out = d.length;
+         return true;
+      }
+   }
+
+   return value_length(cd, name, out, depth + 1);
+}
 
 static bool vhdl_dim(conn_design_t *cd, type_t type, int n, dim_t *d)
 {
@@ -1109,6 +1186,28 @@ static void vhdl_cover_chain(vread_t *vr, tree_t name)
    }
 }
 
+static void vhdl_cover_inner_cb(tree_t t, void *ctx)
+{
+   // The names inside the name that is read as a whole are not reads of
+   // their own, whatever order the tree is visited in
+   vread_t *vr = ctx;
+
+   switch (tree_kind(t)) {
+   case T_ARRAY_REF:
+   case T_ARRAY_SLICE:
+   case T_RECORD_REF:
+      {
+         conn_range_t r;
+         bool approx = false;
+         if (vhdl_select(vr->cd, t, &r, &approx))
+            vhdl_cover_chain(vr, t);
+      }
+      break;
+   default:
+      break;
+   }
+}
+
 static void vhdl_read_names_cb(tree_t t, void *ctx)
 {
    vread_t *vr = ctx;
@@ -1185,6 +1284,12 @@ void vhdl_collect_reads(conn_design_t *cd, tree_t root,
 
    if (targets_are_writes)
       tree_visit(root, vhdl_cover_pre, &vr);
+
+   // With evidence the element of an array of records read as a field is
+   // not also read as a whole.  The output without it keeps the grouping of
+   // the pins as it has always been.
+   if (cd->evidence)
+      tree_visit(root, vhdl_cover_inner_cb, &vr);
 
    // Names with selects first, so that the plain references inside them
    // are not counted as reads of the whole signal
@@ -3445,8 +3550,11 @@ static void compute_process_sets(conn_design_t *cd, struct proc_ref *pp)
       }
    }
 
-   merge_ranges(&reads);
-   merge_ranges(&drives);
+   // The reads and drives of adjacent elements or fields are not joined
+   // into one pin with evidence, which names the pins that clocks and data
+   // are
+   merge_ranges_adj(&reads, !cd->evidence);
+   merge_ranges_adj(&drives, !cd->evidence);
 
    p->reads   = DDUP(cd, reads, conn_range_t);
    p->nreads  = reads.count;

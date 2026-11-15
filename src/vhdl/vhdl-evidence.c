@@ -56,6 +56,7 @@ struct _var {
 typedef struct {
    range_list_t data, ctrl;
    unsigned     nseq, ncomb;
+   unsigned     why;
    int          clock;
    bool         seen;
    int          copy;      // 0 none yet, 1 candidate, 2 broken
@@ -77,6 +78,8 @@ typedef struct {
    hash_t        *vars;
    var_t         *varlist;
    bool           approx;
+   unsigned       why;       // conn_ev_why_t of the whole process
+   unsigned       loop_depth;// Inside a loop with approximate bounds
    bool           region;
    bool           first_stmt;
    bool           in_async;
@@ -86,6 +89,12 @@ typedef struct {
    bool           reg_var;
    int            pass;
 } walker_t;
+
+static void approx_because(walker_t *w, unsigned why)
+{
+   w->approx = true;
+   w->why |= why;
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 // Names and expressions
@@ -416,12 +425,12 @@ static int clock_index(walker_t *w, tree_t clk, conn_edge_t edge)
    conn_range_t r;
    bool approx = false;
    if (!vhdl_select(w->cd, clk, &r, &approx)) {
-      w->approx = true;   // A name of another block or not a signal
+      approx_because(w, CONN_WHY_OTHER);   // Not a signal of this block
       return -1;
    }
 
    if (approx)
-      w->approx = true;
+      approx_because(w, CONN_WHY_DYNAMIC);
 
    return add_clock(w, &r, edge);
 }
@@ -509,12 +518,12 @@ static void assign_to(walker_t *w, tree_t target, tree_t s)
    bool approx = false;
    if (target == NULL || !name_kind_p(strip(target))
        || !vhdl_select(w->cd, strip(target), &r, &approx)) {
-      w->approx = true;
+      approx_because(w, CONN_WHY_OTHER);
       return;
    }
 
    if (approx)
-      w->approx = true;
+      approx_because(w, CONN_WHY_DYNAMIC);
 
    conn_proc_t *p = w->proc;
    for (unsigned j = 0; j < p->ndrives; j++) {
@@ -524,6 +533,10 @@ static void assign_to(walker_t *w, tree_t target, tree_t s)
 
       out_t *o = &(w->outs[j]);
       o->seen = true;
+      if (approx)
+         o->why |= CONN_WHY_DYNAMIC;
+      if (w->loop_depth > 0)
+         o->why |= CONN_WHY_LOOP;
       append_list(&o->data, &data);
       append_list(&o->ctrl, &ctrl);
 
@@ -532,7 +545,7 @@ static void assign_to(walker_t *w, tree_t target, tree_t s)
          if (o->clock < 0)
             o->clock = w->clock;
          else if (o->clock != w->clock)
-            w->approx = true;
+            approx_because(w, CONN_WHY_OTHER);
       }
       else
          o->ncomb++;
@@ -743,33 +756,40 @@ static void walk_stmt(walker_t *w, tree_t s, bool first)
 
          const size_t mark = w->guards.count;
          if (bound.count > 0) {
-            w->approx = true;
+            approx_because(w, CONN_WHY_LOOP);
             append_list(&w->guards, &bound);
+            w->loop_depth++;
          }
          w->cond_depth++;
          walk_stmts(w, s);
          w->cond_depth--;
+         if (bound.count > 0)
+            w->loop_depth--;
          w->guards.count = mark;
       }
       break;
 
    case T_WHILE:
       {
-         w->approx = true;
+         approx_because(w, CONN_WHY_LOOP);
          const size_t mark = w->guards.count;
          if (tree_has_value(s))
             expr_deps(w, tree_value(s), &w->guards, &w->guards);
          w->cond_depth++;
+         w->loop_depth++;
          walk_stmts(w, s);
+         w->loop_depth--;
          w->cond_depth--;
          w->guards.count = mark;
       }
       break;
 
    case T_LOOP:
-      w->approx = true;
+      approx_because(w, CONN_WHY_LOOP);
       w->cond_depth++;
+      w->loop_depth++;
       walk_stmts(w, s);
+      w->loop_depth--;
       w->cond_depth--;
       break;
 
@@ -781,7 +801,7 @@ static void walk_stmt(walker_t *w, tree_t s, bool first)
 
    case T_PCALL:
       // Which signals the procedure drives and from what is not known
-      w->approx = true;
+      approx_because(w, CONN_WHY_CALL);
       for (unsigned i = 0; i < tree_params(s); i++) {
          tree_t v = param_value(s, i);
          if (v != NULL)
@@ -791,7 +811,7 @@ static void walk_stmt(walker_t *w, tree_t s, bool first)
 
    case T_COND_ASSIGN:
    case T_SELECT:
-      w->approx = true;   // Normally rewritten to if and case statements
+      approx_because(w, CONN_WHY_OTHER);   // Normally rewritten to if/case
       break;
 
    default:
@@ -969,6 +989,7 @@ void vhdl_proc_evidence(conn_design_t *cd, conn_proc_t *proc, tree_t t)
 
    conn_evidence_t *ev = dalloc(cd, sizeof(conn_evidence_t));
    ev->approx = w.approx || registers;
+   ev->reasons = w.why | (registers ? CONN_WHY_VARIABLE : 0);
 
    ev->nclocks = w.clocks.count;
    ev->clocks = DDUP(cd, w.clocks, conn_ev_clock_t);
@@ -994,6 +1015,8 @@ void vhdl_proc_evidence(conn_design_t *cd, conn_proc_t *proc, tree_t t)
          // Driven in a way that was not followed: assume it depends on
          // everything the process reads
          ev->approx = true;
+         ev->reasons |= w.pcall.count > 0 ? CONN_WHY_CALL : CONN_WHY_OTHER;
+         o->why |= w.pcall.count > 0 ? CONN_WHY_CALL : CONN_WHY_OTHER;
          for (unsigned i = 0; i < proc->nreads; i++) {
             if (!control_range(&w, &(proc->reads[i])))
                APUSH(o->data, proc->reads[i]);
@@ -1019,11 +1042,16 @@ void vhdl_proc_evidence(conn_design_t *cd, conn_proc_t *proc, tree_t t)
       }
       else {
          oe->cls = CONN_EV_COMB;
-         if (o->nseq > 0)
+         if (o->nseq > 0) {
             ev->approx = true;
+            ev->reasons |= CONN_WHY_OTHER;
+            o->why |= CONN_WHY_OTHER;
+         }
          ncomb++;
       }
 
+      oe->reasons = o->why;
+      ev->reasons |= o->why;
       finish_list(&o->data);
       finish_list(&o->ctrl);
       oe->ndata = o->data.count;
@@ -1045,6 +1073,9 @@ void vhdl_proc_evidence(conn_design_t *cd, conn_proc_t *proc, tree_t t)
       ev->cls = CONN_EV_SEQ;
    else
       ev->cls = CONN_EV_COMB;
+
+   if (ev->approx && ev->reasons == 0)
+      ev->reasons = CONN_WHY_OTHER;
 
    proc->ev = ev;
 

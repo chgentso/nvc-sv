@@ -1512,6 +1512,83 @@ START_TEST(test_ev_vhdl)
 }
 END_TEST
 
+START_TEST(test_ev_vhdl2)
+{
+   set_standard(STD_08);
+   input_from_file(TESTDIR "/netlist/ev_vhdl2.vhd");
+
+   tree_t e = run_elab();
+   fail_if_errors();
+
+   const conn_build_opts_t bopts = { .evidence = true };
+   conn_design_t *cd = conn_build_with(e, &bopts);
+   ck_assert_ptr_nonnull(cd);
+
+   conn_block_t *top = conn_root(cd, 0);
+
+   // The length of a generic sizes the vector, so the constant indexes are
+   // exact
+   conn_net_t *v = get_net(top, "V");
+   ck_assert_uint_eq(v->width, 5);
+   unsigned nexact = 0;
+   for (unsigned i = 0; i < top->nprocs; i++) {
+      const conn_proc_t *p = top->procs[i];
+      if (p->ndrives == 1 && p->drives[0].net == v) {
+         ck_assert_int_eq(p->ev->approx, 0);
+         ck_assert_uint_eq(p->ev->reasons, 0);
+         nexact++;
+      }
+   }
+   ck_assert_uint_eq(nexact, 3);
+
+   // The clock is one field of one element, and the fields are pins of
+   // their own
+   conn_proc_t *pc = get_proc(top, "GEN_CH(1).P_COUNT");
+   const conn_evidence_t *ev = pc->ev;
+   ck_assert_int_eq(ev->approx, 0);
+   ck_assert_uint_eq(ev->nclocks, 1);
+   ck_assert_str_eq(ev->clocks[0].sig.net->name, "CHANS");
+   ck_assert_uint_eq(ev->clocks[0].sig.lo, ev->clocks[0].sig.hi);
+   ck_assert_uint_eq(ev->nouts, 2);
+   for (unsigned i = 0; i < ev->nouts; i++) {
+      const conn_out_ev_t *o = &(ev->outs[i]);
+      ck_assert_uint_eq(o->ndata, 1);
+      ck_assert_uint_eq(o->data[0].lo, pc->drives[o->drive].lo);
+      ck_assert_uint_eq(o->data[0].hi, pc->drives[o->drive].hi);
+   }
+
+   // Reasons
+   ev = get_ev(top, "P_DYN");
+   ck_assert_int_eq(ev->approx, 1);
+   ck_assert_uint_eq(ev->reasons, CONN_WHY_DYNAMIC);
+   ck_assert_uint_eq(ev_out(top, "P_DYN", "DV")->reasons, CONN_WHY_DYNAMIC);
+   ck_assert_uint_eq(ev_out(top, "P_DYN", "Q_DYN")->reasons, 0);
+
+   ev = get_ev(top, "P_LOOP");
+   ck_assert_uint_eq(ev->reasons, CONN_WHY_LOOP);
+   ck_assert_uint_eq(ev_out(top, "P_LOOP", "Q_LOOP")->reasons, CONN_WHY_LOOP);
+
+   ev = get_ev(top, "P_CALL");
+   ck_assert_uint_eq(ev->reasons, CONN_WHY_CALL);
+
+   // The JSON: element bits of the clock and the reasons
+   char *json = write_json_ev(cd, -1, true);
+   ck_has(json, "\"reasons\":[\"dynamic-index\"]");
+   ck_has(json, "\"reasons\":[\"loop\"]");
+   ck_has(json, "\"reasons\":[\"call\"]");
+   ck_has(json, "\"pin\":\"CHANS(1)/CLK_IN\",\"edge\":\"rise\",\"bits\":[");
+   free(json);
+
+   conn_free(cd);
+
+   // Without evidence the length of a generic does not size the net
+   cd = conn_build(e);
+   ck_assert_ptr_nonnull(cd);
+   ck_assert_uint_eq(get_net(conn_root(cd, 0), "V")->width, 1);
+   conn_free(cd);
+}
+END_TEST
+
 START_TEST(test_ev_cdc)
 {
    set_standard(STD_08);
@@ -1601,6 +1678,7 @@ Suite *get_netlist_tests(void)
    tcase_add_test(tc, test_m5_vlog_genloop);
    tcase_add_test(tc, test_ev_option);
    tcase_add_test(tc, test_ev_vhdl);
+   tcase_add_test(tc, test_ev_vhdl2);
    tcase_add_test(tc, test_ev_cdc);
    suite_add_tcase(s, tc);
 

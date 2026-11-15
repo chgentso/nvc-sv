@@ -441,6 +441,39 @@ static const char *read_pin(const evid_t *e, const conn_range_t *r)
    return NULL;
 }
 
+static void write_why(wctx_t *w, unsigned why)
+{
+   static const struct { unsigned bit; const char *name; } names[] = {
+      { CONN_WHY_CALL, "call" }, { CONN_WHY_VARIABLE, "variable" },
+      { CONN_WHY_LOOP, "loop" }, { CONN_WHY_DYNAMIC, "dynamic-index" },
+      { CONN_WHY_OTHER, "other" },
+   };
+
+   key(w, "reasons");
+   fputc('[', w->f);
+   bool first = true;
+   for (unsigned i = 0; i < ARRAY_LEN(names); i++) {
+      if (why & names[i].bit) {
+         if (!first)
+            fputc(',', w->f);
+         json_string(w->f, names[i].name);
+         first = false;
+      }
+   }
+   fputc(']', w->f);
+}
+
+// The netlist bits of a signal: the bits of the pin that carry it, which a
+// pin that groups several elements or fields does not tell
+static void write_sig_bits(wctx_t *w, const conn_range_t *r)
+{
+   fputs(",\"bits\":", w->f);
+   bit_list_t bits = AINIT;
+   net_bits(w, r->net, r->lo, r->hi, &bits);
+   write_bits(w->f, bits.items, bits.count);
+   ACLEAR(bits);
+}
+
 static void write_evidence(wctx_t *w, const evid_t *e)
 {
    const conn_evidence_t *ev = e->ev;
@@ -455,6 +488,9 @@ static void write_evidence(wctx_t *w, const evid_t *e)
    key(w, "confidence");
    json_string(w->f, ev->approx || p->approx ? "approx" : "exact");
 
+   if (ev->approx && ev->reasons != 0)
+      write_why(w, ev->reasons);
+
    key(w, "clocks");
    fputc('[', w->f);
    bool first = true;
@@ -465,7 +501,9 @@ static void write_evidence(wctx_t *w, const evid_t *e)
       static const char *const edges[] = { "rise", "fall", "both" };
       fprintf(w->f, "%s{\"pin\":", first ? "" : ",");
       json_string(w->f, pin);
-      fprintf(w->f, ",\"edge\":\"%s\"}", edges[ev->clocks[i].edge]);
+      fprintf(w->f, ",\"edge\":\"%s\"", edges[ev->clocks[i].edge]);
+      write_sig_bits(w, &(ev->clocks[i].sig));
+      fputc('}', w->f);
       first = false;
    }
    fputc(']', w->f);
@@ -481,8 +519,10 @@ static void write_evidence(wctx_t *w, const evid_t *e)
       static const char *const roles[] = { "reset", "set", "unknown" };
       fprintf(w->f, "%s{\"pin\":", first ? "" : ",");
       json_string(w->f, pin);
-      fprintf(w->f, ",\"level\":\"%s\",\"role\":\"%s\"}",
+      fprintf(w->f, ",\"level\":\"%s\",\"role\":\"%s\"",
               levels[ev->async[i].level], roles[ev->async[i].role]);
+      write_sig_bits(w, &(ev->async[i].sig));
+      fputc('}', w->f);
       first = false;
    }
    fputc(']', w->f);
@@ -510,6 +550,8 @@ static void write_evidence(wctx_t *w, const evid_t *e)
          begin_obj(w);
          key(w, "class");
          json_string(w->f, evidence_class(o->cls));
+         if (o->reasons != 0)
+            write_why(w, o->reasons);
          if (o->cls == CONN_EV_SEQ && o->clock >= 0) {
             key(w, "clock");
             fprintf(w->f, "%d", o->clock);

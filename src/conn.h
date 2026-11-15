@@ -201,8 +201,18 @@ typedef struct {
 
 // Dependencies of one driven range of the process: DRIVE indexes the
 // drives of the process
+// Why the dependencies of a process or an output are approximated: a mask
+typedef enum {
+   CONN_WHY_CALL     = 1,    // Subprogram call: what it drives is not known
+   CONN_WHY_VARIABLE = 2,    // Variable read before it is assigned
+   CONN_WHY_LOOP     = 4,    // Loop whose bounds depend on a signal
+   CONN_WHY_DYNAMIC  = 8,    // Index or slice that is not static
+   CONN_WHY_OTHER    = 16,
+} conn_ev_why_t;
+
 typedef struct {
    unsigned         drive;
+   unsigned         reasons;    // conn_ev_why_t, if the output is approximate
    conn_ev_class_t  cls;        // SEQ, COMB or LATCH
    int              clock;      // Index in clocks for SEQ, else -1
    conn_range_t    *data;      // Read on the right-hand sides
@@ -216,6 +226,7 @@ typedef struct {
 typedef struct {
    conn_ev_class_t  cls;
    bool             approx;
+   unsigned         reasons;    // conn_ev_why_t, when approx
    conn_ev_clock_t *clocks;
    unsigned         nclocks;
    conn_ev_async_t *async;

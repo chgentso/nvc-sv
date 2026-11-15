@@ -55,3 +55,17 @@ grep -q '^"cdc_depth":"2"' cases.json
 grep -q '^"cdc_domain":"clk"' cases.json
 grep -q '^"dont_touch":"yes"' cases.json
 grep -q '^"dont_touch":"no"' cases.json
+
+# Static indexes into arrays of records, reasons and element bits of clocks
+nvc --std=08 -a $TESTDIR/netlist/ev_vhdl2.vhd -e ev_vhdl2
+nvc --std=08 --netlist --evidence ev_vhdl2 > static.json
+
+grep -q '"pin":"CHANS(1)/CLK_IN","edge":"rise","bits":\[[0-9]*\]' static.json
+grep -q '^"reasons":\["dynamic-index"\]' static.json
+grep -q '^"reasons":\["loop"\]' static.json
+grep -q '^"reasons":\["call"\]' static.json
+[ $(grep -c '^"confidence":"approx"' static.json) = 3 ]
+
+# The pins of the default output are not changed by the option
+nvc --std=08 --netlist ev_vhdl2 > static_plain.json
+[ $(grep -c 'reasons' static_plain.json) = 0 ]
