@@ -268,7 +268,12 @@ void parse_vexpect(parse_state_t *state, va_list ap)
       if (state->n_correct > 0)
          state->stall = 0;
 
-      const int rank = (*state->rank_fn)(state->tokenq[state->tokenq_tail].token);
+      const token_t token = state->tokenq[state->tokenq_tail].token;
+      int rank = (*state->rank_fn)(token);
+      if (rank > 0 && state->stray_fn != NULL
+          && (*state->stray_fn)(token, state->hint_str))
+         rank = 0;   // Cannot be what ends this construct
+
       const int limit = rank >= 2 ? 32 : (rank == 1 ? 4 : (rank < 0 ? 1 : 0));
       keep = state->stall < limit;
    }
@@ -306,13 +311,33 @@ bool parse_consume(parse_state_t *state, token_t tok)
 {
    const token_t got = parse_peek_nth(state, 1);
    if (tok != got) {
+      const int tail = state->tokenq_tail;
       parse_expect(state, tok, -1);
+
+      // A single token that is not wanted, followed by what was expected
+      if (state->rank_fn != NULL && parse_recovery()) {
+         if (state->tokenq_tail != tail) {
+            // The token was dropped
+            if (parse_peek_nth(state, 1) != tok)
+               return false;
+         }
+         else if ((*state->rank_fn)(got) > 0 || parse_peek_nth(state, 2) != tok)
+            return false;
+         else {
+            // Kept in case something else can use it: it cannot
+            drop_token(state);
+            state->stall = 0;
+         }
+
+         state->n_correct++;
+         drop_token(state);
+         return true;
+      }
+
       return false;
    }
    else {
       state->n_correct++;
-      if (state->mute && (*state->rank_fn)(tok) >= 3)
-         state->mute = false;
       drop_token(state);
       return true;
    }
@@ -322,8 +347,6 @@ bool parse_optional(parse_state_t *state, token_t tok)
 {
    if (parse_peek_nth(state, 1) == tok) {
       state->n_correct++;
-      if (state->mute && (*state->rank_fn)(tok) >= 3)
-         state->mute = false;
       drop_token(state);
       return true;
    }
@@ -348,12 +371,25 @@ void parse_sync(parse_state_t *state, int level)
    bool dropped = false;
    loc_t first = LOC_INVALID, last = LOC_INVALID;
 
+   if (level >= 3 && (*state->rank_fn)(parse_peek_nth(state, 1)) == 2) {
+      // Something that closes a statement, with nothing left to close: it
+      // is the only thing wrong here
+      lint_note_damage(&state->tokenq[state->tokenq_tail].loc,
+                       &state->tokenq[state->tokenq_tail].loc);
+      drop_token(state);
+      state->stall = 0;
+      state->mute = true;
+      return;
+   }
+
    for (;;) {
       const token_t next = parse_peek_nth(state, 1);
       if (next == tEOF)
          break;
       else if (depth <= 0 && (*state->rank_fn)(next) >= level)
          break;
+      else if ((*state->rank_fn)(next) >= 4)
+         break;   // Never skip a design unit
 
       switch (next) {
       case tLPAREN: case tLSQUARE: case tLBRACE: case tBEGIN: case tFORK:
@@ -388,6 +424,14 @@ void parse_sync(parse_state_t *state, int level)
    // something that starts an item is accepted
    if (level >= 3)
       state->mute = true;
+}
+
+void parse_rearm(parse_state_t *state)
+{
+   // An item that can be told from the garbage that was skipped starts here
+   if (state->mute && state->rank_fn != NULL
+       && (*state->rank_fn)(parse_peek_nth(state, 1)) >= 3)
+      state->mute = false;
 }
 
 bool parse_scan(parse_state_t *state, ...)
@@ -430,8 +474,6 @@ token_t parse_one_of(parse_state_t *state, ...)
 
    if (found) {
       state->n_correct++;
-      if (state->mute && (*state->rank_fn)(p) >= 3)
-         state->mute = false;
       drop_token(state);
       return p;
    }
@@ -443,11 +485,8 @@ token_t parse_one_of(parse_state_t *state, ...)
    }
 }
 
-bool parse_not_at_token(parse_state_t *state, ...)
+static bool not_at_token_rank(parse_state_t *state, int floor, va_list ap)
 {
-   va_list ap;
-   va_start(ap, state);
-
    token_t p = parse_peek_nth(state, 1);
    if (p == tEOF)
       return false;
@@ -469,13 +508,11 @@ bool parse_not_at_token(parse_state_t *state, ...)
       }
    }
 
-   va_end(ap);
-
    if (recover) {
       // Rule X: after an error at a token that nothing in this list can
       // use, a token of an enclosing construct ends the list
       const int r = (*state->rank_fn)(p);
-      if (r >= 2 && r >= minrank) {
+      if (r >= 2 && r >= MAX(minrank, floor)) {
          // The end of the construct that was closed by insertion: what
          // it holds that was closed properly is not affected
          lint_note_damage(&state->last_loc, &state->last_loc);
@@ -484,6 +521,26 @@ bool parse_not_at_token(parse_state_t *state, ...)
    }
 
    return true;
+}
+
+bool parse_not_at_token(parse_state_t *state, ...)
+{
+   va_list ap;
+   va_start(ap, state);
+   const bool result = not_at_token_rank(state, 0, ap);
+   va_end(ap);
+   return result;
+}
+
+bool parse_not_at_items(parse_state_t *state, ...)
+{
+   // The same for a list of items that may start with any token that
+   // starts an item: only the end of a design unit ends it early
+   va_list ap;
+   va_start(ap, state);
+   const bool result = not_at_token_rank(state, 4, ap);
+   va_end(ap);
+   return result;
 }
 
 const loc_t *parse_current_loc(parse_state_t *state)

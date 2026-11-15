@@ -198,6 +198,7 @@ static vlog_node_t global_clock_control(const loc_t *loc);
 static void p_default_declaration(vlog_node_t parent);
 
 static hset_t *seen_units = NULL;
+static hset_t *file_packages = NULL;   // Declared in this file in recovery mode
 
 // The scope of the caller while parsing the constraint block of randomize
 static vlog_scope_t *local_scope = NULL;
@@ -752,8 +753,33 @@ static int vlog_token_rank(token_t tok)
    }
 }
 
+static bool vlog_token_stray(token_t tok, const char *hint)
+{
+   // A token that closes a block is not that when it turns up inside an
+   // expression or a list of arguments: it is more likely to be extra
+   if (tok != tEND && tok != tENDCASE && tok != tJOIN && tok != tJOINANY
+       && tok != tJOINNONE)
+      return false;
+
+   static const char *const inside[] = {
+      "expression", "primary", "call", "select", "argument", "concatenation",
+      "pattern", "range", "dimension", "operator", "connection",
+   };
+
+   for (int i = 0; hint != NULL && i < ARRAY_LEN(inside); i++) {
+      if (strstr(hint, inside[i]) != NULL)
+         return true;
+   }
+
+   return false;
+}
+
+static unsigned syntax_errors_seen = 0;
+static bool     header_damaged = false;
+
 static void vlog_parse_error_cb(void)
 {
+   syntax_errors_seen++;
    lint_note_syntax_error(&state.last_loc);
    vlog_symtab_suppress(symtab);
 }
@@ -984,7 +1010,7 @@ static void declare_port(vlog_node_t mod, vlog_node_t port)
       }
    }
 
-   if (!found) {
+   if (!found && !(header_damaged && parse_recovery())) {
       diag_t *d = diag_new(DIAG_ERROR, vlog_loc(port));
       diag_printf(d, "'%s' does not appear in module port list", istr(id));
       diag_hint(d, vlog_loc(mod), "module declaration for '%s'",
@@ -5643,6 +5669,12 @@ static vlog_node_t package_by_name(ident_t id)
 
    vlog_node_t v = vlog_from_object(obj);
    if (v == NULL || vlog_kind(v) != V_PACKAGE) {
+      // Units are not stored once the file has an error so one that is
+      // declared in this file is not missing
+      if (parse_recovery() && file_packages != NULL
+          && hset_contains(file_packages, id))
+         return NULL;
+
       diag_t *d = diag_new(DIAG_ERROR, &state.last_loc);
       diag_printf(d, "no package named %pQ in library %pi or any other "
                   "library on the search path", id, lib_name(work));
@@ -15039,7 +15071,7 @@ static void p_task_body_declaration(vlog_node_t task)
    }
 
    if (!parsing_prototype && !defer_subr_body(task, tENDTASK)) {
-      while (not_at_token(tENDTASK)) {
+      while (not_at_items(tENDTASK)) {
          vlog_node_t s = p_statement_or_null();
          if (s != NULL)
             vlog_add_stmt(task, s);
@@ -15234,7 +15266,7 @@ static void p_function_body_declaration(vlog_node_t func)
    }
 
    if (!parsing_prototype && !defer_subr_body(func, tENDFUNCTION)) {
-      while (not_at_token(tENDFUNCTION)) {
+      while (not_at_items(tENDFUNCTION)) {
          vlog_node_t s = p_statement_or_null();
          if (s != NULL)
             vlog_add_stmt(func, s);
@@ -20152,7 +20184,7 @@ static vlog_node_t p_generate_block(void)
       const unsigned saved_constructs = gen_constructs;
       gen_constructs = 0;
 
-      while (not_at_token(tEND))
+      while (not_at_items(tEND))
          p_generate_item(b);
 
       gen_constructs = saved_constructs;
@@ -21681,7 +21713,7 @@ static void p_clocking_declaration(vlog_node_t parent, bool is_default)
    bool def_in_step = true;
    vlog_node_t def_in = NULL, def_out = NULL;
 
-   while (not_at_token(tENDCLOCKING)) {
+   while (not_at_items(tENDCLOCKING)) {
       if (scan(tDEFAULT, tINPUT, tOUTPUT, tINOUT))
          p_clocking_item(parent, &vars, &nvars, &def_in_step, &def_in,
                          &def_out);
@@ -23224,7 +23256,7 @@ static vlog_node_t p_specify_block(void)
 
    vlog_symtab_push(symtab, v);
 
-   while (not_at_token(tENDSPECIFY))
+   while (not_at_items(tENDSPECIFY))
       p_specify_item(v);
 
    scope_leave();
@@ -24123,7 +24155,7 @@ static void p_generate_region(vlog_node_t mod)
       vlog_node_t b = vlog_new(V_GEN_BLOCK);
       vlog_set_ident(b, label);
 
-      while (not_at_token(tEND))
+      while (not_at_items(tEND))
          p_generate_item(b);
 
       consume(tEND);
@@ -24141,7 +24173,7 @@ static void p_generate_region(vlog_node_t mod)
       vlog_add_stmt(mod, b);
    }
    else {
-      while (not_at_token(tENDGENERATE))
+      while (not_at_items(tENDGENERATE))
          p_generate_item(mod);
    }
 
@@ -24304,6 +24336,7 @@ static void p_module_item(vlog_node_t mod)
 
    BEGIN("module item");
 
+   parse_rearm(&state);
    skip_over_attributes();
 
    if (scan(tINOUT, tINPUT, tOUTPUT)) {
@@ -24413,7 +24446,9 @@ static void p_nonansi_interface_port_declaration(vlog_node_t mod)
 
       const int index = find_unresolved_port(mod, id);
       if (index == -1) {
-         error_at(&loc, "'%s' does not appear in module port list", istr(id));
+         if (!(header_damaged && parse_recovery()))
+            error_at(&loc, "'%s' does not appear in module port list",
+                     istr(id));
          continue;
       }
 
@@ -25277,11 +25312,18 @@ static vlog_node_t p_module_declaration(void)
       param_kind = V_LOCALPARAM;
    }
 
+   const unsigned header_errors = syntax_errors_seen;
+   const bool saved_damaged = header_damaged;
+   header_damaged = false;
+
    if (!is_checker && peek() == tLPAREN && peek_nth(2) == tID
        && peek_nth(3) != tID && peek_nth(3) != tDOT)
       p_module_nonansi_header(mod);
    else
       p_module_ansi_header(mod);
+
+   // A port that was lost makes every declaration of it look out of place
+   header_damaged = syntax_errors_seen != header_errors;
 
    if (is_checker) {
       while (peek() != tEOF && !(peek() == tID
@@ -25315,6 +25357,7 @@ static vlog_node_t p_module_declaration(void)
    }
 
    expand_user_nets(mod);
+   header_damaged = saved_damaged;
 
    if (optional(tCOLON)) {
       ident_t name = p_identifier();
@@ -25972,6 +26015,12 @@ static vlog_node_t p_package_declaration(void)
    ident_t id, ext;
    p_external_identifier(&id, &ext);
    vlog_set_ident2(v, id);
+
+   if (parse_recovery()) {
+      if (file_packages == NULL)
+         file_packages = hset_new(16);
+      hset_insert(file_packages, id);
+   }
 
    ident_t qual = ident_prefix(lib_name(lib_work()), ext, '.');
    vlog_set_ident(v, qual);
@@ -27196,8 +27245,11 @@ void reset_verilog_parser(void)
    state.lex_fn = processed_yylex;
    state.error_fn = vlog_parse_error_cb;
    state.rank_fn = vlog_token_rank;
+   state.stray_fn = vlog_token_stray;
    state.stall = 0;
    state.mute = false;
+   syntax_errors_seen = 0;
+   header_damaged = false;
 
    implicit_kind = V_NET_WIRE;
    last_attr = NULL;
@@ -27233,6 +27285,11 @@ void reset_verilog_parser(void)
    class_depth = 0;
    flushing_bodies = false;
    spec_into = NULL;
+
+   if (file_packages != NULL) {
+      hset_free(file_packages);
+      file_packages = NULL;
+   }
 
    if (seen_units != NULL) {
       hset_free(seen_units);

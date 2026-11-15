@@ -45,6 +45,7 @@ typedef struct {
    int         stall;
    bool        mute;
    int       (*rank_fn)(token_t);
+   bool      (*stray_fn)(token_t, const char *);
    tokenq_t    tokenq[TOKENQ_SIZE];
    int         tokenq_head;
    int         tokenq_tail;
@@ -66,6 +67,7 @@ typedef struct {
 #define expect(...) parse_expect(&state, __VA_ARGS__, -1)
 #define one_of(...) parse_one_of(&state, __VA_ARGS__, -1)
 #define not_at_token(...) parse_not_at_token(&state, __VA_ARGS__, -1)
+#define not_at_items(...) parse_not_at_items(&state, __VA_ARGS__, -1)
 #define peek() peek_nth(1)
 #define peek_nth(n) parse_peek_nth(&state, (n))
 #define optional(tok) parse_optional(&state, (tok))
@@ -95,6 +97,7 @@ token_t parse_peek_nth(parse_state_t *state, int n);
 void drop_token(parse_state_t *state);
 void drop_tokens_until(parse_state_t *state, token_t tok);
 void parse_sync(parse_state_t *state, int level);
+void parse_rearm(parse_state_t *state);
 void parse_set_recovery(bool on);
 bool parse_recovery(void);
 void parse_vexpect(parse_state_t *state, va_list ap);
@@ -102,6 +105,7 @@ void parse_expect(parse_state_t *state, ...);
 bool parse_optional(parse_state_t *state, token_t tok);
 bool parse_scan(parse_state_t *state, ...);
 bool parse_not_at_token(parse_state_t *state, ...);
+bool parse_not_at_items(parse_state_t *state, ...);
 bool parse_consume(parse_state_t *state, token_t tok);
 token_t parse_one_of(parse_state_t *state, ...);
 const loc_t *parse_current_loc(parse_state_t *state);
