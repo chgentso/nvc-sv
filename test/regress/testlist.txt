@@ -2838,3 +2838,4 @@ vlogclasstype1  verilog
 vlogportdecl1   verilog
 vlogifgen1      verilog
 vlogparamtype1  verilog
+vlogparamtype2  verilog
