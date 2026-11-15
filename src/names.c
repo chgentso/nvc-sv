@@ -981,6 +981,8 @@ static symbol_t *make_visible(scope_t *s, ident_t name, tree_t decl,
          return sym;
       else if (dd->visibility == HIDDEN)
          continue;
+      else if (dd->visibility == ATTRIBUTE && tkind != T_ATTR_SPEC)
+         continue;   // An attribute specification is not a declaration
       else if (dd->kind == T_LIBRARY) {
          if (tkind == T_LIBRARY && tree_ident(decl) == name)
             return sym;   // Ignore redundant library declarations
