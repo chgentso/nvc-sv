@@ -592,6 +592,7 @@ static void p_nonansi_interface_port_declaration(vlog_node_t mod);
 static bool defer_subr_body(vlog_node_t subr, token_t end_token);
 static vlog_node_t specialise_forward(vlog_node_t forward);
 static vlog_node_t p_scoped_member_type(vlog_node_t scope);
+static vlog_node_t specialise_scoped(vlog_node_t d, bool forward);
 static bool keep_class_scope = false;
 static bool want_defer_body(void);
 static vlog_node_t resolve_forward_class(ident_t name);
@@ -2568,7 +2569,7 @@ static vlog_node_t p_data_type(void)
             }
             else if (d != NULL && vlog_kind(d) == V_CLASS_DECL
                      && (vlog_flags(d) & VLOG_F_GENERIC))
-               return p_scoped_member_type(specialise_class(d));
+               return specialise_scoped(d, false);
 
             if (d != NULL && peek() == tLSQUARE)
                d = p_typedef_dimensions(d);
@@ -2631,13 +2632,13 @@ static vlog_node_t p_data_type(void)
             scan_skip_parameters();
          else if (d != NULL && vlog_kind(d) == V_CLASS_DECL
              && (vlog_flags(d) & VLOG_F_GENERIC))
-            return p_scoped_member_type(specialise_class(d));
+            return specialise_scoped(d, false);
          else if (d != NULL && peek() == tHASH && vlog_kind(d) == V_TYPE_DECL
                   && generic_classes != NULL && hash_get(generic_classes, d))
-            return p_scoped_member_type(specialise_class(d));   // Own name
+            return specialise_scoped(d, false);   // Own name
          else if (d != NULL && peek() == tHASH && vlog_kind(d) == V_CLASS_DECL
                   && (vlog_flags(d) & VLOG_F_FORWARD))
-            return p_scoped_member_type(specialise_forward(d));
+            return specialise_scoped(d, true);
 
          if (d != NULL && vlog_kind(d) == V_TYPE_DECL
              && (vlog_flags(d) & VLOG_F_NETTYPE))
@@ -5756,9 +5757,10 @@ static vlog_node_t p_scope_prefix(void)
 
       if (scope == NULL && peek_nth(2) == tHASH) {
          // Specialisation of a parameterised class
+         const bool saved_keep = keep_class_scope;
          keep_class_scope = true;
          vlog_node_t c = vlog_get_type(p_data_type());
-         keep_class_scope = false;
+         keep_class_scope = saved_keep;
          consume(tSCOPE);
 
          if (c != NULL && vlog_kind(c) == V_CLASS_DECL) {
@@ -18642,6 +18644,18 @@ static vlog_node_t replay_default(vlog_node_t generic, generic_class_t *g,
    spec_container = saved_container;
 
    return result;
+}
+
+static vlog_node_t specialise_scoped(vlog_node_t d, bool forward)
+{
+   // The parameters of the specialisation may contain a scope prefix of their
+   // own which does not apply to the name which follows the specialisation
+
+   const bool keep = keep_class_scope;
+   keep_class_scope = false;
+   vlog_node_t spec = forward ? specialise_forward(d) : specialise_class(d);
+   keep_class_scope = keep;
+   return p_scoped_member_type(spec);
 }
 
 static vlog_node_t p_scoped_member_type(vlog_node_t type)

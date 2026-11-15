@@ -9,6 +9,16 @@ endclass
 
 typedef Holder#(8)::vec_t byte_t;
 
+class Getter #(parameter int V = 1);
+   static function int get_v();
+      return V;
+   endfunction
+endclass
+
+class Pair #(parameter int A = 1);
+   localparam int B = A + 1;
+endclass
+
 module vlogclasstype1;
    Holder#(6)::vec_t a;
    Holder #()::pair_t p;
@@ -18,12 +28,16 @@ module vlogclasstype1;
    typedef Holder#(5)::vec_t five_t;
    five_t f;
 
+   // A scope prefix in the parameters of a specialisation used as a scope
+   localparam int NESTED = Getter#(Pair#(9)::B)::get_v();
+
    initial begin
       if ($bits(a) != 6) $fatal(1, "a %0d", $bits(a));
       if ($bits(p) != 8) $fatal(1, "p %0d", $bits(p));
       if ($bits(q[0]) != 6) $fatal(1, "q %0d", $bits(q[0]));
       if ($bits(b) != 8) $fatal(1, "b %0d", $bits(b));
       if ($bits(f) != 5) $fatal(1, "f %0d", $bits(f));
+      if (NESTED != 10) $fatal(1, "NESTED %0d", NESTED);
       p.hi = 4'ha;
       p.lo = 4'h5;
       a = 6'h2a;
