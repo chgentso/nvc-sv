@@ -689,7 +689,7 @@ START_TEST(test_vlog1)
    }
 
    cover_data_t *db =
-      run_cover_vlog(&top[1], 1, COVER_MASK_STMT);
+      run_cover_vlog(&top[1], 1, COVER_MASK_STMT | COVER_MASK_BRANCH);
 
    // The scopes are at the instance paths of the hierarchy
    cover_obj_t top_inst = ck_cover_find(db, "WORK.top");
@@ -726,6 +726,18 @@ START_TEST(test_vlog1)
    cover_obj_t ev2 = cover_get_child(db, p1_2, ident_new("_S0"));
    ck_assert_int_eq(ck_bin_data(db, ev1, COV_ITEM_STMT, 0, 0), 3);
    ck_assert_int_eq(ck_bin_data(db, ev2, COV_ITEM_STMT, 0, 0), 3);
+
+   // The N > 1 condition is never true for u1 and always for u2
+   cover_obj_t if1 = cover_get_child(db, cover_get_child(db, ev1,
+                                                         ident_new("_S1")),
+                                     ident_new("_B0"));
+   cover_obj_t if2 = cover_get_child(db, cover_get_child(db, ev2,
+                                                         ident_new("_S1")),
+                                     ident_new("_B0"));
+   ck_assert_int_eq(ck_bin_data(db, if1, COV_ITEM_BRANCH, 0, 0), 0);
+   ck_assert_int_eq(ck_bin_data(db, if1, COV_ITEM_BRANCH, 0, 1), 2);
+   ck_assert_int_eq(ck_bin_data(db, if2, COV_ITEM_BRANCH, 0, 0), 2);
+   ck_assert_int_eq(ck_bin_data(db, if2, COV_ITEM_BRANCH, 0, 1), 0);
 
    // The XML export marks the modules
    {

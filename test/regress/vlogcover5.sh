@@ -36,3 +36,11 @@ NVC_LOWER_VERBOSE=1 nvc -a $TESTDIR/regress/vlogcover2.sv \
 grep -q 'get counters' stmt.txt
 grep -q 'cover stmt' stmt.txt
 ! grep -q 'cover branch' stmt.txt
+
+# The same for branches, found again when the design is run
+rm -rf work
+nvc -a $TESTDIR/regress/vlogcover7.sv -e --cover=branch vlogcover7
+nvc -r vlogcover7
+nvc --cover-export --format=xml --relative=$TESTDIR/regress -o branch.xml \
+    vlogcover7.ncdb
+diff -u $TESTDIR/regress/gold/vlogcover7.xml branch.xml

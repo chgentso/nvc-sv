@@ -1,0 +1,41 @@
+<?xml version="1.0"?>
+<scope name="WORK">
+  <scope name="vlogcover8" block_name="vlogcover8" kind="module">
+    <scope name="_Dw" file="vlogcover8.sv" line="19">
+      <branch hier="WORK.vlogcover8._Dw._E0.BIN_TRUE" data="2"/>
+      <branch hier="WORK.vlogcover8._Dw._E0.BIN_FALSE" data="2"/>
+    </scope>
+    <scope name="pick" file="vlogcover8.sv" line="23">
+      <scope name="_S0" line="24">
+        <branch hier="WORK.vlogcover8.pick._S0._E0.BIN_TRUE" data="1"/>
+        <branch hier="WORK.vlogcover8.pick._S0._E0.BIN_FALSE" data="2"/>
+      </scope>
+    </scope>
+    <scope name="_P1" file="vlogcover8.sv" line="21">
+      <branch hier="WORK.vlogcover8._P1._E0.BIN_TRUE" data="1"/>
+      <branch hier="WORK.vlogcover8._P1._E0.BIN_FALSE" data="3"/>
+    </scope>
+    <scope name="_P2" file="vlogcover8.sv" line="27">
+      <scope name="_S0">
+        <scope name="_S1" line="29">
+          <branch hier="WORK.vlogcover8._P2._S0._S1._E0.BIN_TRUE" data="1"/>
+          <branch hier="WORK.vlogcover8._P2._S0._S1._E0.BIN_FALSE" data="2"/>
+          <branch hier="WORK.vlogcover8._P2._S0._S1._E1.BIN_TRUE" data="1"/>
+          <branch hier="WORK.vlogcover8._P2._S0._S1._E1.BIN_FALSE" data="2"/>
+        </scope>
+        <scope name="_S2" line="30">
+          <branch hier="WORK.vlogcover8._P2._S0._S2._E0.BIN_TRUE" data="1"/>
+          <branch hier="WORK.vlogcover8._P2._S0._S2._E0.BIN_FALSE" data="2"/>
+        </scope>
+        <scope name="_S3" line="31">
+          <branch hier="WORK.vlogcover8._P2._S0._S3._E0.BIN_TRUE" data="1"/>
+          <branch hier="WORK.vlogcover8._P2._S0._S3._E0.BIN_FALSE" data="2"/>
+        </scope>
+        <scope name="_S4" line="32">
+          <branch hier="WORK.vlogcover8._P2._S0._S4._E0.BIN_TRUE" data="0"/>
+          <branch hier="WORK.vlogcover8._P2._S0._S4._E0.BIN_FALSE" data="0"/>
+        </scope>
+      </scope>
+    </scope>
+  </scope>
+</scope>

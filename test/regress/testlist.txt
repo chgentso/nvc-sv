@@ -2854,3 +2854,6 @@ vlogcover4      verilog,cover=statement,export=cobertura
 vlogcover5      shell
 mixedcover1     mixed,cover=statement
 mixedcover2     mixed,cover=statement
+vlogcover6      verilog,cover=branch
+vlogcover7      verilog,cover=branch
+vlogcover8      verilog,cover=branch

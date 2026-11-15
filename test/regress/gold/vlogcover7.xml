@@ -1,0 +1,107 @@
+<?xml version="1.0"?>
+<scope name="WORK">
+  <scope name="vlogcover7" block_name="vlogcover7" kind="module">
+    <scope name="_P1" file="vlogcover7.sv" line="14">
+      <scope name="_S0">
+        <scope name="_S1" line="18">
+          <scope name="_B0" line="19">
+            <branch hier="WORK.vlogcover7._P1._S0._S1._B0.BIN_CHOICE" data="1"/>
+          </scope>
+          <scope name="_B1" line="20">
+            <branch hier="WORK.vlogcover7._P1._S0._S1._B1.BIN_CHOICE" data="2"/>
+          </scope>
+          <scope name="_B_OTHERS">
+            <branch hier="WORK.vlogcover7._P1._S0._S1._B_OTHERS.BIN_CHOICE" data="0"/>
+          </scope>
+        </scope>
+        <scope name="_S2" line="24">
+          <scope name="_B0" line="25">
+            <branch hier="WORK.vlogcover7._P1._S0._S2._B0.BIN_CHOICE" data="1"/>
+          </scope>
+          <scope name="_B_OTHERS" line="26">
+            <branch hier="WORK.vlogcover7._P1._S0._S2._B_OTHERS.BIN_CHOICE" data="2"/>
+          </scope>
+        </scope>
+        <scope name="_S3" line="30">
+          <scope name="_B0" line="31">
+            <branch hier="WORK.vlogcover7._P1._S0._S3._B0.BIN_CHOICE" data="1"/>
+          </scope>
+          <scope name="_B1" line="32">
+            <branch hier="WORK.vlogcover7._P1._S0._S3._B1.BIN_CHOICE" data="1"/>
+          </scope>
+          <scope name="_B2" line="33">
+            <branch hier="WORK.vlogcover7._P1._S0._S3._B2.BIN_CHOICE" data="1"/>
+          </scope>
+        </scope>
+        <scope name="_S4" line="36">
+          <scope name="_B0" line="37">
+            <branch hier="WORK.vlogcover7._P1._S0._S4._B0.BIN_CHOICE" data="1"/>
+          </scope>
+          <scope name="_B1" line="38">
+            <branch hier="WORK.vlogcover7._P1._S0._S4._B1.BIN_CHOICE" data="2"/>
+          </scope>
+        </scope>
+        <scope name="_S5" line="41">
+          <scope name="_B0" line="42">
+            <branch hier="WORK.vlogcover7._P1._S0._S5._B0.BIN_CHOICE" data="1"/>
+          </scope>
+          <scope name="_B_OTHERS" line="43">
+            <branch hier="WORK.vlogcover7._P1._S0._S5._B_OTHERS.BIN_CHOICE" data="2"/>
+          </scope>
+        </scope>
+        <scope name="_S6" line="47">
+          <scope name="_B0" line="48">
+            <branch hier="WORK.vlogcover7._P1._S0._S6._B0.BIN_CHOICE" data="0"/>
+          </scope>
+          <scope name="_B1" line="49">
+            <branch hier="WORK.vlogcover7._P1._S0._S6._B1.BIN_CHOICE" data="1"/>
+          </scope>
+          <scope name="_B_OTHERS">
+            <branch hier="WORK.vlogcover7._P1._S0._S6._B_OTHERS.BIN_CHOICE" data="2"/>
+          </scope>
+        </scope>
+        <scope name="_S7" line="52">
+          <scope name="_B0" line="53">
+            <branch hier="WORK.vlogcover7._P1._S0._S7._B0.BIN_CHOICE" data="2"/>
+          </scope>
+          <scope name="_B1" line="54">
+            <branch hier="WORK.vlogcover7._P1._S0._S7._B1.BIN_CHOICE" data="0"/>
+          </scope>
+          <scope name="_B_OTHERS" line="55">
+            <branch hier="WORK.vlogcover7._P1._S0._S7._B_OTHERS.BIN_CHOICE" data="1"/>
+          </scope>
+        </scope>
+        <scope name="_S8" line="58">
+          <scope name="_B0" line="59">
+            <branch hier="WORK.vlogcover7._P1._S0._S8._B0.BIN_CHOICE" data="2"/>
+          </scope>
+          <scope name="_B1" line="60">
+            <branch hier="WORK.vlogcover7._P1._S0._S8._B1.BIN_CHOICE" data="0"/>
+          </scope>
+          <scope name="_B_OTHERS">
+            <branch hier="WORK.vlogcover7._P1._S0._S8._B_OTHERS.BIN_CHOICE" data="1"/>
+          </scope>
+        </scope>
+        <scope name="_S9" line="64">
+          <scope name="_B0" line="65">
+            <branch hier="WORK.vlogcover7._P1._S0._S9._B0.BIN_CHOICE" data="3"/>
+          </scope>
+          <scope name="_B_OTHERS">
+            <branch hier="WORK.vlogcover7._P1._S0._S9._B_OTHERS.BIN_CHOICE" data="0"/>
+          </scope>
+        </scope>
+        <scope name="_S10" line="68">
+          <scope name="_B0" line="69">
+            <branch hier="WORK.vlogcover7._P1._S0._S10._B0.BIN_CHOICE" data="3"/>
+          </scope>
+          <scope name="_B1" line="70">
+            <branch hier="WORK.vlogcover7._P1._S0._S10._B1.BIN_CHOICE" data="0"/>
+          </scope>
+          <scope name="_B_OTHERS">
+            <branch hier="WORK.vlogcover7._P1._S0._S10._B_OTHERS.BIN_CHOICE" data="0"/>
+          </scope>
+        </scope>
+      </scope>
+    </scope>
+  </scope>
+</scope>

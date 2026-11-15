@@ -171,6 +171,21 @@ static mir_value_t vlog_cover_counters(vlog_gen_t *g)
    return mir_build_load(g->mu, ptr);
 }
 
+static bool vlog_cover_have(vlog_gen_t *g, vlog_node_t v,
+                            cover_item_kind_t kind)
+{
+   uint32_t tag;
+   if (!vlog_cover_tag(v, kind, &tag))
+      return false;
+
+   if (g->constfunc || mir_get_kind(g->mu) == MIR_UNIT_THUNK)
+      return false;
+
+   int hops;
+   return !mir_is_null(mir_search_object(g->mu, well_known(W_COUNTERS),
+                                         &hops));
+}
+
 static void vlog_cover_count(vlog_gen_t *g, vlog_node_t v,
                              cover_item_kind_t kind, uint32_t add)
 {
@@ -184,7 +199,10 @@ static void vlog_cover_count(vlog_gen_t *g, vlog_node_t v,
    if (mir_is_null(counters))
       return;
 
-   mir_build_cover_stmt(g->mu, counters, tag + add);
+   if (kind == COV_ITEM_STMT)
+      mir_build_cover_stmt(g->mu, counters, tag + add);
+   else
+      mir_build_cover_branch(g->mu, counters, tag + add);
 }
 
 static void vlog_lower_locals(vlog_gen_t *g, vlog_node_t v);
@@ -1217,6 +1235,45 @@ static mir_value_t vlog_lower_test(vlog_gen_t *g, mir_value_t value)
       mir_value_t cmp = mir_build_cmp(g->mu, MIR_CMP_EQ, value, zero);
       return mir_build_not(g->mu, cmp);
    }
+}
+
+static void vlog_cover_ternary(vlog_gen_t *g, vlog_node_t v,
+                               mir_value_t value)
+{
+   // Count a ?: operator going each way.  A condition with an unknown bit
+   // merges the operands and is neither outcome.
+
+   if (!vlog_cover_have(g, v, COV_ITEM_BRANCH))
+      return;
+
+   mir_block_t true_bb = mir_add_block(g->mu);
+   mir_block_t false_bb = mir_add_block(g->mu);
+   mir_block_t join_bb = mir_add_block(g->mu);
+
+   mir_build_cond(g->mu, vlog_lower_test(g, value), true_bb, false_bb);
+
+   mir_set_cursor(g->mu, true_bb, MIR_APPEND);
+   vlog_cover_count(g, v, COV_ITEM_BRANCH, 0);
+   mir_build_jump(g->mu, join_bb);
+
+   mir_set_cursor(g->mu, false_bb, MIR_APPEND);
+
+   if (mir_is(g->mu, value, MIR_TYPE_VEC4)) {
+      mir_type_t t_value = mir_get_type(g->mu, value);
+      mir_value_t zero = vlog_lower_zero(g, t_value);
+      mir_value_t eq = mir_build_binary(g->mu, MIR_VEC_LOG_EQ, t_value,
+                                        value, zero);
+
+      mir_block_t count_bb = mir_add_block(g->mu);
+      mir_build_cond(g->mu, vlog_lower_test(g, eq), count_bb, join_bb);
+
+      mir_set_cursor(g->mu, count_bb, MIR_APPEND);
+   }
+
+   vlog_cover_count(g, v, COV_ITEM_BRANCH, 1);
+   mir_build_jump(g->mu, join_bb);
+
+   mir_set_cursor(g->mu, join_bb, MIR_APPEND);
 }
 
 static vlog_node_t vlog_sized_dimension(vlog_node_t type)
@@ -9538,6 +9595,8 @@ static mir_value_t vlog_lower_with_context(vlog_gen_t *g, vlog_node_t v,
 
          mir_value_t value = vlog_lower_rvalue(g, vlog_value(v));
 
+         vlog_cover_ternary(g, v, value);
+
          const bool is_signed =
             vlog_is_signed(left_expr) && vlog_is_signed(right_expr);
 
@@ -12198,9 +12257,21 @@ static void vlog_lower_if(vlog_gen_t *g, vlog_node_t v, gen_stack_t *gs)
          else
             next_bb = mir_add_block(g->mu);
 
-         mir_build_cond(g->mu, cmp, btrue, next_bb);
+         if (vlog_cover_have(g, c, COV_ITEM_BRANCH)) {
+            // Count the condition being true or false, an else being the
+            // false outcome of the last condition
+            mir_block_t bfalse = mir_add_block(g->mu);
+            mir_build_cond(g->mu, cmp, btrue, bfalse);
+
+            mir_set_cursor(g->mu, bfalse, MIR_APPEND);
+            vlog_cover_count(g, c, COV_ITEM_BRANCH, 1);
+            mir_build_jump(g->mu, next_bb);
+         }
+         else
+            mir_build_cond(g->mu, cmp, btrue, next_bb);
 
          mir_set_cursor(g->mu, btrue, MIR_APPEND);
+         vlog_cover_count(g, c, COV_ITEM_BRANCH, 0);
       }
 
       vlog_lower_stmts(g, c, gs);
@@ -14441,6 +14512,23 @@ static mir_value_t vlog_case_match(vlog_gen_t *g, vlog_node_t item,
    return comb;
 }
 
+static mir_block_t vlog_case_no_match(vlog_gen_t *g, vlog_node_t v)
+{
+   // The block after a case without a default item that has no match is
+   // the current block.  This is also where the items continue after their
+   // statements so give them a block of their own when counting this.
+
+   mir_block_t bb = mir_get_cursor(g->mu, NULL);
+   if (!vlog_cover_have(g, v, COV_ITEM_BRANCH))
+      return bb;
+
+   vlog_cover_count(g, v, COV_ITEM_BRANCH, 0);
+
+   mir_block_t exit_bb = mir_add_block(g->mu);
+   mir_build_jump(g->mu, exit_bb);
+   return exit_bb;
+}
+
 static void vlog_lower_case_inside(vlog_gen_t *g, vlog_node_t v,
                                    gen_stack_t *gs)
 {
@@ -14511,7 +14599,7 @@ static void vlog_lower_case_inside(vlog_gen_t *g, vlog_node_t v,
 
    mir_block_t exit_bb;
    if (default_item == -1)
-      exit_bb = mir_get_cursor(g->mu, NULL);
+      exit_bb = vlog_case_no_match(g, v);
    else {
       mir_build_jump(g->mu, blocks[default_item]);
       exit_bb = mir_add_block(g->mu);
@@ -14519,6 +14607,7 @@ static void vlog_lower_case_inside(vlog_gen_t *g, vlog_node_t v,
 
    for (int i = 0; i < nitems; i++) {
       mir_set_cursor(g->mu, blocks[i], MIR_APPEND);
+      vlog_cover_count(g, vlog_stmt(v, i), COV_ITEM_BRANCH, 0);
       vlog_lower_stmts(g, vlog_stmt(v, i), gs);
 
       if (!mir_block_finished(g->mu, MIR_NULL_BLOCK))
@@ -14580,6 +14669,7 @@ static void vlog_lower_case_object(vlog_gen_t *g, vlog_node_t v,
       }
 
       mir_set_cursor(g->mu, body_bb, MIR_APPEND);
+      vlog_cover_count(g, item, COV_ITEM_BRANCH, 0);
       vlog_lower_stmts(g, item, gs);
 
       if (!mir_block_finished(g->mu, MIR_NULL_BLOCK))
@@ -14588,8 +14678,12 @@ static void vlog_lower_case_object(vlog_gen_t *g, vlog_node_t v,
       mir_set_cursor(g->mu, next_bb, MIR_APPEND);
    }
 
-   if (default_item != NULL)
+   if (default_item != NULL) {
+      vlog_cover_count(g, default_item, COV_ITEM_BRANCH, 0);
       vlog_lower_stmts(g, default_item, gs);
+   }
+   else
+      vlog_cover_count(g, v, COV_ITEM_BRANCH, 0);
 
    if (!mir_block_finished(g->mu, MIR_NULL_BLOCK))
       mir_build_jump(g->mu, exit_bb);
@@ -14721,7 +14815,7 @@ static void vlog_lower_case(vlog_gen_t *g, vlog_node_t v, gen_stack_t *gs)
 
    mir_block_t exit_bb;
    if (default_item == -1)
-      exit_bb = mir_get_cursor(g->mu, NULL);
+      exit_bb = vlog_case_no_match(g, v);
    else {
       mir_build_jump(g->mu, blocks[default_item]);
       exit_bb = mir_add_block(g->mu);
@@ -14732,6 +14826,7 @@ static void vlog_lower_case(vlog_gen_t *g, vlog_node_t v, gen_stack_t *gs)
       assert(vlog_kind(item) == V_CASE_ITEM);
 
       mir_set_cursor(g->mu, blocks[i], MIR_APPEND);
+      vlog_cover_count(g, item, COV_ITEM_BRANCH, 0);
       vlog_lower_stmts(g, item, gs);
 
       if (!mir_block_finished(g->mu, MIR_NULL_BLOCK))
@@ -31166,7 +31261,8 @@ void vlog_lower_instance(mir_context_t *mc, vlog_node_t body, ident_t parent,
       }
    }
 
-   if (cover_enabled(cover, COVER_MASK_STMT) && !cover_is_null(cscope)) {
+   if (cover_enabled(cover, COVER_MASK_STMT | COVER_MASK_BRANCH)
+       && !cover_is_null(cscope)) {
       // The counters of the instance are passed by the block which
       // creates it as the body is shared by instances with the same
       // parameters
