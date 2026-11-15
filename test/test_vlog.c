@@ -4323,6 +4323,25 @@ START_TEST(test_dotname1)
 }
 END_TEST
 
+START_TEST(test_dotstar2)
+{
+   const error_t expect[] = {
+      {  6, "only one .* port connection is allowed in an instance" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/dotstar2.sv");
+
+   do_parse_only(V_MODULE);
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
 START_TEST(test_crash1)
 {
    const error_t expect[] = {
@@ -4860,6 +4879,7 @@ Suite *get_vlog_tests(void)
    tcase_add_test(tc, test_dimsize1);
    tcase_add_test(tc, test_selcount1);
    tcase_add_test(tc, test_dotname1);
+   tcase_add_test(tc, test_dotstar2);
    tcase_add_test(tc, test_crash1);
    tcase_add_test(tc, test_crash2);
    tcase_add_test(tc, test_crash3);

@@ -24854,10 +24854,19 @@ static void p_list_of_port_connections(vlog_node_t inst)
 
    port_pos = 0;
 
+   bool seen_wildcard = false;
    do {
       skip_over_attributes();
 
-      if (peek() == tDOT || peek() == tDOTSTAR)
+      if (peek() == tDOTSTAR) {
+         // Only one wildcard connection is allowed (23.3.2.4)
+         if (seen_wildcard)
+            parse_error(&state.tokenq[state.tokenq_tail].loc, "only one .* "
+                        "port connection is allowed in an instance");
+         seen_wildcard = true;
+         vlog_add_param(inst, p_named_port_connection());
+      }
+      else if (peek() == tDOT)
          vlog_add_param(inst, p_named_port_connection());
       else
          vlog_add_param(inst, p_ordered_port_connection());
