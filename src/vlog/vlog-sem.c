@@ -1176,12 +1176,76 @@ static void vlog_force_auto_cb(vlog_node_t v, void *ctx)
    }
 }
 
+static void vlog_variable_ref_cb(vlog_node_t v, void *ctx)
+{
+   if (vlog_is_variable_ref(v))
+      *(bool *)ctx = true;
+}
+
+static void vlog_check_force_select(vlog_node_t target)
+{
+   // The target of a force or release cannot be a select of a variable or
+   // net with a variable index (10.6.2)
+
+   if (in_pca_process)
+      return;
+
+   for (vlog_node_t v = target;; ) {
+      switch (vlog_kind(v)) {
+      case V_BIT_SELECT:
+         {
+            const int nparams = vlog_params(v);
+            for (int i = 0; i < nparams; i++) {
+               bool var = false;
+               vlog_visit_only(vlog_param(v, i), vlog_variable_ref_cb, &var,
+                               V_REF);
+               if (var) {
+                  diag_t *d = diag_new(relaxed_rules() ? DIAG_WARN
+                                       : DIAG_ERROR, vlog_loc(vlog_param(v, i)));
+                  diag_printf(d, "the index of a select in the target of a "
+                              "force or release must be constant");
+                  diag_emit(d);
+               }
+            }
+         }
+         v = vlog_value(v);
+         continue;
+      case V_PART_SELECT:
+         {
+            bool var = false;
+            if (vlog_has_left(v))
+               vlog_visit_only(vlog_left(v), vlog_variable_ref_cb, &var, V_REF);
+            vlog_visit_only(vlog_right(v), vlog_variable_ref_cb, &var, V_REF);
+            if (var) {
+               diag_t *d = diag_new(relaxed_rules() ? DIAG_WARN : DIAG_ERROR,
+                                    vlog_loc(v));
+               diag_printf(d, "the range of a select in the target of a force "
+                           "or release must be constant");
+               diag_emit(d);
+            }
+         }
+         v = vlog_value(v);
+         continue;
+      case V_CONCAT:
+         {
+            const int nparams = vlog_params(v);
+            for (int i = 0; i < nparams; i++)
+               vlog_check_force_select(vlog_param(v, i));
+         }
+         return;
+      default:
+         return;
+      }
+   }
+}
+
 static void vlog_check_force(vlog_node_t v)
 {
    vlog_node_t target = vlog_target(v);
    type_mask_t lmask = vlog_check_expr(target);
 
    vlog_check_net_lvalue(target, target);
+   vlog_check_force_select(target);
 
    vlog_node_t value = vlog_value(v);
    type_mask_t rmask = vlog_check_expr(value);
@@ -1196,6 +1260,7 @@ static void vlog_check_release(vlog_node_t v)
 
    vlog_check_expr(target);
    vlog_check_net_lvalue(target, target);
+   vlog_check_force_select(target);
 }
 
 static void vlog_check_type(vlog_node_t v)
