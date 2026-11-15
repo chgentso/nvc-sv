@@ -123,6 +123,7 @@ static void p_trailing_label(ident_t label);
 static tree_t p_condition(void);
 static type_t p_subtype_indication(void);
 static tree_t p_record_constraint(type_t base);
+static tree_t p_conditional_tail(tree_t expr0);
 static tree_t p_qualified_expression(tree_t prefix);
 static tree_t p_concurrent_procedure_call_statement(ident_t label, tree_t name);
 static tree_t p_subprogram_instantiation_declaration(void);
@@ -5851,6 +5852,15 @@ static tree_t p_aggregate_or_expression(void)
       consume(tRPAREN);
       return head;
 
+   case tWHEN:
+      // VHDL-2019 conditional expression as a parenthesised primary
+      {
+         consume(tWHEN);
+         tree_t value = p_conditional_tail(head);
+         consume(tRPAREN);
+         return value;
+      }
+
    case tASSOC:
    case tCOMMA:
    case tTO:
@@ -8461,6 +8471,38 @@ static tree_t p_subtype_declaration(void)
    return t;
 }
 
+static tree_t p_conditional_tail(tree_t expr0)
+{
+   // { when condition else expression }
+
+   require_std(STD_19, "conditional expressions");
+
+   tree_t value = tree_new(T_COND_VALUE);
+
+   do {
+      tree_t cond = tree_new(T_COND_EXPR);
+      tree_set_result(cond, expr0);
+      tree_set_value(cond, p_condition());
+
+      tree_set_loc(cond, CURRENT_LOC);
+
+      tree_add_cond(value, cond);
+
+      consume(tELSE);
+
+      expr0 = p_expression();
+   } while (optional(tWHEN));
+
+   tree_t last = tree_new(T_COND_EXPR);
+   tree_set_result(last, expr0);
+   tree_set_loc(last, CURRENT_LOC);
+
+   tree_add_cond(value, last);
+
+   tree_set_loc(value, CURRENT_LOC);
+   return value;
+}
+
 static tree_t p_conditional_expression(tree_t head)
 {
    // expression { when condition else expression }
@@ -8469,34 +8511,8 @@ static tree_t p_conditional_expression(tree_t head)
 
    tree_t expr0 = p_expression_with_head(head);
 
-   if (optional(tWHEN)) {
-      require_std(STD_19, "conditional expressions");
-
-      tree_t value = tree_new(T_COND_VALUE);
-
-      do {
-         tree_t cond = tree_new(T_COND_EXPR);
-         tree_set_result(cond, expr0);
-         tree_set_value(cond, p_condition());
-
-         tree_set_loc(cond, CURRENT_LOC);
-
-         tree_add_cond(value, cond);
-
-         consume(tELSE);
-
-         expr0 = p_expression();
-      } while (optional(tWHEN));
-
-      tree_t last = tree_new(T_COND_EXPR);
-      tree_set_result(last, expr0);
-      tree_set_loc(last, CURRENT_LOC);
-
-      tree_add_cond(value, last);
-
-      tree_set_loc(value, CURRENT_LOC);
-      return value;
-   }
+   if (optional(tWHEN))
+      return p_conditional_tail(expr0);
    else
       return expr0;
 }

@@ -6530,6 +6530,8 @@ static tree_t try_solve_type(nametab_t *tab, tree_t t)
       return try_solve_array_ref(tab, t);
    case T_RECORD_REF:
       return try_solve_record_ref(tab, t);
+   case T_COND_VALUE:
+      return NULL;   // Type depends on the context
    default:
       CANNOT_HANDLE(t);
    }
