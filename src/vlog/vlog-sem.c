@@ -2361,7 +2361,14 @@ static void vlog_check_user_tcall(vlog_node_t v)
       return;
    }
 
-   if (in_function && vlog_kind(func) == V_TASK_DECL)
+   if (in_final && vlog_kind(func) == V_TASK_DECL) {
+      diag_t *d = diag_new(relaxed_rules() ? DIAG_WARN : DIAG_ERROR,
+                           vlog_loc(v));
+      diag_printf(d, "task '%s' cannot be called from a final procedure as it "
+                  "must not block", istr(vlog_ident(func)));
+      diag_emit(d);
+   }
+   else if (in_function && vlog_kind(func) == V_TASK_DECL)
       error_at(vlog_loc(v), "task '%s' cannot be called from a function as "
                "functions must not block", istr(vlog_ident(func)));
 
@@ -5213,9 +5220,14 @@ void vlog_check(vlog_node_t v)
       vlog_check_stmts(v);
       break;
    case V_FINAL:
-      in_final = true;
-      vlog_check_stmts(v);
-      in_final = false;
+      {
+         // A final procedure can only contain what a function can (9.2.3)
+         const bool was_in_function = in_function;
+         in_final = in_function = true;
+         vlog_check_stmts(v);
+         in_final = false;
+         in_function = was_in_function;
+      }
       break;
    case V_SEQ_BLOCK:
    case V_GEN_BLOCK:

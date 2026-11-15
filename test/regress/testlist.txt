@@ -2251,7 +2251,7 @@ svstructassign1 verilog
 svsyn9 verilog
 svsyn10 verilog
 svsyn11 verilog
-svsyn12 verilog
+svsyn12 verilog,relaxed
 svsem1 verilog
 svdpi1          verilog,svlib=dpi_test
 svhdl1          verilog
