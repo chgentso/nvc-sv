@@ -561,12 +561,41 @@ static value_mirror *get_value_mirror(void *context, jit_scalar_t value,
       avm->pt.f_elements->ptr = avm->pt.f_elements + 1;
 
       type_t elem = type_elem(type);
-      const int ebytes = type_byte_width(elem);
-
       value_mirror **elems = avm->pt.f_elements->ptr;
-      for (int i = 0; i < total; i++) {
-         jit_scalar_t elt = load_scalar(value.pointer, i, ebytes);
-         elems[i] = get_value_mirror(context, elt, elem, NULL);
+
+      if (type_is_array(elem)) {
+         // Each element is an array with constant bounds stored inline
+         if (type_is_unconstrained(elem) || !type_const_bounds(elem))
+            jit_msg(NULL, DIAG_FATAL, "sorry, the REFLECT attribute of an "
+                    "object of type %pT with elements of unconstrained "
+                    "subtype is not supported", type);
+
+         size_t nscalars = 1;
+         for (type_t t = elem; type_is_array(t); t = type_elem(t)) {
+            for (int d = 0; d < dimension_of(t); d++) {
+               int64_t length;
+               if (!folded_length(range_of(t, d), &length))
+                  jit_msg(NULL, DIAG_FATAL, "array %pT bounds are not "
+                          "constant", t);
+               nscalars *= length;
+            }
+         }
+
+         const size_t stride =
+            nscalars * type_byte_width(type_elem_recur(elem));
+
+         for (int i = 0; i < total; i++) {
+            void *ptr = value.pointer + i * stride;
+            jit_scalar_t *ebounds LOCAL = get_array_bounds(elem, ptr);
+            elems[i] = get_value_mirror(context, ebounds[0], elem, ebounds);
+         }
+      }
+      else {
+         const int ebytes = type_byte_width(elem);
+         for (int i = 0; i < total; i++) {
+            jit_scalar_t elt = load_scalar(value.pointer, i, ebytes);
+            elems[i] = get_value_mirror(context, elt, elem, NULL);
+         }
       }
 
       vm->pt.f_class = CLASS_ARRAY;
@@ -655,6 +684,16 @@ static value_mirror *get_value_mirror(void *context, jit_scalar_t value,
                get_array_bounds(designated, value.pointer);
             avm->pt.f_value =
                get_value_mirror(context, bounds[0], designated, bounds);
+         }
+         else if (type_is_scalar(designated)) {
+            jit_scalar_t elt;
+            if (type_is_real(designated))
+               elt.real = *(const double *)value.pointer;
+            else
+               elt = load_scalar(value.pointer, 0,
+                                 type_byte_width(designated));
+            avm->pt.f_value =
+               get_value_mirror(context, elt, designated, NULL);
          }
          else {
             jit_scalar_t access = { .pointer = value.pointer };
@@ -908,8 +947,26 @@ static subtype_mirror *get_subtype_mirror(void *context, type_t type,
          type_t itype = index_type_of(type, i);
          dims[i].f_index_subtype = get_subtype_mirror(context, itype, NULL);
 
-         const int64_t left = bounds[i*2 + 1].integer;
-         const int64_t length = bounds[i*2 + 2].integer;
+         int64_t left, length;
+         if (bounds != NULL) {
+            left = bounds[i*2 + 1].integer;
+            length = bounds[i*2 + 2].integer;
+         }
+         else {
+            // An element subtype with constant bounds
+            tree_t r = range_of(type, i);
+            int64_t ileft, iright;
+            if (!folded_int(tree_left(r), &ileft)
+                || !folded_int(tree_right(r), &iright))
+               jit_msg(NULL, DIAG_FATAL, "cannot determine the bounds of the "
+                       "element subtype %pT", type);
+
+            left = ileft;
+            if (tree_subkind(r) == RANGE_TO)
+               length = iright >= ileft ? iright - ileft + 1 : 0;
+            else
+               length = ileft >= iright ? ~(ileft - iright + 1) : ~INT64_C(0);
+         }
 
          dims[i].f_ascending = length >= 0;
          dims[i].f_left = left;
