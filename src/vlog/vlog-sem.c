@@ -3371,6 +3371,105 @@ static void vlog_check_assoc_indices(vlog_node_t v)
    }
 }
 
+static int vlog_select_chain(vlog_node_t v, vlog_node_t *base)
+{
+   // The number of indices applied to a variable by nested selects
+
+   int count = 0;
+   for (;;) {
+      switch (vlog_kind(v)) {
+      case V_BIT_SELECT:
+         count += vlog_params(v);
+         v = vlog_value(v);
+         continue;
+      case V_PART_SELECT:
+         count++;
+         v = vlog_value(v);
+         continue;
+      default:
+         *base = v;
+         return count;
+      }
+   }
+}
+
+static int vlog_known_dimensions(vlog_node_t base)
+{
+   // The number of dimensions of a variable of a simple type that can be
+   // selected from, or -1 if not known
+
+   if (vlog_kind(base) != V_REF || !vlog_has_ref(base))
+      return -1;
+
+   vlog_node_t decl = vlog_ref(base);
+   switch (vlog_kind(decl)) {
+   case V_VAR_DECL:
+   case V_NET_DECL:
+   case V_PORT_DECL:
+   case V_TF_PORT_DECL:
+   case V_LOCAL_DECL:
+      break;
+   default:
+      return -1;
+   }
+
+   // A port may be declared again with its dimensions as a net or variable
+   if ((vlog_kind(decl) == V_PORT_DECL || vlog_kind(decl) == V_TF_PORT_DECL)
+       && vlog_has_ref(decl))
+      return -1;
+
+   if (!vlog_has_type(decl) || vlog_kind(vlog_type(decl)) != V_DATA_TYPE)
+      return -1;
+
+   vlog_node_t type = vlog_type(decl);
+   if (vlog_has_type(type))
+      return -1;
+
+   int dims = vlog_ranges(type);
+   switch (vlog_subkind(type)) {
+   case DT_LOGIC:
+   case DT_BIT:
+   case DT_IMPLICIT:
+      break;
+   case DT_BYTE:
+   case DT_SHORTINT:
+   case DT_INT:
+   case DT_LONGINT:
+   case DT_INTEGER:
+   case DT_TIME:
+      dims = MAX(dims, 1);
+      break;
+   default:
+      return -1;
+   }
+
+   return dims + vlog_ranges(decl);
+}
+
+static void vlog_check_select_count(vlog_node_t v)
+{
+   // A variable has no more indices than it has dimensions (11.5.1)
+
+   vlog_node_t base;
+   const int count = vlog_select_chain(v, &base);
+
+   const int dims = vlog_known_dimensions(base);
+   if (dims < 0 || count <= dims)
+      return;
+
+   // Only report the first select that is too many
+   const int own = vlog_kind(v) == V_BIT_SELECT ? vlog_params(v) : 1;
+   if (count - own > dims)
+      return;
+
+   if (dims == 0)
+      error_at(vlog_loc(v), "cannot select a bit or part of %pQ which is a "
+               "scalar", vlog_ident(base));
+   else
+      error_at(vlog_loc(v), "too many selects for %pQ which has only %d "
+               "dimension%s", vlog_ident(base), dims, dims == 1 ? "" : "s");
+}
+
 static void vlog_dollar_cb(vlog_node_t v, void *ctx)
 {
    *(bool *)ctx = true;
@@ -3403,6 +3502,7 @@ static type_mask_t vlog_check_bit_select(vlog_node_t v)
    }
 
    vlog_check_assoc_indices(v);
+   vlog_check_select_count(v);
 
    const type_mask_t tmask = vlog_check_index(v);
 
@@ -3505,6 +3605,8 @@ static type_mask_t vlog_check_part_select(vlog_node_t v)
 
    vlog_node_t right = vlog_right(v);
    vlog_check_expr(right);
+
+   vlog_check_select_count(v);
 
    const type_mask_t mask = vlog_check_index(v);
 
