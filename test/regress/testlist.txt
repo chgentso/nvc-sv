@@ -2813,3 +2813,4 @@ attr_dim_length normal
 extname_attr normal,2008
 attr_same_name normal,2008
 guarded_composite normal,2008
+resolution_partial normal,2008

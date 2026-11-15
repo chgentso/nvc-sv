@@ -8408,8 +8408,8 @@ static void lower_resolution_wrapper(lower_unit_t *lu, object_t *obj)
    ident_t rfunc = tree_ident2(rdecl);
 
    type_t uarray_param = type_param(tree_type(rdecl), 0);
-   assert(type_kind(uarray_param) == T_ARRAY);
-   tree_t r = range_of(type_index(uarray_param, 0), 0);
+   assert(type_is_array(uarray_param));
+   tree_t r = range_of(index_type_of(uarray_param, 0), 0);
 
    vcode_type_t velem = lower_type(type_elem_recur(elem));
    vcode_stamp_t vbounds = lower_bounds(elem);

@@ -114,7 +114,11 @@ static bool sem_check_resolution(type_t type, tree_t res)
       sem_error(res, "resolution function must have a single argument");
 
    type_t param = type_param(ftype, 0);
-   if (type_kind(param) != T_ARRAY)
+   if (type_kind(param) == T_SUBTYPE && type_is_array(param)
+       && type_is_unconstrained(param)) {
+      // The element subtype of the parameter may be constrained
+   }
+   else if (type_kind(param) != T_ARRAY)
       sem_error(res, "parameter of resolution function must be "
                 "an unconstrained array type");
 
