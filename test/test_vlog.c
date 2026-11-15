@@ -4078,6 +4078,29 @@ START_TEST(test_finaltask1)
 }
 END_TEST
 
+START_TEST(test_repl2)
+{
+   const error_t expect[] = {
+      {  9, "a replication with a constant of zero can only be an operand"
+        " of a concatenation with another operand" },
+      { 10, "a replication with a constant of zero can only be an operand"
+        " of a concatenation with another operand" },
+      { 11, "the replication constant cannot be negative" },
+      { 12, "the replication constant cannot have an unknown value" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/repl2.sv");
+
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
 START_TEST(test_crash1)
 {
    const error_t expect[] = {
@@ -4603,6 +4626,7 @@ Suite *get_vlog_tests(void)
    tcase_add_test(tc, test_packedmem1);
 
    tcase_add_test(tc, test_finaltask1);
+   tcase_add_test(tc, test_repl2);
    tcase_add_test(tc, test_crash1);
    tcase_add_test(tc, test_crash2);
    tcase_add_test(tc, test_crash3);

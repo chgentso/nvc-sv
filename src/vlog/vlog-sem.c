@@ -3504,17 +3504,47 @@ static type_mask_t vlog_check_user_fcall(vlog_node_t v)
    return tmask;
 }
 
+static vlog_node_t zero_repl_ok = NULL;
+
+static void vlog_check_replication(vlog_node_t v)
+{
+   // The replication constant must not be negative, x or z and a zero
+   // replication can only be an operand of a larger concatenation
+   // (11.4.12.1)
+
+   vlog_node_t repeat = vlog_value(v);
+
+   int64_t count;
+   if (vlog_kind(repeat) == V_NUMBER && !number_is_defined(vlog_number(repeat)))
+      error_at(vlog_loc(repeat), "the replication constant cannot have an "
+               "unknown value");
+   else if (vlog_stable_const(repeat, &count)) {
+      if (count < 0)
+         error_at(vlog_loc(repeat), "the replication constant cannot be "
+                  "negative");
+      else if (count == 0 && v != zero_repl_ok)
+         error_at(vlog_loc(v), "a replication with a constant of zero can "
+                  "only be an operand of a concatenation with another "
+                  "operand");
+   }
+}
+
 static type_mask_t vlog_check_concat(vlog_node_t v)
 {
    if (vlog_has_value(v)) {
       vlog_node_t repeat = vlog_value(v);
       vlog_check_expr(repeat);
+      vlog_check_replication(v);
    }
 
    type_mask_t mask = TM_ANY;
    const int nparams = vlog_params(v);
-   for (int i = 0; i < nparams; i++)
-      mask &= vlog_check_expr(vlog_param(v, i));
+   for (int i = 0; i < nparams; i++) {
+      vlog_node_t p = vlog_param(v, i);
+      zero_repl_ok = (nparams > 1 && !vlog_has_value(v)) ? p : NULL;
+      mask &= vlog_check_expr(p);
+      zero_repl_ok = NULL;
+   }
 
    return TM(DT_LOGIC) | mask;
 }
