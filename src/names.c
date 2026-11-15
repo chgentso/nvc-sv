@@ -6111,8 +6111,34 @@ static tree_t try_solve_new(nametab_t *tab, tree_t t)
    type_set_restrict(tab, type_is_access);
 
    type_t type;
-   if (!type_set_uniq(tab, &type))
-      return NULL;
+   if (!type_set_uniq(tab, &type)) {
+      // Use the designated subtype of the allocator to choose between
+      // several access types in the context (LRM 08 section 9.3.7)
+      tree_t value = tree_value(t);
+      if (tab->top_type_set == NULL || !tree_has_type(value))
+         return NULL;
+
+      type_t designated = tree_type(value);
+      if (type_is_none(designated) || type_is_incomplete(designated))
+         return NULL;
+
+      type_t found = NULL;
+      for (int i = 0; i < tab->top_type_set->members.count; i++) {
+         type_t member = tab->top_type_set->members.items[i].type;
+         type_t d = type_designated(member);
+         if (type_is_incomplete(d) || !type_eq(d, designated))
+            continue;
+         else if (found != NULL && !type_eq(found, member))
+            return NULL;
+         else
+            found = member;
+      }
+
+      if (found == NULL)
+         return NULL;
+
+      type = found;
+   }
 
    tree_set_type(t, type);
    return t;
