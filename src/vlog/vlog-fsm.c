@@ -16,6 +16,8 @@
 //
 
 #include "util.h"
+#include "lint.h"
+#include "parse.h"
 #include "array.h"
 #include "diag.h"
 #include "fsm.h"
@@ -1430,10 +1432,36 @@ static void case_cb(vlog_node_t s, void *arg)
       c->found[c->n++] = s;
 }
 
+static unsigned fsm_skipped = 0;
+static bool     fsm_blocked = false;
+
+void vlog_fsm_reset_skipped(void)
+{
+   fsm_skipped = 0;
+}
+
+unsigned vlog_fsm_skipped(void)
+{
+   return fsm_skipped;
+}
+
+static bool proc_damaged(const proc_t *p)
+{
+   // A state graph with missing transitions is worse than none: a process
+   // the parser had to skip something in is not used
+   return p != NULL && p->node != NULL && parse_recovery()
+      && lint_span_syntax_damaged(vlog_loc(p->node));
+}
+
 static bool try_machine(drive_t *d, const sobj_t *state, const sobj_t *next,
                         const proc_t *reg, const proc_t *cp,
                         const char *macro_args)
 {
+   if (proc_damaged(reg) || proc_damaged(cp)) {
+      fsm_blocked = true;
+      return false;
+   }
+
    cases_ctx_t c = { .subject = state->name };
    walk_stmts(cp->body, case_cb, &c);
 
@@ -1576,6 +1604,7 @@ static void scan_scope(vlog_node_t unit, vlog_node_t scope,
             continue;
 
          bool done = false;
+         fsm_blocked = false;
 
          // One process: the case is in a clocked process
          for (unsigned p = 0; p < procs.count && !done; p++) {
@@ -1650,6 +1679,9 @@ static void scan_scope(vlog_node_t unit, vlog_node_t scope,
                }
             }
          }
+
+         if (!done && fsm_blocked)
+            fsm_skipped++;
       }
    }
 

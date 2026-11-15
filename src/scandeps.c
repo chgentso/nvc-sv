@@ -20,6 +20,8 @@
 #include "diag.h"
 #include "fsm.h"
 #include "ident.h"
+#include "lint.h"
+#include "parse.h"
 #include "lib.h"
 #include "option.h"
 #include "phase.h"
@@ -2452,6 +2454,12 @@ unsigned scan_file_deps(const char *file, text_buf_t *json)
    LOCAL_TEXT_BUF fsms = scan_want_fsm ? tb_new() : NULL;
    unsigned nfsms = 0;
 
+   const bool recovering = parse_recovery();
+   if (recovering) {
+      lint_errors_reset();
+      vlog_fsm_reset_skipped();
+   }
+
    input_from_file(file);
 
    switch (source_kind()) {
@@ -2551,6 +2559,17 @@ unsigned scan_file_deps(const char *file, text_buf_t *json)
 
    if (nfsms > 0)
       tb_printf(json, ",\"fsms\":[%s]", tb_get(fsms));
+
+   if (recovering) {
+      LOCAL_TEXT_BUF spans = tb_new();
+      lint_damaged_spans(loc_file_ref(file, NULL), spans);
+      if (tb_len(spans) > 0)
+         tb_printf(json, ",\"damaged\":[%s]", tb_get(spans));
+
+      const unsigned skipped = vlog_fsm_skipped();
+      if (skipped > 0)
+         tb_printf(json, ",\"fsms_skipped\":%u", skipped);
+   }
 
    const unsigned errors = diag_scan_errors() - base_errors;
    if (errors > 0)
