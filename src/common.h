@@ -89,6 +89,7 @@ bool relaxed_rules(void);
 bool is_type_attribute(attr_kind_t kind);
 type_t get_type_or_null(tree_t t);
 type_t subtype_for_string(tree_t str, type_t base);
+bool same_type_mark(type_t declared, type_t mark);
 tree_t change_ref(tree_t name, tree_t new);
 bool all_character_literals(type_t type);
 bool is_operator_symbol(ident_t ident);

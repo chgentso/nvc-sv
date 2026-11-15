@@ -7166,6 +7166,11 @@ static bool sem_check_disconnect(tree_t t, nametab_t *tab)
       sem_error(t, "type of declared signal %pT does not match type %pT in "
                 "disconnection specification", tree_type(decl), type);
 
+   if (!same_type_mark(tree_type(decl), type))
+      sem_error(t, "type mark %pT in disconnection specification is not the "
+                "type mark %pT in the declaration of signal %pI", type,
+                tree_type(decl), tree_ident(t));
+
    tree_t delay = tree_delay(t);
    type_t std_time = std_type(NULL, STD_TIME);
    if (!sem_check_type(delay, std_time, tab))

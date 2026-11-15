@@ -9288,7 +9288,7 @@ static void p_disconnection_specification(tree_t container)
       for (int i = 0; i < ndecls; i++) {
          tree_t sig = tree_decl(container, i);
          if (tree_kind(sig) != T_SIGNAL_DECL || !is_guarded_signal(sig)
-             || !type_eq(tree_type(sig), type))
+             || !same_type_mark(tree_type(sig), type))
             continue;
 
          bool have = false;

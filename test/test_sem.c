@@ -4342,6 +4342,25 @@ START_TEST(test_sigparam)
 }
 END_TEST
 
+START_TEST(test_discmark)
+{
+   set_standard(STD_08);
+
+   input_from_file(TESTDIR "/sem/discmark.vhd");
+
+   const error_t expect[] = {
+      { 18, "type mark BIT in disconnection specification is not the type "
+        "mark RBIT in the declaration of signal G" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   parse_and_check(T_PACKAGE, T_ENTITY, T_ARCH);
+
+   check_expected_errors();
+}
+END_TEST
+
 START_TEST(test_attrspec_relaxed)
 {
    set_standard(STD_08);
@@ -4738,6 +4757,7 @@ Suite *get_sem_tests(void)
    tcase_add_test(tc_core, test_protop);
    tcase_add_test(tc_core, test_purefunc);
    tcase_add_test(tc_core, test_sigparam);
+   tcase_add_test(tc_core, test_discmark);
    suite_add_tcase(s, tc_core);
 
    return s;

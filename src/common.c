@@ -3332,3 +3332,15 @@ tree_t find_default_arch(lib_t lib, ident_t entity)
 
    return lib_get(lib, params.chosen);
 }
+
+bool same_type_mark(type_t declared, type_t mark)
+{
+   // True if the type mark used in a declaration of an object with
+   // subtype DECLARED is MARK: an anonymous subtype denotes the type
+   // mark it was formed from
+
+   while (is_anonymous_subtype(declared))
+      declared = type_base(declared);
+
+   return declared == mark;
+}
