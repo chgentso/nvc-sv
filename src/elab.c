@@ -1825,8 +1825,11 @@ static bool elab_port_name_eq(ident_t a, ident_t b, bool nocase)
 
 static vlog_node_t elab_array_iface_value(vlog_node_t inst, vlog_node_t value);
 static vlog_node_t elab_iface_element(vlog_node_t value, int pos, int count);
-static bool elab_instance_array_bounds(vlog_node_t inst, int64_t *left,
-                                       int64_t *right);
+static int elab_instance_array_count(vlog_node_t inst);
+static int elab_array_indices(vlog_node_t decl, int pos, int count,
+                              int64_t *index);
+
+#define MAX_INST_DIMS 8
 
 static void elab_verilog_iface_port(vlog_node_t inst, vlog_node_t port,
                                     vlog_node_t wildcard, bit_mask_t *used,
@@ -1865,17 +1868,21 @@ static void elab_verilog_iface_port(vlog_node_t inst, vlog_node_t port,
    vlog_node_t value = conn != NULL
       ? elab_array_iface_value(inst, vlog_value(conn)) : NULL;
 
-   int64_t left = 0, right = 0;
    const int count = vlog_ranges(port) > 0
-      && elab_instance_array_bounds(port, &left, &right)
-      ? llabs(left - right) + 1 : 0;
+      ? elab_instance_array_count(port) : 0;
 
    for (int i = 0; i < MAX(count, 1); i++) {
       ident_t id = name;
       vlog_node_t elem = value;
       if (count > 0) {
-         id = ident_sprintf("%s[%"PRIi64"]", istr(name),
-                            left >= right ? left - i : left + i);
+         int64_t index[MAX_INST_DIMS];
+         const int ndims = elab_array_indices(port, i, count, index);
+
+         LOCAL_TEXT_BUF tb = tb_new();
+         tb_cat(tb, istr(name));
+         for (int d = 0; d < ndims; d++)
+            tb_printf(tb, "[%"PRIi64"]", index[d]);
+         id = ident_new(tb_get(tb));
          if (value != NULL) {
             elem = elab_iface_element(value, i, count);
             if (elem == value) {
@@ -1906,10 +1913,10 @@ static void elab_verilog_iface_port(vlog_node_t inst, vlog_node_t port,
    }
 }
 
-static bool elab_instance_array_bounds(vlog_node_t inst, int64_t *left,
-                                       int64_t *right)
+static bool elab_instance_array_dim(vlog_node_t inst, int n, int64_t *left,
+                                    int64_t *right)
 {
-   vlog_node_t r = vlog_range(inst, 0);
+   vlog_node_t r = vlog_range(inst, n);
    if (vlog_get_const(vlog_left(r), left) && vlog_get_const(vlog_right(r), right))
       return true;
 
@@ -1918,14 +1925,62 @@ static bool elab_instance_array_bounds(vlog_node_t inst, int64_t *left,
    return false;
 }
 
-static vlog_node_t elab_array_element(vlog_node_t inst, int pos, int count,
-                                      int64_t index)
+static int elab_instance_array_count(vlog_node_t inst)
+{
+   // The number of elements in all the dimensions or zero if the bounds
+   // are not constant
+
+   int count = 1;
+   const int ndims = vlog_ranges(inst);
+   for (int i = 0; i < ndims; i++) {
+      int64_t left, right;
+      if (!elab_instance_array_dim(inst, i, &left, &right))
+         return 0;
+
+      count *= llabs(left - right) + 1;
+   }
+
+   return count;
+}
+
+static int elab_array_indices(vlog_node_t decl, int pos, int count,
+                              int64_t *index)
+{
+   // The indices of an element of an array of instances counted over all
+   // the dimensions with the last varying fastest
+
+   int rem = pos, total = count;
+   const int ndims = MIN(vlog_ranges(decl), MAX_INST_DIMS);
+   for (int i = 0; i < ndims; i++) {
+      int64_t left, right;
+      (void)elab_instance_array_dim(decl, i, &left, &right);
+
+      const int size = llabs(left - right) + 1;
+      total /= size;
+
+      const int j = rem / total;
+      rem %= total;
+
+      index[i] = left >= right ? left - j : left + j;
+   }
+
+   return ndims;
+}
+
+static vlog_node_t elab_array_element(vlog_node_t inst, int pos, int count)
 {
    // A copy of an element of an instance array which remembers its position
 
+   int64_t index[MAX_INST_DIMS];
+   const int ndims = elab_array_indices(inst, pos, count, index);
+
+   LOCAL_TEXT_BUF tb = tb_new();
+   tb_cat(tb, istr(vlog_ident(inst)));
+   for (int i = 0; i < ndims; i++)
+      tb_printf(tb, "[%"PRIi64"]", index[i]);
+
    vlog_node_t e = vlog_new(V_MOD_INST);
-   vlog_set_ident(e, ident_sprintf("%s[%"PRIi64"]", istr(vlog_ident(inst)),
-                                   index));
+   vlog_set_ident(e, ident_new(tb_get(tb)));
    vlog_set_loc(e, vlog_loc(inst));
    vlog_set_ival(e, ((int64_t)count << 32) | pos);
 
@@ -1952,6 +2007,15 @@ static vlog_node_t elab_array_port_value(vlog_node_t inst, vlog_node_t port,
 
    const int count = vlog_ival(inst) >> 32, pos = vlog_ival(inst) & 0xffffffff;
    const unsigned pw = vlog_width(port), vw = vlog_width(value);
+
+   if (count >= 2 && vw != pw && vw != pw * count
+       && vlog_kind(value) != V_NUMBER) {
+      // The connection must be as wide as one port or all of the ports
+      error_at(vlog_loc(value), "connection to port %pQ of an instance array "
+               "must be %u or %u bits wide but is %u bits", vlog_ident(port),
+               pw, pw * count, vw);
+      return value;
+   }
 
    if (count < 2 || vw != pw * count)
       return value;
@@ -2047,7 +2111,14 @@ static vlog_node_t elab_iface_element(vlog_node_t value, int pos, int count)
       return value;
 
    vlog_node_t mr = vlog_value(value);
-   if (vlog_kind(mr) != V_MOD_REF || vlog_params(mr) > 0 || !vlog_has_ref(mr))
+   if (vlog_kind(mr) != V_MOD_REF || !vlog_has_ref(mr))
+      return value;
+
+   // A slice of the array selects some of the elements
+   int64_t sleft = 0, sright = 0;
+   const bool slice = vlog_params(mr) == 1
+      && vlog_kind(vlog_param(mr, 0)) == V_DIMENSION;
+   if (vlog_params(mr) > 0 && !slice)
       return value;
 
    vlog_node_t decl = vlog_ref(mr);
@@ -2055,17 +2126,37 @@ static vlog_node_t elab_iface_element(vlog_node_t value, int pos, int count)
        || vlog_ranges(decl) == 0)
       return value;
 
-   int64_t left, right;
-   if (!elab_instance_array_bounds(decl, &left, &right))
+   if (slice) {
+      vlog_node_t dim = vlog_param(mr, 0);
+      if (vlog_ranges(decl) != 1 || !vlog_get_const(vlog_left(dim), &sleft)
+          || !vlog_get_const(vlog_right(dim), &sright)) {
+         error_at(vlog_loc(value), "sorry, this slice of an array of "
+                  "interface instances is not supported");
+         return value;
+      }
+
+   }
+
+   const int total = slice ? (int)(llabs(sleft - sright) + 1)
+      : elab_instance_array_count(decl);
+   if (total == 0)
       return value;
 
-   if (llabs(left - right) + 1 != count) {
-      error_at(vlog_loc(value), "array of interface instances %pQ has %lld "
+   if (total != count) {
+      error_at(vlog_loc(value), "array of interface instances %pQ has %d "
                "elements but the port is connected to an array of %d "
-               "instances", vlog_ident(mr), (long long)(llabs(left - right) + 1),
-               count);
+               "instances", vlog_ident(mr), total, count);
       return value;
    }
+
+   int64_t index[MAX_INST_DIMS];
+   int ndims;
+   if (slice) {
+      index[0] = sleft >= sright ? sleft - pos : sleft + pos;
+      ndims = 1;
+   }
+   else
+      ndims = elab_array_indices(decl, pos, count, index);
 
    vlog_node_t emr = vlog_new(V_MOD_REF);
    vlog_set_ident(emr, vlog_ident(mr));
@@ -2073,8 +2164,8 @@ static vlog_node_t elab_iface_element(vlog_node_t value, int pos, int count)
    vlog_set_loc(emr, vlog_loc(mr));
    if (vlog_has_value(mr))
       vlog_set_value(emr, vlog_value(mr));
-   vlog_add_param(emr, elab_number(left >= right ? left - pos : left + pos,
-                                   vlog_loc(mr)));
+   for (int i = 0; i < ndims; i++)
+      vlog_add_param(emr, elab_number(index[i], vlog_loc(mr)));
 
    vlog_node_t href = vlog_new(V_HIER_REF);
    vlog_set_ident(href, vlog_ident(value));
@@ -3154,13 +3245,13 @@ static vlog_node_t elab_early_port_body(vlog_node_t port, void *arg)
 
    if (vlog_ranges(port) > 0) {
       // The elements of an array of ports all have the same layout
-      int64_t left, right;
-      if (value == NULL || !elab_instance_array_bounds(port, &left, &right)) {
+      const int count = value != NULL ? elab_instance_array_count(port) : 0;
+      if (count == 0) {
          diag_set_consumer(saved, saved_ctx);
          return NULL;
       }
 
-      value = elab_iface_element(value, 0, llabs(left - right) + 1);
+      value = elab_iface_element(value, 0, count);
    }
 
    elab_iface_conn_t c = {
@@ -3742,14 +3833,9 @@ static void elab_verilog_instance_list(vlog_node_t v, const elab_ctx_t *ctx)
          continue;
       }
 
-      int64_t left, right;
-      if (!elab_instance_array_bounds(inst, &left, &right))
-         continue;
-
-      const int count = llabs(left - right) + 1;
+      const int count = elab_instance_array_count(inst);
       for (int j = 0; j < count; j++) {
-         const int64_t index = left >= right ? left - j : left + j;
-         vlog_node_t elem = elab_array_element(inst, j, count, index);
+         vlog_node_t elem = elab_array_element(inst, j, count);
          elab_verilog_module(NULL, vlog_ident(elem), imod, ilist, elem, NULL,
                              ctx);
       }
@@ -5276,14 +5362,9 @@ static void elab_verilog_vhdl_instance_list(vlog_node_t v, tree_t entity,
          continue;
       }
 
-      int64_t left, right;
-      if (!elab_instance_array_bounds(inst, &left, &right))
-         continue;
-
-      const int count = llabs(left - right) + 1;
+      const int count = elab_instance_array_count(inst);
       for (int j = 0; j < count; j++) {
-         const int64_t index = left >= right ? left - j : left + j;
-         vlog_node_t elem = elab_array_element(inst, j, count, index);
+         vlog_node_t elem = elab_array_element(inst, j, count);
          elab_verilog_module(NULL, vlog_ident(elem), shim, v, elem, entity,
                              ctx);
       }
@@ -8604,7 +8685,10 @@ static vlog_node_t elab_rewrite_hier_ref_cb(vlog_node_t v, void *arg)
 
    // The whole of an instance array is selected by the elements of the
    // instance it is connected to
-   if (vlog_kind(prefix) == V_MOD_REF && vlog_params(prefix) == 0
+   if (vlog_kind(prefix) == V_MOD_REF
+       && (vlog_params(prefix) == 0
+           || (vlog_params(prefix) == 1
+               && vlog_kind(vlog_param(prefix, 0)) == V_DIMENSION))
        && vlog_has_ref(prefix)
        && (vlog_kind(vlog_ref(prefix)) == V_MOD_INST
            || vlog_kind(vlog_ref(prefix)) == V_IFACE_PORT)

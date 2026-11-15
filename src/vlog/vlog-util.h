@@ -79,6 +79,7 @@ vlog_node_t vlog_virtual_decl(vlog_node_t v);
 vlog_node_t vlog_virtual_decl_or_null(vlog_node_t v);
 bool vlog_virtual_pending(vlog_node_t v);
 bool vlog_virtual_chain(vlog_node_t v);
+bool vlog_typeparam_pending(vlog_node_t v);
 vlog_node_t vlog_virtual_joined_base(vlog_node_t v);
 void vlog_set_design_precision(int log10);
 int vlog_design_precision(void);

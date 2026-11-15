@@ -619,6 +619,7 @@ typedef enum {
    VLOG_F_REALVIEW = VLOG_F_ONESTEP, // On a real member of a union held as bits
    VLOG_F_REFVAR = VLOG_F_TIMELIT,   // On a class property holding a reference
    VLOG_F_SVA_LOCAL = VLOG_F_SOFT,   // On a local variable of a sequence
+   VLOG_F_UNSIGNED = VLOG_F_FILL,    // On an implicit data type with unsigned
    VLOG_F_CONTEXT = VLOG_F_RANDC,    // On a DPI import declared context
    VLOG_F_IMPLICIT = VLOG_F_FORWARD, // On a constraint prototype without extern
    VLOG_F_OPEN_PACKED = VLOG_F_WILDCARD,  // On an unsized packed dimension

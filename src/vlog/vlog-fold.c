@@ -527,11 +527,25 @@ static vlog_node_t fold_localparam(vlog_node_t v, fold_ctx_t *ctx)
    int width = 32;
    bool issigned = true;
    const vlog_kind_t kind = vlog_kind(value);
-   if (kind == V_REAL)
+   if (kind == V_REAL || vlog_is_real(value))
       vlog_set_subkind(dt, DT_REAL);
    else {
       width = vlog_width(value);
       issigned = vlog_is_signed(value);
+
+      // The signing declared with the parameter overrides that of the value
+      // (1800-2017 6.20.2)
+      const vlog_flags_t sign =
+         vlog_flags(vtype) & (VLOG_F_SIGNED | VLOG_F_UNSIGNED);
+      if (sign != 0 && issigned != !!(sign & VLOG_F_SIGNED)) {
+         issigned = !!(sign & VLOG_F_SIGNED);
+         if (kind == V_NUMBER) {
+            vlog_node_t n = vlog_new(V_NUMBER);
+            vlog_set_number(n, number_with_sign(vlog_number(value), issigned));
+            vlog_set_loc(n, vlog_loc(value));
+            vlog_set_value(v, (value = n));
+         }
+      }
 
       if (width == 32 && issigned) {
          vlog_set_subkind(dt, DT_INTEGER);

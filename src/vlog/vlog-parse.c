@@ -591,6 +591,9 @@ static bool is_nonansi_interface_port(vlog_node_t mod);
 static void p_nonansi_interface_port_declaration(vlog_node_t mod);
 static bool defer_subr_body(vlog_node_t subr, token_t end_token);
 static vlog_node_t specialise_forward(vlog_node_t forward);
+static vlog_node_t p_scoped_member_type(vlog_node_t scope);
+static vlog_node_t specialise_scoped(vlog_node_t d, bool forward);
+static bool keep_class_scope = false;
 static bool want_defer_body(void);
 static vlog_node_t resolve_forward_class(ident_t name);
 static void resolve_forward_specs(vlog_node_t class);
@@ -1878,7 +1881,10 @@ static vlog_node_t p_enum_base_type(void)
       }
 
    default:
-      return get_data_type(p_identifier());
+      if (peek() == tID && peek_nth(2) == tSCOPE && !is_process_name())
+         return p_data_type();   // A type declared in a package or class
+      else
+         return get_data_type(p_identifier());
    }
 }
 
@@ -2566,7 +2572,7 @@ static vlog_node_t p_data_type(void)
             }
             else if (d != NULL && vlog_kind(d) == V_CLASS_DECL
                      && (vlog_flags(d) & VLOG_F_GENERIC))
-               return specialise_class(d);
+               return specialise_scoped(d, false);
 
             if (d != NULL && peek() == tLSQUARE)
                d = p_typedef_dimensions(d);
@@ -2629,13 +2635,13 @@ static vlog_node_t p_data_type(void)
             scan_skip_parameters();
          else if (d != NULL && vlog_kind(d) == V_CLASS_DECL
              && (vlog_flags(d) & VLOG_F_GENERIC))
-            return specialise_class(d);
+            return specialise_scoped(d, false);
          else if (d != NULL && peek() == tHASH && vlog_kind(d) == V_TYPE_DECL
                   && generic_classes != NULL && hash_get(generic_classes, d))
-            return specialise_class(d);   // Own name inside class body
+            return specialise_scoped(d, false);   // Own name
          else if (d != NULL && peek() == tHASH && vlog_kind(d) == V_CLASS_DECL
                   && (vlog_flags(d) & VLOG_F_FORWARD))
-            return specialise_forward(d);
+            return specialise_scoped(d, true);
 
          if (d != NULL && vlog_kind(d) == V_TYPE_DECL
              && (vlog_flags(d) & VLOG_F_NETTYPE))
@@ -2688,8 +2694,10 @@ static vlog_node_t p_implicit_data_type(void)
    vlog_node_t v = vlog_new(V_DATA_TYPE);
    vlog_set_subkind(v, DT_IMPLICIT);
 
-   if (scan(tSIGNED, tUNSIGNED))
-      vlog_set_flags(v, p_signing());
+   if (scan(tSIGNED, tUNSIGNED)) {
+      const bool is_unsigned = peek() == tUNSIGNED;
+      vlog_set_flags(v, p_signing() | (is_unsigned ? VLOG_F_UNSIGNED : 0));
+   }
 
    while (peek() == tLSQUARE)
       vlog_add_range(v, p_packed_dimension());
@@ -2765,6 +2773,13 @@ static void p_net_port_type(vlog_net_kind_t *kind, vlog_node_t *dt)
       return;
    }
 
+   if (optional(tVAR)) {
+      // var_data_type: a variable port
+      *kind = V_NET_WIRE;
+      *dt = p_data_type_or_implicit();
+      return;
+   }
+
    if (scan(tSUPPLY0, tSUPPLY1, tTRI, tTRIAND, tTRIOR, tTRIREG,
             tTRI0, tTRI1, tUWIRE, tWIRE, tWAND, tWOR))
       *kind = p_net_type();
@@ -2811,6 +2826,9 @@ static void p_list_of_port_identifiers(vlog_node_t mod, v_port_kind_t kind,
       vlog_set_type(v, datatype);
       vlog_set_loc(v, &state.last_loc);
 
+      while (peek() == tLSQUARE)
+         vlog_add_range(v, p_unpacked_dimension());
+
       vlog_add_decl(mod, v);
       vlog_symtab_put(symtab, v);
 
@@ -2837,6 +2855,9 @@ static void p_list_of_variable_port_identifiers(vlog_node_t mod,
       vlog_set_ident2(v, ext);
       vlog_set_type(v, datatype);
       vlog_set_loc(v, &state.last_loc);
+
+      while (peek() == tLSQUARE)
+         vlog_add_range(v, p_unpacked_dimension());
 
       if (optional(tEQ))
          vlog_set_value(v, p_constant_expression());
@@ -3084,9 +3105,23 @@ static vlog_node_t p_instance_index(vlog_node_t mr)
 {
    // [ constant_expression ]
 
-   consume(tLSQUARE);
-   vlog_add_param(mr, p_expression());
-   consume(tRSQUARE);
+   do {
+      consume(tLSQUARE);
+
+      vlog_node_t index = p_expression();
+      if (optional(tCOLON)) {
+         // A slice of an array of instances
+         vlog_node_t slice = vlog_new(V_DIMENSION);
+         vlog_set_subkind(slice, V_DIM_UNPACKED);
+         vlog_set_left(slice, index);
+         vlog_set_right(slice, p_expression());
+         vlog_set_loc(slice, CURRENT_LOC);
+         index = slice;
+      }
+
+      vlog_add_param(mr, index);
+      consume(tRSQUARE);
+   } while (peek() == tLSQUARE);
 
    return mr;
 }
@@ -3099,16 +3134,19 @@ static bool at_instance_index(bool dot)
    if (peek() != tLSQUARE)
       return false;
 
-   int n = 2;
-   for (int depth = 1; depth > 0 && n < TOKENQ_SIZE - 2; n++) {
-      const token_t tok = peek_nth(n);
-      if (tok == tLSQUARE)
-         depth++;
-      else if (tok == tRSQUARE)
-         depth--;
-      else if (tok == tEOF || tok == tSEMI)
-         return false;
-   }
+   int n = 1;
+   do {
+      n++;
+      for (int depth = 1; depth > 0 && n < TOKENQ_SIZE - 2; n++) {
+         const token_t tok = peek_nth(n);
+         if (tok == tLSQUARE)
+            depth++;
+         else if (tok == tRSQUARE)
+            depth--;
+         else if (tok == tEOF || tok == tSEMI)
+            return false;
+      }
+   } while (peek_nth(n) == tLSQUARE && n < TOKENQ_SIZE - 2);
 
    return !dot || peek_nth(n) == tDOT;
 }
@@ -5739,7 +5777,10 @@ static vlog_node_t p_scope_prefix(void)
 
       if (scope == NULL && peek_nth(2) == tHASH) {
          // Specialisation of a parameterised class
+         const bool saved_keep = keep_class_scope;
+         keep_class_scope = true;
          vlog_node_t c = vlog_get_type(p_data_type());
+         keep_class_scope = saved_keep;
          consume(tSCOPE);
 
          if (c != NULL && vlog_kind(c) == V_CLASS_DECL) {
@@ -18625,6 +18666,56 @@ static vlog_node_t replay_default(vlog_node_t generic, generic_class_t *g,
    return result;
 }
 
+static vlog_node_t specialise_scoped(vlog_node_t d, bool forward)
+{
+   // The parameters of the specialisation may contain a scope prefix of their
+   // own which does not apply to the name which follows the specialisation
+
+   const bool keep = keep_class_scope;
+   keep_class_scope = false;
+   vlog_node_t spec = forward ? specialise_forward(d) : specialise_class(d);
+   keep_class_scope = keep;
+   return p_scoped_member_type(spec);
+}
+
+static vlog_node_t p_scoped_member_type(vlog_node_t type)
+{
+   // A type declared in a specialisation of a class: C #(int)::t
+
+   vlog_node_t scope = vlog_kind(type) == V_CLASS_DECL ? type : NULL;
+   if (keep_class_scope)
+      return type;   // The scope prefix takes the name which follows
+
+   while (scope != NULL && peek() == tSCOPE && peek_nth(2) == tID) {
+      consume(tSCOPE);
+      ident_t id = p_identifier();
+      const loc_t loc = state.last_loc;
+      vlog_node_t d = vlog_scope_member(scope, id);
+      if (d == NULL) {
+         error_at(&loc, "%pQ is not a member of class %pQ", id,
+                  vlog_ident(scope));
+         return logic_type();
+      }
+      else if (!is_data_type(d)) {
+         error_at(&loc, "%pQ is not a data type", id);
+         return logic_type();
+      }
+
+      type = d;
+      scope = vlog_kind(d) == V_CLASS_DECL ? d : NULL;
+      if (scope == NULL && vlog_kind(d) == V_TYPE_DECL) {
+         vlog_node_t t = vlog_get_type(d);
+         if (t != NULL && vlog_kind(t) == V_CLASS_DECL)
+            scope = t;
+      }
+   }
+
+   if (type != NULL && peek() == tLSQUARE && vlog_kind(type) != V_CLASS_DECL)
+      type = p_typedef_dimensions(type);
+
+   return type;
+}
+
 static vlog_node_t specialise_class(vlog_node_t generic)
 {
    // [ # ( list_of_parameter_assignments ) ]
@@ -20223,12 +20314,21 @@ static vlog_node_t p_generate_block(void)
    else {
       vlog_set_ident(b, generate_block_name());
 
+      // The item is in an implicit block with its own scope
+      vlog_symtab_push(symtab, b);
+
+      vlog_node_t saved_scope = current_module;
+      current_module = b;
+
       const unsigned saved_constructs = gen_constructs;
       gen_constructs = 0;
 
       p_generate_item(b);
 
       gen_constructs = saved_constructs;
+      current_module = saved_scope;
+
+      scope_leave();
    }
 
    vlog_set_loc(b, CURRENT_LOC);
@@ -20481,6 +20581,9 @@ static vlog_node_t p_genvar_iteration(void)
 
       vlog_add_stmt(v, a);
    }
+   else if (scan(tPLUSEQ, tMINUSEQ, tTIMESEQ, tDIVEQ, tPERCENTEQ, tAMPEQ,
+                 tBAREQ, tCARETEQ, tLSLEQ, tLSREQ, tASLEQ, tASREQ))
+      vlog_add_stmt(v, p_operator_assignment(ref));
    else {
       vlog_node_t a = vlog_new(V_POSTFIX);
       vlog_set_subkind(a, p_inc_or_dec_operator());
@@ -23491,7 +23594,7 @@ static vlog_node_t p_hierarchical_instance(void)
    vlog_node_t v = vlog_new(V_MOD_INST);
    vlog_set_ident(v, p_identifier());
 
-   if (peek() == tLSQUARE)
+   while (peek() == tLSQUARE)
       vlog_add_range(v, p_unpacked_dimension());
 
    if (lib_scan_active() && peek() != tLPAREN) {

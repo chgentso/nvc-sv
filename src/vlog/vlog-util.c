@@ -192,6 +192,14 @@ bool vlog_get_const(vlog_node_t v, int64_t *value)
          return vlog_get_const(vlog_param(v, 0), value);
       else
          return false;
+   case V_UNARY:
+      if (vlog_subkind(v) == V_UNARY_NEG
+          && vlog_get_const(vlog_value(v), value)) {
+         *value = -*value;
+         return true;
+      }
+      else
+         return false;
    default:
       return false;
    }
@@ -582,6 +590,7 @@ unsigned vlog_size(vlog_node_t v)
          return size;
       }
    case V_FUNC_DECL:
+   case V_ENUM_NAME:
       return 1;  // No unpacked dimensions
    case V_PART_SELECT:
       if (vlog_subkind(v) != V_RANGE_CONST) {
@@ -695,6 +704,43 @@ bool vlog_virtual_pending(vlog_node_t v)
       && vlog_subkind(type) == DT_VIRTUAL;
 }
 
+bool vlog_typeparam_pending(vlog_node_t v)
+{
+   // The prefix is an object whose type is a type parameter so the fields
+   // it has are not known until the instance is elaborated
+
+   if (vlog_kind(v) != V_MEMBER_REF || vlog_has_ref(v))
+      return false;
+
+   vlog_node_t prefix = vlog_value(v);
+   while (vlog_kind(prefix) == V_BIT_SELECT || vlog_kind(prefix) == V_PART_SELECT
+          || vlog_kind(prefix) == V_MEMBER_REF)
+      prefix = vlog_value(prefix);   // Fields of fields
+
+   if (vlog_kind(prefix) != V_REF || !vlog_has_ref(prefix))
+      return false;
+
+   vlog_node_t decl = vlog_ref(prefix);
+   switch (vlog_kind(decl)) {
+   case V_VAR_DECL:
+   case V_NET_DECL:
+   case V_PORT_DECL:
+   case V_PARAM_DECL:
+   case V_LOCALPARAM:
+   case V_LOCAL_DECL:
+   case V_TF_PORT_DECL:
+      break;
+   default:
+      return false;
+   }
+
+   if (!vlog_has_type(decl))
+      return false;
+
+   vlog_node_t type = vlog_type(decl);
+   return vlog_kind(type) == V_TYPE_DECL && (vlog_flags(type) & VLOG_F_TYPEPARAM);
+}
+
 bool vlog_virtual_chain(vlog_node_t v)
 {
    // A selection from a member of a virtual interface whose interface was
@@ -708,7 +754,8 @@ bool vlog_virtual_chain(vlog_node_t v)
    case V_MEMBER_REF:
       if (vlog_has_ref(v))
          return false;
-      return vlog_virtual_pending(v) || vlog_virtual_chain(vlog_value(v));
+      return vlog_virtual_pending(v) || vlog_typeparam_pending(v)
+         || vlog_virtual_chain(vlog_value(v));
    default:
       return false;
    }
@@ -1578,6 +1625,7 @@ vlog_node_t vlog_longest_static_prefix(vlog_node_t v)
       case V_PARAM_DECL:
       case V_LOCALPARAM:
       case V_LOCAL_DECL:
+      case V_ENUM_NAME:
          return NULL;
       default:
          return v;
@@ -2430,14 +2478,22 @@ ident_t vlog_mod_ref_name(vlog_node_t v)
    if (vlog_params(v) == 0)
       return vlog_ident(v);
 
-   int64_t index;
-   if (!vlog_get_const(vlog_param(v, 0), &index)) {
-      error_at(vlog_loc(v), "nonconstant index into instance array %pQ",
-               vlog_ident(v));
-      return vlog_ident(v);
+   LOCAL_TEXT_BUF tb = tb_new();
+   tb_cat(tb, istr(vlog_ident(v)));
+
+   const int nparams = vlog_params(v);
+   for (int i = 0; i < nparams; i++) {
+      int64_t index;
+      if (!vlog_get_const(vlog_param(v, i), &index)) {
+         error_at(vlog_loc(v), "nonconstant index into instance array %pQ",
+                  vlog_ident(v));
+         return vlog_ident(v);
+      }
+
+      tb_printf(tb, "[%"PRIi64"]", index);
    }
 
-   return ident_sprintf("%s[%"PRIi64"]", istr(vlog_ident(v)), index);
+   return ident_new(tb_get(tb));
 }
 
 bool vlog_block_is_named(tree_t b, ident_t name)

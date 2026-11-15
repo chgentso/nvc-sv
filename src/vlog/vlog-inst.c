@@ -69,8 +69,26 @@ static vlog_node_t bind_parameter(vlog_node_t decl, int nth, vlog_node_t inst)
 
    if (vlog_kind(value) == V_REF) {
       vlog_node_t decl = vlog_ref(value);
-      if (vlog_kind(decl) == V_LOCALPARAM)
+      if (vlog_kind(decl) == V_LOCALPARAM) {
+         vlog_node_t type = vlog_type(decl);
          value = vlog_value(decl);
+
+         const bool vector = vlog_kind(type) == V_DATA_TYPE
+            && (vlog_subkind(type) == DT_LOGIC || vlog_subkind(type) == DT_BIT
+                || vlog_subkind(type) == DT_IMPLICIT);
+
+         if (vector && vlog_ranges(decl) == 0
+             && (vlog_ranges(type) > 0 || !is_implicit_data_type(type)
+                 || (vlog_flags(type) & (VLOG_F_SIGNED | VLOG_F_UNSIGNED)))) {
+            // The value has the type declared for the parameter
+            vlog_node_t cast = vlog_new(V_CAST);
+            vlog_set_subkind(cast, V_CAST_TYPE);
+            vlog_set_type(cast, type);
+            vlog_set_value(cast, value);
+            vlog_set_loc(cast, vlog_loc(value));
+            value = cast;
+         }
+      }
    }
 
    vlog_node_t local = vlog_new(V_LOCALPARAM);
@@ -265,6 +283,31 @@ static vlog_node_t fixup_refs_cb(vlog_node_t v, void *ctx)
          vlog_node_t new = hash_get(map, vlog_ref(v));
          if (new != NULL)
             vlog_set_ref(v, new);
+      }
+      break;
+   case V_MEMBER_REF:
+      if (vlog_typeparam_pending(v)) {
+         // The type parameter is now bound so the field can be found
+         vlog_node_t type = vlog_get_type(vlog_value(v));
+         const vlog_kind_t kind = type ? vlog_kind(type) : V_DATA_TYPE;
+         if (kind == V_STRUCT_DECL || kind == V_UNION_DECL) {
+            const int ndecls = vlog_decls(type);
+            for (int i = 0; i < ndecls; i++) {
+               vlog_node_t d = vlog_decl(type, i);
+               if (vlog_ident(d) == vlog_ident(v)) {
+                  vlog_set_ref(v, d);
+                  return v;
+               }
+            }
+
+            error_at(vlog_loc(v), "%s has no field named %pQ",
+                     kind == V_STRUCT_DECL ? "struct" : "union",
+                     vlog_ident(v));
+         }
+         else
+            error_at(vlog_loc(v), "%pQ is not a struct or union",
+                     vlog_has_ident(vlog_value(v))
+                     ? vlog_ident(vlog_value(v)) : vlog_ident(v));
       }
       break;
    case V_SYS_TCALL:

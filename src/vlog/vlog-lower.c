@@ -179,6 +179,8 @@ static bool vlog_is_context_operand(vlog_node_t v)
 }
 
 static mir_value_t vlog_lower_rvalue(vlog_gen_t *g, vlog_node_t v);
+static mir_value_t vlog_array_slice_ptr(vlog_gen_t *g, vlog_node_t v,
+                                        mir_value_t obj);
 static bool vlog_is_unpacked_struct(vlog_node_t type)
 {
    if (type == NULL)
@@ -1442,6 +1444,17 @@ static vlog_select_t vlog_lower_param_value(vlog_gen_t *g, vlog_node_t decl)
        && mir_is_vector(g->mu, value)) {
       mir_type_t vtype = mir_get_type(g->mu, value);
       const int size = mir_get_size(g->mu, vtype);
+
+      // Only the signing of the type is declared (6.20.2)
+      const vlog_flags_t sign = vlog_flags(dt) & (VLOG_F_SIGNED | VLOG_F_UNSIGNED);
+      if (sign != 0 && mir_get_signed(g->mu, vtype) != !!(sign & VLOG_F_SIGNED)) {
+         const bool is_signed = sign & VLOG_F_SIGNED;
+         mir_type_t stype = mir_get_class(g->mu, vtype) == MIR_TYPE_VEC2
+            ? mir_vec2_type(g->mu, size, is_signed)
+            : mir_vec4_type(g->mu, size, is_signed);
+         value = mir_build_cast(g->mu, stype, value);
+         vtype = stype;
+      }
 
       vlog_select_t result = {
          .obj        = value,
@@ -3785,8 +3798,10 @@ static void vlog_assign_variable(vlog_gen_t *g, vlog_node_t target,
                vlog_select_t src = vlog_lower_select(g, rhs);
                if (mir_points_to_vector(g->mu, src.obj)) {
                   mir_type_t t_offset = mir_offset_type(g->mu);
-                  mir_build_copy(g->mu, lvalue1.obj, src.obj,
-                                 mir_const(g->mu, t_offset, count));
+                  mir_build_copy(
+                     g->mu, vlog_array_slice_ptr(g, target, lvalue1.obj),
+                     vlog_array_slice_ptr(g, rhs, src.obj),
+                     mir_const(g->mu, t_offset, count));
                   return;
                }
             }
@@ -3801,8 +3816,9 @@ static void vlog_assign_variable(vlog_gen_t *g, vlog_node_t target,
 
          if (!mir_is_null(value) && mir_points_to_vector(g->mu, lvalue1.obj)) {
             mir_type_t t_flat = mir_vec4_type(g->mu, count * eti->size, false);
-            vlog_store_flat_array(g, lvalue1.obj, count, eti,
-                                  vlog_lower_cast(g, t_flat, value));
+            vlog_store_flat_array(
+               g, vlog_array_slice_ptr(g, target, lvalue1.obj), count, eti,
+               vlog_lower_cast(g, t_flat, value));
             return;
          }
       }
@@ -5062,7 +5078,7 @@ static mir_value_t vlog_lower_update_target(vlog_gen_t *g, vlog_node_t target)
    return value;
 }
 
-static void vlog_spill_index(vlog_gen_t *g, vlog_node_t expr)
+static void vlog_spill_index(vlog_gen_t *g, vlog_node_t expr, bool persist)
 {
    // Evaluate an expression once and remember the value in a temporary
    // which is used where the expression is lowered again
@@ -5073,7 +5089,8 @@ static void vlog_spill_index(vlog_gen_t *g, vlog_node_t expr)
    mir_value_t value = vlog_lower_rvalue(g, expr);
    mir_type_t type = mir_get_type(g->mu, value);
    mir_value_t var = mir_add_var(g->mu, type, MIR_NULL_STAMP,
-                                 ident_uniq("spill"), MIR_VAR_TEMP);
+                                 ident_uniq("spill"),
+                                 persist ? 0 : MIR_VAR_TEMP);
    mir_build_store(g->mu, var, value);
 
    g->spills[g->nspills].expr = expr;
@@ -5105,7 +5122,7 @@ static bool vlog_needs_spill(vlog_node_t expr)
    return found && !vlog_is_string(expr) && !vlog_is_real(expr);
 }
 
-static void vlog_spill_target(vlog_gen_t *g, vlog_node_t target)
+static void vlog_spill_target(vlog_gen_t *g, vlog_node_t target, bool persist)
 {
    // The indices of the target of an operator assignment are evaluated
    // once, before the right hand side (11.4.1)
@@ -5113,7 +5130,7 @@ static void vlog_spill_target(vlog_gen_t *g, vlog_node_t target)
    switch (vlog_kind(target)) {
    case V_BIT_SELECT:
       {
-         vlog_spill_target(g, vlog_value(target));
+         vlog_spill_target(g, vlog_value(target), persist);
          vlog_node_t type = vlog_get_type(vlog_value(target));
          if (type != NULL && vlog_kind(type) == V_DATA_TYPE
              && vlog_subkind(type) == DT_ASSOC)
@@ -5122,19 +5139,26 @@ static void vlog_spill_target(vlog_gen_t *g, vlog_node_t target)
          const int nparams = vlog_params(target);
          for (int i = 0; i < nparams; i++) {
             if (vlog_needs_spill(vlog_param(target, i)))
-               vlog_spill_index(g, vlog_param(target, i));
+               vlog_spill_index(g, vlog_param(target, i), persist);
          }
       }
       break;
    case V_PART_SELECT:
-      vlog_spill_target(g, vlog_value(target));
+      vlog_spill_target(g, vlog_value(target), persist);
       if (vlog_needs_spill(vlog_left(target)))
-         vlog_spill_index(g, vlog_left(target));
+         vlog_spill_index(g, vlog_left(target), persist);
       if (vlog_has_right(target) && vlog_needs_spill(vlog_right(target)))
-         vlog_spill_index(g, vlog_right(target));
+         vlog_spill_index(g, vlog_right(target), persist);
       break;
    case V_MEMBER_REF:
-      vlog_spill_target(g, vlog_value(target));
+      vlog_spill_target(g, vlog_value(target), persist);
+      break;
+   case V_CONCAT:
+      {
+         const int nparams = vlog_params(target);
+         for (int i = 0; i < nparams; i++)
+            vlog_spill_target(g, vlog_param(target, i), persist);
+      }
       break;
    default:
       break;
@@ -5146,7 +5170,7 @@ static mir_value_t vlog_lower_operator_assignment(vlog_gen_t *g, vlog_node_t v)
    vlog_node_t target = vlog_target(v);
    const int saved_spills = g->nspills;
    if (vlog_subkind(v) != V_ASSIGN_EQUALS)
-      vlog_spill_target(g, target);
+      vlog_spill_target(g, target, false);
 
    mir_value_t cur = vlog_lower_update_target(g, target);
 
@@ -8057,6 +8081,38 @@ static mir_value_t vlog_lower_partial_select(vlog_gen_t *g,
    return mir_build_pack(g->mu, select->type, tmp);
 }
 
+static mir_value_t vlog_array_slice_ptr(vlog_gen_t *g, vlog_node_t v,
+                                        mir_value_t obj)
+{
+   // Point to the first element of a slice of a one dimensional unpacked
+   // array held in memory, otherwise return the object unchanged
+
+   if (vlog_kind(v) != V_PART_SELECT)
+      return obj;
+
+   vlog_node_t base = vlog_value(v);
+   vlog_node_t bdims[MAX_UNPACKED_DIMS];
+   if (vlog_unpacked_dims(base, bdims) != 1
+       || mir_is_signal(g->mu, obj) || !mir_points_to_vector(g->mu, obj))
+      return obj;
+
+   mir_type_t t_offset = mir_offset_type(g->mu);
+   mir_value_t start = vlog_lower_array_off(
+      g, bdims[0], vlog_lower_rvalue(g, vlog_left(v)));
+
+   const vlog_range_kind_t kind = vlog_subkind(v);
+   if (kind != V_RANGE_CONST) {
+      const bool is_up = vlog_is_up(bdims[0]);
+      const bool same_dir = (kind == V_RANGE_POS && is_up)
+         || (kind == V_RANGE_NEG && !is_up);
+      if (!same_dir)
+         start = mir_build_sub(g->mu, t_offset, start,
+                               mir_const(g->mu, t_offset, vlog_size(v) - 1));
+   }
+
+   return mir_build_array_ref(g->mu, obj, start);
+}
+
 static mir_value_t vlog_lower_rvalue_select_bits(vlog_gen_t *g, vlog_node_t v)
 {
    if (vlog_kind(v) == V_PART_SELECT) {
@@ -8067,14 +8123,7 @@ static mir_value_t vlog_lower_rvalue_select_bits(vlog_gen_t *g, vlog_node_t v)
          vlog_select_t whole = vlog_lower_select(g, base);
          if (!mir_is_signal(g->mu, whole.obj)
              && mir_points_to_vector(g->mu, whole.obj)) {
-            mir_type_t t_offset = mir_offset_type(g->mu);
-            mir_value_t start = vlog_lower_array_off(
-               g, bdims[0], vlog_lower_rvalue(g, vlog_left(v)));
-            if (vlog_subkind(v) == V_RANGE_NEG)
-               start = mir_build_sub(
-                  g->mu, t_offset, start,
-                  mir_const(g->mu, t_offset, vlog_size(v) - 1));
-            mir_value_t obj = mir_build_array_ref(g->mu, whole.obj, start);
+            mir_value_t obj = vlog_array_slice_ptr(g, v, whole.obj);
             return vlog_load_flat_array(
                g, obj, vlog_size(v),
                vlog_array_elem_info(g, base), false);
@@ -9409,6 +9458,10 @@ static mir_value_t vlog_lower_with_context(vlog_gen_t *g, vlog_node_t v,
       {
          vlog_node_t target = vlog_target(v);
 
+         // The indices of the target are evaluated once
+         const int saved_spills = g->nspills;
+         vlog_spill_target(g, target, false);
+
          mir_value_t prev = vlog_lower_update_target(g, target);
          mir_type_t type = mir_get_type(g->mu, prev);
          if (mir_get_class(g->mu, type) == MIR_TYPE_REAL) {
@@ -9417,6 +9470,7 @@ static mir_value_t vlog_lower_with_context(vlog_gen_t *g, vlog_node_t v,
                ? mir_build_sub(g->mu, type, prev, rone)
                : mir_build_add(g->mu, type, prev, rone);
             vlog_assign_variable(g, target, rnext, NULL);
+            g->nspills = saved_spills;
             return vlog_kind(v) == V_PREFIX ? rnext : prev;
          }
 
@@ -9432,6 +9486,7 @@ static mir_value_t vlog_lower_with_context(vlog_gen_t *g, vlog_node_t v,
          mir_value_t next = mir_build_binary(g->mu, op, type, prev, one);
 
          vlog_assign_variable(g, target, next, NULL);
+         g->nspills = saved_spills;
 
          return vlog_kind(v) == V_PREFIX ? next : prev;
       }
@@ -11675,6 +11730,10 @@ static void vlog_lower_blocking_assignment(vlog_gen_t *g, vlog_node_t v)
       fatal_at(vlog_loc(v), "sorry, this kind of intra-assignment timing "
                "control is not supported");
 
+   // The indices of the target are evaluated once, before the delay
+   const int saved_spills = g->nspills;
+   vlog_spill_target(g, target, true);
+
    vlog_select_t lvalue = vlog_lower_select(g, target);
    const mir_class_t class = mir_get_class(g->mu, lvalue.type);
    if (class != MIR_TYPE_VEC2 && class != MIR_TYPE_VEC4)
@@ -11740,6 +11799,7 @@ static void vlog_lower_blocking_assignment(vlog_gen_t *g, vlog_node_t v)
    }
 
    vlog_assign_variable(g, target, mir_build_load(g->mu, saved), NULL);
+   g->nspills = saved_spills;
 }
 
 static void vlog_lower_nba_store(vlog_gen_t *g, vlog_node_t v,
@@ -11868,6 +11928,20 @@ static void vlog_lower_non_blocking_assignment(vlog_gen_t *g, vlog_node_t v)
    mir_type_t t_time = mir_time_type(g->mu);
    mir_type_t t_offset = mir_offset_type(g->mu);
 
+   // The delay is evaluated first as it may have side effects which must
+   // not overwrite the temporaries holding the value
+   mir_value_t after;
+   if (vlog_has_delay(v)) {
+      vlog_node_t delay = vlog_delay(v);
+      if (vlog_kind(delay) != V_DELAY_CONTROL)
+         fatal_at(vlog_loc(v), "sorry, an event control in a non-blocking "
+                  "assignment is not supported");
+
+      after = vlog_lower_delay(g, delay);
+   }
+   else
+      after = mir_const(g->mu, t_time, 0);
+
    vlog_node_t dims[MAX_UNPACKED_DIMS];
    int ndims;
 
@@ -11914,18 +11988,6 @@ static void vlog_lower_non_blocking_assignment(vlog_gen_t *g, vlog_node_t v)
           && vlog_kind(rhs) != V_PATTERN_EXPR)
          source = vlog_copy_value(g, source, ttype);
    }
-
-   mir_value_t after;
-   if (vlog_has_delay(v)) {
-      vlog_node_t delay = vlog_delay(v);
-      if (vlog_kind(delay) != V_DELAY_CONTROL)
-         fatal_at(vlog_loc(v), "sorry, an event control in a non-blocking "
-                  "assignment is not supported");
-
-      after = vlog_lower_delay(g, delay);
-   }
-   else
-      after = mir_const(g->mu, t_time, 0);
 
    for (int i = 0, offset = 0; i < nlvalues;
         offset += lvalues[i].size, i++) {
