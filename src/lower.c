@@ -4152,6 +4152,28 @@ static vcode_reg_t lower_aggregate_bounds(lower_unit_t *lu, tree_t expr,
                                       &index_right_reg, &dir_reg);
 
          right_reg = emit_add(left_reg, cast_reg);
+
+         // LRM 08 section 9.2.5: if all the operands are null arrays
+         // then the result is the last one including its bounds
+         bool all_concat = true;
+         for (int i = 0; i < nassocs; i++)
+            all_concat &= tree_subkind(tree_assoc(expr, i)) == A_CONCAT;
+
+         if (all_concat && nassocs > 1 && dimension_of(type) == 1) {
+            const int last = nassocs - 1;
+            type_t last_type = tree_type(tree_value(tree_assoc(expr, last)));
+            vcode_reg_t is_null =
+               emit_cmp(VCODE_CMP_EQ, length_reg, emit_const(voffset, 0));
+            vcode_reg_t l_reg = lower_array_left(lu, last_type, 0,
+                                                 value_regs[last]);
+            vcode_reg_t r_reg = lower_array_right(lu, last_type, 0,
+                                                  value_regs[last]);
+            vcode_reg_t d_reg = lower_array_dir(lu, last_type, 0,
+                                                value_regs[last]);
+            left_reg = emit_select(is_null, l_reg, left_reg);
+            right_reg = emit_select(is_null, r_reg, right_reg);
+            dir_reg = emit_select(is_null, d_reg, dir_reg);
+         }
       }
    }
 
@@ -8386,8 +8408,8 @@ static void lower_resolution_wrapper(lower_unit_t *lu, object_t *obj)
    ident_t rfunc = tree_ident2(rdecl);
 
    type_t uarray_param = type_param(tree_type(rdecl), 0);
-   assert(type_kind(uarray_param) == T_ARRAY);
-   tree_t r = range_of(type_index(uarray_param, 0), 0);
+   assert(type_is_array(uarray_param));
+   tree_t r = range_of(index_type_of(uarray_param, 0), 0);
 
    vcode_type_t velem = lower_type(type_elem_recur(elem));
    vcode_stamp_t vbounds = lower_bounds(elem);

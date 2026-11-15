@@ -7833,6 +7833,48 @@ START_TEST(test_issue1692)
 }
 END_TEST
 
+START_TEST(test_litsep)
+{
+   set_standard(STD_08);
+
+   input_from_file(TESTDIR "/parse/litsep.vhd");
+
+   const error_t expect[] = {
+      { 10, "a separator is required between an abstract literal and the "
+        "reserved word mod" },
+      { 13, "a separator is required between an abstract literal and the "
+        "reserved word rem" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   parse_and_check(T_ENTITY, T_ARCH);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_gindex)
+{
+   set_standard(STD_19);
+
+   input_from_file(TESTDIR "/parse/gindex.vhd");
+
+   const error_t expect[] = {
+      {  7, "index subtype definitions and index constraints cannot be "
+         "mixed in the index list of an array type definition" },
+      { 13, "an anonymous index type of an array type definition must be "
+        "of the discrete class" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   parse_and_check(T_ENTITY, T_ARCH);
+
+   check_expected_errors();
+}
+END_TEST
+
 Suite *get_parse_tests(void)
 {
    Suite *s = suite_create("parse");
@@ -8045,6 +8087,8 @@ Suite *get_parse_tests(void)
    tcase_add_test(tc_core, test_issue1614);
    tcase_add_test(tc_core, test_visibility13);
    tcase_add_test(tc_core, test_issue1692);
+   tcase_add_test(tc_core, test_litsep);
+   tcase_add_test(tc_core, test_gindex);
    suite_add_tcase(s, tc_core);
 
    return s;

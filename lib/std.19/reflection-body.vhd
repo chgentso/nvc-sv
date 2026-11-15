@@ -570,17 +570,15 @@ package body reflection is
 
         impure function normalise_index (idx : index; dim : dimension) return natural is
         begin
-            return natural(idx - f_subtype.left(dim));
-        end function;
-
-        impure function stride (dim : dimension) return natural is
-            variable tmp : natural := 0;
-        begin
-            return 0 when dim = 1;
-            for i in index'(1) to dim - 1 loop
-                tmp := tmp + natural(f_subtype.length(i));
-            end loop;
-            return tmp;
+            assert idx >= f_subtype.low(dim) and idx <= f_subtype.high(dim)
+                report "index " & index'image(idx) & " is outside the range "
+                       & "of dimension " & dimension'image(dim) & " of the array"
+                severity failure;
+            if f_subtype.ascending(dim) then
+                return natural(idx - f_subtype.left(dim));
+            else
+                return natural(f_subtype.left(dim) - idx);
+            end if;
         end function;
 
         impure function get (idx : index) return value_mirror is
@@ -591,7 +589,6 @@ package body reflection is
         end function;
 
         impure function get (idx1, idx2 : index) return value_mirror is
-            constant stride1 : natural := stride(1);
         begin
             return get((idx1, idx2));
         end function;
@@ -606,7 +603,7 @@ package body reflection is
         begin
             assert f_subtype.dimensions = dimension(idx'length);
             for i in idx'range loop
-                tmp := tmp * stride(i);
+                tmp := tmp * natural(f_subtype.length(i));
                 tmp := tmp + normalise_index(idx(i), i);
             end loop;
             return f_elements.all(tmp);
@@ -670,12 +667,12 @@ package body reflection is
 
         impure function low (idx : dimension := 1) return index is
         begin
-            return left when ascending else right;
+            return left(idx) when ascending(idx) else right(idx);
         end function;
 
         impure function high (idx : dimension := 1) return index is
         begin
-            return right when ascending else left;
+            return right(idx) when ascending(idx) else left(idx);
         end function;
 
         impure function length (idx : dimension := 1) return index is

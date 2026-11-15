@@ -513,6 +513,21 @@ void map_generic_type(nametab_t *tab, type_t generic, type_t actual)
    hash_put(tab->top_scope->gmap, generic, actual);
 }
 
+type_t get_generic_type_map(nametab_t *tab, type_t generic)
+{
+   // Returns the actual type earlier associated with a formal generic type
+
+   for (scope_t *s = tab->top_scope; s != NULL; s = s->parent) {
+      if (s->gmap != NULL) {
+         type_t actual = hash_get(s->gmap, generic);
+         if (actual != NULL)
+            return actual;
+      }
+   }
+
+   return NULL;
+}
+
 void map_generic_subprogram(nametab_t *tab, tree_t decl, tree_t actual)
 {
    assert(is_subprogram(actual));
@@ -981,6 +996,8 @@ static symbol_t *make_visible(scope_t *s, ident_t name, tree_t decl,
          return sym;
       else if (dd->visibility == HIDDEN)
          continue;
+      else if (dd->visibility == ATTRIBUTE && tkind != T_ATTR_SPEC)
+         continue;   // An attribute specification is not a declaration
       else if (dd->kind == T_LIBRARY) {
          if (tkind == T_LIBRARY && tree_ident(decl) == name)
             return sym;   // Ignore redundant library declarations
@@ -2368,6 +2385,34 @@ tree_t resolve_field_name(nametab_t *tab, const loc_t *loc, ident_t name,
    return decl;
 }
 
+static tree_t solve_selected_prefix(nametab_t *tab, tree_t t)
+{
+   // Solve the prefix of a selected name
+
+   tree_t prefix = tree_value(t);
+   if (tree_kind(prefix) == T_REF && !tree_has_type(prefix)) {
+      // A function name may be an expanded name prefix inside the
+      // function itself (LRM 08 section 8.3) in which case it must not
+      // be interpreted as a call with no arguments
+      const symbol_t *sym = iterate_symbol_for(tab, tree_ident(prefix));
+      for (int i = 0; sym != NULL && i < sym->ndecls; i++) {
+         const decl_t *dd = get_decl(sym, i);
+         if (dd->visibility == HIDDEN || !(dd->mask & N_SUBPROGRAM)
+             || !is_container(dd->tree) || !is_enclosing(tab, dd->tree))
+            continue;
+
+         scope_t *s = private_scope_for(tab, dd->tree);
+         if (symbol_for(s, tree_ident(t)) != NULL) {
+            tree_set_ref(prefix, dd->tree);
+            tree_set_type(prefix, tree_type(dd->tree));
+            break;
+         }
+      }
+   }
+
+   return solve_types(tab, prefix, NULL);
+}
+
 static tree_t resolve_record_ref_or_call(nametab_t *tab, tree_t t, bool pcall)
 {
    assert(tree_kind(t) == T_RECORD_REF);
@@ -2375,7 +2420,7 @@ static tree_t resolve_record_ref_or_call(nametab_t *tab, tree_t t, bool pcall)
    if (tree_has_type(t))
       return NULL;
 
-   tree_t prefix = solve_types(tab, tree_value(t), NULL);
+   tree_t prefix = solve_selected_prefix(tab, t);
 
    if (get_library_ref(prefix) != NULL)
       return NULL;
@@ -5226,7 +5271,7 @@ static tree_t solve_record_ref(nametab_t *tab, tree_t t)
    if (tree_has_type(t))
       return t;
 
-   tree_t prefix = solve_types(tab, tree_value(t), NULL);
+   tree_t prefix = solve_selected_prefix(tab, t);
    tree_set_value(t, (prefix = implicit_dereference(tab, prefix)));
 
    tree_t select = resolve_selected_name(tab, t);
@@ -6083,8 +6128,34 @@ static tree_t try_solve_new(nametab_t *tab, tree_t t)
    type_set_restrict(tab, type_is_access);
 
    type_t type;
-   if (!type_set_uniq(tab, &type))
-      return NULL;
+   if (!type_set_uniq(tab, &type)) {
+      // Use the designated subtype of the allocator to choose between
+      // several access types in the context (LRM 08 section 9.3.7)
+      tree_t value = tree_value(t);
+      if (tab->top_type_set == NULL || !tree_has_type(value))
+         return NULL;
+
+      type_t designated = tree_type(value);
+      if (type_is_none(designated) || type_is_incomplete(designated))
+         return NULL;
+
+      type_t found = NULL;
+      for (int i = 0; i < tab->top_type_set->members.count; i++) {
+         type_t member = tab->top_type_set->members.items[i].type;
+         type_t d = type_designated(member);
+         if (type_is_incomplete(d) || !type_eq(d, designated))
+            continue;
+         else if (found != NULL && !type_eq(found, member))
+            return NULL;
+         else
+            found = member;
+      }
+
+      if (found == NULL)
+         return NULL;
+
+      type = found;
+   }
 
    tree_set_type(t, type);
    return t;
@@ -6474,6 +6545,8 @@ static tree_t try_solve_type(nametab_t *tab, tree_t t)
       return try_solve_array_ref(tab, t);
    case T_RECORD_REF:
       return try_solve_record_ref(tab, t);
+   case T_COND_VALUE:
+      return NULL;   // Type depends on the context
    default:
       CANNOT_HANDLE(t);
    }

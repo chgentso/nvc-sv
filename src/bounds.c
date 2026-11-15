@@ -928,6 +928,9 @@ static void bounds_check_aggregate(tree_t t)
          break;
       }
 
+      if (ilow > ihigh)
+         continue;   // Null slice or null concatenation operand
+
       if (unconstrained) {
          clow = MIN(clow, ilow);
          chigh = MAX(chigh, ihigh);
@@ -937,7 +940,7 @@ static void bounds_check_aggregate(tree_t t)
          bounds_cover_choice(&covered, a, index_type, ilow, ihigh);
    }
 
-   if (known_elem_count)
+   if (known_elem_count && (!unconstrained || clow <= chigh))
       bounds_check_missing_choices(t, type, index_type, dir, clow, chigh,
                                    covered);
 

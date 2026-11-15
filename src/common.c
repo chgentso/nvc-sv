@@ -3065,18 +3065,14 @@ bool calculate_aggregate_bounds(tree_t expr, range_kind_t *kind,
          return false;
 
       case A_POS:
-         if (i == 0) {
+         {
             int64_t ileft;
-            if (folded_int(tree_left(base_r), &ileft))
-               ilow = ihigh = ileft;
-            else
+            if (!folded_int(tree_left(base_r), &ileft))
                return false;
+
+            ilow = ihigh = (dir == RANGE_TO ? ileft + pos : ileft - pos);
+            pos++;
          }
-         else if (dir == RANGE_TO)
-            ilow = ihigh = clow + pos;
-         else
-            ilow = ihigh = chigh - pos;
-         pos++;
          break;
 
       case A_CONCAT:
@@ -3087,22 +3083,22 @@ bool calculate_aggregate_bounds(tree_t expr, range_kind_t *kind,
             if (type_is_unconstrained(value_type))
                return false;
             else if (folded_length(range_of(value_type, 0), &length)) {
-               if (i == 0) {
-                  int64_t ileft;
-                  if (folded_int(tree_left(base_r), &ileft))
-                     ilow = ihigh = ileft;
-                  else
-                     return false;
-               }
-               else if (dir == RANGE_TO) {
-                  ilow = clow + pos;
+               int64_t ileft;
+               if (!folded_int(tree_left(base_r), &ileft))
+                  return false;
+
+               if (dir == RANGE_TO) {
+                  ilow = ileft + pos;
                   ihigh = ilow + length - 1;
                }
                else {
-                  ihigh = chigh - pos;
+                  ihigh = ileft - pos;
                   ilow = ihigh - length + 1;
                }
                pos += length;
+
+               if (length == 0)
+                  continue;   // Null operand contributes no elements
             }
             else
                return false;
@@ -3113,6 +3109,9 @@ bool calculate_aggregate_bounds(tree_t expr, range_kind_t *kind,
       clow = MIN(clow, ilow);
       chigh = MAX(chigh, ihigh);
    }
+
+   if (clow > chigh)
+      return false;   // Every operand was a null concatenation operand
 
    if (clow < low || chigh > high)
       return false;   // Will raise a bounds check error later
@@ -3332,4 +3331,16 @@ tree_t find_default_arch(lib_t lib, ident_t entity)
       return NULL;
 
    return lib_get(lib, params.chosen);
+}
+
+bool same_type_mark(type_t declared, type_t mark)
+{
+   // True if the type mark used in a declaration of an object with
+   // subtype DECLARED is MARK: an anonymous subtype denotes the type
+   // mark it was formed from
+
+   while (is_anonymous_subtype(declared))
+      declared = type_base(declared);
+
+   return declared == mark;
 }

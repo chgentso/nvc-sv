@@ -123,6 +123,7 @@ static void p_trailing_label(ident_t label);
 static tree_t p_condition(void);
 static type_t p_subtype_indication(void);
 static tree_t p_record_constraint(type_t base);
+static tree_t p_conditional_tail(tree_t expr0);
 static tree_t p_qualified_expression(tree_t prefix);
 static tree_t p_concurrent_procedure_call_statement(ident_t label, tree_t name);
 static tree_t p_subprogram_instantiation_declaration(void);
@@ -2447,7 +2448,7 @@ static type_t apply_index_attribute(tree_t aref)
 
    if (tree_kind(name) == T_REF && tree_has_ref(name)) {
       tree_t decl = tree_ref(name);
-      if (aliased_type_decl(decl) != NULL)
+      if (aliased_type_decl(decl) != NULL && type_is_unconstrained(type))
          return base;
    }
 
@@ -2457,6 +2458,12 @@ static type_t apply_index_attribute(tree_t aref)
    tree_set_ident(rexpr, ident_new("RANGE"));
    tree_set_name(rexpr, name);
    tree_set_type(rexpr, base);
+
+   if (nparams == 1) {
+      tree_t dim = tree_value(tree_param(aref, 0));
+      solve_types(nametab, dim, std_type(NULL, STD_UNIVERSAL_INTEGER));
+      add_param(rexpr, dim, P_POS, NULL);
+   }
 
    tree_t r = tree_new(T_RANGE);
    tree_set_loc(r, tree_loc(aref));
@@ -5318,6 +5325,8 @@ static void p_constraint(type_t type)
          type_set_constraint(type, p_index_constraint(base));
       else if (type_is_record(base))
          type_set_constraint(type, p_record_constraint(base));
+      else if (type_is_access(base) && type_is_record(type_designated(base)))
+         type_set_constraint(type, p_record_constraint(type_designated(base)));
       else
          p_array_constraint(type, base);
       break;
@@ -5452,6 +5461,37 @@ static tree_t p_abstract_literal(void)
    }
 
    tree_set_loc(t, CURRENT_LOC);
+
+   // LRM 08 section 15.3: a separator is required between an abstract
+   // literal and an adjacent reserved word
+   switch (peek()) {
+   case tMOD: case tREM: case tAND: case tOR: case tXOR: case tNAND:
+   case tNOR: case tXNOR: case tTO: case tDOWNTO: case tTHEN: case tLOOP:
+   case tSLL: case tSRL: case tSLA: case tSRA: case tROL: case tROR:
+   case tAFTER: case tGENERATE: case tELSE: case tELSIF: case tWHEN:
+   case tIS: case tUNITS: case tOF:
+      {
+         const loc_t *next = &(state.tokenq[state.tokenq_tail].loc);
+         const loc_t *last = &state.last_loc;
+         if (next->first_line == last->first_line + last->line_delta
+             && next->first_column == last->first_column
+                + last->column_delta + 1)
+         {
+            diag_t *d = pedantic_diag(next);
+            if (d != NULL) {
+               diag_printf(d, "a separator is required between an abstract "
+                           "literal and the reserved word %s",
+                           token_str(peek()));
+               diag_lrm(d, STD_08, "15.3");
+               diag_emit(d);
+            }
+         }
+      }
+      break;
+   default:
+      break;
+   }
+
    return t;
 }
 
@@ -5817,6 +5857,15 @@ static tree_t p_aggregate_or_expression(void)
    case tRPAREN:
       consume(tRPAREN);
       return head;
+
+   case tWHEN:
+      // VHDL-2019 conditional expression as a parenthesised primary
+      {
+         consume(tWHEN);
+         tree_t value = p_conditional_tail(head);
+         consume(tRPAREN);
+         return value;
+      }
 
    case tASSOC:
    case tCOMMA:
@@ -6699,16 +6748,42 @@ static void p_floating_incomplete_type_definition(type_t type)
    type_set_subkind(type, GTYPE_FLOATING);
 }
 
-static type_t p_array_index_incomplete_type(void)
+static type_t p_array_index_incomplete_type(int *form)
 {
    // index_subtype_definition | index_constraint | anonymous_type_indication
 
    BEGIN("array index incomplete type");
 
-   if (peek() == tTYPE)
-      return p_anonymous_type_indication();
-   else
-      return p_index_subtype_definition(NULL);
+   if (peek() == tTYPE) {
+      type_t type = p_anonymous_type_indication();
+
+      if (type_kind(type) == T_GENERIC) {
+         const gtype_class_t class = type_subkind(type);
+         if (class != GTYPE_DISCRETE && class != GTYPE_INTEGER) {
+            parse_error(CURRENT_LOC, "an anonymous index type of an array "
+                        "type definition must be of the discrete class");
+            return type_new(T_NONE);
+         }
+      }
+
+      return type;
+   }
+   else {
+      // index_subtype_definition | index_constraint with a subtype mark
+      type_t type = p_type_mark(NULL);
+
+      const int this_form = optional(tRANGE) ? 1 : 2;
+      if (this_form == 1)
+         consume(tBOX);
+
+      if (*form != 0 && *form != this_form)
+         parse_error(CURRENT_LOC, "index subtype definitions and index "
+                     "constraints cannot be mixed in the index list of an "
+                     "array type definition");
+
+      *form = this_form;
+      return type;
+   }
 }
 
 static void p_array_index_incomplete_type_list(type_t type)
@@ -6717,8 +6792,9 @@ static void p_array_index_incomplete_type_list(type_t type)
 
    BEGIN("array index incomplete type list");
 
+   int form = 0;
    do {
-      type_add_index(type, p_array_index_incomplete_type());
+      type_add_index(type, p_array_index_incomplete_type(&form));
    } while (optional(tCOMMA));
 }
 
@@ -8428,6 +8504,38 @@ static tree_t p_subtype_declaration(void)
    return t;
 }
 
+static tree_t p_conditional_tail(tree_t expr0)
+{
+   // { when condition else expression }
+
+   require_std(STD_19, "conditional expressions");
+
+   tree_t value = tree_new(T_COND_VALUE);
+
+   do {
+      tree_t cond = tree_new(T_COND_EXPR);
+      tree_set_result(cond, expr0);
+      tree_set_value(cond, p_condition());
+
+      tree_set_loc(cond, CURRENT_LOC);
+
+      tree_add_cond(value, cond);
+
+      consume(tELSE);
+
+      expr0 = p_expression();
+   } while (optional(tWHEN));
+
+   tree_t last = tree_new(T_COND_EXPR);
+   tree_set_result(last, expr0);
+   tree_set_loc(last, CURRENT_LOC);
+
+   tree_add_cond(value, last);
+
+   tree_set_loc(value, CURRENT_LOC);
+   return value;
+}
+
 static tree_t p_conditional_expression(tree_t head)
 {
    // expression { when condition else expression }
@@ -8436,34 +8544,8 @@ static tree_t p_conditional_expression(tree_t head)
 
    tree_t expr0 = p_expression_with_head(head);
 
-   if (optional(tWHEN)) {
-      require_std(STD_19, "conditional expressions");
-
-      tree_t value = tree_new(T_COND_VALUE);
-
-      do {
-         tree_t cond = tree_new(T_COND_EXPR);
-         tree_set_result(cond, expr0);
-         tree_set_value(cond, p_condition());
-
-         tree_set_loc(cond, CURRENT_LOC);
-
-         tree_add_cond(value, cond);
-
-         consume(tELSE);
-
-         expr0 = p_expression();
-      } while (optional(tWHEN));
-
-      tree_t last = tree_new(T_COND_EXPR);
-      tree_set_result(last, expr0);
-      tree_set_loc(last, CURRENT_LOC);
-
-      tree_add_cond(value, last);
-
-      tree_set_loc(value, CURRENT_LOC);
-      return value;
-   }
+   if (optional(tWHEN))
+      return p_conditional_tail(expr0);
    else
       return expr0;
 }
@@ -9255,7 +9337,7 @@ static void p_disconnection_specification(tree_t container)
       for (int i = 0; i < ndecls; i++) {
          tree_t sig = tree_decl(container, i);
          if (tree_kind(sig) != T_SIGNAL_DECL || !is_guarded_signal(sig)
-             || !type_eq(tree_type(sig), type))
+             || !same_type_mark(tree_type(sig), type))
             continue;
 
          bool have = false;

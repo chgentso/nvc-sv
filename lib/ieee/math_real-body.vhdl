@@ -546,7 +546,7 @@ package body MATH_REAL is
         return NEWVAL;
     end function CBRT;
 
-    function "**" (X : in INTEGER; Y : in REAL) return REAL is
+    function POW_IR_LIBM (X : in INTEGER; Y : in REAL) return REAL is
         -- Description:
         --        See function declaration in IEEE Std 1076.2-1996
         -- Notes:
@@ -587,9 +587,26 @@ package body MATH_REAL is
 
         -- Get value for general case
         return EXP (Y * LOG (REAL(X)));
+    end function POW_IR_LIBM;
+
+    function "**" (X : in INTEGER; Y : in REAL) return REAL is
+    begin
+        if X < 0 and Y /= 0.0 then
+            assert FALSE
+                report "X < 0 and Y /= 0.0 in X**Y"
+                severity ERROR;
+            return 0.0;
+        end if;
+        if X = 0 and Y <= 0.0 then
+            assert FALSE
+                report "X = 0 and Y <= 0.0 in X**Y"
+                severity ERROR;
+            return 0.0;
+        end if;
+        return POW_IR_LIBM(X, Y);
     end function "**";
 
-    function "**" (X : in REAL; Y : in REAL) return REAL is
+    function POW_RR_LIBM (X : in REAL; Y : in REAL) return REAL is
         -- Description:
         --        See function declaration in IEEE Std 1076.2-1996
         -- Notes:
@@ -630,6 +647,23 @@ package body MATH_REAL is
 
         -- Get value for general case
         return EXP (Y * LOG (X));
+    end function POW_RR_LIBM;
+
+    function "**" (X : in REAL; Y : in REAL) return REAL is
+    begin
+        if X < 0.0 and Y /= 0.0 then
+            assert FALSE
+                report "X < 0.0 and Y /= 0.0 in X**Y"
+                severity ERROR;
+            return 0.0;
+        end if;
+        if X = 0.0 and Y <= 0.0 then
+            assert FALSE
+                report "X = 0.0 and Y <= 0.0 in X**Y"
+                severity ERROR;
+            return 0.0;
+        end if;
+        return POW_RR_LIBM(X, Y);
     end function "**";
 
     function EXP  (X : in REAL ) return REAL is
@@ -777,7 +811,7 @@ package body MATH_REAL is
         return X*(2.0 ** N);
     end function LDEXP;
 
-    function LOG (X : in REAL ) return REAL IS
+    function LOG_LIBM (X : in REAL ) return REAL IS
         -- Description:
         --        See function declaration in IEEE Std 1076.2-1996
         --
@@ -1164,10 +1198,21 @@ package body MATH_REAL is
         U2 := (U2 + LOGF_TAIL(J)) + Q;        -- Tiny
         U2 := U2 + LOGF_TAIL(N)*REAL(M);
         return (U1 + U2);
+    end function LOG_LIBM;
+
+    function LOG (X : in REAL ) return REAL is
+    begin
+        if X <= 0.0 then
+            assert FALSE
+                report "X <= 0.0 in LOG(X)"
+                severity ERROR;
+            return REAL'LOW;
+        end if;
+        return LOG_LIBM(X);
     end function LOG;
 
 
-    function LOG2 (X: in REAL) return REAL is
+    function LOG2_LIBM (X: in REAL) return REAL is
         -- Description:
         --        See function declaration in IEEE Std 1076.2-1996
         -- Notes:
@@ -1192,10 +1237,21 @@ package body MATH_REAL is
 
         -- Compute value for general case
         return ( MATH_LOG2_OF_E*LOG(X) );
+    end function LOG2_LIBM;
+
+    function LOG2 (X: in REAL) return REAL is
+    begin
+        if X <= 0.0 then
+            assert FALSE
+                report "X <= 0.0 in LOG2(X)"
+                severity ERROR;
+            return REAL'LOW;
+        end if;
+        return LOG2_LIBM(X);
     end function LOG2;
 
 
-    function LOG10 (X: in REAL) return REAL is
+    function LOG10_LIBM (X: in REAL) return REAL is
         -- Description:
         --        See function declaration in IEEE Std 1076.2-1996
         -- Notes:
@@ -1220,6 +1276,17 @@ package body MATH_REAL is
 
         -- Compute value for general case
         return ( MATH_LOG10_OF_E*LOG(X) );
+    end function LOG10_LIBM;
+
+    function LOG10 (X: in REAL) return REAL is
+    begin
+        if X <= 0.0 then
+            assert FALSE
+                report "X <= 0.0 in LOG10(X)"
+                severity ERROR;
+            return REAL'LOW;
+        end if;
+        return LOG10_LIBM(X);
     end function LOG10;
 
 

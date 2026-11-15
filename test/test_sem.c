@@ -4298,6 +4298,109 @@ START_TEST(test_protop)
 }
 END_TEST
 
+START_TEST(test_purefunc)
+{
+   set_standard(STD_08);
+
+   input_from_file(TESTDIR "/sem/purefunc.vhd");
+
+   const error_t expect[] = {
+      { 11, "a pure function cannot return an access type or a composite "
+        "type with a subelement of an access type" },
+      { 16, "a pure function cannot return an access type or a composite "
+        "type with a subelement of an access type" },
+      { 21, "a pure function cannot return an access type or a composite "
+        "type with a subelement of an access type" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   parse_and_check(T_ENTITY, T_ARCH);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_sigparam)
+{
+   set_standard(STD_08);
+
+   input_from_file(TESTDIR "/sem/sigparam.vhd");
+
+   const error_t expect[] = {
+      { 31, "subtype INTEGER of the actual is not compatible with the "
+        "subtype NATURAL of formal signal parameter X of mode IN" },
+      { 33, "subtype NATURAL of the actual is not compatible with the "
+        "subtype INTEGER of formal signal parameter X of mode OUT" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   parse_and_check(T_ENTITY, T_ARCH);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_discmark)
+{
+   set_standard(STD_08);
+
+   input_from_file(TESTDIR "/sem/discmark.vhd");
+
+   const error_t expect[] = {
+      { 18, "type mark BIT in disconnection specification is not the type "
+        "mark RBIT in the declaration of signal G" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   parse_and_check(T_PACKAGE, T_ENTITY, T_ARCH);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_protself)
+{
+   set_standard(STD_19);
+
+   input_from_file(TESTDIR "/sem/protself.vhd");
+
+   const error_t expect[] = {
+      { 11, "cannot declare an object of protected type OUTER within its "
+        "own body" },
+      { 12, "cannot declare an object of protected type OUTER within its "
+        "own body" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   parse_and_check(T_ENTITY, T_ARCH);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_gaccess)
+{
+   set_standard(STD_19);
+
+   input_from_file(TESTDIR "/sem/gaccess.vhd");
+
+   const error_t expect[] = {
+      { 15, "cannot map type LINE to generic interface type ACC as the "
+        "designated type STRING is not the actual INTEGER of generic type D" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   parse_and_check(T_PACKAGE, T_ENTITY, T_ARCH);
+
+   check_expected_errors();
+}
+END_TEST
+
 START_TEST(test_attrspec_relaxed)
 {
    set_standard(STD_08);
@@ -4692,6 +4795,11 @@ Suite *get_sem_tests(void)
    tcase_add_test(tc_core, test_enumhomo);
    tcase_add_test(tc_core, test_attrspec_relaxed);
    tcase_add_test(tc_core, test_protop);
+   tcase_add_test(tc_core, test_purefunc);
+   tcase_add_test(tc_core, test_sigparam);
+   tcase_add_test(tc_core, test_discmark);
+   tcase_add_test(tc_core, test_protself);
+   tcase_add_test(tc_core, test_gaccess);
    suite_add_tcase(s, tc_core);
 
    return s;

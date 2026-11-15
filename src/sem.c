@@ -114,7 +114,11 @@ static bool sem_check_resolution(type_t type, tree_t res)
       sem_error(res, "resolution function must have a single argument");
 
    type_t param = type_param(ftype, 0);
-   if (type_kind(param) != T_ARRAY)
+   if (type_kind(param) == T_SUBTYPE && type_is_array(param)
+       && type_is_unconstrained(param)) {
+      // The element subtype of the parameter may be constrained
+   }
+   else if (type_kind(param) != T_ARRAY)
       sem_error(res, "parameter of resolution function must be "
                 "an unconstrained array type");
 
@@ -1080,6 +1084,27 @@ static bool sem_check_const_decl(tree_t t, nametab_t *tab)
    return true;
 }
 
+static bool sem_all_resolved(type_t type)
+{
+   // A composite signal is resolved if every scalar subelement is
+
+   if (type_is_resolved(type))
+      return true;
+   else if (type_is_array(type))
+      return sem_all_resolved(type_elem(type));
+   else if (type_is_record(type)) {
+      const int nfields = type_fields(type);
+      for (int i = 0; i < nfields; i++) {
+         if (!sem_all_resolved(tree_type(type_field(type, i))))
+            return false;
+      }
+
+      return true;
+   }
+   else
+      return false;
+}
+
 static bool sem_check_signal_decl(tree_t t, nametab_t *tab)
 {
    type_t type = tree_type(t);
@@ -1115,7 +1140,7 @@ static bool sem_check_signal_decl(tree_t t, nametab_t *tab)
    if (!sem_no_access_file_or_protected(t, type, "signals"))
       return false;
 
-   if (is_guarded_signal(t) && !type_is_resolved(type))
+   if (is_guarded_signal(t) && !sem_all_resolved(type))
       sem_error(t, "guarded signal must have resolved subtype");
 
    if (tree_has_value(t)) {
@@ -1149,6 +1174,18 @@ static bool sem_check_protected_instance(tree_t t, type_t type, nametab_t *tab)
       }
 
       return true;
+   }
+
+   tree_t body = find_enclosing(tab, S_PROTECTED);
+   if (body != NULL && type_is_protected(type) && tree_has_type(body)
+       && find_enclosing(tab, S_SUBPROGRAM) == NULL
+       && type_eq(tree_type(body), type)) {
+      diag_t *d = diag_new(DIAG_ERROR, tree_loc(t));
+      diag_printf(d, "cannot declare an object of protected type %pT "
+                  "within its own body", type);
+      diag_lrm(d, STD_08, "6.4.2.4");
+      diag_emit(d);
+      return false;
    }
 
    ident_t typeid = ident_rfrom(type_ident(type), '.');
@@ -1864,6 +1901,18 @@ static bool sem_check_func_result(tree_t t)
                 "subelement of file type");
    else if (!sem_check_incomplete(t, result))
       return false;
+
+   if (standard() >= STD_08
+       && !(tree_flags(t) & (TREE_F_IMPURE | TREE_F_PROTECTED))
+       && sem_has_access(result)) {
+      diag_t *d = pedantic_diag(tree_loc(t));
+      if (d != NULL) {
+         diag_printf(d, "a pure function cannot return an access type or a "
+                     "composite type with a subelement of an access type");
+         diag_lrm(d, STD_08, "4.2.1");
+         diag_emit(d);
+      }
+   }
 
    return true;
 }
@@ -3181,6 +3230,48 @@ static bool sem_check_compatible_view(tree_t formal, tree_t actual)
    return true;
 }
 
+static bool sem_check_signal_subtypes(tree_t actual, tree_t formal,
+                                      port_mode_t mode)
+{
+   // LRM 08 section 4.2.2.3: the subtypes of a scalar signal actual and the
+   // formal signal parameter must be compatible: for mode IN the actual
+   // must lie within the formal and for mode OUT the formal must lie
+   // within the actual
+
+   type_t atype = tree_type(actual), ftype = tree_type(formal);
+   if (!type_is_scalar(atype) || !type_is_scalar(ftype)
+       || type_is_real(atype) || type_is_none(atype) || type_is_none(ftype)
+       || !type_eq(atype, ftype))
+      return true;
+
+   int64_t alow, ahigh, flow, fhigh;
+   if (!folded_bounds(range_of(atype, 0), &alow, &ahigh)
+       || !folded_bounds(range_of(ftype, 0), &flow, &fhigh))
+      return true;
+
+   if (alow > ahigh || flow > fhigh)
+      return true;   // Null range
+
+   const bool in_ok = alow >= flow && ahigh <= fhigh;
+   const bool out_ok = flow >= alow && fhigh <= ahigh;
+
+   if ((mode == PORT_IN && !in_ok) || (mode == PORT_OUT && !out_ok)
+       || (mode == PORT_INOUT && (!in_ok || !out_ok))) {
+      diag_t *d = pedantic_diag(tree_loc(actual));
+      if (d != NULL) {
+         diag_printf(d, "subtype %pT of the actual is not compatible with "
+                     "the subtype %pT of formal signal parameter %pI of mode "
+                     "%s", atype, ftype, tree_ident(formal),
+                     port_mode_str(mode));
+         diag_lrm(d, STD_08, "4.2.2.3");
+         diag_emit(d);
+         return false;
+      }
+   }
+
+   return true;
+}
+
 static bool sem_check_call_args(tree_t t, tree_t decl, nametab_t *tab)
 {
    const int nparams = tree_params(t);
@@ -3446,6 +3537,10 @@ static bool sem_check_call_args(tree_t t, tree_t decl, nametab_t *tab)
                   && !sem_check_compatible_view(port, value))
             return false;
       }
+
+      if (class == C_SIGNAL && formal_conv == NULL && !partial
+          && !sem_check_signal_subtypes(value, port, mode))
+         return false;
 
       if (class == C_SIGNAL && !sem_static_name(value, sem_globally_static)) {
          diag_t *d = pedantic_diag(tree_loc(value));
@@ -4346,6 +4441,9 @@ static bool sem_check_signal_attr(tree_t t)
    if (tree_kind(name) == T_ATTR_REF)
       return sem_check_signal_attr(name);
 
+   if (tree_kind(name) == T_EXTERNAL_NAME && tree_class(name) == C_SIGNAL)
+      return true;
+
    tree_t ref = name_to_ref(name);
    if (ref != NULL && class_of(ref) == C_SIGNAL)
       return true;
@@ -4418,7 +4516,14 @@ static bool sem_check_dimension_attr(tree_t t, nametab_t *tab)
 
    type_t uint = std_type(NULL, STD_UNIVERSAL_INTEGER);
    type_t dimtype = tree_type(dim);
-   if (!type_eq(dimtype, uint)) {
+
+   // The 'LENGTH and 'POS attributes have type universal_integer but
+   // are given type INTEGER internally
+   const bool is_uint_attr =
+      tree_kind(dim) == T_ATTR_REF
+      && (tree_subkind(dim) == ATTR_LENGTH || tree_subkind(dim) == ATTR_POS);
+
+   if (!is_uint_attr && !type_eq(dimtype, uint)) {
       diag_t *d;
       if (type_is_integer(dimtype))
          d = pedantic_diag(tree_loc(dim));
@@ -5362,11 +5467,18 @@ static bool sem_check_generic_actual(formal_map_t *formals, int nformals,
 
          if (type_is_generic(expect)) {
             const gtype_class_t expect_class = type_subkind(expect);
+            type_t mapped = get_generic_type_map(tab, expect);
             if (!type_matches_class(actual, expect_class))
                sem_error(param, "cannot map type %s to generic interface type "
                          "%s as the designated type %s is not %s type",
                          type_pp(map), istr(tree_ident(decl)),
                          type_pp(actual), class_strings[expect_class]);
+            else if (mapped != NULL && !type_eq(actual, mapped))
+               sem_error(param, "cannot map type %s to generic interface type "
+                         "%s as the designated type %s is not the actual %s "
+                         "of generic type %s", type_pp(map),
+                         istr(tree_ident(decl)), type_pp(actual),
+                         type_pp(mapped), type_pp(expect));
          }
          else if (!type_eq(actual, expect))
             sem_error(param, "cannot map type %s to generic interface type "
@@ -5676,7 +5788,18 @@ static bool sem_static_subtype(type_t type, static_fn_t fn)
    if (type_is_record(type)) {
       const int nfields = type_fields(type);
       for (int i = 0; i < nfields; i++) {
-         if (!sem_static_subtype(tree_type(type_field(type, i)), fn))
+         tree_t f = type_field(type, i);
+         type_t ftype = tree_type(f);
+         if (type_is_unconstrained(ftype)) {
+            // May be constrained by a record element constraint
+            tree_t cons = type_constraint_for_field(type, f);
+            if (cons == NULL)
+               return false;
+
+            ftype = tree_type(cons);
+         }
+
+         if (!sem_static_subtype(ftype, fn))
             return false;
       }
 
@@ -7062,6 +7185,11 @@ static bool sem_check_disconnect(tree_t t, nametab_t *tab)
       sem_error(t, "type of declared signal %pT does not match type %pT in "
                 "disconnection specification", tree_type(decl), type);
 
+   if (!same_type_mark(tree_type(decl), type))
+      sem_error(t, "type mark %pT in disconnection specification is not the "
+                "type mark %pT in the declaration of signal %pI", type,
+                tree_type(decl), tree_ident(t));
+
    tree_t delay = tree_delay(t);
    type_t std_time = std_type(NULL, STD_TIME);
    if (!sem_check_type(delay, std_time, tab))
@@ -7440,7 +7568,17 @@ static bool sem_check_prot_decl(tree_t t, nametab_t *tab)
          // within a protected type declaration denotes anything other
          // than a method of a protected type
          tree_t value = tree_value(d);
-         if (tree_kind(value) != T_PROT_REF)
+         bool own_method = false;
+         if (tree_kind(value) == T_REF && tree_has_ref(value)) {
+            // A method of the protected type being declared
+            tree_t ref = tree_ref(value);
+            if (is_subprogram(ref)) {
+               for (int j = 0; j < i && !own_method; j++)
+                  own_method = tree_decl(t, j) == ref;
+            }
+         }
+
+         if (tree_kind(value) != T_PROT_REF && !own_method)
             sem_error(d, "an alias declared within a protected type "
                       "declaration must denote a protected type method");
       }

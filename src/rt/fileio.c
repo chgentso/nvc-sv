@@ -495,6 +495,8 @@ int64_t x_file_read(void **_fp, void *data, int64_t size, int64_t count)
    const unsigned long actual = fread(data, size, count, slot->file);
    if (actual != count && ferror(slot->file))
       jit_msg(NULL, DIAG_FATAL, "read from file failed");
+   else if (actual == 0 && count > 0 && feof(slot->file))
+      jit_msg(NULL, DIAG_FATAL, "READ called at the end of the file");
 
    return actual;
 }
