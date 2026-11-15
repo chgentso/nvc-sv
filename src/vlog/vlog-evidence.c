@@ -55,6 +55,7 @@ typedef struct {
    copy_state_t copy;
    conn_range_t src;
    bool         assigned;
+   unsigned     why;
 } out_t;
 
 typedef struct {
@@ -78,6 +79,8 @@ typedef struct {
    range_list_t    *rd_ctrl;
    bool             subst;
    bool             approx;
+   bool             in_callee;  // Scanning the body of a subroutine
+   unsigned         why;       // conn_ev_why_t
    bool             other;     // Bench-like: waits, forks, forever
    A(vlog_node_t)   callees;
    A(var_t *)       varlist;
@@ -146,6 +149,12 @@ static bool is_local_decl(vlog_node_t d)
 ////////////////////////////////////////////////////////////////////////////////
 // Reads of expressions
 
+static void wk_why(wk_t *w, unsigned why)
+{
+   w->approx = true;
+   w->why |= why;
+}
+
 static void wk_handle_read(wk_t *w, vlog_node_t decl, const conn_range_t *r,
                            bool approx)
 {
@@ -160,10 +169,11 @@ static void wk_handle_read(wk_t *w, vlog_node_t decl, const conn_range_t *r,
 
    if (r != NULL) {
       add_range(w->rd_data, r->net, r->lo, r->hi);
-      w->approx |= approx;
+      if (approx)
+         wk_why(w, CONN_WHY_DYNAMIC);
    }
-   else if (is_local_decl(decl))
-      w->approx = true;   // Read before assigned: the previous value
+   else if (is_local_decl(decl) && !w->in_callee)
+      wk_why(w, CONN_WHY_VARIABLE);   // Read before assigned: the previous value
 }
 
 static void wk_cover_chain(wk_t *w, vlog_node_t v)
@@ -233,13 +243,13 @@ static void wk_refs_cb(vlog_node_t v, void *ctx)
          else if (is_local_decl(d))
             wk_handle_read(w, d, NULL, false);
          else if (vlog_kind(v) == V_HIER_REF && d == NULL)
-            w->approx = true;
+            wk_why(w, CONN_WHY_OTHER);
       }
       break;
 
    case V_USER_FCALL:
    case V_USER_TCALL:
-      w->approx = true;
+      wk_why(w, CONN_WHY_CALL);
       if (vlog_has_ref(v) && hash_get(w->seen_callee, vlog_ref(v)) == NULL) {
          hash_put(w->seen_callee, vlog_ref(v), vlog_ref(v));
          APUSH(w->callees, vlog_ref(v));
@@ -249,7 +259,7 @@ static void wk_refs_cb(vlog_node_t v, void *ctx)
    case V_METHOD_CALL:
    case V_CLASS_NEW:
    case V_DYNAMIC_NEW:
-      w->approx = true;
+      wk_why(w, CONN_WHY_OTHER);
       break;
 
    default:
@@ -279,6 +289,7 @@ static void wk_collect(wk_t *w, vlog_node_t e, range_list_t *data,
    w->rd_ctrl = &w->call;
    w->subst = false;
 
+   w->in_callee = true;
    while (w->callees.count > 0) {
       vlog_node_t callee = APOP(w->callees);
       switch (vlog_kind(callee)) {
@@ -290,6 +301,8 @@ static void wk_collect(wk_t *w, vlog_node_t e, range_list_t *data,
          break;
       }
    }
+
+   w->in_callee = false;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -377,9 +390,11 @@ static bool reads_range(wk_t *w, vlog_node_t e, const conn_range_t *r)
    SCOPED_LIST(range_list_t, ctrl);
 
    const bool saved_approx = w->approx;
+   const unsigned saved_why = w->why;
    const unsigned ncall = w->call.count;
    wk_probe(w, e, &data, &ctrl);
    w->approx = saved_approx;
+   w->why = saved_why;
    w->call.count = ncall;
 
    for (unsigned i = 0; i < data.count; i++) {
@@ -438,12 +453,12 @@ static void wk_targets(wk_t *w, vlog_node_t t, target_list_t *list)
          if (tg.is_net || is_local_decl(tg.decl))
             APUSH(*list, tg);
          if (approx)
-            w->approx = true;
+            wk_why(w, CONN_WHY_DYNAMIC);
       }
       break;
 
    default:
-      w->approx = true;
+      wk_why(w, CONN_WHY_OTHER);
       break;
    }
 }
@@ -545,6 +560,7 @@ static void wk_assign(wk_t *w, vlog_node_t target, vlog_node_t value,
             if (!o->assigned || w->async_depth == 0)
                o->clock = w->cur_clock;
             o->assigned = true;
+            o->why |= w->why;
 
             if (w->async_depth == 0) {
                if (!copy)
@@ -693,7 +709,7 @@ static void wk_stmt(wk_t *w, vlog_node_t s)
 
          // A loop whose bounds depend on signals is not unrolled
          if (w->guard.count > mark)
-            w->approx = true;
+            wk_why(w, CONN_WHY_LOOP);
 
          const int n = vlog_stmts(s);
          for (int i = 0; i < n; i++)
@@ -722,7 +738,7 @@ static void wk_stmt(wk_t *w, vlog_node_t s)
          const unsigned mark = w->guard.count;
          wk_collect(w, vlog_value(s), &w->guard, &w->guard, true);
          if (w->guard.count > mark)
-            w->approx = true;
+            wk_why(w, CONN_WHY_LOOP);
 
          const int n = vlog_stmts(s);
          for (int i = 0; i < n; i++)
@@ -735,7 +751,7 @@ static void wk_stmt(wk_t *w, vlog_node_t s)
    case V_USER_TCALL:
    case V_USER_FCALL:
    case V_VOID_CALL:
-      w->approx = true;
+      wk_why(w, CONN_WHY_CALL);
       wk_collect(w, s, &w->call, &w->call, false);
       break;
 
@@ -759,7 +775,7 @@ static void wk_stmt(wk_t *w, vlog_node_t s)
 
    default:
       // Not understood: its reads are possible sources of every output
-      w->approx = true;
+      wk_why(w, CONN_WHY_OTHER);
       wk_collect(w, s, &w->call, &w->call, false);
       break;
    }
@@ -825,6 +841,7 @@ static void wk_outputs(wk_t *w, conn_evidence_t *ev)
       merge_ranges(&o->ctrl);
 
       outs[i].drive = i;
+      outs[i].reasons = o->why | (w->call.count > 0 ? CONN_WHY_CALL : 0);
       outs[i].cls = out_class(ev->cls);
       outs[i].clock = ev->cls == CONN_EV_SEQ ? MAX(o->clock, 0) : -1;
       outs[i].data = DDUP(w->cd, o->data, conn_range_t);
@@ -871,10 +888,12 @@ static bool assigns_constants(wk_t *w, vlog_node_t s, bool *zero, bool *ones,
          SCOPED_LIST(range_list_t, data);
          SCOPED_LIST(range_list_t, ctrl);
          const bool saved_approx = w->approx;
+         const unsigned saved_why = w->why;
          const unsigned ncallees = w->call.count;
          wk_probe(w, value, &data, &ctrl);
          const bool pure = !w->approx;
          w->approx = saved_approx;
+         w->why = saved_why;
          w->call.count = ncallees;
 
          if (data.count > 0 || !pure)
@@ -1172,7 +1191,7 @@ static void evidence_always(wk_t *w, conn_evidence_t *ev, vlog_node_t v)
    }
 
    if (has_level)
-      w->approx = true;
+      wk_why(w, CONN_WHY_OTHER);
 
    // The first statement tells the asynchronous controls
    vlog_node_t first = body.count > 0 ? first_stmt(body.items[0]) : NULL;
@@ -1242,6 +1261,7 @@ static void evidence_gate(wk_t *w, conn_evidence_t *ev, vlog_node_t v)
       out_t *o = &(w->outs[idx]);
       add_list(&o->data, &data);
       o->assigned = true;
+      o->why |= w->why;
       if (copy) {
          o->copy = COPY_ONE;
          o->src = src;
@@ -1291,6 +1311,9 @@ void vlog_proc_evidence(conn_design_t *cd, conn_proc_t *proc, vlog_node_t v)
 
    if (ev->cls != CONN_EV_OTHER) {
       ev->approx = w.approx;
+      ev->reasons = w.why;
+      if (ev->approx && ev->reasons == 0)
+         ev->reasons = CONN_WHY_OTHER;
 
       if (w.clocks.count > 0) {
          ev->nclocks = w.clocks.count;

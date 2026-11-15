@@ -44,9 +44,9 @@ ev() {
 }
 
 ev EV_SVMIX.U_TOP 'always @14' '"class":"seq"' \
-   '"clocks":[{"pin":"clk_a","edge":"rise"}]' '"copy":"d"'
+   '"pin":"clk_a","edge":"rise"' '"copy":"d"'
 ev EV_SVMIX.U_TOP.u_sync 'always @4' '"class":"seq"' \
-   '"clocks":[{"pin":"clk","edge":"rise"}]' \
+   '"pin":"clk","edge":"rise"' \
    "\"s0'\":{\"class\":\"seq\",\"clock\":0,\"data\":[\"d\"],\"ctrl\":[],\"copy\":\"d\"}" \
    '"s1":{"class":"seq","clock":0,"data":["s0"],"ctrl":[],"copy":"s0"}'
 ev EV_SVMIX.U_TOP.u_sync 'assign @8' '"class":"comb"' '"copy":"s1"'

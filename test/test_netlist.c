@@ -1804,6 +1804,8 @@ START_TEST(test_ev_sv)
       ck_assert_int_eq(get_proc(top, "always_latch @70")->ev->cls,
                        CONN_EV_LATCH);
       ck_assert(get_proc(top, "always @72")->ev->approx);
+      ck_assert_int_eq(get_proc(top, "always @72")->ev->reasons,
+                       CONN_WHY_DYNAMIC);
    }
 
    // Continuous assignments and gates
@@ -1872,6 +1874,10 @@ START_TEST(test_ev_sv2)
 
    // Calls are approximated
    ck_assert(get_proc(top, "always @37")->ev->approx);
+   ck_assert_int_eq(get_proc(top, "always @37")->ev->reasons, CONN_WHY_CALL);
+   ck_assert_int_eq(sv_out(get_proc(top, "always @37"), "r1")->reasons,
+                    CONN_WHY_CALL);
+   ck_assert_int_eq(get_proc(top, "always @46")->ev->reasons, 0);
    ck_assert(get_proc(top, "always @40")->ev->approx);
 
    // The clock read as data

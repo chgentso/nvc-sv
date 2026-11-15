@@ -49,22 +49,22 @@ notev() {
 
 # Asynchronous reset low, enable controls only one output, copy
 ev ev_sv1 'always_ff @33' '"class":"seq"' '"confidence":"exact"' \
-   '"clocks":[{"pin":"clk_a","edge":"rise"}]' \
-   '"async":[{"pin":"rst_n","level":"low","role":"reset"}]' \
+   '"pin":"clk_a","edge":"rise"' \
+   '"pin":"rst_n","level":"low","role":"reset"' \
    '"ra":{"class":"seq","clock":0,"data":["din"],"ctrl":[],"copy":"din"}' \
    "\"t_a'\":{\"class\":\"seq\",\"clock\":0,\"data\":[\"t_a\"],\"ctrl\":[\"en\"]}"
 
 # Parenthesised edges, set to one with a high active control
-ev ev_sv1 'always @38' '"clocks":[{"pin":"clk_b","edge":"rise"}]' \
-   '"async":[{"pin":"rst_set","level":"high","role":"set"}]' \
+ev ev_sv1 'always @38' '"pin":"clk_b","edge":"rise"' \
+   '"pin":"rst_set","level":"high","role":"set"' \
    '"copy":"ra[0]"'
 
 # Falling edge, control tested by comparison
-ev ev_sv1 'always @43' '"clocks":[{"pin":"clk_b","edge":"fall"}]' \
-   '"async":[{"pin":"rst_n","level":"low","role":"reset"}]'
+ev ev_sv1 'always @43' '"pin":"clk_b","edge":"fall"' \
+   '"pin":"rst_n","level":"low","role":"reset"'
 
 # iff is control, not data
-ev ev_sv1 'always_ff @47' '"clocks":[{"pin":"clk_b","edge":"rise"}]' \
+ev ev_sv1 'always_ff @47' '"pin":"clk_b","edge":"rise"' \
    '"async":[]' '"data":["sel","din[1]"],"ctrl":["en"]'
 notev ev_sv1 'always_ff @47' '"copy"'
 
@@ -76,10 +76,10 @@ ev ev_sv1 'always_ff @50' '"sync_reset":["srst"]' '"async":[]' \
 ev ev_sv1 'always_ff @56' '"a5":{"class":"seq","clock":0,"data":["a3","a4"]'
 
 # Both edges, slice copy, two clocks
-ev ev_sv1 'always @62' '"clocks":[{"pin":"clk_a","edge":"both"}]' \
+ev ev_sv1 'always @62' '"pin":"clk_a","edge":"both"' \
    '"copy":"ra[2]"'
 ev ev_sv1 'always @65' \
-   '"clocks":[{"pin":"clk_a","edge":"rise"},{"pin":"clk_b","edge":"rise"}]'
+   '"pin":"clk_a","edge":"rise"' '"pin":"clk_b","edge":"rise"'
 
 # Combinational and latch processes
 ev ev_sv1 'always_comb @68' '"class":"comb"' '"clocks":[]' \
@@ -89,7 +89,7 @@ ev ev_sv1 'always_latch @70' '"class":"latch"' \
    '"lat":{"class":"latch","data":["din[3]"],"ctrl":["en"]'
 
 # A select that depends on a signal is an approximation
-ev ev_sv1 'always @72' '"confidence":"approx"'
+ev ev_sv1 'always @72' '"confidence":"approx"' '"reasons":["dynamic-index"]'
 
 # Continuous assignments and gates
 ev ev_sv1 'assign @74' '"class":"comb"' '"data":["clk_a","gen_en"]'
@@ -99,13 +99,13 @@ ev ev_sv1 'gate @77' '"class":"comb"' '"copy":"ra[1]"'
 
 # Generate loop and instance arrays: each instance has its own cells
 for u in 'g[0].u' 'g[1].u' 'g[2].u' 'g[3].u'; do
-  ev "ev_sv1.$u" 'always_ff @5' '"clocks":[{"pin":"clk","edge":"rise"}]' \
+  ev "ev_sv1.$u" 'always_ff @5' '"pin":"clk","edge":"rise"' \
      "\"s0'\":{\"class\":\"seq\",\"clock\":0,\"data\":[\"d\"]" \
      '"s1":{"class":"seq","clock":0,"data":["s0"],"ctrl":[],"copy":"s0"}'
   ev "ev_sv1.$u" 'assign @9' '"copy":"s1"'
 done
 for u in 'ua[0]' 'ua[1]' up; do
-  ev "ev_sv1.$u" 'always_ff @14' '"clocks":[{"pin":"clk","edge":"rise"}]'
+  ev "ev_sv1.$u" 'always_ff @14' '"pin":"clk","edge":"rise"'
 done
 
 # Attributes of modules and nets: lower case names, the value as written, 1
@@ -123,14 +123,18 @@ nvc --std=19 -a $TESTDIR/netlist/ev_sv2.sv -e ev_sv2
 nvc --std=19 --netlist --evidence ev_sv2 --output=ev2.json
 evlines ev2.json > ev.txt
 
-ev ev_sv2 'always @18' '"async":[{"pin":"rst","level":"high","role":"unknown"}]' \
+ev ev_sv2 'always @18' '"pin":"rst","level":"high","role":"unknown"' \
    '"ctrl":["op"]' '"confidence":"exact"'
 ev ev_sv2 'always @31' \
-   '"async":[{"pin":"rst","level":"high","role":"reset"},{"pin":"set_n","level":"low","role":"set"}]' \
+   '"pin":"rst","level":"high","role":"reset"' \
+   '"pin":"set_n","level":"low","role":"set"' \
    "\"acc'\":{\"class\":\"seq\",\"clock\":0,\"data\":[\"a\",\"acc\"],\"ctrl\":[]}"
-ev ev_sv2 'always @37' '"confidence":"approx"' '"data":["a","b"]'
-ev ev_sv2 'always @40' '"confidence":"approx"' '"data":["a","b"]'
-ev ev_sv2 'always @43' '"clocks":[{"pin":"clk","edge":"rise"}]'
+ev ev_sv2 'always @37' '"confidence":"approx"' '"reasons":["call"]' \
+   '"data":["a","b"]' '"bits":['
+ev ev_sv2 'always @40' '"confidence":"approx"' '"reasons":["call"]' \
+   '"data":["a","b"]'
+notev ev_sv2 'always @46' '"reasons"'
+ev ev_sv2 'always @43' '"pin":"clk","edge":"rise"'
 ev ev_sv2 'always @46' '"gated":{"class":"seq","clock":0,"data":["clk","op[0]"]'
 ev ev_sv2 'initial @49' '"class":"other"'
 ev ev_sv2 'always @50' '"class":"other"'
