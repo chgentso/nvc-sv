@@ -2008,6 +2008,15 @@ static vlog_node_t elab_array_port_value(vlog_node_t inst, vlog_node_t port,
    const int count = vlog_ival(inst) >> 32, pos = vlog_ival(inst) & 0xffffffff;
    const unsigned pw = vlog_width(port), vw = vlog_width(value);
 
+   if (count >= 2 && vw != pw && vw != pw * count
+       && vlog_kind(value) != V_NUMBER) {
+      // The connection must be as wide as one port or all of the ports
+      error_at(vlog_loc(value), "connection to port %pQ of an instance array "
+               "must be %u or %u bits wide but is %u bits", vlog_ident(port),
+               pw, pw * count, vw);
+      return value;
+   }
+
    if (count < 2 || vw != pw * count)
       return value;
 

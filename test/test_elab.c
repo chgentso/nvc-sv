@@ -2559,6 +2559,41 @@ START_TEST(test_udnport1)
 }
 END_TEST
 
+START_TEST(test_vlogarrwidth1)
+{
+   const error_t expect[] = {
+      { 11, "connection to port 'b' of an instance array must be 1 or 2 bits "
+        "wide but is 5 bits" },
+      { 11, "connection to port 'b' of an instance array must be 1 or 2 bits "
+        "wide but is 5 bits" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/elab/vlogarrwidth1.v");
+
+   analyse_file();
+
+   object_t *obj = lib_get_generic(lib_work(), ident_new("WORK.VLOGARRWIDTH1"),
+                                   NULL);
+   ck_assert_ptr_nonnull(obj);
+
+   mir_context_t *mc = get_mir();
+   unit_registry_t *ur = get_registry();
+   jit_t *j = jit_new(ur, mc);
+   rt_model_t *m = model_new(j, NULL);
+
+   object_t *tops[1] = { obj };
+   tree_t top = elab(tops, 1, j, ur, mc, NULL, NULL, m);
+   fail_unless(top == NULL);
+
+   model_free(m);
+   jit_free(j);
+
+   check_expected_errors();
+}
+END_TEST
+
 Suite *get_elab_tests(void)
 {
    Suite *s = suite_create("elab");
@@ -2685,6 +2720,7 @@ Suite *get_elab_tests(void)
    tcase_add_test(tc, test_issue1638);
    tcase_add_test(tc, test_assert8);
    tcase_add_test(tc, test_udnport1);
+   tcase_add_test(tc, test_vlogarrwidth1);
    suite_add_tcase(s, tc);
 
    return s;
