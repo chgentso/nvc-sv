@@ -2833,3 +2833,4 @@ file_readeof gold,fail
 gen_array_index normal,2019
 vlogslice1      verilog
 vlogincdec1     verilog
+vlogforgen1     verilog

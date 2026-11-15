@@ -20481,6 +20481,9 @@ static vlog_node_t p_genvar_iteration(void)
 
       vlog_add_stmt(v, a);
    }
+   else if (scan(tPLUSEQ, tMINUSEQ, tTIMESEQ, tDIVEQ, tPERCENTEQ, tAMPEQ,
+                 tBAREQ, tCARETEQ, tLSLEQ, tLSREQ, tASLEQ, tASREQ))
+      vlog_add_stmt(v, p_operator_assignment(ref));
    else {
       vlog_node_t a = vlog_new(V_POSTFIX);
       vlog_set_subkind(a, p_inc_or_dec_operator());
