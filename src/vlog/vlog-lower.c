@@ -9439,6 +9439,10 @@ static mir_value_t vlog_lower_with_context(vlog_gen_t *g, vlog_node_t v,
       {
          vlog_node_t target = vlog_target(v);
 
+         // The indices of the target are evaluated once
+         const int saved_spills = g->nspills;
+         vlog_spill_target(g, target);
+
          mir_value_t prev = vlog_lower_update_target(g, target);
          mir_type_t type = mir_get_type(g->mu, prev);
          if (mir_get_class(g->mu, type) == MIR_TYPE_REAL) {
@@ -9447,6 +9451,7 @@ static mir_value_t vlog_lower_with_context(vlog_gen_t *g, vlog_node_t v,
                ? mir_build_sub(g->mu, type, prev, rone)
                : mir_build_add(g->mu, type, prev, rone);
             vlog_assign_variable(g, target, rnext, NULL);
+            g->nspills = saved_spills;
             return vlog_kind(v) == V_PREFIX ? rnext : prev;
          }
 
@@ -9462,6 +9467,7 @@ static mir_value_t vlog_lower_with_context(vlog_gen_t *g, vlog_node_t v,
          mir_value_t next = mir_build_binary(g->mu, op, type, prev, one);
 
          vlog_assign_variable(g, target, next, NULL);
+         g->nspills = saved_spills;
 
          return vlog_kind(v) == V_PREFIX ? next : prev;
       }

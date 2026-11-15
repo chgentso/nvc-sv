@@ -2832,3 +2832,4 @@ reflect_nested normal,2019
 file_readeof gold,fail
 gen_array_index normal,2019
 vlogslice1      verilog
+vlogincdec1     verilog
