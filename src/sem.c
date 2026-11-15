@@ -4418,7 +4418,14 @@ static bool sem_check_dimension_attr(tree_t t, nametab_t *tab)
 
    type_t uint = std_type(NULL, STD_UNIVERSAL_INTEGER);
    type_t dimtype = tree_type(dim);
-   if (!type_eq(dimtype, uint)) {
+
+   // The 'LENGTH and 'POS attributes have type universal_integer but
+   // are given type INTEGER internally
+   const bool is_uint_attr =
+      tree_kind(dim) == T_ATTR_REF
+      && (tree_subkind(dim) == ATTR_LENGTH || tree_subkind(dim) == ATTR_POS);
+
+   if (!is_uint_attr && !type_eq(dimtype, uint)) {
       diag_t *d;
       if (type_is_integer(dimtype))
          d = pedantic_diag(tree_loc(dim));
