@@ -22,6 +22,10 @@
 #include "scan.h"
 
 #define RECOVER_THRESH 5
+
+// Recovery from syntax errors stops when a unit has used this much of its
+// arena
+#define RECOVERY_ARENA_PCT 50
 #define TRACE_PARSE    0
 #define TRACE_RECOVERY 0
 #define TOKENQ_SIZE    2048

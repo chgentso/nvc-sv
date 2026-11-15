@@ -197,6 +197,8 @@ void parse_set_recovery(bool on)
    recovery_mode = on;
 }
 
+static bool recovery_degraded = false;
+
 bool parse_recovery(void)
 {
 #ifdef DEBUG
@@ -207,7 +209,7 @@ bool parse_recovery(void)
    if (forced)
       return true;
 #endif
-   return recovery_mode;
+   return recovery_mode && !recovery_degraded;
 }
 
 void drop_tokens_until(parse_state_t *state, token_t tok)
@@ -259,6 +261,19 @@ void parse_vexpect(parse_state_t *state, va_list ap)
       diag_hint(d, &(state->tokenq[state->tokenq_tail].loc),
                 "this token was unexpected");
       diag_emit(d);
+   }
+
+   if (recovery_mode && state->rank_fn != NULL) {
+      // The unit is getting big: stop trying to read on from errors in it so
+      // that it cannot run out of memory where parsing would have stopped
+      const bool full = object_global_arena_used_pct() >= RECOVERY_ARENA_PCT;
+      if (full && !recovery_degraded) {
+         diag_t *d = diag_new(DIAG_NOTE, NULL);
+         diag_printf(d, "error recovery stopped for the rest of this unit "
+                     "because it is large");
+         diag_emit(d);
+      }
+      recovery_degraded = full;
    }
 
    bool keep = false;

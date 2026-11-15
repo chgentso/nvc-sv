@@ -1374,6 +1374,16 @@ object_t *object_from_locus(ident_t module, ptrdiff_t offset,
    return obj;
 }
 
+unsigned object_global_arena_used_pct(void)
+{
+   if (global_arena == NULL)
+      return 0;
+
+   const size_t total = (char *)global_arena->limit - (char *)global_arena->base;
+   const size_t used = (char *)global_arena->alloc - (char *)global_arena->base;
+   return total == 0 ? 0 : (unsigned)(used * 100 / total);
+}
+
 void freeze_global_arena(void)
 {
    object_one_time_init();
