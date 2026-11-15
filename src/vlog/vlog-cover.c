@@ -177,11 +177,49 @@ static bool vlog_cover_is_property(vlog_node_t p)
    }
 }
 
+static bool vlog_cover_is_made_up(vlog_node_t v)
+{
+   // A reference to a variable made by the parser for the procedural
+   // continuous assignments and forces, which has a name that cannot be
+   // written in the source
+
+   if (vlog_kind(v) != V_REF || !vlog_has_ident(v))
+      return false;
+
+   return istr(vlog_ident(v))[0] == '$';
+}
+
+static bool vlog_cover_is_pca_if(vlog_node_t s)
+{
+   // The check made for a release that the other kind of assignment is not
+   // active: an if with one condition that tests such a variable
+
+   if (vlog_kind(s) != V_IF || vlog_conds(s) != 1)
+      return false;
+
+   vlog_node_t c = vlog_cond(s, 0);
+   if (!vlog_has_value(c))
+      return false;
+
+   vlog_node_t test = vlog_value(c);
+   return vlog_kind(test) == V_BINARY && vlog_cover_is_made_up(vlog_left(test));
+}
+
 bool vlog_cover_wants_stmt(vlog_node_t s)
 {
    switch (vlog_kind(s)) {
    case V_SEQ_BLOCK:
       return false;
+   case V_BASSIGN:
+   case V_NBASSIGN:
+      // Records which procedural continuous assignment is active
+      if (vlog_cover_is_made_up(vlog_target(s)))
+         return false;
+      break;
+   case V_IF:
+      if (vlog_cover_is_pca_if(s))
+         return false;
+      break;
    case V_SYS_TCALL:
    case V_USER_TCALL:
       // Initialisation of a package made by the parser
@@ -477,6 +515,11 @@ static void vlog_cover_stmt_one(vlog_cover_t *g, vlog_node_t s,
    if (kind == V_SEQ_BLOCK && !vlog_has_ident(s)) {
       // Transparent: the statements belong to the enclosing scope
       vlog_cover_stmt_list(g, s, parent);
+      return;
+   }
+   else if (kind == V_IF && vlog_cover_is_pca_if(s)) {
+      // Made up around a release, the statement in it is the user's
+      vlog_cover_stmt_list(g, vlog_cond(s, 0), parent);
       return;
    }
 

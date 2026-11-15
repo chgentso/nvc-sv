@@ -1,0 +1,42 @@
+<?xml version="1.0"?>
+<scope name="WORK">
+  <scope name="vlogcover10" block_name="vlogcover10" kind="module" file="vlogcover10.sv" line="6">
+    <scope name="_P3" line="10">
+      <scope name="_S0" line="11">
+        <statement hier="WORK.vlogcover10._P3._S0" data="1"/>
+      </scope>
+      <scope name="_S2" line="12">
+        <statement hier="WORK.vlogcover10._P3._S2" data="2"/>
+      </scope>
+      <scope name="_S3" line="13">
+        <statement hier="WORK.vlogcover10._P3._S3" data="1"/>
+        <scope name="_S1">
+          <statement hier="WORK.vlogcover10._P3._S3._S1" data="1"/>
+        </scope>
+      </scope>
+      <scope name="_S5" line="14">
+        <statement hier="WORK.vlogcover10._P3._S5" data="2"/>
+      </scope>
+      <scope name="_S6" line="15">
+        <statement hier="WORK.vlogcover10._P3._S6" data="1"/>
+        <scope name="_S1">
+          <statement hier="WORK.vlogcover10._P3._S6._S1" data="1"/>
+        </scope>
+      </scope>
+      <scope name="_S7" line="16">
+        <statement hier="WORK.vlogcover10._P3._S7" data="1"/>
+        <scope name="_B0">
+          <scope name="_S1" line="17">
+            <statement hier="WORK.vlogcover10._P3._S7._B0._S1" data="0"/>
+          </scope>
+          <scope name="_S3" line="18">
+            <statement hier="WORK.vlogcover10._P3._S7._B0._S3" data="0"/>
+          </scope>
+        </scope>
+      </scope>
+      <scope name="_S8" line="20">
+        <statement hier="WORK.vlogcover10._P3._S8" data="1"/>
+      </scope>
+    </scope>
+  </scope>
+</scope>

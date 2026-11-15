@@ -2858,3 +2858,4 @@ vlogcover6      verilog,cover=branch
 vlogcover7      verilog,cover=branch
 vlogcover8      verilog,cover=branch
 vlogcover9      shell
+vlogcover10     verilog,cover=statement
