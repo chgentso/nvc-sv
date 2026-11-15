@@ -242,6 +242,7 @@ ident_t object_ident(object_t *object);
 const char *object_kind_str(object_t *object);
 size_t object_arena_default_size(void);
 unsigned object_global_arena_used_pct(void);
+bool discard_global_arena_if_last(void);
 
 object_t *arena_root(object_arena_t *arena);
 void arena_set_checksum(object_arena_t *arena, uint32_t checksum);

@@ -581,13 +581,15 @@ static void clean_cb(tree_t t, void *context)
 
    switch (tree_kind(t)) {
    case T_REF:
-      if (!tree_has_ref(t) || tree_ident(t) == error_marker()
+      if (!tree_has_ref(t) || !tree_has_ident(t)
+          || tree_ident(t) == error_marker()
           || !decl_is_reliable(tree_ref(t)))
          *clean = false;
       break;
    case T_FCALL:
    case T_PCALL:
-      if (!tree_has_ref(t) || tree_ident(t) == error_marker())
+      if (!tree_has_ref(t) || !tree_has_ident(t)
+          || tree_ident(t) == error_marker())
          *clean = false;
       break;
    default:

@@ -27175,7 +27175,7 @@ static vlog_node_t p_source_text(void)
       if (v == NULL && parse_recovery() && peek() != tEOF) {
          // Nothing in this arena can be used: skip to the next design unit
          // and carry on in a new one
-         discard_global_arena();
+         discard_global_arena_if_last();
 
          loc_t first = LOC_INVALID, last = LOC_INVALID;
          for (;;) {

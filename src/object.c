@@ -1374,6 +1374,17 @@ object_t *object_from_locus(ident_t module, ptrdiff_t offset,
    return obj;
 }
 
+bool discard_global_arena_if_last(void)
+{
+   // Libraries loaded since the arena was made may have arenas after it
+   if (global_arena == NULL || all_arenas.count == 0
+       || all_arenas.items[all_arenas.count - 1] != global_arena)
+      return false;
+
+   discard_global_arena();
+   return true;
+}
+
 unsigned object_global_arena_used_pct(void)
 {
    if (global_arena == NULL)

@@ -791,6 +791,27 @@ static tree_t solve_target_safe(tree_t target, tree_t value)
    return solve_target(nametab, target, value);
 }
 
+static tree_t solve_known_subtype_safe(tree_t value, tree_t target)
+{
+   // The target of an assignment that had an error may have no type
+   if (parse_recovery() && syntax_errors_seen > 0) {
+      switch (tree_kind(target)) {
+      case T_REF:
+      case T_ARRAY_REF:
+      case T_ARRAY_SLICE:
+      case T_RECORD_REF:
+      case T_AGGREGATE:
+         if (!tree_has_type(target))
+            tree_set_type(target, type_new(T_NONE));
+         break;
+      default:
+         break;
+      }
+   }
+
+   return solve_known_subtype(nametab, value, target);
+}
+
 static tree_t find_binding(tree_t inst)
 {
    ident_t name;
@@ -7125,6 +7146,11 @@ static void p_interface_package_declaration(tree_t parent, tree_kind_t kind)
 
    tree_set_loc(d, CURRENT_LOC);
 
+   // A package that was not found has nothing to look in so do not declare
+   // the name of it
+   if (pack == NULL && parse_recovery())
+      return;
+
    add_interface(parent, d, kind);
    sem_check(d, nametab);
 
@@ -11624,7 +11650,7 @@ static tree_t p_simple_variable_assignment(ident_t label, tree_t name)
 
    tree_t t = tree_new(T_VAR_ASSIGN);
    tree_set_target(t, (target = solve_target_safe(target, value)));
-   tree_set_value(t, solve_known_subtype(nametab, value, target));
+   tree_set_value(t, solve_known_subtype_safe(value, target));
 
    consume(tSEMI);
 
@@ -11651,7 +11677,7 @@ static void p_selected_expressions(tree_t stmt, tree_t target)
 
       tree_t a = tree_new(T_VAR_ASSIGN);
       tree_set_target(a, target);
-      tree_set_value(a, solve_known_subtype(nametab, expr, target));
+      tree_set_value(a, solve_known_subtype_safe(expr, target));
 
       sem_check(a, nametab);
 
@@ -11736,7 +11762,7 @@ static tree_t p_waveform_element(tree_t target, tree_t head)
 
    if (head != NULL || !optional(tNULL)) {
       tree_t value = head ?: p_expression();
-      tree_set_value(w, solve_known_subtype(nametab, value, target));
+      tree_set_value(w, solve_known_subtype_safe(value, target));
    }
 
    if (optional(tAFTER)) {
@@ -12437,7 +12463,7 @@ static tree_t p_case_statement(ident_t label)
 
    consume(tIS);
 
-   type_t type = tree_type(value);
+   type_t type = tree_has_type(value) ? tree_type(value) : type_new(T_NONE);
    do {
       tree_add_stmt(t, p_case_statement_alternative(type));
    } while (peek() == tWHEN);
@@ -13518,7 +13544,7 @@ static tree_t p_case_generate_statement(ident_t label)
 
    consume(tGENERATE);
 
-   type_t type = tree_type(value);
+   type_t type = tree_has_type(value) ? tree_type(value) : type_new(T_NONE);
    do {
       tree_add_stmt(g, p_case_generate_alternative(type));
    } while (peek() == tWHEN);
@@ -17119,7 +17145,7 @@ tree_t parse(void)
          return NULL;
 
       // Nothing of this unit can be used: skip to the next one
-      discard_global_arena();
+      discard_global_arena_if_last();
 
       loc_t first = LOC_INVALID, last = LOC_INVALID;
       for (;;) {
