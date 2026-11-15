@@ -3452,6 +3452,25 @@ static type_mask_t vlog_check_binary(vlog_node_t v)
    type_mask_t lmask = vlog_check_expr(left);
    type_mask_t rmask = vlog_check_expr(right);
 
+   switch (vlog_subkind(v)) {
+   case V_BINARY_NAND:
+   case V_BINARY_NOR:
+      {
+         // These are only reduction operators (11.4.9)
+         // Only a warning as it is a common extension
+         diag_t *d = diag_new(DIAG_WARN, vlog_loc(v));
+         diag_printf(d, "'%s' is a unary reduction operator and not a binary "
+                     "operator", vlog_subkind(v) == V_BINARY_NAND
+                     ? "~&" : "~|");
+         diag_hint(d, NULL, "write ~(a %s b) instead",
+                   vlog_subkind(v) == V_BINARY_NAND ? "&" : "|");
+         diag_emit(d);
+      }
+      break;
+   default:
+      break;
+   }
+
    vlog_node_t ltype = vlog_get_type(left);
    vlog_node_t rtype = vlog_get_type(right);
    if (vlog_is_assoc_type(ltype) || vlog_is_assoc_type(rtype)) {
@@ -3461,7 +3480,6 @@ static type_mask_t vlog_check_binary(vlog_node_t v)
           && vlog_is_assoc_type(ltype) && vlog_is_assoc_type(rtype)
           && vlog_same_assoc_type(ltype, rtype))
          return TM(DT_BIT);
-
       error_at(vlog_loc(v), "operator cannot be applied to an associative "
                "array");
       return TM_ERROR;
