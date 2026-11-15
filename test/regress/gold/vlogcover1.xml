@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <scope name="WORK">
-  <scope name="vlogcover1" block_name="vlogcover1" kind="module">
-    <scope name="_P1" file="vlogcover1.sv" line="24">
+  <scope name="vlogcover1" block_name="vlogcover1" kind="module" file="vlogcover1.sv" line="16">
+    <scope name="_P1" line="24">
       <scope name="_S0">
         <statement hier="WORK.vlogcover1._P1._S0" data="7"/>
         <scope name="_S0">
@@ -9,7 +9,7 @@
         </scope>
       </scope>
     </scope>
-    <scope name="_P2" file="vlogcover1.sv" line="27">
+    <scope name="_P2" line="27">
       <scope name="_S0">
         <statement hier="WORK.vlogcover1._P2._S0" data="4"/>
         <scope name="_S0" line="28">
@@ -20,12 +20,12 @@
         </scope>
       </scope>
     </scope>
-    <scope name="_P3" file="vlogcover1.sv" line="32">
+    <scope name="_P3" line="32">
       <scope name="_S0" line="33">
         <statement hier="WORK.vlogcover1._P3._S0" data="4"/>
       </scope>
     </scope>
-    <scope name="_P4" file="vlogcover1.sv" line="36">
+    <scope name="_P4" line="36">
       <scope name="_S0" line="37">
         <statement hier="WORK.vlogcover1._P4._S0" data="4"/>
         <scope name="_B0">
@@ -35,7 +35,7 @@
         </scope>
       </scope>
     </scope>
-    <scope name="_P5" file="vlogcover1.sv" line="41">
+    <scope name="_P5" line="41">
       <scope name="setup">
         <scope name="_S0" line="42">
           <statement hier="WORK.vlogcover1._P5.setup._S0" data="1"/>
@@ -63,7 +63,7 @@
         </scope>
       </scope>
     </scope>
-    <scope name="_P6" file="vlogcover1.sv" line="52">
+    <scope name="_P6" line="52">
       <scope name="_S0" line="53">
         <statement hier="WORK.vlogcover1._P6._S0" data="1"/>
       </scope>
@@ -74,7 +74,7 @@
         <statement hier="WORK.vlogcover1._P6._S2" data="1"/>
       </scope>
     </scope>
-    <scope name="_P7" file="vlogcover1.sv" line="58">
+    <scope name="_P7" line="58">
       <scope name="_S0" line="59">
         <statement hier="WORK.vlogcover1._P7._S0" data="1"/>
       </scope>

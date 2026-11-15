@@ -2857,3 +2857,4 @@ mixedcover2     mixed,cover=statement
 vlogcover6      verilog,cover=branch
 vlogcover7      verilog,cover=branch
 vlogcover8      verilog,cover=branch
+vlogcover9      shell

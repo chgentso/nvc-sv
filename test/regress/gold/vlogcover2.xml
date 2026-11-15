@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <scope name="WORK">
-  <scope name="vlogcover2" block_name="vlogcover2" kind="module">
-    <scope name="_P7" file="vlogcover2.sv" line="52">
+  <scope name="vlogcover2" block_name="vlogcover2" kind="module" file="vlogcover2.sv" line="27">
+    <scope name="_P7" line="52">
       <scope name="_S0">
         <statement hier="WORK.vlogcover2._P7._S0" data="4"/>
         <scope name="_S0">
@@ -9,7 +9,7 @@
         </scope>
       </scope>
     </scope>
-    <scope name="_P8" file="vlogcover2.sv" line="53">
+    <scope name="_P8" line="53">
       <scope name="_S0" line="54">
         <statement hier="WORK.vlogcover2._P8._S0" data="1"/>
       </scope>
@@ -17,7 +17,7 @@
         <statement hier="WORK.vlogcover2._P8._S1" data="0"/>
       </scope>
     </scope>
-    <scope name="u1" block_name="vlogcover2_sub" kind="module" file="vlogcover2.sv" line="31">
+    <scope name="u1" block_name="vlogcover2_sub" kind="module" line="31">
       <scope name="_P0" line="19">
         <scope name="_S0">
           <statement hier="WORK.vlogcover2.u1._P0._S0" data="1"/>
@@ -40,7 +40,7 @@
         </scope>
       </scope>
     </scope>
-    <scope name="u2" block_name="vlogcover2_sub" kind="module" file="vlogcover2.sv" line="32">
+    <scope name="u2" block_name="vlogcover2_sub" kind="module" line="32">
       <scope name="_P0" line="19">
         <scope name="_S0">
           <statement hier="WORK.vlogcover2.u2._P0._S0" data="1"/>
@@ -63,7 +63,7 @@
         </scope>
       </scope>
     </scope>
-    <scope name="g[0]" block_name="g" file="vlogcover2.sv" line="34">
+    <scope name="g[0]" block_name="g" line="34">
       <scope name="u" block_name="vlogcover2_sub" kind="module" line="35">
         <scope name="_P0" line="19">
           <scope name="_S0">
@@ -88,7 +88,7 @@
         </scope>
       </scope>
     </scope>
-    <scope name="g[1]" block_name="g" file="vlogcover2.sv" line="34">
+    <scope name="g[1]" block_name="g" line="34">
       <scope name="u" block_name="vlogcover2_sub" kind="module" line="35">
         <scope name="_P0" line="19">
           <scope name="_S0">
@@ -113,14 +113,14 @@
         </scope>
       </scope>
     </scope>
-    <scope name="gi" block_name="gi" file="vlogcover2.sv" line="38">
+    <scope name="gi" block_name="gi" line="38">
       <scope name="_P0" line="40">
         <scope name="_S0">
           <statement hier="WORK.vlogcover2.gi._P0._S0" data="1"/>
         </scope>
       </scope>
     </scope>
-    <scope name="arr[0]" block_name="vlogcover2_sub" kind="module" file="vlogcover2.sv" line="47">
+    <scope name="arr[0]" block_name="vlogcover2_sub" kind="module" line="47">
       <scope name="_P0" line="19">
         <scope name="_S0">
           <statement hier="WORK.vlogcover2.arr[0]._P0._S0" data="1"/>
@@ -143,7 +143,7 @@
         </scope>
       </scope>
     </scope>
-    <scope name="arr[1]" block_name="vlogcover2_sub" kind="module" file="vlogcover2.sv" line="47">
+    <scope name="arr[1]" block_name="vlogcover2_sub" kind="module" line="47">
       <scope name="_P0" line="19">
         <scope name="_S0">
           <statement hier="WORK.vlogcover2.arr[1]._P0._S0" data="1"/>
@@ -166,7 +166,7 @@
         </scope>
       </scope>
     </scope>
-    <scope name="ifc" block_name="vlogcover2_if" kind="module" file="vlogcover2.sv" line="49">
+    <scope name="ifc" block_name="vlogcover2_if" kind="module" line="49">
       <scope name="_P0" line="7">
         <scope name="_S0">
           <statement hier="WORK.vlogcover2.ifc._P0._S0" data="3"/>
@@ -176,7 +176,7 @@
         </scope>
       </scope>
     </scope>
-    <scope name="prg" block_name="vlogcover2_prg" kind="module" file="vlogcover2.sv" line="50">
+    <scope name="prg" block_name="vlogcover2_prg" kind="module" line="50">
       <scope name="_P0" line="12">
         <scope name="_S0">
           <statement hier="WORK.vlogcover2.prg._P0._S0" data="1"/>

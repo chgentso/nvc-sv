@@ -191,7 +191,7 @@ typedef struct _elab_instance {
 } elab_instance_t;
 
 static void elab_cover_inst(elab_ctx_t *ctx, ident_t block_name,
-                            cover_scope_kind_t kind);
+                            cover_scope_kind_t kind, const loc_t *loc);
 static void elab_vhdl_block(tree_t t, const elab_ctx_t *ctx);
 static void elab_vhdl_processes(tree_t t, const elab_ctx_t *ctx);
 static void elab_vhdl_sub_blocks(tree_t t, const elab_ctx_t *ctx);
@@ -3323,7 +3323,8 @@ static void elab_verilog_module(tree_t comp, ident_t label, vlog_node_t mod,
       new_ctx.cscope = COVER_NULL_OBJ;
    }
    else
-      elab_cover_inst(&new_ctx, vlog_ident2(mod), CSCOPE_MODULE);
+      elab_cover_inst(&new_ctx, vlog_ident2(mod), CSCOPE_MODULE,
+                      vlog_loc(mod));
 
    mod_cache_t *mc = elab_cached_module(vlog_to_object(mod), &new_ctx);
    mc->count++;
@@ -5496,7 +5497,7 @@ static void elab_verilog_block(vlog_node_t v, const elab_ctx_t *ctx)
 
    vlog_trans(body, block);
 
-   elab_cover_inst(&new_ctx, ident_until(id, '['), CSCOPE_INSTANCE);
+   elab_cover_inst(&new_ctx, ident_until(id, '['), CSCOPE_INSTANCE, NULL);
    vlog_cover_block(body, ctx->cover, new_ctx.cscope);
 
    vlog_lower_instance(ctx->mir, body, ctx->cloned, block, ctx->cover,
@@ -6286,7 +6287,7 @@ static void elab_bind_components_save(tree_t block, tree_t config,
 }
 
 static void elab_cover_inst(elab_ctx_t *ctx, ident_t block_name,
-                            cover_scope_kind_t kind)
+                            cover_scope_kind_t kind, const loc_t *loc)
 {
    if (ctx->cover == NULL)
       return;
@@ -6320,13 +6321,17 @@ static void elab_cover_inst(elab_ctx_t *ctx, ident_t block_name,
    cover_obj_t inst = cover_inst_new(ctx->cover, tree_ident(block), parent_inst,
                                      block_name, lib_name(ctx->library),
                                      ctx->dotted);
+   if (loc == NULL || !loc_invalid_p(tree_loc(block)))
+      loc = tree_loc(block);
+
    ctx->cscope = cover_scope_new(ctx->cover, inst, parent, kind,
-                                 tree_ident(block), *tree_loc(block));
+                                 tree_ident(block), *loc);
 }
 
 static void elab_cover_block(elab_ctx_t *ctx, tree_t unit)
 {
-   elab_cover_inst(ctx, ident_rfrom(tree_ident(unit), '.'), CSCOPE_INSTANCE);
+   elab_cover_inst(ctx, ident_rfrom(tree_ident(unit), '.'), CSCOPE_INSTANCE,
+                   NULL);
 }
 
 typedef struct {

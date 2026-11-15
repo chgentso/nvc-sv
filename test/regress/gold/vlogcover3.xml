@@ -1,10 +1,10 @@
 <?xml version="1.0"?>
 <scope name="WORK">
-  <scope name="vlogcover3" block_name="vlogcover3" kind="module">
-    <scope name="_Db" file="vlogcover3.sv" line="7">
+  <scope name="vlogcover3" block_name="vlogcover3" kind="module" file="vlogcover3.sv" line="5">
+    <scope name="_Db" line="7">
       <statement hier="WORK.vlogcover3._Db" data="4"/>
     </scope>
-    <scope name="fact" file="vlogcover3.sv" line="12">
+    <scope name="fact" line="12">
       <scope name="_S0" line="13">
         <statement hier="WORK.vlogcover3.fact._S0" data="4"/>
         <scope name="_B0">
@@ -19,7 +19,7 @@
         </scope>
       </scope>
     </scope>
-    <scope name="bump" file="vlogcover3.sv" line="19">
+    <scope name="bump" line="19">
       <scope name="_S0" line="20">
         <statement hier="WORK.vlogcover3.bump._S0" data="1"/>
         <scope name="_S0" line="21">
@@ -30,15 +30,15 @@
         <statement hier="WORK.vlogcover3.bump._S1" data="1"/>
       </scope>
     </scope>
-    <scope name="unused" file="vlogcover3.sv" line="26">
+    <scope name="unused" line="26">
       <scope name="_S0" line="27">
         <statement hier="WORK.vlogcover3.unused._S0" data="0"/>
       </scope>
     </scope>
-    <scope name="_P0" file="vlogcover3.sv" line="9">
+    <scope name="_P0" line="9">
       <statement hier="WORK.vlogcover3._P0" data="5"/>
     </scope>
-    <scope name="_P2" file="vlogcover3.sv" line="41">
+    <scope name="_P2" line="41">
       <scope name="_S0" line="42">
         <statement hier="WORK.vlogcover3._P2._S0" data="1"/>
       </scope>
@@ -83,7 +83,7 @@
         </scope>
       </scope>
     </scope>
-    <scope name="gen[0]" block_name="gen" file="vlogcover3.sv" line="30">
+    <scope name="gen[0]" block_name="gen" line="30">
       <scope name="twice" line="31">
         <scope name="_S0" line="32">
           <statement hier="WORK.vlogcover3.gen[0].twice._S0" data="0"/>
@@ -100,7 +100,7 @@
         </scope>
       </scope>
     </scope>
-    <scope name="gen[1]" block_name="gen" file="vlogcover3.sv" line="30">
+    <scope name="gen[1]" block_name="gen" line="30">
       <scope name="twice" line="31">
         <scope name="_S0" line="32">
           <statement hier="WORK.vlogcover3.gen[1].twice._S0" data="1"/>

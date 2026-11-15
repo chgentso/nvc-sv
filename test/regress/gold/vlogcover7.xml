@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <scope name="WORK">
-  <scope name="vlogcover7" block_name="vlogcover7" kind="module">
-    <scope name="_P1" file="vlogcover7.sv" line="14">
+  <scope name="vlogcover7" block_name="vlogcover7" kind="module" file="vlogcover7.sv" line="5">
+    <scope name="_P1" line="14">
       <scope name="_S0">
         <scope name="_S1" line="18">
           <scope name="_B0" line="19">

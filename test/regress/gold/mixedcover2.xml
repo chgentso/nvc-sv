@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <scope name="WORK">
-  <scope name="mixedcover2" block_name="mixedcover2" kind="module">
-    <scope name="_P2" file="mixedcover2.sv" line="11">
+  <scope name="mixedcover2" block_name="mixedcover2" kind="module" file="mixedcover2.sv" line="4">
+    <scope name="_P2" line="11">
       <scope name="_S0" line="12">
         <statement hier="WORK.mixedcover2._P2._S0" data="1"/>
         <scope name="_S0">
@@ -21,7 +21,7 @@
         </scope>
       </scope>
     </scope>
-    <scope name="u1" block_name="MIXEDCOVER2_SUB-TEST" file="mixedcover2.sv" line="8">
+    <scope name="u1" block_name="MIXEDCOVER2_SUB-TEST" line="8">
       <scope name="P1" file="mixedcover2.vhd" line="13">
         <scope name="_S0" line="15">
           <statement hier="WORK.mixedcover2.u1.P1._S0" data="4"/>
@@ -45,7 +45,7 @@
         </scope>
       </scope>
     </scope>
-    <scope name="u2" block_name="MIXEDCOVER2_SUB-TEST" file="mixedcover2.sv" line="9">
+    <scope name="u2" block_name="MIXEDCOVER2_SUB-TEST" line="9">
       <scope name="P1" file="mixedcover2.vhd" line="13">
         <scope name="_S0" line="15">
           <statement hier="WORK.mixedcover2.u2.P1._S0" data="4"/>

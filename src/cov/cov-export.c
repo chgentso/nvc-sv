@@ -63,7 +63,7 @@ static cobertura_class_t *cobertura_find_class(cobertura_report_t *report,
    // block name may be used in more than one file
 
    LOCAL_TEXT_BUF tb = tb_new();
-   get_relative_path(tb, report->relative, loc_file_str(loc));
+   get_relative_path(tb, report->relative, loc_file_str(loc) ?: "");
 
    ident_t key = ident_sprintf("%s|%s", istr(block_name ?: ident_new("")),
                               tb_get(tb));
