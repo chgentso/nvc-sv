@@ -4033,6 +4033,32 @@ START_TEST(test_taskexpr1)
 }
 END_TEST
 
+START_TEST(test_packedmem1)
+{
+   const error_t expect[] = {
+      {  8, "member 'r' of a packed structure cannot be a real" },
+      {  9, "member 's' of a packed structure cannot be a string" },
+      { 10, "member 'e' of a packed structure cannot be an event" },
+      { 11, "member 'sp' of a packed structure cannot be an unpacked "
+        "structure or union" },
+      { 12, "member 'ua' of a packed structure cannot be an unpacked "
+        "array" },
+      { 13, "member 'c' of a packed structure cannot be a class handle" },
+      { 18, "member 'sr' of a packed union cannot be a real" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/packedmem1.sv");
+
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
 START_TEST(test_crash1)
 {
    const error_t expect[] = {
@@ -4555,6 +4581,7 @@ Suite *get_vlog_tests(void)
    tcase_add_test(tc, test_netdtype1);
 
    tcase_add_test(tc, test_taskexpr1);
+   tcase_add_test(tc, test_packedmem1);
    tcase_add_test(tc, test_crash1);
    tcase_add_test(tc, test_crash2);
    tcase_add_test(tc, test_crash3);

@@ -1204,6 +1204,7 @@ static void vlog_check_type(vlog_node_t v)
 
    switch (vlog_kind(type)) {
    case V_CLASS_DECL:
+   case V_TYPE_DECL:
       return;   // Checked at original declaration
    default:
       break;
@@ -1603,6 +1604,75 @@ static void vlog_check_enum_decl(vlog_node_t v)
    }
 }
 
+static const char *vlog_unpacked_member_kind(vlog_node_t d)
+{
+   // Names the reason that a member cannot be part of a packed structure
+   // or union, which must only hold packed data (7.2.1)
+
+   if (vlog_ranges(d) > 0 && vlog_subkind(vlog_range(d, 0)) == V_DIM_UNPACKED)
+      return "an unpacked array";
+   else if (!vlog_has_type(d))
+      return NULL;
+
+   vlog_node_t type = vlog_get_type(vlog_type(d));
+   if (type == NULL)
+      return NULL;
+
+   switch (vlog_kind(type)) {
+   case V_CLASS_DECL:
+      return "a class handle";
+   case V_STRUCT_DECL:
+   case V_UNION_DECL:
+      return ((vlog_flags(type) & VLOG_F_PACKED)
+              && !(vlog_flags(type) & VLOG_F_UNPACKED_VIEW)) ? NULL
+         : "an unpacked structure or union";
+   case V_DATA_TYPE:
+      switch (vlog_subkind(type)) {
+      case DT_REAL:
+      case DT_SHORTREAL:
+      case DT_REALTIME:
+         return "a real";
+      case DT_STRING:
+         return "a string";
+      case DT_EVENT:
+         return "an event";
+      case DT_CHANDLE:
+         return "a chandle";
+      case DT_QUEUE:
+      case DT_DYNARRAY:
+      case DT_ASSOC:
+         return "a dynamically sized array";
+      default:
+         return NULL;
+      }
+   default:
+      return NULL;
+   }
+}
+
+static void vlog_check_packed_members(vlog_node_t v)
+{
+   const int ndecls = vlog_decls(v);
+   for (int i = 0; i < ndecls; i++) {
+      vlog_node_t d = vlog_decl(v, i);
+      if (vlog_kind(d) != V_VAR_DECL)
+         continue;
+
+      const char *bad = vlog_unpacked_member_kind(d);
+      if (bad != NULL) {
+         diag_t *dg = diag_new(relaxed_rules() ? DIAG_WARN : DIAG_ERROR,
+                               vlog_loc(d));
+         diag_printf(dg, "member %pQ of a packed %s cannot be %s",
+                     vlog_ident(d),
+                     vlog_kind(v) == V_UNION_DECL ? "union" : "structure",
+                     bad);
+         diag_hint(dg, NULL, "the members of a packed structure or union "
+                   "must be integral or packed");
+         diag_emit(dg);
+      }
+   }
+}
+
 static void vlog_check_struct_decl(vlog_node_t v)
 {
    vlog_check_decls(v);
@@ -1617,11 +1687,17 @@ static void vlog_check_struct_decl(vlog_node_t v)
          error_at(vlog_loc(d), "a member of a packed structure cannot have "
                   "a default value");
    }
+
+   vlog_check_packed_members(v);
 }
 
 static void vlog_check_union_decl(vlog_node_t v)
 {
    vlog_check_decls(v);
+
+   if ((vlog_flags(v) & VLOG_F_PACKED)
+       && !(vlog_flags(v) & VLOG_F_UNPACKED_VIEW))
+      vlog_check_packed_members(v);
 }
 
 static void vlog_const_func_cb(vlog_node_t v, void *ctx)
