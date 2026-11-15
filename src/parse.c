@@ -199,6 +199,16 @@ void parse_set_recovery(bool on)
 
 static bool recovery_degraded = false;
 
+static int rank_of_head(parse_state_t *state)
+{
+   // The rank of the next token, looking at what follows it if the language
+   // needs that to tell
+   if (state->rank_at_fn != NULL)
+      return (*state->rank_at_fn)(state);
+
+   return (*state->rank_fn)(state->tokenq[state->tokenq_tail].token);
+}
+
 bool parse_recovery(void)
 {
 #ifdef DEBUG
@@ -284,7 +294,7 @@ void parse_vexpect(parse_state_t *state, va_list ap)
          state->stall = 0;
 
       const token_t token = state->tokenq[state->tokenq_tail].token;
-      int rank = (*state->rank_fn)(token);
+      int rank = rank_of_head(state);
       if (rank > 0 && state->stray_fn != NULL
           && (*state->stray_fn)(token, state->hint_str))
          rank = 0;   // Cannot be what ends this construct
@@ -324,10 +334,24 @@ void parse_expect(parse_state_t *state, ...)
 
 bool parse_consume(parse_state_t *state, token_t tok)
 {
+   if (state->end_missing > 0 && parse_recovery()) {
+      // The end that this belongs to was not there: neither is the rest of
+      // what goes with it
+      if (tok == tSEMI)
+         state->end_missing = 0;
+      else
+         state->end_missing--;
+      return true;
+   }
+
    const token_t got = parse_peek_nth(state, 1);
    if (tok != got) {
       const int tail = state->tokenq_tail;
       parse_expect(state, tok, -1);
+
+      if (tok == tEND && state->end_clause && parse_recovery()
+          && state->tokenq_tail == tail)
+         state->end_missing = 6;
 
       // A single token that is not wanted, followed by what was expected
       if (state->rank_fn != NULL && parse_recovery()) {
@@ -360,6 +384,9 @@ bool parse_consume(parse_state_t *state, token_t tok)
 
 bool parse_optional(parse_state_t *state, token_t tok)
 {
+   if (state->end_missing > 0 && parse_recovery())
+      return false;
+
    if (parse_peek_nth(state, 1) == tok) {
       state->n_correct++;
       drop_token(state);
@@ -386,7 +413,7 @@ void parse_sync(parse_state_t *state, int level)
    bool dropped = false;
    loc_t first = LOC_INVALID, last = LOC_INVALID;
 
-   if (level >= 3 && (*state->rank_fn)(parse_peek_nth(state, 1)) == 2) {
+   if (level >= 3 && rank_of_head(state) == 2) {
       // Something that closes a statement, with nothing left to close: it
       // is the only thing wrong here
       lint_note_damage(&state->tokenq[state->tokenq_tail].loc,
@@ -401,23 +428,13 @@ void parse_sync(parse_state_t *state, int level)
       const token_t next = parse_peek_nth(state, 1);
       if (next == tEOF)
          break;
-      else if (depth <= 0 && (*state->rank_fn)(next) >= level)
+      else if (depth <= 0 && rank_of_head(state) >= level)
          break;
-      else if ((*state->rank_fn)(next) >= 4)
+      else if (rank_of_head(state) >= 4)
          break;   // Never skip a design unit
 
-      switch (next) {
-      case tLPAREN: case tLSQUARE: case tLBRACE: case tBEGIN: case tFORK:
-      case tCASE: case tCASEX: case tCASEZ:
-         depth++;
-         break;
-      case tRPAREN: case tRSQUARE: case tRBRACE: case tEND: case tENDCASE:
-      case tJOIN: case tJOINANY: case tJOINNONE:
-         depth--;
-         break;
-      default:
-         break;
-      }
+      if (state->group_fn != NULL)
+         depth += (*state->group_fn)(next);
 
       if (!dropped) {
          first = state->tokenq[state->tokenq_tail].loc;
@@ -441,11 +458,42 @@ void parse_sync(parse_state_t *state, int level)
       state->mute = true;
 }
 
+void parse_skip_close(parse_state_t *state)
+{
+   // Skip the rest of a bracketed list that cannot be read: up to and
+   // including its closing bracket, but not over anything that ends or
+   // starts a statement or declaration
+   if (state->rank_fn == NULL || !parse_recovery()) {
+      drop_tokens_until(state, tRPAREN);
+      return;
+   }
+
+   int depth = 0;
+   for (;;) {
+      const token_t next = parse_peek_nth(state, 1);
+      if (next == tEOF)
+         break;
+      else if (depth <= 0 && next == tRPAREN) {
+         drop_token(state);
+         state->stall = 0;
+         break;
+      }
+      else if (depth <= 0 && rank_of_head(state) >= 1)
+         break;
+
+      if (state->group_fn != NULL)
+         depth += (*state->group_fn)(next);
+
+      drop_token(state);
+      state->stall = 0;
+   }
+}
+
 void parse_rearm(parse_state_t *state)
 {
    // An item that can be told from the garbage that was skipped starts here
    if (state->mute && state->rank_fn != NULL
-       && (*state->rank_fn)(parse_peek_nth(state, 1)) >= 3)
+       && rank_of_head(state) >= 3)
       state->mute = false;
 }
 
@@ -526,7 +574,7 @@ static bool not_at_token_rank(parse_state_t *state, int floor, va_list ap)
    if (recover) {
       // Rule X: after an error at a token that nothing in this list can
       // use, a token of an enclosing construct ends the list
-      const int r = (*state->rank_fn)(p);
+      const int r = rank_of_head(state);
       if (r >= 2 && r >= MAX(minrank, floor)) {
          // The end of the construct that was closed by insertion: what
          // it holds that was closed properly is not affected
@@ -643,8 +691,82 @@ static token_t wrapped_yylex(void)
    }
 }
 
+static int vhdl_token_rank(token_t tok)
+{
+   // How far up the grammar a token reaches, used to recover from errors:
+   // negative closes or separates a bracketed list, 1 ends a statement or
+   // declaration, 2 closes a list of statements, 3 starts a declaration or
+   // a concurrent statement and 4 starts or closes a design unit
+   switch (tok) {
+   case tRPAREN: case tCOMMA:
+      return -1;
+   case tSEMI:
+   case tWAIT: case tIF: case tCASE: case tFOR: case tWHILE: case tLOOP:
+   case tRETURN: case tEXIT: case tNEXT: case tASSERT: case tREPORT:
+   case tNULL:
+      return 1;   // Ends a statement, or starts the next one
+   case tEND: case tELSIF: case tELSE: case tWHEN: case tBEGIN:
+      return 2;
+   case tPROCESS: case tSIGNAL: case tCONSTANT: case tVARIABLE: case tTYPE:
+   case tSUBTYPE: case tCOMPONENT: case tFUNCTION: case tPROCEDURE:
+   case tATTRIBUTE: case tBLOCK: case tFILE: case tALIAS: case tPURE:
+   case tIMPURE: case tSHARED: case tPOSTPONED:
+      return 3;
+   case tLIBRARY: case tCONTEXT: case tENTITY: case tARCHITECTURE:
+   case tPACKAGE: case tCONFIGURATION: case tEOF:
+      return 4;
+   default:
+      return 0;
+   }
+}
+
+static bool vhdl_token_stray(token_t tok, const char *hint)
+{
+   // A token that closes or ends a list of statements is not that when it
+   // turns up inside a bracketed list: it is more likely to be extra
+   if (tok != tEND && tok != tBEGIN && tok != tELSE && tok != tELSIF
+       && tok != tWHEN)
+      return false;
+
+   static const char *const inside[] = {
+      "aggregate", "constraint", "association", "actual", "index", "slice",
+   };
+
+   for (int i = 0; hint != NULL && i < ARRAY_LEN(inside); i++) {
+      if (strstr(hint, inside[i]) != NULL)
+         return true;
+   }
+
+   return false;
+}
+
+static int vhdl_rank_at(parse_state_t *s)
+{
+   // A label starts a statement
+   const token_t tok = parse_peek_nth(s, 1);
+   if (tok == tID && parse_peek_nth(s, 2) == tCOLON)
+      return 3;
+
+   return vhdl_token_rank(tok);
+}
+
+static int vhdl_token_group(token_t tok)
+{
+   switch (tok) {
+   case tLPAREN:
+      return 1;
+   case tRPAREN:
+      return -1;
+   default:
+      return 0;
+   }
+}
+
+static unsigned syntax_errors_seen = 0;
+
 static void vhdl_parse_error_cb(void)
 {
+   syntax_errors_seen++;
    lint_note_syntax_error(&state.last_loc);
    suppress_errors(nametab);
 }
@@ -655,6 +777,16 @@ static tree_t error_expr(void)
    tree_set_ident(t, error_marker());
    tree_set_type(t, type_new(T_NONE));
    return t;
+}
+
+static tree_t solve_target_safe(tree_t target, tree_t value)
+{
+   // After an error the value may not give the aggregate a type to take
+   if (parse_recovery() && syntax_errors_seen > 0
+       && tree_kind(target) == T_AGGREGATE && !tree_has_type(target))
+      tree_set_type(target, type_new(T_NONE));
+
+   return solve_target(nametab, target, value);
 }
 
 static tree_t find_binding(tree_t inst)
@@ -5683,7 +5815,7 @@ static tree_t p_aggregate_or_expression(void)
 
    default:
       expect(tRPAREN, tASSOC, tCOMMA, tTO, tDOWNTO, tBAR);
-      drop_tokens_until(&state, tRPAREN);
+      parse_skip_close(&state);
       return head;
    }
 }
@@ -7958,7 +8090,7 @@ static void p_protected_type_declarative_part(tree_t decl)
 
    BEGIN("protected type declarative part");
 
-   while (not_at_token(tEND))
+   while (not_at_items(tEND))
       p_protected_type_declarative_item(decl);
 }
 
@@ -9306,7 +9438,7 @@ static void p_protected_type_body_declarative_part(tree_t body)
 
    BEGIN("protected type body declarative part");
 
-   while (not_at_token(tEND))
+   while (not_at_items(tEND))
       p_protected_type_body_declarative_item(body);
 }
 
@@ -9697,7 +9829,7 @@ static void p_entity_declarative_part(tree_t entity)
 
    BEGIN("entity declarative part");
 
-   while (not_at_token(tEND, tBEGIN))
+   while (not_at_items(tEND, tBEGIN))
       p_entity_declarative_item(entity);
 }
 
@@ -9711,6 +9843,7 @@ static void p_subprogram_declarative_item(tree_t sub)
 
    BEGIN("subprogram declarative item");
 
+   parse_rearm(&state);
    switch (peek()) {
    case tVARIABLE:
       p_variable_declaration(sub);
@@ -9782,7 +9915,7 @@ static void p_subprogram_declarative_part(tree_t sub)
 
    BEGIN("subprogram declarative part");
 
-   while (not_at_token(tBEGIN))
+   while (not_at_items(tBEGIN))
       p_subprogram_declarative_item(sub);
 }
 
@@ -9931,6 +10064,7 @@ static void p_process_declarative_item(tree_t proc)
 
    BEGIN("process declarative item");
 
+   parse_rearm(&state);
    switch (peek()) {
    case tVARIABLE:
       p_variable_declaration(proc);
@@ -10001,7 +10135,7 @@ static void p_process_declarative_part(tree_t proc)
 
    BEGIN("process declarative part");
 
-   while (not_at_token(tBEGIN))
+   while (not_at_items(tBEGIN))
       p_process_declarative_item(proc);
 }
 
@@ -10150,7 +10284,7 @@ static void p_entity_statement_part(tree_t entity)
 
    BEGIN("entity statement part");
 
-   while (not_at_token(tEND)) {
+   while (not_at_items(tEND)) {
       if (peek() == tSTARTPSL)
          p_concurrent_statement_or_psl(entity);
       else
@@ -10265,6 +10399,7 @@ static void p_package_declarative_item(tree_t pack)
 
    BEGIN("package declarative item");
 
+   parse_rearm(&state);
    switch (peek()) {
    case tTYPE:
       p_type_declaration(pack);
@@ -10363,7 +10498,7 @@ static void p_package_declarative_part(tree_t pack)
 
    BEGIN("package declarative part");
 
-   while (not_at_token(tEND))
+   while (not_at_items(tEND))
       p_package_declarative_item(pack);
 }
 
@@ -11345,6 +11480,7 @@ static void p_block_declarative_item(tree_t parent)
 
    BEGIN("block declarative item");
 
+   parse_rearm(&state);
    switch (peek()) {
    case tSIGNAL:
       p_signal_declaration(parent);
@@ -11485,7 +11621,7 @@ static tree_t p_simple_variable_assignment(ident_t label, tree_t name)
    tree_t value = p_conditional_or_unaffected_expression(STD_08);
 
    tree_t t = tree_new(T_VAR_ASSIGN);
-   tree_set_target(t, (target = solve_target(nametab, target, value)));
+   tree_set_target(t, (target = solve_target_safe(target, value)));
    tree_set_value(t, solve_known_subtype(nametab, value, target));
 
    consume(tSEMI);
@@ -11509,7 +11645,7 @@ static void p_selected_expressions(tree_t stmt, tree_t target)
       tree_t expr = p_expression();
 
       if (!tree_has_type(target))
-         target = solve_target(nametab, target, expr);
+         target = solve_target_safe(target, expr);
 
       tree_t a = tree_new(T_VAR_ASSIGN);
       tree_set_target(a, target);
@@ -11757,7 +11893,7 @@ static tree_t p_signal_assignment_statement(ident_t label, tree_t name)
    tree_t expr = NULL;
    if (not_at_token(tNULL, tUNAFFECTED)) {
       expr = p_expression();
-      target = solve_target(nametab, target, expr);
+      target = solve_target_safe(target, expr);
    }
    else
       target = solve_types(nametab, target, NULL);
@@ -12199,7 +12335,7 @@ static tree_t p_procedure_call_statement(ident_t label, tree_t name)
       call = tree_new(T_PCALL);
       tree_set_ident2(call, error_marker());
       set_label_and_loc(call, label, CURRENT_LOC);
-      drop_tokens_until(&state, tSEMI);
+      parse_sync(&state, 2);
       return call;
    }
 
@@ -12324,7 +12460,7 @@ static void p_sequential_block_declarative_part(tree_t block)
 
    BEGIN("sequential block declarative part");
 
-   while (not_at_token(tBEGIN))
+   while (not_at_items(tBEGIN))
       p_process_declarative_item(block);
 }
 
@@ -12454,7 +12590,7 @@ static tree_t p_sequential_statement(void)
    default:
       expect(tWAIT, tID, tASSERT, tREPORT, tIF, tNULL, tRETURN, tCASE, tWHILE,
              tFOR, tLOOP, tEXIT, tNEXT, tWITH, tLTLT, tLPAREN, tBLOCK);
-      drop_tokens_until(&state, tSEMI);
+      parse_sync(&state, 2);
       return tree_new(T_NULL);
    }
 
@@ -12475,7 +12611,7 @@ static tree_t p_sequential_statement(void)
 
    default:
       expect(tWALRUS, tLE, tSEMI);
-      drop_tokens_until(&state, tSEMI);
+      parse_sync(&state, 2);
       return tree_new(T_NULL);
    }
 }
@@ -12785,7 +12921,7 @@ static void p_conditional_waveforms(tree_t stmt, tree_t target, tree_t s0)
          tree_t expr = NULL;
          if (not_at_token(tUNAFFECTED, tNULL)) {
             expr = p_expression();
-            target = solve_target(nametab, target, expr);
+            target = solve_target_safe(target, expr);
          }
          else
             target = solve_types(nametab, target, NULL);
@@ -12867,7 +13003,7 @@ static void p_selected_waveforms(tree_t stmt, tree_t target, tree_t reject)
       tree_t expr = NULL;
       if (not_at_token(tNULL, tUNAFFECTED)) {
          expr = p_expression();
-         target = solve_target(nametab, target, expr);
+         target = solve_target_safe(target, expr);
       }
       else
          target = solve_types(nametab, target, NULL);
@@ -12983,7 +13119,7 @@ static tree_t p_concurrent_procedure_call_statement(ident_t label, tree_t name)
    else if ((call = resolve_pcall(nametab, name)) == NULL) {
       parse_error(tree_loc(name), "invalid procedure call");
       call = tree_new(T_PCALL);
-      drop_tokens_until(&state, tSEMI);
+      parse_sync(&state, 3);
       return call;
    }
 
@@ -13039,7 +13175,7 @@ static void p_block_statement_part(tree_t arch)
 
    BEGIN("block statement part");
 
-   while (not_at_token(tEND))
+   while (not_at_items(tEND))
       p_concurrent_statement_or_psl(arch);
 }
 
@@ -13049,7 +13185,7 @@ static void p_block_declarative_part(tree_t arch)
 
    BEGIN("block declarative part");
 
-   while (not_at_token(tBEGIN))
+   while (not_at_items(tBEGIN))
       p_block_declarative_item(arch);
 }
 
@@ -13160,12 +13296,12 @@ static void p_generate_statement_body(tree_t container, ident_t alt_label)
                        tPROPERTY, tENDPOINT);
 
    if (has_decls) {
-      while (not_at_token(tBEGIN))
+      while (not_at_items(tBEGIN))
          p_block_declarative_item(container);
       consume(tBEGIN);
    }
 
-   while (not_at_token(tEND, tELSIF, tELSE, tWHEN))
+   while (not_at_items(tEND, tELSIF, tELSE, tWHEN))
       p_concurrent_statement_or_psl(container);
 
    if (peek() == tEND && (peek_nth(2) == tID || peek_nth(2) == tSEMI)) {
@@ -13414,7 +13550,7 @@ static tree_t p_generate_statement(ident_t label)
       return p_case_generate_statement(label);
    default:
       expect(tFOR, tIF, tCASE);
-      drop_tokens_until(&state, tSEMI);
+      parse_sync(&state, 3);
       return ensure_labelled(tree_new(T_BLOCK), label);
    }
 }
@@ -15672,6 +15808,7 @@ static tree_t p_concurrent_statement(void)
 
    BEGIN("concurrent statement");
 
+   parse_rearm(&state);
    ident_t label = NULL;
    if ((peek() == tID) && (peek_nth(2) == tCOLON)) {
       label = p_identifier();
@@ -15761,7 +15898,7 @@ static tree_t p_concurrent_statement(void)
       expect(tPROCESS, tPOSTPONED, tCOMPONENT, tENTITY, tCONFIGURATION,
              tWITH, tASSERT, tBLOCK, tIF, tFOR, tCASE, tLPAREN, tID,
              STD(08, tLTLT));
-      drop_tokens_until(&state, tSEMI);
+      parse_sync(&state, 3);
       return ensure_labelled(tree_new(T_BLOCK), label);
    }
 }
@@ -15772,7 +15909,7 @@ static void p_architecture_declarative_part(tree_t arch)
 
    BEGIN("architecture declarative part");
 
-   while (not_at_token(tBEGIN))
+   while (not_at_items(tBEGIN))
       p_block_declarative_item(arch);
 }
 
@@ -15782,7 +15919,7 @@ static void p_architecture_statement_part(tree_t arch)
 
    BEGIN("architecture statement part");
 
-   while (not_at_token(tEND))
+   while (not_at_items(tEND))
       p_concurrent_statement_or_psl(arch);
 }
 
@@ -15959,7 +16096,7 @@ static void p_package_body_declarative_part(tree_t unit)
 
    BEGIN("package body declarative part");
 
-   while (not_at_token(tEND))
+   while (not_at_items(tEND))
       p_package_body_declarative_item(unit);
 }
 
@@ -16859,11 +16996,16 @@ static void p_library_unit(tree_t unit)
                   "STANDARD package");
 }
 
+static bool mute_names = false;
+
 static tree_t p_design_unit(void)
 {
    BEGIN("design unit");
 
    push_scope(nametab);
+
+   if (mute_names)
+      suppress_errors(nametab);
 
    tree_t unit = tree_new(T_DESIGN_UNIT);
    scope_set_container(nametab, unit);
@@ -16954,20 +17096,52 @@ tree_t parse(void)
    if (peek() == tEOF)
       return NULL;
 
-   make_new_arena();
-   nametab = nametab_new();
+   bool after_skip = false;
+   for (;;) {
+      make_new_arena();
+      nametab = nametab_new();
 
-   tree_t unit = p_design_unit();
+      // The context of a unit that was skipped is not there for the next one
+      mute_names = after_skip;
+      tree_t unit = p_design_unit();
+      mute_names = false;
 
-   nametab_finish(nametab);
-   nametab = NULL;
+      nametab_finish(nametab);
+      nametab = NULL;
 
-   flush_pragmas(unit);
+      flush_pragmas(unit);
 
-   if (tree_kind(unit) == T_DESIGN_UNIT)
-      return NULL;
+      if (tree_kind(unit) != T_DESIGN_UNIT)
+         return unit;
+      else if (!parse_recovery() || peek() == tEOF)
+         return NULL;
 
-   return unit;
+      // Nothing of this unit can be used: skip to the next one
+      discard_global_arena();
+
+      loc_t first = LOC_INVALID, last = LOC_INVALID;
+      for (;;) {
+         const token_t next = peek();
+         if (next == tEOF || next == tLIBRARY || next == tCONTEXT
+             || next == tENTITY || next == tARCHITECTURE
+             || next == tPACKAGE || next == tCONFIGURATION)
+            break;
+
+         if (first.first_line == LINE_INVALID)
+            first = state.tokenq[state.tokenq_tail].loc;
+         last = state.tokenq[state.tokenq_tail].loc;
+         drop_token(&state);
+         state.stall = 0;
+      }
+
+      lint_note_damage(&first, &last);
+      state.mute = false;
+      state.end_missing = 0;
+      after_skip = true;
+
+      if (peek() == tEOF)
+         return NULL;
+   }
 }
 
 void reset_vhdl_parser(void)
@@ -16978,4 +17152,13 @@ void reset_vhdl_parser(void)
    state.tokenq_head = state.tokenq_tail = 0;
    state.lex_fn = wrapped_yylex;
    state.error_fn = vhdl_parse_error_cb;
+   state.rank_fn = vhdl_token_rank;
+   state.rank_at_fn = vhdl_rank_at;
+   state.stray_fn = vhdl_token_stray;
+   state.group_fn = vhdl_token_group;
+   state.end_clause = true;
+   state.end_missing = 0;
+   syntax_errors_seen = 0;
+   state.stall = 0;
+   state.mute = false;
 }

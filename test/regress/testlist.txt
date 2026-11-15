@@ -2799,3 +2799,5 @@ linterr19 shell
 linterr20 shell
 linterr21 shell
 linterr22 shell
+linterrvhdl2 shell
+linterrvhdl4 shell

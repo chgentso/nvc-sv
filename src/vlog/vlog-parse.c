@@ -753,6 +753,20 @@ static int vlog_token_rank(token_t tok)
    }
 }
 
+static int vlog_token_group(token_t tok)
+{
+   switch (tok) {
+   case tLPAREN: case tLSQUARE: case tLBRACE: case tBEGIN: case tFORK:
+   case tCASE: case tCASEX: case tCASEZ:
+      return 1;
+   case tRPAREN: case tRSQUARE: case tRBRACE: case tEND: case tENDCASE:
+   case tJOIN: case tJOINANY: case tJOINNONE:
+      return -1;
+   default:
+      return 0;
+   }
+}
+
 static bool vlog_token_stray(token_t tok, const char *hint)
 {
    // A token that closes a block is not that when it turns up inside an
@@ -27275,6 +27289,10 @@ void reset_verilog_parser(void)
    state.error_fn = vlog_parse_error_cb;
    state.rank_fn = vlog_token_rank;
    state.stray_fn = vlog_token_stray;
+   state.group_fn = vlog_token_group;
+   state.rank_at_fn = NULL;
+   state.end_clause = false;
+   state.end_missing = 0;
    state.stall = 0;
    state.mute = false;
    syntax_errors_seen = 0;

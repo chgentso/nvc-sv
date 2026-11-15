@@ -39,7 +39,7 @@ typedef struct {
 typedef token_t (*lex_fn_t)(void);
 typedef void (*error_fn_t)(void);
 
-typedef struct {
+typedef struct _parse_state {
    lex_fn_t    lex_fn;
    error_fn_t  error_fn;
    loc_t       start_loc;
@@ -50,6 +50,10 @@ typedef struct {
    bool        mute;
    int       (*rank_fn)(token_t);
    bool      (*stray_fn)(token_t, const char *);
+   int       (*group_fn)(token_t);   // +1 opens, -1 closes a nested group
+   int       (*rank_at_fn)(struct _parse_state *);   // Rank of the next token with what follows
+   bool        end_clause;   // end is followed by more that goes with it
+   int         end_missing;  // That much of it is taken as already read
    tokenq_t    tokenq[TOKENQ_SIZE];
    int         tokenq_head;
    int         tokenq_tail;
@@ -102,6 +106,7 @@ void drop_token(parse_state_t *state);
 void drop_tokens_until(parse_state_t *state, token_t tok);
 void parse_sync(parse_state_t *state, int level);
 void parse_rearm(parse_state_t *state);
+void parse_skip_close(parse_state_t *state);
 void parse_set_recovery(bool on);
 bool parse_recovery(void);
 void parse_vexpect(parse_state_t *state, va_list ap);
