@@ -402,8 +402,22 @@ void _std_env_createdir(const uint8_t *path_ptr, int64_t path_len,
 {
    char *cstr LOCAL = null_terminate(path_ptr, path_len);
 
-   if (parents)
-      jit_msg(NULL, DIAG_WARN, "PARENTS argument not supported");
+   if (parents) {
+      // Create each missing leading directory first
+      for (char *p = cstr + 1; *p != '\0'; p++) {
+         if (*p != '/' && *p != '\\')
+            continue;
+
+         const char saved = *p;
+         *p = '\0';
+#ifdef __MINGW32__
+         mkdir(cstr);
+#else
+         mkdir(cstr, 0777);
+#endif
+         *p = saved;
+      }
+   }
 
 #ifdef __MINGW32__
    if (mkdir(cstr) == -1)
@@ -662,6 +676,11 @@ int32_t _std_env_file_line(void)
 DLLEXPORT
 int64_t _std_env_seconds_to_time(double real)
 {
+   // TIME'HIGH is 2^63 - 1 femtoseconds
+   if (!(fabs(real) < 9223.372036854775807))
+      jit_msg(NULL, DIAG_FATAL, "SECONDS_TO_TIME argument %g seconds is "
+              "outside the range of type TIME", real);
+
    double whole, frac = modf(real, &whole);
    return (int64_t)whole * UINT64_C(1000000000000000) + (int64_t)(frac * 1e15);
 }
