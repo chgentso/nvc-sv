@@ -29,7 +29,17 @@ module wide #(parameter type T = logic, parameter T P = '0) ();
    end
 endmodule
 
+module nested #(parameter type F = struct packed {struct packed {logic a;} b;}) ();
+   F s;
+   assign s.b.a = 1'b1;
+   initial begin
+      #1;
+      if (s.b.a !== 1'b1) $fatal(1, "nested field %b", s.b.a);
+   end
+endmodule
+
 module vlogtypeparam1;
+   nested nst ();
    logic [7:0] o1, o2;
    leaf #(.T(s_t), .P(16'h1234)) l1 (.o(o1));
    mid #(.T(s_t), .P(16'h00ff)) m1 (.o(o2));

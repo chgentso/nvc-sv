@@ -713,8 +713,9 @@ bool vlog_typeparam_pending(vlog_node_t v)
       return false;
 
    vlog_node_t prefix = vlog_value(v);
-   while (vlog_kind(prefix) == V_BIT_SELECT || vlog_kind(prefix) == V_PART_SELECT)
-      prefix = vlog_value(prefix);
+   while (vlog_kind(prefix) == V_BIT_SELECT || vlog_kind(prefix) == V_PART_SELECT
+          || vlog_kind(prefix) == V_MEMBER_REF)
+      prefix = vlog_value(prefix);   // Fields of fields
 
    if (vlog_kind(prefix) != V_REF || !vlog_has_ref(prefix))
       return false;
