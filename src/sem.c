@@ -1080,6 +1080,27 @@ static bool sem_check_const_decl(tree_t t, nametab_t *tab)
    return true;
 }
 
+static bool sem_all_resolved(type_t type)
+{
+   // A composite signal is resolved if every scalar subelement is
+
+   if (type_is_resolved(type))
+      return true;
+   else if (type_is_array(type))
+      return sem_all_resolved(type_elem(type));
+   else if (type_is_record(type)) {
+      const int nfields = type_fields(type);
+      for (int i = 0; i < nfields; i++) {
+         if (!sem_all_resolved(tree_type(type_field(type, i))))
+            return false;
+      }
+
+      return true;
+   }
+   else
+      return false;
+}
+
 static bool sem_check_signal_decl(tree_t t, nametab_t *tab)
 {
    type_t type = tree_type(t);
@@ -1115,7 +1136,7 @@ static bool sem_check_signal_decl(tree_t t, nametab_t *tab)
    if (!sem_no_access_file_or_protected(t, type, "signals"))
       return false;
 
-   if (is_guarded_signal(t) && !type_is_resolved(type))
+   if (is_guarded_signal(t) && !sem_all_resolved(type))
       sem_error(t, "guarded signal must have resolved subtype");
 
    if (tree_has_value(t)) {
