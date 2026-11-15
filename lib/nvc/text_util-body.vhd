@@ -222,42 +222,95 @@ package body text_util is
         alias ss             : string(1 to length) is s;
         variable pos         : positive := 1;
         variable is_negative : boolean;
-        variable result      : t_int64 := 0;
-        variable num_digits  : natural;
-        constant ascii_zero  : natural := character'pos('0');
-        variable ascii_value : natural;
+        variable base        : t_int64 := 10;
+        variable result      : t_int64 := 0;  -- Magnitude, accumulated negated
+        variable num_digits  : natural := 0;
         variable digit       : natural;
+        variable exp         : natural := 0;
+        variable closing     : character := ' ';
+
+        function digit_value (c : character) return natural is
+        begin
+            case c is
+                when '0' to '9' => return character'pos(c) - character'pos('0');
+                when 'a' to 'f' => return character'pos(c) - character'pos('a') + 10;
+                when 'A' to 'F' => return character'pos(c) - character'pos('A') + 10;
+                when others     => return 99;
+            end case;
+        end function;
     begin
         while pos <= length and isspace(ss(pos)) loop
             pos := pos + 1;
         end loop;
 
         is_negative := pos <= length and ss(pos) = '-';
-        if is_negative then
+        if (pos <= length and ss(pos) = '+') or is_negative then
             pos := pos + 1;
         end if;
 
         while pos <= length and (isdigit(ss(pos)) or ss(pos) = '_') loop
             if ss(pos) /= '_' then
-                ascii_value := character'pos(ss(pos));
-                digit := ascii_value - ascii_zero;
-                if result >= 0 then
-                    result := (result * 10) + t_int64(digit);
-                else
-                    result := (result * 10) - t_int64(digit);
-                end if;
-                if is_negative and result > 0 then
-                    -- Negate now to avoid problems around INTEGER'LOW
-                    result := -result;
-                    is_negative := false;
-                end if;
+                result := (result * 10) - t_int64(digit_value(ss(pos)));
                 num_digits := num_digits + 1;
             end if;
             pos := pos + 1;
         end loop;
 
-        assert num_digits > 0
-            report "invalid integer value """ & s & """" severity failure;
+        if num_digits = 0 then
+            -- A physical literal may be a unit name alone: the function
+            -- below checks for a digit
+            result := -1;
+        end if;
+
+        if num_digits > 0 and pos <= length
+            and (ss(pos) = '#' or ss(pos) = ':')
+        then
+            -- Based literal
+            closing := ss(pos);
+            base := -result;
+            assert base >= 2 and base <= 16
+                report "invalid base in integer value """ & s & """"
+                severity failure;
+            result := 0;
+            num_digits := 0;
+            pos := pos + 1;
+            while pos <= length and ss(pos) /= closing loop
+                if ss(pos) /= '_' then
+                    digit := digit_value(ss(pos));
+                    assert t_int64(digit) < base
+                        report "invalid digit in integer value """ & s & """"
+                        severity failure;
+                    result := (result * base) - t_int64(digit);
+                    num_digits := num_digits + 1;
+                end if;
+                pos := pos + 1;
+            end loop;
+            assert pos <= length and num_digits > 0
+                report "invalid integer value """ & s & """" severity failure;
+            pos := pos + 1;   -- Closing delimiter
+        end if;
+
+        if pos < length and (ss(pos) = 'E' or ss(pos) = 'e')
+            and (isdigit(ss(pos + 1)) or ss(pos + 1) = '+')
+        then
+            pos := pos + 1;
+            if ss(pos) = '+' then
+                pos := pos + 1;
+            end if;
+            while pos <= length and (isdigit(ss(pos)) or ss(pos) = '_') loop
+                if ss(pos) /= '_' then
+                    exp := exp * 10 + digit_value(ss(pos));
+                end if;
+                pos := pos + 1;
+            end loop;
+            for i in 1 to exp loop
+                result := result * base;
+            end loop;
+        end if;
+
+        if not is_negative then
+            result := -result;
+        end if;
 
         used := pos - 1;
         value := result;
@@ -268,7 +321,17 @@ package body text_util is
         variable value  : t_int64;
         constant length : natural := s'length;
         alias ss        : string(1 to length) is s;
+        variable first  : positive := 1;
     begin
+        while first <= length and isspace(ss(first)) loop
+            first := first + 1;
+        end loop;
+        if first <= length and (ss(first) = '+' or ss(first) = '-') then
+            first := first + 1;
+        end if;
+        assert first <= length and isdigit(ss(first))
+            report "invalid integer value """ & s & """" severity failure;
+
         string_to_int(s, value, used);
 
         for i in used + 1 to length loop

@@ -1113,8 +1113,8 @@ START_TEST(test_value1)
    input_from_file(TESTDIR "/jit/value1.vhd");
 
    const error_t expect[] = {
-      { 275, "found invalid characters \"x\" after value \"42x\"" },
-      { 424, "found invalid characters \".4\" after value \"4..4\"" },
+      { 338, "found invalid characters \"x\" after value \"42x\"" },
+      { 487, "found invalid characters \".4\" after value \"4..4\"" },
       { 80, "\" FOO\" is not a valid unit name" },
       { 23, "\"FOO\" is not a valid enumeration value" },
       { -1, NULL },
