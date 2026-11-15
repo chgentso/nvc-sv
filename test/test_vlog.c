@@ -4146,6 +4146,25 @@ START_TEST(test_classitem1)
 }
 END_TEST
 
+START_TEST(test_assertlabel1)
+{
+   const error_t expect[] = {
+      {  6, "duplicate declaration of 'covlabel'" },
+      { 10, "duplicate declaration of 'CHECK'" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/assertlabel1.sv");
+
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
 START_TEST(test_crash1)
 {
    const error_t expect[] = {
@@ -4674,6 +4693,7 @@ Suite *get_vlog_tests(void)
    tcase_add_test(tc, test_repl2);
    tcase_add_test(tc, test_defdup1);
    tcase_add_test(tc, test_classitem1);
+   tcase_add_test(tc, test_assertlabel1);
    tcase_add_test(tc, test_crash1);
    tcase_add_test(tc, test_crash2);
    tcase_add_test(tc, test_crash3);

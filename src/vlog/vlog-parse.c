@@ -263,6 +263,7 @@ static ident_t bind_scope = NULL;   // Module a replayed bind directive is in
 static A(cov_toks_t) pending_units = AINIT;
 static vlog_node_t p_description(void);
 static hset_t        *block_names = NULL;
+static hset_t        *assertion_labels = NULL;
 static void collect_disable_cb(vlog_node_t v, void *ctx)
 {
    if (vlog_kind(v) == V_DISABLE)
@@ -12296,6 +12297,25 @@ static vlog_node_t p_procedural_continuous_assignment(void)
    }
 }
 
+static void check_assertion_label(ident_t label, const loc_t *loc)
+{
+   // The label of an assertion is a name in the scope that contains it and
+   // must not be declared twice there (16.2, 23.9)
+
+   if (label == NULL)
+      return;
+
+   if (assertion_labels == NULL)
+      assertion_labels = hset_new(16);
+
+   ident_t key = ident_sprintf("%p/%s", vlog_symtab_current(symtab),
+                               istr(label));
+   if (hset_contains(assertion_labels, key))
+      error_at(loc, "duplicate declaration of %pQ", label);
+   else
+      hset_insert(assertion_labels, key);
+}
+
 static void check_pending_disables(void)
 {
    // A name may refer to a block declared later in the module
@@ -12310,6 +12330,10 @@ static void check_pending_disables(void)
    if (block_names != NULL)
       hset_free(block_names);
    block_names = NULL;
+
+   if (assertion_labels != NULL)
+      hset_free(assertion_labels);
+   assertion_labels = NULL;
 }
 
 static void note_block_name(ident_t name)
@@ -13684,6 +13708,8 @@ static vlog_node_t p_statement_item(ident_t id)
    case tASSERT:
    case tASSUME:
    case tCOVER:
+      if (id != NULL)
+         check_assertion_label(id, &state.tokenq[state.tokenq_tail].loc);
       if (peek_nth(2) == tPROPERTY || peek_nth(2) == tSEQUENCE)
          return p_procedural_concurrent_assertion();
       if (id != NULL)
@@ -22083,6 +22109,9 @@ static vlog_node_t p_assertion_item(void)
       label = state.last_lval.ident;
       consume(tCOLON);
    }
+
+   if (label != NULL)
+      check_assertion_label(label, &state.last_loc);
 
    if (peek_nth(2) == tPROPERTY || peek_nth(2) == tSEQUENCE) {
       vlog_node_t v = p_concurrent_assertion_statement(label);
