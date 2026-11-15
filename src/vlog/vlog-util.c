@@ -582,6 +582,7 @@ unsigned vlog_size(vlog_node_t v)
          return size;
       }
    case V_FUNC_DECL:
+   case V_ENUM_NAME:
       return 1;  // No unpacked dimensions
    case V_PART_SELECT:
       if (vlog_subkind(v) != V_RANGE_CONST) {
@@ -1578,6 +1579,7 @@ vlog_node_t vlog_longest_static_prefix(vlog_node_t v)
       case V_PARAM_DECL:
       case V_LOCALPARAM:
       case V_LOCAL_DECL:
+      case V_ENUM_NAME:
          return NULL;
       default:
          return v;

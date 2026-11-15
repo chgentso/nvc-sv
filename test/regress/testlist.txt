@@ -2839,3 +2839,4 @@ vlogportdecl1   verilog
 vlogifgen1      verilog
 vlogparamtype1  verilog
 vlogparamtype2  verilog
+vlogenumsel1    verilog
