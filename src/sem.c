@@ -7549,7 +7549,17 @@ static bool sem_check_prot_decl(tree_t t, nametab_t *tab)
          // within a protected type declaration denotes anything other
          // than a method of a protected type
          tree_t value = tree_value(d);
-         if (tree_kind(value) != T_PROT_REF)
+         bool own_method = false;
+         if (tree_kind(value) == T_REF && tree_has_ref(value)) {
+            // A method of the protected type being declared
+            tree_t ref = tree_ref(value);
+            if (is_subprogram(ref)) {
+               for (int j = 0; j < i && !own_method; j++)
+                  own_method = tree_decl(t, j) == ref;
+            }
+         }
+
+         if (tree_kind(value) != T_PROT_REF && !own_method)
             sem_error(d, "an alias declared within a protected type "
                       "declaration must denote a protected type method");
       }

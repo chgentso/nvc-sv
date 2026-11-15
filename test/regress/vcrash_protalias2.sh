@@ -1,7 +1,7 @@
 set -x
 
 # An alias in a protected type declaration for one of its own methods is
-# diagnosed without an internal error
+# accepted
 
 cat >protalias2.vhd <<'VHD'
 entity protalias2 is end;
@@ -11,11 +11,14 @@ architecture a of protalias2 is
         procedure own;
         alias own_alias is own [];
     end protected;
+
+    type counter is protected body
+        procedure own is
+        begin
+        end procedure;
+    end protected body;
 begin
 end architecture;
 VHD
 
-if nvc --std=19 -a protalias2.vhd 2> err.txt; then exit 1; fi
-cat err.txt
-grep -q 'must denote a protected type method' err.txt
-if grep -q 'Fatal' err.txt; then exit 1; fi
+nvc --std=19 -a protalias2.vhd
