@@ -6748,16 +6748,42 @@ static void p_floating_incomplete_type_definition(type_t type)
    type_set_subkind(type, GTYPE_FLOATING);
 }
 
-static type_t p_array_index_incomplete_type(void)
+static type_t p_array_index_incomplete_type(int *form)
 {
    // index_subtype_definition | index_constraint | anonymous_type_indication
 
    BEGIN("array index incomplete type");
 
-   if (peek() == tTYPE)
-      return p_anonymous_type_indication();
-   else
-      return p_index_subtype_definition(NULL);
+   if (peek() == tTYPE) {
+      type_t type = p_anonymous_type_indication();
+
+      if (type_kind(type) == T_GENERIC) {
+         const gtype_class_t class = type_subkind(type);
+         if (class != GTYPE_DISCRETE && class != GTYPE_INTEGER) {
+            parse_error(CURRENT_LOC, "an anonymous index type of an array "
+                        "type definition must be of the discrete class");
+            return type_new(T_NONE);
+         }
+      }
+
+      return type;
+   }
+   else {
+      // index_subtype_definition | index_constraint with a subtype mark
+      type_t type = p_type_mark(NULL);
+
+      const int this_form = optional(tRANGE) ? 1 : 2;
+      if (this_form == 1)
+         consume(tBOX);
+
+      if (*form != 0 && *form != this_form)
+         parse_error(CURRENT_LOC, "index subtype definitions and index "
+                     "constraints cannot be mixed in the index list of an "
+                     "array type definition");
+
+      *form = this_form;
+      return type;
+   }
 }
 
 static void p_array_index_incomplete_type_list(type_t type)
@@ -6766,8 +6792,9 @@ static void p_array_index_incomplete_type_list(type_t type)
 
    BEGIN("array index incomplete type list");
 
+   int form = 0;
    do {
-      type_add_index(type, p_array_index_incomplete_type());
+      type_add_index(type, p_array_index_incomplete_type(&form));
    } while (optional(tCOMMA));
 }
 

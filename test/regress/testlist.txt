@@ -2831,3 +2831,4 @@ env_createdir normal,2019
 reflect_arrays normal,2019
 reflect_nested normal,2019
 file_readeof gold,fail
+gen_array_index normal,2019
