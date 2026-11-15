@@ -32,6 +32,8 @@ typedef struct _fsm_out fsm_out_t;
 void vhdl_fsm_scan(tree_t unit, text_buf_t *out, unsigned *count);
 void vlog_fsm_scan(vlog_node_t unit, text_buf_t *out, unsigned *count);
 void vlog_fsm_reset_skipped(void);
+void vhdl_fsm_reset_skipped(void);
+unsigned vhdl_fsm_skipped(void);
 unsigned vlog_fsm_skipped(void);
 
 // Begin a machine.  KIND is "enum" or "constants", STYLE "one-process" or

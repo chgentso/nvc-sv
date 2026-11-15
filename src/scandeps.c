@@ -2458,6 +2458,7 @@ unsigned scan_file_deps(const char *file, text_buf_t *json)
    if (recovering) {
       lint_errors_reset();
       vlog_fsm_reset_skipped();
+      vhdl_fsm_reset_skipped();
    }
 
    input_from_file(file);
@@ -2566,7 +2567,7 @@ unsigned scan_file_deps(const char *file, text_buf_t *json)
       if (tb_len(spans) > 0)
          tb_printf(json, ",\"damaged\":[%s]", tb_get(spans));
 
-      const unsigned skipped = vlog_fsm_skipped();
+      const unsigned skipped = vlog_fsm_skipped() + vhdl_fsm_skipped();
       if (skipped > 0)
          tb_printf(json, ",\"fsms_skipped\":%u", skipped);
    }
