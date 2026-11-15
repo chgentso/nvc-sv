@@ -2767,6 +2767,13 @@ static void p_net_port_type(vlog_net_kind_t *kind, vlog_node_t *dt)
       return;
    }
 
+   if (optional(tVAR)) {
+      // var_data_type: a variable port
+      *kind = V_NET_WIRE;
+      *dt = p_data_type_or_implicit();
+      return;
+   }
+
    if (scan(tSUPPLY0, tSUPPLY1, tTRI, tTRIAND, tTRIOR, tTRIREG,
             tTRI0, tTRI1, tUWIRE, tWIRE, tWAND, tWOR))
       *kind = p_net_type();
@@ -2813,6 +2820,9 @@ static void p_list_of_port_identifiers(vlog_node_t mod, v_port_kind_t kind,
       vlog_set_type(v, datatype);
       vlog_set_loc(v, &state.last_loc);
 
+      while (peek() == tLSQUARE)
+         vlog_add_range(v, p_unpacked_dimension());
+
       vlog_add_decl(mod, v);
       vlog_symtab_put(symtab, v);
 
@@ -2839,6 +2849,9 @@ static void p_list_of_variable_port_identifiers(vlog_node_t mod,
       vlog_set_ident2(v, ext);
       vlog_set_type(v, datatype);
       vlog_set_loc(v, &state.last_loc);
+
+      while (peek() == tLSQUARE)
+         vlog_add_range(v, p_unpacked_dimension());
 
       if (optional(tEQ))
          vlog_set_value(v, p_constant_expression());
