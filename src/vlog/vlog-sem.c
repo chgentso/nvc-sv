@@ -2451,7 +2451,7 @@ static type_mask_t vlog_check_member_ref(vlog_node_t v)
       return decl != NULL ? get_type_mask(decl) : ~TM_CONST;
    }
    else if (!vlog_has_ref(v)) {
-      if (!vlog_virtual_chain(vlog_value(v)))
+      if (!vlog_virtual_chain(vlog_value(v)) && !vlog_typeparam_pending(v))
          return TM_ERROR;   // Reported by the lookup
 
       // The structure may be known only when the interface is declared

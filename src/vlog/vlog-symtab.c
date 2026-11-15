@@ -454,7 +454,9 @@ static vlog_node_t nested_interface_decl(vlog_node_t iface, ident_t id)
 static void lookup_member(vlog_symtab_t *st, vlog_node_t v)
 {
    vlog_node_t prefix = vlog_value(v), type = vlog_get_type(prefix);
-   if (type == NULL && vlog_virtual_chain(prefix))
+   if (vlog_typeparam_pending(v))
+      return;   // Looked up when the type parameter is bound
+   else if (type == NULL && vlog_virtual_chain(prefix))
       return;   // Looked up when the interface is known
    else if (type == NULL) {
       if (error_count() == 0)  // Otherwise was earlier error

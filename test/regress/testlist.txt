@@ -2845,3 +2845,4 @@ vlogiarrayslice1 verilog
 vlogsideeff1    verilog
 vlogenumbase1   verilog
 vlogenumx1      verilog
+vlogtypeparam1  verilog

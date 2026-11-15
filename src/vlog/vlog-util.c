@@ -704,6 +704,42 @@ bool vlog_virtual_pending(vlog_node_t v)
       && vlog_subkind(type) == DT_VIRTUAL;
 }
 
+bool vlog_typeparam_pending(vlog_node_t v)
+{
+   // The prefix is an object whose type is a type parameter so the fields
+   // it has are not known until the instance is elaborated
+
+   if (vlog_kind(v) != V_MEMBER_REF || vlog_has_ref(v))
+      return false;
+
+   vlog_node_t prefix = vlog_value(v);
+   while (vlog_kind(prefix) == V_BIT_SELECT || vlog_kind(prefix) == V_PART_SELECT)
+      prefix = vlog_value(prefix);
+
+   if (vlog_kind(prefix) != V_REF || !vlog_has_ref(prefix))
+      return false;
+
+   vlog_node_t decl = vlog_ref(prefix);
+   switch (vlog_kind(decl)) {
+   case V_VAR_DECL:
+   case V_NET_DECL:
+   case V_PORT_DECL:
+   case V_PARAM_DECL:
+   case V_LOCALPARAM:
+   case V_LOCAL_DECL:
+   case V_TF_PORT_DECL:
+      break;
+   default:
+      return false;
+   }
+
+   if (!vlog_has_type(decl))
+      return false;
+
+   vlog_node_t type = vlog_type(decl);
+   return vlog_kind(type) == V_TYPE_DECL && (vlog_flags(type) & VLOG_F_TYPEPARAM);
+}
+
 bool vlog_virtual_chain(vlog_node_t v)
 {
    // A selection from a member of a virtual interface whose interface was
@@ -717,7 +753,8 @@ bool vlog_virtual_chain(vlog_node_t v)
    case V_MEMBER_REF:
       if (vlog_has_ref(v))
          return false;
-      return vlog_virtual_pending(v) || vlog_virtual_chain(vlog_value(v));
+      return vlog_virtual_pending(v) || vlog_typeparam_pending(v)
+         || vlog_virtual_chain(vlog_value(v));
    default:
       return false;
    }

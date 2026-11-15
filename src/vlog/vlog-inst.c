@@ -285,6 +285,31 @@ static vlog_node_t fixup_refs_cb(vlog_node_t v, void *ctx)
             vlog_set_ref(v, new);
       }
       break;
+   case V_MEMBER_REF:
+      if (vlog_typeparam_pending(v)) {
+         // The type parameter is now bound so the field can be found
+         vlog_node_t type = vlog_get_type(vlog_value(v));
+         const vlog_kind_t kind = type ? vlog_kind(type) : V_DATA_TYPE;
+         if (kind == V_STRUCT_DECL || kind == V_UNION_DECL) {
+            const int ndecls = vlog_decls(type);
+            for (int i = 0; i < ndecls; i++) {
+               vlog_node_t d = vlog_decl(type, i);
+               if (vlog_ident(d) == vlog_ident(v)) {
+                  vlog_set_ref(v, d);
+                  return v;
+               }
+            }
+
+            error_at(vlog_loc(v), "%s has no field named %pQ",
+                     kind == V_STRUCT_DECL ? "struct" : "union",
+                     vlog_ident(v));
+         }
+         else
+            error_at(vlog_loc(v), "%pQ is not a struct or union",
+                     vlog_has_ident(vlog_value(v))
+                     ? vlog_ident(vlog_value(v)) : vlog_ident(v));
+      }
+      break;
    case V_SYS_TCALL:
    case V_SYS_FCALL:
       if (vlog_design_precision() >= 0 && !is_shared(v))
