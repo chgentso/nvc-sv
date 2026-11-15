@@ -400,8 +400,8 @@ PROTECT           ?i:protect
                            }
                          }
 
-<COMMENT>\n              { BEGIN(comment_caller); }
-<COMMENT>.*              { }
+<COMMENT>[\n\r\v\f]     { BEGIN(comment_caller); }
+<COMMENT>[^\n\r\v\f]*  { }
 
 "/*"                     { MIN_STD(STD_08, "delimited comments");
                            comment_caller = YY_START;
