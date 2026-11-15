@@ -575,6 +575,14 @@ static bool decl_is_reliable(tree_t decl)
    return !lint_span_has_error(loc);
 }
 
+static void loop_cond_cb(tree_t t, void *context)
+{
+   bool *dependent = context;
+   if (tree_kind(t) == T_REF && tree_has_ref(t)
+       && tree_kind(tree_ref(t)) == T_PARAM_DECL)
+      *dependent = true;
+}
+
 static void clean_cb(tree_t t, void *context)
 {
    bool *clean = context;
@@ -591,6 +599,26 @@ static void clean_cb(tree_t t, void *context)
       if (!tree_has_ref(t) || !tree_has_ident(t)
           || tree_ident(t) == error_marker())
          *clean = false;
+      break;
+   default:
+      break;
+   }
+
+   // The simplifier unrolls loops with a static range and folds what
+   // depends on the loop parameter, which this tree has not been through, so
+   // what is assigned under such a condition cannot be told
+   switch (tree_kind(t)) {
+   case T_IF:
+   case T_COND_ASSIGN:
+      for (int i = 0; i < tree_conds(t); i++) {
+         tree_t c = tree_cond(t, i);
+         if (tree_has_value(c)) {
+            bool dependent = false;
+            tree_visit(tree_value(c), loop_cond_cb, &dependent);
+            if (dependent)
+               *clean = false;
+         }
+      }
       break;
    default:
       break;
