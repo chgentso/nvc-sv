@@ -28,10 +28,12 @@ STATIC_ASSERT(V_LAST_NODE_KIND < 256);
 
 static const imask_t has_map[V_LAST_NODE_KIND] = {
    // V_MODULE
-   (I_IDENT | I_PORTS | I_STMTS | I_DECLS | I_IDENT2 | I_FLAGS | I_IVAL),
+   (I_IDENT | I_PORTS | I_STMTS | I_DECLS | I_IDENT2 | I_FLAGS | I_IVAL
+    | I_PRAGMAS),
 
    // V_PORT_DECL
-   (I_IDENT | I_SUBKIND | I_IDENT2 | I_REF | I_RANGES | I_TYPE | I_VALUE),
+   (I_IDENT | I_SUBKIND | I_IDENT2 | I_REF | I_RANGES | I_TYPE | I_VALUE
+    | I_PRAGMAS),
 
    // V_REF
    (I_IDENT | I_REF),
@@ -64,7 +66,8 @@ static const imask_t has_map[V_LAST_NODE_KIND] = {
    (I_NUMBER | I_FLAGS),
 
    // V_NET_DECL
-   (I_IDENT | I_SUBKIND | I_TYPE | I_RANGES | I_VALUE | I_DELAY | I_PARAMS),
+   (I_IDENT | I_SUBKIND | I_TYPE | I_RANGES | I_VALUE | I_DELAY | I_PARAMS
+    | I_PRAGMAS),
 
    // V_ASSIGN
    (I_TARGET | I_VALUE | I_IDENT | I_DELAY | I_PARAMS),
@@ -79,7 +82,8 @@ static const imask_t has_map[V_LAST_NODE_KIND] = {
    (I_VALUE | I_STMTS),
 
    // V_VAR_DECL
-   (I_IDENT | I_TYPE | I_RANGES | I_VALUE | I_FLAGS | I_IDENT2 | I_REF),
+   (I_IDENT | I_TYPE | I_RANGES | I_VALUE | I_FLAGS | I_IDENT2 | I_REF
+    | I_PRAGMAS),
 
    // V_DELAY_CONTROL
    (I_VALUE | I_IVAL | I_PARAMS),
@@ -210,7 +214,8 @@ static const imask_t has_map[V_LAST_NODE_KIND] = {
    (I_IDENT | I_VALUE),
 
    // V_INST_BODY
-   (I_IDENT | I_IDENT2 | I_PORTS | I_STMTS | I_DECLS | I_FLAGS | I_IVAL),
+   (I_IDENT | I_IDENT2 | I_PORTS | I_STMTS | I_DECLS | I_FLAGS | I_IVAL
+    | I_PRAGMAS),
 
    // V_PORT_CONN
    (I_IDENT | I_VALUE | I_REF | I_FLAGS),
@@ -240,7 +245,7 @@ static const imask_t has_map[V_LAST_NODE_KIND] = {
    (I_IDENT | I_DECLS | I_STMTS | I_SUBKIND | I_FLAGS),
 
    // V_ATTR_INST
-   (0),
+   (I_IDENT | I_IDENT2),
 
    // V_USER_TCALL
    (I_IDENT | I_REF | I_PARAMS),
@@ -681,6 +686,26 @@ void vlog_add_port(vlog_node_t v, vlog_node_t p)
    assert(p->object.kind == V_REF || p->object.kind == V_PORT_DECL
           || p->object.kind == V_TF_PORT_DECL);
    vlog_array_add(lookup_item(&vlog_object, v, I_PORTS), p);
+   object_write_barrier(&(v->object), &(p->object));
+}
+
+unsigned vlog_pragmas(vlog_node_t v)
+{
+   item_t *item = lookup_item(&vlog_object, v, I_PRAGMAS);
+   return obj_array_count(item->obj_array);
+}
+
+vlog_node_t vlog_pragma(vlog_node_t v, unsigned n)
+{
+   item_t *item = lookup_item(&vlog_object, v, I_PRAGMAS);
+   return vlog_array_nth(item, n);
+}
+
+void vlog_add_pragma(vlog_node_t v, vlog_node_t p)
+{
+   assert(p != NULL);
+   assert(p->object.kind == V_ATTR_INST);
+   vlog_array_add(lookup_item(&vlog_object, v, I_PRAGMAS), p);
    object_write_barrier(&(v->object), &(p->object));
 }
 

@@ -682,6 +682,10 @@ vlog_node_t vlog_port(vlog_node_t v, unsigned n);
 void vlog_add_port(vlog_node_t v, vlog_node_t p);
 void vlog_delete_port(vlog_node_t v, unsigned n);
 
+unsigned vlog_pragmas(vlog_node_t v);
+vlog_node_t vlog_pragma(vlog_node_t v, unsigned n);
+void vlog_add_pragma(vlog_node_t v, vlog_node_t p);
+
 unsigned vlog_params(vlog_node_t v);
 vlog_node_t vlog_param(vlog_node_t v, unsigned n);
 void vlog_add_param(vlog_node_t v, vlog_node_t p);
