@@ -1890,6 +1890,18 @@ static bool sem_check_func_result(tree_t t)
    else if (!sem_check_incomplete(t, result))
       return false;
 
+   if (standard() >= STD_08
+       && !(tree_flags(t) & (TREE_F_IMPURE | TREE_F_PROTECTED))
+       && sem_has_access(result)) {
+      diag_t *d = pedantic_diag(tree_loc(t));
+      if (d != NULL) {
+         diag_printf(d, "a pure function cannot return an access type or a "
+                     "composite type with a subelement of an access type");
+         diag_lrm(d, STD_08, "4.2.1");
+         diag_emit(d);
+      }
+   }
+
    return true;
 }
 

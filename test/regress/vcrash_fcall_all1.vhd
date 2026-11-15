@@ -5,7 +5,7 @@ end entity;
 architecture test of vcrash_fcall_all1 is
     type ptr is access integer;
 
-    function get return ptr is
+    impure function get return ptr is
     begin
         return new integer'(33);
     end function;

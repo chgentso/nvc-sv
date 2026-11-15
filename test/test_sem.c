@@ -4298,6 +4298,29 @@ START_TEST(test_protop)
 }
 END_TEST
 
+START_TEST(test_purefunc)
+{
+   set_standard(STD_08);
+
+   input_from_file(TESTDIR "/sem/purefunc.vhd");
+
+   const error_t expect[] = {
+      { 11, "a pure function cannot return an access type or a composite "
+        "type with a subelement of an access type" },
+      { 16, "a pure function cannot return an access type or a composite "
+        "type with a subelement of an access type" },
+      { 21, "a pure function cannot return an access type or a composite "
+        "type with a subelement of an access type" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   parse_and_check(T_ENTITY, T_ARCH);
+
+   check_expected_errors();
+}
+END_TEST
+
 START_TEST(test_attrspec_relaxed)
 {
    set_standard(STD_08);
@@ -4692,6 +4715,7 @@ Suite *get_sem_tests(void)
    tcase_add_test(tc_core, test_enumhomo);
    tcase_add_test(tc_core, test_attrspec_relaxed);
    tcase_add_test(tc_core, test_protop);
+   tcase_add_test(tc_core, test_purefunc);
    suite_add_tcase(s, tc_core);
 
    return s;
