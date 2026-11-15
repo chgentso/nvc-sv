@@ -1309,12 +1309,14 @@ void vlog_proc_evidence(conn_design_t *cd, conn_proc_t *proc, vlog_node_t v)
    if (w.other)
       wk_class_other(ev);
 
-   if (ev->cls != CONN_EV_OTHER) {
-      ev->approx = w.approx;
-      ev->reasons = w.why;
-      if (ev->approx && ev->reasons == 0)
-         ev->reasons = CONN_WHY_OTHER;
+   // What the connectivity scan could not resolve is approximate too
+   if (proc->approx && w.why == 0)
+      w.why = CONN_WHY_OTHER;
 
+   ev->approx = w.approx || proc->approx;
+   ev->reasons = ev->approx ? (w.why ?: CONN_WHY_OTHER) : 0;
+
+   if (ev->cls != CONN_EV_OTHER) {
       if (w.clocks.count > 0) {
          ev->nclocks = w.clocks.count;
          ev->clocks = DDUP(cd, w.clocks, conn_ev_clock_t);

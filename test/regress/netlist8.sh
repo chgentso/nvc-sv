@@ -141,3 +141,8 @@ ev ev_sv2 'always @50' '"class":"other"'
 ev ev_sv2 'always @51' '"class":"other"'
 notev ev_sv2 'always @51' '"outputs"'
 ev ev_sv2 'assign @54' '"data":["r1[3:0]","r2[3:0]"]'
+
+# Every approximate process gives the reasons, as the VHDL ones do
+[ $(grep -c '"confidence":"approx"' ev.txt) -gt 0 ]
+[ $(grep -c '"confidence":"approx"' ev.txt) = \
+  $(grep -c '"confidence":"approx","reasons":\[' ev.txt) ]
