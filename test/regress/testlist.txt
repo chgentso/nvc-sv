@@ -2808,3 +2808,4 @@ linterrvhdl7 shell
 concat_null normal
 expname_func normal,2008
 alloc_overload normal
+case_static_rec normal,2008

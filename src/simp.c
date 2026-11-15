@@ -613,9 +613,48 @@ static tree_t simp_pcall(tree_t t, simp_ctx_t *ctx)
    return t;
 }
 
+static tree_t simp_record_ref_of(tree_t agg, ident_t field)
+{
+   type_t type = tree_type(agg);
+   if (!type_is_record(type))
+      return NULL;
+
+   const int nassocs = tree_assocs(agg);
+   for (int i = 0; i < nassocs; i++) {
+      tree_t a = tree_assoc(agg, i);
+      switch (tree_subkind(a)) {
+      case A_POS:
+         if (tree_ident(type_field(type, tree_pos(a))) == field)
+            return tree_value(a);
+         break;
+
+      case A_NAMED:
+         if (tree_kind(tree_name(a)) == T_REF
+             && tree_ident(tree_name(a)) == field)
+            return tree_value(a);
+         break;
+      }
+   }
+
+   return NULL;
+}
+
 static tree_t simp_record_ref(tree_t t, simp_ctx_t *ctx)
 {
    tree_t value = tree_value(t);
+
+   if (tree_kind(value) == T_REF && tree_has_ref(value)
+       && !(tree_flags(value) & (TREE_F_FORMAL_NAME | TREE_F_ATTR_PREFIX))) {
+      // Select a literal element of a constant with an aggregate value
+      tree_t decl = tree_ref(value);
+      if (tree_kind(decl) == T_CONST_DECL && tree_has_value(decl)
+          && tree_kind(tree_value(decl)) == T_AGGREGATE) {
+         tree_t elem = simp_record_ref_of(tree_value(decl), tree_ident(t));
+         if (elem != NULL && is_literal(elem))
+            return elem;
+      }
+   }
+
    if (tree_kind(value) == T_AGGREGATE) {
       ident_t field = tree_ident(t);
       type_t type = tree_type(value);

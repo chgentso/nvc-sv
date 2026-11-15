@@ -5676,7 +5676,18 @@ static bool sem_static_subtype(type_t type, static_fn_t fn)
    if (type_is_record(type)) {
       const int nfields = type_fields(type);
       for (int i = 0; i < nfields; i++) {
-         if (!sem_static_subtype(tree_type(type_field(type, i)), fn))
+         tree_t f = type_field(type, i);
+         type_t ftype = tree_type(f);
+         if (type_is_unconstrained(ftype)) {
+            // May be constrained by a record element constraint
+            tree_t cons = type_constraint_for_field(type, f);
+            if (cons == NULL)
+               return false;
+
+            ftype = tree_type(cons);
+         }
+
+         if (!sem_static_subtype(ftype, fn))
             return false;
       }
 
