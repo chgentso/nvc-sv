@@ -3080,6 +3080,17 @@ static void vlog_check_wait(vlog_node_t v)
       error_at(vlog_loc(v), "a wait statement inside a final block is illegal "
                "as final procedures must not block");
 
+   // A named event has no value to wait for: use its triggered property
+   // (15.5.3)
+   if (vlog_has_value(v)) {
+      vlog_node_t cond = vlog_value(v);
+      vlog_node_t type = vlog_get_type(cond);
+      if (type != NULL && vlog_kind(type) == V_DATA_TYPE
+          && vlog_subkind(type) == DT_EVENT)
+         error_at(vlog_loc(cond), "the condition of a wait statement cannot "
+                  "be a named event");
+   }
+
    // TODO
 }
 

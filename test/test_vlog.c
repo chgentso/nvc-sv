@@ -4202,6 +4202,24 @@ START_TEST(test_genvar3)
 }
 END_TEST
 
+START_TEST(test_waitevent1)
+{
+   const error_t expect[] = {
+      {  7, "the condition of a wait statement cannot be a named event" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/waitevent1.sv");
+
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
 START_TEST(test_crash1)
 {
    const error_t expect[] = {
@@ -4733,6 +4751,7 @@ Suite *get_vlog_tests(void)
    tcase_add_test(tc, test_assertlabel1);
    tcase_add_test(tc, test_lifetime2);
    tcase_add_test(tc, test_genvar3);
+   tcase_add_test(tc, test_waitevent1);
    tcase_add_test(tc, test_crash1);
    tcase_add_test(tc, test_crash2);
    tcase_add_test(tc, test_crash3);
