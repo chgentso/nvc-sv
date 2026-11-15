@@ -2824,3 +2824,4 @@ numeric_resize0 normal,2008
 genenum_path normal
 condprimary normal,2019
 prot_alias_own normal,2019
+attr_index_dim normal,2019

@@ -2448,7 +2448,7 @@ static type_t apply_index_attribute(tree_t aref)
 
    if (tree_kind(name) == T_REF && tree_has_ref(name)) {
       tree_t decl = tree_ref(name);
-      if (aliased_type_decl(decl) != NULL)
+      if (aliased_type_decl(decl) != NULL && type_is_unconstrained(type))
          return base;
    }
 
@@ -2458,6 +2458,12 @@ static type_t apply_index_attribute(tree_t aref)
    tree_set_ident(rexpr, ident_new("RANGE"));
    tree_set_name(rexpr, name);
    tree_set_type(rexpr, base);
+
+   if (nparams == 1) {
+      tree_t dim = tree_value(tree_param(aref, 0));
+      solve_types(nametab, dim, std_type(NULL, STD_UNIVERSAL_INTEGER));
+      add_param(rexpr, dim, P_POS, NULL);
+   }
 
    tree_t r = tree_new(T_RANGE);
    tree_set_loc(r, tree_loc(aref));
