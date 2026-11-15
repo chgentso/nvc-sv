@@ -11027,17 +11027,18 @@ static tree_t find_inherited_binding_unit(tree_t config, ident_list_t *ids,
          return NULL;
       }
 
-      // Default binding indication.  The choice of architecture is not
-      // specified there so a block configuration is not resolved
-      if (for_block)
-         return NULL;
-
+      // Default binding indication
       ident_t name = ident_rfrom(tree_ident(comp), '.') ?: tree_ident(comp);
       ident_t qual = ident_prefix(lib_name(lib_work()), name, '.');
       tree_t entity = lib_get_qualified(qual);
-      if (entity != NULL && tree_kind(entity) == T_ENTITY)
-         return entity;
-      return NULL;
+      if (entity == NULL || tree_kind(entity) != T_ENTITY)
+         return NULL;
+      else if (for_block) {
+         // The default binding chooses the most recently analysed
+         // architecture, which a block configuration may name
+         return find_default_arch(lib_work(), tree_ident(entity));
+      }
+      return entity;
    }
 
    return NULL;
