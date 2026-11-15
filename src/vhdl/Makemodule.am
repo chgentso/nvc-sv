@@ -7,4 +7,5 @@ lib_libnvc_a_SOURCES += \
 	src/vhdl/vhdl-util.c \
 	src/vhdl/vhdl-phase.h \
 	src/vhdl/vhdl-inst.c \
-	src/vhdl/vhdl-cover.c
+	src/vhdl/vhdl-cover.c \
+	src/vhdl/vhdl-evidence.c

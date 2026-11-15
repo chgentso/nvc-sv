@@ -60,6 +60,7 @@ lib_libnvc_a_SOURCES = \
 	src/driver.h \
 	src/driver.c \
 	src/conn.h \
+	src/conn-priv.h \
 	src/conn.c \
 	src/netlist.h \
 	src/netlist.c \

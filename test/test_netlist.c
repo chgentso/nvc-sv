@@ -198,9 +198,10 @@ static const char *json_value(const char *p, int depth)
       return NULL;
 }
 
-static char *write_json(const conn_design_t *cd, int max_depth)
+static char *write_json_ev(const conn_design_t *cd, int max_depth,
+                           bool evidence)
 {
-   netlist_opts_t opts = { .max_depth = max_depth };
+   netlist_opts_t opts = { .max_depth = max_depth, .evidence = evidence };
 
    FILE *f = tmpfile();
    ck_assert_ptr_nonnull(f);
@@ -220,6 +221,11 @@ static char *write_json(const conn_design_t *cd, int max_depth)
                  "malformed JSON:\n%s", buf);
 
    return buf;
+}
+
+static char *write_json(const conn_design_t *cd, int max_depth)
+{
+   return write_json_ev(cd, max_depth, false);
 }
 
 #define ck_has(buf, text) \
@@ -1191,6 +1197,47 @@ START_TEST(test_m5_vlog_genloop)
 }
 END_TEST
 
+START_TEST(test_ev_option)
+{
+   set_standard(STD_08);
+   input_from_file(TESTDIR "/netlist/vhdl1.vhd");
+
+   tree_t e = run_elab();
+   fail_if_errors();
+
+   // Without the option the output has no trace of the evidence
+   conn_design_t *cd = conn_build(e);
+   ck_assert_ptr_nonnull(cd);
+   ck_assert_ptr_null(conn_root(cd, 0)->procs[0]->ev);
+
+   char *plain = write_json(cd, -1);
+   ck_has_not(plain, "evidence");
+   const unsigned nproc = count_substr(plain, "\"cell\":\"$process\"");
+   ck_assert_uint_gt(nproc, 0);
+   conn_free(cd);
+
+   // Building with the option does not change what is written without it
+   const conn_build_opts_t bopts = { .evidence = true };
+   cd = conn_build_with(e, &bopts);
+   ck_assert_ptr_nonnull(cd);
+   ck_assert_ptr_nonnull(conn_root(cd, 0)->procs[0]->ev);
+
+   char *same = write_json_ev(cd, -1, false);
+   ck_assert_str_eq(same, plain);
+
+   // Every process cell has a class
+   char *ev = write_json_ev(cd, -1, true);
+   ck_has(ev, "\"evidence_version\":1");
+   ck_assert_uint_eq(count_substr(ev, "\"evidence\":{"), nproc);
+   ck_assert_uint_eq(count_substr(ev, "\"class\":\""), nproc);
+
+   free(plain);
+   free(same);
+   free(ev);
+   conn_free(cd);
+}
+END_TEST
+
 Suite *get_netlist_tests(void)
 {
    Suite *s = suite_create("netlist");
@@ -1210,6 +1257,7 @@ Suite *get_netlist_tests(void)
    tcase_add_test(tc, test_m5_vlog_params);
    tcase_add_test(tc, test_m5_vlog_params_mixed);
    tcase_add_test(tc, test_m5_vlog_genloop);
+   tcase_add_test(tc, test_ev_option);
    suite_add_tcase(s, tc);
 
    return s;

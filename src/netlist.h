@@ -25,6 +25,8 @@
 
 typedef struct {
    int max_depth;      // Deepest block level emitted as a module, -1 for all
+   bool evidence;      // Write process evidence and attributes: the design
+                       // must be built with conn_build_opts_t.evidence
 } netlist_opts_t;
 
 // Write a block-level schematic of the design in Yosys JSON format as

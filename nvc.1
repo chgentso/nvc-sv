@@ -1090,6 +1090,19 @@ Write modules only for the instances at most
 .Ar N
 levels below the top level; deeper instances appear as cells whose type is
 not defined.  The default is to write all levels.
+.\" --evidence
+.It Fl \-evidence
+Add the facts that a clock domain analysis needs: for each
+.Sy $process
+cell an
+.Sy evidence
+object with the class of the process (seq, comb, latch, mixed or other), its
+clock pins and edges, asynchronous controls and the pins each output depends
+on, and the attributes of signals and units as strings in the
+.Sy attributes
+of nets and modules.  The top level object gets
+.Sy evidence_version .
+Without this option the output is unchanged.
 .\" --output
 .It Fl \-output= Ns Ar file
 Write the netlist to

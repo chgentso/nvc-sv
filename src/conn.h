@@ -74,6 +74,13 @@ typedef struct {
    unsigned    lo, hi;       // Bit positions, inclusive
 } conn_range_t;
 
+// A user or synthesis attribute of a net or block, kept only when the
+// design is built with conn_build_opts_t.evidence.  NAME is in lower case.
+typedef struct {
+   const char *name;
+   const char *value;
+} conn_attr_t;
+
 typedef struct {
    const char *name;       // Appended to the net name: ".FIELD", "(1).FIELD"
    unsigned    lo, hi;     // Bit positions in the net
@@ -97,6 +104,8 @@ struct _conn_net {
    bool          has_bounds;
    const char   *src;       // File name or NULL
    unsigned      line;
+   conn_attr_t  *attrs;     // Attributes (evidence only)
+   unsigned      nattrs;
 };
 
 typedef enum {
@@ -150,6 +159,73 @@ typedef enum {
    CONN_PROC_OTHER,
 } conn_proc_kind_t;
 
+// Facts about the clocking of a process (conn_build_opts_t.evidence).  All
+// signals are ranges of nets of the block of the process, which are the
+// pins of its netlist cell.
+typedef enum {
+   CONN_EV_SEQ,      // Every output is assigned only under a clock edge
+   CONN_EV_COMB,
+   CONN_EV_LATCH,
+   CONN_EV_MIXED,
+   CONN_EV_OTHER,    // Not analysed: bench-like code
+} conn_ev_class_t;
+
+typedef enum {
+   CONN_EDGE_RISE,
+   CONN_EDGE_FALL,
+   CONN_EDGE_BOTH,
+} conn_edge_t;
+
+typedef enum {
+   CONN_LEVEL_LOW,
+   CONN_LEVEL_HIGH,
+   CONN_LEVEL_UNKNOWN,
+} conn_level_t;
+
+typedef enum {
+   CONN_ROLE_RESET,
+   CONN_ROLE_SET,
+   CONN_ROLE_UNKNOWN,
+} conn_role_t;
+
+typedef struct {
+   conn_range_t sig;
+   conn_edge_t  edge;
+} conn_ev_clock_t;
+
+typedef struct {
+   conn_range_t sig;
+   conn_level_t level;
+   conn_role_t  role;
+} conn_ev_async_t;
+
+// Dependencies of one driven range of the process: DRIVE indexes the
+// drives of the process
+typedef struct {
+   unsigned         drive;
+   conn_ev_class_t  cls;        // SEQ, COMB or LATCH
+   int              clock;      // Index in clocks for SEQ, else -1
+   conn_range_t    *data;      // Read on the right-hand sides
+   unsigned         ndata;
+   conn_range_t    *ctrl;      // Read in the guards, without clocks and
+   unsigned         nctrl;     // asynchronous controls
+   bool             has_copy;  // Every assignment is the whole of COPY
+   conn_range_t     copy;
+} conn_out_ev_t;
+
+typedef struct {
+   conn_ev_class_t  cls;
+   bool             approx;
+   conn_ev_clock_t *clocks;
+   unsigned         nclocks;
+   conn_ev_async_t *async;
+   unsigned         nasync;
+   conn_range_t    *sync_reset;
+   unsigned         nsync_reset;
+   conn_out_ev_t   *outs;
+   unsigned         nouts;
+} conn_evidence_t;
+
 struct _conn_proc {
    conn_block_t    *block;
    const char      *name;     // Name in block, with generate prefix
@@ -161,6 +237,7 @@ struct _conn_proc {
    conn_range_t    *drives;
    unsigned         ndrives;
    bool             approx;   // Sets may be over- or under-approximated
+   const conn_evidence_t *ev; // Only if built with evidence, else NULL
 };
 
 typedef struct {
@@ -199,12 +276,19 @@ struct _conn_block {
    unsigned      ninsts;
    conn_proc_t **procs;
    unsigned      nprocs;
+   conn_attr_t  *attrs;      // Attributes of the unit (evidence only)
+   unsigned      nattrs;
 };
+
+typedef struct {
+   bool evidence;    // Compute process evidence and attributes
+} conn_build_opts_t;
 
 // Build the connectivity of the design rooted at `root` which is the
 // T_ELAB tree or one of its top-level T_BLOCKs.  Returns NULL if the tree
 // is not an elaborated design.
 conn_design_t *conn_build(tree_t root);
+conn_design_t *conn_build_with(tree_t root, const conn_build_opts_t *opts);
 void conn_free(conn_design_t *cd);
 
 unsigned conn_roots(const conn_design_t *cd);

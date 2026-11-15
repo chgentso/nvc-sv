@@ -1908,6 +1908,7 @@ static int netlist_cmd(int argc, char **argv, cmd_state_t *state)
       { "output",   required_argument, 0, 'o' },
       { "top-only", no_argument,       0, 't' },
       { "depth",    required_argument, 0, 'd' },
+      { "evidence", no_argument,       0, 'e' },
       { 0, 0, 0, 0 }
    };
 
@@ -1931,6 +1932,9 @@ static int netlist_cmd(int argc, char **argv, cmd_state_t *state)
       case 't':
          opts.max_depth = 0;
          break;
+      case 'e':
+         opts.evidence = true;
+         break;
       case 'd':
          opts.max_depth = parse_int(optarg);
          if (opts.max_depth < 0)
@@ -1951,7 +1955,8 @@ static int netlist_cmd(int argc, char **argv, cmd_state_t *state)
    tree_t top = tree_from_object(obj);
    assert(top != NULL);
 
-   conn_design_t *cd = conn_build(top);
+   const conn_build_opts_t bopts = { .evidence = opts.evidence };
+   conn_design_t *cd = conn_build_with(top, &bopts);
    if (cd == NULL)
       fatal("%s is not an elaborated design", istr(state->top_level));
 
@@ -2750,6 +2755,8 @@ static void usage(void)
       { "Netlist options",
         {
            { "--depth=N", "Write modules only down to level N" },
+           { "--evidence",
+             "Add clocking facts of processes and attributes" },
            { "--output=FILE", "Write the netlist to FILE" },
            { "--top-only", "Write only the top-level module" },
         }

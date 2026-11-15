@@ -19,6 +19,7 @@
 #include "array.h"
 #include "common.h"
 #include "conn.h"
+#include "conn-priv.h"
 #include "diag.h"
 #include "driver.h"
 #include "hash.h"
@@ -37,16 +38,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-typedef A(conn_range_t) range_list_t;
 typedef A(conn_seg_t) seg_list_t;
 typedef A(conn_pconn_t) pconn_list_t;
 typedef A(conn_param_t) param_list_t;
 typedef A(conn_net_t *) net_list_t;
 typedef A(conn_inst_t *) inst_list_t;
 typedef A(conn_proc_t *) proc_list_t;
-
-#define SCOPED_LIST(type, name) \
-   type name __attribute__((cleanup(__cleanup_array))) = AINIT
 
 typedef struct _chunk chunk_t;
 
@@ -77,6 +74,7 @@ struct proc_ref {
 };
 
 struct _conn_design {
+   bool           evidence;    // Compute evidence and attributes
    conn_block_t **roots;
    unsigned       nroots;
    conn_block_t **blocks;      // All blocks in creation order
@@ -101,7 +99,7 @@ struct _conn_design {
 
 #define CHUNK_SIZE 65536
 
-static void *dalloc(conn_design_t *cd, size_t size)
+void *dalloc(conn_design_t *cd, size_t size)
 {
    size = (size + 15) & ~(size_t)15;
 
@@ -120,7 +118,7 @@ static void *dalloc(conn_design_t *cd, size_t size)
    return p;
 }
 
-static char *dstr(conn_design_t *cd, const char *s)
+char *dstr(conn_design_t *cd, const char *s)
 {
    const size_t len = strlen(s);
    char *p = dalloc(cd, len + 1);
@@ -143,12 +141,24 @@ static char *dstrf(conn_design_t *cd, const char *fmt, ...)
    return p;
 }
 
-#define DDUP(cd, list, type) ({                                   \
-         type *_p = dalloc((cd), MAX((list).count, 1) * sizeof(type)); \
-         if ((list).count > 0)                                    \
-            memcpy(_p, (list).items, (list).count * sizeof(type)); \
-         _p;                                                      \
-      })
+void conn_add_attr(conn_design_t *cd, conn_attr_t **list, unsigned *count,
+                   const char *name, const char *value)
+{
+   for (unsigned i = 0; i < *count; i++) {
+      if (strcmp((*list)[i].name, name) == 0) {
+         (*list)[i].value = dstr(cd, value);
+         return;
+      }
+   }
+
+   conn_attr_t *n = dalloc(cd, (*count + 1) * sizeof(conn_attr_t));
+   if (*count > 0)
+      memcpy(n, *list, *count * sizeof(conn_attr_t));
+   n[*count].name = dstr(cd, name);
+   n[*count].value = dstr(cd, value);
+   *list = n;
+   (*count)++;
+}
 
 static void add_block_param(conn_design_t *cd, param_list_t *l,
                                  const char *name, const char *value)
@@ -361,7 +371,7 @@ static char *expr_text_vlog(conn_design_t *cd, vlog_node_t v)
    return dstr(cd, tb_get(tb));
 }
 
-static void add_range(range_list_t *l, conn_net_t *net, unsigned lo,
+void add_range(range_list_t *l, conn_net_t *net, unsigned lo,
                       unsigned hi)
 {
    if (net == NULL || hi < lo)
@@ -382,7 +392,7 @@ static int range_cmp(const void *a, const void *b)
       return ra->hi < rb->hi ? -1 : (ra->hi > rb->hi ? 1 : 0);
 }
 
-static void merge_ranges(range_list_t *l)
+void merge_ranges(range_list_t *l)
 {
    // Sort and merge overlapping or adjacent ranges of the same net
    if (l->count < 2)
@@ -708,7 +718,7 @@ static unsigned dim_position(const dim_t *d, int64_t idx)
 ////////////////////////////////////////////////////////////////////////////////
 // VHDL name resolution
 
-static bool vhdl_select(conn_design_t *cd, tree_t name, conn_range_t *out,
+bool vhdl_select(conn_design_t *cd, tree_t name, conn_range_t *out,
                         bool *approx)
 {
    switch (tree_kind(name)) {
@@ -1236,7 +1246,7 @@ static void vlog_net_shape(vlog_node_t decl, unsigned *width, bool *desc,
       *record = true;
 }
 
-static bool vlog_select(conn_design_t *cd, vlog_node_t v, conn_range_t *out,
+bool vlog_select(conn_design_t *cd, vlog_node_t v, conn_range_t *out,
                         bool *approx)
 {
    switch (vlog_kind(v)) {
@@ -2499,6 +2509,10 @@ static conn_net_t *add_vhdl_net(bctx_t *bc, tree_t decl, const char *prefix,
       vhdl_fields(cd, n, type);
 
    map_decl(cd, decl, n);
+
+   if (cd->evidence)
+      vhdl_net_attrs(cd, n, decl);
+
    return n;
 }
 
@@ -2533,6 +2547,10 @@ static conn_net_t *add_vlog_net(bctx_t *bc, vlog_node_t decl,
    vlog_fields(cd, n, decl);
 
    map_decl(cd, decl, n);
+
+   if (cd->evidence)
+      vlog_net_attrs(cd, n, decl);
+
    return n;
 }
 
@@ -3279,6 +3297,13 @@ static conn_block_t *build_instance(conn_design_t *cd, tree_t b,
    else
       vhdl_block_params(cd, blk, b, outer);
 
+   if (cd->evidence) {
+      if (body != NULL)
+         vlog_block_attrs(cd, blk, body);
+      else
+         vhdl_block_attrs(cd, blk, b, outer);
+   }
+
    if (tree_decls(b) > 0 && tree_kind(tree_decl(b, 0)) == T_HIER) {
       tree_t hier = tree_decl(b, 0);
       if (body != NULL && (vlog_flags(body) & VLOG_F_BLACKBOX)) {
@@ -3421,6 +3446,13 @@ static void compute_process_sets(conn_design_t *cd, struct proc_ref *pp)
    p->ndrives = drives.count;
    p->approx  = approx;
 
+   if (cd->evidence) {
+      if (tree_kind(t) == T_PROCESS)
+         vhdl_proc_evidence(cd, p, t);
+      else
+         vlog_proc_evidence(cd, p, tree_vlog(t));
+   }
+
    bool foreign = false;
    for (unsigned i = 0; i < reads.count; i++)
       foreign |= reads.items[i].net->block != p->block;
@@ -3439,11 +3471,17 @@ static void compute_process_sets(conn_design_t *cd, struct proc_ref *pp)
 
 conn_design_t *conn_build(tree_t root)
 {
+   return conn_build_with(root, NULL);
+}
+
+conn_design_t *conn_build_with(tree_t root, const conn_build_opts_t *opts)
+{
    const tree_kind_t kind = tree_kind(root);
    if (kind != T_ELAB && kind != T_BLOCK)
       return NULL;
 
    conn_design_t *cd = xcalloc(sizeof(conn_design_t));
+   cd->evidence = opts != NULL && opts->evidence;
    cd->gmap = hash_new(1024);
    cd->blkmaps = hash_new(64);
    cd->genmaps = hash_new(64);

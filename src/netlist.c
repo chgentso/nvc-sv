@@ -41,6 +41,7 @@ typedef struct {
    shash_t       *boxes;      // Black box modules already written
    A(char *)      owned;      // Strings to free with the name table
    int            depth;
+   bool           evidence;   // Write the evidence of processes
 } wctx_t;
 
 typedef A(bit_t) bit_list_t;
@@ -293,10 +294,19 @@ static char *short_text(const char *text)
    return xasprintf("%.*s...", (int)n, text);
 }
 
+typedef struct {
+   const conn_evidence_t *ev;
+   const conn_proc_t     *proc;
+   char                 **rnames;   // Pin name of each read range
+   char                 **dnames;   // ... and of each driven range
+} evid_t;
+
+static void write_evidence(wctx_t *w, const evid_t *e);
+
 static void write_cell(wctx_t *w, const char *name, const char *type,
                        const pin_list_t *pins, const char *src,
                        const char *label, const attr_t *extra, int nextra,
-                       bool approx)
+                       bool approx, const evid_t *evid)
 {
    key(w, name);
    begin_obj(w);
@@ -314,6 +324,9 @@ static void write_cell(wctx_t *w, const char *name, const char *type,
       fputs("1", w->f);
    }
    end_obj(w);
+
+   if (evid != NULL)
+      write_evidence(w, evid);
 
    key(w, "port_directions");
    begin_obj(w);
@@ -346,7 +359,7 @@ static char *pin_name(char *name)
    return name;
 }
 
-static void add_pin(pin_list_t *pins, char *name, bool output)
+static const char *add_pin(pin_list_t *pins, char *name, bool output)
 {
    pin_name(name);
 
@@ -355,7 +368,7 @@ static void add_pin(pin_list_t *pins, char *name, bool output)
    for (unsigned i = 0; i < pins->count; i++) {
       if (strcmp(pins->items[i].name, name) == 0) {
          if (pins->items[i].output == output)
-            return;
+            return pins->items[i].name;
          char *n2 = xasprintf("%s'", name);
          free(name);
          name = n2;
@@ -365,12 +378,166 @@ static void add_pin(pin_list_t *pins, char *name, bool output)
 
    pin_t p = { .name = name, .output = output };
    APUSH(*pins, p);
+   return name;
+}
+
+// Write the names of the input pins that carry the ranges, once each
+static void write_pin_list(wctx_t *w, const evid_t *e,
+                           const conn_range_t *ranges, unsigned n)
+{
+   const conn_proc_t *p = e->proc;
+   A(const char *) seen = AINIT;
+
+   fputc('[', w->f);
+   for (unsigned i = 0; i < n; i++) {
+      for (unsigned j = 0; j < p->nreads; j++) {
+         const conn_range_t *pr = &(p->reads[j]);
+         if (e->rnames[j] == NULL || pr->net != ranges[i].net
+             || pr->lo > ranges[i].hi || ranges[i].lo > pr->hi)
+            continue;
+
+         bool dup = false;
+         for (unsigned k = 0; k < seen.count; k++)
+            dup |= seen.items[k] == e->rnames[j];
+         if (dup)
+            continue;
+
+         if (seen.count > 0)
+            fputc(',', w->f);
+         json_string(w->f, e->rnames[j]);
+         APUSH(seen, e->rnames[j]);
+      }
+   }
+   fputc(']', w->f);
+   ACLEAR(seen);
+}
+
+static const char *evidence_class(conn_ev_class_t cls)
+{
+   switch (cls) {
+   case CONN_EV_SEQ: return "seq";
+   case CONN_EV_COMB: return "comb";
+   case CONN_EV_LATCH: return "latch";
+   case CONN_EV_MIXED: return "mixed";
+   default: return "other";
+   }
+}
+
+// The pin of the process that holds a range of one of its reads
+static const char *read_pin(const evid_t *e, const conn_range_t *r)
+{
+   const conn_proc_t *p = e->proc;
+   for (unsigned i = 0; i < p->nreads; i++) {
+      const conn_range_t *pr = &(p->reads[i]);
+      if (e->rnames[i] != NULL && pr->net == r->net && pr->lo <= r->lo
+          && pr->hi >= r->hi)
+         return e->rnames[i];
+   }
+
+   return NULL;
+}
+
+static void write_evidence(wctx_t *w, const evid_t *e)
+{
+   const conn_evidence_t *ev = e->ev;
+   const conn_proc_t *p = e->proc;
+
+   key(w, "evidence");
+   begin_obj(w);
+
+   key(w, "class");
+   json_string(w->f, evidence_class(ev->cls));
+
+   key(w, "confidence");
+   json_string(w->f, ev->approx || p->approx ? "approx" : "exact");
+
+   key(w, "clocks");
+   fputc('[', w->f);
+   bool first = true;
+   for (unsigned i = 0; i < ev->nclocks; i++) {
+      const char *pin = read_pin(e, &(ev->clocks[i].sig));
+      if (pin == NULL)
+         continue;
+      static const char *const edges[] = { "rise", "fall", "both" };
+      fprintf(w->f, "%s{\"pin\":", first ? "" : ",");
+      json_string(w->f, pin);
+      fprintf(w->f, ",\"edge\":\"%s\"}", edges[ev->clocks[i].edge]);
+      first = false;
+   }
+   fputc(']', w->f);
+
+   key(w, "async");
+   fputc('[', w->f);
+   first = true;
+   for (unsigned i = 0; i < ev->nasync; i++) {
+      const char *pin = read_pin(e, &(ev->async[i].sig));
+      if (pin == NULL)
+         continue;
+      static const char *const levels[] = { "low", "high", "unknown" };
+      static const char *const roles[] = { "reset", "set", "unknown" };
+      fprintf(w->f, "%s{\"pin\":", first ? "" : ",");
+      json_string(w->f, pin);
+      fprintf(w->f, ",\"level\":\"%s\",\"role\":\"%s\"}",
+              levels[ev->async[i].level], roles[ev->async[i].role]);
+      first = false;
+   }
+   fputc(']', w->f);
+
+   if (ev->nsync_reset > 0) {
+      key(w, "sync_reset");
+      write_pin_list(w, e, ev->sync_reset, ev->nsync_reset);
+   }
+
+   if (ev->cls != CONN_EV_OTHER) {
+      key(w, "outputs");
+      begin_obj(w);
+      for (unsigned i = 0; i < ev->nouts; i++) {
+         const conn_out_ev_t *o = &(ev->outs[i]);
+         if (o->drive >= p->ndrives || e->dnames[o->drive] == NULL)
+            continue;
+
+         bool dup = false;
+         for (unsigned j = 0; j < i; j++)
+            dup |= ev->outs[j].drive == o->drive;
+         if (dup)
+            continue;
+
+         key(w, e->dnames[o->drive]);
+         begin_obj(w);
+         key(w, "class");
+         json_string(w->f, evidence_class(o->cls));
+         if (o->cls == CONN_EV_SEQ && o->clock >= 0) {
+            key(w, "clock");
+            fprintf(w->f, "%d", o->clock);
+         }
+         key(w, "data");
+         write_pin_list(w, e, o->data, o->ndata);
+         key(w, "ctrl");
+         write_pin_list(w, e, o->ctrl, o->nctrl);
+         if (o->has_copy) {
+            const char *pin = read_pin(e, &(o->copy));
+            if (pin != NULL) {
+               key(w, "copy");
+               json_string(w->f, pin);
+            }
+         }
+         end_obj(w);
+      }
+      end_obj(w);
+   }
+
+   end_obj(w);
 }
 
 static void write_process(wctx_t *w, const conn_proc_t *p)
 {
    pin_list_t pins = AINIT;
    LOCAL_TEXT_BUF hier = tb_new();
+   char **rnames = NULL, **dnames = NULL;
+   if (w->evidence) {
+      rnames = xcalloc_array(MAX(p->nreads, 1), sizeof(char *));
+      dnames = xcalloc_array(MAX(p->ndrives, 1), sizeof(char *));
+   }
 
    for (unsigned i = 0; i < p->nreads + p->ndrives; i++) {
       const bool is_read = i < p->nreads;
@@ -388,8 +555,16 @@ static void write_process(wctx_t *w, const conn_proc_t *p)
          continue;
       }
 
-      add_pin(&pins, range_label(r->net, r->lo, r->hi), !is_read);
+      const char *pn = add_pin(&pins, range_label(r->net, r->lo, r->hi),
+                               !is_read);
       net_bits(w, r->net, r->lo, r->hi, &(pins.items[pins.count - 1].bits));
+
+      if (w->evidence) {
+         if (is_read)
+            rnames[i] = (char *)pn;
+         else
+            dnames[i - p->nreads] = (char *)pn;
+      }
    }
 
    const char *label = p->name;
@@ -401,10 +576,16 @@ static void write_process(wctx_t *w, const conn_proc_t *p)
       { "hier", tb_len(hier) > 0 ? tb_get(hier) : NULL },
       { "cell", "$process" },
    };
+   evid_t evid = { .ev = p->ev, .proc = p, .rnames = rnames,
+                   .dnames = dnames };
+
    // The label is the cell type as that is what is drawn inside the box
-   write_cell(w, name, label, &pins, src, label, attrs, 3, p->approx);
+   write_cell(w, name, label, &pins, src, label, attrs, 3, p->approx,
+              w->evidence && p->ev != NULL ? &evid : NULL);
    free(src);
    free_pins(&pins);
+   free(rnames);
+   free(dnames);
 }
 
 static void write_expr_cell(wctx_t *w, const conn_seg_t *s, const char *src,
@@ -430,7 +611,7 @@ static void write_expr_cell(wctx_t *w, const conn_seg_t *s, const char *src,
    char *name = unique_name(w, base);
    attr_t attrs[] = { { "expr", s->text }, { "cell", "$expr" } };
    char *type = short_text(s->text);
-   write_cell(w, name, type, &pins, src, s->text, attrs, 2, false);
+   write_cell(w, name, type, &pins, src, s->text, attrs, 2, false, NULL);
    free(type);
    free(base);
    free_pins(&pins);
@@ -466,6 +647,25 @@ static void collect_conv(const conn_inst_t *inst, text_buf_t *tb)
 }
 
 // Generics or parameters of an instance with their values as text
+// Attributes of a net or unit that do not clash with a key written above
+static void write_user_attrs(wctx_t *w, const conn_attr_t *attrs,
+                             unsigned n)
+{
+   static const char *const reserved[] = {
+      "src", "record", "interface", "field", "language", "unit", "top",
+      "blackbox", "inferred_ports", "approx", "label", "kind", "hier", "cell",
+      "expr", "conversions",
+   };
+
+   for (unsigned i = 0; i < n; i++) {
+      bool skip = false;
+      for (unsigned j = 0; j < ARRAY_LEN(reserved); j++)
+         skip |= strcmp(attrs[i].name, reserved[j]) == 0;
+      if (!skip)
+         write_attr_str(w, attrs[i].name, attrs[i].value);
+   }
+}
+
 static void write_params(wctx_t *w, const conn_block_t *b)
 {
    if (b->nparams == 0)
@@ -642,6 +842,8 @@ static void write_module(wctx_t *w, conn_block_t *b, bool is_top)
    char *src = src_string(b->src, b->line);
    write_attr_str(w, "src", src);
    free(src);
+   if (w->evidence)
+      write_user_attrs(w, b->attrs, b->nattrs);
    end_obj(w);
 
    write_params(w, b);
@@ -708,6 +910,8 @@ static void write_module(wctx_t *w, conn_block_t *b, bool is_top)
          key(w, "interface");
          fputs("1", w->f);
       }
+      if (w->evidence)
+         write_user_attrs(w, n->attrs, n->nattrs);
       end_obj(w);
       end_obj(w);
 
@@ -797,11 +1001,16 @@ static void module_cb(conn_block_t *b, void *ctx)
 void netlist_write(const conn_design_t *cd, const netlist_opts_t *opts,
                    FILE *f)
 {
-   wctx_t w = { .f = f, .first = true };
+   wctx_t w = { .f = f, .first = true, .evidence = opts && opts->evidence };
 
    fputs("{", f);
    key(&w, "creator");
    json_string(f, "nvc --netlist");
+
+   if (w.evidence) {
+      key(&w, "evidence_version");
+      fputs("1", f);
+   }
 
    key(&w, "modules");
    begin_obj(&w);
