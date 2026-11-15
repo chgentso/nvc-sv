@@ -2865,3 +2865,4 @@ vlogcover10     verilog,cover=statement
 netlist6        shell
 libdir6         shell
 load1           shell
+netlist10       shell

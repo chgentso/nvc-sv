@@ -80,6 +80,7 @@ struct _conn_design {
    conn_block_t **blocks;      // All blocks in creation order
    unsigned       nblocks;
    unsigned       maxblocks;
+   unsigned       nnets;       // Nets created so far, for conn_net_t.id
    hash_t        *netmap;      // Declaration -> conn_net_t (current instance)
    hash_t        *genval;      // Generic declaration -> gen_value_t (ditto)
    shash_t       *names;       // Net names of the current instance
@@ -392,8 +393,10 @@ void add_range(range_list_t *l, conn_net_t *net, unsigned lo,
 static int range_cmp(const void *a, const void *b)
 {
    const conn_range_t *ra = a, *rb = b;
+   // Order by creation, not address, so output does not depend on the
+   // allocator
    if (ra->net != rb->net)
-      return ra->net < rb->net ? -1 : 1;
+      return ra->net->id < rb->net->id ? -1 : 1;
    else if (ra->lo != rb->lo)
       return ra->lo < rb->lo ? -1 : 1;
    else
@@ -518,6 +521,7 @@ static conn_net_t *new_net(bctx_t *bc, const char *name, conn_dir_t dir,
    n->name  = dstr(cd, uniq ?: name);
    shash_put(bc->names, n->name, n);
    free(uniq);
+   n->id    = cd->nnets++;
    n->block = bc->block;
    n->dir   = dir;
    n->width = MAX(width, 1);
