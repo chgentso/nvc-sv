@@ -6385,7 +6385,8 @@ static type_t p_interface_type_indication(tree_t parent, ident_list_t *ids)
       return p_subtype_indication();
 }
 
-static void parse_anonymous_default(type_t type, tree_t *init)
+static void parse_anonymous_default(type_t type, tree_t *init,
+                                    tree_kind_t kind)
 {
    // The default expression is parsed but not allowed for an anonymous type
 
@@ -6394,6 +6395,8 @@ static void parse_anonymous_default(type_t type, tree_t *init)
       parse_error(CURRENT_LOC, "interface declaration with an anonymous type "
                   "cannot have a default expression");
    }
+   else if (kind == T_PORT_DECL)
+      *init = solve_port_default(nametab, p_expression(), type);
    else
       *init = solve_types(nametab, p_expression(), type);
 }
@@ -6443,7 +6446,7 @@ static void p_interface_constant_declaration(tree_t parent, tree_kind_t kind,
 
    tree_t init = NULL;
    if (optional(tWALRUS))
-      parse_anonymous_default(type, &init);
+      parse_anonymous_default(type, &init, kind);
 
    if (kind == T_PARAM_DECL && relaxed_rules() && type_is_file(type)) {
       class = C_FILE;
@@ -6567,7 +6570,7 @@ static void p_interface_signal_declaration(tree_t parent, tree_kind_t kind,
       }
 
       if (optional(tWALRUS))
-         parse_anonymous_default(type, &init);
+         parse_anonymous_default(type, &init, kind);
    }
 
    for (ident_list_t *it = ids; it != NULL; it = it->next) {
@@ -6613,7 +6616,7 @@ static void p_interface_variable_declaration(tree_t parent, tree_kind_t kind)
 
    tree_t init = NULL;
    if (optional(tWALRUS))
-      parse_anonymous_default(type, &init);
+      parse_anonymous_default(type, &init, kind);
 
    // VHDL-87 file parameters have class VARIABLE or no class at all
    const bool file87 = kind == T_PARAM_DECL && relaxed_rules()
@@ -7613,10 +7616,15 @@ static void check_attribute_specification(tree_t parent, tree_t t)
    case T_PACKAGE:
    case T_PACK_BODY:
    case T_CONFIGURATION:
-      if (decl != parent && tree_kind(parent) != T_CONFIGURATION)
-         parse_error(tree_loc(t), "an attribute specification for design "
+      if (decl != parent && tree_kind(parent) != T_CONFIGURATION
+          && state.n_correct >= RECOVER_THRESH) {
+         diag_t *d = diag_new(DIAG_ERROR, tree_loc(t));
+         diag_printf(d, "an attribute specification for design "
                      "unit %pI must appear immediately within its own "
                      "declarative part", tree_ident2(t));
+         diag_hint_relaxable(d);
+         diag_emit(d);
+      }
       break;
 
    case T_PORT_DECL:
@@ -7630,10 +7638,15 @@ static void check_attribute_specification(tree_t parent, tree_t t)
                  "appear in the entity that declares "
                  "it", tree_ident2(t));
       }
-      else if (!is_declared_in_interface(parent, decl))
-         parse_error(tree_loc(t), "an attribute specification for %pI must "
+      else if (!is_declared_in_interface(parent, decl)
+               && state.n_correct >= RECOVER_THRESH) {
+         diag_t *d = diag_new(DIAG_ERROR, tree_loc(t));
+         diag_printf(d, "an attribute specification for %pI must "
                      "appear in the declarative part of the unit that "
                      "declares it", tree_ident2(t));
+         diag_hint_relaxable(d);
+         diag_emit(d);
+      }
       break;
 
    default:

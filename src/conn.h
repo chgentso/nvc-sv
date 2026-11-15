@@ -88,6 +88,7 @@ typedef struct {
 
 struct _conn_net {
    const char   *name;      // Name in block, with generate prefix
+   unsigned      id;        // Creation order, unique in the design
    conn_block_t *block;
    conn_dir_t    dir;
    unsigned      width;     // Number of bits

@@ -108,6 +108,7 @@ struct _diag {
    bool          suppress;
    bool          quiet;
    bool          prefix;
+   bool          relaxable;
 };
 
 typedef struct _hint_rec {
@@ -1201,6 +1202,9 @@ static void diag_format_json(diag_t *d, ostream_t *os)
       json_string(tb, d->rule, strlen(d->rule), false);
    }
 
+   if (d->relaxable)
+      tb_cat(tb, ",\"relaxable\":true");
+
    const loc_t *primary = NULL;
    if (d->hints.count > 0 && !loc_invalid_p(&(d->hints.items[0].loc)))
       primary = &(d->hints.items[0].loc);
@@ -1544,6 +1548,32 @@ void wrapped_printf(const char *fmt, ...)
    va_end(ap);
 }
 
+void diag_set_relaxable(diag_t *d)
+{
+   // The error would be accepted or only a warning with --relaxed
+   d->relaxable = true;
+}
+
+void diag_hint_relaxable(diag_t *d)
+{
+   if (!d->relaxable) {
+      diag_set_relaxable(d);
+      diag_hint(d, NULL, "the $bold$--relaxed$$ option downgrades this "
+                "to a warning");
+   }
+}
+
+diag_t *diag_new_relaxable(const loc_t *loc)
+{
+   // An error which is only a warning with --relaxed
+   if (opt_get_int(OPT_RELAXED))
+      return diag_new(DIAG_WARN, loc);
+
+   diag_t *d = diag_new(DIAG_ERROR, loc);
+   diag_hint_relaxable(d);
+   return d;
+}
+
 diag_t *_pedantic_diag(const loc_t *loc, int *warned, bool *error)
 {
    const bool relaxed = opt_get_int(OPT_RELAXED);
@@ -1551,8 +1581,7 @@ diag_t *_pedantic_diag(const loc_t *loc, int *warned, bool *error)
       const diag_level_t level = relaxed ? DIAG_WARN : DIAG_ERROR;
       diag_t *d = diag_new(level, loc);
       if (level == DIAG_ERROR)
-         diag_hint(d, NULL, "the $bold$--relaxed$$ option downgrades this "
-                   "to a warning");
+         diag_hint_relaxable(d);
 
       *warned = 1;
       if (error) *error = !relaxed;

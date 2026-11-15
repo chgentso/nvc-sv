@@ -104,6 +104,7 @@ typedef struct _type_set {
    type_pred_t          pred;
    unsigned             watermark;
    tree_t               target;
+   bool                 port_default;
 } type_set_t;
 
 typedef enum {
@@ -2282,6 +2283,7 @@ tree_t resolve_name(nametab_t *tab, const loc_t *loc, ident_t name)
    if (hidden > 0 && hidden == sym->ndecls) {
       diag_printf(d, "declaration of %s is hidden", istr(name));
       diag_hint(d, NULL, "the $bold$--relaxed$$ option suppresses this error");
+      diag_set_relaxable(d);
    }
    else if (overload == 0)
       diag_printf(d, "multiple conflicting visible declarations of %s",
@@ -4017,9 +4019,11 @@ static tree_t finish_overload_resolution(overload_t *o)
       if (diag_hints(d) > 0)
          diag_hint(d, tree_loc(o->tree), "use of name %s here", istr(o->name));
 
-      if (explicit == 1 && !prefer_explicit)
+      if (explicit == 1 && !prefer_explicit) {
          diag_hint(d, NULL, "this would be resolved in favour of the "
                    "explicitly defined operator with $bold$--relaxed$$");
+         diag_set_relaxable(d);
+      }
 
       diag_emit(d);
    }
@@ -5949,13 +5953,29 @@ static tree_t solve_array_aggregate(nametab_t *tab, tree_t t, type_t type)
 
             tree_add_range(a, r);
          }
+         else if (index_unconstrained && ts.down->port_default
+                  && relaxed_rules() && type_is_array(type)
+                  && dimension_of(type) == 1
+                  && type_is_scalar(type_elem(type))) {
+            // The default of an unconstrained port is only used for an
+            // unconnected port, which is checked in elaboration
+            diag_t *d = diag_new(DIAG_WARN, tree_loc(t));
+            diag_printf(d, "index range of array aggregate with others "
+                        "choice cannot be determined from the context");
+            diag_hint(d, NULL, "the default value of this port can only be "
+                      "used if it is associated with an actual");
+            diag_lrm(d, STD_08, "9.3.3.3");
+            diag_emit(d);
+         }
          else if (index_unconstrained) {
             diag_t *d = diag_new(DIAG_ERROR, tree_loc(t));
             diag_printf(d, "index range of array aggregate with others choice "
                         "cannot be determined from the context");
-            if (ts.down->target != NULL)
+            if (ts.down->target != NULL || ts.down->port_default) {
+               diag_set_relaxable(d);
                diag_hint(d, NULL, "this would be allowed with the "
                          "$bold$--relaxed$$ option");
+            }
             diag_lrm(d, STD_08, "9.3.3");
             diag_emit(d);
          }
@@ -6616,6 +6636,19 @@ tree_t solve_types(nametab_t *tab, tree_t expr, type_t constraint)
    type_set_push(tab, &ts);
    type_set_add(tab, constraint, NULL);
    tree_t result = _solve_types(tab, expr);
+   type_set_pop(tab, &ts);
+   return result;
+}
+
+tree_t solve_port_default(nametab_t *tab, tree_t expr, type_t type)
+{
+   type_set_t ts = { .port_default = true };
+   type_set_push(tab, &ts);
+
+   type_set_add(tab, type, NULL);
+
+   tree_t result = _solve_types(tab, expr);
+
    type_set_pop(tab, &ts);
    return result;
 }

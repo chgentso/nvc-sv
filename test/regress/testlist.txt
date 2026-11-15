@@ -2864,3 +2864,9 @@ vlogcover9      shell
 vlogcover10     verilog,cover=statement
 vlogcover11     verilog,cover=branch
 netlist6        shell
+libdir6         shell
+load1           shell
+netlist10       shell
+portdef1        normal,2008,relaxed
+portdef2        shell
+relax1          shell

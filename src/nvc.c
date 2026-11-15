@@ -436,6 +436,12 @@ static void set_default_timescale(const char *arg)
    vlog_set_default_timescale(unit_fs, prec_log10);
 }
 
+static const char *append_plugin(const char *list, const char *plugin)
+{
+   // Each --load option adds a plugin, loaded in command line order
+   return list == NULL ? plugin : xasprintf("%s,%s", list, plugin);
+}
+
 static const char *default_surfer_plugin(void)
 {
    // The plugin installed next to the executable, or in a lib directory of
@@ -1307,8 +1313,7 @@ static int run_cmd(int argc, char **argv, cmd_state_t *state)
             // Load the nvc-surfer plugin and have it start Surfer
             const char *plugin = optarg ?: getenv("NVC_SURFER_PLUGIN")
                ?: default_surfer_plugin();
-            pli_plugins = pli_plugins == NULL ? plugin
-               : xasprintf("%s,%s", pli_plugins, plugin);
+            pli_plugins = append_plugin(pli_plugins, plugin);
             setenv("NVC_SURFER_LAUNCH", "1", 1);
          }
          break;
@@ -1337,7 +1342,7 @@ static int run_cmd(int argc, char **argv, cmd_state_t *state)
          wave_exclude_glob(optarg);
          break;
       case 'l':
-         pli_plugins = optarg;
+         pli_plugins = append_plugin(pli_plugins, optarg);
          break;
       case 'Q':
          dpi_add_lib(optarg);
@@ -3147,7 +3152,7 @@ int main(int argc, char **argv)
          parse_stderr_severity(optarg);
          break;
       case 'l':
-         state.plugins = optarg;
+         state.plugins = append_plugin(state.plugins, optarg);
          break;
       case 'Q':
          dpi_add_lib(optarg);

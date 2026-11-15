@@ -357,6 +357,7 @@ static void lib_mark_obsolete(lib_t lib, lib_unit_t *lu, object_t *new)
       diag_hint(d, &(lu->object->loc), "previous definition is here");
       diag_hint(d, NULL, "with $bold$--relaxed$$ the latest definition "
                 "replaces the previous one");
+      diag_set_relaxable(d);
       diag_emit(d);
    }
    else if (lu->dirty) {
@@ -717,10 +718,10 @@ static void lib_default_search_paths(void)
       if (libpath_env) {
          env_copy = strdup(libpath_env);
 
-         char *path_tok = strtok(env_copy, PATH_SEP);
-         do {
+         // strtok skips empty entries but returns NULL for an empty string
+         for (char *path_tok = strtok(env_copy, PATH_SEP); path_tok != NULL;
+              path_tok = strtok(NULL, PATH_SEP))
             push_path(path_tok);
-         } while ((path_tok = strtok(NULL, PATH_SEP)));
       }
    }
 #endif

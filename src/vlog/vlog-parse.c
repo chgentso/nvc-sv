@@ -15246,8 +15246,7 @@ static bool p_method_lifetime(void)
 
    const bool automatic = p_lifetime();
    if (!automatic && class_depth > 0) {
-      diag_t *d = diag_new(relaxed_rules() ? DIAG_WARN : DIAG_ERROR,
-                           &state.last_loc);
+      diag_t *d = diag_new_relaxable(&state.last_loc);
       diag_printf(d, "a class method cannot have a static lifetime");
       diag_hint(d, &state.last_loc, "a static method is declared with "
                 "static before task or function");

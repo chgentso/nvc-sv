@@ -812,6 +812,21 @@ bool is_design_unit(tree_t t)
    }
 }
 
+bool is_unbounded_default(tree_t value)
+{
+   // A default value of an unconstrained port which is an aggregate with
+   // only an others choice has no index range of its own
+   if (tree_kind(value) != T_AGGREGATE || !tree_has_type(value))
+      return false;
+
+   type_t type = tree_type(value);
+   if (!type_is_array(type) || !type_is_unconstrained(type))
+      return false;
+
+   return tree_assocs(value) == 1
+      && tree_subkind(tree_assoc(value, 0)) == A_OTHERS;
+}
+
 bool is_literal(tree_t t)
 {
    switch (tree_kind(t)) {
