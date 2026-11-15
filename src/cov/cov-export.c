@@ -40,6 +40,7 @@ typedef struct {
 
 typedef struct _cobertura_class {
    char              *file;
+   file_ref_t         file_ref;
    ident_t            name;
    cobertura_class_t *next;
    unsigned           nlines;
@@ -54,16 +55,40 @@ typedef struct {
    const char         *relative;
 } cobertura_report_t;
 
+static cobertura_class_t *cobertura_find_class(cobertura_report_t *report,
+                                               ident_t block_name,
+                                               const loc_t *loc)
+{
+   // There is a class for each block name and source file as the same
+   // block name may be used in more than one file
+
+   LOCAL_TEXT_BUF tb = tb_new();
+   get_relative_path(tb, report->relative, loc_file_str(loc));
+
+   ident_t key = ident_sprintf("%s|%s", istr(block_name ?: ident_new("")),
+                              tb_get(tb));
+
+   cobertura_class_t *c = hash_get(report->class_map, key);
+   if (c != NULL)
+      return c;
+
+   c = xcalloc(sizeof(cobertura_class_t));
+   c->name = block_name;
+   c->file = tb_claim(tb);
+   c->file_ref = loc->file_ref;
+   c->next = report->classes;
+
+   report->classes = c;
+   hash_put(report->class_map, key, c);
+   return c;
+}
+
 static cobertura_class_t *cobertura_get_class(cobertura_report_t *report,
                                               cover_obj_t scope)
 {
    cover_obj_t inst = cover_get_obj(report->data, scope, COV_ATTR_INST);
    ident_t block_name = cover_get_ident(report->data, inst,
                                         COV_ATTR_BLOCK_NAME);
-
-   cobertura_class_t *c = hash_get(report->class_map, block_name);
-   if (c != NULL)
-      return c;
 
    cover_obj_t item0 = cover_at(report->data, scope, COV_REL_ITEMS, 0);
    cover_obj_t child0 = cover_at(report->data, scope, COV_REL_CHILDREN, 0);
@@ -77,17 +102,7 @@ static cobertura_class_t *cobertura_get_class(cobertura_report_t *report,
    else
       loc = cover_get_loc(report->data, scope, COV_ATTR_LOC);
 
-   LOCAL_TEXT_BUF tb = tb_new();
-   get_relative_path(tb, report->relative, loc_file_str(&loc));
-
-   c = xcalloc(sizeof(cobertura_class_t));
-   c->name = block_name;
-   c->file = tb_claim(tb);
-   c->next = report->classes;
-
-   report->classes = c;
-   hash_put(report->class_map, block_name, c);
-   return c;
+   return cobertura_find_class(report, block_name, &loc);
 }
 
 static cobertura_line_t *cobertura_get_line(cobertura_class_t *class,
@@ -124,7 +139,13 @@ static void cobertura_export_scope(cobertura_report_t *report,
    cover_obj_t item;
    while (cover_next(&item_it, &item)) {
       loc_t loc = cover_get_loc(report->data, item, COV_ATTR_LOC);
-      cobertura_line_t *l = cobertura_get_line(class, &loc);
+
+      // Code from an included file belongs in a class for that file
+      cobertura_class_t *iclass = class;
+      if (loc.file_ref != FILE_INVALID && loc.file_ref != class->file_ref)
+         iclass = cobertura_find_class(report, class->name, &loc);
+
+      cobertura_line_t *l = cobertura_get_line(iclass, &loc);
 
       switch (cover_get_kind(report->data, item)) {
       case COV_ITEM_STMT:
@@ -209,9 +230,14 @@ static void cobertura_print_class(cobertura_class_t *class, FILE *f)
    const double branch_rate =
       nbranches > 0 ? (double)hitbranches / (double)nbranches : 1.0;
 
-   fprintf(f, "<class name=\"%s(%s)\" filename=\"%s\" "
-           "line-rate=\"%f\" branch-rate=\"%f\" complexity=\"0.0\" >\n",
-           istr(ename), istr(aname), class->file, line_rate, branch_rate);
+   if (aname != NULL)
+      fprintf(f, "<class name=\"%s(%s)\" filename=\"%s\" "
+              "line-rate=\"%f\" branch-rate=\"%f\" complexity=\"0.0\" >\n",
+              istr(ename), istr(aname), class->file, line_rate, branch_rate);
+   else
+      fprintf(f, "<class name=\"%s\" filename=\"%s\" "
+              "line-rate=\"%f\" branch-rate=\"%f\" complexity=\"0.0\" >\n",
+              istr(ename), class->file, line_rate, branch_rate);
    fprintf(f, "<methods/>\n");
 
    fprintf(f, "<lines>\n");

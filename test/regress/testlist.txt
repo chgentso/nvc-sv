@@ -2846,3 +2846,4 @@ vlogsideeff1    verilog
 vlogenumbase1   verilog
 vlogenumx1      verilog
 vlogtypeparam1  verilog
+cover31         shell
