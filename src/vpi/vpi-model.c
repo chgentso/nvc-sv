@@ -197,6 +197,7 @@ typedef struct {
    PLI_INT32 subtype;
    unsigned  argslot;
    bool      is_signed;
+   c_vpiObject *hier_scope;   // Scope of a hierarchical reference to a memory
 } c_operation;
 
 DEF_CLASS(operation, vpiOperation, expr.object);
@@ -404,6 +405,7 @@ typedef struct _vpi_context {
 } vpi_context_t;
 
 static c_vpiObject *build_expr(vlog_node_t v, c_abstractScope *scope);
+static c_vpiObject *vpi_lookup_name(const char *path, c_vpiObject *scope);
 static c_abstractScope *cached_scope(tree_t block, rt_scope_t *s);
 static c_abstractScope *cached_vhdl_scope(rt_scope_t *s);
 static bool vpi_vlog_below(rt_scope_t *s);
@@ -1326,7 +1328,6 @@ static c_vpiObject *build_expr(vlog_node_t v, c_abstractScope *scope)
    case V_PART_SELECT:
    case V_BIT_SELECT:   // XXX: check this
    case V_MEMBER_REF:
-   case V_HIER_REF:
    case V_USER_FCALL:
    case V_METHOD_CALL:
    case V_CAST:
@@ -1335,6 +1336,13 @@ static c_vpiObject *build_expr(vlog_node_t v, c_abstractScope *scope)
    case V_OP_ASSIGN:
    case V_NULL:
       return &(build_operation(v)->expr.object);
+   case V_HIER_REF:
+      {
+         c_operation *op = build_operation(v);
+         if (vlog_has_ref(v) && vlog_is_fixed_unpacked(vlog_ref(v)))
+            op->hier_scope = &(scope->object);   // A memory found by name
+         return &(op->expr.object);
+      }
    default:
       fatal_trace("cannot build VPI expr for node kind %s",
                   vlog_kind_str(vlog_kind(v)));
@@ -6440,6 +6448,40 @@ static c_vpiObject *vpi_range_object(c_vpiObject *left, c_vpiObject *right)
    return &(r->object);
 }
 
+static c_vpiObject *vpi_memory_alias(c_vpiObject *obj)
+{
+   // The memory named by a hierarchical reference which is the argument
+   // of a system task such as $readmemh
+
+   c_operation *op = is_operation(obj);
+   if (op == NULL || op->hier_scope == NULL)
+      return obj;
+
+   vlog_node_t v = op->expr.where;
+
+   const ident_t last = vlog_ident(v);
+   ident_t names[16];
+   int nnames = 0;
+   for (vlog_node_t mr = vlog_value(v); nnames < ARRAY_LEN(names); ) {
+      if (vlog_kind(mr) != V_MOD_REF || vlog_params(mr) > 0)
+         return obj;
+
+      names[nnames++] = vlog_ident(mr);
+      if (!vlog_has_value(mr))
+         break;
+
+      mr = vlog_value(mr);
+   }
+
+   LOCAL_TEXT_BUF tb = tb_new();
+   for (int i = nnames - 1; i >= 0; i--)
+      tb_printf(tb, "%s.", istr(names[i]));
+   tb_cat(tb, istr(last));
+
+   c_vpiObject *found = vpi_lookup_name(tb_get(tb), op->hier_scope);
+   return found != NULL ? found : obj;
+}
+
 DLLEXPORT
 vpiHandle vpi_handle(PLI_INT32 type, vpiHandle refHandle)
 {
@@ -6465,6 +6507,9 @@ vpiHandle vpi_handle(PLI_INT32 type, vpiHandle refHandle)
    c_vpiObject *obj = from_handle(refHandle);
    if (obj == NULL)
       return NULL;
+
+   if (type == vpiLeftRange || type == vpiRightRange)
+      obj = vpi_memory_alias(obj);
 
    vpiHandle class_result;
    if (vpi_handle_class(type, obj, &class_result))
@@ -6628,6 +6673,8 @@ vpiHandle vpi_handle_by_index(vpiHandle handle, PLI_INT32 index)
    c_vpiObject *obj = from_handle(handle);
    if (obj == NULL)
       return NULL;
+
+   obj = vpi_memory_alias(obj);
 
    c_vpiObject *elem = vpi_select_index(obj, index);
    if (elem == NULL) {

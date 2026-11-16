@@ -2879,3 +2879,4 @@ svpackedpattern1  verilog
 svpatterncontext1  verilog
 svtypeparamgen1  verilog
 svdrivepow1  verilog
+svreadmemhier1  verilog
