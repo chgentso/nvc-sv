@@ -1974,12 +1974,18 @@ bool vlog_is_dynamic_type(vlog_node_t type)
    }
 }
 
-vlog_node_t vlog_select_type(vlog_node_t v)
+static vlog_node_t select_type(vlog_node_t v, bool synth)
 {
-   // Type of a selected element of a dynamic or packed array
+   // Type of a selected element of a dynamic or packed array.  When SYNTH
+   // is set the element of a packed vector which has several dimensions is
+   // given a data type of its own.
 
    vlog_node_t value = vlog_value(v);
-   vlog_node_t type = vlog_get_type(value);
+   vlog_node_t type;
+   if (synth && vlog_kind(value) == V_BIT_SELECT)
+      type = select_type(value, true);
+   else
+      type = vlog_get_type(value);
    if (type == NULL)
       return NULL;
 
@@ -2031,8 +2037,32 @@ vlog_node_t vlog_select_type(vlog_node_t v)
                nparams -= ranges - 1;
                type = vlog_get_type(vlog_type(type));
             }
+            else if (synth) {
+               vlog_node_t elem = vlog_new(V_DATA_TYPE);
+               vlog_set_subkind(elem, vlog_subkind(type));
+               vlog_set_loc(elem, vlog_loc(type));
+               vlog_set_type(elem, vlog_type(type));
+
+               for (int i = nparams; i < ranges; i++)
+                  vlog_add_range(elem, vlog_range(type, i));
+
+               return elem;
+            }
             else
                return NULL;
+         }
+         else if (synth && vlog_ranges(type) >= nparams) {
+            // Remove the dimensions that have been selected
+            vlog_node_t elem = vlog_new(V_DATA_TYPE);
+            vlog_set_subkind(elem, vlog_subkind(type));
+            vlog_set_loc(elem, vlog_loc(type));
+            vlog_set_flags(elem, vlog_flags(type) & VLOG_F_SIGNED);
+
+            const int nranges = vlog_ranges(type);
+            for (int i = nparams; i < nranges; i++)
+               vlog_add_range(elem, vlog_range(type, i));
+
+            return elem;
          }
          else
             return NULL;
@@ -2041,6 +2071,16 @@ vlog_node_t vlog_select_type(vlog_node_t v)
    }
 
    return type;
+}
+
+vlog_node_t vlog_select_type(vlog_node_t v)
+{
+   return select_type(v, false);
+}
+
+vlog_node_t vlog_select_type_packed(vlog_node_t v)
+{
+   return select_type(v, true);
 }
 
 vlog_node_t vlog_get_type(vlog_node_t v)

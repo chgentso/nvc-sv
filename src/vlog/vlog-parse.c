@@ -6152,6 +6152,18 @@ static void resolve_type_keys(vlog_node_t *items, int count, vlog_node_t dt,
    }
 }
 
+static vlog_node_t p_pattern_elem_expr(bool of_array, vlog_node_t dt)
+{
+   // The value of an item that gives an element of an unpacked array of
+   // structures
+
+   if (of_array && dt != NULL && peek() == tTICK && peek_nth(2) == tLBRACE
+       && (vlog_kind(dt) == V_STRUCT_DECL || vlog_kind(dt) == V_UNION_DECL))
+      return p_assignment_pattern_expression(dt);
+
+   return p_pattern_item_expr(dt, NULL);
+}
+
 static void p_assignment_pattern(vlog_node_t expr)
 {
    // '{ expression { , expression } }
@@ -6192,7 +6204,7 @@ static void p_assignment_pattern(vlog_node_t expr)
          vlog_set_loc(v, &state.last_loc);
          vlog_set_subkind(v, 1);
          consume(tCOLON);
-         vlog_set_right(v, p_pattern_item_expr(dt, NULL));
+         vlog_set_right(v, p_pattern_elem_expr(of_array, dt));
       }
       else if (!assoc && is_type_key(dt)) {
          vlog_node_t key;
@@ -6288,7 +6300,7 @@ static void p_assignment_pattern(vlog_node_t expr)
 
          if (optional(tCOLON)) {
             vlog_set_left(v, head);
-            vlog_set_right(v, p_pattern_item_expr(dt, NULL));
+            vlog_set_right(v, p_pattern_elem_expr(of_array, dt));
          }
          else if (optional(tLBRACE)) {
             // Replication of a list of items
@@ -6418,7 +6430,9 @@ static vlog_node_t pattern_type_of(vlog_node_t lhs)
    // A slice of an array takes elements of the type of the array
 
    if (vlog_kind(lhs) == V_PART_SELECT) {
-      vlog_node_t type = vlog_get_type(vlog_value(lhs));
+      vlog_node_t value = vlog_value(lhs);
+      vlog_node_t type = vlog_kind(value) == V_BIT_SELECT
+         ? vlog_select_type_packed(value) : vlog_get_type(value);
       if (type != NULL && vlog_kind(type) == V_DATA_TYPE
           && vlog_subkind(type) == DT_DYNARRAY && vlog_ranges(type) == 1) {
          // A slice of an array declared with a fixed size has fewer elements
@@ -6429,10 +6443,43 @@ static vlog_node_t pattern_type_of(vlog_node_t lhs)
          return wrap;
       }
 
+      if (type != NULL && vlog_kind(type) == V_DATA_TYPE
+          && !vlog_has_type(type) && vlog_ranges(type) > 0) {
+         // A part of a packed vector has the width of the part
+         int64_t left, right, width = -1;
+         switch (vlog_subkind(lhs)) {
+         case V_RANGE_CONST:
+            if (vlog_range_bound(vlog_left(lhs), &left)
+                && vlog_range_bound(vlog_right(lhs), &right))
+               width = (left > right ? left - right : right - left) + 1;
+            break;
+         default:
+            if (vlog_range_bound(vlog_right(lhs), &right))
+               width = right;
+            break;
+         }
+
+         if (width > 0) {
+            vlog_node_t part = vlog_new(V_DATA_TYPE);
+            vlog_set_subkind(part, vlog_subkind(type));
+            vlog_set_loc(part, vlog_loc(lhs));
+
+            vlog_node_t dim = vlog_new(V_DIMENSION);
+            vlog_set_subkind(dim, V_DIM_PACKED);
+            vlog_set_left(dim, foreach_number(width - 1, vlog_loc(lhs)));
+            vlog_set_right(dim, foreach_number(0, vlog_loc(lhs)));
+            vlog_set_loc(dim, vlog_loc(lhs));
+            vlog_add_range(part, dim);
+            return part;
+         }
+      }
+
       return type;
    }
 
    vlog_node_t type = vlog_get_type(lhs);
+   if (type == NULL && vlog_kind(lhs) == V_BIT_SELECT)
+      type = vlog_select_type_packed(lhs);
    if (type == NULL) {
       vlog_node_t decl = hier_member_decl(lhs);
       if (decl != NULL && vlog_has_type(decl))
@@ -6440,6 +6487,54 @@ static vlog_node_t pattern_type_of(vlog_node_t lhs)
    }
 
    return type;
+}
+
+static bool lhs_is_unpacked_array(vlog_node_t lhs)
+{
+   // The target of an assignment is a fixed size unpacked array
+
+   int selected = 0;
+   while (vlog_kind(lhs) == V_BIT_SELECT) {
+      selected += vlog_params(lhs);
+      lhs = vlog_value(lhs);
+   }
+
+   vlog_node_t decl = NULL;
+   switch (vlog_kind(lhs)) {
+   case V_REF:
+      if (vlog_has_ref(lhs))
+         decl = vlog_ref(lhs);
+      break;
+   default:
+      decl = hier_member_decl(lhs);
+      break;
+   }
+
+   if (decl == NULL || !vlog_is_fixed_unpacked(decl))
+      return false;
+
+   int unpacked = 0;
+   const int nranges = vlog_ranges(decl);
+   for (int i = 0; i < nranges; i++) {
+      if (vlog_subkind(vlog_range(decl, i)) == V_DIM_UNPACKED)
+         unpacked++;
+   }
+
+   return selected < unpacked;
+}
+
+static vlog_node_t p_expression_of_lhs(vlog_node_t lhs)
+{
+   // The right-hand side of an assignment takes the type of the target
+
+   vlog_node_t dt = pattern_type_of(lhs);
+
+   if (peek() == tTICK && peek_nth(2) == tLBRACE && lhs_is_unpacked_array(lhs))
+      pattern_array_elems = true;
+
+   vlog_node_t v = p_expression_of_type(dt);
+   pattern_array_elems = false;
+   return v;
 }
 
 static vlog_node_t p_assignment_pattern_expression(vlog_node_t dt)
@@ -9665,7 +9760,7 @@ static vlog_node_t p_blocking_assignment(vlog_node_t lhs)
       break;
    case tTICK:
    case tTAGGED:
-      vlog_set_value(v, p_expression_of_type(pattern_type_of(lhs)));
+      vlog_set_value(v, p_expression_of_lhs(lhs));
       break;
    case tHASH:
    case tAT:
@@ -9676,7 +9771,7 @@ static vlog_node_t p_blocking_assignment(vlog_node_t lhs)
       if (is_real_view(lhs))
          vlog_set_value(v, real_view_call("$realtobits", p_expression()));
       else
-         vlog_set_value(v, p_expression_of_type(pattern_type_of(lhs)));
+         vlog_set_value(v, p_expression_of_lhs(lhs));
       break;
    }
 
@@ -9766,7 +9861,7 @@ static vlog_node_t p_clocking_drive(vlog_node_t lhs)
    else
       count = p_delay_value();
 
-   vlog_node_t rhs = p_expression_of_type(pattern_type_of(lhs));
+   vlog_node_t rhs = p_expression_of_lhs(lhs);
 
    const loc_t *loc = CURRENT_LOC;
 
@@ -9859,7 +9954,7 @@ static vlog_node_t p_nonblocking_assignment(vlog_node_t lhs)
    if (is_real_view(lhs))
       vlog_set_value(v, real_view_call("$realtobits", p_expression()));
    else
-      vlog_set_value(v, p_expression_of_type(pattern_type_of(lhs)));
+      vlog_set_value(v, p_expression_of_lhs(lhs));
 
    vlog_set_loc(v, CURRENT_LOC);
    return v;
@@ -10288,7 +10383,7 @@ static vlog_node_t p_variable_assignment(vlog_kind_t kind)
    if (is_real_view(lhs))
       rhs = real_view_call("$realtobits", p_expression());
    else
-      rhs = p_expression_of_type(pattern_type_of(lhs));
+      rhs = p_expression_of_lhs(lhs);
    vlog_set_value(v, rhs);
 
    vlog_set_loc(v, CURRENT_LOC);
@@ -13230,7 +13325,7 @@ static vlog_node_t p_net_assignment(vlog_node_t delay, vlog_node_t strength)
 
    // The net may be declared implicitly by a later port connection
    const bool saved_forward = vlog_symtab_set_forward_net(symtab, true);
-   vlog_set_value(v, p_expression_of_type(pattern_type_of(vlog_target(v))));
+   vlog_set_value(v, p_expression_of_lhs(vlog_target(v)));
    vlog_symtab_set_forward_net(symtab, saved_forward);
 
    vlog_set_loc(v, CURRENT_LOC);

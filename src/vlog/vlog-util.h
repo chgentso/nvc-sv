@@ -60,6 +60,7 @@ vlog_node_t vlog_longest_static_prefix(vlog_node_t v);
 bool vlog_equal_node(vlog_node_t a, vlog_node_t b);
 uint32_t vlog_hash_node(vlog_node_t v);
 vlog_node_t vlog_get_type(vlog_node_t v);
+vlog_node_t vlog_select_type_packed(vlog_node_t v);
 vlog_node_t vlog_assoc_key(vlog_node_t type);
 vlog_node_t vlog_scope_member(vlog_node_t scope, ident_t id);
 unsigned vlog_class_ifaces(vlog_node_t class);
