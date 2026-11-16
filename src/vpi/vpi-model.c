@@ -1335,6 +1335,7 @@ static c_vpiObject *build_expr(vlog_node_t v, c_abstractScope *scope)
    case V_STREAM:
    case V_OP_ASSIGN:
    case V_NULL:
+   case V_PATTERN_EXPR:
       return &(build_operation(v)->expr.object);
    case V_HIER_REF:
       {
