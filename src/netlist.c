@@ -22,6 +22,7 @@
 #include "netlist.h"
 
 #include <assert.h>
+#include <ctype.h>
 #include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
@@ -724,6 +725,110 @@ static void write_params(wctx_t *w, const conn_block_t *b)
    end_obj(w);
 }
 
+static bool param_quoted(const char *s)
+{
+   const size_t len = strlen(s);
+   return len >= 2 && s[0] == '"' && s[len - 1] == '"';
+}
+
+static bool json_number_text(const char *s)
+{
+   // Text that is also a valid JSON number
+   const char *p = s;
+   if (*p == '-')
+      p++;
+   if (!isdigit((unsigned char)*p))
+      return false;
+   if (*p == '0' && isdigit((unsigned char)p[1]))
+      return false;
+   while (isdigit((unsigned char)*p))
+      p++;
+   if (*p == '.') {
+      p++;
+      if (!isdigit((unsigned char)*p))
+         return false;
+      while (isdigit((unsigned char)*p))
+         p++;
+   }
+   if (*p == 'e' || *p == 'E') {
+      p++;
+      if (*p == '+' || *p == '-')
+         p++;
+      if (!isdigit((unsigned char)*p))
+         return false;
+      while (isdigit((unsigned char)*p))
+         p++;
+   }
+   return *p == '\0';
+}
+
+static char *unquote_param(const char *s, bool vhdl)
+{
+   // The characters of a string literal: doubled quotes in VHDL and
+   // backslash escapes in Verilog
+   const size_t len = strlen(s);
+   char *out = xmalloc(len + 1), *o = out;
+   for (const char *p = s + 1; p < s + len - 1; p++) {
+      if (vhdl && p[0] == '"' && p[1] == '"')
+         p++;
+      else if (!vhdl && p[0] == '\\' && p + 1 < s + len - 1)
+         p++;
+      *o++ = *p;
+   }
+   *o = '\0';
+   return out;
+}
+
+// Generics or parameters with their type, how to read the value and
+// whether the instance gave it: a superset of "parameters"
+static void write_generics(wctx_t *w, const conn_block_t *b)
+{
+   if (b->nparams == 0)
+      return;
+
+   const bool vhdl = b->lang == CONN_VHDL;
+
+   key(w, "generics");
+   fputc('[', w->f);
+   for (unsigned i = 0; i < b->nparams; i++) {
+      const conn_param_t *p = &(b->params[i]);
+
+      fputs(i > 0 ? ",\n{" : "\n{", w->f);
+      w->first = true;
+      write_attr_str(w, "name", p->name);
+      write_attr_str(w, "type", p->type);
+      write_attr_str(w, "kind", p->kind);
+
+      key(w, "value");
+      const bool isstr = !strcmp(p->kind, "string");
+      const bool isbits = !strcmp(p->kind, "bits");
+      if (p->exact && (!strcmp(p->kind, "integer")
+                       || (!strcmp(p->kind, "real")
+                           && json_number_text(p->value))))
+         fputs(p->value, w->f);
+      else if (p->exact && !strcmp(p->kind, "boolean"))
+         fputs(p->value, w->f);
+      else if (p->exact && (isstr || (isbits && vhdl))
+               && param_quoted(p->value)) {
+         char *u = unquote_param(p->value, vhdl);
+         json_string(w->f, u);
+         free(u);
+      }
+      else
+         json_string(w->f, p->value);
+
+      key(w, "overridden");
+      fputs(p->overridden ? "true" : "false", w->f);
+      if (!p->exact) {
+         key(w, "exact");
+         fputs("false", w->f);
+      }
+      fputc('}', w->f);
+   }
+   fputs("\n]", w->f);
+   w->first = false;
+}
+
 static void write_instance(wctx_t *w, const conn_inst_t *inst,
                            unsigned *serial)
 {
@@ -827,6 +932,7 @@ static void write_instance(wctx_t *w, const conn_inst_t *inst,
    end_obj(w);
 
    write_params(w, child);
+   write_generics(w, child);
 
    key(w, "port_directions");
    begin_obj(w);
@@ -893,6 +999,7 @@ static void write_module(wctx_t *w, conn_block_t *b, bool is_top)
    end_obj(w);
 
    write_params(w, b);
+   write_generics(w, b);
 
    key(w, "ports");
    begin_obj(w);

@@ -190,10 +190,15 @@ static const char *json_value(const char *p, int depth)
    else if (*p == '"')
       return json_string(p);
    else if ((*p >= '0' && *p <= '9') || *p == '-') {
-      while ((*p >= '0' && *p <= '9') || *p == '-' || *p == '.')
+      while ((*p >= '0' && *p <= '9') || *p == '-' || *p == '.'
+             || *p == '+' || *p == 'e' || *p == 'E')
          p++;
       return p;
    }
+   else if (strncmp(p, "true", 4) == 0)
+      return p + 4;
+   else if (strncmp(p, "false", 5) == 0)
+      return p + 5;
    else
       return NULL;
 }
@@ -420,6 +425,9 @@ START_TEST(test_m5_vhdl_params)
    ck_has(json, "\"type\":\"M5V_TOP.G(0).U2\"");
    ck_has(json, "\"parameters\":{\n\"W\":\"5\",\n\"NAME\":\"\\\"xy\\\"\"");
    ck_has(json, "\"M5V_TOP.G(1).U2\":{");
+   ck_has(json, "\"generics\":[");
+   ck_has(json, "\"name\":\"W\",\n\"type\":\"NATURAL\",\n"
+          "\"kind\":\"integer\",\n\"value\":5,\n\"overridden\":true}");
    free(json);
 
    // At the depth cut the cell still has them

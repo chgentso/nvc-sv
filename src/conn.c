@@ -170,10 +170,41 @@ void conn_add_attr(conn_design_t *cd, conn_attr_t **list, unsigned *count,
 }
 
 static void add_block_param(conn_design_t *cd, param_list_t *l,
-                                 const char *name, const char *value)
+                            const char *name, const char *value,
+                            const char *type, const char *kind,
+                            bool overridden, bool exact)
 {
-   conn_param_t p = { dstr(cd, name), dstr(cd, value) };
+   while (type != NULL && *type == ' ')
+      type++;
+
+   conn_param_t p = {
+      .name       = dstr(cd, name),
+      .value      = dstr(cd, value),
+      .type       = type != NULL && *type != '\0' ? dstr(cd, type) : NULL,
+      .kind       = kind,
+      .overridden = overridden,
+      .exact      = exact,
+   };
    APUSH(*l, p);
+}
+
+static bool param_is_int(const char *s)
+{
+   if (*s == '-')
+      s++;
+   if (*s == '\0')
+      return false;
+   for (; *s; s++) {
+      if (!isdigit((unsigned char)*s))
+         return false;
+   }
+   return true;
+}
+
+static bool param_is_quoted(const char *s)
+{
+   const size_t len = strlen(s);
+   return len >= 2 && s[0] == '"' && s[len - 1] == '"';
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -2120,6 +2151,69 @@ static void vhdl_param_text(conn_design_t *cd, text_buf_t *tb, tree_t value)
       tb_cat(tb, "...");
 }
 
+static vlog_node_t block_vlog_body(tree_t b);
+
+static bool shim_param_given(tree_t outer, ident_t name, bool *found)
+{
+   // A VHDL entity instantiated from Verilog: whether the Verilog instance
+   // gave a value to the parameter bound to this generic
+   *found = false;
+   vlog_node_t body = outer != NULL ? block_vlog_body(outer) : NULL;
+   if (body == NULL)
+      return false;
+
+   const int ndecls = vlog_decls(body);
+   for (int i = 0; i < ndecls; i++) {
+      vlog_node_t d = vlog_decl(body, i);
+      if (vlog_kind(d) == V_LOCALPARAM
+          && strcasecmp(istr(vlog_ident(d)), istr(name)) == 0) {
+         *found = true;
+         return !!(vlog_flags(d) & VLOG_F_OVERRIDDEN);
+      }
+   }
+
+   return false;
+}
+
+static const char *vhdl_param_kind(type_t type, const char *text, bool *exact)
+{
+   // How to read the text of the value of a generic of this type
+   const char *kind = "other";
+   *exact = false;
+
+   if (type_is_integer(type))
+      kind = "integer", *exact = param_is_int(text);
+   else if (type_is_real(type)) {
+      kind = "real";
+      *exact = isdigit((unsigned char)text[0]) || text[0] == '-';
+   }
+   else if (type_is_physical(type)) {
+      kind = "time";
+      *exact = isdigit((unsigned char)text[0]);
+   }
+   else if (type_is_enum(type)) {
+      if (type_ident(type_base_recur(type)) == ident_new("STD.STANDARD.BOOLEAN")) {
+         kind = "boolean";
+         *exact = !strcmp(text, "true") || !strcmp(text, "false");
+      }
+      else {
+         kind = "enum";
+         *exact = true;
+      }
+   }
+   else if (type_is_array(type) && dimension_of(type) == 1) {
+      type_t elem = type_base_recur(type_elem(type));
+      if (type_is_enum(elem)) {
+         const bool character =
+            type_ident(elem) == ident_new("STD.STANDARD.CHARACTER");
+         kind = character ? "string" : "bits";
+         *exact = param_is_quoted(text);
+      }
+   }
+
+   return kind;
+}
+
 static void vhdl_block_params(conn_design_t *cd, conn_block_t *blk, tree_t b,
                               tree_t outer)
 {
@@ -2161,7 +2255,19 @@ static void vhdl_block_params(conn_design_t *cd, conn_block_t *blk, tree_t b,
             value = tree_value(m);
       }
 
+      // The value is the default if it was not given or it is the
+      // default expression itself
+      bool given = value != NULL && tree_kind(value) != T_OPEN
+         && !(tree_has_value(g) && value == tree_value(g));
+
+      bool shim;
+      const bool shim_given = shim_param_given(outer, tree_ident(g), &shim);
+      if (shim)
+         given = shim_given;
+
       LOCAL_TEXT_BUF tb = tb_new();
+      const char *kind = "other";
+      bool exact = true;
       switch (tree_class(g)) {
       case C_CONSTANT:
          if ((value == NULL || tree_kind(value) == T_OPEN)
@@ -2179,6 +2285,7 @@ static void vhdl_block_params(conn_design_t *cd, conn_block_t *blk, tree_t b,
                tb_printf(tb, "%"PRIi64, gv->ival);
             else
                vhdl_param_text(cd, tb, value);
+            kind = vhdl_param_kind(tree_type(g), tb_get(tb), &exact);
          }
          break;
 
@@ -2187,13 +2294,19 @@ static void vhdl_block_params(conn_design_t *cd, conn_block_t *blk, tree_t b,
              || !tree_has_type(value))
             continue;
          tb_printf(tb, "%s", type_pp(tree_type(value)));
+         kind = "type";
          break;
 
       default:
          continue;
       }
 
-      add_block_param(cd, &list, istr(tree_ident(g)), tb_get(tb));
+      const char *tname = NULL;
+      if (tree_class(g) == C_CONSTANT)
+         tname = type_pp(tree_type(g));
+
+      add_block_param(cd, &list, istr(tree_ident(g)), tb_get(tb), tname, kind,
+                      given, exact);
    }
 
    cd->genval = saved_gen;
@@ -2445,6 +2558,31 @@ static const char *vlog_param_value(conn_design_t *cd, vlog_node_t d)
    return dstr(cd, tb_get(tb));
 }
 
+static const char *vlog_param_kind(const char *text, bool *exact)
+{
+   // How to read the text of the value of a parameter
+   *exact = true;
+   if (param_is_int(text))
+      return "integer";
+   else if (param_is_quoted(text))
+      return "string";
+
+   const char *p = text;
+   while (isdigit((unsigned char)*p))
+      p++;
+   if (p > text && p[0] == '\'')
+      return "bits";
+
+   char *end;
+   strtod(text, &end);
+   if (end != text && *end == '\0'
+       && (isdigit((unsigned char)text[0]) || text[0] == '-'))
+      return "real";
+
+   *exact = false;
+   return "other";
+}
+
 static void vlog_block_params(conn_design_t *cd, conn_block_t *blk,
                               vlog_node_t body)
 {
@@ -2460,14 +2598,29 @@ static void vlog_block_params(conn_design_t *cd, conn_block_t *blk,
       vlog_node_t d = vlog_decl(body, i);
       switch (vlog_kind(d)) {
       case V_LOCALPARAM:
-         if ((vlog_flags(d) & VLOG_F_OVERRIDABLE) && vlog_has_value(d))
-            add_block_param(cd, &list, istr(vlog_ident(d)),
-                            vlog_param_value(cd, d));
+         if ((vlog_flags(d) & VLOG_F_OVERRIDABLE) && vlog_has_value(d)) {
+            const char *text = vlog_param_value(cd, d);
+            bool exact;
+            const char *kind = vlog_param_kind(text, &exact);
+
+            LOCAL_TEXT_BUF tb = tb_new();
+            if (vlog_has_type(d))
+               vlog_param_type_text(tb, vlog_type(d));
+
+            if (!strcmp(tb_get(tb), "real") || !strcmp(tb_get(tb), "realtime")
+                || !strcmp(tb_get(tb), "shortreal"))
+               kind = "real";
+
+            add_block_param(cd, &list, istr(vlog_ident(d)), text,
+                            tb_get(tb), kind,
+                            !!(vlog_flags(d) & VLOG_F_OVERRIDDEN), exact);
+         }
          break;
       case V_TYPE_DECL:
          if (vlog_flags(d) & VLOG_F_TYPEPARAM)
             add_block_param(cd, &list, istr(vlog_ident(d)),
-                            vlog_param_value(cd, d));
+                            vlog_param_value(cd, d), NULL, "type",
+                            !!(vlog_flags(d) & VLOG_F_OVERRIDDEN), true);
          break;
       default:
          break;

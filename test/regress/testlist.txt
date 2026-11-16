@@ -2867,6 +2867,10 @@ netlist6        shell
 libdir6         shell
 load1           shell
 netlist10       shell
+netlist_gen1    shell
+netlist_gen2    shell
+netlist_gen3    shell
+netlist_gen4    shell
 portdef1        normal,2008,relaxed
 portdef2        shell
 relax1          shell

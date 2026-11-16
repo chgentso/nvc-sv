@@ -1217,6 +1217,42 @@ structure are extra nets such as
 .Ql R.A
 which share the bits of the whole signal.
 .Pp
+Each cell and module also has a
+.Ql generics
+array with one object for each generic or parameter in declaration order:
+.Ql name ,
+the declared
+.Ql type
+if it has one,
+.Ql kind ,
+the elaborated
+.Ql value
+and
+.Ql overridden ,
+which is true if the instantiation gave the value and false if the default
+was used.
+The kind is
+.Ql integer ,
+.Ql real ,
+.Ql boolean ,
+.Ql string ,
+.Ql bits ,
+.Ql enum ,
+.Ql time ,
+.Ql type
+or
+.Ql other .
+Integers, reals and booleans are JSON values and the others are strings:
+the characters of a string, the digits of a VHDL bit vector, an enumeration
+literal, a time with its unit, and a Verilog vector as a literal with its width
+and base such as
+.Ql 8'hff .
+A value that could not be evaluated is the expression as written and has
+.Ql exact
+false.
+Generics that cannot be represented, such as subprograms and packages, are
+left out.
+.Pp
 For example, to draw the design
 .Ql top
 in the TerosHDL viewer or with netlistsvg:

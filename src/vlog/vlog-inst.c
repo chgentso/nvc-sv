@@ -34,14 +34,17 @@
 static vlog_node_t bind_parameter(vlog_node_t decl, int nth, vlog_node_t inst)
 {
    vlog_node_t value = NULL;
+   bool given = false;
    if (vlog_has_value(decl))
       value = vlog_value(decl);
 
    if (inst != NULL) {
       vlog_node_t p;
       const int nparams = vlog_params(inst);
-      if (nth < nparams && !vlog_has_ident((p = vlog_param(inst, nth))))
+      if (nth < nparams && !vlog_has_ident((p = vlog_param(inst, nth)))) {
          value = vlog_value(p);
+         given = true;
+      }
       else {
          ident_t id = vlog_ident(decl);
          for (int i = 0; i < nparams; i++) {
@@ -51,8 +54,10 @@ static vlog_node_t bind_parameter(vlog_node_t decl, int nth, vlog_node_t inst)
             else if (vlog_ident(p) != id)
                continue;
 
-            if (vlog_has_value(p))
+            if (vlog_has_value(p)) {
                value = vlog_value(p);
+               given = true;
+            }
 
             break;
          }
@@ -96,7 +101,7 @@ static vlog_node_t bind_parameter(vlog_node_t decl, int nth, vlog_node_t inst)
    vlog_set_ident(local, vlog_ident(decl));
    vlog_set_value(local, value);
    vlog_set_type(local, vlog_type(decl));
-   vlog_set_flags(local, VLOG_F_OVERRIDABLE);
+   vlog_set_flags(local, VLOG_F_OVERRIDABLE | (given ? VLOG_F_OVERRIDDEN : 0));
 
    const int nranges = vlog_ranges(decl);
    for (int i = 0; i < nranges; i++)
@@ -677,8 +682,10 @@ vlog_node_t vlog_new_instance(vlog_node_t mod, vlog_node_t inst, ident_t id)
       case V_TYPE_DECL:
          if (vlog_flags(d) & VLOG_F_TYPEPARAM) {
             vlog_node_t value = bind_type_parameter(d, pidx++, inst);
-            if (value != NULL)
+            if (value != NULL) {
                vlog_set_type(d, value);
+               vlog_set_flags(d, vlog_flags(d) | VLOG_F_OVERRIDDEN);
+            }
          }
          vlog_add_decl(v, d);
          break;

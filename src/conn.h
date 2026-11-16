@@ -255,6 +255,12 @@ struct _conn_proc {
 typedef struct {
    const char *name;       // Generic or parameter as declared
    const char *value;      // Value of this instance as text
+   const char *type;       // Declared type as text or NULL
+   const char *kind;       // integer, real, boolean, string, bits, enum, time,
+                           // type or other: how to read VALUE
+   bool        overridden; // Value given by the instance, not the default
+   bool        exact;      // VALUE is the evaluated value and not the
+                           // expression as written
 } conn_param_t;
 
 struct _conn_block {

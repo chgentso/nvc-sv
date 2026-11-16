@@ -625,6 +625,7 @@ typedef enum {
    VLOG_F_OPEN_PACKED = VLOG_F_WILDCARD,  // On an unsized packed dimension
    VLOG_F_IMPLICIT_NET = VLOG_F_FORWARD,  // On the type of a net declared by its use
    VLOG_F_OVERRIDABLE = VLOG_F_GENERIC,   // On a local parameter bound to a parameter
+   VLOG_F_OVERRIDDEN = VLOG_F_FILL,       // ... or type parameter given a value by the instance
 } vlog_flags_t;
 
 typedef enum {
