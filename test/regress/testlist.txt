@@ -2870,3 +2870,4 @@ netlist10       shell
 portdef1        normal,2008,relaxed
 portdef2        shell
 relax1          shell
+vhpi36          normal,vhpi,relaxed
