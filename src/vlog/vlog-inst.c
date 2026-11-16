@@ -209,6 +209,11 @@ static bool copy_instance_pred(vlog_node_t v, void *ctx)
                                        && vlog_subkind(t) == DT_EVENT);
             }
 
+            // The type parameters have already been bound when the
+            // module was copied so a generate block shares the variable
+            if (copy_scope != NULL)
+               return false;
+
             vlog_node_t type = vlog_type(d);
             return vlog_kind(type) == V_TYPE_DECL
                && (vlog_flags(type) & VLOG_F_TYPEPARAM);
@@ -221,7 +226,7 @@ static bool copy_instance_pred(vlog_node_t v, void *ctx)
    case V_MOD_REF:
       return copy_scope == NULL || hset_contains(copy_scope, v);
    case V_TYPE_DECL:
-      return !!(vlog_flags(v) & VLOG_F_TYPEPARAM);
+      return copy_scope == NULL && (vlog_flags(v) & VLOG_F_TYPEPARAM);
    case V_SYS_TCALL:
    case V_SYS_FCALL:
       return vlog_design_precision() >= 0 && !is_shared(v);
