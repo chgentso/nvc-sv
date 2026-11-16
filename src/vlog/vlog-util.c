@@ -1596,6 +1596,12 @@ static bool vlog_is_const_arith(vlog_node_t v)
       case V_BINARY_MOD:
       case V_BINARY_SHIFT_LL:
       case V_BINARY_SHIFT_RL:
+      case V_BINARY_SHIFT_LA:
+      case V_BINARY_SHIFT_RA:
+      case V_BINARY_EXP:
+      case V_BINARY_AND:
+      case V_BINARY_OR:
+      case V_BINARY_XOR:
          return vlog_is_const_arith(vlog_left(v))
             && vlog_is_const_arith(vlog_right(v));
       default:
@@ -1604,7 +1610,24 @@ static bool vlog_is_const_arith(vlog_node_t v)
    case V_UNARY:
       switch (vlog_subkind(v)) {
       case V_UNARY_NEG:
+      case V_UNARY_IDENTITY:
          return vlog_is_const_arith(vlog_value(v));
+      default:
+         return false;
+      }
+   case V_SYS_FCALL:
+      switch (vlog_subkind(v)) {
+      case V_SYSTF_CLOG2:
+      case V_SYSTF_SIGNED:
+      case V_SYSTF_UNSIGNED:
+         {
+            const int nparams = vlog_params(v);
+            for (int i = 0; i < nparams; i++) {
+               if (!vlog_is_const_arith(vlog_param(v, i)))
+                  return false;
+            }
+            return nparams > 0;
+         }
       default:
          return false;
       }
