@@ -42,8 +42,9 @@ typedef struct {
    char       *abs_str;
    const char *linebuf;
    bool        tried_open;
-   unsigned    last_line;
-   const char *last_ptr;
+   const char **lines;     // Start of each line seen so far
+   unsigned    nlines;
+   unsigned    maxlines;
 } loc_file_t;
 
 typedef A(loc_file_t) file_list_t;
@@ -269,25 +270,29 @@ const char *loc_get_source(const loc_t *loc)
    if (file->linebuf == NULL)
       return NULL;
 
-   unsigned line = 1;
-   const char *ptr = file->linebuf;
-
-   if (file->last_line > 0 && loc->first_line >= file->last_line) {
-      line = file->last_line;
-      ptr  = file->last_ptr;
+   // Index the line starts lazily so that lookups in any order are cheap
+   if (file->nlines == 0) {
+      file->maxlines = 256;
+      file->lines = xmalloc_array(file->maxlines, sizeof(const char *));
+      file->lines[file->nlines++] = file->linebuf;
    }
 
-   for (; line < loc->first_line; line++) {
-      if ((ptr = strchr(ptr, '\n')))
-         ptr++;
-      else
+   const unsigned want = loc->first_line > 1 ? loc->first_line : 1;
+   while (file->nlines < want) {
+      const char *nl = strchr(file->lines[file->nlines - 1], '\n');
+      if (nl == NULL)
          return NULL;
+
+      if (file->nlines == file->maxlines) {
+         file->maxlines *= 2;
+         file->lines = xrealloc_array(file->lines, file->maxlines,
+                                      sizeof(const char *));
+      }
+
+      file->lines[file->nlines++] = nl + 1;
    }
 
-   file->last_line = loc->first_line;
-   file->last_ptr  = ptr;
-
-   return ptr;
+   return file->lines[want - 1];
 }
 
 bool loc_eq(const loc_t *a, const loc_t *b)

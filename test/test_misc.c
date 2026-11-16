@@ -25,6 +25,7 @@
 #include "rt/copy.h"
 #include "rt/heap.h"
 #include "thread.h"
+#include "diag.h"
 #include "util.h"
 #include "stdint.h"
 
@@ -986,6 +987,27 @@ START_TEST(test_ilog2)
 }
 END_TEST
 
+START_TEST(test_loc_source)
+{
+   // Source lines can be looked up in any order
+   static const char text[] = "first\nsecond\nthird\nfourth\n";
+   const file_ref_t f = loc_file_ref("loc_source.txt", text);
+
+   const unsigned order[] = { 3, 1, 4, 2, 4, 1, 3 };
+   static const char *const want[] = { "first", "second", "third", "fourth" };
+   for (int i = 0; i < ARRAY_LEN(order); i++) {
+      const loc_t loc = get_loc(order[i], 0, order[i], 1, f);
+      const char *src = loc_get_source(&loc);
+      ck_assert_ptr_nonnull(src);
+      ck_assert_int_eq(strncmp(src, want[order[i] - 1],
+                               strlen(want[order[i] - 1])), 0);
+   }
+
+   const loc_t past = get_loc(9, 0, 9, 1, f);
+   ck_assert_ptr_null(loc_get_source(&past));
+}
+END_TEST
+
 Suite *get_misc_tests(void)
 {
    Suite *s = suite_create("misc");
@@ -1048,6 +1070,10 @@ Suite *get_misc_tests(void)
    tcase_add_test(tc_pool, test_cmp_bytes);
    tcase_add_test(tc_pool, test_copy2);
    suite_add_tcase(s, tc_copy);
+
+   TCase *tc_loc = tcase_create("loc");
+   tcase_add_test(tc_loc, test_loc_source);
+   suite_add_tcase(s, tc_loc);
 
    TCase *tc_math = tcase_create("math");
    tcase_add_test(tc_math, test_ilog2);
