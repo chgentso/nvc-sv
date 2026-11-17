@@ -491,9 +491,15 @@ static bool copy_bind_pred(vlog_node_t v, void *ctx)
    }
 }
 
+typedef struct {
+   vlog_node_t copy;
+   vlog_node_t body;
+} bind_ctx_t;
+
 static vlog_node_t fix_bind_ref_cb(vlog_node_t v, void *ctx)
 {
-   vlog_node_t copy = ctx;
+   const bind_ctx_t *bc = ctx;
+   vlog_node_t copy = bc->copy;
 
    if (vlog_kind(v) == V_PORT_CONN && (vlog_flags(v) & VLOG_F_WILDCARD)) {
       // Implicit connections are to the module the instance is bound to
@@ -530,6 +536,14 @@ static vlog_node_t fix_bind_ref_cb(vlog_node_t v, void *ctx)
       default:
          break;
       }
+   }
+
+   // Implicit nets declared in the target for the bound instance
+   const int nbody = vlog_decls(bc->body);
+   for (int i = 0; i < nbody; i++) {
+      vlog_node_t d = vlog_decl(bc->body, i);
+      if (vlog_kind(d) == V_NET_DECL && vlog_ident(d) == id)
+         vlog_set_ref(v, d);
    }
 
    return v;
@@ -631,15 +645,15 @@ static void add_bound_instances(vlog_node_t v, vlog_node_t mod,
             vlog_set_loc(ndt, vlog_loc(dt));
             vlog_set_type(nd, ndt);
 
-            vlog_add_decl(copy, nd);
             vlog_add_decl(v, nd);
          }
       }
 
+      bind_ctx_t bc = { copy, v };
       const int nstmts = vlog_stmts(b);
       for (int j = 0; j < nstmts; j++) {
          vlog_node_t c = vlog_copy(vlog_stmt(b, j), copy_bind_pred, NULL);
-         vlog_rewrite(c, NULL, fix_bind_ref_cb, copy);
+         vlog_rewrite(c, NULL, fix_bind_ref_cb, &bc);
          vlog_add_stmt(v, c);
       }
    }
