@@ -2883,3 +2883,5 @@ svreadmemhier1  verilog
 svpatparamhier1  verilog
 svbindimplicit1 verilog
 svbindimplicit2 verilog
+netlist11       shell
+netlist12       shell

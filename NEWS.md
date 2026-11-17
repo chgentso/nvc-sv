@@ -1,4 +1,5 @@
 ## Unreleased changes
+- `--netlist` writes an unpacked array (or a VHDL array of arrays or records) of more than 65536 bits as a Yosys style memory in the `memories` section of its module (`width`, `start_offset`, `size` and, for several dimensions, the attribute `dims`) instead of a list of bit numbers.  It has no entry in `netnames`, the pins of cells that would carry its bits are left out, and the cell has the attributes `memories_read`, `memories_written` or `memory_ports` (`port=memory`) instead.
 - An error that `--relaxed` would accept or downgrade to a warning now has the hint that says so in every case, and the JSON messages of `--messages=json` carry `"relaxable":true` for it so that tools can offer the option.
 - With `--relaxed`, an unconstrained port may have a default value such as `(others => '0')` which has no index range of its own: this gives a warning and the port takes the range of its actual.  An unconnected port with such a default is still an error.
 - The pins of a `--netlist` cell and the order of merged ranges no longer depend on memory addresses, so the output is the same for the same design from one build of `nvc` to the next.

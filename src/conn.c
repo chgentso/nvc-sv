@@ -2778,6 +2778,19 @@ static conn_net_t *add_vhdl_net(bctx_t *bc, tree_t decl, const char *prefix,
    if (n->record)
       vhdl_fields(cd, n, type);
 
+   if (type_is_array(type) && dimension_of(type) == 1
+       && (type_is_array(type_elem(type)) || type_is_record(type_elem(type)))) {
+      unsigned ew = 0;
+      dim_t d;
+      if (vhdl_width(cd, type_elem(type), &ew) && ew > 0
+          && vhdl_dim(cd, type, 0, &d)) {
+         n->mem.valid = true;
+         n->mem.elem_width = ew;
+         n->mem.nelems = n->width / ew;
+         n->mem.start = MIN(d.left, d.right);
+      }
+   }
+
    map_decl(cd, decl, n);
 
    if (cd->evidence)
@@ -2794,6 +2807,36 @@ static conn_dir_t vhdl_port_dir(tree_t p)
    case PORT_BUFFER: return CONN_OUT;
    default: return CONN_INOUT;
    }
+}
+
+static void vlog_memory_shape(conn_design_t *cd, conn_net_t *n,
+                              vlog_node_t decl)
+{
+   const unsigned nunpacked = vlog_ranges(decl);
+   if (nunpacked == 0)
+      return;
+
+   LOCAL_TEXT_BUF dims = tb_new();
+   uint64_t count = 1;
+   int64_t start = 0;
+   for (unsigned i = 0; i < nunpacked; i++) {
+      vlog_node_t r = vlog_range(decl, i);
+      count *= MAX(vlog_size(r), 1);
+
+      int64_t l, h;
+      if (vlog_subkind(r) != V_DIM_UNSIZED && vlog_bounds(r, &l, &h)) {
+         tb_printf(dims, "[%"PRIi64":%"PRIi64"]", l, h);
+         if (i == 0)
+            start = MIN(l, h);
+      }
+   }
+
+   n->mem.valid = true;
+   n->mem.nelems = count;
+   n->mem.start = start;
+   n->mem.elem_width = MAX(n->width / count, 1);
+   if (nunpacked > 1 && tb_len(dims) > 0)
+      n->mem.dims = dstr(cd, tb_get(dims));
 }
 
 static conn_net_t *add_vlog_net(bctx_t *bc, vlog_node_t decl,
@@ -2815,6 +2858,7 @@ static conn_net_t *add_vlog_net(bctx_t *bc, vlog_node_t decl,
    n->record = record;
    n->decl = decl;
    vlog_fields(cd, n, decl);
+   vlog_memory_shape(cd, n, decl);
 
    map_decl(cd, decl, n);
 
@@ -2955,6 +2999,7 @@ static void build_ports(bctx_t *bc, tree_t b, vlog_node_t body)
          n->left = xn->left;
          n->right = xn->right;
          n->record = xn->record;
+         n->mem = xn->mem;
          n->fields = xn->fields;
          n->nfields = xn->nfields;
          n->iface = true;
@@ -3349,6 +3394,7 @@ static void build_conns(bctx_t *bc, conn_inst_t *inst, tree_t cb, tree_t via)
          actual->left = n->left;
          actual->right = n->right;
          actual->record = n->record;
+         actual->mem = n->mem;
          actual->fields = n->fields;
          actual->nfields = n->nfields;
          actual->decl = n->decl;

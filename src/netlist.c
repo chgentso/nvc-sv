@@ -135,8 +135,39 @@ static void write_bits(FILE *f, const bit_t *bits, unsigned n)
    fputc(']', f);
 }
 
+// An unpacked array of more than this many bits in total is written as a
+// Yosys style memory, in the "memories" section of its module, instead of a
+// list of bit numbers: the bit list of a RAM of a few megabytes is hundreds
+// of megabytes of JSON.  Pins that would carry its bits are left out and the
+// cell has the attributes memories_read, memories_written or memory_ports.
+#define NETLIST_MEMORY_BITS 65536
+
+static bool is_memory(const conn_net_t *net)
+{
+   return net->mem.valid && net->width > NETLIST_MEMORY_BITS;
+}
+
+// Append NAME to a space-separated list unless it is there already
+static void mem_note(text_buf_t *tb, const char *name)
+{
+   const char *have = tb_get(tb);
+   const size_t n = strlen(name);
+   for (const char *p = have; (p = strstr(p, name)) != NULL; p += n) {
+      if ((p == have || p[-1] == ' ') && (p[n] == ' ' || p[n] == '\0'))
+         return;
+   }
+
+   if (tb_len(tb) > 0)
+      tb_append(tb, ' ');
+   tb_cat(tb, name);
+}
+
 static bit_t net_bit(wctx_t *w, const conn_net_t *net, unsigned pos)
 {
+   // A memory has no bits of its own
+   if (is_memory(net))
+      return w->next++;
+
    // Nets of other blocks cannot be connected within this module: they
    // are left unconnected rather than shared with an unrelated net
    unsigned idx = 0;
@@ -263,6 +294,7 @@ static char *range_label(const conn_net_t *net, unsigned lo, unsigned hi)
 typedef struct {
    char       *name;
    bool        output;
+   bool        hidden;   // A memory: no connection
    bit_list_t  bits;
 } pin_t;
 
@@ -332,6 +364,8 @@ static void write_cell(wctx_t *w, const char *name, const char *type,
    key(w, "port_directions");
    begin_obj(w);
    for (unsigned i = 0; i < pins->count; i++) {
+      if (pins->items[i].hidden)
+         continue;
       key(w, pins->items[i].name);
       json_string(w->f, pins->items[i].output ? "output" : "input");
    }
@@ -340,6 +374,8 @@ static void write_cell(wctx_t *w, const char *name, const char *type,
    key(w, "connections");
    begin_obj(w);
    for (unsigned i = 0; i < pins->count; i++) {
+      if (pins->items[i].hidden)
+         continue;
       key(w, pins->items[i].name);
       write_bits(w->f, pins->items[i].bits.items, pins->items[i].bits.count);
    }
@@ -586,6 +622,9 @@ static void write_process(wctx_t *w, const conn_proc_t *p)
       dnames = xcalloc_array(MAX(p->ndrives, 1), sizeof(char *));
    }
 
+   LOCAL_TEXT_BUF memr = tb_new();
+   LOCAL_TEXT_BUF memw = tb_new();
+
    for (unsigned i = 0; i < p->nreads + p->ndrives; i++) {
       const bool is_read = i < p->nreads;
       const conn_range_t *r = is_read
@@ -599,6 +638,11 @@ static void write_process(wctx_t *w, const conn_proc_t *p)
          tb_printf(hier, "%s%s.%s", is_read ? "" : "->",
                    r->net->block->name, l);
          free(l);
+         continue;
+      }
+
+      if (is_memory(r->net)) {
+         mem_note(is_read ? memr : memw, r->net->name);
          continue;
       }
 
@@ -622,12 +666,14 @@ static void write_process(wctx_t *w, const conn_proc_t *p)
       { "kind", proc_kind_string(p->kind) },
       { "hier", tb_len(hier) > 0 ? tb_get(hier) : NULL },
       { "cell", "$process" },
+      { "memories_read", tb_len(memr) > 0 ? tb_get(memr) : NULL },
+      { "memories_written", tb_len(memw) > 0 ? tb_get(memw) : NULL },
    };
    evid_t evid = { .ev = p->ev, .proc = p, .rnames = rnames,
                    .dnames = dnames };
 
    // The label is the cell type as that is what is drawn inside the box
-   write_cell(w, name, label, &pins, src, label, attrs, 3, p->approx,
+   write_cell(w, name, label, &pins, src, label, attrs, 5, p->approx,
               w->evidence && p->ev != NULL ? &evid : NULL);
    free(src);
    free_pins(&pins);
@@ -644,8 +690,13 @@ static void write_expr_cell(wctx_t *w, const conn_seg_t *s, const char *src,
    // formal through pin A and drives the nets.
    pin_list_t pins = AINIT;
 
+   LOCAL_TEXT_BUF memr = tb_new();
    for (unsigned i = 0; i < s->nreads; i++) {
       const conn_range_t *r = &(s->reads[i]);
+      if (is_memory(r->net)) {
+         mem_note(memr, r->net->name);
+         continue;
+      }
       add_pin(&pins, range_label(r->net, r->lo, r->hi), reverse);
       net_bits(w, r->net, r->lo, r->hi, &(pins.items[pins.count - 1].bits));
    }
@@ -656,9 +707,13 @@ static void write_expr_cell(wctx_t *w, const conn_seg_t *s, const char *src,
 
    char *base = xasprintf("expr#%u", ++*serial);
    char *name = unique_name(w, base);
-   attr_t attrs[] = { { "expr", s->text }, { "cell", "$expr" } };
+   attr_t attrs[] = {
+      { "expr", s->text },
+      { "cell", "$expr" },
+      { "memories_read", tb_len(memr) > 0 ? tb_get(memr) : NULL },
+   };
    char *type = short_text(s->text);
-   write_cell(w, name, type, &pins, src, s->text, attrs, 2, false, NULL);
+   write_cell(w, name, type, &pins, src, s->text, attrs, 3, false, NULL);
    free(type);
    free(base);
    free_pins(&pins);
@@ -701,7 +756,8 @@ static void write_user_attrs(wctx_t *w, const conn_attr_t *attrs,
    static const char *const reserved[] = {
       "src", "record", "interface", "field", "language", "unit", "top",
       "blackbox", "inferred_ports", "approx", "label", "kind", "hier", "cell",
-      "expr", "conversions",
+      "expr", "conversions", "memories_read", "memories_written",
+      "memory_ports",
    };
 
    for (unsigned i = 0; i < n; i++) {
@@ -835,9 +891,33 @@ static void write_instance(wctx_t *w, const conn_inst_t *inst,
    const conn_block_t *child = inst->child;
    pin_list_t pins = AINIT;
    char *src = src_string(inst->src, inst->line);
+   LOCAL_TEXT_BUF mports = tb_new();
 
    for (unsigned i = 0; i < child->nports; i++) {
       conn_net_t *formal = child->nets[i];
+
+      if (is_memory(formal)) {
+         // No bits: the actual, if a memory, is named in memory_ports
+         add_pin(&pins, xstrdup(formal->name), formal->dir == CONN_OUT);
+         pins.items[pins.count - 1].hidden = true;
+
+         for (unsigned j = 0; j < inst->nconns; j++) {
+            const conn_pconn_t *c = &(inst->conns[j]);
+            if (c->formal != formal || c->nsegs == 0
+                || c->segs[0].kind != CONN_SEG_NET
+                || !is_memory(c->segs[0].range.net))
+               continue;
+
+            char *pn = pin_name(xstrdup(formal->name));
+            const char *mn = c->segs[0].range.net->name;
+            char *e = xasprintf("%s=%s", pn, mn);
+            mem_note(mports, e);
+            free(e);
+            free(pn);
+            break;
+         }
+         continue;
+      }
 
       bit_t *byposition = xmalloc_array(formal->width, sizeof(bit_t));
       for (unsigned p = 0; p < formal->width; p++)
@@ -929,6 +1009,8 @@ static void write_instance(wctx_t *w, const conn_inst_t *inst,
    }
    if (tb_len(convs) > 0)
       write_attr_str(w, "conversions", tb_get(convs));
+   if (tb_len(mports) > 0)
+      write_attr_str(w, "memory_ports", tb_get(mports));
    end_obj(w);
 
    write_params(w, child);
@@ -937,6 +1019,8 @@ static void write_instance(wctx_t *w, const conn_inst_t *inst,
    key(w, "port_directions");
    begin_obj(w);
    for (unsigned i = 0; i < child->nports; i++) {
+      if (pins.items[i].hidden)
+         continue;
       key(w, pins.items[i].name);
       json_string(w->f, dir_string(child->nets[i]->dir));
    }
@@ -945,6 +1029,8 @@ static void write_instance(wctx_t *w, const conn_inst_t *inst,
    key(w, "connections");
    begin_obj(w);
    for (unsigned i = 0; i < child->nports; i++) {
+      if (pins.items[i].hidden)
+         continue;
       key(w, pins.items[i].name);
       write_bits(w->f, pins.items[i].bits.items, pins.items[i].bits.count);
    }
@@ -958,6 +1044,44 @@ static void write_instance(wctx_t *w, const conn_inst_t *inst,
 
 static bool hidden_interface(const conn_block_t *b);
 
+static void write_memories(wctx_t *w, const conn_block_t *b)
+{
+   bool any = false;
+   for (unsigned i = 0; i < b->nnets; i++) {
+      const conn_net_t *n = b->nets[i];
+      if (!is_memory(n))
+         continue;
+
+      if (!any) {
+         key(w, "memories");
+         begin_obj(w);
+         any = true;
+      }
+
+      key(w, n->name);
+      begin_obj(w);
+      key(w, "hide_name");
+      fputs("0", w->f);
+      key(w, "attributes");
+      begin_obj(w);
+      char *nsrc = src_string(n->src, n->line);
+      write_attr_str(w, "src", nsrc);
+      free(nsrc);
+      write_attr_str(w, "dims", n->mem.dims);
+      end_obj(w);
+      key(w, "width");
+      fprintf(w->f, "%u", n->mem.elem_width);
+      key(w, "start_offset");
+      fprintf(w->f, "%"PRIi64, n->mem.start);
+      key(w, "size");
+      fprintf(w->f, "%"PRIu64, n->mem.nelems);
+      end_obj(w);
+   }
+
+   if (any)
+      end_obj(w);
+}
+
 static void write_module(wctx_t *w, conn_block_t *b, bool is_top)
 {
    w->block = b;
@@ -967,7 +1091,8 @@ static void write_module(wctx_t *w, conn_block_t *b, bool is_top)
 
    for (unsigned i = 0; i < b->nnets; i++) {
       w->base[i] = w->next;
-      w->next += b->nets[i]->width;
+      if (!is_memory(b->nets[i]))
+         w->next += b->nets[i]->width;
    }
 
    // A black box is a module of the name of the missing unit, which all its
@@ -1012,9 +1137,14 @@ static void write_module(wctx_t *w, conn_block_t *b, bool is_top)
       write_attr_str(w, "direction", dir_string(n->dir));
       key(w, "bits");
       bit_list_t bits = AINIT;
-      net_bits(w, n, 0, n->width - 1, &bits);
+      if (!is_memory(n))
+         net_bits(w, n, 0, n->width - 1, &bits);
       write_bits(w->f, bits.items, bits.count);
       ACLEAR(bits);
+      if (is_memory(n)) {
+         key(w, "memory");
+         fputs("1", w->f);
+      }
       end_obj(w);
    }
    end_obj(w);
@@ -1037,10 +1167,14 @@ static void write_module(wctx_t *w, conn_block_t *b, bool is_top)
 
    end_obj(w);
 
+   write_memories(w, b);
+
    key(w, "netnames");
    begin_obj(w);
    for (unsigned i = 0; i < b->nnets; i++) {
       conn_net_t *n = b->nets[i];
+      if (is_memory(n))
+         continue;
       key(w, n->name);
       begin_obj(w);
       key(w, "hide_name");

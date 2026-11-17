@@ -86,6 +86,16 @@ typedef struct {
    unsigned    lo, hi;     // Bit positions in the net
 } conn_field_t;
 
+// Shape of a net that is an unpacked array (a memory) or an array of
+// arrays or records in VHDL
+typedef struct {
+   bool        valid;
+   unsigned    elem_width;   // Bits per element
+   int64_t     start;        // Lowest index of the first dimension
+   uint64_t    nelems;       // Product of the unpacked dimensions
+   const char *dims;         // "[a:b][c:d]" or NULL
+} conn_mem_t;
+
 struct _conn_net {
    const char   *name;      // Name in block, with generate prefix
    unsigned      id;        // Creation order, unique in the design
@@ -107,6 +117,7 @@ struct _conn_net {
    unsigned      line;
    conn_attr_t  *attrs;     // Attributes (evidence only)
    unsigned      nattrs;
+   conn_mem_t    mem;       // Memory-like shape, see netlist.c
 };
 
 typedef enum {
