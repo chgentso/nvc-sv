@@ -1842,6 +1842,8 @@ void fstWriterFlushContext(fstWriterContext *xc)
 }
 
 /*
+ * Local addition in nvc, not part of upstream fstapi.
+ *
  * write a complete, readable snapshot of the dump so far to a new file,
  * leaving the writer unchanged: the value change blocks written until now,
  * followed by the geometry and hierarchy sections, as at close

@@ -425,6 +425,8 @@ void fstWriterEmitVariableLengthValueChange(fstWriterContext *ctx,
                                             uint32_t len);
 void fstWriterEmitTimeChange(fstWriterContext *ctx, uint64_t tim);
 void fstWriterFlushContext(fstWriterContext *ctx);
+/* Local addition in nvc, not in upstream fstapi: write a readable snapshot
+ * of the dump so far to a new file without closing the writer */
 int fstWriterSnapshot(fstWriterContext *ctx, const char *snapshot_name);
 int fstWriterGetDumpSizeLimitReached(fstWriterContext *ctx);
 int fstWriterGetFseekFailed(fstWriterContext *ctx);
