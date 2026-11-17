@@ -597,6 +597,45 @@ static void add_bound_instances(vlog_node_t v, vlog_node_t mod,
       if (vlog_ident2(b) != vlog_ident(mod) || !bind_matches_instance(b))
          continue;
 
+      // A name used in a port connection of the bound instance and not
+      // declared in the target is an implicit net there (6.10)
+      const int nbdecls = vlog_decls(b);
+      for (int j = 0; j < nbdecls; j++) {
+         vlog_node_t d = vlog_decl(b, j);
+         if (vlog_kind(d) != V_NET_DECL || !vlog_has_type(d))
+            continue;
+
+         vlog_node_t dt = vlog_type(d);
+         if (vlog_kind(dt) != V_DATA_TYPE
+             || !(vlog_flags(dt) & VLOG_F_IMPLICIT_NET))
+            continue;
+
+         ident_t name = vlog_ident(d);
+         bool exists = false;
+         for (int k = 0; k < vlog_ports(copy) && !exists; k++)
+            exists = vlog_ident(vlog_port(copy, k)) == name;
+         for (int k = 0; k < vlog_decls(copy) && !exists; k++) {
+            vlog_node_t o = vlog_decl(copy, k);
+            exists = vlog_has_ident(o) && vlog_ident(o) == name;
+         }
+
+         if (!exists) {
+            vlog_node_t nd = vlog_new(V_NET_DECL);
+            vlog_set_ident(nd, name);
+            vlog_set_loc(nd, vlog_loc(d));
+            vlog_set_subkind(nd, vlog_subkind(d));
+
+            vlog_node_t ndt = vlog_new(V_DATA_TYPE);
+            vlog_set_subkind(ndt, vlog_subkind(dt));
+            vlog_set_flags(ndt, vlog_flags(dt));
+            vlog_set_loc(ndt, vlog_loc(dt));
+            vlog_set_type(nd, ndt);
+
+            vlog_add_decl(copy, nd);
+            vlog_add_decl(v, nd);
+         }
+      }
+
       const int nstmts = vlog_stmts(b);
       for (int j = 0; j < nstmts; j++) {
          vlog_node_t c = vlog_copy(vlog_stmt(b, j), copy_bind_pred, NULL);

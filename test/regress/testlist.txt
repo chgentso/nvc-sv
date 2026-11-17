@@ -2881,3 +2881,5 @@ svtypeparamgen1  verilog
 svdrivepow1  verilog
 svreadmemhier1  verilog
 svpatparamhier1  verilog
+svbindimplicit1 verilog
+svbindimplicit2 verilog
