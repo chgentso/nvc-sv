@@ -24345,6 +24345,15 @@ static void p_module_or_generate_item_1(vlog_node_t mod)
    case tDEFAULT:
       p_module_common_item(mod);
       break;
+   case tBEGIN:
+      {
+         // A generate block may appear directly as a module item (27.3)
+         const unsigned saved_construct = gen_construct;
+         gen_construct = ++gen_constructs;
+         vlog_add_stmt(mod, p_generate_block());
+         gen_construct = saved_construct;
+      }
+      break;
    case tPULLDOWN:
    case tPULLUP:
    case tAND:
@@ -24564,6 +24573,7 @@ static void p_non_port_module_item(vlog_node_t mod)
    case tLOCALPARAM:
    case tPARAMETER:
    case tEVENT:
+   case tBEGIN:
    case tIF:
    case tCASE:
    case tFOR:
