@@ -447,6 +447,8 @@ static void build_sensitivity(vlog_node_t ctrl, vlog_node_t v, hset_t *set,
    }
 }
 
+static hset_t *implicit_timing;
+
 static vlog_node_t simp_timing(vlog_node_t v)
 {
    vlog_node_t ctrl = vlog_value(v);
@@ -458,7 +460,10 @@ static vlog_node_t simp_timing(vlog_node_t v)
       for (int i = 0; i < nstmts; i++)
          build_sensitivity(ctrl, vlog_stmt(v, i), set, false);
 
-      if (vlog_params(ctrl) == 0)
+      // An always_comb or always_latch with nothing in its implicit
+      // sensitivity list still runs once at time zero (1800-2017 9.2.2.2)
+      if (vlog_params(ctrl) == 0
+          && (implicit_timing == NULL || !hset_contains(implicit_timing, v)))
          warn_at(vlog_loc(v), "timing statement has no sensitivities and "
                  "so will never trigger");
 
@@ -488,6 +493,12 @@ static vlog_node_t simp_always(vlog_node_t v)
          vlog_node_t timing = vlog_new(V_TIMING);
          vlog_set_loc(timing, vlog_loc(v));
          vlog_set_value(timing, ctrl);
+
+         if (vlog_params(ctrl) == 0) {
+            if (implicit_timing == NULL)
+               implicit_timing = hset_new(16);
+            hset_insert(implicit_timing, timing);
+         }
 
          vlog_node_t b = vlog_new(V_SEQ_BLOCK);
          vlog_set_loc(b, vlog_loc(v));

@@ -1,0 +1,2 @@
+comb 0
+latch 0
