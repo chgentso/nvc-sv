@@ -1453,8 +1453,8 @@ START_TEST(test_mixed1)
    input_from_file(TESTDIR "/elab/mixed1.vhd");
 
    const error_t expect[] = {
-      { 23, "missing matching VHDL port declaration for Verilog port 'two' "
-        "in component MOD1" },
+      { 23, "missing matching VHDL port declaration for Verilog input port "
+        "'two' in component MOD1 which has no default value" },
       { 37, "port FOUR not found in Verilog module 'mod1'" },
       { 48, "cannot connect VHDL signal with type BIT to Verilog output "
         "port 'three'" },

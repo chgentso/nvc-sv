@@ -709,10 +709,27 @@ static tree_t elab_mixed_binding(tree_t comp, const elab_instance_t *ei)
       }
 
       if (cport == NULL) {
-         error_at(tree_loc(comp), "missing matching VHDL port declaration for "
-                  "Verilog port %pQ in component %pI", vlog_ident(mport),
-                  tree_ident(comp));
-         return NULL;
+         // As for the default binding of a component to an entity
+         // (LRM 08 section 7.3.3) the port is left unassociated if
+         // that is legal: outputs and inouts are open and an input
+         // must have a default value
+         const v_port_kind_t odir = vlog_subkind(mport);
+         if (odir == V_PORT_INPUT && !tree_has_value(vport)) {
+            error_at(tree_loc(comp), "missing matching VHDL port declaration "
+                     "for Verilog input port %pQ in component %pI which has "
+                     "no default value", vlog_ident(mport), tree_ident(comp));
+            return NULL;
+         }
+         else if (odir != V_PORT_INPUT && odir != V_PORT_OUTPUT
+                  && odir != V_PORT_INOUT) {
+            error_at(tree_loc(comp), "only input, output, and inout ports "
+                     "are supported for mixed language instantiation");
+            return NULL;
+         }
+
+         // Later associations cannot be positional
+         have_named = true;
+         continue;
       }
 
       const v_port_kind_t mdir = vlog_subkind(mport);
