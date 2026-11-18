@@ -2894,3 +2894,5 @@ vlogbareblk1    verilog
 vlogdelaybase1  verilog
 mixed56         mixed,2008
 mixed58         mixed,2008
+mixed59         mixed,2008
+mixed60         mixed,2008

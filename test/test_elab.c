@@ -1460,8 +1460,9 @@ START_TEST(test_mixed1)
         "port 'three'" },
       { 56, "missing matching VHDL generic declaration for Verilog parameter "
         "'g1' with no default value in component MOD1" },
-      { 67, "generic G1 should have type INTEGER, BOOLEAN, an enumeration "
-        "type, or a bit vector to match corresponding Verilog parameter" },
+      { 67, "generic G1 should have type INTEGER, BOOLEAN, REAL, an "
+        "enumeration type, or a bit vector to match corresponding Verilog "
+        "parameter 'g1' of untyped type" },
       { 79, "generic G2 not found in Verilog module 'mod1'" },
       { 93, "VHDL port direction IN does not match corresponding Verilog "
         "port 'three' which is declared as output" },
@@ -2162,6 +2163,30 @@ START_TEST(test_mixed2)
 }
 END_TEST
 
+START_TEST(test_mixed3)
+{
+   input_from_file(TESTDIR "/elab/mixed3.v");
+
+   analyse_file();
+
+   input_from_file(TESTDIR "/elab/mixed3.vhd");
+
+   // Reported once for the component rather than for each instance
+   const error_t expect[] = {
+      { 10, "generic P should have type INTEGER, BOOLEAN, REAL, an "
+        "enumeration type, or a bit vector to match corresponding Verilog "
+        "parameter 'P' of real type" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   tree_t e = run_elab();
+   fail_unless(e == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
 START_TEST(test_vlogshim1)
 {
    set_standard(STD_08);
@@ -2706,6 +2731,7 @@ Suite *get_elab_tests(void)
    tcase_add_test(tc, test_issue1204);
    tcase_add_test(tc, test_clone1);
    tcase_add_test(tc, test_mixed2);
+   tcase_add_test(tc, test_mixed3);
    tcase_add_test(tc, test_vlogshim1);
    tcase_add_test(tc, test_shimentity);
    tcase_add_test(tc, test_clone2);

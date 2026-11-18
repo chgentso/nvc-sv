@@ -5770,6 +5770,42 @@ static void elab_verilog_sub_blocks(vlog_node_t v, const elab_ctx_t *ctx)
    }
 }
 
+static void elab_mixed_bad_generic(tree_t cg, vlog_node_t d)
+{
+   // Report once per generic of the component rather than for every
+   // instance
+   static hash_t *reported = NULL;
+   if (reported == NULL)
+      reported = hash_new(16);
+
+   if (hash_get(reported, cg) != NULL)
+      return;
+
+   hash_put(reported, cg, cg);
+
+   const char *vkind = "untyped";
+   vlog_node_t pdt = vlog_type(d);
+   if (vlog_kind(pdt) == V_DATA_TYPE) {
+      switch (vlog_subkind(pdt)) {
+      case DT_IMPLICIT: vkind = "untyped"; break;
+      case DT_REAL: vkind = "real"; break;
+      case DT_REALTIME: vkind = "realtime"; break;
+      case DT_SHORTREAL: vkind = "shortreal"; break;
+      case DT_STRING: vkind = "string"; break;
+      case DT_TIME: vkind = "time"; break;
+      case DT_INTEGER: vkind = "integer"; break;
+      default: vkind = "integral"; break;
+      }
+   }
+   else
+      vkind = "user-defined type";
+
+   error_at(tree_loc(cg), "generic %pI should have type INTEGER, BOOLEAN, "
+            "REAL, an enumeration type, or a bit vector to match "
+            "corresponding Verilog parameter %pQ of %s type",
+            tree_ident(cg), vlog_ident(d), vkind);
+}
+
 static vlog_node_t elab_mixed_generics(tree_t comp, vlog_node_t mod,
                                        const elab_ctx_t *ctx)
 {
@@ -5820,6 +5856,15 @@ static vlog_node_t elab_mixed_generics(tree_t comp, vlog_node_t mod,
 
       type_t ctype = tree_type(cg);
 
+      if (!type_is_real(ctype) && !type_is_integer(ctype)
+          && !type_eq(ctype, std_type(NULL, STD_BOOLEAN))
+          && !elab_is_enum_generic(ctype)
+          && !type_eq(ctype, std_type(NULL, STD_STRING))
+          && !elab_is_vector_generic(ctype)) {
+         elab_mixed_bad_generic(cg, d);
+         return NULL;
+      }
+
       tree_t value = find_generic_map(ctx->out, cpos, cg);
       if (value == NULL)
          fatal_at(tree_loc(ctx->out), "cannot get value of generic %pI",
@@ -5844,7 +5889,15 @@ static vlog_node_t elab_mixed_generics(tree_t comp, vlog_node_t mod,
       number_t n;
       int64_t ival;
       bool bval;
-      if (type_eq(ctype, std_type(NULL, STD_INTEGER))) {
+      double dval;
+      vlog_node_t num = NULL;
+      if (type_is_real(ctype) && folded_real(value, &dval)) {
+         // The assignment to the parameter converts a real value to its
+         // type with rounding and an untyped parameter takes the real type
+         num = vlog_new(V_REAL);
+         vlog_set_dval(num, dval);
+      }
+      else if (type_eq(ctype, std_type(NULL, STD_INTEGER))) {
          const int64_t ival = assume_int(value);
 
          vlog_node_t pdt = vlog_type(d);
@@ -5907,14 +5960,14 @@ static vlog_node_t elab_mixed_generics(tree_t comp, vlog_node_t mod,
          n = number_new(tb_get(tb), tree_loc(cg));
       }
       else {
-         error_at(tree_loc(cg), "generic %pI should have type INTEGER, "
-                  "BOOLEAN, an enumeration type, or a bit vector to match "
-                  "corresponding Verilog parameter", tree_ident(cg));
+         elab_mixed_bad_generic(cg, d);
          return NULL;
       }
 
-      vlog_node_t num = vlog_new(V_NUMBER);
-      vlog_set_number(num, n);
+      if (num == NULL) {
+         num = vlog_new(V_NUMBER);
+         vlog_set_number(num, n);
+      }
 
       vlog_node_t pa = vlog_new(V_PARAM_ASSIGN);
       vlog_set_value(pa, num);
