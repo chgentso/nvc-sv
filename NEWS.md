@@ -1,3 +1,10 @@
+## nvc-sv 0.16.0
+- The program is now called `nvc-sv` and the toolchain has its own version, 0.16.0, reported first by `--version`: `nvc-sv 0.16.0 (based on nvc 1.24-devel)`.  When started through a link called `nvc` the first line is `nvc 1.24-devel (nvc-sv 0.16.0)`, as tools that parse the upstream format expect.
+- The installed files are in `lib/nvc-sv`, `libexec/nvc-sv`, `share/nvc-sv` and `include/nvc-sv` (with `nvc-sv.pc`, `nvc-sv.1` and the completion script `nvc-sv`), so nvc-sv does not share any file with an upstream nvc and both can be installed in one prefix.  The user libraries of `--install` are now in `~/.nvc-sv/lib`: libraries installed by an earlier version in `~/.nvc/lib` are not used and must be installed again.
+- An installed tree can be copied to another place: the libraries, scripts and data are found relative to the program (`../lib/nvc-sv`, `../lib64/nvc-sv`, `../libexec/nvc-sv`, `../share/nvc-sv`) before the directories chosen when it was configured.
+- Each variable `NVC_<NAME>` can also be set as `NVC_SV_<NAME>`, which wins when both are set.  Models reading the environment with `std.env.getenv` see the real variables.
+- Crash reports point to the issue tracker of this fork.
+
 ## Unreleased changes
 - `--netlist` writes an unpacked array (or a VHDL array of arrays or records) of more than 65536 bits as a Yosys style memory in the `memories` section of its module (`width`, `start_offset`, `size` and, for several dimensions, the attribute `dims`) instead of a list of bit numbers.  It has no entry in `netnames`, the pins of cells that would carry its bits are left out, and the cell has the attributes `memories_read`, `memories_written` or `memory_ports` (`port=memory`) instead.
 - An error that `--relaxed` would accept or downgrade to a warning now has the hint that says so in every case, and the JSON messages of `--messages=json` carry `"relaxable":true` for it so that tools can offer the option.

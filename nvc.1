@@ -2454,6 +2454,16 @@ returned by
 contains the name of the tool followed by the plusargs given on the
 command line.
 .Sh ENVIRONMENT
+Each variable below named
+.Ev NVC_<NAME>
+may also be set as
+.Ev NVC_SV_<NAME> ,
+which takes precedence when both are set.
+Libraries installed with
+.Fl \-install
+are placed in
+.Pa $HOME/.nvc-sv/lib
+by default.
 .Bl -tag -width "NVC_CONCURRENT_JOBS"
 .It Ev NVC_CONCURRENT_JOBS
 Provides a hint for the number of concurrently executing simulations.

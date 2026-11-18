@@ -1,7 +1,43 @@
-### Synopsis
+# nvc-sv
 
-[![Build Status](https://github.com/nickg/nvc/actions/workflows/build-test.yml/badge.svg?branch=master&event=push)](https://github.com/nickg/nvc/actions)
-[![Coverage Status](https://coveralls.io/repos/github/nickg/nvc/badge.svg?branch=master)](https://coveralls.io/github/nickg/nvc?branch=master)
+nvc-sv is a fork of the [NVC](https://github.com/nickg/nvc) VHDL compiler
+and simulator that adds SystemVerilog support, including enough of the
+language and its libraries to run UVM test benches, next to the VHDL
+simulator.  It is based on nvc 1.24-devel; the version of the toolchain
+is 0.16.0 (`nvc-sv --version` prints `nvc-sv 0.16.0 (based on nvc 1.24-devel)`).
+
+What differs from upstream nvc:
+
+- SystemVerilog and UVM, mixed freely with VHDL in one design, plus the
+  VPI/VHPI extensions, lint, netlist and scan commands described in
+  [NEWS.md](NEWS.md) and the manual.
+- The program is called `nvc-sv`, so it can be installed next to an
+  upstream nvc, even in the same prefix.  Its files live in `lib/nvc-sv`,
+  `libexec/nvc-sv`, `share/nvc-sv` and `include/nvc-sv`, the manual page
+  is `nvc-sv(1)` and the pkg-config file is `nvc-sv.pc`.  An installed tree
+  can be moved: the program finds its libraries relative to itself.
+- Libraries installed with `nvc-sv --install` go to `~/.nvc-sv/lib`, not
+  `~/.nvc/lib`.
+- Every environment variable `NVC_<NAME>` may also be given as
+  `NVC_SV_<NAME>`, which takes precedence.
+- When the program is started through a link called `nvc`, `--version`
+  prints the upstream format (`nvc 1.24-devel (nvc-sv 0.16.0)`) so that
+  tools that parse it, such as VUnit and cocotb, keep working.  The build
+  tree contains such a link, `bin/nvc`.
+
+The VS Code extension and the debugger, language server and waveform
+viewer integration are developed separately; binary releases are listed
+on the Releases page of this repository.  How upstream changes are merged
+is described in [MERGING.md](MERGING.md).
+
+To build, follow the instructions under "Installing" below, using the
+branch `nvc-sv` of this repository; the executable is `bin/nvc-sv` in the
+build directory.  The upstream text below describes `nvc`: read it with
+`nvc-sv` for the program name and the library folder above.
+
+## Upstream README
+
+### Synopsis
 
 NVC is a [VHDL](https://en.wikipedia.org/wiki/VHDL) compiler and
 simulator.
