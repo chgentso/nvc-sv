@@ -103,6 +103,7 @@ static token_t cstring_end(void);
 static void cstring_append(const char *text);
 
 static int last_token = -1;
+static bool delay_before_base = false;
 static int comment_caller = 0;
 static int string_caller = 0;
 static bool in_psl_comment = false;
@@ -621,6 +622,10 @@ PROTECT           ?i:protect
 <*>"["                   { TOKEN(tLSQUARE); }
 <*>"]"                   { TOKEN(tRSQUARE); }
 <*>"="                   { TOKEN(tEQ); }
+<VLOG>"#"/{SPACE}*{INTEGER}{SPACE}+\'[sS]?[bhdoBHDO]  {
+                           delay_before_base = true;
+                           TOKEN(tHASH);
+                         }
 <*>"#"                   { TOKEN(tHASH); }
 <*>"~"                   { TOKEN(tTILDE); }
 <*>"^"                   { TOKEN(tCARET); }
@@ -1017,7 +1022,20 @@ PROTECT           ?i:protect
 <VLOG>{VLOG_ESCAPED}     { yylval.ident = ident_new(yytext + 1); return tID; }
 <VLOG>{INTEGER}          { yylval.str = xstrdup(yytext); return tUNSNUM; }
 <VLOG>{TIME_LITERAL}     { yylval.str = xstrdup(yytext); return tTIMELIT; }
-<VLOG>{VLOG_NUMBER}      { yylval.str = xstrdup(yytext); return tNUMBER; }
+<VLOG>{VLOG_NUMBER}      { if (delay_before_base) {
+                              // The size of a number is never the delay
+                              // that precedes an unsized number
+                              delay_before_base = false;
+                              int len = 0;
+                              while (isdigit((unsigned char)yytext[len])
+                                     || yytext[len] == '_')
+                                 len++;
+                              yyless(len);
+                              yylval.str = xstrdup(yytext);
+                              return tUNSNUM;
+                           }
+                           yylval.str = xstrdup(yytext);
+                           return tNUMBER; }
 <VLOG>\'[01xXzZ]         { yylval.str = xstrdup(yytext); return tNUMBER; }
 <VLOG>{VLOG_REAL}        { return parse_verilog_real(yytext); };
 <VLOG>{PAREN_STAR}       { return tPARENSTAR; }
@@ -1587,6 +1605,7 @@ static int verilog_keyword(int token, vlog_version_t vers)
 void reset_scanner(void)
 {
    last_token = -1;
+   delay_before_base = false;
    comment_caller = 0;
    in_psl_comment = false;
    preserve_case = opt_get_int(OPT_PRESERVE_CASE);
@@ -1613,6 +1632,7 @@ void push_scanner(void)
    yypush_buffer_state(yy_create_buffer(NULL, YY_BUF_SIZE));
 
    last_token = -1;
+   delay_before_base = false;
    comment_caller = 0;
    string_caller = 0;
    in_psl_comment = false;
