@@ -1,4 +1,4 @@
-EXTRA_DIST = autogen.sh nvc.1 README.md NEWS.md THANKS.md
+EXTRA_DIST = autogen.sh nvc.1 README.md NEWS.md THANKS.md FORK.md
 
 ACLOCAL_AMFLAGS = -I m4
 

@@ -4,13 +4,25 @@ nvc-sv is a fork of the [NVC](https://github.com/nickg/nvc) VHDL compiler
 and simulator that adds SystemVerilog support, including enough of the
 language and its libraries to run UVM test benches, next to the VHDL
 simulator.  It is based on nvc 1.24-devel; the version of the toolchain
-is 0.16.0 (`nvc-sv --version` prints `nvc-sv 0.16.0 (based on nvc 1.24-devel)`).
+is 0.16.0 (the first line of `nvc-sv --version` starts with
+`nvc-sv 0.16.0 (based on nvc 1.24-devel)`).
 
-What differs from upstream nvc:
+What nvc-sv adds over nvc:
 
-- SystemVerilog and UVM, mixed freely with VHDL in one design, plus the
-  VPI/VHPI extensions, lint, netlist and scan commands described in
-  [NEWS.md](NEWS.md) and the manual.
+- SystemVerilog, including classes, interfaces, constrained random and
+  assertions, and UVM 1.2 (a precompiled library is bundled).
+- Mixed VHDL and Verilog designs, with one hierarchy.
+- DPI-C, an extended VPI and several VHPI/VPI plugins.
+- SVA and PSL, code coverage for Verilog and mixed designs, lint, a
+  schematic netlist writer (Yosys JSON), `--scan` and `--symbols` for
+  editors, and hooks for debuggers and the Surfer waveform viewer.
+- A Windows x64 port (MSYS2).
+
+The full list is in [FORK.md](FORK.md).  Known limits are in
+[TODO.md](TODO.md) and the changes of each version in [NEWS.md](NEWS.md).
+
+Naming, environment and folders:
+
 - The program is called `nvc-sv`, so it can be installed next to an
   upstream nvc, even in the same prefix.  Its files live in `lib/nvc-sv`,
   `libexec/nvc-sv`, `share/nvc-sv` and `include/nvc-sv`, the manual page
@@ -25,9 +37,14 @@ What differs from upstream nvc:
   tools that parse it, such as VUnit and cocotb, keep working.  The build
   tree contains such a link, `bin/nvc`.
 
-The VS Code extension and the debugger, language server and waveform
-viewer integration are developed separately; binary releases are listed
-on the Releases page of this repository.  How upstream changes are merged
+The folder table is in [FORK.md](FORK.md).
+
+The VS Code extension, language server and debug adapter are in
+[nvc-sv-ide](https://gitlab.com/cgentsos/nvc-sv-ide).  The waveform
+viewer is the [Surfer fork](https://gitlab.com/cgentsos/surfer).
+Downloads are published at
+[nvc-sv-packaging](https://gitlab.com/cgentsos/nvc-sv-packaging), not on
+the Releases page of this repository.  How upstream changes are merged
 is described in [MERGING.md](MERGING.md).
 
 To build, follow the instructions under "Installing" below, using the
