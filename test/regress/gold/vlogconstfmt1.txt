@@ -1,0 +1,2 @@
+vlogconstfmt1.u1 12-ab-ab-0101-    7|00ff
+vlogconstfmt1.u2 12-ab-ab-0101-    7|00ff

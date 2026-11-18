@@ -2896,3 +2896,4 @@ mixed56         mixed,2008
 mixed58         mixed,2008
 mixed59         mixed,2008
 mixed60         mixed,2008
+vlogconstfmt1   verilog,gold,2019

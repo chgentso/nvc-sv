@@ -271,7 +271,17 @@ static fold_state_t get_fold_state(vlog_node_t v, fold_ctx_t *ctx)
          // and 20.6.3 for $isunbounded
          switch (vlog_subkind(v)) {
          case V_SYSTF_NONE:
-            if (vlog_ident(v) != ident_new("$isunbounded")) {
+            if (vlog_is_sformatf(vlog_ident(v))) {
+               // Formatting constant arguments is a constant expression
+               // but the result, for example the hierarchical name of
+               // a %m, is only known when the instance is lowered
+               fold_state_t state = FOLD_CONST;
+               const int nparams = vlog_params(v);
+               for (int i = 0; i < nparams; i++)
+                  state = MAX(state, get_fold_state(vlog_param(v, i), ctx));
+               return state == FOLD_CONST ? FOLD_LATER : state;
+            }
+            else if (vlog_ident(v) != ident_new("$isunbounded")) {
                ctx->nonconst = v;
                return FOLD_NON_CONST;
             }
