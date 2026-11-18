@@ -20512,6 +20512,12 @@ static vlog_node_t p_generate_block(void)
    return b;
 }
 
+static void declare_gen_block(vlog_node_t b)
+{
+   // The name of a generate block is declared in the enclosing scope
+   vlog_symtab_put(symtab, b);
+}
+
 static bool gen_literal(vlog_node_t v, int64_t *value)
 {
    // A number which is not the value of a parameter that can be overridden
@@ -20678,6 +20684,17 @@ static vlog_node_t p_conditional_generate_construct(void)
       should_not_reach_here();
    }
 
+   // The branches of one construct may share a block name
+   const int nconds = vlog_conds(v);
+   for (int i = 0; i < nconds; i++) {
+      vlog_node_t b = vlog_stmt(vlog_cond(v, i), 0);
+      bool seen = false;
+      for (int j = 0; j < i && !seen; j++)
+         seen = vlog_ident(vlog_stmt(vlog_cond(v, j), 0)) == vlog_ident(b);
+      if (!seen)
+         declare_gen_block(b);
+   }
+
    gen_construct = saved_construct;
    return v;
 }
@@ -20809,6 +20826,8 @@ static void p_loop_generate_construct(vlog_node_t parent)
    gen_construct = saved_construct;
 
    scope_leave();
+
+   declare_gen_block(b);
 
    vlog_set_loc(v, CURRENT_LOC);
    vlog_add_stmt(parent, v);
@@ -24350,7 +24369,9 @@ static void p_module_or_generate_item_1(vlog_node_t mod)
          // A generate block may appear directly as a module item (27.3)
          const unsigned saved_construct = gen_construct;
          gen_construct = ++gen_constructs;
-         vlog_add_stmt(mod, p_generate_block());
+         vlog_node_t b = p_generate_block();
+         vlog_add_stmt(mod, b);
+         declare_gen_block(b);
          gen_construct = saved_construct;
       }
       break;

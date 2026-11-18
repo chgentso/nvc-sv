@@ -163,8 +163,15 @@ static const vlog_symbol_t *symbol_for(vlog_symtab_t *st, ident_t name)
          for (int slot = ident_hash(name) & (s->max_symbols - 1);
               s->symbols[slot].name != NULL;
               slot = (slot + 1) & (s->max_symbols - 1)) {
-            if (s->symbols[slot].name == name)
+            if (s->symbols[slot].name == name) {
+               // The name of a generate block is only kept to detect
+               // duplicates: it is not a declaration that can be referenced
+               const vlog_node_t n = s->symbols[slot].node;
+               if (n != NULL && n != POISON_NODE
+                   && vlog_kind(n) == V_GEN_BLOCK)
+                  break;
                return &(s->symbols[slot]);
+            }
          }
       }
    }

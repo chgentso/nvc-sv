@@ -4273,6 +4273,25 @@ START_TEST(test_genvaruse1)
 }
 END_TEST
 
+START_TEST(test_gendup1)
+{
+   const error_t expect[] = {
+      {  5, "duplicate declaration of 'block'" },
+      {  9, "duplicate declaration of 'block1'" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/gendup1.sv");
+
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
 Suite *get_vlog_tests(void)
 {
    Suite *s = suite_create("vlog");
@@ -4433,6 +4452,7 @@ Suite *get_vlog_tests(void)
    tcase_add_test(tc, test_crash17);
    tcase_add_test(tc, test_crash18);
    tcase_add_test(tc, test_genvaruse1);
+   tcase_add_test(tc, test_gendup1);
    suite_add_tcase(s, tc);
 
    return s;
