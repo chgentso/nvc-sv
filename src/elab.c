@@ -5084,6 +5084,29 @@ static bool elab_verilog_port_open(vlog_node_t inst, tree_t eport, int pos)
    return true;
 }
 
+static tree_t elab_enum_string_literal(tree_t g, type_t type, vlog_node_t d)
+{
+   // A string parameter whose text is the name of a literal of an
+   // enumeration generic selects that literal
+
+   if (!type_is_enum(type) || type_eq(type, ieee_type(IEEE_STD_ULOGIC)))
+      return NULL;
+
+   LOCAL_TEXT_BUF tb = tb_new();
+   if (!elab_vlog_string_value(d, tb) || tb_len(tb) == 0)
+      return NULL;
+
+   type_t base = type_base_recur(type);
+   const int nlits = type_enum_literals(base);
+   ident_t name = ident_new(tb_get(tb));
+   for (int i = 0; i < nlits; i++) {
+      if (ident_casecmp(tree_ident(type_enum_literal(base, i)), name))
+         return get_enum_lit(g, type, i);
+   }
+
+   return NULL;
+}
+
 static void elab_vhdl_in_verilog(tree_t entity, vlog_node_t inst_v,
                                  const elab_instance_t *ei, elab_ctx_t *ctx)
 {
@@ -5211,6 +5234,8 @@ static void elab_vhdl_in_verilog(tree_t entity, vlog_node_t inst_v,
 
             tree_set_type(value, subtype_for_string(value, type));
          }
+         else if ((value = elab_enum_string_literal(g, type, d)) != NULL)
+            ;
          else if (!vlog_get_const(d, &ival)) {
             error_at(tree_loc(g), "value of parameter %pQ is not a defined "
                      "constant", vlog_ident(d));

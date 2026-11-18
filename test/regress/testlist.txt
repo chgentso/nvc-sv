@@ -2893,3 +2893,4 @@ nullwave2       normal
 vlogbareblk1    verilog
 vlogdelaybase1  verilog
 mixed56         mixed,2008
+mixed58         mixed,2008
