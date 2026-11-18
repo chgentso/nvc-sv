@@ -11411,6 +11411,9 @@ static tree_t p_block_configuration(tree_t of)
    else
       suppress_errors(nametab);
 
+   while (peek() == tUSE)
+      p_use_clause(b, tree_add_decl);
+
    while (not_at_token(tEND))
       p_configuration_item(b);
 

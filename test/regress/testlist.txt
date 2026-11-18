@@ -2887,3 +2887,6 @@ netlist11       shell
 netlist12       shell
 svname1         shell
 svenv1          shell
+nullwave1       normal
+config18        normal,2008
+nullwave2       normal
