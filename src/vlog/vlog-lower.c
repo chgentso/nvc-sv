@@ -413,6 +413,7 @@ static vlog_node_t vlog_struct_nettype_of(vlog_node_t decl);
 static bool vlog_lower_struct_net_driver(vlog_gen_t *g, vlog_node_t v);
 static void vlog_lower_struct_net_process(vlog_gen_t *g, vlog_node_t v);
 static hset_t *sv_multi_driver_nets = NULL;
+static hset_t *sv_forced_decls = NULL;
 static hash_t *sv_fork_caps = NULL;     // Forked statement to captured decls
 static hash_t *sv_fork_up = NULL;       // Forked statement to enclosing fork
 
@@ -29293,12 +29294,29 @@ static void vlog_count_driver_cb(vlog_node_t v, void *ctx)
    }
 }
 
+static void vlog_force_ref_cb(vlog_node_t v, void *ctx)
+{
+   if (vlog_kind(v) == V_REF && vlog_has_ref(v))
+      hset_insert(sv_forced_decls, vlog_ref(v));
+}
+
+static void vlog_find_force_cb(vlog_node_t v, void *ctx)
+{
+   if (vlog_kind(v) == V_FORCE || vlog_kind(v) == V_RELEASE)
+      vlog_visit(vlog_target(v), vlog_force_ref_cb, NULL);
+}
+
 static void vlog_find_multi_driver_nets(vlog_node_t body)
 {
    // Nets of the body with more than one driver
 
    if (sv_multi_driver_nets == NULL)
       sv_multi_driver_nets = hset_new(64);
+   if (sv_forced_decls == NULL)
+      sv_forced_decls = hset_new(64);
+
+   // Objects forced or released by a statement of the body
+   vlog_visit(body, vlog_find_force_cb, NULL);
 
    driver_count_t c = { .once = hset_new(64) };
    vlog_visit(body, vlog_count_driver_cb, &c);
@@ -31875,6 +31893,15 @@ void vlog_lower_block(mir_context_t *mc, ident_t parent, tree_t b)
                 && vlog_kind(vlog_ref(root)) == V_NET_DECL
                 && hset_contains(sv_multi_driver_nets, vlog_ref(root))
                 && !vlog_has_net_driver(body, vlog_ref(port), port))
+               break;
+
+            // A variable output port is a continuous assignment to the
+            // actual (IEEE 1800-2017 23.3.3) so forcing the actual must not
+            // change the variable inside the instance
+            if (vlog_subkind(port) == V_PORT_OUTPUT
+                && vlog_kind(vlog_ref(port)) == V_VAR_DECL
+                && vlog_kind(root) == V_REF && vlog_has_ref(root)
+                && hset_contains(sv_forced_decls, vlog_ref(root)))
                break;
 
             // A variable which starts with a known value gives the net of
