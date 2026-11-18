@@ -1,3 +1,8 @@
+## nvc-sv 0.16.2
+- A VHDL real generic can be set from a Verilog `real`, `realtime` or untyped real parameter, and an integer value given for a real generic (or a real one for an integer generic) is converted.
+- A generic of a component that cannot be mapped to the Verilog parameter is reported once for each generic of the component rather than at every instance.
+- A record generic with a default value no longer crashes the elaboration.
+
 ## nvc-sv 0.16.1
 - A null waveform (`s <= null after 1 ns`) is accepted for a signal parameter of a subprogram, and a null transaction on a wide guarded signal no longer crashes the simulation.
 - A block configuration may contain `use` clauses.
