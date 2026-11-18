@@ -1965,6 +1965,20 @@ void __array_resize_slow(void **ptr, uint32_t *limit, uint32_t count,
    }
 }
 
+char *nvc_getenv(const char *name)
+{
+   if (strncmp(name, "NVC_", 4) == 0 && strncmp(name, "NVC_SV_", 7) != 0) {
+      char buf[128];
+      if ((size_t)snprintf(buf, sizeof(buf), "NVC_SV_%s", name + 4) < sizeof(buf)) {
+         char *value = (getenv)(buf);
+         if (value != NULL)
+            return value;
+      }
+   }
+
+   return (getenv)(name);
+}
+
 bool get_exe_path(text_buf_t *tb)
 {
 #if defined __linux__
@@ -2018,41 +2032,45 @@ static void get_relative_prefix(text_buf_t *tb)
 }
 #endif
 
+#if !defined __MINGW32__
+static bool get_relocated_dir(text_buf_t *tb, const char *sub,
+                              const char *marker)
+{
+   // A relocated installation keeps its files in <prefix>/<sub>/nvc-sv
+   // where <prefix>/bin contains the executable
+
+   LOCAL_TEXT_BUF exe = tb_new();
+   if (!get_exe_path(exe))
+      return false;
+
+   char *str LOCAL = tb_claim(exe);
+   for (int i = 0; i < 2; i++) {
+      char *slash = strrchr(str, '/');
+      if (slash == NULL)
+         return false;
+      *slash = '\0';
+   }
+
+   char *dir LOCAL = xasprintf("%s/%s/" PACKAGE, str, sub);
+   char *path LOCAL = marker ? xasprintf("%s/%s", dir, marker) : xstrdup(dir);
+
+   file_info_t info;
+   if (!get_file_info(path, &info))
+      return false;
+
+   tb_cat(tb, dir);
+   return true;
+}
+#endif
+
 void get_libexec_dir(text_buf_t *tb)
 {
 #if defined __MINGW32__
    get_relative_prefix(tb);
-   tb_cat(tb, DIR_SEP "libexec" DIR_SEP "nvc");
+   tb_cat(tb, DIR_SEP "libexec" DIR_SEP PACKAGE);
 #else
-#if defined __linux__
-   // A relocated installation keeps its scripts next to the binary
-   LOCAL_TEXT_BUF exe = tb_new();
-   if (get_exe_path(exe)) {
-      char *str = tb_claim(exe);
-      char *slash = strrchr(str, '/');
-      if (slash != NULL) {
-         *slash = '\0';
-         if ((slash = strrchr(str, '/')) != NULL) {
-            *slash = '\0';
-
-            char *dir = xasprintf("%s/libexec/nvc", str);
-            file_info_t info;
-            const bool found =
-               get_file_info(dir, &info) && info.type == FILE_DIR;
-            if (found)
-               tb_cat(tb, dir);
-
-            free(dir);
-            if (found) {
-               free(str);
-               return;
-            }
-         }
-      }
-      free(str);
-   }
-#endif
-   tb_cat(tb, LIBEXECDIR);
+   if (!get_relocated_dir(tb, "libexec", NULL))
+      tb_cat(tb, LIBEXECDIR);
 #endif
 }
 
@@ -2060,9 +2078,11 @@ void get_lib_dir(text_buf_t *tb)
 {
 #if defined __MINGW32__
    get_relative_prefix(tb);
-   tb_cat(tb, DIR_SEP "lib" DIR_SEP "nvc");
+   tb_cat(tb, DIR_SEP "lib" DIR_SEP PACKAGE);
 #else
-   tb_cat(tb, LIBDIR);
+   if (!get_relocated_dir(tb, "lib", "std")
+       && !get_relocated_dir(tb, "lib64", "std"))
+      tb_cat(tb, LIBDIR);
 #endif
 }
 
@@ -2070,9 +2090,10 @@ void get_data_dir(text_buf_t *tb)
 {
 #if defined __MINGW32__
    get_relative_prefix(tb);
-   tb_cat(tb, DIR_SEP "share" DIR_SEP "nvc");
+   tb_cat(tb, DIR_SEP "share" DIR_SEP PACKAGE);
 #else
-   tb_cat(tb, DATADIR);
+   if (!get_relocated_dir(tb, "share", NULL))
+      tb_cat(tb, DATADIR);
 #endif
 }
 

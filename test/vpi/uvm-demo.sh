@@ -16,7 +16,7 @@ W=$(mktemp -d)
 trap 'rm -rf "$W"' EXIT
 cd "$W"
 
-NVC="$B/bin/nvc -L $B/lib"
+NVC="$B/bin/nvc-sv -L $B/lib"
 OPTS="--std=2019 -a --relaxed -DUVM_NO_DPI -I$U"
 
 if [ "$MODE" = separate ]; then

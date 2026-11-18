@@ -2885,3 +2885,5 @@ svbindimplicit1 verilog
 svbindimplicit2 verilog
 netlist11       shell
 netlist12       shell
+svname1         shell
+svenv1          shell

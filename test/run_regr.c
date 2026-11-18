@@ -950,7 +950,7 @@ static bool run_test(test_t *test)
                test_dir, test->name);
    }
    else if (test->flags & F_TCL) {
-      push_arg(&args, "%s" DIR_SEP "nvc%s", bin_dir, EXEEXT);
+      push_arg(&args, "%s" DIR_SEP "nvc-sv%s", bin_dir, EXEEXT);
       push_std(test, &args);
 
       if (test->flags & F_WORKLIB)
@@ -978,7 +978,7 @@ static bool run_test(test_t *test)
                test_dir, test->name);
    }
    else {
-      push_arg(&args, "%s" DIR_SEP "nvc%s", bin_dir, EXEEXT);
+      push_arg(&args, "%s" DIR_SEP "nvc-sv%s", bin_dir, EXEEXT);
       push_std(test, &args);
 
       if (test->flags & F_WORKLIB)
@@ -1072,7 +1072,7 @@ static bool run_test(test_t *test)
             goto out_print;
          }
 
-         push_arg(&args, "%s/nvc%s", bin_dir, EXEEXT);
+         push_arg(&args, "%s/nvc-sv%s", bin_dir, EXEEXT);
          push_std(test, &args);
 
          if (test->flags & F_WORKLIB)
@@ -1145,7 +1145,7 @@ static bool run_test(test_t *test)
 
    if ((test->flags & F_COVER) && (test->flags & F_EXPORT)) {
       // Generate and check XML report
-      push_arg(&args, "%s/nvc%s", bin_dir, EXEEXT);
+      push_arg(&args, "%s/nvc-sv%s", bin_dir, EXEEXT);
       push_arg(&args, "--cover-export");
       push_arg(&args, "--relative=%s" DIR_SEP "regress", test_dir);
       push_arg(&args, "--out=export.xml");
@@ -1219,7 +1219,7 @@ static bool run_test(test_t *test)
       else
          xml_out = strdup("export.xml");
 
-      push_arg(&args, "%s/nvc%s", bin_dir, EXEEXT);
+      push_arg(&args, "%s/nvc-sv%s", bin_dir, EXEEXT);
       push_arg(&args, "--cover-report");
       push_arg(&args, "--output=%s", html_dir);
       if (test->flags & F_PERFILE)

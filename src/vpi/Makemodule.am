@@ -11,5 +11,5 @@ lib_libnvc_a_SOURCES += \
 	src/vpi/vpi-systf.c \
 	src/vpi/vpi-macros.h
 
-include_HEADERS += src/vpi/svdpi.h src/vpi/vpi_user.h src/vpi/sv_vpi_user.h \
+pkginclude_HEADERS += src/vpi/svdpi.h src/vpi/vpi_user.h src/vpi/sv_vpi_user.h \
 	src/vpi/vpi_ext_nvc.h

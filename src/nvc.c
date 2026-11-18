@@ -88,9 +88,27 @@ const char copy_string[] =
    "This program comes with ABSOLUTELY NO WARRANTY. This is free software, "
    "and\nyou are welcome to redistribute it under certain conditions. See "
    "the GNU\nGeneral Public Licence for details.";
+#define VERSION_TAIL \
+   GIT_SHA_ONLY(" (" GIT_SHA ")") \
+   LLVM_ONLY(" (Using LLVM " LLVM_VERSION ")") DEBUG_ONLY(" [debug]")
 const char version_string[] =
-   PACKAGE_STRING GIT_SHA_ONLY(" (" GIT_SHA ")")
-   LLVM_ONLY(" (Using LLVM " LLVM_VERSION ")") DEBUG_ONLY(" [debug]");
+   "nvc-sv " NVC_SV_VERSION " (based on " PACKAGE_STRING ")" VERSION_TAIL;
+
+// When started under the name of the upstream program, report the upstream
+// version format so that tools which parse it keep working
+static const char alias_version_string[] =
+   PACKAGE_STRING " (nvc-sv " NVC_SV_VERSION ")" VERSION_TAIL;
+
+static bool started_as_nvc(const char *argv0)
+{
+   const char *base = argv0;
+   for (const char *p = argv0; *p; p++) {
+      if (*p == '/' || *p == '\\')
+         base = p + 1;
+   }
+
+   return strcmp(base, "nvc") == 0 || strcmp(base, "nvc.exe") == 0;
+}
 
 static int process_command(int argc, char **argv, cmd_state_t *state);
 static int parse_int(const char *str);
@@ -3113,7 +3131,8 @@ int main(int argc, char **argv)
          usage();
          exit(EXIT_SUCCESS);
       case 'v':
-         printf("%s\n%s\n", version_string, copy_string);
+         printf("%s\n%s\n", started_as_nvc(argv[0]) ? alias_version_string
+                : version_string, copy_string);
          exit(EXIT_SUCCESS);
       case 'w':
          work_name = optarg;

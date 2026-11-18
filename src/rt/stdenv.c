@@ -39,6 +39,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#undef getenv   // Models see the real environment
+
 #ifdef __MINGW32__
 #include <timezoneapi.h>
 

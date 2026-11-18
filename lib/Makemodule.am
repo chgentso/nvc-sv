@@ -1,4 +1,4 @@
-nvc = $(nvc_verbose)$(top_builddir)/bin/nvc$(EXEEXT)
+nvc = $(nvc_verbose)$(top_builddir)/bin/nvc-sv$(EXEEXT)
 
 nvc_verbose = $(nvc_verbose_@AM_V@)
 nvc_verbose_ = $(nvc_verbose_@AM_DEFAULT_V@)
@@ -8,7 +8,7 @@ deps_pp = sed \
 	-e 's|\(lib/[^ ]*.vhd\)|$$(top_srcdir)/\1|g' \
 	-e 's|$(abs_top_builddir)/||g'
 
-DRIVER = bin/nvc$(EXEEXT)
+DRIVER = bin/nvc-sv$(EXEEXT)
 
 gen-deps: $(DRIVER)
 	$(MAKE) gen-deps-std gen-deps-std-08 gen-deps-ieee \

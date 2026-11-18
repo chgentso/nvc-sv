@@ -16,5 +16,12 @@ EXTRA_DIST += $(pkglibexec_SCRIPTS)
 
 if ENABLE_BASH_COMPLETION
 bashcompletiondir = $(BASH_COMPLETION_DIR)
-dist_bashcompletion_DATA = contrib/nvc.bash
+bashcompletion_DATA = contrib/nvc-sv.bash
+
+contrib/nvc-sv.bash: contrib/nvc.bash
+	$(AM_V_GEN)sed -e 's/for nvc(1)/for nvc-sv(1)/' -e 's/(nvc --list/(nvc-sv --list/' \
+	  -e 's/^complete -F _nvc nvc$$/complete -F _nvc nvc-sv/' $(srcdir)/contrib/nvc.bash > $@
+
+EXTRA_DIST += contrib/nvc.bash
+CLEANFILES += contrib/nvc-sv.bash
 endif

@@ -493,4 +493,10 @@ void pool_stats(mem_pool_t *mp, size_t *alloc, size_t *npages);
          __tmp;                                         \
       })
 
+// Variables read by the simulator may also be set as NVC_SV_<NAME>, which
+// takes precedence over NVC_<NAME>
+#include <stdlib.h>
+char *nvc_getenv(const char *name);
+#define getenv(name) nvc_getenv(name)
+
 #endif // _UTIL_H

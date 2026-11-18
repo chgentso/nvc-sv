@@ -2,7 +2,12 @@ EXTRA_DIST = autogen.sh nvc.1 README.md NEWS.md THANKS.md
 
 ACLOCAL_AMFLAGS = -I m4
 
-man_MANS = nvc.1
+man_MANS = nvc-sv.1
+
+nvc-sv.1: nvc.1
+	$(AM_V_GEN)sed -e 's/^\.Dt NVC 1/.Dt NVC-SV 1/' -e 's/^\.Nm nvc$$/.Nm nvc-sv/' \
+	  -e 's|\$$HOME/\.nvc/lib|$$HOME/.nvc-sv/lib|' $(srcdir)/nvc.1 > $@
+
 
 AM_CPPFLAGS = -I$(top_srcdir)/thirdparty -I$(top_srcdir)/src -I$(top_builddir)/src
 AM_CFLAGS   = -Wall $(EXTRA_CFLAGS) $(LTO_FLAG)
@@ -28,7 +33,7 @@ AM_CFLAGS += \
 
 bin_PROGRAMS =
 noinst_LIBRARIES =
-include_HEADERS =
+pkginclude_HEADERS =
 check_PROGRAMS =
 check_LIBRARIES =
 noinst_PROGRAMS =
@@ -37,7 +42,7 @@ pkglibexec_PROGRAMS =
 pkglibexec_SCRIPTS =
 EXTRA_PROGRAMS =
 BUILT_SOURCES =
-CLEANFILES =
+CLEANFILES = nvc-sv.1
 DISTCLEANFILES =
 BOOTSTRAPLIBS =
 LIBDIRS =

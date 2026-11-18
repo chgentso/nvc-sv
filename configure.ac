@@ -1,8 +1,11 @@
 AC_INIT([nvc], [1.24-devel],
-        [https://github.com/nickg/nvc/issues],
-        [nvc],
+        [https://github.com/chgentso/nvc-sv/issues],
+        [nvc-sv],
         [https://www.nickg.me.uk/nvc/])
 AC_PREREQ([2.69])
+
+# Version of the nvc-sv toolchain, independent of the nvc version above
+AC_DEFINE([NVC_SV_VERSION], ["0.16.0"], [Version of the nvc-sv toolchain])
 
 AC_CANONICAL_HOST
 AC_CANONICAL_TARGET
@@ -270,9 +273,9 @@ case $host_os in
 esac
 
 AX_DEFINE_DIR([PREFIX], [prefix], [Installation prefix])
-AX_DEFINE_DIR([LIBDIR], [libdir/nvc], [Installation library directory])
-AX_DEFINE_DIR([LIBEXECDIR], [libexecdir/nvc], [Location of internal programs])
-AX_DEFINE_DIR([DATADIR], [datadir/nvc], [Location of data files])
+AX_DEFINE_DIR([LIBDIR], [libdir/nvc-sv], [Installation library directory])
+AX_DEFINE_DIR([LIBEXECDIR], [libexecdir/nvc-sv], [Location of internal programs])
+AX_DEFINE_DIR([DATADIR], [datadir/nvc-sv], [Location of data files])
 AX_DEFINE_DIR([TESTDIR], [srcdir/test], [Location of testcases])
 
 AM_CONDITIONAL([ARCH_X86_64],
@@ -495,5 +498,5 @@ ARFLAGS="${ARFLAGS:-cr}"
 AC_SUBST(ARFLAGS)
 
 AC_CONFIG_HEADERS([config.h])
-AC_CONFIG_FILES([Makefile contrib/nvc.pc])
+AC_CONFIG_FILES([Makefile contrib/nvc-sv.pc:contrib/nvc.pc.in])
 AC_OUTPUT

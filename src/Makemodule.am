@@ -1,4 +1,4 @@
-bin_PROGRAMS += bin/nvc
+bin_PROGRAMS += bin/nvc-sv
 noinst_LIBRARIES += lib/libnvc.a
 
 lib_libnvc_a_SOURCES = \
@@ -69,11 +69,11 @@ lib_libnvc_a_SOURCES = \
 	src/reheat.c \
 	src/parse.h
 
-bin_nvc_SOURCES = src/nvc.c
+bin_nvc_sv_SOURCES = src/nvc.c
 
-EXTRA_bin_nvc_DEPENDENCIES = src/symbols.txt
+EXTRA_bin_nvc_sv_DEPENDENCIES = src/symbols.txt
 
-bin_nvc_LDADD = \
+bin_nvc_sv_LDADD = \
 	lib/libnvc.a \
 	lib/libthirdparty.a \
 	$(zlib_LIBS) \
@@ -86,31 +86,38 @@ bin_nvc_LDADD = \
 	$(LLVM_LIBS) \
 	$(TCL_LIBS)
 
-bin_nvc_LDFLAGS = $(LDFLAGS) $(AM_LDFLAGS) $(EXPORT_LDFLAGS)
+bin_nvc_sv_LDFLAGS = $(LDFLAGS) $(AM_LDFLAGS) $(EXPORT_LDFLAGS)
 
 if IMPLIB_REQUIRED
-bin_nvc_LDFLAGS += -Wl,--out-implib=lib/libnvcimp.a
+bin_nvc_sv_LDFLAGS += -Wl,--out-implib=lib/libnvcimp.a
 
 implibdir = $(pkglibdir)
 implib_DATA = lib/libnvcimp.a
 
-lib/libnvcimp.a: bin/nvc$(EXEEXT)
+lib/libnvcimp.a: bin/nvc-sv$(EXEEXT)
+else
+# Build-tree alias so that scripts and tests may still say "nvc"
+EXTRA_all_local += bin/nvc
+CLEANFILES += bin/nvc
+
+bin/nvc: bin/nvc-sv$(EXEEXT)
+	$(AM_V_GEN)ln -sf nvc-sv bin/nvc
 endif
 
-nodist_EXTRA_bin_nvc_SOURCES =
+nodist_EXTRA_bin_nvc_sv_SOURCES =
 
 if LLVM_STATIC
 # Force linking as C++ to allow LLVM static libraries
-nodist_EXTRA_bin_nvc_SOURCES += dummy.cxx   # Make sure CXXLD is defined
-bin_nvc_LINK = $(CXXLD) $(AM_CFLAGS) $(CFLAGS) $(bin_nvc_LDFLAGS) -o $@
-AM_V_bin_nvc_LINK = $(AM_V_CXXLD)
+nodist_EXTRA_bin_nvc_sv_SOURCES += dummy.cxx   # Make sure CXXLD is defined
+bin_nvc_sv_LINK = $(CXXLD) $(AM_CFLAGS) $(CFLAGS) $(bin_nvc_sv_LDFLAGS) -o $@
+AM_V_bin_nvc_sv_LINK = $(AM_V_CXXLD)
 else
-bin_nvc_LINK = $(CCLD) $(AM_CFLAGS) $(CFLAGS) $(bin_nvc_LDFLAGS) -o $@
-AM_V_bin_nvc_LINK = $(AM_V_CCLD)
+bin_nvc_sv_LINK = $(CCLD) $(AM_CFLAGS) $(CFLAGS) $(bin_nvc_sv_LDFLAGS) -o $@
+AM_V_bin_nvc_sv_LINK = $(AM_V_CCLD)
 endif
 
 if ENABLE_GIT_SHA
-nodist_EXTRA_bin_nvc_SOURCES += src/gitsha.h
+nodist_EXTRA_bin_nvc_sv_SOURCES += src/gitsha.h
 
 CLEANFILES += src/gitsha.h
 BUILT_SOURCES += src/gitsha.h

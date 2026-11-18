@@ -2,9 +2,9 @@
 
 if [ -z "$NVC_INSTALL_DEST" ]; then
   if command -v cygpath &>/dev/null; then
-    export NVC_INSTALL_DEST="$(cygpath -m "$HOME")/.nvc/lib"
+    export NVC_INSTALL_DEST="$(cygpath -m "$HOME")/.nvc-sv/lib"
   else
-    export NVC_INSTALL_DEST="$HOME/.nvc/lib"
+    export NVC_INSTALL_DEST="$HOME/.nvc-sv/lib"
   fi
 fi
 
