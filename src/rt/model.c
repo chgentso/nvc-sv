@@ -1489,7 +1489,8 @@ static rt_value_t alloc_value(rt_model_t *m, rt_nexus_t *n)
 static void free_value(rt_nexus_t *n, rt_value_t v)
 {
    const size_t valuesz = n->width * n->size;
-   if (valuesz > sizeof(rt_value_t)) {
+   // The value of a null transaction is zero and has no storage
+   if (valuesz > sizeof(rt_value_t) && v.ext != NULL) {
       *(void **)v.ext = n->free_value;
       n->free_value = v.ext;
    }
