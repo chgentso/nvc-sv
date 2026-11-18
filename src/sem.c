@@ -2686,7 +2686,10 @@ static bool sem_check_waveforms(tree_t t, tree_t target, nametab_t *tab)
       }
       else {
          tree_t decl = sem_check_lvalue(target);
-         if (decl != NULL && !is_guarded_signal(decl))
+         // The kind of a formal signal parameter is that of its actual
+         // so the check can only be made for other targets
+         if (decl != NULL && tree_kind(decl) != T_PARAM_DECL
+             && !is_guarded_signal(decl))
             sem_error(waveform, "a null waveform element is only valid when "
                       "the target is a guarded signal");
       }
