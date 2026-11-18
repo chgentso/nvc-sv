@@ -1,3 +1,12 @@
+## nvc-sv 0.16.1
+- A null waveform (`s <= null after 1 ns`) is accepted for a signal parameter of a subprogram, and a null transaction on a wide guarded signal no longer crashes the simulation.
+- A block configuration may contain `use` clauses.
+- A generate block can be written directly as a module item in Verilog without a surrounding `generate` region, and a duplicate generate block name in the same scope is now an error.
+- A delay followed by an unsized number (`#1 'b1`) no longer takes the delay as the size of the number.
+- A VHDL component bound to a Verilog module may omit the outputs of the module.
+- A Verilog string parameter can set a VHDL generic of an enumeration type (including `boolean`).
+- Installing OSVVM with `--install` starts from a fresh build index, so it also works when no library was installed before.
+
 ## nvc-sv 0.16.0
 - The program is now called `nvc-sv` and the toolchain has its own version, 0.16.0, reported first by `--version`: `nvc-sv 0.16.0 (based on nvc 1.24-devel)`.  When started through a link called `nvc` the first line is `nvc 1.24-devel (nvc-sv 0.16.0)`, as tools that parse the upstream format expect.
 - The installed files are in `lib/nvc-sv`, `libexec/nvc-sv`, `share/nvc-sv` and `include/nvc-sv` (with `nvc-sv.pc`, `nvc-sv.1` and the completion script `nvc-sv`), so nvc-sv does not share any file with an upstream nvc and both can be installed in one prefix.  The user libraries of `--install` are now in `~/.nvc-sv/lib`: libraries installed by an earlier version in `~/.nvc/lib` are not used and must be installed again.
