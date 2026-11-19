@@ -22072,6 +22072,8 @@ static void clocking_synthesise(vlog_node_t parent, ident_t name,
    hash_put(clocking_blocks, ident_sprintf("%s$cycle", istr(name)), evc);
 }
 
+static int clocking_def_in_edge = -1, clocking_def_out_edge = -1;
+
 static void p_clocking_item(vlog_node_t parent, clock_var_t **vars, int *nvars,
                             bool *def_in_step, vlog_node_t *def_in,
                             vlog_node_t *def_out)
@@ -22082,11 +22084,22 @@ static void p_clocking_item(vlog_node_t parent, clock_var_t **vars, int *nvars,
 
    if (optional(tDEFAULT)) {
       for (;;) {
-         if (optional(tINPUT))
-            *def_in = clocking_skew(def_in_step);
+         if (optional(tINPUT)) {
+            clocking_def_in_edge = clocking_edge();
+            if (clocking_def_in_edge >= 0) {
+               *def_in = NULL;
+               *def_in_step = false;
+            }
+            if (peek() == tHASH)
+               *def_in = clocking_skew(def_in_step);
+         }
          else if (optional(tOUTPUT)) {
             bool step;
-            *def_out = clocking_skew(&step);
+            clocking_def_out_edge = clocking_edge();
+            if (clocking_def_out_edge >= 0)
+               *def_out = NULL;
+            if (peek() == tHASH)
+               *def_out = clocking_skew(&step);
          }
          else
             break;
@@ -22100,38 +22113,50 @@ static void p_clocking_item(vlog_node_t parent, clock_var_t **vars, int *nvars,
 
    bool in_step = *def_in_step, also_out = false;
    vlog_node_t in_skew = *def_in, out_skew = *def_out;
-   int in_edge = -1, out_edge = -1;
+   int in_edge = clocking_def_in_edge, out_edge = clocking_def_out_edge;
 
    if (dir != tOUTPUT) {
-      in_edge = clocking_edge();
-      if (in_edge >= 0) {
+      const int edge = clocking_edge();
+      if (edge >= 0) {
+         in_edge = edge;
          in_skew = NULL;
          in_step = false;
       }
 
-      if (peek() == tHASH)
+      if (peek() == tHASH) {
+         if (edge < 0)
+            in_edge = -1;
          in_skew = clocking_skew(&in_step);
+      }
    }
    else {
-      out_edge = clocking_edge();
-      if (out_edge >= 0)
+      const int edge = clocking_edge();
+      if (edge >= 0) {
+         out_edge = edge;
          out_skew = NULL;
+      }
 
       if (peek() == tHASH) {
          bool step;
+         if (edge < 0)
+            out_edge = -1;
          out_skew = clocking_skew(&step);
       }
    }
 
    if ((dir == tINOUT || dir == tINPUT) && peek() == tOUTPUT) {
       consume(tOUTPUT);
-      out_edge = clocking_edge();
-      if (out_edge >= 0)
+      const int edge = clocking_edge();
+      if (edge >= 0) {
+         out_edge = edge;
          out_skew = NULL;
+      }
+      else if (peek() == tHASH)
+         out_edge = -1;
 
       bool step;
       vlog_node_t skew = clocking_skew(&step);
-      if (skew != NULL || out_edge < 0)
+      if (skew != NULL || edge < 0)
          out_skew = skew;
       also_out = true;
    }
@@ -22199,6 +22224,7 @@ static void p_clocking_declaration(vlog_node_t parent, bool is_default)
    int nvars = 0;
    bool def_in_step = true;
    vlog_node_t def_in = NULL, def_out = NULL;
+   clocking_def_in_edge = clocking_def_out_edge = -1;
 
    while (not_at_items(tENDCLOCKING)) {
       if (scan(tDEFAULT, tINPUT, tOUTPUT, tINOUT))
