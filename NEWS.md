@@ -1,3 +1,9 @@
+## nvc-sv 0.16.5
+- An array variable initialised from another array, a slice or a function returning an array now gets every element; before, only the last element was copied and the rest stayed undefined (wrong results in 0.16.4 and earlier).
+- Constant `$sformatf` with `%p` of arrays, structs, enums, queues, dynamic arrays and associative arrays matches the runtime output.
+- `foreach` over hierarchical arrays (instances declared later, generate blocks, inner dynamic dimensions) and methods on selected elements of hierarchical arrays.
+- `new` assigned to a hierarchical name.
+
 ## nvc-sv 0.16.4
 - `$sformatf` with constant arguments can be used in a constant expression, including `%m`, which gives the hierarchical name of each instance.
 - An `always_comb` or `always_latch` with no sensitivities runs once at time 0 without a warning.
