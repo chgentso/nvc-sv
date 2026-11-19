@@ -21706,6 +21706,63 @@ static bool clocking_unbound(vlog_node_t expr)
    return unbound;
 }
 
+static bool clocking_is_net(vlog_node_t decl)
+{
+   // A clockvar may drive a net: the clocking block is then one more driver
+
+   switch (vlog_kind(decl)) {
+   case V_NET_DECL:
+      return true;
+   case V_PORT_DECL:
+      if (vlog_has_ref(decl))
+         return clocking_is_net(vlog_ref(decl));
+      return is_implicit_data_type(vlog_type(decl));
+   default:
+      return false;
+   }
+}
+
+static vlog_node_t clocking_net_driver(vlog_node_t parent, ident_t name,
+                                       const clock_var_t *cv, vlog_node_t sig,
+                                       vlog_node_t sigtype, const loc_t *loc)
+{
+   // Drives the net from a variable which starts at high impedance
+
+   vlog_node_t decl = sig;
+   if (cv->expr != NULL) {
+      if (vlog_kind(cv->expr) != V_REF || !vlog_has_ref(cv->expr))
+         return NULL;
+      decl = vlog_ref(cv->expr);
+   }
+
+   if (!clocking_is_net(decl))
+      return NULL;
+
+   vlog_node_t drv = clocking_var(
+      parent, ident_sprintf("%s$%s$n", istr(name), istr(cv->sig)),
+      sigtype, cv->expr ? NULL : sig, loc);
+
+   vlog_node_t z = vlog_new(V_NUMBER);
+   vlog_set_number(z, number_new("1'bz", loc));
+   vlog_set_flags(z, VLOG_F_FILL);
+   vlog_set_loc(z, loc);
+   vlog_set_value(drv, z);
+
+   vlog_node_t assign = vlog_new(V_ASSIGN);
+   vlog_set_target(assign, clocking_sigref(cv, sig, loc));
+   vlog_set_ident(assign, default_label("assign"));
+   vlog_set_value(assign, clocking_ref(drv, loc));
+   vlog_set_loc(assign, loc);
+   vlog_add_stmt(parent, assign);
+   return drv;
+}
+
+static vlog_node_t clocking_outref(const clock_var_t *cv, vlog_node_t sig,
+                                   vlog_node_t drv, const loc_t *loc)
+{
+   return drv != NULL ? clocking_ref(drv, loc) : clocking_sigref(cv, sig, loc);
+}
+
 static void clocking_synthesise(vlog_node_t parent, ident_t name,
                                 vlog_node_t ctrl, const clock_var_t *vars,
                                 int nvars, const loc_t *loc)
@@ -21855,6 +21912,9 @@ static void clocking_synthesise(vlog_node_t parent, ident_t name,
       }
 
       if (cv->output) {
+         vlog_node_t drv = clocking_net_driver(parent, name, cv, sig, sigtype,
+                                               loc);
+
          vlog_node_t ev1 = vlog_new(V_EVENT);
          vlog_set_subkind(ev1, V_EVENT_LEVEL);
          vlog_set_value(ev1, clocking_ref(shadow, loc));
@@ -21867,8 +21927,8 @@ static void clocking_synthesise(vlog_node_t parent, ident_t name,
             vlog_node_t delay = cv->out_skew != NULL
                ? vlog_copy(cv->out_skew, vlog_always_true_cb, NULL) : NULL;
             vlog_node_t drive = clocking_assign(
-               clocking_sigref(cv, sig, loc), clocking_ref(shadow, loc), delay,
-               true, loc);
+               clocking_outref(cv, sig, drv, loc), clocking_ref(shadow, loc),
+               delay, true, loc);
 
             vlog_node_t edge = clocking_edge_control(ctrl, cv->out_edge, loc);
             if (edge != NULL) {
@@ -21914,7 +21974,7 @@ static void clocking_synthesise(vlog_node_t parent, ident_t name,
          vlog_set_value(now, both);
          vlog_set_loc(now, loc);
          vlog_add_stmt(now, clocking_assign(
-                          clocking_sigref(cv, sig, loc),
+                          clocking_outref(cv, sig, drv, loc),
                           clocking_ref(shadow, loc),
                           cv->out_skew ? vlog_copy(cv->out_skew,
                                                    vlog_always_true_cb, NULL)
@@ -21953,7 +22013,7 @@ static void clocking_synthesise(vlog_node_t parent, ident_t name,
          vlog_set_loc(due, loc);
          vlog_add_stmt(due, clocking_flag(pend, 0, loc));
          vlog_add_stmt(due, clocking_assign(
-                          clocking_sigref(cv, sig, loc),
+                          clocking_outref(cv, sig, drv, loc),
                           clocking_ref(held, loc),
                           cv->out_skew ? vlog_copy(cv->out_skew,
                                                    vlog_always_true_cb, NULL)

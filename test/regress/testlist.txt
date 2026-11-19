@@ -2170,6 +2170,7 @@ svassignarrpat1 verilog
 svclockdrive1   verilog
 svclockdrive2   verilog
 svclockdrive3   verilog
+svclockdrive4   verilog
 svvifclockfwd1  verilog
 svlocalforeach1 verilog
 svprocreap1     verilog
