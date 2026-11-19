@@ -307,6 +307,18 @@ static fold_state_t get_fold_state(vlog_node_t v, fold_ctx_t *ctx)
 
          return state == FOLD_CONST ? FOLD_POSSIBLE : state;
       }
+   case V_METHOD_CALL:
+      if (vlog_ident(v) == ident_new("name")) {
+         // The name of a constant enumeration value is known when the
+         // instance is lowered
+         fold_state_t state = get_fold_state(vlog_value(v), ctx);
+         const int nparams = vlog_params(v);
+         for (int i = 0; i < nparams; i++)
+            state = MAX(state, get_fold_state(vlog_param(v, i), ctx));
+         return state == FOLD_CONST ? FOLD_LATER : state;
+      }
+      ctx->nonconst = v;
+      return FOLD_NON_CONST;
    case V_COND_EXPR:
       {
          fold_state_t value = get_fold_state(vlog_value(v), ctx);

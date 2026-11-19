@@ -2899,3 +2899,4 @@ mixed60         mixed,2008
 vlogconstfmt1   verilog,gold,2019
 vlogalwayscomb1 verilog,gold,2019
 svforceport1    verilog
+vlogconstfmt2   verilog,gold,2019

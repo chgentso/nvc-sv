@@ -1353,6 +1353,8 @@ static bool pfmt_array(vlog_node_t arg, bool *dynamic, int64_t *count,
    case V_NET_DECL:
    case V_PORT_DECL:
    case V_TF_PORT_DECL:
+   case V_PARAM_DECL:
+   case V_LOCALPARAM:
       break;
    default:
       return false;
@@ -1381,8 +1383,24 @@ static bool pfmt_array(vlog_node_t arg, bool *dynamic, int64_t *count,
       return false;
 
    switch (vlog_subkind(type)) {
-   case DT_QUEUE:
    case DT_DYNARRAY:
+      if (vlog_ranges(type) == 1
+          && vlog_subkind(vlog_range(type, 0)) != V_DIM_UNSIZED) {
+         // An array of strings or aggregates declared with a fixed size
+         vlog_node_t dim = vlog_range(type, 0);
+         int64_t l, r;
+         if (vlog_range_bound(vlog_left(dim), &l)
+             && vlog_range_bound(vlog_right(dim), &r)) {
+            *dynamic = false;
+            *key = NULL;
+            *count = (l > r ? l - r : r - l) + 1;
+            *left = l;
+            *step = l > r ? -1 : 1;
+            return true;
+         }
+      }
+      // Fall-through
+   case DT_QUEUE:
       *dynamic = true;
       *key = NULL;
       *count = 0;
@@ -1452,9 +1470,51 @@ static vlog_node_t pfmt_array_string(vlog_node_t v, vlog_node_t arg,
                                      int64_t left, int64_t step, bool plain,
                                      vlog_node_t key)
 {
-   // The elements of the array are converted by a loop at run time
-
    const loc_t *loc = vlog_loc(arg);
+
+   vlog_node_t base = arg;
+   while (vlog_kind(base) == V_BIT_SELECT)
+      base = vlog_value(base);
+
+   if (!dynamic && key == NULL && vlog_has_ref(base)
+       && (vlog_kind(vlog_ref(base)) == V_PARAM_DECL
+           || vlog_kind(vlog_ref(base)) == V_LOCALPARAM)) {
+      // The elements of a constant array are joined at compile time so
+      // that the result can be used in a constant expression
+      vlog_node_t cat = vlog_new(V_CONCAT);
+      vlog_set_loc(cat, loc);
+      vlog_add_param(cat, pfmt_string("'{", loc));
+
+      for (int64_t i = 0; i < count; i++) {
+         if (i > 0)
+            vlog_add_param(cat, pfmt_string(plain ? "," : ", ", loc));
+
+         vlog_node_t sel = vlog_new(V_BIT_SELECT);
+         if (vlog_kind(arg) == V_BIT_SELECT) {
+            vlog_set_value(sel, vlog_value(arg));
+            for (int j = 0; j < vlog_params(arg); j++)
+               vlog_add_param(sel, vlog_param(arg, j));
+         }
+         else
+            vlog_set_value(sel, arg);
+         vlog_add_param(sel, pfmt_number(left + step * i, loc));
+         vlog_set_loc(sel, loc);
+
+         vlog_node_t elem = vlog_new(V_SYS_FCALL);
+         vlog_set_ident(elem, ident_new("$sformatf"));
+         vlog_set_subkind(elem, V_SYSTF_NONE);
+         vlog_set_ival(elem, vlog_ival(v));
+         vlog_set_loc(elem, loc);
+         vlog_add_param(elem, pfmt_string(plain ? "%0p" : "%p", loc));
+         vlog_add_param(elem, sel);
+         vlog_add_param(cat, simp_format_p(elem));
+      }
+
+      vlog_add_param(cat, pfmt_string("}", loc));
+      return cat;
+   }
+
+   // The elements of the array are converted by a loop at run time
 
    vlog_node_t dim = vlog_new(V_DIMENSION);
    vlog_set_subkind(dim, V_DIM_PACKED);
