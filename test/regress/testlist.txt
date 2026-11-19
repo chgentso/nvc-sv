@@ -2916,3 +2916,4 @@ svdpiexportgen2 verilog,gold,2019,svlib=dpi_test
 svhierenum1     verilog,gold,2019
 svbindnoinst1   verilog,gold,2019,top2=binder
 svuvmhdl1       verilog,gold,2019
+svforcearg1     verilog,gold,2019

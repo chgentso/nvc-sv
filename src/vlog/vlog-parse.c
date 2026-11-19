@@ -11806,6 +11806,21 @@ static vlog_node_t pca_and(vlog_node_t a, vlog_node_t b, const loc_t *loc)
    return v;
 }
 
+static void pca_local_cb(vlog_node_t v, void *ctx)
+{
+   if (vlog_kind(v) != V_REF || !vlog_has_ref(v))
+      return;
+
+   switch (vlog_kind(vlog_ref(v))) {
+   case V_TF_PORT_DECL:
+   case V_LOCAL_DECL:
+      *(bool *)ctx = true;
+      break;
+   default:
+      break;
+   }
+}
+
 static vlog_node_t rewrite_pca(vlog_node_t stmt, bool is_assign)
 {
    // A procedural continuous assignment or force follows the value of
@@ -11835,6 +11850,18 @@ static vlog_node_t rewrite_pca(vlog_node_t stmt, bool is_assign)
    }
 
    const unsigned n = ++pca_count;
+
+   // The process which repeats the statement is outside the subroutine so
+   // cannot see its arguments and local variables: the value is that when
+   // the statement executes
+   bool uses_locals = false;
+   vlog_visit(vlog_value(stmt), pca_local_cb, &uses_locals);
+   if (uses_locals) {
+      vlog_add_stmt(blk, pca_set(is_assign ? avar : fvar, n, loc));
+      vlog_add_stmt(blk, is_assign
+                    ? rs_if(pca_eq(fvar, 0, loc), stmt, NULL, loc) : stmt);
+      return blk;
+   }
 
    vlog_node_t ctrl = vlog_new(V_EVENT_CONTROL);
    vlog_set_loc(ctrl, loc);
