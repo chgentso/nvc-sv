@@ -2917,3 +2917,5 @@ svhierenum1     verilog,gold,2019
 svbindnoinst1   verilog,gold,2019,top2=binder
 svuvmhdl1       verilog,gold,2019
 svforcearg1     verilog,gold,2019
+textio_overflow normal
+textio_overflow2 gold,fail

@@ -293,18 +293,24 @@ package body textio is
     procedure read_decimal (l      : inout line;
                             pos    : inout integer;
                             value  : out integer;
-                            ndig   : out natural ) is
+                            ndig   : out natural;
+                            ovf    : out boolean ) is
         variable digit  : integer;
         variable result : integer := 0;
         variable count  : natural := 0;
         variable peek   : character;
     begin
+        ovf := false;
         -- Accumulate negated to avoid problems around INTEGER'LOW
         while pos <= l.all'length loop
             peek := get_char(l.all, pos);
             if peek >= '0' and peek <= '9' then
                 digit := character'pos(peek) - character'pos('0');
-                result := (result * 10) - digit;
+                if result < (integer'low + digit) / 10 then
+                    ovf := true;    -- Keep scanning to find the end
+                else
+                    result := (result * 10) - digit;
+                end if;
                 count := count + 1;
                 pos := pos + 1;
             elsif peek = '_' and count > 0 and pos < l.all'length
@@ -332,6 +338,8 @@ package body textio is
         variable is_negative : boolean := false;
         variable peek        : character;
         variable hash        : natural;
+        variable ovf         : boolean;
+        variable ovf_exp     : boolean;
     begin
         good := false;
         skip_whitespace(l);
@@ -349,7 +357,7 @@ package body textio is
             when others =>
         end case;
 
-        read_decimal(l, pos, result, ndig);
+        read_decimal(l, pos, result, ndig, ovf);
         if ndig = 0 then
             return;
         end if;
@@ -365,7 +373,7 @@ package body textio is
         if hash > 0 then
             -- Based literal
             base := -result;
-            if base < 2 or base > 16 then
+            if ovf or base < 2 or base > 16 then
                 return;
             end if;
             result := 0;
@@ -375,7 +383,11 @@ package body textio is
                 peek := get_char(l.all, pos);
                 digit := ext_digit(peek);
                 if digit < base then
-                    result := (result * base) - digit;
+                    if result < (integer'low + digit) / base then
+                        ovf := true;    -- Keep scanning to find the end
+                    else
+                        result := (result * base) - digit;
+                    end if;
                     ndig := ndig + 1;
                 elsif peek = '_' and ndig > 0 and pos < l.all'length
                     and ext_digit(get_char(l.all, pos + 1)) < base
@@ -406,14 +418,28 @@ package body textio is
                 and get_char(l.all, digit) <= '9'
             then
                 pos := digit;
-                read_decimal(l, pos, exp, ndig);
-                for i in 1 to -exp loop
+                read_decimal(l, pos, exp, ndig, ovf_exp);
+                -- EXP is negated
+                while exp < 0 and result /= 0 loop
+                    if result < integer'low / base then
+                        ovf := true;
+                        exit;
+                    end if;
                     result := result * base;
+                    exp := exp + 1;
                 end loop;
+                ovf := ovf or (ovf_exp and result /= 0);
             end if;
         end if;
 
+        if ovf then
+            return;
+        end if;
+
         if not is_negative then
+            if result = integer'low then
+                return;
+            end if;
             result := -result;
         end if;
 
@@ -442,14 +468,15 @@ package body textio is
         variable scale  : real := 1.0;
         variable digit  : integer;
         variable exp    : integer;
+        variable ovf    : boolean;
         variable seen_point : boolean := false;
         variable closing    : character;
         variable peek       : character;
     begin
         good := false;
-        read_decimal(l, pos, ibase, ndig);
+        read_decimal(l, pos, ibase, ndig, ovf);
         ibase := -ibase;
-        if ibase < 2 or ibase > 16 then
+        if ovf or ibase < 2 or ibase > 16 then
             return;
         end if;
         base := real(ibase);
@@ -493,7 +520,10 @@ package body textio is
             if digit <= l.all'length and get_char(l.all, digit) >= '0'
                 and get_char(l.all, digit) <= '9'
             then
-                read_decimal(l, digit, exp, ndig);
+                read_decimal(l, digit, exp, ndig, ovf);
+                if ovf then
+                    return;
+                end if;
                 if get_char(l.all, pos + 1) = '-' then
                     result := result * (base ** exp);   -- EXP is negated
                 else
@@ -647,6 +677,11 @@ package body textio is
             if l'length >= len
                 and strcasecmp(get_slice(l.all, 1, len), unit_map(i).name(1 to len))
             then
+                if scale > time'high / unit_map(i).unit
+                    or scale < time'low / unit_map(i).unit
+                then
+                    return;     -- Result would overflow TIME
+                end if;
                 value := scale * unit_map(i).unit;
                 consume(l, len);
                 good := true;
