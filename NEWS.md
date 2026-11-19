@@ -6,7 +6,7 @@
 - Enum literals can be named hierarchically.
 - A `bind` into a module with no instances is no longer an error.
 - `force` of a value that uses a subroutine argument.
-- The HDL back-door routines of UVM (`uvm_hdl_*`) and the regular-expression and command-line DPI functions are built in, so UVM can be compiled with only `-DUVM_REGEX_NO_DPI -DUVM_CMDLINE_NO_DPI`.
+- nvc-sv implements all of UVM's DPI routines (HDL back door, regular expressions, command line), so UVM can be compiled without any `*_NO_DPI` define.
 
 ## nvc-sv 0.16.5
 - An array variable initialised from another array, a slice or a function returning an array now gets every element; before, only the last element was copied and the rest stayed undefined (wrong results in 0.16.4 and earlier).
