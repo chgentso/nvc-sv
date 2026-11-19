@@ -1,0 +1,26 @@
+2 1 2
+2 1
+aq 0 0
+aq 0 1
+aq 1 0
+d 0 0
+d 0 1
+d 0 2
+d 1 0
+sum 29
+fwd aq 0 0
+fwd aq 0 1
+fwd aq 1 0
+fwd d 0 0
+fwd d 0 1
+fwd d 0 2
+fwd d 1 0
+fwd q 0 0
+fwd q 0 1
+fwd q 0 2
+fwd q 1 0
+fwd q 1 1
+fwd q 1 2
+fwd e 0 0
+fwd e 1 0
+fwd e 1 1

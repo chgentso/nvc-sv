@@ -8755,7 +8755,17 @@ static vlog_node_t elab_rewrite_hier_ref_cb(vlog_node_t v, void *arg)
       // A method of a class handle reached by a hierarchical reference
       vlog_node_t member = vlog_value(v);
       const bool resolved = vlog_subkind(v) != V_METHOD_USER || vlog_has_ref(v);
-      if ((vlog_kind(member) == V_HIER_REF || vlog_kind(member) == V_MEMBER_REF)
+
+      // A method of an element selected from a variable
+      vlog_node_t root = member;
+      while (vlog_kind(root) == V_BIT_SELECT)
+         root = vlog_value(root);
+
+      if (!resolved && root != member && vlog_kind(root) == V_HIER_REF
+          && vlog_has_ref(root))
+         vlog_resolve_method(v);
+      else if ((vlog_kind(member) == V_HIER_REF
+                || vlog_kind(member) == V_MEMBER_REF)
           && vlog_has_ref(member)) {
          vlog_node_t decl = vlog_ref(member);
          if (vlog_kind(decl) == V_FUNC_DECL || vlog_kind(decl) == V_TASK_DECL) {

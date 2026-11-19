@@ -10875,6 +10875,7 @@ static vlog_node_t p_foreach_statement(void)
             vlog_set_ident(q[j], ident_new(queries[j]));
             vlog_set_subkind(q[j], V_SYSTF_NONE);
             vlog_set_ival(q[j], time_ival());
+            vlog_set_flags(q[j], VLOG_F_FORWARD);
             vlog_add_param(q[j], base);
             vlog_add_param(q[j], foreach_number(dimno, vloc));
             vlog_set_loc(q[j], vloc);

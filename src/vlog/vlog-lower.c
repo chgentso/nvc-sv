@@ -1620,7 +1620,8 @@ static int vlog_dyn_depth(vlog_node_t value, vlog_node_t *elem)
    // dynamic arrays or queues and then of the dynamic array or queue itself
 
    int depth = 0;
-   if (vlog_kind(value) == V_REF && vlog_has_ref(value)) {
+   if ((vlog_kind(value) == V_REF || vlog_kind(value) == V_HIER_REF)
+       && vlog_has_ref(value)) {
       vlog_node_t decl = vlog_ref(value);
       switch (vlog_kind(decl)) {
       case V_VAR_DECL:
@@ -1808,6 +1809,13 @@ static vlog_select_t vlog_lower_select(vlog_gen_t *g, vlog_node_t v)
             mir_type_t t_std = vlog_std_logic_type(g);
             ptr = vlog_bind_hier(g, v, mir_signal_type(g->mu, t_std),
                                  MIR_NULL_STAMP);
+         }
+         else if (dynamic && vlog_kind(decl) == V_VAR_DECL
+                  && vlog_ranges(decl) > 0 && vlog_size(decl) > 1) {
+            // An unpacked array of queues or dynamic arrays
+            mir_type_t t_array =
+               mir_carray_type(g->mu, vlog_size(decl), ti->type);
+            ptr = vlog_bind_hier(g, v, t_array, ti->stamp);
          }
          else
             ptr = vlog_bind_hier(g, v, dynamic ? ti->type : ti->signal,
@@ -6542,6 +6550,26 @@ static mir_value_t vlog_lower_array_query(vlog_gen_t *g, vlog_node_t v)
    vlog_qdim_t dims[MAX_QUERY_DIMS];
    const int n = vlog_query_dims(arg, dims);
 
+   if (vlog_flags(v) & VLOG_F_FORWARD) {
+      // The bounds of a foreach over a name which was bound later: the keys
+      // of an associative array cannot be found from the number of elements
+      vlog_node_t root = arg;
+      while (vlog_kind(root) == V_BIT_SELECT)
+         root = vlog_value(root);
+
+      vlog_node_t t = vlog_has_ref(root) && vlog_kind(root) == V_HIER_REF
+         ? vlog_get_type(vlog_ref(root)) : NULL;
+      for (; t != NULL && vlog_kind(t) == V_DATA_TYPE
+              && (vlog_subkind(t) == DT_DYNARRAY || vlog_subkind(t) == DT_QUEUE
+                  || vlog_subkind(t) == DT_ASSOC);
+           t = vlog_get_type(vlog_type(t))) {
+         if (vlog_subkind(t) == DT_ASSOC)
+            fatal_at(vlog_loc(v), "sorry, foreach over an associative array "
+                     "named before its instance is declared is not "
+                     "supported");
+      }
+   }
+
    ident_t id = vlog_ident(v);
    if (id == ident_new("$dimensions"))
       return mir_const_vec(g->mu, t_integer, n, 0);
@@ -6562,7 +6590,7 @@ static mir_value_t vlog_lower_array_query(vlog_gen_t *g, vlog_node_t v)
    int64_t left, right;
    mir_value_t len = MIR_NULL_VALUE;
    if (q->dynamic) {
-      if (which != 1 || vlog_kind(arg) == V_BIT_SELECT)
+      if (which != 1)
          fatal_at(vlog_loc(v), "sorry, this dimension of a dynamic array "
                   "cannot be queried");
 
@@ -15768,7 +15796,8 @@ static mir_value_t vlog_lower_dyn_element(vlog_gen_t *g, vlog_node_t v,
    // The first indices select an element of an unpacked array of queues
    // or dynamic arrays
    int nfixed = 0;
-   if (vlog_kind(value) == V_REF && vlog_has_ref(value)) {
+   if ((vlog_kind(value) == V_REF || vlog_kind(value) == V_HIER_REF)
+       && vlog_has_ref(value)) {
       vlog_node_t decl = vlog_ref(value);
       switch (vlog_kind(decl)) {
       case V_VAR_DECL:

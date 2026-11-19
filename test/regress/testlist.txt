@@ -2906,3 +2906,4 @@ svforeachhier2  verilog,gold,2019
 vlogconstfmt3   verilog,gold,2019
 vlogarrfunc1    verilog,gold,2019
 svnewhier1      verilog,gold,2019
+svforeachdyn2   verilog,gold,2019
