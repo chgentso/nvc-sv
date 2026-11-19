@@ -447,15 +447,10 @@ static bool is_scoped_type_start(void)
    return n > 1 && (peek_nth(n + 1) == tID || peek_nth(n + 1) == tHASH);
 }
 
-static bool is_specialised_scope(void)
+static bool is_specialised_scope_from(int n)
 {
-   // A name in a specialisation of a class like foo #(int)::bar but not a
-   // declaration using a type in the class like foo #(int)::type_t x
+   // The parameters of the specialisation start at token n
 
-   if (peek() != tID || peek_nth(2) != tHASH || peek_nth(3) != tLPAREN)
-      return false;
-
-   int n = 4;
    for (int depth = 1; depth > 0; n++) {
       if (n >= TOKENQ_SIZE - 8)
          return false;
@@ -479,6 +474,28 @@ static bool is_specialised_scope(void)
    }
 
    return peek_nth(n) != tID;
+}
+
+static bool is_specialised_scope(void)
+{
+   // A name in a specialisation of a class like foo #(int)::bar but not a
+   // declaration using a type in the class like foo #(int)::type_t x
+
+   if (peek() != tID || peek_nth(2) != tHASH || peek_nth(3) != tLPAREN)
+      return false;
+
+   return is_specialised_scope_from(4);
+}
+
+static bool is_pkg_specialised_scope(void)
+{
+   // As above for a class declared in a package: pkg::foo #(int)::bar
+
+   if (peek() != tID || peek_nth(2) != tSCOPE || peek_nth(3) != tID
+       || peek_nth(4) != tHASH || peek_nth(5) != tLPAREN)
+      return false;
+
+   return is_specialised_scope_from(6);
 }
 
 static bool is_process_name(void)
@@ -5848,6 +5865,34 @@ static vlog_node_t p_scope_prefix(void)
             consume(tID);
             consume(tSCOPE);
          }
+         qualify_failed = true;
+         return NULL;
+      }
+
+      if (scope == NULL && is_pkg_specialised_scope()
+          && vlog_symtab_query(symtab, peek_ident_nth(1)) == NULL) {
+         // Specialisation of a parameterised class declared in a package
+         vlog_node_t pkg = package_by_name(p_identifier());
+         consume(tSCOPE);
+         ident_t cid = p_identifier();
+         vlog_node_t d = pkg ? vlog_scope_member(pkg, cid) : NULL;
+         if (d != NULL && vlog_kind(d) == V_CLASS_DECL
+             && (vlog_flags(d) & VLOG_F_GENERIC)) {
+            const bool saved_keep = keep_class_scope;
+            keep_class_scope = true;
+            vlog_node_t c = specialise_scoped(d, false);
+            keep_class_scope = saved_keep;
+            consume(tSCOPE);
+
+            if (c != NULL && vlog_kind(c) == V_CLASS_DECL) {
+               scope = c;
+               continue;
+            }
+         }
+         else if (pkg != NULL)
+            error_at(&state.last_loc, "%pQ is not a parameterised class in "
+                     "package %pQ", cid, vlog_ident(pkg));
+
          qualify_failed = true;
          return NULL;
       }

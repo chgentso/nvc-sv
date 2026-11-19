@@ -2911,3 +2911,4 @@ svnewhier1      verilog,gold,2019
 svforeachdyn2   verilog,gold,2019
 svnamedcomb1    verilog,gold,2019
 svdpiexportgen1 verilog,gold,2019
+svpkgspec1      verilog,gold,2019
