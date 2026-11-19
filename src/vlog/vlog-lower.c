@@ -107,6 +107,7 @@ typedef struct {
    bool           for_write;
    int            stream_ubits;
    bool           ref_bind;
+   vlog_node_t    new_class;   // Class of a new expression bound later
    vlog_node_t    update_key;  // Index of the target of an update
    mir_value_t    this_val;
    mir_value_t    crv_ctx;
@@ -3798,6 +3799,14 @@ static void vlog_assign_stream(vlog_gen_t *g, vlog_node_t target,
 static void vlog_assign_variable(vlog_gen_t *g, vlog_node_t target,
                                  mir_value_t value, vlog_node_t rhs)
 {
+   if (rhs != NULL && vlog_kind(rhs) == V_CLASS_NEW && !vlog_has_type(rhs)
+       && vlog_kind(target) == V_HIER_REF) {
+      // The class of a hierarchical name is only known once it is bound
+      vlog_node_t type = vlog_get_type(target);
+      if (type != NULL && vlog_kind(type) == V_CLASS_DECL)
+         g->new_class = type;
+   }
+
    if (vlog_kind(target) == V_STREAM) {
       if (mir_is_null(value))
          value = vlog_lower_rvalue(g, rhs);
@@ -19549,10 +19558,15 @@ static void vlog_copy_properties(vlog_gen_t *g, vlog_node_t class,
 
 static mir_value_t vlog_lower_class_new(vlog_gen_t *g, vlog_node_t v)
 {
-   if (!vlog_has_type(v))
+   vlog_node_t type;
+   if (vlog_has_type(v))
+      type = vlog_type(v);
+   else if (g->new_class != NULL)
+      type = g->new_class;
+   else
       fatal_at(vlog_loc(v), "cannot determine the type of this new expression");
 
-   vlog_node_t type = vlog_type(v);
+   g->new_class = NULL;
    const type_info_t *ti = vlog_type_info(g, type);
 
    if (vlog_kind(type) == V_DATA_TYPE) {
