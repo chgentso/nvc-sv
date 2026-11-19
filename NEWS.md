@@ -1,3 +1,8 @@
+## nvc-sv 0.16.4
+- `$sformatf` with constant arguments can be used in a constant expression, including `%m`, which gives the hierarchical name of each instance.
+- An `always_comb` or `always_latch` with no sensitivities runs once at time 0 without a warning.
+- A variable output port is no longer merged with its actual when the actual is forced, so a force outside the instance does not change the value inside.
+
 ## nvc-sv 0.16.3
 - No simulator changes; toolchain release 0.16.3.
 
