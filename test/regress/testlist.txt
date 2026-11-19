@@ -2901,3 +2901,4 @@ vlogalwayscomb1 verilog,gold,2019
 svforceport1    verilog
 vlogconstfmt2   verilog,gold,2019
 vlogparrinit1   verilog,gold,2019
+vlogparrinit2   verilog,gold,2019

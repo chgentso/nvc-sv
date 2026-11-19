@@ -30341,9 +30341,41 @@ static void vlog_store_local_init(vlog_gen_t *g, vlog_node_t d, mir_value_t var)
          return;
       }
 
-      if (vlog_kind(vlog_value(d)) != V_PATTERN_EXPR)
-         fatal_at(vlog_loc(d), "sorry, this unpacked array initialiser is "
-                  "not supported");
+      if (vlog_kind(vlog_value(d)) != V_PATTERN_EXPR) {
+         // Every element is copied from the array on the right hand side
+         if (vlog_unpacked_count_of(vlog_value(d)) != nelems)
+            fatal_at(vlog_loc(d), "sorry, this unpacked array initialiser is "
+                     "not supported");
+
+         if (eclass == MIR_TYPE_REAL) {
+            vlog_select_t src = vlog_lower_select(g, vlog_value(d));
+            mir_value_t obj = src.obj;
+            if (mir_is_signal(g->mu, obj))
+               obj = mir_build_resolved(g->mu, obj);
+            mir_type_t t_offset = mir_offset_type(g->mu);
+            mir_value_t dst = mir_build_array_ref(
+               g->mu, var, mir_const(g->mu, t_offset, 0));
+            mir_build_copy(g->mu, dst,
+                           mir_build_array_ref(g->mu, obj, src.dst_offset),
+                           mir_const(g->mu, t_offset, nelems));
+            return;
+         }
+
+         if (!is_vec)
+            fatal_at(vlog_loc(d), "sorry, this unpacked array initialiser is "
+                     "not supported");
+
+         mir_type_t t_flat = mir_vec4_type(g->mu, ti->size * nelems, false);
+         mir_value_t packed =
+            vlog_lower_with_context(g, vlog_value(d), t_flat);
+         if (mir_get_class(g->mu, mir_get_type(g->mu, packed))
+             == MIR_TYPE_UARRAY)
+            packed = vlog_load_flat_array(
+               g, mir_build_unwrap(g->mu, packed), nelems, ti, false);
+         vlog_store_flat_array(g, var, nelems, ti,
+                               vlog_lower_cast(g, t_flat, packed));
+         return;
+      }
 
       vlog_node_t *which LOCAL =
          xmalloc_array(vlog_size(dims[0]), sizeof(vlog_node_t)), def;
