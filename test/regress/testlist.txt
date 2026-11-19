@@ -2903,3 +2903,4 @@ vlogconstfmt2   verilog,gold,2019
 vlogparrinit1   verilog,gold,2019
 vlogparrinit2   verilog,gold,2019
 svforeachhier2  verilog,gold,2019
+vlogconstfmt3   verilog,gold,2019

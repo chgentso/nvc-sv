@@ -281,6 +281,19 @@ static fold_state_t get_fold_state(vlog_node_t v, fold_ctx_t *ctx)
                   state = MAX(state, get_fold_state(vlog_param(v, i), ctx));
                return state == FOLD_CONST ? FOLD_LATER : state;
             }
+            else if (vlog_ident(v) == ident_new("$__pfmt")
+                     && vlog_params(v) >= 6
+                     && vlog_kind(vlog_param(v, 0)) == V_METHOD_CALL) {
+               // The elements of a constant queue, dynamic array or
+               // associative array are only known once its value is
+               // evaluated so the formatting is deferred with it
+               vlog_node_t len = vlog_param(v, 0);
+               vlog_node_t array = vlog_params(v) > 6
+                  ? vlog_param(v, 6) : vlog_value(len);
+               fold_state_t state = get_fold_state(array, ctx);
+               return state == FOLD_CONST || state == FOLD_POSSIBLE
+                  ? FOLD_LATER : state;
+            }
             else if (vlog_ident(v) != ident_new("$isunbounded")) {
                ctx->nonconst = v;
                return FOLD_NON_CONST;
