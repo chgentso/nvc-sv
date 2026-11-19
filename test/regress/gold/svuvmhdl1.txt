@@ -1,0 +1,7 @@
+check 1
+deposit 1 sig=5a
+read 1 5a
+force 1 sig=11
+release 1
+sig=22
+check bad 0
