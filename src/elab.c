@@ -8232,6 +8232,46 @@ static vlog_node_t elab_hier_ref_param(tree_t b, ident_t id)
    return NULL;
 }
 
+static vlog_node_t elab_hier_ref_enum(tree_t b, ident_t id)
+{
+   // An enumeration literal declared in the module of an instance (23.6)
+
+   if (tree_decls(b) == 0)
+      return NULL;
+
+   tree_t h = tree_decl(b, 0);
+   if (tree_kind(h) != T_HIER || !tree_has_ref(h)
+       || tree_kind(tree_ref(h)) != T_VERILOG)
+      return NULL;
+
+   vlog_node_t body = tree_vlog(tree_ref(h));
+   const int ndecls = vlog_decls(body);
+   for (int i = 0; i < ndecls; i++) {
+      vlog_node_t d = vlog_decl(body, i);
+      switch (vlog_kind(d)) {
+      case V_TYPE_DECL:
+      case V_VAR_DECL:
+      case V_NET_DECL:
+         break;
+      default:
+         continue;
+      }
+
+      vlog_node_t t = vlog_has_type(d) ? vlog_get_type(d) : NULL;
+      if (t == NULL || vlog_kind(t) != V_ENUM_DECL)
+         continue;
+
+      const int nnames = vlog_decls(t);
+      for (int j = 0; j < nnames; j++) {
+         vlog_node_t en = vlog_decl(t, j);
+         if (vlog_kind(en) == V_ENUM_NAME && vlog_ident(en) == id)
+            return en;
+      }
+   }
+
+   return NULL;
+}
+
 static tree_t elab_walk_mod_refs(vlog_node_t v, tree_t where, hash_t *parents)
 {
    // A name declared in an enclosing scope of a generate block
@@ -8908,6 +8948,15 @@ static vlog_node_t elab_rewrite_hier_ref_cb(vlog_node_t v, void *arg)
       sub.gen_depth = 0;
       return vlog_rewrite(param, elab_rewrite_hier_ref_pre_cb,
                           elab_rewrite_hier_ref_cb, &sub);
+   }
+
+   vlog_node_t en = elab_hier_ref_enum(b, id);
+   if (en != NULL) {
+      vlog_node_t ref = vlog_new(V_REF);
+      vlog_set_ident(ref, id);
+      vlog_set_ref(ref, en);
+      vlog_set_loc(ref, vlog_loc(v));
+      return ref;
    }
 
    param = elab_hier_ref_generic(b, id, vlog_loc(v));

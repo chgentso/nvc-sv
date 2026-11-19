@@ -2913,3 +2913,4 @@ svnamedcomb1    verilog,gold,2019
 svdpiexportgen1 verilog,gold,2019
 svpkgspec1      verilog,gold,2019
 svdpiexportgen2 verilog,gold,2019,svlib=dpi_test
+svhierenum1     verilog,gold,2019
