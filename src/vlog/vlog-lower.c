@@ -30043,6 +30043,16 @@ static mir_value_t vlog_lower_nettype_signal(vlog_gen_t *g, vlog_node_t v,
    return signal;
 }
 
+static unsigned vlog_unpacked_count_of(vlog_node_t v)
+{
+   // Number of elements in the unpacked array an expression denotes or
+   // zero if it is not such an array
+
+   vlog_node_t dims[MAX_UNPACKED_DIMS];
+   const int n = vlog_unpacked_dims(v, dims);
+   return n > 0 ? vlog_unpacked_count(dims, n) : 0;
+}
+
 static void vlog_lower_var_decl(vlog_gen_t *g, vlog_node_t v, tree_t wrap,
                                 unsigned extra_flags)
 {
@@ -30130,6 +30140,35 @@ static void vlog_lower_var_decl(vlog_gen_t *g, vlog_node_t v, tree_t wrap,
          // The elements are slices of the packed result
          mir_type_t t_flat = mir_vec4_type(g->mu, total_size, false);
          mir_value_t packed = vlog_lower_stream(g, vlog_value(v), t_flat);
+         cast = vlog_lower_cast(g, t_flat, packed);
+      }
+      else if (total_size > 1 && vlog_is_fixed_unpacked(v)
+               && mir_get_class(g->mu, ti->type) == MIR_TYPE_REAL
+               && vlog_unpacked_count_of(vlog_value(v)) == vlog_size(v)) {
+         // Each real is held as one element
+         vlog_select_t src = vlog_lower_select(g, vlog_value(v));
+         mir_value_t obj = src.obj;
+         if (mir_is_signal(g->mu, obj))
+            obj = mir_build_resolved(g->mu, obj);
+         cast = mir_build_array_ref(g->mu, obj, src.dst_offset);
+      }
+      else if (total_size > 1 && vlog_is_fixed_unpacked(v)
+               && mir_get_class(g->mu, ti->type) != MIR_TYPE_REAL
+               && vlog_unpacked_count_of(vlog_value(v)) == vlog_size(v)) {
+         // Every element is copied from the array on the right hand side
+         mir_type_t t_flat = mir_vec4_type(g->mu, total_size, false);
+         mir_value_t packed =
+            vlog_lower_with_context(g, vlog_value(v), t_flat);
+         if (mir_get_class(g->mu, mir_get_type(g->mu, packed))
+             == MIR_TYPE_UARRAY) {
+            vlog_node_t dims[MAX_UNPACKED_DIMS];
+            const int ndims = MIN(vlog_ranges(v), MAX_UNPACKED_DIMS);
+            for (int i = 0; i < ndims; i++)
+               dims[i] = vlog_range(v, i);
+            packed = vlog_load_flat_array(
+               g, mir_build_unwrap(g->mu, packed),
+               vlog_unpacked_count(dims, ndims), ti, false);
+         }
          cast = vlog_lower_cast(g, t_flat, packed);
       }
       else {
