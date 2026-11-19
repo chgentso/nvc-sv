@@ -20512,7 +20512,11 @@ static void p_generate_item(vlog_node_t parent)
 
    BEGIN("generate item");
 
-   p_module_or_generate_item(parent);
+   // A DPI export is allowed in the scope of the function (1800-2017 35.5.4)
+   if (peek() == tEXPORT && peek_nth(2) == tSTRING)
+      p_dpi_export(parent);
+   else
+      p_module_or_generate_item(parent);
 }
 
 static ident_t generate_block_name(void)
