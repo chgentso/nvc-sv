@@ -10505,6 +10505,7 @@ typedef struct {
    vlog_node_t  assoc;
    vlog_node_t  left;
    vlog_node_t  right;
+   vlog_node_t  count;   // Number of elements, queried once bound
 } foreach_dim_t;
 
 static int foreach_dimensions(vlog_node_t decl, foreach_dim_t *dims)
@@ -10639,6 +10640,7 @@ static vlog_node_t p_foreach_statement(void)
    foreach_dim_t dims[MAX_FOREACH_DIMS];
    int ndims = 0, nselected = 0;
    vlog_node_t decl = NULL;
+   bool hier_pending = false;
    switch (vlog_kind(arr)) {
    case V_REF:
    case V_MEMBER_REF:
@@ -10647,9 +10649,7 @@ static vlog_node_t p_foreach_statement(void)
       break;
    case V_HIER_REF:
       decl = hier_member_decl(arr);
-      if (decl == NULL)
-         error_at(loc, "sorry, the array of this foreach cannot be found "
-                  "from its hierarchical name");
+      hier_pending = decl == NULL;
       break;
    case V_BIT_SELECT:
       {
@@ -10663,6 +10663,10 @@ static vlog_node_t p_foreach_statement(void)
          if ((vlog_kind(root) == V_REF || vlog_kind(root) == V_MEMBER_REF)
              && vlog_has_ref(root))
             decl = vlog_ref(root);
+         else if (vlog_kind(root) == V_HIER_REF) {
+            decl = hier_member_decl(root);
+            hier_pending = decl == NULL;
+         }
          else
             error_at(loc, "foreach requires the name of an array");
       }
@@ -10692,6 +10696,13 @@ static vlog_node_t p_foreach_statement(void)
 
          dims[ndims++] = (foreach_dim_t) { .left = bound[0], .right = bound[1] };
       }
+   }
+
+   if (hier_pending) {
+      // The instance is not known until elaboration so the bounds and the
+      // number of elements of each dimension are queried once it is
+      for (int i = 0; i < nvars && i < MAX_FOREACH_DIMS; i++)
+         dims[ndims++] = (foreach_dim_t) { .count = arr };
    }
 
    if (decl != NULL) {
@@ -10826,6 +10837,106 @@ static vlog_node_t p_foreach_statement(void)
 
          vlog_node_t fstep = vlog_new(V_FOR_STEP);
          vlog_add_stmt(fstep, step);
+         vlog_set_loc(fstep, vloc);
+         vlog_set_right(loop, fstep);
+
+         if (top == NULL)
+            top = loop;
+         else
+            vlog_add_stmt(inner, loop);
+
+         inner = loop;
+         continue;
+      }
+      else if (dim->count != NULL) {
+         // Count the elements so a dimension which is empty is skipped and
+         // step towards the right bound whichever way it lies
+
+         // The size of an inner dimension may depend on the outer indices
+         vlog_node_t base = arr;
+         int dimno = i + 1;
+         bool selected = i > 0;
+         for (int j = 0; j < i; j++)
+            selected &= idx[j] != NULL;
+
+         if (selected) {
+            base = vlog_new(V_BIT_SELECT);
+            vlog_set_value(base, arr);
+            vlog_set_loc(base, vloc);
+            for (int j = 0; j < i; j++)
+               vlog_add_param(base, foreach_ref(idx[j], vloc));
+            dimno = 1;
+         }
+
+         vlog_node_t q[3];
+         const char *queries[] = { "$left", "$right", "$size" };
+         for (int j = 0; j < 3; j++) {
+            q[j] = vlog_new(V_SYS_FCALL);
+            vlog_set_ident(q[j], ident_new(queries[j]));
+            vlog_set_subkind(q[j], V_SYSTF_NONE);
+            vlog_set_ival(q[j], time_ival());
+            vlog_add_param(q[j], base);
+            vlog_add_param(q[j], foreach_number(dimno, vloc));
+            vlog_set_loc(q[j], vloc);
+         }
+
+         vlog_node_t loop = vlog_new(V_FOR_LOOP);
+         vlog_set_loc(loop, loc);
+
+         vlog_symtab_push(symtab, loop);
+         depth++;
+
+         vlog_node_t d = vlog_new(V_LOCAL_DECL);
+         vlog_set_ident(d, names[i]);
+         vlog_set_loc(d, vloc);
+
+         vlog_node_t dt = make_integer_atom_type(DT_INT);
+         vlog_set_flags(dt, VLOG_F_SIGNED);
+         vlog_set_type(d, dt);
+         vlog_set_value(d, q[0]);
+
+         vlog_symtab_put(symtab, d);
+         idx[i] = d;
+
+         vlog_node_t n = vlog_new(V_LOCAL_DECL);
+         vlog_set_ident(n, ident_uniq("n"));
+         vlog_set_loc(n, vloc);
+         vlog_set_type(n, make_integer_atom_type(DT_INT));
+         vlog_set_value(n, foreach_number(0, vloc));
+         vlog_symtab_put(symtab, n);
+
+         vlog_node_t finit = vlog_new(V_FOR_INIT);
+         vlog_add_decl(finit, d);
+         vlog_add_decl(finit, n);
+         vlog_set_loc(finit, vloc);
+         vlog_set_left(loop, finit);
+
+         vlog_set_value(loop, foreach_binary(V_BINARY_LT, foreach_ref(n, vloc),
+                                             q[2], vloc));
+
+         vlog_node_t up = foreach_binary(V_BINARY_LEQ, q[0], q[1],
+                                         vloc);
+
+         vlog_node_t delta = vlog_new(V_COND_EXPR);
+         vlog_set_value(delta, up);
+         vlog_set_left(delta, foreach_number(1, vloc));
+         vlog_set_right(delta, foreach_number(-1, vloc));
+         vlog_set_loc(delta, vloc);
+
+         vlog_node_t step = vlog_new(V_OP_ASSIGN);
+         vlog_set_subkind(step, V_ASSIGN_PLUS);
+         vlog_set_target(step, foreach_ref(d, vloc));
+         vlog_set_value(step, delta);
+         vlog_set_loc(step, vloc);
+
+         vlog_node_t post = vlog_new(V_POSTFIX);
+         vlog_set_subkind(post, V_INCDEC_PLUS);
+         vlog_set_target(post, foreach_ref(n, vloc));
+         vlog_set_loc(post, vloc);
+
+         vlog_node_t fstep = vlog_new(V_FOR_STEP);
+         vlog_add_stmt(fstep, step);
+         vlog_add_stmt(fstep, post);
          vlog_set_loc(fstep, vloc);
          vlog_set_right(loop, fstep);
 
