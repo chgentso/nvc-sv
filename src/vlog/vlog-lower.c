@@ -3033,8 +3033,12 @@ static mir_value_t vlog_convert_uarray(vlog_gen_t *g, mir_type_t type,
 
    const mir_class_t fclass = mir_get_class(g->mu, from_elem);
    const mir_class_t tclass = mir_get_class(g->mu, to_elem);
-   if ((fclass != MIR_TYPE_VEC2 && fclass != MIR_TYPE_VEC4)
-       || (tclass != MIR_TYPE_VEC2 && tclass != MIR_TYPE_VEC4))
+   const bool vec_conv = (fclass == MIR_TYPE_VEC2 || fclass == MIR_TYPE_VEC4)
+      && (tclass == MIR_TYPE_VEC2 || tclass == MIR_TYPE_VEC4);
+   const bool handle_conv = (fclass == MIR_TYPE_CONTEXT
+                             && tclass == MIR_TYPE_CONTEXT)
+      || (fclass == MIR_TYPE_ACCESS && tclass == MIR_TYPE_ACCESS);
+   if (!vec_conv && !handle_conv)
       return mir_build_cast(g->mu, type, value);
 
    mir_type_t t_offset = mir_offset_type(g->mu);

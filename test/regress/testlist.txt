@@ -2975,3 +2975,4 @@ svpatdef2 verilog
 svprocfin1 verilog
 svprockill1 verilog
 svwaitproc1 verilog
+svdynclass1 verilog
