@@ -835,6 +835,22 @@ START_TEST(test_sv_ifdef_b)
 }
 END_TEST
 
+START_TEST(test_sv_vif_generic)
+{
+   // Virtual interfaces in a parameterised class body
+
+   set_standard(STD_19);
+
+   const char *expect =
+      "{\"file\":\"" SCAN_FILE("sv_vif_generic.sv") "\",\"language\":\"verilog\","
+      "\"units\":[{\"name\":\"WORK.VIF_PKG\",\"kind\":\"package\","
+      "\"instantiates\":[]}],"
+      "\"requires\":[\"?vif_if\",\"?other_if\"],\"includes\":[]}\n";
+
+   ck_assert_uint_eq(scan(SCAN_FILE("sv_vif_generic.sv"), expect), 0);
+}
+END_TEST
+
 START_TEST(test_sv_decls)
 {
    // Only a name followed by a port list is an instance: declarations of
@@ -1342,6 +1358,7 @@ Suite *get_scan_tests(void)
    tcase_add_test(tc, test_sv_ifdef_a);
    tcase_add_test(tc, test_sv_ifdef_b);
    tcase_add_test(tc, test_sv_decls);
+   tcase_add_test(tc, test_sv_vif_generic);
    tcase_add_test(tc, test_sv_syntax);
    tcase_add_test(tc, test_sv_bad_name);
    tcase_add_test(tc, test_sv_no_unit);

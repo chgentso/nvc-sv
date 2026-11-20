@@ -18362,6 +18362,20 @@ static vlog_node_t p_generic_class(ident_t name, vlog_flags_t flags)
       }
    }
 
+   if (lib_scan_active()) {
+      // The body is only parsed for a specialisation so the interfaces of
+      // virtual interface types in it are noted here
+      for (int i = 0; i + 1 < g->ntokens; i++) {
+         if (g->tokens[i].token != tVIRTUAL)
+            continue;
+         int j = i + 1;
+         if (g->tokens[j].token == tINTERFACE && j + 1 < g->ntokens)
+            j++;
+         if (g->tokens[j].token == tID)
+            scan_note_name(g->tokens[j].lval.ident);
+      }
+   }
+
    vlog_node_t v = resolve_forward_class(name);
    if (v == NULL)
       v = vlog_new(V_CLASS_DECL);
