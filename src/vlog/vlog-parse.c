@@ -1974,6 +1974,24 @@ static vlog_node_t p_enum_base_type(void)
          return v;
       }
 
+   case tSIGNED:
+   case tUNSIGNED:
+   case tLSQUARE:
+      {
+         vlog_node_t v = vlog_new(V_DATA_TYPE);
+         vlog_set_subkind(v, DT_LOGIC);
+         vlog_set_loc(v, &state.last_loc);
+
+         if (scan(tSIGNED, tUNSIGNED))
+            vlog_set_flags(v, p_signing());
+
+         if (scan(tLSQUARE))
+            vlog_add_range(v, p_packed_dimension());
+
+         vlog_set_loc(v, CURRENT_LOC);
+         return v;
+      }
+
    default:
       if (peek() == tID && peek_nth(2) == tSCOPE && !is_process_name())
          return p_data_type();   // A type declared in a package or class
