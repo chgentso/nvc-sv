@@ -2949,3 +2949,4 @@ subprog3        normal
 subprog4        normal
 case_const1     normal,2008
 subprog5        normal
+svmodportparam1 verilog

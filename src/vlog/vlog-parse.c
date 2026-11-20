@@ -3186,8 +3186,21 @@ static vlog_node_t check_modport_member(vlog_node_t v)
    for (int i = 0; i < ndecls; i++) {
       vlog_node_t d = vlog_decl(iface, i);
       if (vlog_has_ident(d) && vlog_ident(d) == vlog_ident(v)) {
-         error_at(vlog_loc(v), "interface item %pQ is not in modport %pQ",
-                  vlog_ident(v), vlog_ident(mp));
+         switch (vlog_kind(d)) {
+         case V_PARAM_DECL:
+         case V_LOCALPARAM:
+         case V_TYPE_DECL:
+         case V_STRUCT_DECL:
+         case V_UNION_DECL:
+         case V_ENUM_DECL:
+         case V_ENUM_NAME:
+         case V_GENVAR_DECL:
+            return v;
+         default:
+            error_at(vlog_loc(v), "interface item %pQ is not in modport %pQ",
+                     vlog_ident(v), vlog_ident(mp));
+            break;
+         }
          break;
       }
    }
