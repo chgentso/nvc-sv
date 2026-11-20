@@ -12110,52 +12110,95 @@ static mir_value_t vlog_force_source(vlog_gen_t *g,
    return vlog_lvalue_source(g, lvalue, src);
 }
 
-static void vlog_lower_force(vlog_gen_t *g, vlog_node_t v)
+static void vlog_lower_force_one(vlog_gen_t *g, vlog_node_t v,
+                                 vlog_node_t target,
+                                 const vlog_select_t *lvalue,
+                                 mir_value_t cast)
 {
-   vlog_node_t target = vlog_target(v);
-   if (vlog_kind(target) == V_CONCAT)
-      fatal_at(vlog_loc(v), "sorry, force and release of a concatenation "
-               "are not supported");
-
-   vlog_select_t lvalue = vlog_lower_select(g, target);
-   if (!mir_is_signal(g->mu, lvalue.obj))
+   if (!mir_is_signal(g->mu, lvalue->obj))
       fatal_at(vlog_loc(v), "sorry, force and release of this kind of "
                "variable are not supported");
 
    const bool is_var = vlog_is_variable_target(target);
 
-   mir_value_t nets = mir_build_array_ref(g->mu, lvalue.obj,
-                                          lvalue.dst_offset);
+   mir_value_t nets = mir_build_array_ref(g->mu, lvalue->obj,
+                                          lvalue->dst_offset);
 
    if (vlog_kind(v) == V_RELEASE) {
       if (is_var) {
          // Keeps the forced value until the next assignment
          mir_value_t cur =
-            vlog_lower_cast(g, lvalue.type, vlog_lower_rvalue(g, target));
+            vlog_lower_cast(g, lvalue->type, vlog_lower_rvalue(g, target));
          mir_type_t t_time = mir_time_type(g->mu);
-         mir_build_sched_deposit(g->mu, nets, lvalue.count,
-                                 vlog_force_source(g, &lvalue, cur),
+         mir_build_sched_deposit(g->mu, nets, lvalue->count,
+                                 vlog_force_source(g, lvalue, cur),
                                  mir_const(g->mu, t_time, -1));
       }
 
-      mir_build_release(g->mu, nets, lvalue.count);
+      mir_build_release(g->mu, nets, lvalue->count);
       return;
    }
 
-   vlog_node_t rhs = vlog_value(v);
-   mir_value_t value = vlog_lower_with_context(
-      g, rhs, vlog_assign_context(g, lvalue.type, rhs));
-   mir_value_t cast = vlog_lower_cast(g, lvalue.type, value);
-
    // The forced value of a variable is seen immediately
    if (is_var) {
-      mir_build_release(g->mu, nets, lvalue.count);
+      mir_build_release(g->mu, nets, lvalue->count);
       vlog_assign_variable(g, target, cast, NULL);
    }
 
-   mir_value_t src = vlog_force_source(g, &lvalue, cast);
+   mir_value_t src = vlog_force_source(g, lvalue, cast);
 
-   mir_build_force(g->mu, nets, lvalue.count, src);
+   mir_build_force(g->mu, nets, lvalue->count, src);
+}
+
+static void vlog_lower_force(vlog_gen_t *g, vlog_node_t v)
+{
+   vlog_node_t target = vlog_target(v);
+   if (vlog_kind(target) != V_CONCAT) {
+      vlog_select_t lvalue = vlog_lower_select(g, target);
+      mir_value_t cast = MIR_NULL_VALUE;
+      if (vlog_kind(v) != V_RELEASE) {
+         vlog_node_t rhs = vlog_value(v);
+         mir_value_t value = vlog_lower_with_context(
+            g, rhs, vlog_assign_context(g, lvalue.type, rhs));
+         cast = vlog_lower_cast(g, lvalue.type, value);
+      }
+      vlog_lower_force_one(g, v, target, &lvalue, cast);
+      return;
+   }
+
+   const unsigned nlvalues = vlog_count_lvalues(target);
+   vlog_select_t *lvalues LOCAL = xmalloc_array(nlvalues, sizeof(vlog_select_t));
+   vlog_node_t *nodes LOCAL = xmalloc_array(nlvalues, sizeof(vlog_node_t));
+
+   unsigned index = 0;
+   vlog_lower_lvalues(g, target, lvalues, nodes, &index);
+   assert(index == nlvalues);
+
+   if (vlog_kind(v) == V_RELEASE) {
+      for (unsigned i = 0; i < nlvalues; i++)
+         vlog_lower_force_one(g, v, nodes[i], &lvalues[i], MIR_NULL_VALUE);
+      return;
+   }
+
+   unsigned targetsz = 0;
+   for (unsigned i = 0; i < nlvalues; i++)
+      targetsz += lvalues[i].size;
+
+   mir_type_t t_offset = mir_offset_type(g->mu);
+   mir_type_t t_total = mir_vec4_type(g->mu, targetsz, false);
+   vlog_node_t rhs = vlog_value(v);
+   mir_value_t value = vlog_lower_with_context(
+      g, rhs, vlog_assign_context(g, t_total, rhs));
+   mir_value_t packed = vlog_lower_cast(g, t_total, value);
+
+   for (unsigned i = 0, offset = 0; i < nlvalues;
+        offset += lvalues[i].size, i++) {
+      mir_type_t t_part = mir_vec4_type(g->mu, lvalues[i].size, false);
+      mir_value_t part = mir_build_extract(g->mu, t_part, packed,
+                                           mir_const(g->mu, t_offset, offset));
+      mir_value_t cast = vlog_lower_cast(g, lvalues[i].type, part);
+      vlog_lower_force_one(g, v, nodes[i], &lvalues[i], cast);
+   }
 }
 
 static void vlog_bind_reference(vlog_gen_t *g, vlog_node_t v)

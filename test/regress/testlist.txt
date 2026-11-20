@@ -2963,3 +2963,4 @@ svsizedlit1     verilog
 svpatkey1       verilog
 svassoccmp1     verilog
 svgenbegin1     verilog
+svforceconcat1  verilog
