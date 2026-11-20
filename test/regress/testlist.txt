@@ -2960,3 +2960,4 @@ svbitsconst1    verilog
 svstreammem1    verilog
 svvirtualclass1 verilog
 svsizedlit1     verilog
+svpatkey1       verilog

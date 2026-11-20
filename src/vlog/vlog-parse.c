@@ -6293,6 +6293,8 @@ static void p_assignment_pattern(vlog_node_t expr)
    vlog_node_t bt = dt != NULL ? vlog_get_type(dt) : NULL;
    const bool assoc = bt != NULL && vlog_kind(bt) == V_DATA_TYPE
       && vlog_subkind(bt) == DT_ASSOC;
+   const bool struct_pat = !of_array && bt != NULL
+      && (vlog_kind(bt) == V_STRUCT_DECL || vlog_kind(bt) == V_UNION_DECL);
 
    SCOPED_A(vlog_node_t) items = AINIT;
    bool have_error = false, have_type_key = false;
@@ -6329,46 +6331,30 @@ static void p_assignment_pattern(vlog_node_t expr)
 
          have_type_key = true;
       }
-      else if (!assoc && peek() == tID && peek_nth(2) == tCOLON) {
+      else if (struct_pat && peek() == tID && peek_nth(2) == tCOLON) {
          ident_t id = p_identifier();
 
          vlog_node_t ref = vlog_new(V_REF);
          vlog_set_ident(ref, id);
          vlog_set_loc(ref, &state.last_loc);
 
-         if (dt != NULL) {
-            switch (vlog_kind(dt)) {
-            case V_UNION_DECL:
-            case V_STRUCT_DECL:
-               {
-                  bool found = false;
-                  const int ndecls = vlog_decls(dt);
-                  for (int i = 0; i < ndecls; i++) {
-                     vlog_node_t d = vlog_decl(dt, i);
-                     if (vlog_ident(d) == id) {
-                        vlog_set_ref(ref, d);
-                        found = true;
-                        break;
-                     }
-                  }
-
-                  if (!found && !have_error) {
-                     diag_t *d = diag_new(DIAG_ERROR, &state.last_loc);
-                     diag_printf(d, "struct or union has no field %pQ", id);
-                     diag_hint(d, vlog_loc(dt), "data type declared here");
-                     diag_emit(d);
-                     have_error = true;
-                  }
-               }
-               break;
-            default:
-               if (!have_error) {
-                  parse_error(&state.last_loc, "cannot use structure pattern "
-                              "key with this data type");
-                  have_error = true;
-               }
+         bool found = false;
+         const int ndecls = vlog_decls(bt);
+         for (int i = 0; i < ndecls; i++) {
+            vlog_node_t d = vlog_decl(bt, i);
+            if (vlog_ident(d) == id) {
+               vlog_set_ref(ref, d);
+               found = true;
                break;
             }
+         }
+
+         if (!found && !have_error) {
+            diag_t *d = diag_new(DIAG_ERROR, &state.last_loc);
+            diag_printf(d, "struct or union has no field %pQ", id);
+            diag_hint(d, vlog_loc(bt), "data type declared here");
+            diag_emit(d);
+            have_error = true;
          }
 
          vlog_set_left(v, ref);

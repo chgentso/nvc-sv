@@ -1045,6 +1045,19 @@ static vlog_node_t vlog_fold_post_cb(vlog_node_t v, void *context)
          }
       }
       // Fall-through
+   case V_PATTERN_ITEM:
+      if (vlog_has_left(v) && vlog_subkind(v) != 3) {
+         vlog_node_t key = vlog_left(v);
+         if (!(vlog_kind(key) == V_REF && vlog_has_ref(key)
+               && (vlog_kind(vlog_ref(key)) == V_VAR_DECL
+                   || is_data_type(vlog_ref(key))))
+             && get_fold_state(key, context) == FOLD_POSSIBLE) {
+            vlog_node_t folded = fold_const_expr(key, context);
+            if (folded != NULL)
+               vlog_set_left(v, folded);
+         }
+      }
+      return v;
    case V_ENUM_NAME:
       return fold_enum_name(v, context);
    case V_PARAM_ASSIGN:
