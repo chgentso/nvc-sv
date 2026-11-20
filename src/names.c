@@ -4204,7 +4204,14 @@ static type_t overload_get_name_type(tree_t port, ident_t ident, tree_t name)
          if (!type_is_array(ptype))
             return NULL;
 
-         return ptype;
+         tree_t constraint = tree_new(T_CONSTRAINT);
+         tree_set_subkind(constraint, C_INDEX);
+         tree_add_range(constraint, tree_range(name, 0));
+
+         type_t slice_type = type_new(T_SUBTYPE);
+         type_set_constraint(slice_type, constraint);
+         type_set_base(slice_type, ptype);
+         return slice_type;
       }
    default:
       return tree_type(port);

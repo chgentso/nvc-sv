@@ -47,15 +47,21 @@ typedef struct {
    int    dim;   // Index of the subscript for a multi-dimensional array
 } partial_sel_t;
 
-static tree_t simp_partial_choice(partial_sel_t sel)
+static void simp_set_partial_choice(tree_t a, partial_sel_t sel)
 {
    switch (tree_kind(sel.node)) {
    case T_RECORD_REF:
-      return make_ref(tree_ref(sel.node));
+      tree_set_subkind(a, A_NAMED);
+      tree_set_name(a, make_ref(tree_ref(sel.node)));
+      break;
    case T_ARRAY_SLICE:
-      return tree_value(sel.node);
+      tree_set_subkind(a, A_SLICE);
+      tree_add_range(a, tree_range(sel.node, 0));
+      break;
    default:
-      return tree_value(tree_param(sel.node, sel.dim));
+      tree_set_subkind(a, A_NAMED);
+      tree_set_name(a, tree_value(tree_param(sel.node, sel.dim)));
+      break;
    }
 }
 
@@ -64,10 +70,14 @@ static bool simp_same_choice(tree_t a, partial_sel_t sel)
    // True if the association A names the same element or field as the
    // selection NODE
 
-   if (tree_subkind(a) != A_NAMED)
+   tree_t node = sel.node;
+   if (tree_subkind(a) == A_SLICE)
+      return tree_kind(node) == T_ARRAY_SLICE
+         && same_tree(tree_range(a, 0), tree_range(node, 0));
+   else if (tree_subkind(a) != A_NAMED)
       return false;
 
-   tree_t name = tree_name(a), node = sel.node;
+   tree_t name = tree_name(a);
    if (tree_kind(node) == T_RECORD_REF)
       return tree_kind(name) == T_REF && tree_has_ref(name)
          && tree_ref(name) == tree_ref(node);
@@ -109,9 +119,8 @@ static void simp_add_partial(tree_t agg, tree_t name, tree_t ref, tree_t value,
       if (level == 0) {
          tree_t a = tree_new(T_ASSOC);
          tree_set_loc(a, tree_loc(loc));
-         tree_set_subkind(a, A_NAMED);
          tree_set_value(a, value);
-         tree_set_name(a, simp_partial_choice(node));
+         simp_set_partial_choice(a, node);
          tree_add_assoc(cur, a);
          break;
       }
@@ -136,9 +145,8 @@ static void simp_add_partial(tree_t agg, tree_t name, tree_t ref, tree_t value,
 
          tree_t a = tree_new(T_ASSOC);
          tree_set_loc(a, tree_loc(loc));
-         tree_set_subkind(a, A_NAMED);
          tree_set_value(a, sub);
-         tree_set_name(a, simp_partial_choice(node));
+         simp_set_partial_choice(a, node);
          tree_add_assoc(cur, a);
       }
 
@@ -1917,28 +1925,17 @@ static void simp_generic_map(tree_t t, tree_t unit)
             break;
 
          case T_ARRAY_REF:
+         case T_ARRAY_SLICE:
          case T_RECORD_REF:
-            {
-               tree_t a = tree_new(T_ASSOC);
-               tree_set_loc(a, tree_loc(mj));
-               tree_set_subkind(a, A_NAMED);
-               tree_set_value(a, tree_value(mj));
-
-               if (tree_kind(name) == T_ARRAY_REF)
-                  tree_set_name(a, tree_value(tree_param(name, 0)));
-               else
-                  tree_set_name(a, make_ref(tree_ref(name)));
-
-               if (value == NULL) {
-                  value = tree_new(T_AGGREGATE);
-                  tree_set_loc(value, tree_loc(mj));
-                  tree_set_type(value, tree_type(g));
-               }
-               else
-                  assert(tree_kind(value) == T_AGGREGATE);
-
-               tree_add_assoc(value, a);
+            if (value == NULL) {
+               value = tree_new(T_AGGREGATE);
+               tree_set_loc(value, tree_loc(mj));
+               tree_set_type(value, tree_type(g));
             }
+            else
+               assert(tree_kind(value) == T_AGGREGATE);
+
+            simp_add_partial(value, name, ref, tree_value(mj), mj);
             break;
 
          default:

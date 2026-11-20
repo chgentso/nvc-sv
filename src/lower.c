@@ -3891,8 +3891,7 @@ static vcode_reg_t *lower_const_array_aggregate(lower_unit_t *lu, tree_t t,
 
       case A_SLICE:
          {
-            assert(standard() >= STD_08);
-
+            // Also synthesised from slice formal associations in VHDL-1993
             tree_t r = tree_range(a, 0);
             const int64_t r_left = assume_int(tree_left(r));
             const int64_t off = is_downto ? left - r_left : r_left - left;
