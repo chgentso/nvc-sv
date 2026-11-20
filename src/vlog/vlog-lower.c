@@ -2544,6 +2544,11 @@ static void vlog_array_pattern_slots(vlog_node_t v, vlog_node_t dim,
                "array has %u", next, nelems);
 }
 
+static unsigned vlog_unpacked_count(vlog_node_t *dims, int ndims);
+static mir_value_t vlog_load_array_of(vlog_gen_t *g, mir_value_t ua,
+                                      vlog_node_t expr, unsigned count,
+                                      const type_info_t *eti);
+
 static mir_value_t vlog_lower_array_pattern(vlog_gen_t *g, vlog_node_t v,
                                             vlog_node_t *dims, int ndims,
                                             const type_info_t *eti)
@@ -2582,8 +2587,28 @@ static mir_value_t vlog_lower_array_pattern(vlog_gen_t *g, vlog_node_t v,
          continue;
 
       mir_value_t elem;
+      vlog_node_t edims[MAX_UNPACKED_DIMS];
+      int en;
       if (ndims > 1 && vlog_kind(expr) == V_PATTERN_EXPR)
          elem = vlog_lower_array_pattern(g, expr, dims + 1, ndims - 1, eti);
+      else if (ndims > 1 && (en = vlog_unpacked_dims(expr, edims)) > 0
+               && (stride / eti->size) % vlog_unpacked_count(edims, en) == 0) {
+         const unsigned ecount = vlog_unpacked_count(edims, en);
+         const unsigned esize = ecount * eti->size;
+         elem = vlog_lower_rvalue(g, expr);
+         if (mir_get_class(g->mu, mir_get_type(g->mu, elem)) == MIR_TYPE_UARRAY)
+            elem = vlog_load_array_of(g, elem, expr, ecount, eti);
+         mir_type_t t_sub = mir_vec4_type(g->mu, esize, false);
+         elem = vlog_lower_cast(g, t_sub, elem);
+         if (esize < stride) {
+            mir_value_t rep = vlog_lower_cast(
+               g, t_vec4, mir_const_vec(g->mu, t_sub, 0, 0));
+            for (unsigned j = 0; j < stride / esize; j++)
+               rep = mir_build_insert(
+                  g->mu, elem, rep, mir_const(g->mu, t_offset, j * esize));
+            elem = rep;
+         }
+      }
       else {
          mir_value_t value = vlog_lower_with_context(
             g, expr, vlog_assign_context(g, eti->type, expr));
@@ -8814,15 +8839,41 @@ static void vlog_store_pattern_default(vlog_gen_t *g, mir_value_t rec,
                                        vlog_node_t def)
 {
    // The default of a structure pattern applies to the members of nested
-   // structures too
+   // structures and unpacked arrays too
 
    const type_info_t *fti = vlog_type_info(g, vlog_type(fd));
    mir_value_t ptr = mir_build_record_ref(g->mu, rec, field);
-
    vlog_node_t ft = vlog_get_type(vlog_type(fd));
-   if (ft != NULL && vlog_kind(ft) == V_STRUCT_DECL
-       && !(vlog_flags(ft) & VLOG_F_PACKED)
-       && mir_get_class(g->mu, fti->type) == MIR_TYPE_ACCESS) {
+
+   const bool is_ustruct = ft != NULL && vlog_kind(ft) == V_STRUCT_DECL
+      && !(vlog_flags(ft) & VLOG_F_PACKED)
+      && mir_get_class(g->mu, fti->type) == MIR_TYPE_ACCESS;
+
+   if (vlog_is_fixed_unpacked(fd) && vlog_size(fd) > 1) {
+      mir_type_t t_offset = mir_offset_type(g->mu);
+      const unsigned n = vlog_size(fd);
+      for (unsigned i = 0; i < n; i++) {
+         mir_value_t ep = mir_build_array_ref(g->mu, ptr,
+                                              mir_const(g->mu, t_offset, i));
+         if (is_ustruct && vlog_get_type(def) != ft) {
+            mir_value_t acc = vlog_lower_default_value(g, fti);
+            mir_value_t sub = mir_build_all(g->mu, acc);
+            const int nf = vlog_decls(ft);
+            for (int f = 0; f < nf; f++)
+               vlog_store_pattern_default(g, sub, f, vlog_decl(ft, f), def);
+            mir_build_store(g->mu, ep, acc);
+         }
+         else {
+            mir_value_t fv = vlog_lower_with_context(
+               g, def, vlog_assign_context(g, fti->type, def));
+            mir_value_t val = vlog_lower_cast(g, fti->type, fv);
+            if (vlog_is_dynamic_type(vlog_type(fd)))
+               val = vlog_copy_value(g, val, vlog_type(fd));
+            mir_build_store(g->mu, ep, val);
+         }
+      }
+   }
+   else if (is_ustruct && vlog_get_type(def) != ft) {
       mir_value_t sub = mir_build_all(g->mu, mir_build_load(g->mu, ptr));
       const int n = vlog_decls(ft);
       for (int i = 0; i < n; i++)
@@ -8831,7 +8882,10 @@ static void vlog_store_pattern_default(vlog_gen_t *g, mir_value_t rec,
    else {
       mir_value_t fv = vlog_lower_with_context(
          g, def, vlog_assign_context(g, fti->type, def));
-      mir_build_store(g->mu, ptr, vlog_lower_cast(g, fti->type, fv));
+      mir_value_t val = vlog_lower_cast(g, fti->type, fv);
+      if (vlog_is_dynamic_type(vlog_type(fd)))
+         val = vlog_copy_value(g, val, vlog_type(fd));
+      mir_build_store(g->mu, ptr, val);
    }
 }
 
@@ -9212,6 +9266,53 @@ static uint32_t vlog_type_hash(vlog_node_t type)
 }
 
 static mir_value_t vlog_lower_pattern_expr(vlog_gen_t *g, vlog_node_t v,
+                                           mir_type_t context);
+
+static mir_value_t vlog_lower_pattern_elem(vlog_gen_t *g, vlog_node_t expr,
+                                           vlog_node_t etype,
+                                           const type_info_t *eti)
+{
+   vlog_node_t et = vlog_get_type(etype);
+
+   if (et != NULL && vlog_kind(et) == V_STRUCT_DECL
+       && !(vlog_flags(et) & VLOG_F_PACKED)
+       && mir_get_class(g->mu, eti->type) == MIR_TYPE_ACCESS) {
+      if (vlog_kind(expr) == V_PATTERN_EXPR)
+         return vlog_lower_pattern_expr(g, expr, eti->type);
+      if (vlog_get_type(expr) == et)
+         return vlog_copy_value(g, vlog_lower_with_context(g, expr, eti->type),
+                                etype);
+      mir_value_t acc = vlog_lower_default_value(g, eti);
+      mir_value_t rec = mir_build_all(g->mu, acc);
+      const int ndecls = vlog_decls(et);
+      for (int f = 0; f < ndecls; f++)
+         vlog_store_pattern_default(g, rec, f, vlog_decl(et, f), expr);
+      return acc;
+   }
+
+   if (et != NULL && vlog_kind(et) == V_DATA_TYPE
+       && vlog_subkind(et) == DT_DYNARRAY && vlog_ranges(et) == 1
+       && vlog_kind(expr) != V_PATTERN_EXPR && vlog_get_type(expr) != et) {
+      const type_info_t *inner_eti = vlog_type_info(g, vlog_type(et));
+      mir_type_t t_offset = mir_offset_type(g->mu);
+      const unsigned nelems = vlog_size(vlog_range(et, 0));
+      mir_value_t count = mir_const(g->mu, t_offset, nelems);
+      mir_value_t data = vlog_alloc_array(g, inner_eti->type, count);
+      for (unsigned j = 0; j < nelems; j++) {
+         mir_value_t elem = vlog_lower_pattern_elem(g, expr, vlog_type(et),
+                                                    inner_eti);
+         mir_build_store(g->mu, mir_build_array_ref(
+                            g->mu, data, mir_const(g->mu, t_offset, j)), elem);
+      }
+      return vlog_wrap_array(g, data, count);
+   }
+
+   mir_value_t elem = vlog_lower_with_context(
+      g, expr, vlog_assign_context(g, eti->type, expr));
+   return vlog_copy_value(g, vlog_lower_cast(g, eti->type, elem), etype);
+}
+
+static mir_value_t vlog_lower_pattern_expr(vlog_gen_t *g, vlog_node_t v,
                                            mir_type_t context)
 {
    vlog_node_t dt = vlog_type(v);
@@ -9354,12 +9455,10 @@ static mir_value_t vlog_lower_pattern_expr(vlog_gen_t *g, vlog_node_t v,
             if (expr == NULL)
                continue;
 
-            mir_value_t elem = vlog_lower_with_context(
-               g, expr, vlog_assign_context(g, eti->type, expr));
+            mir_value_t elem = vlog_lower_pattern_elem(g, expr,
+                                                       vlog_type(base), eti);
             mir_value_t pos = mir_const(g->mu, t_offset, i);
-            mir_build_store(g->mu, mir_build_array_ref(g->mu, data, pos),
-                            vlog_copy_value(g, vlog_lower_cast(g, eti->type, elem),
-                                            vlog_type(base)));
+            mir_build_store(g->mu, mir_build_array_ref(g->mu, data, pos), elem);
          }
 
          return vlog_wrap_array(g, data, count);
