@@ -3482,6 +3482,18 @@ static bool sem_check_call_args(tree_t t, tree_t decl, nametab_t *tab)
                       "type %pT of the conversion of formal %pI",
                       tree_type(actual), conv_type, tree_ident(port));
       }
+      else if (mode == PORT_IN && class == C_VARIABLE) {
+         // LRM 08 section 6.5.7.1: actual for an IN variable formal may
+         // be a type conversion or conversion function applied to a variable
+         const tree_kind_t vkind = tree_kind(value);
+         if (vkind == T_TYPE_CONV)
+            actual = tree_value(value);
+         else if (vkind == T_FCALL && tree_params(value) == 1) {
+            tree_t arg = tree_value(tree_param(value, 0));
+            if (sem_check_lvalue(arg) != NULL && class_of(arg) == C_VARIABLE)
+               actual = arg;
+         }
+      }
 
       if (formal_conv != NULL && mode == PORT_OUT)
          ;   // Type of the actual checked above
