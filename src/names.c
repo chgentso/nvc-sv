@@ -3273,16 +3273,18 @@ void insert_names_from_use(nametab_t *tab, tree_t use)
          // the literals and operators visible
          for (int i = 0; i < sym->ndecls; i++) {
             const decl_t *dd = get_decl(sym, i);
-            if (!(dd->mask & N_TYPE) || !is_type_decl(dd->tree))
+            tree_t tdecl = aliased_type_decl(dd->tree);
+            if (!(dd->mask & N_TYPE) || tdecl == NULL)
                continue;
 
-            type_t type = type_base_recur(tree_type(dd->tree));
+            type_t type = type_base_recur(tree_type(tdecl));
             add_type_literals(tab->top_scope, type, make_potentially_visible);
 
             const int ndecls = tree_decls(unit);
             for (int i = 0; i < ndecls; i++) {
                tree_t d = tree_decl(unit, i);
-               if (is_predef_for_type(d, type))
+               tree_t sub = tree_kind(d) == T_ALIAS ? get_aliased_subprogram(d) : d;
+               if (sub != NULL && is_predef_for_type(sub, type))
                   make_visible(tab->top_scope, tree_ident(d), d,
                                POTENTIAL, s);
             }
