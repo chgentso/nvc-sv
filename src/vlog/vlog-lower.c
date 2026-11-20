@@ -32486,6 +32486,19 @@ mir_unit_t *vlog_lower_thunk(mir_context_t *mc, ident_t parent, vlog_node_t v)
       vlog_lower_stmts(&g, v, &gs);
       mir_build_return(mu, MIR_NULL_VALUE);
       break;
+   case V_ENUM_NAME:
+      {
+         const type_info_t *ti = vlog_type_info(&g, vlog_type(v));
+         mir_value_t value = vlog_lower_with_context(
+            &g, vlog_value(v), vlog_assign_context(&g, ti->type,
+                                                   vlog_value(v)));
+
+         mir_value_t cast = vlog_lower_cast(&g, ti->type, value);
+
+         mir_set_result(mu, ti->type);
+         mir_build_return(mu, cast);
+      }
+      break;
    case V_LOCALPARAM:
       {
          vlog_node_t dt = vlog_type(v);

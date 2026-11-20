@@ -751,6 +751,51 @@ static vlog_node_t fold_part_select(vlog_node_t v, fold_ctx_t *ctx)
    return v;
 }
 
+static vlog_node_t fold_enum_name(vlog_node_t v, fold_ctx_t *ctx)
+{
+   if (!vlog_has_value(v))
+      return v;
+
+   vlog_node_t value = vlog_value(v);
+   vlog_node_t etype = vlog_type(v);
+   fold_state_t state = MAX(get_type_state(etype, ctx),
+                            get_fold_state(value, ctx));
+
+   switch (state) {
+   case FOLD_CONST:
+      {
+         vlog_node_t base = vlog_has_type(etype)
+            ? vlog_get_type(vlog_type(etype)) : NULL;
+         if (vlog_kind(value) != V_NUMBER || base == NULL)
+            return v;
+
+         number_t n = vlog_number(value);
+         const unsigned bits = vlog_size(base);
+         const bool issigned = vlog_is_signed(base);
+         if (!(vlog_flags(value) & VLOG_F_FILL) && bits > 0
+             && number_width(n) == bits && number_signed(n) == issigned)
+            return v;
+      }
+      // Fall-through
+   case FOLD_POSSIBLE:
+      {
+         vlog_node_t result = fold_call_thunk(v, ctx);
+         if (result != NULL) {
+            vlog_set_loc(result, vlog_loc(value));
+            vlog_set_value(v, result);
+         }
+         return v;
+      }
+   case FOLD_LATER:
+      return v;
+   case FOLD_NON_CONST:
+      fold_report_non_const(value, ctx);
+      return v;
+   default:
+      should_not_reach_here();
+   }
+}
+
 static vlog_node_t fold_const_value(vlog_node_t v, fold_ctx_t *ctx)
 {
    if (vlog_has_value(v) && !is_data_type(vlog_value(v))
@@ -957,8 +1002,9 @@ static vlog_node_t vlog_fold_post_cb(vlog_node_t v, void *context)
          }
       }
       // Fall-through
-   case V_PARAM_ASSIGN:
    case V_ENUM_NAME:
+      return fold_enum_name(v, context);
+   case V_PARAM_ASSIGN:
    case V_DEFPARAM:
       return fold_const_value(v, context);
    case V_CAST:
