@@ -2519,7 +2519,7 @@ static tree_t resolve_array_ref_or_type_conv(nametab_t *tab, tree_t t)
    return conv;
 }
 
-static tree_t resolve_selected_name(nametab_t *tab, tree_t t)
+static tree_t resolve_selected_name(nametab_t *tab, tree_t t, bool allow_fcall)
 {
    assert(tree_kind(t) == T_RECORD_REF);
 
@@ -2608,7 +2608,7 @@ static tree_t resolve_selected_name(nametab_t *tab, tree_t t)
             is_fcall = can_call_no_args(sub);
       }
 
-      if (is_fcall) {
+      if (allow_fcall && is_fcall) {
          tree_t fcall = tree_new(T_FCALL);
          tree_set_ident(fcall, qual);
          tree_set_loc(fcall, tree_loc(t));
@@ -5288,7 +5288,7 @@ static tree_t solve_record_ref(nametab_t *tab, tree_t t)
    tree_t prefix = solve_selected_prefix(tab, t);
    tree_set_value(t, (prefix = implicit_dereference(tab, prefix)));
 
-   tree_t select = resolve_selected_name(tab, t);
+   tree_t select = resolve_selected_name(tab, t, true);
    if (select != NULL)
       return select;
 
@@ -5500,7 +5500,7 @@ static tree_t try_solve_attr_ref(nametab_t *tab, tree_t t)
       return t;
    }
 
-   tree_t prefix;
+   tree_t prefix, sel_container = NULL;
    switch (tree_subkind(t)) {
    case ATTR_REFLECT:
       {
@@ -5535,8 +5535,9 @@ static tree_t try_solve_attr_ref(nametab_t *tab, tree_t t)
             rec_prefix = implicit_dereference(tab, rec_prefix);
             tree_set_value(name, rec_prefix);
 
-            tree_t select = resolve_selected_name(tab, name);
+            tree_t select = resolve_selected_name(tab, name, false);
             if (select != NULL) {
+               sel_container = get_container_ref(rec_prefix);
                tree_set_name(t, (prefix = select));
                break;
             }
@@ -5763,10 +5764,17 @@ static tree_t try_solve_attr_ref(nametab_t *tab, tree_t t)
             id = ident_rfrom(id, '.') ?: id;
 
             // The specification may be in the current scope or, for a
-            // design unit, in the private scope of the unit
+            // design unit (or declaration within one), in its private scope
             scope_t *scopes[2] = { tab->top_scope, NULL };
             if (is_container(decl))
                scopes[1] = private_scope_for(tab, decl);
+            else if (sel_container != NULL)
+               scopes[1] = private_scope_for(tab, sel_container);
+            else {
+               tree_t cont = tree_container(decl);
+               if (is_container(cont))
+                  scopes[1] = private_scope_for(tab, cont);
+            }
 
             for (int pass = 0; pass < 2 && a == NULL; pass++) {
                scope_t *s = scopes[pass];
