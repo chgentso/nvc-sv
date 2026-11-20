@@ -2956,3 +2956,4 @@ svconstcast1    verilog
 svcastselect1   verilog
 svenumstep1     verilog
 svenumsize1     verilog
+svbitsconst1    verilog

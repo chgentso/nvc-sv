@@ -135,6 +135,70 @@ static fold_state_t get_type_state(vlog_node_t t, fold_ctx_t *ctx)
    return state;
 }
 
+static fold_state_t get_shape_state(vlog_node_t arg, fold_ctx_t *ctx)
+{
+   switch (vlog_kind(arg)) {
+   case V_REF:
+   case V_HIER_REF:
+      if (!vlog_has_ref(arg)) {
+         ctx->later++;
+         return FOLD_LATER;
+      }
+      {
+         vlog_node_t d = vlog_ref(arg);
+         fold_state_t state = FOLD_POSSIBLE;
+         switch (vlog_kind(d)) {
+         case V_TYPE_DECL:
+         case V_STRUCT_DECL:
+         case V_UNION_DECL:
+            state = MAX(state, get_type_state(d, ctx));
+            break;
+         case V_PARAM_DECL:
+            if (vlog_has_type(d) && is_implicit_data_type(vlog_type(d))
+                && vlog_ranges(vlog_type(d)) == 0) {
+               ctx->later++;
+               return FOLD_LATER;
+            }
+            // Fall-through
+         case V_VAR_DECL:
+         case V_NET_DECL:
+         case V_PORT_DECL:
+         case V_LOCALPARAM:
+            if (vlog_has_type(d))
+               state = MAX(state, get_type_state(vlog_type(d), ctx));
+            state = MAX(state, get_ranges_state(d, ctx));
+            break;
+         default:
+            break;
+         }
+         return state;
+      }
+   case V_MEMBER_REF:
+      {
+         vlog_node_t type = vlog_get_type(arg);
+         fold_state_t state = FOLD_POSSIBLE;
+         if (type != NULL)
+            state = MAX(state, get_type_state(type, ctx));
+         if (vlog_has_ref(arg))
+            state = MAX(state, get_ranges_state(vlog_ref(arg), ctx));
+         return state;
+      }
+   case V_BIT_SELECT:
+   case V_PART_SELECT:
+      return get_shape_state(vlog_value(arg), ctx);
+   case V_CONCAT:
+      {
+         fold_state_t state = FOLD_POSSIBLE;
+         const int nparams = vlog_params(arg);
+         for (int i = 0; i < nparams; i++)
+            state = MAX(state, get_shape_state(vlog_param(arg, i), ctx));
+         return state;
+      }
+   default:
+      return FOLD_POSSIBLE;
+   }
+}
+
 static fold_state_t get_fold_state(vlog_node_t v, fold_ctx_t *ctx)
 {
    switch (vlog_kind(v)) {
@@ -239,29 +303,8 @@ static fold_state_t get_fold_state(vlog_node_t v, fold_ctx_t *ctx)
          if (is_array_query(v)) {
             // The dimensions of a variable do not depend on its value
             vlog_node_t arg = vlog_param(v, 0);
-            if (vlog_has_static_shape(arg)) {
-               fold_state_t state = FOLD_POSSIBLE;
-               if (vlog_kind(arg) == V_REF && vlog_has_ref(arg)) {
-                  vlog_node_t d = vlog_ref(arg);
-                  switch (vlog_kind(d)) {
-                  case V_TYPE_DECL:
-                  case V_STRUCT_DECL:
-                  case V_UNION_DECL:
-                     state = MAX(state, get_type_state(d, ctx));
-                     break;
-                  case V_VAR_DECL:
-                  case V_NET_DECL:
-                  case V_PORT_DECL:
-                     if (vlog_has_type(d))
-                        state = MAX(state, get_type_state(vlog_type(d), ctx));
-                     state = MAX(state, get_ranges_state(d, ctx));
-                     break;
-                  default:
-                     break;
-                  }
-               }
-               return state;
-            }
+            if (vlog_has_static_shape(arg))
+               return get_shape_state(arg, ctx);
 
             ctx->nonconst = v;
             return FOLD_NON_CONST;

@@ -527,25 +527,75 @@ bool vlog_is_four_state(vlog_node_t v)
    }
 }
 
+static bool vlog_type_has_static_shape(vlog_node_t type)
+{
+   if (type == NULL)
+      return false;
+
+   switch (vlog_kind(type)) {
+   case V_TYPE_DECL:
+   case V_ENUM_DECL:
+      return vlog_has_type(type) && vlog_type_has_static_shape(vlog_type(type));
+   case V_STRUCT_DECL:
+   case V_UNION_DECL:
+      {
+         const int ndecls = vlog_decls(type);
+         for (int i = 0; i < ndecls; i++) {
+            vlog_node_t m = vlog_decl(type, i);
+            if (!vlog_has_type(m) || !vlog_type_has_static_shape(vlog_type(m)))
+               return false;
+            const int nranges = vlog_ranges(m);
+            for (int j = 0; j < nranges; j++) {
+               if (vlog_subkind(vlog_range(m, j)) == V_DIM_UNSIZED)
+                  return false;
+            }
+         }
+         return true;
+      }
+   case V_DATA_TYPE:
+      if (vlog_subkind(type) == DT_DYNARRAY && vlog_ranges(type) > 0)
+         return vlog_has_type(type)
+            && vlog_type_has_static_shape(vlog_type(type));
+      return !vlog_is_dynamic_type(type);
+   default:
+      return !vlog_is_dynamic_type(type);
+   }
+}
+
 bool vlog_has_static_shape(vlog_node_t v)
 {
    // The dimensions of a variable do not depend on its value
 
    switch (vlog_kind(v)) {
+   case V_NUMBER:
+   case V_REAL:
+      return true;
    case V_REF:
       if (vlog_has_ref(v)) {
          vlog_node_t d = vlog_ref(v);
          return vlog_kind(d) == V_LOCALPARAM || vlog_kind(d) == V_PARAM_DECL
-            || !vlog_is_dynamic_type(vlog_type(d));
+            || (is_data_type(d)
+                ? vlog_type_has_static_shape(d)
+                : vlog_has_type(d) && vlog_type_has_static_shape(vlog_type(d)));
       }
       return false;
+   case V_HIER_REF:
+      if (vlog_has_ref(v)) {
+         vlog_node_t d = vlog_ref(v);
+         return vlog_kind(d) == V_LOCALPARAM || vlog_kind(d) == V_PARAM_DECL
+            || (vlog_has_type(d) && vlog_type_has_static_shape(vlog_type(d)));
+      }
+      return true;
    case V_MEMBER_REF:
+      {
+         vlog_node_t type = vlog_get_type(v);
+         return type != NULL && vlog_type_has_static_shape(type);
+      }
    case V_BIT_SELECT:
       {
          vlog_node_t type = vlog_get_type(v);
          return vlog_has_static_shape(vlog_value(v))
-            && (type != NULL ? !vlog_is_dynamic_type(type)
-                : vlog_kind(v) == V_BIT_SELECT);
+            && (type != NULL ? vlog_type_has_static_shape(type) : true);
       }
    case V_PART_SELECT:
       return vlog_has_static_shape(vlog_value(v)) && vlog_size(v) != 0;
