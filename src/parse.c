@@ -4639,6 +4639,11 @@ static tree_t p_attribute_name(tree_t prefix)
       id = ident_new("SIGNAL");
       kind = ATTR_SIGNAL;
       break;
+   case tSTABLE:
+      consume(tSTABLE);
+      id = ident_new("STABLE");
+      kind = ATTR_STABLE;
+      break;
    case tID:
       id = p_identifier();
       kind = parse_predefined_attr(id);
