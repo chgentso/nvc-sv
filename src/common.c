@@ -610,10 +610,11 @@ class_t class_of(tree_t t)
    case T_ARRAY_REF:
    case T_ARRAY_SLICE:
    case T_RECORD_REF:
-   case T_ALL:
    case T_ALIAS:
    case T_QUALIFIED:
       return class_of(tree_value(t));
+   case T_ALL:
+      return C_VARIABLE;
    case T_PACKAGE:
    case T_PACK_BODY:
    case T_PACK_INST:

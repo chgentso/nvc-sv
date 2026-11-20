@@ -2501,8 +2501,8 @@ static tree_t sem_check_lvalue(tree_t t)
    case T_ARRAY_REF:
    case T_ALIAS:
    case T_RECORD_REF:
-   case T_ALL:
       return sem_check_lvalue(tree_value(t));
+   case T_ALL:
    case T_VAR_DECL:
    case T_SIGNAL_DECL:
    case T_PORT_DECL:
@@ -2598,7 +2598,7 @@ static bool sem_check_variable_target(tree_t target)
       tree_t decl = sem_check_lvalue(target);
       const tree_kind_t kind = decl ? tree_kind(decl) : T_LAST_TREE_KIND;
 
-      const bool suitable = kind == T_VAR_DECL
+      const bool suitable = kind == T_VAR_DECL || kind == T_ALL
          || (kind == T_PARAM_DECL && tree_class(decl) == C_VARIABLE)
          || (kind == T_EXTERNAL_NAME && tree_class(decl) == C_VARIABLE);
 
