@@ -6275,15 +6275,36 @@ static void resolve_type_keys(vlog_node_t *items, int count, vlog_node_t dt,
 
 static vlog_node_t p_pattern_elem_expr(int array_depth, vlog_node_t dt)
 {
-   // The value of an item that gives an element of an unpacked array of
-   // structures
+   // The value of an item that gives an element of an array pattern
 
-   if (array_depth > 0 && dt != NULL && peek() == tTICK && peek_nth(2) == tLBRACE
-       && (vlog_kind(dt) == V_STRUCT_DECL || vlog_kind(dt) == V_UNION_DECL)) {
-      pattern_array_elems = array_depth - 1;
-      vlog_node_t v = p_assignment_pattern_expression(dt);
-      pattern_array_elems = 0;
-      return v;
+   if (dt != NULL && peek() == tTICK && peek_nth(2) == tLBRACE) {
+      if (array_depth > 0) {
+         pattern_array_elems = array_depth - 1;
+         vlog_node_t v = p_assignment_pattern_expression(dt);
+         pattern_array_elems = 0;
+         return v;
+      }
+
+      if (vlog_kind(dt) == V_DATA_TYPE && vlog_ranges(dt) > 0
+          && vlog_subkind(dt) != DT_DYNARRAY && vlog_subkind(dt) != DT_QUEUE
+          && vlog_subkind(dt) != DT_ASSOC) {
+         if (vlog_ranges(dt) > 1) {
+            vlog_node_t elem = vlog_new(V_DATA_TYPE);
+            vlog_set_subkind(elem, vlog_subkind(dt));
+            vlog_set_loc(elem, vlog_loc(dt));
+            if (vlog_has_type(dt))
+               vlog_set_type(elem, vlog_type(dt));
+            const int nr = vlog_ranges(dt);
+            for (int i = 1; i < nr; i++)
+               vlog_add_range(elem, vlog_range(dt, i));
+            return p_assignment_pattern_expression(elem);
+         }
+         else if (vlog_has_type(dt)) {
+            vlog_node_t et = vlog_get_type(vlog_type(dt));
+            if (et != NULL)
+               return p_assignment_pattern_expression(et);
+         }
+      }
    }
 
    return p_pattern_item_expr(dt, NULL);
@@ -6401,14 +6422,9 @@ static void p_assignment_pattern(vlog_node_t expr)
             member = vlog_decl(bt, items.count);
 
          vlog_node_t head;
-         if (of_array && bt != NULL && peek() == tTICK
-             && peek_nth(2) == tLBRACE
-             && (vlog_kind(bt) == V_STRUCT_DECL
-                 || vlog_kind(bt) == V_UNION_DECL)) {
-            pattern_array_elems = array_depth - 1;
-            head = p_assignment_pattern_expression(dt);   // An element
-            pattern_array_elems = 0;
-         }
+         if (!struct_pat && dt != NULL && peek() == tTICK
+             && peek_nth(2) == tLBRACE)
+            head = p_pattern_elem_expr(array_depth, dt);   // An element
          else
             head = p_pattern_item_expr(dt, member);
          vlog_set_loc(v, vlog_loc(head));
