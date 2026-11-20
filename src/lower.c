@@ -12747,7 +12747,13 @@ static vcode_reg_t lower_constrain_port(lower_unit_t *lu, tree_t port, int pos,
 
          // TODO: lower_get_type_bounds does not support records
          type_t type = tree_type(value);
-         if (type_is_record(type))
+         if (type_is_unconstrained(type)) {
+            if (elem != NULL && !type_is_unconstrained(elem))
+               bounds_reg = lower_get_type_bounds(lu, elem);
+            else
+               bounds_reg = lower_rvalue(lu, value);
+         }
+         else if (type_is_record(type))
             bounds_reg = lower_default_value(lu, type, VCODE_INVALID_REG);
          else
             bounds_reg = lower_get_type_bounds(lu, type);
