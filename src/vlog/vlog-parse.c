@@ -1461,8 +1461,31 @@ static vlog_node_t p_integral_number(void)
 
    BEGIN("integral number");
 
-   if (peek() == tUNSNUM)
+   if (peek() == tUNSNUM) {
+      if (peek_nth(2) == tNUMBER) {
+         const int pos = (state.tokenq_tail + 1) & (TOKENQ_SIZE - 1);
+         const char *text = state.tokenq[pos].lval.str;
+         if (text[0] == '\'' && text[1] != '\0'
+             && strchr("bBoOdDhHsS", text[1]) != NULL) {
+            consume(tUNSNUM);
+            char *size = state.last_lval.str;
+            consume(tNUMBER);
+            char *base = state.last_lval.str;
+
+            char *joined = xasprintf("%s%s", size, base);
+            number_t n = number_new(joined, CURRENT_LOC);
+            free(joined);
+            free(size);
+            free(base);
+
+            vlog_node_t v = vlog_new(V_NUMBER);
+            vlog_set_number(v, n);
+            vlog_set_loc(v, CURRENT_LOC);
+            return v;
+         }
+      }
       return p_unsigned_number();
+   }
    else {
       number_t n;
       bool fill = false;
