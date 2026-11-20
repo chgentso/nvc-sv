@@ -10711,7 +10711,18 @@ static mir_value_t vlog_lower_trigger(vlog_gen_t *g, vlog_node_t v)
                      g->mu, nets, mir_const(g->mu, t_offset, 1));
                }
 
+               if (vlog_kind(v) == V_REF) {
+                  vlog_node_t decl = vlog_ref(v);
+                  if (vlog_kind(decl) == V_PORT_DECL && vlog_has_ref(decl))
+                     decl = vlog_ref(decl);
+                  int hops;
+                  if (mir_is_null(mir_search_object(g->mu, decl, &hops)))
+                     return MIR_NULL_VALUE;
+               }
+
                vlog_select_t lvalue = vlog_lower_select(g, v);
+               if (!mir_is_signal(g->mu, lvalue.obj))
+                  return MIR_NULL_VALUE;
                int total_size = lvalue.size;
                if (vlog_kind(v) == V_REF)
                   total_size = vlog_whole_size(g, v, &lvalue);
@@ -10801,6 +10812,8 @@ static mir_value_t vlog_lower_trigger(vlog_gen_t *g, vlog_node_t v)
          }
       }
    case V_NUMBER:
+   case V_STRING:
+   case V_REAL:
       return MIR_NULL_VALUE;
    case V_BINARY:
       {
@@ -10810,6 +10823,7 @@ static mir_value_t vlog_lower_trigger(vlog_gen_t *g, vlog_node_t v)
          return vlog_or_triggers(g, 2, left, right);
       }
    case V_UNARY:
+   case V_CAST:
       return vlog_lower_trigger(g, vlog_value(v));
    case V_COND_EXPR:
       {
@@ -10821,6 +10835,8 @@ static mir_value_t vlog_lower_trigger(vlog_gen_t *g, vlog_node_t v)
       }
    case V_CONCAT:
    case V_USER_FCALL:
+   case V_SYS_FCALL:
+   case V_STREAM:
       {
          mir_value_t trigger = MIR_NULL_VALUE;
          const int nparams = vlog_params(v);
