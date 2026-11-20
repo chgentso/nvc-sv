@@ -3130,6 +3130,34 @@ static void vlog_stream_with_range(vlog_gen_t *g, vlog_node_t p,
    }
 }
 
+static int vlog_stream_type_bits(vlog_gen_t *g, mir_type_t type)
+{
+   switch (mir_get_class(g->mu, type)) {
+   case MIR_TYPE_VEC2:
+   case MIR_TYPE_VEC4:
+      return mir_get_size(g->mu, type);
+   case MIR_TYPE_ACCESS:
+      {
+         mir_type_t elem = mir_get_elem(g->mu, type);
+         if (mir_get_class(g->mu, elem) != MIR_TYPE_RECORD)
+            return 0;
+
+         size_t nfields;
+         const mir_type_t *fields = mir_get_fields(g->mu, elem, &nfields);
+         int total = 0;
+         for (size_t i = 0; i < nfields; i++) {
+            const int fb = vlog_stream_type_bits(g, fields[i]);
+            if (fb == 0)
+               return 0;
+            total += fb;
+         }
+         return total;
+      }
+   default:
+      return 0;
+   }
+}
+
 static bool vlog_stream_is_dynamic(vlog_node_t v)
 {
    // An operand has a length that is not known until the simulation runs
@@ -3149,6 +3177,9 @@ static bool vlog_stream_is_dynamic(vlog_node_t v)
       vlog_node_t t = vlog_get_type(p);
       if (t != NULL && vlog_kind(t) == V_DATA_TYPE
           && (vlog_subkind(t) == DT_DYNARRAY || vlog_subkind(t) == DT_QUEUE))
+         return true;
+      if (t != NULL && vlog_kind(t) == V_STRUCT_DECL
+          && !(vlog_flags(t) & VLOG_F_PACKED))
          return true;
    }
 
@@ -3183,7 +3214,16 @@ static int vlog_stream_ubits(vlog_gen_t *g, vlog_node_t v)
       vlog_node_t t = vlog_get_type(vlog_stream_with(p) ? vlog_value(p) : p);
       if (t != NULL && vlog_kind(t) == V_DATA_TYPE
           && (vlog_subkind(t) == DT_DYNARRAY || vlog_subkind(t) == DT_QUEUE)) {
-         if (vlog_type_info(g, vlog_type(t))->size % 8 != 0)
+         const type_info_t *eti = vlog_type_info(g, vlog_type(t));
+         const int ebits = vlog_stream_type_bits(g, eti->type);
+         if (ebits == 0 || ebits % 8 != 0)
+            return 1;
+      }
+      else if (t != NULL && vlog_kind(t) == V_STRUCT_DECL
+               && !(vlog_flags(t) & VLOG_F_PACKED)) {
+         const type_info_t *sti = vlog_type_info(g, t);
+         const int sbits = vlog_stream_type_bits(g, sti->type);
+         if (sbits == 0 || sbits % 8 != 0)
             return 1;
       }
       else if (vlog_width(p) % 8 != 0)
@@ -3225,6 +3265,31 @@ static void vlog_stream_store_bytes(vlog_gen_t *g, mir_value_t vec,
    }
 }
 
+static void vlog_stream_store_value(vlog_gen_t *g, mir_value_t val,
+                                    mir_value_t out, mir_value_t base,
+                                    const loc_t *loc)
+{
+   mir_type_t type = mir_get_type(g->mu, val);
+   if (mir_is(g->mu, val, MIR_TYPE_ACCESS)) {
+      mir_type_t t_offset = mir_offset_type(g->mu);
+      mir_type_t t_rec = mir_get_elem(g->mu, type);
+      size_t nfields;
+      const mir_type_t *fields = mir_get_fields(g->mu, t_rec, &nfields);
+      mir_value_t rec = mir_build_all(g->mu, val);
+      for (size_t i = 0; i < nfields; i++) {
+         mir_value_t fv = mir_build_load(g->mu,
+                                         mir_build_record_ref(g->mu, rec, i));
+         vlog_stream_store_value(g, fv, out, base, loc);
+         const int fb = vlog_stream_type_bits(g, fields[i]);
+         base = mir_build_add(g->mu, t_offset, base,
+                              mir_const(g->mu, t_offset, fb / g->stream_ubits));
+      }
+      return;
+   }
+
+   vlog_stream_store_bytes(g, val, out, base, loc);
+}
+
 static mir_value_t vlog_stream_value_bytes(vlog_gen_t *g, mir_value_t value,
                                            const loc_t *loc)
 {
@@ -3248,9 +3313,9 @@ static mir_value_t vlog_stream_value_bytes(vlog_gen_t *g, mir_value_t value,
          ew = 8;
       }
       else
-         ew = mir_get_size(g->mu, t_elem);
+         ew = vlog_stream_type_bits(g, t_elem);
 
-      if (ew % ubits != 0)
+      if (ew == 0 || ew % ubits != 0)
          fatal_at(loc, "sorry, the elements of a streamed array must be "
                   "a whole number of bytes");
 
@@ -3265,17 +3330,17 @@ static mir_value_t vlog_stream_value_bytes(vlog_gen_t *g, mir_value_t value,
       if (mir_equals(t_elem, t_char))
          elem = vlog_lower_cast(g, mir_vec4_type(g->mu, 8, false),
                                 mir_build_cast(g->mu, t_int, elem));
-      vlog_stream_store_bytes(g, elem, out,
+      vlog_stream_store_value(g, elem, out,
                               mir_build_mul(g->mu, t_offset, l.i, nb), loc);
       vlog_loop_end(g, &l);
 
       return vlog_wrap_array(g, out, total);
    }
 
-   const int size = mir_get_size(g->mu, mir_get_type(g->mu, value));
+   const int size = vlog_stream_type_bits(g, mir_get_type(g->mu, value));
    mir_value_t total = mir_const(g->mu, t_offset, size / ubits);
    mir_value_t out = vlog_alloc_array(g, t_char, total);
-   vlog_stream_store_bytes(g, value, out, mir_const(g->mu, t_offset, 0), loc);
+   vlog_stream_store_value(g, value, out, mir_const(g->mu, t_offset, 0), loc);
    return vlog_wrap_array(g, out, total);
 }
 
@@ -3395,17 +3460,44 @@ static mir_value_t vlog_stream_compose(vlog_gen_t *g, mir_value_t data,
    return vec;
 }
 
+static mir_value_t vlog_stream_load_value(vlog_gen_t *g, mir_type_t type,
+                                          mir_value_t data, mir_value_t base)
+{
+   mir_type_t t_offset = mir_offset_type(g->mu);
+
+   if (mir_get_class(g->mu, type) == MIR_TYPE_ACCESS) {
+      mir_type_t t_rec = mir_get_elem(g->mu, type);
+      size_t nfields;
+      const mir_type_t *fields = mir_get_fields(g->mu, t_rec, &nfields);
+      mir_value_t acc = mir_build_new(g->mu, t_rec, MIR_NULL_STAMP,
+                                      MIR_NULL_VALUE);
+      mir_value_t rec = mir_build_all(g->mu, acc);
+      for (size_t i = 0; i < nfields; i++) {
+         mir_value_t fv = vlog_stream_load_value(g, fields[i], data, base);
+         mir_build_store(g->mu, mir_build_record_ref(g->mu, rec, i), fv);
+         const int fb = vlog_stream_type_bits(g, fields[i]);
+         base = mir_build_add(g->mu, t_offset, base,
+                              mir_const(g->mu, t_offset, fb / g->stream_ubits));
+      }
+      return acc;
+   }
+
+   const int nb = mir_get_size(g->mu, type) / g->stream_ubits;
+   mir_value_t vec = vlog_stream_compose(g, data, base, nb);
+   return vlog_lower_cast(g, type, vec);
+}
+
 static mir_value_t vlog_stream_to_array(vlog_gen_t *g, mir_value_t data,
                                         mir_value_t from, mir_value_t count,
                                         mir_type_t t_elem)
 {
-   // Convert bytes to an array of integral values
+   // Convert bytes to an array of integral or unpacked structure values
 
    mir_type_t t_offset = mir_offset_type(g->mu);
 
-   const int esize = mir_get_size(g->mu, t_elem);
+   const int esize = vlog_stream_type_bits(g, t_elem);
    const int ubits = g->stream_ubits;
-   if (esize < ubits && ubits % esize == 0) {
+   if (esize > 0 && esize < ubits && ubits % esize == 0) {
       // Several elements are packed in each byte, the first in the most
       // significant bits
       const int per = ubits / esize;
@@ -3431,7 +3523,7 @@ static mir_value_t vlog_stream_to_array(vlog_gen_t *g, mir_value_t data,
 
       return vlog_wrap_array(g, out, n);
    }
-   else if (esize % ubits != 0)
+   else if (esize == 0 || esize % ubits != 0)
       fatal("sorry, streaming into elements of %d bits is not "
             "supported", esize);
 
@@ -3445,9 +3537,8 @@ static mir_value_t vlog_stream_to_array(vlog_gen_t *g, mir_value_t data,
    mir_value_t base = mir_build_add(g->mu, t_offset, from,
                                     mir_build_mul(g->mu, t_offset, l.i,
                                                   nbytes));
-   mir_value_t vec = vlog_stream_compose(g, data, base, nb);
    mir_build_store(g->mu, mir_build_array_ref(g->mu, out, l.i),
-                   vlog_lower_cast(g, t_elem, vec));
+                   vlog_stream_load_value(g, t_elem, data, base));
    vlog_loop_end(g, &l);
 
    return vlog_wrap_array(g, out, n);
@@ -3721,6 +3812,17 @@ static void vlog_assign_stream_dyn_inner(vlog_gen_t *g, vlog_node_t target,
             g, operand, vlog_stream_to_array(g, data, pos, rest, eti->type),
             NULL);
          pos = n;
+      }
+      else if (type != NULL && vlog_kind(type) == V_STRUCT_DECL
+               && !(vlog_flags(type) & VLOG_F_PACKED)) {
+         const type_info_t *sti = vlog_type_info(g, type);
+         const int size = vlog_stream_type_bits(g, sti->type);
+         assert(size > 0 && size % ubits == 0);
+
+         vlog_assign_variable(
+            g, operand, vlog_stream_load_value(g, sti->type, data, pos), NULL);
+         pos = mir_build_add(g->mu, t_offset, pos,
+                             mir_const(g->mu, t_offset, size / ubits));
       }
       else {
          const int size = vlog_width(operand);
@@ -11421,6 +11523,7 @@ static void vlog_poll_leaves(vlog_node_t e, poll_leaves_t *leaves,
       // Fall-through
    case V_PATTERN_EXPR:
    case V_CONCAT:
+   case V_STREAM:
    case V_USER_FCALL:
    case V_SYS_FCALL:
       {
@@ -11583,6 +11686,7 @@ static bool vlog_uses_memory_member(vlog_node_t v)
          return true;
       // Fall-through
    case V_CONCAT:
+   case V_STREAM:
    case V_SYS_FCALL:
    case V_USER_FCALL:
       {
