@@ -1994,7 +1994,20 @@ static vlog_select_t vlog_lower_select(vlog_gen_t *g, vlog_node_t v)
          mir_value_t in_range =
             mir_build_cmp(g->mu, MIR_CMP_NEQ, prefix.count, zero);
 
-         unsigned elems = vlog_size(decl);
+         unsigned elems = 1;
+         switch (vlog_kind(decl)) {
+         case V_VAR_DECL:
+         case V_NET_DECL:
+         case V_PORT_DECL:
+         case V_TF_PORT_DECL:
+         case V_LOCAL_DECL:
+         case V_PARAM_DECL:
+         case V_LOCALPARAM:
+            elems = vlog_size(decl);
+            break;
+         default:
+            break;
+         }
          unsigned size = unpacked_var
             ? (real_mem ? 1 : mir_get_size(g->mu, prefix.type))
             : vlog_is_fixed_unpacked(decl) ? prefix.size
