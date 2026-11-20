@@ -794,6 +794,8 @@ static vlog_node_t fold_part_select(vlog_node_t v, fold_ctx_t *ctx)
    return v;
 }
 
+static vlog_node_t fold_const_value(vlog_node_t v, fold_ctx_t *ctx);
+
 static vlog_node_t fold_enum_name(vlog_node_t v, fold_ctx_t *ctx)
 {
    if (!vlog_has_value(v))
@@ -801,15 +803,18 @@ static vlog_node_t fold_enum_name(vlog_node_t v, fold_ctx_t *ctx)
 
    vlog_node_t value = vlog_value(v);
    vlog_node_t etype = vlog_type(v);
-   fold_state_t state = MAX(get_type_state(etype, ctx),
-                            get_fold_state(value, ctx));
+   vlog_node_t base = vlog_has_type(etype)
+      ? vlog_get_type(vlog_type(etype)) : NULL;
+   if (base == NULL || get_type_state(etype, ctx) != FOLD_CONST
+       || vlog_size(base) == 0)
+      return fold_const_value(v, ctx);
+
+   fold_state_t state = get_fold_state(value, ctx);
 
    switch (state) {
    case FOLD_CONST:
       {
-         vlog_node_t base = vlog_has_type(etype)
-            ? vlog_get_type(vlog_type(etype)) : NULL;
-         if (vlog_kind(value) != V_NUMBER || base == NULL)
+         if (vlog_kind(value) != V_NUMBER)
             return v;
 
          number_t n = vlog_number(value);
