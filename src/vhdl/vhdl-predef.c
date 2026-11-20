@@ -1073,16 +1073,39 @@ static void predef_mixed_bit_vec_op(mir_unit_t *mu, tree_t decl,
    mir_build_return(mu, mir_build_wrap(mu, mem_reg, dims, 1));
 }
 
-static void predef_to_string(mir_unit_t *mu, tree_t decl)
+static void enum_image_helper(vhdl_gen_t *g, type_t type, mir_value_t arg,
+                              bool for_to_string);
+
+static void predef_to_string(vhdl_gen_t *g, tree_t decl)
 {
    // LRM 08 section 5.7 on string representations
 
+   mir_unit_t *mu = g->mu;
    type_t arg_type = tree_type(tree_port(decl, 0));
    mir_value_t r0 = mir_get_param(mu, 0);
 
    mir_type_t t_char = mir_char_type(mu);
    mir_type_t t_string = mir_string_type(mu);
    mir_type_t t_offset = mir_offset_type(mu);
+
+   if (type_is_enum(arg_type)) {
+      if (type_eq(arg_type, type_elem(std_type(NULL, STD_STRING)))) {
+         mir_value_t one = mir_const(mu, t_offset, 1);
+         mir_value_t mem = mir_build_alloc(mu, t_char, MIR_NULL_STAMP, one);
+         mir_build_store(mu, mem, r0);
+
+         mir_dim_t dims[] = {
+            { .left  = one,
+              .right = one,
+              .dir   = mir_const(mu, mir_bool_type(mu), RANGE_TO),
+            }
+         };
+         mir_build_return(mu, mir_build_wrap(mu, mem, dims, 1));
+      }
+      else
+         enum_image_helper(g, arg_type, r0, true);
+      return;
+   }
 
    ident_t func = ident_prefix(type_ident(arg_type), ident_new("image"), '$');
 
@@ -1114,37 +1137,6 @@ static void predef_to_string(mir_unit_t *mu, tree_t decl)
    }
 
    assert(type_is_representable(arg_type));
-
-   if (type_is_enum(arg_type)) {
-      // If the result is a character literal return just the character
-      // without the quotes
-      mir_value_t quote = mir_const(mu, t_char, '\'');
-      mir_value_t data = mir_build_unwrap(mu, str);
-      mir_value_t char0 = mir_build_load(mu, data);
-      mir_value_t is_quote = mir_build_cmp(mu, MIR_CMP_EQ, char0, quote);
-
-      mir_block_t char_bb = mir_add_block(mu);
-      mir_block_t other_bb = mir_add_block(mu);
-
-      mir_build_cond(mu, is_quote, char_bb, other_bb);
-
-      mir_set_cursor(mu, char_bb, MIR_APPEND);
-
-      mir_value_t one = mir_const(mu, t_offset, 1);
-      mir_value_t char1_ptr = mir_build_array_ref(mu, data, one);
-      mir_value_t left = mir_build_uarray_left(mu, str, 0);
-      mir_value_t dir = mir_build_uarray_dir(mu, str, 0);
-
-      mir_dim_t dims[] = {
-         { .left  = left,
-           .right = left,
-           .dir   = dir,
-         }
-      };
-      mir_build_return(mu, mir_build_wrap(mu, char1_ptr, dims, 1));
-
-      mir_set_cursor(mu, other_bb, MIR_APPEND);
-   }
 
    mir_build_return(mu, str);
 }
@@ -1247,7 +1239,7 @@ void vhdl_lower_predef(mir_unit_t *mu, object_t *obj)
       predef_mixed_bit_vec_op(mu, decl, kind);
       break;
    case S_TO_STRING:
-      predef_to_string(mu, decl);
+      predef_to_string(&g, decl);
       break;
    default:
       should_not_reach_here();
@@ -1256,7 +1248,8 @@ void vhdl_lower_predef(mir_unit_t *mu, object_t *obj)
    mir_optimise(mu, MIR_PASS_O0);
 }
 
-static void enum_image_helper(vhdl_gen_t *g, type_t type, mir_value_t arg)
+static void enum_image_helper(vhdl_gen_t *g, type_t type, mir_value_t arg,
+                              bool for_to_string)
 {
    const int nlits = type_enum_literals(type);
    assert(nlits >= 1);
@@ -1275,8 +1268,10 @@ static void enum_image_helper(vhdl_gen_t *g, type_t type, mir_value_t arg)
 
    for (int i = 0; i < nlits; i++) {
       // LRM specifies result is lowercase for enumerated types when
-      // the value is a basic identifier and the same case with each
-      // reverse solidus doubled for an extended identifier
+      // the value is a basic identifier.  For an extended identifier,
+      // 'IMAGE keeps the enclosing backslashes and doubles internal
+      // backslashes whereas TO_STRING strips the enclosing backslashes
+      // and unescapes doubled backslashes (LRM 08 section 5.7).
       ident_t id = tree_ident(type_enum_literal(type, i));
       const char first = ident_char(id, 0);
 
@@ -1287,14 +1282,20 @@ static void enum_image_helper(vhdl_gen_t *g, type_t type, mir_value_t arg)
          const char *src = istr(id);
          const size_t len = ident_len(id);
          LOCAL_TEXT_BUF tb = tb_new();
-         tb_append(tb, '\\');
+         if (!for_to_string)
+            tb_append(tb, '\\');
          for (size_t j = 1; j + 1 < len; j++) {
             tb_append(tb, src[j]);
-            if (src[j] == '\\')
+            if (!for_to_string && src[j] == '\\')
                tb_append(tb, '\\');
          }
-         tb_append(tb, '\\');
+         if (!for_to_string)
+            tb_append(tb, '\\');
          str = wrap_string(g->mu, tb_get(tb));
+      }
+      else if (first == '\'' && for_to_string) {
+         char ch[2] = { ident_char(id, 1), '\0' };
+         str = wrap_string(g->mu, ch);
       }
       else {
          if (first != '\'')
@@ -1724,7 +1725,7 @@ void vhdl_lower_image_helper(mir_unit_t *mu, object_t *obj)
 
    switch (type_kind(type)) {
    case T_ENUM:
-      enum_image_helper(&g, type, arg);
+      enum_image_helper(&g, type, arg, false);
       break;
    case T_INTEGER:
    case T_REAL:
