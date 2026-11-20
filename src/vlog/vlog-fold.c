@@ -1045,6 +1045,11 @@ static vlog_node_t vlog_fold_post_cb(vlog_node_t v, void *context)
          }
       }
       // Fall-through
+   case V_PARAM_ASSIGN:
+   case V_DEFPARAM:
+      return fold_const_value(v, context);
+   case V_ENUM_NAME:
+      return fold_enum_name(v, context);
    case V_PATTERN_ITEM:
       if (vlog_has_left(v) && vlog_subkind(v) != 3) {
          vlog_node_t key = vlog_left(v);
@@ -1058,11 +1063,6 @@ static vlog_node_t vlog_fold_post_cb(vlog_node_t v, void *context)
          }
       }
       return v;
-   case V_ENUM_NAME:
-      return fold_enum_name(v, context);
-   case V_PARAM_ASSIGN:
-   case V_DEFPARAM:
-      return fold_const_value(v, context);
    case V_CAST:
       return fold_cast(v, context);
    case V_IF_GENERATE:
