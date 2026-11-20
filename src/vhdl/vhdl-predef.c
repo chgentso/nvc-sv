@@ -1279,17 +1279,18 @@ static void enum_image_helper(vhdl_gen_t *g, type_t type, mir_value_t arg,
 
       mir_value_t str;
       if (first == '\\') {
+         const bool strip_ext = for_to_string && standard() < STD_19;
          const char *src = istr(id);
          const size_t len = ident_len(id);
          LOCAL_TEXT_BUF tb = tb_new();
-         if (!for_to_string)
+         if (!strip_ext)
             tb_append(tb, '\\');
          for (size_t j = 1; j + 1 < len; j++) {
             tb_append(tb, src[j]);
-            if (!for_to_string && src[j] == '\\')
+            if (!strip_ext && src[j] == '\\')
                tb_append(tb, '\\');
          }
-         if (!for_to_string)
+         if (!strip_ext)
             tb_append(tb, '\\');
          str = wrap_string(g->mu, tb_get(tb));
       }
