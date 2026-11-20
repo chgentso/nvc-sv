@@ -18020,13 +18020,9 @@ static mir_value_t vlog_lower_enum_method(vlog_gen_t *g, vlog_node_t v)
    case V_METHOD_ENUM_NEXT:
    case V_METHOD_ENUM_PREV:
       {
-         int64_t step = 1;
-         if (vlog_params(v) > 0 && !vlog_get_const(vlog_param(v, 0), &step))
-            fatal_at(vlog_loc(v), "sorry, the argument of this enumeration "
-                     "method must be constant");
-
-         if (method == V_METHOD_ENUM_PREV)
-            step = -step;
+         int64_t const_step = 1;
+         const bool has_const =
+            vlog_params(v) == 0 || vlog_get_const(vlog_param(v, 0), &const_step);
 
          mir_value_t cur = vlog_lower_rvalue(g, prefix);
          mir_value_t res = mir_add_var(g->mu, ti->type, ti->stamp,
@@ -18034,17 +18030,51 @@ static mir_value_t vlog_lower_enum_method(vlog_gen_t *g, vlog_node_t v)
          mir_build_store(g->mu, res, vals[method == V_METHOD_ENUM_NEXT
                                           ? 0 : nnames - 1]);
 
+         mir_type_t t_offset = mir_offset_type(g->mu);
+         mir_value_t tab = MIR_NULL_VALUE, step_mod = MIR_NULL_VALUE;
+         mir_value_t n_c = mir_const(g->mu, t_offset, nnames);
+         int64_t step = 0;
+
+         if (has_const)
+            step = method == V_METHOD_ENUM_PREV ? -const_step : const_step;
+         else {
+            mir_type_t t_arr = mir_carray_type(g->mu, nnames, ti->type);
+            tab = mir_add_var(g->mu, t_arr, ti->stamp,
+                              ident_uniq("enum_tab"), MIR_VAR_TEMP);
+            for (int i = 0; i < nnames; i++) {
+               mir_value_t elem = mir_build_array_ref(
+                  g->mu, tab, mir_const(g->mu, t_offset, i));
+               mir_build_store(g->mu, elem, vals[i]);
+            }
+
+            mir_type_t t_uint = mir_vec2_type(g->mu, 32, false);
+            mir_value_t arg = vlog_lower_rvalue(g, vlog_param(v, 0));
+            mir_value_t uarg = vlog_lower_cast(g, t_uint, arg);
+            mir_value_t oarg = vlog_lower_cast(g, t_offset, uarg);
+            step_mod = mir_build_rem(g->mu, t_offset, oarg, n_c);
+            if (method == V_METHOD_ENUM_PREV)
+               step_mod = mir_build_sub(g->mu, t_offset, n_c, step_mod);
+         }
+
          mir_block_t done_bb = mir_add_block(g->mu);
          for (int i = 0; i < nnames; i++) {
-            const int to = (((i + step) % nnames) + nnames) % nnames;
-
             mir_block_t hit_bb = mir_add_block(g->mu);
             mir_block_t next_bb = mir_add_block(g->mu);
             mir_build_cond(g->mu, vlog_enum_equal(g, ti, cur, vals[i]),
                            hit_bb, next_bb);
 
             mir_set_cursor(g->mu, hit_bb, MIR_APPEND);
-            mir_build_store(g->mu, res, vals[to]);
+            if (has_const) {
+               const int to = (((i + step) % nnames) + nnames) % nnames;
+               mir_build_store(g->mu, res, vals[to]);
+            }
+            else {
+               mir_value_t sum = mir_build_add(
+                  g->mu, t_offset, mir_const(g->mu, t_offset, i), step_mod);
+               mir_value_t to = mir_build_rem(g->mu, t_offset, sum, n_c);
+               mir_value_t elem = mir_build_array_ref(g->mu, tab, to);
+               mir_build_store(g->mu, res, mir_build_load(g->mu, elem));
+            }
             mir_build_jump(g->mu, done_bb);
 
             mir_set_cursor(g->mu, next_bb, MIR_APPEND);
