@@ -4252,11 +4252,19 @@ static void overload_named_argument(overload_t *o, tree_t name)
    if (o->trace)
       printf("%s: named argument %s\n", istr(o->name), istr(ident));
 
+   int npos = 0;
+   for (int k = 0; k < o->nactuals; k++) {
+      if (tree_subkind(tree_param(o->tree, k)) == P_POS)
+         npos++;
+      else
+         break;
+   }
+
    // See if any possible overload matches this argument name
    int first_match = -1;
    for (unsigned i = 0; first_match < 0 && i < o->candidates.count; i++) {
       const int nports = tree_ports(o->candidates.items[i]);
-      for (int j = 0; j < nports; j++) {
+      for (int j = npos; j < nports; j++) {
          tree_t p = tree_port(o->candidates.items[i], j);
 
          type_t ntype = overload_get_name_type(p, ident, name);
@@ -4299,7 +4307,7 @@ static void overload_named_argument(overload_t *o, tree_t name)
       for (unsigned i = first_match + 1; i < o->candidates.count; i++) {
          const int nports = tree_ports(o->candidates.items[i]);
          tree_t port = NULL;
-         for (int j = 0; j < nports; j++) {
+         for (int j = npos; j < nports; j++) {
             tree_t p = tree_port(o->candidates.items[i], j);
 
             type_t ntype = overload_get_name_type(p, ident, name);
