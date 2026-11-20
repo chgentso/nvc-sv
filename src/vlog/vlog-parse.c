@@ -20647,6 +20647,9 @@ static void p_module_or_generate_item_declaration(vlog_node_t mod)
    }
 }
 
+static vlog_node_t p_generate_block(void);
+static void declare_gen_block(vlog_node_t b);
+
 static void p_generate_item(vlog_node_t parent)
 {
    // module_or_generate_item | interface_or_generate_item
@@ -20657,6 +20660,15 @@ static void p_generate_item(vlog_node_t parent)
    // A DPI export is allowed in the scope of the function (1800-2017 35.5.4)
    if (peek() == tEXPORT && peek_nth(2) == tSTRING)
       p_dpi_export(parent);
+   else if (peek() == tBEGIN || (peek() == tID && peek_nth(2) == tCOLON
+                                 && peek_nth(3) == tBEGIN)) {
+      const unsigned saved = gen_construct;
+      gen_construct = ++gen_constructs;
+      vlog_node_t b = p_generate_block();
+      gen_construct = saved;
+      declare_gen_block(b);
+      vlog_add_stmt(parent, b);
+   }
    else
       p_module_or_generate_item(parent);
 }
@@ -24816,36 +24828,8 @@ static void p_generate_region(vlog_node_t mod)
 
    consume(tGENERATE);
 
-   if (optional(tBEGIN)) {
-      // This is non-standard but seen in some legacy code
-      consume(tCOLON);
-
-      ident_t label = p_identifier();
-
-      vlog_node_t b = vlog_new(V_GEN_BLOCK);
-      vlog_set_ident(b, label);
-
-      while (not_at_items(tEND))
-         p_generate_item(b);
-
-      consume(tEND);
-
-      if (optional(tCOLON)) {
-         ident_t name = p_identifier();
-         if (label == NULL)
-            parse_error(&state.last_loc, "block does not have a label");
-         else if (name != label)
-            parse_error(&state.last_loc, "%pQ does not match label %pQ",
-                        name, label);
-      }
-
-      vlog_set_loc(b, CURRENT_LOC);
-      vlog_add_stmt(mod, b);
-   }
-   else {
-      while (not_at_items(tENDGENERATE))
-         p_generate_item(mod);
-   }
+   while (not_at_items(tENDGENERATE))
+      p_generate_item(mod);
 
    consume(tENDGENERATE);
 }
