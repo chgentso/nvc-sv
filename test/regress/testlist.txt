@@ -2964,3 +2964,4 @@ svpatkey1       verilog
 svassoccmp1     verilog
 svgenbegin1     verilog
 svforceconcat1  verilog
+svarrayquery1   verilog

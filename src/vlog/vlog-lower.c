@@ -6704,15 +6704,18 @@ static int vlog_query_dims(vlog_node_t v, vlog_qdim_t *dims)
          case V_TF_PORT_DECL:
          case V_PARAM_DECL:
          case V_LOCALPARAM:
+         case V_TYPE_DECL:
             break;
          default:
             return 0;
          }
 
          int n = 0;
-         const int nranges = vlog_ranges(decl);
-         for (int i = 0; i < nranges && n < MAX_QUERY_DIMS; i++)
-            dims[n++] = (vlog_qdim_t){ vlog_range(decl, i), false };
+         if (vlog_kind(decl) != V_TYPE_DECL) {
+            const int nranges = vlog_ranges(decl);
+            for (int i = 0; i < nranges && n < MAX_QUERY_DIMS; i++)
+               dims[n++] = (vlog_qdim_t){ vlog_range(decl, i), false };
+         }
 
          vlog_node_t t = vlog_get_type(vlog_type(decl));
          while (t != NULL && vlog_kind(t) == V_DATA_TYPE
@@ -6744,6 +6747,19 @@ static int vlog_query_dims(vlog_node_t v, vlog_qdim_t *dims)
             dims[i - skip] = tmp[i];
          return n - skip;
       }
+   case V_PART_SELECT:
+      if (vlog_subkind(v) == V_RANGE_CONST) {
+         vlog_qdim_t tmp[MAX_QUERY_DIMS];
+         const int n = vlog_query_dims(vlog_value(v), tmp);
+         if (n == 0)
+            return 0;
+
+         dims[0] = (vlog_qdim_t){ v, false };
+         for (int i = 1; i < n; i++)
+            dims[i] = tmp[i];
+         return n;
+      }
+      return 0;
    default:
       return 0;
    }
@@ -6754,7 +6770,8 @@ static int vlog_query_unpacked(vlog_node_t v, const vlog_qdim_t *dims, int n)
    int count = 0;
    for (int i = 0; i < n; i++) {
       if (dims[i].dynamic
-          || vlog_subkind(dims[i].dim) == V_DIM_UNPACKED)
+          || (vlog_kind(dims[i].dim) == V_DIMENSION
+              && vlog_subkind(dims[i].dim) == V_DIM_UNPACKED))
          count++;
       else
          break;
@@ -6778,55 +6795,12 @@ static bool vlog_is_array_query(vlog_node_t v)
    return false;
 }
 
-static mir_value_t vlog_lower_array_query(vlog_gen_t *g, vlog_node_t v)
+static mir_value_t vlog_lower_array_query_dim(vlog_gen_t *g, vlog_node_t v,
+                                              vlog_node_t arg,
+                                              const vlog_qdim_t *q,
+                                              int64_t which, ident_t id)
 {
    mir_type_t t_integer = mir_vec4_type(g->mu, 32, true);
-
-   const int nparams = vlog_params(v);
-   if (nparams < 1 || nparams > 2)
-      fatal_at(vlog_loc(v), "wrong number of arguments to %pQ", vlog_ident(v));
-
-   vlog_node_t arg = vlog_param(v, 0);
-
-   vlog_qdim_t dims[MAX_QUERY_DIMS];
-   const int n = vlog_query_dims(arg, dims);
-
-   if (vlog_flags(v) & VLOG_F_FORWARD) {
-      // The bounds of a foreach over a name which was bound later: the keys
-      // of an associative array cannot be found from the number of elements
-      vlog_node_t root = arg;
-      while (vlog_kind(root) == V_BIT_SELECT)
-         root = vlog_value(root);
-
-      vlog_node_t t = vlog_has_ref(root) && vlog_kind(root) == V_HIER_REF
-         ? vlog_get_type(vlog_ref(root)) : NULL;
-      for (; t != NULL && vlog_kind(t) == V_DATA_TYPE
-              && (vlog_subkind(t) == DT_DYNARRAY || vlog_subkind(t) == DT_QUEUE
-                  || vlog_subkind(t) == DT_ASSOC);
-           t = vlog_get_type(vlog_type(t))) {
-         if (vlog_subkind(t) == DT_ASSOC)
-            fatal_at(vlog_loc(v), "sorry, foreach over an associative array "
-                     "named before its instance is declared is not "
-                     "supported");
-      }
-   }
-
-   ident_t id = vlog_ident(v);
-   if (id == ident_new("$dimensions"))
-      return mir_const_vec(g->mu, t_integer, n, 0);
-   else if (id == ident_new("$unpacked_dimensions"))
-      return mir_const_vec(g->mu, t_integer, vlog_query_unpacked(arg, dims, n),
-                           0);
-
-   int64_t which = 1;
-   if (nparams == 2 && !vlog_get_const(vlog_param(v, 1), &which))
-      fatal_at(vlog_loc(v), "sorry, the dimension argument of %pQ must be "
-               "constant", id);
-
-   if (which < 1 || which > n)
-      return vlog_lower_x(g, t_integer);
-
-   const vlog_qdim_t *q = &(dims[which - 1]);
 
    int64_t left, right;
    mir_value_t len = MIR_NULL_VALUE;
@@ -6875,6 +6849,85 @@ static mir_value_t vlog_lower_array_query(vlog_gen_t *g, vlog_node_t v)
       result = llabs(left - right) + 1;
 
    return mir_const_vec(g->mu, t_integer, (uint64_t)result & UINT32_MAX, 0);
+}
+
+static mir_value_t vlog_lower_array_query(vlog_gen_t *g, vlog_node_t v)
+{
+   mir_type_t t_integer = mir_vec4_type(g->mu, 32, true);
+
+   const int nparams = vlog_params(v);
+   if (nparams < 1 || nparams > 2)
+      fatal_at(vlog_loc(v), "wrong number of arguments to %pQ", vlog_ident(v));
+
+   vlog_node_t arg = vlog_param(v, 0);
+
+   vlog_qdim_t dims[MAX_QUERY_DIMS];
+   const int n = vlog_query_dims(arg, dims);
+
+   if (vlog_flags(v) & VLOG_F_FORWARD) {
+      // The bounds of a foreach over a name which was bound later: the keys
+      // of an associative array cannot be found from the number of elements
+      vlog_node_t root = arg;
+      while (vlog_kind(root) == V_BIT_SELECT)
+         root = vlog_value(root);
+
+      vlog_node_t t = vlog_has_ref(root) && vlog_kind(root) == V_HIER_REF
+         ? vlog_get_type(vlog_ref(root)) : NULL;
+      for (; t != NULL && vlog_kind(t) == V_DATA_TYPE
+              && (vlog_subkind(t) == DT_DYNARRAY || vlog_subkind(t) == DT_QUEUE
+                  || vlog_subkind(t) == DT_ASSOC);
+           t = vlog_get_type(vlog_type(t))) {
+         if (vlog_subkind(t) == DT_ASSOC)
+            fatal_at(vlog_loc(v), "sorry, foreach over an associative array "
+                     "named before its instance is declared is not "
+                     "supported");
+      }
+   }
+
+   ident_t id = vlog_ident(v);
+   if (id == ident_new("$dimensions"))
+      return mir_const_vec(g->mu, t_integer, n, 0);
+   else if (id == ident_new("$unpacked_dimensions"))
+      return mir_const_vec(g->mu, t_integer, vlog_query_unpacked(arg, dims, n),
+                           0);
+
+   int64_t which = 1;
+   if (nparams == 1 || vlog_get_const(vlog_param(v, 1), &which)) {
+      if (which < 1 || which > n)
+         return vlog_lower_x(g, t_integer);
+
+      return vlog_lower_array_query_dim(g, v, arg, &(dims[which - 1]),
+                                        which, id);
+   }
+
+   mir_value_t dim = vlog_lower_cast(g, t_integer,
+                                     vlog_lower_rvalue(g, vlog_param(v, 1)));
+   mir_value_t res = mir_add_var(g->mu, t_integer, MIR_NULL_STAMP,
+                                 ident_uniq("qdim"), MIR_VAR_TEMP);
+   mir_build_store(g->mu, res, vlog_lower_x(g, t_integer));
+
+   mir_block_t done_bb = mir_add_block(g->mu);
+   for (int d = 1; d <= n; d++) {
+      mir_value_t eq = mir_build_test(
+         g->mu, mir_build_binary(g->mu, MIR_VEC_CASE_EQ, t_integer, dim,
+                                 mir_const_vec(g->mu, t_integer, d, 0)));
+
+      mir_block_t hit_bb = mir_add_block(g->mu);
+      mir_block_t next_bb = mir_add_block(g->mu);
+      mir_build_cond(g->mu, eq, hit_bb, next_bb);
+
+      mir_set_cursor(g->mu, hit_bb, MIR_APPEND);
+      mir_build_store(g->mu, res,
+                      vlog_lower_array_query_dim(g, v, arg, &(dims[d - 1]),
+                                                 d, id));
+      mir_build_jump(g->mu, done_bb);
+
+      mir_set_cursor(g->mu, next_bb, MIR_APPEND);
+   }
+
+   mir_build_jump(g->mu, done_bb);
+   mir_set_cursor(g->mu, done_bb, MIR_APPEND);
+   return mir_build_load(g->mu, res);
 }
 
 static void vlog_typename_node(vlog_node_t where, text_buf_t *tb,
