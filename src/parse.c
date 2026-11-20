@@ -13329,7 +13329,9 @@ static void p_block_header(tree_t block)
       p_generic_clause(block);
 
       if (peek() == tGENERIC) {
+         scope_set_container(nametab, NULL);
          p_generic_map_aspect(block, block);
+         scope_set_container(nametab, block);
          consume(tSEMI);
       }
    }
@@ -13344,7 +13346,9 @@ static void p_block_header(tree_t block)
       pop_scope(nametab);
 
       if (peek() == tPORT) {
+         scope_set_container(nametab, NULL);
          p_port_map_aspect(block, block);
+         scope_set_container(nametab, block);
          consume(tSEMI);
       }
    }
