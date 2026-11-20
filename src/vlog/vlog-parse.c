@@ -14922,18 +14922,15 @@ static vlog_node_t p_typedef_dimensions(vlog_node_t dt)
 
    if (vec != NULL && vlog_kind(vec) == V_DATA_TYPE
        && (vlog_subkind(vec) == DT_LOGIC || vlog_subkind(vec) == DT_BIT)) {
-      // A packed array of a packed array
+      // A packed array of a named vector type is unsigned as a whole while
+      // each element retains the named type's signing (1800-2023 7.4.1)
       vlog_node_t v = vlog_new(V_DATA_TYPE);
       vlog_set_subkind(v, vlog_subkind(vec));
-      vlog_set_flags(v, vlog_flags(vec));
+      vlog_set_type(v, dt);
       vlog_set_loc(v, vlog_loc(dt));
 
       while (peek() == tLSQUARE)
          vlog_add_range(v, p_packed_dimension());
-
-      const int nranges = vlog_ranges(vec);
-      for (int i = 0; i < nranges; i++)
-         vlog_add_range(v, vlog_range(vec, i));
 
       return v;
    }

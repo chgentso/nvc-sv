@@ -2970,3 +2970,4 @@ svctorpat1      verilog
 svpatrep1       verilog
 svbitselmethod1 verilog
 svstreamcast1   verilog
+svpackedsign1   verilog

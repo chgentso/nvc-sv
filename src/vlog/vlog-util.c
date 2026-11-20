@@ -2415,10 +2415,14 @@ static vlog_node_t vlog_dim_of_type(vlog_node_t dt, int n)
    }
 
    // A scalar or an implicit type has fewer dimensions than selects
-   if (n >= (int)vlog_ranges(dt))
-      return NULL;
+   const int nranges = vlog_ranges(dt);
+   if (n < nranges)
+      return vlog_range(dt, n);
 
-   return vlog_range(dt, n);
+   if (vlog_kind(dt) == V_DATA_TYPE && vlog_has_type(dt))
+      return vlog_dim_of_type(vlog_get_type(vlog_type(dt)), n - nranges);
+
+   return NULL;
 }
 
 vlog_node_t vlog_get_dim(vlog_node_t v, int n)

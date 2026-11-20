@@ -2073,13 +2073,22 @@ static vlog_select_t vlog_lower_select(vlog_gen_t *g, vlog_node_t v)
          const bool is_real = mir_get_class(g->mu, prefix.type)
             == MIR_TYPE_REAL;
 
+         mir_type_t rtype = is_real ? prefix.type
+            : vlog_sel_vec_type(g, prefix.type, size);
+         if (!is_real) {
+            vlog_node_t etype = vlog_select_type(v);
+            if (etype != NULL && vlog_is_signed(etype))
+               rtype = mir_get_class(g->mu, rtype) == MIR_TYPE_VEC2
+                  ? mir_vec2_type(g->mu, size, true)
+                  : mir_vec4_type(g->mu, size, true);
+         }
+
          vlog_select_t result = {
             .obj        = obj,
             .dst_offset = bit_off,
             .count      = count,
             .src_offset = mir_const(g->mu, t_offset, 0),
-            .type       = is_real ? prefix.type
-                          : vlog_sel_vec_type(g, prefix.type, size),
+            .type       = rtype,
             .size       = size,
             .two_state  = prefix.two_state
                || mir_get_class(g->mu, prefix.type) == MIR_TYPE_VEC2,
@@ -6747,10 +6756,11 @@ static int vlog_query_dims(vlog_node_t v, vlog_qdim_t *dims)
             t = vlog_get_type(vlog_type(t));
          }
 
-         if (t != NULL && vlog_kind(t) == V_DATA_TYPE) {
+         while (t != NULL && vlog_kind(t) == V_DATA_TYPE) {
             const int nr = vlog_ranges(t);
             for (int i = 0; i < nr && n < MAX_QUERY_DIMS; i++)
                dims[n++] = (vlog_qdim_t){ vlog_range(t, i), false };
+            t = vlog_has_type(t) ? vlog_get_type(vlog_type(t)) : NULL;
          }
 
          return n;
