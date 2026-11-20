@@ -650,10 +650,33 @@ static vlog_node_t simp_wait(vlog_node_t v)
    vlog_node_t expr = vlog_value(v);
 
    vlog_node_t type = vlog_get_type(expr), cond;
-   if (type == NULL ? !vlog_is_real(expr)
-       : vlog_kind(type) == V_DATA_TYPE && vlog_subkind(type) != DT_REAL
-       && vlog_subkind(type) != DT_SHORTREAL
-       && vlog_subkind(type) != DT_REALTIME) {
+   bool is_integral = false;
+   if (type == NULL)
+      is_integral = !vlog_is_real(expr);
+   else if (vlog_kind(type) == V_DATA_TYPE) {
+      switch (vlog_subkind(type)) {
+      case DT_IMPLICIT:
+      case DT_LOGIC:
+      case DT_INTEGER:
+      case DT_BYTE:
+      case DT_SHORTINT:
+      case DT_INT:
+      case DT_LONGINT:
+      case DT_TIME:
+      case DT_BIT:
+         is_integral = true;
+         break;
+      default:
+         break;
+      }
+   }
+   else if (vlog_kind(type) == V_ENUM_DECL
+            || ((vlog_kind(type) == V_STRUCT_DECL
+                 || vlog_kind(type) == V_UNION_DECL)
+                && (vlog_flags(type) & VLOG_F_PACKED)))
+      is_integral = true;
+
+   if (is_integral) {
       // The condition is true only if some bit is known to be one
       vlog_node_t any = vlog_new(V_UNARY);
       vlog_set_loc(any, vlog_loc(expr));

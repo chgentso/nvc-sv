@@ -11107,8 +11107,10 @@ static mir_value_t vlog_lower_poll_vector(vlog_gen_t *g, vlog_node_t expr)
    if (vlog_kind(expr) == V_REF && vlog_is_sized_dynarray(expr))
       value = vlog_flatten_dynarray(g, expr, value, true);
 
-   // A change of a real is detected by comparing its bits
-   if (mir_is(g->mu, value, MIR_TYPE_REAL))
+   // A change of a real or handle is detected by comparing its bits
+   const mir_class_t vclass = mir_get_class(g->mu, mir_get_type(g->mu, value));
+   if (vclass == MIR_TYPE_REAL || vclass == MIR_TYPE_ACCESS
+       || vclass == MIR_TYPE_POINTER || vclass == MIR_TYPE_CONTEXT)
       value = mir_build_cast(g->mu, mir_vec2_type(g->mu, 64, false), value);
 
    if (!mir_is_vector(g->mu, value))

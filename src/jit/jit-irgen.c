@@ -2328,8 +2328,10 @@ static void irgen_op_cast(jit_irgen_t *g, mir_value_t n)
          arg_signed = irgen_repr_signed(repr);
          arg_size = irgen_repr_bits(repr);
       }
-      else if (arg_class == MIR_TYPE_REAL) {
-         // The bits of the double
+      else if (arg_class == MIR_TYPE_REAL || arg_class == MIR_TYPE_ACCESS
+               || arg_class == MIR_TYPE_POINTER
+               || arg_class == MIR_TYPE_CONTEXT) {
+         // The bits of the double or handle/pointer
          arg_signed = false;
          arg_size = 64;
       }
