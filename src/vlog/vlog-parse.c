@@ -640,7 +640,7 @@ static int     rs_loop_depth = 0;
 
 // Package or class which qualifies the name that is about to be looked up
 static vlog_node_t qualify_scope = NULL;
-static bool pattern_array_elems = false;   // The next pattern is for the elements of an unpacked array
+static int pattern_array_elems = 0;   // Unpacked array depth for nested patterns
 static vlog_scope_t *select_scope = NULL;
 static bool        qualify_failed = false;
 
@@ -6273,14 +6273,18 @@ static void resolve_type_keys(vlog_node_t *items, int count, vlog_node_t dt,
    }
 }
 
-static vlog_node_t p_pattern_elem_expr(bool of_array, vlog_node_t dt)
+static vlog_node_t p_pattern_elem_expr(int array_depth, vlog_node_t dt)
 {
    // The value of an item that gives an element of an unpacked array of
    // structures
 
-   if (of_array && dt != NULL && peek() == tTICK && peek_nth(2) == tLBRACE
-       && (vlog_kind(dt) == V_STRUCT_DECL || vlog_kind(dt) == V_UNION_DECL))
-      return p_assignment_pattern_expression(dt);
+   if (array_depth > 0 && dt != NULL && peek() == tTICK && peek_nth(2) == tLBRACE
+       && (vlog_kind(dt) == V_STRUCT_DECL || vlog_kind(dt) == V_UNION_DECL)) {
+      pattern_array_elems = array_depth - 1;
+      vlog_node_t v = p_assignment_pattern_expression(dt);
+      pattern_array_elems = 0;
+      return v;
+   }
 
    return p_pattern_item_expr(dt, NULL);
 }
@@ -6299,8 +6303,9 @@ static void p_assignment_pattern(vlog_node_t expr)
    optional(tTICK);   // An unpacked array concatenation has the same form
    consume(tLBRACE);
 
-   const bool of_array = pattern_array_elems;
-   pattern_array_elems = false;
+   const int array_depth = pattern_array_elems;
+   const bool of_array = array_depth > 0;
+   pattern_array_elems = 0;
 
    if (optional(tRBRACE))
       return;   // Empty queue or dynamic array
@@ -6327,7 +6332,7 @@ static void p_assignment_pattern(vlog_node_t expr)
          vlog_set_loc(v, &state.last_loc);
          vlog_set_subkind(v, 1);
          consume(tCOLON);
-         vlog_set_right(v, p_pattern_elem_expr(of_array, dt));
+         vlog_set_right(v, p_pattern_elem_expr(array_depth, dt));
       }
       else if (!assoc && is_type_key(dt)) {
          vlog_node_t key;
@@ -6399,15 +6404,18 @@ static void p_assignment_pattern(vlog_node_t expr)
          if (of_array && bt != NULL && peek() == tTICK
              && peek_nth(2) == tLBRACE
              && (vlog_kind(bt) == V_STRUCT_DECL
-                 || vlog_kind(bt) == V_UNION_DECL))
+                 || vlog_kind(bt) == V_UNION_DECL)) {
+            pattern_array_elems = array_depth - 1;
             head = p_assignment_pattern_expression(dt);   // An element
+            pattern_array_elems = 0;
+         }
          else
             head = p_pattern_item_expr(dt, member);
          vlog_set_loc(v, vlog_loc(head));
 
          if (optional(tCOLON)) {
             vlog_set_left(v, head);
-            vlog_set_right(v, p_pattern_elem_expr(of_array, dt));
+            vlog_set_right(v, p_pattern_elem_expr(array_depth, dt));
          }
          else if (optional(tLBRACE)) {
             // Replication of a list of items
@@ -6416,7 +6424,7 @@ static void p_assignment_pattern(vlog_node_t expr)
             vlog_node_t list = vlog_new(V_PATTERN_EXPR);
             do {
                vlog_node_t item = vlog_new(V_PATTERN_ITEM);
-               vlog_set_right(item, p_pattern_item_expr(dt, NULL));
+               vlog_set_right(item, p_pattern_elem_expr(array_depth, dt));
                vlog_add_param(list, item);
             } while (optional(tCOMMA));
 
@@ -6596,9 +6604,9 @@ static vlog_node_t pattern_type_of(vlog_node_t lhs)
    return type;
 }
 
-static bool lhs_is_unpacked_array(vlog_node_t lhs)
+static int lhs_unpacked_depth(vlog_node_t lhs)
 {
-   // The target of an assignment is a fixed size unpacked array
+   // Number of remaining unpacked dimensions on the target of an assignment
 
    int selected = 0;
    while (vlog_kind(lhs) == V_BIT_SELECT) {
@@ -6618,7 +6626,7 @@ static bool lhs_is_unpacked_array(vlog_node_t lhs)
    }
 
    if (decl == NULL || !vlog_is_fixed_unpacked(decl))
-      return false;
+      return 0;
 
    int unpacked = 0;
    const int nranges = vlog_ranges(decl);
@@ -6627,7 +6635,7 @@ static bool lhs_is_unpacked_array(vlog_node_t lhs)
          unpacked++;
    }
 
-   return selected < unpacked;
+   return selected < unpacked ? unpacked - selected : 0;
 }
 
 static vlog_node_t p_expression_of_lhs(vlog_node_t lhs)
@@ -6636,11 +6644,11 @@ static vlog_node_t p_expression_of_lhs(vlog_node_t lhs)
 
    vlog_node_t dt = pattern_type_of(lhs);
 
-   if (peek() == tTICK && peek_nth(2) == tLBRACE && lhs_is_unpacked_array(lhs))
-      pattern_array_elems = true;
+   if (peek() == tTICK && peek_nth(2) == tLBRACE)
+      pattern_array_elems = lhs_unpacked_depth(lhs);
 
    vlog_node_t v = p_expression_of_type(dt);
-   pattern_array_elems = false;
+   pattern_array_elems = 0;
    return v;
 }
 
