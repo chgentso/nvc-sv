@@ -6397,8 +6397,13 @@ static void lower_fill_target_parts(lower_unit_t *lu, tree_t target,
          lower_fill_target_parts(lu, value, newkind, ptr);
 
          vcode_reg_t len_reg;
-         if (newkind == PART_SLICE)
-            len_reg = (*ptr - 1)->off;
+         if (newkind == PART_SLICE) {
+            if ((*ptr - 1)->kind == PART_POP)
+               len_reg = (*ptr - 1)->off;
+            else
+               len_reg = lower_array_len(lu, tree_type(value), 0,
+                                         (*ptr - 1)->reg);
+         }
          else
             len_reg = emit_const(vtype_offset(), 1);
 
@@ -6479,10 +6484,34 @@ static void lower_copy_array(lower_unit_t *lu, type_t dst_type, type_t src_type,
    }
 }
 
+static vcode_reg_t lower_target_elem_uarray(vcode_reg_t orig_rhs,
+                                            vcode_reg_t data_reg,
+                                            type_t rhs_type)
+{
+   if (vcode_reg_kind(orig_rhs) != VCODE_TYPE_UARRAY)
+      return data_reg;
+
+   const int outer_dims = dimension_of(rhs_type);
+   const int total_dims = vtype_dims(vcode_reg_type(orig_rhs));
+   if (total_dims <= outer_dims)
+      return data_reg;
+
+   const int inner_dims = total_dims - outer_dims;
+   vcode_dim_t dims[inner_dims];
+   for (int i = 0; i < inner_dims; i++) {
+      dims[i].left  = emit_uarray_left(orig_rhs, outer_dims + i);
+      dims[i].right = emit_uarray_right(orig_rhs, outer_dims + i);
+      dims[i].dir   = emit_uarray_dir(orig_rhs, outer_dims + i);
+   }
+
+   return emit_wrap(data_reg, dims, inner_dims);
+}
+
 static void lower_var_assign_target(lower_unit_t *lu, target_part_t **ptr,
                                     tree_t where, vcode_reg_t rhs,
                                     type_t rhs_type)
 {
+   vcode_reg_t orig_rhs = rhs;
    int fieldno = 0;
    for (const target_part_t *p = (*ptr)++; p->kind != PART_POP; p = (*ptr)++) {
       vcode_reg_t src_reg = rhs;
@@ -6530,13 +6559,20 @@ static void lower_var_assign_target(lower_unit_t *lu, target_part_t **ptr,
 
       type_t type = tree_type(p->target);
 
+      vcode_reg_t data_ptr = src_reg;
+      if (p->kind == PART_ELEM || p->kind == PART_SLICE)
+         data_ptr = lower_array_data(src_reg);
+
+      if (p->kind == PART_ELEM && type_is_array(type))
+         src_reg = lower_target_elem_uarray(orig_rhs, data_ptr, rhs_type);
+
       if (p->kind != PART_SLICE && type_is_array(type)) {
          vcode_reg_t locus = lower_debug_locus(p->target);
          lower_check_array_sizes(lu, type, src_type, p->reg, src_reg, locus);
       }
 
       if (p->kind == PART_ELEM || p->kind == PART_SLICE)
-         src_reg = lower_array_data(src_reg);
+         src_reg = data_ptr;
 
       vcode_reg_t scalar_reg = src_reg;
       if ((p->kind == PART_ELEM || p->kind == PART_FIELD)
@@ -6751,6 +6787,7 @@ static void lower_signal_assign_target(lower_unit_t *lu, target_part_t **ptr,
                                        type_t rhs_type, vcode_reg_t reject,
                                        vcode_reg_t after)
 {
+   vcode_reg_t orig_rhs = rhs;
    int fieldno = 0;
    for (const target_part_t *p = (*ptr)++; p->kind != PART_POP; p = (*ptr)++) {
       vcode_reg_t src_reg = rhs;
@@ -6778,13 +6815,20 @@ static void lower_signal_assign_target(lower_unit_t *lu, target_part_t **ptr,
       if (p->kind == PART_FIELD && have_uarray_ptr(src_reg))
          src_reg = emit_load_indirect(src_reg);
 
+      vcode_reg_t data_ptr = src_reg;
+      if (p->kind == PART_ELEM || p->kind == PART_SLICE)
+         data_ptr = lower_array_data(src_reg);
+
+      if (p->kind == PART_ELEM && type_is_array(type))
+         src_reg = lower_target_elem_uarray(orig_rhs, data_ptr, rhs_type);
+
       if (p->kind != PART_SLICE && type_is_array(type)) {
          vcode_reg_t locus = lower_debug_locus(p->target);
          lower_check_array_sizes(lu, type, src_type, p->reg, src_reg, locus);
       }
 
       if (p->kind == PART_ELEM || p->kind == PART_SLICE)
-         src_reg = lower_array_data(src_reg);
+         src_reg = data_ptr;
 
       if (!type_is_homogeneous(type)) {
          vcode_reg_t args[2] = { reject, after };
