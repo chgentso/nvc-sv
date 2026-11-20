@@ -1584,6 +1584,7 @@ static vcode_reg_t lower_name_attr(lower_unit_t *lu, tree_t decl,
    case T_INSTANCE:
       tb_append(tb, ':');
       tb_istr(tb, tree_ident(decl));
+      tb_append(tb, ':');
       tb_downcase(tb);
       break;
 
