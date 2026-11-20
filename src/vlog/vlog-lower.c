@@ -4964,6 +4964,134 @@ static vlog_cmp_t vlog_struct_compare(vlog_gen_t *g, vlog_node_t v,
    return result;
 }
 
+static mir_value_t vlog_assoc_key_equal(vlog_gen_t *g, vlog_node_t kt,
+                                        mir_value_t a, mir_value_t b);
+
+static mir_value_t vlog_lower_assoc_compare(vlog_gen_t *g, vlog_node_t v,
+                                            vlog_node_t type)
+{
+   // Associative arrays are stored sorted by key so compare entry by entry
+
+   const type_info_t *ti = vlog_type_info(g, type);
+   vlog_node_t etype = vlog_get_type(vlog_type(type));
+   const type_info_t *eti = vlog_type_info(g, etype);
+   vlog_node_t kt = vlog_assoc_key(type);
+
+   const mir_class_t eclass = mir_get_class(g->mu, eti->type);
+   const bool is_struct = eclass == MIR_TYPE_ACCESS && etype != NULL
+      && (vlog_kind(etype) == V_STRUCT_DECL
+          || vlog_kind(etype) == V_UNION_DECL);
+   if (eclass != MIR_TYPE_VEC2 && eclass != MIR_TYPE_VEC4
+       && eclass != MIR_TYPE_REAL && eclass != MIR_TYPE_CONTEXT
+       && eclass != MIR_TYPE_UARRAY && !is_struct)
+      fatal_at(vlog_loc(v), "sorry, associative arrays of this element type "
+               "cannot be compared");
+
+   mir_type_t t_offset = mir_offset_type(g->mu);
+   mir_type_t t_bool = mir_bool_type(g->mu);
+   mir_type_t t_bit = mir_vec2_type(g->mu, 1, false);
+
+   mir_value_t l = vlog_lower_with_context(g, vlog_left(v), ti->type);
+   mir_value_t r = vlog_lower_with_context(g, vlog_right(v), ti->type);
+   mir_value_t len = mir_build_uarray_len(g->mu, l, 0);
+
+   mir_value_t result = mir_add_var(g->mu, t_bool, MIR_NULL_STAMP,
+                                    ident_uniq("eq"), MIR_VAR_TEMP);
+   mir_value_t index = mir_add_var(g->mu, t_offset, MIR_NULL_STAMP,
+                                   ident_uniq("i"), MIR_VAR_TEMP);
+
+   mir_build_store(g->mu, result, mir_const(g->mu, t_bool, 0));
+   mir_build_store(g->mu, index, mir_const(g->mu, t_offset, 0));
+
+   mir_block_t test_bb = mir_add_block(g->mu);
+   mir_block_t body_bb = mir_add_block(g->mu);
+   mir_block_t val_bb = mir_add_block(g->mu);
+   mir_block_t next_bb = mir_add_block(g->mu);
+   mir_block_t same_bb = mir_add_block(g->mu);
+   mir_block_t exit_bb = mir_add_block(g->mu);
+
+   mir_value_t same_size =
+      mir_build_cmp(g->mu, MIR_CMP_EQ, len, mir_build_uarray_len(g->mu, r, 0));
+   mir_build_cond(g->mu, same_size, test_bb, exit_bb);
+
+   mir_set_cursor(g->mu, test_bb, MIR_APPEND);
+
+   mir_value_t i = mir_build_load(g->mu, index);
+   mir_build_cond(g->mu, mir_build_cmp(g->mu, MIR_CMP_LT, i, len), body_bb,
+                  same_bb);
+
+   mir_set_cursor(g->mu, body_bb, MIR_APPEND);
+
+   mir_value_t lpair = mir_build_array_ref(g->mu, mir_build_unwrap(g->mu, l), i);
+   mir_value_t rpair = mir_build_array_ref(g->mu, mir_build_unwrap(g->mu, r), i);
+   mir_value_t lkey = mir_build_load(g->mu, mir_build_record_ref(g->mu, lpair, 0));
+   mir_value_t rkey = mir_build_load(g->mu, mir_build_record_ref(g->mu, rpair, 0));
+   mir_value_t same_key = vlog_assoc_key_equal(g, kt, lkey, rkey);
+   mir_build_cond(g->mu, same_key, val_bb, exit_bb);
+
+   mir_set_cursor(g->mu, val_bb, MIR_APPEND);
+
+   mir_value_t lelem = mir_build_load(g->mu, mir_build_record_ref(g->mu, lpair, 1));
+   mir_value_t relem = mir_build_load(g->mu, mir_build_record_ref(g->mu, rpair, 1));
+
+   const vlog_binary_t op = vlog_subkind(v);
+   const bool casecmp = op == V_BINARY_CASE_EQ || op == V_BINARY_CASE_NEQ;
+   mir_value_t same;
+   switch (eclass) {
+   case MIR_TYPE_REAL:
+      same = mir_build_cmp(g->mu, MIR_CMP_EQ, lelem, relem);
+      break;
+   case MIR_TYPE_CONTEXT:
+      same = mir_build_cmp(g->mu, MIR_CMP_EQ, lelem,
+                           mir_build_cast(g->mu, eti->type, relem));
+      break;
+   case MIR_TYPE_UARRAY:
+      {
+         mir_value_t zero = mir_const(g->mu, t_offset, 0);
+         mir_value_t args[] = { lelem, relem, zero };
+         mir_value_t sc = vlog_str_call(g, "__sv_str_cmp", t_offset, args, 3);
+         same = mir_build_cmp(g->mu, MIR_CMP_EQ, sc, zero);
+      }
+      break;
+   case MIR_TYPE_ACCESS:
+      {
+         vlog_cmp_t cmp = vlog_struct_compare(g, v, etype, lelem, relem,
+                                              casecmp);
+         same = mir_build_not(g->mu, mir_build_or(g->mu, cmp.diff, cmp.unknown));
+      }
+      break;
+   default:
+      same = mir_build_test(
+         g->mu, mir_build_binary(g->mu, MIR_VEC_CASE_EQ, eti->type, lelem,
+                                 relem));
+      break;
+   }
+
+   mir_build_cond(g->mu, same, next_bb, exit_bb);
+
+   mir_set_cursor(g->mu, next_bb, MIR_APPEND);
+
+   mir_build_store(g->mu, index,
+                   mir_build_add(g->mu, t_offset, i,
+                                 mir_const(g->mu, t_offset, 1)));
+   mir_build_jump(g->mu, test_bb);
+
+   mir_set_cursor(g->mu, same_bb, MIR_APPEND);
+
+   mir_build_store(g->mu, result, mir_const(g->mu, t_bool, 1));
+   mir_build_jump(g->mu, exit_bb);
+
+   mir_set_cursor(g->mu, exit_bb, MIR_APPEND);
+
+   const int want = op == V_BINARY_LOG_EQ || op == V_BINARY_CASE_EQ;
+   mir_value_t test = mir_build_cmp(g->mu, MIR_CMP_EQ,
+                                    mir_build_load(g->mu, result),
+                                    mir_const(g->mu, t_bool, want));
+   return mir_build_select(g->mu, t_bit, test,
+                           mir_const_vec(g->mu, t_bit, 1, 0),
+                           mir_const_vec(g->mu, t_bit, 0, 0));
+}
+
 static mir_value_t vlog_lower_struct_compare(vlog_gen_t *g, vlog_node_t v,
                                              vlog_node_t type)
 {
@@ -5143,6 +5271,17 @@ static mir_value_t vlog_lower_binary(vlog_gen_t *g, vlog_node_t v,
           || sop == V_BINARY_CASE_EQ || sop == V_BINARY_CASE_NEQ)
          return vlog_widen_vector(g, vlog_lower_struct_compare(g, v, ltype),
                                   context);
+   }
+
+   if (ltype != NULL && vlog_kind(ltype) == V_DATA_TYPE
+       && vlog_subkind(ltype) == DT_ASSOC) {
+      const vlog_binary_t aop = vlog_subkind(v);
+      if (aop != V_BINARY_LOG_EQ && aop != V_BINARY_LOG_NEQ
+          && aop != V_BINARY_CASE_EQ && aop != V_BINARY_CASE_NEQ)
+         fatal_at(vlog_loc(v), "sorry, this operator is not supported for "
+                  "associative arrays");
+      return vlog_widen_vector(g, vlog_lower_assoc_compare(g, v, ltype),
+                               context);
    }
 
    if (ltype != NULL && vlog_kind(ltype) == V_DATA_TYPE

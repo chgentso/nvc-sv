@@ -2818,8 +2818,16 @@ static type_mask_t vlog_check_binary(vlog_node_t v)
    type_mask_t lmask = vlog_check_expr(left);
    type_mask_t rmask = vlog_check_expr(right);
 
-   if (vlog_is_assoc_type(vlog_get_type(left))
-       || vlog_is_assoc_type(vlog_get_type(right))) {
+   vlog_node_t ltype = vlog_get_type(left);
+   vlog_node_t rtype = vlog_get_type(right);
+   if (vlog_is_assoc_type(ltype) || vlog_is_assoc_type(rtype)) {
+      const vlog_binary_t op = vlog_subkind(v);
+      if ((op == V_BINARY_LOG_EQ || op == V_BINARY_LOG_NEQ
+           || op == V_BINARY_CASE_EQ || op == V_BINARY_CASE_NEQ)
+          && vlog_is_assoc_type(ltype) && vlog_is_assoc_type(rtype)
+          && vlog_same_assoc_type(ltype, rtype))
+         return TM(DT_BIT);
+
       error_at(vlog_loc(v), "operator cannot be applied to an associative "
                "array");
       return TM_ERROR;
