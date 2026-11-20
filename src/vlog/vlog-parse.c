@@ -7549,6 +7549,13 @@ static vlog_node_t p_primary(void)
          vlog_set_loc(head, CURRENT_LOC);
       }
       break;
+   case tCONST:
+      consume(tCONST);
+      consume(tTICK);
+      consume(tLPAREN);
+      head = p_expression();
+      consume(tRPAREN);
+      break;
    case tSYSTASK:
       head = global_clock_call(p_subroutine_call(V_SYS_FCALL));
       break;
@@ -7892,6 +7899,7 @@ static vlog_node_t p_nonbinary_expression(void)
    case tVLOCAL:
    case tSIGNED:
    case tUNSIGNED:
+   case tCONST:
       {
          vlog_node_t v = p_primary();
          if (scan(tPLUSPLUS, tMINUSMINUS))
