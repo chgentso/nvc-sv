@@ -3752,20 +3752,39 @@ static void begin_overload_resolution(overload_t *o)
    o->initial = o->candidates.count;
    o->error   = type_set_any(o->nametab, type_is_none);
 
+   const tree_kind_t kind = tree_kind(o->tree);
+   const bool is_fcall = kind == T_FCALL || kind == T_PROT_FCALL;
+
+   bool all_pos = true;
+   for (int k = 0; k < o->nactuals; k++) {
+      if (tree_subkind(tree_param(o->tree, k)) == P_NAMED) {
+         all_pos = false;
+         break;
+      }
+   }
+
    if (o->candidates.count > 1) {
       unsigned wptr = 0;
       for (unsigned i = 0; i < o->candidates.count; i++) {
-         type_t type = tree_type(o->candidates.items[i]);
+         tree_t cand = o->candidates.items[i];
+         type_t type = tree_type(cand);
          if (type_has_result(type)) {
             type_t result = type_result(type);
             if (type_set_contains(o->nametab, result))
-               o->candidates.items[wptr++] = o->candidates.items[i];
-            else if (tree_subkind(o->candidates.items[i]) == S_DIV_PP) {
+               o->candidates.items[wptr++] = cand;
+            else if (is_fcall && all_pos && o->nactuals > 0
+                     && can_call_no_args(cand)
+                     && type_is_array(result)
+                     && dimension_of(result) == o->nactuals
+                     && type_set_contains(o->nametab, type_elem(result))) {
+               o->candidates.items[wptr++] = cand;
+            }
+            else if (tree_subkind(cand) == S_DIV_PP) {
                // LRM 93 section 7.3.5 allows an implicit conversion of
                // the result of dividing two physical types to any
                // integer type
                if (type_set_any(o->nametab, type_is_integer)) {
-                  o->candidates.items[wptr++] = o->candidates.items[i];
+                  o->candidates.items[wptr++] = cand;
                   o->implicit_conversion = true;
                }
                else
@@ -3775,13 +3794,10 @@ static void begin_overload_resolution(overload_t *o)
                overload_prune_candidate(o, i);
          }
          else
-            o->candidates.items[wptr++] = o->candidates.items[i];
+            o->candidates.items[wptr++] = cand;
       }
       ATRIM(o->candidates, wptr);
    }
-
-   const tree_kind_t kind = tree_kind(o->tree);
-   const bool is_fcall = kind == T_FCALL || kind == T_PROT_FCALL;
 
    // Remove procedures in a function call context and functions in a
    // procedure call context
@@ -4211,6 +4227,28 @@ static void overload_add_argument_type(overload_t *o, type_t type, tree_t d)
    type_set_add(o->nametab, type, d);
 }
 
+static bool overload_can_index(overload_t *o, tree_t d)
+{
+   if (!o->could_be_index || !can_call_no_args(d))
+      return false;
+
+   type_t rtype = get_result_type(o->nametab, d);
+   if (!type_is_array(rtype) || dimension_of(rtype) != o->nactuals)
+      return false;
+
+   const type_set_t *rts = o->typeset.down;
+   if (rts == NULL || rts->members.count == 0)
+      return true;
+
+   type_t elem = type_elem(rtype);
+   for (unsigned i = 0; i < rts->members.count; i++) {
+      if (type_eq(elem, rts->members.items[i].type))
+         return true;
+   }
+
+   return false;
+}
+
 static void overload_positional_argument(overload_t *o, int pos)
 {
    assert(o->state == O_IDLE);
@@ -4230,6 +4268,8 @@ static void overload_positional_argument(overload_t *o, int pos)
          overload_add_argument_type(o, tree_type(p), d);
          o->candidates.items[wptr++] = d;
       }
+      else if (overload_can_index(o, d))
+         o->candidates.items[wptr++] = d;
       else if (o->initial > 1)
          overload_prune_candidate(o, i);
       else
@@ -4491,16 +4531,24 @@ static void overload_next_argument(overload_t *o, tree_t p)
       int first_match = -1;
       bool found_port = false;
       for (unsigned i = 0; i < o->candidates.count; i++) {
-         tree_t port = overload_find_port(o->candidates.items[i], p);
-         if (port != NULL && type != NULL) {
-            type_t ptype = tree_type(port);
+         tree_t cand = o->candidates.items[i];
+         tree_t port = overload_find_port(cand, p);
+         type_t ptype = NULL;
+         if (port != NULL) {
+            ptype = tree_type(port);
             if (is_simple_partial) {
                ptype = overload_get_name_type(port, tree_ident(port),
                                               tree_name(p));
                if (ptype == NULL)
                   ptype = tree_type(port);
             }
+         }
+         else if (!is_named && overload_can_index(o, cand)) {
+            type_t rtype = get_result_type(o->nametab, cand);
+            ptype = index_type_of(rtype, tree_pos(p));
+         }
 
+         if (ptype != NULL && type != NULL) {
             found_port = true;
 
             if (type_eq(ptype, type)) {
