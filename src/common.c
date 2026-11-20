@@ -2488,6 +2488,7 @@ static void build_wait_for_target(tree_t expr, build_wait_fn_t fn, void *ctx)
       }
       break;
    case T_RECORD_REF:
+   case T_ALL:
       build_wait_for_target(tree_value(expr), fn, ctx);
       break;
    default:
@@ -2516,6 +2517,8 @@ void build_wait(tree_t expr, build_wait_fn_t fn, void *ctx)
    case T_QUALIFIED:
    case T_TYPE_CONV:
    case T_INERTIAL:
+   case T_NEW:
+   case T_ALL:
       if (tree_has_value(expr))
          build_wait(tree_value(expr), fn, ctx);
       break;
