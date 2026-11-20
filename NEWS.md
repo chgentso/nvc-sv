@@ -1,3 +1,6 @@
+## nvc-sv 0.17.1
+- `nvc --scan` records virtual interfaces used in parameterised classes, so the files defining them are part of the build.
+
 ## nvc-sv 0.17.0
 - `std.textio` `read` of an integer or time value out of range (for example `2147483648`) returns `good = false` (or the usual read error when there is no `good`) instead of stopping the simulation with an overflow.
 - VHPI names of array elements with an ascending range that does not start at 0 are right (`ram(16)`, not `ram(-16)`).
