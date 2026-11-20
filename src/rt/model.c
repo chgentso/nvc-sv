@@ -3902,6 +3902,7 @@ static void update_pseudo_source(rt_model_t *m, rt_source_t *src)
    else {
       assert(w_now->next == NULL || w_now->next->when > m->now);
       src->disconnected = !(n->flags & NET_F_FORCED);
+      w_now->when = m->now;
    }
 
    update_driving(m, n, false);
@@ -4503,7 +4504,6 @@ void force_signal(rt_model_t *m, rt_signal_t *s, const void *values,
 
       rt_source_t *src = get_pseudo_source(m, n, SOURCE_FORCING);
       copy_value_ptr(n, &(src->u.pseudo.waveforms.value), vptr);
-      src->u.pseudo.waveforms.when = m->now;
       src->disconnected = 0;
 
       waveform_t *w = alloc_waveform(m);
@@ -4967,8 +4967,10 @@ static bool nexus_active(rt_model_t *m, rt_nexus_t *nexus)
             if (nexus_active(m, s->u.port.input))
                return true;
          }
-         else if (s->tag == SOURCE_DRIVER
-                  && s->u.driver.waveforms.when == m->now) {
+         else if ((s->tag == SOURCE_DRIVER
+                   && s->u.driver.waveforms.when == m->now)
+                  || (is_pseudo_source(s->tag)
+                      && s->u.pseudo.waveforms.when == m->now)) {
             if (nexus->active_delta == m->iteration)
                return true;
             else if (nexus->active_delta == m->iteration + 1 && s->was_active)
@@ -4993,6 +4995,9 @@ static uint64_t nexus_last_active(rt_model_t *m, rt_nexus_t *nexus)
          else if (s->tag == SOURCE_DRIVER
                   && s->u.driver.waveforms.when <= m->now)
             last = MIN(last, m->now - s->u.driver.waveforms.when);
+         else if (is_pseudo_source(s->tag)
+                  && s->u.pseudo.waveforms.when <= m->now)
+            last = MIN(last, m->now - s->u.pseudo.waveforms.when);
       }
    }
 
