@@ -2946,3 +2946,4 @@ access13        normal
 alias17         normal,2008
 subprog2        normal
 subprog3        normal
+subprog4        normal

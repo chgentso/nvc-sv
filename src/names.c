@@ -102,6 +102,7 @@ typedef struct _type_set {
    tracked_type_list_t  members;
    type_set_t          *down;
    type_pred_t          pred;
+   ident_t              field;
    unsigned             watermark;
    tree_t               target;
    bool                 port_default;
@@ -1914,6 +1915,47 @@ static type_t get_result_type(nametab_t *tab, tree_t decl)
    return rtype;
 }
 
+static bool type_matches_field_chain(nametab_t *tab, type_t rtype,
+                                     const type_set_t *ts)
+{
+   if (rtype == NULL || type_is_none(rtype))
+      return false;
+
+   if (ts->field == NULL) {
+      if (ts->pred != NULL && !(*ts->pred)(rtype))
+         return false;
+      if (ts->members.count == 0)
+         return true;
+      for (unsigned i = 0; i < ts->members.count; i++) {
+         if (type_eq(rtype, ts->members.items[i].type))
+            return true;
+      }
+      return false;
+   }
+
+   if (type_is_access(rtype)) {
+      rtype = type_designated(rtype);
+      if (type_kind(rtype) == T_INCOMPLETE)
+         rtype = resolve_type(tab, rtype);
+   }
+
+   if (type_is_record(rtype)) {
+      const int nfields = type_fields(rtype);
+      for (int i = 0; i < nfields; i++) {
+         tree_t f = type_field(rtype, i);
+         if (tree_ident(f) == ts->field)
+            return ts->down == NULL
+               || type_matches_field_chain(tab, tree_type(f), ts->down);
+      }
+   }
+   else if (type_is_protected(rtype)) {
+      scope_t *s = scope_for_type(tab, rtype);
+      return symbol_for(s, ts->field) != NULL;
+   }
+
+   return false;
+}
+
 static tree_t get_aliased_subprogram(tree_t t)
 {
    assert(tree_kind(t) == T_ALIAS);
@@ -2119,6 +2161,26 @@ static tree_t try_resolve_name(nametab_t *tab, const symbol_t *sym)
          m.items[wptr++] = m.items[i];
       }
       ATRIM(m, wptr);
+   }
+
+   if (m.count > 1 && subprograms > 0 && enclosing == NULL
+       && tab->top_type_set->field != NULL) {
+      bool any_match = false;
+      for (int i = 0; i < m.count && !any_match; i++) {
+         type_t rtype = tree_has_type(m.items[i])
+            ? get_result_type(tab, m.items[i]) : NULL;
+         any_match = type_matches_field_chain(tab, rtype, tab->top_type_set);
+      }
+      if (any_match) {
+         unsigned wptr = 0;
+         for (int i = 0; i < m.count; i++) {
+            type_t rtype = tree_has_type(m.items[i])
+               ? get_result_type(tab, m.items[i]) : NULL;
+            if (type_matches_field_chain(tab, rtype, tab->top_type_set))
+               m.items[wptr++] = m.items[i];
+         }
+         ATRIM(m, wptr);
+      }
    }
 
    const bool type_set_empty = tab->top_type_set->members.count == 0;
@@ -2415,7 +2477,11 @@ static tree_t solve_selected_prefix(nametab_t *tab, tree_t t)
       }
    }
 
-   return solve_types(tab, prefix, NULL);
+   type_set_t ts = { .field = tree_ident(t) };
+   type_set_push(tab, &ts);
+   tree_t result = _solve_types(tab, prefix);
+   type_set_pop(tab, &ts);
+   return result;
 }
 
 static tree_t resolve_record_ref_or_call(nametab_t *tab, tree_t t, bool pcall)
@@ -3770,6 +3836,28 @@ static void begin_overload_resolution(overload_t *o)
             o->candidates.items[wptr++] = d;
       }
       ATRIM(o->candidates, wptr);
+   }
+
+   // Filter based on required field selection chain if available
+   if (o->candidates.count > 1 && o->nametab->top_type_set->field != NULL) {
+      bool any_match = false;
+      for (unsigned i = 0; i < o->candidates.count && !any_match; i++) {
+         type_t rtype = get_result_type(o->nametab, o->candidates.items[i]);
+         any_match = type_matches_field_chain(o->nametab, rtype,
+                                              o->nametab->top_type_set);
+      }
+      if (any_match) {
+         unsigned wptr = 0;
+         for (unsigned i = 0; i < o->candidates.count; i++) {
+            type_t rtype = get_result_type(o->nametab, o->candidates.items[i]);
+            if (type_matches_field_chain(o->nametab, rtype,
+                                         o->nametab->top_type_set))
+               o->candidates.items[wptr++] = o->candidates.items[i];
+            else
+               overload_prune_candidate(o, i);
+         }
+         ATRIM(o->candidates, wptr);
+      }
    }
 
    // Filter based on required type predicate if available
