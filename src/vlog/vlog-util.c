@@ -2468,9 +2468,19 @@ vlog_node_t vlog_get_dim(vlog_node_t v, int n)
       }
    case V_USER_FCALL:
    case V_METHOD_CALL:
+   case V_PATTERN_EXPR:
+   case V_CAST:
       return vlog_dim_of_type(vlog_get_type(v), n);
    case V_BIT_SELECT:
       return vlog_get_dim(vlog_value(v), vlog_params(v) + n);
+   case V_CONCAT:
+   case V_BINARY:
+   case V_UNARY:
+   case V_COND_EXPR:
+   case V_NUMBER:
+   case V_SYS_FCALL:
+   case V_STREAM:
+      return NULL;
    default:
       CANNOT_HANDLE(v);
    }
