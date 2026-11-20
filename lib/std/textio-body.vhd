@@ -80,8 +80,13 @@ package body textio is
             tmp := new string'("");
         else
             assert nchars <= l'length;
-            tmp := new string(1 to l'length - nchars);
-            tmp.all := get_slice(l.all, 1 + nchars, l'length);
+            if l'ascending then
+                tmp := new string(l'left + nchars to l'right);
+                tmp.all := l.all(l'left + nchars to l'right);
+            else
+                tmp := new string(l'left - nchars downto l'right);
+                tmp.all := l.all(l'left - nchars downto l'right);
+            end if;
         end if;
         deallocate(l);
         l := tmp;
@@ -706,7 +711,7 @@ package body textio is
         alias avalue  : string(1 to value'length) is value;
     begin
         skip_whitespace(l);
-        while pos <= l'right and pos <= avalue'right loop
+        while pos <= l'length and pos <= avalue'right loop
             peek := get_char(l.all, pos);
             exit when is_whitespace(peek);
             avalue(pos) := peek;
@@ -731,7 +736,7 @@ package body textio is
         good := false;
         avalue := (others => '0');
         skip_whitespace(l);
-        while ipos <= l'right and opos <= digits'right loop
+        while ipos <= l'length and opos <= digits'right loop
             char := get_char(l.all, ipos);
             ipos := ipos + 1;
             if char = '_' and underscore then
@@ -803,7 +808,7 @@ package body textio is
         good := false;
         avalue := (others => '0');
         skip_whitespace(l);
-        while ipos <= l'right and opos <= digits'right loop
+        while ipos <= l'length and opos <= digits'right loop
             char := get_char(l.all, ipos);
             ipos := ipos + 1;
             if char = '_' and underscore then

@@ -2190,14 +2190,31 @@ static void std_textio_consume(jit_func_t *func, jit_anchor_t *anchor,
    ffi_uarray_t **line = args[2].pointer;
    const int nchars = args[3].integer;
 
+   if (nchars == 0) {
+      args[0].pointer = NULL;
+      return;
+   }
+
    assert(*line != NULL);
 
-   const int length = ffi_array_length((*line)->dims[0].length);
+   const int64_t raw_len = (*line)->dims[0].length;
+   const int length = ffi_array_length(raw_len);
    assert(nchars <= length);
 
    (*line)->ptr += nchars;
-   (*line)->dims[0].left = 1;
-   (*line)->dims[0].length = length - nchars;
+   const int64_t new_len = length - nchars;
+   if (new_len == 0) {
+      (*line)->dims[0].left = 1;
+      (*line)->dims[0].length = 0;
+   }
+   else if (ffi_array_dir(raw_len)) {
+      (*line)->dims[0].left -= nchars;
+      (*line)->dims[0].length = ~new_len;
+   }
+   else {
+      (*line)->dims[0].left += nchars;
+      (*line)->dims[0].length = new_len;
+   }
 
    args[0].pointer = NULL;
 }
