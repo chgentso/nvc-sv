@@ -1310,7 +1310,7 @@ static void init_indexedName(c_indexedName *in, c_typeDecl *Type,
 
       int idx;
       if (ir->range.IsUp) {
-         idx = indices[i] - ir->LeftBound;
+         idx = ir->LeftBound + indices[i];
          BaseIndex *= ir->RightBound - ir->LeftBound + 1;
       }
       else {

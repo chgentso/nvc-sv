@@ -2919,3 +2919,4 @@ svuvmhdl1       verilog,gold,2019
 svforcearg1     verilog,gold,2019
 textio_overflow normal
 textio_overflow2 gold,fail
+vhpi37          normal,vhpi
