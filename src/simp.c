@@ -1225,8 +1225,11 @@ static tree_t simp_static_expr(tree_t t, simp_ctx_t *ctx)
    switch (tree_kind(t)) {
    case T_LITERAL:
    case T_STRING:
-   case T_REF:
       return t;
+   case T_REF:
+      if (!tree_has_ref(t) || tree_kind(tree_ref(t)) != T_CONST_DECL)
+         return t;
+      // Fall-through to fold constant whose value is a static expression
    default:
       if (eval_possible(t, ctx->registry, ctx->mir))
          return eval_try_fold(ctx->jit, t, ctx->registry, NULL, NULL);

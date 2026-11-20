@@ -3271,6 +3271,29 @@ static vcode_reg_t lower_var_ref(lower_unit_t *lu, tree_t decl, expr_ctx_t ctx)
    vcode_reg_t ptr_reg = VCODE_INVALID_REG;
    int hops = 0;
    vcode_var_t var = lower_get_var(lu, decl, &hops);
+   if (var == VCODE_INVALID_VAR && lu->mode == LOWER_THUNK
+       && ctx == EXPR_RVALUE
+       && tree_kind(decl) == T_CONST_DECL && tree_has_value(decl)) {
+      tree_t container = tree_container(decl);
+      int ch;
+      if (lower_search_vcode_obj(tree_ident(container), lu, &ch)
+          == VCODE_INVALID_REG) {
+         tree_t value = tree_value(decl);
+         if (lower_is_const(value)
+             || is_well_known(tree_ident(container)) >= NUM_WELL_KNOWN) {
+            type_t from_type = tree_type(value);
+
+            emit_comment("Expanding constant %s", istr(tree_ident(decl)));
+
+            vcode_reg_t value_reg = lower_rvalue(lu, value);
+            if (type_is_array(from_type))
+               return lower_coerce_arrays(lu, from_type, type, value_reg);
+            else
+               return value_reg;
+         }
+      }
+   }
+
    if (var == VCODE_INVALID_VAR)
       ptr_reg = lower_link_var(lu, decl);   // External variable
    else if (var & INSTANCE_BIT) {
