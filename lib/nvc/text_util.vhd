@@ -36,6 +36,9 @@ package text_util is
     function string_to_int (s : string) return t_int64;
     procedure string_to_int (s : in string; value : out t_int64;
                              used : out natural);
+    procedure string_to_phys (s : in string; ival : out t_int64;
+                              rval : out real; is_real : out boolean;
+                              used : out natural);
     function string_to_real (s : string) return real;
     function int_to_string (x : t_int64) return string;
     function real_to_string (x : real) return string;

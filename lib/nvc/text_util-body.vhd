@@ -530,4 +530,96 @@ package body text_util is
     begin
         assert false severity failure;
     end function;
+
+    procedure string_to_phys (s       : in string;
+                              ival    : out t_int64;
+                              rval    : out real;
+                              is_real : out boolean;
+                              used    : out natural)
+    is
+        constant length   : natural := s'length;
+        alias ss          : string(1 to length) is s;
+        variable pos      : positive := 1;
+        variable ndig     : natural := 0;
+        variable has_frac : boolean := false;
+        variable buf      : string(1 to length);
+        variable blen     : natural := 0;
+    begin
+        while pos <= length and isspace(ss(pos)) loop
+            pos := pos + 1;
+        end loop;
+
+        if pos <= length and (ss(pos) = '+' or ss(pos) = '-') then
+            blen := blen + 1;
+            buf(blen) := ss(pos);
+            pos := pos + 1;
+        end if;
+
+        while pos <= length and (isdigit(ss(pos)) or ss(pos) = '_') loop
+            if ss(pos) /= '_' then
+                blen := blen + 1;
+                buf(blen) := ss(pos);
+                ndig := ndig + 1;
+            end if;
+            pos := pos + 1;
+        end loop;
+
+        if ndig > 0 and pos < length and ss(pos) = '.'
+            and isdigit(ss(pos + 1))
+        then
+            has_frac := true;
+            blen := blen + 1;
+            buf(blen) := '.';
+            pos := pos + 1;
+            while pos <= length and (isdigit(ss(pos)) or ss(pos) = '_') loop
+                if ss(pos) /= '_' then
+                    blen := blen + 1;
+                    buf(blen) := ss(pos);
+                end if;
+                pos := pos + 1;
+            end loop;
+        end if;
+
+        if ndig > 0 and pos < length and (ss(pos) = 'e' or ss(pos) = 'E') then
+            if isdigit(ss(pos + 1))
+                or (pos + 2 <= length
+                    and (ss(pos + 1) = '+' or ss(pos + 1) = '-')
+                    and isdigit(ss(pos + 2)))
+            then
+                if ss(pos + 1) = '-' then
+                    has_frac := true;
+                end if;
+                if has_frac then
+                    blen := blen + 1;
+                    buf(blen) := ss(pos);
+                    pos := pos + 1;
+                    if ss(pos) = '+' or ss(pos) = '-' then
+                        blen := blen + 1;
+                        buf(blen) := ss(pos);
+                        pos := pos + 1;
+                    end if;
+                    while pos <= length
+                        and (isdigit(ss(pos)) or ss(pos) = '_')
+                    loop
+                        if ss(pos) /= '_' then
+                            blen := blen + 1;
+                            buf(blen) := ss(pos);
+                        end if;
+                        pos := pos + 1;
+                    end loop;
+                end if;
+            end if;
+        end if;
+
+        if has_frac then
+            ival    := 0;
+            rval    := parse_real(buf(1 to blen));
+            is_real := true;
+            used    := pos - 1;
+        else
+            string_to_int(s, ival, used);
+            rval    := 0.0;
+            is_real := false;
+        end if;
+    end procedure;
 end package body;

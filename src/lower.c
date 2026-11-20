@@ -9523,6 +9523,8 @@ static void lower_physical_value_helper(lower_unit_t *lu, type_t type,
    vcode_type_t voffset = vtype_offset();
    vcode_type_t vchar = vtype_char();
    vcode_type_t vint64 = vtype_int(INT64_MIN, INT64_MAX);
+   vcode_type_t vreal = vtype_real(-DBL_MAX, DBL_MAX);
+   vcode_type_t vbool = vtype_bool();
    vcode_type_t vstring = vtype_uarray(1, vchar);
 
    vcode_type_t vstdint = (standard() < STD_19)
@@ -9534,13 +9536,21 @@ static void lower_physical_value_helper(lower_unit_t *lu, type_t type,
    vcode_var_t int_var = lower_temp_var(lu, "int", vint64);
    vcode_reg_t int_ptr = emit_index(int_var, VCODE_INVALID_REG);
 
+   vcode_var_t real_var = lower_temp_var(lu, "real", vreal);
+   vcode_reg_t real_ptr = emit_index(real_var, VCODE_INVALID_REG);
+
+   vcode_var_t is_real_var = lower_temp_var(lu, "is_real", vbool);
+   vcode_reg_t is_real_ptr = emit_index(is_real_var, VCODE_INVALID_REG);
+
    ident_t conv_fn =
-      ident_new("NVC.TEXT_UTIL.STRING_TO_INT(S21NVC.TEXT_UTIL.T_INT64N)");
+      ident_new("NVC.TEXT_UTIL.STRING_TO_PHYS(S21NVC.TEXT_UTIL.T_INT64RBN)");
    vcode_reg_t text_util_reg = emit_link_package(well_known(W_TEXT_UTIL));
    vcode_reg_t conv_args[] = {
       text_util_reg,
       preg,
       int_ptr,
+      real_ptr,
+      is_real_ptr,
       used_ptr,
    };
    emit_fcall(conv_fn, VCODE_INVALID_TYPE, VCODE_INVALID_STAMP,
@@ -9652,7 +9662,6 @@ static void lower_physical_value_helper(lower_unit_t *lu, type_t type,
    type_t std_string = std_type(NULL, STD_STRING);
    ident_t func = predef_func_name(std_string, "=");
 
-   vcode_type_t vbool = vtype_bool();
    vcode_reg_t str_cmp_args[] = { str_reg, canon_reg };
    vcode_reg_t eq_reg = emit_fcall(func, vbool, VCODE_INVALID_STAMP,
                                    str_cmp_args, ARRAY_LEN(str_cmp_args));
@@ -9698,7 +9707,26 @@ static void lower_physical_value_helper(lower_unit_t *lu, type_t type,
 
    vcode_reg_t mul_ptr = emit_array_ref(mul_array_ptr, i_reg);
    vcode_reg_t mul_reg = emit_load_indirect(mul_ptr);
-   vcode_reg_t result_reg = emit_mul(int_reg, mul_reg);
+
+   vcode_var_t res_var = lower_temp_var(lu, "result", vint64);
+   vcode_block_t real_bb = emit_block();
+   vcode_block_t int_bb  = emit_block();
+   vcode_block_t done_bb = emit_block();
+
+   emit_cond(emit_load(is_real_var), real_bb, int_bb);
+
+   vcode_select_block(real_bb);
+   vcode_reg_t mul_real = emit_cast(vreal, VCODE_INVALID_STAMP, mul_reg);
+   vcode_reg_t prod_real = emit_mul(emit_load(real_var), mul_real);
+   emit_store(emit_cast(vint64, VCODE_INVALID_STAMP, prod_real), res_var);
+   emit_jump(done_bb);
+
+   vcode_select_block(int_bb);
+   emit_store(emit_mul(int_reg, mul_reg), res_var);
+   emit_jump(done_bb);
+
+   vcode_select_block(done_bb);
+   vcode_reg_t result_reg = emit_load(res_var);
 
    lower_check_scalar_bounds(lu, result_reg, type, decl, NULL);
    emit_return(emit_cast(vtype, vbounds, result_reg));
