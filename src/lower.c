@@ -12702,6 +12702,15 @@ static vcode_reg_t lower_constrain_port(lower_unit_t *lu, tree_t port, int pos,
       vcode_reg_t bounds_reg = VCODE_INVALID_REG;
       if (map_regs[i] != VCODE_INVALID_REG)
          bounds_reg = map_regs[i];
+      else if (tree_kind(value) == T_OPEN) {
+         type_t type = tree_type(value);
+         if (type_is_array(type))
+            bounds_reg = lower_get_type_bounds(lu, type);
+         else if (type_is_record(type))
+            bounds_reg = lower_default_value(lu, type, VCODE_INVALID_REG);
+         else
+            bounds_reg = emit_null(vtype_pointer(lower_type(type)));
+      }
       else if (tree_kind(value) != T_TYPE_CONV
                || !type_is_unconstrained(tree_type(value))) {
          // Has conversion function, type conversion to a constrained
@@ -12848,8 +12857,8 @@ static vcode_reg_t lower_open_port_map(lower_unit_t *lu, tree_t block, tree_t p)
       if (tree_kind(name) == T_REF)
          port = tree_ref(name);
       else {
-         // VHDL-2019 partially connected vectors in port map
-         assert(standard() >= STD_19);
+         // VHDL-2019 (or --relaxed) partially connected vectors in port map
+         assert(standard() >= STD_19 || opt_get_int(OPT_RELAXED));
          return VCODE_INVALID_REG;
       }
    }

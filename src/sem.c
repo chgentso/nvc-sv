@@ -5129,7 +5129,7 @@ static bool sem_check_port_actual(formal_map_t *formals, int nformals,
          sem_error(value, "unconnected port %pI with mode IN must have a "
                    "default value", tree_ident(decl));
 
-      if ((mode != PORT_IN) && type_is_unconstrained(tree_type(decl)))
+      if ((mode != PORT_IN) && type_is_unconstrained(type))
          sem_error(value, "port %pI of unconstrained type %pT cannot "
                    "be unconnected", tree_ident(decl), type);
 
