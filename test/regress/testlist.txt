@@ -2951,3 +2951,4 @@ case_const1     normal,2008
 subprog5        normal
 svmodportparam1 verilog
 svenumbase1     verilog
+svenumconst1    verilog

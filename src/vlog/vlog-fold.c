@@ -330,6 +330,30 @@ static fold_state_t get_fold_state(vlog_node_t v, fold_ctx_t *ctx)
             state = MAX(state, get_fold_state(vlog_param(v, i), ctx));
          return state == FOLD_CONST ? FOLD_LATER : state;
       }
+      if (vlog_params(v) == 0) {
+         switch (vlog_subkind(v)) {
+         case V_METHOD_ENUM_FIRST:
+         case V_METHOD_ENUM_LAST:
+         case V_METHOD_ENUM_NUM:
+            {
+               vlog_node_t type = vlog_get_type(vlog_value(v));
+               if (type != NULL && vlog_kind(type) == V_ENUM_DECL
+                   && vlog_decls(type) > 0) {
+                  fold_state_t state = get_type_state(type, ctx);
+                  const int nnames = vlog_decls(type);
+                  for (int i = 0; i < nnames; i++) {
+                     vlog_node_t d = vlog_decl(type, i);
+                     if (vlog_has_value(d))
+                        state = MAX(state, get_fold_state(vlog_value(d), ctx));
+                  }
+                  return state == FOLD_CONST ? FOLD_POSSIBLE : state;
+               }
+            }
+            break;
+         default:
+            break;
+         }
+      }
       ctx->nonconst = v;
       return FOLD_NON_CONST;
    case V_COND_EXPR:
