@@ -525,4 +525,9 @@ package body text_util is
     begin
         assert false severity failure;
     end function;
+
+    function parse_real (s : string) return real is
+    begin
+        assert false severity failure;
+    end function;
 end package body;

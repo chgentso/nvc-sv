@@ -16,6 +16,7 @@
 
 library nvc;
 use nvc.polyfill.all;
+use nvc.text_util.parse_real;
 
 package body textio is
 
@@ -546,24 +547,30 @@ package body textio is
     procedure read (l     : inout line;
                     value : out real;
                     good  : out boolean ) is
-        variable whole    : integer;
-        variable exponent : integer;
         variable result   : real;
-        variable digit    : integer;
-        variable shift    : integer := 1;
-        variable pos      : integer := 2;
-        variable sign     : character;
+        variable pos      : integer := 1;
+        variable len      : integer;
+        variable ndig     : integer;
+        variable sign     : character := ' ';
         variable rgood    : boolean;
         variable peek     : character;
     begin
         skip_whitespace(l);
-        peek := get_char(l.all, 1);
-        if l.all'length > 0 and (peek = '-' or peek = '+') then
-            sign := get_char(l.all, 1);
-            consume(l, 1);
+        if l = null or l.all'length = 0 then
+            good := false;
+            return;
         end if;
-        if l.all'length > 0 and based_literal_hash(l.all, 1) > 0 then
+        len := l.all'length;
+        peek := get_char(l.all, 1);
+        if peek = '-' or peek = '+' then
+            sign := peek;
+            pos := 2;
+        end if;
+        if pos <= len and based_literal_hash(l.all, pos) > 0 then
             -- Based literal such as 16#F.8#E1
+            if sign /= ' ' then
+                consume(l, 1);
+            end if;
             read_based_real(l, result, rgood);
             if not rgood then
                 good := false;
@@ -577,42 +584,80 @@ package body textio is
             end if;
             return;
         end if;
-        read(l, whole, rgood);
-        if not rgood then
+        ndig := 0;
+        while pos <= len loop
+            peek := get_char(l.all, pos);
+            if peek >= '0' and peek <= '9' then
+                ndig := ndig + 1;
+                pos := pos + 1;
+            elsif peek = '_' and ndig > 0 and pos < len
+                and get_char(l.all, pos + 1) >= '0'
+                and get_char(l.all, pos + 1) <= '9'
+            then
+                pos := pos + 1;
+            else
+                exit;
+            end if;
+        end loop;
+        if ndig = 0 then
             good := false;
             return;
         end if;
-        result := real(whole);
-        good := true;
-        if l.all'length > 0 and get_char(l.all, 1) = '.' then
-            while pos <= l.all'length loop
+        if pos <= len and get_char(l.all, pos) = '.' then
+            pos := pos + 1;
+            ndig := 0;
+            while pos <= len loop
                 peek := get_char(l.all, pos);
-                exit when peek < '0' or peek > '9';
-                digit := character'pos(peek) - character'pos('0');
-                result := result + (real(digit) * (10.0 ** (-shift)));
-                shift := shift + 1;
-                pos := pos + 1;
+                if peek >= '0' and peek <= '9' then
+                    ndig := ndig + 1;
+                    pos := pos + 1;
+                elsif peek = '_' and ndig > 0 and pos < len
+                    and get_char(l.all, pos + 1) >= '0'
+                    and get_char(l.all, pos + 1) <= '9'
+                then
+                    pos := pos + 1;
+                else
+                    exit;
+                end if;
             end loop;
-            good := pos > 2;
-            consume(l, pos - 1);
+            if ndig = 0 then
+                good := false;
+                return;
+            end if;
         end if;
-        if l.all'length > 0 then
-            peek := get_char(l.all, 1);
-            if (peek = 'e' or peek = 'E') then
-                consume(l, 1);
-                read(l, exponent, rgood);
-                if not rgood then
+        if pos <= len then
+            peek := get_char(l.all, pos);
+            if peek = 'e' or peek = 'E' then
+                pos := pos + 1;
+                if pos <= len and (get_char(l.all, pos) = '+'
+                                   or get_char(l.all, pos) = '-') then
+                    pos := pos + 1;
+                end if;
+                ndig := 0;
+                while pos <= len loop
+                    peek := get_char(l.all, pos);
+                    if peek >= '0' and peek <= '9' then
+                        ndig := ndig + 1;
+                        pos := pos + 1;
+                    elsif peek = '_' and ndig > 0 and pos < len
+                        and get_char(l.all, pos + 1) >= '0'
+                        and get_char(l.all, pos + 1) <= '9'
+                    then
+                        pos := pos + 1;
+                    else
+                        exit;
+                    end if;
+                end loop;
+                if ndig = 0 then
                     good := false;
                     return;
                 end if;
-                result := result * (10.0 ** exponent);
             end if;
         end if;
-        if sign = '-' then
-            value := -result;
-        else
-            value := result;
-        end if;
+        result := parse_real(get_slice(l.all, 1, pos - 1));
+        consume(l, pos - 1);
+        value := result;
+        good := true;
     end procedure;
 
     procedure read (l     : inout line;
@@ -1070,7 +1115,11 @@ package body textio is
                      digits    : in natural := 0 ) is
     begin
         if digits = 0 then
-            write(l, to_string(value, "%e"), justified, field);
+            `if VHDL_VERSION >= "2008" then
+                write(l, to_string(value, 0), justified, field);
+            `else
+                write(l, to_string(value, "%e"), justified, field);
+            `end if
         else
             write(l, to_string(value, "%." & integer'image(digits) & "f"),
                   justified, field);

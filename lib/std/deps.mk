@@ -4,7 +4,7 @@ lib/std/STD.STANDARD-body: $(top_srcdir)/lib/std/standard-body.vhd lib/std/STD.S
 
 lib/std/STD.STANDARD: $(top_srcdir)/lib/std/standard.vhd
 
-lib/std/STD.TEXTIO-body: $(top_srcdir)/lib/std/textio-body.vhd lib/std/STD.TEXTIO lib/std/STD.STANDARD lib/nvc/NVC.POLYFILL
+lib/std/STD.TEXTIO-body: $(top_srcdir)/lib/std/textio-body.vhd lib/std/STD.TEXTIO lib/std/STD.STANDARD lib/nvc/NVC.POLYFILL lib/nvc/NVC.TEXT_UTIL
 
 lib/std/STD.TEXTIO: $(top_srcdir)/lib/std/textio.vhd lib/std/STD.STANDARD
 

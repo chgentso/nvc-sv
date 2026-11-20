@@ -39,6 +39,7 @@ package text_util is
     function string_to_real (s : string) return real;
     function int_to_string (x : t_int64) return string;
     function real_to_string (x : real) return string;
+    function parse_real (s : string) return real;
 
     -- Used to implement 'VALUE for composite types
     function next_delimiter (s : string; pos : natural) return string;
@@ -50,4 +51,6 @@ package text_util is
 
     attribute foreign of real_to_string [real return string]
         : function is "INTERNAL _std_to_string_real";
+    attribute foreign of parse_real [string return real]
+        : function is "INTERNAL _std_parse_real";
 end package;

@@ -202,6 +202,23 @@ void _polyfill_to_ostring_bit_vec(jit_scalar_t *args, tlab_t *tlab)
    bit_vec_to_string(args, tlab, 3, 1);
 }
 
+DLLEXPORT
+void _std_parse_real(jit_scalar_t *args, tlab_t *tlab)
+{
+   const char *ptr = args[1].pointer;
+   const size_t len = ffi_array_length(args[3].integer);
+
+   char *cstr LOCAL = xmalloc(len + 1);
+   size_t out = 0;
+   for (size_t i = 0; i < len; i++) {
+      if (ptr[i] != '_')
+         cstr[out++] = ptr[i];
+   }
+   cstr[out] = '\0';
+
+   args[0].real = strtod(cstr, NULL);
+}
+
 void _std_standard_init(void)
 {
    // Dummy function to force linking

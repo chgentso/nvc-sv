@@ -2932,3 +2932,4 @@ attr25          normal
 block3          normal
 subprog1        normal
 textio9         normal,2008
+textio10        normal,2008

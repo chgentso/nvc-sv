@@ -10,5 +10,5 @@ lib/std.08/STD.TEXTIO: $(top_srcdir)/lib/std.08/textio.vhd lib/std.08/STD.STANDA
 
 lib/std.08/STD.STANDARD-body: $(top_srcdir)/lib/std/standard-body.vhd lib/std.08/STD.STANDARD
 
-lib/std.08/STD.TEXTIO-body: $(top_srcdir)/lib/std/textio-body.vhd lib/std.08/STD.TEXTIO lib/std.08/STD.STANDARD lib/nvc.08/NVC.POLYFILL
+lib/std.08/STD.TEXTIO-body: $(top_srcdir)/lib/std/textio-body.vhd lib/std.08/STD.TEXTIO lib/std.08/STD.STANDARD lib/nvc.08/NVC.POLYFILL lib/nvc.08/NVC.TEXT_UTIL
 

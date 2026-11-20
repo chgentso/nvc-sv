@@ -14,5 +14,5 @@ lib/std.19/STD.TEXTIO: $(top_srcdir)/lib/std.19/textio.vhdl lib/std.19/STD.STAND
 
 lib/std.19/STD.STANDARD-body: $(top_srcdir)/lib/std/standard-body.vhd lib/std.19/STD.STANDARD
 
-lib/std.19/STD.TEXTIO-body: $(top_srcdir)/lib/std/textio-body.vhd lib/std.19/STD.TEXTIO lib/std.19/STD.STANDARD lib/std.19/STD.ENV lib/nvc.19/NVC.POLYFILL
+lib/std.19/STD.TEXTIO-body: $(top_srcdir)/lib/std/textio-body.vhd lib/std.19/STD.TEXTIO lib/std.19/STD.STANDARD lib/std.19/STD.ENV lib/nvc.19/NVC.POLYFILL lib/nvc.19/NVC.TEXT_UTIL
 
