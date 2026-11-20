@@ -8415,10 +8415,16 @@ int64_t x_sv_process_kill(void *arg)
    // Returns non-zero if the caller has killed itself and must stop
 
    sv_task_t *t = sv_process_handle(arg)->task;
-   if (t == NULL || t->done)
+   if (t == NULL)
       return 0;
 
    rt_model_t *m = get_model();
+   if (t->done) {
+      // IEEE 1800-2023 9.7: killing a finished process still kills live
+      // descendants without changing its own FINISHED status
+      sv_task_kill_tree(m, t);
+      return 0;
+   }
 
    // The process may be one that was not forked
    t->proc->wakeable.forked = true;

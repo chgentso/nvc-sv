@@ -2973,3 +2973,4 @@ svstreamcast1   verilog
 svpackedsign1   verilog
 svpatdef2 verilog
 svprocfin1 verilog
+svprockill1 verilog
