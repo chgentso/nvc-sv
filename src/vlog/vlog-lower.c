@@ -28338,8 +28338,13 @@ static void vlog_lower_initial(vlog_gen_t *g, vlog_node_t v)
 
    vlog_lower_stmts(g, v, &gs);
 
-   if (!mir_block_finished(g->mu, MIR_NULL_BLOCK))
+   if (!mir_block_finished(g->mu, MIR_NULL_BLOCK)) {
+      mir_value_t res = mir_build_fcall(g->mu, ident_new("__sv_fork_finish"),
+                                        mir_offset_type(g->mu), MIR_NULL_STAMP,
+                                        NULL, 0);
+      mir_build_consume(g->mu, res);
       mir_build_return(g->mu, MIR_NULL_VALUE);
+   }
 }
 
 static void vlog_lower_final(vlog_gen_t *g, vlog_node_t v)

@@ -1293,7 +1293,8 @@ static void run_process_inner(rt_model_t *m, rt_proc_t *proc)
       m->force_stop = true;
 
    proc->ended = proc->verilog && !obj->forked && !obj->delayed
-      && proc->wait_seq == wait_seq && proc->task == NULL;
+      && proc->wait_seq == wait_seq
+      && (proc->task == NULL || sv_proc_finished(proc));
 
    if (proc->tlab != NULL && result.pointer == NULL) {
       tlab_release(m->jit, proc->tlab);
@@ -8096,10 +8097,13 @@ int64_t x_sv_fork_wait(void *arg, int64_t mode)
 
 void x_sv_fork_finish(void)
 {
-   // Called at the end of the forked statement
+   // Called at the end of a forked statement or an initial process
 
    rt_proc_t *proc = get_active_proc();
    assert(proc != NULL);
+
+   if (!proc->wakeable.forked && proc->task == NULL)
+      return;
 
    sv_task_finish(get_model(), sv_task_for(proc), true);
 }
