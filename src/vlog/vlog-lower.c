@@ -3542,16 +3542,23 @@ static mir_value_t vlog_stream_to_array(vlog_gen_t *g, mir_value_t data,
 
    const int nb = esize / ubits;
    mir_value_t nbytes = mir_const(g->mu, t_offset, nb);
-   mir_value_t n = mir_build_div(g->mu, t_offset, count, nbytes);
+   mir_value_t n = mir_build_div(
+      g->mu, t_offset,
+      mir_build_add(g->mu, t_offset, count, mir_const(g->mu, t_offset, nb - 1)),
+      nbytes);
+   mir_value_t total = mir_build_mul(g->mu, t_offset, n, nbytes);
+   mir_type_t t_char = mir_char_type(g->mu);
+   mir_value_t buf = vlog_alloc_array(g, t_char, total);
+   mir_build_set(g->mu, buf, mir_const(g->mu, t_char, 0), total);
+   mir_build_copy(g->mu, buf, mir_build_array_ref(g->mu, data, from), count);
+
    mir_value_t out = vlog_alloc_array(g, t_elem, n);
 
    vlog_loop_t l;
    vlog_loop_begin(g, &l, mir_const(g->mu, t_offset, 0), n);
-   mir_value_t base = mir_build_add(g->mu, t_offset, from,
-                                    mir_build_mul(g->mu, t_offset, l.i,
-                                                  nbytes));
+   mir_value_t base = mir_build_mul(g->mu, t_offset, l.i, nbytes);
    mir_build_store(g->mu, mir_build_array_ref(g->mu, out, l.i),
-                   vlog_stream_load_value(g, t_elem, data, base));
+                   vlog_stream_load_value(g, t_elem, buf, base));
    vlog_loop_end(g, &l);
 
    return vlog_wrap_array(g, out, n);
@@ -10215,6 +10222,9 @@ static mir_value_t vlog_lower_with_context(vlog_gen_t *g, vlog_node_t v,
                 && (vlog_subkind(dtype) == DT_DYNARRAY
                     || vlog_subkind(dtype) == DT_QUEUE)
                 && mir_get_class(g->mu, ti->type) == MIR_TYPE_UARRAY) {
+               if (vlog_kind(arg) == V_STREAM)
+                  return vlog_lower_with_context(g, arg, ti->type);
+
                int ssize = 0;
                bool fixed = false;
                if (stype != NULL && vlog_kind(stype) == V_DATA_TYPE
@@ -10248,6 +10258,11 @@ static mir_value_t vlog_lower_with_context(vlog_gen_t *g, vlog_node_t v,
                            g, vlog_type(vlog_ref(root)))->size;
                         fixed = true;
                      }
+                  }
+                  else if (!vlog_is_string(arg) && !vlog_is_real(arg)
+                           && (stype == NULL || !vlog_is_dynamic_type(stype))) {
+                     ssize = vlog_width(arg);
+                     fixed = true;
                   }
                }
 

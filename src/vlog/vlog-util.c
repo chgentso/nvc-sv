@@ -2266,7 +2266,12 @@ vlog_node_t vlog_get_type(vlog_node_t v)
          if (type != NULL && (vlog_kind(type) == V_ENUM_DECL
                               || vlog_kind(type) == V_STRUCT_DECL
                               || vlog_kind(type) == V_UNION_DECL
-                              || vlog_kind(type) == V_CLASS_DECL))
+                              || vlog_kind(type) == V_CLASS_DECL
+                              || (vlog_kind(type) == V_DATA_TYPE
+                                  && (vlog_subkind(type) == DT_QUEUE
+                                      || vlog_subkind(type) == DT_DYNARRAY
+                                      || vlog_subkind(type) == DT_ASSOC
+                                      || vlog_subkind(type) == DT_STRING))))
             return type;
       }
       return NULL;
