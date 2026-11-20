@@ -2573,7 +2573,10 @@ package body fixed_generic_pkg is
     variable Xresult         : UNRESOLVED_ufixed (left_index downto
                                                   fw-guard_bits) :=
       (others => '0');
+    variable Xrem            : UNRESOLVED_ufixed (right_index-1 downto
+                                                  fw-guard_bits-1);
     variable presult         : REAL;
+    variable sticky          : STD_ULOGIC := '0';
   begin
     -- If negative or null range, return.
     if (left_index < fw) then
@@ -2604,11 +2607,14 @@ package body fixed_generic_pkg is
         Xresult(i) := '0';
       end if;
     end loop;
+    if presult > 0.0 then
+      sticky := '1';
+    end if;
     if guard_bits > 0 and round_style = fixed_round then
+      Xrem := Xresult (right_index-1 downto right_index-guard_bits) & sticky;
       result := round_fixed (arg => Xresult (left_index
                                              downto right_index),
-                             remainder => Xresult (right_index-1 downto
-                                                   right_index-guard_bits),
+                             remainder => Xrem,
                              overflow_style => overflow_style);
     else
       result := Xresult (result'range);
@@ -2630,7 +2636,9 @@ package body fixed_generic_pkg is
       (others => '0');
     variable Xresult : UNRESOLVED_sfixed (left_index+1 downto fw-guard_bits) :=
       (others => '0');
+    variable Xround : UNRESOLVED_sfixed (left_index+1 downto fw-guard_bits-1);
     variable presult : REAL;
+    variable sticky  : STD_ULOGIC := '0';
   begin
     if (left_index < fw) then           -- null range
       return NASF;
@@ -2660,16 +2668,23 @@ package body fixed_generic_pkg is
         Xresult(i) := '0';
       end if;
     end loop;
-    if arg < 0.0 then
-      Xresult := to_fixed(-to_s(Xresult), Xresult'high, Xresult'low);
+    if presult > 0.0 then
+      sticky := '1';
     end if;
     if guard_bits > 0 and round_style = fixed_round then
-      result := round_fixed (arg => Xresult (left_index
-                                             downto right_index),
-                             remainder => Xresult (right_index-1 downto
-                                                   right_index-guard_bits),
+      Xround := Xresult & sticky;
+      if arg < 0.0 then
+        Xround := to_fixed(-to_s(Xround), Xround'high, Xround'low);
+      end if;
+      result := round_fixed (arg => Xround (left_index
+                                            downto right_index),
+                             remainder => Xround (right_index-1 downto
+                                                  right_index-guard_bits-1),
                              overflow_style => overflow_style);
     else
+      if arg < 0.0 then
+        Xresult := to_fixed(-to_s(Xresult), Xresult'high, Xresult'low);
+      end if;
       result := Xresult (result'range);
     end if;
     return result;

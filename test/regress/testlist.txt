@@ -2937,3 +2937,4 @@ phys1           normal
 port1           normal,relaxed
 attr26          normal,2008
 port2           normal,2008
+fixed1          normal,2008
