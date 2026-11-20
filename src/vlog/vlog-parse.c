@@ -4161,6 +4161,21 @@ static vlog_node_t arg_pattern_type(vlog_node_t call, int n)
    case V_USER_TCALL:
       decl = callee_decl;
       break;
+   case V_CLASS_NEW:
+      if (vlog_has_type(call)) {
+         for (vlog_node_t c = vlog_type(call);
+              c != NULL && vlog_kind(c) == V_CLASS_DECL && decl == NULL;
+              c = vlog_has_ref(c) ? vlog_ref(c) : NULL) {
+            const int ndecls = vlog_decls(c);
+            for (int i = 0; i < ndecls; i++) {
+               if (vlog_kind(vlog_decl(c, i)) == V_CONSTRUCTOR) {
+                  decl = vlog_decl(c, i);
+                  break;
+               }
+            }
+         }
+      }
+      break;
    default:
       break;
    }
@@ -4173,6 +4188,13 @@ static vlog_node_t arg_pattern_type(vlog_node_t call, int n)
    case V_TASK_DECL:
       if (n < vlog_ports(decl)) {
          vlog_node_t port = vlog_port(decl, n);
+         if (vlog_kind(port) == V_TF_PORT_DECL && vlog_has_type(port))
+            return vlog_get_type(vlog_type(port));
+      }
+      return NULL;
+   case V_CONSTRUCTOR:
+      if (n < vlog_params(decl)) {
+         vlog_node_t port = vlog_param(decl, n);
          if (vlog_kind(port) == V_TF_PORT_DECL && vlog_has_type(port))
             return vlog_get_type(vlog_type(port));
       }

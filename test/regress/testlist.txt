@@ -2966,3 +2966,4 @@ svgenbegin1     verilog
 svforceconcat1  verilog
 svarrayquery1   verilog
 svpartwidth1    verilog
+svctorpat1      verilog
