@@ -6280,6 +6280,9 @@ static bool sem_globally_static(tree_t t)
 
          if (tree_kind(name) == T_FCALL)
             return sem_globally_static(name);
+         else if (tree_kind(name) == T_ATTR_REF
+                  && tree_subkind(name) == ATTR_USER)
+            return sem_globally_static(name);
 
          tree_t ref = name_to_ref(name);
          if (ref == NULL)

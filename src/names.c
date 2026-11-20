@@ -5806,6 +5806,8 @@ static tree_t try_solve_attr_ref(nametab_t *tab, tree_t t)
             if (a != NULL) {
                tree_set_value(t, tree_value(a));
                type = tree_type(a);
+               if (type_is_unconstrained(type) && tree_has_type(tree_value(a)))
+                  type = tree_type(tree_value(a));
             }
             else {
                error_at(tree_loc(prefix), "object %s has no attribute %s",
