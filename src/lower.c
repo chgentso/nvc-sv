@@ -1644,6 +1644,7 @@ static vcode_reg_t lower_name_attr(lower_unit_t *lu, tree_t decl,
    case T_CONST_DECL:
    case T_GENERIC_DECL:
    case T_PARAM_DECL:
+   case T_FILE_DECL:
       {
          tree_t target = decl;
          while (tree_kind(target) == T_ALIAS) {
@@ -1665,6 +1666,53 @@ static vcode_reg_t lower_name_attr(lower_unit_t *lu, tree_t decl,
          }
          else
             scope = NULL;
+      }
+      break;
+
+   case T_COMPONENT:
+   case T_TYPE_DECL:
+   case T_SUBTYPE_DECL:
+      {
+         tree_t container = tree_container(decl);
+         if (is_package(container))
+            scope = NULL;
+         else {
+            for (; scope != NULL; scope = scope->parent, extra_hops++) {
+               tree_t sc = scope->container;
+               if (sc == container)
+                  break;
+
+               bool found = false;
+               const int ndecls = tree_decls(sc);
+               for (int i = 0; i < ndecls; i++) {
+                  if (tree_decl(sc, i) == decl) {
+                     found = true;
+                     break;
+                  }
+               }
+               if (found)
+                  break;
+
+               if (tree_kind(sc) == T_BLOCK && ndecls > 0) {
+                  tree_t h = tree_decl(sc, 0);
+                  if (tree_kind(h) == T_HIER && tree_has_ref(h)) {
+                     tree_t href = tree_ref(h);
+                     if (href == container
+                         || (tree_kind(href) == T_ARCH
+                             && tree_primary(href) == container)
+                         || (tree_kind(container) == T_BLOCK
+                             && tree_ident(container) == tree_ident(h)))
+                        break;
+                  }
+               }
+            }
+
+            if (scope != NULL) {
+               get_hierarchical_name(tb, scope, which);
+               tb_istr(tb, tree_ident(decl));
+               tb_downcase(tb);
+            }
+         }
       }
       break;
 
