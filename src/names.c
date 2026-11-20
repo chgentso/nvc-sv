@@ -1596,12 +1596,12 @@ void walk_predefs(nametab_t *tab, ident_t name, predef_cb_t fn, void *context)
            s = s->parent)
          ;
 
-      type_t type = tree_type(dd->tree);
+      type_t type = type_base_recur(tree_type(dd->tree));
 
       const int ndecls = tree_decls(region);
       for (int i = 0; i < ndecls; i++) {
          tree_t d = tree_decl(region, i);
-         if (is_predef_for_type(d, type))
+         if (is_predef_for_type(d, type) && (tree_flags(d) & TREE_F_PREDEFINED))
             (*fn)(d, context);
       }
    }
