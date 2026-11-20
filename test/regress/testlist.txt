@@ -2967,7 +2967,7 @@ svforceconcat1  verilog
 svarrayquery1   verilog
 svpartwidth1    verilog
 svctorpat1      verilog
-svpatrep1       verilog
+svpatrep3       verilog
 svbitselmethod1 verilog
 svstreamcast1   verilog
 svpackedsign1   verilog

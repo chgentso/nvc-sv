@@ -6278,6 +6278,13 @@ static vlog_node_t p_pattern_elem_expr(int array_depth, vlog_node_t dt)
    // The value of an item that gives an element of an array pattern
 
    if (dt != NULL && peek() == tTICK && peek_nth(2) == tLBRACE) {
+      if (vlog_kind(dt) == V_DATA_TYPE
+          && (vlog_subkind(dt) == DT_DYNARRAY || vlog_subkind(dt) == DT_QUEUE)) {
+         vlog_node_t et = vlog_get_type(vlog_type(dt));
+         if (et != NULL)
+            return p_assignment_pattern_expression(et);
+      }
+
       if (array_depth > 0) {
          pattern_array_elems = array_depth - 1;
          vlog_node_t v = p_assignment_pattern_expression(dt);
