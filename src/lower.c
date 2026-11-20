@@ -5563,13 +5563,37 @@ static vcode_reg_t lower_attr_ref(lower_unit_t *lu, tree_t expr)
          vcode_type_t vstring = vtype_uarray(1, vchar);
          return emit_undefined(vstring, VCODE_INVALID_STAMP);
       }
+      else if (tree_kind(name) == T_ATTR_REF) {
+         type_t type = tree_type(name);
+         for (lower_unit_t *scope = lu; scope != NULL; scope = scope->parent) {
+            tree_t sc = scope->container;
+            const int ndecls = tree_decls(sc);
+            for (int i = 0; i < ndecls; i++) {
+               tree_t d = tree_decl(sc, i);
+               const tree_kind_t dkind = tree_kind(d);
+               if ((dkind == T_TYPE_DECL || dkind == T_SUBTYPE_DECL)
+                   && tree_type(d) == type)
+                  return lower_name_attr(lu, d, predef);
+            }
+         }
+
+         LOCAL_TEXT_BUF tb = tb_new();
+         tb_append(tb, ':');
+         tb_istr(tb, type_ident(type));
+         tb_replace(tb, '.', ':');
+         tb_downcase(tb);
+         return lower_wrap_string(tb_get(tb));
+      }
       else
          return lower_name_attr(lu, tree_ref(name), predef);
 
    case ATTR_SIMPLE_NAME:
       {
          LOCAL_TEXT_BUF tb = tb_new();
-         tb_istr(tb, tree_ident(tree_ref(name)));
+         if (tree_kind(name) == T_ATTR_REF)
+            tb_istr(tb, ident_rfrom(type_ident(tree_type(name)), '.'));
+         else
+            tb_istr(tb, tree_ident(tree_ref(name)));
          tb_downcase(tb);
          return lower_wrap_string(tb_get(tb));
       }

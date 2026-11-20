@@ -2205,6 +2205,9 @@ static type_t get_subtype_for(tree_t expr)
 {
    type_t type = tree_type(expr);
 
+   if (!is_anonymous_subtype(type) && !type_is_unconstrained(type))
+      return type;
+
    type_t sub = type_new(T_SUBTYPE);
    type_set_base(sub, type_base_recur(type));
 
@@ -2395,6 +2398,9 @@ static type_t apply_base_attribute(tree_t aref)
       if (decl != NULL)
          type = tree_type(decl);
    }
+   else if (tree_kind(name) == T_ATTR_REF
+            && is_type_attribute(tree_subkind(name)))
+      type = tree_type(name);
 
    if (type == NULL) {
       parse_error(tree_loc(aref), "prefix of 'BASE attribute must be a type "
@@ -2402,7 +2408,7 @@ static type_t apply_base_attribute(tree_t aref)
       return type_new(T_NONE);
    }
    else if (type_kind(type) == T_SUBTYPE)
-      return type_base(type);
+      return type_base_recur(type);
    else
       return type;
 }

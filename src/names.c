@@ -1978,6 +1978,9 @@ static bool can_call_no_args(tree_t t)
 
 static tree_t implicit_dereference(nametab_t *tab, tree_t t)
 {
+   if (tree_kind(t) == T_ATTR_REF && is_type_attribute(tree_subkind(t)))
+      return t;
+
    type_t type = get_type_or_null(t);
    if (type == NULL || !type_is_access(type))
       return t;
@@ -5527,8 +5530,10 @@ static tree_t try_solve_attr_ref(nametab_t *tab, tree_t t)
             prefix = name;
             break;
          }
+
+         tree_set_name(t, (prefix = solve_types(tab, name, NULL)));
       }
-      // Fall-through
+      break;
    default:
       {
          tree_t name = solve_types(tab, tree_name(t), NULL);

@@ -4580,7 +4580,11 @@ static bool sem_check_dimension_attr(tree_t t, nametab_t *tab)
 static bool sem_is_named_entity(tree_t t)
 {
    const tree_kind_t kind = tree_kind(t);
-   if (kind != T_REF)
+   if (kind == T_ATTR_REF && is_type_attribute(tree_subkind(t))) {
+      type_t type = tree_type(t);
+      return !type_is_none(type) && !is_anonymous_subtype(type);
+   }
+   else if (kind != T_REF)
       return false;
 
    tree_t decl = tree_ref(t);
@@ -4799,7 +4803,8 @@ static bool sem_check_attr_ref(tree_t t, bool allow_range, nametab_t *tab)
          sem_error(t, "prefix of %s attribute must be a named entity",
                    istr(attr));
 
-      tree_set_flag(name, TREE_F_ATTR_PREFIX);
+      if (tree_kind(name) == T_REF)
+         tree_set_flag(name, TREE_F_ATTR_PREFIX);
       return true;
 
    case ATTR_QUIET:

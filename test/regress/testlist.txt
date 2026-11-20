@@ -2935,3 +2935,4 @@ textio9         normal,2008
 textio10        normal,2008
 phys1           normal
 port1           normal,relaxed
+attr26          normal,2008
