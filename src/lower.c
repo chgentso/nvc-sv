@@ -11650,26 +11650,51 @@ static void lower_converter_body(lower_unit_t *lu, tree_t conv, bool has_driver,
    case T_CONV_FUNC:
       {
          tree_t fdecl = tree_ref(conv);
+         const subprogram_kind_t kind = tree_subkind(fdecl);
 
          type_t p0_type = tree_type(tree_port(fdecl, 0));
          vcode_reg_t arg_reg = in_reg;
          if (type_is_array(p0_type))
             arg_reg = lower_coerce_arrays(lu, src_type, p0_type, in_reg);
 
-         vcode_type_t vrtype = lower_func_result_type(dst_type);
-         vcode_type_t vrbounds = lower_bounds(dst_type);
+         if (is_open_coded_builtin(kind)) {
+            switch (kind) {
+            case S_SCALAR_NOT:
+               result_reg = emit_not(arg_reg);
+               break;
+            case S_NEGATE:
+               if (type_is_integer(src_type))
+                  result_reg = emit_trap_neg(arg_reg, lower_debug_locus(conv));
+               else
+                  result_reg = emit_neg(arg_reg);
+               break;
+            case S_ABS:
+               result_reg = emit_abs(arg_reg);
+               break;
+            case S_IDENTITY:
+               result_reg = arg_reg;
+               break;
+            default:
+               fatal_trace("cannot handle open-coded builtin %d in converter",
+                           kind);
+            }
+         }
+         else {
+            vcode_type_t vrtype = lower_func_result_type(dst_type);
+            vcode_type_t vrbounds = lower_bounds(dst_type);
 
-         ident_t func = tree_ident2(fdecl);
-         vcode_reg_t args[2];
-         int nargs = 0;
+            ident_t func = tree_ident2(fdecl);
+            vcode_reg_t args[2];
+            int nargs = 0;
 
-         vcode_reg_t context_reg = lower_context_for_call(lu, fdecl);
-         if (context_reg != VCODE_INVALID_REG)
-            args[nargs++] = context_reg;
+            vcode_reg_t context_reg = lower_context_for_call(lu, fdecl);
+            if (context_reg != VCODE_INVALID_REG)
+               args[nargs++] = context_reg;
 
-         args[nargs++] = arg_reg;
+            args[nargs++] = arg_reg;
 
-         result_reg = emit_fcall(func, vrtype, vrbounds, args, nargs);
+            result_reg = emit_fcall(func, vrtype, vrbounds, args, nargs);
+         }
 
          if (type_is_array(dst_type)) {
             vcode_reg_t locus = lower_debug_locus(conv);
