@@ -2958,3 +2958,4 @@ svenumstep1     verilog
 svenumsize1     verilog
 svbitsconst1    verilog
 svstreammem1    verilog
+svvirtualclass1 verilog

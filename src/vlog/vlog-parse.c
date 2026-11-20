@@ -17626,6 +17626,13 @@ static void p_class_item(vlog_node_t parent)
                   "constraints");
       vlog_add_decl(parent, p_constraint_declaration(parent, flags));
       break;
+   case tVIRTUAL:
+   case tINTERFACE:
+      if (peek_nth(2) == tCLASS) {
+         vlog_add_decl(parent, p_class_declaration());
+         break;
+      }
+      // Fall-through
    default:
       {
          const int first = vlog_decls(parent);
