@@ -22,6 +22,7 @@
 #include "rt/mspace.h"
 
 #include <assert.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <inttypes.h>
 #include <string.h>
@@ -83,8 +84,12 @@ static void to_string_real_format(jit_scalar_t *args, tlab_t *tlab,
       }
    }
 
-   char buf[64];
-   checked_sprintf(buf, sizeof(buf), fmt_cstr, value);
+   int len = snprintf(NULL, 0, fmt_cstr, value);
+   if (len < 0)
+      jit_msg(NULL, DIAG_FATAL, "invalid format \"%s\"", fmt_cstr);
+
+   char *buf LOCAL = xmalloc(len + 1);
+   snprintf(buf, len + 1, fmt_cstr, value);
 
    ffi_return_string(buf, args, tlab);
 }
@@ -134,11 +139,17 @@ void _std_to_string_real_digits(jit_scalar_t *args, tlab_t *tlab)
    double value = args[0].real;
    int32_t digits = args[1].integer;
 
-   char buf[32];
+   int len;
    if (digits == 0)
-      checked_sprintf(buf, sizeof(buf), "%.17g", value);
+      len = snprintf(NULL, 0, "%.17g", value);
    else
-      checked_sprintf(buf, sizeof(buf), "%.*f", digits, value);
+      len = snprintf(NULL, 0, "%.*f", digits, value);
+
+   char *buf LOCAL = xmalloc(len + 1);
+   if (digits == 0)
+      snprintf(buf, len + 1, "%.17g", value);
+   else
+      snprintf(buf, len + 1, "%.*f", digits, value);
 
    ffi_return_string(buf, args, tlab);
 }
