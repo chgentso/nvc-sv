@@ -1273,7 +1273,18 @@ unsigned vlog_width(vlog_node_t v)
          return width;
       }
    case V_PART_SELECT:
-      return vlog_size(v);
+      {
+         vlog_node_t value = vlog_value(v);
+         const unsigned count = vlog_size(v);
+         vlog_node_t dim = vlog_get_dim(value, 0);
+         if (dim != NULL && vlog_subkind(dim) == V_DIM_PACKED) {
+            const unsigned dimsz = vlog_size(dim);
+            const unsigned total = vlog_width(value);
+            if (dimsz > 0 && total >= dimsz && total % dimsz == 0)
+               return count * (total / dimsz);
+         }
+         return count;
+      }
    case V_CONCAT:
       {
          unsigned width = 0;
