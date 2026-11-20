@@ -2953,3 +2953,4 @@ svmodportparam1 verilog
 svenumbase1     verilog
 svenumconst1    verilog
 svconstcast1    verilog
+svcastselect1   verilog

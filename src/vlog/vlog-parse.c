@@ -7734,7 +7734,7 @@ static vlog_node_t p_primary(void)
    }
 
    if (peek() == tTICK && peek_nth(2) == tLPAREN)
-      return p_cast(head);
+      return p_call_result_chain(p_cast(head));
    else if (peek() == tTICK && peek_nth(2) == tLBRACE
             && vlog_kind(head) == V_REF && vlog_has_ref(head)
             && is_data_type(vlog_ref(head))
@@ -10225,7 +10225,8 @@ static vlog_node_t p_call_result_chain(vlog_node_t head)
    while ((vlog_kind(head) == V_USER_FCALL
            || vlog_kind(head) == V_METHOD_CALL
            || vlog_kind(head) == V_MEMBER_REF
-           || vlog_kind(head) == V_BIT_SELECT)
+           || vlog_kind(head) == V_BIT_SELECT
+           || vlog_kind(head) == V_CAST)
           && ((peek() == tDOT && peek_nth(2) == tID)
               || (peek() == tLSQUARE && is_call_result(head)))) {
       const bool is_call = vlog_kind(head) == V_USER_FCALL

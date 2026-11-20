@@ -2201,9 +2201,11 @@ vlog_node_t vlog_get_type(vlog_node_t v)
       }
    case V_CAST:
       if (vlog_subkind(v) == V_CAST_TYPE) {
-         // Only an enumeration has methods and is printed by name
          vlog_node_t type = vlog_get_type(vlog_type(v));
-         if (type != NULL && vlog_kind(type) == V_ENUM_DECL)
+         if (type != NULL && (vlog_kind(type) == V_ENUM_DECL
+                              || vlog_kind(type) == V_STRUCT_DECL
+                              || vlog_kind(type) == V_UNION_DECL
+                              || vlog_kind(type) == V_CLASS_DECL))
             return type;
       }
       return NULL;
