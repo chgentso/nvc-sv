@@ -1561,6 +1561,118 @@ static void get_hierarchical_name(text_buf_t *tb, lower_unit_t *lu,
    }
 }
 
+static vcode_reg_t lower_prot_method_name_attr(lower_unit_t *lu, tree_t pref,
+                                               attr_kind_t which)
+{
+   tree_t decl = tree_ref(pref);
+   type_t ptype = tree_type(tree_value(pref));
+   ident_t ptype_name = ident_rfrom(type_ident(ptype), '.');
+   tree_t owner = tree_container(decl);
+
+   LOCAL_TEXT_BUF tb = tb_new();
+
+   if (is_package(owner)) {
+      tb_append(tb, ':');
+      tb_istr(tb, tree_ident(primary_unit_of(owner)));
+      tb_append(tb, ':');
+      tb_replace(tb, '.', ':');
+      tb_istr(tb, ptype_name);
+      tb_append(tb, ':');
+      tb_istr(tb, tree_ident(decl));
+      if (standard() >= STD_02)
+         print_signature(tree_type(decl), tb);
+      tb_append(tb, ':');
+      tb_downcase(tb);
+      return lower_wrap_string(tb_get(tb));
+   }
+
+   lower_unit_t *scope = lu;
+   int extra_hops = 0;
+   for (; scope != NULL; scope = scope->parent, extra_hops++) {
+      tree_t sc = scope->container;
+      if (sc == owner)
+         break;
+
+      const int ndecls = tree_decls(sc);
+      bool found = false;
+      for (int i = 0; i < ndecls; i++) {
+         tree_t d = tree_decl(sc, i);
+         if ((tree_kind(d) == T_PROT_DECL || tree_kind(d) == T_TYPE_DECL)
+             && tree_type(d) == ptype) {
+            found = true;
+            break;
+         }
+      }
+      if (found)
+         break;
+
+      if (tree_kind(sc) == T_BLOCK && ndecls > 0) {
+         tree_t h = tree_decl(sc, 0);
+         if (tree_kind(h) == T_HIER && tree_has_ref(h)) {
+            tree_t href = tree_ref(h);
+            if (href == owner
+                || (tree_kind(href) == T_ARCH && tree_primary(href) == owner)
+                || (tree_kind(owner) == T_BLOCK
+                    && tree_ident(owner) == tree_ident(h)))
+               break;
+         }
+      }
+   }
+
+   if (scope == NULL)
+      fatal_at(tree_loc(decl), "cannot get hierachical name");
+
+   get_hierarchical_name(tb, scope, which);
+   tb_istr(tb, ptype_name);
+   tb_append(tb, ':');
+   tb_istr(tb, tree_ident(decl));
+   if (standard() >= STD_02)
+      print_signature(tree_type(decl), tb);
+   tb_append(tb, ':');
+   tb_downcase(tb);
+
+   ident_t var_name =
+      well_known(which == ATTR_PATH_NAME ? W_PATH_NAME : W_INSTANCE_NAME);
+
+   int hops = 0;
+   vcode_var_t var = lower_search_vcode_obj(var_name, scope, &hops);
+   assert(var != VCODE_INVALID_VAR);
+
+   vcode_reg_t array_reg;
+   if (hops + extra_hops == 0)
+      array_reg = emit_load(var);
+   else {
+      vcode_reg_t ptr_reg = emit_var_upref(hops + extra_hops, var);
+      array_reg = emit_load_indirect(ptr_reg);
+   }
+
+   vcode_type_t ctype = vtype_char();
+   vcode_type_t voffset = vtype_offset();
+
+   const size_t suffix_len = tb_len(tb);
+   vcode_reg_t chars[suffix_len];
+   for (size_t i = 0; i < suffix_len; i++)
+      chars[i] = emit_const(ctype, tb_get(tb)[i]);
+
+   vcode_type_t suffix_type = vtype_carray(suffix_len, ctype);
+   vcode_reg_t suffix_data = emit_const_array(suffix_type, chars, suffix_len);
+
+   vcode_reg_t prefix_len = emit_uarray_len(array_reg, 0);
+   vcode_reg_t total_len = emit_add(prefix_len, emit_const(voffset, suffix_len));
+
+   vcode_reg_t mem = emit_alloc(ctype, VCODE_INVALID_STAMP, total_len);
+   emit_copy(mem, emit_unwrap(array_reg), prefix_len);
+   emit_copy(emit_array_ref(mem, prefix_len), emit_address_of(suffix_data),
+             emit_const(voffset, suffix_len));
+
+   vcode_dim_t dim0 = {
+      .left  = emit_const(voffset, 1),
+      .right = total_len,
+      .dir   = emit_const(vtype_bool(), RANGE_TO)
+   };
+   return emit_wrap(mem, &dim0, 1);
+}
+
 static vcode_reg_t lower_name_attr(lower_unit_t *lu, tree_t decl,
                                    attr_kind_t which)
 {
@@ -5584,6 +5696,8 @@ static vcode_reg_t lower_attr_ref(lower_unit_t *lu, tree_t expr)
          tb_downcase(tb);
          return lower_wrap_string(tb_get(tb));
       }
+      else if (tree_kind(name) == T_PROT_REF)
+         return lower_prot_method_name_attr(lu, name, predef);
       else
          return lower_name_attr(lu, tree_ref(name), predef);
 

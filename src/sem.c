@@ -4584,6 +4584,10 @@ static bool sem_is_named_entity(tree_t t)
       type_t type = tree_type(t);
       return !type_is_none(type) && !is_anonymous_subtype(type);
    }
+   else if (kind == T_PROT_REF) {
+      if (!tree_has_ref(t))
+         return false;
+   }
    else if (kind != T_REF)
       return false;
 
@@ -4652,6 +4656,9 @@ static bool sem_check_attr_prefix(tree_t t, bool allow_range, nametab_t *tab,
 
          return true;
       }
+
+   case T_PROT_REF:
+      return tree_has_ref(t);
 
    default:
       return sem_check(t, tab);

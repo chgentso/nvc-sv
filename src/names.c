@@ -5530,6 +5530,28 @@ static tree_t try_solve_attr_ref(nametab_t *tab, tree_t t)
             prefix = name;
             break;
          }
+         else if (tree_kind(name) == T_RECORD_REF && !tree_has_type(name)) {
+            tree_t rec_prefix = solve_selected_prefix(tab, name);
+            rec_prefix = implicit_dereference(tab, rec_prefix);
+            tree_set_value(name, rec_prefix);
+
+            tree_t select = resolve_selected_name(tab, name);
+            if (select != NULL) {
+               tree_set_name(t, (prefix = select));
+               break;
+            }
+
+            type_t ptype = get_type_or_null(rec_prefix);
+            if (ptype != NULL && type_is_protected(ptype)) {
+               tree_t ref = tree_new(T_PROT_REF);
+               tree_set_value(ref, rec_prefix);
+               tree_set_ident(ref, tree_ident(name));
+               tree_set_loc(ref, tree_loc(name));
+
+               tree_set_name(t, (prefix = _solve_types(tab, ref)));
+               break;
+            }
+         }
 
          tree_set_name(t, (prefix = solve_types(tab, name, NULL)));
       }
@@ -6300,7 +6322,6 @@ static tree_t solve_inertial(nametab_t *tab, tree_t t)
 static tree_t solve_prot_ref(nametab_t *tab, tree_t t)
 {
    type_t signature = get_signature(tab);
-   assert(signature != NULL);
 
    type_t ptype = tree_type(tree_value(t));
    assert(type_is_protected(ptype));
@@ -6316,7 +6337,8 @@ static tree_t solve_prot_ref(nametab_t *tab, tree_t t)
             continue;
          else if (dd->mask & N_SUBPROGRAM) {
             type_t type = tree_type(dd->tree);
-            if (type_eq_map(type, signature, tab->top_scope->gmap))
+            if (signature == NULL
+                || type_eq_map(type, signature, tab->top_scope->gmap))
                APUSH(matching, dd->tree);
          }
       }
@@ -6330,9 +6352,17 @@ static tree_t solve_prot_ref(nametab_t *tab, tree_t t)
 
    tree_set_type(t, type_new(T_NONE));
 
-   if (!tab->top_scope->suppress)
-      error_at(tree_loc(t), "no method %pI in protected type %pT matches "
-               "signature %pT", tree_ident(t), ptype, signature);
+   if (!tab->top_scope->suppress) {
+      if (signature != NULL)
+         error_at(tree_loc(t), "no method %pI in protected type %pT matches "
+                  "signature %pT", tree_ident(t), ptype, signature);
+      else if (matching.count > 1)
+         error_at(tree_loc(t), "method %pI in protected type %pT is ambiguous "
+                  "without a signature", tree_ident(t), ptype);
+      else
+         error_at(tree_loc(t), "protected type %pT has no method named %pI",
+                  ptype, tree_ident(t));
+   }
 
    return t;
 }
