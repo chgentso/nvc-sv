@@ -6265,6 +6265,27 @@ static void elab_bind_components_save(tree_t block, tree_t config,
                if (apply) {
                   if (elab_is_incremental_binding(d))
                      incr = d;
+                  else if (spec != NULL) {
+                     // vhdl_config_instance places component configurations
+                     // before architecture configuration specifications, so D
+                     // is the primary configuration specification and SPEC is
+                     // the component configuration.
+                     tree_t bb = tree_has_value(d) ? tree_value(d) : NULL;
+                     tree_t sb = tree_has_value(spec) ? tree_value(spec) : NULL;
+                     if (bb != NULL && sb != NULL && tree_has_ref(bb)
+                         && tree_has_ref(sb) && tree_class(bb) == tree_class(sb)
+                         && (tree_ref(bb) == tree_ref(sb)
+                             || (tree_class(bb) == C_ENTITY
+                                 && primary_unit_of(tree_ref(bb))
+                                    == primary_unit_of(tree_ref(sb))
+                                 && (!tree_has_ident2(bb)
+                                     || !tree_has_ident2(sb))))) {
+                        tree_t bind = elab_merge_binding(bb, sb);
+                        spec = elab_merge_spec(spec, d, bind);
+                     }
+                     else
+                        spec = d;
+                  }
                   else
                      spec = d;
                }
@@ -6287,8 +6308,28 @@ static void elab_bind_components_save(tree_t block, tree_t config,
                   spec = elab_merge_spec(incr, base, bind);
                }
             }
-            else if (spec != NULL && tree_has_spec(s) && save == NULL)
-               break;   // Configuration specification takes precedence
+            else if (spec != NULL && tree_has_spec(s) && save == NULL) {
+               tree_t base = tree_spec(s);
+               tree_t bb = tree_has_value(base) ? tree_value(base) : NULL;
+               tree_t sb = tree_has_value(spec) ? tree_value(spec) : NULL;
+
+               // LRM 08 section 7.3.2.1: a component configuration whose
+               // entity aspect names the same design entity or configuration
+               // as an existing configuration specification is an incremental
+               // binding indication
+               if (bb != NULL && sb != NULL && tree_has_ref(bb)
+                   && tree_has_ref(sb) && tree_class(bb) == tree_class(sb)
+                   && (tree_ref(bb) == tree_ref(sb)
+                       || (tree_class(bb) == C_ENTITY
+                           && primary_unit_of(tree_ref(bb))
+                              == primary_unit_of(tree_ref(sb))
+                           && (!tree_has_ident2(bb) || !tree_has_ident2(sb))))) {
+                  tree_t bind = elab_merge_binding(bb, sb);
+                  spec = elab_merge_spec(spec, base, bind);
+               }
+               else
+                  break;   // Configuration specification takes precedence
+            }
 
             if (spec != NULL) {
                if (save != NULL) {
