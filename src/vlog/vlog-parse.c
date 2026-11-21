@@ -747,6 +747,31 @@ static vlog_node_t lookup_interface(ident_t name)
    return vlog_from_object(obj);
 }
 
+static bool accept_vhdl_entity(object_t *obj)
+{
+   tree_t t = tree_from_object(obj);
+   return t != NULL && tree_kind(t) == T_ENTITY;
+}
+
+static tree_t lookup_vhdl_entity(ident_t name)
+{
+   LOCAL_TEXT_BUF tb = tb_new();
+   tb_istr(tb, name);
+   tb_upcase(tb);
+
+   ident_t unit = ident_new(tb_get(tb));
+   ident_t qual = ident_prefix(lib_name(lib_work()), unit, '.');
+   object_t *obj = lib_get_generic(lib_work(), qual, NULL);
+   if (obj == NULL)
+      obj = search_other_libs(unit, accept_vhdl_entity);
+
+   if (obj == NULL)
+      return NULL;
+
+   tree_t t = tree_from_object(obj);
+   return t != NULL && tree_kind(t) == T_ENTITY ? t : NULL;
+}
+
 static int vlog_token_rank(token_t tok)
 {
    // How far up the grammar a token reaches, used to recover from errors:
@@ -27522,6 +27547,49 @@ static vlog_node_t bind_child_module(vlog_node_t mod, ident_t id)
    return next != NULL && vlog_kind(next) == V_MODULE ? next : NULL;
 }
 
+static tree_t bind_find_child_entity(vlog_node_t scope, ident_t id)
+{
+   const int nstmts = vlog_stmts(scope);
+   for (int i = 0; i < nstmts; i++) {
+      vlog_node_t s = vlog_stmt(scope, i);
+      switch (vlog_kind(s)) {
+      case V_INST_LIST:
+         {
+            const int ninst = vlog_stmts(s);
+            for (int j = 0; j < ninst; j++) {
+               vlog_node_t inst = vlog_stmt(s, j);
+               if (vlog_kind(inst) == V_MOD_INST && vlog_ident(inst) == id)
+                  return lookup_vhdl_entity(vlog_ident(s));
+            }
+         }
+         break;
+
+      case V_IF_GENERATE:
+         {
+            const int nconds = vlog_conds(s);
+            for (int j = 0; j < nconds; j++) {
+               vlog_node_t c = vlog_cond(s, j);
+               if (vlog_stmts(c) == 0)
+                  continue;
+
+               vlog_node_t blk = vlog_stmt(c, 0);
+               if (vlog_kind(blk) == V_GEN_BLOCK) {
+                  tree_t r = bind_find_child_entity(blk, id);
+                  if (r != NULL)
+                     return r;
+               }
+            }
+         }
+         break;
+
+      default:
+         break;
+      }
+   }
+
+   return NULL;
+}
+
 static vlog_node_t bind_walk_path(vlog_node_t mod, text_buf_t *path)
 {
    // The module of the instance named by the identifiers after the dots,
@@ -27563,6 +27631,7 @@ static vlog_node_t p_bind_directive(void)
 
    // The first name may be an instance in the module with the directive
    vlog_node_t mod = NULL, scope_mod = NULL;
+   tree_t entity = NULL;
    if (peek() == tDOT && bind_scope != NULL) {
       scope_mod = lookup_interface(bind_scope);
       if (scope_mod != NULL && vlog_kind(scope_mod) == V_MODULE)
@@ -27570,16 +27639,23 @@ static vlog_node_t p_bind_directive(void)
    }
 
    bool relative = mod != NULL;
-   if (!relative)
+   if (!relative) {
       mod = lookup_interface(target);
+      if (mod == NULL)
+         entity = lookup_vhdl_entity(target);
+   }
 
-   if (mod == NULL && peek() != tDOT && peek() != tCOLON && bind_scope != NULL) {
+   if (mod == NULL && entity == NULL && peek() != tDOT && peek() != tCOLON
+       && bind_scope != NULL) {
       // The target is an instance in the module with the directive (23.11)
       scope_mod = lookup_interface(bind_scope);
-      if (scope_mod != NULL && vlog_kind(scope_mod) == V_MODULE)
+      if (scope_mod != NULL && vlog_kind(scope_mod) == V_MODULE) {
          mod = bind_child_module(scope_mod, target);
+         if (mod == NULL)
+            entity = bind_find_child_entity(scope_mod, target);
+      }
 
-      if (mod != NULL) {
+      if (mod != NULL || entity != NULL) {
          LOCAL_TEXT_BUF path = tb_new();
          tb_istr(path, bind_scope);
          tb_append(path, '.');
@@ -27613,8 +27689,10 @@ static vlog_node_t p_bind_directive(void)
       vlog_set_loc(sel, &target_loc);
       vlog_add_param(v, sel);
    }
-   else if (peek() == tCOLON && mod != NULL && vlog_kind(mod) == V_MODULE) {
-      // Only the listed instances of the module are targets
+   else if (peek() == tCOLON
+            && ((mod != NULL && vlog_kind(mod) == V_MODULE)
+                || entity != NULL)) {
+      // Only the listed instances of the module or entity are targets
       consume(tCOLON);
 
       do {
@@ -27627,7 +27705,8 @@ static vlog_node_t p_bind_directive(void)
             ident_t first = peek_ident_nth(1);
             vlog_node_t sm = lookup_interface(bind_scope);
             if (sm != NULL && vlog_kind(sm) == V_MODULE
-                && bind_child_module(sm, first) != NULL) {
+                && (bind_child_module(sm, first) != NULL
+                    || bind_find_child_entity(sm, first) != NULL)) {
                tb_istr(path, bind_scope);
                tb_append(path, '.');
             }
@@ -27646,14 +27725,14 @@ static vlog_node_t p_bind_directive(void)
       } while (optional(tCOMMA));
    }
 
-   if (mod == NULL || vlog_kind(mod) != V_MODULE) {
+   if (entity == NULL && (mod == NULL || vlog_kind(mod) != V_MODULE)) {
       error_at(&target_loc, "cannot find module or interface %pI to bind into",
                target);
       drop_tokens_until(&state, tSEMI);   // Also drops the semicolon
       return NULL;
    }
 
-   vlog_set_ident2(v, vlog_ident(mod));
+   vlog_set_ident2(v, entity != NULL ? tree_ident(entity) : vlog_ident(mod));
 
    char hash[SHA_HEX_LEN];
    get_hex_hash(loc_file_str(&state.last_loc), hash);
@@ -27666,6 +27745,81 @@ static vlog_node_t p_bind_directive(void)
 
    vlog_symtab_push(symtab, v);
 
+   if (entity != NULL) {
+      // Populate the bind scope with the VHDL entity's ports and generics so
+      // port connections in the bound instance resolve cleanly before being
+      // rebound to the generated VHDL shim module during elaboration
+      const int nports = tree_ports(entity);
+      for (int i = 0; i < nports; i++) {
+         tree_t p = tree_port(entity, i);
+         LOCAL_TEXT_BUF tb = tb_new();
+         const char *raw = istr(tree_ident(p));
+         if (raw[0] == '\\')
+            tb_catn(tb, raw + 1, strlen(raw) - 2);
+         else {
+            tb_cat(tb, raw);
+            tb_downcase(tb);
+         }
+
+         type_t ptype = tree_type(p);
+         vlog_node_t dt = vlog_new(V_DATA_TYPE);
+         vlog_set_subkind(dt, type_is_real(ptype) ? DT_REAL : DT_LOGIC);
+         vlog_set_loc(dt, &target_loc);
+
+         if (type_is_array(ptype) && !type_is_unconstrained(ptype)) {
+            tree_t r = range_of(ptype, 0);
+            int64_t left, right;
+            if (r != NULL && folded_int(tree_left(r), &left)
+                && folded_int(tree_right(r), &right)) {
+               vlog_node_t nl = vlog_new(V_NUMBER);
+               vlog_set_number(nl, number_from_int(left));
+               vlog_set_loc(nl, &target_loc);
+
+               vlog_node_t nr = vlog_new(V_NUMBER);
+               vlog_set_number(nr, number_from_int(right));
+               vlog_set_loc(nr, &target_loc);
+
+               vlog_node_t dim = vlog_new(V_DIMENSION);
+               vlog_set_subkind(dim, V_DIM_PACKED);
+               vlog_set_left(dim, nl);
+               vlog_set_right(dim, nr);
+               vlog_set_loc(dim, &target_loc);
+               vlog_add_range(dt, dim);
+            }
+         }
+
+         vlog_node_t nd = vlog_new(V_NET_DECL);
+         vlog_set_ident(nd, ident_new(tb_get(tb)));
+         vlog_set_subkind(nd, V_NET_WIRE);
+         vlog_set_type(nd, dt);
+         vlog_set_loc(nd, &target_loc);
+
+         vlog_add_decl(v, nd);
+         vlog_symtab_put(symtab, nd);
+      }
+
+      const int ngenerics = tree_generics(entity);
+      for (int i = 0; i < ngenerics; i++) {
+         tree_t g = tree_generic(entity, i);
+         LOCAL_TEXT_BUF tb = tb_new();
+         const char *raw = istr(tree_ident(g));
+         if (raw[0] == '\\')
+            tb_catn(tb, raw + 1, strlen(raw) - 2);
+         else {
+            tb_cat(tb, raw);
+            tb_downcase(tb);
+         }
+
+         vlog_node_t pd = vlog_new(V_PARAM_DECL);
+         vlog_set_ident(pd, ident_new(tb_get(tb)));
+         vlog_set_type(pd, make_integer_atom_type(DT_INT));
+         vlog_set_loc(pd, &target_loc);
+
+         vlog_add_decl(v, pd);
+         vlog_symtab_put(symtab, pd);
+      }
+   }
+   else {
    // A port declaration is shadowed by the net or variable it declares
    const int ndecls = vlog_decls(mod);
    for (int pass = 0; pass < 2; pass++) {
@@ -27704,6 +27858,7 @@ static vlog_node_t p_bind_directive(void)
             break;
          }
       }
+   }
    }
 
    p_module_or_udp_instantiation(v);

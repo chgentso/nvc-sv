@@ -494,7 +494,36 @@ static bool copy_bind_pred(vlog_node_t v, void *ctx)
 typedef struct {
    vlog_node_t copy;
    vlog_node_t body;
+   bool        vhdl_shim;
 } bind_ctx_t;
+
+static bool bind_is_vhdl_shim(vlog_node_t mod)
+{
+   const char *str = istr(vlog_ident(mod));
+   const char *dollar = strrchr(str, '$');
+   if (dollar == NULL || dollar[1] == '\0')
+      return false;
+
+   for (const char *p = dollar + 1; *p != '\0'; p++) {
+      if (*p < '0' || *p > '9')
+         return false;
+   }
+
+   return true;
+}
+
+static bool bind_matches_mod(vlog_node_t b, vlog_node_t mod)
+{
+   if (vlog_ident2(b) == vlog_ident(mod))
+      return true;
+
+   if (bind_is_vhdl_shim(mod)) {
+      ident_t base = ident_until(vlog_ident(mod), '$');
+      return bind_key(base) == bind_key(vlog_ident2(b));
+   }
+
+   return false;
+}
 
 static vlog_node_t fix_bind_ref_cb(vlog_node_t v, void *ctx)
 {
@@ -515,7 +544,9 @@ static vlog_node_t fix_bind_ref_cb(vlog_node_t v, void *ctx)
    const int nports = vlog_ports(copy);
    for (int i = 0; i < nports; i++) {
       vlog_node_t p = vlog_port(copy, i);
-      if (vlog_kind(p) == V_PORT_DECL && vlog_ident(p) == id) {
+      if (vlog_kind(p) == V_PORT_DECL
+          && (vlog_ident(p) == id
+              || (bc->vhdl_shim && ident_casecmp(vlog_ident(p), id)))) {
          vlog_set_ref(v, p);
          return v;
       }
@@ -530,7 +561,8 @@ static vlog_node_t fix_bind_ref_cb(vlog_node_t v, void *ctx)
       case V_NET_DECL:
       case V_PARAM_DECL:
       case V_LOCALPARAM:
-         if (vlog_ident(d) == id)
+         if (vlog_ident(d) == id
+             || (bc->vhdl_shim && ident_casecmp(vlog_ident(d), id)))
             vlog_set_ref(v, d);
          break;
       default:
@@ -553,7 +585,7 @@ bool vlog_bind_has_hier_ref(vlog_node_t mod)
 {
    for (unsigned i = 0; i < bind_units.count; i++) {
       vlog_node_t b = bind_units.items[i];
-      if (vlog_ident2(b) == vlog_ident(mod)
+      if (bind_matches_mod(b, mod)
           && (vlog_global_flags(b) & VLOG_GF_HIER_REF))
          return true;
    }
@@ -572,7 +604,7 @@ bool vlog_bind_is_selective(vlog_node_t mod)
 {
    for (unsigned i = 0; i < bind_units.count; i++) {
       vlog_node_t b = bind_units.items[i];
-      if (vlog_ident2(b) == vlog_ident(mod) && vlog_params(b) > 0)
+      if (bind_matches_mod(b, mod) && vlog_params(b) > 0)
          return true;
    }
 
@@ -606,9 +638,11 @@ static bool bind_matches_instance(vlog_node_t b)
 static void add_bound_instances(vlog_node_t v, vlog_node_t mod,
                                 vlog_node_t copy)
 {
+   const bool vhdl_shim = bind_is_vhdl_shim(mod);
+
    for (unsigned i = 0; i < bind_units.count; i++) {
       vlog_node_t b = bind_units.items[i];
-      if (vlog_ident2(b) != vlog_ident(mod) || !bind_matches_instance(b))
+      if (!bind_matches_mod(b, mod) || !bind_matches_instance(b))
          continue;
 
       // A name used in a port connection of the bound instance and not
@@ -649,7 +683,7 @@ static void add_bound_instances(vlog_node_t v, vlog_node_t mod,
          }
       }
 
-      bind_ctx_t bc = { copy, v };
+      bind_ctx_t bc = { copy, v, vhdl_shim };
       const int nstmts = vlog_stmts(b);
       for (int j = 0; j < nstmts; j++) {
          vlog_node_t c = vlog_copy(vlog_stmt(b, j), copy_bind_pred, NULL);
