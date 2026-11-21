@@ -56,11 +56,13 @@ module inval4;
   int darr[];
   const int cvar1 = 10, cvar2 = 10;
   assign cvar1 = 20;
+  logic [3:0] vec;
   initial begin
     arr = '{i: 1, default: 0};
     {i, arr} = 0;
     {str} = 0;
     {darr} = 0;
     cvar2 = 30;
+    vec[0:1] = 2'b00;
   end
 endmodule

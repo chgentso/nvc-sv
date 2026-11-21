@@ -28,6 +28,7 @@
 #include "vlog/vlog-util.h"
 
 #include <assert.h>
+#include <inttypes.h>
 #include <stdlib.h>
 
 typedef uint32_t type_mask_t;
@@ -2860,6 +2861,55 @@ static type_mask_t vlog_check_bit_select(vlog_node_t v)
    return tmask;
 }
 
+static vlog_node_t vlog_select_dim(vlog_node_t v, int skip)
+{
+   switch (vlog_kind(v)) {
+   case V_BIT_SELECT:
+      return vlog_select_dim(vlog_value(v), skip + vlog_params(v));
+   case V_REF:
+   case V_MEMBER_REF:
+      {
+         vlog_node_t decl = vlog_kind(v) == V_MEMBER_REF
+            ? vlog_member_decl(v) : (vlog_has_ref(v) ? vlog_ref(v) : NULL);
+         if (decl == NULL)
+            return NULL;
+
+         switch (vlog_kind(decl)) {
+         case V_VAR_DECL:
+         case V_NET_DECL:
+         case V_PORT_DECL:
+         case V_LOCAL_DECL:
+         case V_TF_PORT_DECL:
+         case V_PARAM_DECL:
+         case V_LOCALPARAM:
+            break;
+         default:
+            return NULL;
+         }
+
+         const int nu = vlog_ranges(decl);
+         if (skip < nu)
+            return vlog_range(decl, skip);
+         skip -= nu;
+
+         if (!vlog_has_type(decl))
+            return NULL;
+
+         vlog_node_t dt = vlog_get_type(vlog_type(decl));
+         while (dt != NULL && vlog_kind(dt) == V_DATA_TYPE) {
+            const int np = vlog_ranges(dt);
+            if (skip < np)
+               return vlog_range(dt, skip);
+            skip -= np;
+            dt = vlog_has_type(dt) ? vlog_get_type(vlog_type(dt)) : NULL;
+         }
+         return NULL;
+      }
+   default:
+      return NULL;
+   }
+}
+
 static type_mask_t vlog_check_part_select(vlog_node_t v)
 {
    if (vlog_subkind(v) == V_RANGE_CONST) {
@@ -2870,7 +2920,22 @@ static type_mask_t vlog_check_part_select(vlog_node_t v)
    vlog_node_t right = vlog_right(v);
    vlog_check_expr(right);
 
-   return vlog_check_index(v);
+   const type_mask_t mask = vlog_check_index(v);
+
+   if (vlog_subkind(v) == V_RANGE_CONST) {
+      int64_t sl, sr, dl, dr;
+      if (vlog_get_const(vlog_left(v), &sl)
+          && vlog_get_const(vlog_right(v), &sr) && sl != sr) {
+         vlog_node_t dim = vlog_select_dim(vlog_value(v), 0);
+         if (dim != NULL && vlog_bounds(dim, &dl, &dr) && dl != dr
+             && (sl > sr) != (dl > dr))
+            error_at(vlog_loc(v), "part-select direction [%"PRIi64":%"PRIi64"] "
+                     "does not match declared range [%"PRIi64":%"PRIi64"]",
+                     sl, sr, dl, dr);
+      }
+   }
+
+   return mask;
 }
 
 static type_mask_t vlog_check_user_fcall(vlog_node_t v)
