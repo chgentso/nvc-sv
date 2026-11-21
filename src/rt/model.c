@@ -7157,6 +7157,7 @@ void x_put_driver(sig_shared_t *ss, uint32_t offset, int32_t count,
       copy_value_ptr(n, &d->u.driver.waveforms.value, vptr);
 
       d->u.driver.waveforms.when = m->now;
+      n->active_delta = m->iteration;
 
       calculate_driving_value(m, n);
 
