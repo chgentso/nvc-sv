@@ -3003,3 +3003,4 @@ svtimefmt1 verilog
 svctorchain1 verilog
 svconststr1 verilog
 svtyperestrict1 verilog
+svwildport1 verilog

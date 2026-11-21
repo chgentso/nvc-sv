@@ -2589,6 +2589,7 @@ static void elab_verilog_ports(vlog_node_t inst, elab_instance_t *ei,
       }
       else if (wildcard != NULL && vlog_has_ref(wildcard)) {
          vlog_node_t parent = vlog_ref(wildcard);
+         const loc_t *wloc = vlog_loc(wildcard);
          const int ndecls = vlog_decls(parent);
          for (int j = 0; j < ndecls; j++) {
             vlog_node_t d = vlog_decl(parent, j);
@@ -2597,10 +2598,17 @@ static void elab_verilog_ports(vlog_node_t inst, elab_instance_t *ei,
             case V_VAR_DECL:
             case V_PORT_DECL:
                if (vlog_ident(d) == port_name) {
+                  const loc_t *dloc = vlog_loc(d);
+                  if (dloc->file_ref == wloc->file_ref
+                      && (dloc->first_line > wloc->first_line
+                          || (dloc->first_line == wloc->first_line
+                              && dloc->first_column > wloc->first_column)))
+                     break;
+
                   value = vlog_new(V_REF);
                   vlog_set_ident(value, port_name);
                   vlog_set_ref(value, d);
-                  vlog_set_loc(value, vlog_loc(wildcard));
+                  vlog_set_loc(value, wloc);
                }
                break;
             default:
@@ -2611,7 +2619,7 @@ static void elab_verilog_ports(vlog_node_t inst, elab_instance_t *ei,
                break;
          }
 
-         where = vlog_loc(wildcard);
+         where = wloc;
       }
 
 

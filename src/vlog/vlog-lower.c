@@ -32121,7 +32121,14 @@ void vlog_lower_instance(mir_context_t *mc, vlog_node_t body, ident_t parent,
          }
          else {
             assert(hops == 0); // Port
-            if (vlog_has_value(d))
+            vlog_node_t port = NULL;
+            for (int j = 0; j < nports && port == NULL; j++) {
+               vlog_node_t p = vlog_ref(vlog_port(body, j));
+               if (vlog_ref(p) == d)
+                  port = p;
+            }
+            if (vlog_has_value(d)
+                && (port == NULL || vlog_subkind(port) != V_PORT_INPUT))
                vlog_lower_net_assign(&g, d, hash_get(map, d));
          }
          break;
