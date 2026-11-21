@@ -5,7 +5,7 @@ AC_INIT([nvc], [1.24-devel],
 AC_PREREQ([2.69])
 
 # Version of the nvc-sv toolchain, independent of the nvc version above
-AC_DEFINE([NVC_SV_VERSION], ["0.17.1"], [Version of the nvc-sv toolchain])
+AC_DEFINE([NVC_SV_VERSION], ["0.18.0"], [Version of the nvc-sv toolchain])
 
 AC_CANONICAL_HOST
 AC_CANONICAL_TARGET

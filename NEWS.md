@@ -1,3 +1,7 @@
+## nvc-sv 0.18.0
+- SystemVerilog: bit-stream casts to dynamic arrays and queues, streaming of unpacked structs, equality (`==` / `!=`) on associative arrays, bounded queues (`[$:N]`), `const'(expr)` static casts, method calls and member selects chained on static casts, non-constant step arguments in enum `next()` and `prev()`, pure string methods and enum `first`/`last`/`num` in constant expressions, runtime dimensions and slices in array queries (`$size`, `$high`, `$low`, `$left`, `$right`, `$dimensions`), `force` and `release` of concatenations, input port defaults on blank positional connections, forwarded `extends` constructor arguments, member writes through `const` class and virtual interface handles, and arbitrary precision `%t` formatting.
+- VHDL-2019 and VHDL-2008: range record expressions in ranges, variable ports of composite types with protected subelements, discrete object attributes, array element mode views in drivers and port mapping, predefined attribute generic function actuals, array/slice/record disconnection specifications, open array constraints on access subtypes, loop and sequential block labels in `'PATH_NAME` and `'INSTANCE_NAME`, block configurations for default-bound components, file `seek`/`size`/`position`/`truncate` scaled by element size, and `std.textio` real write/read round-trip precision.
+
 ## nvc-sv 0.17.1
 - `nvc --scan` records virtual interfaces used in parameterised classes, so the files defining them are part of the build.
 
