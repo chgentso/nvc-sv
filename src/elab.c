@@ -755,6 +755,14 @@ static tree_t elab_mixed_binding(tree_t comp, const elab_instance_t *ei)
       type_t btype = tree_type(cport);
       type_t vtype = tree_type(vport);
 
+      if (mdir != V_PORT_INOUT && type_is_real(btype) && type_is_real(vtype)) {
+         if (have_named)
+            add_param(bind, make_ref(cport), P_NAMED, make_ref(vport));
+         else
+            add_param(bind, make_ref(cport), P_POS, NULL);
+         continue;
+      }
+
       tree_t conv = tree_new(T_CONV_FUNC);
       tree_set_loc(conv, tree_loc(cport));
 
@@ -5116,8 +5124,11 @@ static vlog_node_t elab_vhdl_shim_module(vlog_node_t list, tree_t entity,
       if (!elab_vlog_name(first, p, name))
          return NULL;
 
-      tb_printf(tb, "%s%s wire%s %s", i > 0 ? ", " : "", dir, range,
-                tb_get(name));
+      if (type_is_real(type))
+         tb_printf(tb, "%s%s real %s", i > 0 ? ", " : "", dir, tb_get(name));
+      else
+         tb_printf(tb, "%s%s wire%s %s", i > 0 ? ", " : "", dir, range,
+                   tb_get(name));
    }
 
    tb_cat(tb, ");\nendmodule\n");
@@ -5382,6 +5393,15 @@ static void elab_vhdl_in_verilog(tree_t entity, vlog_node_t inst_v,
           && elab_verilog_port_open(inst_v, eport, i)) {
          // Leave the port open so that it takes its default value
          have_named = true;
+         continue;
+      }
+
+      if (tree_subkind(eport) != PORT_INOUT
+          && type_is_real(btype) && type_is_real(vtype)) {
+         if (have_named)
+            add_param(inst, make_ref(vport), P_NAMED, make_ref(eport));
+         else
+            add_param(inst, make_ref(vport), P_POS, NULL);
          continue;
       }
 

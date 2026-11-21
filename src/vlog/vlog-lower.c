@@ -29769,14 +29769,21 @@ static void vlog_lower_port_map(vlog_gen_t *g, vlog_node_t v)
             targetsz = lvalue1.size;
          }
 
-         mir_type_t t_vec = mir_vec4_type(g->mu, targetsz, false);
-
          mir_value_t resolved = mir_build_resolved(g->mu, signal);
-         mir_value_t value = mir_build_pack(g->mu, ti->type, resolved);
+         if (mir_get_class(g->mu, ti->type) == MIR_TYPE_REAL) {
+            mir_value_t value = mir_build_load(g->mu, resolved);
+            mir_type_t t_dst = nlvalues == 1 ? lvalue1.type
+               : mir_vec4_type(g->mu, targetsz, false);
+            resize = vlog_lower_cast(g, t_dst, value);
+         }
+         else {
+            mir_type_t t_vec = mir_vec4_type(g->mu, targetsz, false);
+            mir_value_t value = mir_build_pack(g->mu, ti->type, resolved);
 
-         assert(mir_is_vector(g->mu, value));
+            assert(mir_is_vector(g->mu, value));
 
-         resize = mir_build_cast(g->mu, t_vec, value);
+            resize = mir_build_cast(g->mu, t_vec, value);
+         }
       }
       break;
 
@@ -33254,6 +33261,7 @@ void vlog_lower_block(mir_context_t *mc, ident_t parent, tree_t b)
          src = mir_build_wrap(mu, src_nets, dims, 1);
       }
 
+      bool mapped = false;
       if (tree_kind(value) == T_CONV_FUNC) {
          ident_t sym = ident_sprintf("%s.%s$verilog_convert_in",
                                      istr(qual), istr(vlog_ident(port)));
@@ -33265,6 +33273,7 @@ void vlog_lower_block(mir_context_t *mc, ident_t parent, tree_t b)
                                                  args, ARRAY_LEN(args));
          mir_value_t locus = mir_build_debug_locus(mu, tree_to_object(map));
          mir_build_process_init(mu, closure, locus);
+         mapped = true;
       }
 
       if (tree_subkind(map) == P_NAMED) {
@@ -33280,7 +33289,15 @@ void vlog_lower_block(mir_context_t *mc, ident_t parent, tree_t b)
                                                     args, ARRAY_LEN(args));
             mir_value_t locus = mir_build_debug_locus(mu, tree_to_object(map));
             mir_build_process_init(mu, closure, locus);
+            mapped = true;
          }
+      }
+
+      if (!mapped) {
+         if (vlog_subkind(port) == V_PORT_INPUT)
+            mir_build_map_signal(mu, dst_nets, src_nets, src_count);
+         else if (vlog_subkind(port) == V_PORT_OUTPUT)
+            mir_build_map_signal(mu, src_nets, dst_nets, src_count);
       }
 
       mir_value_t locus = mir_build_debug_locus(mu, tree_to_object(map));
