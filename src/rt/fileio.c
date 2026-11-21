@@ -22,6 +22,7 @@
 #include "rt/fileio.h"
 
 #include <assert.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <errno.h>
 #include <string.h>
@@ -75,6 +76,7 @@ typedef struct {
    file_kind_t  kind;
    file_mode_t  mode;
    uint16_t     generation;
+   size_t       elem_size;
 } file_slot_t;
 
 #define HANDLE_BITS      (sizeof(file_handle_t) * 8)
@@ -134,6 +136,7 @@ static file_handle_t handle_for(FILE *f, const char *name, file_kind_t kind,
    slot->name = xstrdup(name);
    slot->kind = kind;
    slot->mode = mode;
+   slot->elem_size = 1;
 
    free_hint = index + 1;
 
@@ -260,6 +263,11 @@ void __nvc_flush(jit_scalar_t *args)
    fflush(slot->file);
 }
 
+static bool file_is_seekable(const file_slot_t *slot)
+{
+   return slot->kind != FILE_PREDEF && fseeko(slot->file, 0, SEEK_CUR) == 0;
+}
+
 DLLEXPORT
 void __nvc_rewind(jit_scalar_t *args)
 {
@@ -268,6 +276,8 @@ void __nvc_rewind(jit_scalar_t *args)
    file_slot_t *slot = decode_handle(*handle);
    if (slot == NULL)
       jit_msg(NULL, DIAG_FATAL, "FILE_REWIND called on closed file");
+   if (!file_is_seekable(slot))
+      jit_msg(NULL, DIAG_FATAL, "FILE_REWIND called on non-seekable file");
 
    rewind(slot->file);
 }
@@ -282,11 +292,33 @@ void __nvc_seek(jit_scalar_t *args)
    file_slot_t *slot = decode_handle(*handle);
    if (slot == NULL)
       jit_msg(NULL, DIAG_FATAL, "FILE_SEEK called on closed file");
+   if (!file_is_seekable(slot))
+      jit_msg(NULL, DIAG_FATAL, "FILE_SEEK called on non-seekable file");
 
-   const int whence[3] = { SEEK_SET, SEEK_CUR, SEEK_END };
-   assert(origin >= 0 && origin < ARRAY_LEN(whence));
+   fflush(slot->file);
 
-   if (fseeko(slot->file, offset, whence[origin]) < 0)
+   off_t cur = ftello(slot->file);
+   if (cur < 0)
+      jit_msg(NULL, DIAG_FATAL, "FILE_SEEK failed: %s", strerror(errno));
+
+   file_info_t info;
+   if (!get_handle_info(fileno(slot->file), &info))
+      jit_msg(NULL, DIAG_FATAL, "FILE_SEEK failed: %s", strerror(errno));
+
+   const off_t byte_off = offset * (off_t)slot->elem_size;
+   off_t target;
+   switch (origin) {
+   case FILE_ORIGIN_BEGIN:   target = byte_off; break;
+   case FILE_ORIGIN_CURRENT: target = cur + byte_off; break;
+   case FILE_ORIGIN_END:     target = (off_t)info.size + byte_off; break;
+   default:                  should_not_reach_here();
+   }
+
+   if (target < 0 || target > (off_t)info.size)
+      jit_msg(NULL, DIAG_FATAL, "FILE_SEEK position %"PRIi64" is outside file",
+              (int64_t)offset);
+
+   if (fseeko(slot->file, target, SEEK_SET) < 0)
       jit_msg(NULL, DIAG_FATAL, "FILE_SEEK failed: %s", strerror(errno));
 }
 
@@ -300,26 +332,30 @@ void __nvc_truncate(jit_scalar_t *args)
    file_slot_t *slot = decode_handle(*handle);
    if (slot == NULL)
       jit_msg(NULL, DIAG_FATAL, "FILE_TRUNCATE called on closed file");
+   if (!file_is_seekable(slot))
+      jit_msg(NULL, DIAG_FATAL, "FILE_TRUNCATE called on non-seekable file");
 
    fflush(slot->file);
 
+   const int64_t byte_size = size * (int64_t)slot->elem_size;
+
 #ifdef __MINGW32__
    HANDLE os_handle = (HANDLE)_get_osfhandle(_fileno(slot->file));
-   LARGE_INTEGER distance = { .QuadPart = size };
+   LARGE_INTEGER distance = { .QuadPart = byte_size };
    if (!SetFilePointerEx(os_handle, distance, NULL, origin))
       goto failed;
 
    if (!SetEndOfFile(os_handle))
       goto failed;
 #else  // !__MINGW32__
-   off_t asize = size, oldpos = ftello(slot->file);
+   off_t asize = byte_size, oldpos = ftello(slot->file);
    switch (origin) {
    case FILE_ORIGIN_END:
       fseek(slot->file, 0, SEEK_END);
-      asize = ftello(slot->file) + size;
+      asize = ftello(slot->file) + byte_size;
       break;
    case FILE_ORIGIN_CURRENT:
-      asize = oldpos + size;
+      asize = oldpos + byte_size;
       break;
    }
 
@@ -376,6 +412,8 @@ void __nvc_file_position(jit_scalar_t *args)
    file_slot_t *slot = decode_handle(*handle);
    if (slot == NULL)
       jit_msg(NULL, DIAG_FATAL, "FILE_POSITION called on closed file");
+   if (!file_is_seekable(slot))
+      jit_msg(NULL, DIAG_FATAL, "FILE_POSITION called on non-seekable file");
 
    off_t off = ftello(slot->file);
    if (off < 0)
@@ -383,14 +421,14 @@ void __nvc_file_position(jit_scalar_t *args)
 
    switch (origin) {
    case FILE_ORIGIN_BEGIN:
-      args[0].integer = off;
+      args[0].integer = off / (off_t)slot->elem_size;
       break;
    case FILE_ORIGIN_END:
       {
          fseeko(slot->file, 0, SEEK_END);
          off_t end = ftello(slot->file);
          fseeko(slot->file, off, SEEK_SET);
-         args[0].integer = end - off;
+         args[0].integer = (end - off) / (off_t)slot->elem_size;
       }
       break;
    case FILE_ORIGIN_CURRENT:
@@ -405,8 +443,10 @@ void __nvc_file_size(jit_scalar_t *args)
    file_handle_t *handle = args[0].pointer;
 
    file_slot_t *slot = decode_handle(*handle);
-   if (slot->file == NULL)
+   if (slot == NULL)
       jit_msg(NULL, DIAG_FATAL, "FILE_SIZE called on closed file");
+   if (!file_is_seekable(slot))
+      jit_msg(NULL, DIAG_FATAL, "FILE_SIZE called on non-seekable file");
 
    fflush(slot->file);
 
@@ -414,7 +454,7 @@ void __nvc_file_size(jit_scalar_t *args)
    if (!get_handle_info(fileno(slot->file), &info))
       jit_msg(NULL, DIAG_FATAL, "FILE_SIZE failed: %s", strerror(errno));
 
-   args[0].integer = info.size;
+   args[0].integer = info.size / slot->elem_size;
 }
 
 DLLEXPORT
@@ -423,14 +463,14 @@ void __nvc_file_canseek(jit_scalar_t *args)
    file_handle_t *handle = args[0].pointer;
 
    file_slot_t *slot = decode_handle(*handle);
-   if (slot->file == NULL)
+   if (slot == NULL)
       jit_msg(NULL, DIAG_FATAL, "FILE_CANSEEK called on closed file");
 
-   args[0].integer = fseek(slot->file, 0, SEEK_CUR) == 0;
+   args[0].integer = file_is_seekable(slot);
 }
 
 void x_file_open(int8_t *status, void **_fp, const uint8_t *name_bytes,
-                 int32_t name_len, int8_t mode)
+                 int32_t name_len, int8_t mode, int64_t elem_size)
 {
    file_handle_t *handle = (file_handle_t *)_fp;
 
@@ -469,6 +509,11 @@ void x_file_open(int8_t *status, void **_fp, const uint8_t *name_bytes,
          default:     *status = NAME_ERROR; break;
          }
       }
+   }
+   else if (elem_size > 0) {
+      file_slot_t *slot = decode_handle(*handle);
+      if (slot != NULL)
+         slot->elem_size = elem_size;
    }
 }
 

@@ -3364,12 +3364,21 @@ static void irgen_op_assert(jit_irgen_t *g, mir_value_t n)
 
 static void irgen_op_file_open(jit_irgen_t *g, mir_value_t n)
 {
-   jit_value_t file   = irgen_get_arg(g, n, 0);
+   mir_value_t arg0   = mir_get_arg(g->mu, n, 0);
+   jit_value_t file   = irgen_get_value(g, arg0);
    jit_value_t name   = irgen_get_arg(g, n, 1);
    jit_value_t length = irgen_get_arg(g, n, 2);
    jit_value_t kind   = irgen_get_arg(g, n, 3);
 
    irgen_emit_debuginfo(g, n);   // For stack traces
+
+   mir_type_t file_type = mir_get_elem(g->mu, mir_get_type(g->mu, arg0));
+   assert(mir_get_class(g->mu, file_type) == MIR_TYPE_FILE);
+
+   mir_type_t elem_type = mir_get_base(g->mu, file_type);
+   int64_t elem_bytes = 1;
+   if (mir_get_class(g->mu, elem_type) != MIR_TYPE_UARRAY)
+      elem_bytes = MAX(irgen_size_bytes(g, elem_type), 1);
 
    jit_value_t status = jit_null_ptr();
    if (mir_count_args(g->mu, n) == 5)
@@ -3380,6 +3389,7 @@ static void irgen_op_file_open(jit_irgen_t *g, mir_value_t n)
    j_send(g, 2, name);
    j_send(g, 3, length);
    j_send(g, 4, kind);
+   j_send(g, 5, jit_value_from_int64(elem_bytes));
 
    macro_exit(g, JIT_EXIT_FILE_OPEN);
 }

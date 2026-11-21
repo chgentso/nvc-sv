@@ -851,8 +851,9 @@ void __nvc_do_exit(jit_exit_t which, jit_anchor_t *anchor, jit_scalar_t *args,
          uint8_t  *name_bytes = args[2].pointer;
          int32_t   name_len   = args[3].integer;
          int32_t   mode       = args[4].integer;
+         int64_t   elem_size  = args[5].integer;
 
-         x_file_open(status, _fp, name_bytes, name_len, mode);
+         x_file_open(status, _fp, name_bytes, name_len, mode, elem_size);
       }
       break;
 
