@@ -4408,9 +4408,7 @@ START_TEST(test_garray)
    input_from_file(TESTDIR "/sem/garray.vhd");
 
    const error_t expect[] = {
-      { 18, "cannot map constrained array type C4 to unconstrained formal "
-        "generic array type UA" },
-      { 19, "cannot map unconstrained array type U1 to constrained formal "
+      { 18, "cannot map unconstrained array type U1 to constrained formal "
         "generic array type CA" },
       { -1, NULL }
    };

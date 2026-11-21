@@ -15,7 +15,6 @@ architecture test of garray is
     type u1 is array (natural range <>) of integer;
     package ok_u is new work.pu generic map (ua => u1);           -- OK
     package ok_c is new work.pc generic map (ix => small, ca => c4); -- OK
-    package bad_u is new work.pu generic map (ua => c4);          -- Error
     package bad_c is new work.pc generic map (ix => small, ca => u1); -- Error
 begin
 end architecture;

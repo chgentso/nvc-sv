@@ -824,8 +824,13 @@ static tree_t find_binding(tree_t inst)
          query_name(nametab, arch_name, &unit);
          if (unit == NULL) {
             // LRM 7.3.2.2: the architecture named in an entity aspect need
-            // not be analysed until elaboration; resolve the entity now
-            unit = resolve_name(nametab, tree_loc(inst), name);
+            // not be analysed until elaboration as long as the entity exists
+            tree_t ent = NULL;
+            query_name(nametab, name, &ent);
+            if (ent != NULL && tree_kind(ent) == T_ENTITY)
+               unit = ent;
+            else
+               name = arch_name;
          }
          else
             name = arch_name;
@@ -9732,7 +9737,7 @@ static void p_disconnection_specification(tree_t container)
          // TODO: we should use insert_spec for this
          ident_t name = ident_prefix(tree_ident(sig), ident_new("disconnect"),
                                      '$');
-         if (query_name(nametab, name, NULL) == 0)
+         if (tree_kind(resolved) == T_REF || query_name(nametab, name, NULL) == 0)
             insert_name(nametab, d, name);
       }
 

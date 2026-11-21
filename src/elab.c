@@ -1337,7 +1337,8 @@ static void elab_collect_port_refs(tree_t t, void *ctx)
 static void elab_ports(tree_t entity, tree_t bind, const elab_ctx_t *ctx)
 {
    hset_t *used_comp_ports = NULL;
-   if (tree_kind(bind) == T_INSTANCE && tree_class(bind) == C_COMPONENT
+   if (tree_kind(entity) == T_BLOCK
+       && tree_kind(bind) == T_INSTANCE && tree_class(bind) == C_COMPONENT
        && tree_stmts(entity) == 1) {
       used_comp_ports = hset_new(16);
       tree_visit_only(tree_stmt(entity, 0), elab_collect_port_refs,
