@@ -3071,12 +3071,11 @@ static void convert_universal_bounds(tree_t r)
 
 static void find_disconnect_specification(tree_t guard, tree_t target)
 {
-   if (tree_kind(target) != T_REF)
-      return;
-   else if (!tree_has_ref(target))
+   tree_t ref = name_to_ref(target);
+   if (ref == NULL || !tree_has_ref(ref))
       return;
 
-   tree_t decl = tree_ref(target);
+   tree_t decl = tree_ref(ref);
 
    // TODO: use insert_spec for this
    ident_t name = ident_prefix(tree_ident(decl), ident_new("disconnect"), '$');
@@ -9485,7 +9484,7 @@ static void p_disconnection_specification(tree_t container)
 
    // The signals named in the specification or, for ALL and OTHERS, those
    // of the type already declared in this region
-   LOCAL_IDENT_LIST ids = NULL;
+   tree_list_t names = AINIT;
    bool all = false, others = false;
    switch (peek()) {
    case tALL:
@@ -9497,7 +9496,9 @@ static void p_disconnection_specification(tree_t container)
       others = true;
       break;
    default:
-      ids = p_identifier_list();
+      do {
+         APUSH(names, p_name(0));
+      } while (optional(tCOMMA));
       break;
    }
 
@@ -9543,7 +9544,8 @@ static void p_disconnection_specification(tree_t container)
 
          ident_t name = ident_prefix(tree_ident(sig), ident_new("disconnect"),
                                      '$');
-         insert_name(nametab, d, name);
+         if (query_name(nametab, name, NULL) == 0)
+            insert_name(nametab, d, name);
 
          tree_add_decl(container, d);
          sem_check(d, nametab);
@@ -9552,21 +9554,34 @@ static void p_disconnection_specification(tree_t container)
       return;
    }
 
-   for (ident_list_t *it = ids; it != NULL; it = it->next) {
+   for (unsigned i = 0; i < names.count; i++) {
+      tree_t resolved = solve_types(nametab, names.items[i], NULL);
+      tree_t base_ref = name_to_ref(resolved);
+      tree_t sig = (base_ref != NULL && tree_has_ref(base_ref))
+         ? tree_ref(base_ref) : NULL;
+
       tree_t d = tree_new(T_DISCONNECT);
-      tree_set_loc(d, &(it->loc));
-      tree_set_ident(d, it->ident);
+      tree_set_loc(d, tree_loc(resolved));
+      tree_set_ident(d, sig != NULL ? tree_ident(sig)
+                     : (base_ref != NULL ? tree_ident(base_ref)
+                        : well_known(W_ERROR)));
       tree_set_type(d, type);
       tree_set_delay(d, delay);
-      tree_set_ref(d, resolve_name(nametab, CURRENT_LOC, it->ident));
+      if (sig != NULL)
+         tree_set_ref(d, tree_kind(resolved) == T_REF ? sig : resolved);
 
-      // TODO: we should use insert_spec for this
-      ident_t name = ident_prefix(it->ident, ident_new("disconnect"), '$');
-      insert_name(nametab, d, name);
+      if (sig != NULL) {
+         // TODO: we should use insert_spec for this
+         ident_t name = ident_prefix(tree_ident(sig), ident_new("disconnect"),
+                                     '$');
+         if (query_name(nametab, name, NULL) == 0)
+            insert_name(nametab, d, name);
+      }
 
       tree_add_decl(container, d);
       sem_check(d, nametab);
    }
+   ACLEAR(names);
 }
 
 static void p_entity_class_entry_list(tree_t group)

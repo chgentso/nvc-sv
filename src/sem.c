@@ -7401,20 +7401,40 @@ static bool sem_check_disconnect(tree_t t, nametab_t *tab)
    if (!tree_has_ref(t))
       return false;
 
-   tree_t decl = tree_ref(t);
-   if (class_of(decl) != C_SIGNAL || !is_guarded_signal(decl))
+   tree_t ref = tree_ref(t);
+   tree_t decl = ref;
+   type_t sig_type = NULL;
+
+   const tree_kind_t rkind = tree_kind(ref);
+   if (rkind == T_ARRAY_REF || rkind == T_ARRAY_SLICE
+       || rkind == T_RECORD_REF) {
+      if (!sem_check(ref, tab))
+         return false;
+
+      if (!sem_static_name(ref, sem_globally_static))
+         sem_error(ref, "signal name in disconnection specification must be "
+                   "a static signal name");
+
+      tree_t base = name_to_ref(ref);
+      decl = (base != NULL && tree_has_ref(base)) ? tree_ref(base) : NULL;
+      sig_type = tree_type(ref);
+   }
+   else
+      sig_type = tree_type(decl);
+
+   if (decl == NULL || class_of(decl) != C_SIGNAL || !is_guarded_signal(decl))
       sem_error(t, "signal name %pI in disconnection specification must denote "
                 "a guarded signal", tree_ident(t));
 
    type_t type = tree_type(t);
-   if (!type_eq(tree_type(decl), type))
+   if (!type_eq(sig_type, type))
       sem_error(t, "type of declared signal %pT does not match type %pT in "
-                "disconnection specification", tree_type(decl), type);
+                "disconnection specification", sig_type, type);
 
-   if (!same_type_mark(tree_type(decl), type))
+   if (!same_type_mark(sig_type, type))
       sem_error(t, "type mark %pT in disconnection specification is not the "
                 "type mark %pT in the declaration of signal %pI", type,
-                tree_type(decl), tree_ident(t));
+                sig_type, tree_ident(t));
 
    tree_t delay = tree_delay(t);
    type_t std_time = std_type(NULL, STD_TIME);

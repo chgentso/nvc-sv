@@ -2762,6 +2762,7 @@ svinsidesign1 verilog
 wavevlogport1 wave,verilog
 lintjson1       shell
 guard9          normal
+guard10         normal,2008
 svclassfn1 verilog
 svmodportexpr2 verilog
 svunionsel1 verilog
