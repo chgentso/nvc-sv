@@ -1,18 +1,14 @@
 `timescale 1ns/1ps
-package pp;
-  class c;
-    function void p(); $display("pkg %0t|%t|%0d|%0t", $time, $time, $time, $realtime); endfunction
-    function void q(time t); $display("arg %0t|%0d", t, t); endfunction
-  endclass
-endpackage
+
 module svtimefmt1;
-  import pp::*;
-  c o = new;
+  reg [8*512-1:0] text;
+
   initial begin
-    #300;
-    o.p();
-    o.q(7);
-    o.q(300ns);
-    $display("mod %0t|%0d|%0t", $time, $time, $realtime);
+    $timeformat(-9, 200, " ns", 0);
+    $sformat(text, "%t", 12);
+    if (text != {"12.", {200{"0"}}, " ns"}) $fatal(1, "mismatch 1");
+    $sformat(text, "%.250t", 1.5);
+    if (text != {"1.5", {249{"0"}}, " ns"}) $fatal(1, "mismatch 2");
+    $display("PASSED");
   end
 endmodule

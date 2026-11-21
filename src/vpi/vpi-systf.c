@@ -183,10 +183,11 @@ static void format_radix(ostream_t *out, vpiHandle arg, char radix, int fwidth,
             * pow(10.0, -15 - time_format.units);
 
          // The minimum field width includes the suffix
-         char buf[128];
-         checked_sprintf(buf, sizeof(buf), "%.*f%s", time_format.precision,
-                         value, time_format.suffix);
-         nvc_fprintf(out, "%*s", fwidth >= 0 ? fwidth : time_format.width, buf);
+         const int prec = precision >= 0 ? precision : time_format.precision;
+         LOCAL_TEXT_BUF tb = tb_new();
+         tb_printf(tb, "%.*f%s", prec, value, time_format.suffix);
+         nvc_fprintf(out, "%*s", fwidth >= 0 ? fwidth : time_format.width,
+                     tb_get(tb));
       }
 
       return;
