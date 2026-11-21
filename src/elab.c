@@ -1328,8 +1328,22 @@ static bool elab_port_drives_variable(vlog_node_t value)
    }
 }
 
+static void elab_collect_port_refs(tree_t t, void *ctx)
+{
+   if (tree_has_ref(t) && tree_kind(tree_ref(t)) == T_PORT_DECL)
+      hset_insert(ctx, tree_ref(t));
+}
+
 static void elab_ports(tree_t entity, tree_t bind, const elab_ctx_t *ctx)
 {
+   hset_t *used_comp_ports = NULL;
+   if (tree_kind(bind) == T_INSTANCE && tree_class(bind) == C_COMPONENT
+       && tree_stmts(entity) == 1) {
+      used_comp_ports = hset_new(16);
+      tree_visit_only(tree_stmt(entity, 0), elab_collect_port_refs,
+                      used_comp_ports, T_REF);
+   }
+
    const int nports = tree_ports(entity);
    const int nparams = tree_params(bind);
    bool have_named = false;
@@ -1338,7 +1352,18 @@ static void elab_ports(tree_t entity, tree_t bind, const elab_ctx_t *ctx)
       tree_t p = tree_port(entity, i), map = NULL;
       ident_t pname = tree_ident(p);
 
-      if (i < nparams && !have_named) {
+      // A local OUT/INOUT/BUFFER port of a bound component that is not
+      // associated in the binding indication's port map has no sources
+      // inside the component (LRM 14.7.3.1), so do not connect it as a
+      // spurious source on the actual signal.
+      const port_mode_t mode = tree_subkind(p);
+      const bool skip_unbound =
+         used_comp_ports != NULL
+         && (mode == PORT_OUT || mode == PORT_INOUT || mode == PORT_BUFFER)
+         && !type_is_unconstrained(tree_type(p))
+         && !hset_contains(used_comp_ports, p);
+
+      if (!skip_unbound && i < nparams && !have_named) {
          tree_t m = tree_param(bind, i);
          if (tree_subkind(m) == P_POS) {
             assert(tree_pos(m) == i);
@@ -1347,7 +1372,7 @@ static void elab_ports(tree_t entity, tree_t bind, const elab_ctx_t *ctx)
          }
       }
 
-      if (map == NULL) {
+      if (!skip_unbound && map == NULL) {
          for (int j = 0; j < nparams; j++) {
             tree_t m = tree_param(bind, j);
             if (tree_subkind(m) == P_NAMED) {
@@ -1413,6 +1438,9 @@ static void elab_ports(tree_t entity, tree_t bind, const elab_ctx_t *ctx)
 
       tree_add_port(ctx->out, p);
    }
+
+   if (used_comp_ports != NULL)
+      hset_free(used_comp_ports);
 }
 
 static tree_t elab_parse_generic_string(tree_t generic, const char *str)

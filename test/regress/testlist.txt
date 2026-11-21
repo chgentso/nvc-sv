@@ -2901,6 +2901,7 @@ config18        normal,2008
 config19        normal,2008
 config20        normal,2008
 config21        normal,2008
+config22        normal,2008
 nullwave2       normal
 vlogbareblk1    verilog
 vlogdelaybase1  verilog

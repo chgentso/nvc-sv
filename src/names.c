@@ -3541,13 +3541,20 @@ void insert_names_for_config(nametab_t *tab, tree_t unit)
          if (tree_class(g) == C_CONSTANT)
             insert_name(tab, g, NULL);
       }
+
+      const int nports = tree_ports(entity);
+      for (int i = 0; i < nports; i++)
+         insert_name(tab, tree_port(entity, i), NULL);
    }
 
    const int ndecls = tree_decls(unit);
    for (int i = 0; i < ndecls; i++) {
       tree_t d = tree_decl(unit, i);
       const tree_kind_t kind = tree_kind(d);
-      if (kind == T_COMPONENT || kind == T_CONST_DECL)
+      if (kind == T_COMPONENT || kind == T_CONST_DECL
+          || kind == T_SIGNAL_DECL || kind == T_ALIAS
+          || kind == T_TYPE_DECL || kind == T_SUBTYPE_DECL
+          || kind == T_FUNC_DECL || kind == T_FUNC_BODY)
          insert_name(tab, d, NULL);
    }
 
