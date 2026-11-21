@@ -18,11 +18,15 @@ module svwildport1;
   svwild_child u3(.result(r3), .*, .source(s3));
   assign s3 = 1'b1;
 
+  wire r4;
+  svwild_child u4(, , r4);
+
   initial begin
     #1;
     if (r1 !== 1'b0) $fatal(1, "r1=%b expected 0", r1);
     if (r2 !== 1'b1) $fatal(1, "r2=%b expected 1", r2);
     if (r3 !== 1'b1) $fatal(1, "r3=%b expected 1", r3);
+    if (r4 !== 1'b0) $fatal(1, "r4=%b expected 0", r4);
     $display("PASSED");
   end
 endmodule

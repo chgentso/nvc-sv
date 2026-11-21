@@ -2550,7 +2550,10 @@ static void elab_verilog_ports(vlog_node_t inst, elab_instance_t *ei,
       const loc_t *where = vlog_loc(inst);
       if (conn != NULL) {
          if (!vlog_has_value(conn)) {
-            if ((vlog_flags(ei->body) & VLOG_F_CHECKER) && vlog_has_value(port))
+            if (vlog_has_value(port)
+                && ((vlog_flags(ei->body) & VLOG_F_CHECKER)
+                    || (!vlog_has_ident(conn)
+                        && vlog_subkind(port) == V_PORT_INPUT)))
                conn = NULL;
             else {
                if (vlog_subkind(port) == V_PORT_INPUT)
