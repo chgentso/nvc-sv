@@ -11340,6 +11340,61 @@ static mir_value_t vlog_flatten_dynarray(vlog_gen_t *g, vlog_node_t v,
    return mir_build_pack(g->mu, t_total, tmp);
 }
 
+static void vlog_unflatten_dynarray(vlog_gen_t *g, vlog_node_t v,
+                                    mir_value_t resolved, const type_info_t *ti,
+                                    bool leftmost)
+{
+   // Scatter a flat vector into the elements of a dynamic array declared
+   // with a fixed size
+
+   vlog_node_t type = vlog_get_type(vlog_ref(v));
+
+   unsigned count = 1;
+   const int nranges = vlog_ranges(type);
+   for (int i = 0; i < nranges; i++)
+      count *= vlog_size(vlog_range(type, i));
+
+   int64_t left, right;
+   const bool reverse = !leftmost && nranges == 1
+      && vlog_bounds(vlog_range(type, 0), &left, &right) && left > right;
+
+   const type_info_t *eti = vlog_type_info(g, vlog_type(type));
+
+   mir_type_t t_offset = mir_offset_type(g->mu);
+   mir_type_t t_total = mir_vec4_type(g->mu, count * eti->size, false);
+   mir_type_t t_elem = mir_vec4_type(g->mu, eti->size, false);
+   mir_type_t t_array = mir_carray_type(g->mu, count * eti->size,
+                                        mir_logic_type(g->mu));
+   mir_value_t tmp = mir_add_var(g->mu, t_array, MIR_NULL_STAMP,
+                                 ident_uniq("tmp"), MIR_VAR_TEMP);
+
+   mir_value_t packed = mir_build_cast(g->mu, t_total,
+                                       mir_build_pack(g->mu, ti->type,
+                                                      resolved));
+   mir_build_unpack(g->mu, packed, 0, tmp);
+
+   mir_value_t arr = vlog_lower_rvalue(g, v);
+   mir_value_t data = mir_build_unwrap(g->mu, arr);
+
+   vlog_loop_t loop;
+   vlog_loop_begin(g, &loop, mir_const(g->mu, t_offset, 0),
+                   mir_const(g->mu, t_offset, count));
+
+   mir_value_t pos = loop.i;
+   if (reverse)
+      pos = mir_build_sub(g->mu, t_offset,
+                          mir_const(g->mu, t_offset, count - 1), loop.i);
+
+   mir_value_t off = mir_build_mul(g->mu, t_offset, pos,
+                                   mir_const(g->mu, t_offset, eti->size));
+   mir_value_t elem = mir_build_pack(g->mu, t_elem,
+                                     mir_build_array_ref(g->mu, tmp, off));
+   mir_value_t cast = vlog_lower_cast(g, eti->type, elem);
+   mir_build_store(g->mu, mir_build_array_ref(g->mu, data, loop.i), cast);
+
+   vlog_loop_end(g, &loop);
+}
+
 static mir_value_t vlog_lower_poll_vector(vlog_gen_t *g, vlog_node_t expr)
 {
    mir_value_t value = vlog_lower_rvalue(g, expr);
@@ -29738,17 +29793,22 @@ static void vlog_lower_port_map(vlog_gen_t *g, vlog_node_t v)
 
          if (in_memory) {
             mir_value_t resolved = mir_build_resolved(g->mu, signal);
-            mir_value_t value;
-            if (mir_get_class(g->mu, ti->type) == MIR_TYPE_REAL)
-               value = mir_build_load(g->mu, resolved);
+            if (mir_get_class(g->mu, ti->type) == MIR_TYPE_REAL) {
+               mir_value_t value = mir_build_load(g->mu, resolved);
+               vlog_assign_variable(g, target, value, NULL);
+            }
+            else if (vlog_kind(target) == V_REF
+                     && vlog_is_sized_dynarray(target))
+               vlog_unflatten_dynarray(g, target, resolved, ti,
+                                       vlog_ranges(port) == 0);
             else {
-               value = mir_build_pack(g->mu, ti->type, resolved);
+               mir_value_t value = mir_build_pack(g->mu, ti->type, resolved);
                value = mir_build_cast(
                   g->mu, mir_vec4_type(g->mu, vlog_width(target), false),
                   value);
+               vlog_assign_variable(g, target, value, NULL);
             }
 
-            vlog_assign_variable(g, target, value, NULL);
             mir_build_wait(g->mu, start_bb);
             return;
          }
