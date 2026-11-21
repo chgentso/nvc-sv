@@ -209,6 +209,14 @@ static void vlog_check_concat_lvalue(vlog_node_t v)
                "in an lvalue concatenation", type_mask_str(mask));
 }
 
+static bool vlog_is_handle_member(vlog_node_t v)
+{
+   vlog_node_t pt = vlog_get_type(vlog_value(v));
+   return pt != NULL
+      && (vlog_kind(pt) == V_CLASS_DECL
+          || (vlog_kind(pt) == V_DATA_TYPE && vlog_subkind(pt) == DT_VIRTUAL));
+}
+
 static void vlog_check_variable_lvalue(vlog_node_t v, vlog_node_t where)
 {
    switch (vlog_kind(v)) {
@@ -238,7 +246,16 @@ static void vlog_check_variable_lvalue(vlog_node_t v, vlog_node_t where)
       return;
    case V_BIT_SELECT:
    case V_PART_SELECT:
+      vlog_check_variable_lvalue(vlog_value(v), v);
+      return;
    case V_MEMBER_REF:
+      // Modifying a property of a const class handle or virtual interface
+      // modifies the referenced object, not the handle itself (8.19)
+      if (vlog_is_handle_member(v)) {
+         if (vlog_has_ref(v))
+            vlog_check_variable_lvalue(vlog_ref(v), v);
+         return;
+      }
       vlog_check_variable_lvalue(vlog_value(v), v);
       return;
    case V_CONCAT:
@@ -1879,8 +1896,11 @@ static void vlog_check_const_target(vlog_node_t arg)
       break;
    case V_BIT_SELECT:
    case V_PART_SELECT:
-   case V_MEMBER_REF:
       vlog_check_const_target(vlog_value(arg));
+      break;
+   case V_MEMBER_REF:
+      if (!vlog_is_handle_member(arg))
+         vlog_check_const_target(vlog_value(arg));
       break;
    case V_CONCAT:
       {

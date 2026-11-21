@@ -2661,8 +2661,17 @@ static void elab_verilog_ports(vlog_node_t inst, elab_instance_t *ei,
          vlog_node_t base = value;
          while (vlog_kind(base) == V_BIT_SELECT
                 || vlog_kind(base) == V_PART_SELECT
-                || vlog_kind(base) == V_MEMBER_REF)
+                || vlog_kind(base) == V_MEMBER_REF) {
+            if (vlog_kind(base) == V_MEMBER_REF) {
+               vlog_node_t pt = vlog_get_type(vlog_value(base));
+               if (pt != NULL
+                   && (vlog_kind(pt) == V_CLASS_DECL
+                       || (vlog_kind(pt) == V_DATA_TYPE
+                           && vlog_subkind(pt) == DT_VIRTUAL)))
+                  break;
+            }
             base = vlog_value(base);
+         }
 
          if (vlog_kind(base) == V_REF && vlog_has_ref(base)) {
             vlog_node_t decl = vlog_ref(base);
