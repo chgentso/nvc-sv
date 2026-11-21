@@ -592,7 +592,10 @@ class_t class_of(tree_t t)
       return C_FILE;
    case T_PROCESS:
    case T_BLOCK:
+   case T_SEQUENCE:
    case T_FOR:
+   case T_WHILE:
+   case T_LOOP:
    case T_INSTANCE:
    case T_CONCURRENT:
    case T_ELAB:
@@ -2289,6 +2292,7 @@ type_t get_type_or_null(tree_t t)
    case T_INSTANCE:
    case T_CONCURRENT:
    case T_BLOCK:
+   case T_SEQUENCE:
    case T_WHILE:
    case T_FOR:
    case T_LOOP:

@@ -1675,6 +1675,42 @@ static vcode_reg_t lower_prot_method_name_attr(lower_unit_t *lu, tree_t pref,
    return emit_wrap(mem, &dim0, 1);
 }
 
+static int find_decl_in_path_stack(lower_unit_t *scope, tree_t decl)
+{
+   for (int i = scope->path_stack.count - 1; i >= 0; i--) {
+      tree_t s = scope->path_stack.items[i];
+      if (s == decl
+          || (tree_kind(s) == tree_kind(decl)
+              && tree_has_ident(s) && tree_has_ident(decl)
+              && tree_ident(s) == tree_ident(decl)
+              && loc_eq(tree_loc(s), tree_loc(decl))))
+         return i;
+
+      if (tree_kind(s) == T_FOR || tree_kind(s) == T_SEQUENCE) {
+         const int ndecls = tree_decls(s);
+         for (int j = 0; j < ndecls; j++) {
+            if (tree_decl(s, j) == decl)
+               return i;
+         }
+      }
+   }
+   return -1;
+}
+
+static void append_stmt_path(text_buf_t *tb, lower_unit_t *scope, int up_to)
+{
+   for (int i = 0; i <= up_to; i++) {
+      tree_t s = scope->path_stack.items[i];
+      if (tree_has_ident(s)) {
+         ident_t id = tree_ident(s);
+         if (ident_char(id, 0) != '_')
+            tb_istr(tb, id);
+      }
+      tb_append(tb, ':');
+   }
+   tb_downcase(tb);
+}
+
 static vcode_reg_t lower_name_attr(lower_unit_t *lu, tree_t decl,
                                    attr_kind_t which)
 {
@@ -1718,6 +1754,23 @@ static vcode_reg_t lower_name_attr(lower_unit_t *lu, tree_t decl,
       tb_istr(tb, tree_ident(decl));
       tb_append(tb, ':');
       tb_downcase(tb);
+      break;
+
+   case T_FOR:
+   case T_WHILE:
+   case T_LOOP:
+   case T_SEQUENCE:
+      {
+         int idx = -1;
+         for (; scope != NULL; scope = scope->parent, extra_hops++) {
+            if ((idx = find_decl_in_path_stack(scope, decl)) >= 0)
+               break;
+         }
+         if (scope != NULL) {
+            get_hierarchical_name(tb, scope, which);
+            append_stmt_path(tb, scope, idx);
+         }
+      }
       break;
 
    case T_PROC_DECL:
@@ -1775,6 +1828,10 @@ static vcode_reg_t lower_name_attr(lower_unit_t *lu, tree_t decl,
 
             get_hierarchical_name(tb, scope, which);
 
+            const int sidx = find_decl_in_path_stack(scope, target);
+            if (sidx >= 0)
+               append_stmt_path(tb, scope, sidx);
+
             tb_istr(tb, tree_ident(decl));
             tb_downcase(tb);
          }
@@ -1823,6 +1880,9 @@ static vcode_reg_t lower_name_attr(lower_unit_t *lu, tree_t decl,
 
             if (scope != NULL) {
                get_hierarchical_name(tb, scope, which);
+               const int sidx = find_decl_in_path_stack(scope, decl);
+               if (sidx >= 0)
+                  append_stmt_path(tb, scope, sidx);
                tb_istr(tb, tree_ident(decl));
                tb_downcase(tb);
             }
@@ -7684,7 +7744,9 @@ static void lower_for(lower_unit_t *lu, tree_t stmt, gen_stack_t *gs)
    };
 
    gen_stack_t this = lower_push_loop(gs, &loop);
+   APUSH(lu->path_stack, stmt);
    lower_sequence(lu, stmt, &this);
+   APOP(lu->path_stack);
 
    if (loop.test_bb != VCODE_INVALID_BLOCK) {
       // Loop body contained a "next" statement
@@ -7743,7 +7805,9 @@ static void lower_while(lower_unit_t *lu, tree_t stmt, gen_stack_t *gs)
    };
 
    gen_stack_t this = lower_push_loop(gs, &loop);
+   APUSH(lu->path_stack, stmt);
    lower_sequence(lu, stmt, &this);
+   APOP(lu->path_stack);
 
    if (!vcode_block_finished())
       emit_jump(test_bb);
@@ -7769,7 +7833,9 @@ static void lower_loop(lower_unit_t *lu, tree_t stmt, gen_stack_t *gs)
    };
 
    gen_stack_t this = lower_push_loop(gs, &loop);
+   APUSH(lu->path_stack, stmt);
    lower_sequence(lu, stmt, &this);
+   APOP(lu->path_stack);
 
    if (!vcode_block_finished())
       emit_jump(body_bb);
@@ -8364,8 +8430,10 @@ static void lower_match_case(lower_unit_t *lu, tree_t stmt, gen_stack_t *loops)
 static void lower_sequential_block(lower_unit_t *lu, tree_t stmt,
                                    gen_stack_t *gs)
 {
+   APUSH(lu->path_stack, stmt);
    lower_decls(lu, stmt, gs);
    lower_sequence(lu, stmt, gs);
+   APOP(lu->path_stack);
 }
 
 static void lower_stmt(lower_unit_t *lu, tree_t stmt, gen_stack_t *gs)
@@ -13944,6 +14012,7 @@ void lower_unit_free(lower_unit_t *lu)
 
    hash_free(lu->objects);
    ACLEAR(lu->free_temps);
+   ACLEAR(lu->path_stack);
    free(lu);
 }
 

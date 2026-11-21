@@ -12737,12 +12737,14 @@ static tree_t p_sequential_block_statement(ident_t label)
 
    require_std(STD_19, "sequential block statements");
 
+   tree_t t = tree_new(T_SEQUENCE);
+   set_label_and_loc(t, label, CURRENT_LOC);
+   if (label != NULL)
+      insert_name(nametab, t, NULL);
+
    push_scope(nametab);
 
-   tree_t t = tree_new(T_SEQUENCE);
-
    scope_set_container(nametab, t);
-   set_label_and_loc(t, label, CURRENT_LOC);
 
    p_sequential_block_declarative_part(t);
 

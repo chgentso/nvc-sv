@@ -45,6 +45,7 @@ typedef struct _lower_unit {
    ident_t          name;
    tree_t           container;
    var_list_t       free_temps;
+   A(tree_t)        path_stack;
    vcode_unit_t     vunit;
    cover_data_t    *cover;
    cover_obj_t      cscope;
