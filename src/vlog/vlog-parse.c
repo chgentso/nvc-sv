@@ -14053,14 +14053,17 @@ static vlog_node_t p_queue_dimension(void)
    consume(tLSQUARE);
    consume(tDOLLAR);
 
+   vlog_node_t bound = NULL;
    if (optional(tCOLON))
-      (void)p_constant_expression();
+      bound = p_constant_expression();
 
    consume(tRSQUARE);
 
    vlog_node_t v = vlog_new(V_DIMENSION);
    vlog_set_subkind(v, V_DIM_UNSIZED);
    vlog_set_flags(v, VLOG_F_PACKED);   // Marks a queue
+   if (bound != NULL)
+      vlog_set_right(v, bound);
    vlog_set_loc(v, CURRENT_LOC);
 
    return v;
@@ -14315,6 +14318,8 @@ static vlog_node_t p_variable_dimensions(vlog_node_t dt, vlog_node_t decl)
          vlog_set_subkind(wrap, (vlog_flags(d) & VLOG_F_PACKED)
                           ? DT_QUEUE : DT_DYNARRAY);
          vlog_set_type(wrap, dt);
+         if ((vlog_flags(d) & VLOG_F_PACKED) && vlog_has_right(d))
+            vlog_add_param(wrap, vlog_right(d));
          vlog_set_loc(wrap, vlog_loc(d));
          dt = wrap;
       }

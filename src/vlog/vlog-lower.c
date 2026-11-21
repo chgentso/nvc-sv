@@ -4002,6 +4002,32 @@ static void vlog_assign_stream(vlog_gen_t *g, vlog_node_t target,
    }
 }
 
+static mir_value_t vlog_clamp_queue(vlog_gen_t *g, mir_value_t arr,
+                                    vlog_node_t ttype)
+{
+   if (ttype == NULL)
+      return arr;
+
+   vlog_node_t t = vlog_get_type(ttype);
+   if (t == NULL || vlog_kind(t) != V_DATA_TYPE || vlog_subkind(t) != DT_QUEUE
+       || vlog_params(t) == 0)
+      return arr;
+
+   int64_t bound;
+   if (!vlog_get_const(vlog_param(t, 0), &bound) || bound < 0)
+      return arr;
+
+   // A bounded queue [$:N] holds at most N + 1 elements (7.10.1);
+   // extra trailing elements are discarded after evaluation
+   mir_type_t t_offset = mir_offset_type(g->mu);
+   mir_value_t limit = mir_const(g->mu, t_offset, bound + 1);
+   mir_value_t len = mir_build_uarray_len(g->mu, arr, 0);
+   mir_value_t clamped = mir_build_select(
+      g->mu, t_offset, mir_build_cmp(g->mu, MIR_CMP_GT, len, limit),
+      limit, len);
+   return vlog_wrap_array(g, mir_build_unwrap(g->mu, arr), clamped);
+}
+
 static void vlog_assign_variable(vlog_gen_t *g, vlog_node_t target,
                                  mir_value_t value, vlog_node_t rhs)
 {
@@ -4272,6 +4298,7 @@ static void vlog_assign_variable(vlog_gen_t *g, vlog_node_t target,
       if (copy && vlog_kind(rhs) != V_DYNAMIC_NEW && vlog_kind(rhs) != V_CONCAT
           && vlog_kind(rhs) != V_PATTERN_EXPR)
          cast = vlog_copy_value(g, cast, ttype);
+      cast = vlog_clamp_queue(g, cast, ttype);
       mir_build_store(g->mu, lvalues[0].obj, cast);
       return;
    }
@@ -12880,10 +12907,12 @@ static void vlog_lower_non_blocking_assignment(vlog_gen_t *g, vlog_node_t v)
 
       // The target takes its own copy at the time of the assignment
       vlog_node_t ttype = vlog_get_type(target);
-      if (ttype != NULL && vlog_is_dynamic_type(ttype)
-          && vlog_kind(rhs) != V_DYNAMIC_NEW && vlog_kind(rhs) != V_CONCAT
-          && vlog_kind(rhs) != V_PATTERN_EXPR)
-         source = vlog_copy_value(g, source, ttype);
+      if (ttype != NULL && vlog_is_dynamic_type(ttype)) {
+         if (vlog_kind(rhs) != V_DYNAMIC_NEW && vlog_kind(rhs) != V_CONCAT
+             && vlog_kind(rhs) != V_PATTERN_EXPR)
+            source = vlog_copy_value(g, source, ttype);
+         source = vlog_clamp_queue(g, source, ttype);
+      }
    }
 
    for (int i = 0, offset = 0; i < nlvalues;
@@ -19081,6 +19110,10 @@ static mir_value_t vlog_lower_builtin_method(vlog_gen_t *g, vlog_node_t v)
                                  etype);
          vlog_queue_push(g, slot, eti, value,
                          vlog_subkind(v) == V_METHOD_PUSH_FRONT);
+         if (vlog_params(type) > 0)
+            mir_build_store(g->mu, slot,
+                            vlog_clamp_queue(g, mir_build_load(g->mu, slot),
+                                             type));
          return MIR_NULL_VALUE;
       }
    case V_METHOD_POP_BACK:
@@ -31319,6 +31352,7 @@ static void vlog_store_local_init(vlog_gen_t *g, vlog_node_t d, mir_value_t var)
       if (vlog_is_dynamic_type(vlog_type(d)) && vk != V_CLASS_NEW
           && vk != V_DYNAMIC_NEW && vk != V_PATTERN_EXPR && vk != V_CONCAT)
          init = vlog_copy_value(g, init, vlog_type(d));
+      init = vlog_clamp_queue(g, init, vlog_type(d));
       mir_build_store(g->mu, var, init);
    }
    else
