@@ -8744,12 +8744,35 @@ static void lower_var_decl(lower_unit_t *lu, tree_t decl)
       emit_store(value_reg, var);
 }
 
+static type_t find_resolution_type(type_t type)
+{
+   for (type_t t = type; type_kind(t) == T_SUBTYPE; t = type_base(t)) {
+      if (type_has_resolution(t))
+         return t;
+   }
+   return NULL;
+}
+
+static bool lower_needs_constrained_resolution(type_t type)
+{
+   if (!type_is_array(type) || !type_const_bounds(type))
+      return false;
+
+   type_t rtype = find_resolution_type(type);
+   if (rtype == NULL || rtype == type)
+      return false;
+
+   tree_t rname = type_resolution(rtype);
+   return tree_kind(rname) != T_ELEM_RESOLUTION && !type_const_bounds(rtype);
+}
+
 static void lower_resolution_wrapper(lower_unit_t *lu, object_t *obj)
 {
    type_t type = type_from_object(obj);
-   assert(type_has_resolution(type));
+   type_t rtype_decl = find_resolution_type(type);
+   assert(rtype_decl != NULL);
 
-   tree_t rname = type_resolution(type);
+   tree_t rname = type_resolution(rtype_decl);
    type_t elem = type;
    while (tree_kind(rname) == T_ELEM_RESOLUTION) {
       assert(type_is_array(type));
@@ -8768,7 +8791,9 @@ static void lower_resolution_wrapper(lower_unit_t *lu, object_t *obj)
 
    vcode_type_t velem = lower_type(type_elem_recur(elem));
    vcode_stamp_t vbounds = lower_bounds(elem);
-   vcode_type_t rtype = lower_func_result_type(type);
+   vcode_type_t rtype = lower_func_result_type(elem);
+   type_t func_res_type = type_result(tree_type(rdecl));
+   vcode_type_t ftype = lower_func_result_type(func_res_type);
    vcode_type_t atype = vtype_pointer(velem);
    vcode_type_t vuint32 = vtype_int(0, UINT32_MAX);
    vcode_type_t voffset = vtype_offset();
@@ -8789,19 +8814,26 @@ static void lower_resolution_wrapper(lower_unit_t *lu, object_t *obj)
 
    // If the elements of the parameter are themselves arrays then the
    // extra dimensions are those of the element subtype of the parameter
+   // (or of the constrained resolved subtype when the parameter element
+   // subtype is unconstrained).
    type_t pelem = type_elem(uarray_param);
+   type_t elem_bounds =
+      (type_is_array(pelem) && !type_is_unconstrained(pelem)) ? pelem : elem;
    const int nelem_dims =
-      (type_is_array(pelem) && !type_is_unconstrained(pelem))
-      ? nested_dimension_of(pelem) : 0;
+      (type_is_array(elem_bounds) && !type_is_unconstrained(elem_bounds))
+      ? nested_dimension_of(elem_bounds) : 0;
    vcode_dim_t *dims LOCAL = xmalloc_array(1 + nelem_dims, sizeof(vcode_dim_t));
    dims[0].left  = left_reg;
    dims[0].right = right_reg;
    dims[0].dir   = emit_const(vtype_bool(), RANGE_TO);
 
    for (int i = 0; i < nelem_dims; i++) {
-      dims[i + 1].left  = lower_array_left(lu, pelem, i, VCODE_INVALID_REG);
-      dims[i + 1].right = lower_array_right(lu, pelem, i, VCODE_INVALID_REG);
-      dims[i + 1].dir   = lower_array_dir(lu, pelem, i, VCODE_INVALID_REG);
+      dims[i + 1].left  = lower_array_left(lu, elem_bounds, i,
+                                           VCODE_INVALID_REG);
+      dims[i + 1].right = lower_array_right(lu, elem_bounds, i,
+                                            VCODE_INVALID_REG);
+      dims[i + 1].dir   = lower_array_dir(lu, elem_bounds, i,
+                                          VCODE_INVALID_REG);
    }
 
    vcode_reg_t wrap_reg = emit_wrap(data_reg, dims, 1 + nelem_dims);
@@ -8815,13 +8847,23 @@ static void lower_resolution_wrapper(lower_unit_t *lu, object_t *obj)
 
    args[nargs++] = wrap_reg;
 
-   vcode_reg_t call_reg = emit_fcall(rfunc, rtype, vbounds, args, nargs);
-   emit_return(call_reg);
+   vcode_reg_t call_reg = emit_fcall(rfunc, ftype, vbounds, args, nargs);
+   if (vtype_kind(ftype) == VCODE_TYPE_UARRAY
+       && vtype_kind(rtype) == VCODE_TYPE_POINTER) {
+      lower_check_array_sizes(lu, elem, func_res_type, VCODE_INVALID_REG,
+                              call_reg, lower_debug_locus(rname));
+      emit_return(emit_unwrap(call_reg));
+   }
+   else
+      emit_return(call_reg);
 }
 
 static void lower_resolution_var(lower_unit_t *lu, tree_t decl, type_t type)
 {
-   tree_t rname = type_resolution(type);
+   type_t rtype_decl = find_resolution_type(type);
+   assert(rtype_decl != NULL);
+
+   tree_t rname = type_resolution(rtype_decl);
 
    type_t elem = type;
    while (tree_kind(rname) == T_ELEM_RESOLUTION) {
@@ -8848,7 +8890,7 @@ static void lower_resolution_var(lower_unit_t *lu, tree_t decl, type_t type)
 
    ident_t prefix;
    if (is_anonymous_subtype(type))
-      prefix = tree_ident(decl);
+      prefix = ident_prefix(lu->name, tree_ident(decl), '.');
    else
       prefix = type_ident(type);
 
@@ -8857,7 +8899,7 @@ static void lower_resolution_var(lower_unit_t *lu, tree_t decl, type_t type)
    unit_registry_defer(lu->registry, name, lu, emit_function,
                        lower_resolution_wrapper, NULL, type_to_object(type));
 
-   vcode_type_t rtype = lower_func_result_type(type);
+   vcode_type_t rtype = lower_func_result_type(elem);
 
    vcode_reg_t context_reg = emit_context_upref(0);
    vcode_reg_t args[1] = { context_reg };
@@ -8876,13 +8918,24 @@ static void lower_resolution_var(lower_unit_t *lu, tree_t decl, type_t type)
 static vcode_reg_t lower_resolution_func(lower_unit_t *lu, type_t type,
                                          bool *is_array)
 {
-   type_t rtype = NULL;
-   for (type_t t = type; type_kind(t) == T_SUBTYPE; t = type_base(t)) {
-      if (type_has_resolution(t)) {
-         rtype = t;
-         break;
+   if (lower_needs_constrained_resolution(type)) {
+      *is_array = true;
+
+      int hops;
+      vcode_var_t var = lower_search_vcode_obj(type, lu, &hops);
+      if (var != VCODE_INVALID_VAR)
+         return hops == 0 ? emit_index(var, VCODE_INVALID_REG)
+            : emit_var_upref(hops, var);
+      else if (!is_anonymous_subtype(type)) {
+         vcode_type_t vtype = lower_func_result_type(type);
+         ident_t var_name =
+            ident_prefix(type_ident(type), well_known(W_RESOLUTION), '$');
+         vcode_reg_t context_reg = lower_context_for_mangled(lu, var_name);
+         return emit_link_var(context_reg, var_name, vtype_resolution(vtype));
       }
    }
+
+   type_t rtype = find_resolution_type(type);
 
    if (rtype == NULL && type_is_array(type))
       return lower_resolution_func(lu, type_elem(type), is_array);
@@ -9151,8 +9204,10 @@ static void lower_sub_signals(lower_unit_t *lu, type_t type, type_t var_type,
                fbounds_reg = emit_load_indirect(fbounds_reg);
          }
 
-         if (is_anonymous_subtype(ft) && type_has_resolution(ft))
-            lower_resolution_var(lu, f, ft);
+         if (is_anonymous_subtype(et)
+             && (type_has_resolution(et)
+                 || lower_needs_constrained_resolution(et)))
+            lower_resolution_var(lu, f, et);
 
          vcode_reg_t ptr_reg = emit_record_ref(sig_ptr, i);
 
@@ -9191,7 +9246,9 @@ static void lower_signal_decl(lower_unit_t *lu, tree_t decl, gen_stack_t *gs)
    else if (needs_bounds_var(type))
       bounds_reg = lower_get_type_bounds(lu, type);
 
-   if (is_anonymous_subtype(type) && type_has_resolution(type))
+   if (is_anonymous_subtype(type)
+       && (type_has_resolution(type)
+           || lower_needs_constrained_resolution(type)))
       lower_resolution_var(lu, decl, type);
 
    sig_flags_t flags = 0;
@@ -10867,7 +10924,8 @@ static void lower_decl(lower_unit_t *lu, tree_t decl, gen_stack_t *gs)
          if (needs_bounds_var(type))
             lower_type_bounds_var(lu, type);
 
-         if (type_has_resolution(type))
+         if (type_has_resolution(type)
+             || lower_needs_constrained_resolution(type))
             lower_resolution_var(lu, decl, type);
       }
       break;

@@ -2826,6 +2826,7 @@ extname_attr normal,2008
 attr_same_name normal,2008
 guarded_composite normal,2008
 resolution_partial normal,2008
+resolution2     normal,2008
 access_reccons normal,2008
 value_based normal,2008
 textio_based normal
