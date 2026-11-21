@@ -12,7 +12,7 @@ module assoc2;
     r = ia.first(s);
     q = ia;
     ia = sa;
-    r = (ia == ib);
+    r = (ia + ib);
     r = ia[s];
   end
 endmodule
