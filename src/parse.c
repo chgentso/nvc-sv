@@ -2549,10 +2549,21 @@ static type_t apply_type_attribute(tree_t aref)
 
 static void implicit_signal_attribute(tree_t aref)
 {
+   tree_t prefix = tree_name(aref);
+   tree_t pref_ref = name_to_ref(prefix);
+
    if (find_enclosing(nametab, S_SUBPROGRAM) != NULL) {
-      parse_error(tree_loc(aref), "implicit signal %pI cannot be used in a "
-                  "subprogram body", tree_ident(aref));
-      return;
+      // LRM 4.2.2.3: signal-valued attributes cannot be applied to formal
+      // signal parameters, nor in subprograms without an enclosing block
+      // or process scope.
+      if (pref_ref == NULL || !tree_has_ref(pref_ref)
+          || tree_kind(tree_ref(pref_ref)) == T_PARAM_DECL
+          || (find_enclosing(nametab, S_PROCESS) == NULL
+              && find_enclosing(nametab, S_CONCURRENT_BLOCK) == NULL)) {
+         parse_error(tree_loc(aref), "implicit signal %pI cannot be used in a "
+                     "subprogram body", tree_ident(aref));
+         return;
+      }
    }
 
    // Signal must be created under process scope if it captures local
@@ -2567,7 +2578,6 @@ static void implicit_signal_attribute(tree_t aref)
       return;
    }
 
-   tree_t prefix = tree_name(aref);
    const attr_kind_t attr = tree_subkind(aref);
 
    tree_t delay = NULL;

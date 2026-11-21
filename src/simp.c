@@ -1018,7 +1018,57 @@ static void simp_synth_sensitivity(tree_t proc)
    }
 }
 
-static tree_t simp_process(tree_t t)
+typedef struct {
+   tree_t  top;
+   tree_t  wait;
+   hset_t *visited;
+} simp_all_calls_t;
+
+static tree_t simp_find_subprogram_body(tree_t root, ident_t mangle)
+{
+   if (root == NULL)
+      return NULL;
+
+   const int ndecls = tree_decls(root);
+   for (int i = 0; i < ndecls; i++) {
+      tree_t d = tree_decl(root, i);
+      const tree_kind_t k = tree_kind(d);
+      if ((k == T_FUNC_BODY || k == T_PROC_BODY) && tree_ident2(d) == mangle)
+         return d;
+   }
+   return NULL;
+}
+
+static void simp_all_calls_cb(tree_t expr, void *ctx)
+{
+   const tree_kind_t kind = tree_kind(expr);
+   if (kind != T_FCALL && kind != T_PCALL)
+      return;
+   if (!tree_has_ref(expr))
+      return;
+
+   simp_all_calls_t *sc = ctx;
+   tree_t decl = tree_ref(expr);
+   if (!is_subprogram(decl) || tree_subkind(decl) != S_USER)
+      return;
+
+   if (sc->top == NULL || tree_container(decl) != sc->top)
+      return;
+
+   tree_t body = NULL;
+   if (tree_kind(decl) == T_FUNC_BODY || tree_kind(decl) == T_PROC_BODY)
+      body = decl;
+   else
+      body = simp_find_subprogram_body(sc->top, tree_ident2(decl));
+
+   if (body != NULL && !hset_contains(sc->visited, body)) {
+      hset_insert(sc->visited, body);
+      build_wait(body, simp_all_sensitivity_cb, sc->wait);
+      tree_visit(body, simp_all_calls_cb, sc);
+   }
+}
+
+static tree_t simp_process(tree_t t, simp_ctx_t *ctx)
 {
    // Replace sensitivity list with a "wait on" statement
    const int ntriggers = tree_triggers(t);
@@ -1039,8 +1089,19 @@ static tree_t simp_process(tree_t t)
       tree_set_ident(w, tree_ident(p));
       tree_set_flag(w, TREE_F_STATIC_WAIT);
 
-      if (ntriggers == 1 && tree_kind(tree_trigger(t, 0)) == T_ALL)
+      if (ntriggers == 1 && tree_kind(tree_trigger(t, 0)) == T_ALL) {
          build_wait(t, simp_all_sensitivity_cb, w);
+
+         // LRM 08 11.3: also include signals read by subprograms declared in
+         // the same design unit that are called from this process.
+         simp_all_calls_t sc = {
+            .top     = ctx->top,
+            .wait    = w,
+            .visited = hset_new(16),
+         };
+         tree_visit(t, simp_all_calls_cb, &sc);
+         hset_free(sc.visited);
+      }
       else {
          if (opt_get_int(OPT_CHECK_SYNTHESIS))
             simp_synth_sensitivity(t);   // May add to list after ntriggers
@@ -2003,7 +2064,7 @@ static tree_t simp_tree_local(tree_t t, void *_ctx)
 
    switch (tree_kind(t)) {
    case T_PROCESS:
-      return simp_process(t);
+      return simp_process(t, ctx);
    case T_ATTR_REF:
       return simp_attr_ref(t, ctx);
    case T_FCALL:
@@ -2116,7 +2177,7 @@ static tree_t simp_tree_global(tree_t t, void *_ctx)
 
    switch (tree_kind(t)) {
    case T_PROCESS:
-      return simp_process(t);
+      return simp_process(t, ctx);
    case T_ATTR_REF:
       return simp_attr_ref(t, ctx);
    case T_FCALL:

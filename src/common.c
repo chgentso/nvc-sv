@@ -2626,6 +2626,7 @@ void build_wait(tree_t expr, build_wait_fn_t fn, void *ctx)
    case T_INERTIAL:
    case T_NEW:
    case T_ALL:
+   case T_RETURN:
       if (tree_has_value(expr))
          build_wait(tree_value(expr), fn, ctx);
       break;
@@ -2713,6 +2714,10 @@ void build_wait(tree_t expr, build_wait_fn_t fn, void *ctx)
          const attr_kind_t predef = tree_subkind(expr);
          if (predef == ATTR_EVENT || predef == ATTR_ACTIVE)
             build_wait(tree_name(expr), fn, ctx);
+         else if ((predef == ATTR_STABLE || predef == ATTR_QUIET
+                   || predef == ATTR_DELAYED || predef == ATTR_TRANSACTION)
+                  && tree_has_value(expr))
+            build_wait(tree_value(expr), fn, ctx);
 
          const int nparams = tree_params(expr);
          for (int i = 0; i < nparams; i++)
@@ -2764,11 +2769,12 @@ void build_wait(tree_t expr, build_wait_fn_t fn, void *ctx)
    case T_PROCESS:
    case T_SEQUENCE:
    case T_PROC_BODY:
+   case T_FUNC_BODY:
       {
          const int ndecls = tree_decls(expr);
          for (int i = 0; i < ndecls; i++) {
             tree_t d = tree_decl(expr, i);
-            if (tree_kind(d) == T_PROC_BODY)
+            if (tree_kind(d) == T_PROC_BODY || tree_kind(d) == T_FUNC_BODY)
                build_wait(d, fn, ctx);
          }
 

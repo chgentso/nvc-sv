@@ -2365,10 +2365,109 @@ static void sem_check_missing_wait(tree_t t, nametab_t *tab)
    diag_emit(d);
 }
 
+static void sem_all_reads_signal_cb(tree_t expr, void *ctx)
+{
+   bool *reads = ctx;
+   if (tree_kind(expr) == T_EXTERNAL_NAME) {
+      *reads = true;
+      return;
+   }
+
+   tree_t ref = name_to_ref(expr);
+   if (ref != NULL && tree_has_ref(ref)
+       && tree_kind(tree_ref(ref)) != T_PARAM_DECL)
+      *reads = true;
+}
+
+typedef struct {
+   tree_t    du;
+   nametab_t *tab;
+   hset_t   *visited;
+   bool      ok;
+} sem_all_check_t;
+
+static tree_t sem_find_body_in_unit(tree_t unit, ident_t mangle)
+{
+   if (unit == NULL)
+      return NULL;
+
+   const int ndecls = tree_decls(unit);
+   for (int i = 0; i < ndecls; i++) {
+      tree_t d = tree_decl(unit, i);
+      const tree_kind_t k = tree_kind(d);
+      if ((k == T_FUNC_BODY || k == T_PROC_BODY) && tree_ident2(d) == mangle)
+         return d;
+   }
+   return NULL;
+}
+
+static void sem_check_all_calls_cb(tree_t expr, void *ctx)
+{
+   const tree_kind_t kind = tree_kind(expr);
+   if (kind != T_FCALL && kind != T_PCALL)
+      return;
+   if (!tree_has_ref(expr))
+      return;
+
+   sem_all_check_t *sc = ctx;
+   tree_t decl = tree_ref(expr);
+   if (!is_subprogram(decl) || tree_subkind(decl) != S_USER
+       || (tree_flags(decl) & TREE_F_PREDEFINED))
+      return;
+
+   tree_t decl_du = tree_container(decl);
+   if (decl_du == sc->du) {
+      tree_t body = NULL;
+      if (tree_kind(decl) == T_FUNC_BODY || tree_kind(decl) == T_PROC_BODY)
+         body = decl;
+      else
+         body = find_subprogram_body(sc->tab, decl);
+
+      if (body != NULL && !hset_contains(sc->visited, body)) {
+         hset_insert(sc->visited, body);
+         tree_visit(body, sem_check_all_calls_cb, sc);
+      }
+      return;
+   }
+
+   tree_t body = NULL;
+   if (tree_kind(decl) == T_FUNC_BODY || tree_kind(decl) == T_PROC_BODY)
+      body = decl;
+   else if (tree_kind(decl_du) == T_PACKAGE)
+      body = sem_find_body_in_unit(body_of(decl_du), tree_ident2(decl));
+   else
+      body = sem_find_body_in_unit(decl_du, tree_ident2(decl));
+
+   if (body == NULL)
+      return;
+
+   bool reads = false;
+   build_wait(body, sem_all_reads_signal_cb, &reads);
+   if (reads) {
+      error_at(tree_loc(expr), "subprogram %pI declared in another design unit "
+               "reads a signal and cannot be called in process(all)",
+               tree_ident(decl));
+      sc->ok = false;
+   }
+}
+
 static bool sem_check_process(tree_t t, nametab_t *tab)
 {
    if (!sem_check_sensitivity(t, tab))
       return false;
+
+   if (tree_triggers(t) == 1 && tree_kind(tree_trigger(t, 0)) == T_ALL) {
+      sem_all_check_t sc = {
+         .du      = find_enclosing(tab, S_DESIGN_UNIT),
+         .tab     = tab,
+         .visited = hset_new(16),
+         .ok      = true,
+      };
+      tree_visit(t, sem_check_all_calls_cb, &sc);
+      hset_free(sc.visited);
+      if (!sc.ok)
+         return false;
+   }
 
    sem_check_missing_wait(t, tab);
 
