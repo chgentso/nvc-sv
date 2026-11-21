@@ -3164,6 +3164,8 @@ START_TEST(test_ifc1)
       { 16, "class 'C3' cannot extend the interface class 'IA': use "
          "implements" },
       { 19, "an interface class cannot implement another: use extends" },
+      { 23, "an interface class cannot be nested within another interface "
+         "class" },
       { -1, NULL }
    };
    expect_errors(expect);
@@ -3397,6 +3399,7 @@ START_TEST(test_inval4)
       { 26, "a return statement is not allowed inside a fork block" },
       { 45, "cannot assign this value to a variable of enumeration type "
          "without a cast" },
+      { 47, "enumeration name 'W1' overflows base type" },
       { 36, "cannot assign this value to a variable of enumeration type "
          "without a cast" },
       { 37, "an arithmetic assignment cannot be used with a variable of "

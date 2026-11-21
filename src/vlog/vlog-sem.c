@@ -1019,7 +1019,26 @@ static void vlog_check_enum_decl(vlog_node_t v)
       && vlog_subkind(base) != DT_INT && vlog_subkind(base) != DT_LONGINT
       && vlog_subkind(base) != DT_BIT && vlog_subkind(base) != DT_IMPLICIT;
 
-   bool after_unknown = false;
+   unsigned base_bits = 32;
+   bool base_signed = true;
+   if (base != NULL && vlog_kind(base) == V_DATA_TYPE) {
+      base_signed = vlog_is_signed(base);
+      switch (vlog_subkind(base)) {
+      case DT_BYTE:     base_bits = 8; break;
+      case DT_SHORTINT: base_bits = 16; break;
+      case DT_INT:
+      case DT_INTEGER:  base_bits = 32; break;
+      case DT_LONGINT:
+      case DT_TIME:     base_bits = 64; break;
+      default:
+         base_bits = vlog_ranges(base) > 0 ? vlog_size(base) : 1;
+         break;
+      }
+   }
+
+   bool after_unknown = false, have_val = false;
+   int64_t sval = 0;
+   uint64_t uval = 0;
    const int ndecls = vlog_decls(v);
    for (int i = 0; i < ndecls; i++) {
       vlog_node_t n = vlog_decl(v, i);
@@ -1029,22 +1048,82 @@ static void vlog_check_enum_decl(vlog_node_t v)
                      "cannot follow a name with an unknown value",
                      vlog_ident(n));
             after_unknown = false;
+            have_val = false;
+         }
+         else if (base_bits > 0 && base_bits <= 64) {
+            if (i == 0) {
+               have_val = true;
+               sval = 0;
+               uval = 0;
+            }
+            else if (have_val) {
+               if (base_signed) {
+                  const int64_t max_s = base_bits == 64
+                     ? INT64_MAX : ((INT64_C(1) << (base_bits - 1)) - 1);
+                  if (sval == max_s) {
+                     error_at(vlog_loc(n), "enumeration name %pQ overflows "
+                              "base type", vlog_ident(n));
+                     have_val = false;
+                  }
+                  else
+                     sval++;
+               }
+               else {
+                  const uint64_t max_u = base_bits == 64
+                     ? UINT64_MAX : ((UINT64_C(1) << base_bits) - 1);
+                  if (uval == max_u) {
+                     error_at(vlog_loc(n), "enumeration name %pQ overflows "
+                              "base type", vlog_ident(n));
+                     have_val = false;
+                  }
+                  else
+                     uval++;
+               }
+            }
          }
          continue;
       }
 
       vlog_node_t value = vlog_value(n);
-      if (vlog_kind(value) != V_NUMBER && vlog_kind(value) != V_CONCAT)
+      if (vlog_kind(value) != V_NUMBER && vlog_kind(value) != V_CONCAT) {
+         have_val = false;
          continue;
+      }
 
-      if (vlog_has_unknown_literal(value)) {
+      const bool has_xz = vlog_has_unknown_literal(value);
+      if (has_xz) {
          if (!four_state)
             error_at(vlog_loc(value), "the value of enumeration name %pQ "
                      "cannot contain x or z as the base type is two-state",
                      vlog_ident(n));
          else
             after_unknown = true;
+         have_val = false;
       }
+      else if (vlog_kind(value) == V_NUMBER && base_bits > 0
+               && base_bits <= 64) {
+         if (vlog_flags(value) & VLOG_F_FILL) {
+            const uint64_t raw = number_integer(vlog_number(value)) ?
+               (base_bits == 64 ? UINT64_MAX : (UINT64_C(1) << base_bits) - 1)
+               : 0;
+            uval = raw;
+            sval = raw ? -1 : 0;
+         }
+         else {
+            uint64_t raw = (uint64_t)number_integer(vlog_number(value));
+            if (base_bits < 64)
+               raw &= (UINT64_C(1) << base_bits) - 1;
+            uval = raw;
+            if (base_signed && base_bits < 64
+                && (raw & (UINT64_C(1) << (base_bits - 1))))
+               sval = (int64_t)(raw | (~UINT64_C(0) << base_bits));
+            else
+               sval = (int64_t)raw;
+         }
+         have_val = true;
+      }
+      else
+         have_val = false;
 
       if (vlog_kind(value) != V_NUMBER
           || (vlog_flags(value) & VLOG_F_FILL))

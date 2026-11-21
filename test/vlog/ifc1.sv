@@ -18,4 +18,9 @@ module ifc1;
 
   interface class IB implements IA;
   endclass
+
+  interface class IC;
+    interface class ID;
+    endclass
+  endclass
 endmodule

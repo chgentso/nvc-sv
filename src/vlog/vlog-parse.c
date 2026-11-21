@@ -6420,6 +6420,17 @@ static void p_assignment_pattern(vlog_node_t expr)
          vlog_set_right(v, p_pattern_item_expr(
                            dt, vlog_has_ref(ref) ? vlog_ref(ref) : NULL));
       }
+      else if (!assoc && peek() == tID && peek_nth(2) == tCOLON
+               && peek_reference() == NULL) {
+         (void)p_identifier();
+         if (!have_error) {
+            error_at(&state.last_loc, "cannot use structure pattern key "
+                     "with this data type");
+            have_error = true;
+         }
+         consume(tCOLON);
+         vlog_set_right(v, p_expression());
+      }
       else {
          // The item of a structure pattern without a key is a member in order
          vlog_node_t member = NULL;
@@ -17688,7 +17699,13 @@ static void p_class_item(vlog_node_t parent)
    case tVIRTUAL:
    case tINTERFACE:
       if (peek_nth(2) == tCLASS) {
-         vlog_add_decl(parent, p_class_declaration());
+         const bool nested_iface = peek() == tINTERFACE
+            && (vlog_flags(parent) & VLOG_F_INTERFACE);
+         vlog_node_t cls = p_class_declaration();
+         if (nested_iface)
+            error_at(vlog_loc(cls), "an interface class cannot be nested "
+                     "within another interface class");
+         vlog_add_decl(parent, cls);
          break;
       }
       // Fall-through

@@ -43,4 +43,6 @@ module inval4;
   end
 
   e_t init = 2;
+
+  enum logic [1:0] { W0 = 2'd3, W1 } e4;
 endmodule
