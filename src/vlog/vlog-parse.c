@@ -4540,6 +4540,64 @@ static vlog_node_t p_system_tf_call(vlog_kind_t kind)
          return n;
       }
 
+      if (subk == V_SYSTF_BITS && peek() == tID && peek_nth(2) == tLSQUARE) {
+         vlog_node_t td = vlog_symtab_query(symtab, peek_ident_nth(1));
+         if (td != NULL && is_data_type(td)) {
+            vlog_node_t dt = p_data_type();
+            if (peek() == tLSQUARE) {
+               parse_error(&state.last_loc, "packed dimensions cannot be added "
+                           "to unpacked data type");
+               while (peek() == tLSQUARE)
+                  (void)p_unpacked_dimension();
+            }
+            else if (vlog_kind(dt) == V_DATA_TYPE) {
+               const int nranges = vlog_ranges(dt);
+               for (int i = 0; i < nranges; i++) {
+                  vlog_node_t r = vlog_range(dt, i);
+                  if (vlog_subkind(r) == V_DIM_UNSIZED)
+                     parse_error(vlog_loc(r), "unsized dimension is not "
+                                 "allowed in $bits");
+                  else if (vlog_kind(vlog_left(r)) == V_DOLLAR
+                           || vlog_kind(vlog_right(r)) == V_DOLLAR)
+                     parse_error(vlog_loc(r), "queue dimension is not "
+                                 "allowed in $bits");
+               }
+            }
+
+            if (optional(tTICK)) {
+               vlog_node_t cast = vlog_new(V_CAST);
+               vlog_set_subkind(cast, V_CAST_TYPE);
+               vlog_set_type(cast, dt);
+               consume(tLPAREN);
+               vlog_set_value(cast, p_expression());
+               consume(tRPAREN);
+               vlog_set_loc(cast, CURRENT_LOC);
+               vlog_add_param(v, cast);
+               consume(tRPAREN);
+               vlog_set_loc(v, CURRENT_LOC);
+               return v;
+            }
+
+            consume(tRPAREN);
+            if (!(vlog_flags(td) & VLOG_F_TYPEPARAM) && type_has_const_size(dt))
+               return foreach_number(vlog_size(dt), &state.last_loc);
+
+            vlog_node_t decl = vlog_new(V_VAR_DECL);
+            vlog_set_ident(decl, ident_uniq("bits"));
+            vlog_set_type(decl, dt);
+            vlog_set_loc(decl, &state.last_loc);
+
+            vlog_node_t ref = vlog_new(V_REF);
+            vlog_set_ident(ref, vlog_ident(decl));
+            vlog_set_ref(ref, decl);
+            vlog_set_loc(ref, &state.last_loc);
+            vlog_add_param(v, ref);
+
+            vlog_set_loc(v, CURRENT_LOC);
+            return v;
+         }
+      }
+
       int hlen;
       if (subk == V_SYSTF_BITS && is_hier_type_name(&hlen)
           && peek_nth(hlen + 1) == tRPAREN

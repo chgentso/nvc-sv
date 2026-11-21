@@ -3329,7 +3329,69 @@ static type_mask_t vlog_check_pattern_expr(vlog_node_t v)
    if (!vlog_has_type(v))
       return TM_ERROR;
 
-   return get_type_mask(vlog_type(v));
+   vlog_node_t type = vlog_type(v);
+   vlog_node_t bt = vlog_get_type(type);
+   const bool assoc = vlog_is_assoc_type(bt);
+   const bool is_struct = bt != NULL
+      && (vlog_kind(bt) == V_STRUCT_DECL || vlog_kind(bt) == V_UNION_DECL);
+
+   const int nparams = vlog_params(v);
+   for (int i = 0; i < nparams; i++) {
+      vlog_node_t item = vlog_param(v, i);
+      if (vlog_kind(item) != V_PATTERN_ITEM)
+         continue;
+
+      const int subk = vlog_subkind(item);
+      if (vlog_has_left(item) && subk == 0 && !assoc) {
+         vlog_node_t key = vlog_left(item);
+         bool is_field = false;
+         if (is_struct && vlog_kind(key) == V_REF) {
+            if (!vlog_has_ref(key))
+               is_field = true;
+            else {
+               vlog_node_t ref = vlog_ref(key);
+               const int ndecls = vlog_decls(bt);
+               for (int j = 0; j < ndecls; j++) {
+                  if (vlog_decl(bt, j) == ref) {
+                     is_field = true;
+                     break;
+                  }
+               }
+            }
+         }
+
+         if (!is_field) {
+            const type_mask_t kmask = vlog_check_expr(key);
+            if (kmask != TM_ERROR && !(kmask & TM_CONST))
+               error_at(vlog_loc(key), "array assignment pattern key must be "
+                        "a constant expression");
+         }
+      }
+      else if (vlog_has_left(item) && subk == 2) {
+         vlog_node_t count = vlog_left(item);
+         const type_mask_t cmask = vlog_check_expr(count);
+         if (cmask != TM_ERROR && !(cmask & TM_CONST))
+            error_at(vlog_loc(count), "assignment pattern replication count "
+                     "must be a constant expression");
+      }
+
+      if (vlog_has_right(item)) {
+         vlog_node_t rhs = vlog_right(item);
+         if (subk == 2 && vlog_kind(rhs) == V_PATTERN_EXPR) {
+            const int nr = vlog_params(rhs);
+            for (int j = 0; j < nr; j++) {
+               vlog_node_t ri = vlog_param(rhs, j);
+               if (vlog_has_right(ri)
+                   && vlog_kind(vlog_right(ri)) == V_PATTERN_EXPR)
+                  (void)vlog_check_pattern_expr(vlog_right(ri));
+            }
+         }
+         else if (vlog_kind(rhs) == V_PATTERN_EXPR)
+            (void)vlog_check_pattern_expr(rhs);
+      }
+   }
+
+   return get_type_mask(type);
 }
 
 static type_mask_t vlog_check_cast(vlog_node_t v)

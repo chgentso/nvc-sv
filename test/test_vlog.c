@@ -3387,6 +3387,9 @@ END_TEST
 START_TEST(test_inval4)
 {
    const error_t expect[] = {
+      { 52, "packed dimensions cannot be added to unpacked data type" },
+      { 53, "unsized dimension is not allowed in $bits" },
+      { 54, "queue dimension is not allowed in $bits" },
       {  8, "the size of the value of enumeration name 'G' is 4 but the base "
          "type has 3 bits" },
       {  9, "the value of enumeration name 'Q' cannot contain x or z as the "
@@ -3409,6 +3412,7 @@ START_TEST(test_inval4)
       { 39, "cannot assign this value to a variable of enumeration type "
          "without a cast" },
       { 41, "an edge event control cannot be used with a real value" },
+      { 56, "array assignment pattern key must be a constant expression" },
       { -1, NULL }
    };
    expect_errors(expect);

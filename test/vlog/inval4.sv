@@ -45,4 +45,14 @@ module inval4;
   e_t init = 2;
 
   enum logic [1:0] { W0 = 2'd3, W1 } e4;
+
+  int arr[4];
+  typedef logic [7:0] byte_t;
+  typedef logic byte_arr_t [1:0];
+  localparam int W_UNP = $bits(byte_arr_t [3:0]);
+  localparam int W_UNS = $bits(byte_t []);
+  localparam int W_QUE = $bits(byte_t [$:3]);
+  initial begin
+    arr = '{i: 1, default: 0};
+  end
 endmodule
