@@ -6697,6 +6697,8 @@ void model_psl_event(rt_model_t *m, psl_event_t event)
 }
 
 typedef struct {
+   bool has_cover;
+   bool has_assert;
    bool all_covered;
    bool all_asserts_covered;
    bool any_failed;
@@ -6716,13 +6718,17 @@ static void psl_scan_scope(rt_model_t *m, rt_scope_t *scope,
 
       switch (psl_kind(prop->where)) {
       case P_COVER:
+         status->has_cover = true;
          status->all_covered &= prop->covered;
          break;
       case P_ASSERT:
+         status->has_assert = true;
          status->all_asserts_covered &= prop->covered;
          status->any_failed |= prop->failed;
-         if (m->psl_cover_assert)
+         if (m->psl_cover_assert) {
+            status->has_cover = true;
             status->all_covered &= prop->covered;
+         }
          break;
       default:
          status->any_failed |= prop->failed;
@@ -6737,6 +6743,8 @@ static void psl_scan_scope(rt_model_t *m, rt_scope_t *scope,
 bool model_psl_status(rt_model_t *m, psl_query_t query)
 {
    psl_status_t status = {
+      .has_cover = false,
+      .has_assert = false,
       .all_covered = true,
       .all_asserts_covered = true,
       .any_failed = false,
@@ -6744,8 +6752,9 @@ bool model_psl_status(rt_model_t *m, psl_query_t query)
    psl_scan_scope(m, m->root, &status, false);
 
    switch (query) {
-   case PSL_QUERY_COVERED: return status.all_covered;
-   case PSL_QUERY_ASSERT_COVERED: return status.all_asserts_covered;
+   case PSL_QUERY_COVERED: return status.has_cover && status.all_covered;
+   case PSL_QUERY_ASSERT_COVERED:
+      return status.has_assert && status.all_asserts_covered;
    case PSL_QUERY_FAILED: return status.any_failed;
    }
 
