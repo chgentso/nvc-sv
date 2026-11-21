@@ -7060,6 +7060,67 @@ static bool sem_check_binding(tree_t t, nametab_t *tab)
 
 static bool sem_check_block_config(tree_t t, nametab_t *tab)
 {
+   if (!tree_has_ref(t))
+      return true;
+
+   tree_t block = tree_ref(t);
+   if (tree_kind(block) != T_FOR_GENERATE)
+      return true;
+
+   type_t index_type = tree_type(tree_decl(block, 0));
+
+   if (tree_has_value(t)) {
+      tree_t value = tree_value(t);
+      if (tree_kind(value) == T_REF && tree_has_ref(value)
+          && is_type_decl(tree_ref(value))) {
+         type_t type = tree_type(value);
+         if (!type_is_none(type)) {
+            if (!type_is_discrete(type))
+               sem_error(value, "type of index specification %pT is not "
+                         "discrete", type);
+
+            if (!type_eq(type, index_type))
+               sem_error(value, "expected type of index specification to be %pT "
+                         "but is %pT", index_type, type);
+
+            if (!sem_static_subtype(type, sem_globally_static))
+               sem_error(value, "index specification must be static");
+         }
+      }
+      else if (tree_kind(value) == T_ATTR_REF
+               && (tree_subkind(value) == ATTR_RANGE
+                   || tree_subkind(value) == ATTR_REVERSE_RANGE)) {
+         if (!sem_check_attr_ref(value, true, tab))
+            return false;
+
+         if (!sem_check_type(value, index_type, tab))
+            sem_error(value, "expected type of index specification to be %pT "
+                      "but have %pT", index_type, tree_type(value));
+
+         if (!sem_globally_static(value))
+            sem_error(value, "index specification must be static");
+      }
+      else {
+         if (!sem_check(value, tab))
+            return false;
+
+         if (!sem_check_type(value, index_type, tab))
+            sem_error(value, "expected type of index specification to be %pT "
+                      "but have %pT", index_type, tree_type(value));
+
+         if (!sem_globally_static(value))
+            sem_error(value, "index specification must be static");
+      }
+   }
+   else if (tree_ranges(t) > 0) {
+      tree_t r = tree_range(t, 0);
+      if (!sem_check_discrete_range(r, index_type, tab))
+         return false;
+
+      if (!sem_globally_static(r))
+         sem_error(r, "index specification must be static");
+   }
+
    return true;
 }
 

@@ -50,3 +50,34 @@ configuration conf of top is
         end for;
     end for;
 end configuration;
+
+-------------------------------------------------------------------------------
+
+entity gen_top is
+    generic (g : integer := 3);
+    port (n : integer);
+end entity;
+
+architecture a of gen_top is
+    signal arr : bit_vector(1 to 2);
+begin
+    g1: for i in 1 to 3 generate
+    end generate;
+end architecture;
+
+configuration gen_conf of gen_top is
+    for a
+        for g1 (1 to n)                 -- Error
+        end for;
+        for g1 (n)                      -- Error
+        end for;
+        for g1 (1 to g)                 -- OK
+        end for;
+        for g1 (1 to 2)                 -- OK
+        end for;
+        for g1 (arr'range)              -- OK
+        end for;
+        for g1 (2)                      -- OK
+        end for;
+    end for;
+end configuration;

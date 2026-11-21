@@ -11734,15 +11734,17 @@ static tree_t p_block_configuration(tree_t of)
          sub = find_generate_alternative(b, sub);
          break;
       case T_FOR_GENERATE:
-         if (tree_has_value(b)) {
-            // Index specification of a single iteration
+         {
             type_t index_type = tree_type(tree_decl(sub, 0));
-            tree_set_value(b, solve_types(nametab, tree_value(b), index_type));
-         }
-         else if (tree_ranges(b) > 0) {
-            tree_t r = tree_range(b, 0);
-            if (tree_subkind(r) != RANGE_EXPR)
-               solve_types(nametab, r, NULL);
+            if (tree_has_value(b)) {
+               // Index specification of a single iteration
+               tree_set_value(b, solve_types(nametab, tree_value(b), index_type));
+            }
+            else if (tree_ranges(b) > 0) {
+               tree_t r = tree_range(b, 0);
+               if (tree_subkind(r) != RANGE_EXPR)
+                  solve_types(nametab, r, index_type);
+            }
          }
          break;
       default:

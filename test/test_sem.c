@@ -1207,12 +1207,14 @@ START_TEST(test_config)
    const error_t expect[] = {
       { 42, "no visible declaration for O" },
       { 48, "instance BAD not found" },
+      { 70, "index specification must be static" },
+      { 72, "index specification must be static" },
       { -1, NULL }
    };
    expect_errors(expect);
 
    parse_and_check(T_ENTITY, T_ARCH, T_ENTITY, T_ARCH, T_ENTITY,
-                   T_ARCH, T_CONFIGURATION);
+                   T_ARCH, T_CONFIGURATION, T_ENTITY, T_ARCH, T_CONFIGURATION);
 
    check_expected_errors();
 }
