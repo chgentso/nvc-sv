@@ -11249,11 +11249,8 @@ static tree_t find_inherited_binding_unit(tree_t config, ident_list_t *ids,
          return NULL;
       }
 
-      // Default binding indication.  The choice of architecture is not
-      // specified there so a block configuration is not resolved
-      if (for_block)
-         return NULL;
-
+      // Default binding indication: return the default-bound entity so a
+      // block configuration naming its architecture can be resolved
       ident_t name = ident_rfrom(tree_ident(comp), '.') ?: tree_ident(comp);
       ident_t qual = ident_prefix(lib_name(lib_work()), name, '.');
       tree_t entity = lib_get_qualified(qual);
