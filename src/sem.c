@@ -4904,8 +4904,11 @@ static bool sem_check_attr_ref(tree_t t, bool allow_range, nametab_t *tab)
    case ATTR_POS:
    case ATTR_VAL:
       {
-         if (named_type == NULL && standard() >= STD_19)
+         if (named_type == NULL && standard() >= STD_19) {
             named_type = get_type_or_null(name);   // LCS2016-08 relaxation
+            if (predef != ATTR_VAL && tree_params(t) == 0 && named_type != NULL)
+               add_param(t, name, P_POS, NULL);
+         }
 
          if (named_type == NULL)
             sem_error(t, "prefix of attribute '%pI must be a type", attr);

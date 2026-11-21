@@ -2979,3 +2979,4 @@ svdynclass1 verilog
 svtrigfcall1 verilog
 svpatpack1 verilog
 file17 normal,2019
+attr30 normal,2019

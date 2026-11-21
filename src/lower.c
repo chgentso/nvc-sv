@@ -5737,6 +5737,7 @@ static vcode_reg_t lower_attr_ref(lower_unit_t *lu, tree_t expr)
 
    case ATTR_IMAGE:
       {
+         type_t name_type = tree_type(name);
          tree_t value = tree_value(tree_param(expr, 0));
          type_t type = tree_type(value);
          type_t base = type_base_recur(type);
@@ -5745,6 +5746,9 @@ static vcode_reg_t lower_attr_ref(lower_unit_t *lu, tree_t expr)
          vcode_type_t strtype = vtype_uarray(1, ctype);
 
          vcode_reg_t arg_reg = lower_attr_param(lu, value, base, C_CONSTANT);
+
+         if (standard() >= STD_19 && type_is_scalar(name_type))
+            lower_check_scalar_bounds(lu, arg_reg, name_type, expr, NULL);
 
          vcode_reg_t args[] = { arg_reg };
          return emit_fcall(func, strtype, VCODE_INVALID_STAMP, args,
@@ -5822,44 +5826,71 @@ static vcode_reg_t lower_attr_ref(lower_unit_t *lu, tree_t expr)
 
    case ATTR_SUCC:
       {
+         type_t name_type = tree_type(name);
          tree_t value = tree_value(tree_param(expr, 0));
          vcode_reg_t arg_reg = lower_attr_param(lu, value, NULL, C_CONSTANT);
-         return emit_add(arg_reg, emit_const(vcode_reg_type(arg_reg), 1));
+         if (standard() >= STD_19 && type_is_scalar(name_type))
+            lower_check_scalar_bounds(lu, arg_reg, name_type, expr, NULL);
+         vcode_reg_t res = emit_add(arg_reg, emit_const(vcode_reg_type(arg_reg), 1));
+         if (standard() >= STD_19 && type_is_scalar(name_type))
+            lower_check_scalar_bounds(lu, res, name_type, expr, NULL);
+         return res;
       }
 
    case ATTR_PRED:
       {
+         type_t name_type = tree_type(name);
          tree_t value = tree_value(tree_param(expr, 0));
          vcode_reg_t arg_reg = lower_attr_param(lu, value, NULL, C_CONSTANT);
-         return emit_sub(arg_reg, emit_const(vcode_reg_type(arg_reg), 1));
+         if (standard() >= STD_19 && type_is_scalar(name_type))
+            lower_check_scalar_bounds(lu, arg_reg, name_type, expr, NULL);
+         vcode_reg_t res = emit_sub(arg_reg, emit_const(vcode_reg_type(arg_reg), 1));
+         if (standard() >= STD_19 && type_is_scalar(name_type))
+            lower_check_scalar_bounds(lu, res, name_type, expr, NULL);
+         return res;
       }
 
    case ATTR_LEFTOF:
       {
+         type_t name_type = tree_type(name);
          tree_t value = tree_value(tree_param(expr, 0));
          vcode_reg_t arg_reg = lower_attr_param(lu, value, NULL, C_CONSTANT);
+         if (standard() >= STD_19 && type_is_scalar(name_type))
+            lower_check_scalar_bounds(lu, arg_reg, name_type, expr, NULL);
 
          type_t type = tree_type(expr);
          const int dir =
             (type_is_enum(type) || direction_of(type, 0) == RANGE_TO) ? -1 : 1;
-         return emit_add(arg_reg, emit_const(vcode_reg_type(arg_reg), dir));
+         vcode_reg_t res = emit_add(arg_reg, emit_const(vcode_reg_type(arg_reg), dir));
+         if (standard() >= STD_19 && type_is_scalar(name_type))
+            lower_check_scalar_bounds(lu, res, name_type, expr, NULL);
+         return res;
       }
 
    case ATTR_RIGHTOF:
       {
+         type_t name_type = tree_type(name);
          tree_t value = tree_value(tree_param(expr, 0));
          vcode_reg_t arg_reg = lower_attr_param(lu, value, NULL, C_CONSTANT);
+         if (standard() >= STD_19 && type_is_scalar(name_type))
+            lower_check_scalar_bounds(lu, arg_reg, name_type, expr, NULL);
 
          type_t type = tree_type(expr);
          const int dir =
             (type_is_enum(type) || direction_of(type, 0) == RANGE_TO) ? 1 : -1;
-         return emit_add(arg_reg, emit_const(vcode_reg_type(arg_reg), dir));
+         vcode_reg_t res = emit_add(arg_reg, emit_const(vcode_reg_type(arg_reg), dir));
+         if (standard() >= STD_19 && type_is_scalar(name_type))
+            lower_check_scalar_bounds(lu, res, name_type, expr, NULL);
+         return res;
       }
 
    case ATTR_POS:
       {
+         type_t name_type = tree_type(name);
          tree_t value = tree_value(tree_param(expr, 0));
          vcode_reg_t arg_reg = lower_attr_param(lu, value, NULL, C_CONSTANT);
+         if (standard() >= STD_19 && type_is_scalar(name_type))
+            lower_check_scalar_bounds(lu, arg_reg, name_type, expr, NULL);
 
          type_t type = tree_type(expr);
          return emit_cast(lower_type(type), lower_bounds(type), arg_reg);
