@@ -3412,7 +3412,12 @@ START_TEST(test_inval4)
       { 39, "cannot assign this value to a variable of enumeration type "
          "without a cast" },
       { 41, "an edge event control cannot be used with a real value" },
-      { 56, "array assignment pattern key must be a constant expression" },
+      { 58, "array assignment pattern key must be a constant expression" },
+      { 59, "unpacked array cannot be used in an lvalue concatenation" },
+      { 60, "non-integral target of type 'string' cannot be used in an "
+         "lvalue concatenation" },
+      { 61, "non-integral target of type 'dynamic array' cannot be used in "
+         "an lvalue concatenation" },
       { -1, NULL }
    };
    expect_errors(expect);

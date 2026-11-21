@@ -130,6 +130,9 @@ static const char *type_mask_str(type_mask_t tm)
    case TM(DT_SHORTREAL): return "shortreal";
    case TM(DT_TIME): return "time";
    case TM(DT_STRING): return "string";
+   case TM(DT_DYNARRAY): return "dynamic array";
+   case TM(DT_QUEUE): return "queue";
+   case TM(DT_ASSOC): return "associative array";
    case TM_REAL: return "real";
    case TM_CLASS: return "class";
    case TM(DT_PROCESS) | TM_CLASS: return "process";
@@ -138,6 +141,70 @@ static const char *type_mask_str(type_mask_t tm)
    case TM_ENUM: return "enum";
    default: return (tm & TM_INTEGRAL) ? "integral" : "unknown";
    }
+}
+
+static int vlog_unpacked_dims(vlog_node_t v)
+{
+   switch (vlog_kind(v)) {
+   case V_REF:
+   case V_MEMBER_REF:
+      {
+         vlog_node_t decl = vlog_kind(v) == V_MEMBER_REF
+            ? vlog_member_decl(v) : (vlog_has_ref(v) ? vlog_ref(v) : NULL);
+         if (decl == NULL)
+            return 0;
+
+         int ndims = 0;
+         switch (vlog_kind(decl)) {
+         case V_VAR_DECL:
+         case V_NET_DECL:
+         case V_PORT_DECL:
+         case V_LOCAL_DECL:
+         case V_TF_PORT_DECL:
+            ndims += vlog_ranges(decl);
+            if (vlog_has_type(decl)) {
+               vlog_node_t dt = vlog_get_type(vlog_type(decl));
+               if (dt != NULL && vlog_kind(dt) == V_DATA_TYPE
+                   && vlog_subkind(dt) == DT_DYNARRAY)
+                  ndims += vlog_ranges(dt);
+            }
+            break;
+         default:
+            break;
+         }
+         return ndims;
+      }
+   case V_BIT_SELECT:
+      {
+         const int d = vlog_unpacked_dims(vlog_value(v)) - vlog_params(v);
+         return d > 0 ? d : 0;
+      }
+   case V_PART_SELECT:
+      return vlog_unpacked_dims(vlog_value(v));
+   default:
+      return 0;
+   }
+}
+
+static void vlog_check_concat_lvalue(vlog_node_t v)
+{
+   if (vlog_kind(v) == V_CONCAT)
+      return;
+
+   if (vlog_unpacked_dims(v) > 0) {
+      error_at(vlog_loc(v), "unpacked array cannot be used in an lvalue "
+               "concatenation");
+      return;
+   }
+
+   vlog_node_t type = vlog_get_type(v);
+   if (type == NULL)
+      return;
+
+   const type_mask_t mask = get_type_mask(type);
+   if (mask != TM_ERROR && !(mask & TM_INTEGRAL))
+      error_at(vlog_loc(v), "non-integral target of type '%s' cannot be used "
+               "in an lvalue concatenation", type_mask_str(mask));
 }
 
 static void vlog_check_variable_lvalue(vlog_node_t v, vlog_node_t where)
@@ -166,6 +233,15 @@ static void vlog_check_variable_lvalue(vlog_node_t v, vlog_node_t where)
       vlog_check_variable_lvalue(vlog_value(v), v);
       return;
    case V_CONCAT:
+      {
+         const int nparams = vlog_params(v);
+         for (int i = 0; i < nparams; i++) {
+            vlog_node_t p = vlog_param(v, i);
+            vlog_check_variable_lvalue(p, p);
+            vlog_check_concat_lvalue(p);
+         }
+      }
+      return;
    case V_STREAM:
       {
          const int nparams = vlog_params(v);
@@ -227,6 +303,7 @@ static void vlog_check_net_lvalue(vlog_node_t v, vlog_node_t where)
          for (int i = 0; i < nparams; i++) {
             vlog_node_t p = vlog_param(v, i);
             vlog_check_net_lvalue(p, p);
+            vlog_check_concat_lvalue(p);
          }
       }
       return;

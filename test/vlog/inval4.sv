@@ -52,7 +52,12 @@ module inval4;
   localparam int W_UNP = $bits(byte_arr_t [3:0]);
   localparam int W_UNS = $bits(byte_t []);
   localparam int W_QUE = $bits(byte_t [$:3]);
+  string str;
+  int darr[];
   initial begin
     arr = '{i: 1, default: 0};
+    {i, arr} = 0;
+    {str} = 0;
+    {darr} = 0;
   end
 endmodule
