@@ -3002,3 +3002,4 @@ attr31 normal,2019
 svtimefmt1 verilog
 svctorchain1 verilog
 svconststr1 verilog
+svtyperestrict1 verilog

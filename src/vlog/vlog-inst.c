@@ -741,6 +741,10 @@ vlog_node_t vlog_new_instance(vlog_node_t mod, vlog_node_t inst, ident_t id)
          if (vlog_flags(d) & VLOG_F_TYPEPARAM) {
             vlog_node_t value = bind_type_parameter(d, pidx++, inst);
             if (value != NULL) {
+               const unsigned r = vlog_flags(d) & VLOG_F_RESTRICT_MASK;
+               if (r && !vlog_type_matches_restrict(r, value))
+                  error_at(vlog_loc(inst), "type parameter %pQ requires a %s "
+                           "type", vlog_ident(d), vlog_type_restrict_str(r));
                vlog_set_type(d, value);
                vlog_set_flags(d, vlog_flags(d) | VLOG_F_OVERRIDDEN);
             }

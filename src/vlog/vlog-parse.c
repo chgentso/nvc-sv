@@ -15978,21 +15978,45 @@ static void p_list_of_param_assignments(vlog_node_t parent,
 
 static void p_type_assignments(vlog_node_t parent, bool is_param)
 {
-   // type_identifier [ = data_type ] { , type_identifier [ = data_type ] }
+   // [ type_restriction ] type_identifier [ = data_type ]
+   //   { , type_identifier [ = data_type ] }
    //
    // A type parameter is an alias of its default as it cannot be overridden
 
    BEGIN("type assignments");
+
+   vlog_flags_t restrict_flags = 0;
+   if (optional(tENUM))
+      restrict_flags = VLOG_F_RESTRICT_ENUM;
+   else if (optional(tSTRUCT))
+      restrict_flags = VLOG_F_RESTRICT_STRUCT;
+   else if (optional(tUNION))
+      restrict_flags = VLOG_F_RESTRICT_UNION;
+   else if (optional(tCLASS))
+      restrict_flags = VLOG_F_RESTRICT_CLASS;
+   else if (peek() == tINTERFACE && peek_nth(2) == tCLASS) {
+      consume(tINTERFACE);
+      consume(tCLASS);
+      restrict_flags = VLOG_F_RESTRICT_IFACE;
+   }
 
    do {
       vlog_node_t v = vlog_new(V_TYPE_DECL);
       vlog_set_ident(v, p_identifier());
 
       if (is_param)
-         vlog_set_flags(v, VLOG_F_TYPEPARAM);
+         vlog_set_flags(v, VLOG_F_TYPEPARAM | restrict_flags);
+      else if (restrict_flags)
+         vlog_set_flags(v, restrict_flags);
 
-      if (optional(tEQ))
-         vlog_set_type(v, p_data_type());
+      if (optional(tEQ)) {
+         vlog_node_t dt = p_data_type();
+         vlog_set_type(v, dt);
+         if (restrict_flags
+             && !vlog_type_matches_restrict(restrict_flags, dt))
+            error_at(CURRENT_LOC, "type parameter %pQ requires a %s type",
+                     vlog_ident(v), vlog_type_restrict_str(restrict_flags));
+      }
       else
          vlog_set_type(v, logic_type());
 

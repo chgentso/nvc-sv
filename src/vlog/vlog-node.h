@@ -607,6 +607,13 @@ typedef enum {
    VLOG_F_VOID = VLOG_F_PURE,        // On a void member of a tagged union
    VLOG_F_TIMEEXPR = VLOG_F_SOFT,    // On a time literal in an expression
    VLOG_F_TYPEPARAM = VLOG_F_CONST,  // On a type declaration which is a parameter
+   VLOG_F_RESTRICT_ENUM = VLOG_F_SIGNED,
+   VLOG_F_RESTRICT_STRUCT = VLOG_F_PACKED,
+   VLOG_F_RESTRICT_UNION = VLOG_F_VIRTUAL,
+   VLOG_F_RESTRICT_CLASS = VLOG_F_STATIC,
+   VLOG_F_RESTRICT_IFACE = VLOG_F_INTERFACE,
+   VLOG_F_RESTRICT_MASK = VLOG_F_RESTRICT_ENUM | VLOG_F_RESTRICT_STRUCT
+      | VLOG_F_RESTRICT_UNION | VLOG_F_RESTRICT_CLASS | VLOG_F_RESTRICT_IFACE,
    VLOG_F_NETTYPE = VLOG_F_RAND,     // On a type declaration of a net type
    VLOG_F_USERNET = VLOG_F_PRIORITY, // On a variable which is a net of a user-defined net type
    VLOG_F_BLACKBOX = VLOG_F_UNIQUE0,   // On a module made for a missing unit

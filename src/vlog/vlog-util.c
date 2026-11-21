@@ -791,6 +791,41 @@ bool vlog_typeparam_pending(vlog_node_t v)
    return vlog_kind(type) == V_TYPE_DECL && (vlog_flags(type) & VLOG_F_TYPEPARAM);
 }
 
+bool vlog_type_matches_restrict(unsigned r, vlog_node_t dt)
+{
+   r &= VLOG_F_RESTRICT_MASK;
+   if (r == 0 || dt == NULL)
+      return true;
+
+   vlog_node_t bt = vlog_get_type(dt);
+   if (bt == NULL)
+      return true;
+
+   if (r & VLOG_F_RESTRICT_ENUM)
+      return vlog_kind(bt) == V_ENUM_DECL;
+   if (r & VLOG_F_RESTRICT_STRUCT)
+      return vlog_kind(bt) == V_STRUCT_DECL;
+   if (r & VLOG_F_RESTRICT_UNION)
+      return vlog_kind(bt) == V_UNION_DECL;
+   if (r & VLOG_F_RESTRICT_CLASS)
+      return vlog_kind(bt) == V_CLASS_DECL
+         && !(vlog_flags(bt) & VLOG_F_INTERFACE);
+   if (r & VLOG_F_RESTRICT_IFACE)
+      return vlog_kind(bt) == V_CLASS_DECL
+         && (vlog_flags(bt) & VLOG_F_INTERFACE);
+   return true;
+}
+
+const char *vlog_type_restrict_str(unsigned r)
+{
+   if (r & VLOG_F_RESTRICT_ENUM)   return "enum";
+   if (r & VLOG_F_RESTRICT_STRUCT) return "struct";
+   if (r & VLOG_F_RESTRICT_UNION)  return "union";
+   if (r & VLOG_F_RESTRICT_CLASS)  return "class";
+   if (r & VLOG_F_RESTRICT_IFACE)  return "interface class";
+   return "type";
+}
+
 bool vlog_virtual_chain(vlog_node_t v)
 {
    // A selection from a member of a virtual interface whose interface was
