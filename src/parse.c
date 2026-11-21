@@ -835,6 +835,30 @@ static tree_t find_binding(tree_t inst)
          else
             name = arch_name;
       }
+      else if (tree_class(inst) == C_ENTITY) {
+         ident_t lib_i = ident_until(name, '.');
+         ident_t unit_i = ident_rfrom(name, '.');
+         lib_t lib = NULL;
+         if (unit_i != NULL) {
+            tree_t ldecl = NULL;
+            query_name(nametab, lib_i, &ldecl);
+            if (ldecl != NULL && tree_kind(ldecl) == T_LIBRARY)
+               lib = lib_require(tree_ident2(ldecl));
+         }
+         else {
+            lib = lib_work();
+            unit_i = name;
+         }
+
+         if (lib != NULL) {
+            ident_t qual = ident_prefix(lib_name(lib), unit_i, '.');
+            object_t *obj = lib_get_generic(lib, qual, NULL);
+            if (obj != NULL && vlog_from_object(obj) != NULL) {
+               tree_set_ident(inst, qual);
+               return NULL;
+            }
+         }
+      }
    }
    else {
       name = tree_ident2(inst);

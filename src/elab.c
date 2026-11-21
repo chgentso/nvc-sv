@@ -323,6 +323,12 @@ static uint32_t elab_hash_vhdl_inst(tree_t t)
       // Fall-through
    case T_BINDING:
       {
+         if (!tree_has_ref(t)) {
+            if (tree_has_ident(t))
+               h ^= ident_hash(tree_ident(t));
+            break;
+         }
+
          tree_t unit = tree_ref(t), ent = primary_unit_of(unit);
          h ^= mix_bits_64((uintptr_t)unit);
 
@@ -439,6 +445,11 @@ static bool elab_cmp_vhdl_inst(tree_t a, tree_t b)
       // Fall-through
    case T_BINDING:
       {
+         if (!tree_has_ref(a) || !tree_has_ref(b))
+            return !tree_has_ref(a) && !tree_has_ref(b)
+               && tree_has_ident(a) && tree_has_ident(b)
+               && tree_ident(a) == tree_ident(b);
+
          tree_t unit = tree_ref(a), ent = primary_unit_of(unit);
          if (tree_ref(b) != unit)
             return false;
@@ -7016,6 +7027,21 @@ static void elab_component(tree_t inst, tree_t comp, const elab_ctx_t *ctx)
    if (tree_has_spec(inst) && tree_has_value(tree_spec(inst))) {
       tree_t spec = tree_spec(inst);
       tree_t bind = tree_value(spec);
+      if (tree_kind(bind) == T_BINDING && tree_class(bind) == C_ENTITY
+          && !tree_has_ref(bind) && tree_has_ident(bind)) {
+         ident_t qual = tree_ident(bind);
+         lib_t lib = elab_find_lib(qual, ctx);
+         if (lib != NULL) {
+            ident_t full = ident_prefix(lib_name(lib),
+                                        ident_rfrom(qual, '.') ?: qual, '.');
+            object_t *obj = lib_get_generic(lib, full, NULL);
+            vlog_node_t mod = vlog_from_object(obj);
+            if (mod != NULL) {
+               elab_mixed_instance(inst, comp, mod, ctx);
+               return;
+            }
+         }
+      }
       if (tree_kind(bind) == T_BINDING && tree_class(bind) == C_ENTITY
           && tree_has_ref(bind) && tree_kind(tree_ref(bind)) == T_ENTITY
           && tree_has_ident2(bind)) {
