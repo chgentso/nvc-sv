@@ -4282,6 +4282,12 @@ static void overload_positional_argument(overload_t *o, int pos)
    }
    ATRIM(o->candidates, wptr);
 
+   if (o->candidates.count == 1 && pos < tree_ports(o->candidates.items[0])) {
+      tree_t p = tree_port(o->candidates.items[0], pos);
+      if (!type_is_unconstrained(tree_type(p)))
+         o->typeset.target = p;
+   }
+
    if (o->could_be_index) {
       for (unsigned i = 0; i < o->candidates.count; i++) {
          if (!can_call_no_args(o->candidates.items[i]))
@@ -4395,6 +4401,7 @@ static void overload_named_argument(overload_t *o, tree_t name)
 
    // See if any possible overload matches this argument name
    int first_match = -1;
+   tree_t first_port = NULL;
    for (unsigned i = 0; first_match < 0 && i < o->candidates.count; i++) {
       const int nports = tree_ports(o->candidates.items[i]);
       for (int j = npos; j < nports; j++) {
@@ -4412,6 +4419,7 @@ static void overload_named_argument(overload_t *o, tree_t name)
          if (!conv)
             overload_add_argument_type(o, ntype, o->candidates.items[i]);
          first_match = i;
+         first_port = p;
          break;
       }
    }
@@ -4466,6 +4474,10 @@ static void overload_named_argument(overload_t *o, tree_t name)
          }
       }
       ATRIM(o->candidates, wptr);
+
+      if (!conv && o->candidates.count == 1 && first_port != NULL
+          && name == ref && !type_is_unconstrained(tree_type(first_port)))
+         o->typeset.target = first_port;
    }
 
    o->state = O_NAMED;
@@ -6322,7 +6334,10 @@ static tree_t solve_qualified(nametab_t *tab, tree_t t)
 {
    assert(tree_has_type(t));
 
-   tree_t value = solve_types(tab, tree_value(t), tree_type(t));
+   type_t type = tree_type(t);
+   tree_t value = type_is_unconstrained(type)
+      ? solve_types(tab, tree_value(t), type)
+      : solve_known_subtype(tab, tree_value(t), t);
    tree_set_value(t, value);
 
    return t;

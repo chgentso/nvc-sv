@@ -852,6 +852,7 @@ vhpi9           normal,vhpi
 issue730        normal,2008
 driver19        normal,2008
 func25          normal
+func26          normal,2019
 conv9           normal,2019
 comp2           normal
 issue751        normal

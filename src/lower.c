@@ -106,6 +106,8 @@ typedef struct {
 } field_toggle_params_t;
 
 static vcode_reg_t lower_expr(lower_unit_t *lu, tree_t expr, expr_ctx_t ctx);
+static vcode_reg_t lower_known_subtype(lower_unit_t *lu, tree_t value,
+                                       type_t type, vcode_reg_t bounds_reg);
 static void lower_stmt(lower_unit_t *lu, tree_t stmt, gen_stack_t *gs);
 static void lower_func_body(lower_unit_t *lu, object_t *obj);
 static void lower_proc_body(lower_unit_t *lu, object_t *obj);
@@ -1340,7 +1342,7 @@ static vcode_reg_t lower_subprogram_arg(lower_unit_t *lu, tree_t fcall,
    else if (tree_kind(value) == T_OPEN) {
       tree_t def = tree_value(port);
       if (is_body(decl) || is_literal(def) || tree_kind(def) == T_STRING) {
-         reg = lower_rvalue(lu, def);
+         reg = lower_known_subtype(lu, def, port_type, VCODE_INVALID_REG);
          value_type = tree_type(def);
       }
       else {
@@ -1357,7 +1359,7 @@ static vcode_reg_t lower_subprogram_arg(lower_unit_t *lu, tree_t fcall,
       }
    }
    else
-      reg = lower_rvalue(lu, value);
+      reg = lower_known_subtype(lu, value, port_type, VCODE_INVALID_REG);
 
    if (type_is_array(value_type)) {
       if (!type_is_unconstrained(port_type)) {
@@ -5922,7 +5924,8 @@ static vcode_reg_t lower_qualified(lower_unit_t *lu, tree_t expr)
    type_t from_type = tree_type(value);
    type_t to_type = tree_type(expr);
 
-   vcode_reg_t value_reg = lower_rvalue(lu, value);
+   vcode_reg_t value_reg = lower_known_subtype(lu, value, to_type,
+                                               VCODE_INVALID_REG);
 
    if (type_is_array(to_type))
       return lower_coerce_arrays(lu, from_type, to_type, value_reg);

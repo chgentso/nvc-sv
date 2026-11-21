@@ -6031,7 +6031,9 @@ static tree_t p_qualified_expression(tree_t prefix)
    consume(tTICK);
 
    tree_t value = p_aggregate_or_expression();
-   tree_set_value(qual, solve_types(nametab, value, type));
+   tree_set_value(qual, type_is_unconstrained(type)
+                  ? solve_types(nametab, value, type)
+                  : solve_known_subtype(nametab, value, qual));
 
    tree_set_loc(qual, CURRENT_LOC);
    return qual;
