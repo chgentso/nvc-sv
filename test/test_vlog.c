@@ -3391,6 +3391,9 @@ START_TEST(test_inval4)
       { 53, "unsized dimension is not allowed in $bits" },
       { 54, "queue dimension is not allowed in $bits" },
       { 87, "a class constructor cannot be declared virtual" },
+      { 92, "cannot redeclare enclosing function name 'f_redecl_var'" },
+      { 97, "cannot redeclare enclosing function name 'f_redecl_type'" },
+      { 102, "cannot redeclare enclosing function name 'f_redecl_blk'" },
       {  8, "the size of the value of enumeration name 'G' is 4 but the base "
          "type has 3 bits" },
       {  9, "the value of enumeration name 'Q' cannot contain x or z as the "

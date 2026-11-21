@@ -1545,6 +1545,9 @@ static void vlog_const_func_cb(vlog_node_t v, void *ctx)
    switch (vlog_kind(v)) {
    case V_REF:
       {
+         if (!vlog_has_ref(v))
+            break;
+
          vlog_node_t decl = vlog_ref(v);
          switch (vlog_kind(decl)) {
          case V_PARAM_DECL:

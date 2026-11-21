@@ -1170,6 +1170,21 @@ void vlog_symtab_put(vlog_symtab_t *st, vlog_node_t v)
       return;
    }
 
+   vlog_scope_t *enclosing =
+      st->top->container == v ? st->top->parent : st->top;
+   if (enclosing != NULL && enclosing->container != NULL
+       && vlog_kind(enclosing->container) == V_FUNC_DECL
+       && vlog_has_type(enclosing->container)
+       && vlog_ident(enclosing->container) == name) {
+      diag_t *d = diag_new(DIAG_ERROR, vlog_loc(v));
+      diag_printf(d, "cannot redeclare enclosing function name %pQ", name);
+      diag_hint(d, vlog_loc(enclosing->container), "function %pQ declared here",
+                name);
+      diag_suppress(d, name == well_known(W_ERROR) || st->top->suppress);
+      diag_emit(d);
+      return;
+   }
+
    vlog_symbol_t *sym = fresh_symbol_for(st, name);
 
    assert(!loc_invalid_p(vlog_loc(v)));

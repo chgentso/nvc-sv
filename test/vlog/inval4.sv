@@ -87,4 +87,20 @@ module inval4;
     virtual function new();
     endfunction
   endclass
+
+  function integer f_redecl_var(input integer x);
+    integer f_redecl_var;
+    f_redecl_var = x;
+  endfunction
+
+  function integer f_redecl_type(input integer x);
+    typedef integer f_redecl_type;
+    return x;
+  endfunction
+
+  function integer f_redecl_blk(input integer x);
+    begin : f_redecl_blk
+    end
+    return x;
+  endfunction
 endmodule
