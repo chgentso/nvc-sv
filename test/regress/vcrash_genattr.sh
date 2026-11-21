@@ -1,7 +1,6 @@
-set -x
+set -ex
 
-# A predefined attribute as the actual for a generic subprogram is not
-# supported: this must be reported as an error, not crash
+# Predefined attribute as the actual for a generic subprogram (LRM 6.5.7.2)
 
 cat >genattr.vhd <<'VHD'
 package gp is
@@ -21,10 +20,12 @@ entity genattr is end;
 architecture a of genattr is
     package q is new work.gp generic map ( img => integer'image );
 begin
+    process is
+    begin
+        assert q.show = "5" report q.show severity failure;
+        wait;
+    end process;
 end architecture;
 VHD
 
-if nvc --std=08 -a genattr.vhd 2> err.txt; then exit 1; fi
-cat err.txt
-grep -q 'is not supported' err.txt
-if grep -q 'Fatal' err.txt; then exit 1; fi
+nvc --std=08 -a genattr.vhd -e genattr -r genattr
