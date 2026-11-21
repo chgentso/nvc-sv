@@ -69,5 +69,12 @@ module inval4;
     @(posedge ev);
     q.push_back();
     q.insert(0);
+    r = real'(str);
+    r = real'(q);
   end
+
+  class VC;
+    virtual function new();
+    endfunction
+  endclass
 endmodule

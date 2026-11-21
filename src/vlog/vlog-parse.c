@@ -17717,6 +17717,9 @@ static void p_class_item(vlog_node_t parent)
    case tFUNCTION:
       {
          if (peek() == tFUNCTION && peek_nth(2) == tNEW) {
+            if (flags & VLOG_F_VIRTUAL)
+               error_at(&state.last_loc, "a class constructor cannot be "
+                        "declared virtual");
             vlog_node_t c =
                p_class_constructor_declaration(!!(flags & VLOG_F_EXTERN));
             vlog_set_ref(c, parent);

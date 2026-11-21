@@ -223,11 +223,14 @@ static void vlog_check_variable_lvalue(vlog_node_t v, vlog_node_t where)
    case V_UNION_DECL:
    case V_GENVAR_DECL:
    case V_TF_PORT_DECL:
-   case V_THIS:
    case V_HIER_REF:
+      return;
+   case V_THIS:
    case V_METHOD_CALL:
    case V_USER_FCALL:
-      return;
+      if (v != where)
+         return;
+      break;
    case V_REF:
       if (vlog_has_ref(v))
          vlog_check_variable_lvalue(vlog_ref(v), v);
@@ -1913,9 +1916,25 @@ static void vlog_check_user_tcall(vlog_node_t v)
    vlog_check_discarded(v, func);
 }
 
+static void vlog_check_arg_order(vlog_node_t v)
+{
+   bool seen_named = false;
+   const int nparams = vlog_params(v);
+   for (int i = 0; i < nparams; i++) {
+      vlog_node_t p = vlog_param(v, i);
+      if (vlog_kind(p) == V_NAMED_ARG)
+         seen_named = true;
+      else if (seen_named) {
+         error_at(vlog_loc(p), "an argument by position cannot follow one "
+                  "by name");
+         return;
+      }
+   }
+}
+
 static void vlog_check_super_call(vlog_node_t v)
 {
-   // TODO: vlog_check_call_args()
+   vlog_check_arg_order(v);
 }
 
 static void vlog_check_deassign(vlog_node_t v)
@@ -3377,6 +3396,8 @@ static void vlog_check_ctor_args(vlog_node_t v, vlog_node_t class)
 {
    // A class without a constructor has one which takes no arguments
 
+   vlog_check_arg_order(v);
+
    const int nparams = vlog_params(v);
    for (int i = 0; i < nparams; i++) {
       if (vlog_kind(vlog_param(v, i)) == V_NAMED_ARG)
@@ -3583,8 +3604,17 @@ static type_mask_t vlog_check_cast(vlog_node_t v)
    if (vlog_subkind(v) == V_CAST_TYPEREF)
       return TM(DT_INT);
    else if (vlog_subkind(v) == V_CAST_TYPE) {
-      vlog_check_expr(vlog_value(v));
-      return get_type_mask(vlog_type(v));
+      vlog_node_t val = vlog_value(v);
+      const type_mask_t smask = vlog_check_expr(val);
+      const type_mask_t dmask = get_type_mask(vlog_type(v));
+      if ((dmask & TM_REAL) && smask != TM_ERROR) {
+         const bool is_unpacked = vlog_unpacked_dims(val) > 0;
+         if (is_unpacked || !(smask & (TM_INTEGRAL | TM_REAL)))
+            error_at(vlog_loc(v), "cannot cast %s to '%s'",
+                     is_unpacked ? "an unpacked array" : type_mask_str(smask),
+                     type_mask_str(dmask));
+      }
+      return dmask;
    }
 
    vlog_check_expr(vlog_left(v));
@@ -4223,6 +4253,9 @@ static bool vlog_same_result(vlog_node_t a, vlog_node_t b)
    if (ta == NULL || tb == NULL)
       return true;
 
+   if (vlog_kind(ta) == V_CLASS_DECL && vlog_kind(tb) == V_CLASS_DECL)
+      return vlog_class_derives(ta, tb);
+
    return get_type_mask(ta) == get_type_mask(tb)
       && vlog_size(ta) == vlog_size(tb)
       && vlog_is_signed(ta) == vlog_is_signed(tb);
@@ -4522,6 +4555,7 @@ static void vlog_check_class_protos(vlog_node_t v)
 
 static void vlog_check_class(vlog_node_t v)
 {
+   vlog_check_arg_order(v);
    vlog_check_decls(v);
    vlog_check_class_protos(v);
    vlog_check_iface_conflicts(v);

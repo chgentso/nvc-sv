@@ -3390,6 +3390,7 @@ START_TEST(test_inval4)
       { 52, "packed dimensions cannot be added to unpacked data type" },
       { 53, "unsized dimension is not allowed in $bits" },
       { 54, "queue dimension is not allowed in $bits" },
+      { 77, "a class constructor cannot be declared virtual" },
       {  8, "the size of the value of enumeration name 'G' is 4 but the base "
          "type has 3 bits" },
       {  9, "the value of enumeration name 'Q' cannot contain x or z as the "
@@ -3424,6 +3425,8 @@ START_TEST(test_inval4)
       { 69, "an edge event control cannot be used with a named event" },
       { 70, "method 'push_back' of a queue expects 1 argument but has 0" },
       { 71, "method 'insert' of a queue expects 2 arguments but has 1" },
+      { 72, "cannot cast string to 'real'" },
+      { 73, "cannot cast queue to 'real'" },
       { -1, NULL }
    };
    expect_errors(expect);
