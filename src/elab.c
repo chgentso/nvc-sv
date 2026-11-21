@@ -854,7 +854,8 @@ static void elab_map_anonymous_type(type_t ctype, type_t etype, hash_t *map)
 
    hash_put(map, ctype, etype);
 
-   if (type_subkind(ctype) == GTYPE_ARRAY) {
+   if (type_subkind(ctype) == GTYPE_ARRAY
+       || type_subkind(ctype) == GTYPE_CONSTRAINED_ARRAY) {
       elab_map_anonymous_type(type_elem(ctype), type_elem(etype), map);
 
       const int nindex = type_indexes(ctype);
@@ -1608,6 +1609,7 @@ static void elab_map_generic_type(type_t generic, type_t actual, hash_t *map)
 
    switch (type_subkind(generic)) {
    case GTYPE_ARRAY:
+   case GTYPE_CONSTRAINED_ARRAY:
       {
          type_t gelem = type_elem(generic);
          if (type_kind(gelem) == T_GENERIC && !type_has_ident(gelem))

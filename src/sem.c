@@ -5528,6 +5528,7 @@ static bool sem_check_generic_actual(formal_map_t *formals, int nformals,
          [GTYPE_PHYSICAL] = "a physical",
          [GTYPE_ACCESS] = "an access",
          [GTYPE_ARRAY] = "an array",
+         [GTYPE_CONSTRAINED_ARRAY] = "an array",
          [GTYPE_FILE] = "a file",
       };
 
@@ -5561,7 +5562,7 @@ static bool sem_check_generic_actual(formal_map_t *formals, int nformals,
                       type_pp(map), istr(tree_ident(decl)),
                       type_pp(actual), type_pp(expect));
       }
-      else if (class == GTYPE_ARRAY) {
+      else if (class == GTYPE_ARRAY || class == GTYPE_CONSTRAINED_ARRAY) {
          const int nindex = type_indexes(type);
          if (nindex != dimension_of(map))
             sem_error(param, "cannot map type %s to generic interface "
@@ -5605,6 +5606,27 @@ static bool sem_check_generic_actual(formal_map_t *formals, int nformals,
                       "%s as the element type %s is not %s",
                       type_pp(map), istr(tree_ident(decl)),
                       type_pp(actual), type_pp(expect));
+
+         bool actual_constrained = false;
+         for (type_t t = map; type_kind(t) == T_SUBTYPE; t = type_base(t)) {
+            if (type_has_constraint(t)
+                && tree_subkind(type_constraint(t)) == C_INDEX) {
+               actual_constrained = true;
+               break;
+            }
+         }
+         if (type_kind(map) == T_GENERIC
+             && type_subkind(map) == GTYPE_CONSTRAINED_ARRAY)
+            actual_constrained = true;
+
+         if (class == GTYPE_ARRAY && actual_constrained)
+            sem_error(param, "cannot map constrained array type %s to "
+                      "unconstrained formal generic array type %s",
+                      type_pp(map), istr(tree_ident(decl)));
+         else if (class == GTYPE_CONSTRAINED_ARRAY && !actual_constrained)
+            sem_error(param, "cannot map unconstrained array type %s to "
+                      "constrained formal generic array type %s",
+                      type_pp(map), istr(tree_ident(decl)));
       }
 
       break;

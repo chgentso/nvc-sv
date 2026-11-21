@@ -491,6 +491,7 @@ void map_generic_type(nametab_t *tab, type_t generic, type_t actual)
       [GTYPE_DISCRETE] = type_is_discrete,
       [GTYPE_SCALAR] = type_is_scalar,
       [GTYPE_ARRAY] = type_is_array,
+      [GTYPE_CONSTRAINED_ARRAY] = type_is_array,
       [GTYPE_ACCESS] = type_is_access,
       [GTYPE_FILE] = type_is_file,
       [GTYPE_FLOATING] = type_is_real,
@@ -499,22 +500,33 @@ void map_generic_type(nametab_t *tab, type_t generic, type_t actual)
    const gtype_class_t class = type_subkind(generic);
    if (pred[class] != NULL && !(*pred[class])(actual))
       suppress_errors(tab);
-   else if (class == GTYPE_ARRAY) {
+   else if (class == GTYPE_ARRAY || class == GTYPE_CONSTRAINED_ARRAY) {
       type_t gelem = type_elem(generic);
       if (type_kind(gelem) == T_GENERIC && !type_has_ident(gelem))
          map_generic_type(tab, gelem, type_elem(actual));
+      else if (!type_is_generic(gelem)
+               && !type_eq_map(type_elem(actual), gelem, tab->top_scope->gmap))
+         suppress_errors(tab);
 
       const int ndims = type_indexes(generic);
-      for (int i = 0; i < ndims; i++) {
-         type_t index = type_index(generic, i);
-         if (type_kind(index) == T_GENERIC && !type_has_ident(index))
-            map_generic_type(tab, index, index_type_of(actual, i));
+      if (dimension_of(actual) != ndims)
+         suppress_errors(tab);
+      else {
+         for (int i = 0; i < ndims; i++) {
+            type_t index = type_index(generic, i);
+            if (type_kind(index) == T_GENERIC && !type_has_ident(index))
+               map_generic_type(tab, index, index_type_of(actual, i));
+         }
       }
    }
    else if (class == GTYPE_ACCESS || class == GTYPE_FILE) {
       type_t gdesig = type_designated(generic);
       if (type_kind(gdesig) == T_GENERIC && !type_has_ident(gdesig))
          map_generic_type(tab, gdesig, type_designated(actual));
+      else if (!type_is_generic(gdesig)
+               && !type_eq_map(type_designated(actual), gdesig,
+                               tab->top_scope->gmap))
+         suppress_errors(tab);
    }
 
    hash_put(tab->top_scope->gmap, generic, actual);
@@ -2861,6 +2873,7 @@ static void collect_anonymous_types(type_t type, type_list_t *list)
 
    switch (type_subkind(type)) {
    case GTYPE_ARRAY:
+   case GTYPE_CONSTRAINED_ARRAY:
       {
          const int nindex = type_indexes(type);
          for (int i = 0; i < nindex; i++)

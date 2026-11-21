@@ -1016,6 +1016,7 @@ unsigned dimension_of(type_t type)
    case T_GENERIC:
       switch (type_subkind(type)) {
       case GTYPE_ARRAY:
+      case GTYPE_CONSTRAINED_ARRAY:
          return type_indexes(type);
       case GTYPE_ACCESS:
          return dimension_of(type_designated(type));
@@ -1127,7 +1128,9 @@ type_t index_type_of(type_t type, unsigned dim)
       return type_index(base, dim);
    else if (base_kind == T_ENUM || base_kind == T_NONE)
       return type;
-   else if (base_kind == T_GENERIC && type_subkind(base) == GTYPE_ARRAY)
+   else if (base_kind == T_GENERIC
+            && (type_subkind(base) == GTYPE_ARRAY
+                || type_subkind(base) == GTYPE_CONSTRAINED_ARRAY))
       return type_index(base, dim);
    else if (base_kind == T_RECORD || base_kind == T_GENERIC)
       return NULL;

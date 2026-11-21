@@ -1542,13 +1542,15 @@ static void dump_port(tree_t t, int indent)
          print_syntax("#range <> . <>");
          break;
       case GTYPE_ARRAY:
+      case GTYPE_CONSTRAINED_ARRAY:
          {
             print_syntax("#array (");
             const int nindex = type_indexes(type);
             for (int i = 0; i < nindex; i++) {
                if (i > 0) print_syntax(", ");
                dump_type(type_index(type, i));
-               print_syntax(" #range <>");
+               if (type_subkind(type) == GTYPE_ARRAY)
+                  print_syntax(" #range <>");
             }
             print_syntax(") #of ");
             dump_type(type_elem(type));

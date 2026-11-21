@@ -4401,6 +4401,27 @@ START_TEST(test_gaccess)
 }
 END_TEST
 
+START_TEST(test_garray)
+{
+   set_standard(STD_19);
+
+   input_from_file(TESTDIR "/sem/garray.vhd");
+
+   const error_t expect[] = {
+      { 18, "cannot map constrained array type C4 to unconstrained formal "
+        "generic array type UA" },
+      { 19, "cannot map unconstrained array type U1 to constrained formal "
+        "generic array type CA" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   parse_and_check(T_PACKAGE, T_PACKAGE, T_ENTITY, T_ARCH);
+
+   check_expected_errors();
+}
+END_TEST
+
 START_TEST(test_attrspec_relaxed)
 {
    set_standard(STD_08);
@@ -4800,6 +4821,7 @@ Suite *get_sem_tests(void)
    tcase_add_test(tc_core, test_discmark);
    tcase_add_test(tc_core, test_protself);
    tcase_add_test(tc_core, test_gaccess);
+   tcase_add_test(tc_core, test_garray);
    suite_add_tcase(s, tc_core);
 
    return s;

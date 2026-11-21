@@ -51,6 +51,7 @@ typedef enum {
    GTYPE_PHYSICAL,
    GTYPE_FLOATING,
    GTYPE_ARRAY,
+   GTYPE_CONSTRAINED_ARRAY,
    GTYPE_ACCESS,
    GTYPE_FILE,
 } gtype_class_t;

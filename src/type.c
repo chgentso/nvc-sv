@@ -604,8 +604,10 @@ type_kind_t type_base_kind(type_t t)
 bool type_is_array(type_t t)
 {
    const type_kind_t base = type_base_kind(t);
-   if (base == T_GENERIC)
-      return type_subkind(type_base_recur(t)) == GTYPE_ARRAY;
+   if (base == T_GENERIC) {
+      const gtype_class_t class = type_subkind(type_base_recur(t));
+      return class == GTYPE_ARRAY || class == GTYPE_CONSTRAINED_ARRAY;
+   }
    else
       return base == T_ARRAY;
 }
@@ -982,7 +984,7 @@ bool type_is_composite(type_t t)
    const type_kind_t base = type_base_kind(t);
    if (base == T_GENERIC) {
       const gtype_class_t class = type_subkind(type_base_recur(t));
-      return class == GTYPE_ARRAY;
+      return class == GTYPE_ARRAY || class == GTYPE_CONSTRAINED_ARRAY;
    }
    else
       return base == T_ARRAY || base == T_RECORD;
@@ -1102,6 +1104,7 @@ bool type_matches_class(type_t t, gtype_class_t class)
    case GTYPE_ACCESS:
       return type_is_access(t);
    case GTYPE_ARRAY:
+   case GTYPE_CONSTRAINED_ARRAY:
       return type_is_array(t);
    case GTYPE_FILE:
       return type_is_file(t);

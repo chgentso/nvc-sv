@@ -2818,6 +2818,7 @@ static void declare_generic_ops(tree_t parent, type_t type)
       add_generic_type_op(parent, 1, type, std_string, "TO_STRING");
       // Fall-through
    case GTYPE_ARRAY:
+   case GTYPE_CONSTRAINED_ARRAY:
    case GTYPE_ACCESS:
    case GTYPE_PRIVATE:
       add_generic_type_op(parent, 2, type, std_bool, "\"=\"");
@@ -2956,7 +2957,7 @@ static void declare_generic_ops(tree_t parent, type_t type)
       if (type_kind(of) == T_GENERIC && !type_has_ident(of))
          declare_generic_ops(parent, of);
    }
-   else if (class == GTYPE_ARRAY) {
+   else if (class == GTYPE_ARRAY || class == GTYPE_CONSTRAINED_ARRAY) {
       // Declare predefined operators for any anonymous element or index
       type_t elem = type_elem(type);
       if (type_kind(elem) == T_GENERIC && !type_has_ident(elem))
@@ -6915,7 +6916,7 @@ static type_t p_array_index_incomplete_type(int *form)
    }
 }
 
-static void p_array_index_incomplete_type_list(type_t type)
+static int p_array_index_incomplete_type_list(type_t type)
 {
    // array_index_incomplete_type { , array_index_incomplete_type }
 
@@ -6925,6 +6926,8 @@ static void p_array_index_incomplete_type_list(type_t type)
    do {
       type_add_index(type, p_array_index_incomplete_type(&form));
    } while (optional(tCOMMA));
+
+   return form;
 }
 
 static type_t p_incomplete_subtype_indication(void)
@@ -6949,14 +6952,14 @@ static void p_array_incomplete_type_definition(type_t type)
    consume(tARRAY);
    consume(tLPAREN);
 
-   p_array_index_incomplete_type_list(type);
+   const int form = p_array_index_incomplete_type_list(type);
 
    consume(tRPAREN);
    consume(tOF);
 
    type_set_elem(type, p_incomplete_subtype_indication());
 
-   type_set_subkind(type, GTYPE_ARRAY);
+   type_set_subkind(type, form == 2 ? GTYPE_CONSTRAINED_ARRAY : GTYPE_ARRAY);
 }
 
 static void p_access_incomplete_type_definition(type_t type)

@@ -133,6 +133,7 @@ static void collect_generic_types(type_t type, object_copy_ctx_t *ctx)
    // Also collect any anonymous generic types
    switch (type_subkind(type)) {
    case GTYPE_ARRAY:
+   case GTYPE_CONSTRAINED_ARRAY:
       {
          type_t elem = type_elem(type);
          if (type_kind(elem) == T_GENERIC && !type_has_ident(elem))
