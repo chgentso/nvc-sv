@@ -73,7 +73,7 @@ module inval4;
     r = real'(str);
     r = real'(q);
     arr = '{default: 1, default: 2};
-    arr = '{1, 2, default: 0};
+    arr = '{1: 1, 2};
     arr = '{1: 1, 1: 2, default: 0};
     arr = '{4: 1, default: 0};
     arr = '{1: 1, 2: 2};

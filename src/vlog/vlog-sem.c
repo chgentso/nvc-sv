@@ -150,8 +150,7 @@ static int vlog_unpacked_dims(vlog_node_t v)
    case V_REF:
    case V_MEMBER_REF:
       {
-         vlog_node_t decl = vlog_kind(v) == V_MEMBER_REF
-            ? vlog_member_decl(v) : (vlog_has_ref(v) ? vlog_ref(v) : NULL);
+         vlog_node_t decl = vlog_has_ref(v) ? vlog_ref(v) : NULL;
          if (decl == NULL)
             return 0;
 
@@ -162,6 +161,8 @@ static int vlog_unpacked_dims(vlog_node_t v)
          case V_PORT_DECL:
          case V_LOCAL_DECL:
          case V_TF_PORT_DECL:
+         case V_PARAM_DECL:
+         case V_LOCALPARAM:
             ndims += vlog_ranges(decl);
             if (vlog_has_type(decl)) {
                vlog_node_t dt = vlog_get_type(vlog_type(decl));
@@ -3193,8 +3194,7 @@ static vlog_node_t vlog_select_dim(vlog_node_t v, int skip)
    case V_REF:
    case V_MEMBER_REF:
       {
-         vlog_node_t decl = vlog_kind(v) == V_MEMBER_REF
-            ? vlog_member_decl(v) : (vlog_has_ref(v) ? vlog_ref(v) : NULL);
+         vlog_node_t decl = vlog_has_ref(v) ? vlog_ref(v) : NULL;
          if (decl == NULL)
             return NULL;
 
@@ -3221,6 +3221,16 @@ static vlog_node_t vlog_select_dim(vlog_node_t v, int skip)
 
          vlog_node_t dt = vlog_get_type(vlog_type(decl));
          while (dt != NULL && vlog_kind(dt) == V_DATA_TYPE) {
+            if (vlog_subkind(dt) == DT_DYNARRAY || vlog_subkind(dt) == DT_QUEUE
+                || vlog_subkind(dt) == DT_ASSOC
+                || vlog_subkind(dt) == DT_STRING) {
+               const int np = vlog_ranges(dt);
+               if (skip == 0)
+                  return np > 0 ? vlog_range(dt, 0) : NULL;
+               skip--;
+               dt = vlog_has_type(dt) ? vlog_get_type(vlog_type(dt)) : NULL;
+               continue;
+            }
             const int np = vlog_ranges(dt);
             if (skip < np)
                return vlog_range(dt, skip);
@@ -3344,7 +3354,8 @@ static type_mask_t vlog_check_event(vlog_node_t v)
       if (mask != TM_ERROR && (mask & TM_REAL) && !(mask & TM_INTEGRAL))
          error_at(vlog_loc(v), "an edge event control cannot be used with a "
                   "real value");
-      else if (mask != TM_ERROR && (mask & TM(DT_EVENT)))
+      else if (mask != TM_ERROR && (mask & TM(DT_EVENT))
+               && !(mask & TM_INTEGRAL))
          error_at(vlog_loc(v), "an edge event control cannot be used with a "
                   "named event");
       break;
@@ -3786,12 +3797,19 @@ static type_mask_t vlog_check_class_new(vlog_node_t v)
    return TM_CLASS;
 }
 
+static type_mask_t vlog_check_pattern_expr_ex(vlog_node_t v, bool sized_dyn);
+
 static type_mask_t vlog_check_dynamic_new(vlog_node_t v)
 {
    vlog_check_expr(vlog_left(v));
 
-   if (vlog_has_value(v))
-      vlog_check_expr(vlog_value(v));
+   if (vlog_has_value(v)) {
+      vlog_node_t init = vlog_value(v);
+      if (vlog_kind(init) == V_PATTERN_EXPR)
+         vlog_check_pattern_expr_ex(init, true);
+      else
+         vlog_check_expr(init);
+   }
 
    return get_type_mask(vlog_type(v));
 }
@@ -3834,7 +3852,7 @@ static type_mask_t vlog_check_min_typ_max(vlog_node_t v)
    return vlog_check_expr(vlog_value(v));
 }
 
-static type_mask_t vlog_check_pattern_expr(vlog_node_t v)
+static type_mask_t vlog_check_pattern_expr_ex(vlog_node_t v, bool sized_dyn)
 {
    if (!vlog_has_type(v))
       return TM_ERROR;
@@ -3842,7 +3860,8 @@ static type_mask_t vlog_check_pattern_expr(vlog_node_t v)
    vlog_node_t type = vlog_type(v);
    vlog_node_t bt = vlog_get_type(type);
    const bool assoc = vlog_is_assoc_type(bt);
-   const bool unsized_arr = bt != NULL && vlog_kind(bt) == V_DATA_TYPE
+   const bool unsized_arr = !sized_dyn && bt != NULL
+      && vlog_kind(bt) == V_DATA_TYPE
       && (vlog_subkind(bt) == DT_QUEUE
           || (vlog_subkind(bt) == DT_DYNARRAY && vlog_ranges(bt) == 0));
    const bool is_struct = bt != NULL
@@ -3861,7 +3880,6 @@ static type_mask_t vlog_check_pattern_expr(vlog_node_t v)
             error_at(vlog_loc(item), "duplicate default item in assignment "
                      "pattern");
          seen_default = true;
-         seen_keyed = true;
          if (unsized_arr)
             error_at(vlog_loc(item), "keyed or default item is not allowed "
                      "in a dynamic array or queue assignment pattern");
@@ -3927,11 +3945,11 @@ static type_mask_t vlog_check_pattern_expr(vlog_node_t v)
                vlog_node_t ri = vlog_param(rhs, j);
                if (vlog_has_right(ri)
                    && vlog_kind(vlog_right(ri)) == V_PATTERN_EXPR)
-                  (void)vlog_check_pattern_expr(vlog_right(ri));
+                  (void)vlog_check_pattern_expr_ex(vlog_right(ri), false);
             }
          }
          else if (vlog_kind(rhs) == V_PATTERN_EXPR)
-            (void)vlog_check_pattern_expr(rhs);
+            (void)vlog_check_pattern_expr_ex(rhs, false);
       }
    }
 
@@ -3940,6 +3958,11 @@ static type_mask_t vlog_check_pattern_expr(vlog_node_t v)
                "assignment pattern");
 
    return get_type_mask(type);
+}
+
+static type_mask_t vlog_check_pattern_expr(vlog_node_t v)
+{
+   return vlog_check_pattern_expr_ex(v, false);
 }
 
 static type_mask_t vlog_check_cast(vlog_node_t v)
