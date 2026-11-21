@@ -3004,3 +3004,4 @@ svctorchain1 verilog
 svconststr1 verilog
 svtyperestrict1 verilog
 svwildport1 verilog
+svbytestr1 verilog

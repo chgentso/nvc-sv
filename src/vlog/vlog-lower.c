@@ -2549,6 +2549,41 @@ static mir_value_t vlog_load_array_of(vlog_gen_t *g, mir_value_t ua,
                                       vlog_node_t expr, unsigned count,
                                       const type_info_t *eti);
 
+static mir_value_t vlog_lower_string_bytes(vlog_gen_t *g, vlog_node_t str,
+                                           unsigned nelems)
+{
+   assert(vlog_kind(str) == V_STRING);
+
+   number_t num = vlog_number(str);
+   const unsigned nbytes = number_width(num) / 8;
+   const unsigned total = nelems * 8;
+
+   mir_type_t t_offset = mir_offset_type(g->mu);
+   mir_type_t t_total = mir_vec4_type(g->mu, total, false);
+   mir_type_t t_byte = mir_vec4_type(g->mu, 8, false);
+
+   mir_value_t result;
+   if (total <= 64)
+      result = mir_const_vec(g->mu, t_total, 0, 0);
+   else {
+      mir_type_t t_bit = mir_vec4_type(g->mu, 1, false);
+      result = mir_build_cast(g->mu, t_total,
+                              mir_const_vec(g->mu, t_bit, 0, 0));
+   }
+
+   // Left-align string characters into elements 0..nelems-1, padding
+   // trailing elements with null bytes and truncating excess characters
+   const unsigned copy = MIN(nelems, nbytes);
+   for (unsigned i = 0; i < copy; i++) {
+      const uint8_t ch = number_byte(num, nbytes - 1 - i);
+      mir_value_t b = mir_const_vec(g->mu, t_byte, ch, 0);
+      result = mir_build_insert(g->mu, b, result,
+                                mir_const(g->mu, t_offset, i * 8));
+   }
+
+   return result;
+}
+
 static mir_value_t vlog_lower_array_pattern(vlog_gen_t *g, vlog_node_t v,
                                             vlog_node_t *dims, int ndims,
                                             const type_info_t *eti)
@@ -2591,6 +2626,9 @@ static mir_value_t vlog_lower_array_pattern(vlog_gen_t *g, vlog_node_t v,
       int en;
       if (ndims > 1 && vlog_kind(expr) == V_PATTERN_EXPR)
          elem = vlog_lower_array_pattern(g, expr, dims + 1, ndims - 1, eti);
+      else if (ndims == 2 && vlog_kind(expr) == V_STRING && eti->size == 8
+               && mir_is_vector_type(g->mu, eti->type))
+         elem = vlog_lower_string_bytes(g, expr, vlog_size(dims[1]));
       else if (ndims > 1 && (en = vlog_unpacked_dims(expr, edims)) > 0
                && (stride / eti->size) % vlog_unpacked_count(edims, en) == 0) {
          const unsigned ecount = vlog_unpacked_count(edims, en);
@@ -4161,6 +4199,9 @@ static void vlog_assign_variable(vlog_gen_t *g, vlog_node_t target,
          }
          else if (vlog_kind(rhs) == V_PATTERN_EXPR)
             value = vlog_lower_array_pattern(g, rhs, dims, ndims, eti);
+         else if (vlog_kind(rhs) == V_STRING && ndims == 1 && eti->size == 8
+                  && mir_is_vector_type(g->mu, eti->type))
+            value = vlog_lower_string_bytes(g, rhs, count);
          else if (mir_points_to_vector(g->mu, lvalue1.obj)) {
             vlog_node_t sdims[MAX_UNPACKED_DIMS];
             const int sn = vlog_unpacked_dims(rhs, sdims);
@@ -12677,8 +12718,16 @@ static void vlog_lower_non_blocking_assignment(vlog_gen_t *g, vlog_node_t v)
    mir_value_t unpacked = MIR_NULL_VALUE, source;
    if (class == MIR_TYPE_VEC2 || class == MIR_TYPE_VEC4) {
       vlog_node_t rhs = vlog_value(v);
-      mir_type_t context = vlog_assign_context(g, type, rhs);
-      mir_value_t value = vlog_lower_with_context(g, rhs, context);
+      mir_value_t value;
+      if (nlvalues == 1 && vlog_kind(rhs) == V_STRING
+          && (ndims = vlog_unpacked_dims(target, dims)) == 1
+          && vlog_array_elem_info(g, target)->size == 8
+          && mir_is_vector_type(g->mu, vlog_array_elem_info(g, target)->type))
+         value = vlog_lower_string_bytes(g, rhs, vlog_unpacked_count(dims, 1));
+      else {
+         mir_type_t context = vlog_assign_context(g, type, rhs);
+         value = vlog_lower_with_context(g, rhs, context);
+      }
       mir_value_t resize = vlog_lower_cast(g, type, value);
       assert(mir_is_vector(g->mu, resize));
 
@@ -28798,6 +28847,11 @@ static void vlog_lower_assign_process(vlog_gen_t *g, vlog_node_t v)
        && (ndims = vlog_unpacked_dims(target, dims)) > 0)
       value = vlog_lower_array_pattern(g, rhs, dims, ndims,
                                        vlog_array_elem_info(g, target));
+   else if (vlog_kind(rhs) == V_STRING && vlog_kind(target) != V_CONCAT
+            && (ndims = vlog_unpacked_dims(target, dims)) == 1
+            && vlog_array_elem_info(g, target)->size == 8
+            && mir_is_vector_type(g->mu, vlog_array_elem_info(g, target)->type))
+      value = vlog_lower_string_bytes(g, rhs, vlog_unpacked_count(dims, 1));
    else
       value = vlog_lower_with_context(g, rhs, vlog_assign_context(g, type, rhs));
 
@@ -30843,6 +30897,10 @@ static void vlog_lower_var_decl(vlog_gen_t *g, vlog_node_t v, tree_t wrap,
             cast = vlog_lower_array_pattern(g, vlog_value(v), dims, ndims,
                                             ti);
       }
+      else if (vlog_kind(vlog_value(v)) == V_STRING && vlog_is_fixed_unpacked(v)
+               && vlog_ranges(v) == 1 && ti->size == 8
+               && mir_is_vector_type(g->mu, ti->type))
+         cast = vlog_lower_string_bytes(g, vlog_value(v), vlog_size(v));
       else if (vlog_kind(vlog_value(v)) == V_STREAM && total_size > 1
                && vlog_is_fixed_unpacked(v)) {
          // The elements are slices of the packed result
@@ -31051,6 +31109,14 @@ static void vlog_store_local_init(vlog_gen_t *g, vlog_node_t d, mir_value_t var)
          mir_value_t packed = vlog_lower_stream(g, vlog_value(d), t_flat);
          vlog_store_flat_array(g, var, nelems, ti,
                                vlog_lower_cast(g, t_flat, packed));
+         return;
+      }
+
+      if (vlog_kind(vlog_value(d)) == V_STRING && ndims == 1 && ti->size == 8
+          && is_vec) {
+         vlog_store_flat_array(
+            g, var, nelems, ti,
+            vlog_lower_string_bytes(g, vlog_value(d), nelems));
          return;
       }
 
