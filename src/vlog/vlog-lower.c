@@ -28347,6 +28347,24 @@ static void vlog_lower_always(vlog_gen_t *g, vlog_node_t v)
       mir_build_jump(g->mu, start_bb);
 }
 
+static void vlog_uses_task_cb(vlog_node_t v, void *ctx)
+{
+   switch (vlog_kind(v)) {
+   case V_METHOD_CALL:
+   case V_FORK:
+   case V_USER_TCALL:
+   case V_USER_FCALL:
+      *(bool *)ctx = true;
+      break;
+   case V_SYS_FCALL:
+      if (vlog_ident(v) == ident_new("$process_self"))
+         *(bool *)ctx = true;
+      break;
+   default:
+      break;
+   }
+}
+
 static void vlog_lower_initial(vlog_gen_t *g, vlog_node_t v)
 {
    mir_block_t start_bb = mir_add_block(g->mu);
@@ -28361,10 +28379,14 @@ static void vlog_lower_initial(vlog_gen_t *g, vlog_node_t v)
    vlog_lower_stmts(g, v, &gs);
 
    if (!mir_block_finished(g->mu, MIR_NULL_BLOCK)) {
-      mir_value_t res = mir_build_fcall(g->mu, ident_new("__sv_fork_finish"),
-                                        mir_offset_type(g->mu), MIR_NULL_STAMP,
-                                        NULL, 0);
-      mir_build_consume(g->mu, res);
+      bool uses_task = false;
+      vlog_visit(v, vlog_uses_task_cb, &uses_task);
+      if (uses_task) {
+         mir_value_t res = mir_build_fcall(g->mu, ident_new("__sv_fork_finish"),
+                                           mir_offset_type(g->mu),
+                                           MIR_NULL_STAMP, NULL, 0);
+         mir_build_consume(g->mu, res);
+      }
       mir_build_return(g->mu, MIR_NULL_VALUE);
    }
 }
