@@ -3390,7 +3390,7 @@ START_TEST(test_inval4)
       { 52, "packed dimensions cannot be added to unpacked data type" },
       { 53, "unsized dimension is not allowed in $bits" },
       { 54, "queue dimension is not allowed in $bits" },
-      { 84, "a class constructor cannot be declared virtual" },
+      { 87, "a class constructor cannot be declared virtual" },
       {  8, "the size of the value of enumeration name 'G' is 4 but the base "
          "type has 3 bits" },
       {  9, "the value of enumeration name 'Q' cannot contain x or z as the "
@@ -3404,6 +3404,8 @@ START_TEST(test_inval4)
       { 45, "cannot assign this value to a variable of enumeration type "
          "without a cast" },
       { 47, "enumeration name 'W1' overflows base type" },
+      { 62, "string literal can only be assigned to a 1-dimensional unpacked "
+         "array of 8-bit 2-state elements" },
       { 36, "cannot assign this value to a variable of enumeration type "
          "without a cast" },
       { 37, "an arithmetic assignment cannot be used with a variable of "
@@ -3414,27 +3416,29 @@ START_TEST(test_inval4)
          "without a cast" },
       { 41, "an edge event control cannot be used with a real value" },
       { 58, "cannot assign to const variable 'cvar1'" },
-      { 63, "array assignment pattern key must be a constant expression" },
-      { 64, "unpacked array cannot be used in an lvalue concatenation" },
-      { 65, "non-integral target of type 'string' cannot be used in an "
+      { 64, "array assignment pattern key must be a constant expression" },
+      { 65, "unpacked array cannot be used in an lvalue concatenation" },
+      { 66, "non-integral target of type 'string' cannot be used in an "
          "lvalue concatenation" },
-      { 66, "non-integral target of type 'dynamic array' cannot be used in "
+      { 67, "non-integral target of type 'dynamic array' cannot be used in "
          "an lvalue concatenation" },
-      { 67, "cannot assign to const variable 'cvar2'" },
-      { 68, "part-select direction [0:1] does not match declared range [3:0]" },
-      { 69, "an edge event control cannot be used with a named event" },
-      { 70, "method 'push_back' of a queue expects 1 argument but has 0" },
-      { 71, "method 'insert' of a queue expects 2 arguments but has 1" },
-      { 72, "cannot cast string to 'real'" },
-      { 73, "cannot cast queue to 'real'" },
-      { 74, "duplicate default item in assignment pattern" },
-      { 75, "cannot mix positional and keyed items in assignment pattern" },
-      { 76, "duplicate key 1 in array assignment pattern" },
-      { 77, "array assignment pattern key 4 is outside declared range [0:3]" },
-      { 78, "keyed array assignment pattern does not cover all 4 elements and "
+      { 68, "cannot assign to const variable 'cvar2'" },
+      { 69, "part-select direction [0:1] does not match declared range [3:0]" },
+      { 70, "an edge event control cannot be used with a named event" },
+      { 71, "method 'push_back' of a queue expects 1 argument but has 0" },
+      { 72, "method 'insert' of a queue expects 2 arguments but has 1" },
+      { 73, "cannot cast string to 'real'" },
+      { 74, "cannot cast queue to 'real'" },
+      { 75, "duplicate default item in assignment pattern" },
+      { 76, "cannot mix positional and keyed items in assignment pattern" },
+      { 77, "duplicate key 1 in array assignment pattern" },
+      { 78, "array assignment pattern key 4 is outside declared range [0:3]" },
+      { 79, "keyed array assignment pattern does not cover all 4 elements and "
          "has no default" },
-      { 79, "array assignment pattern has 3 elements but target array has 4" },
-      { 80, "assignment pattern replication count must be positive" },
+      { 80, "array assignment pattern has 3 elements but target array has 4" },
+      { 81, "assignment pattern replication count must be positive" },
+      { 82, "cannot assign scalar value to unpacked array" },
+      { 83, "'$' index is only allowed for queues" },
       { -1, NULL }
    };
    expect_errors(expect);

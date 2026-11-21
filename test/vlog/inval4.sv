@@ -59,6 +59,7 @@ module inval4;
   logic [3:0] vec;
   event ev;
   int q[$];
+  logic [7:0] badstr [0:3] = "AB";
   initial begin
     arr = '{i: 1, default: 0};
     {i, arr} = 0;
@@ -78,6 +79,8 @@ module inval4;
     arr = '{1: 1, 2: 2};
     arr = '{3{1}};
     arr = '{0{1}};
+    arr = 10;
+    i = darr[$];
   end
 
   class VC;

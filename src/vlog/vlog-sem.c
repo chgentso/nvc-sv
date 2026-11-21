@@ -809,6 +809,76 @@ static bool vlog_eval_bounds(vlog_node_t dim, int64_t *left, int64_t *right)
       && vlog_eval_const(vlog_right(dim), right);
 }
 
+static int vlog_target_unpacked_dims(vlog_node_t target)
+{
+   switch (vlog_kind(target)) {
+   case V_VAR_DECL:
+   case V_LOCAL_DECL:
+   case V_NET_DECL:
+   case V_PORT_DECL:
+   case V_TF_PORT_DECL:
+      {
+         int ndims = vlog_ranges(target);
+         if (vlog_has_type(target)) {
+            vlog_node_t dt = vlog_get_type(vlog_type(target));
+            if (dt != NULL && vlog_kind(dt) == V_DATA_TYPE
+                && vlog_subkind(dt) == DT_DYNARRAY)
+               ndims += vlog_ranges(dt);
+         }
+         return ndims;
+      }
+   default:
+      return vlog_unpacked_dims(target);
+   }
+}
+
+static void vlog_check_unpacked_scalar_assign(vlog_node_t target,
+                                              vlog_node_t value,
+                                              type_mask_t rmask)
+{
+   const int ndims = vlog_target_unpacked_dims(target);
+   if (ndims <= 0 || rmask == TM_ERROR)
+      return;
+
+   if (vlog_kind(value) == V_STRING) {
+      vlog_node_t et = vlog_get_type(target);
+      if (et != NULL && vlog_kind(et) == V_DATA_TYPE
+          && vlog_subkind(et) == DT_DYNARRAY && vlog_has_type(et))
+         et = vlog_get_type(vlog_type(et));
+
+      const bool ok_byte = ndims == 1 && et != NULL
+         && vlog_kind(et) == V_DATA_TYPE
+         && (get_type_mask(et) & TM_INTEGRAL)
+         && !vlog_is_four_state(et)
+         && vlog_size(et) == 8;
+      if (!ok_byte)
+         error_at(vlog_loc(value), "string literal can only be assigned to a "
+                  "1-dimensional unpacked array of 8-bit 2-state elements");
+      return;
+   }
+
+   switch (vlog_kind(value)) {
+   case V_PATTERN_EXPR:
+   case V_CONCAT:
+   case V_STREAM:
+   case V_DYNAMIC_NEW:
+   case V_COND_EXPR:
+   case V_USER_FCALL:
+   case V_METHOD_CALL:
+   case V_CAST:
+   case V_HIER_REF:
+   case V_SYS_FCALL:
+      return;
+   default:
+      break;
+   }
+
+   if ((rmask & TM_ARRAY) || vlog_unpacked_dims(value) > 0)
+      return;
+
+   error_at(vlog_loc(value), "cannot assign scalar value to unpacked array");
+}
+
 static vlog_node_t vlog_target_outer_dim(vlog_node_t target)
 {
    switch (vlog_kind(target)) {
@@ -1027,6 +1097,7 @@ static void vlog_check_nbassign(vlog_node_t v)
    vlog_check_same_type(target, lmask, value, rmask);
    vlog_check_enum_value(target, value);
    vlog_check_unpacked_assign(target, value);
+   vlog_check_unpacked_scalar_assign(target, value, rmask);
    vlog_check_pattern_target(target, value);
    vlog_check_modport_write(target);
 }
@@ -1044,6 +1115,7 @@ static void vlog_check_bassign(vlog_node_t v)
    vlog_check_same_type(target, lmask, value, rmask);
    vlog_check_enum_value(target, value);
    vlog_check_unpacked_assign(target, value);
+   vlog_check_unpacked_scalar_assign(target, value, rmask);
    vlog_check_pattern_target(target, value);
    vlog_check_modport_write(target);
 }
@@ -1059,6 +1131,7 @@ static void vlog_check_assign(vlog_node_t v)
    type_mask_t rmask = vlog_check_expr(value);
 
    vlog_check_same_type(target, lmask, value, rmask);
+   vlog_check_unpacked_scalar_assign(target, value, rmask);
    vlog_check_pattern_target(target, value);
    vlog_check_modport_write(target);
 }
@@ -1247,8 +1320,9 @@ static void vlog_check_var_decl(vlog_node_t v)
    vlog_check_ranges(v);
 
    if (vlog_has_value(v)) {
-      vlog_check_expr(vlog_value(v));
+      const type_mask_t rmask = vlog_check_expr(vlog_value(v));
       vlog_check_enum_value(v, vlog_value(v));
+      vlog_check_unpacked_scalar_assign(v, vlog_value(v), rmask);
       vlog_check_pattern_target(v, vlog_value(v));
    }
 
@@ -3041,8 +3115,17 @@ static void vlog_check_assoc_indices(vlog_node_t v)
    }
 }
 
+static void vlog_dollar_cb(vlog_node_t v, void *ctx)
+{
+   *(bool *)ctx = true;
+}
+
 static type_mask_t vlog_check_bit_select(vlog_node_t v)
 {
+   vlog_node_t vtype = vlog_get_type(vlog_value(v));
+   const bool is_darray = vtype != NULL && vlog_kind(vtype) == V_DATA_TYPE
+      && vlog_subkind(vtype) == DT_DYNARRAY;
+
    const int nparams = vlog_params(v);
    for (int i = 0; i < nparams; i++) {
       vlog_node_t p = vlog_param(v, i);
@@ -3054,13 +3137,19 @@ static type_mask_t vlog_check_bit_select(vlog_node_t v)
       if (pmask != TM_ERROR && (pmask & TM_REAL)
           && !(vlog_kind(base) == V_HIER_REF && !vlog_has_ref(base)))
          error_at(vlog_loc(p), "index expression cannot have real type");
+
+      if (is_darray && i == 0) {
+         bool has_dollar = false;
+         vlog_visit_only(p, vlog_dollar_cb, &has_dollar, V_DOLLAR);
+         if (has_dollar)
+            error_at(vlog_loc(p), "'$' index is only allowed for queues");
+      }
    }
 
    vlog_check_assoc_indices(v);
 
    const type_mask_t tmask = vlog_check_index(v);
 
-   vlog_node_t vtype = vlog_get_type(vlog_value(v));
    if (tmask != TM_ERROR && vtype != NULL && vlog_kind(vtype) == V_DATA_TYPE
        && vlog_subkind(vtype) == DT_STRING)
       return TM(DT_BYTE);   // One character of the string
