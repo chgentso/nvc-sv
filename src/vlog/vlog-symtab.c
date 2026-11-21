@@ -154,7 +154,8 @@ static vlog_symbol_t *fresh_symbol_for(vlog_symtab_t *st, ident_t name)
    }
 }
 
-static const vlog_symbol_t *symbol_for(vlog_symtab_t *st, ident_t name)
+static const vlog_symbol_t *symbol_for_scope(vlog_symtab_t *st, ident_t name,
+                                             vlog_scope_t **found_scope)
 {
    for (vlog_scope_t *s = st->top; s != NULL; s = s->parent) {
       assert(is_power_of_2(s->max_symbols));
@@ -170,13 +171,22 @@ static const vlog_symbol_t *symbol_for(vlog_symtab_t *st, ident_t name)
                if (n != NULL && n != POISON_NODE
                    && vlog_kind(n) == V_GEN_BLOCK)
                   break;
+               if (found_scope != NULL)
+                  *found_scope = s;
                return &(s->symbols[slot]);
             }
          }
       }
    }
 
+   if (found_scope != NULL)
+      *found_scope = NULL;
    return NULL;
+}
+
+static const vlog_symbol_t *symbol_for(vlog_symtab_t *st, ident_t name)
+{
+   return symbol_for_scope(st, name, NULL);
 }
 
 void vlog_symtab_push(vlog_symtab_t *st, vlog_node_t v)
@@ -348,11 +358,20 @@ void vlog_symtab_pop(vlog_symtab_t *st)
    }
    ACLEAR(st->top->net_deferred);
 
+   const bool leaving_to_root =
+      st->top->parent == NULL || st->top->parent->parent == NULL;
+
    unsigned wptr = 0;
    for (int i = 0; i < st->top->deferred.count; i++) {
       vlog_node_t v = st->top->deferred.items[i];
-      vlog_node_t d = vlog_symtab_query(st, vlog_ident(v));
-      if (d != NULL) {
+      vlog_scope_t *found = NULL;
+      const vlog_symbol_t *sym = symbol_for_scope(st, vlog_ident(v), &found);
+      vlog_node_t d = (sym != NULL && sym->node != POISON_NODE)
+         ? sym->node : NULL;
+      if (d != NULL
+          && (leaving_to_root || found == NULL || found->parent != NULL
+              || (vlog_kind(v) != V_USER_TCALL
+                  && vlog_kind(v) != V_USER_FCALL))) {
          check_forward_ref(v, d);
          vlog_set_ref(v, d);
       }
@@ -1086,7 +1105,8 @@ void vlog_symtab_lookup(vlog_symtab_t *st, vlog_node_t v)
    }
 
    ident_t name = vlog_ident(v);
-   const vlog_symbol_t *sym = symbol_for(st, name);
+   vlog_scope_t *sym_scope = NULL;
+   const vlog_symbol_t *sym = symbol_for_scope(st, name, &sym_scope);
    vlog_node_t home = NULL;
    for (vlog_scope_t *s = st->top; s != NULL && home == NULL; s = s->parent)
       home = s->container;   // The scope of a generate loop has none
@@ -1134,8 +1154,16 @@ void vlog_symtab_lookup(vlog_symtab_t *st, vlog_node_t v)
          vlog_symtab_poison(st, name);
       }
    }
-   else if (sym->node != POISON_NODE)
+   else if (sym->node != POISON_NODE) {
       vlog_set_ref(v, sym->node);
+
+      // A subroutine call bound to the compilation unit scope may still
+      // be shadowed by a later local declaration in an enclosing scope
+      if ((vlog_kind(v) == V_USER_TCALL || vlog_kind(v) == V_USER_FCALL)
+          && sym_scope != NULL && sym_scope->parent == NULL
+          && st->top->parent != NULL)
+         APUSH(st->top->deferred, v);
+   }
 }
 
 static bool copy_data_type_pred(vlog_node_t v, void *ctx)

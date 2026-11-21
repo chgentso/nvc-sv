@@ -3456,6 +3456,26 @@ START_TEST(test_inval4)
 }
 END_TEST
 
+START_TEST(test_callorder1)
+{
+   const error_t expect[] = {
+      {  9, "'f_ev' is not a task" },
+      { 10, "'t_var' is not a task" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/callorder1.sv");
+
+   vlog_check(do_parse_only(V_NAMESPACE));
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
 START_TEST(test_final1)
 {
    const error_t expect[] = {
@@ -4489,6 +4509,7 @@ Suite *get_vlog_tests(void)
    tcase_add_test(tc, test_crash18);
    tcase_add_test(tc, test_genvaruse1);
    tcase_add_test(tc, test_gendup1);
+   tcase_add_test(tc, test_callorder1);
    suite_add_tcase(s, tc);
 
    return s;
