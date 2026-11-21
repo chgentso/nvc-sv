@@ -2716,26 +2716,48 @@ static attr_kind_t parse_predefined_attr(ident_t ident)
    return ATTR_USER;
 }
 
-static void add_generic_type_op2(tree_t parent, int nargs, type_t type,
-                                 type_t right, type_t result,
-                                 const char *name)
+static tree_t make_generic_box_sub(tree_t parent, class_t class,
+                                   const char *name, type_t result)
 {
    ident_t id = ident_new(name);
 
    type_t ftype = type_new(T_SIGNATURE);
    type_set_ident(ftype, id);
-   type_set_result(ftype, result);
-
-   for (int i = 0; i < nargs; i++)
-      type_add_param(ftype, i == 1 ? right : type);
+   if (result != NULL)
+      type_set_result(ftype, result);
 
    tree_t p = tree_new(T_GENERIC_DECL);
-   tree_set_class(p, C_FUNCTION);
+   tree_set_class(p, class);
    tree_set_ident(p, id);
    tree_set_type(p, ftype);
    tree_set_subkind(p, PORT_IN);
    tree_set_loc(p, CURRENT_LOC);
    tree_set_flag(p, TREE_F_PREDEFINED);
+
+   tree_t box = tree_new(T_BOX);
+   tree_set_loc(box, CURRENT_LOC);
+   tree_set_value(p, box);
+
+   return p;
+}
+
+static void add_generic_type_op3(tree_t parent, type_t left, type_t right,
+                                 type_t result, const char *name)
+{
+   tree_t p = make_generic_box_sub(parent, C_FUNCTION, name, result);
+   add_port(p, "L", left, PORT_IN, NULL);
+   add_port(p, "R", right, PORT_IN, NULL);
+   add_interface(parent, p, T_GENERIC_DECL);
+   insert_name(nametab, p, NULL);
+}
+
+static void add_generic_type_op2(tree_t parent, int nargs, type_t type,
+                                 type_t right, type_t result,
+                                 const char *name)
+{
+   tree_t p = make_generic_box_sub(parent, C_FUNCTION, name, result);
+   for (int j = 0; j < nargs; j++)
+      add_port(p, j == 0 ? "L" : "R", j == 1 ? right : type, PORT_IN, NULL);
 
    // LRM 08 section 6.5.3.1: the *predefined* [..] operators,
    // implicitly declared as formal generic subprograms
@@ -2747,22 +2769,6 @@ static void add_generic_type_op2(tree_t parent, int nargs, type_t type,
    // The 2008 LRM seems to be ambiguous as to whether we should map the
    // predefined operator or do a lookup for a matching visible
    // operator.  We always follow the 2019 behaviour here.
-
-   tree_t box = tree_new(T_BOX);
-   tree_set_loc(box, CURRENT_LOC);
-
-   tree_set_value(p, box);
-
-   for (int j = 0; j < nargs; j++) {
-      tree_t arg = tree_new(T_PARAM_DECL);
-      tree_set_ident(arg, ident_new(j == 0 ? "L" : "R"));
-      tree_set_type(arg, j == 1 ? right : type);
-      tree_set_subkind(arg, PORT_IN);
-      tree_set_class(arg, C_CONSTANT);
-      tree_set_loc(arg, CURRENT_LOC);
-
-      tree_add_port(p, arg);
-   }
 
    add_interface(parent, p, T_GENERIC_DECL);
    insert_name(nametab, p, NULL);
@@ -2812,45 +2818,143 @@ static void declare_generic_ops(tree_t parent, type_t type)
       add_generic_type_op(parent, 1, type, std_string, "TO_STRING");
       // Fall-through
    case GTYPE_ARRAY:
-   case GTYPE_FILE:
    case GTYPE_ACCESS:
    case GTYPE_PRIVATE:
       add_generic_type_op(parent, 2, type, std_bool, "\"=\"");
       add_generic_type_op(parent, 2, type, std_bool, "\"/=\"");
       break;
+   case GTYPE_FILE:
+      break;
    }
 
    if (class == GTYPE_ACCESS) {
-      ident_t id = ident_new("DEALLOCATE");
-
-      type_t ftype = type_new(T_SIGNATURE);
-      type_set_ident(ftype, id);
-      type_add_param(ftype, type);
-
-      tree_t p = tree_new(T_GENERIC_DECL);
-      tree_set_class(p, C_PROCEDURE);
-      tree_set_ident(p, id);
-      tree_set_type(p, ftype);
-      tree_set_subkind(p, PORT_IN);
-      tree_set_loc(p, CURRENT_LOC);
-      tree_set_flag(p, TREE_F_PREDEFINED);
-
-      tree_t box = tree_new(T_BOX);
-      tree_set_loc(box, CURRENT_LOC);
-
-      tree_set_value(p, box);
-
-      tree_t arg = tree_new(T_PARAM_DECL);
-      tree_set_ident(arg, ident_new("PTR"));
-      tree_set_type(arg, type);
-      tree_set_subkind(arg, PORT_INOUT);
-      tree_set_class(arg, C_VARIABLE);
-      tree_set_loc(arg, CURRENT_LOC);
-
-      tree_add_port(p, arg);
-
+      tree_t p = make_generic_box_sub(parent, C_PROCEDURE, "DEALLOCATE", NULL);
+      add_port(p, "PTR", type, PORT_INOUT, NULL);
       add_interface(parent, p, T_GENERIC_DECL);
       insert_name(nametab, p, NULL);
+
+      type_t desig = type_designated(type);
+      if (type_kind(desig) == T_GENERIC && !type_has_ident(desig))
+         declare_generic_ops(parent, desig);
+   }
+   else if (class == GTYPE_FILE) {
+      tree_t std = find_std(nametab);
+      tree_t read_mode = get_local_decl(nametab, std, ident_new("READ_MODE"), 0);
+      assert(read_mode != NULL);
+
+      type_t open_kind   = std_type(std, STD_FILE_OPEN_KIND);
+      type_t open_status = std_type(std, STD_FILE_OPEN_STATUS);
+      type_t of          = type_designated(type);
+
+      tree_t fo1 = make_generic_box_sub(parent, C_PROCEDURE, "FILE_OPEN", NULL);
+      add_port(fo1, "F", type, PORT_INOUT, NULL);
+      add_port(fo1, "EXTERNAL_NAME", std_string, PORT_IN, NULL);
+      add_port(fo1, "OPEN_KIND", open_kind, PORT_IN, make_ref(read_mode));
+      add_interface(parent, fo1, T_GENERIC_DECL);
+      insert_name(nametab, fo1, NULL);
+
+      tree_t fo2 = make_generic_box_sub(parent, C_PROCEDURE, "FILE_OPEN", NULL);
+      add_port(fo2, "STATUS", open_status, PORT_OUT, NULL);
+      add_port(fo2, "F", type, PORT_INOUT, NULL);
+      add_port(fo2, "EXTERNAL_NAME", std_string, PORT_IN, NULL);
+      add_port(fo2, "OPEN_KIND", open_kind, PORT_IN, make_ref(read_mode));
+      add_interface(parent, fo2, T_GENERIC_DECL);
+      insert_name(nametab, fo2, NULL);
+
+      tree_t fc = make_generic_box_sub(parent, C_PROCEDURE, "FILE_CLOSE", NULL);
+      add_port(fc, "F", type, PORT_INOUT, NULL);
+      add_interface(parent, fc, T_GENERIC_DECL);
+      insert_name(nametab, fc, NULL);
+
+      tree_t fl = make_generic_box_sub(parent, C_PROCEDURE, "FLUSH", NULL);
+      add_port(fl, "F", type, PORT_IN, NULL);
+      add_interface(parent, fl, T_GENERIC_DECL);
+      insert_name(nametab, fl, NULL);
+
+      tree_t wr = make_generic_box_sub(parent, C_PROCEDURE, "WRITE", NULL);
+      add_port(wr, "F", type, PORT_INOUT, NULL);
+      add_port(wr, "VALUE", of, PORT_IN, NULL);
+      add_interface(parent, wr, T_GENERIC_DECL);
+      insert_name(nametab, wr, NULL);
+
+      tree_t ef = make_generic_box_sub(parent, C_FUNCTION, "ENDFILE", std_bool);
+      add_port(ef, "F", type, PORT_IN, NULL);
+      add_interface(parent, ef, T_GENERIC_DECL);
+      insert_name(nametab, ef, NULL);
+
+      if (standard() >= STD_19) {
+         tree_t origin_begin =
+            get_local_decl(nametab, std, ident_new("FILE_ORIGIN_BEGIN"), 0);
+         assert(origin_begin != NULL);
+
+         type_t origin_kind = std_type(std, STD_FILE_ORIGIN_KIND);
+         type_t open_state  = std_type(std, STD_FILE_OPEN_STATE);
+
+         tree_t fo3 =
+            make_generic_box_sub(parent, C_FUNCTION, "FILE_OPEN", open_status);
+         tree_set_flag(fo3, TREE_F_IMPURE);
+         add_port(fo3, "F", type, PORT_INOUT, NULL);
+         add_port(fo3, "EXTERNAL_NAME", std_string, PORT_IN, NULL);
+         add_port(fo3, "OPEN_KIND", open_kind, PORT_IN, make_ref(read_mode));
+         add_interface(parent, fo3, T_GENERIC_DECL);
+         insert_name(nametab, fo3, NULL);
+
+         tree_t rw =
+            make_generic_box_sub(parent, C_PROCEDURE, "FILE_REWIND", NULL);
+         add_port(rw, "F", type, PORT_IN, NULL);
+         add_interface(parent, rw, T_GENERIC_DECL);
+         insert_name(nametab, rw, NULL);
+
+         tree_t sk =
+            make_generic_box_sub(parent, C_PROCEDURE, "FILE_SEEK", NULL);
+         add_port(sk, "F", type, PORT_IN, NULL);
+         add_port(sk, "OFFSET", std_int, PORT_IN, NULL);
+         add_port(sk, "ORIGIN", origin_kind, PORT_IN, make_ref(origin_begin));
+         add_interface(parent, sk, T_GENERIC_DECL);
+         insert_name(nametab, sk, NULL);
+
+         tree_t tr =
+            make_generic_box_sub(parent, C_PROCEDURE, "FILE_TRUNCATE", NULL);
+         add_port(tr, "F", type, PORT_IN, NULL);
+         add_port(tr, "SIZE", std_int, PORT_IN, NULL);
+         add_port(tr, "ORIGIN", origin_kind, PORT_IN, make_ref(origin_begin));
+         add_interface(parent, tr, T_GENERIC_DECL);
+         insert_name(nametab, tr, NULL);
+
+         tree_t st =
+            make_generic_box_sub(parent, C_FUNCTION, "FILE_STATE", open_state);
+         add_port(st, "F", type, PORT_IN, NULL);
+         add_interface(parent, st, T_GENERIC_DECL);
+         insert_name(nametab, st, NULL);
+
+         tree_t md =
+            make_generic_box_sub(parent, C_FUNCTION, "FILE_MODE", open_kind);
+         add_port(md, "F", type, PORT_IN, NULL);
+         add_interface(parent, md, T_GENERIC_DECL);
+         insert_name(nametab, md, NULL);
+
+         tree_t ps =
+            make_generic_box_sub(parent, C_FUNCTION, "FILE_POSITION", std_int);
+         add_port(ps, "F", type, PORT_IN, NULL);
+         add_port(ps, "ORIGIN", origin_kind, PORT_IN, make_ref(origin_begin));
+         add_interface(parent, ps, T_GENERIC_DECL);
+         insert_name(nametab, ps, NULL);
+
+         tree_t sz =
+            make_generic_box_sub(parent, C_FUNCTION, "FILE_SIZE", std_int);
+         add_port(sz, "F", type, PORT_IN, NULL);
+         add_interface(parent, sz, T_GENERIC_DECL);
+         insert_name(nametab, sz, NULL);
+
+         tree_t cs =
+            make_generic_box_sub(parent, C_FUNCTION, "FILE_CANSEEK", std_bool);
+         add_port(cs, "F", type, PORT_IN, NULL);
+         add_interface(parent, cs, T_GENERIC_DECL);
+         insert_name(nametab, cs, NULL);
+      }
+
+      if (type_kind(of) == T_GENERIC && !type_has_ident(of))
+         declare_generic_ops(parent, of);
    }
    else if (class == GTYPE_ARRAY) {
       // Declare predefined operators for any anonymous element or index
@@ -2859,6 +2963,13 @@ static void declare_generic_ops(tree_t parent, type_t type)
          declare_generic_ops(parent, elem);
 
       const int nindex = type_indexes(type);
+      if (nindex == 1 && !type_is_protected(elem) && !type_is_file(elem)) {
+         add_generic_type_op(parent, 2, type, type, "\"&\"");
+         add_generic_type_op2(parent, 2, type, elem, type, "\"&\"");
+         add_generic_type_op3(parent, elem, type, type, "\"&\"");
+         add_generic_type_op(parent, 2, elem, type, "\"&\"");
+      }
+
       for (int i = 0; i < nindex; i++) {
          type_t index = type_index(type, i);
          if (type_kind(index) == T_GENERIC && !type_has_ident(index))

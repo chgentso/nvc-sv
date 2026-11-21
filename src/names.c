@@ -511,6 +511,11 @@ void map_generic_type(nametab_t *tab, type_t generic, type_t actual)
             map_generic_type(tab, index, index_type_of(actual, i));
       }
    }
+   else if (class == GTYPE_ACCESS || class == GTYPE_FILE) {
+      type_t gdesig = type_designated(generic);
+      if (type_kind(gdesig) == T_GENERIC && !type_has_ident(gdesig))
+         map_generic_type(tab, gdesig, type_designated(actual));
+   }
 
    hash_put(tab->top_scope->gmap, generic, actual);
 }

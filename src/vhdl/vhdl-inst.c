@@ -147,6 +147,15 @@ static void collect_generic_types(type_t type, object_copy_ctx_t *ctx)
       }
       break;
 
+   case GTYPE_ACCESS:
+   case GTYPE_FILE:
+      {
+         type_t desig = type_designated(type);
+         if (type_kind(desig) == T_GENERIC && !type_has_ident(desig))
+            collect_generic_types(desig, ctx);
+      }
+      break;
+
    default:
       break;
    }

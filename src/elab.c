@@ -864,6 +864,10 @@ static void elab_map_anonymous_type(type_t ctype, type_t etype, hash_t *map)
                                     type_index(etype, i), map);
       }
    }
+   else if (type_subkind(ctype) == GTYPE_ACCESS
+            || type_subkind(ctype) == GTYPE_FILE)
+      elab_map_anonymous_type(type_designated(ctype),
+                              type_designated(etype), map);
 }
 
 static unsigned  elab_nblack;
@@ -1615,6 +1619,15 @@ static void elab_map_generic_type(type_t generic, type_t actual, hash_t *map)
             if (type_kind(index) == T_GENERIC && !type_has_ident(index))
                elab_map_generic_type(index, index_type_of(actual, i), map);
          }
+      }
+      break;
+
+   case GTYPE_ACCESS:
+   case GTYPE_FILE:
+      {
+         type_t gdesig = type_designated(generic);
+         if (type_kind(gdesig) == T_GENERIC && !type_has_ident(gdesig))
+            elab_map_generic_type(gdesig, type_designated(actual), map);
       }
       break;
    }
