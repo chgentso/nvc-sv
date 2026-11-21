@@ -364,6 +364,29 @@ static fold_state_t get_fold_state(vlog_node_t v, fold_ctx_t *ctx)
          return state == FOLD_CONST ? FOLD_POSSIBLE : state;
       }
    case V_METHOD_CALL:
+      switch (vlog_subkind(v)) {
+      case V_METHOD_STR_LEN:
+      case V_METHOD_STR_TOUPPER:
+      case V_METHOD_STR_TOLOWER:
+      case V_METHOD_STR_GETC:
+      case V_METHOD_STR_COMPARE:
+      case V_METHOD_STR_ICOMPARE:
+      case V_METHOD_STR_SUBSTR:
+      case V_METHOD_STR_ATOI:
+      case V_METHOD_STR_ATOHEX:
+      case V_METHOD_STR_ATOOCT:
+      case V_METHOD_STR_ATOBIN:
+      case V_METHOD_STR_ATOREAL:
+         {
+            fold_state_t state = get_fold_state(vlog_value(v), ctx);
+            const int nparams = vlog_params(v);
+            for (int i = 0; i < nparams; i++)
+               state = MAX(state, get_fold_state(vlog_param(v, i), ctx));
+            return state == FOLD_CONST ? FOLD_LATER : state;
+         }
+      default:
+         break;
+      }
       if (vlog_ident(v) == ident_new("name")) {
          // The name of a constant enumeration value is known when the
          // instance is lowered
