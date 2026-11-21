@@ -395,10 +395,11 @@ static void bounds_check_array_ref(tree_t t)
                tree_t r = tree_range(c, 0);
                if (tree_subkind(r) == RANGE_EXPR) {
                   tree_t r_attr = tree_value(r);
-                  assert(tree_kind(r_attr) == T_ATTR_REF);
-                  tree_t r_base = tree_name(r_attr);
-                  checked |= (tree_kind(r_base) == T_REF &&
-                              tree_ref(r_base) == tree_ref(value));
+                  if (tree_kind(r_attr) == T_ATTR_REF) {
+                     tree_t r_base = tree_name(r_attr);
+                     checked |= (tree_kind(r_base) == T_REF &&
+                                 tree_ref(r_base) == tree_ref(value));
+                  }
                }
             }
          }

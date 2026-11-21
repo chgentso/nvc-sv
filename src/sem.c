@@ -181,6 +181,19 @@ static bool sem_check_range(tree_t r, type_t expect, nametab_t *tab)
          if (type_is_none(type))
             return false;   // Was earlier error
 
+         if (standard() >= STD_19 && type_is_range_record(type)) {
+            if (!sem_check(expr, tab))
+               return false;
+
+            type_t btype = range_record_bound_type(type);
+            if (expect && !type_eq(btype, expect))
+               sem_error(expr, "expected type of range bound to be %pT but is %pT",
+                         expect, btype);
+
+            tree_set_type(r, expect ?: btype);
+            break;
+         }
+
          if (tree_kind(expr) != T_ATTR_REF)
             sem_error(expr, "invalid expression in range constraint");
 

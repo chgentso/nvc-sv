@@ -1780,7 +1780,20 @@ static tree_t simp_range(tree_t t)
       return t;
 
    tree_t value = tree_value(t);
-   assert(tree_kind(value) == T_ATTR_REF);
+   if (tree_kind(value) != T_ATTR_REF) {
+      tree_t left, right;
+      range_kind_t dir;
+      if (folded_range_record(value, &left, &right, &dir)) {
+         tree_t r = tree_new(T_RANGE);
+         tree_set_loc(r, tree_loc(t));
+         tree_set_type(r, tree_type(t));
+         tree_set_subkind(r, dir);
+         tree_set_left(r, left);
+         tree_set_right(r, right);
+         return r;
+      }
+      return t;
+   }
 
    const attr_kind_t attr = tree_subkind(value);
    assert(attr == ATTR_RANGE || attr == ATTR_REVERSE_RANGE);

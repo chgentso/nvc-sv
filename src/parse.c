@@ -1965,6 +1965,9 @@ static void binary_op(tree_t expr, tree_t left, tree_t (*right_fn)(tree_t))
 
 static bool is_range_expr(tree_t t)
 {
+   if (standard() >= STD_19 && type_is_range_record(get_type_or_null(t)))
+      return true;
+
    switch (tree_kind(t)) {
    case T_REF:
       return tree_has_ref(t) && aliased_type_decl(tree_ref(t));
@@ -3889,7 +3892,17 @@ static tree_t p_discrete_range(tree_t head)
          consume(tRANGE);
 
          tree_t left = p_expression();
-         tree_t r = solve_types(nametab, p_range(left), constraint);
+         tree_t raw;
+         if (standard() >= STD_19 && !scan(tTO, tDOWNTO) && !is_range_expr(left)) {
+            raw = tree_new(T_RANGE);
+            tree_set_loc(raw, tree_loc(left));
+            tree_set_subkind(raw, RANGE_EXPR);
+            tree_set_value(raw, left);
+         }
+         else
+            raw = p_range(left);
+
+         tree_t r = solve_types(nametab, raw, constraint);
          tree_set_type(r, constraint);
          return r;
       }
@@ -3902,6 +3915,14 @@ static tree_t p_discrete_range(tree_t head)
 
          if (tree_kind(expr1) == T_ATTR_REF)
             return p_range(expr1);   // Special attributes such as 'RANGE
+         else if (standard() >= STD_19 && type_is_range_record(type)) {
+            tree_t r = tree_new(T_RANGE);
+            tree_set_loc(r, tree_loc(expr1));
+            tree_set_subkind(r, RANGE_EXPR);
+            tree_set_value(r, expr1);
+            tree_set_type(r, range_record_bound_type(type));
+            return r;
+         }
          else if (tree_kind(expr1) == T_REF && tree_has_ref(expr1)) {
             // A type name T may stand in for a discrete range
             // equivalent to T'RANGE

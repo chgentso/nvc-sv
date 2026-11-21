@@ -1080,6 +1080,100 @@ tree_t range_of(type_t type, unsigned dim)
    }
 }
 
+bool type_is_range_record(type_t type)
+{
+   if (type == NULL || !type_is_record(type))
+      return false;
+
+   type_t base = type_base_recur(type);
+   if (type_fields(base) != 3)
+      return false;
+
+   const char *name = istr(type_ident(base));
+   const size_t len = strlen(name);
+   if (len <= 13 || strcmp(name + len - 13, "_range_record") != 0)
+      return false;
+
+   tree_t f0 = type_field(base, 0);
+   tree_t f1 = type_field(base, 1);
+   tree_t f2 = type_field(base, 2);
+   return type_is_scalar(tree_type(f0))
+      && type_eq(tree_type(f0), tree_type(f1))
+      && type_is_enum(tree_type(f2));
+}
+
+type_t range_record_bound_type(type_t type)
+{
+   assert(type_is_range_record(type));
+   return tree_type(type_field(type_base_recur(type), 0));
+}
+
+bool folded_range_record(tree_t expr, tree_t *left, tree_t *right,
+                         range_kind_t *dir)
+{
+   while (expr != NULL) {
+      if (tree_kind(expr) == T_QUALIFIED)
+         expr = tree_value(expr);
+      else if (tree_kind(expr) == T_REF && tree_has_ref(expr)) {
+         tree_t decl = tree_ref(expr);
+         if (tree_kind(decl) == T_CONST_DECL && tree_has_value(decl))
+            expr = tree_value(decl);
+         else
+            return false;
+      }
+      else
+         break;
+   }
+
+   if (expr == NULL || tree_kind(expr) != T_AGGREGATE)
+      return false;
+
+   type_t type = tree_type(expr);
+   if (!type_is_range_record(type))
+      return false;
+
+   type_t base = type_base_recur(type);
+   tree_t f0 = type_field(base, 0);
+   tree_t f1 = type_field(base, 1);
+   tree_t f2 = type_field(base, 2);
+
+   tree_t vals[3] = { NULL, NULL, NULL };
+   const int nassocs = tree_assocs(expr);
+   for (int i = 0; i < nassocs; i++) {
+      tree_t a = tree_assoc(expr, i);
+      switch (tree_subkind(a)) {
+      case A_POS:
+         if (tree_pos(a) < 3)
+            vals[tree_pos(a)] = tree_value(a);
+         break;
+      case A_NAMED:
+         {
+            tree_t name = tree_name(a);
+            if (tree_kind(name) == T_REF && tree_has_ref(name)) {
+               tree_t f = tree_ref(name);
+               if (f == f0) vals[0] = tree_value(a);
+               else if (f == f1) vals[1] = tree_value(a);
+               else if (f == f2) vals[2] = tree_value(a);
+            }
+         }
+         break;
+      default:
+         return false;
+      }
+   }
+
+   int64_t dval;
+   if (vals[0] == NULL || vals[1] == NULL || vals[2] == NULL
+       || !folded_int(vals[2], &dval)
+       || (dval != RANGE_TO && dval != RANGE_DOWNTO))
+      return false;
+
+   if (left != NULL) *left = vals[0];
+   if (right != NULL) *right = vals[1];
+   if (dir != NULL) *dir = (range_kind_t)dval;
+   return true;
+}
+
 range_kind_t direction_of(type_t type, unsigned dim)
 {
    switch (type_kind(type)) {
@@ -1097,7 +1191,12 @@ range_kind_t direction_of(type_t type, unsigned dim)
          if (rkind == RANGE_EXPR) {
             // Return a fixed direction if possible
             tree_t value = tree_value(r);
-            assert(tree_kind(value) == T_ATTR_REF);
+            if (tree_kind(value) != T_ATTR_REF) {
+               range_kind_t dir;
+               if (folded_range_record(value, NULL, NULL, &dir))
+                  return dir;
+               return rkind;
+            }
 
             DEBUG_ONLY({
                   const attr_kind_t attr = tree_subkind(value);
@@ -2979,7 +3078,12 @@ static range_kind_t get_range_direction(tree_t r)
    // Handle ranges like X'RANGE where X has known direction
 
    tree_t aref = tree_value(r);
-   assert(tree_kind(aref) == T_ATTR_REF);
+   if (tree_kind(aref) != T_ATTR_REF) {
+      range_kind_t rdir;
+      if (folded_range_record(aref, NULL, NULL, &rdir))
+         return rdir;
+      return RANGE_EXPR;
+   }
 
    const attr_kind_t kind = tree_subkind(aref);
    assert(kind == ATTR_RANGE || kind == ATTR_REVERSE_RANGE);

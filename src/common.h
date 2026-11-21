@@ -50,6 +50,10 @@ unsigned bits_for_range(int64_t low, int64_t high);
 unsigned dimension_of(type_t type);
 type_t index_type_of(type_t type, unsigned dim);
 range_kind_t direction_of(type_t type, unsigned dim);
+bool type_is_range_record(type_t type);
+type_t range_record_bound_type(type_t type);
+bool folded_range_record(tree_t expr, tree_t *left, tree_t *right,
+                         range_kind_t *dir);
 tree_t range_of(type_t type, unsigned dim);
 bool unit_needs_cgen(tree_t t);
 bool package_needs_body(tree_t pack);

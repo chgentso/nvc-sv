@@ -291,13 +291,21 @@ static vcode_reg_t lower_range_left(lower_unit_t *lu, tree_t r)
 
    vcode_reg_t left_reg;
    if (tree_subkind(r) == RANGE_EXPR) {
-      int dim = 1;
-      vcode_reg_t array_reg = lower_range_expr(lu, r, &dim);
+      tree_t value = tree_value(r);
+      if (tree_kind(value) != T_ATTR_REF
+          && type_is_range_record(tree_type(value))) {
+         vcode_reg_t rec_reg = lower_rvalue(lu, value);
+         left_reg = emit_load_indirect(emit_record_ref(rec_reg, 0));
+      }
+      else {
+         int dim = 1;
+         vcode_reg_t array_reg = lower_range_expr(lu, r, &dim);
 
-      if (dim < 0)
-         left_reg = emit_uarray_right(array_reg, -dim - 1);
-      else
-         left_reg = emit_uarray_left(array_reg, dim - 1);
+         if (dim < 0)
+            left_reg = emit_uarray_right(array_reg, -dim - 1);
+         else
+            left_reg = emit_uarray_left(array_reg, dim - 1);
+      }
    }
    else
       left_reg = lower_rvalue(lu, tree_left(r));
@@ -315,17 +323,22 @@ static vcode_reg_t lower_range_right(lower_unit_t *lu, tree_t r)
 
    vcode_reg_t right_reg;
    if (tree_subkind(r) == RANGE_EXPR) {
-      int dim = 1;
-      vcode_reg_t array_reg = lower_range_expr(lu, r, &dim);
+      tree_t value = tree_value(r);
+      if (tree_kind(value) != T_ATTR_REF
+          && type_is_range_record(tree_type(value))) {
+         vcode_reg_t rec_reg = lower_rvalue(lu, value);
+         right_reg = emit_load_indirect(emit_record_ref(rec_reg, 1));
+      }
+      else {
+         int dim = 1;
+         vcode_reg_t array_reg = lower_range_expr(lu, r, &dim);
 
-      if (dim < 0)
-         right_reg = emit_uarray_left(array_reg, -dim - 1);
-      else
-         right_reg = emit_uarray_right(array_reg, dim - 1);
+         if (dim < 0)
+            right_reg = emit_uarray_left(array_reg, -dim - 1);
+         else
+            right_reg = emit_uarray_right(array_reg, dim - 1);
+      }
 
-      type_t type = tree_type(r);
-      vcode_type_t vtype = lower_type(type);
-      vcode_type_t vbounds = lower_bounds(type);
       return emit_cast(vtype, vbounds, right_reg);
    }
    else
@@ -345,6 +358,14 @@ static vcode_reg_t lower_range_dir(lower_unit_t *lu, tree_t r)
 
    case RANGE_EXPR:
       {
+         tree_t value = tree_value(r);
+         if (tree_kind(value) != T_ATTR_REF
+             && type_is_range_record(tree_type(value))) {
+            vcode_reg_t rec_reg = lower_rvalue(lu, value);
+            vcode_reg_t dir_reg = emit_load_indirect(emit_record_ref(rec_reg, 2));
+            return emit_cast(vtype_bool(), VCODE_INVALID_STAMP, dir_reg);
+         }
+
          int dim = 1;
          vcode_reg_t array_reg = lower_range_expr(lu, r, &dim);
 

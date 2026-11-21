@@ -6619,9 +6619,34 @@ static tree_t solve_range(nametab_t *tab, tree_t r)
       }
    case RANGE_EXPR:
       {
-         tree_t value = _solve_types(tab, tree_value(r));
+         tree_t value = tree_value(r);
+         if (standard() >= STD_19 && tree_kind(value) != T_ATTR_REF) {
+            type_set_t ts = {};
+            type_set_push(tab, &ts);
+            if (ts.down != NULL) {
+               for (unsigned i = 0; i < ts.down->members.count; i++) {
+                  type_t m = ts.down->members.items[i].type;
+                  type_set_add(tab, m, NULL);
+                  if (type_is_scalar(m)) {
+                     type_t rr = find_range_record_type(tab, m);
+                     if (rr != NULL)
+                        type_set_add(tab, rr, NULL);
+                  }
+               }
+            }
+            value = _solve_types(tab, value);
+            type_set_pop(tab, &ts);
+         }
+         else
+            value = _solve_types(tab, value);
+
          tree_set_value(r, value);
-         tree_set_type(r, tree_type(value));
+
+         type_t vtype = tree_type(value);
+         if (standard() >= STD_19 && type_is_range_record(vtype))
+            tree_set_type(r, range_record_bound_type(vtype));
+         else
+            tree_set_type(r, vtype);
          return r;
       }
    case RANGE_TO:
