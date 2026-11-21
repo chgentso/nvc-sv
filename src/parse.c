@@ -819,8 +819,17 @@ static tree_t find_binding(tree_t inst)
    tree_t unit = NULL;
    if (tree_kind(inst) == T_BINDING) {
       name = tree_ident(inst);
-      if (tree_has_ident2(inst))
-         name = ident_prefix(name, tree_ident2(inst), '-');
+      if (tree_has_ident2(inst)) {
+         ident_t arch_name = ident_prefix(name, tree_ident2(inst), '-');
+         query_name(nametab, arch_name, &unit);
+         if (unit == NULL) {
+            // LRM 7.3.2.2: the architecture named in an entity aspect need
+            // not be analysed until elaboration; resolve the entity now
+            unit = resolve_name(nametab, tree_loc(inst), name);
+         }
+         else
+            name = arch_name;
+      }
    }
    else {
       name = tree_ident2(inst);

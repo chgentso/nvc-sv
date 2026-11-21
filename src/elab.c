@@ -6923,6 +6923,43 @@ static void elab_component(tree_t inst, tree_t comp, const elab_ctx_t *ctx)
       tree_set_spec(inst, spec);
    }
 
+   if (tree_has_spec(inst) && tree_has_value(tree_spec(inst))) {
+      tree_t spec = tree_spec(inst);
+      tree_t bind = tree_value(spec);
+      if (tree_kind(bind) == T_BINDING && tree_class(bind) == C_ENTITY
+          && tree_has_ref(bind) && tree_kind(tree_ref(bind)) == T_ENTITY
+          && tree_has_ident2(bind)) {
+         tree_t entity = tree_ref(bind);
+         ident_t ename = tree_ident(entity);
+         lib_t lib = elab_find_lib(ename, ctx);
+         ident_t qent = ident_prefix(lib_name(lib), ident_rfrom(ename, '.'), '.');
+         ident_t aname = ident_prefix(qent, tree_ident2(bind), '-');
+         tree_t arch = lib_get(lib, aname);
+         if (arch == NULL || tree_kind(arch) != T_ARCH) {
+            error_at(tree_loc(bind), "design unit %pI not found in library %pI",
+                     ident_rfrom(aname, '.'), lib_name(lib));
+            return;
+         }
+
+         tree_t nbind = tree_new(T_BINDING);
+         tree_set_loc(nbind, tree_loc(bind));
+         tree_set_class(nbind, C_ENTITY);
+         tree_set_ident(nbind, tree_ident(bind));
+         tree_set_ident2(nbind, tree_ident2(bind));
+         tree_set_ref(nbind, arch);
+
+         const int ngenmaps = tree_genmaps(bind);
+         for (int i = 0; i < ngenmaps; i++)
+            tree_add_genmap(nbind, tree_genmap(bind, i));
+
+         const int nparams = tree_params(bind);
+         for (int i = 0; i < nparams; i++)
+            tree_add_param(nbind, tree_param(bind, i));
+
+         tree_set_spec(inst, elab_merge_spec(spec, NULL, nbind));
+      }
+   }
+
    ident_t ndotted = ident_prefix(ctx->dotted, tree_ident(inst), '.');
 
    elab_ctx_t new_ctx = {
