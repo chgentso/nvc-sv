@@ -121,6 +121,14 @@ typedef A(init_event_t) init_event_list_t;
 
 #define DEFER_MAX 4096
 
+typedef struct _rt_mixed_bridge {
+   rt_signal_t             *sv_sig;
+   rt_signal_t             *vhdl_sig;
+   bool                     sv_is_net;
+   bool                     vhdl_is_bit;
+   struct _rt_mixed_bridge *next;
+} rt_mixed_bridge_t;
+
 typedef struct _rt_model {
    tree_t             top;
    hash_t            *scopes;
@@ -167,6 +175,7 @@ typedef struct _rt_model {
    rt_callback_t     *phase_cbs[END_OF_SIMULATION + 1];
    rt_sampler_t      *samplers;
    unsigned           nsamplers;
+   rt_mixed_bridge_t *mixed_bridges;
    unsigned           sampler_depth;
    cover_data_t      *cover;
    nvc_rusage_t       ready_rusage;
@@ -750,6 +759,11 @@ static void sv_poll_free(void);
 void model_free(rt_model_t *m)
 {
    sv_poll_free();
+   for (rt_mixed_bridge_t *b = m->mixed_bridges, *tmp; b; b = tmp) {
+      tmp = b->next;
+      free(b);
+   }
+   m->mixed_bridges = NULL;
    free(m->sva_procs);
    free(m->triggertab);
 
@@ -4485,9 +4499,180 @@ static inline void check_delay(int64_t delay)
    }
 }
 
+static uint8_t sv_to_vhdl_byte(uint8_t b, bool sv_is_net, bool vhdl_is_bit)
+{
+   const uint8_t lv = b & 3;
+   if (vhdl_is_bit)
+      return lv == 1 ? 1 : 0;
+
+   if (sv_is_net) {
+      const uint8_t s0 = (b >> 2) & 7;
+      const uint8_t s1 = (b >> 5) & 7;
+      switch (lv) {
+      case 0:
+         if (s0 == 0 && s1 != 0)
+            return 4;   // 'Z'
+         else if (s0 != 0 && s0 < 6)
+            return 6;   // 'L'
+         else
+            return 2;   // '0'
+      case 1:
+         if (s1 == 0 && s0 != 0)
+            return 4;   // 'Z'
+         else if (s1 != 0 && s1 < 6)
+            return 7;   // 'H'
+         else
+            return 3;   // '1'
+      case 2:
+         return 4;   // 'Z'
+      default:
+         return 1;   // 'X'
+      }
+   }
+
+   static const uint8_t map[4] = { 2, 3, 4, 1 };   // '0','1','Z','X'
+   return map[lv];
+}
+
+static uint8_t vhdl_to_sv_byte(uint8_t b, bool sv_is_net, bool vhdl_is_bit)
+{
+   uint8_t lv;
+   uint8_t st = 6;   // St
+   if (vhdl_is_bit)
+      lv = b == 1 ? 1 : 0;
+   else {
+      switch (b) {
+      case 2: lv = 0; break;            // '0'
+      case 3: lv = 1; break;            // '1'
+      case 4: lv = 2; st = 0; break;    // 'Z'
+      case 6: lv = 0; st = 3; break;    // 'L' (We)
+      case 7: lv = 1; st = 3; break;    // 'H' (We)
+      default: lv = 3; break;           // 'U','X','W','-'
+      }
+   }
+
+   if (sv_is_net)
+      return lv + (st << 2) + (st << 5);
+   else
+      return lv;
+}
+
+static void mixed_bridge_sv_event(uint64_t now, rt_signal_t *signal,
+                                  rt_watch_t *watch, void *user)
+{
+   rt_mixed_bridge_t *b = user;
+   rt_model_t *m = get_model();
+   const uint32_t width = signal_width(b->sv_sig);
+
+   uint8_t *buf LOCAL = xmalloc(width);
+   for (uint32_t i = 0; i < width; i++)
+      buf[i] = sv_to_vhdl_byte(b->sv_sig->shared.data[i], b->sv_is_net,
+                               b->vhdl_is_bit);
+
+   deposit_signal(m, b->vhdl_sig, buf, 0, width);
+}
+
+static void mixed_bridge_force(rt_model_t *m, rt_signal_t *s,
+                               const void *values, int offset, size_t count)
+{
+   for (rt_mixed_bridge_t *b = m->mixed_bridges; b != NULL; b = b->next) {
+      if (b->vhdl_sig != s)
+         continue;
+
+      const uint8_t *src = values;
+      uint8_t *buf LOCAL = xmalloc(count);
+      for (size_t i = 0; i < count; i++)
+         buf[i] = vhdl_to_sv_byte(src[i], b->sv_is_net, b->vhdl_is_bit);
+
+      force_signal(m, b->sv_sig, buf, offset, count);
+      return;
+   }
+}
+
+static void mixed_bridge_release(rt_model_t *m, rt_signal_t *s,
+                                 int offset, size_t count)
+{
+   for (rt_mixed_bridge_t *b = m->mixed_bridges; b != NULL; b = b->next) {
+      if (b->vhdl_sig != s)
+         continue;
+
+      // Sync the proxy's default/driving area with the current SV value so
+      // releasing the proxy does not revert to stale initial data
+      uint8_t *driving = b->vhdl_sig->shared.data + 2 * b->vhdl_sig->shared.size;
+      for (size_t i = 0; i < count; i++)
+         driving[offset + i] = sv_to_vhdl_byte(
+            b->sv_sig->shared.data[offset + i], b->sv_is_net, b->vhdl_is_bit);
+
+      release_signal(m, b->sv_sig, offset, count);
+      return;
+   }
+}
+
+sig_shared_t *model_mixed_signal_proxy(rt_model_t *m, rt_signal_t *sv_sig,
+                                       bool sv_is_net, bool vhdl_is_bit,
+                                       tree_t where)
+{
+   for (rt_mixed_bridge_t *b = m->mixed_bridges; b != NULL; b = b->next) {
+      if (b->sv_sig == sv_sig && b->vhdl_is_bit == vhdl_is_bit)
+         return &(b->vhdl_sig->shared);
+   }
+
+   const uint32_t width = signal_width(sv_sig);
+   const size_t datasz = MAX(3 * width, 8);
+   rt_signal_t *s = static_alloc(m, sizeof(rt_signal_t) + datasz);
+
+   s->where   = where;
+   s->n_nexus = 1;
+   s->offset  = 0;
+   s->parent  = sv_sig->parent;
+
+   s->shared.flags = 0;
+   s->shared.size  = width;
+
+   s->nexus.width        = width;
+   s->nexus.size         = 1;
+   s->nexus.n_sources    = 0;
+   s->nexus.offset       = 0;
+   s->nexus.flags        = NET_F_FAST_DRIVER | NET_F_HAS_INITIAL;
+   s->nexus.signal       = s;
+   s->nexus.pending      = NULL;
+   s->nexus.active_delta = DELTA_CYCLE_MAX;
+   s->nexus.event_delta  = DELTA_CYCLE_MAX;
+   s->nexus.last_event   = TIME_HIGH;
+
+   *m->nexus_tail = &(s->nexus);
+   m->nexus_tail = &(s->nexus.chain);
+   m->n_signals++;
+
+   uint8_t *eff = s->shared.data;
+   uint8_t *last = eff + width;
+   uint8_t *driving = eff + 2 * width;
+   for (uint32_t i = 0; i < width; i++) {
+      uint8_t v = sv_to_vhdl_byte(sv_sig->shared.data[i], sv_is_net,
+                                  vhdl_is_bit);
+      eff[i] = last[i] = driving[i] = v;
+   }
+
+   rt_mixed_bridge_t *b = xcalloc(sizeof(rt_mixed_bridge_t));
+   b->sv_sig      = sv_sig;
+   b->vhdl_sig    = s;
+   b->sv_is_net   = sv_is_net;
+   b->vhdl_is_bit = vhdl_is_bit;
+   b->next        = m->mixed_bridges;
+   m->mixed_bridges = b;
+
+   rt_watch_t *w = watch_new(m, mixed_bridge_sv_event, b, WATCH_EVENT, 1);
+   model_set_event_cb(m, sv_sig, 0, width, w);
+
+   return &(s->shared);
+}
+
 void force_signal(rt_model_t *m, rt_signal_t *s, const void *values,
                   int offset, size_t count)
 {
+   if (unlikely(m->mixed_bridges != NULL))
+      mixed_bridge_force(m, s, values, offset, count);
+
    RT_LOCK(s->lock);
 
    TRACE("force signal %s+%d to %s", istr(tree_ident(s->where)), offset,
@@ -4524,6 +4709,9 @@ void force_signal(rt_model_t *m, rt_signal_t *s, const void *values,
 
 void release_signal(rt_model_t *m, rt_signal_t *s, int offset, size_t count)
 {
+   if (unlikely(m->mixed_bridges != NULL))
+      mixed_bridge_release(m, s, offset, count);
+
    RT_LOCK(s->lock);
 
    TRACE("release signal %s+%d", istr(tree_ident(s->where)), offset);

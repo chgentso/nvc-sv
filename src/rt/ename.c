@@ -16,6 +16,7 @@
 //
 
 #include "util.h"
+#include "common.h"
 #include "diag.h"
 #include "hash.h"
 #include "ident.h"
@@ -36,19 +37,48 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+static bool is_verilog_block(tree_t block)
+{
+   if (tree_kind(block) != T_BLOCK || tree_decls(block) == 0)
+      return false;
+
+   tree_t hier = tree_decl(block, 0);
+   return tree_kind(hier) == T_HIER && tree_subkind(hier) == T_VERILOG;
+}
+
+static bool is_vhdl_shim_block(tree_t block)
+{
+   if (!is_verilog_block(block) || tree_stmts(block) != 1)
+      return false;
+
+   tree_t child = tree_stmt(block, 0);
+   if (tree_kind(child) != T_BLOCK || tree_decls(child) == 0)
+      return false;
+
+   tree_t hier = tree_decl(child, 0);
+   return tree_kind(hier) == T_HIER && tree_subkind(hier) == T_ARCH;
+}
+
 static tree_t select_name(tree_t where, ident_t id)
 {
+   const bool ci = is_verilog_block(where);
+
    const int ndecls = tree_decls(where);
    for (int i = 0; i < ndecls; i++) {
       tree_t d = tree_decl(where, i);
-      if (tree_ident(d) == id)
+      if (tree_kind(d) == T_VERILOG) {
+         vlog_node_t vd = tree_vlog(d);
+         if (vlog_kind(vd) == V_PORT_MAP || vlog_kind(vd) == V_IFACE_PORT)
+            continue;
+      }
+      if (ci ? ident_casecmp(tree_ident(d), id) : tree_ident(d) == id)
          return d;
    }
 
    const int ngenerics = tree_generics(where);
    for (int i = 0; i < ngenerics; i++) {
       tree_t g = tree_generic(where, i);
-      if (tree_ident(g) == id)
+      if (ci ? ident_casecmp(tree_ident(g), id) : tree_ident(g) == id)
          return g;
    }
 
@@ -64,14 +94,14 @@ static tree_t select_name(tree_t where, ident_t id)
    const int nstmts = tree_stmts(where);
    for (int i = 0; i < nstmts; i++) {
       tree_t s = tree_stmt(where, i);
-      if (tree_ident(s) == id)
+      if (ci ? ident_casecmp(tree_ident(s), id) : tree_ident(s) == id)
          return s;
    }
 
    const int nports = tree_ports(where);
    for (int i = 0; i < nports; i++) {
       tree_t p = tree_port(where, i);
-      if (tree_ident(p) == id)
+      if (ci ? ident_casecmp(tree_ident(p), id) : tree_ident(p) == id)
          return p;
    }
 
@@ -87,6 +117,133 @@ static bool is_implicit_block(tree_t block)
    assert(tree_kind(hier) == T_HIER);
 
    return tree_subkind(hier) == T_COMPONENT;
+}
+
+static void bind_verilog_external_name(tree_t name, tree_t where,
+                                       tree_t container, jit_scalar_t *args)
+{
+   if (tree_class(name) != C_SIGNAL)
+      jit_msg(tree_loc(name), DIAG_FATAL, "external name referencing Verilog "
+              "object %s must have class signal", istr(tree_ident(where)));
+
+   tree_t h = tree_decl(container, 0);
+   assert(tree_kind(h) == T_HIER);
+
+   rt_scope_t *rts = find_scope(get_model(), container);
+   assert(rts != NULL);
+
+   void *ctx = *mptr_get(rts->privdata);
+   if (ctx == NULL)
+      jit_msg(tree_loc(name), DIAG_FATAL, "%pI has not yet been elaborated",
+              tree_ident(container));
+
+   jit_t *j = jit_for_thread();
+   jit_handle_t handle = jit_compile(j, tree_ident2(h));
+
+   ident_t var_name = NULL;
+   bool sv_is_net = false;
+   if (tree_kind(where) == T_VERILOG) {
+      vlog_node_t vd = tree_vlog(where);
+      if (vlog_kind(vd) != V_VAR_DECL && vlog_kind(vd) != V_NET_DECL)
+         jit_msg(tree_loc(name), DIAG_FATAL, "Verilog object %s is not a "
+                 "signal", istr(tree_ident(where)));
+      var_name = vlog_ident(vd);
+      sv_is_net = (vlog_kind(vd) == V_NET_DECL);
+   }
+   else {
+      assert(tree_kind(where) == T_PORT_DECL);
+      vlog_node_t body = tree_vlog(tree_ref(h));
+      const int nports = vlog_ports(body);
+      for (int i = 0; i < nports; i++) {
+         vlog_node_t p = vlog_ref(vlog_port(body, i));
+         if (ident_casecmp(vlog_ident(p), tree_ident(where))) {
+            vlog_node_t d = vlog_ref(p);
+            var_name = vlog_ident(d);
+            sv_is_net = (vlog_kind(d) == V_NET_DECL);
+            break;
+         }
+      }
+      if (var_name == NULL)
+         jit_msg(tree_loc(name), DIAG_FATAL, "Verilog port %s not found",
+                 istr(tree_ident(where)));
+   }
+
+   void *ptr = jit_get_frame_var(j, handle, ctx, var_name);
+   sig_shared_t *sv_ss = *(sig_shared_t **)ptr;
+   rt_signal_t *sv_sig = container_of(sv_ss, rt_signal_t, shared);
+
+   type_t expect = tree_type(name);
+
+   if (type_is_real(expect) && sv_sig->nexus.size == 8
+       && signal_width(sv_sig) == 1) {
+      args[0].pointer = ptr;
+      return;
+   }
+
+   if (sv_sig->nexus.size != 1)
+      jit_msg(tree_loc(name), DIAG_FATAL, "cannot bind VHDL external name of "
+              "type %pT to Verilog signal %s", expect, istr(var_name));
+
+   const bool is_arr = type_is_array(expect);
+   type_t elem = is_arr ? type_elem(expect) : expect;
+   const bool vhdl_is_bit = type_eq(elem, std_type(NULL, STD_BIT));
+   const bool vhdl_is_sl = type_eq(elem, ieee_type(IEEE_STD_ULOGIC));
+   if ((!vhdl_is_bit && !vhdl_is_sl) || (is_arr && dimension_of(expect) != 1))
+      jit_msg(tree_loc(name), DIAG_FATAL, "cannot bind VHDL external name of "
+              "type %pT to Verilog signal %s", expect, istr(var_name));
+
+   const uint32_t sv_width = signal_width(sv_sig);
+   if (!is_arr) {
+      if (sv_width != 1)
+         jit_msg(tree_loc(name), DIAG_FATAL, "Verilog signal %s has width %u "
+                 "but external name has scalar type %pT",
+                 istr(var_name), sv_width, expect);
+   }
+   else if (type_const_bounds(expect)) {
+      tree_t r = range_of(expect, 0);
+      const range_kind_t dir = tree_subkind(r);
+      const int64_t left = assume_int(tree_left(r));
+      const int64_t right = assume_int(tree_right(r));
+      const int64_t length =
+         MAX(0, dir == RANGE_TO ? right - left + 1 : left - right + 1);
+      if (length != sv_width)
+         jit_msg(tree_loc(name), DIAG_FATAL, "Verilog signal %s has width %u "
+                 "but external name has length %"PRIi64,
+                 istr(var_name), sv_width, length);
+   }
+
+   sig_shared_t *proxy = model_mixed_signal_proxy(get_model(), sv_sig,
+                                                  sv_is_net, vhdl_is_bit,
+                                                  where);
+
+   if (is_arr) {
+      jit_scalar_t *slots = jit_mspace_alloc(4 * sizeof(jit_scalar_t));
+      slots[0].pointer = proxy;
+      slots[1].integer = 0;
+
+      if (type_const_bounds(expect)) {
+         tree_t r = range_of(expect, 0);
+         const range_kind_t dir = tree_subkind(r);
+         const int64_t left = assume_int(tree_left(r));
+         const int64_t right = assume_int(tree_right(r));
+         const int64_t length =
+            MAX(0, dir == RANGE_TO ? right - left + 1 : left - right + 1);
+         slots[2].integer = left;
+         slots[3].integer = dir == RANGE_TO ? length : ~length;
+      }
+      else {
+         slots[2].integer = (int64_t)sv_width - 1;
+         slots[3].integer = ~(int64_t)sv_width;
+      }
+
+      args[0].pointer = slots;
+   }
+   else {
+      jit_scalar_t *slots = jit_mspace_alloc(2 * sizeof(jit_scalar_t));
+      slots[0].pointer = proxy;
+      slots[1].integer = 0;
+      args[0].pointer = slots;
+   }
 }
 
 static void bind_external_name(tree_t name, jit_handle_t scope,
@@ -186,7 +343,7 @@ static void bind_external_name(tree_t name, jit_handle_t scope,
             scope = jit_lazy_compile(j, parent);
             path = jit_get_name(j, scope);
             next = tree_from_object(jit_get_object(j, scope));
-         } while (is_implicit_block(next));
+         } while (is_implicit_block(next) || is_vhdl_shim_block(next));
          continue;
       default:
          should_not_reach_here();
@@ -210,7 +367,16 @@ static void bind_external_name(tree_t name, jit_handle_t scope,
 
       container = where;
 
-      if ((next = select_name(where, id)) == NULL) {
+      next = select_name(where, id);
+      if (next == NULL && is_vhdl_shim_block(where)) {
+         // Descend into the VHDL entity nested beneath the generated shim
+         where = tree_stmt(where, 0);
+         path = ident_prefix(path, tree_ident(where), '.');
+         container = where;
+         next = select_name(where, id);
+      }
+
+      if (next == NULL) {
          diag_t *d = diag_new(DIAG_ERROR, tree_loc(pe));
          diag_printf(d, "external name %s not found",
                      istr(tree_ident(tree_part(name, nparts - 1))));
@@ -226,7 +392,14 @@ static void bind_external_name(tree_t name, jit_handle_t scope,
       }
 
       if (i + 1 < nparts)
-         path = ident_prefix(path, id, '.');
+         path = ident_prefix(path, tree_ident(next), '.');
+   }
+
+   if (tree_kind(where) == T_VERILOG
+       || (container != NULL && is_verilog_block(container)
+           && tree_kind(where) == T_PORT_DECL)) {
+      bind_verilog_external_name(name, where, container, args);
+      return;
    }
 
    if (class_of(where) != tree_class(name)) {

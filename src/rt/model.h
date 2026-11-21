@@ -148,6 +148,9 @@ void deposit_signal(rt_model_t *m, rt_signal_t *s, const void *values,
                     int offset, size_t count);
 void sched_deposit(rt_model_t *m, rt_signal_t *s, const void *values,
                    int offset, size_t count, int64_t after, bool nonblock);
+sig_shared_t *model_mixed_signal_proxy(rt_model_t *m, rt_signal_t *sv_sig,
+                                       bool sv_is_net, bool vhdl_is_bit,
+                                       tree_t where);
 rt_watch_t *find_watch(rt_nexus_t *n, sig_event_fn_t fn);
 bool signal_is_forced(rt_signal_t *s, int offset, size_t count);
 
