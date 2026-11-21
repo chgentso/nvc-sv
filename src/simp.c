@@ -835,7 +835,7 @@ static tree_t simp_attr_ref(tree_t t, simp_ctx_t *ctx)
                type  = type_index(type, dim_i - 1);
                dim_i = 1;
             }
-            else if (type_is_unconstrained(type))
+            else if (type_is_unconstrained(type) || type_is_generic(type))
                break;
             else if (dim_i < 1 || dim_i > dimension_of(type))
                break;

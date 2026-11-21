@@ -784,7 +784,9 @@ bool type_is_unconstrained(type_t t)
    }
    else if (t->object.kind == T_ARRAY)
       return true;
-   else if (t->object.kind == T_GENERIC && type_subkind(t) == GTYPE_ARRAY)
+   else if (t->object.kind == T_GENERIC
+            && (type_subkind(t) == GTYPE_ARRAY
+                || type_subkind(t) == GTYPE_CONSTRAINED_ARRAY))
       return true;
    else if (t->object.kind == T_RECORD && standard() >= STD_08) {
       const int nfields = type_fields(t);
