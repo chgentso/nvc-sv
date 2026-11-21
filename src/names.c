@@ -4252,6 +4252,28 @@ static void overload_add_argument_type(overload_t *o, type_t type, tree_t d)
    type_set_add(o->nametab, type, d);
 }
 
+static bool overload_direct_result_ok(overload_t *o, tree_t d,
+                                      const type_set_t *rts)
+{
+   if (rts == NULL || rts->members.count == 0)
+      return true;
+
+   type_t type = tree_type(d);
+   if (!type_has_result(type))
+      return true;
+
+   type_t rtype = get_result_type(o->nametab, d);
+   for (unsigned i = 0; i < rts->members.count; i++) {
+      if (type_eq(rtype, rts->members.items[i].type))
+         return true;
+      else if (tree_subkind(d) == S_DIV_PP
+               && type_is_integer(rts->members.items[i].type))
+         return true;
+   }
+
+   return false;
+}
+
 static bool overload_can_index(overload_t *o, tree_t d)
 {
    if (!o->could_be_index || !can_call_no_args(d))
@@ -4288,17 +4310,17 @@ static void overload_positional_argument(overload_t *o, int pos)
    unsigned wptr = 0;
    for (unsigned i = 0; i < o->candidates.count; i++) {
       tree_t d = o->candidates.items[i];
-      if (pos < tree_ports(d)) {
+      const bool direct_ok = pos < tree_ports(d)
+         && overload_direct_result_ok(o, d, o->typeset.down);
+      const bool index_ok = overload_can_index(o, d);
+      if (direct_ok) {
          tree_t p = tree_port(d, pos);
          overload_add_argument_type(o, tree_type(p), d);
-         o->candidates.items[wptr++] = d;
       }
-      else if (overload_can_index(o, d))
+      if (direct_ok || index_ok || o->initial <= 1)
          o->candidates.items[wptr++] = d;
-      else if (o->initial > 1)
-         overload_prune_candidate(o, i);
       else
-         o->candidates.items[wptr++] = d;
+         overload_prune_candidate(o, i);
    }
    ATRIM(o->candidates, wptr);
 
@@ -4569,7 +4591,9 @@ static void overload_next_argument(overload_t *o, tree_t p)
       bool found_port = false;
       for (unsigned i = 0; i < o->candidates.count; i++) {
          tree_t cand = o->candidates.items[i];
-         tree_t port = overload_find_port(cand, p);
+         const bool direct_ok =
+            overload_direct_result_ok(o, cand, o->typeset.down);
+         tree_t port = direct_ok ? overload_find_port(cand, p) : NULL;
          type_t ptype = NULL;
          if (port != NULL) {
             ptype = tree_type(port);
@@ -4580,15 +4604,18 @@ static void overload_next_argument(overload_t *o, tree_t p)
                   ptype = tree_type(port);
             }
          }
-         else if (!is_named && overload_can_index(o, cand)) {
+         type_t itype = NULL;
+         if (!is_named && overload_can_index(o, cand)) {
             type_t rtype = get_result_type(o->nametab, cand);
-            ptype = index_type_of(rtype, tree_pos(p));
+            itype = index_type_of(rtype, tree_pos(p));
          }
 
-         if (ptype != NULL && type != NULL) {
+         if ((ptype != NULL || itype != NULL) && type != NULL) {
             found_port = true;
 
-            if (type_eq(ptype, type)) {
+            const bool match = (ptype != NULL && type_eq(ptype, type))
+               || (itype != NULL && type_eq(itype, type));
+            if (match) {
                // We've found at least one candidate with a matching
                // argument. Prune all the previous candidates that were
                // speculatively allowed through.
