@@ -11444,7 +11444,8 @@ static void lower_driver_field_cb(lower_unit_t *lu, tree_t field,
 
       emit_drive_signal(data_reg, count_reg);
    }
-   else if (elem != NULL && tree_subkind(elem) == PORT_RECORD_VIEW) {
+   else if (elem != NULL && (tree_subkind(elem) == PORT_RECORD_VIEW
+                             || tree_subkind(elem) == PORT_ARRAY_VIEW)) {
       void *new_ctx = tag_pointer(tree_value(elem), converse);
       lower_for_each_field(lu, type, ptr, VCODE_INVALID_REG,
                            lower_driver_field_cb, new_ctx);
@@ -12255,7 +12256,8 @@ static void lower_map_view_field_cb(lower_unit_t *lu, tree_t field,
          fatal_trace("unhandled port mode in lower_map_view_field_cb");
       }
    }
-   else if (tree_subkind(elem) == PORT_RECORD_VIEW) {
+   else if (tree_subkind(elem) == PORT_RECORD_VIEW
+            || tree_subkind(elem) == PORT_ARRAY_VIEW) {
       void *new_ctx = tag_pointer(tree_value(elem), converse);
       lower_for_each_field_2(lu, ftype, ftype, src_ptr, dst_ptr, locus,
                              lower_map_view_field_cb, new_ctx);
