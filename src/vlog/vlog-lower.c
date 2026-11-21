@@ -20189,8 +20189,19 @@ static mir_value_t vlog_lower_class_new(vlog_gen_t *g, vlog_node_t v)
                                               MIR_NULL_VALUE, MIR_NULL_VALUE);
 
    vlog_node_t ctor = vlog_find_ctor(type);
-   if (ctor != NULL)
-      vlog_lower_subr_call(g, ctor, v, obj, true);
+   if (ctor != NULL) {
+      vlog_node_t call = v;
+      if (vlog_params(v) == 0 && vlog_ref(ctor) != type) {
+         for (vlog_node_t c = type; c != vlog_ref(ctor) && vlog_has_ref(c);
+              c = vlog_ref(c)) {
+            if (vlog_params(c) > 0) {
+               call = c;
+               break;
+            }
+         }
+      }
+      vlog_lower_subr_call(g, ctor, call, obj, true);
+   }
 
    // Classes below the one whose constructor ran have no constructor of
    // their own so their properties are initialised here
