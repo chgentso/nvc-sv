@@ -14443,7 +14443,8 @@ static void static_init_arg_cb(vlog_node_t v, void *ctx)
 }
 
 static void p_static_local_decls(vlog_node_t parent, vlog_node_t home,
-                                 vlog_node_t datatype, bool is_static)
+                                 vlog_node_t datatype, bool is_static,
+                                 bool is_const)
 {
    // A static variable in a subroutine or block keeps its value and is
    // only initialised once so it lives in the enclosing design unit or
@@ -14453,6 +14454,8 @@ static void p_static_local_decls(vlog_node_t parent, vlog_node_t home,
 
    do {
       vlog_node_t d = p_variable_decl_assignment(datatype, V_VAR_DECL);
+      if (is_const)
+         vlog_set_flags(d, vlog_flags(d) | VLOG_F_CONST);
 
       if (!is_static && vlog_has_value(d)) {
          // A variable in a static subroutine or block is static by
@@ -15105,9 +15108,17 @@ static void p_data_declaration(vlog_node_t parent, vlog_kind_t kind)
          const int first = vlog_decls(parent);
 
          if (home != NULL)
-            p_static_local_decls(parent, home, dt, is_static);
-         else
+            p_static_local_decls(parent, home, dt, is_static, is_const);
+         else {
             p_list_of_variable_decl_assignments(parent, dt, kind);
+            if (is_const && vlog_kind(parent) != V_CLASS_DECL) {
+               const int ndecls = vlog_decls(parent);
+               for (int i = first; i < ndecls; i++) {
+                  vlog_node_t d = vlog_decl(parent, i);
+                  vlog_set_flags(d, vlog_flags(d) | VLOG_F_CONST);
+               }
+            }
+         }
 
          if (nettype != NULL) {
             const int ndecls = vlog_decls(parent);
@@ -20704,9 +20715,11 @@ static void p_package_or_generate_item_declaration(vlog_node_t parent)
       break;
    case tSTATIC:
    case tAUTOMATIC:
-   case tCONST:
-      (void)one_of(tSTATIC, tAUTOMATIC, tCONST);
+      (void)one_of(tSTATIC, tAUTOMATIC);
       p_package_or_generate_item_declaration(parent);
+      break;
+   case tCONST:
+      p_data_declaration(parent, V_VAR_DECL);
       break;
    default:
       one_of(tWIRE, tUWIRE, tSUPPLY0, tSUPPLY1, tTRI, tTRI0, tTRI1, tTRIAND,

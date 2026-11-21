@@ -2646,6 +2646,27 @@ static void elab_verilog_ports(vlog_node_t inst, elab_instance_t *ei,
          continue;
       }
 
+      if (vlog_subkind(port) != V_PORT_INPUT) {
+         vlog_node_t base = value;
+         while (vlog_kind(base) == V_BIT_SELECT
+                || vlog_kind(base) == V_PART_SELECT
+                || vlog_kind(base) == V_MEMBER_REF)
+            base = vlog_value(base);
+
+         if (vlog_kind(base) == V_REF && vlog_has_ref(base)) {
+            vlog_node_t decl = vlog_ref(base);
+            if ((vlog_kind(decl) == V_VAR_DECL
+                 || vlog_kind(decl) == V_LOCAL_DECL)
+                && (vlog_flags(decl) & VLOG_F_CONST)) {
+               error_at(where, "cannot connect const variable '%s' to %s "
+                        "port %pQ", istr(vlog_ident(decl)),
+                        vlog_subkind(port) == V_PORT_OUTPUT ? "output" : "inout",
+                        vlog_ident(port));
+               continue;
+            }
+         }
+      }
+
       elab_check_nettype_conn(port, value, where);
 
       if (opt_get_int(OPT_LINT))

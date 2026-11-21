@@ -54,10 +54,13 @@ module inval4;
   localparam int W_QUE = $bits(byte_t [$:3]);
   string str;
   int darr[];
+  const int cvar1 = 10, cvar2 = 10;
+  assign cvar1 = 20;
   initial begin
     arr = '{i: 1, default: 0};
     {i, arr} = 0;
     {str} = 0;
     {darr} = 0;
+    cvar2 = 30;
   end
 endmodule

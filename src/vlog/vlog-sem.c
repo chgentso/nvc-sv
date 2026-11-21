@@ -211,12 +211,16 @@ static void vlog_check_variable_lvalue(vlog_node_t v, vlog_node_t where)
 {
    switch (vlog_kind(v)) {
    case V_VAR_DECL:
+   case V_LOCAL_DECL:
+      if (vlog_flags(v) & VLOG_F_CONST)
+         error_at(vlog_loc(where), "cannot assign to const variable '%s'",
+                  istr(vlog_ident(v)));
+      return;
    case V_FUNC_DECL:
    case V_STRUCT_DECL:
    case V_ENUM_DECL:
    case V_UNION_DECL:
    case V_GENVAR_DECL:
-   case V_LOCAL_DECL:
    case V_TF_PORT_DECL:
    case V_THIS:
    case V_HIER_REF:
@@ -273,6 +277,10 @@ static void vlog_check_net_lvalue(vlog_node_t v, vlog_node_t where)
 {
    switch (vlog_kind(v)) {
    case V_VAR_DECL:
+      if (vlog_flags(v) & VLOG_F_CONST)
+         error_at(vlog_loc(where), "cannot assign to const variable '%s'",
+                  istr(vlog_ident(v)));
+      return;
    case V_NET_DECL:
    case V_HIER_REF:
       return;
@@ -1562,6 +1570,35 @@ static void vlog_check_ref_arg(vlog_node_t port, vlog_node_t arg)
    }
 }
 
+static void vlog_check_const_target(vlog_node_t arg)
+{
+   switch (vlog_kind(arg)) {
+   case V_REF:
+      if (vlog_has_ref(arg)) {
+         vlog_node_t d = vlog_ref(arg);
+         if ((vlog_kind(d) == V_VAR_DECL || vlog_kind(d) == V_LOCAL_DECL)
+             && (vlog_flags(d) & VLOG_F_CONST))
+            error_at(vlog_loc(arg), "cannot assign to const variable '%s'",
+                     istr(vlog_ident(d)));
+      }
+      break;
+   case V_BIT_SELECT:
+   case V_PART_SELECT:
+   case V_MEMBER_REF:
+      vlog_check_const_target(vlog_value(arg));
+      break;
+   case V_CONCAT:
+      {
+         const int nparams = vlog_params(arg);
+         for (int i = 0; i < nparams; i++)
+            vlog_check_const_target(vlog_param(arg, i));
+      }
+      break;
+   default:
+      break;
+   }
+}
+
 static void vlog_check_output_arg(vlog_node_t port, vlog_node_t arg)
 {
    if (vlog_kind(port) != V_TF_PORT_DECL)
@@ -1587,6 +1624,7 @@ static void vlog_check_output_arg(vlog_node_t port, vlog_node_t arg)
                dir == V_PORT_OUTPUT ? "output" : "inout", vlog_ident(port));
       break;
    default:
+      vlog_check_const_target(arg);
       break;
    }
 }
