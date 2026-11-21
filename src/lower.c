@@ -3642,7 +3642,10 @@ static vcode_reg_t lower_ref(lower_unit_t *lu, tree_t ref, expr_ctx_t ctx)
       return lower_var_ref(lu, decl, ctx);
 
    case T_PORT_DECL:
-      return lower_port_ref(lu, decl);
+      if (tree_class(decl) == C_VARIABLE)
+         return lower_var_ref(lu, decl, ctx);
+      else
+         return lower_port_ref(lu, decl);
 
    case T_PARAM_DECL:
       return lower_param_ref(lu, decl);
@@ -12820,13 +12823,48 @@ static void lower_direct_mapped_port(lower_unit_t *lu, tree_t block, tree_t map,
    if (tree_class(port) == C_VARIABLE) {
       // Variable ports are always directly aliased to the actual
       // variable in the parent scope
-      vcode_type_t vtype = lower_type(tree_type(port));
+      type_t ptype = tree_type(port);
+      type_t vtype_tree = tree_type(value);
+      vcode_type_t vtype = lower_type(ptype);
       vcode_var_t var = emit_var(vtype, VCODE_INVALID_STAMP,
                                  tree_ident(port), 0);
       lower_put_vcode_obj(port, var, lu);
 
-      vcode_reg_t src_reg = lower_rvalue(lu, value);
-      emit_store(src_reg, var);
+      vcode_reg_t vreg = lower_rvalue(lu, value);
+      if (type_is_record(ptype)) {
+         vcode_reg_t ptr_reg = emit_index(var, VCODE_INVALID_REG);
+         if (type_const_bounds(ptype))
+            emit_copy(ptr_reg, vreg, VCODE_INVALID_REG);
+         else
+            lower_new_record(lu, ptype, ptr_reg, vreg);
+      }
+      else if (type_is_array(ptype)) {
+         vcode_reg_t bounds_reg = VCODE_INVALID_REG;
+         if (needs_bounds_var(ptype))
+            bounds_reg = lower_get_type_bounds(lu, ptype);
+
+         lower_check_array_sizes(lu, ptype, vtype_tree, bounds_reg,
+                                 vreg, lower_debug_locus(map));
+
+         if (type_is_unconstrained(ptype)) {
+            vcode_reg_t wrap_reg =
+               lower_coerce_arrays(lu, vtype_tree, ptype, vreg);
+            emit_store(wrap_reg, var);
+         }
+         else if (bounds_reg != VCODE_INVALID_REG) {
+            vcode_reg_t wrap_reg =
+               lower_rewrap(lower_array_data(vreg), bounds_reg);
+            emit_store(wrap_reg, var);
+         }
+         else {
+            vcode_reg_t ptr_reg = emit_index(var, VCODE_INVALID_REG);
+            vcode_reg_t count_reg = lower_array_total_len(lu, ptype,
+                                                          VCODE_INVALID_REG);
+            emit_copy(ptr_reg, lower_array_data(vreg), count_reg);
+         }
+      }
+      else
+         emit_store(vreg, var);
 
       hset_insert(direct, map);
       hset_insert(direct, port);
@@ -13235,6 +13273,9 @@ static void lower_ports(lower_unit_t *lu, tree_t block, tree_t src,
 
    for (int i = 0; i < nports; i++) {
       tree_t port = tree_port(block, i);
+      if (tree_class(port) == C_VARIABLE)
+         continue;
+
       type_t type = tree_type(port);
 
       vcode_type_t vtype = lower_signal_type(type);
@@ -13243,21 +13284,36 @@ static void lower_ports(lower_unit_t *lu, tree_t block, tree_t src,
       lower_put_vcode_obj(port, port_vars[i], lu);
    }
 
-   if (!opt_get_int(OPT_NO_COLLAPSE)) {
+   {
       // Filter out "direct mapped" inputs which can be aliased to
-      // signals in the scope above
-      hset_t *forced = hset_new(16);
-      tree_visit_only(block, lower_force_in_cb, forced, T_FORCE);
+      // signals in the scope above, and always alias variable ports
+      const bool no_collapse = opt_get_int(OPT_NO_COLLAPSE);
+      hset_t *forced = no_collapse ? NULL : hset_new(16);
+      if (forced != NULL)
+         tree_visit_only(block, lower_force_in_cb, forced, T_FORCE);
 
-      for (int i = 0; i < nparams; i++)
-         lower_direct_mapped_port(lu, block, tree_param(block, i), direct,
-                                  &poison, forced, map_regs[i]);
+      for (int i = 0; i < nparams; i++) {
+         tree_t map = tree_param(block, i);
+         if (no_collapse) {
+            tree_t port = tree_subkind(map) == P_POS
+               ? tree_port(block, tree_pos(map))
+               : tree_ref(name_to_ref(tree_name(map)));
+            if (tree_class(port) != C_VARIABLE)
+               continue;
+         }
+         lower_direct_mapped_port(lu, block, map, direct, &poison, forced,
+                                  map_regs[i]);
+      }
 
-      hset_free(forced);
+      if (forced != NULL)
+         hset_free(forced);
    }
 
    for (int i = 0; i < nports; i++) {
       tree_t port = tree_port(block, i);
+      if (tree_class(port) == C_VARIABLE)
+         continue;
+
       type_t type = tree_type(port);
 
       vcode_reg_t bounds_reg = VCODE_INVALID_REG;

@@ -1456,7 +1456,7 @@ static bool sem_check_port_decl(tree_t t, nametab_t *tab)
          sem_error(t, "formal variable port %pI must have mode INOUT",
                    tree_ident(t));
 
-      if (!type_is_protected(type))
+      if (!type_has_protected(type))
          sem_error(t, "formal variable port %pI must have protected type",
                    tree_ident(t));
    }
@@ -1488,7 +1488,8 @@ static bool sem_check_port_decl(tree_t t, nametab_t *tab)
       sem_error(t, "port %pI cannot be declared with file type %pT",
                 tree_ident(t), type);
 
-   if (type_has_protected(type) && !type_is_protected(type))
+   if (class != C_VARIABLE && type_has_protected(type)
+       && !type_is_protected(type))
       sem_error(t, "port %pI cannot be declared with type %pT which has a "
                 "subelement of protected type", tree_ident(t), type);
 
