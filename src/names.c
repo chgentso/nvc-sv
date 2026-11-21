@@ -1383,7 +1383,7 @@ static scope_t *private_scope_for(nametab_t *tab, tree_t unit)
       for (int i = 0; i < ndecls; i++) {
          tree_t d = tree_decl(unit, i);
          const tree_kind_t dkind = tree_kind(d);
-         if (dkind == T_ALIAS || dkind == T_TYPE_DECL) {
+         if (dkind == T_ALIAS || dkind == T_TYPE_DECL || dkind == T_PROT_DECL) {
             // Handle special cases: an alias may make the same
             // enumeration literal visible multiple times and a type
             // declaration may hide an earlier incomplete type
