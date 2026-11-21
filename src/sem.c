@@ -405,7 +405,8 @@ static bool sem_check_subtype_helper(tree_t decl, type_t type, nametab_t *tab)
       }
    }
 
-   if (type_is_array(type) && type_has_elem(type)) {
+   if ((type_is_array(type) || (type_is_access(type) && type_is_array(base)))
+       && type_has_elem(type)) {
       type_t elem = type_elem(type);
       if (is_anonymous_subtype(elem)) {
          // Anonymous subtype created for array element constraint

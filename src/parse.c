@@ -5232,7 +5232,7 @@ static void p_array_constraint(type_t type, type_t base)
       consume(tOPEN);
       consume(tRPAREN);
 
-      if (!type_is_array(type) && !type_is_none(type))
+      if (!type_is_array(base) && !type_is_none(base))
          parse_error(CURRENT_LOC, "open array constraint cannot be used "
                      "with non-array type %pT", type);
    }
@@ -5338,6 +5338,8 @@ static void p_constraint(type_t type)
          type_set_constraint(type, p_record_constraint(base));
       else if (type_is_access(base) && type_is_record(type_designated(base)))
          type_set_constraint(type, p_record_constraint(type_designated(base)));
+      else if (type_is_access(base) && type_is_array(type_designated(base)))
+         p_array_constraint(type, type_designated(base));
       else
          p_array_constraint(type, base);
       break;
