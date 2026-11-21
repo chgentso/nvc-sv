@@ -3390,7 +3390,7 @@ START_TEST(test_inval4)
       { 52, "packed dimensions cannot be added to unpacked data type" },
       { 53, "unsized dimension is not allowed in $bits" },
       { 54, "queue dimension is not allowed in $bits" },
-      { 77, "a class constructor cannot be declared virtual" },
+      { 84, "a class constructor cannot be declared virtual" },
       {  8, "the size of the value of enumeration name 'G' is 4 but the base "
          "type has 3 bits" },
       {  9, "the value of enumeration name 'Q' cannot contain x or z as the "
@@ -3427,6 +3427,14 @@ START_TEST(test_inval4)
       { 71, "method 'insert' of a queue expects 2 arguments but has 1" },
       { 72, "cannot cast string to 'real'" },
       { 73, "cannot cast queue to 'real'" },
+      { 74, "duplicate default item in assignment pattern" },
+      { 75, "cannot mix positional and keyed items in assignment pattern" },
+      { 76, "duplicate key 1 in array assignment pattern" },
+      { 77, "array assignment pattern key 4 is outside declared range [0:3]" },
+      { 78, "keyed array assignment pattern does not cover all 4 elements and "
+         "has no default" },
+      { 79, "array assignment pattern has 3 elements but target array has 4" },
+      { 80, "assignment pattern replication count must be positive" },
       { -1, NULL }
    };
    expect_errors(expect);

@@ -71,6 +71,13 @@ module inval4;
     q.insert(0);
     r = real'(str);
     r = real'(q);
+    arr = '{default: 1, default: 2};
+    arr = '{1, 2, default: 0};
+    arr = '{1: 1, 1: 2, default: 0};
+    arr = '{4: 1, default: 0};
+    arr = '{1: 1, 2: 2};
+    arr = '{3{1}};
+    arr = '{0{1}};
   end
 
   class VC;

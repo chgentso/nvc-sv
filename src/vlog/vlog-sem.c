@@ -780,6 +780,227 @@ static void vlog_check_modport_write(vlog_node_t target)
    (void)vlog_modport_input(target, vlog_ident(v), mp);
 }
 
+static vlog_node_t vlog_select_dim(vlog_node_t v, int skip);
+
+static bool vlog_eval_const(vlog_node_t v, int64_t *value)
+{
+   if (vlog_get_const(v, value))
+      return true;
+
+   if (v != NULL && vlog_kind(v) == V_BINARY) {
+      int64_t l, r;
+      if (vlog_eval_const(vlog_left(v), &l)
+          && vlog_eval_const(vlog_right(v), &r)) {
+         switch (vlog_subkind(v)) {
+         case V_BINARY_PLUS:  *value = l + r; return true;
+         case V_BINARY_MINUS: *value = l - r; return true;
+         case V_BINARY_TIMES: *value = l * r; return true;
+         default: return false;
+         }
+      }
+   }
+
+   return false;
+}
+
+static bool vlog_eval_bounds(vlog_node_t dim, int64_t *left, int64_t *right)
+{
+   return vlog_eval_const(vlog_left(dim), left)
+      && vlog_eval_const(vlog_right(dim), right);
+}
+
+static vlog_node_t vlog_target_outer_dim(vlog_node_t target)
+{
+   switch (vlog_kind(target)) {
+   case V_VAR_DECL:
+   case V_LOCAL_DECL:
+   case V_NET_DECL:
+   case V_PORT_DECL:
+   case V_TF_PORT_DECL:
+      if (vlog_ranges(target) > 0)
+         return vlog_range(target, 0);
+      if (vlog_has_type(target)) {
+         vlog_node_t dt = vlog_get_type(vlog_type(target));
+         if (dt != NULL && vlog_kind(dt) == V_DATA_TYPE
+             && vlog_subkind(dt) == DT_DYNARRAY && vlog_ranges(dt) > 0)
+            return vlog_range(dt, 0);
+      }
+      return NULL;
+   default:
+      if (vlog_unpacked_dims(target) > 0)
+         return vlog_select_dim(target, 0);
+      return NULL;
+   }
+}
+
+static void vlog_check_pattern_target(vlog_node_t target, vlog_node_t pat)
+{
+   if (vlog_kind(pat) != V_PATTERN_EXPR)
+      return;
+
+   const int nparams = vlog_params(pat);
+   if (nparams == 0)
+      return;
+
+   bool seen_pos = false, seen_keyed = false, seen_default = false;
+   bool seen_type = false;
+   for (int i = 0; i < nparams; i++) {
+      vlog_node_t item = vlog_param(pat, i);
+      if (vlog_kind(item) != V_PATTERN_ITEM)
+         continue;
+      switch (vlog_subkind(item)) {
+      case 0:
+         if (vlog_has_left(item))
+            seen_keyed = true;
+         else
+            seen_pos = true;
+         break;
+      case 1:
+         seen_default = true;
+         seen_keyed = true;
+         break;
+      case 2:
+         seen_pos = true;
+         break;
+      case 3:
+         seen_type = true;
+         seen_keyed = true;
+         break;
+      }
+   }
+
+   if (seen_pos && seen_keyed)
+      return;   // Already reported in vlog_check_pattern_expr
+
+   vlog_node_t dim = vlog_target_outer_dim(target);
+   if (dim != NULL) {
+      int64_t dl, dr;
+      if (!vlog_eval_bounds(dim, &dl, &dr))
+         return;
+
+      const int64_t lo = MIN(dl, dr), hi = MAX(dl, dr);
+      const int64_t size = hi - lo + 1;
+
+      if (seen_pos) {
+         int64_t total = 0;
+         bool known = true;
+         for (int i = 0; i < nparams && known; i++) {
+            vlog_node_t item = vlog_param(pat, i);
+            if (vlog_subkind(item) == 2) {
+               int64_t rep;
+               if (!vlog_get_const(vlog_left(item), &rep) || rep <= 0)
+                  known = false;
+               else {
+                  const int64_t inner = vlog_params(vlog_right(item));
+                  if (inner > 0 && rep > (INT64_MAX - total) / inner)
+                     total = size + 1;
+                  else
+                     total += rep * inner;
+               }
+            }
+            else
+               total++;
+         }
+
+         if (known && total != size)
+            error_at(vlog_loc(pat), "array assignment pattern has %"PRIi64
+                     " element%s but target array has %"PRIi64,
+                     total, total == 1 ? "" : "s", size);
+      }
+      else if (seen_keyed && !seen_type) {
+         SCOPED_A(int64_t) keys = AINIT;
+         bool all_const = true;
+         for (int i = 0; i < nparams; i++) {
+            vlog_node_t item = vlog_param(pat, i);
+            if (vlog_subkind(item) != 0 || !vlog_has_left(item))
+               continue;
+
+            int64_t k;
+            if (!vlog_get_const(vlog_left(item), &k)) {
+               all_const = false;
+               continue;
+            }
+
+            if (k < lo || k > hi) {
+               error_at(vlog_loc(vlog_left(item)), "array assignment pattern "
+                        "key %"PRIi64" is outside declared range "
+                        "[%"PRIi64":%"PRIi64"]", k, dl, dr);
+               continue;
+            }
+
+            bool dup = false;
+            for (unsigned j = 0; j < keys.count; j++) {
+               if (keys.items[j] == k) {
+                  dup = true;
+                  break;
+               }
+            }
+
+            if (dup)
+               error_at(vlog_loc(vlog_left(item)), "duplicate key %"PRIi64
+                        " in array assignment pattern", k);
+            else
+               APUSH(keys, k);
+         }
+
+         if (!seen_default && all_const && (int64_t)keys.count < size)
+            error_at(vlog_loc(pat), "keyed array assignment pattern does not "
+                     "cover all %"PRIi64" elements and has no default", size);
+      }
+      return;
+   }
+
+   // Non-array struct/union target
+   vlog_node_t ttype = vlog_get_type(target);
+   if (ttype != NULL && (vlog_kind(ttype) == V_STRUCT_DECL
+                         || vlog_kind(ttype) == V_UNION_DECL)
+       && seen_keyed) {
+      const int ndecls = vlog_decls(ttype);
+      LOCAL_BIT_MASK seen;
+      mask_init(&seen, MAX(ndecls, 1));
+      bool all_valid = true;
+
+      for (int i = 0; i < nparams; i++) {
+         vlog_node_t item = vlog_param(pat, i);
+         if (vlog_subkind(item) != 0 || !vlog_has_left(item))
+            continue;
+
+         vlog_node_t key = vlog_left(item);
+         if (vlog_kind(key) == V_REF && !vlog_has_ref(key)) {
+            all_valid = false;   // Unknown member already reported by parser
+            continue;
+         }
+
+         int idx = -1;
+         if (vlog_kind(key) == V_REF && vlog_has_ref(key)) {
+            vlog_node_t ref = vlog_ref(key);
+            for (int j = 0; j < ndecls; j++) {
+               if (vlog_decl(ttype, j) == ref) {
+                  idx = j;
+                  break;
+               }
+            }
+         }
+
+         if (idx < 0) {
+            error_at(vlog_loc(key), "struct assignment pattern key must be a "
+                     "member name");
+            all_valid = false;
+         }
+         else if (mask_test(&seen, idx))
+            error_at(vlog_loc(key), "duplicate member %pQ in struct assignment "
+                     "pattern", vlog_ident(vlog_decl(ttype, idx)));
+         else
+            mask_set(&seen, idx);
+      }
+
+      if (vlog_kind(ttype) == V_STRUCT_DECL && !seen_default && !seen_type
+          && all_valid && (int)mask_popcount(&seen) < ndecls)
+         error_at(vlog_loc(pat), "keyed struct assignment pattern does not "
+                  "specify all members and has no default");
+   }
+}
+
 static void vlog_check_nbassign(vlog_node_t v)
 {
    vlog_node_t target = vlog_target(v);
@@ -806,6 +1027,7 @@ static void vlog_check_nbassign(vlog_node_t v)
    vlog_check_same_type(target, lmask, value, rmask);
    vlog_check_enum_value(target, value);
    vlog_check_unpacked_assign(target, value);
+   vlog_check_pattern_target(target, value);
    vlog_check_modport_write(target);
 }
 
@@ -822,6 +1044,7 @@ static void vlog_check_bassign(vlog_node_t v)
    vlog_check_same_type(target, lmask, value, rmask);
    vlog_check_enum_value(target, value);
    vlog_check_unpacked_assign(target, value);
+   vlog_check_pattern_target(target, value);
    vlog_check_modport_write(target);
 }
 
@@ -836,7 +1059,19 @@ static void vlog_check_assign(vlog_node_t v)
    type_mask_t rmask = vlog_check_expr(value);
 
    vlog_check_same_type(target, lmask, value, rmask);
+   vlog_check_pattern_target(target, value);
    vlog_check_modport_write(target);
+}
+
+static void vlog_force_auto_cb(vlog_node_t v, void *ctx)
+{
+   if (vlog_kind(v) == V_REF && vlog_has_ref(v)) {
+      vlog_node_t d = vlog_ref(v);
+      if ((vlog_kind(d) == V_LOCAL_DECL || vlog_kind(d) == V_TF_PORT_DECL)
+          && !(vlog_flags(d) & (VLOG_F_STATIC | VLOG_F_IMPLICIT_STATIC)))
+         error_at(vlog_loc(v), "automatic variable '%s' cannot be referenced "
+                  "in a force statement", istr(vlog_ident(d)));
+   }
 }
 
 static void vlog_check_force(vlog_node_t v)
@@ -850,6 +1085,7 @@ static void vlog_check_force(vlog_node_t v)
    type_mask_t rmask = vlog_check_expr(value);
 
    vlog_check_same_type(target, lmask, value, rmask);
+   vlog_visit_only(value, vlog_force_auto_cb, NULL, V_REF);
 }
 
 static void vlog_check_release(vlog_node_t v)
@@ -1005,29 +1241,6 @@ static void vlog_check_rand_var(vlog_node_t v)
    }
 }
 
-static void vlog_check_array_pattern_size(vlog_node_t v)
-{
-   // A positional pattern must give a value for each element
-
-   vlog_node_t type = vlog_get_type(vlog_type(v)), pat = vlog_value(v);
-   if (type == NULL || vlog_kind(type) != V_DATA_TYPE
-       || vlog_subkind(type) != DT_DYNARRAY || vlog_ranges(type) != 1
-       || vlog_kind(pat) != V_PATTERN_EXPR)
-      return;
-
-   const unsigned size = vlog_size(vlog_range(type, 0));
-   const int nitems = vlog_params(pat);
-   bool positional = size > 0;
-   for (int i = 0; i < nitems; i++) {
-      vlog_node_t item = vlog_param(pat, i);
-      positional &= !vlog_has_left(item) && vlog_subkind(item) == 0;
-   }
-
-   if (positional && nitems != size)
-      error_at(vlog_loc(pat), "array pattern has %d elements but the array "
-               "has %u", nitems, size);
-}
-
 static void vlog_check_var_decl(vlog_node_t v)
 {
    vlog_check_type(v);
@@ -1036,7 +1249,7 @@ static void vlog_check_var_decl(vlog_node_t v)
    if (vlog_has_value(v)) {
       vlog_check_expr(vlog_value(v));
       vlog_check_enum_value(v, vlog_value(v));
-      vlog_check_array_pattern_size(v);
+      vlog_check_pattern_target(v, vlog_value(v));
    }
 
    if (vlog_kind(v) == V_VAR_DECL
@@ -3537,9 +3750,13 @@ static type_mask_t vlog_check_pattern_expr(vlog_node_t v)
    vlog_node_t type = vlog_type(v);
    vlog_node_t bt = vlog_get_type(type);
    const bool assoc = vlog_is_assoc_type(bt);
+   const bool unsized_arr = bt != NULL && vlog_kind(bt) == V_DATA_TYPE
+      && (vlog_subkind(bt) == DT_QUEUE
+          || (vlog_subkind(bt) == DT_DYNARRAY && vlog_ranges(bt) == 0));
    const bool is_struct = bt != NULL
       && (vlog_kind(bt) == V_STRUCT_DECL || vlog_kind(bt) == V_UNION_DECL);
 
+   bool seen_pos = false, seen_keyed = false, seen_default = false;
    const int nparams = vlog_params(v);
    for (int i = 0; i < nparams; i++) {
       vlog_node_t item = vlog_param(v, i);
@@ -3547,38 +3764,68 @@ static type_mask_t vlog_check_pattern_expr(vlog_node_t v)
          continue;
 
       const int subk = vlog_subkind(item);
-      if (vlog_has_left(item) && subk == 0 && !assoc) {
-         vlog_node_t key = vlog_left(item);
-         bool is_field = false;
-         if (is_struct && vlog_kind(key) == V_REF) {
-            if (!vlog_has_ref(key))
-               is_field = true;
-            else {
-               vlog_node_t ref = vlog_ref(key);
-               const int ndecls = vlog_decls(bt);
-               for (int j = 0; j < ndecls; j++) {
-                  if (vlog_decl(bt, j) == ref) {
-                     is_field = true;
-                     break;
+      if (subk == 1) {
+         if (seen_default)
+            error_at(vlog_loc(item), "duplicate default item in assignment "
+                     "pattern");
+         seen_default = true;
+         seen_keyed = true;
+         if (unsized_arr)
+            error_at(vlog_loc(item), "keyed or default item is not allowed "
+                     "in a dynamic array or queue assignment pattern");
+      }
+      else if (subk == 3)
+         seen_keyed = true;
+      else if (subk == 2) {
+         seen_pos = true;
+         if (vlog_has_left(item)) {
+            vlog_node_t count = vlog_left(item);
+            const type_mask_t cmask = vlog_check_expr(count);
+            int64_t rep;
+            if (cmask != TM_ERROR && !(cmask & TM_CONST))
+               error_at(vlog_loc(count), "assignment pattern replication count "
+                        "must be a constant expression");
+            else if (vlog_get_const(count, &rep) && rep <= 0)
+               error_at(vlog_loc(count), "assignment pattern replication count "
+                        "must be positive");
+         }
+      }
+      else if (vlog_has_left(item)) {
+         seen_keyed = true;
+         if (unsized_arr)
+            error_at(vlog_loc(item), "keyed or default item is not allowed "
+                     "in a dynamic array or queue assignment pattern");
+         else if (!assoc) {
+            vlog_node_t key = vlog_left(item);
+            bool is_field = false;
+            if (is_struct && vlog_kind(key) == V_REF) {
+               if (!vlog_has_ref(key))
+                  is_field = true;
+               else {
+                  vlog_node_t ref = vlog_ref(key);
+                  const int ndecls = vlog_decls(bt);
+                  for (int j = 0; j < ndecls; j++) {
+                     if (vlog_decl(bt, j) == ref) {
+                        is_field = true;
+                        break;
+                     }
                   }
                }
             }
-         }
 
-         if (!is_field) {
-            const type_mask_t kmask = vlog_check_expr(key);
-            if (kmask != TM_ERROR && !(kmask & TM_CONST))
-               error_at(vlog_loc(key), "array assignment pattern key must be "
-                        "a constant expression");
+            if (!is_field) {
+               const type_mask_t kmask = vlog_check_expr(key);
+               if (kmask != TM_ERROR && !(kmask & TM_CONST))
+                  error_at(vlog_loc(key), "array assignment pattern key must "
+                           "be a constant expression");
+               else if (kmask != TM_ERROR && !(kmask & TM_INTEGRAL))
+                  error_at(vlog_loc(key), "array assignment pattern key must "
+                           "be an integral constant expression");
+            }
          }
       }
-      else if (vlog_has_left(item) && subk == 2) {
-         vlog_node_t count = vlog_left(item);
-         const type_mask_t cmask = vlog_check_expr(count);
-         if (cmask != TM_ERROR && !(cmask & TM_CONST))
-            error_at(vlog_loc(count), "assignment pattern replication count "
-                     "must be a constant expression");
-      }
+      else
+         seen_pos = true;
 
       if (vlog_has_right(item)) {
          vlog_node_t rhs = vlog_right(item);
@@ -3595,6 +3842,10 @@ static type_mask_t vlog_check_pattern_expr(vlog_node_t v)
             (void)vlog_check_pattern_expr(rhs);
       }
    }
+
+   if (seen_pos && seen_keyed)
+      error_at(vlog_loc(v), "cannot mix positional and keyed items in "
+               "assignment pattern");
 
    return get_type_mask(type);
 }
