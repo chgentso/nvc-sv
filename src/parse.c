@@ -4056,6 +4056,160 @@ static tree_t p_actual_designator(tree_t head)
    return p_conditional_expression(NULL);
 }
 
+static tree_t synth_attr_wrapper(tree_t actual, type_t constraint)
+{
+   // LRM 08 section 6.5.7.2: a predefined function attribute (such as
+   // T'IMAGE, T'SUCC, T'POS, T'RIGHTOF, etc.) may be associated with a
+   // formal generic function. Synthesize a wrapper T_FUNC_BODY in the
+   // enclosing declarative region.
+
+   tree_t prefix = tree_name(actual);
+   type_t ptype = get_type_or_null(prefix);
+   if (ptype == NULL || type_is_none(ptype))
+      return actual;
+
+   type_t param_type = NULL, res_type = NULL;
+   bool has_param = true, impure = false;
+
+   const attr_kind_t attr = tree_subkind(actual);
+   switch (attr) {
+   case ATTR_IMAGE:
+      param_type = ptype;
+      res_type = std_type(NULL, STD_STRING);
+      break;
+   case ATTR_VALUE:
+      param_type = std_type(NULL, STD_STRING);
+      res_type = ptype;
+      break;
+   case ATTR_SUCC:
+   case ATTR_PRED:
+   case ATTR_LEFTOF:
+   case ATTR_RIGHTOF:
+      param_type = ptype;
+      res_type = ptype;
+      break;
+   case ATTR_POS:
+      param_type = ptype;
+      if (constraint != NULL && type_kind(constraint) == T_SIGNATURE
+          && type_has_result(constraint)) {
+         type_t r = type_result(constraint);
+         type_t mapped = get_generic_type_map(nametab, r);
+         if (mapped != NULL)
+            r = mapped;
+         if (type_is_integer(r))
+            res_type = r;
+      }
+      if (res_type == NULL)
+         res_type = std_type(NULL, STD_INTEGER);
+      break;
+   case ATTR_VAL:
+      if (constraint != NULL && type_kind(constraint) == T_SIGNATURE
+          && type_params(constraint) == 1) {
+         type_t p = type_param(constraint, 0);
+         type_t mapped = get_generic_type_map(nametab, p);
+         if (mapped != NULL)
+            p = mapped;
+         if (type_is_integer(p))
+            param_type = p;
+      }
+      if (param_type == NULL)
+         param_type = std_type(NULL, STD_INTEGER);
+      res_type = ptype;
+      break;
+   case ATTR_EVENT:
+   case ATTR_ACTIVE:
+   case ATTR_DRIVING:
+      has_param = false;
+      impure = true;
+      res_type = std_type(NULL, STD_BOOLEAN);
+      break;
+   case ATTR_LAST_EVENT:
+   case ATTR_LAST_ACTIVE:
+      has_param = false;
+      impure = true;
+      res_type = std_type(NULL, STD_TIME);
+      break;
+   case ATTR_LAST_VALUE:
+   case ATTR_DRIVING_VALUE:
+      has_param = false;
+      impure = true;
+      res_type = ptype;
+      break;
+   default:
+      return actual;
+   }
+
+   tree_t container = find_enclosing(nametab, S_SUBPROGRAM);
+   if (container == NULL)
+      container = find_enclosing(nametab, S_PROCESS);
+   if (container == NULL)
+      container = find_enclosing(nametab, S_CONCURRENT_BLOCK);
+   if (container == NULL)
+      container = find_enclosing(nametab, S_DESIGN_UNIT);
+   if (container == NULL || tree_kind(container) == T_PACKAGE)
+      return actual;
+
+   ident_t id = ident_uniq("$attr_fn");
+
+   tree_t fn = tree_new(T_FUNC_BODY);
+   tree_set_loc(fn, tree_loc(actual));
+   tree_set_ident(fn, id);
+   tree_set_subkind(fn, S_USER);
+   if (impure)
+      tree_set_flag(fn, TREE_F_IMPURE);
+
+   type_t ftype = type_new(T_SIGNATURE);
+   type_set_ident(ftype, id);
+   type_set_result(ftype, res_type);
+
+   tree_t aref = tree_new(T_ATTR_REF);
+   tree_set_loc(aref, tree_loc(actual));
+   tree_set_ident(aref, tree_ident(actual));
+   tree_set_subkind(aref, attr);
+   tree_set_name(aref, prefix);
+
+   if (has_param) {
+      tree_t p = tree_new(T_PARAM_DECL);
+      tree_set_loc(p, tree_loc(actual));
+      tree_set_ident(p, ident_new("X"));
+      tree_set_class(p, C_CONSTANT);
+      tree_set_subkind(p, PORT_IN);
+      tree_set_type(p, param_type);
+      tree_add_port(fn, p);
+      type_add_param(ftype, param_type);
+
+      tree_t arg = tree_new(T_PARAM);
+      tree_set_loc(arg, tree_loc(actual));
+      tree_set_subkind(arg, P_POS);
+      tree_set_pos(arg, 0);
+      tree_set_value(arg, make_ref(p));
+      tree_add_param(aref, arg);
+   }
+
+   tree_set_type(fn, ftype);
+   mangle_func(nametab, fn);
+
+   aref = solve_types(nametab, aref, res_type);
+
+   tree_t ret = tree_new(T_RETURN);
+   tree_set_loc(ret, tree_loc(actual));
+   tree_set_value(ret, aref);
+   tree_set_type(ret, res_type);
+   tree_add_stmt(fn, ret);
+
+   push_scope(nametab);
+   scope_set_subprogram(nametab, fn);
+   sem_check(ret, nametab);
+   sem_check(fn, nametab);
+   pop_scope(nametab);
+
+   tree_add_decl(container, fn);
+
+   tree_t ref = make_ref(fn);
+   tree_set_loc(ref, tree_loc(actual));
+   return ref;
+}
+
 static tree_t p_actual_part(class_t class, type_t constraint, tree_t head,
                             formal_kind_t kind)
 {
@@ -4087,6 +4241,10 @@ static tree_t p_actual_part(class_t class, type_t constraint, tree_t head,
    tree_t actual = p_actual_designator(head);
    if (kind != F_SUBPROGRAM)
       actual = solve_types(nametab, actual, constraint);
+
+   if (kind == F_GENERIC_MAP && class == C_FUNCTION
+       && tree_kind(actual) == T_ATTR_REF && tree_params(actual) == 0)
+      actual = synth_attr_wrapper(actual, constraint);
 
    const bool could_be_conversion =
       (head != NULL || looking_at_name) && tree_kind(actual) == T_FCALL;

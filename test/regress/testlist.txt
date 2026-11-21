@@ -975,6 +975,7 @@ gentype8        normal,2008
 gentype9        normal,2008
 gentype10       normal,2019
 gentype11       normal,2019
+gentype12       normal,2008
 genpack17       normal,2008
 genpack18       normal,2008
 implicit6       normal
