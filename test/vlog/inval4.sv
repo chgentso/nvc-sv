@@ -57,6 +57,8 @@ module inval4;
   const int cvar1 = 10, cvar2 = 10;
   assign cvar1 = 20;
   logic [3:0] vec;
+  event ev;
+  int q[$];
   initial begin
     arr = '{i: 1, default: 0};
     {i, arr} = 0;
@@ -64,5 +66,8 @@ module inval4;
     {darr} = 0;
     cvar2 = 30;
     vec[0:1] = 2'b00;
+    @(posedge ev);
+    q.push_back();
+    q.insert(0);
   end
 endmodule

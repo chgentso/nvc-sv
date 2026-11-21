@@ -3413,14 +3413,17 @@ START_TEST(test_inval4)
          "without a cast" },
       { 41, "an edge event control cannot be used with a real value" },
       { 58, "cannot assign to const variable 'cvar1'" },
-      { 61, "array assignment pattern key must be a constant expression" },
-      { 62, "unpacked array cannot be used in an lvalue concatenation" },
-      { 63, "non-integral target of type 'string' cannot be used in an "
+      { 63, "array assignment pattern key must be a constant expression" },
+      { 64, "unpacked array cannot be used in an lvalue concatenation" },
+      { 65, "non-integral target of type 'string' cannot be used in an "
          "lvalue concatenation" },
-      { 64, "non-integral target of type 'dynamic array' cannot be used in "
+      { 66, "non-integral target of type 'dynamic array' cannot be used in "
          "an lvalue concatenation" },
-      { 65, "cannot assign to const variable 'cvar2'" },
-      { 66, "part-select direction [0:1] does not match declared range [3:0]" },
+      { 67, "cannot assign to const variable 'cvar2'" },
+      { 68, "part-select direction [0:1] does not match declared range [3:0]" },
+      { 69, "an edge event control cannot be used with a named event" },
+      { 70, "method 'push_back' of a queue expects 1 argument but has 0" },
+      { 71, "method 'insert' of a queue expects 2 arguments but has 1" },
       { -1, NULL }
    };
    expect_errors(expect);

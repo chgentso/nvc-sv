@@ -3016,9 +3016,13 @@ static type_mask_t vlog_check_event(vlog_node_t v)
    switch (vlog_subkind(v)) {
    case V_EVENT_POSEDGE:
    case V_EVENT_NEGEDGE:
+   case V_EVENT_EDGE:
       if (mask != TM_ERROR && (mask & TM_REAL) && !(mask & TM_INTEGRAL))
          error_at(vlog_loc(v), "an edge event control cannot be used with a "
                   "real value");
+      else if (mask != TM_ERROR && (mask & TM(DT_EVENT)))
+         error_at(vlog_loc(v), "an edge event control cannot be used with a "
+                  "named event");
       break;
    default:
       break;
@@ -3907,6 +3911,48 @@ static void vlog_check_string_method(vlog_node_t v)
                vlog_params(v));
 }
 
+static void vlog_check_queue_method(vlog_node_t v)
+{
+   vlog_node_t qty = vlog_get_type(vlog_value(v));
+   if (qty == NULL || vlog_kind(qty) != V_DATA_TYPE
+       || vlog_subkind(qty) != DT_QUEUE)
+      return;
+
+   int min_args, max_args;
+   switch ((vlog_method_t)vlog_subkind(v)) {
+   case V_METHOD_SIZE:
+   case V_METHOD_POP_FRONT:
+   case V_METHOD_POP_BACK:
+      min_args = max_args = 0;
+      break;
+   case V_METHOD_PUSH_FRONT:
+   case V_METHOD_PUSH_BACK:
+      min_args = max_args = 1;
+      break;
+   case V_METHOD_ARR_INSERT:
+      min_args = max_args = 2;
+      break;
+   case V_METHOD_DELETE:
+      min_args = 0;
+      max_args = 1;
+      break;
+   default:
+      return;
+   }
+
+   const int nparams = vlog_params(v);
+   if (nparams < min_args || nparams > max_args) {
+      if (min_args == max_args)
+         error_at(vlog_loc(v), "method %pQ of a queue expects %d argument%s "
+                  "but has %d", vlog_ident(v), min_args,
+                  min_args == 1 ? "" : "s", nparams);
+      else
+         error_at(vlog_loc(v), "method %pQ of a queue expects at most %d "
+                  "argument%s but has %d", vlog_ident(v), max_args,
+                  max_args == 1 ? "" : "s", nparams);
+   }
+}
+
 static void vlog_check_assoc_method(vlog_node_t v)
 {
    vlog_node_t aty = vlog_get_type(vlog_value(v));
@@ -4064,6 +4110,7 @@ static type_mask_t vlog_check_expr(vlog_node_t v)
          vlog_check_assoc_method(v);
          vlog_check_process_method(v);
          vlog_check_string_method(v);
+         vlog_check_queue_method(v);
 
          const int nparams = vlog_params(v);
          for (int i = 0; i < nparams; i++) {
