@@ -9357,6 +9357,77 @@ static mir_value_t vlog_lower_pattern_elem(vlog_gen_t *g, vlog_node_t expr,
    return vlog_copy_value(g, vlog_lower_cast(g, eti->type, elem), etype);
 }
 
+static mir_value_t vlog_lower_packed_default(vlog_gen_t *g, vlog_node_t dt,
+                                             vlog_node_t defnode,
+                                             mir_value_t defval)
+{
+   dt = vlog_get_type(dt);
+   const type_info_t *ti = vlog_type_info(g, dt);
+   const bool two_state = mir_get_class(g->mu, ti->type) == MIR_TYPE_VEC2;
+
+   if (vlog_kind(dt) == V_STRUCT_DECL) {
+      mir_type_t t_offset = mir_offset_type(g->mu);
+      mir_value_t result = vlog_lower_x(g, ti->type);
+      const int ndecls = vlog_decls(dt);
+      for (int i = 0, offset = 0; i < ndecls; i++) {
+         vlog_node_t f = vlog_decl(dt, i);
+         const type_info_t *fti = vlog_type_info(g, vlog_type(f));
+         mir_value_t elem = vlog_lower_packed_default(g, vlog_type(f),
+                                                      defnode, defval);
+         mir_value_t uns = vlog_cast_unsigned(g, elem);
+         uns = mir_build_cast(g->mu,
+                              two_state ? mir_vec2_type(g->mu, fti->size, false)
+                                        : mir_vec4_type(g->mu, fti->size, false),
+                              uns);
+         result = mir_build_insert(g->mu, uns, result,
+                                   mir_const(g->mu, t_offset, offset));
+         offset += fti->size;
+      }
+      return result;
+   }
+
+   if (vlog_kind(dt) == V_DATA_TYPE && vlog_ranges(dt) > 0) {
+      const int nr = vlog_ranges(dt);
+      vlog_node_t inner =
+         vlog_has_type(dt) ? vlog_get_type(vlog_type(dt)) : NULL;
+      const bool inner_compound = inner != NULL
+         && (vlog_kind(inner) == V_STRUCT_DECL
+             || (vlog_kind(inner) == V_DATA_TYPE && vlog_ranges(inner) > 0));
+
+      if (nr > 1 || inner_compound) {
+         unsigned count = 1;
+         const int outer = inner_compound ? nr : nr - 1;
+         for (int i = 0; i < outer; i++)
+            count *= vlog_size(vlog_range(dt, i));
+
+         const unsigned ewidth = ti->size / count;
+         mir_type_t t_elem = two_state ? mir_vec2_type(g->mu, ewidth, false)
+                                       : mir_vec4_type(g->mu, ewidth, false);
+         mir_value_t elem;
+         if (inner_compound)
+            elem = vlog_lower_packed_default(g, inner, defnode, defval);
+         else if (defnode != NULL && vlog_is_fill_literal(defnode))
+            elem = vlog_lower_with_context(g, defnode, t_elem);
+         else
+            elem = vlog_lower_cast(g, t_elem, defval);
+
+         elem = mir_build_cast(g->mu, t_elem, vlog_cast_unsigned(g, elem));
+
+         mir_type_t t_offset = mir_offset_type(g->mu);
+         mir_value_t result = vlog_lower_x(g, ti->type);
+         for (unsigned i = 0; i < count; i++)
+            result = mir_build_insert(g->mu, elem, result,
+                                      mir_const(g->mu, t_offset, i * ewidth));
+         return result;
+      }
+   }
+
+   mir_value_t elem = defval;
+   if (defnode != NULL && vlog_is_fill_literal(defnode))
+      elem = vlog_lower_with_context(g, defnode, ti->type);
+   return vlog_lower_cast(g, ti->type, elem);
+}
+
 static mir_value_t vlog_lower_pattern_expr(vlog_gen_t *g, vlog_node_t v,
                                            mir_type_t context)
 {
@@ -9584,21 +9655,61 @@ static mir_value_t vlog_lower_pattern_expr(vlog_gen_t *g, vlog_node_t v,
          // The elements are the first dimension of a packed array
          const int nelems = vlog_size(dim);
          const int ewidth = width / nelems;
-         mir_type_t t_logic =
-            mir_get_class(g->mu, mir_get_type(g->mu, result)) == MIR_TYPE_VEC2
+         const bool two_state =
+            mir_get_class(g->mu, mir_get_type(g->mu, result)) == MIR_TYPE_VEC2;
+         mir_type_t t_logic = two_state
             ? mir_vec2_type(g->mu, ewidth, false)
             : mir_vec4_type(g->mu, ewidth, false);
 
+         const int nr = vlog_ranges(dt);
+         vlog_node_t inner =
+            vlog_has_type(dt) ? vlog_get_type(vlog_type(dt)) : NULL;
+         const bool inner_compound = inner != NULL
+            && (vlog_kind(inner) == V_STRUCT_DECL
+                || (vlog_kind(inner) == V_DATA_TYPE && vlog_ranges(inner) > 0));
+
          for (int i = 0; i < nelems; i++) {
             mir_value_t elem = def;
+            vlog_node_t enode = defnode;
+            bool from_default = true;
             for (int j = 0; j < nparams; j++) {
                if (keys[j] == i) {
                   elem = vals[j];
+                  enode = vlog_right(items[j]);
+                  from_default = false;
                   break;
                }
             }
 
-            mir_value_t cast = vlog_lower_cast(g, t_logic, elem);
+            mir_value_t cast;
+            if (from_default && defnode != NULL && (nr > 2 || inner_compound)) {
+               unsigned sub = 1;
+               const int outer = inner_compound ? nr - 1 : nr - 2;
+               for (int k = 1; k <= outer; k++)
+                  sub *= vlog_size(vlog_range(dt, k));
+
+               const unsigned sw = ewidth / sub;
+               mir_type_t t_sub = two_state ? mir_vec2_type(g->mu, sw, false)
+                                            : mir_vec4_type(g->mu, sw, false);
+               mir_value_t se;
+               if (inner_compound)
+                  se = vlog_lower_packed_default(g, inner, defnode, def);
+               else if (vlog_is_fill_literal(defnode))
+                  se = vlog_lower_with_context(g, defnode, t_sub);
+               else
+                  se = vlog_lower_cast(g, t_sub, def);
+               se = mir_build_cast(g->mu, t_sub, vlog_cast_unsigned(g, se));
+
+               cast = vlog_lower_x(g, t_logic);
+               for (unsigned k = 0; k < sub; k++)
+                  cast = mir_build_insert(g->mu, se, cast,
+                                          mir_const(g->mu, t_offset, k * sw));
+            }
+            else {
+               if (enode != NULL && vlog_is_fill_literal(enode))
+                  elem = vlog_lower_with_context(g, enode, t_logic);
+               cast = vlog_lower_cast(g, t_logic, elem);
+            }
             mir_value_t pos = mir_const(g->mu, t_offset, i * ewidth);
             result = mir_build_insert(g->mu, cast, result, pos);
          }
@@ -9613,10 +9724,12 @@ static mir_value_t vlog_lower_pattern_expr(vlog_gen_t *g, vlog_node_t v,
          for (int i = 0, offset = 0; i < ndecls; i++) {
             mir_value_t elem = def;
             vlog_node_t enode = defnode;
+            bool from_default = true;
             for (int j = 0; j < nparams; j++) {
                if (keys[j] == i) {
                   elem = vals[j];
                   enode = vlog_right(items[j]);
+                  from_default = false;
                   break;
                }
             }
@@ -9624,9 +9737,15 @@ static mir_value_t vlog_lower_pattern_expr(vlog_gen_t *g, vlog_node_t v,
             vlog_node_t f = vlog_decl(dt, i);
 
             const type_info_t *fti = vlog_type_info(g, vlog_type(f));
-            if (enode != NULL && vlog_is_fill_literal(enode))
-               elem = vlog_lower_with_context(g, enode, fti->type);
-            mir_value_t cast = vlog_lower_cast(g, fti->type, elem);
+            mir_value_t cast;
+            if (from_default && defnode != NULL
+                && vlog_kind(dt) == V_STRUCT_DECL)
+               cast = vlog_lower_packed_default(g, vlog_type(f), defnode, def);
+            else {
+               if (enode != NULL && vlog_is_fill_literal(enode))
+                  elem = vlog_lower_with_context(g, enode, fti->type);
+               cast = vlog_lower_cast(g, fti->type, elem);
+            }
 
             mir_value_t uns = vlog_cast_unsigned(g, cast);
             if (mir_get_class(g->mu, mir_get_type(g->mu, result))

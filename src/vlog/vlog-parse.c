@@ -6335,7 +6335,14 @@ static vlog_node_t p_pattern_elem_expr(int array_depth, vlog_node_t dt)
 {
    // The value of an item that gives an element of an array pattern
 
-   if (dt != NULL && peek() == tTICK && peek_nth(2) == tLBRACE) {
+   const bool nested_brace = peek() == tLBRACE
+      && (array_depth > 1
+          || (dt != NULL && vlog_kind(dt) == V_DATA_TYPE
+              && (vlog_subkind(dt) == DT_DYNARRAY
+                  || vlog_subkind(dt) == DT_QUEUE)));
+
+   if (dt != NULL
+       && ((peek() == tTICK && peek_nth(2) == tLBRACE) || nested_brace)) {
       if (vlog_kind(dt) == V_DATA_TYPE
           && (vlog_subkind(dt) == DT_DYNARRAY || vlog_subkind(dt) == DT_QUEUE)) {
          vlog_node_t et = vlog_get_type(vlog_type(dt));
@@ -6498,8 +6505,13 @@ static void p_assignment_pattern(vlog_node_t expr)
             member = vlog_decl(bt, items.count);
 
          vlog_node_t head;
-         if (!struct_pat && dt != NULL && peek() == tTICK
-             && peek_nth(2) == tLBRACE)
+         if (!struct_pat && dt != NULL
+             && ((peek() == tTICK && peek_nth(2) == tLBRACE)
+                 || (peek() == tLBRACE
+                     && (array_depth > 1
+                         || (vlog_kind(dt) == V_DATA_TYPE
+                             && (vlog_subkind(dt) == DT_DYNARRAY
+                                 || vlog_subkind(dt) == DT_QUEUE))))))
             head = p_pattern_elem_expr(array_depth, dt);   // An element
          else
             head = p_pattern_item_expr(dt, member);
