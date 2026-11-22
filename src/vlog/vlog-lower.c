@@ -27264,6 +27264,13 @@ static void vlog_crv_sels_cb(vlog_node_t v, void *context)
       c->sel[c->nsel++] = v;
 }
 
+static bool vlog_crv_sized_by_solver(vlog_node_t decl)
+{
+   // A rand dynamic array or queue may be given another size by the solver
+   return vlog_crv_is_dynamic_array(decl)
+      && (vlog_flags(decl) & (VLOG_F_RAND | VLOG_F_RANDC));
+}
+
 static mir_value_t vlog_crv_inrange(vlog_gen_t *g, vlog_node_t e)
 {
    // A constraint which refers to an element that does not exist is left
@@ -27280,7 +27287,7 @@ static mir_value_t vlog_crv_inrange(vlog_gen_t *g, vlog_node_t e)
       vlog_node_t base = vlog_value(c.sel[i]);
       vlog_node_t decl = vlog_ref(base);
 
-      if (!vlog_crv_is_state(g, idx))
+      if (!vlog_crv_is_state(g, idx) || vlog_crv_sized_by_solver(decl))
          continue;
       else if (vlog_ranges(decl) > 1)
          continue;
@@ -27330,7 +27337,8 @@ static mir_value_t vlog_crv_inrange_node(vlog_gen_t *g, vlog_node_t e)
       vlog_node_t base = vlog_value(c.sel[i]);
       vlog_node_t decl = vlog_ref(base);
 
-      if (vlog_crv_is_state(g, idx) || vlog_ranges(decl) > 1)
+      if ((vlog_crv_is_state(g, idx) && !vlog_crv_sized_by_solver(decl))
+          || vlog_ranges(decl) > 1)
          continue;
       else if (!vlog_crv_is_dynamic_array(decl) && vlog_ranges(decl) != 1)
          continue;
