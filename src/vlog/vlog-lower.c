@@ -26006,8 +26006,13 @@ static void vlog_crv_needs_unroll_cb(vlog_node_t v, void *ctx)
    switch (vlog_kind(v)) {
    case V_DIST:
    case V_USER_FCALL:
-   case V_METHOD_CALL:
       *(bool *)ctx = true;
+      break;
+   case V_METHOD_CALL:
+      // The size is a node of the problem: unrolling by the length the
+      // array has before solving would miss a size chosen by the solver
+      if (vlog_subkind(v) != V_METHOD_SIZE)
+         *(bool *)ctx = true;
       break;
    default:
       break;
