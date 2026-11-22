@@ -83,6 +83,7 @@ struct _conn_design {
    unsigned       nnets;       // Nets created so far, for conn_net_t.id
    hash_t        *netmap;      // Declaration -> conn_net_t (current instance)
    hash_t        *genval;      // Generic declaration -> gen_value_t (ditto)
+   hash_t        *genvars;     // Genvar of a shared generate body -> value
    shash_t       *names;       // Net names of the current instance
    hash_t        *gmap;        // Declaration -> conn_net_t (all instances)
    hash_t        *genmaps;     // Generate block -> its netmap (see enter_gen)
@@ -1394,6 +1395,122 @@ static void vlog_net_shape(vlog_node_t decl, unsigned *width, bool *desc,
       *record = true;
 }
 
+static bool conn_vlog_int(conn_design_t *cd, vlog_node_t v, int64_t *value)
+{
+   // Constant value of an expression which may use the genvar of the
+   // iteration of a loop whose body is shared by its iterations
+
+   if (vlog_get_const(v, value))
+      return true;
+   else if (cd->genvars == NULL)
+      return false;
+
+   int64_t a, b, c;
+   switch (vlog_kind(v)) {
+   case V_REF:
+      if (vlog_has_ref(v)) {
+         vlog_node_t d = vlog_ref(v);
+         const int64_t *ptr = hash_get(cd->genvars, d);
+         if (ptr != NULL) {
+            *value = *ptr;
+            return true;
+         }
+         else if (vlog_kind(d) == V_LOCALPARAM && vlog_has_value(d)
+                  && vlog_ranges(d) == 0)
+            return conn_vlog_int(cd, vlog_value(d), value);
+      }
+      return false;
+   case V_UNARY:
+      if (!conn_vlog_int(cd, vlog_value(v), &a))
+         return false;
+      switch (vlog_subkind(v)) {
+      case V_UNARY_NEG: *value = -a; return true;
+      case V_UNARY_IDENTITY: *value = a; return true;
+      case V_UNARY_NOT: *value = !a; return true;
+      default: return false;
+      }
+   case V_COND_EXPR:
+      if (!conn_vlog_int(cd, vlog_value(v), &c)
+          || !conn_vlog_int(cd, vlog_left(v), &a)
+          || !conn_vlog_int(cd, vlog_right(v), &b))
+         return false;
+      *value = c ? a : b;
+      return true;
+   case V_BINARY:
+      if (!conn_vlog_int(cd, vlog_left(v), &a)
+          || !conn_vlog_int(cd, vlog_right(v), &b))
+         return false;
+      switch (vlog_subkind(v)) {
+      case V_BINARY_PLUS: *value = a + b; return true;
+      case V_BINARY_MINUS: *value = a - b; return true;
+      case V_BINARY_TIMES: *value = a * b; return true;
+      case V_BINARY_DIVIDE:
+         if (b == 0)
+            return false;
+         *value = a / b;
+         return true;
+      case V_BINARY_MOD:
+         if (b == 0)
+            return false;
+         *value = a % b;
+         return true;
+      case V_BINARY_SHIFT_LL: *value = a << b; return true;
+      case V_BINARY_SHIFT_RL: *value = (uint64_t)a >> b; return true;
+      case V_BINARY_LOG_EQ: *value = a == b; return true;
+      case V_BINARY_LOG_NEQ: *value = a != b; return true;
+      case V_BINARY_LT: *value = a < b; return true;
+      case V_BINARY_GT: *value = a > b; return true;
+      case V_BINARY_LEQ: *value = a <= b; return true;
+      case V_BINARY_GEQ: *value = a >= b; return true;
+      case V_BINARY_LOG_AND: *value = a && b; return true;
+      case V_BINARY_LOG_OR: *value = a || b; return true;
+      default: return false;
+      }
+   default:
+      return false;
+   }
+}
+
+static int64_t *enter_shared_iter(conn_design_t *cd, tree_t blk,
+                                  vlog_node_t *gv)
+{
+   // The genvar of a generate block shared by the iterations of a loop
+   // has the value of this iteration while the block is scanned
+
+   *gv = NULL;
+
+   if (tree_genmaps(blk) != 1 || tree_decls(blk) == 0)
+      return NULL;
+
+   tree_t h = tree_decl(blk, 0);
+   if (tree_kind(h) != T_HIER || !tree_has_ref(h)
+       || tree_kind(tree_ref(h)) != T_VERILOG)
+      return NULL;
+
+   vlog_node_t body = tree_vlog(tree_ref(h));
+   if (vlog_kind(body) != V_INST_BODY
+       || !(vlog_flags(body) & VLOG_F_GEN_SHARED))
+      return NULL;
+
+   *gv = vlog_decl(body, vlog_decls(body) - 1);
+
+   if (cd->genvars == NULL)
+      cd->genvars = hash_new(16);
+
+   int64_t *saved = hash_get(cd->genvars, *gv);
+   int64_t *value = dalloc(cd, sizeof(int64_t));
+   *value = tree_ival(tree_value(tree_genmap(blk, 0)));
+   hash_put(cd->genvars, *gv, value);
+   return saved;
+}
+
+static void leave_shared_iter(conn_design_t *cd, vlog_node_t gv,
+                              int64_t *saved)
+{
+   if (gv != NULL)
+      hash_put(cd->genvars, gv, saved);
+}
+
 bool vlog_select(conn_design_t *cd, vlog_node_t v, conn_range_t *out,
                         bool *approx)
 {
@@ -1474,14 +1591,15 @@ bool vlog_select(conn_design_t *cd, vlog_node_t v, conn_range_t *out,
 
          int64_t a, b;
          if (vlog_kind(v) == V_BIT_SELECT) {
-            if (vlog_params(v) != 1 || !vlog_get_const(vlog_param(v, 0), &a))
+            if (vlog_params(v) != 1
+                || !conn_vlog_int(cd, vlog_param(v, 0), &a))
                goto whole;
             b = a;
          }
          else {
             int64_t l, r;
-            if (!vlog_get_const(vlog_left(v), &l)
-                || !vlog_get_const(vlog_right(v), &r))
+            if (!conn_vlog_int(cd, vlog_left(v), &l)
+                || !conn_vlog_int(cd, vlog_right(v), &r))
                goto whole;
 
             switch (vlog_subkind(v)) {
@@ -3079,7 +3197,10 @@ static void scan_decls(bctx_t *bc, tree_t blk, const char *prefix)
          register_generics(cd, s, cd->genval);
          char *np = dstrf(cd, "%s%s.", prefix, istr(tree_ident(s)));
          hash_t *saved = enter_gen(cd, s);
+         vlog_node_t gv;
+         int64_t *saved_gv = enter_shared_iter(cd, s, &gv);
          scan_decls(bc, s, np);
+         leave_shared_iter(cd, gv, saved_gv);
          cd->netmap = saved;
       }
    }
@@ -3524,7 +3645,10 @@ static void scan_stmts(bctx_t *bc, tree_t blk, const char *prefix, int pass)
             register_generics(cd, s, cd->genval);
             char *np = dstrf(cd, "%s%s.", prefix, istr(tree_ident(s)));
             hash_t *saved = enter_gen(cd, s);
+            vlog_node_t gv;
+            int64_t *saved_gv = enter_shared_iter(cd, s, &gv);
             scan_stmts(bc, s, np, pass);
+            leave_shared_iter(cd, gv, saved_gv);
             cd->netmap = saved;
          }
          else if (pass != (is_interface_block(s) ? 0 : 1))
@@ -3867,6 +3991,8 @@ void conn_free(conn_design_t *cd)
       hash_free(value);
 
    hash_free(cd->genmaps);
+   if (cd->genvars != NULL)
+      hash_free(cd->genvars);
    hash_free(cd->netparents);
    hash_free(cd->blkmaps);
    hash_free(cd->tree_blocks);
