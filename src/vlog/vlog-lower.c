@@ -32484,9 +32484,14 @@ static void vlog_lower_task_decl(mir_unit_t *mu, object_t *obj)
    mir_add_param(mu, t_context, MIR_NULL_STAMP, ident_new("context"));
 
    uint32_t sigref_mask = 0;
-   const char *sr = strstr(istr(mir_get_name(mu, MIR_NULL_VALUE)), "$sr");
-   if (sr != NULL)
-      sigref_mask = strtoul(sr + 3, NULL, 16);
+   const char *mname = istr(mir_get_name(mu, MIR_NULL_VALUE));
+   const char *sr = strrchr(mname, '$');
+   if (sr != NULL && strncmp(sr, "$sr", 3) == 0 && sr[3] != '\0') {
+      char *end = NULL;
+      unsigned long mask = strtoul(sr + 3, &end, 16);
+      if (*end == '\0')
+         sigref_mask = (uint32_t)mask;
+   }
 
    const int nports = vlog_ports(v);
    for (int i = 0; i < nports; i++) {
