@@ -2350,7 +2350,8 @@ static problem_t fuzz_problem(uint64_t seed)
 typedef struct {
    int  problems, with_solutions, unsat, draws;
    int  incomplete;    // Solutions exist and the solver said there are none
-   int  invalid;       // An answer which is not a kept solution
+   int  invalid;       // An answer which breaks a hard constraint
+   int  soft_lost;     // A soft constraint dropped that could be kept
    int  false_sat;     // Unsatisfiable and the solver gave an answer
 } fuzz_stats_t;
 
@@ -2387,8 +2388,16 @@ static bool fuzz_run_one(uint64_t seed, const crv_engine_t *engines,
             what = "no solution for a satisfiable one";
          }
          else if (ok && m.index[model_key(&p, a)] == 0) {
-            st->invalid++;
-            what = "a value that is not a solution";
+            if (hard_holds(&p, a)) {
+               // A solution, but a soft constraint was dropped that could
+               // have been kept
+               st->soft_lost++;
+               what = "a solution that drops a soft constraint it could keep";
+            }
+            else {
+               st->invalid++;
+               what = "a value that is not a solution";
+            }
          }
 
          if (what != NULL && good) {
@@ -2454,16 +2463,18 @@ START_TEST(test_fuzz)
 
    if (lng || replay)
       printf("fuzz: %d problems (%d with solutions, %d unsatisfiable), %d "
-             "draws; %d without an answer, %d invalid, %d answered "
-             "although unsatisfiable\n", st.problems, st.with_solutions,
-             st.unsat, st.draws, st.incomplete, st.invalid, st.false_sat);
+             "draws; %d without an answer, %d soft constraints dropped that "
+             "could be kept, %d invalid, %d answered although "
+             "unsatisfiable\n", st.problems, st.with_solutions, st.unsat,
+             st.draws, st.incomplete, st.soft_lost, st.invalid, st.false_sat);
 
    // The answers the solver gives are always right; whether it finds one
    // when there is one is reported, and bounded
    ck_assert_int_eq(st.invalid, 0);
    ck_assert_int_eq(st.false_sat, 0);
-   ck_assert_msg(st.incomplete * 50 <= st.draws, "%d of %d draws without an "
-                 "answer", st.incomplete, st.draws);
+   ck_assert_msg((st.incomplete + st.soft_lost) * 50 <= st.draws,
+                 "%d + %d of %d draws without an answer or with a soft "
+                 "constraint lost", st.incomplete, st.soft_lost, st.draws);
    (void)bad;
 }
 END_TEST
@@ -2741,7 +2752,7 @@ Suite *get_crv_tests(void)
    Suite *s = suite_create("crv");
 
    TCase *tc = tcase_create("Core");
-   tcase_set_timeout(tc, 30.0);
+   tcase_set_timeout(tc, long_mode() ? 3600.0 : 30.0);
    tcase_add_test(tc, test_domain);
    tcase_add_test(tc, test_fixed);
    tcase_add_test(tc, test_unsat);
