@@ -3126,6 +3126,32 @@ START_TEST(test_stats_decline)
 }
 END_TEST
 
+START_TEST(test_soft_giveup)
+{
+   // The forced rejection stage cannot say that the hard constraints have no
+   // solution: the soft constraints cannot all hold, the hard ones alone are
+   // too tight to sample, and the call gives up instead of saying
+   // unsatisfiable
+   const crv_engine_t saved = crv_engine();
+   crv_set_engine(CRV_ENGINE_REJECT);
+   crv_t *c = crv_new();
+   crv_var_t x = crv_var(c, 32, false, 0), y = crv_var(c, 32, false, 0);
+   crv_require(c, crv_binary(c, CRV_EQ, crv_binary(
+                                c, CRV_ADD, crv_var_ref(c, x),
+                                crv_var_ref(c, y), 32, false),
+                             crv_const(c, 0x12345678, 32, false), 1, false),
+               false, 1);
+   crv_require(c, crv_binary(c, CRV_LT, crv_var_ref(c, x),
+                             crv_const(c, 5, 32, false), 1, false), true, 2);
+   crv_require(c, crv_binary(c, CRV_GT, crv_var_ref(c, x),
+                             crv_const(c, 10, 32, false), 1, false), true, 3);
+   crv_seed(5);
+   ck_assert_int_eq(crv_solve2(c), CRV_GIVEUP);
+   crv_free(c);
+   crv_set_engine(saved);
+}
+END_TEST
+
 START_TEST(test_stats_exhausted)
 {
    // 16 samples of a variable that one value in 2^16 satisfies are all
@@ -3344,6 +3370,7 @@ Suite *get_crv_tests(void)
    tcase_add_test(tc, test_stats_stage);
    tcase_add_test(tc, test_stats_decline);
    tcase_add_test(tc, test_stats_exhausted);
+   tcase_add_test(tc, test_soft_giveup);
    tcase_add_test(tc, test_stats_order);
    tcase_add_test(tc, test_stats_fail);
    tcase_add_test(tc, test_stats_soft);

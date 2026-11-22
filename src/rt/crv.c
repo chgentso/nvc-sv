@@ -6660,6 +6660,7 @@ typedef struct {
    int         nsoft;
    sol_t       best;         // Solution of the last satisfiable trial
    unsigned   *sizes;
+   bool        gaveup;       // The last trial that failed was not decided
 } softctx_t;
 
 static void prob_reset(prob_t *P, amark_t am)
@@ -6691,6 +6692,7 @@ static bool soft_trial(softctx_t *S, const bool *set)
          memcpy(P->soft_on, set, S->nsoft);
          r = solve_prob_timed(P);
       }
+      S->gaveup = r == S_GIVEUP;
       if (r != S_SAT)
          return false;
 
@@ -6708,6 +6710,7 @@ static bool soft_trial(softctx_t *S, const bool *set)
    sres_t r = S_GIVEUP;
    for (int again = 0; again < 3 && r == S_GIVEUP; again++)
       r = solve_once(S->c, set, &next);
+   S->gaveup = r == S_GIVEUP;
    if (r != S_SAT)
       return false;
 
@@ -6772,8 +6775,8 @@ static sres_t solve_soft(crv_t *c, const bool *all, sol_t *out)
       }
       free(list);
    }
-   else if (S.P != NULL && S.P->oob)
-      res = S_GIVEUP;
+   else if (S.gaveup || (S.P != NULL && S.P->oob))
+      res = S_GIVEUP;      // Nothing was proved about the hard constraints
 
    if (res == S_SAT) {
       *out = S.best;
