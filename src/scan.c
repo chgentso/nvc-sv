@@ -132,7 +132,8 @@ void input_from_file(const char *file)
       kind = SOURCE_VERILOG;
       set_default_keywords(VLOG_1364_2001);
    }
-   else if (len > 3 && strcmp(file + len - 3, ".sv") == 0) {
+   else if ((len > 3 && strcmp(file + len - 3, ".sv") == 0)
+            || (len > 4 && strcmp(file + len - 4, ".svh") == 0)) {
       kind = SOURCE_VERILOG;
       set_default_keywords(VLOG_1800_2023);
    }

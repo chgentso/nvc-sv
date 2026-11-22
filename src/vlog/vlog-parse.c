@@ -25,6 +25,7 @@
 #include "ident.h"
 #include "lib.h"
 #include "object.h"
+#include "option.h"
 #include "parse.h"
 #include "scan.h"
 #include "vlog/vlog-node.h"
@@ -28570,9 +28571,11 @@ static vlog_node_t end_of_file(void)
    ACLEAR(pending_binds);
    ACLEAR(pending_bind_scopes);
 
-   scope_leave();
-   vlog_symtab_free(symtab);
-   symtab = NULL;
+   if (!opt_get_int(OPT_SINGLE_UNIT) || error_count() > 0) {
+      scope_leave();
+      vlog_symtab_free(symtab);
+      symtab = NULL;
+   }
    return NULL;
 }
 
@@ -28726,10 +28729,13 @@ void reset_verilog_parser(void)
    header_damaged = false;
    skipped_unit = false;
 
+   const bool keep_unit = opt_get_int(OPT_SINGLE_UNIT) && error_count() == 0;
+
    implicit_kind = V_NET_WIRE;
    last_attr = NULL;
    ACLEAR(pending_attrs);
-   next_namespace = 1;
+   if (!keep_unit)
+      next_namespace = 1;
    time_scale = default_time_scale;
    time_precision_log10 = default_precision_log10;
    time_unscaled = default_unscaled;
@@ -28744,18 +28750,21 @@ void reset_verilog_parser(void)
    ACLEAR(forward_specs);
    ACLEAR(unit_specs);
    ACLEAR(unit_generics);
-   ACLEAR(file_namespaces);
+   if (!keep_unit)
+      ACLEAR(file_namespaces);
    last_modport = NULL;
 
-   // These refer to scopes which are about to be freed
-   if (generic_classes != NULL) {
-      hash_free(generic_classes);
-      generic_classes = NULL;
-   }
+   if (!keep_unit) {
+      // These refer to scopes which are about to be freed
+      if (generic_classes != NULL) {
+         hash_free(generic_classes);
+         generic_classes = NULL;
+      }
 
-   if (generic_homes != NULL) {
-      hash_free(generic_homes);
-      generic_homes = NULL;
+      if (generic_homes != NULL) {
+         hash_free(generic_homes);
+         generic_homes = NULL;
+      }
    }
 
    class_depth = 0;
@@ -28772,7 +28781,7 @@ void reset_verilog_parser(void)
       seen_units = NULL;
    }
 
-   if (symtab != NULL) {
+   if (!keep_unit && symtab != NULL) {
       vlog_symtab_free(symtab);
       symtab = NULL;
    }
