@@ -186,7 +186,25 @@ bool vlog_get_const(vlog_node_t v, int64_t *value)
    case V_PARAM_DECL:
       return vlog_has_value(v) && vlog_get_const(vlog_value(v), value);
    case V_ENUM_NAME:
-      return vlog_has_value(v) && vlog_get_const(vlog_value(v), value);
+      {
+         if (!vlog_has_value(v) || !vlog_get_const(vlog_value(v), value))
+            return false;
+
+         // A value such as W'(4) folded before it was converted to the
+         // base type is signed but the name has the unsigned base type
+         vlog_node_t num = vlog_value(v);
+         if (*value < 0 && vlog_kind(num) == V_NUMBER && vlog_has_type(v)
+             && number_signed(vlog_number(num))) {
+            vlog_node_t etype = vlog_type(v);
+            vlog_node_t base = vlog_has_type(etype)
+               ? vlog_get_type(vlog_type(etype)) : NULL;
+            const unsigned width = number_width(vlog_number(num));
+            if (base != NULL && vlog_kind(base) == V_DATA_TYPE
+                && !vlog_is_signed(base) && width < 64)
+               *value &= (INT64_C(1) << width) - 1;
+         }
+         return true;
+      }
    case V_CONCAT:
       if (vlog_params(v) == 1 && !vlog_has_value(v))
          return vlog_get_const(vlog_param(v, 0), value);
