@@ -4718,6 +4718,26 @@ START_TEST(test_gendup1)
 }
 END_TEST
 
+START_TEST(test_impimp1)
+{
+   const error_t expect[] = {
+      { 12, "no data type declaration for 'base_cfg'" },
+      { 12, "base of class must be a class type" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/impimp1.sv");
+
+   for (int i = 0; i < 3; i++)
+      vlog_check(do_parse_only(V_PACKAGE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
 Suite *get_vlog_tests(void)
 {
    Suite *s = suite_create("vlog");
@@ -4901,6 +4921,7 @@ Suite *get_vlog_tests(void)
    tcase_add_test(tc, test_genvaruse1);
    tcase_add_test(tc, test_gendup1);
    tcase_add_test(tc, test_callorder1);
+   tcase_add_test(tc, test_impimp1);
    suite_add_tcase(s, tc);
 
    return s;

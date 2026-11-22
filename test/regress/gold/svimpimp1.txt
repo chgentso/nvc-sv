@@ -1,0 +1,2 @@
+'base_cfg' is visible only through the import of package BASE_PKG in package LIB_PKG
+PASSED

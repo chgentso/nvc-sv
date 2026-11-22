@@ -1098,7 +1098,7 @@ static void declare_port(vlog_node_t mod, vlog_node_t port)
 
 static vlog_node_t get_data_type(ident_t id)
 {
-   vlog_node_t v = vlog_symtab_query(symtab, id);
+   vlog_node_t v = vlog_symtab_query_at(symtab, id, &state.last_loc);
    if (v == NULL) {
       if (!(skipped_unit && parse_recovery()))
          error_at(&state.last_loc, "no data type declaration for %pQ", id);

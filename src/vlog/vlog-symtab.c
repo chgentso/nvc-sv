@@ -16,6 +16,7 @@
 //
 
 #include "util.h"
+#include "common.h"
 #include "array.h"
 #include "diag.h"
 #include "hash.h"
@@ -52,6 +53,8 @@ typedef struct {
    ident_t     name;
    vlog_node_t node;
    bool        imported;   // Made visible by a wildcard import
+   ident_t     via;        // Package whose own import made it visible
+   ident_t     from;       // Package it was imported from
 } vlog_symbol_t;
 
 typedef struct _vlog_scope {
@@ -1069,6 +1072,27 @@ void vlog_resolve_method(vlog_node_t v)
    lookup_method_call(NULL, v);
 }
 
+static void note_indirect(vlog_symbol_t *sym, const loc_t *loc)
+{
+   // Say once that a name was found through an import of an import
+
+   if (sym->via == NULL || !sym->imported)
+      return;
+
+   const char *via = istr(ident_rfrom(sym->via, '.') ?: sym->via);
+   const char *from = istr(ident_rfrom(sym->from, '.') ?: sym->from);
+
+   diag_t *d = diag_new(DIAG_WARN, loc);
+   diag_printf(d, "%pQ is visible only through the import of package %s in "
+               "package %s", vlog_ident(sym->node), from, via);
+   diag_hint(d, vlog_loc(sym->node), "declared here");
+   diag_hint(d, NULL, "the standard requires package %s to export it with "
+             "'export %s::*' (IEEE 1800-2017 section 26.6)", via, from);
+   diag_emit(d);
+
+   sym->via = sym->from = NULL;
+}
+
 void vlog_symtab_lookup_in(vlog_symtab_t *st, vlog_node_t v,
                            vlog_node_t scope)
 {
@@ -1160,6 +1184,7 @@ void vlog_symtab_lookup(vlog_symtab_t *st, vlog_node_t v)
    }
    else if (sym->node != POISON_NODE) {
       vlog_set_ref(v, sym->node);
+      note_indirect((vlog_symbol_t *)sym, vlog_loc(v));
 
       // A subroutine call bound to the compilation unit scope may still
       // be shadowed by a later local declaration in an enclosing scope
@@ -1227,6 +1252,7 @@ void vlog_symtab_put(vlog_symtab_t *st, vlog_node_t v)
    if (sym->imported) {
       // A declaration takes precedence over a name from a wildcard import
       sym->imported = false;
+      sym->via = sym->from = NULL;
       sym->node = v;
       return;
    }
@@ -1294,6 +1320,17 @@ void vlog_symtab_poison(vlog_symtab_t *st, ident_t name)
 {
    vlog_symbol_t *sym = fresh_symbol_for(st, name);
    sym->node = POISON_NODE;
+}
+
+vlog_node_t vlog_symtab_query_at(vlog_symtab_t *st, ident_t name,
+                                 const loc_t *loc)
+{
+   const vlog_symbol_t *sym = symbol_for(st, name);
+   if (sym == NULL || sym->node == POISON_NODE)
+      return NULL;
+
+   note_indirect((vlog_symbol_t *)sym, loc);
+   return sym->node;
 }
 
 vlog_node_t vlog_symtab_query(vlog_symtab_t *st, ident_t name)
@@ -1486,22 +1523,34 @@ ident_t vlog_symtab_hier_suffix(vlog_symtab_t *st, hier_owner_t *owner,
    return suffix;
 }
 
-static void put_imported(vlog_symtab_t *st, vlog_node_t d)
+static void put_imported(vlog_symtab_t *st, vlog_node_t d, ident_t via,
+                         ident_t from)
 {
    // Names with the same name from different wildcard imports are only an
-   // error if one is used which is not checked
+   // error if one is used which is not checked.  A name which is only
+   // visible through the import of another package (via is not NULL) is
+   // given way to by any other.
 
    vlog_symbol_t *sym = fresh_symbol_for(st, vlog_ident(d));
-   if (sym->node != NULL)
+   if (sym->node != NULL && !(sym->imported && sym->via != NULL
+                              && via == NULL))
       return;
 
    sym->node = d;
    sym->imported = true;
+   sym->via = via;
+   sym->from = from;
 }
 
-static void import_package(vlog_symtab_t *st, vlog_node_t pack, ident_t match)
+static void import_package(vlog_symtab_t *st, vlog_node_t pack, ident_t match,
+                           ident_t via, ident_t from, int depth)
 {
    assert(vlog_kind(pack) == V_PACKAGE);
+
+   // IEEE 1800-2017 section 26.3 does not make the names a package imports
+   // visible to its users unless they are exported, but a name which is
+   // only imported indirectly is found with a warning under --relaxed
+   const bool relaxed = relaxed_rules();
 
    const int ndecls = vlog_decls(pack);
    for (int i = 0; i < ndecls; i++) {
@@ -1509,17 +1558,23 @@ static void import_package(vlog_symtab_t *st, vlog_node_t pack, ident_t match)
       if (vlog_kind(d) == V_CLASS_DECL && (vlog_flags(d) & VLOG_F_SPEC))
          continue;   // A specialisation has no name that can be used
       else if (vlog_kind(d) == V_IMPORT_DECL) {
-         // Names a package imports are not visible to its users unless
-         // they are exported
-         if (!(vlog_flags(d) & VLOG_F_EXPORT))
-            continue;
-
          ident_t item = vlog_has_ident(d) ? vlog_ident(d) : NULL;
          if (item != NULL && match != NULL && item != match)
             continue;
 
+         if (!(vlog_flags(d) & VLOG_F_EXPORT)) {
+            if (relaxed && match == NULL && depth < 8 && vlog_has_ref(d)
+                && vlog_kind(vlog_ref(d)) == V_PACKAGE && item == NULL) {
+               vlog_node_t q = vlog_ref(d);
+               import_package(st, q, NULL, via ?: vlog_ident(pack),
+                              via ? from : vlog_ident(q), depth + 1);
+            }
+            continue;
+         }
+
          if (vlog_has_ref(d) && vlog_kind(vlog_ref(d)) == V_PACKAGE)
-            import_package(st, vlog_ref(d), item ?: match);
+            import_package(st, vlog_ref(d), item ?: match, via, from,
+                           depth + 1);
          else if (!vlog_has_ref(d)) {
             for (int j = 0; j < ndecls; j++) {
                vlog_node_t imp = vlog_decl(pack, j);
@@ -1529,14 +1584,14 @@ static void import_package(vlog_symtab_t *st, vlog_node_t pack, ident_t match)
                    && vlog_kind(vlog_ref(imp)) == V_PACKAGE)
                   import_package(st, vlog_ref(imp),
                                  vlog_has_ident(imp) ? vlog_ident(imp)
-                                 : match);
+                                 : match, via, from, depth + 1);
             }
          }
          continue;
       }
 
       if (match == NULL)
-         put_imported(st, d);
+         put_imported(st, d, via, from);
       else if (vlog_ident(d) == match)
          vlog_symtab_put(st, d);
 
@@ -1552,7 +1607,7 @@ static void import_package(vlog_symtab_t *st, vlog_node_t pack, ident_t match)
       for (int j = 0; j < nnames; j++) {
          vlog_node_t n = vlog_decl(e, j);
          if (match == NULL)
-            put_imported(st, n);
+            put_imported(st, n, via, from);
          else if (vlog_ident(n) == match)
             vlog_symtab_put(st, n);
       }
@@ -1570,5 +1625,5 @@ void vlog_symtab_import(vlog_symtab_t *st, vlog_node_t v)
    if (vlog_has_ident(v))
       match = vlog_ident(v);
 
-   import_package(st, vlog_ref(v), match);
+   import_package(st, vlog_ref(v), match, NULL, NULL, 0);
 }
