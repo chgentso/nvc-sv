@@ -3094,7 +3094,7 @@ svcrvsizeforeach1 verilog
 svcrvsumwith1 verilog
 svcrvfcall1 verilog,fail,gold
 svcrvnullguard1 verilog
-svcrvnullobj1 verilog,fail,gold
+svcrvnullobj1 verilog
 svcrvsigarr1 verilog
 svcrvstdarr1 verilog,fail,gold
 svcrvmanycons1 verilog

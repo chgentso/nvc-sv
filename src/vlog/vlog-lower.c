@@ -28331,8 +28331,26 @@ static mir_value_t vlog_lower_randomize(vlog_gen_t *g, vlog_node_t v)
    mir_value_t obj = vlog_kind(prefix) == V_THIS
       ? vlog_lower_this(g) : vlog_lower_rvalue(g, prefix);
 
-   mir_build_null_check(g->mu, obj, mir_build_debug_locus(
-                           g->mu, vlog_to_object(v)));
+   // Randomizing a null handle fails with a warning
+   mir_type_t t_result = mir_vec2_type(g->mu, 32, true);
+   mir_value_t result = mir_add_var(g->mu, t_result, MIR_NULL_STAMP,
+                                    ident_uniq("randomize"), MIR_VAR_TEMP);
+   mir_build_store(g->mu, result, mir_const_vec(g->mu, t_result, 0, 0));
+
+   mir_block_t null_bb = mir_add_block(g->mu);
+   mir_block_t run_bb = mir_add_block(g->mu);
+   mir_block_t end_bb = mir_add_block(g->mu);
+
+   mir_build_cond(g->mu, mir_build_cmp(g->mu, MIR_CMP_EQ, obj,
+                                       mir_build_null(
+                                          g->mu, mir_get_type(g->mu, obj))),
+                  null_bb, run_bb);
+
+   mir_set_cursor(g->mu, null_bb, MIR_APPEND);
+   vlog_report_warning(g, v, "randomize called on a null handle");
+   mir_build_jump(g->mu, end_bb);
+
+   mir_set_cursor(g->mu, run_bb, MIR_APPEND);
 
    vlog_crv_call_phase(g, class, obj, vlog_crv_int(g, 0), CRV_PHASE_PRE);
 
@@ -28416,7 +28434,11 @@ static mir_value_t vlog_lower_randomize(vlog_gen_t *g, vlog_node_t v)
    g->crv_width = saved.crv_width;
    g->crv_signed = saved.crv_signed;
 
-   return vlog_offset_to_int(g, ok);
+   mir_build_store(g->mu, result, vlog_offset_to_int(g, ok));
+   mir_build_jump(g->mu, end_bb);
+
+   mir_set_cursor(g->mu, end_bb, MIR_APPEND);
+   return mir_build_load(g->mu, result);
 }
 
 static mir_value_t vlog_lower_std_randomize(vlog_gen_t *g, vlog_node_t v)
