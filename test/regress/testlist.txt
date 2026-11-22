@@ -3020,3 +3020,4 @@ svstdrand1 verilog
 svforeachvif1 verilog
 svcrvdist1 verilog
 sveventiff1 verilog
+svsemblock1 verilog

@@ -1135,6 +1135,12 @@ static bool scan_type_declaration(void)
             return true;
 
          vlog_node_t dt = peek_reference();
+         if (dt == NULL && (peek_nth(2) == tID || peek_nth(2) == tHASH)) {
+            const ident_t id = peek_ident_nth(1);
+            if (id == ident_new("semaphore") || id == ident_new("mailbox"))
+               return true;
+         }
+
          return (dt != NULL && is_data_type(dt)) || peek_nth(2) == tHASH;
       }
    default:
