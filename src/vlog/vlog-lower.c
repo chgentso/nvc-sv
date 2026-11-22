@@ -27260,15 +27260,29 @@ static void vlog_crv_sels_cb(vlog_node_t v, void *context)
    vlog_node_t base = vlog_value(v);
    if ((vlog_kind(base) == V_REF || vlog_kind(base) == V_MEMBER_REF)
        && vlog_has_ref(base) && vlog_crv_is_array_decl(vlog_ref(base))
-       && vlog_crv_assoc_type(vlog_ref(base)) == NULL)
-      c->sel[c->nsel++] = v;
+       && vlog_crv_assoc_type(vlog_ref(base)) == NULL) {
+      crv_nest_t n;
+      if (!vlog_crv_nest(vlog_ref(base), &n))   // Those have arrays of their own
+         c->sel[c->nsel++] = v;
+   }
 }
 
-static bool vlog_crv_sized_by_solver(vlog_node_t decl)
+static bool vlog_crv_sized_by_solver(vlog_gen_t *g, vlog_node_t decl)
 {
-   // A rand dynamic array or queue may be given another size by the solver
-   return vlog_crv_is_dynamic_array(decl)
-      && (vlog_flags(decl) & (VLOG_F_RAND | VLOG_F_RANDC));
+   // A rand dynamic array or queue of values may be given another size by
+   // the solver, which is not the case for a fixed size array of objects
+   // held like one
+
+   if (!(vlog_flags(decl) & (VLOG_F_RAND | VLOG_F_RANDC)) || !vlog_has_type(decl))
+      return false;
+
+   vlog_node_t type = vlog_get_type(vlog_type(decl));
+   if (type == NULL || vlog_kind(type) != V_DATA_TYPE
+       || !(vlog_subkind(type) == DT_QUEUE
+            || (vlog_subkind(type) == DT_DYNARRAY && vlog_ranges(type) == 0)))
+      return false;
+
+   return vlog_crv_is_integral(g, vlog_crv_elem_type(decl));
 }
 
 static mir_value_t vlog_crv_inrange(vlog_gen_t *g, vlog_node_t e)
@@ -27287,7 +27301,7 @@ static mir_value_t vlog_crv_inrange(vlog_gen_t *g, vlog_node_t e)
       vlog_node_t base = vlog_value(c.sel[i]);
       vlog_node_t decl = vlog_ref(base);
 
-      if (!vlog_crv_is_state(g, idx) || vlog_crv_sized_by_solver(decl))
+      if (!vlog_crv_is_state(g, idx) || vlog_crv_sized_by_solver(g, decl))
          continue;
       else if (vlog_ranges(decl) > 1)
          continue;
@@ -27337,16 +27351,17 @@ static mir_value_t vlog_crv_inrange_node(vlog_gen_t *g, vlog_node_t e)
       vlog_node_t base = vlog_value(c.sel[i]);
       vlog_node_t decl = vlog_ref(base);
 
-      if ((vlog_crv_is_state(g, idx) && !vlog_crv_sized_by_solver(decl))
-          || vlog_ranges(decl) > 1)
+      const bool solver_sized = vlog_crv_sized_by_solver(g, decl);
+      if ((vlog_crv_is_state(g, idx) && !solver_sized) || vlog_ranges(decl) > 1)
          continue;
-      else if (!vlog_crv_is_dynamic_array(decl) && vlog_ranges(decl) != 1)
+      else if (!solver_sized && (vlog_crv_is_dynamic_array(decl)
+                                 || vlog_ranges(decl) != 1))
          continue;
 
       mir_value_t flags = vlog_crv_flags(g, 32, true);
       int64_t lo = 0, hi = 0;
       mir_value_t size = MIR_NULL_VALUE;
-      if (vlog_crv_is_dynamic_array(decl))
+      if (solver_sized)
          size = CRV2(g, CRV_OP_ARRAY_SIZE, g->crv_ctx, vlog_crv_array(g, base));
       else {
          int64_t left, right;
