@@ -18402,11 +18402,6 @@ static void add_rand_state(vlog_node_t class)
    if (!own)
       return;
 
-   // Only the first 64 rand properties have a rand_mode bit
-   if (ncons > 64)
-      error_at(vlog_loc(class), "sorry, more than 64 constraints in a class "
-               "are not supported");
-
    ident_t rand_off = ident_new("$rand_off");
 
    bool inherited = false;
@@ -18420,6 +18415,21 @@ static void add_rand_state(vlog_node_t class)
       add_hidden_property(class, rand_off);
       add_hidden_property(class, ident_new("$cons_off"));
       add_hidden_property(class, ident_new("$seed"));
+   }
+
+   // Each word of constraint_mode bits covers 64 constraints
+   for (int w = 1; w * 64 < ncons; w++) {
+      ident_t id = ident_sprintf("$cons_off%d", w);
+      bool found = false;
+      for (vlog_node_t c = class; !found; ) {
+         found = class_has_decl(c, id);
+         if (found || !vlog_has_ref(c))
+            break;
+         c = vlog_ref(c);
+      }
+
+      if (!found)
+         add_hidden_property(class, id);
    }
 
    for (int i = 0; i < ndecls; i++) {

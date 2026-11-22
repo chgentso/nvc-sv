@@ -282,6 +282,19 @@ static mir_value_t vlog_crv_from_offset(vlog_gen_t *g, mir_value_t value,
                                         mir_type_t type);
 static mir_value_t vlog_crv_hidden(vlog_gen_t *g, mir_value_t obj,
                                    const char *name);
+static mir_value_t vlog_crv_cons_word(vlog_gen_t *g, mir_value_t obj,
+                                      int word)
+{
+   // The constraint_mode bits of the constraints from 64 * word
+
+   if (word == 0)
+      return vlog_crv_hidden(g, obj, "$cons_off");
+
+   char name[32];
+   checked_sprintf(name, sizeof(name), "$cons_off%d", word);
+   return vlog_crv_hidden(g, obj, name);
+}
+
 static bool vlog_crv_has_hidden(vlog_node_t class);
 static mir_value_t vlog_lower_inside(vlog_gen_t *g, vlog_node_t v);
 static mir_value_t vlog_lower_inside_scalar(vlog_gen_t *g, vlog_node_t v,
@@ -26766,10 +26779,30 @@ static int vlog_crv_rand_bit(vlog_node_t class, vlog_node_t decl)
    return -bit - 1;
 }
 
+static int vlog_crv_max_constraints(vlog_node_t class)
+{
+   // An upper bound on the number of constraints which apply to a class
+
+   int n = 0;
+   for (;;) {
+      const int ndecls = vlog_decls(class);
+      for (int i = 0; i < ndecls; i++) {
+         if (vlog_kind(vlog_decl(class, i)) == V_CONSTRAINT)
+            n++;
+      }
+
+      if (!vlog_has_ref(class))
+         return n;
+
+      class = vlog_ref(class);
+   }
+}
+
 static void vlog_crv_collect_constraints(vlog_node_t class, vlog_node_t *list,
                                          int *count)
 {
    // A constraint in a derived class replaces one of the same name
+   // (the list holds at least vlog_crv_max_constraints entries)
 
    if (vlog_has_ref(class))
       vlog_crv_collect_constraints(vlog_ref(class), list, count);
@@ -26786,10 +26819,8 @@ static void vlog_crv_collect_constraints(vlog_node_t class, vlog_node_t *list,
             break;
       }
 
-      if (j == *count) {
-         assert(*count < 64);
+      if (j == *count)
          (*count)++;
-      }
 
       list[j] = d;
    }
@@ -28107,20 +28138,26 @@ static void vlog_lower_crv_unit(mir_unit_t *mu, object_t *obj)
    g.crv_width = 1;
    g.crv_signed = true;
 
-   vlog_node_t list[64];
+   vlog_node_t *list LOCAL =
+      xmalloc_array(vlog_crv_max_constraints(class) + 1, sizeof(vlog_node_t));
    int count = 0;
    vlog_crv_collect_constraints(class, list, &count);
 
-   mir_value_t cons_off = vlog_crv_int(&g, 0);
-   if (count > 0 && vlog_crv_has_hidden(class))
-      cons_off = vlog_crv_to_offset(
-         &g, mir_build_load(mu, vlog_crv_hidden(&g, this, "$cons_off")));
+   const int nwords = (count + 63) / 64;
+   mir_value_t *cons_off LOCAL = xmalloc_array(nwords + 1, sizeof(mir_value_t));
+   for (int w = 0; w < nwords; w++) {
+      cons_off[w] = vlog_crv_int(&g, 0);
+      if (vlog_crv_has_hidden(class))
+         cons_off[w] = vlog_crv_to_offset(
+            &g, mir_build_load(mu, vlog_crv_cons_word(&g, this, w)));
+   }
 
    for (int i = 0; i < count; i++) {
       mir_block_t on_bb = mir_add_block(mu);
       mir_block_t next_bb = mir_add_block(mu);
 
-      mir_value_t off = CRV2(&g, CRV_OP_TEST_BIT, cons_off, vlog_crv_int(&g, i));
+      mir_value_t off = CRV2(&g, CRV_OP_TEST_BIT, cons_off[i / 64],
+                             vlog_crv_int(&g, i % 64));
       mir_build_cond(mu, mir_build_cmp(mu, MIR_CMP_EQ, off, zero), on_bb,
                      next_bb);
 
@@ -28632,7 +28669,8 @@ static mir_value_t vlog_lower_crv_mode(vlog_gen_t *g, vlog_node_t v)
                      "is not supported", istr(vlog_ident(decl)));
       }
       else {
-         vlog_node_t list[64];
+         vlog_node_t *list LOCAL = xmalloc_array(
+            vlog_crv_max_constraints(class) + 1, sizeof(vlog_node_t));
          int count = 0;
          vlog_crv_collect_constraints(class, list, &count);
          for (int i = 0; i < count; i++) {
@@ -28643,14 +28681,35 @@ static mir_value_t vlog_lower_crv_mode(vlog_gen_t *g, vlog_node_t v)
       }
    }
 
-   mir_value_t ptr = vlog_crv_hidden(g, obj, is_rand ? "$rand_off" : "$cons_off");
-   mir_value_t off = vlog_crv_to_offset(g, mir_build_load(g->mu, ptr));
+   // The mode bits of the constraints are held in as many words as needed
+   int nwords = 1;
+   if (!is_rand) {
+      while (vlog_class_member(class, ident_sprintf("$cons_off%d", nwords)))
+         nwords++;
+   }
 
+   int word = 0;
    mir_value_t ibit = vlog_crv_int(g, bit);
+   if (bit >= 0 && !is_rand) {
+      word = bit / 64;
+      ibit = vlog_crv_int(g, bit % 64);
+   }
+
+   mir_type_t t_int = mir_vec2_type(g->mu, 32, true);
+   mir_type_t t_longint = mir_vec2_type(g->mu, 64, true);
 
    if (vlog_params(v) == 0) {
-      mir_value_t test = CRV2(g, CRV_OP_TEST_BIT, off, ibit);
-      mir_type_t t_int = mir_vec2_type(g->mu, 32, true);
+      mir_value_t test = MIR_NULL_VALUE;
+      for (int w = bit >= 0 ? word : 0; w < (bit >= 0 ? word + 1 : nwords);
+           w++) {
+         mir_value_t ptr = is_rand
+            ? vlog_crv_hidden(g, obj, "$rand_off")
+            : vlog_crv_cons_word(g, obj, w);
+         mir_value_t off = vlog_crv_to_offset(g, mir_build_load(g->mu, ptr));
+         mir_value_t t = CRV2(g, CRV_OP_TEST_BIT, off, ibit);
+         test = mir_is_null(test) ? t : mir_build_or(g->mu, test, t);
+      }
+
       return mir_build_select(
          g->mu, t_int, mir_build_cmp(g->mu, MIR_CMP_EQ, test, vlog_crv_int(g, 0)),
          mir_const_vec(g->mu, t_int, 1, 0), mir_const_vec(g->mu, t_int, 0, 0));
@@ -28658,12 +28717,16 @@ static mir_value_t vlog_lower_crv_mode(vlog_gen_t *g, vlog_node_t v)
 
    mir_value_t mode =
       vlog_crv_to_offset(g, vlog_lower_rvalue(g, vlog_param(v, 0)));
-   mir_value_t next = CRV3(g, CRV_OP_SET_BIT, off, ibit, mode);
 
-   mir_type_t t_longint = mir_vec2_type(g->mu, 64, true);
-   mir_build_store(g->mu, ptr, vlog_crv_from_offset(g, next, t_longint));
+   for (int w = bit >= 0 ? word : 0; w < (bit >= 0 ? word + 1 : nwords); w++) {
+      mir_value_t ptr = is_rand
+         ? vlog_crv_hidden(g, obj, "$rand_off")
+         : vlog_crv_cons_word(g, obj, w);
+      mir_value_t off = vlog_crv_to_offset(g, mir_build_load(g->mu, ptr));
+      mir_value_t next = CRV3(g, CRV_OP_SET_BIT, off, ibit, mode);
+      mir_build_store(g->mu, ptr, vlog_crv_from_offset(g, next, t_longint));
+   }
 
-   mir_type_t t_int = mir_vec2_type(g->mu, 32, true);
    return mir_const_vec(g->mu, t_int, 0, 0);
 }
 
