@@ -22064,8 +22064,68 @@ static mir_value_t vlog_crv_cast(vlog_gen_t *g, mir_value_t node, unsigned from,
    return node;
 }
 
+static void vlog_crv_random_cb(vlog_node_t v, void *context)
+{
+   // A random property or variable of the call
+
+   crv_visit_t *cv = context;
+
+   switch (vlog_kind(v)) {
+   case V_REF:
+      if (vlog_has_ref(v)) {
+         vlog_node_t decl = vlog_ref(v);
+         if (vlog_kind(decl) == V_VAR_DECL
+             && ((vlog_crv_is_target(cv->gen, decl)
+                  && (vlog_flags(decl) & (VLOG_F_RAND | VLOG_F_RANDC)))
+                 || vlog_crv_is_std_var(cv->gen, decl)))
+            cv->found = true;
+      }
+      break;
+   case V_MEMBER_REF:
+      if (vlog_has_ref(v) && vlog_kind(vlog_ref(v)) == V_VAR_DECL
+          && (vlog_flags(vlog_ref(v)) & (VLOG_F_RAND | VLOG_F_RANDC)))
+         cv->found = true;
+      break;
+   default:
+      break;
+   }
+}
+
+static void vlog_crv_check_call_args(vlog_gen_t *g, vlog_node_t v)
+{
+   // The arguments of a function in a constraint are solved before the call
+   // is evaluated (IEEE 1800-2017 18.5.12): not yet implemented, and
+   // evaluating the call on the previous values would be silently wrong
+
+   if (vlog_kind(v) != V_USER_FCALL)
+      return;
+
+   crv_visit_t cv = { .gen = g };
+   const int nparams = vlog_params(v);
+   for (int i = 0; i < nparams && !cv.found; i++)
+      vlog_visit(vlog_param(v, i), vlog_crv_random_cb, &cv);
+
+   if (!cv.found)
+      return;
+
+   LOCAL_TEXT_BUF tb = tb_new();
+   tb_printf(tb, "sorry, the call to function %s with a random variable as "
+             "an argument in a constraint is not supported",
+             istr(vlog_ident(v)));
+
+   mir_type_t t_offset = mir_offset_type(g->mu);
+   mir_type_t t_severity = mir_int_type(g->mu, 0, 3);
+   mir_value_t buf = mir_const_string(g->mu, tb_get(tb));
+   mir_build_report(g->mu, mir_build_address_of(g->mu, buf),
+                    mir_const(g->mu, t_offset, tb_len(tb)),
+                    mir_const(g->mu, t_severity, SEVERITY_FAILURE),
+                    mir_build_debug_locus(g->mu, vlog_to_object(v)));
+}
+
 static mir_value_t vlog_crv_state_node(vlog_gen_t *g, vlog_node_t v)
 {
+   vlog_crv_check_call_args(g, v);
+
    const unsigned width = vlog_crv_width(g, v);
    if (width > 64)
       fatal_at(vlog_loc(v), "sorry, values wider than 64 bits are not "
