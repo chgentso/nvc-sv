@@ -27418,13 +27418,19 @@ static mir_value_t vlog_lower_crv_mode(vlog_gen_t *g, vlog_node_t v)
 
    const vlog_kind_t want = is_rand ? V_VAR_DECL : V_CONSTRAINT;
 
+   vlog_node_t prop = target;
+   vlog_node_t ttype = vlog_get_type(target);
+   const bool target_is_class = ttype != NULL && vlog_kind(ttype) == V_CLASS_DECL;
+   while (is_rand && !target_is_class && vlog_kind(prop) == V_BIT_SELECT)
+      prop = vlog_value(prop);
+
    // A class handle means every property of the object
-   if ((vlog_kind(target) == V_REF || vlog_kind(target) == V_MEMBER_REF)
-       && vlog_has_ref(target) && vlog_kind(vlog_ref(target)) == want
-       && (!is_rand || vlog_crv_prop_class(vlog_ref(target)) == NULL)) {
-      decl = vlog_ref(target);
-      if (vlog_kind(target) == V_MEMBER_REF) {
-         vlog_node_t base = vlog_value(target);
+   if ((vlog_kind(prop) == V_REF || vlog_kind(prop) == V_MEMBER_REF)
+       && vlog_has_ref(prop) && vlog_kind(vlog_ref(prop)) == want
+       && (!is_rand || !target_is_class)) {
+      decl = vlog_ref(prop);
+      if (vlog_kind(prop) == V_MEMBER_REF) {
+         vlog_node_t base = vlog_value(prop);
          class = vlog_get_type(base);
          obj = vlog_kind(base) == V_THIS
             ? vlog_lower_this(g) : vlog_lower_rvalue(g, base);

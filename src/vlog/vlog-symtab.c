@@ -655,12 +655,16 @@ static bool lookup_rand_method(vlog_node_t v, vlog_node_t prefix)
    vlog_node_t type = vlog_get_type(prefix);
    const bool is_class = type != NULL && vlog_kind(type) == V_CLASS_DECL;
 
+   vlog_node_t base = prefix;
+   while (vlog_kind(base) == V_BIT_SELECT)
+      base = vlog_value(base);
+
    vlog_node_t decl = NULL;
-   switch (vlog_kind(prefix)) {
+   switch (vlog_kind(base)) {
    case V_REF:
    case V_MEMBER_REF:
-      if (vlog_has_ref(prefix))
-         decl = vlog_ref(prefix);
+      if (vlog_has_ref(base))
+         decl = vlog_ref(base);
       break;
    default:
       break;
