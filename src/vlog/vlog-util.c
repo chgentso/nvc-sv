@@ -1979,6 +1979,12 @@ vlog_node_t vlog_class_prop_enum(vlog_node_t class, vlog_node_t prop)
    if (et == NULL || vlog_kind(et) != V_ENUM_DECL)
       return NULL;
 
+   // Only one written in the declaration of the property
+   const loc_t *pl = vlog_loc(prop), *el = vlog_loc(et);
+   if (pl->file_ref != el->file_ref || el->first_line < pl->first_line
+       || el->first_line > pl->first_line + pl->line_delta)
+      return NULL;
+
    const int ndecls = vlog_decls(class);
    for (int i = 0; i < ndecls; i++) {
       vlog_node_t d = vlog_decl(class, i);
