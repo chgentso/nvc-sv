@@ -3070,3 +3070,4 @@ vlog_vif_pkg_bits verilog
 vlog_sva_past_localparam verilog
 vlog_comb_func_retval verilog
 vlog_gen_var_syscall_init verilog
+vlog_inout_param_idx verilog

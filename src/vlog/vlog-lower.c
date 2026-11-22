@@ -1657,6 +1657,22 @@ static mir_type_t vlog_sel_vec_type(vlog_gen_t *g, mir_type_t prefix,
    return mir_vec4_type(g->mu, size, false);
 }
 
+static mir_value_t vlog_lower_select_index(vlog_gen_t *g, vlog_node_t index)
+{
+   // An index which is a constant expression such as an element of a
+   // parameter array selected by a genvar is lowered as a constant so
+   // the select is known when the design is built
+
+   int64_t value;
+   if (vlog_kind(index) != V_NUMBER && vlog_get_const(index, &value)
+       && value >= INT32_MIN && value <= INT32_MAX) {
+      mir_type_t t_int = mir_vec4_type(g->mu, 32, true);
+      return mir_const_vec(g->mu, t_int, (uint32_t)value, 0);
+   }
+
+   return vlog_lower_rvalue(g, index);
+}
+
 static vlog_select_t vlog_lower_select(vlog_gen_t *g, vlog_node_t v)
 {
    PUSH_DEBUG_INFO(g->mu, v);
@@ -2037,7 +2053,7 @@ static vlog_select_t vlog_lower_select(vlog_gen_t *g, vlog_node_t v)
                size /= dim_size;
             }
 
-            mir_value_t index = vlog_lower_rvalue(g, vlog_param(v, i));
+            mir_value_t index = vlog_lower_select_index(g, vlog_param(v, i));
             mir_value_t this_off = dim != NULL
                ? vlog_lower_array_off(g, dim, index)
                : vlog_lower_struct_off(g, dim_size, index);
