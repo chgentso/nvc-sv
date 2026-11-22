@@ -8200,7 +8200,12 @@ static vlog_node_t p_nonbinary_expression(void)
 
          optional_attributes();
 
-         vlog_set_value(v, p_primary());
+         // Accept a chain of unary operators such as -~x
+         if (scan(tMINUS, tPLUS, tTILDE, tBANG, tAMP, tBAR, tCARET, tTILDEAMP,
+                  tTILDEBAR, tTILDECARET))
+            vlog_set_value(v, p_nonbinary_expression());
+         else
+            vlog_set_value(v, p_primary());
          vlog_set_loc(v, CURRENT_LOC);
          return v;
       }
