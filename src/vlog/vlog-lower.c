@@ -21931,7 +21931,7 @@ static vlog_node_t vlog_crv_packed_type(vlog_node_t d)
 {
    // The packed structure type of a declaration, if it is one
 
-   if (!vlog_has_type(d) || vlog_ranges(d) > 0)
+   if (!vlog_has_type(d) || vlog_crv_is_array_decl(d))
       return NULL;
 
    vlog_node_t type = vlog_get_type(vlog_type(d));
@@ -23097,9 +23097,11 @@ static bool vlog_crv_is_wide_var(vlog_gen_t *g, vlog_node_t v)
       return false;
 
    vlog_node_t decl = vlog_ref(v);
-   if ((vlog_kind(decl) != V_VAR_DECL && vlog_kind(decl) != V_LOCAL_DECL)
+   const vlog_kind_t dkind = vlog_kind(decl);
+   if ((dkind != V_VAR_DECL && dkind != V_LOCAL_DECL
+        && dkind != V_TF_PORT_DECL && dkind != V_FUNC_DECL)
        || !vlog_has_type(decl)
-       || vlog_ranges(decl) > 0 || vlog_crv_packed_type(decl) != NULL)
+       || vlog_crv_is_array_decl(decl) || vlog_crv_packed_type(decl) != NULL)
       return false;
 
    return vlog_crv_is_wide(g, vlog_type(decl));
@@ -27211,7 +27213,7 @@ static mir_value_t vlog_lower_std_randomize(vlog_gen_t *g, vlog_node_t v)
       const type_info_t *ti = vlog_type_info(g, vlog_type(decl));
       const mir_class_t tclass = mir_get_class(g->mu, ti->type);
       if ((tclass != MIR_TYPE_VEC2 && tclass != MIR_TYPE_VEC4)
-          || (vlog_kind(p) == V_REF && vlog_ranges(decl) > 0))
+          || (vlog_kind(p) == V_REF && vlog_crv_is_array_decl(decl)))
          fatal_at(vlog_loc(p), "sorry, this type of variable is not supported "
                   "by randomize");
 
