@@ -359,6 +359,13 @@ void jit_fill_irbuf(jit_func_t *f)
 
    jit_irgen(f, mu);
 
+   if (mir_get_kind(mu) == MIR_UNIT_PROCESS) {
+      // A process is compiled once and its code is no longer needed:
+      // only the shape is kept for units nested inside it
+      SCOPED_LOCK(f->jit->lock);
+      mir_unit_free(mu);
+   }
+
    jit_transition(thread, f->jit, JIT_COMPILING, oldstate);
 }
 

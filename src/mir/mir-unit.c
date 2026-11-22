@@ -259,6 +259,10 @@ void mir_unit_free(mir_unit_t *mu)
          {
             mir_shape_t *sh = mu->shape ?: mir_build_shape(mu);
             chash_put(mu->context->map, mu->name, tag_pointer(sh, UNIT_FREED));
+
+            // The object map now belongs to the shape which is still
+            // searched by units lowered later with this unit as parent
+            mu->shape = NULL;
          }
          break;
       case UNIT_FREED:

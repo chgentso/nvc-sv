@@ -3074,3 +3074,5 @@ vlog_inout_param_idx verilog
 vlog_enum_cast_index verilog
 vlog_enum_param_width verilog
 vlog_genstats1  shell
+mirfree1        normal,2019
+vlog_mirfree1   verilog
