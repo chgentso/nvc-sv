@@ -2488,7 +2488,7 @@ START_TEST(test_sound_all_engines)
 {
    static const crv_engine_t all[] = { CRV_ENGINE_LEGACY, CRV_ENGINE_DFS,
                                        CRV_ENGINE_REJECT, CRV_ENGINE_BDD,
-                                       CRV_ENGINE_SAT };
+                                       CRV_ENGINE_SAT, CRV_ENGINE_AUTO };
    const problem_t p = problems[_i].make(problems[_i].arg);
    model_t m;
    model_build(&m, &p);
@@ -2513,7 +2513,7 @@ START_TEST(test_bias_report)
 {
    static const crv_engine_t all[] = { CRV_ENGINE_LEGACY, CRV_ENGINE_DFS,
                                        CRV_ENGINE_REJECT, CRV_ENGINE_BDD,
-                                       CRV_ENGINE_SAT };
+                                       CRV_ENGINE_SAT, CRV_ENGINE_AUTO };
    const bool report = long_mode() || getenv("NVC_CRV_REPORT") != NULL;
    if (!report)
       return;
@@ -2867,7 +2867,7 @@ static int fuzz_engines(crv_engine_t *engines)
    // Every stage that exists is checked against the oracle
    static const crv_engine_t all[] = { CRV_ENGINE_LEGACY, CRV_ENGINE_DFS,
                                        CRV_ENGINE_REJECT, CRV_ENGINE_BDD,
-                                       CRV_ENGINE_SAT };
+                                       CRV_ENGINE_SAT, CRV_ENGINE_AUTO };
    int n = 0;
    for (size_t i = 0; i < ARRAY_LEN(all); i++) {
       if (crv_engine_available(all[i]))
@@ -2878,7 +2878,7 @@ static int fuzz_engines(crv_engine_t *engines)
 
 START_TEST(test_fuzz)
 {
-   crv_engine_t engines[5];
+   crv_engine_t engines[6];
    const int nengines = fuzz_engines(engines);
 
    const char *replay = getenv("NVC_CRV_FUZZ_SEED");
@@ -2926,7 +2926,7 @@ END_TEST
 START_TEST(test_fuzz_fixed)
 {
    static const uint64_t seeds[] = { 1214, 1512, 1520 };
-   crv_engine_t engines[5];
+   crv_engine_t engines[6];
    const int nengines = fuzz_engines(engines);
 
    for (size_t i = 0; i < ARRAY_LEN(seeds); i++) {
