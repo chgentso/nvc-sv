@@ -301,6 +301,7 @@ static bool vlog_crv_has_hidden(vlog_node_t class);
 static mir_value_t vlog_lower_inside(vlog_gen_t *g, vlog_node_t v);
 static mir_value_t vlog_lower_inside_scalar(vlog_gen_t *g, vlog_node_t v,
                                             bool is_real);
+static mir_value_t vlog_lower_dist_member(vlog_gen_t *g, vlog_node_t v);
 static void vlog_inside_context(vlog_gen_t *g, vlog_node_t item,
                                 unsigned *width, bool *is_signed);
 static mir_value_t vlog_inside_match(vlog_gen_t *g, vlog_node_t item,
@@ -10183,6 +10184,8 @@ static mir_value_t vlog_lower_with_context(vlog_gen_t *g, vlog_node_t v,
       return vlog_widen_vector(g, vlog_lower_std_randomize(g, v), context);
    case V_INSIDE:
       return vlog_widen_vector(g, vlog_lower_inside(g, v), context);
+   case V_DIST:
+      return vlog_widen_vector(g, vlog_lower_dist_member(g, v), context);
    case V_MATCHES:
       return vlog_widen_vector(g, vlog_lower_matches(g, v), context);
    case V_DOLLAR:
@@ -29712,6 +29715,54 @@ static mir_value_t vlog_lower_inside(vlog_gen_t *g, vlog_node_t v)
 
    for (int i = 0; i < nparams; i++) {
       mir_value_t match = vlog_inside_match(g, vlog_param(v, i), value, t_vec);
+      result = mir_build_binary(g->mu, MIR_VEC_BIT_OR, t_bit, result, match);
+   }
+
+   return result;
+}
+
+static mir_value_t vlog_lower_dist_member(vlog_gen_t *g, vlog_node_t v)
+{
+   // A dist on values nothing can change, such as a variable which is not
+   // randomized by this call, only tests that the value is one of those
+   // which can be chosen (IEEE 1800-2017 18.5.3)
+
+   vlog_node_t arg = vlog_value(v);
+   unsigned width = vlog_width(arg);
+   bool is_signed = vlog_is_signed(arg);
+
+   const int nparams = vlog_params(v);
+   vlog_node_t *items LOCAL = xmalloc_array(MAX(nparams, 1),
+                                            sizeof(vlog_node_t));
+   int nitems = 0;
+   for (int i = 0; i < nparams; i++) {
+      vlog_node_t d = vlog_param(v, i);
+
+      int64_t weight;
+      if (vlog_get_const(vlog_delay(d), &weight) && weight == 0)
+         continue;   // A weight of zero is never chosen
+
+      vlog_node_t item = vlog_left(d);
+      if (vlog_has_right(d)) {
+         item = vlog_new(V_INSIDE_RANGE);
+         vlog_set_left(item, vlog_left(d));
+         vlog_set_right(item, vlog_right(d));
+         vlog_set_loc(item, vlog_loc(d));
+      }
+
+      vlog_inside_context(g, item, &width, &is_signed);
+      items[nitems++] = item;
+   }
+
+   mir_type_t t_vec = mir_vec4_type(g->mu, width, is_signed);
+   mir_type_t t_bit = mir_vec4_type(g->mu, 1, false);
+
+   mir_value_t value = vlog_lower_cast(
+      g, t_vec, vlog_lower_with_context(g, arg, t_vec));
+   mir_value_t result = mir_const_vec(g->mu, t_bit, 0, 0);
+
+   for (int i = 0; i < nitems; i++) {
+      mir_value_t match = vlog_inside_match(g, items[i], value, t_vec);
       result = mir_build_binary(g->mu, MIR_VEC_BIT_OR, t_bit, result, match);
    }
 
