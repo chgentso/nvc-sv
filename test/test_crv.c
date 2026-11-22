@@ -2160,6 +2160,7 @@ static result_t run_samples(const model_t *m, long n, sampler_t draw,
 typedef struct {
    crv_engine_t engine;
    handles_t    h;
+   crv_result_t result;     // Of the last draw
 } solver_ctx_t;
 
 static void solver_draw(const model_t *m, void *ctx, int64_t *a, bool *ok)
@@ -2168,7 +2169,8 @@ static void solver_draw(const model_t *m, void *ctx, int64_t *a, bool *ok)
    crv_set_engine(sc->engine);
    crv_t *c = crv_new();
    build_problem(c, m->p, &sc->h);
-   *ok = crv_solve(c);
+   sc->result = crv_solve2(c);
+   *ok = sc->result == CRV_SAT;
    if (*ok)
       read_problem(c, m->p, &sc->h, a);
    crv_free(c);
@@ -2724,7 +2726,9 @@ static bool fuzz_run_one(uint64_t seed, const crv_engine_t *engines,
          }
          else if (!ok && m.nsol > 0) {
             st->incomplete++;
-            what = "no solution for a satisfiable one";
+            what = sc.result == CRV_GIVEUP
+               ? "no solution for a satisfiable one (the search gave up)"
+               : "no solution for a satisfiable one (said to be unsatisfiable)";
          }
          else if (ok && m.index[model_key(&p, a)] == 0) {
             if (hard_holds(&p, a)) {
