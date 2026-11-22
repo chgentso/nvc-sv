@@ -29348,6 +29348,10 @@ static mir_value_t vlog_lower_randomize(vlog_gen_t *g, vlog_node_t v)
 
    vlog_crv_call_phase(g, class, obj, vlog_crv_int(g, 0), CRV_PHASE_PRE);
 
+   // The first solver is created before the stream of the object is
+   // selected as that seeds the default stream
+   mir_value_t ctx = CRV0(g, CRV_OP_BEGIN);
+
    // The object has its own random stream once it has been seeded
    mir_value_t seed_ptr = MIR_NULL_VALUE;
    if (vlog_crv_has_hidden(class)) {
@@ -29408,6 +29412,7 @@ static mir_value_t vlog_lower_randomize(vlog_gen_t *g, vlog_node_t v)
       // Not solvable without the calls: nor with them
       mir_set_cursor(g->mu, fail_bb, MIR_APPEND);
       CRV1(g, CRV_OP_END, ctx1);
+      CRV1(g, CRV_OP_END, ctx);
       if (!mir_is_null(seed_ptr)) {
          mir_value_t next = CRV0(g, CRV_OP_SEED_END);
          mir_type_t t_longint = mir_vec2_type(g->mu, 64, true);
@@ -29421,7 +29426,6 @@ static mir_value_t vlog_lower_randomize(vlog_gen_t *g, vlog_node_t v)
       g->crv_stage = 0;
    }
 
-   mir_value_t ctx = CRV0(g, CRV_OP_BEGIN);
    g->crv_ctx = ctx;
 
    vlog_crv_list_args(g, v, ctx);
