@@ -24423,10 +24423,117 @@ static mir_value_t vlog_crv_dist_bound(vlog_gen_t *g, vlog_node_t e,
    return vlog_crv_to_offset(g, value);
 }
 
+static bool vlog_crv_dist_dynamic(vlog_gen_t *g, vlog_node_t v)
+{
+   const int nparams = vlog_params(v);
+   for (int i = 0; i < nparams; i++) {
+      vlog_node_t item = vlog_param(v, i);
+      if (vlog_kind(vlog_left(item)) != V_DOLLAR
+          && !vlog_crv_is_state(g, vlog_left(item)))
+         return true;
+      if (vlog_has_right(item) && vlog_kind(vlog_right(item)) != V_DOLLAR
+          && !vlog_crv_is_state(g, vlog_right(item)))
+         return true;
+   }
+
+   return false;
+}
+
+static void vlog_crv_dyn_dist_parts(vlog_gen_t *g, vlog_node_t v,
+                                    mir_value_t *pick, mir_value_t *impls)
+{
+   // Dynamic bounds in dist: pick a bucket with a hidden selector variable
+   // weighted by each item, and imply that the argument lies in that bucket
+
+   vlog_node_t arg = vlog_value(v);
+   unsigned width = vlog_crv_width(g, arg);
+   bool is_signed = vlog_crv_signed(g, arg);
+
+   const int nparams = vlog_params(v);
+   for (int i = 0; i < nparams; i++) {
+      vlog_node_t item = vlog_param(v, i);
+      if (vlog_kind(vlog_left(item)) != V_DOLLAR) {
+         width = MAX(width, vlog_crv_width(g, vlog_left(item)));
+         is_signed &= vlog_crv_signed(g, vlog_left(item));
+      }
+      if (vlog_has_right(item) && vlog_kind(vlog_right(item)) != V_DOLLAR) {
+         width = MAX(width, vlog_crv_width(g, vlog_right(item)));
+         is_signed &= vlog_crv_signed(g, vlog_right(item));
+      }
+   }
+   width = MIN(width, 64);
+
+   static int dyn_dist_serial = 0;
+   mir_value_t key = vlog_crv_int(g, 0x7d158000 + dyn_dist_serial++);
+   mir_value_t zero = vlog_crv_int(g, 0);
+   mir_value_t flags = vlog_crv_flags(g, 32, false);
+   CRV6(g, CRV_OP_VAR, g->crv_ctx, zero, key, zero, flags, vlog_crv_int(g, 1));
+   mir_value_t sel = CRV5(g, CRV_OP_REF, g->crv_ctx, zero, key, zero, flags);
+
+   mir_value_t dist = CRV1(g, CRV_OP_DIST_NEW, g->crv_ctx);
+   mir_value_t node = vlog_crv_expr(g, arg, width, is_signed);
+   mir_value_t bflags = vlog_crv_flags(g, 1, false);
+   mir_value_t one = CRV3(g, CRV_OP_CONST, g->crv_ctx, vlog_crv_int(g, 1),
+                          bflags);
+
+   mir_value_t acc = MIR_NULL_VALUE;
+   for (int i = 0; i < nparams; i++) {
+      vlog_node_t item = vlog_param(v, i);
+      mir_value_t weight =
+         vlog_crv_to_offset(g, vlog_lower_rvalue(g, vlog_delay(item)));
+
+      CRV5(g, CRV_OP_DIST_PER_RANGE, g->crv_ctx, dist, vlog_crv_int(g, i),
+           vlog_crv_int(g, i), weight);
+
+      mir_value_t cond;
+      if (vlog_has_right(item)) {
+         mir_value_t lo_ok = one;
+         if (vlog_kind(vlog_left(item)) != V_DOLLAR) {
+            mir_value_t lo = vlog_crv_expr(g, vlog_left(item), width,
+                                           is_signed);
+            lo_ok = CRV5(g, CRV_OP_BINARY, g->crv_ctx, vlog_crv_int(g, CRV_GE),
+                         node, lo, bflags);
+         }
+
+         mir_value_t hi_ok = one;
+         if (vlog_kind(vlog_right(item)) != V_DOLLAR) {
+            mir_value_t hi = vlog_crv_expr(g, vlog_right(item), width,
+                                           is_signed);
+            hi_ok = CRV5(g, CRV_OP_BINARY, g->crv_ctx, vlog_crv_int(g, CRV_LE),
+                         node, hi, bflags);
+         }
+
+         cond = vlog_crv_and(g, lo_ok, hi_ok);
+      }
+      else {
+         mir_value_t val = vlog_crv_expr(g, vlog_left(item), width, is_signed);
+         cond = CRV5(g, CRV_OP_BINARY, g->crv_ctx, vlog_crv_int(g, CRV_EQ),
+                     node, val, bflags);
+      }
+
+      mir_value_t me = CRV5(g, CRV_OP_BINARY, g->crv_ctx,
+                            vlog_crv_int(g, CRV_EQ), sel,
+                            CRV3(g, CRV_OP_CONST, g->crv_ctx, vlog_crv_int(g, i),
+                                 flags), bflags);
+      mir_value_t imp = CRV5(g, CRV_OP_BINARY, g->crv_ctx,
+                             vlog_crv_int(g, CRV_IMPLIES), me, cond, bflags);
+      acc = mir_is_null(acc) ? imp : vlog_crv_and(g, acc, imp);
+   }
+
+   *pick = CRV3(g, CRV_OP_DIST, g->crv_ctx, sel, dist);
+   *impls = acc;
+}
+
 static mir_value_t vlog_crv_dist(vlog_gen_t *g, vlog_node_t v)
 {
    if (vlog_crv_width(g, vlog_value(v)) > 64)
       return vlog_crv_wide_node(g, v, 1, false);
+
+   if (vlog_crv_dist_dynamic(g, v)) {
+      mir_value_t pick, impls;
+      vlog_crv_dyn_dist_parts(g, v, &pick, &impls);
+      return vlog_crv_and(g, impls, pick);
+   }
 
    vlog_node_t arg = vlog_value(v);
 
@@ -25435,6 +25542,11 @@ static void vlog_crv_foreach_objects(vlog_gen_t *g, vlog_node_t v,
    vlog_crv_objects_level(g, v, guard, vlog_lower_rvalue(g, arr), 0, dim);
 }
 
+static void vlog_crv_has_dist_cb(vlog_node_t v, void *ctx)
+{
+   *(bool *)ctx = true;
+}
+
 static void vlog_crv_foreach(vlog_gen_t *g, vlog_node_t v, mir_value_t guard)
 {
    vlog_node_t arr = vlog_value(v);
@@ -25475,6 +25587,22 @@ static void vlog_crv_foreach(vlog_gen_t *g, vlog_node_t v, mir_value_t guard)
       warn_at(vlog_loc(arr), "sorry, a foreach constraint over an array of "
               "structures is ignored");
       return;
+   }
+
+   if (!vlog_crv_is_dynamic_array(decl) && vlog_ranges(decl) == 1
+       && vlog_decls(v) == 1) {
+      bool has_dist = false;
+      const int nstmts = vlog_stmts(v);
+      for (int i = 0; i < nstmts && !has_dist; i++)
+         vlog_visit_only(vlog_stmt(v, i), vlog_crv_has_dist_cb, &has_dist,
+                         V_DIST);
+
+      int64_t left = 0, right = 0;
+      if (has_dist && vlog_get_const(vlog_left(vlog_range(decl, 0)), &left)
+          && vlog_get_const(vlog_right(vlog_range(decl, 0)), &right)) {
+         vlog_crv_foreach_elems(g, v, guard, left, right);
+         return;
+      }
    }
 
    mir_value_t array = vlog_crv_array(g, arr);
@@ -25580,6 +25708,13 @@ static void vlog_crv_items(vlog_gen_t *g, vlog_node_t v, mir_value_t guard,
             // The choice is a constraint of its own to have the weights
             mir_value_t pick, impls;
             vlog_crv_wide_dist_parts(g, e, &pick, &impls);
+            vlog_crv_emit(g, guard, pick, soft, sink);
+            if (!mir_is_null(impls))
+               vlog_crv_emit(g, guard, impls, soft, sink);
+         }
+         else if (vlog_kind(e) == V_DIST && vlog_crv_dist_dynamic(g, e)) {
+            mir_value_t pick, impls;
+            vlog_crv_dyn_dist_parts(g, e, &pick, &impls);
             vlog_crv_emit(g, guard, pick, soft, sink);
             if (!mir_is_null(impls))
                vlog_crv_emit(g, guard, impls, soft, sink);
