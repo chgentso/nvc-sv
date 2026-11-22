@@ -1,0 +1,1 @@
+sorry, a dist in a foreach constraint over an array of dynamic arrays or queues cannot have a weight which depends on the index of the queue
