@@ -1981,8 +1981,8 @@ vlog_node_t vlog_class_prop_enum(vlog_node_t class, vlog_node_t prop)
 
    // Only one written in the declaration of the property
    const loc_t *pl = vlog_loc(prop), *el = vlog_loc(et);
-   if (pl->file_ref != el->file_ref || el->first_line < pl->first_line
-       || el->first_line > pl->first_line + pl->line_delta)
+   if (pl->file_ref != el->file_ref || pl->first_line < el->first_line
+       || pl->first_line > el->first_line + el->line_delta + 1)
       return NULL;
 
    const int ndecls = vlog_decls(class);

@@ -13,7 +13,10 @@ import p2::*;
 
 class Base;
   rand p1::st_e st;
-  rand enum { LOCAL_A, LOCAL_B } own;
+  rand enum {
+    LOCAL_A,
+    LOCAL_B
+  } own;
 endclass
 
 class Derived extends Base;
