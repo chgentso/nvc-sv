@@ -3130,3 +3130,4 @@ svcrvdisablecond1 verilog
 svcrvstage1 verilog
 svcrvfcall2 verilog,gold
 svcrvoob1 verilog
+svcrvrandmodeh1 verilog

@@ -29851,10 +29851,12 @@ static mir_value_t vlog_lower_crv_mode(vlog_gen_t *g, vlog_node_t v)
    while (is_rand && !target_is_class && vlog_kind(prop) == V_BIT_SELECT)
       prop = vlog_value(prop);
 
-   // A class handle means every property of the object
+   // A class handle means every property of the object, unless it is itself
+   // a rand property, when only the mode of the handle changes (18.8)
    if ((vlog_kind(prop) == V_REF || vlog_kind(prop) == V_MEMBER_REF)
        && vlog_has_ref(prop) && vlog_kind(vlog_ref(prop)) == want
-       && (!is_rand || !target_is_class)) {
+       && (!is_rand || !target_is_class
+           || (vlog_flags(vlog_ref(prop)) & VLOG_F_RAND))) {
       decl = vlog_ref(prop);
       if (vlog_kind(prop) == V_MEMBER_REF) {
          vlog_node_t base = vlog_value(prop);
