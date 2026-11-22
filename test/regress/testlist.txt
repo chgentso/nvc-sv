@@ -3042,6 +3042,7 @@ svbindiface1 verilog
 svbindgen1 verilog
 svcrvforeachcall1 verilog
 svforkescape1 verilog
+svvifforeach1 verilog
 svfwdgeneric1 verilog
 svrandmodearr1 verilog
 svfwdtypedef1 verilog

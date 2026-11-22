@@ -6878,10 +6878,10 @@ static int vlog_query_dims(vlog_node_t v, vlog_qdim_t *dims)
    case V_HIER_REF:
       {
          vlog_node_t decl;
-         if (vlog_has_ref(v))
+         if (vlog_kind(v) == V_MEMBER_REF)
+            decl = vlog_member_decl(v);
+         else if (vlog_has_ref(v))
             decl = vlog_ref(v);
-         else if (vlog_kind(v) == V_MEMBER_REF && vlog_virtual_pending(v))
-            decl = vlog_virtual_decl(v);
          else
             return 0;
 
@@ -29034,8 +29034,8 @@ static void vlog_lower_foreach(vlog_gen_t *g, vlog_node_t v, gen_stack_t *gs)
    }
 
    vlog_node_t decl = NULL;
-   if (vlog_kind(root) == V_MEMBER_REF && vlog_virtual_pending(root))
-      decl = vlog_virtual_decl(root);
+   if (vlog_kind(root) == V_MEMBER_REF)
+      decl = vlog_member_decl(root);
    else if (vlog_has_ref(root))
       decl = vlog_ref(root);
 

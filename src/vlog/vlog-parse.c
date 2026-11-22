@@ -11041,10 +11041,17 @@ static vlog_node_t p_foreach_statement(void)
    while (vlog_kind(arr_root) == V_BIT_SELECT)
       arr_root = vlog_value(arr_root);
 
-   if (decl == NULL && vlog_kind(arr_root) == V_MEMBER_REF
-       && vlog_virtual_pending(arr_root)) {
-      // The interface is declared later so the dimensions and associative
-      // key types are resolved when lowering
+   bool vif_param = false;
+   if (vlog_kind(arr_root) == V_MEMBER_REF) {
+      vlog_node_t vtype = vlog_get_type(vlog_value(arr_root));
+      vif_param = vtype != NULL && vlog_kind(vtype) == V_DATA_TYPE
+         && vlog_subkind(vtype) == DT_VIRTUAL && vlog_params(vtype) > 0;
+   }
+
+   if (vlog_kind(arr_root) == V_MEMBER_REF
+       && ((decl == NULL && vlog_virtual_pending(arr_root)) || vif_param)) {
+      // The interface is declared later or has parameter overrides so the
+      // dimensions and associative key types are resolved when lowering
       vlog_node_t loop = vlog_new(V_FOREACH);
       vlog_set_value(loop, arr);
       vlog_set_loc(loop, loc);
