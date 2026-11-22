@@ -3039,3 +3039,4 @@ svbindimport1 verilog
 svfwdgeneric1 verilog
 svrandmodearr1 verilog
 svfwdtypedef1 verilog
+svsizeenum1 verilog

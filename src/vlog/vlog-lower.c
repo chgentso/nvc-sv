@@ -6915,6 +6915,9 @@ static int vlog_query_dims(vlog_node_t v, vlog_qdim_t *dims)
             t = vlog_get_type(vlog_type(t));
          }
 
+         if (t != NULL && vlog_kind(t) == V_ENUM_DECL && vlog_has_type(t))
+            t = vlog_get_type(vlog_type(t));
+
          while (t != NULL && vlog_kind(t) == V_DATA_TYPE) {
             const int nr = vlog_ranges(t);
             for (int i = 0; i < nr && n < MAX_QUERY_DIMS; i++)
