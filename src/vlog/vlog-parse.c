@@ -18609,6 +18609,26 @@ static void add_rand_state(vlog_node_t class)
       vlog_set_ref(d, class);
    }
 
+   // So is the mode of a static rand variable
+   int nsrand = 0;
+   for (int i = 0; i < vlog_decls(class); i++) {
+      vlog_node_t d = vlog_decl(class, i);
+      if (vlog_kind(d) == V_VAR_DECL && (vlog_flags(d) & VLOG_F_STATIC)
+          && (vlog_flags(d) & (VLOG_F_RAND | VLOG_F_RANDC)))
+         nsrand++;
+   }
+
+   if (nsrand > 64)
+      error_at(vlog_loc(class), "sorry, more than 64 static rand variables "
+               "in a class are not supported");
+
+   if (nsrand > 0) {
+      add_hidden_property(class, ident_new("$srand_off"));
+      vlog_node_t d = vlog_decl(class, vlog_decls(class) - 1);
+      vlog_set_flags(d, VLOG_F_STATIC);
+      vlog_set_ref(d, class);
+   }
+
    ident_t rand_off = ident_new("$rand_off");
 
    bool inherited = false;

@@ -3125,3 +3125,4 @@ svcrvelem2d1 verilog
 svcrvlocal2 verilog
 svcrvskiparr1 verilog
 svcrvnestdyn1 verilog
+svcrvstaticrand1 verilog

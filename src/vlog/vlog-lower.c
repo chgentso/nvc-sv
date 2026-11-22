@@ -21685,6 +21685,7 @@ static bool vlog_crv_std_salt(vlog_node_t v, int *salt, vlog_node_t *decl,
 }
 
 static bool vlog_crv_is_std_var(vlog_gen_t *g, vlog_node_t decl);
+static bool vlog_crv_is_integral(vlog_gen_t *g, vlog_node_t type);
 
 static bool vlog_crv_std_elem(vlog_gen_t *g, vlog_node_t v, int *salt,
                               vlog_node_t *decl)
@@ -21714,8 +21715,26 @@ static bool vlog_crv_std_elem(vlog_gen_t *g, vlog_node_t v, int *salt,
    return false;
 }
 
+static bool vlog_crv_is_static_rand(vlog_gen_t *g, vlog_node_t decl)
+{
+   // A static rand variable of the class is solved with the object which is
+   // randomized but is held outside of it, so it has no object of its own
+
+   if (g->crv_class == NULL || vlog_kind(decl) != V_VAR_DECL
+       || !(vlog_flags(decl) & VLOG_F_STATIC)
+       || !(vlog_flags(decl) & VLOG_F_RAND) || !vlog_has_type(decl)
+       || vlog_ranges(decl) > 0)
+      return false;
+
+   return vlog_crv_chain_has(g->crv_class, decl)
+      && vlog_crv_is_integral(g, vlog_type(decl));
+}
+
 static bool vlog_crv_is_std_var(vlog_gen_t *g, vlog_node_t decl)
 {
+   if (vlog_crv_is_static_rand(g, decl))
+      return true;
+
    if (g->crv_std == NULL)
       return false;
 
@@ -27312,6 +27331,31 @@ static vlog_node_t vlog_crv_static_cons_decl(vlog_node_t class)
    fatal_trace("missing $scons_off in %pi", vlog_ident(class));
 }
 
+static vlog_node_t vlog_crv_static_rand_decl(vlog_node_t class)
+{
+   // The hidden variable which holds the modes of the static rand variables
+
+   return vlog_class_member(class, ident_new("$srand_off"));
+}
+
+static int vlog_crv_static_rand_bit(vlog_node_t class, vlog_node_t var)
+{
+   // Position of the variable among the static rand variables of its class
+
+   int bit = 0;
+   const int ndecls = vlog_decls(class);
+   for (int i = 0; i < ndecls; i++) {
+      vlog_node_t d = vlog_decl(class, i);
+      if (d == var)
+         return bit;
+      else if (vlog_kind(d) == V_VAR_DECL && (vlog_flags(d) & VLOG_F_STATIC)
+               && (vlog_flags(d) & (VLOG_F_RAND | VLOG_F_RANDC)))
+         bit++;
+   }
+
+   fatal_trace("missing static rand variable %pi", vlog_ident(var));
+}
+
 static int vlog_crv_static_bit(vlog_node_t class, vlog_node_t cons)
 {
    // Position of the constraint among the static constraints of its class
@@ -27941,17 +27985,36 @@ static void vlog_crv_nest_run(vlog_gen_t *g, mir_value_t this,
    vlog_crv_nest_walk(&b, 0, ua, vlog_crv_int(g, 0));
 }
 
+static mir_value_t vlog_crv_prop_ptr(vlog_gen_t *g, mir_value_t this,
+                                     vlog_node_t d, mir_type_t type)
+{
+   if (vlog_flags(d) & VLOG_F_STATIC)
+      return vlog_lower_decl_ptr(g, d);
+
+   return mir_build_link_var(g->mu, this, vlog_prop_name(g->crv_class, d),
+                             type);
+}
+
 static void vlog_crv_build_prop(vlog_gen_t *g, mir_value_t this, mir_value_t ctx,
                                 vlog_node_t class, vlog_node_t d)
 {
-   mir_value_t obj = vlog_crv_this_ptr(g, this);
+   mir_value_t obj = vlog_flags(d) & VLOG_F_STATIC
+      ? vlog_crv_int(g, 0) : vlog_crv_this_ptr(g, this);
    mir_value_t key = vlog_crv_key(g, d);
 
    const bool is_rand = !!(vlog_flags(d) & (VLOG_F_RAND | VLOG_F_RANDC));
 
    // Whether this is random at runtime
    mir_value_t rand_off = vlog_crv_int(g, 0), bit = vlog_crv_int(g, -1);
-   if (is_rand && vlog_crv_has_hidden(class)) {
+   if (is_rand && (vlog_flags(d) & VLOG_F_STATIC)) {
+      // The mode is shared by all of the objects
+      vlog_node_t owner = vlog_ref(d);
+      rand_off = vlog_crv_to_offset(
+         g, mir_build_load(g->mu, vlog_lower_decl_ptr(
+                              g, vlog_crv_static_rand_decl(owner))));
+      bit = vlog_crv_int(g, vlog_crv_static_rand_bit(owner, d));
+   }
+   else if (is_rand && vlog_crv_has_hidden(class)) {
       rand_off = vlog_crv_to_offset(
          g, mir_build_load(g->mu, vlog_crv_hidden(g, this, "$rand_off")));
       bit = vlog_crv_int(g, vlog_crv_rand_bit(class, d));
@@ -28147,8 +28210,7 @@ static void vlog_crv_build_prop(vlog_gen_t *g, mir_value_t this, mir_value_t ctx
       return;
    }
 
-   mir_value_t ptr = mir_build_link_var(g->mu, this,
-                                    vlog_prop_name(g->crv_class, d), ti->type);
+   mir_value_t ptr = vlog_crv_prop_ptr(g, this, d, ti->type);
    mir_value_t current = vlog_crv_to_offset(g, mir_build_load(g->mu, ptr));
    mir_value_t flags =
       vlog_crv_flags(g, ti->size, mir_get_signed(g->mu, ti->type));
@@ -28175,7 +28237,8 @@ static void vlog_crv_build_prop(vlog_gen_t *g, mir_value_t this, mir_value_t ctx
 static void vlog_crv_store_prop(vlog_gen_t *g, mir_value_t this, mir_value_t ctx,
                                 vlog_node_t d)
 {
-   mir_value_t obj = vlog_crv_this_ptr(g, this);
+   mir_value_t obj = vlog_flags(d) & VLOG_F_STATIC
+      ? vlog_crv_int(g, 0) : vlog_crv_this_ptr(g, this);
    mir_value_t key = vlog_crv_key(g, d);
 
    crv_nest_t nest;
@@ -28382,9 +28445,7 @@ static void vlog_crv_store_prop(vlog_gen_t *g, mir_value_t this, mir_value_t ctx
    else
       elem = vlog_crv_from_offset(g, CRV2(g, CRV_OP_VALUE, ctx, var),
                                   ti->type);
-   mir_build_store(g->mu, mir_build_link_var(g->mu, this,
-                                    vlog_prop_name(g->crv_class, d),
-                                             ti->type), elem);
+   mir_build_store(g->mu, vlog_crv_prop_ptr(g, this, d, ti->type), elem);
 
    mir_build_jump(g->mu, merge_bb);
    mir_set_cursor(g->mu, merge_bb, MIR_APPEND);
@@ -28553,8 +28614,23 @@ static void vlog_crv_walk_props(vlog_gen_t *g, vlog_node_t class,
    const int ndecls = vlog_decls(class);
    for (int i = 0; i < ndecls; i++) {
       vlog_node_t d = vlog_decl(class, i);
-      if (vlog_kind(d) != V_VAR_DECL || (vlog_flags(d) & VLOG_F_STATIC))
+      if (vlog_kind(d) != V_VAR_DECL)
          continue;
+      else if (vlog_flags(d) & VLOG_F_STATIC) {
+         // A static rand variable is solved with every object of the class
+         if (!(vlog_flags(d) & (VLOG_F_RAND | VLOG_F_RANDC)))
+            continue;
+         else if (vlog_crv_is_static_rand(g, d)) {
+            if (phase == CRV_PHASE_BUILD)
+               vlog_crv_build_prop(g, this, ctx, top, d);
+            else if (phase == CRV_PHASE_STORE)
+               vlog_crv_store_prop(g, this, ctx, d);
+         }
+         else if (phase == CRV_PHASE_BUILD)
+            warn_at(vlog_loc(d), "sorry, a static rand variable of this "
+                    "type is not randomized");
+         continue;
+      }
 
       switch (phase) {
       case CRV_PHASE_BUILD:
@@ -29333,6 +29409,32 @@ static mir_value_t vlog_lower_crv_mode(vlog_gen_t *g, vlog_node_t v)
       return mir_const_vec(g->mu, t_sint, 0, 0);
    }
 
+   if (is_rand && decl != NULL && (vlog_flags(decl) & VLOG_F_STATIC)) {
+      // The mode of a static rand variable is shared by all of the objects
+      vlog_node_t owner = vlog_ref(decl);
+      mir_value_t sptr =
+         vlog_lower_decl_ptr(g, vlog_crv_static_rand_decl(owner));
+      mir_value_t soff = vlog_crv_to_offset(g, mir_build_load(g->mu, sptr));
+      mir_value_t sbit = vlog_crv_int(g, vlog_crv_static_rand_bit(owner, decl));
+
+      mir_type_t t_sint = mir_vec2_type(g->mu, 32, true);
+      if (vlog_params(v) == 0) {
+         mir_value_t test = CRV2(g, CRV_OP_TEST_BIT, soff, sbit);
+         return mir_build_select(
+            g->mu, t_sint, mir_build_cmp(g->mu, MIR_CMP_EQ, test,
+                                         vlog_crv_int(g, 0)),
+            mir_const_vec(g->mu, t_sint, 1, 0),
+            mir_const_vec(g->mu, t_sint, 0, 0));
+      }
+
+      mir_value_t smode =
+         vlog_crv_to_offset(g, vlog_lower_rvalue(g, vlog_param(v, 0)));
+      mir_value_t snext = CRV3(g, CRV_OP_SET_BIT, soff, sbit, smode);
+      mir_build_store(g->mu, sptr, vlog_crv_from_offset(
+                         g, snext, mir_vec2_type(g->mu, 64, true)));
+      return mir_const_vec(g->mu, t_sint, 0, 0);
+   }
+
    // The mode bits of the constraints are held in as many words as needed
    int nwords = 1;
    if (!is_rand) {
@@ -29362,6 +29464,22 @@ static mir_value_t vlog_lower_crv_mode(vlog_gen_t *g, vlog_node_t v)
          test = mir_is_null(test) ? t : mir_build_or(g->mu, test, t);
       }
 
+      if (is_rand && bit < 0) {
+         // Including the static rand variables
+         for (vlog_node_t c = class;; c = vlog_ref(c)) {
+            vlog_node_t sd = vlog_crv_static_rand_decl(c);
+            if (sd != NULL && vlog_ref(sd) == c) {
+               mir_value_t off = vlog_crv_to_offset(
+                  g, mir_build_load(g->mu, vlog_lower_decl_ptr(g, sd)));
+               test = mir_build_or(g->mu, test,
+                                   CRV2(g, CRV_OP_TEST_BIT, off, ibit));
+            }
+
+            if (!vlog_has_ref(c))
+               break;
+         }
+      }
+
       return mir_build_select(
          g->mu, t_int, mir_build_cmp(g->mu, MIR_CMP_EQ, test, vlog_crv_int(g, 0)),
          mir_const_vec(g->mu, t_int, 1, 0), mir_const_vec(g->mu, t_int, 0, 0));
@@ -29377,6 +29495,24 @@ static mir_value_t vlog_lower_crv_mode(vlog_gen_t *g, vlog_node_t v)
       mir_value_t off = vlog_crv_to_offset(g, mir_build_load(g->mu, ptr));
       mir_value_t next = CRV3(g, CRV_OP_SET_BIT, off, ibit, mode);
       mir_build_store(g->mu, ptr, vlog_crv_from_offset(g, next, t_longint));
+   }
+
+   if (is_rand && bit < 0) {
+      // Including the static rand variables
+      for (vlog_node_t c = class;; c = vlog_ref(c)) {
+         vlog_node_t sd = vlog_crv_static_rand_decl(c);
+         if (sd != NULL && vlog_ref(sd) == c) {
+            mir_value_t sptr = vlog_lower_decl_ptr(g, sd);
+            mir_value_t off = vlog_crv_to_offset(
+               g, mir_build_load(g->mu, sptr));
+            mir_value_t next = CRV3(g, CRV_OP_SET_BIT, off, ibit, mode);
+            mir_build_store(g->mu, sptr,
+                            vlog_crv_from_offset(g, next, t_longint));
+         }
+
+         if (!vlog_has_ref(c))
+            break;
+      }
    }
 
    return mir_const_vec(g->mu, t_int, 0, 0);
