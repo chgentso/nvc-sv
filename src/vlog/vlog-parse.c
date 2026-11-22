@@ -7290,6 +7290,42 @@ static vlog_node_t p_cast(vlog_node_t head)
    return v;
 }
 
+static vlog_node_t local_caller_root(vlog_node_t v, vlog_node_t cls)
+{
+   switch (vlog_kind(v)) {
+   case V_REF:
+      {
+         if (!vlog_has_ref(v))
+            return v;
+
+         vlog_node_t decl = vlog_ref(v);
+         if (vlog_kind(decl) != V_VAR_DECL || (vlog_flags(decl) & VLOG_F_STATIC)
+             || vlog_class_member(cls, vlog_ident(decl)) != decl)
+            return v;
+
+         vlog_node_t this = vlog_new(V_THIS);
+         vlog_set_type(this, cls);
+         vlog_set_flags(this, VLOG_F_CALLER);
+         vlog_set_loc(this, vlog_loc(v));
+
+         vlog_node_t m = vlog_new(V_MEMBER_REF);
+         vlog_set_ident(m, vlog_ident(v));
+         vlog_set_value(m, this);
+         vlog_set_ref(m, decl);
+         vlog_set_loc(m, vlog_loc(v));
+         return m;
+      }
+   case V_BIT_SELECT:
+   case V_PART_SELECT:
+   case V_MEMBER_REF:
+      if (vlog_has_value(v))
+         vlog_set_value(v, local_caller_root(vlog_value(v), cls));
+      return v;
+   default:
+      return v;
+   }
+}
+
 static vlog_node_t p_local_scope_select(void)
 {
    // local :: hierarchical_identifier select
@@ -7307,15 +7343,25 @@ static vlog_node_t p_local_scope_select(void)
       return p_select(id);
    }
 
-   if (peek() == tLPAREN) {
+   bool is_call = peek() == tLPAREN;
+   if (!is_call) {
+      // A function called without parentheses
+      vlog_scope_t *inner = vlog_symtab_enter(symtab, local_scope);
+      vlog_node_t d = vlog_symtab_query(symtab, id);
+      vlog_symtab_enter(symtab, inner);
+      is_call = d != NULL && vlog_kind(d) == V_FUNC_DECL;
+   }
+
+   if (is_call) {
       // A function of the scope of the caller rather than one of the
       // object being randomized
       vlog_node_t v = vlog_new(V_USER_FCALL);
       vlog_set_ident(v, id);
 
-      consume(tLPAREN);
-      p_list_of_arguments(v);
-      consume(tRPAREN);
+      if (optional(tLPAREN)) {
+         p_list_of_arguments(v);
+         consume(tRPAREN);
+      }
 
       vlog_set_loc(v, CURRENT_LOC);
 
@@ -7328,7 +7374,18 @@ static vlog_node_t p_local_scope_select(void)
    // Skip the members of the object being randomized, but not the
    // variables of the constraint which the indexes may refer to
    select_scope = local_scope;
-   return p_select(id);
+   vlog_node_t head = p_select(id);
+
+   // A property of the object of the caller is not one of the object
+   // being randomized, even if both are of the same class
+   vlog_scope_t *inner = vlog_symtab_enter(symtab, local_scope);
+   vlog_node_t cls = vlog_symtab_class(symtab);
+   vlog_symtab_enter(symtab, inner);
+
+   if (cls != NULL)
+      head = local_caller_root(head, cls);
+
+   return head;
 }
 
 static vlog_node_t p_streaming_concatenation(void)
@@ -18443,6 +18500,16 @@ static int push_base_scopes(vlog_node_t class)
             put_enum_names(d);
             // Fall-through
          case V_VAR_DECL:
+            {
+               // The names of an enumeration given in the type of a property
+               vlog_node_t et = vlog_class_prop_enum(base, d);
+               if (et != NULL) {
+                  const int nnames = vlog_decls(et);
+                  for (int j = 0; j < nnames; j++)
+                     vlog_symtab_put(symtab, vlog_decl(et, j));
+               }
+            }
+            // Fall-through
          case V_TASK_DECL:
          case V_FUNC_DECL:
          case V_CONSTRAINT:

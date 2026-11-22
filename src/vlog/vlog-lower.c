@@ -10177,6 +10177,8 @@ static mir_value_t vlog_lower_with_context(vlog_gen_t *g, vlog_node_t v,
    case V_PART_SELECT:
       return vlog_widen_vector(g, vlog_lower_rvalue_select(g, v), context);
    case V_THIS:
+      if ((vlog_flags(v) & VLOG_F_CALLER) && !mir_is_null(g->local_this))
+         return g->local_this;   // local:: in a constraint block
       return vlog_lower_this(g);
    case V_METHOD_CALL:
       return vlog_widen_vector(g, vlog_lower_method_call(g, v), context);
@@ -21795,6 +21797,12 @@ static void vlog_crv_state_cb(vlog_node_t v, void *context)
       break;
    case V_MEMBER_REF:
       {
+         // A property of the object which called randomize has the value it
+         // has now (local::)
+         if (vlog_kind(vlog_value(v)) == V_THIS
+             && (vlog_flags(vlog_value(v)) & VLOG_F_CALLER))
+            break;
+
          vlog_node_t type = vlog_get_type(vlog_value(v));
          if (type != NULL && vlog_kind(type) == V_CLASS_DECL) {
             // A property which is not random has the value it has now

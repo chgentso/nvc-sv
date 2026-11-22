@@ -241,6 +241,17 @@ void vlog_symtab_push_members(vlog_symtab_t *st, vlog_node_t class,
          if (vlog_kind(d) != V_VAR_DECL)
             continue;
 
+         vlog_node_t et = vlog_class_prop_enum(c, d);
+         if (et != NULL && only == NULL) {
+            // The names of an enumeration given in the type of a property
+            const int nnames = vlog_decls(et);
+            for (int j = 0; j < nnames; j++) {
+               vlog_symbol_t *sym = fresh_symbol_for(st, vlog_ident(vlog_decl(et, j)));
+               if (sym->node == NULL)
+                  sym->node = vlog_decl(et, j);
+            }
+         }
+
          if (only != NULL) {
             int j = 0;
             for (; j < nonly && only[j] != vlog_ident(d); j++)

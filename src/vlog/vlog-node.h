@@ -633,6 +633,7 @@ typedef enum {
    VLOG_F_UNSIGNED = VLOG_F_FILL,    // On an implicit data type with unsigned
    VLOG_F_CONTEXT = VLOG_F_RANDC,    // On a DPI import declared context
    VLOG_F_IMPLICIT = VLOG_F_FORWARD, // On a constraint prototype without extern
+   VLOG_F_CALLER = VLOG_F_FORWARD,   // On the this of a name in local::
    VLOG_F_OPEN_PACKED = VLOG_F_WILDCARD,  // On an unsized packed dimension
    VLOG_F_IMPLICIT_NET = VLOG_F_FORWARD,  // On the type of a net declared by its use
    VLOG_F_OVERRIDABLE = VLOG_F_GENERIC,   // On a local parameter bound to a parameter
