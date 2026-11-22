@@ -4197,6 +4197,22 @@ static vlog_node_t arg_pattern_type(vlog_node_t call, int n)
          if (vlog_kind(type) == V_CLASS_DECL)
             decl = vlog_class_member(type, id);
          else if (vlog_kind(type) == V_DATA_TYPE
+                  && vlog_subkind(type) == DT_VIRTUAL) {
+            vlog_node_t iface = vlog_virtual_iface(type);
+            if (iface != NULL) {
+               const int ndecls = vlog_decls(iface);
+               for (int i = 0; i < ndecls; i++) {
+                  vlog_node_t d = vlog_decl(iface, i);
+                  if ((vlog_kind(d) == V_FUNC_DECL
+                       || vlog_kind(d) == V_TASK_DECL)
+                      && vlog_ident(d) == id) {
+                     decl = d;
+                     break;
+                  }
+               }
+            }
+         }
+         else if (vlog_kind(type) == V_DATA_TYPE
                   && (vlog_subkind(type) == DT_QUEUE
                       || vlog_subkind(type) == DT_DYNARRAY)) {
             if ((id == ident_new("push_back") || id == ident_new("push_front"))
