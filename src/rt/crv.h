@@ -149,9 +149,11 @@ bool crv_solve(crv_t *c);
 
 // Which stage of the solver may answer.  Read once from NVC_CRV_ENGINE
 // (legacy, dfs, reject, bdd, sat or auto) and overridden by crv_set_engine
-// for tests.  Legacy is the solver of release 0.18.0 and every other
-// choice is the same search until the stages that the names refer to
-// exist: crv_engine_available says which do.
+// for tests.  Legacy is the solver of release 0.18.0, dfs is its search with
+// the components, reject is the rejection stage alone (it gives up on a
+// component it cannot sample) and auto is the stages in turn, the search
+// last.  A stage that is not written yet is taken as dfs:
+// crv_engine_available says which exist.
 typedef enum {
    CRV_ENGINE_AUTO, CRV_ENGINE_LEGACY, CRV_ENGINE_DFS, CRV_ENGINE_REJECT,
    CRV_ENGINE_BDD, CRV_ENGINE_SAT,
@@ -183,7 +185,8 @@ typedef struct {
    uint32_t    freevars;    // Free variables in the components
    uint32_t    maxfree;     // Free variables in the largest component
    uint32_t    stage[CRV_STAGE_COUNT];   // Components answered by each stage
-   uint32_t    declined[3]; // Prefilter, budget and exhausted proposals
+   uint32_t    declined[3]; // Components a stage cannot take, budget of a
+                            // stage, all proposals rejected
    bool        decomposed;  // A variable was split at slice boundaries
    bool        soft;        // Has soft constraints
    bool        ok;          // A solution was found
