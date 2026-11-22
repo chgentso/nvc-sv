@@ -19415,6 +19415,29 @@ static bool spec_eval(vlog_node_t v, const spec_env_t *env, int nenv,
             return true;
          }
       }
+      else if (vlog_ident(v) == ident_new("$size") && vlog_params(v) == 1
+               && vlog_kind(vlog_param(v, 0)) == V_REF
+               && vlog_has_ref(vlog_param(v, 0))) {
+         // The first dimension of a variable or net with a fixed size
+         vlog_node_t arg = vlog_param(v, 0);
+         switch (vlog_kind(vlog_ref(arg))) {
+         case V_VAR_DECL:
+         case V_NET_DECL:
+         case V_PORT_DECL:
+            {
+               vlog_node_t dim = vlog_get_dim(arg, 0);
+               if (dim != NULL && vlog_kind(dim) == V_DIMENSION
+                   && vlog_subkind(dim) != V_DIM_UNSIZED
+                   && !vlog_is_dynamic_type(vlog_type(vlog_ref(arg)))) {
+                  *result = vlog_size(dim);
+                  return *result > 0;
+               }
+            }
+            break;
+         default:
+            break;
+         }
+      }
       else if (vlog_ident(v) == ident_new("$bits") && vlog_params(v) == 1) {
          // The width of a type or of an object with a fixed size
          vlog_node_t arg = vlog_param(v, 0);
@@ -19455,7 +19478,9 @@ static bool spec_eval(vlog_node_t v, const spec_env_t *env, int nenv,
                    && vlog_has_type(t))
                t = vlog_type(t);
 
-            if (vlog_kind(t) == V_DATA_TYPE && !vlog_is_dynamic_type(t)) {
+            if ((vlog_kind(t) == V_DATA_TYPE || vlog_kind(t) == V_STRUCT_DECL
+                 || vlog_kind(t) == V_UNION_DECL)
+                && !vlog_is_dynamic_type(t)) {
                *result = vlog_size(t);
                return *result > 0;
             }
