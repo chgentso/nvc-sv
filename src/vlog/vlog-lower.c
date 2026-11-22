@@ -25185,8 +25185,58 @@ static mir_value_t vlog_crv_binary(vlog_gen_t *g, vlog_node_t v)
    const bool ls = vlog_crv_signed(g, left), rs = vlog_crv_signed(g, right);
 
    if (vlog_subkind(v) == V_BINARY_EXP) {
+      int64_t base, k;
+      if (!vlog_get_const(left, &base) && vlog_get_const(right, &k)) {
+         // A constant exponent is repeated multiplication (11.4.3)
+         const unsigned width = MAX(g->crv_width, lw);
+         const bool is_signed = ls && g->crv_signed;
+         mir_value_t flags = vlog_crv_flags(g, width, is_signed);
+         mir_value_t b = vlog_crv_expr(g, left, width, is_signed);
+
+         if (rs && k < 0) {
+            // 1 for a base of 1, plus or minus 1 for a base of -1, else 0
+            mir_value_t bflags = vlog_crv_flags(g, 1, false);
+            mir_value_t one = CRV3(g, CRV_OP_CONST, g->crv_ctx,
+                                   vlog_crv_int(g, 1), flags);
+            mir_value_t zero = CRV3(g, CRV_OP_CONST, g->crv_ctx,
+                                    vlog_crv_int(g, 0), flags);
+            mir_value_t res = zero;
+            if (is_signed) {
+               mir_value_t minus1 = CRV3(g, CRV_OP_CONST, g->crv_ctx,
+                                         vlog_crv_int(g, -1), flags);
+               res = CRV4(g, CRV_OP_COND, g->crv_ctx,
+                          CRV5(g, CRV_OP_BINARY, g->crv_ctx,
+                               vlog_crv_int(g, CRV_EQ), b, minus1, bflags),
+                          (k & 1) ? minus1 : one, zero);
+            }
+
+            return CRV4(g, CRV_OP_COND, g->crv_ctx,
+                        CRV5(g, CRV_OP_BINARY, g->crv_ctx,
+                             vlog_crv_int(g, CRV_EQ), b, one, bflags),
+                        one, res);
+         }
+         else if (k < 0 || k > 4096)
+            fatal_at(vlog_loc(v), "sorry, this exponent is not supported in "
+                     "a constraint");
+
+         mir_value_t acc = MIR_NULL_VALUE;
+         for (int64_t e = k; e > 0; e >>= 1) {
+            if (e & 1)
+               acc = mir_is_null(acc) ? b
+                  : CRV5(g, CRV_OP_BINARY, g->crv_ctx,
+                         vlog_crv_int(g, CRV_MUL), acc, b, flags);
+            if (e > 1)
+               b = CRV5(g, CRV_OP_BINARY, g->crv_ctx, vlog_crv_int(g, CRV_MUL),
+                        b, b, flags);
+         }
+
+         if (mir_is_null(acc))
+            acc = CRV3(g, CRV_OP_CONST, g->crv_ctx, vlog_crv_int(g, 1), flags);
+
+         return acc;
+      }
+
       // A power of two is a shift
-      int64_t base;
       if (!vlog_get_const(left, &base) || base < 1 || (base & (base - 1)) != 0
           || base > 2)
          fatal_at(vlog_loc(v), "sorry, only the powers of 2 are supported "
