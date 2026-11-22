@@ -1305,8 +1305,12 @@ static bool try_promote_allocation(jit_func_t *f, jit_ir_t *alloc,
          return false;
       else if (ir->op == J_LOAD || ir->op == J_STORE) {
          jit_value_t addr = ir->op == J_LOAD ? ir->arg1 : ir->arg2;
-         if (get_value_reg(addr) != reg)
+         if (get_value_reg(addr) != reg) {
+            // Storing the address of the allocation somewhere else
+            if (ir->op == J_STORE && get_value_reg(ir->arg1) == reg)
+               return false;
             continue;
+         }
          else if (addr.disp != 0 || ir->size != sz)
             return false;
          else if (ir->op == J_STORE && get_value_reg(ir->arg1) == reg)
