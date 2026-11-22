@@ -6206,6 +6206,12 @@ void jit_irgen(jit_func_t *f, mir_unit_t *mu)
       jit_delete_nops(f);
    }
 
+   if (f->nirs < g->bufsz) {
+      // Nothing is appended after this point and the buffer can be
+      // much larger than the code in a design with many small units
+      f->irbuf = xrealloc_array(f->irbuf, MAX(f->nirs, 1), sizeof(jit_ir_t));
+   }
+
    // Function can be executed immediately after this store
    store_release(&(f->state), JIT_FUNC_READY);
 
