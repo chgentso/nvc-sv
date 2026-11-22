@@ -7474,6 +7474,8 @@ static vlog_node_t p_logical_implication(vlog_node_t lhs)
    const token_t tok = peek();
    if (tok != tIFIMPL && tok != tIFFIMPL)
       return lhs;
+   else if (constraint_item && tok == tIFIMPL)
+      return lhs;   // The arrow of an implication constraint
 
    consume(tok);
 
@@ -7831,7 +7833,13 @@ static vlog_node_t p_primary(void)
       break;
    case tLPAREN:
       consume(tLPAREN);
-      head = p_logical_implication(p_mintypmax_expression());
+      {
+         // Inside parentheses an arrow is an operator again
+         const bool saved_item = constraint_item;
+         constraint_item = false;
+         head = p_logical_implication(p_mintypmax_expression());
+         constraint_item = saved_item;
+      }
       switch (peek()) {
       case tEQ:
       case tPLUSEQ:
@@ -8364,9 +8372,6 @@ static vlog_node_t p_expression(void)
    BEGIN("expression");
 
    vlog_node_t head = p_binary_expression(p_nonbinary_expression(), 0);
-   if (constraint_item)
-      return head;
-
    return p_logical_implication(head);
 }
 
