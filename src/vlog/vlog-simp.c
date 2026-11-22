@@ -298,7 +298,10 @@ static void build_sensitivity(vlog_node_t ctrl, vlog_node_t v, hset_t *set,
    case V_FUNC_DECL:
    case V_TASK_DECL:
       {
-         // Ignore task/function ports
+         // Ignore task/function ports and the implicit variable holding the
+         // return value, which is named after the function
+         hset_insert(set, v);
+
          const int nports = vlog_ports(v);
          for (int i = 0; i < nports; i++)
             hset_insert(set, vlog_port(v, i));

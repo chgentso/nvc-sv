@@ -3068,3 +3068,4 @@ vlog_inout_hier_sel verilog
 vlog_cov_with_inside verilog
 vlog_vif_pkg_bits verilog
 vlog_sva_past_localparam verilog
+vlog_comb_func_retval verilog
