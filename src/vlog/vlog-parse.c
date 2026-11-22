@@ -10832,7 +10832,8 @@ static vlog_node_t p_for_initialization(void)
    if (scan(tREG, tSTRUCT, tUNION, tENUM, tSVINT, tINTEGER, tSVREAL,
             tSHORTREAL, tREALTIME, tLOGIC, tVAR, tBIT, tBYTE, tSHORTINT,
             tLONGINT, tTIME, tSTRINGK)
-       || (peek() == tID && (peek_nth(2) == tID || peek_nth(2) == tHASH))) {
+       || (peek() == tID && (peek_nth(2) == tID || peek_nth(2) == tHASH))
+       || is_scoped_type_start()) {
       do {
          p_for_variable_declaration(v);
       } while (optional(tCOMMA));
