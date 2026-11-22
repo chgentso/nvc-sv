@@ -3104,3 +3104,4 @@ svcrvstaticcons1 verilog
 vlog_udiv64 verilog
 svcrvunchecked1 verilog,gold
 vlog_unarychain1 verilog
+svcrvdistparen1 verilog

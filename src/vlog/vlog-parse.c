@@ -151,6 +151,7 @@ static vlog_node_t p_method_call_tail(vlog_node_t prefix);
 static vlog_node_t p_operator_assignment(vlog_node_t lhs);
 static vlog_node_t p_blocking_assignment(vlog_node_t lhs);
 static vlog_node_t p_expression_or_dist(void);
+static vlog_node_t p_dist_tail(vlog_node_t head);
 static vlog_node_t p_constraint_expression(void);
 static void p_list_of_variable_decl_assignments(vlog_node_t parent,
                                                 vlog_node_t datatype,
@@ -7466,6 +7467,7 @@ static vlog_node_t p_process_scope(void)
 }
 
 static bool constraint_item = false;
+static bool constraint_dist = false;
 
 static vlog_node_t p_logical_implication(vlog_node_t lhs)
 {
@@ -7839,6 +7841,10 @@ static vlog_node_t p_primary(void)
          constraint_item = false;
          head = p_logical_implication(p_mintypmax_expression());
          constraint_item = saved_item;
+
+         // A distribution may be parenthesised in a constraint
+         if (constraint_dist && peek() == tDIST)
+            head = p_dist_tail(head);
       }
       switch (peek()) {
       case tEQ:
@@ -8535,15 +8541,9 @@ static vlog_node_t p_dist_item(void)
    return v;
 }
 
-static vlog_node_t p_expression_or_dist(void)
+static vlog_node_t p_dist_tail(vlog_node_t head)
 {
-   // expression [ dist { dist_list } ]
-
-   BEGIN("expression or dist");
-
-   vlog_node_t head = p_expression();
-   if (peek() != tDIST)
-      return head;
+   // dist { dist_list }
 
    consume(tDIST);
 
@@ -8560,6 +8560,19 @@ static vlog_node_t p_expression_or_dist(void)
 
    vlog_set_loc(v, CURRENT_LOC);
    return v;
+}
+
+static vlog_node_t p_expression_or_dist(void)
+{
+   // expression [ dist { dist_list } ]
+
+   BEGIN("expression or dist");
+
+   vlog_node_t head = p_expression();
+   if (peek() != tDIST)
+      return head;
+
+   return p_dist_tail(head);
 }
 
 static void p_constraint_set(vlog_node_t parent)
@@ -8669,6 +8682,42 @@ static vlog_node_t p_constraint_foreach(void)
 
    vlog_set_loc(v, CURRENT_LOC);
    return v;
+}
+
+static bool is_dist_implication(vlog_node_t v)
+{
+   // A distribution inside parentheses as the consequent of an implication
+   // written as an operator: (a -> (x dist { ... }))
+
+   if (vlog_kind(v) != V_BINARY || vlog_subkind(v) != V_BINARY_LOG_OR)
+      return false;
+
+   vlog_node_t lhs = vlog_left(v);
+   if (vlog_kind(lhs) != V_UNARY || vlog_subkind(lhs) != V_UNARY_NOT)
+      return false;
+
+   vlog_node_t rhs = vlog_right(v);
+   return vlog_kind(rhs) == V_DIST || is_dist_implication(rhs);
+}
+
+static vlog_node_t implication_constraint(vlog_node_t v)
+{
+   vlog_node_t c = vlog_new(V_CONS_IMPLY);
+   vlog_set_value(c, vlog_value(vlog_left(v)));
+
+   vlog_node_t rhs = vlog_right(v);
+   vlog_node_t item;
+   if (vlog_kind(rhs) == V_DIST) {
+      item = vlog_new(V_CONS_EXPR);
+      vlog_set_value(item, rhs);
+      vlog_set_loc(item, vlog_loc(rhs));
+   }
+   else
+      item = implication_constraint(rhs);
+
+   vlog_add_stmt(c, item);
+   vlog_set_loc(c, vlog_loc(v));
+   return c;
 }
 
 static vlog_node_t p_constraint_expression(void)
@@ -8788,9 +8837,16 @@ static vlog_node_t p_constraint_expression(void)
       {
          // The arrow of an implication constraint is not an operator here
          const bool saved_item = constraint_item;
-         constraint_item = true;
+         const bool saved_dist = constraint_dist;
+         constraint_item = constraint_dist = true;
          vlog_node_t value = p_expression_or_dist();
          constraint_item = saved_item;
+         constraint_dist = saved_dist;
+
+         if (is_dist_implication(value)) {
+            consume(tSEMI);
+            return implication_constraint(value);
+         }
 
          if (optional(tIFIMPL)) {
             vlog_node_t v = vlog_new(V_CONS_IMPLY);
