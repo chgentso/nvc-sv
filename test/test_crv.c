@@ -795,6 +795,50 @@ START_TEST(test_unique_large)
 }
 END_TEST
 
+// Variables that no constraint links are solved on their own: every
+// constraint holds, a variable nothing mentions is free, and a solve before
+// keeps its variables together
+START_TEST(test_components)
+{
+   const crv_engine_t saved = crv_engine();
+   crv_set_engine(CRV_ENGINE_AUTO);
+   crv_seed(101);
+   int loose_seen[4] = { 0 };
+
+   for (int i = 0; i < 300; i++) {
+      crv_t *c = crv_new();
+      crv_var_t x = crv_var(c, 8, false, 0), y = crv_var(c, 8, false, 0);
+      crv_var_t a = crv_var(c, 6, false, 0), b = crv_var(c, 6, false, 0);
+      crv_var_t d = crv_var(c, 6, false, 0), loose = crv_var(c, 2, false, 0);
+      crv_var_t p = crv_var(c, 4, false, 0), q = crv_var(c, 4, false, 0);
+      crv_require(c, crv_binary(c, CRV_LT, crv_var_ref(c, x),
+                                crv_var_ref(c, y), 1, false), false, 1);
+      crv_node_t sum = crv_binary(
+         c, CRV_ADD, crv_binary(c, CRV_ADD, crv_var_ref(c, a),
+                                crv_var_ref(c, b), 6, false),
+         crv_var_ref(c, d), 6, false);
+      crv_require(c, crv_binary(c, CRV_EQ, sum, crv_const(c, 33, 6, false), 1,
+                                false), false, 2);
+      crv_require(c, crv_binary(c, CRV_NE, crv_var_ref(c, p),
+                                crv_var_ref(c, q), 1, false), false, 3);
+      crv_solve_before(c, p, q);
+      ck_assert(crv_solve(c));
+
+      ck_assert(crv_value(c, x) < crv_value(c, y));
+      ck_assert_int_eq((crv_value(c, a) + crv_value(c, b) + crv_value(c, d))
+                       & 63, 33);
+      ck_assert(crv_value(c, p) != crv_value(c, q));
+      loose_seen[crv_value(c, loose)]++;
+      crv_free(c);
+   }
+
+   for (int k = 0; k < 4; k++)
+      ck_assert_msg(loose_seen[k] > 30, "free value %d seen %d of 300", k,
+                    loose_seen[k]);
+   crv_set_engine(saved);
+}
+END_TEST
+
 START_TEST(test_randc)
 {
    // Every value of a 4 bit variable once before any repeats, also with a
@@ -3083,6 +3127,7 @@ Suite *get_crv_tests(void)
    tcase_add_test(tc, test_soft_many);
    tcase_add_test(tc, test_unique);
    tcase_add_test(tc, test_unique_large);
+   tcase_add_test(tc, test_components);
    tcase_add_test(tc, test_randc);
    tcase_add_test(tc, test_seed);
    tcase_add_test(tc, test_array_fixed);

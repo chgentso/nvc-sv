@@ -1597,6 +1597,9 @@ typedef struct {
    int      *uvstart, *uvlist;   // Sets that each variable is in
    bool      root;        // Propagating the problem before the search
    bool     *soft_on;     // Soft constraints that count, NULL if all do
+   int      *vcomp;       // Component of each variable, -1 if none
+   int      *ccomp;       // Component of each constraint, -1 if none
+   int       ncomp, comp;  // Components with a free variable, the one searched
    bool      sum_ready;
    chain_t  *chain;
    int       nchain, cchain;
@@ -1992,6 +1995,8 @@ static void prob_free(prob_t *P)
 
    free(P->dec);
    free(P->soft_on);
+   free(P->vcomp);
+   free(P->ccomp);
    free(P->varr);
    free(P->tlo);
    free(P->thi);
@@ -4896,6 +4901,8 @@ static int build_order(prob_t *P, int attempt, int **out)
       const pvar_t *pv = &P->vars[v];
       if (pv->dom.lo == pv->dom.hi || pv->derived)
          continue;
+      else if (P->vcomp != NULL && P->vcomp[v] != P->comp)
+         continue;
 
       okey_t *k = &keys[n++];
       k->var = v;
@@ -5149,7 +5156,7 @@ static i128 pick_val(prob_t *P, int v)
    return dom_nth(d, d->lo, d->hi, rnd_i128(n));
 }
 
-static bool check_all(prob_t *P)
+static bool check_all(prob_t *P, int comp)
 {
    for (int v = 0; v < P->nv; v++)
       P->vals[v] = st(P->vars[v].dom.lo);
@@ -5169,6 +5176,8 @@ static bool check_all(prob_t *P)
       const pcons_t *pc = &P->cons[ci];
       E.fail = false;
       if (pc->soft >= 0 && P->soft_on != NULL && !P->soft_on[pc->soft])
+         continue;
+      if (comp >= 0 && P->ccomp[ci] != comp)
          continue;
       if (pc->kind == C_REQ) {
          const int64_t v = ev(&E, pc->root);
@@ -5237,7 +5246,7 @@ static sres_t dfs(prob_t *P, int attempt, int limit)
       }
 
       if (v < 0) {
-         if (check_all(P)) {
+         if (check_all(P, P->vcomp != NULL ? P->comp : -1)) {
             res = S_SAT;
             break;
          }
@@ -5492,6 +5501,111 @@ static void sum_init(prob_t *P)
    free(used);
 }
 
+// Components: the variables linked by a constraint, a unique set or a solve
+// before are solved on their own, one after the other, so that a conflict in
+// one does not undo the choices made for the others, and each has its own
+// number of restarts.  A problem with a single component is searched as a
+// whole.
+static void build_components(prob_t *P)
+{
+   const crv_t *c = P->c;
+   const int nv = P->nv;
+   int *uf = NEW(int, nv);
+   bool *used = xcalloc(nv ? nv : 1);
+   for (int i = 0; i < nv; i++)
+      uf[i] = i;
+
+   for (int ci = 0; ci < P->ncons; ci++) {
+      const pcons_t *pc = &P->cons[ci];
+      if (pc->soft >= 0 && P->soft_on != NULL && !P->soft_on[pc->soft])
+         continue;
+
+      int first = -1;
+      for (int i = P->vstart[ci]; i < P->vstart[ci + 1]; i++) {
+         const int v = P->vl[i];
+         used[v] = true;
+         if (first < 0)
+            first = v;
+         else
+            uf_union(uf, first, v);
+      }
+   }
+
+   for (int i = 0; i < P->ndec; i++) {
+      const dec_t *d = &P->dec[i];
+      for (int k = 0; k < d->nf; k++)
+         uf_union(uf, d->var, d->f0 + k);
+      used[d->var] = true;
+   }
+
+   for (unsigned e = 0; e < c->nedges; e++) {
+      const int b = c->edges[e].array ? P->nsc + c->edges[e].before
+         : c->edges[e].before;
+      const int a = c->edges[e].after;
+      if (a < nv && b < nv) {
+         used[a] = used[b] = true;
+         uf_union(uf, a, b);
+      }
+   }
+
+   // Components are numbered by their first variable; the free variables
+   // that nothing mentions make one more
+   bool *freec = xcalloc(nv + 1);
+   for (int v = 0; v < nv; v++) {
+      if (P->vars[v].dom.lo != P->vars[v].dom.hi)
+         freec[used[v] ? uf_find(uf, v) : nv] = true;
+   }
+
+   int *map = NEW(int, nv + 1);
+   for (int i = 0; i <= nv; i++)
+      map[i] = -1;
+
+   int ncomp = 0;
+   P->vcomp = NEW(int, nv);
+   for (int v = 0; v < nv; v++) {
+      const int r = used[v] ? uf_find(uf, v) : nv;
+      if (!freec[r])
+         P->vcomp[v] = -1;
+      else {
+         if (map[r] < 0)
+            map[r] = ncomp++;
+         P->vcomp[v] = map[r];
+      }
+   }
+
+   P->ccomp = NEW(int, P->ncons);
+   for (int ci = 0; ci < P->ncons; ci++) {
+      P->ccomp[ci] = -1;
+      if (P->vstart[ci] < P->vstart[ci + 1])
+         P->ccomp[ci] = P->vcomp[P->vl[P->vstart[ci]]];
+   }
+
+   P->ncomp = ncomp;
+   free(uf);
+   free(used);
+   free(freec);
+   free(map);
+}
+
+
+static sres_t search(prob_t *P)
+{
+   const int root_trail = P->ntrail;
+   const amark_t am = arena_mark(&P->ar);
+   int limit = 12;
+
+   for (int attempt = 0; ; attempt++) {
+      const sres_t r = dfs(P, attempt, limit);
+      if (r != S_GIVEUP || P->oob)
+         return r;
+
+      undo_to(P, root_trail);
+      arena_reset(&P->ar, am);
+      if (limit < 100000)
+         limit *= 2;
+   }
+}
+
 static sres_t solve_prob(prob_t *P)
 {
    sum_init(P);
@@ -5510,20 +5624,30 @@ static sres_t solve_prob(prob_t *P)
 
    compute_levels(P);
 
-   const int root_trail = P->ntrail;
-   const amark_t am = arena_mark(&P->ar);
-   int limit = 12;
-
-   for (int attempt = 0; ; attempt++) {
-      const sres_t r = dfs(P, attempt, limit);
-      if (r != S_GIVEUP || P->oob)
-         return r;
-
-      undo_to(P, root_trail);
-      arena_reset(&P->ar, am);
-      if (limit < 100000)
-         limit *= 2;
+   if (!P->legacy) {
+      free(P->vcomp);
+      free(P->ccomp);
+      P->vcomp = P->ccomp = NULL;
+      build_components(P);
+      if (P->ncomp < 2) {
+         // One component is searched as a whole
+         free(P->vcomp);
+         free(P->ccomp);
+         P->vcomp = P->ccomp = NULL;
+      }
    }
+
+   if (P->vcomp == NULL)
+      return search(P);
+
+   for (P->comp = 0; P->comp < P->ncomp; P->comp++) {
+      const sres_t r = search(P);
+      if (r != S_SAT)
+         return r;
+   }
+
+   // The values of the components together
+   return check_all(P, -1) ? S_SAT : S_GIVEUP;
 }
 
 typedef struct {

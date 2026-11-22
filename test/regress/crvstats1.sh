@@ -2,17 +2,18 @@ set -xe
 
 nvc --std=2019 -a $TESTDIR/regress/crvstats1.sv -e crvstats1
 
-# The solver's choices do not depend on the engine setting, the statistics
-# or the order of the checks: values for a seed are the same
-nvc -r crvstats1 > base.txt
+# The solver's choices do not depend on the statistics or the order of the
+# checks, and dfs and auto are the same search: values for a seed are the
+# same.  Legacy is the search of release 0.18.0, which may choose other values
+NVC_CRV_ENGINE=auto nvc -r crvstats1 > base.txt
 grep -c '^[0-9]' base.txt | grep -qx 30
 
 NVC_CRV_ENGINE=legacy nvc -r crvstats1 > legacy.txt
 NVC_CRV_ENGINE=dfs nvc -r crvstats1 > dfs.txt
 NVC_CRV_ENGINE=auto nvc -r crvstats1 > auto.txt
-NVC_CRV_STATS=1 nvc -r crvstats1 > stats.txt 2> table.txt
-NVC_CRV_STATS=$PWD/stats.tsv nvc -r crvstats1 > stats2.txt
-cmp base.txt legacy.txt
+NVC_CRV_ENGINE=auto NVC_CRV_STATS=1 nvc -r crvstats1 > stats.txt 2> table.txt
+NVC_CRV_ENGINE=auto NVC_CRV_STATS=$PWD/stats.tsv nvc -r crvstats1 > stats2.txt
+grep -c '^[0-9]' legacy.txt | grep -qx 30
 cmp base.txt dfs.txt
 cmp base.txt auto.txt
 grep '^[0-9]' stats.txt | cmp - base.txt
