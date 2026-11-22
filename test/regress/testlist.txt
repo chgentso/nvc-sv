@@ -3024,6 +3024,7 @@ svsemblock1 verilog
 svcovcrosswith1 verilog
 svexternimport1 verilog
 svgenstruct1 verilog
+svgenstruct2 verilog
 svfwdmember1 verilog
 svcondstruct1 verilog
 svfwdclass1 verilog
