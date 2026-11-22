@@ -15003,6 +15003,8 @@ static vlog_node_t p_type_declaration(void)
          vlog_set_loc(c, &loc);
          vlog_symtab_put(symtab, c);
          APUSH(forward_classes, c);
+         forward_type_t fwd = { .id = id, .loc = loc };
+         APUSH(forward_types, fwd);
       }
 
       return NULL;
@@ -18680,6 +18682,13 @@ static vlog_node_t resolve_forward_class(ident_t name)
       }
    }
 
+   for (int i = 0; i < forward_types.count; i++) {
+      if (forward_types.items[i].id == name) {
+         forward_types.items[i] = forward_types.items[--forward_types.count];
+         i--;
+      }
+   }
+
    return d;
 }
 
@@ -18840,6 +18849,13 @@ static vlog_node_t p_generic_class(ident_t name, vlog_flags_t flags)
                forward_classes.items[j] = forward_classes.items[j + 1];
             ATRIM(forward_classes, forward_classes.count - 1);
             break;
+         }
+      }
+
+      for (int i = 0; i < forward_types.count; i++) {
+         if (forward_types.items[i].id == name) {
+            forward_types.items[i] = forward_types.items[--forward_types.count];
+            i--;
          }
       }
 
@@ -20595,8 +20611,16 @@ static void flush_deferred_bodies(bool end_of_unit)
    if (end_of_unit) {
       for (int i = 0; i < forward_classes.count; i++) {
          vlog_node_t c = forward_classes.items[i];
-         error_at(vlog_loc(c), "class %pQ has a forward declaration but is "
-                  "not declared", vlog_ident(c));
+         bool is_fwd_type = false;
+         for (int j = 0; j < forward_types.count; j++) {
+            if (forward_types.items[j].id == vlog_ident(c)) {
+               is_fwd_type = true;
+               break;
+            }
+         }
+         if (!is_fwd_type)
+            error_at(vlog_loc(c), "class %pQ has a forward declaration but is "
+                     "not declared", vlog_ident(c));
          vlog_clear_flags(c, VLOG_F_FORWARD);
       }
       ARESIZE(forward_classes, 0);
@@ -26494,6 +26518,26 @@ static vlog_node_t rewrite_forward_member_cb(vlog_node_t v, void *ctx)
    case V_PARAM_DECL:
    case V_LOCALPARAM:
       break;
+   default:
+      return v;
+   }
+
+   if (!vlog_has_type(decl))
+      return v;
+
+   vlog_node_t rtype = vlog_get_type(decl);
+   if (rtype == NULL)
+      return v;
+
+   switch (vlog_kind(rtype)) {
+   case V_STRUCT_DECL:
+   case V_UNION_DECL:
+   case V_CLASS_DECL:
+      break;
+   case V_DATA_TYPE:
+      if (vlog_subkind(rtype) == DT_VIRTUAL)
+         break;
+      return v;
    default:
       return v;
    }
