@@ -276,6 +276,7 @@ static void vlog_lower_dispatch(mir_unit_t *mu, object_t *obj);
 static void vlog_lower_crv_dispatch(mir_unit_t *mu, object_t *obj);
 static mir_value_t vlog_lower_randomize(vlog_gen_t *g, vlog_node_t v);
 static mir_value_t vlog_lower_std_randomize(vlog_gen_t *g, vlog_node_t v);
+static void vlog_lower_unchecked_randomize(vlog_gen_t *g, vlog_node_t v);
 static mir_value_t vlog_lower_crv_mode(vlog_gen_t *g, vlog_node_t v);
 static mir_value_t vlog_crv_to_offset(vlog_gen_t *g, mir_value_t value);
 static mir_value_t vlog_crv_from_offset(vlog_gen_t *g, mir_value_t value,
@@ -28483,6 +28484,26 @@ static mir_value_t vlog_lower_randomize(vlog_gen_t *g, vlog_node_t v)
    return mir_build_load(g->mu, result);
 }
 
+static void vlog_lower_unchecked_randomize(vlog_gen_t *g, vlog_node_t v)
+{
+   // A call whose result is not looked at: a failure is easy to miss, so
+   // say so (18.6.1)
+
+   mir_value_t ok = vlog_lower_rvalue(g, v);
+
+   mir_block_t fail_bb = mir_add_block(g->mu);
+   mir_block_t done_bb = mir_add_block(g->mu);
+
+   mir_build_cond(g->mu, vlog_lower_test(g, ok), done_bb, fail_bb);
+
+   mir_set_cursor(g->mu, fail_bb, MIR_APPEND);
+   vlog_report_warning(g, v, "randomize() failed and the result is not "
+                       "checked");
+   mir_build_jump(g->mu, done_bb);
+
+   mir_set_cursor(g->mu, done_bb, MIR_APPEND);
+}
+
 static mir_value_t vlog_lower_std_randomize(vlog_gen_t *g, vlog_node_t v)
 {
    mir_value_t ctx = CRV0(g, CRV_OP_BEGIN);
@@ -30349,13 +30370,20 @@ static bool vlog_lower_one_stmt(vlog_gen_t *g, vlog_node_t s, gen_stack_t *gs)
 
    switch (vlog_kind(s)) {
    case V_METHOD_CALL:
-      vlog_lower_method_call(g, s);
+      if (vlog_subkind(s) == V_METHOD_RANDOMIZE)
+         vlog_lower_unchecked_randomize(g, s);
+      else
+         vlog_lower_method_call(g, s);
       break;
    case V_MEMBER_REF:
       vlog_lower_rvalue(g, s);
       break;
    case V_VOID_CALL:
-      vlog_lower_rvalue(g, vlog_value(s));
+      if (vlog_kind(vlog_value(s)) == V_METHOD_CALL
+          && vlog_subkind(vlog_value(s)) == V_METHOD_RANDOMIZE)
+         vlog_lower_unchecked_randomize(g, vlog_value(s));
+      else
+         vlog_lower_rvalue(g, vlog_value(s));
       break;
    case V_SUPER_CALL:
       vlog_lower_super_call(g, s);

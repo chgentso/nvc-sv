@@ -3102,3 +3102,4 @@ svcrvequiv1 verilog
 svcrvsumwith2 verilog
 svcrvstaticcons1 verilog
 vlog_udiv64 verilog
+svcrvunchecked1 verilog,gold
