@@ -26438,6 +26438,57 @@ static void vlog_crv_store_struct_array(vlog_gen_t *g, mir_value_t this,
    mir_set_cursor(g->mu, done_bb, MIR_APPEND);
 }
 
+static void vlog_crv_constrain_wide_enum(vlog_gen_t *g, mir_value_t ctx,
+                                         mir_value_t obj,
+                                         const mir_value_t *cvars,
+                                         const mir_value_t *ckeys,
+                                         const mir_value_t *ccurs,
+                                         unsigned nchunks,
+                                         const type_info_t *ti,
+                                         vlog_node_t etype)
+{
+   // Restrict a >64-bit enum variable to the exact multi-chunk values of its
+   // enum literals by narrowing each chunk's domain and requiring a full match
+
+   const int nnames = vlog_decls(etype);
+   if (nnames == 0)
+      return;
+
+   mir_value_t flags1 = vlog_crv_flags(g, 1, false);
+   mir_value_t any = MIR_NULL_VALUE;
+
+   for (int j = 0; j < nnames; j++) {
+      vlog_node_t en = vlog_decl(etype, j);
+      mir_value_t eval = vlog_lower_cast(g, ti->type,
+                                         vlog_lower_rvalue(g, vlog_value(en)));
+      mir_value_t all = MIR_NULL_VALUE;
+
+      for (unsigned c = 0; c < nchunks; c++) {
+         const unsigned cw = MIN(64, ti->size - c * 64);
+         mir_value_t cval = vlog_crv_w_chunk(g, eval, c);
+         CRV3(g, CRV_OP_VAR_DOMAIN, ctx, cvars[c], cval);
+
+         mir_value_t cflags = vlog_crv_flags(g, cw, false);
+         mir_value_t ref = CRV5(g, CRV_OP_REF, ctx, obj, ckeys[c], ccurs[c],
+                                cflags);
+         mir_value_t eq = CRV5(g, CRV_OP_BINARY, ctx, vlog_crv_int(g, CRV_EQ),
+                               ref, CRV3(g, CRV_OP_CONST, ctx, cval, cflags),
+                               flags1);
+         all = mir_is_null(all) ? eq
+            : CRV5(g, CRV_OP_BINARY, ctx, vlog_crv_int(g, CRV_LOG_AND),
+                   all, eq, flags1);
+      }
+
+      any = mir_is_null(any) ? all
+         : CRV5(g, CRV_OP_BINARY, ctx, vlog_crv_int(g, CRV_LOG_OR),
+                any, all, flags1);
+   }
+
+   if (!mir_is_null(any))
+      CRV4(g, CRV_OP_REQUIRE, ctx, any, vlog_crv_int(g, 0),
+           vlog_crv_int(g, 0));
+}
+
 static void vlog_crv_build_prop(vlog_gen_t *g, mir_value_t this, mir_value_t ctx,
                                 vlog_node_t class, vlog_node_t d)
 {
@@ -26608,10 +26659,31 @@ static void vlog_crv_build_prop(vlog_gen_t *g, mir_value_t this, mir_value_t ctx
       mir_value_t full = mir_build_load(
          g->mu, mir_build_link_var(g->mu, this,
                                    vlog_prop_name(g->crv_class, d), ti->type));
-      for (unsigned i = 0; i * 64 < ti->size; i++)
-         CRV6(g, CRV_OP_VAR, ctx, obj, vlog_crv_chunk_key(g, d, 0, i),
-              vlog_crv_w_chunk(g, full, i),
-              vlog_crv_flags(g, MIN(64, ti->size - i * 64), false), is_free);
+      const unsigned nchunks = (ti->size + 63) / 64;
+      mir_value_t *cvars LOCAL = xmalloc_array(nchunks, sizeof(mir_value_t));
+      mir_value_t *ckeys LOCAL = xmalloc_array(nchunks, sizeof(mir_value_t));
+      mir_value_t *ccurs LOCAL = xmalloc_array(nchunks, sizeof(mir_value_t));
+      for (unsigned i = 0; i < nchunks; i++) {
+         ckeys[i] = vlog_crv_chunk_key(g, d, 0, i);
+         ccurs[i] = vlog_crv_w_chunk(g, full, i);
+         cvars[i] = CRV6(g, CRV_OP_VAR, ctx, obj, ckeys[i], ccurs[i],
+                         vlog_crv_flags(g, MIN(64, ti->size - i * 64), false),
+                         is_free);
+      }
+
+      vlog_node_t type = vlog_get_type(vlog_type(d));
+      if (type != NULL && vlog_kind(type) == V_ENUM_DECL) {
+         mir_block_t enum_bb = mir_add_block(g->mu);
+         mir_block_t done_bb = mir_add_block(g->mu);
+         mir_build_cond(g->mu, mir_build_cmp(g->mu, MIR_CMP_NEQ, is_free,
+                                             vlog_crv_int(g, 0)),
+                        enum_bb, done_bb);
+         mir_set_cursor(g->mu, enum_bb, MIR_APPEND);
+         vlog_crv_constrain_wide_enum(g, ctx, obj, cvars, ckeys, ccurs,
+                                      nchunks, ti, type);
+         mir_build_jump(g->mu, done_bb);
+         mir_set_cursor(g->mu, done_bb, MIR_APPEND);
+      }
       return;
    }
 
@@ -27393,6 +27465,9 @@ static mir_value_t vlog_lower_std_randomize(vlog_gen_t *g, vlog_node_t v)
       }
 
       // A variable wider than 64 bits is solved as a vector of chunks
+      const unsigned nchunks = (ti->size + 63) / 64;
+      mir_value_t *ckeys LOCAL = xmalloc_array(nchunks, sizeof(mir_value_t));
+      mir_value_t *ccurs LOCAL = xmalloc_array(nchunks, sizeof(mir_value_t));
       for (int bit = 0; bit < ti->size; bit += 64) {
          const unsigned chunk = MIN(64, ti->size - bit);
          mir_value_t part = value;
@@ -27404,10 +27479,13 @@ static mir_value_t vlog_lower_std_randomize(vlog_gen_t *g, vlog_node_t v)
                                     amount);
          }
 
+         const unsigned cidx = bit / 64;
+         ckeys[cidx] = vlog_crv_key_n(g, decl, salt + cidx * 4096);
+         ccurs[cidx] = vlog_crv_to_offset(g, part);
+
          vars = xrealloc_array(vars, nvars + 1, sizeof(mir_value_t));
          vars[nvars++] = CRV6(g, CRV_OP_VAR, ctx, vlog_crv_int(g, 0),
-                              vlog_crv_key_n(g, decl, salt + (bit / 64) * 4096),
-                              vlog_crv_to_offset(g, part),
+                              ckeys[cidx], ccurs[cidx],
                               vlog_crv_flags(g, chunk, ti->size <= 64
                                              && mir_get_signed(g->mu, ti->type)),
                               vlog_crv_int(g, 1));
@@ -27425,6 +27503,12 @@ static mir_value_t vlog_lower_std_randomize(vlog_gen_t *g, vlog_node_t v)
             }
          }
       }
+
+      vlog_node_t dtype = vlog_get_type(vlog_type(decl));
+      if (ti->size > 64 && dtype != NULL && vlog_kind(dtype) == V_ENUM_DECL)
+         vlog_crv_constrain_wide_enum(g, ctx, vlog_crv_int(g, 0),
+                                      &vars[firstvar[i]], ckeys, ccurs,
+                                      nchunks, ti, dtype);
    }
    firstvar[nparams] = nvars;
 
