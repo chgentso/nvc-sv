@@ -3097,3 +3097,4 @@ crvgiveup1      shell
 crvsize1        shell
 crvreject1      shell
 crvdump1        shell
+vlog_constref2 verilog
