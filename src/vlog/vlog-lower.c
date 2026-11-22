@@ -25344,7 +25344,7 @@ static mir_value_t vlog_crv_binary(vlog_gen_t *g, vlog_node_t v)
    }
    else if (shift) {
       l = vlog_crv_expr(g, left, lw, ls);
-      r = vlog_crv_expr(g, right, lw, false);
+      r = vlog_crv_expr(g, right, MIN(MAX(rw, lw), 64), false);
       flags = vlog_crv_flags(g, lw, ls);
    }
    else {
