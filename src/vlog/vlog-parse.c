@@ -514,6 +514,34 @@ static bool is_process_name(void)
       && peek_reference() == NULL;
 }
 
+static bool is_mode_query(vlog_node_t prefix)
+{
+   // constraint_mode and rand_mode can be written without parentheses to
+   // read the mode of a constraint or a random variable
+
+   if (peek() != tID)
+      return false;
+
+   const ident_t id = peek_ident_nth(1);
+   const bool is_cons = id == ident_new("constraint_mode");
+   if (!is_cons && id != ident_new("rand_mode"))
+      return false;
+
+   while (vlog_kind(prefix) == V_BIT_SELECT)
+      prefix = vlog_value(prefix);
+
+   if ((vlog_kind(prefix) != V_REF && vlog_kind(prefix) != V_MEMBER_REF)
+       || !vlog_has_ref(prefix))
+      return false;
+
+   vlog_node_t decl = vlog_ref(prefix);
+   if (is_cons)
+      return vlog_kind(decl) == V_CONSTRAINT;
+   else
+      return vlog_kind(decl) == V_VAR_DECL
+         && (vlog_flags(decl) & (VLOG_F_RAND | VLOG_F_RANDC));
+}
+
 static bool is_rand_method(ident_t id)
 {
    return id == ident_new("randomize") || id == ident_new("rand_mode")
@@ -4048,6 +4076,7 @@ static vlog_node_t p_select(ident_t id)
          }
 
          if (peek_nth(2) == tLPAREN || is_array_method_call(prefix)
+             || is_mode_query(prefix)
              || (ptype != NULL && vlog_kind(ptype) == V_ENUM_DECL)
              || (ptype != NULL && vlog_kind(ptype) == V_DATA_TYPE
                  && vlog_subkind(ptype) == DT_STRING)
