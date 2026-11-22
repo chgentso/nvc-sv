@@ -28514,6 +28514,15 @@ static mir_value_t vlog_lower_randomize(vlog_gen_t *g, vlog_node_t v)
             fatal_at(vlog_loc(p), "sorry, this argument to randomize is not "
                      "supported");
 
+         vlog_node_t ptype = vlog_get_type(p);
+         if (ptype != NULL && vlog_kind(ptype) == V_CLASS_DECL)
+            fatal_at(vlog_loc(p), "sorry, an object handle as the argument of "
+                     "randomize is not supported");
+         else if (vlog_kind(p) == V_MEMBER_REF
+                  && vlog_kind(vlog_value(p)) != V_THIS)
+            fatal_at(vlog_loc(p), "sorry, a member of another object as the "
+                     "argument of randomize is not supported");
+
          CRV3(g, CRV_OP_LIST, ctx, vlog_crv_object(g, p),
               vlog_crv_key(g, vlog_ref(p)));
       }
