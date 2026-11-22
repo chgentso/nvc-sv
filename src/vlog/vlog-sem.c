@@ -22,6 +22,7 @@
 #include "hash.h"
 #include "ident.h"
 #include "mask.h"
+#include "option.h"
 #include "vlog/vlog-node.h"
 #include "vlog/vlog-number.h"
 #include "vlog/vlog-phase.h"
@@ -3084,7 +3085,8 @@ static void vlog_check_assoc_key(vlog_node_t aty, vlog_node_t expr,
    vlog_node_t key = vlog_assoc_key(aty);
    if (key != NULL && vlog_kind(key) == V_DATA_TYPE
        && vlog_subkind(key) == DT_STRING) {
-      if (!(mask & TM(DT_STRING)) && !vlog_is_string_literal(expr))
+      if (!(mask & TM(DT_STRING)) && !vlog_is_string_literal(expr)
+          && !(opt_get_int(OPT_RELAXED) && (mask & TM_INTEGRAL)))
          error_at(vlog_loc(expr), "%s of an associative array with a string "
                   "index must have type string", what);
    }

@@ -3041,3 +3041,4 @@ svrandmodearr1 verilog
 svfwdtypedef1 verilog
 svsizeenum1 verilog
 svsingleunit1 shell
+svassocstr1 shell

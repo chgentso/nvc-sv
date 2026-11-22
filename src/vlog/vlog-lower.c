@@ -16905,7 +16905,7 @@ static mir_value_t vlog_str_call(vlog_gen_t *g, const char *name,
 static mir_value_t vlog_str_arg(vlog_gen_t *g, vlog_node_t v)
 {
    mir_type_t t_str = mir_uarray_type(g->mu, 1, mir_char_type(g->mu));
-   return vlog_lower_with_context(g, v, t_str);
+   return vlog_lower_cast(g, t_str, vlog_lower_with_context(g, v, t_str));
 }
 
 static mir_value_t vlog_str_int_arg(vlog_gen_t *g, vlog_node_t v,
