@@ -158,6 +158,7 @@ typedef struct _elab_ctx {
    hash_t           *modcache;
    ghash_t          *gencache;
    hash_t           *gencheck;
+   hash_t           *genids;
    hash_t           *mracache;
    hash_t           *vucache;
    const elab_vunit_pending_t *pending;
@@ -1880,6 +1881,7 @@ static void elab_inherit_context(elab_ctx_t *ctx, const elab_ctx_t *parent)
    ctx->modcache = parent->modcache;
    ctx->gencache = parent->gencache;
    ctx->gencheck = parent->gencheck;
+   ctx->genids   = parent->genids;
    ctx->mracache = parent->mracache;
    ctx->vucache  = parent->vucache;
    ctx->iface_conns = parent->iface_conns;
@@ -5772,6 +5774,15 @@ static void elab_verilog_gen_block(vlog_node_t tmpl, vlog_node_t genvar,
    else {
       ident_t id2 = ident_prefix(cacheable ? ctx->cloned : ctx->dotted,
                                  one_body ? vlog_ident(v) : id, '%');
+
+      // The branches of a conditional generate construct may have the
+      // same name and more than one of them has a body when the
+      // enclosing body is shared by the iterations of a loop
+      void *count = hash_get(ctx->genids, id2);
+      hash_put(ctx->genids, id2, (void *)((uintptr_t)count + 1));
+      if (count != NULL)
+         id2 = ident_sprintf("%s#%u", istr(id2), (unsigned)(uintptr_t)count);
+
       vlog_set_instance_scope(NULL);
       body = vlog_new_instance(v, NULL, id2);
       if (shared)
@@ -10138,6 +10149,7 @@ tree_t elab(object_t **top, int ntop, jit_t *jit, unit_registry_t *ur,
       .modcache  = hash_new(16),
       .gencache  = ghash_new(16, elab_hash_gen_key, elab_cmp_gen_key),
       .gencheck  = hash_new(16),
+      .genids    = hash_new(16),
       .mracache  = hash_new(16),
       .vucache   = hash_new(16),
       .iface_conns = &iface_conns,
@@ -10173,6 +10185,7 @@ tree_t elab(object_t **top, int ntop, jit_t *jit, unit_registry_t *ur,
    hash_free(ctx.modcache);
    ghash_free(ctx.gencache);
    hash_free(ctx.gencheck);
+   hash_free(ctx.genids);
    hash_free(ctx.mracache);
    hash_free(ctx.vucache);
    ACLEAR(iface_conns);

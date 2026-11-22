@@ -5,7 +5,7 @@ set -xe
 
 for t in vlog_genshare1 vlog_genshare2 vlog_genshare3 vlog_genshare4 \
          vlog_genshare6 vlog_genshare7 vlog_genshare9 vlog_genshare11 \
-         vlog_genshare12; do
+         vlog_genshare12 vlog_genshare13; do
   nvc -a $TESTDIR/regress/$t.sv
   NVC_GEN_SHARE=off nvc -e $t -r 2>&1 | grep -v "^\*\* Debug:" > $t.off
   NVC_GEN_SHARE=on nvc -e $t -r 2>&1 | grep -v "^\*\* Debug:" > $t.on
