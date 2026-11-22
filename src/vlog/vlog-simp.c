@@ -158,7 +158,7 @@ static void build_sensitivity(vlog_node_t ctrl, vlog_node_t v, hset_t *set,
    case V_REF:
       {
          vlog_node_t d = vlog_ref(v);
-         if (hset_contains(set, d))
+         if (vlog_kind(d) == V_TYPE_DECL || hset_contains(set, d))
             break;
 
          hset_insert(set, d);
@@ -325,8 +325,20 @@ static void build_sensitivity(vlog_node_t ctrl, vlog_node_t v, hset_t *set,
       if (vlog_ident(v) == ident_new("$__defer"))
          break;   // The variable it changes is not read
       // Fall-through
-   case V_CONCAT:
    case V_SYS_FCALL:
+      if (vlog_ident(v) == ident_new("$bits")
+          || vlog_ident(v) == ident_new("$left")
+          || vlog_ident(v) == ident_new("$right")
+          || vlog_ident(v) == ident_new("$high")
+          || vlog_ident(v) == ident_new("$low")
+          || vlog_ident(v) == ident_new("$size")
+          || vlog_ident(v) == ident_new("$dimensions")
+          || vlog_ident(v) == ident_new("$unpacked_dimensions")
+          || vlog_ident(v) == ident_new("$increment")
+          || vlog_ident(v) == ident_new("$typename"))
+         break;   // Data type and array query functions do not read arguments
+      // Fall-through
+   case V_CONCAT:
    case V_METHOD_CALL:
       {
          const int nparams = vlog_params(v);
