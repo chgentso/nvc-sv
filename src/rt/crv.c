@@ -5565,19 +5565,73 @@ static sres_t solve_prob_timed(prob_t *P)
    return r;
 }
 
+// Sizes of the arrays that have been tried and have no solution for the
+// elements: not chosen again
+typedef struct {
+   unsigned *sizes;     // narrays per tuple
+   int       n, cap;
+} nogood_t;
+
+static bool nogood_has(const crv_t *c, const nogood_t *ng,
+                       const unsigned *sizes)
+{
+   for (int i = 0; i < ng->n; i++) {
+      bool same = true;
+      for (unsigned a = 0; a < c->narrays && same; a++) {
+         same = !c->arrays[a].size_rand
+            || ng->sizes[i * c->narrays + a] == sizes[a];
+      }
+      if (same)
+         return true;
+   }
+   return false;
+}
+
+static void nogood_add(const crv_t *c, nogood_t *ng, const unsigned *sizes)
+{
+   if (ng->n == ng->cap) {
+      ng->cap = ng->cap ? ng->cap * 2 : 8;
+      ng->sizes = xrealloc_array(ng->sizes, ng->cap * c->narrays,
+                                 sizeof(unsigned));
+   }
+   memcpy(ng->sizes + ng->n++ * c->narrays, sizes,
+          c->narrays * sizeof(unsigned));
+}
+
 static sres_t solve_once(crv_t *c, const bool *active, sol_t *out)
 {
    unsigned *sizes = NEW(unsigned, c->narrays);
    bool rs = false, gave_up = false;
+   int nrs = 0;
    for (unsigned a = 0; a < c->narrays; a++) {
       sizes[a] = c->arrays[a].len;
       rs |= c->arrays[a].size_rand;
+      nrs += c->arrays[a].size_rand;
    }
 
-   for (int att = 0; att < (rs ? 4 : 1); att++) {
+   // The elements may have no solution for the sizes chosen first: later
+   // attempts leave those out
+   const bool legacy = crv_engine() == CRV_ENGINE_LEGACY;
+   const int attempts = !rs ? 1 : legacy ? 4 : 16;
+   nogood_t ng = { 0 };
+   sres_t result = S_UNSAT;
+
+   for (int att = 0; att < attempts; att++) {
       if (rs) {
          prob_t *P1 = prob_build_timed(c, 1, sizes, active);
-         const sres_t r = solve_prob_timed(P1);
+         sres_t r = S_SAT;
+         if (!legacy && nrs == 1) {
+            for (int i = 0; i < ng.n && r == S_SAT; i++) {
+               for (unsigned a = 0; a < c->narrays; a++) {
+                  if (c->arrays[a].size_rand
+                      && !var_remove(P1, P1->nsc + a,
+                                     ng.sizes[i * c->narrays + a]))
+                     r = S_UNSAT;
+               }
+            }
+         }
+         if (r == S_SAT)
+            r = solve_prob_timed(P1);
          if (debug_level() && r != S_SAT)
             fprintf(stderr, "crv: size problem result %d work %"PRIi64" budget "
                     "%"PRIi64" oob %d nv %d ncons %d\n", r, P1->work,
@@ -5595,6 +5649,8 @@ static sres_t solve_once(crv_t *c, const bool *active, sol_t *out)
             gave_up = true;
             continue;
          }
+         else if (!legacy && nogood_has(c, &ng, sizes))
+            continue;
       }
 
       prob_t *P2 = prob_build_timed(c, 2, sizes, active);
@@ -5608,16 +5664,21 @@ static sres_t solve_once(crv_t *c, const bool *active, sol_t *out)
          P2->vals = NULL;
          P2->ebase = NULL;
          prob_free(P2);
+         free(ng.sizes);
          return S_SAT;
       }
       prob_free(P2);
       gave_up |= r == S_GIVEUP;
       if (!rs && r == S_UNSAT)
          break;
+      else if (r == S_UNSAT && !legacy)
+         nogood_add(c, &ng, sizes);
    }
 
+   free(ng.sizes);
    free(sizes);
-   return gave_up ? S_GIVEUP : S_UNSAT;
+   result = gave_up ? S_GIVEUP : S_UNSAT;
+   return result;
 }
 
 static void commit(crv_t *c, const sol_t *s)

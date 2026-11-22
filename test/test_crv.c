@@ -942,6 +942,44 @@ START_TEST(test_array_sum)
 }
 END_TEST
 
+// The elements decide which sizes are possible: with 8 bit elements below 50
+// a sum of 200 needs five of them.  Sizes that have no solution for the
+// elements are not tried again
+START_TEST(test_array_size_elements)
+{
+   const crv_engine_t saved = crv_engine();
+   crv_set_engine(CRV_ENGINE_AUTO);
+   crv_seed(66);
+   for (int i = 0; i < 300; i++) {
+      crv_t *c = crv_new();
+      crv_array_t a = crv_array(c, 8, false, 0, true, true);
+      crv_node_t size = crv_array_size(c, a);
+      crv_require(c, crv_binary(c, CRV_GE, size, crv_const(c, 1, 32, true),
+                                1, false), false, 1);
+      crv_require(c, crv_binary(c, CRV_LE, size, crv_const(c, 10, 32, true),
+                                1, false), false, 2);
+      crv_require(c, crv_binary(c, CRV_EQ, crv_array_sum(c, a, 8, false),
+                                crv_const(c, 200, 8, false), 1, false),
+                  false, 3);
+      crv_node_t idx = crv_index(c);
+      crv_foreach(c, a, idx, crv_binary(
+                     c, CRV_LT, crv_array_elem(c, a, idx),
+                     crv_const(c, 50, 8, false), 1, false), false);
+      ck_assert_msg(crv_solve(c), "call %d: no solution", i);
+
+      unsigned sum = 0;
+      for (unsigned k = 0; k < crv_array_len(c, a); k++) {
+         ck_assert(crv_array_value(c, a, k) < 50);
+         sum += crv_array_value(c, a, k);
+      }
+      ck_assert_int_eq(sum & 255, 200);
+      crv_free(c);
+   }
+
+   crv_set_engine(saved);
+}
+END_TEST
+
 // A long chain of additions, as the sum of a method with a clause is lowered:
 // propagated by its terms, in every engine
 START_TEST(test_sum_chain)
@@ -3050,6 +3088,7 @@ Suite *get_crv_tests(void)
    tcase_add_test(tc, test_array_fixed);
    tcase_add_test(tc, test_array_dynamic);
    tcase_add_test(tc, test_array_sum);
+   tcase_add_test(tc, test_array_size_elements);
    tcase_add_test(tc, test_sum_chain);
    tcase_add_test(tc, test_engine_default);
    tcase_add_loop_test(tc, test_engine_env, 0, 6);

@@ -3094,3 +3094,4 @@ crvstats1       shell
 crvdist1        shell
 crvdist2        shell
 crvgiveup1      shell
+crvsize1        shell
