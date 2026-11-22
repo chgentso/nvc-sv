@@ -633,6 +633,82 @@ START_TEST(test_unique)
 }
 END_TEST
 
+// Large unique sets are propagated by the values that have been taken:
+// a set built from a permutation always has a solution, and one with one
+// member too many for its values has none
+START_TEST(test_unique_large)
+{
+   static const crv_engine_t engines[] = { CRV_ENGINE_LEGACY, CRV_ENGINE_AUTO };
+   const crv_engine_t saved = crv_engine();
+   trng_t rng = { 77 };
+
+   for (size_t e = 0; e < ARRAY_LEN(engines); e++) {
+      crv_set_engine(engines[e]);
+      crv_seed(81 + e);
+
+      for (int trial = 0; trial < 150; trial++) {
+         const int n = 8 + trng_below(&rng, 40);
+         crv_t *c = crv_new();
+         crv_var_t v[48];
+         crv_node_t nodes[48];
+         int64_t lo[48], hi[48];
+         int perm[48];
+         for (int i = 0; i < n; i++)
+            perm[i] = i * 2;
+         for (int i = n - 1; i > 0; i--) {
+            const int j = trng_below(&rng, i + 1);
+            const int t = perm[i];
+            perm[i] = perm[j];
+            perm[j] = t;
+         }
+
+         for (int i = 0; i < n; i++) {
+            // A range round the value of a hidden solution
+            const int slack = trial % 3 == 0 ? 0 : trng_below(&rng, 6);
+            lo[i] = MAX(0, perm[i] - (int)trng_below(&rng, slack + 1));
+            hi[i] = perm[i] + trng_below(&rng, slack + 1);
+            v[i] = crv_var(c, 8, false, 0);
+            nodes[i] = crv_var_ref(c, v[i]);
+            crv_node_t in = crv_binary(
+               c, CRV_LOG_AND,
+               crv_binary(c, CRV_GE, nodes[i], crv_const(c, lo[i], 8, false),
+                          1, false),
+               crv_binary(c, CRV_LE, nodes[i], crv_const(c, hi[i], 8, false),
+                          1, false), 1, false);
+            crv_require(c, in, false, 1);
+         }
+         crv_unique(c, nodes, n);
+
+         ck_assert_msg(crv_solve(c), "engine %zu trial %d n %d: no solution",
+                       e, trial, n);
+         for (int i = 0; i < n; i++) {
+            const int64_t x = crv_value(c, v[i]);
+            ck_assert(x >= lo[i] && x <= hi[i]);
+            for (int j = 0; j < i; j++)
+               ck_assert_int_ne(x, crv_value(c, v[j]));
+         }
+         crv_free(c);
+      }
+
+      // Nine members and eight values
+      crv_t *c = crv_new();
+      crv_node_t nodes[9];
+      for (int i = 0; i < 9; i++) {
+         crv_var_t x = crv_var(c, 8, false, 0);
+         nodes[i] = crv_var_ref(c, x);
+         crv_require(c, crv_binary(c, CRV_LT, nodes[i],
+                                   crv_const(c, 8, 8, false), 1, false),
+                     false, 1);
+      }
+      crv_unique(c, nodes, 9);
+      ck_assert_int_eq(crv_solve2(c), CRV_UNSAT);
+      crv_free(c);
+   }
+
+   crv_set_engine(saved);
+}
+END_TEST
+
 START_TEST(test_randc)
 {
    // Every value of a 4 bit variable once before any repeats, also with a
@@ -2880,6 +2956,7 @@ Suite *get_crv_tests(void)
    tcase_add_test(tc, test_solve_before);
    tcase_add_test(tc, test_soft);
    tcase_add_test(tc, test_unique);
+   tcase_add_test(tc, test_unique_large);
    tcase_add_test(tc, test_randc);
    tcase_add_test(tc, test_seed);
    tcase_add_test(tc, test_array_fixed);

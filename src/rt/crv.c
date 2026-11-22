@@ -1588,6 +1588,14 @@ typedef struct {
    int      *varr;        // Array that a variable is an element of or -1
    i128     *tlo, *thi;   // Sum of the lower and the upper bounds
    i128     *maxw;        // No element is wider than this
+   // A unique set of variables, a hash of the values that have been taken
+   struct uhash_s { i128 *key; int *occ; unsigned mask; } *uh;
+   bool     *ufast;       // Per constraint: propagated by the hash
+   int      *uvar;        // Variable of each member of the unique sets
+   i128     *uval;        // Value taken, if the member is in the hash
+   int      *uslot, *ucons;
+   int      *uvstart, *uvlist;   // Sets that each variable is in
+   bool      root;        // Propagating the problem before the search
    chain_t  *chain;
    int       nchain, cchain;
    int      *chain_of;    // Chain headed by a node or -1: NULL without any
@@ -1991,6 +1999,20 @@ static void prob_free(prob_t *P)
       free(P->chain[i].dirty);
       free(P->chain[i].stack);
    }
+   if (P->uh != NULL) {
+      for (int i = 0; i < P->ncons; i++) {
+         free(P->uh[i].key);
+         free(P->uh[i].occ);
+      }
+   }
+   free(P->uh);
+   free(P->ufast);
+   free(P->uvar);
+   free(P->uval);
+   free(P->uslot);
+   free(P->ucons);
+   free(P->uvstart);
+   free(P->uvlist);
    free(P->chain);
    free(P->chain_of);
    free(P->cstart);
@@ -2688,6 +2710,7 @@ static void derive_domains(prob_t *P)
 // Mode 1 solves for the sizes of arrays with a random size, ignoring the
 // elements of those, mode 2 has all sizes known
 static void chain_setup(prob_t *P);
+static void unique_setup(prob_t *P);
 
 static prob_t *prob_build(crv_t *c, int mode, const unsigned *sizes,
                           const bool *active)
@@ -2906,6 +2929,7 @@ static prob_t *prob_build(crv_t *c, int mode, const unsigned *sizes,
       P->budget = dbg.budget;
 
    chain_setup(P);
+   unique_setup(P);
    return P;
 }
 
@@ -3140,8 +3164,14 @@ static void undo_to(prob_t *P, int mark)
 {
    while (P->ntrail > mark) {
       const trail_t *t = &P->trail[--P->ntrail];
-      if (t->var < 0)
-         P->uproc[-2 - t->var] = 0;
+      if (t->var < 0) {
+         const int u = -2 - t->var;
+         P->uproc[u] = 0;
+         if (P->uslot != NULL && P->uslot[u] >= 0) {
+            P->uh[P->ucons[u]].occ[P->uslot[u]] = 0;
+            P->uslot[u] = -1;
+         }
+      }
       else {
          sum_move(P, t->var, &P->vars[t->var].dom, &t->old);
          P->vars[t->var].dom = t->old;
@@ -4407,10 +4437,16 @@ static bool prop_unique(prob_t *P, const pcons_t *pc)
    return ok;
 }
 
+static bool prop_unique_fast(prob_t *P, int ci);
+
 static bool prop_cons(prob_t *P, const pcons_t *pc)
 {
-   if (pc->kind == C_UNIQUE)
+   if (pc->kind == C_UNIQUE) {
+      const int ci = pc - P->cons;
+      if (P->ufast != NULL && P->ufast[ci])
+         return prop_unique_fast(P, ci);
       return prop_unique(P, pc);
+   }
 
    for (int it = 0; it < 3; it++) {
       const uint64_t ch0 = P->changed;
@@ -4426,6 +4462,306 @@ static bool prop_cons(prob_t *P, const pcons_t *pc)
          break;
    }
    return true;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Large unique sets of variables
+//
+// The values that the assigned members have taken are kept in a hash, so
+// that an assignment costs a lookup instead of a pass over the set.  The
+// bounds of the others are moved off a value that is taken (bounds
+// consistency: a hole inside a domain is not removed), the values of a set
+// are chosen among those not taken, and before the search the intervals
+// that are full (Hall intervals) are removed from the other members.
+
+#define UNIQ_FAST_MIN 8
+
+static inline unsigned uhash(i128 x)
+{
+   uint64_t k = (uint64_t)x ^ ((uint64_t)(x >> 64) * UINT64_C(0x9e3779b97f4a7c15));
+   k ^= k >> 33;
+   k *= UINT64_C(0xff51afd7ed558ccd);
+   k ^= k >> 33;
+   return (unsigned)k;
+}
+
+// The member that has taken a value, plus one, or zero
+static int uh_find(const struct uhash_s *h, i128 x)
+{
+   for (unsigned i = uhash(x) & h->mask;; i = (i + 1) & h->mask) {
+      if (h->occ[i] == 0)
+         return 0;
+      else if (h->key[i] == x)
+         return h->occ[i];
+   }
+}
+
+// The variable that a member of a unique set is, or -1.  Conversions to a
+// wider type do not make two values equal that were not.  The type of the
+// variable and of the member are returned: all members must have the same.
+static int unique_member_var(const prob_t *P, int n, unsigned *shape)
+{
+   const node_t *top = &P->c->nodes[n];
+   const node_t *nd = top;
+   while (nd->kind == N_CAST && P->c->nodes[nd->a].width <= nd->width)
+      nd = &P->c->nodes[nd->a];
+
+   int var = -1;
+   if (nd->kind == N_VAR)
+      var = nd->aux;
+   else if (nd->kind == N_AELEM && P->ebase[nd->aux] >= 0) {
+      const node_t *in = &P->c->nodes[nd->a];
+      if (in->kind == N_CONST && in->val >= 0
+          && in->val < (int64_t)P->sizes[nd->aux])
+         var = P->ebase[nd->aux] + (int)in->val;
+   }
+
+   if (var >= 0 && nd->width <= 64 && top->width <= 64) {
+      *shape = nd->width | nd->sgn << 8 | top->width << 9 | top->sgn << 17;
+      return var;
+   }
+   return -1;
+}
+
+static void unique_setup(prob_t *P)
+{
+   if (P->legacy)
+      return;
+
+   for (int ci = 0; ci < P->ncons; ci++) {
+      const pcons_t *pc = &P->cons[ci];
+      if (pc->kind != C_UNIQUE || pc->unn < UNIQ_FAST_MIN)
+         continue;
+
+      bool all = true;
+      unsigned shape0 = 0, shape = 0;
+      for (int i = 0; i < pc->unn && all; i++) {
+         all = unique_member_var(P, P->un[pc->unstart + i], &shape) >= 0
+            && (i == 0 || shape == shape0);
+         shape0 = shape;
+      }
+      if (!all)
+         continue;
+
+      if (P->ufast == NULL) {
+         P->ufast = xcalloc(P->ncons);
+         P->uh = xcalloc(P->ncons * sizeof(struct uhash_s));
+         P->uvar = NEW(int, P->nun);
+         P->uval = NEW(i128, P->nun);
+         P->uslot = NEW(int, P->nun);
+         P->ucons = NEW(int, P->nun);
+         for (int i = 0; i < P->nun; i++) {
+            P->uvar[i] = -1;
+            P->uslot[i] = -1;
+         }
+      }
+
+      unsigned cap = 16;
+      while (cap < 2 * (unsigned)pc->unn)
+         cap *= 2;
+      P->ufast[ci] = true;
+      P->uh[ci].mask = cap - 1;
+      P->uh[ci].key = NEW(i128, cap);
+      P->uh[ci].occ = xcalloc(cap * sizeof(int));
+      for (int i = 0; i < pc->unn; i++) {
+         P->uvar[pc->unstart + i] = unique_member_var(P, P->un[pc->unstart + i], &shape);
+         P->ucons[pc->unstart + i] = ci;
+      }
+   }
+
+   if (P->ufast == NULL)
+      return;
+
+   // Which sets each variable is in
+   P->uvstart = xcalloc((P->nv + 1) * sizeof(int));
+   for (int u = 0; u < P->nun; u++) {
+      if (P->uvar[u] >= 0)
+         P->uvstart[P->uvar[u] + 1]++;
+   }
+   for (int v = 0; v < P->nv; v++)
+      P->uvstart[v + 1] += P->uvstart[v];
+   P->uvlist = NEW(int, P->uvstart[P->nv]);
+   int *fill = NEW(int, P->nv);
+   memcpy(fill, P->uvstart, P->nv * sizeof(int));
+   for (int u = 0; u < P->nun; u++) {
+      if (P->uvar[u] >= 0)
+         P->uvlist[fill[P->uvar[u]]++] = P->ucons[u];
+   }
+   free(fill);
+}
+
+typedef struct { i128 lo, hi; int var; } uiv_t;
+
+static int uiv_by_hi(const void *a, const void *b)
+{
+   const uiv_t *x = a, *y = b;
+   return x->hi < y->hi ? -1 : x->hi > y->hi ? 1 : 0;
+}
+
+// Intervals that have as many members inside as they have values
+// are full: the other members cannot start or end in them
+static bool unique_hall(prob_t *P, const pcons_t *pc)
+{
+   const int cnt = pc->unn;
+   const amark_t mark = arena_mark(&P->tmp);
+   uiv_t *iv = arena_alloc(&P->tmp, cnt * sizeof(uiv_t));
+   i128 *los = arena_alloc(&P->tmp, cnt * sizeof(i128));
+   bool ok = true;
+
+   for (int round = 0; round < 4 && ok; round++) {
+      const uint64_t ch0 = P->changed;
+      for (int i = 0; i < cnt; i++) {
+         const int v = P->uvar[pc->unstart + i];
+         iv[i] = (uiv_t){ P->vars[v].dom.lo, P->vars[v].dom.hi, v };
+         los[i] = iv[i].lo;
+      }
+      qsort(iv, cnt, sizeof(uiv_t), uiv_by_hi);
+      qsort(los, cnt, sizeof(i128), i128_cmp);
+
+      for (int a = 0; a < cnt && ok; a++) {
+         if (a > 0 && los[a] == los[a - 1])
+            continue;
+
+         const i128 L = los[a];
+         int inside = 0;
+         for (int b = 0; b < cnt && ok; b++) {
+            if (iv[b].lo < L)
+               continue;
+            inside++;
+            const i128 H = iv[b].hi;
+            if (b + 1 < cnt && iv[b + 1].hi == H)
+               continue;
+            else if (inside > H - L + 1)
+               ok = false;
+            else if (inside == H - L + 1) {
+               // Full: move the others out
+               for (int k = 0; k < cnt && ok; k++) {
+                  const dom_t *d = &P->vars[iv[k].var].dom;
+                  if (iv[k].lo >= L && iv[k].hi <= H)
+                     continue;
+                  else if (d->lo >= L && d->lo <= H)
+                     ok = var_clip(P, iv[k].var, H + 1, d->hi);
+                  else if (d->hi >= L && d->hi <= H)
+                     ok = var_clip(P, iv[k].var, d->lo, L - 1);
+               }
+            }
+         }
+      }
+
+      P->work += (int64_t)cnt;
+      if (P->changed == ch0)
+         break;
+   }
+
+   arena_reset(&P->tmp, mark);
+   return ok;
+}
+
+static bool prop_unique_fast(prob_t *P, int ci)
+{
+   const pcons_t *pc = &P->cons[ci];
+   struct uhash_s *h = &P->uh[ci];
+   const int cnt = pc->unn, base = pc->unstart;
+
+   for (int again = 1, it = 0; again && it < 8; it++) {
+      again = 0;
+
+      // Values taken now
+      for (int i = 0; i < cnt; i++) {
+         const int u = base + i;
+         const dom_t *d = &P->vars[P->uvar[u]].dom;
+         if (P->uproc[u] || d->lo != d->hi)
+            continue;
+
+         unsigned slot = uhash(d->lo) & h->mask;
+         while (h->occ[slot] != 0) {
+            if (h->key[slot] == d->lo)
+               return false;
+            slot = (slot + 1) & h->mask;
+         }
+         h->key[slot] = d->lo;
+         h->occ[slot] = i + 1;
+         P->uval[u] = d->lo;
+         P->uslot[u] = slot;
+         P->uproc[u] = 1;
+         const trail_t t = { -2 - u, { 0 } };
+         VEC_PUSH(P->trail, P->ntrail, P->ctrail, t);
+      }
+
+      // The others do not start or end on one
+      for (int i = 0; i < cnt; i++) {
+         const int v = P->uvar[base + i];
+         for (;;) {
+            const dom_t *d = &P->vars[v].dom;
+            if (d->lo == d->hi)
+               break;
+            else if (uh_find(h, d->lo)) {
+               if (!var_remove(P, v, d->lo))
+                  return false;
+            }
+            else if (uh_find(h, d->hi)) {
+               if (!var_remove(P, v, d->hi))
+                  return false;
+            }
+            else
+               break;
+         }
+
+         const dom_t *d = &P->vars[v].dom;
+         if (d->lo == d->hi && !P->uproc[base + i])
+            again = 1;
+      }
+
+      P->work += cnt / 4;
+   }
+
+   if (P->root && !unique_hall(P, pc))
+      return false;
+
+   return true;
+}
+
+// A value for a member that no member of its sets has taken
+static bool pick_untaken(prob_t *P, int v, i128 *out)
+{
+   const dom_t *d = &P->vars[v].dom;
+   const i128 n = dom_count(d, d->lo, d->hi);
+   bool taken = false;
+
+   for (int tries = 0; tries < 8; tries++) {
+      const i128 x = dom_nth(d, d->lo, d->hi, rnd_i128(n));
+      taken = false;
+      for (int k = P->uvstart[v]; k < P->uvstart[v + 1] && !taken; k++)
+         taken = uh_find(&P->uh[P->uvlist[k]], x) != 0;
+      if (!taken) {
+         *out = x;
+         return true;
+      }
+   }
+
+   if (n > 65536)
+      return false;
+
+   // Dense: list what is left
+   P->work += (int64_t)n / 8;
+   i128 *free_vals = NEW(i128, (size_t)n);
+   int nfree = 0;
+   for (int r = 0; r < dom_nr(d); r++) {
+      const range_t rg = dom_range(d, r);
+      for (i128 x = rg.lo; x <= rg.hi; x++) {
+         taken = false;
+         for (int k = P->uvstart[v]; k < P->uvstart[v + 1] && !taken; k++)
+            taken = uh_find(&P->uh[P->uvlist[k]], x) != 0;
+         if (!taken)
+            free_vals[nfree++] = x;
+      }
+   }
+
+   const bool ok = nfree > 0;
+   if (ok)
+      *out = free_vals[rnd_below(nfree)];
+   free(free_vals);
+   return ok;
 }
 
 // Sweeping up then down the constraints reaches the fixpoint of a chain of
@@ -4797,6 +5133,10 @@ static i128 pick_val(prob_t *P, int v)
    if (pv->pop >= 0 && pick_popcount(P, pv, &x))
       return x;
 
+   if (P->uvstart != NULL && P->uvstart[v] != P->uvstart[v + 1]
+       && pick_untaken(P, v, &x))
+      return x;
+
    i128 n = dom_count(d, d->lo, d->hi);
    if (pv->size && n > MAX_SIZE_CHOICES)
       n = 32;
@@ -5147,7 +5487,10 @@ static sres_t solve_prob(prob_t *P)
    for (int ci = 0; ci < P->ncons; ci++)
       enqueue(P, ci);
 
-   if (!propagate(P))
+   P->root = true;
+   const bool root_ok = propagate(P);
+   P->root = false;
+   if (!root_ok)
       return P->oob ? S_GIVEUP : S_UNSAT;
 
    if (cur_stat != NULL)
