@@ -81,6 +81,124 @@ static void put_val(gen_t *s, cov_toks_t t)
    tb_cat(s->tb, "))");
 }
 
+typedef struct {
+   cov_toks_t lo, hi;
+} with_elem_t;
+
+static int with_span_end(const tokenq_t *t, int n, int i)
+{
+   // Index of the token after the bracketed group starting at i or -1
+
+   int depth = 0;
+   for (; i < n; i++) {
+      switch (t[i].token) {
+      case tLPAREN: case tLSQUARE: case tLBRACE: depth++; break;
+      case tRPAREN: case tRSQUARE: case tRBRACE:
+         if (--depth == 0)
+            return i + 1;
+         break;
+      default: break;
+      }
+   }
+
+   return -1;
+}
+
+static bool with_inside_parse(cov_toks_t w, bool *neg, with_elem_t **out,
+                              int *nout)
+{
+   // Recognise [ ! ] [ ( ] item inside { list } [ ) ] where the list holds
+   // values and ranges which do not depend on item
+
+   const tokenq_t *t = w.t;
+   int first = 0, last = w.n;
+
+   *neg = false;
+   if (first < last && t[first].token == tBANG) {
+      *neg = true;
+      first++;
+   }
+
+   if (first < last && t[first].token == tLPAREN
+       && with_span_end(t, last, first) == last) {
+      first++;
+      last--;
+   }
+
+   static ident_t item_id;
+   if (item_id == NULL)
+      item_id = ident_new("item");
+
+   if (last - first < 5 || t[first].token != tID
+       || t[first].lval.ident != item_id || t[first + 1].token != tINSIDE
+       || t[first + 2].token != tLBRACE || t[last - 1].token != tRBRACE
+       || with_span_end(t, last, first + 2) != last)
+      return false;
+
+   with_elem_t *elems = NULL;
+   int n = 0;
+
+   int i = first + 3;
+   while (i < last - 1) {
+      int j = i, depth = 0;
+      for (; j < last - 1; j++) {
+         const token_t tok = t[j].token;
+         if (tok == tLPAREN || tok == tLSQUARE || tok == tLBRACE)
+            depth++;
+         else if (tok == tRPAREN || tok == tRSQUARE || tok == tRBRACE)
+            depth--;
+         else if (depth == 0 && tok == tCOMMA)
+            break;
+      }
+
+      // Tokens [i, j) are one element
+      with_elem_t e = { { t + i, j - i }, { t + i, j - i } };
+      bool ok = j > i;
+      for (int k = i; ok && k < j; k++)
+         ok = !(t[k].token == tID && t[k].lval.ident == item_id)
+            && t[k].token != tQUESTION && t[k].token != tDOLLAR;
+
+      if (ok && t[i].token == tLSQUARE && t[j - 1].token == tRSQUARE) {
+         int colon = -1;
+         depth = 0;
+         for (int k = i + 1; k < j - 1; k++) {
+            const token_t tok = t[k].token;
+            if (tok == tLPAREN || tok == tLSQUARE || tok == tLBRACE)
+               depth++;
+            else if (tok == tRPAREN || tok == tRSQUARE || tok == tRBRACE)
+               depth--;
+            else if (depth == 0 && tok == tCOLON && colon < 0)
+               colon = k;
+         }
+
+         if (colon < 0 || colon == i + 1 || colon == j - 2)
+            ok = false;
+         else {
+            e.lo = (cov_toks_t){ t + i + 1, colon - i - 1 };
+            e.hi = (cov_toks_t){ t + colon + 1, j - colon - 2 };
+         }
+      }
+
+      if (!ok) {
+         free(elems);
+         return false;
+      }
+
+      elems = xrealloc_array(elems, n + 1, sizeof(with_elem_t));
+      elems[n++] = e;
+      i = j + 1;
+   }
+
+   if (n == 0) {
+      free(elems);
+      return false;
+   }
+
+   *out = elems;
+   *nout = n;
+   return true;
+}
+
 static void put_item(gen_t *s, const char *fn, const cov_item_t *it,
                      bool wildcard)
 {
@@ -242,7 +360,7 @@ static void gen_cp_init(gen_t *s, int i)
 
          // Only the values for which the with expression is true
          const cov_item_t *it = &(b->items[k]);
-         tb_cat(tb, "begin\nlongint __lo, __hi;\n__lo = ");
+         tb_cat(tb, "begin\nlongint __lo, __hi;\nlongint __ws[$];\n__lo = ");
          if (it->lo_dollar)
             tb_printf(tb, "h.__cp_mn[%d]", i);
          else {
@@ -260,8 +378,30 @@ static void gen_cp_init(gen_t *s, int i)
          }
          else
             tb_cat(tb, "__lo");
-         tb_cat(tb, ";\nfor (longint item = __lo; item <= __hi; "
-                "item = item + 1) if (");
+         tb_cat(tb, ";\n");
+
+         bool neg;
+         with_elem_t *elems;
+         int nelems;
+         if (with_inside_parse(b->with_expr, &neg, &elems, &nelems)) {
+            // The selected values are a range minus or intersected with
+            // some others, which is found without visiting every value
+            for (int e = 0; e < nelems; e++) {
+               tb_cat(tb, "__ws.push_back(longint'(");
+               put_slot(s, elems[e].lo);
+               tb_cat(tb, "));\n__ws.push_back(longint'(");
+               put_slot(s, elems[e].hi);
+               tb_cat(tb, "));\n");
+            }
+            tb_printf(tb, "h.__with_inside(__lo, __hi, __ws, %d);\nend\n",
+                      neg);
+            free(elems);
+            continue;
+         }
+
+         tb_printf(tb, "if (__hi - __lo > 65535) h.__with_big(\"%s.%s\");\n"
+                   "else for (longint item = __lo; item <= __hi; "
+                   "item = item + 1) if (", istr(cp->label), istr(b->name));
          put_slot(s, b->with_expr);
          tb_cat(tb, ") h.__item(item, item, 0);\nend\n");
       }
