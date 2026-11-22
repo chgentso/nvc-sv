@@ -18,6 +18,12 @@
 # in a call or fails to run.  A case marked xfail that does pass is reported
 # as XPASS: remove its mark.
 #
+# The time per call is the time the solver itself spends (graph to solution,
+# counted by NVC_CRV_STATS) for a case of fewer than 100000 calls and the
+# difference of two runs for the others, which are too fast for the
+# statistics to be left on.  NVC_CRV_ENGINE and the other switches in the
+# environment apply to the runs.
+#
 # Memory is capped with systemd-run when it is there, every run takes at most
 # 300 seconds.
 
@@ -25,6 +31,7 @@ ulimit -c 0
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 BUILD=
+SOLVER_BELOW=100000
 QUICK=0
 SLACK=1
 NAMES=()
@@ -86,6 +93,18 @@ while read -r name calls limit expect quick _; do
 
     fails=$(sed -n 's/^RES fails=\([0-9]*\)\/.*/\1/p' run1.log | head -1)
     per=$(python3 -c "print('%.2f' % (max(0.0, (($t2 - $t1) - ($t1 - $t0))) * 1e6 / max(1, $calls - 1)))")
+    if [ "$calls" -lt "$SOLVER_BELOW" ]; then
+        # The run time of a few calls also holds the interpreter running
+        # the code that builds the constraints and, after a few dozen
+        # calls, the compilation of it, which is longer than the solver
+        # for a big constraint.  The time of the solver itself is counted
+        # by NVC_CRV_STATS.
+        rm -f stats.tsv
+        NVC_CRV_STATS="$d/stats.tsv" "${CAP[@]}" timeout 300 "${NVC[@]}" -r top +N="$calls" > run2.log 2>&1
+        solver=$(awk -F'\t' '{ b += $(NF-1); s += $NF; c += $2 }
+                             END { if (c > 0) printf "%.2f", (b + s) / c }' stats.tsv 2>/dev/null)
+        [ -n "$solver" ] && per=$solver
+    fi
     over=$(python3 -c "print(1 if $per > $limit * $SLACK else 0)")
 
     broken=0
