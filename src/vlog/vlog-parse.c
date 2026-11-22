@@ -7884,7 +7884,7 @@ static vlog_node_t p_primary(void)
       vlog_set_loc(head, CURRENT_LOC);
       break;
    case tTICK:
-      head = p_assignment_pattern_expression(NULL);
+      head = p_assignment_pattern_expression(arm_type);
       break;
    case tVLOCAL:
       head = p_local_scope_select();
@@ -12382,15 +12382,13 @@ static vlog_node_t p_jump_statement(void)
          else
             vlog_set_ref(v, subr);
 
-         if (peek() == tTAGGED || peek() == tTICK) {
+         if (peek() != tSEMI) {
             vlog_node_t rtype = NULL;
             if (subr != NULL && vlog_kind(subr) == V_FUNC_DECL
                 && vlog_has_type(subr))
                rtype = vlog_get_type(vlog_type(subr));
             vlog_set_value(v, p_expression_of_type(rtype));
          }
-         else if (peek() != tSEMI)
-            vlog_set_value(v, p_expression());
 
          consume(tSEMI);
 
