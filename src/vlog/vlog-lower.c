@@ -24571,6 +24571,11 @@ static void vlog_crv_wide_expr(vlog_gen_t *g, vlog_node_t v, unsigned width,
             break;
          }
 
+         if (vlog_crv_is_array_ref(base) || vlog_crv_is_assoc_ref(base))
+            fatal_at(vlog_loc(v), "sorry, an element of an array of values "
+                     "wider than 64 bits is only supported in a constraint "
+                     "for a fixed size array and a constant index");
+
          const unsigned bw = vlog_crv_width(g, base);
          vlog_crv_wide_expr(g, base, bw, false, out);
 
