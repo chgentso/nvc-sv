@@ -3111,3 +3111,4 @@ svcrvlateprop1 verilog
 svcrvmodeq1 verilog
 svcrvlocalcall1 verilog
 svcrvsuper1 verilog
+svcrvdistzero1 verilog

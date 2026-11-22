@@ -25154,6 +25154,9 @@ static mir_value_t vlog_crv_dist(vlog_gen_t *g, vlog_node_t v)
 
    mir_value_t dist = CRV1(g, CRV_OP_DIST_NEW, g->crv_ctx);
 
+   mir_type_t t_offset = mir_offset_type(g->mu);
+   mir_value_t total = vlog_crv_int(g, 0);
+
    const int nparams = vlog_params(v);
    for (int i = 0; i < nparams; i++) {
       vlog_node_t item = vlog_param(v, i);
@@ -25179,10 +25182,35 @@ static mir_value_t vlog_crv_dist(vlog_gen_t *g, vlog_node_t v)
       CRV5(g, vlog_subkind(item) == V_DIST_PER_VALUE
            ? CRV_OP_DIST_PER_VALUE : CRV_OP_DIST_PER_RANGE,
            g->crv_ctx, dist, lo, hi, weight);
+
+      total = mir_build_add(g->mu, t_offset, total, weight);
    }
 
+   // A distribution in which every weight is zero has no preference
+   mir_value_t result = mir_add_var(g->mu, t_offset, MIR_NULL_STAMP,
+                                    ident_uniq("crv_dist"), MIR_VAR_TEMP);
+
+   mir_block_t weighted_bb = mir_add_block(g->mu);
+   mir_block_t flat_bb = mir_add_block(g->mu);
+   mir_block_t done_bb = mir_add_block(g->mu);
+
+   mir_build_cond(g->mu, mir_build_cmp(g->mu, MIR_CMP_EQ, total,
+                                       vlog_crv_int(g, 0)),
+                  flat_bb, weighted_bb);
+
+   mir_set_cursor(g->mu, weighted_bb, MIR_APPEND);
    mir_value_t node = vlog_crv_expr(g, arg, width, is_signed);
-   return CRV3(g, CRV_OP_DIST, g->crv_ctx, node, dist);
+   mir_build_store(g->mu, result, CRV3(g, CRV_OP_DIST, g->crv_ctx, node, dist));
+   mir_build_jump(g->mu, done_bb);
+
+   mir_set_cursor(g->mu, flat_bb, MIR_APPEND);
+   mir_build_store(g->mu, result,
+                   CRV3(g, CRV_OP_CONST, g->crv_ctx, vlog_crv_int(g, 1),
+                        vlog_crv_flags(g, 1, false)));
+   mir_build_jump(g->mu, done_bb);
+
+   mir_set_cursor(g->mu, done_bb, MIR_APPEND);
+   return mir_build_load(g->mu, result);
 }
 
 static mir_value_t vlog_crv_binary(vlog_gen_t *g, vlog_node_t v)
