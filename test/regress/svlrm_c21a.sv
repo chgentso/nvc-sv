@@ -3,7 +3,7 @@ module svlrm_c21a;
   // Self-checking test. Expected values: IEEE 1800-2017 21.2.1 (display format specifiers; %d pads
   // to the width of the type unless a field width or 0 is given, %h/%b pad with zeros to the full
   // width, %s of a vector prints its bytes, %m prints the scope name, real formats follow C printf),
-  // 21.2.1.3 (no `0` flag: `%05d`, `%03d` pad decimals with spaces; explicit widths on %b are minimum
+  // 21.2.1.3 (`%05d`, `%03d` fill a decimal with zeros as C does; explicit widths on %b are minimum
   // widths), 21.3.1 (a $fopen with a mode returns a descriptor with bit 31 set), 21.3.2 ($fflush,
   // $fclose), 21.3.4 ($fgets returns the number of characters read, $fgetc, $ungetc, $ftell, $fseek,
   // $rewind), 21.3.4.3 ($fscanf/$sscanf: %d %s %f %h %b %o %c, white space skipping, sign, `_` in
@@ -60,7 +60,7 @@ module svlrm_c21a;
     $fclose(fd);
     ck(lines.size() == 4, "four lines in the file");
     ck(lines[0] == "hello 42\n", "line 1");
-    ck(lines[1] == "no newline str|   12|34   |   56\n", "line 2");
+    ck(lines[1] == "no newline str|   12|34   |00056\n", "line 2");
     ck(lines[2] == "ab 1010 777 A\n", "line 3");
     ck(lines[3] == "10 3.141590 1.234500e+03 0.0001\n", "line 4");
     fd = $fopen("c21a_out.txt", "r");
@@ -93,7 +93,7 @@ module svlrm_c21a;
     s = $sformatf("%0d %0h %0b %0o", 255, 255, 5, 64); ck(s == "255 ff 101 100", "%0d %0h %0b %0o");
     s = $sformatf("%%|%5%|"); ck(starts(s, "%|"), "%% prints a percent sign");
     s = $sformatf("%t", 5ns); ck(s == {rep(" ", 19), "5"}, "%t default: 5 units in width 20");
-    s = $sformatf("%d|%3d|%-3d|%03d", 5, 5, 5, 5); ck(s == {rep(" ", 10), "5|  5|5  |  5"}, "%d widths");
+    s = $sformatf("%d|%3d|%-3d|%03d", 5, 5, 5, 5); ck(s == {rep(" ", 10), "5|  5|5  |005"}, "%d widths");
     s = $sformatf("%h|%H|%X", 8'hab, 8'hab, 8'hab); ck(s == "ab|ab|ab", "%h in any case");
     s = $sformatf("%b|%0b|%8b", 5, 5, 5); ck(s == {rep("0", 29), "101|101|00000101"}, "%b widths");
     s = $sformatf("%s", 32'h41424344); ck(s == "ABCD", "%s of vector");

@@ -225,12 +225,20 @@ static void format_radix(ostream_t *out, vpiHandle arg, char radix, int fwidth,
             const int len = strlen(argval.value.str);
 
             if (fwidth >= 0) {
-               // A leading zero in the field width does not zero fill
-               // a decimal number: the field is padded with spaces
-               // (21.2.1.3)
+               // A leading zero in the field width zero fills a decimal
+               // number after the sign as in C; a value with x or z bits
+               // is padded with spaces
+               const char *str = argval.value.str;
+               const bool zero = pad == '0' && radix == 'd'
+                  && strpbrk(str, "xXzZ") == NULL;
+               if (zero && str[0] == '-') {
+                  ostream_putc(out, '-');
+                  str++;
+               }
+
                for (int i = 0; i < fwidth - len; i++)
-                  ostream_putc(out, ' ');
-               ostream_puts(out, argval.value.str);
+                  ostream_putc(out, zero ? '0' : ' ');
+               ostream_puts(out, str);
             }
             else if (dmax > len)
                nvc_fprintf(out, "%*s", dmax, argval.value.str);

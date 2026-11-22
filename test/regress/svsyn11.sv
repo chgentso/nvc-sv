@@ -2,7 +2,7 @@
 // Expected values: IEEE 1800-2017 6.16 (string methods: len, substr, toupper, tolower, compare
 // (only the sign is defined), icompare, putc, getc, atoi, atohex, atobin, atoreal, itoa; string
 // comparison operators and concatenation), 21.2.1 (a field width in %5s, %-5s, %05d is a minimum
-// width: decimal values are padded with spaces, %x of a 32-bit value has 8 digits), 21.3.3
+// width: a decimal value is filled with zeros after a leading 0 in the width, %x of a 32-bit value has 8 digits), 21.3.3
 // ($sscanf, %t with the default time format in a 1 ns time unit), 11.4.12.1 (replication).
 // All values are derived by hand.
 `timescale 1ns/1ns
@@ -139,7 +139,7 @@ module svsyn11;
       csv = {csv, i == 0 ? "" : ";", cel};
     end
     cks("csv", csv, "0;1;4;9;16");
-    cks("sformatf", $sformatf("%5s|%-5s|%05d|%x|%0t", "ab", "cd", 42, 255, 10ns), "   ab|cd   |   42|000000ff|10");
+    cks("sformatf", $sformatf("%5s|%-5s|%05d|%x|%0t", "ab", "cd", 42, 255, 10ns), "   ab|cd   |00042|000000ff|10");
     begin
       int a, b; string name;
       automatic int n = $sscanf("x=12 y=34 tag", "x=%d y=%d %s", a, b, name);
