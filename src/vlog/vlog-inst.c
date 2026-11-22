@@ -1012,6 +1012,35 @@ vlog_node_t vlog_generate_instance(vlog_node_t v, vlog_node_t genvar,
    return copy;
 }
 
+vlog_node_t vlog_generate_shared(vlog_node_t v, vlog_node_t genvar,
+                                 ident_t prefix)
+{
+   // One copy of the block for every iteration of the loop where the
+   // genvar is a variable of the block set when each iteration is created
+
+   assert(vlog_kind(v) == V_GEN_BLOCK);
+   assert(vlog_kind(genvar) == V_GENVAR_DECL);
+
+   vlog_node_t copy = vlog_copy(v, copy_generate_pred, v);
+
+   vlog_node_t gv = vlog_new(V_GENVAR_DECL);
+   vlog_set_ident(gv, vlog_ident(genvar));
+   vlog_set_type(gv, vlog_type(genvar));
+   vlog_set_loc(gv, vlog_loc(genvar));
+
+   vlog_add_decl(copy, gv);   // Must be last, see VLOG_F_GEN_SHARED
+
+   rename_tf_decls(copy, ident_prefix(prefix, vlog_ident(v), '.'));
+
+   hash_t *map = hash_new(4);
+   hash_put(map, genvar, gv);
+
+   vlog_rewrite(copy, NULL, fixup_refs_cb, map);
+
+   hash_free(map);
+   return copy;
+}
+
 static mir_context_t *fold_mir = NULL;
 static jit_t         *fold_jit = NULL;
 

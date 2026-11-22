@@ -1,0 +1,8 @@
+vlog_genshare6.g[0].blk 0 0
+vlog_genshare6.g[1].blk 1 1
+vlog_genshare6.g[2].blk 2 0
+vlog_genshare6.g[3].blk 3 1
+vlog_genshare6.g[1].odd 1
+vlog_genshare6.g[3].odd 3
+vlog_genshare6.g[3] 3 changed 0
+vlog_genshare6.g[2] 2 changed 1

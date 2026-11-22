@@ -47,6 +47,11 @@ void vlog_set_instance_scope(ident_t dotted);
 bool vlog_bind_is_selective(vlog_node_t mod);
 vlog_node_t vlog_generate_instance(vlog_node_t v, vlog_node_t genvar,
                                    int32_t value, ident_t prefix);
+vlog_node_t vlog_generate_shared(vlog_node_t v, vlog_node_t genvar,
+                                 ident_t prefix);
+typedef vlog_node_t (*vlog_find_mod_fn_t)(vlog_node_t list, void *ctx);
+bool vlog_gen_shareable(vlog_node_t loop, vlog_find_mod_fn_t find_mod,
+                        void *find_ctx, const char **why, vlog_node_t *where);
 void vlog_fold(vlog_node_t mod, mir_context_t *mc, jit_t *j);
 void vlog_lint(vlog_node_t unit);
 void vlog_lint_partial(vlog_node_t unit);

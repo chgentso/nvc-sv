@@ -1696,11 +1696,24 @@ bool is_implicit_data_type(vlog_node_t v)
    return vlog_kind(v) == V_DATA_TYPE && vlog_subkind(v) == DT_IMPLICIT;
 }
 
-static bool vlog_is_const_arith(vlog_node_t v)
+bool vlog_is_const_arith(vlog_node_t v)
 {
    // A constant index may be computed from parameters and genvars
 
    switch (vlog_kind(v)) {
+   case V_REF:
+      if (vlog_has_ref(v)) {
+         // The genvar of a generate block shared by the iterations of a
+         // loop and the local parameters computed from it are only known
+         // when the iteration is created but cannot change after that
+         vlog_node_t d = vlog_ref(v);
+         if (vlog_kind(d) == V_GENVAR_DECL)
+            return true;
+         else if (vlog_kind(d) == V_LOCALPARAM && vlog_has_value(d)
+                  && vlog_ranges(d) == 0 && !vlog_is_const(d))
+            return vlog_is_const_arith(vlog_value(d));
+      }
+      return vlog_is_const(v);
    case V_BINARY:
       switch (vlog_subkind(v)) {
       case V_BINARY_PLUS:
@@ -1716,6 +1729,14 @@ static bool vlog_is_const_arith(vlog_node_t v)
       case V_BINARY_AND:
       case V_BINARY_OR:
       case V_BINARY_XOR:
+      case V_BINARY_LOG_EQ:
+      case V_BINARY_LOG_NEQ:
+      case V_BINARY_LOG_OR:
+      case V_BINARY_LOG_AND:
+      case V_BINARY_LT:
+      case V_BINARY_GT:
+      case V_BINARY_LEQ:
+      case V_BINARY_GEQ:
          return vlog_is_const_arith(vlog_left(v))
             && vlog_is_const_arith(vlog_right(v));
       default:
@@ -1725,10 +1746,16 @@ static bool vlog_is_const_arith(vlog_node_t v)
       switch (vlog_subkind(v)) {
       case V_UNARY_NEG:
       case V_UNARY_IDENTITY:
+      case V_UNARY_NOT:
+      case V_UNARY_BITNEG:
          return vlog_is_const_arith(vlog_value(v));
       default:
          return false;
       }
+   case V_COND_EXPR:
+      return vlog_is_const_arith(vlog_value(v))
+         && vlog_is_const_arith(vlog_left(v))
+         && vlog_is_const_arith(vlog_right(v));
    case V_SYS_FCALL:
       switch (vlog_subkind(v)) {
       case V_SYSTF_CLOG2:
@@ -1763,6 +1790,7 @@ vlog_node_t vlog_longest_static_prefix(vlog_node_t v)
       case V_LOCALPARAM:
       case V_LOCAL_DECL:
       case V_ENUM_NAME:
+      case V_GENVAR_DECL:   // Of a generate block shared by iterations
          return NULL;
       default:
          return v;

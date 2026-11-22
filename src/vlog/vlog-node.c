@@ -994,6 +994,30 @@ void vlog_visit_only(vlog_node_t v, vlog_visit_fn_t fn, void *context,
    object_visit(&(v->object), &ctx);
 }
 
+void vlog_visit_prepost(vlog_node_t v, vlog_visit_fn_t pre,
+                        vlog_visit_fn_t post, void *context)
+{
+   assert(v != NULL);
+
+   object_visit_ctx_t ctx = {
+      .count      = 0,
+      .postorder  = (object_visit_fn_t)post,
+      .preorder   = (object_visit_fn_t)pre,
+      .context    = context,
+      .kind       = V_LAST_NODE_KIND,
+      .tag        = OBJECT_TAG_VLOG,
+      .generation = object_next_generation(),
+      .deep       = false
+   };
+
+   object_visit(&(v->object), &ctx);
+}
+
+bool vlog_kind_has_type(vlog_kind_t kind)
+{
+   return !!(has_map[kind] & I_TYPE);
+}
+
 vlog_node_t vlog_rewrite(vlog_node_t v, vlog_rewrite_pre_fn_t pre_fn,
                          vlog_rewrite_post_fn_t post_fn, void *context)
 {

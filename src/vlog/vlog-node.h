@@ -624,6 +624,9 @@ typedef enum {
    VLOG_F_NAMED_DISABLE = VLOG_F_VIRTUAL,  // On a block named by a disable
    VLOG_F_UNPACKED_VIEW = VLOG_F_FILL, // On a packed union declared unpacked
    VLOG_F_GEN_BODY = VLOG_F_FILL,    // On the body of a generate block
+   VLOG_F_GEN_SHARED = VLOG_F_RAND,  // On a generate body shared by the
+                                     // iterations of a loop: the genvar is
+                                     // its last declaration
    VLOG_F_REALVIEW = VLOG_F_ONESTEP, // On a real member of a union held as bits
    VLOG_F_REFVAR = VLOG_F_TIMELIT,   // On a class property holding a reference
    VLOG_F_SVA_LOCAL = VLOG_F_SOFT,   // On a local variable of a sequence
@@ -795,6 +798,9 @@ static inline int64_t vlog_time_unit_value(int64_t code)
 typedef void (*vlog_visit_fn_t)(vlog_node_t v, void *context);
 
 void vlog_visit(vlog_node_t v, vlog_visit_fn_t fn, void *context);
+void vlog_visit_prepost(vlog_node_t v, vlog_visit_fn_t pre,
+                        vlog_visit_fn_t post, void *context);
+bool vlog_kind_has_type(vlog_kind_t kind);
 void vlog_visit_only(vlog_node_t v, vlog_visit_fn_t fn, void *context,
                      vlog_kind_t kind);
 

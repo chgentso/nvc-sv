@@ -11027,6 +11027,7 @@ static mir_value_t vlog_lower_trigger(vlog_gen_t *g, vlog_node_t v)
          case V_PARAM_DECL:
          case V_LOCALPARAM:
          case V_ENUM_NAME:
+         case V_GENVAR_DECL:   // Of a generate block shared by iterations
             return MIR_NULL_VALUE;
          default:
             CANNOT_HANDLE(v);
@@ -30049,7 +30050,28 @@ static void vlog_lower_driver(vlog_gen_t *g, vlog_node_t v)
 
       mir_value_t count = vlog_kind(prefix) == V_REF
          ? mir_const(g->mu, t_offset, total_size) : target.count;
-      mir_build_drive_signal(g->mu, nets, count);
+
+      int64_t cval;
+      if (mir_get_const(g->mu, count, &cval)) {
+         if (cval > 0)
+            mir_build_drive_signal(g->mu, nets, count);
+      }
+      else {
+         // An index computed from the genvar of a shared generate block
+         // may be out of range and then nothing is driven
+         mir_block_t drive_bb = mir_add_block(g->mu);
+         mir_block_t skip_bb = mir_add_block(g->mu);
+
+         mir_value_t zero = mir_const(g->mu, t_offset, 0);
+         mir_value_t test = mir_build_cmp(g->mu, MIR_CMP_GT, count, zero);
+         mir_build_cond(g->mu, test, drive_bb, skip_bb);
+
+         mir_set_cursor(g->mu, drive_bb, MIR_APPEND);
+         mir_build_drive_signal(g->mu, nets, count);
+         mir_build_jump(g->mu, skip_bb);
+
+         mir_set_cursor(g->mu, skip_bb, MIR_APPEND);
+      }
    }
 }
 
@@ -30310,6 +30332,7 @@ static void vlog_lower_sensitivity(vlog_gen_t *g, vlog_node_t v)
          case V_STRUCT_DECL:
          case V_UNION_DECL:
          case V_ENUM_DECL:
+         case V_GENVAR_DECL:   // Of a generate block shared by iterations
             break;
          default:
             CANNOT_HANDLE(v);
@@ -33963,6 +33986,21 @@ void vlog_lower_instance(mir_context_t *mc, vlog_node_t body, ident_t parent,
       }
    }
 
+   if (vlog_flags(body) & VLOG_F_GEN_SHARED) {
+      // The value of the genvar is passed by the block of each iteration
+      // before any declaration which may use it is initialised
+      vlog_node_t d = vlog_decl(body, vlog_ndecls - 1);
+      assert(vlog_kind(d) == V_GENVAR_DECL);
+
+      const type_info_t *ti = vlog_type_info(&g, vlog_type(d));
+      mir_value_t p = mir_add_param(mu, ti->type, MIR_NULL_STAMP,
+                                    vlog_ident(d));
+      mir_value_t var = mir_add_var(mu, ti->type, MIR_NULL_STAMP,
+                                    vlog_ident(d), 0);
+      mir_build_store(mu, var, p);
+      mir_put_object(mu, d, var);
+   }
+
    if (cover_enabled(cover, COVER_MASK_STMT | COVER_MASK_BRANCH)
        && !cover_is_null(cscope)) {
       // The counters of the instance are passed by the block which
@@ -34049,7 +34087,8 @@ void vlog_lower_instance(mir_context_t *mc, vlog_node_t body, ident_t parent,
          }
          break;
       case V_GENVAR_DECL:
-         vlog_lower_genvar_decl(&g, d);
+         if (mir_is_null(mir_search_object(mu, d, &hops)))
+            vlog_lower_genvar_decl(&g, d);
          break;
       case V_LOCALPARAM:
          break;  // Always inlined for now
@@ -34745,7 +34784,7 @@ void vlog_lower_block(mir_context_t *mc, ident_t parent, tree_t b)
    }
 
    mir_value_t *args LOCAL =
-      xmalloc_array(vlog_nports + 2, sizeof(mir_value_t));
+      xmalloc_array(vlog_nports + 3, sizeof(mir_value_t));
 
    if (mir_is_null(context))
       args[0] = mir_build_null(mu, mir_context_type(mu, qual));
@@ -34772,6 +34811,18 @@ void vlog_lower_block(mir_context_t *mc, ident_t parent, tree_t b)
       assert(hops == 0);
 
       args[nargs++] = nets;
+   }
+
+   if (body_kind == V_INST_BODY && (vlog_flags(body) & VLOG_F_GEN_SHARED)) {
+      // The value of the genvar for this iteration of the loop
+      assert(tree_genmaps(b) == 1);
+      const int64_t index = tree_ival(tree_value(tree_genmap(b, 0)));
+
+      vlog_node_t d = vlog_decl(body, vlog_ndecls - 1);
+      assert(vlog_kind(d) == V_GENVAR_DECL);
+
+      const type_info_t *ti = vlog_type_info(&g, vlog_type(d));
+      args[nargs++] = mir_const_vec(mu, ti->type, (uint32_t)index, 0);
    }
 
    mir_shape_t *bshape = mir_get_shape(mc, vlog_ident(body));

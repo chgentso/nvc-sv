@@ -32,6 +32,7 @@
 #include "jit/jit-priv.h"
 #include "jit/jit.h"
 #include "lib.h"
+#include "mir/mir-unit.h"
 #include "object.h"
 #include "option.h"
 #include "printf.h"
@@ -1370,6 +1371,61 @@ static c_sysFuncCall *build_sysFuncCall(vlog_node_t where, c_callback *callback,
    return call;
 }
 
+static jit_t *vpi_get_jit(vpi_context_t *c);
+
+static void *vpi_param_value_cb(jit_scalar_t *args, void *ctx)
+{
+   int64_t *value = ctx;
+   if (args[1].integer != 0)
+      return NULL;   // Has X or Z bits
+
+   *value = args[0].integer;
+   return value;
+}
+
+static bool vpi_shared_param_value(vlog_node_t v, c_abstractScope *scope,
+                                   int64_t *ival)
+{
+   // A local parameter of a generate block shared by the iterations of a
+   // loop may be computed from the genvar which is only known for each
+   // iteration of the loop
+
+   if (scope->rtscope == NULL || vlog_kind(scope->where) != V_INST_BODY
+       || !(vlog_flags(scope->where) & VLOG_F_GEN_SHARED)
+       || vlog_ranges(v) > 0 || !vlog_has_value(v))
+      return false;
+
+   const int width = vlog_width(v);
+   if (width == 0 || width > 64)
+      return false;
+
+   void *context = *mptr_get(scope->rtscope->privdata);
+   if (context == NULL)
+      return false;
+
+   jit_t *jit = vpi_get_jit(vpi_context());
+   mir_unit_t *thunk = vlog_lower_thunk(jit_get_mir(jit),
+                                        vlog_ident(scope->where),
+                                        vlog_value(v));
+
+   int64_t value;
+   const bool ok = jit_call_thunk2(jit, thunk, context,
+                                   vpi_param_value_cb, &value) != NULL;
+   mir_unit_free(thunk);
+
+   if (!ok)
+      return false;
+
+   if (width < 64 && vlog_is_signed(v)
+       && (value & (INT64_C(1) << (width - 1))))
+      value |= ~((INT64_C(1) << width) - 1);
+   else if (width < 64)
+      value &= (INT64_C(1) << width) - 1;
+
+   *ival = value;
+   return true;
+}
+
 static void build_parameter(vlog_node_t v, c_abstractScope *scope)
 {
    c_parameter *param = new_object(sizeof(c_parameter), vpiParameter);
@@ -1388,6 +1444,8 @@ static void build_parameter(vlog_node_t v, c_abstractScope *scope)
          break;
       default:
          if (vlog_get_const(value, &ival))
+            param->value = &(build_int_constant(ival)->expr.object);
+         else if (vpi_shared_param_value(v, scope, &ival))
             param->value = &(build_int_constant(ival)->expr.object);
          break;
       }
@@ -1785,6 +1843,7 @@ static void vpi_lazy_decls(c_vpiObject *obj)
          if (!(vlog_flags(v) & VLOG_F_SPECPARAM) || vlog_kind(v) != V_LOCALPARAM)
             build_parameter(v, s);
          break;
+
       default:
          break;
       }

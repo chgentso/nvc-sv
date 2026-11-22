@@ -5604,7 +5604,10 @@ static void elab_verilog_vhdl_instance_list(vlog_node_t v, tree_t entity,
 
 static void elab_gen_check_cb(vlog_node_t v, void *ctx)
 {
-   bool *ok = ctx;
+   vlog_node_t *found = ctx;
+
+   if (*found != NULL)
+      return;
 
    switch (vlog_kind(v)) {
    case V_HIER_REF:
@@ -5615,18 +5618,49 @@ static void elab_gen_check_cb(vlog_node_t v, void *ctx)
    case V_CLASS_DECL:
    case V_CONSTRUCTOR:
    case V_DPI_EXPORT:
-      *ok = false;
+      *found = v;
       break;
    default:
       break;
    }
 }
 
-static bool elab_gen_cacheable(vlog_node_t tmpl, const elab_ctx_t *ctx)
+typedef enum {
+   GEN_SHARE_OFF,       // Lower every iteration of a loop separately
+   GEN_SHARE_ON,        // Share the body of loops which allow it
+   GEN_SHARE_FORCE,     // Share every loop which has a cacheable body
+   GEN_SHARE_ITER,      // Runtime genvar but one body per iteration
+} gen_share_mode_t;
+
+static gen_share_mode_t elab_gen_share_mode(void)
+{
+   static int mode = -1;
+   if (mode == -1) {
+      const char *env = getenv("NVC_GEN_SHARE");
+      if (env == NULL || strcmp(env, "off") == 0)
+         mode = GEN_SHARE_OFF;
+      else if (strcmp(env, "on") == 0)
+         mode = GEN_SHARE_ON;
+      else if (strcmp(env, "force") == 0)
+         mode = GEN_SHARE_FORCE;
+      else if (strcmp(env, "iter") == 0)
+         mode = GEN_SHARE_ITER;
+      else
+         fatal("invalid value '%s' for NVC_GEN_SHARE: expected off, on, "
+               "force or iter", env);
+   }
+
+   return mode;
+}
+
+static bool elab_gen_cacheable(vlog_node_t tmpl, const elab_ctx_t *ctx,
+                               vlog_node_t *where)
 {
    // A generate block may share its body with the same block of other
    // instances of the enclosing body if nothing in it depends on where
    // it is in the hierarchy
+
+   *where = NULL;
 
    if (ctx->cloned == NULL || ctx->cover != NULL)
       return false;
@@ -5637,38 +5671,51 @@ static bool elab_gen_cacheable(vlog_node_t tmpl, const elab_ctx_t *ctx)
          return false;
    }
 
-   void *cached = hash_get(ctx->gencheck, tmpl);
-   if (cached != NULL)
-      return cached == (void *)1;
+   vlog_node_t cached = hash_get(ctx->gencheck, tmpl);
+   if (cached != NULL) {
+      *where = cached == tmpl ? NULL : cached;
+      return cached == tmpl;
+   }
 
-   bool ok = true;
-   vlog_visit(tmpl, elab_gen_check_cb, &ok);
+   vlog_node_t found = NULL;
+   vlog_visit(tmpl, elab_gen_check_cb, &found);
 
-   hash_put(ctx->gencheck, tmpl, ok ? (void *)1 : (void *)2);
-   return ok;
+   hash_put(ctx->gencheck, tmpl, found ?: tmpl);
+   *where = found;
+   return found == NULL;
 }
 
 static void elab_verilog_gen_block(vlog_node_t tmpl, vlog_node_t genvar,
-                                   int32_t index, const elab_ctx_t *ctx)
+                                   int32_t index, bool shared,
+                                   const elab_ctx_t *ctx)
 {
    // Elaborate the block tmpl or, if genvar is not NULL, the iteration of
-   // a for-generate loop where genvar has the value index
+   // a for-generate loop where genvar has the value index.  If shared
+   // then the genvar is a variable of the body which is lowered once for
+   // all iterations.
+
+   const bool one_body = shared && elab_gen_share_mode() != GEN_SHARE_ITER;
 
    const elab_gen_key_t key = {
       .parent    = ctx->cloned,
       .block     = tmpl,
-      .index     = index,
-      .has_index = genvar != NULL,
+      .index     = one_body ? 0 : index,
+      .has_index = genvar != NULL && !one_body,
    };
 
    elab_gen_entry_t *ge = NULL;
-   const bool cacheable = elab_gen_cacheable(tmpl, ctx);
+   vlog_node_t unused;
+   const bool cacheable = shared || elab_gen_cacheable(tmpl, ctx, &unused);
    if (cacheable)
       ge = ghash_get(ctx->gencache, &key);
 
    vlog_node_t v;
    if (ge != NULL)
       v = ge->src;
+   else if (shared) {
+      v = vlog_generate_shared(tmpl, genvar, ctx->cloned);
+      vlog_fold(v, ctx->mir, ctx->jit);
+   }
    else if (genvar != NULL) {
       ident_t prefix = cacheable ? ctx->cloned : ctx->dotted;
       v = vlog_generate_instance(tmpl, genvar, index, prefix);
@@ -5678,6 +5725,8 @@ static void elab_verilog_gen_block(vlog_node_t tmpl, vlog_node_t genvar,
       v = tmpl;
 
    ident_t id = vlog_ident(v);
+   if (shared)
+      id = ident_sprintf("%s[%d]", istr(id), index);
 
    tree_t b = tree_new(T_BLOCK);
    tree_set_ident(b, id);
@@ -5722,9 +5771,11 @@ static void elab_verilog_gen_block(vlog_node_t tmpl, vlog_node_t genvar,
       body = ge->body;
    else {
       ident_t id2 = ident_prefix(cacheable ? ctx->cloned : ctx->dotted,
-                                 id, '%');
+                                 one_body ? vlog_ident(v) : id, '%');
       vlog_set_instance_scope(NULL);
       body = vlog_new_instance(v, NULL, id2);
+      if (shared)
+         vlog_set_flags(body, VLOG_F_GEN_SHARED);
       vlog_fold(body, ctx->mir, ctx->jit);
    }
 
@@ -5778,7 +5829,7 @@ static void elab_verilog_gen_block(vlog_node_t tmpl, vlog_node_t genvar,
    }
    else {
       wrap = tree_new(T_VERILOG);
-      tree_set_ident(wrap, id);
+      tree_set_ident(wrap, one_body ? vlog_ident(v) : id);
       tree_set_loc(wrap, vlog_loc(body));
       tree_set_vlog(wrap, body);
 
@@ -5811,6 +5862,23 @@ static void elab_verilog_gen_block(vlog_node_t tmpl, vlog_node_t genvar,
 
    ctx->stats->gen_scopes++;
 
+   if (shared) {
+      // The block function passes the value of the genvar to the body
+      tree_t map = tree_new(T_PARAM);
+      tree_set_subkind(map, P_POS);
+      tree_set_pos(map, 0);
+      tree_set_loc(map, tree_loc(b));
+
+      tree_t lit = tree_new(T_LITERAL);
+      tree_set_subkind(lit, L_INT);
+      tree_set_ival(lit, index);
+      tree_set_loc(lit, tree_loc(b));
+      tree_set_type(lit, std_type(NULL, STD_INTEGER));
+
+      tree_set_value(map, lit);
+      tree_add_genmap(b, map);
+   }
+
    hash_put(ctx->block_parents, b, ctx->out);
 
    new_ctx.cloned = vlog_ident(body);
@@ -5832,9 +5900,68 @@ static void elab_verilog_gen_block(vlog_node_t tmpl, vlog_node_t genvar,
 
 static void elab_verilog_block(vlog_node_t v, const elab_ctx_t *ctx)
 {
-   elab_verilog_gen_block(v, NULL, 0, ctx);
+   elab_verilog_gen_block(v, NULL, 0, false, ctx);
 }
 
+static vlog_node_t elab_gen_find_mod(vlog_node_t list, void *arg)
+{
+   const elab_ctx_t *ctx = arg;
+
+   if (ctx->config != NULL)
+      return NULL;   // May be bound to another module for each instance
+
+   ident_t qual;
+   object_t *obj = elab_find_instance_unit(list, ctx, &qual);
+   return obj != NULL ? vlog_from_object(obj) : NULL;
+}
+
+static bool elab_gen_share_loop(vlog_node_t v, const elab_ctx_t *ctx)
+{
+   // True if the body of for-generate loop v is lowered once for all
+   // iterations: the decision depends only on v and is made once
+
+   const gen_share_mode_t mode = elab_gen_share_mode();
+   if (mode == GEN_SHARE_OFF)
+      return false;
+
+   const bool verbose = getenv("NVC_GEN_SHARE_VERBOSE") != NULL;
+
+   vlog_node_t s0 = vlog_stmt(v, 0), where = NULL;
+   if (!elab_gen_cacheable(s0, ctx, &where)) {
+      if (verbose && where != NULL && hash_get(ctx->gencheck, v) == NULL) {
+         diag_t *d = diag_new(DIAG_NOTE, vlog_loc(v));
+         diag_printf(d, "generate block %s is lowered for each iteration",
+                     istr(vlog_ident(s0)));
+         diag_hint(d, vlog_loc(where), "%s", vlog_kind_str(vlog_kind(where)));
+         diag_emit(d);
+         hash_put(ctx->gencheck, v, (void *)2);
+      }
+      return false;
+   }
+
+   void *cached = hash_get(ctx->gencheck, v);
+   if (cached != NULL)
+      return cached == (void *)1;
+
+   const char *why = NULL;
+   bool ok = vlog_gen_shareable(v, elab_gen_find_mod, (void *)ctx,
+                                &why, &where);
+
+   if (!ok && mode == GEN_SHARE_FORCE && strcmp(why, "genvar type") != 0
+       && strcmp(why, "loop initialisation") != 0)
+      ok = true;
+
+   if (!ok && verbose) {
+      diag_t *d = diag_new(DIAG_NOTE, vlog_loc(v));
+      diag_printf(d, "generate block %s is lowered for each iteration",
+                  istr(vlog_ident(s0)));
+      diag_hint(d, vlog_loc(where), "%s", why);
+      diag_emit(d);
+   }
+
+   hash_put(ctx->gencheck, v, ok ? (void *)1 : (void *)2);
+   return ok;
+}
 
 static void *elab_verilog_for_generate_test_cb(jit_scalar_t *args, void *ctx)
 {
@@ -5904,7 +6031,11 @@ static void elab_verilog_for_generate(vlog_node_t v, const elab_ctx_t *ctx)
    vlog_node_t s0 = vlog_stmt(v, 0);
    assert(vlog_kind(s0) == V_GEN_BLOCK);
 
-   ctx->stats->for_copy++;
+   const bool shared = elab_gen_share_loop(v, ctx);
+   if (shared)
+      ctx->stats->for_shared++;
+   else
+      ctx->stats->for_copy++;
 
    while (jit_call_thunk2(ctx->jit, test, context,
                           elab_verilog_for_generate_test_cb, NULL)) {
@@ -5912,7 +6043,7 @@ static void elab_verilog_for_generate(vlog_node_t v, const elab_ctx_t *ctx)
       jit_call_thunk2(ctx->jit, get_var, context,
                       elab_verilog_for_generate_index_cb, &index);
 
-      elab_verilog_gen_block(s0, genvar, index, ctx);
+      elab_verilog_gen_block(s0, genvar, index, shared, ctx);
 
       jit_call_thunk2(ctx->jit, step, context, NULL, NULL);
    }
@@ -8567,7 +8698,201 @@ static vlog_node_t elab_hier_ref_generic(tree_t b, ident_t id, const loc_t *loc)
    return NULL;
 }
 
-static vlog_node_t elab_hier_ref_param(tree_t b, ident_t id)
+static vlog_node_t elab_shared_body(tree_t b)
+{
+   // The body of a generate block shared by the iterations of a loop
+
+   if (tree_kind(b) != T_BLOCK || tree_decls(b) == 0
+       || tree_genmaps(b) != 1)
+      return NULL;
+
+   tree_t h = tree_decl(b, 0);
+   if (tree_kind(h) != T_HIER || !tree_has_ref(h)
+       || tree_kind(tree_ref(h)) != T_VERILOG)
+      return NULL;
+
+   vlog_node_t body = tree_vlog(tree_ref(h));
+   if (vlog_kind(body) != V_INST_BODY
+       || !(vlog_flags(body) & VLOG_F_GEN_SHARED))
+      return NULL;
+
+   return body;
+}
+
+typedef struct {
+   hash_t *values;    // Genvar of a shared body to its value
+   hash_t *depends;   // Local parameter to whether it uses one of those
+   hash_t *done;      // Local parameter to its value with them substituted
+} elab_gen_subst_t;
+
+typedef struct {
+   elab_gen_subst_t *gs;
+   bool              found;
+} elab_gen_depends_t;
+
+static bool elab_gen_lp_depends(elab_gen_subst_t *gs, vlog_node_t lp);
+
+static void elab_gen_depends_cb(vlog_node_t v, void *arg)
+{
+   elab_gen_depends_t *gd = arg;
+
+   if (vlog_kind(v) != V_REF || !vlog_has_ref(v))
+      return;
+
+   vlog_node_t d = vlog_ref(v);
+   if (hash_get(gd->gs->values, d) != NULL)
+      gd->found = true;
+   else if (vlog_kind(d) == V_LOCALPARAM && elab_gen_lp_depends(gd->gs, d))
+      gd->found = true;
+}
+
+static bool elab_gen_lp_depends(elab_gen_subst_t *gs, vlog_node_t lp)
+{
+   // True if the value of a local parameter uses the genvar of a loop
+   // being substituted, directly or through another local parameter
+
+   void *memo = hash_get(gs->depends, lp);
+   if (memo != NULL)
+      return memo == (void *)1;
+   else if (!vlog_has_value(lp))
+      return false;
+
+   hash_put(gs->depends, lp, (void *)2);
+
+   elab_gen_depends_t gd = { .gs = gs };
+   vlog_visit(vlog_value(lp), elab_gen_depends_cb, &gd);
+
+   hash_put(gs->depends, lp, gd.found ? (void *)1 : (void *)2);
+   return gd.found;
+}
+
+static bool elab_gen_has_subst(elab_gen_subst_t *gs, vlog_node_t v)
+{
+   elab_gen_depends_t gd = { .gs = gs };
+   vlog_visit(v, elab_gen_depends_cb, &gd);
+   return gd.found;
+}
+
+static vlog_node_t elab_gen_subst_value(vlog_node_t v, elab_gen_subst_t *gs)
+{
+   // Rebuild expression v with the genvars replaced by their values, or
+   // return NULL if it uses them in an expression which is not supported
+
+   if (!elab_gen_has_subst(gs, v))
+      return v;
+
+   vlog_node_t new = NULL;
+   switch (vlog_kind(v)) {
+   case V_REF:
+      {
+         vlog_node_t d = vlog_ref(v);
+         if ((new = hash_get(gs->values, d)) != NULL)
+            return new;
+         else if ((new = hash_get(gs->done, d)) != NULL)
+            return new;
+
+         new = elab_gen_subst_value(vlog_value(d), gs);
+         if (new != NULL)
+            hash_put(gs->done, d, new);
+         return new;
+      }
+   case V_BINARY:
+      {
+         vlog_node_t left = elab_gen_subst_value(vlog_left(v), gs);
+         vlog_node_t right = elab_gen_subst_value(vlog_right(v), gs);
+         if (left == NULL || right == NULL)
+            return NULL;
+
+         new = vlog_new(V_BINARY);
+         vlog_set_subkind(new, vlog_subkind(v));
+         vlog_set_left(new, left);
+         vlog_set_right(new, right);
+      }
+      break;
+   case V_UNARY:
+      {
+         vlog_node_t value = elab_gen_subst_value(vlog_value(v), gs);
+         if (value == NULL)
+            return NULL;
+
+         new = vlog_new(V_UNARY);
+         vlog_set_subkind(new, vlog_subkind(v));
+         vlog_set_value(new, value);
+      }
+      break;
+   case V_COND_EXPR:
+      {
+         vlog_node_t value = elab_gen_subst_value(vlog_value(v), gs);
+         vlog_node_t left = elab_gen_subst_value(vlog_left(v), gs);
+         vlog_node_t right = elab_gen_subst_value(vlog_right(v), gs);
+         if (value == NULL || left == NULL || right == NULL)
+            return NULL;
+
+         new = vlog_new(V_COND_EXPR);
+         vlog_set_value(new, value);
+         vlog_set_left(new, left);
+         vlog_set_right(new, right);
+      }
+      break;
+   default:
+      return NULL;
+   }
+
+   vlog_set_loc(new, vlog_loc(v));
+   return new;
+}
+
+static vlog_node_t elab_gen_param_value(tree_t b, vlog_node_t d,
+                                        hash_t *parents)
+{
+   // The value of a parameter of an iteration of a loop whose body is
+   // shared may depend on the genvar of this or an enclosing loop and
+   // these are substituted by their values for the iteration
+
+   elab_gen_subst_t gs = {};
+
+   for (tree_t it = b; it != NULL; it = hash_get(parents, it)) {
+      vlog_node_t body = elab_shared_body(it);
+      if (body == NULL)
+         continue;
+
+      if (gs.values == NULL) {
+         gs.values = hash_new(4);
+         gs.depends = hash_new(16);
+         gs.done = hash_new(16);
+      }
+
+      const int ndecls = vlog_decls(body);
+      vlog_node_t gv = vlog_decl(body, ndecls - 1);
+      assert(vlog_kind(gv) == V_GENVAR_DECL);
+
+      vlog_node_t num = vlog_new(V_NUMBER);
+      vlog_set_loc(num, vlog_loc(gv));
+      vlog_set_number(num, number_from_int(
+                         tree_ival(tree_value(tree_genmap(it, 0)))));
+      hash_put(gs.values, gv, num);
+   }
+
+   if (gs.values == NULL)
+      return vlog_value(d);
+
+   vlog_node_t result;
+   if (vlog_kind(d) == V_GENVAR_DECL)
+      result = hash_get(gs.values, d);
+   else if ((result = elab_gen_subst_value(vlog_value(d), &gs)) == NULL) {
+      error_at(vlog_loc(d), "sorry, the value of this parameter of a "
+               "generate block shared by the iterations of a loop cannot "
+               "be found from outside the block");
+      result = vlog_value(d);
+   }
+
+   hash_free(gs.values);
+   hash_free(gs.depends);
+   hash_free(gs.done);
+   return result;
+}
+
+static vlog_node_t elab_hier_ref_param(tree_t b, ident_t id, hash_t *parents)
 {
    // The value of a parameter is known for each instance
 
@@ -8586,7 +8911,10 @@ static vlog_node_t elab_hier_ref_param(tree_t b, ident_t id)
       const vlog_kind_t kind = vlog_kind(d);
       if ((kind == V_PARAM_DECL || kind == V_LOCALPARAM)
           && vlog_ident(d) == id && vlog_has_value(d))
-         return vlog_value(d);
+         return elab_gen_param_value(b, d, parents);
+      else if (kind == V_GENVAR_DECL && vlog_ident(d) == id
+               && i == ndecls - 1 && elab_shared_body(b) == body)
+         return elab_gen_param_value(b, d, parents);   // Genvar of the block
    }
 
    return NULL;
@@ -9298,7 +9626,7 @@ static vlog_node_t elab_rewrite_hier_ref_cb(vlog_node_t v, void *arg)
    if (port != NULL)
       return elab_hier_ref_vhdl(v, port);
 
-   vlog_node_t param = elab_hier_ref_param(b, id);
+   vlog_node_t param = elab_hier_ref_param(b, id, hctx->parents);
    if (param != NULL) {
       // The value may contain names that are only bound relative to the
       // instance it belongs to and that instance may not be rewritten yet

@@ -1371,6 +1371,11 @@ void jit_reset(jit_t *j)
    jit_reset_exit_status(j);
 }
 
+mir_context_t *jit_get_mir(jit_t *j)
+{
+   return j->mir;
+}
+
 void jit_get_stats(jit_t *j, unsigned *nfuncs, unsigned *nirfuncs,
                    size_t *irbytes)
 {

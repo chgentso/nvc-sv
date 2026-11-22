@@ -3077,3 +3077,15 @@ vlog_genstats1  shell
 mirfree1        normal,2019
 vlog_mirfree1   verilog
 vlog_gencache1  shell
+vlog_genshare1  verilog
+vlog_genshare2  verilog
+vlog_genshare3  verilog
+vlog_genshare4  verilog
+vlog_genshare7  verilog
+vlog_genshare9  verilog
+vlog_genshare10  verilog
+vlog_genshare11  verilog
+vlog_genshare6  verilog,gold
+vlog_genshare_modes shell
+vlog_genshare12 verilog
+vpi27           verilog,vpi,gold
