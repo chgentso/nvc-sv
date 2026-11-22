@@ -26911,6 +26911,37 @@ static mir_value_t vlog_crv_hidden(vlog_gen_t *g, mir_value_t obj,
    return mir_build_link_var(g->mu, obj, ident_new(name), t_longint);
 }
 
+static vlog_node_t vlog_crv_static_cons_decl(vlog_node_t class)
+{
+   // The hidden variable which holds the modes of the static constraints
+
+   const int ndecls = vlog_decls(class);
+   for (int i = 0; i < ndecls; i++) {
+      vlog_node_t d = vlog_decl(class, i);
+      if (vlog_kind(d) == V_VAR_DECL && vlog_ident(d) == ident_new("$scons_off"))
+         return d;
+   }
+
+   fatal_trace("missing $scons_off in %pi", vlog_ident(class));
+}
+
+static int vlog_crv_static_bit(vlog_node_t class, vlog_node_t cons)
+{
+   // Position of the constraint among the static constraints of its class
+
+   int bit = 0;
+   const int ndecls = vlog_decls(class);
+   for (int i = 0; i < ndecls; i++) {
+      vlog_node_t d = vlog_decl(class, i);
+      if (d == cons)
+         return bit;
+      else if (vlog_kind(d) == V_CONSTRAINT && (vlog_flags(d) & VLOG_F_STATIC))
+         bit++;
+   }
+
+   fatal_trace("missing static constraint %pi", vlog_ident(cons));
+}
+
 static bool vlog_crv_has_hidden(vlog_node_t class)
 {
    return vlog_class_member(class, ident_new("$rand_off")) != NULL;
@@ -28234,8 +28265,19 @@ static void vlog_lower_crv_unit(mir_unit_t *mu, object_t *obj)
       mir_block_t on_bb = mir_add_block(mu);
       mir_block_t next_bb = mir_add_block(mu);
 
-      mir_value_t off = CRV2(&g, CRV_OP_TEST_BIT, cons_off[i / 64],
-                             vlog_crv_int(&g, i % 64));
+      mir_value_t off;
+      if (vlog_flags(list[i]) & VLOG_F_STATIC) {
+         // One mode for all of the objects
+         vlog_node_t owner = vlog_ref(list[i]);
+         mir_value_t bits = vlog_crv_to_offset(
+            &g, mir_build_load(mu, vlog_lower_decl_ptr(
+                                  &g, vlog_crv_static_cons_decl(owner))));
+         off = CRV2(&g, CRV_OP_TEST_BIT, bits,
+                    vlog_crv_int(&g, vlog_crv_static_bit(owner, list[i])));
+      }
+      else
+         off = CRV2(&g, CRV_OP_TEST_BIT, cons_off[i / 64],
+                    vlog_crv_int(&g, i % 64));
       mir_build_cond(mu, mir_build_cmp(mu, MIR_CMP_EQ, off, zero), on_bb,
                      next_bb);
 
@@ -28748,6 +28790,11 @@ static mir_value_t vlog_lower_crv_mode(vlog_gen_t *g, vlog_node_t v)
          obj = vlog_kind(base) == V_THIS
             ? vlog_lower_this(g) : vlog_lower_rvalue(g, base);
       }
+      else if (!is_rand && (vlog_flags(decl) & VLOG_F_STATIC)) {
+         // No object is needed to name a static constraint
+         obj = MIR_NULL_VALUE;
+         class = vlog_ref(decl);
+      }
       else {
          obj = vlog_lower_this(g);
          class = vlog_crv_current_class(g);
@@ -28779,6 +28826,31 @@ static mir_value_t vlog_lower_crv_mode(vlog_gen_t *g, vlog_node_t v)
          }
          assert(bit >= 0);
       }
+   }
+
+   if (!is_rand && decl != NULL && (vlog_flags(decl) & VLOG_F_STATIC)) {
+      // The mode of a static constraint is shared by all of the objects
+      vlog_node_t owner = vlog_ref(decl);
+      mir_value_t sptr = vlog_lower_decl_ptr(g, vlog_crv_static_cons_decl(owner));
+      mir_value_t soff = vlog_crv_to_offset(g, mir_build_load(g->mu, sptr));
+      mir_value_t sbit = vlog_crv_int(g, vlog_crv_static_bit(owner, decl));
+
+      mir_type_t t_sint = mir_vec2_type(g->mu, 32, true);
+      if (vlog_params(v) == 0) {
+         mir_value_t test = CRV2(g, CRV_OP_TEST_BIT, soff, sbit);
+         return mir_build_select(
+            g->mu, t_sint, mir_build_cmp(g->mu, MIR_CMP_EQ, test,
+                                         vlog_crv_int(g, 0)),
+            mir_const_vec(g->mu, t_sint, 1, 0),
+            mir_const_vec(g->mu, t_sint, 0, 0));
+      }
+
+      mir_value_t smode =
+         vlog_crv_to_offset(g, vlog_lower_rvalue(g, vlog_param(v, 0)));
+      mir_value_t snext = CRV3(g, CRV_OP_SET_BIT, soff, sbit, smode);
+      mir_build_store(g->mu, sptr, vlog_crv_from_offset(
+                         g, snext, mir_vec2_type(g->mu, 64, true)));
+      return mir_const_vec(g->mu, t_sint, 0, 0);
    }
 
    // The mode bits of the constraints are held in as many words as needed

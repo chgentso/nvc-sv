@@ -18407,6 +18407,25 @@ static void add_rand_state(vlog_node_t class)
    if (!own)
       return;
 
+   // The mode of a static constraint is shared by every object
+   int nstatic = 0;
+   for (int i = 0; i < vlog_decls(class); i++) {
+      vlog_node_t d = vlog_decl(class, i);
+      if (vlog_kind(d) == V_CONSTRAINT && (vlog_flags(d) & VLOG_F_STATIC))
+         nstatic++;
+   }
+
+   if (nstatic > 64)
+      error_at(vlog_loc(class), "sorry, more than 64 static constraints in "
+               "a class are not supported");
+
+   if (nstatic > 0) {
+      add_hidden_property(class, ident_new("$scons_off"));
+      vlog_node_t d = vlog_decl(class, vlog_decls(class) - 1);
+      vlog_set_flags(d, VLOG_F_STATIC);
+      vlog_set_ref(d, class);
+   }
+
    ident_t rand_off = ident_new("$rand_off");
 
    bool inherited = false;
