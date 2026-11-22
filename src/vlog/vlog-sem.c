@@ -31,6 +31,7 @@
 #include <assert.h>
 #include <inttypes.h>
 #include <stdlib.h>
+#include <string.h>
 
 typedef uint32_t type_mask_t;
 #define TM(x) (1u << (x))
@@ -218,7 +219,69 @@ static bool vlog_is_handle_member(vlog_node_t v)
           || (vlog_kind(pt) == V_DATA_TYPE && vlog_subkind(pt) == DT_VIRTUAL));
 }
 
+static bool in_pca_process = false;
 static vlog_node_t stmt_method_call = NULL;
+
+static bool vlog_stable_const(vlog_node_t v, int64_t *value)
+{
+   // A constant that cannot change when a parameter is overridden
+
+   switch (vlog_kind(v)) {
+   case V_NUMBER:
+      {
+         number_t n = vlog_number(v);
+         if (!number_is_defined(n))
+            return false;
+         *value = number_integer(n);
+         return true;
+      }
+   case V_REF:
+      return vlog_has_ref(v) && vlog_stable_const(vlog_ref(v), value);
+   case V_LOCALPARAM:
+      return !(vlog_flags(v) & VLOG_F_SPECPARAM) && vlog_has_value(v)
+         && vlog_stable_const(vlog_value(v), value);
+   case V_ENUM_NAME:
+      return vlog_has_value(v) && vlog_stable_const(vlog_value(v), value);
+   case V_UNARY:
+      if (vlog_subkind(v) == V_UNARY_NEG && vlog_stable_const(vlog_value(v), value)) {
+         *value = -*value;
+         return true;
+      }
+      return false;
+   case V_BINARY:
+      {
+         int64_t l, r;
+         if (!vlog_stable_const(vlog_left(v), &l)
+             || !vlog_stable_const(vlog_right(v), &r))
+            return false;
+
+         switch (vlog_subkind(v)) {
+         case V_BINARY_PLUS: *value = l + r; return true;
+         case V_BINARY_MINUS: *value = l - r; return true;
+         case V_BINARY_TIMES: *value = l * r; return true;
+         default: return false;
+         }
+      }
+   default:
+      return false;
+   }
+}
+
+static bool vlog_is_variable_ref(vlog_node_t v)
+{
+   if (vlog_kind(v) != V_REF || !vlog_has_ref(v))
+      return false;
+
+   switch (vlog_kind(vlog_ref(v))) {
+   case V_VAR_DECL:
+   case V_NET_DECL:
+   case V_LOCAL_DECL:
+   case V_TF_PORT_DECL:
+      return true;
+   default:
+      return false;
+   }
+}
 
 static void vlog_check_variable_lvalue(vlog_node_t v, vlog_node_t where)
 {
@@ -5430,8 +5493,16 @@ void vlog_check(vlog_node_t v)
       vlog_check_enum_name(v);
       break;
    case V_ALWAYS:
-      vlog_check_always_blocks(v);
-      vlog_check_stmts(v);
+      {
+         // The process made for a procedural continuous assignment repeats
+         // a statement that is also checked where it was written
+         const bool saved = in_pca_process;
+         in_pca_process = vlog_has_ident(v)
+            && strncmp(istr(vlog_ident(v)), "$pca_always", 11) == 0;
+         vlog_check_always_blocks(v);
+         vlog_check_stmts(v);
+         in_pca_process = saved;
+      }
       break;
    case V_INITIAL:
    case V_FOREVER:
