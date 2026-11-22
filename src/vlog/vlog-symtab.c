@@ -1323,6 +1323,7 @@ vlog_node_t vlog_symtab_static_home(vlog_symtab_t *st)
          case V_PACKAGE:
          case V_PROGRAM:
          case V_CLASS_DECL:
+         case V_GEN_BLOCK:
             return s->container;
          default:
             break;
