@@ -5491,12 +5491,19 @@ static void sum_init(prob_t *P)
    P->sum_ready = true;
 
    // Only arrays whose sum is in a constraint
-   bool *used = xcalloc(P->na ? P->na : 1);
    bool any = false;
+   for (unsigned n = 0; n < P->c->nnodes && !any; n++) {
+      const node_t *nd = &P->c->nodes[n];
+      any = nd->kind == N_ASUM && P->ebase[nd->aux] >= 0;
+   }
+   if (!any)
+      return;
+
+   bool *used = xcalloc(P->na ? P->na : 1);
    for (unsigned n = 0; n < P->c->nnodes; n++) {
       const node_t *nd = &P->c->nodes[n];
       if (nd->kind == N_ASUM && P->ebase[nd->aux] >= 0)
-         any = used[nd->aux] = true;
+         used[nd->aux] = true;
    }
 
    if (any) {
@@ -5689,7 +5696,11 @@ static sres_t solve_prob(prob_t *P)
 
    compute_levels(P);
 
-   if (!P->legacy) {
+   int nfree = 0;
+   for (int v = 0; v < P->nv && nfree < 2 && !P->legacy; v++)
+      nfree += P->vars[v].dom.lo != P->vars[v].dom.hi;
+
+   if (!P->legacy && nfree >= 2) {
       free_components(P);
       build_components(P);
       if (P->ncomp < 2) {
