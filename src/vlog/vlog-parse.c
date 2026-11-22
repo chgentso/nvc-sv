@@ -4089,7 +4089,8 @@ static vlog_node_t p_select(ident_t id)
          vlog_set_value(ref, prefix);
          vlog_set_loc(ref, CURRENT_LOC);
 
-         vlog_symtab_lookup(symtab, ref);
+         if (gen_dead == 0)
+            vlog_symtab_lookup(symtab, ref);
 
          prefix = ref;
       }
@@ -21062,11 +21063,56 @@ static void declare_gen_block(vlog_node_t b)
    vlog_symtab_put(symtab, b);
 }
 
+static bool is_module_param(vlog_node_t mod, vlog_node_t d)
+{
+   if (mod == NULL || vlog_kind(d) != V_PARAM_DECL)
+      return false;
+
+   const int ndecls = vlog_decls(mod);
+   for (int i = 0; i < ndecls; i++) {
+      if (vlog_decl(mod, i) == d)
+         return true;
+   }
+
+   return false;
+}
+
 static bool gen_literal(vlog_node_t v, int64_t *value)
 {
-   // A number which is not the value of a parameter that can be overridden
+   // A constant expression that does not depend on an overridable module
+   // parameter
 
-   return vlog_kind(v) == V_NUMBER && vlog_get_const(v, value);
+   switch (vlog_kind(v)) {
+   case V_NUMBER:
+      return vlog_get_const(v, value);
+   case V_REF:
+      if (vlog_has_ref(v)) {
+         vlog_node_t d = vlog_ref(v);
+         if ((vlog_kind(d) == V_LOCALPARAM
+              || (vlog_kind(d) == V_PARAM_DECL
+                  && !is_module_param(module_root, d)))
+             && vlog_has_value(d))
+            return gen_literal(vlog_value(d), value);
+      }
+      return false;
+   case V_UNARY:
+      {
+         int64_t dummy;
+         if (!gen_literal(vlog_value(v), &dummy))
+            return false;
+         return vlog_get_const(v, value);
+      }
+   case V_BINARY:
+      {
+         int64_t dummy;
+         if (!gen_literal(vlog_left(v), &dummy)
+             || !gen_literal(vlog_right(v), &dummy))
+            return false;
+         return vlog_get_const(v, value);
+      }
+   default:
+      return false;
+   }
 }
 
 static vlog_node_t p_if_generate_construct(void)
