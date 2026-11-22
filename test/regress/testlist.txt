@@ -3118,3 +3118,4 @@ svcrvsysfunc1 verilog
 svcrvwithempty1 verilog
 svcrvshiftw1 verilog
 svcrvstdelem1 verilog
+vlog_escprop1 verilog

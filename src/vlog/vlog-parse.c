@@ -18694,6 +18694,18 @@ static void add_pfmt_methods(vlog_node_t class)
                continue;
 
             const char *name = istr(vlog_ident(d));
+
+            // A name which is not a simple identifier is escaped
+            LOCAL_TEXT_BUF idtb = tb_new();
+            bool simple = isalpha((unsigned char)name[0]) || name[0] == '_';
+            for (const char *c = name; *c != '\0'; c++)
+               simple &= isalnum((unsigned char)*c) || *c == '_' || *c == '$';
+            if (simple)
+               tb_cat(idtb, name);
+            else
+               tb_printf(idtb, "\\%s ", name);
+            const char *id = tb_get(idtb);
+
             tb_printf(tb, "if (__r != \"\") __r = {__r, \"%s\"};\n",
                       plain ? "," : ", ");
 
@@ -18701,12 +18713,12 @@ static void add_pfmt_methods(vlog_node_t class)
             if (vlog_kind(t) == V_DATA_TYPE && vlog_subkind(t) == DT_EVENT)
                tb_printf(tb, "__r = {__r, \"%s:<no-events>\"};\n", name);
             else if (vlog_kind(t) == V_CLASS_DECL && vlog_ranges(d) == 0) {
-               tb_printf(tb, "__s = $__pn(%s);\n", name);
+               tb_printf(tb, "__s = $__pn(%s);\n", id);
                tb_printf(tb, "__r = {__r, \"%s:\", __s};\n", name);
             }
             else
                tb_printf(tb, "__r = {__r, \"%s:\", $sformatf(\"%s\", %s)};\n",
-                         name, plain ? "%0p" : "%p", name);
+                         name, plain ? "%0p" : "%p", id);
          }
       }
 
