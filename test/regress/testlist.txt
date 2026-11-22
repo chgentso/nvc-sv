@@ -3029,3 +3029,4 @@ svcondstruct1 verilog
 svfwdclass1 verilog
 svprocself1 verilog
 svretpat1 verilog
+svspeceval1 verilog

@@ -19082,13 +19082,35 @@ static bool spec_eval(vlog_node_t v, const spec_env_t *env, int nenv,
             }
          }
 
-         // A parameter with an expression which has not been folded yet
+         // A parameter or enum constant whose expression has not been folded yet
          vlog_node_t d = vlog_ref(v);
-         if ((vlog_kind(d) == V_PARAM_DECL || vlog_kind(d) == V_LOCALPARAM)
-             && vlog_has_value(d) && vlog_kind(vlog_value(d)) == V_BINARY)
+         if ((vlog_kind(d) == V_PARAM_DECL || vlog_kind(d) == V_LOCALPARAM
+              || vlog_kind(d) == V_ENUM_NAME)
+             && vlog_has_value(d))
             return spec_eval(vlog_value(d), env, nenv, result);
       }
       break;
+   case V_UNARY:
+      {
+         int64_t val;
+         if (!spec_eval(vlog_value(v), env, nenv, &val))
+            return false;
+
+         switch (vlog_subkind(v)) {
+         case V_UNARY_IDENTITY: *result = val; return true;
+         case V_UNARY_NEG:      *result = -val; return true;
+         case V_UNARY_BITNEG:   *result = ~val; return true;
+         case V_UNARY_NOT:      *result = !val; return true;
+         default:               return false;
+         }
+      }
+   case V_COND_EXPR:
+      {
+         int64_t c;
+         if (!spec_eval(vlog_value(v), env, nenv, &c))
+            return false;
+         return spec_eval(c ? vlog_left(v) : vlog_right(v), env, nenv, result);
+      }
    case V_BINARY:
       {
          int64_t l, r;
@@ -19105,12 +19127,71 @@ static bool spec_eval(vlog_node_t v, const spec_env_t *env, int nenv,
                return false;
             *result = l / r;
             return true;
+         case V_BINARY_MOD:
+            if (r == 0)
+               return false;
+            *result = l % r;
+            return true;
+         case V_BINARY_EXP:
+            if (r < 0)
+               return false;
+            else {
+               int64_t acc = 1, base = l, exp = r;
+               while (exp > 0) {
+                  if (exp & 1)
+                     acc *= base;
+                  base *= base;
+                  exp >>= 1;
+               }
+               *result = acc;
+               return true;
+            }
+         case V_BINARY_SHIFT_LL:
+         case V_BINARY_SHIFT_LA:
+            if (r < 0 || r >= 63)
+               return false;
+            *result = l << r;
+            return true;
+         case V_BINARY_SHIFT_RL:
+            if (r < 0 || r >= 63)
+               return false;
+            *result = (int64_t)((uint64_t)l >> r);
+            return true;
+         case V_BINARY_SHIFT_RA:
+            if (r < 0 || r >= 63)
+               return false;
+            *result = l >> r;
+            return true;
+         case V_BINARY_AND:     *result = l & r; return true;
+         case V_BINARY_OR:      *result = l | r; return true;
+         case V_BINARY_XOR:     *result = l ^ r; return true;
+         case V_BINARY_LOG_AND: *result = l && r; return true;
+         case V_BINARY_LOG_OR:  *result = l || r; return true;
+         case V_BINARY_LOG_EQ:  *result = l == r; return true;
+         case V_BINARY_LOG_NEQ: *result = l != r; return true;
+         case V_BINARY_LT:      *result = l < r; return true;
+         case V_BINARY_LEQ:     *result = l <= r; return true;
+         case V_BINARY_GT:      *result = l > r; return true;
+         case V_BINARY_GEQ:     *result = l >= r; return true;
          default:
             return false;
          }
       }
    case V_SYS_FCALL:
-      if (vlog_ident(v) == ident_new("$bits") && vlog_params(v) == 1) {
+      if (vlog_ident(v) == ident_new("$clog2") && vlog_params(v) == 1) {
+         int64_t val;
+         if (spec_eval(vlog_param(v, 0), env, nenv, &val) && val >= 0) {
+            int64_t r = 0;
+            uint64_t u = val > 0 ? (uint64_t)(val - 1) : 0;
+            while (u > 0) {
+               r++;
+               u >>= 1;
+            }
+            *result = r;
+            return true;
+         }
+      }
+      else if (vlog_ident(v) == ident_new("$bits") && vlog_params(v) == 1) {
          // The width of a type or of an object with a fixed size
          vlog_node_t arg = vlog_param(v, 0);
          vlog_node_t t = NULL;
