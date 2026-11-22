@@ -1,0 +1,83 @@
+# Bias report of the search of release 0.18.0 (NVC_CRV_ENGINE=legacy; dfs is the same search at M0)
+# nvc-sv 197a28df + crv M0, produced by: NVC_CRV_LONG=1 NVC_CRV_FUZZ_SECONDS=60 bin/unit_test crv
+# Per problem and seed: samples N = max(50 x solutions, 20000); chi2/df against the distribution the
+# language asks for (uniform over solutions; solve before levels; dist buckets by declared weight among
+# the feasible ones; soft constraints kept from the highest priority); bound = chi-square at p = 1e-4
+# (Wilson-Hilferty); max/min = largest over smallest count of a solution that was reached.
+
+x<y 4                                  seed 1234       sols   120 n  20000 chi2/df   51.39 (df  119 bound   185.2) BIASED max/min   9.04 unreached    0 fails 0
+x<y 4                                  seed abcd5678   sols   120 n  20000 chi2/df   49.51 (df  119 bound   185.2) BIASED max/min   7.59 unreached    0 fails 0
+x<y 4                                  seed 9e3779b9   sols   120 n  20000 chi2/df   51.47 (df  119 bound   185.2) BIASED max/min   9.12 unreached    0 fails 0
+x<y 3                                  seed 1234       sols    28 n  20000 chi2/df  128.42 (df   27 bound    63.4) BIASED max/min   4.23 unreached    0 fails 0
+x<y 3                                  seed abcd5678   sols    28 n  20000 chi2/df  135.26 (df   27 bound    63.4) BIASED max/min   3.95 unreached    0 fails 0
+x<y 3                                  seed 9e3779b9   sols    28 n  20000 chi2/df  140.26 (df   27 bound    63.4) BIASED max/min   4.81 unreached    0 fails 0
+x<y 5                                  seed 1234       sols   496 n  24800 chi2/df   23.74 (df  495 bound   620.7) BIASED max/min  24.88 unreached    0 fails 0
+x<y 5                                  seed abcd5678   sols   496 n  24800 chi2/df   22.92 (df  495 bound   620.7) BIASED max/min  27.47 unreached    0 fails 0
+x<y 5                                  seed 9e3779b9   sols   496 n  24800 chi2/df   24.18 (df  495 bound   620.7) BIASED max/min  26.25 unreached    0 fails 0
+x+y+z==10                              seed 1234       sols    66 n  20000 chi2/df   23.38 (df   65 bound   116.3) BIASED max/min   2.83 unreached    0 fails 0
+x+y+z==10                              seed abcd5678   sols    66 n  20000 chi2/df   25.55 (df   65 bound   116.3) BIASED max/min   2.87 unreached    0 fails 0
+x+y+z==10                              seed 9e3779b9   sols    66 n  20000 chi2/df   24.26 (df   65 bound   116.3) BIASED max/min   3.10 unreached    0 fails 0
+x+y+z==20                              seed 1234       sols   186 n  20000 chi2/df    2.75 (df  185 bound   265.3) BIASED max/min   2.36 unreached    0 fails 0
+x+y+z==20                              seed abcd5678   sols   186 n  20000 chi2/df    2.79 (df  185 bound   265.3) BIASED max/min   2.24 unreached    0 fails 0
+x+y+z==20                              seed 9e3779b9   sols   186 n  20000 chi2/df    2.63 (df  185 bound   265.3) BIASED max/min   2.14 unreached    0 fails 0
+s->d==0                                seed 1234       sols   257 n  20000 chi2/df 1282.91 (df  256 bound   348.9) BIASED max/min 128.05 unreached    0 fails 0
+s->d==0                                seed abcd5678   sols   257 n  20000 chi2/df 1207.81 (df  256 bound   348.9) BIASED max/min 118.38 unreached    0 fails 0
+s->d==0                                seed 9e3779b9   sols   257 n  20000 chi2/df 1222.62 (df  256 bound   348.9) BIASED max/min 138.94 unreached    0 fails 0
+s->d==0, s before d                    seed 1234       sols   257 n  20000 chi2/df    1.07 (df  256 bound   348.9) pass max/min 438.78 unreached    0 fails 0
+s->d==0, s before d                    seed abcd5678   sols   257 n  20000 chi2/df    0.91 (df  256 bound   348.9) pass max/min 433.09 unreached    0 fails 0
+s->d==0, s before d                    seed 9e3779b9   sols   257 n  20000 chi2/df    1.02 (df  256 bound   348.9) pass max/min 454.18 unreached    0 fails 0
+if/else modes                          seed 1234       sols    23 n  20000 chi2/df 1704.71 (df   22 bound    55.8) BIASED max/min  10.25 unreached    0 fails 0
+if/else modes                          seed abcd5678   sols    23 n  20000 chi2/df 1766.07 (df   22 bound    55.8) BIASED max/min  10.96 unreached    0 fails 0
+if/else modes                          seed 9e3779b9   sols    23 n  20000 chi2/df 1772.86 (df   22 bound    55.8) BIASED max/min  11.05 unreached    0 fails 0
+(x&y)==0                               seed 1234       sols    81 n  20000 chi2/df   46.72 (df   80 bound   135.9) BIASED max/min  11.47 unreached    0 fails 0
+(x&y)==0                               seed abcd5678   sols    81 n  20000 chi2/df   48.29 (df   80 bound   135.9) BIASED max/min   7.05 unreached    0 fails 0
+(x&y)==0                               seed 9e3779b9   sols    81 n  20000 chi2/df   46.58 (df   80 bound   135.9) BIASED max/min   9.49 unreached    0 fails 0
+x*y==12 mod 16                         seed 1234       sols    24 n  20000 chi2/df    3.51 (df   23 bound    57.3) BIASED max/min   1.34 unreached    0 fails 0
+x*y==12 mod 16                         seed abcd5678   sols    24 n  20000 chi2/df    4.86 (df   23 bound    57.3) BIASED max/min   1.33 unreached    0 fails 0
+x*y==12 mod 16                         seed 9e3779b9   sols    24 n  20000 chi2/df    6.32 (df   23 bound    57.3) BIASED max/min   1.37 unreached    0 fails 0
+unique of three 2 bit                  seed 1234       sols    24 n  20000 chi2/df    1.45 (df   23 bound    57.3) pass max/min   1.19 unreached    0 fails 0
+unique of three 2 bit                  seed abcd5678   sols    24 n  20000 chi2/df    1.30 (df   23 bound    57.3) pass max/min   1.17 unreached    0 fails 0
+unique of three 2 bit                  seed 9e3779b9   sols    24 n  20000 chi2/df    1.12 (df   23 bound    57.3) pass max/min   1.13 unreached    0 fails 0
+a<b, a before b                        seed 1234       sols   120 n  20000 chi2/df    1.18 (df  119 bound   185.2) pass max/min  18.53 unreached    0 fails 0
+a<b, a before b                        seed abcd5678   sols   120 n  20000 chi2/df    1.08 (df  119 bound   185.2) pass max/min  18.54 unreached    0 fails 0
+a<b, a before b                        seed 9e3779b9   sols   120 n  20000 chi2/df    1.28 (df  119 bound   185.2) pass max/min  17.71 unreached    0 fails 0
+a<b<c, a before b before c             seed 1234       sols    56 n  20000 chi2/df    1.20 (df   55 bound   102.9) pass max/min  43.31 unreached    0 fails 0
+a<b<c, a before b before c             seed abcd5678   sols    56 n  20000 chi2/df    0.91 (df   55 bound   102.9) pass max/min  38.91 unreached    0 fails 0
+a<b<c, a before b before c             seed 9e3779b9   sols    56 n  20000 chi2/df    1.16 (df   55 bound   102.9) pass max/min  39.63 unreached    0 fails 0
+dist x!=y                              seed 1234       sols    56 n  20000 chi2/df    1.25 (df   55 bound   102.9) pass max/min   2.70 unreached    0 fails 0
+dist x!=y                              seed abcd5678   sols    56 n  20000 chi2/df    0.89 (df   55 bound   102.9) pass max/min   2.33 unreached    0 fails 0
+dist x!=y                              seed 9e3779b9   sols    56 n  20000 chi2/df    0.99 (df   55 bound   102.9) pass max/min   2.53 unreached    0 fails 0
+dist, bucket infeasible                seed 1234       sols    32 n  20000 chi2/df    0.72 (df   31 bound    69.3) pass max/min   2.26 unreached    0 fails 0
+dist, bucket infeasible                seed abcd5678   sols    32 n  20000 chi2/df    1.05 (df   31 bound    69.3) pass max/min   2.32 unreached    0 fails 0
+dist, bucket infeasible                seed 9e3779b9   sols    32 n  20000 chi2/df    1.12 (df   31 bound    69.3) pass max/min   2.49 unreached    0 fails 0
+dist, :/ over a split range            seed 1234       sols    48 n  20000 chi2/df   47.47 (df   47 bound    92.0) BIASED max/min   1.15 unreached    0 fails 0
+dist, :/ over a split range            seed abcd5678   sols    48 n  20000 chi2/df   50.97 (df   47 bound    92.0) BIASED max/min   1.21 unreached    0 fails 0
+dist, :/ over a split range            seed 9e3779b9   sols    48 n  20000 chi2/df   46.41 (df   47 bound    92.0) BIASED max/min   1.24 unreached    0 fails 0
+soft conflict                          seed 1234       sols    28 n  20000 chi2/df  129.67 (df   27 bound    63.4) BIASED max/min   4.27 unreached    0 fails 0
+soft conflict                          seed abcd5678   sols    28 n  20000 chi2/df  127.89 (df   27 bound    63.4) BIASED max/min   4.28 unreached    0 fails 0
+soft conflict                          seed 9e3779b9   sols    28 n  20000 chi2/df  126.41 (df   27 bound    63.4) BIASED max/min   3.66 unreached    0 fails 0
+soft compatible                        seed 1234       sols    36 n  20000 chi2/df    1.44 (df   35 bound    75.1) pass max/min   1.22 unreached    0 fails 0
+soft compatible                        seed abcd5678   sols    36 n  20000 chi2/df    0.67 (df   35 bound    75.1) pass max/min   1.14 unreached    0 fails 0
+soft compatible                        seed 9e3779b9   sols    36 n  20000 chi2/df    1.14 (df   35 bound    75.1) pass max/min   1.22 unreached    0 fails 0
+array size 0 to 3, elements nonzero    seed 1234       sols    40 n  20000 chi2/df 1362.82 (df   39 bound    80.8) BIASED max/min  30.99 unreached    0 fails 0
+array size 0 to 3, elements nonzero    seed abcd5678   sols    40 n  20000 chi2/df 1357.44 (df   39 bound    80.8) BIASED max/min  29.98 unreached    0 fails 0
+array size 0 to 3, elements nonzero    seed 9e3779b9   sols    40 n  20000 chi2/df 1420.40 (df   39 bound    80.8) BIASED max/min  33.63 unreached    0 fails 0
+$countones(x)==2 ? y<4 : y>=12         seed 1234       sols    64 n  20000 chi2/df  118.25 (df   63 bound   113.7) BIASED max/min   4.93 unreached    0 fails 0
+$countones(x)==2 ? y<4 : y>=12         seed abcd5678   sols    64 n  20000 chi2/df  127.09 (df   63 bound   113.7) BIASED max/min   4.90 unreached    0 fails 0
+$countones(x)==2 ? y<4 : y>=12         seed 9e3779b9   sols    64 n  20000 chi2/df  123.10 (df   63 bound   113.7) BIASED max/min   4.79 unreached    0 fails 0
+
+# Differential fuzzer (49869 problems of 2 to 5 fields, up to 13 decision bits, three draws each)
+fuzz: 49869 problems (32275 with solutions, 17594 unsatisfiable), 149607 draws; 137 without an answer, 11 soft constraints dropped that could be kept, 0 invalid, 0 answered although unsatisfiable
+# first seeds with a problem (replay: NVC_CRV_FUZZ_SEED=<seed> bin/unit_test crv):
+fuzz seed 1214 engine legacy draw 0: no solution for a satisfiable one (62 solutions)
+fuzz seed 1512 engine legacy draw 0: no solution for a satisfiable one (4096 solutions)
+fuzz seed 1520 engine legacy draw 0: no solution for a satisfiable one (1240 solutions)
+fuzz seed 2013 engine legacy draw 1: no solution for a satisfiable one (103 solutions)
+fuzz seed 2053 engine legacy draw 0: no solution for a satisfiable one (3584 solutions)
+fuzz seed 3561 engine legacy draw 0: no solution for a satisfiable one (3584 solutions)
+fuzz seed 7305 engine legacy draw 0: no solution for a satisfiable one (1040 solutions)
+fuzz seed 11619 engine legacy draw 0: no solution for a satisfiable one (1 solutions)
+fuzz seed 12163 engine legacy draw 0: no solution for a satisfiable one (4088 solutions)
+fuzz seed 12364 engine legacy draw 0: no solution for a satisfiable one (64 solutions)
+fuzz seed 12771 engine legacy draw 0: no solution for a satisfiable one (1276 solutions)
+fuzz seed 12816 engine legacy draw 0: no solution for a satisfiable one (768 solutions)
