@@ -19084,10 +19084,30 @@ static bool spec_eval(vlog_node_t v, const spec_env_t *env, int nenv,
 
          // A parameter or enum constant whose expression has not been folded yet
          vlog_node_t d = vlog_ref(v);
-         if ((vlog_kind(d) == V_PARAM_DECL || vlog_kind(d) == V_LOCALPARAM
-              || vlog_kind(d) == V_ENUM_NAME)
+         if ((vlog_kind(d) == V_PARAM_DECL || vlog_kind(d) == V_LOCALPARAM)
              && vlog_has_value(d))
             return spec_eval(vlog_value(d), env, nenv, result);
+         if (vlog_kind(d) == V_ENUM_NAME) {
+            if (vlog_has_value(d))
+               return spec_eval(vlog_value(d), env, nenv, result);
+            if (vlog_has_type(d) && vlog_kind(vlog_type(d)) == V_ENUM_DECL) {
+               vlog_node_t ed = vlog_type(d);
+               int64_t val = 0;
+               const int ndecls = vlog_decls(ed);
+               for (int i = 0; i < ndecls; i++) {
+                  vlog_node_t item = vlog_decl(ed, i);
+                  if (vlog_has_value(item)) {
+                     if (!spec_eval(vlog_value(item), env, nenv, &val))
+                        return false;
+                  }
+                  if (item == d) {
+                     *result = val;
+                     return true;
+                  }
+                  val++;
+               }
+            }
+         }
       }
       break;
    case V_UNARY:
