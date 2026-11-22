@@ -22467,6 +22467,20 @@ static vlog_node_t clocking_outref(const clock_var_t *cv, vlog_node_t sig,
    return drv != NULL ? clocking_ref(drv, loc) : clocking_sigref(cv, sig, loc);
 }
 
+static vlog_node_t clocking_field_ref(vlog_node_t base, vlog_node_t field,
+                                      const loc_t *loc)
+{
+   if (field == NULL)
+      return base;
+
+   vlog_node_t m = vlog_new(V_MEMBER_REF);
+   vlog_set_ident(m, vlog_ident(field));
+   vlog_set_value(m, base);
+   vlog_set_ref(m, field);
+   vlog_set_loc(m, loc);
+   return m;
+}
+
 static void clocking_synthesise(vlog_node_t parent, ident_t name,
                                 vlog_node_t ctrl, const clock_var_t *vars,
                                 int nvars, const loc_t *loc)
@@ -22619,114 +22633,151 @@ static void clocking_synthesise(vlog_node_t parent, ident_t name,
          vlog_node_t drv = clocking_net_driver(parent, name, cv, sig, sigtype,
                                                loc);
 
-         vlog_node_t ev1 = vlog_new(V_EVENT);
-         vlog_set_subkind(ev1, V_EVENT_LEVEL);
-         vlog_set_value(ev1, clocking_ref(shadow, loc));
-         vlog_set_loc(ev1, loc);
-         vlog_node_t c1 = vlog_new(V_EVENT_CONTROL);
-         vlog_add_param(c1, ev1);
-         vlog_set_loc(c1, loc);
+         // Drive packed struct clockvars per field so driving one member does
+         // not overwrite sibling members driven directly on the target signal
+         vlog_node_t st = vlog_get_type(sigtype);
+         vlog_node_t target_decl = cv->expr != NULL
+            ? (vlog_kind(cv->expr) == V_REF && vlog_has_ref(cv->expr)
+               ? vlog_ref(cv->expr) : NULL)
+            : sig;
+         const bool split_fields = st != NULL
+            && vlog_kind(st) == V_STRUCT_DECL
+            && (vlog_flags(st) & VLOG_F_PACKED)
+            && vlog_decls(st) > 0
+            && target_decl != NULL
+            && (vlog_kind(target_decl) == V_VAR_DECL
+                || vlog_kind(target_decl) == V_NET_DECL
+                || vlog_kind(target_decl) == V_PORT_DECL)
+            && vlog_ranges(target_decl) == 0;
+         const int nfields = split_fields ? vlog_decls(st) : 1;
 
-         if (cv->out_edge >= 0) {
-            vlog_node_t delay = cv->out_skew != NULL
-               ? vlog_copy(cv->out_skew, vlog_always_true_cb, NULL) : NULL;
-            vlog_node_t drive = clocking_assign(
-               clocking_outref(cv, sig, drv, loc), clocking_ref(shadow, loc),
-               delay, true, loc);
+         for (int fi = 0; fi < nfields; fi++) {
+            vlog_node_t field = split_fields ? vlog_decl(st, fi) : NULL;
+            ident_t fname = field != NULL
+               ? ident_sprintf("%s$%s$%s", istr(name), istr(cv->sig),
+                               istr(vlog_ident(field)))
+               : ident_sprintf("%s$%s", istr(name), istr(cv->sig));
+            vlog_node_t ftype = field != NULL ? vlog_type(field) : sigtype;
 
-            vlog_node_t edge = clocking_edge_control(ctrl, cv->out_edge, loc);
-            if (edge != NULL) {
-               // Driven at the next edge of the clock after the drive
-               vlog_node_t t = vlog_new(V_TIMING);
-               vlog_set_value(t, edge);
-               vlog_set_loc(t, loc);
-               vlog_add_stmt(t, drive);
-               drive = t;
+            vlog_node_t ev1 = vlog_new(V_EVENT);
+            vlog_set_subkind(ev1, V_EVENT_LEVEL);
+            vlog_set_value(ev1, clocking_field_ref(clocking_ref(shadow, loc),
+                                                   field, loc));
+            vlog_set_loc(ev1, loc);
+            vlog_node_t c1 = vlog_new(V_EVENT_CONTROL);
+            vlog_add_param(c1, ev1);
+            vlog_set_loc(c1, loc);
+
+            if (cv->out_edge >= 0) {
+               vlog_node_t delay = cv->out_skew != NULL
+                  ? vlog_copy(cv->out_skew, vlog_always_true_cb, NULL) : NULL;
+               vlog_node_t drive = clocking_assign(
+                  clocking_field_ref(clocking_outref(cv, sig, drv, loc),
+                                     field, loc),
+                  clocking_field_ref(clocking_ref(shadow, loc), field, loc),
+                  delay, true, loc);
+
+               vlog_node_t edge = clocking_edge_control(ctrl, cv->out_edge,
+                                                        loc);
+               if (edge != NULL) {
+                  // Driven at the next edge of the clock after the drive
+                  vlog_node_t t = vlog_new(V_TIMING);
+                  vlog_set_value(t, edge);
+                  vlog_set_loc(t, loc);
+                  vlog_add_stmt(t, drive);
+                  drive = t;
+               }
+
+               clocking_always(parent, "$cbo", drive, c1, loc);
+               continue;
             }
 
-            clocking_always(parent, "$cbo", drive, c1, loc);
-            continue;
+            vlog_node_t pend = clocking_var(
+               parent, ident_sprintf("%s$p", istr(fname)),
+               bit_type(), NULL, loc);
+
+            vlog_node_t test = vlog_new(V_BINARY);
+            vlog_set_subkind(test, V_BINARY_LOG_EQ);
+            vlog_set_left(test, clocking_ref(last, loc));
+            vlog_set_right(test, clocking_time_plus_one(loc));
+            vlog_set_loc(test, loc);
+
+            vlog_node_t zero = vlog_new(V_NUMBER);
+            vlog_set_number(zero, number_from_int(0));
+            vlog_set_loc(zero, loc);
+
+            vlog_node_t idle = vlog_new(V_BINARY);
+            vlog_set_subkind(idle, V_BINARY_LOG_EQ);
+            vlog_set_left(idle, clocking_ref(pend, loc));
+            vlog_set_right(idle, zero);
+            vlog_set_loc(idle, loc);
+
+            vlog_node_t both = vlog_new(V_BINARY);
+            vlog_set_subkind(both, V_BINARY_LOG_AND);
+            vlog_set_left(both, test);
+            vlog_set_right(both, idle);
+            vlog_set_loc(both, loc);
+
+            vlog_node_t now = vlog_new(V_COND);
+            vlog_set_value(now, both);
+            vlog_set_loc(now, loc);
+            vlog_add_stmt(now, clocking_assign(
+                             clocking_field_ref(
+                                clocking_outref(cv, sig, drv, loc),
+                                field, loc),
+                             clocking_field_ref(clocking_ref(shadow, loc),
+                                                field, loc),
+                             cv->out_skew ? vlog_copy(cv->out_skew,
+                                                      vlog_always_true_cb, NULL)
+                             : NULL, true, loc));
+
+            vlog_node_t later = vlog_new(V_COND);
+            vlog_set_loc(later, loc);
+            vlog_add_stmt(later, clocking_flag(pend, 1, loc));
+
+            vlog_node_t sel = vlog_new(V_IF);
+            vlog_add_cond(sel, now);
+            vlog_add_cond(sel, later);
+            vlog_set_loc(sel, loc);
+
+            clocking_always(parent, "$cbo", sel, c1, loc);
+
+            // The value is taken before the sample of an inout overwrites it
+            vlog_node_t held = clocking_var(
+               parent, ident_sprintf("%s$h", istr(fname)),
+               ftype, field == NULL && !cv->expr ? sig : NULL, loc);
+
+            vlog_node_t take = vlog_new(V_COND);
+            vlog_set_value(take, clocking_ref(pend, loc));
+            vlog_set_loc(take, loc);
+            vlog_add_stmt(take, clocking_assign(
+                             clocking_ref(held, loc),
+                             clocking_field_ref(clocking_ref(shadow, loc),
+                                                field, loc), NULL, false, loc));
+
+            vlog_node_t grab = vlog_new(V_IF);
+            vlog_add_cond(grab, take);
+            vlog_set_loc(grab, loc);
+            vlog_add_stmt(captures, grab);
+
+            vlog_node_t due = vlog_new(V_COND);
+            vlog_set_value(due, clocking_ref(pend, loc));
+            vlog_set_loc(due, loc);
+            vlog_add_stmt(due, clocking_flag(pend, 0, loc));
+            vlog_add_stmt(due, clocking_assign(
+                             clocking_field_ref(
+                                clocking_outref(cv, sig, drv, loc),
+                                field, loc),
+                             clocking_ref(held, loc),
+                             cv->out_skew ? vlog_copy(cv->out_skew,
+                                                      vlog_always_true_cb, NULL)
+                             : NULL, true, loc));
+
+            vlog_node_t chk = vlog_new(V_IF);
+            vlog_add_cond(chk, due);
+            vlog_set_loc(chk, loc);
+            vlog_add_stmt(drives, chk);
          }
-
-         vlog_node_t pend = clocking_var(
-            parent, ident_sprintf("%s$%s$p", istr(name), istr(cv->sig)),
-            bit_type(), NULL, loc);
-
-         vlog_node_t test = vlog_new(V_BINARY);
-         vlog_set_subkind(test, V_BINARY_LOG_EQ);
-         vlog_set_left(test, clocking_ref(last, loc));
-         vlog_set_right(test, clocking_time_plus_one(loc));
-         vlog_set_loc(test, loc);
-
-         vlog_node_t zero = vlog_new(V_NUMBER);
-         vlog_set_number(zero, number_from_int(0));
-         vlog_set_loc(zero, loc);
-
-         vlog_node_t idle = vlog_new(V_BINARY);
-         vlog_set_subkind(idle, V_BINARY_LOG_EQ);
-         vlog_set_left(idle, clocking_ref(pend, loc));
-         vlog_set_right(idle, zero);
-         vlog_set_loc(idle, loc);
-
-         vlog_node_t both = vlog_new(V_BINARY);
-         vlog_set_subkind(both, V_BINARY_LOG_AND);
-         vlog_set_left(both, test);
-         vlog_set_right(both, idle);
-         vlog_set_loc(both, loc);
-
-         vlog_node_t now = vlog_new(V_COND);
-         vlog_set_value(now, both);
-         vlog_set_loc(now, loc);
-         vlog_add_stmt(now, clocking_assign(
-                          clocking_outref(cv, sig, drv, loc),
-                          clocking_ref(shadow, loc),
-                          cv->out_skew ? vlog_copy(cv->out_skew,
-                                                   vlog_always_true_cb, NULL)
-                          : NULL, true, loc));
-
-         vlog_node_t later = vlog_new(V_COND);
-         vlog_set_loc(later, loc);
-         vlog_add_stmt(later, clocking_flag(pend, 1, loc));
-
-         vlog_node_t sel = vlog_new(V_IF);
-         vlog_add_cond(sel, now);
-         vlog_add_cond(sel, later);
-         vlog_set_loc(sel, loc);
-
-         clocking_always(parent, "$cbo", sel, c1, loc);
-
-         // The value is taken before the sample of an inout overwrites it
-         vlog_node_t held = clocking_var(
-            parent, ident_sprintf("%s$%s$h", istr(name), istr(cv->sig)),
-            sigtype, cv->expr ? NULL : sig, loc);
-
-         vlog_node_t take = vlog_new(V_COND);
-         vlog_set_value(take, clocking_ref(pend, loc));
-         vlog_set_loc(take, loc);
-         vlog_add_stmt(take, clocking_assign(clocking_ref(held, loc),
-                                             clocking_ref(shadow, loc), NULL,
-                                             false, loc));
-
-         vlog_node_t grab = vlog_new(V_IF);
-         vlog_add_cond(grab, take);
-         vlog_set_loc(grab, loc);
-         vlog_add_stmt(captures, grab);
-
-         vlog_node_t due = vlog_new(V_COND);
-         vlog_set_value(due, clocking_ref(pend, loc));
-         vlog_set_loc(due, loc);
-         vlog_add_stmt(due, clocking_flag(pend, 0, loc));
-         vlog_add_stmt(due, clocking_assign(
-                          clocking_outref(cv, sig, drv, loc),
-                          clocking_ref(held, loc),
-                          cv->out_skew ? vlog_copy(cv->out_skew,
-                                                   vlog_always_true_cb, NULL)
-                          : NULL, true, loc));
-
-         vlog_node_t chk = vlog_new(V_IF);
-         vlog_add_cond(chk, due);
-         vlog_set_loc(chk, loc);
-         vlog_add_stmt(drives, chk);
       }
    }
 
