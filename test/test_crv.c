@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 // Tests of the constraint solver through its C API: the graph that the
@@ -2115,6 +2116,359 @@ START_TEST(test_bias_report)
 END_TEST
 
 ////////////////////////////////////////////////////////////////////////////////
+// Differential fuzzer
+//
+// Random small problems: two to five fields of one to six bits, constraints
+// built from every operator, some soft, some with an order or a unique set.
+// The oracle lists their solutions by enumeration, so for each problem the
+// solver must find a solution exactly when one exists, the solution must be
+// one of the kept ones, and an unsatisfiable problem must be reported.  The
+// seed of every problem is printed with a failure and can be replayed with
+// NVC_CRV_FUZZ_SEED, together with a listing of the constraints.
+
+typedef struct {
+   trng_t r;
+   const problem_t *p;
+} gen_t;
+
+static ex_t *gen_val(gen_t *g, int depth);
+
+static unsigned gen_below(gen_t *g, unsigned n)
+{
+   return trng_below(&g->r, n);
+}
+
+static ex_t *gen_leaf(gen_t *g)
+{
+   if (gen_below(g, 4) < 3 && g->p->nfields > 0)
+      return xvar(g->p, gen_below(g, g->p->nfields));
+
+   const unsigned w = 1 + gen_below(g, 8);
+   return xconst(trng_next(&g->r), w, gen_below(g, 3) == 0);
+}
+
+static ex_t *gen_bool(gen_t *g, int depth)
+{
+   switch (depth <= 0 ? gen_below(g, 3) : gen_below(g, 9)) {
+   case 0: case 1: case 2:
+      {
+         static const crv_binary_t ops[] = { CRV_EQ, CRV_NE, CRV_LT, CRV_LE,
+                                             CRV_GT, CRV_GE };
+         ex_t *a = gen_val(g, depth - 1), *b = gen_val(g, depth - 1);
+         return xbin(ops[gen_below(g, 6)], 1, false, a, b);
+      }
+   case 3:
+      {
+         ex_t *a = gen_val(g, depth - 1);
+         const int n = 1 + gen_below(g, 3);
+         int64_t lo[3], hi[3];
+         for (int i = 0; i < n; i++) {
+            const int64_t x = wrapv(trng_next(&g->r), a->w, a->s);
+            const int64_t y = wrapv(trng_next(&g->r), a->w, a->s);
+            const __int128 mx = widen(x, a->s), my = widen(y, a->s);
+            lo[i] = mx < my ? x : y;
+            hi[i] = mx < my ? y : x;
+            if (gen_below(g, 2) == 0)
+               hi[i] = lo[i];
+         }
+         return xinside(a, n, lo, hi);
+      }
+   case 4:
+      return xnum(CRV_NE, gen_val(g, depth - 1), 0);
+   case 5:
+      return xun(CRV_LOG_NOT, gen_bool(g, depth - 1));
+   case 6: case 7:
+      {
+         static const crv_binary_t ops[] = { CRV_LOG_AND, CRV_LOG_OR,
+                                             CRV_IMPLIES };
+         ex_t *a = gen_bool(g, depth - 1), *b = gen_bool(g, depth - 1);
+         return xbin(ops[gen_below(g, 3)], 1, false, a, b);
+      }
+   default:
+      {
+         static const crv_unary_t ops[] = { CRV_REDUCE_AND, CRV_REDUCE_OR,
+                                            CRV_REDUCE_XOR };
+         return xun(ops[gen_below(g, 3)], gen_val(g, depth - 1));
+      }
+   }
+}
+
+static ex_t *gen_val(gen_t *g, int depth)
+{
+   if (depth <= 0)
+      return gen_leaf(g);
+
+   switch (gen_below(g, 12)) {
+   case 0: case 1:
+      return gen_leaf(g);
+   case 2:
+      {
+         static const crv_unary_t ops[] = { CRV_NEG, CRV_INV, CRV_POPCNT };
+         return xun(ops[gen_below(g, 3)], gen_val(g, depth - 1));
+      }
+   case 3:
+      return xcast(gen_val(g, depth - 1), 1 + gen_below(g, 12),
+                   gen_below(g, 2));
+   case 4:
+      {
+         ex_t *t = gen_bool(g, depth - 1);
+         ex_t *a = gen_val(g, depth - 1), *b = gen_val(g, depth - 1);
+         return xcond(t, a, b);
+      }
+   default:
+      {
+         static const crv_binary_t ops[] = {
+            CRV_ADD, CRV_SUB, CRV_MUL, CRV_AND, CRV_OR, CRV_XOR, CRV_SHL,
+            CRV_SHR, CRV_ASR, CRV_DIV, CRV_MOD, CRV_ADD, CRV_AND,
+         };
+         ex_t *a = gen_val(g, depth - 1), *b = gen_val(g, depth - 1);
+         unsigned w = a->w > b->w ? a->w : b->w;
+         if (gen_below(g, 4) == 0 && w < 12)
+            w += 1 + gen_below(g, 4);
+         const bool sg = gen_below(g, 3) == 0 ? gen_below(g, 2)
+            : (a->s && b->s);
+         return xbin(ops[gen_below(g, ARRAY_LEN(ops))], w, sg, a, b);
+      }
+   }
+}
+
+static void xprint(const ex_t *e, FILE *f)
+{
+   static const char *const bops[] = {
+      "+", "-", "*", "/", "%", "&", "|", "^", "<<", ">>", ">>>", "==", "!=",
+      "<", "<=", ">", ">=", "&&", "||", "->"
+   };
+   static const char *const uops[] = {
+      "-", "~", "!", "&", "|", "^", "$countones"
+   };
+   switch (e->kind) {
+   case X_CONST: fprintf(f, "%u'%sd%"PRId64, e->w, e->s ? "s" : "", e->val);
+      break;
+   case X_VAR: fprintf(f, "f%d", e->var); break;
+   case X_CAST: fprintf(f, "%u'%s(", e->w, e->s ? "s" : "");
+      xprint(e->a, f);
+      fprintf(f, ")");
+      break;
+   case X_UN: fprintf(f, "%s(", uops[e->uop]);
+      xprint(e->a, f);
+      fprintf(f, ")");
+      break;
+   case X_COND: fprintf(f, "(");
+      xprint(e->a, f);
+      fprintf(f, " ? ");
+      xprint(e->b, f);
+      fprintf(f, " : ");
+      xprint(e->c, f);
+      fprintf(f, ")");
+      break;
+   case X_BIN: fprintf(f, "(");
+      xprint(e->a, f);
+      fprintf(f, " %s[%u%s] ", bops[e->bop], e->w, e->s ? "s" : "");
+      xprint(e->b, f);
+      fprintf(f, ")");
+      break;
+   case X_INSIDE: xprint(e->a, f);
+      fprintf(f, " inside {");
+      for (int i = 0; i < e->nitems; i++)
+         fprintf(f, "%s[%"PRId64":%"PRId64"]", i ? ", " : "", e->lo[i],
+                 e->hi[i]);
+      fprintf(f, "}");
+      break;
+   case X_DIST: xprint(e->a, f);
+      fprintf(f, " dist {...}");
+      break;
+   }
+}
+
+static void print_problem(const problem_t *p, FILE *f)
+{
+   for (int i = 0; i < p->nfields; i++)
+      fprintf(f, "  rand bit %s [%u] f%d\n", p->f[i].s ? "signed" : "",
+              p->f[i].w, i);
+   for (int i = 0; i < p->ncons; i++) {
+      fprintf(f, "  constraint %s ", p->soft[i] ? "soft" : "hard");
+      xprint(p->cons[i], f);
+      fprintf(f, "\n");
+   }
+   for (int i = 0; i < p->nedges; i++)
+      fprintf(f, "  solve f%d before f%d\n", p->before[i], p->after[i]);
+   for (int u = 0; u < p->nuniq; u++) {
+      fprintf(f, "  unique {");
+      for (int i = 0; i < p->uniq_n[u]; i++) {
+         xprint(p->uniq[u][i], f);
+         fprintf(f, ", ");
+      }
+      fprintf(f, "}\n");
+   }
+}
+
+static problem_t fuzz_problem(uint64_t seed)
+{
+   problem_t p = def_base("fuzz");
+   gen_t g = { .r = { seed }, .p = &p };
+
+   // Widths such that the enumeration stays small
+   const int nf = 2 + gen_below(&g, 4);
+   int budget = 13;
+   for (int i = 0; i < nf; i++) {
+      unsigned w = 1 + gen_below(&g, 6);
+      const int left = budget - (nf - 1 - i);
+      if ((int)w > left)
+         w = left;
+      budget -= w;
+      add_field(&p, w, gen_below(&g, 3) == 0);
+   }
+
+   const int ncons = 1 + gen_below(&g, 3);
+   for (int i = 0; i < ncons; i++)
+      add_cons(&p, gen_bool(&g, 3), i > 0 && gen_below(&g, 4) == 0);
+
+   if (gen_below(&g, 6) == 0 && p.nfields > 1) {
+      p.before[0] = gen_below(&g, p.nfields);
+      p.after[0] = (p.before[0] + 1 + gen_below(&g, p.nfields - 1))
+         % p.nfields;
+      p.nedges = 1;
+   }
+
+   if (gen_below(&g, 8) == 0 && p.nfields > 1) {
+      // Unique over two or three fields of the same width and signedness
+      int n = 0;
+      for (int i = 0; i < p.nfields && n < 3; i++) {
+         if (n == 0 || (p.f[i].w == p.uniq[0][0]->w
+                        && p.f[i].s == p.uniq[0][0]->s))
+            p.uniq[0][n++] = xvar(&p, i);
+      }
+      if (n > 1) {
+         p.nuniq = 1;
+         p.uniq_n[0] = n;
+      }
+   }
+
+   return p;
+}
+
+typedef struct {
+   int  problems, with_solutions, unsat, draws;
+   int  incomplete;    // Solutions exist and the solver said there are none
+   int  invalid;       // An answer which is not a kept solution
+   int  false_sat;     // Unsatisfiable and the solver gave an answer
+} fuzz_stats_t;
+
+static bool fuzz_run_one(uint64_t seed, const crv_engine_t *engines,
+                         int nengines, fuzz_stats_t *st, bool verbose)
+{
+   problem_t p = fuzz_problem(seed);
+   model_t m;
+   model_build(&m, &p);
+
+   st->problems++;
+   if (m.nsol > 0)
+      st->with_solutions++;
+   else
+      st->unsat++;
+
+   bool good = true;
+   for (int e = 0; e < nengines; e++) {
+      for (int draw = 0; draw < 3; draw++) {
+         solver_ctx_t sc = { .engine = engines[e] };
+         int64_t a[MAX_FIELDS] = { 0 };
+         bool ok;
+         crv_seed(seed ^ (draw * UINT64_C(0x9e3779b97f4a7c15)));
+         solver_draw(&m, &sc, a, &ok);
+         st->draws++;
+
+         const char *what = NULL;
+         if (ok && m.nsol == 0) {
+            st->false_sat++;
+            what = "a solution for an unsatisfiable problem";
+         }
+         else if (!ok && m.nsol > 0) {
+            st->incomplete++;
+            what = "no solution for a satisfiable one";
+         }
+         else if (ok && m.index[model_key(&p, a)] == 0) {
+            st->invalid++;
+            what = "a value that is not a solution";
+         }
+
+         if (what != NULL && good) {
+            good = false;
+            if (verbose) {
+               printf("fuzz seed %"PRIu64" engine %s draw %d: %s "
+                      "(%d solutions)\n", seed, crv_engine_name(engines[e]),
+                      draw, what, m.nsol);
+               print_problem(&p, stdout);
+               fflush(stdout);
+            }
+         }
+      }
+   }
+
+   model_free(&m);
+   return good;
+}
+
+static double now_seconds(void)
+{
+   struct timespec ts;
+   clock_gettime(CLOCK_MONOTONIC, &ts);
+   return ts.tv_sec + ts.tv_nsec * 1e-9;
+}
+
+static int fuzz_engines(crv_engine_t *engines)
+{
+   // Every stage that exists is checked against the oracle
+   static const crv_engine_t all[] = { CRV_ENGINE_LEGACY, CRV_ENGINE_REJECT,
+                                       CRV_ENGINE_BDD, CRV_ENGINE_SAT };
+   int n = 0;
+   for (size_t i = 0; i < ARRAY_LEN(all); i++) {
+      if (crv_engine_available(all[i]))
+         engines[n++] = all[i];
+   }
+   return n;
+}
+
+START_TEST(test_fuzz)
+{
+   crv_engine_t engines[4];
+   const int nengines = fuzz_engines(engines);
+
+   const char *replay = getenv("NVC_CRV_FUZZ_SEED");
+   const bool lng = long_mode();
+   const double limit = lng ? (getenv("NVC_CRV_FUZZ_SECONDS")
+                               ? atof(getenv("NVC_CRV_FUZZ_SECONDS")) : 600.0)
+      : 3.0;
+
+   // A fixed number of problems from fixed seeds, as many as fit in the
+   // time in the long mode
+   const uint64_t base = replay ? strtoull(replay, NULL, 0) : 1000;
+   fuzz_stats_t st = { 0 };
+   const double start = now_seconds();
+   int bad = 0;
+   for (uint64_t i = 0; replay ? i < 1 : (lng || i < 1500); i++) {
+      if (!fuzz_run_one(base + i, engines, nengines, &st, lng || replay))
+         bad++;
+      if (now_seconds() - start > limit && !replay)
+         break;
+   }
+
+   if (lng || replay)
+      printf("fuzz: %d problems (%d with solutions, %d unsatisfiable), %d "
+             "draws; %d without an answer, %d invalid, %d answered "
+             "although unsatisfiable\n", st.problems, st.with_solutions,
+             st.unsat, st.draws, st.incomplete, st.invalid, st.false_sat);
+
+   // The answers the solver gives are always right; whether it finds one
+   // when there is one is reported, and bounded
+   ck_assert_int_eq(st.invalid, 0);
+   ck_assert_int_eq(st.false_sat, 0);
+   ck_assert_msg(st.incomplete * 50 <= st.draws, "%d of %d draws without an "
+                 "answer", st.incomplete, st.draws);
+   (void)bad;
+}
+END_TEST
+
+////////////////////////////////////////////////////////////////////////////////
 // Engine selection and statistics
 
 START_TEST(test_engine_default)
@@ -2429,6 +2783,7 @@ Suite *get_crv_tests(void)
    tcase_add_loop_test(tc, test_exact_stages, 0, NPROBLEMS);
    tcase_add_loop_test(tc, test_sound_all_engines, 0, NPROBLEMS);
    tcase_add_loop_test(tc, test_bias_report, 0, NPROBLEMS);
+   tcase_add_test(tc, test_fuzz);
    suite_add_tcase(s, tc);
 
    return s;
