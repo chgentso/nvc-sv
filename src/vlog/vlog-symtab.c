@@ -229,6 +229,15 @@ void vlog_symtab_push_members(vlog_symtab_t *st, vlog_node_t class,
             continue;
          }
 
+         if (vlog_kind(d) == V_FUNC_DECL && only == NULL
+             && !(vlog_flags(d) & VLOG_F_STATIC)) {
+            // The methods of the object are found before those of the caller
+            vlog_symbol_t *sym = fresh_symbol_for(st, vlog_ident(d));
+            if (sym->node == NULL)
+               sym->node = d;
+            continue;
+         }
+
          if (vlog_kind(d) != V_VAR_DECL)
             continue;
 

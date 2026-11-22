@@ -110,6 +110,7 @@ typedef struct {
    vlog_node_t    new_class;   // Class of a new expression bound later
    vlog_node_t    update_key;  // Index of the target of an update
    mir_value_t    this_val;
+   mir_value_t    local_this;  // Caller of randomize() with local:: names
    mir_value_t    crv_ctx;
    mir_value_t    crv_obj;
    vlog_node_t    crv_class;
@@ -307,6 +308,7 @@ static mir_value_t vlog_inside_match(vlog_gen_t *g, vlog_node_t item,
 static void vlog_lower_randcase(vlog_gen_t *g, vlog_node_t v, gen_stack_t *gs);
 static void vlog_lower_capture(mir_unit_t *mu, object_t *obj);
 static bool vlog_is_class_handle(vlog_node_t v);
+static bool vlog_crv_chain_has(vlog_node_t class, vlog_node_t decl);
 static void vlog_lower_fork_process(mir_unit_t *mu, object_t *obj);
 static mir_value_t vlog_lower_decl_ptr(vlog_gen_t *g, vlog_node_t decl);
 static mir_value_t vlog_crv_guard_null(vlog_gen_t *g, mir_value_t base,
@@ -10564,8 +10566,14 @@ static mir_value_t vlog_lower_with_context(vlog_gen_t *g, vlog_node_t v,
       {
          vlog_node_t decl = vlog_ref(v);
          mir_value_t this_val = MIR_NULL_VALUE;
-         if (vlog_has_ref(decl) && !(vlog_flags(decl) & VLOG_F_STATIC))
-            this_val = vlog_lower_this(g);
+         if (vlog_has_ref(decl) && !(vlog_flags(decl) & VLOG_F_STATIC)) {
+            // A method of the caller named by local:: in a constraint block
+            if (g->crv_class != NULL && !mir_is_null(g->local_this)
+                && !vlog_crv_chain_has(g->crv_class, decl))
+               this_val = g->local_this;
+            else
+               this_val = vlog_lower_this(g);
+         }
 
          return vlog_widen_vector(g, vlog_lower_subr_call(g, decl, v, this_val,
                                                           false), context);
@@ -28486,6 +28494,9 @@ static mir_value_t vlog_lower_randomize(vlog_gen_t *g, vlog_node_t v)
    vlog_crv_call_phase(g, class, obj, ctx, CRV_PHASE_BUILD);
 
    mir_value_t saved_this = g->this_val;
+   mir_value_t saved_local = g->local_this;
+   g->local_this = !mir_is_null(saved_this) ? saved_this
+      : vlog_in_class_scope(g) ? vlog_lower_this(g) : MIR_NULL_VALUE;
    g->this_val = obj;
 
    const int nstmts = vlog_stmts(v);
@@ -28493,6 +28504,7 @@ static mir_value_t vlog_lower_randomize(vlog_gen_t *g, vlog_node_t v)
       vlog_crv_items(g, vlog_stmt(v, i), MIR_NULL_VALUE, NULL);
 
    g->this_val = saved_this;
+   g->local_this = saved_local;
 
    mir_value_t ok = CRV1(g, CRV_OP_SOLVE, ctx);
 

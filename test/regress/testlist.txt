@@ -3109,3 +3109,4 @@ vlog_unarychain1 verilog
 svcrvfwdbase1 verilog
 svcrvlateprop1 verilog
 svcrvmodeq1 verilog
+svcrvlocalcall1 verilog

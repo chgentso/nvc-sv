@@ -7302,6 +7302,24 @@ static vlog_node_t p_local_scope_select(void)
       return p_select(id);
    }
 
+   if (peek() == tLPAREN) {
+      // A function of the scope of the caller rather than one of the
+      // object being randomized
+      vlog_node_t v = vlog_new(V_USER_FCALL);
+      vlog_set_ident(v, id);
+
+      consume(tLPAREN);
+      p_list_of_arguments(v);
+      consume(tRPAREN);
+
+      vlog_set_loc(v, CURRENT_LOC);
+
+      vlog_scope_t *inner = vlog_symtab_enter(symtab, local_scope);
+      vlog_symtab_lookup(symtab, v);
+      vlog_symtab_enter(symtab, inner);
+      return v;
+   }
+
    // Skip the members of the object being randomized, but not the
    // variables of the constraint which the indexes may refer to
    select_scope = local_scope;
