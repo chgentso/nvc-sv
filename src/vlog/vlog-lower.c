@@ -133,6 +133,7 @@ typedef struct {
    const type_info_t *unbound;
    unsigned           bind_size;   // Number of nets expected when binding
    vlog_node_t    fork_root;
+   hash_t        *fork_escape;
    gen_stack_t   *wait_gs;
    hash_t        *past;
    bool           in_sva;
@@ -20829,6 +20830,32 @@ static void vlog_fork_after_cb(vlog_node_t v, void *context)
    vlog_fork_written_cb(v, a->set);
 }
 
+typedef struct {
+   vlog_node_t subr;
+   hash_t     *set;
+} fork_escape_t;
+
+static void vlog_collect_fork_escapes_cb(vlog_node_t v, void *context)
+{
+   // Automatic locals of a task captured by reference in fork..join_none may
+   // outlive the task's stack frame once it returns
+
+   if (vlog_kind(v) != V_FORK || vlog_subkind(v) != V_FORK_JOIN_NONE)
+      return;
+
+   fork_escape_t *fe = context;
+   if (fe->set == NULL)
+      fe->set = hash_new(16);
+
+   const int nstmts = vlog_stmts(v);
+   for (int i = 0; i < nstmts; i++)
+      vlog_visit(vlog_stmt(v, i), vlog_fork_written_cb, fe->set);
+
+   fork_after_t after = { .set = fe->set, .loc = vlog_loc(v) };
+   vlog_visit(fe->subr, vlog_fork_after_cb, &after);
+   vlog_visit(fe->subr, vlog_fork_siblings_cb, fe->set);
+}
+
 static void vlog_fork_wait_loop(vlog_gen_t *g, mir_value_t group_var, int mode)
 {
    // Suspend until the runtime says the wait is satisfied
@@ -21026,7 +21053,9 @@ static void vlog_lower_fork(vlog_gen_t *g, vlog_node_t v, gen_stack_t *gs)
          int hops;
          mir_value_t var = mir_search_object(g->mu, d, &hops);
          const bool is_ref = mir_points_to(g->mu, var, MIR_TYPE_POINTER);
-         if (is_ref && !caps->by_ref[j])
+         const bool boxed = g->fork_escape != NULL
+            && hash_get(g->fork_escape, d) != NULL;
+         if (is_ref && !caps->by_ref[j] && !boxed)
             fatal_at(vlog_loc(s), "sorry, references cannot be captured by "
                      "a process forked with join_none");
 
@@ -21048,7 +21077,8 @@ static void vlog_lower_fork(vlog_gen_t *g, vlog_node_t v, gen_stack_t *gs)
          else {
             mir_value_t link = mir_build_link_var(g->mu, frame, field,
                                                   ti->type);
-            mir_build_store(g->mu, link, mir_build_load(g->mu, var));
+            mir_value_t src = boxed ? mir_build_load(g->mu, var) : var;
+            mir_build_store(g->mu, link, mir_build_load(g->mu, src));
          }
       }
 
@@ -30784,6 +30814,9 @@ static void vlog_lower_cleanup(vlog_gen_t *g)
 
    if (g->temps != NULL)
       ihash_free(g->temps);
+
+   if (g->fork_escape != NULL)
+      hash_free(g->fork_escape);
 }
 
 static void vlog_lower_deferred(mir_unit_t *mu, object_t *obj)
@@ -31984,6 +32017,17 @@ static mir_value_t vlog_add_local_var(vlog_gen_t *g, vlog_node_t d,
    if (vlog_is_ref_property(d))
       type = vlog_ref_cell_type(g->mu, ti);
 
+   if (g->fork_escape != NULL && hash_get(g->fork_escape, d) != NULL
+       && nelems == 1 && !vlog_is_ref_property(d)) {
+      mir_value_t acc = mir_build_new(g->mu, type, ti->stamp, MIR_NULL_VALUE);
+      mir_value_t cell = mir_build_all(g->mu, acc);
+      mir_type_t t_ptr = mir_pointer_type(g->mu, type);
+      mir_value_t var = mir_add_var(g->mu, t_ptr, ti->stamp, name, 0);
+      mir_build_store(g->mu, var, cell);
+      mir_put_object(g->mu, d, var);
+      return cell;
+   }
+
    mir_value_t var = mir_add_var(g->mu, type, ti->stamp, name, 0);
    mir_put_object(g->mu, d, var);
    return var;
@@ -32729,6 +32773,10 @@ static void vlog_lower_task_decl(mir_unit_t *mu, object_t *obj)
    }
 
    gen_stack_t gs = {};
+
+   fork_escape_t fe = { .subr = v };
+   vlog_visit(v, vlog_collect_fork_escapes_cb, &fe);
+   g.fork_escape = fe.set;
 
    vlog_lower_locals(&g, v);
 
