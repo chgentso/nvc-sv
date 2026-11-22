@@ -2326,9 +2326,9 @@ static vlog_select_t vlog_lower_select(vlog_gen_t *g, vlog_node_t v)
                      if (vlog_is_dynamic_type(tdecl)) {
                         // Events, strings, and the like are plain variables
                         if (uninst)
-                           ptr = mir_build_null(g->mu,
-                                                mir_pointer_type(g->mu,
-                                                                 ti->type));
+                           ptr = mir_add_var(g->mu, ti->type, ti->stamp,
+                                             ident_uniq("uninst_vif"),
+                                             MIR_VAR_TEMP);
                         else
                            ptr = mir_build_link_var(g->mu, base,
                                                     vlog_ident(decl),
@@ -2343,8 +2343,9 @@ static vlog_select_t vlog_lower_select(vlog_gen_t *g, vlog_node_t v)
                                                    mir_int_type(g->mu, 0, 255));
 
                      if (uninst) {
-                        mir_value_t dummy = mir_build_null(
-                           g->mu, mir_pointer_type(g->mu, t_signal));
+                        mir_value_t dummy = mir_add_var(
+                           g->mu, t_signal, MIR_NULL_STAMP,
+                           ident_uniq("uninst_vif"), MIR_VAR_TEMP);
                         ptr = mir_build_load(g->mu, dummy);
                      }
                      else {
@@ -25446,9 +25447,12 @@ static void vlog_crv_foreach_elems(vlog_gen_t *g, vlog_node_t v,
    const int nstmts = vlog_stmts(v);
    const int step = left <= right ? 1 : -1;
 
+   const mir_class_t iclass = mir_get_class(g->mu, iti->type);
    for (int64_t i = left; ; i += step) {
-      mir_build_store(g->mu, ivar,
-                      vlog_lower_cast(g, iti->type, vlog_crv_int(g, i)));
+      mir_value_t ival = (iclass == MIR_TYPE_VEC2 || iclass == MIR_TYPE_VEC4)
+         ? mir_const_vec(g->mu, iti->type, i, 0)
+         : mir_const(g->mu, iti->type, i);
+      mir_build_store(g->mu, ivar, ival);
 
       g->crv_index[saved_nindex].decl = idecl;
       g->crv_index[saved_nindex].node =
