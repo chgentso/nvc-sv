@@ -383,7 +383,8 @@ static void gen_cp_init(gen_t *s, int i)
          bool neg;
          with_elem_t *elems;
          int nelems;
-         if (with_inside_parse(b->with_expr, &neg, &elems, &nelems)) {
+         if (!b->with_arrays
+             && with_inside_parse(b->with_expr, &neg, &elems, &nelems)) {
             // The selected values are a range minus or intersected with
             // some others, which is found without visiting every value
             for (int e = 0; e < nelems; e++) {

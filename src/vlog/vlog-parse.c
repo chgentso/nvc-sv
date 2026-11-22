@@ -16511,6 +16511,50 @@ static cov_toks_t cov_capture(const token_t *stops, bool rep_stop)
    return (cov_toks_t){ t, n };
 }
 
+static bool cov_may_be_array(cov_toks_t t)
+{
+   // A name in the tokens may stand for an array, which an inside list
+   // takes the elements of, or cannot be resolved yet
+
+   for (int i = 0; i < t.n; i++) {
+      if (t.t[i].token != tID)
+         continue;
+      else if (i > 0 && (t.t[i - 1].token == tDOT
+                         || t.t[i - 1].token == tSCOPE))
+         continue;
+      else if (t.t[i].lval.ident == ident_new("item"))
+         continue;
+
+      vlog_node_t d = NULL;
+      if (i + 2 < t.n && t.t[i + 1].token == tSCOPE && t.t[i + 2].token == tID) {
+         vlog_node_t pack = package_by_name(t.t[i].lval.ident);
+         d = pack ? vlog_scope_member(pack, t.t[i + 2].lval.ident) : NULL;
+      }
+      else
+         d = vlog_symtab_query(symtab, t.t[i].lval.ident);
+
+      if (d == NULL)
+         return true;
+
+      switch (vlog_kind(d)) {
+      case V_VAR_DECL:
+      case V_NET_DECL:
+      case V_PARAM_DECL:
+      case V_LOCALPARAM:
+      case V_PORT_DECL:
+      case V_LOCAL_DECL:
+         if (vlog_ranges(d) > 0 || vlog_is_fixed_unpacked(d)
+             || (vlog_has_type(d) && vlog_is_dynamic_type(vlog_type(d))))
+            return true;
+         break;
+      default:
+         break;
+      }
+   }
+
+   return false;
+}
+
 static bool cov_sorry_at(cov_parse_t *cp, const loc_t *loc, const char *what)
 {
    if (!cp->failed)
@@ -16706,6 +16750,7 @@ static bool p_cov_bins(cov_parse_t *cp, cov_cp_t *c)
          consume(tLPAREN);
          b.has_with = true;
          b.with_expr = cov_capture(stops, false);
+         b.with_arrays = cov_may_be_array(b.with_expr);
          consume(tRPAREN);
          if (!cov_expect_nonempty(cp, b.with_expr))
             return false;
@@ -16750,6 +16795,7 @@ static bool p_cov_bins(cov_parse_t *cp, cov_cp_t *c)
 
          b.has_with = true;
          b.with_expr = cov_capture(stops, false);
+         b.with_arrays = cov_may_be_array(b.with_expr);
          consume(tRPAREN);
          if (!cov_expect_nonempty(cp, b.with_expr))
             return false;

@@ -57,6 +57,7 @@ typedef struct {
    bool           wildcard;
    bool           trans;
    bool           has_with;
+   bool           with_arrays;   // A name may be an array or is unknown
    cov_toks_t     with_expr;
    bool           has_set;
    cov_toks_t     set_expr;

@@ -31,7 +31,16 @@ module vlog_cov_with_inside;
     }
   endgroup
 
+  // A name in the list may be an array whose elements are the values
+  int arr[] = '{40, 41, 42, 43};
+  covergroup gc with function sample(bit [7:0] v);
+    cp: coverpoint v {
+      bins a[4] = {[0:255]} with (item inside {arr});
+    }
+  endgroup
+
   ga a = new;
+  gc c = new;
   gb b = new;
   gw w = new;
   int bad;
@@ -47,6 +56,11 @@ module vlog_cov_with_inside;
       end
     end
     if (a.get_inst_coverage() <= 0.0) bad++;
+    c.sample(41);
+    if (c.get_inst_coverage() != 25.0) begin
+      $display("array list: %f", c.get_inst_coverage());
+      bad++;
+    end
     w.sample(32'h5);
     w.sample(32'hffff_fff0);
     if (w.get_inst_coverage() <= 0.0 || w.get_inst_coverage() >= 100.0) bad++;
