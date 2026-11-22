@@ -309,6 +309,12 @@ static void vlog_lower_randcase(vlog_gen_t *g, vlog_node_t v, gen_stack_t *gs);
 static void vlog_lower_capture(mir_unit_t *mu, object_t *obj);
 static bool vlog_is_class_handle(vlog_node_t v);
 static bool vlog_crv_chain_has(vlog_node_t class, vlog_node_t decl);
+static bool vlog_crv_is_array_decl(vlog_node_t decl);
+static bool vlog_crv_is_dynamic_array(vlog_node_t decl);
+static vlog_node_t vlog_crv_assoc_type(vlog_node_t decl);
+static vlog_node_t vlog_crv_elem_struct(vlog_node_t decl);
+static vlog_node_t vlog_crv_elem_type(vlog_node_t decl);
+static bool vlog_crv_is_integral(vlog_gen_t *g, vlog_node_t type);
 static void vlog_lower_fork_process(mir_unit_t *mu, object_t *obj);
 static mir_value_t vlog_lower_decl_ptr(vlog_gen_t *g, vlog_node_t decl);
 static mir_value_t vlog_crv_guard_null(vlog_gen_t *g, mir_value_t base,
@@ -21598,6 +21604,46 @@ static bool vlog_crv_is_target(vlog_gen_t *g, vlog_node_t decl)
    return vlog_crv_chain_has(g->crv_class, decl);
 }
 
+static bool vlog_crv_std_group(vlog_gen_t *g, vlog_node_t std, int first,
+                               vlog_node_t *decl)
+{
+   // The parser expands an array which is passed to std::randomize into
+   // its elements.  When all of the elements of a one dimensional array of
+   // integral values are there the array is solved as one array, so that
+   // it can be used as a whole in the constraints.
+
+   const int nparams = vlog_params(std);
+   vlog_node_t p = vlog_param(std, first);
+   if (vlog_kind(p) != V_BIT_SELECT || vlog_params(p) != 1
+       || vlog_kind(vlog_value(p)) != V_REF || !vlog_has_ref(vlog_value(p)))
+      return false;
+
+   vlog_node_t d = vlog_ref(vlog_value(p));
+   if (!vlog_crv_is_array_decl(d) || vlog_crv_is_dynamic_array(d)
+       || vlog_crv_assoc_type(d) != NULL || vlog_ranges(d) != 1
+       || vlog_crv_elem_struct(d) != NULL
+       || !vlog_crv_is_integral(g, vlog_crv_elem_type(d))
+       || vlog_type_info(g, vlog_crv_elem_type(d))->size > 64)
+      return false;
+
+   const int count = vlog_size(vlog_range(d, 0));
+   if (first + count > nparams)
+      return false;
+
+   for (int i = 0; i < count; i++) {
+      vlog_node_t e = vlog_param(std, first + i);
+      int64_t index;
+      if (vlog_kind(e) != V_BIT_SELECT || vlog_params(e) != 1
+          || vlog_kind(vlog_value(e)) != V_REF || !vlog_has_ref(vlog_value(e))
+          || vlog_ref(vlog_value(e)) != d
+          || !vlog_get_const(vlog_param(e, 0), &index))
+         return false;
+   }
+
+   *decl = d;
+   return true;
+}
+
 static bool vlog_crv_is_std_var(vlog_gen_t *g, vlog_node_t decl)
 {
    if (g->crv_std == NULL)
@@ -21607,6 +21653,12 @@ static bool vlog_crv_is_std_var(vlog_gen_t *g, vlog_node_t decl)
    for (int i = 0; i < nparams; i++) {
       vlog_node_t p = vlog_param(g->crv_std, i);
       if (vlog_kind(p) == V_REF && vlog_ref(p) == decl)
+         return true;
+
+      vlog_node_t d;
+      if (vlog_kind(p) == V_BIT_SELECT && vlog_has_ref(vlog_value(p))
+          && vlog_ref(vlog_value(p)) == decl
+          && vlog_crv_std_group(g, g->crv_std, i, &d))
          return true;
    }
 
@@ -28710,10 +28762,43 @@ static mir_value_t vlog_lower_std_randomize(vlog_gen_t *g, vlog_node_t v)
    int *firstvar LOCAL = xmalloc_array(nparams + 1, sizeof(int));
    bool *is_array LOCAL = xcalloc_array(nparams, sizeof(bool));
    bool *is_wide LOCAL = xcalloc_array(nparams, sizeof(bool));
+   bool *skip LOCAL = xcalloc_array(nparams, sizeof(bool));
+   vlog_node_t *group LOCAL = xcalloc_array(nparams, sizeof(vlog_node_t));
    int nvars = 0;
 
    for (int i = 0; i < nparams; i++) {
       vlog_node_t p = vlog_param(v, i);
+
+      if (skip[i]) {
+         firstvar[i] = nvars;
+         continue;
+      }
+
+      vlog_node_t gd;
+      if (vlog_kind(p) == V_BIT_SELECT && vlog_crv_std_group(g, v, i, &gd)) {
+         // Every element of an array: one solver array
+         const type_info_t *eti = vlog_type_info(g, vlog_crv_elem_type(gd));
+         mir_value_t data, len;
+         vlog_crv_array_data(g, vlog_value(p), &data, &len);
+
+         const int fl = CRV_FLAGS(eti->size, mir_get_signed(g->mu, eti->type));
+         mir_value_t array = CRV6(g, CRV_OP_ARRAY, ctx, vlog_crv_int(g, 0),
+                                  vlog_crv_key(g, gd), vlog_crv_int(g, fl),
+                                  len, vlog_crv_int(g, 1));
+         if (mir_is_signal(g->mu, data))
+            vlog_crv_signal_array_load(g, array, data, len, eti);
+         else
+            vlog_crv_array_load(g, ctx, array, data, len, false);
+
+         group[i] = gd;
+         for (int k = 1; k < vlog_size(vlog_range(gd, 0)); k++)
+            skip[i + k] = true;
+
+         firstvar[i] = nvars;
+         vars = xrealloc_array(vars, nvars + 1, sizeof(mir_value_t));
+         vars[nvars++] = array;
+         continue;
+      }
 
       if (vlog_kind(p) == V_REF && vlog_has_ref(p)
           && vlog_crv_is_array_decl(vlog_ref(p))
@@ -28862,6 +28947,29 @@ static mir_value_t vlog_lower_std_randomize(vlog_gen_t *g, vlog_node_t v)
 
    for (int i = 0; i < nparams; i++) {
       vlog_node_t p = vlog_param(v, i);
+
+      if (skip[i])
+         continue;
+      else if (group[i] != NULL) {
+         vlog_node_t gd = group[i];
+         const type_info_t *eti = vlog_type_info(g, vlog_crv_elem_type(gd));
+         int64_t left, right;
+         vlog_bounds(vlog_range(gd, 0), &left, &right);
+
+         for (int k = 0; k < vlog_size(vlog_range(gd, 0)); k++) {
+            vlog_node_t e = vlog_param(v, i + k);
+            int64_t index = 0;
+            vlog_get_const(vlog_param(e, 0), &index);
+            const int64_t pos = left <= right ? index - left : left - index;
+
+            mir_value_t value = vlog_crv_from_offset(
+               g, CRV3(g, CRV_OP_ARRAY_VALUE, ctx, vars[firstvar[i]],
+                       vlog_crv_int(g, pos)), eti->type);
+            vlog_assign_variable(g, e, value, NULL);
+         }
+
+         continue;
+      }
 
       if (is_array[i]) {
          vlog_node_t decl = vlog_ref(p);
