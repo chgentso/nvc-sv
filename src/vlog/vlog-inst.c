@@ -231,10 +231,14 @@ static bool copy_instance_pred(vlog_node_t v, void *ctx)
       return copy_scope == NULL && (vlog_flags(v) & VLOG_F_TYPEPARAM);
    case V_SYS_TCALL:
    case V_SYS_FCALL:
-      return vlog_design_precision() >= 0 && !is_shared(v);
+      // A call in a declaration outside a generate block is not copied with
+      // the block or the declaration would no longer be the one it uses
+      return vlog_design_precision() >= 0 && !is_shared(v)
+         && (copy_scope == NULL || hset_contains(copy_scope, v));
    case V_NUMBER:
       return !!(vlog_flags(v) & (VLOG_F_TIMELIT | VLOG_F_ONESTEP))
-         && !is_shared(v);
+         && !is_shared(v)
+         && (copy_scope == NULL || hset_contains(copy_scope, v));
    case V_FUNC_DECL:
    case V_TASK_DECL:
    case V_CLASS_DECL:
