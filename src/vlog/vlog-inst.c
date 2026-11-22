@@ -184,6 +184,8 @@ static bool copy_instance_pred(vlog_node_t v, void *ctx)
 {
    switch (vlog_kind(v)) {
    case V_REF:
+      if (!vlog_has_ref(v))
+         return false;
       switch (vlog_kind(vlog_ref(v))) {
       case V_PARAM_DECL:
       case V_GENVAR_DECL:
