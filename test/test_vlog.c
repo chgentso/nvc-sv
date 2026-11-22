@@ -2902,9 +2902,9 @@ START_TEST(test_crv2)
    set_default_keywords(VLOG_1800_2023);
 
    const error_t expect[] = {
+      { 11, "duplicate declaration of 'k3'" },
       {  8, "sorry, skipping a loop variable in foreach is not supported" },
       {  9, "no visible declaration for 'zzz'" },
-      { 11, "duplicate declaration of 'k3'" },
       { 26, "no visible declaration for 'zzz'" },
       { 27, "'x' has no method named 'randomize'" },
       { 28, "sorry, an identifier list after with is not supported" },
