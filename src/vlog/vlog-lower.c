@@ -22038,6 +22038,21 @@ typedef struct {
    int         nouter;
 } crv_nest_t;
 
+static bool vlog_crv_is_container_of_containers(vlog_node_t type)
+{
+   // A dynamic array or queue whose elements are dynamic arrays or queues,
+   // which is an outer level of an array of arrays with a length of its own
+
+   if (vlog_kind(type) != V_DATA_TYPE || vlog_ranges(type) > 0
+       || (vlog_subkind(type) != DT_DYNARRAY && vlog_subkind(type) != DT_QUEUE))
+      return false;
+
+   vlog_node_t elem = vlog_get_type(vlog_type(type));
+   return elem != NULL && vlog_kind(elem) == V_DATA_TYPE
+      && (vlog_subkind(elem) == DT_DYNARRAY || vlog_subkind(elem) == DT_QUEUE)
+      && vlog_ranges(elem) == 0;
+}
+
 static bool vlog_crv_nest(vlog_node_t decl, crv_nest_t *n)
 {
    // A property which is a fixed size array of queues or dynamic arrays
@@ -22054,7 +22069,8 @@ static bool vlog_crv_nest(vlog_node_t decl, crv_nest_t *n)
 
    vlog_node_t type = vlog_get_type(vlog_type(decl));
    while (type != NULL && vlog_kind(type) == V_DATA_TYPE
-          && vlog_subkind(type) == DT_DYNARRAY && vlog_ranges(type) > 0) {
+          && ((vlog_subkind(type) == DT_DYNARRAY && vlog_ranges(type) > 0)
+              || vlog_crv_is_container_of_containers(type))) {
       if (n->nouter == CRV_MAX_OUTER)
          return false;
 
@@ -22100,7 +22116,7 @@ static bool vlog_crv_is_skipped(vlog_gen_t *g, vlog_node_t decl)
 
    crv_nest_t n;
    if (vlog_crv_nest(decl, &n))
-      return false;
+      return n.st == NULL && !vlog_crv_is_integral(g, vlog_type(n.inner));
 
    vlog_node_t etype = vlog_crv_elem_type(decl);
    vlog_node_t ctype = vlog_get_type(etype);
@@ -22941,6 +22957,13 @@ static mir_value_t vlog_crv_nest_acc(vlog_gen_t *g, mir_value_t acc,
 static bool vlog_crv_nest_bounds(vlog_node_t type, int64_t *left,
                                  int64_t *right)
 {
+   if (vlog_ranges(type) == 0) {
+      // The length is known when the object is randomized
+      *left = 0;
+      *right = 1;
+      return true;
+   }
+
    vlog_node_t dim = vlog_range(type, 0);
    return vlog_get_const(vlog_left(dim), left)
       && vlog_get_const(vlog_right(dim), right);
