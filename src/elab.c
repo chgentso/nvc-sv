@@ -2091,6 +2091,10 @@ static vlog_node_t elab_array_port_value(vlog_node_t inst, vlog_node_t port,
    // elements, otherwise every element is connected to the same value
 
    const int count = vlog_ival(inst) >> 32, pos = vlog_ival(inst) & 0xffffffff;
+
+   if (vlog_kind(value) == V_HIER_REF && !vlog_has_ref(value))
+      return value;   // Bound later and takes the width of the port
+
    const unsigned pw = vlog_width(port), vw = vlog_width(value);
 
    if (count >= 2 && vw != pw && vw != pw * count
