@@ -18738,10 +18738,12 @@ static vlog_node_t p_generic_class(ident_t name, vlog_flags_t flags)
       }
    }
 
-   vlog_node_t v = resolve_forward_class(name);
-   if (v == NULL)
-      v = vlog_new(V_CLASS_DECL);
+   vlog_node_t fwd = vlog_symtab_query(symtab, name);
+   if (fwd != NULL && (vlog_kind(fwd) != V_CLASS_DECL
+                       || !(vlog_flags(fwd) & VLOG_F_FORWARD)))
+      fwd = NULL;
 
+   vlog_node_t v = vlog_new(V_CLASS_DECL);
    vlog_set_ident(v, name);
    vlog_set_flags(v, flags | VLOG_F_GENERIC);
    vlog_set_loc(v, CURRENT_LOC);
@@ -18754,15 +18756,42 @@ static vlog_node_t p_generic_class(ident_t name, vlog_flags_t flags)
 
    vlog_symtab_put(symtab, v);
 
-   if (flags & VLOG_F_INTERFACE) {
-      // Specialise with the default values so that errors in the
-      // declaration are found even if it is never used
-      bool all_default = true;
-      for (int i = 0; i < g->nparams; i++)
-         all_default &= g->params[i].has_def;
+   if (fwd != NULL) {
+      for (int i = 0; i < forward_classes.count; i++) {
+         if (forward_classes.items[i] == fwd) {
+            for (int j = i; j < forward_classes.count - 1; j++)
+               forward_classes.items[j] = forward_classes.items[j + 1];
+            ATRIM(forward_classes, forward_classes.count - 1);
+            break;
+         }
+      }
 
-      if (all_default)
+      for (int i = 0; i < forward_specs.count; i++) {
+         if (forward_specs.items[i].forward == fwd)
+            forward_specs.items[i].forward = v;
+      }
+   }
+
+   bool all_default = true;
+   for (int i = 0; i < g->nparams; i++)
+      all_default &= g->params[i].has_def;
+
+   if (fwd != NULL && all_default) {
+      // Bare references to a forward-declared generic class refer to its
+      // default specialisation
+      spec_into = fwd;
+      (void)specialise_class(v);
+      spec_into = NULL;
+   }
+   else {
+      if (fwd != NULL)
+         vlog_clear_flags(fwd, VLOG_F_FORWARD);
+
+      if ((flags & VLOG_F_INTERFACE) && all_default) {
+         // Specialise with the default values so that errors in the
+         // declaration are found even if it is never used
          (void)specialise_class(v);
+      }
    }
 
    resolve_forward_specs(v);
