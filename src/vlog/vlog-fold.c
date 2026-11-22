@@ -209,6 +209,9 @@ static fold_state_t get_fold_state(vlog_node_t v, fold_ctx_t *ctx)
       return FOLD_CONST;
    case V_REF:
       {
+         if (!vlog_has_ref(v))
+            return FOLD_NON_CONST;
+
          vlog_node_t d = vlog_ref(v);
          switch (vlog_kind(d)) {
          case V_LOCALPARAM:
@@ -432,6 +435,9 @@ static fold_state_t get_fold_state(vlog_node_t v, fold_ctx_t *ctx)
       }
    case V_PATTERN_EXPR:
       {
+         if (!vlog_has_type(v))
+            return FOLD_NON_CONST;
+
          fold_state_t state = FOLD_CONST;
          const int nparams = vlog_params(v);
          for (int i = 0; i < nparams; i++) {

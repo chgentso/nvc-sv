@@ -9520,10 +9520,11 @@ static mir_value_t vlog_lower_packed_default(vlog_gen_t *g, vlog_node_t dt,
    return vlog_lower_cast(g, ti->type, elem);
 }
 
-static mir_value_t vlog_lower_pattern_expr(vlog_gen_t *g, vlog_node_t v,
-                                           mir_type_t context)
+static mir_value_t vlog_lower_pattern_with_type(vlog_gen_t *g, vlog_node_t v,
+                                                vlog_node_t dt,
+                                                mir_type_t context)
 {
-   vlog_node_t dt = vlog_type(v);
+   dt = vlog_get_type(dt);
    const type_info_t *ti = vlog_type_info(g, dt);
 
    vlog_node_t base = vlog_get_type(dt);
@@ -9551,7 +9552,9 @@ static mir_value_t vlog_lower_pattern_expr(vlog_gen_t *g, vlog_node_t v,
          else if (vlog_has_left(item)) {
             vlog_node_t key = vlog_left(item);
             for (int f = 0; f < ndecls; f++) {
-               if (vlog_decl(base, f) == vlog_ref(key))
+               vlog_node_t fd = vlog_decl(base, f);
+               if (vlog_has_ref(key) ? fd == vlog_ref(key)
+                   : vlog_ident(fd) == vlog_ident(key))
                   covered[f] = true;
             }
          }
@@ -9567,7 +9570,15 @@ static mir_value_t vlog_lower_pattern_expr(vlog_gen_t *g, vlog_node_t v,
          int field = i;
          if (vlog_has_left(item)) {
             vlog_node_t key = vlog_left(item);
-            for (field = 0; vlog_decl(base, field) != vlog_ref(key); field++);
+            for (field = 0; field < ndecls; field++) {
+               vlog_node_t fd = vlog_decl(base, field);
+               if (vlog_has_ref(key) ? fd == vlog_ref(key)
+                   : vlog_ident(fd) == vlog_ident(key))
+                  break;
+            }
+            if (field == ndecls)
+               fatal_at(vlog_loc(key), "struct or union has no field %pQ",
+                        vlog_ident(key));
          }
 
          vlog_node_t fd = vlog_decl(base, field);
@@ -9727,11 +9738,12 @@ static mir_value_t vlog_lower_pattern_expr(vlog_gen_t *g, vlog_node_t v,
             keys[i] = ival;
       }
       else {
-         vlog_node_t f = vlog_ref(vlog_left(item));
+         vlog_node_t key = vlog_left(item);
          const int ndecls = vlog_decls(dt);
          for (int j = 0; j < ndecls; j++) {
             vlog_node_t d = vlog_decl(dt, j);
-            if (d == f) {
+            if (vlog_has_ref(key) ? d == vlog_ref(key)
+                : vlog_ident(d) == vlog_ident(key)) {
                keys[i] = j;
                break;
             }
@@ -9862,6 +9874,12 @@ static mir_value_t vlog_lower_pattern_expr(vlog_gen_t *g, vlog_node_t v,
    }
 
    return vlog_widen_vector(g, result, context);
+}
+
+static mir_value_t vlog_lower_pattern_expr(vlog_gen_t *g, vlog_node_t v,
+                                           mir_type_t context)
+{
+   return vlog_lower_pattern_with_type(g, v, vlog_type(v), context);
 }
 
 static mir_value_t vlog_lower_class_new(vlog_gen_t *g, vlog_node_t v);
@@ -12719,8 +12737,13 @@ static void vlog_lower_force(vlog_gen_t *g, vlog_node_t v)
       mir_value_t cast = MIR_NULL_VALUE;
       if (vlog_kind(v) != V_RELEASE) {
          vlog_node_t rhs = vlog_value(v);
-         mir_value_t value = vlog_lower_with_context(
-            g, rhs, vlog_assign_context(g, lvalue.type, rhs));
+         mir_value_t value;
+         if (vlog_kind(rhs) == V_PATTERN_EXPR && !vlog_has_type(rhs))
+            value = vlog_lower_pattern_with_type(g, rhs, vlog_get_type(target),
+                                                 lvalue.type);
+         else
+            value = vlog_lower_with_context(
+               g, rhs, vlog_assign_context(g, lvalue.type, rhs));
          cast = vlog_lower_cast(g, lvalue.type, value);
       }
       vlog_lower_force_one(g, v, target, &lvalue, cast);
@@ -20200,7 +20223,13 @@ static mir_value_t vlog_lower_subr_call(vlog_gen_t *g, vlog_node_t decl,
          vlog_check_virtual_types(vlog_get_type(port), vlog_get_type(actual),
                                   vlog_loc(actual));
 
-         mir_value_t value = vlog_lower_with_context(g, actual, vlog_assign_context(g, ti->type, actual));
+         mir_value_t value;
+         if (vlog_kind(actual) == V_PATTERN_EXPR && !vlog_has_type(actual))
+            value = vlog_lower_pattern_with_type(g, actual, vlog_type(port),
+                                                 ti->type);
+         else
+            value = vlog_lower_with_context(
+               g, actual, vlog_assign_context(g, ti->type, actual));
          if (mir_get_class(g->mu, ti->type) == MIR_TYPE_UARRAY
              && mir_is_vector(g->mu, value)) {
             vlog_node_t ptype = vlog_get_type(port);
@@ -30393,6 +30422,10 @@ static void vlog_lower_port_map(vlog_gen_t *g, vlog_node_t v)
                dims[i] = vlog_range(decl, i);
             value = vlog_lower_array_pattern(g, vlog_value(v), dims, ndims, ti);
          }
+         else if (vlog_kind(vlog_value(v)) == V_PATTERN_EXPR
+                  && !vlog_has_type(vlog_value(v)))
+            value = vlog_lower_pattern_with_type(g, vlog_value(v),
+                                                 vlog_type(port), ti->type);
          else
             value = vlog_lower_with_context(
                g, vlog_value(v), vlog_assign_context(g, ti->type, vlog_value(v)));

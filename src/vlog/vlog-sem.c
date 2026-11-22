@@ -3891,8 +3891,18 @@ static type_mask_t vlog_check_min_typ_max(vlog_node_t v)
 
 static type_mask_t vlog_check_pattern_expr_ex(vlog_node_t v, bool sized_dyn)
 {
-   if (!vlog_has_type(v))
+   if (!vlog_has_type(v)) {
+      if (error_count() == 0) {
+         const int nparams = vlog_params(v);
+         for (int i = 0; i < nparams; i++) {
+            vlog_node_t item = vlog_param(v, i);
+            if (vlog_kind(item) == V_PATTERN_ITEM && vlog_has_right(item))
+               (void)vlog_check_expr(vlog_right(item));
+         }
+         return TM_ANY;
+      }
       return TM_ERROR;
+   }
 
    vlog_node_t type = vlog_type(v);
    vlog_node_t bt = vlog_get_type(type);

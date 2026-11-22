@@ -1238,7 +1238,7 @@ unsigned vlog_width(vlog_node_t v)
    case V_THIS:
       return 0;
    case V_PATTERN_EXPR:
-      return vlog_size(vlog_get_type(v));
+      return vlog_has_type(v) ? vlog_size(vlog_get_type(v)) : 1;
    case V_DOLLAR:
    case V_STD_RANDOMIZE:
       return 32;

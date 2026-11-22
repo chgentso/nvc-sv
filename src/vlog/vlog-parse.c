@@ -119,6 +119,7 @@ static vlog_node_t p_class_declaration(void);
 static vlog_node_t p_class_new(vlog_node_t dt);
 static vlog_node_t p_dynamic_array_new(vlog_node_t dt);
 static vlog_node_t p_assignment_pattern_expression(vlog_node_t dt);
+static vlog_node_t p_deferred_pattern_expression(void);
 static vlog_node_t p_tagged_union_expression(vlog_node_t dt);
 static vlog_node_t p_matches(vlog_node_t head);
 static vlog_node_t p_nonbinary_expression(void);
@@ -4424,11 +4425,14 @@ static void p_list_of_arguments(vlog_node_t call)
          // Clocking event of a sampled value function
          vlog_add_param(call, p_clocking_event());
       }
-      else if (peek() == tTICK && peek_nth(2) == tLBRACE
-               && (pattern_type = arg_pattern_type(call, vlog_params(call)))) {
-         // The type of the pattern is that of the formal or element
-         vlog_node_t v = p_assignment_pattern_expression(pattern_type);
-         vlog_add_param(call, v);
+      else if (peek() == tTICK && peek_nth(2) == tLBRACE) {
+         if ((pattern_type = arg_pattern_type(call, vlog_params(call))))
+            vlog_add_param(call, p_assignment_pattern_expression(pattern_type));
+         else if (vlog_kind(call) == V_METHOD_CALL
+                  && vlog_virtual_pending(call))
+            vlog_add_param(call, p_deferred_pattern_expression());
+         else
+            vlog_add_param(call, p_expression());
       }
       else if (is_assert_control(call)
                && vlog_params(call) >= assert_control_list(call)
@@ -6452,7 +6456,7 @@ static vlog_node_t p_pattern_elem_expr(int array_depth, vlog_node_t dt)
    return p_pattern_item_expr(dt, NULL);
 }
 
-static void p_assignment_pattern(vlog_node_t expr)
+static void p_assignment_pattern(vlog_node_t expr, bool deferred)
 {
    // '{ expression { , expression } }
    //    | '{ structure_pattern_key : expression
@@ -6476,7 +6480,7 @@ static void p_assignment_pattern(vlog_node_t expr)
    vlog_node_t dt = NULL;
    if (vlog_has_type(expr))
       dt = vlog_type(expr);
-   else
+   else if (!deferred)
       parse_error(CURRENT_LOC, "cannot determine type of assignment pattern");
 
    // The keys of an associative array are expressions
@@ -6554,6 +6558,19 @@ static void p_assignment_pattern(vlog_node_t expr)
 
          vlog_set_right(v, p_pattern_item_expr(
                            dt, vlog_has_ref(ref) ? vlog_ref(ref) : NULL));
+      }
+      else if (deferred && peek() == tID && peek_nth(2) == tCOLON) {
+         ident_t id = p_identifier();
+
+         vlog_node_t ref = vlog_new(V_REF);
+         vlog_set_ident(ref, id);
+         vlog_set_loc(ref, &state.last_loc);
+
+         vlog_set_left(v, ref);
+         vlog_set_loc(v, &state.last_loc);
+
+         consume(tCOLON);
+         vlog_set_right(v, p_expression());
       }
       else if (!assoc && peek() == tID && peek_nth(2) == tCOLON
                && peek_reference() == NULL) {
@@ -6812,11 +6829,27 @@ static int lhs_unpacked_depth(vlog_node_t lhs)
    return selected < unpacked ? unpacked - selected : 0;
 }
 
+static vlog_node_t p_deferred_pattern_expression(void)
+{
+   BEGIN("assignment pattern expression");
+
+   vlog_node_t v = vlog_new(V_PATTERN_EXPR);
+
+   p_assignment_pattern(v, true);
+
+   vlog_set_loc(v, CURRENT_LOC);
+   return v;
+}
+
 static vlog_node_t p_expression_of_lhs(vlog_node_t lhs)
 {
    // The right-hand side of an assignment takes the type of the target
 
    vlog_node_t dt = pattern_type_of(lhs);
+
+   if (dt == NULL && peek() == tTICK && peek_nth(2) == tLBRACE
+       && vlog_kind(lhs) == V_HIER_REF)
+      return p_deferred_pattern_expression();
 
    if (peek() == tTICK && peek_nth(2) == tLBRACE)
       pattern_array_elems = lhs_unpacked_depth(lhs);
@@ -6835,7 +6868,7 @@ static vlog_node_t p_assignment_pattern_expression(vlog_node_t dt)
    vlog_node_t v = vlog_new(V_PATTERN_EXPR);
    vlog_set_type(v, dt);
 
-   p_assignment_pattern(v);
+   p_assignment_pattern(v, false);
 
    vlog_set_loc(v, CURRENT_LOC);
    return v;
@@ -24506,6 +24539,8 @@ static vlog_node_t p_connection_expression(ident_t name, int index)
          pattern_array_elems = false;
          return v;
       }
+      else if (port_target == NULL)
+         return p_deferred_pattern_expression();
    }
 
    if ((peek() != tPOSEDGE && peek() != tNEGEDGE) || current_module == NULL)
