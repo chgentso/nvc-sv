@@ -22005,6 +22005,8 @@ static vlog_node_t vlog_crv_packed_type(vlog_node_t d)
    return type;
 }
 
+static void vlog_crv_check_nested(vlog_node_t v);
+
 static bool vlog_crv_is_packed_member(vlog_node_t v)
 {
    if (vlog_kind(v) != V_MEMBER_REF || !vlog_has_ref(v))
@@ -22272,6 +22274,8 @@ static mir_value_t vlog_crv_packed_member(vlog_gen_t *g, vlog_node_t v)
 {
    unsigned off;
    vlog_node_t root = vlog_crv_packed_root(v, &off);
+
+   vlog_crv_check_nested(root);
 
    if (vlog_kind(root) == V_BIT_SELECT) {
       // An element of an array of packed structures is one value
@@ -22570,10 +22574,55 @@ static mir_value_t vlog_crv_value_array(vlog_gen_t *g, vlog_node_t v)
    return array;
 }
 
+static void vlog_crv_check_nested(vlog_node_t v)
+{
+   // A select of an element of a fixed size array of dynamic arrays or
+   // queues is not held by the solver
+
+   vlog_node_t root = v;
+   for (;;) {
+      switch (vlog_kind(root)) {
+      case V_BIT_SELECT:
+      case V_PART_SELECT:
+      case V_MEMBER_REF:
+         if (vlog_kind(root) == V_MEMBER_REF && vlog_has_ref(root)
+             && vlog_kind(vlog_value(root)) != V_BIT_SELECT)
+            return;
+         root = vlog_value(root);
+         continue;
+      case V_REF:
+         if (vlog_has_ref(root)) {
+            vlog_node_t decl = vlog_ref(root);
+            switch (vlog_kind(decl)) {
+            case V_VAR_DECL:
+            case V_LOCAL_DECL:
+            case V_TF_PORT_DECL:
+               if (vlog_crv_is_dynamic_array(decl)
+                   && (vlog_ranges(decl) > 0
+                       || vlog_ranges(vlog_get_type(vlog_type(decl))) > 0))
+                  fatal_at(vlog_loc(v), "sorry, a constraint on an element "
+                           "of an array of dynamic arrays or queues is not "
+                           "supported");
+               break;
+            default:
+               break;
+            }
+         }
+         return;
+      default:
+         return;
+      }
+   }
+}
+
 static mir_value_t vlog_crv_array(vlog_gen_t *g, vlog_node_t v)
 {
    // Rand arrays were registered when the object was added and anything
    // else is state
+
+   if (vlog_kind(v) != V_REF && vlog_kind(v) != V_MEMBER_REF)
+      fatal_at(vlog_loc(v), "sorry, a constraint on an element of an array "
+               "of dynamic arrays or queues is not supported");
 
    vlog_node_t decl = vlog_ref(v);
 
@@ -25035,6 +25084,7 @@ static mir_value_t vlog_crv_expr(vlog_gen_t *g, vlog_node_t v, unsigned width,
       case V_BIT_SELECT:
          {
             vlog_node_t base = vlog_value(v);
+            vlog_crv_check_nested(v);
             if (vlog_crv_is_array_ref(base)) {
                mir_value_t array = vlog_crv_array(g, base);
                node = CRV3(g, CRV_OP_ARRAY_ELEM, g->crv_ctx, array,

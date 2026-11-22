@@ -1,0 +1,1 @@
+sorry, a constraint on an element of an array of dynamic arrays or queues is not supported

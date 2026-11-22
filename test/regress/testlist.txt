@@ -3056,3 +3056,5 @@ svfwdpat1 verilog
 svfwdpat2 verilog
 svpatrep4 verilog
 svcbstruct1 verilog
+svcrvnest1 verilog,fail,gold
+svcrvnest2 verilog,fail,gold
