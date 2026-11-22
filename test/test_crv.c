@@ -598,6 +598,92 @@ START_TEST(test_soft)
 }
 END_TEST
 
+// The soft constraints kept are the ones taken one at a time from the
+// highest priority, whichever way they are found
+START_TEST(test_soft_many)
+{
+   static const crv_engine_t engines[] = { CRV_ENGINE_LEGACY, CRV_ENGINE_AUTO };
+   const crv_engine_t saved = crv_engine();
+   trng_t rng = { 91 };
+
+   for (size_t e = 0; e < ARRAY_LEN(engines); e++) {
+      crv_set_engine(engines[e]);
+      crv_seed(95 + e);
+
+      for (int trial = 0; trial < 120; trial++) {
+         const int n = 1 + trng_below(&rng, 24);
+         int kind[24], a[24], b[24];
+         bool sat[24][256];
+         crv_t *c = crv_new();
+         crv_var_t x = crv_var(c, 8, false, 0);
+         crv_node_t xv = crv_var_ref(c, x);
+
+         const int hlo = trng_below(&rng, 60), hhi = 200 + trng_below(&rng, 56);
+         crv_require(c, crv_binary(c, CRV_GE, xv, crv_const(c, hlo, 8, false),
+                                   1, false), false, 1);
+         crv_require(c, crv_binary(c, CRV_LE, xv, crv_const(c, hhi, 8, false),
+                                   1, false), false, 1);
+
+         for (int i = 0; i < n; i++) {
+            kind[i] = trng_below(&rng, 3);
+            a[i] = trng_below(&rng, 256);
+            b[i] = trng_below(&rng, 256);
+            crv_node_t k;
+            switch (kind[i]) {
+            case 0:
+               k = crv_binary(c, CRV_NE, xv, crv_const(c, a[i], 8, false), 1,
+                              false);
+               break;
+            case 1:
+               k = crv_binary(c, CRV_LT, xv, crv_const(c, a[i], 8, false), 1,
+                              false);
+               break;
+            default:
+               a[i] &= 0x0f;
+               b[i] &= 0xf0;
+               k = crv_binary(
+                  c, CRV_EQ, crv_binary(c, CRV_AND, xv,
+                                        crv_const(c, 0xf0, 8, false), 8, false),
+                  crv_const(c, b[i], 8, false), 1, false);
+               break;
+            }
+            crv_require(c, k, true, 10 + i);
+            for (int v = 0; v < 256; v++)
+               sat[i][v] = kind[i] == 0 ? v != a[i] : kind[i] == 1 ? v < a[i]
+                  : (v & 0xf0) == b[i];
+         }
+
+         // Greedy from the last one
+         bool kept[24] = { false };
+         bool ok[256];
+         for (int v = 0; v < 256; v++)
+            ok[v] = v >= hlo && v <= hhi;
+         for (int i = n - 1; i >= 0; i--) {
+            int both = 0;
+            for (int v = 0; v < 256; v++)
+               both += ok[v] && sat[i][v];
+            if (both > 0) {
+               kept[i] = true;
+               for (int v = 0; v < 256; v++)
+                  ok[v] = ok[v] && sat[i][v];
+            }
+         }
+
+         ck_assert_msg(crv_solve(c), "engine %zu trial %d", e, trial);
+         const int v = crv_value(c, x);
+         ck_assert(v >= hlo && v <= hhi);
+         for (int i = 0; i < n; i++)
+            ck_assert_msg(sat[i][v] == kept[i], "engine %zu trial %d: soft "
+                          "constraint %d of %d is %d, expected %d", e, trial,
+                          i, n, sat[i][v], kept[i]);
+         crv_free(c);
+      }
+   }
+
+   crv_set_engine(saved);
+}
+END_TEST
+
 START_TEST(test_unique)
 {
    // Three 2 bit variables all different: 24 ordered solutions
@@ -2598,8 +2684,9 @@ static double now_seconds(void)
 static int fuzz_engines(crv_engine_t *engines)
 {
    // Every stage that exists is checked against the oracle
-   static const crv_engine_t all[] = { CRV_ENGINE_LEGACY, CRV_ENGINE_REJECT,
-                                       CRV_ENGINE_BDD, CRV_ENGINE_SAT };
+   static const crv_engine_t all[] = { CRV_ENGINE_LEGACY, CRV_ENGINE_DFS,
+                                       CRV_ENGINE_REJECT, CRV_ENGINE_BDD,
+                                       CRV_ENGINE_SAT };
    int n = 0;
    for (size_t i = 0; i < ARRAY_LEN(all); i++) {
       if (crv_engine_available(all[i]))
@@ -2610,7 +2697,7 @@ static int fuzz_engines(crv_engine_t *engines)
 
 START_TEST(test_fuzz)
 {
-   crv_engine_t engines[4];
+   crv_engine_t engines[5];
    const int nengines = fuzz_engines(engines);
 
    const char *replay = getenv("NVC_CRV_FUZZ_SEED");
@@ -2656,7 +2743,7 @@ END_TEST
 START_TEST(test_fuzz_fixed)
 {
    static const uint64_t seeds[] = { 1214, 1512, 1520 };
-   crv_engine_t engines[4];
+   crv_engine_t engines[5];
    const int nengines = fuzz_engines(engines);
 
    for (size_t i = 0; i < ARRAY_LEN(seeds); i++) {
@@ -2955,6 +3042,7 @@ Suite *get_crv_tests(void)
    tcase_add_test(tc, test_dist);
    tcase_add_test(tc, test_solve_before);
    tcase_add_test(tc, test_soft);
+   tcase_add_test(tc, test_soft_many);
    tcase_add_test(tc, test_unique);
    tcase_add_test(tc, test_unique_large);
    tcase_add_test(tc, test_randc);

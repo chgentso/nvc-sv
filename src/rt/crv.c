@@ -1596,6 +1596,8 @@ typedef struct {
    int      *uslot, *ucons;
    int      *uvstart, *uvlist;   // Sets that each variable is in
    bool      root;        // Propagating the problem before the search
+   bool     *soft_on;     // Soft constraints that count, NULL if all do
+   bool      sum_ready;
    chain_t  *chain;
    int       nchain, cchain;
    int      *chain_of;    // Chain headed by a node or -1: NULL without any
@@ -1989,6 +1991,7 @@ static void prob_free(prob_t *P)
    c->nnodes = P->base_nodes;
 
    free(P->dec);
+   free(P->soft_on);
    free(P->varr);
    free(P->tlo);
    free(P->thi);
@@ -4441,6 +4444,9 @@ static bool prop_unique_fast(prob_t *P, int ci);
 
 static bool prop_cons(prob_t *P, const pcons_t *pc)
 {
+   if (pc->soft >= 0 && P->soft_on != NULL && !P->soft_on[pc->soft])
+      return true;
+
    if (pc->kind == C_UNIQUE) {
       const int ci = pc - P->cons;
       if (P->ufast != NULL && P->ufast[ci])
@@ -5162,6 +5168,8 @@ static bool check_all(prob_t *P)
    for (int ci = 0; ci < P->ncons; ci++) {
       const pcons_t *pc = &P->cons[ci];
       E.fail = false;
+      if (pc->soft >= 0 && P->soft_on != NULL && !P->soft_on[pc->soft])
+         continue;
       if (pc->kind == C_REQ) {
          const int64_t v = ev(&E, pc->root);
          if (E.fail || v == 0)
@@ -5446,6 +5454,10 @@ static void stats_components(const prob_t *P, crv_call_stat_t *out)
 
 static void sum_init(prob_t *P)
 {
+   if (P->sum_ready)
+      return;
+   P->sum_ready = true;
+
    // Only arrays whose sum is in a constraint
    bool *used = xcalloc(P->na ? P->na : 1);
    bool any = false;
@@ -5697,6 +5709,147 @@ static void debug_node(const crv_t *c, int n, int depth)
    fprintf(stderr, ")");
 }
 
+// Soft constraints, the kept set found by divide and conquer
+//
+// A soft constraint is kept if the hard constraints and the kept soft ones
+// of higher priority (a later one) allow it.  When all of them cannot hold
+// the kept set is found by trying a block of candidates at once: if hard,
+// kept and the whole block are satisfiable the block is kept, a single one
+// that is not is dropped and a larger block is split in two, the higher
+// priority half first.  That is the same set as taking them one at a time
+// but costs a few solves for each dropped constraint.  Each trial is a
+// solve of the one problem built with all the soft constraints in it,
+// with the flags of those that count.
+
+typedef struct {
+   crv_t      *c;
+   prob_t     *P;            // One problem for all the trials or NULL
+   amark_t     am;
+   bool       *kept;         // Soft constraints that are in the set
+   bool       *trial;
+   int         nsoft;
+   sol_t       best;         // Solution of the last satisfiable trial
+   unsigned   *sizes;
+} softctx_t;
+
+static void prob_reset(prob_t *P, amark_t am)
+{
+   undo_to(P, 0);
+   arena_reset(&P->ar, am);
+   P->work = 0;
+   P->oob = false;
+   P->qn = 0;
+   P->curc = -1;
+   P->ntb = 0;
+   if (P->pend != NULL)
+      memset(P->pend, 0, ((P->ncons + 63) / 64) * sizeof(uint64_t));
+   for (int v = 0; v < P->nv; v++) {
+      P->vars[v].split = false;
+      P->vars[v].ntabu = 0;
+   }
+}
+
+static bool soft_trial(softctx_t *S, const bool *set)
+{
+   if (S->P != NULL) {
+      prob_t *P = S->P;
+      prob_reset(P, S->am);
+      memcpy(P->soft_on, set, S->nsoft);
+      const sres_t r = solve_prob_timed(P);
+      if (r != S_SAT)
+         return false;
+
+      sol_free(&S->best);
+      S->best.vals = NEW(int64_t, P->nv);
+      memcpy(S->best.vals, P->vals, P->nv * sizeof(int64_t));
+      S->best.ebase = NEW(int, P->na);
+      memcpy(S->best.ebase, P->ebase, P->na * sizeof(int));
+      S->best.sizes = NEW(unsigned, P->na);
+      memcpy(S->best.sizes, P->sizes, P->na * sizeof(unsigned));
+      return true;
+   }
+
+   sol_t next = { 0 };
+   if (solve_once(S->c, set, &next) != S_SAT)
+      return false;
+
+   sol_free(&S->best);
+   S->best = next;
+   return true;
+}
+
+static void soft_block(softctx_t *S, const int *list, int n)
+{
+   // list is in order of priority, the highest first
+   if (n == 0)
+      return;
+
+   memcpy(S->trial, S->kept, S->nsoft);
+   for (int i = 0; i < n; i++)
+      S->trial[list[i]] = true;
+
+   if (soft_trial(S, S->trial)) {
+      for (int i = 0; i < n; i++)
+         S->kept[list[i]] = true;
+   }
+   else if (n > 1) {
+      soft_block(S, list, n / 2);
+      soft_block(S, list + n / 2, n - n / 2);
+   }
+}
+
+static sres_t solve_soft(crv_t *c, const bool *all, sol_t *out)
+{
+   const int nsoft = c->nsoft;
+   softctx_t S = { .c = c, .nsoft = nsoft };
+   S.kept = xcalloc(nsoft);
+   S.trial = xcalloc(nsoft);
+
+   bool rs = false;
+   for (unsigned a = 0; a < c->narrays; a++)
+      rs |= c->arrays[a].size_rand;
+
+   if (!rs) {
+      // The sizes are known so one problem does for every trial
+      unsigned *sizes = NEW(unsigned, c->narrays);
+      for (unsigned a = 0; a < c->narrays; a++)
+         sizes[a] = c->arrays[a].len;
+      S.P = prob_build_timed(c, 2, sizes, all);
+      free(sizes);
+      S.P->soft_on = xcalloc(nsoft);
+      S.am = arena_mark(&S.P->ar);
+   }
+
+   // Without any soft constraint: the hard ones alone must be satisfiable
+   sres_t res = soft_trial(&S, S.kept) ? S_SAT : S_UNSAT;
+   if (res == S_SAT) {
+      int *list = NEW(int, nsoft);
+      for (int i = 0; i < nsoft; i++)
+         list[i] = nsoft - 1 - i;
+
+      // All of them together have been tried by the caller
+      if (nsoft > 1) {
+         soft_block(&S, list, nsoft / 2);
+         soft_block(&S, list + nsoft / 2, nsoft - nsoft / 2);
+      }
+      free(list);
+   }
+   else if (S.P != NULL && S.P->oob)
+      res = S_GIVEUP;
+
+   if (res == S_SAT) {
+      *out = S.best;
+      S.best = (sol_t){ 0 };
+   }
+
+   sol_free(&S.best);
+   if (S.P != NULL)
+      prob_free(S.P);
+   free(S.kept);
+   free(S.trial);
+   return res;
+}
+
 static crv_result_t solve_all(crv_t *c);
 
 crv_result_t crv_solve2(crv_t *c)
@@ -5760,7 +5913,13 @@ static crv_result_t solve_all(crv_t *c)
    sres_t res = solve_once(c, active, &sol);
    bool ok = res == S_SAT;
 
-   if (!ok && nsoft > 0) {
+   if (!ok && nsoft > 0 && crv_engine() != CRV_ENGINE_LEGACY) {
+      res = solve_soft(c, active, &sol);
+      ok = res == S_SAT;
+      for (int i = 0; i < nsoft; i++)
+         active[i] = false;
+   }
+   else if (!ok && nsoft > 0) {
       for (int i = 0; i < nsoft; i++)
          active[i] = false;
 
