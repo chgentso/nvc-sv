@@ -3064,3 +3064,4 @@ svcrvnest4 verilog
 svcrvnest5 verilog,fail,gold
 vlog_for_pkgtype verilog
 vlog_hier_inst_array verilog
+vlog_inout_hier_sel verilog

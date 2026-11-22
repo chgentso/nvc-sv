@@ -31237,8 +31237,40 @@ static void vlog_lower_port_map(vlog_gen_t *g, vlog_node_t v)
          }
          break;
       default:
-         fatal_at(vlog_loc(v), "sorry, an inout port connected to this "
-                  "expression is not supported");
+         {
+            vlog_node_t value = vlog_value(v);
+            vlog_node_t root = value;
+            while (vlog_kind(root) == V_BIT_SELECT
+                   || vlog_kind(root) == V_PART_SELECT)
+               root = vlog_value(root);
+
+            if (vlog_subkind(port) != V_PORT_INOUT || root == value
+                || vlog_kind(root) != V_HIER_REF || !vlog_has_ref(root)
+                || ti->size != 1)
+               fatal_at(vlog_loc(v), "sorry, an inout port connected to this "
+                        "expression is not supported");
+
+            // The port is the same net as the bits selected from a net in
+            // another instance, now the name is bound
+            vlog_select_t lvalue = vlog_lower_select(g, value);
+            int64_t count_const;
+            if (!mir_is_signal(g->mu, lvalue.obj)
+                || !mir_get_const(g->mu, lvalue.count, &count_const)
+                || count_const != lvalue.size
+                || lvalue.size != vlog_size(port) * ti->size)
+               fatal_at(vlog_loc(v), "sorry, an inout port connected to this "
+                        "expression is not supported");
+
+            mir_value_t dst = mir_build_array_ref(g->mu, lvalue.obj,
+                                                  lvalue.dst_offset);
+            mir_value_t count = mir_const(g->mu, t_offset, lvalue.size);
+            mir_build_map_signal(g->mu, signal, dst, count);
+            mir_build_return(g->mu, MIR_NULL_VALUE);
+
+            mir_set_cursor(g->mu, start_bb, MIR_APPEND);
+            mir_build_return(g->mu, MIR_NULL_VALUE);
+            return;
+         }
       }
 
       mir_build_return(g->mu, MIR_NULL_VALUE);
@@ -34473,6 +34505,7 @@ void vlog_lower_block(mir_context_t *mc, ident_t parent, tree_t b)
       }
 
       vlog_node_t value = vlog_value(v);
+      bool inout_deferred = false;
       switch (vlog_kind(value)) {
       case V_CONCAT:
          if (vlog_subkind(port) != V_PORT_INOUT || vhdl_nports > 0)
@@ -34500,6 +34533,16 @@ void vlog_lower_block(mir_context_t *mc, ident_t parent, tree_t b)
 
             const type_info_t *ti = vlog_type_info(&g, vlog_type(port));
             if (vlog_kind(root) == V_HIER_REF) {
+               if (vlog_subkind(port) == V_PORT_INOUT && root != value
+                   && vhdl_nports == 0 && !vlog_has_ref(root)
+                   && vlog_size(port) == 1
+                   && vlog_kind(vlog_ref(port)) == V_NET_DECL) {
+                  // The nets of the select do not exist until the instance
+                  // is created so the port is connected by a process
+                  inout_deferred = true;
+                  break;
+               }
+
                if (vlog_subkind(port) != V_PORT_INOUT || root != value
                    || vlog_size(port) != 1)
                   break;
@@ -34597,7 +34640,9 @@ void vlog_lower_block(mir_context_t *mc, ident_t parent, tree_t b)
       vlog_node_t d = vlog_ref(port);
       switch (vlog_kind(d)) {
       case V_NET_DECL:
-         vlog_lower_net_signal(&g, d, hash_get(map, d), resfn, 0);
+         vlog_lower_net_signal(&g, d, hash_get(map, d), resfn,
+                               inout_deferred
+                               ? NET_F_EFFECTIVE | NET_F_INOUT : 0);
          break;
       case V_VAR_DECL:
          vlog_lower_var_decl(&g, d, hash_get(map, d),
