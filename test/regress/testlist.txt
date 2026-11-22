@@ -3022,3 +3022,4 @@ svcrvdist1 verilog
 sveventiff1 verilog
 svsemblock1 verilog
 svcovcrosswith1 verilog
+svexternimport1 verilog

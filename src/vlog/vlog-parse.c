@@ -15441,6 +15441,9 @@ static void push_class_scopes(vlog_node_t class, int *depth)
       case V_LOCALPARAM:
          vlog_symtab_put(symtab, d);
          break;
+      case V_IMPORT_DECL:
+         vlog_symtab_import(symtab, d);
+         break;
       default:
          break;
       }
