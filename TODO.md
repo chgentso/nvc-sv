@@ -52,3 +52,11 @@
   and `u inside {s}` with a signed 32 bit s compares the sign extended value; the same comparison of two variables is
   right.  The dist of a constraint is converted correctly since vlog_crv_dist_bound, the other constraint operators
   are not checked for this.
+- A for-generate loop is compiled once for all iterations only when a whitelist allows it
+  (`NVC_GEN_SHARE_VERBOSE=1` prints the reason for each loop that is not): loops with assertions, sampled-value
+  functions, subprograms, classes, hierarchical names, defparams, coverage enabled, or the genvar in a width,
+  dimension, part-select bound, replication count, cast, instance parameter, instance array, inout port or
+  event control keep one body for each iteration and the memory of that.  Each iteration still has its own
+  scope and block function, about 7-11 kB at run time.  A parameter of a shared iteration read through a
+  hierarchical name is evaluated from the genvar values only for arithmetic, comparison and conditional
+  expressions; anything else is a "sorry" (NVC_GEN_SHARE=off avoids it).

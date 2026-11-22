@@ -11,6 +11,13 @@ details of each option.  Known limits are in [TODO.md](TODO.md).
   simulation of modules, interfaces, programs, packages, classes,
   generate constructs, `bind`, `defparam`, hierarchical references and
   `final` procedures.
+- The body of a `for` generate loop is compiled once for all of its
+  iterations when the genvar is only used where its value can be computed
+  as each iteration is created, and the generate blocks of a module are
+  compiled once for all instances of the module with the same parameters.
+  Each iteration keeps its own scope.  `NVC_GEN_SHARE=off` compiles every
+  iteration separately and `NVC_GEN_SHARE_VERBOSE=1` reports the loops
+  which are not shared and why.
 - Classes with inheritance, virtual methods, parameterised classes,
   `rand` properties, `super`, `this` and `$cast`.
 - Interfaces with modports, virtual interfaces, arrays of interface

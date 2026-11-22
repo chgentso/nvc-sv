@@ -5637,10 +5637,10 @@ static gen_share_mode_t elab_gen_share_mode(void)
    static int mode = -1;
    if (mode == -1) {
       const char *env = getenv("NVC_GEN_SHARE");
-      if (env == NULL || strcmp(env, "off") == 0)
-         mode = GEN_SHARE_OFF;
-      else if (strcmp(env, "on") == 0)
+      if (env == NULL || strcmp(env, "on") == 0)
          mode = GEN_SHARE_ON;
+      else if (strcmp(env, "off") == 0)
+         mode = GEN_SHARE_OFF;
       else if (strcmp(env, "force") == 0)
          mode = GEN_SHARE_FORCE;
       else if (strcmp(env, "iter") == 0)
