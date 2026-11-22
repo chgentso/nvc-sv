@@ -743,6 +743,25 @@ static vlog_node_t fold_sva_op(vlog_node_t v, fold_ctx_t *ctx)
    return v;
 }
 
+static vlog_node_t fold_past(vlog_node_t v, fold_ctx_t *ctx)
+{
+   // The number of ticks of $past is a constant expression
+
+   if (vlog_ident(v) != ident_new("$past") || vlog_params(v) < 2)
+      return v;
+
+   vlog_node_t ticks = vlog_param(v, 1);
+   if (vlog_kind(ticks) == V_EMPTY || vlog_kind(ticks) == V_EVENT_CONTROL
+       || get_fold_state(ticks, ctx) != FOLD_POSSIBLE)
+      return v;
+
+   vlog_node_t folded = fold_const_expr(ticks, ctx);
+   if (folded != NULL)
+      vlog_set_param(v, 1, folded);
+
+   return v;
+}
+
 static vlog_node_t fold_param_decl(vlog_node_t v, fold_ctx_t *ctx)
 {
    if (vlog_has_value(v)) {
@@ -1066,6 +1085,8 @@ static vlog_node_t vlog_fold_post_cb(vlog_node_t v, void *context)
       return fold_dimension(v, context);
    case V_SVA_OP:
       return fold_sva_op(v, context);
+   case V_SYS_FCALL:
+      return fold_past(v, context);
    case V_PART_SELECT:
       return fold_part_select(v, context);
    case V_CONCAT:
