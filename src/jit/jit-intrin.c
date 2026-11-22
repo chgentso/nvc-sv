@@ -3038,6 +3038,7 @@ static void sv_crv(jit_func_t *func, jit_anchor_t *caller, jit_scalar_t *args,
    for (int i = 0; i < ARRAY_LEN(argv); i++)
       argv[i] = args[i + 1].integer;
 
+   crv_set_caller(caller);
    args[0].integer = crv_generated(args[0].integer, argv);
 }
 

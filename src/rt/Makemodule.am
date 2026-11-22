@@ -19,6 +19,7 @@ lib_libnvc_a_SOURCES += \
 	src/rt/sva.h \
 	src/rt/sva.c \
 	src/rt/crv-gen.c \
+	src/rt/crv-stats.c \
 	src/rt/fileio.c \
 	src/rt/fileio.h \
 	src/rt/printer.h \

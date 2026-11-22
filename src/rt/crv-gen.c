@@ -17,6 +17,8 @@
 
 #include "util.h"
 #include "diag.h"
+#include "jit/jit-priv.h"
+#include "jit/jit.h"
 #include "array.h"
 #include "option.h"
 #include "rt/crv.h"
@@ -75,6 +77,42 @@ static inline unsigned crv_flags_width(int64_t flags)
 static inline bool crv_flags_signed(int64_t flags)
 {
    return !!(flags & 0x10000);
+}
+
+static __thread jit_anchor_t *crv_caller;
+
+void crv_set_caller(void *anchor)
+{
+   crv_caller = anchor;
+}
+
+static void crv_gen_label_site(void)
+{
+   // The statistics are kept per call site: the innermost frame with a
+   // source line, which is the code that contains the randomize call.
+   // Generated code does not pass the location down so this walks
+   // the stack, which is only done when statistics are on.
+   char buf[256];
+   const char *what = "?";
+
+   jit_thread_local_t *thread = jit_thread_local();
+   jit_anchor_t *saved = thread->anchor;
+   thread->anchor = crv_caller;
+   jit_stack_trace_t *stack LOCAL = jit_stack_trace();
+   thread->anchor = saved;
+
+   for (size_t i = 0; i < stack->count; i++) {
+      const loc_t *loc = &(stack->frames[i].loc);
+      if (loc_invalid_p(loc) || loc->first_line == 0)
+         continue;
+
+      snprintf(buf, sizeof(buf), "%s:%d:%d", loc_file_str(loc),
+               loc->first_line, loc->first_column);
+      what = buf;
+      break;
+   }
+
+   crv_stats_site(what);
 }
 
 int64_t crv_generated(crv_op_t op, const int64_t *args)
@@ -143,7 +181,11 @@ int64_t crv_generated(crv_op_t op, const int64_t *args)
       free(g);
       return 0;
    case CRV_OP_SOLVE:
-      return g->failed ? 0 : crv_solve(c);
+      if (g->failed)
+         return 0;
+      else if (crv_stats_enabled())
+         crv_gen_label_site();
+      return crv_solve(c);
    case CRV_OP_FAIL:
       {
          loc_t loc = get_loc(args[2], args[3], args[2], args[3] + 1, args[1]);

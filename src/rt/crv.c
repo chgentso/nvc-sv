@@ -2775,7 +2775,8 @@ static prob_t *prob_build(crv_t *c, int mode, const unsigned *sizes,
          P->vars[an->aux].pop = n;
    }
 
-   decompose(P);
+   if (crv_decompose_enabled())
+      decompose(P);
    P->nn = c->nnodes;
 
    // Prepare sets and distributions now the nodes are final
@@ -4652,6 +4653,125 @@ static sres_t dfs(prob_t *P, int attempt, int limit)
    return res;
 }
 
+////////////////////////////////////////////////////////////////////////////////
+// Statistics
+//
+// Components are the sets of variables linked by a constraint, a unique
+// set or a solve before edge.  A component with one free variable cannot
+// be sampled unevenly by the order of the search, only those with more
+// than one can.  This only counts: it does not use the random generator or
+// change the problem.
+
+static __thread crv_call_stat_t *cur_stat;
+
+static int uf_find(int *p, int x)
+{
+   while (p[x] != x) {
+      p[x] = p[p[x]];
+      x = p[x];
+   }
+   return x;
+}
+
+static void uf_union(int *p, int a, int b)
+{
+   a = uf_find(p, a);
+   b = uf_find(p, b);
+   if (a != b)
+      p[a] = b;
+}
+
+static void stats_components(const prob_t *P, crv_call_stat_t *out)
+{
+   const crv_t *c = P->c;
+   const int nv = P->nv;
+
+   int nfields = 0;
+   for (int i = 0; i < P->ndec; i++)
+      nfields += P->dec[i].nf;
+   const int norig = nv - nfields;
+
+   int *uf = NEW(int, nv);
+   bool *used = xcalloc(nv ? nv : 1);
+   for (int i = 0; i < nv; i++)
+      uf[i] = i;
+
+   for (int ci = 0; ci < P->ncons; ci++) {
+      int first = -1;
+      for (int i = P->vstart[ci]; i < P->vstart[ci + 1]; i++) {
+         const int v = P->vl[i];
+         used[v] = true;
+         if (first < 0)
+            first = v;
+         else
+            uf_union(uf, first, v);
+      }
+   }
+
+   for (int i = 0; i < P->ndec; i++) {
+      const dec_t *d = &P->dec[i];
+      for (int k = 0; k < d->nf; k++)
+         uf_union(uf, d->var, d->f0 + k);
+      used[d->var] = true;
+   }
+
+   for (unsigned e = 0; e < c->nedges; e++) {
+      const int b = c->edges[e].array ? P->nsc + c->edges[e].before
+         : c->edges[e].before;
+      const int a = c->edges[e].after;
+      if (a < nv && b < nv) {
+         used[a] = used[b] = true;
+         uf_union(uf, a, b);
+      }
+   }
+
+   int *nfree = xcalloc((nv ? nv : 1) * sizeof(int));
+   bool *comp = xcalloc(nv ? nv : 1);
+   crv_call_stat_t s = { 0 };
+
+   for (int v = 0; v < norig; v++) {
+      const bool is_free = P->vars[v].dom.lo != P->vars[v].dom.hi;
+      if (used[v]) {
+         const int r = uf_find(uf, v);
+         comp[r] = true;
+         nfree[r] += is_free;
+      }
+      else if (is_free)
+         s.loose++;
+   }
+
+   for (int v = 0; v < nv; v++) {
+      if (!comp[v])
+         continue;
+      else if (nfree[v] == 0)
+         s.stage[CRV_STAGE_NONE]++;
+      else {
+         s.comps++;
+         s.stage[CRV_STAGE_DFS]++;
+         s.freevars += nfree[v];
+         if ((uint32_t)nfree[v] > s.maxfree)
+            s.maxfree = nfree[v];
+      }
+   }
+
+   free(nfree);
+   free(comp);
+   free(used);
+   free(uf);
+
+   // Several problems are solved for one call (array sizes, soft
+   // constraints): keep the largest of each count
+#define MAXOF(f) do { if (s.f > out->f) out->f = s.f; } while (0)
+   MAXOF(comps);
+   MAXOF(loose);
+   MAXOF(freevars);
+   MAXOF(maxfree);
+   for (int i = 0; i < CRV_STAGE_COUNT; i++)
+      MAXOF(stage[i]);
+#undef MAXOF
+   out->decomposed |= P->ndec > 0;
+}
+
 static sres_t solve_prob(prob_t *P)
 {
    for (int ci = 0; ci < P->ncons; ci++)
@@ -4659,6 +4779,9 @@ static sres_t solve_prob(prob_t *P)
 
    if (!propagate(P))
       return P->oob ? S_GIVEUP : S_UNSAT;
+
+   if (cur_stat != NULL)
+      stats_components(P, cur_stat);
 
    compute_levels(P);
 
@@ -4693,6 +4816,30 @@ static void sol_free(sol_t *s)
 }
 
 
+static prob_t *prob_build_timed(crv_t *c, int mode, const unsigned *sizes,
+                                const bool *active)
+{
+   if (cur_stat == NULL)
+      return prob_build(c, mode, sizes, active);
+
+   const uint64_t t0 = get_timestamp_ns();
+   prob_t *P = prob_build(c, mode, sizes, active);
+   cur_stat->build_ns += get_timestamp_ns() - t0;
+   return P;
+}
+
+static sres_t solve_prob_timed(prob_t *P)
+{
+   if (cur_stat == NULL)
+      return solve_prob(P);
+
+   const uint64_t t0 = get_timestamp_ns();
+   const sres_t r = solve_prob(P);
+   cur_stat->solve_ns += get_timestamp_ns() - t0;
+   cur_stat->giveup = r == S_GIVEUP;
+   return r;
+}
+
 static bool solve_once(crv_t *c, const bool *active, sol_t *out)
 {
    unsigned *sizes = NEW(unsigned, c->narrays);
@@ -4704,8 +4851,8 @@ static bool solve_once(crv_t *c, const bool *active, sol_t *out)
 
    for (int att = 0; att < (rs ? 4 : 1); att++) {
       if (rs) {
-         prob_t *P1 = prob_build(c, 1, sizes, active);
-         const sres_t r = solve_prob(P1);
+         prob_t *P1 = prob_build_timed(c, 1, sizes, active);
+         const sres_t r = solve_prob_timed(P1);
          if (getenv("NVC_CRV_DEBUG") && r != S_SAT)
             fprintf(stderr, "crv: size problem result %d work %"PRIi64" budget "
                     "%"PRIi64" oob %d nv %d ncons %d\n", r, P1->work,
@@ -4723,8 +4870,8 @@ static bool solve_once(crv_t *c, const bool *active, sol_t *out)
             continue;
       }
 
-      prob_t *P2 = prob_build(c, 2, sizes, active);
-      const sres_t r = solve_prob(P2);
+      prob_t *P2 = prob_build_timed(c, 2, sizes, active);
+      const sres_t r = solve_prob_timed(P2);
       if (getenv("NVC_CRV_DEBUG") && r != S_SAT)
          fprintf(stderr, "crv: value problem result %d (rs=%d)\n", r, rs);
       if (r == S_SAT) {
@@ -4834,7 +4981,31 @@ static void debug_node(const crv_t *c, int n, int depth)
    fprintf(stderr, ")");
 }
 
+static bool solve_all(crv_t *c);
+
 bool crv_solve(crv_t *c)
+{
+   // The engine is read here so that a bad setting is reported once
+   // however the solver is reached
+   (void)crv_engine();
+
+   if (!crv_stats_enabled())
+      return solve_all(c);
+
+   crv_call_stat_t st = { .soft = c->nsoft > 0 };
+   crv_call_stat_t *saved = cur_stat;
+   cur_stat = &st;
+   const bool ok = solve_all(c);
+   cur_stat = saved;
+
+   st.ok = ok;
+   st.giveup &= !ok;
+   st.top = st.comps + st.loose > 0 ? CRV_STAGE_DFS : CRV_STAGE_NONE;
+   crv_stats_record(&st);
+   return ok;
+}
+
+static bool solve_all(crv_t *c)
 {
    if (getenv("NVC_CRV_DEBUG") && !strcmp(getenv("NVC_CRV_DEBUG"), "2")) {
       for (unsigned i = 0; i < c->ncons; i++) {

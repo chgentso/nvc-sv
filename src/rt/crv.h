@@ -141,6 +141,60 @@ void crv_array_solve_before(crv_t *c, crv_array_t before, crv_var_t after);
 // Returns false if there is no solution in which case nothing changes
 bool crv_solve(crv_t *c);
 
+// Which stage of the solver may answer.  Read once from NVC_CRV_ENGINE
+// (legacy, dfs, reject, bdd, sat or auto) and overridden by crv_set_engine
+// for tests.  Legacy is the solver of release 0.18.0 and every other
+// choice is the same search until the stages that the names refer to
+// exist: crv_engine_available says which do.
+typedef enum {
+   CRV_ENGINE_AUTO, CRV_ENGINE_LEGACY, CRV_ENGINE_DFS, CRV_ENGINE_REJECT,
+   CRV_ENGINE_BDD, CRV_ENGINE_SAT,
+} crv_engine_t;
+
+crv_engine_t crv_engine(void);
+void crv_set_engine(crv_engine_t engine);
+bool crv_engine_available(crv_engine_t engine);
+const char *crv_engine_name(crv_engine_t engine);
+
+// Splitting variables at the boundaries of constant slices: NVC_CRV_DECOMPOSE=0
+// turns it off to measure what depends on it
+bool crv_decompose_enabled(void);
+void crv_set_decompose(bool on);
+
+// Statistics of the calls of crv_solve.  NVC_CRV_STATS=1 prints a table per
+// call site at the end of the run and NVC_CRV_STATS=<file> appends one tab
+// separated line per call site to the file.  The solver never reads them.
+typedef enum {
+   CRV_STAGE_NONE,              // No free variable: decided by propagation
+   CRV_STAGE_REJECT, CRV_STAGE_BDD,   // Exact: uniform over the solutions
+   CRV_STAGE_DFS, CRV_STAGE_SAT, CRV_STAGE_MIX,
+   CRV_STAGE_COUNT
+} crv_stage_t;
+
+typedef struct {
+   uint32_t    comps;       // Components of linked variables with a free one
+   uint32_t    loose;       // Free variables that no constraint mentions
+   uint32_t    freevars;    // Free variables in the components
+   uint32_t    maxfree;     // Free variables in the largest component
+   uint32_t    stage[CRV_STAGE_COUNT];   // Components answered by each stage
+   uint32_t    declined[3]; // Prefilter, budget and exhausted proposals
+   bool        decomposed;  // A variable was split at slice boundaries
+   bool        soft;        // Has soft constraints
+   bool        ok;          // A solution was found
+   bool        giveup;      // Not ok and the last attempt ran out of work
+   crv_stage_t top;         // Last stage of the call in the order above
+   uint64_t    build_ns, solve_ns;
+} crv_call_stat_t;
+
+bool crv_stats_enabled(void);
+void crv_stats_force(bool on);                 // Collect without NVC_CRV_STATS
+void crv_stats_site(const char *site);         // Label for the next solve
+const crv_call_stat_t *crv_stats_last(void);   // Most recent solve, this thread
+void crv_stats_reset(void);                    // Forget the sites
+void crv_stats_write(void);                    // Write and forget them
+void crv_stats_record(const crv_call_stat_t *s);   // Used by crv_solve
+const char *crv_stage_name(crv_stage_t stage);
+
 // Solution
 int64_t crv_value(crv_t *c, crv_var_t v);
 unsigned crv_array_len(crv_t *c, crv_array_t a);
@@ -173,5 +227,9 @@ typedef enum {
 } crv_op_t;
 
 int64_t crv_generated(crv_op_t op, const int64_t *args);
+
+// The generated code that is calling the solver, a jit_anchor_t: only used
+// to find the source line of the randomize call for the statistics
+void crv_set_caller(void *anchor);
 
 #endif  // _RT_CRV_H
