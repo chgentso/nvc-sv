@@ -18005,7 +18005,9 @@ static vlog_flags_t p_class_item_qualifiers(void)
 
 static bool defer_constraint_body(vlog_node_t decl)
 {
-   if (forward_classes.count == 0 || class_depth == 0 || peek() != tLBRACE)
+   // The block can use a property declared further down the class as well
+   // as a class which is declared later
+   if (class_depth == 0 || peek() != tLBRACE)
       return false;
 
    deferred_body_t d = {

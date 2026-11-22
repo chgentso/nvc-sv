@@ -3107,3 +3107,4 @@ svcrvpower1 verilog
 svcrvdistparen1 verilog
 vlog_unarychain1 verilog
 svcrvfwdbase1 verilog
+svcrvlateprop1 verilog
