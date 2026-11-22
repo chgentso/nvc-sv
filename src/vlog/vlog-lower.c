@@ -22181,6 +22181,13 @@ static unsigned vlog_crv_width(vlog_gen_t *g, vlog_node_t v)
          vlog_node_t base = vlog_value(v);
          if (vlog_crv_is_array_ref(base)) {
             vlog_node_t decl = vlog_ref(base);
+            vlog_node_t etype = vlog_get_type(vlog_crv_elem_type(decl));
+            if (etype != NULL && vlog_kind(etype) == V_DATA_TYPE
+                && (vlog_subkind(etype) == DT_DYNARRAY
+                    || vlog_subkind(etype) == DT_QUEUE
+                    || vlog_subkind(etype) == DT_ASSOC))
+               return vlog_width(v);   // An element of an element
+
             return vlog_type_info(g, vlog_crv_elem_type(decl))->size;
          }
 
