@@ -1,8 +1,8 @@
 # Bias report of the search of release 0.18.0 (NVC_CRV_ENGINE=legacy; dfs is the same search at M0)
-# nvc-sv 197a28df + crv M0, produced by: NVC_CRV_LONG=1 NVC_CRV_FUZZ_SECONDS=60 bin/unit_test crv
+# nvc-sv crv M2 (dist semantics 18.5.4, countones fix), produced by: NVC_CRV_LONG=1 NVC_CRV_FUZZ_SECONDS=60 bin/unit_test crv
 # Per problem and seed: samples N = max(50 x solutions, 20000); chi2/df against the distribution the
-# language asks for (uniform over solutions; solve before levels; dist buckets by declared weight among
-# the feasible ones; soft constraints kept from the highest priority); bound = chi-square at p = 1e-4
+# language asks for (uniform over solutions; solve before levels; dist values by IEEE 1800 18.5.4: := the weight,
+# :/ the weight shared over the declared size of the range, among the feasible values; soft constraints kept from the highest priority); bound = chi-square at p = 1e-4
 # (Wilson-Hilferty); max/min = largest over smallest count of a solution that was reached.
 
 x<y 4                                  seed 1234       sols   120 n  20000 chi2/df   51.39 (df  119 bound   185.2) BIASED max/min   9.04 unreached    0 fails 0
@@ -50,9 +50,9 @@ dist x!=y                              seed 9e3779b9   sols    56 n  20000 chi2/
 dist, bucket infeasible                seed 1234       sols    32 n  20000 chi2/df    0.72 (df   31 bound    69.3) pass max/min   2.26 unreached    0 fails 0
 dist, bucket infeasible                seed abcd5678   sols    32 n  20000 chi2/df    1.05 (df   31 bound    69.3) pass max/min   2.32 unreached    0 fails 0
 dist, bucket infeasible                seed 9e3779b9   sols    32 n  20000 chi2/df    1.12 (df   31 bound    69.3) pass max/min   2.49 unreached    0 fails 0
-dist, :/ over a split range            seed 1234       sols    48 n  20000 chi2/df   47.47 (df   47 bound    92.0) BIASED max/min   1.15 unreached    0 fails 0
-dist, :/ over a split range            seed abcd5678   sols    48 n  20000 chi2/df   50.97 (df   47 bound    92.0) BIASED max/min   1.21 unreached    0 fails 0
-dist, :/ over a split range            seed 9e3779b9   sols    48 n  20000 chi2/df   46.41 (df   47 bound    92.0) BIASED max/min   1.24 unreached    0 fails 0
+dist, :/ over a split range            seed 1234       sols    48 n  20000 chi2/df    0.52 (df   47 bound    92.0) pass max/min   1.15 unreached    0 fails 0
+dist, :/ over a split range            seed abcd5678   sols    48 n  20000 chi2/df    0.75 (df   47 bound    92.0) pass max/min   1.21 unreached    0 fails 0
+dist, :/ over a split range            seed 9e3779b9   sols    48 n  20000 chi2/df    0.95 (df   47 bound    92.0) pass max/min   1.24 unreached    0 fails 0
 soft conflict                          seed 1234       sols    28 n  20000 chi2/df  129.67 (df   27 bound    63.4) BIASED max/min   4.27 unreached    0 fails 0
 soft conflict                          seed abcd5678   sols    28 n  20000 chi2/df  127.89 (df   27 bound    63.4) BIASED max/min   4.28 unreached    0 fails 0
 soft conflict                          seed 9e3779b9   sols    28 n  20000 chi2/df  126.41 (df   27 bound    63.4) BIASED max/min   3.66 unreached    0 fails 0
@@ -66,18 +66,5 @@ $countones(x)==2 ? y<4 : y>=12         seed 1234       sols    64 n  20000 chi2/
 $countones(x)==2 ? y<4 : y>=12         seed abcd5678   sols    64 n  20000 chi2/df  127.09 (df   63 bound   113.7) BIASED max/min   4.90 unreached    0 fails 0
 $countones(x)==2 ? y<4 : y>=12         seed 9e3779b9   sols    64 n  20000 chi2/df  123.10 (df   63 bound   113.7) BIASED max/min   4.79 unreached    0 fails 0
 
-# Differential fuzzer (49869 problems of 2 to 5 fields, up to 13 decision bits, three draws each)
-fuzz: 49869 problems (32275 with solutions, 17594 unsatisfiable), 149607 draws; 137 without an answer, 11 soft constraints dropped that could be kept, 0 invalid, 0 answered although unsatisfiable
-# first seeds with a problem (replay: NVC_CRV_FUZZ_SEED=<seed> bin/unit_test crv):
-fuzz seed 1214 engine legacy draw 0: no solution for a satisfiable one (62 solutions)
-fuzz seed 1512 engine legacy draw 0: no solution for a satisfiable one (4096 solutions)
-fuzz seed 1520 engine legacy draw 0: no solution for a satisfiable one (1240 solutions)
-fuzz seed 2013 engine legacy draw 1: no solution for a satisfiable one (103 solutions)
-fuzz seed 2053 engine legacy draw 0: no solution for a satisfiable one (3584 solutions)
-fuzz seed 3561 engine legacy draw 0: no solution for a satisfiable one (3584 solutions)
-fuzz seed 7305 engine legacy draw 0: no solution for a satisfiable one (1040 solutions)
-fuzz seed 11619 engine legacy draw 0: no solution for a satisfiable one (1 solutions)
-fuzz seed 12163 engine legacy draw 0: no solution for a satisfiable one (4088 solutions)
-fuzz seed 12364 engine legacy draw 0: no solution for a satisfiable one (64 solutions)
-fuzz seed 12771 engine legacy draw 0: no solution for a satisfiable one (1276 solutions)
-fuzz seed 12816 engine legacy draw 0: no solution for a satisfiable one (768 solutions)
+# Differential fuzzer (every problem of 2 to 5 fields, up to 13 decision bits, three draws each)
+fuzz: 53105 problems (34384 with solutions, 18721 unsatisfiable), 159315 draws; 0 without an answer, 0 soft constraints dropped that could be kept, 0 invalid, 0 answered although unsatisfiable

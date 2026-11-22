@@ -781,7 +781,8 @@ END_TEST
 // decision bits.  From the solutions the distribution that the language
 // asks for is worked out: uniform over the solutions, uniform over the
 // extendable values of earlier solve before levels and uniform given them,
-// buckets of a dist by weight among the feasible ones, and the soft
+// the values of a dist by their weight (IEEE 1800 18.5.4) among the feasible
+// ones, and the soft
 // constraints kept from the highest priority.
 
 typedef enum { X_CONST, X_VAR, X_BIN, X_UN, X_CAST, X_COND, X_INSIDE,
@@ -1363,6 +1364,17 @@ static bool same_group(const model_t *m, unsigned mask, int a, int b)
    return true;
 }
 
+// Weight of one value of a dist: the first range that holds it
+static double dist_value_weight(const ex_t *d, int64_t v)
+{
+   for (int r = 0; r < d->nitems; r++) {
+      if (v >= d->lo[r] && v <= d->hi[r])
+         return d->per_value[r] ? (double)d->weight[r]
+            : (double)d->weight[r] / (double)(d->hi[r] - d->lo[r] + 1);
+   }
+   return 0.0;
+}
+
 static void spread(const model_t *m, const block_t *bl, int nbl, int b,
                    int *idx, int n, double mass)
 {
@@ -1394,46 +1406,30 @@ static void spread(const model_t *m, const block_t *bl, int nbl, int b,
       return;
    }
 
-   // Bucket by weight among those with an extendable value, then uniform
-   // over the extendable values of the bucket
+   // IEEE 1800 18.5.4: every value of a range has the weight of := or the
+   // weight of :/ shared over the declared size of the range.  Other
+   // constraints remove values and the choice is weighted over the values
+   // that are left (those that can be extended), then uniform over the rest
    const ex_t *d = m->p->cons[bl[b].dist];
-   int fld = d->a->var;
+   const int fld = d->a->var;
    double total = 0;
-   int present[MAX_ITEMS] = { 0 };
-   for (int r = 0; r < d->nitems; r++) {
-      if (d->weight[r] == 0)
-         continue;
-      for (int i = 0; i < n; ) {
-         int j = i + 1;
-         while (j < n && same_group(m, bl[b].fields, idx[i], idx[j]))
-            j++;
-         const int64_t v = widen(m->sol[idx[i] * nf + fld],
-                                 m->p->f[fld].s);
-         if (v >= d->lo[r] && v <= d->hi[r])
-            present[r]++;
-         i = j;
-      }
-      if (present[r]) {
-         total += d->per_value[r] ? (double)d->weight[r]
-            * (double)(d->hi[r] - d->lo[r] + 1) : (double)d->weight[r];
-      }
+   for (int i = 0; i < n; ) {
+      int j = i + 1;
+      while (j < n && same_group(m, bl[b].fields, idx[i], idx[j]))
+         j++;
+      total += dist_value_weight(d, widen(m->sol[idx[i] * nf + fld],
+                                          m->p->f[fld].s));
+      i = j;
    }
 
    for (int i = 0; i < n; ) {
       int j = i + 1;
       while (j < n && same_group(m, bl[b].fields, idx[i], idx[j]))
          j++;
-      const int64_t v = widen(m->sol[idx[i] * nf + fld], m->p->f[fld].s);
-      for (int r = 0; r < d->nitems; r++) {
-         if (d->weight[r] > 0 && v >= d->lo[r] && v <= d->hi[r]) {
-            const double wr = d->per_value[r]
-               ? (double)d->weight[r] * (double)(d->hi[r] - d->lo[r] + 1)
-               : (double)d->weight[r];
-            spread(m, bl, nbl, b + 1, idx + i, j - i,
-                   mass * (wr / total) / present[r]);
-            break;
-         }
-      }
+      const double w = dist_value_weight(d, widen(m->sol[idx[i] * nf + fld],
+                                                  m->p->f[fld].s));
+      if (w > 0)
+         spread(m, bl, nbl, b + 1, idx + i, j - i, mass * (w / total));
       i = j;
    }
 }
