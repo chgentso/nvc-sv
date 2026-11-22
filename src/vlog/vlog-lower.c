@@ -33003,7 +33003,8 @@ void vlog_lower_block(mir_context_t *mc, ident_t parent, tree_t b)
             // A hierarchical name is not bound until after elaboration
             vlog_node_t root = value;
             while (vlog_kind(root) == V_BIT_SELECT
-                   || vlog_kind(root) == V_PART_SELECT)
+                   || vlog_kind(root) == V_PART_SELECT
+                   || vlog_kind(root) == V_MEMBER_REF)
                root = vlog_value(root);
 
             const type_info_t *ti = vlog_type_info(&g, vlog_type(port));
