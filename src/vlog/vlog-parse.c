@@ -8303,6 +8303,29 @@ static void hoist_edge_expression(vlog_node_t event)
    vlog_set_value(event, ref);
 }
 
+static bool is_paren_event_expr(void)
+{
+   if (peek() != tLPAREN)
+      return false;
+
+   int depth = 0;
+   for (int n = 1; ; n++) {
+      const token_t tok = peek_nth(n);
+      if (tok == tEOF)
+         return false;
+      else if (tok == tLPAREN)
+         depth++;
+      else if (tok == tRPAREN) {
+         if (--depth == 0)
+            return false;
+      }
+      else if (tok == tPOSEDGE || tok == tNEGEDGE || tok == tEDGE
+               || tok == tOR || tok == tIFFKW
+               || (depth == 1 && tok == tCOMMA))
+         return true;
+   }
+}
+
 static void p_event_expression(vlog_node_t ctrl)
 {
    // [ edge_identifier ] expression [ iff expression ]
@@ -8314,7 +8337,8 @@ static void p_event_expression(vlog_node_t ctrl)
    BEGIN("event expression");
 
    do {
-      if (optional(tLPAREN)) {
+      if (is_paren_event_expr()) {
+         consume(tLPAREN);
          p_event_expression(ctrl);
          consume(tRPAREN);
       }
@@ -8328,6 +8352,10 @@ static void p_event_expression(vlog_node_t ctrl)
             vlog_node_t d = peek_reference();
             consume(tID);
             vlog_set_value(v, p_sva_trigger(d));
+            if (peek() == tIFFKW) {
+               consume(tIFFKW);
+               vlog_set_left(v, p_expression());
+            }
             vlog_set_loc(v, CURRENT_LOC);
             vlog_add_param(ctrl, v);
             continue;

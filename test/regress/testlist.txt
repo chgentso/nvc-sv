@@ -3019,3 +3019,4 @@ svgenstatic1 verilog
 svstdrand1 verilog
 svforeachvif1 verilog
 svcrvdist1 verilog
+sveventiff1 verilog
