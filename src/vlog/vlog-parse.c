@@ -19820,6 +19820,7 @@ static vlog_node_t specialise_class(vlog_node_t generic)
    const int saved_pos = replay_pos;
    const bool saved_proto = parsing_prototype;
    const vlog_kind_t saved_kind = param_kind;
+   const int saved_gen_dead = gen_dead;
 
    vlog_node_t saved_container = spec_container;
    spec_container = container;
@@ -19829,6 +19830,7 @@ static vlog_node_t specialise_class(vlog_node_t generic)
    replay_class = g;
    replay_pos = 0;
    parsing_prototype = false;
+   gen_dead = 0;
 
    state.lex_fn = replay_lex;
    state.tokenq_head = state.tokenq_tail = 0;
@@ -19859,6 +19861,7 @@ static vlog_node_t specialise_class(vlog_node_t generic)
    if (class_depth == 0)
       flush_deferred_bodies(false);
 
+   gen_dead = saved_gen_dead;
    return v;
 }
 

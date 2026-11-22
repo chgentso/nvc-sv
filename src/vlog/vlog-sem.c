@@ -410,7 +410,8 @@ static void vlog_check_same_type(vlog_node_t left, type_mask_t lmask,
       return;   // The elements are the items of the concatenation
 
    if (vlog_is_assoc_type(ltype) || vlog_is_assoc_type(rtype)) {
-      if (vlog_kind(right) == V_PATTERN_EXPR)
+      if (vlog_kind(right) == V_PATTERN_EXPR
+          || lmask == ~TM_CONST || rmask == ~TM_CONST)
          return;
       else if (!vlog_is_assoc_type(ltype) || !vlog_is_assoc_type(rtype)
                || !vlog_same_assoc_type(ltype, rtype))
