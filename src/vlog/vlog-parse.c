@@ -3580,7 +3580,11 @@ static void p_inline_constraints(vlog_node_t call, vlog_node_t class)
       consume(tRPAREN);
 
       scope_leave();
-      vlog_symtab_push_members(symtab, class, names, nnames);
+
+      // An empty list binds no name into the class
+      ident_t none[1] = { NULL };
+      vlog_symtab_push_members(symtab, class, names != NULL ? names : none,
+                               nnames);
 
       consume(tLBRACE);
    }
