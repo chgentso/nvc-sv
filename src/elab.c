@@ -9279,6 +9279,21 @@ static tree_t elab_iface_conn_target(const elab_iface_conn_t *c,
       return target;
    }
 
+   if (vlog_kind(c->value) == V_REF) {
+      // A bound instance may connect to a sibling bound interface instance
+      ident_t ref_name = vlog_ident(c->value);
+      const int nstmts = tree_stmts(c->parent);
+      for (int i = 0; i < nstmts; i++) {
+         tree_t s = tree_stmt(c->parent, i);
+         if (tree_kind(s) == T_BLOCK && ident_casecmp(tree_ident(s), ref_name))
+            return s;
+      }
+
+      tree_t target = vlog_iface_port_target(c->parent, NULL, ref_name);
+      if (target != NULL)
+         return target;
+   }
+
    if (vlog_kind(c->value) != V_HIER_REF) {
       error_at(&c->loc, "interface port %pQ must be connected to an instance "
                "of an interface or another interface port", name);
