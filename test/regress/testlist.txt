@@ -3093,3 +3093,4 @@ vlog_genshare13 verilog
 crvstats1       shell
 crvdist1        shell
 crvdist2        shell
+crvgiveup1      shell

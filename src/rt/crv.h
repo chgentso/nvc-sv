@@ -138,6 +138,12 @@ void crv_foreach(crv_t *c, crv_array_t a, crv_node_t index, crv_node_t body,
 void crv_solve_before(crv_t *c, crv_var_t before, crv_var_t after);
 void crv_array_solve_before(crv_t *c, crv_array_t before, crv_var_t after);
 
+// There is no solution in which case nothing changes, or the search ran
+// out of work before finding one although there may be one
+typedef enum { CRV_SAT, CRV_UNSAT, CRV_GIVEUP } crv_result_t;
+
+crv_result_t crv_solve2(crv_t *c);
+
 // Returns false if there is no solution in which case nothing changes
 bool crv_solve(crv_t *c);
 

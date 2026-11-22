@@ -181,8 +181,17 @@ START_TEST(test_unsat)
                              crv_const(c, 200, 8, false), 1, false), false, 1);
    crv_require(c, crv_binary(c, CRV_LT, crv_var_ref(c, x),
                              crv_const(c, 100, 8, false), 1, false), false, 2);
+   ck_assert_int_eq(crv_solve2(c), CRV_UNSAT);
    ck_assert(!crv_solve(c));
    ck_assert_int_eq(crv_value(c, x), 42);
+   crv_free(c);
+
+   c = crv_new();
+   x = crv_var(c, 8, false, 42);
+   crv_require(c, crv_binary(c, CRV_GT, crv_var_ref(c, x),
+                             crv_const(c, 200, 8, false), 1, false), false, 1);
+   ck_assert_int_eq(crv_solve2(c), CRV_SAT);
+   ck_assert_int_gt(crv_value(c, x), 200);
    crv_free(c);
 }
 END_TEST

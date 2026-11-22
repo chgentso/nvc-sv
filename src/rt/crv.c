@@ -1497,6 +1497,30 @@ typedef struct {
    dom_t   old;
 } trail_t;
 
+// Debugging switches: read once, not on every call
+static struct {
+   int         level;      // NVC_CRV_DEBUG: 0 off, 1 report, 2 list constraints
+   const char *skip;       // NVC_CRV_SKIP
+   int64_t     budget;     // NVC_CRV_BUDGET: work limit of a search, for tests
+   bool        read;
+} dbg;
+
+static void read_debug_env(void)
+{
+   const char *d = getenv("NVC_CRV_DEBUG");
+   dbg.level = d == NULL ? 0 : !strcmp(d, "2") ? 2 : 1;
+   dbg.skip = getenv("NVC_CRV_SKIP");
+   dbg.budget = getenv("NVC_CRV_BUDGET") ? atoll(getenv("NVC_CRV_BUDGET")) : 0;
+   dbg.read = true;
+}
+
+static inline int debug_level(void)
+{
+   if (unlikely(!dbg.read))
+      read_debug_env();
+   return dbg.level;
+}
+
 #define MAX_FIELDS 32
 
 // A variable which is split into fields at the boundaries of the bit
@@ -2831,9 +2855,13 @@ static prob_t *prob_build(crv_t *c, int mode, const unsigned *sizes,
    P->budget = 800000 + 80 * ((int64_t)P->nn + P->nv);
    for (int ci = 0; ci < P->ncons; ci++)
       P->budget += 24 * (int64_t)P->cons[ci].unn * P->cons[ci].unn;
+   (void)debug_level();
+   if (dbg.budget > 0)
+      P->budget = dbg.budget;
 
    return P;
 }
+
 
 ////////////////////////////////////////////////////////////////////////////////
 // Propagation
@@ -4124,7 +4152,7 @@ static bool propagate(prob_t *P)
       P->curc = -1;
 
       if (!ok) {
-         if (getenv("NVC_CRV_DEBUG"))
+         if (debug_level())
             fprintf(stderr, "crv: constraint %d of %d (line %d) failed "
                     "(oob=%d)\n", ci, P->ncons, P->cons[ci].line, P->oob);
          break;
@@ -4666,6 +4694,7 @@ static sres_t dfs(prob_t *P, int attempt, int limit)
 
 static __thread crv_call_stat_t *cur_stat;
 
+
 static int uf_find(int *p, int x)
 {
    while (p[x] != x) {
@@ -4842,10 +4871,10 @@ static sres_t solve_prob_timed(prob_t *P)
    return r;
 }
 
-static bool solve_once(crv_t *c, const bool *active, sol_t *out)
+static sres_t solve_once(crv_t *c, const bool *active, sol_t *out)
 {
    unsigned *sizes = NEW(unsigned, c->narrays);
-   bool rs = false;
+   bool rs = false, gave_up = false;
    for (unsigned a = 0; a < c->narrays; a++) {
       sizes[a] = c->arrays[a].len;
       rs |= c->arrays[a].size_rand;
@@ -4855,7 +4884,7 @@ static bool solve_once(crv_t *c, const bool *active, sol_t *out)
       if (rs) {
          prob_t *P1 = prob_build_timed(c, 1, sizes, active);
          const sres_t r = solve_prob_timed(P1);
-         if (getenv("NVC_CRV_DEBUG") && r != S_SAT)
+         if (debug_level() && r != S_SAT)
             fprintf(stderr, "crv: size problem result %d work %"PRIi64" budget "
                     "%"PRIi64" oob %d nv %d ncons %d\n", r, P1->work,
                     P1->budget, P1->oob, P1->nv, P1->ncons);
@@ -4868,13 +4897,15 @@ static bool solve_once(crv_t *c, const bool *active, sol_t *out)
          prob_free(P1);
          if (r == S_UNSAT)
             break;
-         else if (r == S_GIVEUP)
+         else if (r == S_GIVEUP) {
+            gave_up = true;
             continue;
+         }
       }
 
       prob_t *P2 = prob_build_timed(c, 2, sizes, active);
       const sres_t r = solve_prob_timed(P2);
-      if (getenv("NVC_CRV_DEBUG") && r != S_SAT)
+      if (debug_level() && r != S_SAT)
          fprintf(stderr, "crv: value problem result %d (rs=%d)\n", r, rs);
       if (r == S_SAT) {
          out->vals = P2->vals;
@@ -4883,15 +4914,16 @@ static bool solve_once(crv_t *c, const bool *active, sol_t *out)
          P2->vals = NULL;
          P2->ebase = NULL;
          prob_free(P2);
-         return true;
+         return S_SAT;
       }
       prob_free(P2);
+      gave_up |= r == S_GIVEUP;
       if (!rs && r == S_UNSAT)
          break;
    }
 
    free(sizes);
-   return false;
+   return gave_up ? S_GIVEUP : S_UNSAT;
 }
 
 static void commit(crv_t *c, const sol_t *s)
@@ -4983,9 +5015,9 @@ static void debug_node(const crv_t *c, int n, int depth)
    fprintf(stderr, ")");
 }
 
-static bool solve_all(crv_t *c);
+static crv_result_t solve_all(crv_t *c);
 
-bool crv_solve(crv_t *c)
+crv_result_t crv_solve2(crv_t *c)
 {
    // The engine is read here so that a bad setting is reported once
    // however the solver is reached
@@ -4997,19 +5029,24 @@ bool crv_solve(crv_t *c)
    crv_call_stat_t st = { .soft = c->nsoft > 0 };
    crv_call_stat_t *saved = cur_stat;
    cur_stat = &st;
-   const bool ok = solve_all(c);
+   const crv_result_t r = solve_all(c);
    cur_stat = saved;
 
-   st.ok = ok;
-   st.giveup &= !ok;
+   st.ok = r == CRV_SAT;
+   st.giveup = r == CRV_GIVEUP;
    st.top = st.comps + st.loose > 0 ? CRV_STAGE_DFS : CRV_STAGE_NONE;
    crv_stats_record(&st);
-   return ok;
+   return r;
 }
 
-static bool solve_all(crv_t *c)
+bool crv_solve(crv_t *c)
 {
-   if (getenv("NVC_CRV_DEBUG") && !strcmp(getenv("NVC_CRV_DEBUG"), "2")) {
+   return crv_solve2(c) == CRV_SAT;
+}
+
+static crv_result_t solve_all(crv_t *c)
+{
+   if (debug_level() == 2) {
       for (unsigned i = 0; i < c->ncons; i++) {
          fprintf(stderr, "crv: constraint %u line %d: ", i, c->cons[i].line);
          debug_node(c, c->cons[i].root, 0);
@@ -5017,9 +5054,10 @@ static bool solve_all(crv_t *c)
       }
    }
 
-   if (getenv("NVC_CRV_SKIP")) {
+   (void)debug_level();
+   if (dbg.skip != NULL) {
       // Debugging aid: ignore the constraints with these indices
-      for (const char *p = getenv("NVC_CRV_SKIP"); *p; ) {
+      for (const char *p = dbg.skip; *p; ) {
          char *end;
          const long i = strtol(p, &end, 10);
          if (end == p)
@@ -5037,7 +5075,8 @@ static bool solve_all(crv_t *c)
    for (int i = 0; i < nsoft; i++)
       active[i] = true;
 
-   bool ok = solve_once(c, active, &sol);
+   sres_t res = solve_once(c, active, &sol);
+   bool ok = res == S_SAT;
 
    if (!ok && nsoft > 0) {
       for (int i = 0; i < nsoft; i++)
@@ -5045,7 +5084,8 @@ static bool solve_all(crv_t *c)
 
       // Check the hard constraints alone first so that an unsatisfiable
       // set fails after one more attempt
-      ok = solve_once(c, active, &sol);
+      res = solve_once(c, active, &sol);
+      ok = res == S_SAT;
 
       // Keep each soft constraint in turn from the highest priority if the
       // others still allow it
@@ -5053,7 +5093,7 @@ static bool solve_all(crv_t *c)
          active[k] = true;
 
          sol_t next = { 0 };
-         if (solve_once(c, active, &next)) {
+         if (solve_once(c, active, &next) == S_SAT) {
             sol_free(&sol);
             sol = next;
          }
@@ -5062,7 +5102,7 @@ static bool solve_all(crv_t *c)
       }
    }
 
-   if (!ok && getenv("NVC_CRV_DEBUG")) {
+   if (!ok && debug_level()) {
       // Report a minimal unsatisfiable set of the constraints by removing
       // those which are not needed to make the problem unsatisfiable
       bool *was = NEW(bool, c->ncons);
@@ -5073,7 +5113,7 @@ static bool solve_all(crv_t *c)
 
          c->cons[i].dead = true;
          sol_t t = { 0 };
-         if (solve_once(c, active, &t)) {
+         if (solve_once(c, active, &t) == S_SAT) {
             sol_free(&t);
             c->cons[i].dead = false;   // Needed to be unsatisfiable
          }
@@ -5103,5 +5143,5 @@ static bool solve_all(crv_t *c)
 
    sol_free(&sol);
    free(active);
-   return ok;
+   return ok ? CRV_SAT : res == S_GIVEUP ? CRV_GIVEUP : CRV_UNSAT;
 }

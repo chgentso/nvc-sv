@@ -86,15 +86,11 @@ void crv_set_caller(void *anchor)
    crv_caller = anchor;
 }
 
-static void crv_gen_label_site(void)
+static bool crv_gen_caller_loc(loc_t *out, char *buf, size_t len)
 {
-   // The statistics are kept per call site: the innermost frame with a
-   // source line, which is the code that contains the randomize call.
-   // Generated code does not pass the location down so this walks
-   // the stack, which is only done when statistics are on.
-   char buf[256];
-   const char *what = "?";
-
+   // The innermost frame with a source line is the code that contains the
+   // randomize call.  Generated code does not pass the location down so
+   // this walks the stack: only done for statistics and for a warning.
    jit_thread_local_t *thread = jit_thread_local();
    jit_anchor_t *saved = thread->anchor;
    thread->anchor = crv_caller;
@@ -106,13 +102,32 @@ static void crv_gen_label_site(void)
       if (loc_invalid_p(loc) || loc->first_line == 0)
          continue;
 
-      snprintf(buf, sizeof(buf), "%s:%d:%d", loc_file_str(loc),
-               loc->first_line, loc->first_column);
-      what = buf;
-      break;
+      if (buf != NULL)
+         snprintf(buf, len, "%s:%d:%d", loc_file_str(loc), loc->first_line,
+                  loc->first_column);
+      *out = *loc;
+      return true;
    }
 
-   crv_stats_site(what);
+   return false;
+}
+
+static void crv_gen_label_site(void)
+{
+   char buf[256];
+   loc_t loc;
+   crv_stats_site(crv_gen_caller_loc(&loc, buf, sizeof(buf)) ? buf : "?");
+}
+
+static void crv_gen_warn_giveup(void)
+{
+   loc_t loc;
+   if (crv_gen_caller_loc(&loc, NULL, 0))
+      warn_at(&loc, "randomize() gave up without finding a solution: "
+              "the constraints may be satisfiable");
+   else
+      warnf("randomize() gave up without finding a solution: "
+            "the constraints may be satisfiable");
 }
 
 int64_t crv_generated(crv_op_t op, const int64_t *args)
@@ -181,11 +196,17 @@ int64_t crv_generated(crv_op_t op, const int64_t *args)
       free(g);
       return 0;
    case CRV_OP_SOLVE:
-      if (g->failed)
-         return 0;
-      else if (crv_stats_enabled())
-         crv_gen_label_site();
-      return crv_solve(c);
+      {
+         if (g->failed)
+            return 0;
+         else if (crv_stats_enabled())
+            crv_gen_label_site();
+
+         const crv_result_t r = crv_solve2(c);
+         if (r == CRV_GIVEUP)
+            crv_gen_warn_giveup();
+         return r == CRV_SAT;
+      }
    case CRV_OP_FAIL:
       {
          loc_t loc = get_loc(args[2], args[3], args[2], args[3] + 1, args[1]);
