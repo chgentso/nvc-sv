@@ -3073,3 +3073,4 @@ vlog_gen_var_syscall_init verilog
 vlog_inout_param_idx verilog
 vlog_enum_cast_index verilog
 vlog_enum_param_width verilog
+vlog_genstats1  shell

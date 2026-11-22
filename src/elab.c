@@ -117,6 +117,14 @@ typedef struct {
    unsigned       line;
 } elab_defparam_t;
 
+typedef struct {
+   unsigned vlog_scopes;   // Verilog module and interface instances
+   unsigned gen_scopes;    // Verilog generate blocks
+   unsigned gen_bodies;    // Distinct generate block bodies lowered
+   unsigned for_copy;      // For-generate loops lowered once per iteration
+   unsigned for_shared;    // For-generate loops lowered once
+} elab_stats_t;
+
 typedef struct _elab_ctx {
    const elab_ctx_t *parent;
    tree_t            out;
@@ -146,6 +154,7 @@ typedef struct _elab_ctx {
    hash_t           *iface_units;
    hset_t           *iface_values;
    unsigned         *nshims;
+   elab_stats_t     *stats;
    rt_model_t       *model;
    rt_scope_t       *scope;
    mem_pool_t       *pool;
@@ -1847,6 +1856,7 @@ static void elab_inherit_context(elab_ctx_t *ctx, const elab_ctx_t *parent)
    ctx->iface_units = parent->iface_units;
    ctx->iface_values = parent->iface_values;
    ctx->nshims   = parent->nshims;
+   ctx->stats    = parent->stats;
    ctx->depth    = parent->depth + 1;
    ctx->dp_home  = parent->dp_home;
    ctx->config   = parent->config;
@@ -3453,6 +3463,7 @@ static void elab_verilog_module(tree_t comp, ident_t label, vlog_node_t mod,
 
    mod_cache_t *mc = elab_cached_module(vlog_to_object(mod), &new_ctx);
    mc->count++;
+   ctx->stats->vlog_scopes++;
 
    // The members of the interface connected to a port may differ for
    // each instance so references to them cannot be shared
@@ -5664,6 +5675,8 @@ static void elab_verilog_block(vlog_node_t v, const elab_ctx_t *ctx)
 
    vlog_lower_instance(ctx->mir, body, ctx->cloned, block, ctx->cover,
                        new_ctx.cscope);
+   ctx->stats->gen_scopes++;
+   ctx->stats->gen_bodies++;
 
    hash_put(ctx->block_parents, b, ctx->out);
 
@@ -5754,6 +5767,8 @@ static void elab_verilog_for_generate(vlog_node_t v, const elab_ctx_t *ctx)
 
    vlog_node_t s0 = vlog_stmt(v, 0);
    assert(vlog_kind(s0) == V_GEN_BLOCK);
+
+   ctx->stats->for_copy++;
 
    while (jit_call_thunk2(ctx->jit, test, context,
                           elab_verilog_for_generate_test_cb, NULL)) {
@@ -9552,6 +9567,15 @@ static void elab_print_stats(const elab_ctx_t *ctx)
              sorted[i].unique);
    }
 
+   const elab_stats_t *st = ctx->stats;
+   if (st->vlog_scopes + st->gen_scopes > 0) {
+      printf("\nVerilog instance scopes  %u\n", st->vlog_scopes);
+      printf("Generate block scopes    %u\n", st->gen_scopes);
+      printf("Generate block bodies    %u\n", st->gen_bodies);
+      printf("For-generate loops       %u copied, %u shared\n",
+             st->for_copy, st->for_shared);
+   }
+
    printf("\n");
 }
 
@@ -9637,6 +9661,7 @@ tree_t elab(object_t **top, int ntop, jit_t *jit, unit_registry_t *ur,
    vlog_load_binds(work, top, ntop);
 
    unsigned nshims = 0;
+   elab_stats_t stats = {};
    iface_conn_list_t iface_conns = AINIT;
    gen_body_list_t gen_bodies = AINIT;
 
@@ -9660,6 +9685,7 @@ tree_t elab(object_t **top, int ntop, jit_t *jit, unit_registry_t *ur,
       .iface_units = hash_new(16),
       .iface_values = hset_new(16),
       .nshims    = &nshims,
+      .stats     = &stats,
       .dotted    = lib_name(work),
       .config    = config,
       .model     = m,

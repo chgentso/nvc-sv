@@ -775,8 +775,14 @@ void model_free(rt_model_t *m)
       for (memblock_t *mb = m->memblocks; mb; mb = mb->chain)
          mem += mb->alloc;
 
-      notef("setup:%ums run:%ums user:%ums sys:%ums maxrss:%ukB static:%ukB",
-            m->ready_rusage.ms, ru.ms, ru.user, ru.sys, ru.rss, mem / 1024);
+      unsigned nfuncs, nirfuncs;
+      size_t irbytes;
+      jit_get_stats(m->jit, &nfuncs, &nirfuncs, &irbytes);
+
+      notef("setup:%ums run:%ums user:%ums sys:%ums maxrss:%ukB static:%ukB "
+            "funcs:%u compiled:%u ir:%zukB", m->ready_rusage.ms, ru.ms,
+            ru.user, ru.sys, ru.rss, mem / 1024, nfuncs, nirfuncs,
+            irbytes / 1024);
    }
 
    mtp_report(m->root);

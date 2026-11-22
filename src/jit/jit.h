@@ -83,6 +83,8 @@ void jit_interrupt(jit_t *j, jit_irq_fn_t fn, void *ctx);
 void jit_check_interrupt(jit_t *j);
 void jit_reset(jit_t *j);
 bool jit_is_shutdown(jit_t *j);
+void jit_get_stats(jit_t *j, unsigned *nfuncs, unsigned *nirfuncs,
+                   size_t *irbytes);
 
 tlab_t *tlab_acquire(jit_t *j);
 void tlab_release(jit_t *j, tlab_t *t);

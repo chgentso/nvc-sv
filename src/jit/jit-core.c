@@ -1364,6 +1364,26 @@ void jit_reset(jit_t *j)
    jit_reset_exit_status(j);
 }
 
+void jit_get_stats(jit_t *j, unsigned *nfuncs, unsigned *nirfuncs,
+                   size_t *irbytes)
+{
+   // Number of functions and the memory used by their intermediate code
+
+   SCOPED_LOCK(j->lock);
+
+   *nfuncs = j->next_handle;
+   *nirfuncs = 0;
+   *irbytes = 0;
+
+   for (int i = 0; i < j->next_handle; i++) {
+      jit_func_t *f = j->funcs->items[i];
+      if (f->irbuf != NULL) {
+         (*nirfuncs)++;
+         *irbytes += f->nirs * sizeof(jit_ir_t);
+      }
+   }
+}
+
 jit_t *jit_for_thread(void)
 {
    jit_thread_local_t *thread = jit_thread_local();
