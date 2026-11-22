@@ -3035,3 +3035,4 @@ svsigrefname1 verilog
 svvifuninst1 verilog
 svstdrand2 verilog
 svvifpat2 verilog
+svbindimport1 verilog

@@ -28069,6 +28069,18 @@ static vlog_node_t p_bind_directive(void)
 
    vlog_symtab_push(symtab, v);
 
+   if (bind_scope != NULL) {
+      vlog_node_t sm = lookup_interface(bind_scope);
+      if (sm != NULL && vlog_kind(sm) == V_MODULE) {
+         const int nsm = vlog_decls(sm);
+         for (int i = 0; i < nsm; i++) {
+            vlog_node_t d = vlog_decl(sm, i);
+            if (vlog_kind(d) == V_IMPORT_DECL)
+               vlog_symtab_import(symtab, d);
+         }
+      }
+   }
+
    if (entity != NULL) {
       // Populate the bind scope with the VHDL entity's ports and generics so
       // port connections in the bound instance resolve cleanly before being
@@ -28177,6 +28189,10 @@ static vlog_node_t p_bind_directive(void)
          case V_PORT_DECL:
             if (pass == 1 && vlog_symtab_query(symtab, vlog_ident(d)) == NULL)
                vlog_symtab_put(symtab, d);
+            break;
+         case V_IMPORT_DECL:
+            if (pass == 0)
+               vlog_symtab_import(symtab, d);
             break;
          default:
             break;
