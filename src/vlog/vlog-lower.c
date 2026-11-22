@@ -22283,8 +22283,9 @@ static void vlog_crv_random_cb(vlog_node_t v, void *context)
 static void vlog_crv_check_call_args(vlog_gen_t *g, vlog_node_t v)
 {
    // The arguments of a function in a constraint are solved before the call
-   // is evaluated (IEEE 1800-2017 18.5.12): not yet implemented, and
-   // evaluating the call on the previous values would be silently wrong
+   // is evaluated (IEEE 1800-2017 18.5.12): not yet implemented, so the call
+   // is evaluated on the values the variables have before solving, which
+   // gives wrong results unless the call does not depend on them
 
    if (vlog_kind(v) != V_USER_FCALL)
       return;
@@ -22294,21 +22295,11 @@ static void vlog_crv_check_call_args(vlog_gen_t *g, vlog_node_t v)
    for (int i = 0; i < nparams && !cv.found; i++)
       vlog_visit(vlog_param(v, i), vlog_crv_random_cb, &cv);
 
-   if (!cv.found)
-      return;
-
-   LOCAL_TEXT_BUF tb = tb_new();
-   tb_printf(tb, "sorry, the call to function %s with a random variable as "
-             "an argument in a constraint is not supported",
-             istr(vlog_ident(v)));
-
-   mir_type_t t_offset = mir_offset_type(g->mu);
-   mir_type_t t_severity = mir_int_type(g->mu, 0, 3);
-   mir_value_t buf = mir_const_string(g->mu, tb_get(tb));
-   mir_build_report(g->mu, mir_build_address_of(g->mu, buf),
-                    mir_const(g->mu, t_offset, tb_len(tb)),
-                    mir_const(g->mu, t_severity, SEVERITY_FAILURE),
-                    mir_build_debug_locus(g->mu, vlog_to_object(v)));
+   if (cv.found)
+      warn_at(vlog_loc(v), "sorry, the call to function %s with a random "
+              "variable as an argument in a constraint is evaluated before "
+              "solving, with the current value of the variable",
+              istr(vlog_ident(v)));
 }
 
 static mir_value_t vlog_crv_state_node(vlog_gen_t *g, vlog_node_t v)

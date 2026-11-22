@@ -1,1 +1,2 @@
-the call to function f with a random variable as an argument in a constraint is not supported
+the call to function f with a random variable as an argument in a constraint is evaluated before solving
+PASSED
