@@ -3292,7 +3292,9 @@ static ivl_t fwd(prob_t *P, int n)
             case CRV_POPCNT:
                {
                   const node_t *an = &P->c->nodes[nd->a];
-                  r = ivl(a.lo > 0 ? 1 : 0, a.hi == 0 ? 0 : an->width);
+                  // A negative value has its sign bit set
+                  r = ivl(a.lo > 0 || a.hi < 0 ? 1 : 0,
+                          a.lo >= 0 && a.hi == 0 ? 0 : an->width);
                }
                break;
             default:

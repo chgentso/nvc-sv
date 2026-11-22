@@ -360,6 +360,33 @@ START_TEST(test_unary)
 }
 END_TEST
 
+START_TEST(test_popcnt_signed)
+{
+   // A signed variable whose domain holds negative numbers and zero has
+   // values with a count of one or more: these were refuted
+   for (unsigned w = 1; w <= 5; w++) {
+      crv_t *c = crv_new();
+      crv_seed(31 + w);
+      crv_var_t x = crv_var(c, w, true, 0);
+      crv_node_t n = crv_unary(c, CRV_POPCNT, crv_var_ref(c, x));
+      n = crv_unary(c, CRV_POPCNT, n);
+      crv_require(c, crv_unary(c, CRV_REDUCE_OR, n), false, 1);
+      ck_assert(crv_solve(c));
+      ck_assert_int_ne(crv_value(c, x), 0);
+      crv_free(c);
+
+      c = crv_new();
+      x = crv_var(c, w, true, 0);
+      n = crv_unary(c, CRV_POPCNT, crv_var_ref(c, x));
+      crv_require(c, crv_binary(c, CRV_EQ, n, crv_const(c, w, 32, true), 1,
+                                false), false, 1);
+      ck_assert(crv_solve(c));
+      ck_assert_int_eq(crv_value(c, x), -1);
+      crv_free(c);
+   }
+}
+END_TEST
+
 START_TEST(test_cast)
 {
    // Narrowing wraps, widening extends by the signedness of the source
@@ -2479,6 +2506,23 @@ START_TEST(test_fuzz)
 }
 END_TEST
 
+// Problems the fuzzer found that the solver gave up on although they have
+// solutions: the bounds of $countones of a signed value that can be
+// negative were wrong, so the constraint was refuted at the root
+START_TEST(test_fuzz_fixed)
+{
+   static const uint64_t seeds[] = { 1214, 1512, 1520 };
+   crv_engine_t engines[4];
+   const int nengines = fuzz_engines(engines);
+
+   for (size_t i = 0; i < ARRAY_LEN(seeds); i++) {
+      fuzz_stats_t st = { 0 };
+      ck_assert(fuzz_run_one(seeds[i], engines, nengines, &st, true));
+      ck_assert_int_eq(st.incomplete, 0);
+   }
+}
+END_TEST
+
 ////////////////////////////////////////////////////////////////////////////////
 // Engine selection and statistics
 
@@ -2760,6 +2804,7 @@ Suite *get_crv_tests(void)
    tcase_add_loop_test(tc, test_binary, 0, ARRAY_LEN(binops) * 6);
    tcase_add_loop_test(tc, test_compare, 0, 12);
    tcase_add_test(tc, test_unary);
+   tcase_add_test(tc, test_popcnt_signed);
    tcase_add_test(tc, test_cast);
    tcase_add_test(tc, test_logic);
    tcase_add_test(tc, test_inside);
@@ -2795,6 +2840,7 @@ Suite *get_crv_tests(void)
    tcase_add_loop_test(tc, test_sound_all_engines, 0, NPROBLEMS);
    tcase_add_loop_test(tc, test_bias_report, 0, NPROBLEMS);
    tcase_add_test(tc, test_fuzz);
+   tcase_add_test(tc, test_fuzz_fixed);
    suite_add_tcase(s, tc);
 
    return s;
