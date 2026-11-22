@@ -21750,6 +21750,8 @@ typedef struct {
    bool        found;
 } crv_visit_t;
 
+static bool vlog_crv_is_skipped(vlog_gen_t *g, vlog_node_t decl);
+
 static void vlog_crv_state_cb(vlog_node_t v, void *context)
 {
    crv_visit_t *cv = context;
@@ -21766,6 +21768,9 @@ static void vlog_crv_state_cb(vlog_node_t v, void *context)
    case V_REF:
       if (vlog_has_ref(v)) {
          vlog_node_t decl = vlog_ref(v);
+         if (vlog_crv_is_skipped(cv->gen, decl))
+            return;
+
          if (vlog_kind(decl) == V_VAR_DECL && vlog_has_type(decl)) {
             vlog_node_t dt = vlog_get_type(vlog_type(decl));
             if (dt != NULL && vlog_kind(dt) == V_DATA_TYPE
@@ -22073,6 +22078,38 @@ static bool vlog_crv_nest(vlog_node_t decl, crv_nest_t *n)
 
    n->inner = type;
    return true;
+}
+
+static bool vlog_crv_is_integral(vlog_gen_t *g, vlog_node_t type);
+static bool vlog_crv_is_wide(vlog_gen_t *g, vlog_node_t type);
+
+static bool vlog_crv_is_skipped(vlog_gen_t *g, vlog_node_t decl)
+{
+   // A rand array whose elements are not solved (there is a warning when
+   // the properties are built) so a constraint which uses it sees the values
+   // it has now
+
+   if (vlog_kind(decl) != V_VAR_DECL || !vlog_has_type(decl)
+       || !(vlog_flags(decl) & VLOG_F_RAND) || !vlog_crv_is_target(g, decl))
+      return false;
+
+   if (vlog_crv_assoc_type(decl) != NULL)
+      return !vlog_crv_is_integral(g, vlog_crv_elem_type(decl));
+   else if (!vlog_crv_is_array_decl(decl))
+      return false;
+
+   crv_nest_t n;
+   if (vlog_crv_nest(decl, &n))
+      return false;
+
+   vlog_node_t etype = vlog_crv_elem_type(decl);
+   vlog_node_t ctype = vlog_get_type(etype);
+   if (vlog_crv_elem_struct(decl) != NULL
+       || (ctype != NULL && vlog_kind(ctype) == V_CLASS_DECL)
+       || vlog_crv_leaf_class(decl, NULL) != NULL)
+      return false;
+
+   return !vlog_crv_is_wide(g, etype) && !vlog_crv_is_integral(g, etype);
 }
 
 typedef struct {
@@ -27992,9 +28029,10 @@ static void vlog_crv_build_prop(vlog_gen_t *g, mir_value_t this, mir_value_t ctx
           || vlog_crv_leaf_class(d, NULL) != NULL)
          return;   // The objects are randomized with this one
       else if (!wide && !vlog_crv_is_integral(g, etype)) {
-         if (is_rand)
+         if (is_rand) {
             warn_at(vlog_loc(d), "sorry, the elements of this rand array "
                     "are not randomized");
+            }
          return;
       }
 

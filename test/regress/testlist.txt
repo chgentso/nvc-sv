@@ -3123,3 +3123,4 @@ vlog_constref2 verilog
 svcrvdiststate1 verilog
 svcrvelem2d1 verilog
 svcrvlocal2 verilog
+svcrvskiparr1 verilog
