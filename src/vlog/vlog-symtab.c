@@ -1267,8 +1267,9 @@ void vlog_symtab_put(vlog_symtab_t *st, vlog_node_t v)
          break;
       case V_CLASS_DECL:
          if ((vlog_flags(sym->node) & VLOG_F_FORWARD)
-             && vlog_kind(v) == V_CLASS_DECL
-             && (vlog_flags(v) & VLOG_F_GENERIC)) {
+             && ((vlog_kind(v) == V_CLASS_DECL
+                  && (vlog_flags(v) & VLOG_F_GENERIC))
+                 || vlog_kind(v) == V_TYPE_DECL)) {
             sym->node = v;
             return;
          }

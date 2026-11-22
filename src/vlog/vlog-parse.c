@@ -14941,12 +14941,29 @@ static vlog_node_t p_type_declaration(void)
       return NULL;
    }
 
-   if (((peek() == tSTRUCT || peek() == tUNION || peek() == tENUM)
-        && peek_nth(2) == tID && peek_nth(3) == tSEMI)
-       || (peek() == tID && peek_nth(2) == tSEMI)) {
+   if (peek() == tID && peek_nth(2) == tSEMI) {
+      // Forward typedef without a type keyword may resolve to a class or a
+      // regular typedef later in the same scope (IEEE 1800-2017 6.18)
+      ident_t id = p_identifier();
+      const loc_t loc = state.last_loc;
+      consume(tSEMI);
+
+      if (vlog_symtab_query(symtab, id) == NULL) {
+         vlog_node_t c = vlog_new(V_CLASS_DECL);
+         vlog_set_ident(c, id);
+         vlog_set_flags(c, VLOG_F_FORWARD);
+         vlog_set_loc(c, &loc);
+         vlog_symtab_put(symtab, c);
+         APUSH(forward_classes, c);
+      }
+
+      return NULL;
+   }
+
+   if ((peek() == tSTRUCT || peek() == tUNION || peek() == tENUM)
+       && peek_nth(2) == tID && peek_nth(3) == tSEMI) {
       // Forward declaration of a type which is declared in full later
-      if (peek() != tID)
-         drop_token(&state);
+      drop_token(&state);
       ident_t id = p_identifier();
       consume(tSEMI);
 
@@ -14971,6 +14988,18 @@ static vlog_node_t p_type_declaration(void)
       if (forward_types.items[i].id == vlog_ident(v)) {
          forward_types.items[i] = forward_types.items[--forward_types.count];
          i--;
+      }
+   }
+   vlog_node_t fwd_cls = vlog_symtab_query(symtab, vlog_ident(v));
+   if (fwd_cls != NULL && vlog_kind(fwd_cls) == V_CLASS_DECL
+       && (vlog_flags(fwd_cls) & VLOG_F_FORWARD)) {
+      for (int i = 0; i < forward_classes.count; i++) {
+         if (forward_classes.items[i] == fwd_cls) {
+            for (int j = i; j < forward_classes.count - 1; j++)
+               forward_classes.items[j] = forward_classes.items[j + 1];
+            ATRIM(forward_classes, forward_classes.count - 1);
+            break;
+         }
       }
    }
    vlog_set_type(v, p_variable_dimensions(dt, NULL));
