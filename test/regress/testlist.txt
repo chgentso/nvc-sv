@@ -3040,6 +3040,7 @@ svvifpat2 verilog
 svbindimport1 verilog
 svbindiface1 verilog
 svbindgen1 verilog
+svcrvforeachcall1 verilog
 svfwdgeneric1 verilog
 svrandmodearr1 verilog
 svfwdtypedef1 verilog

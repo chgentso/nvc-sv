@@ -25406,12 +25406,21 @@ static void vlog_crv_foreach_elems(vlog_gen_t *g, vlog_node_t v,
 
    mir_value_t flags32 = vlog_crv_flags(g, 32, true);
 
+   vlog_node_t idecl = vlog_decl(v, 0);
+   const type_info_t *iti = vlog_type_info(g, vlog_type(idecl));
+   mir_value_t ivar = mir_add_var(g->mu, iti->type, iti->stamp,
+                                  vlog_ident(idecl), MIR_VAR_TEMP);
+   mir_put_object(g->mu, idecl, ivar);
+
    const int saved_nindex = g->crv_nindex;
    const int nstmts = vlog_stmts(v);
    const int step = left <= right ? 1 : -1;
 
    for (int64_t i = left; ; i += step) {
-      g->crv_index[saved_nindex].decl = vlog_decl(v, 0);
+      mir_build_store(g->mu, ivar,
+                      vlog_lower_cast(g, iti->type, vlog_crv_int(g, i)));
+
+      g->crv_index[saved_nindex].decl = idecl;
       g->crv_index[saved_nindex].node =
          CRV3(g, CRV_OP_CONST, g->crv_ctx, vlog_crv_int(g, i), flags32);
       g->crv_index[saved_nindex].assoc = NULL;
@@ -25610,9 +25619,82 @@ static void vlog_crv_foreach_objects(vlog_gen_t *g, vlog_node_t v,
    vlog_crv_objects_level(g, v, guard, vlog_lower_rvalue(g, arr), 0, dim);
 }
 
-static void vlog_crv_has_dist_cb(vlog_node_t v, void *ctx)
+static void vlog_crv_needs_unroll_cb(vlog_node_t v, void *ctx)
 {
-   *(bool *)ctx = true;
+   switch (vlog_kind(v)) {
+   case V_DIST:
+   case V_USER_FCALL:
+   case V_METHOD_CALL:
+      *(bool *)ctx = true;
+      break;
+   default:
+      break;
+   }
+}
+
+static void vlog_crv_foreach_dyn_unroll(vlog_gen_t *g, vlog_node_t v,
+                                        mir_value_t guard)
+{
+   // Unroll a 1D dynamic array foreach at runtime so calls and dist work
+   // per element with the loop index available as a MIR variable
+
+   if (g->crv_nindex == ARRAY_LEN(g->crv_index))
+      fatal_at(vlog_loc(v), "sorry, foreach constraints are nested too "
+               "deeply");
+
+   vlog_node_t arr = vlog_value(v);
+   vlog_node_t idecl = vlog_decl(v, 0);
+
+   mir_value_t ua = vlog_lower_rvalue(g, arr);
+   mir_value_t len = mir_build_uarray_len(g->mu, ua, 0);
+
+   mir_type_t t_offset = mir_offset_type(g->mu);
+   mir_value_t ivar = mir_add_var(g->mu, t_offset, MIR_NULL_STAMP,
+                                  ident_uniq("crv_i"), MIR_VAR_TEMP);
+   mir_build_store(g->mu, ivar, vlog_crv_int(g, 0));
+
+   const type_info_t *iti = vlog_type_info(g, vlog_type(idecl));
+   mir_value_t index = mir_add_var(g->mu, iti->type, iti->stamp,
+                                   vlog_ident(idecl), MIR_VAR_TEMP);
+   mir_put_object(g->mu, idecl, index);
+
+   mir_block_t test_bb = mir_add_block(g->mu);
+   mir_block_t body_bb = mir_add_block(g->mu);
+   mir_block_t done_bb = mir_add_block(g->mu);
+
+   mir_build_jump(g->mu, test_bb);
+   mir_set_cursor(g->mu, test_bb, MIR_APPEND);
+
+   mir_value_t i = mir_build_load(g->mu, ivar);
+   mir_build_cond(g->mu, mir_build_cmp(g->mu, MIR_CMP_LT, i, len), body_bb,
+                  done_bb);
+
+   mir_set_cursor(g->mu, body_bb, MIR_APPEND);
+
+   mir_build_store(g->mu, index, vlog_lower_cast(g, iti->type, i));
+
+   mir_value_t flags32 = vlog_crv_flags(g, 32, true);
+   const int saved_nindex = g->crv_nindex;
+   g->crv_index[saved_nindex].decl = idecl;
+   g->crv_index[saved_nindex].node =
+      CRV3(g, CRV_OP_CONST, g->crv_ctx, i, flags32);
+   g->crv_index[saved_nindex].assoc = NULL;
+   g->crv_index[saved_nindex].key = MIR_NULL_VALUE;
+   g->crv_index[saved_nindex].known = true;
+   g->crv_index[saved_nindex].has_sval = false;
+   g->crv_nindex = saved_nindex + 1;
+
+   const int nstmts = vlog_stmts(v);
+   for (int k = 0; k < nstmts; k++)
+      vlog_crv_items(g, vlog_stmt(v, k), guard, NULL);
+
+   g->crv_nindex = saved_nindex;
+
+   mir_build_store(g->mu, ivar, mir_build_add(g->mu, t_offset, i,
+                                              vlog_crv_int(g, 1)));
+   mir_build_jump(g->mu, test_bb);
+
+   mir_set_cursor(g->mu, done_bb, MIR_APPEND);
 }
 
 static void vlog_crv_foreach(vlog_gen_t *g, vlog_node_t v, mir_value_t guard)
@@ -25657,19 +25739,25 @@ static void vlog_crv_foreach(vlog_gen_t *g, vlog_node_t v, mir_value_t guard)
       return;
    }
 
-   if (!vlog_crv_is_dynamic_array(decl) && vlog_ranges(decl) == 1
-       && vlog_decls(v) == 1) {
-      bool has_dist = false;
+   if (vlog_decls(v) == 1
+       && (vlog_crv_is_dynamic_array(decl) || vlog_ranges(decl) == 1)) {
+      bool unroll = false;
       const int nstmts = vlog_stmts(v);
-      for (int i = 0; i < nstmts && !has_dist; i++)
-         vlog_visit_only(vlog_stmt(v, i), vlog_crv_has_dist_cb, &has_dist,
-                         V_DIST);
+      for (int i = 0; i < nstmts && !unroll; i++)
+         vlog_visit(vlog_stmt(v, i), vlog_crv_needs_unroll_cb, &unroll);
 
-      int64_t left = 0, right = 0;
-      if (has_dist && vlog_get_const(vlog_left(vlog_range(decl, 0)), &left)
-          && vlog_get_const(vlog_right(vlog_range(decl, 0)), &right)) {
-         vlog_crv_foreach_elems(g, v, guard, left, right);
-         return;
+      if (unroll) {
+         if (vlog_crv_is_dynamic_array(decl)) {
+            vlog_crv_foreach_dyn_unroll(g, v, guard);
+            return;
+         }
+
+         int64_t left = 0, right = 0;
+         if (vlog_get_const(vlog_left(vlog_range(decl, 0)), &left)
+             && vlog_get_const(vlog_right(vlog_range(decl, 0)), &right)) {
+            vlog_crv_foreach_elems(g, v, guard, left, right);
+            return;
+         }
       }
    }
 
