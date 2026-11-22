@@ -3682,7 +3682,9 @@ static void expand_randomize_args(vlog_node_t src, vlog_node_t v)
       bool expand = false, isarray = false;
 
       if (vlog_kind(p) == V_REF && vlog_has_ref(p)
-          && vlog_kind(vlog_ref(p)) == V_VAR_DECL) {
+          && (vlog_kind(vlog_ref(p)) == V_VAR_DECL
+              || vlog_kind(vlog_ref(p)) == V_LOCAL_DECL
+              || vlog_kind(vlog_ref(p)) == V_TF_PORT_DECL)) {
          decl = vlog_ref(p);
 
          // The unpacked dimension is on the declaration or its type
