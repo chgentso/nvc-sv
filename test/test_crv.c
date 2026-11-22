@@ -3152,6 +3152,35 @@ START_TEST(test_soft_giveup)
 }
 END_TEST
 
+START_TEST(test_stats_defined_elements)
+{
+   // a[k] == a[k-1] + 1 defines each element by the one before: sampling the
+   // first is enough, and the rejection stage answers (the chance that eight
+   // independent bytes follow each other is 2^-56)
+   const crv_engine_t saved = crv_engine();
+   crv_set_engine(CRV_ENGINE_AUTO);
+   crv_t *c = crv_new();
+   crv_array_t a = crv_array(c, 8, false, 8, false, true);
+   for (unsigned k = 1; k < 8; k++) {
+      crv_node_t cur = crv_array_elem(c, a, crv_const(c, k, 32, true));
+      crv_node_t prev = crv_array_elem(c, a, crv_const(c, k - 1, 32, true));
+      crv_node_t next = crv_binary(c, CRV_ADD, prev, crv_const(c, 1, 8, false),
+                                   8, false);
+      crv_require(c, crv_binary(c, CRV_EQ, cur, next, 1, false), false, k);
+   }
+
+   crv_seed(11);
+   const crv_call_stat_t *st = solved_stats(c, true);
+   ck_assert_int_eq(st->stage[CRV_STAGE_REJECT], 1);
+   ck_assert_int_eq(st->stage[CRV_STAGE_DFS], 0);
+   for (unsigned k = 1; k < 8; k++)
+      ck_assert_int_eq(crv_array_value(c, a, k),
+                       (crv_array_value(c, a, k - 1) + 1) & 0xff);
+   crv_free(c);
+   crv_set_engine(saved);
+}
+END_TEST
+
 START_TEST(test_stats_exhausted)
 {
    // 16 samples of a variable that one value in 2^16 satisfies are all
@@ -3370,6 +3399,7 @@ Suite *get_crv_tests(void)
    tcase_add_test(tc, test_stats_stage);
    tcase_add_test(tc, test_stats_decline);
    tcase_add_test(tc, test_stats_exhausted);
+   tcase_add_test(tc, test_stats_defined_elements);
    tcase_add_test(tc, test_soft_giveup);
    tcase_add_test(tc, test_stats_order);
    tcase_add_test(tc, test_stats_fail);

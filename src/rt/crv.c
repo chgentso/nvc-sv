@@ -5831,6 +5831,21 @@ typedef struct {
    uint8_t      *mask;
 } rjv_t;
 
+// The variable that a node stands for: a scalar or an element of an array
+// at a constant index
+static int rj_var_of(const prob_t *P, const node_t *nd)
+{
+   if (nd->kind == N_VAR)
+      return nd->aux >= 0 && nd->aux < P->nv ? nd->aux : -1;
+   else if (nd->kind == N_AELEM && P->ebase[nd->aux] >= 0) {
+      const node_t *in = &P->c->nodes[nd->a];
+      if (in->kind == N_CONST && in->val >= 0
+          && in->val < (int64_t)P->sizes[nd->aux])
+         return P->ebase[nd->aux] + (int)in->val;
+   }
+   return -1;
+}
+
 static void rj_vars_cb(void *ctx, const node_t *nd, int n)
 {
    (void)n;
@@ -5846,7 +5861,9 @@ static void rj_vars_cb(void *ctx, const node_t *nd, int n)
       break;
    case N_ASUM:
    case N_AELEM:
-      if (P->ebase[nd->aux] >= 0) {
+      if (rj_var_of(P, nd) >= 0)
+         V->mask[rj_var_of(P, nd)] = 1;
+      else if (P->ebase[nd->aux] >= 0) {
          for (unsigned i = 0; i < P->sizes[nd->aux]; i++)
             V->mask[P->ebase[nd->aux] + i] = 1;
       }
@@ -5944,10 +5961,9 @@ static void rj_defined(prob_t *P, rj_t *R, const int *lvl, int *defd)
       int side[2] = { nd->a, nd->b };
       int cand[2] = { -1, -1 };
       for (int s = 0; s < 2; s++) {
-         const node_t *vn = &c->nodes[side[s]];
-         if (vn->kind == N_VAR && vn->aux >= 0 && vn->aux < P->nv
-             && rj_definable(P, R->comp, vn->aux, defd))
-            cand[s] = vn->aux;
+         const int u = rj_var_of(P, &c->nodes[side[s]]);
+         if (u >= 0 && rj_definable(P, R->comp, u, defd))
+            cand[s] = u;
       }
 
       if (cand[0] < 0 && cand[1] < 0)
