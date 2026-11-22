@@ -3025,3 +3025,4 @@ svcovcrosswith1 verilog
 svexternimport1 verilog
 svgenstruct1 verilog
 svfwdmember1 verilog
+svcondstruct1 verilog

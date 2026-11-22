@@ -3662,6 +3662,10 @@ static type_mask_t vlog_check_cond_expr(vlog_node_t v)
    const type_mask_t common = lmask & rmask;
    if ((common & TM_CLASS) && !(common & TM_INTEGRAL))
       return TM_CLASS;   // Both could be integral if the types are not known
+   else if ((common & TM_STRUCT) && !(common & TM_INTEGRAL))
+      return TM_STRUCT;
+   else if ((common & TM_UNION) && !(common & TM_INTEGRAL))
+      return TM_UNION;
    else if ((common & TM(DT_STRING)) && !(common & TM_CONST))
       return TM(DT_STRING);
 

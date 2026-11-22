@@ -2357,6 +2357,8 @@ vlog_node_t vlog_get_type(vlog_node_t v)
          if (type == NULL)
             type = vlog_get_type(vlog_right(v));
          if (type != NULL && (vlog_kind(type) == V_CLASS_DECL
+                              || vlog_kind(type) == V_STRUCT_DECL
+                              || vlog_kind(type) == V_UNION_DECL
                               || (vlog_kind(type) == V_DATA_TYPE
                                   && vlog_subkind(type) == DT_STRING)))
             return type;
