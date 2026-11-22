@@ -27245,6 +27245,129 @@ static bool vlog_crv_decide_now(vlog_gen_t *g, vlog_node_t cond)
    return has_null;
 }
 
+typedef struct {
+   vlog_node_t sel[8];
+   int         nsel;
+} crv_sels_t;
+
+static void vlog_crv_sels_cb(vlog_node_t v, void *context)
+{
+   crv_sels_t *c = context;
+   if (vlog_kind(v) != V_BIT_SELECT || vlog_params(v) != 1
+       || c->nsel == ARRAY_LEN(c->sel))
+      return;
+
+   vlog_node_t base = vlog_value(v);
+   if ((vlog_kind(base) == V_REF || vlog_kind(base) == V_MEMBER_REF)
+       && vlog_has_ref(base) && vlog_crv_is_array_decl(vlog_ref(base))
+       && vlog_crv_assoc_type(vlog_ref(base)) == NULL)
+      c->sel[c->nsel++] = v;
+}
+
+static mir_value_t vlog_crv_inrange(vlog_gen_t *g, vlog_node_t e)
+{
+   // A constraint which refers to an element that does not exist is left
+   // out (IEEE 1800-2017 18.5.8.1), such as array[i-1] for the first i of
+   // a foreach.  Null if every element is known to exist.
+
+   crv_sels_t c = { .nsel = 0 };
+   vlog_visit(e, vlog_crv_sels_cb, &c);
+
+   mir_type_t t_offset = mir_offset_type(g->mu);
+   mir_value_t ok = MIR_NULL_VALUE;
+   for (int i = 0; i < c.nsel; i++) {
+      vlog_node_t idx = vlog_param(c.sel[i], 0);
+      vlog_node_t base = vlog_value(c.sel[i]);
+      vlog_node_t decl = vlog_ref(base);
+
+      if (!vlog_crv_is_state(g, idx))
+         continue;
+      else if (vlog_ranges(decl) > 1)
+         continue;
+
+      mir_value_t lo, hi;
+      if (vlog_crv_is_dynamic_array(decl)) {
+         mir_value_t ua = vlog_lower_rvalue(g, base);
+         lo = vlog_crv_int(g, 0);
+         hi = mir_build_sub(g->mu, t_offset,
+                            mir_build_uarray_len(g->mu, ua, 0),
+                            vlog_crv_int(g, 1));
+      }
+      else if (vlog_ranges(decl) == 1) {
+         int64_t left, right;
+         if (!vlog_get_const(vlog_left(vlog_range(decl, 0)), &left)
+             || !vlog_get_const(vlog_right(vlog_range(decl, 0)), &right))
+            continue;
+
+         lo = vlog_crv_int(g, MIN(left, right));
+         hi = vlog_crv_int(g, MAX(left, right));
+      }
+      else
+         continue;
+
+      mir_value_t value = vlog_crv_to_offset(g, vlog_lower_rvalue(g, idx));
+      mir_value_t in = mir_build_and(
+         g->mu, mir_build_cmp(g->mu, MIR_CMP_GEQ, value, lo),
+         mir_build_cmp(g->mu, MIR_CMP_LEQ, value, hi));
+      ok = mir_is_null(ok) ? in : mir_build_and(g->mu, ok, in);
+   }
+
+   return ok;
+}
+
+static mir_value_t vlog_crv_inrange_node(vlog_gen_t *g, vlog_node_t e)
+{
+   // The same for an index which the solver chooses, such as the one of a
+   // foreach over a rand array: the constraint only applies if the element
+   // exists.  Null if there is no such select.
+
+   crv_sels_t c = { .nsel = 0 };
+   vlog_visit(e, vlog_crv_sels_cb, &c);
+
+   mir_value_t ok = MIR_NULL_VALUE;
+   for (int i = 0; i < c.nsel; i++) {
+      vlog_node_t idx = vlog_param(c.sel[i], 0);
+      vlog_node_t base = vlog_value(c.sel[i]);
+      vlog_node_t decl = vlog_ref(base);
+
+      if (vlog_crv_is_state(g, idx) || vlog_ranges(decl) > 1)
+         continue;
+      else if (!vlog_crv_is_dynamic_array(decl) && vlog_ranges(decl) != 1)
+         continue;
+
+      mir_value_t flags = vlog_crv_flags(g, 32, true);
+      int64_t lo = 0, hi = 0;
+      mir_value_t size = MIR_NULL_VALUE;
+      if (vlog_crv_is_dynamic_array(decl))
+         size = CRV2(g, CRV_OP_ARRAY_SIZE, g->crv_ctx, vlog_crv_array(g, base));
+      else {
+         int64_t left, right;
+         if (!vlog_get_const(vlog_left(vlog_range(decl, 0)), &left)
+             || !vlog_get_const(vlog_right(vlog_range(decl, 0)), &right))
+            continue;
+
+         lo = MIN(left, right);
+         hi = MAX(left, right);
+      }
+
+      mir_value_t index = vlog_crv_expr(g, idx, 32, true);
+      mir_value_t bflags = vlog_crv_flags(g, 1, false);
+      mir_value_t first = CRV3(g, CRV_OP_CONST, g->crv_ctx, vlog_crv_int(g, lo),
+                               flags);
+      mir_value_t past = mir_is_null(size)
+         ? CRV3(g, CRV_OP_CONST, g->crv_ctx, vlog_crv_int(g, hi + 1), flags)
+         : size;
+      mir_value_t in = vlog_crv_and(
+         g, CRV5(g, CRV_OP_BINARY, g->crv_ctx, vlog_crv_int(g, CRV_GE), index,
+                 first, bflags),
+         CRV5(g, CRV_OP_BINARY, g->crv_ctx, vlog_crv_int(g, CRV_LT), index,
+              past, bflags));
+      ok = mir_is_null(ok) ? in : vlog_crv_and(g, ok, in);
+   }
+
+   return ok;
+}
+
 static void vlog_crv_items(vlog_gen_t *g, vlog_node_t v, mir_value_t guard,
                            mir_value_t *sink)
 {
@@ -27269,6 +27392,20 @@ static void vlog_crv_items(vlog_gen_t *g, vlog_node_t v, mir_value_t guard,
       else {
          const bool soft = !!(vlog_flags(v) & VLOG_F_SOFT);
          vlog_node_t e = vlog_value(v);
+
+         mir_value_t node_guard = vlog_crv_inrange_node(g, e);
+         if (!mir_is_null(node_guard))
+            guard = vlog_crv_and(g, guard, node_guard);
+
+         mir_block_t skip_bb = MIR_NULL_BLOCK;
+         mir_value_t inrange = vlog_crv_inrange(g, e);
+         if (!mir_is_null(inrange)) {
+            mir_block_t use_bb = mir_add_block(g->mu);
+            skip_bb = mir_add_block(g->mu);
+            mir_build_cond(g->mu, inrange, use_bb, skip_bb);
+            mir_set_cursor(g->mu, use_bb, MIR_APPEND);
+         }
+
          if (vlog_kind(e) == V_DIST && vlog_crv_width(g, vlog_value(e)) > 64
              && !vlog_crv_is_state(g, e)) {
             // The choice is a constraint of its own to have the weights
@@ -27287,6 +27424,11 @@ static void vlog_crv_items(vlog_gen_t *g, vlog_node_t v, mir_value_t guard,
          }
          else
             vlog_crv_emit(g, guard, vlog_crv_bool(g, e), soft, sink);
+
+         if (!mir_is_null(skip_bb)) {
+            mir_build_jump(g->mu, skip_bb);
+            mir_set_cursor(g->mu, skip_bb, MIR_APPEND);
+         }
       }
       break;
    case V_CONS_IMPLY:
