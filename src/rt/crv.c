@@ -1600,6 +1600,8 @@ typedef struct {
    int      *vcomp;       // Component of each variable, -1 if none
    int      *ccomp;       // Component of each constraint, -1 if none
    int       ncomp, comp;  // Components with a free variable, the one searched
+   int      *kvs, *kvl;    // Variables of each component
+   int      *kcs, *kcl;    // Constraints of each component
    bool      sum_ready;
    chain_t  *chain;
    int       nchain, cchain;
@@ -1997,6 +1999,10 @@ static void prob_free(prob_t *P)
    free(P->soft_on);
    free(P->vcomp);
    free(P->ccomp);
+   free(P->kvs);
+   free(P->kvl);
+   free(P->kcs);
+   free(P->kcl);
    free(P->varr);
    free(P->tlo);
    free(P->thi);
@@ -4895,13 +4901,14 @@ static void compute_levels(prob_t *P)
 
 static int build_order(prob_t *P, int attempt, int **out)
 {
-   okey_t *keys = NEW(okey_t, P->nv);
+   const int lo = P->vcomp != NULL ? P->kvs[P->comp] : 0;
+   const int hi = P->vcomp != NULL ? P->kvs[P->comp + 1] : P->nv;
+   okey_t *keys = NEW(okey_t, hi - lo);
    int n = 0;
-   for (int v = 0; v < P->nv; v++) {
+   for (int i = lo; i < hi; i++) {
+      const int v = P->vcomp != NULL ? P->kvl[i] : i;
       const pvar_t *pv = &P->vars[v];
       if (pv->dom.lo == pv->dom.hi || pv->derived)
-         continue;
-      else if (P->vcomp != NULL && P->vcomp[v] != P->comp)
          continue;
 
       okey_t *k = &keys[n++];
@@ -5156,28 +5163,44 @@ static i128 pick_val(prob_t *P, int v)
    return dom_nth(d, d->lo, d->hi, rnd_i128(n));
 }
 
-static bool check_all(prob_t *P, int comp)
+static void fill_vals(prob_t *P, int comp)
 {
-   for (int v = 0; v < P->nv; v++)
-      P->vals[v] = st(P->vars[v].dom.lo);
+   // The variables of a component and the decomposed ones among them, or
+   // all of them: others are not read by the constraints being checked
+   if (comp < 0) {
+      for (int v = 0; v < P->nv; v++)
+         P->vals[v] = st(P->vars[v].dom.lo);
+   }
+   else {
+      for (int i = P->kvs[comp]; i < P->kvs[comp + 1]; i++)
+         P->vals[P->kvl[i]] = st(P->vars[P->kvl[i]].dom.lo);
+   }
 
    for (int i = 0; i < P->ndec; i++) {
       const dec_t *d = &P->dec[i];
+      if (comp >= 0 && P->vcomp[d->var] != comp)
+         continue;
       uint64_t x = 0;
       for (int k = 0; k < d->nf; k++)
          x |= (uint64_t)P->vals[d->f0 + k] << d->pos[k];
       P->vals[d->var] = x;
    }
+}
+
+static bool check_all(prob_t *P, int comp)
+{
+   fill_vals(P, comp);
 
    ectx_t E = { .c = P->c, .vals = P->vals, .nsc = P->nsc,
                 .ebase = P->ebase, .sizes = P->sizes };
 
-   for (int ci = 0; ci < P->ncons; ci++) {
+   const int c0 = comp >= 0 ? P->kcs[comp] : 0;
+   const int c1 = comp >= 0 ? P->kcs[comp + 1] : P->ncons;
+   for (int k = c0; k < c1; k++) {
+      const int ci = comp >= 0 ? P->kcl[k] : k;
       const pcons_t *pc = &P->cons[ci];
       E.fail = false;
       if (pc->soft >= 0 && P->soft_on != NULL && !P->soft_on[pc->soft])
-         continue;
-      if (comp >= 0 && P->ccomp[ci] != comp)
          continue;
       if (pc->kind == C_REQ) {
          const int64_t v = ev(&E, pc->root);
@@ -5506,6 +5529,17 @@ static void sum_init(prob_t *P)
 // one does not undo the choices made for the others, and each has its own
 // number of restarts.  A problem with a single component is searched as a
 // whole.
+static void free_components(prob_t *P)
+{
+   free(P->vcomp);
+   free(P->ccomp);
+   free(P->kvs);
+   free(P->kvl);
+   free(P->kcs);
+   free(P->kcl);
+   P->vcomp = P->ccomp = P->kvs = P->kvl = P->kcs = P->kcl = NULL;
+}
+
 static void build_components(prob_t *P)
 {
    const crv_t *c = P->c;
@@ -5581,6 +5615,37 @@ static void build_components(prob_t *P)
    }
 
    P->ncomp = ncomp;
+
+   P->kvs = xcalloc((ncomp + 1) * sizeof(int));
+   P->kcs = xcalloc((ncomp + 1) * sizeof(int));
+   for (int v = 0; v < nv; v++) {
+      if (P->vcomp[v] >= 0)
+         P->kvs[P->vcomp[v] + 1]++;
+   }
+   for (int ci = 0; ci < P->ncons; ci++) {
+      if (P->ccomp[ci] >= 0)
+         P->kcs[P->ccomp[ci] + 1]++;
+   }
+   for (int k = 0; k < ncomp; k++) {
+      P->kvs[k + 1] += P->kvs[k];
+      P->kcs[k + 1] += P->kcs[k];
+   }
+   P->kvl = NEW(int, P->kvs[ncomp]);
+   P->kcl = NEW(int, P->kcs[ncomp]);
+   int *vf = NEW(int, ncomp), *cf = NEW(int, ncomp);
+   memcpy(vf, P->kvs, ncomp * sizeof(int));
+   memcpy(cf, P->kcs, ncomp * sizeof(int));
+   for (int v = 0; v < nv; v++) {
+      if (P->vcomp[v] >= 0)
+         P->kvl[vf[P->vcomp[v]]++] = v;
+   }
+   for (int ci = 0; ci < P->ncons; ci++) {
+      if (P->ccomp[ci] >= 0)
+         P->kcl[cf[P->ccomp[ci]]++] = ci;
+   }
+   free(vf);
+   free(cf);
+
    free(uf);
    free(used);
    free(freec);
@@ -5625,21 +5690,18 @@ static sres_t solve_prob(prob_t *P)
    compute_levels(P);
 
    if (!P->legacy) {
-      free(P->vcomp);
-      free(P->ccomp);
-      P->vcomp = P->ccomp = NULL;
+      free_components(P);
       build_components(P);
       if (P->ncomp < 2) {
          // One component is searched as a whole
-         free(P->vcomp);
-         free(P->ccomp);
-         P->vcomp = P->ccomp = NULL;
+         free_components(P);
       }
    }
 
    if (P->vcomp == NULL)
       return search(P);
 
+   fill_vals(P, -1);
    for (P->comp = 0; P->comp < P->ncomp; P->comp++) {
       const sres_t r = search(P);
       if (r != S_SAT)
