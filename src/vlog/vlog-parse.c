@@ -10918,6 +10918,8 @@ static vlog_node_t p_foreach_statement(void)
          if ((vlog_kind(root) == V_REF || vlog_kind(root) == V_MEMBER_REF)
              && vlog_has_ref(root))
             decl = vlog_ref(root);
+         else if (vlog_kind(root) == V_MEMBER_REF && vlog_virtual_pending(root))
+            ;   // Deferred until lowering
          else if (vlog_kind(root) == V_HIER_REF) {
             decl = hier_member_decl(root);
             hier_pending = decl == NULL;
@@ -10931,26 +10933,44 @@ static vlog_node_t p_foreach_statement(void)
       break;
    }
 
-   if (decl == NULL && vlog_kind(arr) == V_MEMBER_REF
-       && vlog_virtual_pending(arr)) {
-      // The interface is declared later so the bounds are found by
-      // querying the member once it is known
-      const char *queries[] = { "$left", "$right" };
-      for (int i = 0; i < nvars && i < MAX_FOREACH_DIMS; i++) {
-         vlog_node_t bound[2];
-         for (int j = 0; j < 2; j++) {
-            vlog_node_t q = vlog_new(V_SYS_FCALL);
-            vlog_set_ident(q, ident_new(queries[j]));
-            vlog_set_subkind(q, V_SYSTF_NONE);
-            vlog_set_ival(q, time_ival());
-            vlog_add_param(q, arr);
-            vlog_add_param(q, foreach_number(i + 1, loc));
-            vlog_set_loc(q, loc);
-            bound[j] = q;
-         }
+   vlog_node_t arr_root = arr;
+   while (vlog_kind(arr_root) == V_BIT_SELECT)
+      arr_root = vlog_value(arr_root);
 
-         dims[ndims++] = (foreach_dim_t) { .left = bound[0], .right = bound[1] };
+   if (decl == NULL && vlog_kind(arr_root) == V_MEMBER_REF
+       && vlog_virtual_pending(arr_root)) {
+      // The interface is declared later so the dimensions and associative
+      // key types are resolved when lowering
+      vlog_node_t loop = vlog_new(V_FOREACH);
+      vlog_set_value(loop, arr);
+      vlog_set_loc(loop, loc);
+
+      vlog_symtab_push(symtab, loop);
+
+      for (int i = 0; i < nvars; i++) {
+         if (names[i] != NULL) {
+            vlog_node_t d = vlog_new(V_LOCAL_DECL);
+            vlog_set_ident(d, names[i]);
+            vlog_set_loc(d, &locs[i]);
+
+            vlog_node_t dt = make_integer_atom_type(DT_INT);
+            vlog_set_flags(dt, VLOG_F_SIGNED);
+            vlog_set_type(d, dt);
+            vlog_set_flags(d, VLOG_F_FORWARD);
+
+            vlog_symtab_put(symtab, d);
+            vlog_add_decl(loop, d);
+         }
+         else
+            vlog_add_decl(loop, vlog_new(V_EMPTY));
       }
+
+      vlog_node_t body = p_statement_or_null();
+      if (body != NULL)
+         vlog_add_stmt(loop, body);
+
+      vlog_symtab_pop(symtab);
+      return loop;
    }
 
    if (hier_pending) {

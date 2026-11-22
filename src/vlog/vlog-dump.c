@@ -1791,6 +1791,7 @@ void vlog_dump(vlog_node_t v, int indent)
       vlog_dump_cons_set(v, indent);
       break;
    case V_CONS_FOREACH:
+   case V_FOREACH:
       vlog_dump_cons_foreach(v, indent);
       break;
    case V_CONS_UNIQUE:

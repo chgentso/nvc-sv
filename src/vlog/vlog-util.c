@@ -2202,6 +2202,26 @@ vlog_node_t vlog_select_type_packed(vlog_node_t v)
    return select_type(v, true);
 }
 
+typedef struct {
+   vlog_node_t decl;
+   vlog_node_t type;
+} type_override_t;
+
+static type_override_t type_overrides[32];
+static int ntype_overrides = 0;
+
+void vlog_push_type_override(vlog_node_t decl, vlog_node_t type)
+{
+   assert(ntype_overrides < ARRAY_LEN(type_overrides));
+   type_overrides[ntype_overrides++] = (type_override_t) { decl, type };
+}
+
+void vlog_pop_type_override(void)
+{
+   assert(ntype_overrides > 0);
+   ntype_overrides--;
+}
+
 vlog_node_t vlog_get_type(vlog_node_t v)
 {
    switch (vlog_kind(v)) {
@@ -2211,12 +2231,19 @@ vlog_node_t vlog_get_type(vlog_node_t v)
    case V_DATA_TYPE:
    case V_CLASS_DECL:
       return v;
+   case V_LOCAL_DECL:
+      if (vlog_flags(v) & VLOG_F_FORWARD) {
+         for (int i = ntype_overrides - 1; i >= 0; i--) {
+            if (type_overrides[i].decl == v)
+               return vlog_get_type(type_overrides[i].type);
+         }
+      }
+      return vlog_get_type(vlog_type(v));
    case V_VAR_DECL:
    case V_NET_DECL:
    case V_PORT_DECL:
    case V_TF_PORT_DECL:
    case V_TYPE_DECL:
-   case V_LOCAL_DECL:
    case V_PARAM_DECL:
    case V_LOCALPARAM:
    case V_ENUM_NAME:

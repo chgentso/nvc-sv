@@ -293,6 +293,7 @@ static void vlog_cover_stmt(vlog_cover_t *g, vlog_node_t s,
    case V_WHILE:
    case V_DO_WHILE:
    case V_FOR_LOOP:
+   case V_FOREACH:
       src = COV_SRC_LOOP_STMT;
       break;
    case V_TIMING:
@@ -400,6 +401,7 @@ static void vlog_cover_nested(vlog_node_t s, hset_t *set)
    case V_WHILE:
    case V_DO_WHILE:
    case V_FOR_LOOP:
+   case V_FOREACH:
       {
          const int nstmts = vlog_stmts(s);
          for (int i = 0; i < nstmts; i++)
@@ -538,6 +540,7 @@ static void vlog_cover_stmt_one(vlog_cover_t *g, vlog_node_t s,
    case V_WHILE:
    case V_DO_WHILE:
    case V_FOR_LOOP:
+   case V_FOREACH:
       vlog_cover_stmt_list(g, s, &lcs);
       break;
    case V_IF:

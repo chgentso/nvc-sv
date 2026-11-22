@@ -388,6 +388,13 @@ static void vlog_check_same_type(vlog_node_t left, type_mask_t lmask,
       return;   // Type not known until elaboration
    else if (vlog_kind(left) == V_HIER_REF && !vlog_has_ref(left))
       return;
+   else if ((vlog_kind(left) == V_REF && vlog_has_ref(left)
+             && vlog_kind(vlog_ref(left)) == V_LOCAL_DECL
+             && (vlog_flags(vlog_ref(left)) & VLOG_F_FORWARD))
+            || (vlog_kind(right) == V_REF && vlog_has_ref(right)
+                && vlog_kind(vlog_ref(right)) == V_LOCAL_DECL
+                && (vlog_flags(vlog_ref(right)) & VLOG_F_FORWARD)))
+      return;   // Deferred foreach index type not known until lowering
 
    vlog_node_t ltype = vlog_get_type(left), rtype = vlog_get_type(right);
    if (ltype != NULL && rtype != NULL && vlog_kind(ltype) == V_DATA_TYPE
@@ -3008,6 +3015,10 @@ static type_mask_t vlog_check_ref(vlog_node_t v)
    if (!vlog_has_ref(v))
       return TM_ERROR;   // The lookup failed and was reported
 
+   if (vlog_kind(vlog_ref(v)) == V_LOCAL_DECL
+       && (vlog_flags(vlog_ref(v)) & VLOG_F_FORWARD))
+      return TM_INTEGRAL | TM(DT_STRING);
+
    return get_type_mask(vlog_ref(v));
 }
 
@@ -5082,6 +5093,10 @@ void vlog_check(vlog_node_t v)
    case V_FOR_LOOP:
    case V_FOR_GENERATE:
       vlog_check_for_loop(v);
+      break;
+   case V_FOREACH:
+      vlog_check_expr(vlog_value(v));
+      vlog_check_stmts(v);
       break;
    case V_REPEAT:
       vlog_check_repeat(v);

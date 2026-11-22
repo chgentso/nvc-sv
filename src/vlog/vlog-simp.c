@@ -351,6 +351,14 @@ static void build_sensitivity(vlog_node_t ctrl, vlog_node_t v, hset_t *set,
       build_sensitivity(ctrl, vlog_left(v), set, is_comb);
       build_sensitivity(ctrl, vlog_right(v), set, is_comb);
       break;
+   case V_FOREACH:
+      {
+         build_sensitivity(ctrl, vlog_value(v), set, is_comb);
+         const int nstmts = vlog_stmts(v);
+         for (int i = 0; i < nstmts; i++)
+            build_sensitivity(ctrl, vlog_stmt(v, i), set, is_comb);
+      }
+      break;
    case V_FOR_LOOP:
       {
          build_sensitivity(ctrl, vlog_left(v), set, is_comb);

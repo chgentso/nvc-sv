@@ -465,6 +465,9 @@ static const imask_t has_map[V_LAST_NODE_KIND] = {
 
    // V_CONFIG_RULE
    (I_SUBKIND | I_IDENT | I_IDENT2 | I_PARAMS),
+
+   // V_FOREACH
+   (I_VALUE | I_DECLS | I_STMTS),
 };
 
 static const char *kind_text_map[V_LAST_NODE_KIND] = {
@@ -504,7 +507,7 @@ static const char *kind_text_map[V_LAST_NODE_KIND] = {
    "V_MODPORT",       "V_IFACE_PORT",   "V_MODPORT_PORT",  "V_MATCHES",
    "V_MATCH_PAT",    "V_SVA_OP",       "V_SVA_DECL",      "V_PROP_SPEC",
    "V_EXPECT",        "V_BIND",         "V_DPI_EXPORT",
-   "V_CONFIG",        "V_CONFIG_RULE",
+   "V_CONFIG",        "V_CONFIG_RULE",  "V_FOREACH",
 };
 
 static const change_allowed_t change_allowed[] = {

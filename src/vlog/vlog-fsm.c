@@ -86,7 +86,7 @@ static bool is_stmt_container(vlog_node_t s)
 {
    switch (vlog_kind(s)) {
    case V_SEQ_BLOCK: case V_TIMING: case V_FOREVER: case V_REPEAT:
-   case V_WHILE: case V_DO_WHILE: case V_FOR_LOOP: case V_WAIT:
+   case V_WHILE: case V_DO_WHILE: case V_FOR_LOOP: case V_FOREACH: case V_WAIT:
    case V_COND: case V_CASE: case V_CASE_ITEM: case V_FORK:
       return true;
    default:

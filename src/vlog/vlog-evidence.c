@@ -698,6 +698,21 @@ static void wk_stmt(wk_t *w, vlog_node_t s)
       }
       break;
 
+   case V_FOREACH:
+      {
+         const unsigned mark = w->guard.count;
+         wk_collect(w, vlog_value(s), &w->guard, &w->guard, true);
+         if (w->guard.count > mark)
+            wk_why(w, CONN_WHY_LOOP);
+
+         const int n = vlog_stmts(s);
+         for (int i = 0; i < n; i++)
+            wk_stmt(w, vlog_stmt(s, i));
+
+         w->guard.count = mark;
+      }
+      break;
+
    case V_FOR_LOOP:
       {
          const unsigned mark = w->guard.count;

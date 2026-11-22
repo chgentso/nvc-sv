@@ -1015,6 +1015,7 @@ static void walk_stmt(vlog_node_t v, assigned_list_t *def, latch_ctx_t *ctx)
    case V_SEQ_BLOCK:
    case V_TIMING:
    case V_FOR_LOOP:
+   case V_FOREACH:
    case V_WHILE:
    case V_REPEAT:
    case V_DO_WHILE:

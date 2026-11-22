@@ -294,6 +294,7 @@ typedef enum {
    V_DPI_EXPORT,
    V_CONFIG,
    V_CONFIG_RULE,
+   V_FOREACH,
 
    V_LAST_NODE_KIND
 } vlog_kind_t;
