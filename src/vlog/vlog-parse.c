@@ -589,6 +589,7 @@ typedef struct {
 static A(deferred_body_t) deferred_bodies = AINIT;
 static A(forward_spec_t)  forward_specs = AINIT;
 static A(vlog_node_t)     forward_classes = AINIT;
+static hset_t            *bare_forward_refs = NULL;
 
 typedef struct {
    ident_t id;
@@ -1107,6 +1108,12 @@ static vlog_node_t get_data_type(ident_t id)
       diag_emit(d);
 
       return logic_type();
+   }
+
+   if (vlog_kind(v) == V_CLASS_DECL && (vlog_flags(v) & VLOG_F_FORWARD)) {
+      if (bare_forward_refs == NULL)
+         bare_forward_refs = hset_new(16);
+      hset_insert(bare_forward_refs, v);
    }
 
    return v;
@@ -18846,7 +18853,10 @@ static vlog_node_t p_generic_class(ident_t name, vlog_flags_t flags)
    for (int i = 0; i < g->nparams; i++)
       all_default &= g->params[i].has_def;
 
-   if (fwd != NULL && all_default) {
+   const bool bare_ref = fwd != NULL && bare_forward_refs != NULL
+      && hset_contains(bare_forward_refs, fwd);
+
+   if (bare_ref && all_default) {
       // Bare references to a forward-declared generic class refer to its
       // default specialisation
       spec_into = fwd;
@@ -28936,6 +28946,11 @@ void reset_verilog_parser(void)
    if (file_packages != NULL) {
       hset_free(file_packages);
       file_packages = NULL;
+   }
+
+   if (bare_forward_refs != NULL) {
+      hset_free(bare_forward_refs);
+      bare_forward_refs = NULL;
    }
 
    if (seen_units != NULL) {

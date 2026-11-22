@@ -3045,6 +3045,7 @@ svforkescape1 verilog
 svvifforeach1 verilog
 svcrvwideenum1 verilog
 svfwdgeneric1 verilog
+svfwdgeneric2 verilog
 svrandmodearr1 verilog
 svfwdtypedef1 verilog
 svsizeenum1 verilog
