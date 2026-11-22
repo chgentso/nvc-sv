@@ -780,6 +780,69 @@ START_TEST(test_array_sum)
 }
 END_TEST
 
+// A long chain of additions, as the sum of a method with a clause is lowered:
+// propagated by its terms, in every engine
+START_TEST(test_sum_chain)
+{
+   static const crv_engine_t engines[] = { CRV_ENGINE_LEGACY, CRV_ENGINE_AUTO };
+   const crv_engine_t saved = crv_engine();
+
+   for (size_t e = 0; e < ARRAY_LEN(engines); e++) {
+      crv_set_engine(engines[e]);
+      crv_seed(61 + e);
+
+      for (int trial = 0; trial < 60; trial++) {
+         const int n = 16 + trial % 9;
+         const bool sgn = trial % 3 == 0;
+         const int64_t target = sgn ? (trial % 5) * 50 - 100
+            : 40 + trial * 37 % (n * 200);
+         crv_t *c = crv_new();
+         crv_var_t v[32];
+         crv_node_t sum = 0;
+         for (int i = 0; i < n; i++) {
+            v[i] = crv_var(c, 8, sgn, 0);
+            crv_node_t t = crv_cast(c, crv_var_ref(c, v[i]), 32, true);
+            sum = i == 0 ? t : crv_binary(c, CRV_ADD, sum, t, 32, true);
+         }
+
+         const crv_binary_t rel = trial % 4 == 0 ? CRV_EQ
+            : trial % 4 == 1 ? CRV_LE : trial % 4 == 2 ? CRV_GE : CRV_EQ;
+         crv_require(c, crv_binary(c, rel, sum,
+                                   crv_const(c, target, 32, true), 1, false),
+                     false, 1);
+         if (trial % 7 == 0)
+            crv_require(c, crv_binary(c, CRV_NE, crv_var_ref(c, v[3]),
+                                      crv_var_ref(c, v[4]), 1, false),
+                        false, 2);
+
+         ck_assert_msg(crv_solve(c), "engine %zu trial %d: no solution", e,
+                       trial);
+         int64_t total = 0;
+         for (int i = 0; i < n; i++)
+            total += crv_value(c, v[i]);
+         ck_assert(rel == CRV_EQ ? total == target
+                   : rel == CRV_LE ? total <= target : total >= target);
+         crv_free(c);
+      }
+
+      // Out of reach in both directions
+      crv_t *c = crv_new();
+      crv_node_t sum = 0;
+      for (int i = 0; i < 20; i++) {
+         crv_node_t t = crv_cast(c, crv_var_ref(c, crv_var(c, 8, false, 0)),
+                                 32, true);
+         sum = i == 0 ? t : crv_binary(c, CRV_ADD, sum, t, 32, true);
+      }
+      crv_require(c, crv_binary(c, CRV_GT, sum, crv_const(c, 20 * 255, 32, true),
+                                1, false), false, 1);
+      ck_assert_int_eq(crv_solve2(c), CRV_UNSAT);
+      crv_free(c);
+   }
+
+   crv_set_engine(saved);
+}
+END_TEST
+
 ////////////////////////////////////////////////////////////////////////////////
 // Problems described apart from the solver
 //
@@ -2822,6 +2885,7 @@ Suite *get_crv_tests(void)
    tcase_add_test(tc, test_array_fixed);
    tcase_add_test(tc, test_array_dynamic);
    tcase_add_test(tc, test_array_sum);
+   tcase_add_test(tc, test_sum_chain);
    tcase_add_test(tc, test_engine_default);
    tcase_add_loop_test(tc, test_engine_env, 0, 6);
    tcase_add_test(tc, test_engine_unknown);

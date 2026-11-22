@@ -21,6 +21,7 @@
 #include <assert.h>
 #include <stdint.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -1531,6 +1532,24 @@ typedef struct dec_s {
    uint8_t  pos[MAX_FIELDS + 1];
 } dec_t;
 
+// A long chain of additions of the same width, as made by the sum of a
+// method with a clause: its terms are kept with their bounds and the total
+// of them so that a change of one variable costs one term, not the chain
+typedef struct {
+   int      head;           // Outermost addition
+   int      nterm;
+   int     *term;           // Node of each term
+   ivl_t   *tiv;            // Bounds of each term when last computed
+   uint8_t *dirty;
+   int     *stack, nstack;  // Terms to compute again
+   i128     lo, hi, maxw;   // Total of the bounds, widest term at the start
+   bool     ready;
+} chain_t;
+
+typedef struct { int chain, term; } cref_t;
+
+#define CHAIN_MIN 16
+
 typedef struct {
    crv_t    *c;
    int       nsc, na, nv;
@@ -1564,6 +1583,16 @@ typedef struct {
    unsigned  base_nodes, base_sets;
    struct dec_s *dec;
    int       ndec;
+   bool      legacy;      // The search of release 0.18.0 exactly
+   // Sums of the elements of each array kept up to date as domains change
+   int      *varr;        // Array that a variable is an element of or -1
+   i128     *tlo, *thi;   // Sum of the lower and the upper bounds
+   i128     *maxw;        // No element is wider than this
+   chain_t  *chain;
+   int       nchain, cchain;
+   int      *chain_of;    // Chain headed by a node or -1: NULL without any
+   int      *cstart;      // Terms that contain a variable
+   cref_t   *clist;
 } prob_t;
 
 typedef struct {
@@ -1952,6 +1981,20 @@ static void prob_free(prob_t *P)
    c->nnodes = P->base_nodes;
 
    free(P->dec);
+   free(P->varr);
+   free(P->tlo);
+   free(P->thi);
+   free(P->maxw);
+   for (int i = 0; i < P->nchain; i++) {
+      free(P->chain[i].term);
+      free(P->chain[i].tiv);
+      free(P->chain[i].dirty);
+      free(P->chain[i].stack);
+   }
+   free(P->chain);
+   free(P->chain_of);
+   free(P->cstart);
+   free(P->clist);
    free(P->ebase);
    free(P->sizes);
    free(P->cons);
@@ -2644,11 +2687,14 @@ static void derive_domains(prob_t *P)
 
 // Mode 1 solves for the sizes of arrays with a random size, ignoring the
 // elements of those, mode 2 has all sizes known
+static void chain_setup(prob_t *P);
+
 static prob_t *prob_build(crv_t *c, int mode, const unsigned *sizes,
                           const bool *active)
 {
    prob_t *P = xcalloc(sizeof(prob_t));
    P->c = c;
+   P->legacy = crv_engine() == CRV_ENGINE_LEGACY;
    P->nsc = c->nvars;
    P->na = c->narrays;
    P->curc = -1;
@@ -2859,9 +2905,150 @@ static prob_t *prob_build(crv_t *c, int mode, const unsigned *sizes,
    if (dbg.budget > 0)
       P->budget = dbg.budget;
 
+   chain_setup(P);
    return P;
 }
 
+
+////////////////////////////////////////////////////////////////////////////////
+// Chains of additions
+
+static bool is_add_of(const node_t *nd, unsigned w, bool sgn)
+{
+   return nd->kind == N_BIN && nd->op == CRV_ADD && nd->width == w
+      && nd->sgn == sgn;
+}
+
+static int chain_leaves(const crv_t *c, int n, unsigned w, bool sgn, int cap)
+{
+   const node_t *nd = &c->nodes[n];
+   if (!is_add_of(nd, w, sgn))
+      return 1;
+
+   const int l = chain_leaves(c, nd->a, w, sgn, cap);
+   return l >= cap ? l : l + chain_leaves(c, nd->b, w, sgn, cap - l);
+}
+
+static void chain_collect(const crv_t *c, int n, unsigned w, bool sgn,
+                          chain_t *ch, bool *claimed)
+{
+   const node_t *nd = &c->nodes[n];
+   if (!is_add_of(nd, w, sgn)) {
+      ch->term[ch->nterm++] = n;
+      return;
+   }
+
+   claimed[n] = true;
+   chain_collect(c, nd->a, w, sgn, ch, claimed);
+   chain_collect(c, nd->b, w, sgn, ch, claimed);
+}
+
+typedef struct {
+   int var, chain, term;
+} cvref_t;
+
+typedef struct {
+   const prob_t *P;
+   int          *mark, stamp, chain, term;
+   cvref_t      *refs;
+   int           nrefs, crefs;
+} cvars_t;
+
+static void cvars_add(cvars_t *V, int v)
+{
+   if (V->mark[v] != V->stamp) {
+      V->mark[v] = V->stamp;
+      const cvref_t r = { v, V->chain, V->term };
+      VEC_PUSH(V->refs, V->nrefs, V->crefs, r);
+   }
+}
+
+static void cvars_cb(void *ctx, const node_t *nd, int n)
+{
+   (void)n;
+   cvars_t *V = ctx;
+   const prob_t *P = V->P;
+   switch ((nkind_t)nd->kind) {
+   case N_VAR:
+      cvars_add(V, nd->aux);
+      break;
+   case N_ASIZE:
+      cvars_add(V, P->nsc + nd->aux);
+      break;
+   case N_ASUM:
+   case N_AELEM:
+      if (P->ebase[nd->aux] >= 0) {
+         for (unsigned i = 0; i < P->sizes[nd->aux]; i++)
+            cvars_add(V, P->ebase[nd->aux] + i);
+      }
+      break;
+   default:
+      break;
+   }
+}
+
+static void chain_setup(prob_t *P)
+{
+   const crv_t *c = P->c;
+   if (P->legacy || P->nn < 2 * CHAIN_MIN)
+      return;
+
+   // Outermost first: nodes are made after their operands
+   bool *claimed = xcalloc(P->nn);
+   for (int n = P->nn - 1; n >= 0; n--) {
+      const node_t *nd = &c->nodes[n];
+      if (nd->kind != N_BIN || nd->op != CRV_ADD || claimed[n])
+         continue;
+      else if (chain_leaves(c, n, nd->width, nd->sgn, CHAIN_MIN) < CHAIN_MIN)
+         continue;
+
+      chain_t ch = { .head = n };
+      ch.term = NEW(int, chain_leaves(c, n, nd->width, nd->sgn, INT_MAX));
+      chain_collect(c, n, nd->width, nd->sgn, &ch, claimed);
+      VEC_PUSH(P->chain, P->nchain, P->cchain, ch);
+   }
+   free(claimed);
+
+   if (P->nchain == 0)
+      return;
+
+   P->chain_of = NEW(int, P->nn);
+   for (int i = 0; i < P->nn; i++)
+      P->chain_of[i] = -1;
+
+   // The terms that each variable is in
+   cvars_t V = { .P = P, .mark = xcalloc(P->nn * sizeof(int)) };
+   for (int i = 0; i < P->nchain; i++) {
+      chain_t *ch = &P->chain[i];
+      P->chain_of[ch->head] = i;
+      ch->tiv = NEW(ivl_t, ch->nterm);
+      ch->dirty = xcalloc(ch->nterm);
+      ch->stack = NEW(int, ch->nterm);
+      for (int t = 0; t < ch->nterm; t++) {
+         ch->dirty[t] = 1;
+         ch->stack[ch->nstack++] = t;
+         V.chain = i;
+         V.term = t;
+         V.stamp++;
+         visit(c, ch->term[t], cvars_cb, &V);
+      }
+   }
+   free(V.mark);
+
+   P->cstart = xcalloc((P->nv + 1) * sizeof(int));
+   for (int i = 0; i < V.nrefs; i++)
+      P->cstart[V.refs[i].var + 1]++;
+   for (int v = 0; v < P->nv; v++)
+      P->cstart[v + 1] += P->cstart[v];
+   P->clist = NEW(cref_t, V.nrefs);
+   int *fill = NEW(int, P->nv);
+   memcpy(fill, P->cstart, P->nv * sizeof(int));
+   for (int i = 0; i < V.nrefs; i++)
+      P->clist[fill[V.refs[i].var]++] = (cref_t){ V.refs[i].chain,
+                                                  V.refs[i].term };
+   free(fill);
+   free(V.refs);
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 // Propagation
@@ -2919,10 +3106,31 @@ static void notify(prob_t *P, int v)
    }
 }
 
+static inline void sum_move(prob_t *P, int v, const dom_t *from,
+                            const dom_t *to)
+{
+   if (P->varr != NULL && P->varr[v] >= 0) {
+      P->tlo[P->varr[v]] += to->lo - from->lo;
+      P->thi[P->varr[v]] += to->hi - from->hi;
+   }
+
+   if (P->cstart != NULL) {
+      for (int i = P->cstart[v]; i < P->cstart[v + 1]; i++) {
+         chain_t *ch = &P->chain[P->clist[i].chain];
+         const int t = P->clist[i].term;
+         if (!ch->dirty[t]) {
+            ch->dirty[t] = 1;
+            ch->stack[ch->nstack++] = t;
+         }
+      }
+   }
+}
+
 static void commit_dom(prob_t *P, int v, dom_t nd)
 {
    const trail_t t = { v, P->vars[v].dom };
    VEC_PUSH(P->trail, P->ntrail, P->ctrail, t);
+   sum_move(P, v, &t.old, &nd);
    P->vars[v].dom = nd;
    P->changed++;
    notify(P, v);
@@ -2934,8 +3142,10 @@ static void undo_to(prob_t *P, int mark)
       const trail_t *t = &P->trail[--P->ntrail];
       if (t->var < 0)
          P->uproc[-2 - t->var] = 0;
-      else
+      else {
+         sum_move(P, t->var, &P->vars[t->var].dom, &t->old);
          P->vars[t->var].dom = t->old;
+      }
    }
 }
 
@@ -3015,6 +3225,66 @@ static int node_var(const prob_t *P, const node_t *nd)
 
 static ivl_t fwd(prob_t *P, int n);
 static bool bwd(prob_t *P, int n, ivl_t r);
+
+// Bring the total up to date and say what the chain adds up to, if no
+// intermediate result can wrap
+static bool chain_fwd(prob_t *P, chain_t *ch, const node_t *nd, ivl_t *r)
+{
+   while (ch->nstack > 0) {
+      const int t = ch->stack[--ch->nstack];
+      ch->dirty[t] = 0;
+      const ivl_t x = fwd(P, ch->term[t]);
+      if (iv_empty(x)) {
+         ch->dirty[t] = 1;
+         ch->stack[ch->nstack++] = t;
+         *r = x;
+         return true;
+      }
+
+      const ivl_t old = ch->ready ? ch->tiv[t] : ivl(0, 0);
+      ch->lo += x.lo - old.lo;
+      ch->hi += x.hi - old.hi;
+      ch->tiv[t] = x;
+      if (!ch->ready && x.hi - x.lo > ch->maxw)
+         ch->maxw = x.hi - x.lo;
+   }
+   ch->ready = true;
+   P->work += 2;
+
+   if (ch->lo < tmin(nd->width, nd->sgn) || ch->hi > tmax(nd->width, nd->sgn))
+      return false;
+
+   *r = ivl(ch->lo, ch->hi);
+   return true;
+}
+
+static bool chain_bwd(prob_t *P, chain_t *ch, const node_t *nd, ivl_t r,
+                      bool *res)
+{
+   if (!ch->ready || ch->lo < tmin(nd->width, nd->sgn)
+       || ch->hi > tmax(nd->width, nd->sgn))
+      return false;
+
+   // A term is narrowed only if it is wider than the room above or below
+   // the total: none is when the widest is not
+   const i128 lo = ch->lo, hi = ch->hi;
+   *res = true;
+   if (ch->maxw <= hi - r.lo && ch->maxw <= r.hi - lo)
+      return true;
+
+   P->work += ch->nterm / 8;
+   for (int t = 0; t < ch->nterm; t++) {
+      const ivl_t x = ch->tiv[t];
+      const ivl_t y = ivl(r.lo - (hi - x.hi), r.hi - (lo - x.lo));
+      if (y.lo <= x.lo && y.hi >= x.hi)
+         continue;
+      else if (!bwd(P, ch->term[t], y)) {
+         *res = false;
+         return true;
+      }
+   }
+   return true;
+}
 
 static ivl_t div_corners(ivl_t a, ivl_t b)
 {
@@ -3271,6 +3541,13 @@ static ivl_t fwd(prob_t *P, int n)
    ivl_t r;
    P->work++;
 
+   if (P->chain_of != NULL && n < P->nn && P->chain_of[n] >= 0
+       && chain_fwd(P, &P->chain[P->chain_of[n]], nd, &r)) {
+      P->iv[n] = r;
+      P->stamp[n] = P->pass;
+      return r;
+   }
+
    switch ((nkind_t)nd->kind) {
    case N_CONST:
       r = ivl(mathv(nd->val, nd->sgn), mathv(nd->val, nd->sgn));
@@ -3370,11 +3647,17 @@ static ivl_t fwd(prob_t *P, int n)
          const int base = P->ebase[nd->aux];
          const unsigned size = P->sizes[nd->aux];
          i128 lo = 0, hi = 0;
-         for (unsigned i = 0; i < size; i++) {
-            lo += P->vars[base + i].dom.lo;
-            hi += P->vars[base + i].dom.hi;
+         if (P->varr != NULL && !P->legacy) {
+            lo = P->tlo[nd->aux];
+            hi = P->thi[nd->aux];
          }
-         P->work += size / 8;
+         else {
+            for (unsigned i = 0; i < size; i++) {
+               lo += P->vars[base + i].dom.lo;
+               hi += P->vars[base + i].dom.hi;
+            }
+            P->work += size / 8;
+         }
          r = wrap(ivl(lo, hi), nd->width, nd->sgn);
       }
       break;
@@ -3750,6 +4033,12 @@ static bool bwd(prob_t *P, int n, ivl_t r)
    P->iv[n] = r;
    P->work++;
 
+   if (P->chain_of != NULL && n < P->nn && P->chain_of[n] >= 0) {
+      bool res;
+      if (chain_bwd(P, &P->chain[P->chain_of[n]], nd, r, &res))
+         return res;
+   }
+
    switch ((nkind_t)nd->kind) {
    case N_BIN:
       switch ((crv_binary_t)nd->op) {
@@ -3898,11 +4187,23 @@ static bool bwd(prob_t *P, int n, ivl_t r)
          const int base = P->ebase[nd->aux];
          const unsigned size = P->sizes[nd->aux];
          i128 lo = 0, hi = 0;
-         for (unsigned i = 0; i < size; i++) {
-            lo += P->vars[base + i].dom.lo;
-            hi += P->vars[base + i].dom.hi;
+         if (P->varr != NULL && !P->legacy) {
+            lo = P->tlo[nd->aux];
+            hi = P->thi[nd->aux];
+         }
+         else {
+            for (unsigned i = 0; i < size; i++) {
+               lo += P->vars[base + i].dom.lo;
+               hi += P->vars[base + i].dom.hi;
+            }
          }
          if (lo < tmin(nd->width, nd->sgn) || hi > tmax(nd->width, nd->sgn))
+            return true;
+
+         // An element is clipped only if it is wider than the room left
+         // below or above the sum: none is when the widest is not
+         if (P->varr != NULL && !P->legacy && P->maxw[nd->aux] <= hi - r.lo
+             && P->maxw[nd->aux] <= r.hi - lo)
             return true;
 
          P->work += size / 8;
@@ -4803,8 +5104,46 @@ static void stats_components(const prob_t *P, crv_call_stat_t *out)
    out->decomposed |= P->ndec > 0;
 }
 
+static void sum_init(prob_t *P)
+{
+   // Only arrays whose sum is in a constraint
+   bool *used = xcalloc(P->na ? P->na : 1);
+   bool any = false;
+   for (unsigned n = 0; n < P->c->nnodes; n++) {
+      const node_t *nd = &P->c->nodes[n];
+      if (nd->kind == N_ASUM && P->ebase[nd->aux] >= 0)
+         any = used[nd->aux] = true;
+   }
+
+   if (any) {
+      P->varr = NEW(int, P->nv);
+      P->tlo = xcalloc(P->na * sizeof(i128));
+      P->thi = xcalloc(P->na * sizeof(i128));
+      P->maxw = xcalloc(P->na * sizeof(i128));
+      for (int v = 0; v < P->nv; v++)
+         P->varr[v] = -1;
+
+      for (int a = 0; a < P->na; a++) {
+         if (!used[a])
+            continue;
+         for (unsigned i = 0; i < P->sizes[a]; i++) {
+            const int v = P->ebase[a] + i;
+            const dom_t *d = &P->vars[v].dom;
+            P->varr[v] = a;
+            P->tlo[a] += d->lo;
+            P->thi[a] += d->hi;
+            if (d->hi - d->lo > P->maxw[a])
+               P->maxw[a] = d->hi - d->lo;
+         }
+      }
+   }
+   free(used);
+}
+
 static sres_t solve_prob(prob_t *P)
 {
+   sum_init(P);
+
    for (int ci = 0; ci < P->ncons; ci++)
       enqueue(P, ci);
 
