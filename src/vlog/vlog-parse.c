@@ -16283,6 +16283,7 @@ static bool at_covergroup(void)
 typedef struct {
    cov_group_t group;
    bool        failed;
+   ident_t     cross_label;
    ident_t    *enum_args;
    int         nenum_args;
    ident_t    *class_args;
@@ -16881,6 +16882,11 @@ static cov_sel_t *p_cov_select_base(cov_parse_t *cp)
 
       return s;
    }
+   else if (peek() == tID && cp->cross_label != NULL
+            && peek_ident_nth(1) == cp->cross_label) {
+      consume(tID);
+      return cov_sel_new(COV_SEL_ALL);
+   }
    else {
       cov_sorry(cp, "this select expression of a cross bin");
       return NULL;
@@ -17013,6 +17019,7 @@ static bool p_cov_cross(cov_parse_t *cp, ident_t label)
       p_cov_iff(&x.iff, &x.has_iff);
 
    if (optional(tLBRACE)) {
+      cp->cross_label = label;
       while (not_at_token(tRBRACE, tEOF)) {
          if (cov_at_id("option") || cov_at_id("type_option")) {
             if (!p_cov_option(&x.opts, &x.nopts))
@@ -17060,6 +17067,7 @@ static bool p_cov_cross(cov_parse_t *cp, ident_t label)
          }
       }
       consume(tRBRACE);
+      cp->cross_label = NULL;
       optional(tSEMI);
    }
    else

@@ -89,7 +89,8 @@ typedef struct {
 } cov_cp_t;
 
 typedef enum {
-   COV_SEL_AND, COV_SEL_OR, COV_SEL_NOT, COV_SEL_BINSOF, COV_SEL_WITH
+   COV_SEL_AND, COV_SEL_OR, COV_SEL_NOT, COV_SEL_BINSOF, COV_SEL_WITH,
+   COV_SEL_ALL
 } cov_sel_kind_t;
 
 typedef struct _cov_sel {

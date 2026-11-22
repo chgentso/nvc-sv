@@ -333,6 +333,8 @@ static void sel_sets(gen_t *s, const cov_sel_t *sel)
    case COV_SEL_WITH:
       sel_sets(s, sel->left);
       break;
+   case COV_SEL_ALL:
+      break;
    case COV_SEL_BINSOF:
       if (sel->has_isect) {
          const int id = sel->set;
@@ -381,6 +383,9 @@ static void sel_pred(gen_t *s, const cov_cross_t *x, const cov_sel_t *sel)
       sel_pred(s, x, sel->left);
       tb_printf(tb, " && __w%d(c))", sel->wid);
       break;
+   case COV_SEL_ALL:
+      tb_cat(tb, "1'b1");
+      break;
    case COV_SEL_BINSOF:
       {
          int cpidx = -1;
@@ -416,6 +421,8 @@ static void sel_check(const cov_group_t *g, const cov_cross_t *x,
    case COV_SEL_NOT:
    case COV_SEL_WITH:
       sel_check(g, x, sel->left, err);
+      break;
+   case COV_SEL_ALL:
       break;
    case COV_SEL_BINSOF:
       {
@@ -495,6 +502,7 @@ static void sel_withs(gen_t *s, const cov_cross_t *x, const cov_sel_t *sel)
       sel_withs(s, x, sel->left);
       gen_with(s, x, sel);
       break;
+   case COV_SEL_ALL:
    case COV_SEL_BINSOF:
       break;
    }
@@ -633,6 +641,8 @@ static void number_sets(cov_sel_t *sel, int *n, int *nwith)
    case COV_SEL_WITH:
       number_sets(sel->left, n, nwith);
       sel->wid = (*nwith)++;
+      break;
+   case COV_SEL_ALL:
       break;
    case COV_SEL_BINSOF:
       sel->set = sel->has_isect ? (*n)++ : -1;
