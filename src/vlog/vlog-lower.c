@@ -21866,7 +21866,8 @@ static bool vlog_crv_is_array_ref(vlog_node_t v)
 
 
 typedef enum {
-   CRV_COUNT_NONE, CRV_COUNT_ONES, CRV_COUNT_ONEHOT, CRV_COUNT_ONEHOT0
+   CRV_COUNT_NONE, CRV_COUNT_ONES, CRV_COUNT_ONEHOT, CRV_COUNT_ONEHOT0,
+   CRV_COUNT_BITS
 } crv_count_t;
 
 static crv_count_t vlog_crv_bit_count(vlog_node_t v)
@@ -21880,6 +21881,8 @@ static crv_count_t vlog_crv_bit_count(vlog_node_t v)
       return CRV_COUNT_ONEHOT;
    else if (id == ident_new("$onehot0"))
       return CRV_COUNT_ONEHOT0;
+   else if (id == ident_new("$countbits") && vlog_params(v) >= 2)
+      return CRV_COUNT_BITS;
    else
       return CRV_COUNT_NONE;
 }
@@ -22019,6 +22022,7 @@ static unsigned vlog_crv_width(vlog_gen_t *g, vlog_node_t v)
       case CRV_COUNT_NONE:
          return vlog_width(v);
       case CRV_COUNT_ONES:
+      case CRV_COUNT_BITS:
          return 32;
       default:
          return 1;
@@ -22070,6 +22074,7 @@ static bool vlog_crv_signed(vlog_gen_t *g, vlog_node_t v)
       case CRV_COUNT_NONE:
          return vlog_is_signed(v);
       case CRV_COUNT_ONES:
+      case CRV_COUNT_BITS:
          return true;
       default:
          return false;
@@ -25835,7 +25840,86 @@ static mir_value_t vlog_crv_expr(vlog_gen_t *g, vlog_node_t v, unsigned width,
       case V_SYS_FCALL:
          {
             const crv_count_t count = vlog_crv_bit_count(v);
-            if (count == CRV_COUNT_NONE || vlog_params(v) != 1)
+            if (vlog_ident(v) == ident_new("$isunbounded")
+                && vlog_params(v) == 1) {
+               // A variable is never unbounded
+               node = CRV3(g, CRV_OP_CONST, g->crv_ctx, vlog_crv_int(g, 0),
+                           vlog_crv_flags(g, 1, false));
+               break;
+            }
+            else if (vlog_ident(v) == ident_new("$clog2")
+                     && vlog_params(v) == 1
+                     && vlog_crv_width(g, vlog_param(v, 0)) <= 64) {
+               // The number of powers of two below the value
+               vlog_node_t arg = vlog_param(v, 0);
+               const unsigned aw = vlog_crv_width(g, arg);
+               mir_value_t val = vlog_crv_expr(g, arg, aw, false);
+               mir_value_t flags32 = vlog_crv_flags(g, 32, true);
+               node = CRV3(g, CRV_OP_CONST, g->crv_ctx, vlog_crv_int(g, 0),
+                           flags32);
+               for (unsigned k = 0; k < aw; k++) {
+                  mir_value_t pow2 = CRV3(
+                     g, CRV_OP_CONST, g->crv_ctx,
+                     vlog_crv_int(g, k == 63 ? INT64_MIN : INT64_C(1) << k),
+                     vlog_crv_flags(g, aw, false));
+                  mir_value_t gt = CRV5(g, CRV_OP_BINARY, g->crv_ctx,
+                                        vlog_crv_int(g, CRV_GT), val, pow2,
+                                        vlog_crv_flags(g, 1, false));
+                  mir_value_t bit = CRV3(g, CRV_OP_CAST, g->crv_ctx, gt,
+                                         flags32);
+                  node = CRV5(g, CRV_OP_BINARY, g->crv_ctx,
+                              vlog_crv_int(g, CRV_ADD), node, bit, flags32);
+               }
+               break;
+            }
+            else if (count == CRV_COUNT_BITS) {
+               vlog_node_t arg = vlog_param(v, 0);
+               const unsigned aw = vlog_crv_width(g, arg);
+               if (aw > 64)
+                  fatal_at(vlog_loc(v), "sorry, $countbits of a value wider "
+                           "than 64 bits is not supported in a constraint");
+
+               bool want0 = false, want1 = false;
+               const int nparams = vlog_params(v);
+               for (int i = 1; i < nparams; i++) {
+                  vlog_node_t ctl = vlog_param(v, i);
+                  int64_t c;
+                  if (vlog_kind(ctl) == V_NUMBER
+                      && !number_is_defined(vlog_number(ctl)))
+                     continue;   // x and z never match a two-state value
+                  else if (!vlog_get_const(ctl, &c))
+                     fatal_at(vlog_loc(v), "sorry, the control bits of "
+                              "$countbits must be constant in a constraint");
+                  want0 |= c == 0;
+                  want1 |= c == 1;
+               }
+
+               mir_value_t flags32 = vlog_crv_flags(g, 32, true);
+               if (want0 && want1)
+                  node = CRV3(g, CRV_OP_CONST, g->crv_ctx, vlog_crv_int(g, aw),
+                              flags32);
+               else if (!want0 && !want1)
+                  node = CRV3(g, CRV_OP_CONST, g->crv_ctx, vlog_crv_int(g, 0),
+                              flags32);
+               else {
+                  mir_value_t val = vlog_crv_expr(g, arg, aw, false);
+                  if (want0) {
+                     mir_value_t mask = CRV3(
+                        g, CRV_OP_CONST, g->crv_ctx,
+                        vlog_crv_int(g, aw >= 64 ? -1
+                                     : (INT64_C(1) << aw) - 1),
+                        vlog_crv_flags(g, aw, false));
+                     val = CRV5(g, CRV_OP_BINARY, g->crv_ctx,
+                                vlog_crv_int(g, CRV_XOR), val, mask,
+                                vlog_crv_flags(g, aw, false));
+                  }
+
+                  node = CRV3(g, CRV_OP_UNARY, g->crv_ctx,
+                              vlog_crv_int(g, CRV_POPCNT), val);
+               }
+               break;
+            }
+            else if (count == CRV_COUNT_NONE || vlog_params(v) != 1)
                fatal_at(vlog_loc(v), "sorry, this system function is not "
                         "supported in a constraint");
 

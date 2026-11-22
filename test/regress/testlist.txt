@@ -3114,3 +3114,4 @@ svcrvsuper1 verilog
 svcrvdistzero1 verilog
 svcrvargsorry1 verilog,fail,gold
 svcrvwidearr1 verilog,fail,gold
+svcrvsysfunc1 verilog
