@@ -3044,3 +3044,4 @@ svsingleunit1 shell
 svassocstr1 shell
 svfwdpat1 verilog
 svfwdpat2 verilog
+svpatrep4 verilog

@@ -435,9 +435,6 @@ static fold_state_t get_fold_state(vlog_node_t v, fold_ctx_t *ctx)
       }
    case V_PATTERN_EXPR:
       {
-         if (!vlog_has_type(v))
-            return FOLD_NON_CONST;
-
          fold_state_t state = FOLD_CONST;
          const int nparams = vlog_params(v);
          for (int i = 0; i < nparams; i++) {
@@ -445,8 +442,9 @@ static fold_state_t get_fold_state(vlog_node_t v, fold_ctx_t *ctx)
             if (vlog_has_left(item)) {
                // The key of a structure pattern is a member
                vlog_node_t key = vlog_left(item);
-               if (vlog_kind(key) != V_REF || !vlog_has_ref(key)
-                   || vlog_kind(vlog_ref(key)) != V_VAR_DECL)
+               if (vlog_kind(key) != V_REF
+                   || (vlog_has_ref(key)
+                       && vlog_kind(vlog_ref(key)) != V_VAR_DECL))
                   state = MAX(state, get_fold_state(key, ctx));
             }
             state = MAX(state, get_fold_state(vlog_right(item), ctx));
