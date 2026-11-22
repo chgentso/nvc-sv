@@ -9405,6 +9405,43 @@ static void elab_set_design_precision(const elab_ctx_t *ctx)
    vlog_set_design_precision(p.log10 != UINT_MAX ? p.log10 : 6);
 }
 
+static void elab_fold_port_maps(tree_t block, const elab_ctx_t *ctx)
+{
+   const int nstmts = tree_stmts(block);
+   for (int i = 0; i < nstmts; i++) {
+      tree_t child = tree_stmt(block, i);
+      if (tree_kind(child) != T_BLOCK)
+         continue;
+
+      if (tree_kind(block) == T_BLOCK) {
+         elab_href_ctx_t hctx = {
+            .where        = block,
+            .parents      = ctx->block_parents,
+            .iface_first  = ctx->iface_first,
+            .iface_values = ctx->iface_values,
+         };
+
+         const int ndecls = tree_decls(child);
+         for (int j = 0; j < ndecls; j++) {
+            tree_t d = tree_decl(child, j);
+            if (tree_kind(d) != T_VERILOG)
+               continue;
+
+            vlog_node_t map = tree_vlog(d);
+            if (vlog_kind(map) == V_PORT_MAP) {
+               bool has_href = false;
+               vlog_rewrite(map, NULL, elab_find_href_cb, &has_href);
+               if (has_href)
+                  vlog_rewrite(map, elab_rewrite_hier_ref_pre_cb,
+                               elab_rewrite_hier_ref_cb, &hctx);
+            }
+         }
+      }
+
+      elab_fold_port_maps(child, ctx);
+   }
+}
+
 static void elab_root_cb(void *arg)
 {
    elab_ctx_t *ctx = arg;
@@ -9447,6 +9484,8 @@ static void elab_root_cb(void *arg)
       vlog_rewrite(gb->block, elab_rewrite_hier_ref_pre_cb,
                    elab_rewrite_hier_ref_cb, &hctx);
    }
+
+   elab_fold_port_maps(ctx->out, ctx);
 }
 
 static int elab_compar_modcache(const void *a, const void *b)
