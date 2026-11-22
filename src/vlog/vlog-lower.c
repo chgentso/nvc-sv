@@ -21697,6 +21697,25 @@ static bool vlog_crv_is_reduction(vlog_node_t v)
    }
 }
 
+static bool vlog_crv_is_handle(vlog_node_t v)
+{
+   // A null literal or a name that holds an object handle
+
+   switch (vlog_kind(v)) {
+   case V_NULL:
+   case V_THIS:
+      return true;
+   case V_REF:
+   case V_MEMBER_REF:
+      {
+         vlog_node_t type = vlog_get_type(v);
+         return type != NULL && vlog_kind(type) == V_CLASS_DECL;
+      }
+   default:
+      return false;
+   }
+}
+
 static bool vlog_crv_is_state(vlog_gen_t *g, vlog_node_t v)
 {
    // Can be evaluated once before solving
@@ -21707,6 +21726,21 @@ static bool vlog_crv_is_state(vlog_gen_t *g, vlog_node_t v)
    case V_METHOD_CALL:
       if (vlog_subkind(v) != V_METHOD_SIZE && !vlog_crv_is_reduction(v))
          return true;
+      break;
+   case V_BINARY:
+      // Solving never changes which object a handle refers to
+      switch (vlog_subkind(v)) {
+      case V_BINARY_LOG_EQ:
+      case V_BINARY_LOG_NEQ:
+      case V_BINARY_CASE_EQ:
+      case V_BINARY_CASE_NEQ:
+         if (vlog_crv_is_handle(vlog_left(v))
+             && vlog_crv_is_handle(vlog_right(v)))
+            return true;
+         break;
+      default:
+         break;
+      }
       break;
    default:
       break;
@@ -26500,6 +26534,28 @@ static void vlog_crv_foreach(vlog_gen_t *g, vlog_node_t v, mir_value_t guard)
            vlog_crv_guarded(g, guard, body[1]), vlog_crv_int(g, 1));
 }
 
+static void vlog_crv_null_cb(vlog_node_t v, void *ctx)
+{
+   if (vlog_kind(v) == V_NULL)
+      *(bool *)ctx = true;
+}
+
+static bool vlog_crv_decide_now(vlog_gen_t *g, vlog_node_t cond)
+{
+   // A condition which does not depend on the solution is decided when the
+   // constraints are built, which is required for each element of an array
+   // of objects and for a test that a handle is not null before it is used
+
+   if (!vlog_crv_is_state(g, cond))
+      return false;
+   else if (vlog_crv_in_objects(g))
+      return true;
+
+   bool has_null = false;
+   vlog_visit(cond, vlog_crv_null_cb, &has_null);
+   return has_null;
+}
+
 static void vlog_crv_items(vlog_gen_t *g, vlog_node_t v, mir_value_t guard,
                            mir_value_t *sink)
 {
@@ -26542,7 +26598,7 @@ static void vlog_crv_items(vlog_gen_t *g, vlog_node_t v, mir_value_t guard,
       }
       break;
    case V_CONS_IMPLY:
-      if (vlog_crv_in_objects(g) && vlog_crv_is_state(g, vlog_value(v))) {
+      if (vlog_crv_decide_now(g, vlog_value(v))) {
          mir_block_t then_bb = mir_add_block(g->mu);
          mir_block_t done_bb = mir_add_block(g->mu);
 
@@ -26568,7 +26624,7 @@ static void vlog_crv_items(vlog_gen_t *g, vlog_node_t v, mir_value_t guard,
       }
       break;
    case V_CONS_IF:
-      if (vlog_crv_in_objects(g) && vlog_crv_is_state(g, vlog_value(v))) {
+      if (vlog_crv_decide_now(g, vlog_value(v))) {
          // Decided for each element at run time
          mir_block_t then_bb = mir_add_block(g->mu);
          mir_block_t else_bb = mir_add_block(g->mu);
