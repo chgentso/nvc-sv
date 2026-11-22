@@ -21644,6 +21644,71 @@ static bool vlog_crv_std_group(vlog_gen_t *g, vlog_node_t std, int first,
    return true;
 }
 
+static bool vlog_crv_std_salt(vlog_node_t v, int *salt, vlog_node_t *decl,
+                              vlog_node_t *prefix)
+{
+   // The element of an array with constant indexes: a part of the key of
+   // the variable that std::randomize solves for it
+
+   if (vlog_kind(v) != V_BIT_SELECT || vlog_params(v) < 1
+       || vlog_params(v) > 3)
+      return false;
+
+   *salt = 0;
+   for (int i = 0; i < vlog_params(v); i++) {
+      int64_t index;
+      if (!vlog_get_const(vlog_param(v, i), &index))
+         return false;
+      *salt += index << (10 * i);
+   }
+
+   vlog_node_t base = vlog_value(v);
+   *prefix = NULL;
+   if (vlog_kind(base) == V_MEMBER_REF && vlog_has_ref(base)
+       && vlog_kind(vlog_value(base)) == V_REF
+       && vlog_has_ref(vlog_value(base))) {
+      *prefix = vlog_ref(vlog_value(base));
+      *decl = vlog_ref(base);
+      return true;
+   }
+   else if (vlog_kind(base) == V_REF && vlog_has_ref(base)) {
+      *decl = vlog_ref(base);
+      return true;
+   }
+
+   return false;
+}
+
+static bool vlog_crv_is_std_var(vlog_gen_t *g, vlog_node_t decl);
+
+static bool vlog_crv_std_elem(vlog_gen_t *g, vlog_node_t v, int *salt,
+                              vlog_node_t *decl)
+{
+   // An element of an array which is one of the arguments of std::randomize
+
+   if (g->crv_std == NULL)
+      return false;
+
+   vlog_node_t prefix;
+   if (!vlog_crv_std_salt(v, salt, decl, &prefix))
+      return false;
+   else if (vlog_crv_is_std_var(g, *decl))
+      return false;   // Solved as an array
+
+   const int nparams = vlog_params(g->crv_std);
+   for (int i = 0; i < nparams; i++) {
+      vlog_node_t p = vlog_param(g->crv_std, i);
+      int psalt;
+      vlog_node_t pdecl, pprefix;
+      if (vlog_crv_std_salt(p, &psalt, &pdecl, &pprefix)
+          && psalt == *salt && pdecl == *decl && pprefix == prefix
+          && vlog_params(p) == vlog_params(v))
+         return true;
+   }
+
+   return false;
+}
+
 static bool vlog_crv_is_std_var(vlog_gen_t *g, vlog_node_t decl)
 {
    if (g->crv_std == NULL)
@@ -21685,6 +21750,14 @@ static void vlog_crv_state_cb(vlog_node_t v, void *context)
    crv_visit_t *cv = context;
 
    switch (vlog_kind(v)) {
+   case V_BIT_SELECT:
+      {
+         int salt;
+         vlog_node_t decl;
+         if (vlog_crv_std_elem(cv->gen, v, &salt, &decl))
+            cv->found = true;
+      }
+      break;
    case V_REF:
       if (vlog_has_ref(v)) {
          vlog_node_t decl = vlog_ref(v);
@@ -25800,6 +25873,23 @@ static mir_value_t vlog_crv_expr(vlog_gen_t *g, vlog_node_t v, unsigned width,
       case V_BIT_SELECT:
          {
             vlog_node_t base = vlog_value(v);
+            int salt;
+            vlog_node_t sdecl;
+            if (vlog_crv_std_elem(g, v, &salt, &sdecl)) {
+               // An element which std::randomize solves
+               const type_info_t *sti = vlog_type_info(g, vlog_type(sdecl));
+               if (sti->size > 64)
+                  fatal_at(vlog_loc(v), "sorry, values wider than 64 bits "
+                           "are not supported in constraints");
+
+               node = CRV5(g, CRV_OP_REF, g->crv_ctx, vlog_crv_int(g, 0),
+                           vlog_crv_key_n(g, sdecl, salt),
+                           vlog_crv_to_offset(g, vlog_lower_rvalue(g, v)),
+                           vlog_crv_flags(g, sti->size,
+                                          mir_get_signed(g->mu, sti->type)));
+               break;
+            }
+
             crv_nsel_t ns;
             if (vlog_crv_nsel(g, v, &ns) && ns.nidx == ns.nest.nouter + 1
                 && ns.nest.st == NULL) {
@@ -28835,10 +28925,13 @@ static mir_value_t vlog_lower_std_randomize(vlog_gen_t *g, vlog_node_t v)
          sel = vlog_value(sel);
       }
       if (vlog_kind(sel) == V_BIT_SELECT) {
-         int64_t index;
-         if (vlog_params(sel) == 1 && vlog_get_const(vlog_param(sel, 0), &index))
-            salt = index;
+         vlog_node_t sdecl, sprefix;
+         vlog_crv_std_salt(sel, &salt, &sdecl, &sprefix);
          sel = vlog_value(sel);
+         if (vlog_kind(sel) == V_MEMBER_REF && vlog_has_ref(sel)) {
+            decl = vlog_ref(sel);
+            sel = vlog_value(sel);
+         }
       }
       if (vlog_kind(sel) != V_REF)
          fatal_at(vlog_loc(p), "sorry, this argument to randomize is not "
