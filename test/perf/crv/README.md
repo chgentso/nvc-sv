@@ -11,6 +11,10 @@ gives up in a call, or does not run.
   milestone is meant to reach it. `run.sh` prints XPASS when one of them passes: remove its mark.
 * `baseline.tsv`: the per-call time and give-ups of release 0.18.0 (name, calls, us per call, result
   line), measured on a machine that was also building; read to one significant digit.
+* `baseline-m2.tsv`: solver time per call of the legacy engine (the search of release 0.18.0) and of `auto`
+  in the same build, read from `NVC_CRV_STATS`; the end-to-end figures of
+  `baseline.tsv` also hold the interpreter running the generated code and, for a big constraint,
+  its compilation.
 * `bias-legacy.txt`: the chi-square report of the search of release 0.18.0 against the distribution the
   language asks for, and the result of the differential fuzzer (`NVC_CRV_LONG=1 bin/unit_test crv`).
 

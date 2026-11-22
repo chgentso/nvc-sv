@@ -6000,9 +6000,14 @@ static bool soft_trial(softctx_t *S, const bool *set)
 {
    if (S->P != NULL) {
       prob_t *P = S->P;
-      prob_reset(P, S->am);
-      memcpy(P->soft_on, set, S->nsoft);
-      const sres_t r = solve_prob_timed(P);
+      // A search that ran out of work proves nothing: try again, the
+      // choices are other ones, before a constraint is given up
+      sres_t r = S_GIVEUP;
+      for (int again = 0; again < 3 && r == S_GIVEUP; again++) {
+         prob_reset(P, S->am);
+         memcpy(P->soft_on, set, S->nsoft);
+         r = solve_prob_timed(P);
+      }
       if (r != S_SAT)
          return false;
 
@@ -6017,7 +6022,10 @@ static bool soft_trial(softctx_t *S, const bool *set)
    }
 
    sol_t next = { 0 };
-   if (solve_once(S->c, set, &next) != S_SAT)
+   sres_t r = S_GIVEUP;
+   for (int again = 0; again < 3 && r == S_GIVEUP; again++)
+      r = solve_once(S->c, set, &next);
+   if (r != S_SAT)
       return false;
 
    sol_free(&S->best);
@@ -6158,6 +6166,12 @@ static crv_result_t solve_all(crv_t *c)
       active[i] = true;
 
    sres_t res = solve_once(c, active, &sol);
+
+   // A search that ran out of work proves nothing about the soft
+   // constraints: look again before any is given up
+   for (int again = 0; again < 2 && res == S_GIVEUP && nsoft > 0
+           && crv_engine() != CRV_ENGINE_LEGACY; again++)
+      res = solve_once(c, active, &sol);
    bool ok = res == S_SAT;
 
    if (!ok && nsoft > 0 && crv_engine() != CRV_ENGINE_LEGACY) {

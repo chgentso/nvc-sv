@@ -2739,15 +2739,17 @@ static bool fuzz_run_one(uint64_t seed, const crv_engine_t *engines,
             }
          }
 
-         if (what != NULL && good) {
-            good = false;
+         if (what != NULL) {
+            // Every engine that fails is named, the problem is listed once
             if (verbose) {
                printf("fuzz seed %"PRIu64" engine %s draw %d: %s "
                       "(%d solutions)\n", seed, crv_engine_name(engines[e]),
                       draw, what, m.nsol);
-               print_problem(&p, stdout);
+               if (good)
+                  print_problem(&p, stdout);
                fflush(stdout);
             }
+            good = false;
          }
       }
    }
