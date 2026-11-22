@@ -180,6 +180,103 @@ static bool is_event_formal(vlog_node_t d)
       && vlog_subkind(type) == DT_EVENT;
 }
 
+// Enumerations whose base type has a width that depends on a parameter:
+// their names refer back to the declaration so must be copied with it
+static hset_t *param_enums = NULL;
+
+static void collect_enum_decls_cb(vlog_node_t v, void *ctx)
+{
+   if (vlog_kind(v) == V_ENUM_DECL)
+      APUSH(*(A(vlog_node_t) *)ctx, v);
+   else if (vlog_kind(v) == V_TYPE_DECL && vlog_has_type(v)
+            && vlog_kind(vlog_type(v)) == V_ENUM_DECL)
+      APUSH(*(A(vlog_node_t) *)ctx, vlog_type(v));
+}
+
+typedef struct {
+   bool            found;
+   A(vlog_node_t)  pending;
+} param_scan_t;
+
+static void find_param_ref_cb(vlog_node_t v, void *ctx)
+{
+   param_scan_t *scan = ctx;
+   if (vlog_kind(v) == V_REF && vlog_has_ref(v)) {
+      vlog_node_t d = vlog_ref(v);
+      switch (vlog_kind(d)) {
+      case V_PARAM_DECL:
+      case V_GENVAR_DECL:
+         scan->found = true;
+         break;
+      case V_LOCALPARAM:
+         APUSH(scan->pending, d);
+         break;
+      default:
+         break;
+      }
+   }
+}
+
+static bool depends_on_param(vlog_node_t expr)
+{
+   // A local parameter can depend on a parameter of the module.  This
+   // cannot be done while copying as a visit uses the same mark bits.
+
+   param_scan_t scan = { .found = false };
+   hset_t *seen = hset_new(8);
+   vlog_visit(expr, find_param_ref_cb, &scan);
+
+   for (unsigned i = 0; !scan.found && i < scan.pending.count; i++) {
+      vlog_node_t d = scan.pending.items[i];
+      if (hset_contains(seen, d) || !vlog_has_value(d))
+         continue;
+      hset_insert(seen, d);
+      vlog_visit(vlog_value(d), find_param_ref_cb, &scan);
+   }
+
+   const bool found = scan.found;
+   ACLEAR(scan.pending);
+   hset_free(seen);
+   return found;
+}
+
+static void collect_param_enums(vlog_node_t mod)
+{
+   A(vlog_node_t) decls = AINIT;
+   vlog_visit(mod, collect_enum_decls_cb, &decls);
+
+   for (unsigned i = 0; i < decls.count; i++) {
+      vlog_node_t decl = decls.items[i];
+      if (!vlog_has_type(decl) || vlog_kind(vlog_type(decl)) != V_DATA_TYPE)
+         continue;
+
+      vlog_node_t base = vlog_type(decl);
+      bool found = false;
+      const int nranges = vlog_ranges(base);
+      for (int j = 0; j < nranges && !found; j++) {
+         vlog_node_t r = vlog_range(base, j);
+         if (vlog_subkind(r) == V_DIM_UNSIZED || !vlog_has_left(r))
+            continue;
+         found = depends_on_param(vlog_left(r))
+            || (vlog_has_right(r) && depends_on_param(vlog_right(r)));
+      }
+
+      if (found) {
+         if (param_enums == NULL)
+            param_enums = hset_new(16);
+         hset_insert(param_enums, decl);
+      }
+   }
+
+   ACLEAR(decls);
+}
+
+static bool is_param_enum_name(vlog_node_t d)
+{
+   return param_enums != NULL && vlog_kind(d) == V_ENUM_NAME
+      && vlog_has_type(d) && hset_contains(param_enums, vlog_type(d));
+}
+
 static bool copy_instance_pred(vlog_node_t v, void *ctx)
 {
    switch (vlog_kind(v)) {
@@ -187,6 +284,8 @@ static bool copy_instance_pred(vlog_node_t v, void *ctx)
       if (!vlog_has_ref(v))
          return false;
       switch (vlog_kind(vlog_ref(v))) {
+      case V_ENUM_NAME:
+         return is_param_enum_name(vlog_ref(v));
       case V_PARAM_DECL:
       case V_GENVAR_DECL:
          return true;
@@ -227,6 +326,9 @@ static bool copy_instance_pred(vlog_node_t v, void *ctx)
       return is_event_formal(v);
    case V_MOD_REF:
       return copy_scope == NULL || hset_contains(copy_scope, v);
+   case V_ENUM_NAME:
+      return is_param_enum_name(v)
+         && (copy_scope == NULL || hset_contains(copy_scope, v));
    case V_TYPE_DECL:
       return copy_scope == NULL && (vlog_flags(v) & VLOG_F_TYPEPARAM);
    case V_SYS_TCALL:
@@ -765,10 +867,17 @@ vlog_node_t vlog_new_instance(vlog_node_t mod, vlog_node_t inst, ident_t id)
       vlog_visit(mod, collect_scope_cb, NULL);
    }
 
+   collect_param_enums(mod);
+
    copy_checker = vlog_kind(mod) == V_MODULE
       && (vlog_flags(mod) & VLOG_F_CHECKER);
    vlog_node_t copy = vlog_copy(mod, copy_instance_pred, NULL);
    copy_checker = false;
+
+   if (param_enums != NULL) {
+      hset_free(param_enums);
+      param_enums = NULL;
+   }
 
    hash_t *map = hash_new(16);
 
