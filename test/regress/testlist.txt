@@ -3092,7 +3092,7 @@ vpi27           verilog,vpi,gold
 vlog_genshare13 verilog
 svcrvsizeforeach1 verilog
 svcrvsumwith1 verilog
-svcrvfcall1 verilog,gold
+svcrvfcall1 verilog
 svcrvnullguard1 verilog
 svcrvnullobj1 verilog
 svcrvsigarr1 verilog
@@ -3127,3 +3127,5 @@ svcrvskiparr1 verilog
 svcrvnestdyn1 verilog
 svcrvstaticrand1 verilog
 svcrvdisablecond1 verilog
+svcrvstage1 verilog
+svcrvfcall2 verilog,gold
