@@ -20371,6 +20371,11 @@ static void p_deferred_body(const deferred_body_t *d)
    const vlog_kind_t kind = vlog_kind(subr);
 
    if (d->is_constraint) {
+      // The base class may have been declared after this one
+      int depth = 0;
+      if (vlog_has_ref(subr) && vlog_kind(vlog_ref(subr)) == V_CLASS_DECL)
+         depth = push_base_scopes(vlog_ref(subr));
+
       consume(tLBRACE);
 
       while (not_at_token(tRBRACE)) {
@@ -20379,6 +20384,9 @@ static void p_deferred_body(const deferred_body_t *d)
       }
 
       consume(tRBRACE);
+
+      while (depth-- > 0)
+         scope_leave();
       return;
    }
 
