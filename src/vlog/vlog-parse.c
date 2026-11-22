@@ -28002,6 +28002,20 @@ static vlog_node_t bind_find_child(vlog_node_t scope, ident_t id)
          }
          break;
 
+      case V_FOR_GENERATE:
+         if (vlog_stmts(s) > 0) {
+            vlog_node_t blk = vlog_stmt(s, 0);
+            if (vlog_kind(blk) == V_GEN_BLOCK) {
+               if (vlog_has_ident(blk) && vlog_ident(blk) == id)
+                  return blk;
+
+               vlog_node_t r = bind_find_child(blk, id);
+               if (r != NULL)
+                  return r;
+            }
+         }
+         break;
+
       default:
          break;
       }
@@ -28051,12 +28065,64 @@ static tree_t bind_find_child_entity(vlog_node_t scope, ident_t id)
          }
          break;
 
+      case V_FOR_GENERATE:
+         if (vlog_stmts(s) > 0) {
+            vlog_node_t blk = vlog_stmt(s, 0);
+            if (vlog_kind(blk) == V_GEN_BLOCK) {
+               tree_t r = bind_find_child_entity(blk, id);
+               if (r != NULL)
+                  return r;
+            }
+         }
+         break;
+
       default:
          break;
       }
    }
 
    return NULL;
+}
+
+static void bind_append_index(text_buf_t *path)
+{
+   while (optional(tLSQUARE)) {
+      tb_append(path, '[');
+      if (peek() == tUNSNUM || peek() == tNUMBER) {
+         vlog_node_t idx = p_constant_expression();
+         int64_t val = 0;
+         if (idx != NULL && vlog_kind(idx) == V_NUMBER)
+            val = number_integer(vlog_number(idx));
+         tb_printf(path, "%" PRIi64, val);
+      }
+      else {
+         for (int depth = 1; depth > 0 && peek() != tEOF; ) {
+            const token_t tok = peek();
+            if (tok == tLSQUARE)
+               depth++;
+            else if (tok == tRSQUARE && --depth == 0)
+               break;
+
+            if (consume(tok)) {
+               switch (tok) {
+               case tSTRING:
+                  tb_free(state.last_lval.text);
+                  break;
+               case tNUMBER:
+               case tUNSNUM:
+               case tTIMELIT:
+                  free(state.last_lval.str);
+                  break;
+               default:
+                  break;
+               }
+            }
+         }
+         tb_append(path, '*');
+      }
+      consume(tRSQUARE);
+      tb_append(path, ']');
+   }
 }
 
 static vlog_node_t bind_walk_path(vlog_node_t mod, text_buf_t *path)
@@ -28068,6 +28134,7 @@ static vlog_node_t bind_walk_path(vlog_node_t mod, text_buf_t *path)
       ident_t id = p_identifier();
       tb_append(path, '.');
       tb_istr(path, id);
+      bind_append_index(path);
 
       vlog_node_t next = bind_find_child(mod, id);
       if (next == NULL) {
@@ -28182,9 +28249,11 @@ static vlog_node_t p_bind_directive(void)
          }
 
          tb_istr(path, p_identifier());
+         bind_append_index(path);
          while (optional(tDOT)) {
             tb_append(path, '.');
             tb_istr(path, p_identifier());
+            bind_append_index(path);
          }
 
          vlog_node_t sel = vlog_new(V_STRING);

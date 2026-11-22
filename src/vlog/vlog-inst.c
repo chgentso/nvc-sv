@@ -613,6 +613,35 @@ bool vlog_bind_is_selective(vlog_node_t mod)
    return false;
 }
 
+static bool bind_path_match(const char *path, const char *pattern)
+{
+   while (*pattern != '\0' && *path != '\0') {
+      if (pattern[0] == '[' && pattern[1] == '*' && pattern[2] == ']') {
+         if (*path != '[')
+            return false;
+         path++;
+         if (*path == '-')
+            path++;
+         if (*path < '0' || *path > '9')
+            return false;
+         while (*path >= '0' && *path <= '9')
+            path++;
+         if (*path != ']')
+            return false;
+         path++;
+         pattern += 3;
+      }
+      else if (*path != *pattern)
+         return false;
+      else {
+         path++;
+         pattern++;
+      }
+   }
+
+   return *path == '\0' && *pattern == '\0';
+}
+
 static bool bind_matches_instance(vlog_node_t b)
 {
    const int nsel = vlog_params(b);
@@ -630,7 +659,7 @@ static bool bind_matches_instance(vlog_node_t b)
       // The dotted name starts with the library
       const char *path = inst_dotted != NULL ? strchr(istr(inst_dotted), '.')
          : NULL;
-      if (path != NULL && strcmp(path + 1, text) == 0)
+      if (path != NULL && bind_path_match(path + 1, text))
          return true;
    }
 
