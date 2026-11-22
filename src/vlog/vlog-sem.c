@@ -1407,8 +1407,10 @@ static void vlog_check_net_decl(vlog_node_t v)
    if (vlog_has_type(v)) {
       const char *bad = vlog_bad_net_type(vlog_get_type(vlog_type(v)));
       if (bad != NULL) {
-         diag_t *d = diag_new(relaxed_rules() ? DIAG_WARN : DIAG_ERROR,
-                              vlog_loc(v));
+         // Real nets are a common extension: only a warning
+         const bool is_real = strcmp(bad, "real") == 0;
+         diag_t *d = diag_new(relaxed_rules() || is_real ? DIAG_WARN
+                              : DIAG_ERROR, vlog_loc(v));
          diag_printf(d, "net %pQ cannot have a %s data type", vlog_ident(v),
                      bad);
          diag_hint(d, NULL, "the data type of a net must be 4-state integral "
