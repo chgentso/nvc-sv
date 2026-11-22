@@ -15,7 +15,7 @@ p_none          1310720         20  pass       1
 p_sorted10        81920         43  pass       0
 p_sorted100        5120        680  pass       0
 p_sorted1000        320       9800  pass       0
-p_sum128            320        300  xfail:M2   0
+p_sum128            320        300  pass       0
 p_sum32            5120        270  pass       0
 p_sum8            81920         24  pass       0
 p_uniq16          81920         57  pass       0
@@ -23,7 +23,7 @@ p_uniq32          20480        200  pass       0
 p_uniq64           1280       1100  pass       0
 p_uniqt16         20480        170  pass       0
 p_uniqt32          1280       1100  pass       0
-p_uniqt64           320        500  xfail:M2   0
+p_uniqt64           320        500  pass       0
 p_wide128         81920         78  pass       0
 p_wide256         81920         57  pass       0
 q_2d                320       4800  pass       0
@@ -36,7 +36,7 @@ q_pairs16          1280       1200  pass       0
 q_pairs32           320       8600  pass       0
 q_pairs64            80       5000  xfail:M2   0
 q_perm16          20480        160  pass       0
-q_perm256            20       5000  xfail:M2   0
+q_perm256            20       5000  pass       0
 q_perm64            320       6100  pass       0
 q_soft100conf        80      58000  pass       0
 q_soft20conf       5120        870  pass       0
@@ -50,9 +50,9 @@ r_mask               80       2000  xfail:M4b  0
 r_mul16              80       2000  xfail:M4c  0
 r_or8                80       2000  xfail:M4b  0
 r_pairs128           20     550000  pass       0
-r_perm1024           20      50000  xfail:M2   0
-r_softfe1000         20       5000  xfail:M2   0
-r_sum512             80       3000  xfail:M2   0
+r_perm1024           20      50000  pass       0
+r_softfe1000         20       5000  pass       0
+r_sum512             80       3000  pass       0
 r_sum512b        327680       3000  xfail:M1   0
 r_uniq1000           20     170000  pass       0
 r_uniqdyn            20     260000  pass       0
