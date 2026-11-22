@@ -21679,6 +21679,9 @@ static void vlog_crv_state_cb(vlog_node_t v, void *context)
 
 static bool vlog_crv_is_dynamic_array(vlog_node_t decl);
 
+static void vlog_crv_emit(vlog_gen_t *g, mir_value_t guard, mir_value_t node,
+                          bool soft, mir_value_t *sink);
+
 static bool vlog_crv_is_reduction(vlog_node_t v)
 {
    switch (vlog_subkind(v)) {
@@ -25302,19 +25305,19 @@ static mir_value_t vlog_crv_reduction(vlog_gen_t *g, vlog_node_t v)
                   vlog_crv_flags(g, w, s));
    }
 
-   if (op == CRV_ADD && with && vlog_crv_is_reduction(v)
+   if (with && vlog_crv_is_reduction(v)
        && vlog_crv_is_array_ref(prefix)
        && vlog_crv_is_dynamic_array(vlog_ref(prefix))
        && vlog_ranges(vlog_ref(prefix)) == 0) {
       // The number of elements is only known once the solver has chosen
-      // it so only a with expression that is the element itself, possibly
-      // widened by one cast, can be summed without unrolling
+      // it so only a sum of the element itself, possibly widened by one
+      // cast, is independent of the size
       vlog_node_t decl = vlog_ref(prefix);
       const unsigned w = vlog_type_info(g, vlog_crv_elem_type(decl))->size;
       vlog_node_t body = vlog_stmt(v, 2);
       if (vlog_kind(body) == V_CAST)
          body = vlog_value(body);
-      if (vlog_kind(body) == V_REF && vlog_has_ref(body)
+      if (op == CRV_ADD && vlog_kind(body) == V_REF && vlog_has_ref(body)
           && vlog_ref(body) == vlog_stmt(v, 0)
           && vlog_crv_width(g, vlog_stmt(v, 2)) >= w)
          return CRV3(g, CRV_OP_ARRAY_SUM, g->crv_ctx,
@@ -25322,9 +25325,84 @@ static mir_value_t vlog_crv_reduction(vlog_gen_t *g, vlog_node_t v)
                      vlog_crv_flags(g, vlog_crv_width(g, vlog_stmt(v, 2)),
                                     vlog_crv_signed(g, vlog_stmt(v, 2))));
 
-      fatal_at(vlog_loc(v), "sorry, a with expression of an array reduction "
-               "over a dynamic array in a constraint must be the element "
-               "itself or a widening cast of it");
+      // Any other with expression is combined for the elements the array
+      // has now, which must also be the size that is solved
+      if (g->crv_nindex + 2 > ARRAY_LEN(g->crv_index))
+         fatal_at(vlog_loc(v), "sorry, array reductions in a constraint are "
+                  "nested too deeply");
+
+      mir_value_t array = vlog_crv_array(g, prefix);
+      mir_value_t ua = vlog_lower_rvalue(g, prefix);
+      mir_value_t len = mir_build_uarray_len(g->mu, ua, 0);
+
+      vlog_crv_emit(g, MIR_NULL_VALUE,
+                    CRV5(g, CRV_OP_BINARY, g->crv_ctx, vlog_crv_int(g, CRV_EQ),
+                         CRV2(g, CRV_OP_ARRAY_SIZE, g->crv_ctx, array),
+                         CRV3(g, CRV_OP_CONST, g->crv_ctx,
+                              vlog_crv_to_offset(g, len),
+                              vlog_crv_flags(g, 32, true)),
+                         vlog_crv_flags(g, 1, false)),
+                    false, NULL);
+
+      const unsigned rw = vlog_crv_width(g, vlog_stmt(v, 2));
+      const bool rs = vlog_crv_signed(g, vlog_stmt(v, 2));
+      mir_value_t rflags = vlog_crv_flags(g, rw, rs);
+      mir_value_t flags32 = vlog_crv_flags(g, 32, true);
+
+      // The value that leaves the first element unchanged
+      const int64_t unit = op == CRV_MUL ? 1 : op == CRV_AND ? -1 : 0;
+
+      mir_type_t t_offset = mir_offset_type(g->mu);
+      mir_value_t acc_var = mir_add_var(g->mu, t_offset, MIR_NULL_STAMP,
+                                        ident_uniq("crv_acc"), MIR_VAR_TEMP);
+      mir_build_store(g->mu, acc_var,
+                      CRV3(g, CRV_OP_CONST, g->crv_ctx, vlog_crv_int(g, unit),
+                           rflags));
+
+      mir_value_t ivar = mir_add_var(g->mu, t_offset, MIR_NULL_STAMP,
+                                     ident_uniq("crv_i"), MIR_VAR_TEMP);
+      mir_build_store(g->mu, ivar, vlog_crv_int(g, 0));
+
+      mir_block_t test_bb = mir_add_block(g->mu);
+      mir_block_t body_bb = mir_add_block(g->mu);
+      mir_block_t done_bb = mir_add_block(g->mu);
+
+      mir_build_jump(g->mu, test_bb);
+      mir_set_cursor(g->mu, test_bb, MIR_APPEND);
+
+      mir_value_t i = mir_build_load(g->mu, ivar);
+      mir_build_cond(g->mu, mir_build_cmp(g->mu, MIR_CMP_LT, i, len), body_bb,
+                     done_bb);
+
+      mir_set_cursor(g->mu, body_bb, MIR_APPEND);
+
+      mir_value_t index = CRV3(g, CRV_OP_CONST, g->crv_ctx, i, flags32);
+      mir_value_t elem = CRV3(g, CRV_OP_ARRAY_ELEM, g->crv_ctx, array, index);
+
+      const int saved = g->crv_nindex;
+      for (int k = 0; k < 2; k++) {
+         g->crv_index[g->crv_nindex].decl = vlog_stmt(v, k);
+         g->crv_index[g->crv_nindex].node = k == 0 ? elem : index;
+         g->crv_index[g->crv_nindex].assoc = NULL;
+         g->crv_index[g->crv_nindex].key = MIR_NULL_VALUE;
+         g->crv_index[g->crv_nindex].known = false;
+         g->crv_index[g->crv_nindex].has_sval = false;
+         g->crv_nindex++;
+      }
+
+      mir_value_t term = vlog_crv_expr(g, vlog_stmt(v, 2), rw, rs);
+      g->crv_nindex = saved;
+
+      mir_value_t acc = CRV5(g, CRV_OP_BINARY, g->crv_ctx, vlog_crv_int(g, op),
+                             mir_build_load(g->mu, acc_var), term, rflags);
+      mir_build_store(g->mu, acc_var, acc);
+
+      mir_build_store(g->mu, ivar, mir_build_add(g->mu, t_offset, i,
+                                                 vlog_crv_int(g, 1)));
+      mir_build_jump(g->mu, test_bb);
+
+      mir_set_cursor(g->mu, done_bb, MIR_APPEND);
+      return mir_build_load(g->mu, acc_var);
    }
 
    if (!vlog_crv_is_reduction(v) || !vlog_crv_is_array_ref(prefix)

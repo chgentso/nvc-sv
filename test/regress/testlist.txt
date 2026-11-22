@@ -3099,3 +3099,4 @@ svcrvsigarr1 verilog
 svcrvstdarr1 verilog,fail,gold
 svcrvmanycons1 verilog
 svcrvequiv1 verilog
+svcrvsumwith2 verilog
