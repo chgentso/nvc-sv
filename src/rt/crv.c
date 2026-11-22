@@ -355,6 +355,8 @@ typedef struct {
    unsigned  nmr;
    range_t  *pr;           // The same ranges for picking
    double   *unit;         // Weight of each value
+   int64_t  *wt;           // The weight of each as written and whether it
+   bool     *pvl;          // is for each value (:=) or the range (:/)
    unsigned  npr;
 } cdist_t;
 
@@ -493,6 +495,8 @@ void crv_free(crv_t *c)
       free(c->dists[i].mr);
       free(c->dists[i].pr);
       free(c->dists[i].unit);
+      free(c->dists[i].wt);
+      free(c->dists[i].pvl);
    }
    free(c->nodes);
    free(c->vars);
@@ -1098,9 +1102,13 @@ static void dist_prep(cdist_t *cd)
    free(cd->mr);
    free(cd->pr);
    free(cd->unit);
+   free(cd->wt);
+   free(cd->pvl);
    cd->mr = NEW(range_t, cd->n);
    cd->pr = NEW(range_t, cd->n);
    cd->unit = NEW(double, cd->n);
+   cd->wt = NEW(int64_t, cd->n);
+   cd->pvl = NEW(bool, cd->n);
    cd->nmr = cd->npr = 0;
 
    for (unsigned i = 0; i < cd->n; i++) {
@@ -1110,6 +1118,8 @@ static void dist_prep(cdist_t *cd)
          continue;
       cd->mr[cd->nmr++] = r;
       cd->pr[cd->npr] = r;
+      cd->wt[cd->npr] = d->weight;
+      cd->pvl[cd->npr] = d->per_value;
       cd->unit[cd->npr++] = d->per_value
          ? (double)d->weight : (double)d->weight / (double)(r.hi - r.lo + 1);
    }
@@ -1584,6 +1594,9 @@ typedef struct {
    struct dec_s *dec;
    int       ndec;
    bool      legacy;      // The search of release 0.18.0 exactly
+   int       reject;      // Rejection stage: 0 off, 1 then the search, 2 only
+   int       nstage[CRV_STAGE_COUNT];   // Components answered by each stage
+   uint32_t  ndecl[3];    // Components a stage declined, by reason
    // Sums of the elements of each array kept up to date as domains change
    int      *varr;        // Array that a variable is an element of or -1
    i128     *tlo, *thi;   // Sum of the lower and the upper bounds
@@ -2732,6 +2745,8 @@ static prob_t *prob_build(crv_t *c, int mode, const unsigned *sizes,
    prob_t *P = xcalloc(sizeof(prob_t));
    P->c = c;
    P->legacy = crv_engine() == CRV_ENGINE_LEGACY;
+   P->reject = crv_engine() == CRV_ENGINE_AUTO ? 1
+      : crv_engine() == CRV_ENGINE_REJECT ? 2 : 0;
    P->nsc = c->nvars;
    P->na = c->narrays;
    P->curc = -1;
@@ -2941,6 +2956,8 @@ static prob_t *prob_build(crv_t *c, int mode, const unsigned *sizes,
    (void)debug_level();
    if (dbg.budget > 0)
       P->budget = dbg.budget;
+   else if (P->reject == 2)
+      P->budget *= 100;       // A forced stage has no other stage to hand on to
 
    chain_setup(P);
    unique_setup(P);
@@ -5187,10 +5204,9 @@ static void fill_vals(prob_t *P, int comp)
    }
 }
 
-static bool check_all(prob_t *P, int comp)
+// Whether the constraints of a component hold for the values in P->vals
+static bool check_cons(prob_t *P, int comp)
 {
-   fill_vals(P, comp);
-
    ectx_t E = { .c = P->c, .vals = P->vals, .nsc = P->nsc,
                 .ebase = P->ebase, .sizes = P->sizes };
 
@@ -5230,6 +5246,12 @@ static bool check_all(prob_t *P, int comp)
       }
    }
    return true;
+}
+
+static bool check_all(prob_t *P, int comp)
+{
+   fill_vals(P, comp);
+   return check_cons(P, comp);
 }
 
 // Values of a variable whose domain is wider than this are bisected after
@@ -5459,7 +5481,6 @@ static void stats_components(const prob_t *P, crv_call_stat_t *out)
          s.stage[CRV_STAGE_NONE]++;
       else {
          s.comps++;
-         s.stage[CRV_STAGE_DFS]++;
          s.freevars += nfree[v];
          if ((uint32_t)nfree[v] > s.maxfree)
             s.maxfree = nfree[v];
@@ -5660,6 +5681,647 @@ static void build_components(prob_t *P)
 }
 
 
+////////////////////////////////////////////////////////////////////////////////
+// Rejection stage
+//
+// Every free variable of a component is given a value at random, uniform in
+// the domain that propagation left or by the weights of its dist, and the
+// constraints are evaluated: a sample that satisfies them is exactly uniform
+// over the solutions of the component, which no search can give.  The
+// number of samples is fixed (REJECT_TRIES for each block of variables),
+// never adapted to what earlier calls found, and when none is accepted the
+// component goes to the search.
+//
+// A variable that an equality defines as a function of others in the same
+// solve before level (total == a + b, len == q.size()) is computed from
+// them instead of being sampled: the solutions are in one to one
+// correspondence with the values of the others, so the samples stay uniform
+// and are accepted much more often.
+//
+// The variables are sampled in blocks to follow the meaning of solve before
+// and dist: the variables of a level are one block, uniform over the values
+// that can be extended to a solution, and a dist variable is a block of its
+// own at the top of its level, with the weights of its values among those
+// that can be extended.  Variables that no solve before names are in the
+// last level.  A value of a block that is not the last is kept if the blocks
+// after it can be sampled; if they cannot in the samples they are given the
+// search decides whether it can be extended (complete, within a work limit)
+// and a value that cannot is drawn again.
+
+static sres_t search(prob_t *P);
+
+#define REJECT_TRIES        16
+#define REJECT_TRIES_FORCED (100 * REJECT_TRIES)
+#define REJECT_EXT_WORK     50000
+#define REJECT_MAX_BLOCKS   64
+
+typedef unsigned __int128 u128;
+
+typedef enum {
+   RJ_SAT,         // A sample was accepted and the variables are fixed to it
+   RJ_NOFREE,      // No free variable: nothing to sample
+   RJ_DECLINE,     // The stage cannot take this component
+   RJ_EXHAUST,     // The samples were all rejected
+} rj_res_t;
+
+typedef struct {
+   int  comp;
+   int  nfree;           // Variables to sample
+   int *vars;            // They, block after block
+   int *bstart;          // First of each block, nb + 1 entries
+   int  nb;
+   int *def, *defe;      // Variables computed from others, in order, and
+   int  ndef;            // the node that gives each
+   int  left, per;       // Samples that may still be made, in one block
+   int *lvl;
+} rj_t;
+
+// Uniform in [0, n) for 0 < n < 2^128
+static u128 rnd_u128(u128 n)
+{
+   if (n <= ((u128)1 << 64))
+      return (u128)rnd_i128((i128)n);
+
+   const uint64_t hi = (uint64_t)((n - 1) >> 64);
+   const unsigned bits = 128 - __builtin_clzll(hi);
+   const u128 mask = bits == 128 ? ~(u128)0 : (((u128)1 << bits) - 1);
+   for (;;) {
+      const u128 r = (((u128)rnd64() << 64) | rnd64()) & mask;
+      if (r < n)
+         return r;
+   }
+}
+
+// pick_dist in integers: the weight of a value is the weight of := or the
+// weight of :/ over the declared size of the range, for the values that are
+// left in the domain.  Falls back to pick_dist if the weights are too big
+static bool pick_dist_int(prob_t *P, const pvar_t *pv, int dist, i128 *out)
+{
+   const cdist_t *cd = &P->c->dists[dist];
+   const dom_t *d = &pv->dom;
+
+   if (cd->npr > 256)
+      return pick_dist(P, pv, dist, out);
+
+   u128 mass[256];
+   i128 cnt[256];
+   u128 total = 0;
+   P->work += cd->npr / 4 + 1;
+   for (unsigned i = 0; i < cd->npr; i++) {
+      cnt[i] = dom_count(d, cd->pr[i].lo, cd->pr[i].hi);
+      mass[i] = 0;
+      if (cnt[i] == 0)
+         continue;
+
+      if (cnt[i] >= ((i128)1 << 62))
+         return pick_dist(P, pv, dist, out);
+
+      const u128 prod = (u128)cd->wt[i] * (u128)cnt[i];
+      if (prod >= ((u128)1 << 63))
+         return pick_dist(P, pv, dist, out);
+
+      mass[i] = prod << 56;
+      if (!cd->pvl[i]) {
+         mass[i] /= (u128)(cd->pr[i].hi - cd->pr[i].lo + 1);
+         if (mass[i] == 0)
+            mass[i] = 1;
+      }
+      total += mass[i];
+   }
+
+   if (total == 0)
+      return false;
+
+   u128 r = rnd_u128(total);
+   int last = -1;
+   for (unsigned i = 0; i < cd->npr; i++) {
+      if (mass[i] == 0)
+         continue;
+      last = i;
+      if (r < mass[i])
+         break;
+      r -= mass[i];
+   }
+
+   *out = dom_nth(d, cd->pr[last].lo, cd->pr[last].hi,
+                  rnd_i128(cnt[last]));
+   return true;
+}
+
+// A value for a variable in a proposal
+static i128 rj_propose(prob_t *P, int v)
+{
+   const pvar_t *pv = &P->vars[v];
+   const dom_t *d = &pv->dom;
+
+   P->work += dom_nr(d) / 8;
+
+   i128 x;
+   if (pv->dist >= 0 && pick_dist_int(P, pv, pv->dist, &x))
+      return x;
+
+   i128 n = dom_count(d, d->lo, d->hi);
+   if (pv->size && n > MAX_SIZE_CHOICES)
+      n = 32;
+   return dom_nth(d, d->lo, d->hi, rnd_i128(n));
+}
+
+typedef struct {
+   const prob_t *P;
+   uint8_t      *mask;
+} rjv_t;
+
+static void rj_vars_cb(void *ctx, const node_t *nd, int n)
+{
+   (void)n;
+   rjv_t *V = ctx;
+   const prob_t *P = V->P;
+
+   switch ((nkind_t)nd->kind) {
+   case N_VAR:
+      V->mask[nd->aux] = 1;
+      break;
+   case N_ASIZE:
+      V->mask[P->nsc + nd->aux] = 1;
+      break;
+   case N_ASUM:
+   case N_AELEM:
+      if (P->ebase[nd->aux] >= 0) {
+         for (unsigned i = 0; i < P->sizes[nd->aux]; i++)
+            V->mask[P->ebase[nd->aux] + i] = 1;
+      }
+      break;
+   default:
+      break;
+   }
+}
+
+static inline bool in_comp(const prob_t *P, int comp, int v)
+{
+   return comp < 0 || P->vcomp[v] == comp;
+}
+
+static inline bool is_free(const prob_t *P, int v)
+{
+   return P->vars[v].dom.lo != P->vars[v].dom.hi;
+}
+
+// The level of each variable for the order of the blocks: a variable that no
+// solve before names is in the last level of its component
+static void rj_levels(prob_t *P, int comp, int *lvl)
+{
+   const crv_t *c = P->c;
+   uint8_t *ment = arena_alloc(&P->tmp, P->nv);
+   memset(ment, 0, P->nv);
+
+   for (unsigned e = 0; e < c->nedges; e++) {
+      const edge_t *ed = &c->edges[e];
+      if (ed->after < P->nv)
+         ment[ed->after] = 1;
+      if (!ed->array) {
+         if (ed->before < P->nv)
+            ment[ed->before] = 1;
+      }
+      else if (P->nsc + ed->before < P->nv) {
+         ment[P->nsc + ed->before] = 1;
+         const int base = P->ebase[ed->before];
+         for (int k = 0; base >= 0 && k < (int)P->sizes[ed->before]; k++)
+            ment[base + k] = 1;
+      }
+   }
+
+   for (int i = 0; i < P->ndec; i++) {
+      const dec_t *d = &P->dec[i];
+      for (int k = 0; k < d->nf; k++)
+         ment[d->f0 + k] = ment[d->var];
+   }
+
+   int deepest = 0;
+   const int nv = comp >= 0 ? P->kvs[comp + 1] - P->kvs[comp] : P->nv;
+   for (int i = 0; i < nv; i++) {
+      const int v = comp >= 0 ? P->kvl[P->kvs[comp] + i] : i;
+      if (ment[v] && (int)P->vars[v].level > deepest)
+         deepest = P->vars[v].level;
+   }
+
+   for (int i = 0; i < nv; i++) {
+      const int v = comp >= 0 ? P->kvl[P->kvs[comp] + i] : i;
+      lvl[v] = ment[v] ? (int)P->vars[v].level : deepest;
+   }
+}
+
+// May the variable be computed from an equality
+static bool rj_definable(const prob_t *P, int comp, int v, const int *defd)
+{
+   const pvar_t *pv = &P->vars[v];
+   return in_comp(P, comp, v) && is_free(P, v) && !pv->derived
+      && !pv->rc && pv->dist < 0 && pv->ngd == 0 && !pv->size && defd[v] < 0;
+}
+
+// Find the variables that are defined by equalities and the order in which
+// they are computed
+static void rj_defined(prob_t *P, rj_t *R, const int *lvl, int *defd)
+{
+   const crv_t *c = P->c;
+   const int c0 = R->comp >= 0 ? P->kcs[R->comp] : 0;
+   const int c1 = R->comp >= 0 ? P->kcs[R->comp + 1] : P->ncons;
+
+   uint8_t *used = NULL, *em = NULL;
+   for (int k = c0; k < c1; k++) {
+      const int ci = R->comp >= 0 ? P->kcl[k] : k;
+      const pcons_t *pc = &P->cons[ci];
+      if (pc->kind != C_REQ)
+         continue;
+      if (pc->soft >= 0 && P->soft_on != NULL && !P->soft_on[pc->soft])
+         continue;
+
+      const node_t *nd = &c->nodes[pc->root];
+      if (nd->kind != N_BIN || nd->op != CRV_EQ)
+         continue;
+
+      // Either side may be the variable: the one with more values is
+      // computed so that it is more likely to hold the value
+      int side[2] = { nd->a, nd->b };
+      int cand[2] = { -1, -1 };
+      for (int s = 0; s < 2; s++) {
+         const node_t *vn = &c->nodes[side[s]];
+         if (vn->kind == N_VAR && vn->aux >= 0 && vn->aux < P->nv
+             && rj_definable(P, R->comp, vn->aux, defd))
+            cand[s] = vn->aux;
+      }
+
+      if (cand[0] < 0 && cand[1] < 0)
+         continue;
+      else if (cand[0] >= 0 && cand[1] >= 0) {
+         const pvar_t *p0 = &P->vars[cand[0]], *p1 = &P->vars[cand[1]];
+         if (dom_count(&p0->dom, p0->dom.lo, p0->dom.hi)
+             >= dom_count(&p1->dom, p1->dom.lo, p1->dom.hi))
+            cand[1] = -1;
+         else
+            cand[0] = -1;
+      }
+
+      const int s = cand[0] >= 0 ? 0 : 1;
+      const int v = cand[s];
+      const int e = side[1 - s];
+
+      if (em == NULL) {
+         em = arena_alloc(&P->tmp, P->nv);
+         used = arena_alloc(&P->tmp, P->nv);
+         memset(used, 0, P->nv);
+      }
+
+      // The others it is computed from, which must not be it or anything
+      // computed from it, and must be in its level
+      memset(em, 0, P->nv);
+      rjv_t V = { P, em };
+      visit(c, e, rj_vars_cb, &V);
+
+      bool ok = !em[v] && !used[v];
+      for (int u = 0; u < P->nv && ok; u++) {
+         if (em[u] && is_free(P, u) && lvl[u] != lvl[v])
+            ok = false;
+      }
+      if (!ok)
+         continue;
+
+      for (int u = 0; u < P->nv; u++)
+         used[u] |= em[u];
+
+      defd[v] = R->ndef;
+      R->def[R->ndef] = v;
+      R->defe[R->ndef++] = e;
+   }
+}
+
+// The sizes of the unique sets are such that most samples would be rejected
+// if two members are likely to be equal
+static bool rj_unique_ok(const prob_t *P, int comp)
+{
+   const int c0 = comp >= 0 ? P->kcs[comp] : 0;
+   const int c1 = comp >= 0 ? P->kcs[comp + 1] : P->ncons;
+   for (int k = c0; k < c1; k++) {
+      const int ci = comp >= 0 ? P->kcl[k] : k;
+      const pcons_t *pc = &P->cons[ci];
+      if (pc->kind != C_UNIQUE || pc->unn < 8)
+         continue;
+
+      i128 dmin = (i128)1 << 62;
+      for (int i = 0; i < pc->unn; i++) {
+         const int n = P->un[pc->unstart + i];
+         unsigned shape;
+         const int v = unique_member_var(P, n, &shape);
+         i128 d = (i128)1 << MIN(P->c->nodes[n].width, 62);
+         if (v >= 0) {
+            const dom_t *dm = &P->vars[v].dom;
+            d = dom_count(dm, dm->lo, dm->hi);
+         }
+         if (d < dmin)
+            dmin = d;
+      }
+
+      if ((i128)pc->unn * pc->unn > 6 * dmin)
+         return false;
+   }
+   return true;
+}
+
+static void rj_assemble(prob_t *P, int comp)
+{
+   for (int i = 0; i < P->ndec; i++) {
+      const dec_t *d = &P->dec[i];
+      if (comp >= 0 && P->vcomp[d->var] != comp)
+         continue;
+      uint64_t x = 0;
+      for (int k = 0; k < d->nf; k++)
+         x |= (uint64_t)P->vals[d->f0 + k] << d->pos[k];
+      P->vals[d->var] = x;
+   }
+}
+
+// Whether the values in P->vals, with the defined variables worked out,
+// satisfy the constraints
+static bool rj_holds(prob_t *P, const rj_t *R)
+{
+   if (P->ndec > 0)
+      rj_assemble(P, R->comp);
+
+   ectx_t E = { .c = P->c, .vals = P->vals, .nsc = P->nsc,
+                .ebase = P->ebase, .sizes = P->sizes };
+
+   for (int i = 0; i < R->ndef; i++) {
+      const int v = R->def[i];
+      E.fail = false;
+      const int64_t y = ev(&E, R->defe[i]);
+      if (E.fail)
+         return false;
+
+      const i128 x = mathv(y, P->c->nodes[R->defe[i]].sgn);
+      if (!dom_has(&P->vars[v].dom, x))
+         return false;
+
+      P->vals[v] = st(x);
+      if (P->ndec > 0)
+         rj_assemble(P, R->comp);
+   }
+
+   return check_cons(P, R->comp);
+}
+
+static bool rj_setup(prob_t *P, rj_t *R, rj_res_t *why)
+{
+   const int comp = R->comp;
+   const int nv = comp >= 0 ? P->kvs[comp + 1] - P->kvs[comp] : P->nv;
+
+   int nfree = 0;
+   for (int i = 0; i < nv; i++) {
+      const int v = comp >= 0 ? P->kvl[P->kvs[comp] + i] : i;
+      if (!is_free(P, v) || P->vars[v].derived)
+         continue;
+      if (P->vars[v].rc || P->vars[v].ngd > 0) {
+         *why = RJ_DECLINE;
+         return false;
+      }
+      nfree++;
+   }
+
+   if (nfree == 0) {
+      bool any = false;
+      for (int i = 0; i < nv && !any; i++)
+         any = is_free(P, comp >= 0 ? P->kvl[P->kvs[comp] + i] : i);
+      *why = any ? RJ_DECLINE : RJ_NOFREE;
+      return false;
+   }
+
+   if (!rj_unique_ok(P, comp)) {
+      *why = RJ_DECLINE;
+      return false;
+   }
+
+   R->lvl = arena_alloc(&P->tmp, P->nv * sizeof(int));
+   rj_levels(P, comp, R->lvl);
+
+   int *defd = arena_alloc(&P->tmp, P->nv * sizeof(int));
+   for (int v = 0; v < P->nv; v++)
+      defd[v] = -1;
+   R->def = arena_alloc(&P->tmp, (nfree + 1) * sizeof(int));
+   R->defe = arena_alloc(&P->tmp, (nfree + 1) * sizeof(int));
+   rj_defined(P, R, R->lvl, defd);
+
+   R->vars = arena_alloc(&P->tmp, nfree * sizeof(int));
+   R->bstart = arena_alloc(&P->tmp, (nfree + 2) * sizeof(int));
+
+   int maxl = 0;
+   for (int i = 0; i < nv; i++) {
+      const int v = comp >= 0 ? P->kvl[P->kvs[comp] + i] : i;
+      if (R->lvl[v] > maxl)
+         maxl = R->lvl[v];
+   }
+
+   int n = 0;
+   R->nb = 0;
+   R->bstart[0] = 0;
+   for (int l = 0; l <= maxl; l++) {
+      // A dist variable is a block of its own, the others are one block
+      for (int pass = 0; pass < 2; pass++) {
+         const int first = n;
+         for (int i = 0; i < nv; i++) {
+            const int v = comp >= 0 ? P->kvl[P->kvs[comp] + i] : i;
+            const pvar_t *pv = &P->vars[v];
+            if (R->lvl[v] != l || !is_free(P, v) || pv->derived
+                || defd[v] >= 0)
+               continue;
+            else if ((pass == 0) != (pv->dist >= 0))
+               continue;
+
+            R->vars[n++] = v;
+            if (pass == 0)
+               R->bstart[++R->nb] = n;
+         }
+         if (pass == 1 && n > first)
+            R->bstart[++R->nb] = n;
+      }
+   }
+
+   R->nfree = n;
+   if (R->nb == 0 || R->nb > REJECT_MAX_BLOCKS) {
+      *why = RJ_DECLINE;
+      return false;
+   }
+
+   return true;
+}
+
+static void rj_clear_queue(prob_t *P)
+{
+   if (P->qn > 0) {
+      memset(P->pend, 0, ((P->ncons + 63) / 64) * sizeof(uint64_t));
+      P->qn = 0;
+   }
+}
+
+// Can the variables that are not fixed be given values that satisfy
+// everything: a complete search with a work limit of its own
+static sres_t rj_extends(prob_t *P)
+{
+   const int64_t budget = P->budget;
+   const bool oob = P->oob;
+   const int mark = P->ntrail;
+   const amark_t am = arena_mark(&P->ar);
+
+   if (P->work + REJECT_EXT_WORK < P->budget)
+      P->budget = P->work + REJECT_EXT_WORK;
+
+   const sres_t r = search(P);
+
+   undo_to(P, mark);
+   arena_reset(&P->ar, am);
+   P->budget = budget;
+   P->oob = oob;
+   return r;
+}
+
+// 1 if the blocks from b are fixed to values that satisfy the constraints, 0
+// if every sample was rejected, -1 if the component should be given to
+// another stage as a value was found that can be extended and no sample
+// of what follows it was accepted
+static int rj_draw(prob_t *P, rj_t *R, int b)
+{
+   const int *vs = R->vars + R->bstart[b];
+   const int n = R->bstart[b + 1] - R->bstart[b];
+   const bool last = b == R->nb - 1;
+   const amark_t tm = arena_mark(&P->tmp);
+   i128 *xs = arena_alloc(&P->tmp, n * sizeof(i128));
+   int result = 0;
+
+   if (last)
+      fill_vals(P, R->comp);
+
+   for (int t = 0; t < R->per && R->left > 0; t++) {
+      R->left--;
+      for (int i = 0; i < n; i++)
+         xs[i] = rj_propose(P, vs[i]);
+
+      if (last) {
+         for (int i = 0; i < n; i++)
+            P->vals[vs[i]] = st(xs[i]);
+
+         if (!rj_holds(P, R))
+            continue;
+
+         // Fix every variable of the component to its value
+         bool ok = true;
+         for (int i = 0; i < n && ok; i++)
+            ok = var_clip(P, vs[i], xs[i], xs[i]);
+         for (int i = 0; i < R->ndef && ok; i++) {
+            const i128 x = mathv(P->vals[R->def[i]],
+                                 P->vars[R->def[i]].sgn);
+            ok = var_clip(P, R->def[i], x, x);
+         }
+         if (!ok)
+            should_not_reach_here();
+         result = 1;
+         break;
+      }
+
+      const int mark = P->ntrail;
+      bool ok = true;
+      for (int i = 0; i < n && ok; i++)
+         ok = var_clip(P, vs[i], xs[i], xs[i]);
+      ok = ok && propagate(P);
+      if (!ok) {
+         // Propagation proves the value cannot be extended
+         undo_to(P, mark);
+         if (P->oob) {
+            result = -1;
+            break;
+         }
+         continue;
+      }
+
+      const int r = rj_draw(P, R, b + 1);
+      if (r != 0) {
+         if (r < 0)
+            undo_to(P, mark);
+         result = r;
+         break;
+      }
+
+      // The blocks after this one were not sampled: can the value be
+      // extended at all
+      const sres_t ext = rj_extends(P);
+      undo_to(P, mark);
+      if (ext == S_UNSAT)
+         continue;
+      result = -1;
+      break;
+   }
+
+   arena_reset(&P->tmp, tm);
+   return result;
+}
+
+static rj_res_t reject_comp(prob_t *P, int comp)
+{
+   const amark_t tm = arena_mark(&P->tmp);
+   const amark_t am = arena_mark(&P->ar);
+   const int mark = P->ntrail;
+
+   rj_t R = { .comp = comp };
+   rj_res_t res = RJ_EXHAUST;
+   if (!rj_setup(P, &R, &res)) {
+      arena_reset(&P->tmp, tm);
+      return res;
+   }
+
+   R.per = P->reject == 2 ? REJECT_TRIES_FORCED : REJECT_TRIES;
+   R.left = R.per * R.nb;
+
+   const int r = rj_draw(P, &R, 0);
+   if (r > 0) {
+      res = RJ_SAT;
+      rj_clear_queue(P);
+   }
+   else {
+      undo_to(P, mark);
+      arena_reset(&P->ar, am);
+      res = r < 0 ? RJ_DECLINE : RJ_EXHAUST;
+   }
+
+   arena_reset(&P->tmp, tm);
+   return res;
+}
+
+// Search one component, or the whole problem, by the stages that are on
+static sres_t solve_comp(prob_t *P)
+{
+   const int comp = P->vcomp != NULL ? P->comp : -1;
+
+   if (P->reject != 0) {
+      switch (reject_comp(P, comp)) {
+      case RJ_SAT:
+         P->nstage[CRV_STAGE_REJECT]++;
+         return S_SAT;
+      case RJ_NOFREE:
+         return search(P);
+      case RJ_DECLINE:
+         P->ndecl[0]++;
+         break;
+      case RJ_EXHAUST:
+         P->ndecl[2]++;
+         break;
+      }
+
+      if (P->reject == 2)
+         return S_GIVEUP;
+   }
+
+   const sres_t r = search(P);
+   if (r == S_SAT)
+      P->nstage[CRV_STAGE_DFS]++;
+   return r;
+}
+
 static sres_t search(prob_t *P)
 {
    const int root_trail = P->ntrail;
@@ -5709,18 +6371,28 @@ static sres_t solve_prob(prob_t *P)
       }
    }
 
+   sres_t res = S_SAT;
    if (P->vcomp == NULL)
-      return search(P);
+      res = solve_comp(P);
+   else {
+      fill_vals(P, -1);
+      for (P->comp = 0; P->comp < P->ncomp && res == S_SAT; P->comp++)
+         res = solve_comp(P);
 
-   fill_vals(P, -1);
-   for (P->comp = 0; P->comp < P->ncomp; P->comp++) {
-      const sres_t r = search(P);
-      if (r != S_SAT)
-         return r;
+      // The values of the components together
+      if (res == S_SAT)
+         res = check_all(P, -1) ? S_SAT : S_GIVEUP;
    }
 
-   // The values of the components together
-   return check_all(P, -1) ? S_SAT : S_GIVEUP;
+   if (cur_stat != NULL) {
+      for (int i = 0; i < CRV_STAGE_COUNT; i++) {
+         if ((uint32_t)P->nstage[i] > cur_stat->stage[i])
+            cur_stat->stage[i] = P->nstage[i];
+      }
+      for (int i = 0; i < 3; i++)
+         cur_stat->declined[i] += P->ndecl[i];
+   }
+   return res;
 }
 
 typedef struct {
@@ -6135,7 +6807,12 @@ crv_result_t crv_solve2(crv_t *c)
 
    st.ok = r == CRV_SAT;
    st.giveup = r == CRV_GIVEUP;
-   st.top = st.comps + st.loose > 0 ? CRV_STAGE_DFS : CRV_STAGE_NONE;
+   // The last stage of a call is the least exact of those that answered
+   st.top = CRV_STAGE_NONE;
+   for (int i = 0; i < CRV_STAGE_COUNT; i++) {
+      if (st.stage[i] > 0)
+         st.top = (crv_stage_t)i;
+   }
    crv_stats_record(&st);
    return r;
 }

@@ -90,10 +90,10 @@ void crv_set_engine(crv_engine_t e)
 
 bool crv_engine_available(crv_engine_t e)
 {
-   // Legacy and dfs are the same search and auto is that search until
-   // there are more stages
+   // Legacy and dfs are the same search, reject is the rejection stage on
+   // its own and auto is the stages in turn
    return e == CRV_ENGINE_AUTO || e == CRV_ENGINE_LEGACY
-      || e == CRV_ENGINE_DFS;
+      || e == CRV_ENGINE_DFS || e == CRV_ENGINE_REJECT;
 }
 
 const char *crv_engine_name(crv_engine_t e)

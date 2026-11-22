@@ -1612,6 +1612,14 @@ static int field_level(const problem_t *p, int f, int *deepest)
 
 static int make_blocks(const problem_t *p, block_t *bl)
 {
+   if (p->array) {
+      // The size is chosen first, among the sizes the elements can have,
+      // then the elements: the two phases of the solver
+      bl[0] = (block_t){ 1u, -1 };
+      bl[1] = (block_t){ ((1u << p->nfields) - 1) & ~1u, -1 };
+      return 2;
+   }
+
    int deepest = 0, level[MAX_FIELDS];
    bool mentioned[MAX_FIELDS] = { false };
    for (int i = 0; i < p->nedges; i++)
@@ -1962,7 +1970,8 @@ static problem_t def_chain(void)
 static problem_t def_dist(int variant)
 {
    static const char *const names[] = {
-      "dist x!=y", "dist, bucket infeasible", "dist, :/ over a split range"
+      "dist x!=y", "dist, bucket infeasible", "dist, :/ over a split range",
+      "dist, values with different extensions", "two dists"
    };
    problem_t p = def_base(names[variant]);
    add_field(&p, 3, false);
@@ -1981,6 +1990,30 @@ static problem_t def_dist(int variant)
       const bool pv[] = { false, false, false };
       add_cons(&p, xdist(x, 3, lo, hi, w, pv), false);
       add_cons(&p, xnum(CRV_LT, x, 4), false);
+   }
+   else if (variant == 3) {
+      // y <= 2x: the values of x can be extended in 1, 3, 5 and 7 ways, and
+      // are chosen by their weights alone
+      p.f[0].w = 2;
+      const int64_t lo[] = { 0, 1, 3 }, hi[] = { 0, 2, 3 };
+      const int64_t w[] = { 1, 4, 1 };
+      const bool pv[] = { true, false, true };
+      add_cons(&p, xdist(x, 3, lo, hi, w, pv), false);
+      add_cons(&p, xbin(CRV_LE, 1, false, xvar(&p, 1),
+                        xbin(CRV_MUL, 3, false, x, xconst(2, 3, false))),
+               false);
+   }
+   else if (variant == 4) {
+      // Each variable by its weights in turn, x first
+      p.f[0].w = 2;
+      const int64_t lx[] = { 0, 1 }, hx[] = { 0, 1 }, wx[] = { 1, 3 };
+      const bool px[] = { true, true };
+      add_cons(&p, xdist(x, 2, lx, hx, wx, px), false);
+      const int64_t ly[] = { 0, 2 }, hy[] = { 1, 3 }, wy[] = { 1, 6 };
+      const bool py[] = { true, false };
+      add_cons(&p, xdist(xvar(&p, 1), 2, ly, hy, wy, py), false);
+      add_cons(&p, xnum(CRV_NE, xbin(CRV_ADD, 4, false, x, xvar(&p, 1)), 3),
+               false);
    }
    else {
       // The second bucket loses its low values to a constraint
@@ -2037,6 +2070,51 @@ static problem_t def_array(void)
    return p;
 }
 
+// total is computed from the others: the case for defined variable
+// elimination, without which nearly every sample is rejected
+static problem_t def_defined(void)
+{
+   problem_t p = def_base("total == a + b, a != b");
+   add_field(&p, 8, false);
+   add_field(&p, 3, false);
+   add_field(&p, 3, false);
+   ex_t *sum = xbin(CRV_ADD, 8, false, xvar(&p, 1), xvar(&p, 2));
+   add_cons(&p, xbin(CRV_EQ, 1, false, xvar(&p, 0), sum), false);
+   add_cons(&p, xbin(CRV_NE, 1, false, xvar(&p, 1), xvar(&p, 2)), false);
+   return p;
+}
+
+// c is in no solve before: it is chosen with b, after a
+static problem_t def_unmentioned(void)
+{
+   problem_t p = def_base("a<b, c<=a, a before b");
+   for (int i = 0; i < 3; i++)
+      add_field(&p, 3, false);
+   add_cons(&p, xbin(CRV_LT, 1, false, xvar(&p, 0), xvar(&p, 1)), false);
+   add_cons(&p, xbin(CRV_LE, 1, false, xvar(&p, 2), xvar(&p, 0)), false);
+   p.before[0] = 0;
+   p.after[0] = 1;
+   p.nedges = 1;
+   return p;
+}
+
+// The two defined by one equality are in different levels, so neither is
+// computed from the other
+static problem_t def_defined_levels(void)
+{
+   problem_t p = def_base("x == y + 1, x before y, z != y");
+   add_field(&p, 4, false);
+   add_field(&p, 4, false);
+   add_field(&p, 2, false);
+   ex_t *sum = xbin(CRV_ADD, 4, false, xvar(&p, 1), xconst(1, 4, false));
+   add_cons(&p, xbin(CRV_EQ, 1, false, xvar(&p, 0), sum), false);
+   add_cons(&p, xbin(CRV_NE, 1, false, xvar(&p, 2), xvar(&p, 1)), false);
+   p.before[0] = 0;
+   p.after[0] = 1;
+   p.nedges = 1;
+   return p;
+}
+
 typedef struct {
    problem_t (*make)(int arg);
    int arg;
@@ -2056,6 +2134,9 @@ static problem_t mk_cond(int a) { (void)a; return def_cond(); }
 static problem_t mk_soft(int a) { (void)a; return def_soft(); }
 static problem_t mk_soft_ok(int a) { (void)a; return def_soft_ok(); }
 static problem_t mk_array(int a) { (void)a; return def_array(); }
+static problem_t mk_defined(int a) { (void)a; return def_defined(); }
+static problem_t mk_unm(int a) { (void)a; return def_unmentioned(); }
+static problem_t mk_deflev(int a) { (void)a; return def_defined_levels(); }
 
 static const entry_t problems[] = {
    { mk_xlty, 4 }, { mk_xlty, 3 }, { mk_xlty, 5 },
@@ -2065,6 +2146,8 @@ static const entry_t problems[] = {
    { mk_before, 0 }, { mk_chain, 0 },
    { mk_dist, 0 }, { mk_dist, 1 }, { mk_dist, 2 },
    { mk_soft, 0 }, { mk_soft_ok, 0 }, { mk_array, 0 }, { mk_cond, 0 },
+   { mk_dist, 3 }, { mk_dist, 4 }, { mk_defined, 0 }, { mk_unm, 0 },
+   { mk_deflev, 0 },
 };
 
 #define NPROBLEMS ((int)ARRAY_LEN(problems))
@@ -2694,6 +2777,7 @@ typedef struct {
    int  invalid;       // An answer which breaks a hard constraint
    int  soft_lost;     // A soft constraint dropped that could be kept
    int  false_sat;     // Unsatisfiable and the solver gave an answer
+   int  declined;      // A stage that cannot prove anything gave up
 } fuzz_stats_t;
 
 static bool fuzz_run_one(uint64_t seed, const crv_engine_t *engines,
@@ -2719,8 +2803,17 @@ static bool fuzz_run_one(uint64_t seed, const crv_engine_t *engines,
          solver_draw(&m, &sc, a, &ok);
          st->draws++;
 
+         // The rejection stage on its own finds a solution or gives up: not
+         // finding one is not a fault, and a soft constraint can be lost
+         // because a trial was given up
+         const bool partial = engines[e] == CRV_ENGINE_REJECT;
          const char *what = NULL;
-         if (ok && m.nsol == 0) {
+         if (partial && !ok && m.nsol > 0 && sc.result == CRV_GIVEUP)
+            st->declined++;
+         else if (partial && ok && m.nsol > 0
+                  && m.index[model_key(&p, a)] == 0 && hard_holds(&p, a))
+            st->declined++;
+         else if (ok && m.nsol == 0) {
             st->false_sat++;
             what = "a solution for an unsatisfiable problem";
          }
@@ -2811,8 +2904,10 @@ START_TEST(test_fuzz)
       printf("fuzz: %d problems (%d with solutions, %d unsatisfiable), %d "
              "draws; %d without an answer, %d soft constraints dropped that "
              "could be kept, %d invalid, %d answered although "
-             "unsatisfiable\n", st.problems, st.with_solutions, st.unsat,
-             st.draws, st.incomplete, st.soft_lost, st.invalid, st.false_sat);
+             "unsatisfiable; the rejection stage gave up %d times\n",
+             st.problems, st.with_solutions, st.unsat,
+             st.draws, st.incomplete, st.soft_lost, st.invalid, st.false_sat,
+             st.declined);
 
    // The answers the solver gives are always right; whether it finds one
    // when there is one is reported, and bounded
@@ -2871,7 +2966,10 @@ START_TEST(test_engine_env)
    ck_assert_int_eq(crv_engine(), cases[i].engine);
    ck_assert_str_eq(crv_engine_name(cases[i].engine), cases[i].name);
 
-   // Whatever is chosen the answers are those of the search of release 0.18
+   // The answers are those of the search of release 0.18 for legacy and the
+   // dfs engine: the stages in front of it choose other values
+   const bool same = cases[i].engine == CRV_ENGINE_LEGACY
+      || cases[i].engine == CRV_ENGINE_DFS || !crv_engine_available(cases[i].engine);
    crv_seed(60);
    crv_t *c = crv_new();
    crv_var_t x = crv_var(c, 16, false, 0);
@@ -2892,7 +2990,10 @@ START_TEST(test_engine_env)
                              crv_const(c, 60000, 16, false), 1, false),
                false, 1);
    ck_assert(crv_solve(c));
-   ck_assert_int_eq(crv_value(c, x), v);
+   if (same)
+      ck_assert_int_eq(crv_value(c, x), v);
+   else
+      ck_assert_int_gt(crv_value(c, x), 60000);
    crv_free(c);
 }
 END_TEST
@@ -2909,7 +3010,7 @@ START_TEST(test_engine_available)
    ck_assert(crv_engine_available(CRV_ENGINE_LEGACY));
    ck_assert(crv_engine_available(CRV_ENGINE_DFS));
    ck_assert(crv_engine_available(CRV_ENGINE_AUTO));
-   ck_assert(!crv_engine_available(CRV_ENGINE_REJECT));
+   ck_assert(crv_engine_available(CRV_ENGINE_REJECT));
    ck_assert(!crv_engine_available(CRV_ENGINE_BDD));
    ck_assert(!crv_engine_available(CRV_ENGINE_SAT));
 }
@@ -2961,9 +3062,100 @@ START_TEST(test_stats_linked)
    ck_assert_int_eq(st->comps, 1);
    ck_assert_int_eq(st->freevars, 2);
    ck_assert_int_eq(st->maxfree, 2);
-   ck_assert_int_eq(st->stage[CRV_STAGE_DFS], 1);
-   ck_assert_int_eq(st->top, CRV_STAGE_DFS);
+   ck_assert_int_eq(st->stage[CRV_STAGE_REJECT], 1);
+   ck_assert_int_eq(st->stage[CRV_STAGE_DFS], 0);
+   ck_assert_int_eq(st->top, CRV_STAGE_REJECT);
    crv_free(c);
+}
+END_TEST
+
+START_TEST(test_stats_stage)
+{
+   // The stage that answers is the one the engine allows
+   static const struct {
+      crv_engine_t engine;
+      crv_stage_t  stage;
+   } cases[] = {
+      { CRV_ENGINE_LEGACY, CRV_STAGE_DFS }, { CRV_ENGINE_DFS, CRV_STAGE_DFS },
+      { CRV_ENGINE_REJECT, CRV_STAGE_REJECT },
+      { CRV_ENGINE_AUTO, CRV_STAGE_REJECT },
+   };
+
+   const crv_engine_t saved = crv_engine();
+   for (size_t i = 0; i < ARRAY_LEN(cases); i++) {
+      crv_set_engine(cases[i].engine);
+      crv_t *c = crv_new();
+      crv_var_t x = crv_var(c, 8, false, 0), y = crv_var(c, 8, false, 0);
+      crv_require(c, crv_binary(c, CRV_LT, crv_var_ref(c, x),
+                                crv_var_ref(c, y), 1, false), false, 1);
+      const crv_call_stat_t *st = solved_stats(c, true);
+      ck_assert_int_eq(st->top, cases[i].stage);
+      ck_assert_int_eq(st->stage[cases[i].stage], 1);
+      crv_free(c);
+   }
+   crv_set_engine(saved);
+}
+END_TEST
+
+START_TEST(test_stats_decline)
+{
+   // A component with a randc variable is for the search: forced, the
+   // rejection stage gives up and says why
+   const crv_engine_t saved = crv_engine();
+   uint64_t state = 0;
+   for (int pass = 0; pass < 2; pass++) {
+      crv_set_engine(pass == 0 ? CRV_ENGINE_AUTO : CRV_ENGINE_REJECT);
+      crv_t *c = crv_new();
+      crv_var_t x = crv_var(c, 4, false, 0), y = crv_var(c, 4, false, 0);
+      crv_var_randc(c, x, &state);
+      crv_require(c, crv_binary(c, CRV_LT, crv_var_ref(c, x),
+                                crv_var_ref(c, y), 1, false), false, 1);
+      crv_stats_force(true);
+      const crv_result_t r = crv_solve2(c);
+      const crv_call_stat_t *st = crv_stats_last();
+      ck_assert_int_eq(st->declined[0], 1);
+      if (pass == 0) {
+         ck_assert_int_eq(r, CRV_SAT);
+         ck_assert_int_eq(st->top, CRV_STAGE_DFS);
+      }
+      else
+         ck_assert_int_eq(r, CRV_GIVEUP);
+      crv_free(c);
+   }
+   crv_set_engine(saved);
+}
+END_TEST
+
+START_TEST(test_stats_exhausted)
+{
+   // 16 samples of a variable that one value in 2^16 satisfies are all
+   // rejected: the search takes over, and a forced stage gives up
+   const crv_engine_t saved = crv_engine();
+   for (int pass = 0; pass < 2; pass++) {
+      crv_set_engine(pass == 0 ? CRV_ENGINE_AUTO : CRV_ENGINE_REJECT);
+      crv_t *c = crv_new();
+      crv_var_t x = crv_var(c, 32, false, 0), y = crv_var(c, 32, false, 0);
+      crv_require(c, crv_binary(c, CRV_EQ, crv_binary(
+                                   c, CRV_ADD, crv_var_ref(c, x),
+                                   crv_var_ref(c, y), 32, false),
+                                crv_const(c, 0x12345678, 32, false), 1, false),
+                  false, 1);
+      crv_stats_force(true);
+      crv_seed(5);
+      const crv_result_t r = crv_solve2(c);
+      const crv_call_stat_t *st = crv_stats_last();
+      if (pass == 0) {
+         ck_assert_int_eq(r, CRV_SAT);
+         ck_assert_int_eq((crv_value(c, x) + crv_value(c, y)) & 0xffffffff,
+                          0x12345678);
+         ck_assert_int_eq(st->top, CRV_STAGE_DFS);
+      }
+      else
+         ck_assert_int_eq(r, CRV_GIVEUP);
+      ck_assert_int_eq(st->declined[2], 1);
+      crv_free(c);
+   }
+   crv_set_engine(saved);
 }
 END_TEST
 
@@ -3149,6 +3341,9 @@ Suite *get_crv_tests(void)
    tcase_add_test(tc, test_stats_none);
    tcase_add_test(tc, test_stats_linked);
    tcase_add_test(tc, test_stats_independent);
+   tcase_add_test(tc, test_stats_stage);
+   tcase_add_test(tc, test_stats_decline);
+   tcase_add_test(tc, test_stats_exhausted);
    tcase_add_test(tc, test_stats_order);
    tcase_add_test(tc, test_stats_fail);
    tcase_add_test(tc, test_stats_soft);
