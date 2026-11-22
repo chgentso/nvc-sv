@@ -3023,7 +3023,7 @@ svcrvdist1 verilog
 sveventiff1 verilog
 svsemblock1 verilog
 svcovcrosswith1 verilog
-svexternimport1 verilog
+svexternimport1 verilog,relaxed
 svgenstruct1 verilog
 svgenstruct2 verilog
 svfwdmember1 verilog

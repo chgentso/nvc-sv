@@ -18065,8 +18065,10 @@ static void p_class_item(vlog_node_t parent)
       {
          // Not allowed by the footnotes of the syntax of class items (26.3)
          const loc_t loc = state.tokenq[state.tokenq_tail].loc;
-         error_at(&loc, "an import statement is not allowed directly "
-                  "within a class scope");
+         diag_t *d = diag_new_relaxable(&loc);
+         diag_printf(d, "an import statement is not allowed directly "
+                     "within a class scope");
+         diag_emit(d);
          p_package_import_declaration(parent);
       }
       break;
