@@ -3091,3 +3091,4 @@ vlog_genshare12 verilog
 vpi27           verilog,vpi,gold
 vlog_genshare13 verilog
 svcrvsizeforeach1 verilog
+svcrvsumwith1 verilog

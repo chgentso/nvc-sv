@@ -21664,6 +21664,8 @@ static void vlog_crv_state_cb(vlog_node_t v, void *context)
    }
 }
 
+static bool vlog_crv_is_dynamic_array(vlog_node_t decl);
+
 static bool vlog_crv_is_reduction(vlog_node_t v)
 {
    switch (vlog_subkind(v)) {
@@ -21679,11 +21681,16 @@ static bool vlog_crv_is_reduction(vlog_node_t v)
          // With a with clause the elements of a random array are
          // combined by the solver
          vlog_node_t prefix = vlog_value(v);
-         return vlog_kind(prefix) == V_REF && vlog_has_ref(prefix)
-            && vlog_kind(vlog_ref(prefix)) == V_VAR_DECL
-            && (vlog_flags(vlog_ref(prefix)) & VLOG_F_RAND)
-            && vlog_ranges(vlog_ref(prefix)) == 1
-            && vlog_subkind(vlog_range(vlog_ref(prefix), 0)) == V_DIM_UNPACKED;
+         if (vlog_kind(prefix) != V_REF || !vlog_has_ref(prefix)
+             || vlog_kind(vlog_ref(prefix)) != V_VAR_DECL
+             || !(vlog_flags(vlog_ref(prefix)) & VLOG_F_RAND))
+            return false;
+         else if (vlog_ranges(vlog_ref(prefix)) == 0)
+            return vlog_crv_is_dynamic_array(vlog_ref(prefix));
+         else
+            return vlog_ranges(vlog_ref(prefix)) == 1
+               && vlog_subkind(vlog_range(vlog_ref(prefix), 0))
+                  == V_DIM_UNPACKED;
       }
    default:
       return false;
@@ -25127,12 +25134,37 @@ static mir_value_t vlog_crv_reduction(vlog_gen_t *g, vlog_node_t v)
                   vlog_crv_flags(g, w, s));
    }
 
+   if (op == CRV_ADD && with && vlog_crv_is_reduction(v)
+       && vlog_crv_is_array_ref(prefix)
+       && vlog_crv_is_dynamic_array(vlog_ref(prefix))
+       && vlog_ranges(vlog_ref(prefix)) == 0) {
+      // The number of elements is only known once the solver has chosen
+      // it so only a with expression that is the element itself, possibly
+      // widened by one cast, can be summed without unrolling
+      vlog_node_t decl = vlog_ref(prefix);
+      const unsigned w = vlog_type_info(g, vlog_crv_elem_type(decl))->size;
+      vlog_node_t body = vlog_stmt(v, 2);
+      if (vlog_kind(body) == V_CAST)
+         body = vlog_value(body);
+      if (vlog_kind(body) == V_REF && vlog_has_ref(body)
+          && vlog_ref(body) == vlog_stmt(v, 0)
+          && vlog_crv_width(g, vlog_stmt(v, 2)) >= w)
+         return CRV3(g, CRV_OP_ARRAY_SUM, g->crv_ctx,
+                     vlog_crv_array(g, prefix),
+                     vlog_crv_flags(g, vlog_crv_width(g, vlog_stmt(v, 2)),
+                                    vlog_crv_signed(g, vlog_stmt(v, 2))));
+
+      fatal_at(vlog_loc(v), "sorry, a with expression of an array reduction "
+               "over a dynamic array in a constraint must be the element "
+               "itself or a widening cast of it");
+   }
+
    if (!vlog_crv_is_reduction(v) || !vlog_crv_is_array_ref(prefix)
        || vlog_crv_is_dynamic_array(vlog_ref(prefix))
        || vlog_ranges(vlog_ref(prefix)) != 1)
       fatal_at(vlog_loc(v), "sorry, an array reduction in a constraint is "
-               "only supported for a fixed size array with one dimension and "
-               "no with clause");
+               "only supported for a fixed size array with one dimension, or "
+               "sum() of a dynamic array");
 
    vlog_node_t decl = vlog_ref(prefix);
    const unsigned count = vlog_size(vlog_range(decl, 0));
