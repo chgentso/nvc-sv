@@ -125,6 +125,21 @@ typedef struct {
    unsigned for_shared;    // For-generate loops lowered once
 } elab_stats_t;
 
+typedef struct {
+   ident_t     parent;     // Body containing the generate construct
+   vlog_node_t block;      // Generate block before it is instantiated
+   int64_t     index;      // Value of the genvar if has_index
+   bool        has_index;
+} elab_gen_key_t;
+
+typedef struct {
+   elab_gen_key_t key;
+   vlog_node_t    body;
+   vlog_node_t    src;     // Instantiated block for nested constructs
+   tree_t         block;
+   tree_t         wrap;
+} elab_gen_entry_t;
+
 typedef struct _elab_ctx {
    const elab_ctx_t *parent;
    tree_t            out;
@@ -141,6 +156,8 @@ typedef struct _elab_ctx {
    cover_data_t     *cover;
    sdf_file_t       *sdf;
    hash_t           *modcache;
+   ghash_t          *gencache;
+   hash_t           *gencheck;
    hash_t           *mracache;
    hash_t           *vucache;
    const elab_vunit_pending_t *pending;
@@ -517,6 +534,20 @@ static bool elab_cmp_inst(const void *a, const void *b)
    }
 
    return false;
+}
+
+static uint32_t elab_hash_gen_key(const void *key)
+{
+   const elab_gen_key_t *k = key;
+   return ident_hash(k->parent) ^ mix_bits_64((uintptr_t)k->block)
+      ^ mix_bits_64(k->index) ^ k->has_index;
+}
+
+static bool elab_cmp_gen_key(const void *a, const void *b)
+{
+   const elab_gen_key_t *ka = a, *kb = b;
+   return ka->parent == kb->parent && ka->block == kb->block
+      && ka->index == kb->index && ka->has_index == kb->has_index;
 }
 
 static mod_cache_t *elab_cached_module(object_t *obj, const elab_ctx_t *ctx)
@@ -1847,6 +1878,8 @@ static void elab_inherit_context(elab_ctx_t *ctx, const elab_ctx_t *parent)
    ctx->sdf      = parent->sdf;
    ctx->inst     = ctx->inst ?: parent->inst;
    ctx->modcache = parent->modcache;
+   ctx->gencache = parent->gencache;
+   ctx->gencheck = parent->gencheck;
    ctx->mracache = parent->mracache;
    ctx->vucache  = parent->vucache;
    ctx->iface_conns = parent->iface_conns;
@@ -5569,8 +5602,81 @@ static void elab_verilog_vhdl_instance_list(vlog_node_t v, tree_t entity,
    }
 }
 
-static void elab_verilog_block(vlog_node_t v, const elab_ctx_t *ctx)
+static void elab_gen_check_cb(vlog_node_t v, void *ctx)
 {
+   bool *ok = ctx;
+
+   switch (vlog_kind(v)) {
+   case V_HIER_REF:
+   case V_MOD_REF:
+   case V_DEFPARAM:
+   case V_FUNC_DECL:
+   case V_TASK_DECL:
+   case V_CLASS_DECL:
+   case V_CONSTRUCTOR:
+   case V_DPI_EXPORT:
+      *ok = false;
+      break;
+   default:
+      break;
+   }
+}
+
+static bool elab_gen_cacheable(vlog_node_t tmpl, const elab_ctx_t *ctx)
+{
+   // A generate block may share its body with the same block of other
+   // instances of the enclosing body if nothing in it depends on where
+   // it is in the hierarchy
+
+   if (ctx->cloned == NULL || ctx->cover != NULL)
+      return false;
+
+   ident_t id = vlog_ident(tmpl);
+   for (unsigned i = 0; i < ctx->ndefparams; i++) {
+      if (ctx->defparams[i].path[0] == ident_until(id, '['))
+         return false;
+   }
+
+   void *cached = hash_get(ctx->gencheck, tmpl);
+   if (cached != NULL)
+      return cached == (void *)1;
+
+   bool ok = true;
+   vlog_visit(tmpl, elab_gen_check_cb, &ok);
+
+   hash_put(ctx->gencheck, tmpl, ok ? (void *)1 : (void *)2);
+   return ok;
+}
+
+static void elab_verilog_gen_block(vlog_node_t tmpl, vlog_node_t genvar,
+                                   int32_t index, const elab_ctx_t *ctx)
+{
+   // Elaborate the block tmpl or, if genvar is not NULL, the iteration of
+   // a for-generate loop where genvar has the value index
+
+   const elab_gen_key_t key = {
+      .parent    = ctx->cloned,
+      .block     = tmpl,
+      .index     = index,
+      .has_index = genvar != NULL,
+   };
+
+   elab_gen_entry_t *ge = NULL;
+   const bool cacheable = elab_gen_cacheable(tmpl, ctx);
+   if (cacheable)
+      ge = ghash_get(ctx->gencache, &key);
+
+   vlog_node_t v;
+   if (ge != NULL)
+      v = ge->src;
+   else if (genvar != NULL) {
+      ident_t prefix = cacheable ? ctx->cloned : ctx->dotted;
+      v = vlog_generate_instance(tmpl, genvar, index, prefix);
+      vlog_fold(v, ctx->mir, ctx->jit);
+   }
+   else
+      v = tmpl;
+
    ident_t id = vlog_ident(v);
 
    tree_t b = tree_new(T_BLOCK);
@@ -5611,12 +5717,16 @@ static void elab_verilog_block(vlog_node_t v, const elab_ctx_t *ctx)
       new_ctx.ndefparams = nall;
    }
 
-   // TODO: use elab_instance_t to cache this
-
-   ident_t id2 = ident_prefix(ctx->dotted, vlog_ident(v), '%');
-   vlog_set_instance_scope(NULL);
-   vlog_node_t body = vlog_new_instance(v, NULL, id2);
-   vlog_fold(body, ctx->mir, ctx->jit);
+   vlog_node_t body;
+   if (ge != NULL)
+      body = ge->body;
+   else {
+      ident_t id2 = ident_prefix(cacheable ? ctx->cloned : ctx->dotted,
+                                 id, '%');
+      vlog_set_instance_scope(NULL);
+      body = vlog_new_instance(v, NULL, id2);
+      vlog_fold(body, ctx->mir, ctx->jit);
+   }
 
    unsigned nbody = 0;
    const int nbstmts = vlog_stmts(body);
@@ -5659,29 +5769,49 @@ static void elab_verilog_block(vlog_node_t v, const elab_ctx_t *ctx)
       new_ctx.ndefparams = nall;
    }
 
-   tree_t wrap = tree_new(T_VERILOG);
-   tree_set_ident(wrap, id);
-   tree_set_loc(wrap, vlog_loc(body));
-   tree_set_vlog(wrap, body);
-
-   tree_t block = tree_new(T_BLOCK);
-   tree_set_loc(block, vlog_loc(v));
-   tree_set_ident(block, ndotted);
-
-   vlog_trans(body, block);
-
    elab_cover_inst(&new_ctx, ident_until(id, '['), CSCOPE_INSTANCE, NULL);
-   vlog_cover_block(body, ctx->cover, new_ctx.cscope);
 
-   vlog_lower_instance(ctx->mir, body, ctx->cloned, block, ctx->cover,
-                       new_ctx.cscope);
+   tree_t wrap, block;
+   if (ge != NULL) {
+      wrap = ge->wrap;
+      block = ge->block;
+   }
+   else {
+      wrap = tree_new(T_VERILOG);
+      tree_set_ident(wrap, id);
+      tree_set_loc(wrap, vlog_loc(body));
+      tree_set_vlog(wrap, body);
+
+      block = tree_new(T_BLOCK);
+      tree_set_loc(block, vlog_loc(v));
+      tree_set_ident(block, ndotted);
+
+      vlog_trans(body, block);
+
+      vlog_cover_block(body, ctx->cover, new_ctx.cscope);
+
+      vlog_lower_instance(ctx->mir, body, ctx->cloned, block, ctx->cover,
+                          new_ctx.cscope);
+      ctx->stats->gen_bodies++;
+
+      elab_gen_body_t gb = { .block = v, .body = body, .where = b };
+      APUSH(*ctx->gen_bodies, gb);
+
+      if (cacheable) {
+         ge = pool_calloc(ctx->pool, sizeof(elab_gen_entry_t));
+         ge->key   = key;
+         ge->body  = body;
+         ge->src   = v;
+         ge->block = block;
+         ge->wrap  = wrap;
+
+         ghash_put(ctx->gencache, &(ge->key), ge);
+      }
+   }
+
    ctx->stats->gen_scopes++;
-   ctx->stats->gen_bodies++;
 
    hash_put(ctx->block_parents, b, ctx->out);
-
-   elab_gen_body_t gb = { .block = v, .body = body, .where = b };
-   APUSH(*ctx->gen_bodies, gb);
 
    new_ctx.cloned = vlog_ident(body);
 
@@ -5699,6 +5829,12 @@ static void elab_verilog_block(vlog_node_t v, const elab_ctx_t *ctx)
 
    elab_pop_scope(&new_ctx);
 }
+
+static void elab_verilog_block(vlog_node_t v, const elab_ctx_t *ctx)
+{
+   elab_verilog_gen_block(v, NULL, 0, ctx);
+}
+
 
 static void *elab_verilog_for_generate_test_cb(jit_scalar_t *args, void *ctx)
 {
@@ -5776,11 +5912,7 @@ static void elab_verilog_for_generate(vlog_node_t v, const elab_ctx_t *ctx)
       jit_call_thunk2(ctx->jit, get_var, context,
                       elab_verilog_for_generate_index_cb, &index);
 
-      // TODO: cache this in elab_instance_t
-      vlog_node_t copy = vlog_generate_instance(s0, genvar, index, ctx->dotted);
-      vlog_fold(copy, ctx->mir, ctx->jit);
-
-      elab_verilog_block(copy, ctx);
+      elab_verilog_gen_block(s0, genvar, index, ctx);
 
       jit_call_thunk2(ctx->jit, step, context, NULL, NULL);
    }
@@ -9676,6 +9808,8 @@ tree_t elab(object_t **top, int ntop, jit_t *jit, unit_registry_t *ur,
       .registry  = ur,
       .mir       = mc,
       .modcache  = hash_new(16),
+      .gencache  = ghash_new(16, elab_hash_gen_key, elab_cmp_gen_key),
+      .gencheck  = hash_new(16),
       .mracache  = hash_new(16),
       .vucache   = hash_new(16),
       .iface_conns = &iface_conns,
@@ -9709,6 +9843,8 @@ tree_t elab(object_t **top, int ntop, jit_t *jit, unit_registry_t *ur,
       ghash_free(((mod_cache_t *)value)->instances);
 
    hash_free(ctx.modcache);
+   ghash_free(ctx.gencache);
+   hash_free(ctx.gencheck);
    hash_free(ctx.mracache);
    hash_free(ctx.vucache);
    ACLEAR(iface_conns);
