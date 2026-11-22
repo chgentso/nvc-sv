@@ -7313,8 +7313,8 @@ static vlog_node_t p_process_scope(void)
       vlog_set_subkind(v, V_SYSTF_NONE);
       vlog_set_ival(v, time_ival());
 
-      consume(tLPAREN);
-      consume(tRPAREN);
+      if (optional(tLPAREN))
+         consume(tRPAREN);
 
       vlog_set_loc(v, CURRENT_LOC);
 

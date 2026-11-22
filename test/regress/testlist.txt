@@ -3027,3 +3027,4 @@ svgenstruct1 verilog
 svfwdmember1 verilog
 svcondstruct1 verilog
 svfwdclass1 verilog
+svprocself1 verilog
