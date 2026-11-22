@@ -162,6 +162,7 @@ static void p_module_or_generate_item_1(vlog_node_t mod);
 static void p_block_item_declaration(vlog_node_t parent);
 static int push_base_scopes(vlog_node_t class);
 static void put_enum_names(vlog_node_t type_decl);
+static bool defer_class_lookup(vlog_node_t ref, vlog_node_t scope);
 // Is the name before a scope resolution operator a type, class or
 // parameter declared in the file being scanned rather than a package that
 // is to be found elsewhere?
@@ -3639,7 +3640,9 @@ static vlog_node_t p_method_call_rest(vlog_node_t prefix, ident_t id)
    }
 
    vlog_set_loc(v, CURRENT_LOC);
-   vlog_symtab_lookup(symtab, v);
+   vlog_node_t mtype = vlog_get_type(prefix);
+   if (is_randomize || mtype == NULL || !defer_class_lookup(v, mtype))
+      vlog_symtab_lookup(symtab, v);
    return v;
 }
 
@@ -3830,6 +3833,14 @@ static bool defer_class_lookup(vlog_node_t ref, vlog_node_t scope)
        || vlog_scope_member(scope, vlog_ident(ref)) != NULL)
       return false;
 
+   if (vlog_flags(scope) & VLOG_F_FORWARD) {
+      pending_lookups = xrealloc_array(pending_lookups, npending_lookups + 1,
+                                       sizeof(pending_lookup_t));
+      pending_lookups[npending_lookups++] =
+         (pending_lookup_t){ ref, scope };
+      return true;
+   }
+
    for (int i = 0; i < nopen_classes; i++) {
       if (open_classes[i] == scope) {
          pending_lookups = xrealloc_array(pending_lookups, npending_lookups + 1,
@@ -3848,8 +3859,13 @@ static void resolve_pending_lookups(vlog_node_t scope)
    int wr = 0;
    const int n = npending_lookups;
    for (int i = 0; i < n; i++) {
-      if (pending_lookups[i].scope == scope)
-         vlog_symtab_lookup_in(symtab, pending_lookups[i].ref, scope);
+      if (pending_lookups[i].scope == scope) {
+         vlog_node_t r = pending_lookups[i].ref;
+         if (vlog_kind(r) == V_MEMBER_REF || vlog_kind(r) == V_METHOD_CALL)
+            vlog_symtab_lookup(symtab, r);
+         else
+            vlog_symtab_lookup_in(symtab, r, scope);
+      }
       else
          pending_lookups[wr++] = pending_lookups[i];
    }
@@ -4089,7 +4105,8 @@ static vlog_node_t p_select(ident_t id)
          vlog_set_value(ref, prefix);
          vlog_set_loc(ref, CURRENT_LOC);
 
-         if (gen_dead == 0)
+         if (gen_dead == 0
+             && (ptype == NULL || !defer_class_lookup(ref, ptype)))
             vlog_symtab_lookup(symtab, ref);
 
          prefix = ref;
@@ -5709,7 +5726,9 @@ static vlog_node_t p_method_call(void)
    p_method_call_body(v);
 
    vlog_set_loc(v, CURRENT_LOC);
-   vlog_symtab_lookup(symtab, v);
+   vlog_node_t mtype = vlog_get_type(vlog_value(v));
+   if (mtype == NULL || !defer_class_lookup(v, mtype))
+      vlog_symtab_lookup(symtab, v);
    return v;
 }
 
