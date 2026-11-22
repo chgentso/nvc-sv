@@ -27098,6 +27098,48 @@ static void vlog_crv_null_cb(vlog_node_t v, void *ctx)
       *(bool *)ctx = true;
 }
 
+static void vlog_crv_changing_cb(vlog_node_t v, void *ctx)
+{
+   // Names which the solver may change
+
+   switch (vlog_kind(v)) {
+   case V_REF:
+   case V_MEMBER_REF:
+      if (vlog_has_ref(v) && vlog_kind(vlog_ref(v)) == V_VAR_DECL
+          && (vlog_flags(vlog_ref(v)) & (VLOG_F_RAND | VLOG_F_RANDC)))
+         *(bool *)ctx = true;
+      break;
+   case V_METHOD_CALL:
+      if (vlog_subkind(v) == V_METHOD_SIZE)
+         *(bool *)ctx = true;
+      break;
+   default:
+      break;
+   }
+}
+
+static void vlog_crv_disable_cb(vlog_node_t v, void *ctx)
+{
+   if (vlog_kind(v) == V_CONS_EXPR && (vlog_flags(v) & VLOG_F_DISABLE))
+      *(bool *)ctx = true;
+}
+
+static bool vlog_crv_decide_disable(vlog_gen_t *g, vlog_node_t v)
+{
+   // A disable soft only takes effect when its condition is true, which the
+   // solver cannot be told so the condition has to be known when the
+   // constraints are built
+
+   bool has = false;
+   vlog_visit(v, vlog_crv_disable_cb, &has);
+   if (!has)
+      return false;
+
+   bool random = false;
+   vlog_visit(vlog_value(v), vlog_crv_changing_cb, &random);
+   return !random;
+}
+
 static bool vlog_crv_decide_now(vlog_gen_t *g, vlog_node_t cond)
 {
    // A condition which does not depend on the solution is decided when the
@@ -27156,7 +27198,8 @@ static void vlog_crv_items(vlog_gen_t *g, vlog_node_t v, mir_value_t guard,
       }
       break;
    case V_CONS_IMPLY:
-      if (vlog_crv_decide_now(g, vlog_value(v))) {
+      if (vlog_crv_decide_now(g, vlog_value(v))
+          || vlog_crv_decide_disable(g, v)) {
          mir_block_t then_bb = mir_add_block(g->mu);
          mir_block_t done_bb = mir_add_block(g->mu);
 
@@ -27182,7 +27225,8 @@ static void vlog_crv_items(vlog_gen_t *g, vlog_node_t v, mir_value_t guard,
       }
       break;
    case V_CONS_IF:
-      if (vlog_crv_decide_now(g, vlog_value(v))) {
+      if (vlog_crv_decide_now(g, vlog_value(v))
+          || vlog_crv_decide_disable(g, v)) {
          // Decided for each element at run time
          mir_block_t then_bb = mir_add_block(g->mu);
          mir_block_t else_bb = mir_add_block(g->mu);

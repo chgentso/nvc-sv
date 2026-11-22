@@ -3126,3 +3126,4 @@ svcrvlocal2 verilog
 svcrvskiparr1 verilog
 svcrvnestdyn1 verilog
 svcrvstaticrand1 verilog
+svcrvdisablecond1 verilog
