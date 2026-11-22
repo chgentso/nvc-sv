@@ -1,0 +1,1 @@
+sorry, an array which is randomized by std::randomize cannot be used as a whole in a constraint

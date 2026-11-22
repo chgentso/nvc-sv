@@ -22761,6 +22761,50 @@ static void vlog_crv_array_data(vlog_gen_t *g, vlog_node_t v,
    }
 }
 
+static void vlog_crv_signal_array_load(vlog_gen_t *g, mir_value_t array,
+                                       mir_value_t data, mir_value_t len,
+                                       const type_info_t *eti)
+{
+   // Current values of the elements of an unpacked array of nets or
+   // variables which are held as signals
+
+   mir_type_t t_offset = mir_offset_type(g->mu);
+   mir_value_t ivar = mir_add_var(g->mu, t_offset, MIR_NULL_STAMP,
+                                  ident_uniq("crv_i"), MIR_VAR_TEMP);
+   mir_build_store(g->mu, ivar, vlog_crv_int(g, 0));
+
+   mir_block_t test_bb = mir_add_block(g->mu);
+   mir_block_t body_bb = mir_add_block(g->mu);
+   mir_block_t done_bb = mir_add_block(g->mu);
+
+   mir_build_jump(g->mu, test_bb);
+   mir_set_cursor(g->mu, test_bb, MIR_APPEND);
+
+   mir_value_t i = mir_build_load(g->mu, ivar);
+   mir_build_cond(g->mu, mir_build_cmp(g->mu, MIR_CMP_LT, i, len), body_bb,
+                  done_bb);
+
+   mir_set_cursor(g->mu, body_bb, MIR_APPEND);
+
+   mir_value_t pos = mir_build_mul(g->mu, t_offset, i,
+                                   vlog_crv_int(g, eti->size));
+   mir_value_t ptr = mir_build_array_ref(g->mu, mir_build_resolved(g->mu, data),
+                                         pos);
+   mir_value_t elem;
+   if (eti->size == 1)
+      elem = mir_build_pack(g->mu, eti->type, mir_build_load(g->mu, ptr));
+   else
+      elem = mir_build_pack(g->mu, eti->type, ptr);
+
+   CRV4(g, CRV_OP_ARRAY_INIT, g->crv_ctx, array, i, vlog_crv_to_offset(g, elem));
+
+   mir_build_store(g->mu, ivar, mir_build_add(g->mu, t_offset, i,
+                                              vlog_crv_int(g, 1)));
+   mir_build_jump(g->mu, test_bb);
+
+   mir_set_cursor(g->mu, done_bb, MIR_APPEND);
+}
+
 static mir_value_t vlog_crv_state_array(vlog_gen_t *g, vlog_node_t v)
 {
    // Read only copy of an array which is not being randomized
@@ -22784,8 +22828,11 @@ static mir_value_t vlog_crv_state_array(vlog_gen_t *g, vlog_node_t v)
    if (!is_vec)
       return array;
 
-   vlog_crv_array_load(g, g->crv_ctx, array, data, len,
-                       vlog_crv_assoc_type(decl) != NULL);
+   if (mir_is_signal(g->mu, data))
+      vlog_crv_signal_array_load(g, array, data, len, eti);
+   else
+      vlog_crv_array_load(g, g->crv_ctx, array, data, len,
+                          vlog_crv_assoc_type(decl) != NULL);
    return array;
 }
 
@@ -23043,6 +23090,20 @@ static mir_value_t vlog_crv_array(vlog_gen_t *g, vlog_node_t v)
 
       mir_set_cursor(g->mu, done_bb, MIR_APPEND);
       return mir_build_load(g->mu, var);
+   }
+
+   if (g->crv_std != NULL) {
+      // The parser has expanded the array argument into its elements
+      const int nparams = vlog_params(g->crv_std);
+      for (int i = 0; i < nparams; i++) {
+         vlog_node_t p = vlog_param(g->crv_std, i);
+         if (vlog_kind(p) == V_BIT_SELECT)
+            p = vlog_value(p);
+         if (vlog_kind(p) == V_REF && vlog_has_ref(p) && vlog_ref(p) == decl)
+            fatal_at(vlog_loc(v), "sorry, an array which is randomized by "
+                     "std::randomize cannot be used as a whole in a "
+                     "constraint");
+      }
    }
 
    return vlog_crv_state_array(g, v);
@@ -28154,6 +28215,9 @@ static mir_value_t vlog_lower_randomize(vlog_gen_t *g, vlog_node_t v)
 
    mir_value_t obj = vlog_kind(prefix) == V_THIS
       ? vlog_lower_this(g) : vlog_lower_rvalue(g, prefix);
+
+   mir_build_null_check(g->mu, obj, mir_build_debug_locus(
+                           g->mu, vlog_to_object(v)));
 
    vlog_crv_call_phase(g, class, obj, vlog_crv_int(g, 0), CRV_PHASE_PRE);
 
