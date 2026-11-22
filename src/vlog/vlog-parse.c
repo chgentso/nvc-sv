@@ -604,6 +604,7 @@ typedef struct {
    bool             in_subroutine;
    bool             is_init;
    bool             is_constraint;
+   bool             late_base;   // A class was forward declared
    vlog_node_t      func;
    vlog_node_t      container;
 } deferred_body_t;
@@ -18063,6 +18064,7 @@ static bool defer_constraint_body(vlog_node_t decl)
       .proc_automatic = proc_automatic,
       .subr_automatic = subr_automatic,
       .is_constraint  = true,
+      .late_base      = forward_classes.count > 0,
       .container      = spec_container,
    };
 
@@ -20422,7 +20424,8 @@ static void p_deferred_body(const deferred_body_t *d)
    if (d->is_constraint) {
       // The base class may have been declared after this one
       int depth = 0;
-      if (vlog_has_ref(subr) && vlog_kind(vlog_ref(subr)) == V_CLASS_DECL)
+      if (d->late_base && vlog_has_ref(subr)
+          && vlog_kind(vlog_ref(subr)) == V_CLASS_DECL)
          depth = push_base_scopes(vlog_ref(subr));
 
       consume(tLBRACE);
