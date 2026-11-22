@@ -2314,10 +2314,24 @@ static vlog_select_t vlog_lower_select(vlog_gen_t *g, vlog_node_t v)
                                  "interface with a width that depends on a "
                                  "parameter is not supported");
 
+                     vlog_node_t iface = vlog_virtual_iface(ptype);
+                     vlog_node_t ibody = vlog_virtual_spec(ptype);
+                     if (ibody == NULL && sv_iface_bodies != NULL
+                         && iface != NULL)
+                        ibody = hash_get(sv_iface_bodies, vlog_ident2(iface));
+                     const bool uninst = ibody == NULL
+                        && mir_get_kind(g->mu) != MIR_UNIT_INSTANCE;
+
                      if (vlog_is_dynamic_type(tdecl)) {
                         // Events, strings, and the like are plain variables
-                        ptr = mir_build_link_var(g->mu, base, vlog_ident(decl),
-                                                 ti->type);
+                        if (uninst)
+                           ptr = mir_build_null(g->mu,
+                                                mir_pointer_type(g->mu,
+                                                                 ti->type));
+                        else
+                           ptr = mir_build_link_var(g->mu, base,
+                                                    vlog_ident(decl),
+                                                    ti->type);
                         break;
                      }
 
@@ -2327,10 +2341,17 @@ static vlog_select_t vlog_lower_select(vlog_gen_t *g, vlog_node_t v)
                         t_signal = mir_signal_type(g->mu,
                                                    mir_int_type(g->mu, 0, 255));
 
-                     mir_value_t link = mir_build_link_var(g->mu, base,
-                                                           vlog_ident(decl),
-                                                           t_signal);
-                     ptr = mir_build_load(g->mu, link);
+                     if (uninst) {
+                        mir_value_t dummy = mir_build_null(
+                           g->mu, mir_pointer_type(g->mu, t_signal));
+                        ptr = mir_build_load(g->mu, dummy);
+                     }
+                     else {
+                        mir_value_t link = mir_build_link_var(g->mu, base,
+                                                              vlog_ident(decl),
+                                                              t_signal);
+                        ptr = mir_build_load(g->mu, link);
+                     }
                   }
                   break;
                }
@@ -9988,7 +10009,9 @@ static void vlog_cond_branch_cb(vlog_node_t v, void *context)
       {
          // A member of a structure is always valid
          vlog_node_t type = vlog_get_type(vlog_value(v));
-         if (type != NULL && vlog_kind(type) == V_CLASS_DECL)
+         if (type != NULL && (vlog_kind(type) == V_CLASS_DECL
+                              || (vlog_kind(type) == V_DATA_TYPE
+                                  && vlog_subkind(type) == DT_VIRTUAL)))
             *branch = true;
       }
       break;
@@ -19528,9 +19551,20 @@ static mir_value_t vlog_lower_method_call(vlog_gen_t *g, vlog_node_t v)
       if (body == NULL && sv_iface_bodies != NULL)
          body = hash_get(sv_iface_bodies, vlog_ident2(iface));
 
-      if (body == NULL)
+      if (body == NULL) {
+         if (mir_get_kind(g->mu) != MIR_UNIT_INSTANCE) {
+            mir_value_t context = vlog_lower_rvalue(g, prefix);
+            mir_build_null_check(g->mu, context, mir_build_debug_locus(
+                                    g->mu, vlog_to_object(v)));
+            if (vlog_kind(decl) == V_FUNC_DECL && vlog_has_type(decl)) {
+               const type_info_t *rti = vlog_type_info(g, vlog_type(decl));
+               return vlog_lower_default_value(g, rti);
+            }
+            return MIR_NULL_VALUE;
+         }
          fatal_at(vlog_loc(v), "virtual interface %pQ has no instance in "
                   "the design", vlog_ident2(iface));
+      }
 
       vlog_node_t idecl = NULL;
       const int ndecls = vlog_decls(body);

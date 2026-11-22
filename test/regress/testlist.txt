@@ -3032,3 +3032,4 @@ svretpat1 verilog
 svspeceval1 verilog
 svspeceval2 verilog
 svsigrefname1 verilog
+svvifuninst1 verilog
