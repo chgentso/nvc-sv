@@ -26167,6 +26167,81 @@ static vlog_node_t sample_action_cb(vlog_node_t v, void *ctx)
    return v;
 }
 
+static vlog_node_t rewrite_forward_member_cb(vlog_node_t v, void *ctx)
+{
+   if (vlog_kind(v) != V_HIER_REF || vlog_has_ref(v))
+      return v;
+
+   vlog_node_t chain[16];
+   int depth = 0;
+   vlog_node_t cur = vlog_value(v);
+   while (cur != NULL && vlog_kind(cur) == V_MOD_REF && depth < 16) {
+      chain[depth++] = cur;
+      cur = vlog_has_value(cur) ? vlog_value(cur) : NULL;
+   }
+
+   if (depth == 0 || cur != NULL)
+      return v;
+
+   vlog_node_t root = chain[depth - 1];
+   if (!vlog_has_ref(root))
+      return v;
+
+   vlog_node_t decl = vlog_ref(root);
+   switch (vlog_kind(decl)) {
+   case V_VAR_DECL:
+   case V_NET_DECL:
+   case V_PORT_DECL:
+   case V_PARAM_DECL:
+   case V_LOCALPARAM:
+      break;
+   default:
+      return v;
+   }
+
+   vlog_node_t expr = vlog_new(V_REF);
+   vlog_set_ident(expr, vlog_ident(root));
+   vlog_set_ref(expr, decl);
+   vlog_set_loc(expr, vlog_loc(root));
+
+   const int rparams = vlog_params(root);
+   if (rparams > 0) {
+      vlog_node_t bs = vlog_new(V_BIT_SELECT);
+      vlog_set_value(bs, expr);
+      vlog_set_loc(bs, vlog_loc(root));
+      for (int p = 0; p < rparams; p++)
+         vlog_add_param(bs, vlog_param(root, p));
+      expr = bs;
+   }
+
+   for (int i = depth - 2; i >= 0; i--) {
+      vlog_node_t mr = chain[i];
+      vlog_node_t mref = vlog_new(V_MEMBER_REF);
+      vlog_set_ident(mref, vlog_ident(mr));
+      vlog_set_value(mref, expr);
+      vlog_set_loc(mref, vlog_loc(mr));
+      vlog_symtab_lookup(symtab, mref);
+      expr = mref;
+
+      const int mparams = vlog_params(mr);
+      if (mparams > 0) {
+         vlog_node_t bs = vlog_new(V_BIT_SELECT);
+         vlog_set_value(bs, expr);
+         vlog_set_loc(bs, vlog_loc(mr));
+         for (int p = 0; p < mparams; p++)
+            vlog_add_param(bs, vlog_param(mr, p));
+         expr = bs;
+      }
+   }
+
+   vlog_node_t leaf = vlog_new(V_MEMBER_REF);
+   vlog_set_ident(leaf, vlog_ident(v));
+   vlog_set_value(leaf, expr);
+   vlog_set_loc(leaf, vlog_loc(v));
+   vlog_symtab_lookup(symtab, leaf);
+   return leaf;
+}
+
 static void sample_assertions(vlog_node_t mod, int first)
 {
    // A concurrent assertion uses the values its variables had in the
@@ -26414,6 +26489,8 @@ static vlog_node_t p_module_declaration(void)
    default_disable = saved_disable;
 
    scope_leave();
+
+   (void)vlog_rewrite(mod, NULL, rewrite_forward_member_cb, NULL);
 
    sample_assertions(mod, first_assert);
    module_asserts.count = first_assert;
