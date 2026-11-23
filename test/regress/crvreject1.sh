@@ -3,7 +3,7 @@ set -xe
 nvc --std=2019 -a $TESTDIR/regress/crvdist_pkg.sv $TESTDIR/regress/crvreject1.sv -e crvreject1
 
 # The default engine samples all of these exactly, by rejection
-NVC_CRV_STATS=$PWD/stats.tsv nvc -r crvreject1 > out.txt
+NVC_CRV_ENGINE=auto NVC_CRV_STATS=$PWD/stats.tsv nvc -r crvreject1 > out.txt
 cat out.txt
 grep -q 'crvreject1 done' out.txt
 ! grep -q FAIL out.txt
