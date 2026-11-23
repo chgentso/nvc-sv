@@ -709,6 +709,16 @@ static void note_sig(blast_t *b, const bv_t *x)
    }
 }
 
+// Operands that both have variable bits: a comparison with a constant says
+// nothing about how two variables line up
+static void note_sigs(blast_t *b, const bv_t *x, const bv_t *y)
+{
+   if (bv_vbits(x) > 0 && bv_vbits(y) > 0) {
+      note_sig(b, x);
+      note_sig(b, y);
+   }
+}
+
 // Inputs that some bit of a vector depends on: a sign extension counts as
 // the one bit it repeats
 static unsigned bv_support(const blast_t *b, const bv_t *x)
@@ -820,8 +830,7 @@ static void encode_bin(blast_t *b, crv_node_t n, const node_t *nd)
          bv_t x, y;
          fetch(b, nd->a, w, &x);
          fetch(b, nd->b, w, &y);
-         note_sig(b, &x);
-         note_sig(b, &y);
+         note_sigs(b, &x, &y);
          if (op == CRV_ADD)
             bv_add(b, &x, &y, BLIT_FALSE, w, &out, NULL);
          else if (op == CRV_SUB)
@@ -847,8 +856,7 @@ static void encode_bin(blast_t *b, crv_node_t n, const node_t *nd)
          bv_t x, y;
          fetch(b, nd->a, an->width, &x);
          fetch(b, nd->b, bn->width, &y);
-         note_sig(b, &x);
-         note_sig(b, &y);
+         note_sigs(b, &x, &y);
          note_op(b, n, nd, &x, &y);
          bv_divmod(b, &x, an->sgn, &y, bn->sgn, op == CRV_MOD, w, &out);
          fail = blast_or(b, fail, lit_not(bv_any(b, y.b, y.n)));
@@ -888,8 +896,7 @@ static void encode_bin(blast_t *b, crv_node_t n, const node_t *nd)
          bv_t x, y;
          fetch(b, nd->a, an->width, &x);
          fetch(b, nd->b, bn->width, &y);
-         note_sig(b, &x);
-         note_sig(b, &y);
+         note_sigs(b, &x, &y);
          note_op(b, n, nd, &x, &y);
 
          blit_t eq, lt;
@@ -979,7 +986,6 @@ static void encode_inside(blast_t *b, crv_node_t n, const node_t *nd)
    get_node(b, nd->a);
    bv_t x;
    fetch(b, nd->a, an->width, &x);
-   note_sig(b, &x);
 
    // The value is related to the bounds that are not constants: a group
    // of variables for the order of the stages after the blaster
@@ -998,7 +1004,7 @@ static void encode_inside(blast_t *b, crv_node_t n, const node_t *nd)
       const node_t *ln = &(b->c->nodes[it.lo]);
       bv_t lo;
       fetch(b, it.lo, ln->width, &lo);
-      note_sig(b, &lo);
+      note_sigs(b, &x, &lo);
 
       blit_t ifail = fail_of(b, it.lo), match;
       blit_t eq, lt;
@@ -1010,7 +1016,7 @@ static void encode_inside(blast_t *b, crv_node_t n, const node_t *nd)
          const node_t *hn = &(b->c->nodes[it.hi]);
          bv_t hi;
          fetch(b, it.hi, hn->width, &hi);
-         note_sig(b, &hi);
+         note_sigs(b, &x, &hi);
          ifail = blast_or(b, ifail, fail_of(b, it.hi));
 
          blit_t heq, hlt;

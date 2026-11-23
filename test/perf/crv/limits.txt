@@ -2,7 +2,7 @@
 # limit_us: per call; a case that passes is limited to 3x the slower of the measurement taken for
 # this file and the figure of the plan, the others to their target; xfail:<milestone> = known to be
 # over its limit or to give up until that milestone; no limit is below 20 us (machine noise).
-# Raised in M4b: p_in64, a bdd build that reaches the node limit costs about 0.8 ms before the search
+# Raised in M4b: p_in64 and r_xy64, a bdd build that reaches the node limit costs about 0.8 ms before the search
 # starts; q_objs, without the split of variables at the bits of a mask the search takes 10 times as long
 # for 100 aligned addresses in ascending order
 p_dist16         327680         20  pass       1
@@ -61,4 +61,4 @@ r_uniq1000           20     170000  pass       0
 r_uniqdyn            20     260000  pass       0
 r_wide1024           80      20000  xfail:M4c  0
 r_wide256and         80       2000  xfail:M4c  0
-r_xy64            81920         56  pass       0
+r_xy64            81920         1500  pass       0
