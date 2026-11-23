@@ -21835,8 +21835,10 @@ static mir_value_t vlog_crv_std_key(vlog_gen_t *g, int i)
    return vlog_crv_key_n(g, root, 100000 + i);
 }
 
-static bool vlog_crv_std_salt(vlog_node_t v, int *salt, vlog_node_t *decl,
-                              vlog_node_t *prefix)
+static bool vlog_crv_const_index(vlog_gen_t *g, vlog_node_t e, int64_t *value);
+
+static bool vlog_crv_std_salt(vlog_gen_t *g, vlog_node_t v, int *salt,
+                              vlog_node_t *decl, vlog_node_t *prefix)
 {
    // The element of an array with constant indexes: a part of the key of
    // the variable that std::randomize solves for it
@@ -21848,7 +21850,7 @@ static bool vlog_crv_std_salt(vlog_node_t v, int *salt, vlog_node_t *decl,
    *salt = 0;
    for (int i = 0; i < vlog_params(v); i++) {
       int64_t index;
-      if (!vlog_get_const(vlog_param(v, i), &index))
+      if (!vlog_crv_const_index(g, vlog_param(v, i), &index))
          return false;
       *salt += index << (10 * i);
    }
@@ -21882,7 +21884,7 @@ static bool vlog_crv_std_elem(vlog_gen_t *g, vlog_node_t v, int *salt,
       return false;
 
    vlog_node_t prefix;
-   if (!vlog_crv_std_salt(v, salt, decl, &prefix))
+   if (!vlog_crv_std_salt(g, v, salt, decl, &prefix))
       return false;
    else if (vlog_crv_is_std_var(g, *decl))
       return false;   // Solved as an array
@@ -21892,7 +21894,7 @@ static bool vlog_crv_std_elem(vlog_gen_t *g, vlog_node_t v, int *salt,
       vlog_node_t p = vlog_param(g->crv_std, i);
       int psalt;
       vlog_node_t pdecl, pprefix;
-      if (vlog_crv_std_salt(p, &psalt, &pdecl, &pprefix)
+      if (vlog_crv_std_salt(g, p, &psalt, &pdecl, &pprefix)
           && psalt == *salt && pdecl == *decl && pprefix == prefix
           && vlog_params(p) == vlog_params(v))
          return true;
@@ -24312,6 +24314,38 @@ static void vlog_crv_w_from_elem(vlog_gen_t *g, vlog_node_t v, vlog_node_t decl,
    }
 }
 
+static bool vlog_crv_wide_std_elem(vlog_gen_t *g, vlog_node_t v,
+                                   vlog_node_t *decl, int *salt)
+{
+   // An element of an array wider than 64 bits which std::randomize solves
+   // as a vector of chunks
+
+   if (vlog_kind(v) != V_BIT_SELECT || !vlog_crv_std_elem(g, v, salt, decl))
+      return false;
+
+   return vlog_type_info(g, vlog_type(*decl))->size > 64;
+}
+
+static void vlog_crv_w_from_std_elem(vlog_gen_t *g, vlog_node_t v,
+                                     vlog_node_t decl, int salt,
+                                     crv_wide_t *w)
+{
+   const type_info_t *eti = vlog_type_info(g, vlog_type(decl));
+   vlog_crv_w_zero(w, eti->size);
+
+   mir_value_t full = vlog_lower_rvalue(g, v);
+   mir_value_t object = vlog_crv_object(g, vlog_value(v));
+   for (unsigned i = 0; i < w->n; i++) {
+      const unsigned cw = MIN(64, eti->size - i * 64);
+      mir_value_t ref = CRV5(g, CRV_OP_REF, g->crv_ctx, object,
+                             vlog_crv_chunk_key(g, decl, salt, i),
+                             vlog_crv_w_chunk(g, full, i),
+                             vlog_crv_flags(g, cw, false));
+      w->c[i] = cw == 64 ? ref : CRV3(g, CRV_OP_CAST, g->crv_ctx, ref,
+                                      vlog_crv_flags(g, 64, false));
+   }
+}
+
 static bool vlog_crv_packed_sel(vlog_gen_t *g, vlog_node_t v, vlog_node_t *root,
                                 unsigned *off, unsigned *size)
 {
@@ -24783,7 +24817,10 @@ static bool vlog_crv_needs_wide(vlog_gen_t *g, vlog_node_t v)
       {
          vlog_node_t base = vlog_value(v), decl;
          int64_t index;
-         if (vlog_crv_wide_elem(g, v, &decl, &index))
+         int salt;
+         if (vlog_crv_wide_elem(g, v, &decl, &index)
+             || vlog_crv_wide_std_elem(g, v, &decl, &salt)
+             || (vlog_crv_std_arg(g, v) >= 0 && vlog_crv_width(g, v) > 64))
             return true;
 
          return !vlog_crv_is_array_ref(base) && !vlog_crv_is_assoc_ref(base)
@@ -25123,6 +25160,34 @@ static void vlog_crv_wide_expr(vlog_gen_t *g, vlog_node_t v, unsigned width,
          int64_t eindex;
          if (vlog_crv_wide_elem(g, v, &edecl, &eindex)) {
             vlog_crv_w_from_elem(g, v, edecl, eindex, out);
+            vlog_crv_w_resize(g, out, width, is_signed);
+            break;
+         }
+
+         const int sarg = vlog_crv_std_arg(g, v);
+         if (sarg >= 0 && vlog_crv_width(g, v) > 64) {
+            // An argument of std::randomize named by an expression
+            const unsigned aw = vlog_crv_width(g, v);
+            vlog_crv_w_zero(out, aw);
+            mir_value_t full = vlog_lower_rvalue(g, v);
+            vlog_node_t root = vlog_crv_std_root(vlog_param(g->crv_std, sarg));
+            for (unsigned i = 0; i < out->n; i++) {
+               const unsigned cw = MIN(64, aw - i * 64);
+               mir_value_t ref = CRV5(
+                  g, CRV_OP_REF, g->crv_ctx, vlog_crv_int(g, 0),
+                  vlog_crv_chunk_key(g, root, 100000 + sarg, i),
+                  vlog_crv_w_chunk(g, full, i), vlog_crv_flags(g, cw, false));
+               out->c[i] = cw == 64 ? ref : CRV3(g, CRV_OP_CAST, g->crv_ctx,
+                                                 ref, vlog_crv_flags(g, 64,
+                                                                     false));
+            }
+            vlog_crv_w_resize(g, out, width, is_signed);
+            break;
+         }
+
+         int esalt;
+         if (vlog_crv_wide_std_elem(g, v, &edecl, &esalt)) {
+            vlog_crv_w_from_std_elem(g, v, edecl, esalt, out);
             vlog_crv_w_resize(g, out, width, is_signed);
             break;
          }
@@ -30243,20 +30308,37 @@ static mir_value_t vlog_lower_std_randomize(vlog_gen_t *g, vlog_node_t v)
       if (vlog_kind(p) != V_REF
           && !(vlog_kind(p) == V_MEMBER_REF && vlog_has_ref(p)
                && vlog_kind(vlog_value(p)) == V_REF)
-          && !vlog_crv_std_salt(p, &psalt, &pdecl, &pprefix)
+          && !vlog_crv_std_salt(g, p, &psalt, &pdecl, &pprefix)
           && vlog_crv_std_root(p) != NULL) {
          mir_value_t value = vlog_lower_rvalue(g, p);
          mir_type_t vtype = mir_get_type(g->mu, value);
          const mir_class_t vclass = mir_get_class(g->mu, vtype);
          const unsigned width = vlog_crv_width(g, p);
-         if ((vclass != MIR_TYPE_VEC2 && vclass != MIR_TYPE_VEC4)
-             || width > 64)
+         if (vclass != MIR_TYPE_VEC2 && vclass != MIR_TYPE_VEC4)
             fatal_at(vlog_loc(p), "sorry, this type of variable is not "
                      "supported by randomize");
 
          generic[i] = true;
          gtype[i] = vtype;
          firstvar[i] = nvars;
+
+         if (width > 64) {
+            // Wider than the solver: a variable for each chunk of 64 bits
+            mir_value_t full = vlog_lower_cast(g, vtype, value);
+            vlog_node_t root = vlog_crv_std_root(p);
+            const unsigned nchunks = vlog_crv_nchunks(width);
+            vars = xrealloc_array(vars, nvars + nchunks, sizeof(mir_value_t));
+            for (unsigned c = 0; c < nchunks; c++) {
+               const unsigned cw = MIN(64, width - c * 64);
+               vars[nvars++] = CRV6(
+                  g, CRV_OP_VAR, ctx, vlog_crv_int(g, 0),
+                  vlog_crv_chunk_key(g, root, 100000 + i, c),
+                  vlog_crv_w_chunk(g, full, c), vlog_crv_flags(g, cw, false),
+                  vlog_crv_int(g, 1));
+            }
+            continue;
+         }
+
          vars = xrealloc_array(vars, nvars + 1, sizeof(mir_value_t));
          vars[nvars++] = CRV6(g, CRV_OP_VAR, ctx, vlog_crv_int(g, 0),
                               vlog_crv_std_key(g, i),
@@ -30275,7 +30357,7 @@ static mir_value_t vlog_lower_std_randomize(vlog_gen_t *g, vlog_node_t v)
       }
       if (vlog_kind(sel) == V_BIT_SELECT) {
          vlog_node_t sdecl, sprefix;
-         vlog_crv_std_salt(sel, &salt, &sdecl, &sprefix);
+         vlog_crv_std_salt(g, sel, &salt, &sdecl, &sprefix);
          sel = vlog_value(sel);
          if (vlog_kind(sel) == V_MEMBER_REF && vlog_has_ref(sel)) {
             decl = vlog_ref(sel);
@@ -30299,6 +30381,8 @@ static mir_value_t vlog_lower_std_randomize(vlog_gen_t *g, vlog_node_t v)
                   "by randomize");
 
       mir_value_t value = vlog_lower_rvalue(g, p);
+      if (ti->size > 64)
+         value = vlog_lower_cast(g, ti->type, value);   // Element of a signal
 
       // A member is found by the object which holds it, as the constraints
       // name it
@@ -30402,6 +30486,36 @@ static mir_value_t vlog_lower_std_randomize(vlog_gen_t *g, vlog_node_t v)
 
       if (skip[i])
          continue;
+      else if (generic[i] && firstvar[i + 1] - firstvar[i] > 1) {
+         // The chunks of a value wider than 64 bits
+         mir_type_t t_int64 = mir_int_type(g->mu, INT64_MIN, INT64_MAX);
+         mir_type_t t_vec64 = mir_vec2_type(g->mu, 64, false);
+         const unsigned width = vlog_crv_width(g, p);
+         mir_type_t t_wide = mir_vec2_type(g->mu, width, false);
+
+         mir_value_t result = vlog_lower_zero(g, t_wide);
+         for (int j = firstvar[i]; j < firstvar[i + 1]; j++) {
+            mir_value_t value = CRV2(g, CRV_OP_VALUE, ctx, vars[j]);
+            mir_value_t vec = mir_build_cast(g->mu, t_vec64,
+                                             mir_build_cast(g->mu, t_int64,
+                                                            value));
+            mir_value_t part = vlog_lower_cast(g, t_wide, vec);
+            const int bit = (j - firstvar[i]) * 64;
+            if (bit > 0) {
+               mir_value_t amount = vlog_lower_cast(
+                  g, t_wide, mir_const_vec(g->mu, t_vec64, bit, 0));
+               part = mir_build_binary(g->mu, MIR_VEC_SLL, t_wide, part,
+                                       amount);
+            }
+
+            result = mir_build_binary(g->mu, MIR_VEC_BIT_OR, t_wide, result,
+                                      part);
+         }
+
+         vlog_assign_variable(g, p, vlog_lower_cast(g, gtype[i], result),
+                              NULL);
+         continue;
+      }
       else if (generic[i]) {
          mir_value_t value = CRV2(g, CRV_OP_VALUE, ctx, vars[firstvar[i]]);
          vlog_assign_variable(g, p, vlog_crv_from_offset(g, value, gtype[i]),
