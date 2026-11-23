@@ -1649,8 +1649,8 @@ static int vlog_dyn_depth(vlog_node_t value, vlog_node_t *elem)
    // dynamic arrays or queues and then of the dynamic array or queue itself
 
    int depth = 0;
-   if ((vlog_kind(value) == V_REF || vlog_kind(value) == V_HIER_REF)
-       && vlog_has_ref(value)) {
+   if ((vlog_kind(value) == V_REF || vlog_kind(value) == V_HIER_REF
+        || vlog_kind(value) == V_MEMBER_REF) && vlog_has_ref(value)) {
       vlog_node_t decl = vlog_ref(value);
       switch (vlog_kind(decl)) {
       case V_VAR_DECL:
@@ -16733,7 +16733,8 @@ static mir_value_t vlog_lower_dyn_element(vlog_gen_t *g, vlog_node_t v,
    // The first indices select an element of an unpacked array of queues
    // or dynamic arrays
    int nfixed = 0;
-   if ((vlog_kind(value) == V_REF || vlog_kind(value) == V_HIER_REF)
+   if ((vlog_kind(value) == V_REF || vlog_kind(value) == V_HIER_REF
+           || vlog_kind(value) == V_MEMBER_REF)
        && vlog_has_ref(value)) {
       vlog_node_t decl = vlog_ref(value);
       switch (vlog_kind(decl)) {
@@ -31530,7 +31531,15 @@ static void vlog_lower_foreach(vlog_gen_t *g, vlog_node_t v, gen_stack_t *gs)
          need_cur = true;
    }
 
-   mir_value_t cur = need_cur ? vlog_lower_rvalue(g, arr) : MIR_NULL_VALUE;
+   mir_value_t cur = MIR_NULL_VALUE;
+   if (need_cur && nselected == 0 && vlog_kind(arr) == V_MEMBER_REF
+       && vlog_is_fixed_unpacked(decl) && vlog_size(decl) > 1) {
+      // The elements of a fixed size array member are in memory
+      cur = vlog_lower_select(g, arr).obj;
+   }
+   else if (need_cur)
+      cur = vlog_lower_rvalue(g, arr);
+
    vlog_lower_foreach_level(g, v, gs, dims, nvars, 0, cur);
 }
 

@@ -3134,3 +3134,4 @@ svcrvrandmodeh1 verilog
 svcrvenumscope1 verilog
 svcrvoob2 verilog
 svcrvstructarr1 verilog
+svstructdynarr1 verilog
