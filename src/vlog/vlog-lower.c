@@ -119,6 +119,7 @@ typedef struct {
    ident_t        crv_path;       // Name of the structure property
    mir_value_t    crv_nest_obj;   // Object of a nested array in a foreach
    vlog_node_t    crv_std;
+   const bool    *crv_std_gen;    // Arguments of std::randomize named by expression
    unsigned       crv_width;
    bool           crv_signed;
    int            crv_stage;    // 1 while solving the arguments of calls
@@ -21656,6 +21657,86 @@ static bool vlog_crv_std_group(vlog_gen_t *g, vlog_node_t std, int first,
    return true;
 }
 
+static bool vlog_crv_same_expr(vlog_node_t a, vlog_node_t b)
+{
+   // Two names of the same variable, element or member
+
+   if (vlog_kind(a) != vlog_kind(b))
+      return false;
+
+   int64_t ia, ib;
+   switch (vlog_kind(a)) {
+   case V_REF:
+      return vlog_has_ref(a) && vlog_has_ref(b) && vlog_ref(a) == vlog_ref(b);
+   case V_THIS:
+      return true;
+   case V_NUMBER:
+      return vlog_get_const(a, &ia) && vlog_get_const(b, &ib) && ia == ib;
+   case V_MEMBER_REF:
+      return vlog_has_ref(a) && vlog_has_ref(b) && vlog_ref(a) == vlog_ref(b)
+         && vlog_crv_same_expr(vlog_value(a), vlog_value(b));
+   case V_BIT_SELECT:
+      {
+         const int n = vlog_params(a);
+         if (n != vlog_params(b)
+             || !vlog_crv_same_expr(vlog_value(a), vlog_value(b)))
+            return false;
+
+         for (int i = 0; i < n; i++) {
+            if (!vlog_crv_same_expr(vlog_param(a, i), vlog_param(b, i)))
+               return false;
+         }
+         return true;
+      }
+   default:
+      return false;
+   }
+}
+
+static int vlog_crv_std_arg(vlog_gen_t *g, vlog_node_t v)
+{
+   // The argument of std::randomize which is named by this expression
+
+   if (g->crv_std == NULL || g->crv_std_gen == NULL)
+      return -1;
+
+   switch (vlog_kind(v)) {
+   case V_REF:
+   case V_MEMBER_REF:
+   case V_BIT_SELECT:
+      break;
+   default:
+      return -1;
+   }
+
+   const int nparams = vlog_params(g->crv_std);
+   for (int i = 0; i < nparams; i++) {
+      if (g->crv_std_gen[i] && vlog_crv_same_expr(vlog_param(g->crv_std, i), v))
+         return i;
+   }
+
+   return -1;
+}
+
+static vlog_node_t vlog_crv_std_root(vlog_node_t p)
+{
+   while (vlog_kind(p) == V_MEMBER_REF || vlog_kind(p) == V_BIT_SELECT) {
+      if (vlog_kind(p) == V_MEMBER_REF && vlog_kind(vlog_value(p)) != V_MEMBER_REF
+          && vlog_kind(vlog_value(p)) != V_BIT_SELECT
+          && vlog_has_ref(p))
+         return vlog_ref(p);
+      p = vlog_value(p);
+   }
+
+   return vlog_has_ref(p) ? vlog_ref(p) : NULL;
+}
+
+static mir_value_t vlog_crv_std_key(vlog_gen_t *g, int i)
+{
+   vlog_node_t root = vlog_crv_std_root(vlog_param(g->crv_std, i));
+   return vlog_crv_key_n(g, root, 100000 + i);
+}
+
 static bool vlog_crv_std_salt(vlog_node_t v, int *salt, vlog_node_t *decl,
                               vlog_node_t *prefix)
 {
@@ -21748,7 +21829,8 @@ static bool vlog_crv_is_std_var(vlog_gen_t *g, vlog_node_t decl)
    const int nparams = vlog_params(g->crv_std);
    for (int i = 0; i < nparams; i++) {
       vlog_node_t p = vlog_param(g->crv_std, i);
-      if (vlog_kind(p) == V_REF && vlog_ref(p) == decl)
+      if ((vlog_kind(p) == V_REF || vlog_kind(p) == V_MEMBER_REF)
+          && vlog_has_ref(p) && vlog_ref(p) == decl)
          return true;
 
       vlog_node_t d;
@@ -21781,6 +21863,11 @@ static bool vlog_crv_is_skipped(vlog_gen_t *g, vlog_node_t decl);
 static void vlog_crv_state_cb(vlog_node_t v, void *context)
 {
    crv_visit_t *cv = context;
+
+   if (vlog_crv_std_arg(cv->gen, v) >= 0) {
+      cv->found = true;
+      return;
+   }
 
    switch (vlog_kind(v)) {
    case V_BIT_SELECT:
@@ -21842,7 +21929,8 @@ static void vlog_crv_state_cb(vlog_node_t v, void *context)
             else {
                vlog_node_t decl = vlog_ref(v);
                if (vlog_kind(decl) != V_VAR_DECL
-                   || (vlog_flags(decl) & (VLOG_F_RAND | VLOG_F_RANDC)))
+                   || (vlog_flags(decl) & (VLOG_F_RAND | VLOG_F_RANDC))
+                   || vlog_crv_is_std_var(cv->gen, decl))
                   cv->found = true;
             }
          }
@@ -25938,7 +26026,15 @@ static mir_value_t vlog_crv_expr(vlog_gen_t *g, vlog_node_t v, unsigned width,
    unsigned from = own;
    bool from_signed = own_signed;
 
-   if (vlog_crv_is_state(g, v))
+   const int std_arg = vlog_crv_std_arg(g, v);
+   if (std_arg >= 0) {
+      // An argument of std::randomize which is named by an expression
+      mir_value_t flags = vlog_crv_flags(g, own, own_signed);
+      node = CRV5(g, CRV_OP_REF, g->crv_ctx, vlog_crv_int(g, 0),
+                  vlog_crv_std_key(g, std_arg),
+                  vlog_crv_to_offset(g, vlog_lower_rvalue(g, v)), flags);
+   }
+   else if (vlog_crv_is_state(g, v))
       node = vlog_crv_state_node(g, v);
    else {
       switch (vlog_kind(v)) {
@@ -29751,6 +29847,7 @@ static mir_value_t vlog_lower_std_randomize(vlog_gen_t *g, vlog_node_t v)
    g->crv_class = NULL;
    g->crv_obj = MIR_NULL_VALUE;
    g->crv_std = v;
+   g->crv_std_gen = NULL;
    g->crv_nindex = 0;
    g->crv_width = 1;
    g->crv_signed = true;
@@ -29760,6 +29857,8 @@ static mir_value_t vlog_lower_std_randomize(vlog_gen_t *g, vlog_node_t v)
    int *firstvar LOCAL = xmalloc_array(nparams + 1, sizeof(int));
    bool *is_array LOCAL = xcalloc_array(nparams, sizeof(bool));
    bool *is_assoc LOCAL = xcalloc_array(nparams, sizeof(bool));
+   bool *generic LOCAL = xcalloc_array(nparams, sizeof(bool));
+   mir_type_t *gtype LOCAL = xcalloc_array(nparams, sizeof(mir_type_t));
    bool *is_wide LOCAL = xcalloc_array(nparams, sizeof(bool));
    bool *skip LOCAL = xcalloc_array(nparams, sizeof(bool));
    vlog_node_t *group LOCAL = xcalloc_array(nparams, sizeof(vlog_node_t));
@@ -29852,6 +29951,36 @@ static mir_value_t vlog_lower_std_randomize(vlog_gen_t *g, vlog_node_t v)
          continue;
       }
 
+      // A name which is not a variable or a member of one, or an element with
+      // constant indices, is found in the constraints by its expression
+      int psalt;
+      vlog_node_t pdecl, pprefix;
+      if (vlog_kind(p) != V_REF
+          && !(vlog_kind(p) == V_MEMBER_REF && vlog_has_ref(p)
+               && vlog_kind(vlog_value(p)) == V_REF)
+          && !vlog_crv_std_salt(p, &psalt, &pdecl, &pprefix)
+          && vlog_crv_std_root(p) != NULL) {
+         mir_value_t value = vlog_lower_rvalue(g, p);
+         mir_type_t vtype = mir_get_type(g->mu, value);
+         const mir_class_t vclass = mir_get_class(g->mu, vtype);
+         const unsigned width = vlog_crv_width(g, p);
+         if ((vclass != MIR_TYPE_VEC2 && vclass != MIR_TYPE_VEC4)
+             || width > 64)
+            fatal_at(vlog_loc(p), "sorry, this type of variable is not "
+                     "supported by randomize");
+
+         generic[i] = true;
+         gtype[i] = vtype;
+         firstvar[i] = nvars;
+         vars = xrealloc_array(vars, nvars + 1, sizeof(mir_value_t));
+         vars[nvars++] = CRV6(g, CRV_OP_VAR, ctx, vlog_crv_int(g, 0),
+                              vlog_crv_std_key(g, i),
+                              vlog_crv_to_offset(g, value),
+                              vlog_crv_flags(g, width, vlog_crv_signed(g, p)),
+                              vlog_crv_int(g, 1));
+         continue;
+      }
+
       // The parser expands an array or a structure into its elements
       int salt = 0;
       vlog_node_t decl = NULL, sel = p;
@@ -29868,6 +29997,8 @@ static mir_value_t vlog_lower_std_randomize(vlog_gen_t *g, vlog_node_t v)
             sel = vlog_value(sel);
          }
       }
+      while (vlog_kind(sel) == V_MEMBER_REF && vlog_has_ref(sel))
+         sel = vlog_value(sel);   // A member of the object of a member
       if (vlog_kind(sel) != V_REF)
          fatal_at(vlog_loc(p), "sorry, this argument to randomize is not "
                   "supported");
@@ -29883,6 +30014,11 @@ static mir_value_t vlog_lower_std_randomize(vlog_gen_t *g, vlog_node_t v)
                   "by randomize");
 
       mir_value_t value = vlog_lower_rvalue(g, p);
+
+      // A member is found by the object which holds it, as the constraints
+      // name it
+      mir_value_t obj0 = vlog_kind(p) == V_MEMBER_REF
+         ? vlog_crv_object(g, p) : vlog_crv_int(g, 0);
 
       firstvar[i] = nvars;
 
@@ -29927,7 +30063,7 @@ static mir_value_t vlog_lower_std_randomize(vlog_gen_t *g, vlog_node_t v)
          ccurs[cidx] = vlog_crv_to_offset(g, part);
 
          vars = xrealloc_array(vars, nvars + 1, sizeof(mir_value_t));
-         vars[nvars++] = CRV6(g, CRV_OP_VAR, ctx, vlog_crv_int(g, 0),
+         vars[nvars++] = CRV6(g, CRV_OP_VAR, ctx, obj0,
                               ckeys[cidx], ccurs[cidx],
                               vlog_crv_flags(g, chunk, ti->size <= 64
                                              && mir_get_signed(g->mu, ti->type)),
@@ -29949,11 +30085,13 @@ static mir_value_t vlog_lower_std_randomize(vlog_gen_t *g, vlog_node_t v)
 
       vlog_node_t dtype = vlog_get_type(vlog_type(decl));
       if (ti->size > 64 && dtype != NULL && vlog_kind(dtype) == V_ENUM_DECL)
-         vlog_crv_constrain_wide_enum(g, ctx, vlog_crv_int(g, 0),
+         vlog_crv_constrain_wide_enum(g, ctx, obj0,
                                       &vars[firstvar[i]], ckeys, ccurs,
                                       nchunks, ti, dtype);
    }
    firstvar[nparams] = nvars;
+
+   g->crv_std_gen = generic;
 
    const int nstmts = vlog_stmts(v);
    for (int i = 0; i < nstmts; i++)
@@ -29972,12 +30110,19 @@ static mir_value_t vlog_lower_std_randomize(vlog_gen_t *g, vlog_node_t v)
 
    g->crv_ctx = saved.crv_ctx;
    g->crv_std = saved.crv_std;
+   g->crv_std_gen = saved.crv_std_gen;
 
    for (int i = 0; i < nparams; i++) {
       vlog_node_t p = vlog_param(v, i);
 
       if (skip[i])
          continue;
+      else if (generic[i]) {
+         mir_value_t value = CRV2(g, CRV_OP_VALUE, ctx, vars[firstvar[i]]);
+         vlog_assign_variable(g, p, vlog_crv_from_offset(g, value, gtype[i]),
+                              NULL);
+         continue;
+      }
       else if (group[i] != NULL) {
          vlog_node_t gd = group[i];
          const type_info_t *eti = vlog_type_info(g, vlog_crv_elem_type(gd));

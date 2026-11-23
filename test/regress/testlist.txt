@@ -3142,3 +3142,4 @@ svcrvstructunref1 verilog
 svcrvassocobj1 verilog
 svcrvassocobj2 verilog
 svstdrandassoc1 verilog
+svcrvstdexpr1 verilog
