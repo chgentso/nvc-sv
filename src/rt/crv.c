@@ -400,6 +400,7 @@ struct _crv {
    int       nindex;
    int       nsoft;
    bool      greedy;   // Soft constraints are kept one at a time
+   bool      bad;      // The graph names an array that does not exist
 };
 
 // The first n entries are the values, remaining ones first, and the next n
@@ -568,6 +569,16 @@ void crv_var_domain(crv_t *c, crv_var_t v, int64_t value)
             norm(mathv(value, cv->sgn), cv->width, cv->sgn));
 }
 
+static bool array_valid(crv_t *c, crv_array_t a)
+{
+   // An array that was never registered: the graph cannot be solved
+   if (a >= 0 && (unsigned)a < c->narrays)
+      return true;
+
+   c->bad = true;
+   return false;
+}
+
 crv_array_t crv_array(crv_t *c, unsigned elem_width, bool is_signed,
                       unsigned current_size, bool size_rand, bool elems_rand)
 {
@@ -581,6 +592,9 @@ crv_array_t crv_array(crv_t *c, unsigned elem_width, bool is_signed,
 
 void crv_array_init(crv_t *c, crv_array_t a, unsigned index, int64_t value)
 {
+   if (!array_valid(c, a))
+      return;
+
    carr_t *ar = &c->arrays[a];
    if (index >= ar->ninit) {
       if (index >= (unsigned)MAX_SIZE * 4)
@@ -594,7 +608,7 @@ void crv_array_init(crv_t *c, crv_array_t a, unsigned index, int64_t value)
 
 bool crv_array_resizable(crv_t *c, crv_array_t a)
 {
-   return c->arrays[a].size_rand;
+   return array_valid(c, a) && c->arrays[a].size_rand;
 }
 
 crv_node_t crv_const(crv_t *c, int64_t value, unsigned width, bool is_signed)
@@ -656,12 +670,18 @@ crv_node_t crv_cond(crv_t *c, crv_node_t test, crv_node_t t, crv_node_t f)
 
 crv_node_t crv_array_size(crv_t *c, crv_array_t a)
 {
+   if (!array_valid(c, a))
+      return crv_const(c, 0, 32, true);
+
    node_t n = { .kind = N_ASIZE, .width = 32, .sgn = true, .aux = a };
    return add_node(c, n);
 }
 
 crv_node_t crv_array_elem(crv_t *c, crv_array_t a, crv_node_t index)
 {
+   if (!array_valid(c, a))
+      return crv_const(c, 0, 32, true);
+
    node_t n = { .kind = N_AELEM, .width = c->arrays[a].width,
                 .sgn = c->arrays[a].sgn, .a = index, .aux = a,
                 .inst = true };
@@ -671,6 +691,9 @@ crv_node_t crv_array_elem(crv_t *c, crv_array_t a, crv_node_t index)
 crv_node_t crv_array_sum(crv_t *c, crv_array_t a, unsigned width,
                          bool is_signed)
 {
+   if (!array_valid(c, a))
+      return crv_const(c, 0, width, is_signed);
+
    node_t n = { .kind = N_ASUM, .width = clampw(width), .sgn = is_signed,
                 .aux = a };
    return add_node(c, n);
@@ -763,6 +786,9 @@ crv_node_t crv_index(crv_t *c)
 void crv_foreach(crv_t *c, crv_array_t a, crv_node_t index, crv_node_t body,
                  bool soft)
 {
+   if (!array_valid(c, a))
+      return;
+
    ccons_t k = { .kind = C_FOREACH, .root = body, .arr = a, .idx = index,
                  .soft = -1, .nsoft = 1 };
    if (soft) {
@@ -784,6 +810,9 @@ void crv_solve_before(crv_t *c, crv_var_t before, crv_var_t after)
 
 void crv_array_solve_before(crv_t *c, crv_array_t before, crv_var_t after)
 {
+   if (!array_valid(c, before))
+      return;
+
    edge_t e = { true, before, after };
    VEC_PUSH(c->edges, c->nedges, c->cedges, e);
 }
@@ -795,11 +824,14 @@ int64_t crv_value(crv_t *c, crv_var_t v)
 
 unsigned crv_array_len(crv_t *c, crv_array_t a)
 {
-   return c->arrays[a].len;
+   return array_valid(c, a) ? c->arrays[a].len : 0;
 }
 
 int64_t crv_array_value(crv_t *c, crv_array_t a, unsigned index)
 {
+   if (!array_valid(c, a))
+      return 0;
+
    const carr_t *ar = &c->arrays[a];
    return index < ar->ninit && index < ar->len ? ar->init[index] : 0;
 }
@@ -6811,6 +6843,9 @@ static crv_result_t solve_all(crv_t *c);
 
 crv_result_t crv_solve2(crv_t *c)
 {
+   if (c->bad)
+      return CRV_UNSAT;
+
    // The engine is read here so that a bad setting is reported once
    // however the solver is reached
    (void)crv_engine();
