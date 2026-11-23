@@ -465,10 +465,12 @@ static void bv_udiv(blast_t *b, const bv_t *n, const bv_t *d, unsigned w,
                     bv_t *q, bv_t *r)
 {
    // The remainder register has one more bit than the operands
+   assert(w + 1 <= MAXV);
    bv_t rem, dd;
    bv_const(&rem, 0, w + 1);
    dd.n = w + 1;
-   memcpy(dd.b, d->b, w * sizeof(blit_t));
+   for (unsigned i = 0; i < w; i++)
+      dd.b[i] = d->b[i];
    dd.b[w] = BLIT_FALSE;
 
    q->n = w;
@@ -486,7 +488,8 @@ static void bv_udiv(blast_t *b, const bv_t *n, const bv_t *d, unsigned w,
    }
 
    r->n = w;
-   memcpy(r->b, rem.b, w * sizeof(blit_t));
+   for (unsigned i = 0; i < w; i++)
+      r->b[i] = rem.b[i];
 }
 
 // Division and modulo of the mathematical values, truncating towards zero.
