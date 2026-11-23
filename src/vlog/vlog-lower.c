@@ -27155,7 +27155,17 @@ static void vlog_crv_foreach(vlog_gen_t *g, vlog_node_t v, mir_value_t guard)
 
    if (vlog_decls(v) == 1
        && (vlog_crv_is_dynamic_array(decl) || vlog_ranges(decl) == 1)) {
-      bool unroll = false;
+      // The elements of an array which the solver does not hold are state
+      // so the constraint is made for each of them
+      bool unroll = vlog_kind(arr) == V_REF && vlog_crv_is_skipped(g, decl);
+      if (vlog_kind(arr) == V_REF && vlog_crv_is_target(g, decl)
+          && (vlog_flags(decl) & VLOG_F_RAND)
+          && vlog_crv_elem_struct(decl) != NULL) {
+         crv_member_t members[CRV_MAX_MEMBERS];
+         unroll = vlog_crv_members(g, vlog_crv_elem_struct(decl), members,
+                                   true) == 0;
+      }
+
       const int nstmts = vlog_stmts(v);
       for (int i = 0; i < nstmts && !unroll; i++)
          vlog_visit(vlog_stmt(v, i), vlog_crv_needs_unroll_cb, &unroll);
