@@ -11,15 +11,16 @@ gives up in a call, or does not run.
   milestone is meant to reach it. `run.sh` prints XPASS when one of them passes: remove its mark.
 * `baseline.tsv`: the per-call time and give-ups of release 0.18.0 (name, calls, us per call, result
   line), measured on a machine that was also building; read to one significant digit.
-* `baseline-m2.tsv`: solver time per call of the legacy engine (the search of release 0.18.0) and of `auto`
+* `baseline-m2.tsv`: solver time per call of the legacy engine (the search of release 0.18.0, removed in M4b) and of `auto`
   in the same build, read from `NVC_CRV_STATS`; the end-to-end figures of
   `baseline.tsv` also hold the interpreter running the generated code and, for a big constraint,
   its compilation.
+* `baseline-m4b.tsv`: the same figures for `auto` after the bdd stage (crv M4b), as a last column next to those of M3.
 * `baseline-m3.tsv`: the same figures for `auto` after the rejection stage (crv M3), next to those of M2.
 * `bias-reject.txt`: the chi-square report of the forced rejection stage (it passes every problem, three
   seeds) and of `auto` (it fails the problems whose acceptance is too low for 16 samples, which fall to the
   search; the BDD stage is for those).
-* `bias-legacy.txt`: the chi-square report of the search of release 0.18.0 against the distribution the
+* `bias-legacy.txt`: a record of the engine of release 0.18.0, removed in M4b; the chi-square report of that search against the distribution the
   language asks for, and the result of the differential fuzzer (`NVC_CRV_LONG=1 bin/unit_test crv`).
 
 `--quick` runs the five fastest cases (a few seconds) and is part of the light gate.
