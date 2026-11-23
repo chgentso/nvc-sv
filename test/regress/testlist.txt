@@ -3174,3 +3174,4 @@ vlogcover13     verilog,cover=toggle+count-from-undefined+count-from-to-z
 vlogcover14     verilog,cover=toggle+include-mems+ignore-arrays-from-8
 mixedcover3     mixed,cover=toggle
 vlogcover15     shell
+vlogcover18     verilog,cover=statement

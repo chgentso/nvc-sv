@@ -1,0 +1,34 @@
+<?xml version="1.0"?>
+<scope name="WORK">
+  <scope name="vlogcover18" block_name="vlogcover18" kind="module" file="vlogcover18.sv" line="10">
+    <scope name="_P1" line="16">
+      <scope name="_S0" line="17">
+        <statement hier="WORK.vlogcover18._P1._S0" data="1"/>
+        <scope name="_S0">
+          <statement hier="WORK.vlogcover18._P1._S0._S0" data="1"/>
+        </scope>
+      </scope>
+      <scope name="_S1" line="18">
+        <statement hier="WORK.vlogcover18._P1._S1" data="1"/>
+      </scope>
+      <scope name="_S2" line="19">
+        <statement hier="WORK.vlogcover18._P1._S2" data="1"/>
+      </scope>
+    </scope>
+    <scope name="u" block_name="vlogcover18_leaf" kind="module" line="14">
+      <scope name="_P0" line="6">
+        <scope name="_S0">
+          <statement hier="WORK.vlogcover18.u._P0._S0" data="1"/>
+        </scope>
+      </scope>
+      <scope name="_P1" line="7">
+        <scope name="_S0">
+          <statement hier="WORK.vlogcover18.u._P1._S0" data="1"/>
+          <scope name="_S0">
+            <statement hier="WORK.vlogcover18.u._P1._S0._S0" data="0"/>
+          </scope>
+        </scope>
+      </scope>
+    </scope>
+  </scope>
+</scope>

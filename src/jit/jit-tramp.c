@@ -39,6 +39,9 @@ __attribute__((noinline))
 bool jit_trampoline(jit_thread_local_t *thread, jit_func_t *f,
                     jit_scalar_t *args, tlab_t *tlab)
 {
+   // A call from code that is itself running in the JIT returns to it
+   void *saved_jmp = relaxed_load(&thread->jmp_buf);
+
    relaxed_store(&thread->jmp_buf, thread);
 
    bool ok = true;
@@ -50,7 +53,7 @@ bool jit_trampoline(jit_thread_local_t *thread, jit_func_t *f,
       ok = false;
    }
 
-   relaxed_store(&thread->jmp_buf, NULL);
+   relaxed_store(&thread->jmp_buf, saved_jmp);
    thread->anchor = NULL;
    return ok;
 }
@@ -71,9 +74,11 @@ bool jit_trampoline(jit_thread_local_t *thread, jit_func_t *f,
 {
 #if defined HAVE___BUILTIN_SETJMP && !defined __clang__
    void *jmp_buf[5];
+   void *saved_jmp = relaxed_load(&thread->jmp_buf);
    const int rc = __builtin_setjmp(jmp_buf);
 #else
    sigjmp_buf jmp_buf;
+   void *saved_jmp = relaxed_load(&thread->jmp_buf);
    const int rc = sigsetjmp(jmp_buf, 0);
 #endif
 
@@ -83,12 +88,12 @@ bool jit_trampoline(jit_thread_local_t *thread, jit_func_t *f,
       jit_entry_fn_t entry = load_acquire(&f->entry);
       (*entry)(f, NULL, args, tlab);
 
-      relaxed_store(&thread->jmp_buf, NULL);
+      relaxed_store(&thread->jmp_buf, saved_jmp);
       thread->anchor = NULL;
       return true;
    }
    else {
-      relaxed_store(&thread->jmp_buf, NULL);
+      relaxed_store(&thread->jmp_buf, saved_jmp);
       thread->anchor = NULL;
       return false;
    }
