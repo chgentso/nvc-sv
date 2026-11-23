@@ -1,7 +1,7 @@
-// The distribution of the search of release 0.18.0 where it is not uniform
+// The distribution of the search alone where it is not uniform
 // over the solutions: the numbers are printed as a record, and the shell
 // part of the test checks that the helper sees the bias.  Run with
-// NVC_CRV_ENGINE=legacy: later engines are meant to be uniform here.
+// NVC_CRV_ENGINE=dfs: the exact stages are meant to be uniform here.
 import crvdist::*;
 
 class lt_item;

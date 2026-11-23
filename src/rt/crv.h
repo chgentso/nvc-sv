@@ -155,29 +155,22 @@ crv_result_t crv_solve2(crv_t *c);
 bool crv_solve(crv_t *c);
 
 // Which stage of the solver may answer.  Read once from NVC_CRV_ENGINE
-// (legacy, dfs, reject, bdd, sat or auto) and overridden by crv_set_engine
-// for tests.  Legacy is the solver of release 0.18.0, dfs is its search with
-// the components, reject is the rejection stage alone (it gives up on a
+// (dfs, reject, bdd, sat or auto) and overridden by crv_set_engine for
+// tests.  Dfs is the search alone with the components, reject is the
+// rejection stage alone (it gives up on a
 // component it cannot sample) and auto is the stages in turn, the search
 // last, bdd is the exact stage on small groups on its own (it gives up on a
 // component it cannot take).  A stage that is not written yet is taken as
 // dfs: crv_engine_available says which exist.
 typedef enum {
-   CRV_ENGINE_AUTO, CRV_ENGINE_LEGACY, CRV_ENGINE_DFS, CRV_ENGINE_REJECT,
-   CRV_ENGINE_BDD, CRV_ENGINE_SAT,
+   CRV_ENGINE_AUTO, CRV_ENGINE_DFS, CRV_ENGINE_REJECT, CRV_ENGINE_BDD,
+   CRV_ENGINE_SAT,
 } crv_engine_t;
 
 crv_engine_t crv_engine(void);
 void crv_set_engine(crv_engine_t engine);
 bool crv_engine_available(crv_engine_t engine);
 const char *crv_engine_name(crv_engine_t engine);
-
-// Splitting variables at the boundaries of constant slices was retired when
-// the bdd stage took over the slices and masks: it is only done by the
-// legacy engine, and NVC_CRV_DECOMPOSE=0 turns it off there to measure what
-// depends on it.  The variable has no effect on the other engines.
-bool crv_decompose_enabled(void);
-void crv_set_decompose(bool on);
 
 // The limit on the nodes of one BDD (NVC_CRV_BDD_NODES, default 32768;
 // 0 turns the stage off).  A forced bdd engine allows 100 times as many.
@@ -225,7 +218,6 @@ typedef struct {
    uint32_t    stage[CRV_STAGE_COUNT];   // Components answered by each stage
    uint32_t    declined[3]; // Components a stage cannot take, budget of a
                             // stage, all proposals rejected
-   bool        decomposed;  // A variable was split at slice boundaries
    bool        soft;        // Has soft constraints
    bool        ok;          // A solution was found
    bool        giveup;      // Not ok and the last attempt ran out of work

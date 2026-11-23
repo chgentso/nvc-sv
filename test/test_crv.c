@@ -604,7 +604,7 @@ END_TEST
 // highest priority, whichever way they are found
 START_TEST(test_soft_many)
 {
-   static const crv_engine_t engines[] = { CRV_ENGINE_LEGACY, CRV_ENGINE_AUTO };
+   static const crv_engine_t engines[] = { CRV_ENGINE_DFS, CRV_ENGINE_AUTO };
    const crv_engine_t saved = crv_engine();
    trng_t rng = { 91 };
 
@@ -726,7 +726,7 @@ END_TEST
 // member too many for its values has none
 START_TEST(test_unique_large)
 {
-   static const crv_engine_t engines[] = { CRV_ENGINE_LEGACY, CRV_ENGINE_AUTO };
+   static const crv_engine_t engines[] = { CRV_ENGINE_DFS, CRV_ENGINE_AUTO };
    const crv_engine_t saved = crv_engine();
    trng_t rng = { 77 };
 
@@ -1154,7 +1154,7 @@ END_TEST
 // propagated by its terms, in every engine
 START_TEST(test_sum_chain)
 {
-   static const crv_engine_t engines[] = { CRV_ENGINE_LEGACY, CRV_ENGINE_AUTO };
+   static const crv_engine_t engines[] = { CRV_ENGINE_DFS, CRV_ENGINE_AUTO };
    const crv_engine_t saved = crv_engine();
 
    for (size_t e = 0; e < ARRAY_LEN(engines); e++) {
@@ -2566,12 +2566,12 @@ END_TEST
 START_TEST(test_harness_detects_bias)
 {
    // The first solution found by a deterministic search repeated, or the
-   // legacy search on x<y, are far from uniform and the test says so
+   // search on x<y, are far from uniform and the test says so
    const problem_t p = def_xlty(4);
    model_t m;
    model_build(&m, &p);
 
-   solver_ctx_t sc = { .engine = CRV_ENGINE_LEGACY };
+   solver_ctx_t sc = { .engine = CRV_ENGINE_DFS };
    crv_seed(seeds[0]);
    const result_t r = run_samples(&m, samples_for(&m), solver_draw, &sc);
    ck_assert_int_eq(r.fails, 0);
@@ -2616,7 +2616,7 @@ END_TEST
 // Every stage gives only solutions, whatever its distribution
 START_TEST(test_sound_all_engines)
 {
-   static const crv_engine_t all[] = { CRV_ENGINE_LEGACY, CRV_ENGINE_DFS,
+   static const crv_engine_t all[] = { CRV_ENGINE_DFS,
                                        CRV_ENGINE_REJECT, CRV_ENGINE_BDD,
                                        CRV_ENGINE_SAT, CRV_ENGINE_AUTO };
    const problem_t p = problems[_i].make(problems[_i].arg);
@@ -2641,7 +2641,7 @@ END_TEST
 // The bias report: not asserted, printed in long mode or when asked for
 START_TEST(test_bias_report)
 {
-   static const crv_engine_t all[] = { CRV_ENGINE_LEGACY, CRV_ENGINE_DFS,
+   static const crv_engine_t all[] = { CRV_ENGINE_DFS,
                                        CRV_ENGINE_REJECT, CRV_ENGINE_BDD,
                                        CRV_ENGINE_SAT, CRV_ENGINE_AUTO };
    const bool report = long_mode() || getenv("NVC_CRV_REPORT") != NULL;
@@ -2995,7 +2995,7 @@ static double now_seconds(void)
 static int fuzz_engines(crv_engine_t *engines)
 {
    // Every stage that exists is checked against the oracle
-   static const crv_engine_t all[] = { CRV_ENGINE_LEGACY, CRV_ENGINE_DFS,
+   static const crv_engine_t all[] = { CRV_ENGINE_DFS,
                                        CRV_ENGINE_REJECT, CRV_ENGINE_BDD,
                                        CRV_ENGINE_SAT, CRV_ENGINE_AUTO };
    int n = 0;
@@ -3394,9 +3394,7 @@ END_TEST
 START_TEST(test_engine_default)
 {
    unsetenv("NVC_CRV_ENGINE");
-   unsetenv("NVC_CRV_DECOMPOSE");
    ck_assert_int_eq(crv_engine(), CRV_ENGINE_AUTO);
-   ck_assert(crv_decompose_enabled());
 }
 END_TEST
 
@@ -3406,7 +3404,7 @@ START_TEST(test_engine_env)
       const char *name;
       crv_engine_t engine;
    } cases[] = {
-      { "legacy", CRV_ENGINE_LEGACY }, { "dfs", CRV_ENGINE_DFS },
+      { "dfs", CRV_ENGINE_DFS },
       { "reject", CRV_ENGINE_REJECT }, { "bdd", CRV_ENGINE_BDD },
       { "sat", CRV_ENGINE_SAT }, { "auto", CRV_ENGINE_AUTO },
    };
@@ -3417,10 +3415,6 @@ START_TEST(test_engine_env)
    ck_assert_int_eq(crv_engine(), cases[i].engine);
    ck_assert_str_eq(crv_engine_name(cases[i].engine), cases[i].name);
 
-   // The answers are those of the search of release 0.18 for legacy and the
-   // dfs engine: the stages in front of it choose other values
-   const bool same = cases[i].engine == CRV_ENGINE_LEGACY
-      || cases[i].engine == CRV_ENGINE_DFS || !crv_engine_available(cases[i].engine);
    crv_seed(60);
    crv_t *c = crv_new();
    crv_var_t x = crv_var(c, 16, false, 0);
@@ -3428,23 +3422,7 @@ START_TEST(test_engine_env)
                              crv_const(c, 60000, 16, false), 1, false),
                false, 1);
    ck_assert(crv_solve(c));
-   const int64_t v = crv_value(c, x);
-   ck_assert(v > 60000);
-   crv_free(c);
-
-   // The same seed: identical to what the legacy choice gives
-   crv_set_engine(CRV_ENGINE_LEGACY);
-   crv_seed(60);
-   c = crv_new();
-   x = crv_var(c, 16, false, 0);
-   crv_require(c, crv_binary(c, CRV_GT, crv_var_ref(c, x),
-                             crv_const(c, 60000, 16, false), 1, false),
-               false, 1);
-   ck_assert(crv_solve(c));
-   if (same)
-      ck_assert_int_eq(crv_value(c, x), v);
-   else
-      ck_assert_int_gt(crv_value(c, x), 60000);
+   ck_assert_int_gt(crv_value(c, x), 60000);
    crv_free(c);
 }
 END_TEST
@@ -3456,23 +3434,21 @@ START_TEST(test_engine_unknown)
 }
 END_TEST
 
+START_TEST(test_engine_legacy)
+{
+   // The engine of release 0.18.0 is gone: a note and the default
+   setenv("NVC_CRV_ENGINE", "legacy", 1);
+   ck_assert_int_eq(crv_engine(), CRV_ENGINE_AUTO);
+}
+END_TEST
+
 START_TEST(test_engine_available)
 {
-   ck_assert(crv_engine_available(CRV_ENGINE_LEGACY));
    ck_assert(crv_engine_available(CRV_ENGINE_DFS));
    ck_assert(crv_engine_available(CRV_ENGINE_AUTO));
    ck_assert(crv_engine_available(CRV_ENGINE_REJECT));
    ck_assert(crv_engine_available(CRV_ENGINE_BDD));
    ck_assert(!crv_engine_available(CRV_ENGINE_SAT));
-}
-END_TEST
-
-START_TEST(test_decompose_env)
-{
-   setenv("NVC_CRV_DECOMPOSE", "0", 1);
-   ck_assert(!crv_decompose_enabled());
-   crv_set_decompose(true);
-   ck_assert(crv_decompose_enabled());
 }
 END_TEST
 
@@ -3527,7 +3503,7 @@ START_TEST(test_stats_stage)
       crv_engine_t engine;
       crv_stage_t  stage;
    } cases[] = {
-      { CRV_ENGINE_LEGACY, CRV_STAGE_DFS }, { CRV_ENGINE_DFS, CRV_STAGE_DFS },
+      { CRV_ENGINE_DFS, CRV_STAGE_DFS },
       { CRV_ENGINE_REJECT, CRV_STAGE_REJECT },
       { CRV_ENGINE_BDD, CRV_STAGE_BDD },
       { CRV_ENGINE_AUTO, CRV_STAGE_REJECT },
@@ -3741,51 +3717,6 @@ START_TEST(test_stats_soft)
 }
 END_TEST
 
-START_TEST(test_stats_decompose)
-{
-   // A 32 bit value constrained through two slices is split into fields by
-   // the legacy engine unless that is off; the other engines do not split
-   // it, the bdd stage solves the slices
-   static const struct {
-      crv_engine_t engine;
-      bool         split;
-      bool         on;
-      crv_stage_t  stage;
-   } cases[] = {
-      { CRV_ENGINE_LEGACY, true, true, CRV_STAGE_DFS },
-      { CRV_ENGINE_LEGACY, false, false, CRV_STAGE_DFS },
-      { CRV_ENGINE_DFS, false, true, CRV_STAGE_DFS },
-      { CRV_ENGINE_AUTO, false, true, CRV_STAGE_BDD },
-      { CRV_ENGINE_BDD, false, true, CRV_STAGE_BDD },
-   };
-
-   const crv_engine_t saved = crv_engine();
-   for (size_t i = 0; i < ARRAY_LEN(cases); i++) {
-      crv_set_engine(cases[i].engine);
-      crv_set_decompose(cases[i].on);
-      crv_t *c = crv_new();
-      crv_var_t x = crv_var(c, 32, false, 0);
-      crv_node_t xv = crv_var_ref(c, x);
-      crv_node_t hi = crv_binary(c, CRV_SHR, xv, crv_const(c, 16, 32, false),
-                                 32, false);
-      crv_require(c, crv_binary(c, CRV_EQ, hi, crv_const(c, 0x1234, 32, false),
-                                1, false), false, 1);
-      crv_node_t lo = crv_binary(c, CRV_AND, xv,
-                                 crv_const(c, 0xff, 32, false), 32, false);
-      crv_require(c, crv_binary(c, CRV_EQ, lo, crv_const(c, 0x5a, 32, false),
-                                1, false), false, 2);
-      const crv_call_stat_t *st = solved_stats(c, true);
-      ck_assert_int_eq(st->decomposed, cases[i].split);
-      ck_assert_int_eq(st->top, cases[i].stage);
-      ck_assert_int_eq(crv_value(c, x) >> 16, 0x1234);
-      ck_assert_int_eq(crv_value(c, x) & 0xff, 0x5a);
-      crv_free(c);
-   }
-   crv_set_decompose(true);
-   crv_set_engine(saved);
-}
-END_TEST
-
 START_TEST(test_stats_site)
 {
    // Calls are summed per site and the table can be written to a file
@@ -3877,10 +3808,10 @@ Suite *get_crv_tests(void)
    tcase_add_test(tc, test_seed_before_begin);
    tcase_add_test(tc, test_randc_trial);
    tcase_add_test(tc, test_engine_default);
-   tcase_add_loop_test(tc, test_engine_env, 0, 6);
+   tcase_add_loop_test(tc, test_engine_env, 0, 5);
    tcase_add_test(tc, test_engine_unknown);
+   tcase_add_test(tc, test_engine_legacy);
    tcase_add_test(tc, test_engine_available);
-   tcase_add_test(tc, test_decompose_env);
    tcase_add_test(tc, test_stats_none);
    tcase_add_test(tc, test_stats_linked);
    tcase_add_test(tc, test_stats_independent);
@@ -3892,7 +3823,6 @@ Suite *get_crv_tests(void)
    tcase_add_test(tc, test_stats_order);
    tcase_add_test(tc, test_stats_fail);
    tcase_add_test(tc, test_stats_soft);
-   tcase_add_test(tc, test_stats_decompose);
    tcase_add_test(tc, test_stats_site);
    tcase_add_test(tc, test_model_counts);
    tcase_add_loop_test(tc, test_model_sum_one, 0, NPROBLEMS);

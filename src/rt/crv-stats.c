@@ -34,11 +34,10 @@
 // Environment
 
 static const char *const engine_names[] = {
-   "auto", "legacy", "dfs", "reject", "bdd", "sat"
+   "auto", "dfs", "reject", "bdd", "sat"
 };
 
 static crv_engine_t engine = CRV_ENGINE_AUTO;
-static bool         decompose = true;
 static unsigned     bdd_nodes = 32768;
 static bool         env_read;
 static nvc_lock_t   env_lock;
@@ -60,21 +59,16 @@ static void read_env(void)
          }
       }
 
-      if (!found)
+      if (!found && strcmp(e, "legacy") == 0)
+         fprintf(stderr, "NVC_CRV_ENGINE=legacy: the engine of release 0.18.0 "
+                 "is not available any more, using auto\n");
+      else if (!found)
          fprintf(stderr, "NVC_CRV_ENGINE: unknown engine '%s', expecting "
-                 "legacy, dfs, reject, bdd, sat or auto\n", e);
+                 "dfs, reject, bdd, sat or auto\n", e);
       else if (!crv_engine_available(engine))
          fprintf(stderr, "NVC_CRV_ENGINE=%s: this stage is not available "
                  "yet, using the search of the dfs engine\n", e);
    }
-
-   const char *d = getenv("NVC_CRV_DECOMPOSE");
-   if (d != NULL && strcmp(d, "0") == 0)
-      decompose = false;
-   if (d != NULL && engine != CRV_ENGINE_LEGACY)
-      fprintf(stderr, "NVC_CRV_DECOMPOSE has no effect: slices and masks are "
-              "solved by the bdd stage, only NVC_CRV_ENGINE=legacy splits "
-              "variables\n");
 
    const char *n = getenv("NVC_CRV_BDD_NODES");
    if (n != NULL && *n) {
@@ -106,30 +100,15 @@ void crv_set_engine(crv_engine_t e)
 
 bool crv_engine_available(crv_engine_t e)
 {
-   // Legacy and dfs are the same search, reject and bdd are the stages on
-   // their own and auto is the stages in turn
-   return e == CRV_ENGINE_AUTO || e == CRV_ENGINE_LEGACY
-      || e == CRV_ENGINE_DFS || e == CRV_ENGINE_REJECT
-      || e == CRV_ENGINE_BDD;
+   // Dfs is the search, reject and bdd are the stages on their own and auto
+   // is the stages in turn
+   return e == CRV_ENGINE_AUTO || e == CRV_ENGINE_DFS
+      || e == CRV_ENGINE_REJECT || e == CRV_ENGINE_BDD;
 }
 
 const char *crv_engine_name(crv_engine_t e)
 {
    return engine_names[e];
-}
-
-bool crv_decompose_enabled(void)
-{
-   if (unlikely(!env_read))
-      read_env();
-   return decompose;
-}
-
-void crv_set_decompose(bool on)
-{
-   if (!env_read)
-      read_env();
-   decompose = on;
 }
 
 unsigned crv_bdd_nodes(void)
@@ -151,7 +130,7 @@ void crv_set_bdd_nodes(unsigned nodes)
 
 typedef struct {
    char     *site;
-   uint64_t  calls, comps, loose, freevars, multi, decomposed, soft;
+   uint64_t  calls, comps, loose, freevars, multi, soft;
    uint64_t  fail, giveup;
    uint64_t  comp_stage[CRV_STAGE_COUNT];
    uint64_t  call_stage[CRV_STAGE_COUNT];
@@ -266,7 +245,6 @@ void crv_stats_record(const crv_call_stat_t *s)
    st->loose += s->loose;
    st->freevars += s->freevars;
    st->multi += s->maxfree > 1;
-   st->decomposed += s->decomposed;
    st->soft += s->soft;
    st->fail += !s->ok;
    st->giveup += s->giveup;
@@ -309,7 +287,9 @@ static int site_cmp(const void *a, const void *b)
 }
 
 // Column order of the tab separated lines, fixed so that scripts can rely
-// on it: site, calls, comps, loose, freevars, multi, decomposed, soft, fail,
+// on it: site, calls, comps, loose, freevars, multi, decomposed (always 0 now
+// that variables are not split; the column stays so that the others do not
+// move), soft, fail,
 // giveup, then the components answered by each stage (none, reject, bdd, dfs,
 // sat, mix), the calls whose last stage was each of those, the declines
 // (prefilter, budget, exhausted), build and solve time in microseconds, then
@@ -336,7 +316,7 @@ static void write_sites(void)
          fprintf(f, "%s\t%"PRIu64"\t%"PRIu64"\t%"PRIu64"\t%"PRIu64"\t%"PRIu64
                  "\t%"PRIu64"\t%"PRIu64"\t%"PRIu64"\t%"PRIu64,
                  st->site, st->calls, st->comps, st->loose, st->freevars,
-                 st->multi, st->decomposed, st->soft, st->fail, st->giveup);
+                 st->multi, UINT64_C(0), st->soft, st->fail, st->giveup);
          for (int k = 0; k < CRV_STAGE_COUNT; k++)
             fprintf(f, "\t%"PRIu64, st->comp_stage[k]);
          for (int k = 0; k < CRV_STAGE_COUNT; k++)
@@ -370,7 +350,7 @@ static void write_sites(void)
       fprintf(stderr, "%-34s %8"PRIu64" %6"PRIu64" %6"PRIu64" %5"PRIu64
               " %5"PRIu64" %5"PRIu64" %6"PRIu64" | %7"PRIu64" %7"PRIu64
               " %7"PRIu64" %7"PRIu64" %7"PRIu64" | %9"PRIu64" %9"PRIu64"\n",
-              shown, st->calls, st->comps, st->multi, st->decomposed,
+              shown, st->calls, st->comps, st->multi, UINT64_C(0),
               st->soft, st->fail, st->giveup,
               st->call_stage[CRV_STAGE_NONE], st->call_stage[CRV_STAGE_REJECT],
               st->call_stage[CRV_STAGE_BDD], st->call_stage[CRV_STAGE_DFS],

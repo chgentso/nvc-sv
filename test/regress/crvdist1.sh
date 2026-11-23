@@ -7,7 +7,7 @@ grep -q 'crvdist1 done' out.txt
 ! grep -q FAIL out.txt
 grep -c PASS out.txt | grep -qx 3
 
-# The same with the legacy search
-NVC_CRV_ENGINE=legacy nvc -r crvdist1 > legacy.txt
-grep -q 'crvdist1 done' legacy.txt
+# The same with the search alone
+NVC_CRV_ENGINE=dfs nvc -r crvdist1 > dfs.txt
+grep -q 'crvdist1 done' dfs.txt
 exit 0
