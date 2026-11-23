@@ -28,6 +28,8 @@ typedef struct {
    int     op;
    int     a, b;
    int     leaf;
+   bool    is_seq;
+   int8_t  must_leaf; // Leaf that must hold at tick start, or -1
    int64_t lo, hi;    // Negative hi is unbounded
 } sva_node_t;
 
@@ -91,6 +93,9 @@ struct _sva {
    sva_node_t *nodes;
    int         nnodes, maxnodes;
    int         root;
+   int8_t      vac_leaf;   // Root implication antecedent must_leaf, or -1
+   int8_t      root_leaf;  // Root SVA_LEAF index, or -1
+   int8_t      over_leaf;  // Root overlapping implication consequent leaf, or -1
    uint64_t   *hist;
    int64_t     hbase;      // Tick number of hist[0]
    int64_t     nticks;
@@ -416,6 +421,9 @@ sva_t *sva_new(sva_kind_t kind, unsigned flags)
    s->kind = kind;
    s->path = sva_scope_path();
    s->root = -1;
+   s->vac_leaf = -1;
+   s->root_leaf = -1;
+   s->over_leaf = -1;
    s->probe_t = s->needed_t = s->slots_t = -1;
    for (int i = 0; i < 16; i++)
       s->memo[i].tick = INT64_MIN;
@@ -489,6 +497,56 @@ int sva_node(sva_t *s, int op, int a, int b, int leaf, int64_t lo, int64_t hi)
    n->leaf = leaf;
    n->lo = lo;
    n->hi = hi;
+
+   n->must_leaf = -1;
+   switch (op) {
+   case SVA_LEAF:
+      n->is_seq = true;
+      n->must_leaf = leaf;
+      break;
+   case SVA_DLEAF:
+   case V_SVA_MATCH:
+   case V_SVA_GOTO:
+   case V_SVA_NONCONS:
+   case V_SVA_WITHIN:
+   case V_SVA_THROUGHOUT:
+      n->is_seq = true;
+      break;
+   case V_SVA_DELAY:
+      n->is_seq = true;
+      if (a >= 0)
+         n->must_leaf = s->nodes[a].must_leaf;
+      else if (lo == 0 && hi == 0)
+         n->must_leaf = s->nodes[b].must_leaf;
+      break;
+   case V_SVA_REPEAT:
+      n->is_seq = true;
+      if (lo >= 1)
+         n->must_leaf = s->nodes[a].must_leaf;
+      break;
+   case V_SVA_FIRST_MATCH:
+      n->is_seq = true;
+      n->must_leaf = s->nodes[a].must_leaf;
+      break;
+   case V_SVA_INTERSECT:
+      n->is_seq = true;
+      n->must_leaf = s->nodes[a].must_leaf >= 0
+         ? s->nodes[a].must_leaf : s->nodes[b].must_leaf;
+      break;
+   case V_SVA_AND:
+      n->is_seq = s->nodes[a].is_seq && s->nodes[b].is_seq;
+      if (n->is_seq)
+         n->must_leaf = s->nodes[a].must_leaf >= 0
+            ? s->nodes[a].must_leaf : s->nodes[b].must_leaf;
+      break;
+   case V_SVA_OR:
+      n->is_seq = s->nodes[a].is_seq && s->nodes[b].is_seq;
+      break;
+   default:
+      n->is_seq = false;
+      break;
+   }
+
    return s->nnodes++;
 }
 
@@ -616,6 +674,22 @@ void sva_slotw(sva_t *s, int slot, int width, const uint64_t *bits,
 void sva_set_root(sva_t *s, int node)
 {
    s->root = node;
+   s->vac_leaf = -1;
+   s->root_leaf = -1;
+   s->over_leaf = -1;
+
+   if (node < 0)
+      return;
+
+   const sva_node_t *root = &(s->nodes[node]);
+   if (root->op == SVA_LEAF)
+      s->root_leaf = root->leaf;
+   else if (root->op == V_SVA_IMPL_OVER || root->op == V_SVA_IMPL_NON) {
+      s->vac_leaf = s->nodes[root->a].must_leaf;
+      if (root->op == V_SVA_IMPL_OVER && s->nodes[root->a].op == SVA_LEAF
+          && s->nodes[root->b].op == SVA_LEAF)
+         s->over_leaf = s->nodes[root->b].leaf;
+   }
 }
 
 static bool sva_leaf(const sva_t *s, int leaf, int64_t t)
@@ -704,28 +778,9 @@ static void res_merge(seqres_t *dst, const seqres_t *src)
    }
 }
 
-static bool is_seq(const sva_t *s, int id)
+static inline bool is_seq(const sva_t *s, int id)
 {
-   const sva_node_t *n = &(s->nodes[id]);
-   switch (n->op) {
-   case SVA_LEAF:
-   case SVA_DLEAF:
-   case V_SVA_MATCH:
-   case V_SVA_DELAY:
-   case V_SVA_REPEAT:
-   case V_SVA_GOTO:
-   case V_SVA_NONCONS:
-   case V_SVA_INTERSECT:
-   case V_SVA_WITHIN:
-   case V_SVA_THROUGHOUT:
-   case V_SVA_FIRST_MATCH:
-      return true;
-   case V_SVA_AND:
-   case V_SVA_OR:
-      return is_seq(s, n->a) && is_seq(s, n->b);
-   default:
-      return false;
-   }
+   return s->nodes[id].is_seq;
 }
 
 static void eval_seq(const sva_t *s, int id, int64_t start, seqres_t *out);
@@ -745,6 +800,16 @@ static void seq_delay(const sva_t *s, const sva_node_t *n, int64_t start,
 
    if (leading)
       first = last = start;
+   else if (s->nodes[n->a].op == SVA_LEAF) {
+      if (start >= s->nticks) {
+         out->open = true;
+         return;
+      }
+      if (!sva_leaf(s, s->nodes[n->a].leaf, start))
+         return;
+      first = last = start;
+      leading = true;
+   }
    else {
       eval_seq(s, n->a, start, &ra);
       if (ra.open)
@@ -1053,6 +1118,22 @@ static tri_t tri_not(tri_t t)
 static tri_t seq_as_property(const sva_t *s, int id, int64_t start,
                              bool strong)
 {
+   const sva_node_t *n = &(s->nodes[id]);
+   if (n->op == SVA_LEAF) {
+      if (start >= s->nticks)
+         return at_end(s, strong);
+      return sva_leaf(s, n->leaf, start) ? TRI_TRUE : TRI_FALSE;
+   }
+   else if (n->op == V_SVA_DELAY && n->a < 0
+            && s->nodes[n->b].op == SVA_LEAF) {
+      const int64_t last = n->hi < 0 ? s->nticks - 1
+         : MIN(start + n->hi, s->nticks - 1);
+      const bool open = n->hi < 0 || start + n->hi >= s->nticks;
+      if (leaf_in_range(s, s->nodes[n->b].leaf, start + n->lo, last))
+         return TRI_TRUE;
+      return open ? at_end(s, strong) : TRI_FALSE;
+   }
+
    seqres_t r;
    eval_seq(s, id, start, &r);
 
@@ -1088,8 +1169,14 @@ static tri_t prop_implication(const sva_t *s, const sva_node_t *n,
       tri_t r;
       bool nv2 = true;
       const sva_node_t *nb = &(s->nodes[n->b]);
-      if (nb->op == V_SVA_DELAY && nb->a < 0
-          && s->nodes[nb->b].op == SVA_LEAF) {
+      if (nb->op == SVA_LEAF) {
+         if (from >= s->nticks)
+            r = at_end(s, false);
+         else
+            r = sva_leaf(s, nb->leaf, from) ? TRI_TRUE : TRI_FALSE;
+      }
+      else if (nb->op == V_SVA_DELAY && nb->a < 0
+               && s->nodes[nb->b].op == SVA_LEAF) {
          // A delayed leaf is decided by the newest tick
          const int64_t last = nb->hi < 0 ? s->nticks - 1
             : MIN(from + nb->hi, s->nticks - 1);
@@ -1113,6 +1200,12 @@ static tri_t prop_implication(const sva_t *s, const sva_node_t *n,
          return TRI_PENDING;
       else
          return TRI_TRUE;
+   }
+
+   if (na->must_leaf >= 0 && start < s->nticks
+       && !sva_leaf(s, na->must_leaf, start)) {
+      *nv = false;
+      return TRI_TRUE;
    }
 
    seqres_t ra;
@@ -1150,6 +1243,13 @@ static tri_t prop_implication(const sva_t *s, const sva_node_t *n,
 static tri_t prop_followed_by(const sva_t *s, const sva_node_t *n,
                               int64_t start, bool overlap, bool *nv)
 {
+   const sva_node_t *na = &(s->nodes[n->a]);
+   if (na->must_leaf >= 0 && start < s->nticks
+       && !sva_leaf(s, na->must_leaf, start)) {
+      *nv = true;
+      return TRI_FALSE;
+   }
+
    seqres_t ra;
    eval_seq(s, n->a, start, &ra);
 
@@ -3046,17 +3146,22 @@ unsigned sva_result(const sva_t *s, sva_result_t which)
    }
 }
 
-static void sva_reserve(sva_t *s)
+__attribute__((cold, noinline))
+static void sva_grow_hist(sva_t *s)
 {
-   if (s->nticks - s->hbase == s->hcap) {
-      s->hcap = MAX(256, s->hcap * 2);
-      s->hist = xrealloc_array(s->hist, s->hcap, sizeof(uint64_t));
-      if (s->nslots > 0) {
-         s->shist = xrealloc_array(s->shist, s->hcap * s->nslots,
-                                   sizeof(int64_t));
-         s->uhist = xrealloc_array(s->uhist, s->hcap, sizeof(uint64_t));
-      }
+   s->hcap = MAX(256, s->hcap * 2);
+   s->hist = xrealloc_array(s->hist, s->hcap, sizeof(uint64_t));
+   if (s->nslots > 0) {
+      s->shist = xrealloc_array(s->shist, s->hcap * s->nslots,
+                                sizeof(int64_t));
+      s->uhist = xrealloc_array(s->uhist, s->hcap, sizeof(uint64_t));
    }
+}
+
+static inline void sva_reserve(sva_t *s)
+{
+   if (unlikely(s->nticks - s->hbase == s->hcap))
+      sva_grow_hist(s);
 }
 
 static void sva_probe_attempts(sva_t *s, int64_t t)
@@ -3164,6 +3269,52 @@ unsigned sva_tick(sva_t *s, uint64_t leaves, int disable)
    // if it was only true at some time since the last tick
 
    assert(s->root >= 0);
+
+   // Fast path when no prior attempts are pending and no local-variable
+   // slots are tracked: common single-tick and vacuous cases avoid touching
+   // history buffers, last_true, live[], and sva_compact.
+   if (likely(s->nlive == 0 && !s->lmode && s->nslots == 0)) {
+      if (disable == 1) {
+         s->nticks++;
+         s->hbase = s->nticks;
+         s->passes = s->vpasses = s->fails = s->nevents = 0;
+         s->idle = !s->off;
+         return 0;
+      }
+
+      if (!s->off && (s->kind == SVA_ASSERT || s->kind == SVA_COVER_PROPERTY)) {
+         if (s->vac_leaf >= 0) {
+            if (!((leaves >> s->vac_leaf) & 1)) {
+               s->nticks++;
+               s->hbase = s->nticks;
+               s->passes = s->fails = s->nevents = 0;
+               s->vpasses = s->kind == SVA_COVER_PROPERTY ? 0 : 1;
+               s->idle = !(s->vpasses > 0 && s->has_pass);
+               return 0;
+            }
+            else if (s->over_leaf >= 0) {
+               const bool ok = (leaves >> s->over_leaf) & 1;
+               s->nticks++;
+               s->hbase = s->nticks;
+               s->vpasses = s->nevents = 0;
+               s->passes = ok ? 1 : 0;
+               s->fails = (!ok && s->kind == SVA_ASSERT) ? 1 : 0;
+               s->idle = (s->passes == 0 && s->fails == 0);
+               return s->fails;
+            }
+         }
+         else if (s->root_leaf >= 0) {
+            const bool ok = (leaves >> s->root_leaf) & 1;
+            s->nticks++;
+            s->hbase = s->nticks;
+            s->vpasses = s->nevents = 0;
+            s->passes = ok ? 1 : 0;
+            s->fails = (!ok && s->kind == SVA_ASSERT) ? 1 : 0;
+            s->idle = (s->passes == 0 && s->fails == 0);
+            return s->fails;
+         }
+      }
+   }
 
    sva_reserve(s);
    s->tpool.n = 0;
