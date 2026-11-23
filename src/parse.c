@@ -104,6 +104,7 @@ static tree_t p_sequential_statement(void);
 static tree_t p_concurrent_statement(void);
 static tree_t p_package_declaration(tree_t unit);
 static tree_t p_package_body(tree_t unit);
+static tree_t p_package_instantiation_declaration(tree_t unit);
 static tree_t p_subprogram_declaration(tree_t spec);
 static tree_t p_subprogram_body(tree_t spec);
 static tree_t p_subprogram_specification(void);
@@ -2173,14 +2174,40 @@ static tree_t fcall_to_conv_func(tree_t value)
    return conv;
 }
 
+static ident_t package_mangle_prefix(tree_t pack, tree_t body)
+{
+   tree_t container = tree_container(pack);
+   if (container == pack)
+      return tree_ident(pack);
+
+   tree_t scopes[2] = { pack, body };
+   for (int s = 0; s < 2; s++) {
+      if (scopes[s] == NULL)
+         continue;
+      const int ndecls = tree_decls(scopes[s]);
+      for (int i = 0; i < ndecls; i++) {
+         tree_t d = tree_decl(scopes[s], i);
+         if (is_subprogram(d) && tree_kind(d) != T_GENERIC_DECL
+             && !is_open_coded_builtin(tree_subkind(d))
+             && tree_has_ident2(d))
+            return get_call_context(tree_ident2(d));
+         else if ((is_type_decl(d) || tree_kind(d) == T_PROT_DECL)
+                  && type_has_ident(tree_type(d)))
+            return get_call_context(type_ident(tree_type(d)));
+      }
+   }
+
+   if (is_enclosing(nametab, container))
+      return ident_prefix(scope_prefix(nametab), tree_ident(pack), '.');
+   else
+      return ident_prefix(tree_ident(container), tree_ident(pack), '.');
+}
+
 static void instantiate_package(tree_t new, tree_t pack, tree_t body)
 {
    assert(body == NULL || tree_primary(body) == pack);
 
-   ident_t prefix = tree_ident(pack);
-   tree_t container = tree_container(pack);
-   if (container != pack)
-      prefix = ident_prefix(tree_ident(container), prefix, '.');
+   ident_t prefix = package_mangle_prefix(pack, body);
 
    tree_t roots[] = { pack, body };
    ident_t prefixes[] = { prefix };
@@ -9957,9 +9984,23 @@ static void p_protected_type_body_declarative_item(tree_t body)
          tree_add_decl(body, p_group_declaration());
       break;
 
+   case tPACKAGE:
+      if (peek_nth(4) == tNEW)
+         tree_add_decl(body, p_package_instantiation_declaration(NULL));
+      else if (peek_nth(2) == tBODY) {
+         require_std(STD_08, "nested package declarations");
+         tree_add_decl(body, p_package_body(NULL));
+      }
+      else {
+         require_std(STD_08, "nested package declarations");
+         tree_add_decl(body, p_package_declaration(NULL));
+      }
+      break;
+
    default:
       expect(tATTRIBUTE, tTYPE, tSUBTYPE, tCONSTANT, tFUNCTION, tPROCEDURE,
-             tIMPURE, tPURE, tALIAS, tVARIABLE, tUSE, tFILE, tGROUP);
+             tIMPURE, tPURE, tALIAS, tVARIABLE, tUSE, tFILE, tGROUP,
+             STD(08, tPACKAGE));
    }
 }
 
@@ -10052,6 +10093,55 @@ static tree_t p_protected_type_body(ident_t id)
    return body;
 }
 
+static tree_t find_package_body_in(tree_t scope, tree_t pack)
+{
+   if (scope == NULL)
+      return NULL;
+
+   const int ndecls = tree_decls(scope);
+   for (int i = 0; i < ndecls; i++) {
+      tree_t d = tree_decl(scope, i);
+      if (tree_kind(d) == T_PACK_BODY && tree_has_primary(d)
+          && tree_primary(d) == pack)
+         return d;
+      else if (tree_kind(d) == T_PACKAGE || tree_kind(d) == T_PACK_BODY) {
+         tree_t sub = find_package_body_in(d, pack);
+         if (sub != NULL)
+            return sub;
+      }
+   }
+
+   return NULL;
+}
+
+static tree_t find_package_body(tree_t pack)
+{
+   tree_t body = body_of(pack);
+   if (body != NULL)
+      return body;
+
+   tree_t container = tree_container(pack);
+   if (container != pack) {
+      if (tree_kind(container) == T_PACKAGE) {
+         tree_t cbody = body_of(container);
+         if ((body = find_package_body_in(cbody, pack)) != NULL)
+            return body;
+      }
+      if ((body = find_package_body_in(container, pack)) != NULL)
+         return body;
+   }
+
+   tree_t region = find_enclosing(nametab, S_DECLARATIVE_REGION);
+   if ((body = find_package_body_in(region, pack)) != NULL)
+      return body;
+
+   tree_t du = find_enclosing(nametab, S_DESIGN_UNIT);
+   if (du != region && (body = find_package_body_in(du, pack)) != NULL)
+      return body;
+
+   return NULL;
+}
+
 static tree_t p_package_instantiation_declaration(tree_t unit)
 {
    // 2008: package identifier is new name [ generic_map_aspect ] ;
@@ -10091,7 +10181,8 @@ static tree_t p_package_instantiation_declaration(tree_t unit)
 
    tree_t body = NULL;
    if (pack != NULL) {
-      if (package_needs_body(pack) && (body = body_of(pack)) == NULL)
+      body = find_package_body(pack);
+      if (package_needs_body(pack) && body == NULL)
          parse_error(CURRENT_LOC, "package %s cannot be instantiated until "
                      "its body has been analysed", istr(unit_name));
 
@@ -10326,6 +10417,10 @@ static void p_entity_declarative_item(tree_t entity)
    case tPACKAGE:
       if (peek_nth(4) == tNEW)
          tree_add_decl(entity, p_package_instantiation_declaration(NULL));
+      else if (peek_nth(2) == tBODY) {
+         require_std(STD_08, "nested package declarations");
+         tree_add_decl(entity, p_package_body(NULL));
+      }
       else {
          require_std(STD_08, "nested package declarations");
          tree_add_decl(entity, p_package_declaration(NULL));
@@ -10434,9 +10529,23 @@ static void p_subprogram_declarative_item(tree_t sub)
          tree_add_decl(sub, p_group_declaration());
       break;
 
+   case tPACKAGE:
+      if (peek_nth(4) == tNEW)
+         tree_add_decl(sub, p_package_instantiation_declaration(NULL));
+      else if (peek_nth(2) == tBODY) {
+         require_std(STD_08, "nested package declarations");
+         tree_add_decl(sub, p_package_body(NULL));
+      }
+      else {
+         require_std(STD_08, "nested package declarations");
+         tree_add_decl(sub, p_package_declaration(NULL));
+      }
+      break;
+
    default:
       expect(tVARIABLE, tTYPE, tALIAS, tCONSTANT, tFUNCTION, tPROCEDURE,
-             tIMPURE, tPURE, tATTRIBUTE, tSUBTYPE, tUSE, tFILE, tGROUP);
+             tIMPURE, tPURE, tATTRIBUTE, tSUBTYPE, tUSE, tFILE, tGROUP,
+             STD(08, tPACKAGE));
    }
 }
 
@@ -10654,9 +10763,23 @@ static void p_process_declarative_item(tree_t proc)
          tree_add_decl(proc, p_group_declaration());
       break;
 
+   case tPACKAGE:
+      if (peek_nth(4) == tNEW)
+         tree_add_decl(proc, p_package_instantiation_declaration(NULL));
+      else if (peek_nth(2) == tBODY) {
+         require_std(STD_08, "nested package declarations");
+         tree_add_decl(proc, p_package_body(NULL));
+      }
+      else {
+         require_std(STD_08, "nested package declarations");
+         tree_add_decl(proc, p_package_declaration(NULL));
+      }
+      break;
+
    default:
       expect(tVARIABLE, tTYPE, tSUBTYPE, tCONSTANT, tFUNCTION, tPROCEDURE,
-             tIMPURE, tPURE, tATTRIBUTE, tUSE, tALIAS, tFILE, tGROUP);
+             tIMPURE, tPURE, tATTRIBUTE, tUSE, tALIAS, tFILE, tGROUP,
+             STD(08, tPACKAGE));
    }
 }
 
@@ -10980,6 +11103,9 @@ static void p_package_declarative_item(tree_t pack)
       p_file_declaration(pack);
       break;
 
+   case tVARIABLE:
+      require_std(STD_08, "variable declarations in packages");
+      // Fall-through
    case tSHARED:
       p_variable_declaration(pack);
       break;
@@ -11018,7 +11144,8 @@ static void p_package_declarative_item(tree_t pack)
 
    default:
       expect(tTYPE, tFUNCTION, tPROCEDURE, tIMPURE, tPURE, tSUBTYPE, tSIGNAL,
-             tATTRIBUTE, tCONSTANT, tCOMPONENT, tFILE, tSHARED, tALIAS, tUSE,
+             tATTRIBUTE, tCONSTANT, tCOMPONENT, tFILE, tSHARED,
+             STD(08, tVARIABLE), tALIAS, tUSE,
              tDISCONNECT, tGROUP, tPACKAGE, STD(19, tVIEW));
    }
 }
@@ -11076,10 +11203,8 @@ static tree_t p_package_declaration(tree_t unit)
       qual = ident_prefix(lib_name(lib_work()), name, '.');
       scope_set_prefix(nametab, qual);
    }
-   else {
+   else
       pack = tree_new(T_PACKAGE);
-      scope_set_prefix(nametab, name);
-   }
 
    tree_set_ident(pack, name);
    tree_set_loc(pack, CURRENT_LOC);
@@ -11087,6 +11212,9 @@ static tree_t p_package_declaration(tree_t unit)
    insert_name(nametab, pack, NULL);
 
    push_scope(nametab);
+
+   if (unit == NULL)
+      scope_set_prefix(nametab, name);
 
    consume(tIS);
 
@@ -13855,7 +13983,8 @@ static void p_generate_statement_body(tree_t container, ident_t alt_label)
       has_decls = scan(tSIGNAL, tTYPE, tSUBTYPE, tFILE, tCONSTANT, tFUNCTION,
                        tIMPURE, tPURE, tALIAS, tATTRIBUTE, tBEGIN, tPROCEDURE,
                        tFOR, tCOMPONENT, tUSE, tSHARED, tDEFAULT, tSEQUENCE,
-                       tPROPERTY, tENDPOINT);
+                       tPROPERTY, tENDPOINT, tDISCONNECT, tGROUP, tPACKAGE,
+                       tVIEW);
 
    if (has_decls) {
       while (not_at_items(tBEGIN))
@@ -16585,6 +16714,9 @@ static void p_package_body_declarative_item(tree_t parent)
       }
       break;
 
+   case tVARIABLE:
+      require_std(STD_08, "variable declarations in packages");
+      // Fall-through
    case tSHARED:
       p_variable_declaration(parent);
       break;
@@ -16646,7 +16778,8 @@ static void p_package_body_declarative_item(tree_t parent)
       break;
 
    default:
-      expect(tFUNCTION, tPROCEDURE, tSHARED, tIMPURE, tPURE, tATTRIBUTE, tTYPE,
+      expect(tFUNCTION, tPROCEDURE, tSHARED, STD(08, tVARIABLE), tIMPURE,
+             tPURE, tATTRIBUTE, tTYPE,
              tCONSTANT, tSUBTYPE, tFILE, tALIAS, tUSE, tGROUP,
              STD(08, tPACKAGE));
    }

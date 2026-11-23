@@ -1089,7 +1089,7 @@ static bool sem_check_const_decl(tree_t t, nametab_t *tab)
             tree_set_flag(t, TREE_F_LOCALLY_STATIC);
       }
    }
-   else if (tree_kind(find_enclosing(tab, S_DESIGN_UNIT)) != T_PACKAGE)
+   else if (tree_kind(find_enclosing(tab, S_DECLARATIVE_REGION)) != T_PACKAGE)
       sem_error(t, "deferred constant declarations are only permitted "
                 "in packages");
 
@@ -1130,6 +1130,12 @@ static bool sem_all_resolved(type_t type)
 
 static bool sem_check_signal_decl(tree_t t, nametab_t *tab)
 {
+   if (find_enclosing(tab, S_PROCESS) != NULL
+       || find_enclosing(tab, S_SUBPROGRAM) != NULL
+       || find_enclosing(tab, S_PROTECTED) != NULL)
+      sem_error(t, "signal declaration is not allowed in a package declared "
+                "within a process, subprogram, or protected type body");
+
    type_t type = tree_type(t);
 
    if (!sem_check_subtype(t, type, tab))
@@ -1276,6 +1282,24 @@ static bool sem_check_var_decl(tree_t t, nametab_t *tab)
 
       if (is_unconstrained)  // Infer constraints from intial value
          tree_set_type(t, merge_constraints(type, tree_type(value)));
+   }
+
+   tree_t region = find_enclosing(tab, S_DECLARATIVE_REGION);
+   if (region != NULL && (tree_kind(region) == T_PACKAGE
+                          || tree_kind(region) == T_PACK_BODY)) {
+      const bool is_shared = !!(tree_flags(t) & TREE_F_SHARED);
+      const bool in_seq = find_enclosing(tab, S_PROCESS) != NULL
+         || find_enclosing(tab, S_SUBPROGRAM) != NULL
+         || find_enclosing(tab, S_PROTECTED) != NULL;
+
+      if (is_shared && in_seq)
+         sem_error(t, "shared variable declaration is not allowed in a "
+                   "package declared within a process, subprogram, or "
+                   "protected type body");
+      else if (!is_shared && !in_seq)
+         sem_error(t, "variable declaration in a package must be shared "
+                   "unless declared within a process, subprogram, or "
+                   "protected type body");
    }
 
    // From VHDL-2000 onwards shared variables must be protected types
@@ -2536,6 +2560,24 @@ static bool sem_check_missing_bodies(tree_t secondary, nametab_t *tab)
                sem_error(d, "deferred constant %s was not given a value in the "
                          "package body", istr(tree_ident(d)));
          }
+         break;
+      case T_PACKAGE:
+         if (package_needs_body(d)) {
+            bool found = false;
+            const int nbdecls = tree_decls(secondary);
+            for (int j = 0; j < nbdecls; j++) {
+               tree_t b = tree_decl(secondary, j);
+               if (tree_kind(b) == T_PACK_BODY && tree_has_primary(b)
+                   && tree_primary(b) == d) {
+                  found = true;
+                  break;
+               }
+            }
+            if (!found && opt_get_int(OPT_MISSING_BODY))
+               sem_error(d, "missing package body for nested package %pI",
+                         tree_ident(d));
+         }
+         break;
       default:
          break;
       }

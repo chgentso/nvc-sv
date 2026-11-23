@@ -4606,6 +4606,32 @@ START_TEST(test_undefarg)
 }
 END_TEST
 
+START_TEST(test_nestedpkg)
+{
+   set_standard(STD_08);
+
+   input_from_file(TESTDIR "/sem/nestedpkg.vhd");
+
+   const error_t expect[] = {
+      {  2, "variable declaration in a package must be shared" },
+      {  6, "missing package body for nested package INNER" },
+      { 35, "shared variable declaration is not allowed in a package" },
+      { 36, "signal declaration is not allowed in a package" },
+      { 45, "variable declaration in a package must be shared" },
+      { 52, "shared variable declaration is not allowed in a package" },
+      { 53, "signal declaration is not allowed in a package" },
+      { 62, "shared variable declaration is not allowed in a package" },
+      { 63, "signal declaration is not allowed in a package" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   parse_and_check(T_PACKAGE, T_PACKAGE, T_PACK_BODY, T_ENTITY, T_ARCH);
+
+   check_expected_errors();
+}
+END_TEST
+
 Suite *get_sem_tests(void)
 {
    Suite *s = suite_create("sem");
@@ -4822,6 +4848,7 @@ Suite *get_sem_tests(void)
    tcase_add_test(tc_core, test_protself);
    tcase_add_test(tc_core, test_gaccess);
    tcase_add_test(tc_core, test_garray);
+   tcase_add_test(tc_core, test_nestedpkg);
    suite_add_tcase(s, tc_core);
 
    return s;

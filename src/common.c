@@ -1442,6 +1442,8 @@ bool package_needs_body(tree_t pack)
          if (!tree_has_ref(d) || tree_kind(tree_ref(d)) == T_PROT_DECL)
             return true;
       }
+      else if (dkind == T_PACKAGE && package_needs_body(d))
+         return true;
    }
 
    return false;
