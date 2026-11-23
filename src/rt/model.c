@@ -200,8 +200,7 @@ typedef struct _rt_model {
 #define TRACE_SIGNALS   1
 #define WAVEFORM_CHUNK  256
 #define PENDING_MIN     4
-#define PENDING_INDEX_MIN 32
-#define INDEX_TOMBSTONE   UINT32_MAX
+#define PENDING_INDEX_MIN 16
 
 static void pending_build_index(rt_pending_t *p);
 static void pending_clear(rt_pending_t *p, unsigned slot);
@@ -3105,7 +3104,7 @@ static void pending_build_index(rt_pending_t *p)
 
    free(p->index);
 
-   unsigned size = 64;
+   unsigned size = 32;
    while (size < p->max * 2)
       size *= 2;
 
@@ -3113,72 +3112,50 @@ static void pending_build_index(rt_pending_t *p)
    p->index_size = size;
    p->index_used = 0;
 
+   const unsigned mask = size - 1;
    for (unsigned i = 0; i < p->count; i++) {
       if (p->wake[i] == NULL)
          continue;
 
-      unsigned h = mix_bits_64((uintptr_t)p->wake[i]) & (size - 1);
+      unsigned h = mix_bits_64((uintptr_t)p->wake[i]) & mask;
       while (p->index[h] != 0)
-         h = (h + 1) & (size - 1);
+         h = (h + 1) & mask;
 
       p->index[h] = i + 1;
       p->index_used++;
    }
 }
 
-static int pending_find(rt_pending_t *p, rt_wakeable_t *obj)
+static inline void pending_index_erase(rt_pending_t *p, unsigned h)
 {
-   if (p->index == NULL) {
-      for (unsigned i = 0; i < p->count; i++) {
-         if (p->wake[i] == obj)
-            return i;
+   // Backward-shift deletion avoids tombstones so lookups stay short
+   const unsigned mask = p->index_size - 1;
+   unsigned cur = h;
+   for (unsigned next = (cur + 1) & mask; ; next = (next + 1) & mask) {
+      const uint32_t e = p->index[next];
+      if (e == 0) {
+         p->index[cur] = 0;
+         break;
       }
 
-      return -1;
+      const unsigned ideal = mix_bits_64((uintptr_t)p->wake[e - 1]) & mask;
+      if (((cur - ideal) & mask) < ((next - ideal) & mask)) {
+         p->index[cur] = e;
+         cur = next;
+      }
    }
 
-   const unsigned mask = p->index_size - 1;
-   for (unsigned h = mix_bits_64((uintptr_t)obj) & mask; ;
-        h = (h + 1) & mask) {
-      const uint32_t e = p->index[h];
-      if (e == 0)
-         return -1;
-      else if (e != INDEX_TOMBSTONE && p->wake[e - 1] == obj)
-         return e - 1;
-   }
+   assert(p->index_used > 0);
+   p->index_used--;
 }
 
-static void pending_set(rt_pending_t *p, unsigned slot, rt_wakeable_t *obj)
+static inline void pending_shrink_tail(rt_pending_t *p)
 {
-   // The slot must be empty or the next one past the end
+   while (p->count > 0 && p->wake[p->count - 1] == NULL)
+      p->count--;
 
-   assert(slot <= p->count);
-   assert(slot == p->count || p->wake[slot] == NULL);
-
-   if (slot == p->count) {
-      assert(p->count < p->max);
-      p->count++;
-   }
-
-   p->wake[slot] = obj;
-
-   if (p->index != NULL) {
-      if (p->index_used * 4 >= p->index_size * 3)
-         pending_build_index(p);
-      else {
-         const unsigned mask = p->index_size - 1;
-         unsigned h = mix_bits_64((uintptr_t)obj) & mask;
-         while (p->index[h] != 0 && p->index[h] != INDEX_TOMBSTONE)
-            h = (h + 1) & mask;
-
-         if (p->index[h] == 0)
-            p->index_used++;
-
-         p->index[h] = slot + 1;
-      }
-   }
-   else if (p->count >= PENDING_INDEX_MIN)
-      pending_build_index(p);
+   if (p->first_free > p->count)
+      p->first_free = p->count;
 }
 
 static void pending_clear(rt_pending_t *p, unsigned slot)
@@ -3191,7 +3168,7 @@ static void pending_clear(rt_pending_t *p, unsigned slot)
       for (unsigned h = mix_bits_64((uintptr_t)obj) & mask; ;
            h = (h + 1) & mask) {
          if (p->index[h] == slot + 1) {
-            p->index[h] = INDEX_TOMBSTONE;
+            pending_index_erase(p, h);
             break;
          }
          assert(p->index[h] != 0);
@@ -3202,6 +3179,8 @@ static void pending_clear(rt_pending_t *p, unsigned slot)
 
    if (slot < p->first_free)
       p->first_free = slot;
+   if (slot + 1 == p->count)
+      pending_shrink_tail(p);
 }
 
 static void sched_event(rt_model_t *m, void **pending, rt_wakeable_t *obj)
@@ -3234,9 +3213,29 @@ static void sched_event(rt_model_t *m, void **pending, rt_wakeable_t *obj)
    }
    else {
       rt_pending_t *p = untag_pointer(*pending, rt_pending_t);
+      unsigned insert_h = 0;
+      DEBUG_ONLY(bool have_h = false);
 
-      if (pending_find(p, obj) >= 0)
-         return;
+      if (p->index == NULL) {
+         for (unsigned i = 0; i < p->count; i++) {
+            if (p->wake[i] == obj)
+               return;
+         }
+      }
+      else {
+         const unsigned mask = p->index_size - 1;
+         unsigned h = mix_bits_64((uintptr_t)obj) & mask;
+         for (; ; h = (h + 1) & mask) {
+            const uint32_t e = p->index[h];
+            if (e == 0) {
+               insert_h = h;
+               DEBUG_ONLY(have_h = true);
+               break;
+            }
+            if (p->wake[e - 1] == obj)
+               return;
+         }
+      }
 
       reg_pin(obj, pending);
 
@@ -3253,11 +3252,27 @@ static void sched_event(rt_model_t *m, void **pending, rt_wakeable_t *obj)
          p = xrealloc_flex(p, sizeof(rt_pending_t), p->max,
                            sizeof(rt_wakeable_t *));
          *pending = tag_pointer(p, 0);
-         if (p->index != NULL)
-            pending_build_index(p);
       }
 
-      pending_set(p, slot, obj);
+      if (slot == p->count) {
+         assert(p->count < p->max);
+         p->count++;
+      }
+
+      p->wake[slot] = obj;
+
+      if (p->index != NULL) {
+         if (p->index_used * 4 >= p->index_size * 3
+             || p->index_size < p->max * 2)
+            pending_build_index(p);
+         else {
+            assert(have_h && p->index[insert_h] == 0);
+            p->index[insert_h] = slot + 1;
+            p->index_used++;
+         }
+      }
+      else if (p->count >= PENDING_INDEX_MIN)
+         pending_build_index(p);
    }
 }
 
@@ -3272,10 +3287,38 @@ static void clear_event(rt_model_t *m, void **pending, rt_wakeable_t *obj)
    }
    else if (*pending != NULL) {
       rt_pending_t *p = untag_pointer(*pending, rt_pending_t);
-      const int slot = pending_find(p, obj);
-      if (slot >= 0) {
-         pending_clear(p, slot);
-         reg_unpin(obj, pending);
+      if (p->index == NULL) {
+         for (unsigned i = 0; i < p->count; i++) {
+            if (p->wake[i] == obj) {
+               p->wake[i] = NULL;
+               if (i < p->first_free)
+                  p->first_free = i;
+               if (i + 1 == p->count)
+                  pending_shrink_tail(p);
+               reg_unpin(obj, pending);
+               return;
+            }
+         }
+      }
+      else {
+         const unsigned mask = p->index_size - 1;
+         for (unsigned h = mix_bits_64((uintptr_t)obj) & mask; ;
+              h = (h + 1) & mask) {
+            const uint32_t e = p->index[h];
+            if (e == 0)
+               return;
+            const unsigned slot = e - 1;
+            if (p->wake[slot] == obj) {
+               pending_index_erase(p, h);
+               p->wake[slot] = NULL;
+               if (slot < p->first_free)
+                  p->first_free = slot;
+               if (slot + 1 == p->count)
+                  pending_shrink_tail(p);
+               reg_unpin(obj, pending);
+               return;
+            }
+         }
       }
    }
 }
@@ -3683,37 +3726,58 @@ static void wakeup_one(rt_model_t *m, rt_wakeable_t *obj)
    }
 }
 
-static int wake_order_cmp(const void *a, const void *b)
+typedef struct {
+   rt_wakeable_t *wake;
+   uint64_t       key;
+} wake_entry_t;
+
+static inline uint64_t wake_order_key(const rt_wakeable_t *w)
 {
-   // Verilog processes woken by the same event run in the order in which
-   // they began to wait, the order of processes that are ready at the
-   // same time being unspecified (IEEE 1800-2017 4.7).  Other kinds of
-   // wakeable go first in the order of the pending list.
+   // Non-Verilog wakeables sort first (key 0) in pending-list order;
+   // Verilog processes follow in wait_seq order (IEEE 1800-2017 4.7).
+   if (w->kind == W_PROC) {
+      const rt_proc_t *p = container_of(w, const rt_proc_t, wakeable);
+      if (p->verilog)
+         return p->wait_seq + 1;
+   }
+   return 0;
+}
 
-   const rt_wakeable_t *wa = *(rt_wakeable_t *const *)a;
-   const rt_wakeable_t *wb = *(rt_wakeable_t *const *)b;
+static void wake_merge_sort(wake_entry_t *arr, int n)
+{
+   wake_entry_t *tmp LOCAL = xmalloc_array(n, sizeof(wake_entry_t));
+   wake_entry_t *src = arr, *dst = tmp;
 
-   const rt_proc_t *pa = wa->kind == W_PROC
-      ? container_of(wa, const rt_proc_t, wakeable) : NULL;
-   const rt_proc_t *pb = wb->kind == W_PROC
-      ? container_of(wb, const rt_proc_t, wakeable) : NULL;
+   for (int width = 1; width < n; width *= 2) {
+      for (int i = 0; i < n; i += 2 * width) {
+         const int mid = MIN(i + width, n);
+         const int end = MIN(i + 2 * width, n);
+         int a = i, b = mid, out = i;
+         while (a < mid && b < end) {
+            if (src[a].key <= src[b].key)
+               dst[out++] = src[a++];
+            else
+               dst[out++] = src[b++];
+         }
+         while (a < mid)
+            dst[out++] = src[a++];
+         while (b < end)
+            dst[out++] = src[b++];
+      }
+      wake_entry_t *swap = src;
+      src = dst;
+      dst = swap;
+   }
 
-   const bool va = pa != NULL && pa->verilog;
-   const bool vb = pb != NULL && pb->verilog;
-
-   if (va != vb)
-      return va ? 1 : -1;
-   else if (!va || pa->wait_seq == pb->wait_seq)
-      return 0;
-   else
-      return pa->wait_seq < pb->wait_seq ? -1 : 1;
+   if (src != arr)
+      memcpy(arr, src, n * sizeof(wake_entry_t));
 }
 
 static void wakeup_all(rt_model_t *m, void **pending)
 {
    if (pointer_tag(*pending) == 1) {
       rt_wakeable_t *wake = untag_pointer(*pending, rt_wakeable_t);
-      if (wake->forked && wake->zombie) {
+      if (unlikely(wake->forked && wake->zombie)) {
          // A forked process which was stopped while it waited
          *pending = NULL;
          proc_unpin(wake);
@@ -3723,48 +3787,59 @@ static void wakeup_all(rt_model_t *m, void **pending)
    }
    else if (*pending != NULL) {
       rt_pending_t *p = untag_pointer(*pending, rt_pending_t);
+      const unsigned count = p->count;
+      if (count == 0)
+         return;
 
-      for (int i = 0; i < p->count; i++) {
-         if (p->wake[i] != NULL && p->wake[i]->forked && p->wake[i]->zombie) {
-            proc_unpin(p->wake[i]);
+      wake_entry_t stack_buf[64];
+      wake_entry_t *heap_buf = NULL;
+      wake_entry_t *order = count <= ARRAY_LEN(stack_buf)
+         ? stack_buf
+         : (heap_buf = xmalloc_array(count, sizeof(wake_entry_t)));
+
+      int n = 0;
+      bool sorted = true;
+      uint64_t prev_key = 0;
+
+      for (unsigned i = 0; i < count; i++) {
+         rt_wakeable_t *w = p->wake[i];
+         if (w == NULL)
+            continue;
+         if (unlikely(w->forked && w->zombie)) {
+            proc_unpin(w);
             pending_clear(p, i);
-         }
-      }
-
-      bool verilog = false;
-      for (int i = 0; i < p->count; i++) {
-         if (p->wake[i] != NULL && p->wake[i]->kind == W_PROC
-             && container_of(p->wake[i], rt_proc_t, wakeable)->verilog)
-            verilog = true;
-      }
-
-      if (verilog) {
-         rt_wakeable_t **order LOCAL =
-            xmalloc_array(p->count, sizeof(rt_wakeable_t *));
-         int n = 0;
-         for (int i = 0; i < p->count; i++) {
-            if (p->wake[i] != NULL)
-               order[n++] = p->wake[i];
+            continue;
          }
 
-         // Stable so that other kinds of wakeable keep their order
-         for (int i = 1; i < n; i++) {
-            rt_wakeable_t *key = order[i];
-            int j = i - 1;
-            for (; j >= 0 && wake_order_cmp(&order[j], &key) > 0; j--)
-               order[j + 1] = order[j];
-            order[j + 1] = key;
-         }
+         const uint64_t k = wake_order_key(w);
+         if (k < prev_key)
+            sorted = false;
+         prev_key = k;
 
-         for (int i = 0; i < n; i++)
-            wakeup_one(m, order[i]);
+         order[n].wake = w;
+         order[n].key = k;
+         n++;
       }
-      else {
-         for (int i = 0; i < p->count; i++) {
-            if (p->wake[i] != NULL)
-               wakeup_one(m, p->wake[i]);
+
+      if (!sorted) {
+         if (n <= 32) {
+            // Stable insertion sort for small unsorted lists
+            for (int i = 1; i < n; i++) {
+               const wake_entry_t key = order[i];
+               int j = i - 1;
+               for (; j >= 0 && order[j].key > key.key; j--)
+                  order[j + 1] = order[j];
+               order[j + 1] = key;
+            }
          }
+         else
+            wake_merge_sort(order, n);
       }
+
+      for (int i = 0; i < n; i++)
+         wakeup_one(m, order[i].wake);
+
+      free(heap_buf);
    }
 }
 
