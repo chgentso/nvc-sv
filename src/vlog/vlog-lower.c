@@ -26174,9 +26174,26 @@ static mir_value_t vlog_crv_expr(vlog_gen_t *g, vlog_node_t v, unsigned width,
          node = vlog_crv_dist(g, v);
          break;
       case V_METHOD_CALL:
-         if (vlog_subkind(v) == V_METHOD_SIZE)
-            node = CRV2(g, CRV_OP_ARRAY_SIZE, g->crv_ctx,
-                        vlog_crv_array(g, vlog_value(v)));
+         if (vlog_subkind(v) == V_METHOD_SIZE) {
+            vlog_node_t arr = vlog_value(v);
+            vlog_node_t et = NULL;
+            if ((vlog_kind(arr) == V_REF || vlog_kind(arr) == V_MEMBER_REF)
+                && vlog_has_ref(arr) && vlog_crv_is_array_decl(vlog_ref(arr)))
+               et = vlog_get_type(vlog_crv_elem_type(vlog_ref(arr)));
+
+            if (et != NULL && vlog_kind(et) == V_CLASS_DECL) {
+               // The solver does not hold an array of objects: the size
+               // is the length it has
+               mir_value_t len = mir_build_uarray_len(
+                  g->mu, vlog_lower_rvalue(g, arr), 0);
+               node = CRV3(g, CRV_OP_CONST, g->crv_ctx,
+                           vlog_crv_to_offset(g, len),
+                           vlog_crv_flags(g, 32, true));
+            }
+            else
+               node = CRV2(g, CRV_OP_ARRAY_SIZE, g->crv_ctx,
+                           vlog_crv_array(g, arr));
+         }
          else
             node = vlog_crv_reduction(g, v);
          break;
