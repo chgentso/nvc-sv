@@ -87,6 +87,14 @@ void pp_defines_iter(pp_iter_t fn, void *ctx);
 
 void add_include_dir(const char *str);
 
+typedef struct {
+   file_ref_t file_ref;
+   int        line;
+   bool       on;
+} scan_cover_pragma_t;
+
+unsigned scan_cover_pragmas(const scan_cover_pragma_t **list);
+
 void scan_as_psl(void);
 void scan_as_vhdl(void);
 void scan_as_verilog(void);

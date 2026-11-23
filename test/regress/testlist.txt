@@ -3178,3 +3178,4 @@ vlogcover18     verilog,cover=statement
 vlogcover16     verilog,cover=statement+branch+toggle
 vlogcover20     shell
 vlogcover17     shell
+vlogcover19     verilog,cover=statement+branch+toggle

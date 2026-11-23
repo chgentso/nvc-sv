@@ -1,0 +1,67 @@
+<?xml version="1.0"?>
+<scope name="WORK">
+  <scope name="vlogcover19" block_name="vlogcover19" kind="module" file="vlogcover19.sv" line="5">
+    <scope name="clk" line="6">
+      <toggle hier="WORK.vlogcover19.clk.BIN_0_TO_1" data="2"/>
+      <toggle hier="WORK.vlogcover19.clk.BIN_1_TO_0" data="1"/>
+    </scope>
+    <scope name="yb" line="7">
+      <toggle hier="WORK.vlogcover19.yb.BIN_0_TO_1" data="2"/>
+      <toggle hier="WORK.vlogcover19.yb.BIN_1_TO_0" data="1"/>
+    </scope>
+    <scope name="on_sig" line="12">
+      <toggle hier="WORK.vlogcover19.on_sig[1].BIN_0_TO_1" data="0"/>
+      <toggle hier="WORK.vlogcover19.on_sig[1].BIN_1_TO_0" data="0"/>
+      <toggle hier="WORK.vlogcover19.on_sig[0].BIN_0_TO_1" data="1"/>
+      <toggle hier="WORK.vlogcover19.on_sig[0].BIN_1_TO_0" data="0"/>
+    </scope>
+    <scope name="_P3" line="17">
+      <scope name="_S2" line="22">
+        <statement hier="WORK.vlogcover19._P3._S2" data="1"/>
+        <scope name="_S0">
+          <statement hier="WORK.vlogcover19._P3._S2._S0" data="1"/>
+        </scope>
+      </scope>
+      <scope name="_S3" line="23">
+        <statement hier="WORK.vlogcover19._P3._S3" data="1"/>
+        <scope name="_B0">
+          <branch hier="WORK.vlogcover19._P3._S3._B0.BIN_TRUE" data="1"/>
+          <branch hier="WORK.vlogcover19._P3._S3._B0.BIN_FALSE" data="0"/>
+          <scope name="_S0" line="24">
+            <statement hier="WORK.vlogcover19._P3._S3._B0._S0" data="1"/>
+          </scope>
+        </scope>
+        <scope name="_B1" line="25">
+          <scope name="_S0" line="26">
+            <statement hier="WORK.vlogcover19._P3._S3._B1._S0" data="0"/>
+          </scope>
+        </scope>
+      </scope>
+      <scope name="_S5" line="33">
+        <statement hier="WORK.vlogcover19._P3._S5" data="1"/>
+        <scope name="_S0">
+          <statement hier="WORK.vlogcover19._P3._S5._S0" data="1"/>
+        </scope>
+      </scope>
+      <scope name="_S6" line="34">
+        <statement hier="WORK.vlogcover19._P3._S6" data="1"/>
+      </scope>
+      <scope name="_S7" line="35">
+        <statement hier="WORK.vlogcover19._P3._S7" data="1"/>
+      </scope>
+    </scope>
+    <scope name="ub" block_name="vlogcover19_b" kind="module" line="9">
+    </scope>
+    <scope name="uc" block_name="vlogcover19_c" kind="module" line="10">
+      <scope name="z" line="52">
+        <toggle hier="WORK.vlogcover19.uc.z.BIN_0_TO_1" data="1"/>
+        <toggle hier="WORK.vlogcover19.uc.z.BIN_1_TO_0" data="0"/>
+      </scope>
+      <scope name="_P0" line="53">
+        <scope name="_S0">
+          <statement hier="WORK.vlogcover19.uc._P0._S0" data="1"/>
+        </scope>
+      </scope>
+    </scope>
+  </scope>
+</scope>

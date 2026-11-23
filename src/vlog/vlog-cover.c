@@ -27,6 +27,7 @@
 
 #include <assert.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <stdlib.h>
 
 // Code coverage for the statements and branches of a Verilog instance.  The
@@ -58,10 +59,17 @@ typedef struct {
 } body_tags_t;
 
 typedef struct {
+   file_ref_t file_ref;
+   int        start;
+   int        end;
+} ignore_range_t;
+
+typedef struct {
    cover_data_t *db;
    cover_obj_t   inst;
    bool          bind;
    body_tags_t  *tags;
+   A(ignore_range_t) ignore;   // Lines with coverage turned off
 } vlog_cover_t;
 
 typedef struct {
@@ -90,6 +98,45 @@ static body_tags_t *vlog_cover_body_tags(ident_t body, bool create)
 
 static void vlog_cover_stmt_list(vlog_cover_t *g, vlog_node_t v,
                                  lazy_cscope_t *parent);
+
+static bool vlog_cover_is_off(vlog_cover_t *g, const loc_t *loc)
+{
+   // Coverage is off after a comment saying so up to the one which turns
+   // it on again
+
+   for (int i = 0; i < g->ignore.count; i++) {
+      const ignore_range_t *ir = &(g->ignore.items[i]);
+      if (ir->file_ref == loc->file_ref && loc->first_line > ir->start
+          && loc->first_line <= ir->end)
+         return true;
+   }
+
+   return false;
+}
+
+static void vlog_cover_find_ignored(vlog_cover_t *g, vlog_node_t body)
+{
+   const int npragmas = vlog_pragmas(body);
+   bool on = true;
+   for (int i = 0; i < npragmas; i++) {
+      vlog_node_t p = vlog_pragma(body, i);
+      if (vlog_kind(p) != V_ATTR_INST
+          || vlog_ident(p) != ident_new("$coverage"))
+         continue;
+
+      const loc_t *loc = vlog_loc(p);
+      const bool turn_on = vlog_ident2(p) == ident_new("on");
+      if (!turn_on && on) {
+         ignore_range_t ir = { loc->file_ref, loc->first_line, INT_MAX };
+         APUSH(g->ignore, ir);
+         on = false;
+      }
+      else if (turn_on && !on) {
+         g->ignore.items[g->ignore.count - 1].end = loc->first_line;
+         on = true;
+      }
+   }
+}
 
 static lazy_cscope_t lazy_cover_scope(vlog_node_t v, lazy_cscope_t *parent,
                                       ident_t name)
@@ -305,6 +352,8 @@ static void vlog_cover_stmt(vlog_cover_t *g, vlog_node_t s,
       return;
 
    const loc_t *loc = vlog_loc(s);
+   if (vlog_cover_is_off(g, loc))
+      return;
 
    cover_obj_t item = vlog_cover_item(g, lcs, COV_ITEM_STMT, loc, 1);
    if (cover_is_null(item))
@@ -500,7 +549,7 @@ static void vlog_cover_toggle_decl(vlog_cover_t *g, vlog_node_t d,
       return;
 
    const loc_t *loc = vlog_loc(d);
-   if (loc_invalid_p(loc) || !vlog_has_type(d))
+   if (loc_invalid_p(loc) || !vlog_has_type(d) || vlog_cover_is_off(g, loc))
       return;
 
    vlog_node_t type = vlog_type(d);
@@ -601,7 +650,8 @@ static void vlog_cover_branch(vlog_cover_t *g, hash_t **map, vlog_node_t key,
                               lazy_cscope_t *lcs, const loc_t *loc,
                               bool choice, cover_src_t src, bool expr)
 {
-   if (!cover_enabled(g->db, COVER_MASK_BRANCH) || loc_invalid_p(loc))
+   if (!cover_enabled(g->db, COVER_MASK_BRANCH) || loc_invalid_p(loc)
+       || vlog_cover_is_off(g, loc))
       return;
 
    cover_obj_t item = vlog_cover_item(g, lcs, COV_ITEM_BRANCH, loc,
@@ -901,6 +951,8 @@ static void vlog_cover_walk(vlog_node_t body, cover_data_t *db,
       .tags = bind ? vlog_cover_body_tags(vlog_ident(body), true) : NULL,
    };
 
+   vlog_cover_find_ignored(&g, body);
+
    lazy_cscope_t root = lazy_cover_scope(body, NULL, NULL);
    root.cscope = cs;
    root.resolved = true;
@@ -950,10 +1002,8 @@ static void vlog_cover_walk(vlog_node_t body, cover_data_t *db,
 
    hset_free(port_decls);
 
-   if (!cover_enabled(db, COVER_MASK_STMT | COVER_MASK_BRANCH))
-      return;
-
-   const int nstmts = vlog_stmts(body);
+   const int nstmts = cover_enabled(db, COVER_MASK_STMT | COVER_MASK_BRANCH)
+      ? vlog_stmts(body) : 0;
    for (int i = 0; i < nstmts; i++) {
       vlog_node_t s = vlog_stmt(body, i);
       switch (vlog_kind(s)) {
@@ -967,6 +1017,8 @@ static void vlog_cover_walk(vlog_node_t body, cover_data_t *db,
          break;
       }
    }
+
+   ACLEAR(g.ignore);
 }
 
 void vlog_cover_block(vlog_node_t body, cover_data_t *db, cover_obj_t cs)

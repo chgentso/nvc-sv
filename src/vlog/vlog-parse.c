@@ -27139,6 +27139,49 @@ static bool at_checker(void)
       && peek_nth(2) == tID;
 }
 
+static void attach_cover_pragmas(vlog_node_t mod, int first, int last)
+{
+   // Comments which turn coverage on and off are recorded by the lexer.  A
+   // module starts with the state left by those before it in the file and
+   // the ones inside it are attached to it as attributes with the location
+   // of the comment.
+
+   const scan_cover_pragma_t *list;
+   const unsigned count = scan_cover_pragmas(&list);
+
+   const file_ref_t file_ref = vlog_loc(mod)->file_ref;
+
+   bool on = true;
+   for (unsigned i = 0; i < count; i++) {
+      if (list[i].file_ref == file_ref && list[i].line < first)
+         on = list[i].on;
+   }
+
+   ident_t name = ident_new("$coverage");
+
+   if (!on) {
+      vlog_node_t a = vlog_new(V_ATTR_INST);
+      vlog_set_ident(a, name);
+      vlog_set_ident2(a, ident_new("off"));
+      loc_t loc = get_loc(MAX(first - 1, 0), 0, MAX(first - 1, 0), 0, file_ref);
+      vlog_set_loc(a, &loc);
+      vlog_add_pragma(mod, a);
+   }
+
+   for (unsigned i = 0; i < count; i++) {
+      if (list[i].file_ref != file_ref || list[i].line < first
+          || list[i].line > last)
+         continue;
+
+      vlog_node_t a = vlog_new(V_ATTR_INST);
+      vlog_set_ident(a, name);
+      vlog_set_ident2(a, ident_new(list[i].on ? "on" : "off"));
+      loc_t loc = get_loc(list[i].line, 0, list[i].line, 0, file_ref);
+      vlog_set_loc(a, &loc);
+      vlog_add_pragma(mod, a);
+   }
+}
+
 static vlog_node_t p_module_declaration(void)
 {
    // module_nonansi_header [ timeunits_declaration ] { module_item }
@@ -27271,6 +27314,9 @@ static vlog_node_t p_module_declaration(void)
 
    expand_user_nets(mod);
    header_damaged = saved_damaged;
+
+   attach_cover_pragmas(mod, vlog_loc(mod)->first_line,
+                        state.last_loc.first_line);
 
    if (optional(tCOLON)) {
       ident_t name = p_identifier();

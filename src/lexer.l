@@ -123,6 +123,32 @@ static A(scanner_state_t) scanner_stack = AINIT;
 
 extern loc_t yylloc;
 extern yylval_t yylval;
+
+static A(scan_cover_pragma_t) cover_pragmas = AINIT;
+
+static void note_cover_pragma(bool on)
+{
+   // A comment in Verilog source that turns coverage off or on: recorded
+   // for the parser which attaches those in a module to it
+
+   // The word must end here and not be the start of a longer one
+   const char *c = yytext + 2;
+   while (isspace_iso88591(*c))
+      c++;
+   c += strlen("coverage");
+   while (isspace_iso88591(*c))
+      c++;
+   c += on ? 2 : 3;
+   if (isalnum_iso88591(*c) || *c == '_')
+      return;
+
+   scan_cover_pragma_t p = {
+      .file_ref = yylloc.file_ref,
+      .line     = yylloc.first_line,
+      .on       = on,
+   };
+   APUSH(cover_pragmas, p);
+}
 %}
 
 LOWER           [a-z\xdf-\xf6\xf8-\xff]
@@ -153,6 +179,8 @@ SYNTH_OFF       {PRAGMA}(?i:synthesis)[ \t]+(?i:translate_off).*
 SYNTH_ON        {PRAGMA}(?i:synthesis)[ \t]+(?i:translate_on).*
 COVERAGE_OFF    {PRAGMA}(?i:coverage)[ \t]+(?i:off).*
 COVERAGE_ON     {PRAGMA}(?i:coverage)[ \t]+(?i:on).*
+VLOG_COV_OFF    "//"{SPACE}*(?i:coverage)[ \t]+(?i:off).*
+VLOG_COV_ON     "//"{SPACE}*(?i:coverage)[ \t]+(?i:on).*
 TRANSLATE_OFF   {PRAGMA}(?i:pragma)[ \t]+(?i:translate_off).*
 TRANSLATE_ON    {PRAGMA}(?i:pragma)[ \t]+(?i:translate_on).*
 PSL_COMMENT     {PRAGMA}(?i:psl)
@@ -389,6 +417,8 @@ PROTECT           ?i:protect
 
 <PSL,INITIAL>"--"        { comment_caller = YY_START; BEGIN(COMMENT); }
 <VLOG,UDP>"//"           { comment_caller = YY_START; BEGIN(COMMENT); }
+<VLOG>{VLOG_COV_OFF}     { note_cover_pragma(false); }
+<VLOG>{VLOG_COV_ON}      { note_cover_pragma(true); }
 {PSL_COMMENT}[^ \t\r\n]  { comment_caller = YY_START; BEGIN(COMMENT); }
 {PSL_COMMENT}            { if (begin_psl_comment()) {
                               in_psl_comment = true;
@@ -1667,6 +1697,12 @@ void scan_as_vhdl(void)
 {
    BEGIN(INITIAL);
    in_psl_comment = false;
+}
+
+unsigned scan_cover_pragmas(const scan_cover_pragma_t **list)
+{
+   *list = cover_pragmas.items;
+   return cover_pragmas.count;
 }
 
 void scan_as_verilog(void)
