@@ -3192,3 +3192,4 @@ crvdisableif1 verilog
 crvreduce1 verilog
 crvdistweight1 verilog
 crvforeachrow1 verilog
+crvidxunsigned1 verilog

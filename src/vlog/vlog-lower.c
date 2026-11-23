@@ -23943,6 +23943,18 @@ static unsigned vlog_crv_elems_per(vlog_node_t decl, int dim)
    return count;
 }
 
+static mir_value_t vlog_crv_index_expr(vlog_gen_t *g, vlog_node_t e)
+{
+   // An index is self-determined: a narrow unsigned value is extended
+   // with zeros and not read as a negative number of its own width
+
+   if (vlog_crv_signed(g, e) || vlog_crv_width(g, e) >= 32)
+      return vlog_crv_expr(g, e, 32, true);
+
+   mir_value_t node = vlog_crv_expr(g, e, 32, false);
+   return CRV3(g, CRV_OP_CAST, g->crv_ctx, node, vlog_crv_flags(g, 32, true));
+}
+
 static mir_value_t vlog_crv_array_index(vlog_gen_t *g, vlog_node_t base,
                                         vlog_node_t v)
 {
@@ -23953,7 +23965,7 @@ static mir_value_t vlog_crv_array_index(vlog_gen_t *g, vlog_node_t base,
    const int nparams = vlog_params(v);
    mir_value_t pos = MIR_NULL_VALUE;
    for (int i = 0; i < nparams; i++) {
-      mir_value_t idx = vlog_crv_expr(g, vlog_param(v, i), 32, true);
+      mir_value_t idx = vlog_crv_index_expr(g, vlog_param(v, i));
 
       if (vlog_crv_is_dynamic_array(decl) && !(vlog_ranges(decl) > i)) {
          pos = idx;
@@ -28194,7 +28206,7 @@ static mir_value_t vlog_crv_inrange_node(vlog_gen_t *g, vlog_node_t e)
          hi = MAX(left, right);
       }
 
-      mir_value_t index = vlog_crv_expr(g, idx, 32, true);
+      mir_value_t index = vlog_crv_index_expr(g, idx);
       mir_value_t bflags = vlog_crv_flags(g, 1, false);
       mir_value_t first = CRV3(g, CRV_OP_CONST, g->crv_ctx, vlog_crv_int(g, lo),
                                flags);
