@@ -3139,6 +3139,7 @@ svcrvspecextern1 verilog
 svcrvstructarr1 verilog
 svstructdynarr1 verilog
 svcrvstructsorry1 verilog,fail,gold
+svcrvsorryfind1 verilog,fail,gold
 svcrvstructnest1 verilog
 svcrvstructrandc1 verilog
 svcrvstructunref1 verilog

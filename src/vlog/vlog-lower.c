@@ -23511,6 +23511,10 @@ static mir_value_t vlog_crv_array(vlog_gen_t *g, vlog_node_t v)
          return vlog_crv_nest_array(g, &ns, NULL);
    }
 
+   if (vlog_kind(v) == V_METHOD_CALL || vlog_kind(v) == V_USER_FCALL)
+      fatal_at(vlog_loc(v), "sorry, the array returned by a method or "
+               "function cannot be used in a constraint");
+
    if (vlog_kind(v) != V_REF && vlog_kind(v) != V_MEMBER_REF)
       fatal_at(vlog_loc(v), "sorry, a constraint on an element of an array "
                "of dynamic arrays or queues is only supported for a rand "
