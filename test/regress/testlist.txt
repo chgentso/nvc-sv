@@ -3183,3 +3183,4 @@ vlogcover20     shell
 vlogcover17     shell
 vlogcover19     verilog,cover=statement+branch+toggle
 vlog_assign_init1 verilog,gold
+svreadmemhier2  verilog,gold

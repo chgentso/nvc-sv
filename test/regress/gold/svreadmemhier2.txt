@@ -1,0 +1,4 @@
+relative 7fffffffff 0123456789
+absolute 7fffffffff
+generate relative 7fffffffff
+generate absolute 7fffffffff

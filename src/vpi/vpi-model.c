@@ -6538,7 +6538,16 @@ static c_vpiObject *vpi_memory_alias(c_vpiObject *obj)
       tb_printf(tb, "%s.", istr(names[i]));
    tb_cat(tb, istr(last));
 
-   c_vpiObject *found = vpi_lookup_name(tb_get(tb), op->hier_scope);
+   // The first name is found in the scope of the call, an enclosing
+   // scope such as the generate block's module, or is a top level module
+   c_vpiObject *found = NULL;
+   for (c_abstractScope *s = is_abstractScope(op->hier_scope);
+        found == NULL && s != NULL; s = parent_scope(s))
+      found = vpi_lookup_name(tb_get(tb), &(s->object));
+
+   if (found == NULL)
+      found = vpi_lookup_name(tb_get(tb), NULL);
+
    return found != NULL ? found : obj;
 }
 
