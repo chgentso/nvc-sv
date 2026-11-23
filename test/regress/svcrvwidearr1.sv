@@ -1,11 +1,9 @@
-// An element of a dynamic array of values wider than 64 bits in a constraint is reported (it used to
+// An element of a fixed size array of values wider than 64 bits with a random index in a constraint is reported (it used to
 // crash the code generator)
 class Foo;
-  rand bit [65:0] q[$];
-  function new;
-    q = '{3{0}};
-  endfunction
-  constraint c { q[0] == 0; q[1] == 1; }
+  rand bit [65:0] q[4];
+  rand int n;
+  constraint c { n inside {[0:3]}; q[n] == 1; }
 endclass
 module svcrvwidearr1;
   Foo foo;
