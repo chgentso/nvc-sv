@@ -4979,7 +4979,7 @@ static void mixed_bridge_sv_event(uint64_t now, rt_signal_t *signal,
       buf[i] = sv_to_vhdl_byte(b->sv_sig->shared.data[i], b->sv_is_net,
                                b->vhdl_is_bit);
 
-   deposit_signal(m, b->vhdl_sig, buf, 0, width);
+   sched_deposit(m, b->vhdl_sig, buf, 0, width, 0, false);
 }
 
 static void mixed_bridge_force(rt_model_t *m, rt_signal_t *s,

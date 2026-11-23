@@ -257,12 +257,34 @@ static void bind_external_name(tree_t name, jit_handle_t scope,
    ident_t path = jit_get_name(j, scope);
    int next_arg = 2;
 
+   // When a VHDL entity is instantiated inside a shared Verilog generate
+   // loop, all iterations share one JIT unit so jit_get_object(j, scope)
+   // refers to iteration 0; use the running instance scope for relative
+   // pathnames when it matches this JIT unit.
+   rt_model_t *m = get_model_or_null();
+   if (m != NULL && tree_parts(name) > 0
+       && tree_subkind(tree_part(name, 0)) == PE_RELATIVE) {
+      rt_scope_t *active = get_active_scope(m);
+      if (active != NULL && active->kind == SCOPE_INSTANCE
+          && tree_kind(active->where) == T_BLOCK
+          && tree_decls(active->where) > 0) {
+         tree_t ah = tree_decl(active->where, 0);
+         if (tree_kind(ah) == T_HIER && tree_ident2(ah) == path) {
+            where = active->where;
+            path = active->name;
+         }
+      }
+   }
+
    const int nparts = tree_parts(name);
    for (int i = 0; i < nparts; i++, where = next, next = NULL) {
       tree_t pe = tree_part(name, i);
       assert(tree_kind(pe) == T_PATH_ELT);
 
       ident_t id = NULL;
+      bool is_gen = false;
+      ident_t gen_base = NULL;
+      int64_t gen_idx = 0;
       switch (tree_subkind(pe)) {
       case PE_ABSOLUTE:
          {
@@ -302,13 +324,9 @@ static void bind_external_name(tree_t name, jit_handle_t scope,
          id = tree_ident(pe);
          break;
       case PE_GENERATE:
-         {
-            LOCAL_TEXT_BUF tb = tb_new();
-            tb_istr(tb, tree_ident(pe));
-            tb_printf(tb, "(%"PRIi64")", args[next_arg++].integer);
-
-            id = ident_new(tb_get(tb));
-         }
+         is_gen = true;
+         gen_base = tree_ident(pe);
+         gen_idx = args[next_arg++].integer;
          break;
       case PE_LIBRARY:
          {
@@ -332,18 +350,31 @@ static void bind_external_name(tree_t name, jit_handle_t scope,
          next = where;
          continue;
       case PE_CARET:
-         do {
-            ident_t parent = ident_runtil(path, '.');
-            assert(parent != NULL);
+         {
+            rt_model_t *m = get_model_or_null();
+            rt_scope_t *rts = (m != NULL && tree_kind(where) == T_BLOCK)
+               ? find_scope(m, where) : NULL;
+            do {
+               if (rts != NULL && rts->parent != NULL
+                   && tree_kind(rts->parent->where) == T_BLOCK) {
+                  rts = rts->parent;
+                  next = rts->where;
+                  path = rts->name;
+                  continue;
+               }
 
-            if (parent == lib_name(lib_work()) || tree_kind(where) != T_BLOCK)
-               jit_msg(tree_loc(pe), DIAG_FATAL, "relative pathname has "
-                       "no containing declarative region");
+               ident_t parent = ident_runtil(path, '.');
+               assert(parent != NULL);
 
-            scope = jit_lazy_compile(j, parent);
-            path = jit_get_name(j, scope);
-            next = tree_from_object(jit_get_object(j, scope));
-         } while (is_implicit_block(next) || is_vhdl_shim_block(next));
+               if (parent == lib_name(lib_work()) || tree_kind(where) != T_BLOCK)
+                  jit_msg(tree_loc(pe), DIAG_FATAL, "relative pathname has "
+                          "no containing declarative region");
+
+               scope = jit_lazy_compile(j, parent);
+               path = jit_get_name(j, scope);
+               next = tree_from_object(jit_get_object(j, scope));
+            } while (is_implicit_block(next) || is_vhdl_shim_block(next));
+         }
          continue;
       default:
          should_not_reach_here();
@@ -367,12 +398,36 @@ static void bind_external_name(tree_t name, jit_handle_t scope,
 
       container = where;
 
+      if (is_gen) {
+         if (is_verilog_block(where))
+            id = ident_sprintf("%s[%"PRIi64"]", istr(gen_base), gen_idx);
+         else
+            id = ident_sprintf("%s(%"PRIi64")", istr(gen_base), gen_idx);
+      }
+
       next = select_name(where, id);
+      if (next == NULL && !is_gen && is_verilog_block(where)) {
+         // VHDL extended identifiers such as \gen_x[3]\ carry outer
+         // backslashes; strip them when matching Verilog scope/object names
+         const char *s = istr(id);
+         const size_t len = ident_len(id);
+         if (len > 2 && s[0] == '\\' && s[len - 1] == '\\') {
+            LOCAL_TEXT_BUF tb = tb_new();
+            for (size_t k = 1; k + 1 < len; k++) {
+               tb_append(tb, s[k]);
+               if (s[k] == '\\' && k + 2 < len && s[k + 1] == '\\')
+                  k++;
+            }
+            next = select_name(where, ident_new(tb_get(tb)));
+         }
+      }
       if (next == NULL && is_vhdl_shim_block(where)) {
          // Descend into the VHDL entity nested beneath the generated shim
          where = tree_stmt(where, 0);
          path = ident_prefix(path, tree_ident(where), '.');
          container = where;
+         if (is_gen)
+            id = ident_sprintf("%s(%"PRIi64")", istr(gen_base), gen_idx);
          next = select_name(where, id);
       }
 

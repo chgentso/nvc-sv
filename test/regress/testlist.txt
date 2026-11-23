@@ -3203,3 +3203,4 @@ svunwind2       verilog,fail,gold
 resunwind1      2008
 resunwind2      2008,fail
 resunwind3      2008
+mixedext1       mixed,2008
