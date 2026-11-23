@@ -3136,3 +3136,4 @@ svcrvoob2 verilog
 svcrvstructarr1 verilog
 svstructdynarr1 verilog
 svcrvstructsorry1 verilog,fail,gold
+svcrvstructnest1 verilog
