@@ -1678,6 +1678,47 @@ static void evidence_gate(wk_t *w, conn_evidence_t *ev, vlog_node_t v)
    ev->cls = CONN_EV_COMB;
 }
 
+// Does the process check a concurrent assertion, cover or assumption
+static bool has_concurrent_check(vlog_node_t v, int depth)
+{
+   const int n = vlog_stmts(v);
+   for (int i = 0; i < n; i++) {
+      vlog_node_t s = vlog_stmt(v, i);
+      switch (vlog_kind(s)) {
+      case V_ASSERT:
+      case V_ASSUME:
+      case V_COVER:
+         if (vlog_subkind(s) == V_ASSERT_CONCURRENT
+             || vlog_subkind(s) == V_ASSERT_COVER_SEQ)
+            return true;
+         break;
+      case V_TIMING:
+      case V_SEQ_BLOCK:
+         if (depth < 4 && has_concurrent_check(s, depth + 1))
+            return true;
+         break;
+      default:
+         break;
+      }
+   }
+
+   return false;
+}
+
+// What the process of a concurrent assertion drives is its own bookkeeping
+// of the disable condition: it drives nothing of the design
+static void drop_internal_outputs(conn_design_t *cd, conn_proc_t *proc,
+                                  conn_evidence_t *ev)
+{
+   unsigned n = 0;
+   for (unsigned i = 0; i < ev->nouts; i++) {
+      const conn_range_t *d = &(proc->drives[ev->outs[i].drive]);
+      if (d->net->name[0] != '$')
+         ev->outs[n++] = ev->outs[i];
+   }
+   ev->nouts = n;
+}
+
 void vlog_proc_evidence(conn_design_t *cd, conn_proc_t *proc, vlog_node_t v)
 {
    conn_evidence_t *ev = dalloc(cd, sizeof(conn_evidence_t));
@@ -1734,6 +1775,9 @@ void vlog_proc_evidence(conn_design_t *cd, conn_proc_t *proc, vlog_node_t v)
       }
 
       wk_outputs(&w, ev);
+
+      if (vlog_kind(v) == V_ALWAYS && has_concurrent_check(v, 0))
+         drop_internal_outputs(cd, proc, ev);
    }
 
    wk_free(&w);

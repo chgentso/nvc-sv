@@ -3618,6 +3618,18 @@ static bool is_interface_block(tree_t b)
    return body != NULL && (vlog_flags(body) & VLOG_F_INTERFACE);
 }
 
+// With evidence the processes that stand for concurrent assertions are
+// part of the netlist: the one that checks, and the ones that copy the
+// signals it samples, which tell what the checks read
+static bool keep_generated(conn_design_t *cd, ident_t id)
+{
+   if (!cd->evidence)
+      return false;
+
+   const char *s = istr(id);
+   return strncmp(s, "$assert", 7) == 0 || strncmp(s, "$postponed_a", 12) == 0;
+}
+
 static void scan_stmts(bctx_t *bc, tree_t blk, const char *prefix, int pass)
 {
    conn_design_t *cd = bc->cd;
@@ -3659,7 +3671,7 @@ static void scan_stmts(bctx_t *bc, tree_t blk, const char *prefix, int pass)
 
             ident_t id = vlog_has_ident(v) ? vlog_ident(v)
                : (tree_has_ident(s) ? tree_ident(s) : NULL);
-            if (id != NULL && istr(id)[0] == '$')
+            if (id != NULL && istr(id)[0] == '$' && !keep_generated(cd, id))
                continue;   // Compiler generated process
 
             add_process(bc, prefix, id, kind, s);

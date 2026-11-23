@@ -2145,6 +2145,56 @@ START_TEST(test_ev_reads_vhdl)
 }
 END_TEST
 
+START_TEST(test_ev_sva)
+{
+   set_standard(STD_19);
+   input_from_file(TESTDIR "/netlist/ev_sva.sv");
+
+   tree_t e = run_elab();
+   fail_if_errors();
+
+   const conn_build_opts_t bopts = { .evidence = true };
+   conn_design_t *cd = conn_build_with(e, &bopts);
+   ck_assert_ptr_nonnull(cd);
+
+   conn_block_t *top = conn_root(cd, 0);
+
+   // Each assertion is a cell that reads sampled copies and drives nothing
+   unsigned nchecks = 0, ncopies = 0;
+   for (unsigned i = 0; i < top->nprocs; i++) {
+      const conn_proc_t *p = top->procs[i];
+      ck_assert_ptr_nonnull(p->ev);
+
+      bool samples = false;
+      for (unsigned j = 0; j < p->nreads; j++)
+         samples |= strncmp(p->reads[j].net->name, "$sampled.", 9) == 0;
+
+      if (samples && p->ev->nouts == 0 && p->ev->cls == CONN_EV_COMB
+          && !p->ev->approx)
+         nchecks++;
+
+      // The copy of a signal to its sampled value
+      if (p->ev->nouts == 1 && p->ndrives == 1
+          && strcmp(p->drives[0].net->name, "$sampled.r") == 0) {
+         ck_assert(p->ev->outs[0].has_copy);
+         ck_assert_str_eq(p->ev->outs[0].copy.net->name, "r");
+         ncopies++;
+      }
+   }
+
+   ck_assert_uint_eq(nchecks, 2);
+   ck_assert_uint_eq(ncopies, 1);
+   conn_free(cd);
+
+   // Without evidence the generated processes are not in the netlist
+   cd = conn_build(e);
+   top = conn_root(cd, 0);
+   for (unsigned i = 0; i < top->nprocs; i++)
+      ck_assert_ptr_null(strchr(top->procs[i]->name, '$'));
+   conn_free(cd);
+}
+END_TEST
+
 Suite *get_netlist_tests(void)
 {
    Suite *s = suite_create("netlist");
@@ -2175,6 +2225,7 @@ Suite *get_netlist_tests(void)
    tcase_add_test(tc, test_ev_struct_vhdl);
    tcase_add_test(tc, test_ev_reads);
    tcase_add_test(tc, test_ev_reads_vhdl);
+   tcase_add_test(tc, test_ev_sva);
    suite_add_tcase(s, tc);
 
    return s;
