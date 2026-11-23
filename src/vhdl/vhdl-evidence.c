@@ -74,6 +74,7 @@ typedef struct {
    range_list_t   sync_reset;
    range_list_t   guards;
    range_list_t   pcall;
+   A(conn_read_ev_t) uses;  // How the reads are used
    out_t         *outs;
    hash_t        *vars;
    var_t         *varlist;
@@ -256,10 +257,12 @@ static void var_read_cb(tree_t t, void *ctx)
       APUSH(*vv->ctrl, v->ctrl.items[i]);
 }
 
+static void expr_uses(walker_t *w, tree_t e, unsigned ctx);
+
 // Add what the expression reads to DATA, and the control sets of the
-// variables it reads to CTRL
+// variables it reads to CTRL.  UCTX, if not zero, is how the value is used.
 static void expr_deps(walker_t *w, tree_t e, range_list_t *data,
-                      range_list_t *ctrl)
+                      range_list_t *ctrl, unsigned uctx)
 {
    vhdl_collect_reads(w->cd, e, data, false);
 
@@ -267,6 +270,9 @@ static void expr_deps(walker_t *w, tree_t e, range_list_t *data,
       varvisit_t vv = { w, data, ctrl };
       tree_visit_only(e, var_read_cb, &vv, T_REF);
    }
+
+   if (uctx != 0)
+      expr_uses(w, e, uctx);
 }
 
 // An expression that reads no signal and no variable
@@ -275,9 +281,271 @@ static bool constant_expr(walker_t *w, tree_t e)
    SCOPED_LIST(range_list_t, data);
    SCOPED_LIST(range_list_t, ctrl);
    const bool saved = w->reg_var;
-   expr_deps(w, e, &data, &ctrl);
+   expr_deps(w, e, &data, &ctrl, 0);
    w->reg_var = saved;
    return data.count == 0 && ctrl.count == 0;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Uses of what is read
+
+// The use of a name that is assigned to a variable to be read later: it
+// is the use of the variable that counts
+#define U_DEFER   0x8000
+
+static void use_add(walker_t *w, const conn_range_t *r, unsigned uses)
+{
+   conn_read_ev_t u = { .sig = *r, .uses = uses };
+   APUSH(w->uses, u);
+}
+
+// The operator or function a call names, in lower case, or NULL: the
+// name is  IEEE.NUMERIC_STD."+"(UU)U  or  WORK.PKG.FUNC(...)
+static const char *call_name(tree_t e)
+{
+   static char buf[64];
+
+   if (tree_kind(e) != T_FCALL || !tree_has_ident(e))
+      return NULL;
+
+   const char *s = istr(tree_ident(e)), *end;
+   const char *quote = strchr(s, '"');
+   if (quote != NULL) {
+      s = quote + 1;
+      end = strchr(s, '"');
+      if (end == NULL)
+         return NULL;
+   }
+   else {
+      end = strchr(s, '(');
+      if (end == NULL)
+         end = s + strlen(s);
+      const char *dot = memrchr(s, '.', end - s);
+      if (dot != NULL)
+         s = dot + 1;
+   }
+
+   snprintf(buf, sizeof(buf), "%.*s", (int)MIN(end - s, 60), s);
+   for (char *c = buf; *c; c++)
+      *c = tolower((unsigned char)*c);
+   return buf;
+}
+
+static bool is_number_type(tree_t e)
+{
+   type_t type = tree_type(e);
+   return type_is_integer(type) || type_is_real(type);
+}
+
+static void expr_uses(walker_t *w, tree_t e, unsigned ctx);
+
+// The indices of a name and of the names it is made of
+static void name_indices(walker_t *w, tree_t e)
+{
+   for (;;) {
+      switch (tree_kind(e)) {
+      case T_ARRAY_REF:
+         for (unsigned i = 0; i < tree_params(e); i++) {
+            tree_t v = param_value(e, i);
+            if (v != NULL)
+               expr_uses(w, v, CONN_USE_INDEX);
+         }
+         e = tree_value(e);
+         continue;
+      case T_ARRAY_SLICE:
+         if (tree_ranges(e) > 0) {
+            tree_t r = tree_range(e, 0);
+            if (tree_subkind(r) == RANGE_TO || tree_subkind(r) == RANGE_DOWNTO) {
+               expr_uses(w, tree_left(r), CONN_USE_INDEX);
+               expr_uses(w, tree_right(r), CONN_USE_INDEX);
+            }
+         }
+         e = tree_value(e);
+         continue;
+      case T_RECORD_REF:
+         e = tree_value(e);
+         continue;
+      default:
+         return;
+      }
+   }
+}
+
+// A name whose bits are used as CTX say
+static void name_use(walker_t *w, tree_t e, unsigned ctx)
+{
+   conn_range_t r;
+   bool approx = false;
+
+   if (vhdl_select(w->cd, e, &r, &approx)) {
+      if (ctx == U_DEFER)
+         return;
+
+      unsigned k = ctx;
+      const bool whole = !approx && tree_kind(e) != T_ARRAY_SLICE;
+      if (r.hi == r.lo && !approx)
+         k = CONN_USE_BIT;
+      else if (approx) {
+         // A select that is not static is a multiplexer of the bits
+         if (ctx == CONN_USE_COPY || ctx == CONN_USE_BIT
+             || ctx == CONN_USE_CONST)
+            k = CONN_USE_LOGIC;
+      }
+      else if (!whole && ctx == CONN_USE_COPY)
+         k = CONN_USE_BIT;   // A slice is not the whole pin
+
+      use_add(w, &r, k);
+      return;
+   }
+
+   // A variable stands for what was assigned to it
+   tree_t base = name_base(e), decl;
+   if (base != NULL && var_ref_p(base, &decl) && ctx != U_DEFER) {
+      var_t *v = get_var(w, decl);
+      const unsigned k = ctx != CONN_USE_COPY ? ctx
+         : (v->has_copy ? CONN_USE_COPY : CONN_USE_STORE);
+      for (unsigned i = 0; i < v->data.count; i++) {
+         const conn_range_t *d = &(v->data.items[i]);
+         use_add(w, d, d->hi == d->lo ? CONN_USE_BIT : k);
+      }
+   }
+}
+
+// Everything that E reads is used as CTX
+static void use_all(walker_t *w, tree_t e, unsigned ctx)
+{
+   SCOPED_LIST(range_list_t, reads);
+   vhdl_collect_reads(w->cd, e, &reads, false);
+   for (unsigned i = 0; i < reads.count; i++)
+      use_add(w, &(reads.items[i]), ctx);
+
+   if (w->has_vars) {
+      SCOPED_LIST(range_list_t, data);
+      SCOPED_LIST(range_list_t, ctrl);
+      varvisit_t vv = { w, &data, &ctrl };
+      const bool saved = w->reg_var;
+      tree_visit_only(e, var_read_cb, &vv, T_REF);
+      w->reg_var = saved;
+      for (unsigned i = 0; i < data.count; i++)
+         use_add(w, &(data.items[i]), ctx);
+   }
+}
+
+// The expression E delivers its value to something that uses it as CTX:
+// CONN_USE_COPY if the whole value is assigned to a target of its width
+static void expr_uses(walker_t *w, tree_t e, unsigned ctx)
+{
+   switch (tree_kind(e)) {
+   case T_QUALIFIED:
+      expr_uses(w, tree_value(e), ctx);
+      return;
+
+   case T_TYPE_CONV:
+      // A conversion to a number is arithmetic, one between arrays of
+      // bits keeps them
+      expr_uses(w, tree_value(e), is_number_type(e) ? CONN_USE_ARITH : ctx);
+      return;
+
+   case T_REF:
+      name_use(w, e, ctx);   // Nothing if a constant, literal or generic
+      return;
+
+   case T_ARRAY_REF:
+   case T_ARRAY_SLICE:
+   case T_RECORD_REF:
+      name_use(w, e, ctx);
+      name_indices(w, e);
+      return;
+
+   case T_LITERAL:
+   case T_STRING:
+      return;
+
+   case T_AGGREGATE:
+      for (unsigned i = 0; i < tree_assocs(e); i++) {
+         tree_t a = tree_assoc(e, i);
+         if (tree_has_value(a))
+            expr_uses(w, tree_value(a), CONN_USE_STORE);
+      }
+      return;
+
+   case T_FCALL:
+      {
+         const char *n = call_name(e);
+         const unsigned np = tree_params(e);
+         if (n == NULL)
+            break;
+
+         unsigned k = CONN_USE_CALL;
+         if (!strcmp(n, "and") || !strcmp(n, "or") || !strcmp(n, "xor")
+             || !strcmp(n, "nand") || !strcmp(n, "nor") || !strcmp(n, "xnor")
+             || !strcmp(n, "not"))
+            k = CONN_USE_LOGIC;
+         else if (!strcmp(n, "+") || !strcmp(n, "-") || !strcmp(n, "*")
+                  || !strcmp(n, "/") || !strcmp(n, "mod") || !strcmp(n, "rem")
+                  || !strcmp(n, "abs") || !strcmp(n, "**")
+                  || !strcmp(n, "to_integer") || !strcmp(n, "conv_integer")
+                  || !strcmp(n, "to_unsigned") || !strcmp(n, "to_signed"))
+            k = CONN_USE_ARITH;
+         else if (!strcmp(n, "<") || !strcmp(n, ">") || !strcmp(n, "<=")
+                  || !strcmp(n, ">="))
+            k = CONN_USE_COMPARE;
+         else if (!strcmp(n, "=") || !strcmp(n, "/=")) {
+            k = CONN_USE_COMPARE;
+            for (unsigned i = 0; i < np; i++) {
+               tree_t v = param_value(e, i);
+               if (v != NULL && constant_expr(w, v))
+                  k = CONN_USE_CONST;
+            }
+         }
+         else if (!strcmp(n, "sll") || !strcmp(n, "srl") || !strcmp(n, "sla")
+                  || !strcmp(n, "sra") || !strcmp(n, "rol")
+                  || !strcmp(n, "ror")) {
+            // Moving the bits by a known amount keeps them apart
+            tree_t amount = np > 1 ? param_value(e, 1) : NULL;
+            tree_t v = param_value(e, 0);
+            if (v != NULL)
+               expr_uses(w, v, amount != NULL && constant_expr(w, amount)
+                         ? CONN_USE_LOGIC : CONN_USE_ARITH);
+            if (amount != NULL)
+               expr_uses(w, amount, CONN_USE_ARITH);
+            return;
+         }
+         else if (!strcmp(n, "&"))
+            k = CONN_USE_STORE;
+         else if (!strcmp(n, "resize"))
+            k = CONN_USE_STORE;
+         else if (!strcmp(n, "rising_edge") || !strcmp(n, "falling_edge"))
+            k = CONN_USE_LOGIC;
+         else if (np == 1 && (!strcmp(n, "std_logic_vector")
+                              || !strcmp(n, "unsigned") || !strcmp(n, "signed")
+                              || !strcmp(n, "to_stdlogicvector")
+                              || !strcmp(n, "to_bitvector")
+                              || !strcmp(n, "to_01")
+                              || !strcmp(n, "to_x01"))) {
+            tree_t v = param_value(e, 0);
+            if (v != NULL)
+               expr_uses(w, v, ctx);
+            return;
+         }
+
+         for (unsigned i = 0; i < np; i++) {
+            tree_t v = param_value(e, i);
+            if (v != NULL)
+               expr_uses(w, v, k);
+         }
+      }
+      return;
+
+   case T_ATTR_REF:
+      use_all(w, e, CONN_USE_LOGIC);
+      return;
+
+   default:
+      break;
+   }
+
+   use_all(w, e, CONN_USE_CALL);
 }
 
 // A test of one signal against a literal: its level
@@ -412,7 +680,7 @@ static bool split_edge(walker_t *w, tree_t e, tree_t *clk, conn_edge_t *edge,
       if (split_edge(w, param_value(e, i), clk, edge, &tmp)) {
          for (unsigned j = 0; j < tmp.count; j++)
             APUSH(*rest, tmp.items[j]);
-         expr_deps(w, param_value(e, 1 - i), rest, rest);
+         expr_deps(w, param_value(e, 1 - i), rest, rest, CONN_USE_CONST);
          return true;
       }
    }
@@ -476,19 +744,40 @@ static void assign_to(walker_t *w, tree_t target, tree_t s)
    tree_t single = NULL;
 
    if (tree_kind(s) == T_SIGNAL_ASSIGN) {
+      if (nwaves == 1 && tree_has_value(tree_waveform(s, 0))
+          && !tree_has_delay(tree_waveform(s, 0)))
+         single = tree_value(tree_waveform(s, 0));
+   }
+   else if (tree_has_value(s))
+      single = tree_value(s);
+
+   // How the value is used: a whole copy of a name, a name that is only
+   // kept in a variable until it is read, or a word stored not bit for bit
+   unsigned vctx = CONN_USE_COPY;
+   tree_t sv = strip(single != NULL ? single : NULL);
+   if (single == NULL || (sv != NULL && name_kind_p(sv))) {
+      conn_range_t src, tr;
+      bool tapprox = false;
+      tree_t tbase = name_base(target), tdecl;
+      if (single != NULL && tbase != NULL && var_ref_p(tbase, &tdecl))
+         vctx = U_DEFER;
+      else if (single != NULL && copy_source(w, single, &src)
+               && vhdl_select(w->cd, strip(target), &tr, &tapprox)
+               && !tapprox && src.hi - src.lo == tr.hi - tr.lo)
+         vctx = CONN_USE_COPY;
+      else
+         vctx = CONN_USE_STORE;
+   }
+
+   if (tree_kind(s) == T_SIGNAL_ASSIGN) {
       for (unsigned i = 0; i < nwaves; i++) {
          tree_t wv = tree_waveform(s, i);
-         if (tree_has_value(wv)) {
-            expr_deps(w, tree_value(wv), &data, &ctrl);
-            if (nwaves == 1 && !tree_has_delay(wv))
-               single = tree_value(wv);
-         }
+         if (tree_has_value(wv))
+            expr_deps(w, tree_value(wv), &data, &ctrl, vctx);
       }
    }
-   else if (tree_has_value(s)) {
-      expr_deps(w, tree_value(s), &data, &ctrl);
-      single = tree_value(s);
-   }
+   else if (tree_has_value(s))
+      expr_deps(w, tree_value(s), &data, &ctrl, vctx);
 
    append_list(&ctrl, &w->guards);
 
@@ -626,7 +915,7 @@ static void walk_clocked_if(walker_t *w, tree_t s, unsigned k, tree_t clk,
          add_async(w, &r, level);
       else if (tree_has_value(c)) {
          SCOPED_LIST(range_list_t, reads);
-         expr_deps(w, tree_value(c), &reads, &reads);
+         expr_deps(w, tree_value(c), &reads, &reads, CONN_USE_CONST);
          merge_ranges(&reads);
          for (unsigned j = 0; j < reads.count; j++)
             add_async(w, &reads.items[j], CONN_LEVEL_UNKNOWN);
@@ -701,7 +990,7 @@ static void walk_if(walker_t *w, tree_t s, bool first)
       conn_level_t level;
       if (tree_has_value(c) && simple_test(w, tree_value(c), &r, &level)
           && only_constants(w, c))
-         expr_deps(w, tree_value(c), &w->sync_reset, &w->sync_reset);
+         expr_deps(w, tree_value(c), &w->sync_reset, &w->sync_reset, 0);
    }
 
    const size_t mark = w->guards.count;
@@ -711,7 +1000,7 @@ static void walk_if(walker_t *w, tree_t s, bool first)
    for (unsigned i = 0; i < n; i++) {
       tree_t c = tree_cond(s, i);
       if (tree_has_value(c))
-         expr_deps(w, tree_value(c), &w->guards, &w->guards);
+         expr_deps(w, tree_value(c), &w->guards, &w->guards, CONN_USE_CONST);
 
       w->first_stmt = false;
       walk_stmts(w, c);
@@ -733,7 +1022,7 @@ static void walk_stmt(walker_t *w, tree_t s, bool first)
    case T_MATCH_CASE:
       {
          const size_t mark = w->guards.count;
-         expr_deps(w, tree_value(s), &w->guards, &w->guards);
+         expr_deps(w, tree_value(s), &w->guards, &w->guards, CONN_USE_CONST);
          w->cond_depth++;
          for (unsigned i = 0; i < tree_stmts(s); i++)
             walk_stmts(w, tree_stmt(s, i));
@@ -752,7 +1041,7 @@ static void walk_stmt(walker_t *w, tree_t s, bool first)
          // A bound that depends on a signal or variable is approximated
          SCOPED_LIST(range_list_t, bound);
          for (unsigned i = 0; i < tree_ranges(s); i++)
-            expr_deps(w, tree_range(s, i), &bound, &bound);
+            expr_deps(w, tree_range(s, i), &bound, &bound, CONN_USE_ARITH);
 
          const size_t mark = w->guards.count;
          if (bound.count > 0) {
@@ -774,7 +1063,7 @@ static void walk_stmt(walker_t *w, tree_t s, bool first)
          approx_because(w, CONN_WHY_LOOP);
          const size_t mark = w->guards.count;
          if (tree_has_value(s))
-            expr_deps(w, tree_value(s), &w->guards, &w->guards);
+            expr_deps(w, tree_value(s), &w->guards, &w->guards, CONN_USE_CONST);
          w->cond_depth++;
          w->loop_depth++;
          walk_stmts(w, s);
@@ -805,7 +1094,7 @@ static void walk_stmt(walker_t *w, tree_t s, bool first)
       for (unsigned i = 0; i < tree_params(s); i++) {
          tree_t v = param_value(s, i);
          if (v != NULL)
-            expr_deps(w, v, &w->pcall, &w->pcall);
+            expr_deps(w, v, &w->pcall, &w->pcall, CONN_USE_CALL);
       }
       break;
 
@@ -866,6 +1155,7 @@ static void run_pass(walker_t *w, tree_t t, int pass, bool wait_clocked,
    w->async.count = 0;
    w->sync_reset.count = 0;
    w->pcall.count = 0;
+   w->uses.count = 0;
    for (unsigned i = 0; i < w->proc->ndrives; i++)
       clear_out(&w->outs[i]);
 
@@ -998,6 +1288,9 @@ void vhdl_proc_evidence(conn_design_t *cd, conn_proc_t *proc, tree_t t)
    finish_list(&w.sync_reset);
    ev->nsync_reset = w.sync_reset.count;
    ev->sync_reset = DDUP(cd, w.sync_reset, conn_range_t);
+   ev->nreads = w.uses.count;
+   ev->reads = DDUP(cd, w.uses, conn_read_ev_t);
+   ev->has_reads = true;
 
    merge_ranges(&w.pcall);
 
@@ -1099,6 +1392,7 @@ cleanup:
    ACLEAR(w.sync_reset);
    ACLEAR(w.guards);
    ACLEAR(w.pcall);
+   ACLEAR(w.uses);
 }
 
 ////////////////////////////////////////////////////////////////////////////////

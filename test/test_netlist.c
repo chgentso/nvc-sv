@@ -2105,6 +2105,46 @@ START_TEST(test_ev_reads)
 }
 END_TEST
 
+START_TEST(test_ev_reads_vhdl)
+{
+   set_standard(STD_08);
+   input_from_file(TESTDIR "/netlist/ev_reads.vhd");
+
+   tree_t e = run_elab();
+   fail_if_errors();
+
+   const conn_build_opts_t bopts = { .evidence = true };
+   conn_design_t *cd = conn_build_with(e, &bopts);
+   ck_assert_ptr_nonnull(cd);
+
+   conn_block_t *top = conn_root(cd, 0);
+
+   ck_assert_uint_eq(net_uses(top, "process @20", "A"), CONN_USE_COPY);
+   ck_assert_uint_eq(net_uses(top, "process @24", "B"), CONN_USE_ARITH);
+   ck_assert_uint_eq(net_uses(top, "process @31", "C"), CONN_USE_LOGIC);
+   ck_assert_uint_eq(net_uses(top, "process @31", "E"), CONN_USE_LOGIC);
+   ck_assert_uint_eq(net_uses(top, "process @31", "S"), CONN_USE_BIT);
+   ck_assert_uint_eq(net_uses(top, "process @39", "H"), CONN_USE_CONST);
+   ck_assert_uint_eq(net_uses(top, "process @39", "A"), CONN_USE_COMPARE);
+   ck_assert_uint_eq(net_uses(top, "process @39", "E"), CONN_USE_BIT);
+   ck_assert_uint_eq(net_uses(top, "process @50", "IDX"), CONN_USE_ARITH);
+   ck_assert_uint_eq(net_uses(top, "process @57", "C"), CONN_USE_STORE);
+   ck_assert_uint_eq(net_uses(top, "process @62", "G"), CONN_USE_ARITH);
+
+   // A word that reaches an addition through a variable
+   ck_assert_uint_eq(net_uses(top, "process @62", "F"), CONN_USE_ARITH);
+
+   char *json = write_json_ev(cd, -1, true);
+   ck_has(json, "\"B\":[\"arith\"]");
+   ck_has(json, "\"A\":[\"copy\"]");
+   ck_has(json, "\"CLK\":[]");
+   ck_has(json, "\"H\":[\"const-compare\"]");
+   free(json);
+
+   conn_free(cd);
+}
+END_TEST
+
 Suite *get_netlist_tests(void)
 {
    Suite *s = suite_create("netlist");
@@ -2134,6 +2174,7 @@ Suite *get_netlist_tests(void)
    tcase_add_test(tc, test_ev_struct);
    tcase_add_test(tc, test_ev_struct_vhdl);
    tcase_add_test(tc, test_ev_reads);
+   tcase_add_test(tc, test_ev_reads_vhdl);
    suite_add_tcase(s, tc);
 
    return s;
