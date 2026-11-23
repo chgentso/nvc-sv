@@ -20253,6 +20253,11 @@ static vlog_node_t specialise_class(vlog_node_t generic)
    const vlog_kind_t saved_kind = param_kind;
    const int saved_gen_dead = gen_dead;
 
+   // The class may be specialised in the body of a method defined outside
+   // of its class, which must not change how the methods of this one end
+   const bool saved_extern_def = extern_definition;
+   extern_definition = false;
+
    vlog_node_t saved_container = spec_container;
    spec_container = container;
 
@@ -20288,6 +20293,7 @@ static vlog_node_t specialise_class(vlog_node_t generic)
       replay_generic_extern(g->externs[i], v, g->spec_scopes[g->nspecs - 1]);
 
    spec_container = saved_extern_container;
+   extern_definition = saved_extern_def;
 
    if (class_depth == 0)
       flush_deferred_bodies(false);

@@ -3135,6 +3135,7 @@ svcrvenumscope1 verilog
 svcrvoob2 verilog
 svcrvoob3 verilog
 svcrvoob4 verilog
+svcrvspecextern1 verilog
 svcrvstructarr1 verilog
 svstructdynarr1 verilog
 svcrvstructsorry1 verilog,fail,gold
