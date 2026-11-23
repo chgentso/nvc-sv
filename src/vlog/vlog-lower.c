@@ -31062,7 +31062,8 @@ static vlog_node_t vlog_inside_array_type(vlog_node_t item)
 {
    // The type of a dynamic array or queue of integral values in a set
 
-   if (!vlog_crv_is_array_ref(item))
+   // An element of an array of queues is also a queue
+   if (!vlog_crv_is_array_ref(item) && vlog_kind(item) != V_BIT_SELECT)
       return NULL;
 
    vlog_node_t type = vlog_get_type(item);
@@ -31233,12 +31234,10 @@ static mir_value_t vlog_lower_inside_scalar(vlog_gen_t *g, vlog_node_t v,
    mir_value_t value;
    if (is_real)
       value = vlog_lower_cast(g, t_real, vlog_lower_rvalue(g, arg));
-   else if (vlog_is_string(arg))
-      value = vlog_str_arg(g, arg);
    else {
-      // An integral value compared with strings is converted to a string
-      mir_type_t t_str = mir_uarray_type(g->mu, 1, mir_char_type(g->mu));
-      value = vlog_lower_cast(g, t_str, vlog_lower_rvalue(g, arg));
+      // An integral value or string literal compared with strings is
+      // converted to a string
+      value = vlog_str_arg(g, arg);
    }
 
    mir_value_t result = mir_const(g->mu, mir_bool_type(g->mu), 0);
@@ -31253,7 +31252,7 @@ static mir_value_t vlog_lower_inside_scalar(vlog_gen_t *g, vlog_node_t v,
       if (atype != NULL && vlog_kind(atype) == V_DATA_TYPE
           && (vlog_subkind(atype) == DT_DYNARRAY
               || vlog_subkind(atype) == DT_QUEUE)
-          && vlog_crv_is_array_ref(item)) {
+          && vlog_inside_array_type(item) != NULL) {
          // Any string in the array or queue is equal (11.4.13)
          mir_value_t arr = vlog_lower_rvalue(g, item);
          mir_value_t data = mir_build_unwrap(g->mu, arr);
