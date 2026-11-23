@@ -8484,8 +8484,8 @@ static sres_t solve_prob(prob_t *P)
    for (int v = 0; v < P->nv && nfree < 2; v++)
       nfree += P->vars[v].dom.lo != P->vars[v].dom.hi;
 
+   free_components(P);
    if (nfree >= 2) {
-      free_components(P);
       build_components(P);
       if (P->ncomp < 2) {
          // One component is searched as a whole
@@ -8908,6 +8908,7 @@ typedef struct {
 
 static void prob_reset(prob_t *P, amark_t am)
 {
+   free_components(P);
    undo_to(P, 0);
    arena_reset(&P->ar, am);
    P->work = 0;

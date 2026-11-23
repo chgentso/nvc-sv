@@ -3377,7 +3377,7 @@ END_TEST
 // negative were wrong, so the constraint was refuted at the root
 START_TEST(test_fuzz_fixed)
 {
-   static const uint64_t seeds[] = { 1214, 1512, 1520 };
+   static const uint64_t seeds[] = { 1214, 1512, 1520, 80623 };
    crv_engine_t engines[6];
    const int nengines = fuzz_engines(engines);
 
