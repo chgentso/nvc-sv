@@ -129,8 +129,14 @@ details of each option.  Known limits are in [TODO.md](TODO.md).
   them with VHDL.  Each module instance and generate block is a scope at
   its path, with statement and branch items.
 - The XML export marks module scopes with `kind="module"`.
-- Not covered yet: code in classes and packages, and toggle coverage of
-  Verilog signals.
+- `toggle` counts each bit of the nets, variables and ports of a module or
+  generate block as `name[i]`, with `count-from-undefined`,
+  `count-from-to-z` and `include-mems` as for VHDL.
+- The specification file (`--cover-spec`), the exclude file, `--cover-merge`
+  and the HTML report work on Verilog names, which are compared without
+  regard to case.  `// coverage off` and `// coverage on` turn coverage
+  off and on for the lines between them.
+- Not covered yet: code in classes and packages.
 
 ## Netlist, scan and tool interfaces
 

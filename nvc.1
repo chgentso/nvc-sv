@@ -1531,7 +1531,27 @@ has a further bin, named
 .Ql _B_OTHERS ,
 for no item matching.  A condition with an unknown value is false for an
 .Ql if
-statement and neither outcome of a conditional operator.  Code in classes
+statement and neither outcome of a conditional operator.  The
+.Cm toggle
+kind counts the changes of each bit of the nets, variables and ports of a
+module, interface, program or generate block with two bins for each, named for
+the bit such as
+.Ql v[3]
+or
+.Ql hdr.tag[1] ,
+for packed vectors, packed arrays and structures, enumerations and the
+integer types.  A change to or from
+.Ql x
+or
+.Ql z
+is only counted with the
+.Cm count-from-undefined
+and
+.Cm count-from-to-z
+options, a change of the strength of a net alone is never counted, and
+a memory is counted with
+.Cm include-mems .
+Real, string, event and class handle variables are not counted.  Code in classes
 and packages is not counted.  Each module instance and generate block is a
 coverage scope with the path of the instance in the hierarchy, such as
 .Ql top.g[0].u ,
@@ -1727,6 +1747,26 @@ Toggle coverage collection on specific signals can be also disabled:
 -- coverage off
 signal cnt : std_logic_vector(3 downto 0);
 -- coverage on
+.Ed
+.Pp
+In Verilog and SystemVerilog the same is done by line comments
+.Ql // coverage off
+and
+.Ql // coverage on ,
+in any case, which turn coverage off and on for the lines between them in a
+module, interface or program.  A comment before the declaration of a module
+which turns coverage off keeps it off for that module:
+.Bd -literal -offset indent
+always @(posedge clk) begin
+  if (rst)
+    state <= IDLE;
+  // coverage off
+  else if (state > LAST)
+    $error("bad state");
+  // coverage on
+  else
+    state <= next;
+end
 .Ed
 .Ss Coverage specification file
 NVC can collect code coverage only on part of the simulated design.
@@ -1964,7 +2004,11 @@ In coverage specification file and Exclude file
 .Ql <HIERARCHY>
 and
 .Ql <TYPE>
-are case-insensitive. You can get examples of exclude commands
+are case-insensitive, also for Verilog names which are case sensitive in
+the source, so two Verilog scopes whose names differ only in case cannot be
+told apart.  The generate blocks of Verilog have their index in the name,
+as in
+.Ql WORK.top.g[0].u.* . You can get examples of exclude commands
 from generated Code coverage report by clicking on
 a "Get Exclude Command" button.
 .\" ------------------------------------------------------------
