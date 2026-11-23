@@ -34,7 +34,7 @@ q_newobj         327680         20  pass       1
 q_objs             1280       2200  pass       0
 q_pairs16          1280       1200  pass       0
 q_pairs32           320       8600  pass       0
-q_pairs64            80       5000  xfail:M2   0
+q_pairs64            80       5000  pass       0
 q_perm16          20480        160  pass       0
 q_perm256            20       5000  pass       0
 q_perm64            320       6100  pass       0
@@ -45,7 +45,7 @@ q_softforeach        80      32000  pass       0
 q_sumdyn         327680       1000  xfail:M1   0
 q_sumtight        20480        360  pass       0
 q_sumtight2        5120        300  pass       0
-r_impl256            80       5000  xfail:M2   0
+r_impl256            80       5000  pass       0
 r_mask               80       2000  xfail:M4b  0
 r_mul16              80       2000  xfail:M4c  0
 r_or8                80       2000  xfail:M4b  0

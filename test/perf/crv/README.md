@@ -15,6 +15,10 @@ gives up in a call, or does not run.
   in the same build, read from `NVC_CRV_STATS`; the end-to-end figures of
   `baseline.tsv` also hold the interpreter running the generated code and, for a big constraint,
   its compilation.
+* `baseline-m3.tsv`: the same figures for `auto` after the rejection stage (crv M3), next to those of M2.
+* `bias-reject.txt`: the chi-square report of the forced rejection stage (it passes every problem, three
+  seeds) and of `auto` (it fails the problems whose acceptance is too low for 16 samples, which fall to the
+  search; the BDD stage is for those).
 * `bias-legacy.txt`: the chi-square report of the search of release 0.18.0 against the distribution the
   language asks for, and the result of the differential fuzzer (`NVC_CRV_LONG=1 bin/unit_test crv`).
 

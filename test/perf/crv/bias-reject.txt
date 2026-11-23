@@ -1,0 +1,153 @@
+# Bias report of the engines reject and auto, crv M3 (forced reject must pass everywhere: it is the exact stage)
+# produced by: NVC_CRV_LONG=1 NVC_CRV_FUZZ_SECONDS=2 bin/unit_test crv   (lines of the reject and auto engines)
+# auto is exact for a problem when the rejection stage answers every call (16 samples); BIASED rows are the problems whose acceptance is too low and fall to the search of the dfs engine, which the BDD stage is for
+reject   x<y 4                                  seed 1234       sols   120 n  20000 chi2/df    0.94 (df  119 bound   185.2) pass max/min   1.48 unreached    0 fails 0
+reject   x<y 4                                  seed abcd5678   sols   120 n  20000 chi2/df    1.14 (df  119 bound   185.2) pass max/min   1.47 unreached    0 fails 0
+reject   x<y 4                                  seed 9e3779b9   sols   120 n  20000 chi2/df    0.96 (df  119 bound   185.2) pass max/min   1.50 unreached    0 fails 0
+auto     x<y 4                                  seed 1234       sols   120 n  20000 chi2/df    0.94 (df  119 bound   185.2) pass max/min   1.48 unreached    0 fails 0
+auto     x<y 4                                  seed abcd5678   sols   120 n  20000 chi2/df    1.14 (df  119 bound   185.2) pass max/min   1.47 unreached    0 fails 0
+auto     x<y 4                                  seed 9e3779b9   sols   120 n  20000 chi2/df    0.96 (df  119 bound   185.2) pass max/min   1.50 unreached    0 fails 0
+reject   x<y 3                                  seed 1234       sols    28 n  20000 chi2/df    0.86 (df   27 bound    63.4) pass max/min   1.16 unreached    0 fails 0
+reject   x<y 3                                  seed abcd5678   sols    28 n  20000 chi2/df    1.16 (df   27 bound    63.4) pass max/min   1.16 unreached    0 fails 0
+reject   x<y 3                                  seed 9e3779b9   sols    28 n  20000 chi2/df    1.23 (df   27 bound    63.4) pass max/min   1.21 unreached    0 fails 0
+auto     x<y 3                                  seed 1234       sols    28 n  20000 chi2/df    0.86 (df   27 bound    63.4) pass max/min   1.16 unreached    0 fails 0
+auto     x<y 3                                  seed abcd5678   sols    28 n  20000 chi2/df    1.16 (df   27 bound    63.4) pass max/min   1.16 unreached    0 fails 0
+auto     x<y 3                                  seed 9e3779b9   sols    28 n  20000 chi2/df    1.23 (df   27 bound    63.4) pass max/min   1.21 unreached    0 fails 0
+reject   x<y 5                                  seed 1234       sols   496 n  24800 chi2/df    1.07 (df  495 bound   620.7) pass max/min   2.68 unreached    0 fails 0
+reject   x<y 5                                  seed abcd5678   sols   496 n  24800 chi2/df    1.04 (df  495 bound   620.7) pass max/min   2.42 unreached    0 fails 0
+reject   x<y 5                                  seed 9e3779b9   sols   496 n  24800 chi2/df    1.00 (df  495 bound   620.7) pass max/min   2.78 unreached    0 fails 0
+auto     x<y 5                                  seed 1234       sols   496 n  24800 chi2/df    1.07 (df  495 bound   620.7) pass max/min   2.68 unreached    0 fails 0
+auto     x<y 5                                  seed abcd5678   sols   496 n  24800 chi2/df    1.04 (df  495 bound   620.7) pass max/min   2.42 unreached    0 fails 0
+auto     x<y 5                                  seed 9e3779b9   sols   496 n  24800 chi2/df    1.00 (df  495 bound   620.7) pass max/min   2.78 unreached    0 fails 0
+reject   x+y+z==10                              seed 1234       sols    66 n  20000 chi2/df    1.07 (df   65 bound   116.3) pass max/min   1.29 unreached    0 fails 0
+reject   x+y+z==10                              seed abcd5678   sols    66 n  20000 chi2/df    0.65 (df   65 bound   116.3) pass max/min   1.24 unreached    0 fails 0
+reject   x+y+z==10                              seed 9e3779b9   sols    66 n  20000 chi2/df    1.26 (df   65 bound   116.3) pass max/min   1.36 unreached    0 fails 0
+auto     x+y+z==10                              seed 1234       sols    66 n  20000 chi2/df   14.44 (df   65 bound   116.3) BIASED max/min   2.54 unreached    0 fails 0
+auto     x+y+z==10                              seed abcd5678   sols    66 n  20000 chi2/df   16.78 (df   65 bound   116.3) BIASED max/min   2.64 unreached    0 fails 0
+auto     x+y+z==10                              seed 9e3779b9   sols    66 n  20000 chi2/df   14.22 (df   65 bound   116.3) BIASED max/min   2.36 unreached    0 fails 0
+reject   x+y+z==20                              seed 1234       sols   186 n  20000 chi2/df    0.99 (df  185 bound   265.3) pass max/min   1.81 unreached    0 fails 0
+reject   x+y+z==20                              seed abcd5678   sols   186 n  20000 chi2/df    1.01 (df  185 bound   265.3) pass max/min   1.60 unreached    0 fails 0
+reject   x+y+z==20                              seed 9e3779b9   sols   186 n  20000 chi2/df    0.92 (df  185 bound   265.3) pass max/min   1.79 unreached    0 fails 0
+auto     x+y+z==20                              seed 1234       sols   186 n  20000 chi2/df    1.38 (df  185 bound   265.3) pass max/min   2.00 unreached    0 fails 0
+auto     x+y+z==20                              seed abcd5678   sols   186 n  20000 chi2/df    1.42 (df  185 bound   265.3) pass max/min   2.03 unreached    0 fails 0
+auto     x+y+z==20                              seed 9e3779b9   sols   186 n  20000 chi2/df    1.69 (df  185 bound   265.3) BIASED max/min   1.96 unreached    0 fails 0
+reject   s->d==0                                seed 1234       sols   257 n  20000 chi2/df    0.88 (df  256 bound   348.9) pass max/min   1.86 unreached    0 fails 0
+reject   s->d==0                                seed abcd5678   sols   257 n  20000 chi2/df    0.86 (df  256 bound   348.9) pass max/min   1.80 unreached    0 fails 0
+reject   s->d==0                                seed 9e3779b9   sols   257 n  20000 chi2/df    0.87 (df  256 bound   348.9) pass max/min   1.81 unreached    0 fails 0
+auto     s->d==0                                seed 1234       sols   257 n  20000 chi2/df    0.88 (df  256 bound   348.9) pass max/min   1.86 unreached    0 fails 0
+auto     s->d==0                                seed abcd5678   sols   257 n  20000 chi2/df    0.86 (df  256 bound   348.9) pass max/min   1.80 unreached    0 fails 0
+auto     s->d==0                                seed 9e3779b9   sols   257 n  20000 chi2/df    0.87 (df  256 bound   348.9) pass max/min   1.81 unreached    0 fails 0
+reject   s->d==0, s before d                    seed 1234       sols   257 n  20000 chi2/df    0.95 (df  256 bound   348.9) pass max/min 412.54 unreached    0 fails 0
+reject   s->d==0, s before d                    seed abcd5678   sols   257 n  20000 chi2/df    1.00 (df  256 bound   348.9) pass max/min 460.41 unreached    0 fails 0
+reject   s->d==0, s before d                    seed 9e3779b9   sols   257 n  20000 chi2/df    0.89 (df  256 bound   348.9) pass max/min 398.36 unreached    0 fails 0
+auto     s->d==0, s before d                    seed 1234       sols   257 n  20000 chi2/df    0.95 (df  256 bound   348.9) pass max/min 412.54 unreached    0 fails 0
+auto     s->d==0, s before d                    seed abcd5678   sols   257 n  20000 chi2/df    1.00 (df  256 bound   348.9) pass max/min 460.41 unreached    0 fails 0
+auto     s->d==0, s before d                    seed 9e3779b9   sols   257 n  20000 chi2/df    0.89 (df  256 bound   348.9) pass max/min 398.36 unreached    0 fails 0
+reject   if/else modes                          seed 1234       sols    23 n  20000 chi2/df    0.76 (df   22 bound    55.8) pass max/min   1.14 unreached    0 fails 0
+reject   if/else modes                          seed abcd5678   sols    23 n  20000 chi2/df    1.82 (df   22 bound    55.8) pass max/min   1.17 unreached    0 fails 0
+reject   if/else modes                          seed 9e3779b9   sols    23 n  20000 chi2/df    1.31 (df   22 bound    55.8) pass max/min   1.19 unreached    0 fails 0
+auto     if/else modes                          seed 1234       sols    23 n  20000 chi2/df  896.28 (df   22 bound    55.8) BIASED max/min   6.44 unreached    0 fails 0
+auto     if/else modes                          seed abcd5678   sols    23 n  20000 chi2/df  839.32 (df   22 bound    55.8) BIASED max/min   6.48 unreached    0 fails 0
+auto     if/else modes                          seed 9e3779b9   sols    23 n  20000 chi2/df  872.65 (df   22 bound    55.8) BIASED max/min   6.82 unreached    0 fails 0
+reject   (x&y)==0                               seed 1234       sols    81 n  20000 chi2/df    0.98 (df   80 bound   135.9) pass max/min   1.34 unreached    0 fails 0
+reject   (x&y)==0                               seed abcd5678   sols    81 n  20000 chi2/df    0.88 (df   80 bound   135.9) pass max/min   1.31 unreached    0 fails 0
+reject   (x&y)==0                               seed 9e3779b9   sols    81 n  20000 chi2/df    1.24 (df   80 bound   135.9) pass max/min   1.48 unreached    0 fails 0
+auto     (x&y)==0                               seed 1234       sols    81 n  20000 chi2/df    0.72 (df   80 bound   135.9) pass max/min   1.27 unreached    0 fails 0
+auto     (x&y)==0                               seed abcd5678   sols    81 n  20000 chi2/df    1.27 (df   80 bound   135.9) pass max/min   1.42 unreached    0 fails 0
+auto     (x&y)==0                               seed 9e3779b9   sols    81 n  20000 chi2/df    1.18 (df   80 bound   135.9) pass max/min   1.45 unreached    0 fails 0
+reject   x*y==12 mod 16                         seed 1234       sols    24 n  20000 chi2/df    1.08 (df   23 bound    57.3) pass max/min   1.17 unreached    0 fails 0
+reject   x*y==12 mod 16                         seed abcd5678   sols    24 n  20000 chi2/df    0.95 (df   23 bound    57.3) pass max/min   1.16 unreached    0 fails 0
+reject   x*y==12 mod 16                         seed 9e3779b9   sols    24 n  20000 chi2/df    0.81 (df   23 bound    57.3) pass max/min   1.13 unreached    0 fails 0
+auto     x*y==12 mod 16                         seed 1234       sols    24 n  20000 chi2/df    1.03 (df   23 bound    57.3) pass max/min   1.14 unreached    0 fails 0
+auto     x*y==12 mod 16                         seed abcd5678   sols    24 n  20000 chi2/df    1.75 (df   23 bound    57.3) pass max/min   1.22 unreached    0 fails 0
+auto     x*y==12 mod 16                         seed 9e3779b9   sols    24 n  20000 chi2/df    0.88 (df   23 bound    57.3) pass max/min   1.16 unreached    0 fails 0
+reject   unique of three 2 bit                  seed 1234       sols    24 n  20000 chi2/df    1.38 (df   23 bound    57.3) pass max/min   1.19 unreached    0 fails 0
+reject   unique of three 2 bit                  seed abcd5678   sols    24 n  20000 chi2/df    1.05 (df   23 bound    57.3) pass max/min   1.15 unreached    0 fails 0
+reject   unique of three 2 bit                  seed 9e3779b9   sols    24 n  20000 chi2/df    1.32 (df   23 bound    57.3) pass max/min   1.22 unreached    0 fails 0
+auto     unique of three 2 bit                  seed 1234       sols    24 n  20000 chi2/df    1.37 (df   23 bound    57.3) pass max/min   1.19 unreached    0 fails 0
+auto     unique of three 2 bit                  seed abcd5678   sols    24 n  20000 chi2/df    1.05 (df   23 bound    57.3) pass max/min   1.15 unreached    0 fails 0
+auto     unique of three 2 bit                  seed 9e3779b9   sols    24 n  20000 chi2/df    1.33 (df   23 bound    57.3) pass max/min   1.22 unreached    0 fails 0
+reject   a<b, a before b                        seed 1234       sols   120 n  20000 chi2/df    0.99 (df  119 bound   185.2) pass max/min  19.51 unreached    0 fails 0
+reject   a<b, a before b                        seed abcd5678   sols   120 n  20000 chi2/df    0.93 (df  119 bound   185.2) pass max/min  19.13 unreached    0 fails 0
+reject   a<b, a before b                        seed 9e3779b9   sols   120 n  20000 chi2/df    1.00 (df  119 bound   185.2) pass max/min  17.75 unreached    0 fails 0
+auto     a<b, a before b                        seed 1234       sols   120 n  20000 chi2/df    0.99 (df  119 bound   185.2) pass max/min  19.51 unreached    0 fails 0
+auto     a<b, a before b                        seed abcd5678   sols   120 n  20000 chi2/df    0.93 (df  119 bound   185.2) pass max/min  19.13 unreached    0 fails 0
+auto     a<b, a before b                        seed 9e3779b9   sols   120 n  20000 chi2/df    1.00 (df  119 bound   185.2) pass max/min  17.75 unreached    0 fails 0
+reject   a<b<c, a before b before c             seed 1234       sols    56 n  20000 chi2/df    1.15 (df   55 bound   102.9) pass max/min  49.75 unreached    0 fails 0
+reject   a<b<c, a before b before c             seed abcd5678   sols    56 n  20000 chi2/df    0.79 (df   55 bound   102.9) pass max/min  43.10 unreached    0 fails 0
+reject   a<b<c, a before b before c             seed 9e3779b9   sols    56 n  20000 chi2/df    0.88 (df   55 bound   102.9) pass max/min  43.24 unreached    0 fails 0
+auto     a<b<c, a before b before c             seed 1234       sols    56 n  20000 chi2/df    1.15 (df   55 bound   102.9) pass max/min  49.75 unreached    0 fails 0
+auto     a<b<c, a before b before c             seed abcd5678   sols    56 n  20000 chi2/df    0.79 (df   55 bound   102.9) pass max/min  43.10 unreached    0 fails 0
+auto     a<b<c, a before b before c             seed 9e3779b9   sols    56 n  20000 chi2/df    0.88 (df   55 bound   102.9) pass max/min  43.24 unreached    0 fails 0
+reject   dist x!=y                              seed 1234       sols    56 n  20000 chi2/df    1.02 (df   55 bound   102.9) pass max/min   2.50 unreached    0 fails 0
+reject   dist x!=y                              seed abcd5678   sols    56 n  20000 chi2/df    1.17 (df   55 bound   102.9) pass max/min   2.55 unreached    0 fails 0
+reject   dist x!=y                              seed 9e3779b9   sols    56 n  20000 chi2/df    0.97 (df   55 bound   102.9) pass max/min   2.35 unreached    0 fails 0
+auto     dist x!=y                              seed 1234       sols    56 n  20000 chi2/df    1.02 (df   55 bound   102.9) pass max/min   2.50 unreached    0 fails 0
+auto     dist x!=y                              seed abcd5678   sols    56 n  20000 chi2/df    1.17 (df   55 bound   102.9) pass max/min   2.55 unreached    0 fails 0
+auto     dist x!=y                              seed 9e3779b9   sols    56 n  20000 chi2/df    0.97 (df   55 bound   102.9) pass max/min   2.35 unreached    0 fails 0
+reject   dist, bucket infeasible                seed 1234       sols    32 n  20000 chi2/df    0.94 (df   31 bound    69.3) pass max/min   2.22 unreached    0 fails 0
+reject   dist, bucket infeasible                seed abcd5678   sols    32 n  20000 chi2/df    0.62 (df   31 bound    69.3) pass max/min   2.27 unreached    0 fails 0
+reject   dist, bucket infeasible                seed 9e3779b9   sols    32 n  20000 chi2/df    1.09 (df   31 bound    69.3) pass max/min   2.37 unreached    0 fails 0
+auto     dist, bucket infeasible                seed 1234       sols    32 n  20000 chi2/df    0.94 (df   31 bound    69.3) pass max/min   2.22 unreached    0 fails 0
+auto     dist, bucket infeasible                seed abcd5678   sols    32 n  20000 chi2/df    0.62 (df   31 bound    69.3) pass max/min   2.27 unreached    0 fails 0
+auto     dist, bucket infeasible                seed 9e3779b9   sols    32 n  20000 chi2/df    1.09 (df   31 bound    69.3) pass max/min   2.37 unreached    0 fails 0
+reject   dist, :/ over a split range            seed 1234       sols    48 n  20000 chi2/df    1.45 (df   47 bound    92.0) pass max/min   1.27 unreached    0 fails 0
+reject   dist, :/ over a split range            seed abcd5678   sols    48 n  20000 chi2/df    0.93 (df   47 bound    92.0) pass max/min   1.30 unreached    0 fails 0
+reject   dist, :/ over a split range            seed 9e3779b9   sols    48 n  20000 chi2/df    1.44 (df   47 bound    92.0) pass max/min   1.35 unreached    0 fails 0
+auto     dist, :/ over a split range            seed 1234       sols    48 n  20000 chi2/df    1.45 (df   47 bound    92.0) pass max/min   1.27 unreached    0 fails 0
+auto     dist, :/ over a split range            seed abcd5678   sols    48 n  20000 chi2/df    0.93 (df   47 bound    92.0) pass max/min   1.30 unreached    0 fails 0
+auto     dist, :/ over a split range            seed 9e3779b9   sols    48 n  20000 chi2/df    1.44 (df   47 bound    92.0) pass max/min   1.35 unreached    0 fails 0
+reject   soft conflict                          seed 1234       sols    28 n  20000 chi2/df    1.01 (df   27 bound    63.4) pass max/min   1.15 unreached    0 fails 0
+reject   soft conflict                          seed abcd5678   sols    28 n  20000 chi2/df    0.54 (df   27 bound    63.4) pass max/min   1.12 unreached    0 fails 0
+reject   soft conflict                          seed 9e3779b9   sols    28 n  20000 chi2/df    0.87 (df   27 bound    63.4) pass max/min   1.18 unreached    0 fails 0
+auto     soft conflict                          seed 1234       sols    28 n  20000 chi2/df    1.01 (df   27 bound    63.4) pass max/min   1.15 unreached    0 fails 0
+auto     soft conflict                          seed abcd5678   sols    28 n  20000 chi2/df    0.54 (df   27 bound    63.4) pass max/min   1.12 unreached    0 fails 0
+auto     soft conflict                          seed 9e3779b9   sols    28 n  20000 chi2/df    0.87 (df   27 bound    63.4) pass max/min   1.18 unreached    0 fails 0
+reject   soft compatible                        seed 1234       sols    36 n  20000 chi2/df    1.10 (df   35 bound    75.1) pass max/min   1.19 unreached    0 fails 0
+reject   soft compatible                        seed abcd5678   sols    36 n  20000 chi2/df    0.67 (df   35 bound    75.1) pass max/min   1.13 unreached    0 fails 0
+reject   soft compatible                        seed 9e3779b9   sols    36 n  20000 chi2/df    0.98 (df   35 bound    75.1) pass max/min   1.17 unreached    0 fails 0
+auto     soft compatible                        seed 1234       sols    36 n  20000 chi2/df    1.10 (df   35 bound    75.1) pass max/min   1.19 unreached    0 fails 0
+auto     soft compatible                        seed abcd5678   sols    36 n  20000 chi2/df    0.67 (df   35 bound    75.1) pass max/min   1.13 unreached    0 fails 0
+auto     soft compatible                        seed 9e3779b9   sols    36 n  20000 chi2/df    0.98 (df   35 bound    75.1) pass max/min   1.17 unreached    0 fails 0
+reject   array size 0 to 3, elements nonzero    seed 1234       sols    40 n  20000 chi2/df    1.27 (df   39 bound    80.8) pass max/min  33.54 unreached    0 fails 0
+reject   array size 0 to 3, elements nonzero    seed abcd5678   sols    40 n  20000 chi2/df    0.90 (df   39 bound    80.8) pass max/min  31.49 unreached    0 fails 0
+reject   array size 0 to 3, elements nonzero    seed 9e3779b9   sols    40 n  20000 chi2/df    1.28 (df   39 bound    80.8) pass max/min  33.84 unreached    0 fails 0
+auto     array size 0 to 3, elements nonzero    seed 1234       sols    40 n  20000 chi2/df    1.27 (df   39 bound    80.8) pass max/min  33.54 unreached    0 fails 0
+auto     array size 0 to 3, elements nonzero    seed abcd5678   sols    40 n  20000 chi2/df    0.90 (df   39 bound    80.8) pass max/min  31.49 unreached    0 fails 0
+auto     array size 0 to 3, elements nonzero    seed 9e3779b9   sols    40 n  20000 chi2/df    1.28 (df   39 bound    80.8) pass max/min  33.84 unreached    0 fails 0
+reject   $countones(x)==2 ? y<4 : y>=12         seed 1234       sols    64 n  20000 chi2/df    0.79 (df   63 bound   113.7) pass max/min   1.27 unreached    0 fails 0
+reject   $countones(x)==2 ? y<4 : y>=12         seed abcd5678   sols    64 n  20000 chi2/df    1.03 (df   63 bound   113.7) pass max/min   1.32 unreached    0 fails 0
+reject   $countones(x)==2 ? y<4 : y>=12         seed 9e3779b9   sols    64 n  20000 chi2/df    0.79 (df   63 bound   113.7) pass max/min   1.30 unreached    0 fails 0
+auto     $countones(x)==2 ? y<4 : y>=12         seed 1234       sols    64 n  20000 chi2/df    1.09 (df   63 bound   113.7) pass max/min   1.32 unreached    0 fails 0
+auto     $countones(x)==2 ? y<4 : y>=12         seed abcd5678   sols    64 n  20000 chi2/df    1.21 (df   63 bound   113.7) pass max/min   1.41 unreached    0 fails 0
+auto     $countones(x)==2 ? y<4 : y>=12         seed 9e3779b9   sols    64 n  20000 chi2/df    1.02 (df   63 bound   113.7) pass max/min   1.31 unreached    0 fails 0
+reject   dist, values with different extensions seed 1234       sols    16 n  20000 chi2/df    1.05 (df   15 bound    44.6) pass max/min   7.59 unreached    0 fails 0
+reject   dist, values with different extensions seed abcd5678   sols    16 n  20000 chi2/df    0.93 (df   15 bound    44.6) pass max/min   7.10 unreached    0 fails 0
+reject   dist, values with different extensions seed 9e3779b9   sols    16 n  20000 chi2/df    0.78 (df   15 bound    44.6) pass max/min   7.03 unreached    0 fails 0
+auto     dist, values with different extensions seed 1234       sols    16 n  20000 chi2/df    1.05 (df   15 bound    44.6) pass max/min   7.59 unreached    0 fails 0
+auto     dist, values with different extensions seed abcd5678   sols    16 n  20000 chi2/df    0.93 (df   15 bound    44.6) pass max/min   7.10 unreached    0 fails 0
+auto     dist, values with different extensions seed 9e3779b9   sols    16 n  20000 chi2/df    0.78 (df   15 bound    44.6) pass max/min   7.03 unreached    0 fails 0
+reject   two dists                              seed 1234       sols     6 n  20000 chi2/df    1.00 (df    5 bound    26.3) pass max/min   9.03 unreached    0 fails 0
+reject   two dists                              seed abcd5678   sols     6 n  20000 chi2/df    0.40 (df    5 bound    26.3) pass max/min   9.29 unreached    0 fails 0
+reject   two dists                              seed 9e3779b9   sols     6 n  20000 chi2/df    1.21 (df    5 bound    26.3) pass max/min   9.05 unreached    0 fails 0
+auto     two dists                              seed 1234       sols     6 n  20000 chi2/df    1.00 (df    5 bound    26.3) pass max/min   9.03 unreached    0 fails 0
+auto     two dists                              seed abcd5678   sols     6 n  20000 chi2/df    0.40 (df    5 bound    26.3) pass max/min   9.29 unreached    0 fails 0
+auto     two dists                              seed 9e3779b9   sols     6 n  20000 chi2/df    1.21 (df    5 bound    26.3) pass max/min   9.05 unreached    0 fails 0
+reject   total == a + b, a != b                 seed 1234       sols    56 n  20000 chi2/df    0.98 (df   55 bound   102.9) pass max/min   1.26 unreached    0 fails 0
+reject   total == a + b, a != b                 seed abcd5678   sols    56 n  20000 chi2/df    0.84 (df   55 bound   102.9) pass max/min   1.25 unreached    0 fails 0
+reject   total == a + b, a != b                 seed 9e3779b9   sols    56 n  20000 chi2/df    1.11 (df   55 bound   102.9) pass max/min   1.30 unreached    0 fails 0
+auto     total == a + b, a != b                 seed 1234       sols    56 n  20000 chi2/df    0.98 (df   55 bound   102.9) pass max/min   1.26 unreached    0 fails 0
+auto     total == a + b, a != b                 seed abcd5678   sols    56 n  20000 chi2/df    0.84 (df   55 bound   102.9) pass max/min   1.25 unreached    0 fails 0
+auto     total == a + b, a != b                 seed 9e3779b9   sols    56 n  20000 chi2/df    1.11 (df   55 bound   102.9) pass max/min   1.30 unreached    0 fails 0
+reject   a<b, c<=a, a before b                  seed 1234       sols    84 n  20000 chi2/df    1.07 (df   83 bound   139.8) pass max/min   2.80 unreached    0 fails 0
+reject   a<b, c<=a, a before b                  seed abcd5678   sols    84 n  20000 chi2/df    1.23 (df   83 bound   139.8) pass max/min   3.38 unreached    0 fails 0
+reject   a<b, c<=a, a before b                  seed 9e3779b9   sols    84 n  20000 chi2/df    1.11 (df   83 bound   139.8) pass max/min   3.06 unreached    0 fails 0
+auto     a<b, c<=a, a before b                  seed 1234       sols    84 n  20000 chi2/df    1.07 (df   83 bound   139.8) pass max/min   2.80 unreached    0 fails 0
+auto     a<b, c<=a, a before b                  seed abcd5678   sols    84 n  20000 chi2/df    1.23 (df   83 bound   139.8) pass max/min   3.38 unreached    0 fails 0
+auto     a<b, c<=a, a before b                  seed 9e3779b9   sols    84 n  20000 chi2/df    1.11 (df   83 bound   139.8) pass max/min   3.06 unreached    0 fails 0
+reject   x == y + 1, x before y, z != y         seed 1234       sols    60 n  20000 chi2/df    0.91 (df   59 bound   108.3) pass max/min   1.67 unreached    0 fails 0
+reject   x == y + 1, x before y, z != y         seed abcd5678   sols    60 n  20000 chi2/df    1.52 (df   59 bound   108.3) pass max/min   1.79 unreached    0 fails 0
+reject   x == y + 1, x before y, z != y         seed 9e3779b9   sols    60 n  20000 chi2/df    1.04 (df   59 bound   108.3) pass max/min   1.72 unreached    0 fails 0
+auto     x == y + 1, x before y, z != y         seed 1234       sols    60 n  20000 chi2/df    0.91 (df   59 bound   108.3) pass max/min   1.67 unreached    0 fails 0
+auto     x == y + 1, x before y, z != y         seed abcd5678   sols    60 n  20000 chi2/df    1.52 (df   59 bound   108.3) pass max/min   1.79 unreached    0 fails 0
+auto     x == y + 1, x before y, z != y         seed 9e3779b9   sols    60 n  20000 chi2/df    1.04 (df   59 bound   108.3) pass max/min   1.72 unreached    0 fails 0
