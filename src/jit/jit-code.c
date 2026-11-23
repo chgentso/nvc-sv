@@ -183,6 +183,7 @@ typedef struct _code_page {
    code_cache_t *owner;
    code_page_t  *next;
    uint8_t      *mem;
+   size_t        size;
 } code_page_t;
 
 typedef struct _code_cache {
@@ -225,7 +226,7 @@ static void code_fault_handler(int sig, void *addr, struct cpu_state *cpu,
    code_page_t *page = context;
 
    const uint8_t *pc = (uint8_t *)cpu->pc;
-   if (pc < page->mem || pc > page->mem + CODE_PAGE_SIZE)
+   if (pc < page->mem || pc > page->mem + page->size)
       return;
 
    uintptr_t mark = cpu->pc;
@@ -246,7 +247,7 @@ static bool code_cache_contains(code_cache_t *code, uint8_t *base, size_t size)
    assert_lock_held(&code->lock);
 
    for (code_page_t *p = code->pages; p; p = p->next) {
-      if (base >= p->mem && base + size <= p->mem + CODE_PAGE_SIZE)
+      if (base >= p->mem && base + size <= p->mem + p->size)
          return true;
    }
 
@@ -273,24 +274,28 @@ static code_span_t *code_span_new(code_cache_t *code, ident_t name,
    return span;
 }
 
-static void code_page_new(code_cache_t *code)
+static void code_page_new(code_cache_t *code, size_t min_size)
 {
    assert_lock_held(&code->lock);
+
+   const size_t pagesz = ALIGN_UP(MAX(min_size, CODE_PAGE_SIZE),
+                                  CODE_PAGE_ALIGN);
 
    code_page_t *page = xcalloc(sizeof(code_page_t));
    page->owner = code;
    page->next  = code->pages;
-   page->mem   = map_jit_pages(CODE_PAGE_ALIGN, CODE_PAGE_SIZE);
+   page->mem   = map_jit_pages(CODE_PAGE_ALIGN, pagesz);
+   page->size  = pagesz;
 
    add_fault_handler(code_fault_handler, page);
-   debug_add_unwinder(page->mem, CODE_PAGE_SIZE, code_cache_unwinder, code);
+   debug_add_unwinder(page->mem, pagesz, code_cache_unwinder, code);
 
    code->pages = page;
 
    code_span_t *span = xcalloc(sizeof(code_span_t));
    span->next  = code->spans;
    span->base  = page->mem;
-   span->size  = CODE_PAGE_SIZE;
+   span->size  = pagesz;
    span->owner = code;
 
    code->globalfree = code->spans = span;
@@ -302,7 +307,7 @@ code_cache_t *code_cache_new(void)
 
    {
       SCOPED_LOCK(code->lock);
-      code_page_new(code);
+      code_page_new(code, CODE_PAGE_SIZE);
    }
 
 #ifdef HAVE_CAPSTONE
@@ -377,7 +382,7 @@ void code_cache_free(code_cache_t *code)
       debug_remove_unwinder(it->mem);
       remove_fault_handler(code_fault_handler, it);
 
-      nvc_munmap(it->mem, CODE_PAGE_SIZE);
+      nvc_munmap(it->mem, it->size);
 
       tmp = it->next;
       free(it);
@@ -585,9 +590,10 @@ code_blob_t *code_blob_new(code_cache_t *code, ident_t name, size_t hint)
       const size_t alignedsz = ALIGN_UP(chunksz, CODE_BLOB_ALIGN);
 
       if (alignedsz > code->globalfree->size) {
-         DEBUG_ONLY(debugf("requesting new %d byte code page", CODE_PAGE_SIZE));
-         code_page_new(code);
-         assert(code->globalfree->size == CODE_PAGE_SIZE);
+         DEBUG_ONLY(debugf("requesting new %zu byte code page",
+                           MAX(alignedsz, (size_t)CODE_PAGE_SIZE)));
+         code_page_new(code, alignedsz);
+         assert(code->globalfree->size >= alignedsz);
       }
 
       const size_t take = MIN(code->globalfree->size, alignedsz);

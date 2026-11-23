@@ -518,7 +518,8 @@ static void llvm_optimise(LLVMModuleRef module, LLVMTargetMachineRef target,
 }
 
 static LLVMTargetMachineRef llvm_target_machine(LLVMRelocMode reloc,
-                                                LLVMCodeModel model)
+                                                LLVMCodeModel model,
+                                                LLVMCodeGenOptLevel opt_level)
 {
    char *def_triple = LLVMGetDefaultTargetTriple();
    char *error;
@@ -528,7 +529,7 @@ static LLVMTargetMachineRef llvm_target_machine(LLVMRelocMode reloc,
 
    LLVMTargetMachineRef tm = LLVMCreateTargetMachine(target_ref, def_triple,
                                                      "", "",
-                                                     LLVMCodeGenLevelDefault,
+                                                     opt_level,
                                                      reloc, model);
    LLVMDisposeMessage(def_triple);
 
@@ -3407,8 +3408,13 @@ static void jit_llvm_cgen(jit_t *j, jit_handle_t handle, void *context)
 
    const uint64_t start_us = get_timestamp_us();
 
-   LLVMTargetMachineRef tm = llvm_target_machine(LLVMRelocStatic,
-                                                 JIT_CODE_MODEL);
+   // Huge generated processes (e.g. large register decoders) trigger
+   // superlinear register allocation / scheduling at LLVMCodeGenLevelDefault,
+   // blocking the background JIT worker queue for tens of seconds.
+   const bool huge = f->nirs > 4000;
+   LLVMTargetMachineRef tm = llvm_target_machine(
+      LLVMRelocStatic, JIT_CODE_MODEL,
+      huge ? LLVMCodeGenLevelNone : LLVMCodeGenLevelDefault);
 
    llvm_obj_t obj = {
       .context = LLVMContextCreate(),
@@ -3457,7 +3463,8 @@ static void jit_llvm_cgen(jit_t *j, jit_handle_t handle, void *context)
 
    llvm_dump_module(obj.module, "initial");
    llvm_verify_module(obj.module);
-   llvm_optimise(obj.module, obj.target, obj.opt_hint > 0 ? LLVM_O1 : LLVM_O0);
+   llvm_optimise(obj.module, obj.target,
+                 (!huge && obj.opt_hint > 0) ? LLVM_O1 : LLVM_O0);
    llvm_dump_module(obj.module, "final");
 
    if (jit_is_shutdown(f->jit))
@@ -3473,8 +3480,9 @@ static void jit_llvm_cgen(jit_t *j, jit_handle_t handle, void *context)
       goto skip_load;
 
    const size_t objsz = LLVMGetBufferSize(buf);
+   const size_t hint = objsz + MAX(65536, objsz / 4);
 
-   code_blob_t *blob = code_blob_new(state->code, f->name, objsz);
+   code_blob_t *blob = code_blob_new(state->code, f->name, hint);
    if (blob == NULL)
       return;
 
