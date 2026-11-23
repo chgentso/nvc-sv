@@ -6027,16 +6027,20 @@ static void irgen_thunk_entry(jit_irgen_t *g)
 
 static void irgen_package_entry(jit_irgen_t *g)
 {
-   // It's harmless to initialise a package multiple times, just return
-   // the existing context pointer
-   irgen_label_t *cont = irgen_alloc_label(g);
-   jit_value_t priv = irgen_alloc_temp(g);
-   macro_getpriv(g, priv, g->func->handle);
-   j_cmp(g, JIT_CC_EQ, priv, jit_value_from_int64(0));
-   j_jump(g, JIT_CC_T, cont);
-   j_send(g, 0, priv);
-   j_ret(g);
-   irgen_bind_label(g, cont);
+   const bool is_top_level = mir_get_parent(g->mu) == NULL;
+
+   if (is_top_level) {
+      // It's harmless to initialise a package multiple times, just return
+      // the existing context pointer
+      irgen_label_t *cont = irgen_alloc_label(g);
+      jit_value_t priv = irgen_alloc_temp(g);
+      macro_getpriv(g, priv, g->func->handle);
+      j_cmp(g, JIT_CC_EQ, priv, jit_value_from_int64(0));
+      j_jump(g, JIT_CC_T, cont);
+      j_send(g, 0, priv);
+      j_ret(g);
+      irgen_bind_label(g, cont);
+   }
 
    irgen_stack_vars(g);
    irgen_context_struct(g);
@@ -6046,7 +6050,8 @@ static void irgen_package_entry(jit_irgen_t *g)
    j_recv(g, context, 0);
    j_store(g, JIT_SZ_PTR, context, jit_addr_from_value(g->statereg, 0));
 
-   macro_putpriv(g, g->func->handle, g->statereg);
+   if (is_top_level)
+      macro_putpriv(g, g->func->handle, g->statereg);
 }
 
 static void irgen_protected_entry(jit_irgen_t *g)

@@ -3229,3 +3229,7 @@ vlog_event_scope1 verilog
 vlog_call_lval1 verilog
 vlog_typename_cls1 verilog
 vlog_extern_nest1 verilog
+nestedpkg1 2008
+nestedpkg2 2008
+nestedpkg3 2008
+nestedpkg4 2019

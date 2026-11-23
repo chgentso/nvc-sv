@@ -111,6 +111,8 @@ static vcode_reg_t lower_known_subtype(lower_unit_t *lu, tree_t value,
 static void lower_stmt(lower_unit_t *lu, tree_t stmt, gen_stack_t *gs);
 static void lower_func_body(lower_unit_t *lu, object_t *obj);
 static void lower_proc_body(lower_unit_t *lu, object_t *obj);
+static void lower_package(lower_unit_t *lu, object_t *obj);
+static void lower_pack_body(lower_unit_t *lu, object_t *obj);
 static vcode_reg_t lower_record_aggregate(lower_unit_t *lu, tree_t expr,
                                           bool nest, bool is_const,
                                           vcode_reg_t hint);
@@ -148,6 +150,9 @@ static void lower_subprogram_ports(lower_unit_t *lu, tree_t body,
 static vcode_type_t lower_func_result_type(type_t result);
 static vcode_reg_t lower_context_for_mangled(lower_unit_t *lu,
                                              ident_t unit_name);
+static vcode_reg_t lower_nested_package_context(lower_unit_t *lu,
+                                                const void *target,
+                                                bool is_type);
 static vcode_reg_t lower_context_for_call(lower_unit_t *lu, tree_t decl);
 static void lower_driver_field_cb(lower_unit_t *lu, tree_t field,
                                   vcode_reg_t ptr, vcode_reg_t unused,
@@ -971,7 +976,9 @@ static void lower_get_scalar_type_bounds(lower_unit_t *lu, type_t type,
       if (var == VCODE_INVALID_VAR) {
          // Type or subtype declared in package
          ident_t id = type_ident(type);
-         vcode_reg_t context = emit_link_package(ident_runtil(id, '.'));
+         vcode_reg_t context = lower_nested_package_context(lu, type, true);
+         if (context == VCODE_INVALID_REG)
+            context = lower_context_for_mangled(lu, id);
          vcode_type_t vuarray = vtype_uarray(1, vtype);
          vcode_reg_t ptr_reg = emit_link_var(context, id, vuarray);
          wrap_reg = emit_load_indirect(ptr_reg);
@@ -2725,21 +2732,34 @@ static vcode_reg_t lower_context_for_mangled(lower_unit_t *lu,
 
    int hops;
    vcode_reg_t reg = lower_search_vcode_obj(context_name, lu, &hops);
-   if (reg != VCODE_INVALID_REG && hops == 0)
-      return reg;
-   else if (reg != VCODE_INVALID_REG)
-      return emit_link_package(context_name);
+   if (reg != VCODE_INVALID_REG) {
+      if (reg & INSTANCE_BIT) {
+         vcode_var_t pkg_var = reg & ~INSTANCE_BIT;
+         if (hops == 0)
+            return emit_load(pkg_var);
+         else
+            return emit_load_indirect(emit_var_upref(hops, pkg_var));
+      }
+      else if (hops == 0)
+         return reg;
+      else
+         return emit_link_package(context_name);
+   }
 
    tree_t unit = lib_get_qualified(context_name);
 
    // Handle corner case with nested packages
-   bool nested = false;
+   bool nested = false, nested_local = false;
    for (ident_t it = context_name; unit == NULL; unit = lib_get_qualified(it)) {
       it = get_call_context(it);
       nested = true;
+      if (lower_search_vcode_obj(it, lu, &hops) != VCODE_INVALID_REG) {
+         nested_local = true;
+         break;
+      }
    }
 
-   if (!is_package(unit))   // Subprogram in architecture with no context
+   if (!nested_local && !is_package(unit))   // Subprogram in architecture with no context
       return emit_null(vtype_context(context_name));
    else if (nested) {
       vcode_reg_t parent_reg = lower_context_for_mangled(lu, context_name);
@@ -2769,8 +2789,12 @@ static vcode_reg_t lower_context_for_call(lower_unit_t *lu, tree_t decl)
 
    int hops;
    vcode_reg_t obj = lower_search_vcode_obj(decl, lu, &hops);
-   if (obj == VCODE_INVALID_REG)
+   if (obj == VCODE_INVALID_REG) {
+      vcode_reg_t nested = lower_nested_package_context(lu, decl, false);
+      if (nested != VCODE_INVALID_REG)
+         return nested;
       return lower_context_for_mangled(lu, tree_ident2(decl));
+   }
    else if (obj & INSTANCE_BIT) {
       // This variable is declared in an instantiated package
       vcode_var_t pkg_var = obj & ~INSTANCE_BIT;
@@ -3221,7 +3245,9 @@ static vcode_reg_t lower_get_type_bounds(lower_unit_t *lu, type_t type)
       if (var == VCODE_INVALID_VAR) {
          // Type or subtype declared in package
          ident_t id = type_ident(type);
-         vcode_reg_t context = emit_link_package(ident_runtil(id, '.'));
+         vcode_reg_t context = lower_nested_package_context(lu, type, true);
+         if (context == VCODE_INVALID_REG)
+            context = lower_context_for_mangled(lu, id);
          vcode_reg_t ptr_reg = emit_link_var(context, id, lower_type(type));
          return emit_load_indirect(ptr_reg);
       }
@@ -3293,8 +3319,183 @@ static vcode_type_t lower_var_type(tree_t decl)
    }
 }
 
+static tree_t find_pack_body_in_scope(tree_t scope, tree_t pack)
+{
+   if (scope == NULL)
+      return NULL;
+
+   const int ndecls = tree_decls(scope);
+   for (int i = 0; i < ndecls; i++) {
+      tree_t d = tree_decl(scope, i);
+      if (tree_kind(d) == T_PACK_BODY && tree_has_primary(d)
+          && tree_primary(d) == pack)
+         return d;
+   }
+
+   return NULL;
+}
+
+static bool container_has_decls(tree_kind_t kind)
+{
+   switch (kind) {
+   case T_PACKAGE:
+   case T_PACK_BODY:
+   case T_PACK_INST:
+   case T_BLOCK:
+   case T_PROCESS:
+   case T_FUNC_BODY:
+   case T_PROC_BODY:
+   case T_FUNC_INST:
+   case T_PROC_INST:
+   case T_PROT_BODY:
+   case T_ENTITY:
+   case T_ARCH:
+      return true;
+   default:
+      return false;
+   }
+}
+
+static bool container_has_generics(tree_kind_t kind)
+{
+   switch (kind) {
+   case T_PACKAGE:
+   case T_PACK_INST:
+   case T_BLOCK:
+   case T_FUNC_BODY:
+   case T_PROC_BODY:
+   case T_FUNC_INST:
+   case T_PROC_INST:
+   case T_ENTITY:
+      return true;
+   default:
+      return false;
+   }
+}
+
+static bool find_nested_pack_path(tree_t scope, tree_t body_scope,
+                                  const void *target, bool is_type,
+                                  ident_t scope_name, ident_t *path,
+                                  int *depth, int max_depth,
+                                  tree_t *top_pack)
+{
+   if (scope == NULL)
+      return false;
+
+   tree_t scopes[2] = { scope, body_scope };
+   for (int s = 0; s < 2; s++) {
+      tree_t cur = scopes[s];
+      if (cur == NULL)
+         continue;
+
+      const tree_kind_t ckind = tree_kind(cur);
+      if (!is_type && container_has_generics(ckind)) {
+         const int ngen = tree_generics(cur);
+         for (int i = 0; i < ngen; i++) {
+            if (tree_generic(cur, i) == target)
+               return true;
+         }
+      }
+
+      if (!container_has_decls(ckind))
+         continue;
+
+      const int ndecls = tree_decls(cur);
+      for (int i = 0; i < ndecls; i++) {
+         tree_t d = tree_decl(cur, i);
+         if (is_type ? (is_type_decl(d) && tree_type(d) == target)
+                     : (d == target))
+            return true;
+      }
+   }
+
+   if (*depth >= max_depth)
+      return false;
+
+   for (int s = 0; s < 2; s++) {
+      tree_t cur = scopes[s];
+      if (cur == NULL || !container_has_decls(tree_kind(cur)))
+         continue;
+
+      const int ndecls = tree_decls(cur);
+      for (int i = 0; i < ndecls; i++) {
+         tree_t d = tree_decl(cur, i);
+         const tree_kind_t dkind = tree_kind(d);
+         if ((dkind == T_PACKAGE && !is_uninstantiated_package(d))
+             || dkind == T_PACK_INST) {
+            ident_t sub_name = ident_prefix(scope_name, tree_ident(d), '.');
+            tree_t sub_body = NULL;
+            if (dkind == T_PACKAGE) {
+               sub_body = find_pack_body_in_scope(body_scope, d)
+                  ?: find_pack_body_in_scope(scope, d);
+            }
+
+            const int pos = *depth;
+            path[pos] = sub_name;
+            *depth = pos + 1;
+
+            if (find_nested_pack_path(d, sub_body, target, is_type,
+                                      sub_name, path, depth, max_depth,
+                                      NULL)) {
+               if (top_pack != NULL)
+                  *top_pack = d;
+               return true;
+            }
+
+            *depth = pos;
+         }
+      }
+   }
+
+   return false;
+}
+
+static vcode_reg_t lower_nested_package_context(lower_unit_t *lu,
+                                                const void *target,
+                                                bool is_type)
+{
+   for (lower_unit_t *it = lu; it != NULL; it = it->parent) {
+      if (it->container == NULL)
+         continue;
+
+      tree_t scope = it->container;
+      tree_t body_scope = NULL;
+      if (tree_kind(scope) == T_PACK_BODY) {
+         body_scope = scope;
+         scope = tree_primary(scope);
+      }
+
+      ident_t path[16];
+      int depth = 0;
+      tree_t top_pack = NULL;
+      if (find_nested_pack_path(scope, body_scope, target, is_type,
+                                it->name, path, &depth, ARRAY_LEN(path),
+                                &top_pack)
+          && depth > 0 && top_pack != NULL) {
+         int hops = 0;
+         vcode_var_t var = lower_search_vcode_obj(top_pack, lu, &hops);
+         if (var != VCODE_INVALID_VAR) {
+            vcode_reg_t ctx = (hops == 0)
+               ? emit_load(var)
+               : emit_load_indirect(emit_var_upref(hops, var));
+            for (int k = 1; k < depth; k++) {
+               vcode_type_t vctx = vtype_context(path[k]);
+               ctx = emit_load_indirect(emit_link_var(ctx, path[k], vctx));
+            }
+            return ctx;
+         }
+      }
+   }
+
+   return VCODE_INVALID_REG;
+}
+
 static vcode_reg_t lower_link_var(lower_unit_t *lu, tree_t decl)
 {
+   vcode_reg_t nested_ctx = lower_nested_package_context(lu, decl, false);
+   if (nested_ctx != VCODE_INVALID_REG)
+      return emit_link_var(nested_ctx, tree_ident(decl), lower_var_type(decl));
+
    tree_t container = tree_container(decl);
    assert(!is_uninstantiated_package(container));
 
@@ -3342,6 +3543,29 @@ static vcode_reg_t lower_link_var(lower_unit_t *lu, tree_t decl)
       vcode_dump();
       fatal_trace("invalid container kind %pK for %pI", container,
                   tree_ident(decl));
+   }
+
+   if (is_package(container)) {
+      tree_t pscope = container;
+      tree_t bscope = NULL;
+      if (tree_kind(container) == T_PACK_BODY) {
+         bscope = container;
+         pscope = tree_primary(container);
+         container_name = tree_ident(pscope);
+      }
+      else if (tree_kind(container) == T_PACKAGE)
+         bscope = body_of(container);
+
+      ident_t path[16];
+      int depth = 0;
+      if (find_nested_pack_path(pscope, bscope, decl, false, container_name,
+                                path, &depth, ARRAY_LEN(path), NULL)
+          && depth > 0) {
+         for (int k = 0; k < depth; k++) {
+            vcode_type_t vctx = vtype_context(path[k]);
+            context = emit_load_indirect(emit_link_var(context, path[k], vctx));
+         }
+      }
    }
 
    return emit_link_var(context, tree_ident(decl), lower_var_type(decl));
@@ -6985,6 +7209,7 @@ static void lower_var_assign(lower_unit_t *lu, tree_t stmt, gen_stack_t *gs)
       if (is_var_decl
           && (var = lower_get_var(lu, tree_ref(target),
                                   &hops)) != VCODE_INVALID_VAR
+          && !(var & INSTANCE_BIT)
           && hops == 0)
          emit_store(value_reg, var);
       else {
@@ -8667,6 +8892,20 @@ static void lower_var_decl(lower_unit_t *lu, tree_t decl)
    vcode_var_t var = emit_var(vtype, vbounds, tree_ident(decl), flags);
    lower_put_vcode_obj(decl, var, lu);
 
+   if (is_const && lu->container != NULL
+       && tree_kind(lu->container) == T_PACK_BODY) {
+      tree_t pack = tree_primary(lu->container);
+      const int ndecls = tree_decls(pack);
+      for (int i = 0; i < ndecls; i++) {
+         tree_t d = tree_decl(pack, i);
+         if (tree_kind(d) == T_CONST_DECL && !tree_has_value(d)
+             && tree_ident(d) == tree_ident(decl)) {
+            lower_put_vcode_obj(d, var, lu);
+            break;
+         }
+      }
+   }
+
    if (type_is_protected(type)) {
       vcode_reg_t obj_reg = lower_protected_init(lu, type, decl);
       emit_store(obj_reg, var);
@@ -8947,14 +9186,25 @@ static vcode_reg_t lower_resolution_func(lower_unit_t *lu, type_t type,
 
       int hops;
       vcode_var_t var = lower_search_vcode_obj(type, lu, &hops);
-      if (var != VCODE_INVALID_VAR)
+      if (var != VCODE_INVALID_VAR && (var & INSTANCE_BIT)) {
+         vcode_var_t pkg_var = var & ~INSTANCE_BIT;
+         vcode_reg_t pkg_reg = hops == 0 ? emit_load(pkg_var)
+            : emit_load_indirect(emit_var_upref(hops, pkg_var));
+         vcode_type_t vtype = lower_func_result_type(type);
+         ident_t var_name =
+            ident_prefix(type_ident(type), well_known(W_RESOLUTION), '$');
+         return emit_link_var(pkg_reg, var_name, vtype_resolution(vtype));
+      }
+      else if (var != VCODE_INVALID_VAR)
          return hops == 0 ? emit_index(var, VCODE_INVALID_REG)
             : emit_var_upref(hops, var);
       else if (!is_anonymous_subtype(type)) {
          vcode_type_t vtype = lower_func_result_type(type);
          ident_t var_name =
             ident_prefix(type_ident(type), well_known(W_RESOLUTION), '$');
-         vcode_reg_t context_reg = lower_context_for_mangled(lu, var_name);
+         vcode_reg_t context_reg = lower_nested_package_context(lu, type, true);
+         if (context_reg == VCODE_INVALID_REG)
+            context_reg = lower_context_for_mangled(lu, var_name);
          return emit_link_var(context_reg, var_name, vtype_resolution(vtype));
       }
    }
@@ -8985,8 +9235,19 @@ static vcode_reg_t lower_resolution_func(lower_unit_t *lu, type_t type,
       vcode_type_t vtype = lower_func_result_type(elem);
       ident_t var_name =
          ident_prefix(type_ident(rtype), well_known(W_RESOLUTION), '$');
-      vcode_reg_t context_reg = lower_context_for_mangled(lu, var_name);
+      vcode_reg_t context_reg = lower_nested_package_context(lu, rtype, true);
+      if (context_reg == VCODE_INVALID_REG)
+         context_reg = lower_context_for_mangled(lu, var_name);
       return emit_link_var(context_reg, var_name, vtype_resolution(vtype));
+   }
+   else if (var & INSTANCE_BIT) {
+      vcode_var_t pkg_var = var & ~INSTANCE_BIT;
+      vcode_reg_t pkg_reg = hops == 0 ? emit_load(pkg_var)
+         : emit_load_indirect(emit_var_upref(hops, pkg_var));
+      vcode_type_t vtype = lower_func_result_type(elem);
+      ident_t var_name =
+         ident_prefix(type_ident(rtype), well_known(W_RESOLUTION), '$');
+      return emit_link_var(pkg_reg, var_name, vtype_resolution(vtype));
    }
    else if (hops == 0)
       return emit_index(var, VCODE_INVALID_REG);
@@ -10968,19 +11229,33 @@ static void lower_decl(lower_unit_t *lu, tree_t decl, gen_stack_t *gs)
    case T_ATTR_SPEC:
       break;
 
-   case T_PACKAGE:
    case T_PACK_BODY:
-   case T_PACK_INST:
-      if (unit_needs_cgen(decl)) {
-         if (tree_kind(decl) != T_PACK_INST)
-            fatal_at(tree_loc(decl), "sorry, nested package declarations "
-                     "are not currently supported");
+      // Lowered together with its matching T_PACKAGE declaration
+      break;
 
+   case T_PACKAGE:
+   case T_PACK_INST:
+      if (tree_kind(decl) == T_PACK_INST || !is_uninstantiated_package(decl)) {
          ident_t name = ident_prefix(lu->name, tree_ident(decl), '.');
-         object_t *obj = tree_to_object(decl);
+         lower_fn_t fn;
+         object_t *obj;
+         tree_t body = NULL;
+
+         if (tree_kind(decl) == T_PACK_INST) {
+            fn = lower_instantiated_package;
+            obj = tree_to_object(decl);
+         }
+         else if ((body = find_pack_body_in_scope(lu->container, decl)) != NULL) {
+            fn = lower_pack_body;
+            obj = tree_to_object(body);
+         }
+         else {
+            fn = lower_package;
+            obj = tree_to_object(decl);
+         }
 
          unit_registry_defer(lu->registry, name, lu, emit_package,
-                             lower_instantiated_package, lu->cover, obj);
+                             fn, lu->cover, obj);
 
          vcode_type_t vcontext = vtype_context(name);
          vcode_var_t var = emit_var(vcontext, VCODE_INVALID_STAMP, name, 0);
@@ -10989,13 +11264,14 @@ static void lower_decl(lower_unit_t *lu, tree_t decl, gen_stack_t *gs)
          vcode_reg_t pkg_reg = emit_package_init(name, emit_context_upref(0));
          emit_store(pkg_reg, var);
 
-         lower_put_vcode_obj(name, pkg_reg, lu);
+         lower_put_vcode_obj(name, var | INSTANCE_BIT, lu);
 
-         const int ngenerics = tree_generics(tree_ref(decl));
+         tree_t src = (tree_kind(decl) == T_PACK_INST) ? tree_ref(decl) : decl;
+         const int ngenerics = tree_generics(src);
          for (int i = 0; i < ngenerics; i++)
             lower_put_vcode_obj(tree_generic(decl, i), var | INSTANCE_BIT, lu);
 
-         const int ndecls = tree_decls(tree_ref(decl));
+         const int ndecls = tree_decls(src);
          for (int i = 0; i < ndecls; i++) {
             tree_t d = tree_decl(decl, i);
             if (is_type_decl(d))
@@ -11298,6 +11574,8 @@ static bool lower_has_subprograms(tree_t scope)
       if (kind == T_FUNC_BODY || kind == T_PROC_BODY)
          return true;
       else if (kind == T_FUNC_INST || kind == T_PROC_INST)
+         return true;
+      else if (kind == T_PACKAGE || kind == T_PACK_BODY || kind == T_PACK_INST)
          return true;
       else if (kind == T_TYPE_DECL) {
          // Predefined operators for certain types may reference the
@@ -13688,7 +13966,7 @@ static void lower_cache_instance_name(lower_unit_t *lu, attr_kind_t which)
       {
          LOCAL_TEXT_BUF tb = tb_new();
          tb_append(tb, ':');
-         tb_istr(tb, tree_ident(primary_unit_of(lu->container)));
+         tb_istr(tb, lu->name);
          tb_replace(tb, '.', ':');
          tb_downcase(tb);
 
@@ -13733,6 +14011,7 @@ static void lower_pack_body(lower_unit_t *lu, object_t *obj)
    const bool has_scope =
       lower_push_package_scope(pack) || lower_push_package_scope(body);
 
+   lower_generics(lu, pack, NULL);
    lower_decls(lu, pack, &gs);
    lower_decls(lu, body, &gs);
 
@@ -14375,13 +14654,16 @@ vcode_unit_t unit_registry_get(unit_registry_t *ur, ident_t ident)
          return NULL;
 
       lower_fn_t fn;
-      if (tree_kind(unit) == T_PACKAGE && package_needs_body(unit)) {
+      if (tree_kind(unit) == T_PACKAGE) {
          tree_t body = body_of(unit);
-         if (body == NULL)
+         if (body != NULL) {
+            obj = tree_to_object(body);
+            fn = lower_pack_body;
+         }
+         else if (package_needs_body(unit))
             return NULL;
-
-         obj = tree_to_object(body);
-         fn = lower_pack_body;
+         else
+            fn = lower_package;
       }
       else
          fn = lower_package;
@@ -14396,6 +14678,19 @@ vcode_unit_t unit_registry_get(unit_registry_t *ur, ident_t ident)
          // We actually wanted a unit inside this package so need to
          // force code generation
          (void)unit_registry_get(ur, unit_name);
+
+         // Force generation of intermediate nested packages if needed
+         ident_t sub = unit_name;
+         while (hash_get(ur->map, ident) == NULL && it != NULL) {
+            ident_t seg = ident_walk_selected(&it);
+            if (seg == NULL)
+               break;
+            sub = ident_prefix(sub, seg, '.');
+            if (sub == ident)
+               break;
+            if (hash_get(ur->map, sub) != NULL)
+               (void)unit_registry_get(ur, sub);
+         }
       }
 
       if ((ptr = hash_get(ur->map, ident)) == NULL)

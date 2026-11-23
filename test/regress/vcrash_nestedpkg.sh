@@ -1,7 +1,6 @@
-set -x
+set -xe
 
-# Nested package declarations are not supported by the code generator:
-# elaboration must report this and not hit an internal error
+# Nested package declarations elaborate and run cleanly
 
 cat >nestedpkg.vhd <<'VHD'
 entity nestedpkg is end;
@@ -19,7 +18,5 @@ end architecture;
 VHD
 
 nvc --std=08 -a nestedpkg.vhd
-if nvc --std=08 -e nestedpkg 2> err.txt; then exit 1; fi
-cat err.txt
-grep -q 'sorry, nested package declarations are not currently supported' err.txt
-if grep -q 'does not have item' err.txt; then exit 1; fi
+nvc --std=08 -e nestedpkg
+nvc --std=08 -r nestedpkg 2>&1 | grep -q 'Note:.*: 3'

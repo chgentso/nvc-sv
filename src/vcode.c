@@ -5081,6 +5081,10 @@ vcode_reg_t emit_package_init(ident_t name, vcode_reg_t context)
                 "invalid protected init context argument");
    VCODE_ASSERT(active_unit->kind == VCODE_UNIT_INSTANCE
                 || active_unit->kind == VCODE_UNIT_PACKAGE
+                || active_unit->kind == VCODE_UNIT_PROCESS
+                || active_unit->kind == VCODE_UNIT_PROTECTED
+                || active_unit->kind == VCODE_UNIT_FUNCTION
+                || active_unit->kind == VCODE_UNIT_PROCEDURE
                 || active_unit->kind == VCODE_UNIT_THUNK,
                 "cannot use package init here");
    VCODE_ASSERT(name != active_unit->name, "cyclic package init");
