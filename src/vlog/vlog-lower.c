@@ -36748,7 +36748,7 @@ void vlog_lower_instance(mir_context_t *mc, vlog_node_t body, ident_t parent,
          break;
       case V_VAR_DECL:
          if (mir_is_null(mir_search_object(mu, d, &hops)))
-            vlog_lower_var_decl(&g, d, hash_get(map, d), 0);
+            vlog_lower_var_decl(&g, d, hash_get(map, d), SIG_F_INIT_EVENT);
          else {
             assert(hops == 0); // Port
 
@@ -37382,9 +37382,7 @@ void vlog_lower_block(mir_context_t *mc, ident_t parent, tree_t b)
                                ? NET_F_EFFECTIVE | NET_F_INOUT : 0);
          break;
       case V_VAR_DECL:
-         vlog_lower_var_decl(&g, d, hash_get(map, d),
-                             vlog_subkind(port) == V_PORT_INPUT
-                             ? SIG_F_INIT_EVENT : 0);
+         vlog_lower_var_decl(&g, d, hash_get(map, d), SIG_F_INIT_EVENT);
          break;
       default:
          should_not_reach_here();
@@ -37430,7 +37428,7 @@ void vlog_lower_block(mir_context_t *mc, ident_t parent, tree_t b)
             vlog_lower_net_signal(&g, d, hash_get(map, d), resfn, 0);
             break;
          case V_VAR_DECL:
-            vlog_lower_var_decl(&g, d, hash_get(map, d), 0);
+            vlog_lower_var_decl(&g, d, hash_get(map, d), SIG_F_INIT_EVENT);
             break;
          default:
             should_not_reach_here();
