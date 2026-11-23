@@ -1956,7 +1956,37 @@ static int inst(ictx_t *I, int n)
    case N_BIN:
       {
          nd.a = inst(I, nd.a);
-         nd.b = inst(I, nd.b);
+         if (c->nodes[nd.a].kind == N_CONST && c->nodes[nd.a].width <= 64) {
+            const bool av = c->nodes[nd.a].val != 0;
+            if (nd.op == CRV_IMPLIES) {
+               if (!av)
+                  return mk_const(c, 1, nd.width, false);
+               const int b = inst(I, nd.b);
+               if (c->nodes[b].width == nd.width && !c->nodes[b].sgn)
+                  return b;
+               nd.b = b;
+            }
+            else if (nd.op == CRV_LOG_AND) {
+               if (!av)
+                  return mk_const(c, 0, nd.width, false);
+               const int b = inst(I, nd.b);
+               if (c->nodes[b].width == nd.width && !c->nodes[b].sgn)
+                  return b;
+               nd.b = b;
+            }
+            else if (nd.op == CRV_LOG_OR) {
+               if (av)
+                  return mk_const(c, 1, nd.width, false);
+               const int b = inst(I, nd.b);
+               if (c->nodes[b].width == nd.width && !c->nodes[b].sgn)
+                  return b;
+               nd.b = b;
+            }
+            else
+               nd.b = inst(I, nd.b);
+         }
+         else
+            nd.b = inst(I, nd.b);
          const bool fold = nd.width <= 64
             && c->nodes[nd.a].width <= 64 && c->nodes[nd.b].width <= 64
             && c->nodes[nd.a].kind == N_CONST
@@ -2057,6 +2087,11 @@ static void rsize_cb(void *ctx, const node_t *nd, int n)
 
 static void add_pcons(prob_t *P, ckind_t kind, int root, int soft, int line)
 {
+   if (kind == C_REQ && root >= 0) {
+      const node_t *nd = &P->c->nodes[root];
+      if (nd->kind == N_CONST && nd->width <= 64 && nd->val != 0)
+         return;
+   }
    pcons_t pc = { .kind = kind, .root = root, .soft = soft, .line = line };
    VEC_PUSH(P->cons, P->ncons, P->ccons, pc);
 }
@@ -2969,151 +3004,161 @@ static prob_t *prob_build(crv_t *c, int mode, const unsigned *sizes,
 
    derive_domains(P);
 
-   // Populate P->vals for variables fixed to a single value (e.g. rand_mode(0))
-   for (int v = 0; v < P->nv; v++) {
-      const pvar_t *pv = &P->vars[v];
-      if (pv->width <= 64 && pv->dom.lo == pv->dom.hi)
-         P->vals[v] = norm(pv->dom.lo, pv->width, pv->sgn);
-   }
-
    // Weighted choice applies to a distribution at the root of a constraint,
    // under implications (including nested ones and foreach bounds guards),
    // on a fixed array element or ternary arm, or on an affine expression
    // (var + const) with a fixed offset.
-   for (int ci = 0; ci < P->ncons; ci++) {
-      const pcons_t *pc = &P->cons[ci];
-      if (pc->kind != C_REQ || pc->soft >= 0)
-         continue;
-      int cur = pc->root;
-      int guard = -1;
-      for (;;) {
-         const node_t *nd = &c->nodes[cur];
-         if (nd->kind == N_BIN && nd->op == CRV_IMPLIES) {
-            i128 gv = 0;
-            if (fixed_val_of(P, nd->a, &gv)) {
-               if (gv == 0) {
-                  cur = -1;
-                  break;
+   if (c->ndists > 0) {
+      // Populate P->vals for variables fixed to a single value (e.g. rand_mode(0))
+      for (int v = 0; v < P->nv; v++) {
+         const pvar_t *pv = &P->vars[v];
+         if (pv->width <= 64 && pv->dom.lo == pv->dom.hi)
+            P->vals[v] = norm(pv->dom.lo, pv->width, pv->sgn);
+      }
+
+      for (int ci = 0; ci < P->ncons; ci++) {
+         const pcons_t *pc = &P->cons[ci];
+         if (pc->kind != C_REQ || pc->soft >= 0)
+            continue;
+         // Fast reject: walk CRV_IMPLIES chain to see if leaf is N_DIST
+         int leaf = pc->root;
+         while (c->nodes[leaf].kind == N_BIN
+                && c->nodes[leaf].op == CRV_IMPLIES)
+            leaf = c->nodes[leaf].b;
+         if (c->nodes[leaf].kind != N_DIST)
+            continue;
+
+         int cur = pc->root;
+         int guard = -1;
+         for (;;) {
+            const node_t *nd = &c->nodes[cur];
+            if (nd->kind == N_BIN && nd->op == CRV_IMPLIES) {
+               i128 gv = 0;
+               if (fixed_val_of(P, nd->a, &gv)) {
+                  if (gv == 0) {
+                     cur = -1;
+                     break;
+                  }
                }
+               else if (guard < 0)
+                  guard = nd->a;
+               else
+                  guard = crv_binary(c, CRV_LOG_AND, guard, nd->a, 1, false);
+               cur = nd->b;
             }
-            else if (guard < 0)
-               guard = nd->a;
             else
-               guard = crv_binary(c, CRV_LOG_AND, guard, nd->a, 1, false);
-            cur = nd->b;
+               break;
          }
-         else
+         if (cur < 0)
+            continue;
+
+         const node_t *dn = &c->nodes[cur];
+         if (dn->kind != N_DIST)
+            continue;
+
+         int dist_id = dn->aux;
+         int target_v = -1;
+         int arg = dn->a;
+         // Unwrap widening casts and conditionals with a fixed selector
+         for (;;) {
+            const node_t *cn = &c->nodes[arg];
+            if (cn->kind == N_CAST) {
+               const node_t *in = &c->nodes[cn->a];
+               if (in->width <= cn->width && (!in->sgn || cn->sgn)) {
+                  arg = cn->a;
+                  continue;
+               }
+            }
+            else if (cn->kind == N_COND) {
+               i128 sv = 0;
+               if (fixed_val_of(P, cn->a, &sv)) {
+                  arg = sv != 0 ? cn->b : cn->c;
+                  continue;
+               }
+            }
             break;
-      }
-      if (cur < 0)
-         continue;
+         }
 
-      const node_t *dn = &c->nodes[cur];
-      if (dn->kind != N_DIST)
-         continue;
-
-      int dist_id = dn->aux;
-      int target_v = -1;
-      int arg = dn->a;
-      // Unwrap widening casts and conditionals with a fixed selector
-      for (;;) {
-         const node_t *cn = &c->nodes[arg];
-         if (cn->kind == N_CAST) {
-            const node_t *in = &c->nodes[cn->a];
-            if (in->width <= cn->width && (!in->sgn || cn->sgn)) {
-               arg = cn->a;
-               continue;
+         const node_t *an = &c->nodes[arg];
+         if (an->kind == N_VAR && an->aux >= 0 && an->aux < P->nv)
+            target_v = an->aux;
+         else if (an->kind == N_AELEM && an->aux >= 0 && an->aux < P->na
+                  && P->ebase[an->aux] >= 0) {
+            i128 iv = 0;
+            if (fixed_val_of(P, an->a, &iv)
+                && iv >= 0 && iv < (i128)P->sizes[an->aux])
+               target_v = P->ebase[an->aux] + (int)iv;
+         }
+         else if (an->kind == N_BIN
+                  && (an->op == CRV_ADD || an->op == CRV_SUB)) {
+            // Affine shift: (v + k) dist {...} or (k + v) dist {...}
+            int vnode = -1, knode = -1;
+            bool sub_k = false;
+            i128 kval = 0;
+            if (fixed_val_of(P, an->a, &kval) && an->op == CRV_ADD) {
+               vnode = an->b;
+               knode = an->a;
             }
-         }
-         else if (cn->kind == N_COND) {
-            i128 sv = 0;
-            if (fixed_val_of(P, cn->a, &sv)) {
-               arg = sv != 0 ? cn->b : cn->c;
-               continue;
+            else if (fixed_val_of(P, an->b, &kval)) {
+               vnode = an->a;
+               knode = an->b;
+               sub_k = an->op == CRV_SUB;
             }
-         }
-         break;
-      }
-
-      const node_t *an = &c->nodes[arg];
-      if (an->kind == N_VAR && an->aux >= 0 && an->aux < P->nv)
-         target_v = an->aux;
-      else if (an->kind == N_AELEM && an->aux >= 0 && an->aux < P->na
-               && P->ebase[an->aux] >= 0) {
-         i128 iv = 0;
-         if (fixed_val_of(P, an->a, &iv)
-             && iv >= 0 && iv < (i128)P->sizes[an->aux])
-            target_v = P->ebase[an->aux] + (int)iv;
-      }
-      else if (an->kind == N_BIN
-               && (an->op == CRV_ADD || an->op == CRV_SUB)) {
-         // Affine shift: (v + k) dist {...} or (k + v) dist {...}
-         int vnode = -1, knode = -1;
-         bool sub_k = false;
-         i128 kval = 0;
-         if (fixed_val_of(P, an->a, &kval) && an->op == CRV_ADD) {
-            vnode = an->b;
-            knode = an->a;
-         }
-         else if (fixed_val_of(P, an->b, &kval)) {
-            vnode = an->a;
-            knode = an->b;
-            sub_k = an->op == CRV_SUB;
-         }
-         if (vnode >= 0 && knode >= 0) {
-            while (c->nodes[vnode].kind == N_CAST
-                   && c->nodes[c->nodes[vnode].a].width <= c->nodes[vnode].width)
-               vnode = c->nodes[vnode].a;
-            const node_t *vn = &c->nodes[vnode];
-            if (vn->kind == N_VAR && vn->aux >= 0 && vn->aux < P->nv
-                && P->vars[vn->aux].width == an->width) {
-               const pvar_t *pv = &P->vars[vn->aux];
-               const cdist_t *orig = &c->dists[dist_id];
-               const i128 delta = sub_k ? kval : -kval;
-               bool all_ok = orig->n > 0;
-               for (unsigned j = 0; j < orig->n && all_ok; j++) {
-                  if (orig->r[j].lo != orig->r[j].hi) {
-                     const i128 lo = mathv(orig->r[j].lo, orig->sgn) + delta;
-                     const i128 hi = mathv(orig->r[j].hi, orig->sgn) + delta;
-                     if (lo < tmin(pv->width, pv->sgn)
-                         || hi > tmax(pv->width, pv->sgn))
-                        all_ok = false;
+            if (vnode >= 0 && knode >= 0) {
+               while (c->nodes[vnode].kind == N_CAST
+                      && c->nodes[c->nodes[vnode].a].width <= c->nodes[vnode].width)
+                  vnode = c->nodes[vnode].a;
+               const node_t *vn = &c->nodes[vnode];
+               if (vn->kind == N_VAR && vn->aux >= 0 && vn->aux < P->nv
+                   && P->vars[vn->aux].width == an->width) {
+                  const pvar_t *pv = &P->vars[vn->aux];
+                  const cdist_t *orig = &c->dists[dist_id];
+                  const i128 delta = sub_k ? kval : -kval;
+                  bool all_ok = orig->n > 0;
+                  for (unsigned j = 0; j < orig->n && all_ok; j++) {
+                     if (orig->r[j].lo != orig->r[j].hi) {
+                        const i128 lo = mathv(orig->r[j].lo, orig->sgn) + delta;
+                        const i128 hi = mathv(orig->r[j].hi, orig->sgn) + delta;
+                        if (lo < tmin(pv->width, pv->sgn)
+                            || hi > tmax(pv->width, pv->sgn))
+                           all_ok = false;
+                     }
+                  }
+                  if (all_ok) {
+                     const crv_dist_t nd_id = crv_dist_new(c);
+                     c->dists[nd_id].sgn = pv->sgn;
+                     // orig pointer may have moved after crv_dist_new
+                     const unsigned rn = c->dists[dist_id].n;
+                     for (unsigned j = 0; j < rn; j++) {
+                        const drange_t dr = c->dists[dist_id].r[j];
+                        const i128 lo = mathv(dr.lo, c->dists[dist_id].sgn) + delta;
+                        const i128 hi = mathv(dr.hi, c->dists[dist_id].sgn) + delta;
+                        crv_dist_range(c, nd_id,
+                                       norm(lo, pv->width, pv->sgn),
+                                       norm(hi, pv->width, pv->sgn),
+                                       dr.weight, dr.per_value);
+                     }
+                     dist_id = nd_id;
+                     target_v = vn->aux;
                   }
                }
-               if (all_ok) {
-                  const crv_dist_t nd_id = crv_dist_new(c);
-                  c->dists[nd_id].sgn = pv->sgn;
-                  // orig pointer may have moved after crv_dist_new
-                  const unsigned rn = c->dists[dist_id].n;
-                  for (unsigned j = 0; j < rn; j++) {
-                     const drange_t dr = c->dists[dist_id].r[j];
-                     const i128 lo = mathv(dr.lo, c->dists[dist_id].sgn) + delta;
-                     const i128 hi = mathv(dr.hi, c->dists[dist_id].sgn) + delta;
-                     crv_dist_range(c, nd_id,
-                                    norm(lo, pv->width, pv->sgn),
-                                    norm(hi, pv->width, pv->sgn),
-                                    dr.weight, dr.per_value);
-                  }
-                  dist_id = nd_id;
-                  target_v = vn->aux;
-               }
             }
          }
-      }
 
-      if (target_v < 0)
-         continue;
+         if (target_v < 0)
+            continue;
 
-      pvar_t *pv = &P->vars[target_v];
-      if (guard < 0) {
-         if (pv->dist < 0)
-            pv->dist = dist_id;
-      }
-      else {
-         pv->gd = xrealloc(pv->gd, (pv->ngd + 1) * 2 * sizeof(int));
-         pv->gd[pv->ngd * 2] = guard;
-         pv->gd[pv->ngd * 2 + 1] = dist_id;
-         pv->ngd++;
+         pvar_t *pv = &P->vars[target_v];
+         if (guard < 0) {
+            if (pv->dist < 0)
+               pv->dist = dist_id;
+         }
+         else {
+            pv->gd = xrealloc(pv->gd, (pv->ngd + 1) * 2 * sizeof(int));
+            pv->gd[pv->ngd * 2] = guard;
+            pv->gd[pv->ngd * 2 + 1] = dist_id;
+            pv->ngd++;
+         }
       }
    }
 
@@ -8323,25 +8368,28 @@ static sres_t solve_comp(prob_t *P)
    const amark_t am = arena_mark(&P->ar);
    const int64_t saved_budget = P->budget;
    if (P->sat == 1 && dbg.budget == 0) {
-      // With SAT standing by as fallback, cap DFS work per component by its
-      // size so hopeless bitwise/multiplicative groups reach SAT quickly
-      // without cutting off large array/unique/ordering components.
-      const int nvc = comp >= 0 ? P->kvs[comp + 1] - P->kvs[comp] : P->nv;
-      int nfv = 0;
-      for (int i = 0; i < nvc; i++)
-         nfv += is_free(P, comp >= 0 ? P->kvl[P->kvs[comp] + i] : i);
+      // With SAT standing by as fallback, cap DFS work on compact components
+      // so hopeless bitwise/multiplicative groups reach SAT quickly without
+      // cutting off large array/unique/pairwise components that exceed the
+      // bit-blaster gate limit.
       const int c0 = comp >= 0 ? P->kcs[comp] : 0;
       const int c1 = comp >= 0 ? P->kcs[comp + 1] : P->ncons;
-      int64_t un_work = 0;
-      for (int k = c0; k < c1; k++) {
-         const pcons_t *pc = &P->cons[comp >= 0 ? P->kcl[k] : k];
-         if (pc->kind == C_UNIQUE)
-            un_work += 24 * (int64_t)pc->unn * pc->unn;
+      if (c1 - c0 <= 512) {
+         const int nvc = comp >= 0 ? P->kvs[comp + 1] - P->kvs[comp] : P->nv;
+         int nfv = 0;
+         for (int i = 0; i < nvc; i++)
+            nfv += is_free(P, comp >= 0 ? P->kvl[P->kvs[comp] + i] : i);
+         int64_t un_work = 0;
+         for (int k = c0; k < c1; k++) {
+            const pcons_t *pc = &P->cons[comp >= 0 ? P->kcl[k] : k];
+            if (pc->kind == C_UNIQUE)
+               un_work += 24 * (int64_t)pc->unn * pc->unn;
+         }
+         const int64_t cap = P->work + 8000 + 800 * (int64_t)nfv
+            + 80 * (int64_t)(c1 - c0) + un_work;
+         if (cap < P->budget)
+            P->budget = cap;
       }
-      const int64_t cap = P->work + 8000 + 800 * (int64_t)nfv
-         + 80 * (int64_t)(c1 - c0) + un_work;
-      if (cap < P->budget)
-         P->budget = cap;
    }
    const sres_t r = search(P);
    P->budget = saved_budget;
