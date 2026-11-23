@@ -7499,6 +7499,7 @@ struct _sv_task {
    unsigned         nawaiters;
    void          ***regs;           // Events the process is waiting on
    unsigned         nregs;
+   uint64_t         rng;            // Random stream, zero if not seeded
 };
 
 static A(sv_task_t *) sv_marked_tasks = AINIT;
@@ -7596,6 +7597,119 @@ static sv_task_t *sv_task_for(rt_proc_t *proc)
    }
 
    return proc->task;
+}
+
+static sv_handle_t *sv_process_handle(void *arg);
+
+static uint64_t sv_rng_mix(uint64_t *x)
+{
+   uint64_t z = (*x += UINT64_C(0x9e3779b97f4a7c15));
+   z = (z ^ (z >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);
+   z = (z ^ (z >> 27)) * UINT64_C(0x94d049bb133111eb);
+   return z ^ (z >> 31);
+}
+
+static uint64_t sv_rng_child(sv_task_t *parent)
+{
+   // A process created by a seeded process takes its seed from the stream
+   // of the parent (IEEE 1800-2017 18.14.2); otherwise both use the
+   // default streams
+
+   if (parent->rng == 0)
+      return 0;
+
+   uint64_t next = sv_rng_mix(&(parent->rng));
+   return next | 1;
+}
+
+static sv_task_t *sv_rng_active(void)
+{
+   rt_proc_t *proc = get_active_proc();
+   return proc != NULL ? proc->task : NULL;
+}
+
+bool model_rng_draw(uint64_t *r)
+{
+   // Takes the next value of the random stream of the running process
+   // if it has been seeded
+
+   sv_task_t *t = sv_rng_active();
+   if (t == NULL || t->rng == 0)
+      return false;
+
+   *r = sv_rng_mix(&(t->rng));
+   return true;
+}
+
+int64_t x_sv_rng_get(void)
+{
+   sv_task_t *t = sv_rng_active();
+   return t != NULL ? (int64_t)t->rng : 0;
+}
+
+void x_sv_rng_set(int64_t state)
+{
+   // Only a process which has a stream keeps the state a call leaves
+
+   sv_task_t *t = sv_rng_active();
+   if (t != NULL && t->rng != 0 && state != 0)
+      t->rng = state;
+}
+
+int64_t x_sv_rng_new(void)
+{
+   // The seed of an object comes from the stream of the process that
+   // creates it (18.14.1)
+
+   uint64_t r;
+   return model_rng_draw(&r) ? (int64_t)(r | 1) : 0;
+}
+
+void x_sv_rng_seed(void *arg, int64_t seed)
+{
+   sv_task_t *t = sv_process_handle(arg)->task;
+   if (t != NULL) {
+      uint64_t x = seed;
+      t->rng = sv_rng_mix(&x) | 1;
+   }
+}
+
+static uint64_t sv_rng_fresh(void)
+{
+   // A stream for a process that is asked for its state before it has
+   // one: the same on every run
+
+   static uint64_t counter = 0;
+   if (counter == 0)
+      counter = opt_verilog_seed() * UINT64_C(0x2545f4914f6cdd1d) + 1;
+
+   return sv_rng_mix(&counter) | 1;
+}
+
+int64_t x_sv_rng_fresh(void)
+{
+   return (int64_t)sv_rng_fresh();
+}
+
+int64_t x_sv_rng_state(void *arg)
+{
+   // The state of a process which has not been seeded cannot be restored
+   // so it takes a stream now
+
+   sv_task_t *t = sv_process_handle(arg)->task;
+   if (t == NULL)
+      return 0;
+   else if (t->rng == 0)
+      t->rng = sv_rng_fresh();
+
+   return (int64_t)t->rng;
+}
+
+void x_sv_rng_restore(void *arg, int64_t state)
+{
+   sv_task_t *t = sv_process_handle(arg)->task;
+   if (t != NULL && state != 0)
+      t->rng = state;
 }
 
 typedef struct _sv_waiter {
@@ -8713,6 +8827,7 @@ void x_sv_spawn(const ffi_closure_t *closure, void *group, int64_t label)
    task->parent = pt;
    task->group = group;
    task->block_label = label;
+   task->rng = sv_rng_child(pt);
    task->next_sibling = pt->first_child;
    task->prev_sibling = NULL;
    if (pt->first_child != NULL)

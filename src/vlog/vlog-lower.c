@@ -305,6 +305,8 @@ static mir_value_t vlog_crv_cons_word(vlog_gen_t *g, mir_value_t obj,
 }
 
 static bool vlog_crv_has_hidden(vlog_node_t class);
+static mir_value_t vlog_rng_call(vlog_gen_t *g, const char *name,
+                                 mir_value_t *args, int nargs);
 static mir_value_t vlog_lower_inside(vlog_gen_t *g, vlog_node_t v);
 static mir_value_t vlog_lower_inside_scalar(vlog_gen_t *g, vlog_node_t v,
                                             bool is_real);
@@ -353,6 +355,7 @@ static mir_value_t vlog_lower_assoc_checked(vlog_gen_t *g, mir_value_t slot,
                                             vlog_node_t kexpr, bool for_write,
                                             const type_info_t *eti);
 static mir_value_t vlog_lower_method_call(vlog_gen_t *g, vlog_node_t v);
+static mir_value_t vlog_lower_rng_method(vlog_gen_t *g, vlog_node_t v);
 typedef struct {
    vlog_gen_t  *g;
    vlog_node_t  subr;
@@ -19257,35 +19260,11 @@ static mir_value_t vlog_lower_builtin_method(vlog_gen_t *g, vlog_node_t v)
          return vlog_offset_to_int(g, res);
       }
    case V_METHOD_SRANDOM:
-      {
-         vlog_node_t class = vlog_get_type(prefix);
-         if (class != NULL && vlog_kind(class) == V_CLASS_DECL
-             && vlog_crv_has_hidden(class)) {
-            mir_value_t obj = vlog_kind(prefix) == V_THIS
-               ? vlog_lower_this(g) : vlog_lower_rvalue(g, prefix);
-            mir_type_t t_longint = mir_vec2_type(g->mu, 64, true);
-            mir_value_t seed = vlog_lower_cast(
-               g, t_longint, vlog_lower_rvalue(g, vlog_param(v, 0)));
-
-            // An odd value as zero means the object has no seed
-            mir_value_t two = mir_const_vec(g->mu, t_longint, 2, 0);
-            mir_value_t one = mir_const_vec(g->mu, t_longint, 1, 0);
-            mir_value_t odd = mir_build_binary(
-               g->mu, MIR_VEC_ADD, t_longint,
-               mir_build_binary(g->mu, MIR_VEC_MUL, t_longint, seed, two), one);
-
-            mir_build_store(g->mu, vlog_crv_hidden(g, obj, "$seed"), odd);
-         }
-         return MIR_NULL_VALUE;
-      }
    case V_METHOD_RANDSTATE_SET:
+   case V_METHOD_RANDSTATE_GET:
+      return vlog_lower_rng_method(g, v);
    case V_METHOD_NOP:
       return MIR_NULL_VALUE;
-   case V_METHOD_RANDSTATE_GET:
-      {
-         mir_type_t t_str = mir_uarray_type(g->mu, 1, mir_char_type(g->mu));
-         return vlog_empty_array(g, t_str);
-      }
    case V_METHOD_ASSOC_EXISTS:
    case V_METHOD_ASSOC_FIRST:
    case V_METHOD_ASSOC_LAST:
@@ -20576,6 +20555,116 @@ static void vlog_copy_properties(vlog_gen_t *g, vlog_node_t class,
    }
 }
 
+static mir_value_t vlog_lower_rng_method(vlog_gen_t *g, vlog_node_t v)
+{
+   // srandom, get_randstate and set_randstate of a process or an object
+   // (IEEE 1800-2017 18.13, 18.14)
+
+   vlog_node_t prefix = vlog_value(v);
+   const vlog_method_t method = vlog_subkind(v);
+
+   vlog_node_t class = vlog_get_type(prefix);
+   const bool is_class = class != NULL && vlog_kind(class) == V_CLASS_DECL;
+   if (is_class && !vlog_crv_has_hidden(class)) {
+      // The object has no random stream
+      if (method == V_METHOD_RANDSTATE_GET) {
+         mir_type_t t_str = mir_uarray_type(g->mu, 1, mir_char_type(g->mu));
+         return vlog_empty_array(g, t_str);
+      }
+
+      return MIR_NULL_VALUE;
+   }
+
+   mir_type_t t_offset = mir_offset_type(g->mu);
+   mir_type_t t_longint = mir_vec2_type(g->mu, 64, true);
+
+   mir_value_t who;
+   mir_value_t seed_ptr = MIR_NULL_VALUE;
+   if (is_class) {
+      who = vlog_kind(prefix) == V_THIS
+         ? vlog_lower_this(g) : vlog_lower_rvalue(g, prefix);
+      seed_ptr = vlog_crv_hidden(g, who, "$seed");
+   }
+   else
+      who = vlog_lower_rvalue(g, prefix);
+
+   switch (method) {
+   case V_METHOD_SRANDOM:
+      {
+         mir_value_t seed = vlog_lower_cast(
+            g, t_longint, vlog_lower_rvalue(g, vlog_param(v, 0)));
+
+         if (!is_class) {
+            mir_value_t args[] = { who, vlog_crv_to_offset(g, seed) };
+            vlog_rng_call(g, "__sv_rng_seed", args, 2);
+            return MIR_NULL_VALUE;
+         }
+
+         // An odd value as zero means the object has no seed
+         mir_value_t two = mir_const_vec(g->mu, t_longint, 2, 0);
+         mir_value_t one = mir_const_vec(g->mu, t_longint, 1, 0);
+         mir_value_t odd = mir_build_binary(
+            g->mu, MIR_VEC_ADD, t_longint,
+            mir_build_binary(g->mu, MIR_VEC_MUL, t_longint, seed, two), one);
+
+         mir_build_store(g->mu, seed_ptr, odd);
+         return MIR_NULL_VALUE;
+      }
+
+   case V_METHOD_RANDSTATE_SET:
+      {
+         mir_value_t str = vlog_str_arg(g, vlog_param(v, 0));
+         mir_value_t pargs[] = { str };
+         mir_value_t state = vlog_rng_call(g, "__sv_rng_parse", pargs, 1);
+
+         if (is_class) {
+            // Text which is not a state leaves the object as it was
+            mir_value_t zero = mir_const(g->mu, t_offset, 0);
+            mir_block_t set_bb = mir_add_block(g->mu);
+            mir_block_t end_bb = mir_add_block(g->mu);
+            mir_build_cond(g->mu, mir_build_cmp(g->mu, MIR_CMP_NEQ, state,
+                                                zero), set_bb, end_bb);
+            mir_set_cursor(g->mu, set_bb, MIR_APPEND);
+            mir_build_store(g->mu, seed_ptr,
+                            vlog_crv_from_offset(g, state, t_longint));
+            mir_build_jump(g->mu, end_bb);
+            mir_set_cursor(g->mu, end_bb, MIR_APPEND);
+         }
+         else {
+            mir_value_t args[] = { who, state };
+            vlog_rng_call(g, "__sv_rng_restore", args, 2);
+         }
+
+         return MIR_NULL_VALUE;
+      }
+
+   default:
+      {
+         mir_value_t state;
+         if (is_class) {
+            // An object that has not been seeded gets its stream now
+            mir_value_t args[] = {
+               vlog_crv_to_offset(g, mir_build_load(g->mu, seed_ptr))
+            };
+            state = vlog_rng_call(g, "__sv_rng_ensure", args, 1);
+            mir_build_store(g->mu, seed_ptr,
+                            vlog_crv_from_offset(g, state, t_longint));
+         }
+         else {
+            mir_value_t args[] = { who };
+            state = vlog_rng_call(g, "__sv_rng_state", args, 1);
+         }
+
+         mir_type_t t_char = mir_char_type(g->mu);
+         mir_value_t len = mir_const(g->mu, t_offset, 20);
+         mir_value_t data = vlog_alloc_array(g, t_char, len);
+         mir_value_t args[] = { state, data };
+         vlog_rng_call(g, "__sv_rng_format", args, 2);
+         return vlog_wrap_array(g, data, len);
+      }
+   }
+}
+
 static mir_value_t vlog_lower_class_new(vlog_gen_t *g, vlog_node_t v)
 {
    vlog_node_t type;
@@ -20650,6 +20739,15 @@ static mir_value_t vlog_lower_class_new(vlog_gen_t *g, vlog_node_t v)
 
    mir_value_t obj = mir_build_protected_init(g->mu, ti->type, parent,
                                               MIR_NULL_VALUE, MIR_NULL_VALUE);
+
+   if (vlog_crv_has_hidden(type)) {
+      // An object takes its stream from the process that creates it when
+      // that has one (18.14.1)
+      mir_type_t t_longint = mir_vec2_type(g->mu, 64, true);
+      mir_value_t seed = vlog_rng_call(g, "__sv_rng_new", NULL, 0);
+      mir_build_store(g->mu, vlog_crv_hidden(g, obj, "$seed"),
+                      vlog_crv_from_offset(g, seed, t_longint));
+   }
 
    vlog_node_t ctor = vlog_find_ctor(type);
    if (ctor != NULL) {
@@ -28001,6 +28099,31 @@ static int vlog_crv_static_bit(vlog_node_t class, vlog_node_t cons)
    fatal_trace("missing static constraint %pi", vlog_ident(cons));
 }
 
+static mir_value_t vlog_rng_call(vlog_gen_t *g, const char *name,
+                                 mir_value_t *args, int nargs)
+{
+   // Calls on the random stream of the running process
+
+   mir_type_t t_offset = mir_offset_type(g->mu);
+   mir_value_t r = mir_build_fcall(g->mu, ident_new(name), t_offset,
+                                   MIR_NULL_STAMP, args, nargs);
+   mir_build_consume(g->mu, r);
+   return r;
+}
+
+static void vlog_crv_seed_end(vlog_gen_t *g, mir_value_t seed_ptr,
+                              mir_value_t seed_in)
+{
+   // Stores the stream of the object after a solve: the stream of the
+   // process was used and advanced if the object had none
+
+   mir_value_t next = CRV0(g, CRV_OP_SEED_END);
+   mir_value_t args[] = { vlog_crv_to_offset(g, seed_in), next };
+   mir_value_t back = vlog_rng_call(g, "__sv_rng_back", args, 2);
+   mir_type_t t_longint = mir_vec2_type(g->mu, 64, true);
+   mir_build_store(g->mu, seed_ptr, vlog_crv_from_offset(g, back, t_longint));
+}
+
 static bool vlog_crv_has_hidden(vlog_node_t class)
 {
    return vlog_class_member(class, ident_new("$rand_off")) != NULL;
@@ -29856,11 +29979,14 @@ static mir_value_t vlog_lower_randomize(vlog_gen_t *g, vlog_node_t v)
    mir_value_t ctx = CRV0(g, CRV_OP_BEGIN);
 
    // The object has its own random stream once it has been seeded
-   mir_value_t seed_ptr = MIR_NULL_VALUE;
+   mir_value_t seed_ptr = MIR_NULL_VALUE, seed_in = MIR_NULL_VALUE;
    if (vlog_crv_has_hidden(class)) {
       seed_ptr = vlog_crv_hidden(g, obj, "$seed");
-      CRV1(g, CRV_OP_SEED_BEGIN,
-           vlog_crv_to_offset(g, mir_build_load(g->mu, seed_ptr)));
+      seed_in = mir_build_load(g->mu, seed_ptr);
+
+      // The stream of the process is the default when the object has none
+      mir_value_t args[] = { vlog_crv_to_offset(g, seed_in) };
+      CRV1(g, CRV_OP_SEED_BEGIN, vlog_rng_call(g, "__sv_rng_pick", args, 1));
    }
 
    vlog_gen_t saved = *g;
@@ -29916,12 +30042,8 @@ static mir_value_t vlog_lower_randomize(vlog_gen_t *g, vlog_node_t v)
       mir_set_cursor(g->mu, fail_bb, MIR_APPEND);
       CRV1(g, CRV_OP_END, ctx1);
       CRV1(g, CRV_OP_END, ctx);
-      if (!mir_is_null(seed_ptr)) {
-         mir_value_t next = CRV0(g, CRV_OP_SEED_END);
-         mir_type_t t_longint = mir_vec2_type(g->mu, 64, true);
-         mir_build_store(g->mu, seed_ptr,
-                         vlog_crv_from_offset(g, next, t_longint));
-      }
+      if (!mir_is_null(seed_ptr))
+         vlog_crv_seed_end(g, seed_ptr, seed_in);
       mir_build_store(g->mu, result, mir_const_vec(g->mu, t_result, 0, 0));
       mir_build_jump(g->mu, end_bb);
 
@@ -29943,11 +30065,8 @@ static mir_value_t vlog_lower_randomize(vlog_gen_t *g, vlog_node_t v)
 
    mir_value_t ok = CRV1(g, CRV_OP_SOLVE, ctx);
 
-   if (!mir_is_null(seed_ptr)) {
-      mir_value_t next = CRV0(g, CRV_OP_SEED_END);
-      mir_type_t t_longint = mir_vec2_type(g->mu, 64, true);
-      mir_build_store(g->mu, seed_ptr, vlog_crv_from_offset(g, next, t_longint));
-   }
+   if (!mir_is_null(seed_ptr))
+      vlog_crv_seed_end(g, seed_ptr, seed_in);
 
    mir_block_t store_bb = mir_add_block(g->mu);
    mir_block_t done_bb = mir_add_block(g->mu);

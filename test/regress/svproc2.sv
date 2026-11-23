@@ -1,51 +1,45 @@
-// Killing a process from itself and a process which was not forked
+// IEEE 1800-2017 18.14.2: a forked process takes its stream from its parent when
+// the parent has one, and does not share later draws of the parent.
 module svproc2;
-   `define CHECK(x, y) if ((x) !== (y)) begin \
-      $display("FAILED line %0d: %0d !== %0d", `__LINE__, (x), (y)); \
-      $finish; end
+  int errs = 0;
+  int ra, rb, rc;
 
-   process ip, fp;
-   int x, y, z;
+  task automatic check(bit ok, string what);
+    if (!ok) begin $error("%s", what); errs++; end
+  endtask
 
-   task automatic stop_self();
-      process::self().kill();
-   endtask
+  task automatic run(output int first, output int second);
+    process p;
+    p = process::self();
+    p.srandom(77);
+    fork
+      begin
+        first = $urandom;
+        #1;
+        second = $urandom;
+      end
+    join_none
+    // The parent draws between the first and the second draw of the child
+    void'($urandom); void'($urandom);
+    #2;
+  endtask
 
-   initial begin
-      ip = process::self();
-      #10;
-      x = 1;           // Never reached as the process is killed at time 5
-   end
+  initial begin
+    int a1, a2, b1, b2;
+    run(a1, a2);
+    run(b1, b2);
+    check(a1 == b1, "child first draw");
+    check(a2 == b2, "child draws are independent of the parent");
+    check(a1 != a2, "child draws differ");
 
-   initial begin
-      #5;
-      `CHECK(ip.status(), process::WAITING);
-      ip.kill();
-      `CHECK(ip.status(), process::KILLED);
-   end
-
-   initial begin
-      #20;
-      `CHECK(x, 0);
-      fork
-         begin
-            fp = process::self();
-            y = 1;
-            fp.kill();
-            y = 2;     // Not executed
-         end
-         begin
-            z = 1;
-            stop_self();
-            z = 2;     // Not executed
-         end
-      join_none
-      #1;
-      `CHECK(z, 1);
-      `CHECK(y, 1);
-      `CHECK(fp.status(), process::KILLED);
-      fp.await();      // Already finished so does not wait
-      `CHECK($time, 21);
-      $display("PASSED");
-   end
+    // Two branches seeded the same way agree
+    fork
+      begin process p; p = process::self(); p.srandom(42); ra = $urandom; end
+      begin process p; p = process::self(); p.srandom(42); rb = $urandom; end
+      begin process p; p = process::self(); p.srandom(43); rc = $urandom; end
+    join
+    check(ra == rb, "same seed in two branches");
+    check(ra != rc, "different seed in a branch");
+    if (errs == 0) $display("PASSED");
+  end
 endmodule

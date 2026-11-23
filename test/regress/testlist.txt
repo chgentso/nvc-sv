@@ -3151,3 +3151,5 @@ svcrvstdexpr1 verilog
 svcrvargobj1 verilog
 svcrvwideforeach1 verilog
 svcrvstructrand1 verilog
+svproc1 verilog
+svproc2 verilog

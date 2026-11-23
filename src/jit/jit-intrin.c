@@ -24,6 +24,7 @@
 #include "option.h"
 #include "rt/assert.h"
 #include "rt/crv.h"
+#include "rt/model.h"
 #include "rt/sva.h"
 #include "thirdparty/svrand.h"
 #include "vpi/vpi-model.h"
@@ -2840,8 +2841,112 @@ static void sv_urandom_below(jit_func_t *func, jit_anchor_t *caller,
    INIT_ONCE(seed = opt_verilog_seed());
 
    const uint64_t range = args[0].integer;
-   const uint32_t r = rtl_dist_uniform(&seed, INT32_MIN, INT32_MAX);
+   uint64_t draw;
+   const uint32_t r = model_rng_draw(&draw)
+      ? (uint32_t)draw : rtl_dist_uniform(&seed, INT32_MIN, INT32_MAX);
    args[0].integer = range == 0 ? 0 : r % range;
+}
+
+static void sv_rng_get(jit_func_t *func, jit_anchor_t *caller,
+                       jit_scalar_t *args, tlab_t *tlab)
+{
+   args[0].integer = x_sv_rng_get();
+}
+
+static void sv_rng_pick(jit_func_t *func, jit_anchor_t *caller,
+                        jit_scalar_t *args, tlab_t *tlab)
+{
+   // The stream of an object if it has one, otherwise that of the process
+
+   if (args[0].integer == 0)
+      args[0].integer = x_sv_rng_get();
+}
+
+static void sv_rng_back(jit_func_t *func, jit_anchor_t *caller,
+                        jit_scalar_t *args, tlab_t *tlab)
+{
+   // Returns the new state of the object: the stream of the process
+   // advanced instead if the object has none
+
+   if (args[0].integer == 0) {
+      x_sv_rng_set(args[1].integer);
+      args[0].integer = 0;
+   }
+   else
+      args[0].integer = args[1].integer;
+}
+
+static void sv_rng_new(jit_func_t *func, jit_anchor_t *caller,
+                       jit_scalar_t *args, tlab_t *tlab)
+{
+   args[0].integer = x_sv_rng_new();
+}
+
+static void sv_rng_seed(jit_func_t *func, jit_anchor_t *caller,
+                        jit_scalar_t *args, tlab_t *tlab)
+{
+   x_sv_rng_seed(args[0].pointer, args[1].integer);
+   args[0].integer = 0;
+}
+
+static void sv_rng_state(jit_func_t *func, jit_anchor_t *caller,
+                         jit_scalar_t *args, tlab_t *tlab)
+{
+   args[0].integer = x_sv_rng_state(args[0].pointer);
+}
+
+static void sv_rng_restore(jit_func_t *func, jit_anchor_t *caller,
+                           jit_scalar_t *args, tlab_t *tlab)
+{
+   x_sv_rng_restore(args[0].pointer, args[1].integer);
+   args[0].integer = 0;
+}
+
+static void sv_rng_ensure(jit_func_t *func, jit_anchor_t *caller,
+                          jit_scalar_t *args, tlab_t *tlab)
+{
+   // An object that has no stream yet takes one from its process, or a
+   // sequence which is the same on every run
+
+   if (args[0].integer == 0) {
+      int64_t s = x_sv_rng_new();
+      args[0].integer = s != 0 ? s : x_sv_rng_fresh();
+   }
+}
+
+static void sv_rng_format(jit_func_t *func, jit_anchor_t *caller,
+                          jit_scalar_t *args, tlab_t *tlab)
+{
+   // The text of a random state: a prefix and 16 hex digits
+
+   uint8_t *dest = args[1].pointer;
+   char buf[32];
+   snprintf(buf, sizeof(buf), "nvc:%016" PRIx64, (uint64_t)args[0].integer);
+   memcpy(dest, buf, 20);
+   args[0].integer = 0;
+}
+
+static void sv_rng_parse(jit_func_t *func, jit_anchor_t *caller,
+                         jit_scalar_t *args, tlab_t *tlab)
+{
+   // Zero if the text is not a state this simulator produced
+
+   const char *str = args[0].pointer;
+   const int64_t len = ffi_array_length(args[2].integer);
+
+   uint64_t value = 0;
+   bool ok = len == 20 && memcmp(str, "nvc:", 4) == 0;
+   for (int i = 4; ok && i < 20; i++) {
+      const int c = str[i];
+      if (c >= '0' && c <= '9')
+         value = (value << 4) | (c - '0');
+      else if (c >= 'a' && c <= 'f')
+         value = (value << 4) | (c - 'a' + 10);
+      else
+         ok = false;
+   }
+
+   args[0].integer = ok ? (int64_t)value : 0;
 }
 
 static void sv_str_cmp(jit_func_t *func, jit_anchor_t *caller,
@@ -3365,6 +3470,16 @@ static jit_intrinsic_t intrinsic_list[] = {
    { "__sv_fork_finish", sv_fork_finish },
    { "__sv_str_eq", sv_str_eq },
    { "__sv_urandom_below", sv_urandom_below },
+   { "__sv_rng_get", sv_rng_get },
+   { "__sv_rng_pick", sv_rng_pick },
+   { "__sv_rng_back", sv_rng_back },
+   { "__sv_rng_new", sv_rng_new },
+   { "__sv_rng_seed", sv_rng_seed },
+   { "__sv_rng_state", sv_rng_state },
+   { "__sv_rng_restore", sv_rng_restore },
+   { "__sv_rng_ensure", sv_rng_ensure },
+   { "__sv_rng_format", sv_rng_format },
+   { "__sv_rng_parse", sv_rng_parse },
    { "__sv_assoc_badkey", sv_assoc_badkey },
    { "__sv_array_badwrite", sv_array_badwrite },
    { "__sv_sva_new", sv_sva_new },

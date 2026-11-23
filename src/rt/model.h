@@ -59,6 +59,7 @@ void model_run(rt_model_t *m, uint64_t stop_time);
 bool model_step(rt_model_t *m);
 bool model_can_create_delta(rt_model_t *m);
 int64_t model_now(rt_model_t *m, unsigned *deltas);
+bool model_rng_draw(uint64_t *r);
 int64_t model_next_time(rt_model_t *m);
 void model_stop(rt_model_t *m);
 void model_finish(rt_model_t *m);
