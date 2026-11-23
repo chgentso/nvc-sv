@@ -481,30 +481,128 @@ static void bind_external_name(tree_t name, jit_handle_t scope,
       args[0].pointer = ptr;
 }
 
-rt_scope_t *scope_for_context(rt_scope_t *s, void *ctx)
+typedef struct {
+   vlog_node_t  v;
+   rt_scope_t  *scope;
+   void        *ptr;
+   bool         is_net;
+} hier_cache_entry_t;
+
+static rt_model_t         *hier_cache_model = NULL;
+static hier_cache_entry_t *hier_cache = NULL;
+static unsigned            hier_cache_cap = 0;
+static unsigned            hier_cache_used = 0;
+
+void ename_free_cache(rt_model_t *m)
 {
-   static hash_t *cache = NULL;
+   if (hier_cache_model == m) {
+      free(hier_cache);
+      hier_cache = NULL;
+      hier_cache_cap = 0;
+      hier_cache_used = 0;
+      hier_cache_model = NULL;
+   }
+}
 
-   if (cache == NULL)
-      cache = hash_new(64);
-   else {
-      rt_scope_t *cached = hash_get(cache, ctx);
-      if (cached != NULL)
-         return cached;
+static inline uint64_t hier_cache_hash(vlog_node_t v, rt_scope_t *s, bool is_net)
+{
+   return mix_bits_64((uintptr_t)v
+                      ^ ((uintptr_t)s * UINT64_C(0x9e3779b97f4a7c15))
+                      ^ (uint64_t)is_net);
+}
+
+static void *hier_cache_get(rt_model_t *m, vlog_node_t v, rt_scope_t *s,
+                            bool is_net)
+{
+   if (hier_cache_model != m || hier_cache_cap == 0)
+      return NULL;
+
+   const unsigned mask = hier_cache_cap - 1;
+   for (unsigned h = hier_cache_hash(v, s, is_net) & mask; ;
+        h = (h + 1) & mask) {
+      const hier_cache_entry_t *e = &hier_cache[h];
+      if (e->v == NULL)
+         return NULL;
+      if (e->v == v && e->scope == s && e->is_net == is_net)
+         return e->ptr;
+   }
+}
+
+static void hier_cache_put(rt_model_t *m, vlog_node_t v, rt_scope_t *s,
+                           bool is_net, void *ptr)
+{
+   if (hier_cache_model != m) {
+      free(hier_cache);
+      hier_cache = NULL;
+      hier_cache_cap = 0;
+      hier_cache_used = 0;
+      hier_cache_model = m;
    }
 
-   if (s->kind == SCOPE_INSTANCE && *mptr_get(s->privdata) == ctx) {
-      hash_put(cache, ctx, s);
+   if (hier_cache_cap == 0 || (hier_cache_used + 1) * 10 >= hier_cache_cap * 7) {
+      const unsigned ncap = hier_cache_cap ? hier_cache_cap * 2 : 256;
+      hier_cache_entry_t *ntab = xcalloc_array(ncap, sizeof(hier_cache_entry_t));
+      const unsigned nmask = ncap - 1;
+
+      for (unsigned i = 0; i < hier_cache_cap; i++) {
+         const hier_cache_entry_t *e = &hier_cache[i];
+         if (e->v == NULL)
+            continue;
+         unsigned h = hier_cache_hash(e->v, e->scope, e->is_net) & nmask;
+         while (ntab[h].v != NULL)
+            h = (h + 1) & nmask;
+         ntab[h] = *e;
+      }
+
+      free(hier_cache);
+      hier_cache = ntab;
+      hier_cache_cap = ncap;
+   }
+
+   const unsigned mask = hier_cache_cap - 1;
+   unsigned h = hier_cache_hash(v, s, is_net) & mask;
+   while (hier_cache[h].v != NULL) {
+      if (hier_cache[h].v == v && hier_cache[h].scope == s
+          && hier_cache[h].is_net == is_net) {
+         hier_cache[h].ptr = ptr;
+         return;
+      }
+      h = (h + 1) & mask;
+   }
+
+   hier_cache[h] = (hier_cache_entry_t){
+      .v = v,
+      .scope = s,
+      .ptr = ptr,
+      .is_net = is_net,
+   };
+   hier_cache_used++;
+}
+
+static rt_scope_t *scope_for_context_walk(rt_scope_t *s, void *ctx)
+{
+   if (s->kind == SCOPE_INSTANCE && *mptr_get(s->privdata) == ctx)
       return s;
-   }
 
    for (int i = 0; i < s->children.count; i++) {
-      rt_scope_t *found = scope_for_context(s->children.items[i], ctx);
+      rt_scope_t *found = scope_for_context_walk(s->children.items[i], ctx);
       if (found != NULL)
          return found;
    }
 
    return NULL;
+}
+
+rt_scope_t *scope_for_context(rt_scope_t *s, void *ctx)
+{
+   if (ctx == NULL)
+      return NULL;
+
+   rt_model_t *m = get_model_or_null();
+   if (m != NULL && s == root_scope(m))
+      return find_scope_by_context(m, ctx);
+
+   return scope_for_context_walk(s, ctx);
 }
 
 void *x_sv_vif_child(void *context, int64_t label)
@@ -516,7 +614,7 @@ void *x_sv_vif_child(void *context, int64_t label)
       jit_msg(NULL, DIAG_FATAL, "null virtual interface handle");
 
    rt_model_t *m = get_model();
-   rt_scope_t *s = scope_for_context(root_scope(m), context);
+   rt_scope_t *s = find_scope_by_context(m, context);
    if (s == NULL)
       jit_msg(NULL, DIAG_FATAL, "virtual interface handle does not refer "
               "to an interface instance");
@@ -548,9 +646,26 @@ static void bind_hier_ref(vlog_node_t v, jit_handle_t scope,
    rt_scope_t *s = get_active_scope(m);
 
    if (args[2].pointer != NULL) {
-      rt_scope_t *lexical = scope_for_context(root_scope(m), args[2].pointer);
+      rt_scope_t *lexical = find_scope_by_context(m, args[2].pointer);
       if (lexical != NULL)
          s = lexical;
+   }
+
+   const bool is_net = (args[4].integer == 1);
+   const uint32_t expect = args[3].integer;
+   rt_scope_t *const orig_s = s;
+
+   void *cached = hier_cache_get(m, v, orig_s, is_net);
+   if (cached != NULL) {
+      args[0].pointer = cached;
+      if (unlikely(expect > 0)) {
+         sig_shared_t *ss = *(sig_shared_t **)cached;
+         rt_signal_t *sig = container_of(ss, rt_signal_t, shared);
+         if (signal_width(sig) != expect)
+            jit_msg(vlog_loc(v), DIAG_FATAL, "sorry, an inout port connected to "
+                    "a hierarchical name of a different width is not supported");
+      }
+      return;
    }
 
    tree_t alias = NULL;
@@ -648,21 +763,23 @@ static void bind_hier_ref(vlog_node_t v, jit_handle_t scope,
          name = ident_new("$self");
    }
 
-   if (args[4].integer == 1)   // The signal of a structure net
+   if (is_net)   // The signal of a structure net
       name = ident_prefix(name, ident_new("net"), '$');
 
-   args[0].pointer = jit_get_frame_var(j, handle, ctx, name);
+   void *ptr = jit_get_frame_var(j, handle, ctx, name);
+   args[0].pointer = ptr;
 
    // The width of a net connected to an inout port cannot be checked
    // before the name is bound
-   const uint32_t expect = args[3].integer;
    if (expect > 0) {
-      sig_shared_t *ss = *(sig_shared_t **)args[0].pointer;
+      sig_shared_t *ss = *(sig_shared_t **)ptr;
       rt_signal_t *sig = container_of(ss, rt_signal_t, shared);
       if (signal_width(sig) != expect)
          jit_msg(vlog_loc(v), DIAG_FATAL, "sorry, an inout port connected to "
                  "a hierarchical name of a different width is not supported");
    }
+
+   hier_cache_put(m, v, orig_s, is_net, ptr);
 }
 
 void x_bind_external(object_t *where, jit_handle_t scope, jit_scalar_t *args)

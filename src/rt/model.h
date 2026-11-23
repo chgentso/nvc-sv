@@ -121,6 +121,7 @@ rt_scope_t *get_active_scope(rt_model_t *m);
 cover_data_t *get_coverage(rt_model_t *m);
 
 rt_scope_t *find_scope(rt_model_t *m, tree_t container);
+rt_scope_t *find_scope_by_context(rt_model_t *m, void *ctx);
 rt_scope_t *root_scope(rt_model_t *m);
 rt_scope_t *child_scope(rt_scope_t *scope, tree_t decl);
 rt_scope_t *child_scope_at(rt_scope_t *scope, int index);
@@ -134,6 +135,7 @@ void get_path_name(rt_scope_t *s, text_buf_t *tb);
 void get_verilog_path_name(rt_scope_t *s, text_buf_t *tb);
 bool scope_is_wrapper(const rt_scope_t *s);
 rt_scope_t *scope_for_context(rt_scope_t *s, void *ctx);
+void ename_free_cache(rt_model_t *m);
 
 const void *signal_value(rt_signal_t *s);
 const void *signal_last_value(rt_signal_t *s);

@@ -132,6 +132,7 @@ typedef struct _rt_mixed_bridge {
 typedef struct _rt_model {
    tree_t             top;
    hash_t            *scopes;
+   hash_t            *ctx_scopes;
    rt_scope_t        *root;
    mspace_t          *mspace;
    jit_t             *jit;
@@ -635,6 +636,7 @@ rt_model_t *model_new(jit_t *jit, cover_data_t *cover)
 {
    rt_model_t *m = xcalloc(sizeof(rt_model_t));
    m->scopes      = hash_new(256);
+   m->ctx_scopes  = hash_new(256);
    m->mspace      = jit_get_mspace(jit);
    m->jit         = jit;
    m->nexus_tail  = &(m->nexuses);
@@ -842,6 +844,8 @@ void model_free(rt_model_t *m)
    heap_free(m->effective_heap);
    heap_free(m->driving_heap);
    heap_free(m->eventq_heap);
+   ename_free_cache(m);
+   hash_free(m->ctx_scopes);
    hash_free(m->scopes);
    ihash_free(m->res_memo);
    ACLEAR(m->eventsigs);
@@ -969,8 +973,11 @@ rt_scope_t *create_scope(rt_model_t *m, tree_t block, rt_scope_t *parent)
 
       tlab_t tlab = jit_null_tlab(m->jit);
 
-      if (jit_fastcall(m->jit, handle, &result, context, p2, &tlab))
+      if (jit_fastcall(m->jit, handle, &result, context, p2, &tlab)) {
          *mptr_get(s->privdata) = result.pointer;
+         if (result.pointer != NULL)
+            hash_put(m->ctx_scopes, result.pointer, s);
+      }
       else
          m->force_stop = true;
 
@@ -983,6 +990,11 @@ rt_scope_t *create_scope(rt_model_t *m, tree_t block, rt_scope_t *parent)
 rt_scope_t *find_scope(rt_model_t *m, tree_t container)
 {
    return hash_get(m->scopes, container);
+}
+
+rt_scope_t *find_scope_by_context(rt_model_t *m, void *ctx)
+{
+   return ctx != NULL ? hash_get(m->ctx_scopes, ctx) : NULL;
 }
 
 rt_scope_t *root_scope(rt_model_t *m)
