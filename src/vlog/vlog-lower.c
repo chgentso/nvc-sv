@@ -109,6 +109,7 @@ typedef struct {
    bool           ref_bind;
    vlog_node_t    new_class;   // Class of a new expression bound later
    vlog_node_t    update_key;  // Index of the target of an update
+   bool           quiet_assoc; // No warning for a missing key (polling)
    mir_value_t    this_val;
    mir_value_t    local_this;  // Caller of randomize() with local:: names
    mir_value_t    crv_ctx;
@@ -12016,6 +12017,7 @@ static bool vlog_poll_watch_simple(vlog_node_t v)
 
    switch (vlog_kind(v)) {
    case V_NUMBER:
+   case V_STRING:
    case V_NULL:
       return true;
    case V_REF:
@@ -12028,6 +12030,94 @@ static bool vlog_poll_watch_simple(vlog_node_t v)
    default:
       return false;
    }
+}
+
+static bool vlog_poll_watch_expr(vlog_gen_t *g, vlog_node_t v);
+
+static bool vlog_poll_is_assoc_elem(vlog_node_t v)
+{
+   if (vlog_kind(v) != V_BIT_SELECT || vlog_params(v) != 1)
+      return false;
+
+   vlog_node_t prefix = vlog_value(v);
+   if (vlog_kind(prefix) != V_REF && vlog_kind(prefix) != V_MEMBER_REF)
+      return false;
+
+   vlog_node_t type = vlog_get_type(prefix);
+   return type != NULL && vlog_kind(type) == V_DATA_TYPE
+      && vlog_subkind(type) == DT_ASSOC;
+}
+
+static bool vlog_poll_watch_assoc(vlog_gen_t *g, vlog_node_t v, bool whole)
+{
+   // An element of an associative array changes when a key is added or
+   // removed, which changes the array, or when the element itself is
+   // written.  A missing key is read as the default value so the element
+   // is not found until the array changes.
+
+   assert(vlog_poll_is_assoc_elem(v));
+
+   vlog_node_t prefix = vlog_value(v), key = vlog_param(v, 0);
+   if (!vlog_poll_watch_simple(key))
+      return vlog_poll_watch_never(g);
+
+   if (vlog_kind(prefix) == V_MEMBER_REF) {
+      if (!vlog_poll_watch_expr(g, vlog_value(prefix)))
+         return false;
+   }
+
+   if (!vlog_poll_watch_leaf(g, prefix, true) || !vlog_poll_watch_expr(g, key))
+      return false;
+
+   if (!whole)
+      return true;
+
+   const bool quiet = g->quiet_assoc;
+   g->quiet_assoc = true;
+   vlog_select_t sel = vlog_lower_select(g, v);
+   g->quiet_assoc = quiet;
+
+   if (!mir_is(g->mu, sel.obj, MIR_TYPE_POINTER))
+      return vlog_poll_watch_never(g);
+
+   mir_type_t pointee = mir_get_pointer(g->mu, mir_get_type(g->mu, sel.obj));
+   const int bytes = vlog_poll_watch_bytes(g, pointee, false);
+   if (bytes == 0 || bytes > 32)
+      return vlog_poll_watch_never(g);
+
+   vlog_poll_watch_ptr(g, mir_build_array_ref(g->mu, sel.obj, sel.dst_offset),
+                       bytes);
+   return true;
+}
+
+static bool vlog_poll_watch_assoc_member(vlog_gen_t *g, vlog_node_t v)
+{
+   // A member of an element of an associative array which is a structure
+
+   vlog_node_t elem = vlog_value(v), type = vlog_get_type(elem);
+   if (type == NULL || vlog_kind(type) != V_STRUCT_DECL
+       || (vlog_flags(type) & VLOG_F_PACKED))
+      return vlog_poll_watch_assoc(g, elem, true);
+
+   if (!vlog_poll_watch_assoc(g, elem, false))
+      return false;
+
+   const bool quiet = g->quiet_assoc;
+   g->quiet_assoc = true;
+   vlog_select_t sel = vlog_lower_select(g, v);
+   g->quiet_assoc = quiet;
+
+   if (!mir_is(g->mu, sel.obj, MIR_TYPE_POINTER))
+      return vlog_poll_watch_never(g);
+
+   mir_type_t pointee = mir_get_pointer(g->mu, mir_get_type(g->mu, sel.obj));
+   const int bytes = vlog_poll_watch_bytes(g, pointee, false);
+   if (bytes == 0 || bytes > 32)
+      return vlog_poll_watch_never(g);
+
+   vlog_poll_watch_ptr(g, mir_build_array_ref(g->mu, sel.obj, sel.dst_offset),
+                       bytes);
+   return true;
 }
 
 static bool vlog_poll_watch_expr(vlog_gen_t *g, vlog_node_t v)
@@ -12058,6 +12148,9 @@ static bool vlog_poll_watch_expr(vlog_gen_t *g, vlog_node_t v)
       }
       return vlog_poll_watch_leaf(g, v, false);
    case V_MEMBER_REF:
+      if (vlog_poll_is_assoc_elem(vlog_value(v)))
+         return vlog_poll_watch_assoc_member(g, v);
+
       return vlog_poll_watch_expr(g, vlog_value(v))
          && vlog_poll_watch_leaf(g, v, false);
    case V_NULL:
@@ -12081,6 +12174,9 @@ static bool vlog_poll_watch_expr(vlog_gen_t *g, vlog_node_t v)
       return vlog_poll_watch_expr(g, vlog_value(v));
    case V_BIT_SELECT:
       {
+         if (vlog_poll_is_assoc_elem(v))
+            return vlog_poll_watch_assoc(g, v, true);
+
          // Only a vector or fixed size array has storage which does not move
          vlog_node_t type = vlog_get_type(vlog_value(v));
          if (type == NULL || vlog_is_dynamic_type(type))
@@ -12129,7 +12225,19 @@ static bool vlog_poll_watch_expr(vlog_gen_t *g, vlog_node_t v)
    }
 }
 
+static void vlog_lower_poll_control_inner(vlog_gen_t *g, vlog_node_t ctrl);
+
 static void vlog_lower_poll_control(vlog_gen_t *g, vlog_node_t ctrl)
+{
+   // A condition is evaluated again each time it is polled so a missing
+   // key of an associative array is not reported again
+   const bool quiet = g->quiet_assoc;
+   g->quiet_assoc = true;
+   vlog_lower_poll_control_inner(g, ctrl);
+   g->quiet_assoc = quiet;
+}
+
+static void vlog_lower_poll_control_inner(vlog_gen_t *g, vlog_node_t ctrl)
 {
    const int nparams = vlog_params(ctrl);
    mir_value_t *vars LOCAL = xmalloc_array(nparams, sizeof(mir_value_t));
@@ -12331,7 +12439,21 @@ static void vlog_poll_leaves(vlog_node_t e, poll_leaves_t *leaves,
    }
 }
 
+static void vlog_lower_poll_leaves_inner(vlog_gen_t *g,
+                                         const poll_leaves_t *leaves);
+
 static void vlog_lower_poll_leaves(vlog_gen_t *g, const poll_leaves_t *leaves)
+{
+   // A condition is evaluated again each time it is polled so a missing
+   // key of an associative array is not reported again
+   const bool quiet = g->quiet_assoc;
+   g->quiet_assoc = true;
+   vlog_lower_poll_leaves_inner(g, leaves);
+   g->quiet_assoc = quiet;
+}
+
+static void vlog_lower_poll_leaves_inner(vlog_gen_t *g,
+                                         const poll_leaves_t *leaves)
 {
    // Suspend until any of the names an expression reads changes
 
@@ -12390,7 +12512,19 @@ static void vlog_lower_poll_leaves(vlog_gen_t *g, const poll_leaves_t *leaves)
    vlog_poll_done(g, any, loop_bb);
 }
 
+static void vlog_lower_poll_expr_inner(vlog_gen_t *g, vlog_node_t expr);
+
 static void vlog_lower_poll_expr(vlog_gen_t *g, vlog_node_t expr)
+{
+   // A condition is evaluated again each time it is polled so a missing
+   // key of an associative array is not reported again
+   const bool quiet = g->quiet_assoc;
+   g->quiet_assoc = true;
+   vlog_lower_poll_expr_inner(g, expr);
+   g->quiet_assoc = quiet;
+}
+
+static void vlog_lower_poll_expr_inner(vlog_gen_t *g, vlog_node_t expr)
 {
    // Suspend until the value of an expression which is not a signal changes
 
@@ -17614,7 +17748,7 @@ static mir_value_t vlog_assoc_element(vlog_gen_t *g, mir_value_t slot,
       mir_value_t arr = mir_build_load(g->mu, slot);
       mir_block_t def_bb = mir_add_block(g->mu);
       mir_block_t none_bb = mir_add_block(g->mu);
-      if (where != NULL && where == g->update_key)
+      if (where != NULL && (where == g->update_key || g->quiet_assoc))
          where = NULL;
       mir_block_t warn_bb = where != NULL ? mir_add_block(g->mu) : none_bb;
       mir_build_cond(g->mu, vlog_assoc_has_default(g, arr), def_bb, warn_bb);
