@@ -1553,23 +1553,50 @@ bool vlog_select(conn_design_t *cd, vlog_node_t v, conn_range_t *out,
 
    case V_MEMBER_REF:
       {
-         if (!vlog_select(cd, vlog_value(v), out, approx))
+         // The names of the members down to the net: ".a.b"
+         LOCAL_TEXT_BUF path = tb_new();
+         vlog_node_t base = v;
+         bool named = true;
+         A(vlog_node_t) chain = AINIT;
+         while (vlog_kind(base) == V_MEMBER_REF) {
+            APUSH(chain, base);
+            base = vlog_value(base);
+         }
+         for (unsigned i = chain.count; i > 0; i--) {
+            vlog_node_t m = chain.items[i - 1];
+            if (vlog_has_ident(m))
+               tb_printf(path, ".%s", istr(vlog_ident(m)));
+            else
+               named = false;
+         }
+         ACLEAR(chain);
+
+         if (!vlog_select(cd, base, out, approx))
             return false;
 
          // Member of a packed structure that is the whole of a net
          const conn_net_t *net = out->net;
-         if (!*approx && out->lo == 0 && out->hi == net->width - 1
-             && vlog_has_ident(v)) {
-            char *name = xasprintf(".%s", istr(vlog_ident(v)));
+         if (named && !*approx && out->lo == 0 && out->hi == net->width - 1) {
+            const char *name = tb_get(path);
+            const size_t len = strlen(name);
+            bool found = false;
+            unsigned lo = 0, hi = 0;
             for (unsigned i = 0; i < net->nfields; i++) {
-               if (strcmp(net->fields[i].name, name) == 0) {
-                  out->lo = net->fields[i].lo;
-                  out->hi = net->fields[i].hi;
-                  free(name);
-                  return true;
-               }
+               const char *fn = net->fields[i].name;
+               if (strncmp(fn, name, len) != 0
+                   || (fn[len] != '\0' && fn[len] != '.'))
+                  continue;   // Not this member or a part of it
+               if (!found || net->fields[i].lo < lo)
+                  lo = net->fields[i].lo;
+               if (!found || net->fields[i].hi > hi)
+                  hi = net->fields[i].hi;
+               found = true;
             }
-            free(name);
+            if (found) {
+               out->lo = lo;
+               out->hi = hi;
+               return true;
+            }
          }
 
          *approx = true;

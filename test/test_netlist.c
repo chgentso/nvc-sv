@@ -27,6 +27,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 ////////////////////////////////////////////////////////////////////////////////
 // Helpers
@@ -1951,6 +1952,90 @@ START_TEST(test_ev_svmix)
 }
 END_TEST
 
+// A member of a packed structure or record is its own range of bits of the
+// net, nested members included
+static void struct_clocks(conn_block_t *top, conn_net_t *r)
+{
+   unsigned nclk = 0, nclk2 = 0;
+   for (unsigned i = 0; i < top->nprocs; i++) {
+      const conn_proc_t *p = top->procs[i];
+      ck_assert_ptr_nonnull(p->ev);
+      ck_assert(!p->ev->approx);
+      if (p->ev->nclocks == 0 || p->ndrives == 0
+          || p->drives[0].net != r)
+         continue;
+
+      // The process in CLK drives the members of A, the one in CLK2 those of B
+      const bool is_clk = strcasecmp(p->ev->clocks[0].sig.net->name, "clk") == 0;
+      unsigned lo = r->width, hi = 0;
+      for (unsigned j = 0; j < p->ndrives; j++) {
+         lo = MIN(lo, p->drives[j].lo);
+         hi = MAX(hi, p->drives[j].hi);
+      }
+      ck_assert_uint_eq(lo, is_clk ? 0 : 2);
+      ck_assert_uint_eq(hi, is_clk ? 1 : 3);
+      if (is_clk)
+         nclk++;
+      else
+         nclk2++;
+   }
+   ck_assert_uint_eq(nclk, 1);
+   ck_assert_uint_eq(nclk2, 1);
+}
+
+START_TEST(test_ev_struct)
+{
+   set_standard(STD_19);
+   input_from_file(TESTDIR "/netlist/ev_struct.sv");
+
+   tree_t e = run_elab();
+   fail_if_errors();
+
+   const conn_build_opts_t bopts = { .evidence = true };
+   conn_design_t *cd = conn_build_with(e, &bopts);
+   ck_assert_ptr_nonnull(cd);
+
+   conn_block_t *top = conn_root(cd, 0);
+   conn_net_t *r = get_net(top, "r");
+   struct_clocks(top, r);
+
+   // The reader of two members of A sees only those bits
+   unsigned nread = 0;
+   for (unsigned i = 0; i < top->nprocs; i++) {
+      const conn_proc_t *p = top->procs[i];
+      for (unsigned j = 0; j < p->nreads; j++) {
+         if (p->reads[j].net != r)
+            continue;
+         ck_assert_uint_eq(p->reads[j].lo, 0);
+         ck_assert_uint_eq(p->reads[j].hi, 1);
+         nread++;
+      }
+   }
+   ck_assert_uint_ge(nread, 1);
+
+   conn_free(cd);
+}
+END_TEST
+
+START_TEST(test_ev_struct_vhdl)
+{
+   set_standard(STD_08);
+   input_from_file(TESTDIR "/netlist/ev_struct.vhd");
+
+   tree_t e = run_elab();
+   fail_if_errors();
+
+   const conn_build_opts_t bopts = { .evidence = true };
+   conn_design_t *cd = conn_build_with(e, &bopts);
+   ck_assert_ptr_nonnull(cd);
+
+   conn_block_t *top = conn_root(cd, 0);
+   struct_clocks(top, get_net(top, "R"));
+
+   conn_free(cd);
+}
+END_TEST
+
 Suite *get_netlist_tests(void)
 {
    Suite *s = suite_create("netlist");
@@ -1977,6 +2062,8 @@ Suite *get_netlist_tests(void)
    tcase_add_test(tc, test_ev_vhdl);
    tcase_add_test(tc, test_ev_vhdl2);
    tcase_add_test(tc, test_ev_cdc);
+   tcase_add_test(tc, test_ev_struct);
+   tcase_add_test(tc, test_ev_struct_vhdl);
    suite_add_tcase(s, tc);
 
    return s;
