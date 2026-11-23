@@ -787,14 +787,61 @@ bool jit_call_closure(jit_t *j, ffi_closure_t *closure, jit_scalar_t *result,
 
    jit_scalar_t args[JIT_MAX_ARGS];
    assert(closure->nargs + 2 <= JIT_MAX_ARGS);
-   memcpy(args, closure->args, closure->nargs * sizeof(jit_scalar_t));
-   args[closure->nargs] = arg;
+   if (likely(closure->nargs == 1)) {
+      args[0] = closure->args[0];
+      args[1] = arg;
+   }
+   else {
+      memcpy(args, closure->args, closure->nargs * sizeof(jit_scalar_t));
+      args[closure->nargs] = arg;
+   }
 
    if (!jit_try_vcall(j, f, args, tlab))
       return false;
 
    *result = args[0];
    return true;
+}
+
+bool jit_run_guarded(jit_t *j, void (*fn)(void *), void *ctx)
+{
+   return jit_trampoline_guard(jit_thread_local(), fn, ctx);
+}
+
+void jit_call_closure_guarded(jit_t *j, ffi_closure_t *closure,
+                              jit_scalar_t *result, jit_scalar_t arg,
+                              tlab_t *tlab)
+{
+   jit_func_t *f = jit_get_func(j, closure->handle);
+
+   jit_thread_local_t *thread = jit_thread_local();
+   assert(thread->jmp_buf != NULL);
+   assert(thread->guard_args != NULL);
+
+   jit_scalar_t *args = thread->guard_args;
+   if (likely(closure->nargs == 1)) {
+      args[0] = closure->args[0];
+      args[1] = arg;
+   }
+   else {
+      assert(closure->nargs + 2 <= JIT_MAX_ARGS);
+      memcpy(args, closure->args, closure->nargs * sizeof(jit_scalar_t));
+      args[closure->nargs] = arg;
+   }
+
+   const jit_state_t oldstate = thread->state;
+   thread->state = JIT_RUNNING;
+   thread->jit = j;
+
+   jit_entry_fn_t entry = load_acquire(&f->entry);
+   (*entry)(f, NULL, args, tlab);
+
+   thread->anchor = NULL;
+   thread->state = oldstate;
+   if (oldstate != JIT_RUNNING)
+      thread->jit = NULL;
+
+   *result = args[0];
 }
 
 void *jit_call_thunk(jit_t *j, vcode_unit_t unit, void *context,

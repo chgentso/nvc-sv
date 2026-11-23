@@ -59,6 +59,37 @@ bool jit_trampoline(jit_thread_local_t *thread, jit_func_t *f,
 }
 
 __attribute__((noinline))
+bool jit_trampoline_guard(jit_thread_local_t *thread,
+                          void (*fn)(void *), void *ctx)
+{
+   jit_scalar_t args[JIT_MAX_ARGS];
+   void *saved_jmp = relaxed_load(&thread->jmp_buf);
+   jit_scalar_t *saved_args = thread->guard_args;
+   const jit_state_t saved_state = thread->state;
+   jit_t *saved_jit = thread->jit;
+
+   relaxed_store(&thread->jmp_buf, thread);
+   thread->guard_args = args;
+
+   bool ok = true;
+   __try {
+      (*fn)(ctx);
+   }
+   __except (jit_seh_filter(GetExceptionCode())) {
+      ok = false;
+   }
+
+   relaxed_store(&thread->jmp_buf, saved_jmp);
+   thread->guard_args = saved_args;
+   thread->anchor = NULL;
+   if (!ok) {
+      thread->state = saved_state;
+      thread->jit = saved_jit;
+   }
+   return ok;
+}
+
+__attribute__((noinline))
 void jit_unwind(jit_thread_local_t *thread)
 {
    assert(thread->jmp_buf != NULL);
@@ -95,6 +126,46 @@ bool jit_trampoline(jit_thread_local_t *thread, jit_func_t *f,
    else {
       relaxed_store(&thread->jmp_buf, saved_jmp);
       thread->anchor = NULL;
+      return false;
+   }
+}
+
+__attribute__((noinline))
+bool jit_trampoline_guard(jit_thread_local_t *thread,
+                          void (*fn)(void *), void *ctx)
+{
+   jit_scalar_t args[JIT_MAX_ARGS];
+   jit_scalar_t *saved_args = thread->guard_args;
+   const jit_state_t saved_state = thread->state;
+   jit_t *saved_jit = thread->jit;
+
+#if defined HAVE___BUILTIN_SETJMP && !defined __clang__
+   void *jmp_buf[5];
+   void *saved_jmp = relaxed_load(&thread->jmp_buf);
+   const int rc = __builtin_setjmp(jmp_buf);
+#else
+   sigjmp_buf jmp_buf;
+   void *saved_jmp = relaxed_load(&thread->jmp_buf);
+   const int rc = sigsetjmp(jmp_buf, 0);
+#endif
+
+   if (likely(rc == 0)) {
+      relaxed_store(&thread->jmp_buf, jmp_buf);
+      thread->guard_args = args;
+
+      (*fn)(ctx);
+
+      relaxed_store(&thread->jmp_buf, saved_jmp);
+      thread->guard_args = saved_args;
+      thread->anchor = NULL;
+      return true;
+   }
+   else {
+      relaxed_store(&thread->jmp_buf, saved_jmp);
+      thread->guard_args = saved_args;
+      thread->anchor = NULL;
+      thread->state = saved_state;
+      thread->jit = saved_jit;
       return false;
    }
 }

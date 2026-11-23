@@ -117,6 +117,10 @@ bool jit_vfastcall(jit_t *j, jit_handle_t handle, const jit_scalar_t *inargs,
                    tlab_t *tlab);
 bool jit_call_closure(jit_t *j, ffi_closure_t *closure, jit_scalar_t *result,
                       jit_scalar_t arg, tlab_t *tlab);
+bool jit_run_guarded(jit_t *j, void (*fn)(void *), void *ctx);
+void jit_call_closure_guarded(jit_t *j, ffi_closure_t *closure,
+                              jit_scalar_t *result, jit_scalar_t arg,
+                              tlab_t *tlab);
 
 tlab_t jit_null_tlab(jit_t *j);
 

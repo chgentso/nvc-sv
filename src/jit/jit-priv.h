@@ -374,6 +374,7 @@ typedef struct {
    jit_state_t   state;
    void         *jmp_buf;
    jit_anchor_t *anchor;
+   jit_scalar_t *guard_args;
 } jit_thread_local_t;
 
 typedef struct _code_cache code_cache_t;
@@ -416,6 +417,8 @@ jit_thread_local_t *jit_attach_thread(jit_anchor_t *anchor);
 
 bool jit_trampoline(jit_thread_local_t *thread, jit_func_t *f,
                     jit_scalar_t *args, tlab_t *tlab);
+bool jit_trampoline_guard(jit_thread_local_t *thread,
+                          void (*fn)(void *), void *ctx);
 
 __attribute__((noreturn))
 void jit_unwind(jit_thread_local_t *thread);

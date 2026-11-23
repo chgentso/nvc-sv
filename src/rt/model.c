@@ -96,6 +96,7 @@ typedef struct {
    tlab_t        *tlab;
    rt_wakeable_t *active_obj;
    rt_scope_t    *active_scope;
+   bool           jit_guarded;
 } __attribute__((aligned(64))) model_thread_t;
 
 typedef void (*defer_fn_t)(rt_model_t *, void *);
@@ -520,6 +521,89 @@ static void run_spawned(rt_model_t *m)
    for (int i = 0; i < m->spawnq.count; i++)
       (*m->spawnq.tasks[i].fn)(m, m->spawnq.tasks[i].arg);
    m->spawnq.count = 0;
+}
+
+typedef struct {
+   rt_model_t *m;
+   deferq_t   *dq;
+   int         idx;
+   int         spawn_idx;
+} deferq_guard_ctx_t;
+
+static void flush_deferred(rt_model_t *m);
+
+static void deferq_run_body(void *arg)
+{
+   deferq_guard_ctx_t *ctx = arg;
+   rt_model_t *m = ctx->m;
+   deferq_t *dq = ctx->dq;
+
+   for (;;) {
+      while (ctx->spawn_idx < m->spawnq.count) {
+         const int si = ctx->spawn_idx++;
+         (*m->spawnq.tasks[si].fn)(m, m->spawnq.tasks[si].arg);
+      }
+      if (m->spawnq.count > 0) {
+         m->spawnq.count = 0;
+         ctx->spawn_idx = 0;
+      }
+
+      if (dq->count == 0)
+         break;
+
+      const defer_task_t *tasks = dq->tasks;
+      const int count = dq->count;
+
+      while (ctx->idx < count) {
+         const int i = ctx->idx++;
+         if (i + 1 < count)
+            prefetch_read(tasks[i + 1].arg);
+         (*tasks[i].fn)(m, tasks[i].arg);
+         while (ctx->spawn_idx < m->spawnq.count) {
+            const int si = ctx->spawn_idx++;
+            (*m->spawnq.tasks[si].fn)(m, m->spawnq.tasks[si].arg);
+         }
+         if (m->spawnq.count > 0) {
+            m->spawnq.count = 0;
+            ctx->spawn_idx = 0;
+         }
+      }
+
+      assert(dq->tasks == tasks);
+      assert(dq->count == count);
+
+      dq->count = 0;
+      ctx->idx = 0;
+
+      if (m->reschedq.count == 0)
+         break;
+
+      deferq_swap(&m->reschedq, dq);
+   }
+}
+
+static void deferq_run_procs(rt_model_t *m, deferq_t *dq)
+{
+   if (dq->count == 0)
+      return;
+
+   model_thread_t *thread = model_thread(m);
+   deferq_guard_ctx_t ctx = { .m = m, .dq = dq, .idx = 0, .spawn_idx = 0 };
+
+   const bool prev_guarded = thread->jit_guarded;
+   thread->jit_guarded = true;
+
+   while (!jit_run_guarded(m->jit, deferq_run_body, &ctx)) {
+      m->force_stop = true;
+      thread->active_obj = NULL;
+      thread->active_scope = NULL;
+      if (thread->tlab != NULL)
+         tlab_reset(thread->tlab);
+      if (unlikely(m->ndeferred > 0))
+         flush_deferred(m);
+   }
+
+   thread->jit_guarded = prev_guarded;
 }
 
 static void deferq_run(rt_model_t *m, deferq_t *dq)
@@ -1438,8 +1522,11 @@ static void run_process_inner(rt_model_t *m, rt_proc_t *proc)
 
    const uint64_t wait_seq = proc->wait_seq;
 
-   if (!jit_call_closure(m->jit, &proc->closure, &result, state,
-                         proc->tlab ?: thread->tlab))
+   if (likely(thread->jit_guarded))
+      jit_call_closure_guarded(m->jit, &proc->closure, &result, state,
+                               proc->tlab ?: thread->tlab);
+   else if (!jit_call_closure(m->jit, &proc->closure, &result, state,
+                              proc->tlab ?: thread->tlab))
       m->force_stop = true;
 
    proc->ended = proc->verilog && !obj->forked && !obj->delayed
@@ -4600,7 +4687,7 @@ static void model_cycle_body(rt_model_t *m)
    // Run all non-postponed processes and event callbacks
    deferq_swap(&m->next_procq, &m->procq);
    (void)mtp_enter(MTP_TASKQ);
-   deferq_run(m, &m->next_procq);
+   deferq_run_procs(m, &m->next_procq);
    (void)mtp_enter(MTP_OTHER);
 
    run_callbacks(m, END_OF_PROCESSES);
@@ -4617,7 +4704,7 @@ static void model_cycle_body(rt_model_t *m)
       TRACE("begin inactive region");
       deferq_swap(&m->next_inactiveq, &m->inactiveq);
       (void)mtp_enter(MTP_TASKQ);
-      deferq_run(m, &m->next_inactiveq);
+      deferq_run_procs(m, &m->next_inactiveq);
       (void)mtp_enter(MTP_OTHER);
    }
 
@@ -4665,8 +4752,8 @@ static void model_cycle_body(rt_model_t *m)
 
       // Run all postponed processes and event callbacks
       (void)mtp_enter(MTP_TASKQ);
-      deferq_run(m, &m->postponedq);
-      deferq_run(m, &m->latepostq);
+      deferq_run_procs(m, &m->postponedq);
+      deferq_run_procs(m, &m->latepostq);
       (void)mtp_enter(MTP_OTHER);
 
       run_callbacks(m, END_TIME_STEP);
