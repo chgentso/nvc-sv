@@ -1200,8 +1200,10 @@ void __nvc_vec4op(jit_vec_op_t op, jit_anchor_t *anchor, jit_scalar_t *args,
    const int nwords = (size + 63) / 64;
 
    if (size > 64 && op != JIT_VEC_EXTRACT) {
-      // Two-state operands have no X/Z plane so supply an all-zero one
-      uint64_t *zero = NULL;
+      // Two-state operands have no X/Z plane so supply an all-zero one.
+      // Input planes are read-only and never escape __nvc_vec4op.
+      static const uint64_t zero_plane[64];
+      const uint64_t *zero = NULL;
       for (int i = 1; i < 6; i += 2) {
          if (args[i].pointer != NULL)
             continue;
@@ -1218,10 +1220,15 @@ void __nvc_vec4op(jit_vec_op_t op, jit_anchor_t *anchor, jit_scalar_t *args,
             continue;
 
          if (zero == NULL) {
-            zero = jit_mspace_alloc(nwords * sizeof(uint64_t));
-            memset(zero, 0, nwords * sizeof(uint64_t));
+            if (nwords <= ARRAY_LEN(zero_plane))
+               zero = zero_plane;
+            else {
+               uint64_t *buf = jit_mspace_alloc(nwords * sizeof(uint64_t));
+               memset(buf, 0, nwords * sizeof(uint64_t));
+               zero = buf;
+            }
          }
-         args[i].pointer = zero;
+         args[i].pointer = (void *)zero;
       }
    }
 
@@ -1257,13 +1264,13 @@ void __nvc_vec4op(jit_vec_op_t op, jit_anchor_t *anchor, jit_scalar_t *args,
          int aresult, bresult;
          switch (op) {
          case JIT_VEC_CASE_EQ:
-            aresult = memcmp(xa, ya, nwords * sizeof(uint64_t)) == 0
-               && memcmp(xb, yb, nwords * sizeof(uint64_t)) == 0;
+            aresult = (xa == ya || memcmp(xa, ya, nwords * sizeof(uint64_t)) == 0)
+               && (xb == yb || memcmp(xb, yb, nwords * sizeof(uint64_t)) == 0);
             bresult = 0;
             break;
          case JIT_VEC_CASE_NEQ:
-            aresult = memcmp(xa, ya, nwords * sizeof(uint64_t)) != 0
-               || memcmp(xb, yb, nwords * sizeof(uint64_t)) != 0;
+            aresult = (xa != ya && memcmp(xa, ya, nwords * sizeof(uint64_t)) != 0)
+               || (xb != yb && memcmp(xb, yb, nwords * sizeof(uint64_t)) != 0);
             bresult = 0;
             break;
          case JIT_VEC_CASEX_EQ:

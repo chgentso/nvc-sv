@@ -2956,15 +2956,42 @@ static void sv_str_cmp(jit_func_t *func, jit_anchor_t *caller,
    const int64_t llen = ffi_array_length(args[2].integer);
    const int64_t rlen = ffi_array_length(args[5].integer);
    const bool icase = args[6].integer;
+   const int64_t n = MIN(llen, rlen);
 
    int64_t result = 0;
-   for (int64_t i = 0; i < MIN(llen, rlen) && result == 0; i++) {
-      int lc = left[i], rc = right[i];
-      if (icase) {
-         lc = tolower(lc);
-         rc = tolower(rc);
+   if (!icase) {
+      if (left != right) {
+         int64_t i = 0;
+         for (; i + 8 <= n; i += 8) {
+            uint64_t lw, rw;
+            memcpy(&lw, left + i, 8);
+            memcpy(&rw, right + i, 8);
+            if (lw != rw) {
+               const uint64_t diff = lw ^ rw;
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+               const int b = __builtin_ctzll(diff) >> 3;
+#else
+               const int b = __builtin_clzll(diff) >> 3;
+#endif
+               result = (int)left[i + b] - (int)right[i + b];
+               i = n;
+               break;
+            }
+         }
+         for (; i < n; i++) {
+            if (left[i] != right[i]) {
+               result = (int)left[i] - (int)right[i];
+               break;
+            }
+         }
       }
-      result = lc - rc;
+   }
+   else {
+      for (int64_t i = 0; i < n && result == 0; i++) {
+         const int lc = tolower(left[i]);
+         const int rc = tolower(right[i]);
+         result = lc - rc;
+      }
    }
 
    args[0].integer = result != 0 ? result : llen - rlen;
