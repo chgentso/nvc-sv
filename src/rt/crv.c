@@ -5229,6 +5229,45 @@ static bool guard_true(prob_t *P, int node)
    return !E.fail && v != 0;
 }
 
+// Does a value of a variable satisfy the constraints on it alone: those
+// with at most four variables, the others of which are fixed.  A mask on a
+// variable, such as an aligned address, is a constraint like that, and
+// without it a pick is wrong three times in four.
+static bool pick_unary_ok(prob_t *P, int v, i128 x)
+{
+   ectx_t E = { .c = P->c, .vals = P->vals, .nsc = P->nsc,
+                .ebase = P->ebase, .sizes = P->sizes };
+
+   for (int k = P->wstart[v]; k < P->wstart[v + 1]; k++) {
+      const int ci = P->wlist[k];
+      const pcons_t *pc = &P->cons[ci];
+      if (pc->kind != C_REQ || P->vstart[ci + 1] - P->vstart[ci] > 4)
+         continue;
+      else if (pc->soft >= 0 && P->soft_on != NULL && !P->soft_on[pc->soft])
+         continue;
+
+      bool alone = true;
+      for (int i = P->vstart[ci]; i < P->vstart[ci + 1]; i++) {
+         const int u = P->vl[i];
+         if (u == v)
+            P->vals[u] = st(x);
+         else if (P->vars[u].dom.lo == P->vars[u].dom.hi)
+            P->vals[u] = st(P->vars[u].dom.lo);
+         else
+            alone = false;
+      }
+
+      if (!alone)
+         continue;
+
+      E.fail = false;
+      const int64_t r = ev(&E, pc->root);
+      if (E.fail || r == 0)
+         return false;
+   }
+   return true;
+}
+
 static i128 pick_val(prob_t *P, int v)
 {
    const pvar_t *pv = &P->vars[v];
@@ -5257,7 +5296,14 @@ static i128 pick_val(prob_t *P, int v)
    i128 n = dom_count(d, d->lo, d->hi);
    if (pv->size && n > MAX_SIZE_CHOICES)
       n = 32;
-   return dom_nth(d, d->lo, d->hi, rnd_i128(n));
+   x = dom_nth(d, d->lo, d->hi, rnd_i128(n));
+
+   if (!P->legacy && P->wstart != NULL && P->wstart[v] != P->wstart[v + 1]
+       && n > 4) {
+      for (int t = 0; t < 32 && !pick_unary_ok(P, v, x); t++)
+         x = dom_nth(d, d->lo, d->hi, rnd_i128(n));
+   }
+   return x;
 }
 
 static void fill_vals(prob_t *P, int comp)
