@@ -353,7 +353,8 @@ static bool vlog_cover_bit_range(vlog_node_t type, int nth, const char *prefix,
       if (vlog_has_type(type))
          return vlog_cover_bit_names(vlog_type(type), prefix, names);
 
-      APUSH(*names, ident_new(prefix));
+      // A scalar has no name for its bit
+      APUSH(*names, prefix[0] != '\0' ? ident_new(prefix) : NULL);
       return true;
    }
 
@@ -546,7 +547,8 @@ static void vlog_cover_toggle_decl(vlog_cover_t *g, vlog_node_t d,
       tb_rewind(tb);
       if (nelems > 1)
          tb_printf(tb, "[%"PRIi64"]", mem_left + mem_step * (i / nbits));
-      tb_istr(tb, bits.items[i % nbits]);
+      if (bits.items[i % nbits] != NULL)
+         tb_istr(tb, bits.items[i % nbits]);
 
       cover_obj_t *pair = bins + i * 2;
 
