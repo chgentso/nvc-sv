@@ -20,6 +20,7 @@
 
 #include <inttypes.h>
 #include <math.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -890,6 +891,47 @@ START_TEST(test_array_unregistered)
    int64_t d[8] = { g };
    ck_assert_int_eq(crv_generated(CRV_OP_SOLVE, d), 0);
    crv_generated(CRV_OP_END, d);
+}
+END_TEST
+
+static void *seeded_object_thread(void *arg)
+{
+   // Value drawn for an object seeded with 77: its solver is created
+   // before (arg == 0) or after the object's stream is selected
+   int64_t a[8] = { 0 };
+   int64_t g = 0;
+   if (!arg)
+      g = crv_generated(CRV_OP_BEGIN, a);
+
+   int64_t s[8] = { 77 };
+   crv_generated(CRV_OP_SEED_BEGIN, s);
+   if (arg)
+      g = crv_generated(CRV_OP_BEGIN, a);
+
+   int64_t v[8] = { g, 1, 1, 0, CRV_FLAGS(32, false), 1 };
+   const int64_t x = crv_generated(CRV_OP_VAR, v);
+   int64_t d[8] = { g };
+   if (!crv_generated(CRV_OP_SOLVE, d))
+      return (void *)(intptr_t)-1;
+   int64_t r[8] = { g, x };
+   const int64_t val = crv_generated(CRV_OP_VALUE, r);
+   crv_generated(CRV_OP_SEED_END, a);
+   crv_generated(CRV_OP_END, d);
+   return (void *)(intptr_t)(val + 2);
+}
+
+START_TEST(test_seed_before_begin)
+{
+   // The first solver may be created while the stream of an object is
+   // selected without replacing that stream
+   void *first, *second;
+   pthread_t t;
+   ck_assert_int_eq(pthread_create(&t, NULL, seeded_object_thread, NULL), 0);
+   pthread_join(t, &first);
+   ck_assert_int_eq(pthread_create(&t, NULL, seeded_object_thread, (void *)1), 0);
+   pthread_join(t, &second);
+   ck_assert_ptr_ne(first, (void *)(intptr_t)-1);
+   ck_assert_ptr_eq(first, second);
 }
 END_TEST
 
@@ -3417,6 +3459,7 @@ Suite *get_crv_tests(void)
    tcase_add_test(tc, test_array_size_elements);
    tcase_add_test(tc, test_sum_chain);
    tcase_add_test(tc, test_array_unregistered);
+   tcase_add_test(tc, test_seed_before_begin);
    tcase_add_test(tc, test_engine_default);
    tcase_add_loop_test(tc, test_engine_env, 0, 6);
    tcase_add_test(tc, test_engine_unknown);

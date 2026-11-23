@@ -132,6 +132,15 @@ static void crv_gen_warn_giveup(void)
 
 int64_t crv_generated(crv_op_t op, const int64_t *args)
 {
+   // The default stream is seeded by the first operation of any kind, not
+   // by the first solver, which may be created while the stream of an
+   // object is selected
+   static __thread bool seeded = false;
+   if (unlikely(!seeded)) {
+      crv_seed(opt_verilog_seed());
+      seeded = true;
+   }
+
    // These do not have a solver as their first argument
    switch (op) {
    case CRV_OP_OBJECT_ID:
@@ -177,12 +186,6 @@ int64_t crv_generated(crv_op_t op, const int64_t *args)
    switch (op) {
    case CRV_OP_BEGIN:
       {
-         static __thread bool seeded = false;
-         if (!seeded) {
-            crv_seed(opt_verilog_seed());
-            seeded = true;
-         }
-
          crv_gen_t *n = xcalloc(sizeof(crv_gen_t));
          n->solver = crv_new();
          return (intptr_t)n;
