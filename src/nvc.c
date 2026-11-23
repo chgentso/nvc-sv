@@ -850,6 +850,16 @@ static int parse_optimise_level(const char *str)
    return level;
 }
 
+static bool check_all_files(const char *file, void *ctx)
+{
+   // Only Verilog and SystemVerilog sources, the VHDL libraries have
+   // subprograms which cannot be lowered on their own
+   const char *dot = strrchr(file, '.');
+   return dot != NULL && (strcmp(dot, ".v") == 0 || strcmp(dot, ".sv") == 0
+                          || strcmp(dot, ".vh") == 0
+                          || strcmp(dot, ".svh") == 0);
+}
+
 static int elaborate(int argc, char **argv, cmd_state_t *state)
 {
    static struct option long_options[] = {
@@ -867,10 +877,11 @@ static int elaborate(int argc, char **argv, cmd_state_t *state)
       { "trace",           no_argument,       0, 't' },
       { "debug-stmts",     no_argument,       0, 'B' },
       { "black-box-missing", optional_argument, 0, 'K' },
+      { "check-crv",       no_argument,       0, 'Q' },
       { 0, 0, 0, 0 }
    };
 
-   bool no_save = false;
+   bool no_save = false, check_crv = false;
    unit_meta_t meta = {};
    cover_mask_t cover_mask = 0;
    const char *cover_spec_file = NULL, *sdf_args = NULL;
@@ -910,6 +921,9 @@ static int elaborate(int argc, char **argv, cmd_state_t *state)
          break;
       case 'j':
          // No effect
+         break;
+      case 'Q':
+         check_crv = true;
          break;
       case 'g':
          parse_generic(optarg);
@@ -1040,6 +1054,17 @@ static int elaborate(int argc, char **argv, cmd_state_t *state)
 
    if (error_count() > 0)
       return EXIT_FAILURE;
+
+   if (check_crv) {
+      // Subprograms and processes are normally lowered when they first run
+      // so that unsupported constructs are reported part way through a
+      // simulation
+      jit_lower_file(state->jit, check_all_files, NULL);
+      progress("lowering all code");
+
+      if (error_count() > 0)
+         return EXIT_FAILURE;
+   }
 
    if (!no_save) {
       lib_save(state->work);
@@ -2799,6 +2824,9 @@ static void usage(void)
            { "--black-box-missing[=LIB,...]",
              "Elaborate instances of missing units as empty black boxes "
              "(the design cannot be run)" },
+           { "--check-crv",
+             "Lower all Verilog code now, so that constructs which are not "
+             "supported are reported before the simulation starts" },
            { "--no-collapse", "Do not collapse multiple signals into one" },
            { "--no-save", "Do not save the elaborated design to disk" },
            { "--stats", "Print statistics about instantiated design units" },
