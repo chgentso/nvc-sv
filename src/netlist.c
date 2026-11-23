@@ -262,6 +262,7 @@ static const char *proc_kind_string(conn_proc_kind_t kind)
    case CONN_PROC_FINAL: return "final";
    case CONN_PROC_ASSIGN: return "assign";
    case CONN_PROC_GATE: return "gate";
+   case CONN_PROC_PSL: return "psl";
    default: return "other";
    }
 }

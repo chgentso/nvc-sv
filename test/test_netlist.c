@@ -2195,6 +2195,51 @@ START_TEST(test_ev_sva)
 }
 END_TEST
 
+START_TEST(test_ev_psl)
+{
+   set_standard(STD_08);
+   input_from_file(TESTDIR "/netlist/ev_psl.vhd");
+
+   tree_t e = run_elab();
+   fail_if_errors();
+
+   const conn_build_opts_t bopts = { .evidence = true };
+   conn_design_t *cd = conn_build_with(e, &bopts);
+   ck_assert_ptr_nonnull(cd);
+
+   conn_block_t *top = conn_root(cd, 0);
+   conn_net_t *sva_q = get_net(top, "SVA_Q");
+
+   unsigned nchecks = 0;
+   for (unsigned i = 0; i < top->nprocs; i++) {
+      const conn_proc_t *p = top->procs[i];
+      ck_assert_ptr_nonnull(p->ev);
+      if (p->kind != CONN_PROC_PSL)
+         continue;
+
+      ck_assert_int_eq(p->ev->cls, CONN_EV_COMB);
+      ck_assert(!p->ev->approx);
+      ck_assert_uint_eq(p->ev->nouts, 0);
+      ck_assert_uint_eq(p->ndrives, 0);
+      ck_assert(in_ranges(p->reads, p->nreads, sva_q));
+      nchecks++;
+   }
+   ck_assert_uint_eq(nchecks, 3);
+
+   char *json = write_json_ev(cd, -1, true);
+   ck_has(json, "\"kind\":\"psl\"");
+   free(json);
+   conn_free(cd);
+
+   // Without evidence they are not in the netlist
+   cd = conn_build(e);
+   top = conn_root(cd, 0);
+   for (unsigned i = 0; i < top->nprocs; i++)
+      ck_assert_int_ne(top->procs[i]->kind, CONN_PROC_PSL);
+   conn_free(cd);
+}
+END_TEST
+
 Suite *get_netlist_tests(void)
 {
    Suite *s = suite_create("netlist");
@@ -2226,6 +2271,7 @@ Suite *get_netlist_tests(void)
    tcase_add_test(tc, test_ev_reads);
    tcase_add_test(tc, test_ev_reads_vhdl);
    tcase_add_test(tc, test_ev_sva);
+   tcase_add_test(tc, test_ev_psl);
    suite_add_tcase(s, tc);
 
    return s;

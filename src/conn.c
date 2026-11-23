@@ -3266,7 +3266,7 @@ static conn_proc_t *add_process(bctx_t *bc, const char *prefix, ident_t id,
       [CONN_PROC_ALWAYS_LATCH] = "always_latch",
       [CONN_PROC_INITIAL] = "initial", [CONN_PROC_FINAL] = "final",
       [CONN_PROC_ASSIGN] = "assign", [CONN_PROC_GATE] = "gate",
-      [CONN_PROC_OTHER] = "other",
+      [CONN_PROC_OTHER] = "other", [CONN_PROC_PSL] = "psl",
    };
 
    if (generated)
@@ -3643,6 +3643,13 @@ static void scan_stmts(bctx_t *bc, tree_t blk, const char *prefix, int pass)
             add_process(bc, prefix, tree_ident(s), CONN_PROC_VHDL, s);
          break;
 
+      case T_PSL_DIRECT:
+         // A check only: it is in the netlist for the evidence
+         if (pass == 2 && cd->evidence)
+            add_process(bc, prefix, tree_has_ident(s) ? tree_ident(s) : NULL,
+                        CONN_PROC_PSL, s);
+         break;
+
       case T_VERILOG:
          if (pass != 2)
             break;
@@ -3902,6 +3909,8 @@ static void compute_process_sets(conn_design_t *cd, struct proc_ref *pp)
 
       vhdl_collect_reads(cd, t, &reads, true);
    }
+   else if (tree_kind(t) == T_PSL_DIRECT)
+      vhdl_collect_reads(cd, t, &reads, false);
    else {
       vlog_node_t v = tree_vlog(t);
       vlog_scan(cd, v, &reads, &drives,
@@ -3931,6 +3940,8 @@ static void compute_process_sets(conn_design_t *cd, struct proc_ref *pp)
    if (cd->evidence) {
       if (tree_kind(t) == T_PROCESS)
          vhdl_proc_evidence(cd, p, t);
+      else if (tree_kind(t) == T_PSL_DIRECT)
+         psl_proc_evidence(cd, p, t);
       else
          vlog_proc_evidence(cd, p, tree_vlog(t));
    }

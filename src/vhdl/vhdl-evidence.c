@@ -1395,6 +1395,26 @@ cleanup:
    ACLEAR(w.uses);
 }
 
+// A PSL directive observes signals and drives nothing: a combinational
+// cell without outputs, whose reads are bits looked at
+void psl_proc_evidence(conn_design_t *cd, conn_proc_t *proc, tree_t t)
+{
+   conn_evidence_t *ev = dalloc(cd, sizeof(conn_evidence_t));
+   ev->cls = CONN_EV_COMB;
+
+   ev->reads = dalloc(cd, MAX(proc->nreads, 1) * sizeof(conn_read_ev_t));
+   for (unsigned i = 0; i < proc->nreads; i++) {
+      const conn_range_t *r = &(proc->reads[i]);
+      ev->reads[i].sig = *r;
+      ev->reads[i].uses = r->hi == r->lo ? CONN_USE_BIT : CONN_USE_LOGIC;
+   }
+   ev->nreads = proc->nreads;
+   ev->has_reads = true;
+
+   ev->outs = dalloc(cd, sizeof(conn_out_ev_t));
+   proc->ev = ev;
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // Attributes
 

@@ -168,6 +168,7 @@ typedef enum {
    CONN_PROC_FINAL,
    CONN_PROC_ASSIGN,     // Verilog continuous assignment
    CONN_PROC_GATE,       // Verilog gate or UDP instance
+   CONN_PROC_PSL,        // PSL assertion or cover directive, check only
    CONN_PROC_OTHER,
 } conn_proc_kind_t;
 

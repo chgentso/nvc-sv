@@ -71,6 +71,7 @@ void vhdl_collect_reads(conn_design_t *cd, tree_t root, range_list_t *reads,
 // and the attributes of nets and blocks.  Allocate with dalloc.
 void vhdl_proc_evidence(conn_design_t *cd, conn_proc_t *proc, tree_t t);
 void vlog_proc_evidence(conn_design_t *cd, conn_proc_t *proc, vlog_node_t v);
+void psl_proc_evidence(conn_design_t *cd, conn_proc_t *proc, tree_t t);
 void vhdl_net_attrs(conn_design_t *cd, conn_net_t *net, tree_t decl);
 void vlog_net_attrs(conn_design_t *cd, conn_net_t *net, vlog_node_t decl);
 void vhdl_block_attrs(conn_design_t *cd, conn_block_t *blk, tree_t block,
