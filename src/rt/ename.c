@@ -30,6 +30,8 @@
 #include "tree.h"
 #include "type.h"
 #include "vlog/vlog-node.h"
+#include "vlog/vlog-number.h"
+#include "vlog/vlog-phase.h"
 #include "vlog/vlog-util.h"
 
 #include <assert.h>
@@ -247,6 +249,277 @@ static uint8_t vhdl_int_byte_size(type_t type)
    }
 }
 
+static void *shared_param_thunk_cb(jit_scalar_t *args, void *ctx)
+{
+   int64_t *value = ctx;
+   if (args[1].integer != 0)
+      return NULL;   // Has X or Z bits
+
+   *value = args[0].integer;
+   return value;
+}
+
+static void write_vhdl_int_slot(void *slot, uint8_t vsize, int64_t ival)
+{
+   switch (vsize) {
+   case 1: *(int8_t *)slot = (int8_t)ival; break;
+   case 2: *(int16_t *)slot = (int16_t)ival; break;
+   case 4: *(int32_t *)slot = (int32_t)ival; break;
+   case 8: *(int64_t *)slot = ival; break;
+   default: should_not_reach_here();
+   }
+}
+
+static void bind_verilog_constant(tree_t name, vlog_node_t vd,
+                                  vlog_node_t body, void *ctx,
+                                  jit_t *j, jit_scalar_t *args)
+{
+   ident_t pname = vlog_ident(vd);
+
+   if (!vlog_has_value(vd))
+      jit_msg(tree_loc(name), DIAG_FATAL, "sorry, VHDL external constant "
+              "referencing Verilog parameter %s without a value is not "
+              "supported", istr(pname));
+
+   vlog_node_t vtype = vlog_has_type(vd) ? vlog_type(vd) : NULL;
+   vlog_node_t utype = unwrap_verilog_type(vtype);
+
+   if (vlog_is_fixed_unpacked(vd))
+      jit_msg(tree_loc(name), DIAG_FATAL, "sorry, VHDL external constant "
+              "referencing Verilog unpacked array parameter %s is not "
+              "supported", istr(pname));
+
+   if (utype != NULL
+       && (vlog_kind(utype) == V_STRUCT_DECL || vlog_kind(utype) == V_UNION_DECL)
+       && !(vlog_flags(utype) & VLOG_F_PACKED))
+      jit_msg(tree_loc(name), DIAG_FATAL, "sorry, VHDL external constant "
+              "referencing Verilog unpacked %s parameter %s is not supported",
+              vlog_kind(utype) == V_STRUCT_DECL ? "struct" : "union",
+              istr(pname));
+
+   if (vtype != NULL && vlog_is_dynamic_type(vtype)
+       && (utype == NULL || vlog_kind(utype) != V_DATA_TYPE
+           || vlog_subkind(utype) != DT_STRING))
+      jit_msg(tree_loc(name), DIAG_FATAL, "sorry, VHDL external constant "
+              "referencing Verilog %s parameter %s is not supported",
+              verilog_dynamic_kind_str(vtype), istr(pname));
+
+   vlog_node_t val = vlog_value(vd);
+   type_t expect = tree_type(name);
+
+   // Case 1: string literal / string parameter
+   if (vlog_kind(val) == V_STRING) {
+      const bool expect_str = type_is_array(expect)
+         && dimension_of(expect) == 1
+         && type_eq(type_elem(expect), type_elem(std_type(NULL, STD_STRING)));
+      if (!expect_str)
+         jit_msg(tree_loc(name), DIAG_FATAL, "type of Verilog parameter %s is "
+                 "string but external name has type %pT",
+                 istr(pname), expect);
+
+      number_t num = vlog_number(val);
+      const uint32_t slen = number_width(num) / 8;
+
+      int64_t left = 1;
+      int64_t len_dir = (int64_t)slen;
+      if (type_const_bounds(expect)) {
+         tree_t r = range_of(expect, 0);
+         const range_kind_t dir = tree_subkind(r);
+         left = assume_int(tree_left(r));
+         const int64_t right = assume_int(tree_right(r));
+         const int64_t elen =
+            MAX(0, dir == RANGE_TO ? right - left + 1 : left - right + 1);
+         if (elen != slen)
+            jit_msg(tree_loc(name), DIAG_FATAL, "type of Verilog parameter %s "
+                    "is string (length %u) but external name has type %pT "
+                    "(length %"PRIi64")", istr(pname), slen, expect, elen);
+         len_dir = (dir == RANGE_TO) ? elen : ~elen;
+      }
+
+      uint8_t *buf = jit_mspace_alloc(MAX(slen, 1));
+      for (uint32_t i = 0; i < slen; i++)
+         buf[i] = number_byte(num, slen - 1 - i);
+
+      jit_scalar_t *slots = jit_mspace_alloc(3 * sizeof(jit_scalar_t));
+      slots[0].pointer = buf;
+      slots[1].integer = left;
+      slots[2].integer = len_dir;
+      args[0].pointer = slots;
+      return;
+   }
+
+   // Case 2: real parameter
+   bool is_real_val = false;
+   double dval = 0.0;
+   if (vlog_kind(val) == V_REAL) {
+      is_real_val = true;
+      dval = vlog_dval(val);
+   }
+   else if (vlog_kind(val) == V_UNARY
+            && vlog_kind(vlog_value(val)) == V_REAL
+            && (vlog_subkind(val) == V_UNARY_NEG
+                || vlog_subkind(val) == V_UNARY_IDENTITY)) {
+      is_real_val = true;
+      dval = vlog_dval(vlog_value(val));
+      if (vlog_subkind(val) == V_UNARY_NEG)
+         dval = -dval;
+   }
+   else if (vtype != NULL && vlog_is_real(vtype) && vlog_kind(val) == V_NUMBER
+            && number_is_defined(vlog_number(val))) {
+      is_real_val = true;
+      dval = (double)number_integer(vlog_number(val));
+   }
+
+   if (is_real_val) {
+      if (!type_is_real(expect))
+         jit_msg(tree_loc(name), DIAG_FATAL, "type of Verilog parameter %s is "
+                 "real but external name has type %pT", istr(pname), expect);
+
+      double *slot = jit_mspace_alloc(sizeof(double));
+      *slot = dval;
+      args[0].pointer = slot;
+      return;
+   }
+
+   // Case 3: integral / logic parameter (including genvar-dependent
+   // localparams inside shared Verilog generate blocks)
+   bool has_num = false, has_int = false;
+   number_t num = { .bits = 0 };
+   int64_t ival = 0;
+
+   if (vlog_kind(val) == V_NUMBER) {
+      num = vlog_number(val);
+      has_num = true;
+      if (number_is_defined(num) && number_width(num) <= 64) {
+         ival = number_integer(num);
+         has_int = true;
+      }
+   }
+   else if (vlog_get_const(val, &ival)) {
+      num = number_from_int(ival);
+      has_num = true;
+      has_int = true;
+   }
+   else if (body != NULL && (vlog_flags(body) & VLOG_F_GEN_SHARED)
+            && ctx != NULL) {
+      const int w = vlog_width(vd);
+      if (w > 0 && w <= 64) {
+         mir_unit_t *thunk = vlog_lower_thunk(jit_get_mir(j),
+                                              vlog_ident(body), val);
+         if (jit_call_thunk2(j, thunk, ctx, shared_param_thunk_cb, &ival)
+             != NULL) {
+            num = number_from_int(ival);
+            has_num = true;
+            has_int = true;
+         }
+      }
+   }
+
+   if (!has_num)
+      jit_msg(tree_loc(name), DIAG_FATAL, "sorry, VHDL external constant "
+              "referencing non-constant Verilog parameter %s is not supported",
+              istr(pname));
+
+   const uint32_t decl_width = (vtype != NULL && vlog_kind(vtype) == V_DATA_TYPE
+                                && vlog_subkind(vtype) != DT_IMPLICIT)
+      ? vlog_size(vtype) : 0;
+   const uint32_t pwidth = decl_width > 0 ? decl_width : number_width(num);
+
+   LOCAL_TEXT_BUF vtb = tb_new();
+   fmt_verilog_type(vd, pwidth, false, vtb);
+
+   if (type_is_integer(expect)) {
+      if (!has_int)
+         jit_msg(tree_loc(name), DIAG_FATAL, "type of Verilog parameter %s is "
+                 "%s but external name has type %pT",
+                 istr(pname), tb_get(vtb), expect);
+
+      if (type_const_bounds(expect)) {
+         tree_t r = range_of(expect, 0);
+         int64_t low, high;
+         if (folded_bounds(r, &low, &high) && (ival < low || ival > high))
+            jit_msg(tree_loc(name), DIAG_FATAL, "value %"PRIi64" of Verilog "
+                    "parameter %s is outside range of %pT (%"PRIi64" to "
+                    "%"PRIi64")", ival, istr(pname), expect, low, high);
+      }
+
+      void *slot = jit_mspace_alloc(8);
+      write_vhdl_int_slot(slot, vhdl_int_byte_size(expect), ival);
+      args[0].pointer = slot;
+      return;
+   }
+
+   const bool is_arr = type_is_array(expect);
+   type_t elem = is_arr ? type_elem(expect) : expect;
+   const bool vhdl_is_bool = !is_arr
+      && type_eq(expect, std_type(NULL, STD_BOOLEAN));
+   const bool vhdl_is_bit = vhdl_is_bool
+      || type_eq(elem, std_type(NULL, STD_BIT));
+   const bool vhdl_is_sl = type_eq(elem, ieee_type(IEEE_STD_ULOGIC));
+
+   if ((!vhdl_is_bit && !vhdl_is_sl) || (is_arr && dimension_of(expect) != 1))
+      jit_msg(tree_loc(name), DIAG_FATAL, "type of Verilog parameter %s is %s "
+              "but external name has type %pT",
+              istr(pname), tb_get(vtb), expect);
+
+   if (!is_arr) {
+      if (vhdl_is_bool) {
+         if (!has_int || (ival != 0 && ival != 1))
+            jit_msg(tree_loc(name), DIAG_FATAL, "type of Verilog parameter %s "
+                    "is %s but external name has type %pT",
+                    istr(pname), tb_get(vtb), expect);
+         uint8_t *slot = jit_mspace_alloc(8);
+         *slot = ival ? 1 : 0;
+         args[0].pointer = slot;
+         return;
+      }
+
+      if (pwidth != 1)
+         jit_msg(tree_loc(name), DIAG_FATAL, "type of Verilog parameter %s is "
+                 "%s but external name has scalar type %pT",
+                 istr(pname), tb_get(vtb), expect);
+
+      const vlog_logic_t b = number_bit(num, 0);
+      static const uint8_t sl_map[4] = { 2, 3, 4, 1 };
+      uint8_t *slot = jit_mspace_alloc(8);
+      *slot = vhdl_is_bit ? (b == LOGIC_1 ? 1 : 0) : sl_map[b & 3];
+      args[0].pointer = slot;
+      return;
+   }
+
+   int64_t left = (int64_t)pwidth - 1;
+   int64_t len_dir = ~(int64_t)pwidth;
+   if (type_const_bounds(expect)) {
+      tree_t r = range_of(expect, 0);
+      const range_kind_t dir = tree_subkind(r);
+      left = assume_int(tree_left(r));
+      const int64_t right = assume_int(tree_right(r));
+      const int64_t elen =
+         MAX(0, dir == RANGE_TO ? right - left + 1 : left - right + 1);
+      if (elen != pwidth)
+         jit_msg(tree_loc(name), DIAG_FATAL, "type of Verilog parameter %s is "
+                 "%s (width %u) but external name has type %pT (length "
+                 "%"PRIi64")", istr(pname), tb_get(vtb), pwidth, expect, elen);
+      len_dir = (dir == RANGE_TO) ? elen : ~elen;
+   }
+
+   static const uint8_t sl_map[4] = { 2, 3, 4, 1 };
+   const uint32_t nw = number_width(num);
+   uint8_t *data = jit_mspace_alloc(MAX(pwidth, 1));
+   for (uint32_t i = 0; i < pwidth; i++) {
+      const uint32_t bit_idx = pwidth - 1 - i;
+      const vlog_logic_t b =
+         (bit_idx < nw) ? number_bit(num, bit_idx) : LOGIC_0;
+      data[i] = vhdl_is_bit ? (b == LOGIC_1 ? 1 : 0) : sl_map[b & 3];
+   }
+
+   jit_scalar_t *slots = jit_mspace_alloc(3 * sizeof(jit_scalar_t));
+   slots[0].pointer = data;
+   slots[1].integer = left;
+   slots[2].integer = len_dir;
+   args[0].pointer = slots;
+}
+
 static void bind_verilog_external_name(tree_t name, tree_t where,
                                        tree_t container, jit_scalar_t *args)
 {
@@ -254,10 +527,6 @@ static void bind_verilog_external_name(tree_t name, tree_t where,
       jit_msg(tree_loc(name), DIAG_FATAL, "sorry, VHDL external variable "
               "referencing Verilog object %s is not supported",
               istr(tree_ident(where)));
-
-   if (tree_class(name) != C_SIGNAL)
-      jit_msg(tree_loc(name), DIAG_FATAL, "external name referencing Verilog "
-              "object %s must have class signal", istr(tree_ident(where)));
 
    tree_t h = tree_decl(container, 0);
    assert(tree_kind(h) == T_HIER);
@@ -271,51 +540,86 @@ static void bind_verilog_external_name(tree_t name, tree_t where,
               tree_ident(container));
 
    jit_t *j = jit_for_thread();
-   jit_handle_t handle = jit_compile(j, tree_ident2(h));
+   vlog_node_t body = tree_has_ref(h) && tree_kind(tree_ref(h)) == T_VERILOG
+      ? tree_vlog(tree_ref(h)) : NULL;
 
    vlog_node_t vd = NULL;
    ident_t var_name = NULL;
    bool sv_is_net = false;
-   if (tree_kind(where) == T_VERILOG) {
-      vd = tree_vlog(where);
-      switch (vlog_kind(vd)) {
-      case V_VAR_DECL:
-      case V_NET_DECL:
-         var_name = vlog_ident(vd);
-         sv_is_net = (vlog_kind(vd) == V_NET_DECL);
-         break;
-      case V_CLASS_DECL:
-         jit_msg(tree_loc(name), DIAG_FATAL, "sorry, VHDL external name "
-                 "referencing Verilog class %s is not supported",
-                 istr(tree_ident(where)));
-      case V_FUNC_DECL:
-      case V_TASK_DECL:
-         jit_msg(tree_loc(name), DIAG_FATAL, "sorry, VHDL external name "
-                 "referencing Verilog subprogram %s is not supported",
-                 istr(tree_ident(where)));
-      default:
-         jit_msg(tree_loc(name), DIAG_FATAL, "sorry, VHDL external name "
-                 "referencing Verilog object %s is not supported",
-                 istr(tree_ident(where)));
+   if (tree_kind(where) == T_GENERIC_DECL) {
+      if (body != NULL) {
+         const int ndecls = vlog_decls(body);
+         for (int i = 0; i < ndecls; i++) {
+            vlog_node_t d = vlog_decl(body, i);
+            if ((vlog_kind(d) == V_PARAM_DECL || vlog_kind(d) == V_LOCALPARAM)
+                && ident_casecmp(vlog_ident(d), tree_ident(where))) {
+               vd = d;
+               break;
+            }
+         }
       }
+      if (vd == NULL)
+         jit_msg(tree_loc(name), DIAG_FATAL, "Verilog parameter %s not found",
+                 istr(tree_ident(where)));
+   }
+   else if (tree_kind(where) == T_VERILOG) {
+      vd = tree_vlog(where);
    }
    else {
       assert(tree_kind(where) == T_PORT_DECL);
-      vlog_node_t body = tree_vlog(tree_ref(h));
-      const int nports = vlog_ports(body);
+      const int nports = body != NULL ? vlog_ports(body) : 0;
       for (int i = 0; i < nports; i++) {
          vlog_node_t p = vlog_ref(vlog_port(body, i));
          if (ident_casecmp(vlog_ident(p), tree_ident(where))) {
             vd = vlog_ref(p);
-            var_name = vlog_ident(vd);
-            sv_is_net = (vlog_kind(vd) == V_NET_DECL);
             break;
          }
       }
-      if (var_name == NULL)
+      if (vd == NULL)
          jit_msg(tree_loc(name), DIAG_FATAL, "Verilog port %s not found",
                  istr(tree_ident(where)));
    }
+
+   if (tree_class(name) == C_CONSTANT) {
+      if (vlog_kind(vd) != V_PARAM_DECL && vlog_kind(vd) != V_LOCALPARAM)
+         jit_msg(tree_loc(name), DIAG_FATAL, "class of Verilog object %s is "
+                 "not constant", istr(tree_ident(where)));
+
+      bind_verilog_constant(name, vd, body, ctx, j, args);
+      return;
+   }
+
+   if (tree_class(name) != C_SIGNAL)
+      jit_msg(tree_loc(name), DIAG_FATAL, "external name referencing Verilog "
+              "object %s must have class signal or constant",
+              istr(tree_ident(where)));
+
+   switch (vlog_kind(vd)) {
+   case V_VAR_DECL:
+   case V_NET_DECL:
+      var_name = vlog_ident(vd);
+      sv_is_net = (vlog_kind(vd) == V_NET_DECL);
+      break;
+   case V_PARAM_DECL:
+   case V_LOCALPARAM:
+      jit_msg(tree_loc(name), DIAG_FATAL, "class of Verilog parameter %s is "
+              "constant, not signal", istr(tree_ident(where)));
+   case V_CLASS_DECL:
+      jit_msg(tree_loc(name), DIAG_FATAL, "sorry, VHDL external name "
+              "referencing Verilog class %s is not supported",
+              istr(tree_ident(where)));
+   case V_FUNC_DECL:
+   case V_TASK_DECL:
+      jit_msg(tree_loc(name), DIAG_FATAL, "sorry, VHDL external name "
+              "referencing Verilog subprogram %s is not supported",
+              istr(tree_ident(where)));
+   default:
+      jit_msg(tree_loc(name), DIAG_FATAL, "sorry, VHDL external name "
+              "referencing Verilog object %s is not supported",
+              istr(tree_ident(where)));
+   }
+
+   jit_handle_t handle = jit_compile(j, tree_ident2(h));
 
    // Guard non-signal Verilog representations before dereferencing the
    // instance frame slot as a sig_shared_t *.
@@ -665,7 +969,8 @@ static void bind_external_name(tree_t name, jit_handle_t scope,
 
    if (tree_kind(where) == T_VERILOG
        || (container != NULL && is_verilog_block(container)
-           && tree_kind(where) == T_PORT_DECL)) {
+           && (tree_kind(where) == T_PORT_DECL
+               || tree_kind(where) == T_GENERIC_DECL))) {
       bind_verilog_external_name(name, where, container, args);
       return;
    }

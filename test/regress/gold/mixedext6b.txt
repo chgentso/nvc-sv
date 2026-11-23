@@ -1,0 +1,1 @@
+class of Verilog parameter DEPTH is constant, not signal

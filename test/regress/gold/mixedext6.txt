@@ -1,0 +1,1 @@
+type of Verilog parameter GAIN is real but external name has type INTEGER

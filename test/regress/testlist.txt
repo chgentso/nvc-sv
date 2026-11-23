@@ -3209,3 +3209,6 @@ mixedext3       mixed,2008,fail,gold
 mixedext4       mixed,2008,fail,gold
 mixedext4b      mixed,2008,fail,gold
 mixedext4c      mixed,2008,fail,gold
+mixedext5       mixed,2008
+mixedext6       mixed,2008,fail,gold
+mixedext6b      mixed,2008,fail,gold
