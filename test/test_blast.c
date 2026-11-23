@@ -76,7 +76,7 @@ typedef struct {
    rng_t        r;
    crv_t       *c;
    unsigned     nsc, na, nv;
-   uint8_t      width[MAX_VARS];
+   uint16_t     width[MAX_VARS];
    bool         sgn[MAX_VARS];
    bool         fixed[MAX_VARS];
    int64_t      value[MAX_VARS];
@@ -638,7 +638,7 @@ START_TEST(test_wide_ops)
    else
       n = crv_binary(c, op->op, x, mode == 2 ? y : crv_cast(c, y, w, s), w, s);
 
-   uint8_t width[2] = { w, bw };
+   uint16_t width[2] = { w, bw };
    bool sgn[2] = { s, bs };
    blast_shape_t shape = { .nv = 2, .width = width, .sgn = sgn, .nsc = 2 };
    blast_t *b = blast_new(c, &shape);
@@ -786,7 +786,7 @@ START_TEST(test_chunked128)
    out[no++] = shl0;
    out[no++] = shl1;
 
-   uint8_t width[4] = { 64, 64, 64, 64 };
+   uint16_t width[4] = { 64, 64, 64, 64 };
    bool sgn[4] = { false };
    blast_shape_t shape = { .nv = 4, .width = width, .sgn = sgn, .nsc = 4 };
    blast_t *b = blast_new(c, &shape);
@@ -861,7 +861,7 @@ START_TEST(test_unique)
    crv_node_t s = crv_binary(c, CRV_ADD, x, z, 3, false);
    const crv_node_t set[] = { x, y, s };
 
-   uint8_t width[3] = { 3, 3, 3 };
+   uint16_t width[3] = { 3, 3, 3 };
    bool sgn[3] = { false };
    blast_shape_t shape = { .nv = 3, .width = width, .sgn = sgn, .nsc = 3 };
    blast_t *b = blast_new(c, &shape);
@@ -894,7 +894,7 @@ START_TEST(test_stats)
    crv_node_t y = crv_var_ref(c, crv_var(c, 12, false, 0));
    crv_node_t k = crv_const(c, 1234, 16, false);
 
-   uint8_t width[2] = { 16, 12 };
+   uint16_t width[2] = { 16, 12 };
    bool sgn[2] = { false };
    blast_shape_t shape = { .nv = 2, .width = width, .sgn = sgn, .nsc = 2 };
    blast_t *b = blast_new(c, &shape);
@@ -953,7 +953,7 @@ static unsigned gates_of(crv_binary_t op, unsigned w, bool s, bool konst,
    crv_node_t y = konst ? crv_const(c, shift ? 5 : 0x2545f4914f6cdd1dULL, w, s)
       : crv_var_ref(c, crv_var(c, w, s, 0));
 
-   uint8_t width[2] = { w, w };
+   uint16_t width[2] = { w, w };
    bool sgn[2] = { s, s };
    blast_shape_t shape = { .nv = konst ? 1 : 2, .width = width, .sgn = sgn,
                            .nsc = konst ? 1 : 2 };
@@ -1054,7 +1054,7 @@ START_TEST(test_dump_smt2)
    crv_node_t y = crv_var_ref(c, crv_var(c, 6, true, 0));
    crv_node_t q = crv_binary(c, CRV_DIV, x, y, 6, true);
 
-   uint8_t width[2] = { 6, 6 };
+   uint16_t width[2] = { 6, 6 };
    bool sgn[2] = { true, true };
    blast_shape_t shape = { .nv = 2, .width = width, .sgn = sgn, .nsc = 2 };
    blast_t *b = blast_new(c, &shape);
@@ -1089,7 +1089,7 @@ START_TEST(test_dump_smt2)
    crv_array_t a = crv_array(c, 8, false, 3, false, true);
    crv_node_t i = crv_var_ref(c, 0);
    crv_node_t e = crv_array_elem(c, a, i);
-   uint8_t w2[5] = { 64, 32, 8, 8, 8 };
+   uint16_t w2[5] = { 64, 32, 8, 8, 8 };
    bool s2[5] = { false, true, false, false, false };
    bool fixed[5] = { false, true };
    int64_t value[5] = { 0, 3 };

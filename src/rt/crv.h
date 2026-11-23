@@ -62,6 +62,14 @@ uint64_t crv_pop_seed(void);
 // sign or zero extended to 64 bits according to is_signed.
 crv_var_t crv_var(crv_t *c, unsigned width, bool is_signed, int64_t current);
 
+// Scalar variable of arbitrary width (up to 16384 bits).  current points to
+// (width + 63) / 64 little-endian 64-bit words, or NULL for zero.
+crv_var_t crv_var_wide(crv_t *c, unsigned width, bool is_signed,
+                       const uint64_t *current);
+
+// Fix a variable (narrow or wide) to its current value (rand_mode(0)).
+void crv_var_fix(crv_t *c, crv_var_t v);
+
 // Every value of the variable is taken once before any repeats.  The state
 // is the address of a word owned by the caller, zero to start with, which
 // must be passed again on the next call for this variable and object: the
@@ -93,6 +101,8 @@ bool crv_array_resizable(crv_t *c, crv_array_t a);
 
 // Graph nodes
 crv_node_t crv_const(crv_t *c, int64_t value, unsigned width, bool is_signed);
+crv_node_t crv_const_wide(crv_t *c, const uint64_t *words, unsigned width,
+                          bool is_signed);
 crv_node_t crv_var_ref(crv_t *c, crv_var_t v);
 crv_node_t crv_binary(crv_t *c, crv_binary_t op, crv_node_t l, crv_node_t r,
                       unsigned width, bool is_signed);
@@ -244,6 +254,7 @@ const char *crv_bdd_reason_name(crv_bdd_reason_t reason);
 
 // Solution
 int64_t crv_value(crv_t *c, crv_var_t v);
+void crv_value_wide(crv_t *c, crv_var_t v, uint64_t *out);
 unsigned crv_array_len(crv_t *c, crv_array_t a);
 int64_t crv_array_value(crv_t *c, crv_array_t a, unsigned index);
 
@@ -271,7 +282,8 @@ typedef enum {
    CRV_OP_ARRAY_VALUE, CRV_OP_TEST_BIT, CRV_OP_SET_BIT, CRV_OP_RANDOM,
    CRV_OP_DISABLE_SOFT, CRV_OP_SEED_BEGIN, CRV_OP_SEED_END, CRV_OP_ARRAY_SUM,
    CRV_OP_FAIL, CRV_OP_TRIAL, CRV_OP_RANDC_COMMIT, CRV_OP_DISABLE_SOFT_IF,
-   CRV_OP_ARRAY_REDUCE,
+   CRV_OP_ARRAY_REDUCE, CRV_OP_VAR_WIDE, CRV_OP_REF_WIDE, CRV_OP_CONST_WIDE,
+   CRV_OP_VALUE_WIDE,
 } crv_op_t;
 
 int64_t crv_generated(crv_op_t op, const int64_t *args);

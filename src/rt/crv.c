@@ -200,9 +200,24 @@ static inline int64_t st(i128 v)
    return (int64_t)(uint64_t)v;
 }
 
+#define MAX_WIDE_WIDTH 16384
+
 static inline unsigned clampw(unsigned w)
 {
-   return w < 1 ? 1 : w > 64 ? 64 : w;
+   return w < 1 ? 1 : w > MAX_WIDE_WIDTH ? MAX_WIDE_WIDTH : w;
+}
+
+static inline unsigned wide_words(unsigned w)
+{
+   return (w + 63) / 64;
+}
+
+static void wide_norm(uint64_t *words, unsigned w)
+{
+   const unsigned nw = wide_words(w);
+   const unsigned rem = w % 64;
+   if (rem != 0)
+      words[nw - 1] &= (UINT64_C(1) << rem) - 1;
 }
 
 static inline ivl_t ivl(i128 lo, i128 hi)
@@ -375,8 +390,10 @@ crv_t *crv_new(void)
 
 void crv_free(crv_t *c)
 {
-   for (unsigned i = 0; i < c->nvars; i++)
+   for (unsigned i = 0; i < c->nvars; i++) {
       free(c->vars[i].dom);
+      free(c->vars[i].wcur);
+   }
    for (unsigned i = 0; i < c->narrays; i++)
       free(c->arrays[i].init);
    for (unsigned i = 0; i < c->nsets; i++) {
@@ -391,6 +408,7 @@ void crv_free(crv_t *c)
       free(c->dists[i].wt);
       free(c->dists[i].pvl);
    }
+   free(c->wpool);
    free(c->nodes);
    free(c->vars);
    free(c->arrays);
@@ -424,10 +442,52 @@ static crv_node_t mk_fail(crv_t *c)
 crv_var_t crv_var(crv_t *c, unsigned width, bool is_signed, int64_t current)
 {
    width = clampw(width);
+   if (width > 64) {
+      uint64_t w0 = (uint64_t)current;
+      const unsigned nw = wide_words(width);
+      uint64_t *buf = xcalloc_array(nw, sizeof(uint64_t));
+      buf[0] = w0;
+      if (is_signed && current < 0) {
+         for (unsigned i = 1; i < nw; i++)
+            buf[i] = ~UINT64_C(0);
+      }
+      const crv_var_t id = crv_var_wide(c, width, is_signed, buf);
+      free(buf);
+      return id;
+   }
    cvar_t v = { .width = width, .sgn = is_signed,
                 .cur = norm(mathv(current, is_signed), width, is_signed) };
    VEC_PUSH(c->vars, c->nvars, c->cvars, v);
    return c->nvars - 1;
+}
+
+crv_var_t crv_var_wide(crv_t *c, unsigned width, bool is_signed,
+                       const uint64_t *current)
+{
+   width = clampw(width);
+   if (width <= 64)
+      return crv_var(c, width, is_signed,
+                     current != NULL ? (int64_t)current[0] : 0);
+
+   c->has_wide = true;
+   const unsigned nw = wide_words(width);
+   uint64_t *wcur = xcalloc_array(nw, sizeof(uint64_t));
+   if (current != NULL)
+      memcpy(wcur, current, nw * sizeof(uint64_t));
+   wide_norm(wcur, width);
+   cvar_t v = { .width = width, .sgn = is_signed, .cur = (int64_t)wcur[0],
+                .wcur = wcur };
+   VEC_PUSH(c->vars, c->nvars, c->cvars, v);
+   return c->nvars - 1;
+}
+
+void crv_var_fix(crv_t *c, crv_var_t v)
+{
+   cvar_t *cv = &c->vars[v];
+   if (cv->width <= 64)
+      crv_var_domain(c, v, cv->cur);
+   else
+      cv->wfixed = true;
 }
 
 void crv_var_randc(crv_t *c, crv_var_t v, uint64_t *state)
@@ -506,7 +566,46 @@ bool crv_array_resizable(crv_t *c, crv_array_t a)
 crv_node_t crv_const(crv_t *c, int64_t value, unsigned width, bool is_signed)
 {
    width = clampw(width);
+   if (width > 64) {
+      const unsigned nw = wide_words(width);
+      uint64_t *buf = xcalloc_array(nw, sizeof(uint64_t));
+      buf[0] = (uint64_t)value;
+      if (is_signed && value < 0) {
+         for (unsigned i = 1; i < nw; i++)
+            buf[i] = ~UINT64_C(0);
+      }
+      const crv_node_t id = crv_const_wide(c, buf, width, is_signed);
+      free(buf);
+      return id;
+   }
    return mk_const(c, mathv(value, is_signed), width, is_signed);
+}
+
+crv_node_t crv_const_wide(crv_t *c, const uint64_t *words, unsigned width,
+                          bool is_signed)
+{
+   width = clampw(width);
+   if (width <= 64)
+      return crv_const(c, words != NULL ? (int64_t)words[0] : 0, width,
+                       is_signed);
+
+   c->has_wide = true;
+   const unsigned nw = wide_words(width);
+   if (c->nwpool + nw > c->cwpool) {
+      c->cwpool = MAX(c->cwpool * 2, c->nwpool + nw + 16);
+      c->wpool = xrealloc_array(c->wpool, c->cwpool, sizeof(uint64_t));
+   }
+   const unsigned off = c->nwpool;
+   if (words != NULL)
+      memcpy(c->wpool + off, words, nw * sizeof(uint64_t));
+   else
+      memset(c->wpool + off, 0, nw * sizeof(uint64_t));
+   wide_norm(c->wpool + off, width);
+   c->nwpool += nw;
+
+   node_t n = { .kind = N_CONST, .width = width, .sgn = is_signed,
+                .val = (int64_t)off };
+   return add_node(c, n);
 }
 
 crv_node_t crv_var_ref(crv_t *c, crv_var_t v)
@@ -519,7 +618,10 @@ crv_node_t crv_var_ref(crv_t *c, crv_var_t v)
 crv_node_t crv_binary(crv_t *c, crv_binary_t op, crv_node_t l, crv_node_t r,
                       unsigned width, bool is_signed)
 {
-   node_t n = { .kind = N_BIN, .op = op, .width = clampw(width),
+   width = clampw(width);
+   if (width > 64)
+      c->has_wide = true;
+   node_t n = { .kind = N_BIN, .op = op, .width = width,
                 .sgn = is_signed, .a = l, .b = r,
                 .inst = c->nodes[l].inst || c->nodes[r].inst };
    if (op >= CRV_EQ)
@@ -546,7 +648,10 @@ crv_node_t crv_unary(crv_t *c, crv_unary_t op, crv_node_t arg)
 
 crv_node_t crv_cast(crv_t *c, crv_node_t arg, unsigned width, bool is_signed)
 {
-   node_t n = { .kind = N_CAST, .width = clampw(width), .sgn = is_signed,
+   width = clampw(width);
+   if (width > 64)
+      c->has_wide = true;
+   node_t n = { .kind = N_CAST, .width = width, .sgn = is_signed,
                 .a = arg, .inst = c->nodes[arg].inst };
    return add_node(c, n);
 }
@@ -719,6 +824,15 @@ void crv_array_solve_before(crv_t *c, crv_array_t before, crv_var_t after)
 int64_t crv_value(crv_t *c, crv_var_t v)
 {
    return c->vars[v].cur;
+}
+
+void crv_value_wide(crv_t *c, crv_var_t v, uint64_t *out)
+{
+   const cvar_t *cv = &c->vars[v];
+   if (cv->width <= 64)
+      out[0] = (uint64_t)cv->cur;
+   else
+      memcpy(out, cv->wcur, wide_words(cv->width) * sizeof(uint64_t));
 }
 
 unsigned crv_array_len(crv_t *c, crv_array_t a)
@@ -1434,6 +1548,7 @@ typedef struct {
    randc_t  *rc;
    unsigned  level;
    int64_t   cur;
+   uint64_t *wval;     // (width + 63) / 64 words when width > 64
    bool      split;
 } pvar_t;
 
@@ -1443,6 +1558,7 @@ typedef struct {
    int     soft;
    int     unstart, unn;
    int     line;
+   bool    wide;       // Constraint touches a node or variable wider than 64 bits
 } pcons_t;
 
 typedef struct {
@@ -1706,6 +1822,8 @@ void crv_disable_soft(crv_t *c, crv_node_t target)
 static bool is_const_node(const crv_t *c, int n)
 {
    const node_t *nd = &c->nodes[n];
+   if (nd->width > 64)
+      return false;
    switch ((nkind_t)nd->kind) {
    case N_CONST:
       return true;
@@ -1839,7 +1957,9 @@ static int inst(ictx_t *I, int n)
       {
          nd.a = inst(I, nd.a);
          nd.b = inst(I, nd.b);
-         const bool fold = c->nodes[nd.a].kind == N_CONST
+         const bool fold = nd.width <= 64
+            && c->nodes[nd.a].width <= 64 && c->nodes[nd.b].width <= 64
+            && c->nodes[nd.a].kind == N_CONST
             && c->nodes[nd.b].kind == N_CONST;
          const int m = add_node(c, nd);
          if (!fold)
@@ -1855,7 +1975,8 @@ static int inst(ictx_t *I, int n)
    case N_CAST:
       {
          nd.a = inst(I, nd.a);
-         const bool fold = c->nodes[nd.a].kind == N_CONST;
+         const bool fold = nd.width <= 64 && c->nodes[nd.a].width <= 64
+            && c->nodes[nd.a].kind == N_CONST;
          const int m = add_node(c, nd);
          if (!fold)
             return m;
@@ -1868,7 +1989,7 @@ static int inst(ictx_t *I, int n)
    case N_COND:
       {
          const int t = inst(I, nd.a);
-         if (c->nodes[t].kind == N_CONST)
+         if (c->nodes[t].kind == N_CONST && c->nodes[t].width <= 64)
             return inst(I, c->nodes[t].val != 0 ? nd.b : nd.c);
          nd.a = t;
          nd.b = inst(I, nd.b);
@@ -2060,6 +2181,9 @@ static int i64_cmp(const void *a, const void *b)
 
 static dom_t scalar_dom(prob_t *P, const cvar_t *cv)
 {
+   if (cv->width > 64)
+      return cv->wfixed ? dom_interval(0, 0) : dom_interval(0, 1);
+
    dom_t d = type_dom(cv->width, cv->sgn);
    if (cv->ndom == 0)
       return d;
@@ -2157,6 +2281,7 @@ static void prob_free(prob_t *P)
    for (int v = 0; v < P->nv; v++) {
       free(P->vars[v].tabu);
       free(P->vars[v].gd);
+      free(P->vars[v].wval);
    }
    free(P->tb);
    free(P->vars);
@@ -2170,6 +2295,8 @@ static void prob_free(prob_t *P)
 static bool is_const_tree(const crv_t *c, int n)
 {
    const node_t *nd = &c->nodes[n];
+   if (nd->width > 64)
+      return false;
    switch ((nkind_t)nd->kind) {
    case N_CONST:
       return true;
@@ -2225,11 +2352,14 @@ static bool value_of(const prob_t *P, int n, i128 *out)
 static bool all_fixed_node(const prob_t *P, int n)
 {
    const node_t *nd = &P->c->nodes[n];
+   if (nd->width > 64)
+      return false;
    switch ((nkind_t)nd->kind) {
    case N_CONST:
       return true;
    case N_VAR:
       return nd->aux >= 0 && nd->aux < P->nv
+         && P->vars[nd->aux].width <= 64
          && P->vars[nd->aux].dom.lo == P->vars[nd->aux].dom.hi;
    case N_BIN:
       return all_fixed_node(P, nd->a) && all_fixed_node(P, nd->b);
@@ -2370,7 +2500,7 @@ static void derive_domains(prob_t *P)
 
    for (int ci = 0; ci < n0 && nimp < MAX_IMPL; ci++) {
       const pcons_t *pc = &P->cons[ci];
-      if (pc->kind != C_REQ || pc->soft >= 0)
+      if (pc->kind != C_REQ || pc->soft >= 0 || pc->wide)
          continue;
 
       const node_t *nd = &c->nodes[pc->root];
@@ -2511,20 +2641,25 @@ static void dump_smt2(const prob_t *P)
    static __thread unsigned seq;
    const crv_t *c = P->c;
 
-   uint8_t *width = NEW(uint8_t, P->nv);
+   uint16_t *width = NEW(uint16_t, P->nv);
    bool *sgn = NEW(bool, P->nv), *fixed = NEW(bool, P->nv);
    int64_t *value = NEW(int64_t, P->nv);
+   const uint64_t **wvalue = c->has_wide ? xcalloc_array(P->nv, sizeof(uint64_t *)) : NULL;
    for (int v = 0; v < P->nv; v++) {
       const pvar_t *pv = &P->vars[v];
       width[v] = pv->width;
       sgn[v] = pv->sgn;
       fixed[v] = !dom_empty(&pv->dom) && pv->dom.lo == pv->dom.hi;
-      value[v] = fixed[v] ? norm(pv->dom.lo, pv->width, pv->sgn) : 0;
+      if (pv->width <= 64)
+         value[v] = fixed[v] ? norm(pv->dom.lo, pv->width, pv->sgn) : 0;
+      else if (fixed[v] && wvalue != NULL)
+         wvalue[v] = pv->wval;
    }
 
    const blast_shape_t shape = {
       .nv = P->nv, .width = width, .sgn = sgn, .nsc = P->nsc,
       .ebase = P->ebase, .sizes = P->sizes, .fixed = fixed, .value = value,
+      .wvalue = wvalue,
    };
    blast_t *b = blast_new(c, &shape);
 
@@ -2614,6 +2749,7 @@ static void dump_smt2(const prob_t *P)
    free(extra);
    free(defs);
    free(holds);
+   free(wvalue);
    free(value);
    free(fixed);
    free(sgn);
@@ -2666,6 +2802,11 @@ static prob_t *prob_build(crv_t *c, int mode, const unsigned *sizes,
       pvar_t *pv = &P->vars[v];
       *pv = (pvar_t){ .dom = scalar_dom(P, cv), .width = cv->width,
                       .sgn = cv->sgn, .dist = -1, .pop = -1, .cur = cv->cur };
+      if (cv->width > 64) {
+         const unsigned nw = wide_words(cv->width);
+         pv->wval = xmalloc_array(nw, sizeof(uint64_t));
+         memcpy(pv->wval, cv->wcur, nw * sizeof(uint64_t));
+      }
       if (cv->rc)
          pv->rc = (randc_t *)(uintptr_t)*cv->rc;
    }
@@ -2755,12 +2896,83 @@ static prob_t *prob_build(crv_t *c, int mode, const unsigned *sizes,
       P->ncons = 0;
       add_pcons(P, C_REQ, mk_fail(c), -1, 0);
       }
+
+   if (c->has_wide) {
+      for (int ci = 0; ci < P->ncons; ci++) {
+         pcons_t *pc = &P->cons[ci];
+         bool is_w = false;
+         if (pc->kind == C_REQ) {
+            // Walk nodes in constraint to check for any >64-bit node
+            int sp = 0, cap = 32;
+            int *st = xmalloc_array(cap, sizeof(int));
+            st[sp++] = pc->root;
+            while (sp > 0 && !is_w) {
+               const int nid = st[--sp];
+               const node_t *nd = &c->nodes[nid];
+               if (nd->width > 64) {
+                  is_w = true;
+                  break;
+               }
+               if (nd->kind == N_VAR && nd->aux >= 0 && nd->aux < P->nv
+                   && P->vars[nd->aux].width > 64) {
+                  is_w = true;
+                  break;
+               }
+               switch ((nkind_t)nd->kind) {
+               case N_BIN:
+                  if (sp + 2 > cap) { cap *= 2; st = xrealloc_array(st, cap, sizeof(int)); }
+                  st[sp++] = nd->a;
+                  st[sp++] = nd->b;
+                  break;
+               case N_UN:
+               case N_CAST:
+               case N_AELEM:
+               case N_DIST:
+                  if (sp + 1 > cap) { cap *= 2; st = xrealloc_array(st, cap, sizeof(int)); }
+                  st[sp++] = nd->a;
+                  break;
+               case N_COND:
+                  if (sp + 3 > cap) { cap *= 2; st = xrealloc_array(st, cap, sizeof(int)); }
+                  st[sp++] = nd->a;
+                  st[sp++] = nd->b;
+                  st[sp++] = nd->c;
+                  break;
+               case N_INSIDE:
+                  {
+                     const cset_t *cs = &c->sets[nd->aux];
+                     const int need = 1 + (int)cs->n * 2;
+                     while (sp + need > cap) { cap *= 2; st = xrealloc_array(st, cap, sizeof(int)); }
+                     st[sp++] = nd->a;
+                     for (unsigned j = 0; j < cs->n; j++) {
+                        st[sp++] = cs->items[j].lo;
+                        if (cs->items[j].hi >= 0)
+                           st[sp++] = cs->items[j].hi;
+                     }
+                  }
+                  break;
+               default:
+                  break;
+               }
+            }
+            free(st);
+         }
+         else {
+            for (int i = 0; i < pc->unn && !is_w; i++) {
+               const int nid = P->un[pc->unstart + i];
+               if (c->nodes[nid].width > 64)
+                  is_w = true;
+            }
+         }
+         pc->wide = is_w;
+      }
+   }
+
    derive_domains(P);
 
    // Populate P->vals for variables fixed to a single value (e.g. rand_mode(0))
    for (int v = 0; v < P->nv; v++) {
       const pvar_t *pv = &P->vars[v];
-      if (pv->dom.lo == pv->dom.hi)
+      if (pv->width <= 64 && pv->dom.lo == pv->dom.hi)
          P->vals[v] = norm(pv->dom.lo, pv->width, pv->sgn);
    }
 
@@ -4500,6 +4712,8 @@ static bool prop_unique_fast(prob_t *P, int ci);
 
 static bool prop_cons(prob_t *P, const pcons_t *pc)
 {
+   if (pc->wide)
+      return true;
    if (pc->soft >= 0 && P->soft_on != NULL && !P->soft_on[pc->soft])
       return true;
 
@@ -5242,17 +5456,618 @@ static i128 pick_val(prob_t *P, int v)
    return x;
 }
 
+////////////////////////////////////////////////////////////////////////////////
+// Arbitrary-width concrete evaluation (used to verify wide SAT solutions)
+
+typedef struct {
+   unsigned  w, nw;
+   bool      sgn;
+   uint64_t *d;
+   uint64_t  inl[4];
+} wval_t;
+
+static inline void wv_init(wval_t *v, unsigned w, bool sgn)
+{
+   v->w = w;
+   v->nw = wide_words(w);
+   v->sgn = sgn;
+   v->d = v->nw <= 4 ? v->inl : xcalloc_array(v->nw, sizeof(uint64_t));
+   if (v->nw <= 4)
+      memset(v->inl, 0, v->nw * sizeof(uint64_t));
+}
+
+static inline void wv_free(wval_t *v)
+{
+   if (v->d != v->inl)
+      free(v->d);
+}
+
+static inline bool wv_bit(const wval_t *v, unsigned i)
+{
+   if (i < v->w)
+      return (v->d[i / 64] >> (i % 64)) & 1;
+   else if (v->sgn && v->w > 0)
+      return (v->d[(v->w - 1) / 64] >> ((v->w - 1) % 64)) & 1;
+   return false;
+}
+
+static inline bool wv_is_zero(const wval_t *v)
+{
+   for (unsigned i = 0; i < v->nw; i++) {
+      if (v->d[i] != 0)
+         return false;
+   }
+   return true;
+}
+
+static void wv_from_u64(wval_t *v, uint64_t x, unsigned w, bool sgn)
+{
+   wv_init(v, w, sgn);
+   v->d[0] = x;
+   if (sgn && ((int64_t)x < 0)) {
+      for (unsigned i = 1; i < v->nw; i++)
+         v->d[i] = ~UINT64_C(0);
+   }
+   wide_norm(v->d, w);
+}
+
+static void wv_from_i128(wval_t *v, i128 x, unsigned w, bool sgn)
+{
+   wv_init(v, w, sgn);
+   v->d[0] = (uint64_t)x;
+   if (v->nw > 1)
+      v->d[1] = (uint64_t)((unsigned __int128)x >> 64);
+   if (x < 0) {
+      for (unsigned i = 2; i < v->nw; i++)
+         v->d[i] = ~UINT64_C(0);
+   }
+   wide_norm(v->d, w);
+}
+
+static void wv_resize(wval_t *dst, const wval_t *src, unsigned w, bool sgn)
+{
+   wv_init(dst, w, sgn);
+   const bool neg = src->sgn && wv_bit(src, src->w - 1);
+   const unsigned copy_w = MIN(src->nw, dst->nw);
+   for (unsigned i = 0; i < copy_w; i++)
+      dst->d[i] = src->d[i];
+   if (neg && w > src->w) {
+      const unsigned rem = src->w % 64;
+      if (rem != 0 && src->nw <= dst->nw)
+         dst->d[src->nw - 1] |= ~((UINT64_C(1) << rem) - 1);
+      for (unsigned i = src->nw; i < dst->nw; i++)
+         dst->d[i] = ~UINT64_C(0);
+   }
+   wide_norm(dst->d, w);
+}
+
+static void wv_add(const wval_t *x, const wval_t *y, wval_t *out, unsigned w,
+                   bool sgn)
+{
+   wv_init(out, w, sgn);
+   __uint128_t carry = 0;
+   for (unsigned i = 0; i < out->nw; i++) {
+      const __uint128_t s = (__uint128_t)x->d[i] + y->d[i] + carry;
+      out->d[i] = (uint64_t)s;
+      carry = s >> 64;
+   }
+   wide_norm(out->d, w);
+}
+
+static void wv_sub(const wval_t *x, const wval_t *y, wval_t *out, unsigned w,
+                   bool sgn)
+{
+   wv_init(out, w, sgn);
+   __uint128_t borrow = 0;
+   for (unsigned i = 0; i < out->nw; i++) {
+      const __uint128_t xi = x->d[i];
+      const __uint128_t yi = (__uint128_t)y->d[i] + borrow;
+      out->d[i] = (uint64_t)(xi - yi);
+      borrow = xi < yi ? 1 : 0;
+   }
+   wide_norm(out->d, w);
+}
+
+static void wv_neg(const wval_t *x, wval_t *out, unsigned w, bool sgn)
+{
+   wval_t z;
+   wv_init(&z, w, sgn);
+   wv_sub(&z, x, out, w, sgn);
+   wv_free(&z);
+}
+
+static void wv_mul(const wval_t *x, const wval_t *y, wval_t *out, unsigned w,
+                   bool sgn)
+{
+   wv_init(out, w, sgn);
+   for (unsigned i = 0; i < out->nw; i++) {
+      __uint128_t carry = 0;
+      for (unsigned j = 0; i + j < out->nw; j++) {
+         const __uint128_t p = (__uint128_t)x->d[i] * y->d[j]
+            + out->d[i + j] + carry;
+         out->d[i + j] = (uint64_t)p;
+         carry = p >> 64;
+      }
+   }
+   wide_norm(out->d, w);
+}
+
+static int wv_ucmp(const wval_t *x, const wval_t *y)
+{
+   assert(x->nw == y->nw);
+   for (int i = (int)x->nw - 1; i >= 0; i--) {
+      if (x->d[i] != y->d[i])
+         return x->d[i] < y->d[i] ? -1 : 1;
+   }
+   return 0;
+}
+
+static int wv_cmp(const wval_t *x, const wval_t *y)
+{
+   const bool sx = x->sgn && wv_bit(x, x->w - 1);
+   const bool sy = y->sgn && wv_bit(y, y->w - 1);
+   if (sx != sy)
+      return sx ? -1 : 1;
+   const unsigned ww = MAX(x->w, y->w) + (x->sgn != y->sgn ? 1 : 0);
+   wval_t ex, ey;
+   wv_resize(&ex, x, ww, x->sgn || y->sgn);
+   wv_resize(&ey, y, ww, x->sgn || y->sgn);
+   const int r = wv_ucmp(&ex, &ey);
+   wv_free(&ex);
+   wv_free(&ey);
+   return r;
+}
+
+static void wv_udivmod(const wval_t *n, const wval_t *d, unsigned ww,
+                       wval_t *q, wval_t *r)
+{
+   wv_init(q, ww, false);
+   wv_init(r, ww + 1, false);
+   wval_t dd;
+   wv_resize(&dd, d, ww + 1, false);
+   for (int i = (int)ww - 1; i >= 0; i--) {
+      // r = (r << 1) | n[i]
+      uint64_t carry = wv_bit(n, (unsigned)i) ? 1 : 0;
+      for (unsigned k = 0; k < r->nw; k++) {
+         const uint64_t next = r->d[k] >> 63;
+         r->d[k] = (r->d[k] << 1) | carry;
+         carry = next;
+      }
+      wide_norm(r->d, ww + 1);
+      if (wv_ucmp(r, &dd) >= 0) {
+         wval_t diff;
+         wv_sub(r, &dd, &diff, ww + 1, false);
+         memcpy(r->d, diff.d, r->nw * sizeof(uint64_t));
+         wv_free(&diff);
+         q->d[i / 64] |= UINT64_C(1) << (i % 64);
+      }
+   }
+   wv_free(&dd);
+   r->w = ww;
+   r->nw = wide_words(ww);
+   wide_norm(r->d, ww);
+}
+
+static void wv_divmod(const wval_t *x, const wval_t *y, bool want_mod,
+                      wval_t *out, unsigned w, bool sgn)
+{
+   const bool sg = x->sgn || y->sgn;
+   const unsigned ww = MAX(x->w, y->w) + (sg ? 1 : 0);
+   wval_t ex, ey, q, r;
+   wv_resize(&ex, x, ww, sg);
+   wv_resize(&ey, y, ww, sg);
+   if (!sg) {
+      wv_udivmod(&ex, &ey, ww, &q, &r);
+      wv_resize(out, want_mod ? &r : &q, w, sgn);
+      wv_free(&ex); wv_free(&ey); wv_free(&q); wv_free(&r);
+      return;
+   }
+   const bool sx = wv_bit(&ex, ww - 1), sy = wv_bit(&ey, ww - 1);
+   wval_t ax, ay;
+   if (sx) wv_neg(&ex, &ax, ww, false);
+   else wv_resize(&ax, &ex, ww, false);
+   if (sy) wv_neg(&ey, &ay, ww, false);
+   else wv_resize(&ay, &ey, ww, false);
+   wv_udivmod(&ax, &ay, ww, &q, &r);
+   wval_t *raw = want_mod ? &r : &q;
+   const bool neg_res = want_mod ? sx : (sx != sy);
+   wval_t tmp;
+   if (neg_res) {
+      wv_neg(raw, &tmp, ww, true);
+      wv_resize(out, &tmp, w, sgn);
+      wv_free(&tmp);
+   }
+   else {
+      raw->sgn = true;
+      wv_resize(out, raw, w, sgn);
+   }
+   wv_free(&ax); wv_free(&ay);
+   wv_free(&ex); wv_free(&ey); wv_free(&q); wv_free(&r);
+}
+
+static void wv_shift(const wval_t *x, const wval_t *cnt, int kind,
+                     wval_t *out, unsigned w, bool sgn)
+{
+   const unsigned sw = (w <= 64 && x->w <= 64) ? 64 : MAX(w, x->w);
+   wval_t ex;
+   wv_resize(&ex, x, sw, x->sgn);
+   if (kind == 1 && w < sw) {
+      for (unsigned i = w; i < sw; i++)
+         ex.d[i / 64] &= ~(UINT64_C(1) << (i % 64));
+   }
+
+   bool big = false;
+   for (unsigned i = 1; i < cnt->nw; i++)
+      big |= cnt->d[i] != 0;
+   const uint64_t sh = cnt->d[0];
+   if (sh >= sw)
+      big = true;
+
+   wv_init(out, w, sgn);
+   const bool fill = kind == 2 && wv_bit(&ex, sw - 1);
+   if (big) {
+      if (fill) {
+         for (unsigned i = 0; i < out->nw; i++)
+            out->d[i] = ~UINT64_C(0);
+         wide_norm(out->d, w);
+      }
+      wv_free(&ex);
+      return;
+   }
+
+   for (unsigned i = 0; i < w; i++) {
+      bool b = false;
+      if (kind == 0)
+         b = i >= sh ? wv_bit(&ex, i - (unsigned)sh) : false;
+      else if (i + sh < sw)
+         b = wv_bit(&ex, i + (unsigned)sh);
+      else
+         b = fill;
+      if (b)
+         out->d[i / 64] |= UINT64_C(1) << (i % 64);
+   }
+   wv_free(&ex);
+}
+
+static void ev_wide(const prob_t *P, int n, wval_t *out, bool *fail)
+{
+   const crv_t *c = P->c;
+   const node_t *nd = &c->nodes[n];
+   const unsigned w = nd->width;
+   const bool s = nd->sgn;
+
+   switch ((nkind_t)nd->kind) {
+   case N_CONST:
+      if (w <= 64)
+         wv_from_u64(out, (uint64_t)nd->val, w, s);
+      else {
+         wv_init(out, w, s);
+         memcpy(out->d, c->wpool + nd->val, out->nw * sizeof(uint64_t));
+         wide_norm(out->d, w);
+      }
+      return;
+   case N_VAR:
+      {
+         const pvar_t *pv = &P->vars[nd->aux];
+         if (pv->width <= 64)
+            wv_from_u64(out, (uint64_t)P->vals[nd->aux], w, s);
+         else {
+            wval_t src;
+            wv_init(&src, pv->width, pv->sgn);
+            memcpy(src.d, pv->wval, src.nw * sizeof(uint64_t));
+            wide_norm(src.d, pv->width);
+            wv_resize(out, &src, w, s);
+            wv_free(&src);
+         }
+         return;
+      }
+   case N_ASIZE:
+      wv_from_u64(out, P->sizes[nd->aux], w, s);
+      return;
+   case N_AELEM:
+      {
+         wval_t idx;
+         ev_wide(P, nd->a, &idx, fail);
+         if (*fail) {
+            wv_free(&idx);
+            wv_init(out, w, s);
+            return;
+         }
+         const bool neg = idx.sgn && wv_bit(&idx, idx.w - 1);
+         bool oob = neg;
+         for (unsigned i = 1; i < idx.nw; i++)
+            oob |= idx.d[i] != 0;
+         if (oob || idx.d[0] >= P->sizes[nd->aux]) {
+            *fail = true;
+            wv_free(&idx);
+            wv_init(out, w, s);
+            return;
+         }
+         const int ev_id = P->ebase[nd->aux] + (int)idx.d[0];
+         wv_from_u64(out, (uint64_t)P->vals[ev_id], w, s);
+         wv_free(&idx);
+         return;
+      }
+   case N_ASUM:
+      {
+         wv_init(out, w, s);
+         for (unsigned i = 0; i < P->sizes[nd->aux]; i++) {
+            const int ev_id = P->ebase[nd->aux] + (int)i;
+            wval_t el, sum;
+            wv_from_u64(&el, (uint64_t)P->vals[ev_id], w, s);
+            wv_add(out, &el, &sum, w, s);
+            wv_free(&el);
+            wv_free(out);
+            *out = sum;
+            if (out->d == sum.inl)
+               out->d = out->inl;
+         }
+         return;
+      }
+   case N_CAST:
+      {
+         wval_t a;
+         ev_wide(P, nd->a, &a, fail);
+         wv_resize(out, &a, w, s);
+         wv_free(&a);
+         return;
+      }
+   case N_UN:
+      {
+         wval_t a;
+         ev_wide(P, nd->a, &a, fail);
+         if (*fail) {
+            wv_free(&a);
+            wv_init(out, w, s);
+            return;
+         }
+         switch ((crv_unary_t)nd->op) {
+         case CRV_NEG:
+            wv_neg(&a, out, w, s);
+            break;
+         case CRV_INV:
+            wv_init(out, w, s);
+            for (unsigned i = 0; i < out->nw; i++)
+               out->d[i] = ~a.d[i];
+            wide_norm(out->d, w);
+            break;
+         case CRV_LOG_NOT:
+            wv_from_u64(out, wv_is_zero(&a) ? 1 : 0, w, s);
+            break;
+         case CRV_REDUCE_AND:
+            {
+               bool all = true;
+               for (unsigned i = 0; i < a.w && all; i++)
+                  all = wv_bit(&a, i);
+               wv_from_u64(out, all ? 1 : 0, w, s);
+            }
+            break;
+         case CRV_REDUCE_OR:
+            wv_from_u64(out, wv_is_zero(&a) ? 0 : 1, w, s);
+            break;
+         case CRV_REDUCE_XOR:
+            {
+               unsigned p = 0;
+               for (unsigned i = 0; i < a.nw; i++)
+                  p ^= (unsigned)__builtin_parityll(a.d[i]);
+               wv_from_u64(out, p & 1, w, s);
+            }
+            break;
+         case CRV_POPCNT:
+            {
+               unsigned pc = 0;
+               for (unsigned i = 0; i < a.nw; i++)
+                  pc += (unsigned)__builtin_popcountll(a.d[i]);
+               wv_from_u64(out, pc, w, s);
+            }
+            break;
+         }
+         wv_free(&a);
+         return;
+      }
+   case N_BIN:
+      {
+         const crv_binary_t op = (crv_binary_t)nd->op;
+         if (op == CRV_LOG_AND || op == CRV_LOG_OR || op == CRV_IMPLIES) {
+            bool lf = false, rf = false;
+            wval_t l, r;
+            ev_wide(P, nd->a, &l, &lf);
+            ev_wide(P, nd->b, &r, &rf);
+            const bool lt = op == CRV_IMPLIES ? wv_is_zero(&l) : !wv_is_zero(&l);
+            const bool rt = !wv_is_zero(&r);
+            wv_free(&l);
+            wv_free(&r);
+            if (op == CRV_LOG_AND) {
+               if ((!lf && !lt) || (!rf && !rt))
+                  wv_from_u64(out, 0, w, s);
+               else if (lf || rf) {
+                  *fail = true;
+                  wv_init(out, w, s);
+               }
+               else
+                  wv_from_u64(out, 1, w, s);
+            }
+            else {
+               if ((!lf && lt) || (!rf && rt))
+                  wv_from_u64(out, 1, w, s);
+               else if (lf || rf) {
+                  *fail = true;
+                  wv_init(out, w, s);
+               }
+               else
+                  wv_from_u64(out, 0, w, s);
+            }
+            return;
+         }
+
+         wval_t l, r;
+         ev_wide(P, nd->a, &l, fail);
+         if (*fail) {
+            wv_free(&l);
+            wv_init(out, w, s);
+            return;
+         }
+         ev_wide(P, nd->b, &r, fail);
+         if (*fail) {
+            wv_free(&l);
+            wv_free(&r);
+            wv_init(out, w, s);
+            return;
+         }
+         switch (op) {
+         case CRV_ADD: case CRV_SUB: case CRV_MUL:
+         case CRV_AND: case CRV_OR: case CRV_XOR:
+            {
+               wval_t lx, rx;
+               wv_resize(&lx, &l, w, s);
+               wv_resize(&rx, &r, w, s);
+               if (op == CRV_ADD) wv_add(&lx, &rx, out, w, s);
+               else if (op == CRV_SUB) wv_sub(&lx, &rx, out, w, s);
+               else if (op == CRV_MUL) wv_mul(&lx, &rx, out, w, s);
+               else {
+                  wv_init(out, w, s);
+                  for (unsigned i = 0; i < out->nw; i++)
+                     out->d[i] = op == CRV_AND ? (lx.d[i] & rx.d[i])
+                        : op == CRV_OR ? (lx.d[i] | rx.d[i])
+                        : (lx.d[i] ^ rx.d[i]);
+                  wide_norm(out->d, w);
+               }
+               wv_free(&lx);
+               wv_free(&rx);
+            }
+            break;
+         case CRV_DIV:
+         case CRV_MOD:
+            if (wv_is_zero(&r)) {
+               *fail = true;
+               wv_init(out, w, s);
+            }
+            else
+               wv_divmod(&l, &r, op == CRV_MOD, out, w, s);
+            break;
+         case CRV_SHL:
+         case CRV_SHR:
+         case CRV_ASR:
+            wv_shift(&l, &r, op == CRV_SHL ? 0
+                     : (op == CRV_ASR && s) ? 2 : 1, out, w, s);
+            break;
+         case CRV_EQ: case CRV_NE: case CRV_LT:
+         case CRV_LE: case CRV_GT: case CRV_GE:
+            {
+               const int cmp = wv_cmp(&l, &r);
+               bool res = false;
+               switch (op) {
+               case CRV_EQ: res = cmp == 0; break;
+               case CRV_NE: res = cmp != 0; break;
+               case CRV_LT: res = cmp < 0; break;
+               case CRV_LE: res = cmp <= 0; break;
+               case CRV_GT: res = cmp > 0; break;
+               default:     res = cmp >= 0; break;
+               }
+               wv_from_u64(out, res ? 1 : 0, w, s);
+            }
+            break;
+         default:
+            should_not_reach_here();
+         }
+         wv_free(&l);
+         wv_free(&r);
+         return;
+      }
+   case N_COND:
+      {
+         wval_t t;
+         ev_wide(P, nd->a, &t, fail);
+         if (*fail) {
+            wv_free(&t);
+            wv_init(out, w, s);
+            return;
+         }
+         const bool cond = !wv_is_zero(&t);
+         wv_free(&t);
+         wval_t b;
+         ev_wide(P, cond ? nd->b : nd->c, &b, fail);
+         wv_resize(out, &b, w, s);
+         wv_free(&b);
+         return;
+      }
+   case N_INSIDE:
+      {
+         const cset_t *cs = &c->sets[nd->aux];
+         wval_t x;
+         ev_wide(P, nd->a, &x, fail);
+         if (*fail) {
+            wv_free(&x);
+            wv_init(out, w, s);
+            return;
+         }
+         bool found = false;
+         for (unsigned i = 0; i < cs->n && !found; i++) {
+            const item_t it = cs->items[i];
+            wval_t lo;
+            ev_wide(P, it.lo, &lo, fail);
+            if (*fail) { wv_free(&lo); break; }
+            if (it.hi < 0)
+               found = wv_cmp(&x, &lo) == 0;
+            else {
+               wval_t hi;
+               ev_wide(P, it.hi, &hi, fail);
+               if (*fail) { wv_free(&lo); wv_free(&hi); break; }
+               found = wv_cmp(&x, &lo) >= 0 && wv_cmp(&x, &hi) <= 0;
+               wv_free(&hi);
+            }
+            wv_free(&lo);
+         }
+         wv_free(&x);
+         wv_from_u64(out, found ? 1 : 0, w, s);
+         return;
+      }
+   case N_DIST:
+      {
+         cdist_t *cd = (cdist_t *)&c->dists[nd->aux];
+         crv_dist_prepare(cd);
+         wval_t x;
+         ev_wide(P, nd->a, &x, fail);
+         if (*fail) {
+            wv_free(&x);
+            wv_init(out, w, s);
+            return;
+         }
+         bool in = false;
+         for (unsigned i = 0; i < cd->nmr && !in; i++) {
+            wval_t lo, hi;
+            wv_from_i128(&lo, cd->mr[i].lo, 128, true);
+            wv_from_i128(&hi, cd->mr[i].hi, 128, true);
+            in = wv_cmp(&x, &lo) >= 0 && wv_cmp(&x, &hi) <= 0;
+            wv_free(&lo);
+            wv_free(&hi);
+         }
+         wv_free(&x);
+         wv_from_u64(out, in ? 1 : 0, w, s);
+         return;
+      }
+   default:
+      *fail = true;
+      wv_init(out, w, s);
+      return;
+   }
+}
+
 static void fill_vals(prob_t *P, int comp)
 {
    // The variables of a component or all of them: others are not read by
    // the constraints being checked
    if (comp < 0) {
       for (int v = 0; v < P->nv; v++)
-         P->vals[v] = st(P->vars[v].dom.lo);
+         P->vals[v] = P->vars[v].width <= 64 ? st(P->vars[v].dom.lo)
+            : (int64_t)P->vars[v].wval[0];
    }
    else {
-      for (int i = P->kvs[comp]; i < P->kvs[comp + 1]; i++)
-         P->vals[P->kvl[i]] = st(P->vars[P->kvl[i]].dom.lo);
+      for (int i = P->kvs[comp]; i < P->kvs[comp + 1]; i++) {
+         const int v = P->kvl[i];
+         P->vals[v] = P->vars[v].width <= 64 ? st(P->vars[v].dom.lo)
+            : (int64_t)P->vars[v].wval[0];
+      }
    }
 
 }
@@ -5271,6 +6086,39 @@ static bool check_cons(prob_t *P, int comp)
       E.fail = false;
       if (pc->soft >= 0 && P->soft_on != NULL && !P->soft_on[pc->soft])
          continue;
+      if (pc->wide) {
+         if (pc->kind == C_REQ) {
+            bool wfail = false;
+            wval_t r;
+            ev_wide(P, pc->root, &r, &wfail);
+            const bool ok = !wfail && !wv_is_zero(&r);
+            wv_free(&r);
+            if (!ok)
+               return false;
+         }
+         else {
+            wval_t *vals = xcalloc_array(pc->unn, sizeof(wval_t));
+            bool ok = true;
+            for (int i = 0; i < pc->unn; i++) {
+               bool wfail = false;
+               ev_wide(P, P->un[pc->unstart + i], &vals[i], &wfail);
+               if (wfail)
+                  ok = false;
+            }
+            for (int i = 0; i < pc->unn && ok; i++) {
+               for (int j = i + 1; j < pc->unn && ok; j++) {
+                  if (wv_cmp(&vals[i], &vals[j]) == 0)
+                     ok = false;
+               }
+            }
+            for (int i = 0; i < pc->unn; i++)
+               wv_free(&vals[i]);
+            free(vals);
+            if (!ok)
+               return false;
+         }
+         continue;
+      }
       if (pc->kind == C_REQ) {
          const int64_t v = ev(&E, pc->root);
          if (E.fail || v == 0)
@@ -6289,8 +7137,30 @@ static int rj_draw(prob_t *P, rj_t *R, int b)
    return result;
 }
 
+static bool comp_has_wide(const prob_t *P, int comp)
+{
+   if (!P->c->has_wide)
+      return false;
+   const int nvc = comp >= 0 ? P->kvs[comp + 1] - P->kvs[comp] : P->nv;
+   for (int i = 0; i < nvc; i++) {
+      const int v = comp >= 0 ? P->kvl[P->kvs[comp] + i] : i;
+      if (P->vars[v].width > 64)
+         return true;
+   }
+   const int c0 = comp >= 0 ? P->kcs[comp] : 0;
+   const int c1 = comp >= 0 ? P->kcs[comp + 1] : P->ncons;
+   for (int k = c0; k < c1; k++) {
+      const int ci = comp >= 0 ? P->kcl[k] : k;
+      if (P->cons[ci].wide)
+         return true;
+   }
+   return false;
+}
+
 static rj_res_t reject_comp(prob_t *P, int comp)
 {
+   if (comp_has_wide(P, comp))
+      return RJ_DECLINE;
    const amark_t tm = arena_mark(&P->tmp);
    const amark_t am = arena_mark(&P->ar);
    const int mark = P->ntrail;
@@ -6496,6 +7366,10 @@ static bd_res_t bd_build(bd_t *D, bool flat)
    prob_t *P = D->P;
    const crv_t *c = P->c;
    const int comp = D->comp;
+   if (comp_has_wide(P, comp)) {
+      D->why = CRV_BDD_BITS;
+      return BD_DECLINE;
+   }
    const int nvc = comp >= 0 ? P->kvs[comp + 1] - P->kvs[comp] : P->nv;
 
    D->fv = NEW(int, nvc + 1);
@@ -6551,20 +7425,25 @@ static bd_res_t bd_build(bd_t *D, bool flat)
    }
 
    // The circuit
-   uint8_t *width = NEW(uint8_t, P->nv);
+   uint16_t *width = NEW(uint16_t, P->nv);
    bool *sgn = NEW(bool, P->nv), *fixed = NEW(bool, P->nv);
    int64_t *value = NEW(int64_t, P->nv);
+   const uint64_t **wvalue = c->has_wide ? xcalloc_array(P->nv, sizeof(uint64_t *)) : NULL;
    for (int v = 0; v < P->nv; v++) {
       const pvar_t *pv = &P->vars[v];
       width[v] = pv->width;
       sgn[v] = pv->sgn;
       fixed[v] = !dom_empty(&pv->dom) && pv->dom.lo == pv->dom.hi;
-      value[v] = fixed[v] ? norm(pv->dom.lo, pv->width, pv->sgn) : 0;
+      if (pv->width <= 64)
+         value[v] = fixed[v] ? norm(pv->dom.lo, pv->width, pv->sgn) : 0;
+      else if (fixed[v] && wvalue != NULL)
+         wvalue[v] = pv->wval;
    }
 
    const blast_shape_t shape = {
       .nv = P->nv, .width = width, .sgn = sgn, .nsc = P->nsc,
       .ebase = P->ebase, .sizes = P->sizes, .fixed = fixed, .value = value,
+      .wvalue = wvalue,
    };
    D->blast = blast_new(c, &shape);
    blast_t *b = D->blast;
@@ -6831,6 +7710,7 @@ static bd_res_t bd_build(bd_t *D, bool flat)
    free(width);
    free(sgn);
    free(fixed);
+   free(wvalue);
    free(value);
    free(hard);
    free(outs);
@@ -7150,20 +8030,25 @@ static sres_t sat_comp(prob_t *P, int comp, bool *answered)
       return check_all(P, comp) ? S_SAT : S_UNSAT;
    }
 
-   uint8_t *width = NEW(uint8_t, P->nv);
+   uint16_t *width = NEW(uint16_t, P->nv);
    bool *sgn = NEW(bool, P->nv), *fixed = NEW(bool, P->nv);
    int64_t *value = NEW(int64_t, P->nv);
+   const uint64_t **wvalue = c->has_wide ? xcalloc_array(P->nv, sizeof(uint64_t *)) : NULL;
    for (int v = 0; v < P->nv; v++) {
       const pvar_t *pv = &P->vars[v];
       width[v] = pv->width;
       sgn[v] = pv->sgn;
       fixed[v] = !dom_empty(&pv->dom) && pv->dom.lo == pv->dom.hi;
-      value[v] = fixed[v] ? norm(pv->dom.lo, pv->width, pv->sgn) : 0;
+      if (pv->width <= 64)
+         value[v] = fixed[v] ? norm(pv->dom.lo, pv->width, pv->sgn) : 0;
+      else if (fixed[v] && wvalue != NULL)
+         wvalue[v] = pv->wval;
    }
 
    const blast_shape_t shape = {
       .nv = P->nv, .width = width, .sgn = sgn, .nsc = P->nsc,
       .ebase = P->ebase, .sizes = P->sizes, .fixed = fixed, .value = value,
+      .wvalue = wvalue,
    };
    blast_t *b = blast_new(c, &shape);
    const bool forced = P->sat == 2;
@@ -7260,15 +8145,37 @@ static sres_t sat_comp(prob_t *P, int comp, bool *answered)
       const unsigned nin = blast_input_count(b);
       uint64_t *vbits = xcalloc_array(nfv, sizeof(uint64_t));
       uint64_t *vmask = xcalloc_array(nfv, sizeof(uint64_t));
+      uint64_t **wide_bits = NULL, **wide_mask = NULL;
+      if (c->has_wide) {
+         wide_bits = xcalloc_array(nfv, sizeof(uint64_t *));
+         wide_mask = xcalloc_array(nfv, sizeof(uint64_t *));
+         for (int i = 0; i < nfv; i++) {
+            const pvar_t *pv = &P->vars[fv[i]];
+            if (pv->width > 64) {
+               const unsigned nw = wide_words(pv->width);
+               wide_bits[i] = xcalloc_array(nw, sizeof(uint64_t));
+               wide_mask[i] = xcalloc_array(nw, sizeof(uint64_t));
+            }
+         }
+      }
+
       for (unsigned i = 0; i < nin; i++) {
          int var;
          unsigned bit;
          blast_input_var(b, i, &var, &bit);
-         if (var >= 0 && var < P->nv && loc[var] >= 0 && bit < 64) {
+         if (var >= 0 && var < P->nv && loc[var] >= 0) {
             const int li = loc[var];
-            vmask[li] |= UINT64_C(1) << bit;
-            if (invals[i])
-               vbits[li] |= UINT64_C(1) << bit;
+            const unsigned vw = P->vars[var].width;
+            if (vw <= 64 && bit < 64) {
+               vmask[li] |= UINT64_C(1) << bit;
+               if (invals[i])
+                  vbits[li] |= UINT64_C(1) << bit;
+            }
+            else if (vw > 64 && bit < vw && wide_bits != NULL) {
+               wide_mask[li][bit / 64] |= UINT64_C(1) << (bit % 64);
+               if (invals[i])
+                  wide_bits[li][bit / 64] |= UINT64_C(1) << (bit % 64);
+            }
          }
       }
 
@@ -7276,7 +8183,19 @@ static sres_t sat_comp(prob_t *P, int comp, bool *answered)
       bool ok = true;
       for (int i = 0; i < nfv && ok; i++) {
          const int v = fv[i];
-         const pvar_t *pv = &P->vars[v];
+         pvar_t *pv = &P->vars[v];
+         if (pv->width > 64) {
+            const unsigned nw = wide_words(pv->width);
+            for (unsigned wi = 0; wi < nw; wi++) {
+               uint64_t word = wide_bits[i][wi];
+               if (wide_mask[i][wi] != ~UINT64_C(0))
+                  word |= rnd64() & ~wide_mask[i][wi];
+               pv->wval[wi] = word;
+            }
+            wide_norm(pv->wval, pv->width);
+            ok = var_clip(P, v, 0, 0);
+            continue;
+         }
          i128 x;
          if (vmask[i] == 0) {
             i128 n = dom_count(&pv->dom, pv->dom.lo, pv->dom.hi);
@@ -7309,6 +8228,14 @@ static sres_t sat_comp(prob_t *P, int comp, bool *answered)
          res = S_GIVEUP;
       }
 
+      if (wide_bits != NULL) {
+         for (int i = 0; i < nfv; i++) {
+            free(wide_bits[i]);
+            free(wide_mask[i]);
+         }
+         free(wide_bits);
+         free(wide_mask);
+      }
       free(vbits);
       free(vmask);
    }
@@ -7320,6 +8247,7 @@ static sres_t sat_comp(prob_t *P, int comp, bool *answered)
    free(width);
    free(sgn);
    free(fixed);
+   free(wvalue);
    free(value);
    free(fv);
    free(loc);
@@ -7365,6 +8293,20 @@ static sres_t solve_comp(prob_t *P)
 
       if (P->bdd == 2)
          return S_GIVEUP;
+   }
+
+   if (comp_has_wide(P, comp)) {
+      if (P->sat == 0) {
+         P->oob = true;
+         return S_GIVEUP;
+      }
+      bool answered = false;
+      const sres_t sr = sat_comp(P, comp, &answered);
+      if (sr == S_SAT && answered)
+         P->nstage[CRV_STAGE_SAT]++;
+      else if (sr == S_GIVEUP)
+         P->oob = true;
+      return sr;
    }
 
    if (P->sat == 2) {
@@ -7534,9 +8476,11 @@ static sres_t solve_prob(prob_t *P)
 }
 
 typedef struct {
-   unsigned *sizes;
-   int      *ebase;
-   int64_t  *vals;
+   unsigned  *sizes;
+   int       *ebase;
+   int64_t   *vals;
+   uint64_t **wvals;
+   unsigned   nwvals;
 } sol_t;
 
 static void sol_free(sol_t *s)
@@ -7544,7 +8488,27 @@ static void sol_free(sol_t *s)
    free(s->sizes);
    free(s->ebase);
    free(s->vals);
+   if (s->wvals != NULL) {
+      for (unsigned i = 0; i < s->nwvals; i++)
+         free(s->wvals[i]);
+      free(s->wvals);
+   }
    *s = (sol_t){ 0 };
+}
+
+static void sol_copy_wide(sol_t *s, const prob_t *P)
+{
+   if (!P->c->has_wide)
+      return;
+   s->nwvals = P->nsc;
+   s->wvals = xcalloc_array(P->nsc ? P->nsc : 1, sizeof(uint64_t *));
+   for (int v = 0; v < P->nsc; v++) {
+      if (P->vars[v].width > 64 && P->vars[v].wval != NULL) {
+         const unsigned nw = wide_words(P->vars[v].width);
+         s->wvals[v] = xmalloc_array(nw, sizeof(uint64_t));
+         memcpy(s->wvals[v], P->vars[v].wval, nw * sizeof(uint64_t));
+      }
+   }
 }
 
 
@@ -7738,6 +8702,7 @@ static sres_t solve_once(crv_t *c, const bool *active, sol_t *out)
          out->vals = P2->vals;
          out->ebase = P2->ebase;
          out->sizes = sizes;
+         sol_copy_wide(out, P2);
          P2->vals = NULL;
          P2->ebase = NULL;
          prob_free(P2);
@@ -7800,6 +8765,11 @@ static void commit(crv_t *c, const sol_t *s)
    for (unsigned v = 0; v < c->nvars; v++) {
       cvar_t *cv = &c->vars[v];
       cv->cur = s->vals[v];
+      if (cv->width > 64 && s->wvals != NULL && v < s->nwvals
+          && s->wvals[v] != NULL) {
+         memcpy(cv->wcur, s->wvals[v], wide_words(cv->width) * sizeof(uint64_t));
+         cv->cur = (int64_t)cv->wcur[0];
+      }
 
       if (cv->rc && !c->trial)
          randc_consume(cv);
@@ -7929,6 +8899,7 @@ static bool soft_trial(softctx_t *S, const bool *set)
       memcpy(S->best.ebase, P->ebase, P->na * sizeof(int));
       S->best.sizes = NEW(unsigned, P->na);
       memcpy(S->best.sizes, P->sizes, P->na * sizeof(unsigned));
+      sol_copy_wide(&S->best, P);
       return true;
    }
 

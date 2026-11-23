@@ -4315,6 +4315,202 @@ START_TEST(test_array_reduce)
 }
 END_TEST
 
+START_TEST(test_wide_nodes)
+{
+   crv_seed(0x01de128);
+
+   // 128-bit unsigned arithmetic: a + b == target, a > lo_bound
+   {
+      crv_t *c = crv_new();
+      crv_var_t a = crv_var_wide(c, 128, false, NULL);
+      crv_var_t b = crv_var_wide(c, 128, false, NULL);
+      const uint64_t tgt[2] = { UINT64_C(0x1122334455667788),
+                                UINT64_C(0x99aabbccddeeff00) };
+      const uint64_t bound[2] = { UINT64_C(0x0000000000000001),
+                                  UINT64_C(0x5000000000000000) };
+      crv_node_t na = crv_var_ref(c, a), nb = crv_var_ref(c, b);
+      crv_node_t sum = crv_binary(c, CRV_ADD, na, nb, 128, false);
+      crv_require(c, crv_binary(c, CRV_EQ, sum,
+                                crv_const_wide(c, tgt, 128, false), 1, false),
+                  false, 1);
+      crv_require(c, crv_binary(c, CRV_GT, na,
+                                crv_const_wide(c, bound, 128, false), 1, false),
+                  false, 2);
+      ck_assert(crv_solve(c));
+      uint64_t av[2] = { 0 }, bv[2] = { 0 };
+      crv_value_wide(c, a, av);
+      crv_value_wide(c, b, bv);
+      const unsigned __int128 ua = ((unsigned __int128)av[1] << 64) | av[0];
+      const unsigned __int128 ub = ((unsigned __int128)bv[1] << 64) | bv[0];
+      const unsigned __int128 ut = ((unsigned __int128)tgt[1] << 64) | tgt[0];
+      const unsigned __int128 ul = ((unsigned __int128)bound[1] << 64) | bound[0];
+      ck_assert((ua + ub) == ut);
+      ck_assert(ua > ul);
+      crv_free(c);
+   }
+
+   // 128-bit unsigned multiplication: x * y == prod (x, y > 1, y smallish)
+   {
+      crv_t *c = crv_new();
+      crv_var_t x = crv_var_wide(c, 128, false, NULL);
+      crv_var_t y = crv_var_wide(c, 128, false, NULL);
+      const unsigned __int128 px = ((unsigned __int128)UINT64_C(0x100000003) << 40) + 7;
+      const unsigned __int128 py = 97;
+      const unsigned __int128 prod = px * py;
+      const uint64_t pw[2] = { (uint64_t)prod, (uint64_t)(prod >> 64) };
+      const uint64_t limy[2] = { 255, 0 };
+      const uint64_t one[2] = { 1, 0 };
+      crv_node_t nx = crv_var_ref(c, x), ny = crv_var_ref(c, y);
+      crv_require(c, crv_binary(c, CRV_EQ,
+                                crv_binary(c, CRV_MUL, nx, ny, 128, false),
+                                crv_const_wide(c, pw, 128, false), 1, false),
+                  false, 1);
+      crv_require(c, crv_binary(c, CRV_GT, ny, crv_const_wide(c, one, 128, false),
+                                1, false), false, 2);
+      crv_require(c, crv_binary(c, CRV_LE, ny, crv_const_wide(c, limy, 128, false),
+                                1, false), false, 3);
+      crv_require(c, crv_binary(c, CRV_LT, nx, crv_const_wide(c, pw, 128, false),
+                                1, false), false, 4);
+      ck_assert(crv_solve(c));
+      uint64_t xv[2] = { 0 }, yv[2] = { 0 };
+      crv_value_wide(c, x, xv);
+      crv_value_wide(c, y, yv);
+      const unsigned __int128 ux = ((unsigned __int128)xv[1] << 64) | xv[0];
+      const unsigned __int128 uy = ((unsigned __int128)yv[1] << 64) | yv[0];
+      ck_assert(ux * uy == prod);
+      ck_assert(uy > 1 && uy <= 255);
+      crv_free(c);
+   }
+
+   // 128-bit unsigned division and modulo
+   {
+      crv_t *c = crv_new();
+      crv_var_t n = crv_var_wide(c, 128, false, NULL);
+      const uint64_t dv[2] = { UINT64_C(0x1000000000003), 1 };
+      const uint64_t qv[2] = { 17, 0 };
+      const uint64_t rv[2] = { 42, 0 };
+      crv_node_t nn = crv_var_ref(c, n);
+      crv_node_t nd = crv_const_wide(c, dv, 128, false);
+      crv_require(c, crv_binary(c, CRV_EQ,
+                                crv_binary(c, CRV_DIV, nn, nd, 128, false),
+                                crv_const_wide(c, qv, 128, false), 1, false),
+                  false, 1);
+      crv_require(c, crv_binary(c, CRV_EQ,
+                                crv_binary(c, CRV_MOD, nn, nd, 128, false),
+                                crv_const_wide(c, rv, 128, false), 1, false),
+                  false, 2);
+      ck_assert(crv_solve(c));
+      uint64_t nv[2] = { 0 };
+      crv_value_wide(c, n, nv);
+      const unsigned __int128 un = ((unsigned __int128)nv[1] << 64) | nv[0];
+      const unsigned __int128 ud = ((unsigned __int128)dv[1] << 64) | dv[0];
+      ck_assert(un / ud == 17);
+      ck_assert(un % ud == 42);
+      crv_free(c);
+   }
+
+   // 128-bit signed division & modulo with negative dividend
+   {
+      crv_t *c = crv_new();
+      crv_var_t n = crv_var_wide(c, 128, true, NULL);
+      const __int128 d128 = 1000000007;
+      const __int128 q128 = -(((__int128)1 << 70) + 5);
+      const __int128 r128 = -123;
+      const uint64_t dw[2] = { (uint64_t)d128, (uint64_t)((unsigned __int128)d128 >> 64) };
+      const uint64_t qw[2] = { (uint64_t)q128, (uint64_t)((unsigned __int128)q128 >> 64) };
+      const uint64_t rw[2] = { (uint64_t)r128, (uint64_t)((unsigned __int128)r128 >> 64) };
+      crv_node_t nn = crv_var_ref(c, n);
+      crv_node_t nd = crv_const_wide(c, dw, 128, true);
+      crv_require(c, crv_binary(c, CRV_EQ,
+                                crv_binary(c, CRV_DIV, nn, nd, 128, true),
+                                crv_const_wide(c, qw, 128, true), 1, false),
+                  false, 1);
+      crv_require(c, crv_binary(c, CRV_EQ,
+                                crv_binary(c, CRV_MOD, nn, nd, 128, true),
+                                crv_const_wide(c, rw, 128, true), 1, false),
+                  false, 2);
+      ck_assert(crv_solve(c));
+      uint64_t nv[2] = { 0 };
+      crv_value_wide(c, n, nv);
+      const __int128 sn = (__int128)(((unsigned __int128)nv[1] << 64) | nv[0]);
+      ck_assert(sn == q128 * d128 + r128);
+      crv_free(c);
+   }
+
+   // 256-bit arithmetic + fixed wide var + 256-bit UNSAT proof
+   {
+      crv_t *c = crv_new();
+      const uint64_t cur[4] = { 0xdeadbeefcafebabeULL, 0x0123456789abcdefULL,
+                                0xfedcba9876543210ULL, 0x0011223344556677ULL };
+      crv_var_t a = crv_var_wide(c, 256, false, cur);
+      crv_var_fix(c, a);
+      crv_var_t b = crv_var_wide(c, 256, false, NULL);
+      const uint64_t mask[4] = { 0x1111111111111111ULL, 0x2222222222222222ULL,
+                                 0x3333333333333333ULL, 0x4444444444444444ULL };
+      crv_require(c, crv_binary(c, CRV_EQ,
+                                crv_binary(c, CRV_XOR, crv_var_ref(c, a),
+                                           crv_var_ref(c, b), 256, false),
+                                crv_const_wide(c, mask, 256, false), 1, false),
+                  false, 1);
+      ck_assert(crv_solve(c));
+      uint64_t bv[4] = { 0 };
+      crv_value_wide(c, b, bv);
+      for (int i = 0; i < 4; i++)
+         ck_assert_uint_eq(bv[i], cur[i] ^ mask[i]);
+      crv_free(c);
+
+      // 256-bit UNSAT: x > y && y > z && z > x
+      crv_t *u = crv_new();
+      crv_var_t x = crv_var_wide(u, 256, false, NULL);
+      crv_var_t y = crv_var_wide(u, 256, false, NULL);
+      crv_var_t z = crv_var_wide(u, 256, false, NULL);
+      crv_require(u, crv_binary(u, CRV_GT, crv_var_ref(u, x),
+                                crv_var_ref(u, y), 1, false), false, 1);
+      crv_require(u, crv_binary(u, CRV_GT, crv_var_ref(u, y),
+                                crv_var_ref(u, z), 1, false), false, 2);
+      crv_require(u, crv_binary(u, CRV_GT, crv_var_ref(u, z),
+                                crv_var_ref(u, x), 1, false), false, 3);
+      ck_assert_int_eq(crv_solve2(u), CRV_UNSAT);
+      crv_free(u);
+   }
+
+   // Wide generated ABI: CRV_OP_VAR_WIDE, CRV_OP_REF_WIDE, CRV_OP_CONST_WIDE,
+   // CRV_OP_VALUE_WIDE
+   {
+      int64_t a_begin[] = { 0 };
+      int64_t g = crv_generated(CRV_OP_BEGIN, a_begin);
+      uint64_t init_x[2] = { 0, 0 };
+      int64_t a_vx[] = { g, 1, 1, (intptr_t)init_x, CRV_FLAGS(100, false), 1 };
+      int64_t vx = crv_generated(CRV_OP_VAR_WIDE, a_vx);
+      int64_t a_rx[] = { g, 1, 1, (intptr_t)init_x, CRV_FLAGS(100, false) };
+      int64_t nx = crv_generated(CRV_OP_REF_WIDE, a_rx);
+      uint64_t state_y[2] = { UINT64_C(0xaaaaaaaaaaaaaaaa), UINT64_C(0x555555555) };
+      int64_t a_ry[] = { g, 1, 2, (intptr_t)state_y, CRV_FLAGS(100, false) };
+      int64_t ny = crv_generated(CRV_OP_REF_WIDE, a_ry);
+      uint64_t k_sum[2] = { UINT64_C(0x123456789abcdef0), UINT64_C(0xabcdef123) };
+      int64_t a_kc[] = { g, (intptr_t)k_sum, CRV_FLAGS(100, false) };
+      int64_t nc = crv_generated(CRV_OP_CONST_WIDE, a_kc);
+      int64_t a_add[] = { g, CRV_ADD, nx, ny, CRV_FLAGS(100, false) };
+      int64_t nadd = crv_generated(CRV_OP_BINARY, a_add);
+      int64_t a_eq[] = { g, CRV_EQ, nadd, nc, CRV_FLAGS(1, false) };
+      int64_t a_req[] = { g, crv_generated(CRV_OP_BINARY, a_eq), 0, 1 };
+      crv_generated(CRV_OP_REQUIRE, a_req);
+
+      int64_t a_g[] = { g };
+      ck_assert_int_eq(crv_generated(CRV_OP_SOLVE, a_g), 1);
+      uint64_t out[2] = { 0 };
+      int64_t a_val[] = { g, vx, (intptr_t)out };
+      crv_generated(CRV_OP_VALUE_WIDE, a_val);
+      const unsigned __int128 mask100 = (((unsigned __int128)1) << 100) - 1;
+      const unsigned __int128 ux = (((unsigned __int128)out[1] << 64) | out[0]);
+      const unsigned __int128 uy = (((unsigned __int128)state_y[1] << 64) | state_y[0]) & mask100;
+      const unsigned __int128 uc = (((unsigned __int128)k_sum[1] << 64) | k_sum[0]) & mask100;
+      ck_assert(((ux + uy) & mask100) == uc);
+      crv_generated(CRV_OP_END, a_g);
+   }
+}
+END_TEST
+
 Suite *get_crv_tests(void)
 {
    Suite *s = suite_create("crv");
@@ -4387,6 +4583,7 @@ Suite *get_crv_tests(void)
    tcase_add_test(tc, test_dist_guarded);
    tcase_add_test(tc, test_disable_soft_if);
    tcase_add_test(tc, test_array_reduce);
+   tcase_add_test(tc, test_wide_nodes);
    tcase_add_test(tc, test_fuzz_fixed);
    suite_add_tcase(s, tc);
 

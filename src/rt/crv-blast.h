@@ -44,14 +44,15 @@ typedef struct _blast blast_t;
 // The variables that are the inputs, laid out as the solver lays them out:
 // the scalar variables, then the size of each array, then the elements
 typedef struct {
-   unsigned        nv;          // Number of variables
-   const uint8_t  *width;       // Width and signedness of each
-   const bool     *sgn;
-   unsigned        nsc;         // As for crv_eval
-   const int      *ebase;
-   const unsigned *sizes;
-   const bool     *fixed;       // NULL or per variable: value is known
-   const int64_t  *value;
+   unsigned               nv;          // Number of variables
+   const uint16_t        *width;       // Width and signedness of each
+   const bool            *sgn;
+   unsigned               nsc;         // As for crv_eval
+   const int             *ebase;
+   const unsigned        *sizes;
+   const bool            *fixed;       // NULL or per variable: value is known
+   const int64_t         *value;
+   const uint64_t *const *wvalue;      // NULL or wide values for fixed vars > 64 bits
 } blast_shape_t;
 
 // Facts about the circuit that the stages after the blaster decline on
@@ -71,7 +72,7 @@ typedef struct {
 typedef struct {
    crv_node_t node;
    uint8_t    op;               // crv_binary_t or BLAST_OP_INSIDE
-   uint8_t    wa, wb;           // Bits of each operand that are not constant
+   uint16_t   wa, wb;           // Bits of each operand that are not constant
 } blast_op_t;
 
 blast_t *blast_new(const crv_t *c, const blast_shape_t *shape);

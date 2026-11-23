@@ -39,18 +39,21 @@ typedef enum {
 } nkind_t;
 
 typedef struct {
-   uint8_t kind, op, width;
-   bool    sgn;
-   bool    inst;     // Contains an index or array element to substitute
-   int32_t a, b, c;
-   int32_t aux;
-   int64_t val;
+   uint8_t  kind, op;
+   uint16_t width;
+   bool     sgn;
+   bool     inst;    // Contains an index or array element to substitute
+   int32_t  a, b, c;
+   int32_t  aux;
+   int64_t  val;     // Value for width <= 64, or word offset in c->wpool
 } node_t;
 
 typedef struct {
    unsigned  width;
    bool      sgn;
+   bool      wfixed; // Fixed wide variable (width > 64)
    int64_t   cur;
+   uint64_t *wcur;   // (width + 63) / 64 little-endian words when width > 64
    uint64_t *rc;
    int64_t  *dom;
    unsigned  ndom, cdom;
@@ -137,6 +140,9 @@ struct _crv {
    bool      greedy;   // Soft constraints are kept one at a time
    bool      bad;      // The graph names an array that does not exist
    bool      trial;    // Solves do not consume randc values
+   bool      has_wide; // At least one variable or node is wider than 64 bits
+   uint64_t *wpool;    // Word pool for N_CONST nodes wider than 64 bits
+   unsigned  nwpool, cwpool;
 };
 
 

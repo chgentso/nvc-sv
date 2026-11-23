@@ -24,18 +24,19 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define MAXV 72      // The widest vector: a divider of 65 bit operands, plus one
+#define MAXV 72      // Inline capacity; wider vectors spill to the heap
 
 typedef struct {
-   unsigned n;
-   blit_t   b[MAXV];
+   unsigned n, cap;
+   blit_t  *b;
+   blit_t   inl[MAXV];
 } bv_t;
 
 typedef struct {
-   int32_t off;
-   uint8_t w;
-   bool    sgn, done;
-   blit_t  fail;
+   int32_t  off;
+   uint16_t w;
+   bool     sgn, done;
+   blit_t   fail;
 } enode_t;
 
 typedef struct {
@@ -54,7 +55,7 @@ struct _blast {
    unsigned  tmask;
    unsigned *in_gate;         // Gate of each input
    int      *in_var;
-   uint8_t  *in_bit;
+   uint16_t *in_bit;
    uint8_t  *in_sig;          // Place in the first operand that has the bit
    unsigned  nin, cin;
 
@@ -217,7 +218,7 @@ static blit_t new_input(blast_t *b, int var, unsigned bit)
       b->cin = b->cin ? b->cin * 2 : 64;
       b->in_gate = xrealloc_array(b->in_gate, b->cin, sizeof(unsigned));
       b->in_var = xrealloc_array(b->in_var, b->cin, sizeof(int));
-      b->in_bit = xrealloc_array(b->in_bit, b->cin, sizeof(uint8_t));
+      b->in_bit = xrealloc_array(b->in_bit, b->cin, sizeof(uint16_t));
       b->in_sig = xrealloc_array(b->in_sig, b->cin, sizeof(uint8_t));
    }
 
@@ -238,11 +239,79 @@ static blit_t constant(bool v)
 ////////////////////////////////////////////////////////////////////////////////
 // Vectors
 
+static inline void bv_init(bv_t *v)
+{
+   v->n = 0;
+   v->cap = MAXV;
+   v->b = v->inl;
+}
+
+static inline void bv_free(bv_t *v)
+{
+   if (v->b != v->inl)
+      free(v->b);
+}
+
+static void bv_reserve(bv_t *v, unsigned need)
+{
+   if (need <= v->cap)
+      return;
+   unsigned nc = v->cap * 2;
+   while (nc < need)
+      nc *= 2;
+   if (v->b == v->inl) {
+      blit_t *p = xmalloc_array(nc, sizeof(blit_t));
+      if (v->n > 0)
+         memcpy(p, v->inl, v->n * sizeof(blit_t));
+      v->b = p;
+   }
+   else
+      v->b = xrealloc_array(v->b, nc, sizeof(blit_t));
+   v->cap = nc;
+}
+
+static void bv_copy(bv_t *dst, const bv_t *src)
+{
+   bv_reserve(dst, src->n);
+   dst->n = src->n;
+   if (src->n > 0)
+      memcpy(dst->b, src->b, src->n * sizeof(blit_t));
+}
+
 static void bv_const(bv_t *v, uint64_t val, unsigned w)
 {
+   bv_reserve(v, w);
    v->n = w;
    for (unsigned i = 0; i < w; i++)
       v->b[i] = constant(i < 64 && ((val >> i) & 1));
+}
+
+static void bv_const_wide(bv_t *v, const uint64_t *words, unsigned nwords,
+                          unsigned w)
+{
+   bv_reserve(v, w);
+   v->n = w;
+   for (unsigned i = 0; i < w; i++) {
+      const unsigned wi = i / 64;
+      v->b[i] = constant(wi < nwords && ((words[wi] >> (i % 64)) & 1));
+   }
+}
+
+static void bv_const_i128(bv_t *v, i128 k, unsigned w)
+{
+   bv_reserve(v, w);
+   v->n = w;
+   const uint64_t lo = (uint64_t)k;
+   const uint64_t hi = (uint64_t)((unsigned __int128)k >> 64);
+   const blit_t sign = constant(k < 0);
+   for (unsigned i = 0; i < w; i++) {
+      if (i < 64)
+         v->b[i] = constant((lo >> i) & 1);
+      else if (i < 128)
+         v->b[i] = constant((hi >> (i - 64)) & 1);
+      else
+         v->b[i] = sign;
+   }
 }
 
 // Bit i of the value extended past the top
@@ -258,7 +327,7 @@ static inline blit_t bv_ext(const bv_t *v, unsigned i, bool sgn)
 
 static void bv_resize(bv_t *v, unsigned w, bool sgn)
 {
-   assert(w <= MAXV);
+   bv_reserve(v, w);
    for (unsigned i = v->n; i < w; i++)
       v->b[i] = bv_ext(v, i, sgn);
    v->n = w;
@@ -313,6 +382,7 @@ static blit_t bv_parity(blast_t *b, const blit_t *x, unsigned n)
 static void bv_add(blast_t *b, const bv_t *x, const bv_t *y, blit_t cin,
                    unsigned w, bv_t *out, blit_t *cout)
 {
+   bv_reserve(out, w);
    blit_t carry = cin;
    for (unsigned i = 0; i < w; i++) {
       const blit_t xi = x->b[i], yi = y->b[i];
@@ -327,6 +397,7 @@ static void bv_add(blast_t *b, const bv_t *x, const bv_t *y, blit_t cin,
 
 static void bv_not(const bv_t *x, bv_t *out)
 {
+   bv_reserve(out, x->n);
    for (unsigned i = 0; i < x->n; i++)
       out->b[i] = lit_not(x->b[i]);
    out->n = x->n;
@@ -337,12 +408,15 @@ static void bv_sub(blast_t *b, const bv_t *x, const bv_t *y, unsigned w,
                    bv_t *out, blit_t *cout)
 {
    bv_t ny;
+   bv_init(&ny);
    bv_not(y, &ny);
    bv_add(b, x, &ny, BLIT_TRUE, w, out, cout);
+   bv_free(&ny);
 }
 
 static void bv_neg(blast_t *b, const bv_t *x, unsigned w, bv_t *out)
 {
+   bv_reserve(out, w);
    blit_t seen = BLIT_FALSE;
    for (unsigned i = 0; i < w; i++) {
       out->b[i] = g_xor(b, x->b[i], seen);
@@ -355,6 +429,7 @@ static void bv_mux(blast_t *b, blit_t s, const bv_t *t, const bv_t *f,
                    bv_t *out)
 {
    assert(t->n == f->n);
+   bv_reserve(out, t->n);
    for (unsigned i = 0; i < t->n; i++)
       out->b[i] = g_mux(b, s, t->b[i], f->b[i]);
    out->n = t->n;
@@ -381,10 +456,17 @@ static blit_t bv_ult(blast_t *b, const bv_t *x, const bv_t *y)
 static blit_t bv_slt(blast_t *b, const bv_t *x, const bv_t *y)
 {
    assert(x->n == y->n && x->n > 0);
-   bv_t fx = *x, fy = *y;
+   bv_t fx, fy;
+   bv_init(&fx);
+   bv_init(&fy);
+   bv_copy(&fx, x);
+   bv_copy(&fy, y);
    fx.b[x->n - 1] = lit_not(fx.b[x->n - 1]);
    fy.b[y->n - 1] = lit_not(fy.b[y->n - 1]);
-   return bv_ult(b, &fx, &fy);
+   const blit_t r = bv_ult(b, &fx, &fy);
+   bv_free(&fx);
+   bv_free(&fy);
+   return r;
 }
 
 // Compare the mathematical values of two numbers
@@ -392,42 +474,62 @@ static void bv_cmp(blast_t *b, const bv_t *x, bool xs, const bv_t *y, bool ys,
                    blit_t *eq, blit_t *lt)
 {
    const unsigned w = MAX(x->n, y->n) + (xs != ys ? 1 : 0);
-   bv_t ex = *x, ey = *y;
+   bv_t ex, ey;
+   bv_init(&ex);
+   bv_init(&ey);
+   bv_copy(&ex, x);
+   bv_copy(&ey, y);
    bv_resize(&ex, w, xs);
    bv_resize(&ey, w, ys);
    *eq = bv_eq(b, &ex, &ey);
    *lt = (xs || ys) ? bv_slt(b, &ex, &ey) : bv_ult(b, &ex, &ey);
+   bv_free(&ex);
+   bv_free(&ey);
 }
 
 // Compare with a constant, which may be outside the range of the type
 static blit_t bv_le_const(blast_t *b, const bv_t *x, bool xs, i128 k)
 {
    const unsigned w = x->n;
-   const i128 lo = xs ? -((i128)1 << (w - 1)) : 0;
-   const i128 hi = xs ? ((i128)1 << (w - 1)) - 1 : ((i128)1 << w) - 1;
-   if (k >= hi)
-      return BLIT_TRUE;
-   else if (k < lo)
+   if (w <= 64) {
+      const i128 lo = xs ? -((i128)1 << (w - 1)) : 0;
+      const i128 hi = xs ? ((i128)1 << (w - 1)) - 1 : ((i128)1 << w) - 1;
+      if (k >= hi)
+         return BLIT_TRUE;
+      else if (k < lo)
+         return BLIT_FALSE;
+   }
+   else if (!xs && k < 0)
       return BLIT_FALSE;
 
    bv_t kv;
-   bv_const(&kv, (uint64_t)k, w);
-   return lit_not(xs ? bv_slt(b, &kv, x) : bv_ult(b, &kv, x));
+   bv_init(&kv);
+   bv_const_i128(&kv, k, w);
+   const blit_t r = lit_not(xs ? bv_slt(b, &kv, x) : bv_ult(b, &kv, x));
+   bv_free(&kv);
+   return r;
 }
 
 static blit_t bv_ge_const(blast_t *b, const bv_t *x, bool xs, i128 k)
 {
    const unsigned w = x->n;
-   const i128 lo = xs ? -((i128)1 << (w - 1)) : 0;
-   const i128 hi = xs ? ((i128)1 << (w - 1)) - 1 : ((i128)1 << w) - 1;
-   if (k <= lo)
+   if (w <= 64) {
+      const i128 lo = xs ? -((i128)1 << (w - 1)) : 0;
+      const i128 hi = xs ? ((i128)1 << (w - 1)) - 1 : ((i128)1 << w) - 1;
+      if (k <= lo)
+         return BLIT_TRUE;
+      else if (k > hi)
+         return BLIT_FALSE;
+   }
+   else if (!xs && k <= 0)
       return BLIT_TRUE;
-   else if (k > hi)
-      return BLIT_FALSE;
 
    bv_t kv;
-   bv_const(&kv, (uint64_t)k, w);
-   return lit_not(xs ? bv_slt(b, x, &kv) : bv_ult(b, x, &kv));
+   bv_init(&kv);
+   bv_const_i128(&kv, k, w);
+   const blit_t r = lit_not(xs ? bv_slt(b, x, &kv) : bv_ult(b, x, &kv));
+   bv_free(&kv);
+   return r;
 }
 
 // Array multiplier: the low w bits of x * y.  The operand with the most
@@ -446,29 +548,38 @@ static void bv_mul(blast_t *b, const bv_t *x, const bv_t *y, unsigned w,
       y = t;
    }
 
-   bv_t acc;
+   bv_t acc, row, sum, hi;
+   bv_init(&acc);
+   bv_init(&row);
+   bv_init(&sum);
+   bv_init(&hi);
    bv_const(&acc, 0, w);
    for (unsigned i = 0; i < w; i++) {
       if (y->b[i] == BLIT_FALSE)
          continue;
 
-      bv_t row, sum;
-      row.n = w - i;
+      const unsigned remw = w - i;
+      bv_reserve(&row, remw);
+      row.n = remw;
       bool zero = true;
-      for (unsigned j = 0; j < row.n; j++) {
+      for (unsigned j = 0; j < remw; j++) {
          row.b[j] = blast_and(b, y->b[i], x->b[j]);
          zero &= row.b[j] == BLIT_FALSE;
       }
       if (zero)
          continue;
 
-      bv_t hi;
-      hi.n = w - i;
-      memcpy(hi.b, acc.b + i, (w - i) * sizeof(blit_t));
-      bv_add(b, &hi, &row, BLIT_FALSE, w - i, &sum, NULL);
-      memcpy(acc.b + i, sum.b, (w - i) * sizeof(blit_t));
+      bv_reserve(&hi, remw);
+      hi.n = remw;
+      memcpy(hi.b, acc.b + i, remw * sizeof(blit_t));
+      bv_add(b, &hi, &row, BLIT_FALSE, remw, &sum, NULL);
+      memcpy(acc.b + i, sum.b, remw * sizeof(blit_t));
    }
-   *out = acc;
+   bv_copy(out, &acc);
+   bv_free(&acc);
+   bv_free(&row);
+   bv_free(&sum);
+   bv_free(&hi);
 }
 
 // Restoring divider on unsigned values of w bits
@@ -476,14 +587,18 @@ static void bv_udiv(blast_t *b, const bv_t *n, const bv_t *d, unsigned w,
                     bv_t *q, bv_t *r)
 {
    // The remainder register has one more bit than the operands
-   assert(w + 1 <= MAXV);
-   bv_t rem, dd;
+   bv_t rem, dd, diff;
+   bv_init(&rem);
+   bv_init(&dd);
+   bv_init(&diff);
    bv_const(&rem, 0, w + 1);
+   bv_reserve(&dd, w + 1);
    dd.n = w + 1;
    for (unsigned i = 0; i < w; i++)
       dd.b[i] = d->b[i];
    dd.b[w] = BLIT_FALSE;
 
+   bv_reserve(q, w);
    q->n = w;
    for (int i = w - 1; i >= 0; i--) {
       // rem = (rem << 1) | n[i]
@@ -491,16 +606,19 @@ static void bv_udiv(blast_t *b, const bv_t *n, const bv_t *d, unsigned w,
          rem.b[j] = rem.b[j - 1];
       rem.b[0] = n->b[i];
 
-      bv_t diff;
       blit_t ge;
       bv_sub(b, &rem, &dd, w + 1, &diff, &ge);
       q->b[i] = ge;
       bv_mux(b, ge, &diff, &rem, &rem);
    }
 
+   bv_reserve(r, w);
    r->n = w;
    for (unsigned i = 0; i < w; i++)
       r->b[i] = rem.b[i];
+   bv_free(&rem);
+   bv_free(&dd);
+   bv_free(&diff);
 }
 
 // Division and modulo of the mathematical values, truncating towards zero.
@@ -510,22 +628,37 @@ static void bv_divmod(blast_t *b, const bv_t *x, bool xs, const bv_t *y,
 {
    const bool sg = xs || ys;
    const unsigned ww = MAX(x->n, y->n) + (sg ? 1 : 0);
-   bv_t ex = *x, ey = *y;
+   bv_t ex, ey, q, r;
+   bv_init(&ex);
+   bv_init(&ey);
+   bv_init(&q);
+   bv_init(&r);
+   bv_copy(&ex, x);
+   bv_copy(&ey, y);
    bv_resize(&ex, ww, xs);
    bv_resize(&ey, ww, ys);
 
-   bv_t q, r;
    if (!sg) {
       bv_udiv(b, &ex, &ey, ww, &q, &r);
       bv_t *res = want_mod ? &r : &q;
       bv_resize(res, w, false);
-      *out = *res;
+      bv_copy(out, res);
       out->n = w;
+      bv_free(&ex);
+      bv_free(&ey);
+      bv_free(&q);
+      bv_free(&r);
       return;
    }
 
    const blit_t sx = ex.b[ww - 1], sy = ey.b[ww - 1];
-   bv_t nx, ny, ax, ay;
+   bv_t nx, ny, ax, ay, res, nres;
+   bv_init(&nx);
+   bv_init(&ny);
+   bv_init(&ax);
+   bv_init(&ay);
+   bv_init(&res);
+   bv_init(&nres);
    bv_neg(b, &ex, ww, &nx);
    bv_neg(b, &ey, ww, &ny);
    bv_mux(b, sx, &nx, &ex, &ax);
@@ -533,7 +666,6 @@ static void bv_divmod(blast_t *b, const bv_t *x, bool xs, const bv_t *y,
 
    bv_udiv(b, &ax, &ay, ww, &q, &r);
 
-   bv_t res, nres;
    if (want_mod) {
       bv_neg(b, &r, ww, &nres);
       bv_mux(b, sx, &nres, &r, &res);
@@ -544,54 +676,76 @@ static void bv_divmod(blast_t *b, const bv_t *x, bool xs, const bv_t *y,
    }
 
    bv_resize(&res, w, true);
-   *out = res;
+   bv_copy(out, &res);
    out->n = w;
+   bv_free(&nx);
+   bv_free(&ny);
+   bv_free(&ax);
+   bv_free(&ay);
+   bv_free(&res);
+   bv_free(&nres);
+   bv_free(&ex);
+   bv_free(&ey);
+   bv_free(&q);
+   bv_free(&r);
 }
 
-// Barrel shifter on the 64 bit value x: by the count held in the low bits
+// Barrel shifter on the sw-bit value x: by the count held in the low bits
 // of cnt (cnt->n bits, taken as unsigned).  kind: 0 left, 1 logical right,
 // 2 arithmetic right.
 static void bv_shift(blast_t *b, const bv_t *x, const bv_t *cnt, int kind,
                      unsigned w, bv_t *out)
 {
-   assert(x->n == 64);
+   const unsigned sw = x->n;
+   assert(sw >= w && sw > 0);
+   unsigned stages = 0;
+   while ((1u << stages) < sw)
+      stages++;
 
-   bv_t cur = *x;
-   for (unsigned k = 0; k < 6; k++) {
+   bv_t cur, sh;
+   bv_init(&cur);
+   bv_init(&sh);
+   bv_copy(&cur, x);
+   bv_reserve(&sh, sw);
+   sh.n = sw;
+
+   for (unsigned k = 0; k < stages; k++) {
       const blit_t sel = k < cnt->n ? cnt->b[k] : BLIT_FALSE;
       if (sel == BLIT_FALSE)
          continue;
 
       const unsigned by = 1u << k;
-      bv_t sh;
-      sh.n = 64;
-      for (unsigned i = 0; i < 64; i++) {
+      for (unsigned i = 0; i < sw; i++) {
          if (kind == 0)
             sh.b[i] = i >= by ? cur.b[i - by] : BLIT_FALSE;
-         else if (i + by < 64)
+         else if (i + by < sw)
             sh.b[i] = cur.b[i + by];
          else
-            sh.b[i] = kind == 2 ? x->b[63] : BLIT_FALSE;
+            sh.b[i] = kind == 2 ? x->b[sw - 1] : BLIT_FALSE;
       }
-      for (unsigned i = 0; i < 64; i++)
+      for (unsigned i = 0; i < sw; i++)
          cur.b[i] = g_mux(b, sel, sh.b[i], cur.b[i]);
    }
 
-   // A count of 64 or more shifts everything out
+   // A count of (1 << stages) or more shifts everything out
    blit_t big = BLIT_FALSE;
-   for (unsigned k = 6; k < cnt->n; k++)
+   for (unsigned k = stages; k < cnt->n; k++)
       big = blast_or(b, big, cnt->b[k]);
 
-   const blit_t fill = kind == 2 ? x->b[63] : BLIT_FALSE;
+   const blit_t fill = kind == 2 ? x->b[sw - 1] : BLIT_FALSE;
+   bv_reserve(out, w);
    out->n = w;
    for (unsigned i = 0; i < w; i++)
       out->b[i] = g_mux(b, big, fill, cur.b[i]);
+   bv_free(&cur);
+   bv_free(&sh);
 }
 
 // Number of set bits among n literals, as a vector of the width needed
 static void bv_popcount(blast_t *b, const blit_t *x, unsigned n, bv_t *out)
 {
    if (n == 1) {
+      bv_reserve(out, 1);
       out->n = 1;
       out->b[0] = x[0];
       return;
@@ -599,6 +753,8 @@ static void bv_popcount(blast_t *b, const blit_t *x, unsigned n, bv_t *out)
 
    const unsigned h = n / 2;
    bv_t l, r;
+   bv_init(&l);
+   bv_init(&r);
    bv_popcount(b, x, h, &l);
    bv_popcount(b, x + h, n - h, &r);
 
@@ -610,6 +766,8 @@ static void bv_popcount(blast_t *b, const blit_t *x, unsigned n, bv_t *out)
    // The top bit is only needed if it can be set
    while (out->n > 1 && out->b[out->n - 1] == BLIT_FALSE)
       out->n--;
+   bv_free(&l);
+   bv_free(&r);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -655,6 +813,7 @@ static void store(blast_t *b, crv_node_t n, const bv_t *v, blit_t fail)
 static void fetch(blast_t *b, crv_node_t n, unsigned w, bv_t *out)
 {
    const enode_t *e = get_node(b, n);
+   bv_reserve(out, MAX(e->w, w));
    out->n = e->w;
    memcpy(out->b, b->pool + e->off, e->w * sizeof(blit_t));
    bv_resize(out, w, e->sgn);
@@ -686,13 +845,20 @@ static void input_vec(blast_t *b, int v, bv_t *out)
 
       b->invec[v].off = b->npool;
       for (unsigned i = 0; i < w; i++) {
-         if (s->fixed != NULL && s->fixed[v])
-            b->pool[b->npool++] = constant((s->value[v] >> i) & 1);
+         if (s->fixed != NULL && s->fixed[v]) {
+            bool bit = false;
+            if (w <= 64)
+               bit = ((uint64_t)s->value[v] >> i) & 1;
+            else if (s->wvalue != NULL && s->wvalue[v] != NULL)
+               bit = (s->wvalue[v][i / 64] >> (i % 64)) & 1;
+            b->pool[b->npool++] = constant(bit);
+         }
          else
             b->pool[b->npool++] = new_input(b, v, i);
       }
    }
 
+   bv_reserve(out, w);
    out->n = w;
    memcpy(out->b, b->pool + b->invec[v].off, w * sizeof(blit_t));
 }
@@ -776,7 +942,10 @@ static void encode_bin(blast_t *b, crv_node_t n, const node_t *nd)
 {
    const crv_binary_t op = nd->op;
    const unsigned w = nd->width;
-   bv_t out = { .n = w };
+   bv_t out;
+   bv_init(&out);
+   bv_reserve(&out, w);
+   out.n = w;
 
    if (op == CRV_LOG_AND || op == CRV_LOG_OR || op == CRV_IMPLIES) {
       // A failed operand is unknown: unknown or 1 and unknown implies 1
@@ -809,6 +978,7 @@ static void encode_bin(blast_t *b, crv_node_t n, const node_t *nd)
       for (unsigned i = 1; i < w; i++)
          out.b[i] = BLIT_FALSE;
       store(b, n, &out, fail);
+      bv_free(&out);
       return;
    }
 
@@ -827,6 +997,8 @@ static void encode_bin(blast_t *b, crv_node_t n, const node_t *nd)
    case CRV_XOR:
       {
          bv_t x, y;
+         bv_init(&x);
+         bv_init(&y);
          fetch(b, nd->a, w, &x);
          fetch(b, nd->b, w, &y);
          note_sigs(b, &x, &y);
@@ -846,6 +1018,8 @@ static void encode_bin(blast_t *b, crv_node_t n, const node_t *nd)
          }
          if (op == CRV_ADD || op == CRV_SUB)
             note_op(b, n, nd, &x, &y);
+         bv_free(&x);
+         bv_free(&y);
       }
       break;
 
@@ -853,12 +1027,16 @@ static void encode_bin(blast_t *b, crv_node_t n, const node_t *nd)
    case CRV_MOD:
       {
          bv_t x, y;
+         bv_init(&x);
+         bv_init(&y);
          fetch(b, nd->a, an->width, &x);
          fetch(b, nd->b, bn->width, &y);
          note_sigs(b, &x, &y);
          note_op(b, n, nd, &x, &y);
          bv_divmod(b, &x, an->sgn, &y, bn->sgn, op == CRV_MOD, w, &out);
          fail = blast_or(b, fail, lit_not(bv_any(b, y.b, y.n)));
+         bv_free(&x);
+         bv_free(&y);
       }
       break;
 
@@ -867,21 +1045,28 @@ static void encode_bin(blast_t *b, crv_node_t n, const node_t *nd)
    case CRV_ASR:
       {
          bv_t x, cnt;
-         fetch(b, nd->a, 64, &x);
+         bv_init(&x);
+         bv_init(&cnt);
+         const unsigned sw = (w <= 64 && an->width <= 64) ? 64
+            : MAX(w, an->width);
+         fetch(b, nd->a, sw, &x);
 
-         // The value of a node is its representation in 64 bits
+         // The value of a node is its representation in sw bits
          if (op != CRV_SHL && !(op == CRV_ASR && nd->sgn)) {
-            for (unsigned i = w; i < 64; i++)
+            for (unsigned i = w; i < sw; i++)
                x.b[i] = BLIT_FALSE;
          }
 
          // The count is the raw bits of the operand
          const enode_t *be = get_node(b, nd->b);
+         bv_reserve(&cnt, be->w);
          cnt.n = be->w;
          memcpy(cnt.b, b->pool + be->off, be->w * sizeof(blit_t));
 
          bv_shift(b, &x, &cnt, op == CRV_SHL ? 0
                   : op == CRV_ASR && nd->sgn ? 2 : 1, w, &out);
+         bv_free(&x);
+         bv_free(&cnt);
       }
       break;
 
@@ -893,6 +1078,8 @@ static void encode_bin(blast_t *b, crv_node_t n, const node_t *nd)
    case CRV_GE:
       {
          bv_t x, y;
+         bv_init(&x);
+         bv_init(&y);
          fetch(b, nd->a, an->width, &x);
          fetch(b, nd->b, bn->width, &y);
          note_sigs(b, &x, &y);
@@ -912,6 +1099,8 @@ static void encode_bin(blast_t *b, crv_node_t n, const node_t *nd)
          out.b[0] = r;
          for (unsigned i = 1; i < w; i++)
             out.b[i] = BLIT_FALSE;
+         bv_free(&x);
+         bv_free(&y);
       }
       break;
 
@@ -920,6 +1109,7 @@ static void encode_bin(blast_t *b, crv_node_t n, const node_t *nd)
    }
 
    store(b, n, &out, fail);
+   bv_free(&out);
 }
 
 static void encode_un(blast_t *b, crv_node_t n, const node_t *nd)
@@ -929,7 +1119,11 @@ static void encode_un(blast_t *b, crv_node_t n, const node_t *nd)
    const node_t *an = &(b->c->nodes[nd->a]);
    const blit_t fail = fail_of(b, nd->a);
 
-   bv_t x, out = { .n = w };
+   bv_t x, out;
+   bv_init(&x);
+   bv_init(&out);
+   bv_reserve(&out, w);
+   out.n = w;
    switch ((crv_unary_t)nd->op) {
    case CRV_NEG:
       fetch(b, nd->a, w, &x);
@@ -975,6 +1169,8 @@ static void encode_un(blast_t *b, crv_node_t n, const node_t *nd)
    }
 
    store(b, n, &out, fail);
+   bv_free(&x);
+   bv_free(&out);
 }
 
 static void encode_inside(blast_t *b, crv_node_t n, const node_t *nd)
@@ -984,6 +1180,7 @@ static void encode_inside(blast_t *b, crv_node_t n, const node_t *nd)
 
    get_node(b, nd->a);
    bv_t x;
+   bv_init(&x);
    fetch(b, nd->a, an->width, &x);
 
    // The value is related to the bounds that are not constants: a group
@@ -1002,24 +1199,28 @@ static void encode_inside(blast_t *b, crv_node_t n, const node_t *nd)
       get_node(b, it.lo);
       const node_t *ln = &(b->c->nodes[it.lo]);
       bv_t lo;
+      bv_init(&lo);
       fetch(b, it.lo, ln->width, &lo);
       note_sigs(b, &x, &lo);
 
       blit_t ifail = fail_of(b, it.lo), match;
       blit_t eq, lt;
       bv_cmp(b, &x, an->sgn, &lo, ln->sgn, &eq, &lt);
+      bv_free(&lo);
       if (it.hi < 0)
          match = eq;
       else {
          get_node(b, it.hi);
          const node_t *hn = &(b->c->nodes[it.hi]);
          bv_t hi;
+         bv_init(&hi);
          fetch(b, it.hi, hn->width, &hi);
          note_sigs(b, &x, &hi);
          ifail = blast_or(b, ifail, fail_of(b, it.hi));
 
          blit_t heq, hlt;
          bv_cmp(b, &x, an->sgn, &hi, hn->sgn, &heq, &hlt);
+         bv_free(&hi);
          match = blast_and(b, lit_not(lt), blast_or(b, hlt, heq));
       }
 
@@ -1029,12 +1230,17 @@ static void encode_inside(blast_t *b, crv_node_t n, const node_t *nd)
                        blast_and(b, blast_and(b, alive, lit_not(ifail)),
                                  match));
    }
+   bv_free(&x);
 
-   bv_t out = { .n = nd->width };
+   bv_t out;
+   bv_init(&out);
+   bv_reserve(&out, nd->width);
+   out.n = nd->width;
    out.b[0] = found;
    for (unsigned i = 1; i < out.n; i++)
       out.b[i] = BLIT_FALSE;
    store(b, n, &out, failed);
+   bv_free(&out);
 }
 
 static void encode_dist(blast_t *b, crv_node_t n, const node_t *nd)
@@ -1045,6 +1251,7 @@ static void encode_dist(blast_t *b, crv_node_t n, const node_t *nd)
    const node_t *an = &(b->c->nodes[nd->a]);
    get_node(b, nd->a);
    bv_t x;
+   bv_init(&x);
    fetch(b, nd->a, an->width, &x);
 
    blit_t in = BLIT_FALSE;
@@ -1053,30 +1260,38 @@ static void encode_dist(blast_t *b, crv_node_t n, const node_t *nd)
       const blit_t le = bv_le_const(b, &x, an->sgn, cd->mr[i].hi);
       in = blast_or(b, in, blast_and(b, ge, le));
    }
+   bv_free(&x);
 
-   bv_t out = { .n = nd->width };
+   bv_t out;
+   bv_init(&out);
+   bv_reserve(&out, nd->width);
+   out.n = nd->width;
    out.b[0] = in;
    for (unsigned i = 1; i < out.n; i++)
       out.b[i] = BLIT_FALSE;
    store(b, n, &out, fail_of(b, nd->a));
+   bv_free(&out);
 }
 
 static void encode_elem(blast_t *b, crv_node_t n, const node_t *nd)
 {
    const blast_shape_t *s = &(b->shape);
    const unsigned w = nd->width;
-   bv_t out = { .n = w };
+   bv_t out;
+   bv_init(&out);
 
    if (s->ebase[nd->aux] < 0) {
       // The elements are not variables of this problem
       bv_const(&out, 0, w);
       store(b, n, &out, BLIT_TRUE);
+      bv_free(&out);
       return;
    }
 
    const node_t *an = &(b->c->nodes[nd->a]);
    get_node(b, nd->a);
    bv_t idx;
+   bv_init(&idx);
    fetch(b, nd->a, an->width, &idx);
 
    const unsigned size = s->sizes[nd->aux];
@@ -1085,13 +1300,15 @@ static void encode_elem(blast_t *b, crv_node_t n, const node_t *nd)
    for (unsigned k = 0; k < size; k++) {
       // Index equal to k: a negative index never is
       blit_t sel;
-      if (an->sgn ? (k >= ((uint64_t)1 << (an->width - 1)))
+      if (an->sgn ? (an->width <= 64 && k >= ((uint64_t)1 << (an->width - 1)))
           : (an->width < 64 && k >= ((uint64_t)1 << an->width)))
          sel = BLIT_FALSE;
       else {
          bv_t kv;
+         bv_init(&kv);
          bv_const(&kv, k, an->width);
          sel = bv_eq(b, &idx, &kv);
+         bv_free(&kv);
       }
 
       if (sel == BLIT_FALSE)
@@ -1100,13 +1317,17 @@ static void encode_elem(blast_t *b, crv_node_t n, const node_t *nd)
       any = blast_or(b, any, sel);
 
       bv_t ev;
+      bv_init(&ev);
       input_vec(b, s->ebase[nd->aux] + k, &ev);
       bv_resize(&ev, w, s->sgn[s->ebase[nd->aux] + k]);
       for (unsigned i = 0; i < w; i++)
          out.b[i] = blast_or(b, out.b[i], blast_and(b, sel, ev.b[i]));
+      bv_free(&ev);
    }
 
    store(b, n, &out, blast_or(b, fail_of(b, nd->a), lit_not(any)));
+   bv_free(&idx);
+   bv_free(&out);
 }
 
 static void encode_sum(blast_t *b, crv_node_t n, const node_t *nd)
@@ -1114,23 +1335,30 @@ static void encode_sum(blast_t *b, crv_node_t n, const node_t *nd)
    const blast_shape_t *s = &(b->shape);
    const unsigned w = nd->width;
    bv_t acc;
+   bv_init(&acc);
    bv_const(&acc, 0, w);
 
    if (s->ebase[nd->aux] < 0) {
       store(b, n, &acc, BLIT_TRUE);
+      bv_free(&acc);
       return;
    }
 
+   bv_t ev, sum;
+   bv_init(&ev);
+   bv_init(&sum);
    for (unsigned k = 0; k < s->sizes[nd->aux]; k++) {
-      bv_t ev, sum;
       const int v = s->ebase[nd->aux] + k;
       input_vec(b, v, &ev);
       bv_resize(&ev, w, s->sgn[v]);
       bv_add(b, &acc, &ev, BLIT_FALSE, w, &sum, NULL);
-      acc = sum;
+      bv_copy(&acc, &sum);
    }
+   bv_free(&ev);
+   bv_free(&sum);
 
    store(b, n, &acc, BLIT_FALSE);
+   bv_free(&acc);
 }
 
 static const enode_t *get_node(blast_t *b, crv_node_t n)
@@ -1143,11 +1371,15 @@ static const enode_t *get_node(blast_t *b, crv_node_t n)
    const node_t *nd = &(c->nodes[n]);
    const blast_shape_t *s = &(b->shape);
    const unsigned w = nd->width;
-   bv_t out = { .n = w };
+   bv_t out;
+   bv_init(&out);
 
    switch ((nkind_t)nd->kind) {
    case N_CONST:
-      bv_const(&out, (uint64_t)nd->val, w);
+      if (w <= 64)
+         bv_const(&out, (uint64_t)nd->val, w);
+      else
+         bv_const_wide(&out, c->wpool + nd->val, (w + 63) / 64, w);
       store(b, n, &out, BLIT_FALSE);
       break;
    case N_VAR:
@@ -1188,9 +1420,13 @@ static const enode_t *get_node(blast_t *b, crv_node_t n)
          get_node(b, nd->c);
          const blit_t t = truth(b, nd->a);
          bv_t x, y;
+         bv_init(&x);
+         bv_init(&y);
          fetch(b, nd->b, w, &x);
          fetch(b, nd->c, w, &y);
          bv_mux(b, t, &x, &y, &out);
+         bv_free(&x);
+         bv_free(&y);
          const blit_t bf = fail_of(b, nd->b), cf = fail_of(b, nd->c);
          const blit_t fail = blast_or(b, fail_of(b, nd->a),
                                       g_mux(b, t, bf, cf));
@@ -1217,6 +1453,7 @@ static const enode_t *get_node(blast_t *b, crv_node_t n)
       break;
    }
 
+   bv_free(&out);
    return &(b->memo[n]);
 }
 
@@ -1290,15 +1527,19 @@ blit_t blast_unique(blast_t *b, const crv_node_t *nodes, unsigned count)
    for (unsigned i = 0; i < count; i++) {
       const node_t *in = &(b->c->nodes[nodes[i]]);
       bv_t x;
+      bv_init(&x);
       fetch(b, nodes[i], in->width, &x);
       for (unsigned j = i + 1; j < count; j++) {
          const node_t *jn = &(b->c->nodes[nodes[j]]);
          bv_t y;
+         bv_init(&y);
          fetch(b, nodes[j], jn->width, &y);
          blit_t eq, lt;
          bv_cmp(b, &x, in->sgn, &y, jn->sgn, &eq, &lt);
          ok = blast_and(b, ok, lit_not(eq));
+         bv_free(&y);
       }
+      bv_free(&x);
    }
 
    return ok;
@@ -1307,6 +1548,8 @@ blit_t blast_unique(blast_t *b, const crv_node_t *nodes, unsigned count)
 blit_t blast_var_range(blast_t *b, int v, __int128 lo, __int128 hi)
 {
    const unsigned w = b->shape.width[v];
+   if (w > 64)
+      return BLIT_TRUE;
    const bool sgn = b->shape.sgn[v];
    const i128 tlo = sgn ? -((i128)1 << (w - 1)) : 0;
    const i128 thi = sgn ? ((i128)1 << (w - 1)) - 1 : ((i128)1 << w) - 1;
@@ -1316,24 +1559,36 @@ blit_t blast_var_range(blast_t *b, int v, __int128 lo, __int128 hi)
       return BLIT_FALSE;
 
    bv_t x;
+   bv_init(&x);
    input_vec(b, v, &x);
+   blit_t res;
    if (lo == hi) {
       bv_t kv;
+      bv_init(&kv);
       bv_const(&kv, (uint64_t)lo, x.n);
-      return bv_eq(b, &x, &kv);
+      res = bv_eq(b, &x, &kv);
+      bv_free(&kv);
    }
-
-   const blit_t ge = bv_ge_const(b, &x, sgn, lo);
-   const blit_t le = bv_le_const(b, &x, sgn, hi);
-   return blast_and(b, ge, le);
+   else {
+      const blit_t ge = bv_ge_const(b, &x, sgn, lo);
+      const blit_t le = bv_le_const(b, &x, sgn, hi);
+      res = blast_and(b, ge, le);
+   }
+   bv_free(&x);
+   return res;
 }
 
 blit_t blast_var_eq(blast_t *b, int v, uint64_t val)
 {
    bv_t x, kv;
+   bv_init(&x);
+   bv_init(&kv);
    input_vec(b, v, &x);
    bv_const(&kv, val, x.n);
-   return bv_eq(b, &x, &kv);
+   const blit_t r = bv_eq(b, &x, &kv);
+   bv_free(&x);
+   bv_free(&kv);
+   return r;
 }
 
 void blast_set_limit(blast_t *b, unsigned gates)
@@ -2099,7 +2354,10 @@ void blast_dump_smt2(blast_t *b, FILE *f, const crv_node_t *roots,
       smt_node(&S, roots[i]);
 
    // Literals of the circuit for each root
-   blit_t *lits = xmalloc_array(count * (MAXV + 1), sizeof(blit_t));
+   size_t capl = 0;
+   for (unsigned i = 0; i < count; i++)
+      capl += blast_width(b, roots[i]) + 1;
+   blit_t *lits = xmalloc_array(capl ? capl : 1, sizeof(blit_t));
    unsigned nl = 0;
    for (unsigned i = 0; i < count; i++) {
       const unsigned w = blast_width(b, roots[i]);

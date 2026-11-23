@@ -266,6 +266,22 @@ int64_t crv_generated(crv_op_t op, const int64_t *args)
          APUSH(g->entries, e);
          return v;
       }
+   case CRV_OP_VAR_WIDE:
+      {
+         const unsigned width = crv_flags_width(args[4]);
+         const bool is_signed = crv_flags_signed(args[4]);
+         const uint64_t *cur = (const uint64_t *)(intptr_t)args[3];
+         crv_var_t v = crv_var_wide(c, width, is_signed, cur);
+         if (!args[5])
+            crv_var_fix(c, v);
+
+         crv_entry_t e = {
+            .object = args[1], .key = args[2], .id = v, .is_free = !!args[5],
+            .width = width, .is_signed = is_signed
+         };
+         APUSH(g->entries, e);
+         return v;
+      }
    case CRV_OP_VAR_DOMAIN:
    case CRV_OP_VAR_RANDC:
       for (int i = 0; i < g->entries.count; i++) {
@@ -309,6 +325,16 @@ int64_t crv_generated(crv_op_t op, const int64_t *args)
          return crv_const(c, args[3], crv_flags_width(args[4]),
                           crv_flags_signed(args[4]));
       }
+   case CRV_OP_REF_WIDE:
+      {
+         const crv_entry_t *e = crv_gen_find(g, args[1], args[2], false);
+         if (e != NULL)
+            return crv_var_ref(c, e->id);
+
+         return crv_const_wide(c, (const uint64_t *)(intptr_t)args[3],
+                               crv_flags_width(args[4]),
+                               crv_flags_signed(args[4]));
+      }
    case CRV_OP_FIND_ARRAY:
       {
          const crv_entry_t *e = crv_gen_find(g, args[1], args[2], true);
@@ -324,6 +350,10 @@ int64_t crv_generated(crv_op_t op, const int64_t *args)
    case CRV_OP_CONST:
       return crv_const(c, args[1], crv_flags_width(args[2]),
                        crv_flags_signed(args[2]));
+   case CRV_OP_CONST_WIDE:
+      return crv_const_wide(c, (const uint64_t *)(intptr_t)args[1],
+                            crv_flags_width(args[2]),
+                            crv_flags_signed(args[2]));
    case CRV_OP_BINARY:
       return crv_binary(c, args[1], args[2], args[3], crv_flags_width(args[4]),
                         crv_flags_signed(args[4]));
@@ -470,6 +500,9 @@ int64_t crv_generated(crv_op_t op, const int64_t *args)
       }
    case CRV_OP_VALUE:
       return crv_value(c, args[1]);
+   case CRV_OP_VALUE_WIDE:
+      crv_value_wide(c, args[1], (uint64_t *)(intptr_t)args[2]);
+      return 0;
    case CRV_OP_ARRAY_LEN:
       return crv_array_len(c, args[1]);
    case CRV_OP_ARRAY_VALUE:
