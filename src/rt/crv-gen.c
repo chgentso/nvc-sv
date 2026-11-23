@@ -217,6 +217,12 @@ int64_t crv_generated(crv_op_t op, const int64_t *args)
          g->failed = true;
          return 0;
       }
+   case CRV_OP_TRIAL:
+      crv_trial(c, !!args[1]);
+      return 0;
+   case CRV_OP_RANDC_COMMIT:
+      crv_randc_commit(c);
+      return 0;
    case CRV_OP_ONLY_LISTED:
       g->only_listed = true;
       return 0;

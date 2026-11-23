@@ -401,6 +401,7 @@ struct _crv {
    int       nsoft;
    bool      greedy;   // Soft constraints are kept one at a time
    bool      bad;      // The graph names an array that does not exist
+   bool      trial;    // Solves do not consume randc values
 };
 
 // The first n entries are the values, remaining ones first, and the next n
@@ -6598,34 +6599,51 @@ static sres_t solve_once(crv_t *c, const bool *active, sol_t *out)
    return result;
 }
 
+static void randc_consume(const cvar_t *cv)
+{
+   randc_t *rc = (randc_t *)(uintptr_t)*cv->rc;
+   if (rc->n == 0) {
+      randc_insert(rc, randc_key((uint64_t)cv->cur, cv->width));
+      if (cv->width < 64 && rc->nused >= UINT64_C(1) << cv->width)
+         randc_clear(rc);
+      return;
+   }
+
+   const uint32_t x = (uint64_t)cv->cur & wmask(cv->width);
+   uint32_t *pos = rc->vals + rc->n;
+   if (pos[x] >= rc->left)
+      rc->left = rc->n;
+
+   const uint32_t last = rc->left - 1, y = rc->vals[last];
+   rc->vals[pos[x]] = y;
+   pos[y] = pos[x];
+   rc->vals[last] = x;
+   pos[x] = last;
+   rc->left--;
+}
+
+void crv_trial(crv_t *c, bool on)
+{
+   c->trial = on;
+}
+
+void crv_randc_commit(crv_t *c)
+{
+   for (unsigned v = 0; v < c->nvars; v++) {
+      const cvar_t *cv = &c->vars[v];
+      if (cv->rc)
+         randc_consume(cv);
+   }
+}
+
 static void commit(crv_t *c, const sol_t *s)
 {
    for (unsigned v = 0; v < c->nvars; v++) {
       cvar_t *cv = &c->vars[v];
       cv->cur = s->vals[v];
 
-      if (cv->rc) {
-         randc_t *rc = (randc_t *)(uintptr_t)*cv->rc;
-         if (rc->n == 0) {
-            randc_insert(rc, randc_key((uint64_t)cv->cur, cv->width));
-            if (cv->width < 64 && rc->nused >= UINT64_C(1) << cv->width) {
-               randc_clear(rc);
-            }
-            continue;
-         }
-
-         const uint32_t x = (uint64_t)cv->cur & wmask(cv->width);
-         uint32_t *pos = rc->vals + rc->n;
-         if (pos[x] >= rc->left)
-            rc->left = rc->n;
-
-         const uint32_t last = rc->left - 1, y = rc->vals[last];
-         rc->vals[pos[x]] = y;
-         pos[y] = pos[x];
-         rc->vals[last] = x;
-         pos[x] = last;
-         rc->left--;
-      }
+      if (cv->rc && !c->trial)
+         randc_consume(cv);
    }
 
    for (unsigned a = 0; a < c->narrays; a++) {

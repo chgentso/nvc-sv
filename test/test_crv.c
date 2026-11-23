@@ -935,6 +935,63 @@ START_TEST(test_seed_before_begin)
 }
 END_TEST
 
+START_TEST(test_randc_trial)
+{
+   // A trial solve followed by the final one takes one value from the cycle
+   // for the pair, so the cycle stays a permutation
+   uint64_t state = 0;
+   crv_seed(46);
+   for (int cycle = 0; cycle < 4; cycle++) {
+      bool used[16] = { false };
+      for (int i = 0; i < 16; i++) {
+         crv_t *c = crv_new();
+         crv_var_t x = crv_var(c, 4, false, 0);
+         crv_var_randc(c, x, &state);
+         crv_var_t y = crv_var(c, 8, false, 0);
+         crv_require(c, crv_binary(c, CRV_LT, crv_var_ref(c, y),
+                                   crv_const(c, 100, 8, false), 1, false),
+                     false, 1);
+
+         // Trial draws leave the cycle alone and may repeat a value
+         crv_trial(c, true);
+         ck_assert(crv_solve(c));
+         ck_assert(crv_solve(c));
+         ck_assert(crv_solve(c));
+
+         // The final draw is taken
+         ck_assert(crv_solve(c));
+         const int v = crv_value(c, x);
+         crv_randc_commit(c);
+         ck_assert_msg(!used[v], "cycle %d: %d repeated at step %d", cycle, v, i);
+         used[v] = true;
+         crv_free(c);
+      }
+   }
+
+   // Without the commit the trial leaves the cycle where it was
+   uint64_t state2 = 0;
+   for (int i = 0; i < 40; i++) {
+      crv_t *c = crv_new();
+      crv_var_t x = crv_var(c, 4, false, 0);
+      crv_var_randc(c, x, &state2);
+      crv_trial(c, true);
+      ck_assert(crv_solve(c));
+      crv_free(c);
+   }
+   bool used[16] = { false };
+   for (int i = 0; i < 16; i++) {
+      crv_t *c = crv_new();
+      crv_var_t x = crv_var(c, 4, false, 0);
+      crv_var_randc(c, x, &state2);
+      ck_assert(crv_solve(c));
+      const int v = crv_value(c, x);
+      ck_assert(!used[v]);
+      used[v] = true;
+      crv_free(c);
+   }
+}
+END_TEST
+
 START_TEST(test_seed)
 {
    // The same seed gives the same values and push/pop leaves the stream
@@ -3460,6 +3517,7 @@ Suite *get_crv_tests(void)
    tcase_add_test(tc, test_sum_chain);
    tcase_add_test(tc, test_array_unregistered);
    tcase_add_test(tc, test_seed_before_begin);
+   tcase_add_test(tc, test_randc_trial);
    tcase_add_test(tc, test_engine_default);
    tcase_add_loop_test(tc, test_engine_env, 0, 6);
    tcase_add_test(tc, test_engine_unknown);

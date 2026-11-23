@@ -68,6 +68,13 @@ crv_var_t crv_var(crv_t *c, unsigned width, bool is_signed, int64_t current);
 // solver keeps the cycle there and it is never freed.
 void crv_var_randc(crv_t *c, crv_var_t v, uint64_t *state);
 
+// Solves of a solver in trial mode draw randc values without taking them
+// from the cycle, so the same value may be drawn again by the next solve.
+// Once the final solve is done crv_randc_commit takes the values the
+// solver holds, as a solve outside trial mode would have.
+void crv_trial(crv_t *c, bool on);
+void crv_randc_commit(crv_t *c);
+
 // Exclude a value from a variable: used to give an enum only its members
 // by calling crv_var_domain with each of them instead.  A variable with
 // any domain value takes only those.
@@ -232,7 +239,7 @@ typedef enum {
    CRV_OP_FOREACH, CRV_OP_SOLVE_BEFORE, CRV_OP_VALUE, CRV_OP_ARRAY_LEN,
    CRV_OP_ARRAY_VALUE, CRV_OP_TEST_BIT, CRV_OP_SET_BIT, CRV_OP_RANDOM,
    CRV_OP_DISABLE_SOFT, CRV_OP_SEED_BEGIN, CRV_OP_SEED_END, CRV_OP_ARRAY_SUM,
-   CRV_OP_FAIL,
+   CRV_OP_FAIL, CRV_OP_TRIAL, CRV_OP_RANDC_COMMIT,
 } crv_op_t;
 
 int64_t crv_generated(crv_op_t op, const int64_t *args);
