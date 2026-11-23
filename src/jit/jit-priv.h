@@ -493,6 +493,22 @@ void fast_drive_signal(jit_anchor_t *anchor, sig_shared_t *shared,
                        int32_t offset, int32_t count);
 void fast_sched_event(jit_anchor_t *anchor, sig_shared_t *shared,
                       int32_t offset, int32_t count);
+void fast_sched_active(jit_anchor_t *anchor, sig_shared_t *shared,
+                       int32_t offset, int32_t count);
+void fast_clear_event(jit_anchor_t *anchor, sig_shared_t *shared,
+                      int32_t offset, int32_t count);
+void fast_enable_trigger(jit_anchor_t *anchor, rt_trigger_t *trigger);
+void fast_disable_trigger(jit_anchor_t *anchor, rt_trigger_t *trigger);
+void fast_deposit_signal(jit_anchor_t *anchor, sig_shared_t *shared,
+                         int32_t offset, int32_t count, jit_scalar_t value,
+                         bool scalar);
+void fast_sched_deposit(jit_anchor_t *anchor, sig_shared_t *shared,
+                        int32_t offset, int32_t count, jit_scalar_t value,
+                        bool scalar, int64_t after);
+void fast_put_driver(jit_anchor_t *anchor, sig_shared_t *shared,
+                     int32_t offset, int32_t count, jit_scalar_t value,
+                     bool scalar);
+void fast_sched_inactive(jit_anchor_t *anchor);
 void fast_length_fail(jit_anchor_t *anchor, int64_t left, int64_t right,
                       int32_t dim, tree_t where);
 void fast_index_fail(jit_anchor_t *anchor, int64_t value, int64_t left,

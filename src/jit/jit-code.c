@@ -353,6 +353,14 @@ code_cache_t *code_cache_new(void)
    shash_put(s, "nvc.vec4op", &__nvc_vec4op);
    shash_put(s, "nvc.drive_signal", &fast_drive_signal);
    shash_put(s, "nvc.sched_event", &fast_sched_event);
+   shash_put(s, "nvc.sched_active", &fast_sched_active);
+   shash_put(s, "nvc.clear_event", &fast_clear_event);
+   shash_put(s, "nvc.enable_trigger", &fast_enable_trigger);
+   shash_put(s, "nvc.disable_trigger", &fast_disable_trigger);
+   shash_put(s, "nvc.deposit_signal", &fast_deposit_signal);
+   shash_put(s, "nvc.sched_deposit", &fast_sched_deposit);
+   shash_put(s, "nvc.put_driver", &fast_put_driver);
+   shash_put(s, "nvc.sched_inactive", &fast_sched_inactive);
    shash_put(s, "nvc.length_fail", &fast_length_fail);
    shash_put(s, "nvc.index_fail", &fast_index_fail);
    shash_put(s, "memmove", &memmove);

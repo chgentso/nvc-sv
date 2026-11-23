@@ -141,6 +141,14 @@ typedef enum {
    LLVM_VEC4OP,
    LLVM_DRIVE_SIGNAL,
    LLVM_SCHED_EVENT,
+   LLVM_SCHED_ACTIVE,
+   LLVM_CLEAR_EVENT,
+   LLVM_ENABLE_TRIGGER,
+   LLVM_DISABLE_TRIGGER,
+   LLVM_DEPOSIT_SIGNAL,
+   LLVM_SCHED_DEPOSIT,
+   LLVM_PUT_DRIVER,
+   LLVM_SCHED_INACTIVE,
    LLVM_LENGTH_FAIL,
    LLVM_INDEX_FAIL,
 
@@ -922,6 +930,8 @@ static LLVMValueRef llvm_get_fn(llvm_obj_t *obj, llvm_fn_t which)
 
    case LLVM_DRIVE_SIGNAL:
    case LLVM_SCHED_EVENT:
+   case LLVM_SCHED_ACTIVE:
+   case LLVM_CLEAR_EVENT:
       {
          LLVMTypeRef args[] = {
             obj->types[LLVM_PTR],
@@ -932,10 +942,88 @@ static LLVMValueRef llvm_get_fn(llvm_obj_t *obj, llvm_fn_t which)
          obj->fntypes[which] = LLVMFunctionType(obj->types[LLVM_VOID], args,
                                                 ARRAY_LEN(args), false);
 
-         const char *sym = which == LLVM_DRIVE_SIGNAL
-            ? "nvc.drive_signal" : "nvc.sched_event";
+         const char *sym = NULL;
+         switch (which) {
+         case LLVM_DRIVE_SIGNAL: sym = "nvc.drive_signal"; break;
+         case LLVM_SCHED_EVENT:  sym = "nvc.sched_event";  break;
+         case LLVM_SCHED_ACTIVE: sym = "nvc.sched_active"; break;
+         case LLVM_CLEAR_EVENT:  sym = "nvc.clear_event";  break;
+         default: should_not_reach_here();
+         }
 
          fn = llvm_add_fn(obj, sym, obj->fntypes[which]);
+         llvm_add_func_attr(obj, fn, FUNC_ATTR_NOUNWIND, -1);
+      }
+      break;
+
+   case LLVM_ENABLE_TRIGGER:
+   case LLVM_DISABLE_TRIGGER:
+      {
+         LLVMTypeRef args[] = {
+            obj->types[LLVM_PTR],
+            obj->types[LLVM_PTR],
+         };
+         obj->fntypes[which] = LLVMFunctionType(obj->types[LLVM_VOID], args,
+                                                ARRAY_LEN(args), false);
+
+         const char *sym = which == LLVM_ENABLE_TRIGGER
+            ? "nvc.enable_trigger" : "nvc.disable_trigger";
+
+         fn = llvm_add_fn(obj, sym, obj->fntypes[which]);
+         llvm_add_func_attr(obj, fn, FUNC_ATTR_NOUNWIND, -1);
+      }
+      break;
+
+   case LLVM_DEPOSIT_SIGNAL:
+   case LLVM_PUT_DRIVER:
+      {
+         LLVMTypeRef args[] = {
+            obj->types[LLVM_PTR],
+            obj->types[LLVM_PTR],
+            obj->types[LLVM_INT32],
+            obj->types[LLVM_INT32],
+            obj->types[LLVM_INT64],
+            obj->types[LLVM_INT1],
+         };
+         obj->fntypes[which] = LLVMFunctionType(obj->types[LLVM_VOID], args,
+                                                ARRAY_LEN(args), false);
+
+         const char *sym = which == LLVM_DEPOSIT_SIGNAL
+            ? "nvc.deposit_signal" : "nvc.put_driver";
+
+         fn = llvm_add_fn(obj, sym, obj->fntypes[which]);
+         llvm_add_func_attr(obj, fn, FUNC_ATTR_NOUNWIND, -1);
+      }
+      break;
+
+   case LLVM_SCHED_DEPOSIT:
+      {
+         LLVMTypeRef args[] = {
+            obj->types[LLVM_PTR],
+            obj->types[LLVM_PTR],
+            obj->types[LLVM_INT32],
+            obj->types[LLVM_INT32],
+            obj->types[LLVM_INT64],
+            obj->types[LLVM_INT1],
+            obj->types[LLVM_INT64],
+         };
+         obj->fntypes[which] = LLVMFunctionType(obj->types[LLVM_VOID], args,
+                                                ARRAY_LEN(args), false);
+
+         fn = llvm_add_fn(obj, "nvc.sched_deposit", obj->fntypes[which]);
+         llvm_add_func_attr(obj, fn, FUNC_ATTR_NOUNWIND, -1);
+      }
+      break;
+
+   case LLVM_SCHED_INACTIVE:
+      {
+         LLVMTypeRef args[] = {
+            obj->types[LLVM_PTR],
+         };
+         obj->fntypes[which] = LLVMFunctionType(obj->types[LLVM_VOID], args,
+                                                ARRAY_LEN(args), false);
+
+         fn = llvm_add_fn(obj, "nvc.sched_inactive", obj->fntypes[which]);
          llvm_add_func_attr(obj, fn, FUNC_ATTR_NOUNWIND, -1);
       }
       break;
@@ -2213,6 +2301,15 @@ static void cgen_macro_exit(llvm_obj_t *obj, cgen_block_t *cgb, jit_ir_t *ir)
       }
       break;
 
+   case JIT_EXIT_SCHED_INACTIVE:
+      {
+         LLVMValueRef args[] = {
+            PTR(cgb->func->anchor),
+         };
+         llvm_call_fn(obj, LLVM_SCHED_INACTIVE, args, ARRAY_LEN(args));
+      }
+      break;
+
    default:
       {
          LLVMValueRef which = cgen_get_value(obj, cgb, ir->arg1);
@@ -2743,6 +2840,81 @@ static int cgen_fuse_ir(llvm_obj_t *obj, cgen_block_t *cgb, jit_ir_t *ir)
          after,
       };
       llvm_call_fn(obj, LLVM_SCHED_PROCESS, args, ARRAY_LEN(args));
+
+      return nsend;
+   }
+   else if ((exit->arg1.exit == JIT_EXIT_ENABLE_TRIGGER
+             || exit->arg1.exit == JIT_EXIT_DISABLE_TRIGGER)
+            && nsend == 1) {
+      LLVMValueRef trigger = cgen_coerce_value(obj, cgb, ir[0].arg2, LLVM_PTR);
+
+      cgen_sync_irpos(obj, cgb, exit);
+
+      LLVMValueRef args[] = {
+         PTR(cgb->func->anchor),
+         trigger,
+      };
+      const llvm_fn_t fn = exit->arg1.exit == JIT_EXIT_ENABLE_TRIGGER
+         ? LLVM_ENABLE_TRIGGER : LLVM_DISABLE_TRIGGER;
+      llvm_call_fn(obj, fn, args, ARRAY_LEN(args));
+
+      return nsend;
+   }
+   else if ((exit->arg1.exit == JIT_EXIT_SCHED_ACTIVE
+             || exit->arg1.exit == JIT_EXIT_CLEAR_EVENT)
+            && nsend == 3) {
+      LLVMValueRef shared = cgen_coerce_value(obj, cgb, ir[0].arg2, LLVM_PTR);
+      LLVMValueRef offset = cgen_coerce_value(obj, cgb, ir[1].arg2, LLVM_INT32);
+      LLVMValueRef count  = cgen_coerce_value(obj, cgb, ir[2].arg2, LLVM_INT32);
+
+      cgen_sync_irpos(obj, cgb, exit);
+
+      LLVMValueRef args[] = {
+         PTR(cgb->func->anchor),
+         shared, offset, count,
+      };
+      const llvm_fn_t fn = exit->arg1.exit == JIT_EXIT_SCHED_ACTIVE
+         ? LLVM_SCHED_ACTIVE : LLVM_CLEAR_EVENT;
+      llvm_call_fn(obj, fn, args, ARRAY_LEN(args));
+
+      return nsend;
+   }
+   else if ((exit->arg1.exit == JIT_EXIT_DEPOSIT_SIGNAL
+             || exit->arg1.exit == JIT_EXIT_PUT_DRIVER)
+            && nsend == 5) {
+      LLVMValueRef shared = cgen_coerce_value(obj, cgb, ir[0].arg2, LLVM_PTR);
+      LLVMValueRef offset = cgen_coerce_value(obj, cgb, ir[1].arg2, LLVM_INT32);
+      LLVMValueRef count  = cgen_coerce_value(obj, cgb, ir[2].arg2, LLVM_INT32);
+      LLVMValueRef value  = cgen_coerce_value(obj, cgb, ir[3].arg2, LLVM_INT64);
+      LLVMValueRef scalar = cgen_coerce_value(obj, cgb, ir[4].arg2, LLVM_INT1);
+
+      cgen_sync_irpos(obj, cgb, exit);
+
+      LLVMValueRef args[] = {
+         PTR(cgb->func->anchor),
+         shared, offset, count, value, scalar,
+      };
+      const llvm_fn_t fn = exit->arg1.exit == JIT_EXIT_DEPOSIT_SIGNAL
+         ? LLVM_DEPOSIT_SIGNAL : LLVM_PUT_DRIVER;
+      llvm_call_fn(obj, fn, args, ARRAY_LEN(args));
+
+      return nsend;
+   }
+   else if (exit->arg1.exit == JIT_EXIT_SCHED_DEPOSIT && nsend == 6) {
+      LLVMValueRef shared = cgen_coerce_value(obj, cgb, ir[0].arg2, LLVM_PTR);
+      LLVMValueRef offset = cgen_coerce_value(obj, cgb, ir[1].arg2, LLVM_INT32);
+      LLVMValueRef count  = cgen_coerce_value(obj, cgb, ir[2].arg2, LLVM_INT32);
+      LLVMValueRef value  = cgen_coerce_value(obj, cgb, ir[3].arg2, LLVM_INT64);
+      LLVMValueRef scalar = cgen_coerce_value(obj, cgb, ir[4].arg2, LLVM_INT1);
+      LLVMValueRef after  = cgen_coerce_value(obj, cgb, ir[5].arg2, LLVM_INT64);
+
+      cgen_sync_irpos(obj, cgb, exit);
+
+      LLVMValueRef args[] = {
+         PTR(cgb->func->anchor),
+         shared, offset, count, value, scalar, after,
+      };
+      llvm_call_fn(obj, LLVM_SCHED_DEPOSIT, args, ARRAY_LEN(args));
 
       return nsend;
    }

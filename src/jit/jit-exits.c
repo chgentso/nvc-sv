@@ -422,6 +422,105 @@ void fast_sched_event(jit_anchor_t *anchor, sig_shared_t *shared,
    thread->anchor = NULL;
 }
 
+void fast_sched_active(jit_anchor_t *anchor, sig_shared_t *shared,
+                       int32_t offset, int32_t count)
+{
+   jit_thread_local_t *thread = jit_attach_thread(anchor);
+
+   x_sched_active(shared, offset, count);
+
+   thread->anchor = NULL;
+}
+
+void fast_clear_event(jit_anchor_t *anchor, sig_shared_t *shared,
+                      int32_t offset, int32_t count)
+{
+   jit_thread_local_t *thread = jit_attach_thread(anchor);
+
+   x_clear_event(shared, offset, count);
+
+   thread->anchor = NULL;
+}
+
+void fast_enable_trigger(jit_anchor_t *anchor, rt_trigger_t *trigger)
+{
+   jit_thread_local_t *thread = jit_attach_thread(anchor);
+
+   x_enable_trigger(trigger);
+
+   thread->anchor = NULL;
+}
+
+void fast_disable_trigger(jit_anchor_t *anchor, rt_trigger_t *trigger)
+{
+   jit_thread_local_t *thread = jit_attach_thread(anchor);
+
+   x_disable_trigger(trigger);
+
+   thread->anchor = NULL;
+}
+
+void fast_deposit_signal(jit_anchor_t *anchor, sig_shared_t *shared,
+                         int32_t offset, int32_t count, jit_scalar_t value,
+                         bool scalar)
+{
+   jit_thread_local_t *thread = jit_attach_thread(anchor);
+
+   if (scalar)
+      x_deposit_signal(shared, offset, count, &value.integer);
+   else
+      x_deposit_signal(shared, offset, count, value.pointer);
+
+   thread->anchor = NULL;
+}
+
+void fast_sched_deposit(jit_anchor_t *anchor, sig_shared_t *shared,
+                        int32_t offset, int32_t count, jit_scalar_t value,
+                        bool scalar, int64_t after)
+{
+   jit_thread_local_t *thread = jit_attach_thread(anchor);
+
+   if (scalar)
+      x_sched_deposit(shared, offset, count, &value.integer, after);
+   else
+      x_sched_deposit(shared, offset, count, value.pointer, after);
+
+   thread->anchor = NULL;
+}
+
+void fast_put_driver(jit_anchor_t *anchor, sig_shared_t *shared,
+                     int32_t offset, int32_t count, jit_scalar_t value,
+                     bool scalar)
+{
+   jit_thread_local_t *thread = jit_attach_thread(anchor);
+
+   if (scalar)
+      x_put_driver(shared, offset, count, &value.integer);
+   else
+      x_put_driver(shared, offset, count, value.pointer);
+
+   thread->anchor = NULL;
+}
+
+void fast_sched_inactive(jit_anchor_t *anchor)
+{
+   jit_thread_local_t *thread = jit_attach_thread(anchor);
+
+   x_sched_inactive();
+
+   thread->anchor = NULL;
+}
+
+__attribute__((cold, noinline))
+static void exit_instance_name(jit_scalar_t *args, tlab_t *tlab)
+{
+   const attr_kind_t kind = args[0].integer;
+
+   LOCAL_TEXT_BUF tb = tb_new();
+   x_instance_name(kind, tb);
+   ffi_return_string(tb_get(tb), args, tlab);
+}
+
 void fast_length_fail(jit_anchor_t *anchor, int64_t left, int64_t right,
                       int32_t dim, tree_t where)
 {
@@ -553,11 +652,10 @@ void __nvc_do_exit(jit_exit_t which, jit_anchor_t *anchor, jit_scalar_t *args,
       {
          sig_shared_t *dst_ss     = args[0].pointer;
          uint32_t      dst_offset = args[1].integer;
-         jit_scalar_t  initval    = { .integer = args[2].integer };
          uint32_t      dst_count  = args[3].integer;
          bool          scalar     = args[4].integer;
 
-         const void *vptr = scalar ? &initval.integer : initval.pointer;
+         const void *vptr = scalar ? &args[2].integer : args[2].pointer;
 
          x_map_const(dst_ss, dst_offset, vptr, dst_count);
       }
@@ -716,13 +814,12 @@ void __nvc_do_exit(jit_exit_t which, jit_anchor_t *anchor, jit_scalar_t *args,
          sig_shared_t *shared = args[0].pointer;
          int32_t       offset = args[1].integer;
          int32_t       count  = args[2].integer;
-         jit_scalar_t  value  = { .integer = args[3].integer };
          bool          scalar = args[4].integer;
 
          if (scalar)
-            x_force(shared, offset, count, &value.integer);
+            x_force(shared, offset, count, &args[3].integer);
          else
-            x_force(shared, offset, count, value.pointer);
+            x_force(shared, offset, count, args[3].pointer);
       }
       break;
 
@@ -741,13 +838,12 @@ void __nvc_do_exit(jit_exit_t which, jit_anchor_t *anchor, jit_scalar_t *args,
          sig_shared_t *shared = args[0].pointer;
          int32_t       offset = args[1].integer;
          int32_t       count  = args[2].integer;
-         jit_scalar_t  value  = { .integer = args[3].integer };
          bool          scalar = args[4].integer;
 
          if (scalar)
-            x_deposit_signal(shared, offset, count, &value.integer);
+            x_deposit_signal(shared, offset, count, &args[3].integer);
          else
-            x_deposit_signal(shared, offset, count, value.pointer);
+            x_deposit_signal(shared, offset, count, args[3].pointer);
       }
       break;
 
@@ -756,14 +852,13 @@ void __nvc_do_exit(jit_exit_t which, jit_anchor_t *anchor, jit_scalar_t *args,
          sig_shared_t *shared = args[0].pointer;
          int32_t       offset = args[1].integer;
          int32_t       count  = args[2].integer;
-         jit_scalar_t  value  = { .integer = args[3].integer };
          bool          scalar = args[4].integer;
          int64_t       after  = args[5].integer;
 
          if (scalar)
-            x_sched_deposit(shared, offset, count, &value.integer, after);
+            x_sched_deposit(shared, offset, count, &args[3].integer, after);
          else
-            x_sched_deposit(shared, offset, count, value.pointer, after);
+            x_sched_deposit(shared, offset, count, args[3].pointer, after);
       }
       break;
 
@@ -772,13 +867,12 @@ void __nvc_do_exit(jit_exit_t which, jit_anchor_t *anchor, jit_scalar_t *args,
          sig_shared_t *shared = args[0].pointer;
          int32_t       offset = args[1].integer;
          int32_t       count  = args[2].integer;
-         jit_scalar_t  value  = { .integer = args[3].integer };
          bool          scalar = args[4].integer;
 
          if (scalar)
-            x_put_driver(shared, offset, count, &value.integer);
+            x_put_driver(shared, offset, count, &args[3].integer);
          else
-            x_put_driver(shared, offset, count, value.pointer);
+            x_put_driver(shared, offset, count, args[3].pointer);
       }
       break;
 
@@ -870,16 +964,15 @@ void __nvc_do_exit(jit_exit_t which, jit_anchor_t *anchor, jit_scalar_t *args,
 
    case JIT_EXIT_FILE_WRITE:
       {
-         void         **_fp    = args[0].pointer;
-         jit_scalar_t   data   = { .integer = args[1].integer };
-         size_t         size   = args[2].integer;
-         size_t         count  = args[3].integer;
-         bool           scalar = args[4].integer;
+         void   **_fp    = args[0].pointer;
+         size_t   size   = args[2].integer;
+         size_t   count  = args[3].integer;
+         bool     scalar = args[4].integer;
 
          if (scalar)
-            x_file_write(_fp, &data.integer, size, count);
+            x_file_write(_fp, &args[1].integer, size, count);
          else
-            x_file_write(_fp, data.pointer, size, count);
+            x_file_write(_fp, args[1].pointer, size, count);
       }
       break;
 
@@ -1065,13 +1158,7 @@ void __nvc_do_exit(jit_exit_t which, jit_anchor_t *anchor, jit_scalar_t *args,
       break;
 
    case JIT_EXIT_INSTANCE_NAME:
-      {
-         const attr_kind_t kind = args[0].integer;
-
-         LOCAL_TEXT_BUF tb = tb_new();
-         x_instance_name(kind, tb);
-         ffi_return_string(tb_get(tb), args, tlab);
-      }
+      exit_instance_name(args, tlab);
       break;
 
    case JIT_EXIT_BIND_EXTERNAL:
