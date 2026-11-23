@@ -3168,3 +3168,4 @@ svproc2 verilog
 svstdwide1 verilog
 svcrvwidedyn1 verilog
 svcheckcrv1 shell,verilog
+svcrvrandcstaged1 verilog

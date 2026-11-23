@@ -30222,6 +30222,11 @@ static mir_value_t vlog_lower_randomize(vlog_gen_t *g, vlog_node_t v)
       mir_value_t ctx1 = CRV0(g, CRV_OP_BEGIN);
       g->crv_ctx = ctx1;
 
+      // The first stage only decides the arguments of the calls: its randc
+      // draws must not take values from the cycles (18.4.2), the final
+      // solve takes them once
+      CRV2(g, CRV_OP_TRIAL, ctx1, vlog_crv_int(g, 1));
+
       vlog_crv_list_args(g, v, ctx1, obj);
       vlog_crv_call_phase(g, class, obj, ctx1, CRV_PHASE_BUILD1);
       vlog_crv_inline_items(g, v, obj);
