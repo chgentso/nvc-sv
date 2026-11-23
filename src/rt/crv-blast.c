@@ -55,6 +55,7 @@ struct _blast {
    unsigned *in_gate;         // Gate of each input
    int      *in_var;
    uint8_t  *in_bit;
+   uint8_t  *in_sig;          // Place in the first operand that has the bit
    unsigned  nin, cin;
 
    enode_t  *memo;
@@ -217,12 +218,14 @@ static blit_t new_input(blast_t *b, int var, unsigned bit)
       b->in_gate = xrealloc_array(b->in_gate, b->cin, sizeof(unsigned));
       b->in_var = xrealloc_array(b->in_var, b->cin, sizeof(int));
       b->in_bit = xrealloc_array(b->in_bit, b->cin, sizeof(uint8_t));
+      b->in_sig = xrealloc_array(b->in_sig, b->cin, sizeof(uint8_t));
    }
 
    const unsigned g = new_gate(b, INPUT, b->nin);
    b->in_gate[b->nin] = g;
    b->in_var[b->nin] = var;
    b->in_bit[b->nin] = bit;
+   b->in_sig[b->nin] = 255;
    b->nin++;
    return g << 1;
 }
@@ -695,6 +698,17 @@ static void input_vec(blast_t *b, int v, bv_t *out)
    memcpy(out->b, b->pool + b->invec[v].off, w * sizeof(blit_t));
 }
 
+// Record where the inputs that are bits of an operand are in it: bits of
+// two operands at the same place meet in the gates of the operation
+static void note_sig(blast_t *b, const bv_t *x)
+{
+   for (unsigned k = 0; k < x->n; k++) {
+      const unsigned g = x->b[k] >> 1;
+      if (g != 0 && b->l0[g] == INPUT && b->in_sig[b->l1[g]] == 255)
+         b->in_sig[b->l1[g]] = MIN(k, 254);
+   }
+}
+
 // Inputs that some bit of a vector depends on: a sign extension counts as
 // the one bit it repeats
 static unsigned bv_support(const blast_t *b, const bv_t *x)
@@ -806,6 +820,8 @@ static void encode_bin(blast_t *b, crv_node_t n, const node_t *nd)
          bv_t x, y;
          fetch(b, nd->a, w, &x);
          fetch(b, nd->b, w, &y);
+         note_sig(b, &x);
+         note_sig(b, &y);
          if (op == CRV_ADD)
             bv_add(b, &x, &y, BLIT_FALSE, w, &out, NULL);
          else if (op == CRV_SUB)
@@ -831,6 +847,8 @@ static void encode_bin(blast_t *b, crv_node_t n, const node_t *nd)
          bv_t x, y;
          fetch(b, nd->a, an->width, &x);
          fetch(b, nd->b, bn->width, &y);
+         note_sig(b, &x);
+         note_sig(b, &y);
          note_op(b, n, nd, &x, &y);
          bv_divmod(b, &x, an->sgn, &y, bn->sgn, op == CRV_MOD, w, &out);
          fail = blast_or(b, fail, lit_not(bv_any(b, y.b, y.n)));
@@ -870,6 +888,8 @@ static void encode_bin(blast_t *b, crv_node_t n, const node_t *nd)
          bv_t x, y;
          fetch(b, nd->a, an->width, &x);
          fetch(b, nd->b, bn->width, &y);
+         note_sig(b, &x);
+         note_sig(b, &y);
          note_op(b, n, nd, &x, &y);
 
          blit_t eq, lt;
@@ -959,6 +979,15 @@ static void encode_inside(blast_t *b, crv_node_t n, const node_t *nd)
    get_node(b, nd->a);
    bv_t x;
    fetch(b, nd->a, an->width, &x);
+   note_sig(b, &x);
+
+   // The value is related to the bounds that are not constants: a group
+   // of variables for the order of the stages after the blaster
+   if (b->nops == b->cops) {
+      b->cops = b->cops ? b->cops * 2 : 64;
+      b->ops = xrealloc_array(b->ops, b->cops, sizeof(blast_op_t));
+   }
+   b->ops[b->nops++] = (blast_op_t){ n, BLAST_OP_INSIDE, 1, 1 };
 
    // The items are looked at in order and the search stops at a match, so
    // an undefined item only counts if nothing before it matched
@@ -969,6 +998,7 @@ static void encode_inside(blast_t *b, crv_node_t n, const node_t *nd)
       const node_t *ln = &(b->c->nodes[it.lo]);
       bv_t lo;
       fetch(b, it.lo, ln->width, &lo);
+      note_sig(b, &lo);
 
       blit_t ifail = fail_of(b, it.lo), match;
       blit_t eq, lt;
@@ -980,6 +1010,7 @@ static void encode_inside(blast_t *b, crv_node_t n, const node_t *nd)
          const node_t *hn = &(b->c->nodes[it.hi]);
          bv_t hi;
          fetch(b, it.hi, hn->width, &hi);
+         note_sig(b, &hi);
          ifail = blast_or(b, ifail, fail_of(b, it.hi));
 
          blit_t heq, hlt;
@@ -1212,6 +1243,7 @@ void blast_free(blast_t *b)
    free(b->in_gate);
    free(b->in_var);
    free(b->in_bit);
+   free(b->in_sig);
    free(b->memo);
    free(b->pool);
    free(b->invec);
@@ -1293,6 +1325,12 @@ void blast_gate_fanins(const blast_t *b, unsigned g, blit_t *l0, blit_t *l1)
    assert(g > 0 && g < b->ng && b->l0[g] != INPUT);
    *l0 = b->l0[g];
    *l1 = b->l1[g];
+}
+
+unsigned blast_input_sig(const blast_t *b, unsigned i)
+{
+   assert(i < b->nin);
+   return b->in_sig[i];
 }
 
 unsigned blast_input_gate(const blast_t *b, unsigned i)

@@ -27,7 +27,7 @@ cmp base.txt stats2.txt
 grep -q 'call sites\|calls per call site' table.txt
 grep -q 'crvstats1.sv:26' table.txt
 test $(wc -l < stats.tsv) -eq 1
-awk -F'\t' '$1 ~ /crvstats1.sv:26/ && $2 == 30 && $6 == 30 && NF == 40 { ok = 1 }
+awk -F'\t' '$1 ~ /crvstats1.sv:26/ && $2 == 30 && $6 == 30 && NF == 41 { ok = 1 }
             END { exit !ok }' stats.tsv
 
 # Splitting variables at slice boundaries is only done by the legacy engine,

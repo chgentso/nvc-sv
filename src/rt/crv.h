@@ -210,6 +210,7 @@ typedef enum {
    CRV_BDD_SIZE,        // The size of an array with many possible values
    CRV_BDD_UNIQUE,      // A unique set of more than 8 members
    CRV_BDD_NONLINEAR,   // A product or quotient of two wide variables
+   CRV_BDD_ADDERS,      // A sum of more than 6 terms
    CRV_BDD_GATES,       // A circuit of more than 20000 gates
    CRV_BDD_BUDGET,      // The node limit was reached
    CRV_BDD_CHECK,       // The sample failed the check (a bug if it happens)

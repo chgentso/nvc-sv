@@ -8,9 +8,9 @@ cat out.txt
 grep -q 'crvbdd1 done' out.txt
 test $(wc -l < stats.tsv) -eq 4
 # columns 9 and 10 are failures and give-ups, 13 and 14 the components
-# answered by bdd and by dfs, 38 to 40 (bdd) declines are all zero
+# answered by bdd and by dfs, 28 to 38 (bdd) declines are all zero
 awk -F'\t' '$9 == 0 && $10 == 0 && $13 >= $2 && $14 == 0 { n++ } END { exit n != 4 }' stats.tsv
-awk -F'\t' '{ for (i = 28; i <= 37; i++) if ($i != 0) bad = 1 } END { exit bad }' stats.tsv
+awk -F'\t' '{ for (i = 28; i <= 38; i++) if ($i != 0) bad = 1 } END { exit bad }' stats.tsv
 
 # In auto the search is never needed: the components are answered by the
 # rejection or the bdd stage (columns 12 and 13)

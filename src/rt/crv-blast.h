@@ -66,9 +66,11 @@ typedef struct {
 
 // An arithmetic or comparison node whose operands have variable bits: the
 // variables of its operands are related by it
+#define BLAST_OP_INSIDE 255      // op of an inside: not a crv_binary_t
+
 typedef struct {
    crv_node_t node;
-   uint8_t    op;               // crv_binary_t
+   uint8_t    op;               // crv_binary_t or BLAST_OP_INSIDE
    uint8_t    wa, wb;           // Bits of each operand that are not constant
 } blast_op_t;
 
@@ -101,6 +103,11 @@ unsigned blast_gate_count(const blast_t *b);
 int blast_gate_input(const blast_t *b, unsigned g);    // Input index or -1
 void blast_gate_fanins(const blast_t *b, unsigned g, blit_t *l0, blit_t *l1);
 unsigned blast_input_gate(const blast_t *b, unsigned i);
+
+// Place of an input in the first operand of an operation that it is a bit
+// of, 255 if there is none: bits of two operands with the same place are
+// the ones an adder or a comparator meets
+unsigned blast_input_sig(const blast_t *b, unsigned i);
 
 // Inputs
 unsigned blast_input_count(const blast_t *b);

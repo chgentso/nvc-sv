@@ -218,7 +218,7 @@ const char *crv_bdd_reason_name(crv_bdd_reason_t reason)
 {
    static const char *const names[CRV_BDD_REASONS] = {
       "randc", "guarded-dist", "dists", "bits", "size", "unique",
-      "nonlinear", "gates", "budget", "check"
+      "nonlinear", "adders", "gates", "budget", "check"
    };
    return names[reason];
 }

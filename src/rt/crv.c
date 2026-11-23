@@ -6419,6 +6419,7 @@ static rj_res_t reject_comp(prob_t *P, int comp)
 #define BDD_MAX_UNIQUE 8
 #define BDD_MAX_GATES  20000
 #define BDD_MAX_NONLIN 8
+#define BDD_MAX_ADDERS 5
 #define BDD_FORCED     100
 
 typedef enum {
@@ -6447,6 +6448,8 @@ typedef struct {
 } bd_t;
 
 typedef struct {
+   unsigned group;           // Where the walk reaches the group of variables
+   unsigned sig;             // Place of the bit in the operands that have it
    unsigned rank;            // Where the walk of the circuit reaches the bit
    int      var;             // Index in fv
    unsigned bit;
@@ -6455,11 +6458,22 @@ typedef struct {
 static int bd_ord_cmp(const void *a, const void *b)
 {
    const bd_ord_t *x = a, *y = b;
-   if (x->rank != y->rank)
+   if (x->group != y->group)
+      return x->group < y->group ? -1 : 1;
+   else if (x->sig != y->sig)
+      return x->sig < y->sig ? -1 : 1;
+   else if (x->rank != y->rank)
       return x->rank < y->rank ? -1 : 1;
    else if (x->var != y->var)
       return x->var < y->var ? -1 : 1;
    return x->bit < y->bit ? -1 : x->bit > y->bit;
+}
+
+static unsigned bd_find(unsigned *uf, unsigned x)
+{
+   while (uf[x] != x)
+      x = uf[x] = uf[uf[x]];
+   return x;
 }
 
 static int bd_uint_cmp(const void *a, const void *b)
@@ -6624,7 +6638,8 @@ static bd_res_t bd_build(bd_t *D, bool flat)
 
    bd_res_t res = BD_SAT;
    blit_t *outs = NULL;
-   unsigned *order = NULL, *rank = NULL;
+   unsigned *order = NULL, *rank = NULL, *sigs = NULL, *uf = NULL, *gmin = NULL;
+   uint8_t *mask = NULL;
    bool *needed = NULL;
    bnode_t *node = NULL;
    int *lvl = NULL;
@@ -6642,6 +6657,18 @@ static bd_res_t bd_build(bd_t *D, bool flat)
       goto out;
    }
 
+   // The BDD of a long sum of variables has a node for each partial total:
+   // too many for the limit, and a build that ends in the limit is slow
+   unsigned nops, nadd = 0;
+   const blast_op_t *ops = blast_ops(b, &nops);
+   for (unsigned i = 0; i < nops; i++)
+      nadd += ops[i].op == CRV_ADD || ops[i].op == CRV_SUB;
+   if (nadd > BDD_MAX_ADDERS) {
+      D->why = CRV_BDD_ADDERS;
+      res = BD_DECLINE;
+      goto out;
+   }
+
    const int nouts = nhard;
    outs = NEW(blit_t, nouts + 1);
    memcpy(outs, hard, nhard * sizeof(blit_t));
@@ -6654,8 +6681,11 @@ static bd_res_t bd_build(bd_t *D, bool flat)
    const unsigned nin = blast_input_count(b);
    order = NEW(unsigned, nin + 1);
    rank = NEW(unsigned, D->nbits + 1);
-   for (unsigned i = 0; i < D->nbits; i++)
+   sigs = NEW(unsigned, D->nbits + 1);
+   for (unsigned i = 0; i < D->nbits; i++) {
       rank[i] = UINT_MAX;
+      sigs[i] = 255;
+   }
    D->boff = NEW(unsigned, nfv + 1);
    D->bitpos = NEW(unsigned, D->nbits + 1);
    unsigned off = 0;
@@ -6668,8 +6698,43 @@ static bd_res_t bd_build(bd_t *D, bool flat)
       int var;
       unsigned bit;
       blast_input_var(b, order[j], &var, &bit);
-      if (D->loc[var] >= 0 && bit < P->vars[var].width)
+      if (D->loc[var] >= 0 && bit < P->vars[var].width) {
          rank[D->boff[D->loc[var]] + bit] = j;
+         sigs[D->boff[D->loc[var]] + bit] = blast_input_sig(b, order[j]);
+      }
+   }
+
+   // Variables that meet in an operation make a group
+   uf = NEW(unsigned, nfv + 1);
+   for (int i = 0; i < nfv; i++)
+      uf[i] = i;
+
+   mask = xcalloc(P->nv ? P->nv : 1);
+   rjv_t V = { P, mask };
+   for (unsigned i = 0; i < nops; i++) {
+      visit(c, ops[i].node, rj_vars_cb, &V);
+      int first = -1;
+      for (int k = 0; k < nfv; k++) {
+         if (!mask[D->fv[k]])
+            continue;
+         mask[D->fv[k]] = 0;
+         if (first < 0)
+            first = k;
+         else
+            uf[bd_find(uf, k)] = bd_find(uf, first);
+      }
+   }
+
+   // The place of a group is that of its first bit
+   gmin = NEW(unsigned, nfv + 1);
+   for (int i = 0; i < nfv; i++)
+      gmin[i] = UINT_MAX;
+   for (int i = 0; i < nfv; i++) {
+      const unsigned r = bd_find(uf, i);
+      for (unsigned k = 0; k < P->vars[D->fv[i]].width; k++) {
+         if (rank[D->boff[i] + k] < gmin[r])
+            gmin[r] = rank[D->boff[i] + k];
+      }
    }
 
    // The order: every bit by where the circuit reaches it
@@ -6678,7 +6743,9 @@ static bd_res_t bd_build(bd_t *D, bool flat)
       unsigned n = 0;
       for (int i = 0; i < nfv; i++) {
          for (unsigned k = 0; k < P->vars[D->fv[i]].width; k++)
-            all[n++] = (bd_ord_t){ rank[D->boff[i] + k], i, k };
+            all[n++] = (bd_ord_t){ gmin[bd_find(uf, i)] ,
+                                   sigs[D->boff[i] + k],
+                                   rank[D->boff[i] + k], i, k };
       }
       qsort(all, n, sizeof(bd_ord_t), bd_ord_cmp);
       for (unsigned i = 0; i < n; i++)
@@ -6815,6 +6882,10 @@ static bd_res_t bd_build(bd_t *D, bool flat)
    free(outs);
    free(order);
    free(rank);
+   free(sigs);
+   free(uf);
+   free(gmin);
+   free(mask);
    free(needed);
    free(node);
    free(ords);
