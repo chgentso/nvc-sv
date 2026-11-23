@@ -3087,6 +3087,9 @@ vlog_genshare10  verilog
 vlog_genshare11  verilog
 vlog_genshare6  verilog,gold
 vlog_genshare_modes shell
+vlog_genshare_modes2 shell
+vlog_genshare_modes3 shell
+vlog_genshare_stats1 shell
 vlog_genshare12 verilog
 vpi27           verilog,vpi,gold
 vlog_genshare13 verilog
