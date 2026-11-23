@@ -35,7 +35,7 @@ typedef struct { i128 lo, hi; } range_t;
 
 typedef enum {
    N_CONST, N_VAR, N_BIN, N_UN, N_CAST, N_COND, N_ASIZE, N_AELEM, N_ASUM,
-   N_INSIDE, N_DIST, N_INDEX, N_FAIL,
+   N_AREDUCE, N_INSIDE, N_DIST, N_INDEX, N_FAIL,
 } nkind_t;
 
 typedef struct {

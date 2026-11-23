@@ -585,6 +585,19 @@ crv_node_t crv_array_sum(crv_t *c, crv_array_t a, unsigned width,
    return add_node(c, n);
 }
 
+crv_node_t crv_array_reduce(crv_t *c, crv_binary_t op, crv_array_t a,
+                            crv_node_t index, crv_node_t body,
+                            unsigned width, bool is_signed)
+{
+   if (!array_valid(c, a))
+      return crv_const(c, 0, width, is_signed);
+
+   node_t n = { .kind = N_AREDUCE, .op = op, .width = clampw(width),
+                .sgn = is_signed, .a = index, .b = body, .aux = a,
+                .inst = true };
+   return add_node(c, n);
+}
+
 crv_set_t crv_set_new(crv_t *c)
 {
    cset_t s = { 0 };
@@ -1575,6 +1588,9 @@ static void visit(const crv_t *c, int n, visit_fn fn, void *ctx)
    case N_DIST:
       visit(c, nd->a, fn, ctx);
       break;
+   case N_AREDUCE:
+      visit(c, nd->b, fn, ctx);
+      break;
    case N_COND:
       visit(c, nd->a, fn, ctx);
       visit(c, nd->b, fn, ctx);
@@ -1610,7 +1626,8 @@ static void collect_vars_cb(void *ctx, const node_t *nd, int n)
    mention_t *m = ctx;
    if (nd->kind == N_VAR && nd->aux >= 0 && (unsigned)nd->aux < m->count)
       m->vars[nd->aux] = true;
-   else if ((nd->kind == N_AELEM || nd->kind == N_ASIZE || nd->kind == N_ASUM)
+   else if ((nd->kind == N_AELEM || nd->kind == N_ASIZE || nd->kind == N_ASUM
+             || nd->kind == N_AREDUCE)
             && nd->aux >= 0 && (unsigned)nd->aux < m->acount)
       m->arrs[nd->aux] = true;
 }
@@ -1622,7 +1639,8 @@ static void mention_vars_cb(void *ctx, const node_t *nd, int n)
    if (nd->kind == N_VAR && nd->aux >= 0 && (unsigned)nd->aux < m->count
        && m->vars[nd->aux])
       m->found = true;
-   else if ((nd->kind == N_AELEM || nd->kind == N_ASIZE || nd->kind == N_ASUM)
+   else if ((nd->kind == N_AELEM || nd->kind == N_ASIZE || nd->kind == N_ASUM
+             || nd->kind == N_AREDUCE)
             && nd->aux >= 0 && (unsigned)nd->aux < m->acount
             && m->arrs[nd->aux])
       m->found = true;
@@ -1754,6 +1772,69 @@ static int inst(ictx_t *I, int n)
          return add_node(c, nd);
       }
 
+   case N_AREDUCE:
+      {
+         const unsigned sz = I->sizes[nd.aux];
+         if (sz == 0)
+            return mk_const(c, 0, nd.width, nd.sgn);
+         if (I->nb >= MAX_BIND) {
+            I->toobig = true;
+            return mk_fail(c);
+         }
+
+         const int idx_id = c->nodes[nd.a].aux;
+         const int slot = I->nb++;
+         I->bidx[slot] = idx_id;
+
+         int *terms = xmalloc_array(sz, sizeof(int));
+         for (unsigned k = 0; k < sz; k++) {
+            I->bval[slot] = k;
+            int t = inst(I, nd.b);
+            if (I->toobig) {
+               I->nb--;
+               free(terms);
+               return mk_fail(c);
+            }
+            const node_t *tn = &c->nodes[t];
+            if (tn->width != nd.width || tn->sgn != nd.sgn) {
+               if (tn->kind == N_CONST)
+                  t = mk_const(c, mathv(tn->val, tn->sgn), nd.width, nd.sgn);
+               else
+                  t = crv_cast(c, t, nd.width, nd.sgn);
+            }
+            terms[k] = t;
+         }
+         I->nb--;
+
+         // Balanced tree reduction
+         unsigned cur = sz;
+         while (cur > 1) {
+            unsigned out = 0;
+            for (unsigned k = 0; k + 1 < cur; k += 2) {
+               const int l = terms[k], r = terms[k + 1];
+               const bool fold = c->nodes[l].kind == N_CONST
+                  && c->nodes[r].kind == N_CONST;
+               const int m = crv_binary(c, (crv_binary_t)nd.op, l, r,
+                                        nd.width, nd.sgn);
+               if (fold) {
+                  ectx_t E = { .c = c };
+                  const int64_t v = ev(&E, m);
+                  terms[out++] = E.fail ? mk_fail(c)
+                     : mk_const(c, mathv(v, nd.sgn), nd.width, nd.sgn);
+               }
+               else
+                  terms[out++] = m;
+            }
+            if (cur & 1)
+               terms[out++] = terms[cur - 1];
+            cur = out;
+         }
+
+         const int res = terms[0];
+         free(terms);
+         return res;
+      }
+
    case N_BIN:
       {
          nd.a = inst(I, nd.a);
@@ -1848,7 +1929,7 @@ static void rsize_cb(void *ctx, const node_t *nd, int n)
 {
    (void)n;
    crv_rsize_t *r = ctx;
-   if ((nd->kind == N_AELEM || nd->kind == N_ASUM)
+   if ((nd->kind == N_AELEM || nd->kind == N_ASUM || nd->kind == N_AREDUCE)
        && r->c->arrays[nd->aux].size_rand)
       r->bad = true;
 }

@@ -105,6 +105,9 @@ crv_node_t crv_array_size(crv_t *c, crv_array_t a);
 crv_node_t crv_array_elem(crv_t *c, crv_array_t a, crv_node_t index);
 crv_node_t crv_array_sum(crv_t *c, crv_array_t a, unsigned width,
                          bool is_signed);
+crv_node_t crv_array_reduce(crv_t *c, crv_binary_t op, crv_array_t a,
+                            crv_node_t index, crv_node_t body,
+                            unsigned width, bool is_signed);
 
 // Sets.  A set is built up then inside is a one bit node.
 typedef int32_t crv_set_t;
@@ -268,6 +271,7 @@ typedef enum {
    CRV_OP_ARRAY_VALUE, CRV_OP_TEST_BIT, CRV_OP_SET_BIT, CRV_OP_RANDOM,
    CRV_OP_DISABLE_SOFT, CRV_OP_SEED_BEGIN, CRV_OP_SEED_END, CRV_OP_ARRAY_SUM,
    CRV_OP_FAIL, CRV_OP_TRIAL, CRV_OP_RANDC_COMMIT, CRV_OP_DISABLE_SOFT_IF,
+   CRV_OP_ARRAY_REDUCE,
 } crv_op_t;
 
 int64_t crv_generated(crv_op_t op, const int64_t *args);

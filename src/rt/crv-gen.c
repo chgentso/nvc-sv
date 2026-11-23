@@ -339,6 +339,10 @@ int64_t crv_generated(crv_op_t op, const int64_t *args)
    case CRV_OP_ARRAY_SUM:
       return crv_array_sum(c, args[1], crv_flags_width(args[2]),
                            crv_flags_signed(args[2]));
+   case CRV_OP_ARRAY_REDUCE:
+      return crv_array_reduce(c, args[1], args[2], args[3], args[4],
+                              crv_flags_width(args[5]),
+                              crv_flags_signed(args[5]));
    case CRV_OP_ARRAY_ELEM:
       return crv_array_elem(c, args[1], args[2]);
    case CRV_OP_SET_NEW:

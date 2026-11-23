@@ -4181,6 +4181,140 @@ START_TEST(test_disable_soft_if)
 }
 END_TEST
 
+START_TEST(test_array_reduce)
+{
+   crv_seed(0x4ed0ce);
+
+   // Dynamic solver-sized array: product with (item + 1) == 24, size in [2..4],
+   // each element in [1..5]
+   for (int trial = 0; trial < 20; trial++) {
+      crv_t *c = crv_new();
+      crv_array_t a = crv_array(c, 8, false, 0, true, true);
+      crv_node_t sz = crv_array_size(c, a);
+      crv_require(c, crv_binary(c, CRV_GE, sz, crv_const(c, 2, 32, true),
+                                1, false), false, 1);
+      crv_require(c, crv_binary(c, CRV_LE, sz, crv_const(c, 4, 32, true),
+                                1, false), false, 2);
+      crv_node_t fi = crv_index(c);
+      crv_node_t fe = crv_array_elem(c, a, fi);
+      crv_foreach(c, a, fi,
+                  crv_binary(c, CRV_LOG_AND,
+                             crv_binary(c, CRV_GE, fe,
+                                        crv_const(c, 1, 8, false), 1, false),
+                             crv_binary(c, CRV_LE, fe,
+                                        crv_const(c, 5, 8, false), 1, false),
+                             1, false),
+                  false);
+      crv_node_t ri = crv_index(c);
+      crv_node_t re = crv_cast(c, crv_array_elem(c, a, ri), 16, false);
+      crv_node_t body = crv_binary(c, CRV_ADD, re, crv_const(c, 1, 16, false),
+                                   16, false);
+      crv_node_t prod = crv_array_reduce(c, CRV_MUL, a, ri, body, 16, false);
+      crv_require(c, crv_binary(c, CRV_EQ, prod, crv_const(c, 24, 16, false),
+                                1, false), false, 3);
+      ck_assert(crv_solve(c));
+      const unsigned len = crv_array_len(c, a);
+      ck_assert(len >= 2 && len <= 4);
+      uint64_t p = 1;
+      for (unsigned i = 0; i < len; i++) {
+         const int64_t v = crv_array_value(c, a, i);
+         ck_assert(v >= 1 && v <= 5);
+         p *= (uint64_t)(v + 1);
+      }
+      ck_assert_uint_eq(p, 24);
+      crv_free(c);
+   }
+
+   // Sum, bitwise AND, OR, XOR reductions with body using both item and index
+   const crv_binary_t ops[] = { CRV_ADD, CRV_AND, CRV_OR, CRV_XOR };
+   const uint64_t targets[] = { 30, 0x05, 0x0f, 0x0a };
+   for (size_t k = 0; k < ARRAY_LEN(ops); k++) {
+      crv_t *c = crv_new();
+      crv_array_t a = crv_array(c, 8, false, 0, true, true);
+      crv_require(c, crv_binary(c, CRV_EQ, crv_array_size(c, a),
+                                crv_const(c, 4, 32, true), 1, false), false, 1);
+      crv_node_t ri = crv_index(c);
+      crv_node_t elem = crv_array_elem(c, a, ri);
+      crv_node_t idx8 = crv_cast(c, ri, 8, false);
+      crv_node_t body = k == 0
+         ? crv_binary(c, CRV_ADD, elem, idx8, 8, false)
+         : elem;
+      crv_node_t red = crv_array_reduce(c, ops[k], a, ri, body, 8, false);
+      crv_require(c, crv_binary(c, CRV_EQ, red,
+                                crv_const(c, targets[k], 8, false), 1, false),
+                  false, 2);
+      ck_assert(crv_solve(c));
+      ck_assert_uint_eq(crv_array_len(c, a), 4);
+      uint64_t acc = (uint64_t)(crv_array_value(c, a, 0) + (k == 0 ? 0 : 0)) & 0xff;
+      for (unsigned i = 1; i < 4; i++) {
+         const uint64_t term = ((uint64_t)crv_array_value(c, a, i)
+                                + (k == 0 ? i : 0)) & 0xff;
+         if (ops[k] == CRV_ADD) acc = (acc + term) & 0xff;
+         else if (ops[k] == CRV_AND) acc &= term;
+         else if (ops[k] == CRV_OR) acc |= term;
+         else acc ^= term;
+      }
+      ck_assert_uint_eq(acc, targets[k]);
+      crv_free(c);
+   }
+
+   // Empty array reduction returns 0 (IEEE 1800 7.12.3)
+   {
+      crv_t *c = crv_new();
+      crv_array_t a = crv_array(c, 8, false, 0, true, true);
+      crv_require(c, crv_binary(c, CRV_EQ, crv_array_size(c, a),
+                                crv_const(c, 0, 32, true), 1, false), false, 1);
+      crv_var_t x = crv_var(c, 8, false, 0);
+      crv_node_t ri = crv_index(c);
+      crv_node_t red = crv_array_reduce(c, CRV_MUL, a, ri,
+                                        crv_array_elem(c, a, ri), 8, false);
+      crv_require(c, crv_binary(c, CRV_EQ, crv_var_ref(c, x), red, 1, false),
+                  false, 2);
+      ck_assert(crv_solve(c));
+      ck_assert_int_eq(crv_value(c, x), 0);
+      crv_free(c);
+   }
+
+   // CRV_OP_ARRAY_REDUCE via crv_generated
+   {
+      int64_t a_begin[] = { 0 };
+      int64_t g = crv_generated(CRV_OP_BEGIN, a_begin);
+      int64_t a_arr[] = { g, 1, 1, CRV_FLAGS(8, false) | CRV_FLAG_DYNAMIC, 0, 1 };
+      int64_t arr = crv_generated(CRV_OP_ARRAY, a_arr);
+      int64_t a_sz[] = { g, arr };
+      int64_t nsz = crv_generated(CRV_OP_ARRAY_SIZE, a_sz);
+      int64_t a_c3[] = { g, 3, CRV_FLAGS(32, true) };
+      int64_t k3 = crv_generated(CRV_OP_CONST, a_c3);
+      int64_t a_eqsz[] = { g, CRV_EQ, nsz, k3, CRV_FLAGS(1, false) };
+      int64_t a_r1[] = { g, crv_generated(CRV_OP_BINARY, a_eqsz), 0, 1 };
+      crv_generated(CRV_OP_REQUIRE, a_r1);
+
+      int64_t a_g[] = { g };
+      int64_t idx = crv_generated(CRV_OP_INDEX, a_g);
+      int64_t a_el[] = { g, arr, idx };
+      int64_t el = crv_generated(CRV_OP_ARRAY_ELEM, a_el);
+      int64_t a_red[] = { g, CRV_XOR, arr, idx, el, CRV_FLAGS(8, false) };
+      int64_t red = crv_generated(CRV_OP_ARRAY_REDUCE, a_red);
+      int64_t a_c5a[] = { g, 0x5a, CRV_FLAGS(8, false) };
+      int64_t k5a = crv_generated(CRV_OP_CONST, a_c5a);
+      int64_t a_eqr[] = { g, CRV_EQ, red, k5a, CRV_FLAGS(1, false) };
+      int64_t a_r2[] = { g, crv_generated(CRV_OP_BINARY, a_eqr), 0, 2 };
+      crv_generated(CRV_OP_REQUIRE, a_r2);
+
+      ck_assert_int_eq(crv_generated(CRV_OP_SOLVE, a_g), 1);
+      int64_t a_len[] = { g, arr };
+      ck_assert_int_eq(crv_generated(CRV_OP_ARRAY_LEN, a_len), 3);
+      uint64_t xr = 0;
+      for (int i = 0; i < 3; i++) {
+         int64_t a_av[] = { g, arr, i };
+         xr ^= (uint64_t)crv_generated(CRV_OP_ARRAY_VALUE, a_av) & 0xff;
+      }
+      ck_assert_uint_eq(xr, 0x5a);
+      crv_generated(CRV_OP_END, a_g);
+   }
+}
+END_TEST
+
 Suite *get_crv_tests(void)
 {
    Suite *s = suite_create("crv");
@@ -4252,6 +4386,7 @@ Suite *get_crv_tests(void)
    tcase_add_test(tc, test_sat_api);
    tcase_add_test(tc, test_dist_guarded);
    tcase_add_test(tc, test_disable_soft_if);
+   tcase_add_test(tc, test_array_reduce);
    tcase_add_test(tc, test_fuzz_fixed);
    suite_add_tcase(s, tc);
 
