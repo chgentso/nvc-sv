@@ -8,6 +8,13 @@ class A;
     name.size() == n;
     name[0] == 75;
     name[3] == 67;
+  }
+endclass
+
+class B;
+  rand bit [7:0] name[];
+  constraint c {
+    name.size() == 4;
     name[7] == 1;
   }
 endclass
@@ -20,6 +27,10 @@ module svcrvoob2;
       ok = a.randomize();
       if (ok != 1 || a.name.size() != 4 || a.name[0] != 75 || a.name[3] != 67)
         $error("randomize %0d size %0d", ok, a.name.size());
+    end
+    begin
+      B b = new;
+      if (b.randomize() != 0) $error("element 7 of 4");
     end
     $display("PASSED");
   end

@@ -27585,9 +27585,10 @@ static bool vlog_crv_sized_by_solver(vlog_gen_t *g, vlog_node_t decl)
 
 static mir_value_t vlog_crv_inrange(vlog_gen_t *g, vlog_node_t e)
 {
-   // A constraint which refers to an element that does not exist is left
-   // out (IEEE 1800-2017 18.5.8.1), such as array[i-1] for the first i of
-   // a foreach.  Null if every element is known to exist.
+   // A constraint in a foreach which refers to an element that does not
+   // exist is left out, such as array[i-1] for the first i.  Any other
+   // out of bounds index is an error of the constraint and randomize fails
+   // (IEEE 1800-2017 18.5.8).  Null if every element is known to exist.
 
    crv_sels_t c = { .nsel = 0 };
    vlog_visit(e, vlog_crv_sels_cb, &c);
@@ -27599,7 +27600,8 @@ static mir_value_t vlog_crv_inrange(vlog_gen_t *g, vlog_node_t e)
       vlog_node_t base = vlog_value(c.sel[i]);
       vlog_node_t decl = vlog_ref(base);
 
-      if (!vlog_crv_is_state(g, idx) || vlog_crv_sized_by_solver(g, decl))
+      if (!vlog_crv_uses_index(g, idx) || !vlog_crv_is_state(g, idx)
+          || vlog_crv_sized_by_solver(g, decl))
          continue;
       else if (vlog_ranges(decl) > 1)
          continue;
@@ -27650,7 +27652,9 @@ static mir_value_t vlog_crv_inrange_node(vlog_gen_t *g, vlog_node_t e)
       vlog_node_t decl = vlog_ref(base);
 
       const bool solver_sized = vlog_crv_sized_by_solver(g, decl);
-      if ((vlog_crv_is_state(g, idx) && !solver_sized) || vlog_ranges(decl) > 1)
+      if (!vlog_crv_uses_index(g, idx)
+          || (vlog_crv_is_state(g, idx) && !solver_sized)
+          || vlog_ranges(decl) > 1)
          continue;
       else if (!solver_sized && (vlog_crv_is_dynamic_array(decl)
                                  || vlog_ranges(decl) != 1))
