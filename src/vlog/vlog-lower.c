@@ -26782,7 +26782,7 @@ static void vlog_crv_foreach_assoc(vlog_gen_t *g, vlog_node_t v,
 
    vlog_node_t decl = vlog_ref(arr);
 
-   if (!(vlog_flags(decl) & VLOG_F_RAND)) {
+   if (!(vlog_flags(decl) & VLOG_F_RAND) && !vlog_crv_is_std_var(g, decl)) {
       vlog_crv_foreach_unroll(g, v, guard);
       return;
    }
@@ -29759,6 +29759,7 @@ static mir_value_t vlog_lower_std_randomize(vlog_gen_t *g, vlog_node_t v)
    mir_value_t *vars LOCAL = NULL;
    int *firstvar LOCAL = xmalloc_array(nparams + 1, sizeof(int));
    bool *is_array LOCAL = xcalloc_array(nparams, sizeof(bool));
+   bool *is_assoc LOCAL = xcalloc_array(nparams, sizeof(bool));
    bool *is_wide LOCAL = xcalloc_array(nparams, sizeof(bool));
    bool *skip LOCAL = xcalloc_array(nparams, sizeof(bool));
    vlog_node_t *group LOCAL = xcalloc_array(nparams, sizeof(vlog_node_t));
@@ -29792,6 +29793,32 @@ static mir_value_t vlog_lower_std_randomize(vlog_gen_t *g, vlog_node_t v)
          for (int k = 1; k < vlog_size(vlog_range(gd, 0)); k++)
             skip[i + k] = true;
 
+         firstvar[i] = nvars;
+         vars = xrealloc_array(vars, nvars + 1, sizeof(mir_value_t));
+         vars[nvars++] = array;
+         continue;
+      }
+
+      if (vlog_kind(p) == V_REF && vlog_has_ref(p)
+          && vlog_crv_assoc_type(vlog_ref(p)) != NULL) {
+         // The values of the entries which the array has now
+         vlog_node_t decl = vlog_ref(p);
+         const type_info_t *eti = vlog_type_info(g, vlog_crv_elem_type(decl));
+         if (!vlog_crv_is_integral(g, vlog_crv_elem_type(decl)))
+            fatal_at(vlog_loc(p), "sorry, this type of array is not supported "
+                     "by randomize");
+
+         mir_value_t ua = vlog_lower_rvalue(g, p);
+         mir_value_t data = mir_build_unwrap(g->mu, ua);
+         mir_value_t len = mir_build_uarray_len(g->mu, ua, 0);
+
+         const int fl = CRV_FLAGS(eti->size, mir_get_signed(g->mu, eti->type));
+         mir_value_t array = CRV6(g, CRV_OP_ARRAY, ctx, vlog_crv_int(g, 0),
+                                  vlog_crv_key(g, decl), vlog_crv_int(g, fl),
+                                  len, vlog_crv_int(g, 1));
+         vlog_crv_array_load(g, ctx, array, data, len, true);
+
+         is_assoc[i] = true;
          firstvar[i] = nvars;
          vars = xrealloc_array(vars, nvars + 1, sizeof(mir_value_t));
          vars[nvars++] = array;
@@ -29969,6 +29996,18 @@ static mir_value_t vlog_lower_std_randomize(vlog_gen_t *g, vlog_node_t v)
             vlog_assign_variable(g, e, value, NULL);
          }
 
+         continue;
+      }
+
+      if (is_assoc[i]) {
+         vlog_node_t decl = vlog_ref(p);
+         const type_info_t *eti =
+            vlog_type_info(g, vlog_crv_elem_type(decl));
+         mir_value_t array = vars[firstvar[i]];
+         mir_value_t ua = vlog_lower_rvalue(g, p);
+         mir_value_t len = CRV2(g, CRV_OP_ARRAY_LEN, ctx, array);
+         vlog_crv_array_store(g, ctx, array, mir_build_unwrap(g->mu, ua), len,
+                              eti, false, true);
          continue;
       }
 
