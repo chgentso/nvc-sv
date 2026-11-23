@@ -3144,3 +3144,4 @@ svcrvassocobj2 verilog
 svstdrandassoc1 verilog
 svcrvstdexpr1 verilog
 svcrvargobj1 verilog
+svcrvwideforeach1 verilog

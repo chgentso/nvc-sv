@@ -24176,7 +24176,7 @@ static bool vlog_crv_wide_elem(vlog_gen_t *g, vlog_node_t v, vlog_node_t *decl,
        || !vlog_crv_is_wide(g, vlog_crv_elem_type(d)))
       return false;
 
-   if (!vlog_get_const(vlog_param(v, 0), index) || *index < 0
+   if (!vlog_crv_const_index(g, vlog_param(v, 0), index) || *index < 0
        || *index >= vlog_size(d))
       return false;
 
@@ -27362,6 +27362,11 @@ static void vlog_crv_foreach(vlog_gen_t *g, vlog_node_t v, mir_value_t guard)
       // The elements of an array which the solver does not hold are state
       // so the constraint is made for each of them
       bool unroll = vlog_kind(arr) == V_REF && vlog_crv_is_skipped(g, decl);
+
+      // A wide element is solved in chunks, which only a known element has
+      if (!vlog_crv_is_dynamic_array(decl) && vlog_ranges(decl) == 1
+          && vlog_crv_is_wide(g, vlog_crv_elem_type(decl)))
+         unroll = true;
       if (vlog_kind(arr) == V_REF && vlog_crv_is_target(g, decl)
           && (vlog_flags(decl) & VLOG_F_RAND)
           && vlog_crv_elem_struct(decl) != NULL) {
