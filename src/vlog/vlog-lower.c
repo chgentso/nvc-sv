@@ -27521,6 +27521,24 @@ static void vlog_crv_needs_unroll_cb(vlog_node_t v, void *ctx)
    }
 }
 
+static bool vlog_crv_sized_by_solver(vlog_gen_t *g, vlog_node_t decl);
+
+static void vlog_crv_needs_unroll_nodist_cb(vlog_node_t v, void *ctx)
+{
+   // The same where a dist is left to the solver
+
+   if (vlog_kind(v) != V_DIST)
+      vlog_crv_needs_unroll_cb(v, ctx);
+}
+
+static void vlog_crv_row_foreach_cb(vlog_node_t v, void *ctx)
+{
+   // A foreach over a row of an array selected by an enclosing index
+   if (vlog_kind(v) == V_CONS_FOREACH
+       && vlog_kind(vlog_value(v)) == V_BIT_SELECT)
+      *(bool *)ctx = true;
+}
+
 static void vlog_crv_foreach_dyn_unroll(vlog_gen_t *g, vlog_node_t v,
                                         mir_value_t guard)
 {
@@ -27790,6 +27808,30 @@ static void vlog_crv_foreach(vlog_gen_t *g, vlog_node_t v, mir_value_t guard)
          return;
       }
 
+      // A row of a multi-dimensional array selected by the index of an
+      // enclosing foreach: m[i] is a constant for each of its iterations
+      int nsel = 0;
+      vlog_node_t base = arr;
+      bool known = true;
+      while (vlog_kind(base) == V_BIT_SELECT && vlog_params(base) == 1) {
+         int64_t index;
+         known &= vlog_crv_const_index(g, vlog_param(base, 0), &index);
+         base = vlog_value(base);
+         nsel++;
+      }
+
+      if (known && nsel > 0 && vlog_decls(v) == 1 && vlog_crv_is_array_ref(base)
+          && !vlog_crv_is_dynamic_array(vlog_ref(base))
+          && vlog_ranges(vlog_ref(base)) == nsel + 1) {
+         vlog_node_t dim = vlog_range(vlog_ref(base), nsel);
+         int64_t left, right;
+         if (vlog_get_const(vlog_left(dim), &left)
+             && vlog_get_const(vlog_right(dim), &right)) {
+            vlog_crv_foreach_elems(g, v, guard, left, right);
+            return;
+         }
+      }
+
       fatal_at(vlog_loc(arr), "sorry, this array is not supported in a "
                "foreach constraint");
    }
@@ -27823,8 +27865,13 @@ static void vlog_crv_foreach(vlog_gen_t *g, vlog_node_t v, mir_value_t guard)
       return;
    }
 
+   bool rows = false;
+   for (int i = 0; i < vlog_stmts(v) && !rows; i++)
+      vlog_visit(vlog_stmt(v, i), vlog_crv_row_foreach_cb, &rows);
+
    if (vlog_decls(v) == 1
-       && (vlog_crv_is_dynamic_array(decl) || vlog_ranges(decl) == 1)) {
+       && (vlog_crv_is_dynamic_array(decl) || vlog_ranges(decl) == 1
+           || (rows && vlog_ranges(decl) > 1))) {
       // The elements of an array which the solver does not hold are state
       // so the constraint is made for each of them
       bool unroll = vlog_kind(arr) == V_REF && vlog_crv_is_skipped(g, decl);
@@ -27842,8 +27889,14 @@ static void vlog_crv_foreach(vlog_gen_t *g, vlog_node_t v, mir_value_t guard)
       }
 
       const int nstmts = vlog_stmts(v);
+      // A dist for each element of an array which the solver sizes is
+      // part of the problem as the elements are not known yet
+      const bool by_solver = vlog_crv_is_dynamic_array(decl)
+         && vlog_crv_sized_by_solver(g, decl);
       for (int i = 0; i < nstmts && !unroll; i++)
-         vlog_visit(vlog_stmt(v, i), vlog_crv_needs_unroll_cb, &unroll);
+         vlog_visit(vlog_stmt(v, i), by_solver ? vlog_crv_needs_unroll_nodist_cb
+                    : vlog_crv_needs_unroll_cb, &unroll);
+      unroll |= rows;
 
       if (unroll) {
          if (vlog_crv_is_dynamic_array(decl)) {
