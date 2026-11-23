@@ -4916,6 +4916,8 @@ static bool elab_is_simple_generic(type_t type)
       || type_eq(type, std_type(NULL, STD_BOOLEAN));
 }
 
+static bool elab_verilog_port_open(vlog_node_t inst, tree_t eport, int pos);
+
 static vlog_node_t elab_vhdl_shim_module(vlog_node_t list, tree_t entity,
                                          const elab_ctx_t *ctx)
 {
@@ -5171,10 +5173,20 @@ static vlog_node_t elab_vhdl_shim_module(vlog_node_t list, tree_t entity,
             return NULL;
          }
          else if (elab_range_width(r, left, right) == 0) {
-            error_at(tree_loc(p), "port %pI of VHDL entity %pI has a null "
-                     "range which cannot be instantiated from Verilog",
-                     tree_ident(p), tree_ident(entity));
-            return NULL;
+            // An input with a default value left open in every instance
+            // has no Verilog net so the shim declares a placeholder
+            bool all_open = tree_subkind(p) == PORT_IN && tree_has_value(p);
+            for (int j = 0; all_open && j < vlog_stmts(list); j++)
+               all_open = elab_verilog_port_open(vlog_stmt(list, j), p, i);
+
+            if (!all_open) {
+               error_at(tree_loc(p), "port %pI of VHDL entity %pI has a null "
+                        "range which cannot be instantiated from Verilog",
+                        tree_ident(p), tree_ident(entity));
+               return NULL;
+            }
+
+            left = right = 0;
          }
 
          checked_sprintf(range, sizeof(range), " [%"PRIi64":%"PRIi64"]",
