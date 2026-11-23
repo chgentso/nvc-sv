@@ -100,10 +100,11 @@ void crv_set_engine(crv_engine_t e)
 
 bool crv_engine_available(crv_engine_t e)
 {
-   // Dfs is the search, reject and bdd are the stages on their own and auto
-   // is the stages in turn
+   // Dfs is the search, reject, bdd and sat are the stages on their own and
+   // auto is the stages in turn
    return e == CRV_ENGINE_AUTO || e == CRV_ENGINE_DFS
-      || e == CRV_ENGINE_REJECT || e == CRV_ENGINE_BDD;
+      || e == CRV_ENGINE_REJECT || e == CRV_ENGINE_BDD
+      || e == CRV_ENGINE_SAT;
 }
 
 const char *crv_engine_name(crv_engine_t e)

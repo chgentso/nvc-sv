@@ -20,6 +20,8 @@ lib_libnvc_a_SOURCES += \
 	src/rt/crv-blast.h \
 	src/rt/crv-bdd.c \
 	src/rt/crv-bdd.h \
+	src/rt/crv-sat.c \
+	src/rt/crv-sat.h \
 	src/rt/crv-priv.h \
 	src/rt/sva.h \
 	src/rt/sva.c \

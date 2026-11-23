@@ -1,0 +1,33 @@
+# Bias report of the CDCL SAT stage of crv M4c (NVC_CRV_ENGINE=sat)
+# nvc-sv crv M4c, produced by: NVC_CRV_REPORT=1 bin/unit_test crv (seed 1234)
+# Per problem and seed: samples N = max(50 x solutions, 20000); chi2/df against the distribution the
+# language asks for (uniform over solutions; solve before levels; dist values by IEEE 1800 18.5.4;
+# soft constraints kept from the highest priority); bound = chi-square at p = 1e-4 (Wilson-Hilferty);
+# max/min = largest over smallest count of a solution that was reached.
+# Every problem reached every solution (unreached = 0, fails = 0).
+
+sat      x<y 4                                  seed 1234       sols   120 n  20000 chi2/df   45.17 (df  119 bound   185.2) BIASED max/min   8.36 unreached    0 fails 0
+sat      x<y 3                                  seed 1234       sols    28 n  20000 chi2/df   84.92 (df   27 bound    63.4) BIASED max/min   4.03 unreached    0 fails 0
+sat      x<y 5                                  seed 1234       sols   496 n  24800 chi2/df   27.73 (df  495 bound   620.7) BIASED max/min  52.44 unreached    0 fails 0
+sat      x+y+z==10                              seed 1234       sols    66 n  20000 chi2/df   12.15 (df   65 bound   116.3) BIASED max/min   2.28 unreached    0 fails 0
+sat      x+y+z==20                              seed 1234       sols   186 n  20000 chi2/df   16.03 (df  185 bound   265.3) BIASED max/min   7.31 unreached    0 fails 0
+sat      s->d==0                                seed 1234       sols   257 n  20000 chi2/df  423.40 (df  256 bound   348.9) BIASED max/min  86.67 unreached    0 fails 0
+sat      s->d==0, s before d                    seed 1234       sols   257 n  20000 chi2/df  375.60 (df  256 bound   348.9) BIASED max/min  86.67 unreached    0 fails 0
+sat      if/else modes                          seed 1234       sols    23 n  20000 chi2/df  850.95 (df   22 bound    55.8) BIASED max/min  13.82 unreached    0 fails 0
+sat      (x&y)==0                               seed 1234       sols    81 n  20000 chi2/df   32.49 (df   80 bound   135.9) BIASED max/min   6.50 unreached    0 fails 0
+sat      x*y==12 mod 16                         seed 1234       sols    24 n  20000 chi2/df   56.08 (df   23 bound    57.3) BIASED max/min   2.34 unreached    0 fails 0
+sat      unique of three 2 bit                  seed 1234       sols    24 n  20000 chi2/df    0.83 (df   23 bound    57.3) pass max/min   1.12 unreached    0 fails 0
+sat      a<b, a before b                        seed 1234       sols   120 n  20000 chi2/df   80.81 (df  119 bound   185.2) BIASED max/min   8.36 unreached    0 fails 0
+sat      a<b<c, a before b before c             seed 1234       sols    56 n  20000 chi2/df  278.34 (df   55 bound   102.9) BIASED max/min   3.05 unreached    0 fails 0
+sat      dist x!=y                              seed 1234       sols    56 n  20000 chi2/df   91.66 (df   55 bound   102.9) BIASED max/min   2.91 unreached    0 fails 0
+sat      dist, bucket infeasible                seed 1234       sols    32 n  20000 chi2/df   63.83 (df   31 bound    69.3) BIASED max/min   1.21 unreached    0 fails 0
+sat      dist, :/ over a split range            seed 1234       sols    48 n  20000 chi2/df   48.16 (df   47 bound    92.0) BIASED max/min   3.04 unreached    0 fails 0
+sat      soft conflict                          seed 1234       sols    28 n  20000 chi2/df   85.46 (df   27 bound    63.4) BIASED max/min   4.43 unreached    0 fails 0
+sat      soft compatible                        seed 1234       sols    36 n  20000 chi2/df  184.11 (df   35 bound    75.1) BIASED max/min   7.75 unreached    0 fails 0
+sat      array size 0 to 3, elements nonzero    seed 1234       sols    40 n  20000 chi2/df  217.16 (df   39 bound    80.8) BIASED max/min  16.54 unreached    0 fails 0
+sat      $countones(x)==2 ? y<4 : y>=12         seed 1234       sols    64 n  20000 chi2/df   50.05 (df   63 bound   113.7) BIASED max/min   3.42 unreached    0 fails 0
+sat      dist, values with different extensions seed 1234       sols    16 n  20000 chi2/df  764.61 (df   15 bound    44.6) BIASED max/min   1.74 unreached    0 fails 0
+sat      two dists                              seed 1234       sols     6 n  20000 chi2/df 1054.90 (df    5 bound    26.3) BIASED max/min   3.00 unreached    0 fails 0
+sat      total == a + b, a != b                 seed 1234       sols    56 n  20000 chi2/df   30.84 (df   55 bound   102.9) BIASED max/min   3.36 unreached    0 fails 0
+sat      a<b, c<=a, a before b                  seed 1234       sols    84 n  20000 chi2/df   48.26 (df   83 bound   139.8) BIASED max/min   5.04 unreached    0 fails 0
+sat      x == y + 1, x before y, z != y         seed 1234       sols    60 n  20000 chi2/df   84.78 (df   59 bound   108.3) BIASED max/min   4.70 unreached    0 fails 0

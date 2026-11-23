@@ -18,6 +18,7 @@
 #include "test_util.h"
 #include "rt/crv.h"
 #include "rt/crv-bdd.h"
+#include "rt/crv-sat.h"
 
 #include <inttypes.h>
 #include <math.h>
@@ -3448,7 +3449,7 @@ START_TEST(test_engine_available)
    ck_assert(crv_engine_available(CRV_ENGINE_AUTO));
    ck_assert(crv_engine_available(CRV_ENGINE_REJECT));
    ck_assert(crv_engine_available(CRV_ENGINE_BDD));
-   ck_assert(!crv_engine_available(CRV_ENGINE_SAT));
+   ck_assert(crv_engine_available(CRV_ENGINE_SAT));
 }
 END_TEST
 
@@ -3506,6 +3507,7 @@ START_TEST(test_stats_stage)
       { CRV_ENGINE_DFS, CRV_STAGE_DFS },
       { CRV_ENGINE_REJECT, CRV_STAGE_REJECT },
       { CRV_ENGINE_BDD, CRV_STAGE_BDD },
+      { CRV_ENGINE_SAT, CRV_STAGE_SAT },
       { CRV_ENGINE_AUTO, CRV_STAGE_REJECT },
    };
 
@@ -3773,6 +3775,190 @@ START_TEST(test_stats_site)
 }
 END_TEST
 
+static uint64_t test_sat_rng(void *ctx)
+{
+   return trng_next((trng_t *)ctx);
+}
+
+// Direct tests of the CDCL SAT core: satisfiable 3-SAT, pigeonhole UNSAT,
+// conflict budget give-up, and deterministic seed replay
+START_TEST(test_sat_core)
+{
+   // Pigeonhole PHP(n+1, n): n+1 pigeons in n holes is unsatisfiable
+   for (unsigned holes = 3; holes <= 5; holes++) {
+      const unsigned pigeons = holes + 1;
+      sat_t *s = sat_new(pigeons * holes);
+      // Every pigeon must be in at least one hole
+      for (unsigned p = 0; p < pigeons; p++) {
+         uint32_t cl[6];
+         for (unsigned h = 0; h < holes; h++)
+            cl[h] = (p * holes + h) << 1;
+         ck_assert(sat_add_clause(s, cl, holes));
+      }
+      // At most one pigeon per hole
+      for (unsigned h = 0; h < holes; h++) {
+         for (unsigned p1 = 0; p1 < pigeons; p1++) {
+            for (unsigned p2 = p1 + 1; p2 < pigeons; p2++) {
+               uint32_t cl[2] = { ((p1 * holes + h) << 1) | 1,
+                                  ((p2 * holes + h) << 1) | 1 };
+               ck_assert(sat_add_clause(s, cl, 2));
+            }
+         }
+      }
+      trng_t rng = { 12345 + holes };
+      ck_assert_int_eq(sat_solve(s, test_sat_rng, &rng), SAT_UNSAT);
+      sat_free(s);
+   }
+
+   // Conflict budget gives up cleanly on PHP(7, 6) with budget = 5
+   {
+      const unsigned holes = 6, pigeons = 7;
+      sat_t *s = sat_new(pigeons * holes);
+      sat_set_budget(s, 5);
+      for (unsigned p = 0; p < pigeons; p++) {
+         uint32_t cl[6];
+         for (unsigned h = 0; h < holes; h++)
+            cl[h] = (p * holes + h) << 1;
+         sat_add_clause(s, cl, holes);
+      }
+      for (unsigned h = 0; h < holes; h++) {
+         for (unsigned p1 = 0; p1 < pigeons; p1++) {
+            for (unsigned p2 = p1 + 1; p2 < pigeons; p2++) {
+               uint32_t cl[2] = { ((p1 * holes + h) << 1) | 1,
+                                  ((p2 * holes + h) << 1) | 1 };
+               sat_add_clause(s, cl, 2);
+            }
+         }
+      }
+      trng_t rng = { 77 };
+      ck_assert_int_eq(sat_solve(s, test_sat_rng, &rng), SAT_GIVEUP);
+      sat_free(s);
+   }
+
+   // Satisfiable random 3-SAT with planted solution: model must satisfy all
+   trng_t gen = { 9999 };
+   const unsigned nv = 40, nc = 160;
+   uint8_t planted[40];
+   for (unsigned v = 0; v < nv; v++)
+      planted[v] = trng_next(&gen) & 1;
+
+   uint32_t clauses[160][3];
+   sat_t *s = sat_new(nv);
+   for (unsigned i = 0; i < nc; i++) {
+      bool sat_planted = false;
+      for (unsigned k = 0; k < 3; k++) {
+         const unsigned v = trng_below(&gen, nv);
+         unsigned neg = trng_next(&gen) & 1;
+         if (k == 2 && !sat_planted)
+            neg = planted[v] ? 0 : 1;
+         if ((neg == 0) == (planted[v] == 1))
+            sat_planted = true;
+         clauses[i][k] = (v << 1) | neg;
+      }
+      ck_assert(sat_add_clause(s, clauses[i], 3));
+   }
+   trng_t rng = { 42 };
+   ck_assert_int_eq(sat_solve(s, test_sat_rng, &rng), SAT_SAT);
+   for (unsigned i = 0; i < nc; i++) {
+      bool ok = false;
+      for (unsigned k = 0; k < 3; k++) {
+         const bool v = sat_value(s, clauses[i][k] >> 1);
+         if (v == ((clauses[i][k] & 1) == 0))
+            ok = true;
+      }
+      ck_assert(ok);
+   }
+   sat_free(s);
+}
+END_TEST
+
+// SAT stage via the solver C API: modular multiplication, bit relations,
+// proven UNSAT (not give-up), and seed stability
+START_TEST(test_sat_api)
+{
+   const crv_engine_t saved = crv_engine();
+   crv_set_engine(CRV_ENGINE_AUTO);
+
+   // 16-bit product x * y == 30031, x > 1, y > 1: answered by SAT in auto
+   crv_seed(31415);
+   for (int i = 0; i < 10; i++) {
+      crv_t *c = crv_new();
+      crv_var_t x = crv_var(c, 16, false, 0), y = crv_var(c, 16, false, 0);
+      crv_require(c, crv_binary(c, CRV_EQ, crv_binary(
+                                   c, CRV_MUL, crv_var_ref(c, x),
+                                   crv_var_ref(c, y), 16, false),
+                                crv_const(c, 30031, 16, false), 1, false),
+                  false, 1);
+      crv_require(c, crv_binary(c, CRV_GT, crv_var_ref(c, x),
+                                crv_const(c, 1, 16, false), 1, false),
+                  false, 2);
+      crv_require(c, crv_binary(c, CRV_GT, crv_var_ref(c, y),
+                                crv_const(c, 1, 16, false), 1, false),
+                  false, 3);
+      crv_stats_force(true);
+      ck_assert_int_eq(crv_solve2(c), CRV_SAT);
+      const uint16_t xv = (uint16_t)crv_value(c, x);
+      const uint16_t yv = (uint16_t)crv_value(c, y);
+      ck_assert_int_eq((uint16_t)(xv * yv), 30031);
+      ck_assert_int_gt(xv, 1);
+      ck_assert_int_gt(yv, 1);
+      ck_assert_int_eq(crv_stats_last()->top, CRV_STAGE_SAT);
+      crv_free(c);
+   }
+
+   // Unsatisfiable product: 17 is prime, x, y in [2..16] -> proven CRV_UNSAT
+   {
+      crv_t *c = crv_new();
+      crv_var_t x = crv_var(c, 8, false, 0), y = crv_var(c, 8, false, 0);
+      crv_require(c, crv_binary(c, CRV_EQ, crv_binary(
+                                   c, CRV_MUL, crv_var_ref(c, x),
+                                   crv_var_ref(c, y), 8, false),
+                                crv_const(c, 17, 8, false), 1, false),
+                  false, 1);
+      crv_require(c, crv_binary(c, CRV_GT, crv_var_ref(c, x),
+                                crv_const(c, 1, 8, false), 1, false),
+                  false, 2);
+      crv_require(c, crv_binary(c, CRV_LT, crv_var_ref(c, x),
+                                crv_const(c, 17, 8, false), 1, false),
+                  false, 3);
+      crv_require(c, crv_binary(c, CRV_GT, crv_var_ref(c, y),
+                                crv_const(c, 1, 8, false), 1, false),
+                  false, 4);
+      crv_require(c, crv_binary(c, CRV_LT, crv_var_ref(c, y),
+                                crv_const(c, 17, 8, false), 1, false),
+                  false, 5);
+      ck_assert_int_eq(crv_solve2(c), CRV_UNSAT);
+      crv_set_engine(CRV_ENGINE_SAT);
+      ck_assert_int_eq(crv_solve2(c), CRV_UNSAT);
+      crv_free(c);
+   }
+
+   // Forced SAT seed stability: same seed gives identical sequence
+   int64_t seq[2][4];
+   for (int pass = 0; pass < 2; pass++) {
+      crv_set_engine(CRV_ENGINE_SAT);
+      crv_seed(0x5a75eed);
+      for (int k = 0; k < 2; k++) {
+         crv_t *c = crv_new();
+         crv_var_t x = crv_var(c, 16, false, 0), y = crv_var(c, 16, false, 0);
+         crv_require(c, crv_binary(c, CRV_EQ, crv_binary(
+                                      c, CRV_MUL, crv_var_ref(c, x),
+                                      crv_var_ref(c, y), 16, false),
+                                   crv_const(c, 30031, 16, false), 1, false),
+                     false, 1);
+         ck_assert_int_eq(crv_solve2(c), CRV_SAT);
+         seq[pass][k * 2] = crv_value(c, x);
+         seq[pass][k * 2 + 1] = crv_value(c, y);
+         crv_free(c);
+      }
+   }
+   for (int i = 0; i < 4; i++)
+      ck_assert_int_eq(seq[0][i], seq[1][i]);
+
+   crv_set_engine(saved);
+}
+END_TEST
+
 Suite *get_crv_tests(void)
 {
    Suite *s = suite_create("crv");
@@ -3840,6 +4026,8 @@ Suite *get_crv_tests(void)
    tcase_add_test(tc, test_bdd_cmp_scrambled);
    tcase_add_test(tc, test_bdd_budget);
    tcase_add_test(tc, test_bdd_seed_stable);
+   tcase_add_test(tc, test_sat_core);
+   tcase_add_test(tc, test_sat_api);
    tcase_add_test(tc, test_fuzz_fixed);
    suite_add_tcase(s, tc);
 

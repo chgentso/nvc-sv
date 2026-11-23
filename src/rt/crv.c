@@ -20,6 +20,7 @@
 #include "rt/crv-priv.h"
 #include "rt/crv-bdd.h"
 #include "rt/crv-blast.h"
+#include "rt/crv-sat.h"
 
 #include <assert.h>
 #include <stdint.h>
@@ -1498,6 +1499,8 @@ typedef struct {
    uint32_t *stamp, pass;
    uint64_t *pend;
    int       qn;
+   int      *ustack;
+   int       unq;
    int       curc;
    trail_t  *trail;
    int       ntrail, ctrail;
@@ -1511,6 +1514,7 @@ typedef struct {
    unsigned  base_nodes, base_sets;
    int       reject;      // Rejection stage: 0 off, 1 then the search, 2 only
    int       bdd;         // BDD stage: 0 off, 1 then the search, 2 only
+   int       sat;         // SAT stage: 0 off, 1 after search give-up, 2 only
    uint32_t  nbdd[CRV_BDD_REASONS];   // Components it declined, by reason
    uint64_t  bdd_build_ns, bdd_sample_ns;
    uint32_t  bdd_bytes;
@@ -1974,6 +1978,7 @@ static void prob_free(prob_t *P)
    free(P->iv);
    free(P->stamp);
    free(P->pend);
+   free(P->ustack);
    free(P->uproc);
    for (int v = 0; v < P->nv; v++) {
       free(P->vars[v].tabu);
@@ -2404,6 +2409,8 @@ static prob_t *prob_build(crv_t *c, int mode, const unsigned *sizes,
       : crv_engine() == CRV_ENGINE_BDD ? 2 : 0;
    if (crv_bdd_nodes() == 0)
       P->bdd = 0;
+   P->sat = crv_engine() == CRV_ENGINE_AUTO ? 1
+      : crv_engine() == CRV_ENGINE_SAT ? 2 : 0;
    P->nsc = c->nvars;
    P->na = c->narrays;
    P->curc = -1;
@@ -2607,6 +2614,7 @@ static prob_t *prob_build(crv_t *c, int mode, const unsigned *sizes,
    P->stamp = xcalloc((P->nn ? P->nn : 1) * sizeof(uint32_t));
    P->uproc = xcalloc(P->nun ? P->nun : 1);
    P->pend = xcalloc(((P->ncons + 63) / 64 + 1) * sizeof(uint64_t));
+   P->ustack = NEW(int, P->ncons ? P->ncons : 1);
 
    P->budget = 800000 + 80 * ((int64_t)P->nn + P->nv);
    for (int ci = 0; ci < P->ncons; ci++)
@@ -2777,6 +2785,8 @@ static void enqueue(prob_t *P, int ci)
    if (!(P->pend[ci >> 6] & bit)) {
       P->pend[ci >> 6] |= bit;
       P->qn++;
+      if (P->cons[ci].kind == C_REQ && P->vstart[ci + 1] - P->vstart[ci] == 1)
+         P->ustack[P->unq++] = ci;
    }
 }
 
@@ -4462,16 +4472,23 @@ static bool propagate(prob_t *P)
    int pos = 0;
 
    while (P->qn > 0) {
-      const int ci = next_pending(P, pos, up);
-      if (ci < 0) {
-         up = !up;
-         pos = up ? 0 : P->ncons - 1;
-         continue;
+      int ci;
+      if (P->unq > 0) {
+         ci = P->ustack[--P->unq];
+         P->pend[ci >> 6] &= ~(UINT64_C(1) << (ci & 63));
+         P->qn--;
       }
-
-      P->pend[ci >> 6] &= ~(UINT64_C(1) << (ci & 63));
-      P->qn--;
-      pos = up ? ci + 1 : ci - 1;
+      else {
+         ci = next_pending(P, pos, up);
+         if (ci < 0) {
+            up = !up;
+            pos = up ? 0 : P->ncons - 1;
+            continue;
+         }
+         P->pend[ci >> 6] &= ~(UINT64_C(1) << (ci & 63));
+         P->qn--;
+         pos = up ? ci + 1 : ci - 1;
+      }
 
       P->curc = ci;
       ok = prop_cons(P, &P->cons[ci]);
@@ -4494,6 +4511,7 @@ static bool propagate(prob_t *P)
       memset(P->pend, 0, ((P->ncons + 63) / 64) * sizeof(uint64_t));
       P->qn = 0;
    }
+   P->unq = 0;
    return ok;
 }
 
@@ -5805,6 +5823,7 @@ static void rj_clear_queue(prob_t *P)
       memset(P->pend, 0, ((P->ncons + 63) / 64) * sizeof(uint64_t));
       P->qn = 0;
    }
+   P->unq = 0;
 }
 
 // Can the variables that are not fixed be given values that satisfy
@@ -6013,6 +6032,27 @@ static int bd_ord_cmp(const void *a, const void *b)
       return x->group < y->group ? -1 : 1;
    else if (x->sig != y->sig)
       return x->sig < y->sig ? -1 : 1;
+   else if (x->rank != y->rank)
+      return x->rank < y->rank ? -1 : 1;
+   else if (x->var != y->var)
+      return x->var < y->var ? -1 : 1;
+   return x->bit < y->bit ? -1 : x->bit > y->bit;
+}
+
+// Most-significant-bit-first within each group: for wide ripple adders and
+// comparators (which build carries from bit 0 upward), placing bit k above
+// bit k-1 lets carry[k] share carry[k-1], keeping node count linear O(w)
+// instead of quadratic O(w^2) across the intermediate AIG gates.
+static int bd_ord_cmp_msb(const void *a, const void *b)
+{
+   const bd_ord_t *x = a, *y = b;
+   if (x->group != y->group)
+      return x->group < y->group ? -1 : 1;
+   else if (x->sig != y->sig) {
+      if (x->sig == 255) return 1;
+      if (y->sig == 255) return -1;
+      return x->sig > y->sig ? -1 : 1;
+   }
    else if (x->rank != y->rank)
       return x->rank < y->rank ? -1 : 1;
    else if (x->var != y->var)
@@ -6298,7 +6338,8 @@ static bd_res_t bd_build(bd_t *D, bool flat)
                                    sigs[D->boff[i] + k],
                                    rank[D->boff[i] + k], i, k };
       }
-      qsort(all, n, sizeof(bd_ord_t), bd_ord_cmp);
+      qsort(all, n, sizeof(bd_ord_t),
+            D->nbits > 64 ? bd_ord_cmp_msb : bd_ord_cmp);
       for (unsigned i = 0; i < n; i++)
          D->bitpos[D->boff[all[i].var] + all[i].bit] = i;
       free(all);
@@ -6680,6 +6721,249 @@ static bd_res_t bdd_comp(prob_t *P, int comp)
    return BD_SAT;
 }
 
+////////////////////////////////////////////////////////////////////////////////
+// SAT stage (engine B)
+//
+// Complete fallback for one component after the DFS search gives up, or the
+// sole stage when NVC_CRV_ENGINE=sat is forced.  Encodes the component's
+// constraints and propagated variable domains via the bit-blaster AIG into
+// CNF and runs the CDCL solver.
+
+#define SAT_CONFLICTS        50000
+#define SAT_CONFLICTS_FORCED (100 * SAT_CONFLICTS)
+#define SAT_MAX_GATES        1000000
+#define SAT_MAX_GATES_FORCED 5000000
+
+static uint64_t sat_rnd_cb(void *ctx)
+{
+   (void)ctx;
+   return rnd64();
+}
+
+static blit_t sat_domain(blast_t *b, int v, const pvar_t *pv)
+{
+   const int nr = dom_nr(&pv->dom);
+   if (nr == 1) {
+      const range_t rg = dom_range(&pv->dom, 0);
+      return blast_var_range(b, v, rg.lo, rg.hi);
+   }
+   blit_t r = BLIT_FALSE;
+   for (int k = 0; k < nr; k++) {
+      const range_t rg = dom_range(&pv->dom, k);
+      r = blast_or(b, r, blast_var_range(b, v, rg.lo, rg.hi));
+   }
+   return r;
+}
+
+static sres_t sat_comp(prob_t *P, int comp, bool *answered)
+{
+   const crv_t *c = P->c;
+   const int nvc = comp >= 0 ? P->kvs[comp + 1] - P->kvs[comp] : P->nv;
+   *answered = false;
+
+   int *fv = NEW(int, nvc + 1);
+   int *loc = NEW(int, P->nv ? P->nv : 1);
+   for (int v = 0; v < P->nv; v++)
+      loc[v] = -1;
+
+   int nfv = 0;
+   bool has_extra = false;
+   for (int i = 0; i < nvc; i++) {
+      const int v = comp >= 0 ? P->kvl[P->kvs[comp] + i] : i;
+      const pvar_t *pv = &P->vars[v];
+      if (!is_free(P, v))
+         continue;
+      loc[v] = nfv;
+      fv[nfv++] = v;
+      if (pv->rc != NULL)
+         has_extra = true;
+      else if (pv->size
+               && dom_count(&pv->dom, pv->dom.lo, pv->dom.hi) > MAX_SIZE_CHOICES)
+         has_extra = true;
+   }
+
+   if (nfv == 0) {
+      free(fv);
+      free(loc);
+      return check_all(P, comp) ? S_SAT : S_UNSAT;
+   }
+
+   uint8_t *width = NEW(uint8_t, P->nv);
+   bool *sgn = NEW(bool, P->nv), *fixed = NEW(bool, P->nv);
+   int64_t *value = NEW(int64_t, P->nv);
+   for (int v = 0; v < P->nv; v++) {
+      const pvar_t *pv = &P->vars[v];
+      width[v] = pv->width;
+      sgn[v] = pv->sgn;
+      fixed[v] = !dom_empty(&pv->dom) && pv->dom.lo == pv->dom.hi;
+      value[v] = fixed[v] ? norm(pv->dom.lo, pv->width, pv->sgn) : 0;
+   }
+
+   const blast_shape_t shape = {
+      .nv = P->nv, .width = width, .sgn = sgn, .nsc = P->nsc,
+      .ebase = P->ebase, .sizes = P->sizes, .fixed = fixed, .value = value,
+   };
+   blast_t *b = blast_new(c, &shape);
+   const bool forced = P->sat == 2;
+   blast_set_limit(b, forced ? SAT_MAX_GATES_FORCED : SAT_MAX_GATES);
+
+   const int c0 = comp >= 0 ? P->kcs[comp] : 0;
+   const int c1 = comp >= 0 ? P->kcs[comp + 1] : P->ncons;
+
+   blit_t *roots = NULL;
+   unsigned nroots = 0, croots = 0;
+
+   for (int i = 0; i < nfv && !blast_overflow(b); i++) {
+      const blit_t dl = sat_domain(b, fv[i], &P->vars[fv[i]]);
+      if (dl != BLIT_TRUE)
+         VEC_PUSH(roots, nroots, croots, dl);
+   }
+
+   for (int k = c0; k < c1 && !blast_overflow(b); k++) {
+      const int ci = comp >= 0 ? P->kcl[k] : k;
+      const pcons_t *pc = &P->cons[ci];
+      if (pc->soft >= 0 && P->soft_on != NULL && !P->soft_on[pc->soft])
+         continue;
+
+      const blit_t r = pc->kind == C_REQ
+         ? blast_holds(b, pc->root)
+         : blast_unique(b, P->un + pc->unstart, pc->unn);
+      VEC_PUSH(roots, nroots, croots, r);
+   }
+
+   sres_t res = S_GIVEUP;
+   const unsigned nbase = nroots;
+
+   if (blast_overflow(b))
+      goto out;
+
+   const uint64_t budget = forced ? SAT_CONFLICTS_FORCED : SAT_CONFLICTS;
+   sat_res_t sr = SAT_UNSAT;
+   uint8_t *invals = NULL;
+
+   for (int pass = has_extra ? 0 : 1; pass < 2; pass++) {
+      nroots = nbase;
+      if (pass == 0) {
+         // Prefer unused randc values and small sizes for unconstrained arrays
+         for (int i = 0; i < nfv && !blast_overflow(b); i++) {
+            const int v = fv[i];
+            const pvar_t *pv = &P->vars[v];
+            if (pv->rc != NULL) {
+               const randc_t *rc = pv->rc;
+               if (rc->n > 0) {
+                  if (rc->left <= rc->n / 2) {
+                     blit_t any = BLIT_FALSE;
+                     for (uint32_t j = 0; j < rc->left && !blast_overflow(b); j++)
+                        any = blast_or(b, any, blast_var_eq(b, v, rc->vals[j]));
+                     VEC_PUSH(roots, nroots, croots, any);
+                  }
+                  else {
+                     for (uint32_t j = rc->left; j < rc->n && !blast_overflow(b); j++)
+                        VEC_PUSH(roots, nroots, croots,
+                                 blast_not(blast_var_eq(b, v, rc->vals[j])));
+                  }
+               }
+               else if (rc->nused > 0 && rc->nused <= 4096) {
+                  for (uint64_t j = 0; j < rc->cap && !blast_overflow(b); j++) {
+                     if (rc->used[j] != 0)
+                        VEC_PUSH(roots, nroots, croots,
+                                 blast_not(blast_var_eq(b, v, rc->used[j] - 1)));
+                  }
+               }
+            }
+            else if (pv->size
+                     && dom_count(&pv->dom, pv->dom.lo, pv->dom.hi) > MAX_SIZE_CHOICES) {
+               const i128 hi = dom_nth(&pv->dom, pv->dom.lo, pv->dom.hi, 31);
+               VEC_PUSH(roots, nroots, croots,
+                        blast_var_range(b, v, pv->dom.lo, hi));
+            }
+         }
+         if (blast_overflow(b))
+            continue;
+      }
+
+      const unsigned nin = blast_input_count(b);
+      free(invals);
+      invals = xcalloc(nin ? nin : 1);
+      sr = sat_solve_aig(b, roots, nroots, budget, sat_rnd_cb, NULL, invals);
+      if (sr == SAT_SAT || sr == SAT_GIVEUP)
+         break;
+   }
+
+   if (sr == SAT_UNSAT)
+      res = S_UNSAT;
+   else if (sr == SAT_GIVEUP)
+      res = S_GIVEUP;
+   else {
+      const unsigned nin = blast_input_count(b);
+      uint64_t *vbits = xcalloc_array(nfv, sizeof(uint64_t));
+      uint64_t *vmask = xcalloc_array(nfv, sizeof(uint64_t));
+      for (unsigned i = 0; i < nin; i++) {
+         int var;
+         unsigned bit;
+         blast_input_var(b, i, &var, &bit);
+         if (var >= 0 && var < P->nv && loc[var] >= 0 && bit < 64) {
+            const int li = loc[var];
+            vmask[li] |= UINT64_C(1) << bit;
+            if (invals[i])
+               vbits[li] |= UINT64_C(1) << bit;
+         }
+      }
+
+      const int mark = P->ntrail;
+      bool ok = true;
+      for (int i = 0; i < nfv && ok; i++) {
+         const int v = fv[i];
+         const pvar_t *pv = &P->vars[v];
+         i128 x;
+         if (vmask[i] == 0) {
+            i128 n = dom_count(&pv->dom, pv->dom.lo, pv->dom.hi);
+            if (pv->size && n > MAX_SIZE_CHOICES)
+               n = 32;
+            x = dom_nth(&pv->dom, pv->dom.lo, pv->dom.hi, rnd_i128(n));
+         }
+         else {
+            uint64_t bits = vbits[i];
+            const uint64_t need = wmask(pv->width);
+            if ((vmask[i] & need) != need)
+               bits |= rnd64() & (need & ~vmask[i]);
+            x = nrm(bits, pv->width, pv->sgn);
+         }
+         ok = var_clip(P, v, x, x);
+      }
+
+      if (ok) {
+         fill_vals(P, comp);
+         ok = check_cons(P, comp);
+      }
+
+      if (ok) {
+         rj_clear_queue(P);
+         *answered = true;
+         res = S_SAT;
+      }
+      else {
+         undo_to(P, mark);
+         res = S_GIVEUP;
+      }
+
+      free(vbits);
+      free(vmask);
+   }
+
+   free(invals);
+ out:
+   free(roots);
+   blast_free(b);
+   free(width);
+   free(sgn);
+   free(fixed);
+   free(value);
+   free(fv);
+   free(loc);
+   return res;
+}
+
 // Search one component, or the whole problem, by the stages that are on
 static sres_t solve_comp(prob_t *P)
 {
@@ -6721,9 +7005,60 @@ static sres_t solve_comp(prob_t *P)
          return S_GIVEUP;
    }
 
+   if (P->sat == 2) {
+      bool answered = false;
+      const sres_t sr = sat_comp(P, comp, &answered);
+      if (sr == S_SAT && answered)
+         P->nstage[CRV_STAGE_SAT]++;
+      else if (sr == S_GIVEUP)
+         P->oob = true;
+      return sr;
+   }
+
+   const int mark = P->ntrail;
+   const amark_t am = arena_mark(&P->ar);
+   const int64_t saved_budget = P->budget;
+   if (P->sat == 1 && dbg.budget == 0) {
+      // With SAT standing by as fallback, cap DFS work per component by its
+      // size so hopeless bitwise/multiplicative groups reach SAT quickly
+      // without cutting off large array/unique/ordering components.
+      const int nvc = comp >= 0 ? P->kvs[comp + 1] - P->kvs[comp] : P->nv;
+      int nfv = 0;
+      for (int i = 0; i < nvc; i++)
+         nfv += is_free(P, comp >= 0 ? P->kvl[P->kvs[comp] + i] : i);
+      const int c0 = comp >= 0 ? P->kcs[comp] : 0;
+      const int c1 = comp >= 0 ? P->kcs[comp + 1] : P->ncons;
+      int64_t un_work = 0;
+      for (int k = c0; k < c1; k++) {
+         const pcons_t *pc = &P->cons[comp >= 0 ? P->kcl[k] : k];
+         if (pc->kind == C_UNIQUE)
+            un_work += 24 * (int64_t)pc->unn * pc->unn;
+      }
+      const int64_t cap = P->work + 8000 + 800 * (int64_t)nfv
+         + 80 * (int64_t)(c1 - c0) + un_work;
+      if (cap < P->budget)
+         P->budget = cap;
+   }
    const sres_t r = search(P);
-   if (r == S_SAT)
+   P->budget = saved_budget;
+   if (r == S_SAT) {
       P->nstage[CRV_STAGE_DFS]++;
+      return r;
+   }
+
+   if (r == S_GIVEUP && P->sat == 1) {
+      undo_to(P, mark);
+      arena_reset(&P->ar, am);
+      rj_clear_queue(P);
+      P->oob = false;
+      bool answered = false;
+      const sres_t sr = sat_comp(P, comp, &answered);
+      if (sr == S_SAT && answered)
+         P->nstage[CRV_STAGE_SAT]++;
+      else if (sr == S_GIVEUP)
+         P->oob = true;
+      return sr;
+   }
    return r;
 }
 
@@ -7168,6 +7503,7 @@ static void prob_reset(prob_t *P, amark_t am)
    P->work = 0;
    P->oob = false;
    P->qn = 0;
+   P->unq = 0;
    P->curc = -1;
    P->ntb = 0;
    if (P->pend != NULL)

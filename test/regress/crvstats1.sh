@@ -43,10 +43,10 @@ NVC_CRV_ENGINE=bdd NVC_CRV_STATS=$PWD/bdd.tsv nvc -r crvstats1 > bdd.txt
 grep -c '^[0-9]' bdd.txt | grep -qx 30
 awk -F'\t' '$9 == 0 && $10 == 0 && $13 > 0 { ok = 1 } END { exit !ok }' bdd.tsv
 
-# A stage that does not exist yet falls back to the search, with a message
-NVC_CRV_ENGINE=sat nvc -r crvstats1 > sat.txt 2> sat.err
-cmp dfs.txt sat.txt
-grep -q 'not available' sat.err
+# The sat stage on its own answers every component of the 30 calls
+NVC_CRV_ENGINE=sat NVC_CRV_STATS=$PWD/sat.tsv nvc -r crvstats1 > sat.txt
+grep -c '^[0-9]' sat.txt | grep -qx 30
+awk -F'\t' '$9 == 0 && $10 == 0 && $15 > 0 { ok = 1 } END { exit !ok }' sat.tsv
 NVC_CRV_ENGINE=nonsense nvc -r crvstats1 > bad.txt 2> bad.err
 cmp base.txt bad.txt
 grep -q 'unknown engine' bad.err

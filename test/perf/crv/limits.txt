@@ -2,9 +2,7 @@
 # limit_us: per call; a case that passes is limited to 3x the slower of the measurement taken for
 # this file and the figure of the plan, the others to their target; xfail:<milestone> = known to be
 # over its limit or to give up until that milestone; no limit is below 20 us (machine noise).
-# Raised in M4b: p_in64 and r_xy64, a bdd build that reaches the node limit costs about 0.8 ms before the search
-# starts; q_objs, without the split of variables at the bits of a mask the search takes 10 times as long
-# for 100 aligned addresses in ascending order
+# M4c recovered p_in64/r_xy64 (MSB-first BDD order for >64 bits) and q_objs (unary-first propagation)
 p_dist16         327680         20  pass       1
 p_dyn100          20480        210  pass       0
 p_dyn1000          1280       2100  pass       0
@@ -13,7 +11,7 @@ p_impl16           5120        650  pass       0
 p_impl4           81920         42  pass       0
 p_impl64             80      48000  pass       0
 p_in32           327680         20  pass       1
-p_in64            81920         1500  pass       0
+p_in64            81920        800  pass       0
 p_none          1310720         20  pass       1
 p_sorted10        81920         43  pass       0
 p_sorted100        5120        680  pass       0
@@ -34,7 +32,7 @@ q_dist256         20480        220  pass       0
 q_inside1000       5120        800  pass       0
 q_item            81920         20  pass       1
 q_newobj         327680         20  pass       1
-q_objs             1280       20000  pass       0
+q_objs             1280       2500  pass       0
 q_pairs16          1280       1200  pass       0
 q_pairs32           320       8600  pass       0
 q_pairs64            80       5000  pass       0
@@ -50,7 +48,7 @@ q_sumtight        20480        360  pass       0
 q_sumtight2        5120        300  pass       0
 r_impl256            80       5000  pass       0
 r_mask               80       2000  pass       0
-r_mul16              80       2000  xfail:M4c  0
+r_mul16              80       2000  pass       0
 r_or8                80       2000  pass       0
 r_pairs128           20     550000  pass       0
 r_perm1024           20      50000  pass       0
@@ -59,6 +57,6 @@ r_sum512             80       3000  pass       0
 r_sum512b        327680       3000  xfail:M1   0
 r_uniq1000           20     170000  pass       0
 r_uniqdyn            20     260000  pass       0
-r_wide1024           80      20000  xfail:M4c  0
-r_wide256and         80       2000  xfail:M4c  0
-r_xy64            81920         1500  pass       0
+r_wide1024           80      20000  pass       0
+r_wide256and         80       2000  pass       0
+r_xy64            81920        800  pass       0

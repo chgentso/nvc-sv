@@ -412,8 +412,7 @@ static blit_t bv_le_const(blast_t *b, const bv_t *x, bool xs, i128 k)
 
    bv_t kv;
    bv_const(&kv, (uint64_t)k, w);
-   const blit_t lt = xs ? bv_slt(b, x, &kv) : bv_ult(b, x, &kv);
-   return blast_or(b, lt, bv_eq(b, x, &kv));
+   return lit_not(xs ? bv_slt(b, &kv, x) : bv_ult(b, &kv, x));
 }
 
 static blit_t bv_ge_const(blast_t *b, const bv_t *x, bool xs, i128 k)
@@ -1303,6 +1302,38 @@ blit_t blast_unique(blast_t *b, const crv_node_t *nodes, unsigned count)
    }
 
    return ok;
+}
+
+blit_t blast_var_range(blast_t *b, int v, __int128 lo, __int128 hi)
+{
+   const unsigned w = b->shape.width[v];
+   const bool sgn = b->shape.sgn[v];
+   const i128 tlo = sgn ? -((i128)1 << (w - 1)) : 0;
+   const i128 thi = sgn ? ((i128)1 << (w - 1)) - 1 : ((i128)1 << w) - 1;
+   if (lo <= tlo && hi >= thi)
+      return BLIT_TRUE;
+   else if (lo > hi || hi < tlo || lo > thi)
+      return BLIT_FALSE;
+
+   bv_t x;
+   input_vec(b, v, &x);
+   if (lo == hi) {
+      bv_t kv;
+      bv_const(&kv, (uint64_t)lo, x.n);
+      return bv_eq(b, &x, &kv);
+   }
+
+   const blit_t ge = bv_ge_const(b, &x, sgn, lo);
+   const blit_t le = bv_le_const(b, &x, sgn, hi);
+   return blast_and(b, ge, le);
+}
+
+blit_t blast_var_eq(blast_t *b, int v, uint64_t val)
+{
+   bv_t x, kv;
+   input_vec(b, v, &x);
+   bv_const(&kv, val, x.n);
+   return bv_eq(b, &x, &kv);
 }
 
 void blast_set_limit(blast_t *b, unsigned gates)

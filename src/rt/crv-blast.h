@@ -92,6 +92,10 @@ blit_t blast_holds(blast_t *b, crv_node_t n);
 // True when every value is defined and they are all different
 blit_t blast_unique(blast_t *b, const crv_node_t *nodes, unsigned count);
 
+// True when variable v lies in [lo, hi] (mathematical value) or equals val
+blit_t blast_var_range(blast_t *b, int v, __int128 lo, __int128 hi);
+blit_t blast_var_eq(blast_t *b, int v, uint64_t val);
+
 // A limit on the number of gates: once reached no more are made, the
 // literals that follow are meaningless and blast_overflow says so
 void blast_set_limit(blast_t *b, unsigned gates);
