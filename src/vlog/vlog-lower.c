@@ -24917,6 +24917,63 @@ static mir_value_t vlog_crv_w_cmp(vlog_gen_t *g, crv_binary_t op,
    return r;
 }
 
+static mir_value_t vlog_crv_w_to_native(vlog_gen_t *g, const crv_wide_t *w,
+                                        bool is_signed)
+{
+   // The chunks as one node of the solver, which has operators of any
+   // width: each chunk is moved into place and the pieces are joined
+
+   mir_value_t flags = vlog_crv_flags(g, w->width, false);
+
+   mir_value_t node = MIR_NULL_VALUE;
+   for (unsigned i = 0; i < w->n; i++) {
+      if (mir_is_null(w->c[i]))
+         continue;
+
+      mir_value_t part = CRV3(g, CRV_OP_CAST, g->crv_ctx, w->c[i], flags);
+      if (i > 0)
+         part = CRV5(g, CRV_OP_BINARY, g->crv_ctx, vlog_crv_int(g, CRV_SHL),
+                     part, CRV3(g, CRV_OP_CONST, g->crv_ctx,
+                                vlog_crv_int(g, i * 64), flags), flags);
+
+      node = mir_is_null(node) ? part
+         : CRV5(g, CRV_OP_BINARY, g->crv_ctx, vlog_crv_int(g, CRV_OR), node,
+                part, flags);
+   }
+
+   if (mir_is_null(node))
+      node = CRV3(g, CRV_OP_CONST, g->crv_ctx, vlog_crv_int(g, 0), flags);
+
+   if (is_signed)
+      node = CRV3(g, CRV_OP_CAST, g->crv_ctx, node,
+                  vlog_crv_flags(g, w->width, true));
+
+   return node;
+}
+
+static void vlog_crv_w_from_native(vlog_gen_t *g, mir_value_t node,
+                                   unsigned width, bool is_signed,
+                                   crv_wide_t *w)
+{
+   // The chunks of a node of the solver
+
+   vlog_crv_w_zero(w, width);
+
+   mir_value_t flags = vlog_crv_flags(g, width, false);
+   if (is_signed)
+      node = CRV3(g, CRV_OP_CAST, g->crv_ctx, node, flags);
+
+   for (unsigned i = 0; i < w->n; i++) {
+      mir_value_t part = node;
+      if (i > 0)
+         part = CRV5(g, CRV_OP_BINARY, g->crv_ctx, vlog_crv_int(g, CRV_SHR),
+                     part, CRV3(g, CRV_OP_CONST, g->crv_ctx,
+                                vlog_crv_int(g, i * 64), flags), flags);
+      w->c[i] = CRV3(g, CRV_OP_CAST, g->crv_ctx, part,
+                     vlog_crv_flags(g, 64, false));
+   }
+}
+
 static void vlog_crv_w_arith(vlog_gen_t *g, vlog_node_t v, unsigned w,
                              bool s, crv_wide_t *a, crv_wide_t *b)
 {
@@ -24950,15 +25007,23 @@ static void vlog_crv_w_arith(vlog_gen_t *g, vlog_node_t v, unsigned w,
    case V_BINARY_DIVIDE:
    case V_BINARY_MOD:
       {
-         // Only where the operands fit the 64 bit arithmetic of the solver
-         if (s || MIN(lw, 64) + MIN(rw, 64) > 64
-             || (vlog_subkind(v) == V_BINARY_TIMES && lw + rw > 64)
-             || lw > 64 || rw > 64)
-            fatal_at(vlog_loc(v), "sorry, this arithmetic on values wider "
-                     "than 64 bits is not supported in a constraint");
-
          const crv_binary_t op = vlog_subkind(v) == V_BINARY_TIMES ? CRV_MUL
             : vlog_subkind(v) == V_BINARY_DIVIDE ? CRV_DIV : CRV_MOD;
+
+         // Operands which fit the 64 bit arithmetic of the solver are
+         // combined as before, any other as nodes as wide as the result
+         if (s || MIN(lw, 64) + MIN(rw, 64) > 64
+             || (vlog_subkind(v) == V_BINARY_TIMES && lw + rw > 64)
+             || lw > 64 || rw > 64) {
+            mir_value_t na = vlog_crv_w_to_native(g, a, s);
+            mir_value_t nb = vlog_crv_w_to_native(g, b, s);
+            mir_value_t r = CRV5(g, CRV_OP_BINARY, g->crv_ctx,
+                                 vlog_crv_int(g, op), na, nb,
+                                 vlog_crv_flags(g, w, s));
+            vlog_crv_w_from_native(g, r, w, s, a);
+            return;
+         }
+
          mir_value_t r = vlog_crv_w_bin(g, op, a->c[0], b->c[0]);
          vlog_crv_w_zero(a, a->width);
          a->c[0] = r;
