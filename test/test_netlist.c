@@ -2036,6 +2036,75 @@ START_TEST(test_ev_struct_vhdl)
 }
 END_TEST
 
+static unsigned net_uses(conn_block_t *b, const char *proc, const char *net)
+{
+   const conn_proc_t *p = get_proc(b, proc);
+   ck_assert_ptr_nonnull(p->ev);
+   ck_assert(p->ev->has_reads);
+
+   unsigned uses = 0;
+   bool seen = false;
+   for (unsigned i = 0; i < p->ev->nreads; i++) {
+      if (strcmp(p->ev->reads[i].sig.net->name, net) == 0) {
+         uses |= p->ev->reads[i].uses;
+         seen = true;
+      }
+   }
+
+   ck_assert_msg(seen, "%s does not read %s", proc, net);
+   return uses;
+}
+
+START_TEST(test_ev_reads)
+{
+   set_standard(STD_19);
+   input_from_file(TESTDIR "/netlist/ev_reads.sv");
+
+   tree_t e = run_elab();
+   fail_if_errors();
+
+   const conn_build_opts_t bopts = { .evidence = true };
+   conn_design_t *cd = conn_build_with(e, &bopts);
+   ck_assert_ptr_nonnull(cd);
+
+   conn_block_t *top = conn_root(cd, 0);
+
+   ck_assert_uint_eq(net_uses(top, "always_ff @14", "a"), CONN_USE_COPY);
+   ck_assert_uint_eq(net_uses(top, "always_ff @15", "b"), CONN_USE_ARITH);
+   ck_assert_uint_eq(net_uses(top, "always_ff @17", "c"), CONN_USE_LOGIC);
+   ck_assert_uint_eq(net_uses(top, "always_ff @17", "e"), CONN_USE_LOGIC);
+   ck_assert_uint_eq(net_uses(top, "always_ff @18", "f"), CONN_USE_LOGIC);
+   ck_assert_uint_eq(net_uses(top, "always_ff @18", "s"), CONN_USE_BIT);
+   ck_assert_uint_eq(net_uses(top, "always_ff @20", "h"), CONN_USE_CONST);
+   ck_assert_uint_eq(net_uses(top, "always_ff @20", "a"), CONN_USE_COMPARE);
+   ck_assert_uint_eq(net_uses(top, "always_ff @20", "w"), CONN_USE_BIT);
+   ck_assert_uint_eq(net_uses(top, "always_ff @22", "idx"), CONN_USE_INDEX);
+   ck_assert_uint_eq(net_uses(top, "always_ff @24", "c"), CONN_USE_STORE);
+   ck_assert_uint_eq(net_uses(top, "always_ff @26", "e"), CONN_USE_BIT);
+   ck_assert_uint_eq(net_uses(top, "always_comb @28", "g"), CONN_USE_ARITH);
+   ck_assert_uint_eq(net_uses(top, "always_ff @36", "d"), CONN_USE_CALL);
+
+   // The pins are named in the JSON, a copy is the output's copy
+   char *json = write_json_ev(cd, -1, true);
+   ck_has(json, "\"reads\":{");
+   ck_has(json, "\"b\":[\"arith\"]");
+   ck_has(json, "\"a\":[\"copy\"]");
+   ck_has(json, "\"clk\":[]");
+   ck_has(json, "\"idx\":[\"index\"]");
+   ck_has(json, "\"h\":[\"const-compare\"]");
+   free(json);
+
+   // Without evidence there is none
+   conn_free(cd);
+   cd = conn_build(e);
+   json = write_json_ev(cd, -1, false);
+   ck_has_not(json, "\"reads\"");
+   free(json);
+
+   conn_free(cd);
+}
+END_TEST
+
 Suite *get_netlist_tests(void)
 {
    Suite *s = suite_create("netlist");
@@ -2064,6 +2133,7 @@ Suite *get_netlist_tests(void)
    tcase_add_test(tc, test_ev_cdc);
    tcase_add_test(tc, test_ev_struct);
    tcase_add_test(tc, test_ev_struct_vhdl);
+   tcase_add_test(tc, test_ev_reads);
    suite_add_tcase(s, tc);
 
    return s;

@@ -86,6 +86,9 @@ typedef struct {
    A(var_t *)       varlist;
    A(conn_ev_clock_t) clocks;
    A(vlog_node_t)   skip;      // Conditions that are not guards
+   A(conn_read_ev_t) uses;     // How the reads are used
+   hash_t          *ucov;     // Names inside selects counted as part of them
+   unsigned         opctx;    // Use of the target of an operator assignment
    out_t           *outs;
    unsigned         nouts;
    int              cur_clock;
@@ -143,6 +146,328 @@ static bool is_local_decl(vlog_node_t d)
       return true;
    default:
       return false;
+   }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Uses of what is read
+
+// The use of a name that is assigned to a variable to be read later: it
+// is the use of the variable that counts
+#define U_DEFER   0x8000
+
+static void use_add(wk_t *w, const conn_range_t *r, unsigned uses)
+{
+   if (r->net == NULL)
+      return;
+
+   conn_read_ev_t u = { .sig = *r, .uses = uses };
+   APUSH(w->uses, u);
+}
+
+// A name whose bits are used as CTX say
+static void use_name(wk_t *w, vlog_node_t e, unsigned ctx)
+{
+   conn_range_t r;
+   bool approx = false;
+   vlog_node_t d = base_decl(e);
+   const bool ok = vlog_select(w->cd, e, &r, &approx);
+
+   var_t *var = (w->subst && d != NULL) ? hash_get(w->vars, d) : NULL;
+   if (var != NULL) {
+      // What the variable holds is used when it is read
+      if (ctx != U_DEFER) {
+         const unsigned k = ctx == CONN_USE_COPY ? CONN_USE_STORE : ctx;
+         for (unsigned i = 0; i < var->data.count; i++) {
+            const conn_range_t *v = &(var->data.items[i]);
+            use_add(w, v, v->hi == v->lo ? CONN_USE_BIT : k);
+         }
+      }
+      if (var->full || !ok)
+         return;
+   }
+
+   if (!ok || ctx == U_DEFER)
+      return;
+
+   unsigned k = ctx;
+   const bool whole = !approx && (vlog_kind(e) == V_REF
+                                  || vlog_kind(e) == V_HIER_REF
+                                  || vlog_kind(e) == V_MEMBER_REF);
+   if (r.hi == r.lo && !approx)
+      k = CONN_USE_BIT;
+   else if (approx) {
+      // A select that is not static is a multiplexer of the bits
+      switch (ctx) {
+      case CONN_USE_COPY:
+      case CONN_USE_BIT:
+      case CONN_USE_CONST:
+         k = CONN_USE_LOGIC;
+         break;
+      default:
+         break;
+      }
+   }
+   else if (!whole && ctx == CONN_USE_COPY)
+      k = CONN_USE_BIT;   // A slice is not the whole pin
+
+   use_add(w, &r, k);
+}
+
+static void use_selects_cb(vlog_node_t v, void *ctx)
+{
+   wk_t *w = ctx;
+
+   switch (vlog_kind(v)) {
+   case V_BIT_SELECT:
+   case V_PART_SELECT:
+   case V_MEMBER_REF:
+      {
+         if (hash_get(w->ucov, v) != NULL)
+            return;
+
+         conn_range_t r;
+         bool approx = false;
+         if (!vlog_select(w->cd, v, &r, &approx))
+            return;
+
+         use_name(w, v, w->opctx);
+         for (;;) {
+            switch (vlog_kind(v)) {
+            case V_BIT_SELECT:
+            case V_PART_SELECT:
+            case V_MEMBER_REF:
+               v = vlog_value(v);
+               hash_put(w->ucov, v, v);
+               continue;
+            default:
+               return;
+            }
+         }
+      }
+      break;
+   default:
+      break;
+   }
+}
+
+static void use_refs_cb(vlog_node_t v, void *ctx)
+{
+   wk_t *w = ctx;
+
+   switch (vlog_kind(v)) {
+   case V_REF:
+   case V_HIER_REF:
+      if (hash_get(w->ucov, v) == NULL)
+         use_name(w, v, w->opctx);
+      break;
+   default:
+      break;
+   }
+}
+
+// Everything that E reads is used as CTX
+static void wk_use_all(wk_t *w, vlog_node_t e, unsigned ctx)
+{
+   const unsigned saved = w->opctx;
+   w->opctx = ctx;
+   vlog_visit(e, use_selects_cb, w);
+   vlog_visit(e, use_refs_cb, w);
+   w->opctx = saved;
+}
+
+static bool is_const_expr(vlog_node_t e)
+{
+   int64_t c;
+   return vlog_kind(e) == V_NUMBER || vlog_get_const(e, &c);
+}
+
+static void wk_uses(wk_t *w, vlog_node_t e, unsigned ctx);
+
+// The indices of a select and of the selects it is made of
+static void wk_use_indices(wk_t *w, vlog_node_t e)
+{
+   for (;;) {
+      switch (vlog_kind(e)) {
+      case V_BIT_SELECT:
+         {
+            const int n = vlog_params(e);
+            for (int i = 0; i < n; i++)
+               wk_uses(w, vlog_param(e, i), CONN_USE_INDEX);
+         }
+         e = vlog_value(e);
+         continue;
+      case V_PART_SELECT:
+         if (vlog_has_left(e) && !is_const_expr(vlog_left(e)))
+            wk_uses(w, vlog_left(e), CONN_USE_INDEX);
+         if (vlog_has_right(e) && !is_const_expr(vlog_right(e)))
+            wk_uses(w, vlog_right(e), CONN_USE_INDEX);
+         e = vlog_value(e);
+         continue;
+      case V_MEMBER_REF:
+         e = vlog_value(e);
+         continue;
+      default:
+         return;
+      }
+   }
+}
+
+// The expression E delivers its value to something that uses it as CTX:
+// CONN_USE_COPY if the whole value is assigned to a target of its width
+static void wk_uses(wk_t *w, vlog_node_t e, unsigned ctx)
+{
+   switch (vlog_kind(e)) {
+   case V_REF:
+   case V_HIER_REF:
+      use_name(w, e, ctx);
+      return;
+
+   case V_BIT_SELECT:
+   case V_PART_SELECT:
+   case V_MEMBER_REF:
+      {
+         conn_range_t r;
+         bool approx = false;
+         if (vlog_select(w->cd, e, &r, &approx)
+             || is_local_decl(base_decl(e))) {
+            use_name(w, e, ctx);
+            wk_use_indices(w, e);
+         }
+         else
+            wk_use_all(w, e, CONN_USE_CALL);
+      }
+      return;
+
+   case V_NUMBER:
+   case V_REAL:
+   case V_STRING:
+      return;
+
+   case V_UNARY:
+      switch ((vlog_unary_t)vlog_subkind(e)) {
+      case V_UNARY_IDENTITY:
+         wk_uses(w, vlog_value(e), ctx);
+         break;
+      case V_UNARY_BITNEG:
+         wk_uses(w, vlog_value(e), CONN_USE_LOGIC);
+         break;
+      case V_UNARY_NOT:
+      case V_UNARY_AND:
+      case V_UNARY_OR:
+      case V_UNARY_NAND:
+      case V_UNARY_NOR:
+         wk_uses(w, vlog_value(e), CONN_USE_CONST);
+         break;
+      default:
+         wk_uses(w, vlog_value(e), CONN_USE_ARITH);
+         break;
+      }
+      return;
+
+   case V_BINARY:
+      {
+         vlog_node_t l = vlog_left(e), r = vlog_right(e);
+         switch ((vlog_binary_t)vlog_subkind(e)) {
+         case V_BINARY_OR:
+         case V_BINARY_AND:
+         case V_BINARY_XOR:
+         case V_BINARY_XNOR:
+         case V_BINARY_NAND:
+         case V_BINARY_NOR:
+            wk_uses(w, l, CONN_USE_LOGIC);
+            wk_uses(w, r, CONN_USE_LOGIC);
+            break;
+         case V_BINARY_LOG_AND:
+         case V_BINARY_LOG_OR:
+            wk_uses(w, l, CONN_USE_CONST);
+            wk_uses(w, r, CONN_USE_CONST);
+            break;
+         case V_BINARY_LT:
+         case V_BINARY_GT:
+         case V_BINARY_LEQ:
+         case V_BINARY_GEQ:
+            wk_uses(w, l, CONN_USE_COMPARE);
+            wk_uses(w, r, CONN_USE_COMPARE);
+            break;
+         case V_BINARY_LOG_EQ:
+         case V_BINARY_LOG_NEQ:
+         case V_BINARY_CASE_EQ:
+         case V_BINARY_CASE_NEQ:
+         case V_BINARY_WILD_EQ:
+         case V_BINARY_WILD_NEQ:
+            if (is_const_expr(r)) {
+               wk_uses(w, l, CONN_USE_CONST);
+               wk_uses(w, r, CONN_USE_CONST);
+            }
+            else if (is_const_expr(l)) {
+               wk_uses(w, l, CONN_USE_CONST);
+               wk_uses(w, r, CONN_USE_CONST);
+            }
+            else {
+               wk_uses(w, l, CONN_USE_COMPARE);
+               wk_uses(w, r, CONN_USE_COMPARE);
+            }
+            break;
+         case V_BINARY_SHIFT_LL:
+         case V_BINARY_SHIFT_RL:
+         case V_BINARY_SHIFT_LA:
+         case V_BINARY_SHIFT_RA:
+            // Moving the bits by a known amount keeps them apart
+            wk_uses(w, l, is_const_expr(r) ? CONN_USE_LOGIC : CONN_USE_ARITH);
+            wk_uses(w, r, CONN_USE_ARITH);
+            break;
+         default:
+            wk_uses(w, l, CONN_USE_ARITH);
+            wk_uses(w, r, CONN_USE_ARITH);
+            break;
+         }
+      }
+      return;
+
+   case V_COND_EXPR:
+      wk_uses(w, vlog_value(e), CONN_USE_CONST);
+      wk_uses(w, vlog_left(e), ctx == CONN_USE_COPY ? CONN_USE_LOGIC : ctx);
+      wk_uses(w, vlog_right(e), ctx == CONN_USE_COPY ? CONN_USE_LOGIC : ctx);
+      return;
+
+   case V_CONCAT:
+      {
+         const int n = vlog_params(e);
+         if (n == 1 && !vlog_has_value(e)) {
+            wk_uses(w, vlog_param(e, 0), ctx);
+            return;
+         }
+
+         for (int i = 0; i < n; i++)
+            wk_uses(w, vlog_param(e, i), CONN_USE_STORE);
+         if (vlog_has_value(e))
+            wk_uses(w, vlog_value(e), CONN_USE_ARITH);
+      }
+      return;
+
+   case V_SYS_FCALL:
+      {
+         const int n = vlog_params(e);
+         const char *name = vlog_has_ident(e) ? istr(vlog_ident(e)) : "";
+         const bool conv = n == 1 && (strcmp(name, "$signed") == 0
+                                      || strcmp(name, "$unsigned") == 0);
+         for (int i = 0; i < n; i++)
+            wk_uses(w, vlog_param(e, i), conv ? ctx : CONN_USE_CALL);
+      }
+      return;
+
+   case V_USER_FCALL:
+      {
+         const int n = vlog_params(e);
+         for (int i = 0; i < n; i++)
+            wk_uses(w, vlog_param(e, i), CONN_USE_CALL);
+      }
+      return;
+
+   default:
+      wk_use_all(w, e, CONN_USE_CALL);
+      return;
    }
 }
 
@@ -276,13 +601,15 @@ static void wk_visit(wk_t *w, vlog_node_t e)
 // Reads of E go to DATA, and those that stand for the control of a
 // variable substituted to CTRL
 static void wk_collect(wk_t *w, vlog_node_t e, range_list_t *data,
-                       range_list_t *ctrl, bool subst)
+                       range_list_t *ctrl, bool subst, unsigned uctx)
 {
    w->rd_data = data;
    w->rd_ctrl = ctrl;
    w->subst = subst;
 
    wk_visit(w, e);
+   if (uctx != 0)
+      wk_uses(w, e, uctx);
 
    // What a subroutine reads goes to every output of the process
    w->rd_data = &w->call;
@@ -296,6 +623,8 @@ static void wk_collect(wk_t *w, vlog_node_t e, range_list_t *data,
       case V_FUNC_DECL:
       case V_TASK_DECL:
          wk_visit(w, callee);
+         if (uctx != 0)
+            wk_use_all(w, callee, CONN_USE_CALL);
          break;
       default:
          break;
@@ -379,7 +708,7 @@ static void wk_probe(wk_t *w, vlog_node_t e, range_list_t *data,
 {
    hash_t *saved = w->covered;
    w->covered = hash_new(16);
-   wk_collect(w, e, data, ctrl, false);
+   wk_collect(w, e, data, ctrl, false, 0);
    hash_free(w->covered);
    w->covered = saved;
 }
@@ -479,7 +808,7 @@ static void wk_target_index(wk_t *w, vlog_node_t t, range_list_t *ctrl)
       {
          const int n = vlog_params(t);
          for (int i = 0; i < n; i++)
-            wk_collect(w, vlog_param(t, i), ctrl, ctrl, true);
+            wk_collect(w, vlog_param(t, i), ctrl, ctrl, true, CONN_USE_INDEX);
          wk_target_index(w, vlog_value(t), ctrl);
       }
       break;
@@ -488,9 +817,9 @@ static void wk_target_index(wk_t *w, vlog_node_t t, range_list_t *ctrl)
       {
          int64_t c;
          if (vlog_has_left(t) && !vlog_get_const(vlog_left(t), &c))
-            wk_collect(w, vlog_left(t), ctrl, ctrl, true);
+            wk_collect(w, vlog_left(t), ctrl, ctrl, true, CONN_USE_INDEX);
          if (vlog_has_right(t) && !vlog_get_const(vlog_right(t), &c))
-            wk_collect(w, vlog_right(t), ctrl, ctrl, true);
+            wk_collect(w, vlog_right(t), ctrl, ctrl, true, CONN_USE_INDEX);
          wk_target_index(w, vlog_value(t), ctrl);
       }
       break;
@@ -523,11 +852,6 @@ static void wk_assign(wk_t *w, vlog_node_t target, vlog_node_t value,
    SCOPED_LIST(range_list_t, ctrl);
    target_list_t tgts = AINIT;
 
-   if (value != NULL)
-      wk_collect(w, value, &data, &ctrl, true);
-   if (own_value)
-      wk_collect(w, target, &data, &ctrl, true);
-
    add_list(&ctrl, &w->guard);
    wk_target_index(w, target, &ctrl);
    wk_targets(w, target, &tgts);
@@ -546,6 +870,26 @@ static void wk_assign(wk_t *w, vlog_node_t target, vlog_node_t value,
           && tr.hi - tr.lo == src.hi - src.lo)
          copy = true;
    }
+
+   // How the value is used: a whole copy of a name, the value of a name that
+   // is only kept in a variable until it is read, or a word stored
+   // not bit for bit
+   unsigned vctx = CONN_USE_COPY;
+   if (value != NULL && is_name(value)) {
+      if (copy)
+         vctx = CONN_USE_COPY;
+      else if (tgts.count == 1 && !tgts.items[0].is_net)
+         vctx = U_DEFER;
+      else
+         vctx = CONN_USE_STORE;
+   }
+
+   const unsigned optx = w->opctx;
+   w->opctx = 0;
+   if (value != NULL)
+      wk_collect(w, value, &data, &ctrl, true, own_value ? optx : vctx);
+   if (own_value)
+      wk_collect(w, target, &data, &ctrl, true, optx);
 
    for (unsigned i = 0; i < tgts.count; i++) {
       const target_t *tg = &(tgts.items[i]);
@@ -624,11 +968,22 @@ static void wk_stmt(wk_t *w, vlog_node_t s)
       break;
 
    case V_OP_ASSIGN:
+      switch ((vlog_assign_t)vlog_subkind(s)) {
+      case V_ASSIGN_AND:
+      case V_ASSIGN_OR:
+      case V_ASSIGN_XOR:
+         w->opctx = CONN_USE_LOGIC;
+         break;
+      default:
+         w->opctx = CONN_USE_ARITH;
+         break;
+      }
       wk_assign(w, vlog_target(s), vlog_value(s), true, true);
       break;
 
    case V_PREFIX:
    case V_POSTFIX:
+      w->opctx = CONN_USE_ARITH;
       wk_assign(w, vlog_target(s), NULL, true, true);
       break;
 
@@ -655,7 +1010,8 @@ static void wk_stmt(wk_t *w, vlog_node_t s)
                if (clk >= 0)
                   w->cur_clock = clk;
                else
-                  wk_collect(w, vlog_value(c), &w->guard, &w->guard, true);
+                  wk_collect(w, vlog_value(c), &w->guard, &w->guard, true,
+                              CONN_USE_CONST);
             }
 
             if (skip)
@@ -677,16 +1033,29 @@ static void wk_stmt(wk_t *w, vlog_node_t s)
    case V_CASE:
       {
          const unsigned mark = w->guard.count;
-         wk_collect(w, vlog_value(s), &w->guard, &w->guard, true);
 
+         // The selector is compared with the items: with constants it is
+         // only tested for equality
+         bool all_const = true;
          const int n = vlog_stmts(s);
+         for (int i = 0; i < n; i++) {
+            vlog_node_t item = vlog_stmt(s, i);
+            const int np = vlog_params(item);
+            for (int j = 0; j < np; j++)
+               all_const &= is_const_expr(vlog_param(item, j));
+         }
+
+         wk_collect(w, vlog_value(s), &w->guard, &w->guard, true,
+                    all_const ? CONN_USE_CONST : CONN_USE_COMPARE);
+
          for (int i = 0; i < n; i++) {
             vlog_node_t item = vlog_stmt(s, i);
             const unsigned mark2 = w->guard.count;
 
             const int np = vlog_params(item);
             for (int j = 0; j < np; j++)
-               wk_collect(w, vlog_param(item, j), &w->guard, &w->guard, true);
+               wk_collect(w, vlog_param(item, j), &w->guard, &w->guard, true,
+                           all_const ? 0 : CONN_USE_COMPARE);
 
             const int ns = vlog_stmts(item);
             for (int j = 0; j < ns; j++)
@@ -701,7 +1070,8 @@ static void wk_stmt(wk_t *w, vlog_node_t s)
    case V_FOREACH:
       {
          const unsigned mark = w->guard.count;
-         wk_collect(w, vlog_value(s), &w->guard, &w->guard, true);
+         wk_collect(w, vlog_value(s), &w->guard, &w->guard, true,
+                 CONN_USE_CONST);
          if (w->guard.count > mark)
             wk_why(w, CONN_WHY_LOOP);
 
@@ -720,7 +1090,8 @@ static void wk_stmt(wk_t *w, vlog_node_t s)
          if (vlog_has_left(s))
             wk_stmt(w, vlog_left(s));
          if (vlog_has_value(s))
-            wk_collect(w, vlog_value(s), &w->guard, &w->guard, true);
+            wk_collect(w, vlog_value(s), &w->guard, &w->guard, true,
+                 CONN_USE_CONST);
 
          // A loop whose bounds depend on signals is not unrolled
          if (w->guard.count > mark)
@@ -751,7 +1122,8 @@ static void wk_stmt(wk_t *w, vlog_node_t s)
    case V_REPEAT:
       {
          const unsigned mark = w->guard.count;
-         wk_collect(w, vlog_value(s), &w->guard, &w->guard, true);
+         wk_collect(w, vlog_value(s), &w->guard, &w->guard, true,
+                 CONN_USE_CONST);
          if (w->guard.count > mark)
             wk_why(w, CONN_WHY_LOOP);
 
@@ -767,7 +1139,7 @@ static void wk_stmt(wk_t *w, vlog_node_t s)
    case V_USER_FCALL:
    case V_VOID_CALL:
       wk_why(w, CONN_WHY_CALL);
-      wk_collect(w, s, &w->call, &w->call, false);
+      wk_collect(w, s, &w->call, &w->call, false, CONN_USE_CALL);
       break;
 
    case V_TIMING:
@@ -778,11 +1150,22 @@ static void wk_stmt(wk_t *w, vlog_node_t s)
       w->other = true;
       break;
 
-   case V_EMPTY:
-   case V_SYS_TCALL:
    case V_ASSERT:
    case V_ASSUME:
    case V_COVER:
+      // Checks do not take part in what the process computes, the bits they
+      // look at are only observed
+      if (vlog_has_value(s)) {
+         vlog_node_t c = vlog_value(s);
+         if (vlog_kind(c) == V_PROP_SPEC)
+            wk_use_all(w, c, CONN_USE_LOGIC);
+         else
+            wk_uses(w, c, CONN_USE_CONST);
+      }
+      break;
+
+   case V_EMPTY:
+   case V_SYS_TCALL:
    case V_DISABLE:
    case V_RETURN:
    case V_LOOP_JUMP:
@@ -791,7 +1174,7 @@ static void wk_stmt(wk_t *w, vlog_node_t s)
    default:
       // Not understood: its reads are possible sources of every output
       wk_why(w, CONN_WHY_OTHER);
-      wk_collect(w, s, &w->call, &w->call, false);
+      wk_collect(w, s, &w->call, &w->call, false, CONN_USE_CALL);
       break;
    }
 }
@@ -808,6 +1191,7 @@ static void wk_init(wk_t *w, conn_design_t *cd, conn_proc_t *proc)
    w->covered = hash_new(64);
    w->vars = hash_new(16);
    w->seen_callee = hash_new(16);
+   w->ucov = hash_new(16);
    w->nouts = proc->ndrives;
    w->outs = xcalloc_array(MAX(proc->ndrives, 1), sizeof(out_t));
 }
@@ -817,6 +1201,7 @@ static void wk_free(wk_t *w)
    hash_free(w->covered);
    hash_free(w->vars);
    hash_free(w->seen_callee);
+   hash_free(w->ucov);
 
    for (unsigned i = 0; i < w->varlist.count; i++) {
       ACLEAR(w->varlist.items[i]->data);
@@ -836,6 +1221,7 @@ static void wk_free(wk_t *w)
    ACLEAR(w->callees);
    ACLEAR(w->clocks);
    ACLEAR(w->skip);
+   ACLEAR(w->uses);
 }
 
 static conn_ev_class_t out_class(conn_ev_class_t cls)
@@ -1221,7 +1607,8 @@ static void evidence_always(wk_t *w, conn_evidence_t *ev, vlog_node_t v)
    for (int i = 0; i < nparams; i++) {
       vlog_node_t e = vlog_param(ctrl, i);
       if (vlog_has_left(e))
-         wk_collect(w, vlog_left(e), &w->guard, &w->guard, false);
+         wk_collect(w, vlog_left(e), &w->guard, &w->guard, false,
+                    CONN_USE_CONST);
    }
    w->base_guard = w->guard.count;
 
@@ -1250,7 +1637,9 @@ static void evidence_gate(wk_t *w, conn_evidence_t *ev, vlog_node_t v)
 
    const int np = vlog_params(v);
    for (int i = 0; i < np; i++)
-      wk_collect(w, vlog_param(v, i), &data, &ctrl, false);
+      wk_collect(w, vlog_param(v, i), &data, &ctrl, false,
+                 vlog_subkind(v) == V_GATE_BUF && np == 1
+                 ? CONN_USE_COPY : CONN_USE_LOGIC);
 
    if (vlog_has_target(v))
       wk_targets(w, vlog_target(v), &tgts);
@@ -1326,6 +1715,10 @@ void vlog_proc_evidence(conn_design_t *cd, conn_proc_t *proc, vlog_node_t v)
 
    if (w.other)
       wk_class_other(ev);
+
+   ev->reads = DDUP(cd, w.uses, conn_read_ev_t);
+   ev->nreads = w.uses.count;
+   ev->has_reads = true;
 
    // What the connectivity scan could not resolve is approximate too
    if (proc->approx && w.why == 0)

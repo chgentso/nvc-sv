@@ -511,6 +511,73 @@ static void write_sig_bits(wctx_t *w, const conn_range_t *r)
    ACLEAR(bits);
 }
 
+// The uses of every input pin: a pin read only bit by bit has an empty list
+static void write_reads(wctx_t *w, const evid_t *e)
+{
+   static const struct { unsigned bit; const char *name; } kinds[] = {
+      { CONN_USE_ARITH, "arith" }, { CONN_USE_COMPARE, "compare" },
+      { CONN_USE_INDEX, "index" }, { CONN_USE_CALL, "call" },
+      { CONN_USE_STORE, "store" }, { CONN_USE_BIT, "bit" },
+      { CONN_USE_LOGIC, "logic" }, { CONN_USE_CONST, "const-compare" },
+      { CONN_USE_COPY, "copy" },
+   };
+
+   const conn_evidence_t *ev = e->ev;
+   const conn_proc_t *p = e->proc;
+
+   key(w, "reads");
+   begin_obj(w);
+
+   for (unsigned i = 0; i < p->nreads; i++) {
+      const char *pin = e->rnames[i];
+      if (pin == NULL)
+         continue;
+
+      bool dup = false;
+      for (unsigned j = 0; j < i; j++)
+         dup |= e->rnames[j] == pin;
+      if (dup)
+         continue;
+
+      // All the ranges that make up the pin
+      unsigned uses = 0;
+      for (unsigned j = i; j < p->nreads; j++) {
+         if (e->rnames[j] != pin)
+            continue;
+
+         const conn_range_t *pr = &(p->reads[j]);
+         for (unsigned k = 0; k < ev->nreads; k++) {
+            const conn_read_ev_t *r = &(ev->reads[k]);
+            if (r->sig.net == pr->net && r->sig.lo <= pr->hi
+                && pr->lo <= r->sig.hi)
+               uses |= r->uses & ~CONN_USE_COPY;
+         }
+      }
+
+      // A copy is the whole of the pin: the one that the output names
+      for (unsigned k = 0; k < ev->nouts; k++) {
+         const conn_out_ev_t *o = &(ev->outs[k]);
+         if (o->has_copy && read_pin(e, &(o->copy)) == pin)
+            uses |= CONN_USE_COPY;
+      }
+
+      key(w, pin);
+      fputc('[', w->f);
+      bool first = true;
+      for (unsigned k = 0; k < ARRAY_LEN(kinds); k++) {
+         if (!(uses & kinds[k].bit))
+            continue;
+         if (!first)
+            fputc(',', w->f);
+         json_string(w->f, kinds[k].name);
+         first = false;
+      }
+      fputc(']', w->f);
+   }
+
+   end_obj(w);
+}
+
 static void write_evidence(wctx_t *w, const evid_t *e)
 {
    const conn_evidence_t *ev = e->ev;
@@ -568,6 +635,9 @@ static void write_evidence(wctx_t *w, const evid_t *e)
       key(w, "sync_reset");
       write_pin_list(w, e, ev->sync_reset, ev->nsync_reset);
    }
+
+   if (ev->has_reads)
+      write_reads(w, e);
 
    if (ev->cls != CONN_EV_OTHER) {
       key(w, "outputs");

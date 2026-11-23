@@ -235,6 +235,29 @@ typedef struct {
    conn_range_t     copy;
 } conn_out_ev_t;
 
+// How a process uses the bits it reads (evidence.reads): a mask.  The first
+// five take the bits of a pin as one value, the rest do not.  CONN_USE_COPY
+// is not set by the walkers: it follows from the copy of an output.
+typedef enum {
+   CONN_USE_ARITH    = 1,     // Operand of arithmetic, a shift count, a conversion
+   CONN_USE_COMPARE  = 2,     // Ordering, or equality with a non-constant
+   CONN_USE_INDEX    = 4,     // Index, slice bound, address
+   CONN_USE_CALL     = 8,     // Argument of a call or of an opaque expression
+   CONN_USE_STORE    = 16,    // Whole word stored but not as a bit-for-bit copy
+   CONN_USE_BIT      = 32,    // A single bit or a bit slice of constant position
+   CONN_USE_LOGIC    = 64,    // Bitwise operator or multiplexer
+   CONN_USE_CONST    = 128,   // Equality with a constant
+   CONN_USE_COPY     = 256,   // Whole pin copied to the output with a copy
+} conn_use_t;
+
+#define CONN_USE_VALUE (CONN_USE_ARITH | CONN_USE_COMPARE | CONN_USE_INDEX \
+                        | CONN_USE_CALL | CONN_USE_STORE)
+
+typedef struct {
+   conn_range_t sig;
+   unsigned     uses;       // conn_use_t, 0 if only read bit by bit
+} conn_read_ev_t;
+
 typedef struct {
    conn_ev_class_t  cls;
    bool             approx;
@@ -247,6 +270,9 @@ typedef struct {
    unsigned         nsync_reset;
    conn_out_ev_t   *outs;
    unsigned         nouts;
+   conn_read_ev_t  *reads;     // Uses of what the process reads: ranges that
+   unsigned         nreads;    // overlap the same pin are combined
+   bool             has_reads; // The walker reports them
 } conn_evidence_t;
 
 struct _conn_proc {
