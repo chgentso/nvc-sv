@@ -26572,6 +26572,100 @@ static void vlog_crv_foreach_unroll(vlog_gen_t *g, vlog_node_t v,
    mir_set_cursor(g->mu, done_bb, MIR_APPEND);
 }
 
+static void vlog_crv_foreach_assoc_objects(vlog_gen_t *g, vlog_node_t v,
+                                           mir_value_t guard)
+{
+   // The objects held by an associative array are solved with it, so each
+   // element gets its own constraints and the key is a variable that the
+   // names of the objects can use
+
+   vlog_node_t arr = vlog_value(v);
+   vlog_node_t decl = vlog_ref(arr);
+   vlog_node_t idecl = vlog_decl(v, 0);
+   vlog_node_t aty = vlog_crv_assoc_type(decl);
+
+   vlog_node_t kt = vlog_assoc_key(aty);
+   if (kt == NULL)
+      fatal_at(vlog_loc(idecl), "foreach over an associative array with a "
+               "wildcard index is not allowed");
+
+   bool is_string;
+   (void)vlog_assoc_key_type(g, aty, &is_string);
+
+   mir_value_t ua = vlog_lower_rvalue(g, arr);
+   mir_value_t data = mir_build_unwrap(g->mu, ua);
+   mir_value_t len = mir_build_uarray_len(g->mu, ua, 0);
+
+   vlog_push_type_override(idecl, kt);
+
+   const type_info_t *kti = vlog_type_info(g, kt);
+   mir_value_t var = mir_add_var(g->mu, kti->type, kti->stamp,
+                                 vlog_ident(idecl), 0);
+   mir_put_object(g->mu, idecl, var);
+
+   mir_type_t t_offset = mir_offset_type(g->mu);
+   mir_value_t ivar = mir_add_var(g->mu, t_offset, MIR_NULL_STAMP,
+                                  ident_uniq("crv_i"), MIR_VAR_TEMP);
+   mir_build_store(g->mu, ivar, vlog_crv_int(g, 0));
+
+   mir_block_t test_bb = mir_add_block(g->mu);
+   mir_block_t body_bb = mir_add_block(g->mu);
+   mir_block_t done_bb = mir_add_block(g->mu);
+
+   mir_build_jump(g->mu, test_bb);
+   mir_set_cursor(g->mu, test_bb, MIR_APPEND);
+
+   mir_value_t i = mir_build_load(g->mu, ivar);
+   mir_build_cond(g->mu, mir_build_cmp(g->mu, MIR_CMP_LT, i, len), body_bb,
+                  done_bb);
+
+   mir_set_cursor(g->mu, body_bb, MIR_APPEND);
+
+   mir_value_t found_key = mir_build_load(
+      g->mu, mir_build_record_ref(g->mu, mir_build_array_ref(g->mu, data, i),
+                                  0));
+
+   mir_value_t kv;
+   if (is_string || vlog_assoc_key_is_struct(kt))
+      kv = found_key;
+   else if (vlog_kind(kt) == V_CLASS_DECL)
+      kv = mir_build_cast(g->mu, kti->type, found_key);
+   else if (vlog_assoc_key_is_wide(kt))
+      kv = vlog_lower_cast(g, kti->type, found_key);
+   else {
+      mir_type_t t_key64 = mir_vec2_type(g->mu, 64, false);
+      kv = vlog_lower_cast(g, kti->type,
+                           vlog_lower_cast(g, t_key64, found_key));
+   }
+   mir_build_store(g->mu, var, kv);
+
+   mir_value_t flags32 = vlog_crv_flags(g, 32, true);
+   const int saved_nindex = g->crv_nindex;
+   g->crv_index[g->crv_nindex].decl = idecl;
+   g->crv_index[g->crv_nindex].node = vlog_crv_assoc_key_ok(aty)
+      ? CRV3(g, CRV_OP_CONST, g->crv_ctx, found_key, flags32) : MIR_NULL_VALUE;
+   g->crv_index[g->crv_nindex].assoc = decl;
+   g->crv_index[g->crv_nindex].flat =
+      CRV3(g, CRV_OP_CONST, g->crv_ctx, i, flags32);
+   g->crv_index[g->crv_nindex].key = found_key;
+   g->crv_index[g->crv_nindex].known = false;
+   g->crv_index[g->crv_nindex].has_sval = false;
+   g->crv_nindex++;
+
+   const int nstmts = vlog_stmts(v);
+   for (int k = 0; k < nstmts; k++)
+      vlog_crv_items(g, vlog_stmt(v, k), guard, NULL);
+
+   g->crv_nindex = saved_nindex;
+
+   mir_build_store(g->mu, ivar, mir_build_add(g->mu, t_offset, i,
+                                              vlog_crv_int(g, 1)));
+   mir_build_jump(g->mu, test_bb);
+
+   mir_set_cursor(g->mu, done_bb, MIR_APPEND);
+   vlog_pop_type_override();
+}
+
 static void vlog_crv_foreach_bits(vlog_gen_t *g, vlog_node_t v,
                                   mir_value_t guard)
 {
@@ -26659,6 +26753,20 @@ static void vlog_crv_foreach_assoc(vlog_gen_t *g, vlog_node_t v,
                                    mir_value_t guard)
 {
    vlog_node_t arr = vlog_value(v);
+
+   if (vlog_crv_is_assoc_ref(arr) && vlog_decls(v) == 1) {
+      // The objects held by an array are solved with it, so each element
+      // gets its own constraints
+      vlog_node_t vtype = vlog_get_type(vlog_crv_elem_type(vlog_ref(arr)));
+      if (vtype != NULL && vlog_kind(vtype) == V_CLASS_DECL) {
+         if (g->crv_nindex == ARRAY_LEN(g->crv_index))
+            fatal_at(vlog_loc(v), "sorry, foreach constraints are nested "
+                     "too deeply");
+
+         vlog_crv_foreach_assoc_objects(g, v, guard);
+         return;
+      }
+   }
 
    if (!vlog_crv_is_assoc_ref(arr)
        || !vlog_crv_is_integral(g, vlog_crv_elem_type(vlog_ref(arr)))
