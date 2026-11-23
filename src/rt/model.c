@@ -234,6 +234,7 @@ static void reset_process(rt_model_t *m, rt_proc_t *proc);
 typedef struct _sv_task sv_task_t;
 static void sv_task_destroy(rt_model_t *m, rt_proc_t *p);
 static bool sv_task_hold(rt_proc_t *p);
+static bool sv_task_is_suspended(const rt_proc_t *p);
 static void sv_task_note_reg(rt_proc_t *p, void **pending);
 static void sv_task_drop_reg(rt_proc_t *p, void **pending);
 static void sv_task_note_run(rt_proc_t *p);
@@ -1210,6 +1211,7 @@ static void reset_property(rt_model_t *m, rt_prop_t *prop)
 // Processes waiting for a condition on state which is not a signal
 static A(rt_proc_t *) sv_pollers = AINIT;
 static unsigned       sv_pollers_woken = 0;
+static unsigned       sv_pollers_kept = 0;
 static unsigned       sv_pollers_fired = 0;
 static unsigned       sv_procs_run = 0;
 
@@ -1248,10 +1250,41 @@ typedef struct _sv_watch {
 static sv_watch_t sv_watch_pending;
 static bool       sv_watch_never = false;
 
-static bool sv_watch_unchanged(const sv_watch_t *w)
+static inline bool sv_watch_item_eq(const void *a, const void *b, unsigned sz)
+{
+   switch (sz) {
+   case 1:
+      return *(const uint8_t *)a == *(const uint8_t *)b;
+   case 2:
+      {
+         uint16_t x, y;
+         memcpy(&x, a, 2);
+         memcpy(&y, b, 2);
+         return x == y;
+      }
+   case 4:
+      {
+         uint32_t x, y;
+         memcpy(&x, a, 4);
+         memcpy(&y, b, 4);
+         return x == y;
+      }
+   case 8:
+      {
+         uint64_t x, y;
+         memcpy(&x, a, 8);
+         memcpy(&y, b, 8);
+         return x == y;
+      }
+   default:
+      return memcmp(a, b, sz) == 0;
+   }
+}
+
+static inline bool sv_watch_unchanged(const sv_watch_t *w)
 {
    for (unsigned i = 0; i < w->count; i++) {
-      if (memcmp(w->item[i].ptr, w->item[i].snap, w->item[i].size) != 0)
+      if (!sv_watch_item_eq(w->item[i].ptr, w->item[i].snap, w->item[i].size))
          return false;
    }
 
@@ -4094,7 +4127,7 @@ static void sv_poll_end_cycle(rt_model_t *m)
 
    const bool idle = sv_pollers_woken > 0
       && sv_procs_run == sv_pollers_woken
-      && sv_pollers.count == sv_pollers_woken
+      && sv_pollers.count == sv_pollers_kept + sv_pollers_woken
       && sv_pollers_fired == 0
       && m->nonblockq.count == 0 && m->inactiveq.count == 0;
 
@@ -4102,18 +4135,41 @@ static void sv_poll_end_cycle(rt_model_t *m)
    sv_pollers_woken = 0;
    sv_pollers_fired = 0;
 
-   if (sv_pollers.count == 0 || idle)
+   if (sv_pollers.count == 0 || idle) {
+      sv_pollers_kept = sv_pollers.count;
       return;
-
-   // Conditions are checked again in the order they began waiting
-   for (int i = 0; i < sv_pollers.count; i++) {
-      rt_proc_t *p = sv_pollers.items[i];
-      p->poll_wake = 1;
-      deltaq_insert_proc(m, 0, p);
    }
 
-   sv_pollers_woken = sv_pollers.count;
-   ARESIZE(sv_pollers, 0);
+   // Conditions are checked again in the order they began waiting.
+   // A poller whose watched memory has not changed would immediately skip
+   // and re-queue itself, so keep it waiting without scheduling a delta.
+   unsigned keep = 0, woken = 0;
+   for (int i = 0; i < sv_pollers.count; i++) {
+      rt_proc_t *p = sv_pollers.items[i];
+      rt_wakeable_t *obj = &(p->wakeable);
+
+      if (unlikely(obj->forked && obj->zombie))
+         continue;
+
+      const sv_watch_t *w = p->watch;
+      if (w != NULL && w->count > 0 && !obj->interrupted && !obj->pending
+          && obj->trigger == NULL
+          && (p->task == NULL || !sv_task_is_suspended(p))
+          && sv_watch_unchanged(w)) {
+         if (p->task != NULL)
+            sv_task_note_skipped_poll(p);
+         sv_pollers.items[keep++] = p;
+         continue;
+      }
+
+      p->poll_wake = 1;
+      deltaq_insert_proc(m, 0, p);
+      woken++;
+   }
+
+   sv_pollers_woken = woken;
+   sv_pollers_kept = keep;
+   ARESIZE(sv_pollers, keep);
 }
 
 static void fire_init_events(rt_model_t *m)
@@ -7516,6 +7572,11 @@ struct _sv_task {
 
 static A(sv_task_t *) sv_marked_tasks = AINIT;
 
+static bool sv_task_is_suspended(const rt_proc_t *p)
+{
+   return p->task != NULL && p->task->suspended;
+}
+
 static bool sv_task_hold(rt_proc_t *p)
 {
    // A wake up of a process suspended by process::suspend is remembered
@@ -8076,6 +8137,7 @@ static void sv_poll_free(void)
    ACLEAR(sv_handles);
    ACLEAR(stale_events);
    sv_pollers_woken = 0;
+   sv_pollers_kept = 0;
    sv_pollers_fired = 0;
    sv_procs_run = 0;
 }
