@@ -1729,14 +1729,17 @@ object_t *__nvc_get_object(const char *unit, ptrdiff_t offset)
    return object_from_locus(ident_new(unit), offset, lib_load_handler);
 }
 
-static inline uint64_t pack_bytes(const uint8_t *src, unsigned shift)
+static inline void pack_8bytes(const uint8_t *src, uint8_t *a_out,
+                               uint8_t *b_out)
 {
-   // Gather bit zero or one of eight bytes into one byte, the first byte
+   // Gather bit zero and one of eight bytes into two bytes, the first byte
    // in the most significant position
    uint64_t word;
    memcpy(&word, src, sizeof(word));
-   const uint64_t sel = (word >> shift) & UINT64_C(0x0101010101010101);
-   return (sel * UINT64_C(0x8040201008040201)) >> 56;
+   const uint64_t sa = word & UINT64_C(0x0101010101010101);
+   const uint64_t sb = (word >> 1) & UINT64_C(0x0101010101010101);
+   *a_out = (sa * UINT64_C(0x8040201008040201)) >> 56;
+   *b_out = (sb * UINT64_C(0x8040201008040201)) >> 56;
 }
 
 DLLEXPORT
@@ -1747,21 +1750,31 @@ void __nvc_pack(const uint8_t *src, int32_t size, jit_scalar_t *args)
       uint64_t *mem = jit_mspace_alloc(nwords * 2 * sizeof(uint64_t));
       uint64_t *abits = mem, *bbits = mem + nwords;
 
-      for (int i = 0; i < nwords * 2; i++)
-         mem[i] = 0;
-
       const int top = size % 64;
-      for (int i = 0; i < top; i++) {
-         const int pos = size - 1 - i;
-         abits[pos / 64] |= (uint64_t)(src[i] & 1) << (pos % 64);
-         bbits[pos / 64] |= (uint64_t)((src[i] >> 1) & 1) << (pos % 64);
+      if (top > 0) {
+         uint64_t a = 0, b = 0;
+         int i = 0;
+         for (; i + 8 <= top; i += 8) {
+            uint8_t a8, b8;
+            pack_8bytes(src + i, &a8, &b8);
+            a = (a << 8) | a8;
+            b = (b << 8) | b8;
+         }
+         for (; i < top; i++) {
+            a = (a << 1) | (src[i] & 1);
+            b = (b << 1) | ((src[i] >> 1) & 1);
+         }
+         abits[nwords - 1] = a;
+         bbits[nwords - 1] = b;
       }
 
       for (int w = size / 64 - 1, i = top; w >= 0; w--, i += 64) {
          uint64_t a = 0, b = 0;
          for (int j = 0; j < 64; j += 8) {
-            a = (a << 8) | pack_bytes(src + i + j, 0);
-            b = (b << 8) | pack_bytes(src + i + j, 1);
+            uint8_t a8, b8;
+            pack_8bytes(src + i + j, &a8, &b8);
+            a = (a << 8) | a8;
+            b = (b << 8) | b8;
          }
          abits[w] = a;
          bbits[w] = b;
@@ -1770,10 +1783,22 @@ void __nvc_pack(const uint8_t *src, int32_t size, jit_scalar_t *args)
       args[0].pointer = abits;
       args[1].pointer = bbits;
    }
+   else if (size == 1) {
+      args[0].integer = src[0] & 1;
+      args[1].integer = (src[0] >> 1) & 1;
+   }
    else {
       uint64_t abits = 0, bbits = 0;
+      int i = 0;
 
-      for (int i = 0; i < size; i++) {
+      for (; i + 8 <= size; i += 8) {
+         uint8_t a8, b8;
+         pack_8bytes(src + i, &a8, &b8);
+         abits = (abits << 8) | a8;
+         bbits = (bbits << 8) | b8;
+      }
+
+      for (; i < size; i++) {
          abits = (abits << 1) | (src[i] & 1);
          bbits = (bbits << 1) | ((src[i] >> 1) & 1);
       }
@@ -1803,33 +1828,73 @@ void __nvc_unpack(jit_scalar_t aval, jit_scalar_t bval, jit_scalar_t *args)
    if (size > 64) {
       const uint64_t *abits = aval.pointer;
       const uint64_t *bbits = bval.pointer;
+      const uint64_t str8 = strength * UINT64_C(0x0101010101010101);
 
       const int top = size % 64;
-      for (int i = 0; i < top; i++) {
-         const int pos = size - 1 - i;
-         const uint64_t abit = (abits[pos / 64] >> (pos % 64)) & 1;
-         const uint64_t bbit =
-            bbits ? (bbits[pos / 64] >> (pos % 64)) & 1 : 0;
-         dest[i] = abit | (bbit << 1) | strength;
+      if (top > 0) {
+         const int nwords = (size + 63) / 64;
+         const uint64_t aw = abits[nwords - 1];
+         const uint64_t bw = bbits ? bbits[nwords - 1] : 0;
+         int i = 0;
+         for (; i + 8 <= top; i += 8) {
+            const unsigned shift = top - 8 - i;
+            const uint64_t a = unpack_bits((aw >> shift) & 0xff);
+            const uint64_t b = unpack_bits((bw >> shift) & 0xff);
+            const uint64_t out = a | (b << 1) | str8;
+            memcpy(dest + i, &out, sizeof(out));
+         }
+         for (; i < top; i++) {
+            const unsigned shift = top - 1 - i;
+            dest[i] = ((aw >> shift) & 1) | (((bw >> shift) & 1) << 1)
+               | strength;
+         }
       }
 
-      const uint64_t str8 = strength * UINT64_C(0x0101010101010101);
-      for (int w = size / 64 - 1, i = top; w >= 0; w--, i += 64) {
-         for (int j = 0; j < 64; j += 8) {
-            const unsigned shift = 56 - j;
-            const uint64_t a = unpack_bits((abits[w] >> shift) & 0xff);
-            const uint64_t b =
-               bbits ? unpack_bits((bbits[w] >> shift) & 0xff) : 0;
-            const uint64_t out = a | (b << 1) | str8;
-            memcpy(dest + i + j, &out, sizeof(out));
+      if (bbits != NULL) {
+         for (int w = size / 64 - 1, i = top; w >= 0; w--, i += 64) {
+            const uint64_t aw = abits[w], bw = bbits[w];
+            for (int j = 0; j < 64; j += 8) {
+               const unsigned shift = 56 - j;
+               const uint64_t a = unpack_bits((aw >> shift) & 0xff);
+               const uint64_t b = unpack_bits((bw >> shift) & 0xff);
+               const uint64_t out = a | (b << 1) | str8;
+               memcpy(dest + i + j, &out, sizeof(out));
+            }
+         }
+      }
+      else {
+         for (int w = size / 64 - 1, i = top; w >= 0; w--, i += 64) {
+            const uint64_t aw = abits[w];
+            for (int j = 0; j < 64; j += 8) {
+               const unsigned shift = 56 - j;
+               const uint64_t a = unpack_bits((aw >> shift) & 0xff);
+               const uint64_t out = a | str8;
+               memcpy(dest + i + j, &out, sizeof(out));
+            }
          }
       }
    }
+   else if (size == 1) {
+      dest[0] = (aval.integer & 1) | ((bval.integer & 1) << 1) | strength;
+   }
    else {
-      uint64_t abits = aval.integer;
-      uint64_t bbits = bval.integer;
+      const uint64_t abits = aval.integer;
+      const uint64_t bbits = bval.integer;
+      const uint64_t str8 = strength * UINT64_C(0x0101010101010101);
 
-      for (int i = 0; i < size; i++, abits >>= 1, bbits >>= 1)
-         dest[size - i - 1] = (abits & 1) | ((bbits & 1) << 1) | strength;
+      size_t i = 0;
+      for (; i + 8 <= size; i += 8) {
+         const unsigned shift = size - 8 - i;
+         const uint64_t a = unpack_bits((abits >> shift) & 0xff);
+         const uint64_t b = unpack_bits((bbits >> shift) & 0xff);
+         const uint64_t out = a | (b << 1) | str8;
+         memcpy(dest + i, &out, sizeof(out));
+      }
+
+      for (; i < size; i++) {
+         const unsigned shift = size - 1 - i;
+         dest[i] = ((abits >> shift) & 1) | (((bbits >> shift) & 1) << 1)
+            | strength;
+      }
    }
 }
