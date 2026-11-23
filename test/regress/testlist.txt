@@ -3154,3 +3154,4 @@ svcrvstructrand1 verilog
 svproc1 verilog
 svproc2 verilog
 svstdwide1 verilog
+svcrvwidedyn1 verilog

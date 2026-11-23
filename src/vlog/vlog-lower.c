@@ -24314,6 +24314,52 @@ static void vlog_crv_w_from_elem(vlog_gen_t *g, vlog_node_t v, vlog_node_t decl,
    }
 }
 
+static bool vlog_crv_wide_dyn_elem(vlog_gen_t *g, vlog_node_t v,
+                                   vlog_node_t *decl)
+{
+   // An element of a rand dynamic array or queue of wide values, which the
+   // solver holds as an array for each chunk
+
+   if (vlog_kind(v) != V_BIT_SELECT || vlog_params(v) != 1)
+      return false;
+
+   vlog_node_t base = vlog_value(v);
+   if ((vlog_kind(base) != V_REF && vlog_kind(base) != V_MEMBER_REF)
+       || !vlog_has_ref(base))
+      return false;
+
+   vlog_node_t d = vlog_ref(base);
+   if (vlog_kind(d) != V_VAR_DECL || !(vlog_flags(d) & VLOG_F_RAND)
+       || (vlog_kind(base) == V_REF && !vlog_crv_is_target(g, d))
+       || !vlog_crv_is_array_decl(d) || !vlog_crv_is_dynamic_array(d)
+       || vlog_ranges(d) > 0 || vlog_crv_assoc_type(d) != NULL
+       || vlog_crv_elem_struct(d) != NULL
+       || !vlog_crv_is_wide(g, vlog_crv_elem_type(d)))
+      return false;
+
+   *decl = d;
+   return true;
+}
+
+static void vlog_crv_w_from_dyn_elem(vlog_gen_t *g, vlog_node_t v,
+                                     vlog_node_t decl, crv_wide_t *w)
+{
+   const type_info_t *eti = vlog_type_info(g, vlog_crv_elem_type(decl));
+   vlog_crv_w_zero(w, eti->size);
+
+   vlog_node_t base = vlog_value(v);
+   mir_value_t object = vlog_crv_object(g, base);
+   mir_value_t index = vlog_crv_array_index(g, base, v);
+   for (unsigned c = 0; c < w->n; c++) {
+      mir_value_t array = CRV3(g, CRV_OP_FIND_ARRAY, g->crv_ctx, object,
+                               vlog_crv_chunk_key(g, decl, 0, c));
+      mir_value_t elem = CRV3(g, CRV_OP_ARRAY_ELEM, g->crv_ctx, array, index);
+      const unsigned cw = MIN(64, eti->size - c * 64);
+      w->c[c] = cw == 64 ? elem : CRV3(g, CRV_OP_CAST, g->crv_ctx, elem,
+                                       vlog_crv_flags(g, 64, false));
+   }
+}
+
 static bool vlog_crv_wide_std_elem(vlog_gen_t *g, vlog_node_t v,
                                    vlog_node_t *decl, int *salt)
 {
@@ -24819,6 +24865,7 @@ static bool vlog_crv_needs_wide(vlog_gen_t *g, vlog_node_t v)
          int64_t index;
          int salt;
          if (vlog_crv_wide_elem(g, v, &decl, &index)
+             || vlog_crv_wide_dyn_elem(g, v, &decl)
              || vlog_crv_wide_std_elem(g, v, &decl, &salt)
              || (vlog_crv_std_arg(g, v) >= 0 && vlog_crv_width(g, v) > 64))
             return true;
@@ -25160,6 +25207,12 @@ static void vlog_crv_wide_expr(vlog_gen_t *g, vlog_node_t v, unsigned width,
          int64_t eindex;
          if (vlog_crv_wide_elem(g, v, &edecl, &eindex)) {
             vlog_crv_w_from_elem(g, v, edecl, eindex, out);
+            vlog_crv_w_resize(g, out, width, is_signed);
+            break;
+         }
+
+         if (vlog_crv_wide_dyn_elem(g, v, &edecl)) {
+            vlog_crv_w_from_dyn_elem(g, v, edecl, out);
             vlog_crv_w_resize(g, out, width, is_signed);
             break;
          }
@@ -28300,6 +28353,64 @@ static void vlog_crv_store_wide(vlog_gen_t *g, mir_value_t ctx,
    mir_set_cursor(g->mu, skip_bb, MIR_APPEND);
 }
 
+static void vlog_crv_wide_chunks_load(vlog_gen_t *g, mir_value_t ctx,
+                                      const mir_value_t *arrays,
+                                      unsigned nchunks, mir_value_t data,
+                                      mir_value_t len)
+{
+   // Current chunks of each element of an array of values wider than 64 bits
+
+   vlog_loop_t l;
+   vlog_loop_begin(g, &l, vlog_crv_int(g, 0), len);
+   mir_value_t full = mir_build_load(g->mu, mir_build_array_ref(g->mu, data,
+                                                                l.i));
+   for (unsigned c = 0; c < nchunks; c++)
+      CRV4(g, CRV_OP_ARRAY_INIT, ctx, arrays[c], l.i,
+           vlog_crv_w_chunk(g, full, c));
+   vlog_loop_end(g, &l);
+}
+
+static void vlog_crv_wide_chunks_store(vlog_gen_t *g, mir_value_t ctx,
+                                       vlog_node_t d, mir_value_t obj,
+                                       const type_info_t *eti,
+                                       mir_value_t array0, mir_value_t data,
+                                       mir_value_t len)
+{
+   // Elements of an array of wide values from the chunks the solver chose
+
+   const unsigned nchunks = vlog_crv_nchunks(eti->size);
+   mir_value_t *arrays LOCAL = xmalloc_array(nchunks, sizeof(mir_value_t));
+   arrays[0] = array0;
+   for (unsigned c = 1; c < nchunks; c++)
+      arrays[c] = CRV3(g, CRV_OP_FIND_FREE_ARRAY, ctx, obj,
+                       vlog_crv_chunk_key(g, d, 0, c));
+
+   mir_type_t t_int64 = mir_int_type(g->mu, INT64_MIN, INT64_MAX);
+   mir_type_t t_vec64 = mir_vec2_type(g->mu, 64, false);
+   mir_type_t t_wide = mir_vec2_type(g->mu, eti->size, false);
+
+   vlog_loop_t l;
+   vlog_loop_begin(g, &l, vlog_crv_int(g, 0), len);
+
+   mir_value_t result = vlog_lower_zero(g, t_wide);
+   for (unsigned c = 0; c < nchunks; c++) {
+      mir_value_t value = CRV3(g, CRV_OP_ARRAY_VALUE, ctx, arrays[c], l.i);
+      mir_value_t vec = mir_build_cast(g->mu, t_vec64,
+                                       mir_build_cast(g->mu, t_int64, value));
+      mir_value_t part = vlog_lower_cast(g, t_wide, vec);
+      if (c > 0) {
+         mir_value_t amount = vlog_lower_cast(
+            g, t_wide, mir_const_vec(g->mu, t_vec64, c * 64, 0));
+         part = mir_build_binary(g->mu, MIR_VEC_SLL, t_wide, part, amount);
+      }
+      result = mir_build_binary(g->mu, MIR_VEC_BIT_OR, t_wide, result, part);
+   }
+
+   mir_build_store(g->mu, mir_build_array_ref(g->mu, data, l.i),
+                   vlog_lower_cast(g, eti->type, result));
+   vlog_loop_end(g, &l);
+}
+
 static void vlog_crv_array_store(vlog_gen_t *g, mir_value_t ctx,
                                  mir_value_t array, mir_value_t data,
                                  mir_value_t len, const type_info_t *eti,
@@ -28959,7 +29070,9 @@ static void vlog_crv_build_decl(vlog_gen_t *g, mir_value_t this,
          len = vlog_crv_int(g, vlog_size(d));
       }
 
-      const int fl = (wide ? CRV_FLAGS(1, false)
+      // The chunks of the elements of a wide array of any length are
+      // arrays of their own, the first is the one the sizes are found by
+      const int fl = (wide ? CRV_FLAGS(is_dyn ? 64 : 1, false)
                       : CRV_FLAGS(eti->size, mir_get_signed(g->mu, eti->type)))
          | (is_dyn ? CRV_FLAG_DYNAMIC : 0);
       mir_value_t array = CRV6(g, CRV_OP_ARRAY, ctx, obj, key,
@@ -28979,8 +29092,30 @@ static void vlog_crv_build_decl(vlog_gen_t *g, mir_value_t this,
          return;
       }
 
-      if (wide)
+      if (wide) {
+         const unsigned nchunks = vlog_crv_nchunks(eti->size);
+         mir_value_t *arrays LOCAL = xmalloc_array(nchunks, sizeof(mir_value_t));
+         arrays[0] = array;
+         for (unsigned c = 1; c < nchunks; c++) {
+            const unsigned cw = MIN(64, eti->size - c * 64);
+            arrays[c] = CRV6(g, CRV_OP_ARRAY, ctx, obj,
+                             vlog_crv_chunk_key(g, d, 0, c),
+                             vlog_crv_int(g, CRV_FLAGS(cw, false)
+                                          | CRV_FLAG_DYNAMIC),
+                             len, is_free);
+
+            mir_value_t same = CRV5(g, CRV_OP_BINARY, ctx,
+                                    vlog_crv_int(g, CRV_EQ),
+                                    CRV2(g, CRV_OP_ARRAY_SIZE, ctx, arrays[0]),
+                                    CRV2(g, CRV_OP_ARRAY_SIZE, ctx, arrays[c]),
+                                    vlog_crv_flags(g, 1, false));
+            CRV4(g, CRV_OP_REQUIRE, ctx, same, vlog_crv_int(g, 0),
+                 vlog_crv_int(g, 0));
+         }
+
+         vlog_crv_wide_chunks_load(g, ctx, arrays, nchunks, data, len);
          return;
+      }
 
       vlog_crv_array_load(g, ctx, array, data, len, false);
       return;
@@ -29206,7 +29341,10 @@ static void vlog_crv_store_decl(vlog_gen_t *g, mir_value_t this,
          data = vlog_crv_slot(g, this, d, t_array);
       }
 
-      vlog_crv_array_store(g, ctx, array, data, len, eti, wide, false);
+      if (wide)
+         vlog_crv_wide_chunks_store(g, ctx, d, obj, eti, array, data, len);
+      else
+         vlog_crv_array_store(g, ctx, array, data, len, eti, false, false);
 
       if (is_dyn) {
          const type_info_t *ti = vlog_type_info(g, vlog_type(d));
