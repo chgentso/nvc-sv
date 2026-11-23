@@ -1,67 +1,93 @@
-// The process class: self, status, kill and await
+// IEEE 1800-2017 18.13 to 18.15: the random stream of a process.  Values are not
+// specified so the checks compare streams with each other.
+class item;
+  rand bit [31:0] a;
+  rand bit [7:0]  b;
+endclass
+
 module svproc1;
-   `define CHECK(x, y) if ((x) !== (y)) begin \
-      $display("FAILED line %0d: %0d !== %0d", `__LINE__, (x), (y)); \
-      $finish; end
+  int errs = 0;
+  task automatic check(bit ok, string what);
+    if (!ok) begin $error("%s", what); errs++; end
+  endtask
 
-   process main_p, child1, child2, child3, nop;
-   int log_a, log_b, log_c;
-   process::state st;
+  initial begin
+    process p;
+    string st;
+    int a, b, c;
+    int seq1[4], seq2[4];
+    item x, y;
+    p = process::self();
 
-   initial begin
-      main_p = process::self();
-      `CHECK(main_p != null, 1);
-      `CHECK(nop == null, 1);
-      `CHECK(main_p.status(), process::RUNNING);
+    // Restoring a state repeats $random, $urandom and $urandom_range
+    st = p.get_randstate();
+    a = $random; p.set_randstate(st); b = $random;
+    check(a == b, "random after set_randstate");
+    p.set_randstate(st);
+    a = $urandom; p.set_randstate(st); b = $urandom;
+    check(a == b, "urandom after set_randstate");
+    p.set_randstate(st);
+    a = $urandom_range(1000, 0); p.set_randstate(st); b = $urandom_range(1000, 0);
+    check(a == b, "urandom_range after set_randstate");
 
-      fork
-         begin
-            child1 = process::self();
-            #10;
-            log_a = 1;
-         end
-         begin
-            child2 = process::self();
-            #5;
-            log_b = 1;
-            #100;
-            log_b = 2;       // Never reached as it is killed
-         end
-         begin
-            child3 = process::self();
-            #1000;
-            log_c = 1;       // Killed by another process
-         end
-      join_none
+    // The state after ten draws is the same again
+    st = p.get_randstate();
+    for (int i = 0; i < 10; i++) void'($urandom);
+    a = $urandom;
+    p.set_randstate(st);
+    for (int i = 0; i < 10; i++) void'($urandom);
+    b = $urandom;
+    check(a == b, "eleventh draw");
 
-      #1;
-      `CHECK(child1.status(), process::WAITING);
-      `CHECK(child2.status() == process::WAITING, 1);
-      `CHECK(child1 != child2, 1);
+    // The same seed gives the same sequence
+    p.srandom(11);
+    foreach (seq1[i]) seq1[i] = $urandom;
+    p.srandom(11);
+    foreach (seq2[i]) seq2[i] = $urandom;
+    check(seq1 == seq2, "srandom repeats the sequence");
+    p.srandom(12);
+    foreach (seq2[i]) seq2[i] = $urandom;
+    check(seq1 != seq2, "another seed differs");
 
-      child3.kill();
-      `CHECK(child3.status(), process::KILLED);
+    // Objects are seeded by their creator and randomize uses the stream of
+    // the process
+    p.srandom(5);
+    x = new; void'(x.randomize());
+    p.srandom(5);
+    y = new; void'(y.randomize());
+    check(x.a == y.a && x.b == y.b, "object created after the same seed");
+    p.srandom(5);
+    x = new; y = new;
+    void'(x.randomize()); void'(y.randomize());
+    check(x.a != y.a, "two objects differ");
 
-      child1.await();       // Waits for the first process to finish
-      `CHECK($time, 10);
-      `CHECK(log_a, 1);
-      `CHECK(child1.status(), process::FINISHED);
+    // Saving the state around creating and randomizing an object
+    p.srandom(9);
+    st = p.get_randstate();
+    x = new; void'(x.randomize()); a = x.a;
+    void'(x.randomize()); b = x.a;
+    p.set_randstate(st);
+    y = new; void'(y.randomize());
+    check(y.a == a, "restored state repeats the object");
+    check(a != b, "successive randomize calls differ");
 
-      child2.kill();
-      `CHECK(child2.status(), process::KILLED);
-      `CHECK(log_b, 1);
+    // Object state
+    x = new;
+    st = x.get_randstate();
+    void'(x.randomize()); a = x.a;
+    x.set_randstate(st);
+    void'(x.randomize()); b = x.a;
+    check(a == b, "object randstate");
 
-      #2000;
-      `CHECK(log_b, 1);
-      `CHECK(log_c, 0);
-      st = child1.status();
-      `CHECK(st, process::FINISHED);
+    // A malformed state changes nothing
+    p.srandom(3);
+    st = p.get_randstate();
+    a = $urandom;
+    p.set_randstate(st);
+    p.set_randstate("garbage");
+    b = $urandom;
+    check(a == b, "malformed state ignored");
 
-      // Killing a process which has finished does nothing
-      child1.kill();
-      `CHECK(child1.status(), process::FINISHED);
-      nop = main_p;
-      `CHECK(nop == main_p, 1);
-      $display("PASSED");
-   end
+    if (errs == 0) $display("PASSED");
+  end
 endmodule

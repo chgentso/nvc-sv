@@ -2293,6 +2293,18 @@ static PLI_INT32 random_tf(PLI_BYTE8 *userdata)
 
    vpi_release_handle(argv);
 
+   // A process with its own random stream does not use the default one
+   uint64_t draw;
+   if (seed == NULL && model_rng_draw(&draw)) {
+      s_vpi_value own = {
+         .format = vpiIntVal,
+         .value = { .integer = (int32_t)draw },
+      };
+      vpi_put_value(call, &own, NULL, 0);
+      vpi_release_handle(call);
+      return 0;
+   }
+
    s_vpi_value result = {
       .format = vpiIntVal,
       .value = { .integer = rtl_dist_uniform(&a_seed, INT32_MIN, INT32_MAX) },
@@ -2338,9 +2350,13 @@ static PLI_INT32 urandom_tf(PLI_BYTE8 *userdata)
 
    vpi_release_handle(argv);
 
+   uint64_t draw;
+   const bool own = seedp == &i_seed && model_rng_draw(&draw);
+
    s_vpi_value result = {
       .format = vpiIntVal,
-      .value = { .integer = rtl_dist_uniform(seedp, INT32_MIN, INT32_MAX) },
+      .value = { .integer = own ? (int32_t)draw
+                 : rtl_dist_uniform(seedp, INT32_MIN, INT32_MAX) },
    };
    vpi_put_value(call, &result, NULL, 0);
 
@@ -2375,7 +2391,9 @@ static PLI_INT32 urandom_range_tf(PLI_BYTE8 *userdata)
       hi = tmp;
    }
 
-   const uint32_t r = rtl_dist_uniform(&i_seed, INT32_MIN, INT32_MAX);
+   uint64_t draw;
+   const uint32_t r = model_rng_draw(&draw)
+      ? (uint32_t)draw : rtl_dist_uniform(&i_seed, INT32_MIN, INT32_MAX);
    const uint64_t range = (uint64_t)hi - lo + 1;
 
    s_vpi_value result = {
