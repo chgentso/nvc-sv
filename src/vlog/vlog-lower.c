@@ -26022,6 +26022,19 @@ static bool vlog_crv_dist_weights_dynamic(vlog_gen_t *g, vlog_node_t v)
    for (int i = 0; i < nparams && !found; i++)
       vlog_visit(vlog_delay(vlog_param(v, i)), vlog_crv_rand_ref_cb, &found);
 
+   if (found) {
+      // Said once for each dist, however many times it is lowered
+      static hset_t *warned = NULL;
+      if (warned == NULL)
+         warned = hset_new(16);
+
+      if (!hset_contains(warned, v)) {
+         hset_insert(warned, v);
+         warn_at(vlog_loc(v), "the weights of this dist depend on random "
+                 "variables and are ignored");
+      }
+   }
+
    return found;
 }
 

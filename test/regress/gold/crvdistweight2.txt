@@ -1,0 +1,2 @@
+the weights of this dist depend on random variables and are ignored
+PASSED

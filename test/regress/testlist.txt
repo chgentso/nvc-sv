@@ -3195,3 +3195,4 @@ crvforeachrow1 verilog
 crvidxunsigned1 verilog
 crvobjarr17 verilog
 crvwidearith1 verilog
+crvdistweight2 verilog,gold
