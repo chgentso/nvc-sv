@@ -27572,6 +27572,14 @@ static bool vlog_crv_sized_by_solver(vlog_gen_t *g, vlog_node_t decl)
             || (vlog_subkind(type) == DT_DYNARRAY && vlog_ranges(type) == 0)))
       return false;
 
+   // The elements of an array of structures are held as arrays of their
+   // rand members
+   vlog_node_t st = vlog_crv_elem_struct(decl);
+   if (st != NULL) {
+      crv_member_t members[CRV_MAX_MEMBERS];
+      return vlog_crv_members(g, st, members, true) > 0;
+   }
+
    return vlog_crv_is_integral(g, vlog_crv_elem_type(decl));
 }
 
