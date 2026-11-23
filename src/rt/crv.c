@@ -1511,7 +1511,7 @@ typedef struct {
    int       ntb, ctb;
    bool      oob;
    int64_t  *vals;
-   unsigned  base_nodes, base_sets;
+   unsigned  base_nodes, base_sets, base_dists;
    int       reject;      // Rejection stage: 0 off, 1 then the search, 2 only
    int       bdd;         // BDD stage: 0 off, 1 then the search, 2 only
    int       sat;         // SAT stage: 0 off, 1 after search give-up, 2 only
@@ -1640,6 +1640,25 @@ void crv_disable_soft(crv_t *c, crv_node_t target)
    free(m.vars);
 }
 
+static bool is_const_node(const crv_t *c, int n)
+{
+   const node_t *nd = &c->nodes[n];
+   switch ((nkind_t)nd->kind) {
+   case N_CONST:
+      return true;
+   case N_BIN:
+      return is_const_node(c, nd->a) && is_const_node(c, nd->b);
+   case N_UN:
+   case N_CAST:
+      return is_const_node(c, nd->a);
+   case N_COND:
+      return is_const_node(c, nd->a) && is_const_node(c, nd->b)
+         && is_const_node(c, nd->c);
+   default:
+      return false;
+   }
+}
+
 static int inst(ictx_t *I, int n)
 {
    crv_t *c = I->c;
@@ -1665,12 +1684,25 @@ static int inst(ictx_t *I, int n)
       {
          const int a = inst(I, nd.a);
          const node_t *an = &c->nodes[a];
+         i128 idx_val = 0;
+         bool have_idx = false;
          if (an->kind == N_CONST) {
-            const i128 i = mathv(an->val, an->sgn);
-            if (i < 0 || i >= I->sizes[nd.aux])
+            idx_val = mathv(an->val, an->sgn);
+            have_idx = true;
+         }
+         else if (is_const_node(c, a)) {
+            ectx_t E = { .c = c };
+            const int64_t ev_i = ev(&E, a);
+            if (!E.fail) {
+               idx_val = mathv(ev_i, an->sgn);
+               have_idx = true;
+            }
+         }
+         if (have_idx) {
+            if (idx_val < 0 || idx_val >= I->sizes[nd.aux])
                return mk_fail(c);
             node_t v = { .kind = N_VAR, .width = nd.width, .sgn = nd.sgn,
-                         .aux = I->ebase[nd.aux] + (int)i };
+                         .aux = I->ebase[nd.aux] + (int)idx_val };
             return add_node(c, v);
          }
          nd.a = a;
@@ -1929,6 +1961,15 @@ static void prob_free(prob_t *P)
       free(c->sets[i].rr);
    }
    c->nsets = P->base_sets;
+   for (unsigned i = P->base_dists; i < c->ndists; i++) {
+      free(c->dists[i].r);
+      free(c->dists[i].mr);
+      free(c->dists[i].pr);
+      free(c->dists[i].unit);
+      free(c->dists[i].wt);
+      free(c->dists[i].pvl);
+   }
+   c->ndists = P->base_dists;
    c->nnodes = P->base_nodes;
 
    free(P->soft_on);
@@ -2048,6 +2089,43 @@ static bool value_of(const prob_t *P, int n, i128 *out)
    return true;
 }
 
+static bool all_fixed_node(const prob_t *P, int n)
+{
+   const node_t *nd = &P->c->nodes[n];
+   switch ((nkind_t)nd->kind) {
+   case N_CONST:
+      return true;
+   case N_VAR:
+      return nd->aux >= 0 && nd->aux < P->nv
+         && P->vars[nd->aux].dom.lo == P->vars[nd->aux].dom.hi;
+   case N_BIN:
+      return all_fixed_node(P, nd->a) && all_fixed_node(P, nd->b);
+   case N_UN:
+   case N_CAST:
+      return all_fixed_node(P, nd->a);
+   case N_COND:
+      return all_fixed_node(P, nd->a) && all_fixed_node(P, nd->b)
+         && all_fixed_node(P, nd->c);
+   default:
+      return false;
+   }
+}
+
+static bool fixed_val_of(const prob_t *P, int n, i128 *out)
+{
+   if (!all_fixed_node(P, n))
+      return false;
+
+   ectx_t E = { .c = P->c, .vals = P->vals, .nsc = P->nsc,
+                .ebase = P->ebase, .sizes = P->sizes };
+   const int64_t v = ev(&E, n);
+   if (E.fail)
+      return false;
+
+   *out = mathv(v, P->c->nodes[n].sgn);
+   return true;
+}
+
 static int pred_var(const prob_t *P, int n, int *xnode)
 {
    // A variable which a cast keeps whole
@@ -2115,6 +2193,22 @@ static bool pred_spans(const prob_t *P, int n, int *var, int *xnode,
          if (cs->items[i].hi < 0)
             hi = lo;
          spans[(*ns)++] = (range_t){ lo, hi };
+      }
+
+      *var = v;
+      return *ns > 0;
+   }
+   else if (nd->kind == N_DIST) {
+      const int v = pred_var(P, nd->a, xnode);
+      if (v < 0)
+         return false;
+
+      cdist_t *cd = &((crv_t *)c)->dists[nd->aux];
+      crv_dist_prepare(cd);
+      for (unsigned i = 0; i < cd->nmr; i++) {
+         if (*ns == MAX_SPANS)
+            return false;
+         spans[(*ns)++] = cd->mr[i];
       }
 
       *var = v;
@@ -2473,6 +2567,7 @@ static prob_t *prob_build(crv_t *c, int mode, const unsigned *sizes,
                 .nsc = P->nsc };
    P->base_nodes = c->nnodes;
    P->base_sets = c->nsets;
+   P->base_dists = c->ndists;
 
    for (unsigned k = 0; k < c->ncons; k++) {
       const ccons_t *cc = &c->cons[k];
@@ -2521,27 +2616,151 @@ static prob_t *prob_build(crv_t *c, int mode, const unsigned *sizes,
       }
    derive_domains(P);
 
-   // Weighted choice applies to a distribution at the root of a constraint
+   // Populate P->vals for variables fixed to a single value (e.g. rand_mode(0))
+   for (int v = 0; v < P->nv; v++) {
+      const pvar_t *pv = &P->vars[v];
+      if (pv->dom.lo == pv->dom.hi)
+         P->vals[v] = norm(pv->dom.lo, pv->width, pv->sgn);
+   }
+
+   // Weighted choice applies to a distribution at the root of a constraint,
+   // under implications (including nested ones and foreach bounds guards),
+   // on a fixed array element or ternary arm, or on an affine expression
+   // (var + const) with a fixed offset.
    for (int ci = 0; ci < P->ncons; ci++) {
       const pcons_t *pc = &P->cons[ci];
       if (pc->kind != C_REQ || pc->soft >= 0)
          continue;
-      const node_t *nd = &c->nodes[pc->root];
-      const node_t *an = &c->nodes[nd->a];
-      if (nd->kind == N_DIST && an->kind == N_VAR
-          && P->vars[an->aux].dist < 0)
-         P->vars[an->aux].dist = nd->aux;
-      else if (nd->kind == N_BIN && nd->op == CRV_IMPLIES
-               && c->nodes[nd->b].kind == N_DIST) {
-         const node_t *dn = &c->nodes[nd->b];
-         const node_t *dv = &c->nodes[dn->a];
-         if (dv->kind == N_VAR) {
-            pvar_t *pv = &P->vars[dv->aux];
-            pv->gd = xrealloc(pv->gd, (pv->ngd + 1) * 2 * sizeof(int));
-            pv->gd[pv->ngd * 2] = nd->a;
-            pv->gd[pv->ngd * 2 + 1] = dn->aux;
-            pv->ngd++;
+      int cur = pc->root;
+      int guard = -1;
+      for (;;) {
+         const node_t *nd = &c->nodes[cur];
+         if (nd->kind == N_BIN && nd->op == CRV_IMPLIES) {
+            i128 gv = 0;
+            if (fixed_val_of(P, nd->a, &gv)) {
+               if (gv == 0) {
+                  cur = -1;
+                  break;
+               }
+            }
+            else if (guard < 0)
+               guard = nd->a;
+            else
+               guard = crv_binary(c, CRV_LOG_AND, guard, nd->a, 1, false);
+            cur = nd->b;
          }
+         else
+            break;
+      }
+      if (cur < 0)
+         continue;
+
+      const node_t *dn = &c->nodes[cur];
+      if (dn->kind != N_DIST)
+         continue;
+
+      int dist_id = dn->aux;
+      int target_v = -1;
+      int arg = dn->a;
+      // Unwrap widening casts and conditionals with a fixed selector
+      for (;;) {
+         const node_t *cn = &c->nodes[arg];
+         if (cn->kind == N_CAST) {
+            const node_t *in = &c->nodes[cn->a];
+            if (in->width <= cn->width && (!in->sgn || cn->sgn)) {
+               arg = cn->a;
+               continue;
+            }
+         }
+         else if (cn->kind == N_COND) {
+            i128 sv = 0;
+            if (fixed_val_of(P, cn->a, &sv)) {
+               arg = sv != 0 ? cn->b : cn->c;
+               continue;
+            }
+         }
+         break;
+      }
+
+      const node_t *an = &c->nodes[arg];
+      if (an->kind == N_VAR && an->aux >= 0 && an->aux < P->nv)
+         target_v = an->aux;
+      else if (an->kind == N_AELEM && an->aux >= 0 && an->aux < P->na
+               && P->ebase[an->aux] >= 0) {
+         i128 iv = 0;
+         if (fixed_val_of(P, an->a, &iv)
+             && iv >= 0 && iv < (i128)P->sizes[an->aux])
+            target_v = P->ebase[an->aux] + (int)iv;
+      }
+      else if (an->kind == N_BIN
+               && (an->op == CRV_ADD || an->op == CRV_SUB)) {
+         // Affine shift: (v + k) dist {...} or (k + v) dist {...}
+         int vnode = -1, knode = -1;
+         bool sub_k = false;
+         i128 kval = 0;
+         if (fixed_val_of(P, an->a, &kval) && an->op == CRV_ADD) {
+            vnode = an->b;
+            knode = an->a;
+         }
+         else if (fixed_val_of(P, an->b, &kval)) {
+            vnode = an->a;
+            knode = an->b;
+            sub_k = an->op == CRV_SUB;
+         }
+         if (vnode >= 0 && knode >= 0) {
+            while (c->nodes[vnode].kind == N_CAST
+                   && c->nodes[c->nodes[vnode].a].width <= c->nodes[vnode].width)
+               vnode = c->nodes[vnode].a;
+            const node_t *vn = &c->nodes[vnode];
+            if (vn->kind == N_VAR && vn->aux >= 0 && vn->aux < P->nv
+                && P->vars[vn->aux].width == an->width) {
+               const pvar_t *pv = &P->vars[vn->aux];
+               const cdist_t *orig = &c->dists[dist_id];
+               const i128 delta = sub_k ? kval : -kval;
+               bool all_ok = orig->n > 0;
+               for (unsigned j = 0; j < orig->n && all_ok; j++) {
+                  if (orig->r[j].lo != orig->r[j].hi) {
+                     const i128 lo = mathv(orig->r[j].lo, orig->sgn) + delta;
+                     const i128 hi = mathv(orig->r[j].hi, orig->sgn) + delta;
+                     if (lo < tmin(pv->width, pv->sgn)
+                         || hi > tmax(pv->width, pv->sgn))
+                        all_ok = false;
+                  }
+               }
+               if (all_ok) {
+                  const crv_dist_t nd_id = crv_dist_new(c);
+                  c->dists[nd_id].sgn = pv->sgn;
+                  // orig pointer may have moved after crv_dist_new
+                  const unsigned rn = c->dists[dist_id].n;
+                  for (unsigned j = 0; j < rn; j++) {
+                     const drange_t dr = c->dists[dist_id].r[j];
+                     const i128 lo = mathv(dr.lo, c->dists[dist_id].sgn) + delta;
+                     const i128 hi = mathv(dr.hi, c->dists[dist_id].sgn) + delta;
+                     crv_dist_range(c, nd_id,
+                                    norm(lo, pv->width, pv->sgn),
+                                    norm(hi, pv->width, pv->sgn),
+                                    dr.weight, dr.per_value);
+                  }
+                  dist_id = nd_id;
+                  target_v = vn->aux;
+               }
+            }
+         }
+      }
+
+      if (target_v < 0)
+         continue;
+
+      pvar_t *pv = &P->vars[target_v];
+      if (guard < 0) {
+         if (pv->dist < 0)
+            pv->dist = dist_id;
+      }
+      else {
+         pv->gd = xrealloc(pv->gd, (pv->ngd + 1) * 2 * sizeof(int));
+         pv->gd[pv->ngd * 2] = guard;
+         pv->gd[pv->ngd * 2 + 1] = dist_id;
+         pv->ngd++;
       }
    }
 
@@ -4600,7 +4819,9 @@ static int build_order(prob_t *P, int attempt, int **out)
       k->var = v;
       k->a = pv->rc ? 0 : 1;
       k->b = pv->size ? 1 << 20 : pv->level;
-      k->c = pv->dist >= 0 || pv->ngd > 0 ? 0 : pv->size ? 1 : 2;
+      // Guarded dist variables are picked after ordinary variables (so their
+      // guard variables are decided first and pick_dist sees the active guard).
+      k->c = pv->dist >= 0 ? 0 : pv->size ? 1 : pv->ngd > 0 ? 3 : 2;
       if (attempt > 0)
          k->c = k->c * 128 + ilog2_128(dom_count(&pv->dom, pv->dom.lo,
                                                   pv->dom.hi));
@@ -7092,6 +7313,36 @@ static sres_t solve_prob(prob_t *P)
    P->root = false;
    if (!root_ok)
       return P->oob ? S_GIVEUP : S_UNSAT;
+
+   // Promote guarded dists whose guards are already decided by root propagation
+   for (int v = 0; v < P->nv; v++) {
+      pvar_t *pv = &P->vars[v];
+      if (pv->ngd == 0)
+         continue;
+      bool all_known = true;
+      int active_d = -1;
+      int active_cnt = 0;
+      for (int i = 0; i < pv->ngd; i++) {
+         gctx_t g = { P, true };
+         visit(P->c, pv->gd[i * 2], guard_cb, &g);
+         if (!g.ok) {
+            all_known = false;
+            break;
+         }
+         ectx_t E = { .c = P->c, .vals = P->vals, .nsc = P->nsc,
+                      .ebase = P->ebase, .sizes = P->sizes };
+         const int64_t gv = ev(&E, pv->gd[i * 2]);
+         if (!E.fail && gv != 0) {
+            active_d = pv->gd[i * 2 + 1];
+            active_cnt++;
+         }
+      }
+      if (all_known && active_cnt <= 1) {
+         if (active_cnt == 1 && pv->dist < 0)
+            pv->dist = active_d;
+         pv->ngd = 0;
+      }
+   }
 
    if (cur_stat != NULL)
       stats_components(P, cur_stat);

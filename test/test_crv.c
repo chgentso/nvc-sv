@@ -3959,6 +3959,85 @@ START_TEST(test_sat_api)
 }
 END_TEST
 
+START_TEST(test_dist_guarded)
+{
+   crv_seed(0x90a123);
+
+   // Guarded dist under a free guard variable: both branches weighted
+   int m1_hi = 0, m1_n = 0, m0_lo = 0, m0_n = 0;
+   for (int i = 0; i < 400; i++) {
+      crv_t *c = crv_new();
+      crv_var_t mode = crv_var(c, 1, false, 0);
+      crv_var_t x = crv_var(c, 8, false, 0);
+      crv_dist_t d1 = crv_dist_new(c);
+      crv_dist_range(c, d1, 255, 255, 3, true);
+      crv_dist_range(c, d1, 0, 0, 1, true);
+      crv_dist_t d0 = crv_dist_new(c);
+      crv_dist_range(c, d0, 0, 0, 3, true);
+      crv_dist_range(c, d0, 255, 255, 1, true);
+      crv_require(c, crv_binary(c, CRV_IMPLIES, crv_var_ref(c, mode),
+                                crv_dist(c, crv_var_ref(c, x), d1), 1, false),
+                  false, 1);
+      crv_require(c, crv_binary(c, CRV_IMPLIES,
+                                crv_unary(c, CRV_LOG_NOT, crv_var_ref(c, mode)),
+                                crv_dist(c, crv_var_ref(c, x), d0), 1, false),
+                  false, 2);
+      ck_assert(crv_solve(c));
+      const int64_t mv = crv_value(c, mode);
+      const int64_t xv = crv_value(c, x);
+      ck_assert(xv == 0 || xv == 255);
+      if (mv) {
+         m1_n++;
+         if (xv == 255) m1_hi++;
+      }
+      else {
+         m0_n++;
+         if (xv == 0) m0_lo++;
+      }
+      crv_free(c);
+   }
+   ck_assert_int_gt(m1_n, 100);
+   ck_assert_int_gt(m0_n, 100);
+   ck_assert_int_gt(m1_hi * 2, m1_n);
+   ck_assert_int_gt(m0_lo * 2, m0_n);
+
+   // Guarded dist with non-dist else branch and free guard
+   int s0 = 0, s1_5 = 0, s1_70 = 0;
+   for (int i = 0; i < 200; i++) {
+      crv_t *c = crv_new();
+      crv_var_t sel = crv_var(c, 1, false, 0);
+      crv_var_t x = crv_var(c, 32, false, 0);
+      crv_dist_t d = crv_dist_new(c);
+      crv_dist_range(c, d, 5, 5, 1, true);
+      crv_dist_range(c, d, 70, 70, 1, true);
+      crv_require(c, crv_binary(c, CRV_IMPLIES, crv_var_ref(c, sel),
+                                crv_dist(c, crv_var_ref(c, x), d), 1, false),
+                  false, 1);
+      crv_require(c, crv_binary(c, CRV_IMPLIES,
+                                crv_unary(c, CRV_LOG_NOT, crv_var_ref(c, sel)),
+                                crv_binary(c, CRV_EQ, crv_var_ref(c, x),
+                                           crv_const(c, 4242, 32, false),
+                                           1, false),
+                                1, false),
+                  false, 2);
+      ck_assert(crv_solve(c));
+      if (crv_value(c, sel)) {
+         const int64_t xv = crv_value(c, x);
+         ck_assert(xv == 5 || xv == 70);
+         if (xv == 5) s1_5++; else s1_70++;
+      }
+      else {
+         ck_assert_int_eq(crv_value(c, x), 4242);
+         s0++;
+      }
+      crv_free(c);
+   }
+   ck_assert_int_gt(s0, 0);
+   ck_assert_int_gt(s1_5, 0);
+   ck_assert_int_gt(s1_70, 0);
+}
+END_TEST
+
 Suite *get_crv_tests(void)
 {
    Suite *s = suite_create("crv");
@@ -4028,6 +4107,7 @@ Suite *get_crv_tests(void)
    tcase_add_test(tc, test_bdd_seed_stable);
    tcase_add_test(tc, test_sat_core);
    tcase_add_test(tc, test_sat_api);
+   tcase_add_test(tc, test_dist_guarded);
    tcase_add_test(tc, test_fuzz_fixed);
    suite_add_tcase(s, tc);
 
