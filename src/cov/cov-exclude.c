@@ -78,6 +78,24 @@ static void to_upper_str(char *str)
    }
 }
 
+static ident_t to_upper_ident(ident_t id)
+{
+   // Patterns in an exclude file are upper case but names in Verilog are
+   // case sensitive and are compared without regard to case
+
+   char small[128], *big = NULL, *buf = small;
+   const size_t len = ident_len(id);
+   if (len >= sizeof(small))
+      buf = big = xmalloc(len + 1);
+
+   memcpy(buf, istr(id), len + 1);
+   to_upper_str(buf);
+
+   ident_t result = ident_new(buf);
+   free(big);
+   return result;
+}
+
 static excl_trie_t *excl_trie_get(cover_data_t *db,excl_trie_t *where,
                                   const char *hier)
 {
@@ -198,12 +216,13 @@ static void cover_exclude_items(cover_data_t *db, cover_obj_t item)
    cover_obj_t bin;
    while (cover_next(&it, &bin)) {
       ident_t hier = cover_get_ident(db, bin, COV_ATTR_HIER);
+      ident_t uhier = to_upper_ident(hier);
 
       for (int j = 0; j < db->ef->n_excl_cmds; j++) {
          cover_excl_cmd_t *excl = &(db->ef->excl[j]);
          const char *excl_hier = istr(excl->hier);
 
-         if (ident_glob(hier, excl_hier, strlen(excl_hier))) {
+         if (ident_glob(uhier, excl_hier, strlen(excl_hier))) {
             excl->found = true;
 
             uint32_t data = cover_get_u32(db, bin, COV_ATTR_DATA, 0);
@@ -473,7 +492,7 @@ static void cover_iterate_fold_source_scope(cover_data_t *db,
    ident_t tgt_hier = cover_get_ident(db, tgt_scope, COV_ATTR_HIER);
    ident_t src_hier = cover_get_ident(db, src_scope, COV_ATTR_HIER);
 
-   if (src_hier == cmd->source) {
+   if (to_upper_ident(src_hier) == cmd->source) {
       cmd->found_source = true;
       diag_t *d = diag_new(DIAG_DEBUG, NULL);
       diag_printf(d, "folding coverage scopes:");
@@ -525,7 +544,8 @@ static void cover_iterate_fold_target_scope(cover_data_t *db,
 {
    // On target scope name match, go and search for all source scopes
    // and collapse them into the target scope
-   if (cover_get_ident(db, tgt_scope, COV_ATTR_HIER) == cmd->target) {
+   if (to_upper_ident(cover_get_ident(db, tgt_scope, COV_ATTR_HIER))
+       == cmd->target) {
       cmd->found_target = true;
       cover_iterate_fold_sources(db, tgt_scope, cmd);
    }
