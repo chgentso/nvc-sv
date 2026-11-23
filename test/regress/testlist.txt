@@ -3190,3 +3190,4 @@ mixed67 mixed,2008,gold
 blackbox3 shell
 crvdisableif1 verilog
 crvreduce1 verilog
+crvdistweight1 verilog

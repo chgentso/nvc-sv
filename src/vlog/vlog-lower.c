@@ -25914,6 +25914,94 @@ static bool vlog_crv_dist_dynamic(vlog_gen_t *g, vlog_node_t v)
    return false;
 }
 
+static void vlog_crv_rand_ref_cb(vlog_node_t v, void *context)
+{
+   bool *found = context;
+
+   switch (vlog_kind(v)) {
+   case V_REF:
+   case V_MEMBER_REF:
+      if (vlog_has_ref(v)) {
+         vlog_node_t decl = vlog_ref(v);
+         if (vlog_kind(decl) == V_VAR_DECL
+             && (vlog_flags(decl) & (VLOG_F_RAND | VLOG_F_RANDC)))
+            *found = true;
+      }
+      break;
+   default:
+      break;
+   }
+}
+
+static bool vlog_crv_dist_weights_dynamic(vlog_gen_t *g, vlog_node_t v)
+{
+   // The weights depend on random variables which the solver is choosing
+
+   if (g->crv_class == NULL)
+      return false;
+
+   bool found = false;
+   const int nparams = vlog_params(v);
+   for (int i = 0; i < nparams && !found; i++)
+      vlog_visit(vlog_delay(vlog_param(v, i)), vlog_crv_rand_ref_cb, &found);
+
+   return found;
+}
+
+static mir_value_t vlog_crv_dist_as_inside(vlog_gen_t *g, vlog_node_t v)
+{
+   // Weights which are not known until the solver has run cannot bias the
+   // choice so the argument only has to be in one of the items
+
+   vlog_node_t arg = vlog_value(v);
+   unsigned width = MIN(vlog_crv_width(g, arg), 64);
+   bool is_signed = vlog_crv_signed(g, arg);
+
+   const int nparams = vlog_params(v);
+   for (int i = 0; i < nparams; i++) {
+      vlog_node_t item = vlog_param(v, i);
+      if (vlog_kind(vlog_left(item)) != V_DOLLAR) {
+         width = MAX(width, MIN(vlog_crv_width(g, vlog_left(item)), 64));
+         is_signed &= vlog_crv_signed(g, vlog_left(item));
+      }
+      if (vlog_has_right(item) && vlog_kind(vlog_right(item)) != V_DOLLAR) {
+         width = MAX(width, MIN(vlog_crv_width(g, vlog_right(item)), 64));
+         is_signed &= vlog_crv_signed(g, vlog_right(item));
+      }
+   }
+
+   mir_value_t flags = vlog_crv_flags(g, width, is_signed);
+   mir_value_t set = CRV1(g, CRV_OP_SET_NEW, g->crv_ctx);
+
+   for (int i = 0; i < nparams; i++) {
+      vlog_node_t item = vlog_param(v, i);
+      mir_value_t lo;
+      if (vlog_kind(vlog_left(item)) == V_DOLLAR)
+         lo = CRV3(g, CRV_OP_CONST, g->crv_ctx,
+                   vlog_crv_int(g, is_signed ? INT64_MIN >> (64 - width) : 0),
+                   flags);
+      else
+         lo = vlog_crv_expr(g, vlog_left(item), width, is_signed);
+
+      if (!vlog_has_right(item))
+         CRV3(g, CRV_OP_SET_VALUE, g->crv_ctx, set, lo);
+      else {
+         mir_value_t hi;
+         if (vlog_kind(vlog_right(item)) == V_DOLLAR)
+            hi = CRV3(g, CRV_OP_CONST, g->crv_ctx,
+                      vlog_crv_int(g, is_signed ? INT64_MAX >> (64 - width)
+                                   : width >= 63 ? INT64_MAX
+                                   : (INT64_C(1) << width) - 1), flags);
+         else
+            hi = vlog_crv_expr(g, vlog_right(item), width, is_signed);
+         CRV4(g, CRV_OP_SET_RANGE, g->crv_ctx, set, lo, hi);
+      }
+   }
+
+   mir_value_t node = vlog_crv_expr(g, arg, width, is_signed);
+   return CRV3(g, CRV_OP_INSIDE, g->crv_ctx, node, set);
+}
+
 static void vlog_crv_dyn_dist_parts(vlog_gen_t *g, vlog_node_t v,
                                     mir_value_t *pick, mir_value_t *impls)
 {
@@ -26003,6 +26091,9 @@ static mir_value_t vlog_crv_dist(vlog_gen_t *g, vlog_node_t v)
 {
    if (vlog_crv_width(g, vlog_value(v)) > 64)
       return vlog_crv_wide_node(g, v, 1, false);
+
+   if (vlog_crv_dist_weights_dynamic(g, v))
+      return vlog_crv_dist_as_inside(g, v);
 
    if (vlog_crv_dist_dynamic(g, v)) {
       mir_value_t pick, impls;
@@ -28118,7 +28209,8 @@ static void vlog_crv_items(vlog_gen_t *g, vlog_node_t v, mir_value_t guard,
             if (!mir_is_null(impls))
                vlog_crv_emit(g, guard, impls, soft, sink);
          }
-         else if (vlog_kind(e) == V_DIST && vlog_crv_dist_dynamic(g, e)) {
+         else if (vlog_kind(e) == V_DIST && vlog_crv_dist_dynamic(g, e)
+                  && !vlog_crv_dist_weights_dynamic(g, e)) {
             mir_value_t pick, impls;
             vlog_crv_dyn_dist_parts(g, e, &pick, &impls);
             vlog_crv_emit(g, guard, pick, soft, sink);
