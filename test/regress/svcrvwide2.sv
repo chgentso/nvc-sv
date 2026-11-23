@@ -2,7 +2,8 @@
 // constants, wide ranges, wide and narrow mixes and a 256-bit key with a mask.
 // Expected values: IEEE 1800-2017 18.3 and 18.5 (constraints apply to integral types of any width),
 // 18.5.3 (inside), 11.4.5 (equality), 11.4.4 (relational), 11.4.8 (bitwise).
-// The distribution checks are statistical (probability of failure below 2**-60).
+// The distribution checks are statistical.  The solutions are drawn uniformly, so the sets of iv are
+// small enough for each to be seen in 200 draws (probability of failure below 1e-12).
 class Key;
   rand bit [255:0] key;
   rand bit [127:0] iv;
@@ -14,7 +15,7 @@ class Key;
                        == 256'h1234_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_5678;
                      key != 256'h0; }
   constraint c_iv { iv inside {128'h1, 128'h2,
-                               [128'h1_0000_0000_0000_0000 : 128'h1_0000_0000_0000_00ff],
+                               [128'h1_0000_0000_0000_0000 : 128'h1_0000_0000_0000_0003],
                                128'hffff_ffff_ffff_ffff_ffff_ffff_ffff_ff00}; }
   constraint c_odd { odd >= 200'h1_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000;
                      odd < 200'h1_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0010;
@@ -37,7 +38,7 @@ module svcrvwide2;
               !== 256'h1234_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_5678
             || k.key == 0) begin $error("key %h", k.key); bad++; end
         if (k.iv == 1 || k.iv == 2) n_iv_small++;
-        else if (k.iv >= 128'h1_0000_0000_0000_0000 && k.iv <= 128'h1_0000_0000_0000_00ff) n_iv_range++;
+        else if (k.iv >= 128'h1_0000_0000_0000_0000 && k.iv <= 128'h1_0000_0000_0000_0003) n_iv_range++;
         else if (k.iv == 128'hffff_ffff_ffff_ffff_ffff_ffff_ffff_ff00) n_iv_big++;
         else begin $error("iv %h", k.iv); bad++; end
         if (k.odd < 200'h1_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000

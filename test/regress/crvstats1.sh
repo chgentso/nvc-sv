@@ -27,19 +27,30 @@ cmp base.txt stats2.txt
 grep -q 'call sites\|calls per call site' table.txt
 grep -q 'crvstats1.sv:26' table.txt
 test $(wc -l < stats.tsv) -eq 1
-awk -F'\t' '$1 ~ /crvstats1.sv:26/ && $2 == 30 && $6 == 30 && NF == 27 { ok = 1 }
+awk -F'\t' '$1 ~ /crvstats1.sv:26/ && $2 == 30 && $6 == 30 && NF == 40 { ok = 1 }
             END { exit !ok }' stats.tsv
 
-# Splitting variables at slice boundaries is a separate switch: with it off
-# the values are the solver's own for a problem without the split
-NVC_CRV_DECOMPOSE=0 NVC_CRV_STATS=$PWD/nodec.tsv nvc -r crvstats1 > nodec.txt
+# Splitting variables at slice boundaries is only done by the legacy engine,
+# with its own switch; the other engines leave the slices to the bdd stage
+NVC_CRV_ENGINE=legacy NVC_CRV_STATS=$PWD/legacy.tsv nvc -r crvstats1 > legacy2.txt
+awk -F'\t' '$7 > 0 { ok = 1 } END { exit !ok }' legacy.tsv
+NVC_CRV_ENGINE=legacy NVC_CRV_DECOMPOSE=0 NVC_CRV_STATS=$PWD/nodec.tsv nvc -r crvstats1 > nodec.txt
 awk -F'\t' '$7 == 0 { ok = 1 } END { exit !ok }' nodec.tsv
-awk -F'\t' '$7 > 0 { ok = 1 } END { exit !ok }' stats.tsv
+awk -F'\t' '$7 == 0 { ok = 1 } END { exit !ok }' stats.tsv
+NVC_CRV_DECOMPOSE=0 nvc -r crvstats1 > nodec2.txt 2> nodec.err
+cmp base.txt nodec2.txt
+grep -q 'no effect' nodec.err
+
+# The bdd stage on its own answers every component of the 30 calls, and
+# is the stage that answers the slices in auto
+NVC_CRV_ENGINE=bdd NVC_CRV_STATS=$PWD/bdd.tsv nvc -r crvstats1 > bdd.txt
+grep -c '^[0-9]' bdd.txt | grep -qx 30
+awk -F'\t' '$9 == 0 && $10 == 0 && $13 > 0 { ok = 1 } END { exit !ok }' bdd.tsv
 
 # A stage that does not exist yet falls back to the search, with a message
-NVC_CRV_ENGINE=bdd nvc -r crvstats1 > bdd.txt 2> bdd.err
-cmp dfs.txt bdd.txt
-grep -q 'not available' bdd.err
+NVC_CRV_ENGINE=sat nvc -r crvstats1 > sat.txt 2> sat.err
+cmp dfs.txt sat.txt
+grep -q 'not available' sat.err
 NVC_CRV_ENGINE=nonsense nvc -r crvstats1 > bad.txt 2> bad.err
 cmp base.txt bad.txt
 grep -q 'unknown engine' bad.err

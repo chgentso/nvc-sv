@@ -101,7 +101,7 @@ while read -r name calls limit expect quick _; do
         # by NVC_CRV_STATS.
         rm -f stats.tsv
         NVC_CRV_STATS="$d/stats.tsv" "${CAP[@]}" timeout 300 "${NVC[@]}" -r top +N="$calls" > run2.log 2>&1
-        solver=$(awk -F'\t' '{ b += $(NF-1); s += $NF; c += $2 }
+        solver=$(awk -F'\t' '{ b += $26; s += $27; c += $2 }
                              END { if (c > 0) printf "%.2f", (b + s) / c }' stats.tsv 2>/dev/null)
         [ -n "$solver" ] && per=$solver
     fi

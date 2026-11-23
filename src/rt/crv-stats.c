@@ -39,6 +39,7 @@ static const char *const engine_names[] = {
 
 static crv_engine_t engine = CRV_ENGINE_AUTO;
 static bool         decompose = true;
+static unsigned     bdd_nodes = 32768;
 static bool         env_read;
 static nvc_lock_t   env_lock;
 
@@ -70,6 +71,21 @@ static void read_env(void)
    const char *d = getenv("NVC_CRV_DECOMPOSE");
    if (d != NULL && strcmp(d, "0") == 0)
       decompose = false;
+   if (d != NULL && engine != CRV_ENGINE_LEGACY)
+      fprintf(stderr, "NVC_CRV_DECOMPOSE has no effect: slices and masks are "
+              "solved by the bdd stage, only NVC_CRV_ENGINE=legacy splits "
+              "variables\n");
+
+   const char *n = getenv("NVC_CRV_BDD_NODES");
+   if (n != NULL && *n) {
+      char *end;
+      const long v = strtol(n, &end, 10);
+      if (*end != '\0' || v < 0 || v > 100000000)
+         fprintf(stderr, "NVC_CRV_BDD_NODES: expecting a number of nodes, "
+                 "0 to 100000000, not '%s'\n", n);
+      else
+         bdd_nodes = v;
+   }
 
    env_read = true;
 }
@@ -90,10 +106,11 @@ void crv_set_engine(crv_engine_t e)
 
 bool crv_engine_available(crv_engine_t e)
 {
-   // Legacy and dfs are the same search, reject is the rejection stage on
-   // its own and auto is the stages in turn
+   // Legacy and dfs are the same search, reject and bdd are the stages on
+   // their own and auto is the stages in turn
    return e == CRV_ENGINE_AUTO || e == CRV_ENGINE_LEGACY
-      || e == CRV_ENGINE_DFS || e == CRV_ENGINE_REJECT;
+      || e == CRV_ENGINE_DFS || e == CRV_ENGINE_REJECT
+      || e == CRV_ENGINE_BDD;
 }
 
 const char *crv_engine_name(crv_engine_t e)
@@ -115,6 +132,20 @@ void crv_set_decompose(bool on)
    decompose = on;
 }
 
+unsigned crv_bdd_nodes(void)
+{
+   if (unlikely(!env_read))
+      read_env();
+   return bdd_nodes;
+}
+
+void crv_set_bdd_nodes(unsigned nodes)
+{
+   if (!env_read)
+      read_env();
+   bdd_nodes = nodes;
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // Counters
 
@@ -126,6 +157,8 @@ typedef struct {
    uint64_t  call_stage[CRV_STAGE_COUNT];
    uint64_t  declined[3];
    uint64_t  build_ns, solve_ns;
+   uint64_t  bdd_declined[CRV_BDD_REASONS];
+   uint64_t  bdd_build_ns, bdd_sample_ns, bdd_bytes;
 } site_t;
 
 static nvc_lock_t        stats_lock;
@@ -179,6 +212,15 @@ void crv_stats_site(const char *site)
 const crv_call_stat_t *crv_stats_last(void)
 {
    return &last;
+}
+
+const char *crv_bdd_reason_name(crv_bdd_reason_t reason)
+{
+   static const char *const names[CRV_BDD_REASONS] = {
+      "randc", "guarded-dist", "dists", "bits", "size", "unique",
+      "nonlinear", "gates", "budget", "check"
+   };
+   return names[reason];
 }
 
 const char *crv_stage_name(crv_stage_t stage)
@@ -235,6 +277,12 @@ void crv_stats_record(const crv_call_stat_t *s)
       st->declined[i] += s->declined[i];
    st->build_ns += s->build_ns;
    st->solve_ns += s->solve_ns;
+   for (int i = 0; i < CRV_BDD_REASONS; i++)
+      st->bdd_declined[i] += s->bdd_declined[i];
+   st->bdd_build_ns += s->bdd_build_ns;
+   st->bdd_sample_ns += s->bdd_sample_ns;
+   if (s->bdd_bytes > st->bdd_bytes)
+      st->bdd_bytes = s->bdd_bytes;
 }
 
 void crv_stats_reset(void)
@@ -264,7 +312,9 @@ static int site_cmp(const void *a, const void *b)
 // on it: site, calls, comps, loose, freevars, multi, decomposed, soft, fail,
 // giveup, then the components answered by each stage (none, reject, bdd, dfs,
 // sat, mix), the calls whose last stage was each of those, the declines
-// (prefilter, budget, exhausted), build and solve time in microseconds
+// (prefilter, budget, exhausted), build and solve time in microseconds, then
+// the declines of the bdd stage by reason (crv_bdd_reason_t), its build and
+// sample time in microseconds and the most memory a build held in bytes
 static void write_sites(void)
 {
    SCOPED_LOCK(stats_lock);
@@ -293,8 +343,13 @@ static void write_sites(void)
             fprintf(f, "\t%"PRIu64, st->call_stage[k]);
          for (int k = 0; k < 3; k++)
             fprintf(f, "\t%"PRIu64, st->declined[k]);
-         fprintf(f, "\t%"PRIu64"\t%"PRIu64"\n", st->build_ns / 1000,
+         fprintf(f, "\t%"PRIu64"\t%"PRIu64, st->build_ns / 1000,
                  st->solve_ns / 1000);
+         for (int k = 0; k < CRV_BDD_REASONS; k++)
+            fprintf(f, "\t%"PRIu64, st->bdd_declined[k]);
+         fprintf(f, "\t%"PRIu64"\t%"PRIu64"\t%"PRIu64"\n",
+                 st->bdd_build_ns / 1000, st->bdd_sample_ns / 1000,
+                 st->bdd_bytes);
       }
       fclose(f);
       return;

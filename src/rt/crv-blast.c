@@ -69,6 +69,9 @@ struct _blast {
 
    uint64_t *sim;
    unsigned  nsim;
+
+   unsigned  limit;           // Most gates to make, 0 for no limit
+   bool      over;
 };
 
 #define INPUT UINT32_MAX
@@ -140,6 +143,12 @@ blit_t blast_and(blast_t *b, blit_t x, blit_t y)
       const unsigned g = b->tab[h] - 1;
       if (b->l0[g] == x && b->l1[g] == y)
          return g << 1;
+   }
+
+   if (b->limit != 0 && b->ng >= b->limit) {
+      // Too big: everything after this is meaningless and discarded
+      b->over = true;
+      return BLIT_FALSE;
    }
 
    const unsigned g = new_gate(b, x, y);
@@ -686,6 +695,41 @@ static void input_vec(blast_t *b, int v, bv_t *out)
    memcpy(out->b, b->pool + b->invec[v].off, w * sizeof(blit_t));
 }
 
+// Inputs that some bit of a vector depends on: a sign extension counts as
+// the one bit it repeats
+static unsigned bv_support(const blast_t *b, const bv_t *x)
+{
+   uint8_t *seen = xcalloc(b->ng);
+   unsigned *stack = xmalloc_array(b->ng + 1, sizeof(unsigned));
+   unsigned n = 0;
+
+   for (unsigned i = 0; i < x->n; i++) {
+      unsigned sp = 0;
+      if (x->b[i] >> 1 != 0 && !seen[x->b[i] >> 1]) {
+         seen[x->b[i] >> 1] = 1;
+         stack[sp++] = x->b[i] >> 1;
+      }
+      while (sp > 0) {
+         const unsigned g = stack[--sp];
+         if (b->l0[g] == INPUT) {
+            n++;
+            continue;
+         }
+         const blit_t l[2] = { b->l0[g], b->l1[g] };
+         for (int k = 0; k < 2; k++) {
+            if (l[k] >> 1 != 0 && !seen[l[k] >> 1]) {
+               seen[l[k] >> 1] = 1;
+               stack[sp++] = l[k] >> 1;
+            }
+         }
+      }
+   }
+
+   free(stack);
+   free(seen);
+   return n;
+}
+
 static void note_op(blast_t *b, crv_node_t n, const node_t *nd,
                     const bv_t *x, const bv_t *y)
 {
@@ -699,8 +743,10 @@ static void note_op(blast_t *b, crv_node_t n, const node_t *nd,
    }
    b->ops[b->nops++] = (blast_op_t){ n, nd->op, vx, vy };
 
-   if (nd->op == CRV_MUL || nd->op == CRV_DIV || nd->op == CRV_MOD)
-      b->nonlinear = MAX(b->nonlinear, MIN(vx, vy));
+   if (nd->op == CRV_MUL || nd->op == CRV_DIV || nd->op == CRV_MOD) {
+      const unsigned sx = bv_support(b, x), sy = bv_support(b, y);
+      b->nonlinear = MAX(b->nonlinear, MIN(MIN(sx, sy), MIN(vx, vy)));
+   }
 }
 
 static void encode_bin(blast_t *b, crv_node_t n, const node_t *nd)
@@ -1219,6 +1265,40 @@ blit_t blast_unique(blast_t *b, const crv_node_t *nodes, unsigned count)
    }
 
    return ok;
+}
+
+void blast_set_limit(blast_t *b, unsigned gates)
+{
+   b->limit = gates;
+}
+
+bool blast_overflow(const blast_t *b)
+{
+   return b->over;
+}
+
+unsigned blast_gate_count(const blast_t *b)
+{
+   return b->ng;
+}
+
+int blast_gate_input(const blast_t *b, unsigned g)
+{
+   assert(g < b->ng);
+   return b->l0[g] == INPUT ? (int)b->l1[g] : -1;
+}
+
+void blast_gate_fanins(const blast_t *b, unsigned g, blit_t *l0, blit_t *l1)
+{
+   assert(g > 0 && g < b->ng && b->l0[g] != INPUT);
+   *l0 = b->l0[g];
+   *l1 = b->l1[g];
+}
+
+unsigned blast_input_gate(const blast_t *b, unsigned i)
+{
+   assert(i < b->nin);
+   return b->in_gate[i];
 }
 
 unsigned blast_input_count(const blast_t *b)

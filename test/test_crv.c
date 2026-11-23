@@ -17,6 +17,7 @@
 
 #include "test_util.h"
 #include "rt/crv.h"
+#include "rt/crv-bdd.h"
 
 #include <inttypes.h>
 #include <math.h>
@@ -2599,6 +2600,10 @@ START_TEST(test_exact_stages)
          crv_seed(seeds[s]);
          const result_t r = run_samples(&m, samples_for(&m), solver_draw, &sc);
          ck_assert_int_eq(r.invalid, 0);
+         // The bdd stage takes every problem of the harness
+         if (exact[e] == CRV_ENGINE_BDD)
+            ck_assert_msg(r.fails == 0, "%s: bdd declined %ld draws", p.name,
+                          r.fails);
          ck_assert_msg(r.chi2 <= r.bound, "%s with %s seed %d: chi2 %.1f "
                        "above %.1f", p.name, crv_engine_name(exact[e]), s,
                        r.chi2, r.bound);
@@ -3001,6 +3006,314 @@ static int fuzz_engines(crv_engine_t *engines)
    return n;
 }
 
+// The comparison of the bits of a variable with a constant, for every width
+// and constant up to 6 bits, signed or not, with the bits in any order
+START_TEST(test_bdd_cmp_const)
+{
+   for (unsigned w = 1; w <= 6; w++) {
+      for (int order = 0; order < 3; order++) {
+         // The bits of the variable are spread among 2 w positions: least
+         // significant first, most significant first, or mixed
+         unsigned pos[6];
+         for (unsigned i = 0; i < w; i++) {
+            const unsigned k = order == 0 ? i : order == 1 ? w - 1 - i
+               : (i * 5) % w;
+            pos[i] = 2 * k + (k & 1);
+         }
+         if (order == 2) {
+            // (i * 5) % w is a permutation only when 5 and w are coprime
+            bool seen[6] = { false };
+            bool perm = true;
+            for (unsigned i = 0; i < w; i++) {
+               const unsigned k = (i * 5) % w;
+               perm &= !seen[k];
+               seen[k] = true;
+            }
+            if (!perm)
+               continue;
+         }
+
+         for (int sgn = 0; sgn < 2; sgn++) {
+            for (int ge = 0; ge < 2; ge++) {
+               for (unsigned cc = 0; cc < (1u << w); cc++) {
+                  bdd_t *b = bdd_open(2 * w, 100000);
+                  const bnode_t f = bdd_cmp_const(b, pos, w, sgn, cc, ge);
+                  ck_assert(!bdd_over(b));
+                  uint8_t fix[16], bits[16];
+                  memset(fix, 1, sizeof(fix));
+                  for (unsigned x = 0; x < (1u << w); x++) {
+                     memset(bits, 0, sizeof(bits));
+                     for (unsigned i = 0; i < w; i++)
+                        bits[pos[i]] = (x >> i) & 1;
+                     const bnode_t r = bdd_cofactor(b, f, fix, bits);
+                     // Signed: the pattern with the top bit inverted compares
+                     const unsigned u = sgn ? x ^ (1u << (w - 1)) : x;
+                     const bool want = ge ? u >= cc : u <= cc;
+                     ck_assert_msg(r == (want ? BDD_TRUE : BDD_FALSE),
+                                   "w %u order %d sgn %d ge %d c %u x %u", w,
+                                   order, sgn, ge, cc, x);
+                  }
+                  bdd_close(b);
+               }
+            }
+         }
+      }
+   }
+}
+END_TEST
+
+// Wide variables in a scrambled order of bits (a slice of a variable
+// that a constraint mentions comes before the rest): the comparison stays
+// small
+START_TEST(test_bdd_cmp_scrambled)
+{
+   trng_t rng = { 4242 };
+   for (unsigned w = 8; w <= 64; w *= 2) {
+      for (int trial = 0; trial < 30; trial++) {
+         unsigned pos[64];
+         for (unsigned i = 0; i < w; i++)
+            pos[i] = i;
+         for (unsigned i = w - 1; i > 0; i--) {
+            const unsigned j = trng_below(&rng, i + 1);
+            const unsigned t = pos[i];
+            pos[i] = pos[j];
+            pos[j] = t;
+         }
+         const uint64_t c = trng_next(&rng) & tmask(w);
+         const bool ge = trial & 1, sgn = trial & 2;
+         bdd_t *b = bdd_open(w, 100000);
+         const bnode_t f = bdd_cmp_const(b, pos, w, sgn, c, ge);
+         ck_assert(!bdd_over(b));
+         ck_assert_msg(bdd_nodes(b) < 4 * w * w, "w %u: %u nodes", w,
+                       bdd_nodes(b));
+         uint8_t fix[64], bits[64];
+         memset(fix, 1, sizeof(fix));
+         for (int k = 0; k < 100; k++) {
+            const uint64_t x = trng_next(&rng) & tmask(w);
+            for (unsigned i = 0; i < w; i++)
+               bits[pos[i]] = (x >> i) & 1;
+            const uint64_t u = sgn ? x ^ (UINT64_C(1) << (w - 1)) : x;
+            const bool want = ge ? u >= c : u <= c;
+            ck_assert(bdd_cofactor(b, f, fix, bits)
+                      == (want ? BDD_TRUE : BDD_FALSE));
+         }
+         bdd_close(b);
+      }
+   }
+}
+END_TEST
+
+// A product of two 8 bit values needs a BDD of more than the budget: the
+// stage gives up and the next one answers exactly as it does without the
+// stage; wider products are not tried
+START_TEST(test_bdd_budget)
+{
+   const crv_engine_t saved = crv_engine();
+   const unsigned nodes = crv_bdd_nodes();
+   crv_set_engine(CRV_ENGINE_AUTO);
+
+   int64_t got[3][2] = { { 0 } };
+   for (int pass = 0; pass < 3; pass++) {
+      // pass 0: the default budget, 1: no bdd stage, 2: a smaller budget
+      crv_set_bdd_nodes(pass == 0 ? 20000 : pass == 1 ? 0 : 2000);
+      crv_t *c = crv_new();
+      crv_var_t x = crv_var(c, 8, false, 0), y = crv_var(c, 8, false, 0);
+      crv_require(c, crv_binary(c, CRV_EQ, crv_binary(
+                                   c, CRV_MUL, crv_var_ref(c, x),
+                                   crv_var_ref(c, y), 16, false),
+                                crv_const(c, 60000, 16, false), 1, false),
+                  false, 1);
+      crv_stats_force(true);
+      crv_seed(77);
+      const crv_result_t r = crv_solve2(c);
+      const crv_call_stat_t *st = crv_stats_last();
+      ck_assert_int_eq(r, CRV_SAT);
+      ck_assert_int_eq(crv_value(c, x) * crv_value(c, y), 60000);
+      ck_assert_int_eq(st->top, CRV_STAGE_DFS);
+      got[pass][0] = crv_value(c, x);
+      got[pass][1] = crv_value(c, y);
+      if (pass == 1)
+         ck_assert_int_eq(st->bdd_declined[CRV_BDD_BUDGET], 0);
+      else {
+         ck_assert_int_eq(st->bdd_declined[CRV_BDD_BUDGET], 1);
+         ck_assert_int_eq(st->declined[1], 1);
+         ck_assert_msg(st->bdd_bytes < (1u << 20), "%u bytes", st->bdd_bytes);
+      }
+      crv_free(c);
+   }
+
+   // The same values whatever the stage that gave up did
+   for (int pass = 1; pass < 3; pass++) {
+      ck_assert_int_eq(got[pass][0], got[0][0]);
+      ck_assert_int_eq(got[pass][1], got[0][1]);
+   }
+
+   // Wider products are not tried at all
+   crv_set_bdd_nodes(nodes);
+   crv_t *c = crv_new();
+   crv_var_t x = crv_var(c, 12, false, 0), y = crv_var(c, 12, false, 0);
+   crv_require(c, crv_binary(c, CRV_EQ, crv_binary(
+                                c, CRV_MUL, crv_var_ref(c, x),
+                                crv_var_ref(c, y), 24, false),
+                             crv_const(c, 1000000, 24, false), 1, false),
+               false, 1);
+   crv_stats_force(true);
+   ck_assert_int_eq(crv_solve2(c), CRV_SAT);
+   ck_assert_int_eq(crv_stats_last()->bdd_declined[CRV_BDD_NONLINEAR], 1);
+   ck_assert_int_eq(crv_value(c, x) * crv_value(c, y), 1000000);
+   crv_free(c);
+
+   crv_set_engine(saved);
+   crv_set_bdd_nodes(nodes);
+}
+END_TEST
+
+// Values for a seed depend on the problem and the seed alone: not on how
+// large the node limit is when the problem fits in it, and not on the build
+// (the golden values below are the same in the release and the ASan builds)
+static void bdd_draws(const problem_t *p, uint64_t seed, int n, int64_t *out)
+{
+   model_t m = { .p = p };
+   solver_ctx_t sc = { .engine = CRV_ENGINE_BDD };
+   crv_seed(seed);
+   for (int i = 0; i < n; i++) {
+      bool ok;
+      solver_draw(&m, &sc, out + i * p->nfields, &ok);
+      ck_assert(ok);
+   }
+}
+
+START_TEST(test_bdd_seed_stable)
+{
+   const unsigned nodes = crv_bdd_nodes();
+   const crv_engine_t saved = crv_engine();
+   const unsigned budgets[] = { 2000, 20000, 400000 };
+   for (int pi = 0; pi < NPROBLEMS; pi++) {
+      const problem_t p = problems[pi].make(problems[pi].arg);
+      int64_t base[4 * MAX_FIELDS], other[4 * MAX_FIELDS];
+      crv_set_bdd_nodes(budgets[1]);
+      bdd_draws(&p, 0x51ed, 4, base);
+      for (size_t b = 0; b < ARRAY_LEN(budgets); b += 2) {
+         crv_set_bdd_nodes(budgets[b]);
+         bdd_draws(&p, 0x51ed, 4, other);
+         ck_assert_msg(!memcmp(base, other, sizeof(int64_t) * 4 * p.nfields),
+                       "%s: values change with the node limit %u", p.name,
+                       budgets[b]);
+      }
+   }
+
+   // Values of fixed seeds
+   static const struct {
+      int      problem;
+      int64_t  v[8];
+   } golden[] = {
+      { 0, { 4, 14, 3, 5, 2, 7, 1, 4 } },
+      { 11, { 0, 2, 3, 12, 7, 14, 14, 15 } },
+      { 13, { 1, 6, 3, 7, 6, 7, 4, 1 } },
+      { 14, { 1, 6, 3, 3, 0, 5, 0, 3 } },
+      { 15, { 1, 6, 5, 3, 1, 5, 0, 0 } },
+      { 20, { 0, 0, 3, 6, 1, 1, 1, 2 } },
+      { 21, { 0, 2, 1, 1, 1, 3, 0, 2 } },
+   };
+   const bool print_golden = getenv("NVC_CRV_PRINT_GOLDEN") != NULL;
+   crv_set_bdd_nodes(nodes);
+   for (size_t i = 0; i < ARRAY_LEN(golden); i++) {
+      const problem_t p = problems[golden[i].problem].make(
+         problems[golden[i].problem].arg);
+      int64_t got[4 * MAX_FIELDS];
+      bdd_draws(&p, 0x51ed, 4, got);
+      if (print_golden) {
+         for (int k = 0; k < 4 * p.nfields; k++)
+            printf("%"PRIi64", ", got[k]);
+         printf("\n");
+         continue;
+      }
+      for (int k = 0; k < 4 * p.nfields; k++)
+         ck_assert_msg(got[k] == golden[i].v[k], "%s: value %d is %"PRIi64
+                       ", expected %"PRIi64, p.name, k, got[k],
+                       golden[i].v[k]);
+   }
+   crv_set_engine(saved);
+}
+END_TEST
+
+// The BDD of the hard constraints counts the solutions and unranking from 0
+// to the count lists each of them once: the stage is exact if this holds,
+// whatever the random numbers do
+static void check_bdd_bijection(const problem_t *p, const char *what)
+{
+   if (p->array)
+      return;
+
+   const int nf = p->nfields;
+   int nbits = 0;
+   for (int i = 0; i < nf; i++)
+      nbits += p->f[i].w;
+   ck_assert_int_le(nbits, 16);
+   const uint32_t total = UINT32_C(1) << nbits;
+
+   // Every solution of the hard constraints
+   uint8_t *hard = xcalloc(total);
+   uint64_t nhard = 0;
+   for (uint32_t key = 0; key < total; key++) {
+      int64_t a[MAX_FIELDS];
+      uint32_t k = key;
+      for (int i = nf - 1; i >= 0; i--) {
+         field_value(p, i, k & tmask(p->f[i].w), a);
+         k >>= p->f[i].w;
+      }
+      if (hard_holds(p, a)) {
+         hard[model_key(p, a)] = 1;
+         nhard++;
+      }
+   }
+
+   crv_t *c = crv_new();
+   handles_t h;
+   build_problem(c, p, &h);
+   int64_t *vals = xmalloc_array(nhard + 1, nf * sizeof(int64_t));
+   uint64_t count = 0;
+   ck_assert_msg(crv_bdd_enumerate(c, nhard, &count, vals), "%s: the stage "
+                 "declined", what);
+   ck_assert_msg(count == nhard, "%s: BDD counts %"PRIu64" solutions, "
+                 "enumeration %"PRIu64, what, count, nhard);
+
+   uint8_t *seen = xcalloc(total);
+   for (uint64_t r = 0; r < count; r++) {
+      const uint32_t key = model_key(p, vals + r * nf);
+      ck_assert_msg(hard[key], "%s: unrank %"PRIu64" is not a solution", what, r);
+      ck_assert_msg(!seen[key], "%s: unrank %"PRIu64" repeats a solution", what,
+                    r);
+      seen[key] = 1;
+   }
+
+   free(seen);
+   free(vals);
+   free(hard);
+   crv_free(c);
+}
+
+START_TEST(test_bdd_bijection_problems)
+{
+   const problem_t p = problems[_i].make(problems[_i].arg);
+   check_bdd_bijection(&p, p.name);
+}
+END_TEST
+
+START_TEST(test_bdd_bijection_fuzz)
+{
+   const uint64_t base = getenv("NVC_CRV_FUZZ_SEED")
+      ? strtoull(getenv("NVC_CRV_FUZZ_SEED"), NULL, 0) : 1000;
+   const int n = long_mode() ? 20000 : 600;
+   for (int i = 0; i < n; i++) {
+      const problem_t p = fuzz_problem(base + i);
+      char what[64];
+      snprintf(what, sizeof(what), "fuzz seed %"PRIu64, base + i);
+      check_bdd_bijection(&p, what);
+   }
+}
+END_TEST
+
 START_TEST(test_fuzz)
 {
    crv_engine_t engines[6];
@@ -3136,7 +3449,7 @@ START_TEST(test_engine_available)
    ck_assert(crv_engine_available(CRV_ENGINE_DFS));
    ck_assert(crv_engine_available(CRV_ENGINE_AUTO));
    ck_assert(crv_engine_available(CRV_ENGINE_REJECT));
-   ck_assert(!crv_engine_available(CRV_ENGINE_BDD));
+   ck_assert(crv_engine_available(CRV_ENGINE_BDD));
    ck_assert(!crv_engine_available(CRV_ENGINE_SAT));
 }
 END_TEST
@@ -3203,6 +3516,7 @@ START_TEST(test_stats_stage)
    } cases[] = {
       { CRV_ENGINE_LEGACY, CRV_STAGE_DFS }, { CRV_ENGINE_DFS, CRV_STAGE_DFS },
       { CRV_ENGINE_REJECT, CRV_STAGE_REJECT },
+      { CRV_ENGINE_BDD, CRV_STAGE_BDD },
       { CRV_ENGINE_AUTO, CRV_STAGE_REJECT },
    };
 
@@ -3225,11 +3539,14 @@ END_TEST
 START_TEST(test_stats_decline)
 {
    // A component with a randc variable is for the search: forced, the
-   // rejection stage gives up and says why
+   // rejection stage and the bdd stage give up and say why
+   static const crv_engine_t engines[] = {
+      CRV_ENGINE_AUTO, CRV_ENGINE_REJECT, CRV_ENGINE_BDD
+   };
    const crv_engine_t saved = crv_engine();
    uint64_t state = 0;
-   for (int pass = 0; pass < 2; pass++) {
-      crv_set_engine(pass == 0 ? CRV_ENGINE_AUTO : CRV_ENGINE_REJECT);
+   for (size_t pass = 0; pass < ARRAY_LEN(engines); pass++) {
+      crv_set_engine(engines[pass]);
       crv_t *c = crv_new();
       crv_var_t x = crv_var(c, 4, false, 0), y = crv_var(c, 4, false, 0);
       crv_var_randc(c, x, &state);
@@ -3238,7 +3555,10 @@ START_TEST(test_stats_decline)
       crv_stats_force(true);
       const crv_result_t r = crv_solve2(c);
       const crv_call_stat_t *st = crv_stats_last();
-      ck_assert_int_eq(st->declined[0], 1);
+      if (pass != 2)
+         ck_assert_int_eq(st->declined[0], 1);
+      if (pass != 1)
+         ck_assert_int_eq(st->bdd_declined[CRV_BDD_RANDC], 1);
       if (pass == 0) {
          ck_assert_int_eq(r, CRV_SAT);
          ck_assert_int_eq(st->top, CRV_STAGE_DFS);
@@ -3309,10 +3629,16 @@ END_TEST
 START_TEST(test_stats_exhausted)
 {
    // 16 samples of a variable that one value in 2^16 satisfies are all
-   // rejected: the search takes over, and a forced stage gives up
+   // rejected: the bdd stage answers, the search does without it, and a
+   // forced rejection stage gives up
+   static const crv_engine_t engines[] = {
+      CRV_ENGINE_AUTO, CRV_ENGINE_REJECT, CRV_ENGINE_AUTO
+   };
    const crv_engine_t saved = crv_engine();
-   for (int pass = 0; pass < 2; pass++) {
-      crv_set_engine(pass == 0 ? CRV_ENGINE_AUTO : CRV_ENGINE_REJECT);
+   const unsigned nodes = crv_bdd_nodes();
+   for (int pass = 0; pass < 3; pass++) {
+      crv_set_engine(engines[pass]);
+      crv_set_bdd_nodes(pass == 2 ? 0 : nodes);
       crv_t *c = crv_new();
       crv_var_t x = crv_var(c, 32, false, 0), y = crv_var(c, 32, false, 0);
       crv_require(c, crv_binary(c, CRV_EQ, crv_binary(
@@ -3324,17 +3650,18 @@ START_TEST(test_stats_exhausted)
       crv_seed(5);
       const crv_result_t r = crv_solve2(c);
       const crv_call_stat_t *st = crv_stats_last();
-      if (pass == 0) {
+      if (pass != 1) {
          ck_assert_int_eq(r, CRV_SAT);
          ck_assert_int_eq((crv_value(c, x) + crv_value(c, y)) & 0xffffffff,
                           0x12345678);
-         ck_assert_int_eq(st->top, CRV_STAGE_DFS);
+         ck_assert_int_eq(st->top, pass == 0 ? CRV_STAGE_BDD : CRV_STAGE_DFS);
       }
       else
          ck_assert_int_eq(r, CRV_GIVEUP);
       ck_assert_int_eq(st->declined[2], 1);
       crv_free(c);
    }
+   crv_set_bdd_nodes(nodes);
    crv_set_engine(saved);
 }
 END_TEST
@@ -3403,10 +3730,26 @@ END_TEST
 
 START_TEST(test_stats_decompose)
 {
-   // A 32 bit value constrained through two slices is split into fields
-   // unless that is off
-   for (int pass = 0; pass < 2; pass++) {
-      crv_set_decompose(pass == 0);
+   // A 32 bit value constrained through two slices is split into fields by
+   // the legacy engine unless that is off; the other engines do not split
+   // it, the bdd stage solves the slices
+   static const struct {
+      crv_engine_t engine;
+      bool         split;
+      bool         on;
+      crv_stage_t  stage;
+   } cases[] = {
+      { CRV_ENGINE_LEGACY, true, true, CRV_STAGE_DFS },
+      { CRV_ENGINE_LEGACY, false, false, CRV_STAGE_DFS },
+      { CRV_ENGINE_DFS, false, true, CRV_STAGE_DFS },
+      { CRV_ENGINE_AUTO, false, true, CRV_STAGE_BDD },
+      { CRV_ENGINE_BDD, false, true, CRV_STAGE_BDD },
+   };
+
+   const crv_engine_t saved = crv_engine();
+   for (size_t i = 0; i < ARRAY_LEN(cases); i++) {
+      crv_set_engine(cases[i].engine);
+      crv_set_decompose(cases[i].on);
       crv_t *c = crv_new();
       crv_var_t x = crv_var(c, 32, false, 0);
       crv_node_t xv = crv_var_ref(c, x);
@@ -3419,11 +3762,14 @@ START_TEST(test_stats_decompose)
       crv_require(c, crv_binary(c, CRV_EQ, lo, crv_const(c, 0x5a, 32, false),
                                 1, false), false, 2);
       const crv_call_stat_t *st = solved_stats(c, true);
-      ck_assert_int_eq(st->decomposed, pass == 0);
+      ck_assert_int_eq(st->decomposed, cases[i].split);
+      ck_assert_int_eq(st->top, cases[i].stage);
       ck_assert_int_eq(crv_value(c, x) >> 16, 0x1234);
       ck_assert_int_eq(crv_value(c, x) & 0xff, 0x5a);
       crv_free(c);
    }
+   crv_set_decompose(true);
+   crv_set_engine(saved);
 }
 END_TEST
 
@@ -3468,12 +3814,13 @@ START_TEST(test_stats_site)
       ck_assert_int_eq(multi, calls);
       ck_assert_int_eq(freevars, calls * 2);
 
-      // Site, nine counters, two groups of six stages, three declines and
-      // two times
+      // Site, nine counters, two groups of six stages, three declines, two
+      // times, the declines of the bdd stage by reason, its two times and
+      // its memory
       int cols = 1;
       for (const char *p = line; *p; p++)
          cols += *p == '\t';
-      ck_assert_int_eq(cols, 27);
+      ck_assert_int_eq(cols, 27 + CRV_BDD_REASONS + 3);
       n++;
    }
    fclose(f);
@@ -3544,6 +3891,12 @@ Suite *get_crv_tests(void)
    tcase_add_loop_test(tc, test_sound_all_engines, 0, NPROBLEMS);
    tcase_add_loop_test(tc, test_bias_report, 0, NPROBLEMS);
    tcase_add_test(tc, test_fuzz);
+   tcase_add_loop_test(tc, test_bdd_bijection_problems, 0, NPROBLEMS);
+   tcase_add_test(tc, test_bdd_bijection_fuzz);
+   tcase_add_test(tc, test_bdd_cmp_const);
+   tcase_add_test(tc, test_bdd_cmp_scrambled);
+   tcase_add_test(tc, test_bdd_budget);
+   tcase_add_test(tc, test_bdd_seed_stable);
    tcase_add_test(tc, test_fuzz_fixed);
    suite_add_tcase(s, tc);
 

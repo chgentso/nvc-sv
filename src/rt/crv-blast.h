@@ -57,9 +57,10 @@ typedef struct {
 // Facts about the circuit that the stages after the blaster decline on
 typedef struct {
    unsigned inputs, gates;
-   unsigned nonlinear;          // Widest of the narrower operands of a
-                                // multiplier, divider or modulo whose both
-                                // operands have variable bits
+   unsigned nonlinear;          // Of the multipliers, dividers and modulos
+                                // whose operands both have variable bits:
+                                // the most inputs the operand with fewer
+                                // depends on (a sign extension is one)
    unsigned nops;               // Arithmetic and comparison nodes encoded
 } blast_stats_t;
 
@@ -88,6 +89,18 @@ blit_t blast_holds(blast_t *b, crv_node_t n);
 
 // True when every value is defined and they are all different
 blit_t blast_unique(blast_t *b, const crv_node_t *nodes, unsigned count);
+
+// A limit on the number of gates: once reached no more are made, the
+// literals that follow are meaningless and blast_overflow says so
+void blast_set_limit(blast_t *b, unsigned gates);
+bool blast_overflow(const blast_t *b);
+
+// The gates themselves, numbered from 1 in an order in which a gate comes
+// after its fanins.  An input gate has no fanins.
+unsigned blast_gate_count(const blast_t *b);
+int blast_gate_input(const blast_t *b, unsigned g);    // Input index or -1
+void blast_gate_fanins(const blast_t *b, unsigned g, blit_t *l0, blit_t *l1);
+unsigned blast_input_gate(const blast_t *b, unsigned i);
 
 // Inputs
 unsigned blast_input_count(const blast_t *b);
