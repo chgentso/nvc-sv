@@ -16,6 +16,11 @@ lib_libnvc_a_SOURCES += \
 	src/rt/model.h \
 	src/rt/model.c \
 	src/rt/crv.c \
+	src/rt/crv-blast.c \
+	src/rt/crv-blast.h \
+	src/rt/crv-bdd.c \
+	src/rt/crv-bdd.h \
+	src/rt/crv-priv.h \
 	src/rt/sva.h \
 	src/rt/sva.c \
 	src/rt/crv-gen.c \

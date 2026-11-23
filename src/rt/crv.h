@@ -68,6 +68,13 @@ crv_var_t crv_var(crv_t *c, unsigned width, bool is_signed, int64_t current);
 // solver keeps the cycle there and it is never freed.
 void crv_var_randc(crv_t *c, crv_var_t v, uint64_t *state);
 
+// Solves of a solver in trial mode draw randc values without taking them
+// from the cycle, so the same value may be drawn again by the next solve.
+// Once the final solve is done crv_randc_commit takes the values the
+// solver holds, as a solve outside trial mode would have.
+void crv_trial(crv_t *c, bool on);
+void crv_randc_commit(crv_t *c);
+
 // Exclude a value from a variable: used to give an enum only its members
 // by calling crv_var_domain with each of them instead.  A variable with
 // any domain value takes only those.
@@ -148,15 +155,16 @@ crv_result_t crv_solve2(crv_t *c);
 bool crv_solve(crv_t *c);
 
 // Which stage of the solver may answer.  Read once from NVC_CRV_ENGINE
-// (legacy, dfs, reject, bdd, sat or auto) and overridden by crv_set_engine
-// for tests.  Legacy is the solver of release 0.18.0, dfs is its search with
-// the components, reject is the rejection stage alone (it gives up on a
+// (dfs, reject, bdd, sat or auto) and overridden by crv_set_engine for
+// tests.  Dfs is the search alone with the components, reject is the
+// rejection stage alone (it gives up on a
 // component it cannot sample) and auto is the stages in turn, the search
-// last.  A stage that is not written yet is taken as dfs:
-// crv_engine_available says which exist.
+// last, bdd is the exact stage on small groups on its own (it gives up on a
+// component it cannot take).  A stage that is not written yet is taken as
+// dfs: crv_engine_available says which exist.
 typedef enum {
-   CRV_ENGINE_AUTO, CRV_ENGINE_LEGACY, CRV_ENGINE_DFS, CRV_ENGINE_REJECT,
-   CRV_ENGINE_BDD, CRV_ENGINE_SAT,
+   CRV_ENGINE_AUTO, CRV_ENGINE_DFS, CRV_ENGINE_REJECT, CRV_ENGINE_BDD,
+   CRV_ENGINE_SAT,
 } crv_engine_t;
 
 crv_engine_t crv_engine(void);
@@ -164,10 +172,17 @@ void crv_set_engine(crv_engine_t engine);
 bool crv_engine_available(crv_engine_t engine);
 const char *crv_engine_name(crv_engine_t engine);
 
-// Splitting variables at the boundaries of constant slices: NVC_CRV_DECOMPOSE=0
-// turns it off to measure what depends on it
-bool crv_decompose_enabled(void);
-void crv_set_decompose(bool on);
+// The limit on the nodes of one BDD (NVC_CRV_BDD_NODES, default 32768;
+// 0 turns the stage off).  A forced bdd engine allows 100 times as many.
+unsigned crv_bdd_nodes(void);
+void crv_set_bdd_nodes(unsigned nodes);
+
+// For the tests of the BDD: the number of solutions of the hard constraints
+// of a problem without arrays by counting in the BDD, and the values of the
+// variables (nvars of them) of the first max solutions by unranking.  False
+// if the stage cannot take the problem.
+bool crv_bdd_enumerate(crv_t *c, uint64_t max, uint64_t *count,
+                       int64_t *vals);
 
 // Statistics of the calls of crv_solve.  NVC_CRV_STATS=1 prints a table per
 // call site at the end of the run and NVC_CRV_STATS=<file> appends one tab
@@ -179,6 +194,22 @@ typedef enum {
    CRV_STAGE_COUNT
 } crv_stage_t;
 
+// Why the bdd stage did not take a component
+typedef enum {
+   CRV_BDD_RANDC,       // A randc variable
+   CRV_BDD_GUARDED,     // A dist guarded by a condition
+   CRV_BDD_DISTS,       // More than 8 dist variables
+   CRV_BDD_BITS,        // More than 256 decision bits
+   CRV_BDD_SIZE,        // The size of an array with many possible values
+   CRV_BDD_UNIQUE,      // A unique set of more than 8 members
+   CRV_BDD_NONLINEAR,   // A product or quotient of two wide variables
+   CRV_BDD_ADDERS,      // A sum of more than 6 terms
+   CRV_BDD_GATES,       // A circuit of more than 20000 gates
+   CRV_BDD_BUDGET,      // The node limit was reached
+   CRV_BDD_CHECK,       // The sample failed the check (a bug if it happens)
+   CRV_BDD_REASONS
+} crv_bdd_reason_t;
+
 typedef struct {
    uint32_t    comps;       // Components of linked variables with a free one
    uint32_t    loose;       // Free variables that no constraint mentions
@@ -187,12 +218,14 @@ typedef struct {
    uint32_t    stage[CRV_STAGE_COUNT];   // Components answered by each stage
    uint32_t    declined[3]; // Components a stage cannot take, budget of a
                             // stage, all proposals rejected
-   bool        decomposed;  // A variable was split at slice boundaries
    bool        soft;        // Has soft constraints
    bool        ok;          // A solution was found
    bool        giveup;      // Not ok and the last attempt ran out of work
    crv_stage_t top;         // Last stage of the call in the order above
    uint64_t    build_ns, solve_ns;
+   uint32_t    bdd_declined[CRV_BDD_REASONS];
+   uint64_t    bdd_build_ns, bdd_sample_ns;   // Within solve_ns
+   uint32_t    bdd_bytes;           // Most memory a BDD build held
 } crv_call_stat_t;
 
 bool crv_stats_enabled(void);
@@ -203,6 +236,7 @@ void crv_stats_reset(void);                    // Forget the sites
 void crv_stats_write(void);                    // Write and forget them
 void crv_stats_record(const crv_call_stat_t *s);   // Used by crv_solve
 const char *crv_stage_name(crv_stage_t stage);
+const char *crv_bdd_reason_name(crv_bdd_reason_t reason);
 
 // Solution
 int64_t crv_value(crv_t *c, crv_var_t v);
@@ -232,7 +266,7 @@ typedef enum {
    CRV_OP_FOREACH, CRV_OP_SOLVE_BEFORE, CRV_OP_VALUE, CRV_OP_ARRAY_LEN,
    CRV_OP_ARRAY_VALUE, CRV_OP_TEST_BIT, CRV_OP_SET_BIT, CRV_OP_RANDOM,
    CRV_OP_DISABLE_SOFT, CRV_OP_SEED_BEGIN, CRV_OP_SEED_END, CRV_OP_ARRAY_SUM,
-   CRV_OP_FAIL,
+   CRV_OP_FAIL, CRV_OP_TRIAL, CRV_OP_RANDC_COMMIT,
 } crv_op_t;
 
 int64_t crv_generated(crv_op_t op, const int64_t *args);

@@ -3142,3 +3142,6 @@ svcrvoob1 verilog
 svcrvrandmodeh1 verilog
 svcrvenumscope1 verilog
 svcrvoob2 verilog
+crvdump1        shell
+crvbdd1         shell
+svcrvunary1     verilog

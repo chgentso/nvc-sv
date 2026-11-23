@@ -38,8 +38,10 @@ module crv05;
         if (o.mode == 3 && o.c > 1) begin errors++; $display("k6"); end
       end
     end
-    // both values of a must appear (implication does not make it degenerate)
-    if (na < 200 || na > 1800) begin errors++; $display("na=%0d", na); end
+    // both values of a must appear (implication does not make it degenerate);
+    // the solutions are drawn uniformly and few of them have a set: 35 of the
+    // combinations of b, c, mode and len against about 2000
+    if (na < 5 || na > 1800) begin errors++; $display("na=%0d", na); end
     if (n3 == 0) begin errors++; $display("mode 3 never"); end
     if (errors == 0) $display("PASSED"); else $display("FAILED errors=%0d", errors);
     $finish;

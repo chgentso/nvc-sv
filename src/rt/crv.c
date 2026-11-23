@@ -17,6 +17,9 @@
 
 #include "util.h"
 #include "rt/crv.h"
+#include "rt/crv-priv.h"
+#include "rt/crv-bdd.h"
+#include "rt/crv-blast.h"
 
 #include <assert.h>
 #include <stdint.h>
@@ -24,14 +27,6 @@
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
-
-// Values are held as 128-bit integers during propagation so that the
-// result of any 64-bit operation can be represented exactly before it is
-// wrapped to the width of its node.
-typedef __int128 i128;
-
-typedef struct { i128 lo, hi; } ivl_t;     // Empty if lo > hi
-typedef struct { i128 lo, hi; } range_t;
 
 #define BIG ((i128)1 << 100)
 #define MAX_SIZE (1 << 20)
@@ -299,109 +294,6 @@ static i128 pow2mask(i128 x)
 ////////////////////////////////////////////////////////////////////////////////
 // The graph
 
-typedef enum {
-   N_CONST, N_VAR, N_BIN, N_UN, N_CAST, N_COND, N_ASIZE, N_AELEM, N_ASUM,
-   N_INSIDE, N_DIST, N_INDEX, N_FAIL,
-} nkind_t;
-
-typedef struct {
-   uint8_t kind, op, width;
-   bool    sgn;
-   bool    inst;     // Contains an index or array element to substitute
-   int32_t a, b, c;
-   int32_t aux;
-   int64_t val;
-} node_t;
-
-typedef struct {
-   unsigned  width;
-   bool      sgn;
-   int64_t   cur;
-   uint64_t *rc;
-   int64_t  *dom;
-   unsigned  ndom, cdom;
-} cvar_t;
-
-typedef struct {
-   unsigned  width;
-   bool      sgn, size_rand, elems_rand;
-   unsigned  len;
-   int64_t  *init;
-   unsigned  ninit;
-} carr_t;
-
-typedef struct {
-   crv_node_t lo, hi;      // hi is -1 for a single value
-} item_t;
-
-typedef struct {
-   item_t   *items;
-   unsigned  n, cap;
-   range_t  *rr;
-   unsigned  nrr;
-   bool      allconst, prep;
-} cset_t;
-
-typedef struct {
-   int64_t lo, hi, weight;
-   bool    per_value;
-} drange_t;
-
-typedef struct {
-   drange_t *r;
-   unsigned  n, cap;
-   bool      sgn, prep;
-   range_t  *mr;           // Merged ranges with non-zero weight
-   unsigned  nmr;
-   range_t  *pr;           // The same ranges for picking
-   double   *unit;         // Weight of each value
-   int64_t  *wt;           // The weight of each as written and whether it
-   bool     *pvl;          // is for each value (:=) or the range (:/)
-   unsigned  npr;
-} cdist_t;
-
-typedef enum { C_REQ, C_FOREACH, C_UNIQUE } ckind_t;
-
-typedef struct {
-   ckind_t     kind;
-   crv_node_t  root;
-   int         soft;       // Index among soft constraints or -1
-   unsigned    nsoft;      // Soft indices of a foreach, one per element
-   crv_array_t arr;
-   crv_node_t  idx;
-   unsigned    first, count;
-   bool        dead;       // Soft constraint discarded by disable soft
-   int         line;       // Source line for NVC_CRV_DEBUG
-} ccons_t;
-
-typedef struct {
-   bool        array;
-   int         before;
-   crv_var_t   after;
-} edge_t;
-
-struct _crv {
-   node_t   *nodes;
-   unsigned  nnodes, cnodes;
-   cvar_t   *vars;
-   unsigned  nvars, cvars;
-   carr_t   *arrays;
-   unsigned  narrays, carrays;
-   cset_t   *sets;
-   unsigned  nsets, csets;
-   cdist_t  *dists;
-   unsigned  ndists, cdists;
-   ccons_t  *cons;
-   unsigned  ncons, ccons;
-   crv_node_t *uniq;
-   unsigned  nuniq, cuniq;
-   edge_t   *edges;
-   unsigned  nedges, cedges;
-   int       nindex;
-   int       nsoft;
-   bool      greedy;   // Soft constraints are kept one at a time
-};
-
 // The first n entries are the values, remaining ones first, and the next n
 // are the index of each value
 //
@@ -568,6 +460,16 @@ void crv_var_domain(crv_t *c, crv_var_t v, int64_t value)
             norm(mathv(value, cv->sgn), cv->width, cv->sgn));
 }
 
+static bool array_valid(crv_t *c, crv_array_t a)
+{
+   // An array that was never registered: the graph cannot be solved
+   if (a >= 0 && (unsigned)a < c->narrays)
+      return true;
+
+   c->bad = true;
+   return false;
+}
+
 crv_array_t crv_array(crv_t *c, unsigned elem_width, bool is_signed,
                       unsigned current_size, bool size_rand, bool elems_rand)
 {
@@ -581,6 +483,9 @@ crv_array_t crv_array(crv_t *c, unsigned elem_width, bool is_signed,
 
 void crv_array_init(crv_t *c, crv_array_t a, unsigned index, int64_t value)
 {
+   if (!array_valid(c, a))
+      return;
+
    carr_t *ar = &c->arrays[a];
    if (index >= ar->ninit) {
       if (index >= (unsigned)MAX_SIZE * 4)
@@ -594,7 +499,7 @@ void crv_array_init(crv_t *c, crv_array_t a, unsigned index, int64_t value)
 
 bool crv_array_resizable(crv_t *c, crv_array_t a)
 {
-   return c->arrays[a].size_rand;
+   return array_valid(c, a) && c->arrays[a].size_rand;
 }
 
 crv_node_t crv_const(crv_t *c, int64_t value, unsigned width, bool is_signed)
@@ -662,6 +567,9 @@ crv_node_t crv_array_size(crv_t *c, crv_array_t a)
 
 crv_node_t crv_array_elem(crv_t *c, crv_array_t a, crv_node_t index)
 {
+   if (!array_valid(c, a))
+      return crv_const(c, 0, 32, true);
+
    node_t n = { .kind = N_AELEM, .width = c->arrays[a].width,
                 .sgn = c->arrays[a].sgn, .a = index, .aux = a,
                 .inst = true };
@@ -763,6 +671,9 @@ crv_node_t crv_index(crv_t *c)
 void crv_foreach(crv_t *c, crv_array_t a, crv_node_t index, crv_node_t body,
                  bool soft)
 {
+   if (!array_valid(c, a))
+      return;
+
    ccons_t k = { .kind = C_FOREACH, .root = body, .arr = a, .idx = index,
                  .soft = -1, .nsoft = 1 };
    if (soft) {
@@ -784,6 +695,9 @@ void crv_solve_before(crv_t *c, crv_var_t before, crv_var_t after)
 
 void crv_array_solve_before(crv_t *c, crv_array_t before, crv_var_t after)
 {
+   if (!array_valid(c, before))
+      return;
+
    edge_t e = { true, before, after };
    VEC_PUSH(c->edges, c->nedges, c->cedges, e);
 }
@@ -795,11 +709,14 @@ int64_t crv_value(crv_t *c, crv_var_t v)
 
 unsigned crv_array_len(crv_t *c, crv_array_t a)
 {
-   return c->arrays[a].len;
+   return array_valid(c, a) ? c->arrays[a].len : 0;
 }
 
 int64_t crv_array_value(crv_t *c, crv_array_t a, unsigned index)
 {
+   if (!array_valid(c, a))
+      return 0;
+
    const carr_t *ar = &c->arrays[a];
    return index < ar->ninit && index < ar->len ? ar->init[index] : 0;
 }
@@ -1030,6 +947,17 @@ static int64_t ev(ectx_t *E, int n)
    }
 }
 
+int64_t crv_eval(const crv_t *c, crv_node_t n, const int64_t *vals,
+                 unsigned nsc, const int *ebase, const unsigned *sizes,
+                 bool *fail)
+{
+   ectx_t E = { .c = c, .vals = vals, .nsc = nsc, .ebase = ebase,
+                .sizes = sizes };
+   const int64_t v = ev(&E, n);
+   *fail = E.fail;
+   return v;
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // Sets and distributions
 
@@ -1094,7 +1022,7 @@ static void set_prep(crv_t *c, cset_t *cs)
    cs->prep = true;
 }
 
-static void dist_prep(cdist_t *cd)
+void crv_dist_prepare(cdist_t *cd)
 {
    if (cd->prep)
       return;
@@ -1492,7 +1420,7 @@ typedef struct {
    randc_t  *rc;
    unsigned  level;
    int64_t   cur;
-   bool      split, derived;
+   bool      split;
 } pvar_t;
 
 typedef struct {
@@ -1531,16 +1459,6 @@ static inline int debug_level(void)
       read_debug_env();
    return dbg.level;
 }
-
-#define MAX_FIELDS 32
-
-// A variable which is split into fields at the boundaries of the bit
-// slices of it that are used in constraints
-typedef struct dec_s {
-   int      var, f0, nf;
-   unsigned width;
-   uint8_t  pos[MAX_FIELDS + 1];
-} dec_t;
 
 // A long chain of additions of the same width, as made by the sum of a
 // method with a clause: its terms are kept with their bounds and the total
@@ -1591,10 +1509,11 @@ typedef struct {
    bool      oob;
    int64_t  *vals;
    unsigned  base_nodes, base_sets;
-   struct dec_s *dec;
-   int       ndec;
-   bool      legacy;      // The search of release 0.18.0 exactly
    int       reject;      // Rejection stage: 0 off, 1 then the search, 2 only
+   int       bdd;         // BDD stage: 0 off, 1 then the search, 2 only
+   uint32_t  nbdd[CRV_BDD_REASONS];   // Components it declined, by reason
+   uint64_t  bdd_build_ns, bdd_sample_ns;
+   uint32_t  bdd_bytes;
    int       nstage[CRV_STAGE_COUNT];   // Components answered by each stage
    uint32_t  ndecl[3];    // Components a stage declined, by reason
    // Sums of the elements of each array kept up to date as domains change
@@ -2008,7 +1927,6 @@ static void prob_free(prob_t *P)
    c->nsets = P->base_sets;
    c->nnodes = P->base_nodes;
 
-   free(P->dec);
    free(P->soft_on);
    free(P->vcomp);
    free(P->ccomp);
@@ -2070,15 +1988,6 @@ static void prob_free(prob_t *P)
    free(P);
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// Splitting variables into bit fields
-//
-// Bounds on a variable cannot express that some of its bits are fixed, so
-// the constraints on several slices of one variable take a long chain of
-// propagation steps, each moving one bound past a single field, and a random
-// value is almost never a solution.  Instead each slice becomes a sum of
-// independent variables for the fields.
-
 static bool is_const_tree(const crv_t *c, int n)
 {
    const node_t *nd = &c->nodes[n];
@@ -2094,402 +2003,6 @@ static bool is_const_tree(const crv_t *c, int n)
       return false;
    }
 }
-
-static bool const_of(const crv_t *c, int n, int64_t *val)
-{
-   if (!is_const_tree(c, n))
-      return false;
-
-   ectx_t E = { .c = c };
-   const int64_t v = ev(&E, n);
-   if (E.fail)
-      return false;
-
-   *val = mathv(v, c->nodes[n].sgn);
-   return true;
-}
-
-static bool slice_of(const crv_t *c, int n, int nsc, int *var, unsigned *lsb,
-                     unsigned *w)
-{
-   const node_t *cn = &c->nodes[n];
-   if (cn->kind != N_CAST || cn->sgn)
-      return false;
-
-   const node_t *sh = &c->nodes[cn->a];
-   if (sh->kind != N_BIN || sh->op != CRV_SHR)
-      return false;
-
-   const node_t *xv = &c->nodes[sh->a];
-   int64_t k;
-   if (xv->kind != N_VAR || xv->aux >= nsc || xv->sgn || xv->width > 64
-       || !const_of(c, sh->b, &k) || k < 0 || k >= xv->width)
-      return false;
-
-   *var = xv->aux;
-   *lsb = k;
-   *w = MIN(cn->width, xv->width - (unsigned)k);
-   return true;
-}
-
-static bool mask_of(const crv_t *c, int n, int nsc, int *var,
-                    uint64_t *mask)
-{
-   // A variable ANDed with a constant: the bits in the mask are separate
-   // fields of the variable
-   const node_t *nd = &c->nodes[n];
-   if (nd->kind != N_BIN || nd->op != CRV_AND || nd->sgn)
-      return false;
-
-   int v = nd->a, m = nd->b;
-   if (c->nodes[v].kind != N_VAR)
-      v = nd->b, m = nd->a;
-
-   const node_t *xv = &c->nodes[v];
-   int64_t k;
-   if (xv->kind != N_VAR || xv->aux >= nsc || xv->sgn || xv->width > 64
-       || xv->width != nd->width || !const_of(c, m, &k))
-      return false;
-
-   *var = xv->aux;
-   *mask = (uint64_t)k & (xv->width == 64 ? ~UINT64_C(0)
-                          : (UINT64_C(1) << xv->width) - 1);
-   return true;
-}
-
-typedef struct {
-   const prob_t *P;
-   uint64_t     *cut;
-   bool         *bad;
-   int          *count;
-} dcol_t;
-
-static void dcol_bad(dcol_t *D, int n)
-{
-   const crv_t *c = D->P->c;
-   const node_t *an = &c->nodes[n];
-   if (an->kind == N_CAST)
-      an = &c->nodes[an->a];
-   if (an->kind == N_VAR && an->aux < D->P->nsc)
-      D->bad[an->aux] = true;
-}
-
-static void dcol_cb(void *ctx, const node_t *nd, int n)
-{
-   dcol_t *D = ctx;
-   const crv_t *c = D->P->c;
-
-   int var;
-   unsigned lsb, w;
-   if (slice_of(c, n, D->P->nsc, &var, &lsb, &w)) {
-      const unsigned width = c->nodes[c->nodes[nd->a].a].width;
-      D->cut[var] |= UINT64_C(1) << lsb;
-      if (lsb + w < width)
-         D->cut[var] |= UINT64_C(1) << (lsb + w);
-      D->count[var]++;
-      return;
-   }
-
-   uint64_t mask;
-   if (mask_of(c, n, D->P->nsc, &var, &mask)) {
-      const unsigned width = c->vars[var].width;
-      for (unsigned b = 1; b < width; b++) {
-         if (((mask >> b) & 1) != ((mask >> (b - 1)) & 1))
-            D->cut[var] |= UINT64_C(1) << b;
-      }
-      D->count[var]++;
-      return;
-   }
-
-   switch ((nkind_t)nd->kind) {
-   case N_INSIDE:
-   case N_DIST:
-      dcol_bad(D, nd->a);
-      break;
-   case N_UN:
-      if (nd->op == CRV_POPCNT)
-         dcol_bad(D, nd->a);
-      break;
-   case N_BIN:
-      // Shifted by an amount which is not known
-      if ((nd->op == CRV_SHR || nd->op == CRV_ASR || nd->op == CRV_SHL)
-          && !is_const_tree(c, nd->b))
-         dcol_bad(D, nd->a);
-      break;
-   default:
-      break;
-   }
-}
-
-typedef struct {
-   prob_t *P;
-   int    *memo;
-   int     n0;
-} drw_t;
-
-static const dec_t *dec_for(const drw_t *R, int var)
-{
-   for (int i = 0; i < R->P->ndec; i++) {
-      if (R->P->dec[i].var == var)
-         return &R->P->dec[i];
-   }
-   return NULL;
-}
-
-static int drw_fields(drw_t *R, const dec_t *d, unsigned lsb, unsigned w,
-                      unsigned own)
-{
-   crv_t *c = R->P->c;
-   int result = -1;
-   for (int i = 0; i < d->nf; i++) {
-      if (d->pos[i] < lsb || d->pos[i + 1] > lsb + w)
-         continue;
-
-      const unsigned fw = d->pos[i + 1] - d->pos[i];
-      node_t fn = { .kind = N_VAR, .width = fw, .aux = d->f0 + i };
-      int t = add_node(c, fn);
-      if (d->pos[i] > lsb) {
-         node_t sn = { .kind = N_BIN, .op = CRV_SHL, .width = own,
-                       .a = t, .b = mk_const(c, d->pos[i] - lsb, 32, true) };
-         t = add_node(c, sn);
-      }
-      else if (fw != own && w == fw) {
-         node_t cn = { .kind = N_CAST, .width = own, .a = t };
-         t = add_node(c, cn);
-      }
-
-      if (result < 0)
-         result = t;
-      else {
-         node_t an = { .kind = N_BIN, .op = CRV_ADD, .width = own,
-                       .a = result, .b = t };
-         result = add_node(c, an);
-      }
-   }
-   return result;
-}
-
-static int drw_masked(drw_t *R, const dec_t *d, uint64_t mask, unsigned own)
-{
-   // The fields of the variable inside the mask: each is wholly in or out
-   crv_t *c = R->P->c;
-   int result = -1;
-   for (int i = 0; i < d->nf; i++) {
-      if (!((mask >> d->pos[i]) & 1))
-         continue;
-
-      const unsigned fw = d->pos[i + 1] - d->pos[i];
-      node_t fn = { .kind = N_VAR, .width = fw, .aux = d->f0 + i };
-      int t = add_node(c, fn);
-      if (fw != own) {
-         node_t cn = { .kind = N_CAST, .width = own, .a = t };
-         t = add_node(c, cn);
-      }
-      if (d->pos[i] > 0) {
-         node_t sn = { .kind = N_BIN, .op = CRV_SHL, .width = own,
-                       .a = t, .b = mk_const(c, d->pos[i], 32, true) };
-         t = add_node(c, sn);
-      }
-
-      if (result < 0)
-         result = t;
-      else {
-         node_t an = { .kind = N_BIN, .op = CRV_ADD, .width = own,
-                       .a = result, .b = t };
-         result = add_node(c, an);
-      }
-   }
-
-   return result >= 0 ? result : mk_const(c, 0, own, false);
-}
-
-static int drw(drw_t *R, int n)
-{
-   crv_t *c = R->P->c;
-   if (n >= R->n0)
-      return n;
-   else if (R->memo[n] >= 0)
-      return R->memo[n];
-
-   node_t nd = c->nodes[n];
-   int res = n, var;
-   unsigned lsb, w;
-   const dec_t *d;
-
-   uint64_t mask;
-   if (slice_of(c, n, R->P->nsc, &var, &lsb, &w)
-       && (d = dec_for(R, var)) != NULL)
-      res = drw_fields(R, d, lsb, w, nd.width);
-   else if (mask_of(c, n, R->P->nsc, &var, &mask)
-            && (d = dec_for(R, var)) != NULL)
-      res = drw_masked(R, d, mask, nd.width);
-   else {
-      switch ((nkind_t)nd.kind) {
-      case N_VAR:
-         if (nd.aux < R->P->nsc && (d = dec_for(R, nd.aux)) != NULL)
-            res = drw_fields(R, d, 0, d->width, nd.width);
-         break;
-      case N_BIN:
-         {
-            const int a = drw(R, nd.a), b = drw(R, nd.b);
-            if (a != nd.a || b != nd.b) {
-               nd.a = a;
-               nd.b = b;
-               res = add_node(c, nd);
-            }
-         }
-         break;
-      case N_UN:
-      case N_CAST:
-      case N_DIST:
-      case N_AELEM:
-         {
-            const int a = drw(R, nd.a);
-            if (a != nd.a) {
-               nd.a = a;
-               res = add_node(c, nd);
-            }
-         }
-         break;
-      case N_COND:
-         {
-            const int a = drw(R, nd.a), b = drw(R, nd.b), cc = drw(R, nd.c);
-            if (a != nd.a || b != nd.b || cc != nd.c) {
-               nd.a = a;
-               nd.b = b;
-               nd.c = cc;
-               res = add_node(c, nd);
-            }
-         }
-         break;
-      case N_INSIDE:
-         {
-            bool changed = false;
-            const int a = drw(R, nd.a);
-            changed |= a != nd.a;
-            cset_t ns = { 0 };
-            const unsigned cnt = c->sets[nd.aux].n;
-            for (unsigned i = 0; i < cnt; i++) {
-               item_t it = c->sets[nd.aux].items[i];
-               const int lo = drw(R, it.lo);
-               const int hi = it.hi >= 0 ? drw(R, it.hi) : -1;
-               changed |= lo != it.lo || hi != it.hi;
-               it.lo = lo;
-               it.hi = hi;
-               VEC_PUSH(ns.items, ns.n, ns.cap, it);
-            }
-            if (changed) {
-               VEC_PUSH(c->sets, c->nsets, c->csets, ns);
-               nd.a = a;
-               nd.aux = c->nsets - 1;
-               res = add_node(c, nd);
-            }
-            else
-               free(ns.items);
-         }
-         break;
-      default:
-         break;
-      }
-   }
-
-   R->memo[n] = res;
-   return res;
-}
-
-static void decompose(prob_t *P)
-{
-   crv_t *c = P->c;
-   if (P->nsc == 0)
-      return;
-
-   dcol_t D = { .P = P, .cut = xcalloc(P->nsc * sizeof(uint64_t)),
-                .bad = xcalloc(P->nsc), .count = xcalloc(P->nsc * sizeof(int)) };
-
-   for (int ci = 0; ci < P->ncons; ci++) {
-      const pcons_t *pc = &P->cons[ci];
-      if (pc->kind == C_REQ)
-         visit(c, pc->root, dcol_cb, &D);
-      else {
-         for (int i = 0; i < pc->unn; i++) {
-            const int n = P->un[pc->unstart + i];
-            dcol_bad(&D, n);
-            visit(c, n, dcol_cb, &D);
-         }
-      }
-   }
-
-   int nf = 0;
-   for (int v = 0; v < P->nsc; v++) {
-      const cvar_t *cv = &c->vars[v];
-      const pvar_t *pv = &P->vars[v];
-      if (D.count[v] == 0 || D.bad[v] || cv->sgn || cv->width < 12
-          || cv->width > 64 || cv->rc || cv->ndom > 0 || pv->dist >= 0
-          || pv->ngd > 0 || pv->pop >= 0)
-         continue;
-
-      const uint64_t cut = D.cut[v] | 1;
-      const int n = __builtin_popcountll(cut);
-      if (n < 2 || n > MAX_FIELDS)
-         continue;
-
-      dec_t d = { .var = v, .nf = n, .width = cv->width, .f0 = P->nv + nf };
-      int k = 0;
-      for (unsigned b = 0; b < cv->width; b++) {
-         if (cut & (UINT64_C(1) << b))
-            d.pos[k++] = b;
-      }
-      d.pos[n] = cv->width;
-      nf += n;
-      P->dec = xrealloc(P->dec, (P->ndec + 1) * sizeof(dec_t));
-      P->dec[P->ndec++] = d;
-   }
-
-   free(D.cut);
-   free(D.bad);
-   free(D.count);
-
-   if (P->ndec == 0)
-      return;
-
-   P->vars = xrealloc(P->vars, (P->nv + nf) * sizeof(pvar_t));
-   P->vals = xrealloc(P->vals, (P->nv + nf) * sizeof(int64_t));
-   for (int i = 0; i < P->ndec; i++) {
-      const dec_t *d = &P->dec[i];
-      P->vars[d->var].derived = true;
-      for (int k = 0; k < d->nf; k++) {
-         const unsigned fw = d->pos[k + 1] - d->pos[k];
-         P->vars[d->f0 + k] = (pvar_t){
-            .dom = dom_interval(0, ((i128)1 << fw) - 1), .width = fw,
-            .dist = -1, .pop = -1,
-         };
-      }
-   }
-   P->nv += nf;
-
-   drw_t R = { .P = P, .n0 = c->nnodes };
-   R.memo = NEW(int, c->nnodes);
-   memset(R.memo, -1, c->nnodes * sizeof(int));
-
-   for (int ci = 0; ci < P->ncons; ci++) {
-      pcons_t *pc = &P->cons[ci];
-      if (pc->kind == C_REQ)
-         pc->root = drw(&R, pc->root);
-      else {
-         for (int i = 0; i < pc->unn; i++)
-            P->un[pc->unstart + i] = drw(&R, P->un[pc->unstart + i]);
-      }
-   }
-
-   for (int v = 0; v < P->nsc; v++) {
-      pvar_t *pv = &P->vars[v];
-      for (int i = 0; i < pv->ngd; i++)
-         pv->gd[i * 2] = drw(&R, pv->gd[i * 2]);
-   }
-
-   free(R.memo);
-}
-
 
 ////////////////////////////////////////////////////////////////////////////////
 // Domains from implications
@@ -2734,6 +2247,147 @@ static void derive_domains(prob_t *P)
    free(imps);
 }
 
+
+// NVC_CRV_DUMP_SMT2=<prefix>: write each problem as <prefix>.<n>.smt2 for an
+// SMT solver and the check of the bit-blaster on it as <prefix>.<n>.miter.smt2
+static const char *dump_smt2_prefix(void)
+{
+   static __thread bool read;
+   static __thread const char *prefix;
+   if (!read) {
+      prefix = getenv("NVC_CRV_DUMP_SMT2");
+      if (prefix != NULL && *prefix == '\0')
+         prefix = NULL;
+      read = true;
+   }
+   return prefix;
+}
+
+static char *dump_bin(i128 v, unsigned w)
+{
+   char *s = xmalloc(w + 3);
+   s[0] = '#';
+   s[1] = 'b';
+   for (unsigned i = 0; i < w; i++)
+      s[2 + i] = ((v >> (w - 1 - i)) & 1) ? '1' : '0';
+   s[w + 2] = 0;
+   return s;
+}
+
+static void dump_smt2(const prob_t *P)
+{
+   static __thread unsigned seq;
+   const crv_t *c = P->c;
+
+   uint8_t *width = NEW(uint8_t, P->nv);
+   bool *sgn = NEW(bool, P->nv), *fixed = NEW(bool, P->nv);
+   int64_t *value = NEW(int64_t, P->nv);
+   for (int v = 0; v < P->nv; v++) {
+      const pvar_t *pv = &P->vars[v];
+      width[v] = pv->width;
+      sgn[v] = pv->sgn;
+      fixed[v] = !dom_empty(&pv->dom) && pv->dom.lo == pv->dom.hi;
+      value[v] = fixed[v] ? norm(pv->dom.lo, pv->width, pv->sgn) : 0;
+   }
+
+   const blast_shape_t shape = {
+      .nv = P->nv, .width = width, .sgn = sgn, .nsc = P->nsc,
+      .ebase = P->ebase, .sizes = P->sizes, .fixed = fixed, .value = value,
+   };
+   blast_t *b = blast_new(c, &shape);
+
+   crv_node_t *holds = NEW(crv_node_t, P->ncons);
+   unsigned nholds = 0, nsoft = 0;
+   crv_node_t *defs = NEW(crv_node_t, P->nun + 1);
+   unsigned ndefs = 0;
+   char *extra = xstrdup("");
+   for (int ci = 0; ci < P->ncons; ci++) {
+      const pcons_t *pc = &P->cons[ci];
+      if (pc->soft >= 0)
+         nsoft++;
+      else if (pc->kind == C_REQ)
+         holds[nholds++] = pc->root;
+      else {
+         for (int i = 0; i < pc->unn; i++)
+            defs[ndefs++] = P->un[pc->unstart + i];
+         char *u = xasprintf("%s(assert (distinct", extra);
+         free(extra);
+         extra = u;
+         for (int i = 0; i < pc->unn; i++) {
+            u = xasprintf("%s n%d", extra, P->un[pc->unstart + i]);
+            free(extra);
+            extra = u;
+         }
+         u = xasprintf("%s))\n", extra);
+         free(extra);
+         extra = u;
+      }
+   }
+
+   // The domain of each variable that is not a constant
+   for (int v = 0; v < P->nv; v++) {
+      const pvar_t *pv = &P->vars[v];
+      if (fixed[v] || dom_empty(&pv->dom))
+         continue;
+
+      const unsigned w = pv->width + 1;
+      char *t = xasprintf("(or false");
+      for (int k = 0; k < dom_nr(&pv->dom); k++) {
+         const range_t r = dom_range(&pv->dom, k);
+         char *lo = dump_bin(r.lo, w), *hi = dump_bin(r.hi, w);
+         char *u = xasprintf("%s (and (bvsle %s ((_ %s_extend 1) v%d)) "
+                             "(bvsle ((_ %s_extend 1) v%d) %s))", t, lo,
+                             pv->sgn ? "sign" : "zero", v,
+                             pv->sgn ? "sign" : "zero", v, hi);
+         free(lo);
+         free(hi);
+         free(t);
+         t = u;
+      }
+      char *u = xasprintf("%s(assert %s))\n", extra, t);
+      free(t);
+      free(extra);
+      extra = u;
+   }
+
+   char *name = xasprintf("%s.%u.smt2", dump_smt2_prefix(), seq);
+   FILE *f = fopen(name, "w");
+   if (f != NULL) {
+      fprintf(f, "; crv problem %u: %u hard constraints, %u soft "
+              "constraints not included\n", seq, nholds, nsoft);
+      blast_dump_problem_smt2(b, f, holds, nholds, defs, ndefs, extra);
+      fclose(f);
+   }
+   free(name);
+
+   name = xasprintf("%s.%u.miter.smt2", dump_smt2_prefix(), seq);
+   f = fopen(name, "w");
+   if (f != NULL) {
+      crv_node_t *roots = NEW(crv_node_t, nholds + ndefs + 1);
+      unsigned nr = 0;
+      for (unsigned i = 0; i < nholds; i++)
+         roots[nr++] = holds[i];
+      for (unsigned i = 0; i < ndefs; i++)
+         roots[nr++] = defs[i];
+      for (unsigned i = 0; i < nr; i++)
+         (void)blast_holds(b, roots[i]);
+      blast_dump_smt2(b, f, roots, nr);
+      fclose(f);
+      free(roots);
+   }
+   free(name);
+
+   seq++;
+   blast_free(b);
+   free(extra);
+   free(defs);
+   free(holds);
+   free(value);
+   free(fixed);
+   free(sgn);
+   free(width);
+}
+
 // Mode 1 solves for the sizes of arrays with a random size, ignoring the
 // elements of those, mode 2 has all sizes known
 static void chain_setup(prob_t *P);
@@ -2744,9 +2398,12 @@ static prob_t *prob_build(crv_t *c, int mode, const unsigned *sizes,
 {
    prob_t *P = xcalloc(sizeof(prob_t));
    P->c = c;
-   P->legacy = crv_engine() == CRV_ENGINE_LEGACY;
    P->reject = crv_engine() == CRV_ENGINE_AUTO ? 1
       : crv_engine() == CRV_ENGINE_REJECT ? 2 : 0;
+   P->bdd = crv_engine() == CRV_ENGINE_AUTO ? 1
+      : crv_engine() == CRV_ENGINE_BDD ? 2 : 0;
+   if (crv_bdd_nodes() == 0)
+      P->bdd = 0;
    P->nsc = c->nvars;
    P->na = c->narrays;
    P->curc = -1;
@@ -2897,15 +2554,16 @@ static prob_t *prob_build(crv_t *c, int mode, const unsigned *sizes,
          P->vars[an->aux].pop = n;
    }
 
-   if (crv_decompose_enabled())
-      decompose(P);
    P->nn = c->nnodes;
 
    // Prepare sets and distributions now the nodes are final
    for (unsigned i = 0; i < c->nsets; i++)
       set_prep(c, &c->sets[i]);
    for (unsigned i = 0; i < c->ndists; i++)
-      dist_prep(&c->dists[i]);
+      crv_dist_prepare(&c->dists[i]);
+
+   if (unlikely(dump_smt2_prefix() != NULL))
+      dump_smt2(P);
 
    P->vmark = xcalloc((P->nv ? P->nv : 1) * sizeof(int));
    P->vstart = NEW(int, P->ncons + 1);
@@ -3045,7 +2703,7 @@ static void cvars_cb(void *ctx, const node_t *nd, int n)
 static void chain_setup(prob_t *P)
 {
    const crv_t *c = P->c;
-   if (P->legacy || P->nn < 2 * CHAIN_MIN)
+   if (P->nn < 2 * CHAIN_MIN)
       return;
 
    // Outermost first: nodes are made after their operands
@@ -3708,7 +3366,7 @@ static ivl_t fwd(prob_t *P, int n)
          const int base = P->ebase[nd->aux];
          const unsigned size = P->sizes[nd->aux];
          i128 lo = 0, hi = 0;
-         if (P->varr != NULL && !P->legacy) {
+         if (P->varr != NULL) {
             lo = P->tlo[nd->aux];
             hi = P->thi[nd->aux];
          }
@@ -4248,7 +3906,7 @@ static bool bwd(prob_t *P, int n, ivl_t r)
          const int base = P->ebase[nd->aux];
          const unsigned size = P->sizes[nd->aux];
          i128 lo = 0, hi = 0;
-         if (P->varr != NULL && !P->legacy) {
+         if (P->varr != NULL) {
             lo = P->tlo[nd->aux];
             hi = P->thi[nd->aux];
          }
@@ -4263,7 +3921,7 @@ static bool bwd(prob_t *P, int n, ivl_t r)
 
          // An element is clipped only if it is wider than the room left
          // below or above the sum: none is when the widest is not
-         if (P->varr != NULL && !P->legacy && P->maxw[nd->aux] <= hi - r.lo
+         if (P->varr != NULL && P->maxw[nd->aux] <= hi - r.lo
              && P->maxw[nd->aux] <= r.hi - lo)
             return true;
 
@@ -4559,9 +4217,6 @@ static int unique_member_var(const prob_t *P, int n, unsigned *shape)
 
 static void unique_setup(prob_t *P)
 {
-   if (P->legacy)
-      return;
-
    for (int ci = 0; ci < P->ncons; ci++) {
       const pcons_t *pc = &P->cons[ci];
       if (pc->kind != C_UNIQUE || pc->unn < UNIQ_FAST_MIN)
@@ -4909,11 +4564,6 @@ static void compute_levels(prob_t *P)
          break;
    }
 
-   for (int i = 0; i < P->ndec; i++) {
-      const dec_t *d = &P->dec[i];
-      for (int k = 0; k < d->nf; k++)
-         P->vars[d->f0 + k].level = P->vars[d->var].level;
-   }
 }
 
 static int build_order(prob_t *P, int attempt, int **out)
@@ -4925,7 +4575,7 @@ static int build_order(prob_t *P, int attempt, int **out)
    for (int i = lo; i < hi; i++) {
       const int v = P->vcomp != NULL ? P->kvl[i] : i;
       const pvar_t *pv = &P->vars[v];
-      if (pv->dom.lo == pv->dom.hi || pv->derived)
+      if (pv->dom.lo == pv->dom.hi)
          continue;
 
       okey_t *k = &keys[n++];
@@ -5149,6 +4799,31 @@ static bool guard_true(prob_t *P, int node)
    return !E.fail && v != 0;
 }
 
+// Does a value of a variable satisfy the constraints on it alone.  A mask on a
+// variable, such as an aligned address, is a constraint like that, and
+// without it a pick is wrong three times in four.
+static bool pick_unary_ok(prob_t *P, int v, i128 x)
+{
+   ectx_t E = { .c = P->c, .vals = P->vals, .nsc = P->nsc,
+                .ebase = P->ebase, .sizes = P->sizes };
+
+   for (int k = P->wstart[v]; k < P->wstart[v + 1]; k++) {
+      const int ci = P->wlist[k];
+      const pcons_t *pc = &P->cons[ci];
+      if (pc->kind != C_REQ || P->vstart[ci + 1] - P->vstart[ci] != 1)
+         continue;
+      else if (pc->soft >= 0 && P->soft_on != NULL && !P->soft_on[pc->soft])
+         continue;
+
+      P->vals[v] = st(x);
+      E.fail = false;
+      const int64_t r = ev(&E, pc->root);
+      if (E.fail || r == 0)
+         return false;
+   }
+   return true;
+}
+
 static i128 pick_val(prob_t *P, int v)
 {
    const pvar_t *pv = &P->vars[v];
@@ -5177,13 +4852,20 @@ static i128 pick_val(prob_t *P, int v)
    i128 n = dom_count(d, d->lo, d->hi);
    if (pv->size && n > MAX_SIZE_CHOICES)
       n = 32;
-   return dom_nth(d, d->lo, d->hi, rnd_i128(n));
+   x = dom_nth(d, d->lo, d->hi, rnd_i128(n));
+
+   if (P->wstart != NULL && P->wstart[v] != P->wstart[v + 1]
+       && n > 4) {
+      for (int t = 0; t < 32 && !pick_unary_ok(P, v, x); t++)
+         x = dom_nth(d, d->lo, d->hi, rnd_i128(n));
+   }
+   return x;
 }
 
 static void fill_vals(prob_t *P, int comp)
 {
-   // The variables of a component and the decomposed ones among them, or
-   // all of them: others are not read by the constraints being checked
+   // The variables of a component or all of them: others are not read by
+   // the constraints being checked
    if (comp < 0) {
       for (int v = 0; v < P->nv; v++)
          P->vals[v] = st(P->vars[v].dom.lo);
@@ -5193,15 +4875,6 @@ static void fill_vals(prob_t *P, int comp)
          P->vals[P->kvl[i]] = st(P->vars[P->kvl[i]].dom.lo);
    }
 
-   for (int i = 0; i < P->ndec; i++) {
-      const dec_t *d = &P->dec[i];
-      if (comp >= 0 && P->vcomp[d->var] != comp)
-         continue;
-      uint64_t x = 0;
-      for (int k = 0; k < d->nf; k++)
-         x |= (uint64_t)P->vals[d->f0 + k] << d->pos[k];
-      P->vals[d->var] = x;
-   }
 }
 
 // Whether the constraints of a component hold for the values in P->vals
@@ -5420,10 +5093,7 @@ static void stats_components(const prob_t *P, crv_call_stat_t *out)
    const crv_t *c = P->c;
    const int nv = P->nv;
 
-   int nfields = 0;
-   for (int i = 0; i < P->ndec; i++)
-      nfields += P->dec[i].nf;
-   const int norig = nv - nfields;
+   const int norig = nv;
 
    int *uf = NEW(int, nv);
    bool *used = xcalloc(nv ? nv : 1);
@@ -5440,13 +5110,6 @@ static void stats_components(const prob_t *P, crv_call_stat_t *out)
          else
             uf_union(uf, first, v);
       }
-   }
-
-   for (int i = 0; i < P->ndec; i++) {
-      const dec_t *d = &P->dec[i];
-      for (int k = 0; k < d->nf; k++)
-         uf_union(uf, d->var, d->f0 + k);
-      used[d->var] = true;
    }
 
    for (unsigned e = 0; e < c->nedges; e++) {
@@ -5502,7 +5165,6 @@ static void stats_components(const prob_t *P, crv_call_stat_t *out)
    for (int i = 0; i < CRV_STAGE_COUNT; i++)
       MAXOF(stage[i]);
 #undef MAXOF
-   out->decomposed |= P->ndec > 0;
 }
 
 static void sum_init(prob_t *P)
@@ -5591,13 +5253,6 @@ static void build_components(prob_t *P)
          else
             uf_union(uf, first, v);
       }
-   }
-
-   for (int i = 0; i < P->ndec; i++) {
-      const dec_t *d = &P->dec[i];
-      for (int k = 0; k < d->nf; k++)
-         uf_union(uf, d->var, d->f0 + k);
-      used[d->var] = true;
    }
 
    for (unsigned e = 0; e < c->nedges; e++) {
@@ -5907,12 +5562,6 @@ static void rj_levels(prob_t *P, int comp, int *lvl)
       }
    }
 
-   for (int i = 0; i < P->ndec; i++) {
-      const dec_t *d = &P->dec[i];
-      for (int k = 0; k < d->nf; k++)
-         ment[d->f0 + k] = ment[d->var];
-   }
-
    int deepest = 0;
    const int nv = comp >= 0 ? P->kvs[comp + 1] - P->kvs[comp] : P->nv;
    for (int i = 0; i < nv; i++) {
@@ -5931,7 +5580,7 @@ static void rj_levels(prob_t *P, int comp, int *lvl)
 static bool rj_definable(const prob_t *P, int comp, int v, const int *defd)
 {
    const pvar_t *pv = &P->vars[v];
-   return in_comp(P, comp, v) && is_free(P, v) && !pv->derived
+   return in_comp(P, comp, v) && is_free(P, v)
       && !pv->rc && pv->dist < 0 && pv->ngd == 0 && !pv->size && defd[v] < 0;
 }
 
@@ -6042,26 +5691,10 @@ static bool rj_unique_ok(const prob_t *P, int comp)
    return true;
 }
 
-static void rj_assemble(prob_t *P, int comp)
-{
-   for (int i = 0; i < P->ndec; i++) {
-      const dec_t *d = &P->dec[i];
-      if (comp >= 0 && P->vcomp[d->var] != comp)
-         continue;
-      uint64_t x = 0;
-      for (int k = 0; k < d->nf; k++)
-         x |= (uint64_t)P->vals[d->f0 + k] << d->pos[k];
-      P->vals[d->var] = x;
-   }
-}
-
 // Whether the values in P->vals, with the defined variables worked out,
 // satisfy the constraints
 static bool rj_holds(prob_t *P, const rj_t *R)
 {
-   if (P->ndec > 0)
-      rj_assemble(P, R->comp);
-
    ectx_t E = { .c = P->c, .vals = P->vals, .nsc = P->nsc,
                 .ebase = P->ebase, .sizes = P->sizes };
 
@@ -6077,8 +5710,6 @@ static bool rj_holds(prob_t *P, const rj_t *R)
          return false;
 
       P->vals[v] = st(x);
-      if (P->ndec > 0)
-         rj_assemble(P, R->comp);
    }
 
    return check_cons(P, R->comp);
@@ -6092,7 +5723,7 @@ static bool rj_setup(prob_t *P, rj_t *R, rj_res_t *why)
    int nfree = 0;
    for (int i = 0; i < nv; i++) {
       const int v = comp >= 0 ? P->kvl[P->kvs[comp] + i] : i;
-      if (!is_free(P, v) || P->vars[v].derived)
+      if (!is_free(P, v))
          continue;
       if (P->vars[v].rc || P->vars[v].ngd > 0) {
          *why = RJ_DECLINE;
@@ -6144,7 +5775,7 @@ static bool rj_setup(prob_t *P, rj_t *R, rj_res_t *why)
          for (int i = 0; i < nv; i++) {
             const int v = comp >= 0 ? P->kvl[P->kvs[comp] + i] : i;
             const pvar_t *pv = &P->vars[v];
-            if (R->lvl[v] != l || !is_free(P, v) || pv->derived
+            if (R->lvl[v] != l || !is_free(P, v)
                 || defd[v] >= 0)
                continue;
             else if ((pass == 0) != (pv->dist >= 0))
@@ -6308,6 +5939,747 @@ static rj_res_t reject_comp(prob_t *P, int comp)
    return res;
 }
 
+////////////////////////////////////////////////////////////////////////////////
+// BDD stage
+//
+// The constraints of a component are turned into a BDD over the bits of its
+// free variables (the and-inverter graph of the bit-blaster, one BDD per
+// gate) and a solution is drawn by counting: exactly uniform over the
+// solutions, so the stage is as exact as the rejection stage but does not
+// depend on the share of samples that are accepted.
+//
+// The bits are ordered by where a walk of the circuit from its output first
+// reaches them: bits that meet in a gate are close and misaligned slices of
+// two variables come out side by side.  The order does not depend on the
+// levels of solve before: the values are drawn block after block, a block
+// being a dist variable or the other variables of a level, and for each the
+// variables of the blocks after it are existentially quantified away so that
+// its values are those that can be extended, then the BDD is cofactored by
+// the values drawn.  A dist block picks an item of the dist by its mass, the
+// weight of a value times the number of its values that can be extended,
+// then a value of the item uniformly.
+//
+// The number of nodes is limited and the limit is for the whole build: when
+// it is reached the component is given to the next stage, with nothing
+// reported about which constraint was too big.  Soft constraints that are on
+// are taken as hard (see bd_build).  Nothing is kept from one call to the
+// next: the BDD is made again for every call.
+
+#define BDD_MAX_BITS   256
+#define BDD_MAX_DISTS  8
+#define BDD_MAX_UNIQUE 8
+#define BDD_MAX_GATES  20000
+#define BDD_MAX_NONLIN 8
+#define BDD_MAX_ADDERS 5
+#define BDD_FORCED     100
+
+typedef enum {
+   BD_SAT,         // The variables of the component are fixed to a sample
+   BD_UNSAT,       // The constraints have no solution
+   BD_NOFREE,      // No free variable: nothing to sample
+   BD_DECLINE,     // The stage cannot take this component
+} bd_res_t;
+
+typedef struct {
+   prob_t   *P;
+   int       comp;
+   int       nfv;            // Free variables of the component
+   int      *fv;
+   int      *loc;            // Index in fv of each variable or -1
+   unsigned *boff;           // First entry of each in bitpos
+   unsigned *bitpos;         // BDD variable of each bit of each variable
+   unsigned  nbits;
+   int       nb;             // Blocks
+   unsigned *bstart, *blist; // BDD variables of each block, in order
+   int      *bdist;          // Free variable of a dist block or -1
+   bdd_t    *B;
+   bnode_t   f;
+   blast_t  *blast;
+   crv_bdd_reason_t why;
+} bd_t;
+
+typedef struct {
+   unsigned group;           // Where the walk reaches the group of variables
+   unsigned sig;             // Place of the bit in the operands that have it
+   unsigned rank;            // Where the walk of the circuit reaches the bit
+   int      var;             // Index in fv
+   unsigned bit;
+} bd_ord_t;
+
+static int bd_ord_cmp(const void *a, const void *b)
+{
+   const bd_ord_t *x = a, *y = b;
+   if (x->group != y->group)
+      return x->group < y->group ? -1 : 1;
+   else if (x->sig != y->sig)
+      return x->sig < y->sig ? -1 : 1;
+   else if (x->rank != y->rank)
+      return x->rank < y->rank ? -1 : 1;
+   else if (x->var != y->var)
+      return x->var < y->var ? -1 : 1;
+   return x->bit < y->bit ? -1 : x->bit > y->bit;
+}
+
+static unsigned bd_find(unsigned *uf, unsigned x)
+{
+   while (uf[x] != x)
+      x = uf[x] = uf[uf[x]];
+   return x;
+}
+
+static int bd_uint_cmp(const void *a, const void *b)
+{
+   const unsigned x = *(const unsigned *)a, y = *(const unsigned *)b;
+   return x < y ? -1 : x > y;
+}
+
+static void bd_free(bd_t *D)
+{
+   if (D->B != NULL)
+      bdd_close(D->B);
+   if (D->blast != NULL)
+      blast_free(D->blast);
+   free(D->fv);
+   free(D->loc);
+   free(D->boff);
+   free(D->bitpos);
+   free(D->bstart);
+   free(D->blist);
+   free(D->bdist);
+}
+
+// The values of a range of a variable in the BDD
+static bnode_t bd_range(bdd_t *B, const unsigned *pos, unsigned w, bool sgn,
+                        i128 lo, i128 hi)
+{
+   const i128 tlo = tmin(w, sgn), thi = tmax(w, sgn);
+   if (lo < tlo)
+      lo = tlo;
+   if (hi > thi)
+      hi = thi;
+   if (lo > hi)
+      return BDD_FALSE;
+
+   const i128 off = sgn ? ((i128)1 << (w - 1)) : 0;
+   bnode_t r = BDD_TRUE;
+   if (lo > tlo)
+      r = bdd_cmp_const(B, pos, w, sgn, (uint64_t)(lo + off), true);
+   if (hi < thi)
+      r = bdd_and(B, r, bdd_cmp_const(B, pos, w, sgn, (uint64_t)(hi + off),
+                                      false));
+   return r;
+}
+
+static bnode_t bd_domain(bdd_t *B, const unsigned *pos, const pvar_t *pv)
+{
+   bnode_t r = BDD_FALSE;
+   for (int k = 0; k < dom_nr(&pv->dom); k++) {
+      const range_t rg = dom_range(&pv->dom, k);
+      r = bdd_or(B, r, bd_range(B, pos, pv->width, pv->sgn, rg.lo, rg.hi));
+   }
+   return r;
+}
+
+static bnode_t bd_lit(bdd_t *B, const bnode_t *node, blit_t l)
+{
+   if (l < 2)
+      return l;
+   return (l & 1) ? bdd_not(B, node[l >> 1]) : node[l >> 1];
+}
+
+// Make the BDD of the component.  flat puts the variables in one block and
+// ignores solve before and dist, for the tests of the BDD itself.
+static bd_res_t bd_build(bd_t *D, bool flat)
+{
+   prob_t *P = D->P;
+   const crv_t *c = P->c;
+   const int comp = D->comp;
+   const int nvc = comp >= 0 ? P->kvs[comp + 1] - P->kvs[comp] : P->nv;
+
+   D->fv = NEW(int, nvc + 1);
+   D->loc = NEW(int, P->nv ? P->nv : 1);
+   for (int v = 0; v < P->nv; v++)
+      D->loc[v] = -1;
+
+   int ndist = 0;
+   crv_bdd_reason_t why = CRV_BDD_REASONS;
+   D->nbits = 0;
+   for (int i = 0; i < nvc; i++) {
+      const int v = comp >= 0 ? P->kvl[P->kvs[comp] + i] : i;
+      const pvar_t *pv = &P->vars[v];
+      if (!is_free(P, v))
+         continue;
+
+      D->loc[v] = D->nfv;
+      D->fv[D->nfv++] = v;
+      D->nbits += pv->width;
+      if (pv->dist >= 0)
+         ndist++;
+
+      if (pv->rc && why == CRV_BDD_REASONS)
+         why = CRV_BDD_RANDC;
+      else if (pv->ngd > 0 && why == CRV_BDD_REASONS)
+         why = CRV_BDD_GUARDED;
+      else if (pv->size && why == CRV_BDD_REASONS
+               && dom_count(&pv->dom, pv->dom.lo, pv->dom.hi)
+               > MAX_SIZE_CHOICES)
+         why = CRV_BDD_SIZE;
+   }
+
+   if (D->nfv == 0)
+      return BD_NOFREE;
+
+   const int c0 = comp >= 0 ? P->kcs[comp] : 0;
+   const int c1 = comp >= 0 ? P->kcs[comp + 1] : P->ncons;
+
+   if (why == CRV_BDD_REASONS && ndist > BDD_MAX_DISTS && !flat)
+      why = CRV_BDD_DISTS;
+   else if (why == CRV_BDD_REASONS && D->nbits > BDD_MAX_BITS)
+      why = CRV_BDD_BITS;
+
+   for (int k = c0; k < c1 && why == CRV_BDD_REASONS; k++) {
+      const pcons_t *pc = &P->cons[comp >= 0 ? P->kcl[k] : k];
+      if (pc->kind == C_UNIQUE && pc->unn > BDD_MAX_UNIQUE)
+         why = CRV_BDD_UNIQUE;
+   }
+
+   if (why != CRV_BDD_REASONS) {
+      D->why = why;
+      return BD_DECLINE;
+   }
+
+   // The circuit
+   uint8_t *width = NEW(uint8_t, P->nv);
+   bool *sgn = NEW(bool, P->nv), *fixed = NEW(bool, P->nv);
+   int64_t *value = NEW(int64_t, P->nv);
+   for (int v = 0; v < P->nv; v++) {
+      const pvar_t *pv = &P->vars[v];
+      width[v] = pv->width;
+      sgn[v] = pv->sgn;
+      fixed[v] = !dom_empty(&pv->dom) && pv->dom.lo == pv->dom.hi;
+      value[v] = fixed[v] ? norm(pv->dom.lo, pv->width, pv->sgn) : 0;
+   }
+
+   const blast_shape_t shape = {
+      .nv = P->nv, .width = width, .sgn = sgn, .nsc = P->nsc,
+      .ebase = P->ebase, .sizes = P->sizes, .fixed = fixed, .value = value,
+   };
+   D->blast = blast_new(c, &shape);
+   blast_t *b = D->blast;
+   blast_set_limit(b, BDD_MAX_GATES);
+
+   // The soft constraints that are on are hard here: whether they can all
+   // hold and which are kept when they cannot is decided by the trials of
+   // solve_soft, each an exact solve of its own.  They cannot be decided
+   // in the BDD because the domains that propagation left already assume
+   // them.
+   blit_t *hard = NEW(blit_t, (c1 - c0) + 1);
+   int nhard = 0;
+   for (int k = c0; k < c1; k++) {
+      const int ci = comp >= 0 ? P->kcl[k] : k;
+      const pcons_t *pc = &P->cons[ci];
+      if (pc->soft >= 0 && P->soft_on != NULL && !P->soft_on[pc->soft])
+         continue;
+
+      if (pc->kind == C_REQ)
+         hard[nhard++] = blast_holds(b, pc->root);
+      else
+         hard[nhard++] = blast_unique(b, P->un + pc->unstart, pc->unn);
+   }
+
+   bd_res_t res = BD_SAT;
+   blit_t *outs = NULL;
+   unsigned *order = NULL, *rank = NULL, *sigs = NULL, *uf = NULL, *gmin = NULL;
+   uint8_t *mask = NULL;
+   bool *needed = NULL;
+   bnode_t *node = NULL;
+   int *lvl = NULL;
+   bd_ord_t *ords = NULL;
+   const amark_t tm = arena_mark(&P->tmp);
+
+   if (blast_overflow(b)) {
+      D->why = CRV_BDD_GATES;
+      res = BD_DECLINE;
+      goto out;
+   }
+   else if (blast_stats(b).nonlinear > BDD_MAX_NONLIN) {
+      D->why = CRV_BDD_NONLINEAR;
+      res = BD_DECLINE;
+      goto out;
+   }
+
+   // The BDD of a long sum of variables has a node for each partial total:
+   // too many for the limit, and a build that ends in the limit is slow
+   unsigned nops, nadd = 0;
+   const blast_op_t *ops = blast_ops(b, &nops);
+   for (unsigned i = 0; i < nops; i++)
+      nadd += ops[i].op == CRV_ADD || ops[i].op == CRV_SUB;
+   if (nadd > BDD_MAX_ADDERS) {
+      D->why = CRV_BDD_ADDERS;
+      res = BD_DECLINE;
+      goto out;
+   }
+
+   const int nouts = nhard;
+   outs = NEW(blit_t, nouts + 1);
+   memcpy(outs, hard, nhard * sizeof(blit_t));
+
+   const int nfv = D->nfv;
+
+   // Where a walk from the output first reaches each bit: bits that meet
+   // in a gate are close, and misaligned slices of two variables, as in an
+   // instruction word, come out side by side
+   const unsigned nin = blast_input_count(b);
+   order = NEW(unsigned, nin + 1);
+   rank = NEW(unsigned, D->nbits + 1);
+   sigs = NEW(unsigned, D->nbits + 1);
+   for (unsigned i = 0; i < D->nbits; i++) {
+      rank[i] = UINT_MAX;
+      sigs[i] = 255;
+   }
+   D->boff = NEW(unsigned, nfv + 1);
+   D->bitpos = NEW(unsigned, D->nbits + 1);
+   unsigned off = 0;
+   for (int i = 0; i < nfv; i++) {
+      D->boff[i] = off;
+      off += P->vars[D->fv[i]].width;
+   }
+   const unsigned reached = blast_fanin_order(b, outs, nouts, order);
+   for (unsigned j = 0; j < reached; j++) {
+      int var;
+      unsigned bit;
+      blast_input_var(b, order[j], &var, &bit);
+      if (D->loc[var] >= 0 && bit < P->vars[var].width) {
+         rank[D->boff[D->loc[var]] + bit] = j;
+         sigs[D->boff[D->loc[var]] + bit] = blast_input_sig(b, order[j]);
+      }
+   }
+
+   // Variables that meet in an operation make a group
+   uf = NEW(unsigned, nfv + 1);
+   for (int i = 0; i < nfv; i++)
+      uf[i] = i;
+
+   mask = xcalloc(P->nv ? P->nv : 1);
+   rjv_t V = { P, mask };
+   for (unsigned i = 0; i < nops; i++) {
+      visit(c, ops[i].node, rj_vars_cb, &V);
+      int first = -1;
+      for (int k = 0; k < nfv; k++) {
+         if (!mask[D->fv[k]])
+            continue;
+         mask[D->fv[k]] = 0;
+         if (first < 0)
+            first = k;
+         else
+            uf[bd_find(uf, k)] = bd_find(uf, first);
+      }
+   }
+
+   // The place of a group is that of its first bit
+   gmin = NEW(unsigned, nfv + 1);
+   for (int i = 0; i < nfv; i++)
+      gmin[i] = UINT_MAX;
+   for (int i = 0; i < nfv; i++) {
+      const unsigned r = bd_find(uf, i);
+      for (unsigned k = 0; k < P->vars[D->fv[i]].width; k++) {
+         if (rank[D->boff[i] + k] < gmin[r])
+            gmin[r] = rank[D->boff[i] + k];
+      }
+   }
+
+   // The order: every bit by where the circuit reaches it
+   {
+      bd_ord_t *all = NEW(bd_ord_t, D->nbits + 1);
+      unsigned n = 0;
+      for (int i = 0; i < nfv; i++) {
+         for (unsigned k = 0; k < P->vars[D->fv[i]].width; k++)
+            all[n++] = (bd_ord_t){ gmin[bd_find(uf, i)] ,
+                                   sigs[D->boff[i] + k],
+                                   rank[D->boff[i] + k], i, k };
+      }
+      qsort(all, n, sizeof(bd_ord_t), bd_ord_cmp);
+      for (unsigned i = 0; i < n; i++)
+         D->bitpos[D->boff[all[i].var] + all[i].bit] = i;
+      free(all);
+   }
+
+   // Levels and blocks
+   lvl = arena_alloc(&P->tmp, P->nv * sizeof(int));
+   int maxl = 0;
+   if (flat) {
+      for (int i = 0; i < nfv; i++)
+         lvl[D->fv[i]] = 0;
+   }
+   else {
+      rj_levels(P, comp, lvl);
+      for (int i = 0; i < nfv; i++) {
+         if (lvl[D->fv[i]] > maxl)
+            maxl = lvl[D->fv[i]];
+      }
+   }
+
+   D->bstart = NEW(unsigned, nfv + 2);
+   D->blist = NEW(unsigned, D->nbits + 1);
+   D->bdist = NEW(int, nfv + 1);
+   unsigned next = 0;
+   for (int l = 0; l <= maxl; l++) {
+      // A dist variable is a block of its own
+      for (int i = 0; i < nfv && !flat; i++) {
+         const pvar_t *pv = &P->vars[D->fv[i]];
+         if (lvl[D->fv[i]] != l || pv->dist < 0)
+            continue;
+
+         D->bstart[D->nb] = next;
+         for (unsigned k = 0; k < pv->width; k++)
+            D->blist[next++] = D->bitpos[D->boff[i] + k];
+         qsort(D->blist + D->bstart[D->nb], pv->width, sizeof(unsigned),
+               bd_uint_cmp);
+         D->bdist[D->nb++] = i;
+      }
+
+      const unsigned first = next;
+      for (int i = 0; i < nfv; i++) {
+         const pvar_t *pv = &P->vars[D->fv[i]];
+         if (lvl[D->fv[i]] != l || (pv->dist >= 0 && !flat))
+            continue;
+
+         for (unsigned k = 0; k < pv->width; k++)
+            D->blist[next++] = D->bitpos[D->boff[i] + k];
+      }
+
+      if (next > first) {
+         D->bstart[D->nb] = first;
+         qsort(D->blist + first, next - first, sizeof(unsigned), bd_uint_cmp);
+         D->bdist[D->nb++] = -1;
+      }
+   }
+   D->bstart[D->nb] = next;
+
+   assert(next == D->nbits);
+
+   // The BDD
+   const unsigned budget = crv_bdd_nodes();
+   D->B = bdd_open(D->nbits, P->bdd == 2 ? budget * BDD_FORCED : budget);
+   bdd_t *B = D->B;
+   bnode_t f = BDD_TRUE;
+
+   for (int i = 0; i < nfv; i++)
+      f = bdd_and(B, f, bd_domain(B, D->bitpos + D->boff[i], &P->vars[D->fv[i]]));
+
+   // The gates that the outputs need
+   const unsigned ng = blast_gate_count(b);
+   needed = xcalloc(ng ? ng : 1);
+   for (int i = 0; i < nouts; i++)
+      needed[outs[i] >> 1] = true;
+   for (unsigned g = ng; g-- > 1; ) {
+      if (!needed[g] || blast_gate_input(b, g) >= 0)
+         continue;
+      blit_t l0, l1;
+      blast_gate_fanins(b, g, &l0, &l1);
+      needed[l0 >> 1] = needed[l1 >> 1] = true;
+   }
+
+   node = NEW(bnode_t, ng ? ng : 1);
+   node[0] = BDD_FALSE;
+   for (unsigned g = 1; g < ng && !bdd_over(B); g++) {
+      if (!needed[g])
+         continue;
+      const int in = blast_gate_input(b, g);
+      if (in >= 0) {
+         int var;
+         unsigned bit;
+         blast_input_var(b, in, &var, &bit);
+         if (D->loc[var] < 0) {
+            D->why = CRV_BDD_CHECK;
+            res = BD_DECLINE;
+            goto out;
+         }
+         node[g] = bdd_var(B, D->bitpos[D->boff[D->loc[var]] + bit]);
+      }
+      else {
+         blit_t l0, l1;
+         blast_gate_fanins(b, g, &l0, &l1);
+         node[g] = bdd_and(B, bd_lit(B, node, l0), bd_lit(B, node, l1));
+      }
+   }
+
+   for (int i = 0; i < nhard && !bdd_over(B); i++)
+      f = bdd_and(B, f, bd_lit(B, node, hard[i]));
+
+   if (bdd_over(B)) {
+      D->why = CRV_BDD_BUDGET;
+      res = BD_DECLINE;
+      goto out;
+   }
+   else if (f == BDD_FALSE) {
+      res = BD_UNSAT;
+      goto out;
+   }
+
+   if (bdd_over(B)) {
+      D->why = CRV_BDD_BUDGET;
+      res = BD_DECLINE;
+   }
+   D->f = f;
+
+ out:
+   arena_reset(&P->tmp, tm);
+   free(width);
+   free(sgn);
+   free(fixed);
+   free(value);
+   free(hard);
+   free(outs);
+   free(order);
+   free(rank);
+   free(sigs);
+   free(uf);
+   free(gmin);
+   free(mask);
+   free(needed);
+   free(node);
+   free(ords);
+   return res;
+}
+
+static unsigned bd_bitlen(u128 x)
+{
+   unsigned n = 0;
+   while (x != 0) {
+      n++;
+      x >>= 1;
+   }
+   return n;
+}
+
+// Uniform in [0, total), total not zero
+static bnum_t rnd_bnum(const bnum_t *total)
+{
+   bnum_t t1 = *total;
+   bnum_sub1(&t1);
+   const unsigned bl = bnum_bitlen(&t1);
+   const unsigned limbs = (bl + 63) / 64;
+
+   bnum_t r = bnum_zero(total->nl);
+   if (bl == 0)
+      return r;
+
+   for (;;) {
+      for (unsigned i = 0; i < limbs; i++)
+         r.w[i] = rnd64();
+      if (bl % 64 != 0)
+         r.w[limbs - 1] &= (UINT64_C(1) << (bl % 64)) - 1;
+      if (bnum_cmp(&r, total) < 0)
+         return r;
+   }
+}
+
+// Draw the values of one block from h, a function of its variables alone
+// that is true for the values that can be extended.  False if the build ran
+// out of nodes or a count was wrong.
+static bool bd_draw_block(bd_t *D, int blk, bnode_t h, uint8_t *bits)
+{
+   prob_t *P = D->P;
+   bdd_t *B = D->B;
+   const unsigned *vars = D->blist + D->bstart[blk];
+   const unsigned nv = D->bstart[blk + 1] - D->bstart[blk];
+
+   bnum_t total;
+   if (D->bdist[blk] < 0) {
+      if (!bdd_count(B, h, vars, nv, &total) || bnum_is_zero(&total))
+         return false;
+      const bnum_t r = rnd_bnum(&total);
+      bdd_unrank(B, h, vars, nv, &r, bits);
+      return true;
+   }
+
+   const int li = D->bdist[blk];
+   const pvar_t *pv = &P->vars[D->fv[li]];
+   const cdist_t *cd = &P->c->dists[pv->dist];
+   const unsigned *pos = D->bitpos + D->boff[li];
+
+   bnode_t *G = NEW(bnode_t, cd->npr + 1);
+   u128 *prod = NEW(u128, cd->npr + 1);
+   u128 *mass = NEW(u128, cd->npr + 1);
+   bool ok = true;
+   u128 maxp = 0;
+   for (unsigned i = 0; i < cd->npr && ok; i++) {
+      G[i] = bdd_and(B, h, bd_range(B, pos, pv->width, pv->sgn, cd->pr[i].lo,
+                                    cd->pr[i].hi));
+      bnum_t cnt;
+      if (bdd_over(B) || !bdd_count(B, G[i], vars, nv, &cnt))
+         ok = false;
+      else {
+         // A variable is at most 64 bits wide
+         prod[i] = (u128)(uint64_t)cd->wt[i] * bnum_u128(&cnt);
+         if (prod[i] > maxp)
+            maxp = prod[i];
+      }
+   }
+
+   int pick = -1;
+   if (ok) {
+      // Mass of an item: the weight of its values times how many can be
+      // extended, over the size of the range for :/.  Scaled up so that the
+      // division loses nothing that matters
+      const unsigned bl = bd_bitlen(maxp);
+      ok = bl <= 118;
+      const unsigned shift = ok ? MIN(118 - bl, 56) : 0;
+      u128 sum = 0;
+      for (unsigned i = 0; i < cd->npr && ok; i++) {
+         mass[i] = prod[i] << shift;
+         if (!cd->pvl[i])
+            mass[i] /= (u128)(cd->pr[i].hi - cd->pr[i].lo + 1);
+         if (mass[i] == 0 && prod[i] != 0)
+            mass[i] = 1;
+         sum += mass[i];
+      }
+
+      if (ok && sum > 0) {
+         u128 r = rnd_u128(sum);
+         for (unsigned i = 0; i < cd->npr; i++) {
+            if (mass[i] == 0)
+               continue;
+            pick = i;
+            if (r < mass[i])
+               break;
+            r -= mass[i];
+         }
+      }
+   }
+
+   if (pick >= 0) {
+      ok = bdd_count(B, G[pick], vars, nv, &total) && !bnum_is_zero(&total);
+      if (ok) {
+         const bnum_t r = rnd_bnum(&total);
+         bdd_unrank(B, G[pick], vars, nv, &r, bits);
+      }
+   }
+   else
+      ok = false;
+
+   free(G);
+   free(prod);
+   free(mass);
+   return ok;
+}
+
+// The value of a variable from the bits drawn
+static i128 bd_value(const bd_t *D, int li, const uint8_t *bits)
+{
+   const pvar_t *pv = &D->P->vars[D->fv[li]];
+   uint64_t x = 0;
+   for (unsigned k = 0; k < pv->width; k++)
+      x |= (uint64_t)bits[D->bitpos[D->boff[li] + k]] << k;
+   if (pv->sgn && pv->width < 64 && ((x >> (pv->width - 1)) & 1))
+      return (i128)(int64_t)(x | ~wmask(pv->width));
+   return pv->sgn ? (i128)(int64_t)x : (i128)x;
+}
+
+static void bd_note(prob_t *P, const bd_t *D, uint64_t build_ns,
+                    uint64_t sample_ns)
+{
+   P->bdd_build_ns += build_ns;
+   P->bdd_sample_ns += sample_ns;
+   if (D->B != NULL && bdd_bytes(D->B) > P->bdd_bytes)
+      P->bdd_bytes = bdd_bytes(D->B);
+}
+
+static bd_res_t bdd_comp(prob_t *P, int comp)
+{
+   const bool timed = cur_stat != NULL;
+   const uint64_t t0 = timed ? get_timestamp_ns() : 0;
+
+   bd_t D = { .P = P, .comp = comp, .why = CRV_BDD_REASONS };
+   bd_res_t res = bd_build(&D, false);
+   const uint64_t t1 = timed ? get_timestamp_ns() : 0;
+
+   if (res == BD_DECLINE) {
+      P->nbdd[D.why]++;
+      if (D.why == CRV_BDD_BUDGET)
+         P->ndecl[1]++;
+      bd_note(P, &D, t1 - t0, 0);
+      bd_free(&D);
+      return res;
+   }
+   else if (res != BD_SAT) {
+      bd_note(P, &D, t1 - t0, 0);
+      bd_free(&D);
+      return res;
+   }
+
+   // The values, block after block
+   bdd_t *B = D.B;
+   uint8_t *bits = xcalloc(D.nbits + 1);
+   uint8_t *quant = xmalloc(D.nbits + 1);
+   uint8_t *fix = xcalloc(D.nbits + 1);
+   memset(quant, 1, D.nbits + 1);
+   bnode_t g = D.f;
+   bool ok = !bdd_over(B);
+   for (int k = 0; k < D.nb && ok; k++) {
+      const unsigned *vars = D.blist + D.bstart[k];
+      const unsigned nv = D.bstart[k + 1] - D.bstart[k];
+      for (unsigned i = 0; i < nv; i++)
+         quant[vars[i]] = 0;
+
+      // The values that can be extended by the blocks after this one
+      bnode_t h = g;
+      if (k < D.nb - 1)
+         h = bdd_exists_set(B, g, quant);
+
+      ok = !bdd_over(B) && bd_draw_block(&D, k, h, bits);
+
+      if (ok && k < D.nb - 1) {
+         for (unsigned i = 0; i < nv; i++)
+            fix[vars[i]] = 1;
+         g = bdd_cofactor(B, g, fix, bits);
+         for (unsigned i = 0; i < nv; i++)
+            fix[vars[i]] = 0;
+         ok = !bdd_over(B);
+      }
+   }
+   free(quant);
+   free(fix);
+
+   if (!ok) {
+      P->nbdd[bdd_over(B) ? CRV_BDD_BUDGET : CRV_BDD_CHECK]++;
+      if (bdd_over(B))
+         P->ndecl[1]++;
+      free(bits);
+      bd_note(P, &D, t1 - t0, timed ? get_timestamp_ns() - t1 : 0);
+      bd_free(&D);
+      return BD_DECLINE;
+   }
+
+   // Fix the variables to the sample and check it against the constraints
+   const int mark = P->ntrail;
+   for (int i = 0; i < D.nfv && ok; i++) {
+      const i128 x = bd_value(&D, i, bits);
+      ok = var_clip(P, D.fv[i], x, x);
+   }
+   free(bits);
+
+   // The constraints that were kept hold: a check that does not depend on
+   // the circuit
+   if (ok) {
+      fill_vals(P, comp);
+      ok = check_cons(P, comp);
+   }
+
+   bd_note(P, &D, t1 - t0, timed ? get_timestamp_ns() - t1 : 0);
+   if (!ok) {
+      undo_to(P, mark);
+      P->nbdd[CRV_BDD_CHECK]++;
+      bd_free(&D);
+      return BD_DECLINE;
+   }
+
+   rj_clear_queue(P);
+   bd_free(&D);
+   return BD_SAT;
+}
+
 // Search one component, or the whole problem, by the stages that are on
 static sres_t solve_comp(prob_t *P)
 {
@@ -6329,6 +6701,23 @@ static sres_t solve_comp(prob_t *P)
       }
 
       if (P->reject == 2)
+         return S_GIVEUP;
+   }
+
+   if (P->bdd != 0) {
+      switch (bdd_comp(P, comp)) {
+      case BD_SAT:
+         P->nstage[CRV_STAGE_BDD]++;
+         return S_SAT;
+      case BD_UNSAT:
+         return S_UNSAT;
+      case BD_NOFREE:
+         return search(P);
+      case BD_DECLINE:
+         break;
+      }
+
+      if (P->bdd == 2)
          return S_GIVEUP;
    }
 
@@ -6375,10 +6764,10 @@ static sres_t solve_prob(prob_t *P)
    compute_levels(P);
 
    int nfree = 0;
-   for (int v = 0; v < P->nv && nfree < 2 && !P->legacy; v++)
+   for (int v = 0; v < P->nv && nfree < 2; v++)
       nfree += P->vars[v].dom.lo != P->vars[v].dom.hi;
 
-   if (!P->legacy && nfree >= 2) {
+   if (nfree >= 2) {
       free_components(P);
       build_components(P);
       if (P->ncomp < 2) {
@@ -6407,6 +6796,12 @@ static sres_t solve_prob(prob_t *P)
       }
       for (int i = 0; i < 3; i++)
          cur_stat->declined[i] += P->ndecl[i];
+      for (int i = 0; i < CRV_BDD_REASONS; i++)
+         cur_stat->bdd_declined[i] += P->nbdd[i];
+      cur_stat->bdd_build_ns += P->bdd_build_ns;
+      cur_stat->bdd_sample_ns += P->bdd_sample_ns;
+      if (P->bdd_bytes > cur_stat->bdd_bytes)
+         cur_stat->bdd_bytes = P->bdd_bytes;
    }
    return res;
 }
@@ -6436,6 +6831,77 @@ static prob_t *prob_build_timed(crv_t *c, int mode, const unsigned *sizes,
    prob_t *P = prob_build(c, mode, sizes, active);
    cur_stat->build_ns += get_timestamp_ns() - t0;
    return P;
+}
+
+// The BDD of the hard constraints of a problem without arrays, counted and
+// every solution listed by unranking, for the tests: *count is the number of
+// solutions and vals gets the values of the variables of the first max of
+// them, nvars each.  False if the stage cannot take the problem.
+bool crv_bdd_enumerate(crv_t *c, uint64_t max, uint64_t *count, int64_t *vals)
+{
+   if (c->narrays > 0 || c->bad)
+      return false;
+
+   bool *active = xcalloc(c->nsoft ? c->nsoft : 1);
+   prob_t *P = prob_build(c, 2, NULL, active);
+   free(active);
+   P->bdd = 2;
+
+   sum_init(P);
+   for (int ci = 0; ci < P->ncons; ci++)
+      enqueue(P, ci);
+   P->root = true;
+   const bool root_ok = propagate(P);
+   P->root = false;
+
+   bool result = false;
+   *count = 0;
+   if (!root_ok) {
+      result = true;
+      prob_free(P);
+      return result;
+   }
+
+   bd_t D = { .P = P, .comp = -1, .why = CRV_BDD_REASONS };
+   const bd_res_t res = bd_build(&D, true);
+   if (res == BD_UNSAT)
+      result = true;
+   else if (res == BD_NOFREE) {
+      *count = check_all(P, -1);
+      if (*count > 0 && max > 0) {
+         for (int v = 0; v < P->nsc; v++)
+            vals[v] = st(P->vars[v].dom.lo);
+      }
+      result = true;
+   }
+   else if (res == BD_SAT) {
+      bnum_t total;
+      if (bdd_count(D.B, D.f, D.blist, D.nbits, &total)
+          && bnum_bitlen(&total) <= 63) {
+         const uint64_t n = bnum_u128(&total);
+         *count = n;
+         uint8_t *bits = xcalloc(D.nbits + 1);
+         for (uint64_t k = 0; k < n && k < max; k++) {
+            bnum_t r = bnum_zero(total.nl);
+            r.w[0] = k;
+            bdd_unrank(D.B, D.f, D.blist, D.nbits, &r, bits);
+            for (int v = 0; v < P->nsc; v++) {
+               if (D.loc[v] >= 0)
+                  vals[k * P->nsc + v] = st(bd_value(&D, D.loc[v], bits));
+               else
+                  vals[k * P->nsc + v] = st(P->vars[v].dom.lo);
+            }
+         }
+         free(bits);
+         result = true;
+      }
+   }
+
+   if (!result && debug_level())
+      fprintf(stderr, "crv: bdd declined: %s\n", res == BD_DECLINE ? crv_bdd_reason_name(D.why) : "?");
+   bd_free(&D);
+   prob_free(P);
+   return result;
 }
 
 static sres_t solve_prob_timed(prob_t *P)
@@ -6496,8 +6962,7 @@ static sres_t solve_once(crv_t *c, const bool *active, sol_t *out)
 
    // The elements may have no solution for the sizes chosen first: later
    // attempts leave those out
-   const bool legacy = crv_engine() == CRV_ENGINE_LEGACY;
-   const int attempts = !rs ? 1 : legacy ? 4 : 16;
+   const int attempts = !rs ? 1 : 16;
    nogood_t ng = { 0 };
    sres_t result = S_UNSAT;
 
@@ -6505,7 +6970,7 @@ static sres_t solve_once(crv_t *c, const bool *active, sol_t *out)
       if (rs) {
          prob_t *P1 = prob_build_timed(c, 1, sizes, active);
          sres_t r = S_SAT;
-         if (!legacy && nrs == 1) {
+         if (nrs == 1) {
             for (int i = 0; i < ng.n && r == S_SAT; i++) {
                for (unsigned a = 0; a < c->narrays; a++) {
                   if (c->arrays[a].size_rand
@@ -6534,7 +6999,7 @@ static sres_t solve_once(crv_t *c, const bool *active, sol_t *out)
             gave_up = true;
             continue;
          }
-         else if (!legacy && nogood_has(c, &ng, sizes))
+         else if (nogood_has(c, &ng, sizes))
             continue;
       }
 
@@ -6556,7 +7021,7 @@ static sres_t solve_once(crv_t *c, const bool *active, sol_t *out)
       gave_up |= r == S_GIVEUP;
       if (!rs && r == S_UNSAT)
          break;
-      else if (r == S_UNSAT && !legacy)
+      else if (r == S_UNSAT)
          nogood_add(c, &ng, sizes);
    }
 
@@ -6566,34 +7031,51 @@ static sres_t solve_once(crv_t *c, const bool *active, sol_t *out)
    return result;
 }
 
+static void randc_consume(const cvar_t *cv)
+{
+   randc_t *rc = (randc_t *)(uintptr_t)*cv->rc;
+   if (rc->n == 0) {
+      randc_insert(rc, randc_key((uint64_t)cv->cur, cv->width));
+      if (cv->width < 64 && rc->nused >= UINT64_C(1) << cv->width)
+         randc_clear(rc);
+      return;
+   }
+
+   const uint32_t x = (uint64_t)cv->cur & wmask(cv->width);
+   uint32_t *pos = rc->vals + rc->n;
+   if (pos[x] >= rc->left)
+      rc->left = rc->n;
+
+   const uint32_t last = rc->left - 1, y = rc->vals[last];
+   rc->vals[pos[x]] = y;
+   pos[y] = pos[x];
+   rc->vals[last] = x;
+   pos[x] = last;
+   rc->left--;
+}
+
+void crv_trial(crv_t *c, bool on)
+{
+   c->trial = on;
+}
+
+void crv_randc_commit(crv_t *c)
+{
+   for (unsigned v = 0; v < c->nvars; v++) {
+      const cvar_t *cv = &c->vars[v];
+      if (cv->rc)
+         randc_consume(cv);
+   }
+}
+
 static void commit(crv_t *c, const sol_t *s)
 {
    for (unsigned v = 0; v < c->nvars; v++) {
       cvar_t *cv = &c->vars[v];
       cv->cur = s->vals[v];
 
-      if (cv->rc) {
-         randc_t *rc = (randc_t *)(uintptr_t)*cv->rc;
-         if (rc->n == 0) {
-            randc_insert(rc, randc_key((uint64_t)cv->cur, cv->width));
-            if (cv->width < 64 && rc->nused >= UINT64_C(1) << cv->width) {
-               randc_clear(rc);
-            }
-            continue;
-         }
-
-         const uint32_t x = (uint64_t)cv->cur & wmask(cv->width);
-         uint32_t *pos = rc->vals + rc->n;
-         if (pos[x] >= rc->left)
-            rc->left = rc->n;
-
-         const uint32_t last = rc->left - 1, y = rc->vals[last];
-         rc->vals[pos[x]] = y;
-         pos[y] = pos[x];
-         rc->vals[last] = x;
-         pos[x] = last;
-         rc->left--;
-      }
+      if (cv->rc && !c->trial)
+         randc_consume(cv);
    }
 
    for (unsigned a = 0; a < c->narrays; a++) {
@@ -6811,6 +7293,9 @@ static crv_result_t solve_all(crv_t *c);
 
 crv_result_t crv_solve2(crv_t *c)
 {
+   if (c->bad)
+      return CRV_UNSAT;
+
    // The engine is read here so that a bad setting is reported once
    // however the solver is reached
    (void)crv_engine();
@@ -6876,39 +7361,15 @@ static crv_result_t solve_all(crv_t *c)
 
    // A search that ran out of work proves nothing about the soft
    // constraints: look again before any is given up
-   for (int again = 0; again < 2 && res == S_GIVEUP && nsoft > 0
-           && crv_engine() != CRV_ENGINE_LEGACY; again++)
+   for (int again = 0; again < 2 && res == S_GIVEUP && nsoft > 0; again++)
       res = solve_once(c, active, &sol);
    bool ok = res == S_SAT;
 
-   if (!ok && nsoft > 0 && crv_engine() != CRV_ENGINE_LEGACY) {
+   if (!ok && nsoft > 0) {
       res = solve_soft(c, active, &sol);
       ok = res == S_SAT;
       for (int i = 0; i < nsoft; i++)
          active[i] = false;
-   }
-   else if (!ok && nsoft > 0) {
-      for (int i = 0; i < nsoft; i++)
-         active[i] = false;
-
-      // Check the hard constraints alone first so that an unsatisfiable
-      // set fails after one more attempt
-      res = solve_once(c, active, &sol);
-      ok = res == S_SAT;
-
-      // Keep each soft constraint in turn from the highest priority if the
-      // others still allow it
-      for (int k = nsoft - 1; ok && k >= 0; k--) {
-         active[k] = true;
-
-         sol_t next = { 0 };
-         if (solve_once(c, active, &next) == S_SAT) {
-            sol_free(&sol);
-            sol = next;
-         }
-         else
-            active[k] = false;
-      }
    }
 
    if (!ok && debug_level()) {
