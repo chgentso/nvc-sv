@@ -3240,10 +3240,13 @@ END_TEST
 // The BDD of the hard constraints counts the solutions and unranking from 0
 // to the count lists each of them once: the stage is exact if this holds,
 // whatever the random numbers do
-static void check_bdd_bijection(const problem_t *p, const char *what)
+// Returns false if the stage declined the problem: a product of two big
+// expressions or a long sum is for the search
+static bool check_bdd_bijection(const problem_t *p, const char *what,
+                                bool may_decline)
 {
    if (p->array)
-      return;
+      return true;
 
    const int nf = p->nfields;
    int nbits = 0;
@@ -3273,8 +3276,13 @@ static void check_bdd_bijection(const problem_t *p, const char *what)
    build_problem(c, p, &h);
    int64_t *vals = xmalloc_array(nhard + 1, nf * sizeof(int64_t));
    uint64_t count = 0;
-   ck_assert_msg(crv_bdd_enumerate(c, nhard, &count, vals), "%s: the stage "
-                 "declined", what);
+   if (!crv_bdd_enumerate(c, nhard, &count, vals)) {
+      ck_assert_msg(may_decline, "%s: the stage declined", what);
+      free(vals);
+      free(hard);
+      crv_free(c);
+      return false;
+   }
    ck_assert_msg(count == nhard, "%s: BDD counts %"PRIu64" solutions, "
                  "enumeration %"PRIu64, what, count, nhard);
 
@@ -3291,12 +3299,13 @@ static void check_bdd_bijection(const problem_t *p, const char *what)
    free(vals);
    free(hard);
    crv_free(c);
+   return true;
 }
 
 START_TEST(test_bdd_bijection_problems)
 {
    const problem_t p = problems[_i].make(problems[_i].arg);
-   check_bdd_bijection(&p, p.name);
+   check_bdd_bijection(&p, p.name, false);
 }
 END_TEST
 
@@ -3305,12 +3314,16 @@ START_TEST(test_bdd_bijection_fuzz)
    const uint64_t base = getenv("NVC_CRV_FUZZ_SEED")
       ? strtoull(getenv("NVC_CRV_FUZZ_SEED"), NULL, 0) : 1000;
    const int n = long_mode() ? 20000 : 600;
+   int declined = 0;
    for (int i = 0; i < n; i++) {
       const problem_t p = fuzz_problem(base + i);
       char what[64];
       snprintf(what, sizeof(what), "fuzz seed %"PRIu64, base + i);
-      check_bdd_bijection(&p, what);
+      if (!check_bdd_bijection(&p, what, true))
+         declined++;
    }
+   ck_assert_msg(declined * 100 <= n, "%d of %d problems declined", declined,
+                 n);
 }
 END_TEST
 
