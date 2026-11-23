@@ -3146,6 +3146,7 @@ crvdump1        shell
 crvbdd1         shell
 crvsat1         shell
 crvdistcond1    verilog
+crvrandcase1    verilog
 svcrvunary1     verilog
 svcrvoob3 verilog
 svcrvoob4 verilog

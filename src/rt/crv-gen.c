@@ -22,6 +22,7 @@
 #include "array.h"
 #include "option.h"
 #include "rt/crv.h"
+#include "rt/model.h"
 #include "thread.h"
 
 #include <assert.h>
@@ -160,16 +161,20 @@ int64_t crv_generated(crv_op_t op, const int64_t *args)
       }
    case CRV_OP_RANDOM:
       {
-         static __thread uint64_t state = 0;
-         if (state == 0)
-            state = opt_verilog_seed() * UINT64_C(2) + 1;
+         uint64_t r;
+         if (!model_rng_draw(&r)) {
+            static __thread uint64_t state = 0;
+            if (state == 0)
+               state = opt_verilog_seed() * UINT64_C(2) + 1;
 
-         // Xorshift: only used to choose the arm of a randcase
-         state ^= state << 13;
-         state ^= state >> 7;
-         state ^= state << 17;
+            // Xorshift fallback when no process random stream is active
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            r = state;
+         }
 
-         return args[0] > 0 ? (int64_t)(state % (uint64_t)args[0]) : -1;
+         return args[0] > 0 ? (int64_t)(r % (uint64_t)args[0]) : -1;
       }
    case CRV_OP_SEED_BEGIN:
       crv_push_seed(args[0]);
