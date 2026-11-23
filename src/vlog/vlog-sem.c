@@ -1501,7 +1501,9 @@ static void vlog_check_rand_var(vlog_node_t v)
 
    vlog_node_t atype = vlog_get_type(vlog_type(v));
    if (vlog_is_assoc_type(atype)) {
-      if (!(get_type_mask(vlog_get_type(vlog_type(atype))) & TM_INTEGRAL)) {
+      const type_mask_t amask =
+         get_type_mask(vlog_get_type(vlog_type(atype)));
+      if (!(amask & TM_INTEGRAL) && !(!is_randc && (amask & TM_CLASS))) {
          warn_at(vlog_loc(v), "sorry, the elements of the rand associative "
                  "array %pQ are not randomized", vlog_ident(v));
          vlog_clear_flags(v, VLOG_F_RAND | VLOG_F_RANDC);

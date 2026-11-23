@@ -28466,7 +28466,10 @@ static void vlog_crv_build_decl(vlog_gen_t *g, mir_value_t this,
          return;
 
       vlog_node_t etype = vlog_crv_elem_type(d);
-      if (!vlog_crv_is_integral(g, etype)) {
+      vlog_node_t ctype = vlog_get_type(etype);
+      if (ctype != NULL && vlog_kind(ctype) == V_CLASS_DECL)
+         return;   // The objects are randomized with this one
+      else if (!vlog_crv_is_integral(g, etype)) {
          warn_at(vlog_loc(d), "sorry, the elements of this rand associative "
                  "array are not randomized");
          return;
@@ -28939,10 +28942,35 @@ static void vlog_crv_nested(vlog_gen_t *g, vlog_node_t d, mir_value_t this,
    if (!(vlog_flags(d) & VLOG_F_RAND))
       return;
 
+   vlog_node_t assoc = vlog_crv_assoc_type(d);
+   if (assoc != NULL) {
+      // The objects held by an associative array
+      vlog_node_t vtype = vlog_get_type(vlog_type(assoc));
+      if (vtype == NULL || vlog_kind(vtype) != V_CLASS_DECL)
+         return;
+
+      const type_info_t *ti = vlog_type_info(g, vlog_type(d));
+      const type_info_t *hti = vlog_type_info(g, vlog_crv_elem_type(d));
+      mir_value_t ua = mir_build_load(
+         g->mu, vlog_crv_slot(g, this, d, ti->type));
+
+      mir_value_t data = mir_build_unwrap(g->mu, ua);
+      mir_value_t len = mir_build_uarray_len(g->mu, ua, 0);
+
+      vlog_loop_t l;
+      vlog_loop_begin(g, &l, vlog_crv_int(g, 0), len);
+      mir_value_t entry = mir_build_array_ref(g->mu, data, l.i);
+      mir_value_t handle = mir_build_load(
+         g->mu, mir_build_record_ref(g->mu, entry, 1));
+      vlog_crv_nested_one(g, d, this, ctx, phase, vtype, handle, hti->type);
+      vlog_loop_end(g, &l);
+      return;
+   }
+
    if (vlog_crv_is_array_decl(d)) {
       int depth = 0;
       vlog_node_t etype = vlog_crv_leaf_class(d, &depth);
-      if (etype == NULL || vlog_crv_assoc_type(d) != NULL)
+      if (etype == NULL)
          return;
 
       if (depth > 1) {

@@ -3139,3 +3139,4 @@ svcrvstructsorry1 verilog,fail,gold
 svcrvstructnest1 verilog
 svcrvstructrandc1 verilog
 svcrvstructunref1 verilog
+svcrvassocobj1 verilog
