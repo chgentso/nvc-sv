@@ -21,6 +21,8 @@
 #include "prim.h"
 #include "rt/crv.h"
 
+#include <stdio.h>
+
 // Bit-blaster: turns the nodes of the constraint graph into an and-inverter
 // graph (AIG) over the bits of the variables.  Slices, masks and casts are
 // wiring, adders are ripple adders, multiplication is an array multiplier,
@@ -108,5 +110,21 @@ const blast_op_t *blast_ops(const blast_t *b, unsigned *count);
 // word.
 void blast_sim(blast_t *b, const int64_t *vals, unsigned lanes);
 uint64_t blast_lit(const blast_t *b, blit_t lit);
+
+// Write the nodes as an SMT-LIB 2 problem that is unsatisfiable if the
+// circuit computes what the node does: word-level bit-vector terms next to
+// the gates, and an assertion that the two differ on some input where the
+// value is defined.  Nodes must have been given to blast_holds or
+// blast_bit already.
+void blast_dump_smt2(blast_t *b, FILE *f, const crv_node_t *roots,
+                     unsigned count);
+
+// Write the constraints themselves as an SMT-LIB 2 problem over the
+// variables v<i>: each node of holds must be defined and non-zero.  The nodes
+// of defs are defined too, as n<id> of their width and f<id> for their
+// undefined flag, for the text in extra (more assertions) to use.
+void blast_dump_problem_smt2(blast_t *b, FILE *f, const crv_node_t *holds,
+                             unsigned nholds, const crv_node_t *defs,
+                             unsigned ndefs, const char *extra);
 
 #endif  // _RT_CRV_BLAST_H

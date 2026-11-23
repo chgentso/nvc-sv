@@ -481,6 +481,23 @@ START_TEST(test_exhaustive)
       blast_all(&k, g);
       k.vals = xmalloc_array(64 * g->nv, sizeof(int64_t));
 
+      // NVC_CRV_BLAST_SMT2=<prefix> writes the check of the circuit for an
+      // SMT solver, which should find it unsatisfiable
+      const char *smt = getenv("NVC_CRV_BLAST_SMT2");
+      if (smt != NULL && *smt) {
+         char *name = xasprintf("%s.%"PRIu64".smt2", smt, seed);
+         FILE *f = fopen(name, "w");
+         if (f != NULL) {
+            crv_node_t *roots = xmalloc_array(g->nlist, sizeof(crv_node_t));
+            for (unsigned i = 0; i < g->nlist; i++)
+               roots[i] = g->list[i].id;
+            blast_dump_smt2(k.b, f, roots, g->nlist);
+            free(roots);
+            fclose(f);
+         }
+         free(name);
+      }
+
       const uint64_t total = UINT64_C(1) << g->bits;
       for (uint64_t x = 0; x < total; x += 64) {
          const unsigned lanes = total - x < 64 ? total - x : 64;
@@ -1028,6 +1045,46 @@ START_TEST(test_gate_counts)
 }
 END_TEST
 
+START_TEST(test_dump_smt2)
+{
+   // The check of the circuit names the variables, defines the nodes at
+   // word level and the gates, and asserts that they differ
+   crv_t *c = crv_new();
+   crv_node_t x = crv_var_ref(c, crv_var(c, 6, true, 0));
+   crv_node_t y = crv_var_ref(c, crv_var(c, 6, true, 0));
+   crv_node_t q = crv_binary(c, CRV_DIV, x, y, 6, true);
+
+   uint8_t width[2] = { 6, 6 };
+   bool sgn[2] = { true, true };
+   blast_shape_t shape = { .nv = 2, .width = width, .sgn = sgn, .nsc = 2 };
+   blast_t *b = blast_new(c, &shape);
+   (void)blast_holds(b, q);
+
+   char *buf = NULL;
+   size_t len = 0;
+   FILE *f = open_memstream(&buf, &len);
+   blast_dump_smt2(b, f, &q, 1);
+   fclose(f);
+
+   ck_assert_ptr_nonnull(strstr(buf, "(declare-const v0 (_ BitVec 6))"));
+   ck_assert_ptr_nonnull(strstr(buf, "bvsdiv"));
+   ck_assert_ptr_nonnull(strstr(buf, "define-fun g"));
+   ck_assert_ptr_nonnull(strstr(buf, "(check-sat)"));
+   free(buf);
+
+   // The problem itself
+   f = open_memstream(&buf, &len);
+   blast_dump_problem_smt2(b, f, &q, 1, NULL, 0, "(assert false)\n");
+   fclose(f);
+   ck_assert_ptr_nonnull(strstr(buf, "(assert (and (not f2)"));
+   ck_assert_ptr_nonnull(strstr(buf, "(assert false)"));
+   free(buf);
+
+   blast_free(b);
+   crv_free(c);
+}
+END_TEST
+
 Suite *get_blast_tests(void)
 {
    Suite *s = suite_create("blast");
@@ -1041,6 +1098,7 @@ Suite *get_blast_tests(void)
    tcase_add_test(tc, test_unique);
    tcase_add_test(tc, test_stats);
    tcase_add_test(tc, test_gate_counts);
+   tcase_add_test(tc, test_dump_smt2);
    suite_add_tcase(s, tc);
 
    return s;

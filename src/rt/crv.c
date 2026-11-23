@@ -18,6 +18,7 @@
 #include "util.h"
 #include "rt/crv.h"
 #include "rt/crv-priv.h"
+#include "rt/crv-blast.h"
 
 #include <assert.h>
 #include <stdint.h>
@@ -2667,6 +2668,146 @@ static void derive_domains(prob_t *P)
 }
 
 
+// NVC_CRV_DUMP_SMT2=<prefix>: write each problem as <prefix>.<n>.smt2 for an
+// SMT solver and the check of the bit-blaster on it as <prefix>.<n>.miter.smt2
+static const char *dump_smt2_prefix(void)
+{
+   static __thread bool read;
+   static __thread const char *prefix;
+   if (!read) {
+      prefix = getenv("NVC_CRV_DUMP_SMT2");
+      if (prefix != NULL && *prefix == '\0')
+         prefix = NULL;
+      read = true;
+   }
+   return prefix;
+}
+
+static char *dump_bin(i128 v, unsigned w)
+{
+   char *s = xmalloc(w + 3);
+   s[0] = '#';
+   s[1] = 'b';
+   for (unsigned i = 0; i < w; i++)
+      s[2 + i] = ((v >> (w - 1 - i)) & 1) ? '1' : '0';
+   s[w + 2] = 0;
+   return s;
+}
+
+static void dump_smt2(const prob_t *P)
+{
+   static __thread unsigned seq;
+   const crv_t *c = P->c;
+
+   uint8_t *width = NEW(uint8_t, P->nv);
+   bool *sgn = NEW(bool, P->nv), *fixed = NEW(bool, P->nv);
+   int64_t *value = NEW(int64_t, P->nv);
+   for (int v = 0; v < P->nv; v++) {
+      const pvar_t *pv = &P->vars[v];
+      width[v] = pv->width;
+      sgn[v] = pv->sgn;
+      fixed[v] = !dom_empty(&pv->dom) && pv->dom.lo == pv->dom.hi;
+      value[v] = fixed[v] ? norm(pv->dom.lo, pv->width, pv->sgn) : 0;
+   }
+
+   const blast_shape_t shape = {
+      .nv = P->nv, .width = width, .sgn = sgn, .nsc = P->nsc,
+      .ebase = P->ebase, .sizes = P->sizes, .fixed = fixed, .value = value,
+   };
+   blast_t *b = blast_new(c, &shape);
+
+   crv_node_t *holds = NEW(crv_node_t, P->ncons);
+   unsigned nholds = 0, nsoft = 0;
+   crv_node_t *defs = NEW(crv_node_t, P->nun + 1);
+   unsigned ndefs = 0;
+   char *extra = xstrdup("");
+   for (int ci = 0; ci < P->ncons; ci++) {
+      const pcons_t *pc = &P->cons[ci];
+      if (pc->soft >= 0)
+         nsoft++;
+      else if (pc->kind == C_REQ)
+         holds[nholds++] = pc->root;
+      else {
+         for (int i = 0; i < pc->unn; i++)
+            defs[ndefs++] = P->un[pc->unstart + i];
+         char *u = xasprintf("%s(assert (distinct", extra);
+         free(extra);
+         extra = u;
+         for (int i = 0; i < pc->unn; i++) {
+            u = xasprintf("%s n%d", extra, P->un[pc->unstart + i]);
+            free(extra);
+            extra = u;
+         }
+         u = xasprintf("%s))\n", extra);
+         free(extra);
+         extra = u;
+      }
+   }
+
+   // The domain of each variable that is not a constant
+   for (int v = 0; v < P->nv; v++) {
+      const pvar_t *pv = &P->vars[v];
+      if (fixed[v] || dom_empty(&pv->dom))
+         continue;
+
+      const unsigned w = pv->width + 1;
+      char *t = xasprintf("(or false");
+      for (int k = 0; k < dom_nr(&pv->dom); k++) {
+         const range_t r = dom_range(&pv->dom, k);
+         char *lo = dump_bin(r.lo, w), *hi = dump_bin(r.hi, w);
+         char *u = xasprintf("%s (and (bvsle %s ((_ %s_extend 1) v%d)) "
+                             "(bvsle ((_ %s_extend 1) v%d) %s))", t, lo,
+                             pv->sgn ? "sign" : "zero", v,
+                             pv->sgn ? "sign" : "zero", v, hi);
+         free(lo);
+         free(hi);
+         free(t);
+         t = u;
+      }
+      char *u = xasprintf("%s(assert %s))\n", extra, t);
+      free(t);
+      free(extra);
+      extra = u;
+   }
+
+   char *name = xasprintf("%s.%u.smt2", dump_smt2_prefix(), seq);
+   FILE *f = fopen(name, "w");
+   if (f != NULL) {
+      fprintf(f, "; crv problem %u: %u hard constraints, %u soft "
+              "constraints not included\n", seq, nholds, nsoft);
+      blast_dump_problem_smt2(b, f, holds, nholds, defs, ndefs, extra);
+      fclose(f);
+   }
+   free(name);
+
+   name = xasprintf("%s.%u.miter.smt2", dump_smt2_prefix(), seq);
+   f = fopen(name, "w");
+   if (f != NULL) {
+      crv_node_t *roots = NEW(crv_node_t, nholds + ndefs + 1);
+      unsigned nr = 0;
+      for (unsigned i = 0; i < nholds; i++)
+         roots[nr++] = holds[i];
+      for (unsigned i = 0; i < ndefs; i++)
+         roots[nr++] = defs[i];
+      for (unsigned i = 0; i < nr; i++)
+         (void)blast_holds(b, roots[i]);
+      blast_dump_smt2(b, f, roots, nr);
+      fclose(f);
+      free(roots);
+   }
+   free(name);
+
+   seq++;
+   blast_free(b);
+   free(extra);
+   free(defs);
+   free(holds);
+   free(value);
+   free(fixed);
+   free(sgn);
+   free(width);
+}
+
 // Mode 1 solves for the sizes of arrays with a random size, ignoring the
 // elements of those, mode 2 has all sizes known
 static void chain_setup(prob_t *P);
@@ -2839,6 +2980,9 @@ static prob_t *prob_build(crv_t *c, int mode, const unsigned *sizes,
       set_prep(c, &c->sets[i]);
    for (unsigned i = 0; i < c->ndists; i++)
       crv_dist_prepare(&c->dists[i]);
+
+   if (unlikely(dump_smt2_prefix() != NULL))
+      dump_smt2(P);
 
    P->vmark = xcalloc((P->nv ? P->nv : 1) * sizeof(int));
    P->vstart = NEW(int, P->ncons + 1);

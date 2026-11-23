@@ -20,6 +20,7 @@
 #include "rt/crv-priv.h"
 
 #include <assert.h>
+#include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -1340,4 +1341,641 @@ void blast_sim(blast_t *b, const int64_t *vals, unsigned lanes)
 uint64_t blast_lit(const blast_t *b, blit_t lit)
 {
    return b->sim[lit >> 1] ^ (0 - (uint64_t)(lit & 1));
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// SMT-LIB 2 dump
+//
+// The word-level meaning of each node written as bit-vector terms next to
+// the gates, so that an SMT solver can check that they agree.  The
+// terms are written from the definition of the operators, not from the
+// encoders.
+
+typedef struct {
+   blast_t *b;
+   FILE    *f;
+   uint8_t *done;
+} smt_t;
+
+static char *smt_bin(i128 v, unsigned w)
+{
+   char *s = xmalloc(w + 3);
+   s[0] = '#';
+   s[1] = 'b';
+   for (unsigned i = 0; i < w; i++)
+      s[2 + i] = ((v >> (w - 1 - i)) & 1) ? '1' : '0';
+   s[w + 2] = 0;
+   return s;
+}
+
+static char *smt_resize(char *term, unsigned from, unsigned w, bool sgn)
+{
+   char *r;
+   if (w == from)
+      return term;
+   else if (w > from)
+      r = xasprintf("((_ %s_extend %u) %s)", sgn ? "sign" : "zero", w - from,
+                    term);
+   else
+      r = xasprintf("((_ extract %u 0) %s)", w - 1, term);
+   free(term);
+   return r;
+}
+
+// The value of node n extended or cut to w bits
+static char *smt_ext(smt_t *S, crv_node_t n, unsigned w)
+{
+   const node_t *nd = &(S->b->c->nodes[n]);
+   return smt_resize(xasprintf("n%d", n), nd->width, w, nd->sgn);
+}
+
+static char *smt_var(smt_t *S, int v, unsigned w, bool sgn)
+{
+   const blast_shape_t *sh = &(S->b->shape);
+   char *t;
+   if (sh->fixed != NULL && sh->fixed[v])
+      t = smt_bin(sh->value[v], sh->width[v]);
+   else
+      t = xasprintf("v%d", v);
+   return smt_resize(t, sh->width[v], w, sgn);
+}
+
+static char *smt_truth(smt_t *S, crv_node_t n)
+{
+   return xasprintf("(distinct n%d (_ bv0 %u))", n,
+                    S->b->c->nodes[n].width);
+}
+
+// Comparison of the mathematical values of two nodes: = lt le
+static char *smt_cmp(smt_t *S, const char *op, crv_node_t x, crv_node_t y)
+{
+   const node_t *xn = &(S->b->c->nodes[x]), *yn = &(S->b->c->nodes[y]);
+   const unsigned w = MAX(xn->width, yn->width) + (xn->sgn != yn->sgn ? 1 : 0);
+   const bool sg = xn->sgn || yn->sgn;
+   char *a = smt_ext(S, x, w), *b = smt_ext(S, y, w);
+   char *r = xasprintf("(%s%s %s %s)",
+                       !strcmp(op, "=") ? "" : sg ? "bvs" : "bvu", op, a, b);
+   free(a);
+   free(b);
+   return r;
+}
+
+static char *smt_bit(char *cond, unsigned w)
+{
+   char *r = xasprintf("(ite %s (_ bv1 %u) (_ bv0 %u))", cond, w, w);
+   free(cond);
+   return r;
+}
+
+static void smt_emit(smt_t *S, crv_node_t n, char *val, char *fail)
+{
+   fprintf(S->f, "(define-fun n%d () (_ BitVec %u) %s)\n", n,
+           S->b->c->nodes[n].width, val);
+   fprintf(S->f, "(define-fun f%d () Bool %s)\n", n, fail);
+   free(val);
+   free(fail);
+}
+
+static void smt_node(smt_t *S, crv_node_t n);
+
+static void smt_children(smt_t *S, const node_t *nd)
+{
+   const crv_t *c = S->b->c;
+   switch ((nkind_t)nd->kind) {
+   case N_BIN:
+      smt_node(S, nd->a);
+      smt_node(S, nd->b);
+      break;
+   case N_UN:
+   case N_CAST:
+   case N_AELEM:
+   case N_DIST:
+      smt_node(S, nd->a);
+      break;
+   case N_COND:
+      smt_node(S, nd->a);
+      smt_node(S, nd->b);
+      smt_node(S, nd->c);
+      break;
+   case N_INSIDE:
+      {
+         smt_node(S, nd->a);
+         const cset_t *cs = &(c->sets[nd->aux]);
+         for (unsigned i = 0; i < cs->n; i++) {
+            smt_node(S, cs->items[i].lo);
+            if (cs->items[i].hi >= 0)
+               smt_node(S, cs->items[i].hi);
+         }
+      }
+      break;
+   default:
+      break;
+   }
+}
+
+static char *smt_unary(smt_t *S, const node_t *nd)
+{
+   const crv_t *c = S->b->c;
+   const node_t *an = &(c->nodes[nd->a]);
+   const unsigned w = nd->width, wa = an->width;
+
+   switch ((crv_unary_t)nd->op) {
+   case CRV_NEG:
+   case CRV_INV:
+      {
+         char *x = smt_ext(S, nd->a, w);
+         char *r = xasprintf("(%s %s)", nd->op == CRV_NEG ? "bvneg" : "bvnot",
+                             x);
+         free(x);
+         return r;
+      }
+   case CRV_LOG_NOT:
+      return smt_bit(xasprintf("(= n%d (_ bv0 %u))", nd->a, wa), w);
+   case CRV_REDUCE_AND:
+      return smt_bit(xasprintf("(= n%d (bvnot (_ bv0 %u)))", nd->a, wa), w);
+   case CRV_REDUCE_OR:
+      return smt_bit(xasprintf("(distinct n%d (_ bv0 %u))", nd->a, wa), w);
+   case CRV_REDUCE_XOR:
+      {
+         char *t = xasprintf("((_ extract 0 0) n%d)", nd->a);
+         for (unsigned i = 1; i < wa; i++) {
+            char *u = xasprintf("(bvxor %s ((_ extract %u %u) n%d))", t, i, i,
+                                nd->a);
+            free(t);
+            t = u;
+         }
+         char *r = smt_bit(xasprintf("(= %s #b1)", t), w);
+         free(t);
+         return r;
+      }
+   case CRV_POPCNT:
+      {
+         char *t = xasprintf("((_ zero_extend %u) ((_ extract 0 0) n%d))",
+                             w - 1, nd->a);
+         for (unsigned i = 1; i < wa; i++) {
+            char *u = xasprintf("(bvadd %s ((_ zero_extend %u) ((_ extract "
+                                "%u %u) n%d)))", t, w - 1, i, i, nd->a);
+            free(t);
+            t = u;
+         }
+         return t;
+      }
+   }
+
+   should_not_reach_here();
+}
+
+static char *smt_binary(smt_t *S, const node_t *nd, char **fail)
+{
+   const crv_t *c = S->b->c;
+   const node_t *an = &(c->nodes[nd->a]), *bn = &(c->nodes[nd->b]);
+   const crv_binary_t op = nd->op;
+   const unsigned w = nd->width;
+
+   *fail = xasprintf("(or f%d f%d)", nd->a, nd->b);
+
+   switch (op) {
+   case CRV_ADD: case CRV_SUB: case CRV_MUL: case CRV_AND: case CRV_OR:
+   case CRV_XOR:
+      {
+         char *x = smt_ext(S, nd->a, w), *y = smt_ext(S, nd->b, w);
+         char *r = xasprintf("(%s %s %s)", op == CRV_ADD ? "bvadd"
+                             : op == CRV_SUB ? "bvsub" : op == CRV_MUL
+                             ? "bvmul" : op == CRV_AND ? "bvand"
+                             : op == CRV_OR ? "bvor" : "bvxor", x, y);
+         free(x);
+         free(y);
+         return r;
+      }
+   case CRV_DIV:
+   case CRV_MOD:
+      {
+         const bool sg = an->sgn || bn->sgn;
+         const unsigned ww = MAX(an->width, bn->width) + (sg ? 1 : 0);
+         char *x = smt_ext(S, nd->a, ww), *y = smt_ext(S, nd->b, ww);
+         char *q = xasprintf("(%s %s %s)", sg ? (op == CRV_DIV ? "bvsdiv"
+                                                 : "bvsrem")
+                             : (op == CRV_DIV ? "bvudiv" : "bvurem"), x, y);
+         free(x);
+         free(y);
+         free(*fail);
+         *fail = xasprintf("(or f%d f%d (= n%d (_ bv0 %u)))", nd->a, nd->b,
+                           nd->b, bn->width);
+         return smt_resize(q, ww, w, sg);
+      }
+   case CRV_SHL:
+   case CRV_SHR:
+   case CRV_ASR:
+      {
+         const bool arith = op == CRV_ASR && nd->sgn;
+         char *x = smt_ext(S, nd->a, 64);
+         if (op != CRV_SHL && !arith && w < 64) {
+            char *m = smt_bin(((i128)1 << w) - 1, 64);
+            char *u = xasprintf("(bvand %s %s)", x, m);
+            free(x);
+            free(m);
+            x = u;
+         }
+
+         // The amount is the raw bits of the operand
+         char *y = smt_resize(xasprintf("n%d", nd->b), bn->width, 64, false);
+         char *r = xasprintf("(%s %s %s)", op == CRV_SHL ? "bvshl"
+                             : arith ? "bvashr" : "bvlshr", x, y);
+         free(x);
+         free(y);
+         return smt_resize(r, 64, w, false);
+      }
+   case CRV_EQ: case CRV_NE: case CRV_LT: case CRV_LE: case CRV_GT:
+   case CRV_GE:
+      {
+         char *t;
+         switch (op) {
+         case CRV_EQ: t = smt_cmp(S, "=", nd->a, nd->b); break;
+         case CRV_LT: t = smt_cmp(S, "lt", nd->a, nd->b); break;
+         case CRV_LE: t = smt_cmp(S, "le", nd->a, nd->b); break;
+         case CRV_NE:
+            {
+               char *e = smt_cmp(S, "=", nd->a, nd->b);
+               t = xasprintf("(not %s)", e);
+               free(e);
+            }
+            break;
+         case CRV_GT:
+            {
+               char *e = smt_cmp(S, "le", nd->a, nd->b);
+               t = xasprintf("(not %s)", e);
+               free(e);
+            }
+            break;
+         default:
+            {
+               char *e = smt_cmp(S, "lt", nd->a, nd->b);
+               t = xasprintf("(not %s)", e);
+               free(e);
+            }
+            break;
+         }
+         return smt_bit(t, w);
+      }
+   default:
+      {
+         // Logical operators: an undefined operand is unknown
+         char *l = op == CRV_IMPLIES
+            ? xasprintf("(= n%d (_ bv0 %u))", nd->a, an->width)
+            : smt_truth(S, nd->a);
+         char *r = smt_truth(S, nd->b);
+         char *val, *ret;
+         free(*fail);
+         if (op == CRV_LOG_AND) {
+            val = xasprintf("(and %s %s (not f%d) (not f%d))", l, r, nd->a,
+                            nd->b);
+            ret = xasprintf("(or (and (not f%d) (not %s)) (and (not f%d) "
+                            "(not %s)))", nd->a, l, nd->b, r);
+         }
+         else {
+            val = xasprintf("(or (and (not f%d) %s) (and (not f%d) %s))",
+                            nd->a, l, nd->b, r);
+            ret = xasprintf("%s", val);
+         }
+         *fail = xasprintf("(and (not %s) (or f%d f%d))", ret, nd->a, nd->b);
+         free(ret);
+         free(l);
+         free(r);
+         return smt_bit(val, w);
+      }
+   }
+}
+
+static void smt_inside(smt_t *S, crv_node_t n, const node_t *nd)
+{
+   const crv_t *c = S->b->c;
+   const cset_t *cs = &(c->sets[nd->aux]);
+   FILE *f = S->f;
+
+   char *found = xasprintf("false"), *failed = xasprintf("f%d", nd->a);
+   for (unsigned i = 0; i < cs->n; i++) {
+      const item_t it = cs->items[i];
+      char *ifail, *match;
+      if (it.hi < 0) {
+         ifail = xasprintf("f%d", it.lo);
+         match = smt_cmp(S, "=", nd->a, it.lo);
+      }
+      else {
+         ifail = xasprintf("(or f%d f%d)", it.lo, it.hi);
+         char *lt = smt_cmp(S, "lt", nd->a, it.lo);
+         char *le = smt_cmp(S, "le", nd->a, it.hi);
+         match = xasprintf("(and (not %s) %s)", lt, le);
+         free(lt);
+         free(le);
+      }
+
+      char *alive = xasprintf("(and (not %s) (not %s))", found, failed);
+      fprintf(f, "(define-fun t%d_%u () Bool (or %s (and %s %s)))\n", n, i,
+              failed, alive, ifail);
+      fprintf(f, "(define-fun s%d_%u () Bool (or %s (and %s (not %s) %s)))\n",
+              n, i, found, alive, ifail, match);
+      free(alive);
+      free(ifail);
+      free(match);
+      free(found);
+      free(failed);
+      found = xasprintf("s%d_%u", n, i);
+      failed = xasprintf("t%d_%u", n, i);
+   }
+
+   smt_emit(S, n, smt_bit(found, nd->width), failed);
+}
+
+static void smt_dist(smt_t *S, crv_node_t n, const node_t *nd)
+{
+   const crv_t *c = S->b->c;
+   cdist_t *cd = (cdist_t *)&(c->dists[nd->aux]);
+   crv_dist_prepare(cd);
+
+   const node_t *an = &(c->nodes[nd->a]);
+   const unsigned w = an->width + 1;
+   const i128 lo = an->sgn ? -((i128)1 << (an->width - 1)) : 0;
+   const i128 hi = an->sgn ? ((i128)1 << (an->width - 1)) - 1
+      : ((i128)1 << an->width) - 1;
+
+   char *x = smt_ext(S, nd->a, w);
+   char *any = xasprintf("false");
+   for (unsigned i = 0; i < cd->nmr; i++) {
+      i128 l = cd->mr[i].lo, h = cd->mr[i].hi;
+      if (l > hi || h < lo)
+         continue;
+      if (l < lo)
+         l = lo;
+      if (h > hi)
+         h = hi;
+      char *lc = smt_bin(l, w), *hc = smt_bin(h, w);
+      char *u = xasprintf("(or %s (and (bvsle %s %s) (bvsle %s %s)))", any,
+                          lc, x, x, hc);
+      free(lc);
+      free(hc);
+      free(any);
+      any = u;
+   }
+
+   free(x);
+   smt_emit(S, n, smt_bit(any, nd->width), xasprintf("f%d", nd->a));
+}
+
+static void smt_elem(smt_t *S, crv_node_t n, const node_t *nd)
+{
+   const crv_t *c = S->b->c;
+   const blast_shape_t *sh = &(S->b->shape);
+   const node_t *an = &(c->nodes[nd->a]);
+   const unsigned w = nd->width, iw = an->width + 1;
+   const unsigned size = sh->sizes[nd->aux];
+
+   char *idx = smt_ext(S, nd->a, iw);
+   char *val = xasprintf("(_ bv0 %u)", w);
+   char *any = xasprintf("false");
+   if (sh->ebase[nd->aux] >= 0) {
+      for (int k = size - 1; k >= 0; k--) {
+         if ((uint64_t)k >= ((uint64_t)1 << (iw - 1)) && iw <= 64)
+            continue;      // No index of this type is k
+
+         char *kc = smt_bin(k, iw);
+         char *e = smt_var(S, sh->ebase[nd->aux] + k, w,
+                           sh->sgn[sh->ebase[nd->aux] + k]);
+         char *u = xasprintf("(ite (= %s %s) %s %s)", idx, kc, e, val);
+         char *a = xasprintf("(or (= %s %s) %s)", idx, kc, any);
+         free(kc);
+         free(e);
+         free(val);
+         free(any);
+         val = u;
+         any = a;
+      }
+   }
+   free(idx);
+
+   char *fail = xasprintf("(or f%d (not %s))", nd->a, any);
+   free(any);
+   smt_emit(S, n, val, fail);
+}
+
+static void smt_node(smt_t *S, crv_node_t n)
+{
+   if (S->done[n])
+      return;
+   S->done[n] = 1;
+
+   const crv_t *c = S->b->c;
+   const node_t *nd = &(c->nodes[n]);
+   const blast_shape_t *sh = &(S->b->shape);
+   const unsigned w = nd->width;
+
+   smt_children(S, nd);
+
+   switch ((nkind_t)nd->kind) {
+   case N_CONST:
+      smt_emit(S, n, smt_bin((i128)nd->val, w), xasprintf("false"));
+      break;
+   case N_VAR:
+      smt_emit(S, n, smt_var(S, nd->aux, w, sh->sgn[nd->aux]),
+               xasprintf("false"));
+      break;
+   case N_ASIZE:
+      smt_emit(S, n, smt_var(S, sh->nsc + nd->aux, w, true),
+               xasprintf("false"));
+      break;
+   case N_CAST:
+      smt_emit(S, n, smt_ext(S, nd->a, w), xasprintf("f%d", nd->a));
+      break;
+   case N_UN:
+      smt_emit(S, n, smt_unary(S, nd), xasprintf("f%d", nd->a));
+      break;
+   case N_BIN:
+      {
+         char *fail;
+         char *val = smt_binary(S, nd, &fail);
+         smt_emit(S, n, val, fail);
+      }
+      break;
+   case N_COND:
+      {
+         char *t = smt_truth(S, nd->a);
+         char *x = smt_ext(S, nd->b, w), *y = smt_ext(S, nd->c, w);
+         char *val = xasprintf("(ite %s %s %s)", t, x, y);
+         char *fail = xasprintf("(or f%d (ite %s f%d f%d))", nd->a, t, nd->b,
+                                nd->c);
+         free(t);
+         free(x);
+         free(y);
+         smt_emit(S, n, val, fail);
+      }
+      break;
+   case N_INSIDE:
+      smt_inside(S, n, nd);
+      break;
+   case N_DIST:
+      smt_dist(S, n, nd);
+      break;
+   case N_AELEM:
+      smt_elem(S, n, nd);
+      break;
+   case N_ASUM:
+      {
+         char *val = xasprintf("(_ bv0 %u)", w);
+         if (sh->ebase[nd->aux] >= 0) {
+            for (unsigned k = 0; k < sh->sizes[nd->aux]; k++) {
+               const int v = sh->ebase[nd->aux] + k;
+               char *e = smt_var(S, v, w, sh->sgn[v]);
+               char *u = xasprintf("(bvadd %s %s)", val, e);
+               free(e);
+               free(val);
+               val = u;
+            }
+            smt_emit(S, n, val, xasprintf("false"));
+         }
+         else
+            smt_emit(S, n, val, xasprintf("true"));
+      }
+      break;
+   default:
+      smt_emit(S, n, xasprintf("(_ bv0 %u)", w), xasprintf("true"));
+      break;
+   }
+}
+
+static char *smt_lit(blit_t l)
+{
+   if (l >> 1 == 0)
+      return xasprintf("%s", (l & 1) ? "true" : "false");
+   return (l & 1) ? xasprintf("(not g%u)", l >> 1) : xasprintf("g%u", l >> 1);
+}
+
+// The gates in the cones of the literals, defined in order
+static void smt_gates(blast_t *b, FILE *f, const blit_t *lits, unsigned n)
+{
+   uint8_t *mark = xcalloc(b->ng);
+   unsigned *stack = xmalloc_array(b->ng + 1, sizeof(unsigned));
+   for (unsigned i = 0; i < n; i++) {
+      unsigned sp = 0;
+      const unsigned g0 = lits[i] >> 1;
+      if (g0 == 0 || mark[g0])
+         continue;
+      mark[g0] = 1;
+      stack[sp++] = g0;
+      while (sp > 0) {
+         const unsigned g = stack[--sp];
+         if (b->l0[g] == INPUT)
+            continue;
+         const blit_t fi[2] = { b->l0[g], b->l1[g] };
+         for (int k = 0; k < 2; k++) {
+            if (fi[k] >> 1 != 0 && !mark[fi[k] >> 1]) {
+               mark[fi[k] >> 1] = 1;
+               stack[sp++] = fi[k] >> 1;
+            }
+         }
+      }
+   }
+
+   for (unsigned g = 1; g < b->ng; g++) {
+      if (!mark[g])
+         continue;
+
+      if (b->l0[g] == INPUT) {
+         const unsigned in = b->l1[g];
+         fprintf(f, "(define-fun g%u () Bool (= ((_ extract %u %u) v%d) "
+                 "#b1))\n", g, b->in_bit[in], b->in_bit[in], b->in_var[in]);
+      }
+      else {
+         char *x = smt_lit(b->l0[g]), *y = smt_lit(b->l1[g]);
+         fprintf(f, "(define-fun g%u () Bool (and %s %s))\n", g, x, y);
+         free(x);
+         free(y);
+      }
+   }
+
+   free(stack);
+   free(mark);
+}
+
+void blast_dump_problem_smt2(blast_t *b, FILE *f, const crv_node_t *holds,
+                             unsigned nholds, const crv_node_t *defs,
+                             unsigned ndefs, const char *extra)
+{
+   fprintf(f, "(set-logic QF_BV)\n");
+
+   const blast_shape_t *sh = &(b->shape);
+   for (unsigned v = 0; v < sh->nv; v++) {
+      if (sh->fixed == NULL || !sh->fixed[v])
+         fprintf(f, "(declare-const v%u (_ BitVec %u))\n", v, sh->width[v]);
+   }
+
+   smt_t S = { b, f, xcalloc(b->nmemo > b->c->nnodes ? b->nmemo
+                             : b->c->nnodes) };
+   for (unsigned i = 0; i < ndefs; i++)
+      smt_node(&S, defs[i]);
+   for (unsigned i = 0; i < nholds; i++) {
+      smt_node(&S, holds[i]);
+      fprintf(f, "(assert (and (not f%d) (distinct n%d (_ bv0 %u))))\n",
+              holds[i], holds[i], b->c->nodes[holds[i]].width);
+   }
+
+   if (extra != NULL)
+      fputs(extra, f);
+   fprintf(f, "(check-sat)\n");
+   free(S.done);
+}
+
+void blast_dump_smt2(blast_t *b, FILE *f, const crv_node_t *roots,
+                     unsigned count)
+{
+   fprintf(f, "; Bit-blaster check: unsatisfiable if the gates compute what "
+           "the nodes do\n(set-logic QF_BV)\n");
+
+   const blast_shape_t *sh = &(b->shape);
+   for (unsigned v = 0; v < sh->nv; v++) {
+      if (sh->fixed == NULL || !sh->fixed[v])
+         fprintf(f, "(declare-const v%u (_ BitVec %u))\n", v, sh->width[v]);
+   }
+
+   smt_t S = { b, f, xcalloc(b->nmemo > b->c->nnodes ? b->nmemo
+                             : b->c->nnodes) };
+   for (unsigned i = 0; i < count; i++)
+      smt_node(&S, roots[i]);
+
+   // Literals of the circuit for each root
+   blit_t *lits = xmalloc_array(count * (MAXV + 1), sizeof(blit_t));
+   unsigned nl = 0;
+   for (unsigned i = 0; i < count; i++) {
+      const unsigned w = blast_width(b, roots[i]);
+      for (unsigned j = 0; j < w; j++)
+         lits[nl++] = blast_bit(b, roots[i], j);
+      lits[nl++] = blast_fail(b, roots[i]);
+   }
+   smt_gates(b, f, lits, nl);
+
+   fprintf(f, "(assert (or false");
+   for (unsigned i = 0; i < count; i++) {
+      const unsigned w = blast_width(b, roots[i]);
+      char *cat = NULL;
+      for (unsigned j = w; j > 0; j--) {
+         char *l = smt_lit(blast_bit(b, roots[i], j - 1));
+         char *bit = xasprintf("(ite %s #b1 #b0)", l);
+         free(l);
+         if (cat == NULL)
+            cat = bit;
+         else {
+            char *u = xasprintf("(concat %s %s)", cat, bit);
+            free(cat);
+            free(bit);
+            cat = u;
+         }
+      }
+      char *fl = smt_lit(blast_fail(b, roots[i]));
+      fprintf(f, "\n  (xor f%d %s) (and (not f%d) (distinct n%d %s))",
+              roots[i], fl, roots[i], roots[i], cat);
+      free(fl);
+      free(cat);
+   }
+   fprintf(f, "))\n(check-sat)\n");
+
+   free(lits);
+   free(S.done);
 }
