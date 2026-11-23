@@ -28125,14 +28125,17 @@ static void vlog_crv_items(vlog_gen_t *g, vlog_node_t v, mir_value_t guard,
          break;   // Not until its arguments are solved
 
       if (vlog_flags(v) & VLOG_F_DISABLE) {
-         if (!mir_is_null(guard) || sink != NULL)
+         if (sink != NULL)
             fatal_at(vlog_loc(v), "sorry, disable soft cannot be used in a "
                      "conditional constraint or foreach");
 
          vlog_node_t target = vlog_value(v);
          mir_value_t node = vlog_crv_expr(g, target, vlog_crv_width(g, target),
                                           vlog_crv_signed(g, target));
-         CRV2(g, CRV_OP_DISABLE_SOFT, g->crv_ctx, node);
+         if (mir_is_null(guard))
+            CRV2(g, CRV_OP_DISABLE_SOFT, g->crv_ctx, node);
+         else
+            CRV3(g, CRV_OP_DISABLE_SOFT_IF, g->crv_ctx, guard, node);
          break;
       }
       else {
