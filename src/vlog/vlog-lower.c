@@ -23363,6 +23363,33 @@ static void vlog_crv_check_nested(vlog_gen_t *g, vlog_node_t v)
    }
 }
 
+typedef struct {
+   vlog_gen_t *gen;
+   bool        found;
+} crv_index_use_t;
+
+static void vlog_crv_index_use_cb(vlog_node_t v, void *context)
+{
+   crv_index_use_t *u = context;
+
+   if (vlog_kind(v) != V_REF || !vlog_has_ref(v))
+      return;
+
+   for (int i = 0; i < u->gen->crv_nindex; i++) {
+      if (u->gen->crv_index[i].decl == vlog_ref(v))
+         u->found = true;
+   }
+}
+
+static bool vlog_crv_uses_index(vlog_gen_t *g, vlog_node_t v)
+{
+   // The expression names the index of an enclosing foreach constraint
+
+   crv_index_use_t u = { .gen = g };
+   vlog_visit(v, vlog_crv_index_use_cb, &u);
+   return u.found;
+}
+
 static mir_value_t vlog_crv_array(vlog_gen_t *g, vlog_node_t v)
 {
    // Rand arrays were registered when the object was added and anything
@@ -23386,6 +23413,12 @@ static mir_value_t vlog_crv_array(vlog_gen_t *g, vlog_node_t v)
    if (vlog_crv_nest(decl, &nest))
       fatal_at(vlog_loc(v), "sorry, an array of dynamic arrays or queues "
                "cannot be used as a whole in a constraint");
+
+   if (vlog_crv_is_struct_member(v) && vlog_kind(vlog_value(v)) == V_BIT_SELECT
+       && vlog_crv_uses_index(g, vlog_value(v)))
+      fatal_at(vlog_loc(v), "sorry, an array which is a member of an element "
+               "of an array of structures cannot be used in a constraint "
+               "with the index of a foreach");
 
    const bool registered = vlog_kind(v) == V_MEMBER_REF
       ? vlog_kind(decl) == V_VAR_DECL && (vlog_flags(decl) & VLOG_F_RAND)

@@ -1,0 +1,1 @@
+sorry, an array which is a member of an element of an array of structures cannot be used in a constraint with the index of a foreach
