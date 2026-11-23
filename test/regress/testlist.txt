@@ -3187,3 +3187,4 @@ svreadmemhier2  verilog,gold
 vlog_inside_str1  verilog,gold
 vlog_waitassoc1 shell
 mixed67 mixed,2008,gold
+blackbox3 shell

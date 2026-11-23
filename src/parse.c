@@ -4608,6 +4608,7 @@ static void infer_anonymous_type(tree_t map, tree_t unit, tree_t elem,
 }
 
 static tree_t black_box_comp;   // Component being inferred from a port map
+static tree_t black_box_decl;   // Visible component declaration of that name
 
 static tree_t p_black_box_component(tree_t inst)
 {
@@ -4665,12 +4666,25 @@ static tree_t p_inferred_association(tree_t comp, int pos, formal_kind_t kind)
    tree_t p = tree_new(T_PARAM);
 
    ident_t name = NULL;
-   if (peek() == tID && peek_nth(2) == tASSOC) {
+   const bool named = peek() == tID && peek_nth(2) == tASSOC;
+   if (named) {
       name = p_identifier();
       consume(tASSOC);
    }
    else
       name = ident_sprintf("%c%d", kind == F_PORT_MAP ? 'P' : 'G', pos);
+
+   // A component of the same name which is visible declares the type of
+   // each generic
+   type_t decl_type = NULL;
+   if (kind == F_GENERIC_MAP && black_box_decl != NULL) {
+      const int ngenerics = tree_generics(black_box_decl);
+      for (int i = 0; i < ngenerics && decl_type == NULL; i++) {
+         tree_t g = tree_generic(black_box_decl, i);
+         if (tree_ident(g) == name || (i == pos && !named))
+            decl_type = tree_type(g);
+      }
+   }
 
    // The width of an open port is not known: it is one bit
    const bool open = peek() == tOPEN;
@@ -4690,11 +4704,17 @@ static tree_t p_inferred_association(tree_t comp, int pos, formal_kind_t kind)
             ? ieee_type(IEEE_STD_LOGIC) : std_type(NULL, STD_BIT);
       }
 
+      if (decl_type != NULL)
+         guess = decl_type;
+
       value = p_actual_part(C_DEFAULT, guess, NULL, kind);
    }
 
    type_t type = tree_kind(value) == T_OPEN || !tree_has_type(value)
       ? NULL : tree_type(value);
+
+   if (decl_type != NULL && type != NULL && !type_is_none(type))
+      type = decl_type;
 
    if (type != NULL && type_is_universal(type)) {
       type = std_type(NULL, type_is_real(type) ? STD_REAL : STD_INTEGER);
@@ -4729,7 +4749,8 @@ static tree_t p_inferred_association(tree_t comp, int pos, formal_kind_t kind)
       tree_set_name(p, ref);
    }
    else if (kind == F_GENERIC_MAP && type != NULL && !type_is_none(type)
-            && type_is_scalar(type)) {
+            && (type_is_scalar(type) || type_is_array(type)
+                || type_is_record(type))) {
       tree_t g = tree_new(T_GENERIC_DECL);
       tree_set_ident(g, name);
       tree_set_loc(g, tree_loc(value));
@@ -4744,9 +4765,9 @@ static tree_t p_inferred_association(tree_t comp, int pos, formal_kind_t kind)
       tree_set_name(p, make_ref(g));
    }
    else {
-      // Open, or of a type that cannot be inferred: not part of the box
-      tree_set_subkind(p, P_POS);
-      tree_set_pos(p, pos);
+      // Of a type that cannot be inferred: not part of the box and not
+      // associated with a formal of the other elements by position
+      return NULL;
    }
 
    tree_set_value(p, value);
@@ -4768,6 +4789,9 @@ static void p_port_association_list(tree_t map, tree_t unit)
       tree_t elem = unit != NULL && unit == black_box_comp
          ? p_inferred_association(unit, pos++, F_PORT_MAP)
          : p_association_element(unit, pos++, p, F_PORT_MAP);
+      if (elem == NULL)
+         continue;
+
       tree_add_param(map, elem);
 
       if (standard() >= STD_19 && unit != NULL && tree_generics(unit) > 0)
@@ -4789,6 +4813,9 @@ static void p_generic_association_list(tree_t map, tree_t unit)
       tree_t elem = unit != NULL && unit == black_box_comp
          ? p_inferred_association(unit, pos++, F_GENERIC_MAP)
          : p_association_element(unit, pos++, g, F_GENERIC_MAP);
+      if (elem == NULL)
+         continue;
+
       tree_add_genmap(map, elem);
 
       if (standard() >= STD_19 && unit != NULL)
@@ -13354,6 +13381,11 @@ static tree_t p_component_instantiation_statement(ident_t label, tree_t name)
                                          tree_ident2(t), '.'));
       tree_set_ref(spec, black);
       black_box_comp = black;
+
+      tree_t decl = NULL;
+      if (query_name(nametab, tree_ident(black), &decl) != 0 && decl != NULL
+          && tree_kind(decl) == T_COMPONENT)
+         black_box_decl = decl;
    }
 
    if (spec != NULL)
@@ -13375,6 +13407,7 @@ static tree_t p_component_instantiation_statement(ident_t label, tree_t name)
    consume(tSEMI);
 
    black_box_comp = NULL;
+   black_box_decl = NULL;
 
    tree_set_loc(t, CURRENT_LOC);
 
