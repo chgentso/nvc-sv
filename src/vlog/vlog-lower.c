@@ -114,6 +114,9 @@ typedef struct {
    mir_value_t    crv_ctx;
    mir_value_t    crv_obj;
    vlog_node_t    crv_class;
+   vlog_node_t    crv_slot_decl;  // Member of a structure being built
+   mir_value_t    crv_slot;       // Its storage
+   ident_t        crv_path;       // Name of the structure property
    vlog_node_t    crv_std;
    unsigned       crv_width;
    bool           crv_signed;
@@ -27839,9 +27842,31 @@ static bool vlog_crv_is_struct_decl(vlog_gen_t *g, vlog_node_t d)
       && !(vlog_flags(type) & VLOG_F_PACKED);
 }
 
-static void vlog_crv_build_struct(vlog_gen_t *g, mir_value_t ctx,
-                                  mir_value_t rec, vlog_node_t sdecl,
-                                  mir_value_t rand_off, mir_value_t bit)
+static mir_value_t vlog_crv_slot(vlog_gen_t *g, mir_value_t this,
+                                 vlog_node_t d, mir_type_t type)
+{
+   // Storage of a property or of a member of a structure property
+
+   if (d == g->crv_slot_decl)
+      return g->crv_slot;
+
+   return mir_build_link_var(g->mu, this, vlog_prop_name(g->crv_class, d),
+                             type);
+}
+
+static void vlog_crv_build_decl(vlog_gen_t *g, mir_value_t this,
+                                mir_value_t ctx, vlog_node_t d,
+                                mir_value_t obj, mir_value_t key,
+                                bool is_rand, mir_value_t rand_off,
+                                mir_value_t bit);
+static void vlog_crv_store_decl(vlog_gen_t *g, mir_value_t this,
+                                mir_value_t ctx, vlog_node_t d,
+                                mir_value_t obj, mir_value_t key);
+
+static void vlog_crv_build_struct(vlog_gen_t *g, mir_value_t this,
+                                  mir_value_t ctx, mir_value_t rec,
+                                  vlog_node_t sdecl, mir_value_t rand_off,
+                                  mir_value_t bit)
 {
    // Only the members of a rand structure which are rand change
 
@@ -27855,34 +27880,22 @@ static void vlog_crv_build_struct(vlog_gen_t *g, mir_value_t ctx,
           || !(vlog_flags(m) & (VLOG_F_RAND | VLOG_F_RANDC)))
          continue;
 
-      const type_info_t *mti = vlog_type_info(g, vlog_type(m));
-      mir_value_t ptr = mir_build_record_ref(g->mu, fields, i);
+      vlog_node_t saved_decl = g->crv_slot_decl;
+      mir_value_t saved_slot = g->crv_slot;
+      g->crv_slot_decl = m;
+      g->crv_slot = mir_build_record_ref(g->mu, fields, i);
 
-      if (vlog_crv_is_struct_decl(g, m)) {
-         vlog_crv_build_struct(g, ctx, mir_build_load(g->mu, ptr),
-                               vlog_get_type(vlog_type(m)), rand_off, bit);
-         continue;
-      }
+      vlog_crv_build_decl(g, this, ctx, m, obj, vlog_crv_key(g, m), true,
+                          rand_off, bit);
 
-      if (vlog_flags(m) & VLOG_F_RANDC)
-         fatal_at(vlog_loc(m), "sorry, randc members of a structure are not "
-                  "supported");
-      else if (vlog_ranges(m) > 0 || !vlog_crv_is_integral(g, vlog_type(m)))
-         fatal_at(vlog_loc(m), "sorry, this type of rand structure member is "
-                  "not supported");
-
-      mir_value_t key = vlog_crv_key(g, m);
-      mir_value_t is_free = CRV6(g, CRV_OP_IS_FREE, ctx, obj, key,
-                                 vlog_crv_int(g, 1), rand_off, bit);
-      mir_value_t current = vlog_crv_to_offset(g, mir_build_load(g->mu, ptr));
-      mir_value_t flags =
-         vlog_crv_flags(g, mti->size, mir_get_signed(g->mu, mti->type));
-      CRV6(g, CRV_OP_VAR, ctx, obj, key, current, flags, is_free);
+      g->crv_slot_decl = saved_decl;
+      g->crv_slot = saved_slot;
    }
 }
 
-static void vlog_crv_store_struct(vlog_gen_t *g, mir_value_t ctx,
-                                  mir_value_t rec, vlog_node_t sdecl)
+static void vlog_crv_store_struct(vlog_gen_t *g, mir_value_t this,
+                                  mir_value_t ctx, mir_value_t rec,
+                                  vlog_node_t sdecl)
 {
    mir_value_t obj = vlog_crv_this_ptr(g, rec);
    mir_value_t fields = mir_build_all(g->mu, rec);
@@ -27894,29 +27907,15 @@ static void vlog_crv_store_struct(vlog_gen_t *g, mir_value_t ctx,
           || !(vlog_flags(m) & (VLOG_F_RAND | VLOG_F_RANDC)))
          continue;
 
-      mir_value_t ptr = mir_build_record_ref(g->mu, fields, i);
+      vlog_node_t saved_decl = g->crv_slot_decl;
+      mir_value_t saved_slot = g->crv_slot;
+      g->crv_slot_decl = m;
+      g->crv_slot = mir_build_record_ref(g->mu, fields, i);
 
-      if (vlog_crv_is_struct_decl(g, m)) {
-         vlog_crv_store_struct(g, ctx, mir_build_load(g->mu, ptr),
-                               vlog_get_type(vlog_type(m)));
-         continue;
-      }
+      vlog_crv_store_decl(g, this, ctx, m, obj, vlog_crv_key(g, m));
 
-      const type_info_t *mti = vlog_type_info(g, vlog_type(m));
-
-      mir_value_t var = CRV3(g, CRV_OP_FIND_FREE, ctx, obj, vlog_crv_key(g, m));
-
-      mir_block_t store_bb = mir_add_block(g->mu);
-      mir_block_t merge_bb = mir_add_block(g->mu);
-      mir_build_cond(g->mu, mir_build_cmp(g->mu, MIR_CMP_GEQ, var,
-                                          vlog_crv_int(g, 0)),
-                     store_bb, merge_bb);
-      mir_set_cursor(g->mu, store_bb, MIR_APPEND);
-
-      mir_value_t value = CRV2(g, CRV_OP_VALUE, ctx, var);
-      mir_build_store(g->mu, ptr, vlog_crv_from_offset(g, value, mti->type));
-      mir_build_jump(g->mu, merge_bb);
-      mir_set_cursor(g->mu, merge_bb, MIR_APPEND);
+      g->crv_slot_decl = saved_decl;
+      g->crv_slot = saved_slot;
    }
 }
 
@@ -27951,15 +27950,13 @@ static void vlog_crv_build_struct_array(vlog_gen_t *g, mir_value_t this,
    if (is_dyn) {
       const type_info_t *ti = vlog_type_info(g, vlog_type(d));
       mir_value_t ua = mir_build_load(
-         g->mu, mir_build_link_var(g->mu, this,
-                                    vlog_prop_name(g->crv_class, d), ti->type));
+         g->mu, vlog_crv_slot(g, this, d, ti->type));
       data = mir_build_unwrap(g->mu, ua);
       len = mir_build_uarray_len(g->mu, ua, 0);
    }
    else {
       mir_type_t t_array = mir_carray_type(g->mu, vlog_size(d), eti->type);
-      data = mir_build_link_var(g->mu, this,
-                                    vlog_prop_name(g->crv_class, d), t_array);
+      data = vlog_crv_slot(g, this, d, t_array);
       len = vlog_crv_int(g, vlog_size(d));
    }
 
@@ -28014,15 +28011,13 @@ static void vlog_crv_store_struct_array(vlog_gen_t *g, mir_value_t this,
    if (is_dyn && !vlog_crv_is_resizable(d)) {
       const type_info_t *ti = vlog_type_info(g, vlog_type(d));
       mir_value_t old = mir_build_load(
-         g->mu, mir_build_link_var(g->mu, this,
-                                    vlog_prop_name(g->crv_class, d), ti->type));
+         g->mu, vlog_crv_slot(g, this, d, ti->type));
       data = mir_build_unwrap(g->mu, old);
    }
    else if (is_dyn) {
       const type_info_t *ti = vlog_type_info(g, vlog_type(d));
       mir_value_t slot =
-         mir_build_link_var(g->mu, this,
-                                    vlog_prop_name(g->crv_class, d), ti->type);
+         vlog_crv_slot(g, this, d, ti->type);
       mir_value_t old = mir_build_load(g->mu, slot);
       mir_value_t old_len = mir_build_uarray_len(g->mu, old, 0);
 
@@ -28037,8 +28032,7 @@ static void vlog_crv_store_struct_array(vlog_gen_t *g, mir_value_t this,
    }
    else {
       mir_type_t t_array = mir_carray_type(g->mu, vlog_size(d), eti->type);
-      data = mir_build_link_var(g->mu, this,
-                                    vlog_prop_name(g->crv_class, d), t_array);
+      data = vlog_crv_slot(g, this, d, t_array);
    }
 
    for (int k = 0; k < count; k++) {
@@ -28284,8 +28278,7 @@ static void vlog_crv_nest_run(vlog_gen_t *g, mir_value_t this,
 
    const type_info_t *ti = vlog_type_info(g, vlog_type(d));
    mir_value_t ua = mir_build_load(
-      g->mu, mir_build_link_var(g->mu, this,
-                                vlog_prop_name(g->crv_class, d), ti->type));
+      g->mu, vlog_crv_slot(g, this, d, ti->type));
 
    vlog_crv_nest_walk(&b, 0, ua, vlog_crv_int(g, 0));
 }
@@ -28296,8 +28289,7 @@ static mir_value_t vlog_crv_prop_ptr(vlog_gen_t *g, mir_value_t this,
    if (vlog_flags(d) & VLOG_F_STATIC)
       return vlog_lower_decl_ptr(g, d);
 
-   return mir_build_link_var(g->mu, this, vlog_prop_name(g->crv_class, d),
-                             type);
+   return vlog_crv_slot(g, this, d, type);
 }
 
 static void vlog_crv_build_prop(vlog_gen_t *g, mir_value_t this, mir_value_t ctx,
@@ -28325,12 +28317,20 @@ static void vlog_crv_build_prop(vlog_gen_t *g, mir_value_t this, mir_value_t ctx
       bit = vlog_crv_int(g, vlog_crv_rand_bit(class, d));
    }
 
+   vlog_crv_build_decl(g, this, ctx, d, obj, key, is_rand, rand_off, bit);
+}
+
+static void vlog_crv_build_decl(vlog_gen_t *g, mir_value_t this,
+                                mir_value_t ctx, vlog_node_t d,
+                                mir_value_t obj, mir_value_t key,
+                                bool is_rand, mir_value_t rand_off,
+                                mir_value_t bit)
+{
    if (is_rand && vlog_crv_is_struct_decl(g, d)) {
       const type_info_t *sti = vlog_type_info(g, vlog_type(d));
       mir_value_t rec = mir_build_load(
-         g->mu, mir_build_link_var(g->mu, this,
-                                    vlog_prop_name(g->crv_class, d), sti->type));
-      vlog_crv_build_struct(g, ctx, rec, vlog_get_type(vlog_type(d)),
+         g->mu, vlog_crv_slot(g, this, d, sti->type));
+      vlog_crv_build_struct(g, this, ctx, rec, vlog_get_type(vlog_type(d)),
                             rand_off, bit);
       return;
    }
@@ -28348,8 +28348,7 @@ static void vlog_crv_build_prop(vlog_gen_t *g, mir_value_t this, mir_value_t ctx
    if (vlog_crv_is_packed_rand(d)) {
       const type_info_t *sti = vlog_type_info(g, vlog_type(d));
       mir_value_t full = mir_build_load(
-         g->mu, mir_build_link_var(g->mu, this,
-                                    vlog_prop_name(g->crv_class, d), sti->type));
+         g->mu, vlog_crv_slot(g, this, d, sti->type));
 
       crv_leaf_t leaves[CRV_MAX_LEAVES];
       int nleaves = 0;
@@ -28392,8 +28391,7 @@ static void vlog_crv_build_prop(vlog_gen_t *g, mir_value_t this, mir_value_t ctx
       const type_info_t *eti = vlog_type_info(g, etype);
       const type_info_t *ti = vlog_type_info(g, vlog_type(d));
       mir_value_t ua = mir_build_load(
-         g->mu, mir_build_link_var(g->mu, this,
-                                    vlog_prop_name(g->crv_class, d), ti->type));
+         g->mu, vlog_crv_slot(g, this, d, ti->type));
       mir_value_t data = mir_build_unwrap(g->mu, ua);
       mir_value_t len = mir_build_uarray_len(g->mu, ua, 0);
 
@@ -28434,15 +28432,13 @@ static void vlog_crv_build_prop(vlog_gen_t *g, mir_value_t this, mir_value_t ctx
       if (is_dyn) {
          const type_info_t *ti = vlog_type_info(g, vlog_type(d));
          mir_value_t ua = mir_build_load(
-            g->mu, mir_build_link_var(g->mu, this,
-                                    vlog_prop_name(g->crv_class, d), ti->type));
+            g->mu, vlog_crv_slot(g, this, d, ti->type));
          data = mir_build_unwrap(g->mu, ua);
          len = mir_build_uarray_len(g->mu, ua, 0);
       }
       else {
          mir_type_t t_array = mir_carray_type(g->mu, vlog_size(d), eti->type);
-         data = mir_build_link_var(g->mu, this,
-                                    vlog_prop_name(g->crv_class, d), t_array);
+         data = vlog_crv_slot(g, this, d, t_array);
          len = vlog_crv_int(g, vlog_size(d));
       }
 
@@ -28485,8 +28481,7 @@ static void vlog_crv_build_prop(vlog_gen_t *g, mir_value_t this, mir_value_t ctx
    if (wide) {
       // One variable for each chunk of 64 bits
       mir_value_t full = mir_build_load(
-         g->mu, mir_build_link_var(g->mu, this,
-                                   vlog_prop_name(g->crv_class, d), ti->type));
+         g->mu, vlog_crv_slot(g, this, d, ti->type));
       const unsigned nchunks = (ti->size + 63) / 64;
       mir_value_t *cvars LOCAL = xmalloc_array(nchunks, sizeof(mir_value_t));
       mir_value_t *ckeys LOCAL = xmalloc_array(nchunks, sizeof(mir_value_t));
@@ -28546,6 +28541,13 @@ static void vlog_crv_store_prop(vlog_gen_t *g, mir_value_t this, mir_value_t ctx
       ? vlog_crv_int(g, 0) : vlog_crv_this_ptr(g, this);
    mir_value_t key = vlog_crv_key(g, d);
 
+   vlog_crv_store_decl(g, this, ctx, d, obj, key);
+}
+
+static void vlog_crv_store_decl(vlog_gen_t *g, mir_value_t this,
+                                mir_value_t ctx, vlog_node_t d,
+                                mir_value_t obj, mir_value_t key)
+{
    crv_nest_t nest;
    if (vlog_crv_nest(d, &nest)) {
       if (vlog_flags(d) & VLOG_F_RAND)
@@ -28556,17 +28558,15 @@ static void vlog_crv_store_prop(vlog_gen_t *g, mir_value_t this, mir_value_t ctx
    if ((vlog_flags(d) & VLOG_F_RAND) && vlog_crv_is_struct_decl(g, d)) {
       const type_info_t *sti = vlog_type_info(g, vlog_type(d));
       mir_value_t rec = mir_build_load(
-         g->mu, mir_build_link_var(g->mu, this,
-                                    vlog_prop_name(g->crv_class, d), sti->type));
-      vlog_crv_store_struct(g, ctx, rec, vlog_get_type(vlog_type(d)));
+         g->mu, vlog_crv_slot(g, this, d, sti->type));
+      vlog_crv_store_struct(g, this, ctx, rec, vlog_get_type(vlog_type(d)));
       return;
    }
 
    if (vlog_crv_is_packed_rand(d)) {
       const type_info_t *sti = vlog_type_info(g, vlog_type(d));
       mir_value_t ptr =
-         mir_build_link_var(g->mu, this,
-                                    vlog_prop_name(g->crv_class, d), sti->type);
+         vlog_crv_slot(g, this, d, sti->type);
 
       crv_leaf_t leaves[CRV_MAX_LEAVES];
       int nleaves = 0;
@@ -28631,8 +28631,7 @@ static void vlog_crv_store_prop(vlog_gen_t *g, mir_value_t this, mir_value_t ctx
       const type_info_t *eti = vlog_type_info(g, etype);
       const type_info_t *ti = vlog_type_info(g, vlog_type(d));
       mir_value_t ua = mir_build_load(
-         g->mu, mir_build_link_var(g->mu, this,
-                                    vlog_prop_name(g->crv_class, d), ti->type));
+         g->mu, vlog_crv_slot(g, this, d, ti->type));
       mir_value_t data = mir_build_unwrap(g->mu, ua);
       mir_value_t len = CRV2(g, CRV_OP_ARRAY_LEN, ctx, array);
 
@@ -28658,8 +28657,7 @@ static void vlog_crv_store_prop(vlog_gen_t *g, mir_value_t this, mir_value_t ctx
 
       if (wide && !is_dyn) {
          mir_type_t t_array = mir_carray_type(g->mu, vlog_size(d), eti->type);
-         mir_value_t data = mir_build_link_var(
-            g->mu, this, vlog_prop_name(g->crv_class, d), t_array);
+         mir_value_t data = vlog_crv_slot(g, this, d, t_array);
          for (unsigned e = 0; e < vlog_size(d); e++)
             vlog_crv_store_wide(g, ctx, obj, d, 1 + e, eti,
                                 mir_build_array_ref(g->mu, data,
@@ -28684,17 +28682,14 @@ static void vlog_crv_store_prop(vlog_gen_t *g, mir_value_t this, mir_value_t ctx
          data = vlog_alloc_array(g, eti->type, len);
       else {
          mir_type_t t_array = mir_carray_type(g->mu, vlog_size(d), eti->type);
-         data = mir_build_link_var(g->mu, this,
-                                    vlog_prop_name(g->crv_class, d), t_array);
+         data = vlog_crv_slot(g, this, d, t_array);
       }
 
       vlog_crv_array_store(g, ctx, array, data, len, eti, wide, false);
 
       if (is_dyn) {
          const type_info_t *ti = vlog_type_info(g, vlog_type(d));
-         mir_build_store(g->mu, mir_build_link_var(g->mu, this,
-                                    vlog_prop_name(g->crv_class, d),
-                                                   ti->type),
+         mir_build_store(g->mu, vlog_crv_slot(g, this, d, ti->type),
                          vlog_wrap_array(g, data, len));
       }
 
