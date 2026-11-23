@@ -1082,6 +1082,32 @@ START_TEST(test_dump_smt2)
 
    blast_free(b);
    crv_free(c);
+
+   // An index of 64 bits: no index is out of the range of the type by size
+   c = crv_new();
+   crv_var(c, 64, false, 0);
+   crv_array_t a = crv_array(c, 8, false, 3, false, true);
+   crv_node_t i = crv_var_ref(c, 0);
+   crv_node_t e = crv_array_elem(c, a, i);
+   uint8_t w2[5] = { 64, 32, 8, 8, 8 };
+   bool s2[5] = { false, true, false, false, false };
+   bool fixed[5] = { false, true };
+   int64_t value[5] = { 0, 3 };
+   int ebase[1] = { 2 };
+   unsigned sizes[1] = { 3 };
+   blast_shape_t shape2 = { .nv = 5, .width = w2, .sgn = s2, .nsc = 1,
+                            .ebase = ebase, .sizes = sizes, .fixed = fixed,
+                            .value = value };
+   b = blast_new(c, &shape2);
+   (void)blast_holds(b, e);
+   f = open_memstream(&buf, &len);
+   blast_dump_smt2(b, f, &e, 1);
+   fclose(f);
+   ck_assert_ptr_nonnull(strstr(buf, "(ite (= ((_ zero_extend 1) n0)"));
+   free(buf);
+
+   blast_free(b);
+   crv_free(c);
 }
 END_TEST
 

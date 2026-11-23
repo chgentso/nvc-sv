@@ -1734,7 +1734,7 @@ static void smt_elem(smt_t *S, crv_node_t n, const node_t *nd)
    char *any = xasprintf("false");
    if (sh->ebase[nd->aux] >= 0) {
       for (int k = size - 1; k >= 0; k--) {
-         if ((uint64_t)k >= ((uint64_t)1 << (iw - 1)) && iw <= 64)
+         if (iw <= 64 && (uint64_t)k >= ((uint64_t)1 << (iw - 1)))
             continue;      // No index of this type is k
 
          char *kc = smt_bin(k, iw);
