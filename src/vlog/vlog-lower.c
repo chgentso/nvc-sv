@@ -28398,8 +28398,14 @@ static void vlog_crv_build_decl(vlog_gen_t *g, mir_value_t this,
       const type_info_t *sti = vlog_type_info(g, vlog_type(d));
       mir_value_t rec = mir_build_load(
          g->mu, vlog_crv_slot(g, this, d, sti->type));
+      ident_t saved_path = g->crv_path;
+      g->crv_path = saved_path == NULL ? vlog_ident(d)
+         : ident_sprintf("%s.%s", istr(saved_path), istr(vlog_ident(d)));
+
       vlog_crv_build_struct(g, this, ctx, rec, vlog_get_type(vlog_type(d)),
                             rand_off, bit);
+
+      g->crv_path = saved_path;
       return;
    }
 
@@ -28596,8 +28602,12 @@ static void vlog_crv_build_decl(vlog_gen_t *g, mir_value_t this,
    }
 
    if (vlog_flags(d) & VLOG_F_RANDC) {
-      char name[128];
-      checked_sprintf(name, sizeof(name), "%s$randc", istr(vlog_ident(d)));
+      char name[256];
+      if (g->crv_path != NULL)
+         checked_sprintf(name, sizeof(name), "%s.%s$randc", istr(g->crv_path),
+                         istr(vlog_ident(d)));
+      else
+         checked_sprintf(name, sizeof(name), "%s$randc", istr(vlog_ident(d)));
       CRV3(g, CRV_OP_VAR_RANDC, ctx, var, vlog_crv_hidden(g, this, name));
    }
 }

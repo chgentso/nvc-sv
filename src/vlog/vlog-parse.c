@@ -18556,6 +18556,31 @@ static void add_hidden_property(vlog_node_t class, ident_t id)
    vlog_add_decl(class, d);
 }
 
+static void add_struct_randc(vlog_node_t class, ident_t path,
+                             vlog_node_t sdecl)
+{
+   // The state of a randc member of a structure property is a property of
+   // the class named by the path to the member
+
+   const int ndecls = vlog_decls(sdecl);
+   for (int i = 0; i < ndecls; i++) {
+      vlog_node_t m = vlog_decl(sdecl, i);
+      if (vlog_kind(m) != V_VAR_DECL)
+         continue;
+
+      if (vlog_flags(m) & VLOG_F_RANDC)
+         add_hidden_property(class, ident_sprintf("%s.%s$randc", istr(path),
+                                                  istr(vlog_ident(m))));
+      else if ((vlog_flags(m) & VLOG_F_RAND) && vlog_has_type(m)) {
+         vlog_node_t type = vlog_get_type(vlog_type(m));
+         if (type != NULL && vlog_kind(type) == V_STRUCT_DECL
+             && !(vlog_flags(type) & VLOG_F_PACKED) && vlog_ranges(m) == 0)
+            add_struct_randc(class, ident_sprintf("%s.%s", istr(path),
+                                                  istr(vlog_ident(m))), type);
+      }
+   }
+}
+
 static void add_rand_state(vlog_node_t class)
 {
    // Hidden properties hold the rand_mode and constraint_mode bits and the
@@ -18664,6 +18689,13 @@ static void add_rand_state(vlog_node_t class)
       if (vlog_kind(d) == V_VAR_DECL && (vlog_flags(d) & VLOG_F_RANDC))
          add_hidden_property(class, ident_prefix(vlog_ident(d),
                                                  ident_new("randc"), '$'));
+      else if (vlog_kind(d) == V_VAR_DECL && (vlog_flags(d) & VLOG_F_RAND)
+               && vlog_has_type(d) && vlog_ranges(d) == 0) {
+         vlog_node_t type = vlog_get_type(vlog_type(d));
+         if (type != NULL && vlog_kind(type) == V_STRUCT_DECL
+             && !(vlog_flags(type) & VLOG_F_PACKED))
+            add_struct_randc(class, vlog_ident(d), type);
+      }
    }
 }
 
