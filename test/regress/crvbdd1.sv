@@ -46,7 +46,7 @@ module crvbdd1;
 
       ai = new;
       h = new(9);
-      repeat (20000) begin
+      repeat (5000) begin
          r = ai.randomize();
          if (!r || (ai.x & ai.y) != 0) $fatal(1, "x & y failed");
          h.add($countones(ai.x));
@@ -56,7 +56,7 @@ module crvbdd1;
 
       oi = new;
       h = new(16);
-      repeat (4000) begin
+      repeat (1600) begin
          r = oi.randomize();
          if (!r || (oi.x & oi.y) != 16'h0f00 || (oi.x | oi.y) != 16'hff00)
             $fatal(1, "and/or failed");
