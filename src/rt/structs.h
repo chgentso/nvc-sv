@@ -67,6 +67,7 @@ typedef struct _rt_trigger {
    rt_trigger_t   *chain;
    uint64_t        hash;
    trigger_kind_t  kind;
+   bool            level_only;
    jit_scalar_t    result;
    jit_scalar_t    args[];
 } rt_trigger_t;

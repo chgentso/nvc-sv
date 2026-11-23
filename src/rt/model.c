@@ -186,7 +186,11 @@ typedef struct _rt_model {
    signal_list_t      eventsigs;
    unsigned           ndeferred;
    bool               skip_comb;
-   struct { rt_nexus_t *nexus; unsigned char *init; } deferred[DEFER_MAX];
+   struct {
+      rt_nexus_t    *nexus;
+      unsigned char *init;
+      unsigned char  buf[32];
+   } deferred[DEFER_MAX];
    init_event_list_t  init_events;
    bool               shuffle;
    bool               liveness;
@@ -3719,6 +3723,11 @@ static void wakeup_one(rt_model_t *m, rt_wakeable_t *obj)
             deferq_do(&m->triggerq, async_run_trigger, t);
             set_pending(obj);
          }
+         else if (t->level_only) {
+            t->result.integer = 1;
+            t->epoch = m->trigger_epoch;
+            wakeup_all(m, &(t->pending));
+         }
          else if (run_trigger(m, t))
             wakeup_all(m, &(t->pending));
       }
@@ -4098,7 +4107,12 @@ static void async_run_trigger(rt_model_t *m, void *arg)
    assert(t->wakeable.pending);
    t->wakeable.pending = false;
 
-   if (run_trigger(m, t))
+   if (t->level_only) {
+      t->result.integer = 1;
+      t->epoch = m->trigger_epoch;
+      wakeup_all(m, &(t->pending));
+   }
+   else if (run_trigger(m, t))
       wakeup_all(m, &(t->pending));
 }
 
@@ -4967,7 +4981,8 @@ static void flush_deferred(rt_model_t *m)
          deposit_notify(m, nx);
          m->skip_comb = false;
       }
-      free(m->deferred[i].init);
+      if (m->deferred[i].init != m->deferred[i].buf)
+         free(m->deferred[i].init);
    }
 }
 
@@ -5014,9 +5029,11 @@ void deposit_signal(rt_model_t *m, rt_signal_t *s, const void *values,
             if (i < m->ndeferred)
                defer = true;
             else if (m->ndeferred < DEFER_MAX) {
+               unsigned char *init = valuesz <= sizeof(m->deferred[i].buf)
+                  ? m->deferred[i].buf : xmalloc(valuesz);
                m->deferred[i].nexus = n;
-               m->deferred[i].init = xmalloc(valuesz);
-               memcpy(m->deferred[i].init, eff, valuesz);
+               m->deferred[i].init = init;
+               memcpy(init, eff, valuesz);
                m->ndeferred++;
                defer = true;
             }
@@ -6203,7 +6220,7 @@ static rt_trigger_t *new_trigger(rt_model_t *m, trigger_kind_t kind,
       for (unsigned i = 0; i < m->triggertab_size; i++) {
          for (rt_trigger_t *t = m->triggertab[i], *next; t; t = next) {
             next = t->chain;
-            rt_trigger_t **nb = &(ntab[t->hash % nsize]);
+            rt_trigger_t **nb = &(ntab[t->hash & (nsize - 1)]);
             t->chain = *nb;
             *nb = t;
          }
@@ -6214,7 +6231,7 @@ static rt_trigger_t *new_trigger(rt_model_t *m, trigger_kind_t kind,
       m->triggertab_size = nsize;
    }
 
-   rt_trigger_t **bucket = &(m->triggertab[hash % m->triggertab_size]);
+   rt_trigger_t **bucket = &(m->triggertab[hash & (m->triggertab_size - 1)]);
 
    for (rt_trigger_t *exist = *bucket; exist; exist = exist->chain) {
       bool hit = exist->handle == handle
@@ -6237,6 +6254,10 @@ static rt_trigger_t *new_trigger(rt_model_t *m, trigger_kind_t kind,
    t->nargs  = nargs;
    t->epoch  = UINT64_MAX;
    t->kind   = kind;
+   t->level_only = (kind == LEVEL_TRIGGER)
+      || (kind == OR_TRIGGER
+          && ((rt_trigger_t *)args[0].pointer)->level_only
+          && ((rt_trigger_t *)args[1].pointer)->level_only);
    t->chain  = *bucket;
    t->hash   = hash;
    memcpy(t->args, args, argsz);
