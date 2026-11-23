@@ -215,6 +215,22 @@ static void vlog_cover_count(vlog_gen_t *g, vlog_node_t v,
       mir_build_cover_branch(g->mu, counters, tag + add);
 }
 
+static void vlog_cover_toggle_signal(vlog_gen_t *g, vlog_node_t v,
+                                     mir_value_t signal)
+{
+   // Count the changes of every bit of a net or variable
+
+   uint32_t tag;
+   unsigned count;
+   if (!vlog_cover_toggle(v, &tag, &count))
+      return;
+
+   mir_type_t t_offset = mir_offset_type(g->mu);
+   mir_build_cover_toggle(g->mu, signal,
+                          mir_const(g->mu, t_offset,
+                                    count | COVER_TOGGLE_VERILOG), tag);
+}
+
 static void vlog_lower_locals(vlog_gen_t *g, vlog_node_t v);
 static void vlog_lower_sensitivity(vlog_gen_t *g, vlog_node_t v);
 static bool vlog_is_param_select(vlog_node_t v);
@@ -34640,6 +34656,8 @@ static void vlog_lower_net_signal(vlog_gen_t *g, vlog_node_t v, tree_t wrap,
    mir_build_store(g->mu, var, signal);
 
    mir_put_object(g->mu, v, var);
+
+   vlog_cover_toggle_signal(g, v, signal);
 }
 
 static void vlog_lower_net_decl(vlog_gen_t *g, vlog_node_t v, tree_t wrap,
@@ -35425,6 +35443,8 @@ static void vlog_lower_var_decl(vlog_gen_t *g, vlog_node_t v, tree_t wrap,
    mir_build_store(g->mu, var, signal);
 
    mir_put_object(g->mu, v, var);
+
+   vlog_cover_toggle_signal(g, v, signal);
 }
 
 static void vlog_lower_port_decl(vlog_gen_t *g, vlog_node_t v)
@@ -35450,6 +35470,8 @@ static void vlog_lower_port_decl(vlog_gen_t *g, vlog_node_t v)
 
    mir_put_object(g->mu, v, var);
    mir_put_object(g->mu, d, var);
+
+   vlog_cover_toggle_signal(g, v, p);
 
    // A net which is connected to the port takes the wired logic of the
    // net type declared for it
@@ -36548,6 +36570,11 @@ void vlog_lower_instance(mir_context_t *mc, vlog_node_t body, ident_t parent,
 
    vlog_find_multi_driver_nets(body);
 
+   // The tags of the items are needed to lower the declarations
+   if (cover_enabled(cover, COVER_MASK_STMT | COVER_MASK_BRANCH
+                     | COVER_MASK_TOGGLE) && !cover_is_null(cscope))
+      vlog_cover_bind(body, cover, cscope);
+
    hash_t *map = hash_new(16);
 
    const int vhdl_ndecls = tree_decls(trans);
@@ -36622,8 +36649,10 @@ void vlog_lower_instance(mir_context_t *mc, vlog_node_t body, ident_t parent,
       mir_put_object(mu, d, var);
    }
 
-   if (cover_enabled(cover, COVER_MASK_STMT | COVER_MASK_BRANCH)
-       && !cover_is_null(cscope)) {
+   const bool cover_counts =
+      cover_enabled(cover, COVER_MASK_STMT | COVER_MASK_BRANCH);
+
+   if (cover_counts && !cover_is_null(cscope)) {
       // The counters of the instance are passed by the block which
       // creates it as the body is shared by instances with the same
       // parameters
@@ -36634,8 +36663,6 @@ void vlog_lower_instance(mir_context_t *mc, vlog_node_t body, ident_t parent,
                                     well_known(W_COUNTERS), 0);
       mir_build_store(mu, var, p);
       mir_put_object(mu, well_known(W_COUNTERS), var);
-
-      vlog_cover_bind(body, cover, cscope);
    }
 
    if (vlog_flags(body) & VLOG_F_INTERFACE) {

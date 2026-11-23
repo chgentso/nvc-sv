@@ -55,8 +55,14 @@ typedef struct {
    bool          bind;
 } vlog_cover_t;
 
+typedef struct {
+   uint32_t tag;
+   uint32_t count;
+} toggle_info_t;
+
 static hash_t *stmt_tags = NULL;
 static hash_t *branch_tags = NULL;
+static hash_t *toggle_tags = NULL;
 
 static void vlog_cover_stmt_list(vlog_cover_t *g, vlog_node_t v,
                                  lazy_cscope_t *parent);
@@ -317,6 +323,245 @@ static void vlog_cover_stmt(vlog_cover_t *g, vlog_node_t s,
    }
 
    cover_put_u32(g->db, item, COV_ATTR_SOURCE, src);
+}
+
+typedef A(ident_t) bit_names_t;
+
+static bool vlog_cover_has_nettype(vlog_node_t type)
+{
+   // A net of a user-defined type does not have the representation of
+   // an integral type
+
+   for (; type != NULL && vlog_kind(type) == V_TYPE_DECL;
+        type = vlog_has_type(type) ? vlog_type(type) : NULL) {
+      if (vlog_flags(type) & VLOG_F_NETTYPE)
+         return true;
+   }
+
+   return false;
+}
+
+static bool vlog_cover_bit_names(vlog_node_t type, const char *prefix,
+                                 bit_names_t *names);
+
+static bool vlog_cover_bit_range(vlog_node_t type, int nth, const char *prefix,
+                                 bit_names_t *names)
+{
+   // The bits of the packed dimensions of a type from the left
+
+   if (nth == vlog_ranges(type)) {
+      if (vlog_has_type(type))
+         return vlog_cover_bit_names(vlog_type(type), prefix, names);
+
+      APUSH(*names, ident_new(prefix));
+      return true;
+   }
+
+   int64_t left, right;
+   if (!vlog_bounds(vlog_range(type, nth), &left, &right))
+      return false;
+
+   const int step = left >= right ? -1 : 1;
+
+   LOCAL_TEXT_BUF tb = tb_new();
+   for (int64_t i = left;; i += step) {
+      tb_rewind(tb);
+      tb_cat(tb, prefix);
+      tb_printf(tb, "[%"PRIi64"]", i);
+
+      if (!vlog_cover_bit_range(type, nth + 1, tb_get(tb), names))
+         return false;
+
+      if (i == right)
+         break;
+   }
+
+   return true;
+}
+
+static bool vlog_cover_bit_names(vlog_node_t type, const char *prefix,
+                                 bit_names_t *names)
+{
+   // The names of the bits of a static integral type from the left
+
+   switch (vlog_kind(type)) {
+   case V_TYPE_DECL:
+   case V_ENUM_DECL:
+      return vlog_cover_bit_names(vlog_type(type), prefix, names);
+   case V_STRUCT_DECL:
+      {
+         if (!(vlog_flags(type) & VLOG_F_PACKED))
+            return false;
+
+         LOCAL_TEXT_BUF tb = tb_new();
+         const int ndecls = vlog_decls(type);
+         for (int i = 0; i < ndecls; i++) {
+            vlog_node_t d = vlog_decl(type, i);
+
+            tb_rewind(tb);
+            tb_cat(tb, prefix);
+            tb_append(tb, '.');
+            tb_istr(tb, vlog_ident(d));
+
+            if (!vlog_cover_bit_names(vlog_type(d), tb_get(tb), names))
+               return false;
+         }
+
+         return ndecls > 0;
+      }
+   case V_UNION_DECL:
+      {
+         // Every member shares the same bits
+         if (!(vlog_flags(type) & VLOG_F_PACKED)
+             || (vlog_flags(type) & VLOG_F_TAGGED))
+            return false;
+
+         LOCAL_TEXT_BUF tb = tb_new();
+         const int width = vlog_size(type);
+         for (int i = width - 1; i >= 0; i--) {
+            tb_rewind(tb);
+            tb_cat(tb, prefix);
+            tb_printf(tb, "[%d]", i);
+            APUSH(*names, ident_new(tb_get(tb)));
+         }
+
+         return width > 0;
+      }
+   case V_DATA_TYPE:
+      switch (vlog_subkind(type)) {
+      case DT_LOGIC:
+      case DT_IMPLICIT:
+      case DT_INTEGER:
+      case DT_TIME:
+      case DT_BIT:
+      case DT_INT:
+      case DT_SHORTINT:
+      case DT_LONGINT:
+      case DT_BYTE:
+         return vlog_cover_bit_range(type, 0, prefix, names);
+      default:
+         return false;   // Real, string, event, class handle and so on
+      }
+   default:
+      return false;
+   }
+}
+
+bool vlog_cover_toggle(vlog_node_t decl, uint32_t *tag, unsigned *count)
+{
+   if (toggle_tags == NULL)
+      return false;
+
+   const toggle_info_t *ti = hash_get(toggle_tags, decl);
+   if (ti == NULL)
+      return false;
+
+   *tag = ti->tag;
+   *count = ti->count;
+   return true;
+}
+
+static void vlog_cover_toggle_decl(vlog_cover_t *g, vlog_node_t d,
+                                   lazy_cscope_t *root, bool port)
+{
+   if (!cover_enabled(g->db, COVER_MASK_TOGGLE))
+      return;
+
+   const loc_t *loc = vlog_loc(d);
+   if (loc_invalid_p(loc) || !vlog_has_type(d))
+      return;
+
+   vlog_node_t type = vlog_type(d);
+   if (vlog_cover_has_nettype(type))
+      return;
+
+   // An array of elements is a memory
+   unsigned nelems = 1;
+   int64_t mem_left = 0, mem_step = 1;
+   if (vlog_ranges(d) > 0) {
+      int64_t mem_right;
+      if (port || vlog_ranges(d) > 1
+          || !cover_enabled(g->db, COVER_MASK_TOGGLE_INCLUDE_MEMS)
+          || !vlog_bounds(vlog_range(d, 0), &mem_left, &mem_right))
+         return;
+      mem_step = mem_left > mem_right ? -1 : 1;
+      nelems = vlog_size(d);
+   }
+
+   bit_names_t bits = AINIT;
+   if (!vlog_cover_bit_names(type, "", &bits) || bits.count == 0
+       || nelems == 0) {
+      ACLEAR(bits);
+      return;
+   }
+
+   const unsigned width = bits.count * nelems;
+   if (!cover_should_emit_array_toggle(g->db, width)) {
+      ACLEAR(bits);
+      return;
+   }
+
+   lazy_cscope_t lcs = lazy_cover_scope(d, root, vlog_ident(d));
+
+   cover_obj_t item = vlog_cover_item(g, &lcs, COV_ITEM_TOGGLE, loc, width * 2);
+   if (cover_is_null(item)) {
+      ACLEAR(bits);
+      return;
+   }
+
+   cover_obj_t first = cover_at(g->db, item, COV_REL_BINS, 0);
+
+   if (g->bind) {
+      toggle_info_t *ti = xmalloc(sizeof(toggle_info_t));
+      ti->tag = cover_get_tag(g->db, first);
+      ti->count = width;
+
+      if (toggle_tags == NULL)
+         toggle_tags = hash_new(256);
+
+      hash_put(toggle_tags, d, ti);
+      ACLEAR(bits);
+      return;
+   }
+
+   // The first element of the signal is the left most bit
+   const int nbits = bits.count;
+
+   cover_obj_t parent = get_cover_scope(g, root);
+   ident_t parent_hier = cover_get_ident(g->db, parent, COV_ATTR_HIER);
+   cover_put_i64(g->db, item, COV_ATTR_METADATA, ident_len(parent_hier) + 1);
+
+   cover_obj_t *bins LOCAL = xmalloc_array(width * 2, sizeof(cover_obj_t));
+   cover_rel(g->db, item, COV_REL_BINS, 0, bins, width * 2);
+
+   const cover_flags_t flags =
+      port ? COV_FLAG_TOGGLE_PORT : COV_FLAG_TOGGLE_SIGNAL;
+   const char *binstr[2] = {
+      cover_bmask_to_bin_str(COV_FLAG_TOGGLE_TO_1),
+      cover_bmask_to_bin_str(COV_FLAG_TOGGLE_TO_0),
+   };
+
+   LOCAL_TEXT_BUF tb = tb_new();
+   for (unsigned i = 0; i < width; i++) {
+      tb_rewind(tb);
+      if (nelems > 1)
+         tb_printf(tb, "[%"PRIi64"]", mem_left + mem_step * (i / nbits));
+      tb_istr(tb, bits.items[i % nbits]);
+
+      cover_obj_t *pair = bins + i * 2;
+
+      cover_put_flags(g->db, pair[0], COV_FLAG_TOGGLE_TO_1 | flags);
+      cover_put_flags(g->db, pair[1], COV_FLAG_TOGGLE_TO_0 | flags);
+
+      for (int j = 0; j < 2; j++) {
+         ident_t hier = cover_get_ident(g->db, pair[j], COV_ATTR_HIER);
+         cover_put_ident(g->db, pair[j], COV_ATTR_HIER,
+                         ident_sprintf("%s%s.%s", istr(hier), tb_get(tb),
+                                       binstr[j]));
+      }
+   }
+
+   ACLEAR(bits);
 }
 
 static void vlog_cover_branch(vlog_cover_t *g, hash_t **map, vlog_node_t key,
@@ -612,7 +857,8 @@ static void vlog_cover_walk(vlog_node_t body, cover_data_t *db,
    if (db == NULL || cover_is_null(cs))
       return;
 
-   if (!cover_enabled(db, COVER_MASK_STMT | COVER_MASK_BRANCH))
+   if (!cover_enabled(db, COVER_MASK_STMT | COVER_MASK_BRANCH
+                      | COVER_MASK_TOGGLE))
       return;
 
    vlog_cover_t g = {
@@ -626,9 +872,25 @@ static void vlog_cover_walk(vlog_node_t body, cover_data_t *db,
    root.resolved = true;
 
    const int ndecls = vlog_decls(body);
+
+   // The declaration of the net or variable of a port is the port
+   hset_t *port_decls = hset_new(16);
+   for (int i = 0; i < ndecls; i++) {
+      vlog_node_t d = vlog_decl(body, i);
+      if (vlog_kind(d) == V_PORT_DECL && vlog_has_ref(d))
+         hset_insert(port_decls, vlog_ref(d));
+   }
+
    for (int i = 0; i < ndecls; i++) {
       vlog_node_t d = vlog_decl(body, i);
       switch (vlog_kind(d)) {
+      case V_PORT_DECL:
+         vlog_cover_toggle_decl(&g, d, &root, true);
+         break;
+      case V_VAR_DECL:
+         if (!hset_contains(port_decls, d))
+            vlog_cover_toggle_decl(&g, d, &root, false);
+         break;
       case V_FUNC_DECL:
       case V_TASK_DECL:
          {
@@ -638,6 +900,8 @@ static void vlog_cover_walk(vlog_node_t body, cover_data_t *db,
          }
          break;
       case V_NET_DECL:
+         if (!hset_contains(port_decls, d))
+            vlog_cover_toggle_decl(&g, d, &root, false);
          if (vlog_has_value(d)) {
             lazy_cscope_t dl =
                lazy_cover_scope(d, &root, vlog_cover_scope_name(d, i));
@@ -649,6 +913,11 @@ static void vlog_cover_walk(vlog_node_t body, cover_data_t *db,
          break;
       }
    }
+
+   hset_free(port_decls);
+
+   if (!cover_enabled(db, COVER_MASK_STMT | COVER_MASK_BRANCH))
+      return;
 
    const int nstmts = vlog_stmts(body);
    for (int i = 0; i < nstmts; i++) {

@@ -1,0 +1,49 @@
+<?xml version="1.0"?>
+<scope name="WORK">
+  <scope name="vlogcover14" block_name="vlogcover14" kind="module" file="vlogcover14.sv" line="4">
+    <scope name="mem" line="5">
+      <toggle hier="WORK.vlogcover14.mem[0][1].BIN_0_TO_1" data="0"/>
+      <toggle hier="WORK.vlogcover14.mem[0][1].BIN_1_TO_0" data="0"/>
+      <toggle hier="WORK.vlogcover14.mem[0][0].BIN_0_TO_1" data="0"/>
+      <toggle hier="WORK.vlogcover14.mem[0][0].BIN_1_TO_0" data="0"/>
+      <toggle hier="WORK.vlogcover14.mem[1][1].BIN_0_TO_1" data="1"/>
+      <toggle hier="WORK.vlogcover14.mem[1][1].BIN_1_TO_0" data="1"/>
+      <toggle hier="WORK.vlogcover14.mem[1][0].BIN_0_TO_1" data="0"/>
+      <toggle hier="WORK.vlogcover14.mem[1][0].BIN_1_TO_0" data="0"/>
+      <toggle hier="WORK.vlogcover14.mem[2][1].BIN_0_TO_1" data="0"/>
+      <toggle hier="WORK.vlogcover14.mem[2][1].BIN_1_TO_0" data="0"/>
+      <toggle hier="WORK.vlogcover14.mem[2][0].BIN_0_TO_1" data="0"/>
+      <toggle hier="WORK.vlogcover14.mem[2][0].BIN_1_TO_0" data="0"/>
+    </scope>
+    <scope name="desc" line="6">
+      <toggle hier="WORK.vlogcover14.desc[3][1].BIN_0_TO_1" data="0"/>
+      <toggle hier="WORK.vlogcover14.desc[3][1].BIN_1_TO_0" data="0"/>
+      <toggle hier="WORK.vlogcover14.desc[3][0].BIN_0_TO_1" data="1"/>
+      <toggle hier="WORK.vlogcover14.desc[3][0].BIN_1_TO_0" data="0"/>
+      <toggle hier="WORK.vlogcover14.desc[2][1].BIN_0_TO_1" data="1"/>
+      <toggle hier="WORK.vlogcover14.desc[2][1].BIN_1_TO_0" data="0"/>
+      <toggle hier="WORK.vlogcover14.desc[2][0].BIN_0_TO_1" data="1"/>
+      <toggle hier="WORK.vlogcover14.desc[2][0].BIN_1_TO_0" data="0"/>
+      <toggle hier="WORK.vlogcover14.desc[1][1].BIN_0_TO_1" data="0"/>
+      <toggle hier="WORK.vlogcover14.desc[1][1].BIN_1_TO_0" data="0"/>
+      <toggle hier="WORK.vlogcover14.desc[1][0].BIN_0_TO_1" data="0"/>
+      <toggle hier="WORK.vlogcover14.desc[1][0].BIN_1_TO_0" data="0"/>
+    </scope>
+    <scope name="ok" line="8">
+      <toggle hier="WORK.vlogcover14.ok[6].BIN_0_TO_1" data="1"/>
+      <toggle hier="WORK.vlogcover14.ok[6].BIN_1_TO_0" data="0"/>
+      <toggle hier="WORK.vlogcover14.ok[5].BIN_0_TO_1" data="0"/>
+      <toggle hier="WORK.vlogcover14.ok[5].BIN_1_TO_0" data="0"/>
+      <toggle hier="WORK.vlogcover14.ok[4].BIN_0_TO_1" data="0"/>
+      <toggle hier="WORK.vlogcover14.ok[4].BIN_1_TO_0" data="0"/>
+      <toggle hier="WORK.vlogcover14.ok[3].BIN_0_TO_1" data="0"/>
+      <toggle hier="WORK.vlogcover14.ok[3].BIN_1_TO_0" data="0"/>
+      <toggle hier="WORK.vlogcover14.ok[2].BIN_0_TO_1" data="0"/>
+      <toggle hier="WORK.vlogcover14.ok[2].BIN_1_TO_0" data="0"/>
+      <toggle hier="WORK.vlogcover14.ok[1].BIN_0_TO_1" data="0"/>
+      <toggle hier="WORK.vlogcover14.ok[1].BIN_1_TO_0" data="0"/>
+      <toggle hier="WORK.vlogcover14.ok[0].BIN_0_TO_1" data="0"/>
+      <toggle hier="WORK.vlogcover14.ok[0].BIN_1_TO_0" data="0"/>
+    </scope>
+  </scope>
+</scope>

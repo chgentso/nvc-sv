@@ -32,6 +32,7 @@ typedef struct {
    int32_t   *counters;
    int32_t    offset;
    uint32_t   count;
+   bool       verilog;
 } rt_toggle_data_t;
 
 enum std_ulogic {
@@ -131,9 +132,73 @@ static inline void cover_toggle_check_0_1_u_z(uint8_t old, uint8_t new,
 }
 
 __attribute__((always_inline))
-static inline void cover_toggle_generic(rt_signal_t *s, rt_toggle_data_t *td,
+// A Verilog net or variable has one byte for each bit with the value in the
+// low two bits and the strength of a net above them
+static inline uint8_t cover_verilog_value(uint8_t byte)
+{
+   static const uint8_t map[4] = { _0, _1, _Z, _X };
+   return map[byte & 3];
+}
+
+static inline void cover_toggle_bytes(rt_toggle_data_t *td, const void *cur,
+                                      const void *last, int32_t low,
+                                      int32_t high, toggle_check_fn_t fn)
+{
+   int32_t *toggle_01 = td->counters + low * 2;
+   int32_t *toggle_10 = toggle_01 + 1;
+   for (int j = low; j < high; j++) {
+      uint8_t new = ((const uint8_t *)cur)[j];
+      uint8_t old = ((const uint8_t *)last)[j];
+      if (new != old) {
+         if (td->verilog) {
+            new = cover_verilog_value(new);
+            old = cover_verilog_value(old);
+         }
+         if (new != old)   // Not only the strength changed
+            (*fn)(old, new, toggle_01, toggle_10);
+      }
+      toggle_01 += 2;
+      toggle_10 += 2;
+   }
+}
+
+static inline void cover_toggle_nexuses(uint64_t now, rt_signal_t *s,
+                                        rt_toggle_data_t *td,
                                         toggle_check_fn_t fn)
 {
+   // The previous value is only the one before this event for the parts of
+   // the signal which had an event now, such as the element of a memory.
+   // The callback runs in the delta cycle after the update.
+
+   unsigned deltas;
+   model_now(get_model(), &deltas);
+
+   const void *cur = signal_value(s) + td->offset;
+   const void *last = signal_last_value(s) + td->offset;
+
+   rt_nexus_t *n = &(s->nexus);
+   for (unsigned i = 0; i < s->n_nexus; i++, n = n->chain) {
+      if (n->last_event != now || n->event_delta != (delta_cycle_t)(deltas - 1))
+         continue;
+
+      // Bounds of the nexus within the range of the watch
+      const int32_t lo = MAX((int32_t)n->offset - td->offset, 0);
+      const int32_t hi = MIN((int32_t)(n->offset + n->width) - td->offset,
+                             (int32_t)td->count);
+      if (lo < hi)
+         cover_toggle_bytes(td, cur, last, lo, hi, fn);
+   }
+}
+
+static inline void cover_toggle_generic(uint64_t now, rt_signal_t *s,
+                                        rt_toggle_data_t *td,
+                                        toggle_check_fn_t fn)
+{
+   if (td->verilog && s->n_nexus > 1) {
+      cover_toggle_nexuses(now, s, td, fn);
+      return;
+   }
+
    assert(s->nexus.size == 1);
 
    const void *cur = signal_value(s) + td->offset;
@@ -155,42 +220,32 @@ static inline void cover_toggle_generic(rt_signal_t *s, rt_toggle_data_t *td,
          batch_size = ((td->count - 1) % sizeof(uint64_t)) + 1;
 
       int32_t low = i * sizeof(uint64_t);
-      int32_t high = low + batch_size;
-      int32_t *toggle_01 = td->counters + low * 2;
-      int32_t *toggle_10 = toggle_01 + 1;
-      for (int j = low; j < high; j++) {
-         uint8_t new = ((const uint8_t *)cur)[j];
-         uint8_t old = ((const uint8_t *)last)[j];
-         if (new != old)
-            (*fn)(old, new, toggle_01, toggle_10);
-         toggle_01 += 2;
-         toggle_10 += 2;
-      }
+      cover_toggle_bytes(td, cur, last, low, low + batch_size, fn);
    }
 }
 
 static void cover_toggle_cb_0_1(uint64_t now, rt_signal_t *s, rt_watch_t *w,
                                 void *user)
 {
-   cover_toggle_generic(s, user, cover_toggle_check_0_1);
+   cover_toggle_generic(now, s, user, cover_toggle_check_0_1);
 }
 
 static void cover_toggle_cb_0_1_u(uint64_t now, rt_signal_t *s, rt_watch_t *w,
                                   void *user)
 {
-   cover_toggle_generic(s, user, cover_toggle_check_0_1_u);
+   cover_toggle_generic(now, s, user, cover_toggle_check_0_1_u);
 }
 
 static void cover_toggle_cb_0_1_z(uint64_t now, rt_signal_t *s, rt_watch_t *w,
                                   void *user)
 {
-   cover_toggle_generic(s, user, cover_toggle_check_0_1_z);
+   cover_toggle_generic(now, s, user, cover_toggle_check_0_1_z);
 }
 
 static void cover_toggle_cb_0_1_u_z(uint64_t now, rt_signal_t *s, rt_watch_t *w,
                                     void *user)
 {
-   cover_toggle_generic(s, user, cover_toggle_check_0_1_u_z);
+   cover_toggle_generic(now, s, user, cover_toggle_check_0_1_u_z);
 }
 
 static bool is_constant_input(rt_signal_t *s)
@@ -235,7 +290,10 @@ void x_cover_setup_toggle_cb(sig_shared_t *ss, uint32_t offset, int32_t count,
 
    cover_mask_t op_mask = cover_get_u32(data, COVER_NULL_OBJ, COV_ATTR_MASK, 0);
 
-   if (is_constant_input(s)) {
+   const bool verilog = !!(count & COVER_TOGGLE_VERILOG);
+   count &= ~COVER_TOGGLE_VERILOG;
+
+   if (!verilog && is_constant_input(s)) {
       int32_t *toggle_01 = counters + tag;
       int32_t *toggle_10 = toggle_01 + 1;
 
@@ -268,6 +326,7 @@ void x_cover_setup_toggle_cb(sig_shared_t *ss, uint32_t offset, int32_t count,
    td->counters = counters + tag;
    td->offset   = offset;
    td->count    = count;
+   td->verilog  = verilog;
 
    rt_watch_t *w = watch_new(m, fn, td, WATCH_EVENT, 1);
    model_set_event_cb(m, s, offset, count, w);

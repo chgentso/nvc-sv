@@ -3169,3 +3169,8 @@ svstdwide1 verilog
 svcrvwidedyn1 verilog
 svcheckcrv1 shell,verilog
 svcrvrandcstaged1 verilog
+vlogcover12     verilog,cover=toggle
+vlogcover13     verilog,cover=toggle+count-from-undefined+count-from-to-z
+vlogcover14     verilog,cover=toggle+include-mems+ignore-arrays-from-8
+mixedcover3     mixed,cover=toggle
+vlogcover15     shell

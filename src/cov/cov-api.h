@@ -315,6 +315,10 @@ void cover_load_exclude_file(const char *path, cover_data_t *data);
 bool cover_should_emit_fsm_type(cover_data_t *db, ident_t name);
 bool cover_should_emit_array_toggle(cover_data_t *db, int width);
 
+// Set in the count of the toggle of a signal which holds the bits of a
+// Verilog net or variable rather than std_ulogic
+#define COVER_TOGGLE_VERILOG 0x40000000
+
 //
 // Report generation and export
 //

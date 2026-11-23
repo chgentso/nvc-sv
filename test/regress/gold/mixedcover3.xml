@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<scope name="WORK">
+  <scope name="MIXEDCOVER3" block_name="MIXEDCOVER3-TEST" file="mixedcover3.vhd" line="10">
+    <scope name="A1" line="16">
+      <toggle hier="WORK.MIXEDCOVER3.A1.BIN_0_TO_1" data="1"/>
+      <toggle hier="WORK.MIXEDCOVER3.A1.BIN_1_TO_0" data="1"/>
+    </scope>
+    <scope name="Y1" line="17">
+      <toggle hier="WORK.MIXEDCOVER3.Y1(1).BIN_0_TO_1" data="1"/>
+      <toggle hier="WORK.MIXEDCOVER3.Y1(1).BIN_1_TO_0" data="1"/>
+      <toggle hier="WORK.MIXEDCOVER3.Y1(0).BIN_0_TO_1" data="1"/>
+      <toggle hier="WORK.MIXEDCOVER3.Y1(0).BIN_1_TO_0" data="1"/>
+    </scope>
+    <scope name="U1" block_name="mixedcover3_sub" kind="module" line="20">
+      <scope name="a" file="mixedcover3.sv" line="1">
+        <toggle hier="WORK.MIXEDCOVER3.U1.a.BIN_0_TO_1" data="1"/>
+        <toggle hier="WORK.MIXEDCOVER3.U1.a.BIN_1_TO_0" data="1"/>
+      </scope>
+      <scope name="y" file="mixedcover3.sv" line="1">
+        <toggle hier="WORK.MIXEDCOVER3.U1.y[1].BIN_0_TO_1" data="1"/>
+        <toggle hier="WORK.MIXEDCOVER3.U1.y[1].BIN_1_TO_0" data="1"/>
+        <toggle hier="WORK.MIXEDCOVER3.U1.y[0].BIN_0_TO_1" data="1"/>
+        <toggle hier="WORK.MIXEDCOVER3.U1.y[0].BIN_1_TO_0" data="1"/>
+      </scope>
+      <scope name="last" file="mixedcover3.sv" line="2">
+        <toggle hier="WORK.MIXEDCOVER3.U1.last.BIN_0_TO_1" data="1"/>
+        <toggle hier="WORK.MIXEDCOVER3.U1.last.BIN_1_TO_0" data="1"/>
+      </scope>
+    </scope>
+  </scope>
+</scope>
