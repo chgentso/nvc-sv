@@ -29621,10 +29621,35 @@ static vlog_node_t vlog_crv_arg_owner(vlog_node_t p, bool *handle)
 
    if (*handle)
       return p;
-   else if (vlog_kind(p) == V_MEMBER_REF && vlog_kind(vlog_value(p)) != V_THIS)
-      return vlog_value(p);
+   else if (vlog_kind(p) == V_MEMBER_REF && vlog_kind(vlog_value(p)) != V_THIS) {
+      vlog_node_t otype = vlog_get_type(vlog_value(p));
+      if (otype != NULL && vlog_kind(otype) == V_CLASS_DECL)
+         return vlog_value(p);
+   }
 
    return NULL;
+}
+
+static void vlog_crv_list_struct(vlog_gen_t *g, mir_value_t ctx,
+                                 mir_value_t rec, vlog_node_t sdecl)
+{
+   // Every member of a structure is a variable to solve
+
+   mir_value_t obj = vlog_crv_this_ptr(g, rec);
+   mir_value_t fields = mir_build_all(g->mu, rec);
+
+   const int ndecls = vlog_decls(sdecl);
+   for (int i = 0; i < ndecls; i++) {
+      vlog_node_t m = vlog_decl(sdecl, i);
+      if (vlog_kind(m) != V_VAR_DECL)
+         continue;
+
+      CRV3(g, CRV_OP_LIST, ctx, obj, vlog_crv_key(g, m));
+      if (vlog_crv_is_struct_decl(g, m))
+         vlog_crv_list_struct(g, ctx, mir_build_load(
+                                 g->mu, mir_build_record_ref(g->mu, fields, i)),
+                              vlog_get_type(vlog_type(m)));
+   }
 }
 
 static void vlog_crv_list_class(vlog_gen_t *g, mir_value_t ctx, vlog_node_t class,
@@ -29726,6 +29751,19 @@ static void vlog_crv_list_args(vlog_gen_t *g, vlog_node_t v, mir_value_t ctx,
 
          CRV3(g, CRV_OP_LIST, ctx, vlog_crv_object(g, p),
               vlog_crv_key(g, vlog_ref(p)));
+
+         vlog_node_t decl = vlog_ref(p);
+         if (vlog_kind(decl) == V_VAR_DECL && vlog_crv_is_struct_decl(g, decl)) {
+            mir_value_t saved_this = g->this_val;
+            mir_value_t saved_local = g->local_this;
+            g->local_this = !mir_is_null(saved_this) ? saved_this
+               : vlog_in_class_scope(g) ? vlog_lower_this(g) : MIR_NULL_VALUE;
+            g->this_val = self;
+            vlog_crv_list_struct(g, ctx, vlog_lower_rvalue(g, p),
+                                 vlog_get_type(vlog_type(decl)));
+            g->this_val = saved_this;
+            g->local_this = saved_local;
+         }
       }
 
       vlog_crv_arg_objects(g, v, ctx, self, false);
