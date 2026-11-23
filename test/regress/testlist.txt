@@ -3196,3 +3196,10 @@ crvidxunsigned1 verilog
 crvobjarr17 verilog
 crvwidearith1 verilog
 crvdistweight2 verilog,gold
+vpi28           verilog,vpi,gold
+vpi29           verilog,vpi
+svunwind1       verilog,gold
+svunwind2       verilog,fail,gold
+resunwind1      2008
+resunwind2      2008,fail
+resunwind3      2008

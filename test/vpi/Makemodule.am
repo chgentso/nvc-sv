@@ -31,6 +31,8 @@ lib_vpi_test_so_SOURCES = \
 	test/vpi/vpi25.c \
 	test/vpi/vpi26.c \
 	test/vpi/vpi27.c \
+	test/vpi/vpi28.c \
+	test/vpi/vpi29.c \
 	test/vpi/vpicls1.c \
 	test/vpi/vpicls2.c \
 	test/vpi/vpicls3.c \
