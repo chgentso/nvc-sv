@@ -1212,11 +1212,22 @@ static void reset_property(rt_model_t *m, rt_prop_t *prop)
 }
 
 // Processes waiting for a condition on state which is not a signal
-static A(rt_proc_t *) sv_pollers = AINIT;
-static unsigned       sv_pollers_woken = 0;
-static unsigned       sv_pollers_kept = 0;
-static unsigned       sv_pollers_fired = 0;
-static unsigned       sv_procs_run = 0;
+typedef struct {
+   rt_proc_t  *proc;
+   const void *ptr0;
+   uint64_t    snap0;
+   uint8_t     sz0;
+   uint8_t     count;
+} sv_watch_poller_t;
+
+static A(rt_proc_t *)        sv_pollers = AINIT;
+static A(sv_watch_poller_t)  sv_watched = AINIT;
+static unsigned              sv_pollers_woken = 0;
+static unsigned              sv_pollers_kept = 0;
+static unsigned              sv_pollers_fired = 0;
+static unsigned              sv_procs_run = 0;
+static unsigned              sv_suspended_tasks = 0;
+static unsigned              sv_pending_defers = 0;
 
 static bool sv_proc_finished(const rt_proc_t *proc);
 
@@ -1294,6 +1305,77 @@ static inline bool sv_watch_unchanged(const sv_watch_t *w)
    return true;
 }
 
+static inline bool sv_poller_inline_eq(const sv_watch_poller_t *e)
+{
+   switch (e->sz0) {
+   case 1:
+      return *(const uint8_t *)e->ptr0 == (uint8_t)e->snap0;
+   case 2:
+      {
+         uint16_t x;
+         memcpy(&x, e->ptr0, 2);
+         return x == (uint16_t)e->snap0;
+      }
+   case 4:
+      {
+         uint32_t x;
+         memcpy(&x, e->ptr0, 4);
+         return x == (uint32_t)e->snap0;
+      }
+   case 8:
+      {
+         uint64_t x;
+         memcpy(&x, e->ptr0, 8);
+         return x == e->snap0;
+      }
+   default:
+      return false;
+   }
+}
+
+static inline void sv_watch_poller_push(rt_proc_t *proc)
+{
+   const sv_watch_t *w = proc->watch;
+   const rt_wakeable_t *obj = &(proc->wakeable);
+   if (unlikely(w == NULL || w->count == 0
+                || (obj->forked && obj->zombie)
+                || obj->interrupted || obj->pending
+                || obj->trigger != NULL)) {
+      APUSH(sv_pollers, proc);
+      return;
+   }
+
+   sv_watch_poller_t e = {
+      .proc  = proc,
+      .count = w->count,
+   };
+   const unsigned sz0 = w->item[0].size;
+   if (sz0 == 1 || sz0 == 2 || sz0 == 4 || sz0 == 8) {
+      e.ptr0 = w->item[0].ptr;
+      e.sz0  = sz0;
+      memcpy(&e.snap0, w->item[0].snap, sz0);
+   }
+
+   APUSH(sv_watched, e);
+}
+
+static void sv_poller_remove(rt_proc_t *proc)
+{
+   for (int i = 0; i < sv_pollers.count; i++) {
+      if (sv_pollers.items[i] == proc) {
+         sv_pollers.items[i] = sv_pollers.items[--sv_pollers.count];
+         return;
+      }
+   }
+
+   for (int i = 0; i < sv_watched.count; i++) {
+      if (sv_watched.items[i].proc == proc) {
+         sv_watched.items[i] = sv_watched.items[--sv_watched.count];
+         return;
+      }
+   }
+}
+
 static void flush_deferred(rt_model_t *m);
 
 static void run_process_inner(rt_model_t *m, rt_proc_t *proc)
@@ -1326,11 +1408,11 @@ static void run_process_inner(rt_model_t *m, rt_proc_t *proc)
       if (w != NULL && w->count > 0 && !was_interrupted
           && sv_watch_unchanged(w)) {
          sv_procs_run++;
-         if (proc->task != NULL)
+         if (unlikely(sv_pending_defers > 0) && proc->task != NULL)
             sv_task_note_skipped_poll(proc);
 
          note_wait(m, proc);
-         APUSH(sv_pollers, proc);
+         sv_watch_poller_push(proc);
          return;
       }
    }
@@ -4214,9 +4296,10 @@ static void sv_poll_end_cycle(rt_model_t *m)
    // back to waiting has changed nothing, which lets an otherwise idle
    // simulation finish.
 
+   const unsigned total_pollers = sv_pollers.count + sv_watched.count;
    const bool idle = sv_pollers_woken > 0
       && sv_procs_run == sv_pollers_woken
-      && sv_pollers.count == sv_pollers_kept + sv_pollers_woken
+      && total_pollers == sv_pollers_kept + sv_pollers_woken
       && sv_pollers_fired == 0
       && m->nonblockq.count == 0 && m->inactiveq.count == 0;
 
@@ -4224,31 +4307,95 @@ static void sv_poll_end_cycle(rt_model_t *m)
    sv_pollers_woken = 0;
    sv_pollers_fired = 0;
 
-   if (sv_pollers.count == 0 || idle) {
-      sv_pollers_kept = sv_pollers.count;
+   if (total_pollers == 0 || idle) {
+      sv_pollers_kept = total_pollers;
       return;
    }
 
    // Conditions are checked again in the order they began waiting.
-   // A poller whose watched memory has not changed would immediately skip
-   // and re-queue itself, so keep it waiting without scheduling a delta.
+   // Watched pollers whose memory has not changed stay on sv_watched
+   // without scheduling a delta cycle.
+   const bool check_slow = sv_suspended_tasks > 0 || sv_pending_defers > 0;
    unsigned keep = 0, woken = 0;
-   for (int i = 0; i < sv_pollers.count; i++) {
-      rt_proc_t *p = sv_pollers.items[i];
+   for (int i = 0; i < sv_watched.count; i++) {
+      const sv_watch_poller_t *e = &(sv_watched.items[i]);
+
+      if (likely(!check_slow)) {
+         bool unchanged;
+         if (likely(e->sz0 != 0)) {
+            unchanged = sv_poller_inline_eq(e);
+            if (unchanged && e->count > 1) {
+               const sv_watch_t *w = e->proc->watch;
+               for (unsigned j = 1; j < w->count; j++) {
+                  if (!sv_watch_item_eq(w->item[j].ptr, w->item[j].snap,
+                                        w->item[j].size)) {
+                     unchanged = false;
+                     break;
+                  }
+               }
+            }
+         }
+         else
+            unchanged = sv_watch_unchanged(e->proc->watch);
+
+         if (likely(unchanged)) {
+            DEBUG_ONLY({
+               const rt_wakeable_t *dobj = &(e->proc->wakeable);
+               assert(!(dobj->forked && dobj->zombie));
+               assert(!dobj->interrupted && !dobj->pending);
+               assert(dobj->trigger == NULL);
+               assert(!sv_task_is_suspended(e->proc));
+            });
+            if (keep != i)
+               sv_watched.items[keep] = *e;
+            keep++;
+            continue;
+         }
+
+         rt_proc_t *p = e->proc;
+         if (unlikely(p->wakeable.forked && p->wakeable.zombie))
+            continue;
+
+         p->poll_wake = 1;
+         deltaq_insert_proc(m, 0, p);
+         woken++;
+         continue;
+      }
+
+      rt_proc_t *p = e->proc;
       rt_wakeable_t *obj = &(p->wakeable);
 
       if (unlikely(obj->forked && obj->zombie))
          continue;
 
-      const sv_watch_t *w = p->watch;
-      if (w != NULL && w->count > 0 && !obj->interrupted && !obj->pending
+      if (!obj->interrupted && !obj->pending
           && obj->trigger == NULL
-          && (p->task == NULL || !sv_task_is_suspended(p))
-          && sv_watch_unchanged(w)) {
-         if (p->task != NULL)
-            sv_task_note_skipped_poll(p);
-         sv_pollers.items[keep++] = p;
-         continue;
+          && (sv_suspended_tasks == 0 || !sv_task_is_suspended(p))) {
+         bool unchanged;
+         if (e->sz0 != 0) {
+            unchanged = sv_poller_inline_eq(e);
+            if (unchanged && e->count > 1) {
+               const sv_watch_t *w = p->watch;
+               for (unsigned j = 1; j < w->count; j++) {
+                  if (!sv_watch_item_eq(w->item[j].ptr, w->item[j].snap,
+                                        w->item[j].size)) {
+                     unchanged = false;
+                     break;
+                  }
+               }
+            }
+         }
+         else
+            unchanged = sv_watch_unchanged(p->watch);
+
+         if (unchanged) {
+            if (unlikely(sv_pending_defers > 0) && p->task != NULL)
+               sv_task_note_skipped_poll(p);
+            if (keep != i)
+               sv_watched.items[keep] = *e;
+            keep++;
+            continue;
+         }
       }
 
       p->poll_wake = 1;
@@ -4256,9 +4403,22 @@ static void sv_poll_end_cycle(rt_model_t *m)
       woken++;
    }
 
+   ARESIZE(sv_watched, keep);
+
+   for (int i = 0; i < sv_pollers.count; i++) {
+      rt_proc_t *p = sv_pollers.items[i];
+      if (unlikely(p->wakeable.forked && p->wakeable.zombie))
+         continue;
+
+      p->poll_wake = 1;
+      deltaq_insert_proc(m, 0, p);
+      woken++;
+   }
+
+   ARESIZE(sv_pollers, 0);
+
    sv_pollers_woken = woken;
    sv_pollers_kept = keep;
-   ARESIZE(sv_pollers, keep);
 }
 
 static void fire_init_events(rt_model_t *m)
@@ -7648,6 +7808,7 @@ struct _sv_task {
    int64_t          disabled;      // Label of block disabled by a child
    uint32_t         runs;          // Times resumed since it was created
    uint32_t         dseq;          // Deferred assertion evaluations so far
+   uint32_t         pending_defers; // Pending deferred assertions for this task
    struct {
       int64_t  label;
       uint32_t seq;
@@ -7688,6 +7849,16 @@ static bool sv_task_hold(rt_proc_t *p)
 static void sv_task_destroy(rt_model_t *m, rt_proc_t *p)
 {
    sv_task_t *t = p->task;
+
+   if (t->suspended) {
+      t->suspended = false;
+      sv_suspended_tasks--;
+   }
+
+   if (t->pending_defers > 0) {
+      sv_pending_defers -= t->pending_defers;
+      t->pending_defers = 0;
+   }
 
    if (t->listed) {
       for (unsigned i = 0; i < sv_marked_tasks.count; i++) {
@@ -8048,15 +8219,23 @@ void x_sv_poll_wait(void)
       const unsigned n = sv_watch_pending.count;
       memcpy(proc->watch, &sv_watch_pending,
              offsetof(sv_watch_t, item[0]) + n * sizeof(proc->watch->item[0]));
+
+      sv_watch_pending.count = 0;
+      sv_watch_never = false;
+
+      note_wait(get_model(), proc);
+      sv_watch_poller_push(proc);
    }
-   else if (proc->watch != NULL)
-      proc->watch->count = 0;
+   else {
+      if (proc->watch != NULL)
+         proc->watch->count = 0;
 
-   sv_watch_pending.count = 0;
-   sv_watch_never = false;
+      sv_watch_pending.count = 0;
+      sv_watch_never = false;
 
-   note_wait(get_model(), proc);
-   APUSH(sv_pollers, proc);
+      note_wait(get_model(), proc);
+      APUSH(sv_pollers, proc);
+   }
 }
 
 void x_sv_poll_fired(void)
@@ -8229,6 +8408,7 @@ static void sv_poll_free(void)
    sv_nba_pending = NULL;
 
    ACLEAR(sv_pollers);
+   ACLEAR(sv_watched);
    ACLEAR(sv_reap);
    ACLEAR(sv_handles);
    ACLEAR(stale_events);
@@ -8236,6 +8416,8 @@ static void sv_poll_free(void)
    sv_pollers_kept = 0;
    sv_pollers_fired = 0;
    sv_procs_run = 0;
+   sv_suspended_tasks = 0;
+   sv_pending_defers = 0;
 }
 
 int64_t x_sv_event_triggered(void *event)
@@ -8340,18 +8522,17 @@ static void sv_task_kill(rt_model_t *m, sv_task_t *t)
 
    t->proc->wakeable.zombie = true;
    t->killed = true;
+   if (t->suspended) {
+      t->suspended = false;
+      sv_suspended_tasks--;
+   }
 
    dpi_proc_killed(t->proc);
 
    if (t->handle != 0)
       sv_handles.items[t->handle - 1].killed = true;
 
-   for (int i = 0; i < sv_pollers.count; i++) {
-      if (sv_pollers.items[i] == t->proc) {
-         sv_pollers.items[i] = sv_pollers.items[--sv_pollers.count];
-         break;
-      }
-   }
+   sv_poller_remove(t->proc);
 
    if (t->wait_event != NULL) {
       sv_event_forget(t->proc, t->wait_event);
@@ -8625,12 +8806,7 @@ static void sv_task_interrupt(rt_model_t *m, sv_task_t *t)
       APUSH(stale_events, stale);
    }
 
-   for (int i = 0; i < sv_pollers.count; i++) {
-      if (sv_pollers.items[i] == proc) {
-         sv_pollers.items[i] = sv_pollers.items[--sv_pollers.count];
-         break;
-      }
-   }
+   sv_poller_remove(proc);
 
    if (sv_events != NULL) {
       const void *key;
@@ -8757,6 +8933,8 @@ rt_proc_t *model_defer_note(uint32_t *runs, uint32_t *seq)
    sv_task_t *t = sv_task_for(proc);
    *runs = t->runs;
    *seq = ++t->dseq;
+   t->pending_defers++;
+   sv_pending_defers++;
    proc_pin(&(proc->wakeable));
    return proc;
 }
@@ -8771,7 +8949,11 @@ bool model_defer_live(rt_proc_t *proc, uint32_t runs, uint32_t seq,
    if (proc == NULL)
       return true;
 
-   const sv_task_t *t = proc->task;
+   sv_task_t *t = proc->task;
+   if (t != NULL && t->pending_defers > 0) {
+      t->pending_defers--;
+      sv_pending_defers--;
+   }
    bool live = t != NULL && t->runs == runs && !t->killed;
    for (unsigned i = 0; live && i < t->ndis; i++) {
       if (t->dis[i].seq < seq)
@@ -8873,6 +9055,7 @@ int64_t x_sv_process_suspend(void *arg)
       return 0;
 
    t->suspended = true;
+   sv_suspended_tasks++;
 
    if (t->proc == get_active_proc()) {
       t->missed = true;
@@ -8889,6 +9072,7 @@ int64_t x_sv_process_resume(void *arg)
       return 0;
 
    t->suspended = false;
+   sv_suspended_tasks--;
 
    if (t->missed) {
       t->missed = false;
