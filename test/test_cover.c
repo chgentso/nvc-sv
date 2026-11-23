@@ -766,6 +766,66 @@ START_TEST(test_vlog1)
 }
 END_TEST
 
+START_TEST(test_vlog2)
+{
+   input_from_file(TESTDIR "/cover/vlog1.sv");
+
+   vlog_node_t top[2];
+   top[0] = parse_vlog_module();    // sub
+   top[1] = parse_vlog_module();    // top
+   ck_assert_ptr_null(vlog_parse());
+
+   cover_data_t *db = run_cover_vlog(&top[1], 1, COVER_MASK_TOGGLE);
+
+   cover_obj_t u1_inst = ck_cover_find(db, "WORK.top.u1");
+   cover_obj_t u1 = cover_get_obj(db, u1_inst, COV_ATTR_ROOT);
+
+   // A port of the module has a pair of bins for each bit from the left
+   cover_obj_t q = cover_get_child(db, u1, ident_new("q"));
+   ck_assert(!cover_is_null(q));
+
+   cover_obj_t item = cover_get_item(db, q, COV_ITEM_TOGGLE, 0);
+   ck_assert(!cover_is_null(item));
+   ck_assert_int_eq(cover_count(db, item, COV_REL_BINS), 8);
+
+   const char *expect[] = {
+      "WORK.top.u1.q[3].BIN_0_TO_1", "WORK.top.u1.q[3].BIN_1_TO_0",
+      "WORK.top.u1.q[2].BIN_0_TO_1", "WORK.top.u1.q[2].BIN_1_TO_0",
+      "WORK.top.u1.q[1].BIN_0_TO_1", "WORK.top.u1.q[1].BIN_1_TO_0",
+      "WORK.top.u1.q[0].BIN_0_TO_1", "WORK.top.u1.q[0].BIN_1_TO_0",
+   };
+   const uint32_t first_tag =
+      cover_get_tag(db, cover_at(db, item, COV_REL_BINS, 0));
+
+   for (int i = 0; i < ARRAY_LEN(expect); i++) {
+      cover_obj_t bin = cover_at(db, item, COV_REL_BINS, i);
+      ck_assert_str_eq(istr(cover_get_ident(db, bin, COV_ATTR_HIER)),
+                       expect[i]);
+      ck_assert_int_eq(cover_get_tag(db, bin), first_tag + i);
+      ck_assert((cover_get_flags(db, bin) & COV_FLAG_TOGGLE_PORT) != 0);
+   }
+
+   // A scalar has no index in the name and a variable is not a port
+   cover_obj_t clk = cover_get_child(db, u1, ident_new("clk"));
+   cover_obj_t clk_item = cover_get_item(db, clk, COV_ITEM_TOGGLE, 0);
+   ck_assert_int_eq(cover_count(db, clk_item, COV_REL_BINS), 2);
+   ck_assert_str_eq(
+      istr(cover_get_ident(db, cover_at(db, clk_item, COV_REL_BINS, 0),
+                           COV_ATTR_HIER)),
+      "WORK.top.u1.clk.BIN_0_TO_1");
+
+   cover_obj_t cnt = cover_get_child(db, u1, ident_new("cnt"));
+   ck_assert(cover_is_null(cnt) == false);
+   ck_assert_int_eq(cover_count(db, cover_get_item(db, cnt, COV_ITEM_TOGGLE, 0),
+                                COV_REL_BINS), 64);
+   ck_assert((cover_get_flags(db, cover_at(db, cover_get_item(
+                  db, cnt, COV_ITEM_TOGGLE, 0), COV_REL_BINS, 0))
+              & COV_FLAG_TOGGLE_SIGNAL) != 0);
+
+   cover_data_free(db);
+}
+END_TEST
+
 Suite *get_cover_tests(void)
 {
    Suite *s = suite_create("cover");
@@ -785,6 +845,7 @@ Suite *get_cover_tests(void)
    tcase_add_test(tc, test_merge4);
    tcase_add_test(tc, test_merge5);
    tcase_add_test(tc, test_vlog1);
+   tcase_add_test(tc, test_vlog2);
    suite_add_tcase(s, tc);
 
    return s;
