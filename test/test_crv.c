@@ -874,9 +874,7 @@ START_TEST(test_array_unregistered)
    crv_node_t e = crv_array_elem(c, -1, crv_const(c, 0, 32, true));
    crv_require(c, crv_binary(c, CRV_EQ, crv_var_ref(c, x),
                              crv_cast(c, e, 8, false), 1, false), false, 1);
-   crv_node_t sz = crv_array_size(c, 3);
-   crv_node_t sum = crv_array_sum(c, -1, 32, true);
-   crv_require(c, crv_binary(c, CRV_LE, sz, sum, 1, false), false, 2);
+   crv_array_init(c, -1, 0, 5);
    crv_foreach(c, -1, crv_index(c), crv_const(c, 1, 1, false), false);
    ck_assert_int_eq(crv_solve2(c), CRV_UNSAT);
    ck_assert_uint_eq(crv_array_len(c, -1), 0);

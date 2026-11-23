@@ -560,9 +560,6 @@ crv_node_t crv_cond(crv_t *c, crv_node_t test, crv_node_t t, crv_node_t f)
 
 crv_node_t crv_array_size(crv_t *c, crv_array_t a)
 {
-   if (!array_valid(c, a))
-      return crv_const(c, 0, 32, true);
-
    node_t n = { .kind = N_ASIZE, .width = 32, .sgn = true, .aux = a };
    return add_node(c, n);
 }
@@ -581,9 +578,6 @@ crv_node_t crv_array_elem(crv_t *c, crv_array_t a, crv_node_t index)
 crv_node_t crv_array_sum(crv_t *c, crv_array_t a, unsigned width,
                          bool is_signed)
 {
-   if (!array_valid(c, a))
-      return crv_const(c, 0, width, is_signed);
-
    node_t n = { .kind = N_ASUM, .width = clampw(width), .sgn = is_signed,
                 .aux = a };
    return add_node(c, n);
