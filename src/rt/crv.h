@@ -128,6 +128,7 @@ crv_node_t crv_dist(crv_t *c, crv_node_t arg, crv_dist_t d);
 // the hard constraints, trying to keep the later ones.
 void crv_require(crv_t *c, crv_node_t test, bool soft, int line);
 void crv_disable_soft(crv_t *c, crv_node_t target);
+void crv_disable_soft_if(crv_t *c, crv_node_t cond, crv_node_t target);
 
 // Every node given must be different.  Used by the unique constraint.
 void crv_unique(crv_t *c, const crv_node_t *nodes, unsigned count);
@@ -266,7 +267,7 @@ typedef enum {
    CRV_OP_FOREACH, CRV_OP_SOLVE_BEFORE, CRV_OP_VALUE, CRV_OP_ARRAY_LEN,
    CRV_OP_ARRAY_VALUE, CRV_OP_TEST_BIT, CRV_OP_SET_BIT, CRV_OP_RANDOM,
    CRV_OP_DISABLE_SOFT, CRV_OP_SEED_BEGIN, CRV_OP_SEED_END, CRV_OP_ARRAY_SUM,
-   CRV_OP_FAIL, CRV_OP_TRIAL, CRV_OP_RANDC_COMMIT,
+   CRV_OP_FAIL, CRV_OP_TRIAL, CRV_OP_RANDC_COMMIT, CRV_OP_DISABLE_SOFT_IF,
 } crv_op_t;
 
 int64_t crv_generated(crv_op_t op, const int64_t *args);

@@ -375,6 +375,9 @@ int64_t crv_generated(crv_op_t op, const int64_t *args)
    case CRV_OP_DISABLE_SOFT:
       crv_disable_soft(c, args[1]);
       return 0;
+   case CRV_OP_DISABLE_SOFT_IF:
+      crv_disable_soft_if(c, args[1], args[2]);
+      return 0;
    case CRV_OP_UNIQUE_PUSH:
       APUSH(g->unique, args[1]);
       return 0;

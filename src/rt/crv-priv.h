@@ -99,6 +99,7 @@ typedef enum { C_REQ, C_FOREACH, C_UNIQUE } ckind_t;
 typedef struct {
    ckind_t     kind;
    crv_node_t  root;
+   crv_node_t  disable_cond; // -1 or condition under which soft constraint is disabled
    int         soft;       // Index among soft constraints or -1
    unsigned    nsoft;      // Soft indices of a foreach, one per element
    crv_array_t arr;

@@ -4038,6 +4038,149 @@ START_TEST(test_dist_guarded)
 }
 END_TEST
 
+START_TEST(test_disable_soft_if)
+{
+   crv_seed(0x50f71f);
+
+   // Free cond variable: when cond==0 soft x==10 applies; when cond==1 soft is
+   // disabled so x can take any value in [0..15] (not forced to 10).
+   int c0 = 0, c1_other = 0;
+   for (int i = 0; i < 200; i++) {
+      crv_t *c = crv_new();
+      crv_var_t cond = crv_var(c, 1, false, 0);
+      crv_var_t x = crv_var(c, 4, false, 0);
+      crv_require(c, crv_binary(c, CRV_EQ, crv_var_ref(c, x),
+                                crv_const(c, 10, 4, false), 1, false),
+                  true, 1);
+      crv_disable_soft_if(c, crv_var_ref(c, cond), crv_var_ref(c, x));
+      ck_assert(crv_solve(c));
+      if (crv_value(c, cond) == 0) {
+         ck_assert_int_eq(crv_value(c, x), 10);
+         c0++;
+      }
+      else if (crv_value(c, x) != 10)
+         c1_other++;
+      crv_free(c);
+   }
+   ck_assert_int_gt(c0, 0);
+   ck_assert_int_gt(c1_other, 0);
+
+   // Later disable_soft on the condition variable does NOT disable the earlier
+   // soft constraint on x.
+   {
+      crv_t *c = crv_new();
+      crv_var_t cond = crv_var(c, 1, false, 0);
+      crv_var_t x = crv_var(c, 8, false, 0);
+      crv_require(c, crv_binary(c, CRV_EQ, crv_var_ref(c, cond),
+                                crv_const(c, 0, 1, false), 1, false),
+                  false, 1);
+      crv_require(c, crv_binary(c, CRV_EQ, crv_var_ref(c, x),
+                                crv_const(c, 42, 8, false), 1, false),
+                  true, 2);
+      crv_disable_soft_if(c, crv_var_ref(c, cond), crv_var_ref(c, x));
+      crv_disable_soft(c, crv_var_ref(c, cond));
+      ck_assert(crv_solve(c));
+      ck_assert_int_eq(crv_value(c, x), 42);
+      crv_free(c);
+   }
+
+   // Higher-priority soft y==20 conflicts with earlier soft x==10 via x==y.
+   // Disabling soft y conditionally lets x==10 win when cond==1, while y==20
+   // wins when cond==0.
+   for (int cv = 0; cv < 2; cv++) {
+      crv_t *c = crv_new();
+      crv_var_t cond = crv_var(c, 1, false, 0);
+      crv_var_t x = crv_var(c, 8, false, 0);
+      crv_var_t y = crv_var(c, 8, false, 0);
+      crv_require(c, crv_binary(c, CRV_EQ, crv_var_ref(c, cond),
+                                crv_const(c, cv, 1, false), 1, false),
+                  false, 1);
+      crv_require(c, crv_binary(c, CRV_EQ, crv_var_ref(c, x),
+                                crv_var_ref(c, y), 1, false),
+                  false, 2);
+      crv_require(c, crv_binary(c, CRV_EQ, crv_var_ref(c, x),
+                                crv_const(c, 10, 8, false), 1, false),
+                  true, 3);
+      crv_require(c, crv_binary(c, CRV_EQ, crv_var_ref(c, y),
+                                crv_const(c, 20, 8, false), 1, false),
+                  true, 4);
+      crv_disable_soft_if(c, crv_var_ref(c, cond), crv_var_ref(c, y));
+      ck_assert(crv_solve(c));
+      ck_assert_int_eq(crv_value(c, x), cv ? 10 : 20);
+      ck_assert_int_eq(crv_value(c, y), cv ? 10 : 20);
+      crv_free(c);
+   }
+
+   // Test via CRV_OP_DISABLE_SOFT_IF generated ABI
+   {
+      int64_t a_begin[] = { 0 };
+      int64_t g = crv_generated(CRV_OP_BEGIN, a_begin);
+      int64_t a_cond[] = { g, 1, 1, 0, CRV_FLAGS(1, false), 1 };
+      int64_t vc = crv_generated(CRV_OP_VAR, a_cond);
+      int64_t a_x[] = { g, 1, 2, 0, CRV_FLAGS(8, false), 1 };
+      int64_t vx = crv_generated(CRV_OP_VAR, a_x);
+      int64_t a_rc[] = { g, 1, 1, 0, CRV_FLAGS(1, false) };
+      int64_t nc = crv_generated(CRV_OP_REF, a_rc);
+      int64_t a_rx[] = { g, 1, 2, 0, CRV_FLAGS(8, false) };
+      int64_t nx = crv_generated(CRV_OP_REF, a_rx);
+      int64_t a_c1[] = { g, 1, CRV_FLAGS(1, false) };
+      int64_t k1 = crv_generated(CRV_OP_CONST, a_c1);
+      int64_t a_c55[] = { g, 55, CRV_FLAGS(8, false) };
+      int64_t k55 = crv_generated(CRV_OP_CONST, a_c55);
+      int64_t a_c77[] = { g, 77, CRV_FLAGS(8, false) };
+      int64_t k77 = crv_generated(CRV_OP_CONST, a_c77);
+
+      // soft x == 55
+      int64_t a_eq55[] = { g, CRV_EQ, nx, k55, CRV_FLAGS(1, false) };
+      int64_t eq55 = crv_generated(CRV_OP_BINARY, a_eq55);
+      int64_t a_req1[] = { g, eq55, 1, 10 };
+      crv_generated(CRV_OP_REQUIRE, a_req1);
+
+      // if (cond) disable soft x
+      int64_t a_ds[] = { g, nc, nx };
+      crv_generated(CRV_OP_DISABLE_SOFT_IF, a_ds);
+
+      // hard cond == 1, soft x == 77 (should win since earlier soft disabled)
+      int64_t a_eqc[] = { g, CRV_EQ, nc, k1, CRV_FLAGS(1, false) };
+      int64_t eqc = crv_generated(CRV_OP_BINARY, a_eqc);
+      int64_t a_req2[] = { g, eqc, 0, 11 };
+      crv_generated(CRV_OP_REQUIRE, a_req2);
+      int64_t a_eq77[] = { g, CRV_EQ, nx, k77, CRV_FLAGS(1, false) };
+      int64_t eq77 = crv_generated(CRV_OP_BINARY, a_eq77);
+      int64_t a_req3[] = { g, eq77, 1, 12 };
+      crv_generated(CRV_OP_REQUIRE, a_req3);
+
+      int64_t a_g[] = { g };
+      ck_assert_int_eq(crv_generated(CRV_OP_SOLVE, a_g), 1);
+      int64_t a_vx[] = { g, vx };
+      ck_assert_int_eq(crv_generated(CRV_OP_VALUE, a_vx), 77);
+      (void)vc;
+      crv_generated(CRV_OP_END, a_g);
+   }
+
+   // Foreach soft disabled conditionally
+   {
+      crv_t *c = crv_new();
+      crv_var_t cond = crv_var(c, 1, false, 0);
+      crv_array_t arr = crv_array(c, 8, false, 3, false, true);
+      crv_node_t idx = crv_index(c);
+      crv_foreach(c, arr, idx,
+                  crv_binary(c, CRV_EQ, crv_array_elem(c, arr, idx),
+                             crv_const(c, 33, 8, false), 1, false),
+                  true);
+      crv_disable_soft_if(c, crv_var_ref(c, cond),
+                          crv_array_size(c, arr));
+      crv_require(c, crv_binary(c, CRV_EQ, crv_var_ref(c, cond),
+                                crv_const(c, 0, 1, false), 1, false),
+                  false, 1);
+      ck_assert(crv_solve(c));
+      for (unsigned i = 0; i < 3; i++)
+         ck_assert_int_eq(crv_array_value(c, arr, i), 33);
+      crv_free(c);
+   }
+}
+END_TEST
+
 Suite *get_crv_tests(void)
 {
    Suite *s = suite_create("crv");
@@ -4108,6 +4251,7 @@ Suite *get_crv_tests(void)
    tcase_add_test(tc, test_sat_core);
    tcase_add_test(tc, test_sat_api);
    tcase_add_test(tc, test_dist_guarded);
+   tcase_add_test(tc, test_disable_soft_if);
    tcase_add_test(tc, test_fuzz_fixed);
    suite_add_tcase(s, tc);
 

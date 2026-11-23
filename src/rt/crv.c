@@ -648,15 +648,15 @@ crv_node_t crv_dist(crv_t *c, crv_node_t arg, crv_dist_t d)
 
 void crv_require(crv_t *c, crv_node_t test, bool soft, int line)
 {
-   ccons_t k = { .kind = C_REQ, .root = test,
+   ccons_t k = { .kind = C_REQ, .root = test, .disable_cond = -1,
                  .soft = soft ? c->nsoft++ : -1, .line = line };
    VEC_PUSH(c->cons, c->ncons, c->ccons, k);
 }
 
 void crv_unique(crv_t *c, const crv_node_t *nodes, unsigned count)
 {
-   ccons_t k = { .kind = C_UNIQUE, .soft = -1, .first = c->nuniq,
-                 .count = count };
+   ccons_t k = { .kind = C_UNIQUE, .disable_cond = -1, .soft = -1,
+                 .first = c->nuniq, .count = count };
    for (unsigned i = 0; i < count; i++)
       VEC_PUSH(c->uniq, c->nuniq, c->cuniq, nodes[i]);
    VEC_PUSH(c->cons, c->ncons, c->ccons, k);
@@ -675,8 +675,8 @@ void crv_foreach(crv_t *c, crv_array_t a, crv_node_t index, crv_node_t body,
    if (!array_valid(c, a))
       return;
 
-   ccons_t k = { .kind = C_FOREACH, .root = body, .arr = a, .idx = index,
-                 .soft = -1, .nsoft = 1 };
+   ccons_t k = { .kind = C_FOREACH, .root = body, .disable_cond = -1,
+                 .arr = a, .idx = index, .soft = -1, .nsoft = 1 };
    if (soft) {
       // Each element is a separate soft constraint
       const carr_t *ar = &c->arrays[a];
@@ -1599,32 +1599,60 @@ static void visit(const crv_t *c, int n, visit_fn fn, void *ctx)
 typedef struct {
    bool     *vars;
    unsigned  count;
+   bool     *arrs;
+   unsigned  acount;
    bool      found;
 } mention_t;
 
 static void collect_vars_cb(void *ctx, const node_t *nd, int n)
 {
+   (void)n;
    mention_t *m = ctx;
-   if (nd->kind == N_VAR && nd->aux >= 0 && nd->aux < m->count)
+   if (nd->kind == N_VAR && nd->aux >= 0 && (unsigned)nd->aux < m->count)
       m->vars[nd->aux] = true;
+   else if ((nd->kind == N_AELEM || nd->kind == N_ASIZE || nd->kind == N_ASUM)
+            && nd->aux >= 0 && (unsigned)nd->aux < m->acount)
+      m->arrs[nd->aux] = true;
 }
 
 static void mention_vars_cb(void *ctx, const node_t *nd, int n)
 {
+   (void)n;
    mention_t *m = ctx;
-   if (nd->kind == N_VAR && nd->aux >= 0 && nd->aux < m->count
+   if (nd->kind == N_VAR && nd->aux >= 0 && (unsigned)nd->aux < m->count
        && m->vars[nd->aux])
+      m->found = true;
+   else if ((nd->kind == N_AELEM || nd->kind == N_ASIZE || nd->kind == N_ASUM)
+            && nd->aux >= 0 && (unsigned)nd->aux < m->acount
+            && m->arrs[nd->aux])
       m->found = true;
 }
 
-void crv_disable_soft(crv_t *c, crv_node_t target)
-{
-   // Discard the soft constraints added so far which refer to a variable
+static bool is_const_node(const crv_t *c, int n);
 
-   if (c->nvars == 0)
+void crv_disable_soft_if(crv_t *c, crv_node_t cond, crv_node_t target)
+{
+   // Discard or conditionally guard soft constraints added so far which
+   // refer to any variable or array in target.
+   if (c->nvars == 0 && c->narrays == 0)
       return;
 
-   mention_t m = { .vars = xcalloc(c->nvars), .count = c->nvars };
+   if (cond >= 0 && is_const_node(c, cond)) {
+      ectx_t E = { .c = c };
+      const int64_t cv = ev(&E, cond);
+      if (!E.fail) {
+         if (cv == 0)
+            return;
+         cond = -1;
+      }
+   }
+
+   mention_t m = {
+      .vars = c->nvars ? xcalloc(c->nvars) : NULL,
+      .count = c->nvars,
+      .arrs = c->narrays ? xcalloc(c->narrays) : NULL,
+      .acount = c->narrays,
+   };
    visit(c, target, collect_vars_cb, &m);
 
    for (unsigned i = 0; i < c->ncons; i++) {
@@ -1632,12 +1660,29 @@ void crv_disable_soft(crv_t *c, crv_node_t target)
       if (cc->soft < 0 || cc->dead)
          continue;
 
-      m.found = false;
-      visit(c, cc->root, mention_vars_cb, &m);
-      cc->dead |= m.found;
+      m.found = cc->kind == C_FOREACH && cc->arr >= 0
+         && (unsigned)cc->arr < m.acount && m.arrs[cc->arr];
+      if (!m.found)
+         visit(c, cc->root, mention_vars_cb, &m);
+      if (!m.found)
+         continue;
+
+      if (cond < 0)
+         cc->dead = true;
+      else if (cc->disable_cond < 0)
+         cc->disable_cond = cond;
+      else
+         cc->disable_cond = crv_binary(c, CRV_LOG_OR, cc->disable_cond,
+                                       cond, 1, false);
    }
 
    free(m.vars);
+   free(m.arrs);
+}
+
+void crv_disable_soft(crv_t *c, crv_node_t target)
+{
+   crv_disable_soft_if(c, -1, target);
 }
 
 static bool is_const_node(const crv_t *c, int n)
@@ -1821,6 +1866,8 @@ static void expand_foreach(prob_t *P, ictx_t *I, const ccons_t *f,
 
    idxlist_t l = { .n = 0 };
    visit(c, f->root, idx_cb, &l);
+   if (f->disable_cond >= 0)
+      visit(c, f->disable_cond, idx_cb, &l);
 
    int own = c->nodes[f->idx].aux;
    int ids[MAX_BIND];
@@ -1862,8 +1909,13 @@ static void expand_foreach(prob_t *P, ictx_t *I, const ccons_t *f,
       if (sid >= 0 && sid == f->soft && nd == 1)
          sid += MIN(cnt[0], f->nsoft - 1);
 
-      if (sid < 0 || active[sid])
-         add_pcons(P, C_REQ, inst(I, f->root), sid, f->line);
+      if (sid < 0 || active[sid]) {
+         int root = inst(I, f->root);
+         if (f->disable_cond >= 0)
+            root = crv_binary(c, CRV_LOG_OR, inst(I, f->disable_cond),
+                              root, 1, false);
+         add_pcons(P, C_REQ, root, sid, f->line);
+      }
       if (I->toobig)
          return;
 
@@ -2586,8 +2638,11 @@ static prob_t *prob_build(crv_t *c, int mode, const unsigned *sizes,
       bool skip = false;
       if (mode == 1) {
          crv_rsize_t rs = { false, c };
-         if (cc->kind == C_REQ)
+         if (cc->kind == C_REQ) {
             visit(c, cc->root, rsize_cb, &rs);
+            if (cc->disable_cond >= 0)
+               visit(c, cc->disable_cond, rsize_cb, &rs);
+         }
          else {
             for (unsigned i = 0; i < cc->count; i++)
                visit(c, c->uniq[cc->first + i], rsize_cb, &rs);
@@ -2598,8 +2653,13 @@ static prob_t *prob_build(crv_t *c, int mode, const unsigned *sizes,
          continue;
 
       I.nb = 0;
-      if (cc->kind == C_REQ)
-         add_pcons(P, C_REQ, inst(&I, cc->root), cc->soft, cc->line);
+      if (cc->kind == C_REQ) {
+         int root = inst(&I, cc->root);
+         if (cc->disable_cond >= 0)
+            root = crv_binary(c, CRV_LOG_OR, inst(&I, cc->disable_cond),
+                              root, 1, false);
+         add_pcons(P, C_REQ, root, cc->soft, cc->line);
+      }
       else {
          add_pcons(P, C_UNIQUE, -1, cc->soft, cc->line);
          P->cons[P->ncons - 1].unstart = P->nun;
