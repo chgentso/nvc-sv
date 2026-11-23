@@ -3112,7 +3112,7 @@ svcrvmodeq1 verilog
 svcrvlocalcall1 verilog
 svcrvsuper1 verilog
 svcrvdistzero1 verilog
-svcrvargsorry1 verilog,fail,gold
+svcrvargmember1 verilog
 svcrvwidearr1 verilog,fail,gold
 svcrvsysfunc1 verilog
 svcrvwithempty1 verilog
@@ -3143,3 +3143,4 @@ svcrvassocobj1 verilog
 svcrvassocobj2 verilog
 svstdrandassoc1 verilog
 svcrvstdexpr1 verilog
+svcrvargobj1 verilog
