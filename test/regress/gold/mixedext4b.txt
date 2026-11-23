@@ -1,0 +1,1 @@
+sorry, VHDL external name referencing Verilog unpacked array mem is not supported

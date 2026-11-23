@@ -1,0 +1,1 @@
+type of Verilog signal vec8 is logic [7:0] (width 8) but external name has type STD_LOGIC_VECTOR (length 4)

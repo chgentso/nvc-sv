@@ -119,9 +119,142 @@ static bool is_implicit_block(tree_t block)
    return tree_subkind(hier) == T_COMPONENT;
 }
 
+static vlog_node_t unwrap_verilog_type(vlog_node_t t)
+{
+   while (t != NULL) {
+      if (vlog_kind(t) == V_TYPE_DECL)
+         t = vlog_type(t);
+      else if (vlog_kind(t) == V_REF && vlog_has_ref(t))
+         t = vlog_ref(t);
+      else
+         break;
+   }
+   return t;
+}
+
+static const char *verilog_dynamic_kind_str(vlog_node_t vtype)
+{
+   vlog_node_t ut = unwrap_verilog_type(vtype);
+   if (ut == NULL)
+      return "dynamic object";
+
+   switch (vlog_kind(ut)) {
+   case V_CLASS_DECL:
+      return "class handle";
+   case V_DATA_TYPE:
+      switch (vlog_subkind(ut)) {
+      case DT_STRING:    return "string";
+      case DT_DYNARRAY:  return "dynamic array";
+      case DT_QUEUE:     return "queue";
+      case DT_ASSOC:     return "associative array";
+      case DT_EVENT:     return "event";
+      case DT_CHANDLE:   return "chandle";
+      case DT_MAILBOX:   return "mailbox";
+      case DT_SEMAPHORE: return "semaphore";
+      case DT_PROCESS:   return "process handle";
+      case DT_VIRTUAL:   return "virtual interface";
+      default:           return "dynamic object";
+      }
+   default:
+      return "dynamic object";
+   }
+}
+
+static void fmt_verilog_type(vlog_node_t vd, uint32_t width, bool is_net,
+                             text_buf_t *tb)
+{
+   vlog_node_t vtype = vlog_has_type(vd) ? vlog_type(vd) : NULL;
+   vlog_node_t ut = unwrap_verilog_type(vtype);
+
+   if (ut == NULL) {
+      tb_printf(tb, "%s", is_net ? "wire" : "logic");
+      if (width > 1)
+         tb_printf(tb, " [%u:0]", width - 1);
+      return;
+   }
+
+   switch (vlog_kind(ut)) {
+   case V_CLASS_DECL:
+      tb_printf(tb, "class %s", istr(vlog_ident(ut)));
+      return;
+   case V_STRUCT_DECL:
+      tb_printf(tb, "%s struct",
+                (vlog_flags(ut) & VLOG_F_PACKED) ? "packed" : "unpacked");
+      if ((vlog_flags(ut) & VLOG_F_PACKED) && width > 1)
+         tb_printf(tb, " [%u:0]", width - 1);
+      return;
+   case V_UNION_DECL:
+      tb_printf(tb, "%s union",
+                (vlog_flags(ut) & VLOG_F_PACKED) ? "packed" : "unpacked");
+      if ((vlog_flags(ut) & VLOG_F_PACKED) && width > 1)
+         tb_printf(tb, " [%u:0]", width - 1);
+      return;
+   case V_ENUM_DECL:
+      tb_printf(tb, "enum");
+      if (width > 1)
+         tb_printf(tb, " [%u:0]", width - 1);
+      return;
+   case V_DATA_TYPE:
+      switch (vlog_subkind(ut)) {
+      case DT_REAL:      tb_cat(tb, "real"); return;
+      case DT_SHORTREAL: tb_cat(tb, "shortreal"); return;
+      case DT_REALTIME:  tb_cat(tb, "realtime"); return;
+      case DT_INT:       tb_cat(tb, "int"); return;
+      case DT_INTEGER:   tb_cat(tb, "integer"); return;
+      case DT_SHORTINT:  tb_cat(tb, "shortint"); return;
+      case DT_LONGINT:   tb_cat(tb, "longint"); return;
+      case DT_BYTE:      tb_cat(tb, "byte"); return;
+      case DT_TIME:      tb_cat(tb, "time"); return;
+      case DT_STRING:    tb_cat(tb, "string"); return;
+      case DT_DYNARRAY:  tb_cat(tb, "dynamic array"); return;
+      case DT_QUEUE:     tb_cat(tb, "queue"); return;
+      case DT_ASSOC:     tb_cat(tb, "associative array"); return;
+      case DT_EVENT:     tb_cat(tb, "event"); return;
+      case DT_CHANDLE:   tb_cat(tb, "chandle"); return;
+      case DT_BIT:
+         tb_cat(tb, "bit");
+         if (width > 1)
+            tb_printf(tb, " [%u:0]", width - 1);
+         return;
+      default:
+         tb_cat(tb, is_net ? "wire" : "logic");
+         if (width > 1)
+            tb_printf(tb, " [%u:0]", width - 1);
+         return;
+      }
+   default:
+      tb_cat(tb, is_net ? "wire" : "logic");
+      if (width > 1)
+         tb_printf(tb, " [%u:0]", width - 1);
+      return;
+   }
+}
+
+static uint8_t vhdl_int_byte_size(type_t type)
+{
+   type_t base = type_base_recur(type);
+   tree_t r = type_dim(base, 0);
+   int64_t low, high;
+   if (!folded_bounds(r, &low, &high))
+      return 8;
+
+   switch (bits_for_range(low, high)) {
+   case 1:
+   case 8:  return 1;
+   case 16: return 2;
+   case 32: return 4;
+   default: return 8;
+   }
+}
+
 static void bind_verilog_external_name(tree_t name, tree_t where,
                                        tree_t container, jit_scalar_t *args)
 {
+   if (tree_class(name) == C_VARIABLE)
+      jit_msg(tree_loc(name), DIAG_FATAL, "sorry, VHDL external variable "
+              "referencing Verilog object %s is not supported",
+              istr(tree_ident(where)));
+
    if (tree_class(name) != C_SIGNAL)
       jit_msg(tree_loc(name), DIAG_FATAL, "external name referencing Verilog "
               "object %s must have class signal", istr(tree_ident(where)));
@@ -140,15 +273,31 @@ static void bind_verilog_external_name(tree_t name, tree_t where,
    jit_t *j = jit_for_thread();
    jit_handle_t handle = jit_compile(j, tree_ident2(h));
 
+   vlog_node_t vd = NULL;
    ident_t var_name = NULL;
    bool sv_is_net = false;
    if (tree_kind(where) == T_VERILOG) {
-      vlog_node_t vd = tree_vlog(where);
-      if (vlog_kind(vd) != V_VAR_DECL && vlog_kind(vd) != V_NET_DECL)
-         jit_msg(tree_loc(name), DIAG_FATAL, "Verilog object %s is not a "
-                 "signal", istr(tree_ident(where)));
-      var_name = vlog_ident(vd);
-      sv_is_net = (vlog_kind(vd) == V_NET_DECL);
+      vd = tree_vlog(where);
+      switch (vlog_kind(vd)) {
+      case V_VAR_DECL:
+      case V_NET_DECL:
+         var_name = vlog_ident(vd);
+         sv_is_net = (vlog_kind(vd) == V_NET_DECL);
+         break;
+      case V_CLASS_DECL:
+         jit_msg(tree_loc(name), DIAG_FATAL, "sorry, VHDL external name "
+                 "referencing Verilog class %s is not supported",
+                 istr(tree_ident(where)));
+      case V_FUNC_DECL:
+      case V_TASK_DECL:
+         jit_msg(tree_loc(name), DIAG_FATAL, "sorry, VHDL external name "
+                 "referencing Verilog subprogram %s is not supported",
+                 istr(tree_ident(where)));
+      default:
+         jit_msg(tree_loc(name), DIAG_FATAL, "sorry, VHDL external name "
+                 "referencing Verilog object %s is not supported",
+                 istr(tree_ident(where)));
+      }
    }
    else {
       assert(tree_kind(where) == T_PORT_DECL);
@@ -157,9 +306,9 @@ static void bind_verilog_external_name(tree_t name, tree_t where,
       for (int i = 0; i < nports; i++) {
          vlog_node_t p = vlog_ref(vlog_port(body, i));
          if (ident_casecmp(vlog_ident(p), tree_ident(where))) {
-            vlog_node_t d = vlog_ref(p);
-            var_name = vlog_ident(d);
-            sv_is_net = (vlog_kind(d) == V_NET_DECL);
+            vd = vlog_ref(p);
+            var_name = vlog_ident(vd);
+            sv_is_net = (vlog_kind(vd) == V_NET_DECL);
             break;
          }
       }
@@ -168,36 +317,98 @@ static void bind_verilog_external_name(tree_t name, tree_t where,
                  istr(tree_ident(where)));
    }
 
+   // Guard non-signal Verilog representations before dereferencing the
+   // instance frame slot as a sig_shared_t *.
+   vlog_node_t vtype = vlog_has_type(vd) ? vlog_type(vd) : NULL;
+   vlog_node_t utype = unwrap_verilog_type(vtype);
+   if (vtype != NULL && vlog_is_dynamic_type(vtype))
+      jit_msg(tree_loc(name), DIAG_FATAL, "sorry, VHDL external name "
+              "referencing Verilog %s %s is not supported",
+              verilog_dynamic_kind_str(vtype), istr(var_name));
+
+   if (vlog_is_fixed_unpacked(vd))
+      jit_msg(tree_loc(name), DIAG_FATAL, "sorry, VHDL external name "
+              "referencing Verilog unpacked array %s is not supported",
+              istr(var_name));
+
+   if (utype != NULL
+       && (vlog_kind(utype) == V_STRUCT_DECL || vlog_kind(utype) == V_UNION_DECL)
+       && !(vlog_flags(utype) & VLOG_F_PACKED))
+      jit_msg(tree_loc(name), DIAG_FATAL, "sorry, VHDL external name "
+              "referencing Verilog unpacked %s %s is not supported",
+              vlog_kind(utype) == V_STRUCT_DECL ? "struct" : "union",
+              istr(var_name));
+
    void *ptr = jit_get_frame_var(j, handle, ctx, var_name);
    sig_shared_t *sv_ss = *(sig_shared_t **)ptr;
    rt_signal_t *sv_sig = container_of(sv_ss, rt_signal_t, shared);
 
+   const uint32_t sv_width = signal_width(sv_sig);
+   const bool sv_is_real = (vtype != NULL && vlog_is_real(vtype))
+      || (sv_sig->nexus.size == 8 && sv_width == 1);
+
+   LOCAL_TEXT_BUF vtb = tb_new();
+   fmt_verilog_type(vd, sv_width, sv_is_net, vtb);
+
    type_t expect = tree_type(name);
 
-   if (type_is_real(expect) && sv_sig->nexus.size == 8
-       && signal_width(sv_sig) == 1) {
-      args[0].pointer = ptr;
+   if (type_is_real(expect)) {
+      if (!sv_is_real || sv_sig->nexus.size != 8 || sv_width != 1)
+         jit_msg(tree_loc(name), DIAG_FATAL, "type of Verilog signal %s is %s "
+                 "but external name has type %pT",
+                 istr(var_name), tb_get(vtb), expect);
+
+      sig_shared_t *proxy = model_mixed_signal_proxy(get_model(), sv_sig,
+                                                     sv_is_net,
+                                                     MIXED_BRIDGE_REAL,
+                                                     false, sizeof(double),
+                                                     where);
+      jit_scalar_t *slots = jit_mspace_alloc(2 * sizeof(jit_scalar_t));
+      slots[0].pointer = proxy;
+      slots[1].integer = 0;
+      args[0].pointer = slots;
       return;
    }
 
-   if (sv_sig->nexus.size != 1)
-      jit_msg(tree_loc(name), DIAG_FATAL, "cannot bind VHDL external name of "
-              "type %pT to Verilog signal %s", expect, istr(var_name));
+   if (sv_is_real || sv_sig->nexus.size != 1)
+      jit_msg(tree_loc(name), DIAG_FATAL, "type of Verilog signal %s is %s "
+              "but external name has type %pT",
+              istr(var_name), tb_get(vtb), expect);
+
+   if (type_is_integer(expect)) {
+      if (sv_width == 0 || sv_width > 64)
+         jit_msg(tree_loc(name), DIAG_FATAL, "type of Verilog signal %s is %s "
+                 "but external name has type %pT",
+                 istr(var_name), tb_get(vtb), expect);
+
+      const bool sv_signed = vtype != NULL && vlog_is_signed(vtype);
+      const uint8_t vsize = vhdl_int_byte_size(expect);
+      sig_shared_t *proxy = model_mixed_signal_proxy(get_model(), sv_sig,
+                                                     sv_is_net,
+                                                     MIXED_BRIDGE_INT,
+                                                     sv_signed, vsize, where);
+      jit_scalar_t *slots = jit_mspace_alloc(2 * sizeof(jit_scalar_t));
+      slots[0].pointer = proxy;
+      slots[1].integer = 0;
+      args[0].pointer = slots;
+      return;
+   }
 
    const bool is_arr = type_is_array(expect);
    type_t elem = is_arr ? type_elem(expect) : expect;
-   const bool vhdl_is_bit = type_eq(elem, std_type(NULL, STD_BIT));
+   const bool vhdl_is_bool = !is_arr && type_eq(expect, std_type(NULL, STD_BOOLEAN));
+   const bool vhdl_is_bit = vhdl_is_bool || type_eq(elem, std_type(NULL, STD_BIT));
    const bool vhdl_is_sl = type_eq(elem, ieee_type(IEEE_STD_ULOGIC));
    if ((!vhdl_is_bit && !vhdl_is_sl) || (is_arr && dimension_of(expect) != 1))
-      jit_msg(tree_loc(name), DIAG_FATAL, "cannot bind VHDL external name of "
-              "type %pT to Verilog signal %s", expect, istr(var_name));
+      jit_msg(tree_loc(name), DIAG_FATAL, "type of Verilog signal %s is %s "
+              "but external name has type %pT",
+              istr(var_name), tb_get(vtb), expect);
 
-   const uint32_t sv_width = signal_width(sv_sig);
    if (!is_arr) {
       if (sv_width != 1)
-         jit_msg(tree_loc(name), DIAG_FATAL, "Verilog signal %s has width %u "
+         jit_msg(tree_loc(name), DIAG_FATAL, "type of Verilog signal %s is %s "
                  "but external name has scalar type %pT",
-                 istr(var_name), sv_width, expect);
+                 istr(var_name), tb_get(vtb), expect);
    }
    else if (type_const_bounds(expect)) {
       tree_t r = range_of(expect, 0);
@@ -207,13 +418,15 @@ static void bind_verilog_external_name(tree_t name, tree_t where,
       const int64_t length =
          MAX(0, dir == RANGE_TO ? right - left + 1 : left - right + 1);
       if (length != sv_width)
-         jit_msg(tree_loc(name), DIAG_FATAL, "Verilog signal %s has width %u "
-                 "but external name has length %"PRIi64,
-                 istr(var_name), sv_width, length);
+         jit_msg(tree_loc(name), DIAG_FATAL, "type of Verilog signal %s is %s "
+                 "(width %u) but external name has type %pT (length %"PRIi64")",
+                 istr(var_name), tb_get(vtb), sv_width, expect, length);
    }
 
+   const mixed_bridge_kind_t kind =
+      vhdl_is_bit ? MIXED_BRIDGE_BIT : MIXED_BRIDGE_LOGIC;
    sig_shared_t *proxy = model_mixed_signal_proxy(get_model(), sv_sig,
-                                                  sv_is_net, vhdl_is_bit,
+                                                  sv_is_net, kind, false, 1,
                                                   where);
 
    if (is_arr) {

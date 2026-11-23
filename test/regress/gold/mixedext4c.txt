@@ -1,0 +1,1 @@
+sorry, VHDL external variable referencing Verilog object v is not supported

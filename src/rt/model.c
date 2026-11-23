@@ -125,8 +125,10 @@ typedef A(init_event_t) init_event_list_t;
 typedef struct _rt_mixed_bridge {
    rt_signal_t             *sv_sig;
    rt_signal_t             *vhdl_sig;
+   mixed_bridge_kind_t      kind;
    bool                     sv_is_net;
-   bool                     vhdl_is_bit;
+   bool                     sv_is_signed;
+   uint8_t                  vhdl_size;
    struct _rt_mixed_bridge *next;
 } rt_mixed_bridge_t;
 
@@ -4967,17 +4969,75 @@ static uint8_t vhdl_to_sv_byte(uint8_t b, bool sv_is_net, bool vhdl_is_bit)
       return lv;
 }
 
+static void sv_to_vhdl_int(const rt_mixed_bridge_t *b, void *dst)
+{
+   const uint32_t width = signal_width(b->sv_sig);
+   const uint8_t *src = b->sv_sig->shared.data;
+
+   uint64_t val = 0;
+   for (uint32_t i = 0; i < width; i++) {
+      const uint8_t bit = ((src[i] & 3) == 1) ? 1 : 0;
+      val = (val << 1) | bit;
+   }
+
+   if (b->sv_is_signed && width > 0 && width < 64 && ((src[0] & 3) == 1))
+      val |= (~UINT64_C(0) << width);
+
+   switch (b->vhdl_size) {
+   case 1: *(int8_t *)dst = (int8_t)val; break;
+   case 2: *(int16_t *)dst = (int16_t)val; break;
+   case 4: *(int32_t *)dst = (int32_t)val; break;
+   case 8: *(int64_t *)dst = (int64_t)val; break;
+   default: should_not_reach_here();
+   }
+}
+
+static void vhdl_int_to_sv(const rt_mixed_bridge_t *b, const void *src,
+                           uint8_t *dst)
+{
+   int64_t val = 0;
+   switch (b->vhdl_size) {
+   case 1: val = *(const int8_t *)src; break;
+   case 2: val = *(const int16_t *)src; break;
+   case 4: val = *(const int32_t *)src; break;
+   case 8: val = *(const int64_t *)src; break;
+   default: should_not_reach_here();
+   }
+
+   const uint32_t width = signal_width(b->sv_sig);
+   for (uint32_t i = 0; i < width; i++) {
+      const uint32_t bit_idx = width - 1 - i;
+      const uint8_t bit = (bit_idx < 64)
+         ? (uint8_t)(((uint64_t)val >> bit_idx) & 1)
+         : (val < 0 ? 1 : 0);
+      dst[i] = vhdl_to_sv_byte(bit, b->sv_is_net, true);
+   }
+}
+
 static void mixed_bridge_sv_event(uint64_t now, rt_signal_t *signal,
                                   rt_watch_t *watch, void *user)
 {
    rt_mixed_bridge_t *b = user;
    rt_model_t *m = get_model();
+
+   if (b->kind == MIXED_BRIDGE_INT) {
+      uint8_t buf[8] = { 0 };
+      sv_to_vhdl_int(b, buf);
+      sched_deposit(m, b->vhdl_sig, buf, 0, 1, 0, false);
+      return;
+   }
+   else if (b->kind == MIXED_BRIDGE_REAL) {
+      sched_deposit(m, b->vhdl_sig, b->sv_sig->shared.data, 0, 1, 0, false);
+      return;
+   }
+
    const uint32_t width = signal_width(b->sv_sig);
+   const bool vhdl_is_bit = (b->kind == MIXED_BRIDGE_BIT);
 
    uint8_t *buf LOCAL = xmalloc(width);
    for (uint32_t i = 0; i < width; i++)
       buf[i] = sv_to_vhdl_byte(b->sv_sig->shared.data[i], b->sv_is_net,
-                               b->vhdl_is_bit);
+                               vhdl_is_bit);
 
    sched_deposit(m, b->vhdl_sig, buf, 0, width, 0, false);
 }
@@ -4989,10 +5049,23 @@ static void mixed_bridge_force(rt_model_t *m, rt_signal_t *s,
       if (b->vhdl_sig != s)
          continue;
 
+      if (b->kind == MIXED_BRIDGE_INT) {
+         const uint32_t width = signal_width(b->sv_sig);
+         uint8_t *buf LOCAL = xmalloc(width);
+         vhdl_int_to_sv(b, values, buf);
+         force_signal(m, b->sv_sig, buf, 0, width);
+         return;
+      }
+      else if (b->kind == MIXED_BRIDGE_REAL) {
+         force_signal(m, b->sv_sig, values, 0, 1);
+         return;
+      }
+
+      const bool vhdl_is_bit = (b->kind == MIXED_BRIDGE_BIT);
       const uint8_t *src = values;
       uint8_t *buf LOCAL = xmalloc(count);
       for (size_t i = 0; i < count; i++)
-         buf[i] = vhdl_to_sv_byte(src[i], b->sv_is_net, b->vhdl_is_bit);
+         buf[i] = vhdl_to_sv_byte(src[i], b->sv_is_net, vhdl_is_bit);
 
       force_signal(m, b->sv_sig, buf, offset, count);
       return;
@@ -5006,29 +5079,59 @@ static void mixed_bridge_release(rt_model_t *m, rt_signal_t *s,
       if (b->vhdl_sig != s)
          continue;
 
+      uint8_t *driving = b->vhdl_sig->shared.data + 2 * b->vhdl_sig->shared.size;
+      if (b->kind == MIXED_BRIDGE_INT) {
+         const uint32_t sv_width = signal_width(b->sv_sig);
+         sv_to_vhdl_int(b, driving);
+         if (!b->sv_is_net)
+            sched_deposit(m, b->sv_sig, b->sv_sig->shared.data, 0, sv_width,
+                          -1, false);
+         release_signal(m, b->sv_sig, 0, sv_width);
+         return;
+      }
+      else if (b->kind == MIXED_BRIDGE_REAL) {
+         memcpy(driving, b->sv_sig->shared.data, sizeof(double));
+         if (!b->sv_is_net)
+            sched_deposit(m, b->sv_sig, b->sv_sig->shared.data, 0, 1,
+                          -1, false);
+         release_signal(m, b->sv_sig, 0, 1);
+         return;
+      }
+
       // Sync the proxy's default/driving area with the current SV value so
       // releasing the proxy does not revert to stale initial data
-      uint8_t *driving = b->vhdl_sig->shared.data + 2 * b->vhdl_sig->shared.size;
+      const bool vhdl_is_bit = (b->kind == MIXED_BRIDGE_BIT);
       for (size_t i = 0; i < count; i++)
          driving[offset + i] = sv_to_vhdl_byte(
-            b->sv_sig->shared.data[offset + i], b->sv_is_net, b->vhdl_is_bit);
+            b->sv_sig->shared.data[offset + i], b->sv_is_net, vhdl_is_bit);
 
+      if (!b->sv_is_net)
+         sched_deposit(m, b->sv_sig, b->sv_sig->shared.data + offset,
+                       offset, count, -1, false);
       release_signal(m, b->sv_sig, offset, count);
       return;
    }
 }
 
 sig_shared_t *model_mixed_signal_proxy(rt_model_t *m, rt_signal_t *sv_sig,
-                                       bool sv_is_net, bool vhdl_is_bit,
-                                       tree_t where)
+                                       bool sv_is_net,
+                                       mixed_bridge_kind_t kind,
+                                       bool sv_is_signed,
+                                       uint8_t vhdl_size, tree_t where)
 {
    for (rt_mixed_bridge_t *b = m->mixed_bridges; b != NULL; b = b->next) {
-      if (b->sv_sig == sv_sig && b->vhdl_is_bit == vhdl_is_bit)
+      if (b->sv_sig == sv_sig && b->kind == kind
+          && b->vhdl_size == vhdl_size && b->sv_is_signed == sv_is_signed)
          return &(b->vhdl_sig->shared);
    }
 
-   const uint32_t width = signal_width(sv_sig);
-   const size_t datasz = MAX(3 * width, 8);
+   const uint32_t sv_width = signal_width(sv_sig);
+   const bool scalar_word = (kind == MIXED_BRIDGE_INT
+                             || kind == MIXED_BRIDGE_REAL);
+   const uint32_t vhdl_width = scalar_word ? 1 : sv_width;
+   const uint8_t elem_size = scalar_word ? vhdl_size : 1;
+   const size_t total_bytes = (size_t)vhdl_width * elem_size;
+   const size_t datasz = MAX(3 * total_bytes, 8);
    rt_signal_t *s = static_alloc(m, sizeof(rt_signal_t) + datasz);
 
    s->where   = where;
@@ -5037,10 +5140,10 @@ sig_shared_t *model_mixed_signal_proxy(rt_model_t *m, rt_signal_t *sv_sig,
    s->parent  = sv_sig->parent;
 
    s->shared.flags = 0;
-   s->shared.size  = width;
+   s->shared.size  = total_bytes;
 
-   s->nexus.width        = width;
-   s->nexus.size         = 1;
+   s->nexus.width        = vhdl_width;
+   s->nexus.size         = elem_size;
    s->nexus.n_sources    = 0;
    s->nexus.offset       = 0;
    s->nexus.flags        = NET_F_FAST_DRIVER | NET_F_HAS_INITIAL;
@@ -5054,25 +5157,40 @@ sig_shared_t *model_mixed_signal_proxy(rt_model_t *m, rt_signal_t *sv_sig,
    m->nexus_tail = &(s->nexus.chain);
    m->n_signals++;
 
-   uint8_t *eff = s->shared.data;
-   uint8_t *last = eff + width;
-   uint8_t *driving = eff + 2 * width;
-   for (uint32_t i = 0; i < width; i++) {
-      uint8_t v = sv_to_vhdl_byte(sv_sig->shared.data[i], sv_is_net,
-                                  vhdl_is_bit);
-      eff[i] = last[i] = driving[i] = v;
-   }
-
    rt_mixed_bridge_t *b = xcalloc(sizeof(rt_mixed_bridge_t));
-   b->sv_sig      = sv_sig;
-   b->vhdl_sig    = s;
-   b->sv_is_net   = sv_is_net;
-   b->vhdl_is_bit = vhdl_is_bit;
-   b->next        = m->mixed_bridges;
+   b->sv_sig       = sv_sig;
+   b->vhdl_sig     = s;
+   b->kind         = kind;
+   b->sv_is_net    = sv_is_net;
+   b->sv_is_signed = sv_is_signed;
+   b->vhdl_size    = elem_size;
+   b->next         = m->mixed_bridges;
    m->mixed_bridges = b;
 
+   uint8_t *eff = s->shared.data;
+   uint8_t *last = eff + total_bytes;
+   uint8_t *driving = eff + 2 * total_bytes;
+   if (kind == MIXED_BRIDGE_INT) {
+      sv_to_vhdl_int(b, eff);
+      memcpy(last, eff, elem_size);
+      memcpy(driving, eff, elem_size);
+   }
+   else if (kind == MIXED_BRIDGE_REAL) {
+      memcpy(eff, sv_sig->shared.data, elem_size);
+      memcpy(last, eff, elem_size);
+      memcpy(driving, eff, elem_size);
+   }
+   else {
+      const bool vhdl_is_bit = (kind == MIXED_BRIDGE_BIT);
+      for (uint32_t i = 0; i < sv_width; i++) {
+         uint8_t v = sv_to_vhdl_byte(sv_sig->shared.data[i], sv_is_net,
+                                     vhdl_is_bit);
+         eff[i] = last[i] = driving[i] = v;
+      }
+   }
+
    rt_watch_t *w = watch_new(m, mixed_bridge_sv_event, b, WATCH_EVENT, 1);
-   model_set_event_cb(m, sv_sig, 0, width, w);
+   model_set_event_cb(m, sv_sig, 0, sv_width, w);
 
    return &(s->shared);
 }

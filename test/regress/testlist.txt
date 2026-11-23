@@ -3204,3 +3204,8 @@ resunwind1      2008
 resunwind2      2008,fail
 resunwind3      2008
 mixedext1       mixed,2008
+mixedext2       mixed,2008
+mixedext3       mixed,2008,fail,gold
+mixedext4       mixed,2008,fail,gold
+mixedext4b      mixed,2008,fail,gold
+mixedext4c      mixed,2008,fail,gold

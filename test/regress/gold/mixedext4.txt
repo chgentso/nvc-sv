@@ -1,0 +1,1 @@
+sorry, VHDL external name referencing Verilog dynamic array dyn_arr is not supported
