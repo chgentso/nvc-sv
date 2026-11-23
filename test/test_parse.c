@@ -6513,7 +6513,6 @@ START_TEST(test_vests2)
    const error_t expect[] = {
       { 39, "design unit FAIL-C12S03B02X02P05N01I03064ARCH_A not found in " },
       { 41, "no visible declaration for TEST" },
-      { 41, "cannot determine type of OPEN expression" },
       { -1, NULL }
    };
    expect_errors(expect);
@@ -7875,6 +7874,24 @@ START_TEST(test_gindex)
 }
 END_TEST
 
+START_TEST(test_missingunit)
+{
+   input_from_file(TESTDIR "/parse/missingunit.vhd");
+
+   const error_t expect[] = {
+      { 12, "design unit NOT_HERE not found in library WORK" },
+      { 16, "design unit NOT_HERE-RTL not found in library WORK" },
+      { 19, "no visible declaration for NOCOMP" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   parse_and_check(T_ENTITY, T_ARCH);
+
+   check_expected_errors();
+}
+END_TEST
+
 Suite *get_parse_tests(void)
 {
    Suite *s = suite_create("parse");
@@ -8089,6 +8106,7 @@ Suite *get_parse_tests(void)
    tcase_add_test(tc_core, test_issue1692);
    tcase_add_test(tc_core, test_litsep);
    tcase_add_test(tc_core, test_gindex);
+   tcase_add_test(tc_core, test_missingunit);
    suite_add_tcase(s, tc_core);
 
    return s;

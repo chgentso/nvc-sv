@@ -4497,6 +4497,16 @@ static tree_t p_association_element(tree_t unit, int pos, tree_t formal,
       tree_set_pos(p, pos);
    }
 
+   if (unit == NULL && kind != F_SUBPROGRAM) {
+      // The unit being instantiated is missing so there are no formals:
+      // a named formal may have resolved to an unrelated object in an
+      // outer scope.  Give the actual the error type to avoid cascading
+      // errors.
+      formal = NULL;
+      class = C_DEFAULT;
+      type = type_new(T_NONE);
+   }
+
    tree_t value = NULL;
    if (kind == F_GENERIC_MAP && formal != NULL && onebit_generics != NULL
        && hset_contains(onebit_generics, formal))
