@@ -60,3 +60,31 @@
   scope and block function, about 7-11 kB at run time.  A parameter of a shared iteration read through a
   hierarchical name is evaluated from the genvar values only for arithmetic, comparison and conditional
   expressions; anything else is a "sorry" (NVC_GEN_SHARE=off avoids it).
+- Constrained random, limits found by the review of the solver (own tests in test/regress/svcrv*; none of these
+  is a crash, each is a sorry, a warning or a randomize() that fails):
+  - `randsequence` (IEEE 1800-2017 18.17): production weights, `rand join`, `break`/`return` inside a production
+    and arguments of productions are not all supported or tested; a sequence that uses one of them may take the
+    wrong branch.  Not looked at in this review.
+  - `rand real` and a real value in a constraint (1800-2023): not supported; the property is not randomized.
+  - `**` in a constraint: a constant exponent is expanded to multiplications (also a negative one), the power
+    of two with a variable exponent is a shift; any other variable exponent, and `**` on a value wider than 64
+    bits, is a sorry.
+  - A function called in a constraint with a random variable as an argument is a run-time sorry that names the
+    function: IEEE 1800-2017 18.5.12 solves the argument first and calls the function, which needs a staged
+    solve (the function result then takes part in the constraints).
+  - A constraint over the elements of a dynamic array whose size the solver chooses, when it needs a call or
+    a dist per element (the foreach is unrolled over the length the array has when randomize() is called), is
+    built for that length: the first call on an empty array gets no element constraints.  `sum() with (e)`,
+    `product()`, `and()`, `or()` and `xor()` with an expression over such an array are built for the current
+    length and add the constraint size == length, so randomize() fails (with the unchecked-result warning)
+    until the array has been given the size the constraints ask for.  `sum() with (item)` and `sum() with
+    (int'(item))` are exact for any size.
+  - An element of a dynamic array or queue of values wider than 64 bits in a constraint, and a constraint on a
+    queue of queues or a dynamic array of dynamic arrays that is not a rand property, are a sorry or a warning.
+  - `static` rand variables are not randomized (the property keeps its value); the mode of a static constraint
+    is shared by all objects but rand_mode() of a static rand variable is per object.
+  - randomize(obj) with an object handle, and randomize(a.b) with a member of another object, as arguments are a
+    sorry; `with (list)` and local:: bind names as the standard says but a local:: function call is made on the
+    object that called randomize() only when the function is not also a method of the randomized class.
+  - Out of range index of an element in a foreach constraint (`a[i] == a[i-1]` for i == 0) makes the
+    constraint, and so randomize(), fail instead of leaving the element out.

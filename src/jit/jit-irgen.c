@@ -4447,8 +4447,8 @@ static void irgen_binary_body(jit_irgen_t *g, mir_value_t n)
    const mir_vec_op_t op = irgen_get_enum(g, n, 0);
 
    bool call_runtime = size > 64 || op == MIR_VEC_EXP || op == MIR_VEC_SEXP;
-   if (size == 64 && issigned && (op == MIR_VEC_DIV || op == MIR_VEC_MOD))
-      call_runtime = true;  // Division corner case
+   if (size == 64 && (op == MIR_VEC_DIV || op == MIR_VEC_MOD))
+      call_runtime = true;  // Division corner case and unsigned values above 2^63
 
    if (call_runtime) {
       jit_vec_op_t jop;

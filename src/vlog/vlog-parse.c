@@ -151,6 +151,7 @@ static vlog_node_t p_method_call_tail(vlog_node_t prefix);
 static vlog_node_t p_operator_assignment(vlog_node_t lhs);
 static vlog_node_t p_blocking_assignment(vlog_node_t lhs);
 static vlog_node_t p_expression_or_dist(void);
+static vlog_node_t p_dist_tail(vlog_node_t head);
 static vlog_node_t p_constraint_expression(void);
 static void p_list_of_variable_decl_assignments(vlog_node_t parent,
                                                 vlog_node_t datatype,
@@ -513,6 +514,34 @@ static bool is_process_name(void)
       && peek_reference() == NULL;
 }
 
+static bool is_mode_query(vlog_node_t prefix)
+{
+   // constraint_mode and rand_mode can be written without parentheses to
+   // read the mode of a constraint or a random variable
+
+   if (peek() != tID)
+      return false;
+
+   const ident_t id = peek_ident_nth(1);
+   const bool is_cons = id == ident_new("constraint_mode");
+   if (!is_cons && id != ident_new("rand_mode"))
+      return false;
+
+   while (vlog_kind(prefix) == V_BIT_SELECT)
+      prefix = vlog_value(prefix);
+
+   if ((vlog_kind(prefix) != V_REF && vlog_kind(prefix) != V_MEMBER_REF)
+       || !vlog_has_ref(prefix))
+      return false;
+
+   vlog_node_t decl = vlog_ref(prefix);
+   if (is_cons)
+      return vlog_kind(decl) == V_CONSTRAINT;
+   else
+      return vlog_kind(decl) == V_VAR_DECL
+         && (vlog_flags(decl) & (VLOG_F_RAND | VLOG_F_RANDC));
+}
+
 static bool is_rand_method(ident_t id)
 {
    return id == ident_new("randomize") || id == ident_new("rand_mode")
@@ -575,6 +604,7 @@ typedef struct {
    bool             in_subroutine;
    bool             is_init;
    bool             is_constraint;
+   bool             late_base;   // A class was forward declared
    vlog_node_t      func;
    vlog_node_t      container;
 } deferred_body_t;
@@ -3550,7 +3580,11 @@ static void p_inline_constraints(vlog_node_t call, vlog_node_t class)
       consume(tRPAREN);
 
       scope_leave();
-      vlog_symtab_push_members(symtab, class, names, nnames);
+
+      // An empty list binds no name into the class
+      ident_t none[1] = { NULL };
+      vlog_symtab_push_members(symtab, class, names != NULL ? names : none,
+                               nnames);
 
       consume(tLBRACE);
    }
@@ -4047,6 +4081,7 @@ static vlog_node_t p_select(ident_t id)
          }
 
          if (peek_nth(2) == tLPAREN || is_array_method_call(prefix)
+             || is_mode_query(prefix)
              || (ptype != NULL && vlog_kind(ptype) == V_ENUM_DECL)
              || (ptype != NULL && vlog_kind(ptype) == V_DATA_TYPE
                  && vlog_subkind(ptype) == DT_STRING)
@@ -7255,6 +7290,42 @@ static vlog_node_t p_cast(vlog_node_t head)
    return v;
 }
 
+static vlog_node_t local_caller_root(vlog_node_t v, vlog_node_t cls)
+{
+   switch (vlog_kind(v)) {
+   case V_REF:
+      {
+         if (!vlog_has_ref(v))
+            return v;
+
+         vlog_node_t decl = vlog_ref(v);
+         if (vlog_kind(decl) != V_VAR_DECL || (vlog_flags(decl) & VLOG_F_STATIC)
+             || vlog_class_member(cls, vlog_ident(decl)) != decl)
+            return v;
+
+         vlog_node_t this = vlog_new(V_THIS);
+         vlog_set_type(this, cls);
+         vlog_set_flags(this, VLOG_F_CALLER);
+         vlog_set_loc(this, vlog_loc(v));
+
+         vlog_node_t m = vlog_new(V_MEMBER_REF);
+         vlog_set_ident(m, vlog_ident(v));
+         vlog_set_value(m, this);
+         vlog_set_ref(m, decl);
+         vlog_set_loc(m, vlog_loc(v));
+         return m;
+      }
+   case V_BIT_SELECT:
+   case V_PART_SELECT:
+   case V_MEMBER_REF:
+      if (vlog_has_value(v))
+         vlog_set_value(v, local_caller_root(vlog_value(v), cls));
+      return v;
+   default:
+      return v;
+   }
+}
+
 static vlog_node_t p_local_scope_select(void)
 {
    // local :: hierarchical_identifier select
@@ -7272,10 +7343,49 @@ static vlog_node_t p_local_scope_select(void)
       return p_select(id);
    }
 
+   bool is_call = peek() == tLPAREN;
+   if (!is_call) {
+      // A function called without parentheses
+      vlog_scope_t *inner = vlog_symtab_enter(symtab, local_scope);
+      vlog_node_t d = vlog_symtab_query(symtab, id);
+      vlog_symtab_enter(symtab, inner);
+      is_call = d != NULL && vlog_kind(d) == V_FUNC_DECL;
+   }
+
+   if (is_call) {
+      // A function of the scope of the caller rather than one of the
+      // object being randomized
+      vlog_node_t v = vlog_new(V_USER_FCALL);
+      vlog_set_ident(v, id);
+
+      if (optional(tLPAREN)) {
+         p_list_of_arguments(v);
+         consume(tRPAREN);
+      }
+
+      vlog_set_loc(v, CURRENT_LOC);
+
+      vlog_scope_t *inner = vlog_symtab_enter(symtab, local_scope);
+      vlog_symtab_lookup(symtab, v);
+      vlog_symtab_enter(symtab, inner);
+      return v;
+   }
+
    // Skip the members of the object being randomized, but not the
    // variables of the constraint which the indexes may refer to
    select_scope = local_scope;
-   return p_select(id);
+   vlog_node_t head = p_select(id);
+
+   // A property of the object of the caller is not one of the object
+   // being randomized, even if both are of the same class
+   vlog_scope_t *inner = vlog_symtab_enter(symtab, local_scope);
+   vlog_node_t cls = vlog_symtab_class(symtab);
+   vlog_symtab_enter(symtab, inner);
+
+   if (cls != NULL)
+      head = local_caller_root(head, cls);
+
+   return head;
 }
 
 static vlog_node_t p_streaming_concatenation(void)
@@ -7466,6 +7576,7 @@ static vlog_node_t p_process_scope(void)
 }
 
 static bool constraint_item = false;
+static bool constraint_dist = false;
 
 static vlog_node_t p_logical_implication(vlog_node_t lhs)
 {
@@ -7474,6 +7585,8 @@ static vlog_node_t p_logical_implication(vlog_node_t lhs)
    const token_t tok = peek();
    if (tok != tIFIMPL && tok != tIFFIMPL)
       return lhs;
+   else if (constraint_item && tok == tIFIMPL)
+      return lhs;   // The arrow of an implication constraint
 
    consume(tok);
 
@@ -7831,7 +7944,17 @@ static vlog_node_t p_primary(void)
       break;
    case tLPAREN:
       consume(tLPAREN);
-      head = p_logical_implication(p_mintypmax_expression());
+      {
+         // Inside parentheses an arrow is an operator again
+         const bool saved_item = constraint_item;
+         constraint_item = false;
+         head = p_logical_implication(p_mintypmax_expression());
+         constraint_item = saved_item;
+
+         // A distribution may be parenthesised in a constraint
+         if (constraint_dist && peek() == tDIST)
+            head = p_dist_tail(head);
+      }
       switch (peek()) {
       case tEQ:
       case tPLUSEQ:
@@ -8192,7 +8315,12 @@ static vlog_node_t p_nonbinary_expression(void)
 
          optional_attributes();
 
-         vlog_set_value(v, p_primary());
+         // Accept a chain of unary operators such as -~x
+         if (scan(tMINUS, tPLUS, tTILDE, tBANG, tAMP, tBAR, tCARET, tTILDEAMP,
+                  tTILDEBAR, tTILDECARET))
+            vlog_set_value(v, p_nonbinary_expression());
+         else
+            vlog_set_value(v, p_primary());
          vlog_set_loc(v, CURRENT_LOC);
          return v;
       }
@@ -8364,9 +8492,6 @@ static vlog_node_t p_expression(void)
    BEGIN("expression");
 
    vlog_node_t head = p_binary_expression(p_nonbinary_expression(), 0);
-   if (constraint_item)
-      return head;
-
    return p_logical_implication(head);
 }
 
@@ -8525,15 +8650,9 @@ static vlog_node_t p_dist_item(void)
    return v;
 }
 
-static vlog_node_t p_expression_or_dist(void)
+static vlog_node_t p_dist_tail(vlog_node_t head)
 {
-   // expression [ dist { dist_list } ]
-
-   BEGIN("expression or dist");
-
-   vlog_node_t head = p_expression();
-   if (peek() != tDIST)
-      return head;
+   // dist { dist_list }
 
    consume(tDIST);
 
@@ -8550,6 +8669,19 @@ static vlog_node_t p_expression_or_dist(void)
 
    vlog_set_loc(v, CURRENT_LOC);
    return v;
+}
+
+static vlog_node_t p_expression_or_dist(void)
+{
+   // expression [ dist { dist_list } ]
+
+   BEGIN("expression or dist");
+
+   vlog_node_t head = p_expression();
+   if (peek() != tDIST)
+      return head;
+
+   return p_dist_tail(head);
 }
 
 static void p_constraint_set(vlog_node_t parent)
@@ -8659,6 +8791,42 @@ static vlog_node_t p_constraint_foreach(void)
 
    vlog_set_loc(v, CURRENT_LOC);
    return v;
+}
+
+static bool is_dist_implication(vlog_node_t v)
+{
+   // A distribution inside parentheses as the consequent of an implication
+   // written as an operator: (a -> (x dist { ... }))
+
+   if (vlog_kind(v) != V_BINARY || vlog_subkind(v) != V_BINARY_LOG_OR)
+      return false;
+
+   vlog_node_t lhs = vlog_left(v);
+   if (vlog_kind(lhs) != V_UNARY || vlog_subkind(lhs) != V_UNARY_NOT)
+      return false;
+
+   vlog_node_t rhs = vlog_right(v);
+   return vlog_kind(rhs) == V_DIST || is_dist_implication(rhs);
+}
+
+static vlog_node_t implication_constraint(vlog_node_t v)
+{
+   vlog_node_t c = vlog_new(V_CONS_IMPLY);
+   vlog_set_value(c, vlog_value(vlog_left(v)));
+
+   vlog_node_t rhs = vlog_right(v);
+   vlog_node_t item;
+   if (vlog_kind(rhs) == V_DIST) {
+      item = vlog_new(V_CONS_EXPR);
+      vlog_set_value(item, rhs);
+      vlog_set_loc(item, vlog_loc(rhs));
+   }
+   else
+      item = implication_constraint(rhs);
+
+   vlog_add_stmt(c, item);
+   vlog_set_loc(c, vlog_loc(v));
+   return c;
 }
 
 static vlog_node_t p_constraint_expression(void)
@@ -8778,9 +8946,16 @@ static vlog_node_t p_constraint_expression(void)
       {
          // The arrow of an implication constraint is not an operator here
          const bool saved_item = constraint_item;
-         constraint_item = true;
+         const bool saved_dist = constraint_dist;
+         constraint_item = constraint_dist = true;
          vlog_node_t value = p_expression_or_dist();
          constraint_item = saved_item;
+         constraint_dist = saved_dist;
+
+         if (is_dist_implication(value)) {
+            consume(tSEMI);
+            return implication_constraint(value);
+         }
 
          if (optional(tIFIMPL)) {
             vlog_node_t v = vlog_new(V_CONS_IMPLY);
@@ -17939,7 +18114,9 @@ static vlog_flags_t p_class_item_qualifiers(void)
 
 static bool defer_constraint_body(vlog_node_t decl)
 {
-   if (forward_classes.count == 0 || class_depth == 0 || peek() != tLBRACE)
+   // The block can use a property declared further down the class as well
+   // as a class which is declared later
+   if (class_depth == 0 || peek() != tLBRACE)
       return false;
 
    deferred_body_t d = {
@@ -17948,6 +18125,7 @@ static bool defer_constraint_body(vlog_node_t decl)
       .proc_automatic = proc_automatic,
       .subr_automatic = subr_automatic,
       .is_constraint  = true,
+      .late_base      = forward_classes.count > 0,
       .container      = spec_container,
    };
 
@@ -18322,6 +18500,16 @@ static int push_base_scopes(vlog_node_t class)
             put_enum_names(d);
             // Fall-through
          case V_VAR_DECL:
+            {
+               // The names of an enumeration given in the type of a property
+               vlog_node_t et = vlog_class_prop_enum(base, d);
+               if (et != NULL) {
+                  const int nnames = vlog_decls(et);
+                  for (int j = 0; j < nnames; j++)
+                     vlog_symtab_put(symtab, vlog_decl(et, j));
+               }
+            }
+            // Fall-through
          case V_TASK_DECL:
          case V_FUNC_DECL:
          case V_CONSTRAINT:
@@ -18402,10 +18590,44 @@ static void add_rand_state(vlog_node_t class)
    if (!own)
       return;
 
-   // Only the first 64 rand properties have a rand_mode bit
-   if (ncons > 64)
-      error_at(vlog_loc(class), "sorry, more than 64 constraints in a class "
-               "are not supported");
+   // The mode of a static constraint is shared by every object
+   int nstatic = 0;
+   for (int i = 0; i < vlog_decls(class); i++) {
+      vlog_node_t d = vlog_decl(class, i);
+      if (vlog_kind(d) == V_CONSTRAINT && (vlog_flags(d) & VLOG_F_STATIC))
+         nstatic++;
+   }
+
+   if (nstatic > 64)
+      error_at(vlog_loc(class), "sorry, more than 64 static constraints in "
+               "a class are not supported");
+
+   if (nstatic > 0) {
+      add_hidden_property(class, ident_new("$scons_off"));
+      vlog_node_t d = vlog_decl(class, vlog_decls(class) - 1);
+      vlog_set_flags(d, VLOG_F_STATIC);
+      vlog_set_ref(d, class);
+   }
+
+   // So is the mode of a static rand variable
+   int nsrand = 0;
+   for (int i = 0; i < vlog_decls(class); i++) {
+      vlog_node_t d = vlog_decl(class, i);
+      if (vlog_kind(d) == V_VAR_DECL && (vlog_flags(d) & VLOG_F_STATIC)
+          && (vlog_flags(d) & (VLOG_F_RAND | VLOG_F_RANDC)))
+         nsrand++;
+   }
+
+   if (nsrand > 64)
+      error_at(vlog_loc(class), "sorry, more than 64 static rand variables "
+               "in a class are not supported");
+
+   if (nsrand > 0) {
+      add_hidden_property(class, ident_new("$srand_off"));
+      vlog_node_t d = vlog_decl(class, vlog_decls(class) - 1);
+      vlog_set_flags(d, VLOG_F_STATIC);
+      vlog_set_ref(d, class);
+   }
 
    ident_t rand_off = ident_new("$rand_off");
 
@@ -18420,6 +18642,21 @@ static void add_rand_state(vlog_node_t class)
       add_hidden_property(class, rand_off);
       add_hidden_property(class, ident_new("$cons_off"));
       add_hidden_property(class, ident_new("$seed"));
+   }
+
+   // Each word of constraint_mode bits covers 64 constraints
+   for (int w = 1; w * 64 < ncons; w++) {
+      ident_t id = ident_sprintf("$cons_off%d", w);
+      bool found = false;
+      for (vlog_node_t c = class; !found; ) {
+         found = class_has_decl(c, id);
+         if (found || !vlog_has_ref(c))
+            break;
+         c = vlog_ref(c);
+      }
+
+      if (!found)
+         add_hidden_property(class, id);
    }
 
    for (int i = 0; i < ndecls; i++) {
@@ -18544,6 +18781,18 @@ static void add_pfmt_methods(vlog_node_t class)
                continue;
 
             const char *name = istr(vlog_ident(d));
+
+            // A name which is not a simple identifier is escaped
+            LOCAL_TEXT_BUF idtb = tb_new();
+            bool simple = isalpha((unsigned char)name[0]) || name[0] == '_';
+            for (const char *c = name; *c != '\0'; c++)
+               simple &= isalnum((unsigned char)*c) || *c == '_' || *c == '$';
+            if (simple)
+               tb_cat(idtb, name);
+            else
+               tb_printf(idtb, "\\%s ", name);
+            const char *id = tb_get(idtb);
+
             tb_printf(tb, "if (__r != \"\") __r = {__r, \"%s\"};\n",
                       plain ? "," : ", ");
 
@@ -18551,12 +18800,12 @@ static void add_pfmt_methods(vlog_node_t class)
             if (vlog_kind(t) == V_DATA_TYPE && vlog_subkind(t) == DT_EVENT)
                tb_printf(tb, "__r = {__r, \"%s:<no-events>\"};\n", name);
             else if (vlog_kind(t) == V_CLASS_DECL && vlog_ranges(d) == 0) {
-               tb_printf(tb, "__s = $__pn(%s);\n", name);
+               tb_printf(tb, "__s = $__pn(%s);\n", id);
                tb_printf(tb, "__r = {__r, \"%s:\", __s};\n", name);
             }
             else
                tb_printf(tb, "__r = {__r, \"%s:\", $sformatf(\"%s\", %s)};\n",
-                         name, plain ? "%0p" : "%p", name);
+                         name, plain ? "%0p" : "%p", id);
          }
       }
 
@@ -20276,6 +20525,12 @@ static void p_deferred_body(const deferred_body_t *d)
    const vlog_kind_t kind = vlog_kind(subr);
 
    if (d->is_constraint) {
+      // The base class may have been declared after this one
+      int depth = 0;
+      if (d->late_base && vlog_has_ref(subr)
+          && vlog_kind(vlog_ref(subr)) == V_CLASS_DECL)
+         depth = push_base_scopes(vlog_ref(subr));
+
       consume(tLBRACE);
 
       while (not_at_token(tRBRACE)) {
@@ -20284,6 +20539,9 @@ static void p_deferred_body(const deferred_body_t *d)
       }
 
       consume(tRBRACE);
+
+      while (depth-- > 0)
+         scope_leave();
       return;
    }
 

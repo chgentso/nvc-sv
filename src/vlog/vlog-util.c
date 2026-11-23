@@ -1966,6 +1966,35 @@ bool vlog_class_derives(vlog_node_t c, vlog_node_t base)
    }
 }
 
+vlog_node_t vlog_class_prop_enum(vlog_node_t class, vlog_node_t prop)
+{
+   // The enumeration given in the type of a property of the class, whose
+   // names are visible in the class and its derived classes (the names of
+   // a typedef are found through the declaration of the type)
+
+   if (vlog_kind(prop) != V_VAR_DECL || !vlog_has_type(prop))
+      return NULL;
+
+   vlog_node_t et = vlog_get_type(vlog_type(prop));
+   if (et == NULL || vlog_kind(et) != V_ENUM_DECL)
+      return NULL;
+
+   // Only one written in the declaration of the property
+   const loc_t *pl = vlog_loc(prop), *el = vlog_loc(et);
+   if (pl->file_ref != el->file_ref || pl->first_line < el->first_line
+       || pl->first_line > el->first_line + el->line_delta + 1)
+      return NULL;
+
+   const int ndecls = vlog_decls(class);
+   for (int i = 0; i < ndecls; i++) {
+      vlog_node_t d = vlog_decl(class, i);
+      if (vlog_kind(d) == V_TYPE_DECL && vlog_type(d) == et)
+         return NULL;
+   }
+
+   return et;
+}
+
 vlog_node_t vlog_class_member(vlog_node_t class, ident_t id)
 {
    for (vlog_node_t c = class;; c = vlog_ref(c)) {
