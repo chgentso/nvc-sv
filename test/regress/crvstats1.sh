@@ -37,7 +37,7 @@ awk -F'\t' '$7 > 0 { ok = 1 } END { exit !ok }' legacy.tsv
 NVC_CRV_ENGINE=legacy NVC_CRV_DECOMPOSE=0 NVC_CRV_STATS=$PWD/nodec.tsv nvc -r crvstats1 > nodec.txt
 awk -F'\t' '$7 == 0 { ok = 1 } END { exit !ok }' nodec.tsv
 awk -F'\t' '$7 == 0 { ok = 1 } END { exit !ok }' stats.tsv
-NVC_CRV_DECOMPOSE=0 nvc -r crvstats1 > nodec2.txt 2> nodec.err
+NVC_CRV_ENGINE=auto NVC_CRV_DECOMPOSE=0 nvc -r crvstats1 > nodec2.txt 2> nodec.err
 cmp base.txt nodec2.txt
 grep -q 'no effect' nodec.err
 
