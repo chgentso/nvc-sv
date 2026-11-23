@@ -3175,3 +3175,4 @@ vlogcover14     verilog,cover=toggle+include-mems+ignore-arrays-from-8
 mixedcover3     mixed,cover=toggle
 vlogcover15     shell
 vlogcover18     verilog,cover=statement
+vlogcover16     verilog,cover=statement+branch+toggle

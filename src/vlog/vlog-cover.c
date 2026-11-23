@@ -49,10 +49,19 @@ typedef struct _lazy_cscope {
    unsigned       nitem[NUM_COVER_KINDS];
 } lazy_cscope_t;
 
+// The tags of the items of each body.  Bodies of instances with different
+// parameters or coverage specifications share syntax nodes but not tags.
+typedef struct {
+   hash_t *stmt;
+   hash_t *branch;
+   hash_t *toggle;
+} body_tags_t;
+
 typedef struct {
    cover_data_t *db;
    cover_obj_t   inst;
    bool          bind;
+   body_tags_t  *tags;
 } vlog_cover_t;
 
 typedef struct {
@@ -60,9 +69,24 @@ typedef struct {
    uint32_t count;
 } toggle_info_t;
 
-static hash_t *stmt_tags = NULL;
-static hash_t *branch_tags = NULL;
-static hash_t *toggle_tags = NULL;
+static hash_t *body_maps = NULL;   // Name of body to body_tags_t
+
+static body_tags_t *vlog_cover_body_tags(ident_t body, bool create)
+{
+   if (body_maps == NULL) {
+      if (!create)
+         return NULL;
+      body_maps = hash_new(64);
+   }
+
+   body_tags_t *bt = hash_get(body_maps, body);
+   if (bt == NULL && create) {
+      bt = xcalloc(sizeof(body_tags_t));
+      hash_put(body_maps, body, bt);
+   }
+
+   return bt;
+}
 
 static void vlog_cover_stmt_list(vlog_cover_t *g, vlog_node_t v,
                                  lazy_cscope_t *parent);
@@ -240,6 +264,11 @@ bool vlog_cover_wants_stmt(vlog_node_t s)
    return !loc_invalid_p(vlog_loc(s));
 }
 
+bool vlog_cover_is_body(ident_t name)
+{
+   return vlog_cover_body_tags(name, false) != NULL;
+}
+
 ident_t vlog_cover_scope_name(vlog_node_t v, int nth)
 {
    switch (vlog_kind(v)) {
@@ -283,7 +312,7 @@ static void vlog_cover_stmt(vlog_cover_t *g, vlog_node_t s,
 
    if (g->bind) {
       cover_obj_t bin = cover_at(g->db, item, COV_REL_BINS, 0);
-      vlog_cover_remember(&stmt_tags, s, cover_get_tag(g->db, bin));
+      vlog_cover_remember(&g->tags->stmt, s, cover_get_tag(g->db, bin));
       return;
    }
 
@@ -448,12 +477,14 @@ static bool vlog_cover_bit_names(vlog_node_t type, const char *prefix,
    }
 }
 
-bool vlog_cover_toggle(vlog_node_t decl, uint32_t *tag, unsigned *count)
+bool vlog_cover_toggle(ident_t body, vlog_node_t decl, uint32_t *tag,
+                       unsigned *count)
 {
-   if (toggle_tags == NULL)
+   body_tags_t *bt = vlog_cover_body_tags(body, false);
+   if (bt == NULL || bt->toggle == NULL)
       return false;
 
-   const toggle_info_t *ti = hash_get(toggle_tags, decl);
+   const toggle_info_t *ti = hash_get(bt->toggle, decl);
    if (ti == NULL)
       return false;
 
@@ -517,10 +548,10 @@ static void vlog_cover_toggle_decl(vlog_cover_t *g, vlog_node_t d,
       ti->tag = cover_get_tag(g->db, first);
       ti->count = width;
 
-      if (toggle_tags == NULL)
-         toggle_tags = hash_new(256);
+      if (g->tags->toggle == NULL)
+         g->tags->toggle = hash_new(64);
 
-      hash_put(toggle_tags, d, ti);
+      hash_put(g->tags->toggle, d, ti);
       ACLEAR(bits);
       return;
    }
@@ -696,7 +727,7 @@ static void vlog_cover_ternaries(vlog_cover_t *g, vlog_node_t s,
       for (int i = 0; i < all.count; i++) {
          vlog_node_t c = all.items[i];
          if (!hset_contains(skip, c))
-            vlog_cover_branch(g, &branch_tags, c, lcs,
+            vlog_cover_branch(g, &g->tags->branch, c, lcs,
                               vlog_loc(vlog_value(c)), false,
                               COV_SRC_CONDITION, true);
       }
@@ -716,7 +747,7 @@ static void vlog_cover_if(vlog_cover_t *g, vlog_node_t s, lazy_cscope_t *lcs)
          lazy_cover_scope(c, lcs, vlog_cover_scope_name(c, i));
 
       if (vlog_has_value(c))
-         vlog_cover_branch(g, &branch_tags, c, &cl,
+         vlog_cover_branch(g, &g->tags->branch, c, &cl,
                            vlog_loc(vlog_value(c)), false,
                            COV_SRC_IF_CONDITION, false);
 
@@ -739,7 +770,7 @@ static void vlog_cover_case(vlog_cover_t *g, vlog_node_t s,
 
       has_default |= vlog_params(item) == 0;
 
-      vlog_cover_branch(g, &branch_tags, item, &il, vlog_loc(item), true,
+      vlog_cover_branch(g, &g->tags->branch, item, &il, vlog_loc(item), true,
                         COV_SRC_CASE_CHOICE, false);
 
       vlog_cover_stmt_list(g, item, &il);
@@ -751,7 +782,7 @@ static void vlog_cover_case(vlog_cover_t *g, vlog_node_t s,
       // Nothing matched: there is no item for this so make one
       lazy_cscope_t nl =
          lazy_cover_scope(s, lcs, ident_new("_B_OTHERS"));
-      vlog_cover_branch(g, &branch_tags, s, &nl, vlog_loc(s), true,
+      vlog_cover_branch(g, &g->tags->branch, s, &nl, vlog_loc(s), true,
                         COV_SRC_CASE_CHOICE, false);
    }
 }
@@ -867,6 +898,7 @@ static void vlog_cover_walk(vlog_node_t body, cover_data_t *db,
       .db   = db,
       .inst = cover_get_obj(db, cs, COV_ATTR_INST),
       .bind = bind,
+      .tags = bind ? vlog_cover_body_tags(vlog_ident(body), true) : NULL,
    };
 
    lazy_cscope_t root = lazy_cover_scope(body, NULL, NULL);
@@ -960,13 +992,18 @@ static bool vlog_cover_lookup(hash_t *map, vlog_node_t v, uint32_t *tag)
    return true;
 }
 
-bool vlog_cover_tag(vlog_node_t v, cover_item_kind_t kind, uint32_t *tag)
+bool vlog_cover_tag(ident_t body, vlog_node_t v, cover_item_kind_t kind,
+                    uint32_t *tag)
 {
+   body_tags_t *bt = vlog_cover_body_tags(body, false);
+   if (bt == NULL)
+      return false;
+
    switch (kind) {
    case COV_ITEM_STMT:
-      return vlog_cover_lookup(stmt_tags, v, tag);
+      return vlog_cover_lookup(bt->stmt, v, tag);
    case COV_ITEM_BRANCH:
-      return vlog_cover_lookup(branch_tags, v, tag);
+      return vlog_cover_lookup(bt->branch, v, tag);
    default:
       return false;
    }

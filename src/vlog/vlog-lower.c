@@ -181,11 +181,44 @@ static mir_value_t vlog_cover_counters(vlog_gen_t *g)
    return mir_build_load(g->mu, ptr);
 }
 
+static ident_t vlog_cover_body(vlog_gen_t *g)
+{
+   // The name of the instance unit with the items of coverage that this
+   // unit belongs to, or null
+
+   if (g->constfunc || g->mir == NULL || mir_get_kind(g->mu) == MIR_UNIT_THUNK)
+      return NULL;
+
+   ident_t name = mir_get_name(g->mu, MIR_NULL_VALUE);
+   if (name != NULL && vlog_cover_is_body(name))
+      return name;
+
+   for (name = mir_get_parent(g->mu); name != NULL; ) {
+      if (vlog_cover_is_body(name))
+         return name;
+
+      mir_shape_t *shape = mir_get_shape(g->mir, name);
+      if (shape == NULL)
+         break;
+
+      name = mir_get_shape_parent(shape);
+   }
+
+   return NULL;
+}
+
+static bool vlog_cover_get_tag(vlog_gen_t *g, vlog_node_t v,
+                               cover_item_kind_t kind, uint32_t *tag)
+{
+   ident_t body = vlog_cover_body(g);
+   return body != NULL && vlog_cover_tag(body, v, kind, tag);
+}
+
 static bool vlog_cover_have(vlog_gen_t *g, vlog_node_t v,
                             cover_item_kind_t kind)
 {
    uint32_t tag;
-   if (!vlog_cover_tag(v, kind, &tag))
+   if (!vlog_cover_get_tag(g, v, kind, &tag))
       return false;
 
    if (g->constfunc || mir_get_kind(g->mu) == MIR_UNIT_THUNK)
@@ -202,7 +235,7 @@ static void vlog_cover_count(vlog_gen_t *g, vlog_node_t v,
    // Count one execution of an item bound to this syntax node
 
    uint32_t tag;
-   if (!vlog_cover_tag(v, kind, &tag))
+   if (!vlog_cover_get_tag(g, v, kind, &tag))
       return;
 
    mir_value_t counters = vlog_cover_counters(g);
@@ -222,7 +255,8 @@ static void vlog_cover_toggle_signal(vlog_gen_t *g, vlog_node_t v,
 
    uint32_t tag;
    unsigned count;
-   if (!vlog_cover_toggle(v, &tag, &count))
+   ident_t body = vlog_cover_body(g);
+   if (body == NULL || !vlog_cover_toggle(body, v, &tag, &count))
       return;
 
    mir_type_t t_offset = mir_offset_type(g->mu);
