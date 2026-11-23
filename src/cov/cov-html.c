@@ -273,10 +273,22 @@ static void cover_print_item_title(html_gen_t *g, FILE *f, cover_obj_t item)
    fprintf(f, "</h3>");
 }
 
+static bool cover_is_verilog_file(const loc_t *loc)
+{
+   const char *file = loc_file_str(loc);
+   const char *ext = file != NULL ? strrchr(file, '.') : NULL;
+   if (ext == NULL)
+      return false;
+
+   return !strcmp(ext, ".v") || !strcmp(ext, ".sv") || !strcmp(ext, ".svh")
+      || !strcmp(ext, ".vh");
+}
+
 static void cover_print_expr(html_gen_t *g, FILE *f, cover_obj_t item,
                              cover_obj_t bin, const rpt_line_t *line)
 {
    loc_t loc = cover_get_loc(g->data, item, COV_ATTR_LOC);
+   const bool verilog = cover_is_verilog_file(&loc);
    cover_flags_t flags = cover_get_flags(g->data, bin);
 
    const rpt_line_t *curr_line = line;
@@ -322,7 +334,10 @@ static void cover_print_expr(html_gen_t *g, FILE *f, cover_obj_t item,
          // Filter comments
          if (line_pos < curr_line->len - 1) {
             char next_c = curr_line->text[line_pos + 1];
-            if (c == '-' && next_c == '-')
+            // The decrement operator also starts with two hyphens
+            if (c == '-' && next_c == '-' && !verilog)
+               break;
+            if (c == '/' && next_c == '/' && verilog)
                break;
             if (c == '/' && next_c == '*')
                is_comment = true;
@@ -677,7 +692,7 @@ static void html_print_table(html_gen_t *g, const rpt_table_t *table,
 
          int name_len = 0;
          while (sig_name[name_len] != '\0' && sig_name[name_len] != '.'
-                && sig_name[name_len] != '(')
+                && sig_name[name_len] != '(' && sig_name[name_len] != '[')
             name_len++;
 
          fprintf(f, "&nbsp;<code>%.*s</code>", name_len, sig_name);
