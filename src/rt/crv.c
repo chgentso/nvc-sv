@@ -17,6 +17,7 @@
 
 #include "util.h"
 #include "rt/crv.h"
+#include "rt/crv-priv.h"
 
 #include <assert.h>
 #include <stdint.h>
@@ -24,14 +25,6 @@
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
-
-// Values are held as 128-bit integers during propagation so that the
-// result of any 64-bit operation can be represented exactly before it is
-// wrapped to the width of its node.
-typedef __int128 i128;
-
-typedef struct { i128 lo, hi; } ivl_t;     // Empty if lo > hi
-typedef struct { i128 lo, hi; } range_t;
 
 #define BIG ((i128)1 << 100)
 #define MAX_SIZE (1 << 20)
@@ -298,111 +291,6 @@ static i128 pow2mask(i128 x)
 
 ////////////////////////////////////////////////////////////////////////////////
 // The graph
-
-typedef enum {
-   N_CONST, N_VAR, N_BIN, N_UN, N_CAST, N_COND, N_ASIZE, N_AELEM, N_ASUM,
-   N_INSIDE, N_DIST, N_INDEX, N_FAIL,
-} nkind_t;
-
-typedef struct {
-   uint8_t kind, op, width;
-   bool    sgn;
-   bool    inst;     // Contains an index or array element to substitute
-   int32_t a, b, c;
-   int32_t aux;
-   int64_t val;
-} node_t;
-
-typedef struct {
-   unsigned  width;
-   bool      sgn;
-   int64_t   cur;
-   uint64_t *rc;
-   int64_t  *dom;
-   unsigned  ndom, cdom;
-} cvar_t;
-
-typedef struct {
-   unsigned  width;
-   bool      sgn, size_rand, elems_rand;
-   unsigned  len;
-   int64_t  *init;
-   unsigned  ninit;
-} carr_t;
-
-typedef struct {
-   crv_node_t lo, hi;      // hi is -1 for a single value
-} item_t;
-
-typedef struct {
-   item_t   *items;
-   unsigned  n, cap;
-   range_t  *rr;
-   unsigned  nrr;
-   bool      allconst, prep;
-} cset_t;
-
-typedef struct {
-   int64_t lo, hi, weight;
-   bool    per_value;
-} drange_t;
-
-typedef struct {
-   drange_t *r;
-   unsigned  n, cap;
-   bool      sgn, prep;
-   range_t  *mr;           // Merged ranges with non-zero weight
-   unsigned  nmr;
-   range_t  *pr;           // The same ranges for picking
-   double   *unit;         // Weight of each value
-   int64_t  *wt;           // The weight of each as written and whether it
-   bool     *pvl;          // is for each value (:=) or the range (:/)
-   unsigned  npr;
-} cdist_t;
-
-typedef enum { C_REQ, C_FOREACH, C_UNIQUE } ckind_t;
-
-typedef struct {
-   ckind_t     kind;
-   crv_node_t  root;
-   int         soft;       // Index among soft constraints or -1
-   unsigned    nsoft;      // Soft indices of a foreach, one per element
-   crv_array_t arr;
-   crv_node_t  idx;
-   unsigned    first, count;
-   bool        dead;       // Soft constraint discarded by disable soft
-   int         line;       // Source line for NVC_CRV_DEBUG
-} ccons_t;
-
-typedef struct {
-   bool        array;
-   int         before;
-   crv_var_t   after;
-} edge_t;
-
-struct _crv {
-   node_t   *nodes;
-   unsigned  nnodes, cnodes;
-   cvar_t   *vars;
-   unsigned  nvars, cvars;
-   carr_t   *arrays;
-   unsigned  narrays, carrays;
-   cset_t   *sets;
-   unsigned  nsets, csets;
-   cdist_t  *dists;
-   unsigned  ndists, cdists;
-   ccons_t  *cons;
-   unsigned  ncons, ccons;
-   crv_node_t *uniq;
-   unsigned  nuniq, cuniq;
-   edge_t   *edges;
-   unsigned  nedges, cedges;
-   int       nindex;
-   int       nsoft;
-   bool      greedy;   // Soft constraints are kept one at a time
-   bool      bad;      // The graph names an array that does not exist
-   bool      trial;    // Solves do not consume randc values
-};
 
 // The first n entries are the values, remaining ones first, and the next n
 // are the index of each value
@@ -1063,6 +951,17 @@ static int64_t ev(ectx_t *E, int n)
    }
 }
 
+int64_t crv_eval(const crv_t *c, crv_node_t n, const int64_t *vals,
+                 unsigned nsc, const int *ebase, const unsigned *sizes,
+                 bool *fail)
+{
+   ectx_t E = { .c = c, .vals = vals, .nsc = nsc, .ebase = ebase,
+                .sizes = sizes };
+   const int64_t v = ev(&E, n);
+   *fail = E.fail;
+   return v;
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // Sets and distributions
 
@@ -1127,7 +1026,7 @@ static void set_prep(crv_t *c, cset_t *cs)
    cs->prep = true;
 }
 
-static void dist_prep(cdist_t *cd)
+void crv_dist_prepare(cdist_t *cd)
 {
    if (cd->prep)
       return;
@@ -2767,6 +2666,7 @@ static void derive_domains(prob_t *P)
    free(imps);
 }
 
+
 // Mode 1 solves for the sizes of arrays with a random size, ignoring the
 // elements of those, mode 2 has all sizes known
 static void chain_setup(prob_t *P);
@@ -2938,7 +2838,7 @@ static prob_t *prob_build(crv_t *c, int mode, const unsigned *sizes,
    for (unsigned i = 0; i < c->nsets; i++)
       set_prep(c, &c->sets[i]);
    for (unsigned i = 0; i < c->ndists; i++)
-      dist_prep(&c->dists[i]);
+      crv_dist_prepare(&c->dists[i]);
 
    P->vmark = xcalloc((P->nv ? P->nv : 1) * sizeof(int));
    P->vstart = NEW(int, P->ncons + 1);

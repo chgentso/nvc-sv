@@ -43,7 +43,8 @@ bin_unit_test_SOURCES = \
 	test/test_cover.c \
 	test/test_scan.c \
 	test/test_lint.c \
-	test/test_crv.c
+	test/test_crv.c \
+	test/test_blast.c
 
 if ARCH_X86_64
 bin_unit_test_SOURCES += test/test_native.c
