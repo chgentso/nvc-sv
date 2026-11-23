@@ -830,16 +830,17 @@ void jit_call_closure_guarded(jit_t *j, ffi_closure_t *closure,
    }
 
    const jit_state_t oldstate = thread->state;
+   jit_anchor_t *saved_anchor = thread->anchor;
+   jit_t *saved_jit = thread->jit;
    thread->state = JIT_RUNNING;
    thread->jit = j;
 
    jit_entry_fn_t entry = load_acquire(&f->entry);
    (*entry)(f, NULL, args, tlab);
 
-   thread->anchor = NULL;
+   thread->anchor = saved_anchor;
    thread->state = oldstate;
-   if (oldstate != JIT_RUNNING)
-      thread->jit = NULL;
+   thread->jit = saved_jit;
 
    *result = args[0];
 }

@@ -2691,7 +2691,7 @@ static void call_resolution(rt_model_t *m, rt_nexus_t *n, res_memo_t *r,
             }                                                           \
             assert(o == nonnull);                                       \
             type *p = (type *)resolved;                                 \
-            jit_scalar_t result;                                        \
+            jit_scalar_t result = { .integer = 0 };                     \
             if (!jit_try_call(m->jit, r->closure.handle, &result,       \
                               r->closure.args[0], vals, nonnull))       \
                m->force_stop = true;                                    \

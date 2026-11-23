@@ -40,7 +40,8 @@ bool jit_trampoline(jit_thread_local_t *thread, jit_func_t *f,
                     jit_scalar_t *args, tlab_t *tlab)
 {
    // A call from code that is itself running in the JIT returns to it
-   void *saved_jmp = relaxed_load(&thread->jmp_buf);
+   void *volatile saved_jmp = relaxed_load(&thread->jmp_buf);
+   jit_anchor_t *volatile saved_anchor = thread->anchor;
 
    relaxed_store(&thread->jmp_buf, thread);
 
@@ -54,7 +55,7 @@ bool jit_trampoline(jit_thread_local_t *thread, jit_func_t *f,
    }
 
    relaxed_store(&thread->jmp_buf, saved_jmp);
-   thread->anchor = NULL;
+   thread->anchor = saved_anchor;
    return ok;
 }
 
@@ -63,10 +64,11 @@ bool jit_trampoline_guard(jit_thread_local_t *thread,
                           void (*fn)(void *), void *ctx)
 {
    jit_scalar_t args[JIT_MAX_ARGS];
-   void *saved_jmp = relaxed_load(&thread->jmp_buf);
-   jit_scalar_t *saved_args = thread->guard_args;
-   const jit_state_t saved_state = thread->state;
-   jit_t *saved_jit = thread->jit;
+   void *volatile saved_jmp = relaxed_load(&thread->jmp_buf);
+   jit_anchor_t *volatile saved_anchor = thread->anchor;
+   jit_scalar_t *volatile saved_args = thread->guard_args;
+   volatile jit_state_t saved_state = thread->state;
+   jit_t *volatile saved_jit = thread->jit;
 
    relaxed_store(&thread->jmp_buf, thread);
    thread->guard_args = args;
@@ -81,7 +83,7 @@ bool jit_trampoline_guard(jit_thread_local_t *thread,
 
    relaxed_store(&thread->jmp_buf, saved_jmp);
    thread->guard_args = saved_args;
-   thread->anchor = NULL;
+   thread->anchor = saved_anchor;
    if (!ok) {
       thread->state = saved_state;
       thread->jit = saved_jit;
@@ -103,13 +105,13 @@ __attribute__((noinline))
 bool jit_trampoline(jit_thread_local_t *thread, jit_func_t *f,
                     jit_scalar_t *args, tlab_t *tlab)
 {
+   void *volatile saved_jmp = relaxed_load(&thread->jmp_buf);
+   jit_anchor_t *volatile saved_anchor = thread->anchor;
 #if defined HAVE___BUILTIN_SETJMP && !defined __clang__
    void *jmp_buf[5];
-   void *saved_jmp = relaxed_load(&thread->jmp_buf);
    const int rc = __builtin_setjmp(jmp_buf);
 #else
    sigjmp_buf jmp_buf;
-   void *saved_jmp = relaxed_load(&thread->jmp_buf);
    const int rc = sigsetjmp(jmp_buf, 0);
 #endif
 
@@ -120,12 +122,12 @@ bool jit_trampoline(jit_thread_local_t *thread, jit_func_t *f,
       (*entry)(f, NULL, args, tlab);
 
       relaxed_store(&thread->jmp_buf, saved_jmp);
-      thread->anchor = NULL;
+      thread->anchor = saved_anchor;
       return true;
    }
    else {
       relaxed_store(&thread->jmp_buf, saved_jmp);
-      thread->anchor = NULL;
+      thread->anchor = saved_anchor;
       return false;
    }
 }
@@ -135,17 +137,17 @@ bool jit_trampoline_guard(jit_thread_local_t *thread,
                           void (*fn)(void *), void *ctx)
 {
    jit_scalar_t args[JIT_MAX_ARGS];
-   jit_scalar_t *saved_args = thread->guard_args;
-   const jit_state_t saved_state = thread->state;
-   jit_t *saved_jit = thread->jit;
+   void *volatile saved_jmp = relaxed_load(&thread->jmp_buf);
+   jit_anchor_t *volatile saved_anchor = thread->anchor;
+   jit_scalar_t *volatile saved_args = thread->guard_args;
+   volatile jit_state_t saved_state = thread->state;
+   jit_t *volatile saved_jit = thread->jit;
 
 #if defined HAVE___BUILTIN_SETJMP && !defined __clang__
    void *jmp_buf[5];
-   void *saved_jmp = relaxed_load(&thread->jmp_buf);
    const int rc = __builtin_setjmp(jmp_buf);
 #else
    sigjmp_buf jmp_buf;
-   void *saved_jmp = relaxed_load(&thread->jmp_buf);
    const int rc = sigsetjmp(jmp_buf, 0);
 #endif
 
@@ -157,13 +159,13 @@ bool jit_trampoline_guard(jit_thread_local_t *thread,
 
       relaxed_store(&thread->jmp_buf, saved_jmp);
       thread->guard_args = saved_args;
-      thread->anchor = NULL;
+      thread->anchor = saved_anchor;
       return true;
    }
    else {
       relaxed_store(&thread->jmp_buf, saved_jmp);
       thread->guard_args = saved_args;
-      thread->anchor = NULL;
+      thread->anchor = saved_anchor;
       thread->state = saved_state;
       thread->jit = saved_jit;
       return false;
