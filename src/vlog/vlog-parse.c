@@ -514,6 +514,25 @@ static bool is_process_name(void)
       && peek_reference() == NULL;
 }
 
+static bool is_std_prefix(const char *name)
+{
+   return peek() == tID && peek_nth(2) == tSCOPE && peek_nth(3) == tID
+      && peek_ident_nth(1) == ident_new("std")
+      && peek_ident_nth(3) == ident_new(name)
+      && peek_reference() == NULL;
+}
+
+static bool is_std_process_scope(void)
+{
+   return is_std_prefix("process") && peek_nth(4) == tSCOPE;
+}
+
+static bool is_std_builtin_type(void)
+{
+   return is_std_prefix("process") || is_std_prefix("mailbox")
+      || is_std_prefix("semaphore");
+}
+
 static bool is_mode_query(vlog_node_t prefix)
 {
    // constraint_mode and rand_mode can be written without parentheses to
@@ -2780,6 +2799,11 @@ static vlog_node_t p_data_type(void)
          int hlen;
          if (is_hier_type_name(&hlen))
             return p_hier_type();
+
+         if (is_std_builtin_type()) {
+            consume(tID);
+            consume(tSCOPE);
+         }
 
          if (peek_nth(2) == tSCOPE && !is_process_name()) {
             vlog_node_t scope = p_scope_prefix();
@@ -7510,9 +7534,14 @@ static vlog_node_t p_streaming_concatenation(void)
 
 static vlog_node_t p_process_scope(void)
 {
-   // process :: self ( ) | process :: state_name
+   // [ std :: ] process :: self ( ) | [ std :: ] process :: state_name
 
    BEGIN("process scope");
+
+   if (is_std_process_scope()) {
+      consume(tID);
+      consume(tSCOPE);
+   }
 
    consume(tID);
    consume(tSCOPE);
@@ -7548,6 +7577,7 @@ static vlog_node_t p_process_scope(void)
          { "resume",  V_METHOD_PROC_RESUME },
          { "srandom", V_METHOD_SRANDOM },
          { "set_randstate", V_METHOD_RANDSTATE_SET },
+         { "get_randstate", V_METHOD_RANDSTATE_GET },
       };
 
       ident_t mid = p_identifier();
@@ -7896,7 +7926,7 @@ static vlog_node_t p_primary(void)
          }
          break;
       case tSCOPE:
-         if (is_process_name()) {
+         if (is_process_name() || is_std_process_scope()) {
             head = p_process_scope();
             break;
          }
@@ -10862,19 +10892,24 @@ static vlog_node_t p_subroutine_call_statement(void)
             peek() == tSYSTASK ? V_SYS_FCALL : V_USER_FCALL;
 
          v = vlog_new(V_VOID_CALL);
-         if (peek() == tID && (peek_nth(2) == tSCOPE || is_specialised_scope())
-             && !is_std_randomize())
-            qualify_scope = p_scope_prefix();
+         if ((is_process_name() && peek_nth(2) == tSCOPE)
+             || is_std_process_scope())
+            vlog_set_value(v, p_process_scope());
+         else {
+            if (peek() == tID && (peek_nth(2) == tSCOPE || is_specialised_scope())
+                && !is_std_randomize())
+               qualify_scope = p_scope_prefix();
 
-         if (peek() == tTHIS || peek() == tSUPER)
-            vlog_set_value(v, p_select(NULL));
-         else if (peek() == tID
-                  && (peek_nth(2) == tDOT || peek_nth(2) == tLSQUARE))
-            vlog_set_value(v, p_select(p_identifier()));
-         else if (call_is_chained())
-            vlog_set_value(v, p_call_result_chain(p_subroutine_call(kind)));
-         else
-            vlog_set_value(v, p_subroutine_call(kind));
+            if (peek() == tTHIS || peek() == tSUPER)
+               vlog_set_value(v, p_select(NULL));
+            else if (peek() == tID
+                     && (peek_nth(2) == tDOT || peek_nth(2) == tLSQUARE))
+               vlog_set_value(v, p_select(p_identifier()));
+            else if (call_is_chained())
+               vlog_set_value(v, p_call_result_chain(p_subroutine_call(kind)));
+            else
+               vlog_set_value(v, p_subroutine_call(kind));
+         }
 
          consume(tRPAREN);
       }
@@ -13778,7 +13813,8 @@ static vlog_node_t p_statement_item(ident_t id)
       if (is_std_randomize())
          return p_subroutine_call_statement();
 
-      if (is_process_name() && peek_nth(2) == tSCOPE) {
+      if ((is_process_name() && peek_nth(2) == tSCOPE)
+          || is_std_process_scope()) {
          vlog_node_t v = p_process_scope();
          consume(tSEMI);
          return v;
@@ -16337,12 +16373,22 @@ static vlog_node_t p_function_data_type_or_implicit(void)
       return p_data_type();
    case tID:
       {
-         if (is_scoped_type_start() || peek_nth(2) == tHASH)
+         if (is_scoped_type_start() || peek_nth(2) == tHASH
+             || (is_process_name()
+                 && (peek_nth(2) == tID
+                     || (peek_nth(2) == tSCOPE && peek_nth(3) == tID
+                         && peek_ident_nth(3) == ident_new("state")))))
             return p_data_type();
          else if (peek_nth(2) == tSCOPE)
             return p_implicit_data_type();
 
          vlog_node_t dt = peek_reference();
+         if (dt == NULL && peek_nth(2) == tID) {
+            const ident_t id = peek_ident_nth(1);
+            if (id == ident_new("semaphore") || id == ident_new("mailbox"))
+               return p_data_type();
+         }
+
          if (dt != NULL && vlog_kind(dt) == V_CLASS_DECL
              && (vlog_flags(dt) & VLOG_F_GENERIC))
             return p_data_type();
