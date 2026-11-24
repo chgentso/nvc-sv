@@ -5064,6 +5064,27 @@ START_TEST(test_dpichk1)
 }
 END_TEST
 
+START_TEST(test_pkgexp1)
+{
+   const error_t expect[] = {
+      { 13, "cannot export 'y' from package 'WORK.P1' without importing it" },
+      { 18, "'y' is not exported by package 'WORK.P_OK'" },
+      { 23, "exported symbol 'x' conflicts with local declaration in package 'WORK.P_BAD3'" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/pkgexp1.sv");
+
+   for (int i = 0; i < 5; i++)
+      vlog_check(do_parse_only(V_PACKAGE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
 Suite *get_vlog_tests(void)
 {
    Suite *s = suite_create("vlog");
@@ -5263,6 +5284,7 @@ Suite *get_vlog_tests(void)
    tcase_add_test(tc, test_methargs1);
    tcase_add_test(tc, test_covreal1);
    tcase_add_test(tc, test_dpichk1);
+   tcase_add_test(tc, test_pkgexp1);
    suite_add_tcase(s, tc);
 
    return s;

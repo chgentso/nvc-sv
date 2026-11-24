@@ -652,6 +652,107 @@ static void vlog_check_dpi_export(vlog_node_t v, vlog_node_t scope)
    }
 }
 
+static bool vlog_pkg_has_local(vlog_node_t pkg, ident_t id)
+{
+   const int ndecls = vlog_decls(pkg);
+   for (int i = 0; i < ndecls; i++) {
+      vlog_node_t d = vlog_decl(pkg, i);
+      if (vlog_kind(d) == V_IMPORT_DECL)
+         continue;
+      if (vlog_has_ident(d) && vlog_ident(d) == id)
+         return true;
+
+      vlog_node_t ed = NULL;
+      if (vlog_kind(d) == V_ENUM_DECL)
+         ed = d;
+      else if (vlog_kind(d) == V_TYPE_DECL && vlog_has_type(d)
+               && vlog_kind(vlog_type(d)) == V_ENUM_DECL)
+         ed = vlog_type(d);
+      if (ed != NULL) {
+         const int nenums = vlog_decls(ed);
+         for (int k = 0; k < nenums; k++) {
+            if (vlog_ident(vlog_decl(ed, k)) == id)
+               return true;
+         }
+      }
+   }
+   return false;
+}
+
+static bool vlog_pkg_exports_symbol(vlog_node_t pkg, ident_t id, int depth)
+{
+   if (pkg == NULL || vlog_kind(pkg) != V_PACKAGE || depth > 8)
+      return false;
+
+   if (vlog_pkg_has_local(pkg, id))
+      return true;
+
+   const int ndecls = vlog_decls(pkg);
+   for (int i = 0; i < ndecls; i++) {
+      vlog_node_t d = vlog_decl(pkg, i);
+      if (vlog_kind(d) != V_IMPORT_DECL || !(vlog_flags(d) & VLOG_F_EXPORT))
+         continue;
+
+      if (!vlog_has_ref(d)) {
+         // export *::* re-exports anything imported by pkg
+         for (int j = 0; j < ndecls; j++) {
+            vlog_node_t imp = vlog_decl(pkg, j);
+            if (vlog_kind(imp) != V_IMPORT_DECL
+                || (vlog_flags(imp) & VLOG_F_EXPORT) || !vlog_has_ref(imp))
+               continue;
+            if ((!vlog_has_ident(imp) || vlog_ident(imp) == id)
+                && vlog_pkg_exports_symbol(vlog_ref(imp), id, depth + 1))
+               return true;
+         }
+      }
+      else if (!vlog_has_ident(d) || vlog_ident(d) == id) {
+         if (vlog_pkg_exports_symbol(vlog_ref(d), id, depth + 1))
+            return true;
+      }
+   }
+
+   return false;
+}
+
+static void vlog_check_pkg_export(vlog_node_t d, vlog_node_t pkg)
+{
+   if (!vlog_has_ref(d) || !vlog_has_ident(d))
+      return;
+
+   vlog_node_t from = vlog_ref(d);
+   if (from == NULL || vlog_kind(from) != V_PACKAGE)
+      return;
+
+   ident_t id = vlog_ident(d);
+
+   if (vlog_pkg_has_local(pkg, id)) {
+      error_at(vlog_loc(d), "exported symbol %pQ conflicts with local "
+               "declaration in package %pQ", id, vlog_ident(pkg));
+      return;
+   }
+
+   if (!vlog_pkg_exports_symbol(from, id, 0)) {
+      error_at(vlog_loc(d), "%pQ is not exported by package %pQ",
+               id, vlog_ident(from));
+      return;
+   }
+
+   bool imported = false;
+   const int ndecls = vlog_decls(pkg);
+   for (int i = 0; i < ndecls && !imported; i++) {
+      vlog_node_t imp = vlog_decl(pkg, i);
+      if (vlog_kind(imp) != V_IMPORT_DECL || (vlog_flags(imp) & VLOG_F_EXPORT)
+          || !vlog_has_ref(imp) || vlog_ref(imp) != from)
+         continue;
+      if (!vlog_has_ident(imp) || vlog_ident(imp) == id)
+         imported = true;
+   }
+
+   if (!imported)
+      error_at(vlog_loc(d), "cannot export %pQ from package %pQ without "
+               "importing it", id, vlog_ident(from));
+}
+
 static void vlog_check_decls(vlog_node_t v)
 {
    const int ndecls = vlog_decls(v);
@@ -659,7 +760,10 @@ static void vlog_check_decls(vlog_node_t v)
       vlog_node_t d = vlog_decl(v, i);
       vlog_check(d);
 
-      if (vlog_kind(d) == V_DPI_EXPORT) {
+      if (vlog_kind(d) == V_IMPORT_DECL && (vlog_flags(d) & VLOG_F_EXPORT)
+          && vlog_kind(v) == V_PACKAGE)
+         vlog_check_pkg_export(d, v);
+      else if (vlog_kind(d) == V_DPI_EXPORT) {
          for (int j = 0; j < i; j++) {
             vlog_node_t prev = vlog_decl(v, j);
             if (vlog_kind(prev) != V_DPI_EXPORT)
