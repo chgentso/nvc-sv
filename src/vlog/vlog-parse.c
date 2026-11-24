@@ -4752,9 +4752,11 @@ static vlog_node_t p_system_tf_call(vlog_kind_t kind)
 
       if (id == ident_new("$typename")
           && ((is_simple_type_token(peek()) && peek_nth(2) != tTICK)
-              || (peek() == tID && vlog_symtab_query(symtab, peek_ident_nth(1))
-                  && vlog_kind(vlog_symtab_query(symtab, peek_ident_nth(1)))
-                  == V_TYPE_DECL))) {
+              || (peek() == tID && peek_nth(2) != tTICK
+                  && peek_nth(2) != tSCOPE && !is_specialised_scope()
+                  && vlog_symtab_query(symtab, peek_ident_nth(1)) != NULL
+                  && is_data_type(vlog_symtab_query(symtab,
+                                                    peek_ident_nth(1)))))) {
          // A data type is represented by a variable declared with it
          vlog_node_t decl = vlog_new(V_VAR_DECL);
          vlog_set_ident(decl, ident_uniq("typename"));
