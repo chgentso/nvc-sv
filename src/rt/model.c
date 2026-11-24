@@ -4070,10 +4070,8 @@ static void procq_do(rt_model_t *m, rt_wakeable_t *obj, defer_fn_t fn,
       deferq_do(&m->latepostq, fn, arg);
    else if (obj->postponed)
       deferq_do(&m->postponedq, fn, arg);
-   else if (obj->reschedule) {
+   else if (obj->reschedule)
       deferq_do(&m->reschedq, fn, arg);
-      m->next_is_delta |= m->blocking_update;
-   }
    else if (obj->reactive) {
       deferq_do(&m->reactiveq, fn, arg);
       container_of(obj, rt_proc_t, wakeable)->wake_iter = m->iteration;
@@ -5060,8 +5058,16 @@ static void model_cycle_body(rt_model_t *m)
    deferq_run_procs(m, &m->next_procq);
    (void)mtp_enter(MTP_OTHER);
 
-   if (!rt_island_eval_dirty(m->jit, m, m->islands, model_thread(m)->tlab))
-      m->force_stop = true;
+   if (m->islands != NULL) {
+      if (!rt_island_eval_dirty(m->jit, m, m->islands, model_thread(m)->tlab))
+         m->force_stop = true;
+      else if (m->reschedq.count > 0) {
+         deferq_swap(&m->next_procq, &m->reschedq);
+         deferq_run_procs(m, &m->next_procq);
+      }
+      if (rt_island_has_dirty(m->islands))
+         m->next_is_delta = true;
+   }
 
    run_callbacks(m, END_OF_PROCESSES);
 
