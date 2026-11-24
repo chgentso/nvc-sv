@@ -43,4 +43,15 @@ EOF
 
   cd "$src/unisims/primitive"
   analyse_list unisim$(std_suffix $STD) vhdl_analyze_order
+
+  # Post-synthesis netlists written by ISE also name SIMPRIM
+  if [ -f "$src/simprims/simprim_Vcomponents.vhd" ]; then
+    analyse_list simprim$(std_suffix $STD) <<EOF
+$src/simprims/simprim_Vpackage.vhd
+$src/simprims/simprim_Vcomponents.vhd
+EOF
+
+    cd "$src/simprims/primitive/other"
+    analyse_list simprim$(std_suffix $STD) vhdl_analyze_order
+  fi
 done
