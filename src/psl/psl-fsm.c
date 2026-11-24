@@ -1730,35 +1730,30 @@ static fsm_state_t *build_next_e(psl_fsm_t *fsm, fsm_state_t *state, psl_node_t 
    psl_guard_t guard_n = not_guard(fsm, guard);
    fsm_state_t *curr = state;
 
-   int64_t lo,hi = 0;
+   int64_t lo, hi = 0;
    psl_node_t range = psl_delay(p);
    get_range(fsm, range, &lo, &hi);
 
-   for (int i = 0; i < lo - 1; i++) {
+   for (int64_t i = 0; i < lo; i++) {
       fsm_state_t *new = add_state(fsm, p);
       new->strong = strong;
       add_edge(fsm, curr, new, EDGE_NEXT, NULL);
       curr = new;
    }
 
-   const int n_states = hi - lo + 1;
-   fsm_state_t LOCAL **states = xmalloc_array(n_states, sizeof(fsm_state_t*));
+   fsm_state_t *final = add_state(fsm, p);
 
-   for (int i = 0; i < n_states; i++) {
-      states[i] = add_state(fsm, p);
-      states[i]->strong = strong;
+   for (int64_t k = lo; k <= hi; k++) {
+      add_edge(fsm, curr, final, EDGE_EPSILON, guard);
+      if (k < hi) {
+         fsm_state_t *next = add_state(fsm, p);
+         next->strong = strong;
+         add_edge(fsm, curr, next, EDGE_NEXT, guard_n);
+         curr = next;
+      }
    }
 
-   add_edge(fsm, curr, states[n_states - 1], EDGE_NEXT, guard);
-   add_edge(fsm, curr, states[0], EDGE_NEXT, guard_n);
-
-   for (int i = 0; i < n_states - 1; i++) {
-      add_edge(fsm, states[i], states[n_states - 1], EDGE_NEXT, guard);
-      if (i < n_states - 2)
-         add_edge(fsm, states[i], states[i + 1], EDGE_NEXT, guard_n);
-   }
-
-   return states[n_states - 1];
+   return final;
 }
 
 static fsm_state_t *build_next_event(psl_fsm_t *fsm, fsm_state_t *state,
