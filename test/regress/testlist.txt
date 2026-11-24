@@ -3214,3 +3214,4 @@ mixedext6       mixed,2008,fail,gold
 mixedext6b      mixed,2008,fail,gold
 vlog_waitassoc2 shell
 vlog_class_hier1 verilog
+sva_disable_inside1 verilog

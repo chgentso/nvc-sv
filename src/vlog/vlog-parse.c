@@ -4845,6 +4845,8 @@ static bool monitor_arg_sensitive(vlog_node_t v)
    case V_UNARY:
    case V_COND_EXPR:
    case V_CONCAT:
+   case V_INSIDE:
+   case V_CAST:
       return true;
    default:
       return false;

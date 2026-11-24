@@ -2040,6 +2040,7 @@ bool vlog_needs_polling(vlog_node_t v)
    case V_NUMBER:
    case V_STRING:
    case V_REAL:
+   case V_DOLLAR:
       return false;
    case V_REF:
    case V_HIER_REF:
@@ -2109,7 +2110,24 @@ bool vlog_needs_polling(vlog_node_t v)
       return vlog_needs_polling(vlog_left(v))
          || vlog_needs_polling(vlog_right(v));
    case V_UNARY:
+   case V_CAST:
       return vlog_needs_polling(vlog_value(v));
+   case V_INSIDE:
+      {
+         if (vlog_needs_polling(vlog_value(v)))
+            return true;
+
+         const int nparams = vlog_params(v);
+         for (int i = 0; i < nparams; i++) {
+            if (vlog_needs_polling(vlog_param(v, i)))
+               return true;
+         }
+
+         return false;
+      }
+   case V_INSIDE_RANGE:
+      return vlog_needs_polling(vlog_left(v))
+         || vlog_needs_polling(vlog_right(v));
    case V_COND_EXPR:
       return vlog_needs_polling(vlog_value(v))
          || vlog_needs_polling(vlog_left(v))

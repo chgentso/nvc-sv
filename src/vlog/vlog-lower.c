@@ -11202,13 +11202,26 @@ static mir_value_t vlog_lower_trigger(vlog_gen_t *g, vlog_node_t v)
    case V_NUMBER:
    case V_STRING:
    case V_REAL:
+   case V_DOLLAR:
       return MIR_NULL_VALUE;
    case V_BINARY:
+   case V_INSIDE_RANGE:
       {
          mir_value_t left = vlog_lower_trigger(g, vlog_left(v));
          mir_value_t right = vlog_lower_trigger(g, vlog_right(v));
 
          return vlog_or_triggers(g, 2, left, right);
+      }
+   case V_INSIDE:
+      {
+         mir_value_t trigger = vlog_lower_trigger(g, vlog_value(v));
+         const int nparams = vlog_params(v);
+         for (int i = 0; i < nparams; i++) {
+            mir_value_t p = vlog_lower_trigger(g, vlog_param(v, i));
+            trigger = vlog_or_triggers(g, 2, trigger, p);
+         }
+
+         return trigger;
       }
    case V_UNARY:
    case V_CAST:
@@ -12162,6 +12175,7 @@ static bool vlog_poll_watch_expr(vlog_gen_t *g, vlog_node_t v)
    case V_STRING:
    case V_REAL:
    case V_EMPTY:
+   case V_DOLLAR:
       return true;
    case V_REF:
       if (vlog_has_ref(v)) {
@@ -12221,7 +12235,24 @@ static bool vlog_poll_watch_expr(vlog_gen_t *g, vlog_node_t v)
             && vlog_poll_watch_expr(g, vlog_right(v));
       }
    case V_UNARY:
+   case V_CAST:
       return vlog_poll_watch_expr(g, vlog_value(v));
+   case V_INSIDE:
+      {
+         if (!vlog_poll_watch_expr(g, vlog_value(v)))
+            return false;
+
+         const int nparams = vlog_params(v);
+         for (int i = 0; i < nparams; i++) {
+            if (!vlog_poll_watch_expr(g, vlog_param(v, i)))
+               return false;
+         }
+
+         return true;
+      }
+   case V_INSIDE_RANGE:
+      return vlog_poll_watch_expr(g, vlog_left(v))
+         && vlog_poll_watch_expr(g, vlog_right(v));
    case V_BIT_SELECT:
       {
          if (vlog_poll_is_assoc_elem(v))
