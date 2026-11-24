@@ -2312,7 +2312,11 @@ static void vlog_check_defparam(vlog_node_t v)
 
 static void vlog_check_case(vlog_node_t v)
 {
-   vlog_check_expr(vlog_value(v));
+   vlog_node_t sel = vlog_value(v);
+   vlog_check_expr(sel);
+
+   const bool sel_typeref = vlog_kind(sel) == V_CAST
+      && vlog_subkind(sel) == V_CAST_TYPEREF;
 
    bool seen_default = false;
    const int nstmts = vlog_stmts(v);
@@ -2326,6 +2330,15 @@ static void vlog_check_case(vlog_node_t v)
       else if (nparams == 0)
          error_at(vlog_loc(item), "multiple default statements within a single "
                   "case statement");
+
+      for (int j = 0; j < nparams; j++) {
+         vlog_node_t p = vlog_param(item, j);
+         const bool item_typeref = vlog_kind(p) == V_CAST
+            && vlog_subkind(p) == V_CAST_TYPEREF;
+         if (sel_typeref != item_typeref)
+            error_at(vlog_loc(p), "type reference can only be compared with "
+                     "another type reference");
+      }
 
       vlog_check_stmts(item);
    }

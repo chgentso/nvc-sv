@@ -5085,6 +5085,25 @@ START_TEST(test_pkgexp1)
 }
 END_TEST
 
+START_TEST(test_typeref1)
+{
+   const error_t expect[] = {
+      {  5, "type reference can only be compared with another type reference" },
+      { 10, "type reference can only be compared with another type reference" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/typeref1.sv");
+
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
 Suite *get_vlog_tests(void)
 {
    Suite *s = suite_create("vlog");
@@ -5285,6 +5304,7 @@ Suite *get_vlog_tests(void)
    tcase_add_test(tc, test_covreal1);
    tcase_add_test(tc, test_dpichk1);
    tcase_add_test(tc, test_pkgexp1);
+   tcase_add_test(tc, test_typeref1);
    suite_add_tcase(s, tc);
 
    return s;
