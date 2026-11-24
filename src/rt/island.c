@@ -1897,7 +1897,23 @@ void rt_island_reset_all(rt_island_mgr_t *mgr)
 
    for (unsigned i = 0; i < mgr->islands.count; i++) {
       rt_island_t *isl = mgr->islands.items[i];
-      if (isl->eval_handle != JIT_HANDLE_INVALID)
+      const bool no_comb = isl->eval_handle == JIT_HANDLE_INVALID;
+      for (uint32_t j = 0; j < isl->nsigs; j++) {
+         rt_island_sig_t *s = &(isl->sigs[j]);
+         if (!(s->flags & RT_ISIG_TWO_STATE)
+             || !(s->flags & (RT_ISIG_FF_WRITTEN | RT_ISIG_COMB_WRITTEN)))
+            continue;
+         if (s->flags & RT_ISIG_DIRECT_LINK) {
+            for (uint32_t t = 0; t < s->n_direct_targets; t++)
+               island_copy_direct_sig(s, s->direct_targets[t]);
+         }
+         else if (s->sig != NULL
+                  && (s->flags & (RT_ISIG_OUT | RT_ISIG_OBSERVED))
+                  && (!(s->flags & RT_ISIG_COMB_WRITTEN) || no_comb)) {
+            island_sync_out_sig(mgr->model, isl, s);
+         }
+      }
+      if (!no_comb)
          island_mark_dirty(isl);
    }
 }

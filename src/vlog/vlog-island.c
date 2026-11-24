@@ -19,6 +19,7 @@
 #include "array.h"
 #include "hash.h"
 #include "ident.h"
+#include "option.h"
 #include "vlog/vlog-island.h"
 #include "vlog/vlog-node.h"
 #include "vlog/vlog-number.h"
@@ -2487,7 +2488,8 @@ static vlog_island_t *build_island(analyze_ctx_t *ctx, uint32_t island_id)
       dst->name = sm->name;
       dst->width = sm->width;
       dst->nelems = sm->nelems;
-      dst->two_state = sm->two_state;
+      dst->two_state = sm->two_state
+         || (opt_get_int(OPT_TWO_STATE) >= TWO_STATE_ISLANDS);
       dst->is_external = sm->is_external;
       dst->eject_reason = sm->eject_reason;
       dst->nwords = (sm->width + 63u) / 64u;
@@ -2740,14 +2742,19 @@ void vlog_island_dump(const vlog_island_plan_t *plan)
 
    for (uint32_t i = 0; i < plan->nislands; i++) {
       const vlog_island_t *isl = plan->islands[i];
+      uint32_t n_two_state = 0;
+      for (uint32_t j = 0; j < isl->nsigs; j++) {
+         if (isl->sigs[j].two_state)
+            n_two_state++;
+      }
       printf("  ISLAND %u: assign=%u comb=%u ff=%u domains=%u topo_levels=%u "
              "comb_sccs=%u sigs(int=%u in=%u out=%u inout=%u clk=%u rst=%u) "
-             "state_bytes=%u\n",
+             "state_bytes=%u two_state=%u/%u\n",
              isl->island_id, isl->n_assign, isl->n_comb, isl->n_ff,
              isl->ndomains, isl->comb_levels, isl->comb_sccs,
              isl->n_internal_sigs, isl->n_boundary_in, isl->n_boundary_out,
              isl->n_boundary_inout, isl->n_clock_sigs, isl->n_reset_sigs,
-             isl->state_bytes);
+             isl->state_bytes, n_two_state, isl->nsigs);
 
       for (uint32_t d = 0; d < isl->ndomains; d++) {
          const island_domain_t *dom = &(isl->domains[d]);
