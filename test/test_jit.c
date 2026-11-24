@@ -19,6 +19,7 @@
 #include "common.h"
 #include "diag.h"
 #include "ident.h"
+#include "jit/jit-cache.h"
 #include "jit/jit-ffi.h"
 #include "jit/jit-layout.h"
 #include "jit/jit-priv.h"
@@ -28,11 +29,16 @@
 #include "option.h"
 #include "phase.h"
 #include "scan.h"
+#include "thread.h"
 #include "type.h"
 
+#include <dirent.h>
+#include <fcntl.h>
 #include <math.h>
 #include <stdlib.h>
 #include <inttypes.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #define REG(r) ((jit_value_t){ .kind = JIT_VALUE_REG, .reg = (r) })
 #define CONST(i) ((jit_value_t){ .kind = JIT_VALUE_INT64, .int64 = (i) })
@@ -2176,6 +2182,336 @@ START_TEST(test_lvn12)
 }
 END_TEST
 
+static unsigned count_cache_objs(const char *dir, size_t *total_bytes,
+                                 char **first_file)
+{
+   unsigned count = 0;
+   if (total_bytes != NULL)
+      *total_bytes = 0;
+   if (first_file != NULL)
+      *first_file = NULL;
+
+   DIR *root = opendir(dir);
+   if (root == NULL)
+      return 0;
+
+   struct dirent *de;
+   while ((de = readdir(root)) != NULL) {
+      if (strlen(de->d_name) != 2)
+         continue;
+
+      char *sub LOCAL = xasprintf("%s/%s", dir, de->d_name);
+      DIR *sd = opendir(sub);
+      if (sd == NULL)
+         continue;
+
+      struct dirent *fe;
+      while ((fe = readdir(sd)) != NULL) {
+         const size_t nlen = strlen(fe->d_name);
+         if (nlen >= 3 && strcmp(fe->d_name + nlen - 2, ".o") == 0) {
+            char *fpath = xasprintf("%s/%s", sub, fe->d_name);
+            struct stat st;
+            if (stat(fpath, &st) == 0 && S_ISREG(st.st_mode)) {
+               count++;
+               if (total_bytes != NULL)
+                  *total_bytes += (size_t)st.st_size;
+               if (first_file != NULL && *first_file == NULL)
+                  *first_file = fpath;
+               else
+                  free(fpath);
+            }
+            else
+               free(fpath);
+         }
+      }
+      closedir(sd);
+   }
+   closedir(root);
+   return count;
+}
+
+static void rm_cache_dir(const char *dir)
+{
+   DIR *root = opendir(dir);
+   if (root != NULL) {
+      struct dirent *de;
+      while ((de = readdir(root)) != NULL) {
+         if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
+            continue;
+         char *p LOCAL = xasprintf("%s/%s", dir, de->d_name);
+         struct stat st;
+         if (stat(p, &st) == 0 && S_ISDIR(st.st_mode))
+            rm_cache_dir(p);
+         else
+            (void)unlink(p);
+      }
+      closedir(root);
+   }
+   (void)rmdir(dir);
+}
+
+START_TEST(test_cache_sha256)
+{
+   static const struct {
+      const char *input;
+      const char *hex;
+   } vectors[] = {
+      { "",
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" },
+      { "abc",
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" },
+      { "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq",
+        "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1" },
+   };
+
+   for (size_t i = 0; i < ARRAY_LEN(vectors); i++) {
+      jit_cache_key_t key;
+      jit_cache_sha256(vectors[i].input, strlen(vectors[i].input), key.bytes);
+      char hex[65];
+      jit_cache_hex(&key, hex);
+      ck_assert_str_eq(hex, vectors[i].hex);
+   }
+}
+END_TEST
+
+START_TEST(test_cache_eviction)
+{
+   char tmpl[] = "/tmp/nvc-jitcache-evict-XXXXXX";
+   char *dir = mkdtemp(tmpl);
+   ck_assert_ptr_nonnull(dir);
+
+   opt_set_int(OPT_JIT_CACHE, 1);
+   opt_set_str(OPT_JIT_CACHE_DIR, dir);
+   opt_set_size(OPT_JIT_CACHE_LIMIT, 4096);
+
+   jit_cache_cfg_t cfg = { .code_model = 1, .reloc_mode = 0 };
+   jit_cache_t *c = jit_cache_new("x86_64-pc-linux-gnu", "", "", "test", &cfg);
+   fail_unless(jit_cache_enabled(c));
+
+   uint8_t *payload LOCAL = xcalloc(2048);
+   for (int i = 0; i < 6; i++) {
+      memset(payload, i + 1, 2048);
+      jit_cache_key_t k;
+      memset(&k, i + 1, sizeof(k));
+      jit_cache_store(c, &k, payload, 2048);
+      if (i < 5)
+         thread_sleep(2000);
+   }
+
+   size_t total = 0;
+   const unsigned n = count_cache_objs(dir, &total, NULL);
+   ck_assert_uint_gt(n, 0);
+   ck_assert_uint_le(total, 4096);
+
+   // Newest entry should still hit
+   jit_cache_key_t last;
+   memset(&last, 6, sizeof(last));
+   void *out = NULL;
+   size_t out_sz = 0;
+   fail_unless(jit_cache_lookup(c, &last, &out, &out_sz));
+   ck_assert_uint_eq(out_sz, 2048);
+   free(out);
+
+   jit_cache_free(c);
+   rm_cache_dir(dir);
+}
+END_TEST
+
+START_TEST(test_cache_multi_instance)
+{
+   char tmpl[] = "/tmp/nvc-jitcache-share-XXXXXX";
+   char *dir = mkdtemp(tmpl);
+   ck_assert_ptr_nonnull(dir);
+
+   opt_set_int(OPT_JIT_CACHE, 1);
+   opt_set_str(OPT_JIT_CACHE_DIR, dir);
+
+   jit_t *j = jit_new(NULL, NULL);
+
+   const char *text_callee0 =
+      "    RECV    R0, #0    \n"
+      "    ADD     R0, R0, #10 \n"
+      "    SEND    #0, R0    \n"
+      "    RET               \n";
+   const char *text_callee1 =
+      "    RECV    R0, #0    \n"
+      "    ADD     R0, R0, #20 \n"
+      "    SEND    #0, R0    \n"
+      "    RET               \n";
+
+   const char *text_caller0 =
+      "    RECV    R0, #0    \n"
+      "    SEND    #0, R0    \n"
+      "    CALL    <CALLEE0> \n"
+      "    RECV    R1, #0    \n"
+      "    SEND    #0, R1    \n"
+      "    RET               \n";
+   const char *text_caller1 =
+      "    RECV    R0, #0    \n"
+      "    SEND    #0, R0    \n"
+      "    CALL    <CALLEE1> \n"
+      "    RECV    R1, #0    \n"
+      "    SEND    #0, R1    \n"
+      "    RET               \n";
+
+   (void)jit_assemble(j, ident_new("CALLEE0"), text_callee0);
+   (void)jit_assemble(j, ident_new("CALLEE1"), text_callee1);
+   jit_handle_t h0 = jit_assemble(j, ident_new("CALLER0"), text_caller0);
+   jit_handle_t h1 = jit_assemble(j, ident_new("CALLER1"), text_caller1);
+
+   jit_cache_cfg_t cfg = { .code_model = 1, .reloc_mode = 0 };
+   jit_cache_t *c = jit_cache_new("x86_64-pc-linux-gnu", "", "", "test", &cfg);
+
+   jit_func_t *f0 = jit_get_func(j, h0);
+   jit_func_t *f1 = jit_get_func(j, h1);
+
+   jit_cache_key_t k0, k1;
+   void **r0 = NULL, **r1 = NULL;
+   unsigned nr0 = 0, nr1 = 0;
+   jit_cache_prepare(c, f0, false, &k0, &r0, &nr0, NULL);
+   jit_cache_prepare(c, f1, false, &k1, &r1, &nr1, NULL);
+
+   ck_assert_uint_eq(nr0, 1);
+   ck_assert_uint_eq(nr1, 1);
+   ck_assert_mem_eq(k0.bytes, k1.bytes, sizeof(k0.bytes));
+   ck_assert_ptr_ne(r0[0], r1[0]);
+
+   free(r0);
+   free(r1);
+   jit_cache_free(c);
+   jit_free(j);
+   rm_cache_dir(dir);
+}
+END_TEST
+
+#ifdef ENABLE_LLVM
+START_TEST(test_cache_cold_warm_and_corrupt)
+{
+   char tmpl[] = "/tmp/nvc-jitcache-e2e-XXXXXX";
+   char *dir = mkdtemp(tmpl);
+   ck_assert_ptr_nonnull(dir);
+
+   input_from_file(TESTDIR "/jit/context1.vhd");
+   parse_check_and_simplify(T_PACKAGE, T_PACK_BODY);
+
+   opt_set_int(OPT_JIT_CACHE, 1);
+   opt_set_str(OPT_JIT_CACHE_DIR, dir);
+   opt_set_int(OPT_JIT_THRESHOLD, 1);
+   opt_set_int(OPT_JIT_ASYNC, 0);
+
+   // Cold run populates cache
+   {
+      jit_t *j = jit_new(get_registry(), get_mir());
+      jit_register_llvm_plugin(j);
+
+      jit_handle_t handle = jit_lazy_compile(j, ident_new("WORK.PACK"));
+      void *ctx = jit_link(j, handle);
+      fail_if(ctx == NULL);
+
+      jit_handle_t fn1 = compile_for_test(j, "WORK.PACK.GET_ELT(N)I");
+      jit_handle_t fn2 = compile_for_test(j, "WORK.PACK.NESTED_GET_ELT(N)I");
+      ck_assert_int_eq(jit_call(j, fn1, ctx, 1).integer, 10);
+      ck_assert_int_eq(jit_call(j, fn1, ctx, 2).integer, 20);
+      ck_assert_int_eq(jit_call(j, fn2, ctx, 5).integer, 50);
+
+      jit_func_t *f1 = jit_get_func(j, fn1);
+      ck_assert_ptr_ne(f1->entry, jit_interp);
+      jit_free(j);
+   }
+
+   char *obj_path = NULL;
+   const unsigned ncold = count_cache_objs(dir, NULL, &obj_path);
+   ck_assert_uint_gt(ncold, 0);
+   ck_assert_ptr_nonnull(obj_path);
+
+   // Warm run hits cache without adding entries
+   {
+      jit_t *j = jit_new(get_registry(), get_mir());
+      jit_register_llvm_plugin(j);
+
+      jit_handle_t handle = jit_lazy_compile(j, ident_new("WORK.PACK"));
+      void *ctx = jit_link(j, handle);
+      fail_if(ctx == NULL);
+
+      jit_handle_t fn1 = compile_for_test(j, "WORK.PACK.GET_ELT(N)I");
+      jit_handle_t fn2 = compile_for_test(j, "WORK.PACK.NESTED_GET_ELT(N)I");
+      ck_assert_int_eq(jit_call(j, fn1, ctx, 1).integer, 10);
+      ck_assert_int_eq(jit_call(j, fn1, ctx, 2).integer, 20);
+      ck_assert_int_eq(jit_call(j, fn2, ctx, 5).integer, 50);
+
+      jit_free(j);
+   }
+   ck_assert_uint_eq(count_cache_objs(dir, NULL, NULL), ncold);
+
+   // Corrupt one cached object file and verify graceful fallback
+   {
+      int fd = open(obj_path, O_RDWR);
+      ck_assert_int_ge(fd, 0);
+      uint8_t junk[4] = { 0xde, 0xad, 0xbe, 0xef };
+      ck_assert_int_eq(write(fd, junk, sizeof(junk)), (ssize_t)sizeof(junk));
+      close(fd);
+   }
+   free(obj_path);
+
+   {
+      jit_t *j = jit_new(get_registry(), get_mir());
+      jit_register_llvm_plugin(j);
+
+      jit_handle_t handle = jit_lazy_compile(j, ident_new("WORK.PACK"));
+      void *ctx = jit_link(j, handle);
+      fail_if(ctx == NULL);
+
+      jit_handle_t fn1 = compile_for_test(j, "WORK.PACK.GET_ELT(N)I");
+      ck_assert_int_eq(jit_call(j, fn1, ctx, 1).integer, 10);
+      jit_free(j);
+   }
+   ck_assert_uint_eq(count_cache_objs(dir, NULL, NULL), ncold);
+
+   // Clear and verify OPT_JIT_CACHE=0 writes nothing
+   jit_cache_clear();
+   ck_assert_uint_eq(count_cache_objs(dir, NULL, NULL), 0);
+
+   opt_set_int(OPT_JIT_CACHE, 0);
+   {
+      jit_t *j = jit_new(get_registry(), get_mir());
+      jit_register_llvm_plugin(j);
+
+      jit_handle_t handle = jit_lazy_compile(j, ident_new("WORK.PACK"));
+      void *ctx = jit_link(j, handle);
+      fail_if(ctx == NULL);
+
+      jit_handle_t fn1 = compile_for_test(j, "WORK.PACK.GET_ELT(N)I");
+      ck_assert_int_eq(jit_call(j, fn1, ctx, 2).integer, 20);
+      jit_free(j);
+   }
+   ck_assert_uint_eq(count_cache_objs(dir, NULL, NULL), 0);
+
+   // Unwritable cache dir gracefully disables cache without crashing
+   char *bad_file LOCAL = xasprintf("%s/not_a_dir", dir);
+   int bfd = open(bad_file, O_WRONLY | O_CREAT, 0644);
+   ck_assert_int_ge(bfd, 0);
+   close(bfd);
+
+   opt_set_int(OPT_JIT_CACHE, 1);
+   opt_set_str(OPT_JIT_CACHE_DIR, bad_file);
+   {
+      jit_t *j = jit_new(get_registry(), get_mir());
+      jit_register_llvm_plugin(j);
+
+      jit_handle_t handle = jit_lazy_compile(j, ident_new("WORK.PACK"));
+      void *ctx = jit_link(j, handle);
+      fail_if(ctx == NULL);
+
+      jit_handle_t fn1 = compile_for_test(j, "WORK.PACK.GET_ELT(N)I");
+      ck_assert_int_eq(jit_call(j, fn1, ctx, 1).integer, 10);
+      jit_free(j);
+   }
+
+   rm_cache_dir(dir);
+}
+END_TEST
+#endif
+
 Suite *get_jit_tests(void)
 {
    Suite *s = suite_create("jit");
@@ -2234,6 +2570,12 @@ Suite *get_jit_tests(void)
    tcase_add_test(tc, test_trim1);
    tcase_add_test(tc, test_lvn11);
    tcase_add_test(tc, test_lvn12);
+   tcase_add_test(tc, test_cache_sha256);
+   tcase_add_test(tc, test_cache_eviction);
+   tcase_add_test(tc, test_cache_multi_instance);
+#ifdef ENABLE_LLVM
+   tcase_add_test(tc, test_cache_cold_warm_and_corrupt);
+#endif
    suite_add_tcase(s, tc);
 
    return s;

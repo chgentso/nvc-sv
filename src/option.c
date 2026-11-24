@@ -134,6 +134,21 @@ static int get_int_env(const char *var, int def)
    return atoi(env);
 }
 
+static int get_bool_env(const char *var, int def)
+{
+   const char *env = getenv(var);
+   if (env == NULL || *env == '\0')
+      return def;
+   else if (strcasecmp(env, "0") == 0 || strcasecmp(env, "off") == 0
+            || strcasecmp(env, "false") == 0 || strcasecmp(env, "no") == 0)
+      return 0;
+   else if (strcasecmp(env, "1") == 0 || strcasecmp(env, "on") == 0
+            || strcasecmp(env, "true") == 0 || strcasecmp(env, "yes") == 0)
+      return 1;
+   else
+      return atoi(env) != 0;
+}
+
 void set_default_options(void)
 {
    opt_set_int(OPT_RT_STATS, 0);
@@ -200,6 +215,13 @@ void set_default_options(void)
    opt_set_int(OPT_BLACK_BOX, 0);
    opt_set_int(OPT_LINT, 0);
    opt_set_str(OPT_BLACK_BOX_LIBS, NULL);
+   opt_set_int(OPT_JIT_CACHE, get_bool_env("NVC_JIT_CACHE", 1));
+   opt_set_str(OPT_JIT_CACHE_DIR, getenv("NVC_JIT_CACHE_DIR"));
+   {
+      const int limit_mb = get_int_env("NVC_JIT_CACHE_LIMIT_MB", 512);
+      const size_t limit = limit_mb > 0 ? (size_t)limit_mb * 1024 * 1024 : 0;
+      opt_set_size(OPT_JIT_CACHE_LIMIT, limit);
+   }
 }
 
 bool opt_black_box_allowed(const char *lib)

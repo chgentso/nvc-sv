@@ -66,6 +66,10 @@ bin_unit_test_LDADD = \
 	$(TCL_LIBS) \
 	$(libdwarf_LIBS)
 
+if ENABLE_LLVM
+bin_unit_test_LDADD += $(LLVM_LIBS)
+endif
+
 bin_unit_test_LDFLAGS = $(LDFLAGS) $(AM_LDFLAGS) $(EXPORT_LDFLAGS)
 
 EXTRA_bin_unit_test_DEPENDENCIES = src/symbols.txt

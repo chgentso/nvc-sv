@@ -19,6 +19,7 @@
 #include "array.h"
 #include "hash.h"
 #include "ident.h"
+#include "jit/jit-cache.h"
 #include "jit/jit-priv.h"
 #include "lib.h"
 #include "object.h"
@@ -38,6 +39,10 @@
 #include <llvm-c/DebugInfo.h>
 #include <llvm-c/Error.h>
 #include <llvm-c/TargetMachine.h>
+
+#if HAVE_GIT_SHA
+#include "gitsha.h"
+#endif
 
 #if LLVM_HAS_PASS_BUILDER
 #include <llvm-c/Transforms/PassBuilder.h>
@@ -197,7 +202,8 @@ typedef struct _llvm_obj {
    LLVMTypeRef           types[LLVM_LAST_TYPE];
    LLVMValueRef          fns[LLVM_LAST_FN];
    LLVMTypeRef           fntypes[LLVM_LAST_FN];
-   LLVMValueRef          strtab;
+   LLVMMetadataRef       invariant_md;
+   unsigned              invariant_kind;
    unsigned              opt_hint;
 } llvm_obj_t;
 
@@ -219,6 +225,7 @@ typedef struct _cgen_func {
    LLVMValueRef     tlab;
    LLVMValueRef     anchor;
    LLVMValueRef     cpool;
+   LLVMValueRef     relocs;
    LLVMTypeRef      cpool_type;
    LLVMValueRef     descr;
    LLVMTypeRef      descr_type;
@@ -227,7 +234,10 @@ typedef struct _cgen_func {
    cgen_block_t    *blocks;
    jit_func_t      *source;
    jit_cfg_t       *cfg;
-   char            *name;
+   const char      *name;
+   unsigned         nrelocs;
+   unsigned         reloc_cursor;
+   bool             uses_cpool;
    loc_t            last_loc;
 } cgen_func_t;
 
@@ -294,12 +304,6 @@ static LLVMValueRef llvm_intptr(llvm_obj_t *obj, intptr_t i)
    return LLVMConstInt(obj->types[LLVM_INTPTR], i, false);
 }
 
-static LLVMValueRef llvm_ptr(llvm_obj_t *obj, void *ptr)
-{
-   return LLVMConstIntToPtr(llvm_intptr(obj, (intptr_t)ptr),
-                            obj->types[LLVM_PTR]);
-}
-
 static LLVMValueRef llvm_load_ptr(llvm_obj_t *obj, LLVMValueRef ptr,
                                   const char *name)
 {
@@ -309,6 +313,18 @@ static LLVMValueRef llvm_load_ptr(llvm_obj_t *obj, LLVMValueRef ptr,
 #endif
 
    return LLVMBuildLoad2(obj->builder, obj->types[LLVM_PTR], ptr, name);
+}
+
+static void llvm_mark_invariant(llvm_obj_t *obj, LLVMValueRef load)
+{
+   if (obj->invariant_md == NULL)
+      obj->invariant_md = LLVMMDNodeInContext2(obj->context, NULL, 0);
+   if (obj->invariant_kind == 0)
+      obj->invariant_kind =
+         LLVMGetMDKindIDInContext(obj->context, "invariant.load", 14);
+
+   LLVMSetMetadata(load, obj->invariant_kind,
+                   LLVMMetadataAsValue(obj->context, obj->invariant_md));
 }
 
 static LLVMValueRef llvm_real(llvm_obj_t *obj, double r)
@@ -439,16 +455,16 @@ static void llvm_register_types(llvm_obj_t *obj)
    }
 }
 
-static void llvm_dump_module(LLVMModuleRef module, const char *tag)
+static void llvm_dump_module(LLVMModuleRef module, ident_t unit_name,
+                             const char *tag)
 {
-   size_t length;
-   const char *module_name = LLVMGetModuleIdentifier(module, &length);
+   const char *name = istr(unit_name);
 
-   if (!opt_get_verbose(OPT_LLVM_VERBOSE, module_name))
+   if (!opt_get_verbose(OPT_LLVM_VERBOSE, name))
       return;
 
    LOCAL_TEXT_BUF tb = tb_new();
-   tb_printf(tb, "%s.%s.ll", module_name, tag);
+   tb_printf(tb, "%s.%s.ll", name, tag);
 
 #ifdef NAME_MAX
    if (tb_len(tb) > NAME_MAX)
@@ -461,7 +477,7 @@ static void llvm_dump_module(LLVMModuleRef module, const char *tag)
    if (LLVMPrintModuleToFile(module, tb_get(tb), &error))
       fatal("Failed to write LLVM IR file: %s: %s", tb_get(tb), error);
 
-   debugf("wrote LLVM IR for %s to %s", module_name, tb_get(tb));
+   debugf("wrote LLVM IR for %s to %s", name, tb_get(tb));
 }
 
 static void llvm_verify_module(LLVMModuleRef module)
@@ -1364,6 +1380,29 @@ static LLVMIntPredicate cgen_int_pred(cgen_block_t *cgb, jit_ir_t *ir)
    }
 }
 
+static LLVMValueRef cgen_load_reloc(llvm_obj_t *obj, cgen_func_t *func,
+                                    const char *name)
+{
+   const unsigned slot = func->reloc_cursor++;
+   assert(slot < func->nrelocs);
+   assert(func->relocs != NULL);
+
+   LLVMValueRef base = func->relocs;
+#ifndef LLVM_HAS_OPAQUE_POINTERS
+   LLVMTypeRef ptr_type = LLVMPointerType(obj->types[LLVM_PTR], 0);
+   base = LLVMBuildPointerCast(obj->builder, base, ptr_type, "");
+#endif
+
+   LLVMValueRef indexes[] = { llvm_intptr(obj, slot) };
+   LLVMValueRef slot_ptr = LLVMBuildInBoundsGEP2(obj->builder,
+                                                 obj->types[LLVM_PTR],
+                                                 base, indexes, 1, "");
+   LLVMValueRef val = llvm_load_ptr(obj, slot_ptr, name);
+   LLVMSetAlignment(val, sizeof(void *));
+   llvm_mark_invariant(obj, val);
+   return val;
+}
+
 static LLVMValueRef cgen_get_value(llvm_obj_t *obj, cgen_block_t *cgb,
                                    jit_value_t value)
 {
@@ -1378,7 +1417,15 @@ static LLVMValueRef cgen_get_value(llvm_obj_t *obj, cgen_block_t *cgb,
       return llvm_real(obj, value.dval);
    case JIT_ADDR_CPOOL:
       assert(value.int64 >= 0 && value.int64 <= cgb->func->source->cpoolsz);
-      return llvm_ptr(obj, cgb->func->source->cpool + value.int64);
+      assert(cgb->func->cpool != NULL);
+      if (value.int64 == 0)
+         return cgb->func->cpool;
+      else {
+         LLVMValueRef indexes[] = { llvm_intptr(obj, value.int64) };
+         return LLVMBuildInBoundsGEP2(obj->builder,
+                                      obj->types[LLVM_INT8],
+                                      cgb->func->cpool, indexes, 1, "");
+      }
    case JIT_ADDR_REG:
       {
          assert(value.reg < cgb->func->source->nregs);
@@ -1400,11 +1447,17 @@ static LLVMValueRef cgen_get_value(llvm_obj_t *obj, cgen_block_t *cgb,
    case JIT_VALUE_EXIT:
       return llvm_int32(obj, value.exit);
    case JIT_VALUE_HANDLE:
-      return llvm_int32(obj, value.handle);
+      {
+         LLVMValueRef raw = cgen_load_reloc(obj, cgb->func, "handle");
+         return LLVMBuildPtrToInt(obj->builder, raw, obj->types[LLVM_INT32], "");
+      }
    case JIT_ADDR_ABS:
-      return llvm_ptr(obj, (void *)(intptr_t)value.int64);
+      if (value.int64 == 0)
+         return LLVMConstNull(obj->types[LLVM_PTR]);
+      else
+         return cgen_load_reloc(obj, cgb->func, "abs");
    case JIT_VALUE_LOCUS:
-      return llvm_ptr(obj, value.locus);
+      return cgen_load_reloc(obj, cgb->func, "locus");
    default:
       fatal_trace("cannot handle value kind %d", value.kind);
    }
@@ -1555,6 +1608,9 @@ static void cgen_debug_loc(llvm_obj_t *obj, cgen_func_t *func, const loc_t *loc)
 
 static LLVMValueRef cgen_maybe_inline(llvm_obj_t *obj, jit_func_t *callee)
 {
+   if (INLINE_LIMIT == 0)
+      return NULL;
+
    if (load_acquire(&callee->state) != JIT_FUNC_READY)
       return NULL;
 
@@ -1570,7 +1626,7 @@ static LLVMValueRef cgen_maybe_inline(llvm_obj_t *obj, jit_func_t *callee)
       return exist;
 
    cgen_func_t func = {
-      .name   = tb_claim(tb),
+      .name   = tb_get(tb),
       .source = callee,
    };
 
@@ -1583,7 +1639,6 @@ static LLVMValueRef cgen_maybe_inline(llvm_obj_t *obj, jit_func_t *callee)
 
    LLVMPositionBuilderAtEnd(obj->builder, old_bb);
 
-   free(func.name);
    obj->opt_hint++;
    return func.llvmfn;
 }
@@ -2099,11 +2154,13 @@ static void cgen_op_call(llvm_obj_t *obj, cgen_block_t *cgb, jit_ir_t *ir)
 {
    cgen_sync_irpos(obj, cgb, ir);
 
-   jit_func_t *callee = jit_get_func(cgb->func->source->jit, ir->arg1.handle);
+   LLVMValueRef fptr = cgen_load_reloc(obj, cgb->func, "callee");
 
-   LLVMValueRef fptr = llvm_ptr(obj, callee);
-
-   LLVMValueRef entry = cgen_maybe_inline(obj, callee);
+   LLVMValueRef entry = NULL;
+   if (INLINE_LIMIT > 0) {
+      jit_func_t *callee = jit_get_func(cgb->func->source->jit, ir->arg1.handle);
+      entry = cgen_maybe_inline(obj, callee);
+   }
    if (entry == NULL) {
       // Must have acquire semantics to synchronise with installing new code
       entry = llvm_load_ptr(obj, fptr, "entry");
@@ -2381,8 +2438,7 @@ static void cgen_macro_salloc(llvm_obj_t *obj, cgen_block_t *cgb, jit_ir_t *ir)
 
 static void cgen_macro_getpriv(llvm_obj_t *obj, cgen_block_t *cgb, jit_ir_t *ir)
 {
-   jit_func_t *f = jit_get_func(cgb->func->source->jit, ir->arg1.handle);
-   LLVMValueRef ptrptr = llvm_ptr(obj, jit_get_privdata_ptr(f->jit, f));
+   LLVMValueRef ptrptr = cgen_load_reloc(obj, cgb->func, "privptr");
 
    LLVMValueRef ptr = llvm_load_ptr(obj, ptrptr, "p2");
    LLVMSetAlignment(ptr, sizeof(void *));
@@ -2393,10 +2449,11 @@ static void cgen_macro_getpriv(llvm_obj_t *obj, cgen_block_t *cgb, jit_ir_t *ir)
 
 static void cgen_macro_putpriv(llvm_obj_t *obj, cgen_block_t *cgb, jit_ir_t *ir)
 {
+   LLVMValueRef handle = cgen_get_value(obj, cgb, ir->arg1);
    LLVMValueRef value = cgen_coerce_value(obj, cgb, ir->arg2, LLVM_PTR);
 
    LLVMValueRef args[] = {
-      cgen_get_value(obj, cgb, ir->arg1),
+      handle,
       value,
    };
    llvm_call_fn(obj, LLVM_PUTPRIV, args, ARRAY_LEN(args));
@@ -3135,6 +3192,27 @@ static void cgen_function(llvm_obj_t *obj, cgen_func_t *func)
 
    jit_cfg_t *cfg = func->cfg = jit_get_cfg(func->source);
    cgen_reexecute_guard(obj, func, cfg);
+
+   if (func->uses_cpool) {
+      LLVMValueRef fptr = LLVMGetParam(func->llvmfn, 0);
+      LLVMValueRef idx[] = { llvm_intptr(obj, offsetof(jit_func_t, cpool)) };
+      LLVMValueRef field = LLVMBuildInBoundsGEP2(
+         obj->builder, obj->types[LLVM_INT8], fptr, idx, 1, "");
+      func->cpool = llvm_load_ptr(obj, field, "cpool");
+      LLVMSetAlignment(func->cpool, sizeof(void *));
+      llvm_mark_invariant(obj, func->cpool);
+   }
+
+   if (func->nrelocs > 0) {
+      LLVMValueRef fptr = LLVMGetParam(func->llvmfn, 0);
+      LLVMValueRef idx[] = { llvm_intptr(obj, offsetof(jit_func_t, relocs)) };
+      LLVMValueRef field = LLVMBuildInBoundsGEP2(
+         obj->builder, obj->types[LLVM_INT8], fptr, idx, 1, "");
+      func->relocs = llvm_load_ptr(obj, field, "relocs");
+      LLVMSetAlignment(func->relocs, sizeof(void *));
+      llvm_mark_invariant(obj, func->relocs);
+   }
+
    cgen_basic_blocks(obj, func, cfg);
 
    entry_bb = LLVMGetInsertBlock(obj->builder);
@@ -3284,6 +3362,8 @@ static void cgen_function(llvm_obj_t *obj, cgen_func_t *func)
    LLVMBuildBr(obj->builder, func->blocks[0].bbref);
 
    jit_free_cfg(cfg);
+
+   assert(func->reloc_cursor == func->nrelocs);
 
    free(func->blocks);
    func->blocks = NULL;
@@ -3554,14 +3634,46 @@ static void cgen_memset_body(llvm_obj_t *obj, llvm_fn_t which,
 
 typedef struct {
    code_cache_t *code;
+   jit_cache_t  *cache;
 } llvm_jit_state_t;
 
 static void *jit_llvm_init(jit_t *jit)
 {
    llvm_native_setup();
 
+   char *triple = LLVMGetDefaultTargetTriple();
+   char *cpu = LLVMGetHostCPUName();
+   char *features = LLVMGetHostCPUFeatures();
+
+   const jit_cache_cfg_t cfg = {
+      .code_model   = (uint32_t)JIT_CODE_MODEL,
+      .reloc_mode   = (uint32_t)LLVMRelocStatic,
+#ifdef PRESERVE_FRAME_POINTER
+      .preserve_fp  = 1,
+#endif
+#ifdef DEBUG
+      .debug_build  = 1,
+#endif
+      .enable_dwarf = ENABLE_DWARF,
+#ifdef LLVM_HAS_OPAQUE_POINTERS
+      .opaque_ptrs  = 1,
+#endif
+      .inline_limit = INLINE_LIMIT,
+   };
+
+   const char *build_fp = PACKAGE_VERSION ":" NVC_SV_VERSION ":" LLVM_VERSION
+#if HAVE_GIT_SHA
+      ":" GIT_SHA
+#endif
+      ":" __DATE__ " " __TIME__;
+
    llvm_jit_state_t *state = xcalloc(sizeof(llvm_jit_state_t));
-   state->code = code_cache_new();
+   state->code  = code_cache_new();
+   state->cache = jit_cache_new(triple, cpu, features, build_fp, &cfg);
+
+   LLVMDisposeMessage(triple);
+   LLVMDisposeMessage(cpu);
+   LLVMDisposeMessage(features);
 
    return state;
 }
@@ -3584,6 +3696,59 @@ static void jit_llvm_cgen(jit_t *j, jit_handle_t handle, void *context)
    // superlinear register allocation / scheduling at LLVMCodeGenLevelDefault,
    // blocking the background JIT worker queue for tens of seconds.
    const bool huge = f->nirs > 4000;
+
+   jit_cache_key_t key;
+   void **relocs = NULL;
+   unsigned nrelocs = 0;
+   bool uses_cpool = false;
+   jit_cache_prepare(state->cache, f, huge, &key, &relocs, &nrelocs,
+                     &uses_cpool);
+
+   if (jit_is_shutdown(f->jit)) {
+      free(relocs);
+      return;
+   }
+
+   void *cached_obj = NULL;
+   size_t cached_sz = 0;
+   const bool cache_on = jit_cache_enabled(state->cache);
+   if (cache_on && jit_cache_lookup(state->cache, &key, &cached_obj, &cached_sz)) {
+      if (jit_is_shutdown(f->jit)) {
+         free(cached_obj);
+         free(relocs);
+         return;
+      }
+
+      const size_t hint = cached_sz + MAX(65536, cached_sz / 4);
+      code_blob_t *blob = code_blob_new(state->code, f->name, hint);
+      if (blob == NULL) {
+         free(cached_obj);
+         free(relocs);
+         return;
+      }
+
+      f->relocs  = relocs;
+      f->nrelocs = nrelocs;
+
+      const uint8_t *base = blob->wptr;
+      const void *entry_addr = blob->wptr;
+
+      code_load_object(blob, cached_obj, cached_sz);
+
+      const size_t size = blob->wptr - base;
+      code_blob_finalise(blob, &(f->entry));
+
+      free(cached_obj);
+
+      if (opt_get_int(OPT_JIT_LOG)) {
+         const uint64_t end_us = get_timestamp_us();
+         debugf("%s at %p [%zu bytes in %"PRIi64" us] [cache hit]",
+                f->name ? istr(f->name) : "(anon)",
+                entry_addr, size, end_us - start_us);
+      }
+      return;
+   }
+
    LLVMTargetMachineRef tm = llvm_target_machine(
       LLVMRelocStatic, JIT_CODE_MODEL,
       huge ? LLVMCodeGenLevelNone : LLVMCodeGenLevelDefault);
@@ -3593,10 +3758,7 @@ static void jit_llvm_cgen(jit_t *j, jit_handle_t handle, void *context)
       .target  = tm,
    };
 
-   LOCAL_TEXT_BUF tb = tb_new();
-   tb_istr(tb, f->name);
-
-   obj.module   = LLVMModuleCreateWithNameInContext(tb_get(tb), obj.context);
+   obj.module   = LLVMModuleCreateWithNameInContext("__nvc_module", obj.context);
    obj.builder  = LLVMCreateBuilderInContext(obj.context);
    obj.data_ref = LLVMCreateTargetDataLayout(tm);
 
@@ -3607,8 +3769,10 @@ static void jit_llvm_cgen(jit_t *j, jit_handle_t handle, void *context)
    llvm_register_types(&obj);
 
    cgen_func_t func = {
-      .name   = tb_claim(tb),
-      .source = f,
+      .name       = "__nvc_entry",
+      .source     = f,
+      .nrelocs    = nrelocs,
+      .uses_cpool = uses_cpool,
    };
 
    cgen_function(&obj, &func);
@@ -3630,17 +3794,21 @@ static void jit_llvm_cgen(jit_t *j, jit_handle_t handle, void *context)
 
    DWARF_ONLY(LLVMDIBuilderFinalize(obj.debuginfo));
 
-   if (jit_is_shutdown(f->jit))
+   if (jit_is_shutdown(f->jit)) {
+      free(relocs);
       goto skip_emit;
+   }
 
-   llvm_dump_module(obj.module, "initial");
+   llvm_dump_module(obj.module, f->name, "initial");
    llvm_verify_module(obj.module);
    llvm_optimise(obj.module, obj.target,
                  (!huge && obj.opt_hint > 0) ? LLVM_O1 : LLVM_O0);
-   llvm_dump_module(obj.module, "final");
+   llvm_dump_module(obj.module, f->name, "final");
 
-   if (jit_is_shutdown(f->jit))
+   if (jit_is_shutdown(f->jit)) {
+      free(relocs);
       goto skip_emit;
+   }
 
    LLVMMemoryBufferRef buf;
    char *error;
@@ -3648,28 +3816,42 @@ static void jit_llvm_cgen(jit_t *j, jit_handle_t handle, void *context)
                                            &error, &buf))
      fatal("failed to generate native code: %s", error);
 
-   if (jit_is_shutdown(f->jit))
+   if (jit_is_shutdown(f->jit)) {
+      free(relocs);
       goto skip_load;
+   }
 
+   const void *objdata = LLVMGetBufferStart(buf);
    const size_t objsz = LLVMGetBufferSize(buf);
+
+   if (cache_on)
+      jit_cache_store(state->cache, &key, objdata, objsz);
+
    const size_t hint = objsz + MAX(65536, objsz / 4);
 
    code_blob_t *blob = code_blob_new(state->code, f->name, hint);
-   if (blob == NULL)
-      return;
+   if (blob == NULL) {
+      free(relocs);
+      goto skip_load;
+   }
+
+   f->relocs  = relocs;
+   f->nrelocs = nrelocs;
 
    const uint8_t *base = blob->wptr;
    const void *entry_addr = blob->wptr;
 
-   code_load_object(blob, LLVMGetBufferStart(buf), objsz);
+   code_load_object(blob, objdata, objsz);
 
    const size_t size = blob->wptr - base;
    code_blob_finalise(blob, &(f->entry));
 
    if (opt_get_int(OPT_JIT_LOG)) {
       const uint64_t end_us = get_timestamp_us();
-      debugf("%s at %p [%zu bytes in %"PRIi64" us]", func.name,
-             entry_addr, size, end_us - start_us);
+      debugf("%s at %p [%zu bytes in %"PRIi64" us]%s",
+             f->name ? istr(f->name) : "(anon)",
+             entry_addr, size, end_us - start_us,
+             cache_on ? " [cache miss]" : "");
    }
 
  skip_load:
@@ -3681,13 +3863,13 @@ static void jit_llvm_cgen(jit_t *j, jit_handle_t handle, void *context)
    LLVMDisposeBuilder(obj.builder);
    DWARF_ONLY(LLVMDisposeDIBuilder(obj.debuginfo));
    LLVMContextDispose(obj.context);
-   free(func.name);
 }
 
 static void jit_llvm_cleanup(void *context)
 {
    llvm_jit_state_t *state = context;
    code_cache_free(state->code);
+   jit_cache_free(state->cache);
    free(state);
 }
 

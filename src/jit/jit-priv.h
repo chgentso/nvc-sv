@@ -342,6 +342,8 @@ typedef struct _jit_func {
    mptr_t          privdata;
    jit_ir_t       *irbuf;
    unsigned char  *cpool;
+   void          **relocs;
+   unsigned        nrelocs;
    unsigned        framesz;
    unsigned        nirs;
    unsigned        nregs;

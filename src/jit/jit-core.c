@@ -174,6 +174,7 @@ static void jit_free_func(jit_func_t *f)
    free(f->irbuf);
    free(f->linktab);
    free(f->cpool);
+   free(f->relocs);
    free(f);
 }
 
@@ -413,8 +414,11 @@ void *jit_link(jit_t *j, jit_handle_t handle)
 
 void **jit_get_privdata_ptr(jit_t *j, jit_func_t *f)
 {
-   if (f->privdata == MPTR_INVALID)
-      f->privdata = mptr_new(j->mspace, "privdata");
+   if (unlikely(load_acquire(&f->privdata) == MPTR_INVALID)) {
+      SCOPED_LOCK(j->lock);
+      if (f->privdata == MPTR_INVALID)
+         store_release(&f->privdata, mptr_new(j->mspace, "privdata"));
+   }
 
    return mptr_get(f->privdata);
 }

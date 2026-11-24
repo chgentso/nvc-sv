@@ -1039,7 +1039,8 @@ static void code_load_pe(code_blob_t *blob, const void *data, size_t size)
          else
             ptr = shash_get(external, name);
 
-         if (ptr == NULL && icmp(blob->span->name, name))
+         if (ptr == NULL && (strcmp(name, "__nvc_entry") == 0
+                             || icmp(blob->span->name, name)))
             ptr = blob->span->base;
 
          if (ptr == NULL)
@@ -1104,7 +1105,8 @@ static void code_load_pe(code_blob_t *blob, const void *data, size_t size)
          continue;
       else if ((sym->Type >> 4) != IMAGE_SYM_DTYPE_FUNCTION)
          continue;
-      else if (icmp(blob->span->name, strtab + sym->N.Name.Long)) {
+      else if (strcmp(strtab + sym->N.Name.Long, "__nvc_entry") == 0
+               || icmp(blob->span->name, strtab + sym->N.Name.Long)) {
          blob->span->entry = load_addr[sym->SectionNumber - 1] + sym->Value;
          break;
       }
@@ -1190,7 +1192,8 @@ static void code_load_macho(code_blob_t *blob, const void *data, size_t size)
             name = data + symtab->stroff + nl->n_un.n_strx;
 
             if (nl->n_type & N_EXT) {
-               if (icmp(blob->span->name, name + 1))
+               if (strcmp(name + 1, "__nvc_entry") == 0
+                   || icmp(blob->span->name, name + 1))
                   ptr = blob->span->base;
                else if ((ptr = shash_get(external, name + 1)) == NULL)
                   fatal_trace("failed to resolve symbol %s", name + 1);
@@ -1262,7 +1265,8 @@ static void code_load_macho(code_blob_t *blob, const void *data, size_t size)
          continue;
 
       const char *name = data + symtab->stroff + sym->n_un.n_strx;
-      if (name[0] == '_' && icmp(blob->span->name, name + 1)) {
+      if (name[0] == '_' && (strcmp(name + 1, "__nvc_entry") == 0
+                             || icmp(blob->span->name, name + 1))) {
          blob->span->entry = load_addr[sym->n_sect - 1] + sym->n_value;
          break;
       }
@@ -1327,7 +1331,8 @@ static void code_load_elf(code_blob_t *blob, const void *data, size_t size)
 
             if (ELF64_ST_TYPE(sym->st_info) != STT_FUNC)
                continue;
-            else if (!icmp(blob->span->name, strtab + sym->st_name))
+            else if (strcmp(strtab + sym->st_name, "__nvc_entry") != 0
+                     && !icmp(blob->span->name, strtab + sym->st_name))
                continue;
             else if (load_addr[sym->st_shndx] == NULL)
                fatal_trace("missing section %d for symbol %s", sym->st_shndx,

@@ -1067,12 +1067,16 @@ static jit_value_t irgen_get_context(jit_irgen_t *g)
 static size_t irgen_append_cpool(jit_irgen_t *g, size_t sz, int align)
 {
    if (g->cpoolptr + sz + align - 1 > g->func->cpoolsz) {
-      g->func->cpoolsz = MAX(128, MAX((g->func->cpoolsz * 3) / 2,
+      const size_t oldsz = g->func->cpoolsz;
+      g->func->cpoolsz = MAX(128, MAX((oldsz * 3) / 2,
                                       g->cpoolptr + sz + align - 1));
       g->func->cpool = xrealloc(g->func->cpool, g->func->cpoolsz);
+      memset(g->func->cpool + oldsz, 0, g->func->cpoolsz - oldsz);
    }
 
    const size_t result = ALIGN_UP(g->cpoolptr, align);
+   if (result > g->cpoolptr)
+      memset(g->func->cpool + g->cpoolptr, 0, result - g->cpoolptr);
    g->oldptr = result;
    g->cpoolptr = result + sz;
    return result;

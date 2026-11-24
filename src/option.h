@@ -87,6 +87,9 @@ typedef enum {
    OPT_BLACK_BOX,
    OPT_BLACK_BOX_LIBS,
    OPT_LINT,
+   OPT_JIT_CACHE,
+   OPT_JIT_CACHE_DIR,
+   OPT_JIT_CACHE_LIMIT,
 
    OPT_LAST_NAME
 } opt_name_t;

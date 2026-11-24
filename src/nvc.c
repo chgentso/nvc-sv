@@ -20,6 +20,7 @@
 #include "cov/cov-api.h"
 #include "diag.h"
 #include "ident.h"
+#include "jit/jit-cache.h"
 #include "jit/jit-dpi.h"
 #include "jit/jit.h"
 #include "lib.h"
@@ -209,6 +210,25 @@ static void parse_pp_define(char *optarg)
       *eq = '\0';
       pp_defines_add(optarg, eq + 1);
    }
+}
+
+enum {
+   OPT_CLI_JIT_CACHE = 256,
+   OPT_CLI_NO_JIT_CACHE,
+   OPT_CLI_JIT_CACHE_DIR,
+};
+
+static void parse_jit_cache_option(const char *arg, bool *want_clear)
+{
+   if (strcmp(arg, "on") == 0)
+      opt_set_int(OPT_JIT_CACHE, 1);
+   else if (strcmp(arg, "off") == 0)
+      opt_set_int(OPT_JIT_CACHE, 0);
+   else if (strcmp(arg, "clear") == 0)
+      *want_clear = true;
+   else
+      fatal("invalid $bold$--jit-cache$$ option '%s' "
+            "(expected on, off, or clear)", arg);
 }
 
 static bool parse_warn_option(char *optarg)
@@ -878,10 +898,13 @@ static int elaborate(int argc, char **argv, cmd_state_t *state)
       { "debug-stmts",     no_argument,       0, 'B' },
       { "black-box-missing", optional_argument, 0, 'K' },
       { "check-crv",       no_argument,       0, 'Q' },
+      { "jit-cache",       required_argument, 0, OPT_CLI_JIT_CACHE },
+      { "no-jit-cache",    no_argument,       0, OPT_CLI_NO_JIT_CACHE },
+      { "jit-cache-dir",   required_argument, 0, OPT_CLI_JIT_CACHE_DIR },
       { 0, 0, 0, 0 }
    };
 
-   bool no_save = false, check_crv = false;
+   bool no_save = false, check_crv = false, clear_jit_cache = false;
    unit_meta_t meta = {};
    cover_mask_t cover_mask = 0;
    const char *cover_spec_file = NULL, *sdf_args = NULL;
@@ -951,6 +974,15 @@ static int elaborate(int argc, char **argv, cmd_state_t *state)
          if (optarg != NULL)
             opt_set_str(OPT_BLACK_BOX_LIBS, optarg);
          break;
+      case OPT_CLI_JIT_CACHE:
+         parse_jit_cache_option(optarg, &clear_jit_cache);
+         break;
+      case OPT_CLI_NO_JIT_CACHE:
+         opt_set_int(OPT_JIT_CACHE, 0);
+         break;
+      case OPT_CLI_JIT_CACHE_DIR:
+         opt_set_str(OPT_JIT_CACHE_DIR, optarg);
+         break;
       case 0:
          // Set a flag
          break;
@@ -962,6 +994,9 @@ static int elaborate(int argc, char **argv, cmd_state_t *state)
          should_not_reach_here();
       }
    }
+
+   if (clear_jit_cache)
+      jit_cache_clear();
 
    const int ntops = next_cmd - optind;
    if (ntops == 0)
@@ -1290,6 +1325,9 @@ static int run_cmd(int argc, char **argv, cmd_state_t *state)
       { "surfer",        optional_argument, 0, 'U' },
       { "shuffle",       no_argument,       0, 'H' },
       { "debug-stmts",   no_argument,       0, 'B' },
+      { "jit-cache",     required_argument, 0, OPT_CLI_JIT_CACHE },
+      { "no-jit-cache",  no_argument,       0, OPT_CLI_NO_JIT_CACHE },
+      { "jit-cache-dir", required_argument, 0, OPT_CLI_JIT_CACHE_DIR },
       { 0, 0, 0, 0 }
    };
 
@@ -1298,6 +1336,7 @@ static int run_cmd(int argc, char **argv, cmd_state_t *state)
    const char   *wave_fname = NULL;
    const char   *gtkw_fname = NULL;
    const char   *pli_plugins = NULL;
+   bool          clear_jit_cache = false;
 
    static bool have_run = false;
    if (have_run)
@@ -1421,10 +1460,22 @@ static int run_cmd(int argc, char **argv, cmd_state_t *state)
                "as non-deterministic behaviour");
          opt_set_int(OPT_SHUFFLE_PROCS, 1);
          break;
+      case OPT_CLI_JIT_CACHE:
+         parse_jit_cache_option(optarg, &clear_jit_cache);
+         break;
+      case OPT_CLI_NO_JIT_CACHE:
+         opt_set_int(OPT_JIT_CACHE, 0);
+         break;
+      case OPT_CLI_JIT_CACHE_DIR:
+         opt_set_str(OPT_JIT_CACHE_DIR, optarg);
+         break;
       default:
          should_not_reach_here();
       }
    }
+
+   if (clear_jit_cache)
+      jit_cache_clear();
 
    // Shuffle the arguments to put all the plusargs first
    qsort(argv + optind, next_cmd - optind, sizeof(char *), plusarg_cmp);
@@ -2712,7 +2763,7 @@ static void usage(void)
       struct {
          const char *args;
          const char *usage;
-      } options[20];
+      } options[24];
    } groups[] = {
       { "Commands",
         {
@@ -2750,6 +2801,10 @@ static void usage(void)
            { "--ieee-warnings={on,off,off-at-0}",
              "Enable or disable warnings from IEEE packages" },
            { "--ignore-time", "Skip source file timestamp check" },
+           { "--jit-cache={on,off,clear}",
+             "Enable, disable, or clear persistent JIT object cache" },
+           { "--jit-cache-dir=DIR",
+             "Directory for cached JIT object files" },
            { "--lint[=RULES]",
              "Warn about suspicious code: RULES is a list of unused, "
              "undriven, width, latch, sensitivity, all, none or -RULE to remove "
@@ -3139,6 +3194,9 @@ int main(int argc, char **argv)
       { "vhpi-trace",    no_argument,       0, 'T' },
       { "seed",          required_argument, 0, 'S' },
       { "lint",          optional_argument, 0, 'N' },
+      { "jit-cache",     required_argument, 0, OPT_CLI_JIT_CACHE },
+      { "no-jit-cache",  no_argument,       0, OPT_CLI_NO_JIT_CACHE },
+      { "jit-cache-dir", required_argument, 0, OPT_CLI_JIT_CACHE_DIR },
       { 0, 0, 0, 0 }
    };
 
@@ -3146,6 +3204,7 @@ int main(int argc, char **argv)
 
    const char *work_name = "work";
    cmd_state_t state = {};
+   bool clear_jit_cache = false;
 
    const int next_cmd = scan_cmd(1, argc, argv);
    int c, index = 0;
@@ -3221,6 +3280,15 @@ int main(int argc, char **argv)
          opt_set_int(OPT_RANDOM_SEED, parse_int(optarg));
          opt_set_int(OPT_RANDOM_SEED_GIVEN, 1);
          break;
+      case OPT_CLI_JIT_CACHE:
+         parse_jit_cache_option(optarg, &clear_jit_cache);
+         break;
+      case OPT_CLI_NO_JIT_CACHE:
+         opt_set_int(OPT_JIT_CACHE, 0);
+         break;
+      case OPT_CLI_JIT_CACHE_DIR:
+         opt_set_str(OPT_JIT_CACHE_DIR, optarg);
+         break;
       case '?':
          bad_option("global", argv);
       case ':':
@@ -3228,6 +3296,12 @@ int main(int argc, char **argv)
       default:
          should_not_reach_here();
       }
+   }
+
+   if (clear_jit_cache) {
+      jit_cache_clear();
+      if (next_cmd == argc)
+         return EXIT_SUCCESS;
    }
 
    srand(opt_get_int(OPT_RANDOM_SEED));
