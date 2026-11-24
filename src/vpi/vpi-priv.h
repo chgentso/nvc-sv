@@ -41,4 +41,12 @@ void vpi_format_number(int size, bool is_signed, const uint64_t *abits,
                        text_buf_t *tb);
 void vpi_format_real(double value, s_vpi_value *val, text_buf_t *tb);
 
+typedef struct _vpi_mem_bulk vpi_mem_bulk_t;
+
+vpi_mem_bulk_t *vpi_mem_bulk_open(vpiHandle mem, int64_t *low, int64_t *high,
+                                  int *width);
+bool vpi_mem_bulk_write(vpi_mem_bulk_t *b, int64_t addr, const char *word,
+                        bool binary);
+void vpi_mem_bulk_close(vpi_mem_bulk_t *b);
+
 #endif  // _VPI_PRIV_H

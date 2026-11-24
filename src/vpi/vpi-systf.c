@@ -1952,12 +1952,14 @@ static PLI_INT32 monitor_switch_tf(PLI_BYTE8 *userdata)
 }
 
 typedef struct {
-   vpiHandle    mem;
-   const char  *file_name;
-   bool         binary;
-   int64_t      low;
-   int64_t      high;
-   int          width;
+   vpiHandle       mem;
+   vpi_mem_bulk_t *bulk;
+   text_buf_t     *clean;
+   const char     *file_name;
+   bool            binary;
+   int64_t         low;
+   int64_t         high;
+   int             width;
 } readmem_t;
 
 static int64_t readmem_range_end(vpiHandle mem, PLI_INT32 which)
@@ -1978,14 +1980,14 @@ static bool readmem_store(const readmem_t *r, int64_t addr, const char *digits,
    // The value is the digits with underscores removed which are extended
    // to the width of the word
 
-   LOCAL_TEXT_BUF tb = tb_new();
+   tb_rewind(r->clean);
    for (const char *p = digits; *p != '\0'; p++) {
       if (*p != '_')
-         tb_append(tb, *p);
+         tb_append(r->clean, *p);
    }
 
-   const char *word = tb_get(tb);
-   const size_t ndigits = tb_len(tb);
+   const char *word = tb_get(r->clean);
+   const size_t ndigits = tb_len(r->clean);
 
    const size_t per = r->binary ? 1 : 4;
    const size_t maxdigits = (r->width + per - 1) / per;
@@ -2010,6 +2012,9 @@ static bool readmem_store(const readmem_t *r, int64_t addr, const char *digits,
    }
    else if (ndigits == 0)
       return true;
+
+   if (r->bulk != NULL)
+      return vpi_mem_bulk_write(r->bulk, addr, word, r->binary);
 
    vpiHandle elem = vpi_handle_by_index(r->mem, addr);
    if (elem == NULL)
@@ -2060,21 +2065,28 @@ static PLI_INT32 readmem_tf(PLI_BYTE8 *userdata)
       jit_msg(NULL, DIAG_FATAL, "failed to open %s: %s",
               file_name, strerror(errno));
 
+   LOCAL_TEXT_BUF tok = tb_new();
+   LOCAL_TEXT_BUF clean = tb_new();
+
    readmem_t r = {
       .mem       = mem_arg,
+      .clean     = clean,
       .file_name = file_name,
       .binary    = *(char *)userdata == 'b',
    };
 
-   const int64_t left = readmem_range_end(mem_arg, vpiLeftRange);
-   const int64_t right = readmem_range_end(mem_arg, vpiRightRange);
-   r.low = MIN(left, right);
-   r.high = MAX(left, right);
+   r.bulk = vpi_mem_bulk_open(mem_arg, &r.low, &r.high, &r.width);
+   if (r.bulk == NULL) {
+      const int64_t left = readmem_range_end(mem_arg, vpiLeftRange);
+      const int64_t right = readmem_range_end(mem_arg, vpiRightRange);
+      r.low = MIN(left, right);
+      r.high = MAX(left, right);
 
-   vpiHandle first = vpi_handle_by_index(mem_arg, r.low);
-   r.width = first != NULL ? vpi_get(vpiSize, first) : 1;
-   if (first != NULL)
-      vpi_release_handle(first);
+      vpiHandle first = vpi_handle_by_index(mem_arg, r.low);
+      r.width = first != NULL ? vpi_get(vpiSize, first) : 1;
+      if (first != NULL)
+         vpi_release_handle(first);
+   }
 
    // The addresses visited go from the start to the finish
    int64_t addr = has_start ? start : r.low;
@@ -2113,7 +2125,7 @@ static PLI_INT32 readmem_tf(PLI_BYTE8 *userdata)
          }
       }
       else {
-         LOCAL_TEXT_BUF tok = tb_new();
+         tb_rewind(tok);
          const bool is_addr = c == '@';
          if (is_addr)
             c = fgetc(f);
@@ -2158,6 +2170,7 @@ static PLI_INT32 readmem_tf(PLI_BYTE8 *userdata)
       }
    }
 
+   vpi_mem_bulk_close(r.bulk);
    file_close(fh);
 
    vpi_release_handle(mem_arg);

@@ -8898,3 +8898,220 @@ int uvm_hdl_release_and_read(const char *path, svLogicVecVal *value)
    hdl_release(&t);
    return hdl_read(&t, value);
 }
+
+struct _vpi_mem_bulk {
+   bool          is_signal;
+   bool          two_state;
+   bool          four;
+   int64_t       left;
+   int64_t       right;
+   uint32_t      count;
+   int           width;
+   loc_t         loc;
+   rt_signal_t  *sig;
+   uint32_t      base_offset;
+   uint8_t      *base_ptr;
+   uint32_t      elemsz;
+   uint8_t      *stage;
+   uint32_t      stage_cap;
+   uint32_t      stage_head;
+   int64_t       run_start;
+   uint32_t      run_len;
+};
+
+static void vpi_mem_bulk_flush(vpi_mem_bulk_t *b)
+{
+   if (!b->is_signal || b->run_len == 0)
+      return;
+
+   rt_model_t *m = vpi_get_model(vpi_context());
+   const uint8_t *src = b->stage + (size_t)b->stage_head * b->width;
+   const int off = (int)(b->base_offset + (uint64_t)b->run_start * b->width);
+   const size_t cnt = (size_t)b->run_len * b->width;
+   deposit_signal(m, b->sig, src, off, cnt);
+   b->run_len = 0;
+}
+
+vpi_mem_bulk_t *vpi_mem_bulk_open(vpiHandle mem, int64_t *low, int64_t *high,
+                                  int *width)
+{
+   c_vpiObject *obj = from_handle(mem);
+   if (obj == NULL)
+      return NULL;
+
+   obj = vpi_memory_alias(obj);
+
+   c_port *p = is_port(obj);
+   if (p != NULL && p->low != NULL)
+      obj = p->low;
+
+   if (vpi_dyn_array(obj) != NULL)
+      return NULL;
+
+   c_regArray *arr = is_regArray(obj);
+   if (arr == NULL || arr->count == 0 || arr->decl.dtype == NULL)
+      return NULL;
+
+   vlog_node_t rnode = arr->decl.rnode ?: arr->decl.where;
+   if (arr->decl.dim + 1 != vlog_ranges(rnode))
+      return NULL;
+
+   if (!vpi_is_packed_type(arr->decl.dtype))
+      return NULL;
+
+   const int w = vlog_size(arr->decl.dtype);
+   if (w <= 0)
+      return NULL;
+
+   int64_t left, right;
+   vpi_array_bounds(arr, &left, &right);
+
+   if (arr->decl.storage == STORE_SIGNAL) {
+      vpi_context_t *c = vpi_context();
+      rt_model_t *m = vpi_get_model(c);
+      if ((c->readonly || !model_can_create_delta(m)) && c->call == NULL)
+         return NULL;
+
+      if (arr->elemsz != (uint32_t)w)
+         return NULL;
+
+      rt_signal_t *sig = vpi_signal(&(arr->decl));
+      if (sig == NULL)
+         return NULL;
+
+      const uint32_t max_words = MAX(1u, 131072u / (uint32_t)w);
+      const uint32_t cap = MIN(arr->count, MIN(4096u, max_words));
+
+      vpi_mem_bulk_t *b = xcalloc(sizeof(vpi_mem_bulk_t));
+      b->is_signal   = true;
+      b->two_state   = !arr->decl.is_net && vlog_is_two_state(arr->decl.dtype);
+      b->left        = left;
+      b->right       = right;
+      b->count       = arr->count;
+      b->width       = w;
+      b->loc         = arr->decl.object.loc;
+      b->sig         = sig;
+      b->base_offset = arr->decl.offset;
+      b->stage_cap   = cap;
+      b->stage       = xmalloc((size_t)cap * w);
+
+      *low   = MIN(left, right);
+      *high  = MAX(left, right);
+      *width = w;
+      return b;
+   }
+
+   if (arr->decl.storage == STORE_MARRAY) {
+      unsigned esz;
+      const storage_t estore = vpi_mem_layout(arr->decl.dtype, &esz);
+      if (estore != STORE_FVEC2 && estore != STORE_FVEC4)
+         return NULL;
+
+      uint8_t *base_ptr = vpi_field_ptr(&(arr->decl));
+      if (base_ptr == NULL)
+         return NULL;
+
+      vpi_mem_bulk_t *b = xcalloc(sizeof(vpi_mem_bulk_t));
+      b->is_signal = false;
+      b->four      = (estore == STORE_FVEC4);
+      b->left      = left;
+      b->right     = right;
+      b->count     = arr->count;
+      b->width     = w;
+      b->loc       = arr->decl.object.loc;
+      b->base_ptr  = base_ptr;
+      b->elemsz    = arr->elemsz;
+      b->stage     = xmalloc(w);
+
+      *low   = MIN(left, right);
+      *high  = MAX(left, right);
+      *width = w;
+      return b;
+   }
+
+   return NULL;
+}
+
+bool vpi_mem_bulk_write(vpi_mem_bulk_t *b, int64_t addr, const char *word,
+                        bool binary)
+{
+   const int64_t pos = b->left > b->right ? b->left - addr : addr - b->left;
+   if (pos < 0 || pos >= b->count)
+      return false;
+
+   s_vpi_value val = {
+      .format    = binary ? vpiBinStrVal : vpiHexStrVal,
+      .value.str = (PLI_BYTE8 *)word,
+   };
+
+   if (b->is_signal) {
+      uint8_t *dst;
+      if (b->run_len > 0 && pos == b->run_start + b->run_len
+          && b->stage_head + b->run_len < b->stage_cap) {
+         dst = b->stage + (size_t)(b->stage_head + b->run_len) * b->width;
+         if (!unpack_value(&val, dst, b->width, &(b->loc)))
+            return false;
+         b->run_len++;
+      }
+      else if (b->run_len > 0 && pos == b->run_start - 1
+               && b->stage_head > 0) {
+         dst = b->stage + (size_t)(b->stage_head - 1) * b->width;
+         if (!unpack_value(&val, dst, b->width, &(b->loc)))
+            return false;
+         b->stage_head--;
+         b->run_start--;
+         b->run_len++;
+      }
+      else {
+         const bool desc = (b->run_len > 0 && pos == b->run_start - 1)
+            || (b->run_len == 0 && b->left > b->right);
+         vpi_mem_bulk_flush(b);
+         const uint32_t head = desc ? b->stage_cap - 1 : 0;
+         dst = b->stage + (size_t)head * b->width;
+         if (!unpack_value(&val, dst, b->width, &(b->loc)))
+            return false;
+         b->stage_head = head;
+         b->run_start  = pos;
+         b->run_len    = 1;
+      }
+
+      if (b->two_state) {
+         for (int i = 0; i < b->width; i++)
+            dst[i] = dst[i] == 1;
+      }
+
+      return true;
+   }
+
+   if (!unpack_value(&val, b->stage, b->width, &(b->loc)))
+      return false;
+
+   uint64_t *cell = (uint64_t *)(b->base_ptr + (size_t)pos * b->elemsz);
+   vpi_vec_t v = {
+      .cell  = cell,
+      .width = b->width,
+      .lsb   = 0,
+      .four  = b->four,
+   };
+   if (v.width <= 64) {
+      v.abits = cell;
+      v.bbits = v.four ? cell + 1 : NULL;
+   }
+   else {
+      v.abits = (uint64_t *)cell[0];
+      v.bbits = v.four ? (uint64_t *)cell[1] : NULL;
+   }
+
+   vpi_mem_vec_write(&v, b->stage, b->width);
+   return true;
+}
+
+void vpi_mem_bulk_close(vpi_mem_bulk_t *b)
+{
+   if (b == NULL)
+      return;
+
+   vpi_mem_bulk_flush(b);
+   free(b->stage);
+   free(b);
+}
