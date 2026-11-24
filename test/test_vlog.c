@@ -4852,6 +4852,27 @@ START_TEST(test_constprop1)
 }
 END_TEST
 
+START_TEST(test_castcls1)
+{
+   const error_t expect[] = {
+      { 18, "cannot statically cast class 'base' to incompatible class 'derived'" },
+      { 19, "cannot statically cast class 'derived' to incompatible class 'unrelated'" },
+      { 20, "cannot cast int to class 'derived'" },
+      { 21, "cannot cast class 'derived' to 'int'" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/castcls1.sv");
+
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
 Suite *get_vlog_tests(void)
 {
    Suite *s = suite_create("vlog");
@@ -5041,6 +5062,7 @@ Suite *get_vlog_tests(void)
    tcase_add_test(tc, test_misstatic1);
    tcase_add_test(tc, test_override1);
    tcase_add_test(tc, test_constprop1);
+   tcase_add_test(tc, test_castcls1);
    suite_add_tcase(s, tc);
 
    return s;

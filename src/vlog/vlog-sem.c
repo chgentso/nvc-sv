@@ -4495,6 +4495,26 @@ static type_mask_t vlog_check_pattern_expr(vlog_node_t v)
    return vlog_check_pattern_expr_ex(v, false);
 }
 
+static bool vlog_sem_is_subclass(vlog_node_t c, vlog_node_t base)
+{
+   for (;; c = vlog_ref(c)) {
+      if (c == base)
+         return true;
+      else if (vlog_ident(c) == vlog_ident(base)
+               && ident_runtil(vlog_ident(c), '$') != vlog_ident(c))
+         return true;   // Same specialisation declared in another scope
+
+      const unsigned nifaces = vlog_class_ifaces(c);
+      for (unsigned i = 0; i < nifaces; i++) {
+         if (vlog_sem_is_subclass(vlog_class_iface(c, i), base))
+            return true;
+      }
+
+      if (!vlog_has_ref(c))
+         return false;
+   }
+}
+
 static type_mask_t vlog_check_cast(vlog_node_t v)
 {
    if (vlog_subkind(v) == V_CAST_TYPEREF)
@@ -4509,6 +4529,28 @@ static type_mask_t vlog_check_cast(vlog_node_t v)
             error_at(vlog_loc(v), "cannot cast %s to '%s'",
                      is_unpacked ? "an unpacked array" : type_mask_str(smask),
                      type_mask_str(dmask));
+      }
+      else if (smask != TM_ERROR && dmask != TM_ERROR) {
+         vlog_node_t dt = vlog_get_type(vlog_type(v));
+         vlog_node_t st = vlog_get_type(val);
+         const bool dest_cls = dt != NULL && vlog_kind(dt) == V_CLASS_DECL;
+         const bool src_cls = st != NULL && vlog_kind(st) == V_CLASS_DECL;
+         if (dest_cls) {
+            if (vlog_kind(val) == V_NULL)
+               ;
+            else if (!src_cls) {
+               if (!(smask & TM_CLASS))
+                  error_at(vlog_loc(v), "cannot cast %s to class %pQ",
+                           type_mask_str(smask), vlog_ident(dt));
+            }
+            else if (!vlog_sem_is_subclass(st, dt))
+               error_at(vlog_loc(v), "cannot statically cast class %pQ to "
+                        "incompatible class %pQ",
+                        vlog_ident(st), vlog_ident(dt));
+         }
+         else if (src_cls && vlog_kind(val) != V_NULL)
+            error_at(vlog_loc(v), "cannot cast class %pQ to '%s'",
+                     vlog_ident(st), type_mask_str(dmask));
       }
       return dmask;
    }
