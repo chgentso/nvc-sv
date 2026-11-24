@@ -4951,6 +4951,34 @@ START_TEST(test_dpiname1)
 }
 END_TEST
 
+START_TEST(test_evnba1)
+{
+   const error_t expect[] = {
+      { 20, "a non-blocking event trigger cannot target an automatic variable" },
+      { 28, "a non-blocking event trigger cannot target an element of a "
+        "dynamically sized array" },
+      { 29, "a non-blocking event trigger cannot target an element of a "
+        "dynamically sized array" },
+      { 30, "a non-blocking event trigger cannot target an element of a "
+        "dynamically sized array" },
+      { 31, "a non-blocking event trigger cannot target an element of a "
+        "dynamically sized array" },
+      { 32, "a non-blocking event trigger cannot target an element of a "
+        "dynamically sized array" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/evnba1.sv");
+
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
 Suite *get_vlog_tests(void)
 {
    Suite *s = suite_create("vlog");
@@ -5145,6 +5173,7 @@ Suite *get_vlog_tests(void)
    tcase_add_test(tc, test_funcnb1);
    tcase_add_test(tc, test_funcnb2);
    tcase_add_test(tc, test_dpiname1);
+   tcase_add_test(tc, test_evnba1);
    suite_add_tcase(s, tc);
 
    return s;

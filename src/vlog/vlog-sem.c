@@ -728,6 +728,43 @@ static bool vlog_nba_target_is_automatic(vlog_node_t target)
    }
 }
 
+static bool vlog_nba_target_is_dynamic_elem(vlog_node_t target)
+{
+   for (; vlog_kind(target) == V_BIT_SELECT; target = vlog_value(target)) {
+      vlog_node_t base = vlog_value(target);
+      vlog_node_t btype = vlog_get_type(base);
+      if (btype != NULL) {
+         if (vlog_is_assoc_type(btype))
+            return true;
+         if (vlog_kind(btype) == V_DATA_TYPE
+             && (vlog_subkind(btype) == DT_QUEUE
+                 || (vlog_subkind(btype) == DT_DYNARRAY
+                     && vlog_ranges(btype) == 0)))
+            return true;
+      }
+
+      if ((vlog_kind(base) == V_REF || vlog_kind(base) == V_MEMBER_REF)
+          && vlog_has_ref(base)) {
+         vlog_node_t d = vlog_ref(base);
+         if (vlog_kind(d) == V_VAR_DECL || vlog_kind(d) == V_LOCAL_DECL) {
+            const int nranges = vlog_ranges(d);
+            for (int i = 0; i < nranges; i++) {
+               vlog_node_t r = vlog_range(d, i);
+               const vlog_dimension_kind_t dk = vlog_subkind(r);
+               if (dk == V_DIM_UNSIZED || dk == V_DIM_ASSOC)
+                  return true;
+               if (vlog_has_left(r) && vlog_kind(vlog_left(r)) == V_DOLLAR)
+                  return true;
+               if (vlog_has_right(r) && vlog_kind(vlog_right(r)) == V_DOLLAR)
+                  return true;
+            }
+         }
+      }
+   }
+
+   return false;
+}
+
 static vlog_node_t vlog_unpacked_element(vlog_node_t v)
 {
    // The element type of a whole unpacked array named by V
@@ -5900,6 +5937,15 @@ void vlog_check(vlog_node_t v)
                 && vlog_subkind(type) != DT_EVENT)
                error_at(vlog_loc(value), "'%s' is not an event",
                         istr(vlog_ident(v)));
+            else if (vlog_subkind(v) == 1) {
+               if (vlog_nba_target_is_automatic(value))
+                  error_at(vlog_loc(value), "a non-blocking event trigger "
+                           "cannot target an automatic variable");
+               else if (vlog_nba_target_is_dynamic_elem(value))
+                  error_at(vlog_loc(value), "a non-blocking event trigger "
+                           "cannot target an element of a dynamically sized "
+                           "array");
+            }
          }
       }
       break;
