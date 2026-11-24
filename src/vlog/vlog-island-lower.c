@@ -24,10 +24,12 @@
 #include "rt/island.h"
 #include "vlog/vlog-island-lower.h"
 #include "vlog/vlog-node.h"
+#include "vlog/vlog-number.h"
 #include "vlog/vlog-phase.h"
 #include "vlog/vlog-util.h"
 
 #include <assert.h>
+#include <inttypes.h>
 #include <limits.h>
 #include <string.h>
 
@@ -431,6 +433,243 @@ static void m2_compute_boundaries(vlog_island_m2_t *m2)
    }
 }
 
+typedef struct _island_shared_cache {
+   mir_context_t                *mc;
+   shash_t                      *canon_map;
+   uint32_t                      next_id;
+   struct _island_shared_cache  *next;
+} island_shared_cache_t;
+
+static island_shared_cache_t *shared_caches = NULL;
+
+static void island_shared_cache_free(void *arg)
+{
+   island_shared_cache_t *c = arg;
+   for (island_shared_cache_t **pp = &shared_caches; *pp != NULL;
+        pp = &((*pp)->next)) {
+      if (*pp == c) {
+         *pp = c->next;
+         break;
+      }
+   }
+   shash_free(c->canon_map);
+   free(c);
+}
+
+static island_shared_cache_t *island_get_shared_cache(mir_context_t *mc)
+{
+   for (island_shared_cache_t *c = shared_caches; c != NULL; c = c->next) {
+      if (c->mc == mc)
+         return c;
+   }
+
+   island_shared_cache_t *c = xcalloc(sizeof(island_shared_cache_t));
+   c->mc = mc;
+   c->canon_map = shash_new(64);
+   c->next = shared_caches;
+   shared_caches = c;
+   mir_context_on_free(mc, island_shared_cache_free, c);
+   return c;
+}
+
+typedef struct {
+   vlog_node_t body;
+   ident_t     qual;
+   bool        pure;
+} m2_pure_check_t;
+
+static void m2_pure_state_cb(vlog_node_t v, void *arg)
+{
+   m2_pure_check_t *pc = arg;
+   if (!pc->pure)
+      return;
+
+   switch (vlog_kind(v)) {
+   case V_USER_FCALL:
+      if (!vlog_has_ref(v)) {
+         pc->pure = false;
+         return;
+      }
+      {
+         vlog_node_t fn = vlog_ref(v);
+         if (!vlog_has_ident2(fn)
+             || ident_starts_with(vlog_ident2(fn), pc->qual))
+            pc->pure = false;
+      }
+      return;
+
+   case V_REF:
+      if (vlog_has_ref(v)) {
+         vlog_node_t d = vlog_ref(v);
+         if (vlog_kind(d) == V_GENVAR_DECL
+             && (vlog_flags(pc->body) & VLOG_F_GEN_SHARED))
+            pc->pure = false;
+         else if ((vlog_kind(d) == V_PARAM_DECL
+                   || vlog_kind(d) == V_LOCALPARAM)
+                  && vlog_ranges(d) > 0)
+            pc->pure = false;
+      }
+      return;
+
+   default:
+      return;
+   }
+}
+
+static bool m2_serialize_type(text_buf_t *tb, vlog_node_t dt, int depth)
+{
+   if (dt == NULL) {
+      tb_cat(tb, "null");
+      return true;
+   }
+   if (depth > 16)
+      return false;
+
+   switch (vlog_kind(dt)) {
+   case V_DATA_TYPE:
+      tb_printf(tb, "dt(%d,%u,%u,", vlog_subkind(dt),
+                (unsigned)(vlog_flags(dt) & VLOG_F_SIGNED), vlog_size(dt));
+      {
+         const int nr = vlog_ranges(dt);
+         tb_printf(tb, "%d", nr);
+         for (int i = 0; i < nr; i++) {
+            vlog_node_t r = vlog_range(dt, i);
+            int64_t lval = 0, rval = 0;
+            if (!vlog_get_const(vlog_left(r), &lval)
+                || !vlog_get_const(vlog_right(r), &rval))
+               return false;
+            tb_printf(tb, "[%" PRIi64 ":%" PRIi64 "]", lval, rval);
+         }
+      }
+      tb_cat(tb, ",");
+      if (vlog_has_type(dt) && !m2_serialize_type(tb, vlog_type(dt), depth + 1))
+         return false;
+      tb_cat(tb, ")");
+      return true;
+
+   case V_TYPE_DECL:
+   case V_ENUM_DECL:
+      {
+         const loc_t *loc = vlog_loc(dt);
+         tb_printf(tb, "td(%s,%u:%u:%u,", istr(vlog_ident(dt)),
+                   loc->file_ref, loc->first_line, loc->first_column);
+         if (vlog_has_type(dt)
+             && !m2_serialize_type(tb, vlog_type(dt), depth + 1))
+            return false;
+         tb_cat(tb, ")");
+      }
+      return true;
+
+   case V_STRUCT_DECL:
+   case V_UNION_DECL:
+      {
+         const loc_t *loc = vlog_loc(dt);
+         tb_printf(tb, "sd(%d,%u,%u,%u:%u:%u)", vlog_kind(dt),
+                   (unsigned)(vlog_flags(dt) & VLOG_F_PACKED),
+                   vlog_size(dt), loc->file_ref, loc->first_line,
+                   loc->first_column);
+      }
+      return true;
+
+   default:
+      return false;
+   }
+}
+
+static bool m2_append_module_spec(text_buf_t *tb, vlog_node_t body,
+                                  const vlog_island_m2_t *m2)
+{
+   if (vlog_flags(body) & (VLOG_F_GEN_BODY | VLOG_F_GEN_SHARED
+                           | VLOG_F_INTERFACE))
+      return false;
+
+   const vlog_island_t *isl = m2->isl;
+   ident_t unit_base = ident_runtil(vlog_ident(body), '#');
+   tb_printf(tb, "%s|%s|sb=%u|ns=%u|np=%u",
+             istr(unit_base),
+             vlog_has_ident2(body) ? istr(vlog_ident2(body)) : "",
+             isl->state_bytes, isl->nsigs, isl->nprocs);
+
+   const int ndecls = vlog_decls(body);
+   for (int i = 0; i < ndecls; i++) {
+      vlog_node_t d = vlog_decl(body, i);
+      const vlog_kind_t dk = vlog_kind(d);
+      if (dk == V_PARAM_DECL || dk == V_LOCALPARAM) {
+         if (vlog_ranges(d) > 0)
+            return false;
+         tb_printf(tb, "|P:%s:", istr(vlog_ident(d)));
+         if (vlog_has_type(d) && !m2_serialize_type(tb, vlog_type(d), 0))
+            return false;
+         if (vlog_has_value(d)) {
+            vlog_node_t val = vlog_value(d);
+            const vlog_kind_t vk = vlog_kind(val);
+            if (vk == V_NUMBER || vk == V_STRING) {
+               number_t num = vlog_number(val);
+               tb_printf(tb, "=%u:%d:", number_width(num),
+                         number_signed(num) ? 1 : 0);
+               number_print(num, tb);
+            }
+            else {
+               int64_t cval = 0;
+               if (!vlog_get_const(val, &cval))
+                  return false;
+               tb_printf(tb, "=%" PRIi64, cval);
+            }
+         }
+      }
+      else if (dk == V_TYPE_DECL && (vlog_flags(d) & VLOG_F_TYPEPARAM)) {
+         tb_printf(tb, "|T:%s:", istr(vlog_ident(d)));
+         if (vlog_has_type(d) && !m2_serialize_type(tb, vlog_type(d), 0))
+            return false;
+      }
+   }
+
+   for (uint32_t i = 0; i < isl->nsigs; i++) {
+      const island_sig_t *s = &(isl->sigs[i]);
+      tb_printf(tb, "|S%u:%s:%u:%u:%d:%u:%u", i, istr(s->name),
+                s->width, s->nelems, s->two_state ? 1 : 0, s->a_off, s->b_off);
+   }
+
+   tb_cat(tb, "|F:");
+   for (uint32_t p = 0; p < isl->nprocs; p++)
+      tb_append(tb, m2->fused_proc[p] ? '1' : '0');
+
+   return true;
+}
+
+static bool m2_procs_are_pure_state(vlog_node_t body, ident_t qual,
+                                    const vlog_island_t *isl,
+                                    const bool *fused_proc,
+                                    const uint32_t *procs, uint32_t nprocs)
+{
+   m2_pure_check_t pc = { .body = body, .qual = qual, .pure = true };
+   for (uint32_t i = 0; i < nprocs && pc.pure; i++) {
+      const uint32_t pidx = procs[i];
+      if (!fused_proc[pidx])
+         continue;
+      vlog_visit(isl->procs[pidx].stmt, m2_pure_state_cb, &pc);
+   }
+   return pc.pure;
+}
+
+static ident_t m2_register_shared_sym(mir_context_t *mc, ident_t unit_base,
+                                      const char *kind_tag, const char *key,
+                                      bool *should_emit)
+{
+   island_shared_cache_t *cache = island_get_shared_cache(mc);
+   ident_t sym = shash_get(cache->canon_map, key);
+   if (sym != NULL) {
+      *should_emit = false;
+      return sym;
+   }
+
+   sym = ident_sprintf("%s.$island_shared_%s_%u", istr(unit_base), kind_tag,
+                       cache->next_id++);
+   shash_put(cache->canon_map, key, sym);
+   *should_emit = true;
+   return sym;
+}
+
 vlog_island_lower_ctx_t *vlog_island_lower_prepare(vlog_node_t body,
                                                    bool is_mixed,
                                                    mir_unit_t *inst_mu,
@@ -505,8 +744,32 @@ vlog_island_lower_ctx_t *vlog_island_lower_prepare(vlog_node_t body,
          }
       }
 
-      if (m2->n_fused_comb > 0)
-         m2->eval_sym = ident_sprintf("%s.$island_comb%u", istr(qual), ii);
+      mir_context_t *mc = mir_get_context(inst_mu);
+      LOCAL_TEXT_BUF spec_tb = tb_new();
+      const bool can_share = m2_append_module_spec(spec_tb, body, m2);
+      ident_t unit_base = ident_runtil(vlog_ident(body), '#');
+
+      if (m2->n_fused_comb > 0) {
+         if (can_share
+             && m2_procs_are_pure_state(body, qual, isl, m2->fused_proc,
+                                        isl->topo_order, isl->ntopo)) {
+            LOCAL_TEXT_BUF key_tb = tb_new();
+            tb_printf(key_tb, "comb:%u|%s|topo:", ii, tb_get(spec_tb));
+            for (uint32_t c = 0; c < isl->ntopo; c++) {
+               if (m2->fused_proc[isl->topo_order[c]])
+                  tb_printf(key_tb, "%u,", isl->topo_order[c]);
+            }
+            m2->comb_shared = true;
+            m2->eval_sym = m2_register_shared_sym(mc, unit_base, "comb",
+                                                  tb_get(key_tb),
+                                                  &m2->emit_comb);
+         }
+         else {
+            m2->comb_shared = false;
+            m2->emit_comb = true;
+            m2->eval_sym = ident_sprintf("%s.$island_comb%u", istr(qual), ii);
+         }
+      }
 
       m2->n_fused_ff = 0;
       if (isl->ndomains > 0) {
@@ -539,9 +802,32 @@ vlog_island_lower_ctx_t *vlog_island_lower_prepare(vlog_node_t body,
 
             dm->write_sigs = wsigs.items;
             dm->n_write_sigs = wsigs.count;
-            if (dm->n_fused_ff > 0)
-               dm->ff_sym = ident_sprintf("%s.$island_ff%u_%u",
-                                          istr(qual), ii, d);
+            if (dm->n_fused_ff > 0) {
+               if (can_share
+                   && m2_procs_are_pure_state(body, qual, isl, m2->fused_proc,
+                                              dom->ff_procs, dom->nff_procs)) {
+                  LOCAL_TEXT_BUF key_tb = tb_new();
+                  tb_printf(key_tb, "ff:%u:%u:%d:%d:%u|%s|procs:", ii, d,
+                            dom->clk_sig, dom->rst_sig,
+                            (dom->clk_posedge ? 1u : 0u)
+                            | (dom->rst_posedge ? 2u : 0u),
+                            tb_get(spec_tb));
+                  for (uint32_t f = 0; f < dom->nff_procs; f++) {
+                     if (m2->fused_proc[dom->ff_procs[f]])
+                        tb_printf(key_tb, "%u,", dom->ff_procs[f]);
+                  }
+                  dm->shared = true;
+                  dm->ff_sym = m2_register_shared_sym(mc, unit_base, "ff",
+                                                      tb_get(key_tb),
+                                                      &dm->emit_fn);
+               }
+               else {
+                  dm->shared = false;
+                  dm->emit_fn = true;
+                  dm->ff_sym = ident_sprintf("%s.$island_ff%u_%u",
+                                             istr(qual), ii, d);
+               }
+            }
          }
       }
 
@@ -575,7 +861,9 @@ void vlog_island_lower_emit_init(vlog_island_lower_ctx_t *ctx,
 
       mir_value_t closure;
       if (m2->n_fused_comb > 0) {
-         mir_value_t cl_args[] = { self };
+         mir_value_t cl_args[] = {
+            m2->comb_shared ? mir_build_null(inst_mu, t_ptr) : self
+         };
          closure = mir_build_closure(inst_mu, m2->eval_sym, t_offset,
                                      cl_args, 1);
       }
@@ -638,7 +926,9 @@ void vlog_island_lower_emit_init(vlog_island_lower_ctx_t *ctx,
             continue;
 
          const island_domain_t *dom = &(isl->domains[d]);
-         mir_value_t cl_args[] = { self };
+         mir_value_t cl_args[] = {
+            dm->shared ? mir_build_null(inst_mu, t_ptr) : self
+         };
          mir_value_t ff_cl = mir_build_closure(inst_mu, dm->ff_sym, t_offset,
                                                cl_args, 1);
          const uint32_t edge_flags =
@@ -694,14 +984,15 @@ void vlog_island_lower_emit_funcs(vlog_island_lower_ctx_t *ctx,
 
    for (uint32_t ii = 0; ii < ctx->plan->nislands; ii++) {
       const vlog_island_m2_t *m2 = &(ctx->islands[ii]);
-      if (m2->n_fused_comb > 0)
+      if (m2->n_fused_comb > 0 && m2->emit_comb)
          vlog_lower_island_comb_fn(mc, body, qual, m2->eval_sym,
-                                   m2->isl, m2->fused_proc);
+                                   m2->isl, m2->fused_proc, m2->comb_shared);
 
       for (uint32_t d = 0; d < m2->isl->ndomains; d++) {
-         if (m2->doms[d].n_fused_ff > 0)
+         if (m2->doms[d].n_fused_ff > 0 && m2->doms[d].emit_fn)
             vlog_lower_island_ff_fn(mc, body, qual, m2->doms[d].ff_sym,
-                                    m2->isl, d, m2->fused_proc);
+                                    m2->isl, d, m2->fused_proc,
+                                    m2->doms[d].shared);
       }
    }
 }

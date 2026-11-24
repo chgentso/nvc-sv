@@ -38597,18 +38597,18 @@ static void vlog_lower_island_always(vlog_gen_t *g, vlog_node_t s)
 void vlog_lower_island_comb_fn(mir_context_t *mc, vlog_node_t body,
                                ident_t qual, ident_t sym,
                                const vlog_island_t *isl,
-                               const bool *fused_proc)
+                               const bool *fused_proc, bool is_shared)
 {
-   mir_shape_t *shape = mir_get_shape(mc, qual);
+   mir_shape_t *shape = is_shared ? NULL : mir_get_shape(mc, qual);
    mir_unit_t *mu = mir_unit_new(mc, sym, vlog_to_object(body),
                                  MIR_UNIT_FUNCTION, shape);
 
    mir_type_t t_offset = mir_offset_type(mu);
    mir_set_result(mu, t_offset);
 
-   mir_add_param(mu, mir_context_type(mu, qual), MIR_NULL_STAMP,
-                 ident_new("context"));
    mir_type_t t_ptr = mir_pointer_type(mu, mir_int_type(mu, 0, 255));
+   mir_add_param(mu, is_shared ? t_ptr : mir_context_type(mu, qual),
+                 MIR_NULL_STAMP, ident_new("context"));
    mir_value_t state = mir_add_param(mu, t_ptr, MIR_NULL_STAMP,
                                      ident_new("state"));
 
@@ -38664,21 +38664,22 @@ void vlog_lower_island_comb_fn(mir_context_t *mc, vlog_node_t body,
 void vlog_lower_island_ff_fn(mir_context_t *mc, vlog_node_t body,
                              ident_t qual, ident_t sym,
                              const vlog_island_t *isl,
-                             uint32_t domain_idx, const bool *fused_proc)
+                             uint32_t domain_idx, const bool *fused_proc,
+                             bool is_shared)
 {
    assert(domain_idx < isl->ndomains);
    const island_domain_t *dom = &(isl->domains[domain_idx]);
 
-   mir_shape_t *shape = mir_get_shape(mc, qual);
+   mir_shape_t *shape = is_shared ? NULL : mir_get_shape(mc, qual);
    mir_unit_t *mu = mir_unit_new(mc, sym, vlog_to_object(body),
                                  MIR_UNIT_FUNCTION, shape);
 
    mir_type_t t_offset = mir_offset_type(mu);
    mir_set_result(mu, t_offset);
 
-   mir_add_param(mu, mir_context_type(mu, qual), MIR_NULL_STAMP,
-                 ident_new("context"));
    mir_type_t t_ptr = mir_pointer_type(mu, mir_int_type(mu, 0, 255));
+   mir_add_param(mu, is_shared ? t_ptr : mir_context_type(mu, qual),
+                 MIR_NULL_STAMP, ident_new("context"));
    mir_value_t state = mir_add_param(mu, t_ptr, MIR_NULL_STAMP,
                                      ident_new("state"));
 

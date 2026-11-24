@@ -27,6 +27,8 @@ typedef struct {
    uint32_t  n_write_sigs;
    uint32_t  n_fused_ff;
    ident_t   ff_sym;
+   bool      shared;
+   bool      emit_fn;
 } vlog_island_dom_m3_t;
 
 typedef struct {
@@ -41,6 +43,8 @@ typedef struct {
    bool                 *sig_ext_w;    // [isl->nsigs]
    vlog_island_dom_m3_t *doms;         // [isl->ndomains]
    ident_t               eval_sym;
+   bool                  comb_shared;
+   bool                  emit_comb;
 } vlog_island_m2_t;
 
 typedef struct {
