@@ -12137,7 +12137,10 @@ static vlog_node_t p_event_trigger(void)
    }
 
    vlog_node_t v = vlog_new(V_EVENT_TRIGGER);
-   vlog_node_t target = p_select(p_identifier());
+   if (peek() == tID && (peek_nth(2) == tSCOPE || is_specialised_scope()))
+      qualify_scope = p_scope_prefix();
+   vlog_node_t target = (peek() == tTHIS || peek() == tSUPER)
+      ? p_select(NULL) : p_select(p_identifier());
    if (vlog_kind(target) == V_REF)
       vlog_set_ident(v, vlog_ident(target));
    else

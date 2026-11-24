@@ -3225,3 +3225,4 @@ agg_mdim1       normal,2008
 fcall_index1    normal,2008
 psl_default_conc1 2008
 math_pow_int1   2008
+vlog_event_scope1 verilog
