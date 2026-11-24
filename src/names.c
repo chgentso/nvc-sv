@@ -5599,6 +5599,57 @@ static tree_t solve_array_ref(nametab_t *tab, tree_t t)
 
    type_t base_type = tree_type(deref);
 
+   // Disambiguate F(X)(Y) where F can be called with no arguments and
+   // returns an array of arrays, so F()(X)(Y) is the valid interpretation
+   // (LRM 08 section 8.4).
+   const tree_kind_t dkind = tree_kind(deref);
+   if ((dkind == T_FCALL || dkind == T_PROT_FCALL)
+       && tree_has_ref(deref) && type_is_array(base_type)) {
+      tree_t decl = tree_ref(deref);
+      type_t elem = type_elem(base_type);
+      const int inner_n = tree_params(deref);
+      const int outer_n = tree_params(t);
+      if (can_call_no_args(decl)
+          && inner_n == dimension_of(base_type)
+          && type_is_array(elem)
+          && outer_n == dimension_of(elem)) {
+         bool need_rewrite = outer_n != dimension_of(base_type);
+         if (!need_rewrite && tab->top_type_set->members.count > 0
+             && !type_set_contains(tab, elem)
+             && type_set_contains(tab, type_elem(elem)))
+            need_rewrite = true;
+
+         bool idx_ok = need_rewrite;
+         for (int i = 0; idx_ok && i < inner_n; i++) {
+            tree_t ip = tree_param(deref, i);
+            type_t itype = index_type_of(base_type, i);
+            if (tree_subkind(ip) != P_POS || itype == NULL
+                || !type_eq(tree_type(tree_value(ip)), itype))
+               idx_ok = false;
+         }
+
+         if (idx_ok) {
+            tree_t new_call = tree_new(dkind);
+            tree_set_ref(new_call, decl);
+            tree_set_ident(new_call, tree_ident(deref));
+            tree_set_loc(new_call, tree_loc(deref));
+            tree_set_type(new_call, base_type);
+            if (dkind == T_PROT_FCALL && tree_has_name(deref))
+               tree_set_name(new_call, tree_name(deref));
+
+            tree_t inner = tree_new(T_ARRAY_REF);
+            tree_set_value(inner, new_call);
+            tree_set_type(inner, elem);
+            tree_set_loc(inner, tree_loc(deref));
+            tree_copy_params(inner, deref);
+
+            deref = inner;
+            tree_set_value(t, deref);
+            base_type = elem;
+         }
+      }
+   }
+
    const int nparams = tree_params(t);
    for (int i = 0; i < nparams; i++) {
       tree_t p = tree_param(t, i);
