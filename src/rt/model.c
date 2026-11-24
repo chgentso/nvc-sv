@@ -5109,6 +5109,10 @@ static void model_cycle_body(rt_model_t *m)
          deferq_run(m, &m->nonblockq);
       if (rt_island_has_ff_commits(m->islands)) {
          rt_island_commit_ff(m, m->islands, model_thread(m)->tlab);
+         if (m->reschedq.count > 0) {
+            deferq_swap(&m->reschedq, &m->nonblockq);
+            deferq_run(m, &m->nonblockq);
+         }
          if (rt_island_has_dirty(m->islands))
             m->next_is_delta = true;
       }

@@ -1777,6 +1777,21 @@ static void island_build_hier(rt_island_mgr_t *mgr)
    }
    ACLEAR(groups);
    ghash_free(sdom_map);
+
+   if (opt_get_int(OPT_DUMP_ISLANDS)) {
+      uint32_t n_direct = 0;
+      for (uint32_t i = 0; i < N; i++) {
+         const rt_island_t *isl = mgr->islands.items[i];
+         for (uint32_t j = 0; j < isl->nsigs; j++) {
+            if ((isl->sigs[j].flags & RT_ISIG_DIRECT_LINK)
+                && isl->sigs[j].n_direct_targets > 0)
+               n_direct++;
+         }
+      }
+      printf("ISLAND_HIER: islands=%u super_islands=%u direct_wires=%u "
+             "super_domains=%u\n",
+             N, mgr->clusters.count, n_direct, mgr->super_domains.count);
+   }
 }
 
 void rt_island_reset_all(rt_island_mgr_t *mgr)

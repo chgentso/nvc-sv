@@ -950,9 +950,7 @@ void vlog_island_lower_emit_init(vlog_island_lower_ctx_t *ctx,
             continue;
 
          const island_domain_t *dom = &(isl->domains[d]);
-         mir_value_t cl_args[] = {
-            dm->shared ? mir_build_null(inst_mu, t_ptr) : self
-         };
+         mir_value_t cl_args[] = { self };
          mir_value_t ff_cl = mir_build_closure(inst_mu, dm->ff_sym, t_offset,
                                                cl_args, 1);
          const uint32_t edge_flags =

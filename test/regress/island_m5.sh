@@ -229,3 +229,51 @@ grep -q "PASSED cycle_m5" cycle_hier.out
 nvc-sv -a cycle_m5.sv -e --rtl-islands=off tb_cycle_m5
 nvc-sv -r tb_cycle_m5 > cycle_off.out
 diff -u cycle_off.out cycle_hier.out
+
+# 4. SystemVerilog interface with tri-state driver resolved against RTL module
+cat >iface_m5.sv <<'EOF'
+interface bus_if(input logic clk, input logic rst_n, inout wire [1:0] tx);
+  logic [1:0] tx_drv = 2'b00;
+  bit active = 1'b0;
+  logic seen;
+
+  assign tx = active ? tx_drv : 2'bzz;
+  always_comb seen = (tx[1] ^ tx[0]) === 1'b1;
+endinterface
+
+module rtl_tx(input logic clk, input logic rst_n, output logic [1:0] tx_o);
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) tx_o <= 2'b01;
+    else        tx_o <= ~tx_o;
+  end
+endmodule
+
+module tb_iface_m5;
+  logic clk = 1'b0, rst_n = 1'b0;
+  wire [1:0] tx;
+  bus_if u_if(.clk(clk), .rst_n(rst_n), .tx(tx));
+  rtl_tx u_dut(.clk(clk), .rst_n(rst_n), .tx_o(tx));
+
+  always #5 clk = ~clk;
+
+  initial begin
+    #1;
+    if (tx !== 2'b01 || u_if.seen !== 1'b1)
+      $fatal(1, "iface tri-state mismatch tx=%b seen=%b", tx, u_if.seen);
+    rst_n = 1'b1;
+    @(posedge clk);
+    #1;
+    if (tx !== 2'b10 || u_if.seen !== 1'b1)
+      $fatal(1, "iface post-edge mismatch tx=%b seen=%b", tx, u_if.seen);
+    $display("PASSED iface_m5");
+    $finish;
+  end
+endmodule
+EOF
+
+nvc-sv -a iface_m5.sv -e --rtl-islands=hier tb_iface_m5
+nvc-sv -r tb_iface_m5 > iface_hier.out
+grep -q "PASSED iface_m5" iface_hier.out
+nvc-sv -a iface_m5.sv -e --rtl-islands=off tb_iface_m5
+nvc-sv -r tb_iface_m5 > iface_off.out
+diff -u iface_off.out iface_hier.out

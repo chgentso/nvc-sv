@@ -2540,6 +2540,14 @@ vlog_island_plan_t *vlog_island_analyze(vlog_node_t body, bool is_mixed)
 {
    assert(vlog_kind(body) == V_INST_BODY);
 
+   if (vlog_flags(body) & VLOG_F_INTERFACE) {
+      vlog_island_plan_t *plan = xcalloc(sizeof(vlog_island_plan_t));
+      plan->mod_name = vlog_has_ident2(body) ? vlog_ident2(body) : vlog_ident(body);
+      plan->body_name = vlog_ident(body);
+      plan->has_mixed_ports = is_mixed;
+      return plan;
+   }
+
    analyze_ctx_t ctx = {
       .body     = body,
       .is_mixed = is_mixed,
