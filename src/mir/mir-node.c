@@ -1614,14 +1614,16 @@ mir_value_t mir_build_binary(mir_unit_t *mu, mir_vec_op_t op, mir_type_t type,
    case MIR_VEC_CASEZ_EQ:
    case MIR_VEC_LOG_AND:
    case MIR_VEC_LOG_OR:
-      // XXX: these should be vec2
    case MIR_VEC_LT:
    case MIR_VEC_LEQ:
    case MIR_VEC_GT:
    case MIR_VEC_GEQ:
    case MIR_VEC_LOG_EQ:
    case MIR_VEC_LOG_NEQ:
-      otype = mir_vec4_type(mu, 1, false);
+      if (mir_get_class(mu, type) == MIR_TYPE_VEC4)
+         otype = mir_vec4_type(mu, 1, false);
+      else
+         otype = mir_vec2_type(mu, 1, false);
       break;
    default:
       otype = type;
@@ -2188,6 +2190,8 @@ mir_value_t mir_build_ternary(mir_unit_t *mu, mir_type_t type,
    mir_value_t result = mir_build_3(mu, MIR_OP_TERNARY, type, stamp, test,
                                     vtrue, vfalse);
 
+   MIR_ASSERT(mir_get_class(mu, type) == MIR_TYPE_VEC4,
+              "ternary result is not a vec4");
    MIR_ASSERT(mir_is(mu, test, MIR_TYPE_VEC4), "ternary test is not a vec4");
    MIR_ASSERT(mir_get_size(mu, mir_get_type(mu, test)) == 1,
               "test must be one bit vector");
