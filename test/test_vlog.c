@@ -5021,6 +5021,27 @@ START_TEST(test_methargs1)
 }
 END_TEST
 
+START_TEST(test_covreal1)
+{
+   const error_t expect[] = {
+      { 14, "wildcard bins are not allowed on a real coverpoint" },
+      { 17, "transition bins are not allowed on a real coverpoint" },
+      { 20, "with clause is not allowed on a non-integral coverpoint" },
+      { 23, "with clause is not allowed on a non-integral coverpoint" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/covreal1.sv");
+
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
 Suite *get_vlog_tests(void)
 {
    Suite *s = suite_create("vlog");
@@ -5218,6 +5239,7 @@ Suite *get_vlog_tests(void)
    tcase_add_test(tc, test_evnba1);
    tcase_add_test(tc, test_covbin1);
    tcase_add_test(tc, test_methargs1);
+   tcase_add_test(tc, test_covreal1);
    suite_add_tcase(s, tc);
 
    return s;

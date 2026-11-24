@@ -17194,6 +17194,44 @@ static vlog_node_t cov_member_type(vlog_node_t type, ident_t name)
    return NULL;
 }
 
+static vlog_node_t cov_expr_type(const cov_parse_t *cp, cov_toks_t e)
+{
+   if (e.n < 1 || e.t[0].token != tID)
+      return NULL;
+
+   const ident_t first = e.t[0].lval.ident;
+   vlog_node_t type = NULL;
+
+   vlog_node_t decl = vlog_symtab_query(symtab, first);
+   if (decl == NULL) {
+      for (int i = 0; i < cp->nclass_args; i++) {
+         if (cp->class_args[i] == first)
+            type = cp->class_types[i];
+      }
+      if (type == NULL)
+         return NULL;
+   }
+   else switch (vlog_kind(decl)) {
+   case V_VAR_DECL:
+   case V_NET_DECL:
+   case V_PORT_DECL:
+   case V_TF_PORT_DECL:
+   case V_LOCAL_DECL:
+      type = vlog_get_type(decl);
+      break;
+   default:
+      return NULL;
+   }
+
+   for (int i = 1; i + 1 < e.n && type != NULL; i += 2) {
+      if (e.t[i].token != tDOT || e.t[i + 1].token != tID)
+         return NULL;
+      type = cov_member_type(type, e.t[i + 1].lval.ident);
+   }
+
+   return type;
+}
+
 static bool cov_expr_is_enum(const cov_parse_t *cp, cov_toks_t e,
                              ident_t *cast)
 {
@@ -17307,6 +17345,32 @@ static bool p_cov_coverpoint(cov_parse_t *cp, ident_t label)
       consume(tSEMI);
 
    c.is_enum = cov_expr_is_enum(cp, c.expr, &c.enum_cast);
+
+   vlog_node_t ctype = cov_expr_type(cp, c.expr);
+   const bool is_real = ctype != NULL && vlog_kind(ctype) == V_DATA_TYPE
+      && (vlog_subkind(ctype) == DT_REAL || vlog_subkind(ctype) == DT_SHORTREAL
+          || vlog_subkind(ctype) == DT_REALTIME);
+   const bool is_nonint = is_real
+      || (ctype != NULL
+          && (vlog_kind(ctype) == V_CLASS_DECL
+              || (vlog_kind(ctype) == V_DATA_TYPE
+                  && (vlog_subkind(ctype) == DT_STRING
+                      || vlog_subkind(ctype) == DT_CHANDLE
+                      || vlog_subkind(ctype) == DT_EVENT))));
+   if (is_nonint) {
+      for (int i = 0; i < c.nbins; i++) {
+         const cov_bin_t *b = &(c.bins[i]);
+         if (is_real && b->wildcard)
+            error_at(&state.last_loc, "wildcard bins are not allowed on a "
+                     "real coverpoint");
+         else if (is_real && b->trans)
+            error_at(&state.last_loc, "transition bins are not allowed on a "
+                     "real coverpoint");
+         else if (b->has_with)
+            error_at(&state.last_loc, "with clause is not allowed on a "
+                     "non-integral coverpoint");
+      }
+   }
 
    COV_PUSH(cp->group.cps, cp->group.ncps, c);
    return true;
