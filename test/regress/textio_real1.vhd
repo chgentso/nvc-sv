@@ -1,4 +1,4 @@
--- TEXTIO READ for REAL: decimal point required (LRM 16.4 / 15.5.2),
+-- TEXTIO READ for REAL: integer-form values are accepted,
 -- stop before malformed exponent, large integer part and overflow handling.
 use std.textio.all;
 
@@ -12,20 +12,26 @@ begin
         variable r  : real;
         variable ok : boolean;
     begin
-        -- Integer literal without decimal point is not a valid real literal
+        -- Values without a decimal point are accepted (existing files
+        -- often hold whole numbers)
         l := new string'("42");
         read(l, r, ok);
-        assert not ok and l.all = "42";
+        assert ok and r = 42.0 and l'length = 0;
         deallocate(l);
 
         l := new string'("1e3");
         read(l, r, ok);
-        assert not ok and l.all = "1e3";
+        assert ok and r = 1000.0 and l'length = 0;
         deallocate(l);
 
         l := new string'("-16#FF#");
         read(l, r, ok);
-        assert not ok and l.all = "-16#FF#";
+        assert ok and r = -255.0 and l'length = 0;
+        deallocate(l);
+
+        l := new string'("-7 x");
+        read(l, r, ok);
+        assert ok and r = -7.0 and l.all = " x";
         deallocate(l);
 
         -- Trailing non-exponent characters stop before 'e'

@@ -477,7 +477,6 @@ package body textio is
         variable exp    : integer;
         variable ovf    : boolean;
         variable seen_point : boolean := false;
-        variable frac_dig   : natural := 0;
         variable closing    : character;
         variable peek       : character;
     begin
@@ -498,7 +497,6 @@ package body textio is
                 if seen_point then
                     scale := scale / base;
                     result := result + real(digit) * scale;
-                    frac_dig := frac_dig + 1;
                 else
                     if result > (real'high - real(digit)) / base then
                         return;
@@ -517,19 +515,9 @@ package body textio is
             end if;
             pos := pos + 1;
         end loop;
-        `if VHDL_VERSION >= "2008" then
-            if not seen_point or frac_dig = 0 or pos > l.all'length
-                or get_char(l.all, pos) /= closing
-            then
-                return;
-            end if;
-        `else
-            if ndig = 0 or pos > l.all'length
-                or get_char(l.all, pos) /= closing
-            then
-                return;
-            end if;
-        `end if
+        if ndig = 0 or pos > l.all'length or get_char(l.all, pos) /= closing then
+            return;
+        end if;
         pos := pos + 1;
 
         if pos < l.all'length and (get_char(l.all, pos) = 'e'
@@ -625,17 +613,10 @@ package body textio is
                 exit;
             end if;
         end loop;
-        `if VHDL_VERSION >= "2008" then
-            if ndig = 0 or pos > len or get_char(l.all, pos) /= '.' then
-                good := false;
-                return;
-            end if;
-        `else
-            if ndig = 0 then
-                good := false;
-                return;
-            end if;
-        `end if
+        if ndig = 0 then
+            good := false;
+            return;
+        end if;
         if pos <= len and get_char(l.all, pos) = '.' then
             pos := pos + 1;
             ndig := 0;
