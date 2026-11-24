@@ -3469,6 +3469,8 @@ static vlog_node_t elab_early_port_body(vlog_node_t port, void *arg)
    return (vlog_flags(body) & VLOG_F_INTERFACE) ? body : NULL;
 }
 
+static vlog_node_t elab_gen_find_mod(vlog_node_t list, void *arg);
+
 static void elab_verilog_module(tree_t comp, ident_t label, vlog_node_t mod,
                                 vlog_node_t list, vlog_node_t inst,
                                 tree_t entity, const elab_ctx_t *ctx)
@@ -3614,6 +3616,8 @@ static void elab_verilog_module(tree_t comp, ident_t label, vlog_node_t mod,
       vlog_trans(ei->body, ei->block);
       elab_infer_interconnects(ei->body, ctx);
 
+      vlog_island_set_find_mod(elab_gen_find_mod, (void *)ctx);
+
       if (entity == NULL
           && (opt_get_int(OPT_RTL_ISLANDS) != RTL_ISLANDS_OFF
               || opt_get_int(OPT_DUMP_ISLANDS))) {
@@ -3631,6 +3635,7 @@ static void elab_verilog_module(tree_t comp, ident_t label, vlog_node_t mod,
 
       vlog_lower_instance(ctx->mir, ei->body, NULL, ei->block, ctx->cover,
                           new_ctx.cscope);
+      vlog_island_set_find_mod(NULL, NULL);
 
       ghash_put(mc->instances, list, ei);
       mc->unique++;
@@ -5892,8 +5897,10 @@ static void elab_verilog_gen_block(vlog_node_t tmpl, vlog_node_t genvar,
 
       vlog_cover_block(body, ctx->cover, new_ctx.cscope);
 
+      vlog_island_set_find_mod(elab_gen_find_mod, (void *)&new_ctx);
       vlog_lower_instance(ctx->mir, body, ctx->cloned, block, ctx->cover,
                           new_ctx.cscope);
+      vlog_island_set_find_mod(NULL, NULL);
       ctx->stats->gen_bodies++;
 
       elab_gen_body_t gb = { .block = v, .body = body, .where = b };

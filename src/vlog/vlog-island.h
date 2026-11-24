@@ -19,6 +19,7 @@
 #define _VLOG_ISLAND_H
 
 #include "prim.h"
+#include "vlog/vlog-phase.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -167,6 +168,7 @@ typedef struct {
    bool                   has_mixed_ports;
 } vlog_island_plan_t;
 
+void vlog_island_set_find_mod(vlog_find_mod_fn_t fn, void *ctx);
 vlog_island_plan_t *vlog_island_analyze(vlog_node_t body, bool is_mixed);
 void vlog_island_plan_free(vlog_island_plan_t *plan);
 void vlog_island_dump(const vlog_island_plan_t *plan);

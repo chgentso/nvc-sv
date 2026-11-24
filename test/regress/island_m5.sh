@@ -277,3 +277,65 @@ grep -q "PASSED iface_m5" iface_hier.out
 nvc-sv -a iface_m5.sv -e --rtl-islands=off tb_iface_m5
 nvc-sv -r tb_iface_m5 > iface_off.out
 diff -u iface_off.out iface_hier.out
+
+# 5. Generate block driving partial slices of parent packed vector + reverse-order direct link
+cat >gen_slice_m5.sv <<'EOF'
+module gen_tree_m5 #(parameter int N = 4) (
+  input  logic [N-1:0] req_i,
+  output logic [N-1:0] gnt_o
+);
+  logic [6:0] tree_vec;
+  assign tree_vec[0] = 1'b1;
+
+  for (genvar i = 1; i <= 6; i++) begin : gen_nodes
+    assign tree_vec[i] = tree_vec[(i - 1) >> 1] ^ req_i[i & 3];
+  end
+
+  assign gnt_o = req_i & tree_vec[6:3];
+endmodule
+
+module rev_cons_m5 (
+  input  logic [3:0] d_i,
+  output logic [3:0] y_o
+);
+  always_comb y_o = d_i ^ 4'ha;
+endmodule
+
+module rev_prod_m5 (
+  input  logic [3:0] a_i,
+  output logic [3:0] q_o
+);
+  always_comb q_o = a_i + 4'h1;
+endmodule
+
+module tb_gen_slice_m5;
+  logic [3:0] req = 4'b0101;
+  logic [3:0] gnt;
+  logic [3:0] a = 4'h2;
+  logic [3:0] w_mid, y;
+
+  // Consumer instantiated BEFORE producer (must still form direct wire)
+  rev_cons_m5 u_cons (.d_i(w_mid), .y_o(y));
+  rev_prod_m5 u_prod (.a_i(a), .q_o(w_mid));
+  gen_tree_m5 u_tree (req, gnt);
+
+  initial begin
+    #1;
+    $display("T0 gnt=%b y=%h", gnt, y);
+    req = 4'b1011; a = 4'h9;
+    #1;
+    $display("T1 gnt=%b y=%h", gnt, y);
+    $display("PASSED gen_slice_m5");
+    $finish;
+  end
+endmodule
+EOF
+
+nvc-sv -a gen_slice_m5.sv -e --rtl-islands=hier tb_gen_slice_m5
+NVC_DUMP_ISLANDS=1 nvc-sv -r tb_gen_slice_m5 > gen_hier.out
+grep -q "PASSED gen_slice_m5" gen_hier.out
+grep -Eq "ISLAND_HIER: islands=[0-9]+ super_islands=1 direct_wires=1" gen_hier.out
+nvc-sv -a gen_slice_m5.sv -e --rtl-islands=off tb_gen_slice_m5
+nvc-sv -r tb_gen_slice_m5 > gen_off.out
+grep -v "^ISLAND_HIER:" gen_hier.out > gen_hier_clean.out
+diff -u gen_off.out gen_hier_clean.out

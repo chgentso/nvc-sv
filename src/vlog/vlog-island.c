@@ -30,6 +30,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+static vlog_find_mod_fn_t island_find_mod = NULL;
+static void *island_find_mod_ctx = NULL;
+
+void vlog_island_set_find_mod(vlog_find_mod_fn_t fn, void *ctx)
+{
+   island_find_mod = fn;
+   island_find_mod_ctx = ctx;
+}
+
 typedef struct {
    vlog_node_t               decl;
    vlog_node_t               port;
@@ -538,6 +547,240 @@ static void collect_stmt_writes_ext(analyze_ctx_t *ctx, vlog_node_t stmt)
    }
 }
 
+static void prescan_stmt_drivers(analyze_ctx_t *ctx, vlog_node_t s,
+                                 bool in_generate)
+{
+   const vlog_kind_t k = vlog_kind(s);
+   switch (k) {
+   case V_ASSIGN:
+      if (in_generate) {
+         ref_scan_t rs = { .ctx = ctx, .mark_ext_read = true };
+         vlog_visit(s, scan_refs_cb, &rs);
+         hset_t *once = hset_new(8);
+         scan_lvalue_refs(ctx, vlog_target(s), false, true, true, once);
+         hset_free(once);
+      }
+      else {
+         hset_t *once = hset_new(8);
+         scan_lvalue_refs(ctx, vlog_target(s), false, false, true, once);
+         hset_free(once);
+      }
+      break;
+
+   case V_ALWAYS:
+      if (in_generate) {
+         ref_scan_t rs = { .ctx = ctx, .mark_ext_read = true };
+         vlog_visit(s, scan_refs_cb, &rs);
+         collect_stmt_writes_ext(ctx, s);
+         hset_t *once = hset_new(8);
+         collect_stmt_writes_only(ctx, s, once);
+         hset_free(once);
+      }
+      else {
+         hset_t *once = hset_new(8);
+         collect_stmt_writes_only(ctx, s, once);
+         hset_free(once);
+      }
+      break;
+
+   case V_INITIAL:
+   case V_FINAL:
+      {
+         // Mark writes as external without inflating multi-driver counts
+         ref_scan_t rs = {
+            .ctx           = ctx,
+            .mark_ext_read = true,
+         };
+         vlog_visit(s, scan_refs_cb, &rs);
+         collect_stmt_writes_ext(ctx, s);
+      }
+      break;
+
+   case V_GATE_INST:
+      {
+         if (vlog_subkind(s) == V_GATE_ALIAS) {
+            ref_scan_t rs = {
+               .ctx              = ctx,
+               .mark_ext_read    = true,
+               .mark_ext_written = true,
+               .force_reason     = ISIG_EJ_ALIAS,
+            };
+            vlog_visit(s, scan_refs_cb, &rs);
+            if (vlog_has_target(s))
+               scan_lvalue_refs(ctx, vlog_target(s), true, true, true, NULL);
+            break;
+         }
+
+         hset_t *once = hset_new(8);
+         if (vlog_has_target(s))
+            scan_lvalue_refs(ctx, vlog_target(s), false, true, true, once);
+         for (unsigned j = 0; j < vlog_params(s); j++) {
+            vlog_node_t p = vlog_param(s, j);
+            ref_scan_t rs = {
+               .ctx              = ctx,
+               .mark_ext_read    = true,
+               .mark_ext_written = (vlog_subkind(s) >= V_GATE_TRAN
+                                    && vlog_subkind(s) <= V_GATE_RTRANIF1),
+               .add_driver       = (vlog_subkind(s) >= V_GATE_TRAN
+                                    && vlog_subkind(s) <= V_GATE_RTRANIF1),
+               .seen_once        = once,
+            };
+            vlog_visit(p, scan_refs_cb, &rs);
+         }
+         hset_free(once);
+      }
+      break;
+
+   case V_UDP_TABLE:
+   case V_SPECIFY:
+      {
+         ref_scan_t rs = {
+            .ctx              = ctx,
+            .mark_ext_read    = true,
+            .mark_ext_written = true,
+         };
+         vlog_visit(s, scan_refs_cb, &rs);
+      }
+      break;
+
+   case V_INST_LIST:
+      {
+         vlog_node_t mod = island_find_mod != NULL
+            ? (*island_find_mod)(s, island_find_mod_ctx) : NULL;
+         if (mod != NULL && vlog_kind(mod) != V_MODULE)
+            mod = NULL;
+
+         bool has_iface = false;
+         int nmod_ports = 0;
+         if (mod != NULL) {
+            nmod_ports = vlog_ports(mod);
+            const int ndecls = vlog_decls(mod);
+            for (int d = 0; d < ndecls; d++) {
+               if (vlog_kind(vlog_decl(mod, d)) == V_IFACE_PORT) {
+                  has_iface = true;
+                  break;
+               }
+            }
+         }
+
+         const int ninst = vlog_stmts(s);
+         for (int j = 0; j < ninst; j++) {
+            vlog_node_t inst = vlog_stmt(s, j);
+            if (vlog_kind(inst) != V_MOD_INST)
+               continue;
+            bool seen_named = false;
+            const int nconns = vlog_params(inst);
+            for (int p = 0; p < nconns; p++) {
+               vlog_node_t conn = vlog_param(inst, p);
+               if (vlog_kind(conn) != V_PORT_CONN)
+                  continue;
+               if (vlog_has_ident(conn))
+                  seen_named = true;
+               if (!vlog_has_value(conn))
+                  continue;
+
+               vlog_node_t port = NULL;
+               if (vlog_has_ref(conn)
+                   && vlog_kind(vlog_ref(conn)) == V_PORT_DECL)
+                  port = vlog_ref(conn);
+               else if (mod != NULL) {
+                  if (vlog_has_ident(conn)) {
+                     ident_t cname = vlog_ident(conn);
+                     for (int k = 0; k < nmod_ports; k++) {
+                        vlog_node_t pr = vlog_port(mod, k);
+                        if (vlog_has_ref(pr)
+                            && vlog_ident(vlog_ref(pr)) == cname) {
+                           port = vlog_ref(pr);
+                           break;
+                        }
+                     }
+                  }
+                  else if (!seen_named && !has_iface && p < nmod_ports) {
+                     vlog_node_t pr = vlog_port(mod, p);
+                     if (vlog_has_ref(pr))
+                        port = vlog_ref(pr);
+                  }
+               }
+
+               bool is_in = false, is_out = false;
+               if (port != NULL && vlog_kind(port) == V_PORT_DECL) {
+                  switch (vlog_subkind(port)) {
+                  case V_PORT_INPUT:  is_in = true; break;
+                  case V_PORT_OUTPUT: is_out = true; break;
+                  default:            is_in = is_out = true; break;
+                  }
+               }
+               else {
+                  // Direction not bound yet: mark shared read/written so
+                  // boundary ports are promoted safely without inflating
+                  // single-driver count on parent inputs
+                  is_in = true;
+                  is_out = true;
+               }
+
+               ref_scan_t rs = {
+                  .ctx              = ctx,
+                  .mark_ext_read    = is_in,
+                  .mark_ext_written = is_out,
+                  .add_driver       = (port != NULL && is_out),
+               };
+               vlog_visit(vlog_value(conn), scan_refs_cb, &rs);
+            }
+         }
+      }
+      break;
+
+   case V_GEN_BLOCK:
+      {
+         const int ndecls = vlog_decls(s);
+         ref_scan_t rs = { .ctx = ctx, .mark_ext_read = true };
+         for (int j = 0; j < ndecls; j++) {
+            vlog_node_t d = vlog_decl(s, j);
+            const vlog_kind_t dk = vlog_kind(d);
+            if ((dk == V_NET_DECL || dk == V_VAR_DECL) && vlog_has_value(d))
+               vlog_visit(vlog_value(d), scan_refs_cb, &rs);
+         }
+         const int nstmts = vlog_stmts(s);
+         for (int j = 0; j < nstmts; j++)
+            prescan_stmt_drivers(ctx, vlog_stmt(s, j), true);
+      }
+      break;
+
+   case V_IF_GENERATE:
+      {
+         ref_scan_t rs = { .ctx = ctx, .mark_ext_read = true };
+         const int nconds = vlog_conds(s);
+         for (int c = 0; c < nconds; c++) {
+            vlog_node_t cond = vlog_cond(s, c);
+            if (vlog_has_value(cond))
+               vlog_visit(vlog_value(cond), scan_refs_cb, &rs);
+            const int nstmts = vlog_stmts(cond);
+            for (int j = 0; j < nstmts; j++)
+               prescan_stmt_drivers(ctx, vlog_stmt(cond, j), true);
+         }
+      }
+      break;
+
+   case V_FOR_GENERATE:
+      {
+         ref_scan_t rs = { .ctx = ctx, .mark_ext_read = true };
+         if (vlog_has_left(s))
+            vlog_visit(vlog_left(s), scan_refs_cb, &rs);
+         if (vlog_has_value(s))
+            vlog_visit(vlog_value(s), scan_refs_cb, &rs);
+         if (vlog_has_right(s))
+            vlog_visit(vlog_right(s), scan_refs_cb, &rs);
+         const int nstmts = vlog_stmts(s);
+         for (int j = 0; j < nstmts; j++)
+            prescan_stmt_drivers(ctx, vlog_stmt(s, j), true);
+      }
+      break;
+
+   default:
+      break;
+   }
+}
+
 static void prescan_external_and_drivers(analyze_ctx_t *ctx)
 {
    // Scan force/release and hier refs across the whole module body
@@ -567,153 +810,8 @@ static void prescan_external_and_drivers(analyze_ctx_t *ctx)
    }
 
    const int nstmts = vlog_stmts(ctx->body);
-   for (int i = 0; i < nstmts; i++) {
-      vlog_node_t s = vlog_stmt(ctx->body, i);
-      const vlog_kind_t k = vlog_kind(s);
-
-      // Force/release targets anywhere inside any statement
-      if (k == V_INITIAL || k == V_ALWAYS || k == V_FINAL) {
-         // Scan for V_FORCE / V_RELEASE inside the process
-         // We do a targeted check via vlog_visit_only for V_FORCE/V_RELEASE
-         // using a tiny callback below? Easier: check in a pass.
-      }
-
-      switch (k) {
-      case V_ASSIGN:
-         {
-            hset_t *once = hset_new(8);
-            scan_lvalue_refs(ctx, vlog_target(s), false, false, true, once);
-            hset_free(once);
-         }
-         break;
-
-      case V_ALWAYS:
-         {
-            hset_t *once = hset_new(8);
-            collect_stmt_writes_only(ctx, s, once);
-            hset_free(once);
-         }
-         break;
-
-      case V_INITIAL:
-      case V_FINAL:
-         {
-            // Mark writes as external without inflating multi-driver counts
-            ref_scan_t rs = {
-               .ctx           = ctx,
-               .mark_ext_read = true,
-            };
-            vlog_visit(s, scan_refs_cb, &rs);
-            collect_stmt_writes_ext(ctx, s);
-         }
-         break;
-
-      case V_GATE_INST:
-         {
-            if (vlog_subkind(s) == V_GATE_ALIAS) {
-               ref_scan_t rs = {
-                  .ctx              = ctx,
-                  .mark_ext_read    = true,
-                  .mark_ext_written = true,
-                  .force_reason     = ISIG_EJ_ALIAS,
-               };
-               vlog_visit(s, scan_refs_cb, &rs);
-               if (vlog_has_target(s))
-                  scan_lvalue_refs(ctx, vlog_target(s), true, true, true, NULL);
-               break;
-            }
-
-            hset_t *once = hset_new(8);
-            if (vlog_has_target(s))
-               scan_lvalue_refs(ctx, vlog_target(s), false, true, true, once);
-            for (unsigned j = 0; j < vlog_params(s); j++) {
-               vlog_node_t p = vlog_param(s, j);
-               ref_scan_t rs = {
-                  .ctx              = ctx,
-                  .mark_ext_read    = true,
-                  .mark_ext_written = (vlog_subkind(s) >= V_GATE_TRAN
-                                       && vlog_subkind(s) <= V_GATE_RTRANIF1),
-                  .add_driver       = (vlog_subkind(s) >= V_GATE_TRAN
-                                       && vlog_subkind(s) <= V_GATE_RTRANIF1),
-                  .seen_once        = once,
-               };
-               vlog_visit(p, scan_refs_cb, &rs);
-            }
-            hset_free(once);
-         }
-         break;
-
-      case V_UDP_TABLE:
-      case V_SPECIFY:
-         {
-            ref_scan_t rs = {
-               .ctx              = ctx,
-               .mark_ext_read    = true,
-               .mark_ext_written = true,
-            };
-            vlog_visit(s, scan_refs_cb, &rs);
-         }
-         break;
-
-      case V_INST_LIST:
-         {
-            const int ninst = vlog_stmts(s);
-            for (int j = 0; j < ninst; j++) {
-               vlog_node_t inst = vlog_stmt(s, j);
-               if (vlog_kind(inst) != V_MOD_INST)
-                  continue;
-               const int nconns = vlog_params(inst);
-               for (int p = 0; p < nconns; p++) {
-                  vlog_node_t conn = vlog_param(inst, p);
-                  if (vlog_kind(conn) != V_PORT_CONN || !vlog_has_value(conn))
-                     continue;
-
-                  bool is_in = false, is_out = false;
-                  if (vlog_has_ref(conn)
-                      && vlog_kind(vlog_ref(conn)) == V_PORT_DECL) {
-                     switch (vlog_subkind(vlog_ref(conn))) {
-                     case V_PORT_INPUT:  is_in = true; break;
-                     case V_PORT_OUTPUT: is_out = true; break;
-                     default:            is_in = is_out = true; break;
-                     }
-                  }
-                  else {
-                     // Direction not bound yet: mark shared read/written so
-                     // boundary ports are promoted safely without inflating
-                     // single-driver count on parent inputs
-                     is_in = true;
-                     is_out = true;
-                  }
-
-                  ref_scan_t rs = {
-                     .ctx              = ctx,
-                     .mark_ext_read    = is_in,
-                     .mark_ext_written = is_out,
-                     .add_driver       = (vlog_has_ref(conn) && is_out),
-                  };
-                  vlog_visit(vlog_value(conn), scan_refs_cb, &rs);
-               }
-            }
-         }
-         break;
-
-      case V_GEN_BLOCK:
-      case V_IF_GENERATE:
-      case V_FOR_GENERATE:
-         {
-            ref_scan_t rs = {
-               .ctx              = ctx,
-               .mark_ext_read    = true,
-               .mark_ext_written = true,
-            };
-            vlog_visit(s, scan_refs_cb, &rs);
-         }
-         break;
-
-      default:
-         break;
-      }
-   }
+   for (int i = 0; i < nstmts; i++)
+      prescan_stmt_drivers(ctx, vlog_stmt(ctx->body, i), false);
 
    for (uint32_t i = 0; i < ctx->nsigs; i++) {
       if (ctx->sigs[i].driver_count > 1)
@@ -846,7 +944,7 @@ static bool check_lvalue(check_ctx_t *cc, vlog_node_t lhs, bool is_nba,
             return false;
          }
 
-         if (s->driver_count > 1) {
+         if (s->driver_count > 1 || s->ext_written) {
             fail_proc(cc, IPROC_EJ_MULTI_DRIVER_TARGET);
             return false;
          }

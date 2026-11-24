@@ -200,16 +200,41 @@ static inline bool island_edge_match(uint8_t old_v, uint8_t new_v, bool posedge)
       return (old_v == 1 && new_v != 1) || (old_v != 0 && new_v == 0);
 }
 
+static void island_input_watch_cb(uint64_t now, rt_signal_t *signal,
+                                  rt_watch_t *watch, void *user);
+
+static inline bool island_wakeable_is_input_watch(const rt_wakeable_t *w)
+{
+   if (w == NULL || w->kind != W_WATCH)
+      return false;
+   const rt_watch_t *watch = container_of(w, rt_watch_t, wakeable);
+   return watch->fn == island_input_watch_cb;
+}
+
+static inline bool island_pending_has_ext_observer(void *pending)
+{
+   if (pending == NULL)
+      return false;
+   if (pointer_tag(pending) == 1) {
+      const rt_wakeable_t *w = untag_pointer(pending, rt_wakeable_t);
+      return !island_wakeable_is_input_watch(w);
+   }
+   const rt_pending_t *p = untag_pointer(pending, rt_pending_t);
+   for (unsigned j = 0; j < p->count; j++) {
+      if (p->wake[j] != NULL && !island_wakeable_is_input_watch(p->wake[j]))
+         return true;
+   }
+   return false;
+}
+
 static inline bool island_sig_observed(const rt_signal_t *sig)
 {
-   if (sig->nexus.pending != NULL
-       || (sig->shared.flags & SIG_F_POLL_WATCHED) != 0)
+   if (sig->shared.flags & SIG_F_POLL_WATCHED)
       return true;
-   if (unlikely(sig->n_nexus > 1)) {
-      for (const rt_nexus_t *nx = sig->nexus.chain; nx != NULL; nx = nx->chain) {
-         if (nx->pending != NULL)
-            return true;
-      }
+   const rt_nexus_t *nx = &(sig->nexus);
+   for (uint32_t i = 0; i < sig->n_nexus; i++, nx = nx->chain) {
+      if (island_pending_has_ext_observer(nx->pending))
+         return true;
    }
    return false;
 }
