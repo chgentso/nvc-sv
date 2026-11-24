@@ -6552,8 +6552,6 @@ static bool mir_op_is_signal_only(mir_unit_t *mu, mir_value_t n,
    case MIR_OP_SCHED_DEPOSIT:
    case MIR_OP_DEPOSIT_SIGNAL:
    case MIR_OP_LOAD_PACKED:
-   case MIR_OP_DEPOSIT_PACKED:
-   case MIR_OP_SCHED_DEPOSIT_PACKED:
    case MIR_OP_PUT_DRIVER:
    case MIR_OP_FORCE:
    case MIR_OP_RELEASE:
