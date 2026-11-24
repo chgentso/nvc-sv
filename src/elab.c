@@ -1101,7 +1101,8 @@ static tree_t elab_default_binding(tree_t inst, const elab_ctx_t *ctx)
             value = make_ref(match);
          }
       }
-      else if (tree_has_value(eg)) {
+      else if (tree_has_value(eg) && tree_class(eg) != C_PACKAGE
+               && tree_class(eg) != C_TYPE) {
          tree_t def = tree_value(eg);
          if (is_literal(def))
             value = def;
