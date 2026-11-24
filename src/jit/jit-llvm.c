@@ -3950,7 +3950,7 @@ static void jit_llvm_cgen(jit_t *j, jit_handle_t handle, void *context)
    // Huge generated processes (e.g. large register decoders) trigger
    // superlinear register allocation / scheduling at LLVMCodeGenLevelDefault,
    // blocking the background JIT worker queue for tens of seconds.
-   const bool huge = f->nirs > 4000;
+   const bool huge = f->nirs > 32768;
 
    jit_cache_key_t key;
    void **relocs = NULL;
@@ -3974,7 +3974,7 @@ static void jit_llvm_cgen(jit_t *j, jit_handle_t handle, void *context)
          return;
       }
 
-      const size_t hint = cached_sz + MAX(65536, cached_sz / 4);
+      const size_t hint = cached_sz + MAX(8192, cached_sz / 4);
       code_blob_t *blob = code_blob_new(state->code, f->name, hint);
       if (blob == NULL) {
          free(cached_obj);
@@ -4082,7 +4082,7 @@ static void jit_llvm_cgen(jit_t *j, jit_handle_t handle, void *context)
    if (cache_on)
       jit_cache_store(state->cache, &key, objdata, objsz);
 
-   const size_t hint = objsz + MAX(65536, objsz / 4);
+   const size_t hint = objsz + MAX(8192, objsz / 4);
 
    code_blob_t *blob = code_blob_new(state->code, f->name, hint);
    if (blob == NULL) {
