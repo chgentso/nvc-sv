@@ -5611,6 +5611,9 @@ sig_shared_t *model_mixed_signal_proxy(rt_model_t *m, rt_signal_t *sv_sig,
    rt_watch_t *w = watch_new(m, mixed_bridge_sv_event, b, WATCH_EVENT, 1);
    model_set_event_cb(m, sv_sig, 0, sv_width, w);
 
+   if (unlikely(sv_sig->shared.flags & SIG_F_ISLAND))
+      rt_island_on_observer_attached(m, sv_sig);
+
    return &(s->shared);
 }
 
@@ -5870,17 +5873,29 @@ static void async_packed_deposit(rt_model_t *m, void *arg)
    if (ps->nonblock)
       ps->signal->shared.flags &= ~SIG_F_NB_DEFERQ;
    if (ps->abits != NULL) {
-      deposit_packed_apply(m, ps->signal, ps->offset, ps->count,
-                           (uint64_t)(uintptr_t)ps->abits,
-                           (uint64_t)(uintptr_t)ps->bbits,
-                           ps->has_b ? 0 : PACK_SRC_VEC2, true, false);
+      if (unlikely(ps->signal->shared.flags & SIG_F_ISLAND))
+         rt_island_put_packed(m, ps->signal, ps->offset, ps->count,
+                              (uint64_t)(uintptr_t)ps->abits,
+                              (uint64_t)(uintptr_t)ps->bbits,
+                              ps->has_b ? 0 : PACK_SRC_VEC2, false);
+      else
+         deposit_packed_apply(m, ps->signal, ps->offset, ps->count,
+                              (uint64_t)(uintptr_t)ps->abits,
+                              (uint64_t)(uintptr_t)ps->bbits,
+                              ps->has_b ? 0 : PACK_SRC_VEC2, true, false);
       free(ps->abits);
    }
    else {
-      deposit_packed_apply(m, ps->signal, ps->offset, ps->count,
-                           ps->small_a, ps->small_b,
-                           PACK_SRC_SCALAR | (ps->has_b ? 0 : PACK_SRC_VEC2),
-                           true, false);
+      if (unlikely(ps->signal->shared.flags & SIG_F_ISLAND))
+         rt_island_put_packed(m, ps->signal, ps->offset, ps->count,
+                              ps->small_a, ps->small_b,
+                              PACK_SRC_SCALAR | (ps->has_b ? 0 : PACK_SRC_VEC2),
+                              false);
+      else
+         deposit_packed_apply(m, ps->signal, ps->offset, ps->count,
+                              ps->small_a, ps->small_b,
+                              PACK_SRC_SCALAR | (ps->has_b ? 0 : PACK_SRC_VEC2),
+                              true, false);
    }
    ps->abits = ps->bbits = NULL;
    ps->next = m->free_packed_sched;
@@ -6057,6 +6072,12 @@ static void force_packed(rt_model_t *m, rt_signal_t *s, uint32_t msb_off,
    if (count == 0)
       return;
 
+   if (unlikely(s->shared.flags & SIG_F_ISLAND)) {
+      rt_island_put_packed(m, s, msb_off, count, a_val, b_val,
+                           src_flags, true);
+      return;
+   }
+
    const uint32_t width = s->bit_width;
    assert(msb_off + count <= width);
    const int nwords = (width + 63) / 64;
@@ -6108,7 +6129,15 @@ static void force_packed(rt_model_t *m, rt_signal_t *s, uint32_t msb_off,
 static void release_packed(rt_model_t *m, rt_signal_t *s, uint32_t msb_off,
                            uint32_t count, bool immediate)
 {
-   if (count == 0 || !(s->nexus.flags & NET_F_FORCED))
+   if (count == 0)
+      return;
+
+   if (unlikely(s->shared.flags & SIG_F_ISLAND)) {
+      rt_island_vpi_release_slice(m, s, msb_off, count);
+      return;
+   }
+
+   if (!(s->nexus.flags & NET_F_FORCED))
       return;
 
    rt_packed_force_t *pf = m->packed_forces
@@ -6205,6 +6234,28 @@ void force_signal(rt_model_t *m, rt_signal_t *s, const void *values,
 
    RT_LOCK(s->lock);
 
+   if (unlikely(s->shared.flags & SIG_F_ISLAND)) {
+      if (s->shared.flags & SIG_F_PACKED) {
+         if (count == 0)
+            return;
+         const int nwords = (count + 63) / 64;
+         uint64_t sa[4], sb[4];
+         uint64_t *heap LOCAL = NULL;
+         uint64_t *pa = sa, *pb = sb;
+         if (nwords > ARRAY_LEN(sa)) {
+            heap = xmalloc_array(nwords * 2, sizeof(uint64_t));
+            pa = heap;
+            pb = heap + nwords;
+         }
+         packed_bytes_to_words(values, count, pa, pb);
+         rt_island_put_packed(m, s, offset, count, (uint64_t)(uintptr_t)pa,
+                              (uint64_t)(uintptr_t)pb, 0, true);
+         return;
+      }
+      rt_island_put_bytes(m, s, values, offset, count, true);
+      return;
+   }
+
    if (unlikely(s->shared.flags & SIG_F_PACKED)) {
       if (count == 0)
          return;
@@ -6262,6 +6313,12 @@ void release_signal(rt_model_t *m, rt_signal_t *s, int offset, size_t count)
 
    RT_LOCK(s->lock);
 
+   if (unlikely(s->shared.flags & SIG_F_ISLAND)) {
+      assert(m->can_create_delta);
+      rt_island_vpi_release_slice(m, s, offset, count);
+      return;
+   }
+
    if (unlikely(s->shared.flags & SIG_F_PACKED)) {
       assert(m->can_create_delta);
       release_packed(m, s, offset, count, false);
@@ -6301,6 +6358,12 @@ void release_signal_now(rt_model_t *m, rt_signal_t *s, int offset,
    // (IEEE 1800-2017 section 10.6.2)
 
    RT_LOCK(s->lock);
+
+   if (unlikely(s->shared.flags & SIG_F_ISLAND)) {
+      assert(m->can_create_delta);
+      rt_island_vpi_release_slice(m, s, offset, count);
+      return;
+   }
 
    if (unlikely(s->shared.flags & SIG_F_PACKED)) {
       assert(m->can_create_delta);
@@ -6722,6 +6785,9 @@ void model_set_event_cb(rt_model_t *m, rt_signal_t *s, int offset,
    w->signals[w->next_slot++] = s;
 
    s->shared.flags &= ~SIG_F_FAST_DIRECT;
+
+   if (unlikely(s->shared.flags & SIG_F_ISLAND))
+      rt_island_on_observer_attached(m, s);
 
    if (unlikely(s->shared.flags & SIG_F_PACKED))
       count = count > 0 ? 1 : 0;
@@ -7636,6 +7702,8 @@ static void arm_trigger(rt_model_t *m, rt_trigger_t *t, rt_wakeable_t *obj)
          int32_t offset = t->args[1].integer;
 
          s->shared.flags &= ~SIG_F_FAST_DIRECT;
+         if (unlikely(s->shared.flags & SIG_F_ISLAND))
+            rt_island_on_observer_attached(m, s);
          rt_nexus_t *n = split_nexus(m, s, offset, 1);
          sched_event(m, &(n->pending), obj);
       }
@@ -7648,6 +7716,8 @@ static void arm_trigger(rt_model_t *m, rt_trigger_t *t, rt_wakeable_t *obj)
 
             ss->flags &= ~SIG_F_FAST_DIRECT;
             rt_signal_t *s = container_of(ss, rt_signal_t, shared);
+            if (unlikely(s->shared.flags & SIG_F_ISLAND))
+               rt_island_on_observer_attached(m, s);
 
             rt_nexus_t *n = split_nexus(m, s, offset, 1);
             sched_event(m, &(n->pending), obj);
@@ -7662,6 +7732,8 @@ static void arm_trigger(rt_model_t *m, rt_trigger_t *t, rt_wakeable_t *obj)
          int32_t count = t->args[2].integer;
 
          s->shared.flags &= ~SIG_F_FAST_DIRECT;
+         if (unlikely(s->shared.flags & SIG_F_ISLAND))
+            rt_island_on_observer_attached(m, s);
          if (unlikely(s->shared.flags & SIG_F_PACKED))
             count = count > 0 ? 1 : 0;
 
@@ -8325,6 +8397,8 @@ void x_transfer_signal(sig_shared_t *target_ss, uint32_t toffset,
    target_ss->flags &= ~SIG_F_FAST_DIRECT;
 
    rt_model_t *m = get_model();
+   if (unlikely(source_ss->flags & SIG_F_ISLAND))
+      rt_island_on_observer_attached(m, source);
 
    rt_transfer_t *t = static_alloc(m, sizeof(rt_transfer_t));
    t->proc   = proc;
@@ -8365,6 +8439,8 @@ int32_t x_test_net_event(sig_shared_t *ss, uint32_t offset, int32_t count)
 
    int32_t result = 0;
    rt_model_t *m = get_model();
+   if (unlikely(ss->flags & SIG_F_ISLAND))
+      rt_island_on_observer_attached(m, s);
    if (unlikely(ss->flags & SIG_F_PACKED))
       count = count > 0 ? 1 : 0;
    rt_nexus_t *n = split_nexus(m, s, offset, count);
@@ -8400,6 +8476,8 @@ int32_t x_test_net_active(sig_shared_t *ss, uint32_t offset, int32_t count)
    ss->flags &= ~SIG_F_FAST_DIRECT;
 
    rt_model_t *m = get_model();
+   if (unlikely(ss->flags & SIG_F_ISLAND))
+      rt_island_on_observer_attached(m, s);
    if (unlikely(ss->flags & SIG_F_PACKED))
       count = count > 0 ? 1 : 0;
    rt_nexus_t *n = split_nexus(m, s, offset, count);
@@ -8427,6 +8505,8 @@ void x_sched_event(sig_shared_t *ss, uint32_t offset, int32_t count)
    rt_wakeable_t *obj = get_active_wakeable();
 
    rt_model_t *m = get_model();
+   if (unlikely(ss->flags & SIG_F_ISLAND))
+      rt_island_on_observer_attached(m, s);
    if (unlikely(ss->flags & SIG_F_PACKED))
       count = count > 0 ? 1 : 0;
    rt_nexus_t *n = split_nexus(m, s, offset, count);
@@ -8471,6 +8551,8 @@ void x_sched_active(sig_shared_t *ss, uint32_t offset, int32_t count)
 
    rt_wakeable_t *obj = get_active_wakeable();
    rt_model_t *m = get_model();
+   if (unlikely(ss->flags & SIG_F_ISLAND))
+      rt_island_on_observer_attached(m, s);
 
    if (obj->kind == W_PROC)
       proc_pin_forever(container_of(obj, rt_proc_t, wakeable));
@@ -8678,6 +8760,8 @@ int64_t x_last_event(sig_shared_t *ss, uint32_t offset, int32_t count)
    int64_t last = TIME_HIGH;
 
    rt_model_t *m = get_model();
+   if (unlikely(ss->flags & SIG_F_ISLAND))
+      rt_island_on_observer_attached(m, s);
    if (unlikely(ss->flags & SIG_F_PACKED))
       count = count > 0 ? 1 : 0;
    rt_nexus_t *n = split_nexus(m, s, offset, count);
@@ -8705,6 +8789,8 @@ int64_t x_last_active(sig_shared_t *ss, uint32_t offset, int32_t count)
    int64_t last = TIME_HIGH;
 
    rt_model_t *m = get_model();
+   if (unlikely(ss->flags & SIG_F_ISLAND))
+      rt_island_on_observer_attached(m, s);
    if (unlikely(ss->flags & SIG_F_PACKED))
       count = count > 0 ? 1 : 0;
    rt_nexus_t *n = split_nexus(m, s, offset, count);
@@ -8990,6 +9076,11 @@ void x_deposit_signal(sig_shared_t *ss, uint32_t offset, int32_t count,
    rt_signal_t *s = container_of(ss, rt_signal_t, shared);
    rt_model_t *m = get_model();
 
+   if (unlikely(ss->flags & SIG_F_ISLAND)) {
+      rt_island_put_bytes(m, s, values, offset, count, false);
+      return;
+   }
+
    deposit_signal(m, s, values, offset, count);
 }
 
@@ -9124,7 +9215,12 @@ void x_deposit_packed(sig_shared_t *ss, uint32_t offset, int32_t count,
 {
    rt_signal_t *s = container_of(ss, rt_signal_t, shared);
    RT_LOCK(s->lock);
-   deposit_packed_apply(get_model(), s, offset, count, abits, bbits,
+   rt_model_t *m = get_model();
+   if (unlikely(ss->flags & SIG_F_ISLAND)) {
+      rt_island_put_packed(m, s, offset, count, abits, bbits, src_flags, false);
+      return;
+   }
+   deposit_packed_apply(m, s, offset, count, abits, bbits,
                         src_flags, true, true);
 }
 
@@ -9745,6 +9841,9 @@ void x_sv_poll_watch_sig(sig_shared_t *ss, uint32_t offset, unsigned count)
    rt_signal_t *s = container_of(ss, rt_signal_t, shared);
    ss->flags = (ss->flags | SIG_F_POLL_WATCHED) & ~SIG_F_FAST_DIRECT;
 
+   if (unlikely(ss->flags & SIG_F_ISLAND))
+      rt_island_on_observer_attached(get_model(), s);
+
    if (ss->flags & SIG_F_PACKED) {
       sv_watch_add(ss->data, ss->size, true);
       return;
@@ -9819,6 +9918,22 @@ void rt_island_deposit_packed(rt_model_t *m, rt_signal_t *s, uint32_t msb_off,
 {
    deposit_packed_apply(m, s, msb_off, count, a_val, b_val, src_flags,
                         true, false);
+}
+
+void rt_island_request_delta(rt_model_t *m)
+{
+   if (m != NULL && m->can_create_delta)
+      m->next_is_delta = true;
+}
+
+jit_t *rt_island_model_jit(rt_model_t *m)
+{
+   return m->jit;
+}
+
+rt_island_mgr_t *rt_island_model_mgr(rt_model_t *m)
+{
+   return m != NULL ? m->islands : NULL;
 }
 
 void *x_sv_island_begin(struct _ffi_closure *closure, uint32_t state_bytes,

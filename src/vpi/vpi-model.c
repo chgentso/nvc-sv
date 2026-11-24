@@ -38,6 +38,7 @@
 #include "printf.h"
 #include "rt/assert.h"
 #include "rt/fileio.h"
+#include "rt/island.h"
 #include "rt/model.h"
 #include "rt/mtprof.h"
 #include "rt/mspace.h"
@@ -4257,6 +4258,10 @@ static bool vpi_read_bits(c_abstractDecl *d, uint64_t *abits, uint64_t *bbits)
          if (s == NULL)
             return false;
 
+         if (unlikely(s->shared.flags & SIG_F_ISLAND))
+            rt_island_sync_slice_to_signal(vpi_get_model(vpi_context()), s,
+                                           d->offset, d->size);
+
          if (s->shared.flags & SIG_F_PACKED) {
             const uint32_t total = signal_width(s);
             const int snwords = (total + 63) / 64;
@@ -4312,6 +4317,9 @@ static bool vpi_read_real(c_abstractDecl *d, double *value)
       rt_signal_t *s = vpi_signal(d);
       if (s == NULL)
          return false;
+
+      if (unlikely(s->shared.flags & SIG_F_ISLAND))
+         rt_island_sync_to_signal(vpi_get_model(vpi_context()), s);
 
       *value = unaligned_load((const double *)signal_value(s) + d->offset,
                               double);
@@ -4454,6 +4462,10 @@ static bool vpi_value_decl(c_abstractDecl *d, p_vpi_value value_p)
             rt_signal_t *s = vpi_signal(d);
             if (s == NULL)
                return false;
+
+            if (unlikely(s->shared.flags & SIG_F_ISLAND))
+               rt_island_sync_slice_to_signal(vpi_get_model(vpi_context()), s,
+                                              d->offset, d->size);
 
             static const char map[] = "01zx";
             char *p = tb_reserve(c->valuestr, d->size);
@@ -4832,6 +4844,25 @@ static void vpi_write_signal(c_abstractDecl *d, rt_signal_t *s,
 
    const bool is_var = !d->is_net && !(vlog_flags(d->where) & VLOG_F_VHDL);
    const int count = d->storage == STORE_REAL ? 1 : d->size;
+
+   if (unlikely(s->shared.flags & SIG_F_ISLAND)) {
+      switch (flags & 0xff) {
+      case vpiForceFlag:
+         rt_island_put_bytes(m, s, values, d->offset, count, true);
+         return;
+      case vpiReleaseFlag:
+         rt_island_vpi_release_slice(m, s, d->offset, count);
+         return;
+      case vpiInertialDelay:
+      case vpiTransportDelay:
+      case vpiPureTransportDelay:
+         sched_deposit(m, s, values, d->offset, count, delay, false);
+         return;
+      default:
+         rt_island_put_bytes(m, s, values, d->offset, count, false);
+         return;
+      }
+   }
 
    switch (flags & 0xff) {
    case vpiForceFlag:
@@ -8836,6 +8867,10 @@ static bool hdl_lookup(const char *path, hdl_target_t *t)
 
 static int hdl_read(hdl_target_t *t, svLogicVecVal *value)
 {
+   if (unlikely(t->signal->shared.flags & SIG_F_ISLAND))
+      rt_island_sync_slice_to_signal(vpi_get_model(vpi_context()), t->signal,
+                                     t->offset, t->count);
+
    const int nwords = (t->count + 31) / 32;
    for (int i = 0; i < nwords; i++)
       value[i].aval = value[i].bval = 0;
@@ -8881,6 +8916,10 @@ static int hdl_write(hdl_target_t *t, const svLogicVecVal *value, bool force)
    }
 
    rt_model_t *model = vpi_get_model(vpi_context());
+   if (unlikely(t->signal->shared.flags & SIG_F_ISLAND)) {
+      rt_island_put_bytes(model, t->signal, vals, t->offset, t->count, force);
+      return 1;
+   }
    if (force) {
       // The forced value of a variable is seen immediately
       if (t->is_var) {
@@ -8899,6 +8938,11 @@ static int hdl_write(hdl_target_t *t, const svLogicVecVal *value, bool force)
 static void hdl_release(hdl_target_t *t)
 {
    rt_model_t *model = vpi_get_model(vpi_context());
+
+   if (unlikely(t->signal->shared.flags & SIG_F_ISLAND)) {
+      rt_island_vpi_release_slice(model, t->signal, t->offset, t->count);
+      return;
+   }
 
    if (t->is_var) {
       // A variable keeps the forced value until the next assignment
@@ -8983,7 +9027,10 @@ static void vpi_mem_bulk_flush(vpi_mem_bulk_t *b)
    const uint8_t *src = b->stage + (size_t)b->stage_head * b->width;
    const int off = (int)(b->base_offset + (uint64_t)b->run_start * b->width);
    const size_t cnt = (size_t)b->run_len * b->width;
-   deposit_signal(m, b->sig, src, off, cnt);
+   if (unlikely(b->sig->shared.flags & SIG_F_ISLAND))
+      rt_island_put_bytes(m, b->sig, src, off, cnt, false);
+   else
+      deposit_signal(m, b->sig, src, off, cnt);
    b->run_len = 0;
 }
 

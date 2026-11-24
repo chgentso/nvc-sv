@@ -24,6 +24,7 @@
 #include "jit/jit.h"
 #include "lib.h"
 #include "printf.h"
+#include "rt/island.h"
 #include "rt/model.h"
 #include "rt/mspace.h"
 #include "rt/structs.h"
@@ -646,6 +647,9 @@ static void bind_verilog_external_name(tree_t name, tree_t where,
    void *ptr = jit_get_frame_var(j, handle, ctx, var_name);
    sig_shared_t *sv_ss = *(sig_shared_t **)ptr;
    rt_signal_t *sv_sig = container_of(sv_ss, rt_signal_t, shared);
+
+   if (unlikely(sv_sig->shared.flags & SIG_F_ISLAND))
+      rt_island_on_observer_attached(get_model(), sv_sig);
 
    const uint32_t sv_width = signal_width(sv_sig);
    const bool sv_is_packed = !!(sv_sig->shared.flags & SIG_F_PACKED);
@@ -1343,6 +1347,28 @@ static void bind_hier_ref(vlog_node_t v, jit_handle_t scope,
 
    void *ptr = jit_get_frame_var(j, handle, ctx, name);
    args[0].pointer = ptr;
+
+   if (vlog_has_ref(v)) {
+      vlog_node_t target = vlog_ref(v);
+      if (vlog_kind(target) == V_PORT_DECL && vlog_has_ref(target))
+         target = vlog_ref(target);
+
+      if ((vlog_kind(target) == V_VAR_DECL || vlog_kind(target) == V_NET_DECL)
+          && !vlog_is_fixed_unpacked(target)) {
+         vlog_node_t vt = vlog_has_type(target) ? vlog_type(target) : NULL;
+         vlog_node_t ut = unwrap_verilog_type(vt);
+         const bool is_unpacked_agg = ut != NULL
+            && (vlog_kind(ut) == V_STRUCT_DECL || vlog_kind(ut) == V_UNION_DECL)
+            && !(vlog_flags(ut) & VLOG_F_PACKED);
+         if ((vt == NULL || !vlog_is_dynamic_type(vt)) && !is_unpacked_agg
+             && name != ident_new("$self")) {
+            sig_shared_t *ss = *(sig_shared_t **)ptr;
+            if (ss != NULL && unlikely(ss->flags & SIG_F_ISLAND))
+               rt_island_on_observer_attached(m, container_of(ss, rt_signal_t,
+                                                              shared));
+         }
+      }
+   }
 
    // The width of a net connected to an inout port cannot be checked
    // before the name is bound

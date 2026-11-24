@@ -31,20 +31,33 @@ typedef enum {
    RT_ISIG_IS_NET       = (1u << 3),
    RT_ISIG_COMB_WRITTEN = (1u << 4),
    RT_ISIG_COMB_READ    = (1u << 5),
+   RT_ISIG_FF_WRITTEN   = (1u << 6),
+   RT_ISIG_OBSERVED     = (1u << 7),
 } rt_island_sig_flags_t;
 
 #define RT_ISLAND_STRIDE(bytes) ALIGN_UP(MAX(64u, (bytes)), 64u)
 
 typedef struct {
-   rt_signal_t *sig;
-   int32_t      sig_offset;
-   uint32_t     a_off;
-   uint32_t     b_off;
-   uint32_t     width;
-   uint32_t     nelems;
-   uint32_t     nwords;
-   uint32_t     flags;
-   rt_watch_t  *watch;
+   uint32_t  sig_idx;
+   uint64_t *mask;
+   uint64_t *a;
+   uint64_t *b;
+} rt_island_force_t;
+
+typedef struct _rt_island_sig {
+   rt_signal_t            *sig;
+   struct _rt_island      *isl;
+   uint32_t                sig_idx;
+   uint32_t                in_idx;
+   struct _rt_island_sig  *next_owner;
+   int32_t                 sig_offset;
+   uint32_t                a_off;
+   uint32_t                b_off;
+   uint32_t                width;
+   uint32_t                nelems;
+   uint32_t                nwords;
+   uint32_t                flags;
+   rt_watch_t             *watch;
 } rt_island_sig_t;
 
 typedef struct {
@@ -80,14 +93,24 @@ typedef struct _rt_island {
    uint32_t             ndomains;
    uint32_t            *in_sigs;
    uint32_t             n_in_sigs;
-   uint32_t            *sync_sigs;
-   uint32_t             n_sync_sigs;
+   uint64_t             dirty_in_mask;
+   uint64_t            *dirty_in_words;
+   uint32_t             dirty_in_nwords;
+   uint32_t            *out_sigs;
+   uint32_t             n_out_sigs;
+   uint32_t            *obs_sigs;
+   uint32_t             n_obs_sigs;
+   uint32_t             cap_obs_sigs;
+   rt_island_force_t   *forces;
+   uint32_t             n_forces;
+   uint32_t             cap_forces;
    uint64_t            *scratch;
    uint32_t             scratch_words;
    uint32_t             dirty_gen;
    bool                 dirty;
    bool                 in_dirty_list;
    bool                 initialized;
+   bool                 has_forces;
 } rt_island_t;
 
 typedef struct _rt_island_mgr rt_island_mgr_t;
@@ -104,6 +127,27 @@ bool rt_island_eval_ff(jit_t *jit, rt_model_t *m, rt_island_mgr_t *mgr,
 bool rt_island_has_ff_commits(const rt_island_mgr_t *mgr);
 void rt_island_commit_ff(rt_model_t *m, rt_island_mgr_t *mgr);
 
+bool rt_island_read_sig(rt_island_mgr_t *mgr, rt_signal_t *sig,
+                        uint64_t *a_out, uint64_t *b_out,
+                        uint32_t *width_out, bool *two_state_out);
+void rt_island_sync_to_signal(rt_model_t *m, rt_signal_t *sig);
+void rt_island_sync_slice_to_signal(rt_model_t *m, rt_signal_t *sig,
+                                    uint32_t offset, uint32_t count);
+void rt_island_on_observer_attached(rt_model_t *m, rt_signal_t *sig);
+bool rt_island_vpi_put(rt_model_t *m, rt_signal_t *sig,
+                       const uint64_t *a_val, const uint64_t *b_val,
+                       uint32_t width, bool is_force);
+void rt_island_vpi_release(rt_model_t *m, rt_signal_t *sig);
+bool rt_island_put_bytes(rt_model_t *m, rt_signal_t *sig,
+                         const uint8_t *bytes, uint32_t offset, uint32_t count,
+                         bool is_force);
+bool rt_island_put_packed(rt_model_t *m, rt_signal_t *sig,
+                          uint32_t msb_off, uint32_t count,
+                          uint64_t a_val, uint64_t b_val, uint32_t src_flags,
+                          bool is_force);
+void rt_island_vpi_release_slice(rt_model_t *m, rt_signal_t *sig,
+                                 uint32_t offset, uint32_t count);
+
 void *rt_island_begin(rt_model_t *m, rt_island_mgr_t **mgr_p,
                       jit_handle_t eval_handle, void *inst_ctx,
                       uint32_t state_bytes, uint32_t nsigs,
@@ -119,9 +163,12 @@ void rt_island_add_domain_write(void *handle, uint32_t dom_idx,
                                 uint32_t sig_idx);
 void rt_island_finish(void *handle);
 
-// Runtime hook provided by model.c to push packed updates cleanly
+// Runtime hooks provided by model.c
 void rt_island_deposit_packed(rt_model_t *m, rt_signal_t *s, uint32_t msb_off,
                               uint32_t count, uint64_t a_val, uint64_t b_val,
                               uint32_t src_flags);
+void rt_island_request_delta(rt_model_t *m);
+jit_t *rt_island_model_jit(rt_model_t *m);
+rt_island_mgr_t *rt_island_model_mgr(rt_model_t *m);
 
 #endif  // _RT_ISLAND_H
