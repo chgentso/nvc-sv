@@ -320,9 +320,13 @@ static const char *call_name(tree_t e)
       end = strchr(s, '(');
       if (end == NULL)
          end = s + strlen(s);
-      const char *dot = memrchr(s, '.', end - s);
-      if (dot != NULL)
-         s = dot + 1;
+      // Last '.' before end (memrchr is not available on Windows)
+      for (const char *p = end; p > s; p--) {
+         if (p[-1] == '.') {
+            s = p;
+            break;
+         }
+      }
    }
 
    snprintf(buf, sizeof(buf), "%.*s", (int)MIN(end - s, 60), s);
