@@ -1587,6 +1587,33 @@ static void irgen_op_xor(jit_irgen_t *g, mir_value_t n)
    j_xor(g, g->map[n.id], arg0, arg1);
 }
 
+static inline bool irgen_wraps_overflow(jit_value_t locus)
+{
+   if (locus.kind != JIT_VALUE_LOCUS || locus.locus == NULL)
+      return false;
+
+   tree_t where = tree_from_object(locus.locus);
+   return where != NULL && tree_kind(where) == T_FCALL
+      && (tree_flags(where) & TREE_F_WRAP_OVERFLOW);
+}
+
+static void irgen_emit_overflow_trap(jit_irgen_t *g, jit_value_t arg0,
+                                     jit_value_t arg1, jit_value_t locus)
+{
+   if (irgen_wraps_overflow(locus))
+      return;
+
+   irgen_label_t *l_pass = irgen_alloc_label(g);
+   j_jump(g, JIT_CC_F, l_pass);
+
+   j_send(g, 0, arg0);
+   j_send(g, 1, arg1);
+   j_send(g, 2, locus);
+   macro_exit(g, JIT_EXIT_OVERFLOW);
+
+   irgen_bind_label(g, l_pass);
+}
+
 static void irgen_op_trap_add(jit_irgen_t *g, mir_value_t n)
 {
    jit_value_t arg0 = irgen_get_arg(g, n, 0);
@@ -1600,15 +1627,7 @@ static void irgen_op_trap_add(jit_irgen_t *g, mir_value_t n)
    jit_cc_t cc = irgen_repr_signed(repr) ? JIT_CC_O : JIT_CC_C;
    j_adds(g, sz, cc, g->map[n.id], arg0, arg1);
 
-   irgen_label_t *l_pass = irgen_alloc_label(g);
-   j_jump(g, JIT_CC_F, l_pass);
-
-   j_send(g, 0, arg0);
-   j_send(g, 1, arg1);
-   j_send(g, 2, locus);
-   macro_exit(g, JIT_EXIT_OVERFLOW);
-
-   irgen_bind_label(g, l_pass);
+   irgen_emit_overflow_trap(g, arg0, arg1, locus);
 }
 
 static void irgen_op_add(jit_irgen_t *g, mir_value_t n)
@@ -1635,15 +1654,7 @@ static void irgen_op_trap_mul(jit_irgen_t *g, mir_value_t n)
    jit_cc_t cc = irgen_repr_signed(repr) ? JIT_CC_O : JIT_CC_C;
    j_muls(g, sz, cc, g->map[n.id], arg0, arg1);
 
-   irgen_label_t *l_pass = irgen_alloc_label(g);
-   j_jump(g, JIT_CC_F, l_pass);
-
-   j_send(g, 0, arg0);
-   j_send(g, 1, arg1);
-   j_send(g, 2, locus);
-   macro_exit(g, JIT_EXIT_OVERFLOW);
-
-   irgen_bind_label(g, l_pass);
+   irgen_emit_overflow_trap(g, arg0, arg1, locus);
 }
 
 static void irgen_op_mul(jit_irgen_t *g, mir_value_t n)
@@ -1727,15 +1738,7 @@ static void irgen_op_trap_sub(jit_irgen_t *g, mir_value_t n)
    jit_cc_t cc = irgen_repr_signed(repr) ? JIT_CC_O : JIT_CC_C;
    j_subs(g, sz, cc, g->map[n.id], arg0, arg1);
 
-   irgen_label_t *l_pass = irgen_alloc_label(g);
-   j_jump(g, JIT_CC_F, l_pass);
-
-   j_send(g, 0, arg0);
-   j_send(g, 1, arg1);
-   j_send(g, 2, locus);
-   macro_exit(g, JIT_EXIT_OVERFLOW);
-
-   irgen_bind_label(g, l_pass);
+   irgen_emit_overflow_trap(g, arg0, arg1, locus);
 }
 
 static void irgen_op_neg(jit_irgen_t *g, mir_value_t n)
@@ -1753,25 +1756,28 @@ static void irgen_op_trap_neg(jit_irgen_t *g, mir_value_t n)
    jit_value_t arg0 = irgen_get_arg(g, n, 0);
    jit_value_t locus = irgen_get_arg(g, n, 1);
 
-   int64_t cmp;
-   switch (irgen_jit_size(g, mir_get_type(g->mu, n))) {
-   case JIT_SZ_8: cmp = INT8_MIN; break;
-   case JIT_SZ_16: cmp = INT16_MIN; break;
-   case JIT_SZ_32: cmp = INT32_MIN; break;
-   case JIT_SZ_64: cmp = INT64_MIN; break;
-   default: cmp = 0;
+   if (!irgen_wraps_overflow(locus)) {
+      int64_t cmp;
+      switch (irgen_jit_size(g, mir_get_type(g->mu, n))) {
+      case JIT_SZ_8: cmp = INT8_MIN; break;
+      case JIT_SZ_16: cmp = INT16_MIN; break;
+      case JIT_SZ_32: cmp = INT32_MIN; break;
+      case JIT_SZ_64: cmp = INT64_MIN; break;
+      default: cmp = 0;
+      }
+
+      irgen_label_t *cont = irgen_alloc_label(g);
+      j_cmp(g, JIT_CC_GT, arg0, jit_value_from_int64(cmp));
+      j_jump(g, JIT_CC_T, cont);
+
+      j_send(g, 0, arg0);
+      j_send(g, 1, jit_value_from_int64(0));
+      j_send(g, 2, locus);
+      macro_exit(g, JIT_EXIT_OVERFLOW);
+
+      irgen_bind_label(g, cont);
    }
 
-   irgen_label_t *cont = irgen_alloc_label(g);
-   j_cmp(g, JIT_CC_GT, arg0, jit_value_from_int64(cmp));
-   j_jump(g, JIT_CC_T, cont);
-
-   j_send(g, 0, arg0);
-   j_send(g, 1, jit_value_from_int64(0));
-   j_send(g, 2, locus);
-   macro_exit(g, JIT_EXIT_OVERFLOW);
-
-   irgen_bind_label(g, cont);
    j_neg(g, g->map[n.id], arg0);
 }
 

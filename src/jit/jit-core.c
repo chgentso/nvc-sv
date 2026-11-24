@@ -1385,6 +1385,7 @@ bool jit_will_abort(jit_ir_t *ir)
 {
    if (ir->op == MACRO_EXIT) {
       return ir->arg1.exit == JIT_EXIT_INDEX_FAIL
+         || ir->arg1.exit == JIT_EXIT_OVERFLOW
          || ir->arg1.exit == JIT_EXIT_NULL_DEREF
          || ir->arg1.exit == JIT_EXIT_UNREACHABLE
          || ir->arg1.exit == JIT_EXIT_LENGTH_FAIL
