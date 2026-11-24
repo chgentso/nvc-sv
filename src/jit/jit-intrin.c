@@ -2326,7 +2326,8 @@ static void sv_island_begin(jit_func_t *func, jit_anchor_t *caller,
 {
    args[0].pointer = x_sv_island_begin(args[0].pointer,
                                        (uint32_t)args[1].integer,
-                                       (uint32_t)args[2].integer);
+                                       (uint32_t)args[2].integer,
+                                       (uint32_t)args[3].integer);
 }
 
 static void sv_island_bind_sig(jit_func_t *func, jit_anchor_t *caller,
@@ -2337,6 +2338,24 @@ static void sv_island_bind_sig(jit_func_t *func, jit_anchor_t *caller,
                         (uint32_t)args[4].integer, (uint32_t)args[5].integer,
                         (uint32_t)args[6].integer, (uint32_t)args[7].integer,
                         (uint32_t)args[8].integer);
+   args[0].integer = 0;
+}
+
+static void sv_island_add_domain(jit_func_t *func, jit_anchor_t *caller,
+                                 jit_scalar_t *args, tlab_t *tlab)
+{
+   x_sv_island_add_domain(args[0].pointer, (uint32_t)args[1].integer,
+                          args[2].pointer, (uint32_t)args[3].integer,
+                          (int32_t)args[4].integer, (uint32_t)args[5].integer,
+                          (uint32_t)args[6].integer);
+   args[0].integer = 0;
+}
+
+static void sv_island_add_domain_write(jit_func_t *func, jit_anchor_t *caller,
+                                       jit_scalar_t *args, tlab_t *tlab)
+{
+   x_sv_island_add_domain_write(args[0].pointer, (uint32_t)args[1].integer,
+                                (uint32_t)args[2].integer);
    args[0].integer = 0;
 }
 
@@ -3832,14 +3851,17 @@ jit_entry_fn_t jit_bind_intrinsic(ident_t name)
 {
    static ident_t dispatch_func_i = NULL, dispatch_proc_i = NULL;
    static ident_t island_begin_i = NULL, island_bind_i = NULL,
+      island_add_dom_i = NULL, island_add_dom_w_i = NULL,
       island_finish_i = NULL;
 
    INIT_ONCE({
-         dispatch_func_i = ident_new("__nvc_protected_dispatch_func");
-         dispatch_proc_i = ident_new("__nvc_protected_dispatch_proc");
-         island_begin_i  = ident_new("__sv_island_begin");
-         island_bind_i   = ident_new("__sv_island_bind_sig");
-         island_finish_i = ident_new("__sv_island_finish");
+         dispatch_func_i    = ident_new("__nvc_protected_dispatch_func");
+         dispatch_proc_i    = ident_new("__nvc_protected_dispatch_proc");
+         island_begin_i     = ident_new("__sv_island_begin");
+         island_bind_i      = ident_new("__sv_island_bind_sig");
+         island_add_dom_i   = ident_new("__sv_island_add_domain");
+         island_add_dom_w_i = ident_new("__sv_island_add_domain_write");
+         island_finish_i    = ident_new("__sv_island_finish");
 
          const bool want_intrinsics = !!opt_get_int(OPT_JIT_INTRINSICS);
 
@@ -3883,6 +3905,10 @@ jit_entry_fn_t jit_bind_intrinsic(ident_t name)
       return sv_island_begin;
    else if (name == island_bind_i)
       return sv_island_bind_sig;
+   else if (name == island_add_dom_i)
+      return sv_island_add_domain;
+   else if (name == island_add_dom_w_i)
+      return sv_island_add_domain_write;
    else if (name == island_finish_i)
       return sv_island_finish;
 

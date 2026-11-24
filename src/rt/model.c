@@ -5065,6 +5065,10 @@ static void model_cycle_body(rt_model_t *m)
          deferq_swap(&m->next_procq, &m->reschedq);
          deferq_run_procs(m, &m->next_procq);
       }
+      if (!m->force_stop && rt_island_has_ff_sample(m->islands)) {
+         if (!rt_island_eval_ff(m->jit, m, m->islands, model_thread(m)->tlab))
+            m->force_stop = true;
+      }
       if (rt_island_has_dirty(m->islands))
          m->next_is_delta = true;
    }
@@ -5090,7 +5094,8 @@ static void model_cycle_body(rt_model_t *m)
    if (m->next_is_delta)
       goto next_delta;
 
-   if (m->nonblockq.count > 0 || m->nb_packed_q.count > 0) {
+   if (m->nonblockq.count > 0 || m->nb_packed_q.count > 0
+       || rt_island_has_ff_commits(m->islands)) {
       TRACE("begin non-blocking assignment region");
       (void)mtp_enter(MTP_NBA);
       if (m->nb_packed_q.count > 0) {
@@ -5100,6 +5105,11 @@ static void model_cycle_body(rt_model_t *m)
       }
       if (m->nonblockq.count > 0)
          deferq_run(m, &m->nonblockq);
+      if (rt_island_has_ff_commits(m->islands)) {
+         rt_island_commit_ff(m, m->islands);
+         if (rt_island_has_dirty(m->islands))
+            m->next_is_delta = true;
+      }
       (void)mtp_enter(MTP_OTHER);
       sv_procs_run++;   // May have changed state a poller depends on
 
@@ -9812,14 +9822,14 @@ void rt_island_deposit_packed(rt_model_t *m, rt_signal_t *s, uint32_t msb_off,
 }
 
 void *x_sv_island_begin(struct _ffi_closure *closure, uint32_t state_bytes,
-                        uint32_t nsigs)
+                        uint32_t nsigs, uint32_t ndomains)
 {
    rt_model_t *m = get_model();
    ffi_closure_t *c = (ffi_closure_t *)closure;
-   assert(c != NULL);
-   void *inst_ctx = c->nargs > 0 ? c->args[0].pointer : NULL;
-   return rt_island_begin(m, &m->islands, c->handle, inst_ctx,
-                          state_bytes, nsigs);
+   jit_handle_t eval_handle = c != NULL ? c->handle : JIT_HANDLE_INVALID;
+   void *inst_ctx = (c != NULL && c->nargs > 0) ? c->args[0].pointer : NULL;
+   return rt_island_begin(m, &m->islands, eval_handle, inst_ctx,
+                          state_bytes, nsigs, ndomains);
 }
 
 void x_sv_island_bind_sig(void *handle, uint32_t idx, sig_shared_t *ss,
@@ -9828,6 +9838,24 @@ void x_sv_island_bind_sig(void *handle, uint32_t idx, sig_shared_t *ss,
 {
    rt_island_bind_sig(handle, idx, ss, sig_offset, a_off, b_off,
                       width, nelems, flags);
+}
+
+void x_sv_island_add_domain(void *handle, uint32_t dom_idx,
+                            struct _ffi_closure *ff_closure,
+                            uint32_t clk_sig_idx, int32_t rst_sig_idx,
+                            uint32_t edge_flags, uint32_t n_write_sigs)
+{
+   ffi_closure_t *c = (ffi_closure_t *)ff_closure;
+   assert(c != NULL);
+   void *inst_ctx = c->nargs > 0 ? c->args[0].pointer : NULL;
+   rt_island_add_domain(handle, dom_idx, c->handle, inst_ctx, clk_sig_idx,
+                        rst_sig_idx, edge_flags, n_write_sigs);
+}
+
+void x_sv_island_add_domain_write(void *handle, uint32_t dom_idx,
+                                  uint32_t sig_idx)
+{
+   rt_island_add_domain_write(handle, dom_idx, sig_idx);
 }
 
 void x_sv_island_finish(void *handle)

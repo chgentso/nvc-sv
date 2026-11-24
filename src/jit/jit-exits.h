@@ -143,10 +143,16 @@ void x_sv_poll_fired(void);
 
 struct _ffi_closure;
 void *x_sv_island_begin(struct _ffi_closure *closure, uint32_t state_bytes,
-                        uint32_t nsigs);
+                        uint32_t nsigs, uint32_t ndomains);
 void x_sv_island_bind_sig(void *handle, uint32_t idx, sig_shared_t *ss,
                           int32_t sig_offset, uint32_t a_off, uint32_t b_off,
                           uint32_t width, uint32_t nelems, uint32_t flags);
+void x_sv_island_add_domain(void *handle, uint32_t dom_idx,
+                            struct _ffi_closure *ff_closure,
+                            uint32_t clk_sig_idx, int32_t rst_sig_idx,
+                            uint32_t edge_flags, uint32_t n_write_sigs);
+void x_sv_island_add_domain_write(void *handle, uint32_t dom_idx,
+                                  uint32_t sig_idx);
 void x_sv_island_finish(void *handle);
 int64_t x_sv_event_triggered(void *event);
 void x_sv_nba_store(void *dest, const void *value, int64_t bytes,
