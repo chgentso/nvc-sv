@@ -10880,8 +10880,26 @@ static vlog_node_t p_subroutine_call_statement(void)
    case tID:
    default:
       if (call_is_chained()) {
-         // A method of the value returned by a function
+         // A method of the value returned by a function, or an assignment
+         // to a member of the returned object
          v = p_call_result_chain(p_subroutine_call(V_USER_FCALL));
+         if (vlog_kind(v) == V_MEMBER_REF || vlog_kind(v) == V_BIT_SELECT
+             || vlog_kind(v) == V_PART_SELECT) {
+            switch (peek()) {
+            case tLE:
+               v = p_nonblocking_assignment(v);
+               break;
+            case tPLUSPLUS:
+            case tMINUSMINUS:
+               v = p_inc_or_dec_expression(v);
+               break;
+            case tSEMI:
+               break;
+            default:
+               v = p_blocking_assignment(v);
+               break;
+            }
+         }
       }
       else
          v = p_subroutine_call(V_USER_TCALL);
