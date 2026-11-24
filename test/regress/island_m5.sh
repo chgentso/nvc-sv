@@ -339,3 +339,72 @@ nvc-sv -a gen_slice_m5.sv -e --rtl-islands=off tb_gen_slice_m5
 nvc-sv -r tb_gen_slice_m5 > gen_off.out
 grep -v "^ISLAND_HIER:" gen_hier.out > gen_hier_clean.out
 diff -u gen_off.out gen_hier_clean.out
+
+# 6. Island output read by an unfused clocked process (dynamic array write, no watch on data wire)
+cat >ext_read_m5.sv <<'EOF'
+module ext_prod_m5 (
+  input  logic       clk,
+  input  logic       rst_n,
+  input  logic [7:0] d_i,
+  output logic [7:0] q_o
+);
+  logic [7:0] r_q;
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) r_q <= 8'h00;
+    else        r_q <= d_i + 8'h11;
+  end
+  assign q_o = r_q ^ 8'h05;
+endmodule
+
+module ext_cons_m5 (
+  input  logic       clk,
+  input  logic       wr_en,
+  input  logic [1:0] waddr,
+  input  logic [1:0] raddr,
+  input  logic [7:0] wdata_i,
+  output logic [7:0] comb_o,
+  output logic [7:0] rdata_o
+);
+  logic [7:0] mem [4];
+  always_comb comb_o = wdata_i ^ 8'ha0;
+  always_comb rdata_o = mem[raddr];
+  always_ff @(posedge clk) begin
+    if (wr_en)
+      mem[waddr] <= wdata_i;
+  end
+endmodule
+
+module tb_ext_read_m5;
+  logic       clk = 1'b0, rst_n = 1'b0, wr_en = 1'b0;
+  logic [1:0] waddr = 2'd0, raddr = 2'd0;
+  logic [7:0] d = 8'h20, w_mid, comb_y, rdata_y;
+
+  ext_prod_m5 u_prod (.clk(clk), .rst_n(rst_n), .d_i(d), .q_o(w_mid));
+  ext_cons_m5 u_cons (.clk(clk), .wr_en(wr_en), .waddr(waddr), .raddr(raddr),
+                      .wdata_i(w_mid), .comb_o(comb_y), .rdata_o(rdata_y));
+
+  always #5 clk = ~clk;
+
+  initial begin
+    #12 rst_n = 1'b1;
+    @(negedge clk);
+    d = 8'h31;
+    @(posedge clk);
+    #1;
+    wr_en = 1'b1; waddr = 2'd1; raddr = 2'd1;
+    @(posedge clk);
+    #1;
+    if (rdata_y !== 8'h47 || comb_y !== (8'h47 ^ 8'ha0))
+      $fatal(1, "ext_read mismatch rdata=%h comb=%h", rdata_y, comb_y);
+    $display("PASSED ext_read_m5 rdata=%h comb=%h", rdata_y, comb_y);
+    $finish;
+  end
+endmodule
+EOF
+
+nvc-sv -a ext_read_m5.sv -e --rtl-islands=hier tb_ext_read_m5
+nvc-sv -r tb_ext_read_m5 > ext_hier.out
+grep -q "PASSED ext_read_m5" ext_hier.out
+nvc-sv -a ext_read_m5.sv -e --rtl-islands=off tb_ext_read_m5
+nvc-sv -r tb_ext_read_m5 > ext_off.out
+diff -u ext_off.out ext_hier.out

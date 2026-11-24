@@ -229,7 +229,7 @@ static inline bool island_pending_has_ext_observer(void *pending)
 
 static inline bool island_sig_observed(const rt_signal_t *sig)
 {
-   if (sig->shared.flags & SIG_F_POLL_WATCHED)
+   if (sig->shared.flags & (SIG_F_POLL_WATCHED | SIG_F_EXT_READ))
       return true;
    const rt_nexus_t *nx = &(sig->nexus);
    for (uint32_t i = 0; i < sig->n_nexus; i++, nx = nx->chain) {
@@ -1301,7 +1301,7 @@ static bool island_check_direct_sig(const rt_island_sig_t *src_s,
       return false;
 
    const rt_signal_t *sig = src_s->sig;
-   if (sig->shared.flags & SIG_F_POLL_WATCHED)
+   if (sig->shared.flags & (SIG_F_POLL_WATCHED | SIG_F_EXT_READ))
       return false;
 
    const rt_nexus_t *nx = &(sig->nexus);

@@ -9996,6 +9996,16 @@ void x_sv_island_finish(void *handle)
    rt_island_finish(handle);
 }
 
+void x_sv_island_mark_ext_read(sig_shared_t *ss)
+{
+   if (ss == NULL)
+      return;
+   ss->flags |= SIG_F_EXT_READ;
+   if (unlikely(ss->flags & SIG_F_ISLAND))
+      rt_island_on_observer_attached(get_model(),
+                                     container_of(ss, rt_signal_t, shared));
+}
+
 typedef struct _sv_nba {
    struct _sv_nba  *next;
    struct _sv_nba **pprev;

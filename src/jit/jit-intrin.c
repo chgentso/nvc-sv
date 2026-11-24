@@ -2366,6 +2366,13 @@ static void sv_island_finish(jit_func_t *func, jit_anchor_t *caller,
    args[0].integer = 0;
 }
 
+static void sv_island_mark_ext_read(jit_func_t *func, jit_anchor_t *caller,
+                                    jit_scalar_t *args, tlab_t *tlab)
+{
+   x_sv_island_mark_ext_read(args[0].pointer);
+   args[0].integer = 0;
+}
+
 static void sv_event_triggered(jit_func_t *func, jit_anchor_t *caller,
                                jit_scalar_t *args, tlab_t *tlab)
 {
@@ -3852,7 +3859,7 @@ jit_entry_fn_t jit_bind_intrinsic(ident_t name)
    static ident_t dispatch_func_i = NULL, dispatch_proc_i = NULL;
    static ident_t island_begin_i = NULL, island_bind_i = NULL,
       island_add_dom_i = NULL, island_add_dom_w_i = NULL,
-      island_finish_i = NULL;
+      island_finish_i = NULL, island_ext_read_i = NULL;
 
    INIT_ONCE({
          dispatch_func_i    = ident_new("__nvc_protected_dispatch_func");
@@ -3862,6 +3869,7 @@ jit_entry_fn_t jit_bind_intrinsic(ident_t name)
          island_add_dom_i   = ident_new("__sv_island_add_domain");
          island_add_dom_w_i = ident_new("__sv_island_add_domain_write");
          island_finish_i    = ident_new("__sv_island_finish");
+         island_ext_read_i  = ident_new("__sv_island_mark_ext_read");
 
          const bool want_intrinsics = !!opt_get_int(OPT_JIT_INTRINSICS);
 
@@ -3911,6 +3919,8 @@ jit_entry_fn_t jit_bind_intrinsic(ident_t name)
       return sv_island_add_domain_write;
    else if (name == island_finish_i)
       return sv_island_finish;
+   else if (name == island_ext_read_i)
+      return sv_island_mark_ext_read;
 
    for (const jit_intrinsic_t *it = intrinsic_list; it->name; it++) {
       if (it->ident == name)

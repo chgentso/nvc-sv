@@ -70,6 +70,7 @@ typedef uint8_t net_flags_t;
 #define SIG_F_FAST_DIRECT  (1 << 18)
 #define SIG_F_NB_DEFERQ    (1 << 19)
 #define SIG_F_ISLAND       (1 << 20)
+#define SIG_F_EXT_READ     (1 << 21)
 typedef uint32_t sig_flags_t;
 
 #define PACK_SRC_SCALAR    (1 << 0)

@@ -38170,6 +38170,38 @@ static vlog_node_t alias_net_decl(vlog_node_t expr)
    return d;
 }
 
+typedef struct {
+   hset_t         *seen_decls;
+   hset_t         *seen_funcs;
+   A(vlog_node_t)  decls;
+} unfused_read_ctx_t;
+
+static void vlog_collect_unfused_reads_cb(vlog_node_t v, void *arg)
+{
+   unfused_read_ctx_t *rc = arg;
+   const vlog_kind_t k = vlog_kind(v);
+   if (k == V_REF && vlog_has_ref(v)) {
+      vlog_node_t d = vlog_ref(v);
+      if (vlog_kind(d) == V_PORT_DECL && vlog_has_ref(d))
+         d = vlog_ref(d);
+      const vlog_kind_t dk = vlog_kind(d);
+      if ((dk == V_NET_DECL || dk == V_VAR_DECL)
+          && !hset_contains(rc->seen_decls, d)) {
+         hset_insert(rc->seen_decls, d);
+         APUSH(rc->decls, d);
+      }
+   }
+   else if ((k == V_USER_FCALL || k == V_USER_TCALL) && vlog_has_ref(v)) {
+      vlog_node_t fn = vlog_ref(v);
+      const vlog_kind_t fk = vlog_kind(fn);
+      if ((fk == V_FUNC_DECL || fk == V_TASK_DECL)
+          && !hset_contains(rc->seen_funcs, fn)) {
+         hset_insert(rc->seen_funcs, fn);
+         vlog_visit(fn, vlog_collect_unfused_reads_cb, rc);
+      }
+   }
+}
+
 void vlog_lower_instance(mir_context_t *mc, vlog_node_t body, ident_t parent,
                          tree_t trans, cover_data_t *cover, cover_obj_t cscope)
 {
@@ -38558,6 +38590,63 @@ void vlog_lower_instance(mir_context_t *mc, vlog_node_t body, ident_t parent,
    }
 
    vlog_island_lower_emit_init(island_ctx, mu, self);
+
+   if (opt_get_int(OPT_RTL_ISLANDS) == RTL_ISLANDS_HIER) {
+      unfused_read_ctx_t rc = {
+         .seen_decls = hset_new(32),
+         .seen_funcs = hset_new(8),
+         .decls      = AINIT,
+      };
+      for (int i = 0; i < vlog_ndecls; i++) {
+         vlog_node_t d = vlog_decl(body, i);
+         const vlog_kind_t dk = vlog_kind(d);
+         if ((dk == V_NET_DECL || dk == V_VAR_DECL) && vlog_has_value(d))
+            vlog_visit(vlog_value(d), vlog_collect_unfused_reads_cb, &rc);
+      }
+      for (int i = 0; i < nstmts; i++) {
+         tree_t wrap = tree_stmt(trans, i);
+         if (tree_kind(wrap) != T_VERILOG)
+            continue;
+         vlog_node_t s = tree_vlog(wrap);
+         switch (vlog_kind(s)) {
+         case V_FINAL:
+         case V_ASSIGN:
+         case V_INITIAL:
+         case V_ALWAYS:
+         case V_GATE_INST:
+         case V_UDP_TABLE:
+         case V_TCHECK:
+            if (vlog_kind(s) == V_GATE_INST
+                && vlog_subkind(s) == V_GATE_ALIAS)
+               break;
+            if (island_ctx != NULL && hset_contains(island_ctx->fused_stmts, s))
+               break;
+            vlog_visit(s, vlog_collect_unfused_reads_cb, &rc);
+            break;
+         default:
+            break;
+         }
+      }
+      ident_t ext_read_fn = ident_new("__sv_island_mark_ext_read");
+      mir_type_t t_offset = mir_offset_type(mu);
+      for (unsigned i = 0; i < rc.decls.count; i++) {
+         int hops = 0;
+         mir_value_t var = mir_search_object(mu, rc.decls.items[i], &hops);
+         if (mir_is_null(var))
+            continue;
+         mir_value_t ptr = hops > 0 ? mir_build_var_upref(mu, hops, var.id) : var;
+         mir_value_t val = mir_build_load(mu, ptr);
+         if (!mir_is_signal(mu, val))
+            continue;
+         mir_value_t args[] = { val };
+         mir_value_t res = mir_build_fcall(mu, ext_read_fn, t_offset,
+                                           MIR_NULL_STAMP, args, 1);
+         mir_build_consume(mu, res);
+      }
+      ACLEAR(rc.decls);
+      hset_free(rc.seen_decls);
+      hset_free(rc.seen_funcs);
+   }
 
    mir_build_return(mu, MIR_NULL_VALUE);
 
