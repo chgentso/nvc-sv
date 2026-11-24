@@ -36917,7 +36917,25 @@ static void vlog_store_local_init(vlog_gen_t *g, vlog_node_t d, mir_value_t var)
          xmalloc_array(vlog_size(dims[0]), sizeof(vlog_node_t)), def;
       vlog_array_pattern_slots(vlog_value(d), dims[0], which, &def);
 
-      if (is_vec) {
+      if (is_vec && ndims == 1) {
+         mir_type_t t_offset = mir_offset_type(g->mu);
+         const int n = vlog_size(dims[0]);
+         for (int i = 0; i < n; i++) {
+            vlog_node_t item = which[i] != NULL ? which[i] : def;
+            mir_value_t init;
+            if (item != NULL) {
+               mir_value_t value = vlog_lower_with_context(
+                  g, item, vlog_assign_context(g, ti->type, item));
+               init = vlog_lower_cast(g, ti->type, value);
+            }
+            else
+               init = vlog_lower_zero(g, ti->type);
+            mir_build_store(g->mu, mir_build_array_ref(
+                               g->mu, var, mir_const(g->mu, t_offset, i)),
+                            init);
+         }
+      }
+      else if (is_vec) {
          mir_value_t flat =
             vlog_lower_array_pattern(g, vlog_value(d), dims, ndims, ti);
          vlog_store_flat_array(g, var, nelems, ti, flat);
