@@ -15419,10 +15419,16 @@ static vlog_node_t p_type_declaration(void)
       // Forward declaration of a type which is declared in full later
       drop_token(&state);
       ident_t id = p_identifier();
+      const loc_t loc = state.last_loc;
       consume(tSEMI);
 
       if (vlog_symtab_query(symtab, id) == NULL) {
-         forward_type_t fwd = { .id = id, .loc = state.last_loc };
+         vlog_node_t fwd_td = vlog_new(V_TYPE_DECL);
+         vlog_set_ident(fwd_td, id);
+         vlog_set_flags(fwd_td, VLOG_F_FORWARD);
+         vlog_set_loc(fwd_td, &loc);
+         vlog_symtab_put(symtab, fwd_td);
+         forward_type_t fwd = { .id = id, .loc = loc };
          APUSH(forward_types, fwd);
       }
 
@@ -15431,11 +15437,22 @@ static vlog_node_t p_type_declaration(void)
 
    ACLEAR(typedef_dims);
 
-   vlog_node_t v = vlog_new(V_TYPE_DECL);
    typedef_depth++;
    vlog_node_t dt = p_data_type();
    typedef_depth--;
-   vlog_set_ident(v, p_identifier());
+   ident_t id = p_identifier();
+
+   vlog_node_t existing = vlog_symtab_query(symtab, id);
+   vlog_node_t v;
+   if (existing != NULL && vlog_kind(existing) == V_TYPE_DECL
+       && (vlog_flags(existing) & VLOG_F_FORWARD)) {
+      v = existing;
+      vlog_clear_flags(v, VLOG_F_FORWARD);
+   }
+   else {
+      v = vlog_new(V_TYPE_DECL);
+      vlog_set_ident(v, id);
+   }
    typedef_scope_name(v);
 
    for (int i = 0; i < forward_types.count; i++) {

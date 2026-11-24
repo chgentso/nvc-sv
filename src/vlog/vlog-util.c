@@ -2338,11 +2338,12 @@ vlog_node_t vlog_get_type(vlog_node_t v)
    case V_NET_DECL:
    case V_PORT_DECL:
    case V_TF_PORT_DECL:
-   case V_TYPE_DECL:
    case V_PARAM_DECL:
    case V_LOCALPARAM:
    case V_ENUM_NAME:
       return vlog_get_type(vlog_type(v));
+   case V_TYPE_DECL:
+      return vlog_has_type(v) ? vlog_get_type(vlog_type(v)) : NULL;
    case V_CLASS_NEW:
    case V_DYNAMIC_NEW:
       // The class of a new expression assigned to a hierarchical name
