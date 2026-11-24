@@ -72,6 +72,8 @@ struct _mspace {
    nvc_lock_t        lock;
    size_t            maxsize;
    size_t            maxlines;
+   size_t            allocated;
+   size_t            gc_limit;
    char             *space;
    bit_mask_t        headmask;
    mptr_t            roots;
@@ -99,6 +101,7 @@ mspace_t *mspace_new(size_t size, const mspace_handler_t *h)
    mspace_t *m = xcalloc(sizeof(mspace_t));
    m->maxsize  = ALIGN_UP(size, LINE_SIZE);
    m->maxlines = (m->maxsize - OVERRUN_MARGIN) / LINE_SIZE;
+   m->gc_limit = MIN(m->maxsize, 16 * 1024 * 1024);
 
    if (m->maxsize > MAX_HEAP)
       fatal("the maximum supported heap size is %"PRIu64"g",
@@ -268,7 +271,7 @@ bool mspace_check_free_list(mspace_t *m)
    return true;
 }
 
-static void *mspace_try_alloc(mspace_t *m, size_t size)
+static void *mspace_try_alloc(mspace_t *m, size_t size, bool soft)
 {
    // Add one to size before rounding up to LINE_SIZE to allow a valid
    // pointer to point at one element past the end of an array
@@ -276,6 +279,11 @@ static void *mspace_try_alloc(mspace_t *m, size_t size)
    const size_t asize = nlines * LINE_SIZE;
 
    SCOPED_LOCK(m->lock);
+
+   // Trigger collection at the adaptive soft threshold before growing RSS
+   // into the full virtual reservation.
+   if (soft && m->gc_limit < m->maxsize && m->allocated + asize > m->gc_limit)
+      return NULL;
 
    // Large objects are carved from the end of the last free block that
    // fits so they do not fragment the space between small long-lived
@@ -356,6 +364,10 @@ static void *mspace_try_alloc(mspace_t *m, size_t size)
       // allocate THP on Linux
       *(volatile char *)base = 0;
 
+      m->allocated += asize;
+      if (!soft && m->allocated > m->gc_limit)
+         m->gc_limit = MIN(m->maxsize, MAX(m->gc_limit * 2, m->allocated * 2));
+
       return base;
    }
 
@@ -376,7 +388,7 @@ void *mspace_alloc(mspace_t *m, size_t size)
 
    int retry = 1;
    do {
-      void *ptr = mspace_try_alloc(m, size);
+      void *ptr = mspace_try_alloc(m, size, retry == 1);
       if (ptr != NULL)
          return ptr;
 
@@ -612,7 +624,8 @@ static void mspace_gc(mspace_t *m)
    m->free_list = m->free_tail = NULL;
    memset(m->hints, '\0', sizeof(m->hints));
 
-   int freefrags = 0, freelines = 0;
+   int freefrags = 0;
+   size_t freelines = 0;
    free_list_t **tail = &(m->free_list);
    for (size_t line = 0; line < m->maxlines;) {
       const size_t clear = mask_count_clear(&(state.markmask), line);
@@ -637,6 +650,11 @@ static void mspace_gc(mspace_t *m)
          line += clear;
       }
    }
+
+   const size_t live = (m->maxlines - freelines) * LINE_SIZE;
+   m->allocated = live;
+   if (live > m->gc_limit / 2)
+      m->gc_limit = MIN(m->maxsize, MAX(m->gc_limit * 2, live * 2));
 
    if (opt_get_verbose(OPT_GC_VERBOSE, NULL)) {
       const int ticks = get_timestamp_us() - start_ticks;
