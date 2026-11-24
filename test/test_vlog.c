@@ -4776,6 +4776,29 @@ START_TEST(test_letbad1)
 }
 END_TEST
 
+START_TEST(test_misstatic1)
+{
+   const error_t expect[] = {
+      { 12, "cannot call non-static method 'ns' without an object handle" },
+      { 13, "cannot call non-static method 'nsf' without an object handle" },
+      { 25, "cannot call non-static method 'nsf' from a static method" },
+      { 26, "cannot call non-static method 'ns' from a static method" },
+      { 35, "cannot call non-static method 'ns' without an object handle" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/misstatic1.sv");
+
+   vlog_check(do_parse_only(V_PACKAGE));
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
 Suite *get_vlog_tests(void)
 {
    Suite *s = suite_create("vlog");
@@ -4962,6 +4985,7 @@ Suite *get_vlog_tests(void)
    tcase_add_test(tc, test_impimp1);
    tcase_add_test(tc, test_puremeth1);
    tcase_add_test(tc, test_letbad1);
+   tcase_add_test(tc, test_misstatic1);
    suite_add_tcase(s, tc);
 
    return s;

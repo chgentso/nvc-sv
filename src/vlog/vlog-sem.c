@@ -415,6 +415,7 @@ static void vlog_check_net_lvalue(vlog_node_t v, vlog_node_t where)
 
 static bool in_function = false;
 static bool in_final = false;
+static bool in_static_method = false;
 static bool in_sva_expr = false;
 
 static bool vlog_is_assoc_type(vlog_node_t type)
@@ -1883,12 +1884,17 @@ static void vlog_check_func_decl(vlog_node_t v)
    for (int i = 0; i < nports; i++)
       vlog_check(vlog_port(v, i));
 
+   const bool was_in_function = in_function;
+   const bool was_in_static = in_static_method;
+   in_static_method = vlog_has_ref(v) && vlog_kind(vlog_ref(v)) == V_CLASS_DECL
+      && (vlog_flags(v) & VLOG_F_STATIC);
+
    vlog_check_decls(v);
 
-   const bool was_in_function = in_function;
    in_function = true;
    vlog_check_stmts(v);
    in_function = was_in_function;
+   in_static_method = was_in_static;
 
    vlog_visit(v, vlog_const_func_cb, v);
 }
@@ -1917,8 +1923,13 @@ static void vlog_check_task_decl(vlog_node_t v)
    for (int i = 0; i < nports; i++)
       vlog_check(vlog_port(v, i));
 
+   const bool was_in_static = in_static_method;
+   in_static_method = vlog_has_ref(v) && vlog_kind(vlog_ref(v)) == V_CLASS_DECL
+      && (vlog_flags(v) & VLOG_F_STATIC);
+
    vlog_check_decls(v);
    vlog_check_stmts(v);
+   in_static_method = was_in_static;
 }
 
 static void vlog_check_primitive(vlog_node_t udp)
@@ -2508,6 +2519,16 @@ static void vlog_check_user_tcall(vlog_node_t v)
    else if (in_function && vlog_kind(func) == V_TASK_DECL)
       error_at(vlog_loc(v), "task '%s' cannot be called from a function as "
                "functions must not block", istr(vlog_ident(func)));
+
+   if (in_static_method && vlog_has_ref(func)
+       && vlog_kind(vlog_ref(func)) == V_CLASS_DECL
+       && !(vlog_flags(func) & VLOG_F_STATIC)) {
+      diag_t *d = diag_new(DIAG_ERROR, vlog_loc(v));
+      diag_printf(d, "cannot call non-static method %pQ from a static method",
+                  vlog_ident(func));
+      diag_hint(d, vlog_loc(func), "declared here");
+      diag_emit(d);
+   }
 
    vlog_check_call_args(v, func);
    vlog_check_discarded(v, func);
@@ -3731,6 +3752,16 @@ static type_mask_t vlog_check_user_fcall(vlog_node_t v)
             break;
          }
       }
+   }
+
+   if (in_static_method && vlog_has_ref(func)
+       && vlog_kind(vlog_ref(func)) == V_CLASS_DECL
+       && !(vlog_flags(func) & VLOG_F_STATIC)) {
+      diag_t *d = diag_new(DIAG_ERROR, vlog_loc(v));
+      diag_printf(d, "cannot call non-static method %pQ from a static method",
+                  vlog_ident(func));
+      diag_hint(d, vlog_loc(func), "declared here");
+      diag_emit(d);
    }
 
    vlog_check_call_args(v, func);

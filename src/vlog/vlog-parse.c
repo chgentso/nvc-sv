@@ -5754,6 +5754,31 @@ static vlog_node_t p_tf_call(vlog_kind_t kind)
    else if (!failed)
       vlog_symtab_lookup(symtab, v);   // Otherwise reported already
 
+   if (scope != NULL && vlog_kind(scope) == V_CLASS_DECL && vlog_has_ref(v)) {
+      vlog_node_t func = vlog_ref(v);
+      if ((vlog_kind(func) == V_FUNC_DECL || vlog_kind(func) == V_TASK_DECL)
+          && !(vlog_flags(func) & VLOG_F_STATIC)) {
+         // Class scope resolution of a non-static method is only allowed from
+         // within the class or a derived class (8.23)
+         bool ok = false;
+         for (vlog_node_t c = vlog_symtab_class(symtab); c != NULL;
+              c = vlog_has_ref(c) ? vlog_ref(c) : NULL) {
+            if (c == scope) {
+               ok = true;
+               break;
+            }
+         }
+
+         if (!ok) {
+            diag_t *d = diag_new(DIAG_ERROR, vlog_loc(v));
+            diag_printf(d, "cannot call non-static method %pQ without an "
+                        "object handle", vlog_ident(func));
+            diag_hint(d, vlog_loc(func), "declared here");
+            diag_emit(d);
+         }
+      }
+   }
+
    if (kind == V_USER_FCALL && vlog_has_ref(v)
        && vlog_kind(vlog_ref(v)) == V_FUNC_DECL
        && (vlog_flags(vlog_ref(v)) & VLOG_F_LET))
