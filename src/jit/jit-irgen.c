@@ -6903,7 +6903,18 @@ void jit_irgen(jit_func_t *f, mir_unit_t *mu)
       should_not_reach_here();
    }
 
-   g->signal_only = mir_unit_is_signal_only(mu);
+   object_t *obj = mir_get_object(mu);
+   tree_t tree = obj != NULL ? tree_from_object(obj) : NULL;
+   const bool vhdl_only = tree != NULL
+      && (mir_get_kind(mu) == MIR_UNIT_PROCESS
+          || tree_kind(tree) == T_FUNC_BODY
+          || tree_kind(tree) == T_PROC_BODY
+          || tree_kind(tree) == T_PACKAGE
+          || tree_kind(tree) == T_PACK_BODY
+          || tree_kind(tree) == T_PACK_INST
+          || tree_kind(tree) == T_PROT_BODY);
+
+   g->signal_only = vhdl_only || mir_unit_is_signal_only(mu);
 
    for (int i = 0; i < nblocks; i++)
       irgen_block(g, mir_get_block(mu, i));

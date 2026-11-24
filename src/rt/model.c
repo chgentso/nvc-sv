@@ -229,6 +229,8 @@ typedef struct _rt_model {
    init_event_list_t  init_events;
    bool               shuffle;
    bool               liveness;
+   bool               has_verilog;
+   bool               has_level_trigger;
    bool               sv_poll_mem_dirty;
    bool               sv_poll_sig_dirty;
    bool               sv_poll_susp_dirty;
@@ -1351,7 +1353,7 @@ static void reset_process_state(rt_model_t *m, rt_proc_t *proc)
 
    if (jit_call_closure(m->jit, &proc->closure, &result, state, &tlab)) {
       *mptr_get(proc->privdata) = result.pointer;
-      if (unlikely(!proc->signal_only_known)) {
+      if (unlikely(proc->verilog) && unlikely(!proc->signal_only_known)) {
          proc->signal_only = !proc->wakeable.forked && proc->task == NULL
             && jit_func_signal_only(m->jit, proc->closure.handle);
          proc->signal_only_known = 1;
@@ -1654,22 +1656,21 @@ static void run_process_inner(rt_model_t *m, rt_proc_t *proc)
 
    rt_wakeable_t *obj = &(proc->wakeable);
 
-   const bool poll = proc->poll_wake;
-   const bool was_interrupted = obj->interrupted;
-   proc->poll_wake = 0;
-
-   if (obj->forked && obj->zombie)
+   if (unlikely(obj->forked && obj->zombie))
       return;   // Disabled by disable fork
 
-   if (obj->interrupted)
+   const bool was_interrupted = obj->interrupted;
+   if (unlikely(was_interrupted))
       obj->interrupted = false;
    else if (obj->trigger != NULL && !run_trigger(m, obj->trigger))
       return;   // Filtered
 
-   if (sv_task_hold(proc))
+   if (unlikely(proc->task != NULL) && sv_task_hold(proc))
       return;   // Runs once it is resumed
 
-   if (poll) {
+   if (unlikely(proc->poll_wake)) {
+      proc->poll_wake = 0;
+
       // A poll of a condition that reads only memory which has not changed
       // since the process began waiting would find the same value and wait
       // again, so do that without running the process
@@ -1686,9 +1687,10 @@ static void run_process_inner(rt_model_t *m, rt_proc_t *proc)
       }
    }
 
-   sv_procs_run++;
+   if (unlikely(m->has_verilog))
+      sv_procs_run++;
 
-   if (proc->task != NULL)
+   if (unlikely(proc->task != NULL))
       sv_task_note_run(proc);
 
    model_thread_t *thread = model_thread(m);
@@ -1705,12 +1707,13 @@ static void run_process_inner(rt_model_t *m, rt_proc_t *proc)
    };
    jit_scalar_t result;
 
-   const uint64_t wait_seq = proc->wait_seq;
+   const bool is_verilog = unlikely(proc->verilog);
+   const uint64_t wait_seq = is_verilog ? proc->wait_seq : 0;
 
    tlab_t *tlab = proc->tlab ?: thread->tlab;
    assert(tlab->mem_dirty == 0);
 
-   if (unlikely(!proc->signal_only_known)) {
+   if (is_verilog && unlikely(!proc->signal_only_known)) {
       tlab->mem_dirty = 0;
       m->sv_poll_mem_dirty = true;
    }
@@ -1720,22 +1723,24 @@ static void run_process_inner(rt_model_t *m, rt_proc_t *proc)
    else if (!jit_call_closure(m->jit, &proc->closure, &result, state, tlab))
       m->force_stop = true;
 
-   if (unlikely(!proc->signal_only_known)) {
-      proc->signal_only = !proc->wakeable.forked
-         && jit_func_signal_only(m->jit, proc->closure.handle);
-      proc->signal_only_known = 1;
-      if (!proc->signal_only)
+   if (is_verilog) {
+      if (unlikely(!proc->signal_only_known)) {
+         proc->signal_only = !proc->wakeable.forked
+            && jit_func_signal_only(m->jit, proc->closure.handle);
+         proc->signal_only_known = 1;
+         if (!proc->signal_only)
+            m->sv_poll_mem_dirty = true;
+         tlab->mem_dirty = 0;
+      }
+      else if (!proc->signal_only && tlab->mem_dirty) {
          m->sv_poll_mem_dirty = true;
-      tlab->mem_dirty = 0;
-   }
-   else if (!proc->signal_only && tlab->mem_dirty) {
-      m->sv_poll_mem_dirty = true;
-      tlab->mem_dirty = 0;
-   }
+         tlab->mem_dirty = 0;
+      }
 
-   proc->ended = proc->verilog && !obj->forked && !obj->delayed
-      && proc->wait_seq == wait_seq
-      && (proc->task == NULL || sv_proc_finished(proc));
+      proc->ended = !obj->forked && !obj->delayed
+         && proc->wait_seq == wait_seq
+         && (proc->task == NULL || sv_proc_finished(proc));
+   }
 
    if (proc->tlab != NULL && result.pointer == NULL) {
       tlab_release(m->jit, proc->tlab);
@@ -2592,6 +2597,7 @@ static void setup_process(rt_model_t *m, rt_proc_t *p, const char *path)
    case T_VERILOG:
       {
          p->verilog = true;
+         m->has_verilog = true;
 
          vlog_node_t v = tree_vlog(p->where);
          switch (vlog_kind(v)) {
