@@ -150,5 +150,6 @@ void vpicls6_startup(void);
 void vpi_packed1_startup(void);
 void vpi_fast_direct1_startup(void);
 void vpi_island1_startup(void);
+void vpi_island2_startup(void);
 
 #endif  // _VPI_TEST_H
