@@ -147,6 +147,10 @@ bool rt_island_put_packed(rt_model_t *m, rt_signal_t *sig,
                           bool is_force);
 void rt_island_vpi_release_slice(rt_model_t *m, rt_signal_t *sig,
                                  uint32_t offset, uint32_t count);
+void rt_island_report_forces(rt_island_mgr_t *mgr, rt_signal_t *sig,
+                             uint32_t offset, uint32_t count,
+                             void (*fn)(uint32_t, uint32_t, void *),
+                             void *arg);
 
 void *rt_island_begin(rt_model_t *m, rt_island_mgr_t **mgr_p,
                       jit_handle_t eval_handle, void *inst_ctx,

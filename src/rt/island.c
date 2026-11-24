@@ -1700,3 +1700,51 @@ void rt_island_vpi_release(rt_model_t *m, rt_signal_t *sig)
       return;
    rt_island_vpi_release_slice(m, sig, 0, signal_width(sig));
 }
+
+void rt_island_report_forces(rt_island_mgr_t *mgr, rt_signal_t *sig,
+                             uint32_t offset, uint32_t count,
+                             void (*fn)(uint32_t, uint32_t, void *),
+                             void *arg)
+{
+   if (mgr == NULL || mgr->sig_map == NULL || sig == NULL || count == 0)
+      return;
+
+   for (rt_island_sig_t *s = hash_get(mgr->sig_map, sig);
+        s != NULL; s = s->next_owner) {
+      rt_island_t *isl = s->isl;
+      if (!isl->has_forces)
+         continue;
+
+      const rt_island_force_t *f = island_find_force(isl, s->sig_idx);
+      if (f == NULL)
+         continue;
+
+      const uint32_t s_start = (uint32_t)s->sig_offset;
+      const uint32_t s_end = s_start + s->width * s->nelems;
+      const uint32_t r_start = MAX(offset, s_start);
+      const uint32_t r_end = MIN(offset + count, s_end);
+      if (r_start >= r_end)
+         continue;
+
+      uint32_t run_start = 0, run_len = 0;
+      for (uint32_t pos = r_start; pos < r_end; pos++) {
+         const uint32_t k = pos - s_start;
+         const uint32_t e = k / s->width;
+         const uint32_t lsb = s->width - 1u - (k % s->width);
+         const uint32_t widx = e * s->nwords + (lsb / 64u);
+         const uint64_t bit = UINT64_C(1) << (lsb & 63u);
+
+         if (f->mask[widx] & bit) {
+            if (run_len == 0)
+               run_start = pos - offset;
+            run_len++;
+         }
+         else if (run_len > 0) {
+            (*fn)(run_start, run_len, arg);
+            run_len = 0;
+         }
+      }
+      if (run_len > 0)
+         (*fn)(run_start, run_len, arg);
+   }
+}

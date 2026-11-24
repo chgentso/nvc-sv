@@ -5800,6 +5800,8 @@ typedef struct {
    vpi_nvc_conn_fn_t fn;
    void             *user;
    uint32_t          total;
+   bool              have_driver;
+   bool              have_force;
 } conn_query_t;
 
 static void conn_set_loc(vpi_nvc_conn_t *out, tree_t where)
@@ -5833,6 +5835,7 @@ static void conn_report(const rt_conn_t *c, void *arg)
          if (c->proc == NULL)
             return;
 
+         q->have_driver = true;
          out.kind = vpiNvcConnProcess;
          out.proc_kind = model_proc_kind(c->proc);
 
@@ -5845,6 +5848,7 @@ static void conn_report(const rt_conn_t *c, void *arg)
       break;
 
    case RT_CONN_PORT:
+      q->have_driver = true;
       out.kind = vpiNvcConnPort;
       model_item_path(c->other_scope, c->other_name, other);
       out.other = tb_get(other);
@@ -5855,6 +5859,7 @@ static void conn_report(const rt_conn_t *c, void *arg)
       break;
 
    case RT_CONN_FORCE:
+      q->have_force = true;
       out.kind = vpiNvcConnForce;
       break;
 
@@ -5927,7 +5932,23 @@ typedef struct {
    conn_query_t       *q;
    vpi_context_t      *ctx;
    conn_design_t      *cd;
+   bool                is_load;
 } conn_load_t;
+
+static const char *conn_proc_kind_str(conn_proc_kind_t k)
+{
+   switch (k) {
+   case CONN_PROC_ASSIGN:       return "assign";
+   case CONN_PROC_ALWAYS_COMB:  return "always_comb";
+   case CONN_PROC_ALWAYS_FF:    return "always_ff";
+   case CONN_PROC_ALWAYS_LATCH: return "always_latch";
+   case CONN_PROC_ALWAYS:       return "always";
+   case CONN_PROC_INITIAL:      return "initial";
+   case CONN_PROC_FINAL:        return "final";
+   case CONN_PROC_GATE:         return "gate";
+   default:                     return "process";
+   }
+}
 
 static void conn_load_report(const conn_end_t *e, void *arg)
 {
@@ -5938,7 +5959,7 @@ static void conn_load_report(const conn_end_t *e, void *arg)
 
 
    vpi_nvc_conn_t out = {
-      .is_load = 1,
+      .is_load = l->is_load ? 1 : 0,
       .first   = e->lo,
       .count   = e->hi - e->lo + 1,
       .total   = l->q->total,
@@ -5971,7 +5992,10 @@ static void conn_load_report(const conn_end_t *e, void *arg)
          }
          else {
             name = e->proc->name;
-            out.proc_kind = "process";
+            out.proc_kind = conn_proc_kind_str(e->proc->kind);
+            if (!l->is_load && e->proc->kind != CONN_PROC_ASSIGN
+                && e->proc->kind != CONN_PROC_GATE)
+               out.flags |= vpiNvcConnApprox;
          }
 
          out.name = name;
@@ -6017,6 +6041,16 @@ static void conn_load_report(const conn_end_t *e, void *arg)
    (*l->q->fn)(&out, l->q->user);
 }
 
+static const conn_net_t *conn_find_by_space_path(conn_design_t *cd,
+                                                 const char *path)
+{
+   LOCAL_TEXT_BUF dotted = tb_new();
+   for (const char *p = path; *p; p++)
+      tb_append(dotted, *p == ' ' ? '.' : *p);
+
+   return conn_find_net(cd, tb_get(dotted));
+}
+
 static bool conn_loads(vpi_context_t *c, const char *path, conn_query_t *q,
                        PLI_INT32 first, PLI_INT32 count)
 {
@@ -6027,20 +6061,34 @@ static bool conn_loads(vpi_context_t *c, const char *path, conn_query_t *q,
    if (cd == NULL)
       return false;
 
-   LOCAL_TEXT_BUF dotted = tb_new();
-   for (const char *p = path; *p; p++)
-      tb_append(dotted, *p == ' ' ? '.' : *p);
-
-   const conn_net_t *net = conn_find_net(cd, tb_get(dotted));
+   const conn_net_t *net = conn_find_by_space_path(cd, path);
    if (net == NULL || net->width == 0 || (unsigned)first >= net->width)
       return false;
 
    const unsigned hi = count > 0
       ? MIN((unsigned)(first + count - 1), net->width - 1) : net->width - 1;
 
-   conn_load_t l = { .q = q, .ctx = c, .cd = cd };
+   conn_load_t l = { .q = q, .ctx = c, .cd = cd, .is_load = true };
    conn_readers(cd, net, first, hi, conn_load_report, &l);
    return true;
+}
+
+typedef struct {
+   conn_query_t *q;
+   const char   *scope;
+} conn_island_force_t;
+
+static void conn_island_force_cb(uint32_t first, uint32_t count, void *arg)
+{
+   conn_island_force_t *f = arg;
+   vpi_nvc_conn_t out = {
+      .kind  = vpiNvcConnForce,
+      .scope = f->scope,
+      .first = first,
+      .count = count,
+      .total = f->q->total,
+   };
+   (*f->q->fn)(&out, f->q->user);
 }
 
 DLLEXPORT
@@ -6070,6 +6118,34 @@ PLI_INT32 vpi_nvc_connections(const char *path, PLI_INT32 first,
    };
 
    model_item_drivers(&found, first, count, conn_report, &q);
+
+   if (found.signal->shared.flags & SIG_F_ISLAND) {
+      if (!q.have_force) {
+         LOCAL_TEXT_BUF scope = tb_new();
+         if (found.signal->parent != NULL)
+            model_scope_path(found.signal->parent, scope);
+         conn_island_force_t f = { .q = &q, .scope = tb_get(scope) };
+         rt_island_report_forces(rt_island_model_mgr(c->model), found.signal,
+                                 found.offset + (uint32_t)first, q.total,
+                                 conn_island_force_cb, &f);
+      }
+
+      if (!q.have_driver) {
+         conn_design_t *cd = conn_design(c);
+         if (cd != NULL) {
+            const conn_net_t *net = conn_find_by_space_path(cd, path);
+            if (net != NULL && net->width > 0 && (unsigned)first < net->width) {
+               const unsigned hi = count > 0
+                  ? MIN((unsigned)(first + count - 1), net->width - 1)
+                  : net->width - 1;
+               conn_load_t d = {
+                  .q = &q, .ctx = c, .cd = cd, .is_load = false
+               };
+               conn_drivers(cd, net, first, hi, conn_load_report, &d);
+            }
+         }
+      }
+   }
 
    // A signal that was found by an alias path (a merged port) is asked for by
    // the name given
