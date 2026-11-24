@@ -21593,17 +21593,139 @@ static void vlog_scan_namespace_cb(lib_t lib, ident_t name, int kind, void *ctx)
    vlog_defer_scope(mc, name);
 }
 
+typedef struct _sv_class_node {
+   vlog_node_t            cls;
+   struct _sv_class_node *next;
+} sv_class_node_t;
+
+typedef struct {
+   mir_context_t *context;
+   bool           ns_scanned;
+   unsigned       specs_known;
+   unsigned       classes_known;
+   hash_t        *ifaces;    // vlog_node_t -> sv_class_node_t * or sentinel (1)
+   hash_t        *by_subr;   // ident_t subr_name -> sv_class_node_t *
+   hash_t        *by_spec;   // ident_t spec_ident -> sv_class_node_t *
+   mem_pool_t    *pool;
+} sv_class_cache_t;
+
+static sv_class_cache_t *sv_class_cache = NULL;
+
+static void sv_class_cache_clear_index(sv_class_cache_t *cache)
+{
+   hash_free(cache->ifaces);
+   hash_free(cache->by_subr);
+   hash_free(cache->by_spec);
+   pool_free(cache->pool);
+   cache->ifaces = NULL;
+   cache->by_subr = NULL;
+   cache->by_spec = NULL;
+   cache->pool = NULL;
+   cache->classes_known = 0;
+}
+
+static void sv_class_cache_free_cb(void *arg)
+{
+   sv_class_cache_t *cache = arg;
+   sv_class_cache_clear_index(cache);
+   if (sv_class_cache == cache)
+      sv_class_cache = NULL;
+   free(cache);
+}
+
+static sv_class_cache_t *sv_class_cache_get(mir_context_t *mc)
+{
+   if (sv_class_cache == NULL || sv_class_cache->context != mc) {
+      sv_class_cache_t *cache = xcalloc(sizeof(sv_class_cache_t));
+      cache->context = mc;
+      mir_context_on_free(mc, sv_class_cache_free_cb, cache);
+      sv_class_cache = cache;
+   }
+
+   return sv_class_cache;
+}
+
+static sv_class_node_t *sv_class_cache_ifaces(sv_class_cache_t *cache,
+                                              vlog_node_t c, ident_t impl_id)
+{
+   void *found = hash_get(cache->ifaces, c);
+   if (found != NULL)
+      return found == (void *)(uintptr_t)1 ? NULL : found;
+
+   sv_class_node_t *head = NULL;
+   const int ndecls = vlog_decls(c);
+   for (int i = 0; i < ndecls; i++) {
+      vlog_node_t d = vlog_decl(c, i);
+      if (vlog_kind(d) == V_TYPE_DECL && vlog_ident(d) == impl_id) {
+         sv_class_node_t *n = pool_malloc(cache->pool, sizeof(sv_class_node_t));
+         n->cls  = vlog_type(d);
+         n->next = head;
+         head = n;
+      }
+   }
+
+   hash_put(cache->ifaces, c, head != NULL ? head : (void *)(uintptr_t)1);
+   return head;
+}
+
+static void sv_class_cache_add(sv_class_cache_t *cache, hash_t *map,
+                               ident_t key, vlog_node_t leaf)
+{
+   sv_class_node_t *n = pool_malloc(cache->pool, sizeof(sv_class_node_t));
+   n->cls  = leaf;
+   n->next = hash_get(map, key);
+   hash_put(map, key, n);
+}
+
+static void sv_class_cache_record(sv_class_cache_t *cache, vlog_node_t leaf,
+                                  vlog_node_t anc, ident_t impl_id,
+                                  void *stamp, hash_t *seen_anc,
+                                  hash_t *seen_subr, hash_t *seen_spec)
+{
+   for (;; anc = vlog_ref(anc)) {
+      if (hash_get(seen_anc, anc) == stamp)
+         return;
+      hash_put(seen_anc, anc, stamp);
+
+      ident_t sname = vlog_subr_name(anc);
+      if (hash_get(seen_subr, sname) != stamp) {
+         hash_put(seen_subr, sname, stamp);
+         sv_class_cache_add(cache, cache->by_subr, sname, leaf);
+      }
+
+      ident_t id = vlog_ident(anc);
+      if (ident_runtil(id, '$') != id && hash_get(seen_spec, id) != stamp) {
+         hash_put(seen_spec, id, stamp);
+         sv_class_cache_add(cache, cache->by_spec, id, leaf);
+      }
+
+      for (const sv_class_node_t *it =
+              sv_class_cache_ifaces(cache, anc, impl_id);
+           it != NULL; it = it->next)
+         sv_class_cache_record(cache, leaf, it->cls, impl_id, stamp,
+                               seen_anc, seen_subr, seen_spec);
+
+      if (!vlog_has_ref(anc))
+         return;
+   }
+}
+
 static void vlog_scan_namespace(mir_context_t *mc)
 {
    // Every class that an object can have must be known before the code which
    // dispatches on the class of an object is generated.  A specialisation
    // declared in an instance is only initialised when its scope runs.
 
-   lib_walk_index(lib_work(), vlog_scan_namespace_cb, mc);
-
    vlog_check_context(mc);
+   sv_class_cache_t *cache = sv_class_cache_get(mc);
 
-   if (sv_spec_scopes == NULL)
+   if (!cache->ns_scanned) {
+      lib_walk_index(lib_work(), vlog_scan_namespace_cb, mc);
+      cache->ns_scanned = true;
+   }
+
+   if (sv_spec_scopes == NULL
+       || hash_members(sv_spec_scopes) == cache->specs_known)
       return;
 
    unsigned known;
@@ -21621,26 +21743,60 @@ static void vlog_scan_namespace(mir_context_t *mc)
       for (unsigned i = 0; i < n; i++)
          vlog_defer_scope(mc, names[i]);
    } while (hash_members(sv_spec_scopes) != known);
+
+   cache->specs_known = known;
 }
 
-static bool vlog_is_subclass(vlog_node_t c, vlog_node_t base)
+static const sv_class_node_t *sv_class_subclasses(mir_context_t *mc,
+                                                  vlog_node_t base)
 {
-   for (;; c = vlog_ref(c)) {
-      if (vlog_subr_name(c) == vlog_subr_name(base))
-         return true;
-      else if (vlog_ident(c) == vlog_ident(base)
-               && ident_runtil(vlog_ident(c), '$') != vlog_ident(c))
-         return true;   // Same specialisation declared in another scope
+   // Reverse index of all known classes deriving from base (including base
+   // itself), built once per elaboration context and freed with it.
 
-      const unsigned nifaces = vlog_class_ifaces(c);
-      for (unsigned i = 0; i < nifaces; i++) {
-         if (vlog_is_subclass(vlog_class_iface(c, i), base))
-            return true;
+   vlog_scan_namespace(mc);
+
+   if (sv_classes == NULL)
+      return NULL;
+
+   sv_class_cache_t *cache = sv_class_cache_get(mc);
+   const unsigned nclasses = hash_members(sv_classes);
+   if (cache->pool == NULL || cache->classes_known != nclasses) {
+      sv_class_cache_clear_index(cache);
+
+      const size_t sz = MAX(32, nclasses * 2);
+      cache->ifaces  = hash_new(sz);
+      cache->by_subr = hash_new(sz);
+      cache->by_spec = hash_new(MAX(32, nclasses));
+      cache->pool    = pool_new();
+
+      ident_t impl_id = ident_new("$implements");
+      hash_t *seen_anc = hash_new(sz);
+      hash_t *seen_subr = hash_new(sz);
+      hash_t *seen_spec = hash_new(MAX(32, nclasses));
+      uintptr_t gen = 0;
+
+      const void *key;
+      void *value;
+      for (hash_iter_t it = HASH_BEGIN;
+           hash_iter(sv_classes, &it, &key, &value); ) {
+         vlog_node_t c = value;
+         void *stamp = (void *)(++gen);
+         sv_class_cache_record(cache, c, c, impl_id, stamp,
+                               seen_anc, seen_subr, seen_spec);
       }
 
-      if (!vlog_has_ref(c))
-         return false;
+      hash_free(seen_anc);
+      hash_free(seen_subr);
+      hash_free(seen_spec);
+
+      cache->classes_known = nclasses;
    }
+
+   ident_t id = vlog_ident(base);
+   if (ident_runtil(id, '$') != id)
+      return hash_get(cache->by_spec, id);
+   else
+      return hash_get(cache->by_subr, vlog_subr_name(base));
 }
 
 static void vlog_lower_cast_unit(mir_unit_t *mu, object_t *obj)
@@ -21654,8 +21810,6 @@ static void vlog_lower_cast_unit(mir_unit_t *mu, object_t *obj)
       .mir = mir_get_context(mu),
    };
 
-   vlog_scan_namespace(g.mir);
-
    mir_type_t t_offset = mir_offset_type(mu);
    mir_set_result(mu, t_offset);
 
@@ -21667,13 +21821,9 @@ static void vlog_lower_cast_unit(mir_unit_t *mu, object_t *obj)
    mir_value_t vid = mir_build_load(
       mu, mir_build_link_var(mu, this, ident_new("$vid"), t_vid));
 
-   const void *key;
-   void *value;
-   for (hash_iter_t it = HASH_BEGIN;
-        hash_iter(sv_classes, &it, &key, &value); ) {
-      vlog_node_t c = value;
-      if (!vlog_is_subclass(c, class))
-         continue;
+   for (const sv_class_node_t *it = sv_class_subclasses(g.mir, class);
+        it != NULL; it = it->next) {
+      vlog_node_t c = it->cls;
 
       mir_block_t yes_bb = mir_add_block(mu);
       mir_block_t next_bb = mir_add_block(mu);
@@ -21705,10 +21855,6 @@ static void vlog_lower_dispatch(mir_unit_t *mu, object_t *obj)
       .mir = mir_get_context(mu),
    };
 
-   // Classes outside modules are found in the library and those inside
-   // modules have been seen by now as this runs after elaboration
-   vlog_scan_namespace(g.mir);
-
    const int nports = vlog_ports(decl);
    mir_value_t *args LOCAL = xmalloc_array(nports + 1, sizeof(mir_value_t));
 
@@ -21734,12 +21880,12 @@ static void vlog_lower_dispatch(mir_unit_t *mu, object_t *obj)
    mir_value_t vid = mir_build_load(
       mu, mir_build_link_var(mu, args[0], ident_new("$vid"), t_vid));
 
-   const void *key;
-   void *value;
-   for (hash_iter_t it = HASH_BEGIN;
-        hash_iter(sv_classes, &it, &key, &value); ) {
-      vlog_node_t c = value;
-      if ((vlog_flags(c) & VLOG_F_VIRTUAL) || !vlog_is_subclass(c, class))
+   // Classes outside modules are found in the library and those inside
+   // modules have been seen by now as this runs after elaboration
+   for (const sv_class_node_t *it = sv_class_subclasses(g.mir, class);
+        it != NULL; it = it->next) {
+      vlog_node_t c = it->cls;
+      if (vlog_flags(c) & VLOG_F_VIRTUAL)
          continue;
 
       vlog_node_t impl = vlog_class_member(c, vlog_ident(decl));
@@ -30361,8 +30507,6 @@ static void vlog_lower_crv_dispatch(mir_unit_t *mu, object_t *obj)
       .mir = mir_get_context(mu),
    };
 
-   vlog_scan_namespace(g.mir);
-
    mir_type_t t_offset = mir_offset_type(mu);
    mir_set_result(mu, t_offset);
 
@@ -30376,12 +30520,10 @@ static void vlog_lower_crv_dispatch(mir_unit_t *mu, object_t *obj)
    mir_value_t vid = mir_build_load(
       mu, mir_build_link_var(mu, args[0], ident_new("$vid"), t_vid));
 
-   const void *key;
-   void *value;
-   for (hash_iter_t it = HASH_BEGIN;
-        hash_iter(sv_classes, &it, &key, &value); ) {
-      vlog_node_t c = value;
-      if ((vlog_flags(c) & VLOG_F_VIRTUAL) || !vlog_is_subclass(c, class))
+   for (const sv_class_node_t *it = sv_class_subclasses(g.mir, class);
+        it != NULL; it = it->next) {
+      vlog_node_t c = it->cls;
+      if (vlog_flags(c) & VLOG_F_VIRTUAL)
          continue;
 
       mir_block_t call_bb = mir_add_block(mu);

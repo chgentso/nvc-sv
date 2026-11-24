@@ -41,9 +41,11 @@ typedef struct {
 } mir_annotate_t;
 
 typedef void (*mir_lower_fn_t)(mir_unit_t *, object_t *);
+typedef void (*mir_cleanup_fn_t)(void *);
 
 mir_context_t *mir_context_new(void);
 void mir_context_free(mir_context_t *mc);
+void mir_context_on_free(mir_context_t *mc, mir_cleanup_fn_t fn, void *arg);
 
 void mir_put_unit(mir_context_t *mc, mir_unit_t *mu);
 mir_unit_t *mir_get_unit(mir_context_t *mc, ident_t name);

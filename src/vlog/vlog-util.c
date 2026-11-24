@@ -1913,20 +1913,21 @@ uint32_t vlog_hash_node(vlog_node_t v)
    }
 }
 
-static bool vlog_is_iface_decl(vlog_node_t d)
+static bool vlog_is_iface_decl(vlog_node_t d, ident_t impl_id)
 {
    // An interface class which is implemented, or extended by an interface
    // class, is kept as a type declaration with a reserved name
 
-   return vlog_kind(d) == V_TYPE_DECL && vlog_ident(d) == ident_new("$implements");
+   return vlog_kind(d) == V_TYPE_DECL && vlog_ident(d) == impl_id;
 }
 
 unsigned vlog_class_ifaces(vlog_node_t class)
 {
+   ident_t impl_id = ident_new("$implements");
    unsigned count = 0;
    const int ndecls = vlog_decls(class);
    for (int i = 0; i < ndecls; i++) {
-      if (vlog_is_iface_decl(vlog_decl(class, i)))
+      if (vlog_is_iface_decl(vlog_decl(class, i), impl_id))
          count++;
    }
 
@@ -1935,10 +1936,11 @@ unsigned vlog_class_ifaces(vlog_node_t class)
 
 vlog_node_t vlog_class_iface(vlog_node_t class, unsigned n)
 {
+   ident_t impl_id = ident_new("$implements");
    const int ndecls = vlog_decls(class);
    for (int i = 0; i < ndecls; i++) {
       vlog_node_t d = vlog_decl(class, i);
-      if (vlog_is_iface_decl(d) && n-- == 0)
+      if (vlog_is_iface_decl(d, impl_id) && n-- == 0)
          return vlog_type(d);
    }
 

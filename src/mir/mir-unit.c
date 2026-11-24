@@ -96,8 +96,21 @@ static void mir_free_unit_cb(const void *key, void *value)
    }
 }
 
+void mir_context_on_free(mir_context_t *mc, mir_cleanup_fn_t fn, void *arg)
+{
+   SCOPED_LOCK(mc->pool_mtx);
+   mir_cleanup_t *c = pool_malloc(mc->pool, sizeof(mir_cleanup_t));
+   c->fn        = fn;
+   c->arg       = arg;
+   c->next      = mc->cleanups;
+   mc->cleanups = c;
+}
+
 void mir_context_free(mir_context_t *mc)
 {
+   for (mir_cleanup_t *c = mc->cleanups; c != NULL; c = c->next)
+      (*c->fn)(c->arg);
+
    chash_iter(mc->map, mir_free_unit_cb);
    mir_free_types(mc->typetab);
    pool_free(mc->pool);

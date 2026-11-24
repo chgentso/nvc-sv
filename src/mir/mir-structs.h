@@ -262,12 +262,19 @@ typedef struct {
    type_data_t  types[0];
 } type_tab_t;
 
+typedef struct _mir_cleanup {
+   mir_cleanup_fn_t     fn;
+   void                *arg;
+   struct _mir_cleanup *next;
+} mir_cleanup_t;
+
 typedef struct _mir_context {
-   type_tab_t *typetab;
-   type_tab_t *resizing;
-   chash_t    *map;
-   mem_pool_t *pool;
-   nvc_lock_t  pool_mtx;
+   type_tab_t    *typetab;
+   type_tab_t    *resizing;
+   chash_t       *map;
+   mem_pool_t    *pool;
+   nvc_lock_t     pool_mtx;
+   mir_cleanup_t *cleanups;
 } mir_context_t;
 
 typedef struct {
