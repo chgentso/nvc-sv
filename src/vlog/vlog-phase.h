@@ -40,6 +40,10 @@ void vlog_lower_island_comb_fn(mir_context_t *mc, vlog_node_t body,
                                ident_t qual, ident_t sym,
                                const struct _vlog_island *isl,
                                const bool *fused_proc);
+void vlog_lower_island_ff_fn(mir_context_t *mc, vlog_node_t body,
+                             ident_t qual, ident_t sym,
+                             const struct _vlog_island *isl,
+                             uint32_t domain_idx, const bool *fused_proc);
 void vlog_cover_block(vlog_node_t body, cover_data_t *db, cover_obj_t cs);
 void vlog_cover_bind(vlog_node_t body, cover_data_t *db, cover_obj_t cs);
 bool vlog_cover_tag(ident_t body, vlog_node_t v, cover_item_kind_t kind,

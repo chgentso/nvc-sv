@@ -23,13 +23,24 @@
 #include "vlog/vlog-island.h"
 
 typedef struct {
-   const vlog_island_t *isl;
-   bool                *fused_proc;   // [isl->nprocs]
-   uint32_t             n_fused_comb;
-   bool                *sig_in;       // [isl->nsigs]
-   bool                *sig_out;      // [isl->nsigs]
-   bool                *sig_comb_w;   // [isl->nsigs]
-   ident_t              eval_sym;
+   uint32_t *write_sigs;
+   uint32_t  n_write_sigs;
+   uint32_t  n_fused_ff;
+   ident_t   ff_sym;
+} vlog_island_dom_m3_t;
+
+typedef struct {
+   const vlog_island_t  *isl;
+   bool                 *fused_proc;   // [isl->nprocs]
+   uint32_t              n_fused_comb;
+   uint32_t              n_fused_ff;
+   bool                 *sig_in;       // [isl->nsigs]
+   bool                 *sig_out;      // [isl->nsigs]
+   bool                 *sig_comb_w;   // [isl->nsigs]
+   bool                 *sig_comb_r;   // [isl->nsigs]
+   bool                 *sig_ext_w;    // [isl->nsigs]
+   vlog_island_dom_m3_t *doms;         // [isl->ndomains]
+   ident_t               eval_sym;
 } vlog_island_m2_t;
 
 typedef struct {

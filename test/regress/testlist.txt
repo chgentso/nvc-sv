@@ -3257,3 +3257,4 @@ vlog_fast_write1 verilog
 vpi_fast_direct1 verilog,vpi
 vlog_nb_packed1  verilog
 island_m2       shell
+island_m3       shell
