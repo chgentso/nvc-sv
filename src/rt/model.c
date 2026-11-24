@@ -163,6 +163,12 @@ typedef struct {
    uint32_t     flags;
 } nb_packed_t;
 
+typedef struct {
+   rt_nexus_t    *nexus;
+   unsigned char *init;
+   unsigned char  buf[32];
+} rt_deferred_t;
+
 typedef struct _rt_model {
    tree_t             top;
    hash_t            *scopes;
@@ -181,12 +187,23 @@ typedef struct _rt_model {
    bool               force_stop;
    bool               sva_flush;
    bool               finished;
-   rt_proc_t        **sva_procs;
-   unsigned           nsva_procs;
-   unsigned           nfinal_procs;
    bool               blocking_update;
    bool               psl_cover_assert;
+   bool               has_verilog;
+   bool               has_level_trigger;
+   bool               skip_comb;
+   bool               shuffle;
+   bool               liveness;
+   bool               sv_poll_mem_dirty;
+   bool               sv_poll_sig_dirty;
+   bool               sv_poll_susp_dirty;
+   unsigned           ndeferred;
+   unsigned           nsva_procs;
+   unsigned           nfinal_procs;
    unsigned           n_signals;
+   rt_proc_t        **sva_procs;
+   rt_deferred_t     *deferred;
+   rt_island_mgr_t   *islands;
    heap_t            *eventq_heap;
    ihash_t           *res_memo;
    rt_watch_t        *watches;
@@ -219,21 +236,7 @@ typedef struct _rt_model {
    memblock_t        *memblocks;
    model_thread_t    *threads[MAX_THREADS];
    signal_list_t      eventsigs;
-   unsigned           ndeferred;
-   bool               skip_comb;
-   struct {
-      rt_nexus_t    *nexus;
-      unsigned char *init;
-      unsigned char  buf[32];
-   } deferred[DEFER_MAX];
    init_event_list_t  init_events;
-   bool               shuffle;
-   bool               liveness;
-   bool               has_verilog;
-   bool               has_level_trigger;
-   bool               sv_poll_mem_dirty;
-   bool               sv_poll_sig_dirty;
-   bool               sv_poll_susp_dirty;
    rt_trigger_t     **triggertab;
    unsigned           triggertab_size;
    unsigned           ntriggers;
@@ -246,7 +249,6 @@ typedef struct _rt_model {
       unsigned     count;
       unsigned     max;
    } nb_packed_q;
-   rt_island_mgr_t   *islands;
 } rt_model_t;
 
 #define FMT_VALUES_SZ   128
@@ -921,6 +923,7 @@ void model_free(rt_model_t *m)
    }
    m->mixed_bridges = NULL;
    free(m->sva_procs);
+   free(m->deferred);
    free(m->triggertab);
 
    for (rt_packed_force_t *pf = m->packed_force_list, *tmp; pf; pf = tmp) {
@@ -4076,15 +4079,17 @@ static bool run_trigger(rt_model_t *m, rt_trigger_t *t)
 static void procq_do(rt_model_t *m, rt_wakeable_t *obj, defer_fn_t fn,
                      void *arg)
 {
-   if (obj->postponed && obj->latepost)
-      deferq_do(&m->latepostq, fn, arg);
-   else if (obj->postponed)
-      deferq_do(&m->postponedq, fn, arg);
-   else if (obj->reschedule)
-      deferq_do(&m->reschedq, fn, arg);
-   else if (obj->reactive) {
-      deferq_do(&m->reactiveq, fn, arg);
-      container_of(obj, rt_proc_t, wakeable)->wake_iter = m->iteration;
+   if (unlikely(obj->postponed || obj->reschedule || obj->reactive)) {
+      if (obj->postponed && obj->latepost)
+         deferq_do(&m->latepostq, fn, arg);
+      else if (obj->postponed)
+         deferq_do(&m->postponedq, fn, arg);
+      else if (obj->reschedule)
+         deferq_do(&m->reschedq, fn, arg);
+      else {
+         deferq_do(&m->reactiveq, fn, arg);
+         container_of(obj, rt_proc_t, wakeable)->wake_iter = m->iteration;
+      }
    }
    else {
       deferq_do(&m->procq, fn, arg);
@@ -4099,34 +4104,36 @@ static void wakeup_one(rt_model_t *m, rt_wakeable_t *obj)
    if (obj->pending)
       return;   // Already scheduled
 
+   if (likely(obj->kind == W_PROC)) {
+      rt_proc_t *proc = container_of(obj, rt_proc_t, wakeable);
+      if (unlikely(m->skip_comb) && proc->comb)
+         return;
+
+      TRACE("%s %sprocess %s", obj->reschedule ? "reschedule" : "wakeup",
+            obj->postponed ? "postponed " : "", istr(proc->name));
+
+      if (unlikely(proc->wakeable.delayed)) {
+         // This process was already scheduled to run at a later
+         // time so we need to delete it from the simulation queue
+         heap_delete(m->eventq_heap, heap_delete_proc_cb, proc);
+         proc->wakeable.delayed = false;
+      }
+
+      if (unlikely(m->blocking_update) && tree_kind(proc->where) == T_PARAM) {
+         // A Verilog process changed the source of this conversion so
+         // run it with the signal updates in the next delta cycle
+         deferq_do(&m->driverq, async_run_process, proc);
+         set_pending(obj);
+         m->next_is_delta = true;
+      }
+      else
+         procq_do(m, obj, async_run_process, proc);
+      return;
+   }
+
    switch (obj->kind) {
    case W_PROC:
-      {
-         rt_proc_t *proc = container_of(obj, rt_proc_t, wakeable);
-         if (proc->comb && m->skip_comb)
-            break;
-
-         TRACE("%s %sprocess %s", obj->reschedule ? "reschedule" : "wakeup",
-               obj->postponed ? "postponed " : "", istr(proc->name));
-
-         if (proc->wakeable.delayed) {
-            // This process was already scheduled to run at a later
-            // time so we need to delete it from the simulation queue
-            heap_delete(m->eventq_heap, heap_delete_proc_cb, proc);
-            proc->wakeable.delayed = false;
-         }
-
-         if (m->blocking_update && tree_kind(proc->where) == T_PARAM) {
-            // A Verilog process changed the source of this conversion so
-            // run it with the signal updates in the next delta cycle
-            deferq_do(&m->driverq, async_run_process, proc);
-            set_pending(obj);
-            m->next_is_delta = true;
-         }
-         else
-            procq_do(m, obj, async_run_process, proc);
-      }
-      break;
+      should_not_reach_here();
 
    case W_PROPERTY:
       {
@@ -5687,11 +5694,15 @@ static inline bool packed_can_fast_direct(const rt_signal_t *s)
       && s->nexus.pending == NULL;
 }
 
-static bool packed_save_deferred(rt_model_t *m, rt_nexus_t *n, size_t valuesz)
+static bool save_deferred(rt_model_t *m, rt_nexus_t *n, size_t valuesz,
+                          const void *init_src)
 {
    rt_proc_t *ap = get_active_proc();
    if (ap == NULL || !ap->comb)
       return false;
+
+   if (unlikely(m->deferred == NULL))
+      m->deferred = xmalloc_array(DEFER_MAX, sizeof(rt_deferred_t));
 
    unsigned i = 0;
    while (i < m->ndeferred && m->deferred[i].nexus != n)
@@ -5704,11 +5715,16 @@ static bool packed_save_deferred(rt_model_t *m, rt_nexus_t *n, size_t valuesz)
          ? m->deferred[i].buf : xmalloc(valuesz);
       m->deferred[i].nexus = n;
       m->deferred[i].init = init;
-      memcpy(init, n->signal->shared.data, valuesz);
+      memcpy(init, init_src, valuesz);
       m->ndeferred++;
       return true;
    }
    return false;
+}
+
+static bool packed_save_deferred(rt_model_t *m, rt_nexus_t *n, size_t valuesz)
+{
+   return save_deferred(m, n, valuesz, n->signal->shared.data);
 }
 
 static void packed_rmw_range(uint64_t *dst_a, uint64_t *dst_b,
@@ -6540,28 +6556,7 @@ void deposit_signal(rt_model_t *m, rt_signal_t *s, const void *values,
       }
 
       if (!cmp_bytes(eff, vptr, valuesz)) {
-         rt_proc_t *ap = get_active_proc();
-         bool defer = false;
-         if (ap != NULL && ap->comb) {
-            // The always_comb process runs to completion before any
-            // process that waits on its variables resumes, so those see
-            // only the final value: a change that is reverted within the
-            // same activation raises no event (IEEE 1800-2017 9.2.2.2.1)
-            unsigned i = 0;
-            while (i < m->ndeferred && m->deferred[i].nexus != n)
-               i++;
-            if (i < m->ndeferred)
-               defer = true;
-            else if (m->ndeferred < DEFER_MAX) {
-               unsigned char *init = valuesz <= sizeof(m->deferred[i].buf)
-                  ? m->deferred[i].buf : xmalloc(valuesz);
-               m->deferred[i].nexus = n;
-               m->deferred[i].init = init;
-               memcpy(init, eff, valuesz);
-               m->ndeferred++;
-               defer = true;
-            }
-         }
+         const bool defer = save_deferred(m, n, valuesz, eff);
 
          copy2(last, eff, vptr, valuesz);
          m->trigger_epoch++;

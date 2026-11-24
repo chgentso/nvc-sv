@@ -48,12 +48,12 @@ typedef struct {
    unsigned        pending : 1;
    unsigned        postponed : 1;
    unsigned        latepost : 1;
-   unsigned        sampler : 1;
+   unsigned        reschedule : 1;
+   unsigned        reactive : 1;
    unsigned        delayed : 1;
    unsigned        zombie : 1;
-   unsigned        reschedule : 1;
    unsigned        forked : 1;
-   unsigned        reactive : 1;
+   unsigned        sampler : 1;
    unsigned        interrupted : 1;
    rt_trigger_t   *trigger;
 } rt_wakeable_t;
@@ -83,15 +83,15 @@ typedef struct _rt_proc {
    uint64_t       wait_seq;
    uint32_t       create_seq;
    uint32_t       wake_iter;
-   unsigned       poll_wake : 1;   // Queued by the poll at the end of a cycle
-   struct _sv_watch *watch;   // Memory a polled condition depends on
    uint32_t       scope_idx;   // Index in scope->procs of a forked process
+   unsigned       poll_wake : 1;   // Queued by the poll at the end of a cycle
    unsigned       verilog : 1;
    unsigned       comb : 1;    // always_comb or always_latch
    unsigned       ended : 1;   // Returned without waiting for anything
    unsigned       signal_only : 1;
    unsigned       signal_only_known : 1;
    unsigned       regs : 16;   // Places that hold a pointer to this process
+   struct _sv_watch *watch;   // Memory a polled condition depends on
    struct _sv_task *task;
    ffi_closure_t  closure;   // Has a flexible member
 } rt_proc_t;
