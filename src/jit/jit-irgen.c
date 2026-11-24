@@ -1942,6 +1942,21 @@ static void irgen_op_load(jit_irgen_t *g, mir_value_t n)
    }
 }
 
+static bool irgen_vec_store_persists(jit_irgen_t *g, mir_value_t dst,
+                                     mir_type_t type)
+{
+   if (mir_get_size(g->mu, type) <= 64)
+      return false;
+
+   if (dst.tag == MIR_TAG_VAR)
+      return g->statereg.kind != JIT_VALUE_INVALID
+         && (!(mir_get_var_flags(g->mu, dst) & MIR_VAR_TEMP)
+             || irgen_temp_in_state(g, dst));
+
+   return g->statereg.kind != JIT_VALUE_INVALID
+      || mir_get_mem(g->mu, dst) != MIR_MEM_STACK;
+}
+
 static void irgen_op_store(jit_irgen_t *g, mir_value_t n)
 {
    mir_value_t arg0 = mir_get_arg(g->mu, n, 0);
@@ -2007,48 +2022,36 @@ static void irgen_op_store(jit_irgen_t *g, mir_value_t n)
       break;
 
    case MIR_TYPE_VEC2:
-      if (mir_get_size(g->mu, type) > 64) {
-         const bool persist = arg0.tag != MIR_TAG_VAR
-            || (g->statereg.kind != JIT_VALUE_INVALID
-                && (!(mir_get_var_flags(g->mu, arg0) & MIR_VAR_TEMP)
-                    || irgen_temp_in_state(g, arg0)));
-         if (persist && mir_get_mem(g->mu, arg0) != MIR_MEM_STACK) {
-            const size_t wbytes =
-               ((mir_get_size(g->mu, type) + 63) / 64) * sizeof(uint64_t);
-            jit_value_t copy = irgen_alloc_temp(g);
-            jit_value_t cnt = irgen_alloc_temp(g);
-            macro_galloc(g, copy, jit_value_from_int64(wbytes));
-            j_mov(g, cnt, jit_value_from_int64(wbytes));
-            macro_copy(g, copy, value, cnt);
-            j_store(g, JIT_SZ_64, copy, addr);
-            break;
-         }
+      if (irgen_vec_store_persists(g, arg0, type)) {
+         const size_t wbytes =
+            ((mir_get_size(g->mu, type) + 63) / 64) * sizeof(uint64_t);
+         jit_value_t copy = irgen_alloc_temp(g);
+         jit_value_t cnt = irgen_alloc_temp(g);
+         macro_galloc(g, copy, jit_value_from_int64(wbytes));
+         j_mov(g, cnt, jit_value_from_int64(wbytes));
+         macro_copy(g, copy, value, cnt);
+         j_store(g, JIT_SZ_64, copy, addr);
+         break;
       }
       j_store(g, JIT_SZ_64, value, addr);
       break;
 
    case MIR_TYPE_VEC4:
-      if (mir_get_size(g->mu, type) > 64) {
-         const bool persist = arg0.tag != MIR_TAG_VAR
-            || (g->statereg.kind != JIT_VALUE_INVALID
-                && (!(mir_get_var_flags(g->mu, arg0) & MIR_VAR_TEMP)
-                    || irgen_temp_in_state(g, arg0)));
-         if (persist && mir_get_mem(g->mu, arg0) != MIR_MEM_STACK) {
-            const size_t wbytes =
-               ((mir_get_size(g->mu, type) + 63) / 64) * sizeof(uint64_t);
-            jit_value_t copy = irgen_alloc_temp(g);
-            jit_value_t bcopy = irgen_alloc_temp(g);
-            jit_value_t cnt = irgen_alloc_temp(g);
-            macro_galloc(g, copy, jit_value_from_int64(2 * wbytes));
-            j_mov(g, cnt, jit_value_from_int64(wbytes));
-            macro_copy(g, copy, irgen_get_slot(g, arg1, 0), cnt);
-            j_add(g, bcopy, copy, jit_value_from_int64(wbytes));
-            macro_copy(g, bcopy, irgen_get_slot(g, arg1, 1), cnt);
-            j_store(g, JIT_SZ_64, copy, addr);
-            addr = jit_addr_from_value(addr, sizeof(uint64_t));
-            j_store(g, JIT_SZ_64, bcopy, addr);
-            break;
-         }
+      if (irgen_vec_store_persists(g, arg0, type)) {
+         const size_t wbytes =
+            ((mir_get_size(g->mu, type) + 63) / 64) * sizeof(uint64_t);
+         jit_value_t copy = irgen_alloc_temp(g);
+         jit_value_t bcopy = irgen_alloc_temp(g);
+         jit_value_t cnt = irgen_alloc_temp(g);
+         macro_galloc(g, copy, jit_value_from_int64(2 * wbytes));
+         j_mov(g, cnt, jit_value_from_int64(wbytes));
+         macro_copy(g, copy, irgen_get_slot(g, arg1, 0), cnt);
+         j_add(g, bcopy, copy, jit_value_from_int64(wbytes));
+         macro_copy(g, bcopy, irgen_get_slot(g, arg1, 1), cnt);
+         j_store(g, JIT_SZ_64, copy, addr);
+         addr = jit_addr_from_value(addr, sizeof(uint64_t));
+         j_store(g, JIT_SZ_64, bcopy, addr);
+         break;
       }
       j_store(g, JIT_SZ_64, irgen_get_slot(g, arg1, 0), addr);
       addr = jit_addr_from_value(addr, sizeof(uint64_t));
