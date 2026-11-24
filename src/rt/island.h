@@ -33,7 +33,11 @@ typedef enum {
    RT_ISIG_COMB_READ    = (1u << 5),
    RT_ISIG_FF_WRITTEN   = (1u << 6),
    RT_ISIG_OBSERVED     = (1u << 7),
+   RT_ISIG_DIRECT_LINK  = (1u << 8),
 } rt_island_sig_flags_t;
+
+typedef struct _rt_super_island rt_super_island_t;
+typedef struct _rt_super_domain rt_super_domain_t;
 
 #define RT_ISLAND_STRIDE(bytes) ALIGN_UP(MAX(64u, (bytes)), 64u)
 
@@ -50,6 +54,9 @@ typedef struct _rt_island_sig {
    uint32_t                sig_idx;
    uint32_t                in_idx;
    struct _rt_island_sig  *next_owner;
+   struct _rt_island_sig **direct_targets;
+   struct _rt_island_sig  *direct_src;
+   uint32_t                n_direct_targets;
    int32_t                 sig_offset;
    uint32_t                a_off;
    uint32_t                b_off;
@@ -62,6 +69,7 @@ typedef struct _rt_island_sig {
 
 typedef struct {
    struct _rt_island *isl;
+   rt_super_domain_t *super_dom;
    uint32_t           dom_idx;
    jit_handle_t       ff_handle;
    uint32_t           clk_sig_idx;
@@ -82,6 +90,9 @@ typedef struct {
 typedef struct _rt_island {
    rt_model_t          *model;
    struct _rt_island_mgr *mgr;
+   rt_super_island_t   *cluster;
+   uint32_t             isl_id;
+   uint32_t             topo_pos;
    uint8_t             *state;
    uint8_t             *next_state;
    uint32_t             state_bytes;
@@ -98,6 +109,10 @@ typedef struct _rt_island {
    uint32_t             dirty_in_nwords;
    uint32_t            *out_sigs;
    uint32_t             n_out_sigs;
+   uint32_t            *ext_out_sigs;
+   uint32_t             n_ext_out_sigs;
+   uint32_t            *direct_comb_outs;
+   uint32_t             n_direct_comb_outs;
    uint32_t            *obs_sigs;
    uint32_t             n_obs_sigs;
    uint32_t             cap_obs_sigs;
@@ -109,6 +124,7 @@ typedef struct _rt_island {
    uint32_t             dirty_gen;
    bool                 dirty;
    bool                 in_dirty_list;
+   bool                 has_dirty_inputs;
    bool                 initialized;
    bool                 has_forces;
 } rt_island_t;
@@ -125,7 +141,7 @@ bool rt_island_has_ff_sample(const rt_island_mgr_t *mgr);
 bool rt_island_eval_ff(jit_t *jit, rt_model_t *m, rt_island_mgr_t *mgr,
                        tlab_t *tlab);
 bool rt_island_has_ff_commits(const rt_island_mgr_t *mgr);
-void rt_island_commit_ff(rt_model_t *m, rt_island_mgr_t *mgr);
+void rt_island_commit_ff(rt_model_t *m, rt_island_mgr_t *mgr, tlab_t *tlab);
 
 bool rt_island_read_sig(rt_island_mgr_t *mgr, rt_signal_t *sig,
                         uint64_t *a_out, uint64_t *b_out,

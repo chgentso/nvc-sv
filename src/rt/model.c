@@ -1090,6 +1090,8 @@ rt_watch_t *find_watch(rt_nexus_t *n, sig_event_fn_t fn)
       rt_pending_t *p = untag_pointer(n->pending, rt_pending_t);
 
       for (int i = 0; i < p->count; i++) {
+         if (p->wake[i] == NULL)
+            continue;
          rt_wakeable_t *obj = untag_pointer(p->wake[i], rt_wakeable_t);
          if (obj->kind == W_WATCH) {
             rt_watch_t *w = container_of(obj, rt_watch_t, wakeable);
@@ -5106,7 +5108,7 @@ static void model_cycle_body(rt_model_t *m)
       if (m->nonblockq.count > 0)
          deferq_run(m, &m->nonblockq);
       if (rt_island_has_ff_commits(m->islands)) {
-         rt_island_commit_ff(m, m->islands);
+         rt_island_commit_ff(m, m->islands, model_thread(m)->tlab);
          if (rt_island_has_dirty(m->islands))
             m->next_is_delta = true;
       }
