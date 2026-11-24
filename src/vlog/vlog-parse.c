@@ -18875,6 +18875,7 @@ static int push_base_scopes(vlog_node_t class)
          case V_CONSTRAINT:
          case V_PARAM_DECL:
          case V_LOCALPARAM:
+         case V_CLASS_DECL:
             vlog_symtab_put(symtab, d);
             break;
          default:
