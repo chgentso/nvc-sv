@@ -1334,7 +1334,7 @@ static A(sv_handle_t) sv_handles = AINIT;
 
 static void note_wait(rt_model_t *m, rt_proc_t *proc);
 
-#define SV_WATCH_MAX   8
+#define SV_WATCH_MAX   16
 #define SV_WATCH_BYTES 32
 
 typedef struct _sv_watch {
@@ -8397,8 +8397,18 @@ void x_sv_poll_watch(const void *ptr, unsigned size)
    // The condition about to be polled reads this memory.  A null address
    // or anything which is not simple memory makes it always polled.
 
-   if (ptr == NULL || size == 0 || size > SV_WATCH_BYTES
-       || sv_watch_pending.count == SV_WATCH_MAX)
+   if (ptr == NULL || size == 0 || size > SV_WATCH_BYTES) {
+      sv_watch_never = true;
+      return;
+   }
+
+   for (unsigned i = 0; i < sv_watch_pending.count; i++) {
+      if (sv_watch_pending.item[i].ptr == ptr
+          && sv_watch_pending.item[i].size == size)
+         return;
+   }
+
+   if (sv_watch_pending.count == SV_WATCH_MAX)
       sv_watch_never = true;
    else {
       const unsigned n = sv_watch_pending.count++;

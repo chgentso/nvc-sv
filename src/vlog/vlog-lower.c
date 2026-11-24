@@ -12048,6 +12048,35 @@ static bool vlog_poll_is_assoc_elem(vlog_node_t v)
       && vlog_subkind(type) == DT_ASSOC;
 }
 
+static bool vlog_poll_is_string(vlog_node_t v)
+{
+   vlog_node_t type = vlog_get_type(v);
+   return type != NULL && vlog_kind(type) == V_DATA_TYPE
+      && vlog_subkind(type) == DT_STRING;
+}
+
+static bool vlog_poll_key_pure(vlog_node_t v)
+{
+   switch (vlog_kind(v)) {
+   case V_NUMBER:
+   case V_STRING:
+   case V_NULL:
+   case V_THIS:
+      return true;
+   case V_REF:
+      return vlog_has_ref(v);
+   case V_MEMBER_REF:
+      return vlog_poll_key_pure(vlog_value(v));
+   case V_UNARY:
+      return vlog_poll_key_pure(vlog_value(v));
+   case V_BINARY:
+      return vlog_poll_key_pure(vlog_left(v))
+         && vlog_poll_key_pure(vlog_right(v));
+   default:
+      return false;
+   }
+}
+
 static bool vlog_poll_watch_assoc(vlog_gen_t *g, vlog_node_t v, bool whole)
 {
    // An element of an associative array changes when a key is added or
@@ -12058,7 +12087,7 @@ static bool vlog_poll_watch_assoc(vlog_gen_t *g, vlog_node_t v, bool whole)
    assert(vlog_poll_is_assoc_elem(v));
 
    vlog_node_t prefix = vlog_value(v), key = vlog_param(v, 0);
-   if (!vlog_poll_watch_simple(key))
+   if (!vlog_poll_key_pure(key))
       return vlog_poll_watch_never(g);
 
    if (vlog_kind(prefix) == V_MEMBER_REF) {
@@ -12081,7 +12110,7 @@ static bool vlog_poll_watch_assoc(vlog_gen_t *g, vlog_node_t v, bool whole)
       return vlog_poll_watch_never(g);
 
    mir_type_t pointee = mir_get_pointer(g->mu, mir_get_type(g->mu, sel.obj));
-   const int bytes = vlog_poll_watch_bytes(g, pointee, false);
+   const int bytes = vlog_poll_watch_bytes(g, pointee, vlog_poll_is_string(v));
    if (bytes == 0 || bytes > 32)
       return vlog_poll_watch_never(g);
 
@@ -12111,7 +12140,7 @@ static bool vlog_poll_watch_assoc_member(vlog_gen_t *g, vlog_node_t v)
       return vlog_poll_watch_never(g);
 
    mir_type_t pointee = mir_get_pointer(g->mu, mir_get_type(g->mu, sel.obj));
-   const int bytes = vlog_poll_watch_bytes(g, pointee, false);
+   const int bytes = vlog_poll_watch_bytes(g, pointee, vlog_poll_is_string(v));
    if (bytes == 0 || bytes > 32)
       return vlog_poll_watch_never(g);
 
@@ -12146,26 +12175,47 @@ static bool vlog_poll_watch_expr(vlog_gen_t *g, vlog_node_t v)
             break;
          }
       }
-      return vlog_poll_watch_leaf(g, v, false);
+      return vlog_poll_watch_leaf(g, v, vlog_poll_is_string(v));
    case V_MEMBER_REF:
       if (vlog_poll_is_assoc_elem(vlog_value(v)))
          return vlog_poll_watch_assoc_member(g, v);
 
       return vlog_poll_watch_expr(g, vlog_value(v))
-         && vlog_poll_watch_leaf(g, v, false);
+         && vlog_poll_watch_leaf(g, v, vlog_poll_is_string(v));
    case V_NULL:
+   case V_THIS:
       return true;
    case V_BINARY:
       switch (vlog_subkind(v)) {
       case V_BINARY_LOG_AND:
       case V_BINARY_LOG_OR:
-         // The right operand may not be evaluated so it must not be able
-         // to fault, like a member of a null handle
-         if (!vlog_poll_watch_simple(vlog_right(v)))
-            return vlog_poll_watch_never(g);
+         {
+            vlog_node_t left = vlog_left(v), right = vlog_right(v);
+            if (!vlog_poll_watch_expr(g, left))
+               return false;
 
-         return vlog_poll_watch_expr(g, vlog_left(v))
-            && vlog_poll_watch_expr(g, vlog_right(v));
+            if (vlog_poll_watch_simple(right))
+               return vlog_poll_watch_expr(g, right);
+
+            // Guard watching the right operand with the left value so
+            // short-circuiting avoids null-handle dereferences and skips
+            // watching operands that cannot change the result yet.
+            mir_value_t cond = vlog_lower_test(g, vlog_lower_rvalue(g, left));
+            mir_block_t rhs_bb = mir_add_block(g->mu);
+            mir_block_t done_bb = mir_add_block(g->mu);
+
+            if (vlog_subkind(v) == V_BINARY_LOG_AND)
+               mir_build_cond(g->mu, cond, rhs_bb, done_bb);
+            else
+               mir_build_cond(g->mu, cond, done_bb, rhs_bb);
+
+            mir_set_cursor(g->mu, rhs_bb, MIR_APPEND);
+            (void)vlog_poll_watch_expr(g, right);
+            mir_build_jump(g->mu, done_bb);
+
+            mir_set_cursor(g->mu, done_bb, MIR_APPEND);
+            return true;
+         }
       default:
          return vlog_poll_watch_expr(g, vlog_left(v))
             && vlog_poll_watch_expr(g, vlog_right(v));
@@ -12195,30 +12245,44 @@ static bool vlog_poll_watch_expr(vlog_gen_t *g, vlog_node_t v)
       }
    case V_METHOD_CALL:
       {
-         // The length of a queue, dynamic array or string
+         // The length/size of a queue, dynamic/associative array or string,
+         // or associative array key membership
          vlog_node_t prefix = vlog_value(v), type = vlog_get_type(prefix);
-         if (vlog_params(v) != 0 || type == NULL
-             || vlog_kind(type) != V_DATA_TYPE)
+         if (type == NULL || vlog_kind(type) != V_DATA_TYPE)
             return vlog_poll_watch_never(g);
 
-         const bool len = vlog_subkind(v) == V_METHOD_STR_LEN
+         const bool len = vlog_params(v) == 0
+            && vlog_subkind(v) == V_METHOD_STR_LEN
             && vlog_subkind(type) == DT_STRING;
-         const bool size = vlog_subkind(v) == V_METHOD_SIZE
+         const bool size = vlog_params(v) == 0
+            && vlog_subkind(v) == V_METHOD_SIZE
             && (vlog_subkind(type) == DT_QUEUE
-                || vlog_subkind(type) == DT_DYNARRAY);
-         if (!len && !size)
+                || vlog_subkind(type) == DT_DYNARRAY
+                || vlog_subkind(type) == DT_ASSOC);
+         const bool exists = vlog_params(v) == 1
+            && vlog_subkind(v) == V_METHOD_ASSOC_EXISTS
+            && vlog_subkind(type) == DT_ASSOC;
+         if (!len && !size && !exists)
             return vlog_poll_watch_never(g);
 
          switch (vlog_kind(prefix)) {
          case V_REF:
-            return vlog_has_ref(prefix)
-               && vlog_poll_watch_leaf(g, prefix, true);
+            if (!vlog_has_ref(prefix) || !vlog_poll_watch_leaf(g, prefix, true))
+               return false;
+            break;
          case V_MEMBER_REF:
-            return vlog_poll_watch_expr(g, vlog_value(prefix))
-               && vlog_poll_watch_leaf(g, prefix, true);
+            if (!vlog_poll_watch_expr(g, vlog_value(prefix))
+                || !vlog_poll_watch_leaf(g, prefix, true))
+               return false;
+            break;
          default:
             return vlog_poll_watch_never(g);
          }
+
+         if (exists)
+            return vlog_poll_watch_expr(g, vlog_param(v, 0));
+
+         return true;
       }
    default:
       return vlog_poll_watch_never(g);
