@@ -68,6 +68,7 @@ typedef uint8_t net_flags_t;
 #define SIG_F_FAST_NOOP    (1 << 16)
 #define SIG_F_POLL_WATCHED (1 << 17)
 #define SIG_F_FAST_DIRECT  (1 << 18)
+#define SIG_F_NB_DEFERQ    (1 << 19)
 typedef uint32_t sig_flags_t;
 
 #define PACK_SRC_SCALAR    (1 << 0)

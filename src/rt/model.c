@@ -151,8 +151,16 @@ typedef struct _rt_packed_sched {
    uint64_t                 small_a;
    uint64_t                 small_b;
    bool                     has_b;
+   bool                     nonblock;
    struct _rt_packed_sched *next;
 } rt_packed_sched_t;
+
+typedef struct {
+   rt_signal_t *sig;
+   uint64_t     a;
+   uint64_t     b;
+   uint32_t     flags;
+} nb_packed_t;
 
 typedef struct _rt_model {
    tree_t             top;
@@ -230,6 +238,11 @@ typedef struct _rt_model {
    rt_packed_force_t *packed_force_list;
    rt_packed_sched_t *free_packed_sched;
    hash_t            *packed_delayed;
+   struct {
+      nb_packed_t *items;
+      unsigned     count;
+      unsigned     max;
+   } nb_packed_q;
 } rt_model_t;
 
 #define FMT_VALUES_SZ   128
@@ -986,6 +999,7 @@ void model_free(rt_model_t *m)
    free(m->next_inactiveq.tasks);
    free(m->nonblockq.tasks);
    free(m->reschedq.tasks);
+   free(m->nb_packed_q.items);
    free(m->driverq.tasks);
    free(m->next_driverq.tasks);
 
@@ -4636,7 +4650,8 @@ static void sv_poll_end_cycle(rt_model_t *m)
       && sv_procs_run == sv_pollers_woken
       && total_pollers == sv_pollers_kept + sv_pollers_woken
       && sv_pollers_fired == 0
-      && m->nonblockq.count == 0 && m->inactiveq.count == 0;
+      && m->nonblockq.count == 0 && m->nb_packed_q.count == 0
+      && m->inactiveq.count == 0;
 
    sv_procs_run = 0;
    sv_pollers_woken = 0;
@@ -4861,6 +4876,8 @@ static void fire_init_events(rt_model_t *m)
    m->init_events.count = 0;
 }
 
+static void drain_nb_packed(rt_model_t *m);
+
 static void reactive_sort(deferq_t *dq)
 {
    for (int i = 1; i < dq->count; i++) {
@@ -4972,6 +4989,7 @@ static void model_cycle_body(rt_model_t *m)
                rt_signal_t *s = untag_pointer(e, rt_signal_t);
                rt_packed_sched_t *ps = pop_packed_delayed(m, s, true);
                assert(ps->when == m->now);
+               s->shared.flags |= SIG_F_NB_DEFERQ;
                deferq_do(&m->nonblockq, async_packed_deposit, ps);
             }
             break;
@@ -5054,10 +5072,13 @@ static void model_cycle_body(rt_model_t *m)
    if (m->next_is_delta)
       goto next_delta;
 
-   if (m->nonblockq.count > 0) {
+   if (m->nonblockq.count > 0 || m->nb_packed_q.count > 0) {
       TRACE("begin non-blocking assignment region");
       (void)mtp_enter(MTP_NBA);
-      deferq_run(m, &m->nonblockq);
+      if (m->nb_packed_q.count > 0)
+         drain_nb_packed(m);
+      if (m->nonblockq.count > 0)
+         deferq_run(m, &m->nonblockq);
       (void)mtp_enter(MTP_OTHER);
       sv_procs_run++;   // May have changed state a poller depends on
 
@@ -5815,6 +5836,8 @@ static void deposit_packed_apply(rt_model_t *m, rt_signal_t *s,
 static void async_packed_deposit(rt_model_t *m, void *arg)
 {
    rt_packed_sched_t *ps = arg;
+   if (ps->nonblock)
+      ps->signal->shared.flags &= ~SIG_F_NB_DEFERQ;
    if (ps->abits != NULL) {
       deposit_packed_apply(m, ps->signal, ps->offset, ps->count,
                            (uint64_t)(uintptr_t)ps->abits,
@@ -5831,6 +5854,44 @@ static void async_packed_deposit(rt_model_t *m, void *arg)
    ps->abits = ps->bbits = NULL;
    ps->next = m->free_packed_sched;
    m->free_packed_sched = ps;
+}
+
+static void drain_nb_packed(rt_model_t *m)
+{
+   const unsigned n = m->nb_packed_q.count;
+   m->nb_packed_q.count = 0;
+
+   nb_packed_t *items = m->nb_packed_q.items;
+   for (unsigned i = 0; i < n; i++) {
+      rt_signal_t *s = items[i].sig;
+      const uint32_t sflags = s->shared.flags;
+      if (likely(sflags & SIG_F_FAST_NOOP)) {
+         const uint32_t width = s->bit_width;
+         const uint64_t top_mask = packed_top_mask(width);
+         const bool is4 = !!(sflags & SIG_F_PACKED4);
+         const uint64_t na = items[i].a & top_mask;
+         const uint64_t nb = (is4 && !(items[i].flags & PACK_SRC_VEC2))
+            ? (items[i].b & top_mask) : 0;
+         uint64_t *eff_a = (uint64_t *)s->shared.data;
+         uint64_t *eff_b = is4 ? eff_a + 1 : NULL;
+         if (eff_a[0] == na && (!is4 || eff_b[0] == nb))
+            continue;
+
+         if (sflags & SIG_F_FAST_DIRECT) {
+            uint64_t *last_a = (uint64_t *)(s->shared.data + s->shared.size);
+            last_a[0] = eff_a[0];
+            eff_a[0] = na;
+            if (is4) {
+               uint64_t *last_b = last_a + 1;
+               last_b[0] = eff_b[0];
+               eff_b[0] = nb;
+            }
+            continue;
+         }
+      }
+      deposit_packed_apply(m, s, 0, s->bit_width, items[i].a, items[i].b,
+                           items[i].flags, true, false);
+   }
 }
 
 static inline void *packed_delayed_key(rt_signal_t *s, bool nonblock)
@@ -5890,6 +5951,24 @@ static void sched_deposit_packed(rt_model_t *m, rt_signal_t *s,
    if (count == 0)
       return;
 
+   if (after == 0 && nonblock && msb_off == 0 && count == s->bit_width
+       && s->bit_width <= 64 && (src_flags & PACK_SRC_SCALAR)
+       && !(s->shared.flags & SIG_F_NB_DEFERQ)) {
+      if (m->nb_packed_q.count == m->nb_packed_q.max) {
+         m->nb_packed_q.max = MAX(m->nb_packed_q.max * 2, 64);
+         m->nb_packed_q.items = xrealloc_array(m->nb_packed_q.items,
+                                               m->nb_packed_q.max,
+                                               sizeof(nb_packed_t));
+      }
+      m->nb_packed_q.items[m->nb_packed_q.count++] = (nb_packed_t){
+         .sig   = s,
+         .a     = a_val,
+         .b     = (src_flags & PACK_SRC_VEC2) ? 0 : b_val,
+         .flags = src_flags,
+      };
+      return;
+   }
+
    rt_packed_sched_t *ps = m->free_packed_sched;
    if (ps != NULL)
       m->free_packed_sched = ps->next;
@@ -5899,8 +5978,9 @@ static void sched_deposit_packed(rt_model_t *m, rt_signal_t *s,
    ps->signal = s;
    ps->offset = msb_off;
    ps->count  = count;
-   ps->has_b  = !(src_flags & PACK_SRC_VEC2) && (s->shared.flags & SIG_F_PACKED4);
-   ps->next   = NULL;
+   ps->has_b    = !(src_flags & PACK_SRC_VEC2) && (s->shared.flags & SIG_F_PACKED4);
+   ps->nonblock = nonblock;
+   ps->next     = NULL;
 
    if (src_flags & PACK_SRC_SCALAR) {
       ps->abits   = NULL;
@@ -5922,9 +6002,12 @@ static void sched_deposit_packed(rt_model_t *m, rt_signal_t *s,
          ps->bbits = NULL;
    }
 
-   if (after == 0)
+   if (after == 0) {
+      if (nonblock)
+         s->shared.flags |= SIG_F_NB_DEFERQ;
       deferq_do(nonblock ? &m->nonblockq : &m->driverq,
                 async_packed_deposit, ps);
+   }
    else {
       ps->when = m->now + after;
       push_packed_delayed(m, ps, nonblock);
