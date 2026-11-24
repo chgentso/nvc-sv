@@ -4199,10 +4199,27 @@ static type_mask_t vlog_check_cast_call(vlog_node_t v)
 
 static type_mask_t vlog_check_sys_fcall(vlog_node_t v)
 {
-   if (vlog_ident(v) == ident_new("$cast"))
+   ident_t id = vlog_ident(v);
+   if (id == ident_new("$cast"))
       return vlog_check_cast_call(v);
-   else if (vlog_ident(v) == ident_new("$process_self"))
+   else if (id == ident_new("$process_self"))
       return TM(DT_PROCESS) | TM_CLASS;
+   else if (id == ident_new("$countbits") || id == ident_new("$countones")
+            || id == ident_new("$onehot") || id == ident_new("$onehot0")
+            || id == ident_new("$isunknown")) {
+      const int nparams = vlog_params(v);
+      for (int i = 0; i < nparams; i++) {
+         vlog_node_t arg = vlog_param(v, i);
+         const type_mask_t amask = vlog_check_expr(arg);
+         if (i == 0 && amask != TM_ERROR) {
+            const bool is_unpacked = vlog_unpacked_dims(arg) > 0;
+            if (is_unpacked || !(amask & TM_INTEGRAL))
+               error_at(vlog_loc(arg), "argument to %pQ must be a bit vector",
+                        id);
+         }
+      }
+      return TM_INTEGRAL;
+   }
 
    type_mask_t mask = vlog_check_params(v);
 
