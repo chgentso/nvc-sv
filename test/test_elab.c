@@ -2619,6 +2619,43 @@ START_TEST(test_vlogarrwidth1)
 }
 END_TEST
 
+START_TEST(test_vlogparam1)
+{
+   const error_t expect[] = {
+      { 19, "cannot override localparam 'LP' of interface 'if_p'" },
+      { 20, "interface 'if_p' has no parameter named 'sig'" },
+      { 21, "interface 'if_p' has no parameter named 'foo'" },
+      { 22, "interface 'if_p' has no parameter named 'nope'" },
+      { 23, "cannot override localparam 'B' of module 'sub_p'" },
+      { 24, "module 'sub_p' has no parameter named 'missing'" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/elab/vlogparam1.sv");
+
+   analyse_file();
+
+   object_t *obj = lib_get_generic(lib_work(), ident_new("WORK.VLOGPARAM1"),
+                                   NULL);
+   ck_assert_ptr_nonnull(obj);
+
+   mir_context_t *mc = get_mir();
+   unit_registry_t *ur = get_registry();
+   jit_t *j = jit_new(ur, mc);
+   rt_model_t *m = model_new(j, NULL);
+
+   object_t *tops[1] = { obj };
+   tree_t top = elab(tops, 1, j, ur, mc, NULL, NULL, m);
+   fail_unless(top == NULL);
+
+   model_free(m);
+   jit_free(j);
+
+   check_expected_errors();
+}
+END_TEST
+
 Suite *get_elab_tests(void)
 {
    Suite *s = suite_create("elab");
@@ -2747,6 +2784,7 @@ Suite *get_elab_tests(void)
    tcase_add_test(tc, test_assert8);
    tcase_add_test(tc, test_udnport1);
    tcase_add_test(tc, test_vlogarrwidth1);
+   tcase_add_test(tc, test_vlogparam1);
    suite_add_tcase(s, tc);
 
    return s;

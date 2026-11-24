@@ -935,12 +935,56 @@ vlog_node_t vlog_new_instance(vlog_node_t mod, vlog_node_t inst, ident_t id)
       }
    }
 
-   if (inst != NULL) {
+   if (inst != NULL && !bind_is_vhdl_shim(mod)
+       && !(vlog_kind(mod) == V_MODULE
+            && (vlog_flags(mod) & VLOG_F_BLACKBOX))) {
       const int nparams = vlog_params(inst);
       if (pidx < nparams)
          error_at(vlog_loc(inst), "module %s has %d parameter%s but %d "
                   "values given", istr(vlog_ident2(mod)), pidx,
                   pidx != 1 ? "s" : "", nparams);
+
+      for (int i = 0; i < nparams; i++) {
+         vlog_node_t p = vlog_param(inst, i);
+         if (!vlog_has_ident(p))
+            continue;
+
+         ident_t pid = vlog_ident(p);
+         bool matched = false;
+         vlog_node_t other = NULL;
+         for (int j = 0; j < ndecls && !matched; j++) {
+            vlog_node_t d = vlog_decl(copy, j);
+            if (!vlog_has_ident(d) || vlog_ident(d) != pid)
+               continue;
+
+            if (vlog_kind(d) == V_PARAM_DECL
+                || (vlog_kind(d) == V_TYPE_DECL
+                    && (vlog_flags(d) & VLOG_F_TYPEPARAM)))
+               matched = true;
+            else if (other == NULL)
+               other = d;
+         }
+
+         if (!matched) {
+            const char *kind = (vlog_kind(mod) == V_MODULE
+                                && (vlog_flags(mod) & VLOG_F_INTERFACE))
+               ? "interface"
+               : vlog_kind(mod) == V_PROGRAM ? "program" : "module";
+            diag_t *dg = diag_new(DIAG_ERROR, vlog_loc(p));
+            if (other != NULL && vlog_kind(other) == V_LOCALPARAM) {
+               diag_printf(dg, "cannot override localparam %pQ of %s %pQ",
+                           pid, kind, vlog_ident2(mod));
+               diag_hint(dg, vlog_loc(other), "localparam declared here");
+            }
+            else {
+               diag_printf(dg, "%s %pQ has no parameter named %pQ",
+                           kind, vlog_ident2(mod), pid);
+               if (other != NULL)
+                  diag_hint(dg, vlog_loc(other), "%pQ declared here", pid);
+            }
+            diag_emit(dg);
+         }
+      }
    }
 
    const int nstmts = vlog_stmts(copy);

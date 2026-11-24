@@ -3541,6 +3541,7 @@ static void elab_verilog_module(tree_t comp, ident_t label, vlog_node_t mod,
    if (!elab_can_clone_instance(ei, &new_ctx)) {
       ident_t id = ident_sprintf("%s#%d", istr(vlog_ident(mod)), mc->unique);
 
+      const int base_errors = error_count();
       vlog_set_instance_scope(ndotted);
       vlog_node_t body = vlog_new_instance(mod, list, id);
       bool folded = false;
@@ -3555,7 +3556,6 @@ static void elab_verilog_module(tree_t comp, ident_t label, vlog_node_t mod,
       ident_t key = NULL;
       elab_instance_t *shared = NULL;
       if (is_iface) {
-         const int base_errors = error_count();
          vlog_fold(body, ctx->mir, ctx->jit);
          folded = true;
 
