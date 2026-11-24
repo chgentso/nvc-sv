@@ -7113,8 +7113,30 @@ tree_t solve_psl_bit(nametab_t *tab, tree_t expr)
 
 tree_t solve_psl_condition(nametab_t *tab, tree_t expr)
 {
-   if (standard() >= STD_08)
+   if (standard() >= STD_08) {
+      if (tree_kind(expr) == T_FCALL && tree_params(expr) == 2
+          && (tree_ident(expr) == well_known(W_OP_AND)
+              || tree_ident(expr) == well_known(W_OP_OR))) {
+         // PSL Boolean operators may combine condition-convertible operands
+         // (e.g. STD_LOGIC) with BOOLEAN expressions
+         type_set_t ts = {};
+         type_set_push(tab, &ts);
+         type_set_add(tab, std_type(NULL, STD_BOOLEAN), NULL);
+         type_set_add(tab, std_type(NULL, STD_BIT), NULL);
+         type_set_add(tab, ieee_type(IEEE_STD_ULOGIC), NULL);
+         tree_t try = try_solve_type(tab, expr);
+         type_set_pop(tab, &ts);
+
+         if (try == NULL) {
+            tree_t p0 = tree_param(expr, 0);
+            tree_t p1 = tree_param(expr, 1);
+            tree_set_value(p0, solve_psl_condition(tab, tree_value(p0)));
+            tree_set_value(p1, solve_psl_condition(tab, tree_value(p1)));
+         }
+      }
+
       return solve_condition(tab, expr);
+   }
    else {
       // Allow BIT and STD_LOGIC in PSL conditions for VHDL-93
       type_set_t ts = {};
