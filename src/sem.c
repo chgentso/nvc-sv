@@ -5683,6 +5683,9 @@ static bool sem_check_generic_actual(formal_map_t *formals, int nformals,
       else if (!sem_check_incomplete(param, map))
          return false;
 
+      if (get_generic_type_map(tab, type) == NULL)
+         map_generic_type(tab, type, map);
+
       static const char *class_strings[] = {
          [GTYPE_SCALAR] = "a scalar",
          [GTYPE_DISCRETE] = "a discrete",

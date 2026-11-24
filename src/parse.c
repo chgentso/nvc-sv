@@ -11240,6 +11240,21 @@ static tree_t p_package_declaration(tree_t unit)
 
    sem_check(pack, nametab);
 
+   if (tree_genmaps(pack) > 0) {
+      hash_t *map = get_generic_map(nametab);
+      if (map != NULL) {
+         vhdl_instance_fixup(pack, map);
+         const int ndecls = tree_decls(pack);
+         for (int i = 0; i < ndecls; i++) {
+            tree_t d = tree_decl(pack, i);
+            if (is_subprogram(d)) {
+               tree_set_ident2(d, NULL);
+               mangle_func(nametab, d);
+            }
+         }
+      }
+   }
+
    pop_scope(nametab);
    return pack;
 }
@@ -16862,6 +16877,41 @@ static tree_t p_package_body(tree_t unit)
 
    tree_set_loc(body, CURRENT_LOC);
    sem_check(body, nametab);
+
+   if (pack != NULL && tree_genmaps(pack) > 0) {
+      const int ngenerics = tree_generics(pack);
+      const int ngenmaps = tree_genmaps(pack);
+      if (ngenerics == ngenmaps) {
+         for (int i = 0; i < ngenerics; i++) {
+            tree_t g = tree_generic(pack, i);
+            tree_t m = tree_genmap(pack, i);
+            tree_t value = tree_value(m);
+            switch (tree_class(g)) {
+            case C_TYPE:
+               if (tree_kind(value) == T_TYPE_REF
+                   && type_kind(tree_type(g)) == T_GENERIC)
+                  map_generic_type(nametab, tree_type(g), tree_type(value));
+               break;
+            case C_FUNCTION:
+            case C_PROCEDURE:
+               if (tree_kind(value) == T_REF && tree_has_ref(value))
+                  map_generic_subprogram(nametab, g, tree_ref(value));
+               break;
+            case C_PACKAGE:
+               if (tree_kind(value) == T_REF && tree_has_ref(value)
+                   && tree_has_value(g) && tree_has_ref(tree_value(g)))
+                  map_generic_package(nametab, tree_ref(tree_value(g)),
+                                      tree_ref(value));
+               break;
+            default:
+               break;
+            }
+         }
+         hash_t *map = get_generic_map(nametab);
+         if (map != NULL)
+            vhdl_instance_fixup(body, map);
+      }
+   }
 
    pop_scope(nametab);
    pop_scope(nametab);

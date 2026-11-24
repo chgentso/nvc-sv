@@ -3751,8 +3751,9 @@ static vcode_reg_t lower_generic_ref(lower_unit_t *lu, tree_t decl,
    vcode_reg_t ptr_reg = VCODE_INVALID_REG;
 
    if (var == VCODE_INVALID_VAR) {
-      tree_t unit;
-      if (tree_kind((unit = tree_container(decl))) == T_PACK_INST) {
+      tree_t unit = tree_container(decl);
+      if (tree_kind(unit) == T_PACK_INST
+          || (tree_kind(unit) == T_PACKAGE && tree_genmaps(unit) > 0)) {
          vcode_reg_t context = emit_link_package(tree_ident(unit));
          ptr_reg = emit_link_var(context, tree_ident(decl), lower_type(type));
       }
@@ -14011,7 +14012,9 @@ static void lower_pack_body(lower_unit_t *lu, object_t *obj)
    const bool has_scope =
       lower_push_package_scope(pack) || lower_push_package_scope(body);
 
-   lower_generics(lu, pack, NULL);
+   if (tree_genmaps(pack) > 0)
+      lower_generics(lu, pack, NULL);
+
    lower_decls(lu, pack, &gs);
    lower_decls(lu, body, &gs);
 
