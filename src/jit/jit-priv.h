@@ -355,6 +355,7 @@ typedef struct _jit_func {
    ffi_spec_t      spec;
    object_t       *object;
    frame_layout_t *frame;    // Variables passed to the statement probe
+   unsigned        signal_only : 1;
 } jit_func_t;
 
 // The code generator knows the layout of this struct

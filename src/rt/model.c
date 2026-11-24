@@ -197,6 +197,8 @@ typedef struct _rt_model {
    init_event_list_t  init_events;
    bool               shuffle;
    bool               liveness;
+   bool               sv_poll_mem_dirty;
+   bool               sv_poll_sig_dirty;
    rt_trigger_t     **triggertab;
    unsigned           triggertab_size;
    unsigned           ntriggers;
@@ -679,6 +681,9 @@ static void run_callbacks(rt_model_t *m, model_phase_t phase)
    rt_callback_t *list = m->phase_cbs[phase];
    m->phase_cbs[phase] = NULL;
 
+   if (list != NULL && phase != END_OF_SIMULATION)
+      m->sv_poll_mem_dirty = true;
+
    for (rt_callback_t *it = list, *tmp; it; it = tmp) {
       tmp = it->next;
       if (unlikely(mtp.on)) {
@@ -738,8 +743,10 @@ rt_model_t *model_new(jit_t *jit, cover_data_t *cover)
    m->driving_heap   = heap_new(64);
    m->effective_heap = heap_new(64);
 
-   m->can_create_delta = true;
-   m->next_is_delta    = true;
+   m->can_create_delta  = true;
+   m->next_is_delta     = true;
+   m->sv_poll_mem_dirty = true;
+   m->sv_poll_sig_dirty = true;
 
    m->threads[thread_id()] = static_alloc(m, sizeof(model_thread_t));
 
@@ -759,6 +766,11 @@ rt_model_t *get_model(void)
 rt_model_t *get_model_or_null(void)
 {
    return __model;
+}
+
+void model_mark_sv_poll_mem_dirty(rt_model_t *m)
+{
+   m->sv_poll_mem_dirty = true;
 }
 
 static rt_wakeable_t *get_active_wakeable(void)
@@ -1237,8 +1249,14 @@ static void reset_process_state(rt_model_t *m, rt_proc_t *proc)
 
    tlab_t tlab = jit_null_tlab(m->jit);
 
-   if (jit_call_closure(m->jit, &proc->closure, &result, state, &tlab))
+   if (jit_call_closure(m->jit, &proc->closure, &result, state, &tlab)) {
       *mptr_get(proc->privdata) = result.pointer;
+      if (unlikely(!proc->signal_only_known)) {
+         proc->signal_only = !proc->wakeable.forked && proc->task == NULL
+            && jit_func_signal_only(m->jit, proc->closure.handle);
+         proc->signal_only_known = 1;
+      }
+   }
    else
       m->force_stop = true;
 
@@ -1299,17 +1317,21 @@ static void reset_property(rt_model_t *m, rt_prop_t *prop)
    thread->active_scope = NULL;
 }
 
+#define SV_POLL_HAS_SIG (1 << 0)
+
 // Processes waiting for a condition on state which is not a signal
 typedef struct {
    rt_proc_t  *proc;
    const void *ptr0;
    uint64_t    snap0;
    uint8_t     sz0;
-   uint8_t     count;
+   uint8_t     flags;
+   uint16_t    count;
 } sv_watch_poller_t;
 
 static A(rt_proc_t *)        sv_pollers = AINIT;
 static A(sv_watch_poller_t)  sv_watched = AINIT;
+static unsigned              sv_watched_sig_count = 0;
 static unsigned              sv_pollers_woken = 0;
 static unsigned              sv_pollers_kept = 0;
 static unsigned              sv_pollers_fired = 0;
@@ -1474,7 +1496,8 @@ static inline void sv_watch_poller_push(rt_proc_t *proc)
 
    sv_watch_poller_t e = {
       .proc  = proc,
-      .count = MIN(w->count, UINT8_MAX),
+      .flags = w->has_sig ? SV_POLL_HAS_SIG : 0,
+      .count = MIN(w->count, UINT16_MAX),
    };
    const unsigned sz0 = w->items[0].size;
    if (sz0 == 1 || sz0 == 2 || sz0 == 4 || sz0 == 8) {
@@ -1482,6 +1505,9 @@ static inline void sv_watch_poller_push(rt_proc_t *proc)
       e.sz0  = sz0;
       memcpy(&e.snap0, w->items[0].snap, sz0);
    }
+
+   if (e.flags & SV_POLL_HAS_SIG)
+      sv_watched_sig_count++;
 
    APUSH(sv_watched, e);
 }
@@ -1497,6 +1523,10 @@ static void sv_poller_remove(rt_proc_t *proc)
 
    for (int i = 0; i < sv_watched.count; i++) {
       if (sv_watched.items[i].proc == proc) {
+         if (sv_watched.items[i].flags & SV_POLL_HAS_SIG) {
+            assert(sv_watched_sig_count > 0);
+            sv_watched_sig_count--;
+         }
          sv_watched.items[i] = sv_watched.items[--sv_watched.count];
          return;
       }
@@ -1565,12 +1595,23 @@ static void run_process_inner(rt_model_t *m, rt_proc_t *proc)
 
    const uint64_t wait_seq = proc->wait_seq;
 
+   if (!proc->signal_only_known || !proc->signal_only)
+      m->sv_poll_mem_dirty = true;
+
    if (likely(thread->jit_guarded))
       jit_call_closure_guarded(m->jit, &proc->closure, &result, state,
                                proc->tlab ?: thread->tlab);
    else if (!jit_call_closure(m->jit, &proc->closure, &result, state,
                               proc->tlab ?: thread->tlab))
       m->force_stop = true;
+
+   if (unlikely(!proc->signal_only_known)) {
+      proc->signal_only = !proc->wakeable.forked && proc->task == NULL
+         && jit_func_signal_only(m->jit, proc->closure.handle);
+      proc->signal_only_known = 1;
+      if (!proc->signal_only)
+         m->sv_poll_mem_dirty = true;
+   }
 
    proc->ended = proc->verilog && !obj->forked && !obj->delayed
       && proc->wait_seq == wait_seq
@@ -2647,6 +2688,7 @@ static void call_resolution(rt_model_t *m, rt_nexus_t *n, res_memo_t *r,
       // The function is called with the values of all the sources for
       // each group of elements making up one value and returns a pointer
       // to the resolved value (user-defined net types, IEEE 1800 6.6.7)
+      m->sv_poll_mem_dirty = true;
 
       const int k = r->blobsz;
       if (n->width % k != 0 || (n->offset / n->size) % k != 0)
@@ -2687,6 +2729,7 @@ static void call_resolution(rt_model_t *m, rt_nexus_t *n, res_memo_t *r,
    }
    else if (r->flags & R_COMPOSITE) {
       // Call resolution function of composite type
+      m->sv_poll_mem_dirty = true;
 
       rt_scope_t *scope = n->signal->parent, *rscope = scope;
       while (is_signal_scope(scope->parent)) {
@@ -2716,6 +2759,7 @@ static void call_resolution(rt_model_t *m, rt_nexus_t *n, res_memo_t *r,
       tlab_trim(thread->tlab, mark);
    }
    else {
+      m->sv_poll_mem_dirty = true;
       model_thread_t *thread = model_thread(m);
       assert(thread->tlab != NULL);
 
@@ -3175,6 +3219,9 @@ void model_reset(rt_model_t *m)
    m->shuffle    = opt_get_int(OPT_SHUFFLE_PROCS);
 
    __trace_on = opt_get_int(OPT_RT_TRACE);
+
+   m->sv_poll_mem_dirty = true;
+   m->sv_poll_sig_dirty = true;
 
    create_processes(m, m->root);
 
@@ -3775,6 +3822,7 @@ static bool run_trigger(rt_model_t *m, rt_trigger_t *t)
    switch (t->kind) {
    case FUNC_TRIGGER:
       {
+         m->sv_poll_mem_dirty = true;
          tlab_t tlab = jit_null_tlab(m->jit);
          if (!jit_vfastcall(m->jit, t->handle, t->args, t->nargs,
                             &t->result, 1, &tlab))
@@ -4077,6 +4125,9 @@ static void notify_event(rt_model_t *m, rt_nexus_t *n)
 
    if (n->flags & NET_F_CACHE_EVENT)
       set_event_flag(m, n->signal);
+
+   if (n->signal->shared.flags & SIG_F_POLL_WATCHED)
+      m->sv_poll_sig_dirty = true;
 
    wakeup_all(m, &(n->pending));
 }
@@ -4439,6 +4490,10 @@ static void sv_poll_end_cycle(rt_model_t *m)
 
    if (total_pollers == 0 || idle) {
       sv_pollers_kept = total_pollers;
+      if (idle) {
+         m->sv_poll_mem_dirty = false;
+         m->sv_poll_sig_dirty = false;
+      }
       return;
    }
 
@@ -4446,11 +4501,28 @@ static void sv_poll_end_cycle(rt_model_t *m)
    // Watched pollers whose memory has not changed stay on sv_watched
    // without scheduling a delta cycle.
    const bool check_slow = sv_suspended_tasks > 0 || sv_pending_defers > 0;
-   unsigned keep = 0, woken = 0;
+   const bool mem_dirty = m->sv_poll_mem_dirty;
+   const bool sig_dirty = m->sv_poll_sig_dirty;
+
+   if (sv_pollers.count == 0 && !check_slow && !mem_dirty
+       && (!sig_dirty || sv_watched_sig_count == 0)) {
+      sv_pollers_kept = total_pollers;
+      m->sv_poll_sig_dirty = false;
+      return;
+   }
+
+   unsigned keep = 0, keep_sig = 0, woken = 0;
    for (int i = 0; i < sv_watched.count; i++) {
       const sv_watch_poller_t *e = &(sv_watched.items[i]);
 
       if (likely(!check_slow)) {
+         if (!mem_dirty && !(e->flags & SV_POLL_HAS_SIG)) {
+            if (keep != i)
+               sv_watched.items[keep] = *e;
+            keep++;
+            continue;
+         }
+
          bool unchanged;
          if (likely(e->sz0 != 0)) {
             unchanged = sv_poller_inline_eq(e);
@@ -4478,6 +4550,8 @@ static void sv_poll_end_cycle(rt_model_t *m)
             if (keep != i)
                sv_watched.items[keep] = *e;
             keep++;
+            if (e->flags & SV_POLL_HAS_SIG)
+               keep_sig++;
             continue;
          }
 
@@ -4522,6 +4596,8 @@ static void sv_poll_end_cycle(rt_model_t *m)
             if (keep != i)
                sv_watched.items[keep] = *e;
             keep++;
+            if (e->flags & SV_POLL_HAS_SIG)
+               keep_sig++;
             continue;
          }
       }
@@ -4532,6 +4608,7 @@ static void sv_poll_end_cycle(rt_model_t *m)
    }
 
    ARESIZE(sv_watched, keep);
+   sv_watched_sig_count = keep_sig;
 
    for (int i = 0; i < sv_pollers.count; i++) {
       rt_proc_t *p = sv_pollers.items[i];
@@ -4547,6 +4624,8 @@ static void sv_poll_end_cycle(rt_model_t *m)
 
    sv_pollers_woken = woken;
    sv_pollers_kept = keep;
+   m->sv_poll_mem_dirty = false;
+   m->sv_poll_sig_dirty = false;
 }
 
 static void fire_init_events(rt_model_t *m)
@@ -5352,6 +5431,9 @@ static void deposit_notify(rt_model_t *m, rt_nexus_t *n)
 
    if (n->flags & NET_F_CACHE_EVENT)
       set_event_flag(m, n->signal);
+
+   if (n->signal->shared.flags & SIG_F_POLL_WATCHED)
+      m->sv_poll_sig_dirty = true;
 
    wakeup_all(m, &(n->pending));
 
@@ -8577,6 +8659,7 @@ static sv_nba_t *sv_nba_pending = NULL;
 static void async_sv_nba_store(rt_model_t *m, void *arg)
 {
    sv_nba_t *n = arg;
+   m->sv_poll_mem_dirty = true;
 
    void **block = *mptr_get(n->root);
    char *dest = block[0];
@@ -8732,6 +8815,7 @@ static void sv_poll_free(void)
 
    ACLEAR(sv_pollers);
    ACLEAR(sv_watched);
+   sv_watched_sig_count = 0;
    ACLEAR(sv_reap);
    ACLEAR(sv_handles);
    ACLEAR(stale_events);

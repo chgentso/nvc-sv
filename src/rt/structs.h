@@ -89,6 +89,8 @@ typedef struct _rt_proc {
    unsigned       verilog : 1;
    unsigned       comb : 1;    // always_comb or always_latch
    unsigned       ended : 1;   // Returned without waiting for anything
+   unsigned       signal_only : 1;
+   unsigned       signal_only_known : 1;
    unsigned       regs : 16;   // Places that hold a pointer to this process
    struct _sv_task *task;
    ffi_closure_t  closure;   // Has a flexible member

@@ -7721,6 +7721,8 @@ vpiHandle vpi_put_value(vpiHandle handle, p_vpi_value value_p,
       return NULL;
 
    vpi_context_t *c = vpi_context();
+   if (c->model != NULL)
+      model_mark_sv_poll_mem_dirty(c->model);
 
    c_operation *op = is_operation(obj);
    if (op != NULL && c->args != NULL && op->subtype != vpiNullOp

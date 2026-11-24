@@ -149,6 +149,7 @@ void release_signal_now(rt_model_t *m, rt_signal_t *s, int offset,
                         size_t count);
 void deposit_signal(rt_model_t *m, rt_signal_t *s, const void *values,
                     int offset, size_t count);
+void model_mark_sv_poll_mem_dirty(rt_model_t *m);
 void sched_deposit(rt_model_t *m, rt_signal_t *s, const void *values,
                    int offset, size_t count, int64_t after, bool nonblock);
 typedef enum {

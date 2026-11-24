@@ -298,6 +298,15 @@ jit_func_t *jit_get_func(jit_t *j, jit_handle_t handle)
    return f;
 }
 
+bool jit_func_signal_only(jit_t *j, jit_handle_t handle)
+{
+   if (handle == JIT_HANDLE_INVALID)
+      return false;
+
+   jit_func_t *f = jit_get_func(j, handle);
+   return load_acquire(&(f->state)) == JIT_FUNC_READY && f->signal_only;
+}
+
 __attribute__((noreturn))
 static void jit_missing_unit(jit_func_t *f)
 {

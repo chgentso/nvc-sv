@@ -3246,3 +3246,4 @@ svcombstatic1   verilog
 svcombassert1   verilog
 jitcache1       shell
 svpollstruct1   verilog
+svpollskip1     verilog
