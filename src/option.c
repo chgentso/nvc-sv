@@ -164,6 +164,21 @@ static int get_rtl_islands_env(void)
             "(expected off, module, or hier)", env);
 }
 
+static int get_two_state_env(void)
+{
+   const char *env = getenv("NVC_2STATE");
+   if (env == NULL || *env == '\0' || strcasecmp(env, "off") == 0
+       || strcasecmp(env, "0") == 0)
+      return TWO_STATE_OFF;
+   else if (strcasecmp(env, "islands") == 0 || strcasecmp(env, "1") == 0)
+      return TWO_STATE_ISLANDS;
+   else if (strcasecmp(env, "all") == 0 || strcasecmp(env, "2") == 0)
+      return TWO_STATE_ALL;
+   else
+      fatal("invalid value '%s' for NVC_2STATE "
+            "(expected off, islands, or all)", env);
+}
+
 void set_default_options(void)
 {
    opt_set_int(OPT_RT_STATS, 0);
@@ -239,6 +254,7 @@ void set_default_options(void)
    }
    opt_set_int(OPT_RTL_ISLANDS, get_rtl_islands_env());
    opt_set_int(OPT_DUMP_ISLANDS, get_bool_env("NVC_DUMP_ISLANDS", 0));
+   opt_set_int(OPT_TWO_STATE, get_two_state_env());
 }
 
 bool opt_black_box_allowed(const char *lib)

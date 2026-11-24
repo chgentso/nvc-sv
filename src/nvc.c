@@ -218,6 +218,7 @@ enum {
    OPT_CLI_JIT_CACHE_DIR,
    OPT_CLI_RTL_ISLANDS,
    OPT_CLI_DUMP_ISLANDS,
+   OPT_CLI_TWO_STATE,
 };
 
 static void parse_rtl_islands_option(const char *arg)
@@ -231,6 +232,19 @@ static void parse_rtl_islands_option(const char *arg)
    else
       fatal("invalid $bold$--rtl-islands$$ option '%s' "
             "(expected off, module, or hier)", arg);
+}
+
+static void parse_two_state_option(const char *arg)
+{
+   if (arg == NULL || strcasecmp(arg, "islands") == 0)
+      opt_set_int(OPT_TWO_STATE, TWO_STATE_ISLANDS);
+   else if (strcasecmp(arg, "off") == 0)
+      opt_set_int(OPT_TWO_STATE, TWO_STATE_OFF);
+   else if (strcasecmp(arg, "all") == 0)
+      opt_set_int(OPT_TWO_STATE, TWO_STATE_ALL);
+   else
+      fatal("invalid $bold$--2state$$ option '%s' "
+            "(expected off, islands, or all)", arg);
 }
 
 static void parse_jit_cache_option(const char *arg, bool *want_clear)
@@ -918,6 +932,7 @@ static int elaborate(int argc, char **argv, cmd_state_t *state)
       { "jit-cache-dir",   required_argument, 0, OPT_CLI_JIT_CACHE_DIR },
       { "rtl-islands",     optional_argument, 0, OPT_CLI_RTL_ISLANDS },
       { "dump-islands",    no_argument,       0, OPT_CLI_DUMP_ISLANDS },
+      { "2state",          optional_argument, 0, OPT_CLI_TWO_STATE },
       { 0, 0, 0, 0 }
    };
 
@@ -1002,6 +1017,9 @@ static int elaborate(int argc, char **argv, cmd_state_t *state)
          break;
       case OPT_CLI_RTL_ISLANDS:
          parse_rtl_islands_option(optarg);
+         break;
+      case OPT_CLI_TWO_STATE:
+         parse_two_state_option(optarg);
          break;
       case OPT_CLI_DUMP_ISLANDS:
          opt_set_int(OPT_DUMP_ISLANDS, 1);
@@ -1104,6 +1122,7 @@ static int elaborate(int argc, char **argv, cmd_state_t *state)
    meta.debug_stmts = opt_get_int(OPT_DEBUG_STMTS);
    meta.black_boxes = elab_black_boxes() > 0;
    meta.rtl_islands = opt_get_int(OPT_RTL_ISLANDS);
+   meta.two_state = opt_get_int(OPT_TWO_STATE);
 
    lib_put_meta(state->work, e, &meta);
 
@@ -1536,6 +1555,8 @@ static int run_cmd(int argc, char **argv, cmd_state_t *state)
       opt_set_int(OPT_DEBUG_STMTS, 1);
    if (meta->rtl_islands && opt_get_int(OPT_RTL_ISLANDS) == RTL_ISLANDS_OFF)
       opt_set_int(OPT_RTL_ISLANDS, meta->rtl_islands);
+   if (meta->two_state && opt_get_int(OPT_TWO_STATE) == TWO_STATE_OFF)
+      opt_set_int(OPT_TWO_STATE, meta->two_state);
 
    wave_dumper_t *dumper = NULL;
    if (wave_fname != NULL) {
@@ -2914,6 +2935,8 @@ static void usage(void)
            { "--no-save", "Do not save the elaborated design to disk" },
            { "--rtl-islands[={off,module,hier}]",
              "Enable compiled RTL island partitioning (default off)" },
+           { "--2state[={off,islands,all}]",
+             "Enable 2-state SystemVerilog simulation (default off)" },
            { "--stats", "Print statistics about instantiated design units" },
            { "-V, --verbose", "Print resource usage at each step" },
         }
@@ -3229,6 +3252,7 @@ int main(int argc, char **argv)
       { "jit-cache-dir", required_argument, 0, OPT_CLI_JIT_CACHE_DIR },
       { "rtl-islands",   optional_argument, 0, OPT_CLI_RTL_ISLANDS },
       { "dump-islands",  no_argument,       0, OPT_CLI_DUMP_ISLANDS },
+      { "2state",        optional_argument, 0, OPT_CLI_TWO_STATE },
       { 0, 0, 0, 0 }
    };
 
@@ -3323,6 +3347,9 @@ int main(int argc, char **argv)
          break;
       case OPT_CLI_RTL_ISLANDS:
          parse_rtl_islands_option(optarg);
+         break;
+      case OPT_CLI_TWO_STATE:
+         parse_two_state_option(optarg);
          break;
       case OPT_CLI_DUMP_ISLANDS:
          opt_set_int(OPT_DUMP_ISLANDS, 1);

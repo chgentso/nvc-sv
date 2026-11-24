@@ -1107,6 +1107,7 @@ static void lib_read_meta(fbuf_t *f, unit_meta_t *meta)
    meta->debug_stmts = (flags >> 1) & 1;
    meta->black_boxes = (flags >> 2) & 1;
    meta->rtl_islands = (flags >> 3) & 3;
+   meta->two_state = (flags >> 5) & 3;
 }
 
 static lib_unit_t *lib_read_unit(lib_t lib, ident_t id)
@@ -1329,7 +1330,7 @@ static void lib_save_unit(lib_t lib, lib_unit_t *unit)
 
    if (unit->meta.cover_file != NULL || unit->meta.no_collapse
        || unit->meta.debug_stmts || unit->meta.black_boxes
-       || unit->meta.rtl_islands) {
+       || unit->meta.rtl_islands || unit->meta.two_state) {
       write_u8('M', f);
 
       if (unit->meta.cover_file != NULL) {
@@ -1342,7 +1343,8 @@ static void lib_save_unit(lib_t lib, lib_unit_t *unit)
 
       fbuf_put_uint(f, unit->meta.no_collapse | (unit->meta.debug_stmts << 1)
                    | (unit->meta.black_boxes << 2)
-                   | ((uint64_t)(unit->meta.rtl_islands & 3) << 3));
+                   | ((uint64_t)(unit->meta.rtl_islands & 3) << 3)
+                   | ((uint64_t)(unit->meta.two_state & 3) << 5));
    }
 
    write_u8('\0', f);

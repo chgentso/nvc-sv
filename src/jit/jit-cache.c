@@ -611,6 +611,7 @@ void jit_cache_prepare(jit_cache_t *cache, jit_func_t *f, bool huge,
       hash_u8(&ctx, cache->cfg.opaque_ptrs);
       hash_u32(&ctx, cache->cfg.inline_limit);
       hash_u8(&ctx, huge ? 1 : 0);
+      hash_u8(&ctx, (uint8_t)opt_get_int(OPT_TWO_STATE));
 
       // Canonical function metadata & constant pool
       hash_u32(&ctx, f->nirs);
