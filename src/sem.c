@@ -1866,6 +1866,10 @@ static bool sem_check_protected_method(tree_t t, nametab_t *tab)
    if (standard() >= STD_19)
       return true;   // Relaxed in LCS2016_04
 
+   tree_t prot = find_enclosing(tab, S_PROTECTED);
+   if (prot != NULL && tree_kind(prot) != T_PROT_DECL)
+      return true;   // LRM 5.6.2 restrictions apply only to protected type declaration
+
    const int nports = tree_ports(t);
    for (int i = 0; i < nports; i++) {
       tree_t p = tree_port(t, i);

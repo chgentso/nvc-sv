@@ -1742,6 +1742,7 @@ protected19     normal,2019
 protected20     normal,2019
 protected21     normal,2019
 protected22     normal,2019
+protected_priv1 normal,2008
 anontype1       normal,2019
 anontype2       normal,2019
 anontype3       normal,2019
