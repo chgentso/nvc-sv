@@ -585,6 +585,10 @@ package body MATH_REAL is
                 return (REAL(X));
         end if;
 
+        if Y = TRUNC(Y) and ABS(Y) <= REAL(INTEGER'HIGH) then
+                return REAL(X) ** INTEGER(Y);
+        end if;
+
         -- Get value for general case
         return EXP (Y * LOG (REAL(X)));
     end function POW_IR_LIBM;
@@ -643,6 +647,10 @@ package body MATH_REAL is
 
         if ( Y = 1.0) then
                 return (X);
+        end if;
+
+        if Y = TRUNC(Y) and ABS(Y) <= REAL(INTEGER'HIGH) then
+                return X ** INTEGER(Y);
         end if;
 
         -- Get value for general case

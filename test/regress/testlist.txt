@@ -3219,3 +3219,4 @@ svreadmem2      verilog
 textio_real1    2008
 conf_default93  shell
 psl_default_conc1 2008
+math_pow_int1   2008
