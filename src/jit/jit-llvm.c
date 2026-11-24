@@ -180,10 +180,13 @@ typedef struct _cgen_block cgen_block_t;
 
 #if defined __APPLE__ && defined ARCH_ARM64
 #define JIT_CODE_MODEL LLVMCodeModelSmall
+#define USE_ELF_RELOCS 0
 #elif defined __linux__ && defined ARCH_X86_64
 #define JIT_CODE_MODEL LLVMCodeModelLarge
+#define USE_ELF_RELOCS 1
 #else
 #define JIT_CODE_MODEL LLVMCodeModelJITDefault
+#define USE_ELF_RELOCS 0
 #endif
 
 #if ENABLE_DWARF
@@ -239,9 +242,14 @@ typedef struct _cgen_func {
    jit_func_t      *source;
    jit_cfg_t       *cfg;
    const char      *name;
+   const uint32_t  *slot_map;
+   LLVMValueRef    *reloc_syms;
    unsigned         nrelocs;
+   unsigned         nslots;
    unsigned         reloc_cursor;
    bool             uses_cpool;
+   bool             use_relocs;
+   bool             use_elf_relocs;
    loc_t            last_loc;
 } cgen_func_t;
 
@@ -306,6 +314,12 @@ static LLVMValueRef llvm_int64(llvm_obj_t *obj, int64_t i)
 static LLVMValueRef llvm_intptr(llvm_obj_t *obj, intptr_t i)
 {
    return LLVMConstInt(obj->types[LLVM_INTPTR], i, false);
+}
+
+static LLVMValueRef llvm_ptr(llvm_obj_t *obj, void *ptr)
+{
+   return LLVMConstIntToPtr(llvm_intptr(obj, (intptr_t)ptr),
+                            obj->types[LLVM_PTR]);
 }
 
 static LLVMValueRef llvm_load_ptr(llvm_obj_t *obj, LLVMValueRef ptr,
@@ -1437,8 +1451,27 @@ static LLVMIntPredicate cgen_int_pred(cgen_block_t *cgb, jit_ir_t *ir)
 static LLVMValueRef cgen_load_reloc(llvm_obj_t *obj, cgen_func_t *func,
                                     const char *name)
 {
-   const unsigned slot = func->reloc_cursor++;
+   const unsigned use = func->reloc_cursor++;
+   assert(use < func->nslots);
+   assert(func->slot_map != NULL);
+   const unsigned slot = func->slot_map[use];
    assert(slot < func->nrelocs);
+
+   if (func->use_elf_relocs) {
+      assert(func->reloc_syms != NULL);
+      if (func->reloc_syms[slot] == NULL) {
+         char sym[32];
+         checked_sprintf(sym, sizeof(sym), "__nvc.r%u", slot);
+         LLVMValueRef gv = LLVMGetNamedGlobal(obj->module, sym);
+         if (gv == NULL) {
+            gv = LLVMAddGlobal(obj->module, obj->types[LLVM_INT8], sym);
+            LLVMSetLinkage(gv, LLVMExternalLinkage);
+         }
+         func->reloc_syms[slot] = gv;
+      }
+      return func->reloc_syms[slot];
+   }
+
    assert(func->relocs != NULL);
 
    LLVMValueRef base = func->relocs;
@@ -1471,6 +1504,8 @@ static LLVMValueRef cgen_get_value(llvm_obj_t *obj, cgen_block_t *cgb,
       return llvm_real(obj, value.dval);
    case JIT_ADDR_CPOOL:
       assert(value.int64 >= 0 && value.int64 <= cgb->func->source->cpoolsz);
+      if (!cgb->func->use_relocs)
+         return llvm_ptr(obj, cgb->func->source->cpool + value.int64);
       assert(cgb->func->cpool != NULL);
       if (value.int64 == 0)
          return cgb->func->cpool;
@@ -1501,6 +1536,8 @@ static LLVMValueRef cgen_get_value(llvm_obj_t *obj, cgen_block_t *cgb,
    case JIT_VALUE_EXIT:
       return llvm_int32(obj, value.exit);
    case JIT_VALUE_HANDLE:
+      if (!cgb->func->use_relocs)
+         return llvm_int32(obj, value.handle);
       {
          LLVMValueRef raw = cgen_load_reloc(obj, cgb->func, "handle");
          return LLVMBuildPtrToInt(obj->builder, raw, obj->types[LLVM_INT32], "");
@@ -1508,9 +1545,13 @@ static LLVMValueRef cgen_get_value(llvm_obj_t *obj, cgen_block_t *cgb,
    case JIT_ADDR_ABS:
       if (value.int64 == 0)
          return LLVMConstNull(obj->types[LLVM_PTR]);
+      else if (!cgb->func->use_relocs)
+         return llvm_ptr(obj, (void *)(intptr_t)value.int64);
       else
          return cgen_load_reloc(obj, cgb->func, "abs");
    case JIT_VALUE_LOCUS:
+      if (!cgb->func->use_relocs)
+         return llvm_ptr(obj, value.locus);
       return cgen_load_reloc(obj, cgb->func, "locus");
    default:
       fatal_trace("cannot handle value kind %d", value.kind);
@@ -2208,7 +2249,11 @@ static void cgen_op_call(llvm_obj_t *obj, cgen_block_t *cgb, jit_ir_t *ir)
 {
    cgen_sync_irpos(obj, cgb, ir);
 
-   LLVMValueRef fptr = cgen_load_reloc(obj, cgb->func, "callee");
+   LLVMValueRef fptr;
+   if (cgb->func->use_relocs)
+      fptr = cgen_load_reloc(obj, cgb->func, "callee");
+   else
+      fptr = llvm_ptr(obj, jit_get_func(cgb->func->source->jit, ir->arg1.handle));
 
    LLVMValueRef entry = NULL;
    if (INLINE_LIMIT > 0) {
@@ -2492,7 +2537,13 @@ static void cgen_macro_salloc(llvm_obj_t *obj, cgen_block_t *cgb, jit_ir_t *ir)
 
 static void cgen_macro_getpriv(llvm_obj_t *obj, cgen_block_t *cgb, jit_ir_t *ir)
 {
-   LLVMValueRef ptrptr = cgen_load_reloc(obj, cgb->func, "privptr");
+   LLVMValueRef ptrptr;
+   if (cgb->func->use_relocs)
+      ptrptr = cgen_load_reloc(obj, cgb->func, "privptr");
+   else {
+      jit_func_t *f = jit_get_func(cgb->func->source->jit, ir->arg1.handle);
+      ptrptr = llvm_ptr(obj, jit_get_privdata_ptr(f->jit, f));
+   }
 
    LLVMValueRef ptr = llvm_load_ptr(obj, ptrptr, "p2");
    LLVMSetAlignment(ptr, sizeof(void *));
@@ -3448,17 +3499,28 @@ static void cgen_function(llvm_obj_t *obj, cgen_func_t *func)
    jit_cfg_t *cfg = func->cfg = jit_get_cfg(func->source);
    cgen_reexecute_guard(obj, func, cfg);
 
-   if (func->uses_cpool) {
-      LLVMValueRef fptr = LLVMGetParam(func->llvmfn, 0);
-      LLVMValueRef idx[] = { llvm_intptr(obj, offsetof(jit_func_t, cpool)) };
-      LLVMValueRef field = LLVMBuildInBoundsGEP2(
-         obj->builder, obj->types[LLVM_INT8], fptr, idx, 1, "");
-      func->cpool = llvm_load_ptr(obj, field, "cpool");
-      LLVMSetAlignment(func->cpool, sizeof(void *));
-      llvm_mark_invariant(obj, func->cpool);
+   if (func->use_relocs && func->uses_cpool) {
+      if (func->use_elf_relocs) {
+         LLVMValueRef gv = LLVMGetNamedGlobal(obj->module, "__nvc.cpool");
+         if (gv == NULL) {
+            gv = LLVMAddGlobal(obj->module, obj->types[LLVM_INT8],
+                               "__nvc.cpool");
+            LLVMSetLinkage(gv, LLVMExternalLinkage);
+         }
+         func->cpool = gv;
+      }
+      else {
+         LLVMValueRef fptr = LLVMGetParam(func->llvmfn, 0);
+         LLVMValueRef idx[] = { llvm_intptr(obj, offsetof(jit_func_t, cpool)) };
+         LLVMValueRef field = LLVMBuildInBoundsGEP2(
+            obj->builder, obj->types[LLVM_INT8], fptr, idx, 1, "");
+         func->cpool = llvm_load_ptr(obj, field, "cpool");
+         LLVMSetAlignment(func->cpool, sizeof(void *));
+         llvm_mark_invariant(obj, func->cpool);
+      }
    }
 
-   if (func->nrelocs > 0) {
+   if (func->use_relocs && !func->use_elf_relocs && func->nrelocs > 0) {
       LLVMValueRef fptr = LLVMGetParam(func->llvmfn, 0);
       LLVMValueRef idx[] = { llvm_intptr(obj, offsetof(jit_func_t, relocs)) };
       LLVMValueRef field = LLVMBuildInBoundsGEP2(
@@ -3618,7 +3680,7 @@ static void cgen_function(llvm_obj_t *obj, cgen_func_t *func)
 
    jit_free_cfg(cfg);
 
-   assert(func->reloc_cursor == func->nrelocs);
+   assert(!func->use_relocs || func->reloc_cursor == func->nslots);
 
    free(func->blocks);
    func->blocks = NULL;
@@ -3913,6 +3975,7 @@ static void *jit_llvm_init(jit_t *jit)
 #ifdef LLVM_HAS_OPAQUE_POINTERS
       .opaque_ptrs  = 1,
 #endif
+      .elf_relocs   = USE_ELF_RELOCS,
       .inline_limit = INLINE_LIMIT,
    };
 
@@ -3952,56 +4015,69 @@ static void jit_llvm_cgen(jit_t *j, jit_handle_t handle, void *context)
    // blocking the background JIT worker queue for tens of seconds.
    const bool huge = f->nirs > 32768;
 
+   const bool cache_on = jit_cache_enabled(state->cache);
+
    jit_cache_key_t key;
    void **relocs = NULL;
    unsigned nrelocs = 0;
+   uint32_t *slot_map = NULL;
+   unsigned nslots = 0;
    bool uses_cpool = false;
-   jit_cache_prepare(state->cache, f, huge, &key, &relocs, &nrelocs,
-                     &uses_cpool);
+   if (cache_on) {
+      jit_cache_prepare_slots(state->cache, f, huge, &key, &relocs, &nrelocs,
+                              &slot_map, &nslots, &uses_cpool);
 
-   if (jit_is_shutdown(f->jit)) {
-      free(relocs);
-      return;
-   }
-
-   void *cached_obj = NULL;
-   size_t cached_sz = 0;
-   const bool cache_on = jit_cache_enabled(state->cache);
-   if (cache_on && jit_cache_lookup(state->cache, &key, &cached_obj, &cached_sz)) {
       if (jit_is_shutdown(f->jit)) {
-         free(cached_obj);
          free(relocs);
+         free(slot_map);
          return;
       }
 
-      const size_t hint = cached_sz + MAX(8192, cached_sz / 4);
-      code_blob_t *blob = code_blob_new(state->code, f->name, hint);
-      if (blob == NULL) {
+      void *cached_obj = NULL;
+      size_t cached_sz = 0;
+      if (jit_cache_lookup(state->cache, &key, &cached_obj, &cached_sz)) {
+         free(slot_map);
+         if (jit_is_shutdown(f->jit)) {
+            free(cached_obj);
+            free(relocs);
+            return;
+         }
+
+         const size_t hint = cached_sz + MAX(8192, cached_sz / 4);
+         code_blob_t *blob = code_blob_new(state->code, f->name, hint);
+         if (blob == NULL) {
+            free(cached_obj);
+            free(relocs);
+            return;
+         }
+
+         blob->func = f;
+         f->relocs  = relocs;
+         f->nrelocs = nrelocs;
+
+         const uint8_t *base = blob->wptr;
+         const void *entry_addr = blob->wptr;
+
+         code_load_object(blob, cached_obj, cached_sz);
+         if (USE_ELF_RELOCS) {
+            free(relocs);
+            f->relocs  = NULL;
+            f->nrelocs = 0;
+         }
+
+         const size_t size = blob->wptr - base;
+         code_blob_finalise(blob, &(f->entry));
+
          free(cached_obj);
-         free(relocs);
+
+         if (opt_get_int(OPT_JIT_LOG)) {
+            const uint64_t end_us = get_timestamp_us();
+            debugf("%s at %p [%zu bytes in %"PRIi64" us] [cache hit]",
+                   f->name ? istr(f->name) : "(anon)",
+                   entry_addr, size, end_us - start_us);
+         }
          return;
       }
-
-      f->relocs  = relocs;
-      f->nrelocs = nrelocs;
-
-      const uint8_t *base = blob->wptr;
-      const void *entry_addr = blob->wptr;
-
-      code_load_object(blob, cached_obj, cached_sz);
-
-      const size_t size = blob->wptr - base;
-      code_blob_finalise(blob, &(f->entry));
-
-      free(cached_obj);
-
-      if (opt_get_int(OPT_JIT_LOG)) {
-         const uint64_t end_us = get_timestamp_us();
-         debugf("%s at %p [%zu bytes in %"PRIi64" us] [cache hit]",
-                f->name ? istr(f->name) : "(anon)",
-                entry_addr, size, end_us - start_us);
-      }
-      return;
    }
 
    LLVMTargetMachineRef tm = llvm_target_machine(
@@ -4023,14 +4099,26 @@ static void jit_llvm_cgen(jit_t *j, jit_handle_t handle, void *context)
 
    llvm_register_types(&obj);
 
+   LLVMValueRef *reloc_syms = (cache_on && USE_ELF_RELOCS && nrelocs > 0)
+      ? xcalloc_array(nrelocs, sizeof(LLVMValueRef)) : NULL;
+
    cgen_func_t func = {
-      .name       = "__nvc_entry",
-      .source     = f,
-      .nrelocs    = nrelocs,
-      .uses_cpool = uses_cpool,
+      .name           = "__nvc_entry",
+      .source         = f,
+      .slot_map       = slot_map,
+      .reloc_syms     = reloc_syms,
+      .nrelocs        = nrelocs,
+      .nslots         = nslots,
+      .uses_cpool     = uses_cpool,
+      .use_relocs     = cache_on,
+      .use_elf_relocs = cache_on && USE_ELF_RELOCS,
    };
 
    cgen_function(&obj, &func);
+   free(slot_map);
+   free(reloc_syms);
+   func.slot_map = NULL;
+   func.reloc_syms = NULL;
 
    if (obj.fns[LLVM_TLAB_ALLOC] != NULL)
       cgen_tlab_alloc_body(&obj);
@@ -4090,6 +4178,7 @@ static void jit_llvm_cgen(jit_t *j, jit_handle_t handle, void *context)
       goto skip_load;
    }
 
+   blob->func = f;
    f->relocs  = relocs;
    f->nrelocs = nrelocs;
 
@@ -4097,6 +4186,11 @@ static void jit_llvm_cgen(jit_t *j, jit_handle_t handle, void *context)
    const void *entry_addr = blob->wptr;
 
    code_load_object(blob, objdata, objsz);
+   if (USE_ELF_RELOCS) {
+      free(relocs);
+      f->relocs  = NULL;
+      f->nrelocs = 0;
+   }
 
    const size_t size = blob->wptr - base;
    code_blob_finalise(blob, &(f->entry));

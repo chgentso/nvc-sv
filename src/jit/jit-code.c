@@ -1384,17 +1384,32 @@ static void code_load_elf(code_blob_t *blob, const void *data, size_t size)
             + ELF64_R_SYM(r->r_info) * symtab->sh_entsize;
 
          void *ptr = NULL;
+         bool allow_null = false;
+         const char *sname = strtab + sym->st_name;
          switch (ELF64_ST_TYPE(sym->st_info)) {
          case STT_NOTYPE:
          case STT_FUNC:
+         case STT_OBJECT:
             if (sym->st_shndx != 0)
                ptr = load_addr[sym->st_shndx] + sym->st_value;
 #ifdef ARCH_PPC64
-            else if (strcmp(strtab + sym->st_name, ".TOC.") == 0)
+            else if (strcmp(sname, ".TOC.") == 0)
                ptr = toc;
 #endif
+            else if (strncmp(sname, "__nvc.r", 7) == 0 && blob->func != NULL
+                     && blob->func->relocs != NULL) {
+               char *endp = NULL;
+               unsigned long slot = strtoul(sname + 7, &endp, 10);
+               if (endp != sname + 7 && *endp == '\0'
+                   && slot < blob->func->nrelocs) {
+                  ptr = blob->func->relocs[slot];
+                  allow_null = true;
+               }
+            }
+            else if (strcmp(sname, "__nvc.cpool") == 0 && blob->func != NULL)
+               ptr = blob->func->cpool;
             else
-               ptr = shash_get(external, strtab + sym->st_name);
+               ptr = shash_get(external, sname);
             break;
          case STT_SECTION:
             ptr = load_addr[sym->st_shndx];
@@ -1404,9 +1419,9 @@ static void code_load_elf(code_blob_t *blob, const void *data, size_t size)
                         ELF64_ST_TYPE(sym->st_info));
          }
 
-         if (ptr == NULL)
+         if (ptr == NULL && !allow_null)
             fatal_trace("cannot resolve symbol %s type %d",
-                        strtab + sym->st_name, ELF64_ST_TYPE(sym->st_info));
+                        sname, ELF64_ST_TYPE(sym->st_info));
 
          void *patch = load_addr[shdr->sh_info] + r->r_offset;
          assert(r->r_offset < mod->sh_size);

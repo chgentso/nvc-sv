@@ -493,9 +493,109 @@ const char *jit_cache_dir(jit_cache_t *cache)
 ////////////////////////////////////////////////////////////////////////////////
 // Relocations & 256-bit key computation
 
+typedef enum {
+   RELOC_ABS,
+   RELOC_LOCUS,
+   RELOC_HANDLE,
+   RELOC_CALL,
+   RELOC_PRIV,
+} reloc_kind_t;
+
+typedef struct {
+   A(void *)   relocs;
+   A(uint8_t)  kinds;
+   A(uint32_t) slot_map;
+   bool        want_slots;
+   uint32_t   *htab;
+   size_t      mask;
+} reloc_table_t;
+
+static inline uint64_t reloc_hash(reloc_kind_t kind, const void *ptr)
+{
+   uint64_t x = ((uint64_t)(uintptr_t)ptr)
+      ^ ((uint64_t)kind * UINT64_C(0x9e3779b97f4a7c15));
+   x ^= x >> 30;
+   x *= UINT64_C(0xbf58476d1ce4e5b9);
+   x ^= x >> 27;
+   return x;
+}
+
+static uint32_t reloc_intern(reloc_table_t *rt, reloc_kind_t kind, void *ptr)
+{
+   // Linear scan for small tables; open-addressed hash table once larger
+   uint32_t slot = UINT32_MAX;
+   if (rt->htab == NULL && rt->relocs.count < 16) {
+      for (unsigned i = 0; i < rt->relocs.count; i++) {
+         if (rt->kinds.items[i] == (uint8_t)kind
+             && rt->relocs.items[i] == ptr) {
+            slot = i;
+            break;
+         }
+      }
+   }
+   else {
+      if (rt->htab == NULL) {
+         const size_t cap = 64;
+         rt->htab = xmalloc_array(cap, sizeof(uint32_t));
+         memset(rt->htab, 0xff, cap * sizeof(uint32_t));
+         rt->mask = cap - 1;
+         for (unsigned i = 0; i < rt->relocs.count; i++) {
+            size_t idx = reloc_hash(rt->kinds.items[i], rt->relocs.items[i])
+               & rt->mask;
+            while (rt->htab[idx] != UINT32_MAX)
+               idx = (idx + 1) & rt->mask;
+            rt->htab[idx] = i;
+         }
+      }
+      else if ((rt->relocs.count + 1) * 2 > rt->mask + 1) {
+         const size_t cap = (rt->mask + 1) * 2;
+         uint32_t *nslots = xmalloc_array(cap, sizeof(uint32_t));
+         memset(nslots, 0xff, cap * sizeof(uint32_t));
+         const size_t nmask = cap - 1;
+         for (unsigned i = 0; i < rt->relocs.count; i++) {
+            size_t idx = reloc_hash(rt->kinds.items[i], rt->relocs.items[i])
+               & nmask;
+            while (nslots[idx] != UINT32_MAX)
+               idx = (idx + 1) & nmask;
+            nslots[idx] = i;
+         }
+         free(rt->htab);
+         rt->htab = nslots;
+         rt->mask = nmask;
+      }
+
+      size_t idx = reloc_hash(kind, ptr) & rt->mask;
+      while (rt->htab[idx] != UINT32_MAX) {
+         const uint32_t cand = rt->htab[idx];
+         if (rt->kinds.items[cand] == (uint8_t)kind
+             && rt->relocs.items[cand] == ptr) {
+            slot = cand;
+            break;
+         }
+         idx = (idx + 1) & rt->mask;
+      }
+
+      if (slot == UINT32_MAX) {
+         slot = rt->relocs.count;
+         rt->htab[idx] = slot;
+      }
+   }
+
+   if (slot == UINT32_MAX || slot == rt->relocs.count) {
+      slot = rt->relocs.count;
+      APUSH(rt->relocs, ptr);
+      APUSH(rt->kinds, (uint8_t)kind);
+   }
+
+   if (rt->want_slots)
+      APUSH(rt->slot_map, slot);
+
+   return slot;
+}
+
 static inline void hash_value(sha256_t *ctx, jit_value_t val,
                               bool is_call, bool is_getpriv,
-                              unsigned *slot_counter, bool enable_dwarf,
+                              uint32_t slot, bool enable_dwarf,
                               uint32_t inline_limit)
 {
    hash_u8(ctx, (uint8_t)val.kind);
@@ -526,14 +626,14 @@ static inline void hash_value(sha256_t *ctx, jit_value_t val,
          const uint8_t is_null = (val.int64 == 0) ? 1 : 0;
          hash_u8(ctx, is_null);
          if (!is_null)
-            hash_u32(ctx, (*slot_counter)++);
+            hash_u32(ctx, slot);
       }
       break;
    case JIT_VALUE_LABEL:
       hash_u32(ctx, val.label);
       break;
    case JIT_VALUE_HANDLE:
-      hash_u32(ctx, (*slot_counter)++);
+      hash_u32(ctx, slot);
       if (is_call) {
          // INLINE_LIMIT == 0 never inlines; included explicitly for safety.
          hash_u8(ctx, (uint8_t)(inline_limit > 0 ? 1 : 0));
@@ -559,14 +659,15 @@ static inline void hash_value(sha256_t *ctx, jit_value_t val,
       hash_u32(ctx, val.vpos.op);
       break;
    case JIT_VALUE_LOCUS:
-      hash_u32(ctx, (*slot_counter)++);
+      hash_u32(ctx, slot);
       break;
    }
 }
 
-void jit_cache_prepare(jit_cache_t *cache, jit_func_t *f, bool huge,
-                       jit_cache_key_t *key_out, void ***relocs_out,
-                       unsigned *nrelocs_out, bool *uses_cpool_out)
+void jit_cache_prepare_slots(jit_cache_t *cache, jit_func_t *f, bool huge,
+                             jit_cache_key_t *key_out, void ***relocs_out,
+                             unsigned *nrelocs_out, uint32_t **slot_map_out,
+                             unsigned *nslots_out, bool *uses_cpool_out)
 {
    const bool compute_key = (key_out != NULL) && jit_cache_enabled(cache);
 
@@ -609,6 +710,7 @@ void jit_cache_prepare(jit_cache_t *cache, jit_func_t *f, bool huge,
       hash_u8(&ctx, cache->cfg.debug_build);
       hash_u8(&ctx, cache->cfg.enable_dwarf);
       hash_u8(&ctx, cache->cfg.opaque_ptrs);
+      hash_u8(&ctx, cache->cfg.elf_relocs);
       hash_u32(&ctx, cache->cfg.inline_limit);
       hash_u8(&ctx, huge ? 1 : 0);
       hash_u8(&ctx, (uint8_t)opt_get_int(OPT_TWO_STATE));
@@ -622,37 +724,31 @@ void jit_cache_prepare(jit_cache_t *cache, jit_func_t *f, bool huge,
          sha256_update(&ctx, f->cpool, f->cpoolsz);
    }
 
-   A(void *) relocs = AINIT;
+   reloc_table_t rt = {
+      .relocs     = AINIT,
+      .kinds      = AINIT,
+      .slot_map   = AINIT,
+      .want_slots = (slot_map_out != NULL),
+   };
+
    bool uses_cpool = false;
-   unsigned slot_counter = 0;
    const bool enable_dwarf = cache ? (cache->cfg.enable_dwarf != 0) : false;
    const uint32_t inline_limit = cache ? cache->cfg.inline_limit : 0;
 
    for (unsigned i = 0; i < f->nirs; i++) {
       const jit_ir_t *ir = &(f->irbuf[i]);
-
-      if (compute_key) {
-         hash_u8(&ctx, (uint8_t)ir->op);
-         hash_u8(&ctx, (uint8_t)ir->size);
-         hash_u8(&ctx, (uint8_t)ir->target);
-         hash_u8(&ctx, (uint8_t)ir->cc);
-         hash_u32(&ctx, ir->result);
-         hash_value(&ctx, ir->arg1, ir->op == J_CALL,
-                    ir->op == MACRO_GETPRIV, &slot_counter,
-                    enable_dwarf, inline_limit);
-         hash_value(&ctx, ir->arg2, false, false, &slot_counter,
-                    enable_dwarf, inline_limit);
-      }
+      uint32_t arg_slots[2] = { 0, 0 };
 
       if (ir->op == J_CALL) {
          assert(ir->arg1.kind == JIT_VALUE_HANDLE);
          jit_func_t *callee = jit_get_func(f->jit, ir->arg1.handle);
-         APUSH(relocs, callee);
+         arg_slots[0] = reloc_intern(&rt, RELOC_CALL, callee);
       }
       else if (ir->op == MACRO_GETPRIV) {
          assert(ir->arg1.kind == JIT_VALUE_HANDLE);
          jit_func_t *target = jit_get_func(f->jit, ir->arg1.handle);
-         APUSH(relocs, jit_get_privdata_ptr(target->jit, target));
+         arg_slots[0] = reloc_intern(
+            &rt, RELOC_PRIV, jit_get_privdata_ptr(target->jit, target));
       }
       else {
          const jit_value_t args[2] = { ir->arg1, ir->arg2 };
@@ -663,30 +759,59 @@ void jit_cache_prepare(jit_cache_t *cache, jit_func_t *f, bool huge,
                break;
             case JIT_ADDR_ABS:
                if (args[a].int64 != 0)
-                  APUSH(relocs, (void *)(intptr_t)args[a].int64);
+                  arg_slots[a] = reloc_intern(&rt, RELOC_ABS,
+                                              (void *)(intptr_t)args[a].int64);
                break;
             case JIT_VALUE_LOCUS:
-               APUSH(relocs, args[a].locus);
+               arg_slots[a] = reloc_intern(&rt, RELOC_LOCUS, args[a].locus);
                break;
             case JIT_VALUE_HANDLE:
-               APUSH(relocs, (void *)(uintptr_t)args[a].handle);
+               arg_slots[a] = reloc_intern(&rt, RELOC_HANDLE,
+                                           (void *)(uintptr_t)args[a].handle);
                break;
             default:
                break;
             }
          }
       }
+
+      if (compute_key) {
+         hash_u8(&ctx, (uint8_t)ir->op);
+         hash_u8(&ctx, (uint8_t)ir->size);
+         hash_u8(&ctx, (uint8_t)ir->target);
+         hash_u8(&ctx, (uint8_t)ir->cc);
+         hash_u32(&ctx, ir->result);
+         hash_value(&ctx, ir->arg1, ir->op == J_CALL,
+                    ir->op == MACRO_GETPRIV, arg_slots[0],
+                    enable_dwarf, inline_limit);
+         hash_value(&ctx, ir->arg2, false, false, arg_slots[1],
+                    enable_dwarf, inline_limit);
+      }
    }
 
-   assert(!compute_key || slot_counter == relocs.count);
+   free(rt.htab);
+   ACLEAR(rt.kinds);
 
    if (compute_key)
       sha256_final(&ctx, key_out->bytes);
 
-   *nrelocs_out = relocs.count;
-   *relocs_out = relocs.items;
+   *nrelocs_out = rt.relocs.count;
+   *relocs_out = rt.relocs.items;
+   if (slot_map_out != NULL) {
+      *slot_map_out = rt.slot_map.items;
+      if (nslots_out != NULL)
+         *nslots_out = rt.slot_map.count;
+   }
    if (uses_cpool_out != NULL)
       *uses_cpool_out = uses_cpool;
+}
+
+void jit_cache_prepare(jit_cache_t *cache, jit_func_t *f, bool huge,
+                       jit_cache_key_t *key_out, void ***relocs_out,
+                       unsigned *nrelocs_out, bool *uses_cpool_out)
+{
+   jit_cache_prepare_slots(cache, f, huge, key_out, relocs_out, nrelocs_out,
+                           NULL, NULL, uses_cpool_out);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
