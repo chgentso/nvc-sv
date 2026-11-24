@@ -15088,6 +15088,9 @@ static void p_static_local_decls(vlog_node_t parent, vlog_node_t home,
       vlog_set_ident(d, ident_sprintf("%s$static%u_%u", istr(vlog_ident(d)),
                                       loc->first_line, loc->first_column));
       vlog_set_flags(d, VLOG_F_STATIC);
+      if (vlog_kind(home) == V_MODULE || vlog_kind(home) == V_PROGRAM
+          || vlog_kind(home) == V_GEN_BLOCK)
+         vlog_set_flags(d, VLOG_F_SIGNAL_STATIC);
 
       bool added = false;
       if (vlog_kind(home) == V_CLASS_DECL)
