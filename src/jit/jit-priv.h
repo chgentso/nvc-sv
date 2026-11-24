@@ -89,6 +89,7 @@ typedef enum {
    MACRO_UNPACK,
    MACRO_VEC2OP,
    MACRO_VEC4OP,
+   MACRO_MEM_DIRTY,
 } jit_op_t;
 
 typedef enum {

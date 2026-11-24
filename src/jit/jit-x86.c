@@ -2081,6 +2081,12 @@ static void jit_x86_macro_trim(code_blob_t *blob, jit_ir_t *ir)
    MOV(ADDR(TLAB_REG, offsetof(tlab_t, alloc)), __EAX, __DWORD);
 }
 
+static void jit_x86_macro_mem_dirty(code_blob_t *blob)
+{
+   MOV(__EAX, IMM(1), __QWORD);
+   MOV(ADDR(TLAB_REG, offsetof(tlab_t, mem_dirty)), __EAX, __QWORD);
+}
+
 static void jit_x86_op(code_blob_t *blob, jit_x86_state_t *state, jit_ir_t *ir,
                        const phys_slot_t *slots)
 {
@@ -2237,6 +2243,9 @@ static void jit_x86_op(code_blob_t *blob, jit_x86_state_t *state, jit_ir_t *ir,
       break;
    case MACRO_TRIM:
       jit_x86_macro_trim(blob, ir);
+      break;
+   case MACRO_MEM_DIRTY:
+      jit_x86_macro_mem_dirty(blob);
       break;
    default:
       jit_dump_with_mark(blob->func, ir - blob->func->irbuf);

@@ -1119,6 +1119,9 @@ static void interp_loop(jit_interp_t *state)
       case MACRO_VEC4OP:
          interp_vec4op(state, ir);
          break;
+      case MACRO_MEM_DIRTY:
+         state->tlab->mem_dirty = 1;
+         break;
       default:
          interp_dump(state);
          fatal_trace("cannot interpret opcode %s", jit_op_name(ir->op));

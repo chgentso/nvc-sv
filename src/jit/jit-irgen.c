@@ -80,6 +80,7 @@ typedef struct {
    bool            stateless;
    bool            needs_context;
    bool            have_frame;   // The layout of the frame has been made
+   bool            signal_only;
    frame_layout_t *frame;
 } jit_irgen_t;
 
@@ -736,6 +737,11 @@ static void macro_vec4op(jit_irgen_t *g, jit_vec_op_t op, int size)
    irgen_emit_binary(g, MACRO_VEC4OP, JIT_SZ_UNSPEC, JIT_CC_NONE,
                      JIT_REG_INVALID, jit_value_from_int64(op),
                      jit_value_from_int64(size));
+}
+
+static void macro_mem_dirty(jit_irgen_t *g)
+{
+   irgen_emit_nullary(g, MACRO_MEM_DIRTY, JIT_CC_NONE, JIT_REG_INVALID);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -5203,6 +5209,9 @@ static void irgen_op_get_counters(jit_irgen_t *g, mir_value_t n)
    j_recv(g, g->map[n.id], 0);
 }
 
+static bool mir_op_is_signal_only(mir_unit_t *mu, mir_value_t n,
+                                  bool *is_jit_call);
+
 static void irgen_block(jit_irgen_t *g, mir_block_t block)
 {
    irgen_bind_label(g, g->blocks[block.id]);
@@ -5210,6 +5219,7 @@ static void irgen_block(jit_irgen_t *g, mir_block_t block)
    g->flags = MIR_NULL_VALUE;
    g->curblock = block;
 
+   bool block_dirty = false;
    const int nops = mir_count_nodes(g->mu, block);
    for (int i = 0; i < nops; i++, g->next_temp = 0) {
       mir_value_t n = mir_get_node(g->mu, block, i);
@@ -5217,6 +5227,14 @@ static void irgen_block(jit_irgen_t *g, mir_block_t block)
       const mir_op_t op = mir_get_op(g->mu, n);
       if (op == MIR_OP_COMMENT || op == MIR_OP_CONSUME)
          continue;
+
+      if (!g->signal_only && !block_dirty) {
+         bool is_jit_call = false;
+         if (!mir_op_is_signal_only(g->mu, n, &is_jit_call) && !is_jit_call) {
+            macro_mem_dirty(g);
+            block_dirty = true;
+         }
+      }
 
 #ifdef DEBUG
       mir_set_cursor(g->mu, block, i);
@@ -6149,6 +6167,184 @@ static bool mir_is_private_dest(mir_unit_t *mu, mir_value_t dst)
    }
 }
 
+static bool mir_op_is_signal_only(mir_unit_t *mu, mir_value_t n,
+                                  bool *is_jit_call)
+{
+   if (is_jit_call != NULL)
+      *is_jit_call = false;
+
+   switch (mir_get_op(mu, n)) {
+   case _MIR_DELETED_OP:
+   case MIR_OP_COMMENT:
+   case MIR_OP_CONSUME:
+   case MIR_OP_RETURN:
+   case MIR_OP_JUMP:
+   case MIR_OP_COND:
+   case MIR_OP_CASE:
+   case MIR_OP_PHI:
+   case MIR_OP_SELECT:
+   case MIR_OP_TERNARY:
+   case MIR_OP_WAIT:
+   case MIR_OP_CONST:
+   case MIR_OP_CONST_REAL:
+   case MIR_OP_CONST_ARRAY:
+   case MIR_OP_CONST_REP:
+   case MIR_OP_CONST_RECORD:
+   case MIR_OP_CONST_VEC:
+   case MIR_OP_NULL:
+   case MIR_OP_DEBUG_LOCUS:
+   case MIR_OP_ADD:
+   case MIR_OP_SUB:
+   case MIR_OP_MUL:
+   case MIR_OP_DIV:
+   case MIR_OP_REM:
+   case MIR_OP_MOD:
+   case MIR_OP_EXP:
+   case MIR_OP_AND:
+   case MIR_OP_OR:
+   case MIR_OP_XOR:
+   case MIR_OP_NOT:
+   case MIR_OP_NEG:
+   case MIR_OP_ABS:
+   case MIR_OP_CMP:
+   case MIR_OP_CAST:
+   case MIR_OP_TRAP_ADD:
+   case MIR_OP_TRAP_SUB:
+   case MIR_OP_TRAP_MUL:
+   case MIR_OP_TRAP_EXP:
+   case MIR_OP_TRAP_NEG:
+   case MIR_OP_RANGE_CHECK:
+   case MIR_OP_INDEX_CHECK:
+   case MIR_OP_NULL_CHECK:
+   case MIR_OP_LENGTH_CHECK:
+   case MIR_OP_ZERO_CHECK:
+   case MIR_OP_EXPONENT_CHECK:
+   case MIR_OP_DIR_CHECK:
+   case MIR_OP_RANGE_LENGTH:
+   case MIR_OP_RANGE_NULL:
+   case MIR_OP_BINARY:
+   case MIR_OP_UNARY:
+   case MIR_OP_INSERT:
+   case MIR_OP_TEST:
+   case MIR_OP_DEFINED:
+   case MIR_OP_EXTRACT:
+   case MIR_OP_PACK:
+   case MIR_OP_WRAP:
+   case MIR_OP_UNWRAP:
+   case MIR_OP_UARRAY_LEN:
+   case MIR_OP_UARRAY_LEFT:
+   case MIR_OP_UARRAY_RIGHT:
+   case MIR_OP_UARRAY_DIR:
+   case MIR_OP_ARRAY_REF:
+   case MIR_OP_TABLE_REF:
+   case MIR_OP_RECORD_REF:
+   case MIR_OP_ADDRESS_OF:
+   case MIR_OP_ALL:
+   case MIR_OP_LOAD:
+   case MIR_OP_VAR_UPREF:
+   case MIR_OP_CONTEXT_UPREF:
+   case MIR_OP_LINK_VAR:
+   case MIR_OP_LINK_PACKAGE:
+   case MIR_OP_RESOLVED:
+   case MIR_OP_LAST_VALUE:
+   case MIR_OP_EVENT:
+   case MIR_OP_ACTIVE:
+   case MIR_OP_LAST_EVENT:
+   case MIR_OP_LAST_ACTIVE:
+   case MIR_OP_DRIVING:
+   case MIR_OP_DRIVING_VALUE:
+   case MIR_OP_DRIVE_SIGNAL:
+   case MIR_OP_SCHED_WAVEFORM:
+   case MIR_OP_SCHED_EVENT:
+   case MIR_OP_CLEAR_EVENT:
+   case MIR_OP_SCHED_PROCESS:
+   case MIR_OP_SCHED_INACTIVE:
+   case MIR_OP_SCHED_ACTIVE:
+   case MIR_OP_SCHED_DEPOSIT:
+   case MIR_OP_DEPOSIT_SIGNAL:
+   case MIR_OP_PUT_DRIVER:
+   case MIR_OP_FORCE:
+   case MIR_OP_RELEASE:
+   case MIR_OP_DISCONNECT:
+   case MIR_OP_TRANSFER_SIGNAL:
+   case MIR_OP_OR_TRIGGER:
+   case MIR_OP_CMP_TRIGGER:
+   case MIR_OP_LEVEL_TRIGGER:
+   case MIR_OP_ADD_TRIGGER:
+   case MIR_OP_COVER_STMT:
+   case MIR_OP_COVER_BRANCH:
+   case MIR_OP_COVER_TOGGLE:
+   case MIR_OP_COVER_EXPR:
+   case MIR_OP_COVER_STATE:
+   case MIR_OP_UNREACHABLE:
+   case MIR_OP_ASSERT:
+   case MIR_OP_REPORT:
+   case MIR_OP_DEBUG_OUT:
+   case MIR_OP_GET_COUNTERS:
+   case MIR_OP_ENTER_STATE:
+   case MIR_OP_POP_SCOPE:
+   case MIR_OP_PACKAGE_SCOPE:
+   case MIR_OP_ARRAY_SCOPE:
+   case MIR_OP_RECORD_SCOPE:
+      return true;
+
+   case MIR_OP_STORE:
+   case MIR_OP_COPY:
+   case MIR_OP_SET:
+      return mir_is_private_dest(mu, mir_get_arg(mu, n, 0));
+
+   case MIR_OP_UNPACK:
+      {
+         mir_value_t tmp = mir_get_arg(mu, n, 2);
+         return mir_is_null(tmp) || mir_is_private_dest(mu, tmp);
+      }
+
+   case MIR_OP_FCALL:
+      {
+         ident_t fn = mir_get_name(mu, mir_get_arg(mu, n, 0));
+         if (fn == ident_new("__sv_poll_watch_sig")
+             || fn == ident_new("__sv_poll_watch")
+             || fn == ident_new("__sv_poll_wait")
+             || fn == ident_new("__sv_poll_fired")
+             || fn == ident_new("__sv_reactive_yield")
+             || fn == ident_new("__sv_sva_yield")
+             || fn == ident_new("__sv_event_trigger"))
+            return true;
+
+         if (is_jit_call != NULL)
+            *is_jit_call = jit_bind_intrinsic(fn) == NULL;
+         return false;
+      }
+
+   case MIR_OP_PCALL:
+      if (is_jit_call != NULL) {
+         ident_t fn = mir_get_name(mu, mir_get_arg(mu, n, 1));
+         *is_jit_call = jit_bind_intrinsic(fn) == NULL;
+      }
+      return false;
+
+   case MIR_OP_RESUME:
+      if (is_jit_call != NULL) {
+         ident_t fn = mir_get_name(mu, mir_get_arg(mu, n, 0));
+         *is_jit_call = jit_bind_intrinsic(fn) == NULL;
+      }
+      return false;
+
+   case MIR_OP_SYSCALL:
+      if (mir_count_args(mu, n) == 2) {
+         ident_t fn = mir_get_name(mu, mir_get_arg(mu, n, 0));
+         if (fn == ident_new("$time")
+             || fn == ident_new("$stime")
+             || fn == ident_new("$realtime"))
+            return true;
+      }
+      return false;
+
+   default:
+      return false;
+   }
+}
+
 static bool mir_unit_is_signal_only(mir_unit_t *mu)
 {
    if (mir_get_kind(mu) != MIR_UNIT_PROCESS)
@@ -6160,150 +6356,8 @@ static bool mir_unit_is_signal_only(mir_unit_t *mu)
       const int nops = mir_count_nodes(mu, block);
       for (int i = 0; i < nops; i++) {
          mir_value_t n = mir_get_node(mu, block, i);
-         switch (mir_get_op(mu, n)) {
-         case _MIR_DELETED_OP:
-         case MIR_OP_COMMENT:
-         case MIR_OP_CONSUME:
-         case MIR_OP_RETURN:
-         case MIR_OP_JUMP:
-         case MIR_OP_COND:
-         case MIR_OP_CASE:
-         case MIR_OP_PHI:
-         case MIR_OP_SELECT:
-         case MIR_OP_TERNARY:
-         case MIR_OP_WAIT:
-         case MIR_OP_CONST:
-         case MIR_OP_CONST_REAL:
-         case MIR_OP_CONST_ARRAY:
-         case MIR_OP_CONST_REP:
-         case MIR_OP_CONST_RECORD:
-         case MIR_OP_CONST_VEC:
-         case MIR_OP_NULL:
-         case MIR_OP_DEBUG_LOCUS:
-         case MIR_OP_ADD:
-         case MIR_OP_SUB:
-         case MIR_OP_MUL:
-         case MIR_OP_DIV:
-         case MIR_OP_REM:
-         case MIR_OP_MOD:
-         case MIR_OP_EXP:
-         case MIR_OP_AND:
-         case MIR_OP_OR:
-         case MIR_OP_XOR:
-         case MIR_OP_NOT:
-         case MIR_OP_NEG:
-         case MIR_OP_ABS:
-         case MIR_OP_CMP:
-         case MIR_OP_CAST:
-         case MIR_OP_TRAP_ADD:
-         case MIR_OP_TRAP_SUB:
-         case MIR_OP_TRAP_MUL:
-         case MIR_OP_TRAP_EXP:
-         case MIR_OP_TRAP_NEG:
-         case MIR_OP_RANGE_CHECK:
-         case MIR_OP_INDEX_CHECK:
-         case MIR_OP_NULL_CHECK:
-         case MIR_OP_LENGTH_CHECK:
-         case MIR_OP_ZERO_CHECK:
-         case MIR_OP_EXPONENT_CHECK:
-         case MIR_OP_DIR_CHECK:
-         case MIR_OP_RANGE_LENGTH:
-         case MIR_OP_RANGE_NULL:
-         case MIR_OP_BINARY:
-         case MIR_OP_UNARY:
-         case MIR_OP_INSERT:
-         case MIR_OP_TEST:
-         case MIR_OP_DEFINED:
-         case MIR_OP_EXTRACT:
-         case MIR_OP_PACK:
-         case MIR_OP_WRAP:
-         case MIR_OP_UNWRAP:
-         case MIR_OP_UARRAY_LEN:
-         case MIR_OP_UARRAY_LEFT:
-         case MIR_OP_UARRAY_RIGHT:
-         case MIR_OP_UARRAY_DIR:
-         case MIR_OP_ARRAY_REF:
-         case MIR_OP_TABLE_REF:
-         case MIR_OP_RECORD_REF:
-         case MIR_OP_ADDRESS_OF:
-         case MIR_OP_ALL:
-         case MIR_OP_LOAD:
-         case MIR_OP_VAR_UPREF:
-         case MIR_OP_CONTEXT_UPREF:
-         case MIR_OP_LINK_VAR:
-         case MIR_OP_LINK_PACKAGE:
-         case MIR_OP_RESOLVED:
-         case MIR_OP_LAST_VALUE:
-         case MIR_OP_EVENT:
-         case MIR_OP_ACTIVE:
-         case MIR_OP_LAST_EVENT:
-         case MIR_OP_LAST_ACTIVE:
-         case MIR_OP_DRIVING:
-         case MIR_OP_DRIVING_VALUE:
-         case MIR_OP_DRIVE_SIGNAL:
-         case MIR_OP_SCHED_WAVEFORM:
-         case MIR_OP_SCHED_EVENT:
-         case MIR_OP_CLEAR_EVENT:
-         case MIR_OP_SCHED_PROCESS:
-         case MIR_OP_SCHED_INACTIVE:
-         case MIR_OP_SCHED_ACTIVE:
-         case MIR_OP_SCHED_DEPOSIT:
-         case MIR_OP_DEPOSIT_SIGNAL:
-         case MIR_OP_PUT_DRIVER:
-         case MIR_OP_FORCE:
-         case MIR_OP_RELEASE:
-         case MIR_OP_DISCONNECT:
-         case MIR_OP_TRANSFER_SIGNAL:
-         case MIR_OP_OR_TRIGGER:
-         case MIR_OP_CMP_TRIGGER:
-         case MIR_OP_LEVEL_TRIGGER:
-         case MIR_OP_ADD_TRIGGER:
-         case MIR_OP_COVER_STMT:
-         case MIR_OP_COVER_BRANCH:
-         case MIR_OP_COVER_TOGGLE:
-         case MIR_OP_COVER_EXPR:
-         case MIR_OP_COVER_STATE:
-         case MIR_OP_UNREACHABLE:
-         case MIR_OP_ASSERT:
-         case MIR_OP_REPORT:
-         case MIR_OP_DEBUG_OUT:
-         case MIR_OP_GET_COUNTERS:
-         case MIR_OP_ENTER_STATE:
-         case MIR_OP_POP_SCOPE:
-         case MIR_OP_PACKAGE_SCOPE:
-         case MIR_OP_ARRAY_SCOPE:
-         case MIR_OP_RECORD_SCOPE:
-            break;
-
-         case MIR_OP_STORE:
-         case MIR_OP_COPY:
-         case MIR_OP_SET:
-            if (!mir_is_private_dest(mu, mir_get_arg(mu, n, 0)))
-               return false;
-            break;
-
-         case MIR_OP_UNPACK:
-            {
-               mir_value_t tmp = mir_get_arg(mu, n, 2);
-               if (!mir_is_null(tmp) && !mir_is_private_dest(mu, tmp))
-                  return false;
-            }
-            break;
-
-         case MIR_OP_FCALL:
-            {
-               ident_t fn = mir_get_name(mu, mir_get_arg(mu, n, 0));
-               if (fn != ident_new("__sv_poll_watch_sig")
-                   && fn != ident_new("__sv_poll_watch")
-                   && fn != ident_new("__sv_poll_wait")
-                   && fn != ident_new("__sv_poll_fired"))
-                  return false;
-            }
-            break;
-
-         default:
+         if (!mir_op_is_signal_only(mu, n, NULL))
             return false;
-         }
       }
    }
 
@@ -6368,13 +6422,15 @@ void jit_irgen(jit_func_t *f, mir_unit_t *mu)
       should_not_reach_here();
    }
 
+   g->signal_only = mir_unit_is_signal_only(mu);
+
    for (int i = 0; i < nblocks; i++)
       irgen_block(g, mir_get_block(mu, i));
 
    f->nregs       = g->next_reg;
    f->cpoolsz     = g->cpoolptr;
    f->object      = mir_get_object(g->mu);
-   f->signal_only = mir_unit_is_signal_only(mu);
+   f->signal_only = g->signal_only;
 
    for (irgen_label_t *it = g->labels, *tmp; it; it = tmp) {
       assert(it->label < g->func->nirs);

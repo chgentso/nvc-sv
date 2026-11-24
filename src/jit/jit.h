@@ -32,8 +32,12 @@ typedef struct _tlab {
    mspace_t *mspace;
    uint32_t  alloc;
    uint32_t  limit;
+   uint64_t  mem_dirty;
+   uint64_t  _pad;
    char      data[0];
 } tlab_t;
+
+STATIC_ASSERT(offsetof(tlab_t, data) % 16 == 0);
 
 typedef union {
    int64_t  integer;

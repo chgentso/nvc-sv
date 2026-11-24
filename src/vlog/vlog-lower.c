@@ -12096,6 +12096,13 @@ static bool vlog_poll_watch_leaf(vlog_gen_t *g, vlog_node_t v,
    if (decl == NULL)
       return vlog_poll_watch_never(g);
 
+   vlog_node_t etype = vlog_get_type(v);
+   if (etype == NULL && vlog_has_type(decl))
+      etype = vlog_get_type(vlog_type(decl));
+   if (etype != NULL && vlog_kind(etype) == V_DATA_TYPE
+       && vlog_subkind(etype) == DT_EVENT)
+      return vlog_poll_watch_never(g);
+
    // An unpacked array is not held as one value
    vlog_node_t dims[MAX_UNPACKED_DIMS];
    if (vlog_unpacked_dims(v, dims) > 0 || vlog_is_fixed_unpacked(decl))

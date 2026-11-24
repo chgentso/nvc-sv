@@ -592,6 +592,7 @@ void jit_cache_prepare(jit_cache_t *cache, jit_func_t *f, bool huge,
       hash_u64(&ctx, sizeof(tlab_t));
       hash_u64(&ctx, offsetof(tlab_t, alloc));
       hash_u64(&ctx, offsetof(tlab_t, limit));
+      hash_u64(&ctx, offsetof(tlab_t, mem_dirty));
       hash_u64(&ctx, offsetof(tlab_t, data));
       hash_u64(&ctx, sizeof(sig_shared_t));
       hash_u64(&ctx, sizeof(jit_ir_t));

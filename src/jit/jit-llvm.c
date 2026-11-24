@@ -406,6 +406,8 @@ static void llvm_register_types(llvm_obj_t *obj)
          obj->types[LLVM_PTR],                     // Mspace object
          obj->types[LLVM_INT32],                   // Allocation pointer
          obj->types[LLVM_INT32],                   // Limit pointer
+         obj->types[LLVM_INT64],                   // Memory dirty flag
+         obj->types[LLVM_INT64],                   // Alignment padding for data
          LLVMArrayType(obj->types[LLVM_INT8], 0),  // Data
       };
       obj->types[LLVM_TLAB] = LLVMStructTypeInContext(obj->context, fields,
@@ -2538,6 +2540,15 @@ static void cgen_macro_trim(llvm_obj_t *obj, cgen_block_t *cgb, jit_ir_t *ir)
    LLVMBuildStore(obj->builder, watermark, alloc_ptr);
 }
 
+static void cgen_macro_mem_dirty(llvm_obj_t *obj, cgen_block_t *cgb,
+                                 jit_ir_t *ir)
+{
+   LLVMValueRef dirty_ptr = LLVMBuildStructGEP2(obj->builder,
+                                                obj->types[LLVM_TLAB],
+                                                cgb->func->tlab, 3, "");
+   LLVMBuildStore(obj->builder, llvm_int64(obj, 1), dirty_ptr);
+}
+
 static void cgen_macro_reexec(llvm_obj_t *obj, cgen_block_t *cgb, jit_ir_t *ir)
 {
    LLVMValueRef fptr = LLVMGetParam(cgb->func->llvmfn, 0);
@@ -2752,6 +2763,9 @@ static void cgen_ir(llvm_obj_t *obj, cgen_block_t *cgb, jit_ir_t *ir)
       break;
    case MACRO_TRIM:
       cgen_macro_trim(obj, cgb, ir);
+      break;
+   case MACRO_MEM_DIRTY:
+      cgen_macro_mem_dirty(obj, cgb, ir);
       break;
    case MACRO_REEXEC:
       cgen_macro_reexec(obj, cgb, ir);
@@ -3423,7 +3437,7 @@ static void cgen_tlab_alloc_body(llvm_obj_t *obj)
    LLVMBuildStore(obj->builder, next, alloc_ptr);
 
    LLVMValueRef base =
-      LLVMBuildStructGEP2(obj->builder, obj->types[LLVM_TLAB], tlab, 3, "");
+      LLVMBuildStructGEP2(obj->builder, obj->types[LLVM_TLAB], tlab, 5, "");
 
    LLVMValueRef indexes[] = { alloc };
    LLVMValueRef fast_ptr = LLVMBuildInBoundsGEP2(obj->builder,
