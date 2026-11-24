@@ -2403,6 +2403,36 @@ static void vlog_check_open_arg(vlog_node_t sub, vlog_node_t port,
                "array argument '%s'", istr(vlog_ident(port)));
 }
 
+static void vlog_check_arg_type(vlog_node_t port, vlog_node_t arg)
+{
+   if (vlog_kind(arg) == V_EMPTY || vlog_kind(arg) == V_NULL
+       || vlog_kind(arg) == V_HIER_REF)
+      return;
+   else if (vlog_unpacked_dims(port) > 0 || vlog_unpacked_dims(arg) > 0)
+      return;
+
+   vlog_node_t pt = vlog_get_type(port);
+   vlog_node_t at = vlog_get_type(arg);
+   if (pt == NULL || at == NULL)
+      return;
+
+   const bool port_cls = vlog_kind(pt) == V_CLASS_DECL;
+   const bool arg_cls = vlog_kind(at) == V_CLASS_DECL;
+   if (port_cls && !arg_cls) {
+      const type_mask_t amask = get_type_mask(at);
+      if (amask != TM_ERROR && !(amask & TM_CLASS))
+         error_at(vlog_loc(arg), "cannot pass %s to class argument %pQ",
+                  type_mask_str(amask), vlog_ident(port));
+   }
+   else if (arg_cls && !port_cls) {
+      const type_mask_t pmask = get_type_mask(pt);
+      if (pmask != TM_ERROR && !(pmask & TM_CLASS))
+         error_at(vlog_loc(arg), "cannot pass class %pQ to argument %pQ "
+                  "of type '%s'", vlog_ident(at), vlog_ident(port),
+                  type_mask_str(pmask));
+   }
+}
+
 static void vlog_check_call_args(vlog_node_t v, vlog_node_t sub)
 {
    const int nparams = vlog_params(v);
@@ -2449,6 +2479,7 @@ static void vlog_check_call_args(vlog_node_t v, vlog_node_t sub)
             if (vlog_has_value(p)) {
                vlog_check_output_arg(port, vlog_value(p));
                vlog_check_open_arg(sub, port, vlog_value(p));
+               vlog_check_arg_type(port, vlog_value(p));
             }
          }
 
@@ -2464,6 +2495,7 @@ static void vlog_check_call_args(vlog_node_t v, vlog_node_t sub)
          vlog_check_expr(vlog_param(v, i));
          vlog_check_output_arg(vlog_port(sub, i), vlog_param(v, i));
          vlog_check_open_arg(sub, vlog_port(sub, i), vlog_param(v, i));
+         vlog_check_arg_type(vlog_port(sub, i), vlog_param(v, i));
       }
 
       for (int i = npositional; i < nports; i++) {
@@ -2511,6 +2543,7 @@ static void vlog_check_call_args(vlog_node_t v, vlog_node_t sub)
          vlog_check_expr(p);
          vlog_check_output_arg(port, p);
          vlog_check_open_arg(sub, port, p);
+         vlog_check_arg_type(port, p);
 
          if (vlog_kind(p) == V_EMPTY && !vlog_has_value(port)) {
             diag_t *d = diag_new(DIAG_ERROR, vlog_loc(v));
@@ -5145,9 +5178,14 @@ static type_mask_t vlog_check_expr(vlog_node_t v)
             break;
          }
 
-         if ((vlog_subkind(v) == V_METHOD_USER
-              || vlog_subkind(v) == V_METHOD_CLASS) && vlog_has_ref(v)
-             && vlog_kind(vlog_ref(v)) == V_TASK_DECL && v != stmt_method_call)
+         const bool is_user_meth = (vlog_subkind(v) == V_METHOD_USER
+                                    || vlog_subkind(v) == V_METHOD_CLASS)
+            && vlog_has_ref(v)
+            && (vlog_kind(vlog_ref(v)) == V_FUNC_DECL
+                || vlog_kind(vlog_ref(v)) == V_TASK_DECL);
+
+         if (is_user_meth && vlog_kind(vlog_ref(v)) == V_TASK_DECL
+             && v != stmt_method_call)
             error_at(vlog_loc(v), "task %pQ cannot be called in an "
                      "expression", vlog_ident(v));
 
@@ -5156,11 +5194,15 @@ static type_mask_t vlog_check_expr(vlog_node_t v)
          vlog_check_string_method(v);
          vlog_check_queue_method(v);
 
-         const int nparams = vlog_params(v);
-         for (int i = 0; i < nparams; i++) {
-            vlog_node_t p = vlog_param(v, i);
-            if (vlog_kind(p) != V_EMPTY)
-               (void)vlog_check_expr(p);
+         if (is_user_meth)
+            vlog_check_call_args(v, vlog_ref(v));
+         else {
+            const int nparams = vlog_params(v);
+            for (int i = 0; i < nparams; i++) {
+               vlog_node_t p = vlog_param(v, i);
+               if (vlog_kind(p) != V_EMPTY)
+                  (void)vlog_check_expr(p);
+            }
          }
 
          vlog_node_t type = vlog_get_type(v);

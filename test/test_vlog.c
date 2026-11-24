@@ -5000,6 +5000,27 @@ START_TEST(test_covbin1)
 }
 END_TEST
 
+START_TEST(test_methargs1)
+{
+   const error_t expect[] = {
+      { 24, "cannot pass class 'item' to argument 's' of type 'string'" },
+      { 25, "cannot pass string to class argument 'it'" },
+      { 27, "expected at least 1 argument for 'sample' but have 0" },
+      { 28, "expected at most 2 argument for 'sample' but have 3" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/methargs1.sv");
+
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
 Suite *get_vlog_tests(void)
 {
    Suite *s = suite_create("vlog");
@@ -5196,6 +5217,7 @@ Suite *get_vlog_tests(void)
    tcase_add_test(tc, test_dpiname1);
    tcase_add_test(tc, test_evnba1);
    tcase_add_test(tc, test_covbin1);
+   tcase_add_test(tc, test_methargs1);
    suite_add_tcase(s, tc);
 
    return s;
