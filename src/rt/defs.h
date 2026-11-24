@@ -65,12 +65,17 @@ typedef uint8_t net_flags_t;
 #define SIG_F_PACKED2      (1 << 14)
 #define SIG_F_PACKED       (SIG_F_PACKED4 | SIG_F_PACKED2)
 #define SIG_F_PACKED_DRIVEN (1 << 15)
-// Bit 16 reserved for Tier 1.3 fast-write flags
+#define SIG_F_FAST_NOOP    (1 << 16)
 #define SIG_F_POLL_WATCHED (1 << 17)
+#define SIG_F_FAST_DIRECT  (1 << 18)
 typedef uint32_t sig_flags_t;
 
 #define PACK_SRC_SCALAR    (1 << 0)
 #define PACK_SRC_VEC2      (1 << 1)
+#define PACK_SRC_DST4      (1 << 2)
+#define PACK_SRC_WHOLE     (1 << 3)
+#define PACK_SRC_WIDTH_SH  8
+#define PACK_SRC_WIDTH_MSK (0x7fu << PACK_SRC_WIDTH_SH)
 
 typedef enum {
    SCOPE_ROOT,

@@ -3798,7 +3798,18 @@ static void irgen_op_deposit_signal(jit_irgen_t *g, mir_value_t n)
       j_send(g, 0, shared);
       j_send(g, 1, offset);
       j_send(g, 2, count);
-      const uint32_t sflags = irgen_packed_send_vec(g, n, 2);
+      uint32_t sflags = irgen_packed_send_vec(g, n, 2);
+      mir_value_t sig = mir_get_arg(g->mu, n, 0);
+      mir_type_t sig_base = mir_get_base(g->mu, mir_get_type(g->mu, sig));
+      const mir_class_t sig_cls = mir_get_class(g->mu, sig_base);
+      if (sig_cls == MIR_TYPE_VEC4 || sig_cls == MIR_TYPE_VEC2) {
+         const int sig_W = mir_get_size(g->mu, sig_base);
+         if (sig_W >= 1 && sig_W <= 64) {
+            if (sig_cls == MIR_TYPE_VEC4)
+               sflags |= PACK_SRC_DST4;
+            sflags |= PACK_SRC_WHOLE | ((uint32_t)sig_W << PACK_SRC_WIDTH_SH);
+         }
+      }
       j_send(g, 5, jit_value_from_int64(sflags));
       macro_exit(g, JIT_EXIT_DEPOSIT_PACKED);
       return;

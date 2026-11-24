@@ -3253,3 +3253,5 @@ vpi_packed1     verilog,vpi
 fst_packed1     verilog,shell
 island_m1       shell
 vlog_wide_tlab1 verilog
+vlog_fast_write1 verilog
+vpi_fast_direct1 verilog,vpi

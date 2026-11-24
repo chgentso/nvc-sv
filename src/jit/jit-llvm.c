@@ -212,6 +212,7 @@ typedef struct _llvm_obj {
 
 typedef struct _cgen_block {
    LLVMBasicBlockRef  bbref;
+   LLVMBasicBlockRef  exitbb;
    LLVMValueRef       inflags;
    LLVMValueRef       outflags;
    LLVMValueRef      *inregs;
@@ -3041,9 +3042,157 @@ static int cgen_fuse_ir(llvm_obj_t *obj, cgen_block_t *cgb, jit_ir_t *ir)
 
       return nsend;
    }
-   else if ((exit->arg1.exit == JIT_EXIT_DEPOSIT_PACKED
-             || exit->arg1.exit == JIT_EXIT_PUT_DRIVER_PACKED)
-            && nsend == 6) {
+   else if (exit->arg1.exit == JIT_EXIT_DEPOSIT_PACKED && nsend == 6) {
+      LLVMValueRef shared    = cgen_coerce_value(obj, cgb, ir[0].arg2, LLVM_PTR);
+      LLVMValueRef offset    = cgen_coerce_value(obj, cgb, ir[1].arg2, LLVM_INT32);
+      LLVMValueRef count     = cgen_coerce_value(obj, cgb, ir[2].arg2, LLVM_INT32);
+      LLVMValueRef abits     = cgen_coerce_value(obj, cgb, ir[3].arg2, LLVM_INT64);
+      LLVMValueRef bbits     = cgen_coerce_value(obj, cgb, ir[4].arg2, LLVM_INT64);
+      LLVMValueRef src_flags = cgen_coerce_value(obj, cgb, ir[5].arg2, LLVM_INT32);
+
+      const uint32_t sf = ir[5].arg2.kind == JIT_VALUE_INT64
+         ? (uint32_t)ir[5].arg2.int64 : 0;
+      const uint32_t sig_w = (sf & PACK_SRC_WIDTH_MSK) >> PACK_SRC_WIDTH_SH;
+      if (ir[1].arg2.kind == JIT_VALUE_INT64 && ir[1].arg2.int64 == 0
+          && (sf & PACK_SRC_SCALAR) && (sf & PACK_SRC_WHOLE)
+          && sig_w >= 1 && sig_w <= 64
+          && ir[2].arg2.kind == JIT_VALUE_INT64
+          && ir[2].arg2.int64 == sig_w) {
+         const uint64_t top_mask = sig_w == 64
+            ? ~UINT64_C(0) : ((UINT64_C(1) << sig_w) - 1);
+         const bool sig_is4 = !!(sf & PACK_SRC_DST4);
+         const bool src_is2 = !!(sf & PACK_SRC_VEC2);
+
+         LLVMValueRef na = top_mask == ~UINT64_C(0)
+            ? abits : LLVMBuildAnd(obj->builder, abits,
+                                   llvm_int64(obj, top_mask), "na");
+         LLVMValueRef nb = NULL;
+         if (sig_is4) {
+            if (src_is2)
+               nb = llvm_int64(obj, 0);
+            else if (top_mask == ~UINT64_C(0))
+               nb = bbits;
+            else
+               nb = LLVMBuildAnd(obj->builder, bbits,
+                                 llvm_int64(obj, top_mask), "nb");
+         }
+
+         LLVMBasicBlockRef noop_bb =
+            llvm_append_block(obj, cgb->func->llvmfn, "dp_noop");
+         LLVMBasicBlockRef changed_bb =
+            llvm_append_block(obj, cgb->func->llvmfn, "dp_chg");
+         LLVMBasicBlockRef direct_bb =
+            llvm_append_block(obj, cgb->func->llvmfn, "dp_dir");
+         LLVMBasicBlockRef slow_bb =
+            llvm_append_block(obj, cgb->func->llvmfn, "dp_slow");
+         LLVMBasicBlockRef done_bb =
+            llvm_append_block(obj, cgb->func->llvmfn, "dp_done");
+
+         LLVMValueRef fidx[] = { llvm_intptr(obj, 4) };
+         LLVMValueRef fptr = LLVMBuildInBoundsGEP2(
+            obj->builder, obj->types[LLVM_INT8], shared, fidx, 1, "");
+#ifndef LLVM_HAS_OPAQUE_POINTERS
+         fptr = LLVMBuildPointerCast(
+            obj->builder, fptr, LLVMPointerType(obj->types[LLVM_INT32], 0), "");
+#endif
+         LLVMValueRef flags = LLVMBuildLoad2(
+            obj->builder, obj->types[LLVM_INT32], fptr, "sflags");
+         LLVMValueRef has_noop = LLVMBuildICmp(
+            obj->builder, LLVMIntNE,
+            LLVMBuildAnd(obj->builder, flags,
+                         llvm_int32(obj, SIG_F_FAST_NOOP), ""),
+            llvm_int32(obj, 0), "");
+         LLVMBuildCondBr(obj->builder, has_noop, noop_bb, slow_bb);
+
+         LLVMPositionBuilderAtEnd(obj->builder, noop_bb);
+         LLVMValueRef ea_idx[] = { llvm_intptr(obj, 8) };
+         LLVMValueRef ea_ptr = LLVMBuildInBoundsGEP2(
+            obj->builder, obj->types[LLVM_INT8], shared, ea_idx, 1, "");
+#ifndef LLVM_HAS_OPAQUE_POINTERS
+         ea_ptr = LLVMBuildPointerCast(
+            obj->builder, ea_ptr,
+            LLVMPointerType(obj->types[LLVM_INT64], 0), "");
+#endif
+         LLVMValueRef cur_a = LLVMBuildLoad2(
+            obj->builder, obj->types[LLVM_INT64], ea_ptr, "cura");
+         LLVMValueRef eq = LLVMBuildICmp(obj->builder, LLVMIntEQ, cur_a, na, "");
+
+         LLVMValueRef eb_ptr = NULL, cur_b = NULL;
+         if (sig_is4) {
+            LLVMValueRef eb_idx[] = { llvm_intptr(obj, 16) };
+            eb_ptr = LLVMBuildInBoundsGEP2(
+               obj->builder, obj->types[LLVM_INT8], shared, eb_idx, 1, "");
+#ifndef LLVM_HAS_OPAQUE_POINTERS
+            eb_ptr = LLVMBuildPointerCast(
+               obj->builder, eb_ptr,
+               LLVMPointerType(obj->types[LLVM_INT64], 0), "");
+#endif
+            cur_b = LLVMBuildLoad2(
+               obj->builder, obj->types[LLVM_INT64], eb_ptr, "curb");
+            LLVMValueRef eq_b = LLVMBuildICmp(
+               obj->builder, LLVMIntEQ, cur_b, nb, "");
+            eq = LLVMBuildAnd(obj->builder, eq, eq_b, "");
+         }
+         LLVMBuildCondBr(obj->builder, eq, done_bb, changed_bb);
+
+         LLVMPositionBuilderAtEnd(obj->builder, changed_bb);
+         LLVMValueRef has_dir = LLVMBuildICmp(
+            obj->builder, LLVMIntNE,
+            LLVMBuildAnd(obj->builder, flags,
+                         llvm_int32(obj, SIG_F_FAST_DIRECT), ""),
+            llvm_int32(obj, 0), "");
+         LLVMBuildCondBr(obj->builder, has_dir, direct_bb, slow_bb);
+
+         LLVMPositionBuilderAtEnd(obj->builder, direct_bb);
+         LLVMValueRef la_idx[] = { llvm_intptr(obj, sig_is4 ? 24 : 16) };
+         LLVMValueRef la_ptr = LLVMBuildInBoundsGEP2(
+            obj->builder, obj->types[LLVM_INT8], shared, la_idx, 1, "");
+#ifndef LLVM_HAS_OPAQUE_POINTERS
+         la_ptr = LLVMBuildPointerCast(
+            obj->builder, la_ptr,
+            LLVMPointerType(obj->types[LLVM_INT64], 0), "");
+#endif
+         LLVMBuildStore(obj->builder, cur_a, la_ptr);
+         LLVMBuildStore(obj->builder, na, ea_ptr);
+         if (sig_is4) {
+            LLVMValueRef lb_idx[] = { llvm_intptr(obj, 32) };
+            LLVMValueRef lb_ptr = LLVMBuildInBoundsGEP2(
+               obj->builder, obj->types[LLVM_INT8], shared, lb_idx, 1, "");
+#ifndef LLVM_HAS_OPAQUE_POINTERS
+            lb_ptr = LLVMBuildPointerCast(
+               obj->builder, lb_ptr,
+               LLVMPointerType(obj->types[LLVM_INT64], 0), "");
+#endif
+            LLVMBuildStore(obj->builder, cur_b, lb_ptr);
+            LLVMBuildStore(obj->builder, nb, eb_ptr);
+         }
+         LLVMBuildBr(obj->builder, done_bb);
+
+         LLVMPositionBuilderAtEnd(obj->builder, slow_bb);
+         cgen_sync_irpos(obj, cgb, exit);
+         LLVMValueRef args[] = {
+            PTR(cgb->func->anchor),
+            shared, offset, count, abits, bbits, src_flags,
+         };
+         llvm_call_fn(obj, LLVM_DEPOSIT_PACKED, args, ARRAY_LEN(args));
+         LLVMBuildBr(obj->builder, done_bb);
+
+         LLVMPositionBuilderAtEnd(obj->builder, done_bb);
+         cgb->exitbb = done_bb;
+         return nsend;
+      }
+
+      cgen_sync_irpos(obj, cgb, exit);
+
+      LLVMValueRef args[] = {
+         PTR(cgb->func->anchor),
+         shared, offset, count, abits, bbits, src_flags,
+      };
+      llvm_call_fn(obj, LLVM_DEPOSIT_PACKED, args, ARRAY_LEN(args));
+
+      return nsend;
+   }
+   else if (exit->arg1.exit == JIT_EXIT_PUT_DRIVER_PACKED && nsend == 6) {
       LLVMValueRef shared    = cgen_coerce_value(obj, cgb, ir[0].arg2, LLVM_PTR);
       LLVMValueRef offset    = cgen_coerce_value(obj, cgb, ir[1].arg2, LLVM_INT32);
       LLVMValueRef count     = cgen_coerce_value(obj, cgb, ir[2].arg2, LLVM_INT32);
@@ -3057,9 +3206,7 @@ static int cgen_fuse_ir(llvm_obj_t *obj, cgen_block_t *cgb, jit_ir_t *ir)
          PTR(cgb->func->anchor),
          shared, offset, count, abits, bbits, src_flags,
       };
-      const llvm_fn_t fn = exit->arg1.exit == JIT_EXIT_DEPOSIT_PACKED
-         ? LLVM_DEPOSIT_PACKED : LLVM_PUT_DRIVER_PACKED;
-      llvm_call_fn(obj, fn, args, ARRAY_LEN(args));
+      llvm_call_fn(obj, LLVM_PUT_DRIVER_PACKED, args, ARRAY_LEN(args));
 
       return nsend;
    }
@@ -3101,6 +3248,7 @@ static void cgen_basic_blocks(llvm_obj_t *obj, cgen_func_t *func,
 
       cgen_block_t *cgb = &(func->blocks[i]);
       cgb->bbref  = llvm_append_block(obj, func->llvmfn, name);
+      cgb->exitbb = cgb->bbref;
       cgb->source = &(cfg->blocks[i]);
       cgb->func   = func;
 
@@ -3403,7 +3551,7 @@ static void cgen_function(llvm_obj_t *obj, cgen_func_t *func)
          i += skip;
 
       if (i == cgb->source->last) {
-         if (LLVMGetBasicBlockTerminator(cgb->bbref) == NULL) {
+         if (LLVMGetBasicBlockTerminator(cgb->exitbb) == NULL) {
             if (cgb->source->aborts)
                LLVMBuildUnreachable(obj->builder);
             else {
@@ -3437,7 +3585,7 @@ static void cgen_function(llvm_obj_t *obj, cgen_func_t *func)
          for (int j = 0; j < bb->in.count; j++) {
             const int edge = jit_get_edge(&bb->in, j);
             phi_in[j] = func->blocks[edge].outflags;
-            phi_bb[j] = func->blocks[edge].bbref;
+            phi_bb[j] = func->blocks[edge].exitbb;
          }
          LLVMAddIncoming(cgb->inflags, phi_in, phi_bb, bb->in.count);
       }
@@ -3451,7 +3599,7 @@ static void cgen_function(llvm_obj_t *obj, cgen_func_t *func)
                const int edge = jit_get_edge(&bb->in, k);
                assert(func->blocks[edge].outregs[j] != NULL);
                phi_in[k] = func->blocks[edge].outregs[j];
-               phi_bb[k] = func->blocks[edge].bbref;
+               phi_bb[k] = func->blocks[edge].exitbb;
             }
             LLVMAddIncoming(cgb->inregs[j], phi_in, phi_bb, bb->in.count);
          }

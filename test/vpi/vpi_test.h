@@ -148,5 +148,6 @@ void vpicls4_startup(void);
 void vpicls5_startup(void);
 void vpicls6_startup(void);
 void vpi_packed1_startup(void);
+void vpi_fast_direct1_startup(void);
 
 #endif  // _VPI_TEST_H

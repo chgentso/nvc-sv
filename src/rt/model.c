@@ -5586,6 +5586,16 @@ static inline uint64_t packed_top_mask(uint32_t width)
    return (width & 63) ? ((UINT64_C(1) << (width & 63)) - 1) : ~UINT64_C(0);
 }
 
+static inline bool packed_can_fast_direct(const rt_signal_t *s)
+{
+   return (s->shared.flags & SIG_F_PACKED)
+      && s->bit_width <= 64
+      && !(s->nexus.flags & (NET_F_FORCED | NET_F_EFFECTIVE | NET_F_CACHE_EVENT))
+      && !(s->shared.flags & (SIG_F_POLL_WATCHED | SIG_F_CACHE_EVENT))
+      && s->nexus.n_sources == 0
+      && s->nexus.pending == NULL;
+}
+
 static bool packed_save_deferred(rt_model_t *m, rt_nexus_t *n, size_t valuesz)
 {
    rt_proc_t *ap = get_active_proc();
@@ -5973,6 +5983,7 @@ static void force_packed(rt_model_t *m, rt_signal_t *s, uint32_t msb_off,
    packed_rmw_range(pf->abits, pf->bbits, width, msb_off, count,
                     src_a, src_b, NULL);
    s->nexus.flags |= NET_F_FORCED;
+   s->shared.flags &= ~(SIG_F_FAST_NOOP | SIG_F_FAST_DIRECT);
 
    deposit_packed_apply(m, s, msb_off, count, a_val, b_val, src_flags,
                         false, false);
@@ -6011,8 +6022,14 @@ static void release_packed(rt_model_t *m, rt_signal_t *s, uint32_t msb_off,
    bool any_forced = false;
    for (int w = 0; w < nwords && !any_forced; w++)
       any_forced = pf->mask[w] != 0;
-   if (!any_forced)
+   if (!any_forced) {
       s->nexus.flags &= ~NET_F_FORCED;
+      if (s->bit_width <= 64) {
+         s->shared.flags |= SIG_F_FAST_NOOP;
+         if (packed_can_fast_direct(s))
+            s->shared.flags |= SIG_F_FAST_DIRECT;
+      }
+   }
 
    if (!immediate && !(s->shared.flags & SIG_F_PACKED_DRIVEN)
        && (s->shared.flags & SIG_F_REGISTER)) {
@@ -6587,6 +6604,8 @@ void model_set_event_cb(rt_model_t *m, rt_signal_t *s, int offset,
    assert(offset + count <= signal_width(s));
 
    w->signals[w->next_slot++] = s;
+
+   s->shared.flags &= ~SIG_F_FAST_DIRECT;
 
    if (unlikely(s->shared.flags & SIG_F_PACKED))
       count = count > 0 ? 1 : 0;
@@ -7500,6 +7519,7 @@ static void arm_trigger(rt_model_t *m, rt_trigger_t *t, rt_wakeable_t *obj)
          rt_signal_t *s = t->args[0].pointer;
          int32_t offset = t->args[1].integer;
 
+         s->shared.flags &= ~SIG_F_FAST_DIRECT;
          rt_nexus_t *n = split_nexus(m, s, offset, 1);
          sched_event(m, &(n->pending), obj);
       }
@@ -7510,6 +7530,7 @@ static void arm_trigger(rt_model_t *m, rt_trigger_t *t, rt_wakeable_t *obj)
             sig_shared_t *ss = t->args[1].pointer;
             int32_t offset = t->args[2].integer;
 
+            ss->flags &= ~SIG_F_FAST_DIRECT;
             rt_signal_t *s = container_of(ss, rt_signal_t, shared);
 
             rt_nexus_t *n = split_nexus(m, s, offset, 1);
@@ -7524,6 +7545,7 @@ static void arm_trigger(rt_model_t *m, rt_trigger_t *t, rt_wakeable_t *obj)
          int32_t offset = t->args[1].integer;
          int32_t count = t->args[2].integer;
 
+         s->shared.flags &= ~SIG_F_FAST_DIRECT;
          if (unlikely(s->shared.flags & SIG_F_PACKED))
             count = count > 0 ? 1 : 0;
 
@@ -8183,6 +8205,9 @@ void x_transfer_signal(sig_shared_t *target_ss, uint32_t toffset,
    check_postponed(after, proc);
    check_reject_limit(target, after, reject);
 
+   source_ss->flags &= ~SIG_F_FAST_DIRECT;
+   target_ss->flags &= ~SIG_F_FAST_DIRECT;
+
    rt_model_t *m = get_model();
 
    rt_transfer_t *t = static_alloc(m, sizeof(rt_transfer_t));
@@ -8220,6 +8245,8 @@ int32_t x_test_net_event(sig_shared_t *ss, uint32_t offset, int32_t count)
    TRACE("_test_net_event %s offset=%d count=%d",
          istr(tree_ident(s->where)), offset, count);
 
+   ss->flags &= ~SIG_F_FAST_DIRECT;
+
    int32_t result = 0;
    rt_model_t *m = get_model();
    if (unlikely(ss->flags & SIG_F_PACKED))
@@ -8254,6 +8281,8 @@ int32_t x_test_net_active(sig_shared_t *ss, uint32_t offset, int32_t count)
    TRACE("_test_net_active %s offset=%d count=%d",
          istr(tree_ident(s->where)), offset, count);
 
+   ss->flags &= ~SIG_F_FAST_DIRECT;
+
    rt_model_t *m = get_model();
    if (unlikely(ss->flags & SIG_F_PACKED))
       count = count > 0 ? 1 : 0;
@@ -8276,6 +8305,8 @@ void x_sched_event(sig_shared_t *ss, uint32_t offset, int32_t count)
 
    TRACE("schedule event %s+%d count=%d", istr(tree_ident(s->where)),
          offset, count);
+
+   ss->flags &= ~SIG_F_FAST_DIRECT;
 
    rt_wakeable_t *obj = get_active_wakeable();
 
@@ -8319,6 +8350,8 @@ void x_sched_active(sig_shared_t *ss, uint32_t offset, int32_t count)
 
    TRACE("schedule active %s+%d count=%d", istr(tree_ident(s->where)),
          offset, count);
+
+   ss->flags &= ~SIG_F_FAST_DIRECT;
 
    rt_wakeable_t *obj = get_active_wakeable();
    rt_model_t *m = get_model();
@@ -8524,6 +8557,8 @@ int64_t x_last_event(sig_shared_t *ss, uint32_t offset, int32_t count)
    TRACE("_last_event %s offset=%d count=%d",
          istr(tree_ident(s->where)), offset, count);
 
+   ss->flags &= ~SIG_F_FAST_DIRECT;
+
    int64_t last = TIME_HIGH;
 
    rt_model_t *m = get_model();
@@ -8548,6 +8583,8 @@ int64_t x_last_active(sig_shared_t *ss, uint32_t offset, int32_t count)
 
    TRACE("_last_active %s offset=%d count=%d",
          istr(tree_ident(s->where)), offset, count);
+
+   ss->flags &= ~SIG_F_FAST_DIRECT;
 
    int64_t last = TIME_HIGH;
 
@@ -8579,6 +8616,9 @@ void x_map_signal(sig_shared_t *src_ss, uint32_t src_offset,
          istr(tree_ident(dst_s->where)), dst_offset, count);
 
    assert(src_s != dst_s);
+
+   src_ss->flags &= ~(SIG_F_FAST_NOOP | SIG_F_FAST_DIRECT);
+   dst_ss->flags &= ~(SIG_F_FAST_NOOP | SIG_F_FAST_DIRECT);
 
    rt_model_t *m = get_model();
 
@@ -8926,6 +8966,8 @@ sig_shared_t *x_init_packed(int64_t width, uint64_t abits, uint64_t bbits,
    setup_signal(m, s, where, 1, MIN(snapsz, 255U), flags, offset);
    s->bit_width = w;
    s->shared.size = (uint32_t)snapsz;
+   if (w <= 64 && !(s->nexus.flags & (NET_F_FORCED | NET_F_EFFECTIVE)))
+      s->shared.flags |= SIG_F_FAST_NOOP | SIG_F_FAST_DIRECT;
 
    uint64_t *eff_a = (uint64_t *)s->shared.data;
    uint64_t *drv_a = (uint64_t *)(s->shared.data + 2 * snapsz);
@@ -9585,7 +9627,7 @@ void x_sv_poll_watch_sig(sig_shared_t *ss, uint32_t offset, unsigned count)
    }
 
    rt_signal_t *s = container_of(ss, rt_signal_t, shared);
-   ss->flags |= SIG_F_POLL_WATCHED;
+   ss->flags = (ss->flags | SIG_F_POLL_WATCHED) & ~SIG_F_FAST_DIRECT;
 
    if (ss->flags & SIG_F_PACKED) {
       sv_watch_add(ss->data, ss->size, true);
@@ -10656,6 +10698,7 @@ rt_trigger_t *x_or_trigger(rt_trigger_t *left, rt_trigger_t *right)
 
 void *x_cmp_trigger(sig_shared_t *ss, uint32_t offset, int64_t right)
 {
+   ss->flags &= ~SIG_F_FAST_DIRECT;
    rt_model_t *m = get_model();
    rt_signal_t *s = container_of(ss, rt_signal_t, shared);
 
@@ -10675,6 +10718,7 @@ void *x_cmp_trigger(sig_shared_t *ss, uint32_t offset, int64_t right)
 
 void *x_level_trigger(sig_shared_t *ss, uint32_t offset, int32_t count)
 {
+   ss->flags &= ~SIG_F_FAST_DIRECT;
    rt_model_t *m = get_model();
    rt_signal_t *s = container_of(ss, rt_signal_t, shared);
 
