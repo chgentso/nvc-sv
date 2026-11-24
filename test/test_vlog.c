@@ -4979,6 +4979,27 @@ START_TEST(test_evnba1)
 }
 END_TEST
 
+START_TEST(test_covbin1)
+{
+   const error_t expect[] = {
+      {  8, "duplicate bin name 'a' in coverpoint 'cp1'" },
+      { 12, "duplicate bin name 'a' in coverpoint 'cp2'" },
+      { 16, "a default bin cannot be declared as ignore_bins" },
+      { 20, "a default bin cannot be declared as ignore_bins" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/covbin1.sv");
+
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
 Suite *get_vlog_tests(void)
 {
    Suite *s = suite_create("vlog");
@@ -5174,6 +5195,7 @@ Suite *get_vlog_tests(void)
    tcase_add_test(tc, test_funcnb2);
    tcase_add_test(tc, test_dpiname1);
    tcase_add_test(tc, test_evnba1);
+   tcase_add_test(tc, test_covbin1);
    suite_add_tcase(s, tc);
 
    return s;

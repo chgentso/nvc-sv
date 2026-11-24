@@ -17028,6 +17028,15 @@ static bool p_cov_bins(cov_parse_t *cp, cov_cp_t *c)
    }
 
    b.name = p_identifier();
+   const loc_t name_loc = state.last_loc;
+
+   for (int i = 0; i < c->nbins; i++) {
+      if (c->bins[i].name == b.name) {
+         error_at(&name_loc, "duplicate bin name %pQ in coverpoint %pQ",
+                  b.name, c->label);
+         break;
+      }
+   }
 
    if (optional(tLSQUARE)) {
       static const token_t stops[] = { tRSQUARE, tEOF };
@@ -17081,6 +17090,9 @@ static bool p_cov_bins(cov_parse_t *cp, cov_cp_t *c)
       consume(tDEFAULT);
       if (peek() == tSEQUENCE)
          consume(tSEQUENCE);
+      if (b.kind == COV_IGNORE)
+         error_at(&state.last_loc, "a default bin cannot be declared as "
+                  "ignore_bins");
       b.kind = COV_DEFAULT;
       break;
    default:
@@ -17557,6 +17569,15 @@ static bool p_cov_cross(cov_parse_t *cp, ident_t label)
             }
 
             b.name = p_identifier();
+            const loc_t name_loc = state.last_loc;
+
+            for (int i = 0; i < x.nbins; i++) {
+               if (x.bins[i].name == b.name) {
+                  error_at(&name_loc, "duplicate bin name %pQ in cross %pQ",
+                           b.name, x.label);
+                  break;
+               }
+            }
 
             if (peek() == tLSQUARE)
                return cov_sorry(cp, "an array of cross bins");
