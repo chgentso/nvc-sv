@@ -33,6 +33,7 @@
 #include "rt/copy.h"
 #include "rt/defs.h"
 #include "rt/heap.h"
+#include "rt/island.h"
 #include "rt/model.h"
 #include "rt/mtprof.h"
 #include "rt/random.h"
@@ -243,6 +244,7 @@ typedef struct _rt_model {
       unsigned     count;
       unsigned     max;
    } nb_packed_q;
+   rt_island_mgr_t   *islands;
 } rt_model_t;
 
 #define FMT_VALUES_SZ   128
@@ -972,6 +974,9 @@ void model_free(rt_model_t *m)
       hash_free(m->packed_delayed);
       m->packed_delayed = NULL;
    }
+
+   rt_island_mgr_free(m->islands);
+   m->islands = NULL;
 
    if (m->root != NULL)
       cleanup_scope(m, m->root);
@@ -3416,6 +3421,8 @@ void model_reset(rt_model_t *m)
 
    tlab_reset(thread->tlab);   // No allocations can be live past here
 
+   rt_island_reset_all(m->islands);
+
    run_callbacks(m, END_OF_INITIALISATION);
 }
 
@@ -4063,8 +4070,10 @@ static void procq_do(rt_model_t *m, rt_wakeable_t *obj, defer_fn_t fn,
       deferq_do(&m->latepostq, fn, arg);
    else if (obj->postponed)
       deferq_do(&m->postponedq, fn, arg);
-   else if (obj->reschedule)
+   else if (obj->reschedule) {
       deferq_do(&m->reschedq, fn, arg);
+      m->next_is_delta |= m->blocking_update;
+   }
    else if (obj->reactive) {
       deferq_do(&m->reactiveq, fn, arg);
       container_of(obj, rt_proc_t, wakeable)->wake_iter = m->iteration;
@@ -5050,6 +5059,9 @@ static void model_cycle_body(rt_model_t *m)
    (void)mtp_enter(MTP_TASKQ);
    deferq_run_procs(m, &m->next_procq);
    (void)mtp_enter(MTP_OTHER);
+
+   if (!rt_island_eval_dirty(m->jit, m, m->islands))
+      m->force_stop = true;
 
    run_callbacks(m, END_OF_PROCESSES);
 
@@ -9783,6 +9795,38 @@ void x_sv_poll_fired(void)
    // which may change the state another poller depends on
 
    sv_pollers_fired++;
+}
+
+void rt_island_deposit_packed(rt_model_t *m, rt_signal_t *s, uint32_t msb_off,
+                              uint32_t count, uint64_t a_val, uint64_t b_val,
+                              uint32_t src_flags)
+{
+   deposit_packed_apply(m, s, msb_off, count, a_val, b_val, src_flags,
+                        true, false);
+}
+
+void *x_sv_island_begin(struct _ffi_closure *closure, uint32_t state_bytes,
+                        uint32_t nsigs)
+{
+   rt_model_t *m = get_model();
+   ffi_closure_t *c = (ffi_closure_t *)closure;
+   assert(c != NULL);
+   void *inst_ctx = c->nargs > 0 ? c->args[0].pointer : NULL;
+   return rt_island_begin(m, &m->islands, c->handle, inst_ctx,
+                          state_bytes, nsigs);
+}
+
+void x_sv_island_bind_sig(void *handle, uint32_t idx, sig_shared_t *ss,
+                          int32_t sig_offset, uint32_t a_off, uint32_t b_off,
+                          uint32_t width, uint32_t nelems, uint32_t flags)
+{
+   rt_island_bind_sig(handle, idx, ss, sig_offset, a_off, b_off,
+                      width, nelems, flags);
+}
+
+void x_sv_island_finish(void *handle)
+{
+   rt_island_finish(handle);
 }
 
 typedef struct _sv_nba {

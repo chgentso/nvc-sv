@@ -13,6 +13,8 @@ lib_libnvc_a_SOURCES += \
 	src/rt/standard.c \
 	src/rt/simpkg.c \
 	src/rt/structs.h \
+	src/rt/island.h \
+	src/rt/island.c \
 	src/rt/model.h \
 	src/rt/model.c \
 	src/rt/crv.c \
