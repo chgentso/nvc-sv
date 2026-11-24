@@ -27352,6 +27352,7 @@ static vlog_node_t p_module_declaration(void)
    BEGIN("module declaration");
 
    vlog_node_t mod = vlog_new(V_MODULE);
+   p_port_conn_flags(mod);
 
    vlog_node_t saved_module = current_module;
    current_module = mod;

@@ -4898,13 +4898,31 @@ END_TEST
 START_TEST(test_funcnb1)
 {
    const error_t expect[] = {
-      {  6, "non-blocking assignment is not allowed in a function" },
-      { 18, "non-blocking assignment is not allowed in a final procedure" },
+      { 9, "non-blocking assignment is not allowed in a final procedure" },
       { -1, NULL }
    };
    expect_errors(expect);
 
    input_from_file(TESTDIR "/vlog/funcnb1.sv");
+
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
+START_TEST(test_funcnb2)
+{
+   const error_t expect[] = {
+      { 7, "non-blocking assignment is not allowed in a function" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   set_default_keywords(VLOG_1364_2005);
+   input_from_file(TESTDIR "/vlog/funcnb2.v");
 
    vlog_check(do_parse_only(V_MODULE));
 
@@ -5125,6 +5143,7 @@ Suite *get_vlog_tests(void)
    tcase_add_test(tc, test_castcls1);
    tcase_add_test(tc, test_countbits1);
    tcase_add_test(tc, test_funcnb1);
+   tcase_add_test(tc, test_funcnb2);
    tcase_add_test(tc, test_dpiname1);
    suite_add_tcase(s, tc);
 

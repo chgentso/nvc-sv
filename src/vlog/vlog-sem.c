@@ -427,6 +427,7 @@ static void vlog_check_net_lvalue(vlog_node_t v, vlog_node_t where)
 static bool in_function = false;
 static bool in_final = false;
 static bool in_static_method = false;
+static bool in_sv_unit = false;
 static bool in_sva_expr = false;
 
 static bool vlog_is_assoc_type(vlog_node_t type)
@@ -1177,9 +1178,12 @@ static void vlog_check_pattern_target(vlog_node_t target, vlog_node_t pat)
 
 static void vlog_check_nbassign(vlog_node_t v)
 {
-   if (in_function)
-      error_at(vlog_loc(v), "non-blocking assignment is not allowed in a %s",
-               in_final ? "final procedure" : "function");
+   if (in_final)
+      error_at(vlog_loc(v), "non-blocking assignment is not allowed in a "
+               "final procedure");
+   else if (in_function && !in_sv_unit)
+      error_at(vlog_loc(v), "non-blocking assignment is not allowed in a "
+               "function");
 
    vlog_node_t target = vlog_target(v);
    type_mask_t lmask = vlog_check_expr(target);
@@ -5589,11 +5593,23 @@ void vlog_check(vlog_node_t v)
 {
    switch (vlog_kind(v)) {
    case V_MODULE:
-      vlog_check_module(v);
+      {
+         const bool was_sv = in_sv_unit;
+         in_sv_unit = !!(vlog_flags(v) & (VLOG_F_SYSTEMVERILOG
+                                          | VLOG_F_INTERFACE
+                                          | VLOG_F_CHECKER));
+         vlog_check_module(v);
+         in_sv_unit = was_sv;
+      }
       break;
    case V_PACKAGE:
    case V_NAMESPACE:
-      vlog_check_decls(v);
+      {
+         const bool was_sv = in_sv_unit;
+         in_sv_unit = true;
+         vlog_check_decls(v);
+         in_sv_unit = was_sv;
+      }
       break;
    case V_BIND:
       vlog_check_stmts(v);

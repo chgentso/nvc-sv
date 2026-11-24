@@ -1,17 +1,8 @@
 module funcnb1;
    reg x;
 
-   function int f1(input logic a);
-      begin : nested
-         x <= a;         // Error: non-blocking assignment in function
-         return 0;
-      end
-   endfunction
-
-   function void f2(input logic a);
-      fork
-         x <= a;         // OK: inside fork...join_none
-      join_none
+   function void f_sv(input logic a);
+      x <= a;            // OK in SystemVerilog (IEEE 1800 13.4)
    endfunction
 
    final begin
