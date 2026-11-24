@@ -36320,7 +36320,8 @@ static void vlog_lower_locals(vlog_gen_t *g, vlog_node_t v)
       switch (vlog_kind(d)) {
       case V_VAR_DECL:
          // Lives in the enclosing unit except during constant evaluation
-         if ((vlog_flags(d) & VLOG_F_STATIC) && !g->constfunc)
+         if ((vlog_flags(d) & VLOG_F_STATIC)
+             && (!g->constfunc || vlog_kind(v) == V_SEQ_BLOCK))
             break;
          // Fall-through
       case V_LOCAL_DECL:

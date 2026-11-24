@@ -2073,10 +2073,12 @@ bool vlog_needs_polling(vlog_node_t v)
          case V_GENVAR_DECL:
             return false;
          case V_VAR_DECL:
-            // Variables in a package are memory rather than signals
+            // Package/$unit variables and class static variables are memory
+            // rather than signals; module static locals are signals
             return (vlog_flags(d) & VLOG_F_PROPERTY)
                || vlog_is_dynamic_type(vlog_type(d))
-               || vlog_has_ident2(d) || (vlog_flags(d) & VLOG_F_STATIC);
+               || vlog_has_ident2(d)
+               || ((vlog_flags(d) & VLOG_F_STATIC) && vlog_has_ref(d));
          default:
             return true;
          }

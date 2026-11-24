@@ -758,6 +758,11 @@ static void vlog_check_decls(vlog_node_t v)
    const int ndecls = vlog_decls(v);
    for (int i = 0; i < ndecls; i++) {
       vlog_node_t d = vlog_decl(v, i);
+      // Static locals inside a block live on the enclosing unit via
+      // pending_statics and are checked there
+      if (vlog_kind(v) == V_SEQ_BLOCK && vlog_kind(d) == V_VAR_DECL
+          && (vlog_flags(d) & VLOG_F_STATIC))
+         continue;
       vlog_check(d);
 
       if (vlog_kind(d) == V_IMPORT_DECL && (vlog_flags(d) & VLOG_F_EXPORT)

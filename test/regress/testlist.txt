@@ -3242,3 +3242,4 @@ vlog_alias1 verilog
 vlog_pattern_cmp1 verilog
 vlog_class_inner1 verilog
 vlog_typedef_fwd1 verilog
+svcombstatic1   verilog

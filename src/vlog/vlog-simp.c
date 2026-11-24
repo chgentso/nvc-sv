@@ -374,6 +374,12 @@ static void build_sensitivity(vlog_node_t ctrl, vlog_node_t v, hset_t *set,
       }
       break;
    case V_FOR_INIT:
+      {
+         const int ndecls = vlog_decls(v);
+         for (int i = 0; i < ndecls; i++)
+            hset_insert(set, vlog_decl(v, i));
+      }
+      // Fall-through
    case V_FOR_STEP:
       {
          const int nstmts = vlog_stmts(v);

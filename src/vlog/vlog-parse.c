@@ -15098,8 +15098,9 @@ static void p_static_local_decls(vlog_node_t parent, vlog_node_t home,
       }
 
       if (!added && (vlog_kind(parent) == V_FUNC_DECL
-                     || vlog_kind(parent) == V_TASK_DECL))
-         vlog_add_decl(parent, d);         // Visible as subroutine.name
+                     || vlog_kind(parent) == V_TASK_DECL
+                     || vlog_kind(parent) == V_SEQ_BLOCK))
+         vlog_add_decl(parent, d);         // Visible as subroutine.name or block local
 
       if (vlog_kind(home) == V_MODULE || vlog_kind(home) == V_PACKAGE)
          APUSH(pending_statics, d);        // Added at the end of the unit
