@@ -5075,8 +5075,11 @@ static void model_cycle_body(rt_model_t *m)
    if (m->nonblockq.count > 0 || m->nb_packed_q.count > 0) {
       TRACE("begin non-blocking assignment region");
       (void)mtp_enter(MTP_NBA);
-      if (m->nb_packed_q.count > 0)
+      if (m->nb_packed_q.count > 0) {
          drain_nb_packed(m);
+         if (m->nonblockq.count == 0 && m->reschedq.count > 0)
+            deferq_swap(&m->reschedq, &m->nonblockq);
+      }
       if (m->nonblockq.count > 0)
          deferq_run(m, &m->nonblockq);
       (void)mtp_enter(MTP_OTHER);
@@ -5877,17 +5880,19 @@ static void drain_nb_packed(rt_model_t *m)
          if (eff_a[0] == na && (!is4 || eff_b[0] == nb))
             continue;
 
-         if (sflags & SIG_F_FAST_DIRECT) {
-            uint64_t *last_a = (uint64_t *)(s->shared.data + s->shared.size);
-            last_a[0] = eff_a[0];
-            eff_a[0] = na;
-            if (is4) {
-               uint64_t *last_b = last_a + 1;
-               last_b[0] = eff_b[0];
-               eff_b[0] = nb;
-            }
-            continue;
+         uint64_t *last_a = (uint64_t *)(s->shared.data + s->shared.size);
+         last_a[0] = eff_a[0];
+         eff_a[0] = na;
+         if (is4) {
+            uint64_t *last_b = last_a + 1;
+            last_b[0] = eff_b[0];
+            eff_b[0] = nb;
          }
+         if (!(sflags & SIG_F_FAST_DIRECT)) {
+            m->trigger_epoch++;
+            deposit_notify(m, &(s->nexus));
+         }
+         continue;
       }
       deposit_packed_apply(m, s, 0, s->bit_width, items[i].a, items[i].b,
                            items[i].flags, true, false);
