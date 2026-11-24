@@ -126,6 +126,7 @@ void x_sv_program_end(void);
 void x_sv_event_trigger(void *event);
 void x_sv_event_trigger_nba(void *event, int64_t after);
 void x_sv_poll_watch(const void *ptr, unsigned size);
+void x_sv_poll_watch_sig(sig_shared_t *ss, uint32_t offset, unsigned count);
 void x_sv_poll_wait(void);
 void x_sv_poll_fired(void);
 int64_t x_sv_event_triggered(void *event);

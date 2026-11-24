@@ -61,6 +61,8 @@ typedef uint8_t net_flags_t;
 #define SIG_F_CACHE_EVENT  (1 << 10)
 #define SIG_F_EVENT_FLAG   (1 << 11)
 #define SIG_F_REGISTER     (1 << 12)
+// Bits 13-16 reserved
+#define SIG_F_POLL_WATCHED (1 << 17)
 typedef uint32_t sig_flags_t;
 
 typedef enum {

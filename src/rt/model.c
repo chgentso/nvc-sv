@@ -808,6 +808,8 @@ static void cleanup_signal(rt_model_t *m, rt_signal_t *s)
    free(s->index);
 }
 
+static void sv_watch_free(struct _sv_watch *w);
+
 static void cleanup_scope(rt_model_t *m, rt_scope_t *scope)
 {
    for (int i = 0; i < scope->procs.count; i++) {
@@ -816,7 +818,7 @@ static void cleanup_scope(rt_model_t *m, rt_scope_t *scope)
       tlab_release(m->jit, p->tlab);
       if (p->task != NULL)
          sv_task_destroy(m, p);
-      free(p->watch);
+      sv_watch_free(p->watch);
       free(p);
    }
    ACLEAR(scope->procs);
@@ -1334,21 +1336,54 @@ static A(sv_handle_t) sv_handles = AINIT;
 
 static void note_wait(rt_model_t *m, rt_proc_t *proc);
 
-#define SV_WATCH_MAX   16
-#define SV_WATCH_BYTES 32
+#define SV_WATCH_INLINE 8
+#define SV_WATCH_BYTES  32
+
+typedef struct {
+   const void *ptr;
+   unsigned    size;
+   bool        is_sig;
+   union {
+      uint8_t  snap[SV_WATCH_BYTES];
+      uint8_t *ext;
+   };
+} sv_watch_item_t;
 
 typedef struct _sv_watch {
-   unsigned  count;
-   struct {
-      const void *ptr;
-      unsigned    size;
-      uint8_t     snap[SV_WATCH_BYTES];
-   } item[SV_WATCH_MAX];
+   unsigned         count;
+   unsigned         max;
+   bool             has_sig;
+   sv_watch_item_t *items;
+   sv_watch_item_t  inline_items[SV_WATCH_INLINE];
 } sv_watch_t;
 
 // Memory read by a condition the process polls, collected until it waits
 static sv_watch_t sv_watch_pending;
 static bool       sv_watch_never = false;
+
+static void sv_watch_clear(sv_watch_t *w)
+{
+   if (w == NULL)
+      return;
+
+   for (unsigned i = 0; i < w->count; i++) {
+      if (w->items[i].size > SV_WATCH_BYTES)
+         free(w->items[i].ext);
+   }
+   w->count = 0;
+   w->has_sig = false;
+}
+
+static void sv_watch_free(sv_watch_t *w)
+{
+   if (w == NULL)
+      return;
+
+   sv_watch_clear(w);
+   if (w->items != NULL && w->items != w->inline_items)
+      free(w->items);
+   free(w);
+}
 
 static inline bool sv_watch_item_eq(const void *a, const void *b, unsigned sz)
 {
@@ -1381,10 +1416,16 @@ static inline bool sv_watch_item_eq(const void *a, const void *b, unsigned sz)
    }
 }
 
+static inline bool sv_watch_item_unchanged(const sv_watch_item_t *item)
+{
+   const void *snap = item->size <= SV_WATCH_BYTES ? item->snap : item->ext;
+   return sv_watch_item_eq(item->ptr, snap, item->size);
+}
+
 static inline bool sv_watch_unchanged(const sv_watch_t *w)
 {
    for (unsigned i = 0; i < w->count; i++) {
-      if (!sv_watch_item_eq(w->item[i].ptr, w->item[i].snap, w->item[i].size))
+      if (!sv_watch_item_unchanged(&w->items[i]))
          return false;
    }
 
@@ -1433,13 +1474,13 @@ static inline void sv_watch_poller_push(rt_proc_t *proc)
 
    sv_watch_poller_t e = {
       .proc  = proc,
-      .count = w->count,
+      .count = MIN(w->count, UINT8_MAX),
    };
-   const unsigned sz0 = w->item[0].size;
+   const unsigned sz0 = w->items[0].size;
    if (sz0 == 1 || sz0 == 2 || sz0 == 4 || sz0 == 8) {
-      e.ptr0 = w->item[0].ptr;
+      e.ptr0 = w->items[0].ptr;
       e.sz0  = sz0;
-      memcpy(&e.snap0, w->item[0].snap, sz0);
+      memcpy(&e.snap0, w->items[0].snap, sz0);
    }
 
    APUSH(sv_watched, e);
@@ -4416,8 +4457,7 @@ static void sv_poll_end_cycle(rt_model_t *m)
             if (unchanged && e->count > 1) {
                const sv_watch_t *w = e->proc->watch;
                for (unsigned j = 1; j < w->count; j++) {
-                  if (!sv_watch_item_eq(w->item[j].ptr, w->item[j].snap,
-                                        w->item[j].size)) {
+                  if (!sv_watch_item_unchanged(&w->items[j])) {
                      unchanged = false;
                      break;
                   }
@@ -4466,8 +4506,7 @@ static void sv_poll_end_cycle(rt_model_t *m)
             if (unchanged && e->count > 1) {
                const sv_watch_t *w = p->watch;
                for (unsigned j = 1; j < w->count; j++) {
-                  if (!sv_watch_item_eq(w->item[j].ptr, w->item[j].snap,
-                                        w->item[j].size)) {
+                  if (!sv_watch_item_unchanged(&w->items[j])) {
                      unchanged = false;
                      break;
                   }
@@ -8392,30 +8431,75 @@ void x_sv_program_end(void)
    }
 }
 
-void x_sv_poll_watch(const void *ptr, unsigned size)
+static void sv_watch_add(const void *ptr, unsigned size, bool is_sig)
 {
-   // The condition about to be polled reads this memory.  A null address
-   // or anything which is not simple memory makes it always polled.
-
-   if (ptr == NULL || size == 0 || size > SV_WATCH_BYTES) {
+   if (ptr == NULL || size == 0) {
       sv_watch_never = true;
       return;
    }
 
    for (unsigned i = 0; i < sv_watch_pending.count; i++) {
-      if (sv_watch_pending.item[i].ptr == ptr
-          && sv_watch_pending.item[i].size == size)
+      if (sv_watch_pending.items[i].ptr == ptr
+          && sv_watch_pending.items[i].size == size) {
+         sv_watch_pending.items[i].is_sig |= is_sig;
+         sv_watch_pending.has_sig |= is_sig;
          return;
+      }
    }
 
-   if (sv_watch_pending.count == SV_WATCH_MAX)
-      sv_watch_never = true;
-   else {
-      const unsigned n = sv_watch_pending.count++;
-      sv_watch_pending.item[n].ptr = ptr;
-      sv_watch_pending.item[n].size = size;
-      memcpy(sv_watch_pending.item[n].snap, ptr, size);
+   if (sv_watch_pending.items == NULL) {
+      sv_watch_pending.items = sv_watch_pending.inline_items;
+      sv_watch_pending.max = SV_WATCH_INLINE;
    }
+   else if (sv_watch_pending.count == sv_watch_pending.max) {
+      const unsigned new_max = sv_watch_pending.max * 2;
+      if (sv_watch_pending.items == sv_watch_pending.inline_items) {
+         sv_watch_item_t *arr = xmalloc_array(new_max, sizeof(sv_watch_item_t));
+         memcpy(arr, sv_watch_pending.inline_items,
+                sv_watch_pending.count * sizeof(sv_watch_item_t));
+         sv_watch_pending.items = arr;
+      }
+      else {
+         sv_watch_pending.items = xrealloc_array(sv_watch_pending.items,
+                                                 new_max,
+                                                 sizeof(sv_watch_item_t));
+      }
+      sv_watch_pending.max = new_max;
+   }
+
+   sv_watch_item_t *it = &sv_watch_pending.items[sv_watch_pending.count++];
+   it->ptr = ptr;
+   it->size = size;
+   it->is_sig = is_sig;
+   if (size <= SV_WATCH_BYTES)
+      memcpy(it->snap, ptr, size);
+   else {
+      it->ext = xmalloc(size);
+      memcpy(it->ext, ptr, size);
+   }
+   sv_watch_pending.has_sig |= is_sig;
+}
+
+void x_sv_poll_watch(const void *ptr, unsigned size)
+{
+   // The condition about to be polled reads this memory.  A null address
+   // or anything which is not simple memory makes it always polled.
+
+   sv_watch_add(ptr, size, false);
+}
+
+void x_sv_poll_watch_sig(sig_shared_t *ss, uint32_t offset, unsigned count)
+{
+   if (ss == NULL || count == 0) {
+      sv_watch_never = true;
+      return;
+   }
+
+   rt_signal_t *s = container_of(ss, rt_signal_t, shared);
+   ss->flags |= SIG_F_POLL_WATCHED;
+
+   const unsigned elemsz = s->nexus.size;
+   sv_watch_add(ss->data + (size_t)offset * elemsz, count * elemsz, true);
 }
 
 void x_sv_poll_wait(void)
@@ -8428,25 +8512,41 @@ void x_sv_poll_wait(void)
    TRACE("process %s polls", istr(proc->name));
 
    if (sv_watch_pending.count > 0 && !sv_watch_never) {
-      if (proc->watch == NULL)
-         proc->watch = xmalloc(sizeof(sv_watch_t));
+      if (proc->watch == NULL) {
+         proc->watch = xcalloc(sizeof(sv_watch_t));
+         proc->watch->items = proc->watch->inline_items;
+         proc->watch->max = SV_WATCH_INLINE;
+      }
+      else
+         sv_watch_clear(proc->watch);
 
       const unsigned n = sv_watch_pending.count;
-      memcpy(proc->watch, &sv_watch_pending,
-             offsetof(sv_watch_t, item[0]) + n * sizeof(proc->watch->item[0]));
+      if (n > proc->watch->max) {
+         if (proc->watch->items != proc->watch->inline_items)
+            free(proc->watch->items);
+         proc->watch->items = xmalloc_array(n, sizeof(sv_watch_item_t));
+         proc->watch->max = n;
+      }
 
+      memcpy(proc->watch->items, sv_watch_pending.items,
+             n * sizeof(sv_watch_item_t));
+      proc->watch->count = n;
+      proc->watch->has_sig = sv_watch_pending.has_sig;
+
+      // Ownership of any ext buffers transferred to proc->watch
       sv_watch_pending.count = 0;
+      sv_watch_pending.has_sig = false;
       sv_watch_never = false;
 
       note_wait(get_model(), proc);
       sv_watch_poller_push(proc);
    }
    else {
-      if (proc->watch != NULL)
-         proc->watch->count = 0;
-
-      sv_watch_pending.count = 0;
+      sv_watch_clear(&sv_watch_pending);
       sv_watch_never = false;
+
+      if (proc->watch != NULL)
+         sv_watch_clear(proc->watch);
 
       note_wait(get_model(), proc);
       APUSH(sv_pollers, proc);
@@ -8621,6 +8721,14 @@ static void sv_poll_free(void)
       free(it);
    }
    sv_nba_pending = NULL;
+
+   sv_watch_clear(&sv_watch_pending);
+   if (sv_watch_pending.items != NULL
+       && sv_watch_pending.items != sv_watch_pending.inline_items)
+      free(sv_watch_pending.items);
+   sv_watch_pending.items = NULL;
+   sv_watch_pending.max = 0;
+   sv_watch_never = false;
 
    ACLEAR(sv_pollers);
    ACLEAR(sv_watched);
@@ -8808,7 +8916,7 @@ static void sv_proc_free(rt_model_t *m, rt_proc_t *p)
    mptr_free(m->mspace, &(p->privdata));
    tlab_release(m->jit, p->tlab);
    sv_task_destroy(m, p);
-   free(p->watch);
+   sv_watch_free(p->watch);
    free(p);
 }
 

@@ -3245,3 +3245,4 @@ vlog_typedef_fwd1 verilog
 svcombstatic1   verilog
 svcombassert1   verilog
 jitcache1       shell
+svpollstruct1   verilog

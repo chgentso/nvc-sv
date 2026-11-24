@@ -11865,6 +11865,21 @@ static mir_value_t vlog_poll_value_changed(vlog_gen_t *g, vlog_node_t expr,
    return changed;
 }
 
+static void vlog_poll_watch_ptr(vlog_gen_t *g, mir_value_t ptr, int bytes);
+static bool vlog_poll_watch_never(vlog_gen_t *g);
+static bool vlog_poll_can_watch_record(vlog_gen_t *g, mir_type_t rec_type,
+                                       int depth);
+static void vlog_poll_watch_record(vlog_gen_t *g, mir_value_t acc,
+                                   mir_type_t rec_type, int depth);
+static bool vlog_poll_watch_expr(vlog_gen_t *g, vlog_node_t v);
+
+static bool vlog_poll_can_watch_value_type(vlog_node_t vtype)
+{
+   return vlog_kind(vtype) == V_STRUCT_DECL
+      || vlog_kind(vtype) == V_UNION_DECL
+      || vlog_kind(vtype) == V_CLASS_DECL;
+}
+
 static void vlog_lower_poll_value_wait(vlog_gen_t *g, vlog_node_t expr,
                                        mir_value_t ptr, vlog_node_t type)
 {
@@ -11876,6 +11891,27 @@ static void vlog_lower_poll_value_wait(vlog_gen_t *g, vlog_node_t expr,
    mir_build_jump(g->mu, loop_bb);
 
    mir_set_cursor(g->mu, loop_bb, MIR_APPEND);
+
+   if (!mir_is_null(ptr)) {
+      mir_type_t ptype = mir_get_pointer(g->mu, mir_get_type(g->mu, ptr));
+      if ((vlog_kind(type) == V_STRUCT_DECL || vlog_kind(type) == V_UNION_DECL)
+          && mir_get_class(g->mu, ptype) == MIR_TYPE_ACCESS
+          && mir_get_class(g->mu, mir_get_elem(g->mu, ptype))
+             == MIR_TYPE_RECORD
+          && vlog_poll_can_watch_record(g, mir_get_elem(g->mu, ptype), 0)) {
+         vlog_poll_watch_ptr(g, ptr, sizeof(void *));
+         vlog_poll_watch_record(g, mir_build_load(g->mu, ptr),
+                                mir_get_elem(g->mu, ptype), 0);
+      }
+      else if (vlog_kind(type) == V_CLASS_DECL)
+         vlog_poll_watch_ptr(g, ptr, sizeof(void *));
+      else
+         vlog_poll_watch_never(g);
+   }
+   else if (vlog_poll_can_watch_value_type(type))
+      vlog_poll_watch_expr(g, expr);
+   else
+      vlog_poll_watch_never(g);
 
    mir_value_t res = mir_build_fcall(g->mu, ident_new("__sv_poll_wait"),
                                      mir_offset_type(g->mu), MIR_NULL_STAMP,
@@ -11903,6 +11939,15 @@ static void vlog_poll_watch_ptr(vlog_gen_t *g, mir_value_t ptr, int bytes)
    mir_build_consume(g->mu, res);
 }
 
+static void vlog_poll_watch_sig(vlog_gen_t *g, mir_value_t sig, int count)
+{
+   mir_type_t t_offset = mir_offset_type(g->mu);
+   mir_value_t args[] = { sig, mir_const(g->mu, t_offset, count) };
+   mir_value_t res = mir_build_fcall(g->mu, ident_new("__sv_poll_watch_sig"),
+                                     t_offset, MIR_NULL_STAMP, args, 2);
+   mir_build_consume(g->mu, res);
+}
+
 static bool vlog_poll_watch_never(vlog_gen_t *g)
 {
    // The condition depends on something which is not simple memory so it
@@ -11923,6 +11968,22 @@ static int vlog_poll_watch_bytes(vlog_gen_t *g, mir_type_t type,
       return mir_get_size(g->mu, type) <= 64 ? sizeof(uint64_t) : 0;
    case MIR_TYPE_VEC4:
       return mir_get_size(g->mu, type) <= 64 ? 2 * sizeof(uint64_t) : 0;
+   case MIR_TYPE_REAL:
+      return sizeof(double);
+   case MIR_TYPE_INT:
+   case MIR_TYPE_OFFSET:
+      switch (mir_get_repr(g->mu, type)) {
+      case MIR_REPR_U1:
+      case MIR_REPR_I8:
+      case MIR_REPR_U8:  return 1;
+      case MIR_REPR_I16:
+      case MIR_REPR_U16: return 2;
+      case MIR_REPR_I32:
+      case MIR_REPR_U32: return 4;
+      case MIR_REPR_I64:
+      case MIR_REPR_U64: return 8;
+      default:           return 0;
+      }
    case MIR_TYPE_ACCESS:
    case MIR_TYPE_CONTEXT:
       return sizeof(void *);
@@ -11936,8 +11997,92 @@ static int vlog_poll_watch_bytes(vlog_gen_t *g, mir_type_t type,
    }
 }
 
+static bool vlog_is_unpacked_struct_or_union(vlog_node_t v)
+{
+   vlog_node_t t = vlog_get_type(v);
+   return t != NULL
+      && (vlog_kind(t) == V_STRUCT_DECL || vlog_kind(t) == V_UNION_DECL)
+      && !(vlog_flags(t) & VLOG_F_PACKED);
+}
+
+static bool vlog_poll_can_watch_record(vlog_gen_t *g, mir_type_t rec_type,
+                                       int depth)
+{
+   if (depth > 8 || mir_get_class(g->mu, rec_type) != MIR_TYPE_RECORD)
+      return false;
+
+   size_t nfields;
+   const mir_type_t *fields = mir_get_fields(g->mu, rec_type, &nfields);
+   for (size_t i = 0; i < nfields; i++) {
+      const mir_type_t ftype = fields[i];
+      const mir_class_t cls = mir_get_class(g->mu, ftype);
+      if (cls == MIR_TYPE_ACCESS) {
+         const mir_type_t elem = mir_get_elem(g->mu, ftype);
+         if (mir_get_class(g->mu, elem) != MIR_TYPE_RECORD
+             || !vlog_poll_can_watch_record(g, elem, depth + 1))
+            return false;
+      }
+      else if (cls == MIR_TYPE_CARRAY) {
+         const mir_type_t elem = mir_get_elem(g->mu, ftype);
+         if (mir_get_class(g->mu, elem) == MIR_TYPE_ACCESS
+             || vlog_poll_watch_bytes(g, elem, false) == 0)
+            return false;
+      }
+      else if (vlog_poll_watch_bytes(g, ftype, false) == 0)
+         return false;
+   }
+
+   return true;
+}
+
+static void vlog_poll_watch_record(vlog_gen_t *g, mir_value_t acc,
+                                   mir_type_t rec_type, int depth)
+{
+   assert(depth <= 8);
+   assert(mir_get_class(g->mu, rec_type) == MIR_TYPE_RECORD);
+
+   mir_value_t nonnull = mir_build_cmp(
+      g->mu, MIR_CMP_NEQ, acc, mir_build_null(g->mu, mir_get_type(g->mu, acc)));
+   mir_block_t body_bb = mir_add_block(g->mu);
+   mir_block_t done_bb = mir_add_block(g->mu);
+   mir_build_cond(g->mu, nonnull, body_bb, done_bb);
+
+   mir_set_cursor(g->mu, body_bb, MIR_APPEND);
+
+   mir_value_t rec = mir_build_all(g->mu, acc);
+   mir_type_t t_offset = mir_offset_type(g->mu);
+   mir_value_t zero = mir_const(g->mu, t_offset, 0);
+
+   size_t nfields;
+   const mir_type_t *fields = mir_get_fields(g->mu, rec_type, &nfields);
+   for (size_t i = 0; i < nfields; i++) {
+      const mir_type_t ftype = fields[i];
+      mir_value_t fptr = mir_build_record_ref(g->mu, rec, i);
+      const mir_class_t cls = mir_get_class(g->mu, ftype);
+      if (cls == MIR_TYPE_ACCESS) {
+         vlog_poll_watch_ptr(g, fptr, sizeof(void *));
+         vlog_poll_watch_record(g, mir_build_load(g->mu, fptr),
+                                mir_get_elem(g->mu, ftype), depth + 1);
+      }
+      else if (cls == MIR_TYPE_CARRAY) {
+         const int nelems = mir_get_size(g->mu, ftype);
+         const int ebytes = vlog_poll_watch_bytes(
+            g, mir_get_elem(g->mu, ftype), false);
+         vlog_poll_watch_ptr(g, mir_build_array_ref(g->mu, fptr, zero),
+                             nelems * ebytes);
+      }
+      else {
+         const int fbytes = vlog_poll_watch_bytes(g, ftype, false);
+         vlog_poll_watch_ptr(g, fptr, fbytes);
+      }
+   }
+
+   mir_build_jump(g->mu, done_bb);
+   mir_set_cursor(g->mu, done_bb, MIR_APPEND);
+}
+
 static bool vlog_poll_watch_leaf(vlog_gen_t *g, vlog_node_t v,
-                                 bool allow_uarray)
+                                 bool allow_uarray, bool whole_struct)
 {
    // Watch the storage of a variable or member that the expression reads.
    // Returns false if it cannot be watched.
@@ -11951,7 +12096,7 @@ static bool vlog_poll_watch_leaf(vlog_gen_t *g, vlog_node_t v,
    if (decl == NULL)
       return vlog_poll_watch_never(g);
 
-   // An unpacked array or structure is not held as one value
+   // An unpacked array is not held as one value
    vlog_node_t dims[MAX_UNPACKED_DIMS];
    if (vlog_unpacked_dims(v, dims) > 0 || vlog_is_fixed_unpacked(decl))
       return vlog_poll_watch_never(g);
@@ -11971,6 +12116,15 @@ static bool vlog_poll_watch_leaf(vlog_gen_t *g, vlog_node_t v,
       // The variable is reached through a reference which holds its
       // address
       const type_info_t *ti = vlog_type_info(g, vlog_type(decl));
+      const bool watch_rec = whole_struct
+         && vlog_is_unpacked_struct_or_union(v)
+         && mir_get_class(g->mu, ti->type) == MIR_TYPE_ACCESS
+         && mir_get_class(g->mu, mir_get_elem(g->mu, ti->type))
+            == MIR_TYPE_RECORD;
+      if (watch_rec
+          && !vlog_poll_can_watch_record(g, mir_get_elem(g->mu, ti->type), 0))
+         return vlog_poll_watch_never(g);
+
       const int bytes = vlog_poll_watch_bytes(g, ti->type, allow_uarray);
       if (bytes == 0)
          return vlog_poll_watch_never(g);
@@ -11999,7 +12153,24 @@ static bool vlog_poll_watch_leaf(vlog_gen_t *g, vlog_node_t v,
       mir_value_t rec = mir_build_all(g->mu, cell);
       mir_value_t addr =
          mir_build_load(g->mu, mir_build_record_ref(g->mu, rec, 0));
-      vlog_poll_watch_ptr(g, addr, bytes);   // Null if it tracks a signal
+      if (watch_rec) {
+         mir_value_t nonnull = mir_build_cmp(
+            g->mu, MIR_CMP_NEQ, addr,
+            mir_build_null(g->mu, mir_get_type(g->mu, addr)));
+         mir_block_t body_bb = mir_add_block(g->mu);
+         mir_block_t done_bb = mir_add_block(g->mu);
+         mir_build_cond(g->mu, nonnull, body_bb, done_bb);
+
+         mir_set_cursor(g->mu, body_bb, MIR_APPEND);
+         vlog_poll_watch_ptr(g, addr, sizeof(void *));
+         vlog_poll_watch_record(g, mir_build_load(g->mu, addr),
+                                mir_get_elem(g->mu, ti->type), 0);
+         mir_build_jump(g->mu, done_bb);
+
+         mir_set_cursor(g->mu, done_bb, MIR_APPEND);
+      }
+      else
+         vlog_poll_watch_ptr(g, addr, bytes);   // Null if it tracks a signal
       return true;
    }
 
@@ -12011,7 +12182,7 @@ static bool vlog_poll_watch_leaf(vlog_gen_t *g, vlog_node_t v,
 
    if (mir_is_signal(g->mu, sel.obj)) {
       // The condition reads the resolved value which has a byte for each bit
-      if (vlog_is_vhdl_signal(g, sel.obj) || sel.size > 32)
+      if (vlog_is_vhdl_signal(g, sel.obj))
          return vlog_poll_watch_never(g);
 
       mir_value_t data = mir_build_resolved(g->mu, sel.obj);
@@ -12020,13 +12191,19 @@ static bool vlog_poll_watch_leaf(vlog_gen_t *g, vlog_node_t v,
          return vlog_poll_watch_never(g);
 
       mir_type_t elem = mir_get_elem(g->mu, mir_get_type(g->mu, first));
-      if (mir_get_class(g->mu, elem) != MIR_TYPE_INT
-          || (mir_get_repr(g->mu, elem) != MIR_REPR_U1
-              && mir_get_repr(g->mu, elem) != MIR_REPR_I8
-              && mir_get_repr(g->mu, elem) != MIR_REPR_U8))
+      const mir_class_t eclass = mir_get_class(g->mu, elem);
+      if (eclass == MIR_TYPE_REAL) {
+         if (sel.size != 1)
+            return vlog_poll_watch_never(g);
+      }
+      else if (eclass != MIR_TYPE_INT
+               || (mir_get_repr(g->mu, elem) != MIR_REPR_U1
+                   && mir_get_repr(g->mu, elem) != MIR_REPR_I8
+                   && mir_get_repr(g->mu, elem) != MIR_REPR_U8))
          return vlog_poll_watch_never(g);
 
-      vlog_poll_watch_ptr(g, first, sel.size);
+      mir_value_t sig = mir_build_array_ref(g->mu, sel.obj, sel.dst_offset);
+      vlog_poll_watch_sig(g, sig, sel.size);
       return true;
    }
 
@@ -12034,12 +12211,26 @@ static bool vlog_poll_watch_leaf(vlog_gen_t *g, vlog_node_t v,
       return vlog_poll_watch_never(g);
 
    mir_type_t pointee = mir_get_pointer(g->mu, mir_get_type(g->mu, sel.obj));
+   mir_value_t ptr = mir_build_array_ref(g->mu, sel.obj, sel.dst_offset);
+
+   if (whole_struct && vlog_is_unpacked_struct_or_union(v)
+       && mir_get_class(g->mu, pointee) == MIR_TYPE_ACCESS
+       && mir_get_class(g->mu, mir_get_elem(g->mu, pointee))
+          == MIR_TYPE_RECORD) {
+      mir_type_t rec_type = mir_get_elem(g->mu, pointee);
+      if (!vlog_poll_can_watch_record(g, rec_type, 0))
+         return vlog_poll_watch_never(g);
+
+      vlog_poll_watch_ptr(g, ptr, sizeof(void *));
+      vlog_poll_watch_record(g, mir_build_load(g->mu, ptr), rec_type, 0);
+      return true;
+   }
+
    const int bytes = vlog_poll_watch_bytes(g, pointee, allow_uarray);
    if (bytes == 0 || bytes > 32)
       return vlog_poll_watch_never(g);
 
-   vlog_poll_watch_ptr(g, mir_build_array_ref(g->mu, sel.obj, sel.dst_offset),
-                       bytes);
+   vlog_poll_watch_ptr(g, ptr, bytes);
    return true;
 }
 
@@ -12128,7 +12319,8 @@ static bool vlog_poll_watch_assoc(vlog_gen_t *g, vlog_node_t v, bool whole)
          return false;
    }
 
-   if (!vlog_poll_watch_leaf(g, prefix, true) || !vlog_poll_watch_expr(g, key))
+   if (!vlog_poll_watch_leaf(g, prefix, true, false)
+       || !vlog_poll_watch_expr(g, key))
       return false;
 
    if (!whole)
@@ -12182,7 +12374,8 @@ static bool vlog_poll_watch_assoc_member(vlog_gen_t *g, vlog_node_t v)
    return true;
 }
 
-static bool vlog_poll_watch_expr(vlog_gen_t *g, vlog_node_t v)
+static bool vlog_poll_watch_expr_ex(vlog_gen_t *g, vlog_node_t v,
+                                    bool whole_struct)
 {
    // Tell the kernel what memory the value of this expression is read from
    // so the process only runs when one of them changes.  Anything else
@@ -12209,13 +12402,13 @@ static bool vlog_poll_watch_expr(vlog_gen_t *g, vlog_node_t v)
             break;
          }
       }
-      return vlog_poll_watch_leaf(g, v, vlog_poll_is_string(v));
+      return vlog_poll_watch_leaf(g, v, vlog_poll_is_string(v), whole_struct);
    case V_MEMBER_REF:
       if (vlog_poll_is_assoc_elem(vlog_value(v)))
          return vlog_poll_watch_assoc_member(g, v);
 
-      return vlog_poll_watch_expr(g, vlog_value(v))
-         && vlog_poll_watch_leaf(g, v, vlog_poll_is_string(v));
+      return vlog_poll_watch_expr_ex(g, vlog_value(v), false)
+         && vlog_poll_watch_leaf(g, v, vlog_poll_is_string(v), whole_struct);
    case V_NULL:
    case V_THIS:
       return true;
@@ -12254,9 +12447,47 @@ static bool vlog_poll_watch_expr(vlog_gen_t *g, vlog_node_t v)
          return vlog_poll_watch_expr(g, vlog_left(v))
             && vlog_poll_watch_expr(g, vlog_right(v));
       }
+   case V_COND_EXPR:
+      {
+         vlog_node_t cond_v = vlog_value(v);
+         vlog_node_t left = vlog_left(v), right = vlog_right(v);
+         if (!vlog_poll_watch_expr(g, cond_v))
+            return false;
+
+         if (vlog_poll_watch_simple(left) && vlog_poll_watch_simple(right))
+            return vlog_poll_watch_expr(g, left)
+               && vlog_poll_watch_expr(g, right);
+
+         mir_value_t cond = vlog_lower_test(g, vlog_lower_rvalue(g, cond_v));
+         mir_block_t true_bb = mir_add_block(g->mu);
+         mir_block_t false_bb = mir_add_block(g->mu);
+         mir_block_t done_bb = mir_add_block(g->mu);
+
+         mir_build_cond(g->mu, cond, true_bb, false_bb);
+
+         mir_set_cursor(g->mu, true_bb, MIR_APPEND);
+         (void)vlog_poll_watch_expr(g, left);
+         mir_build_jump(g->mu, done_bb);
+
+         mir_set_cursor(g->mu, false_bb, MIR_APPEND);
+         (void)vlog_poll_watch_expr(g, right);
+         mir_build_jump(g->mu, done_bb);
+
+         mir_set_cursor(g->mu, done_bb, MIR_APPEND);
+         return true;
+      }
    case V_UNARY:
    case V_CAST:
       return vlog_poll_watch_expr(g, vlog_value(v));
+   case V_CONCAT:
+      {
+         const int nparams = vlog_params(v);
+         for (int i = 0; i < nparams; i++) {
+            if (!vlog_poll_watch_expr(g, vlog_param(v, i)))
+               return false;
+         }
+         return true;
+      }
    case V_INSIDE:
       {
          if (!vlog_poll_watch_expr(g, vlog_value(v)))
@@ -12294,6 +12525,16 @@ static bool vlog_poll_watch_expr(vlog_gen_t *g, vlog_node_t v)
 
          return true;
       }
+   case V_PART_SELECT:
+      {
+         vlog_node_t type = vlog_get_type(vlog_value(v));
+         if (type == NULL || vlog_is_dynamic_type(type))
+            return vlog_poll_watch_never(g);
+
+         return vlog_poll_watch_expr(g, vlog_value(v))
+            && vlog_poll_watch_expr(g, vlog_left(v))
+            && vlog_poll_watch_expr(g, vlog_right(v));
+      }
    case V_METHOD_CALL:
       {
          // The length/size of a queue, dynamic/associative array or string,
@@ -12318,12 +12559,13 @@ static bool vlog_poll_watch_expr(vlog_gen_t *g, vlog_node_t v)
 
          switch (vlog_kind(prefix)) {
          case V_REF:
-            if (!vlog_has_ref(prefix) || !vlog_poll_watch_leaf(g, prefix, true))
+            if (!vlog_has_ref(prefix)
+                || !vlog_poll_watch_leaf(g, prefix, true, false))
                return false;
             break;
          case V_MEMBER_REF:
-            if (!vlog_poll_watch_expr(g, vlog_value(prefix))
-                || !vlog_poll_watch_leaf(g, prefix, true))
+            if (!vlog_poll_watch_expr_ex(g, vlog_value(prefix), false)
+                || !vlog_poll_watch_leaf(g, prefix, true, false))
                return false;
             break;
          default:
@@ -12338,6 +12580,11 @@ static bool vlog_poll_watch_expr(vlog_gen_t *g, vlog_node_t v)
    default:
       return vlog_poll_watch_never(g);
    }
+}
+
+static bool vlog_poll_watch_expr(vlog_gen_t *g, vlog_node_t v)
+{
+   return vlog_poll_watch_expr_ex(g, v, true);
 }
 
 static void vlog_lower_poll_control_inner(vlog_gen_t *g, vlog_node_t ctrl);
@@ -12401,10 +12648,15 @@ static void vlog_lower_poll_control_inner(vlog_gen_t *g, vlog_node_t ctrl)
 
    for (int i = 0; i < nparams; i++) {
       vlog_node_t e = vlog_param(ctrl, i);
-      if (vlog_is_event_item(e) || vlog_poll_value_type(vlog_value(e)) != NULL)
+      if (vlog_is_event_item(e))
          vlog_poll_watch_never(g);
-      else
-         vlog_poll_watch_expr(g, vlog_value(e));
+      else {
+         vlog_node_t vtype = vlog_poll_value_type(vlog_value(e));
+         if (vtype != NULL && !vlog_poll_can_watch_value_type(vtype))
+            vlog_poll_watch_never(g);
+         else
+            vlog_poll_watch_expr(g, vlog_value(e));
+      }
    }
 
    mir_value_t res = mir_build_fcall(g->mu, ident_new("__sv_poll_wait"),
@@ -12593,6 +12845,13 @@ static void vlog_lower_poll_leaves_inner(vlog_gen_t *g,
 
    mir_set_cursor(g->mu, loop_bb, MIR_APPEND);
 
+   for (int i = 0; i < n; i++) {
+      if (types[i] != NULL && !vlog_poll_can_watch_value_type(types[i]))
+         vlog_poll_watch_never(g);
+      else
+         vlog_poll_watch_expr(g, leaves->items[i]);
+   }
+
    mir_value_t res = mir_build_fcall(g->mu, ident_new("__sv_poll_wait"),
                                      mir_offset_type(g->mu), MIR_NULL_STAMP,
                                      NULL, 0);
@@ -12671,6 +12930,8 @@ static void vlog_lower_poll_expr_inner(vlog_gen_t *g, vlog_node_t expr)
    mir_build_jump(g->mu, loop_bb);
 
    mir_set_cursor(g->mu, loop_bb, MIR_APPEND);
+
+   vlog_poll_watch_expr(g, expr);
 
    mir_value_t res = mir_build_fcall(g->mu, ident_new("__sv_poll_wait"),
                                      mir_offset_type(g->mu), MIR_NULL_STAMP,
