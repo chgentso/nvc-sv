@@ -140,6 +140,14 @@ void x_sv_poll_watch(const void *ptr, unsigned size);
 void x_sv_poll_watch_sig(sig_shared_t *ss, uint32_t offset, unsigned count);
 void x_sv_poll_wait(void);
 void x_sv_poll_fired(void);
+
+struct _ffi_closure;
+void *x_sv_island_begin(struct _ffi_closure *closure, uint32_t state_bytes,
+                        uint32_t nsigs);
+void x_sv_island_bind_sig(void *handle, uint32_t idx, sig_shared_t *ss,
+                          int32_t sig_offset, uint32_t a_off, uint32_t b_off,
+                          uint32_t width, uint32_t nelems, uint32_t flags);
+void x_sv_island_finish(void *handle);
 int64_t x_sv_event_triggered(void *event);
 void x_sv_nba_store(void *dest, const void *value, int64_t bytes,
                     int64_t offset, int64_t count, int64_t after,

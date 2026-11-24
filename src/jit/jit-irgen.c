@@ -4652,6 +4652,166 @@ static void irgen_op_load_packed(jit_irgen_t *g, mir_value_t n)
       j_recv(g, bbits, 1);
 }
 
+static void irgen_island_addrs(jit_irgen_t *g, jit_value_t state,
+                               int64_t a_off, int64_t b_off,
+                               mir_value_t elem_arg, size_t wbytes,
+                               jit_value_t *a_addr, jit_value_t *b_addr)
+{
+   int64_t elem_c = 0;
+   if (mir_get_const(g->mu, elem_arg, &elem_c)) {
+      *a_addr = jit_addr_from_value(state, a_off + elem_c * (int64_t)wbytes);
+      *b_addr = jit_addr_from_value(state, b_off + elem_c * (int64_t)wbytes);
+   }
+   else {
+      jit_value_t elem_v = irgen_get_value(g, elem_arg);
+      jit_value_t ebytes = irgen_alloc_temp(g);
+      j_mul(g, ebytes, elem_v, jit_value_from_int64(wbytes));
+      jit_value_t base = irgen_alloc_temp(g);
+      j_add(g, base, state, ebytes);
+      *a_addr = jit_addr_from_value(base, a_off);
+      *b_addr = jit_addr_from_value(base, b_off);
+   }
+}
+
+static void irgen_op_island_load(jit_irgen_t *g, mir_value_t n)
+{
+   jit_value_t state = irgen_get_arg(g, n, 0);
+   int64_t a_off = 0, b_off = -1;
+   if (!mir_get_const(g->mu, mir_get_arg(g->mu, n, 1), &a_off)
+       || !mir_get_const(g->mu, mir_get_arg(g->mu, n, 2), &b_off))
+      should_not_reach_here();
+
+   mir_type_t res_t = mir_get_type(g->mu, n);
+   const int W = mir_get_size(g->mu, res_t);
+   const int nwords = (W + 63) / 64;
+   const size_t wbytes = (size_t)nwords * sizeof(uint64_t);
+   const bool res_is4 = mir_get_class(g->mu, res_t) == MIR_TYPE_VEC4;
+
+   jit_value_t a_addr, b_addr;
+   irgen_island_addrs(g, state, a_off, b_off, mir_get_arg(g->mu, n, 3),
+                      wbytes, &a_addr, &b_addr);
+
+   jit_value_t abits = irgen_get_slot(g, n, 0);
+   jit_value_t bbits = res_is4
+      ? irgen_get_slot(g, n, 1) : (jit_value_t){ .kind = JIT_VALUE_INVALID };
+
+   if (W <= 64) {
+      j_load(g, JIT_SZ_64, abits, a_addr);
+      if (res_is4) {
+         if (b_off >= 0)
+            j_load(g, JIT_SZ_64, bbits, b_addr);
+         else
+            j_mov(g, bbits, jit_value_from_int64(0));
+      }
+      return;
+   }
+
+   g->used_tlab = true;
+   jit_value_t aptr = irgen_alloc_temp(g);
+   irgen_lea(g, aptr, a_addr);
+   jit_value_t cnt = irgen_alloc_temp(g);
+
+   if (res_is4) {
+      macro_lalloc(g, abits, jit_value_from_int64(2 * wbytes));
+      j_mov(g, cnt, jit_value_from_int64(wbytes));
+      macro_copy(g, abits, aptr, cnt);
+      j_add(g, bbits, abits, jit_value_from_int64(wbytes));
+      if (b_off >= 0) {
+         jit_value_t bptr = irgen_alloc_temp(g);
+         irgen_lea(g, bptr, b_addr);
+         j_mov(g, cnt, jit_value_from_int64(wbytes));
+         macro_copy(g, bbits, bptr, cnt);
+      }
+      else {
+         j_mov(g, cnt, jit_value_from_int64(wbytes));
+         macro_bzero(g, jit_addr_from_value(bbits, 0), cnt);
+      }
+   }
+   else {
+      macro_lalloc(g, abits, jit_value_from_int64(wbytes));
+      j_mov(g, cnt, jit_value_from_int64(wbytes));
+      macro_copy(g, abits, aptr, cnt);
+   }
+}
+
+static void irgen_op_island_store(jit_irgen_t *g, mir_value_t n)
+{
+   jit_value_t state = irgen_get_arg(g, n, 0);
+   int64_t a_off = 0, b_off = -1;
+   if (!mir_get_const(g->mu, mir_get_arg(g->mu, n, 1), &a_off)
+       || !mir_get_const(g->mu, mir_get_arg(g->mu, n, 2), &b_off))
+      should_not_reach_here();
+
+   mir_value_t val = mir_get_arg(g->mu, n, 4);
+   mir_type_t val_t = mir_get_type(g->mu, val);
+   const int W = mir_get_size(g->mu, val_t);
+   const int nwords = (W + 63) / 64;
+   const size_t wbytes = (size_t)nwords * sizeof(uint64_t);
+   const bool val_is4 = mir_get_class(g->mu, val_t) == MIR_TYPE_VEC4;
+   const uint64_t top_mask = (W & 63)
+      ? ((UINT64_C(1) << (W & 63)) - 1) : ~UINT64_C(0);
+
+   jit_value_t a_addr, b_addr;
+   irgen_island_addrs(g, state, a_off, b_off, mir_get_arg(g->mu, n, 3),
+                      wbytes, &a_addr, &b_addr);
+
+   if (W <= 64) {
+      jit_value_t va = irgen_get_arg_slot(g, n, 4, 0);
+      if (W < 64) {
+         jit_value_t ma = irgen_alloc_temp(g);
+         j_and(g, ma, va, jit_value_from_int64(top_mask));
+         va = ma;
+      }
+      j_store(g, JIT_SZ_64, va, a_addr);
+
+      if (b_off >= 0) {
+         if (val_is4) {
+            jit_value_t vb = irgen_get_arg_slot(g, n, 4, 1);
+            if (W < 64) {
+               jit_value_t mb = irgen_alloc_temp(g);
+               j_and(g, mb, vb, jit_value_from_int64(top_mask));
+               vb = mb;
+            }
+            j_store(g, JIT_SZ_64, vb, b_addr);
+         }
+         else
+            j_store(g, JIT_SZ_64, jit_value_from_int64(0), b_addr);
+      }
+      return;
+   }
+
+   jit_value_t aptr = irgen_alloc_temp(g);
+   irgen_lea(g, aptr, a_addr);
+   jit_value_t cnt = irgen_alloc_temp(g);
+   j_mov(g, cnt, jit_value_from_int64(wbytes));
+   macro_copy(g, aptr, irgen_get_arg_slot(g, n, 4, 0), cnt);
+   if (W & 63) {
+      jit_value_t la = jit_addr_from_value(aptr, (nwords - 1) * 8);
+      jit_value_t lw = irgen_alloc_temp(g);
+      j_load(g, JIT_SZ_64, lw, la);
+      j_and(g, lw, lw, jit_value_from_int64(top_mask));
+      j_store(g, JIT_SZ_64, lw, la);
+   }
+
+   if (b_off >= 0) {
+      jit_value_t bptr = irgen_alloc_temp(g);
+      irgen_lea(g, bptr, b_addr);
+      j_mov(g, cnt, jit_value_from_int64(wbytes));
+      if (val_is4) {
+         macro_copy(g, bptr, irgen_get_arg_slot(g, n, 4, 1), cnt);
+         if (W & 63) {
+            jit_value_t lb = jit_addr_from_value(bptr, (nwords - 1) * 8);
+            jit_value_t lbw = irgen_alloc_temp(g);
+            j_load(g, JIT_SZ_64, lbw, lb);
+            j_and(g, lbw, lbw, jit_value_from_int64(top_mask));
+            j_store(g, JIT_SZ_64, lbw, lb);
+         }
+      }
+      else
+         macro_bzero(g, jit_addr_from_value(bptr, 0), cnt);
+   }
+}
+
 static void irgen_op_pack(jit_irgen_t *g, mir_value_t n)
 {
    mir_value_t arg = mir_get_arg(g->mu, n, 0);
@@ -5954,6 +6114,12 @@ static void irgen_block(jit_irgen_t *g, mir_block_t block)
       case MIR_OP_LOAD_PACKED:
          irgen_op_load_packed(g, n);
          break;
+      case MIR_OP_ISLAND_LOAD:
+         irgen_op_island_load(g, n);
+         break;
+      case MIR_OP_ISLAND_STORE:
+         irgen_op_island_store(g, n);
+         break;
       default:
          DEBUG_ONLY(mir_dump(g->mu));
          fatal_trace("cannot generate JIT IR for MIR op %s", mir_op_string(op));
@@ -6575,6 +6741,8 @@ static bool mir_op_is_signal_only(mir_unit_t *mu, mir_value_t n,
    case MIR_OP_SCHED_DEPOSIT:
    case MIR_OP_DEPOSIT_SIGNAL:
    case MIR_OP_LOAD_PACKED:
+   case MIR_OP_ISLAND_LOAD:
+   case MIR_OP_ISLAND_STORE:
    case MIR_OP_PUT_DRIVER:
    case MIR_OP_FORCE:
    case MIR_OP_RELEASE:

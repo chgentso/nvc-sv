@@ -181,6 +181,8 @@ const char *mir_op_string(mir_op_t op)
       [MIR_OP_INSTANCE_INIT] = "instance init",
       [MIR_OP_STMT_PROBE] = "stmt probe",
       [MIR_OP_LOAD_PACKED] = "load packed",
+      [MIR_OP_ISLAND_LOAD] = "island load",
+      [MIR_OP_ISLAND_STORE] = "island store",
    };
 
    return map[op];
@@ -1055,6 +1057,22 @@ void mir_annotate(mir_unit_t *mu, const mir_annotate_t *cb, void *ctx)
             }
             break;
 
+         case MIR_OP_ISLAND_LOAD:
+            {
+               col += mir_dump_value(mu, result, cb, ctx);
+               col += printf(" := %s ", mir_op_string(n->op));
+               col += mir_dump_arg(mu, result, 0, cb, ctx);
+               col += printf(" a=");
+               col += mir_dump_arg(mu, result, 1, cb, ctx);
+               col += printf(" b=");
+               col += mir_dump_arg(mu, result, 2, cb, ctx);
+               col += printf(" elem=");
+               col += mir_dump_arg(mu, result, 3, cb, ctx);
+               mir_dump_type(mu, col, n->type);
+               mir_dump_stamp(mu, n->type, n->stamp);
+            }
+            break;
+
          case MIR_OP_UARRAY_LEN:
          case MIR_OP_UARRAY_DIR:
          case MIR_OP_UARRAY_LEFT:
@@ -1547,6 +1565,21 @@ void mir_annotate(mir_unit_t *mu, const mir_annotate_t *cb, void *ctx)
                mir_dump_arg(mu, result, 1, cb, ctx);
                printf(" values ");
                mir_dump_arg(mu, result, 2, cb, ctx);
+            }
+            break;
+
+         case MIR_OP_ISLAND_STORE:
+            {
+               printf("%s ", mir_op_string(n->op));
+               mir_dump_arg(mu, result, 0, cb, ctx);
+               printf(" a=");
+               mir_dump_arg(mu, result, 1, cb, ctx);
+               printf(" b=");
+               mir_dump_arg(mu, result, 2, cb, ctx);
+               printf(" elem=");
+               mir_dump_arg(mu, result, 3, cb, ctx);
+               printf(" val=");
+               mir_dump_arg(mu, result, 4, cb, ctx);
             }
             break;
 

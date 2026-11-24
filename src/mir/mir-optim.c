@@ -853,6 +853,7 @@ static void gvn_visit_block(mir_unit_t *mu, mir_block_t block,
       case MIR_OP_NEW:
       case MIR_OP_LAST_VALUE:
       case MIR_OP_LOAD_PACKED:
+      case MIR_OP_ISLAND_LOAD:
       case MIR_OP_LAST_EVENT:
       case MIR_OP_LAST_ACTIVE:
       case MIR_OP_EVENT:

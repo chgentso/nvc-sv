@@ -2686,6 +2686,38 @@ mir_value_t mir_build_load_packed(mir_unit_t *mu, mir_type_t type,
    return result;
 }
 
+mir_value_t mir_build_island_load(mir_unit_t *mu, mir_type_t type,
+                                  mir_value_t state, mir_value_t a_off,
+                                  mir_value_t b_off, mir_value_t elem)
+{
+   mir_value_t result = mir_build_4(mu, MIR_OP_ISLAND_LOAD, type,
+                                    MIR_NULL_STAMP, state, a_off, b_off, elem);
+
+   MIR_ASSERT(mir_is(mu, state, MIR_TYPE_POINTER), "state must be pointer");
+   MIR_ASSERT(mir_is_offset(mu, a_off), "a_off must be offset type");
+   MIR_ASSERT(mir_is_offset(mu, b_off), "b_off must be offset type");
+   MIR_ASSERT(mir_is_offset(mu, elem), "elem must be offset type");
+   MIR_ASSERT(mir_get_class(mu, type) == MIR_TYPE_VEC2
+              || mir_get_class(mu, type) == MIR_TYPE_VEC4,
+              "island load result must be vector");
+
+   return result;
+}
+
+void mir_build_island_store(mir_unit_t *mu, mir_value_t state,
+                            mir_value_t a_off, mir_value_t b_off,
+                            mir_value_t elem, mir_value_t value)
+{
+   mir_build_5(mu, MIR_OP_ISLAND_STORE, MIR_NULL_TYPE, MIR_NULL_STAMP,
+               state, a_off, b_off, elem, value);
+
+   MIR_ASSERT(mir_is(mu, state, MIR_TYPE_POINTER), "state must be pointer");
+   MIR_ASSERT(mir_is_offset(mu, a_off), "a_off must be offset type");
+   MIR_ASSERT(mir_is_offset(mu, b_off), "b_off must be offset type");
+   MIR_ASSERT(mir_is_offset(mu, elem), "elem must be offset type");
+   MIR_ASSERT(mir_is_vector(mu, value), "island store value must be vector");
+}
+
 mir_value_t mir_build_last_value(mir_unit_t *mu, mir_value_t signal)
 {
    mir_type_t type = mir_get_type(mu, signal);

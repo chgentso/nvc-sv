@@ -26,10 +26,11 @@
 #include "prim.h"
 
 typedef struct {
-   char *cover_file;
-   bool  no_collapse;
-   bool  debug_stmts;   // Elaborated with --debug-stmts
-   bool  black_boxes;   // Contains black boxes for missing units
+   char    *cover_file;
+   bool     no_collapse;
+   bool     debug_stmts;   // Elaborated with --debug-stmts
+   bool     black_boxes;   // Contains black boxes for missing units
+   uint8_t  rtl_islands;   // Elaborated with --rtl-islands=...
 } unit_meta_t;
 
 lib_t lib_find(ident_t name);

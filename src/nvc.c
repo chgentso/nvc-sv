@@ -1103,6 +1103,7 @@ static int elaborate(int argc, char **argv, cmd_state_t *state)
 
    meta.debug_stmts = opt_get_int(OPT_DEBUG_STMTS);
    meta.black_boxes = elab_black_boxes() > 0;
+   meta.rtl_islands = opt_get_int(OPT_RTL_ISLANDS);
 
    lib_put_meta(state->work, e, &meta);
 
@@ -1533,6 +1534,8 @@ static int run_cmd(int argc, char **argv, cmd_state_t *state)
    // wanted if the design was elaborated with --debug-stmts
    if (meta->debug_stmts)
       opt_set_int(OPT_DEBUG_STMTS, 1);
+   if (meta->rtl_islands && opt_get_int(OPT_RTL_ISLANDS) == RTL_ISLANDS_OFF)
+      opt_set_int(OPT_RTL_ISLANDS, meta->rtl_islands);
 
    wave_dumper_t *dumper = NULL;
    if (wave_fname != NULL) {

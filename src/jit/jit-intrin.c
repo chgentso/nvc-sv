@@ -2321,6 +2321,32 @@ static void sv_poll_fired(jit_func_t *func, jit_anchor_t *caller,
    args[0].integer = 0;
 }
 
+static void sv_island_begin(jit_func_t *func, jit_anchor_t *caller,
+                            jit_scalar_t *args, tlab_t *tlab)
+{
+   args[0].pointer = x_sv_island_begin(args[0].pointer,
+                                       (uint32_t)args[1].integer,
+                                       (uint32_t)args[2].integer);
+}
+
+static void sv_island_bind_sig(jit_func_t *func, jit_anchor_t *caller,
+                               jit_scalar_t *args, tlab_t *tlab)
+{
+   x_sv_island_bind_sig(args[0].pointer, (uint32_t)args[1].integer,
+                        args[2].pointer, (int32_t)args[3].integer,
+                        (uint32_t)args[4].integer, (uint32_t)args[5].integer,
+                        (uint32_t)args[6].integer, (uint32_t)args[7].integer,
+                        (uint32_t)args[8].integer);
+   args[0].integer = 0;
+}
+
+static void sv_island_finish(jit_func_t *func, jit_anchor_t *caller,
+                             jit_scalar_t *args, tlab_t *tlab)
+{
+   x_sv_island_finish(args[0].pointer);
+   args[0].integer = 0;
+}
+
 static void sv_event_triggered(jit_func_t *func, jit_anchor_t *caller,
                                jit_scalar_t *args, tlab_t *tlab)
 {
@@ -3805,10 +3831,15 @@ static void protected_dispatch_proc(jit_func_t *func, jit_anchor_t *anchor,
 jit_entry_fn_t jit_bind_intrinsic(ident_t name)
 {
    static ident_t dispatch_func_i = NULL, dispatch_proc_i = NULL;
+   static ident_t island_begin_i = NULL, island_bind_i = NULL,
+      island_finish_i = NULL;
 
    INIT_ONCE({
          dispatch_func_i = ident_new("__nvc_protected_dispatch_func");
          dispatch_proc_i = ident_new("__nvc_protected_dispatch_proc");
+         island_begin_i  = ident_new("__sv_island_begin");
+         island_bind_i   = ident_new("__sv_island_bind_sig");
+         island_finish_i = ident_new("__sv_island_finish");
 
          const bool want_intrinsics = !!opt_get_int(OPT_JIT_INTRINSICS);
 
@@ -3848,6 +3879,12 @@ jit_entry_fn_t jit_bind_intrinsic(ident_t name)
       return protected_dispatch_func;
    else if (name == dispatch_proc_i)
       return protected_dispatch_proc;
+   else if (name == island_begin_i)
+      return sv_island_begin;
+   else if (name == island_bind_i)
+      return sv_island_bind_sig;
+   else if (name == island_finish_i)
+      return sv_island_finish;
 
    for (const jit_intrinsic_t *it = intrinsic_list; it->name; it++) {
       if (it->ident == name)
