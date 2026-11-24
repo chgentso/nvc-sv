@@ -2518,6 +2518,8 @@ static void vlog_check_const_target(vlog_node_t arg)
    }
 }
 
+static void vlog_mark_port_var(vlog_node_t expr);
+
 static void vlog_check_output_arg(vlog_node_t port, vlog_node_t arg)
 {
    if (vlog_kind(port) != V_TF_PORT_DECL)
@@ -2526,6 +2528,7 @@ static void vlog_check_output_arg(vlog_node_t port, vlog_node_t arg)
    const int dir = vlog_subkind(port);
    if (dir == V_PORT_REF) {
       vlog_check_ref_arg(port, arg);
+      vlog_mark_port_var(arg);
       return;
    }
 
@@ -3545,6 +3548,10 @@ static void vlog_mark_port_var(vlog_node_t expr)
    case V_BIT_SELECT:
    case V_PART_SELECT:
       vlog_mark_port_var(vlog_value(expr));
+      break;
+   case V_MEMBER_REF:
+      if (!vlog_is_handle_member(expr))
+         vlog_mark_port_var(vlog_value(expr));
       break;
    case V_CONCAT:
       {

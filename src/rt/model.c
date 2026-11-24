@@ -145,6 +145,7 @@ typedef struct _rt_packed_sched {
    rt_signal_t             *signal;
    uint32_t                 offset;
    uint32_t                 count;
+   int64_t                  when;
    uint64_t                *abits;
    uint64_t                *bbits;
    uint64_t                 small_a;
@@ -228,6 +229,7 @@ typedef struct _rt_model {
    hash_t            *packed_forces;
    rt_packed_force_t *packed_force_list;
    rt_packed_sched_t *free_packed_sched;
+   hash_t            *packed_delayed;
 } rt_model_t;
 
 #define FMT_VALUES_SZ   128
@@ -308,6 +310,8 @@ static void async_update_driver(rt_model_t *m, void *arg);
 static void async_fast_driver(rt_model_t *m, void *arg);
 static void async_fast_all_drivers(rt_model_t *m, void *arg);
 static void async_pseudo_source(rt_model_t *m, void *arg);
+static rt_packed_sched_t *pop_packed_delayed(rt_model_t *m, rt_signal_t *s,
+                                             bool nonblock);
 static void async_packed_deposit(rt_model_t *m, void *arg);
 static void async_transfer_signal(rt_model_t *m, void *arg);
 static void async_run_trigger(rt_model_t *m, void *arg);
@@ -944,10 +948,16 @@ void model_free(rt_model_t *m)
          free(untag_pointer(e, rt_callback_t));
       else if (pointer_tag(e) == EVENT_PACKED_DEPOSIT
                || pointer_tag(e) == EVENT_PACKED_NONBLOCK) {
-         rt_packed_sched_t *ps = untag_pointer(e, rt_packed_sched_t);
+         rt_signal_t *s = untag_pointer(e, rt_signal_t);
+         const bool nb = pointer_tag(e) == EVENT_PACKED_NONBLOCK;
+         rt_packed_sched_t *ps = pop_packed_delayed(m, s, nb);
          free(ps->abits);
          free(ps);
       }
+   }
+   if (m->packed_delayed != NULL) {
+      hash_free(m->packed_delayed);
+      m->packed_delayed = NULL;
    }
 
    if (m->root != NULL)
@@ -4951,13 +4961,17 @@ static void model_cycle_body(rt_model_t *m)
             break;
          case EVENT_PACKED_DEPOSIT:
             {
-               rt_packed_sched_t *ps = untag_pointer(e, rt_packed_sched_t);
+               rt_signal_t *s = untag_pointer(e, rt_signal_t);
+               rt_packed_sched_t *ps = pop_packed_delayed(m, s, false);
+               assert(ps->when == m->now);
                deferq_do(&m->driverq, async_packed_deposit, ps);
             }
             break;
          case EVENT_PACKED_NONBLOCK:
             {
-               rt_packed_sched_t *ps = untag_pointer(e, rt_packed_sched_t);
+               rt_signal_t *s = untag_pointer(e, rt_signal_t);
+               rt_packed_sched_t *ps = pop_packed_delayed(m, s, true);
+               assert(ps->when == m->now);
                deferq_do(&m->nonblockq, async_packed_deposit, ps);
             }
             break;
@@ -5809,6 +5823,47 @@ static void async_packed_deposit(rt_model_t *m, void *arg)
    m->free_packed_sched = ps;
 }
 
+static inline void *packed_delayed_key(rt_signal_t *s, bool nonblock)
+{
+   return (void *)((uintptr_t)s | (nonblock ? 1u : 0u));
+}
+
+static void push_packed_delayed(rt_model_t *m, rt_packed_sched_t *ps,
+                                bool nonblock)
+{
+   if (m->packed_delayed == NULL)
+      m->packed_delayed = hash_new(16);
+
+   void *key = packed_delayed_key(ps->signal, nonblock);
+   rt_packed_sched_t *head = hash_get(m->packed_delayed, key);
+   if (head == NULL || ps->when < head->when) {
+      ps->next = head;
+      hash_put(m->packed_delayed, key, ps);
+   }
+   else {
+      rt_packed_sched_t *it = head;
+      while (it->next != NULL && it->next->when <= ps->when)
+         it = it->next;
+      ps->next = it->next;
+      it->next = ps;
+   }
+}
+
+static rt_packed_sched_t *pop_packed_delayed(rt_model_t *m, rt_signal_t *s,
+                                             bool nonblock)
+{
+   assert(m->packed_delayed != NULL);
+   void *key = packed_delayed_key(s, nonblock);
+   rt_packed_sched_t *head = hash_get(m->packed_delayed, key);
+   assert(head != NULL);
+   if (head->next != NULL)
+      hash_put(m->packed_delayed, key, head->next);
+   else
+      hash_delete(m->packed_delayed, key);
+   head->next = NULL;
+   return head;
+}
+
 static void sched_deposit_packed(rt_model_t *m, rt_signal_t *s,
                                  uint32_t msb_off, uint32_t count,
                                  uint64_t a_val, uint64_t b_val,
@@ -5861,7 +5916,9 @@ static void sched_deposit_packed(rt_model_t *m, rt_signal_t *s,
       deferq_do(nonblock ? &m->nonblockq : &m->driverq,
                 async_packed_deposit, ps);
    else {
-      void *e = tag_pointer(ps, nonblock
+      ps->when = m->now + after;
+      push_packed_delayed(m, ps, nonblock);
+      void *e = tag_pointer(s, nonblock
                             ? EVENT_PACKED_NONBLOCK : EVENT_PACKED_DEPOSIT);
       heap_insert(m->eventq_heap, m->now + after, e);
    }
