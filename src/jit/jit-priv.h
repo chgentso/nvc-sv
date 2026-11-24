@@ -487,7 +487,7 @@ void jit_do_syscall(vlog_node_t where, jit_anchor_t *caller, jit_scalar_t *args,
 DLLEXPORT void __nvc_do_exit(jit_exit_t which, jit_anchor_t *anchor,
                              jit_scalar_t *args, tlab_t *tlab);
 DLLEXPORT void __nvc_vec4op(jit_vec_op_t op, jit_anchor_t *anchor,
-                            jit_scalar_t *args, int size);
+                            jit_scalar_t *args, int size, tlab_t *tlab);
 DLLEXPORT void __nvc_pack(const uint8_t *src, int32_t size, jit_scalar_t *args);
 DLLEXPORT void __nvc_unpack(jit_scalar_t aval, jit_scalar_t bval,
                             jit_scalar_t *args);

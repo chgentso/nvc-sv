@@ -937,7 +937,8 @@ static void interp_unpack(jit_interp_t *state, jit_ir_t *ir)
 static void interp_vec4op(jit_interp_t *state, jit_ir_t *ir)
 {
    state->anchor->irpos = ir - state->func->irbuf;
-   __nvc_vec4op(ir->arg1.int64, state->anchor, state->args, ir->arg2.int64);
+   __nvc_vec4op(ir->arg1.int64, state->anchor, state->args, ir->arg2.int64,
+                state->tlab);
 }
 
 static void interp_loop(jit_interp_t *state)

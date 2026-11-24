@@ -3252,3 +3252,4 @@ vlog_packed1    verilog
 vpi_packed1     verilog,vpi
 fst_packed1     verilog,shell
 island_m1       shell
+vlog_wide_tlab1 verilog

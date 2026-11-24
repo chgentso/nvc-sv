@@ -734,6 +734,9 @@ static void macro_unpack(jit_irgen_t *g, jit_value_t abits, jit_value_t bbits)
 
 static void macro_vec4op(jit_irgen_t *g, jit_vec_op_t op, int size)
 {
+   if (size > 64)
+      g->used_tlab = true;
+
    irgen_emit_binary(g, MACRO_VEC4OP, JIT_SZ_UNSPEC, JIT_CC_NONE,
                      JIT_REG_INVALID, jit_value_from_int64(op),
                      jit_value_from_int64(size));
@@ -1530,18 +1533,22 @@ static void irgen_op_return(jit_irgen_t *g, mir_value_t n)
          j_send(g, 0, jit_null_ptr());  // Procedure compiled as function
 
       if (g->used_tlab) {
-         mir_value_t rval = mir_get_arg(g->mu, n, 0);
-         mir_type_t rtype = mir_get_type(g->mu, rval);
-         const mir_mem_t mem = mir_get_mem(g->mu, rval);
-         const bool wide_vec = !mir_is_null(rtype)
-            && (mir_get_class(g->mu, rtype) == MIR_TYPE_VEC2
-                || mir_get_class(g->mu, rtype) == MIR_TYPE_VEC4)
-            && mir_get_size(g->mu, rtype) > 64;
-         if (mem <= MIR_MEM_CONST && !wide_vec)
+         if (mir_count_args(g->mu, n) == 0)
             macro_trim(g);
-         else if (mem == MIR_MEM_STACK) {
-            mir_dump(g->mu);
-            fatal_trace("returning pointer to stack allocation");
+         else {
+            mir_value_t rval = mir_get_arg(g->mu, n, 0);
+            mir_type_t rtype = mir_get_type(g->mu, rval);
+            const mir_mem_t mem = mir_get_mem(g->mu, rval);
+            const bool wide_vec = !mir_is_null(rtype)
+               && (mir_get_class(g->mu, rtype) == MIR_TYPE_VEC2
+                   || mir_get_class(g->mu, rtype) == MIR_TYPE_VEC4)
+               && mir_get_size(g->mu, rtype) > 64;
+            if (mem <= MIR_MEM_CONST && !wide_vec)
+               macro_trim(g);
+            else if (mem == MIR_MEM_STACK) {
+               mir_dump(g->mu);
+               fatal_trace("returning pointer to stack allocation");
+            }
          }
       }
       break;
@@ -2715,8 +2722,10 @@ static void irgen_op_fcall(jit_irgen_t *g, mir_value_t n)
          j_recv(g, irgen_get_slot(g, n, i), i);
 
       const mir_class_t rclass = mir_get_class(g->mu, rtype);
+      const bool wide_vec = (rclass == MIR_TYPE_VEC2 || rclass == MIR_TYPE_VEC4)
+         && mir_get_size(g->mu, rtype) > 64;
       g->used_tlab |= rclass == MIR_TYPE_UARRAY
-         || rclass == MIR_TYPE_POINTER;
+         || rclass == MIR_TYPE_POINTER || wide_vec;
    }
    else {
       irgen_label_t *cont = irgen_alloc_label(g);

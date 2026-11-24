@@ -1248,6 +1248,11 @@ static LLVMValueRef llvm_get_fn(llvm_obj_t *obj, llvm_fn_t which)
             LLVMPointerType(obj->types[LLVM_INT64], 0),
 #endif
             obj->types[LLVM_INT32],
+#ifdef LLVM_HAS_OPAQUE_POINTERS
+            obj->types[LLVM_PTR],
+#else
+            LLVMPointerType(obj->types[LLVM_TLAB], 0),
+#endif
          };
          obj->fntypes[which] = LLVMFunctionType(obj->types[LLVM_VOID], args,
                                                 ARRAY_LEN(args), false);
@@ -2539,6 +2544,7 @@ static void cgen_macro_vec4op(llvm_obj_t *obj, cgen_block_t *cgb, jit_ir_t *ir)
       cgb->func->anchor,
       cgb->func->args,
       LLVMBuildTrunc(obj->builder, size, obj->types[LLVM_INT32], ""),
+      cgb->func->tlab,
    };
    llvm_call_fn(obj, LLVM_VEC4OP, args, ARRAY_LEN(args));
 }

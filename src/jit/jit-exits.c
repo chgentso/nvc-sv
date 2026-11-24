@@ -1296,7 +1296,7 @@ void __nvc_do_exit(jit_exit_t which, jit_anchor_t *anchor, jit_scalar_t *args,
 
 DLLEXPORT
 void __nvc_vec4op(jit_vec_op_t op, jit_anchor_t *anchor, jit_scalar_t *args,
-                  int size)
+                  int size, tlab_t *tlab)
 {
    jit_thread_local_t *thread = jit_attach_thread(anchor);
 
@@ -1326,7 +1326,7 @@ void __nvc_vec4op(jit_vec_op_t op, jit_anchor_t *anchor, jit_scalar_t *args,
             if (nwords <= ARRAY_LEN(zero_plane))
                zero = zero_plane;
             else {
-               uint64_t *buf = jit_mspace_alloc(nwords * sizeof(uint64_t));
+               uint64_t *buf = tlab_alloc(tlab, nwords * sizeof(uint64_t));
                memset(buf, 0, nwords * sizeof(uint64_t));
                zero = buf;
             }
@@ -1551,7 +1551,7 @@ void __nvc_vec4op(jit_vec_op_t op, jit_anchor_t *anchor, jit_scalar_t *args,
       {
          assert(size > 64);
 
-         void *ptr = jit_mspace_alloc(nwords * 2 * sizeof(uint64_t));
+         void *ptr = tlab_alloc(tlab, nwords * 2 * sizeof(uint64_t));
          uint64_t *aresult = ptr, *bresult = aresult + nwords;
 
          const int arg_size = args[2].integer;
@@ -1619,7 +1619,7 @@ void __nvc_vec4op(jit_vec_op_t op, jit_anchor_t *anchor, jit_scalar_t *args,
       {
          assert(size > 64);
 
-         void *ptr = jit_mspace_alloc(nwords * 2 * sizeof(uint64_t));
+         void *ptr = tlab_alloc(tlab, nwords * 2 * sizeof(uint64_t));
          uint64_t *aresult = ptr, *bresult = aresult + nwords;
 
          const uint64_t *afull = args[0].pointer;
@@ -1709,7 +1709,7 @@ void __nvc_vec4op(jit_vec_op_t op, jit_anchor_t *anchor, jit_scalar_t *args,
             args[1].integer = bbits;
          }
          else {
-            void *ptr = jit_mspace_alloc(nwords * 2 * sizeof(uint64_t));
+            void *ptr = tlab_alloc(tlab, nwords * 2 * sizeof(uint64_t));
             uint64_t *aresult = ptr, *bresult = aresult + nwords;
 
             for (int i = 0; i < nwords; i++) {
@@ -1748,7 +1748,7 @@ void __nvc_vec4op(jit_vec_op_t op, jit_anchor_t *anchor, jit_scalar_t *args,
          const bool is_true = (abits & ~bbits) != 0;
          const bool is_false = (abits | bbits) == 0;
 
-         void *ptr = jit_mspace_alloc(nwords * 2 * sizeof(uint64_t));
+         void *ptr = tlab_alloc(tlab, nwords * 2 * sizeof(uint64_t));
          uint64_t *aresult = ptr, *bresult = aresult + nwords;
 
          const uint64_t *atrue = args[2].pointer;
@@ -1781,7 +1781,7 @@ void __nvc_vec4op(jit_vec_op_t op, jit_anchor_t *anchor, jit_scalar_t *args,
       {
          uint64_t *aresult, *bresult, *a2, *b2;
          if (size > 64) {
-            void *ptr = jit_mspace_alloc(nwords * 2 * sizeof(uint64_t));
+            void *ptr = tlab_alloc(tlab, nwords * 2 * sizeof(uint64_t));
             aresult = ptr;
             bresult = aresult + nwords;
 
