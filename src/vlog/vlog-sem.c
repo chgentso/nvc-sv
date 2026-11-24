@@ -1177,6 +1177,10 @@ static void vlog_check_pattern_target(vlog_node_t target, vlog_node_t pat)
 
 static void vlog_check_nbassign(vlog_node_t v)
 {
+   if (in_function)
+      error_at(vlog_loc(v), "non-blocking assignment is not allowed in a %s",
+               in_final ? "final procedure" : "function");
+
    vlog_node_t target = vlog_target(v);
    type_mask_t lmask = vlog_check_expr(target);
 
