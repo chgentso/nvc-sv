@@ -13721,6 +13721,8 @@ static void p_concurrent_statement_or_psl(tree_t parent)
       else
          tree_add_stmt(parent, p_psl_directive(NULL));
    }
+   else if (scan(tDEFAULT, tSEQUENCE, tPROPERTY, tENDPOINT))
+      p_psl_declaration(parent);
    else
       tree_add_stmt(parent, p_concurrent_statement());
 }
