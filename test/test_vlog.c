@@ -5042,6 +5042,28 @@ START_TEST(test_covreal1)
 }
 END_TEST
 
+START_TEST(test_dpichk1)
+{
+   const error_t expect[] = {
+      {  3, "subroutine 'dup_t' is already exported via DPI-C" },
+      {  8, "DPI-C import 'c_fn' conflicts with previous declaration" },
+      { 15, "DPI-C unpacked struct member 'q' has a type not allowed in DPI-C" },
+      { 16, "DPI-C unpacked struct member 'u' cannot be an unpacked union" },
+      { 17, "DPI-C unpacked struct member 'e' has a type not allowed in DPI-C" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/dpichk1.sv");
+
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
 Suite *get_vlog_tests(void)
 {
    Suite *s = suite_create("vlog");
@@ -5240,6 +5262,7 @@ Suite *get_vlog_tests(void)
    tcase_add_test(tc, test_covbin1);
    tcase_add_test(tc, test_methargs1);
    tcase_add_test(tc, test_covreal1);
+   tcase_add_test(tc, test_dpichk1);
    suite_add_tcase(s, tc);
 
    return s;

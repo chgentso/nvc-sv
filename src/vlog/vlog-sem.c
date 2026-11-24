@@ -538,6 +538,90 @@ static void vlog_check_same_type(vlog_node_t left, type_mask_t lmask,
                "'%s'", type_mask_str(rmask), type_mask_str(lmask));
 }
 
+static void vlog_check_dpi_struct_type(vlog_node_t type, const loc_t *loc)
+{
+   type = vlog_get_type(type);
+   while (type != NULL && vlog_kind(type) == V_DATA_TYPE
+          && vlog_subkind(type) == DT_DYNARRAY && vlog_ranges(type) > 0)
+      type = vlog_get_type(vlog_type(type));
+
+   if (type == NULL || vlog_kind(type) != V_STRUCT_DECL
+       || (vlog_flags(type) & VLOG_F_PACKED))
+      return;
+
+   const int ndecls = vlog_decls(type);
+   for (int i = 0; i < ndecls; i++) {
+      vlog_node_t m = vlog_decl(type, i);
+      if (vlog_kind(m) != V_VAR_DECL)
+         continue;
+
+      const int nranges = vlog_ranges(m);
+      for (int r = 0; r < nranges; r++) {
+         vlog_node_t dim = vlog_range(m, r);
+         if (vlog_subkind(dim) == V_DIM_UNSIZED
+             || vlog_subkind(dim) == V_DIM_ASSOC
+             || (vlog_has_left(dim) && vlog_kind(vlog_left(dim)) == V_DOLLAR)
+             || (vlog_has_right(dim) && vlog_kind(vlog_right(dim)) == V_DOLLAR))
+            error_at(loc, "DPI-C unpacked struct member %pQ cannot have a "
+                     "dynamically sized array type", vlog_ident(m));
+      }
+
+      vlog_node_t mt = vlog_get_type(m);
+      while (mt != NULL && vlog_kind(mt) == V_DATA_TYPE
+             && vlog_subkind(mt) == DT_DYNARRAY && vlog_ranges(mt) > 0)
+         mt = vlog_get_type(vlog_type(mt));
+
+      if (mt == NULL)
+         continue;
+
+      if (vlog_kind(mt) == V_UNION_DECL
+          && (!(vlog_flags(mt) & VLOG_F_PACKED)
+              || (vlog_flags(mt) & VLOG_F_UNPACKED_VIEW)))
+         error_at(loc, "DPI-C unpacked struct member %pQ cannot be an "
+                  "unpacked union", vlog_ident(m));
+      else if (vlog_kind(mt) == V_CLASS_DECL)
+         error_at(loc, "DPI-C unpacked struct member %pQ cannot be a class "
+                  "handle", vlog_ident(m));
+      else if (vlog_kind(mt) == V_DATA_TYPE
+               && (vlog_subkind(mt) == DT_QUEUE
+                   || (vlog_subkind(mt) == DT_DYNARRAY && vlog_ranges(mt) == 0)
+                   || vlog_subkind(mt) == DT_ASSOC
+                   || vlog_subkind(mt) == DT_EVENT))
+         error_at(loc, "DPI-C unpacked struct member %pQ has a type not "
+                  "allowed in DPI-C", vlog_ident(m));
+      else if (vlog_kind(mt) == V_STRUCT_DECL
+               && !(vlog_flags(mt) & VLOG_F_PACKED))
+         vlog_check_dpi_struct_type(mt, loc);
+   }
+}
+
+static bool vlog_dpi_same_sig(vlog_node_t a, vlog_node_t b)
+{
+   if (vlog_kind(a) != vlog_kind(b) || vlog_ports(a) != vlog_ports(b))
+      return false;
+   if (vlog_kind(a) == V_FUNC_DECL) {
+      if (vlog_has_type(a) != vlog_has_type(b))
+         return false;
+      if (vlog_has_type(a) && get_type_mask(vlog_type(a))
+          != get_type_mask(vlog_type(b)))
+         return false;
+   }
+
+   const int nports = vlog_ports(a);
+   for (int i = 0; i < nports; i++) {
+      vlog_node_t pa = vlog_port(a, i), pb = vlog_port(b, i);
+      if (vlog_subkind(pa) != vlog_subkind(pb))
+         return false;
+      if (vlog_has_type(pa) != vlog_has_type(pb))
+         return false;
+      if (vlog_has_type(pa) && get_type_mask(vlog_type(pa))
+          != get_type_mask(vlog_type(pb)))
+         return false;
+   }
+
+   return true;
+}
+
 static void vlog_check_dpi_export(vlog_node_t v, vlog_node_t scope)
 {
    // An exported subroutine cannot have unsized arguments (35.5.6.1)
@@ -560,6 +644,8 @@ static void vlog_check_dpi_export(vlog_node_t v, vlog_node_t scope)
                      istr(vlog_ident(port)));
             return;
          }
+         if (vlog_has_type(port))
+            vlog_check_dpi_struct_type(vlog_type(port), vlog_loc(port));
       }
 
       return;
@@ -573,8 +659,59 @@ static void vlog_check_decls(vlog_node_t v)
       vlog_node_t d = vlog_decl(v, i);
       vlog_check(d);
 
-      if (vlog_kind(d) == V_DPI_EXPORT)
+      if (vlog_kind(d) == V_DPI_EXPORT) {
+         for (int j = 0; j < i; j++) {
+            vlog_node_t prev = vlog_decl(v, j);
+            if (vlog_kind(prev) != V_DPI_EXPORT)
+               continue;
+            if (vlog_ident(prev) == vlog_ident(d)) {
+               diag_t *dg = diag_new(DIAG_ERROR, vlog_loc(d));
+               diag_printf(dg, "subroutine %pQ is already exported via DPI-C",
+                           vlog_ident(d));
+               diag_hint(dg, vlog_loc(prev), "previously exported here");
+               diag_emit(dg);
+               break;
+            }
+            else if (vlog_ident3(prev) == vlog_ident3(d)) {
+               diag_t *dg = diag_new(DIAG_ERROR, vlog_loc(d));
+               diag_printf(dg, "duplicate DPI-C export name %pQ",
+                           vlog_ident3(d));
+               diag_hint(dg, vlog_loc(prev), "previously exported here");
+               diag_emit(dg);
+               break;
+            }
+         }
          vlog_check_dpi_export(d, v);
+      }
+      else if ((vlog_kind(d) == V_FUNC_DECL || vlog_kind(d) == V_TASK_DECL)
+               && (vlog_flags(d) & VLOG_F_DPI)) {
+         ident_t cid = vlog_has_ident3(d) ? vlog_ident3(d) : vlog_ident(d);
+         for (int j = 0; j < i; j++) {
+            vlog_node_t prev = vlog_decl(v, j);
+            if ((vlog_kind(prev) != V_FUNC_DECL && vlog_kind(prev) != V_TASK_DECL)
+                || !(vlog_flags(prev) & VLOG_F_DPI))
+               continue;
+            ident_t pcid = vlog_has_ident3(prev)
+               ? vlog_ident3(prev) : vlog_ident(prev);
+            if (pcid == cid && !vlog_dpi_same_sig(prev, d)) {
+               diag_t *dg = diag_new(DIAG_ERROR, vlog_loc(d));
+               diag_printf(dg, "DPI-C import %pQ conflicts with previous "
+                           "declaration", cid);
+               diag_hint(dg, vlog_loc(prev), "previously declared here");
+               diag_emit(dg);
+               break;
+            }
+         }
+
+         const int nports = vlog_ports(d);
+         for (int j = 0; j < nports; j++) {
+            vlog_node_t port = vlog_port(d, j);
+            if (vlog_has_type(port))
+               vlog_check_dpi_struct_type(vlog_type(port), vlog_loc(port));
+         }
+         if (vlog_kind(d) == V_FUNC_DECL && vlog_has_type(d))
+            vlog_check_dpi_struct_type(vlog_type(d), vlog_loc(d));
+      }
    }
 }
 
