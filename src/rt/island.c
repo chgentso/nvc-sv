@@ -158,6 +158,40 @@ static inline uint8_t island_read_sv_bit(const rt_signal_t *sig,
    return raw & 3u;
 }
 
+static inline uint8_t island_read_last_sv_bit(const rt_signal_t *sig,
+                                              int32_t sig_offset)
+{
+   const uint8_t *last_base = sig->shared.data + sig->shared.size;
+   if (sig->shared.flags & SIG_F_PACKED) {
+      const uint32_t sig_w = sig->bit_width;
+      const uint32_t sig_nw = (sig_w + 63u) / 64u;
+      const bool sig_is4 = !!(sig->shared.flags & SIG_F_PACKED4);
+      const uint64_t *src_a = (const uint64_t *)last_base;
+      const uint64_t *src_b = sig_is4 ? src_a + sig_nw : NULL;
+      const uint32_t sig_bit = sig_w - 1u - (uint32_t)sig_offset;
+      const uint64_t a = (src_a[sig_bit / 64u] >> (sig_bit & 63u)) & 1u;
+      const uint64_t b = src_b != NULL
+         ? ((src_b[sig_bit / 64u] >> (sig_bit & 63u)) & 1u) : 0;
+      return (uint8_t)((b << 1) | a);
+   }
+
+   const uint8_t raw = last_base[sig_offset];
+   if (sig->shared.flags & SIG_F_STD_LOGIC)
+      return std_logic_to_sv(raw);
+   return raw & 3u;
+}
+
+static inline uint8_t island_initial_prev_sv_bit(const rt_model_t *m,
+                                                 const rt_signal_t *sig,
+                                                 int32_t sig_offset)
+{
+   if (sig == NULL)
+      return 3u;
+   if (rt_model_has_init_event(m, sig))
+      return island_read_last_sv_bit(sig, sig_offset);
+   return island_read_sv_bit(sig, sig_offset);
+}
+
 static inline bool island_edge_match(uint8_t old_v, uint8_t new_v, bool posedge)
 {
    if (posedge)
@@ -1785,12 +1819,12 @@ void rt_island_reset_all(rt_island_mgr_t *mgr)
       for (uint32_t d = 0; d < isl->ndomains; d++) {
          rt_island_domain_t *dom = &(isl->domains[d]);
          const rt_island_sig_t *cs = &(isl->sigs[dom->clk_sig_idx]);
-         dom->prev_clk = cs->sig != NULL
-            ? island_read_sv_bit(cs->sig, cs->sig_offset) : 3u;
+         dom->prev_clk = island_initial_prev_sv_bit(mgr->model, cs->sig,
+                                                    cs->sig_offset);
          if (dom->rst_sig_idx >= 0) {
             const rt_island_sig_t *rs = &(isl->sigs[dom->rst_sig_idx]);
-            dom->prev_rst = rs->sig != NULL
-               ? island_read_sv_bit(rs->sig, rs->sig_offset) : 3u;
+            dom->prev_rst = island_initial_prev_sv_bit(mgr->model, rs->sig,
+                                                       rs->sig_offset);
          }
          else
             dom->prev_rst = 3u;
@@ -1811,9 +1845,10 @@ void rt_island_reset_all(rt_island_mgr_t *mgr)
       else {
          for (unsigned i = 0; i < mgr->super_domains.count; i++) {
             rt_super_domain_t *sd = mgr->super_domains.items[i];
-            sd->prev_clk = island_read_sv_bit(sd->clk_sig, sd->clk_sig_offset);
-            sd->prev_rst = sd->rst_sig != NULL
-               ? island_read_sv_bit(sd->rst_sig, sd->rst_sig_offset) : 3u;
+            sd->prev_clk = island_initial_prev_sv_bit(mgr->model, sd->clk_sig,
+                                                      sd->clk_sig_offset);
+            sd->prev_rst = island_initial_prev_sv_bit(mgr->model, sd->rst_sig,
+                                                      sd->rst_sig_offset);
             sd->in_sample_q = false;
             sd->in_commit_q = false;
          }

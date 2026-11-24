@@ -9938,6 +9938,18 @@ rt_island_mgr_t *rt_island_model_mgr(rt_model_t *m)
    return m != NULL ? m->islands : NULL;
 }
 
+bool rt_model_has_init_event(const rt_model_t *m, const rt_signal_t *s)
+{
+   if (m == NULL || s == NULL)
+      return false;
+
+   for (int i = 0; i < m->init_events.count; i++) {
+      if (m->init_events.items[i].signal == s)
+         return true;
+   }
+   return false;
+}
+
 void *x_sv_island_begin(struct _ffi_closure *closure, uint32_t state_bytes,
                         uint32_t nsigs, uint32_t ndomains)
 {

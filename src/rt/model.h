@@ -227,6 +227,7 @@ bool model_lookup_signal(rt_model_t *m, const char *path, rt_found_t *out);
 void model_scope_path(rt_scope_t *s, text_buf_t *tb);
 void model_item_path(rt_scope_t *scope, ident_t name, text_buf_t *tb);
 void get_forcing_value(rt_signal_t *s, uint8_t *value);
+bool rt_model_has_init_event(const rt_model_t *m, const rt_signal_t *s);
 
 void _std_standard_init(void);
 void _std_env_init(void);

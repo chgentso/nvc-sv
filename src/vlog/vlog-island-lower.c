@@ -473,10 +473,22 @@ static island_shared_cache_t *island_get_shared_cache(mir_context_t *mc)
 }
 
 typedef struct {
-   vlog_node_t body;
-   ident_t     qual;
-   bool        pure;
+   vlog_node_t          body;
+   ident_t              qual;
+   const vlog_island_t *isl;
+   bool                 pure;
 } m2_pure_check_t;
+
+static bool m2_sig_in_island(const vlog_island_t *isl, vlog_node_t d)
+{
+   if (isl == NULL)
+      return false;
+   for (uint32_t i = 0; i < isl->nsigs; i++) {
+      if (isl->sigs[i].decl == d)
+         return true;
+   }
+   return false;
+}
 
 static void m2_pure_state_cb(vlog_node_t v, void *arg)
 {
@@ -498,6 +510,17 @@ static void m2_pure_state_cb(vlog_node_t v, void *arg)
       }
       return;
 
+   case V_SEQ_BLOCK:
+      {
+         const int nd = vlog_decls(v);
+         for (int i = 0; i < nd; i++) {
+            vlog_node_t d = vlog_decl(v, i);
+            if (vlog_kind(d) == V_VAR_DECL && (vlog_flags(d) & VLOG_F_STATIC))
+               pc->pure = false;
+         }
+      }
+      return;
+
    case V_REF:
       if (vlog_has_ref(v)) {
          vlog_node_t d = vlog_ref(v);
@@ -507,6 +530,9 @@ static void m2_pure_state_cb(vlog_node_t v, void *arg)
          else if ((vlog_kind(d) == V_PARAM_DECL
                    || vlog_kind(d) == V_LOCALPARAM)
                   && vlog_ranges(d) > 0)
+            pc->pure = false;
+         else if (vlog_kind(d) == V_VAR_DECL && (vlog_flags(d) & VLOG_F_STATIC)
+                  && !vlog_has_ident2(d) && !m2_sig_in_island(pc->isl, d))
             pc->pure = false;
       }
       return;
@@ -642,7 +668,7 @@ static bool m2_procs_are_pure_state(vlog_node_t body, ident_t qual,
                                     const bool *fused_proc,
                                     const uint32_t *procs, uint32_t nprocs)
 {
-   m2_pure_check_t pc = { .body = body, .qual = qual, .pure = true };
+   m2_pure_check_t pc = { .body = body, .qual = qual, .isl = isl, .pure = true };
    for (uint32_t i = 0; i < nprocs && pc.pure; i++) {
       const uint32_t pidx = procs[i];
       if (!fused_proc[pidx])
@@ -861,9 +887,7 @@ void vlog_island_lower_emit_init(vlog_island_lower_ctx_t *ctx,
 
       mir_value_t closure;
       if (m2->n_fused_comb > 0) {
-         mir_value_t cl_args[] = {
-            m2->comb_shared ? mir_build_null(inst_mu, t_ptr) : self
-         };
+         mir_value_t cl_args[] = { self };
          closure = mir_build_closure(inst_mu, m2->eval_sym, t_offset,
                                      cl_args, 1);
       }
