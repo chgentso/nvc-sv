@@ -3238,3 +3238,4 @@ genpack_header1 2008
 psl_bool_and1   2008
 vlog_clocking_hier1 verilog
 vlog_process_std1 verilog
+vlog_alias1 verilog

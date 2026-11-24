@@ -23883,6 +23883,57 @@ static void p_default_declaration(vlog_node_t parent)
    }
 }
 
+static bool is_net_alias(void)
+{
+   // alias net_lvalue = net_lvalue { = net_lvalue } ;
+   if (peek() != tID || peek_ident_nth(1) != ident_new("alias")
+       || peek_reference() != NULL)
+      return false;
+
+   const token_t t2 = peek_nth(2);
+   if (t2 == tLBRACE)
+      return true;
+   if (t2 != tID)
+      return false;
+
+   for (int n = 3; n < TOKENQ_SIZE - 2; n++) {
+      const token_t tok = peek_nth(n);
+      if (tok == tEQ)
+         return true;
+      if (tok == tSEMI || tok == tEOF || tok == tLPAREN)
+         return false;
+   }
+
+   return false;
+}
+
+static void p_net_alias(vlog_node_t mod)
+{
+   // alias net_lvalue = net_lvalue { = net_lvalue } ;
+
+   BEGIN("net alias");
+
+   consume(tID);
+
+   vlog_node_t first = p_net_lvalue();
+   do {
+      consume(tEQ);
+      vlog_node_t next = p_net_lvalue();
+
+      vlog_node_t v = vlog_new(V_GATE_INST);
+      vlog_set_subkind(v, V_GATE_ALIAS);
+      vlog_set_ident(v, ident_uniq("alias"));
+      vlog_set_target(v, first);
+      vlog_add_param(v, next);
+      vlog_set_loc(v, CURRENT_LOC);
+      vlog_add_stmt(mod, v);
+
+      first = next;
+   } while (peek() == tEQ);
+
+   consume(tSEMI);
+}
+
 static void p_module_common_item(vlog_node_t mod)
 {
    // module_or_generate_item_declaration
@@ -23984,6 +24035,10 @@ static void p_module_common_item(vlog_node_t mod)
       }
       break;
    case tID:
+      if (is_net_alias()) {
+         p_net_alias(mod);
+         break;
+      }
       {
          bool is_assert = false;
          if (peek_nth(2) == tCOLON) {
@@ -26151,7 +26206,7 @@ static void p_module_or_generate_item_1(vlog_node_t mod)
       p_parameter_override(mod);
       break;
    case tID:
-      if (peek_nth(2) == tCOLON || is_scoped_type_start()) {
+      if (peek_nth(2) == tCOLON || is_scoped_type_start() || is_net_alias()) {
          p_module_common_item(mod);
          break;
       }

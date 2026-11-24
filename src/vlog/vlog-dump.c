@@ -784,6 +784,7 @@ static void vlog_dump_gate_inst(vlog_node_t v, int indent)
    switch (vlog_subkind(v)) {
    case V_GATE_PULLUP: print_syntax("#pullup "); break;
    case V_GATE_PULLDOWN: print_syntax("#pulldown "); break;
+   case V_GATE_ALIAS: print_syntax("#alias "); break;
    }
 
    const int nparams = vlog_params(v);

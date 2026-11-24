@@ -37151,6 +37151,32 @@ static void vlog_lower_convert_out(mir_unit_t *mu, object_t *obj)
    vlog_lower_converter(mu, cf, inout ? CONV_INOUT_OUT : CONV_DRIVE);
 }
 
+static vlog_node_t alias_find(hash_t *rep, vlog_node_t d)
+{
+   vlog_node_t cur = d;
+   for (;;) {
+      vlog_node_t next = hash_get(rep, cur);
+      if (next == NULL)
+         return cur;
+      cur = next;
+   }
+}
+
+static vlog_node_t alias_net_decl(vlog_node_t expr)
+{
+   if (vlog_kind(expr) != V_REF || !vlog_has_ref(expr))
+      return NULL;
+
+   vlog_node_t d = vlog_ref(expr);
+   if (vlog_kind(d) == V_PORT_DECL && vlog_has_ref(d))
+      d = vlog_ref(d);
+
+   if (vlog_kind(d) != V_NET_DECL || vlog_nettype_of(d) != NULL)
+      return NULL;
+
+   return d;
+}
+
 void vlog_lower_instance(mir_context_t *mc, vlog_node_t body, ident_t parent,
                          tree_t trans, cover_data_t *cover, cover_obj_t cscope)
 {
@@ -37282,6 +37308,50 @@ void vlog_lower_instance(mir_context_t *mc, vlog_node_t body, ident_t parent,
       mir_build_store(mu, self_var, mir_build_context_upref(mu, 0));
    }
 
+   // Collect whole-net aliases so aliased nets share a single runtime signal
+   hash_t *alias_rep = NULL;
+   const int nstmts_init = tree_stmts(trans);
+   for (int i = 0; i < nstmts_init; i++) {
+      tree_t wrap = tree_stmt(trans, i);
+      if (tree_kind(wrap) != T_VERILOG)
+         continue;
+
+      vlog_node_t s = tree_vlog(wrap);
+      if (vlog_kind(s) != V_GATE_INST || vlog_subkind(s) != V_GATE_ALIAS)
+         continue;
+
+      vlog_node_t da = alias_net_decl(vlog_target(s));
+      vlog_node_t db = alias_net_decl(vlog_param(s, 0));
+      if (da == NULL || db == NULL)
+         fatal_at(vlog_loc(s), "sorry, partial or complex net alias is not "
+                  "supported");
+
+      const int wa = vlog_type_info(&g, vlog_type(da))->size * vlog_size(da);
+      const int wb = vlog_type_info(&g, vlog_type(db))->size * vlog_size(db);
+      if (wa != wb)
+         fatal_at(vlog_loc(s), "sorry, net alias operands of different widths "
+                  "(%d and %d) are not supported", wa, wb);
+
+      if (alias_rep == NULL)
+         alias_rep = hash_new(16);
+
+      vlog_node_t ra = alias_find(alias_rep, da);
+      vlog_node_t rb = alias_find(alias_rep, db);
+      if (ra == rb)
+         continue;
+
+      int hops_a, hops_b;
+      const bool pa = !mir_is_null(mir_search_object(mu, ra, &hops_a));
+      const bool pb = !mir_is_null(mir_search_object(mu, rb, &hops_b));
+      if (pa && pb)
+         fatal_at(vlog_loc(s), "sorry, aliasing two ports together is not "
+                  "supported");
+      else if (pb)
+         hash_put(alias_rep, ra, rb);
+      else
+         hash_put(alias_rep, rb, ra);
+   }
+
    for (int i = 0, hops; i < vlog_ndecls; i++) {
       vlog_node_t d = vlog_decl(body, i);
 
@@ -37289,6 +37359,8 @@ void vlog_lower_instance(mir_context_t *mc, vlog_node_t body, ident_t parent,
       case V_PORT_DECL:
          break;   // Translated above
       case V_NET_DECL:
+         if (alias_rep != NULL && hash_get(alias_rep, d) != NULL)
+            break;   // Aliased to representative below
          if (mir_is_null(mir_search_object(mu, d, &hops))) {
             if (vlog_nettype_of(d) != NULL)
                vlog_lower_var_decl(&g, d, hash_get(map, d), 0);
@@ -37370,6 +37442,29 @@ void vlog_lower_instance(mir_context_t *mc, vlog_node_t body, ident_t parent,
       }
    }
 
+   if (alias_rep != NULL) {
+      mir_type_t t_net_signal = mir_signal_type(mu, t_net_value);
+      for (int i = 0, hops; i < vlog_ndecls; i++) {
+         vlog_node_t d = vlog_decl(body, i);
+         if (vlog_kind(d) != V_NET_DECL || hash_get(alias_rep, d) == NULL)
+            continue;
+
+         vlog_node_t root = alias_find(alias_rep, d);
+         mir_value_t var_root = mir_search_object(mu, root, &hops);
+         assert(!mir_is_null(var_root));
+         assert(hops == 0);
+
+         mir_value_t var = mir_add_var(mu, t_net_signal, MIR_NULL_STAMP,
+                                       vlog_ident(d), MIR_VAR_SIGNAL);
+         mir_build_store(mu, var, mir_build_load(mu, var_root));
+         mir_put_object(mu, d, var);
+
+         if (vlog_has_value(d))
+            vlog_lower_net_assign(&g, d, hash_get(map, d));
+      }
+      hash_free(alias_rep);
+   }
+
    mir_value_t self = mir_build_context_upref(mu, 0);
 
    const int nstmts = tree_stmts(trans);
@@ -37386,6 +37481,8 @@ void vlog_lower_instance(mir_context_t *mc, vlog_node_t body, ident_t parent,
       case V_INITIAL:
       case V_ALWAYS:
       case V_GATE_INST:
+         if (vlog_kind(s) == V_GATE_INST && vlog_subkind(s) == V_GATE_ALIAS)
+            break;   // Lowered as shared signal above
          {
             ident_t sym = ident_prefix(qual, vlog_ident(s), '.');
             mir_defer(mc, sym, qual, MIR_UNIT_PROCESS,

@@ -3522,6 +3522,31 @@ static void vlog_check_module(vlog_node_t v)
 
 static void vlog_check_gate_inst(vlog_node_t v)
 {
+   if (vlog_subkind(v) == V_GATE_ALIAS) {
+      vlog_node_t lhs = vlog_target(v);
+      vlog_node_t rhs = vlog_param(v, 0);
+      vlog_check_expr(lhs);
+      vlog_check_expr(rhs);
+
+      vlog_node_t ops[2] = { lhs, rhs };
+      for (int i = 0; i < 2; i++) {
+         vlog_node_t root = ops[i];
+         while (vlog_kind(root) == V_BIT_SELECT
+                || vlog_kind(root) == V_PART_SELECT)
+            root = vlog_value(root);
+         if (vlog_kind(root) == V_REF && vlog_has_ref(root)) {
+            vlog_node_t d = vlog_ref(root);
+            if (vlog_kind(d) == V_PORT_DECL && vlog_has_ref(d))
+               d = vlog_ref(d);
+            if (vlog_kind(d) == V_VAR_DECL)
+               error_at(vlog_loc(ops[i]),
+                        "net alias operand %pQ must be a net",
+                        vlog_ident(d));
+         }
+      }
+      return;
+   }
+
    const int nparams = vlog_params(v);
    for (int i = 0; i < nparams; i++) {
       vlog_node_t p = vlog_param(v, i);
