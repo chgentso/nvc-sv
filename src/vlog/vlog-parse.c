@@ -15359,6 +15359,26 @@ static void name_anonymous_type(vlog_node_t v, bool is_enum)
    vlog_set_ident(v, ident_new(tb_get(tb)));
 }
 
+static bool type_contains_decl(vlog_node_t dt, vlog_node_t target)
+{
+   for (int depth = 0; dt != NULL && depth < 32; depth++) {
+      if (dt == target)
+         return true;
+      switch (vlog_kind(dt)) {
+      case V_TYPE_DECL:
+      case V_DATA_TYPE:
+      case V_ENUM_DECL:
+         if (!vlog_has_type(dt))
+            return false;
+         dt = vlog_type(dt);
+         break;
+      default:
+         return false;
+      }
+   }
+   return false;
+}
+
 static vlog_node_t p_type_declaration(void)
 {
    // typedef data_type type_identifier { variable_dimension } ;
@@ -15448,6 +15468,10 @@ static vlog_node_t p_type_declaration(void)
        && (vlog_flags(existing) & VLOG_F_FORWARD)) {
       v = existing;
       vlog_clear_flags(v, VLOG_F_FORWARD);
+      if (type_contains_decl(dt, v)) {
+         error_at(&state.last_loc, "recursive typedef %pQ", id);
+         dt = logic_type();
+      }
    }
    else {
       v = vlog_new(V_TYPE_DECL);
