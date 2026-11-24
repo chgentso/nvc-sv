@@ -81,8 +81,10 @@ static vlog_node_t simp_port_decl(vlog_node_t v, vlog_node_t mod)
       decl = vlog_new(V_NET_DECL);
       vlog_set_subkind(decl, V_NET_WIRE);
    }
-   else
+   else {
       decl = vlog_new(V_VAR_DECL);
+      vlog_set_flags(decl, VLOG_F_PORT_VAR);
+   }
 
    vlog_set_loc(decl, vlog_loc(v));
    vlog_set_ident(decl, vlog_ident(v));

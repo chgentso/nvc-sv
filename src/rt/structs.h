@@ -231,6 +231,10 @@ typedef struct _rt_signal {
    nvc_lock_t    lock;
    uint32_t      offset;
    uint32_t      n_nexus;
+   union {
+      uint32_t   bit_width;
+      uint32_t   last_event_seq;
+   };
    rt_nexus_t    nexus;
    sig_shared_t  shared;
 } rt_signal_t;

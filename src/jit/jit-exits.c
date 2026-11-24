@@ -502,6 +502,41 @@ void fast_put_driver(jit_anchor_t *anchor, sig_shared_t *shared,
    thread->anchor = NULL;
 }
 
+void fast_deposit_packed(jit_anchor_t *anchor, sig_shared_t *shared,
+                         uint32_t offset, int32_t count, uint64_t abits,
+                         uint64_t bbits, uint32_t src_flags)
+{
+   jit_thread_local_t *thread = jit_attach_thread(anchor);
+
+   x_deposit_packed(shared, offset, count, abits, bbits, src_flags);
+
+   thread->anchor = NULL;
+}
+
+void fast_sched_deposit_packed(jit_anchor_t *anchor, sig_shared_t *shared,
+                               uint32_t offset, int32_t count, uint64_t abits,
+                               uint64_t bbits, uint32_t src_flags,
+                               int64_t after)
+{
+   jit_thread_local_t *thread = jit_attach_thread(anchor);
+
+   x_sched_deposit_packed(shared, offset, count, abits, bbits, src_flags,
+                          after);
+
+   thread->anchor = NULL;
+}
+
+void fast_put_driver_packed(jit_anchor_t *anchor, sig_shared_t *shared,
+                            uint32_t offset, int32_t count, uint64_t abits,
+                            uint64_t bbits, uint32_t src_flags)
+{
+   jit_thread_local_t *thread = jit_attach_thread(anchor);
+
+   x_put_driver_packed(shared, offset, count, abits, bbits, src_flags);
+
+   thread->anchor = NULL;
+}
+
 void fast_sched_inactive(jit_anchor_t *anchor)
 {
    jit_thread_local_t *thread = jit_attach_thread(anchor);
@@ -873,6 +908,74 @@ void __nvc_do_exit(jit_exit_t which, jit_anchor_t *anchor, jit_scalar_t *args,
             x_put_driver(shared, offset, count, &args[3].integer);
          else
             x_put_driver(shared, offset, count, args[3].pointer);
+      }
+      break;
+
+   case JIT_EXIT_INIT_PACKED:
+      {
+         int64_t   width  = args[0].integer;
+         uint64_t  abits  = args[1].integer;
+         uint64_t  bbits  = args[2].integer;
+         uint32_t  flags  = args[3].integer;
+         tree_t    where  = args[4].pointer;
+         int32_t   offset = args[5].integer;
+
+         args[0].pointer = x_init_packed(width, abits, bbits, flags,
+                                         where, offset);
+      }
+      break;
+
+   case JIT_EXIT_DEPOSIT_PACKED:
+      {
+         sig_shared_t *shared    = args[0].pointer;
+         uint32_t      offset    = args[1].integer;
+         int32_t       count     = args[2].integer;
+         uint64_t      abits     = args[3].integer;
+         uint64_t      bbits     = args[4].integer;
+         uint32_t      src_flags = args[5].integer;
+
+         x_deposit_packed(shared, offset, count, abits, bbits, src_flags);
+      }
+      break;
+
+   case JIT_EXIT_SCHED_DEPOSIT_PACKED:
+      {
+         sig_shared_t *shared    = args[0].pointer;
+         uint32_t      offset    = args[1].integer;
+         int32_t       count     = args[2].integer;
+         uint64_t      abits     = args[3].integer;
+         uint64_t      bbits     = args[4].integer;
+         uint32_t      src_flags = args[5].integer;
+         int64_t       after     = args[6].integer;
+
+         x_sched_deposit_packed(shared, offset, count, abits, bbits, src_flags,
+                                after);
+      }
+      break;
+
+   case JIT_EXIT_PUT_DRIVER_PACKED:
+      {
+         sig_shared_t *shared    = args[0].pointer;
+         uint32_t      offset    = args[1].integer;
+         int32_t       count     = args[2].integer;
+         uint64_t      abits     = args[3].integer;
+         uint64_t      bbits     = args[4].integer;
+         uint32_t      src_flags = args[5].integer;
+
+         x_put_driver_packed(shared, offset, count, abits, bbits, src_flags);
+      }
+      break;
+
+   case JIT_EXIT_FORCE_PACKED:
+      {
+         sig_shared_t *shared    = args[0].pointer;
+         uint32_t      offset    = args[1].integer;
+         int32_t       count     = args[2].integer;
+         uint64_t      abits     = args[3].integer;
+         uint64_t      bbits     = args[4].integer;
+         uint32_t      src_flags = args[5].integer;
+
+         x_force_packed(shared, offset, count, abits, bbits, src_flags);
       }
       break;
 

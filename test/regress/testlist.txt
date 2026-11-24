@@ -3248,3 +3248,6 @@ jitcache1       shell
 svpollstruct1   verilog
 svpollskip1     verilog
 svpollskip2     verilog
+vlog_packed1    verilog
+vpi_packed1     verilog,vpi
+fst_packed1     verilog,shell

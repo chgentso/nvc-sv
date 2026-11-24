@@ -24,7 +24,9 @@
 #include "option.h"
 #include "rt/assert.h"
 #include "rt/crv.h"
+#include "rt/defs.h"
 #include "rt/model.h"
+#include "rt/structs.h"
 #include "rt/sva.h"
 #include "thirdparty/svrand.h"
 #include "vpi/vpi-model.h"
@@ -3213,6 +3215,48 @@ static void sv_std_to_logic(jit_func_t *func, jit_anchor_t *caller,
    args[0].integer = 0;
 }
 
+static void sv_packed_edge(jit_func_t *func, jit_anchor_t *caller,
+                           jit_scalar_t *args, tlab_t *tlab)
+{
+   sig_shared_t *ss = args[0].pointer;
+   const uint32_t offset = args[1].integer;
+   const int64_t edge = args[2].integer;
+
+   const rt_signal_t *s = container_of(ss, rt_signal_t, shared);
+   const uint32_t width = s->bit_width;
+   const uint32_t bit = width - 1 - offset;
+   const int nwords = (width + 63) / 64;
+   const int w = bit / 64, sh = bit % 64;
+
+   const uint64_t *cur_a = (const uint64_t *)ss->data;
+   const uint64_t *last_a = (const uint64_t *)(ss->data + ss->size);
+
+   uint8_t cur_cmp, last_cmp;
+   if (ss->flags & SIG_F_PACKED4) {
+      const uint64_t *cur_b = cur_a + nwords;
+      const uint64_t *last_b = last_a + nwords;
+      const uint8_t ca = (cur_a[w] >> sh) & 1;
+      const uint8_t cb = (cur_b[w] >> sh) & 1;
+      const uint8_t la = (last_a[w] >> sh) & 1;
+      const uint8_t lb = (last_b[w] >> sh) & 1;
+      cur_cmp = (cb << 1) | ca;
+      last_cmp = (lb << 1) | la;
+   }
+   else {
+      cur_cmp = (cur_a[w] >> sh) & 1;
+      last_cmp = (last_a[w] >> sh) & 1;
+   }
+
+   static const uint8_t table_entries[16] = {
+      0, 1, 1, 1,
+      2, 0, 2, 2,
+      2, 1, 0, 0,
+      2, 1, 0, 0,
+   };
+
+   args[0].integer = table_entries[last_cmp * 4 + cur_cmp] == edge;
+}
+
 static void sv_cstr_len(jit_func_t *func, jit_anchor_t *caller,
                         jit_scalar_t *args, tlab_t *tlab)
 {
@@ -3556,6 +3600,7 @@ static jit_intrinsic_t intrinsic_list[] = {
    { "__sv_crv", sv_crv },
    { "__sv_logic_to_std", sv_logic_to_std },
    { "__sv_std_to_logic", sv_std_to_logic },
+   { "__sv_packed_edge", sv_packed_edge },
    { "__sv_cstr_len", sv_cstr_len },
    { "__sv_fread", sv_fread },
    { "__sv_fread_count", sv_fread_count },

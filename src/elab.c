@@ -3340,6 +3340,7 @@ static void elab_bind_event_formals(vlog_node_t body, vlog_node_t inst)
       vlog_set_ident(var, vlog_ident(port));
       vlog_set_type(var, type);
       vlog_set_loc(var, vlog_loc(port));
+      vlog_set_flags(var, VLOG_F_PORT_VAR);
 
       vlog_set_type(port, type);
       vlog_set_ref(port, var);

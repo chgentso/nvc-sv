@@ -648,8 +648,10 @@ static void bind_verilog_external_name(tree_t name, tree_t where,
    rt_signal_t *sv_sig = container_of(sv_ss, rt_signal_t, shared);
 
    const uint32_t sv_width = signal_width(sv_sig);
-   const bool sv_is_real = (vtype != NULL && vlog_is_real(vtype))
-      || (sv_sig->nexus.size == 8 && sv_width == 1);
+   const bool sv_is_packed = !!(sv_sig->shared.flags & SIG_F_PACKED);
+   const bool sv_is_real = !sv_is_packed
+      && ((vtype != NULL && vlog_is_real(vtype))
+          || (sv_sig->nexus.size == 8 && sv_width == 1));
 
    LOCAL_TEXT_BUF vtb = tb_new();
    fmt_verilog_type(vd, sv_width, sv_is_net, vtb);
@@ -674,7 +676,7 @@ static void bind_verilog_external_name(tree_t name, tree_t where,
       return;
    }
 
-   if (sv_is_real || sv_sig->nexus.size != 1)
+   if (sv_is_real || (!sv_is_packed && sv_sig->nexus.size != 1))
       jit_msg(tree_loc(name), DIAG_FATAL, "type of Verilog signal %s is %s "
               "but external name has type %pT",
               istr(var_name), tb_get(vtb), expect);

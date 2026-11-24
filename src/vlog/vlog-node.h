@@ -643,6 +643,7 @@ typedef enum {
    VLOG_F_OVERRIDE_INITIAL = VLOG_F_UNIQUE,  // On a method declared :initial
    VLOG_F_OVERRIDE_EXTENDS = VLOG_F_UNIQUE0, // On a method declared :extends
    VLOG_F_OVERRIDE_FINAL = VLOG_F_PRIORITY,  // On a method declared :final
+   VLOG_F_PORT_VAR = (1U << 31),     // Var backing a module/interface port
 } vlog_flags_t;
 
 typedef enum {

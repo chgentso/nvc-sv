@@ -194,6 +194,36 @@ static inline void cover_toggle_generic(uint64_t now, rt_signal_t *s,
                                         rt_toggle_data_t *td,
                                         toggle_check_fn_t fn)
 {
+   if (s->shared.flags & SIG_F_PACKED) {
+      const uint32_t width = s->bit_width;
+      const int nwords = (width + 63) / 64;
+      const uint64_t *cur_a = (const uint64_t *)signal_value(s);
+      const uint64_t *last_a = (const uint64_t *)signal_last_value(s);
+      const bool is_4state = !!(s->shared.flags & SIG_F_PACKED4);
+      const uint64_t *cur_b = is_4state ? cur_a + nwords : NULL;
+      const uint64_t *last_b = is_4state ? last_a + nwords : NULL;
+
+      int32_t *toggle_01 = td->counters;
+      int32_t *toggle_10 = toggle_01 + 1;
+      for (uint32_t k = 0; k < td->count; k++) {
+         const uint32_t bit = width - 1 - (td->offset + k);
+         const int widx = bit / 64;
+         const int sh = bit % 64;
+         const uint8_t na = (cur_a[widx] >> sh) & 1;
+         const uint8_t nb = cur_b != NULL ? ((cur_b[widx] >> sh) & 1) : 0;
+         const uint8_t oa = (last_a[widx] >> sh) & 1;
+         const uint8_t ob = last_b != NULL ? ((last_b[widx] >> sh) & 1) : 0;
+         const uint8_t nval = (nb << 1) | na;
+         const uint8_t oval = (ob << 1) | oa;
+         if (nval != oval)
+            (*fn)(cover_verilog_value(oval), cover_verilog_value(nval),
+                  toggle_01, toggle_10);
+         toggle_01 += 2;
+         toggle_10 += 2;
+      }
+      return;
+   }
+
    if (td->verilog && s->n_nexus > 1) {
       cover_toggle_nexuses(now, s, td, fn);
       return;

@@ -182,6 +182,11 @@ typedef enum {
    JIT_EXIT_SCHED_ACTIVE,
    JIT_EXIT_SCHED_ZERO,
    JIT_EXIT_STMT_PROBE,
+   JIT_EXIT_INIT_PACKED,
+   JIT_EXIT_DEPOSIT_PACKED,
+   JIT_EXIT_SCHED_DEPOSIT_PACKED,
+   JIT_EXIT_PUT_DRIVER_PACKED,
+   JIT_EXIT_FORCE_PACKED,
 } jit_exit_t;
 
 typedef uint32_t jit_reg_t;
@@ -515,6 +520,16 @@ void fast_sched_deposit(jit_anchor_t *anchor, sig_shared_t *shared,
 void fast_put_driver(jit_anchor_t *anchor, sig_shared_t *shared,
                      int32_t offset, int32_t count, jit_scalar_t value,
                      bool scalar);
+void fast_deposit_packed(jit_anchor_t *anchor, sig_shared_t *shared,
+                         uint32_t offset, int32_t count, uint64_t abits,
+                         uint64_t bbits, uint32_t src_flags);
+void fast_sched_deposit_packed(jit_anchor_t *anchor, sig_shared_t *shared,
+                               uint32_t offset, int32_t count, uint64_t abits,
+                               uint64_t bbits, uint32_t src_flags,
+                               int64_t after);
+void fast_put_driver_packed(jit_anchor_t *anchor, sig_shared_t *shared,
+                            uint32_t offset, int32_t count, uint64_t abits,
+                            uint64_t bbits, uint32_t src_flags);
 void fast_sched_inactive(jit_anchor_t *anchor);
 void fast_length_fail(jit_anchor_t *anchor, int64_t left, int64_t right,
                       int32_t dim, tree_t where);

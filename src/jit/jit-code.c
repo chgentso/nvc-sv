@@ -360,6 +360,9 @@ code_cache_t *code_cache_new(void)
    shash_put(s, "nvc.deposit_signal", &fast_deposit_signal);
    shash_put(s, "nvc.sched_deposit", &fast_sched_deposit);
    shash_put(s, "nvc.put_driver", &fast_put_driver);
+   shash_put(s, "nvc.deposit_packed", &fast_deposit_packed);
+   shash_put(s, "nvc.sched_deposit_packed", &fast_sched_deposit_packed);
+   shash_put(s, "nvc.put_driver_packed", &fast_put_driver_packed);
    shash_put(s, "nvc.sched_inactive", &fast_sched_inactive);
    shash_put(s, "nvc.length_fail", &fast_length_fail);
    shash_put(s, "nvc.index_fail", &fast_index_fail);

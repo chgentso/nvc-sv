@@ -2569,8 +2569,10 @@ mir_value_t mir_build_init_signal(mir_unit_t *mu, mir_type_t type,
                            count, size, value, flags, locus, offset);
 
    MIR_ASSERT(mir_get_class(mu, type) == MIR_TYPE_INT
-              || mir_get_class(mu, type) == MIR_TYPE_REAL,
-              "signal must have integer or real type");
+              || mir_get_class(mu, type) == MIR_TYPE_REAL
+              || mir_get_class(mu, type) == MIR_TYPE_VEC2
+              || mir_get_class(mu, type) == MIR_TYPE_VEC4,
+              "signal must have integer, real, or vector type");
    MIR_ASSERT(mir_is_offset(mu, count), "count argument must be offset");
    MIR_ASSERT(mir_is_offset(mu, size), "size argument must be offset");
    MIR_ASSERT(mir_is_offset(mu, flags), "flags argument must be offset");
@@ -2662,6 +2664,24 @@ mir_value_t mir_build_resolved(mir_unit_t *mu, mir_value_t signal)
 
    MIR_ASSERT(mir_get_class(mu, type) == MIR_TYPE_SIGNAL,
               "argument to resolved must be signal");
+
+   return result;
+}
+
+mir_value_t mir_build_load_packed(mir_unit_t *mu, mir_type_t type,
+                                  mir_value_t signal, mir_value_t offset,
+                                  mir_value_t count, mir_value_t last)
+{
+   mir_value_t result = mir_build_4(mu, MIR_OP_LOAD_PACKED, type,
+                                    MIR_NULL_STAMP, signal, offset, count, last);
+
+   MIR_ASSERT(mir_is_signal(mu, signal), "first argument must be signal");
+   MIR_ASSERT(mir_is_offset(mu, offset), "offset must be offset type");
+   MIR_ASSERT(mir_is_offset(mu, count), "count must be offset type");
+   MIR_ASSERT(mir_is_integral(mu, last), "last must be integral type");
+   MIR_ASSERT(mir_get_class(mu, type) == MIR_TYPE_VEC2
+              || mir_get_class(mu, type) == MIR_TYPE_VEC4,
+              "load packed result must be vector");
 
    return result;
 }

@@ -70,6 +70,8 @@ typedef enum {
    EVENT_PROCESS,
    EVENT_PSEUDO,
    EVENT_NONBLOCK,
+   EVENT_PACKED_DEPOSIT,
+   EVENT_PACKED_NONBLOCK,
 } event_kind_t;
 
 #define MEMBLOCK_ALIGN   64
@@ -132,6 +134,25 @@ typedef struct _rt_mixed_bridge {
    struct _rt_mixed_bridge *next;
 } rt_mixed_bridge_t;
 
+typedef struct _rt_packed_force {
+   uint64_t                *mask;
+   uint64_t                *abits;
+   uint64_t                *bbits;
+   struct _rt_packed_force *next;
+} rt_packed_force_t;
+
+typedef struct _rt_packed_sched {
+   rt_signal_t             *signal;
+   uint32_t                 offset;
+   uint32_t                 count;
+   uint64_t                *abits;
+   uint64_t                *bbits;
+   uint64_t                 small_a;
+   uint64_t                 small_b;
+   bool                     has_b;
+   struct _rt_packed_sched *next;
+} rt_packed_sched_t;
+
 typedef struct _rt_model {
    tree_t             top;
    hash_t            *scopes;
@@ -168,6 +189,7 @@ typedef struct _rt_model {
    deferq_t           postponedq;
    deferq_t           reactiveq;
    uint64_t           wait_seq;
+   uint32_t           event_seq;
    deferq_t           latepostq;
    deferq_t           triggerq;
    deferq_t           inactiveq;
@@ -203,6 +225,9 @@ typedef struct _rt_model {
    rt_trigger_t     **triggertab;
    unsigned           triggertab_size;
    unsigned           ntriggers;
+   hash_t            *packed_forces;
+   rt_packed_force_t *packed_force_list;
+   rt_packed_sched_t *free_packed_sched;
 } rt_model_t;
 
 #define FMT_VALUES_SZ   128
@@ -283,6 +308,7 @@ static void async_update_driver(rt_model_t *m, void *arg);
 static void async_fast_driver(rt_model_t *m, void *arg);
 static void async_fast_all_drivers(rt_model_t *m, void *arg);
 static void async_pseudo_source(rt_model_t *m, void *arg);
+static void async_packed_deposit(rt_model_t *m, void *arg);
 static void async_transfer_signal(rt_model_t *m, void *arg);
 static void async_run_trigger(rt_model_t *m, void *arg);
 
@@ -737,6 +763,7 @@ rt_model_t *model_new(jit_t *jit, cover_data_t *cover)
    m->jit         = jit;
    m->nexus_tail  = &(m->nexuses);
    m->iteration   = -1;
+   m->event_seq   = 1;
    m->eventq_heap = heap_new(512);
    m->res_memo    = ihash_new(128);
    m->cover       = cover;
@@ -876,6 +903,21 @@ void model_free(rt_model_t *m)
    free(m->sva_procs);
    free(m->triggertab);
 
+   for (rt_packed_force_t *pf = m->packed_force_list, *tmp; pf; pf = tmp) {
+      tmp = pf->next;
+      free(pf);
+   }
+   m->packed_force_list = NULL;
+   if (m->packed_forces != NULL) {
+      hash_free(m->packed_forces);
+      m->packed_forces = NULL;
+   }
+   for (rt_packed_sched_t *ps = m->free_packed_sched, *tmp; ps; ps = tmp) {
+      tmp = ps->next;
+      free(ps);
+   }
+   m->free_packed_sched = NULL;
+
    if (opt_get_int(OPT_RT_STATS)) {
       nvc_rusage_t ru;
       nvc_rusage(&ru);
@@ -900,6 +942,12 @@ void model_free(rt_model_t *m)
       void *e = heap_extract_min(m->eventq_heap);
       if (pointer_tag(e) == EVENT_TIMEOUT)
          free(untag_pointer(e, rt_callback_t));
+      else if (pointer_tag(e) == EVENT_PACKED_DEPOSIT
+               || pointer_tag(e) == EVENT_PACKED_NONBLOCK) {
+         rt_packed_sched_t *ps = untag_pointer(e, rt_packed_sched_t);
+         free(ps->abits);
+         free(ps);
+      }
    }
 
    if (m->root != NULL)
@@ -1142,11 +1190,29 @@ uint8_t signal_size(rt_signal_t *s)
 
 uint32_t signal_width(rt_signal_t *s)
 {
+   if (s->shared.flags & SIG_F_PACKED)
+      return s->bit_width;
+
    return s->shared.size / s->nexus.size;
 }
 
 size_t signal_expand(rt_signal_t *s, uint64_t *buf, size_t max)
 {
+   if (s->shared.flags & SIG_F_PACKED) {
+      const uint32_t total = s->bit_width;
+      const int nwords = (total + 63) / 64;
+      const uint64_t *abits = (const uint64_t *)s->shared.data;
+      const uint64_t *bbits = (s->shared.flags & SIG_F_PACKED4)
+         ? abits + nwords : NULL;
+      for (uint32_t i = 0; i < max && i < total; i++) {
+         const uint32_t bit = total - 1 - i;
+         const uint64_t a = (abits[bit / 64] >> (bit % 64)) & 1;
+         const uint64_t b = bbits ? ((bbits[bit / 64] >> (bit % 64)) & 1) : 0;
+         buf[i] = (b << 1) | a;
+      }
+      return total;
+   }
+
    const size_t total = s->shared.size / s->nexus.size;
 
 #define SIGNAL_READ_EXPAND_U64(type) do {                               \
@@ -2424,6 +2490,8 @@ static inline rt_nexus_t *split_nexus(rt_model_t *m, rt_signal_t *s,
    MULTITHREADED_ONLY(assert_lock_held(&s->lock));
 
    rt_nexus_t *n0 = &(s->nexus);
+   if (unlikely(s->shared.flags & SIG_F_PACKED))
+      return n0;
    if (likely(offset == 0 && n0->width == count))
       return n0;
    else if (offset == 0 && count == s->shared.size / n0->size)
@@ -2971,6 +3039,12 @@ static void calculate_effective_value(rt_model_t *m, rt_nexus_t *n)
 
 static void calculate_initial_value(rt_model_t *m, rt_nexus_t *n)
 {
+   if (unlikely(n->signal->shared.flags & SIG_F_PACKED)) {
+      rt_signal_t *s = n->signal;
+      memcpy(s->shared.data + s->shared.size, s->shared.data, s->shared.size);
+      return;
+   }
+
    calculate_driving_value(m, n);
 
    if (n->flags & NET_F_EFFECTIVE) {
@@ -3037,6 +3111,11 @@ static void dump_one_signal(rt_model_t *m, rt_scope_t *scope, rt_signal_t *s,
       fprintf(stderr, "%-20s %-5d %-4d %-7d %-7d %-4d ",
               nth == 0 ? tb_get(tb) : "+",
               n->width, n->size, n->n_sources, n_outputs, n->rank);
+
+      if (s->shared.flags & SIG_F_PACKED) {
+         fprintf(stderr, "[packed %u bits]\n", s->bit_width);
+         continue;
+      }
 
       if (n->event_delta == m->iteration && n->last_event == m->now)
          fprintf(stderr, "%s -> ", fmt_nexus(n, nexus_last_value(n)));
@@ -3893,15 +3972,53 @@ static bool run_trigger(rt_model_t *m, rt_trigger_t *t)
 
          t->result.integer = 0;
 
-         rt_nexus_t *n = split_nexus(m, s, offset, count);
-         for (; count > 0; n = n->chain) {
+         if (unlikely(s->shared.flags & SIG_F_PACKED)) {
+            rt_nexus_t *n = &(s->nexus);
             if (n->last_event == m->now && n->event_delta == m->iteration) {
-               t->result.integer = 1;
-               break;
+               if (offset == 0 && (uint32_t)count >= s->bit_width)
+                  t->result.integer = 1;
+               else if (offset < s->bit_width && count > 0) {
+                  uint32_t cnt = (uint32_t)count;
+                  if (cnt > s->bit_width - offset)
+                     cnt = s->bit_width - offset;
+                  const uint32_t lsb_off = s->bit_width - offset - cnt;
+                  const int w0 = lsb_off / 64;
+                  const int w1 = (lsb_off + cnt - 1) / 64;
+                  const bool is4 = !!(s->shared.flags & SIG_F_PACKED4);
+                  const int nwords = (s->bit_width + 63) / 64;
+                  const uint64_t *eff_a = (const uint64_t *)s->shared.data;
+                  const uint64_t *eff_b = is4 ? eff_a + nwords : NULL;
+                  const uint64_t *last_a =
+                     (const uint64_t *)(s->shared.data + s->shared.size);
+                  const uint64_t *last_b = is4 ? last_a + nwords : NULL;
+                  for (int w = w0; w <= w1; w++) {
+                     const uint32_t d_start = (w == w0) ? (lsb_off % 64) : 0;
+                     const uint32_t d_end =
+                        (w == w1) ? ((lsb_off + cnt - 1) % 64) : 63;
+                     const uint32_t span = d_end - d_start + 1;
+                     const uint64_t wmask = (span == 64)
+                        ? ~UINT64_C(0)
+                        : (((UINT64_C(1) << span) - 1) << d_start);
+                     if (((eff_a[w] ^ last_a[w]) & wmask)
+                         || (is4 && ((eff_b[w] ^ last_b[w]) & wmask))) {
+                        t->result.integer = 1;
+                        break;
+                     }
+                  }
+               }
             }
+         }
+         else if (s->last_event_seq == m->event_seq) {
+            rt_nexus_t *n = split_nexus(m, s, offset, count);
+            for (; count > 0; n = n->chain) {
+               if (n->last_event == m->now && n->event_delta == m->iteration) {
+                  t->result.integer = 1;
+                  break;
+               }
 
-            count -= n->width;
-            assert(count >= 0);
+               count -= n->width;
+               assert(count >= 0);
+            }
          }
 
          TRACE("level trigger %pi+%d ==> %"PRIi64, tree_ident(s->where),
@@ -4143,6 +4260,8 @@ static void notify_event(rt_model_t *m, rt_nexus_t *n)
 {
    n->last_event = m->now;
    n->event_delta = m->iteration;
+   if (!(n->signal->shared.flags & SIG_F_PACKED))
+      n->signal->last_event_seq = m->event_seq;
    mtp.events += mtp.on;
 
    // Triggers run synchronously in blocking update phase
@@ -4681,6 +4800,34 @@ static void fire_init_events(rt_model_t *m)
    for (int i = 0; i < m->init_events.count; i++) {
       const init_event_t *ev = &(m->init_events.items[i]);
 
+      if (unlikely(ev->signal->shared.flags & SIG_F_PACKED)) {
+         rt_signal_t *s = ev->signal;
+         rt_nexus_t *n = &(s->nexus);
+         if (n->flags & NET_F_EFFECTIVE)
+            continue;
+
+         bool known = false;
+         if (s->shared.flags & SIG_F_PACKED2)
+            known = s->bit_width > 0;
+         else {
+            const uint32_t w = s->bit_width;
+            const int nwords = (w + 63) / 64;
+            const uint64_t *bbits = (const uint64_t *)s->shared.data + nwords;
+            for (int j = 0; j < nwords && !known; j++) {
+               const uint64_t mask = (j == nwords - 1 && (w & 63))
+                  ? ((UINT64_C(1) << (w & 63)) - 1) : ~UINT64_C(0);
+               if ((~bbits[j]) & mask)
+                  known = true;
+            }
+         }
+
+         if (known) {
+            notify_event(m, n);
+            m->next_is_delta = true;
+         }
+         continue;
+      }
+
       int remaining = ev->count;
       rt_nexus_t *n = split_nexus(m, ev->signal, ev->offset, ev->count);
       for (; remaining > 0; n = n->chain) {
@@ -4734,6 +4881,13 @@ static void model_cycle_body(rt_model_t *m)
    else {
       m->now = heap_min_key(m->eventq_heap);
       m->iteration = 0;
+   }
+   if (unlikely(++m->event_seq == 0)) {
+      m->event_seq = 1;
+      for (rt_nexus_t *nx = m->nexuses; nx != NULL; nx = nx->chain) {
+         if (!(nx->signal->shared.flags & SIG_F_PACKED))
+            nx->signal->last_event_seq = 0;
+      }
    }
 
    m->blocking_update = false;
@@ -4793,6 +4947,18 @@ static void model_cycle_body(rt_model_t *m)
                // non-blocking region of the time step it matures in
                rt_source_t *source = untag_pointer(e, rt_source_t);
                deferq_do(&m->nonblockq, async_pseudo_source, source);
+            }
+            break;
+         case EVENT_PACKED_DEPOSIT:
+            {
+               rt_packed_sched_t *ps = untag_pointer(e, rt_packed_sched_t);
+               deferq_do(&m->driverq, async_packed_deposit, ps);
+            }
+            break;
+         case EVENT_PACKED_NONBLOCK:
+            {
+               rt_packed_sched_t *ps = untag_pointer(e, rt_packed_sched_t);
+               deferq_do(&m->nonblockq, async_packed_deposit, ps);
             }
             break;
          }
@@ -5130,18 +5296,35 @@ static uint8_t vhdl_to_sv_byte(uint8_t b, bool sv_is_net, bool vhdl_is_bit)
       return lv;
 }
 
+static inline uint8_t packed_read_sv_bit(const rt_signal_t *s, uint32_t msb_idx)
+{
+   const uint32_t width = s->bit_width;
+   const uint32_t bit = width - 1 - msb_idx;
+   const int nwords = (width + 63) / 64;
+   const uint64_t *abits = (const uint64_t *)s->shared.data;
+   const uint64_t *bbits = (s->shared.flags & SIG_F_PACKED4)
+      ? abits + nwords : NULL;
+   const uint64_t a = (abits[bit / 64] >> (bit % 64)) & 1;
+   const uint64_t b = bbits != NULL ? ((bbits[bit / 64] >> (bit % 64)) & 1) : 0;
+   return (uint8_t)((b << 1) | a);
+}
+
 static void sv_to_vhdl_int(const rt_mixed_bridge_t *b, void *dst)
 {
    const uint32_t width = signal_width(b->sv_sig);
+   const bool packed = !!(b->sv_sig->shared.flags & SIG_F_PACKED);
    const uint8_t *src = b->sv_sig->shared.data;
 
    uint64_t val = 0;
    for (uint32_t i = 0; i < width; i++) {
-      const uint8_t bit = ((src[i] & 3) == 1) ? 1 : 0;
+      const uint8_t svb = packed ? packed_read_sv_bit(b->sv_sig, i) : src[i];
+      const uint8_t bit = ((svb & 3) == 1) ? 1 : 0;
       val = (val << 1) | bit;
    }
 
-   if (b->sv_is_signed && width > 0 && width < 64 && ((src[0] & 3) == 1))
+   const uint8_t msb = width > 0
+      ? (packed ? packed_read_sv_bit(b->sv_sig, 0) : src[0]) : 0;
+   if (b->sv_is_signed && width > 0 && width < 64 && ((msb & 3) == 1))
       val |= (~UINT64_C(0) << width);
 
    switch (b->vhdl_size) {
@@ -5194,11 +5377,14 @@ static void mixed_bridge_sv_event(uint64_t now, rt_signal_t *signal,
 
    const uint32_t width = signal_width(b->sv_sig);
    const bool vhdl_is_bit = (b->kind == MIXED_BRIDGE_BIT);
+   const bool packed = !!(b->sv_sig->shared.flags & SIG_F_PACKED);
 
    uint8_t *buf LOCAL = xmalloc(width);
-   for (uint32_t i = 0; i < width; i++)
-      buf[i] = sv_to_vhdl_byte(b->sv_sig->shared.data[i], b->sv_is_net,
-                               vhdl_is_bit);
+   for (uint32_t i = 0; i < width; i++) {
+      const uint8_t svb = packed ? packed_read_sv_bit(b->sv_sig, i)
+         : b->sv_sig->shared.data[i];
+      buf[i] = sv_to_vhdl_byte(svb, b->sv_is_net, vhdl_is_bit);
+   }
 
    sched_deposit(m, b->vhdl_sig, buf, 0, width, 0, false);
 }
@@ -5262,12 +5448,16 @@ static void mixed_bridge_release(rt_model_t *m, rt_signal_t *s,
       // Sync the proxy's default/driving area with the current SV value so
       // releasing the proxy does not revert to stale initial data
       const bool vhdl_is_bit = (b->kind == MIXED_BRIDGE_BIT);
-      for (size_t i = 0; i < count; i++)
-         driving[offset + i] = sv_to_vhdl_byte(
-            b->sv_sig->shared.data[offset + i], b->sv_is_net, vhdl_is_bit);
+      const bool packed = !!(b->sv_sig->shared.flags & SIG_F_PACKED);
+      for (size_t i = 0; i < count; i++) {
+         const uint8_t svb = packed ? packed_read_sv_bit(b->sv_sig, offset + i)
+            : b->sv_sig->shared.data[offset + i];
+         driving[offset + i] = sv_to_vhdl_byte(svb, b->sv_is_net, vhdl_is_bit);
+      }
 
       if (!b->sv_is_net)
-         sched_deposit(m, b->sv_sig, b->sv_sig->shared.data + offset,
+         sched_deposit(m, b->sv_sig,
+                       packed ? NULL : b->sv_sig->shared.data + offset,
                        offset, count, -1, false);
       release_signal(m, b->sv_sig, offset, count);
       return;
@@ -5343,9 +5533,11 @@ sig_shared_t *model_mixed_signal_proxy(rt_model_t *m, rt_signal_t *sv_sig,
    }
    else {
       const bool vhdl_is_bit = (kind == MIXED_BRIDGE_BIT);
+      const bool packed = !!(sv_sig->shared.flags & SIG_F_PACKED);
       for (uint32_t i = 0; i < sv_width; i++) {
-         uint8_t v = sv_to_vhdl_byte(sv_sig->shared.data[i], sv_is_net,
-                                     vhdl_is_bit);
+         const uint8_t svb = packed ? packed_read_sv_bit(sv_sig, i)
+            : sv_sig->shared.data[i];
+         uint8_t v = sv_to_vhdl_byte(svb, sv_is_net, vhdl_is_bit);
          eff[i] = last[i] = driving[i] = v;
       }
    }
@@ -5356,6 +5548,465 @@ sig_shared_t *model_mixed_signal_proxy(rt_model_t *m, rt_signal_t *sv_sig,
    return &(s->shared);
 }
 
+static void packed_bytes_to_words(const uint8_t *bytes, uint32_t count,
+                                  uint64_t *abits, uint64_t *bbits)
+{
+   const int nwords = (count + 63) / 64;
+   for (int i = 0; i < nwords; i++) {
+      abits[i] = 0;
+      if (bbits != NULL)
+         bbits[i] = 0;
+   }
+   for (uint32_t i = 0; i < count; i++) {
+      const uint32_t bit = count - 1 - i;
+      const uint8_t v = bytes[i];
+      if (v & 1)
+         abits[bit / 64] |= UINT64_C(1) << (bit % 64);
+      if (bbits != NULL && (v & 2))
+         bbits[bit / 64] |= UINT64_C(1) << (bit % 64);
+   }
+}
+
+static inline uint64_t packed_top_mask(uint32_t width)
+{
+   return (width & 63) ? ((UINT64_C(1) << (width & 63)) - 1) : ~UINT64_C(0);
+}
+
+static bool packed_save_deferred(rt_model_t *m, rt_nexus_t *n, size_t valuesz)
+{
+   rt_proc_t *ap = get_active_proc();
+   if (ap == NULL || !ap->comb)
+      return false;
+
+   unsigned i = 0;
+   while (i < m->ndeferred && m->deferred[i].nexus != n)
+      i++;
+   if (i < m->ndeferred)
+      return true;
+
+   if (m->ndeferred < DEFER_MAX) {
+      unsigned char *init = valuesz <= sizeof(m->deferred[i].buf)
+         ? m->deferred[i].buf : xmalloc(valuesz);
+      m->deferred[i].nexus = n;
+      m->deferred[i].init = init;
+      memcpy(init, n->signal->shared.data, valuesz);
+      m->ndeferred++;
+      return true;
+   }
+   return false;
+}
+
+static void packed_rmw_range(uint64_t *dst_a, uint64_t *dst_b,
+                             uint32_t width, uint32_t msb_off, uint32_t count,
+                             const uint64_t *src_a, const uint64_t *src_b,
+                             const uint64_t *force_mask)
+{
+   const uint32_t lsb_off = width - msb_off - count;
+   const int src_nwords = (count + 63) / 64;
+   const int w0 = lsb_off / 64;
+   const int w1 = (lsb_off + count - 1) / 64;
+
+   for (int w = w0; w <= w1; w++) {
+      const uint32_t d_start = (w == w0) ? (lsb_off % 64) : 0;
+      const uint32_t d_end = (w == w1) ? ((lsb_off + count - 1) % 64) : 63;
+      const uint32_t span = d_end - d_start + 1;
+      uint64_t wmask = (span == 64)
+         ? ~UINT64_C(0) : (((UINT64_C(1) << span) - 1) << d_start);
+      if (force_mask != NULL)
+         wmask &= ~force_mask[w];
+      if (wmask == 0)
+         continue;
+
+      const uint32_t s_bit = (uint32_t)(w * 64 + d_start) - lsb_off;
+      const int sw = s_bit / 64;
+      const int ssh = s_bit % 64;
+      uint64_t sa = src_a[sw] >> ssh;
+      if (ssh != 0 && sw + 1 < src_nwords)
+         sa |= src_a[sw + 1] << (64 - ssh);
+      const uint64_t val_a = sa << d_start;
+      dst_a[w] = (dst_a[w] & ~wmask) | (val_a & wmask);
+
+      if (dst_b != NULL) {
+         uint64_t sb = 0;
+         if (src_b != NULL) {
+            sb = src_b[sw] >> ssh;
+            if (ssh != 0 && sw + 1 < src_nwords)
+               sb |= src_b[sw + 1] << (64 - ssh);
+         }
+         const uint64_t val_b = sb << d_start;
+         dst_b[w] = (dst_b[w] & ~wmask) | (val_b & wmask);
+      }
+   }
+}
+
+static void deposit_notify(rt_model_t *m, rt_nexus_t *n);
+
+static bool packed_range_differs(const uint64_t *eff_a, const uint64_t *eff_b,
+                                 uint32_t width, uint32_t msb_off,
+                                 uint32_t count, const uint64_t *src_a,
+                                 const uint64_t *src_b,
+                                 const uint64_t *force_mask)
+{
+   const uint32_t lsb_off = width - msb_off - count;
+   const int src_nwords = (count + 63) / 64;
+   const int w0 = lsb_off / 64;
+   const int w1 = (lsb_off + count - 1) / 64;
+
+   for (int w = w0; w <= w1; w++) {
+      const uint32_t d_start = (w == w0) ? (lsb_off % 64) : 0;
+      const uint32_t d_end = (w == w1) ? ((lsb_off + count - 1) % 64) : 63;
+      const uint32_t span = d_end - d_start + 1;
+      uint64_t wmask = (span == 64)
+         ? ~UINT64_C(0) : (((UINT64_C(1) << span) - 1) << d_start);
+      if (force_mask != NULL)
+         wmask &= ~force_mask[w];
+      if (wmask == 0)
+         continue;
+
+      const uint32_t s_bit = (uint32_t)(w * 64 + d_start) - lsb_off;
+      const int sw = s_bit / 64;
+      const int ssh = s_bit % 64;
+      uint64_t sa = src_a[sw] >> ssh;
+      if (ssh != 0 && sw + 1 < src_nwords)
+         sa |= src_a[sw + 1] << (64 - ssh);
+      if (((sa << d_start) ^ eff_a[w]) & wmask)
+         return true;
+
+      if (eff_b != NULL) {
+         uint64_t sb = 0;
+         if (src_b != NULL) {
+            sb = src_b[sw] >> ssh;
+            if (ssh != 0 && sw + 1 < src_nwords)
+               sb |= src_b[sw + 1] << (64 - ssh);
+         }
+         if (((sb << d_start) ^ eff_b[w]) & wmask)
+            return true;
+      }
+   }
+   return false;
+}
+
+static void deposit_packed_apply(rt_model_t *m, rt_signal_t *s,
+                                 uint32_t msb_off, uint32_t count,
+                                 uint64_t a_val, uint64_t b_val,
+                                 uint32_t src_flags, bool respect_force,
+                                 bool check_comb)
+{
+   if (count == 0)
+      return;
+
+   const uint32_t width = s->bit_width;
+   assert(msb_off + count <= width);
+
+   const int nwords = (width + 63) / 64;
+   const bool is4 = !!(s->shared.flags & SIG_F_PACKED4);
+   uint64_t *eff_a = (uint64_t *)s->shared.data;
+   uint64_t *eff_b = is4 ? eff_a + nwords : NULL;
+   uint64_t *last_a = (uint64_t *)(s->shared.data + s->shared.size);
+   uint64_t *last_b = is4 ? last_a + nwords : NULL;
+
+   const uint64_t *force_mask = NULL;
+   if (unlikely(respect_force && (s->nexus.flags & NET_F_FORCED))) {
+      rt_packed_force_t *pf = m->packed_forces
+         ? hash_get(m->packed_forces, s) : NULL;
+      if (pf != NULL)
+         force_mask = pf->mask;
+   }
+
+   if (likely(msb_off == 0 && count == width && force_mask == NULL
+              && (src_flags & PACK_SRC_SCALAR) && nwords == 1)) {
+      const uint64_t top_mask = packed_top_mask(width);
+      const uint64_t na = a_val & top_mask;
+      const uint64_t nb = (is4 && !(src_flags & PACK_SRC_VEC2))
+         ? (b_val & top_mask) : 0;
+      if (eff_a[0] == na && (!is4 || eff_b[0] == nb))
+         return;
+
+      const bool defer = check_comb
+         && packed_save_deferred(m, &(s->nexus), s->shared.size);
+      last_a[0] = eff_a[0];
+      if (is4)
+         last_b[0] = eff_b[0];
+      eff_a[0] = na;
+      if (is4)
+         eff_b[0] = nb;
+      m->trigger_epoch++;
+      if (!defer)
+         deposit_notify(m, &(s->nexus));
+      return;
+   }
+
+   const uint64_t *src_a = (src_flags & PACK_SRC_SCALAR)
+      ? &a_val : (const uint64_t *)(uintptr_t)a_val;
+   const uint64_t *src_b = (src_flags & PACK_SRC_VEC2) ? NULL
+      : ((src_flags & PACK_SRC_SCALAR)
+         ? &b_val : (const uint64_t *)(uintptr_t)b_val);
+
+   if (msb_off == 0 && count == width && force_mask == NULL) {
+      const uint64_t top_mask = packed_top_mask(width);
+      bool changed = false;
+      for (int i = 0; i < nwords && !changed; i++) {
+         const uint64_t msk = (i == nwords - 1) ? top_mask : ~UINT64_C(0);
+         if ((eff_a[i] ^ src_a[i]) & msk)
+            changed = true;
+         if (is4 && ((eff_b[i] ^ (src_b ? src_b[i] : 0)) & msk))
+            changed = true;
+      }
+      if (!changed)
+         return;
+
+      const bool defer = check_comb
+         && packed_save_deferred(m, &(s->nexus), s->shared.size);
+      memcpy(last_a, eff_a, s->shared.size);
+      memcpy(eff_a, src_a, (size_t)nwords * sizeof(uint64_t));
+      eff_a[nwords - 1] &= top_mask;
+      if (is4) {
+         if (src_b != NULL) {
+            memcpy(eff_b, src_b, (size_t)nwords * sizeof(uint64_t));
+            eff_b[nwords - 1] &= top_mask;
+         }
+         else
+            memset(eff_b, 0, (size_t)nwords * sizeof(uint64_t));
+      }
+      m->trigger_epoch++;
+      if (!defer)
+         deposit_notify(m, &(s->nexus));
+      return;
+   }
+
+   if (!packed_range_differs(eff_a, eff_b, width, msb_off, count,
+                             src_a, src_b, force_mask))
+      return;
+
+   const bool defer = check_comb
+      && packed_save_deferred(m, &(s->nexus), s->shared.size);
+   memcpy(last_a, eff_a, s->shared.size);
+   packed_rmw_range(eff_a, eff_b, width, msb_off, count,
+                    src_a, src_b, force_mask);
+   m->trigger_epoch++;
+   if (!defer)
+      deposit_notify(m, &(s->nexus));
+}
+
+static void async_packed_deposit(rt_model_t *m, void *arg)
+{
+   rt_packed_sched_t *ps = arg;
+   if (ps->abits != NULL) {
+      deposit_packed_apply(m, ps->signal, ps->offset, ps->count,
+                           (uint64_t)(uintptr_t)ps->abits,
+                           (uint64_t)(uintptr_t)ps->bbits,
+                           ps->has_b ? 0 : PACK_SRC_VEC2, true, false);
+      free(ps->abits);
+   }
+   else {
+      deposit_packed_apply(m, ps->signal, ps->offset, ps->count,
+                           ps->small_a, ps->small_b,
+                           PACK_SRC_SCALAR | (ps->has_b ? 0 : PACK_SRC_VEC2),
+                           true, false);
+   }
+   ps->abits = ps->bbits = NULL;
+   ps->next = m->free_packed_sched;
+   m->free_packed_sched = ps;
+}
+
+static void sched_deposit_packed(rt_model_t *m, rt_signal_t *s,
+                                 uint32_t msb_off, uint32_t count,
+                                 uint64_t a_val, uint64_t b_val,
+                                 uint32_t src_flags, int64_t after,
+                                 bool nonblock)
+{
+   if (after < 0) {
+      if (!(s->shared.flags & SIG_F_PACKED_DRIVEN)
+          && (s->nexus.flags & NET_F_FORCED))
+         s->shared.flags |= SIG_F_REGISTER;
+      return;
+   }
+
+   if (count == 0)
+      return;
+
+   rt_packed_sched_t *ps = m->free_packed_sched;
+   if (ps != NULL)
+      m->free_packed_sched = ps->next;
+   else
+      ps = xmalloc(sizeof(rt_packed_sched_t));
+
+   ps->signal = s;
+   ps->offset = msb_off;
+   ps->count  = count;
+   ps->has_b  = !(src_flags & PACK_SRC_VEC2) && (s->shared.flags & SIG_F_PACKED4);
+   ps->next   = NULL;
+
+   if (src_flags & PACK_SRC_SCALAR) {
+      ps->abits   = NULL;
+      ps->bbits   = NULL;
+      ps->small_a = a_val;
+      ps->small_b = ps->has_b ? b_val : 0;
+   }
+   else {
+      const int nwords = (count + 63) / 64;
+      const size_t wbytes = (size_t)nwords * sizeof(uint64_t);
+      uint64_t *buf = xmalloc(ps->has_b ? 2 * wbytes : wbytes);
+      memcpy(buf, (const void *)(uintptr_t)a_val, wbytes);
+      ps->abits = buf;
+      if (ps->has_b) {
+         ps->bbits = buf + nwords;
+         memcpy(ps->bbits, (const void *)(uintptr_t)b_val, wbytes);
+      }
+      else
+         ps->bbits = NULL;
+   }
+
+   if (after == 0)
+      deferq_do(nonblock ? &m->nonblockq : &m->driverq,
+                async_packed_deposit, ps);
+   else {
+      void *e = tag_pointer(ps, nonblock
+                            ? EVENT_PACKED_NONBLOCK : EVENT_PACKED_DEPOSIT);
+      heap_insert(m->eventq_heap, m->now + after, e);
+   }
+}
+
+static void force_packed(rt_model_t *m, rt_signal_t *s, uint32_t msb_off,
+                         uint32_t count, uint64_t a_val, uint64_t b_val,
+                         uint32_t src_flags)
+{
+   if (count == 0)
+      return;
+
+   const uint32_t width = s->bit_width;
+   assert(msb_off + count <= width);
+   const int nwords = (width + 63) / 64;
+   const bool is4 = !!(s->shared.flags & SIG_F_PACKED4);
+
+   if (m->packed_forces == NULL)
+      m->packed_forces = hash_new(16);
+
+   rt_packed_force_t *pf = hash_get(m->packed_forces, s);
+   if (pf == NULL) {
+      const size_t wbytes = (size_t)nwords * sizeof(uint64_t);
+      const size_t alloc = sizeof(rt_packed_force_t) + (is4 ? 3 : 2) * wbytes;
+      pf = xcalloc(alloc);
+      uint64_t *words = (uint64_t *)(pf + 1);
+      pf->mask  = words;
+      pf->abits = words + nwords;
+      pf->bbits = is4 ? words + 2 * nwords : NULL;
+      pf->next  = m->packed_force_list;
+      m->packed_force_list = pf;
+      hash_put(m->packed_forces, s, pf);
+   }
+
+   const uint64_t *src_a = (src_flags & PACK_SRC_SCALAR)
+      ? &a_val : (const uint64_t *)(uintptr_t)a_val;
+   const uint64_t *src_b = (src_flags & PACK_SRC_VEC2) ? NULL
+      : ((src_flags & PACK_SRC_SCALAR)
+         ? &b_val : (const uint64_t *)(uintptr_t)b_val);
+
+   const uint32_t lsb_off = width - msb_off - count;
+   const int w0 = lsb_off / 64;
+   const int w1 = (lsb_off + count - 1) / 64;
+   for (int w = w0; w <= w1; w++) {
+      const uint32_t d_start = (w == w0) ? (lsb_off % 64) : 0;
+      const uint32_t d_end = (w == w1) ? ((lsb_off + count - 1) % 64) : 63;
+      const uint32_t span = d_end - d_start + 1;
+      const uint64_t wmask = (span == 64)
+         ? ~UINT64_C(0) : (((UINT64_C(1) << span) - 1) << d_start);
+      pf->mask[w] |= wmask;
+   }
+   packed_rmw_range(pf->abits, pf->bbits, width, msb_off, count,
+                    src_a, src_b, NULL);
+   s->nexus.flags |= NET_F_FORCED;
+
+   deposit_packed_apply(m, s, msb_off, count, a_val, b_val, src_flags,
+                        false, false);
+}
+
+static void release_packed(rt_model_t *m, rt_signal_t *s, uint32_t msb_off,
+                           uint32_t count, bool immediate)
+{
+   if (count == 0 || !(s->nexus.flags & NET_F_FORCED))
+      return;
+
+   rt_packed_force_t *pf = m->packed_forces
+      ? hash_get(m->packed_forces, s) : NULL;
+   if (pf == NULL) {
+      s->nexus.flags &= ~NET_F_FORCED;
+      return;
+   }
+
+   const uint32_t width = s->bit_width;
+   assert(msb_off + count <= width);
+   const int nwords = (width + 63) / 64;
+   const bool is4 = !!(s->shared.flags & SIG_F_PACKED4);
+
+   const uint32_t lsb_off = width - msb_off - count;
+   const int w0 = lsb_off / 64;
+   const int w1 = (lsb_off + count - 1) / 64;
+   for (int w = w0; w <= w1; w++) {
+      const uint32_t d_start = (w == w0) ? (lsb_off % 64) : 0;
+      const uint32_t d_end = (w == w1) ? ((lsb_off + count - 1) % 64) : 63;
+      const uint32_t span = d_end - d_start + 1;
+      const uint64_t wmask = (span == 64)
+         ? ~UINT64_C(0) : (((UINT64_C(1) << span) - 1) << d_start);
+      pf->mask[w] &= ~wmask;
+   }
+
+   bool any_forced = false;
+   for (int w = 0; w < nwords && !any_forced; w++)
+      any_forced = pf->mask[w] != 0;
+   if (!any_forced)
+      s->nexus.flags &= ~NET_F_FORCED;
+
+   if (!immediate && !(s->shared.flags & SIG_F_PACKED_DRIVEN)
+       && (s->shared.flags & SIG_F_REGISTER)) {
+      if (!any_forced)
+         s->shared.flags &= ~SIG_F_REGISTER;
+      return;
+   }
+
+   const uint64_t *drv_a = (const uint64_t *)(s->shared.data + 2 * s->shared.size);
+   const uint64_t *drv_b = is4 ? drv_a + nwords : NULL;
+   uint64_t *eff_a = (uint64_t *)s->shared.data;
+   uint64_t *eff_b = is4 ? eff_a + nwords : NULL;
+   uint64_t *last_a = (uint64_t *)(s->shared.data + s->shared.size);
+
+   const uint64_t *fmask = any_forced ? pf->mask : NULL;
+   bool changed = false;
+   for (int w = w0; w <= w1; w++) {
+      const uint32_t d_start = (w == w0) ? (lsb_off % 64) : 0;
+      const uint32_t d_end = (w == w1) ? ((lsb_off + count - 1) % 64) : 63;
+      const uint32_t span = d_end - d_start + 1;
+      uint64_t wmask = (span == 64)
+         ? ~UINT64_C(0) : (((UINT64_C(1) << span) - 1) << d_start);
+      if (fmask != NULL)
+         wmask &= ~fmask[w];
+      if ((eff_a[w] ^ drv_a[w]) & wmask)
+         changed = true;
+      if (is4 && ((eff_b[w] ^ drv_b[w]) & wmask))
+         changed = true;
+   }
+   if (changed) {
+      memcpy(last_a, eff_a, s->shared.size);
+      for (int w = w0; w <= w1; w++) {
+         const uint32_t d_start = (w == w0) ? (lsb_off % 64) : 0;
+         const uint32_t d_end = (w == w1) ? ((lsb_off + count - 1) % 64) : 63;
+         const uint32_t span = d_end - d_start + 1;
+         uint64_t wmask = (span == 64)
+            ? ~UINT64_C(0) : (((UINT64_C(1) << span) - 1) << d_start);
+         if (fmask != NULL)
+            wmask &= ~fmask[w];
+         eff_a[w] = (eff_a[w] & ~wmask) | (drv_a[w] & wmask);
+         if (is4)
+            eff_b[w] = (eff_b[w] & ~wmask) | (drv_b[w] & wmask);
+      }
+      m->trigger_epoch++;
+      deposit_notify(m, &(s->nexus));
+   }
+
+   if (!any_forced)
+      s->shared.flags &= ~SIG_F_REGISTER;
+}
+
 void force_signal(rt_model_t *m, rt_signal_t *s, const void *values,
                   int offset, size_t count)
 {
@@ -5363,6 +6014,24 @@ void force_signal(rt_model_t *m, rt_signal_t *s, const void *values,
       mixed_bridge_force(m, s, values, offset, count);
 
    RT_LOCK(s->lock);
+
+   if (unlikely(s->shared.flags & SIG_F_PACKED)) {
+      if (count == 0)
+         return;
+      const int nwords = (count + 63) / 64;
+      uint64_t sa[4], sb[4];
+      uint64_t *heap LOCAL = NULL;
+      uint64_t *pa = sa, *pb = sb;
+      if (nwords > ARRAY_LEN(sa)) {
+         heap = xmalloc_array(nwords * 2, sizeof(uint64_t));
+         pa = heap;
+         pb = heap + nwords;
+      }
+      packed_bytes_to_words(values, count, pa, pb);
+      force_packed(m, s, offset, count, (uint64_t)(uintptr_t)pa,
+                   (uint64_t)(uintptr_t)pb, 0);
+      return;
+   }
 
    TRACE("force signal %s+%d to %s", istr(tree_ident(s->where)), offset,
          fmt_values(values, count));
@@ -5403,6 +6072,12 @@ void release_signal(rt_model_t *m, rt_signal_t *s, int offset, size_t count)
 
    RT_LOCK(s->lock);
 
+   if (unlikely(s->shared.flags & SIG_F_PACKED)) {
+      assert(m->can_create_delta);
+      release_packed(m, s, offset, count, false);
+      return;
+   }
+
    TRACE("release signal %s+%d", istr(tree_ident(s->where)), offset);
 
    assert(m->can_create_delta);
@@ -5436,6 +6111,12 @@ void release_signal_now(rt_model_t *m, rt_signal_t *s, int offset,
    // (IEEE 1800-2017 section 10.6.2)
 
    RT_LOCK(s->lock);
+
+   if (unlikely(s->shared.flags & SIG_F_PACKED)) {
+      assert(m->can_create_delta);
+      release_packed(m, s, offset, count, true);
+      return;
+   }
 
    TRACE("release signal %s+%d now", istr(tree_ident(s->where)), offset);
 
@@ -5471,6 +6152,8 @@ static void deposit_notify(rt_model_t *m, rt_nexus_t *n)
 
    n->last_event = m->now;
    n->event_delta = m->iteration;
+   if (!(n->signal->shared.flags & SIG_F_PACKED))
+      n->signal->last_event_seq = m->event_seq;
 
    if (n->flags & NET_F_CACHE_EVENT)
       set_event_flag(m, n->signal);
@@ -5498,8 +6181,9 @@ static void flush_deferred(rt_model_t *m)
 
    for (unsigned i = 0; i < n; i++) {
       rt_nexus_t *nx = m->deferred[i].nexus;
-      if (!cmp_bytes(nexus_effective(nx), m->deferred[i].init,
-                     nx->size * nx->width))
+      const size_t valuesz = (nx->signal->shared.flags & SIG_F_PACKED)
+         ? nx->signal->shared.size : (size_t)nx->size * nx->width;
+      if (!cmp_bytes(nexus_effective(nx), m->deferred[i].init, valuesz))
          deposit_notify(m, nx);
       else {
          // The update events of a variable which an always_comb process
@@ -5519,6 +6203,26 @@ void deposit_signal(rt_model_t *m, rt_signal_t *s, const void *values,
                     int offset, size_t count)
 {
    RT_LOCK(s->lock);
+
+   if (unlikely(s->shared.flags & SIG_F_PACKED)) {
+      if (count == 0)
+         return;
+      assert(get_active_proc() == NULL || !get_active_proc()->wakeable.postponed
+             || get_active_proc()->wakeable.sampler);
+      const int nwords = (count + 63) / 64;
+      uint64_t sa[4], sb[4];
+      uint64_t *heap LOCAL = NULL;
+      uint64_t *pa = sa, *pb = sb;
+      if (nwords > ARRAY_LEN(sa)) {
+         heap = xmalloc_array(nwords * 2, sizeof(uint64_t));
+         pa = heap;
+         pb = heap + nwords;
+      }
+      packed_bytes_to_words(values, count, pa, pb);
+      deposit_packed_apply(m, s, offset, count, (uint64_t)(uintptr_t)pa,
+                           (uint64_t)(uintptr_t)pb, 0, true, true);
+      return;
+   }
 
    TRACE("deposit signal %s+%d value=%s count=%zd", istr(tree_ident(s->where)),
          offset, fmt_values(values, count * s->nexus.size), count);
@@ -5589,6 +6293,30 @@ void sched_deposit(rt_model_t *m, rt_signal_t *s, const void *values,
                    int offset, size_t count, int64_t after, bool nonblock)
 {
    RT_LOCK(s->lock);
+
+   if (unlikely(s->shared.flags & SIG_F_PACKED)) {
+      assert(m->can_create_delta);
+      if (after < 0) {
+         sched_deposit_packed(m, s, offset, count, 0, 0, PACK_SRC_SCALAR,
+                              after, nonblock);
+         return;
+      }
+      if (count == 0)
+         return;
+      const int nwords = (count + 63) / 64;
+      uint64_t sa[4], sb[4];
+      uint64_t *heap LOCAL = NULL;
+      uint64_t *pa = sa, *pb = sb;
+      if (nwords > ARRAY_LEN(sa)) {
+         heap = xmalloc_array(nwords * 2, sizeof(uint64_t));
+         pa = heap;
+         pb = heap + nwords;
+      }
+      packed_bytes_to_words(values, count, pa, pb);
+      sched_deposit_packed(m, s, offset, count, (uint64_t)(uintptr_t)pa,
+                           (uint64_t)(uintptr_t)pb, 0, after, nonblock);
+      return;
+   }
 
    TRACE("schedule deposit %s+%d value=%s count=%zd after=%s",
          istr(tree_ident(s->where)), offset,
@@ -5802,6 +6530,9 @@ void model_set_event_cb(rt_model_t *m, rt_signal_t *s, int offset,
    assert(offset + count <= signal_width(s));
 
    w->signals[w->next_slot++] = s;
+
+   if (unlikely(s->shared.flags & SIG_F_PACKED))
+      count = count > 0 ? 1 : 0;
 
    rt_nexus_t *n = split_nexus(m, s, offset, count);
    for (; count > 0; n = n->chain) {
@@ -6662,6 +7393,29 @@ void model_item_drivers(const rt_found_t *f, uint32_t first, uint32_t count,
 
 void get_forcing_value(rt_signal_t *s, uint8_t *value)
 {
+   if (unlikely(s->shared.flags & SIG_F_PACKED)) {
+      rt_model_t *m = get_model();
+      rt_packed_force_t *pf = m->packed_forces
+         ? hash_get(m->packed_forces, s) : NULL;
+      const uint32_t width = s->bit_width;
+      const int nwords = (width + 63) / 64;
+      const bool is4 = !!(s->shared.flags & SIG_F_PACKED4);
+      const uint64_t *sa = (const uint64_t *)s->shared.data;
+      const uint64_t *sb = is4 ? sa + nwords : NULL;
+      for (uint32_t i = 0; i < width; i++) {
+         const uint32_t bit = width - 1 - i;
+         const int w = bit / 64, sh = bit % 64;
+         const bool forced = pf != NULL && ((pf->mask[w] >> sh) & 1);
+         const uint64_t a = forced
+            ? ((pf->abits[w] >> sh) & 1) : ((sa[w] >> sh) & 1);
+         const uint64_t b = forced
+            ? (pf->bbits ? ((pf->bbits[w] >> sh) & 1) : 0)
+            : (sb ? ((sb[w] >> sh) & 1) : 0);
+         value[i] = (uint8_t)((b << 1) | a);
+      }
+      return;
+   }
+
    uint8_t *p = value;
    rt_nexus_t *n = &(s->nexus);
    for (int i = 0; i < s->n_nexus; i++) {
@@ -6712,6 +7466,9 @@ static void arm_trigger(rt_model_t *m, rt_trigger_t *t, rt_wakeable_t *obj)
          rt_signal_t *s = t->args[0].pointer;
          int32_t offset = t->args[1].integer;
          int32_t count = t->args[2].integer;
+
+         if (unlikely(s->shared.flags & SIG_F_PACKED))
+            count = count > 0 ? 1 : 0;
 
          rt_nexus_t *n = split_nexus(m, s, offset, count);
          for (; count > 0; n = n->chain) {
@@ -6783,10 +7540,19 @@ static rt_trigger_t *new_trigger(rt_model_t *m, trigger_kind_t kind,
    t->nargs  = nargs;
    t->epoch  = UINT64_MAX;
    t->kind   = kind;
-   t->level_only = (kind == LEVEL_TRIGGER)
-      || (kind == OR_TRIGGER
-          && ((rt_trigger_t *)args[0].pointer)->level_only
-          && ((rt_trigger_t *)args[1].pointer)->level_only);
+   bool level_only = (kind == LEVEL_TRIGGER);
+   if (level_only) {
+      const rt_signal_t *s = args[0].pointer;
+      const uint32_t offset = args[1].integer;
+      const int32_t count = args[2].integer;
+      if ((s->shared.flags & SIG_F_PACKED)
+          && (offset > 0 || count < (int32_t)s->bit_width))
+         level_only = false;
+   }
+   else if (kind == OR_TRIGGER)
+      level_only = ((rt_trigger_t *)args[0].pointer)->level_only
+         && ((rt_trigger_t *)args[1].pointer)->level_only;
+   t->level_only = level_only;
    t->chain  = *bucket;
    t->hash   = hash;
    memcpy(t->args, args, argsz);
@@ -6962,6 +7728,11 @@ void x_drive_signal(sig_shared_t *ss, uint32_t offset, int32_t count)
 {
    rt_signal_t *s = container_of(ss, rt_signal_t, shared);
    RT_LOCK(s->lock);
+
+   if (unlikely(ss->flags & SIG_F_PACKED)) {
+      ss->flags |= SIG_F_PACKED_DRIVEN;
+      return;
+   }
 
    TRACE("drive signal %s+%d count=%d", istr(tree_ident(s->where)),
          offset, count);
@@ -7394,6 +8165,8 @@ int32_t x_test_net_event(sig_shared_t *ss, uint32_t offset, int32_t count)
 
    int32_t result = 0;
    rt_model_t *m = get_model();
+   if (unlikely(ss->flags & SIG_F_PACKED))
+      count = count > 0 ? 1 : 0;
    rt_nexus_t *n = split_nexus(m, s, offset, count);
    for (; count > 0; n = n->chain) {
       if (n->last_event == m->now && n->event_delta == m->iteration) {
@@ -7405,7 +8178,7 @@ int32_t x_test_net_event(sig_shared_t *ss, uint32_t offset, int32_t count)
       assert(count >= 0);
    }
 
-   if (ss->size == s->nexus.size) {
+   if ((ss->flags & SIG_F_PACKED) || ss->size == s->nexus.size) {
       assert(!(ss->flags & SIG_F_CACHE_EVENT));   // Should have taken fast-path
       ss->flags |= SIG_F_CACHE_EVENT;
       s->nexus.flags |= NET_F_CACHE_EVENT;
@@ -7425,6 +8198,8 @@ int32_t x_test_net_active(sig_shared_t *ss, uint32_t offset, int32_t count)
          istr(tree_ident(s->where)), offset, count);
 
    rt_model_t *m = get_model();
+   if (unlikely(ss->flags & SIG_F_PACKED))
+      count = count > 0 ? 1 : 0;
    rt_nexus_t *n = split_nexus(m, s, offset, count);
    for (; count > 0; n = n->chain) {
       if (nexus_active(m, n))
@@ -7448,6 +8223,8 @@ void x_sched_event(sig_shared_t *ss, uint32_t offset, int32_t count)
    rt_wakeable_t *obj = get_active_wakeable();
 
    rt_model_t *m = get_model();
+   if (unlikely(ss->flags & SIG_F_PACKED))
+      count = count > 0 ? 1 : 0;
    rt_nexus_t *n = split_nexus(m, s, offset, count);
    for (; count > 0; n = n->chain) {
       sched_event(m, &(n->pending), obj);
@@ -7467,6 +8244,8 @@ void x_clear_event(sig_shared_t *ss, uint32_t offset, int32_t count)
 
    rt_model_t *m = get_model();
    rt_proc_t *proc = get_active_proc();
+   if (unlikely(ss->flags & SIG_F_PACKED))
+      count = count > 0 ? 1 : 0;
    rt_nexus_t *n = split_nexus(m, s, offset, count);
    for (; count > 0; n = n->chain) {
       clear_event(m, &(n->pending), &(proc->wakeable));
@@ -7691,6 +8470,8 @@ int64_t x_last_event(sig_shared_t *ss, uint32_t offset, int32_t count)
    int64_t last = TIME_HIGH;
 
    rt_model_t *m = get_model();
+   if (unlikely(ss->flags & SIG_F_PACKED))
+      count = count > 0 ? 1 : 0;
    rt_nexus_t *n = split_nexus(m, s, offset, count);
    for (; count > 0; n = n->chain) {
       if (n->last_event <= m->now)
@@ -7714,6 +8495,8 @@ int64_t x_last_active(sig_shared_t *ss, uint32_t offset, int32_t count)
    int64_t last = TIME_HIGH;
 
    rt_model_t *m = get_model();
+   if (unlikely(ss->flags & SIG_F_PACKED))
+      count = count > 0 ? 1 : 0;
    rt_nexus_t *n = split_nexus(m, s, offset, count);
    for (; count > 0; n = n->chain) {
       last = MIN(last, nexus_last_active(m, n));
@@ -8068,6 +8851,125 @@ void x_put_driver(sig_shared_t *ss, uint32_t offset, int32_t count,
 
       vptr += n->size * n->width;
    }
+}
+
+sig_shared_t *x_init_packed(int64_t width, uint64_t abits, uint64_t bbits,
+                            uint32_t flags, tree_t where, int32_t offset)
+{
+   rt_model_t *m = get_model();
+
+   assert(width >= 1 && width <= INT32_MAX);
+   const uint32_t w = (uint32_t)width;
+   const int nwords = (w + 63) / 64;
+   const bool is4 = !!(flags & SIG_F_PACKED4);
+   const size_t snapsz = (is4 ? 2 : 1) * (size_t)nwords * sizeof(uint64_t);
+   const size_t datasz = MAX(3 * snapsz, 8);
+
+   rt_signal_t *s = static_alloc(m, sizeof(rt_signal_t) + datasz);
+   setup_signal(m, s, where, 1, MIN(snapsz, 255U), flags, offset);
+   s->bit_width = w;
+   s->shared.size = (uint32_t)snapsz;
+
+   uint64_t *eff_a = (uint64_t *)s->shared.data;
+   uint64_t *drv_a = (uint64_t *)(s->shared.data + 2 * snapsz);
+   const uint64_t top_mask = packed_top_mask(w);
+
+   if (w <= 64) {
+      const uint64_t na = abits & top_mask;
+      eff_a[0] = drv_a[0] = na;
+      if (is4) {
+         uint64_t *eff_b = eff_a + 1;
+         uint64_t *drv_b = drv_a + 1;
+         const uint64_t nb = bbits & top_mask;
+         eff_b[0] = drv_b[0] = nb;
+      }
+   }
+   else {
+      const uint64_t *sa = (const uint64_t *)(uintptr_t)abits;
+      memcpy(eff_a, sa, (size_t)nwords * sizeof(uint64_t));
+      eff_a[nwords - 1] &= top_mask;
+      memcpy(drv_a, eff_a, (size_t)nwords * sizeof(uint64_t));
+      if (is4) {
+         uint64_t *eff_b = eff_a + nwords;
+         uint64_t *drv_b = drv_a + nwords;
+         const uint64_t *sb = (const uint64_t *)(uintptr_t)bbits;
+         if (sb != NULL) {
+            memcpy(eff_b, sb, (size_t)nwords * sizeof(uint64_t));
+            eff_b[nwords - 1] &= top_mask;
+            memcpy(drv_b, eff_b, (size_t)nwords * sizeof(uint64_t));
+         }
+      }
+   }
+
+   return &(s->shared);
+}
+
+void x_deposit_packed(sig_shared_t *ss, uint32_t offset, int32_t count,
+                      uint64_t abits, uint64_t bbits, uint32_t src_flags)
+{
+   rt_signal_t *s = container_of(ss, rt_signal_t, shared);
+   RT_LOCK(s->lock);
+   deposit_packed_apply(get_model(), s, offset, count, abits, bbits,
+                        src_flags, true, true);
+}
+
+void x_sched_deposit_packed(sig_shared_t *ss, uint32_t offset, int32_t count,
+                            uint64_t abits, uint64_t bbits, uint32_t src_flags,
+                            int64_t after)
+{
+   rt_signal_t *s = container_of(ss, rt_signal_t, shared);
+   RT_LOCK(s->lock);
+   sched_deposit_packed(get_model(), s, offset, count, abits, bbits,
+                        src_flags, after, true);
+}
+
+void x_put_driver_packed(sig_shared_t *ss, uint32_t offset, int32_t count,
+                         uint64_t abits, uint64_t bbits, uint32_t src_flags)
+{
+   if (count == 0)
+      return;
+
+   rt_signal_t *s = container_of(ss, rt_signal_t, shared);
+   RT_LOCK(s->lock);
+
+   rt_model_t *m = get_model();
+   if ((ss->flags & SIG_F_INIT_EVENT) && m->now == 0 && m->iteration <= 0) {
+      const init_event_t ev = { s, offset, count };
+      APUSH(m->init_events, ev);
+   }
+
+   ss->flags |= SIG_F_PACKED_DRIVEN;
+
+   const uint32_t width = s->bit_width;
+   const int nwords = (width + 63) / 64;
+   const bool is4 = !!(ss->flags & SIG_F_PACKED4);
+   uint64_t *drv_a = (uint64_t *)(s->shared.data + 2 * s->shared.size);
+   uint64_t *drv_b = is4 ? drv_a + nwords : NULL;
+
+   const uint64_t *src_a = (src_flags & PACK_SRC_SCALAR)
+      ? &abits : (const uint64_t *)(uintptr_t)abits;
+   const uint64_t *src_b = (src_flags & PACK_SRC_VEC2) ? NULL
+      : ((src_flags & PACK_SRC_SCALAR)
+         ? &bbits : (const uint64_t *)(uintptr_t)bbits);
+   packed_rmw_range(drv_a, drv_b, width, offset, count, src_a, src_b, NULL);
+   drv_a[nwords - 1] &= packed_top_mask(width);
+   if (drv_b != NULL)
+      drv_b[nwords - 1] &= packed_top_mask(width);
+
+   deposit_packed_apply(m, s, offset, count, abits, bbits, src_flags,
+                        true, false);
+}
+
+void x_force_packed(sig_shared_t *ss, uint32_t offset, int32_t count,
+                    uint64_t abits, uint64_t bbits, uint32_t src_flags)
+{
+   rt_signal_t *s = container_of(ss, rt_signal_t, shared);
+   RT_LOCK(s->lock);
+
+   rt_proc_t *proc = get_active_proc();
+   check_postponed(0, proc);
+
+   force_packed(get_model(), s, offset, count, abits, bbits, src_flags);
 }
 
 void x_resolve_signal(sig_shared_t *ss, ffi_closure_t *closure, int32_t nlits,
@@ -8627,6 +9529,11 @@ void x_sv_poll_watch_sig(sig_shared_t *ss, uint32_t offset, unsigned count)
 
    rt_signal_t *s = container_of(ss, rt_signal_t, shared);
    ss->flags |= SIG_F_POLL_WATCHED;
+
+   if (ss->flags & SIG_F_PACKED) {
+      sv_watch_add(ss->data, ss->size, true);
+      return;
+   }
 
    const unsigned elemsz = s->nexus.size;
    sv_watch_add(ss->data + (size_t)offset * elemsz, count * elemsz, true);

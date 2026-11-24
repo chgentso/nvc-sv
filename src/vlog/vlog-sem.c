@@ -22,6 +22,7 @@
 #include "hash.h"
 #include "ident.h"
 #include "mask.h"
+#include "object.h"
 #include "option.h"
 #include "vlog/vlog-node.h"
 #include "vlog/vlog-number.h"
@@ -1696,6 +1697,9 @@ static void vlog_check_port_decl(vlog_node_t v)
    if (vlog_has_ref(v)) {
       vlog_node_t ref = vlog_ref(v);
       vlog_node_t type = vlog_type(v);
+
+      if (vlog_kind(ref) == V_VAR_DECL)
+         vlog_set_flags(ref, VLOG_F_PORT_VAR);
 
       if (vlog_flags(type) & VLOG_F_SIGNED)
          vlog_set_flags(vlog_type(ref), VLOG_F_SIGNED);
@@ -3525,6 +3529,35 @@ static void vlog_check_module(vlog_node_t v)
    hash_free(writers);
 }
 
+static void vlog_mark_port_var(vlog_node_t expr)
+{
+   switch (vlog_kind(expr)) {
+   case V_REF:
+      if (vlog_has_ref(expr)) {
+         vlog_node_t d = vlog_ref(expr);
+         if (vlog_kind(d) == V_PORT_DECL && vlog_has_ref(d))
+            d = vlog_ref(d);
+         if (vlog_kind(d) == V_VAR_DECL && !(vlog_flags(d) & VLOG_F_PORT_VAR)
+             && !arena_frozen(object_arena(vlog_to_object(d))))
+            vlog_set_flags(d, VLOG_F_PORT_VAR);
+      }
+      break;
+   case V_BIT_SELECT:
+   case V_PART_SELECT:
+      vlog_mark_port_var(vlog_value(expr));
+      break;
+   case V_CONCAT:
+      {
+         const int nparams = vlog_params(expr);
+         for (int i = 0; i < nparams; i++)
+            vlog_mark_port_var(vlog_param(expr, i));
+      }
+      break;
+   default:
+      break;
+   }
+}
+
 static void vlog_check_gate_inst(vlog_node_t v)
 {
    if (vlog_subkind(v) == V_GATE_ALIAS) {
@@ -3558,6 +3591,9 @@ static void vlog_check_gate_inst(vlog_node_t v)
       if (vlog_kind(p) != V_DIMENSION)
          vlog_check_expr(p);
    }
+
+   if (vlog_has_target(v))
+      vlog_mark_port_var(vlog_target(v));
 }
 
 static void vlog_check_inst_list(vlog_node_t v)
@@ -3591,6 +3627,8 @@ static void vlog_check_port_conn(vlog_node_t v)
    interconnect_ok = root;
    vlog_check_expr(vlog_value(v));
    interconnect_ok = NULL;
+
+   vlog_mark_port_var(vlog_value(v));
 }
 
 static void vlog_check_param_assign(vlog_node_t v)
@@ -5961,6 +5999,14 @@ void vlog_check(vlog_node_t v)
          in_sv_unit = !!(vlog_flags(v) & (VLOG_F_SYSTEMVERILOG
                                           | VLOG_F_INTERFACE
                                           | VLOG_F_CHECKER));
+         if (vlog_flags(v) & VLOG_F_INTERFACE) {
+            const int ndecls = vlog_decls(v);
+            for (int i = 0; i < ndecls; i++) {
+               vlog_node_t d = vlog_decl(v, i);
+               if (vlog_kind(d) == V_VAR_DECL)
+                  vlog_set_flags(d, VLOG_F_PORT_VAR);
+            }
+         }
          vlog_check_module(v);
          in_sv_unit = was_sv;
       }

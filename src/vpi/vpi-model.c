@@ -4257,6 +4257,25 @@ static bool vpi_read_bits(c_abstractDecl *d, uint64_t *abits, uint64_t *bbits)
          if (s == NULL)
             return false;
 
+         if (s->shared.flags & SIG_F_PACKED) {
+            const uint32_t total = signal_width(s);
+            const int snwords = (total + 63) / 64;
+            const uint64_t *sa = (const uint64_t *)signal_value(s);
+            const uint64_t *sb = (s->shared.flags & SIG_F_PACKED4)
+               ? sa + snwords : NULL;
+            const uint32_t lsb = total - d->offset - d->size;
+            for (int i = 0; i < d->size; i++) {
+               const uint32_t bit = lsb + i;
+               const int w = bit / 64, sh = bit % 64;
+               const uint64_t mask = UINT64_C(1) << (i % 64);
+               if ((sa[w] >> sh) & 1)
+                  abits[i / 64] |= mask;
+               if (sb != NULL && ((sb[w] >> sh) & 1))
+                  bbits[i / 64] |= mask;
+            }
+            return true;
+         }
+
          const uint8_t *vals = (const uint8_t *)signal_value(s) + d->offset;
          vpi_gather_bits(vals, d->size, abits, bbits);
       }
@@ -4437,11 +4456,27 @@ static bool vpi_value_decl(c_abstractDecl *d, p_vpi_value value_p)
                return false;
 
             static const char map[] = "01zx";
-            const uint8_t *vals =
-               (const uint8_t *)signal_value(s) + d->offset;
             char *p = tb_reserve(c->valuestr, d->size);
-            for (int i = 0; i < d->size; i++)
-               p[i] = map[vals[i] & 3];
+            if (s->shared.flags & SIG_F_PACKED) {
+               const uint32_t total = signal_width(s);
+               const int snwords = (total + 63) / 64;
+               const uint64_t *sa = (const uint64_t *)signal_value(s);
+               const uint64_t *sb = (s->shared.flags & SIG_F_PACKED4)
+                  ? sa + snwords : NULL;
+               for (int i = 0; i < d->size; i++) {
+                  const uint32_t bit = total - 1 - (d->offset + i);
+                  const int w = bit / 64, sh = bit % 64;
+                  const uint64_t a = (sa[w] >> sh) & 1;
+                  const uint64_t b = sb ? ((sb[w] >> sh) & 1) : 0;
+                  p[i] = map[(b << 1) | a];
+               }
+            }
+            else {
+               const uint8_t *vals =
+                  (const uint8_t *)signal_value(s) + d->offset;
+               for (int i = 0; i < d->size; i++)
+                  p[i] = map[vals[i] & 3];
+            }
 
             value_p->value.str = (PLI_BYTE8 *)tb_get(c->valuestr);
             return true;
@@ -8801,11 +8836,29 @@ static bool hdl_lookup(const char *path, hdl_target_t *t)
 
 static int hdl_read(hdl_target_t *t, svLogicVecVal *value)
 {
-   const uint8_t *vals = signal_value(t->signal);
-
    const int nwords = (t->count + 31) / 32;
    for (int i = 0; i < nwords; i++)
       value[i].aval = value[i].bval = 0;
+
+   if (t->signal->shared.flags & SIG_F_PACKED) {
+      const uint32_t total = signal_width(t->signal);
+      const int snwords = (total + 63) / 64;
+      const uint64_t *sa = (const uint64_t *)signal_value(t->signal);
+      const uint64_t *sb = (t->signal->shared.flags & SIG_F_PACKED4)
+         ? sa + snwords : NULL;
+      for (int i = 0; i < t->count; i++) {
+         const int pos = t->count - 1 - i;
+         const uint32_t bit = total - 1 - (t->offset + i);
+         const int w = bit / 64, sh = bit % 64;
+         const uint32_t a = (sa[w] >> sh) & 1;
+         const uint32_t b = sb ? ((sb[w] >> sh) & 1) : 0;
+         value[pos / 32].aval |= a << (pos % 32);
+         value[pos / 32].bval |= b << (pos % 32);
+      }
+      return 1;
+   }
+
+   const uint8_t *vals = signal_value(t->signal);
 
    for (int i = 0; i < t->count; i++) {
       const int pos = t->count - 1 - i;

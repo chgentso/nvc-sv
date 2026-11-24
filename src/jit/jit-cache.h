@@ -24,7 +24,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define NVC_JIT_CACHE_ABI 1
+#define NVC_JIT_CACHE_ABI 2
 
 typedef struct _jit_cache jit_cache_t;
 typedef struct _jit_func jit_func_t;

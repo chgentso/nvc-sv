@@ -92,6 +92,17 @@ void x_sched_deposit(sig_shared_t *ss, uint32_t offset, int32_t count,
                      void *values, int64_t after);
 void x_put_driver(sig_shared_t *ss, uint32_t offset, int32_t count,
                   void *values);
+sig_shared_t *x_init_packed(int64_t width, uint64_t abits, uint64_t bbits,
+                            uint32_t flags, tree_t where, int32_t offset);
+void x_deposit_packed(sig_shared_t *ss, uint32_t offset, int32_t count,
+                      uint64_t abits, uint64_t bbits, uint32_t src_flags);
+void x_sched_deposit_packed(sig_shared_t *ss, uint32_t offset, int32_t count,
+                            uint64_t abits, uint64_t bbits, uint32_t src_flags,
+                            int64_t after);
+void x_put_driver_packed(sig_shared_t *ss, uint32_t offset, int32_t count,
+                         uint64_t abits, uint64_t bbits, uint32_t src_flags);
+void x_force_packed(sig_shared_t *ss, uint32_t offset, int32_t count,
+                    uint64_t abits, uint64_t bbits, uint32_t src_flags);
 void x_resolve_signal(sig_shared_t *ss, ffi_closure_t *closure, int32_t nlits,
                       int32_t flags);
 void x_unreachable(tree_t where);

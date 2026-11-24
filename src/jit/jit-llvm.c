@@ -153,6 +153,9 @@ typedef enum {
    LLVM_DEPOSIT_SIGNAL,
    LLVM_SCHED_DEPOSIT,
    LLVM_PUT_DRIVER,
+   LLVM_DEPOSIT_PACKED,
+   LLVM_SCHED_DEPOSIT_PACKED,
+   LLVM_PUT_DRIVER_PACKED,
    LLVM_SCHED_INACTIVE,
    LLVM_LENGTH_FAIL,
    LLVM_INDEX_FAIL,
@@ -1029,6 +1032,49 @@ static LLVMValueRef llvm_get_fn(llvm_obj_t *obj, llvm_fn_t which)
                                                 ARRAY_LEN(args), false);
 
          fn = llvm_add_fn(obj, "nvc.sched_deposit", obj->fntypes[which]);
+         llvm_add_func_attr(obj, fn, FUNC_ATTR_NOUNWIND, -1);
+      }
+      break;
+
+   case LLVM_DEPOSIT_PACKED:
+   case LLVM_PUT_DRIVER_PACKED:
+      {
+         LLVMTypeRef args[] = {
+            obj->types[LLVM_PTR],
+            obj->types[LLVM_PTR],
+            obj->types[LLVM_INT32],
+            obj->types[LLVM_INT32],
+            obj->types[LLVM_INT64],
+            obj->types[LLVM_INT64],
+            obj->types[LLVM_INT32],
+         };
+         obj->fntypes[which] = LLVMFunctionType(obj->types[LLVM_VOID], args,
+                                                ARRAY_LEN(args), false);
+
+         const char *sym = which == LLVM_DEPOSIT_PACKED
+            ? "nvc.deposit_packed" : "nvc.put_driver_packed";
+
+         fn = llvm_add_fn(obj, sym, obj->fntypes[which]);
+         llvm_add_func_attr(obj, fn, FUNC_ATTR_NOUNWIND, -1);
+      }
+      break;
+
+   case LLVM_SCHED_DEPOSIT_PACKED:
+      {
+         LLVMTypeRef args[] = {
+            obj->types[LLVM_PTR],
+            obj->types[LLVM_PTR],
+            obj->types[LLVM_INT32],
+            obj->types[LLVM_INT32],
+            obj->types[LLVM_INT64],
+            obj->types[LLVM_INT64],
+            obj->types[LLVM_INT32],
+            obj->types[LLVM_INT64],
+         };
+         obj->fntypes[which] = LLVMFunctionType(obj->types[LLVM_VOID], args,
+                                                ARRAY_LEN(args), false);
+
+         fn = llvm_add_fn(obj, "nvc.sched_deposit_packed", obj->fntypes[which]);
          llvm_add_func_attr(obj, fn, FUNC_ATTR_NOUNWIND, -1);
       }
       break;
@@ -2986,6 +3032,47 @@ static int cgen_fuse_ir(llvm_obj_t *obj, cgen_block_t *cgb, jit_ir_t *ir)
          shared, offset, count, value, scalar, after,
       };
       llvm_call_fn(obj, LLVM_SCHED_DEPOSIT, args, ARRAY_LEN(args));
+
+      return nsend;
+   }
+   else if ((exit->arg1.exit == JIT_EXIT_DEPOSIT_PACKED
+             || exit->arg1.exit == JIT_EXIT_PUT_DRIVER_PACKED)
+            && nsend == 6) {
+      LLVMValueRef shared    = cgen_coerce_value(obj, cgb, ir[0].arg2, LLVM_PTR);
+      LLVMValueRef offset    = cgen_coerce_value(obj, cgb, ir[1].arg2, LLVM_INT32);
+      LLVMValueRef count     = cgen_coerce_value(obj, cgb, ir[2].arg2, LLVM_INT32);
+      LLVMValueRef abits     = cgen_coerce_value(obj, cgb, ir[3].arg2, LLVM_INT64);
+      LLVMValueRef bbits     = cgen_coerce_value(obj, cgb, ir[4].arg2, LLVM_INT64);
+      LLVMValueRef src_flags = cgen_coerce_value(obj, cgb, ir[5].arg2, LLVM_INT32);
+
+      cgen_sync_irpos(obj, cgb, exit);
+
+      LLVMValueRef args[] = {
+         PTR(cgb->func->anchor),
+         shared, offset, count, abits, bbits, src_flags,
+      };
+      const llvm_fn_t fn = exit->arg1.exit == JIT_EXIT_DEPOSIT_PACKED
+         ? LLVM_DEPOSIT_PACKED : LLVM_PUT_DRIVER_PACKED;
+      llvm_call_fn(obj, fn, args, ARRAY_LEN(args));
+
+      return nsend;
+   }
+   else if (exit->arg1.exit == JIT_EXIT_SCHED_DEPOSIT_PACKED && nsend == 7) {
+      LLVMValueRef shared    = cgen_coerce_value(obj, cgb, ir[0].arg2, LLVM_PTR);
+      LLVMValueRef offset    = cgen_coerce_value(obj, cgb, ir[1].arg2, LLVM_INT32);
+      LLVMValueRef count     = cgen_coerce_value(obj, cgb, ir[2].arg2, LLVM_INT32);
+      LLVMValueRef abits     = cgen_coerce_value(obj, cgb, ir[3].arg2, LLVM_INT64);
+      LLVMValueRef bbits     = cgen_coerce_value(obj, cgb, ir[4].arg2, LLVM_INT64);
+      LLVMValueRef src_flags = cgen_coerce_value(obj, cgb, ir[5].arg2, LLVM_INT32);
+      LLVMValueRef after     = cgen_coerce_value(obj, cgb, ir[6].arg2, LLVM_INT64);
+
+      cgen_sync_irpos(obj, cgb, exit);
+
+      LLVMValueRef args[] = {
+         PTR(cgb->func->anchor),
+         shared, offset, count, abits, bbits, src_flags, after,
+      };
+      llvm_call_fn(obj, LLVM_SCHED_DEPOSIT_PACKED, args, ARRAY_LEN(args));
 
       return nsend;
    }

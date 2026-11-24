@@ -292,6 +292,41 @@ static void fst_fmt_verilog(rt_watch_t *w, fst_data_t *data)
    }
 }
 
+static void fst_fmt_verilog_packed4(rt_watch_t *w, fst_data_t *data)
+{
+   rt_signal_t *s = data->signal;
+   const uint32_t width = s->bit_width;
+   const int nwords = (width + 63) / 64;
+   const uint64_t *abits = (const uint64_t *)signal_value(s);
+   const uint64_t *bbits = abits + nwords;
+
+   char buf[data->size];
+   const uint32_t start = data->offset;
+   for (uint32_t j = 0; j < data->size; j++) {
+      const uint32_t bit = width - 1 - (start + j);
+      const uint64_t a = (abits[bit / 64] >> (bit % 64)) & 1;
+      const uint64_t b = (bbits[bit / 64] >> (bit % 64)) & 1;
+      buf[j] = data->type->u.map[(b << 1) | a];
+   }
+   fstWriterEmitValueChange(data->dumper->fst_ctx, data->handle[0], buf);
+}
+
+static void fst_fmt_verilog_packed2(rt_watch_t *w, fst_data_t *data)
+{
+   rt_signal_t *s = data->signal;
+   const uint32_t width = s->bit_width;
+   const uint64_t *abits = (const uint64_t *)signal_value(s);
+
+   char buf[data->size];
+   const uint32_t start = data->offset;
+   for (uint32_t j = 0; j < data->size; j++) {
+      const uint32_t bit = width - 1 - (start + j);
+      const uint64_t a = (abits[bit / 64] >> (bit % 64)) & 1;
+      buf[j] = data->type->u.map[a];
+   }
+   fstWriterEmitValueChange(data->dumper->fst_ctx, data->handle[0], buf);
+}
+
 static void fst_event_cb(uint64_t now, rt_signal_t *s, rt_watch_t *w,
                          void *user)
 {
@@ -767,7 +802,15 @@ static void fst_create_scalar_var(wave_dumper_t *wd, tree_t d, rt_signal_t *s,
       return;
 
    fst_data_t *data = xcalloc(sizeof(fst_data_t) + sizeof(fstHandle));
-   data->type   = ft;
+   if (s->shared.flags & SIG_F_PACKED) {
+      fst_type_t *pft = xcalloc(sizeof(fst_type_t));
+      *pft = *ft;
+      pft->fn = (s->shared.flags & SIG_F_PACKED4)
+         ? fst_fmt_verilog_packed4 : fst_fmt_verilog_packed2;
+      data->type = pft;
+   }
+   else
+      data->type = ft;
    data->count  = 1;
    data->size   = ft->size;
    data->dumper = wd;
@@ -1186,7 +1229,15 @@ static void fst_process_verilog(wave_dumper_t *wd, rt_scope_t *scope,
    }
 
    fst_data_t *data = xcalloc(sizeof(fst_data_t) + sizeof(fstHandle));
-   data->type   = ft;
+   if (s->shared.flags & SIG_F_PACKED) {
+      fst_type_t *pft = xcalloc(sizeof(fst_type_t));
+      *pft = *ft;
+      pft->fn = (s->shared.flags & SIG_F_PACKED4)
+         ? fst_fmt_verilog_packed4 : fst_fmt_verilog_packed2;
+      data->type = pft;
+   }
+   else
+      data->type = ft;
    data->count  = 1;
    data->size   = size;
    data->dumper = wd;
