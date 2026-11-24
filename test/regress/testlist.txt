@@ -3260,6 +3260,7 @@ island_m2       shell
 island_m3       shell
 island_m4       shell
 island_m5       shell
+island_m6       shell
 vpi_island1     verilog,vpi,$NVC_RTL_ISLANDS=module
 vpi_island2     verilog,vpi,$NVC_RTL_ISLANDS=hier
 svpollclass1    verilog
