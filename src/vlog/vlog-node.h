@@ -638,6 +638,10 @@ typedef enum {
    VLOG_F_IMPLICIT_NET = VLOG_F_FORWARD,  // On the type of a net declared by its use
    VLOG_F_OVERRIDABLE = VLOG_F_GENERIC,   // On a local parameter bound to a parameter
    VLOG_F_OVERRIDDEN = VLOG_F_FILL,       // ... or type parameter given a value by the instance
+   VLOG_F_FINAL_CLASS = VLOG_F_PRIORITY,  // On a class declared :final
+   VLOG_F_OVERRIDE_INITIAL = VLOG_F_UNIQUE,  // On a method declared :initial
+   VLOG_F_OVERRIDE_EXTENDS = VLOG_F_UNIQUE0, // On a method declared :extends
+   VLOG_F_OVERRIDE_FINAL = VLOG_F_PRIORITY,  // On a method declared :final
 } vlog_flags_t;
 
 typedef enum {

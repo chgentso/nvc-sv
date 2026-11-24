@@ -5305,7 +5305,27 @@ static void vlog_check_virtual_override(vlog_node_t class, vlog_node_t d)
             continue;
          else if (vlog_kind(b) != V_FUNC_DECL && vlog_kind(b) != V_TASK_DECL)
             continue;
-         else if (!(vlog_flags(b) & (VLOG_F_VIRTUAL | VLOG_F_PURE)))
+
+         if (vlog_flags(b) & VLOG_F_OVERRIDE_FINAL) {
+            diag_t *dg = diag_new(DIAG_ERROR, vlog_loc(d));
+            diag_printf(dg, "cannot override final method %pQ of "
+                        "superclass %pQ", vlog_ident(d), vlog_ident(c));
+            diag_hint(dg, vlog_loc(b), "declared final here");
+            diag_emit(dg);
+            return;
+         }
+
+         if (vlog_flags(d) & VLOG_F_OVERRIDE_INITIAL) {
+            diag_t *dg = diag_new(DIAG_ERROR, vlog_loc(d));
+            diag_printf(dg, "method %pQ with :initial specifier cannot "
+                        "override method in superclass %pQ",
+                        vlog_ident(d), vlog_ident(c));
+            diag_hint(dg, vlog_loc(b), "superclass method declared here");
+            diag_emit(dg);
+            return;
+         }
+
+         if (!(vlog_flags(b) & (VLOG_F_VIRTUAL | VLOG_F_PURE)))
             return;
          else if (vlog_kind(b) != vlog_kind(d)) {
             diag_t *dg = diag_new(DIAG_ERROR, vlog_loc(d));
@@ -5366,12 +5386,24 @@ static void vlog_check_virtual_override(vlog_node_t class, vlog_node_t d)
          return;
       }
    }
+
+   if (vlog_flags(d) & VLOG_F_OVERRIDE_EXTENDS)
+      error_at(vlog_loc(d), "method %pQ with :extends specifier does not "
+               "override any superclass method", vlog_ident(d));
 }
 
 static void vlog_check_class_protos(vlog_node_t v)
 {
    // Prototypes must be defined in the same scope as the class and a pure
    // constraint is implemented by a class derived from the one declaring it
+
+   if (vlog_has_ref(v) && (vlog_flags(vlog_ref(v)) & VLOG_F_FINAL_CLASS)) {
+      diag_t *dg = diag_new(DIAG_ERROR, vlog_loc(v));
+      diag_printf(dg, "class %pQ cannot extend final class %pQ",
+                  vlog_ident(v), vlog_ident(vlog_ref(v)));
+      diag_hint(dg, vlog_loc(vlog_ref(v)), "declared final here");
+      diag_emit(dg);
+   }
 
    const int ndecls = vlog_decls(v);
    for (int i = 0; i < ndecls; i++) {
@@ -5399,8 +5431,7 @@ static void vlog_check_class_protos(vlog_node_t v)
          }
       }
 
-      if ((vlog_kind(d) == V_FUNC_DECL || vlog_kind(d) == V_TASK_DECL)
-          && vlog_has_ref(v))
+      if (vlog_kind(d) == V_FUNC_DECL || vlog_kind(d) == V_TASK_DECL)
          vlog_check_virtual_override(v, d);
 
       if ((vlog_kind(d) == V_FUNC_DECL || vlog_kind(d) == V_TASK_DECL)

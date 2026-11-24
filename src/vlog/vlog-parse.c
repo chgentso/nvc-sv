@@ -16227,6 +16227,31 @@ static bool p_method_lifetime(void)
    return automatic;
 }
 
+static vlog_flags_t p_dynamic_override_specifiers(void)
+{
+   // [ : initial | : extends ] [ : final ]
+
+   vlog_flags_t flags = 0;
+   if (peek() == tCOLON && (peek_nth(2) == tINITIAL
+                            || peek_nth(2) == tEXTENDS)) {
+      consume(tCOLON);
+      if (optional(tINITIAL))
+         flags |= VLOG_F_OVERRIDE_INITIAL;
+      else {
+         consume(tEXTENDS);
+         flags |= VLOG_F_OVERRIDE_EXTENDS;
+      }
+   }
+
+   if (peek() == tCOLON && peek_nth(2) == tFINAL) {
+      consume(tCOLON);
+      consume(tFINAL);
+      flags |= VLOG_F_OVERRIDE_FINAL;
+   }
+
+   return flags;
+}
+
 static vlog_node_t p_task_declaration(void)
 {
    // task [ dynamic_override_specifiers ] [ lifetime ] task_body_declaration
@@ -16239,6 +16264,10 @@ static vlog_node_t p_task_declaration(void)
    vlog_node_t v = vlog_new(V_TASK_DECL);
 
    consume(tTASK);
+
+   const vlog_flags_t oflags = p_dynamic_override_specifiers();
+   if (oflags != 0)
+      vlog_set_flags(v, vlog_flags(v) | oflags);
 
    const bool saved_automatic = proc_automatic;
    vlog_node_t saved_func = current_func;
@@ -16410,6 +16439,10 @@ static vlog_node_t p_function_declaration(void)
    vlog_node_t v = vlog_new(V_FUNC_DECL);
 
    consume(tFUNCTION);
+
+   const vlog_flags_t oflags = p_dynamic_override_specifiers();
+   if (oflags != 0)
+      vlog_set_flags(v, vlog_flags(v) | oflags);
 
    const bool saved_automatic = proc_automatic;
    vlog_node_t saved_func = current_func;
@@ -21337,6 +21370,11 @@ static vlog_node_t p_class_declaration(void)
       flags = VLOG_F_VIRTUAL | VLOG_F_INTERFACE;
 
    consume(tCLASS);
+
+   if (optional(tCOLON)) {
+      consume(tFINAL);
+      flags |= VLOG_F_FINAL_CLASS;
+   }
 
    ident_t name = p_identifier();
 

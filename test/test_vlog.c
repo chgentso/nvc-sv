@@ -4799,6 +4799,32 @@ START_TEST(test_misstatic1)
 }
 END_TEST
 
+START_TEST(test_override1)
+{
+   const error_t expect[] = {
+      {  6, "method 'bad_root' with :extends specifier does not override any "
+         "superclass method" },
+      { 11, "method 'm_ok' with :extends specifier does not override any "
+         "superclass method" },
+      { 13, "cannot override final method 'm_f' of superclass 'base'" },
+      { 14, "cannot override final method 'm_if' of superclass 'base'" },
+      { 18, "method 'm_i' with :initial specifier cannot override method in "
+         "superclass 'child'" },
+      { 24, "class 'bad_sub' cannot extend final class 'leaf'" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/override1.sv");
+
+   vlog_check(do_parse_only(V_PACKAGE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
 Suite *get_vlog_tests(void)
 {
    Suite *s = suite_create("vlog");
@@ -4986,6 +5012,7 @@ Suite *get_vlog_tests(void)
    tcase_add_test(tc, test_puremeth1);
    tcase_add_test(tc, test_letbad1);
    tcase_add_test(tc, test_misstatic1);
+   tcase_add_test(tc, test_override1);
    suite_add_tcase(s, tc);
 
    return s;
