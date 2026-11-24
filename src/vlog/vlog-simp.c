@@ -259,8 +259,10 @@ static void build_sensitivity(vlog_node_t ctrl, vlog_node_t v, hset_t *set,
    case V_ASSERT:
    case V_ASSUME:
    case V_COVER:
+      // Action blocks of assertions do not contribute to always_comb
+      // sensitivity; only the assertion expression itself is sensitive
       build_sensitivity(ctrl, vlog_value(v), set, is_comb);
-      // Fall-through
+      break;
    case V_IF:
       {
          const int nconds = vlog_conds(v);
@@ -321,7 +323,7 @@ static void build_sensitivity(vlog_node_t ctrl, vlog_node_t v, hset_t *set,
       break;
    case V_USER_FCALL:
    case V_USER_TCALL:
-      if (is_comb)
+      if (is_comb && !hset_contains(set, vlog_ref(v)))
          build_sensitivity(ctrl, vlog_ref(v), set, is_comb);
       // Fall-through
    case V_SYS_TCALL:
