@@ -464,9 +464,10 @@ package body textio is
     end procedure;
 
     procedure read_based_real (l      : inout line;
+                               start  : in positive;
                                value  : out real;
                                good   : out boolean ) is
-        variable pos    : integer := 1;
+        variable pos    : integer := start;
         variable ibase  : integer;
         variable ndig   : natural;
         variable base   : real;
@@ -476,6 +477,7 @@ package body textio is
         variable exp    : integer;
         variable ovf    : boolean;
         variable seen_point : boolean := false;
+        variable frac_dig   : natural := 0;
         variable closing    : character;
         variable peek       : character;
     begin
@@ -496,7 +498,11 @@ package body textio is
                 if seen_point then
                     scale := scale / base;
                     result := result + real(digit) * scale;
+                    frac_dig := frac_dig + 1;
                 else
+                    if result > (real'high - real(digit)) / base then
+                        return;
+                    end if;
                     result := result * base + real(digit);
                 end if;
                 ndig := ndig + 1;
@@ -511,9 +517,19 @@ package body textio is
             end if;
             pos := pos + 1;
         end loop;
-        if ndig = 0 or pos > l.all'length or get_char(l.all, pos) /= closing then
-            return;
-        end if;
+        `if VHDL_VERSION >= "2008" then
+            if not seen_point or frac_dig = 0 or pos > l.all'length
+                or get_char(l.all, pos) /= closing
+            then
+                return;
+            end if;
+        `else
+            if ndig = 0 or pos > l.all'length
+                or get_char(l.all, pos) /= closing
+            then
+                return;
+            end if;
+        `end if
         pos := pos + 1;
 
         if pos < l.all'length and (get_char(l.all, pos) = 'e'
@@ -531,12 +547,24 @@ package body textio is
                     return;
                 end if;
                 if get_char(l.all, pos + 1) = '-' then
-                    result := result * (base ** exp);   -- EXP is negated
+                    for k in 1 to -exp loop
+                        result := result / base;
+                        exit when result = 0.0;
+                    end loop;
                 else
-                    result := result * (base ** (-exp));
+                    for k in 1 to -exp loop
+                        if result > real'high / base then
+                            return;
+                        end if;
+                        result := result * base;
+                    end loop;
                 end if;
                 pos := digit;
             end if;
+        end if;
+
+        if not (result >= real'low and result <= real'high) then
+            return;
         end if;
 
         consume(l, pos - 1);
@@ -547,13 +575,14 @@ package body textio is
     procedure read (l     : inout line;
                     value : out real;
                     good  : out boolean ) is
-        variable result   : real;
-        variable pos      : integer := 1;
-        variable len      : integer;
-        variable ndig     : integer;
-        variable sign     : character := ' ';
-        variable rgood    : boolean;
-        variable peek     : character;
+        variable result    : real;
+        variable pos       : integer := 1;
+        variable exp_start : integer;
+        variable len       : integer;
+        variable ndig      : integer;
+        variable sign      : character := ' ';
+        variable rgood     : boolean;
+        variable peek      : character;
     begin
         skip_whitespace(l);
         if l = null or l.all'length = 0 then
@@ -568,10 +597,7 @@ package body textio is
         end if;
         if pos <= len and based_literal_hash(l.all, pos) > 0 then
             -- Based literal such as 16#F.8#E1
-            if sign /= ' ' then
-                consume(l, 1);
-            end if;
-            read_based_real(l, result, rgood);
+            read_based_real(l, pos, result, rgood);
             if not rgood then
                 good := false;
                 return;
@@ -599,10 +625,17 @@ package body textio is
                 exit;
             end if;
         end loop;
-        if ndig = 0 then
-            good := false;
-            return;
-        end if;
+        `if VHDL_VERSION >= "2008" then
+            if ndig = 0 or pos > len or get_char(l.all, pos) /= '.' then
+                good := false;
+                return;
+            end if;
+        `else
+            if ndig = 0 then
+                good := false;
+                return;
+            end if;
+        `end if
         if pos <= len and get_char(l.all, pos) = '.' then
             pos := pos + 1;
             ndig := 0;
@@ -628,6 +661,7 @@ package body textio is
         if pos <= len then
             peek := get_char(l.all, pos);
             if peek = 'e' or peek = 'E' then
+                exp_start := pos;
                 pos := pos + 1;
                 if pos <= len and (get_char(l.all, pos) = '+'
                                    or get_char(l.all, pos) = '-') then
@@ -649,12 +683,15 @@ package body textio is
                     end if;
                 end loop;
                 if ndig = 0 then
-                    good := false;
-                    return;
+                    pos := exp_start;
                 end if;
             end if;
         end if;
         result := parse_real(get_slice(l.all, 1, pos - 1));
+        if not (result >= real'low and result <= real'high) then
+            good := false;
+            return;
+        end if;
         consume(l, pos - 1);
         value := result;
         good := true;
