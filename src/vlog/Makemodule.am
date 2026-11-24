@@ -27,7 +27,9 @@ lib_libnvc_a_SOURCES += \
 	src/vlog/vlog-fsm.c \
 	src/vlog/vlog-evidence.c \
 	src/vlog/vlog-island.h \
-	src/vlog/vlog-island.c
+	src/vlog/vlog-island.c \
+	src/vlog/vlog-island-lower.h \
+	src/vlog/vlog-island-lower.c
 
 EXTRA_DIST += src/vlog/vlog-cov-core.inc
 

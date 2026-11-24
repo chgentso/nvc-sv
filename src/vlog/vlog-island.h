@@ -124,7 +124,7 @@ typedef struct {
    island_proc_eject_reason_t reason;
 } island_ejected_proc_t;
 
-typedef struct {
+typedef struct _vlog_island {
    ident_t          mod_name;
    ident_t          body_name;
    uint32_t         island_id;

@@ -1274,10 +1274,6 @@ static bool check_stmt(check_ctx_t *cc, vlog_node_t v)
           && check_expr(cc, vlog_value(v));
 
    case V_OP_ASSIGN:
-      if (vlog_has_delay(v)) {
-         fail_proc(cc, IPROC_EJ_DELAY);
-         return false;
-      }
       return check_lvalue(cc, vlog_target(v), false, true)
           && check_expr(cc, vlog_value(v));
 

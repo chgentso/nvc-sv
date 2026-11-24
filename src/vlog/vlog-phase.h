@@ -35,6 +35,11 @@ void vlog_lower_block(mir_context_t *mc, ident_t parent, tree_t b);
 void vlog_set_interconnect_nettype(vlog_node_t decl, vlog_node_t nettype);
 void vlog_lower_instance(mir_context_t *mc, vlog_node_t body, ident_t parent,
                          tree_t trans, cover_data_t *cover, cover_obj_t cscope);
+struct _vlog_island;
+void vlog_lower_island_comb_fn(mir_context_t *mc, vlog_node_t body,
+                               ident_t qual, ident_t sym,
+                               const struct _vlog_island *isl,
+                               const bool *fused_proc);
 void vlog_cover_block(vlog_node_t body, cover_data_t *db, cover_obj_t cs);
 void vlog_cover_bind(vlog_node_t body, cover_data_t *db, cover_obj_t cs);
 bool vlog_cover_tag(ident_t body, vlog_node_t v, cover_item_kind_t kind,
