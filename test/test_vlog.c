@@ -4758,6 +4758,24 @@ START_TEST(test_puremeth1)
 }
 END_TEST
 
+START_TEST(test_letbad1)
+{
+   const error_t expect[] = {
+      { 7, "let 'add1' cannot be called as a statement" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/letbad1.sv");
+
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
 Suite *get_vlog_tests(void)
 {
    Suite *s = suite_create("vlog");
@@ -4943,6 +4961,7 @@ Suite *get_vlog_tests(void)
    tcase_add_test(tc, test_callorder1);
    tcase_add_test(tc, test_impimp1);
    tcase_add_test(tc, test_puremeth1);
+   tcase_add_test(tc, test_letbad1);
    suite_add_tcase(s, tc);
 
    return s;

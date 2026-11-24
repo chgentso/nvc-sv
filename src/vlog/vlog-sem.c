@@ -2484,9 +2484,14 @@ static void vlog_check_discarded(vlog_node_t v, vlog_node_t func)
 static void vlog_check_user_tcall(vlog_node_t v)
 {
    vlog_node_t func = vlog_ref(v);
-   if (vlog_kind(func) != V_TASK_DECL && vlog_kind(func) != V_FUNC_DECL) {
+   if ((vlog_kind(func) != V_TASK_DECL && vlog_kind(func) != V_FUNC_DECL)
+       || (vlog_flags(func) & VLOG_F_LET)) {
       diag_t *d = diag_new(DIAG_ERROR, vlog_loc(v));
-      diag_printf(d, "'%s' is not a task", istr(vlog_ident(func)));
+      if (vlog_flags(func) & VLOG_F_LET)
+         diag_printf(d, "let '%s' cannot be called as a statement",
+                     istr(vlog_ident(func)));
+      else
+         diag_printf(d, "'%s' is not a task", istr(vlog_ident(func)));
       diag_hint(d, vlog_loc(func), "'%s' declared here",
                 istr(vlog_ident(func)));
       diag_emit(d);
