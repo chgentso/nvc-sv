@@ -3290,18 +3290,19 @@ type_t calculate_aggregate_subtype(tree_t expr)
    type_t elem = type_elem(type);
    if (type_is_unconstrained(elem)) {
       tree_t a0 = tree_assoc(expr, 0);
+      type_t elem_src;
       switch (tree_subkind(a0)) {
       case A_CONCAT:
       case A_SLICE:
-         a0_type = type_elem(tree_type(tree_value(a0)));
+         elem_src = type_elem(tree_type(tree_value(a0)));
          break;
       default:
-         a0_type = tree_type(tree_value(a0));
+         elem_src = ndims > 1 ? type_elem(a0_type) : tree_type(tree_value(a0));
          break;
       }
 
-      if (!type_is_unconstrained(a0_type))
-         elem = a0_type;
+      if (!type_is_unconstrained(elem_src))
+         elem = elem_src;
    }
 
    type_set_elem(sub, elem);
