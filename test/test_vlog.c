@@ -4914,6 +4914,25 @@ START_TEST(test_funcnb1)
 }
 END_TEST
 
+START_TEST(test_dpiname1)
+{
+   const error_t expect[] = {
+      { 4, "DPI-C identifier 'bad.import' is not a valid C identifier" },
+      { 6, "DPI-C identifier 'bad.export' is not a valid C identifier" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/dpiname1.sv");
+
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
 Suite *get_vlog_tests(void)
 {
    Suite *s = suite_create("vlog");
@@ -5106,6 +5125,7 @@ Suite *get_vlog_tests(void)
    tcase_add_test(tc, test_castcls1);
    tcase_add_test(tc, test_countbits1);
    tcase_add_test(tc, test_funcnb1);
+   tcase_add_test(tc, test_dpiname1);
    suite_add_tcase(s, tc);
 
    return s;

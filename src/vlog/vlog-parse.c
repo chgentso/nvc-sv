@@ -15417,6 +15417,19 @@ static void p_package_import_declaration(vlog_node_t parent)
                         | (is_context ? VLOG_F_CONTEXT : 0));
          if (cname != NULL)
             vlog_set_ident3(subr, cname);
+
+         ident_t cid = cname ?: vlog_ident(subr);
+         const char *s = istr(cid);
+         bool valid_c = (s[0] >= 'a' && s[0] <= 'z')
+            || (s[0] >= 'A' && s[0] <= 'Z') || s[0] == '_';
+         for (const char *p = valid_c ? s + 1 : s; valid_c && *p != '\0'; p++) {
+            valid_c = (*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z')
+               || (*p >= '0' && *p <= '9') || *p == '_';
+         }
+         if (!valid_c)
+            error_at(vlog_loc(subr), "DPI-C identifier %pQ is not a valid C "
+                     "identifier", cid);
+
          vlog_add_decl(parent, subr);
       }
 
@@ -21488,6 +21501,22 @@ static void dpi_stub_emit(const char *name)
    fflush(dpi_stub_file);
 }
 
+static bool is_valid_c_ident(ident_t id)
+{
+   const char *s = istr(id);
+   if (!((s[0] >= 'a' && s[0] <= 'z') || (s[0] >= 'A' && s[0] <= 'Z')
+         || s[0] == '_'))
+      return false;
+
+   for (const char *p = s + 1; *p != '\0'; p++) {
+      if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z')
+            || (*p >= '0' && *p <= '9') || *p == '_'))
+         return false;
+   }
+
+   return true;
+}
+
 static void p_dpi_export(vlog_node_t parent)
 {
    // export "DPI-C" [ c_identifier = ] function name ;
@@ -21509,7 +21538,12 @@ static void p_dpi_export(vlog_node_t parent)
 
    vlog_node_t v = vlog_new(V_DPI_EXPORT);
    vlog_set_ident(v, p_identifier());
-   vlog_set_ident3(v, cname ?: vlog_ident(v));
+   ident_t cid = cname ?: vlog_ident(v);
+   vlog_set_ident3(v, cid);
+
+   if (!is_valid_c_ident(cid))
+      error_at(&state.last_loc, "DPI-C identifier %pQ is not a valid C "
+               "identifier", cid);
 
    dpi_stub_emit(istr(vlog_ident3(v)));
 
