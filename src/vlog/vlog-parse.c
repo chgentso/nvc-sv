@@ -15836,17 +15836,43 @@ static void push_class_scopes(vlog_node_t class, int *depth)
    }
 }
 
-static vlog_node_t find_extern_proto(ident_t cname, const loc_t *cloc,
-                                     ident_t id, const loc_t *mloc,
-                                     vlog_kind_t kind, vlog_node_t *classp)
+static vlog_node_t p_extern_class_scope(ident_t *cnamep, loc_t *clocp)
 {
-   // Find the prototype in a class for a definition outside of the class
+   ident_t cname = p_identifier();
+   loc_t cloc = state.last_loc;
+   consume(tSCOPE);
 
    vlog_node_t class = spec_extern_class;
    if (class == NULL)
       class = vlog_symtab_query(symtab, cname);
    if (class != NULL && vlog_kind(class) == V_TYPE_DECL)
       class = vlog_get_type(class);
+
+   while (peek() == tID && peek_nth(2) == tSCOPE) {
+      ident_t next = p_identifier();
+      cloc = state.last_loc;
+      consume(tSCOPE);
+      cname = next;
+      if (class != NULL && vlog_kind(class) == V_CLASS_DECL) {
+         class = vlog_scope_member(class, next);
+         if (class != NULL && vlog_kind(class) == V_TYPE_DECL)
+            class = vlog_get_type(class);
+      }
+      else
+         class = NULL;
+   }
+
+   *cnamep = cname;
+   *clocp = cloc;
+   return class;
+}
+
+static vlog_node_t find_extern_proto(vlog_node_t class, ident_t cname,
+                                     const loc_t *cloc, ident_t id,
+                                     const loc_t *mloc, vlog_kind_t kind,
+                                     vlog_node_t *classp)
+{
+   // Find the prototype in a class for a definition outside of the class
 
    *classp = NULL;
 
@@ -15905,15 +15931,15 @@ static void p_extern_subr_body(vlog_node_t tmp)
 
    extern_definition = true;
 
-   ident_t cname = p_identifier();
-   const loc_t cloc = state.last_loc;
-   consume(tSCOPE);
+   ident_t cname;
+   loc_t cloc;
+   vlog_node_t scope_cls = p_extern_class_scope(&cname, &cloc);
    ident_t id = p_identifier();
    const loc_t mloc = state.last_loc;
 
    vlog_node_t class;
-   vlog_node_t proto = find_extern_proto(cname, &cloc, id, &mloc,
-                                        vlog_kind(tmp), &class);
+   vlog_node_t proto = find_extern_proto(scope_cls, cname, &cloc, id, &mloc,
+                                         vlog_kind(tmp), &class);
 
    if (proto == NULL) {
       // Skip the definition
@@ -16007,17 +16033,17 @@ static void p_extern_constructor(void)
 
    extern_definition = true;
 
-   ident_t cname = p_identifier();
-   const loc_t cloc = state.last_loc;
-   consume(tSCOPE);
+   ident_t cname;
+   loc_t cloc;
+   vlog_node_t scope_cls = p_extern_class_scope(&cname, &cloc);
    consume(tNEW);
    const loc_t mloc = state.last_loc;
 
    ident_t id = ident_new("new");
 
    vlog_node_t class;
-   vlog_node_t proto = find_extern_proto(cname, &cloc, id, &mloc,
-                                        V_CONSTRUCTOR, &class);
+   vlog_node_t proto = find_extern_proto(scope_cls, cname, &cloc, id, &mloc,
+                                         V_CONSTRUCTOR, &class);
 
    if (proto == NULL) {
       drop_tokens_until(&state, tENDFUNCTION);
@@ -16271,6 +16297,8 @@ static vlog_node_t p_function_data_type_or_implicit(void)
       {
          if (is_scoped_type_start() || peek_nth(2) == tHASH)
             return p_data_type();
+         else if (peek_nth(2) == tSCOPE)
+            return p_implicit_data_type();
 
          vlog_node_t dt = peek_reference();
          if (dt != NULL && vlog_kind(dt) == V_CLASS_DECL
@@ -16393,7 +16421,11 @@ static vlog_node_t p_function_declaration(void)
    if (scan(tAUTOMATIC, tSTATIC))
       proc_automatic = p_method_lifetime();
 
-   if (peek() == tID && peek_nth(2) == tSCOPE && peek_nth(3) == tNEW)
+   int cn = 1;
+   while (peek_nth(cn) == tID && peek_nth(cn + 1) == tSCOPE)
+      cn += 2;
+
+   if (cn > 1 && peek_nth(cn) == tNEW)
       p_extern_constructor();
    else
       p_function_body_declaration(v);

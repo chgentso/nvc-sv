@@ -3228,3 +3228,4 @@ math_pow_int1   2008
 vlog_event_scope1 verilog
 vlog_call_lval1 verilog
 vlog_typename_cls1 verilog
+vlog_extern_nest1 verilog
