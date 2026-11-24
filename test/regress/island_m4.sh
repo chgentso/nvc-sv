@@ -224,6 +224,6 @@ grep -q "PASSED hier_island" hier_m4.out
 nvc-sv -a hier_island.sv -e --rtl-islands=off tb_hier_island
 nvc-sv -r --wave=hier_off.fst tb_hier_island > hier_off.out
 diff -u hier_off.out hier_m4.out
-fst2vcd -f hier_m4.fst > hier_m4.vcd
-fst2vcd -f hier_off.fst > hier_off.vcd
+fst2vcd -f hier_m4.fst | sed '/^\$date/,/^\$end/d' > hier_m4.vcd
+fst2vcd -f hier_off.fst | sed '/^\$date/,/^\$end/d' > hier_off.vcd
 diff -u hier_off.vcd hier_m4.vcd
