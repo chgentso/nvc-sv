@@ -387,3 +387,29 @@ nvc --work=work_uarr_isl --rtl-islands=hier --2state=islands -e tb_uarr_m6
 out_uarr=$(nvc --work=work_uarr_isl --rtl-islands=hier --2state=islands -r tb_uarr_m6)
 echo "$out_uarr"
 echo "$out_uarr" | grep -q "UARR dout=f0"
+
+# Test 7: 1-element V_CONCAT output port connection under --2state=all
+cat >concat_port_m6.sv <<'EOF'
+module leaf_concat_m6(input logic [7:0] a, output logic [7:0] y);
+  assign y = ~a;
+endmodule
+
+module tb_concat_m6;
+  typedef logic [7:0] byte_t;
+  logic [7:0] a = 8'h3C;
+  byte_t y;
+  leaf_concat_m6 u (.a(a), .y({y}));
+  initial begin
+    #1;
+    $display("CONCAT_PORT y=%h", y);
+    $finish;
+  end
+endmodule
+EOF
+
+rm -rf work_concat_all
+nvc --work=work_concat_all -a concat_port_m6.sv
+nvc --work=work_concat_all --rtl-islands=hier --2state=all -e tb_concat_m6
+out_cp=$(nvc --work=work_concat_all --rtl-islands=hier --2state=all -r tb_concat_m6)
+echo "$out_cp"
+echo "$out_cp" | grep -q "CONCAT_PORT y=c3"

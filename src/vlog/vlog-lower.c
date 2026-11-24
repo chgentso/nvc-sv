@@ -35741,7 +35741,7 @@ static void vlog_lower_port_map(vlog_gen_t *g, vlog_node_t v)
          mir_value_t resolved = mir_build_resolved(g->mu, signal);
          if (mir_get_class(g->mu, ti->type) == MIR_TYPE_REAL) {
             mir_value_t value = mir_build_load(g->mu, resolved);
-            mir_type_t t_dst = nlvalues == 1 ? lvalue1.type
+            mir_type_t t_dst = nlvalues == 1 ? lvalues[0].type
                : mir_vec4_type(g->mu, targetsz, false);
             resize = vlog_lower_cast(g, t_dst, value);
          }
@@ -35751,15 +35751,9 @@ static void vlog_lower_port_map(vlog_gen_t *g, vlog_node_t v)
                                mir_get_signed(g->mu, ti->type))
                : ti->type;
             bool any_vec4 = !g->two_state;
-            if (!any_vec4 && nlvalues == 1)
-               any_vec4 = mir_get_class(g->mu, lvalue1.type) == MIR_TYPE_VEC4;
-            else if (!any_vec4) {
-               for (int i = 0; i < nlvalues; i++) {
-                  if (mir_get_class(g->mu, lvalues[i].type) == MIR_TYPE_VEC4) {
-                     any_vec4 = true;
-                     break;
-                  }
-               }
+            for (int i = 0; !any_vec4 && i < nlvalues; i++) {
+               if (mir_get_class(g->mu, lvalues[i].type) == MIR_TYPE_VEC4)
+                  any_vec4 = true;
             }
             mir_type_t t_vec = any_vec4
                ? mir_vec4_type(g->mu, targetsz, false)
