@@ -584,6 +584,17 @@ typedef struct {
 
 static void flush_deferred(rt_model_t *m);
 
+__attribute__((noinline))
+static void run_spawned_ctx(rt_model_t *m, deferq_guard_ctx_t *ctx)
+{
+   while (ctx->spawn_idx < m->spawnq.count) {
+      const int si = ctx->spawn_idx++;
+      (*m->spawnq.tasks[si].fn)(m, m->spawnq.tasks[si].arg);
+   }
+   m->spawnq.count = 0;
+   ctx->spawn_idx = 0;
+}
+
 static void deferq_run_body(void *arg)
 {
    deferq_guard_ctx_t *ctx = arg;
@@ -591,14 +602,8 @@ static void deferq_run_body(void *arg)
    deferq_t *dq = ctx->dq;
 
    for (;;) {
-      while (ctx->spawn_idx < m->spawnq.count) {
-         const int si = ctx->spawn_idx++;
-         (*m->spawnq.tasks[si].fn)(m, m->spawnq.tasks[si].arg);
-      }
-      if (m->spawnq.count > 0) {
-         m->spawnq.count = 0;
-         ctx->spawn_idx = 0;
-      }
+      if (unlikely(m->spawnq.count > 0))
+         run_spawned_ctx(m, ctx);
 
       if (dq->count == 0)
          break;
@@ -611,14 +616,8 @@ static void deferq_run_body(void *arg)
          if (i + 1 < count)
             prefetch_read(tasks[i + 1].arg);
          (*tasks[i].fn)(m, tasks[i].arg);
-         while (ctx->spawn_idx < m->spawnq.count) {
-            const int si = ctx->spawn_idx++;
-            (*m->spawnq.tasks[si].fn)(m, m->spawnq.tasks[si].arg);
-         }
-         if (m->spawnq.count > 0) {
-            m->spawnq.count = 0;
-            ctx->spawn_idx = 0;
-         }
+         if (unlikely(m->spawnq.count > 0))
+            run_spawned_ctx(m, ctx);
       }
 
       assert(dq->tasks == tasks);
@@ -3591,8 +3590,11 @@ static void pending_clear(rt_pending_t *p, unsigned slot)
 
 static void sched_event(rt_model_t *m, void **pending, rt_wakeable_t *obj)
 {
-   if (obj->kind == W_PROC)
-      note_wait(m, container_of(obj, rt_proc_t, wakeable));
+   if (obj->kind == W_PROC) {
+      rt_proc_t *p = container_of(obj, rt_proc_t, wakeable);
+      if (unlikely(p->verilog))
+         note_wait(m, p);
+   }
 
    if (*pending == NULL) {
       *pending = tag_pointer(obj, 1);
@@ -4223,6 +4225,61 @@ static void wake_merge_sort(wake_entry_t *arr, int n)
       memcpy(arr, src, n * sizeof(wake_entry_t));
 }
 
+__attribute__((noinline))
+static void wakeup_all_ordered(rt_model_t *m, rt_pending_t *p)
+{
+   const unsigned count = p->count;
+   wake_entry_t stack_buf[64];
+   wake_entry_t *heap_buf = NULL;
+   wake_entry_t *order = count <= ARRAY_LEN(stack_buf)
+      ? stack_buf
+      : (heap_buf = xmalloc_array(count, sizeof(wake_entry_t)));
+
+   int n = 0;
+   bool sorted = true;
+   uint64_t prev_key = 0;
+
+   for (unsigned i = 0; i < count; i++) {
+      rt_wakeable_t *w = p->wake[i];
+      if (w == NULL)
+         continue;
+      if (unlikely(w->forked && w->zombie)) {
+         proc_unpin(w);
+         pending_clear(p, i);
+         continue;
+      }
+
+      const uint64_t k = wake_order_key(w);
+      if (k < prev_key)
+         sorted = false;
+      prev_key = k;
+
+      order[n].wake = w;
+      order[n].key = k;
+      n++;
+   }
+
+   if (!sorted) {
+      if (n <= 32) {
+         // Stable insertion sort for small unsorted lists
+         for (int i = 1; i < n; i++) {
+            const wake_entry_t key = order[i];
+            int j = i - 1;
+            for (; j >= 0 && order[j].key > key.key; j--)
+               order[j + 1] = order[j];
+            order[j + 1] = key;
+         }
+      }
+      else
+         wake_merge_sort(order, n);
+   }
+
+   for (int i = 0; i < n; i++)
+      wakeup_one(m, order[i].wake);
+
+   free(heap_buf);
+}
+
 static void wakeup_all(rt_model_t *m, void **pending)
 {
    if (pointer_tag(*pending) == 1) {
@@ -4241,55 +4298,15 @@ static void wakeup_all(rt_model_t *m, void **pending)
       if (count == 0)
          return;
 
-      wake_entry_t stack_buf[64];
-      wake_entry_t *heap_buf = NULL;
-      wake_entry_t *order = count <= ARRAY_LEN(stack_buf)
-         ? stack_buf
-         : (heap_buf = xmalloc_array(count, sizeof(wake_entry_t)));
-
-      int n = 0;
-      bool sorted = true;
-      uint64_t prev_key = 0;
-
-      for (unsigned i = 0; i < count; i++) {
-         rt_wakeable_t *w = p->wake[i];
-         if (w == NULL)
-            continue;
-         if (unlikely(w->forked && w->zombie)) {
-            proc_unpin(w);
-            pending_clear(p, i);
-            continue;
+      if (likely(!m->has_verilog)) {
+         for (unsigned i = 0; i < count; i++) {
+            rt_wakeable_t *w = p->wake[i];
+            if (w != NULL)
+               wakeup_one(m, w);
          }
-
-         const uint64_t k = wake_order_key(w);
-         if (k < prev_key)
-            sorted = false;
-         prev_key = k;
-
-         order[n].wake = w;
-         order[n].key = k;
-         n++;
       }
-
-      if (!sorted) {
-         if (n <= 32) {
-            // Stable insertion sort for small unsorted lists
-            for (int i = 1; i < n; i++) {
-               const wake_entry_t key = order[i];
-               int j = i - 1;
-               for (; j >= 0 && order[j].key > key.key; j--)
-                  order[j + 1] = order[j];
-               order[j + 1] = key;
-            }
-         }
-         else
-            wake_merge_sort(order, n);
-      }
-
-      for (int i = 0; i < n; i++)
-         wakeup_one(m, order[i].wake);
-
-      free(heap_buf);
+      else
+         wakeup_all_ordered(m, p);
    }
 }
 
@@ -4299,17 +4316,21 @@ static void notify_event(rt_model_t *m, rt_nexus_t *n)
 {
    n->last_event = m->now;
    n->event_delta = m->iteration;
-   if (!(n->signal->shared.flags & SIG_F_PACKED))
+   if (unlikely(m->has_level_trigger)
+       && !(n->signal->shared.flags & SIG_F_PACKED))
       n->signal->last_event_seq = m->event_seq;
-   mtp.events += mtp.on;
+   if (unlikely(mtp.on))
+      mtp.events++;
 
    // Triggers run synchronously in blocking update phase
-   m->trigger_epoch += m->blocking_update;
+   if (unlikely(m->blocking_update))
+      m->trigger_epoch++;
 
    if (n->flags & NET_F_CACHE_EVENT)
       set_event_flag(m, n->signal);
 
-   if (n->signal->shared.flags & SIG_F_POLL_WATCHED)
+   if (unlikely(sv_watched_sig_count > 0)
+       && (n->signal->shared.flags & SIG_F_POLL_WATCHED))
       m->sv_poll_sig_dirty = true;
 
    wakeup_all(m, &(n->pending));
@@ -4345,7 +4366,8 @@ static void update_effective(rt_model_t *m, rt_nexus_t *n)
 {
    n->active_delta = m->iteration;
    n->flags &= ~NET_F_PENDING;
-   mtp.nupd_eff += mtp.on;
+   if (unlikely(mtp.on))
+      mtp.nupd_eff++;
 
    calculate_effective_value(m, n);
 
@@ -4392,7 +4414,8 @@ static void update_driving(rt_model_t *m, rt_nexus_t *n, bool safe)
    if (n->n_sources == 1 || safe) {
       n->active_delta = m->iteration;
       n->flags &= ~NET_F_PENDING;
-      mtp.nupd_drv += mtp.on;
+      if (unlikely(mtp.on))
+         mtp.nupd_drv++;
 
       calculate_driving_value(m, n);
 
@@ -4924,7 +4947,7 @@ static void model_cycle_body(rt_model_t *m)
       m->now = heap_min_key(m->eventq_heap);
       m->iteration = 0;
    }
-   if (unlikely(++m->event_seq == 0)) {
+   if (unlikely(m->has_level_trigger) && unlikely(++m->event_seq == 0)) {
       m->event_seq = 1;
       for (rt_nexus_t *nx = m->nexuses; nx != NULL; nx = nx->chain) {
          if (!(nx->signal->shared.flags & SIG_F_PACKED))
@@ -4941,7 +4964,7 @@ static void model_cycle_body(rt_model_t *m)
       deltaq_dump(m);
 #endif
 
-   if (sv_reap.count >= sv_reap_next)
+   if (unlikely(sv_reap.count >= sv_reap_next))
       sv_reap_procs(m);
 
    if (m->iteration == 0)
@@ -5066,7 +5089,7 @@ static void model_cycle_body(rt_model_t *m)
    deferq_run_procs(m, &m->next_procq);
    (void)mtp_enter(MTP_OTHER);
 
-   if (m->islands != NULL) {
+   if (unlikely(m->islands != NULL)) {
       if (!rt_island_eval_dirty(m->jit, m, m->islands, model_thread(m)->tlab))
          m->force_stop = true;
       else if (m->reschedq.count > 0) {
@@ -5091,7 +5114,7 @@ static void model_cycle_body(rt_model_t *m)
    if (m->next_is_delta)
       goto next_delta;
 
-   if (m->inactiveq.count > 0) {
+   if (unlikely(m->inactiveq.count > 0)) {
       TRACE("begin inactive region");
       deferq_swap(&m->next_inactiveq, &m->inactiveq);
       (void)mtp_enter(MTP_TASKQ);
@@ -5102,8 +5125,8 @@ static void model_cycle_body(rt_model_t *m)
    if (m->next_is_delta)
       goto next_delta;
 
-   if (m->nonblockq.count > 0 || m->nb_packed_q.count > 0
-       || rt_island_has_ff_commits(m->islands)) {
+   if (unlikely(m->nonblockq.count > 0 || m->nb_packed_q.count > 0
+                || (m->islands != NULL && rt_island_has_ff_commits(m->islands)))) {
       TRACE("begin non-blocking assignment region");
       (void)mtp_enter(MTP_NBA);
       if (m->nb_packed_q.count > 0) {
@@ -5113,7 +5136,7 @@ static void model_cycle_body(rt_model_t *m)
       }
       if (m->nonblockq.count > 0)
          deferq_run(m, &m->nonblockq);
-      if (rt_island_has_ff_commits(m->islands)) {
+      if (m->islands != NULL && rt_island_has_ff_commits(m->islands)) {
          rt_island_commit_ff(m, m->islands, model_thread(m)->tlab);
          if (m->reschedq.count > 0) {
             deferq_swap(&m->reschedq, &m->nonblockq);
@@ -5131,7 +5154,7 @@ static void model_cycle_body(rt_model_t *m)
          m->next_is_delta = true;
    }
 
-   if (!m->next_is_delta && m->reactiveq.count > 0) {
+   if (!m->next_is_delta && unlikely(m->reactiveq.count > 0)) {
       // Program processes run once nothing else is scheduled in the time
       // step, in the order they began waiting, and may then schedule more
       // events
@@ -5142,7 +5165,8 @@ static void model_cycle_body(rt_model_t *m)
    }
 
  next_delta:
-   sv_poll_end_cycle(m);
+   if (unlikely(m->has_verilog))
+      sv_poll_end_cycle(m);
 
    if (!m->next_is_delta) {
       if (m->samplers != NULL) {
@@ -6417,13 +6441,15 @@ static void deposit_notify(rt_model_t *m, rt_nexus_t *n)
 
    n->last_event = m->now;
    n->event_delta = m->iteration;
-   if (!(n->signal->shared.flags & SIG_F_PACKED))
+   if (unlikely(m->has_level_trigger)
+       && !(n->signal->shared.flags & SIG_F_PACKED))
       n->signal->last_event_seq = m->event_seq;
 
    if (n->flags & NET_F_CACHE_EVENT)
       set_event_flag(m, n->signal);
 
-   if (n->signal->shared.flags & SIG_F_POLL_WATCHED)
+   if (unlikely(sv_watched_sig_count > 0)
+       && (n->signal->shared.flags & SIG_F_POLL_WATCHED))
       m->sv_poll_sig_dirty = true;
 
    wakeup_all(m, &(n->pending));
@@ -7821,6 +7847,7 @@ static rt_trigger_t *new_trigger(rt_model_t *m, trigger_kind_t kind,
    t->kind   = kind;
    bool level_only = (kind == LEVEL_TRIGGER);
    if (level_only) {
+      m->has_level_trigger = true;
       const rt_signal_t *s = args[0].pointer;
       const uint32_t offset = args[1].integer;
       const int32_t count = args[2].integer;
