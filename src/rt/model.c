@@ -5060,7 +5060,7 @@ static void model_cycle_body(rt_model_t *m)
    deferq_run_procs(m, &m->next_procq);
    (void)mtp_enter(MTP_OTHER);
 
-   if (!rt_island_eval_dirty(m->jit, m, m->islands))
+   if (!rt_island_eval_dirty(m->jit, m, m->islands, model_thread(m)->tlab))
       m->force_stop = true;
 
    run_callbacks(m, END_OF_PROCESSES);

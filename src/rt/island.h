@@ -70,7 +70,8 @@ typedef struct _rt_island_mgr rt_island_mgr_t;
 rt_island_mgr_t *rt_island_mgr_new(rt_model_t *m);
 void rt_island_mgr_free(rt_island_mgr_t *mgr);
 void rt_island_reset_all(rt_island_mgr_t *mgr);
-bool rt_island_eval_dirty(jit_t *jit, rt_model_t *m, rt_island_mgr_t *mgr);
+bool rt_island_eval_dirty(jit_t *jit, rt_model_t *m, rt_island_mgr_t *mgr,
+                          tlab_t *tlab);
 
 void *rt_island_begin(rt_model_t *m, rt_island_mgr_t **mgr_p,
                       jit_handle_t eval_handle, void *inst_ctx,

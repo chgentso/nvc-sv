@@ -432,7 +432,8 @@ void rt_island_reset_all(rt_island_mgr_t *mgr)
    }
 }
 
-bool rt_island_eval_dirty(jit_t *jit, rt_model_t *m, rt_island_mgr_t *mgr)
+bool rt_island_eval_dirty(jit_t *jit, rt_model_t *m, rt_island_mgr_t *mgr,
+                          tlab_t *tlab)
 {
    if (mgr == NULL || mgr->dirty_q.count == 0)
       return true;
@@ -452,11 +453,20 @@ bool rt_island_eval_dirty(jit_t *jit, rt_model_t *m, rt_island_mgr_t *mgr)
       jit_scalar_t p1 = { .pointer = isl->inst_ctx };
       jit_scalar_t p2 = { .pointer = isl->state };
       jit_scalar_t result = { .integer = 0 };
-      tlab_t tlab = jit_null_tlab(jit);
-      if (!jit_fastcall(jit, isl->eval_handle, &result, p1, p2, &tlab)) {
+      tlab_t null_tlab;
+      tlab_t *use_tlab = tlab;
+      if (use_tlab == NULL) {
+         null_tlab = jit_null_tlab(jit);
+         use_tlab = &null_tlab;
+      }
+      if (!jit_fastcall(jit, isl->eval_handle, &result, p1, p2, use_tlab)) {
+         if (tlab != NULL)
+            tlab_reset(tlab);
          ok = false;
          break;
       }
+      if (tlab != NULL)
+         tlab_reset(tlab);
 
       for (uint32_t j = 0; j < isl->n_sync_sigs; j++)
          island_sync_out_sig(m, isl, &(isl->sigs[isl->sync_sigs[j]]));
