@@ -5136,7 +5136,7 @@ static bool sem_static_signal_name(tree_t t)
 
 static bool sem_check_port_actual(formal_map_t *formals, int nformals,
                                   tree_t param, tree_t unit, int pos,
-                                  nametab_t *tab)
+                                  bool is_binding, nametab_t *tab)
 {
    tree_t value = tree_value(param), name = NULL, out_conv = NULL;
    tree_t decl = NULL;
@@ -5272,7 +5272,7 @@ static bool sem_check_port_actual(formal_map_t *formals, int nformals,
    const port_mode_t mode = tree_subkind(decl);
 
    if (kind == T_OPEN) {
-      if ((mode == PORT_IN) && !tree_has_value(decl))
+      if ((mode == PORT_IN) && !tree_has_value(decl) && !is_binding)
          sem_error(value, "unconnected port %pI with mode IN must have a "
                    "default value", tree_ident(decl));
 
@@ -5489,9 +5489,11 @@ static bool sem_check_port_map(tree_t t, tree_t unit, nametab_t *tab)
    if (!ok)
       return false;
 
+   const bool is_binding = tree_kind(t) == T_BINDING;
    for (int i = 0; i < nactuals; i++) {
       tree_t actual = tree_param(t, i);
-      ok &= sem_check_port_actual(formals, nformals, actual, unit, i, tab);
+      ok &= sem_check_port_actual(formals, nformals, actual, unit, i,
+                                  is_binding, tab);
 
       if (!ok && tree_subkind(actual) == P_POS && i >= nformals)
          break;   // Prevent useless repeated errors

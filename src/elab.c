@@ -1405,6 +1405,11 @@ static void elab_ports(tree_t entity, tree_t bind, const elab_ctx_t *ctx)
                       used_comp_ports, T_REF);
    }
 
+   const bool check_open_in =
+      ctx->inst != NULL
+      && tree_kind(bind) == T_INSTANCE
+      && (tree_class(bind) == C_ENTITY || tree_class(bind) == C_CONFIGURATION);
+
    const int nports = tree_ports(entity);
    const int nparams = tree_params(bind);
    bool have_named = false;
@@ -1476,6 +1481,10 @@ static void elab_ports(tree_t entity, tree_t bind, const elab_ctx_t *ctx)
       }
 
       if (map == NULL) {
+         if (check_open_in && mode == PORT_IN && !tree_has_value(p))
+            error_at(tree_loc(bind), "unconnected port %pI with mode IN must "
+                     "have a default value", tree_ident(p));
+
          map = tree_new(T_PARAM);
          tree_set_loc(map, tree_loc(p));
 
@@ -1495,6 +1504,11 @@ static void elab_ports(tree_t entity, tree_t bind, const elab_ctx_t *ctx)
          tree_set_value(map, open);
 
          tree_add_param(ctx->out, map);
+      }
+      else if (check_open_in && tree_kind(tree_value(map)) == T_OPEN
+               && mode == PORT_IN && !tree_has_value(p)) {
+         error_at(tree_loc(tree_value(map)), "unconnected port %pI with mode "
+                  "IN must have a default value", tree_ident(p));
       }
 
       tree_add_port(ctx->out, p);
