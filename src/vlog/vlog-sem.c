@@ -5401,14 +5401,21 @@ static void vlog_check_class_protos(vlog_node_t v)
       const int nbase = vlog_decls(c);
       for (int i = 0; i < nbase; i++) {
          vlog_node_t d = vlog_decl(c, i);
-         if (vlog_kind(d) != V_CONSTRAINT || !(vlog_flags(d) & VLOG_F_PURE))
+         if ((vlog_kind(d) != V_CONSTRAINT && vlog_kind(d) != V_FUNC_DECL
+              && vlog_kind(d) != V_TASK_DECL)
+             || !(vlog_flags(d) & VLOG_F_PURE))
             continue;
 
          vlog_node_t impl = vlog_class_member(v, vlog_ident(d));
          if (impl == NULL || (vlog_flags(impl) & VLOG_F_PURE)) {
+            if (impl != NULL && impl != d)
+               continue;
+
             diag_t *dg = diag_new(DIAG_ERROR, vlog_loc(v));
-            diag_printf(dg, "class %pQ does not implement the pure "
-                        "constraint %pQ", vlog_ident(v), vlog_ident(d));
+            diag_printf(dg, "class %pQ does not implement the pure %s %pQ",
+                        vlog_ident(v),
+                        vlog_kind(d) == V_CONSTRAINT ? "constraint"
+                        : "virtual method", vlog_ident(d));
             diag_hint(dg, vlog_loc(d), "declared here");
             diag_emit(dg);
          }

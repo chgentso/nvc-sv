@@ -4738,6 +4738,26 @@ START_TEST(test_impimp1)
 }
 END_TEST
 
+START_TEST(test_puremeth1)
+{
+   const error_t expect[] = {
+      { 16, "class 'bad' does not implement the pure virtual method 'f'" },
+      { 16, "class 'bad' does not implement the pure virtual method 't'" },
+      { 19, "class 'bad2' does not implement the pure virtual method 't'" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/puremeth1.sv");
+
+   vlog_check(do_parse_only(V_PACKAGE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
 Suite *get_vlog_tests(void)
 {
    Suite *s = suite_create("vlog");
@@ -4922,6 +4942,7 @@ Suite *get_vlog_tests(void)
    tcase_add_test(tc, test_gendup1);
    tcase_add_test(tc, test_callorder1);
    tcase_add_test(tc, test_impimp1);
+   tcase_add_test(tc, test_puremeth1);
    suite_add_tcase(s, tc);
 
    return s;
