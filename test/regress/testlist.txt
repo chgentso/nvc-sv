@@ -3217,3 +3217,4 @@ vlog_class_hier1 verilog
 sva_disable_inside1 verilog
 svreadmem2      verilog
 textio_real1    2008
+conf_default93  shell

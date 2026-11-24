@@ -11488,11 +11488,15 @@ static void p_configuration_declarative_part(tree_t unit, tree_list_t *vunits)
 }
 
 static tree_t find_inherited_binding_unit(tree_t config, ident_list_t *ids,
-                                          tree_t comp, bool for_block)
+                                          tree_t comp, bool for_block,
+                                          bool *used_default)
 {
    // For a component configuration with no entity aspect find the design
    // unit the instances are bound to by a configuration specification so
    // a block configuration within can be resolved
+
+   if (used_default != NULL)
+      *used_default = false;
 
    if (comp == NULL || !tree_has_ref(config))
       return NULL;
@@ -11533,8 +11537,11 @@ static tree_t find_inherited_binding_unit(tree_t config, ident_list_t *ids,
       ident_t name = ident_rfrom(tree_ident(comp), '.') ?: tree_ident(comp);
       ident_t qual = ident_prefix(lib_name(lib_work()), name, '.');
       tree_t entity = lib_get_qualified(qual);
-      if (entity != NULL && tree_kind(entity) == T_ENTITY)
+      if (entity != NULL && tree_kind(entity) == T_ENTITY) {
+         if (used_default != NULL)
+            *used_default = true;
          return entity;
+      }
       return NULL;
    }
 
@@ -11564,9 +11571,11 @@ static void p_component_configuration(tree_t unit)
    // Without an entity aspect the binding is inherited from the
    // configuration specification or default binding indication
    tree_t inherit_unit = NULL, inherit_block = NULL;
+   bool used_default = false;
    if (peek() != tUSE) {
-      inherit_unit = find_inherited_binding_unit(unit, ids, comp, false);
-      inherit_block = find_inherited_binding_unit(unit, ids, comp, true);
+      inherit_unit = find_inherited_binding_unit(unit, ids, comp, false, NULL);
+      inherit_block = find_inherited_binding_unit(unit, ids, comp, true,
+                                                  &used_default);
    }
 
    tree_t bind = NULL;
@@ -11586,8 +11595,10 @@ static void p_component_configuration(tree_t unit)
          tree_set_loc(bind, CURRENT_LOC);
       }
    }
-   else
+   else {
       inherit_block = NULL;
+      used_default = false;
+   }
 
    tree_list_t vunits = AINIT;
    peek();
@@ -11599,6 +11610,10 @@ static void p_component_configuration(tree_t unit)
    if (peek() == tFOR) {
       tree_t of = bind != NULL && tree_has_ref(bind) ? tree_ref(bind)
          : inherit_block;
+      if (used_default && standard() < STD_08)
+         parse_error(CURRENT_LOC, "component configuration without an "
+                     "explicit binding indication cannot contain a block "
+                     "configuration before VHDL-2008");
       bcfg = p_block_configuration(of);
    }
 
