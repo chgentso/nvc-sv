@@ -4825,6 +4825,33 @@ START_TEST(test_override1)
 }
 END_TEST
 
+START_TEST(test_constprop1)
+{
+   const error_t expect[] = {
+      { 11, "cannot assign to const variable 'gs'" },
+      { 12, "cannot assign to const variable 'sg'" },
+      { 13, "cannot assign to const variable 'g'" },
+      { 17, "cannot assign to const variable 'gs'" },
+      { 18, "cannot assign to const variable 'sg'" },
+      { 22, "cannot assign to const variable 'inst_c'" },
+      { 29, "cannot assign to const variable 'gs'" },
+      { 30, "cannot assign to const variable 'sg'" },
+      { 31, "cannot assign to const variable 'g'" },
+      { 32, "cannot assign to const variable 'inst_c'" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/constprop1.sv");
+
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
 Suite *get_vlog_tests(void)
 {
    Suite *s = suite_create("vlog");
@@ -5013,6 +5040,7 @@ Suite *get_vlog_tests(void)
    tcase_add_test(tc, test_letbad1);
    tcase_add_test(tc, test_misstatic1);
    tcase_add_test(tc, test_override1);
+   tcase_add_test(tc, test_constprop1);
    suite_add_tcase(s, tc);
 
    return s;

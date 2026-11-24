@@ -59,6 +59,7 @@ static void vlog_check_ranges(vlog_node_t v);
 static type_mask_t vlog_check_expr(vlog_node_t v);
 static void vlog_check_ref_ports(vlog_node_t v);
 static type_mask_t vlog_check_cast_call(vlog_node_t v);
+static bool in_constructor = false;
 
 static void name_for_diag(diag_t *d, vlog_node_t v, const char *alt)
 {
@@ -288,9 +289,19 @@ static void vlog_check_variable_lvalue(vlog_node_t v, vlog_node_t where)
    switch (vlog_kind(v)) {
    case V_VAR_DECL:
    case V_LOCAL_DECL:
-      if (vlog_flags(v) & VLOG_F_CONST)
-         error_at(vlog_loc(where), "cannot assign to const variable '%s'",
-                  istr(vlog_ident(v)));
+      if (vlog_flags(v) & VLOG_F_CONST) {
+         // An instance constant (non-static class property without an initial
+         // value) may be assigned in the class constructor (8.19)
+         const bool inst_const = vlog_kind(v) == V_VAR_DECL
+            && (vlog_flags(v) & VLOG_F_PROPERTY)
+            && !(vlog_flags(v) & VLOG_F_STATIC)
+            && !vlog_has_value(v);
+         const bool on_this = vlog_kind(where) != V_MEMBER_REF
+            || vlog_kind(vlog_value(where)) == V_THIS;
+         if (!(in_constructor && inst_const && on_this))
+            error_at(vlog_loc(where), "cannot assign to const variable '%s'",
+                     istr(vlog_ident(v)));
+      }
       return;
    case V_FUNC_DECL:
    case V_STRUCT_DECL:
@@ -5614,9 +5625,12 @@ void vlog_check(vlog_node_t v)
          }
 
          const bool was_in_function = in_function;
+         const bool was_in_ctor = in_constructor;
          in_function = true;
+         in_constructor = true;
          vlog_check_stmts(v);
          in_function = was_in_function;
+         in_constructor = was_in_ctor;
       }
       break;
    case V_INST_LIST:

@@ -15595,7 +15595,7 @@ static void p_data_declaration(vlog_node_t parent, vlog_kind_t kind)
             p_static_local_decls(parent, home, dt, is_static, is_const);
          else {
             p_list_of_variable_decl_assignments(parent, dt, kind);
-            if (is_const && vlog_kind(parent) != V_CLASS_DECL) {
+            if (is_const) {
                const int ndecls = vlog_decls(parent);
                for (int i = first; i < ndecls; i++) {
                   vlog_node_t d = vlog_decl(parent, i);
@@ -18181,6 +18181,7 @@ static vlog_flags_t p_class_item_qualifiers(void)
          if (!scan_nth_qualifier())
             return flags;
          consume(tCONST);
+         flags |= VLOG_F_CONST;
          break;
       case tSTATIC:
          consume(tSTATIC);
