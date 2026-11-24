@@ -9465,8 +9465,17 @@ static vlog_node_t elab_hier_ref_variable(vlog_node_t v,
          continue;
 
       vlog_node_t vd = elab_hier_ref_decl(pb, id);
-      if (vd == NULL)
+      if (vd == NULL) {
+         if (i == nmods - 1 && vlog_params(mods[i]) == 0) {
+            ident_t cbsig = ident_sprintf("%s$%s", istr(id),
+                                          istr(vlog_ident(v)));
+            if (elab_hier_ref_decl(pb, cbsig) != NULL) {
+               vlog_set_value(v, mods[i - 1]);
+               vlog_set_ident(v, cbsig);
+            }
+         }
          return NULL;
+      }
       else if (vlog_kind(vd) == V_IFACE_PORT)
          continue;
 
@@ -9617,7 +9626,7 @@ static vlog_node_t elab_rewrite_hier_ref_cb(vlog_node_t v, void *arg)
        && vlog_ranges(vlog_ref(prefix)) > 0)
       return v;
 
-   // A name before the member may be a structure variable
+   // A name before the member may be a structure variable or clocking block
    if (vlog_has_value(prefix)) {
       vlog_node_t rec = elab_hier_ref_vhdl_record(v, hctx);
       if (rec != NULL)
@@ -9626,6 +9635,29 @@ static vlog_node_t elab_rewrite_hier_ref_cb(vlog_node_t v, void *arg)
       rec = elab_hier_ref_variable(v, hctx);
       if (rec != NULL)
          return rec;
+
+      prefix = vlog_value(v);
+   }
+   else if (vlog_kind(prefix) == V_MOD_REF && !vlog_has_ref(prefix)
+            && vlog_params(prefix) == 0) {
+      ident_t cbname = vlog_ident(prefix);
+      ident_t cbsig = ident_sprintf("%s$%s", istr(cbname), istr(vlog_ident(v)));
+      for (tree_t it = hctx->where; it != NULL;
+           it = hash_get(hctx->parents, it)) {
+         if (tree_kind(it) != T_BLOCK)
+            break;
+         else if (elab_has_child_block(it, cbname))
+            break;
+         else if (elab_hier_ref_decl(it, cbsig) != NULL) {
+            vlog_node_t mr = vlog_new(V_MOD_REF);
+            vlog_set_ident(mr, tree_ident(it));
+            vlog_set_loc(mr, vlog_loc(prefix));
+            vlog_set_value(v, mr);
+            vlog_set_ident(v, cbsig);
+            prefix = mr;
+            break;
+         }
+      }
    }
 
    tree_t b = elab_walk_mod_refs(prefix, hctx->where, hctx->parents);
