@@ -90,9 +90,17 @@ typedef enum {
    OPT_JIT_CACHE,
    OPT_JIT_CACHE_DIR,
    OPT_JIT_CACHE_LIMIT,
+   OPT_RTL_ISLANDS,
+   OPT_DUMP_ISLANDS,
 
    OPT_LAST_NAME
 } opt_name_t;
+
+typedef enum {
+   RTL_ISLANDS_OFF = 0,
+   RTL_ISLANDS_MODULE = 1,
+   RTL_ISLANDS_HIER = 2,
+} rtl_islands_mode_t;
 
 typedef enum {
    IEEE_WARNINGS_OFF,

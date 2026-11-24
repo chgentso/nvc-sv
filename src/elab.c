@@ -39,6 +39,7 @@
 #include "type.h"
 #include "vhdl/vhdl-phase.h"
 #include "vlog/vlog-defs.h"
+#include "vlog/vlog-island.h"
 #include "vlog/vlog-node.h"
 #include "vlog/vlog-phase.h"
 #include "vlog/vlog-util.h"
@@ -3612,6 +3613,17 @@ static void elab_verilog_module(tree_t comp, ident_t label, vlog_node_t mod,
 
       vlog_trans(ei->body, ei->block);
       elab_infer_interconnects(ei->body, ctx);
+
+      if (entity == NULL
+          && (opt_get_int(OPT_RTL_ISLANDS) != RTL_ISLANDS_OFF
+              || opt_get_int(OPT_DUMP_ISLANDS))) {
+         vlog_island_plan_t *plan =
+            vlog_island_analyze(ei->body, comp != NULL);
+         if (opt_get_int(OPT_DUMP_ISLANDS)
+             && (!is_iface || plan->n_total_procs > 0))
+            vlog_island_dump(plan);
+         vlog_island_plan_free(plan);
+      }
 
       ei->cscope = new_ctx.cscope;
       vlog_cover_block(ei->body, ctx->cover, new_ctx.cscope);

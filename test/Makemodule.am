@@ -38,6 +38,7 @@ bin_unit_test_SOURCES = \
 	test/test_driver.c \
 	test/test_netlist.c \
 	test/test_vlog.c \
+	test/test_island.c \
 	test/test_mir.h \
 	test/test_mir.c \
 	test/test_cover.c \

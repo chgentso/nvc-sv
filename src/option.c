@@ -149,6 +149,21 @@ static int get_bool_env(const char *var, int def)
       return atoi(env) != 0;
 }
 
+static int get_rtl_islands_env(void)
+{
+   const char *env = getenv("NVC_RTL_ISLANDS");
+   if (env == NULL || *env == '\0' || strcasecmp(env, "off") == 0
+       || strcasecmp(env, "0") == 0)
+      return RTL_ISLANDS_OFF;
+   else if (strcasecmp(env, "module") == 0 || strcasecmp(env, "1") == 0)
+      return RTL_ISLANDS_MODULE;
+   else if (strcasecmp(env, "hier") == 0)
+      return RTL_ISLANDS_HIER;
+   else
+      fatal("invalid value '%s' for NVC_RTL_ISLANDS "
+            "(expected off, module, or hier)", env);
+}
+
 void set_default_options(void)
 {
    opt_set_int(OPT_RT_STATS, 0);
@@ -222,6 +237,8 @@ void set_default_options(void)
       const size_t limit = limit_mb > 0 ? (size_t)limit_mb * 1024 * 1024 : 0;
       opt_set_size(OPT_JIT_CACHE_LIMIT, limit);
    }
+   opt_set_int(OPT_RTL_ISLANDS, get_rtl_islands_env());
+   opt_set_int(OPT_DUMP_ISLANDS, get_bool_env("NVC_DUMP_ISLANDS", 0));
 }
 
 bool opt_black_box_allowed(const char *lib)
