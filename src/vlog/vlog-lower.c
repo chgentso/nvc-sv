@@ -5588,6 +5588,26 @@ static mir_value_t vlog_lower_binary(vlog_gen_t *g, vlog_node_t v,
 
    const vlog_binary_t op = vlog_subkind(v);
 
+   if (op == V_BINARY_LOG_EQ || op == V_BINARY_LOG_NEQ
+       || op == V_BINARY_CASE_EQ || op == V_BINARY_CASE_NEQ) {
+      vlog_node_t ldims[MAX_UNPACKED_DIMS], rdims[MAX_UNPACKED_DIMS];
+      const int nl = vlog_unpacked_dims(lexpr, ldims);
+      const int nr = vlog_unpacked_dims(rexpr, rdims);
+      if ((nl > 0 && vlog_kind(rexpr) == V_PATTERN_EXPR)
+          || (nr > 0 && vlog_kind(lexpr) == V_PATTERN_EXPR)) {
+         vlog_node_t arr = nl > 0 ? lexpr : rexpr;
+         vlog_node_t pat = nl > 0 ? rexpr : lexpr;
+         vlog_node_t *dims = nl > 0 ? ldims : rdims;
+         const int ndims = nl > 0 ? nl : nr;
+         const type_info_t *eti = vlog_type_info(g, vlog_get_type(arr));
+         mir_value_t aval = vlog_lower_rvalue(g, arr);
+         mir_value_t pval = vlog_lower_array_pattern(g, pat, dims, ndims, eti);
+         mir_value_t left = nl > 0 ? aval : pval;
+         mir_value_t right = nl > 0 ? pval : aval;
+         return vlog_lower_vector_binary(g, op, left, right, context);
+      }
+   }
+
    if (vlog_kind(vlog_left(v)) == V_NULL
        && vlog_kind(vlog_right(v)) == V_NULL) {
       // Neither operand has a type to take the null from
