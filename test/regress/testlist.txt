@@ -3279,3 +3279,4 @@ vlog_const_nodef1 verilog
 vlog_genvar_disp1 verilog
 vlog_gen_subblk1 verilog
 vlog_pp_macro_dir1 verilog
+vlog_for_sens1  verilog

@@ -382,8 +382,18 @@ static void build_sensitivity(vlog_node_t ctrl, vlog_node_t v, hset_t *set,
          const int ndecls = vlog_decls(v);
          for (int i = 0; i < ndecls; i++)
             hset_insert(set, vlog_decl(v, i));
+
+         const int nstmts = vlog_stmts(v);
+         for (int i = 0; i < nstmts; i++) {
+            vlog_node_t s = vlog_stmt(v, i);
+            build_sensitivity(ctrl, s, set, is_comb);
+            if (vlog_kind(s) == V_BASSIGN && vlog_has_target(s)
+                && vlog_kind(vlog_target(s)) == V_REF
+                && vlog_has_ref(vlog_target(s)))
+               hset_insert(set, vlog_ref(vlog_target(s)));
+         }
       }
-      // Fall-through
+      break;
    case V_FOR_STEP:
       {
          const int nstmts = vlog_stmts(v);
