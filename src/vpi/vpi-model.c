@@ -2377,8 +2377,10 @@ static const vpi_step_t *vpi_path_add(const c_abstractDecl *base, bool deref,
                                         sizeof(vpi_step_t));
    if (base->npath > 0)
       memcpy(path, base->path, base->npath * sizeof(vpi_step_t));
-   path[base->npath].offset = offset;
-   path[base->npath].deref  = deref;
+   path[base->npath] = (vpi_step_t){
+      .offset = offset,
+      .deref  = deref,
+   };
    return path;
 }
 
@@ -4856,6 +4858,7 @@ static void vpi_write_signal(c_abstractDecl *d, rt_signal_t *s,
       case vpiInertialDelay:
       case vpiTransportDelay:
       case vpiPureTransportDelay:
+         rt_island_on_ext_deposit(m, s);
          sched_deposit(m, s, values, d->offset, count, delay, false);
          return;
       default:

@@ -4200,8 +4200,10 @@ static void island_ext_deposit_watch_cb(uint64_t now, rt_signal_t *signal,
    island_sync_in_sig(isl, s);
    if (unlikely(isl->has_forces)) {
       const rt_island_force_t *f = island_find_force(isl, s->sig_idx);
-      if (f != NULL)
+      if (f != NULL) {
          island_apply_force_entry(isl->state, s, f);
+         island_sync_sig_raw(isl, s, false);
+      }
    }
    if (isl->next_state != NULL)
       island_copy_sig_buf(isl->next_state, isl->state, s);
