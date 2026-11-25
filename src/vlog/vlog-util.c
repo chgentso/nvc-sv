@@ -609,6 +609,9 @@ bool vlog_has_static_shape(vlog_node_t v)
       return true;
    case V_MEMBER_REF:
       {
+         if (!vlog_has_ref(v)
+             && (vlog_typeparam_pending(v) || vlog_virtual_chain(vlog_value(v))))
+            return true;
          vlog_node_t type = vlog_get_type(v);
          return type != NULL && vlog_type_has_static_shape(type);
       }

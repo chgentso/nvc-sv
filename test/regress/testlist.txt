@@ -3283,3 +3283,4 @@ vlog_gen_subblk1 verilog
 vlog_pp_macro_dir1 verilog
 vlog_for_sens1  verilog
 vlog_typeparam_idx1 verilog
+vlog_bits_typeparam1 verilog

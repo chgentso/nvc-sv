@@ -293,7 +293,14 @@ static bool copy_instance_pred(vlog_node_t v, void *ctx)
       case V_GENVAR_DECL:
          return true;
       case V_PORT_DECL:
-         return is_event_formal(vlog_ref(v));
+         if (is_event_formal(vlog_ref(v)))
+            return true;
+         // Fall-through
+      case V_NET_DECL:
+         if (copy_scope != NULL || !vlog_has_type(vlog_ref(v)))
+            return false;
+         return vlog_kind(vlog_type(vlog_ref(v))) == V_TYPE_DECL
+            && (vlog_flags(vlog_type(vlog_ref(v))) & VLOG_F_TYPEPARAM);
       case V_FUNC_DECL:
          // The name of a function assigned to give its result
          return true;

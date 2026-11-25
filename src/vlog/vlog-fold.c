@@ -46,6 +46,7 @@ typedef struct {
    hset_t         *funcdeps;
    unsigned        later;
    bool            retry;
+   bool            defer_typeparams;
    unsigned        gen_depth;
    A(fold_saved_t) stack;
 } fold_ctx_t;
@@ -112,6 +113,11 @@ static fold_state_t get_type_state(vlog_node_t t, fold_ctx_t *ctx)
          state = MAX(state, get_type_state(vlog_type(t), ctx));
       break;
    case V_TYPE_DECL:
+      if (ctx->defer_typeparams && (vlog_flags(t) & VLOG_F_TYPEPARAM)) {
+         ctx->later++;
+         return FOLD_LATER;
+      }
+      // Fall-through
    case V_ENUM_DECL:
       if (vlog_has_type(t))
          state = get_type_state(vlog_type(t), ctx);
@@ -175,12 +181,15 @@ static fold_state_t get_shape_state(vlog_node_t arg, fold_ctx_t *ctx)
       }
    case V_MEMBER_REF:
       {
+         if (!vlog_has_ref(arg)) {
+            ctx->later++;
+            return FOLD_LATER;
+         }
          vlog_node_t type = vlog_get_type(arg);
          fold_state_t state = FOLD_POSSIBLE;
          if (type != NULL)
             state = MAX(state, get_type_state(type, ctx));
-         if (vlog_has_ref(arg))
-            state = MAX(state, get_ranges_state(vlog_ref(arg), ctx));
+         state = MAX(state, get_ranges_state(vlog_ref(arg), ctx));
          return state;
       }
    case V_BIT_SELECT:
@@ -1177,6 +1186,8 @@ void vlog_fold(vlog_node_t mod, mir_context_t *mc, jit_t *j)
    fold_ctx_t ctx = {
       .mir = mc,
       .jit = j,
+      .defer_typeparams = vlog_kind(mod) == V_MODULE
+         || vlog_kind(mod) == V_PROGRAM,
    };
 
    vlog_lower_const_funcs(mc, mod);
