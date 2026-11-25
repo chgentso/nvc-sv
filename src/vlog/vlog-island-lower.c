@@ -577,7 +577,8 @@ static bool m2_serialize_type(text_buf_t *tb, vlog_node_t dt, int depth)
    case V_ENUM_DECL:
       {
          const loc_t *loc = vlog_loc(dt);
-         tb_printf(tb, "td(%s,%u:%u:%u,", istr(vlog_ident(dt)),
+         tb_printf(tb, "td(%s,%u:%u:%u,",
+                   vlog_has_ident(dt) ? istr(vlog_ident(dt)) : "",
                    loc->file_ref, loc->first_line, loc->first_column);
          if (vlog_has_type(dt)
              && !m2_serialize_type(tb, vlog_type(dt), depth + 1))

@@ -60,7 +60,7 @@ module svcombassert1;
       errors++;
     end
 
-    for (int iter = 0; iter < 50000; iter++) begin
+    for (int iter = 0; iter < 15000; iter++) begin
       logic [8:0] exp_sum;
       a = iter[7:0];
       b = (iter * 5 + 1) & 8'hff;

@@ -730,9 +730,14 @@ static mir_value_t vlog_packed_lvalue_slice(vlog_gen_t *g, mir_value_t cast,
 
    if (offset > 0 || mir_get_size(g->mu, cast_t) != lvalue->size) {
       mir_type_t t_offset = mir_offset_type(g->mu);
-      part = mir_build_extract(g->mu, lvalue->type, cast,
+      mir_type_t t_ext = mir_vector_slice(g->mu, cast_t, lvalue->size);
+      part = mir_build_extract(g->mu, t_ext, cast,
                                mir_const(g->mu, t_offset, offset));
    }
+
+   if (mir_get_class(g->mu, mir_get_type(g->mu, part))
+       != mir_get_class(g->mu, lvalue->type))
+      part = mir_build_cast(g->mu, lvalue->type, part);
 
    int64_t cnt_c = 0;
    if (mir_get_const(g->mu, lvalue->count, &cnt_c)) {

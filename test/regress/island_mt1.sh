@@ -179,7 +179,7 @@ check_sv_mode() {
   fi
 }
 
-check_sv_mode module off 1
+check_sv_mode module off 0
 check_sv_mode module islands 0
 check_sv_mode hier off 0
 check_sv_mode hier islands 1
@@ -334,7 +334,7 @@ check_vhdl_mode() {
   fi
 }
 
-check_vhdl_mode module off 1
+check_vhdl_mode module off 0
 check_vhdl_mode module islands 0
 check_vhdl_mode hier off 0
 check_vhdl_mode hier islands 1

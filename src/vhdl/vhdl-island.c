@@ -1038,6 +1038,9 @@ static bool check_expr(check_ctx_t *c, tree_t expr, bool is_target)
          case A_RANGE:
             {
                tree_t rg = tree_range(a, 0);
+               const range_kind_t rk = tree_subkind(rg);
+               if (rk != RANGE_TO && rk != RANGE_DOWNTO)
+                  return false;
                int64_t l, r;
                if (!vhdl_island_eval_const_int(c->ctx->block, tree_left(rg), &l)
                    || !vhdl_island_eval_const_int(c->ctx->block,
