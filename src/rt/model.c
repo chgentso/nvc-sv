@@ -617,20 +617,14 @@ static void deferq_run_body(void *arg)
       if (dq->count == 0)
          break;
 
-      const defer_task_t *tasks = dq->tasks;
-      const int count = dq->count;
-
-      while (ctx->idx < count) {
+      while (ctx->idx < dq->count) {
          const int i = ctx->idx++;
-         if (i + 1 < count)
-            prefetch_read(tasks[i + 1].arg);
-         (*tasks[i].fn)(m, tasks[i].arg);
+         if (i + 1 < dq->count)
+            prefetch_read(dq->tasks[i + 1].arg);
+         (*dq->tasks[i].fn)(m, dq->tasks[i].arg);
          if (unlikely(m->spawnq.count > 0))
             run_spawned_ctx(m, ctx);
       }
-
-      assert(dq->tasks == tasks);
-      assert(dq->count == count);
 
       dq->count = 0;
       ctx->idx = 0;

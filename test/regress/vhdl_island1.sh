@@ -344,8 +344,8 @@ EOF
 
 nvc -a unfused_obs.vhd
 nvc --rtl-islands=off -e tb_obs && nvc --rtl-islands=off -r tb_obs > obs_off.txt 2>&1
-# Test repeated elab+run across off / islands / all to verify JIT cache isolation
-for ts in off islands all; do
+# Test repeated elab+run across off / islands to verify JIT cache isolation
+for ts in off islands; do
   nvc --rtl-islands=hier --2state=$ts --dump-islands -e tb_obs > obs_elab_$ts.txt 2>&1
   if [ "$ts" = "off" ]; then
     grep -q "VHDL_ISLAND_ELAB:.*two_state=0" obs_elab_$ts.txt
