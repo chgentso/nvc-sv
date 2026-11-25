@@ -190,5 +190,6 @@ bool vhdl_island_eval_const_int_ctx(const vhdl_island_ctx_t *ctx, tree_t expr,
 bool vhdl_island_const_slice_width(const vhdl_island_ctx_t *ctx, tree_t rg,
                                    uint32_t *width_out);
 bool vhdl_island_is_sig_root(tree_t expr);
+tree_t vhdl_island_resolve_func_body(tree_t decl);
 
 #endif   // _VHDL_ISLAND_H

@@ -980,6 +980,7 @@ typedef struct {
    A(tree_t)                loop_vars;
    A(tree_t)                active_funcs;
    int                      loop_depth;
+   ident_t                  cur_loop_label;
    tree_t                   clk_sig_ref;
    bool                     rejected;
 } check_ctx_t;
@@ -987,6 +988,37 @@ typedef struct {
 static bool check_expr(check_ctx_t *c, tree_t expr, bool is_target);
 static bool check_stmt_list(check_ctx_t *c, tree_t owner, int start, int end,
                             bool is_func);
+
+tree_t vhdl_island_resolve_func_body(tree_t decl)
+{
+   if (decl == NULL)
+      return NULL;
+   if (tree_kind(decl) == T_FUNC_BODY)
+      return decl;
+   if (tree_kind(decl) != T_FUNC_DECL)
+      return NULL;
+
+   tree_t owner = tree_container(decl);
+   if (owner == NULL)
+      return NULL;
+   if (tree_kind(owner) == T_PACKAGE) {
+      owner = body_of(owner);
+      if (owner == NULL)
+         return NULL;
+   }
+   const tree_kind_t ok = tree_kind(owner);
+   if (ok != T_PACK_BODY && ok != T_ARCH && ok != T_BLOCK && ok != T_FUNC_BODY)
+      return NULL;
+
+   ident_t target_id = tree_ident2(decl);
+   const int nd = tree_decls(owner);
+   for (int i = 0; i < nd; i++) {
+      tree_t d = tree_decl(owner, i);
+      if (tree_kind(d) == T_FUNC_BODY && tree_ident2(d) == target_id)
+         return d;
+   }
+   return NULL;
+}
 
 static bool is_supported_std_fn(const char *pkg, const char *fn, bool two_state)
 {
@@ -997,6 +1029,8 @@ static bool is_supported_std_fn(const char *pkg, const char *fn, bool two_state)
          || fn_name_is(fn, "\"nand\"") || fn_name_is(fn, "\"nor\"")
          || fn_name_is(fn, "\"xor\"") || fn_name_is(fn, "\"xnor\"")
          || fn_name_is(fn, "\"not\"")
+         || fn_name_is(fn, "\"??\"")
+         || fn_name_is(fn, "IS_X")
          || fn_name_is(fn, "TO_STDLOGICVECTOR")
          || fn_name_is(fn, "TO_STDULOGICVECTOR")
          || fn_name_is(fn, "TO_BITVECTOR")
@@ -1031,8 +1065,8 @@ static bool is_supported_std_fn(const char *pkg, const char *fn, bool two_state)
          || fn_name_is(fn, "CONV_INTEGER") || fn_name_is(fn, "CONV_STD_LOGIC_VECTOR")
          || fn_name_is(fn, "CONV_UNSIGNED") || fn_name_is(fn, "CONV_SIGNED")
          || fn_name_is(fn, "UNSIGNED") || fn_name_is(fn, "SIGNED")
-         || fn_name_is(fn, "TO_01") || fn_name_is(fn, "MINIMUM")
-         || fn_name_is(fn, "MAXIMUM");
+         || fn_name_is(fn, "TO_01") || fn_name_is(fn, "IS_X")
+         || fn_name_is(fn, "MINIMUM") || fn_name_is(fn, "MAXIMUM");
    }
    return false;
 }
@@ -1066,7 +1100,8 @@ static bool check_pure_func_body(check_ctx_t *outer, tree_t func_decl)
 {
    if (outer->call_depth >= VHDL_ISLAND_MAX_CALL_DEPTH)
       return false;
-   if (tree_kind(func_decl) != T_FUNC_BODY)
+   func_decl = vhdl_island_resolve_func_body(func_decl);
+   if (func_decl == NULL)
       return false;
    if (tree_flags(func_decl) & TREE_F_IMPURE)
       return false;
@@ -1553,9 +1588,7 @@ static bool check_expr(check_ctx_t *c, tree_t expr, bool is_target)
                return false;
          }
 
-         if (sk != S_USER && sk != S_IEEE_MISC) {
-            if (sk == S_IEEE_LOGICAL)
-               return false;
+         if (sk != S_USER && sk != S_IEEE_MISC && sk != S_IEEE_LOGICAL) {
             if (sk == S_DIV || sk == S_MOD || sk == S_REM || sk == S_EXP) {
                type_t rt = tree_type(expr);
                if (!type_is_integer(rt))
@@ -1789,28 +1822,63 @@ static bool check_stmt(check_ctx_t *c, tree_t stmt, bool is_func)
          return true;
       }
 
+   case T_SEQUENCE:
+      return check_stmt_list(c, stmt, 0, tree_stmts(stmt), is_func);
+
+   case T_EXIT:
+   case T_NEXT:
+      if (c->loop_depth <= 0)
+         return false;
+      if (tree_has_ident2(stmt) && tree_ident2(stmt) != c->cur_loop_label)
+         return false;
+      if (tree_has_value(stmt) && !check_expr(c, tree_value(stmt), false))
+         return false;
+      return true;
+
    case T_FOR:
       {
          tree_t rg = tree_range(stmt, 0);
          if (tree_kind(rg) != T_RANGE)
             return false;
          const range_kind_t rk = tree_subkind(rg);
-         if (rk != RANGE_TO && rk != RANGE_DOWNTO)
+         if (rk == RANGE_EXPR) {
+            // Allow `for i in param'range` / `param'reverse_range` inside pure functions
+            if (!is_func || !tree_has_value(rg))
+               return false;
+            tree_t re = tree_value(rg);
+            if (tree_kind(re) != T_ATTR_REF)
+               return false;
+            const attr_kind_t ak = tree_subkind(re);
+            if ((ak != ATTR_RANGE && ak != ATTR_REVERSE_RANGE) || tree_params(re) > 0)
+               return false;
+            tree_t nm = tree_name(re);
+            if (tree_kind(nm) != T_REF || tree_kind(tree_ref(nm)) != T_PARAM_DECL)
+               return false;
+         }
+         else if (rk == RANGE_TO || rk == RANGE_DOWNTO) {
+            int64_t l, r;
+            if (!vhdl_island_eval_const_int_ctx(c->ctx, tree_left(rg), &l)
+                || !vhdl_island_eval_const_int_ctx(c->ctx, tree_right(rg), &r))
+               return false;
+            const int64_t niters = (rk == RANGE_TO) ? (r - l + 1) : (l - r + 1);
+            if (niters < 0 || niters > VHDL_ISLAND_MAX_LOOP_ITERS)
+               return false;
+         }
+         else
             return false;
-         int64_t l, r;
-         if (!vhdl_island_eval_const_int(c->ctx->block, tree_left(rg), &l)
-             || !vhdl_island_eval_const_int(c->ctx->block, tree_right(rg), &r))
-            return false;
-         const int64_t niters = (rk == RANGE_TO) ? (r - l + 1) : (l - r + 1);
-         if (niters < 0 || niters > VHDL_ISLAND_MAX_LOOP_ITERS)
-            return false;
+
          bool *saved = NULL;
          if (!is_func && c->var_decls.count > 0) {
             saved = xmalloc_array(c->var_decls.count, sizeof(bool));
             memcpy(saved, c->var_assigned.items,
                    c->var_decls.count * sizeof(bool));
          }
+         ident_t saved_label = c->cur_loop_label;
+         c->cur_loop_label = tree_has_ident(stmt) ? tree_ident(stmt) : NULL;
+         c->loop_depth++;
          const bool ok = check_stmt_list(c, stmt, 0, tree_stmts(stmt), is_func);
+         c->loop_depth--;
+         c->cur_loop_label = saved_label;
          if (saved != NULL) {
             memcpy(c->var_assigned.items, saved,
                    c->var_decls.count * sizeof(bool));

@@ -88,6 +88,8 @@ typedef struct vi_scope {
    range_kind_t     ret_dir;
    int64_t          ret_left;
    int64_t          ret_right;
+   mir_block_t      loop_next_bb;
+   mir_block_t      loop_exit_bb;
 } vi_scope_t;
 
 typedef struct {
@@ -702,6 +704,60 @@ static void vi_pack_bytes_to_words(const uint8_t *bytes, uint32_t width,
    }
 }
 
+static bool vi_modeb_call_ieee(vi_lower_t *l, tree_t decl,
+                               const vi_val_t *pvals, int np,
+                               mir_type_t mret, mir_value_t *ret_out)
+{
+   mir_unit_t *mu = l->mu;
+   const char *base_s = istr(tree_ident2(decl));
+   const char *paren = strchr(base_s, '(');
+   if (paren == NULL)
+      return false;
+   const char *dot = paren;
+   while (dot > base_s && *dot != '.')
+      dot--;
+   if (*dot != '.')
+      return false;
+   ident_t pkg_id = ident_new_n(base_s, (size_t)(dot - base_s));
+   mir_value_t pkg_ctx = mir_build_link_package(mu, pkg_id);
+
+   SCOPED_A(mir_value_t) args = AINIT;
+   APUSH(args, pkg_ctx);
+   for (int i = 0; i < np; i++) {
+      const vi_val_t pv = pvals[i];
+      tree_t fport = tree_port(decl, i);
+      type_t pt = tree_type(fport);
+      if (type_is_array(pt)) {
+         if (pv.kind != VIVAL_VEC) {
+            ACLEAR(args);
+            return false;
+         }
+         mir_dim_t dim = {
+            .left  = vi_off(mu, pv.left),
+            .right = vi_off(mu, pv.right),
+            .dir   = mir_const(mu, mir_bool_type(mu),
+                               pv.dir == RANGE_DOWNTO ? 1 : 0),
+         };
+         APUSH(args, mir_build_wrap(mu, pv.val, &dim, 1));
+      }
+      else if (vi_type_is_bool(pt)) {
+         APUSH(args, vi_to_bool(l, pv));
+      }
+      else if (vi_type_is_std_logic(pt) || type_is_enum(pt)) {
+         APUSH(args, mir_build_cast(mu, vi_u8_type(mu), pv.val));
+      }
+      else {
+         APUSH(args, mir_build_cast(mu, mir_int_type(mu, INT32_MIN, INT32_MAX),
+                                    vi_to_i64(mu, pv.val)));
+      }
+   }
+
+   *ret_out = mir_build_fcall(mu, tree_ident2(decl), mret, MIR_NULL_STAMP,
+                              args.items, args.count);
+   ACLEAR(args);
+   return true;
+}
+
 static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
                                const char *pkg, const char *fn, vi_val_t *out)
 {
@@ -711,83 +767,233 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
    const bool ret_signed = vi_type_is_signed_vec(rtype);
 
    if (!l->two_state) {
-      // Mode B: inline simple bitwise, call IEEE VHDL body for arithmetic/shifts/resize
-      const char *base_s = istr(tree_ident2(decl));
-      const char *paren = strchr(base_s, '(');
-      if (paren == NULL)
-         return false;
-      const char *dot = paren;
-      while (dot > base_s && *dot != '.')
-         dot--;
-      if (*dot != '.')
-         return false;
-      ident_t pkg_id = ident_new_n(base_s, (size_t)(dot - base_s));
-      mir_value_t pkg_ctx = mir_build_link_package(mu, pkg_id);
+      // Mode B: inline scalar 1-bit ops and zero-loop RESIZE/SHIFT; delegate
+      // vector bitwise and NUMERIC_STD arithmetic/compare/conv to IEEE fcall
+      // so NVC's AVX2 SIMD jit-intrin.c fast-paths execute directly.
+      if (np == 1 && fn_name_is(fn, "\"??\"")) {
+         vi_val_t a;
+         if (!vi_lower_expr(l, tree_value(tree_param(fcall, 0)), &a)
+             || a.kind != VIVAL_BIT)
+            return false;
+         mir_value_t av = mir_build_cast(mu, vi_u8_type(mu), a.val);
+         mir_value_t is1 = mir_build_or(mu,
+                                        mir_build_cmp(mu, MIR_CMP_EQ, av, vi_u8(mu, 3)),
+                                        mir_build_cmp(mu, MIR_CMP_EQ, av, vi_u8(mu, 7)));
+         *out = vi_from_bool_bit(l, is1, true, false);
+         return true;
+      }
 
-      SCOPED_A(mir_value_t) args = AINIT;
-      APUSH(args, pkg_ctx);
+      const bool is_std1164 = (strcmp(pkg, "IEEE.STD_LOGIC_1164.") == 0);
+      const bool is_num_pkg = (strcmp(pkg, "IEEE.NUMERIC_STD.") == 0
+                               || strcmp(pkg, "IEEE.NUMERIC_STD_UNSIGNED.") == 0
+                               || strcmp(pkg, "IEEE.STD_LOGIC_UNSIGNED.") == 0
+                               || strcmp(pkg, "IEEE.STD_LOGIC_SIGNED.") == 0
+                               || strcmp(pkg, "IEEE.STD_LOGIC_ARITH.") == 0);
 
+      // Lower all arguments once
+      vi_val_t *pvals LOCAL = xcalloc_array(MAX(1, np), sizeof(vi_val_t));
       vi_val_t first_vec = { 0 };
       for (int i = 0; i < np; i++) {
-         vi_val_t pv;
-         if (!vi_lower_expr(l, tree_value(tree_param(fcall, i)), &pv)) {
-            ACLEAR(args);
+         if (!vi_lower_expr(l, tree_value(tree_param(fcall, i)), &pvals[i]))
             return false;
+         if (pvals[i].kind == VIVAL_VEC && first_vec.width == 0)
+            first_vec = pvals[i];
+      }
+
+      if (np == 1 && fn_name_is(fn, "IS_X") && pvals[0].kind == VIVAL_BIT) {
+         mir_value_t av = mir_build_cast(mu, vi_u8_type(mu), pvals[0].val);
+         mir_value_t ok01 = mir_build_or(
+            mu,
+            mir_build_or(mu,
+                         mir_build_cmp(mu, MIR_CMP_EQ, av, vi_u8(mu, 2)),
+                         mir_build_cmp(mu, MIR_CMP_EQ, av, vi_u8(mu, 3))),
+            mir_build_or(mu,
+                         mir_build_cmp(mu, MIR_CMP_EQ, av, vi_u8(mu, 6)),
+                         mir_build_cmp(mu, MIR_CMP_EQ, av, vi_u8(mu, 7))));
+         *out = vi_from_bool_bit(l, mir_build_not(mu, ok01), true, false);
+         return true;
+      }
+
+      if (is_std1164) {
+         if (np == 1 && fn_name_is(fn, "\"not\"") && pvals[0].kind == VIVAL_BIT) {
+            *out = pvals[0];
+            out->val = vi_std_scalar_not(l, pvals[0].val);
+            return true;
          }
-         tree_t fport = tree_port(decl, i);
-         type_t pt = tree_type(fport);
-         if (type_is_array(pt)) {
-            if (pv.kind != VIVAL_VEC) {
-               ACLEAR(args);
-               return false;
+         if (np == 2 && pvals[0].kind == VIVAL_BIT && pvals[1].kind == VIVAL_BIT
+             && (fn_name_is(fn, "\"and\"") || fn_name_is(fn, "\"nand\"")
+                 || fn_name_is(fn, "\"or\"") || fn_name_is(fn, "\"nor\"")
+                 || fn_name_is(fn, "\"xor\"") || fn_name_is(fn, "\"xnor\""))) {
+            const bool neg = fn_name_is(fn, "\"nand\"") || fn_name_is(fn, "\"nor\"")
+               || fn_name_is(fn, "\"xnor\"");
+            const int tbl_kind = (fn_name_is(fn, "\"and\"") || fn_name_is(fn, "\"nand\""))
+               ? 1 : ((fn_name_is(fn, "\"or\"") || fn_name_is(fn, "\"nor\"")) ? 2 : 3);
+            *out = pvals[0];
+            out->val = vi_std_scalar_bin(l, tbl_kind, pvals[0].val, pvals[1].val, neg);
+            return true;
+         }
+      }
+
+      if (is_num_pkg && np == 2) {
+         const vi_val_t a = pvals[0];
+         const vi_val_t b = pvals[1];
+         tree_t e1 = tree_value(tree_param(fcall, 1));
+
+         if (fn_name_is(fn, "RESIZE") && a.kind == VIVAL_VEC && a.width >= 1) {
+            int64_t sz;
+            if (vhdl_island_eval_const_int_ctx(l->ctx, e1, &sz)
+                && sz >= 1 && sz <= VHDL_ISLAND_MAX_WIDTH) {
+               const uint32_t nw = (uint32_t)sz;
+               const bool sg = a.is_signed || ret_signed;
+               mir_value_t dst = vi_modeb_alloc_vec(l, nw);
+               if (!sg) {
+                  if (nw <= a.width) {
+                     mir_value_t src = (nw == a.width)
+                        ? a.val
+                        : mir_build_array_ref(mu, a.val, vi_off(mu, a.width - nw));
+                     mir_build_copy(mu, dst, src, vi_off(mu, nw));
+                  }
+                  else {
+                     const uint32_t pad = nw - a.width;
+                     mir_build_set(mu, dst, vi_u8(mu, 2), vi_off(mu, pad));
+                     mir_build_copy(mu, mir_build_array_ref(mu, dst, vi_off(mu, pad)),
+                                    a.val, vi_off(mu, a.width));
+                  }
+               }
+               else {
+                  mir_value_t sbyte = mir_build_load(mu, a.val);
+                  if (nw == 1) {
+                     mir_build_store(mu, dst, sbyte);
+                  }
+                  else if (nw <= a.width) {
+                     mir_build_store(mu, dst, sbyte);
+                     const uint32_t low = nw - 1;
+                     mir_build_copy(mu, mir_build_array_ref(mu, dst, vi_off(mu, 1)),
+                                    mir_build_array_ref(mu, a.val, vi_off(mu, a.width - low)),
+                                    vi_off(mu, low));
+                  }
+                  else {
+                     const uint32_t pad = nw - a.width;
+                     mir_build_set(mu, dst, sbyte, vi_off(mu, pad));
+                     mir_build_copy(mu, mir_build_array_ref(mu, dst, vi_off(mu, pad)),
+                                    a.val, vi_off(mu, a.width));
+                  }
+               }
+               *out = (vi_val_t){
+                  .kind      = VIVAL_VEC,
+                  .val       = dst,
+                  .width     = nw,
+                  .is_signed = sg,
+                  .is_std    = a.is_std,
+                  .dir       = RANGE_DOWNTO,
+                  .left      = (int64_t)nw - 1,
+                  .right     = 0,
+               };
+               return true;
             }
-            if (first_vec.width == 0)
-               first_vec = pv;
-            mir_dim_t dim = {
-               .left  = vi_off(mu, pv.left),
-               .right = vi_off(mu, pv.right),
-               .dir   = mir_const(mu, mir_bool_type(mu), pv.dir == RANGE_DOWNTO ? 1 : 0),
+         }
+
+         if ((fn_name_is(fn, "SHIFT_LEFT") || fn_name_is(fn, "SHIFT_RIGHT")
+              || fn_name_is(fn, "\"sll\"") || fn_name_is(fn, "\"srl\""))
+             && a.kind == VIVAL_VEC && a.width >= 1 && b.kind == VIVAL_INT) {
+            const uint32_t w = a.width;
+            const bool is_shift_l = fn_name_is(fn, "SHIFT_LEFT");
+            const bool is_shift_r = fn_name_is(fn, "SHIFT_RIGHT");
+            const bool is_sll = fn_name_is(fn, "\"sll\"");
+            const bool arith_r = is_shift_r && a.is_signed;
+            mir_value_t fill = arith_r ? mir_build_load(mu, a.val) : vi_u8(mu, 2);
+            mir_value_t dst = vi_modeb_alloc_vec(l, w);
+            mir_value_t amt64 = vi_to_i64(mu, b.val);
+            mir_block_t bb_done = mir_add_block(mu);
+
+            if (is_shift_l || is_shift_r) {
+               mir_block_t bb_ovf = mir_add_block(mu);
+               mir_block_t bb_in = mir_add_block(mu);
+               mir_value_t ovf = mir_build_cmp(mu, MIR_CMP_GEQ, amt64, vi_i64(mu, w));
+               mir_build_cond(mu, ovf, bb_ovf, bb_in);
+
+               mir_set_cursor(mu, bb_ovf, MIR_APPEND);
+               mir_build_set(mu, dst, fill, vi_off(mu, w));
+               mir_build_jump(mu, bb_done);
+
+               mir_set_cursor(mu, bb_in, MIR_APPEND);
+               mir_value_t c = vi_to_off(mu, amt64);
+               mir_value_t rem = mir_build_sub(mu, mir_offset_type(mu),
+                                               vi_off(mu, w), c);
+               if (is_shift_l) {
+                  mir_build_copy(mu, dst, mir_build_array_ref(mu, a.val, c), rem);
+                  mir_build_set(mu, mir_build_array_ref(mu, dst, rem), fill, c);
+               }
+               else {
+                  mir_build_set(mu, dst, fill, c);
+                  mir_build_copy(mu, mir_build_array_ref(mu, dst, c), a.val, rem);
+               }
+               mir_build_jump(mu, bb_done);
+            }
+            else {
+               mir_value_t neg = mir_build_cmp(mu, MIR_CMP_LT, amt64, vi_i64(mu, 0));
+               mir_value_t abs64 = mir_build_select(
+                  mu, vi_i64_type(mu), neg,
+                  mir_build_neg(mu, vi_i64_type(mu), amt64), amt64);
+               mir_value_t go_left = is_sll ? mir_build_not(mu, neg) : neg;
+               mir_block_t bb_ovf = mir_add_block(mu);
+               mir_block_t bb_in = mir_add_block(mu);
+               mir_block_t bb_l = mir_add_block(mu);
+               mir_block_t bb_r = mir_add_block(mu);
+               mir_build_cond(mu, mir_build_cmp(mu, MIR_CMP_GEQ, abs64, vi_i64(mu, w)),
+                              bb_ovf, bb_in);
+
+               mir_set_cursor(mu, bb_ovf, MIR_APPEND);
+               mir_build_set(mu, dst, vi_u8(mu, 2), vi_off(mu, w));
+               mir_build_jump(mu, bb_done);
+
+               mir_set_cursor(mu, bb_in, MIR_APPEND);
+               mir_value_t c = vi_to_off(mu, abs64);
+               mir_value_t rem = mir_build_sub(mu, mir_offset_type(mu),
+                                               vi_off(mu, w), c);
+               mir_build_cond(mu, go_left, bb_l, bb_r);
+
+               mir_set_cursor(mu, bb_l, MIR_APPEND);
+               mir_build_copy(mu, dst, mir_build_array_ref(mu, a.val, c), rem);
+               mir_build_set(mu, mir_build_array_ref(mu, dst, rem),
+                             vi_u8(mu, 2), c);
+               mir_build_jump(mu, bb_done);
+
+               mir_set_cursor(mu, bb_r, MIR_APPEND);
+               mir_build_set(mu, dst, vi_u8(mu, 2), c);
+               mir_build_copy(mu, mir_build_array_ref(mu, dst, c), a.val, rem);
+               mir_build_jump(mu, bb_done);
+            }
+
+            mir_set_cursor(mu, bb_done, MIR_APPEND);
+            *out = (vi_val_t){
+               .kind      = VIVAL_VEC,
+               .val       = dst,
+               .width     = w,
+               .is_signed = a.is_signed,
+               .is_std    = a.is_std,
+               .dir       = RANGE_DOWNTO,
+               .left      = (int64_t)w - 1,
+               .right     = 0,
             };
-            APUSH(args, mir_build_wrap(mu, pv.val, &dim, 1));
-         }
-         else if (vi_type_is_bool(pt)) {
-            APUSH(args, vi_to_bool(l, pv));
-         }
-         else if (vi_type_is_std_logic(pt) || type_is_enum(pt)) {
-            APUSH(args, mir_build_cast(mu, vi_u8_type(mu), pv.val));
-         }
-         else {
-            APUSH(args, mir_build_cast(mu, mir_int_type(mu, INT32_MIN, INT32_MAX),
-                                       vi_to_i64(mu, pv.val)));
+            return true;
          }
       }
 
       if (type_is_array(rtype)) {
          mir_type_t mret = mir_uarray_type(mu, 1, vi_u8_type(mu));
-         mir_value_t res_ua = mir_build_fcall(mu, tree_ident2(decl), mret,
-                                              MIR_NULL_STAMP, args.items, args.count);
-         ACLEAR(args);
+         mir_value_t res_ua = MIR_NULL_VALUE;
+         if (!vi_modeb_call_ieee(l, decl, pvals, np, mret, &res_ua))
+            return false;
 
          range_kind_t rdir = RANGE_DOWNTO;
          int64_t rl = 0, rr = 0;
          uint32_t rw = 0;
          if (!vi_eval_type_bounds(l->ctx, rtype, &rdir, &rl, &rr, &rw)) {
-            // Infer width for common IEEE operators
             if (strcmp(fn, "\"*\"") == 0 && np == 2) {
-               // Both operands are vectors or vec * int
-               rw = first_vec.width;
-               if (tree_kind(tree_value(tree_param(fcall, 1))) == T_REF
-                   || type_is_array(tree_type(tree_value(tree_param(fcall, 1))))) {
-                  // Compute sum of vector widths
-                  uint32_t w0 = 0, w1 = 0;
-                  vi_val_t t0, t1;
-                  if (vi_lower_expr(l, tree_value(tree_param(fcall, 0)), &t0)
-                      && vi_lower_expr(l, tree_value(tree_param(fcall, 1)), &t1)) {
-                     w0 = t0.kind == VIVAL_VEC ? t0.width : first_vec.width;
-                     w1 = t1.kind == VIVAL_VEC ? t1.width : first_vec.width;
-                     rw = w0 + w1;
-                  }
-               }
+               uint32_t w0 = pvals[0].kind == VIVAL_VEC ? pvals[0].width : first_vec.width;
+               uint32_t w1 = pvals[1].kind == VIVAL_VEC ? pvals[1].width : first_vec.width;
+               rw = w0 + w1;
             }
             else if ((strncmp(fn, "RESIZE", 6) == 0
                       || strncmp(fn, "TO_UNSIGNED", 11) == 0
@@ -805,16 +1011,11 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
             }
             else if ((strncmp(fn, "\"+\"", 3) == 0 || strncmp(fn, "\"-\"", 3) == 0)
                      && np == 2) {
-               rw = first_vec.width;
-               // If both array operands, max width
-               type_t t0 = tree_type(tree_value(tree_param(fcall, 0)));
-               type_t t1 = tree_type(tree_value(tree_param(fcall, 1)));
-               if (type_is_array(t0) && type_is_array(t1)) {
-                  range_kind_t d0, d1; int64_t l0, r0, l1, r1; uint32_t w0, w1;
-                  if (vi_eval_type_bounds(l->ctx, t0, &d0, &l0, &r0, &w0)
-                      && vi_eval_type_bounds(l->ctx, t1, &d1, &l1, &r1, &w1))
-                     rw = MAX(w0, w1);
-               }
+               uint32_t w0 = pvals[0].kind == VIVAL_VEC ? pvals[0].width : 0;
+               uint32_t w1 = pvals[1].kind == VIVAL_VEC ? pvals[1].width : 0;
+               rw = MAX(w0, w1);
+               if (rw == 0)
+                  rw = first_vec.width;
             }
             else if (first_vec.width > 0) {
                rw = first_vec.width;
@@ -827,11 +1028,15 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
          }
 
          mir_value_t uptr = mir_build_unwrap(mu, res_ua);
-         mir_value_t buf = vi_modeb_alloc_vec(l, rw);
-         mir_build_copy(mu, buf, uptr, vi_off(mu, rw));
+         mir_value_t vec_ptr = uptr;
+         if (fn_name_is(fn, "TO_01") || fn_name_is(fn, "RESIZE")
+             || fn_name_is(fn, "SHIFT_LEFT") || fn_name_is(fn, "SHIFT_RIGHT")) {
+            vec_ptr = vi_modeb_alloc_vec(l, rw);
+            mir_build_copy(mu, vec_ptr, uptr, vi_off(mu, rw));
+         }
          *out = (vi_val_t){
             .kind      = VIVAL_VEC,
-            .val       = buf,
+            .val       = vec_ptr,
             .width     = rw,
             .is_signed = ret_signed,
             .is_std    = true,
@@ -842,31 +1047,30 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
          return true;
       }
       else if (vi_type_is_bool(rtype)) {
-         mir_value_t r = mir_build_fcall(mu, tree_ident2(decl), mir_bool_type(mu),
-                                         MIR_NULL_STAMP, args.items, args.count);
-         ACLEAR(args);
+         mir_value_t r = MIR_NULL_VALUE;
+         if (!vi_modeb_call_ieee(l, decl, pvals, np, mir_bool_type(mu), &r))
+            return false;
          *out = vi_from_bool_bit(l, r, true, false);
          return true;
       }
       else if (type_is_integer(rtype)) {
-         mir_value_t r = mir_build_fcall(mu, tree_ident2(decl),
-                                         mir_int_type(mu, INT32_MIN, INT32_MAX),
-                                         MIR_NULL_STAMP, args.items, args.count);
-         ACLEAR(args);
+         mir_value_t r = MIR_NULL_VALUE;
+         if (!vi_modeb_call_ieee(l, decl, pvals, np,
+                                 mir_int_type(mu, INT32_MIN, INT32_MAX), &r))
+            return false;
          *out = (vi_val_t){ .kind = VIVAL_INT, .val = vi_to_i64(mu, r) };
          return true;
       }
       else if (type_is_enum(rtype)) {
-         mir_value_t r = mir_build_fcall(mu, tree_ident2(decl), vi_u8_type(mu),
-                                         MIR_NULL_STAMP, args.items, args.count);
-         ACLEAR(args);
+         mir_value_t r = MIR_NULL_VALUE;
+         if (!vi_modeb_call_ieee(l, decl, pvals, np, vi_u8_type(mu), &r))
+            return false;
          *out = (vi_val_t){
             .kind = VIVAL_BIT, .val = r, .width = 1,
             .is_std = vi_type_is_std_logic(rtype),
          };
          return true;
       }
-      ACLEAR(args);
       return false;
    }
 
@@ -876,6 +1080,12 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
          vi_val_t a;
          if (!vi_lower_expr(l, tree_value(tree_param(fcall, 0)), &a))
             return false;
+         if (fn_name_is(fn, "\"??\"")) {
+            if (a.kind != VIVAL_BIT)
+               return false;
+            *out = vi_from_bool_bit(l, vi_to_bool(l, a), true, false);
+            return true;
+         }
          if (fn_name_is(fn, "\"not\"")) {
             if (a.kind == VIVAL_BIT) {
                mir_value_t v1 = mir_build_unary(mu, MIR_VEC_BIT_NOT,
@@ -936,6 +1146,23 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
             if (neg)
                r = mir_build_unary(mu, MIR_VEC_BIT_NOT, tv, r);
             *out = a;
+            out->val = r;
+            return true;
+         }
+         if ((a.kind == VIVAL_VEC && b.kind == VIVAL_BIT)
+             || (a.kind == VIVAL_BIT && b.kind == VIVAL_VEC)) {
+            vi_val_t v = (a.kind == VIVAL_VEC) ? a : b;
+            vi_val_t s = (a.kind == VIVAL_BIT) ? a : b;
+            mir_type_t tv = mir_vec2_type(mu, v.width, v.is_signed);
+            mir_value_t sb = mir_build_test(mu, vi_to_vec2_1(l, s));
+            mir_value_t splat = mir_build_select(
+               mu, tv, sb,
+               vi_const_vec2_rep(mu, (int)v.width, v.is_signed, 1),
+               vi_const_vec2_rep(mu, (int)v.width, v.is_signed, 0));
+            mir_value_t r = mir_build_binary(mu, op, tv, v.val, splat);
+            if (neg)
+               r = mir_build_unary(mu, MIR_VEC_BIT_NOT, tv, r);
+            *out = v;
             out->val = r;
             return true;
          }
@@ -1265,7 +1492,8 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
 static bool vi_lower_inline_func(vi_lower_t *l, tree_t fcall, tree_t func,
                                  vi_val_t *out)
 {
-   if (tree_kind(func) != T_FUNC_BODY || (tree_flags(func) & TREE_F_IMPURE))
+   func = vhdl_island_resolve_func_body(func);
+   if (func == NULL || (tree_flags(func) & TREE_F_IMPURE))
       return false;
 
    mir_unit_t *mu = l->mu;
@@ -2380,7 +2608,16 @@ static bool vi_lower_expr(vi_lower_t *l, tree_t expr, vi_val_t *out)
          if (!type_is_array(t))
             return false;
          const int na = tree_assocs(expr);
-         const bool is_concat = (na > 0 && tree_subkind(tree_assoc(expr, 0)) == A_CONCAT);
+         bool has_concat = false;
+         bool all_pos = (na > 0);
+         for (int i = 0; i < na; i++) {
+            const assoc_kind_t ak = tree_subkind(tree_assoc(expr, i));
+            if (ak == A_CONCAT)
+               has_concat = true;
+            if (ak != A_POS)
+               all_pos = false;
+         }
+         const bool is_concat = has_concat || (all_pos && type_is_unconstrained(t));
          const bool is_std = vi_type_is_std_logic(type_elem(t));
          const bool is_sg = vi_type_is_signed_vec(t);
 
@@ -2623,7 +2860,7 @@ static bool vi_lower_expr(vi_lower_t *l, tree_t expr, vi_val_t *out)
       {
          tree_t decl = tree_ref(expr);
          const subprogram_kind_t sk = tree_subkind(decl);
-         if (sk != S_USER && sk != S_IEEE_MISC) {
+         if (sk != S_USER && sk != S_IEEE_MISC && sk != S_IEEE_LOGICAL) {
             if (sk == S_RECORD_EQ || sk == S_RECORD_NEQ) {
                // Leaf-by-leaf record comparison
                if (tree_params(expr) != 2)
@@ -3452,14 +3689,75 @@ static bool vi_lower_stmt(vi_lower_t *l, tree_t stmt)
          return true;
       }
 
+   case T_SEQUENCE:
+      for (int j = 0; j < tree_stmts(stmt); j++) {
+         unsigned pos = 0;
+         if (mir_block_finished(mu, mir_get_cursor(mu, &pos)))
+            break;
+         if (!vi_lower_stmt(l, tree_stmt(stmt, j)))
+            return false;
+      }
+      return true;
+
+   case T_EXIT:
+   case T_NEXT:
+      {
+         mir_block_t target_bb = MIR_NULL_BLOCK;
+         for (vi_scope_t *sc = l->scope; sc != NULL; sc = sc->parent) {
+            mir_block_t bb = (tree_kind(stmt) == T_EXIT)
+               ? sc->loop_exit_bb : sc->loop_next_bb;
+            if (!mir_is_null(bb)) {
+               target_bb = bb;
+               break;
+            }
+         }
+         if (mir_is_null(target_bb))
+            return false;
+         if (tree_has_value(stmt)) {
+            vi_val_t cv;
+            if (!vi_lower_expr(l, tree_value(stmt), &cv))
+               return false;
+            mir_block_t cont_bb = mir_add_block(mu);
+            mir_build_cond(mu, vi_to_bool(l, cv), target_bb, cont_bb);
+            mir_set_cursor(mu, cont_bb, MIR_APPEND);
+         }
+         else
+            mir_build_jump(mu, target_bb);
+         return true;
+      }
+
    case T_FOR:
       {
          tree_t rg = tree_range(stmt, 0);
-         int64_t lv, rv;
-         if (!vhdl_island_eval_const_int(l->ctx->block, tree_left(rg), &lv)
-             || !vhdl_island_eval_const_int(l->ctx->block, tree_right(rg), &rv))
-            return false;
+         int64_t lv = 0, rv = 0;
          range_kind_t rk = tree_subkind(rg);
+         if (rk == RANGE_EXPR && tree_has_value(rg)) {
+            tree_t re = tree_value(rg);
+            if (tree_kind(re) != T_ATTR_REF)
+               return false;
+            const attr_kind_t ak = tree_subkind(re);
+            tree_t nm = tree_name(re);
+            if (tree_kind(nm) != T_REF)
+               return false;
+            vi_local_t *ploc = vi_find_local(l, tree_ref(nm));
+            if (ploc == NULL || !ploc->is_vec || ploc->width == 0)
+               return false;
+            if (ak == ATTR_RANGE) {
+               rk = ploc->dir;
+               lv = ploc->left;
+               rv = ploc->right;
+            }
+            else if (ak == ATTR_REVERSE_RANGE) {
+               rk = (ploc->dir == RANGE_TO) ? RANGE_DOWNTO : RANGE_TO;
+               lv = ploc->right;
+               rv = ploc->left;
+            }
+            else
+               return false;
+         }
+         else if (!vhdl_island_eval_const_int_ctx(l->ctx, tree_left(rg), &lv)
+                  || !vhdl_island_eval_const_int_ctx(l->ctx, tree_right(rg), &rv))
+            return false;
          if ((rk == RANGE_TO && lv > rv) || (rk == RANGE_DOWNTO && lv < rv))
             return true;
 
@@ -3468,19 +3766,23 @@ static bool vi_lower_stmt(vi_lower_t *l, tree_t stmt)
                                         tree_ident(loop_var), MIR_VAR_TEMP);
          mir_build_store(mu, lvar, vi_i64(mu, lv));
 
+         mir_block_t hdr = mir_add_block(mu);
+         mir_block_t body = mir_add_block(mu);
+         mir_block_t step_bb = mir_add_block(mu);
+         mir_block_t exit_bb = mir_add_block(mu);
+
          vi_scope_t ls = { .parent = l->scope, .ret_bb = l->scope->ret_bb,
                            .ret_slot = l->scope->ret_slot,
                            .ret_type = l->scope->ret_type,
                            .ret_is_vec = l->scope->ret_is_vec,
                            .ret_signed = l->scope->ret_signed,
-                           .ret_w = l->scope->ret_w };
+                           .ret_w = l->scope->ret_w,
+                           .loop_next_bb = step_bb,
+                           .loop_exit_bb = exit_bb };
          vi_local_t loc = { .decl = loop_var, .storage = lvar };
          APUSH(ls.locals, loc);
          l->scope = &ls;
 
-         mir_block_t hdr = mir_add_block(mu);
-         mir_block_t body = mir_add_block(mu);
-         mir_block_t exit_bb = mir_add_block(mu);
          mir_build_jump(mu, hdr);
 
          mir_set_cursor(mu, hdr, MIR_APPEND);
@@ -3502,13 +3804,15 @@ static bool vi_lower_stmt(vi_lower_t *l, tree_t stmt)
             }
          }
          unsigned pos = 0;
-         if (!mir_block_finished(mu, mir_get_cursor(mu, &pos))) {
-            mir_value_t step = (rk == RANGE_TO) ? vi_i64(mu, 1) : vi_i64(mu, -1);
-            mir_build_store(mu, lvar,
-                            mir_build_add(mu, vi_i64_type(mu),
-                                          mir_build_load(mu, lvar), step));
-            mir_build_jump(mu, hdr);
-         }
+         if (!mir_block_finished(mu, mir_get_cursor(mu, &pos)))
+            mir_build_jump(mu, step_bb);
+
+         mir_set_cursor(mu, step_bb, MIR_APPEND);
+         mir_value_t step = (rk == RANGE_TO) ? vi_i64(mu, 1) : vi_i64(mu, -1);
+         mir_build_store(mu, lvar,
+                         mir_build_add(mu, vi_i64_type(mu),
+                                       mir_build_load(mu, lvar), step));
+         mir_build_jump(mu, hdr);
 
          l->scope->has_ret_val |= ls.has_ret_val;
          l->scope->ret_slot = ls.ret_slot;

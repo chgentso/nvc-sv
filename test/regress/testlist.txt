@@ -3302,4 +3302,5 @@ vhdl_island_subblock1 normal,2008,$NVC_RTL_ISLANDS=hier
 vhdl_island_extforce1 normal,2008,$NVC_RTL_ISLANDS=hier
 vhdl_island_direct_wire1 normal,2008,$NVC_RTL_ISLANDS=hier
 vhdl_island_slices1 normal,2008,$NVC_RTL_ISLANDS=hier
+vhdl_island_ieee_ops1 normal,2008,$NVC_RTL_ISLANDS=hier
 ename_unbound1 fail,gold,2008
