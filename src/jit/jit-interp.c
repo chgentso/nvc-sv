@@ -1142,7 +1142,7 @@ void jit_interp(jit_func_t *f, jit_anchor_t *caller, jit_scalar_t *args,
 
    jit_fill_irbuf(f);
 
-   if (f->next_tier && --(f->hotness) <= 0)
+   if (f->next_tier && thread_id() == 0 && --(f->hotness) <= 0)
       jit_tier_up(f);
 
    jit_anchor_t anchor = {

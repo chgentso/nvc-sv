@@ -70,6 +70,8 @@ jit_t *jit_new(unit_registry_t *ur, mir_context_t *mc);
 void jit_free(jit_t *j);
 jit_handle_t jit_compile(jit_t *j, ident_t name);
 jit_handle_t jit_lazy_compile(jit_t *j, ident_t name);
+bool jit_prepare_call(jit_t *j, jit_handle_t handle, unsigned count);
+void jit_init_thread(void);
 jit_handle_t jit_assemble(jit_t *j, ident_t name, const char *text);
 void *jit_link(jit_t *j, jit_handle_t handle);
 void *jit_get_frame_var(jit_t *j, jit_handle_t handle, void *p, ident_t name);

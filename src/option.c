@@ -18,6 +18,7 @@
 #include "util.h"
 #include "diag.h"
 #include "option.h"
+#include "thread.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -179,6 +180,22 @@ static int get_two_state_env(void)
             "(expected off, islands, or all)", env);
 }
 
+static int get_sim_threads_env(void)
+{
+   const char *env = getenv("NVC_THREADS");
+   if (env == NULL || *env == '\0')
+      return 1;
+   else if (strcasecmp(env, "auto") == 0)
+      return MIN(8, MAX(1, (int)nvc_nprocs()));
+
+   char *eptr = NULL;
+   const long val = strtol(env, &eptr, 10);
+   if (eptr == env || *eptr != '\0' || val < 1 || val > MAX_THREADS)
+      fatal("invalid value '%s' for NVC_THREADS "
+            "(expected 1..%d or auto)", env, MAX_THREADS);
+   return (int)val;
+}
+
 void set_default_options(void)
 {
    opt_set_int(OPT_RT_STATS, 0);
@@ -255,6 +272,7 @@ void set_default_options(void)
    opt_set_int(OPT_RTL_ISLANDS, get_rtl_islands_env());
    opt_set_int(OPT_DUMP_ISLANDS, get_bool_env("NVC_DUMP_ISLANDS", 0));
    opt_set_int(OPT_TWO_STATE, get_two_state_env());
+   opt_set_int(OPT_SIM_THREADS, get_sim_threads_env());
 }
 
 bool opt_black_box_allowed(const char *lib)

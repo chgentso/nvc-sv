@@ -140,6 +140,11 @@ jit_thread_local_t *jit_thread_local(void)
    return *ptr;
 }
 
+void jit_init_thread(void)
+{
+   (void)jit_thread_local();
+}
+
 jit_t *jit_new(unit_registry_t *ur, mir_context_t *mc)
 {
    jit_t *j = xcalloc(sizeof(jit_t));
@@ -395,6 +400,107 @@ jit_handle_t jit_compile(jit_t *j, ident_t name)
    jit_fill_irbuf(f);
 
    return handle;
+}
+
+static bool jit_exit_is_mt_safe(jit_exit_t exit)
+{
+   switch (exit) {
+   case JIT_EXIT_INDEX_FAIL:
+   case JIT_EXIT_OVERFLOW:
+   case JIT_EXIT_NULL_DEREF:
+   case JIT_EXIT_LENGTH_FAIL:
+   case JIT_EXIT_UNREACHABLE:
+   case JIT_EXIT_DIV_ZERO:
+   case JIT_EXIT_EXPONENT_FAIL:
+   case JIT_EXIT_RANGE_FAIL:
+   case JIT_EXIT_DIR_FAIL:
+      return true;
+   default:
+      return false;
+   }
+}
+
+static bool jit_intrinsic_is_mt_safe(ident_t name)
+{
+   const char *s = istr(name);
+   if (strncmp(s, "IEEE.STD_LOGIC_1164.", 20) == 0
+       || strncmp(s, "IEEE.NUMERIC_STD.", 17) == 0
+       || strncmp(s, "IEEE.MATH_REAL.", 15) == 0
+       || strncmp(s, "STD.STANDARD.", 13) == 0)
+      return true;
+
+   return strcmp(s, "__sv_bits_to_real") == 0
+      || strcmp(s, "__sv_real_to_int") == 0
+      || strcmp(s, "__sv_real_to_word") == 0
+      || strcmp(s, "__sv_words_to_real") == 0
+      || strcmp(s, "__sv_real_finite") == 0
+      || strcmp(s, "__sv_wildcard_eq") == 0
+      || strcmp(s, "__sv_logic_to_std") == 0
+      || strcmp(s, "__sv_std_to_logic") == 0;
+}
+
+static void jit_prepare_deps(jit_t *j, jit_func_t *f)
+{
+   if (f->deps_prepared)
+      return;
+
+   f->deps_prepared = 1;
+
+   for (unsigned i = 0; i < f->nirs; i++) {
+      const jit_ir_t *ir = &(f->irbuf[i]);
+      if (ir->op == MACRO_EXIT) {
+         if (!jit_exit_is_mt_safe(ir->arg1.exit))
+            f->mt_unsafe = 1;
+      }
+      else if (ir->op == MACRO_PUTPRIV)
+         f->mt_unsafe = 1;
+      else if (ir->op == J_CALL && ir->arg1.kind != JIT_VALUE_HANDLE)
+         f->mt_unsafe = 1;
+   }
+
+   for (unsigned i = 0; i < f->nirs; i++) {
+      const jit_ir_t *ir = &(f->irbuf[i]);
+      if (ir->op == J_CALL && ir->arg1.kind == JIT_VALUE_HANDLE) {
+         if (!jit_prepare_call(j, ir->arg1.handle, 0))
+            f->mt_unsafe = 1;
+      }
+   }
+}
+
+bool jit_prepare_call(jit_t *j, jit_handle_t handle, unsigned count)
+{
+   if (handle == JIT_HANDLE_INVALID)
+      return true;
+
+   jit_func_t *f = jit_get_func(j, handle);
+   const jit_entry_fn_t entry = load_acquire(&f->entry);
+   const func_state_t state = load_acquire(&f->state);
+
+   if (entry != jit_interp && state == JIT_FUNC_PLACEHOLDER) {
+      if (!f->deps_prepared) {
+         f->deps_prepared = 1;
+         if (!jit_intrinsic_is_mt_safe(f->name))
+            f->mt_unsafe = 1;
+      }
+      return !f->mt_unsafe;
+   }
+
+   if (!f->deps_prepared) {
+      if (state != JIT_FUNC_READY || f->irbuf == NULL)
+         jit_fill_irbuf(f);
+      jit_prepare_deps(j, f);
+   }
+
+   if (entry == jit_interp && f->next_tier != NULL && count > 0) {
+      if (f->hotness <= count) {
+         f->hotness = 0;
+         jit_tier_up(f);
+      }
+      else
+         f->hotness -= count;
+   }
+
+   return !f->mt_unsafe;
 }
 
 void *jit_link(jit_t *j, jit_handle_t handle)

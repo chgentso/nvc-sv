@@ -362,6 +362,8 @@ typedef struct _jit_func {
    object_t       *object;
    frame_layout_t *frame;    // Variables passed to the statement probe
    unsigned        signal_only : 1;
+   unsigned        deps_prepared : 1;
+   unsigned        mt_unsafe : 1;
 } jit_func_t;
 
 // The code generator knows the layout of this struct

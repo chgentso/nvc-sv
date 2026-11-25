@@ -219,6 +219,7 @@ enum {
    OPT_CLI_RTL_ISLANDS,
    OPT_CLI_DUMP_ISLANDS,
    OPT_CLI_TWO_STATE,
+   OPT_CLI_THREADS,
 };
 
 static void parse_rtl_islands_option(const char *arg)
@@ -245,6 +246,21 @@ static void parse_two_state_option(const char *arg)
    else
       fatal("invalid $bold$--2state$$ option '%s' "
             "(expected off, islands, or all)", arg);
+}
+
+static void parse_threads_option(const char *arg)
+{
+   if (strcasecmp(arg, "auto") == 0) {
+      opt_set_int(OPT_SIM_THREADS, MIN(8, MAX(1, (int)nvc_nprocs())));
+      return;
+   }
+
+   char *eptr = NULL;
+   const long val = strtol(arg, &eptr, 10);
+   if (*arg == '\0' || *eptr != '\0' || val < 1 || val > MAX_THREADS)
+      fatal("invalid $bold$--threads$$ option '%s' "
+            "(expected 1..%d or auto)", arg, MAX_THREADS);
+   opt_set_int(OPT_SIM_THREADS, (int)val);
 }
 
 static void parse_jit_cache_option(const char *arg, bool *want_clear)
@@ -1371,6 +1387,7 @@ static int run_cmd(int argc, char **argv, cmd_state_t *state)
       { "jit-cache",     required_argument, 0, OPT_CLI_JIT_CACHE },
       { "no-jit-cache",  no_argument,       0, OPT_CLI_NO_JIT_CACHE },
       { "jit-cache-dir", required_argument, 0, OPT_CLI_JIT_CACHE_DIR },
+      { "threads",       required_argument, 0, OPT_CLI_THREADS },
       { 0, 0, 0, 0 }
    };
 
@@ -1511,6 +1528,9 @@ static int run_cmd(int argc, char **argv, cmd_state_t *state)
          break;
       case OPT_CLI_JIT_CACHE_DIR:
          opt_set_str(OPT_JIT_CACHE_DIR, optarg);
+         break;
+      case OPT_CLI_THREADS:
+         parse_threads_option(optarg);
          break;
       default:
          should_not_reach_here();
@@ -2869,6 +2889,8 @@ static void usage(void)
            { "--std={1993,..,2019}", "VHDL standard revision to use" },
            { "--stderr={note,warning,error,failure,none}",
              "Print messages of this severity level or higher to stderr" },
+           { "--threads=<N|auto>",
+             "Number of simulation threads (1..64 or auto, default 1)" },
            { "-v, --version", "Display version and copyright information" },
            { "--vhpi-debug", "Report VHPI errors as diagnostic messages" },
            { "--vhpi-trace", "Trace VHPI calls and events" },
@@ -2956,6 +2978,8 @@ static void usage(void)
            { "--stats", "Print time and memory usage at end of run" },
            { "--stop-delta=N", "Stop after N delta cycles (default 10000)" },
            { "--stop-time=T", "Stop after simulation time T (e.g. 5ns)" },
+           { "--threads=<N|auto>",
+             "Number of simulation threads (1..64 or auto, default 1)" },
            { "--trace", "Trace simulation events" },
            { "-w, --wave[=FILE]", "Write waveform dump to FILE" },
            { "    --surfer[=PLUGIN]", "Load the nvc-surfer plugin (default "
@@ -3253,6 +3277,7 @@ int main(int argc, char **argv)
       { "rtl-islands",   optional_argument, 0, OPT_CLI_RTL_ISLANDS },
       { "dump-islands",  no_argument,       0, OPT_CLI_DUMP_ISLANDS },
       { "2state",        optional_argument, 0, OPT_CLI_TWO_STATE },
+      { "threads",       required_argument, 0, OPT_CLI_THREADS },
       { 0, 0, 0, 0 }
    };
 
@@ -3353,6 +3378,9 @@ int main(int argc, char **argv)
          break;
       case OPT_CLI_DUMP_ISLANDS:
          opt_set_int(OPT_DUMP_ISLANDS, 1);
+         break;
+      case OPT_CLI_THREADS:
+         parse_threads_option(optarg);
          break;
       case '?':
          bad_option("global", argv);

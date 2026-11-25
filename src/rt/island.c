@@ -22,20 +22,200 @@
 #include "option.h"
 #include "rt/island.h"
 #include "rt/model.h"
+#include "rt/mspace.h"
 #include "rt/structs.h"
+#include "thread.h"
 
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef HAVE_PTHREAD
+#include <pthread.h>
+#elif defined __MINGW32__
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#else
+#error missing pthread or win32 thread support
+#endif
+
+#define RT_ISLAND_MT_FF_THRESHOLD    16u
+#define RT_ISLAND_MT_DIRTY_THRESHOLD 8u
+#define RT_ISLAND_MT_MIN_BATCH_NS    25000u
+#define RT_ISLAND_SPIN_ITERS         3000
+
+typedef struct {
+   uint32_t next_probe;
+   uint32_t probes_done;
+   bool     use_mt;
+} rt_island_mt_gate_t;
+
+static inline bool island_mt_gate_should_run(rt_island_mt_gate_t *g,
+                                             bool *do_probe)
+{
+   if (g->next_probe == 0) {
+      *do_probe = true;
+      return false;
+   }
+   g->next_probe--;
+   *do_probe = false;
+   return g->use_mt;
+}
+
+static inline void island_mt_gate_record(rt_island_mt_gate_t *g,
+                                         uint64_t dt_ns)
+{
+   g->use_mt = (dt_ns >= RT_ISLAND_MT_MIN_BATCH_NS);
+   g->probes_done++;
+   if (g->probes_done == 1)
+      g->next_probe = 64u;
+   else if (g->probes_done == 2)
+      g->next_probe = 128u;
+   else if (g->probes_done == 3)
+      g->next_probe = 256u;
+   else
+      g->next_probe = 2048u;
+}
+
+#ifdef __MINGW32__
+typedef CRITICAL_SECTION   island_mutex_t;
+typedef CONDITION_VARIABLE island_cond_t;
+
+static inline void island_mutex_init(island_mutex_t *m)
+{
+   InitializeCriticalSection(m);
+}
+
+static inline void island_mutex_destroy(island_mutex_t *m)
+{
+   DeleteCriticalSection(m);
+}
+
+static inline void island_mutex_lock(island_mutex_t *m)
+{
+   EnterCriticalSection(m);
+}
+
+static inline void island_mutex_unlock(island_mutex_t *m)
+{
+   LeaveCriticalSection(m);
+}
+
+static inline void island_cond_init(island_cond_t *c)
+{
+   InitializeConditionVariable(c);
+}
+
+static inline void island_cond_destroy(island_cond_t *c)
+{
+   (void)c;
+}
+
+static inline void island_cond_wait(island_cond_t *c, island_mutex_t *m)
+{
+   SleepConditionVariableCS(c, m, INFINITE);
+}
+
+static inline void island_cond_broadcast(island_cond_t *c)
+{
+   WakeAllConditionVariable(c);
+}
+#else
+typedef pthread_mutex_t island_mutex_t;
+typedef pthread_cond_t  island_cond_t;
+
+static inline void island_mutex_init(island_mutex_t *m)
+{
+   pthread_mutex_init(m, NULL);
+}
+
+static inline void island_mutex_destroy(island_mutex_t *m)
+{
+   pthread_mutex_destroy(m);
+}
+
+static inline void island_mutex_lock(island_mutex_t *m)
+{
+   pthread_mutex_lock(m);
+}
+
+static inline void island_mutex_unlock(island_mutex_t *m)
+{
+   pthread_mutex_unlock(m);
+}
+
+static inline void island_cond_init(island_cond_t *c)
+{
+   pthread_cond_init(c, NULL);
+}
+
+static inline void island_cond_destroy(island_cond_t *c)
+{
+   pthread_cond_destroy(c);
+}
+
+static inline void island_cond_wait(island_cond_t *c, island_mutex_t *m)
+{
+   pthread_cond_wait(c, m);
+}
+
+static inline void island_cond_broadcast(island_cond_t *c)
+{
+   pthread_cond_broadcast(c);
+}
+#endif
+
+typedef enum {
+   ISLAND_TASK_NONE = 0,
+   ISLAND_TASK_EVAL_FF,
+   ISLAND_TASK_EVAL_DIRTY_CLUSTERS,
+   ISLAND_TASK_EVAL_DIRTY_ISLANDS,
+} rt_island_task_kind_t;
+
+typedef struct _rt_island_pool rt_island_pool_t;
+
+typedef struct {
+   nvc_thread_t     *thread;
+   rt_island_pool_t *pool;
+   tlab_t           *tlab;
+   uint32_t          idx;
+} __attribute__((aligned(64))) rt_island_worker_t;
+
+struct _rt_island_pool {
+   jit_t                *jit;
+   rt_model_t           *model;
+   rt_island_mgr_t      *mgr;
+   uint32_t              nthreads;
+   uint32_t              nworkers;
+   rt_island_worker_t   *workers;
+   island_mutex_t        park_mtx;
+   island_cond_t         park_cv;
+   uint64_t              epoch __attribute__((aligned(64)));
+   bool                  stop;
+   rt_island_task_kind_t task_kind;
+   void *const          *items;
+   uint32_t              n_items;
+   uint32_t              chunk;
+   uint32_t              n_parked __attribute__((aligned(64)));
+   uint32_t              done_count __attribute__((aligned(64)));
+   uint32_t              next_idx __attribute__((aligned(64)));
+   uint32_t              failed __attribute__((aligned(64)));
+};
+
 struct _rt_super_island {
-   uint32_t      id;
-   rt_island_t **islands;
-   uint32_t      n_islands;
-   uint32_t      min_dirty_pos;
-   uint32_t      dirty_count;
-   bool          has_dirty;
-   bool          has_dirty_inputs;
+   uint32_t            id;
+   rt_island_t       **islands;
+   uint32_t            n_islands;
+   uint32_t            min_dirty_pos;
+   uint32_t            dirty_count;
+   rt_super_island_t **comb_deps;
+   uint32_t            n_comb_deps;
+   uint32_t            mt_wave_tag;
+   uint32_t            mt_sync_start;
+   uint32_t            mt_sync_end;
+   bool                has_dirty;
+   bool                has_dirty_inputs;
+   bool                mt_eval_on_main;
 };
 
 struct _rt_super_domain {
@@ -73,8 +253,25 @@ struct _rt_island_mgr {
    A(rt_super_domain_t *)  super_domains;
    A(rt_super_domain_t *)  super_sample_q;
    A(rt_super_domain_t *)  super_commit_q;
+   rt_island_pool_t       *pool;
+   A(rt_island_t *)        mt_ff_islands;
+   A(rt_island_t *)        mt_ff_safe_q;
+   A(rt_island_t *)        mt_isl_work_q;
+   A(rt_island_t *)        mt_isl_wave_q;
+   A(rt_island_t *)        mt_isl_rem_q;
+   A(rt_island_t *)        mt_isl_safe_q;
+   A(rt_super_island_t *)  mt_cl_work_q;
+   A(rt_super_island_t *)  mt_cl_wave_q;
+   A(rt_super_island_t *)  mt_cl_rem_q;
+   A(rt_super_island_t *)  mt_cl_safe_q;
+   rt_island_mt_gate_t     mt_gate_cl;
+   rt_island_mt_gate_t     mt_gate_isl;
+   rt_island_mt_gate_t     mt_gate_ff;
+   uint32_t                mt_wave_tag;
    uint32_t                eval_epoch;
    bool                    hier_built;
+   bool                    mt_deps_built;
+   bool                    mt_has_comb_deps;
 };
 
 static inline bool island_is_hier_mode(void)
@@ -453,13 +650,45 @@ rt_island_mgr_t *rt_island_mgr_new(rt_model_t *m)
    return mgr;
 }
 
+static void island_pool_free(rt_island_pool_t *pool)
+{
+   if (pool == NULL)
+      return;
+
+   island_mutex_lock(&pool->park_mtx);
+   atomic_store(&pool->stop, true);
+   island_cond_broadcast(&pool->park_cv);
+   island_mutex_unlock(&pool->park_mtx);
+
+   for (uint32_t i = 0; i < pool->nworkers; i++) {
+      if (pool->workers[i].thread != NULL)
+         thread_join(pool->workers[i].thread);
+   }
+
+   for (uint32_t i = 0; i < pool->nworkers; i++) {
+      if (pool->workers[i].tlab != NULL)
+         tlab_release(pool->jit, pool->workers[i].tlab);
+   }
+
+   island_cond_destroy(&pool->park_cv);
+   island_mutex_destroy(&pool->park_mtx);
+   free(pool->workers);
+   free(pool);
+}
+
 void rt_island_mgr_free(rt_island_mgr_t *mgr)
 {
    if (mgr == NULL)
       return;
 
+   if (mgr->pool != NULL) {
+      island_pool_free(mgr->pool);
+      mgr->pool = NULL;
+   }
+
    for (unsigned i = 0; i < mgr->clusters.count; i++) {
       rt_super_island_t *cl = mgr->clusters.items[i];
+      free(cl->comb_deps);
       free(cl->islands);
       free(cl);
    }
@@ -480,6 +709,7 @@ void rt_island_mgr_free(rt_island_mgr_t *mgr)
       free(isl->forces);
       for (uint32_t s = 0; s < isl->nsigs; s++)
          free(isl->sigs[s].direct_targets);
+      free(isl->comb_deps);
       free(isl->state);
       free(isl->sigs);
       free(isl->in_sigs);
@@ -501,6 +731,16 @@ void rt_island_mgr_free(rt_island_mgr_t *mgr)
    ACLEAR(mgr->super_domains);
    ACLEAR(mgr->super_sample_q);
    ACLEAR(mgr->super_commit_q);
+   ACLEAR(mgr->mt_ff_islands);
+   ACLEAR(mgr->mt_ff_safe_q);
+   ACLEAR(mgr->mt_isl_work_q);
+   ACLEAR(mgr->mt_isl_wave_q);
+   ACLEAR(mgr->mt_isl_rem_q);
+   ACLEAR(mgr->mt_isl_safe_q);
+   ACLEAR(mgr->mt_cl_work_q);
+   ACLEAR(mgr->mt_cl_wave_q);
+   ACLEAR(mgr->mt_cl_rem_q);
+   ACLEAR(mgr->mt_cl_safe_q);
    free(mgr);
 }
 
@@ -544,6 +784,7 @@ void *rt_island_begin(rt_model_t *m, rt_island_mgr_t **mgr_p,
    rt_island_t *isl = xcalloc(sizeof(rt_island_t));
    isl->model = m;
    isl->mgr = *mgr_p;
+   isl->isl_id = isl->mgr->islands.count;
    isl->eval_handle = eval_handle;
    isl->inst_ctx = inst_ctx;
    isl->state_bytes = RT_ISLAND_STRIDE(state_bytes);
@@ -2065,6 +2306,9 @@ void rt_island_reset_all(rt_island_mgr_t *mgr)
    mgr->dirty_clusters.count = 0;
    mgr->super_sample_q.count = 0;
    mgr->super_commit_q.count = 0;
+   memset(&mgr->mt_gate_cl, 0, sizeof(mgr->mt_gate_cl));
+   memset(&mgr->mt_gate_isl, 0, sizeof(mgr->mt_gate_isl));
+   memset(&mgr->mt_gate_ff, 0, sizeof(mgr->mt_gate_ff));
 
    for (unsigned i = 0; i < mgr->clusters.count; i++) {
       rt_super_island_t *cl = mgr->clusters.items[i];
@@ -2072,10 +2316,15 @@ void rt_island_reset_all(rt_island_mgr_t *mgr)
       cl->has_dirty_inputs = false;
       cl->dirty_count = 0;
       cl->min_dirty_pos = UINT32_MAX;
+      cl->mt_sync_start = 0;
+      cl->mt_sync_end = 0;
    }
 
    for (unsigned i = 0; i < mgr->islands.count; i++) {
       rt_island_t *isl = mgr->islands.items[i];
+      isl->need_sync_out = false;
+      isl->ff_pending_head = NULL;
+      isl->ff_pending_tail = NULL;
       for (uint32_t f = 0; f < isl->n_forces; f++)
          free(isl->forces[f].mask);
       isl->n_forces = 0;
@@ -2188,9 +2437,73 @@ bool rt_island_has_dirty(const rt_island_mgr_t *mgr)
       && (mgr->dirty_q.count > 0 || mgr->dirty_clusters.count > 0);
 }
 
+static void island_add_isl_dep(rt_island_t *isl, rt_island_t *dep)
+{
+   for (uint32_t i = 0; i < isl->n_comb_deps; i++) {
+      if (isl->comb_deps[i] == dep)
+         return;
+   }
+   isl->comb_deps = xrealloc_array(isl->comb_deps, isl->n_comb_deps + 1u,
+                                   sizeof(rt_island_t *));
+   isl->comb_deps[isl->n_comb_deps++] = dep;
+}
+
+static void island_add_cl_dep(rt_super_island_t *cl, rt_super_island_t *dep)
+{
+   for (uint32_t i = 0; i < cl->n_comb_deps; i++) {
+      if (cl->comb_deps[i] == dep)
+         return;
+   }
+   cl->comb_deps = xrealloc_array(cl->comb_deps, cl->n_comb_deps + 1u,
+                                  sizeof(rt_super_island_t *));
+   cl->comb_deps[cl->n_comb_deps++] = dep;
+}
+
+static void island_build_mt_deps(rt_island_mgr_t *mgr)
+{
+   if (mgr->mt_deps_built)
+      return;
+   mgr->mt_deps_built = true;
+
+   const uint32_t N = mgr->islands.count;
+   for (uint32_t i = 0; i < N; i++) {
+      rt_island_t *isl = mgr->islands.items[i];
+      for (uint32_t j = 0; j < isl->n_in_sigs; j++) {
+         const rt_island_sig_t *in_s = &(isl->sigs[isl->in_sigs[j]]);
+         if (!(in_s->flags & RT_ISIG_COMB_READ)
+             || (in_s->flags & RT_ISIG_DIRECT_LINK)
+             || in_s->sig == NULL)
+            continue;
+
+         const uint32_t in_start = (uint32_t)in_s->sig_offset;
+         const uint32_t in_end = in_start + in_s->width * in_s->nelems;
+         for (rt_island_sig_t *own = hash_get(mgr->sig_map, in_s->sig);
+              own != NULL; own = own->next_owner) {
+            if (own->isl == isl || !(own->flags & RT_ISIG_COMB_WRITTEN))
+               continue;
+            const uint32_t o_start = (uint32_t)own->sig_offset;
+            const uint32_t o_end = o_start + own->width * own->nelems;
+            if (MAX(in_start, o_start) >= MIN(in_end, o_end))
+               continue;
+
+            if (isl->cluster == NULL && own->isl->cluster == NULL) {
+               island_add_isl_dep(isl, own->isl);
+               mgr->mt_has_comb_deps = true;
+            }
+            else if (isl->cluster != NULL && own->isl->cluster != NULL
+                     && isl->cluster != own->isl->cluster) {
+               island_add_cl_dep(isl->cluster, own->isl->cluster);
+               mgr->mt_has_comb_deps = true;
+            }
+         }
+      }
+   }
+}
+
 static bool island_call_comb(jit_t *jit, rt_model_t *m, rt_island_t *isl,
                              tlab_t *tlab)
 {
+   (void)m;
    jit_scalar_t p1 = { .pointer = isl->inst_ctx };
    jit_scalar_t p2 = { .pointer = isl->state };
    jit_scalar_t result = { .integer = 0 };
@@ -2265,24 +2578,327 @@ static bool island_eval_cluster(jit_t *jit, rt_model_t *m,
    return ok;
 }
 
+static bool island_eval_cluster_mt(jit_t *jit, rt_super_island_t *cl,
+                                   tlab_t *tlab)
+{
+   bool ok = true;
+   const uint32_t sync_start = cl->min_dirty_pos;
+   uint32_t sync_end = 0;
+
+   for (uint32_t k = cl->min_dirty_pos;
+        k < cl->n_islands && cl->dirty_count > 0; k++) {
+      rt_island_t *isl = cl->islands[k];
+      if (!isl->dirty)
+         continue;
+      cl->dirty_count--;
+      isl->dirty = false;
+      isl->has_dirty_inputs = false;
+
+      island_sync_dirty_inputs(isl);
+
+      if (isl->eval_handle == JIT_HANDLE_INVALID)
+         continue;
+
+      if (!island_call_comb(jit, isl->model, isl, tlab)) {
+         ok = false;
+         break;
+      }
+
+      for (uint32_t j = 0; j < isl->n_direct_comb_outs; j++) {
+         const rt_island_sig_t *src_s = &(isl->sigs[isl->direct_comb_outs[j]]);
+         const bool is_direct = !!(src_s->flags & RT_ISIG_DIRECT_LINK);
+         if (!is_direct && (src_s->n_direct_targets == 0 || isl->has_forces))
+            continue;
+         for (uint32_t t = 0; t < src_s->n_direct_targets; t++) {
+            rt_island_sig_t *dst_s = src_s->direct_targets[t];
+            if (!is_direct && dst_s->isl->has_forces)
+               continue;
+            assert(dst_s->isl->cluster == cl);
+            if (island_copy_direct_sig(src_s, dst_s)
+                && (dst_s->flags & RT_ISIG_COMB_READ)
+                && dst_s->isl->eval_handle != JIT_HANDLE_INVALID) {
+               assert(dst_s->isl->topo_pos > k);
+               if (!dst_s->isl->dirty) {
+                  dst_s->isl->dirty = true;
+                  cl->dirty_count++;
+               }
+            }
+         }
+      }
+
+      if (isl->n_ext_out_sigs > 0 || unlikely(isl->n_obs_sigs > 0)) {
+         isl->need_sync_out = true;
+         sync_end = k + 1;
+      }
+   }
+
+   if (ok) {
+      cl->has_dirty = false;
+      cl->has_dirty_inputs = false;
+      cl->min_dirty_pos = UINT32_MAX;
+      cl->dirty_count = 0;
+      cl->mt_sync_start = sync_start;
+      cl->mt_sync_end = sync_end;
+   }
+   return ok;
+}
+
+static bool island_eval_solo_mt(jit_t *jit, rt_island_t *isl, tlab_t *tlab)
+{
+   if (!isl->dirty)
+      return true;
+   isl->dirty = false;
+   isl->has_dirty_inputs = false;
+
+   island_sync_dirty_inputs(isl);
+
+   if (isl->eval_handle == JIT_HANDLE_INVALID)
+      return true;
+
+   if (!island_call_comb(jit, isl->model, isl, tlab))
+      return false;
+
+   if (isl->n_out_sigs > 0 || unlikely(isl->n_obs_sigs > 0))
+      isl->need_sync_out = true;
+   return true;
+}
+
+static bool island_sample_domain(jit_t *jit, rt_island_domain_t *dom,
+                                 tlab_t *tlab);
+
+static bool island_eval_ff_island_mt(jit_t *jit, rt_island_t *isl,
+                                     tlab_t *tlab)
+{
+   rt_island_domain_t *dom = isl->ff_pending_head;
+   isl->ff_pending_head = NULL;
+   isl->ff_pending_tail = NULL;
+
+   bool ok = true;
+   while (dom != NULL) {
+      rt_island_domain_t *next = dom->ff_batch_next;
+      dom->ff_batch_next = NULL;
+      if (ok && !island_sample_domain(jit, dom, tlab))
+         ok = false;
+      dom = next;
+   }
+   return ok;
+}
+
+static void island_pool_work(rt_island_pool_t *pool, tlab_t *tlab)
+{
+   const rt_island_task_kind_t kind = pool->task_kind;
+   void *const *items = pool->items;
+   const uint32_t n = pool->n_items;
+   const uint32_t chunk = pool->chunk;
+   jit_t *jit = pool->jit;
+
+   for (;;) {
+      if (unlikely(relaxed_load(&pool->failed) != 0))
+         break;
+
+      const uint32_t start = relaxed_fetch_add(&pool->next_idx, chunk);
+      if (start >= n)
+         break;
+
+      const uint32_t end = MIN(start + chunk, n);
+      for (uint32_t i = start; i < end; i++) {
+         bool ok = true;
+         switch (kind) {
+         case ISLAND_TASK_EVAL_FF:
+            ok = island_eval_ff_island_mt(jit, items[i], tlab);
+            break;
+         case ISLAND_TASK_EVAL_DIRTY_CLUSTERS:
+            ok = island_eval_cluster_mt(jit, items[i], tlab);
+            break;
+         case ISLAND_TASK_EVAL_DIRTY_ISLANDS:
+            ok = island_eval_solo_mt(jit, items[i], tlab);
+            break;
+         case ISLAND_TASK_NONE:
+            break;
+         }
+         if (unlikely(!ok)) {
+            atomic_store(&pool->failed, 1);
+            return;
+         }
+      }
+   }
+}
+
+static void *island_worker_entry(void *arg)
+{
+   mspace_stack_limit(MSPACE_CURRENT_FRAME);
+   jit_init_thread();
+
+   rt_island_worker_t *w = arg;
+   rt_island_pool_t *pool = w->pool;
+   uint64_t my_epoch = 0;
+
+   for (;;) {
+      bool got_work = false;
+      for (int spin = 0; spin < RT_ISLAND_SPIN_ITERS; spin++) {
+         if (unlikely(load_acquire(&pool->stop)))
+            return NULL;
+         const uint64_t ep = load_acquire(&pool->epoch);
+         if (ep != my_epoch) {
+            my_epoch = ep;
+            got_work = true;
+            break;
+         }
+         spin_wait();
+      }
+
+      if (!got_work) {
+         island_mutex_lock(&pool->park_mtx);
+         atomic_fetch_add(&pool->n_parked, 1);
+         while (!load_acquire(&pool->stop)
+                && load_acquire(&pool->epoch) == my_epoch)
+            island_cond_wait(&pool->park_cv, &pool->park_mtx);
+         atomic_fetch_add(&pool->n_parked, -1);
+         island_mutex_unlock(&pool->park_mtx);
+
+         if (load_acquire(&pool->stop))
+            return NULL;
+         const uint64_t ep = load_acquire(&pool->epoch);
+         if (ep == my_epoch)
+            continue;
+         my_epoch = ep;
+      }
+
+      tlab_reset(w->tlab);
+      island_pool_work(pool, w->tlab);
+      tlab_reset(w->tlab);
+
+      atomic_fetch_add(&pool->done_count, 1);
+   }
+}
+
+static rt_island_pool_t *island_pool_ensure(rt_island_mgr_t *mgr, jit_t *jit)
+{
+   const int req = opt_get_int(OPT_SIM_THREADS);
+   if (req <= 1)
+      return NULL;
+
+   if (mgr->pool != NULL)
+      return mgr->pool;
+
+   const uint32_t nthreads = (uint32_t)MIN(req, MAX_THREADS);
+   rt_island_pool_t *pool = xcalloc(sizeof(rt_island_pool_t));
+   pool->jit = jit;
+   pool->model = mgr->model;
+   pool->mgr = mgr;
+   pool->nthreads = nthreads;
+   pool->nworkers = nthreads - 1u;
+   pool->workers = xcalloc_array(pool->nworkers, sizeof(rt_island_worker_t));
+   island_mutex_init(&pool->park_mtx);
+   island_cond_init(&pool->park_cv);
+
+   for (uint32_t i = 0; i < pool->nworkers; i++) {
+      rt_island_worker_t *w = &(pool->workers[i]);
+      w->pool = pool;
+      w->idx = i + 1u;
+      w->tlab = tlab_acquire(jit);
+      w->thread = thread_create(island_worker_entry, w, "island %u", i + 1u);
+   }
+
+   mgr->pool = pool;
+   return pool;
+}
+
+static bool island_pool_run(rt_island_pool_t *pool,
+                            rt_island_task_kind_t kind,
+                            void *const *items, uint32_t n_items,
+                            tlab_t *main_tlab)
+{
+   pool->task_kind = kind;
+   pool->items = items;
+   pool->n_items = n_items;
+   pool->chunk = MAX(1u, (n_items + pool->nthreads * 3u - 1u)
+                         / (pool->nthreads * 3u));
+   relaxed_store(&pool->next_idx, 0);
+   relaxed_store(&pool->failed, 0);
+   relaxed_store(&pool->done_count, 0);
+
+   const uint64_t next_epoch = pool->epoch + 1u;
+   atomic_store(&pool->epoch, next_epoch);
+
+   if (atomic_load(&pool->n_parked) > 0) {
+      island_mutex_lock(&pool->park_mtx);
+      island_cond_broadcast(&pool->park_cv);
+      island_mutex_unlock(&pool->park_mtx);
+   }
+
+   island_pool_work(pool, main_tlab);
+
+   while (load_acquire(&pool->done_count) < pool->nworkers)
+      spin_wait();
+
+   pool->task_kind = ISLAND_TASK_NONE;
+   pool->items = NULL;
+   return atomic_load(&pool->failed) == 0;
+}
+
+static void island_sync_out_island(rt_model_t *m, rt_island_t *isl)
+{
+   if (isl->n_direct_comb_outs > 0) {
+      for (uint32_t j = 0; j < isl->n_ext_out_sigs; j++)
+         island_sync_out_sig(m, isl, &(isl->sigs[isl->ext_out_sigs[j]]));
+   }
+   else {
+      for (uint32_t j = 0; j < isl->n_out_sigs; j++)
+         island_sync_out_sig(m, isl, &(isl->sigs[isl->out_sigs[j]]));
+   }
+   if (unlikely(isl->n_obs_sigs > 0)) {
+      for (uint32_t j = 0; j < isl->n_obs_sigs; j++)
+         island_sync_out_sig(m, isl, &(isl->sigs[isl->obs_sigs[j]]));
+   }
+}
+
 static bool island_eval_dirty_clusters(jit_t *jit, rt_model_t *m,
                                        rt_island_mgr_t *mgr, tlab_t *tlab)
 {
    if (mgr->dirty_clusters.count == 0)
       return true;
 
+   const int nthreads = opt_get_int(OPT_SIM_THREADS);
    unsigned n = mgr->dirty_clusters.count;
-   bool ok = true;
-   for (unsigned i = 0; i < n; i++) {
-      rt_super_island_t *cl = mgr->dirty_clusters.items[i];
-      if (!cl->has_dirty)
-         continue;
-      if (!island_eval_cluster(jit, m, cl, tlab)) {
-         ok = false;
-         break;
+   bool do_probe = false;
+   const bool try_mt = (nthreads > 1 && n >= RT_ISLAND_MT_DIRTY_THRESHOLD)
+      && island_mt_gate_should_run(&mgr->mt_gate_cl, &do_probe);
+   if (!try_mt) {
+      const uint64_t t0 = do_probe ? get_timestamp_ns() : 0;
+      bool ok = true;
+      for (unsigned i = 0; i < n; i++) {
+         rt_super_island_t *cl = mgr->dirty_clusters.items[i];
+         if (!cl->has_dirty)
+            continue;
+         if (!island_eval_cluster(jit, m, cl, tlab)) {
+            ok = false;
+            break;
+         }
       }
+
+      if (mgr->dirty_clusters.count > n) {
+         memmove(mgr->dirty_clusters.items, mgr->dirty_clusters.items + n,
+                 (mgr->dirty_clusters.count - n) * sizeof(rt_super_island_t *));
+         mgr->dirty_clusters.count -= n;
+      }
+      else
+         mgr->dirty_clusters.count = 0;
+
+      if (do_probe && ok)
+         island_mt_gate_record(&mgr->mt_gate_cl, get_timestamp_ns() - t0);
+
+      return ok;
    }
 
+   island_build_mt_deps(mgr);
+
+   mgr->mt_cl_work_q.count = 0;
+   for (unsigned i = 0; i < n; i++) {
+      rt_super_island_t *cl = mgr->dirty_clusters.items[i];
+      if (cl->has_dirty)
+         APUSH(mgr->mt_cl_work_q, cl);
+   }
    if (mgr->dirty_clusters.count > n) {
       memmove(mgr->dirty_clusters.items, mgr->dirty_clusters.items + n,
               (mgr->dirty_clusters.count - n) * sizeof(rt_super_island_t *));
@@ -2290,6 +2906,130 @@ static bool island_eval_dirty_clusters(jit_t *jit, rt_model_t *m,
    }
    else
       mgr->dirty_clusters.count = 0;
+
+   bool ok = true;
+   while (ok && mgr->mt_cl_work_q.count > 0) {
+      mgr->mt_cl_wave_q.count = 0;
+      mgr->mt_cl_rem_q.count = 0;
+
+      if (!mgr->mt_has_comb_deps) {
+         for (unsigned i = 0; i < mgr->mt_cl_work_q.count; i++) {
+            rt_super_island_t *cl = mgr->mt_cl_work_q.items[i];
+            if (cl->has_dirty)
+               APUSH(mgr->mt_cl_wave_q, cl);
+         }
+      }
+      else {
+         const uint32_t tag = ++mgr->mt_wave_tag;
+         for (unsigned i = 0; i < mgr->mt_cl_work_q.count; i++) {
+            rt_super_island_t *cl = mgr->mt_cl_work_q.items[i];
+            if (!cl->has_dirty)
+               continue;
+            bool dep_in_wave = false;
+            for (uint32_t d = 0; d < cl->n_comb_deps; d++) {
+               if (cl->comb_deps[d]->mt_wave_tag == tag) {
+                  dep_in_wave = true;
+                  break;
+               }
+            }
+            if (dep_in_wave)
+               APUSH(mgr->mt_cl_rem_q, cl);
+            else {
+               cl->mt_wave_tag = tag;
+               APUSH(mgr->mt_cl_wave_q, cl);
+            }
+         }
+      }
+
+      if (mgr->mt_cl_wave_q.count == 0)
+         break;
+
+      if (mgr->mt_cl_wave_q.count < RT_ISLAND_MT_DIRTY_THRESHOLD) {
+         for (unsigned i = 0; i < mgr->mt_cl_wave_q.count; i++) {
+            rt_super_island_t *cl = mgr->mt_cl_wave_q.items[i];
+            if (cl->has_dirty && !island_eval_cluster(jit, m, cl, tlab)) {
+               ok = false;
+               break;
+            }
+         }
+      }
+      else {
+         mgr->mt_cl_safe_q.count = 0;
+         for (unsigned i = 0; i < mgr->mt_cl_wave_q.count; i++) {
+            rt_super_island_t *cl = mgr->mt_cl_wave_q.items[i];
+            bool cl_safe = true;
+            for (uint32_t k = cl->min_dirty_pos; k < cl->n_islands; k++) {
+               rt_island_t *isl = cl->islands[k];
+               if (isl->eval_handle != JIT_HANDLE_INVALID
+                   && !jit_prepare_call(jit, isl->eval_handle,
+                                        isl->dirty ? 1u : 0u))
+                  cl_safe = false;
+            }
+            cl->mt_eval_on_main = !cl_safe;
+            if (cl_safe)
+               APUSH(mgr->mt_cl_safe_q, cl);
+         }
+
+         if (mgr->mt_cl_safe_q.count < RT_ISLAND_MT_DIRTY_THRESHOLD) {
+            for (unsigned i = 0; i < mgr->mt_cl_wave_q.count; i++) {
+               rt_super_island_t *cl = mgr->mt_cl_wave_q.items[i];
+               if (cl->has_dirty && !island_eval_cluster(jit, m, cl, tlab)) {
+                  ok = false;
+                  break;
+               }
+            }
+         }
+         else {
+            rt_island_pool_t *pool = island_pool_ensure(mgr, jit);
+            if (!island_pool_run(pool, ISLAND_TASK_EVAL_DIRTY_CLUSTERS,
+                                 (void *const *)mgr->mt_cl_safe_q.items,
+                                 mgr->mt_cl_safe_q.count, tlab)) {
+               ok = false;
+            }
+            else {
+               for (unsigned i = 0; i < mgr->mt_cl_wave_q.count; i++) {
+                  rt_super_island_t *cl = mgr->mt_cl_wave_q.items[i];
+                  if (cl->mt_eval_on_main) {
+                     if (cl->has_dirty
+                         && !island_eval_cluster(jit, m, cl, tlab)) {
+                        ok = false;
+                        break;
+                     }
+                     continue;
+                  }
+                  for (uint32_t k = cl->mt_sync_start; k < cl->mt_sync_end; k++) {
+                     rt_island_t *isl = cl->islands[k];
+                     if (!isl->need_sync_out)
+                        continue;
+                     isl->need_sync_out = false;
+                     for (uint32_t j = 0; j < isl->n_ext_out_sigs; j++)
+                        island_sync_out_sig(m, isl,
+                                            &(isl->sigs[isl->ext_out_sigs[j]]));
+                     if (unlikely(isl->n_obs_sigs > 0)) {
+                        for (uint32_t j = 0; j < isl->n_obs_sigs; j++)
+                           island_sync_out_sig(m, isl,
+                                               &(isl->sigs[isl->obs_sigs[j]]));
+                     }
+                  }
+                  cl->mt_sync_start = 0;
+                  cl->mt_sync_end = 0;
+               }
+            }
+         }
+      }
+
+      mgr->mt_cl_work_q.count = 0;
+      for (unsigned i = 0; i < mgr->mt_cl_rem_q.count; i++)
+         APUSH(mgr->mt_cl_work_q, mgr->mt_cl_rem_q.items[i]);
+   }
+
+   if (!ok) {
+      for (unsigned i = 0; i < mgr->mt_cl_work_q.count; i++) {
+         rt_super_island_t *cl = mgr->mt_cl_work_q.items[i];
+         if (cl->has_dirty)
+            APUSH(mgr->dirty_clusters, cl);
+      }
+   }
 
    return ok;
 }
@@ -2302,59 +3042,210 @@ bool rt_island_eval_dirty(jit_t *jit, rt_model_t *m, rt_island_mgr_t *mgr,
 
    bool ok = true;
    if (mgr->dirty_q.count > 0) {
+      const int nthreads = opt_get_int(OPT_SIM_THREADS);
       unsigned n = mgr->dirty_q.count;
-      for (unsigned i = 0; i < n; i++) {
-         rt_island_t *isl = mgr->dirty_q.items[i];
-         isl->in_dirty_list = false;
-         if (!isl->dirty)
-            continue;
-         isl->dirty = false;
-         isl->has_dirty_inputs = false;
+      bool do_probe = false;
+      const bool try_mt = (nthreads > 1 && n >= RT_ISLAND_MT_DIRTY_THRESHOLD)
+         && island_mt_gate_should_run(&mgr->mt_gate_isl, &do_probe);
 
-         island_sync_dirty_inputs(isl);
+      if (!try_mt) {
+         const uint64_t t0 = do_probe ? get_timestamp_ns() : 0;
+         for (unsigned i = 0; i < n; i++) {
+            rt_island_t *isl = mgr->dirty_q.items[i];
+            isl->in_dirty_list = false;
+            if (!isl->dirty)
+               continue;
+            isl->dirty = false;
+            isl->has_dirty_inputs = false;
 
-         if (isl->eval_handle == JIT_HANDLE_INVALID)
-            continue;
+            island_sync_dirty_inputs(isl);
 
-         if (!island_call_comb(jit, m, isl, tlab)) {
-            ok = false;
-            break;
+            if (isl->eval_handle == JIT_HANDLE_INVALID)
+               continue;
+
+            if (!island_call_comb(jit, m, isl, tlab)) {
+               ok = false;
+               break;
+            }
+
+            if (isl->n_direct_comb_outs > 0) {
+               for (uint32_t j = 0; j < isl->n_direct_comb_outs; j++) {
+                  const rt_island_sig_t *src_s =
+                     &(isl->sigs[isl->direct_comb_outs[j]]);
+                  if (unlikely(!(src_s->flags & RT_ISIG_DIRECT_LINK)))
+                     continue;
+                  for (uint32_t t = 0; t < src_s->n_direct_targets; t++) {
+                     rt_island_sig_t *dst_s = src_s->direct_targets[t];
+                     if (island_copy_direct_sig(src_s, dst_s)
+                         && (dst_s->flags & RT_ISIG_COMB_READ)
+                         && dst_s->isl->eval_handle != JIT_HANDLE_INVALID)
+                        island_mark_dirty(dst_s->isl);
+                  }
+               }
+               for (uint32_t j = 0; j < isl->n_ext_out_sigs; j++)
+                  island_sync_out_sig(m, isl,
+                                      &(isl->sigs[isl->ext_out_sigs[j]]));
+            }
+            else {
+               for (uint32_t j = 0; j < isl->n_out_sigs; j++)
+                  island_sync_out_sig(m, isl, &(isl->sigs[isl->out_sigs[j]]));
+            }
+            if (unlikely(isl->n_obs_sigs > 0)) {
+               for (uint32_t j = 0; j < isl->n_obs_sigs; j++)
+                  island_sync_out_sig(m, isl, &(isl->sigs[isl->obs_sigs[j]]));
+            }
          }
 
-         if (isl->n_direct_comb_outs > 0) {
-            for (uint32_t j = 0; j < isl->n_direct_comb_outs; j++) {
-               const rt_island_sig_t *src_s =
-                  &(isl->sigs[isl->direct_comb_outs[j]]);
-               if (unlikely(!(src_s->flags & RT_ISIG_DIRECT_LINK)))
-                  continue;
-               for (uint32_t t = 0; t < src_s->n_direct_targets; t++) {
-                  rt_island_sig_t *dst_s = src_s->direct_targets[t];
-                  if (island_copy_direct_sig(src_s, dst_s)
-                      && (dst_s->flags & RT_ISIG_COMB_READ)
-                      && dst_s->isl->eval_handle != JIT_HANDLE_INVALID)
-                     island_mark_dirty(dst_s->isl);
+         if (mgr->dirty_q.count > n) {
+            memmove(mgr->dirty_q.items, mgr->dirty_q.items + n,
+                    (mgr->dirty_q.count - n) * sizeof(rt_island_t *));
+            mgr->dirty_q.count -= n;
+         }
+         else
+            mgr->dirty_q.count = 0;
+
+         if (do_probe && ok)
+            island_mt_gate_record(&mgr->mt_gate_isl, get_timestamp_ns() - t0);
+      }
+      else {
+         island_build_mt_deps(mgr);
+
+         mgr->mt_isl_work_q.count = 0;
+         for (unsigned i = 0; i < n; i++) {
+            rt_island_t *isl = mgr->dirty_q.items[i];
+            isl->in_dirty_list = false;
+            if (isl->dirty)
+               APUSH(mgr->mt_isl_work_q, isl);
+         }
+         if (mgr->dirty_q.count > n) {
+            memmove(mgr->dirty_q.items, mgr->dirty_q.items + n,
+                    (mgr->dirty_q.count - n) * sizeof(rt_island_t *));
+            mgr->dirty_q.count -= n;
+         }
+         else
+            mgr->dirty_q.count = 0;
+
+         while (ok && mgr->mt_isl_work_q.count > 0) {
+            mgr->mt_isl_wave_q.count = 0;
+            mgr->mt_isl_rem_q.count = 0;
+
+            if (!mgr->mt_has_comb_deps) {
+               for (unsigned i = 0; i < mgr->mt_isl_work_q.count; i++) {
+                  rt_island_t *isl = mgr->mt_isl_work_q.items[i];
+                  if (isl->dirty)
+                     APUSH(mgr->mt_isl_wave_q, isl);
                }
             }
-            for (uint32_t j = 0; j < isl->n_ext_out_sigs; j++)
-               island_sync_out_sig(m, isl, &(isl->sigs[isl->ext_out_sigs[j]]));
-         }
-         else {
-            for (uint32_t j = 0; j < isl->n_out_sigs; j++)
-               island_sync_out_sig(m, isl, &(isl->sigs[isl->out_sigs[j]]));
-         }
-         if (unlikely(isl->n_obs_sigs > 0)) {
-            for (uint32_t j = 0; j < isl->n_obs_sigs; j++)
-               island_sync_out_sig(m, isl, &(isl->sigs[isl->obs_sigs[j]]));
-         }
-      }
+            else {
+               const uint32_t tag = ++mgr->mt_wave_tag;
+               for (unsigned i = 0; i < mgr->mt_isl_work_q.count; i++) {
+                  rt_island_t *isl = mgr->mt_isl_work_q.items[i];
+                  if (!isl->dirty)
+                     continue;
+                  bool dep_in_wave = false;
+                  for (uint32_t d = 0; d < isl->n_comb_deps; d++) {
+                     if (isl->comb_deps[d]->mt_wave_tag == tag) {
+                        dep_in_wave = true;
+                        break;
+                     }
+                  }
+                  if (dep_in_wave)
+                     APUSH(mgr->mt_isl_rem_q, isl);
+                  else {
+                     isl->mt_wave_tag = tag;
+                     APUSH(mgr->mt_isl_wave_q, isl);
+                  }
+               }
+            }
 
-      if (mgr->dirty_q.count > n) {
-         memmove(mgr->dirty_q.items, mgr->dirty_q.items + n,
-                 (mgr->dirty_q.count - n) * sizeof(rt_island_t *));
-         mgr->dirty_q.count -= n;
+            if (mgr->mt_isl_wave_q.count == 0)
+               break;
+
+            if (mgr->mt_isl_wave_q.count < RT_ISLAND_MT_DIRTY_THRESHOLD) {
+               for (unsigned i = 0; i < mgr->mt_isl_wave_q.count; i++) {
+                  rt_island_t *isl = mgr->mt_isl_wave_q.items[i];
+                  if (!isl->dirty)
+                     continue;
+                  isl->dirty = false;
+                  isl->has_dirty_inputs = false;
+                  island_sync_dirty_inputs(isl);
+                  if (isl->eval_handle == JIT_HANDLE_INVALID)
+                     continue;
+                  if (!island_call_comb(jit, m, isl, tlab)) {
+                     ok = false;
+                     break;
+                  }
+                  island_sync_out_island(m, isl);
+               }
+            }
+            else {
+               mgr->mt_isl_safe_q.count = 0;
+               for (unsigned i = 0; i < mgr->mt_isl_wave_q.count; i++) {
+                  rt_island_t *isl = mgr->mt_isl_wave_q.items[i];
+                  assert(isl->cluster == NULL && isl->n_direct_comb_outs == 0);
+                  const bool safe = (isl->eval_handle == JIT_HANDLE_INVALID)
+                     || jit_prepare_call(jit, isl->eval_handle, 1u);
+                  isl->mt_eval_on_main = !safe;
+                  if (safe)
+                     APUSH(mgr->mt_isl_safe_q, isl);
+               }
+
+               if (mgr->mt_isl_safe_q.count < RT_ISLAND_MT_DIRTY_THRESHOLD) {
+                  for (unsigned i = 0; i < mgr->mt_isl_wave_q.count; i++) {
+                     rt_island_t *isl = mgr->mt_isl_wave_q.items[i];
+                     if (!isl->dirty)
+                        continue;
+                     isl->dirty = false;
+                     isl->has_dirty_inputs = false;
+                     island_sync_dirty_inputs(isl);
+                     if (isl->eval_handle == JIT_HANDLE_INVALID)
+                        continue;
+                     if (!island_call_comb(jit, m, isl, tlab)) {
+                        ok = false;
+                        break;
+                     }
+                     island_sync_out_island(m, isl);
+                  }
+               }
+               else {
+                  rt_island_pool_t *pool = island_pool_ensure(mgr, jit);
+                  if (!island_pool_run(pool, ISLAND_TASK_EVAL_DIRTY_ISLANDS,
+                                       (void *const *)mgr->mt_isl_safe_q.items,
+                                       mgr->mt_isl_safe_q.count, tlab)) {
+                     ok = false;
+                  }
+                  else {
+                     for (unsigned i = 0; i < mgr->mt_isl_wave_q.count; i++) {
+                        rt_island_t *isl = mgr->mt_isl_wave_q.items[i];
+                        if (isl->mt_eval_on_main) {
+                           if (!isl->dirty)
+                              continue;
+                           isl->dirty = false;
+                           isl->has_dirty_inputs = false;
+                           island_sync_dirty_inputs(isl);
+                           if (isl->eval_handle == JIT_HANDLE_INVALID)
+                              continue;
+                           if (!island_call_comb(jit, m, isl, tlab)) {
+                              ok = false;
+                              break;
+                           }
+                           island_sync_out_island(m, isl);
+                           continue;
+                        }
+                        if (!isl->need_sync_out)
+                           continue;
+                        isl->need_sync_out = false;
+                        island_sync_out_island(m, isl);
+                     }
+                  }
+               }
+            }
+
+            mgr->mt_isl_work_q.count = 0;
+            for (unsigned i = 0; i < mgr->mt_isl_rem_q.count; i++)
+               APUSH(mgr->mt_isl_work_q, mgr->mt_isl_rem_q.items[i]);
+         }
       }
-      else
-         mgr->dirty_q.count = 0;
    }
 
    if (ok && mgr->dirty_clusters.count > 0)
@@ -2398,6 +3289,84 @@ static bool island_sample_domain(jit_t *jit, rt_island_domain_t *dom,
    return ok;
 }
 
+static bool island_eval_ff_pre_sync(jit_t *jit, rt_model_t *m,
+                                    rt_island_mgr_t *mgr, tlab_t *tlab,
+                                    unsigned n_ff, unsigned n_sd)
+{
+   for (unsigned i = 0; i < n_ff; i++) {
+      rt_island_domain_t *dom = mgr->ff_sample_q.items[i];
+      rt_island_t *isl = dom->isl;
+      if (isl->cluster != NULL && isl->cluster->has_dirty) {
+         if (!island_eval_cluster(jit, m, isl->cluster, tlab))
+            return false;
+      }
+      if (isl->has_dirty_inputs) {
+         island_sync_dirty_inputs(isl);
+         isl->has_dirty_inputs = false;
+      }
+   }
+
+   for (unsigned i = 0; i < n_sd; i++) {
+      rt_super_domain_t *sd = mgr->super_sample_q.items[i];
+      for (uint32_t c = 0; c < sd->n_clusters; c++) {
+         rt_super_island_t *cl = sd->clusters[c];
+         if (cl->has_dirty && !island_eval_cluster(jit, m, cl, tlab))
+            return false;
+         if (cl->has_dirty_inputs) {
+            for (uint32_t k = 0; k < cl->n_islands; k++) {
+               rt_island_t *isl = cl->islands[k];
+               if (isl->has_dirty_inputs) {
+                  island_sync_dirty_inputs(isl);
+                  isl->has_dirty_inputs = false;
+               }
+            }
+            cl->has_dirty_inputs = false;
+         }
+      }
+
+      for (uint32_t s = 0; s < sd->n_solo_islands; s++) {
+         rt_island_t *isl = sd->solo_islands[s];
+         if (isl->has_dirty_inputs) {
+            island_sync_dirty_inputs(isl);
+            isl->has_dirty_inputs = false;
+         }
+         if (isl->dirty && isl->eval_handle != JIT_HANDLE_INVALID) {
+            isl->dirty = false;
+            if (!island_call_comb(jit, m, isl, tlab))
+               return false;
+            for (uint32_t j = 0; j < isl->n_out_sigs; j++)
+               island_sync_out_sig(m, isl, &(isl->sigs[isl->out_sigs[j]]));
+            if (unlikely(isl->n_obs_sigs > 0)) {
+               for (uint32_t j = 0; j < isl->n_obs_sigs; j++)
+                  island_sync_out_sig(m, isl, &(isl->sigs[isl->obs_sigs[j]]));
+            }
+         }
+      }
+   }
+
+   return true;
+}
+
+static inline void island_ff_enqueue_dom(rt_island_mgr_t *mgr,
+                                         rt_island_domain_t *dom,
+                                         bool safe)
+{
+   rt_island_t *isl = dom->isl;
+   dom->ff_batch_next = NULL;
+   if (isl->ff_pending_head == NULL) {
+      isl->ff_pending_head = dom;
+      isl->ff_pending_tail = dom;
+      isl->mt_ff_unsafe = !safe;
+      APUSH(mgr->mt_ff_islands, isl);
+   }
+   else {
+      isl->ff_pending_tail->ff_batch_next = dom;
+      isl->ff_pending_tail = dom;
+      if (!safe)
+         isl->mt_ff_unsafe = true;
+   }
+}
+
 bool rt_island_eval_ff(jit_t *jit, rt_model_t *m, rt_island_mgr_t *mgr,
                        tlab_t *tlab)
 {
@@ -2405,115 +3374,237 @@ bool rt_island_eval_ff(jit_t *jit, rt_model_t *m, rt_island_mgr_t *mgr,
        || (mgr->ff_sample_q.count == 0 && mgr->super_sample_q.count == 0))
       return true;
 
-   bool ok = true;
-   if (mgr->ff_sample_q.count > 0) {
-      unsigned n = mgr->ff_sample_q.count;
-      for (unsigned i = 0; i < n; i++) {
-         rt_island_domain_t *dom = mgr->ff_sample_q.items[i];
-         dom->in_sample_q = false;
+   const int nthreads = opt_get_int(OPT_SIM_THREADS);
+   const unsigned n_ff = mgr->ff_sample_q.count;
+   const unsigned n_sd = mgr->super_sample_q.count;
 
-         rt_island_t *isl = dom->isl;
-         if (isl->cluster != NULL && isl->cluster->has_dirty) {
-            if (!island_eval_cluster(jit, m, isl->cluster, tlab)) {
+   uint32_t total_doms = n_ff;
+   if (nthreads > 1) {
+      for (unsigned i = 0; i < n_sd; i++)
+         total_doms += mgr->super_sample_q.items[i]->n_doms;
+   }
+
+   bool do_probe = false;
+   const bool try_mt = (nthreads > 1 && total_doms >= RT_ISLAND_MT_FF_THRESHOLD)
+      && island_mt_gate_should_run(&mgr->mt_gate_ff, &do_probe);
+
+   if (!try_mt) {
+      const uint64_t t0 = do_probe ? get_timestamp_ns() : 0;
+      bool ok = true;
+      if (n_ff > 0) {
+         for (unsigned i = 0; i < n_ff; i++) {
+            rt_island_domain_t *dom = mgr->ff_sample_q.items[i];
+            dom->in_sample_q = false;
+
+            rt_island_t *isl = dom->isl;
+            if (isl->cluster != NULL && isl->cluster->has_dirty) {
+               if (!island_eval_cluster(jit, m, isl->cluster, tlab)) {
+                  ok = false;
+                  break;
+               }
+            }
+
+            if (!island_sample_domain(jit, dom, tlab)) {
                ok = false;
                break;
             }
+
+            if (!dom->in_commit_q) {
+               dom->in_commit_q = true;
+               APUSH(mgr->ff_commit_q, dom);
+            }
          }
 
-         if (!island_sample_domain(jit, dom, tlab)) {
-            ok = false;
-            break;
+         if (mgr->ff_sample_q.count > n_ff) {
+            memmove(mgr->ff_sample_q.items, mgr->ff_sample_q.items + n_ff,
+                    (mgr->ff_sample_q.count - n_ff)
+                    * sizeof(rt_island_domain_t *));
+            mgr->ff_sample_q.count -= n_ff;
          }
-
-         if (!dom->in_commit_q) {
-            dom->in_commit_q = true;
-            APUSH(mgr->ff_commit_q, dom);
-         }
+         else
+            mgr->ff_sample_q.count = 0;
       }
 
-      if (mgr->ff_sample_q.count > n) {
-         memmove(mgr->ff_sample_q.items, mgr->ff_sample_q.items + n,
-                 (mgr->ff_sample_q.count - n) * sizeof(rt_island_domain_t *));
-         mgr->ff_sample_q.count -= n;
+      if (ok && n_sd > 0) {
+         for (unsigned i = 0; i < n_sd; i++) {
+            rt_super_domain_t *sd = mgr->super_sample_q.items[i];
+            sd->in_sample_q = false;
+
+            for (uint32_t c = 0; c < sd->n_clusters; c++) {
+               rt_super_island_t *cl = sd->clusters[c];
+               if (cl->has_dirty && !island_eval_cluster(jit, m, cl, tlab)) {
+                  ok = false;
+                  break;
+               }
+               if (cl->has_dirty_inputs) {
+                  for (uint32_t k = 0; k < cl->n_islands; k++) {
+                     rt_island_t *isl = cl->islands[k];
+                     if (isl->has_dirty_inputs) {
+                        island_sync_dirty_inputs(isl);
+                        isl->has_dirty_inputs = false;
+                     }
+                  }
+                  cl->has_dirty_inputs = false;
+               }
+            }
+            if (!ok)
+               break;
+
+            for (uint32_t s = 0; s < sd->n_solo_islands; s++) {
+               rt_island_t *isl = sd->solo_islands[s];
+               if (isl->has_dirty_inputs) {
+                  island_sync_dirty_inputs(isl);
+                  isl->has_dirty_inputs = false;
+               }
+               if (isl->dirty && isl->eval_handle != JIT_HANDLE_INVALID) {
+                  isl->dirty = false;
+                  if (!island_call_comb(jit, m, isl, tlab)) {
+                     ok = false;
+                     break;
+                  }
+                  for (uint32_t j = 0; j < isl->n_out_sigs; j++)
+                     island_sync_out_sig(m, isl,
+                                         &(isl->sigs[isl->out_sigs[j]]));
+                  if (unlikely(isl->n_obs_sigs > 0)) {
+                     for (uint32_t j = 0; j < isl->n_obs_sigs; j++)
+                        island_sync_out_sig(m, isl,
+                                            &(isl->sigs[isl->obs_sigs[j]]));
+                  }
+               }
+            }
+            if (!ok)
+               break;
+
+            for (uint32_t d = 0; d < sd->n_doms; d++) {
+               if (!island_sample_domain(jit, sd->doms[d], tlab)) {
+                  ok = false;
+                  break;
+               }
+            }
+            if (!ok)
+               break;
+
+            if (!sd->in_commit_q) {
+               sd->in_commit_q = true;
+               APUSH(mgr->super_commit_q, sd);
+            }
+         }
+
+         if (mgr->super_sample_q.count > n_sd) {
+            memmove(mgr->super_sample_q.items, mgr->super_sample_q.items + n_sd,
+                    (mgr->super_sample_q.count - n_sd)
+                    * sizeof(rt_super_domain_t *));
+            mgr->super_sample_q.count -= n_sd;
+         }
+         else
+            mgr->super_sample_q.count = 0;
+      }
+
+      if (do_probe && ok)
+         island_mt_gate_record(&mgr->mt_gate_ff, get_timestamp_ns() - t0);
+
+      return ok;
+   }
+
+   if (!island_eval_ff_pre_sync(jit, m, mgr, tlab, n_ff, n_sd))
+      return false;
+
+   mgr->mt_ff_islands.count = 0;
+   for (unsigned i = 0; i < n_ff; i++) {
+      rt_island_domain_t *dom = mgr->ff_sample_q.items[i];
+      dom->in_sample_q = false;
+      const bool safe = jit_prepare_call(jit, dom->ff_handle, 1u);
+      island_ff_enqueue_dom(mgr, dom, safe);
+      if (!dom->in_commit_q) {
+         dom->in_commit_q = true;
+         APUSH(mgr->ff_commit_q, dom);
+      }
+   }
+   if (n_ff > 0) {
+      if (mgr->ff_sample_q.count > n_ff) {
+         memmove(mgr->ff_sample_q.items, mgr->ff_sample_q.items + n_ff,
+                 (mgr->ff_sample_q.count - n_ff)
+                 * sizeof(rt_island_domain_t *));
+         mgr->ff_sample_q.count -= n_ff;
       }
       else
          mgr->ff_sample_q.count = 0;
    }
 
-   if (ok && mgr->super_sample_q.count > 0) {
-      unsigned n = mgr->super_sample_q.count;
-      for (unsigned i = 0; i < n; i++) {
-         rt_super_domain_t *sd = mgr->super_sample_q.items[i];
-         sd->in_sample_q = false;
-
-         for (uint32_t c = 0; c < sd->n_clusters; c++) {
-            rt_super_island_t *cl = sd->clusters[c];
-            if (cl->has_dirty && !island_eval_cluster(jit, m, cl, tlab)) {
-               ok = false;
-               break;
-            }
-            if (cl->has_dirty_inputs) {
-               for (uint32_t k = 0; k < cl->n_islands; k++) {
-                  rt_island_t *isl = cl->islands[k];
-                  if (isl->has_dirty_inputs) {
-                     island_sync_dirty_inputs(isl);
-                     isl->has_dirty_inputs = false;
-                  }
-               }
-               cl->has_dirty_inputs = false;
-            }
-         }
-         if (!ok)
-            break;
-
-         for (uint32_t s = 0; s < sd->n_solo_islands; s++) {
-            rt_island_t *isl = sd->solo_islands[s];
-            if (isl->has_dirty_inputs) {
-               island_sync_dirty_inputs(isl);
-               isl->has_dirty_inputs = false;
-            }
-            if (isl->dirty && isl->eval_handle != JIT_HANDLE_INVALID) {
-               isl->dirty = false;
-               if (!island_call_comb(jit, m, isl, tlab)) {
-                  ok = false;
-                  break;
-               }
-               for (uint32_t j = 0; j < isl->n_out_sigs; j++)
-                  island_sync_out_sig(m, isl, &(isl->sigs[isl->out_sigs[j]]));
-               if (unlikely(isl->n_obs_sigs > 0)) {
-                  for (uint32_t j = 0; j < isl->n_obs_sigs; j++)
-                     island_sync_out_sig(m, isl,
-                                         &(isl->sigs[isl->obs_sigs[j]]));
-               }
-            }
-         }
-         if (!ok)
-            break;
-
-         for (uint32_t d = 0; d < sd->n_doms; d++) {
-            if (!island_sample_domain(jit, sd->doms[d], tlab)) {
-               ok = false;
-               break;
-            }
-         }
-         if (!ok)
-            break;
-
-         if (!sd->in_commit_q) {
-            sd->in_commit_q = true;
-            APUSH(mgr->super_commit_q, sd);
-         }
+   for (unsigned i = 0; i < n_sd; i++) {
+      rt_super_domain_t *sd = mgr->super_sample_q.items[i];
+      sd->in_sample_q = false;
+      for (uint32_t d = 0; d < sd->n_doms; d++) {
+         rt_island_domain_t *dom = sd->doms[d];
+         const bool safe = jit_prepare_call(jit, dom->ff_handle, 1u);
+         island_ff_enqueue_dom(mgr, dom, safe);
       }
-
-      if (mgr->super_sample_q.count > n) {
-         memmove(mgr->super_sample_q.items, mgr->super_sample_q.items + n,
-                 (mgr->super_sample_q.count - n) * sizeof(rt_super_domain_t *));
-         mgr->super_sample_q.count -= n;
+      if (!sd->in_commit_q) {
+         sd->in_commit_q = true;
+         APUSH(mgr->super_commit_q, sd);
+      }
+   }
+   if (n_sd > 0) {
+      if (mgr->super_sample_q.count > n_sd) {
+         memmove(mgr->super_sample_q.items, mgr->super_sample_q.items + n_sd,
+                 (mgr->super_sample_q.count - n_sd)
+                 * sizeof(rt_super_domain_t *));
+         mgr->super_sample_q.count -= n_sd;
       }
       else
          mgr->super_sample_q.count = 0;
    }
 
+   if (mgr->mt_ff_islands.count == 0)
+      return true;
+
+   mgr->mt_ff_safe_q.count = 0;
+   for (unsigned i = 0; i < mgr->mt_ff_islands.count; i++) {
+      rt_island_t *isl = mgr->mt_ff_islands.items[i];
+      if (!isl->mt_ff_unsafe)
+         APUSH(mgr->mt_ff_safe_q, isl);
+   }
+
+   bool ok = true;
+   if (mgr->mt_ff_safe_q.count >= RT_ISLAND_MT_FF_THRESHOLD) {
+      rt_island_pool_t *pool = island_pool_ensure(mgr, jit);
+      ok = island_pool_run(pool, ISLAND_TASK_EVAL_FF,
+                           (void *const *)mgr->mt_ff_safe_q.items,
+                           mgr->mt_ff_safe_q.count, tlab);
+      if (ok && mgr->mt_ff_safe_q.count < mgr->mt_ff_islands.count) {
+         for (unsigned i = 0; i < mgr->mt_ff_islands.count; i++) {
+            rt_island_t *isl = mgr->mt_ff_islands.items[i];
+            if (isl->mt_ff_unsafe
+                && !island_eval_ff_island_mt(jit, isl, tlab)) {
+               ok = false;
+               break;
+            }
+         }
+      }
+   }
+   else {
+      for (unsigned i = 0; i < mgr->mt_ff_islands.count; i++) {
+         if (!island_eval_ff_island_mt(jit, mgr->mt_ff_islands.items[i],
+                                       tlab)) {
+            ok = false;
+            break;
+         }
+      }
+   }
+
+   if (!ok) {
+      for (unsigned i = 0; i < mgr->mt_ff_islands.count; i++) {
+         rt_island_t *isl = mgr->mt_ff_islands.items[i];
+         rt_island_domain_t *dom = isl->ff_pending_head;
+         isl->ff_pending_head = NULL;
+         isl->ff_pending_tail = NULL;
+         while (dom != NULL) {
+            rt_island_domain_t *next = dom->ff_batch_next;
+            dom->ff_batch_next = NULL;
+            dom = next;
+         }
+      }
+   }
    return ok;
 }
 
