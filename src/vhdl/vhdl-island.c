@@ -151,10 +151,25 @@ static bool eval_const_int_depth(tree_t block, tree_t expr, int64_t *out,
       {
          const attr_kind_t ak = tree_subkind(expr);
          type_t t = tree_type(tree_name(expr));
-         if (t != NULL && type_is_array(t) && dimension_of(t) >= 1) {
+         if (t != NULL && type_is_array(t) && !type_is_unconstrained(t)
+             && dimension_of(t) >= 1) {
+            int64_t dim = 1;
+            if (tree_params(expr) > 0) {
+               if (tree_params(expr) != 1
+                   || !eval_const_int_depth(block,
+                                            tree_value(tree_param(expr, 0)),
+                                            &dim, depth + 1))
+                  return false;
+            }
+            if (dim < 1 || dim > dimension_of(t))
+               return false;
+            tree_t rg = range_of(t, (unsigned)(dim - 1));
+            if (rg == NULL || tree_kind(rg) != T_RANGE)
+               return false;
+            const range_kind_t dir = tree_subkind(rg);
+            if (dir != RANGE_TO && dir != RANGE_DOWNTO)
+               return false;
             int64_t l, r, len;
-            range_kind_t dir = direction_of(t, 0);
-            tree_t rg = range_of(t, 0);
             if (!eval_const_int_depth(block, tree_left(rg), &l, depth + 1)
                 || !eval_const_int_depth(block, tree_right(rg), &r, depth + 1))
                return false;
@@ -238,7 +253,7 @@ static bool eval_array_bounds(tree_t block, type_t t, int dim,
       return false;
 
    tree_t r = range_of(t, dim);
-   if (tree_kind(r) != T_RANGE)
+   if (r == NULL || tree_kind(r) != T_RANGE)
       return false;
 
    const range_kind_t rk = tree_subkind(r);

@@ -246,7 +246,7 @@ static bool vi_eval_type_bounds(const vhdl_island_ctx_t *ctx, type_t t,
    if (type_is_unconstrained(t) || !type_is_array(t) || dimension_of(t) < 1)
       return false;
    tree_t r = range_of(t, 0);
-   if (tree_kind(r) != T_RANGE)
+   if (r == NULL || tree_kind(r) != T_RANGE)
       return false;
    range_kind_t rk = tree_subkind(r);
    if (rk != RANGE_TO && rk != RANGE_DOWNTO)
@@ -3667,7 +3667,7 @@ vhdl_island_ctx_t *vhdl_island_lower_prepare(mir_context_t *mc, tree_t block,
       A(mir_unit_t *) isl_units = AINIT;
       int failed_proc = -1;
 
-      if (isl->n_comb_procs > 0) {
+      if (isl->n_comb_procs > 0 && mir_get_shape(mc, isl->eval_name) == NULL) {
          mir_unit_t *cmu = vi_build_comb_unit(mc, ctx, isl, &failed_proc);
          if (cmu == NULL) {
             vi_rebuild_without_rejected(ctx, failed_proc);
@@ -3679,6 +3679,8 @@ vhdl_island_ctx_t *vhdl_island_lower_prepare(mir_context_t *mc, tree_t block,
 
       bool ok = true;
       for (uint32_t d = 0; d < isl->n_doms; d++) {
+         if (mir_get_shape(mc, isl->doms[d].fn_name) != NULL)
+            continue;
          mir_unit_t *fmu = vi_build_ff_unit(mc, ctx, isl, &(isl->doms[d]),
                                             &failed_proc);
          if (fmu == NULL) {
