@@ -21,6 +21,7 @@
 #include "hash.h"
 #include "ident.h"
 #include "option.h"
+#include "psl/psl-node.h"
 #include "rt/island.h"
 #include "tree.h"
 #include "type.h"
@@ -1865,6 +1866,141 @@ eject_scan_reads:
 static void scan_unfused_refs(const vhdl_island_ctx_t *ctx, tree_t t,
                               bool is_target, u32_list_t *ext_reads,
                               bool mark_ext_drivers, sig_list_t *sigs_mut,
+                              int depth);
+
+static void scan_psl_refs(const vhdl_island_ctx_t *ctx, psl_node_t p,
+                          u32_list_t *ext_reads, sig_list_t *sigs_mut,
+                          int depth)
+{
+   if (p == NULL || depth > 64)
+      return;
+
+   switch (psl_kind(p)) {
+   case P_HDL_EXPR:
+   case P_CLOCK_DECL:
+      if (psl_has_tree(p))
+         scan_unfused_refs(ctx, psl_tree(p), false, ext_reads, false,
+                           sigs_mut, 0);
+      return;
+
+   case P_PARAM_DECL:
+      if (psl_has_tree(p))
+         scan_unfused_refs(ctx, psl_tree(p), false, ext_reads, false,
+                           sigs_mut, 0);
+      if (psl_has_value(p))
+         scan_psl_refs(ctx, psl_value(p), ext_reads, sigs_mut, depth + 1);
+      return;
+
+   case P_PROC_BLOCK:
+      if (psl_has_tree(p))
+         scan_unfused_refs(ctx, psl_tree(p), false, ext_reads, true,
+                           sigs_mut, 0);
+      if (psl_has_value(p))
+         scan_psl_refs(ctx, psl_value(p), ext_reads, sigs_mut, depth + 1);
+      return;
+
+   case P_CLOCKED:
+      if (psl_has_tree(p))
+         scan_unfused_refs(ctx, psl_tree(p), false, ext_reads, false,
+                           sigs_mut, 0);
+      if (psl_has_value(p))
+         scan_psl_refs(ctx, psl_value(p), ext_reads, sigs_mut, depth + 1);
+      if (psl_has_ref(p))
+         scan_psl_refs(ctx, psl_ref(p), ext_reads, sigs_mut, depth + 1);
+      return;
+
+   case P_ASSERT:
+   case P_ASSUME:
+   case P_RESTRICT:
+   case P_COVER:
+      if (psl_has_message(p))
+         scan_unfused_refs(ctx, psl_message(p), false, ext_reads, false,
+                           sigs_mut, 0);
+      if (psl_has_value(p))
+         scan_psl_refs(ctx, psl_value(p), ext_reads, sigs_mut, depth + 1);
+      return;
+
+   case P_FAIRNESS:
+      if (psl_has_message(p))
+         scan_unfused_refs(ctx, psl_message(p), false, ext_reads, false,
+                           sigs_mut, 0);
+      for (unsigned i = 0; i < psl_operands(p); i++)
+         scan_psl_refs(ctx, psl_operand(p, i), ext_reads, sigs_mut, depth + 1);
+      return;
+
+   case P_ALWAYS:
+   case P_NEVER:
+   case P_EVENTUALLY:
+   case P_PROPERTY_DECL:
+   case P_SEQUENCE_DECL:
+   case P_ENDPOINT_DECL:
+      if (psl_has_value(p))
+         scan_psl_refs(ctx, psl_value(p), ext_reads, sigs_mut, depth + 1);
+      return;
+
+   case P_NEXT:
+   case P_NEXT_A:
+   case P_NEXT_E:
+   case P_REPEAT:
+      if (psl_has_value(p))
+         scan_psl_refs(ctx, psl_value(p), ext_reads, sigs_mut, depth + 1);
+      if (psl_has_delay(p))
+         scan_psl_refs(ctx, psl_delay(p), ext_reads, sigs_mut, depth + 1);
+      return;
+
+   case P_NEXT_EVENT:
+   case P_NEXT_EVENT_A:
+   case P_NEXT_EVENT_E:
+      if (psl_has_value(p))
+         scan_psl_refs(ctx, psl_value(p), ext_reads, sigs_mut, depth + 1);
+      if (psl_has_delay(p))
+         scan_psl_refs(ctx, psl_delay(p), ext_reads, sigs_mut, depth + 1);
+      for (unsigned i = 0; i < psl_operands(p); i++)
+         scan_psl_refs(ctx, psl_operand(p, i), ext_reads, sigs_mut, depth + 1);
+      return;
+
+   case P_PROPERTY_INST:
+   case P_SEQUENCE_INST:
+      if (psl_has_ref(p))
+         scan_psl_refs(ctx, psl_ref(p), ext_reads, sigs_mut, depth + 1);
+      for (unsigned i = 0; i < psl_operands(p); i++)
+         scan_psl_refs(ctx, psl_operand(p, i), ext_reads, sigs_mut, depth + 1);
+      return;
+
+   case P_PARAM_SERE:
+   case P_PARAM_PROP:
+      if (psl_has_value(p))
+         scan_psl_refs(ctx, psl_value(p), ext_reads, sigs_mut, depth + 1);
+      for (unsigned i = 0; i < psl_operands(p); i++)
+         scan_psl_refs(ctx, psl_operand(p, i), ext_reads, sigs_mut, depth + 1);
+      return;
+
+   case P_SERE:
+   case P_UNION:
+   case P_BUILTIN_FCALL:
+   case P_VALUE_SET:
+   case P_UNTIL:
+   case P_ABORT:
+   case P_BEFORE:
+   case P_SUFFIX_IMPL:
+   case P_LOGICAL:
+      for (unsigned i = 0; i < psl_operands(p); i++)
+         scan_psl_refs(ctx, psl_operand(p, i), ext_reads, sigs_mut, depth + 1);
+      return;
+
+   case P_RANGE:
+      scan_psl_refs(ctx, psl_left(p), ext_reads, sigs_mut, depth + 1);
+      scan_psl_refs(ctx, psl_right(p), ext_reads, sigs_mut, depth + 1);
+      return;
+
+   default:
+      return;
+   }
+}
+
+static void scan_unfused_refs(const vhdl_island_ctx_t *ctx, tree_t t,
+                              bool is_target, u32_list_t *ext_reads,
+                              bool mark_ext_drivers, sig_list_t *sigs_mut,
                               int depth)
 {
    if (t == NULL || depth > 64)
@@ -2047,6 +2183,13 @@ static void scan_unfused_refs(const vhdl_island_ctx_t *ctx, tree_t t,
                            mark_ext_drivers, sigs_mut, depth + 1);
       return;
 
+   case T_PSL_DIRECT:
+   case T_PSL_DECL:
+   case T_PSL_FCALL:
+   case T_PSL_UNION:
+      scan_psl_refs(ctx, tree_psl(t), ext_reads, sigs_mut, 0);
+      return;
+
    default:
       return;
    }
@@ -2210,6 +2353,12 @@ static void scan_child_block_uses(const vhdl_island_ctx_t *ctx, tree_t blk,
          is_entity_inst = true;
    }
    if (!is_entity_inst) {
+      const int nd = tree_decls(blk);
+      for (int i = 0; i < nd; i++) {
+         tree_t cd = tree_decl(blk, i);
+         if (tree_kind(cd) == T_PSL_DECL)
+            scan_psl_refs(ctx, tree_psl(cd), ext_reads, sigs, 0);
+      }
       const int n = tree_stmts(blk);
       for (int i = 0; i < n; i++) {
          tree_t cs = tree_stmt(blk, i);
@@ -2458,7 +2607,12 @@ vhdl_island_ctx_t *vhdl_island_analyze(tree_t block, ident_t scope_prefix)
    for (int i = 0; i < nstmts; i++)
       mark_ineligible_attr_expr(ctx, &sigs, tree_stmt(block, i), 0);
 
-   // Scan child T_BLOCK port maps (including inside generate blocks) and T_PSL_DIRECT
+   // Scan PSL declarations, child T_BLOCK port maps, and T_PSL_DIRECT
+   for (int i = 0; i < ndecls; i++) {
+      tree_t d = tree_decl(block, i);
+      if (tree_kind(d) == T_PSL_DECL)
+         scan_psl_refs(ctx, tree_psl(d), &ext_reads, &sigs, 0);
+   }
    for (int i = 0; i < nstmts; i++) {
       tree_t s = tree_stmt(block, i);
       if (tree_kind(s) == T_BLOCK)
