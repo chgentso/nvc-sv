@@ -526,6 +526,8 @@ static inline bool island_sig_observed(const rt_island_sig_t *s)
    for (uint32_t i = 0; i < sig->n_nexus; i++, nx = nx->chain) {
       if (!island_nexus_overlaps_sig(nx, s))
          continue;
+      if (nx->outputs != NULL)
+         return true;
       if (island_pending_has_ext_observer(nx->pending))
          return true;
    }
@@ -2448,6 +2450,25 @@ void rt_island_reset_all(rt_island_mgr_t *mgr)
       isl->dirty = false;
       isl->in_dirty_list = false;
       isl->has_dirty_inputs = false;
+   }
+
+   // Re-scan observed status now that all child scopes have run map_signal
+   // and sched_event (rt_island_finish ran per-scope before child init).
+   for (unsigned i = 0; i < mgr->islands.count; i++) {
+      rt_island_t *isl = mgr->islands.items[i];
+      for (uint32_t j = 0; j < isl->nsigs; j++) {
+         rt_island_sig_t *s = &(isl->sigs[j]);
+         if (s->sig == NULL
+             || !(s->flags & (RT_ISIG_COMB_WRITTEN | RT_ISIG_FF_WRITTEN))
+             || (s->flags & RT_ISIG_OBSERVED))
+            continue;
+         if (island_sig_observed(s)) {
+            s->flags |= RT_ISIG_OBSERVED;
+            if ((s->flags & RT_ISIG_COMB_WRITTEN)
+                && !(s->flags & RT_ISIG_OUT))
+               island_add_obs_sig(isl, j);
+         }
+      }
    }
 
    if (island_is_hier_mode()) {
