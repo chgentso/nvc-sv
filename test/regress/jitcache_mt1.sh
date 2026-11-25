@@ -56,9 +56,9 @@ module tb_sv_mt_cache;
   initial begin
     int cycles;
     logic [15:0] xsum;
-    cycles = 80;
+    cycles = 400;
     if (!$value$plusargs("CYCLES=%d", cycles))
-      cycles = 80;
+      cycles = 400;
 
     u0.acc  = 16'h1001; u1.acc  = 16'h1002; u2.acc  = 16'h1003; u3.acc  = 16'h1004;
     u4.acc  = 16'h1005; u5.acc  = 16'h1006; u6.acc  = 16'h1007; u7.acc  = 16'h1008;
@@ -144,7 +144,7 @@ begin
   process
     variable xsum : unsigned(15 downto 0) := (others => '0');
   begin
-    for c in 0 to 60 loop
+    for c in 0 to 300 loop
       wait until falling_edge(clk);
       din <= resize(din * 13 + 5, 16);
       wait until rising_edge(clk);
@@ -178,7 +178,7 @@ for T in 1 2 4; do
 
   NVC_JIT_CACHE_DIR="$CDIR" nvc-sv --work=work_sv --threads="$T" -r tb_sv_mt_cache \
     > "sv_cold_t${T}.out" 2> "sv_cold_t${T}.log"
-  grep -q "SV_OK cycles=80" "sv_cold_t${T}.out"
+  grep -q "SV_OK cycles=400" "sv_cold_t${T}.out"
 
   NVC_JIT_CACHE_DIR="$CDIR" nvc-sv --work=work_vhdl --threads="$T" -r tb_vhdl_mt_cache \
     > "vhdl_cold_t${T}.out" 2> "vhdl_cold_t${T}.log"
