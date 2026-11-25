@@ -2174,7 +2174,22 @@ static void scan_unfused_refs(const vhdl_island_ctx_t *ctx, tree_t t,
                            mark_ext_drivers, sigs_mut, depth + 1);
       return;
 
+   case T_FORCE:
+      scan_unfused_refs(ctx, tree_target(t), true, ext_reads,
+                        mark_ext_drivers, sigs_mut, depth + 1);
+      if (tree_has_value(t))
+         scan_unfused_refs(ctx, tree_value(t), false, ext_reads,
+                           mark_ext_drivers, sigs_mut, depth + 1);
+      return;
+
+   case T_RELEASE:
+      scan_unfused_refs(ctx, tree_target(t), true, ext_reads,
+                        mark_ext_drivers, sigs_mut, depth + 1);
+      return;
+
    case T_PCALL:
+   case T_PROT_PCALL:
+   case T_PROT_FCALL:
       for (int i = 0; i < tree_params(t); i++)
          scan_unfused_refs(ctx, tree_value(tree_param(t, i)), false,
                            ext_reads, mark_ext_drivers, sigs_mut, depth + 1);
@@ -2373,6 +2388,37 @@ static void scan_child_block_uses(const vhdl_island_ctx_t *ctx, tree_t blk,
    }
 }
 
+static void mark_target_sig_flag(sig_list_t *sigs, tree_t target,
+                                 bool set_ineligible, bool set_ext_driver)
+{
+   if (target == NULL)
+      return;
+   if (tree_kind(target) == T_AGGREGATE) {
+      for (int i = 0; i < tree_assocs(target); i++)
+         mark_target_sig_flag(sigs, tree_value(tree_assoc(target, i)),
+                              set_ineligible, set_ext_driver);
+      return;
+   }
+   tree_t base = unwrap_signal_base(target);
+   tree_t decl = NULL;
+   int path[VHDL_ISIG_MAX_DEPTH];
+   uint8_t plen = 0;
+   if (vhdl_island_extract_path(base, &decl, path, &plen)) {
+      for (uint32_t i = 0; i < sigs->count; i++) {
+         if (sigs->items[i].decl == decl
+             && (plen == 0
+                 || (sigs->items[i].path_len >= plen
+                     && memcmp(sigs->items[i].field_path, path,
+                               plen * sizeof(int)) == 0))) {
+            if (set_ineligible)
+               sigs->items[i].ineligible = true;
+            if (set_ext_driver)
+               sigs->items[i].has_ext_driver = true;
+         }
+      }
+   }
+}
+
 static void mark_ineligible_attr_expr(vhdl_island_ctx_t *ctx, sig_list_t *sigs,
                                       tree_t t, int depth)
 {
@@ -2383,20 +2429,27 @@ static void mark_ineligible_attr_expr(vhdl_island_ctx_t *ctx, sig_list_t *sigs,
       {
          const attr_kind_t ak = tree_subkind(t);
          if (ak == ATTR_DELAYED || ak == ATTR_STABLE
-             || ak == ATTR_QUIET || ak == ATTR_TRANSACTION) {
-            tree_t base = unwrap_signal_base(tree_name(t));
-            tree_t decl = NULL;
-            int path[VHDL_ISIG_MAX_DEPTH];
-            uint8_t plen = 0;
-            if (vhdl_island_extract_path(base, &decl, path, &plen)) {
-               for (uint32_t i = 0; i < sigs->count; i++) {
-                  if (sigs->items[i].decl == decl)
-                     sigs->items[i].ineligible = true;
-               }
-            }
+             || ak == ATTR_QUIET || ak == ATTR_TRANSACTION
+             || ak == ATTR_ACTIVE || ak == ATTR_LAST_ACTIVE
+             || ak == ATTR_DRIVING || ak == ATTR_DRIVING_VALUE) {
+            mark_target_sig_flag(sigs, tree_name(t), true, false);
+         }
+         else if (ak == ATTR_LAST_EVENT || ak == ATTR_LAST_VALUE) {
+            mark_target_sig_flag(sigs, tree_name(t), false, true);
          }
          mark_ineligible_attr_expr(ctx, sigs, tree_name(t), depth + 1);
+         for (int i = 0; i < tree_params(t); i++)
+            mark_ineligible_attr_expr(ctx, sigs, tree_value(tree_param(t, i)),
+                                      depth + 1);
       }
+      break;
+   case T_FORCE:
+      mark_target_sig_flag(sigs, tree_target(t), true, true);
+      if (tree_has_value(t))
+         mark_ineligible_attr_expr(ctx, sigs, tree_value(t), depth + 1);
+      break;
+   case T_RELEASE:
+      mark_target_sig_flag(sigs, tree_target(t), true, true);
       break;
    case T_IF:
    case T_COND_EXPR:
@@ -2424,6 +2477,49 @@ static void mark_ineligible_attr_expr(vhdl_island_ctx_t *ctx, sig_list_t *sigs,
             mark_ineligible_attr_expr(ctx, sigs, tree_value(w), depth + 1);
       }
       break;
+   case T_VAR_ASSIGN:
+      mark_ineligible_attr_expr(ctx, sigs, tree_target(t), depth + 1);
+      mark_ineligible_attr_expr(ctx, sigs, tree_value(t), depth + 1);
+      break;
+   case T_ARRAY_REF:
+      mark_ineligible_attr_expr(ctx, sigs, tree_value(t), depth + 1);
+      for (int i = 0; i < tree_params(t); i++)
+         mark_ineligible_attr_expr(ctx, sigs, tree_value(tree_param(t, i)),
+                                   depth + 1);
+      break;
+   case T_ARRAY_SLICE:
+   case T_RECORD_REF:
+   case T_QUALIFIED:
+   case T_TYPE_CONV:
+      mark_ineligible_attr_expr(ctx, sigs, tree_value(t), depth + 1);
+      break;
+   case T_AGGREGATE:
+      for (int i = 0; i < tree_assocs(t); i++) {
+         tree_t a = tree_assoc(t, i);
+         if (tree_subkind(a) == A_NAMED)
+            mark_ineligible_attr_expr(ctx, sigs, tree_name(a), depth + 1);
+         mark_ineligible_attr_expr(ctx, sigs, tree_value(a), depth + 1);
+      }
+      break;
+   case T_RETURN:
+      if (tree_has_value(t))
+         mark_ineligible_attr_expr(ctx, sigs, tree_value(t), depth + 1);
+      break;
+   case T_BLOCK:
+      {
+         bool is_entity_inst = false;
+         if (tree_decls(t) > 0 && tree_kind(tree_decl(t, 0)) == T_HIER) {
+            tree_t unit = tree_ref(tree_decl(t, 0));
+            if (unit != NULL && (is_design_unit(unit)
+                                 || tree_kind(unit) == T_COMPONENT))
+               is_entity_inst = true;
+         }
+         if (!is_entity_inst) {
+            for (int i = 0; i < tree_stmts(t); i++)
+               mark_ineligible_attr_expr(ctx, sigs, tree_stmt(t, i), depth + 1);
+         }
+      }
+      break;
    case T_PROCESS:
    case T_FOR:
    case T_WHILE:
@@ -2435,6 +2531,8 @@ static void mark_ineligible_attr_expr(vhdl_island_ctx_t *ctx, sig_list_t *sigs,
    case T_WAIT:
       if (tree_has_value(t))
          mark_ineligible_attr_expr(ctx, sigs, tree_value(t), depth + 1);
+      for (int i = 0; i < tree_triggers(t); i++)
+         mark_ineligible_attr_expr(ctx, sigs, tree_trigger(t, i), depth + 1);
       break;
    case T_ASSERT:
       if (tree_has_value(t))
@@ -2443,8 +2541,13 @@ static void mark_ineligible_attr_expr(vhdl_island_ctx_t *ctx, sig_list_t *sigs,
    case T_REPORT:
       if (tree_has_message(t))
          mark_ineligible_attr_expr(ctx, sigs, tree_message(t), depth + 1);
+      if (tree_has_severity(t))
+         mark_ineligible_attr_expr(ctx, sigs, tree_severity(t), depth + 1);
       break;
    case T_FCALL:
+   case T_PCALL:
+   case T_PROT_PCALL:
+   case T_PROT_FCALL:
       for (int i = 0; i < tree_params(t); i++)
          mark_ineligible_attr_expr(ctx, sigs, tree_value(tree_param(t, i)),
                                    depth + 1);
