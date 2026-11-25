@@ -565,6 +565,11 @@ bool thread_attached(void)
    return my_thread != NULL;
 }
 
+unsigned thread_max_workers(void)
+{
+   return max_workers > 0 ? max_workers : 1;
+}
+
 void thread_sleep(int usec)
 {
    usleep(usec);

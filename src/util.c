@@ -2265,18 +2265,24 @@ void capture_registers(struct cpu_state *cpu)
 #endif
 }
 
+static nvc_lock_t fault_lock = 0;
+
 void add_fault_handler(fault_fn_t fn, void *context)
 {
+   SCOPED_LOCK(fault_lock);
+
    fault_handler_t *h = xmalloc(sizeof(fault_handler_t));
    h->next    = fault_handlers;
    h->fn      = fn;
    h->context = context;
 
-   fault_handlers = h;
+   store_release(&fault_handlers, h);
 }
 
 void remove_fault_handler(fault_fn_t fn, void *context)
 {
+   SCOPED_LOCK(fault_lock);
+
    for (fault_handler_t **p = &fault_handlers; *p; p = &((*p)->next)) {
       if ((*p)->fn == fn && (*p)->context == context) {
          fault_handler_t *tmp = (*p)->next;

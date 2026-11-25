@@ -26,6 +26,7 @@
 
 #define NVC_JIT_CACHE_ABI 3
 
+typedef struct _jit jit_t;
 typedef struct _jit_cache jit_cache_t;
 typedef struct _jit_func jit_func_t;
 
@@ -63,6 +64,12 @@ void jit_cache_prepare_slots(jit_cache_t *cache, jit_func_t *f, bool huge,
 
 bool jit_cache_lookup(jit_cache_t *cache, const jit_cache_key_t *key,
                       void **data_out, size_t *size_out);
+
+bool jit_cache_lookup_or_claim(jit_cache_t *cache, const jit_cache_key_t *key,
+                               jit_t *jit, void **data_out, size_t *size_out,
+                               bool *claimed_out);
+
+void jit_cache_release_claim(jit_cache_t *cache, const jit_cache_key_t *key);
 
 void jit_cache_store(jit_cache_t *cache, const jit_cache_key_t *key,
                      const void *data, size_t size);

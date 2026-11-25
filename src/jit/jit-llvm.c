@@ -1367,11 +1367,22 @@ static void llvm_dump_value(const char *tag, LLVMValueRef value)
 
 static void llvm_native_setup(void)
 {
-   LLVMInitializeNativeTarget();
-   LLVMInitializeNativeAsmPrinter();
+   static nvc_lock_t init_lock = 0;
+   static bool initialised = false;
 
-   if (!LLVMIsMultithreaded())
-      fatal("LLVM was built without multithreaded support");
+   if (likely(load_acquire(&initialised)))
+      return;
+
+   SCOPED_LOCK(init_lock);
+   if (!initialised) {
+      LLVMInitializeNativeTarget();
+      LLVMInitializeNativeAsmPrinter();
+
+      if (!LLVMIsMultithreaded())
+         fatal("LLVM was built without multithreaded support");
+
+      store_release(&initialised, true);
+   }
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -3998,6 +4009,9 @@ static void *jit_llvm_init(jit_t *jit)
 
 static void jit_llvm_cgen(jit_t *j, jit_handle_t handle, void *context)
 {
+   if (jit_is_shutdown(j))
+      return;
+
    llvm_jit_state_t *state = context;
 
    jit_func_t *f = jit_get_func(j, handle);
@@ -4023,6 +4037,7 @@ static void jit_llvm_cgen(jit_t *j, jit_handle_t handle, void *context)
    uint32_t *slot_map = NULL;
    unsigned nslots = 0;
    bool uses_cpool = false;
+   bool claimed = false;
    if (cache_on) {
       jit_cache_prepare_slots(state->cache, f, huge, &key, &relocs, &nrelocs,
                               &slot_map, &nslots, &uses_cpool);
@@ -4035,7 +4050,8 @@ static void jit_llvm_cgen(jit_t *j, jit_handle_t handle, void *context)
 
       void *cached_obj = NULL;
       size_t cached_sz = 0;
-      if (jit_cache_lookup(state->cache, &key, &cached_obj, &cached_sz)) {
+      if (jit_cache_lookup_or_claim(state->cache, &key, f->jit, &cached_obj,
+                                    &cached_sz, &claimed)) {
          free(slot_map);
          if (jit_is_shutdown(f->jit)) {
             free(cached_obj);
@@ -4076,6 +4092,14 @@ static void jit_llvm_cgen(jit_t *j, jit_handle_t handle, void *context)
                    f->name ? istr(f->name) : "(anon)",
                    entry_addr, size, end_us - start_us);
          }
+         return;
+      }
+
+      if (jit_is_shutdown(f->jit)) {
+         if (claimed)
+            jit_cache_release_claim(state->cache, &key);
+         free(relocs);
+         free(slot_map);
          return;
       }
    }
@@ -4170,6 +4194,16 @@ static void jit_llvm_cgen(jit_t *j, jit_handle_t handle, void *context)
    if (cache_on)
       jit_cache_store(state->cache, &key, objdata, objsz);
 
+   if (claimed) {
+      jit_cache_release_claim(state->cache, &key);
+      claimed = false;
+   }
+
+   if (jit_is_shutdown(f->jit)) {
+      free(relocs);
+      goto skip_load;
+   }
+
    const size_t hint = objsz + MAX(8192, objsz / 4);
 
    code_blob_t *blob = code_blob_new(state->code, f->name, hint);
@@ -4207,6 +4241,8 @@ static void jit_llvm_cgen(jit_t *j, jit_handle_t handle, void *context)
    LLVMDisposeMemoryBuffer(buf);
 
  skip_emit:
+   if (claimed)
+      jit_cache_release_claim(state->cache, &key);
    LLVMDisposeTargetData(obj.data_ref);
    LLVMDisposeTargetMachine(tm);
    LLVMDisposeBuilder(obj.builder);

@@ -42,10 +42,35 @@
 #ifndef O_BINARY
 #define O_BINARY _O_BINARY
 #endif
+typedef CRITICAL_SECTION   cache_mutex_t;
+typedef CONDITION_VARIABLE cache_cond_t;
+static inline void cache_mutex_init(cache_mutex_t *m)    { InitializeCriticalSection(m); }
+static inline void cache_mutex_destroy(cache_mutex_t *m) { DeleteCriticalSection(m); }
+static inline void cache_mutex_lock(cache_mutex_t *m)    { EnterCriticalSection(m); }
+static inline void cache_mutex_unlock(cache_mutex_t *m)  { LeaveCriticalSection(m); }
+static inline void cache_cond_init(cache_cond_t *c)      { InitializeConditionVariable(c); }
+static inline void cache_cond_destroy(cache_cond_t *c)   { (void)c; }
+static inline void cache_cond_broadcast(cache_cond_t *c) { WakeAllConditionVariable(c); }
+static inline void cache_cond_wait(cache_cond_t *c, cache_mutex_t *m) {
+   SleepConditionVariableCS(c, m, INFINITE);
+}
 #else
+#include <pthread.h>
 #ifndef O_BINARY
 #define O_BINARY 0
 #endif
+typedef pthread_mutex_t cache_mutex_t;
+typedef pthread_cond_t  cache_cond_t;
+static inline void cache_mutex_init(cache_mutex_t *m)    { pthread_mutex_init(m, NULL); }
+static inline void cache_mutex_destroy(cache_mutex_t *m) { pthread_mutex_destroy(m); }
+static inline void cache_mutex_lock(cache_mutex_t *m)    { pthread_mutex_lock(m); }
+static inline void cache_mutex_unlock(cache_mutex_t *m)  { pthread_mutex_unlock(m); }
+static inline void cache_cond_init(cache_cond_t *c)      { pthread_cond_init(c, NULL); }
+static inline void cache_cond_destroy(cache_cond_t *c)   { pthread_cond_destroy(c); }
+static inline void cache_cond_broadcast(cache_cond_t *c) { pthread_cond_broadcast(c); }
+static inline void cache_cond_wait(cache_cond_t *c, cache_mutex_t *m) {
+   pthread_cond_wait(c, m);
+}
 #endif
 
 #define JIT_CACHE_MAGIC     UINT32_C(0x4e56434a)   // "NVCJ"
@@ -64,19 +89,22 @@ typedef struct {
 STATIC_ASSERT(sizeof(jit_cache_hdr_t) == 80);
 
 struct _jit_cache {
-   nvc_lock_t      lock;
-   char           *dir;
-   char           *opt_dir_snap;
-   bool            enabled;
-   char           *triple;
-   char           *cpu;
-   char           *features;
-   char           *build_fp;
-   jit_cache_cfg_t cfg;
-   uint64_t        writes;
-   uint64_t        session_bytes;
-   uint64_t        tmp_seq;
-   int             evicting;
+   nvc_lock_t         lock;
+   char              *dir;
+   char              *opt_dir_snap;
+   bool               enabled;
+   char              *triple;
+   char              *cpu;
+   char              *features;
+   char              *build_fp;
+   jit_cache_cfg_t    cfg;
+   uint64_t           writes;
+   uint64_t           session_bytes;
+   uint64_t           tmp_seq;
+   int                evicting;
+   cache_mutex_t      inflight_mtx;
+   cache_cond_t       inflight_cv;
+   A(jit_cache_key_t) inflight;
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -418,8 +446,10 @@ static int cache_rename(const char *src, const char *dst)
 ////////////////////////////////////////////////////////////////////////////////
 // Cache lifecycle & configuration
 
-static void refresh_cache_dir(jit_cache_t *cache)
+static void refresh_cache_dir_locked(jit_cache_t *cache)
 {
+   assert_lock_held(&cache->lock);
+
    const char *opt_dir = opt_get_str(OPT_JIT_CACHE_DIR);
    if (cache->opt_dir_snap == NULL && opt_dir == NULL)
       return;
@@ -427,14 +457,28 @@ static void refresh_cache_dir(jit_cache_t *cache)
        && strcmp(cache->opt_dir_snap, opt_dir) == 0)
       return;
 
-   SCOPED_LOCK(cache->lock);
-
    free(cache->opt_dir_snap);
    cache->opt_dir_snap = opt_dir ? xstrdup(opt_dir) : NULL;
 
    free(cache->dir);
    cache->dir = resolve_cache_dir();
    cache->enabled = (cache->dir != NULL) && cache_dir_writable(cache->dir);
+}
+
+static char *cache_dup_dir(jit_cache_t *cache, bool require_enabled)
+{
+   if (cache == NULL)
+      return NULL;
+   if (require_enabled && !opt_get_int(OPT_JIT_CACHE))
+      return NULL;
+
+   SCOPED_LOCK(cache->lock);
+   refresh_cache_dir_locked(cache);
+
+   if (require_enabled && !cache->enabled)
+      return NULL;
+
+   return cache->dir ? xstrdup(cache->dir) : NULL;
 }
 
 jit_cache_t *jit_cache_new(const char *triple, const char *cpu,
@@ -448,6 +492,9 @@ jit_cache_t *jit_cache_new(const char *triple, const char *cpu,
    cache->build_fp = xstrdup(build_fp ?: "");
    if (cfg != NULL)
       cache->cfg = *cfg;
+
+   cache_mutex_init(&cache->inflight_mtx);
+   cache_cond_init(&cache->inflight_cv);
 
    const char *opt_dir = opt_get_str(OPT_JIT_CACHE_DIR);
    cache->opt_dir_snap = opt_dir ? xstrdup(opt_dir) : NULL;
@@ -463,6 +510,10 @@ void jit_cache_free(jit_cache_t *cache)
    if (cache == NULL)
       return;
 
+   ACLEAR(cache->inflight);
+   cache_cond_destroy(&cache->inflight_cv);
+   cache_mutex_destroy(&cache->inflight_mtx);
+
    free(cache->dir);
    free(cache->opt_dir_snap);
    free(cache->triple);
@@ -477,8 +528,9 @@ bool jit_cache_enabled(jit_cache_t *cache)
    if (cache == NULL || !opt_get_int(OPT_JIT_CACHE))
       return false;
 
-   refresh_cache_dir(cache);
-   return relaxed_load(&cache->enabled);
+   SCOPED_LOCK(cache->lock);
+   refresh_cache_dir_locked(cache);
+   return cache->enabled;
 }
 
 const char *jit_cache_dir(jit_cache_t *cache)
@@ -486,7 +538,8 @@ const char *jit_cache_dir(jit_cache_t *cache)
    if (cache == NULL)
       return NULL;
 
-   refresh_cache_dir(cache);
+   SCOPED_LOCK(cache->lock);
+   refresh_cache_dir_locked(cache);
    return cache->dir;
 }
 
@@ -850,14 +903,18 @@ static int cmp_cache_entry_mtime(const void *a, const void *b)
 static void cache_evict_if_needed(jit_cache_t *cache)
 {
    const size_t limit = opt_get_size(OPT_JIT_CACHE_LIMIT);
-   if (limit == 0 || cache->dir == NULL)
+   if (limit == 0)
+      return;
+
+   char *dir LOCAL = cache_dup_dir(cache, false);
+   if (dir == NULL)
       return;
 
    if (!atomic_cas(&cache->evicting, 0, 1))
       return;
 
    const time_t now = time(NULL);
-   DIR *root = opendir(cache->dir);
+   DIR *root = opendir(dir);
    if (root == NULL) {
       atomic_store(&cache->evicting, 0);
       return;
@@ -871,7 +928,7 @@ static void cache_evict_if_needed(jit_cache_t *cache)
       if (strlen(de->d_name) != 2)
          continue;
 
-      char *subdir LOCAL = xasprintf("%s/%s", cache->dir, de->d_name);
+      char *subdir LOCAL = xasprintf("%s/%s", dir, de->d_name);
       DIR *sd = opendir(subdir);
       if (sd == NULL)
          continue;
@@ -936,19 +993,31 @@ static void cache_evict_if_needed(jit_cache_t *cache)
    atomic_store(&cache->evicting, 0);
 }
 
+static int cache_inflight_find(const jit_cache_t *cache,
+                               const jit_cache_key_t *key)
+{
+   for (unsigned i = 0; i < cache->inflight.count; i++) {
+      if (memcmp(cache->inflight.items[i].bytes, key->bytes,
+                 sizeof(key->bytes)) == 0)
+         return (int)i;
+   }
+   return -1;
+}
+
 bool jit_cache_lookup(jit_cache_t *cache, const jit_cache_key_t *key,
                       void **data_out, size_t *size_out)
 {
    *data_out = NULL;
    *size_out = 0;
 
-   if (!jit_cache_enabled(cache))
+   char *dir LOCAL = cache_dup_dir(cache, true);
+   if (dir == NULL)
       return false;
 
    char hex[65];
    jit_cache_hex(key, hex);
 
-   char *path LOCAL = xasprintf("%s/%c%c/%s.o", cache->dir, hex[0], hex[1], hex);
+   char *path LOCAL = xasprintf("%s/%c%c/%s.o", dir, hex[0], hex[1], hex);
    int fd = open(path, O_RDONLY | O_BINARY);
    if (fd < 0)
       return false;
@@ -1010,24 +1079,91 @@ bool jit_cache_lookup(jit_cache_t *cache, const jit_cache_key_t *key,
    return true;
 }
 
+bool jit_cache_lookup_or_claim(jit_cache_t *cache, const jit_cache_key_t *key,
+                               jit_t *jit, void **data_out, size_t *size_out,
+                               bool *claimed_out)
+{
+   *data_out = NULL;
+   *size_out = 0;
+   *claimed_out = false;
+
+   for (;;) {
+      if (jit_cache_lookup(cache, key, data_out, size_out))
+         return true;
+
+      if (!jit_cache_enabled(cache) || jit_is_shutdown(jit))
+         return false;
+
+      cache_mutex_lock(&cache->inflight_mtx);
+      if (cache_inflight_find(cache, key) < 0) {
+         APUSH(cache->inflight, *key);
+         cache_mutex_unlock(&cache->inflight_mtx);
+         *claimed_out = true;
+         return false;
+      }
+
+      bool waited = false;
+      while (cache_inflight_find(cache, key) >= 0 && !jit_is_shutdown(jit)) {
+         waited = true;
+         cache_cond_wait(&cache->inflight_cv, &cache->inflight_mtx);
+      }
+      cache_mutex_unlock(&cache->inflight_mtx);
+
+      if (jit_is_shutdown(jit))
+         return false;
+
+      if (waited) {
+         if (jit_cache_lookup(cache, key, data_out, size_out))
+            return true;
+         return false;
+      }
+   }
+}
+
+void jit_cache_release_claim(jit_cache_t *cache, const jit_cache_key_t *key)
+{
+   if (cache == NULL || key == NULL)
+      return;
+
+   cache_mutex_lock(&cache->inflight_mtx);
+   const int idx = cache_inflight_find(cache, key);
+   if (idx >= 0) {
+      const unsigned last = cache->inflight.count - 1;
+      if ((unsigned)idx != last)
+         cache->inflight.items[idx] = cache->inflight.items[last];
+      cache->inflight.count = last;
+   }
+   cache_cond_broadcast(&cache->inflight_cv);
+   cache_mutex_unlock(&cache->inflight_mtx);
+}
+
+static void cache_disable_locked(jit_cache_t *cache)
+{
+   SCOPED_LOCK(cache->lock);
+   cache->enabled = false;
+}
+
 void jit_cache_store(jit_cache_t *cache, const jit_cache_key_t *key,
                      const void *data, size_t size)
 {
-   if (!jit_cache_enabled(cache) || data == NULL || size == 0
-       || size > JIT_CACHE_MAX_SIZE)
+   if (data == NULL || size == 0 || size > JIT_CACHE_MAX_SIZE)
+      return;
+
+   char *dir LOCAL = cache_dup_dir(cache, true);
+   if (dir == NULL)
       return;
 
    char hex[65];
    jit_cache_hex(key, hex);
 
-   char *subdir LOCAL = xasprintf("%s/%c%c", cache->dir, hex[0], hex[1]);
+   char *subdir LOCAL = xasprintf("%s/%c%c", dir, hex[0], hex[1]);
    if (!cache_mkdir_p(subdir)) {
       if (errno == EACCES || errno == EROFS)
-         relaxed_store(&cache->enabled, false);
+         cache_disable_locked(cache);
       return;
    }
 
-   const uint64_t seq = relaxed_fetch_add(&cache->tmp_seq, 1);
+   const uint64_t seq = atomic_fetch_add(&cache->tmp_seq, 1);
    char *tmp LOCAL = xasprintf("%s/.tmp.%s.%lu.%d.%" PRIu64, subdir, hex,
                                (unsigned long)getpid(), thread_id(), seq);
    char *dst LOCAL = xasprintf("%s/%s.o", subdir, hex);
@@ -1035,7 +1171,7 @@ void jit_cache_store(jit_cache_t *cache, const jit_cache_key_t *key,
    int fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_BINARY, 0644);
    if (fd < 0) {
       if (errno == EACCES || errno == EROFS)
-         relaxed_store(&cache->enabled, false);
+         cache_disable_locked(cache);
       return;
    }
 

@@ -907,9 +907,13 @@ const debug_frame_t *debug_get_frame(debug_info_t *di, unsigned n)
    return AGET(di->frames, n);
 }
 
+static nvc_lock_t unwinder_lock = 0;
+
 void debug_add_unwinder(void *start, size_t len, debug_unwind_fn_t fn,
                         void *context)
 {
+   SCOPED_LOCK(unwinder_lock);
+
    debug_unwinder_t *uw = xmalloc(sizeof(debug_unwinder_t));
    uw->next    = unwinders;
    uw->fn      = fn;
@@ -917,11 +921,13 @@ void debug_add_unwinder(void *start, size_t len, debug_unwind_fn_t fn,
    uw->start   = (uintptr_t)start;
    uw->end     = (uintptr_t)start + len;
 
-   unwinders = uw;
+   store_release(&unwinders, uw);
 }
 
 void debug_remove_unwinder(void *start)
 {
+   SCOPED_LOCK(unwinder_lock);
+
    for (debug_unwinder_t **p = &unwinders; *p; p = &((*p)->next)) {
       if ((*p)->start == (uintptr_t)start) {
          debug_unwinder_t *tmp = *p;

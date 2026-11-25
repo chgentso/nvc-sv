@@ -211,7 +211,7 @@ static void code_cache_unwinder(uintptr_t addr, debug_frame_t *frame,
    code_cache_t *code = context;
 
    const uint8_t *pc = (uint8_t *)addr;
-   for (code_span_t *span = code->spans; span; span = span->next) {
+   for (code_span_t *span = load_acquire(&code->spans); span; span = span->next) {
       if (pc >= span->base && pc < span->base + span->size) {
          frame->kind = FRAME_VHDL;
          frame->disp = pc - span->base;
@@ -235,7 +235,8 @@ static void code_fault_handler(int sig, void *addr, struct cpu_state *cpu,
       mark--;   // Point to faulting instruction
 #endif
 
-   for (code_span_t *span = page->owner->spans; span; span = span->next) {
+   for (code_span_t *span = load_acquire(&page->owner->spans); span;
+        span = span->next) {
       if (pc >= span->base && pc < span->base + span->size && span->name)
          code_disassemble(span, mark, cpu);
    }
@@ -255,10 +256,10 @@ static bool code_cache_contains(code_cache_t *code, uint8_t *base, size_t size)
 }
 #endif
 
-static code_span_t *code_span_new(code_cache_t *code, ident_t name,
-                                  uint8_t *base, size_t size)
+static code_span_t *code_span_new_locked(code_cache_t *code, ident_t name,
+                                         uint8_t *base, size_t size)
 {
-   SCOPED_LOCK(code->lock);
+   assert_lock_held(&code->lock);
 
    assert(code_cache_contains(code, base, size));
 
@@ -270,7 +271,7 @@ static code_span_t *code_span_new(code_cache_t *code, ident_t name,
    span->size  = size;
    span->owner = code;
 
-   code->spans = span;
+   store_release(&code->spans, span);
    return span;
 }
 
@@ -298,7 +299,8 @@ static void code_page_new(code_cache_t *code, size_t min_size)
    span->size  = pagesz;
    span->owner = code;
 
-   code->globalfree = code->spans = span;
+   code->globalfree = span;
+   store_release(&code->spans, span);
 }
 
 code_cache_t *code_cache_new(void)
@@ -389,32 +391,42 @@ code_cache_t *code_cache_new(void)
 
 void code_cache_free(code_cache_t *code)
 {
-   for (code_page_t *it = code->pages, *tmp; it; it = tmp) {
-      debug_remove_unwinder(it->mem);
-      remove_fault_handler(code_fault_handler, it);
+   {
+      SCOPED_LOCK(code->lock);
 
-      nvc_munmap(it->mem, it->size);
+      for (code_page_t *it = code->pages, *tmp; it; it = tmp) {
+         debug_remove_unwinder(it->mem);
+         remove_fault_handler(code_fault_handler, it);
 
-      tmp = it->next;
-      free(it);
-   }
+         nvc_munmap(it->mem, it->size);
 
-   for (code_span_t *it = code->spans, *tmp; it; it = tmp) {
-      tmp = it->next;
-      DEBUG_ONLY(free(it->debug.comments));
-      free(it);
-   }
+         tmp = it->next;
+         free(it);
+      }
+
+      for (code_span_t *it = code->spans, *tmp; it; it = tmp) {
+         tmp = it->next;
+         DEBUG_ONLY(free(it->debug.comments));
+         free(it);
+      }
+
+      if (code->perfmap != NULL) {
+         fclose(code->perfmap);
+         code->perfmap = NULL;
+      }
 
 #ifdef HAVE_CAPSTONE
-   cs_close(&(code->capstone));
+      cs_close(&(code->capstone));
 #endif
 
 #ifdef DEBUG
-   if (code->used > 0)
-      debugf("JIT code footprint: %zu bytes", code->used);
+      if (code->used > 0)
+         debugf("JIT code footprint: %zu bytes", code->used);
 #endif
 
-   shash_free(code->symbols);
+      shash_free(code->symbols);
+   }
+
    free(code);
 }
 
@@ -577,52 +589,54 @@ static void code_write_perf_map(code_span_t *span)
 
 code_blob_t *code_blob_new(code_cache_t *code, ident_t name, size_t hint)
 {
-   code_span_t **freeptr = &(code->freelist[thread_id()]);
-
-   code_span_t *free = relaxed_load(freeptr);
-   if (free == NULL) {
-      free = code_span_new(code, NULL, code->pages->mem, 0);
-      relaxed_store(freeptr, free);
-   }
-
+   const int tid = thread_id();
    const size_t reqsz = hint ?: MIN_BLOB_SIZE;
 
-   if (free->size < reqsz) {
+   code_span_t *span;
+   {
       SCOPED_LOCK(code->lock);
 
-#ifdef DEBUG
-      if (free->size > 0)
-         debugf("thread %d needs new code cache from global free list "
-                "(requested %zu bytes, wasted %zu bytes)",
-                thread_id(), reqsz, free->size);
-#endif
-
-      const size_t chunksz = MAX(reqsz, THREAD_CACHE_SIZE);
-      const size_t alignedsz = ALIGN_UP(chunksz, CODE_BLOB_ALIGN);
-
-      if (alignedsz > code->globalfree->size) {
-         DEBUG_ONLY(debugf("requesting new %zu byte code page",
-                           MAX(alignedsz, (size_t)CODE_PAGE_SIZE)));
-         code_page_new(code, alignedsz);
-         assert(code->globalfree->size >= alignedsz);
+      code_span_t *free = code->freelist[tid];
+      if (free == NULL) {
+         free = code_span_new_locked(code, NULL, code->pages->mem, 0);
+         code->freelist[tid] = free;
       }
 
-      const size_t take = MIN(code->globalfree->size, alignedsz);
+      if (free->size < reqsz) {
+#ifdef DEBUG
+         if (free->size > 0)
+            debugf("thread %d needs new code cache from global free list "
+                   "(requested %zu bytes, wasted %zu bytes)",
+                   tid, reqsz, free->size);
+#endif
 
-      free->size = take;
-      free->base = code->globalfree->base;
+         const size_t chunksz = MAX(reqsz, THREAD_CACHE_SIZE);
+         const size_t alignedsz = ALIGN_UP(chunksz, CODE_BLOB_ALIGN);
 
-      code->globalfree->base += take;
-      code->globalfree->size -= take;
+         if (alignedsz > code->globalfree->size) {
+            DEBUG_ONLY(debugf("requesting new %zu byte code page",
+                              MAX(alignedsz, (size_t)CODE_PAGE_SIZE)));
+            code_page_new(code, alignedsz);
+            assert(code->globalfree->size >= alignedsz);
+         }
+
+         const size_t take = MIN(code->globalfree->size, alignedsz);
+
+         free->size = take;
+         free->base = code->globalfree->base;
+
+         code->globalfree->base += take;
+         code->globalfree->size -= take;
+      }
+
+      assert(reqsz <= free->size);
+      assert(((uintptr_t)free->base & (CODE_BLOB_ALIGN - 1)) == 0);
+
+      span = code_span_new_locked(code, name, free->base, free->size);
+
+      free->base += span->size;
+      free->size -= span->size;
    }
-
-   assert(reqsz <= free->size);
-   assert(((uintptr_t)free->base & (CODE_BLOB_ALIGN - 1)) == 0);
-
-   code_span_t *span = code_span_new(code, name, free->base, free->size);
-
-   free->base += span->size;
-   free->size -= span->size;
 
    code_blob_t *blob = xcalloc(sizeof(code_blob_t));
    blob->span = span;
@@ -636,29 +650,42 @@ code_blob_t *code_blob_new(code_cache_t *code, ident_t name, size_t hint)
 void code_blob_finalise(code_blob_t *blob, jit_entry_fn_t *entry)
 {
    code_span_t *span = blob->span;
-   span->size = blob->wptr - span->base;
-
-   code_span_t *freespan = relaxed_load(&(span->owner->freelist[thread_id()]));
-   assert(freespan->size == 0);
+   code_cache_t *code = span->owner;
+   uint8_t *wptr = blob->wptr;
+   const size_t span_size = wptr - span->base;
 
    ihash_free(blob->labels);
    blob->labels = NULL;
 
    if (unlikely(blob->patches != NULL))
       fatal_trace("not all labels in %s were patched", istr(span->name));
-   else if (unlikely(blob->overflow)) {
-      // Return all the memory
-      freespan->size = freespan->base - span->base;
-      freespan->base = span->base;
-      free(blob);
-      return;
-   }
-   else if (span->size == 0)
-      fatal_trace("code span %s is empty", istr(span->name));
 
-   uint8_t *aligned = ALIGN_UP(blob->wptr, CODE_BLOB_ALIGN);
-   freespan->size = freespan->base - aligned;
-   freespan->base = aligned;
+   const int tid = thread_id();
+   {
+      SCOPED_LOCK(code->lock);
+
+      code_span_t *freespan = code->freelist[tid];
+      assert(freespan != NULL && freespan->size == 0);
+
+      if (unlikely(blob->overflow)) {
+         // Return all the memory
+         span->size = 0;
+         freespan->size = freespan->base - span->base;
+         freespan->base = span->base;
+         free(blob);
+         thread_wx_mode(WX_EXECUTE);
+         return;
+      }
+
+      if (span_size == 0)
+         fatal_trace("code span %s is empty", istr(span->name));
+
+      span->size = span_size;
+
+      uint8_t *aligned = ALIGN_UP(wptr, CODE_BLOB_ALIGN);
+      freespan->size = freespan->base - aligned;
+      freespan->base = aligned;
+   }
 
    if (opt_get_verbose(OPT_ASM_VERBOSE, istr(span->name))) {
       nvc_printf("\n$bold$$blue$");
@@ -666,13 +693,13 @@ void code_blob_finalise(code_blob_t *blob, jit_entry_fn_t *entry)
       nvc_printf("$$\n");
    }
 
-   __builtin___clear_cache((char *)span->base, (char *)blob->wptr);
+   __builtin___clear_cache((char *)span->base, (char *)wptr);
 
    thread_wx_mode(WX_EXECUTE);
 
    store_release(entry, (jit_entry_fn_t)span->entry);
 
-   DEBUG_ONLY(relaxed_add(&span->owner->used, span->size));
+   DEBUG_ONLY(relaxed_add(&code->used, span_size));
    free(blob);
 
    if (opt_get_int(OPT_PERF_MAP))

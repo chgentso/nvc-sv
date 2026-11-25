@@ -3245,6 +3245,7 @@ vlog_typedef_fwd1 verilog
 svcombstatic1   verilog
 svcombassert1   verilog
 jitcache1       shell
+jitcache_mt1    shell
 svpollstruct1   verilog
 svpollskip1     verilog
 svpollskip2     verilog

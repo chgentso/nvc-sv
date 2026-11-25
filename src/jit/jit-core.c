@@ -45,11 +45,67 @@
 #include <string.h>
 #include <unistd.h>
 
-#define FUNC_HASH_SZ    1024
-#define FUNC_LIST_SZ    512
-#define COMPILE_TIMEOUT 10000
+#ifdef __MINGW32__
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+typedef CRITICAL_SECTION   jit_mutex_t;
+typedef CONDITION_VARIABLE jit_cond_t;
+static inline void jit_mutex_init(jit_mutex_t *m)    { InitializeCriticalSection(m); }
+static inline void jit_mutex_destroy(jit_mutex_t *m) { DeleteCriticalSection(m); }
+static inline void jit_mutex_lock(jit_mutex_t *m)    { EnterCriticalSection(m); }
+static inline void jit_mutex_unlock(jit_mutex_t *m)  { LeaveCriticalSection(m); }
+static inline void jit_cond_init(jit_cond_t *c)      { InitializeConditionVariable(c); }
+static inline void jit_cond_destroy(jit_cond_t *c)   { (void)c; }
+static inline void jit_cond_signal(jit_cond_t *c)    { WakeConditionVariable(c); }
+static inline void jit_cond_broadcast(jit_cond_t *c) { WakeAllConditionVariable(c); }
+static inline void jit_cond_wait(jit_cond_t *c, jit_mutex_t *m) {
+   SleepConditionVariableCS(c, m, INFINITE);
+}
+#else
+#include <pthread.h>
+typedef pthread_mutex_t jit_mutex_t;
+typedef pthread_cond_t  jit_cond_t;
+static inline void jit_mutex_init(jit_mutex_t *m)    { pthread_mutex_init(m, NULL); }
+static inline void jit_mutex_destroy(jit_mutex_t *m) { pthread_mutex_destroy(m); }
+static inline void jit_mutex_lock(jit_mutex_t *m)    { pthread_mutex_lock(m); }
+static inline void jit_mutex_unlock(jit_mutex_t *m)  { pthread_mutex_unlock(m); }
+static inline void jit_cond_init(jit_cond_t *c)      { pthread_cond_init(c, NULL); }
+static inline void jit_cond_destroy(jit_cond_t *c)   { pthread_cond_destroy(c); }
+static inline void jit_cond_signal(jit_cond_t *c)    { pthread_cond_signal(c); }
+static inline void jit_cond_broadcast(jit_cond_t *c) { pthread_cond_broadcast(c); }
+static inline void jit_cond_wait(jit_cond_t *c, jit_mutex_t *m) {
+   pthread_cond_wait(c, m);
+}
+#endif
+
+#define FUNC_HASH_SZ         1024
+#define FUNC_LIST_SZ         512
+#define COMPILE_TIMEOUT      10000
+#define JIT_POOL_MAX_WORKERS 4
 
 typedef struct _linked_tlab linked_tlab_t;
+typedef struct _jit_pool    jit_pool_t;
+
+typedef struct {
+   jit_func_t *func;
+   jit_tier_t *tier;
+} jit_job_t;
+
+struct _jit_pool {
+   jit_t         *jit;
+   jit_pool_t    *next;
+   unsigned       nworkers;
+   nvc_thread_t **workers;
+   jit_job_t     *queue;
+   unsigned       head;
+   unsigned       tail;
+   unsigned       count;
+   unsigned       cap;
+   unsigned       in_flight;
+   bool           stop;
+   jit_mutex_t    mtx;
+   jit_cond_t     cv;
+};
 
 typedef struct _jit_tier {
    jit_tier_t    *next;
@@ -87,11 +143,13 @@ typedef struct _jit {
    mir_context_t    *mir;
    linked_tlab_t    *live_tlabs;
    linked_tlab_t    *free_tlabs;
+   jit_pool_t       *pool;
 } jit_t;
 
 static void jit_transition(jit_thread_local_t *thread, jit_t *j,
                            jit_state_t from, jit_state_t to);
 static void jit_diag_cb(diag_t *d, void *arg);
+static void jit_pool_destroy(jit_t *j);
 
 static void jit_oom_cb(mspace_t *m, size_t size, void *ctx)
 {
@@ -186,6 +244,7 @@ static void jit_free_func(jit_func_t *f)
 void jit_free(jit_t *j)
 {
    store_release(&j->shutdown, true);
+   jit_pool_destroy(j);
    async_barrier();
 
    for (int i = 0; i < j->next_handle; i++)
@@ -364,13 +423,15 @@ void jit_fill_irbuf(jit_func_t *f)
    const jit_state_t oldstate = thread->state;
    jit_transition(thread, f->jit, oldstate, JIT_COMPILING);
 
-   mir_unit_t *mu = mir_get_unit(f->jit->mir, f->name);
-
-   if (mu == NULL && f->jit->registry != NULL) {
+   mir_unit_t *mu;
+   {
       // Unit registry and MIR import is not thread-safe
       SCOPED_LOCK(f->jit->lock);
-      (void)unit_registry_get(f->jit->registry, f->name);
       mu = mir_get_unit(f->jit->mir, f->name);
+      if (mu == NULL && f->jit->registry != NULL) {
+         (void)unit_registry_get(f->jit->registry, f->name);
+         mu = mir_get_unit(f->jit->mir, f->name);
+      }
    }
 
    if (mu == NULL) {
@@ -513,7 +574,7 @@ bool jit_prepare_call(jit_t *j, jit_handle_t handle, unsigned count)
       f->mt_unsafe = 0;
    }
 
-   if (entry == jit_interp && f->next_tier != NULL && count > 0) {
+   if (entry == jit_interp && relaxed_load(&f->next_tier) != NULL && count > 0) {
       if (f->hotness <= count) {
          f->hotness = 0;
          jit_tier_up(f);
@@ -531,10 +592,10 @@ void *jit_link(jit_t *j, jit_handle_t handle)
       return NULL;
 
    jit_func_t *f = jit_get_func(j, handle);
-   if (f->privdata != MPTR_INVALID)
-      return *mptr_get(f->privdata);
-
-   f->privdata = mptr_new(j->mspace, "privdata");
+   void **privptr = jit_get_privdata_ptr(j, f);
+   void *existing = load_acquire(privptr);
+   if (existing != NULL)
+      return existing;
 
    jit_fill_irbuf(f);
 
@@ -1127,27 +1188,204 @@ bool jit_exit_status(jit_t *j, int *status)
       return false;
 }
 
-static void jit_async_cgen(void *context, void *arg)
-{
-   jit_func_t *f = context;
-   jit_tier_t *tier = arg;
+static nvc_lock_t  jit_pools_lock = 0;
+static jit_pool_t *jit_pools_head = NULL;
+static bool        jit_pools_atexit_registered = false;
 
-   if (!jit_is_shutdown(f->jit))
-      (*tier->plugin.cgen)(f->jit, f->handle, tier->context);
+static void jit_pool_stop_and_join(jit_pool_t *pool)
+{
+   if (pool == NULL)
+      return;
+
+   store_release(&pool->jit->shutdown, true);
+
+   jit_mutex_lock(&pool->mtx);
+   pool->stop  = true;
+   pool->head  = 0;
+   pool->tail  = 0;
+   pool->count = 0;
+   jit_cond_broadcast(&pool->cv);
+   jit_mutex_unlock(&pool->mtx);
+
+   for (unsigned i = 0; i < pool->nworkers; i++) {
+      if (pool->workers[i] != NULL) {
+         thread_join(pool->workers[i]);
+         pool->workers[i] = NULL;
+      }
+   }
+}
+
+static void jit_pools_shutdown_atexit(void)
+{
+   if (thread_attached() && thread_id() != 0)
+      return;
+
+   jit_pool_t *list;
+   {
+      SCOPED_LOCK(jit_pools_lock);
+      list = jit_pools_head;
+      jit_pools_head = NULL;
+   }
+
+   for (jit_pool_t *p = list; p != NULL; p = p->next)
+      jit_pool_stop_and_join(p);
+}
+
+static void *jit_pool_worker(void *arg)
+{
+   mspace_stack_limit(MSPACE_CURRENT_FRAME);
+   jit_init_thread();
+
+   jit_pool_t *pool = arg;
+   for (;;) {
+      jit_mutex_lock(&pool->mtx);
+      while (!pool->stop && pool->count == 0)
+         jit_cond_wait(&pool->cv, &pool->mtx);
+
+      if (pool->stop) {
+         jit_mutex_unlock(&pool->mtx);
+         return NULL;
+      }
+
+      jit_job_t job = pool->queue[pool->head];
+      pool->head = (pool->head + 1u) & (pool->cap - 1u);
+      pool->count--;
+      pool->in_flight++;
+      jit_mutex_unlock(&pool->mtx);
+
+      if (!jit_is_shutdown(job.func->jit))
+         (*job.tier->plugin.cgen)(job.func->jit, job.func->handle,
+                                  job.tier->context);
+
+      jit_mutex_lock(&pool->mtx);
+      pool->in_flight--;
+      jit_mutex_unlock(&pool->mtx);
+   }
+}
+
+static jit_pool_t *jit_pool_ensure(jit_t *j)
+{
+   jit_pool_t *pool = load_acquire(&j->pool);
+   if (likely(pool != NULL))
+      return pool;
+
+   SCOPED_LOCK(j->lock);
+   if (j->pool != NULL)
+      return j->pool;
+   if (jit_is_shutdown(j))
+      return NULL;
+
+   const int sim_threads = opt_get_int(OPT_SIM_THREADS);
+   const unsigned req = sim_threads > 1
+      ? (unsigned)MIN(JIT_POOL_MAX_WORKERS, sim_threads)
+      : 1u;
+   const unsigned nworkers = MIN(req, thread_max_workers());
+
+   pool = xcalloc(sizeof(jit_pool_t));
+   pool->jit      = j;
+   pool->nworkers = nworkers;
+   pool->cap      = 64;
+   pool->queue    = xcalloc_array(pool->cap, sizeof(jit_job_t));
+   pool->workers  = xcalloc_array(nworkers, sizeof(nvc_thread_t *));
+   jit_mutex_init(&pool->mtx);
+   jit_cond_init(&pool->cv);
+
+   {
+      SCOPED_LOCK(jit_pools_lock);
+      if (!jit_pools_atexit_registered) {
+         atexit(jit_pools_shutdown_atexit);
+         jit_pools_atexit_registered = true;
+      }
+      pool->next = jit_pools_head;
+      jit_pools_head = pool;
+   }
+
+   for (unsigned i = 0; i < nworkers; i++)
+      pool->workers[i] = thread_create(jit_pool_worker, pool, "jit %u", i + 1u);
+
+   store_release(&j->pool, pool);
+   return pool;
+}
+
+static void jit_pool_enqueue(jit_pool_t *pool, jit_func_t *f, jit_tier_t *tier)
+{
+   jit_mutex_lock(&pool->mtx);
+   if (pool->stop || jit_is_shutdown(pool->jit)) {
+      jit_mutex_unlock(&pool->mtx);
+      return;
+   }
+
+   if (pool->count == pool->cap) {
+      const unsigned newcap = pool->cap * 2u;
+      jit_job_t *newq = xcalloc_array(newcap, sizeof(jit_job_t));
+      const unsigned first = pool->cap - pool->head;
+      memcpy(newq, pool->queue + pool->head, first * sizeof(jit_job_t));
+      if (pool->head > 0)
+         memcpy(newq + first, pool->queue, pool->head * sizeof(jit_job_t));
+      free(pool->queue);
+      pool->queue = newq;
+      pool->head  = 0;
+      pool->tail  = pool->count;
+      pool->cap   = newcap;
+   }
+
+   pool->queue[pool->tail] = (jit_job_t){ .func = f, .tier = tier };
+   pool->tail = (pool->tail + 1u) & (pool->cap - 1u);
+   pool->count++;
+   jit_cond_signal(&pool->cv);
+   jit_mutex_unlock(&pool->mtx);
+}
+
+static void jit_pool_destroy(jit_t *j)
+{
+   jit_pool_t *pool = load_acquire(&j->pool);
+   if (pool == NULL)
+      return;
+
+   {
+      SCOPED_LOCK(jit_pools_lock);
+      for (jit_pool_t **pp = &jit_pools_head; *pp != NULL; pp = &((*pp)->next)) {
+         if (*pp == pool) {
+            *pp = pool->next;
+            break;
+         }
+      }
+   }
+
+   jit_pool_stop_and_join(pool);
+   assert(pool->in_flight == 0);
+
+   jit_cond_destroy(&pool->cv);
+   jit_mutex_destroy(&pool->mtx);
+   free(pool->queue);
+   free(pool->workers);
+   free(pool);
+   store_release(&j->pool, NULL);
 }
 
 void jit_tier_up(jit_func_t *f)
 {
    assert(f->hotness <= 0);
-   assert(f->next_tier != NULL);
 
-   if (opt_get_int(OPT_JIT_ASYNC))
-      async_do(jit_async_cgen, f, f->next_tier);
-   else
-      (f->next_tier->plugin.cgen)(f->jit, f->handle, f->next_tier->context);
+   jit_tier_t *tier = atomic_xchg(&f->next_tier, NULL);
+   if (tier == NULL)
+      return;
 
-   f->hotness   = 0;
-   f->next_tier = NULL;
+   f->hotness = 0;
+
+   if (load_acquire(&f->state) != JIT_FUNC_READY || f->irbuf == NULL)
+      jit_fill_irbuf(f);
+
+   if (opt_get_int(OPT_JIT_ASYNC) && thread_max_workers() > 1) {
+      jit_pool_t *pool = jit_pool_ensure(f->jit);
+      if (pool != NULL) {
+         jit_pool_enqueue(pool, f, tier);
+         return;
+      }
+   }
+
+   if (!jit_is_shutdown(f->jit))
+      (*tier->plugin.cgen)(f->jit, f->handle, tier->context);
 }
 
 void jit_add_tier(jit_t *j, int threshold, const jit_plugin_t *plugin)
