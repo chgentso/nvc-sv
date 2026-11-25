@@ -6094,8 +6094,8 @@ static inline bool packed_can_fast_direct(const rt_signal_t *s)
       && s->nexus.pending == NULL;
 }
 
-static bool save_deferred(rt_model_t *m, rt_nexus_t *n, size_t valuesz,
-                          const void *init_src)
+static bool save_deferred_ex(rt_model_t *m, rt_nexus_t *n, size_t valuesz,
+                             const void *init_src, bool *already_saved)
 {
    rt_proc_t *ap = get_active_proc();
    if (ap == NULL || !ap->comb)
@@ -6107,8 +6107,11 @@ static bool save_deferred(rt_model_t *m, rt_nexus_t *n, size_t valuesz,
    unsigned i = 0;
    while (i < m->ndeferred && m->deferred[i].nexus != n)
       i++;
-   if (i < m->ndeferred)
+   if (i < m->ndeferred) {
+      if (already_saved != NULL)
+         *already_saved = true;
       return true;
+   }
 
    if (m->ndeferred < DEFER_MAX) {
       unsigned char *init = valuesz <= sizeof(m->deferred[i].buf)
@@ -6117,14 +6120,40 @@ static bool save_deferred(rt_model_t *m, rt_nexus_t *n, size_t valuesz,
       m->deferred[i].init = init;
       memcpy(init, init_src, valuesz);
       m->ndeferred++;
+      if (already_saved != NULL)
+         *already_saved = false;
       return true;
    }
    return false;
 }
 
-static bool packed_save_deferred(rt_model_t *m, rt_nexus_t *n, size_t valuesz)
+static bool save_deferred(rt_model_t *m, rt_nexus_t *n, size_t valuesz,
+                          const void *init_src)
 {
-   return save_deferred(m, n, valuesz, n->signal->shared.data);
+   return save_deferred_ex(m, n, valuesz, init_src, NULL);
+}
+
+static bool packed_save_deferred(rt_model_t *m, rt_nexus_t *n, size_t valuesz,
+                                 bool *already_saved)
+{
+   return save_deferred_ex(m, n, valuesz, n->signal->shared.data,
+                           already_saved);
+}
+
+static inline void packed_merge_last_word(uint64_t *last_a, uint64_t *last_b,
+                                          int w, uint64_t old_a, uint64_t old_b,
+                                          uint64_t new_a, uint64_t new_b,
+                                          bool is4)
+{
+   if (is4) {
+      const uint64_t same = ~((new_a ^ last_a[w]) | (new_b ^ last_b[w]));
+      last_a[w] = (last_a[w] & ~same) | (old_a & same);
+      last_b[w] = (last_b[w] & ~same) | (old_b & same);
+   }
+   else {
+      const uint64_t same = ~(new_a ^ last_a[w]);
+      last_a[w] = (last_a[w] & ~same) | (old_a & same);
+   }
 }
 
 static void packed_rmw_range(uint64_t *dst_a, uint64_t *dst_b,
@@ -6253,14 +6282,25 @@ static void deposit_packed_apply(rt_model_t *m, rt_signal_t *s,
       if (eff_a[0] == na && (!is4 || eff_b[0] == nb))
          return;
 
+      bool already_saved = false;
       const bool defer = check_comb
-         && packed_save_deferred(m, &(s->nexus), s->shared.size);
-      last_a[0] = eff_a[0];
-      if (is4)
-         last_b[0] = eff_b[0];
+         && packed_save_deferred(m, &(s->nexus), s->shared.size,
+                                 &already_saved);
+      const bool already_delta =
+         (s->nexus.last_event == m->now && s->nexus.event_delta == m->iteration)
+         || (defer && already_saved);
+      const uint64_t oa = eff_a[0];
+      const uint64_t ob = is4 ? eff_b[0] : 0;
       eff_a[0] = na;
       if (is4)
          eff_b[0] = nb;
+      if (likely(!already_delta)) {
+         last_a[0] = oa;
+         if (is4)
+            last_b[0] = ob;
+      }
+      else
+         packed_merge_last_word(last_a, last_b, 0, oa, ob, na, nb, is4);
       m->trigger_epoch++;
       if (!defer)
          deposit_notify(m, &(s->nexus));
@@ -6286,18 +6326,38 @@ static void deposit_packed_apply(rt_model_t *m, rt_signal_t *s,
       if (!changed)
          return;
 
+      bool already_saved = false;
       const bool defer = check_comb
-         && packed_save_deferred(m, &(s->nexus), s->shared.size);
-      memcpy(last_a, eff_a, s->shared.size);
-      memcpy(eff_a, src_a, (size_t)nwords * sizeof(uint64_t));
-      eff_a[nwords - 1] &= top_mask;
-      if (is4) {
-         if (src_b != NULL) {
-            memcpy(eff_b, src_b, (size_t)nwords * sizeof(uint64_t));
-            eff_b[nwords - 1] &= top_mask;
+         && packed_save_deferred(m, &(s->nexus), s->shared.size,
+                                 &already_saved);
+      const bool already_delta =
+         (s->nexus.last_event == m->now && s->nexus.event_delta == m->iteration)
+         || (defer && already_saved);
+      if (likely(!already_delta)) {
+         memcpy(last_a, eff_a, s->shared.size);
+         memcpy(eff_a, src_a, (size_t)nwords * sizeof(uint64_t));
+         eff_a[nwords - 1] &= top_mask;
+         if (is4) {
+            if (src_b != NULL) {
+               memcpy(eff_b, src_b, (size_t)nwords * sizeof(uint64_t));
+               eff_b[nwords - 1] &= top_mask;
+            }
+            else
+               memset(eff_b, 0, (size_t)nwords * sizeof(uint64_t));
          }
-         else
-            memset(eff_b, 0, (size_t)nwords * sizeof(uint64_t));
+      }
+      else {
+         for (int i = 0; i < nwords; i++) {
+            const uint64_t msk = (i == nwords - 1) ? top_mask : ~UINT64_C(0);
+            const uint64_t oa = eff_a[i];
+            const uint64_t ob = is4 ? eff_b[i] : 0;
+            const uint64_t na = src_a[i] & msk;
+            const uint64_t nb = (is4 && src_b != NULL) ? (src_b[i] & msk) : 0;
+            eff_a[i] = na;
+            if (is4)
+               eff_b[i] = nb;
+            packed_merge_last_word(last_a, last_b, i, oa, ob, na, nb, is4);
+         }
       }
       m->trigger_epoch++;
       if (!defer)
@@ -6309,11 +6369,40 @@ static void deposit_packed_apply(rt_model_t *m, rt_signal_t *s,
                              src_a, src_b, force_mask))
       return;
 
+   bool already_saved = false;
    const bool defer = check_comb
-      && packed_save_deferred(m, &(s->nexus), s->shared.size);
-   memcpy(last_a, eff_a, s->shared.size);
-   packed_rmw_range(eff_a, eff_b, width, msb_off, count,
-                    src_a, src_b, force_mask);
+      && packed_save_deferred(m, &(s->nexus), s->shared.size, &already_saved);
+   const bool already_delta =
+      (s->nexus.last_event == m->now && s->nexus.event_delta == m->iteration)
+      || (defer && already_saved);
+   if (likely(!already_delta)) {
+      memcpy(last_a, eff_a, s->shared.size);
+      packed_rmw_range(eff_a, eff_b, width, msb_off, count,
+                       src_a, src_b, force_mask);
+   }
+   else {
+      const uint32_t lsb_off = width - msb_off - count;
+      const int w0 = lsb_off / 64;
+      const int w1 = (lsb_off + count - 1) / 64;
+      const int nw_span = w1 - w0 + 1;
+      uint64_t sa[8], sb[8];
+      uint64_t *heap LOCAL = NULL;
+      uint64_t *old_a = sa, *old_b = sb;
+      if (nw_span > (int)ARRAY_LEN(sa)) {
+         heap = xmalloc_array((size_t)nw_span * (is4 ? 2 : 1), sizeof(uint64_t));
+         old_a = heap;
+         old_b = is4 ? heap + nw_span : NULL;
+      }
+      memcpy(old_a, eff_a + w0, (size_t)nw_span * sizeof(uint64_t));
+      if (is4)
+         memcpy(old_b, eff_b + w0, (size_t)nw_span * sizeof(uint64_t));
+      packed_rmw_range(eff_a, eff_b, width, msb_off, count,
+                       src_a, src_b, force_mask);
+      for (int w = w0; w <= w1; w++)
+         packed_merge_last_word(last_a, last_b, w, old_a[w - w0],
+                                is4 ? old_b[w - w0] : 0, eff_a[w],
+                                is4 ? eff_b[w] : 0, is4);
+   }
    m->trigger_epoch++;
    if (!defer)
       deposit_notify(m, &(s->nexus));
@@ -6376,13 +6465,22 @@ static void drain_nb_packed(rt_model_t *m)
             continue;
 
          uint64_t *last_a = (uint64_t *)(s->shared.data + s->shared.size);
-         last_a[0] = eff_a[0];
+         uint64_t *last_b = is4 ? last_a + 1 : NULL;
+         const bool already_delta =
+            s->nexus.last_event == m->now
+            && s->nexus.event_delta == m->iteration;
+         const uint64_t oa = eff_a[0];
+         const uint64_t ob = is4 ? eff_b[0] : 0;
          eff_a[0] = na;
-         if (is4) {
-            uint64_t *last_b = last_a + 1;
-            last_b[0] = eff_b[0];
+         if (is4)
             eff_b[0] = nb;
+         if (likely(!already_delta)) {
+            last_a[0] = oa;
+            if (is4)
+               last_b[0] = ob;
          }
+         else
+            packed_merge_last_word(last_a, last_b, 0, oa, ob, na, nb, is4);
          if (!(sflags & SIG_F_FAST_DIRECT)) {
             m->trigger_epoch++;
             deposit_notify(m, &(s->nexus));
@@ -6657,7 +6755,11 @@ static void release_packed(rt_model_t *m, rt_signal_t *s, uint32_t msb_off,
          changed = true;
    }
    if (changed) {
-      memcpy(last_a, eff_a, s->shared.size);
+      uint64_t *last_b = is4 ? last_a + nwords : NULL;
+      const bool already_delta =
+         s->nexus.last_event == m->now && s->nexus.event_delta == m->iteration;
+      if (likely(!already_delta))
+         memcpy(last_a, eff_a, s->shared.size);
       for (int w = w0; w <= w1; w++) {
          const uint32_t d_start = (w == w0) ? (lsb_off % 64) : 0;
          const uint32_t d_end = (w == w1) ? ((lsb_off + count - 1) % 64) : 63;
@@ -6666,9 +6768,14 @@ static void release_packed(rt_model_t *m, rt_signal_t *s, uint32_t msb_off,
             ? ~UINT64_C(0) : (((UINT64_C(1) << span) - 1) << d_start);
          if (fmask != NULL)
             wmask &= ~fmask[w];
+         const uint64_t oa = eff_a[w];
+         const uint64_t ob = is4 ? eff_b[w] : 0;
          eff_a[w] = (eff_a[w] & ~wmask) | (drv_a[w] & wmask);
          if (is4)
             eff_b[w] = (eff_b[w] & ~wmask) | (drv_b[w] & wmask);
+         if (unlikely(already_delta))
+            packed_merge_last_word(last_a, last_b, w, oa, ob, eff_a[w],
+                                   is4 ? eff_b[w] : 0, is4);
       }
       m->trigger_epoch++;
       deposit_notify(m, &(s->nexus));
