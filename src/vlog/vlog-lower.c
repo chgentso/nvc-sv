@@ -22375,12 +22375,38 @@ typedef struct {
    hash_t     *set;
 } fork_escape_t;
 
+static void vlog_fork_escape_capture_cb(vlog_node_t v, void *context)
+{
+   hash_t *set = context;
+   if (vlog_kind(v) != V_REF || !vlog_has_ref(v))
+      return;
+
+   vlog_node_t d = vlog_ref(v);
+   switch (vlog_kind(d)) {
+   case V_LOCAL_DECL:
+      hash_put(set, d, d);
+      break;
+   case V_TF_PORT_DECL:
+      if (vlog_subkind(d) != V_PORT_REF && !vlog_is_fixed_unpacked(d)
+          && !vlog_is_const_ref(d))
+         hash_put(set, d, d);
+      break;
+   default:
+      break;
+   }
+}
+
 static void vlog_collect_fork_escapes_cb(vlog_node_t v, void *context)
 {
-   // Automatic locals of a task captured by reference in fork..join_none may
-   // outlive the task's stack frame once it returns
+   // Automatic locals and parameters of a task or fork block captured by
+   // fork..join_none or fork..join_any (directly or via an enclosing
+   // fork..join) may outlive the enclosing TLAB state frame once it returns.
 
-   if (vlog_kind(v) != V_FORK || vlog_subkind(v) != V_FORK_JOIN_NONE)
+   if (vlog_kind(v) != V_FORK)
+      return;
+
+   const vlog_fork_kind_t fk = vlog_subkind(v);
+   if (fk != V_FORK_JOIN_NONE && fk != V_FORK_JOIN_ANY)
       return;
 
    fork_escape_t *fe = context;
@@ -22388,12 +22414,16 @@ static void vlog_collect_fork_escapes_cb(vlog_node_t v, void *context)
       fe->set = hash_new(16);
 
    const int nstmts = vlog_stmts(v);
-   for (int i = 0; i < nstmts; i++)
+   for (int i = 0; i < nstmts; i++) {
+      vlog_visit(vlog_stmt(v, i), vlog_fork_escape_capture_cb, fe->set);
       vlog_visit(vlog_stmt(v, i), vlog_fork_written_cb, fe->set);
+   }
 
-   fork_after_t after = { .set = fe->set, .loc = vlog_loc(v) };
-   vlog_visit(fe->subr, vlog_fork_after_cb, &after);
-   vlog_visit(fe->subr, vlog_fork_siblings_cb, fe->set);
+   if (fe->subr != NULL) {
+      fork_after_t after = { .set = fe->set, .loc = vlog_loc(v) };
+      vlog_visit(fe->subr, vlog_fork_after_cb, &after);
+      vlog_visit(fe->subr, vlog_fork_siblings_cb, fe->set);
+   }
 }
 
 static void vlog_fork_wait_loop(vlog_gen_t *g, mir_value_t group_var, int mode)
@@ -22706,6 +22736,10 @@ static void vlog_lower_fork_process(mir_unit_t *mu, object_t *obj)
    mir_set_cursor(mu, start_bb, MIR_APPEND);
 
    gen_stack_t gs = {};
+
+   fork_escape_t fe = { .subr = NULL };
+   vlog_visit(s, vlog_collect_fork_escapes_cb, &fe);
+   g.fork_escape = fe.set;
 
    vlog_lower_one_stmt(&g, s, &gs);
 
@@ -38090,6 +38124,10 @@ static void vlog_lower_task_decl(mir_unit_t *mu, object_t *obj)
          sigref_mask = (uint32_t)mask;
    }
 
+   fork_escape_t fe = { .subr = v };
+   vlog_visit(v, vlog_collect_fork_escapes_cb, &fe);
+   g.fork_escape = fe.set;
+
    const int nports = vlog_ports(v);
    for (int i = 0; i < nports; i++) {
       vlog_node_t port = vlog_port(v, i);
@@ -38136,19 +38174,31 @@ static void vlog_lower_task_decl(mir_unit_t *mu, object_t *obj)
          continue;
       }
 
-      mir_value_t local = mir_add_var(mu, pti->type, pti->stamp, name, 0);
-      mir_put_object(mu, port, local);
+      mir_value_t slot;
+      if (g.fork_escape != NULL && hash_get(g.fork_escape, port) != NULL) {
+         mir_value_t acc = mir_build_new(mu, pti->type, pti->stamp,
+                                         MIR_NULL_VALUE);
+         slot = mir_build_all(mu, acc);
+         mir_type_t t_ptr = mir_pointer_type(mu, pti->type);
+         mir_value_t var = mir_add_var(mu, t_ptr, pti->stamp, name, 0);
+         mir_build_store(mu, var, slot);
+         mir_put_object(mu, port, var);
+      }
+      else {
+         slot = mir_add_var(mu, pti->type, pti->stamp, name, 0);
+         mir_put_object(mu, port, slot);
+      }
 
       if (vlog_subkind(port) == V_PORT_INPUT) {
          mir_value_t param = mir_add_param(mu, pti->type, pti->stamp, name);
-         mir_build_store(mu, local, param);
+         mir_build_store(mu, slot, param);
       }
       else {
          mir_type_t t_pointer = mir_pointer_type(mu, pti->type);
          mir_value_t param = mir_add_param(mu, t_pointer, pti->stamp, name);
 
          mir_value_t init = mir_build_load(mu, param);
-         mir_build_store(mu, local, init);
+         mir_build_store(mu, slot, init);
 
          // The parameter does not survive the task suspending
          mir_value_t saved = mir_add_var(mu, t_pointer, pti->stamp,
@@ -38160,10 +38210,6 @@ static void vlog_lower_task_decl(mir_unit_t *mu, object_t *obj)
    }
 
    gen_stack_t gs = {};
-
-   fork_escape_t fe = { .subr = v };
-   vlog_visit(v, vlog_collect_fork_escapes_cb, &fe);
-   g.fork_escape = fe.set;
 
    vlog_lower_locals(&g, v);
 
@@ -38201,7 +38247,9 @@ static void vlog_lower_task_decl(mir_unit_t *mu, object_t *obj)
       mir_value_t saved = mir_search_object(mu, vlog_ident(port), &hops);
       assert(!mir_is_null(saved));
 
-      mir_value_t result = mir_build_load(mu, local);
+      mir_value_t src = mir_points_to(mu, local, MIR_TYPE_POINTER)
+         ? mir_build_load(mu, local) : local;
+      mir_value_t result = mir_build_load(mu, src);
       mir_build_store(mu, mir_build_load(mu, saved), result);
    }
 
