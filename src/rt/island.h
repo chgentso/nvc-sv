@@ -56,6 +56,8 @@ typedef struct {
    uint64_t *mask;
    uint64_t *a;
    uint64_t *b;
+   uint64_t *saved_a;
+   uint64_t *saved_b;
 } rt_island_force_t;
 
 typedef struct _rt_island_sig {

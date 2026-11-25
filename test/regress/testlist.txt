@@ -3299,3 +3299,4 @@ vlog_island_partial_sig1 verilog
 vhdl_island_force1 normal,2008,$NVC_RTL_ISLANDS=hier
 vhdl_island_comb_edge1 normal,2008,$NVC_RTL_ISLANDS=hier
 vhdl_island_subblock1 normal,2008,$NVC_RTL_ISLANDS=hier
+vhdl_island_extforce1 normal,2008,$NVC_RTL_ISLANDS=hier

@@ -1714,33 +1714,80 @@ static rt_island_force_t *island_get_or_add_force(rt_island_t *isl,
       const uint32_t total = s->width * s->nelems;
       const uint32_t mask_words = (total + 63u) / 64u;
       const uint32_t val_words = (total * s->elem_size + 7u) / 8u;
-      uint64_t *mem = xcalloc_array(mask_words + val_words, sizeof(uint64_t));
+      uint64_t *mem = xcalloc_array(mask_words + val_words * 2u,
+                                    sizeof(uint64_t));
       f->mask = mem;
       f->a = mem + mask_words;
       f->b = NULL;
+      f->saved_a = mem + mask_words + val_words;
+      f->saved_b = NULL;
    }
    else {
       const uint32_t total_words = s->nwords * s->nelems;
-      uint64_t *mem = xcalloc_array(total_words * 3u, sizeof(uint64_t));
+      uint64_t *mem = xcalloc_array(total_words * 5u, sizeof(uint64_t));
       f->mask = mem;
       f->a = mem + total_words;
       f->b = mem + total_words * 2u;
+      f->saved_a = mem + total_words * 3u;
+      f->saved_b = mem + total_words * 4u;
    }
    isl->has_forces = true;
    return f;
 }
 
 static void island_apply_force_entry(uint8_t *base, const rt_island_sig_t *s,
-                                     const rt_island_force_t *f)
+                                     rt_island_force_t *f, bool save_unforced)
 {
    if (s->flags & RT_ISIG_STD_LOGIC9) {
       const uint32_t total = s->width * s->nelems;
       const size_t elem_sz = s->elem_size;
       uint8_t *dst = base + s->a_off;
       const uint8_t *fa = (const uint8_t *)f->a;
+      uint8_t *sa = (uint8_t *)f->saved_a;
+      for (uint32_t k = 0; k < total; k++) {
+         if (f->mask[k >> 6] & (UINT64_C(1) << (k & 63u))) {
+            if (save_unforced)
+               memcpy(sa + k * elem_sz, dst + k * elem_sz, elem_sz);
+            memcpy(dst + k * elem_sz, fa + k * elem_sz, elem_sz);
+         }
+      }
+      return;
+   }
+
+   const uint32_t total_words = s->nwords * s->nelems;
+   uint64_t *ap = (uint64_t *)(base + s->a_off);
+   for (uint32_t w = 0; w < total_words; w++) {
+      const uint64_t m = f->mask[w];
+      if (m) {
+         if (save_unforced)
+            f->saved_a[w] = (f->saved_a[w] & ~m) | (ap[w] & m);
+         ap[w] = (ap[w] & ~m) | (f->a[w] & m);
+      }
+   }
+   if (!(s->flags & RT_ISIG_TWO_STATE)) {
+      uint64_t *bp = (uint64_t *)(base + s->b_off);
+      for (uint32_t w = 0; w < total_words; w++) {
+         const uint64_t m = f->mask[w];
+         if (m) {
+            if (save_unforced)
+               f->saved_b[w] = (f->saved_b[w] & ~m) | (bp[w] & m);
+            bp[w] = (bp[w] & ~m) | (f->b[w] & m);
+         }
+      }
+   }
+}
+
+static void island_restore_saved_force(uint8_t *base, const rt_island_sig_t *s,
+                                       const rt_island_force_t *f)
+{
+   if (s->flags & RT_ISIG_STD_LOGIC9) {
+      const uint32_t total = s->width * s->nelems;
+      const size_t elem_sz = s->elem_size;
+      uint8_t *dst = base + s->a_off;
+      const uint8_t *sa = (const uint8_t *)f->saved_a;
       for (uint32_t k = 0; k < total; k++) {
          if (f->mask[k >> 6] & (UINT64_C(1) << (k & 63u)))
-            memcpy(dst + k * elem_sz, fa + k * elem_sz, elem_sz);
+            memcpy(dst + k * elem_sz, sa + k * elem_sz, elem_sz);
       }
       return;
    }
@@ -1750,14 +1797,14 @@ static void island_apply_force_entry(uint8_t *base, const rt_island_sig_t *s,
    for (uint32_t w = 0; w < total_words; w++) {
       const uint64_t m = f->mask[w];
       if (m)
-         ap[w] = (ap[w] & ~m) | (f->a[w] & m);
+         ap[w] = (ap[w] & ~m) | (f->saved_a[w] & m);
    }
    if (!(s->flags & RT_ISIG_TWO_STATE)) {
       uint64_t *bp = (uint64_t *)(base + s->b_off);
       for (uint32_t w = 0; w < total_words; w++) {
          const uint64_t m = f->mask[w];
          if (m)
-            bp[w] = (bp[w] & ~m) | (f->b[w] & m);
+            bp[w] = (bp[w] & ~m) | (f->saved_b[w] & m);
       }
    }
 }
@@ -1765,9 +1812,9 @@ static void island_apply_force_entry(uint8_t *base, const rt_island_sig_t *s,
 static void island_apply_forces_comb(rt_island_t *isl)
 {
    for (uint32_t i = 0; i < isl->n_forces; i++) {
-      const rt_island_force_t *f = &(isl->forces[i]);
+      rt_island_force_t *f = &(isl->forces[i]);
       const rt_island_sig_t *s = &(isl->sigs[f->sig_idx]);
-      island_apply_force_entry(isl->state, s, f);
+      island_apply_force_entry(isl->state, s, f, false);
    }
 }
 
@@ -3744,6 +3791,16 @@ static bool island_sample_domain(jit_t *jit, rt_island_domain_t *dom,
          island_copy_sig_buf(isl->next_state, isl->state,
                              &(isl->sigs[dom->write_sigs[j]]));
    }
+   if (unlikely(isl->has_forces)) {
+      for (uint32_t j = 0; j < dom->n_write_sigs; j++) {
+         const rt_island_sig_t *s = &(isl->sigs[dom->write_sigs[j]]);
+         if (!(s->flags & RT_ISIG_VHDL))
+            continue;
+         const rt_island_force_t *f = island_find_force(isl, s->sig_idx);
+         if (f != NULL)
+            island_restore_saved_force(isl->next_state, s, f);
+      }
+   }
 
    jit_scalar_t p1 = { .pointer = isl->inst_ctx };
    jit_scalar_t p2 = { .pointer = isl->state };
@@ -3910,6 +3967,83 @@ static void island_sched_out_sig(rt_model_t *m, rt_island_t *isl,
    free(heap_buf);
 }
 
+static void island_sched_out_slice(rt_model_t *m, rt_island_t *isl,
+                                   const rt_island_sig_t *s,
+                                   uint32_t local_off, uint32_t local_cnt)
+{
+   if (local_cnt == 0)
+      return;
+   if (local_off == 0 && local_cnt >= s->width * s->nelems) {
+      island_sched_out_sig(m, isl, s);
+      return;
+   }
+
+   rt_signal_t *sig = s->sig;
+   if (s->flags & RT_ISIG_STD_LOGIC9) {
+      assert(!(sig->shared.flags & SIG_F_PACKED));
+      const uint32_t sig_off = (uint32_t)s->sig_offset + local_off;
+      const size_t elem_sz = s->elem_size;
+      const uint8_t *src = isl->state + s->a_off + (size_t)local_off * elem_sz;
+      if (memcmp(sig->shared.data + (size_t)sig_off * elem_sz, src,
+                 (size_t)local_cnt * elem_sz) != 0)
+         sched_deposit(m, sig, src, (int)sig_off, (int)local_cnt, 0, false);
+      return;
+   }
+
+   if (sig->shared.flags & SIG_F_PACKED) {
+      island_sync_out_slice(m, isl, s, local_off, local_cnt);
+      return;
+   }
+
+   const uint32_t width = s->width;
+   const uint32_t nwords = s->nwords;
+   const bool two_state = !!(s->flags & RT_ISIG_TWO_STATE);
+   const uint64_t *src_a = (const uint64_t *)(isl->state + s->a_off);
+   const uint64_t *src_b = two_state
+      ? NULL : (const uint64_t *)(isl->state + s->b_off);
+   const bool is_std = island_sig_is_std(sig, s->flags);
+
+   uint8_t stack_buf[64];
+   uint8_t *heap_buf = NULL;
+   uint8_t *out_bytes = stack_buf;
+   if (local_cnt > sizeof(stack_buf)) {
+      heap_buf = xmalloc(local_cnt);
+      out_bytes = heap_buf;
+   }
+
+   for (uint32_t k = 0; k < local_cnt; k++) {
+      const uint32_t pos = local_off + k;
+      const uint32_t e = pos / width;
+      const uint32_t bit = width - 1u - (pos % width);
+      const uint64_t *ea = src_a + e * nwords;
+      const uint64_t *eb = src_b != NULL ? src_b + e * nwords : NULL;
+      const uint8_t a = (ea[bit / 64u] >> (bit & 63u)) & 1u;
+      const uint8_t b = eb != NULL
+         ? ((eb[bit / 64u] >> (bit & 63u)) & 1u) : 0;
+      const uint8_t sv = (uint8_t)(a | (b << 1));
+      out_bytes[k] = is_std ? sv_to_std_logic(sv) : sv;
+   }
+
+   const uint32_t sig_off = (uint32_t)s->sig_offset + local_off;
+   if (memcmp(sig->shared.data + sig_off, out_bytes, local_cnt) != 0)
+      sched_deposit(m, sig, out_bytes, (int)sig_off, (int)local_cnt, 0, false);
+
+   free(heap_buf);
+}
+
+static inline void island_flush_out_slice(rt_model_t *m, rt_island_t *isl,
+                                          rt_island_sig_t *s,
+                                          uint32_t local_off,
+                                          uint32_t local_cnt)
+{
+   if ((s->flags & RT_ISIG_VHDL) && model_can_create_delta(m)) {
+      s->flags |= RT_ISIG_VHDL_SCHED;
+      island_sched_out_slice(m, isl, s, local_off, local_cnt);
+   }
+   else
+      island_sync_out_slice(m, isl, s, local_off, local_cnt);
+}
+
 static void island_commit_vhdl_domain(rt_model_t *m, rt_island_domain_t *dom)
 {
    rt_island_t *isl = dom->isl;
@@ -3917,9 +4051,9 @@ static void island_commit_vhdl_domain(rt_model_t *m, rt_island_domain_t *dom)
    for (uint32_t j = 0; j < dom->n_write_sigs; j++) {
       rt_island_sig_t *s = &(isl->sigs[dom->write_sigs[j]]);
       if (unlikely(isl->has_forces)) {
-         const rt_island_force_t *f = island_find_force(isl, s->sig_idx);
+         rt_island_force_t *f = (rt_island_force_t *)island_find_force(isl, s->sig_idx);
          if (f != NULL)
-            island_apply_force_entry(isl->next_state, s, f);
+            island_apply_force_entry(isl->next_state, s, f, true);
       }
 
       if (!island_commit_sig_buf(isl, s))
@@ -4244,9 +4378,9 @@ static void island_commit_domain(rt_model_t *m, rt_island_domain_t *dom)
    for (uint32_t j = 0; j < dom->n_write_sigs; j++) {
       rt_island_sig_t *s = &(isl->sigs[dom->write_sigs[j]]);
       if (unlikely(isl->has_forces)) {
-         const rt_island_force_t *f = island_find_force(isl, s->sig_idx);
+         rt_island_force_t *f = (rt_island_force_t *)island_find_force(isl, s->sig_idx);
          if (f != NULL)
-            island_apply_force_entry(isl->next_state, s, f);
+            island_apply_force_entry(isl->next_state, s, f, true);
       }
 
       if (!island_commit_sig_buf(isl, s))
@@ -4440,9 +4574,9 @@ static void island_ext_deposit_watch_cb(uint64_t now, rt_signal_t *signal,
    rt_island_t *isl = s->isl;
    island_sync_in_sig(isl, s);
    if (unlikely(isl->has_forces)) {
-      const rt_island_force_t *f = island_find_force(isl, s->sig_idx);
+      rt_island_force_t *f = (rt_island_force_t *)island_find_force(isl, s->sig_idx);
       if (f != NULL) {
-         island_apply_force_entry(isl->state, s, f);
+         island_apply_force_entry(isl->state, s, f, true);
          island_sync_sig_raw(isl, s, false);
       }
    }
@@ -4537,15 +4671,15 @@ static void island_eval_comb_now(rt_model_t *m, rt_island_t *isl)
          }
       }
       for (uint32_t j = 0; j < isl->n_ext_out_sigs; j++)
-         island_sync_out_sig(m, isl, &(isl->sigs[isl->ext_out_sigs[j]]));
+         island_flush_comb_out_sig(m, isl, &(isl->sigs[isl->ext_out_sigs[j]]));
    }
    else {
       for (uint32_t j = 0; j < isl->n_out_sigs; j++)
-         island_sync_out_sig(m, isl, &(isl->sigs[isl->out_sigs[j]]));
+         island_flush_comb_out_sig(m, isl, &(isl->sigs[isl->out_sigs[j]]));
    }
    if (unlikely(isl->n_obs_sigs > 0)) {
       for (uint32_t j = 0; j < isl->n_obs_sigs; j++)
-         island_sync_out_sig(m, isl, &(isl->sigs[isl->obs_sigs[j]]));
+         island_flush_comb_out_sig(m, isl, &(isl->sigs[isl->obs_sigs[j]]));
    }
 
    isl->dirty = false;
@@ -4570,6 +4704,7 @@ static void island_write_bits_slice(rt_island_t *isl, rt_island_sig_t *s,
       uint8_t *dst = isl->state + s->a_off;
       uint8_t *ndst = isl->next_state != NULL ? isl->next_state + s->a_off : NULL;
       uint8_t *fa = f != NULL ? (uint8_t *)f->a : NULL;
+      uint8_t *sa = f != NULL ? (uint8_t *)f->saved_a : NULL;
       for (uint32_t k = 0; k < local_cnt; k++) {
          const uint32_t pos = local_off + k;
          uint8_t val_buf[8] = {0};
@@ -4585,15 +4720,18 @@ static void island_write_bits_slice(rt_island_t *isl, rt_island_sig_t *s,
 
          const uint64_t mbit = UINT64_C(1) << (pos & 63u);
          if (is_force) {
+            if (!(f->mask[pos >> 6] & mbit))
+               memcpy(sa + (size_t)pos * elem_sz, dst + (size_t)pos * elem_sz,
+                      elem_sz);
             f->mask[pos >> 6] |= mbit;
             memcpy(fa + (size_t)pos * elem_sz, val_buf, elem_sz);
             memcpy(dst + (size_t)pos * elem_sz, val_buf, elem_sz);
-            if (ndst != NULL)
-               memcpy(ndst + (size_t)pos * elem_sz, val_buf, elem_sz);
          }
          else {
-            if (f != NULL && (f->mask[pos >> 6] & mbit))
+            if (f != NULL && (f->mask[pos >> 6] & mbit)) {
+               memcpy(sa + (size_t)pos * elem_sz, val_buf, elem_sz);
                continue;
+            }
             memcpy(dst + (size_t)pos * elem_sz, val_buf, elem_sz);
             if (ndst != NULL)
                memcpy(ndst + (size_t)pos * elem_sz, val_buf, elem_sz);
@@ -4637,20 +4775,25 @@ static void island_write_bits_slice(rt_island_t *isl, rt_island_sig_t *s,
       }
 
       if (is_force) {
+         if (!(f->mask[widx] & bit)) {
+            f->saved_a[widx] = (f->saved_a[widx] & ~bit) | (ap[widx] & bit);
+            if (bp != NULL)
+               f->saved_b[widx] = (f->saved_b[widx] & ~bit) | (bp[widx] & bit);
+         }
          f->mask[widx] |= bit;
          f->a[widx] = (f->a[widx] & ~bit) | (a ? bit : 0);
          f->b[widx] = (f->b[widx] & ~bit) | (b ? bit : 0);
          ap[widx] = (ap[widx] & ~bit) | (a ? bit : 0);
          if (bp != NULL)
             bp[widx] = (bp[widx] & ~bit) | (b ? bit : 0);
-         if (nap != NULL)
-            nap[widx] = (nap[widx] & ~bit) | (a ? bit : 0);
-         if (nbp != NULL)
-            nbp[widx] = (nbp[widx] & ~bit) | (b ? bit : 0);
       }
       else {
-         if (f != NULL && (f->mask[widx] & bit))
+         if (f != NULL && (f->mask[widx] & bit)) {
+            f->saved_a[widx] = (f->saved_a[widx] & ~bit) | (a ? bit : 0);
+            if (bp != NULL)
+               f->saved_b[widx] = (f->saved_b[widx] & ~bit) | (b ? bit : 0);
             continue;
+         }
          ap[widx] = (ap[widx] & ~bit) | (a ? bit : 0);
          if (bp != NULL)
             bp[widx] = (bp[widx] & ~bit) | (b ? bit : 0);
@@ -4763,7 +4906,7 @@ bool rt_island_put_bytes(rt_model_t *m, rt_signal_t *sig,
       island_write_bits_slice(s->isl, s, r_start - s_start, r_end - r_start,
                               bytes != NULL ? bytes + (size_t)(r_start - offset) * step : NULL,
                               NULL, NULL, false, 0, is_force);
-      island_sync_out_slice(m, s->isl, s, r_start - s_start, r_end - r_start);
+      island_flush_out_slice(m, s->isl, s, r_start - s_start, r_end - r_start);
 
       if (is_force || !(s->flags & RT_ISIG_COMB_WRITTEN)) {
          if ((s->flags & RT_ISIG_COMB_READ)
@@ -4975,9 +5118,31 @@ bool rt_island_vpi_release_slice(rt_model_t *m, rt_signal_t *sig,
          continue;
 
       rt_island_force_t *f = &(isl->forces[fidx]);
+      // VHDL signals restore their underlying driving value upon release
+      // (IEEE 1076), whereas SV variables retain the forced value until the
+      // next procedural assignment (IEEE 1800-2017 10.6.2).
+      const bool restore_saved = !(s->flags & RT_ISIG_COMB_WRITTEN)
+         && !!(s->flags & RT_ISIG_VHDL);
+      bool released_any = false;
       if (s->flags & RT_ISIG_STD_LOGIC9) {
-         for (uint32_t k = r_start - s_start; k < r_end - s_start; k++)
-            f->mask[k >> 6] &= ~(UINT64_C(1) << (k & 63u));
+         const size_t elem_sz = s->elem_size;
+         uint8_t *dst = isl->state + s->a_off;
+         uint8_t *ndst = isl->next_state != NULL ? isl->next_state + s->a_off : NULL;
+         const uint8_t *sa = (const uint8_t *)f->saved_a;
+         for (uint32_t k = r_start - s_start; k < r_end - s_start; k++) {
+            const uint64_t mbit = UINT64_C(1) << (k & 63u);
+            if (f->mask[k >> 6] & mbit) {
+               released_any = true;
+               if (restore_saved) {
+                  memcpy(dst + (size_t)k * elem_sz, sa + (size_t)k * elem_sz,
+                         elem_sz);
+                  if (ndst != NULL)
+                     memcpy(ndst + (size_t)k * elem_sz,
+                            sa + (size_t)k * elem_sz, elem_sz);
+               }
+               f->mask[k >> 6] &= ~mbit;
+            }
+         }
          const uint32_t mask_words = (s->width * s->nelems + 63u) / 64u;
          bool any = false;
          for (uint32_t w = 0; w < mask_words && !any; w++)
@@ -4991,12 +5156,31 @@ bool rt_island_vpi_release_slice(rt_model_t *m, rt_signal_t *sig,
          }
       }
       else {
+         const bool two_state = !!(s->flags & RT_ISIG_TWO_STATE);
+         uint64_t *ap = (uint64_t *)(isl->state + s->a_off);
+         uint64_t *bp = two_state ? NULL : (uint64_t *)(isl->state + s->b_off);
+         uint64_t *nap = isl->next_state != NULL
+            ? (uint64_t *)(isl->next_state + s->a_off) : NULL;
+         uint64_t *nbp = (nap != NULL && !two_state)
+            ? (uint64_t *)(isl->next_state + s->b_off) : NULL;
          for (uint32_t k = r_start - s_start; k < r_end - s_start; k++) {
             const uint32_t e = k / s->width;
             const uint32_t lsb = s->width - 1u - (k % s->width);
             const uint32_t widx = e * s->nwords + (lsb / 64u);
             const uint64_t bit = UINT64_C(1) << (lsb & 63u);
-            f->mask[widx] &= ~bit;
+            if (f->mask[widx] & bit) {
+               released_any = true;
+               if (restore_saved) {
+                  ap[widx] = (ap[widx] & ~bit) | (f->saved_a[widx] & bit);
+                  if (bp != NULL)
+                     bp[widx] = (bp[widx] & ~bit) | (f->saved_b[widx] & bit);
+                  if (nap != NULL)
+                     nap[widx] = (nap[widx] & ~bit) | (f->saved_a[widx] & bit);
+                  if (nbp != NULL)
+                     nbp[widx] = (nbp[widx] & ~bit) | (f->saved_b[widx] & bit);
+               }
+               f->mask[widx] &= ~bit;
+            }
          }
 
          const uint32_t total_words = s->nwords * s->nelems;
@@ -5030,10 +5214,27 @@ bool rt_island_vpi_release_slice(rt_model_t *m, rt_signal_t *sig,
          else if (!(s->flags & (RT_ISIG_OUT | RT_ISIG_OBSERVED)))
             island_sync_sig_raw(isl, s, true);
       }
-      else if ((s->flags & RT_ISIG_COMB_READ)
-               && isl->eval_handle != JIT_HANDLE_INVALID) {
-         island_mark_dirty(isl);
-         rt_island_request_delta(m);
+      else {
+         if (released_any) {
+            island_flush_out_slice(m, isl, s, r_start - s_start,
+                                   r_end - r_start);
+            if (s->flags & RT_ISIG_DIRECT_LINK) {
+               for (uint32_t t = 0; t < s->n_direct_targets; t++) {
+                  rt_island_sig_t *dst_s = s->direct_targets[t];
+                  if (island_copy_direct_sig(s, dst_s)
+                      && (dst_s->flags & RT_ISIG_COMB_READ)
+                      && dst_s->isl->eval_handle != JIT_HANDLE_INVALID) {
+                     island_mark_dirty(dst_s->isl);
+                     rt_island_request_delta(m);
+                  }
+               }
+            }
+         }
+         if ((s->flags & RT_ISIG_COMB_READ)
+             && isl->eval_handle != JIT_HANDLE_INVALID) {
+            island_mark_dirty(isl);
+            rt_island_request_delta(m);
+         }
       }
    }
 
