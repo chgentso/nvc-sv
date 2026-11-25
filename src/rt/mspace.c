@@ -74,6 +74,7 @@ struct _mspace {
    size_t            maxlines;
    size_t            allocated;
    size_t            gc_limit;
+   uint64_t          last_gc_us;
    char             *space;
    bit_mask_t        headmask;
    mptr_t            roots;
@@ -610,13 +611,6 @@ static void mspace_gc(mspace_t *m)
 
    start_world();
 
-#if ASAN_ENABLED
-   for (int i = 0; i < m->maxlines; i++) {
-      if (!mask_test(&(state.markmask), i))
-         ASAN_POISON(m->space + i * LINE_SIZE, LINE_SIZE);
-   }
-#endif
-
    for (free_list_t *it = m->free_list, *tmp; it; it = tmp) {
       tmp = it->next;
       free(it);
@@ -638,6 +632,8 @@ static void mspace_gc(mspace_t *m)
          f->ptr  = m->space + line * LINE_SIZE;
          f->size = clear * LINE_SIZE;
 
+         ASAN_POISON(f->ptr, f->size);
+
          *tail = f;
          tail = &(f->next);
          m->free_tail = f;
@@ -651,10 +647,16 @@ static void mspace_gc(mspace_t *m)
       }
    }
 
+   const uint64_t now_us = get_timestamp_us();
    const size_t live = (m->maxlines - freelines) * LINE_SIZE;
    m->allocated = live;
    if (live > m->gc_limit / 2)
       m->gc_limit = MIN(m->maxsize, MAX(m->gc_limit * 2, live * 2));
+   else if (m->last_gc_us != 0 && now_us - m->last_gc_us < 100000
+            && m->gc_limit < 256 * 1024 * 1024)
+      m->gc_limit = MIN(m->maxsize,
+                        MIN((size_t)256 * 1024 * 1024, m->gc_limit * 2));
+   m->last_gc_us = now_us;
 
    if (opt_get_verbose(OPT_GC_VERBOSE, NULL)) {
       const int ticks = get_timestamp_us() - start_ticks;
