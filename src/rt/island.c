@@ -276,6 +276,7 @@ struct _rt_island_mgr {
    uint32_t                mt_wave_tag;
    uint32_t                eval_epoch;
    bool                    hier_built;
+   bool                    reset_done;
    bool                    mt_deps_built;
    bool                    mt_has_comb_deps;
 };
@@ -2537,6 +2538,8 @@ void rt_island_reset_all(rt_island_mgr_t *mgr)
       if (!no_comb)
          island_mark_dirty(isl);
    }
+
+   mgr->reset_done = true;
 }
 
 bool rt_island_has_dirty(const rt_island_mgr_t *mgr)
@@ -3036,6 +3039,28 @@ static void island_sync_out_island(rt_model_t *m, rt_island_t *isl)
    }
 }
 
+static bool island_has_pending_vhdl_ff(const rt_island_t *isl)
+{
+   for (uint32_t d = 0; d < isl->ndomains; d++) {
+      const rt_island_domain_t *dom = &(isl->domains[d]);
+      if (!(dom->edge_flags & (RT_IEDGE_VHDL | RT_IEDGE_VHDL_EVENT)))
+         continue;
+      if (dom->in_sample_q
+          || (dom->super_dom != NULL && dom->super_dom->in_sample_q))
+         return true;
+   }
+   return false;
+}
+
+static bool cluster_has_pending_vhdl_ff(const rt_super_island_t *cl)
+{
+   for (uint32_t k = 0; k < cl->n_islands; k++) {
+      if (island_has_pending_vhdl_ff(cl->islands[k]))
+         return true;
+   }
+   return false;
+}
+
 static bool island_eval_dirty_clusters(jit_t *jit, rt_model_t *m,
                                        rt_island_mgr_t *mgr, tlab_t *tlab)
 {
@@ -3054,6 +3079,10 @@ static bool island_eval_dirty_clusters(jit_t *jit, rt_model_t *m,
          rt_super_island_t *cl = mgr->dirty_clusters.items[i];
          if (!cl->has_dirty)
             continue;
+         if (unlikely(cluster_has_pending_vhdl_ff(cl))) {
+            APUSH(mgr->dirty_clusters, cl);
+            continue;
+         }
          if (!island_eval_cluster(jit, m, cl, tlab)) {
             ok = false;
             break;
@@ -3079,7 +3108,11 @@ static bool island_eval_dirty_clusters(jit_t *jit, rt_model_t *m,
    mgr->mt_cl_work_q.count = 0;
    for (unsigned i = 0; i < n; i++) {
       rt_super_island_t *cl = mgr->dirty_clusters.items[i];
-      if (cl->has_dirty)
+      if (!cl->has_dirty)
+         continue;
+      if (unlikely(cluster_has_pending_vhdl_ff(cl)))
+         APUSH(mgr->dirty_clusters, cl);
+      else
          APUSH(mgr->mt_cl_work_q, cl);
    }
    if (mgr->dirty_clusters.count > n) {
@@ -3235,9 +3268,15 @@ bool rt_island_eval_dirty(jit_t *jit, rt_model_t *m, rt_island_mgr_t *mgr,
          const uint64_t t0 = do_probe ? get_timestamp_ns() : 0;
          for (unsigned i = 0; i < n; i++) {
             rt_island_t *isl = mgr->dirty_q.items[i];
-            isl->in_dirty_list = false;
-            if (!isl->dirty)
+            if (!isl->dirty) {
+               isl->in_dirty_list = false;
                continue;
+            }
+            if (unlikely(island_has_pending_vhdl_ff(isl))) {
+               APUSH(mgr->dirty_q, isl);
+               continue;
+            }
+            isl->in_dirty_list = false;
             isl->dirty = false;
             isl->has_dirty_inputs = false;
 
@@ -3296,9 +3335,16 @@ bool rt_island_eval_dirty(jit_t *jit, rt_model_t *m, rt_island_mgr_t *mgr,
          mgr->mt_isl_work_q.count = 0;
          for (unsigned i = 0; i < n; i++) {
             rt_island_t *isl = mgr->dirty_q.items[i];
+            if (!isl->dirty) {
+               isl->in_dirty_list = false;
+               continue;
+            }
+            if (unlikely(island_has_pending_vhdl_ff(isl))) {
+               APUSH(mgr->dirty_q, isl);
+               continue;
+            }
             isl->in_dirty_list = false;
-            if (isl->dirty)
-               APUSH(mgr->mt_isl_work_q, isl);
+            APUSH(mgr->mt_isl_work_q, isl);
          }
          if (mgr->dirty_q.count > n) {
             memmove(mgr->dirty_q.items, mgr->dirty_q.items + n,
@@ -3481,7 +3527,9 @@ static bool island_eval_ff_pre_sync(jit_t *jit, rt_model_t *m,
    for (unsigned i = 0; i < n_ff; i++) {
       rt_island_domain_t *dom = mgr->ff_sample_q.items[i];
       rt_island_t *isl = dom->isl;
-      if (isl->cluster != NULL && isl->cluster->has_dirty) {
+      const bool is_vhdl = !!(dom->edge_flags
+                              & (RT_IEDGE_VHDL | RT_IEDGE_VHDL_EVENT));
+      if (!is_vhdl && isl->cluster != NULL && isl->cluster->has_dirty) {
          if (!island_eval_cluster(jit, m, isl->cluster, tlab))
             return false;
       }
@@ -3493,9 +3541,11 @@ static bool island_eval_ff_pre_sync(jit_t *jit, rt_model_t *m,
 
    for (unsigned i = 0; i < n_sd; i++) {
       rt_super_domain_t *sd = mgr->super_sample_q.items[i];
+      const bool is_vhdl = !!(sd->edge_flags
+                              & (RT_IEDGE_VHDL | RT_IEDGE_VHDL_EVENT));
       for (uint32_t c = 0; c < sd->n_clusters; c++) {
          rt_super_island_t *cl = sd->clusters[c];
-         if (cl->has_dirty && !island_eval_cluster(jit, m, cl, tlab))
+         if (!is_vhdl && cl->has_dirty && !island_eval_cluster(jit, m, cl, tlab))
             return false;
          if (cl->has_dirty_inputs) {
             for (uint32_t k = 0; k < cl->n_islands; k++) {
@@ -3515,7 +3565,7 @@ static bool island_eval_ff_pre_sync(jit_t *jit, rt_model_t *m,
             island_sync_dirty_inputs(isl);
             isl->has_dirty_inputs = false;
          }
-         if (isl->dirty && isl->eval_handle != JIT_HANDLE_INVALID) {
+         if (!is_vhdl && isl->dirty && isl->eval_handle != JIT_HANDLE_INVALID) {
             isl->dirty = false;
             if (!island_call_comb(jit, m, isl, tlab))
                return false;
@@ -3714,7 +3764,9 @@ bool rt_island_eval_ff(jit_t *jit, rt_model_t *m, rt_island_mgr_t *mgr,
             dom->in_sample_q = false;
 
             rt_island_t *isl = dom->isl;
-            if (isl->cluster != NULL && isl->cluster->has_dirty) {
+            const bool is_vhdl = !!(dom->edge_flags
+                                    & (RT_IEDGE_VHDL | RT_IEDGE_VHDL_EVENT));
+            if (!is_vhdl && isl->cluster != NULL && isl->cluster->has_dirty) {
                if (!island_eval_cluster(jit, m, isl->cluster, tlab)) {
                   ok = false;
                   break;
@@ -3746,10 +3798,13 @@ bool rt_island_eval_ff(jit_t *jit, rt_model_t *m, rt_island_mgr_t *mgr,
          for (unsigned i = 0; i < n_sd; i++) {
             rt_super_domain_t *sd = mgr->super_sample_q.items[i];
             sd->in_sample_q = false;
+            const bool is_vhdl = !!(sd->edge_flags
+                                    & (RT_IEDGE_VHDL | RT_IEDGE_VHDL_EVENT));
 
             for (uint32_t c = 0; c < sd->n_clusters; c++) {
                rt_super_island_t *cl = sd->clusters[c];
-               if (cl->has_dirty && !island_eval_cluster(jit, m, cl, tlab)) {
+               if (!is_vhdl && cl->has_dirty
+                   && !island_eval_cluster(jit, m, cl, tlab)) {
                   ok = false;
                   break;
                }
@@ -3773,7 +3828,8 @@ bool rt_island_eval_ff(jit_t *jit, rt_model_t *m, rt_island_mgr_t *mgr,
                   island_sync_dirty_inputs(isl);
                   isl->has_dirty_inputs = false;
                }
-               if (isl->dirty && isl->eval_handle != JIT_HANDLE_INVALID) {
+               if (!is_vhdl && isl->dirty
+                   && isl->eval_handle != JIT_HANDLE_INVALID) {
                   isl->dirty = false;
                   if (!island_call_comb(jit, m, isl, tlab)) {
                      ok = false;
@@ -3820,6 +3876,8 @@ bool rt_island_eval_ff(jit_t *jit, rt_model_t *m, rt_island_mgr_t *mgr,
       if (do_probe && ok)
          island_mt_gate_record(&mgr->mt_gate_ff, get_timestamp_ns() - t0);
 
+      if (ok && rt_island_has_dirty(mgr))
+         ok = rt_island_eval_dirty(jit, m, mgr, tlab);
       if (ok)
          island_commit_vhdl_ff_domains(m, mgr);
 
@@ -3925,9 +3983,10 @@ bool rt_island_eval_ff(jit_t *jit, rt_model_t *m, rt_island_mgr_t *mgr,
          }
       }
    }
-   else
+   if (ok && rt_island_has_dirty(mgr))
+      ok = rt_island_eval_dirty(jit, m, mgr, tlab);
+   if (ok)
       island_commit_vhdl_ff_domains(m, mgr);
-
    return ok;
 }
 
@@ -4195,7 +4254,7 @@ void rt_island_on_observer_attached(rt_model_t *m, rt_signal_t *sig)
       if (s->flags & RT_ISIG_DIRECT_LINK)
          island_break_direct_link(m, s);
       else if (!(s->flags & RT_ISIG_OBSERVED)) {
-         if (!(s->flags & RT_ISIG_OUT))
+         if (mgr->reset_done && !(s->flags & RT_ISIG_OUT))
             island_sync_sig_raw(s->isl, s, true);
          s->flags |= RT_ISIG_OBSERVED;
          if ((s->flags & RT_ISIG_COMB_WRITTEN) && !(s->flags & RT_ISIG_OUT))
