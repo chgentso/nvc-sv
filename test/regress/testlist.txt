@@ -3292,3 +3292,4 @@ vlog_timelit_div1 verilog
 vlog_comb_assoc1 verilog
 vlog_const_func_pat1 verilog
 vlog_vif_typeparam1 verilog
+vlog_island_countbits1 verilog

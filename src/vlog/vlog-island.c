@@ -973,7 +973,7 @@ static bool is_pure_systf(vlog_node_t v)
    default:
       {
          static const char *const pure_names[] = {
-            "$onehot", "$onehot0", "$isunknown", "$countones", "$countbits",
+            "$isunknown",
             "$left", "$right", "$low", "$high", "$size", "$dimensions",
             "$unpacked_dimensions", "$increment",
          };
