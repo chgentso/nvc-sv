@@ -551,6 +551,24 @@ static ident_t p_identifier(void)
       return error_marker();
 }
 
+static ident_t p_macro_identifier(void)
+{
+   ident_t id = p_identifier();
+   if (macro_args != NULL) {
+      const char *rep = hash_get(macro_args, id);
+      if (rep != NULL) {
+         while (*rep != '\0' && isspace_iso88591(*rep))
+            rep++;
+         size_t len = strlen(rep);
+         while (len > 0 && isspace_iso88591(rep[len - 1]))
+            len--;
+         if (len > 0)
+            return ident_new_n(rep, len);
+      }
+   }
+   return id;
+}
+
 static void skip_formal_space(void)
 {
    // The list of formal arguments may continue on the next line
@@ -633,7 +651,7 @@ static macro_t *p_text_macro_name(void)
    optional(tWHITESPACE);
 
    macro_t *m = xcalloc(sizeof(macro_t));
-   m->name = p_identifier();
+   m->name = p_macro_identifier();
    m->loc  = state.last_loc;
    m->text = tb_new();
 
@@ -1122,7 +1140,7 @@ static bool p_ifdef_condition(void)
    switch (peek()) {
    case tID:
       {
-         ident_t id = p_identifier();
+         ident_t id = p_macro_identifier();
          cond = hash_get(macros, id) != NULL;
       }
       break;
@@ -1356,7 +1374,7 @@ static void p_undef_compiler_directive(void)
 
    optional(tWHITESPACE);
 
-   ident_t id = p_identifier();
+   ident_t id = p_macro_identifier();
 
    hash_delete(macros, id);
 }
