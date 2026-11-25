@@ -1585,6 +1585,8 @@ END_TEST
 
 START_TEST(test_lower1)
 {
+   opt_set_int(OPT_RTL_ISLANDS, RTL_ISLANDS_OFF);
+
    input_from_file(TESTDIR "/vlog/lower1.v");
 
    run_elab();
