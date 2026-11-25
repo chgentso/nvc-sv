@@ -3290,3 +3290,4 @@ vlog_typeparam_pat1 verilog
 vlog_typeparam_struct_field1 verilog
 vlog_timelit_div1 verilog
 vlog_comb_assoc1 verilog
+vlog_const_func_pat1 verilog

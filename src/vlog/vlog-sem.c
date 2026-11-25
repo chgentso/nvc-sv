@@ -2142,12 +2142,38 @@ static void vlog_check_union_decl(vlog_node_t v)
       vlog_check_packed_members(v);
 }
 
-static void vlog_const_func_cb(vlog_node_t v, void *ctx)
+typedef struct {
+   vlog_node_t func;
+   hset_t     *struct_keys;
+} const_func_ctx_t;
+
+static void collect_struct_keys_cb(vlog_node_t v, void *ctx)
 {
+   if (!vlog_has_type(v))
+      return;
+
+   vlog_node_t bt = vlog_get_type(vlog_type(v));
+   if (bt == NULL || (vlog_kind(bt) != V_STRUCT_DECL
+                      && vlog_kind(bt) != V_UNION_DECL))
+      return;
+
+   const int nparams = vlog_params(v);
+   for (int i = 0; i < nparams; i++) {
+      vlog_node_t item = vlog_param(v, i);
+      if (vlog_kind(item) == V_PATTERN_ITEM && vlog_subkind(item) == 0
+          && vlog_has_left(item) && vlog_kind(vlog_left(item)) == V_REF)
+         hset_insert(ctx, vlog_left(item));
+   }
+}
+
+static void vlog_const_func_cb(vlog_node_t v, void *context)
+{
+   const_func_ctx_t *ctx = context;
+
    switch (vlog_kind(v)) {
    case V_REF:
       {
-         if (!vlog_has_ref(v))
+         if (!vlog_has_ref(v) || hset_contains(ctx->struct_keys, v))
             break;
 
          vlog_node_t decl = vlog_ref(v);
@@ -2163,20 +2189,20 @@ static void vlog_const_func_cb(vlog_node_t v, void *ctx)
          case V_VAR_DECL:
             // Variable local to this function: see vlog_lower_locals
             if (!(vlog_flags(decl) & VLOG_F_STATIC))
-               vlog_clear_flags(ctx, VLOG_F_CONST);
+               vlog_clear_flags(ctx->func, VLOG_F_CONST);
             break;
          default:
-            vlog_clear_flags(ctx, VLOG_F_CONST);
+            vlog_clear_flags(ctx->func, VLOG_F_CONST);
             break;
          }
       }
       break;
    case V_USER_FCALL:
       if (!(vlog_flags(vlog_ref(v)) & VLOG_F_CONST))
-         vlog_clear_flags(ctx, VLOG_F_CONST);
+         vlog_clear_flags(ctx->func, VLOG_F_CONST);
       break;
    case V_HIER_REF:
-      vlog_clear_flags(ctx, VLOG_F_CONST);
+      vlog_clear_flags(ctx->func, VLOG_F_CONST);
       break;
    default:
       break;
@@ -2205,7 +2231,13 @@ static void vlog_check_func_decl(vlog_node_t v)
    in_function = was_in_function;
    in_static_method = was_in_static;
 
-   vlog_visit(v, vlog_const_func_cb, v);
+   const_func_ctx_t cfctx = {
+      .func        = v,
+      .struct_keys = hset_new(8),
+   };
+   vlog_visit_only(v, collect_struct_keys_cb, cfctx.struct_keys, V_PATTERN_EXPR);
+   vlog_visit(v, vlog_const_func_cb, &cfctx);
+   hset_free(cfctx.struct_keys);
 }
 
 static void vlog_check_ref_ports(vlog_node_t v)
