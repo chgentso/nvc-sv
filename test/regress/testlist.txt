@@ -3276,3 +3276,4 @@ vlog_packed3    verilog
 eval_silent1    normal,2008
 svforkescape2   verilog
 vlog_const_nodef1 verilog
+vlog_genvar_disp1 verilog

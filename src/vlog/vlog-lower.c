@@ -6504,6 +6504,7 @@ static mir_value_t vlog_lower_systf_param(vlog_gen_t *g, vlog_node_t v,
       case V_PARAM_DECL:
       case V_LOCALPARAM:
       case V_ENUM_NAME:
+      case V_GENVAR_DECL:
          return vlog_lower_rvalue(g, v);
       case V_VAR_DECL:
       case V_LOCAL_DECL:
