@@ -8172,14 +8172,9 @@ static vlog_node_t p_primary(void)
          const unsigned __int128 den =
             (unsigned __int128)time_pow10(frac) * time_scale;
 
-         if (num % den == 0 && num / den <= INT64_MAX) {
-            head = vlog_new(V_NUMBER);
-            vlog_set_number(head, number_from_int((uint64_t)(num / den)));
-         }
-         else {
-            head = vlog_new(V_REAL);
-            vlog_set_dval(head, (double)((long double)num / (long double)den));
-         }
+         // A time literal in an expression has realtime type (1800-2023 5.8)
+         head = vlog_new(V_REAL);
+         vlog_set_dval(head, (double)((long double)num / (long double)den));
 
          vlog_set_loc(head, CURRENT_LOC);
       }
