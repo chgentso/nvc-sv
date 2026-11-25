@@ -22,6 +22,7 @@
 #include "mir/mir-node.h"
 #include "mir/mir-unit.h"
 #include "option.h"
+#include "rt/assert.h"
 #include "rt/island.h"
 #include "tree.h"
 #include "type.h"
@@ -3471,6 +3472,243 @@ static bool vi_lower_var_assign(vi_lower_t *l, tree_t stmt)
    return true;
 }
 
+typedef struct {
+   mir_value_t ptr;
+   mir_value_t len;
+} vi_str_t;
+
+static bool vi_lower_str_expr(vi_lower_t *l, tree_t expr, vi_str_t *out)
+{
+   mir_unit_t *mu = l->mu;
+   if (expr == NULL)
+      return false;
+
+   switch (tree_kind(expr)) {
+   case T_STRING:
+      {
+         const int nch = tree_chars(expr);
+         const int alen = MAX(1, nch);
+         mir_value_t *vals LOCAL = xmalloc_array(alen, sizeof(mir_value_t));
+         if (nch == 0)
+            vals[0] = vi_u8(mu, 0);
+         else {
+            for (int i = 0; i < nch; i++) {
+               tree_t ch = tree_char(expr, i);
+               if (tree_kind(ch) != T_REF || tree_kind(tree_ref(ch)) != T_ENUM_LIT)
+                  return false;
+               vals[i] = vi_u8(mu, (uint8_t)tree_pos(tree_ref(ch)));
+            }
+         }
+         mir_value_t ca = mir_const_array(
+            mu, mir_carray_type(mu, alen, vi_u8_type(mu)), vals, alen);
+         out->ptr = mir_build_address_of(mu, ca);
+         out->len = vi_off(mu, nch);
+         return true;
+      }
+
+   case T_AGGREGATE:
+      {
+         const int na = tree_assocs(expr);
+         if (na < 1)
+            return false;
+         vi_str_t *parts LOCAL = xcalloc_array(na, sizeof(vi_str_t));
+         mir_value_t tot = vi_off(mu, 0);
+         for (int i = 0; i < na; i++) {
+            tree_t a = tree_assoc(expr, i);
+            const assoc_kind_t ak = tree_subkind(a);
+            tree_t v = tree_value(a);
+            if (ak == A_CONCAT || (ak == A_POS && type_is_array(tree_type(v)))) {
+               if (!vi_lower_str_expr(l, v, &parts[i]))
+                  return false;
+            }
+            else if (ak == A_POS) {
+               vi_val_t ch;
+               if (!vi_lower_expr(l, v, &ch))
+                  return false;
+               mir_value_t b = mir_build_alloc(mu, vi_u8_type(mu),
+                                               MIR_NULL_STAMP, vi_off(mu, 1));
+               mir_build_store(mu, b, mir_build_cast(mu, vi_u8_type(mu), ch.val));
+               parts[i].ptr = b;
+               parts[i].len = vi_off(mu, 1);
+            }
+            else
+               return false;
+            tot = mir_build_add(mu, mir_offset_type(mu), tot, parts[i].len);
+         }
+         mir_value_t buf = mir_build_alloc(mu, vi_u8_type(mu),
+                                           MIR_NULL_STAMP, tot);
+         mir_value_t cur = vi_off(mu, 0);
+         for (int i = 0; i < na; i++) {
+            mir_build_copy(mu, mir_build_array_ref(mu, buf, cur),
+                           parts[i].ptr, parts[i].len);
+            cur = mir_build_add(mu, mir_offset_type(mu), cur, parts[i].len);
+         }
+         out->ptr = buf;
+         out->len = tot;
+         return true;
+      }
+
+   case T_QUALIFIED:
+   case T_TYPE_CONV:
+      return vi_lower_str_expr(l, tree_value(expr), out);
+
+   case T_REF:
+      {
+         tree_t d = tree_ref(expr);
+         if (d == NULL)
+            return false;
+         if (tree_kind(d) == T_CONST_DECL && tree_has_value(d))
+            return vi_lower_str_expr(l, tree_value(d), out);
+         if (tree_kind(d) == T_GENERIC_DECL && l->ctx != NULL) {
+            for (int ai = -1; ai < l->ctx->n_ancestors; ai++) {
+               tree_t gb = (ai < 0) ? l->ctx->block : l->ctx->ancestors[ai];
+               if (gb == NULL)
+                  continue;
+               const int ng = tree_generics(gb);
+               const int nm = tree_genmaps(gb);
+               for (int gi = 0; gi < ng && gi < nm; gi++) {
+                  if (tree_generic(gb, gi) == d)
+                     return vi_lower_str_expr(
+                        l, tree_value(tree_genmap(gb, gi)), out);
+               }
+            }
+            if (tree_has_value(d))
+               return vi_lower_str_expr(l, tree_value(d), out);
+         }
+         return false;
+      }
+
+   case T_ATTR_REF:
+      if (tree_subkind(expr) == ATTR_IMAGE && tree_params(expr) == 1) {
+         tree_t val_e = tree_value(tree_param(expr, 0));
+         vi_val_t v;
+         if (!vi_lower_expr(l, val_e, &v))
+            return false;
+         type_t base = type_base_recur(tree_type(val_e));
+         ident_t func = ident_prefix(type_ident(base), ident_new("image"), '$');
+         mir_value_t arg;
+         if (type_is_enum(base)) {
+            const unsigned nlits = type_enum_literals(base);
+            mir_type_t at = mir_int_type(mu, 0, (int64_t)nlits - 1);
+            well_known_t wk = is_well_known(type_ident(base));
+            if (l->two_state && (wk == W_IEEE_ULOGIC || wk == W_IEEE_LOGIC)) {
+               mir_value_t b = vi_to_bool(l, v);
+               arg = mir_build_select(mu, at, b, mir_const(mu, at, 3),
+                                      mir_const(mu, at, 2));
+            }
+            else if (l->two_state && (wk == W_STD_BIT || wk == W_STD_BOOL)) {
+               mir_value_t b = vi_to_bool(l, v);
+               arg = mir_build_select(mu, at, b, mir_const(mu, at, 1),
+                                      mir_const(mu, at, 0));
+            }
+            else
+               arg = mir_build_cast(mu, at, v.val);
+         }
+         else if (type_is_integer(base)) {
+            int64_t lo = INT64_MIN, hi = INT64_MAX;
+            if (type_dims(base) > 0)
+               folded_bounds(type_dim(base, 0), &lo, &hi);
+            mir_type_t at = mir_int_type(mu, lo, hi);
+            arg = mir_build_cast(mu, at, vi_to_i64(mu, v.val));
+         }
+         else
+            return false;
+         mir_type_t str_t = mir_uarray_type(mu, 1, vi_u8_type(mu));
+         mir_value_t uarr = mir_build_fcall(mu, func, str_t, MIR_NULL_STAMP,
+                                            &arg, 1);
+         out->ptr = mir_build_unwrap(mu, uarr);
+         out->len = mir_build_uarray_len(mu, uarr, 0);
+         return true;
+      }
+      return false;
+
+   case T_FCALL:
+      {
+         tree_t decl = tree_ref(expr);
+         const subprogram_kind_t sk = tree_subkind(decl);
+         if (sk == S_TO_STRING && tree_params(expr) == 1) {
+            tree_t val_e = tree_value(tree_param(expr, 0));
+            vi_val_t v;
+            if (!vi_lower_expr(l, val_e, &v))
+               return false;
+            type_t base = type_base_recur(tree_type(val_e));
+            ident_t func = ident_prefix(type_ident(base), ident_new("image"), '$');
+            mir_value_t arg;
+            if (type_is_enum(base)) {
+               const unsigned nlits = type_enum_literals(base);
+               mir_type_t at = mir_int_type(mu, 0, (int64_t)nlits - 1);
+               arg = mir_build_cast(mu, at, v.val);
+            }
+            else if (type_is_integer(base)) {
+               int64_t lo = INT64_MIN, hi = INT64_MAX;
+               if (type_dims(base) > 0)
+                  folded_bounds(type_dim(base, 0), &lo, &hi);
+               mir_type_t at = mir_int_type(mu, lo, hi);
+               arg = mir_build_cast(mu, at, vi_to_i64(mu, v.val));
+            }
+            else
+               return false;
+            mir_type_t str_t = mir_uarray_type(mu, 1, vi_u8_type(mu));
+            mir_value_t uarr = mir_build_fcall(mu, func, str_t, MIR_NULL_STAMP,
+                                               &arg, 1);
+            out->ptr = mir_build_unwrap(mu, uarr);
+            out->len = mir_build_uarray_len(mu, uarr, 0);
+            return true;
+         }
+         if (sk == S_CONCAT && tree_params(expr) >= 1) {
+            const int np = tree_params(expr);
+            vi_str_t *parts LOCAL = xcalloc_array(np, sizeof(vi_str_t));
+            mir_value_t tot = vi_off(mu, 0);
+            for (int i = 0; i < np; i++) {
+               tree_t ai = tree_value(tree_param(expr, i));
+               if (type_is_array(tree_type(ai))) {
+                  if (!vi_lower_str_expr(l, ai, &parts[i]))
+                     return false;
+               }
+               else {
+                  vi_val_t ch;
+                  if (!vi_lower_expr(l, ai, &ch))
+                     return false;
+                  mir_value_t b = mir_build_alloc(mu, vi_u8_type(mu),
+                                                  MIR_NULL_STAMP, vi_off(mu, 1));
+                  mir_build_store(mu, b, mir_build_cast(mu, vi_u8_type(mu), ch.val));
+                  parts[i].ptr = b;
+                  parts[i].len = vi_off(mu, 1);
+               }
+               tot = mir_build_add(mu, mir_offset_type(mu), tot, parts[i].len);
+            }
+            mir_value_t buf = mir_build_alloc(mu, vi_u8_type(mu),
+                                              MIR_NULL_STAMP, tot);
+            mir_value_t cur = vi_off(mu, 0);
+            for (int i = 0; i < np; i++) {
+               mir_build_copy(mu, mir_build_array_ref(mu, buf, cur),
+                              parts[i].ptr, parts[i].len);
+               cur = mir_build_add(mu, mir_offset_type(mu), cur, parts[i].len);
+            }
+            out->ptr = buf;
+            out->len = tot;
+            return true;
+         }
+         if (!l->two_state && tree_params(expr) == 1) {
+            vi_val_t av;
+            if (!vi_lower_expr(l, tree_value(tree_param(expr, 0)), &av))
+               return false;
+            mir_type_t str_t = mir_uarray_type(mu, 1, vi_u8_type(mu));
+            mir_value_t uarr;
+            if (!vi_modeb_call_ieee(l, decl, &av, 1, str_t, &uarr))
+               return false;
+            out->ptr = mir_build_unwrap(mu, uarr);
+            out->len = mir_build_uarray_len(mu, uarr, 0);
+            return true;
+         }
+         return false;
+      }
+
+   default:
+      return false;
+   }
+}
+
 static bool vi_lower_stmt(vi_lower_t *l, tree_t stmt)
 {
    if (stmt == NULL || l->failed)
@@ -3698,6 +3936,79 @@ static bool vi_lower_stmt(vi_lower_t *l, tree_t stmt)
             return false;
       }
       return true;
+
+   case T_ASSERT:
+      {
+         vi_val_t cv;
+         if (!vi_lower_expr(l, tree_value(stmt), &cv))
+            return false;
+         mir_value_t cond = vi_to_bool(l, cv);
+         int64_t cval = 0;
+         if (mir_get_const(mu, cond, &cval) && cval != 0)
+            return true;
+
+         mir_block_t fail_bb = mir_add_block(mu);
+         mir_block_t cont_bb = mir_add_block(mu);
+         mir_build_cond(mu, cond, cont_bb, fail_bb);
+
+         mir_set_cursor(mu, fail_bb, MIR_APPEND);
+         mir_value_t msg_ptr = MIR_NULL_VALUE, msg_len = MIR_NULL_VALUE;
+         if (tree_has_message(stmt)) {
+            vi_str_t ms;
+            if (!vi_lower_str_expr(l, tree_message(stmt), &ms))
+               return false;
+            msg_ptr = ms.ptr;
+            msg_len = ms.len;
+         }
+         mir_type_t sev_t = mir_int_type(mu, 0, 3);
+         mir_value_t sev;
+         if (tree_has_severity(stmt)) {
+            vi_val_t sv;
+            if (!vi_lower_expr(l, tree_severity(stmt), &sv))
+               return false;
+            sev = mir_build_cast(mu, sev_t, sv.val);
+         }
+         else
+            sev = mir_const(mu, sev_t, SEVERITY_ERROR);
+         mir_value_t locus = mir_build_debug_locus(
+            mu, tree_to_object(tree_value(stmt)));
+         mir_build_assert(mu, mir_const(mu, mir_bool_type(mu), 0),
+                          msg_ptr, msg_len, sev, locus,
+                          MIR_NULL_VALUE, MIR_NULL_VALUE);
+         mir_build_jump(mu, cont_bb);
+
+         mir_set_cursor(mu, cont_bb, MIR_APPEND);
+         return true;
+      }
+
+   case T_REPORT:
+      {
+         vi_str_t ms;
+         if (tree_has_message(stmt)) {
+            if (!vi_lower_str_expr(l, tree_message(stmt), &ms))
+               return false;
+         }
+         else {
+            mir_value_t z = vi_u8(mu, 0);
+            mir_value_t ca = mir_const_array(
+               mu, mir_carray_type(mu, 1, vi_u8_type(mu)), &z, 1);
+            ms.ptr = mir_build_address_of(mu, ca);
+            ms.len = vi_off(mu, 0);
+         }
+         mir_type_t sev_t = mir_int_type(mu, 0, 3);
+         mir_value_t sev;
+         if (tree_has_severity(stmt)) {
+            vi_val_t sv;
+            if (!vi_lower_expr(l, tree_severity(stmt), &sv))
+               return false;
+            sev = mir_build_cast(mu, sev_t, sv.val);
+         }
+         else
+            sev = mir_const(mu, sev_t, SEVERITY_NOTE);
+         mir_value_t locus = mir_build_debug_locus(mu, tree_to_object(stmt));
+         mir_build_report(mu, ms.ptr, ms.len, sev, locus);
+         return true;
+      }
 
    case T_EXIT:
    case T_NEXT:

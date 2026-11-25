@@ -1610,6 +1610,119 @@ static bool check_expr(check_ctx_t *c, tree_t expr, bool is_target)
    }
 }
 
+static bool check_str_expr(check_ctx_t *c, tree_t expr, int depth)
+{
+   if (expr == NULL || depth > 32)
+      return false;
+
+   switch (tree_kind(expr)) {
+   case T_STRING:
+      return true;
+   case T_AGGREGATE:
+      {
+         const int na = tree_assocs(expr);
+         if (na < 1)
+            return false;
+         for (int i = 0; i < na; i++) {
+            tree_t a = tree_assoc(expr, i);
+            const assoc_kind_t ak = tree_subkind(a);
+            if (ak == A_CONCAT) {
+               if (!check_str_expr(c, tree_value(a), depth + 1))
+                  return false;
+            }
+            else if (ak == A_POS) {
+               tree_t v = tree_value(a);
+               type_t vt = tree_type(v);
+               if (vt != NULL && type_is_array(vt)) {
+                  if (!check_str_expr(c, v, depth + 1))
+                     return false;
+               }
+               else if (!check_expr(c, v, false))
+                  return false;
+            }
+            else
+               return false;
+         }
+         return true;
+      }
+   case T_QUALIFIED:
+   case T_TYPE_CONV:
+      return check_str_expr(c, tree_value(expr), depth + 1);
+   case T_REF:
+      {
+         tree_t d = tree_ref(expr);
+         if (d == NULL)
+            return false;
+         if (tree_kind(d) == T_CONST_DECL && tree_has_value(d))
+            return check_str_expr(c, tree_value(d), depth + 1);
+         if (tree_kind(d) == T_GENERIC_DECL && c->ctx != NULL) {
+            for (int ai = -1; ai < c->ctx->n_ancestors; ai++) {
+               tree_t gb = (ai < 0) ? c->ctx->block : c->ctx->ancestors[ai];
+               if (gb == NULL)
+                  continue;
+               const int ng = tree_generics(gb);
+               const int nm = tree_genmaps(gb);
+               for (int gi = 0; gi < ng && gi < nm; gi++) {
+                  if (tree_generic(gb, gi) == d)
+                     return check_str_expr(c, tree_value(tree_genmap(gb, gi)),
+                                           depth + 1);
+               }
+            }
+            if (tree_has_value(d))
+               return check_str_expr(c, tree_value(d), depth + 1);
+         }
+         return false;
+      }
+   case T_ATTR_REF:
+      if (tree_subkind(expr) == ATTR_IMAGE && tree_params(expr) == 1) {
+         tree_t val = tree_value(tree_param(expr, 0));
+         type_t vt = tree_type(val);
+         if (vt == NULL || type_is_array(vt) || type_is_record(vt))
+            return false;
+         if (!type_is_enum(vt) && !type_is_integer(vt))
+            return false;
+         return check_expr(c, val, false);
+      }
+      return false;
+   case T_FCALL:
+      {
+         tree_t decl = tree_ref(expr);
+         const subprogram_kind_t sk = tree_subkind(decl);
+         if (sk == S_CONCAT && tree_params(expr) >= 1) {
+            const int np = tree_params(expr);
+            for (int i = 0; i < np; i++) {
+               tree_t arg = tree_value(tree_param(expr, i));
+               type_t at = tree_type(arg);
+               if (at != NULL && type_is_array(at)) {
+                  if (!check_str_expr(c, arg, depth + 1))
+                     return false;
+               }
+               else if (!check_expr(c, arg, false))
+                  return false;
+            }
+            return true;
+         }
+         if (sk == S_TO_STRING && tree_params(expr) == 1) {
+            tree_t arg = tree_value(tree_param(expr, 0));
+            type_t vt = tree_type(arg);
+            if (vt != NULL && !type_is_array(vt) && !type_is_record(vt)
+                && (type_is_enum(vt) || type_is_integer(vt)))
+               return check_expr(c, arg, false);
+         }
+         const char *pkg = NULL, *fn = NULL;
+         if (!c->two_state && ident_has_std_pkg_fn(decl, &pkg, &fn)
+             && tree_params(expr) == 1
+             && (fn_name_is(fn, "TO_HSTRING") || fn_name_is(fn, "TO_STRING")
+                 || fn_name_is(fn, "TO_OSTRING") || fn_name_is(fn, "TO_BSTRING"))) {
+            return check_expr(c, tree_value(tree_param(expr, 0)), false);
+         }
+         return false;
+      }
+   default:
+      return false;
+   }
+}
+
 static bool check_stmt(check_ctx_t *c, tree_t stmt, bool is_func)
 {
    if (stmt == NULL || c->rejected)
@@ -1824,6 +1937,22 @@ static bool check_stmt(check_ctx_t *c, tree_t stmt, bool is_func)
 
    case T_SEQUENCE:
       return check_stmt_list(c, stmt, 0, tree_stmts(stmt), is_func);
+
+   case T_ASSERT:
+      if (!tree_has_value(stmt) || !check_expr(c, tree_value(stmt), false))
+         return false;
+      if (tree_has_severity(stmt) && !check_expr(c, tree_severity(stmt), false))
+         return false;
+      if (tree_has_message(stmt) && !check_str_expr(c, tree_message(stmt), 0))
+         return false;
+      return true;
+
+   case T_REPORT:
+      if (tree_has_severity(stmt) && !check_expr(c, tree_severity(stmt), false))
+         return false;
+      if (tree_has_message(stmt) && !check_str_expr(c, tree_message(stmt), 0))
+         return false;
+      return true;
 
    case T_EXIT:
    case T_NEXT:

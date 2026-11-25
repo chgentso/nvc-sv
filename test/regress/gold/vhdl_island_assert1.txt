@@ -1,0 +1,6 @@
+Note: 15ns+2: comb hit cnt=02
+Process :vhdl_island_assert1:p_comb
+Note: 25ns+1: ff assert cnt=02 flag='1'
+Process :vhdl_island_assert1:p_ff
+Note: 35ns+1: ff report val=3
+Process :vhdl_island_assert1:p_ff

@@ -688,6 +688,33 @@ static void jit_emit_trace(diag_t *d, const loc_t *loc, object_t *enclosing,
             diag_trace(d, loc, "Type$$ %pI", tree_ident(tree));
          break;
       case T_BLOCK:
+         if (symbol != NULL) {
+            const char *tag = strstr(symbol, ".$vhdl_island_");
+            const char *dot = tag != NULL ? strchr(symbol, '.') : NULL;
+            if (dot != NULL && dot < tag) {
+               LOCAL_TEXT_BUF tb = tb_new();
+               for (const char *p = dot; p < tag; p++)
+                  tb_append(tb, *p == '.' ? ':' : tolower_iso88591(*p));
+               if (loc != NULL) {
+                  const int nstmts = tree_stmts(tree);
+                  for (int i = 0; i < nstmts; i++) {
+                     tree_t st = tree_stmt(tree, i);
+                     if (tree_kind(st) != T_PROCESS)
+                        continue;
+                     const loc_t *pl = tree_loc(st);
+                     if (pl->file_ref == loc->file_ref
+                         && loc->first_line >= pl->first_line
+                         && loc->first_line <= pl->first_line + pl->line_delta) {
+                        tb_append(tb, ':');
+                        tb_istr(tb, ident_downcase(tree_ident(st)));
+                        break;
+                     }
+                  }
+               }
+               diag_trace(d, loc, "Process$$ %s", tb_get(tb));
+               break;
+            }
+         }
          diag_trace(d, loc, "Process$$ (init)");
          break;
       case T_PACKAGE:
