@@ -809,6 +809,15 @@ bool vlog_typeparam_pending(vlog_node_t v)
       case V_PART_SELECT:
          continue;
       case V_MEMBER_REF:
+         {
+            // A member of a virtual interface is resolved via the interface's
+            // specialised type (lookup_member / vlog_member_decl), never via
+            // module-instantiation elaboration in vlog-inst.c.
+            vlog_node_t pt = vlog_get_type(vlog_value(p));
+            if (pt != NULL && vlog_kind(pt) == V_DATA_TYPE
+                && vlog_subkind(pt) == DT_VIRTUAL)
+               return false;
+         }
          if (vlog_has_ref(p)) {
             vlog_node_t d = vlog_ref(p);
             switch (vlog_kind(d)) {
