@@ -234,6 +234,9 @@ int64_t vlog_must_be_const(vlog_node_t v)
 
 bool vlog_is_const(vlog_node_t v)
 {
+   if (v == NULL)
+      return false;
+
    switch (vlog_kind(v)) {
    case V_BIT_SELECT:
    case V_MEMBER_REF:
@@ -244,10 +247,10 @@ bool vlog_is_const(vlog_node_t v)
    case V_NUMBER:
       return true;
    case V_REF:
-      return vlog_is_const(vlog_ref(v));
+      return vlog_has_ref(v) && vlog_is_const(vlog_ref(v));
    case V_LOCALPARAM:
    case V_PARAM_DECL:
-      return vlog_is_const(vlog_value(v));
+      return vlog_has_value(v) && vlog_is_const(vlog_value(v));
    case V_ENUM_NAME:
       return vlog_has_value(v) && vlog_is_const(vlog_value(v));
    case V_CONCAT:
