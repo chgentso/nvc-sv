@@ -279,6 +279,9 @@ static bool is_param_enum_name(vlog_node_t d)
 
 static bool copy_instance_pred(vlog_node_t v, void *ctx)
 {
+   if (copy_scope != NULL && !hset_contains(copy_scope, v))
+      return false;
+
    switch (vlog_kind(v)) {
    case V_REF:
       if (!vlog_has_ref(v))
@@ -324,6 +327,9 @@ static bool copy_instance_pred(vlog_node_t v, void *ctx)
       }
    case V_PORT_DECL:
       return is_event_formal(v);
+   case V_PORT_CONN:
+      return (vlog_flags(v) & VLOG_F_WILDCARD)
+         && (copy_scope == NULL || hset_contains(copy_scope, v));
    case V_MOD_REF:
       return copy_scope == NULL || hset_contains(copy_scope, v);
    case V_ENUM_NAME:
@@ -398,6 +404,13 @@ static vlog_node_t fixup_refs_cb(vlog_node_t v, void *ctx)
       break;
    case V_REF:
       {
+         vlog_node_t new = hash_get(map, vlog_ref(v));
+         if (new != NULL)
+            vlog_set_ref(v, new);
+      }
+      break;
+   case V_PORT_CONN:
+      if ((vlog_flags(v) & VLOG_F_WILDCARD) && vlog_has_ref(v)) {
          vlog_node_t new = hash_get(map, vlog_ref(v));
          if (new != NULL)
             vlog_set_ref(v, new);
@@ -996,6 +1009,8 @@ vlog_node_t vlog_new_instance(vlog_node_t mod, vlog_node_t inst, ident_t id)
 
    rename_tf_decls(v, id);
 
+   hash_put(map, mod, v);
+   hash_put(map, copy, v);
    vlog_rewrite(v, NULL, fixup_refs_cb, map);
 
    hash_free(map);

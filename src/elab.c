@@ -5949,7 +5949,7 @@ static void elab_verilog_gen_block(vlog_node_t tmpl, vlog_node_t genvar,
    elab_lower(b, &new_ctx);
 
    if (elab_new_errors(&new_ctx) == 0)
-      elab_verilog_sub_blocks(v, &new_ctx);
+      elab_verilog_sub_blocks(body, &new_ctx);
 
    elab_check_defparams(body, &new_ctx);
 
