@@ -51,6 +51,7 @@
 typedef CRITICAL_SECTION   jit_mutex_t;
 typedef CONDITION_VARIABLE jit_cond_t;
 static inline void jit_mutex_init(jit_mutex_t *m)    { InitializeCriticalSection(m); }
+static inline void jit_mutex_init_recursive(jit_mutex_t *m) { InitializeCriticalSection(m); }
 static inline void jit_mutex_destroy(jit_mutex_t *m) { DeleteCriticalSection(m); }
 static inline void jit_mutex_lock(jit_mutex_t *m)    { EnterCriticalSection(m); }
 static inline void jit_mutex_unlock(jit_mutex_t *m)  { LeaveCriticalSection(m); }
@@ -66,6 +67,14 @@ static inline void jit_cond_wait(jit_cond_t *c, jit_mutex_t *m) {
 typedef pthread_mutex_t jit_mutex_t;
 typedef pthread_cond_t  jit_cond_t;
 static inline void jit_mutex_init(jit_mutex_t *m)    { pthread_mutex_init(m, NULL); }
+static inline void jit_mutex_init_recursive(jit_mutex_t *m)
+{
+   pthread_mutexattr_t attr;
+   pthread_mutexattr_init(&attr);
+   pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+   pthread_mutex_init(m, &attr);
+   pthread_mutexattr_destroy(&attr);
+}
 static inline void jit_mutex_destroy(jit_mutex_t *m) { pthread_mutex_destroy(m); }
 static inline void jit_mutex_lock(jit_mutex_t *m)    { pthread_mutex_lock(m); }
 static inline void jit_mutex_unlock(jit_mutex_t *m)  { pthread_mutex_unlock(m); }
@@ -137,6 +146,7 @@ typedef struct _jit {
    func_array_t     *funcs;
    unsigned          next_handle;
    nvc_lock_t        lock;
+   jit_mutex_t       mir_lock;
    jit_irq_fn_t      interrupt;
    void             *interrupt_ctx;
    unit_registry_t  *registry;
@@ -210,6 +220,7 @@ jit_t *jit_new(unit_registry_t *ur, mir_context_t *mc)
    j->index       = chash_new(FUNC_HASH_SZ);
    j->exit_status = INT_MIN;
    j->mir         = mc;
+   jit_mutex_init_recursive(&j->mir_lock);
 
    const mspace_handler_t mspace_handler = {
       .oom     = jit_oom_cb,
@@ -267,6 +278,7 @@ void jit_free(jit_t *j)
 
    mspace_destroy(j->mspace);
    chash_free(j->index);
+   jit_mutex_destroy(&j->mir_lock);
    free(j);
 }
 
@@ -425,13 +437,16 @@ void jit_fill_irbuf(jit_func_t *f)
 
    mir_unit_t *mu;
    {
-      // Unit registry and MIR import is not thread-safe
-      SCOPED_LOCK(f->jit->lock);
+      // Unit registry and MIR import is not thread-safe; use a dedicated
+      // recursive mutex because lazy MIR lowering may fold constants via
+      // jit_call_thunk2 -> jit_lazy_compile (j->lock) or nested mir_get_unit.
+      jit_mutex_lock(&f->jit->mir_lock);
       mu = mir_get_unit(f->jit->mir, f->name);
       if (mu == NULL && f->jit->registry != NULL) {
          (void)unit_registry_get(f->jit->registry, f->name);
          mu = mir_get_unit(f->jit->mir, f->name);
       }
+      jit_mutex_unlock(&f->jit->mir_lock);
    }
 
    if (mu == NULL) {
@@ -444,8 +459,9 @@ void jit_fill_irbuf(jit_func_t *f)
    if (mir_get_kind(mu) == MIR_UNIT_PROCESS) {
       // A process is compiled once and its code is no longer needed:
       // only the shape is kept for units nested inside it
-      SCOPED_LOCK(f->jit->lock);
+      jit_mutex_lock(&f->jit->mir_lock);
       mir_unit_free(mu);
+      jit_mutex_unlock(&f->jit->mir_lock);
    }
 
    jit_transition(thread, f->jit, JIT_COMPILING, oldstate);
@@ -748,13 +764,15 @@ static void jit_emit_trace(diag_t *d, const loc_t *loc, object_t *enclosing,
 
 void jit_lower_file(jit_t *j, jit_file_fn_t fn, void *ctx)
 {
-   SCOPED_LOCK(j->lock);
+   jit_mutex_lock(&j->mir_lock);
 
    if (j->registry != NULL)
       unit_registry_lower_file(j->registry, fn, ctx);
 
    if (j->mir != NULL)
       mir_lower_file(j->mir, fn, ctx);
+
+   jit_mutex_unlock(&j->mir_lock);
 }
 
 int jit_stack_depth(void)

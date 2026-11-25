@@ -3270,3 +3270,4 @@ vhdl_island1    shell
 svpollclass1    verilog
 svpoll_dirty1   shell
 ieee_fast1      normal,2008
+vlog_jit_fold_reentry1 verilog
