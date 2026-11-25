@@ -778,6 +778,23 @@ bool vlog_virtual_pending(vlog_node_t v)
       && vlog_subkind(type) == DT_VIRTUAL;
 }
 
+bool vlog_uses_typeparam(vlog_node_t type)
+{
+   while (type != NULL) {
+      if (vlog_kind(type) == V_TYPE_DECL) {
+         if (vlog_flags(type) & VLOG_F_TYPEPARAM)
+            return true;
+         type = vlog_has_type(type) ? vlog_type(type) : NULL;
+      }
+      else if (vlog_kind(type) == V_DATA_TYPE && vlog_has_type(type))
+         type = vlog_type(type);
+      else
+         break;
+   }
+
+   return false;
+}
+
 bool vlog_typeparam_pending(vlog_node_t v)
 {
    // The prefix is an object whose type is a type parameter so the fields
@@ -811,8 +828,7 @@ bool vlog_typeparam_pending(vlog_node_t v)
    if (!vlog_has_type(decl))
       return false;
 
-   vlog_node_t type = vlog_type(decl);
-   return vlog_kind(type) == V_TYPE_DECL && (vlog_flags(type) & VLOG_F_TYPEPARAM);
+   return vlog_uses_typeparam(vlog_type(decl));
 }
 
 bool vlog_type_matches_restrict(unsigned r, vlog_node_t dt)

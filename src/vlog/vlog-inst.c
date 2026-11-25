@@ -297,10 +297,8 @@ static bool copy_instance_pred(vlog_node_t v, void *ctx)
             return true;
          // Fall-through
       case V_NET_DECL:
-         if (copy_scope != NULL || !vlog_has_type(vlog_ref(v)))
-            return false;
-         return vlog_kind(vlog_type(vlog_ref(v))) == V_TYPE_DECL
-            && (vlog_flags(vlog_type(vlog_ref(v))) & VLOG_F_TYPEPARAM);
+         return copy_scope == NULL && vlog_has_type(vlog_ref(v))
+            && vlog_uses_typeparam(vlog_type(vlog_ref(v)));
       case V_FUNC_DECL:
          // The name of a function assigned to give its result
          return true;
@@ -325,9 +323,7 @@ static bool copy_instance_pred(vlog_node_t v, void *ctx)
             if (copy_scope != NULL)
                return false;
 
-            vlog_node_t type = vlog_type(d);
-            return vlog_kind(type) == V_TYPE_DECL
-               && (vlog_flags(type) & VLOG_F_TYPEPARAM);
+            return vlog_uses_typeparam(vlog_type(d));
          }
       default:
          return false;
@@ -342,6 +338,8 @@ static bool copy_instance_pred(vlog_node_t v, void *ctx)
    case V_ENUM_NAME:
       return is_param_enum_name(v)
          && (copy_scope == NULL || hset_contains(copy_scope, v));
+   case V_MEMBER_REF:
+      return copy_scope == NULL && vlog_typeparam_pending(v);
    case V_TYPE_DECL:
       return copy_scope == NULL && (vlog_flags(v) & VLOG_F_TYPEPARAM);
    case V_SYS_TCALL:

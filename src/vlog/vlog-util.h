@@ -84,6 +84,7 @@ vlog_node_t vlog_virtual_decl(vlog_node_t v);
 vlog_node_t vlog_virtual_decl_or_null(vlog_node_t v);
 bool vlog_virtual_pending(vlog_node_t v);
 bool vlog_virtual_chain(vlog_node_t v);
+bool vlog_uses_typeparam(vlog_node_t type);
 bool vlog_typeparam_pending(vlog_node_t v);
 bool vlog_type_matches_restrict(unsigned r, vlog_node_t dt);
 const char *vlog_type_restrict_str(unsigned r);
