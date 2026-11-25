@@ -4000,7 +4000,7 @@ static type_mask_t vlog_check_bit_select(vlog_node_t v)
       while (vlog_kind(base) == V_PART_SELECT || vlog_kind(base) == V_BIT_SELECT)
          base = vlog_value(base);
 
-      if (pmask != TM_ERROR && (pmask & TM_REAL)
+      if (pmask != TM_ERROR && (pmask & TM_REAL) && !(pmask & TM_INTEGRAL)
           && !(vlog_kind(base) == V_HIER_REF && !vlog_has_ref(base)))
          error_at(vlog_loc(p), "index expression cannot have real type");
 
