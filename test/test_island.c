@@ -29,7 +29,8 @@
 static vlog_node_t build_inst_body(const char *src)
 {
    set_default_keywords(VLOG_1800_2023);
-   input_from_buffer(src, strlen(src), FILE_INVALID, SOURCE_VERILOG);
+   input_from_buffer(src, strlen(src), loc_file_ref("test_island.sv", NULL),
+                     SOURCE_VERILOG);
 
    vlog_node_t m = vlog_parse();
    ck_assert_ptr_nonnull(m);

@@ -9328,8 +9328,11 @@ static mir_value_t vlog_lower_partial_select(vlog_gen_t *g,
             mir_const(g->mu, mir_bool_type(g->mu), 0));
 
          if (sig_w <= 64 && select->size <= 64) {
-            mir_value_t full = mir_build_cast(
-               g->mu, mir_vector_slice(g->mu, select->type, sig_w), whole);
+            mir_type_t full_t =
+               mir_get_class(g->mu, select->type) == MIR_TYPE_VEC2
+               ? mir_vec2_type(g->mu, sig_w, false)
+               : mir_vec4_type(g->mu, sig_w, false);
+            mir_value_t full = mir_build_cast(g->mu, full_t, whole);
             mir_value_t res = select->two_state
                ? vlog_lower_zero(g, select->type)
                : vlog_lower_x(g, select->type);

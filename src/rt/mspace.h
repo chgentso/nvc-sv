@@ -32,6 +32,7 @@ typedef void *UNSAFE_MPTR;
 #define tlab_reset(t) do {                      \
       assert((t)->alloc <= (t)->limit);         \
       (t)->alloc = 0;                           \
+      (t)->mem_dirty = 0;                       \
    } while (0)
 
 #define tlab_mark(t) (t)->alloc                 \

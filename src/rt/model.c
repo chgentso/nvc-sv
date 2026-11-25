@@ -2004,6 +2004,8 @@ static void run_process_inner(rt_model_t *m, rt_proc_t *proc)
          && proc->wait_seq == wait_seq
          && (proc->task == NULL || sv_proc_finished(proc));
    }
+   else
+      tlab->mem_dirty = 0;
 
    if (proc->tlab != NULL && result.pointer == NULL) {
       tlab_release(m->jit, proc->tlab);
