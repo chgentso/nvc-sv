@@ -112,8 +112,8 @@ nvc --work=work_sv --threads=4 -r tb_sv_mt2 > sv_2s4.out
 diff -u sv_off.out sv_2s4.out
 
 if command -v fst2vcd >/dev/null 2>&1; then
-  fst2vcd sv_off.fst | grep -v '^\$date' > sv_off.vcd
-  fst2vcd sv_hier.fst | grep -v '^\$date' > sv_hier.vcd
+  fst2vcd sv_off.fst | sed '/^\$date/,/^\$end/d' > sv_off.vcd
+  fst2vcd sv_hier.fst | sed '/^\$date/,/^\$end/d' > sv_hier.vcd
   diff -u sv_off.vcd sv_hier.vcd
 fi
 
@@ -262,8 +262,8 @@ nvc --std=2008 --work=work_vhdl --threads=4 -r tb_vhdl_mt2 > vhdl_2s4.out 2>&1
 diff -u vhdl_off.out vhdl_2s4.out
 
 if command -v fst2vcd >/dev/null 2>&1; then
-  fst2vcd vhdl_off.fst | grep -v '^\$date' > vhdl_off.vcd
-  fst2vcd vhdl_hier.fst | grep -v '^\$date' > vhdl_hier.vcd
+  fst2vcd vhdl_off.fst | sed '/^\$date/,/^\$end/d' > vhdl_off.vcd
+  fst2vcd vhdl_hier.fst | sed '/^\$date/,/^\$end/d' > vhdl_hier.vcd
   diff -u vhdl_off.vcd vhdl_hier.vcd
 fi
 
