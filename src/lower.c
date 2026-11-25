@@ -14267,6 +14267,9 @@ static vcode_reg_t lower_get_island_leaf_sig(lower_unit_t *lu, tree_t decl,
       ? lower_port_ref(lu, decl)
       : lower_signal_ref(lu, decl);
    for (uint8_t i = 0; i < len; i++) {
+      if (vcode_reg_kind(reg) == VCODE_TYPE_POINTER
+          && vtype_kind(vtype_pointed(vcode_reg_type(reg))) == VCODE_TYPE_UARRAY)
+         reg = emit_load_indirect(reg);
       if (vtype_kind(vcode_reg_type(reg)) == VCODE_TYPE_UARRAY)
          reg = emit_unwrap(reg);
       if (path[i] < 0)
