@@ -718,9 +718,10 @@ static inline void hash_value(sha256_t *ctx, jit_value_t val,
 }
 
 void jit_cache_prepare_slots(jit_cache_t *cache, jit_func_t *f, bool huge,
-                             jit_cache_key_t *key_out, void ***relocs_out,
-                             unsigned *nrelocs_out, uint32_t **slot_map_out,
-                             unsigned *nslots_out, bool *uses_cpool_out)
+                             uint8_t opt_level, jit_cache_key_t *key_out,
+                             void ***relocs_out, unsigned *nrelocs_out,
+                             uint32_t **slot_map_out, unsigned *nslots_out,
+                             bool *uses_cpool_out)
 {
    const bool compute_key = (key_out != NULL) && jit_cache_enabled(cache);
 
@@ -766,6 +767,7 @@ void jit_cache_prepare_slots(jit_cache_t *cache, jit_func_t *f, bool huge,
       hash_u8(&ctx, cache->cfg.elf_relocs);
       hash_u32(&ctx, cache->cfg.inline_limit);
       hash_u8(&ctx, huge ? 1 : 0);
+      hash_u8(&ctx, opt_level);
       hash_u8(&ctx, (uint8_t)opt_get_int(OPT_TWO_STATE));
 
       // Canonical function metadata & constant pool
@@ -860,11 +862,12 @@ void jit_cache_prepare_slots(jit_cache_t *cache, jit_func_t *f, bool huge,
 }
 
 void jit_cache_prepare(jit_cache_t *cache, jit_func_t *f, bool huge,
-                       jit_cache_key_t *key_out, void ***relocs_out,
-                       unsigned *nrelocs_out, bool *uses_cpool_out)
+                       uint8_t opt_level, jit_cache_key_t *key_out,
+                       void ***relocs_out, unsigned *nrelocs_out,
+                       bool *uses_cpool_out)
 {
-   jit_cache_prepare_slots(cache, f, huge, key_out, relocs_out, nrelocs_out,
-                           NULL, NULL, uses_cpool_out);
+   jit_cache_prepare_slots(cache, f, huge, opt_level, key_out, relocs_out,
+                           nrelocs_out, NULL, NULL, uses_cpool_out);
 }
 
 ////////////////////////////////////////////////////////////////////////////////

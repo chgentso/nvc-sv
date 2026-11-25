@@ -2365,19 +2365,22 @@ START_TEST(test_cache_multi_instance)
    jit_func_t *f0 = jit_get_func(j, h0);
    jit_func_t *f1 = jit_get_func(j, h1);
 
-   jit_cache_key_t k0, k1;
-   void **r0 = NULL, **r1 = NULL;
-   unsigned nr0 = 0, nr1 = 0;
-   jit_cache_prepare(c, f0, false, &k0, &r0, &nr0, NULL);
-   jit_cache_prepare(c, f1, false, &k1, &r1, &nr1, NULL);
+   jit_cache_key_t k0, k1, k1_o2;
+   void **r0 = NULL, **r1 = NULL, **r2 = NULL;
+   unsigned nr0 = 0, nr1 = 0, nr2 = 0;
+   jit_cache_prepare(c, f0, false, 1, &k0, &r0, &nr0, NULL);
+   jit_cache_prepare(c, f1, false, 1, &k1, &r1, &nr1, NULL);
+   jit_cache_prepare(c, f0, false, 2, &k1_o2, &r2, &nr2, NULL);
 
    ck_assert_uint_eq(nr0, 1);
    ck_assert_uint_eq(nr1, 1);
    ck_assert_mem_eq(k0.bytes, k1.bytes, sizeof(k0.bytes));
+   ck_assert_int_ne(memcmp(k0.bytes, k1_o2.bytes, sizeof(k0.bytes)), 0);
    ck_assert_ptr_ne(r0[0], r1[0]);
 
    free(r0);
    free(r1);
+   free(r2);
    jit_cache_free(c);
    jit_free(j);
    rm_cache_dir(dir);

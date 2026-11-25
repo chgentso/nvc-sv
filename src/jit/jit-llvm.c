@@ -4007,6 +4007,16 @@ static void *jit_llvm_init(jit_t *jit)
    return state;
 }
 
+static bool jit_is_island_func(const jit_func_t *f)
+{
+   if (f->name == NULL)
+      return false;
+
+   const char *name = istr(f->name);
+   return strstr(name, ".$island_") != NULL
+      || strstr(name, ".$vhdl_island_") != NULL;
+}
+
 static void jit_llvm_cgen(jit_t *j, jit_handle_t handle, void *context)
 {
    if (jit_is_shutdown(j))
@@ -4028,6 +4038,9 @@ static void jit_llvm_cgen(jit_t *j, jit_handle_t handle, void *context)
    // superlinear register allocation / scheduling at LLVMCodeGenLevelDefault,
    // blocking the background JIT worker queue for tens of seconds.
    const bool huge = f->nirs > 32768;
+   const bool is_island = jit_is_island_func(f);
+   const llvm_opt_level_t base_olevel =
+      (!huge && is_island) ? LLVM_O2 : LLVM_O0;
 
    const bool cache_on = jit_cache_enabled(state->cache);
 
@@ -4039,8 +4052,9 @@ static void jit_llvm_cgen(jit_t *j, jit_handle_t handle, void *context)
    bool uses_cpool = false;
    bool claimed = false;
    if (cache_on) {
-      jit_cache_prepare_slots(state->cache, f, huge, &key, &relocs, &nrelocs,
-                              &slot_map, &nslots, &uses_cpool);
+      jit_cache_prepare_slots(state->cache, f, huge, (uint8_t)base_olevel,
+                              &key, &relocs, &nrelocs, &slot_map, &nslots,
+                              &uses_cpool);
 
       if (jit_is_shutdown(f->jit)) {
          free(relocs);
@@ -4168,8 +4182,9 @@ static void jit_llvm_cgen(jit_t *j, jit_handle_t handle, void *context)
 
    llvm_dump_module(obj.module, f->name, "initial");
    llvm_verify_module(obj.module);
-   llvm_optimise(obj.module, obj.target,
-                 (!huge && obj.opt_hint > 0) ? LLVM_O1 : LLVM_O0);
+   const llvm_opt_level_t olevel = huge ? LLVM_O0
+      : (is_island ? LLVM_O2 : (obj.opt_hint > 0 ? LLVM_O1 : LLVM_O0));
+   llvm_optimise(obj.module, obj.target, olevel);
    llvm_dump_module(obj.module, f->name, "final");
 
    if (jit_is_shutdown(f->jit)) {

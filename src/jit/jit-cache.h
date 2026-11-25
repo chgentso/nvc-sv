@@ -24,7 +24,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define NVC_JIT_CACHE_ABI 3
+#define NVC_JIT_CACHE_ABI 4
 
 typedef struct _jit jit_t;
 typedef struct _jit_cache jit_cache_t;
@@ -54,13 +54,15 @@ bool jit_cache_enabled(jit_cache_t *cache);
 const char *jit_cache_dir(jit_cache_t *cache);
 
 void jit_cache_prepare(jit_cache_t *cache, jit_func_t *f, bool huge,
-                       jit_cache_key_t *key_out, void ***relocs_out,
-                       unsigned *nrelocs_out, bool *uses_cpool_out);
+                       uint8_t opt_level, jit_cache_key_t *key_out,
+                       void ***relocs_out, unsigned *nrelocs_out,
+                       bool *uses_cpool_out);
 
 void jit_cache_prepare_slots(jit_cache_t *cache, jit_func_t *f, bool huge,
-                             jit_cache_key_t *key_out, void ***relocs_out,
-                             unsigned *nrelocs_out, uint32_t **slot_map_out,
-                             unsigned *nslots_out, bool *uses_cpool_out);
+                             uint8_t opt_level, jit_cache_key_t *key_out,
+                             void ***relocs_out, unsigned *nrelocs_out,
+                             uint32_t **slot_map_out, unsigned *nslots_out,
+                             bool *uses_cpool_out);
 
 bool jit_cache_lookup(jit_cache_t *cache, const jit_cache_key_t *key,
                       void **data_out, size_t *size_out);
