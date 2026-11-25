@@ -193,9 +193,9 @@ if command -v fst2vcd >/dev/null 2>&1; then
   fst2vcd -f w_off.fst -o w_off.vcd
   fst2vcd -f w_mod.fst -o w_mod.vcd
   fst2vcd -f w_hier.fst -o w_hier.vcd
-  grep -v '^\$date' w_off.vcd > w_off_nd.vcd
-  grep -v '^\$date' w_mod.vcd > w_mod_nd.vcd
-  grep -v '^\$date' w_hier.vcd > w_hier_nd.vcd
+  sed '/^\$date/,/^\$end/d' w_off.vcd > w_off_nd.vcd
+  sed '/^\$date/,/^\$end/d' w_mod.vcd > w_mod_nd.vcd
+  sed '/^\$date/,/^\$end/d' w_hier.vcd > w_hier_nd.vcd
   diff -u w_off_nd.vcd w_mod_nd.vcd
   diff -u w_off_nd.vcd w_hier_nd.vcd
 fi
