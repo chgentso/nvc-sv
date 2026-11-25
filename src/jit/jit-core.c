@@ -1158,9 +1158,11 @@ unsigned jit_suppressed_count(jit_t *j)
    return j->suppressed;
 }
 
-void jit_set_silent(jit_t *j, bool silent)
+bool jit_set_silent(jit_t *j, bool silent)
 {
+   const bool prev = j->silent;
    j->silent = silent;
+   return prev;
 }
 
 void jit_msg(const loc_t *where, diag_level_t level, const char *fmt, ...)

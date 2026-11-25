@@ -2110,7 +2110,7 @@ static res_memo_t *memo_resolution_fn(rt_model_t *m, rt_signal_t *signal,
 
    const vhdl_severity_t old_severity = set_exit_severity(SEVERITY_NOTE);
 
-   jit_set_silent(m->jit, true);
+   const bool prev_silent = jit_set_silent(m->jit, true);
 
    // Memoise the function for all two value cases
 
@@ -2149,7 +2149,7 @@ static res_memo_t *memo_resolution_fn(rt_model_t *m, rt_signal_t *signal,
    TRACE("memoised resolution function %pi for type %pT",
          jit_get_name(m->jit, closure->handle), tree_type(signal->where));
 
-   jit_set_silent(m->jit, false);
+   jit_set_silent(m->jit, prev_silent);
    jit_reset_exit_status(m->jit);
 
    set_exit_severity(old_severity);

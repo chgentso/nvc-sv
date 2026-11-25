@@ -264,7 +264,7 @@ static tree_t eval_try_fold_common(jit_t *jit, tree_t expr,
                                    bool keep_messages)
 {
    const bool verbose = opt_get_verbose(OPT_EVAL_VERBOSE, NULL);
-   jit_set_silent(jit, !verbose);
+   const bool prev_silent = jit_set_silent(jit, !verbose);
 
    const unsigned suppressed = jit_suppressed_count(jit);
 
@@ -277,7 +277,7 @@ static tree_t eval_try_fold_common(jit_t *jit, tree_t expr,
       result = expr;
    }
 
-   jit_set_silent(jit, false);
+   jit_set_silent(jit, prev_silent);
    jit_reset_exit_status(jit);
 
    clear_vhdl_assert();

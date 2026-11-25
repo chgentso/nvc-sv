@@ -75,7 +75,7 @@ void jit_init_thread(void);
 jit_handle_t jit_assemble(jit_t *j, ident_t name, const char *text);
 void *jit_link(jit_t *j, jit_handle_t handle);
 void *jit_get_frame_var(jit_t *j, jit_handle_t handle, void *p, ident_t name);
-void jit_set_silent(jit_t *j, bool silent);
+bool jit_set_silent(jit_t *j, bool silent);
 unsigned jit_suppressed_count(jit_t *j);
 mspace_t *jit_get_mspace(jit_t *j);
 bool jit_exit_status(jit_t *j, int *status);
