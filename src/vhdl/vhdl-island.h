@@ -37,13 +37,22 @@ typedef enum {
    VISIG_STD_LOGIC = 0,
    VISIG_BIT,
    VISIG_BOOL,
+   VISIG_ENUM,
+   VISIG_INT,
 } vhdl_isig_elem_t;
+
+typedef struct {
+   uint32_t sig_id;
+   uint32_t pos_lo;
+   uint32_t pos_hi;
+} vhdl_write_range_t;
 
 typedef struct {
    uint32_t         id;
    tree_t           decl;
    type_t           type;
    uint8_t          path_len;
+   uint8_t          byte_size;
    int              field_path[VHDL_ISIG_MAX_DEPTH];
    vhdl_isig_elem_t elem_kind;
    bool             is_signed;
@@ -98,6 +107,8 @@ typedef struct {
    uint32_t          n_reads;
    uint32_t         *writes;
    uint32_t          n_writes;
+   vhdl_write_range_t *write_ranges;
+   uint32_t          n_write_ranges;
    int               island_idx;
    int               dom_idx;
 } vhdl_iproc_t;

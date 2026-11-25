@@ -294,7 +294,8 @@ static bool type_has_disallowed_resolution(type_t t)
    return false;
 }
 
-static bool classify_scalar_elem(type_t scalar, vhdl_isig_elem_t *kind_out)
+static bool classify_scalar_elem_ex(type_t scalar, vhdl_isig_elem_t *kind_out,
+                                    uint8_t *bytes_out, bool *signed_out)
 {
    if (type_has_disallowed_resolution(scalar))
       return false;
@@ -305,16 +306,62 @@ static bool classify_scalar_elem(type_t scalar, vhdl_isig_elem_t *kind_out)
    case W_IEEE_ULOGIC:
    case W_IEEE_LOGIC:
       *kind_out = VISIG_STD_LOGIC;
+      if (bytes_out != NULL) *bytes_out = 1;
+      if (signed_out != NULL) *signed_out = false;
       return true;
    case W_STD_BIT:
       *kind_out = VISIG_BIT;
+      if (bytes_out != NULL) *bytes_out = 1;
+      if (signed_out != NULL) *signed_out = false;
       return true;
    case W_STD_BOOL:
       *kind_out = VISIG_BOOL;
+      if (bytes_out != NULL) *bytes_out = 1;
+      if (signed_out != NULL) *signed_out = false;
       return true;
    default:
-      return false;
+      break;
    }
+
+   if (type_kind(base) == T_ENUM) {
+      const unsigned nlits = type_enum_literals(base);
+      if (nlits == 0)
+         return false;
+      const unsigned bits = bits_for_range(0, (int64_t)nlits - 1);
+      uint8_t bsz = (bits <= 8) ? 1 : (uint8_t)(bits / 8);
+      if (bsz != 1 && bsz != 2 && bsz != 4 && bsz != 8)
+         return false;
+      *kind_out = VISIG_ENUM;
+      if (bytes_out != NULL) *bytes_out = bsz;
+      if (signed_out != NULL) *signed_out = false;
+      return true;
+   }
+
+   if (type_kind(base) == T_INTEGER) {
+      int64_t low = INT64_MIN, high = INT64_MAX;
+      uint8_t bsz = 8;
+      bool sgn = true;
+      if (type_dims(base) > 0 && folded_bounds(type_dim(base, 0), &low, &high)) {
+         const unsigned bits = bits_for_range(low, high);
+         if (bits > 0) {
+            bsz = (bits <= 8) ? 1 : (uint8_t)(bits / 8);
+            sgn = (low < 0);
+         }
+      }
+      if (bsz != 1 && bsz != 2 && bsz != 4 && bsz != 8)
+         return false;
+      *kind_out = VISIG_INT;
+      if (bytes_out != NULL) *bytes_out = bsz;
+      if (signed_out != NULL) *signed_out = sgn;
+      return true;
+   }
+
+   return false;
+}
+
+static bool classify_scalar_elem(type_t scalar, vhdl_isig_elem_t *kind_out)
+{
+   return classify_scalar_elem_ex(scalar, kind_out, NULL, NULL);
 }
 
 static bool classify_vector_type(tree_t block, type_t t,
@@ -331,6 +378,9 @@ static bool classify_vector_type(tree_t block, type_t t,
    if (type_is_array(elem) || type_is_record(elem))
       return false;
    if (!classify_scalar_elem(elem, elem_out))
+      return false;
+   if (*elem_out != VISIG_STD_LOGIC && *elem_out != VISIG_BIT
+       && *elem_out != VISIG_BOOL)
       return false;
 
    type_t base = type_base_recur(t);
@@ -374,6 +424,7 @@ static void collect_decl_leaves(tree_t block, tree_t decl, type_t type,
       .decl         = decl,
       .type         = type,
       .path_len     = depth,
+      .byte_size    = 1,
       .is_port      = (tree_kind(decl) == T_PORT_DECL),
       .port_mode    = (tree_kind(decl) == T_PORT_DECL)
          ? (port_mode_t)tree_subkind(decl) : PORT_INVALID,
@@ -388,8 +439,10 @@ static void collect_decl_leaves(tree_t block, tree_t decl, type_t type,
       return;
 
    if (!type_is_array(type)) {
-      if (!classify_scalar_elem(type, &s.elem_kind))
+      if (!classify_scalar_elem_ex(type, &s.elem_kind, &s.byte_size, &s.is_signed))
          return;
+      if (s.elem_kind == VISIG_ENUM || s.elem_kind == VISIG_INT)
+         s.two_state = false;
       s.width = 1;
       s.nelems = 1;
       APUSH(*sigs, s);
@@ -645,6 +698,7 @@ typedef struct {
    int                      call_depth;
    u32_list_t               reads;
    u32_list_t               writes;
+   A(vhdl_write_range_t)    write_ranges;
    A(tree_t)                var_decls;
    A(bool)                  var_assigned;
    A(tree_t)                loop_vars;
@@ -1082,7 +1136,81 @@ static bool check_stmt(check_ctx_t *c, tree_t stmt, bool is_func)
             return false;
          if (!check_expr(c, tree_value(wf), false))
             return false;
-         return check_expr(c, tree_target(stmt), true);
+         tree_t target = tree_target(stmt);
+         if (!check_expr(c, target, true))
+            return false;
+
+         // Record exact constant bit/slice range for disjoint multi-driver support
+         bool recorded = false;
+         if (tree_kind(target) == T_ARRAY_SLICE) {
+            tree_t rg = tree_range(target, 0);
+            int64_t sl, sr;
+            tree_t decl = NULL;
+            int path[VHDL_ISIG_MAX_DEPTH];
+            uint8_t plen = 0;
+            if (vhdl_island_eval_const_int(c->ctx->block, tree_left(rg), &sl)
+                && vhdl_island_eval_const_int(c->ctx->block, tree_right(rg), &sr)
+                && vhdl_island_extract_path(tree_value(target), &decl, path, &plen)) {
+               int sid = vhdl_island_lookup_leaf(c->ctx, decl, path, plen);
+               if (sid >= 0) {
+                  const vhdl_isig_t *s = &(c->ctx->sigs[sid]);
+                  range_kind_t sdir = tree_subkind(rg);
+                  int64_t sw = (sdir == RANGE_TO) ? (sr - sl + 1) : (sl - sr + 1);
+                  int64_t pos = (s->dir == RANGE_TO) ? (sl - s->left) : (s->left - sl);
+                  if (s->is_vector && !s->is_array2d && sdir == s->dir
+                      && sw > 0 && pos >= 0 && pos + sw <= s->width) {
+                     vhdl_write_range_t wr = {
+                        .sig_id = (uint32_t)sid,
+                        .pos_lo = (uint32_t)pos,
+                        .pos_hi = (uint32_t)(pos + sw - 1),
+                     };
+                     APUSH(c->write_ranges, wr);
+                     recorded = true;
+                  }
+               }
+            }
+         }
+         else if (tree_kind(target) == T_ARRAY_REF && tree_params(target) == 1) {
+            int64_t idx;
+            tree_t decl = NULL;
+            int path[VHDL_ISIG_MAX_DEPTH];
+            uint8_t plen = 0;
+            if (vhdl_island_eval_const_int(c->ctx->block,
+                                           tree_value(tree_param(target, 0)), &idx)
+                && vhdl_island_extract_path(tree_value(target), &decl, path, &plen)) {
+               int sid = vhdl_island_lookup_leaf(c->ctx, decl, path, plen);
+               if (sid >= 0) {
+                  const vhdl_isig_t *s = &(c->ctx->sigs[sid]);
+                  int64_t pos = (s->dir == RANGE_TO) ? (idx - s->left) : (s->left - idx);
+                  if (s->is_vector && !s->is_array2d && pos >= 0 && pos < s->width) {
+                     vhdl_write_range_t wr = {
+                        .sig_id = (uint32_t)sid,
+                        .pos_lo = (uint32_t)pos,
+                        .pos_hi = (uint32_t)pos,
+                     };
+                     APUSH(c->write_ranges, wr);
+                     recorded = true;
+                  }
+               }
+            }
+         }
+         if (!recorded) {
+            uint32_t *ids = NULL;
+            uint32_t n = 0;
+            if (vhdl_island_collect_expr_leaves(c->ctx, target, &ids, &n)) {
+               for (uint32_t k = 0; k < n; k++) {
+                  const vhdl_isig_t *s = &(c->ctx->sigs[ids[k]]);
+                  vhdl_write_range_t wr = {
+                     .sig_id = ids[k],
+                     .pos_lo = 0,
+                     .pos_hi = s->width > 0 ? s->width - 1 : 0,
+                  };
+                  APUSH(c->write_ranges, wr);
+               }
+            }
+            free(ids);
+         }
+         return true;
       }
 
    case T_VAR_ASSIGN:
@@ -1307,7 +1435,10 @@ static bool extract_clk_edge(const vhdl_island_ctx_t *ctx, tree_t cond,
          if (!vhdl_island_extract_path(arg, &rdecl, path, &len))
             return false;
          int id = vhdl_island_lookup_leaf(ctx, rdecl, path, len);
-         if (id < 0 || ctx->sigs[id].is_vector || ctx->sigs[id].width != 1)
+         if (id < 0 || ctx->sigs[id].is_vector || ctx->sigs[id].width != 1
+             || (ctx->sigs[id].elem_kind != VISIG_STD_LOGIC
+                 && ctx->sigs[id].elem_kind != VISIG_BIT
+                 && ctx->sigs[id].elem_kind != VISIG_BOOL))
             return false;
          const bool pos = (sk == S_RISING_EDGE
                            || ident_pkg_match(tree_ident2(decl),
@@ -1339,7 +1470,10 @@ static bool extract_clk_edge(const vhdl_island_ctx_t *ctx, tree_t cond,
             if (!vhdl_island_extract_path(clk_e, &rdecl, path, &len))
                return false;
             int id = vhdl_island_lookup_leaf(ctx, rdecl, path, len);
-            if (id < 0 || ctx->sigs[id].is_vector || ctx->sigs[id].width != 1)
+            if (id < 0 || ctx->sigs[id].is_vector || ctx->sigs[id].width != 1
+                || (ctx->sigs[id].elem_kind != VISIG_STD_LOGIC
+                    && ctx->sigs[id].elem_kind != VISIG_BIT
+                    && ctx->sigs[id].elem_kind != VISIG_BOOL))
                return false;
 
             bool pos = false;
@@ -1450,6 +1584,9 @@ static bool extract_rst_cond(const vhdl_island_ctx_t *ctx, tree_t cond,
          lit_e = lhs;
       }
       if (id >= 0 && !ctx->sigs[id].is_vector && ctx->sigs[id].width == 1
+          && (ctx->sigs[id].elem_kind == VISIG_STD_LOGIC
+              || ctx->sigs[id].elem_kind == VISIG_BIT
+              || ctx->sigs[id].elem_kind == VISIG_BOOL)
           && tree_kind(lit_e) == T_REF
           && tree_kind(tree_ref(lit_e)) == T_ENUM_LIT) {
          unsigned p = tree_pos(tree_ref(lit_e));
@@ -1625,6 +1762,8 @@ static void analyze_process(vhdl_island_ctx_t *ctx, tree_t proc, int stmt_idx,
                .n_reads        = c.reads.count,
                .writes         = c.writes.items,
                .n_writes       = c.writes.count,
+               .write_ranges   = c.write_ranges.items,
+               .n_write_ranges = c.write_ranges.count,
                .island_idx     = -1,
                .dom_idx        = -1,
             };
@@ -1637,6 +1776,7 @@ static void analyze_process(vhdl_island_ctx_t *ctx, tree_t proc, int stmt_idx,
          }
          ACLEAR(c.reads);
          ACLEAR(c.writes);
+         ACLEAR(c.write_ranges);
          ACLEAR(c.var_decls);
          ACLEAR(c.var_assigned);
          ACLEAR(c.loop_vars);
@@ -1679,6 +1819,8 @@ static void analyze_process(vhdl_island_ctx_t *ctx, tree_t proc, int stmt_idx,
                .n_reads        = c.reads.count,
                .writes         = c.writes.items,
                .n_writes       = c.writes.count,
+               .write_ranges   = c.write_ranges.items,
+               .n_write_ranges = c.write_ranges.count,
                .island_idx     = -1,
                .dom_idx        = -1,
             };
@@ -1692,6 +1834,7 @@ static void analyze_process(vhdl_island_ctx_t *ctx, tree_t proc, int stmt_idx,
       }
       ACLEAR(c.reads);
       ACLEAR(c.writes);
+      ACLEAR(c.write_ranges);
       ACLEAR(c.var_decls);
       ACLEAR(c.var_assigned);
       ACLEAR(c.loop_vars);
@@ -2195,6 +2338,35 @@ static void tarjan_dfs(scc_state_t *st, uint32_t v)
    }
 }
 
+static bool procs_have_write_conflict(const vhdl_iproc_t *a,
+                                      const vhdl_iproc_t *b, uint32_t sid)
+{
+   if (a->kind != b->kind)
+      return true;
+   if (a->kind == VIPROC_FF) {
+      if (a->clk_sig != b->clk_sig || a->rst_sig != b->rst_sig
+          || a->clk_posedge != b->clk_posedge
+          || a->rst_posedge != b->rst_posedge
+          || a->edge_flags != b->edge_flags)
+         return true;
+   }
+   bool a_has = false, b_has = false;
+   for (uint32_t i = 0; i < a->n_write_ranges; i++) {
+      if (a->write_ranges[i].sig_id != sid)
+         continue;
+      a_has = true;
+      for (uint32_t j = 0; j < b->n_write_ranges; j++) {
+         if (b->write_ranges[j].sig_id != sid)
+            continue;
+         b_has = true;
+         if (a->write_ranges[i].pos_lo <= b->write_ranges[j].pos_hi
+             && b->write_ranges[j].pos_lo <= a->write_ranges[i].pos_hi)
+            return true;
+      }
+   }
+   return !a_has || !b_has;
+}
+
 static uint32_t find_root(uint32_t *parent, uint32_t x)
 {
    while (parent[x] != x) {
@@ -2294,7 +2466,8 @@ vhdl_island_ctx_t *vhdl_island_analyze(tree_t block, ident_t scope_prefix)
       }
    }
 
-   // Iteratively resolve multi-driver conflicts
+   // Iteratively resolve multi-driver conflicts (allowing pairwise-disjoint
+   // constant-bit/slice writers of the same vector signal)
    int *driver_count LOCAL = xcalloc_array(ctx->n_sigs, sizeof(int));
    bool changed = true;
    while (changed) {
@@ -2313,10 +2486,33 @@ vhdl_island_ctx_t *vhdl_island_analyze(tree_t block, ident_t scope_prefix)
          bool conflict = false;
          for (uint32_t j = 0; j < p->n_writes; j++) {
             const uint32_t sid = p->writes[j];
-            if (driver_count[sid] > 1 || sigs.items[sid].has_ext_driver
-                || sigs.items[sid].ineligible) {
+            if (sigs.items[sid].has_ext_driver || sigs.items[sid].ineligible) {
                conflict = true;
                break;
+            }
+            if (driver_count[sid] > 1) {
+               if (!sigs.items[sid].is_vector || sigs.items[sid].is_array2d) {
+                  conflict = true;
+                  break;
+               }
+               for (unsigned k = 0; k < procs.count; k++) {
+                  if (k == i || procs.items[k].rejected)
+                     continue;
+                  bool k_writes = false;
+                  for (uint32_t kw = 0; kw < procs.items[k].n_writes; kw++) {
+                     if (procs.items[k].writes[kw] == sid) {
+                        k_writes = true;
+                        break;
+                     }
+                  }
+                  if (k_writes
+                      && procs_have_write_conflict(p, &(procs.items[k]), sid)) {
+                     conflict = true;
+                     break;
+                  }
+               }
+               if (conflict)
+                  break;
             }
          }
          bool read_9state = false;
@@ -2350,13 +2546,12 @@ vhdl_island_ctx_t *vhdl_island_analyze(tree_t block, ident_t scope_prefix)
    u32_list_t topo_comb_procs = AINIT;
    if (comb_idxs.count > 0) {
       const uint32_t nc = comb_idxs.count;
-      int *writer_comb LOCAL = xmalloc_array(ctx->n_sigs, sizeof(int));
-      for (uint32_t i = 0; i < ctx->n_sigs; i++)
-         writer_comb[i] = -1;
+      u32_list_t *writers_comb LOCAL = xcalloc_array(ctx->n_sigs,
+                                                     sizeof(u32_list_t));
       for (uint32_t c = 0; c < nc; c++) {
          const vhdl_iproc_t *p = &(procs.items[comb_idxs.items[c]]);
          for (uint32_t j = 0; j < p->n_writes; j++)
-            writer_comb[p->writes[j]] = (int)c;
+            APUSH(writers_comb[p->writes[j]], c);
       }
 
       bool **adj LOCAL = xcalloc_array(nc, sizeof(bool *));
@@ -2366,11 +2561,13 @@ vhdl_island_ctx_t *vhdl_island_analyze(tree_t block, ident_t scope_prefix)
       for (uint32_t c = 0; c < nc; c++) {
          const vhdl_iproc_t *p = &(procs.items[comb_idxs.items[c]]);
          for (uint32_t j = 0; j < p->n_reads; j++) {
-            int w = writer_comb[p->reads[j]];
-            if (w >= 0)
-               adj[c][(uint32_t)w] = true;  // c depends on w: visit w first
+            const u32_list_t *wl = &(writers_comb[p->reads[j]]);
+            for (unsigned wi = 0; wi < wl->count; wi++)
+               adj[c][wl->items[wi]] = true;  // c depends on w: visit w first
          }
       }
+      for (uint32_t s = 0; s < ctx->n_sigs; s++)
+         ACLEAR(writers_comb[s]);
 
       scc_state_t st = {
          .index    = xcalloc_array(nc, sizeof(uint32_t)),
@@ -2477,6 +2674,67 @@ vhdl_island_ctx_t *vhdl_island_analyze(tree_t block, ident_t scope_prefix)
       }
    }
 
+   // Coalesce same-clock/reset-domain FF processes in this block into one island
+   // to eliminate small-island boundary & domain dispatch churn.
+   for (unsigned i = 0; i < procs.count; i++) {
+      const vhdl_iproc_t *pi = &(procs.items[i]);
+      if (pi->rejected || pi->kind != VIPROC_FF)
+         continue;
+      for (unsigned j = i + 1; j < procs.count; j++) {
+         const vhdl_iproc_t *pj = &(procs.items[j]);
+         if (pj->rejected || pj->kind != VIPROC_FF)
+            continue;
+         if (pi->clk_sig == pj->clk_sig && pi->rst_sig == pj->rst_sig
+             && pi->clk_posedge == pj->clk_posedge
+             && pi->rst_posedge == pj->rst_posedge
+             && pi->edge_flags == pj->edge_flags) {
+            union_nodes(uf_parent, i, j);
+            break;
+         }
+      }
+   }
+
+   // Prune unprofitable 1-process combinational-only islands (zero internal
+   // signals: every input & output crosses the island boundary, so native NVC
+   // fast-driver execution avoids watch/sync/deposit churn).
+   uint32_t *root_comb_cnt LOCAL = xcalloc_array(procs.count, sizeof(uint32_t));
+   uint32_t *root_ff_cnt LOCAL = xcalloc_array(procs.count, sizeof(uint32_t));
+   for (unsigned i = 0; i < procs.count; i++) {
+      if (procs.items[i].rejected)
+         continue;
+      uint32_t r = find_root(uf_parent, i);
+      if (procs.items[i].kind == VIPROC_FF)
+         root_ff_cnt[r]++;
+      else
+         root_comb_cnt[r]++;
+   }
+   for (unsigned i = 0; i < procs.count; i++) {
+      vhdl_iproc_t *p = &(procs.items[i]);
+      if (p->rejected)
+         continue;
+      uint32_t r = find_root(uf_parent, i);
+      if (root_ff_cnt[r] == 0 && root_comb_cnt[r] == 1) {
+         p->rejected = true;
+         n_live--;
+         for (uint32_t j = 0; j < p->n_writes; j++)
+            ctx->sigs[p->writes[j]].driver_proc = -1;
+         scan_unfused_refs(ctx, p->stmt, false, &ext_reads, false, &sigs, 0);
+      }
+   }
+
+   if (n_live == 0) {
+      if (opt_get_int(OPT_DUMP_ISLANDS) && total_procs > 0)
+         printf("VHDL_ISLAND_ELAB: %s islands=0 fused_procs=0/%u "
+                "sigs=%u state_bytes=0 two_state=0\n",
+                istr(scope_prefix), total_procs, ctx->n_sigs);
+      ACLEAR(topo_comb_procs);
+      ctx->procs = procs.items;
+      ctx->n_procs = procs.count;
+      ctx->ext_read_sigs = ext_reads.items;
+      ctx->n_ext_read_sigs = ext_reads.count;
+      return ctx;
+   }
+
    // Map UF roots to island indices
    int *root_to_isl LOCAL = xmalloc_array(procs.count, sizeof(int));
    for (unsigned i = 0; i < procs.count; i++)
@@ -2561,7 +2819,7 @@ vhdl_island_ctx_t *vhdl_island_analyze(tree_t block, ident_t scope_prefix)
             off += nwords * s->nelems * 8u;
          }
          else {
-            const uint32_t nbytes = s->width * s->nelems;
+            const uint32_t nbytes = s->width * s->nelems * s->byte_size;
             off += ALIGN_UP(nbytes, 8u);
          }
       }
@@ -2724,6 +2982,7 @@ void vhdl_island_ctx_free(vhdl_island_ctx_t *ctx)
    for (uint32_t i = 0; i < ctx->n_procs; i++) {
       free(ctx->procs[i].reads);
       free(ctx->procs[i].writes);
+      free(ctx->procs[i].write_ranges);
    }
    free(ctx->procs);
 

@@ -278,6 +278,42 @@ static bool vi_type_is_bool(type_t t)
    return is_well_known(type_ident(base)) == W_STD_BOOL;
 }
 
+static bool vi_type_is_int_or_user_enum(type_t t)
+{
+   if (t == NULL)
+      return false;
+   if (type_is_integer(t))
+      return true;
+   if (type_is_enum(t)) {
+      type_t base = type_base_recur(t);
+      well_known_t wk = is_well_known(type_ident(base));
+      return wk != W_IEEE_ULOGIC && wk != W_IEEE_LOGIC
+         && wk != W_STD_BIT && wk != W_STD_BOOL;
+   }
+   return false;
+}
+
+static mir_type_t vi_scalar_int_mir_type(mir_unit_t *mu, uint8_t byte_size,
+                                         bool is_signed)
+{
+   switch (byte_size) {
+   case 1:
+      return is_signed
+         ? mir_int_type(mu, INT8_MIN, INT8_MAX)
+         : mir_int_type(mu, 0, UINT8_MAX);
+   case 2:
+      return is_signed
+         ? mir_int_type(mu, INT16_MIN, INT16_MAX)
+         : mir_int_type(mu, 0, UINT16_MAX);
+   case 4:
+      return is_signed
+         ? mir_int_type(mu, INT32_MIN, INT32_MAX)
+         : mir_int_type(mu, 0, UINT32_MAX);
+   default:
+      return vi_i64_type(mu);
+   }
+}
+
 static bool vi_type_is_signed_vec(type_t t)
 {
    const char *n = istr(type_ident(type_base_recur(t)));
@@ -454,6 +490,23 @@ static bool vi_lower_sig_load(vi_lower_t *l, const vhdl_isig_t *s,
                               mir_value_t elem_idx, vi_val_t *out)
 {
    mir_unit_t *mu = l->mu;
+   if (s->elem_kind == VISIG_ENUM || s->elem_kind == VISIG_INT) {
+      mir_type_t mt = vi_scalar_int_mir_type(mu, s->byte_size, s->is_signed);
+      mir_value_t ptr = vi_state_ptr_at(l, isig->a_off);
+      if (s->byte_size > 1 || s->is_signed)
+         ptr = mir_build_cast(mu, mir_pointer_type(mu, mt), ptr);
+      mir_value_t raw = mir_build_load(mu, ptr);
+      mir_value_t iv = (s->byte_size == 8 && s->is_signed)
+         ? raw : mir_build_cast(mu, vi_i64_type(mu), raw);
+      *out = (vi_val_t){
+         .kind      = VIVAL_INT,
+         .val       = iv,
+         .width     = 1,
+         .is_signed = s->is_signed,
+      };
+      return true;
+   }
+
    if (l->two_state) {
       mir_value_t r = mir_build_island_load(
          mu, mir_vec2_type(mu, s->width, s->is_signed),
@@ -1995,11 +2048,37 @@ static bool vi_lower_expr(vi_lower_t *l, tree_t expr, vi_val_t *out)
                      };
                      return true;
                   }
-               }
-               int64_t cval;
-               if (vhdl_island_eval_const_int(l->ctx->block, expr, &cval)) {
-                  *out = (vi_val_t){ .kind = VIVAL_INT, .val = vi_i64(mu, cval) };
+                  if (loc->is_std || loc->is_bool || loc->width == 1) {
+                     *out = (vi_val_t){
+                        .kind    = VIVAL_BIT,
+                        .val     = mir_build_load(mu, loc->storage),
+                        .width   = 1,
+                        .is_std  = loc->is_std,
+                        .is_bool = loc->is_bool,
+                     };
+                     return true;
+                  }
+                  *out = (vi_val_t){
+                     .kind = VIVAL_INT, .val = mir_build_load(mu, loc->storage),
+                  };
                   return true;
+               }
+               if (vi_type_is_int_or_user_enum(tree_type(d))) {
+                  int64_t cval;
+                  if (vhdl_island_eval_const_int(l->ctx->block, expr, &cval)) {
+                     *out = (vi_val_t){ .kind = VIVAL_INT, .val = vi_i64(mu, cval) };
+                     return true;
+                  }
+               }
+               if (tree_kind(d) == T_GENERIC_DECL && l->ctx->block != NULL) {
+                  const int ng = tree_generics(l->ctx->block);
+                  const int np = tree_params(l->ctx->block);
+                  for (int gi = 0; gi < ng && gi < np; gi++) {
+                     if (tree_generic(l->ctx->block, gi) == d)
+                        return vi_lower_expr(l,
+                                             tree_value(tree_param(l->ctx->block, gi)),
+                                             out);
+                  }
                }
                if (tree_has_value(d))
                   return vi_lower_expr(l, tree_value(d), out);
@@ -2016,6 +2095,52 @@ static bool vi_lower_expr(vi_lower_t *l, tree_t expr, vi_val_t *out)
          const vhdl_isig_t *s = vi_resolve_expr_sig(l, expr, &isig);
          if (s != NULL && !s->is_array2d)
             return vi_lower_sig_load(l, s, isig, vi_off(mu, 0), out);
+
+         // Constant record field reference: e.g. my_const_rec.field
+         tree_t base_e = tree_value(expr);
+         tree_t field = tree_ref(expr);
+         if (tree_kind(field) == T_FIELD_DECL) {
+            tree_t rec_val = base_e;
+            while (rec_val != NULL) {
+               if (tree_kind(rec_val) == T_REF
+                   && tree_kind(tree_ref(rec_val)) == T_CONST_DECL
+                   && tree_has_value(tree_ref(rec_val)))
+                  rec_val = tree_value(tree_ref(rec_val));
+               else if (tree_kind(rec_val) == T_QUALIFIED
+                        || tree_kind(rec_val) == T_TYPE_CONV)
+                  rec_val = tree_value(rec_val);
+               else
+                  break;
+            }
+            if (rec_val != NULL && tree_kind(rec_val) == T_AGGREGATE) {
+               const unsigned fpos = tree_pos(field);
+               tree_t fval = NULL, others_val = NULL;
+               const int na = tree_assocs(rec_val);
+               for (int i = 0; i < na; i++) {
+                  tree_t a = tree_assoc(rec_val, i);
+                  switch (tree_subkind(a)) {
+                  case A_POS:
+                     if ((unsigned)i == fpos)
+                        fval = tree_value(a);
+                     break;
+                  case A_NAMED:
+                     if (tree_kind(tree_name(a)) == T_REF
+                         && tree_ref(tree_name(a)) == field)
+                        fval = tree_value(a);
+                     break;
+                  case A_OTHERS:
+                     others_val = tree_value(a);
+                     break;
+                  default:
+                     break;
+                  }
+               }
+               if (fval == NULL)
+                  fval = others_val;
+               if (fval != NULL)
+                  return vi_lower_expr(l, fval, out);
+            }
+         }
          return false;
       }
 
@@ -2168,7 +2293,8 @@ static bool vi_lower_expr(vi_lower_t *l, tree_t expr, vi_val_t *out)
             };
             return true;
          }
-         mir_type_t st = type_is_integer(rt) ? vi_i64_type(mu)
+         const bool is_int_like = vi_type_is_int_or_user_enum(rt);
+         mir_type_t st = is_int_like ? vi_i64_type(mu)
             : (l->two_state ? mir_vec2_type(mu, 1, false) : vi_u8_type(mu));
          mir_value_t slot = mir_add_var(mu, st, MIR_NULL_STAMP,
                                         ident_uniq("ces"), MIR_VAR_TEMP);
@@ -2188,7 +2314,7 @@ static bool vi_lower_expr(vi_lower_t *l, tree_t expr, vi_val_t *out)
             vi_val_t vv;
             if (!vi_lower_expr(l, tree_value(tree_stmt(br, 0)), &vv))
                return false;
-            mir_build_store(mu, slot, type_is_integer(rt) ? vi_to_i64(mu, vv.val)
+            mir_build_store(mu, slot, is_int_like ? vi_to_i64(mu, vv.val)
                             : (l->two_state ? vi_to_vec2_1(l, vv) : vv.val));
             mir_build_jump(mu, exit_bb);
             if (i + 1 < nc)
@@ -2196,7 +2322,7 @@ static bool vi_lower_expr(vi_lower_t *l, tree_t expr, vi_val_t *out)
          }
          mir_set_cursor(mu, exit_bb, MIR_APPEND);
          *out = (vi_val_t){
-            .kind    = type_is_integer(rt) ? VIVAL_INT : VIVAL_BIT,
+            .kind    = is_int_like ? VIVAL_INT : VIVAL_BIT,
             .val     = mir_build_load(mu, slot),
             .width   = 1,
             .is_std  = vi_type_is_std_logic(rt),
@@ -2506,6 +2632,11 @@ static bool vi_lower_expr(vi_lower_t *l, tree_t expr, vi_val_t *out)
                         }
                      }
                   }
+                  else if (v0.kind == VIVAL_INT && v1.kind == VIVAL_INT) {
+                     eq = mir_build_cmp(mu, MIR_CMP_EQ,
+                                        vi_to_i64(mu, v0.val),
+                                        vi_to_i64(mu, v1.val));
+                  }
                   else {
                      if (l->two_state)
                         eq = mir_build_cmp(mu, MIR_CMP_EQ,
@@ -2555,6 +2686,18 @@ static bool vi_assign_leaf_sig(vi_lower_t *l, const vhdl_isig_t *s,
 {
    mir_unit_t *mu = l->mu;
    const uint32_t dst_off = isig->a_off + (l->is_ff ? l->ff_stride : 0u);
+
+   if (s->elem_kind == VISIG_ENUM || s->elem_kind == VISIG_INT) {
+      if (val.kind != VIVAL_INT)
+         return false;
+      mir_type_t mt = vi_scalar_int_mir_type(mu, s->byte_size, s->is_signed);
+      mir_value_t ptr = vi_state_ptr_at(l, dst_off);
+      if (s->byte_size > 1 || s->is_signed)
+         ptr = mir_build_cast(mu, mir_pointer_type(mu, mt), ptr);
+      mir_value_t v = mir_build_cast(mu, mt, vi_to_i64(mu, val.val));
+      mir_build_store(mu, ptr, v);
+      return true;
+   }
 
    if (l->two_state) {
       if (is_full && sub_w == s->width) {
@@ -2623,13 +2766,97 @@ static bool vi_assign_leaf_sig_dyn_pos(vi_lower_t *l, const vhdl_isig_t *s,
    return true;
 }
 
+static bool vi_assign_record_expr(vi_lower_t *l, tree_t target_decl,
+                                  int *path, uint8_t depth, type_t rec_type,
+                                  tree_t rhs_e)
+{
+   while (rhs_e != NULL) {
+      if (tree_kind(rhs_e) == T_REF
+          && tree_kind(tree_ref(rhs_e)) == T_CONST_DECL
+          && tree_has_value(tree_ref(rhs_e)))
+         rhs_e = tree_value(tree_ref(rhs_e));
+      else if (tree_kind(rhs_e) == T_QUALIFIED
+               || tree_kind(rhs_e) == T_TYPE_CONV)
+         rhs_e = tree_value(rhs_e);
+      else
+         break;
+   }
+   if (rhs_e == NULL)
+      return false;
+
+   if (type_is_record(rec_type)) {
+      if (depth >= VHDL_ISIG_MAX_DEPTH || tree_kind(rhs_e) != T_AGGREGATE)
+         return false;
+      type_t base = type_base_recur(rec_type);
+      const int nfields = type_fields(base);
+      const int na = tree_assocs(rhs_e);
+      tree_t others_val = NULL;
+      for (int i = 0; i < na; i++) {
+         tree_t a = tree_assoc(rhs_e, i);
+         if (tree_subkind(a) == A_OTHERS)
+            others_val = tree_value(a);
+      }
+      for (int f = 0; f < nfields; f++) {
+         tree_t fdecl = type_field(base, f);
+         tree_t fval = NULL;
+         for (int i = 0; i < na; i++) {
+            tree_t a = tree_assoc(rhs_e, i);
+            switch (tree_subkind(a)) {
+            case A_POS:
+               if (i == f)
+                  fval = tree_value(a);
+               break;
+            case A_NAMED:
+               if (tree_kind(tree_name(a)) == T_REF
+                   && tree_ref(tree_name(a)) == fdecl)
+                  fval = tree_value(a);
+               break;
+            default:
+               break;
+            }
+         }
+         if (fval == NULL)
+            fval = others_val;
+         if (fval == NULL)
+            return false;
+         path[depth] = f;
+         if (!vi_assign_record_expr(l, target_decl, path, (uint8_t)(depth + 1),
+                                    tree_type(fdecl), fval))
+            return false;
+      }
+      return true;
+   }
+
+   int gid = vhdl_island_lookup_leaf(l->ctx, target_decl, path, depth);
+   if (gid < 0)
+      return false;
+   const vhdl_isig_t *ds = &(l->ctx->sigs[gid]);
+   const vhdl_isl_sig_t *dis = vhdl_island_find_sig(l->isl, (uint32_t)gid);
+   if (dis == NULL || ds->is_array2d)
+      return false;
+
+   vi_val_t rv;
+   if (!vi_lower_expr(l, rhs_e, &rv))
+      return false;
+   if (ds->is_vector && (rv.kind != VIVAL_VEC || rv.width != ds->width))
+      return false;
+   if (!ds->is_vector && ds->elem_kind != VISIG_ENUM
+       && ds->elem_kind != VISIG_INT && rv.kind != VIVAL_BIT)
+      return false;
+   if ((ds->elem_kind == VISIG_ENUM || ds->elem_kind == VISIG_INT)
+       && rv.kind != VIVAL_INT)
+      return false;
+   return vi_assign_leaf_sig(l, ds, dis, vi_off(l->mu, 0), 0, ds->width,
+                             true, rv);
+}
+
 static bool vi_lower_sig_assign(vi_lower_t *l, tree_t stmt)
 {
    tree_t target = tree_target(stmt);
    tree_t val_e = tree_value(tree_waveform(stmt, 0));
    mir_unit_t *mu = l->mu;
 
-   // Whole/partial record signal assignment: r_dst <= r_src or (others => ...)
+   // Whole/partial record signal assignment: r_dst <= r_src or const/aggregate
    if (type_is_record(tree_type(target))) {
       uint32_t *d_ids = NULL;
       uint32_t dn = 0;
@@ -2671,6 +2898,12 @@ static bool vi_lower_sig_assign(vi_lower_t *l, tree_t stmt)
          return true;
       }
       free(d_ids);
+      tree_t tdecl = NULL;
+      int tpath[VHDL_ISIG_MAX_DEPTH];
+      uint8_t tlen = 0;
+      if (vhdl_island_extract_path(target, &tdecl, tpath, &tlen))
+         return vi_assign_record_expr(l, tdecl, tpath, tlen, tree_type(target),
+                                      val_e);
       return false;
    }
 
@@ -2731,7 +2964,11 @@ static bool vi_lower_sig_assign(vi_lower_t *l, tree_t stmt)
       return false;
    if (s->is_vector && (rv.kind != VIVAL_VEC || rv.width != s->width))
       return false;
-   if (!s->is_vector && rv.kind != VIVAL_BIT)
+   if ((s->elem_kind == VISIG_ENUM || s->elem_kind == VISIG_INT)
+       && rv.kind != VIVAL_INT)
+      return false;
+   if (!s->is_vector && s->elem_kind != VISIG_ENUM && s->elem_kind != VISIG_INT
+       && rv.kind != VIVAL_BIT)
       return false;
    return vi_assign_leaf_sig(l, s, isig, vi_off(mu, 0), 0, s->width, true, rv);
 }
@@ -2878,7 +3115,7 @@ static bool vi_lower_stmt(vi_lower_t *l, tree_t stmt)
             else
                mir_build_copy(mu, l->scope->ret_slot, rv.val, vi_off(mu, rv.width));
          }
-         else if (type_is_integer(l->scope->ret_type)) {
+         else if (vi_type_is_int_or_user_enum(l->scope->ret_type)) {
             if (rv.kind != VIVAL_INT)
                return false;
             mir_build_store(mu, l->scope->ret_slot, vi_to_i64(mu, rv.val));
@@ -3150,7 +3387,7 @@ static bool vi_bind_process_locals(vi_lower_t *l, tree_t proc, vi_scope_t *sc)
          else
             loc.storage = vi_modeb_alloc_vec(l, loc.width);
       }
-      else if (type_is_integer(vt)) {
+      else if (vi_type_is_int_or_user_enum(vt)) {
          loc.storage = mir_add_var(mu, vi_i64_type(mu), MIR_NULL_STAMP,
                                    tree_ident(d), MIR_VAR_TEMP);
       }
@@ -3379,13 +3616,19 @@ static bool vi_rebuild_without_rejected(vhdl_island_ctx_t *ctx, int fail_proc)
                                                    sizeof(uint32_t));
                ctx->ext_read_sigs[ctx->n_ext_read_sigs++] = sid;
             }
-            if (ctx->sigs[sid].driver_proc >= 0
-                && !ctx->procs[ctx->sigs[sid].driver_proc].rejected) {
-               const int drv_isl =
-                  ctx->procs[ctx->sigs[sid].driver_proc].island_idx;
-               if (drv_isl >= 0) {
+            for (uint32_t dp = 0; dp < ctx->n_procs; dp++) {
+               if (ctx->procs[dp].rejected || ctx->procs[dp].island_idx < 0)
+                  continue;
+               bool writes_sid = false;
+               for (uint32_t w = 0; w < ctx->procs[dp].n_writes; w++) {
+                  if (ctx->procs[dp].writes[w] == sid) {
+                     writes_sid = true;
+                     break;
+                  }
+               }
+               if (writes_sid) {
                   vhdl_isl_sig_t *ds = (vhdl_isl_sig_t *)vhdl_island_find_sig(
-                     &(ctx->islands[drv_isl]), sid);
+                     &(ctx->islands[ctx->procs[dp].island_idx]), sid);
                   if (ds != NULL)
                      ds->rt_flags |= RT_ISIG_OUT;
                }

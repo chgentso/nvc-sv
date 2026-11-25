@@ -72,6 +72,7 @@ typedef struct _rt_island_sig {
    uint32_t                nelems;
    uint32_t                nwords;
    uint32_t                flags;
+   uint8_t                 elem_size;
    rt_watch_t             *watch;
 } rt_island_sig_t;
 
@@ -90,6 +91,7 @@ typedef struct _rt_island_domain {
    uint8_t                   prev_rst;
    bool                      in_sample_q;
    bool                      in_commit_q;
+   bool                      needs_presync;
    uint32_t                 *write_sigs;
    uint32_t                  n_write_sigs;
    uint32_t                  cap_write_sigs;

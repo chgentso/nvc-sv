@@ -765,6 +765,9 @@ static void gvn_visit_block(mir_unit_t *mu, mir_block_t block,
       case MIR_OP_SELECT:
       case MIR_OP_TERNARY:
       case MIR_OP_REM:
+      case MIR_OP_MOD:
+      case MIR_OP_XOR:
+      case MIR_OP_ABS:
       case MIR_OP_LINK_PACKAGE:
       case MIR_OP_LINK_VAR:
       case MIR_OP_PACKAGE_INIT:

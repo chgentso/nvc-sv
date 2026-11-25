@@ -2375,6 +2375,10 @@ static void irgen_op_cast(jit_irgen_t *g, mir_value_t n)
       assert(mir_is(g->mu, arg, MIR_TYPE_ACCESS));
       j_mov(g, g->map[n.id], irgen_get_value(g, arg));
    }
+   else if (result_kind == MIR_TYPE_POINTER
+            && mir_is(g->mu, arg, MIR_TYPE_POINTER)) {
+      j_mov(g, g->map[n.id], irgen_get_value(g, arg));
+   }
    else if (result_kind == MIR_TYPE_CONTEXT) {
       // Casting between protected types
       assert(mir_is(g->mu, arg, MIR_TYPE_CONTEXT));

@@ -498,12 +498,28 @@ static inline bool island_pending_has_ext_observer(void *pending)
    return false;
 }
 
-static inline bool island_sig_observed(const rt_signal_t *sig)
+static inline bool island_nexus_overlaps_sig(const rt_nexus_t *nx,
+                                             const rt_island_sig_t *s)
 {
+   if (s->sig->shared.flags & SIG_F_PACKED)
+      return true;
+   const uint32_t s_lo = (uint32_t)s->sig_offset;
+   const uint32_t s_hi = s_lo + s->width * s->nelems;
+   const uint32_t n_sz = nx->size > 0 ? nx->size : 1u;
+   const uint32_t n_lo = (uint32_t)(nx->offset / n_sz);
+   const uint32_t n_hi = n_lo + nx->width;
+   return n_hi > s_lo && n_lo < s_hi;
+}
+
+static inline bool island_sig_observed(const rt_island_sig_t *s)
+{
+   const rt_signal_t *sig = s->sig;
    if (sig->shared.flags & (SIG_F_POLL_WATCHED | SIG_F_EXT_READ))
       return true;
    const rt_nexus_t *nx = &(sig->nexus);
    for (uint32_t i = 0; i < sig->n_nexus; i++, nx = nx->chain) {
+      if (!island_nexus_overlaps_sig(nx, s))
+         continue;
       if (island_pending_has_ext_observer(nx->pending))
          return true;
    }
@@ -835,8 +851,12 @@ void rt_island_bind_sig(void *handle, uint32_t idx, sig_shared_t *ss,
    s->nelems = nelems;
    s->nwords = (width + 63u) / 64u;
    s->flags = flags;
+   s->elem_size = (sig != NULL && !(sig->shared.flags & SIG_F_PACKED)
+                   && sig->nexus.size > 0)
+      ? (uint8_t)sig->nexus.size : 1u;
    if (flags & RT_ISIG_STD_LOGIC9)
-      assert(a_off + ALIGN_UP(width * nelems, 8u) <= isl->state_bytes);
+      assert(a_off + ALIGN_UP(width * nelems * s->elem_size, 8u)
+             <= isl->state_bytes);
 }
 
 void rt_island_add_domain(void *handle, uint32_t dom_idx,
@@ -941,7 +961,7 @@ void rt_island_finish(void *handle)
          s->next_owner = prev;
          hash_put(isl->mgr->sig_map, s->sig, s);
 
-         if (island_sig_observed(s->sig)) {
+         if (island_sig_observed(s)) {
             s->flags |= RT_ISIG_OBSERVED;
             if ((s->flags & RT_ISIG_COMB_WRITTEN)
                 && !(s->flags & RT_ISIG_OUT))
@@ -954,6 +974,29 @@ void rt_island_finish(void *handle)
       rt_island_domain_t *dom = &(isl->domains[d]);
       if (dom->ff_handle == JIT_HANDLE_INVALID)
          continue;
+
+      dom->needs_presync = false;
+      for (uint32_t w = 0; w < dom->n_write_sigs; w++) {
+         const uint32_t sidx = dom->write_sigs[w];
+         const rt_island_sig_t *ws = &(isl->sigs[sidx]);
+         if (ws->flags & (RT_ISIG_IN | RT_ISIG_COMB_WRITTEN)) {
+            dom->needs_presync = true;
+            break;
+         }
+         for (uint32_t d2 = 0; d2 < isl->ndomains && !dom->needs_presync; d2++) {
+            if (d2 == d)
+               continue;
+            const rt_island_domain_t *od = &(isl->domains[d2]);
+            for (uint32_t w2 = 0; w2 < od->n_write_sigs; w2++) {
+               if (od->write_sigs[w2] == sidx) {
+                  dom->needs_presync = true;
+                  break;
+               }
+            }
+         }
+         if (dom->needs_presync)
+            break;
+      }
 
       const rt_island_sig_t *cs = &(isl->sigs[dom->clk_sig_idx]);
       assert(cs->sig != NULL);
@@ -987,8 +1030,18 @@ static void island_sync_in_sig(rt_island_t *isl, const rt_island_sig_t *s)
 
    if (s->flags & RT_ISIG_STD_LOGIC9) {
       assert(!(sig->shared.flags & SIG_F_PACKED));
-      memcpy(isl->state + s->a_off, sig->shared.data + s->sig_offset,
-             (size_t)width * nelems);
+      const size_t elem_sz = s->elem_size;
+      const size_t nbytes = (size_t)width * nelems * elem_sz;
+      const uint8_t *src = sig->shared.data + (size_t)s->sig_offset * elem_sz;
+      uint8_t *dst = isl->state + s->a_off;
+      if (nbytes == 1)
+         *dst = *src;
+      else if (nbytes == 4)
+         memcpy(dst, src, 4);
+      else if (nbytes == 8)
+         memcpy(dst, src, 8);
+      else
+         memcpy(dst, src, nbytes);
       return;
    }
 
@@ -1143,9 +1196,16 @@ static void island_sync_out_sig(rt_model_t *m, rt_island_t *isl,
    if (s->flags & RT_ISIG_STD_LOGIC9) {
       assert(!(sig->shared.flags & SIG_F_PACKED));
       const uint32_t total = width * nelems;
+      const size_t elem_sz = s->elem_size;
+      const size_t nbytes = (size_t)total * elem_sz;
       const uint8_t *src = isl->state + s->a_off;
-      const uint8_t *cur = sig->shared.data + s->sig_offset;
-      if (memcmp(cur, src, total) != 0)
+      const uint8_t *cur = sig->shared.data + (size_t)s->sig_offset * elem_sz;
+      bool diff;
+      if (nbytes == 1)
+         diff = (*cur != *src);
+      else
+         diff = (memcmp(cur, src, nbytes) != 0);
+      if (diff)
          deposit_signal(m, sig, src, s->sig_offset, total);
       return;
    }
@@ -1301,8 +1361,10 @@ static void island_sync_out_slice(rt_model_t *m, rt_island_t *isl,
    if (s->flags & RT_ISIG_STD_LOGIC9) {
       assert(!(sig->shared.flags & SIG_F_PACKED));
       const uint32_t sig_off = (uint32_t)s->sig_offset + local_off;
-      const uint8_t *src = isl->state + s->a_off + local_off;
-      if (memcmp(sig->shared.data + sig_off, src, local_cnt) != 0)
+      const size_t elem_sz = s->elem_size;
+      const uint8_t *src = isl->state + s->a_off + (size_t)local_off * elem_sz;
+      if (memcmp(sig->shared.data + (size_t)sig_off * elem_sz, src,
+                 (size_t)local_cnt * elem_sz) != 0)
          deposit_signal(m, sig, src, (int)sig_off, (int)local_cnt);
       return;
    }
@@ -1400,12 +1462,14 @@ static void island_sync_sig_raw(rt_island_t *isl, const rt_island_sig_t *s,
 
    if (s->flags & RT_ISIG_STD_LOGIC9) {
       assert(!(sig->shared.flags & SIG_F_PACKED));
-      const uint32_t total = width * nelems;
-      uint8_t *dst = sig->shared.data + s->sig_offset;
-      memcpy(dst, isl->state + s->a_off, total);
+      const size_t elem_sz = s->elem_size;
+      const size_t total_bytes = (size_t)width * nelems * elem_sz;
+      const size_t byte_off = (size_t)s->sig_offset * elem_sz;
+      uint8_t *dst = sig->shared.data + byte_off;
+      memcpy(dst, isl->state + s->a_off, total_bytes);
       if (update_last)
-         memcpy(sig->shared.data + sig->shared.size + s->sig_offset,
-                dst, total);
+         memcpy(sig->shared.data + sig->shared.size + byte_off,
+                dst, total_bytes);
       return;
    }
 
@@ -1504,11 +1568,14 @@ static void island_sync_sig_raw_slice(rt_island_t *isl,
    rt_signal_t *sig = s->sig;
    if (s->flags & RT_ISIG_STD_LOGIC9) {
       assert(!(sig->shared.flags & SIG_F_PACKED));
-      uint8_t *dst = sig->shared.data + s->sig_offset + local_off;
-      memcpy(dst, isl->state + s->a_off + local_off, local_cnt);
+      const size_t elem_sz = s->elem_size;
+      const size_t byte_off = ((size_t)s->sig_offset + local_off) * elem_sz;
+      const size_t byte_cnt = (size_t)local_cnt * elem_sz;
+      uint8_t *dst = sig->shared.data + byte_off;
+      memcpy(dst, isl->state + s->a_off + (size_t)local_off * elem_sz,
+             byte_cnt);
       if (update_last)
-         memcpy(sig->shared.data + sig->shared.size
-                + s->sig_offset + local_off, dst, local_cnt);
+         memcpy(sig->shared.data + sig->shared.size + byte_off, dst, byte_cnt);
       return;
    }
 
@@ -1603,7 +1670,7 @@ static rt_island_force_t *island_get_or_add_force(rt_island_t *isl,
    if (s->flags & RT_ISIG_STD_LOGIC9) {
       const uint32_t total = s->width * s->nelems;
       const uint32_t mask_words = (total + 63u) / 64u;
-      const uint32_t val_words = (total + 7u) / 8u;
+      const uint32_t val_words = (total * s->elem_size + 7u) / 8u;
       uint64_t *mem = xcalloc_array(mask_words + val_words, sizeof(uint64_t));
       f->mask = mem;
       f->a = mem + mask_words;
@@ -1625,11 +1692,12 @@ static void island_apply_force_entry(uint8_t *base, const rt_island_sig_t *s,
 {
    if (s->flags & RT_ISIG_STD_LOGIC9) {
       const uint32_t total = s->width * s->nelems;
+      const size_t elem_sz = s->elem_size;
       uint8_t *dst = base + s->a_off;
       const uint8_t *fa = (const uint8_t *)f->a;
       for (uint32_t k = 0; k < total; k++) {
          if (f->mask[k >> 6] & (UINT64_C(1) << (k & 63u)))
-            dst[k] = fa[k];
+            memcpy(dst + k * elem_sz, fa + k * elem_sz, elem_sz);
       }
       return;
    }
@@ -1666,7 +1734,7 @@ static inline void island_copy_sig_buf(uint8_t *dst_base,
 {
    if (s->flags & RT_ISIG_STD_LOGIC9) {
       memcpy(dst_base + s->a_off, src_base + s->a_off,
-             (size_t)s->width * s->nelems);
+             (size_t)s->width * s->nelems * s->elem_size);
       return;
    }
    const size_t bytes = (size_t)s->nwords * s->nelems * sizeof(uint64_t);
@@ -1679,9 +1747,16 @@ static inline bool island_commit_sig_buf(rt_island_t *isl,
                                          const rt_island_sig_t *s)
 {
    if (s->flags & RT_ISIG_STD_LOGIC9) {
-      const size_t total = (size_t)s->width * s->nelems;
+      const size_t total = (size_t)s->width * s->nelems * s->elem_size;
       uint8_t *dst = isl->state + s->a_off;
       const uint8_t *src = isl->next_state + s->a_off;
+      if (total == 1) {
+         if (*dst != *src) {
+            *dst = *src;
+            return true;
+         }
+         return false;
+      }
       if (memcmp(dst, src, total) != 0) {
          memcpy(dst, src, total);
          return true;
@@ -1722,7 +1797,7 @@ static inline bool island_copy_direct_sig(const rt_island_sig_t *src_s,
    const rt_island_t *src_isl = src_s->isl;
    rt_island_t *dst_isl = dst_s->isl;
    if (src_s->flags & RT_ISIG_STD_LOGIC9) {
-      const size_t total = (size_t)src_s->width * src_s->nelems;
+      const size_t total = (size_t)src_s->width * src_s->nelems * src_s->elem_size;
       const uint8_t *src = src_isl->state + src_s->a_off;
       uint8_t *dst = dst_isl->state + dst_s->a_off;
       if (memcmp(dst, src, total) != 0) {
@@ -1775,6 +1850,8 @@ static bool island_check_direct_sig(const rt_island_sig_t *src_s,
 
    const rt_nexus_t *nx = &(sig->nexus);
    for (uint32_t i = 0; i < sig->n_nexus; i++, nx = nx->chain) {
+      if (!island_nexus_overlaps_sig(nx, src_s))
+         continue;
       if (nx->n_sources != 0 || nx->outputs != NULL)
          return false;
       if (nx->pending == NULL)
@@ -1792,6 +1869,7 @@ static bool island_check_direct_sig(const rt_island_sig_t *src_s,
              || dst_s->sig_offset != src_s->sig_offset
              || dst_s->width != src_s->width
              || dst_s->nelems != src_s->nelems
+             || dst_s->elem_size != src_s->elem_size
              || ((src_s->flags ^ dst_s->flags)
                  & (RT_ISIG_TWO_STATE | RT_ISIG_STD_LOGIC9)) != 0)
             return false;
@@ -1822,6 +1900,7 @@ static bool island_check_direct_sig(const rt_island_sig_t *src_s,
                 || dst_s->sig_offset != src_s->sig_offset
                 || dst_s->width != src_s->width
                 || dst_s->nelems != src_s->nelems
+                || dst_s->elem_size != src_s->elem_size
                 || ((src_s->flags ^ dst_s->flags)
                  & (RT_ISIG_TWO_STATE | RT_ISIG_STD_LOGIC9)) != 0)
                return false;
@@ -3269,9 +3348,11 @@ static bool island_sample_domain(jit_t *jit, rt_island_domain_t *dom,
       isl->has_dirty_inputs = false;
    }
 
-   for (uint32_t j = 0; j < dom->n_write_sigs; j++)
-      island_copy_sig_buf(isl->next_state, isl->state,
-                          &(isl->sigs[dom->write_sigs[j]]));
+   if (unlikely(dom->needs_presync)) {
+      for (uint32_t j = 0; j < dom->n_write_sigs; j++)
+         island_copy_sig_buf(isl->next_state, isl->state,
+                             &(isl->sigs[dom->write_sigs[j]]));
+   }
 
    jit_scalar_t p1 = { .pointer = isl->inst_ctx };
    jit_scalar_t p2 = { .pointer = isl->state };
@@ -3689,6 +3770,8 @@ bool rt_island_read_sig(rt_island_mgr_t *mgr, rt_signal_t *sig,
    const uint32_t nwords = s->nwords;
    const uint32_t nelems = s->nelems;
    if (s->flags & RT_ISIG_STD_LOGIC9) {
+      if (s->elem_size != 1)
+         return false;
       const uint8_t *src = isl->state + s->a_off;
       for (uint32_t e = 0; e < nelems; e++) {
          uint64_t *ea = a_out != NULL ? a_out + e * nwords : NULL;
@@ -3881,34 +3964,37 @@ static void island_write_bits_slice(rt_island_t *isl, rt_island_sig_t *s,
       f = (rt_island_force_t *)island_find_force(isl, s->sig_idx);
 
    if (s->flags & RT_ISIG_STD_LOGIC9) {
+      const size_t elem_sz = s->elem_size;
       uint8_t *dst = isl->state + s->a_off;
       uint8_t *ndst = isl->next_state != NULL ? isl->next_state + s->a_off : NULL;
       uint8_t *fa = f != NULL ? (uint8_t *)f->a : NULL;
       for (uint32_t k = 0; k < local_cnt; k++) {
          const uint32_t pos = local_off + k;
-         uint8_t val = 0;
+         uint8_t val_buf[8] = {0};
          if (is_packed_src) {
             const uint32_t src_bit = total_src_w - 1u - k;
             const uint8_t a = (a_words[src_bit / 64u] >> (src_bit & 63u)) & 1u;
             const uint8_t b = b_words != NULL
                ? ((b_words[src_bit / 64u] >> (src_bit & 63u)) & 1u) : 0u;
-            val = sv_to_std_logic((uint8_t)(a | (b << 1)));
+            val_buf[0] = sv_to_std_logic((uint8_t)(a | (b << 1)));
          }
          else if (bytes != NULL)
-            val = bytes[k];
+            memcpy(val_buf, bytes + (size_t)k * elem_sz, elem_sz);
 
          const uint64_t mbit = UINT64_C(1) << (pos & 63u);
          if (is_force) {
             f->mask[pos >> 6] |= mbit;
-            fa[pos] = val;
-            dst[pos] = val;
+            memcpy(fa + (size_t)pos * elem_sz, val_buf, elem_sz);
+            memcpy(dst + (size_t)pos * elem_sz, val_buf, elem_sz);
             if (ndst != NULL)
-               ndst[pos] = val;
+               memcpy(ndst + (size_t)pos * elem_sz, val_buf, elem_sz);
          }
          else {
             if (f != NULL && (f->mask[pos >> 6] & mbit))
                continue;
-            dst[pos] = val;
+            memcpy(dst + (size_t)pos * elem_sz, val_buf, elem_sz);
+            if (ndst != NULL)
+               memcpy(ndst + (size_t)pos * elem_sz, val_buf, elem_sz);
          }
       }
       return;
@@ -3966,6 +4052,10 @@ static void island_write_bits_slice(rt_island_t *isl, rt_island_sig_t *s,
          ap[widx] = (ap[widx] & ~bit) | (a ? bit : 0);
          if (bp != NULL)
             bp[widx] = (bp[widx] & ~bit) | (b ? bit : 0);
+         if (nap != NULL)
+            nap[widx] = (nap[widx] & ~bit) | (a ? bit : 0);
+         if (nbp != NULL)
+            nbp[widx] = (nbp[widx] & ~bit) | (b ? bit : 0);
       }
    }
 }
