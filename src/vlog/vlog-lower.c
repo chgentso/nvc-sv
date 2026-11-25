@@ -38855,9 +38855,14 @@ void vlog_lower_instance(mir_context_t *mc, vlog_node_t body, ident_t parent,
 
    vlog_island_lower_ctx_t *island_ctx = NULL;
    if (opt_get_int(OPT_RTL_ISLANDS) != RTL_ISLANDS_OFF
-       && !opt_get_int(OPT_DEBUG_STMTS))
-      island_ctx = vlog_island_lower_prepare(body, tree_ports(trans) > 0,
+       && !opt_get_int(OPT_DEBUG_STMTS)) {
+      const bool is_mixed =
+         (tree_decls(trans) > 0 && tree_kind(tree_decl(trans, 0)) == T_HIER)
+         ? (tree_ports(trans) > 0)
+         : vlog_island_body_is_mixed(body);
+      island_ctx = vlog_island_lower_prepare(body, is_mixed,
                                              mu, cover_counts);
+   }
 
    const int nstmts = tree_stmts(trans);
    for (int i = 0; i < nstmts; i++) {

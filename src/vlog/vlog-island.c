@@ -33,11 +33,22 @@
 
 static vlog_find_mod_fn_t island_find_mod = NULL;
 static void *island_find_mod_ctx = NULL;
+static vlog_node_t last_analyzed_body = NULL;
+static bool last_analyzed_is_mixed = false;
 
 void vlog_island_set_find_mod(vlog_find_mod_fn_t fn, void *ctx)
 {
    island_find_mod = fn;
    island_find_mod_ctx = ctx;
+   if (fn == NULL) {
+      last_analyzed_body = NULL;
+      last_analyzed_is_mixed = false;
+   }
+}
+
+bool vlog_island_body_is_mixed(vlog_node_t body)
+{
+   return body != NULL && body == last_analyzed_body && last_analyzed_is_mixed;
 }
 
 typedef struct {
@@ -54,6 +65,7 @@ typedef struct {
    bool                      is_output_port;
    bool                      ext_read;
    bool                      ext_written;
+   bool                      level_watched;
    uint32_t                  driver_count;
    island_sig_eject_reason_t eject_reason;
 } sig_meta_t;
@@ -403,8 +415,10 @@ static void scan_lvalue_refs(analyze_ctx_t *ctx, vlog_node_t lhs,
                s->ext_written = true;
             if (mark_ext_read)
                s->ext_read = true;
-            if (add_driver && !hset_contains(driver_once, s->decl)) {
-               hset_insert(driver_once, s->decl);
+            if (add_driver && (driver_once == NULL
+                               || !hset_contains(driver_once, s->decl))) {
+               if (driver_once != NULL)
+                  hset_insert(driver_once, s->decl);
                s->driver_count++;
             }
          }
@@ -503,7 +517,30 @@ static void collect_stmt_writes_only(analyze_ctx_t *ctx, vlog_node_t stmt,
    }
 }
 
-static void collect_stmt_writes_ext(analyze_ctx_t *ctx, vlog_node_t stmt)
+static void scan_mutating_sysf_cb(vlog_node_t v, void *arg)
+{
+   analyze_ctx_t *ctx = arg;
+   if (vlog_kind(v) != V_SYS_FCALL || !vlog_has_ident(v))
+      return;
+
+   ident_t id = vlog_ident(v);
+   const unsigned np = vlog_params(v);
+   if (id == ident_new("$fscanf") || id == ident_new("$sscanf")) {
+      for (unsigned i = 2; i < np; i++)
+         scan_lvalue_refs(ctx, vlog_param(v, i), false, true, false, NULL);
+   }
+   else if (id == ident_new("$value$plusargs")) {
+      if (np >= 2)
+         scan_lvalue_refs(ctx, vlog_param(v, 1), false, true, false, NULL);
+   }
+   else if (id == ident_new("$fgets") || id == ident_new("$fread")) {
+      if (np >= 1)
+         scan_lvalue_refs(ctx, vlog_param(v, 0), false, true, false, NULL);
+   }
+}
+
+static void collect_stmt_writes_ext_rec(analyze_ctx_t *ctx, vlog_node_t stmt,
+                                        hset_t *seen_tasks)
 {
    switch (vlog_kind(stmt)) {
    case V_ASSIGN:
@@ -514,6 +551,46 @@ static void collect_stmt_writes_ext(analyze_ctx_t *ctx, vlog_node_t stmt)
    case V_POSTFIX:
       if (vlog_has_target(stmt))
          scan_lvalue_refs(ctx, vlog_target(stmt), false, true, false, NULL);
+      break;
+   case V_SYS_TCALL:
+      if (vlog_has_ident(stmt)) {
+         ident_t id = vlog_ident(stmt);
+         const unsigned np = vlog_params(stmt);
+         if (id == ident_new("$readmemh") || id == ident_new("$readmemb")
+             || id == ident_new("$value$plusargs")) {
+            if (np >= 2)
+               scan_lvalue_refs(ctx, vlog_param(stmt, 1), false, true, false, NULL);
+         }
+         else if (id == ident_new("$fscanf") || id == ident_new("$sscanf")) {
+            for (unsigned i = 2; i < np; i++)
+               scan_lvalue_refs(ctx, vlog_param(stmt, i), false, true, false, NULL);
+         }
+         else if (id == ident_new("$fgets") || id == ident_new("$fread")
+                  || id == ident_new("$sformat") || id == ident_new("$swrite")
+                  || id == ident_new("$swriteb") || id == ident_new("$swriteo")
+                  || id == ident_new("$swriteh")) {
+            if (np >= 1)
+               scan_lvalue_refs(ctx, vlog_param(stmt, 0), false, true, false, NULL);
+         }
+      }
+      break;
+   case V_USER_TCALL:
+      if (vlog_has_ref(stmt) && vlog_kind(vlog_ref(stmt)) == V_TASK_DECL) {
+         vlog_node_t task = vlog_ref(stmt);
+         const unsigned nports = vlog_ports(task);
+         const unsigned np = vlog_params(stmt);
+         for (unsigned i = 0; i < np && i < nports; i++) {
+            vlog_node_t p = vlog_port(task, i);
+            if (vlog_kind(p) == V_TF_PORT_DECL
+                && vlog_subkind(p) != V_PORT_INPUT)
+               scan_lvalue_refs(ctx, vlog_param(stmt, i), false, true, false, NULL);
+         }
+         if (!hset_contains(seen_tasks, task)) {
+            hset_insert(seen_tasks, task);
+            for (unsigned i = 0; i < vlog_stmts(task); i++)
+               collect_stmt_writes_ext_rec(ctx, vlog_stmt(task, i), seen_tasks);
+         }
+      }
       break;
    case V_ALWAYS:
    case V_INITIAL:
@@ -530,29 +607,37 @@ static void collect_stmt_writes_ext(analyze_ctx_t *ctx, vlog_node_t stmt)
    case V_CASE_ITEM:
    case V_FORK:
       for (unsigned i = 0; i < vlog_stmts(stmt); i++)
-         collect_stmt_writes_ext(ctx, vlog_stmt(stmt, i));
+         collect_stmt_writes_ext_rec(ctx, vlog_stmt(stmt, i), seen_tasks);
       if (vlog_kind(stmt) == V_FOR_LOOP) {
          if (vlog_has_left(stmt))
-            collect_stmt_writes_ext(ctx, vlog_left(stmt));
+            collect_stmt_writes_ext_rec(ctx, vlog_left(stmt), seen_tasks);
          if (vlog_has_right(stmt))
-            collect_stmt_writes_ext(ctx, vlog_right(stmt));
+            collect_stmt_writes_ext_rec(ctx, vlog_right(stmt), seen_tasks);
       }
       break;
    case V_FOR_INIT:
    case V_FOR_STEP:
       for (unsigned i = 0; i < vlog_stmts(stmt); i++)
-         collect_stmt_writes_ext(ctx, vlog_stmt(stmt, i));
+         collect_stmt_writes_ext_rec(ctx, vlog_stmt(stmt, i), seen_tasks);
       break;
    case V_IF:
       for (unsigned i = 0; i < vlog_conds(stmt); i++) {
          vlog_node_t c = vlog_cond(stmt, i);
          for (unsigned j = 0; j < vlog_stmts(c); j++)
-            collect_stmt_writes_ext(ctx, vlog_stmt(c, j));
+            collect_stmt_writes_ext_rec(ctx, vlog_stmt(c, j), seen_tasks);
       }
       break;
    default:
       break;
    }
+}
+
+static void collect_stmt_writes_ext(analyze_ctx_t *ctx, vlog_node_t stmt)
+{
+   hset_t *seen_tasks = hset_new(8);
+   collect_stmt_writes_ext_rec(ctx, stmt, seen_tasks);
+   hset_free(seen_tasks);
+   vlog_visit_only(stmt, scan_mutating_sysf_cb, ctx, V_SYS_FCALL);
 }
 
 static void prescan_stmt_drivers(analyze_ctx_t *ctx, vlog_node_t s,
@@ -607,15 +692,19 @@ static void prescan_stmt_drivers(analyze_ctx_t *ctx, vlog_node_t s,
    case V_GATE_INST:
       {
          if (vlog_subkind(s) == V_GATE_ALIAS) {
+            hset_t *once = hset_new(8);
             ref_scan_t rs = {
                .ctx              = ctx,
                .mark_ext_read    = true,
                .mark_ext_written = true,
+               .add_driver       = true,
                .force_reason     = ISIG_EJ_ALIAS,
+               .seen_once        = once,
             };
             vlog_visit(s, scan_refs_cb, &rs);
             if (vlog_has_target(s))
-               scan_lvalue_refs(ctx, vlog_target(s), true, true, true, NULL);
+               scan_lvalue_refs(ctx, vlog_target(s), true, true, true, once);
+            hset_free(once);
             break;
          }
 
@@ -1831,6 +1920,14 @@ static vlog_node_t first_exec_stmt(vlog_node_t s)
 static void check_assign_proc(analyze_ctx_t *ctx, proc_meta_t *pm,
                               vlog_node_t s)
 {
+   // Continuous assignments in a mixed VHDL-SV boundary module run as
+   // stateless processes during model_reset and signal-update (reschedq)
+   // so VHDL sees zero extra delta cycles across the language boundary.
+   if (ctx->is_mixed) {
+      pm->eject_reason = IPROC_EJ_UNSUPPORTED_STMT;
+      return;
+   }
+
    if (vlog_has_delay(s)) {
       pm->eject_reason = IPROC_EJ_DELAY;
       return;
@@ -2193,9 +2290,48 @@ static void check_always_proc(analyze_ctx_t *ctx, proc_meta_t *pm,
    ACLEAR(body_stmts);
 }
 
+static void mark_ejected_level_watches(analyze_ctx_t *ctx, vlog_node_t s)
+{
+   if (vlog_kind(s) != V_ALWAYS || vlog_stmts(s) == 0)
+      return;
+   const vlog_always_kind_t ak = vlog_subkind(s);
+   if (ak == V_ALWAYS_COMB || ak == V_ALWAYS_COMB_DONE
+       || ak == V_ALWAYS_LATCH || ak == V_ALWAYS_LATCH_DONE)
+      return;
+
+   vlog_node_t top = vlog_stmt(s, 0);
+   vlog_node_t timing = top;
+   if (vlog_stmts(s) == 1 && vlog_kind(top) == V_SEQ_BLOCK
+       && vlog_stmts(top) > 0)
+      timing = vlog_stmt(top, 0);
+   if (vlog_kind(timing) != V_TIMING || !vlog_has_value(timing))
+      return;
+
+   vlog_node_t ctrl = vlog_value(timing);
+   if (vlog_kind(ctrl) != V_EVENT_CONTROL)
+      return;
+
+   const unsigned np = vlog_params(ctrl);
+   for (unsigned i = 0; i < np; i++) {
+      vlog_node_t ev = vlog_param(ctrl, i);
+      if (vlog_kind(ev) != V_EVENT || vlog_subkind(ev) != V_EVENT_LEVEL)
+         continue;
+      vlog_node_t val = vlog_value(ev);
+      while (vlog_kind(val) == V_BIT_SELECT || vlog_kind(val) == V_PART_SELECT
+             || vlog_kind(val) == V_MEMBER_REF)
+         val = vlog_value(val);
+      if (vlog_kind(val) == V_REF && vlog_has_ref(val)) {
+         const int idx = find_sig_idx(ctx, vlog_ref(val));
+         if (idx >= 0)
+            ctx->sigs[idx].level_watched = true;
+      }
+   }
+}
+
 static void mark_ejected_proc_refs(analyze_ctx_t *ctx, vlog_node_t s)
 {
    collect_stmt_writes_ext(ctx, s);
+   mark_ejected_level_watches(ctx, s);
 
    ref_scan_t rs = {
       .ctx           = ctx,
@@ -2304,6 +2440,53 @@ static bool sv_procs_write_conflict(const proc_meta_t *a, const proc_meta_t *b,
    return !a_has || !b_has;
 }
 
+static bool sv_output_port_fully_written(const analyze_ctx_t *ctx, uint32_t si)
+{
+   const sig_meta_t *sm = &(ctx->sigs[si]);
+   const uint64_t total_bits = (uint64_t)sm->width * sm->nelems;
+   if (total_bits == 0)
+      return false;
+
+   A(sv_write_range_t) ranges = AINIT;
+   for (uint32_t k = 0; k < ctx->nprocs; k++) {
+      const proc_meta_t *q = &(ctx->procs[k]);
+      if (!q->eligible)
+         continue;
+      for (uint32_t r = 0; r < q->write_ranges.count; r++) {
+         if (q->write_ranges.items[r].sig_idx == si)
+            APUSH(ranges, q->write_ranges.items[r]);
+      }
+   }
+
+   if (ranges.count == 0) {
+      ACLEAR(ranges);
+      return false;
+   }
+
+   for (uint32_t i = 1; i < ranges.count; i++) {
+      sv_write_range_t key = ranges.items[i];
+      uint32_t j = i;
+      while (j > 0 && ranges.items[j - 1].bit_lo > key.bit_lo) {
+         ranges.items[j] = ranges.items[j - 1];
+         j--;
+      }
+      ranges.items[j] = key;
+   }
+
+   uint64_t covered = 0;
+   for (uint32_t i = 0; i < ranges.count; i++) {
+      if (ranges.items[i].bit_lo > covered)
+         break;
+      if (ranges.items[i].bit_hi + 1u > covered)
+         covered = ranges.items[i].bit_hi + 1u;
+      if (covered >= total_bits)
+         break;
+   }
+
+   ACLEAR(ranges);
+   return covered >= total_bits;
+}
+
 static void resolve_multi_drivers(analyze_ctx_t *ctx)
 {
    bool changed = true;
@@ -2319,6 +2502,16 @@ static void resolve_multi_drivers(analyze_ctx_t *ctx)
             const uint32_t si = p->writes.items[j];
             sig_meta_t *sm = &(ctx->sigs[si]);
             if (sm->ext_written) {
+               conflict = true;
+               break;
+            }
+            if (sm->level_watched
+                && (p->kind == IPROC_COMB || p->kind == IPROC_ASSIGN)) {
+               conflict = true;
+               break;
+            }
+            if (sm->is_output_port && !sv_output_port_fully_written(ctx, si)) {
+               sm->ext_written = true;
                conflict = true;
                break;
             }
@@ -3010,6 +3203,11 @@ static vlog_island_t *build_island(analyze_ctx_t *ctx, uint32_t island_id)
 vlog_island_plan_t *vlog_island_analyze(vlog_node_t body, bool is_mixed)
 {
    assert(vlog_kind(body) == V_INST_BODY);
+
+   if (body != last_analyzed_body) {
+      last_analyzed_body = body;
+      last_analyzed_is_mixed = is_mixed;
+   }
 
    if (vlog_flags(body) & VLOG_F_INTERFACE) {
       vlog_island_plan_t *plan = xcalloc(sizeof(vlog_island_plan_t));

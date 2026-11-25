@@ -169,6 +169,7 @@ typedef struct {
 } vlog_island_plan_t;
 
 void vlog_island_set_find_mod(vlog_find_mod_fn_t fn, void *ctx);
+bool vlog_island_body_is_mixed(vlog_node_t body);
 vlog_island_plan_t *vlog_island_analyze(vlog_node_t body, bool is_mixed);
 void vlog_island_plan_free(vlog_island_plan_t *plan);
 void vlog_island_dump(const vlog_island_plan_t *plan);
