@@ -6601,7 +6601,7 @@ static void p_assignment_pattern(vlog_node_t expr, bool deferred)
    vlog_node_t bt = dt != NULL ? vlog_get_type(dt) : NULL;
    const bool assoc = bt != NULL && vlog_kind(bt) == V_DATA_TYPE
       && vlog_subkind(bt) == DT_ASSOC;
-   const bool struct_pat = !of_array && bt != NULL
+   const bool struct_pat = !deferred && !of_array && bt != NULL
       && (vlog_kind(bt) == V_STRUCT_DECL || vlog_kind(bt) == V_UNION_DECL);
 
    SCOPED_A(vlog_node_t) items = AINIT;
@@ -6615,7 +6615,9 @@ static void p_assignment_pattern(vlog_node_t expr, bool deferred)
          consume(tCOLON);
          vlog_set_right(v, p_pattern_elem_expr(array_depth, dt));
       }
-      else if (!assoc && is_type_key(dt)) {
+      else if (!assoc && (!deferred ? is_type_key(dt)
+                          : (peek_nth(2) == tCOLON
+                             && is_simple_type_token(peek())))) {
          vlog_node_t key;
          if (is_simple_type_token(peek()))
             key = p_data_type();
@@ -7026,15 +7028,47 @@ static void resolve_deferred_pattern(vlog_node_t pat, vlog_node_t dt,
    }
 }
 
+static bool lhs_uses_typeparam(vlog_node_t lhs)
+{
+   while (vlog_kind(lhs) == V_BIT_SELECT || vlog_kind(lhs) == V_PART_SELECT)
+      lhs = vlog_value(lhs);
+
+   if (vlog_kind(lhs) == V_REF && vlog_has_ref(lhs)) {
+      vlog_node_t d = vlog_ref(lhs);
+      switch (vlog_kind(d)) {
+      case V_VAR_DECL:
+      case V_NET_DECL:
+      case V_PORT_DECL:
+      case V_LOCAL_DECL:
+      case V_TF_PORT_DECL:
+         return vlog_has_type(d) && vlog_uses_typeparam(vlog_type(d));
+      default:
+         break;
+      }
+   }
+
+   return false;
+}
+
 static vlog_node_t p_expression_of_lhs(vlog_node_t lhs)
 {
    // The right-hand side of an assignment takes the type of the target
 
    vlog_node_t dt = pattern_type_of(lhs);
 
-   if (dt == NULL && peek() == tTICK && peek_nth(2) == tLBRACE
-       && vlog_kind(lhs) == V_HIER_REF)
-      return p_deferred_pattern_expression();
+   const bool pending = vlog_kind(lhs) == V_HIER_REF
+      || vlog_typeparam_pending(lhs) || vlog_virtual_chain(lhs)
+      || lhs_uses_typeparam(lhs);
+
+   if (pending && (dt == NULL || lhs_uses_typeparam(lhs))) {
+      if (peek() == tTICK && peek_nth(2) == tLBRACE)
+         return p_deferred_pattern_expression();
+
+      deferred_pattern_depth++;
+      vlog_node_t v = p_expression_of_type(NULL);
+      deferred_pattern_depth--;
+      return v;
+   }
 
    if (peek() == tTICK && peek_nth(2) == tLBRACE)
       pattern_array_elems = lhs_unpacked_depth(lhs);
@@ -7051,9 +7085,15 @@ static vlog_node_t p_assignment_pattern_expression(vlog_node_t dt)
    BEGIN("assignment pattern expression");
 
    vlog_node_t v = vlog_new(V_PATTERN_EXPR);
-   vlog_set_type(v, dt);
+   if (dt != NULL)
+      vlog_set_type(v, dt);
 
-   p_assignment_pattern(v, false);
+   const bool deferred = dt != NULL && vlog_uses_typeparam(dt);
+   if (deferred)
+      deferred_pattern_depth++;
+   p_assignment_pattern(v, deferred);
+   if (deferred)
+      deferred_pattern_depth--;
 
    vlog_set_loc(v, CURRENT_LOC);
    return v;
@@ -8273,7 +8313,9 @@ static vlog_node_t p_primary(void)
             && vlog_kind(head) == V_REF && vlog_has_ref(head)
             && is_data_type(vlog_ref(head))
             && vlog_get_type(vlog_ref(head)) != NULL)
-      return p_assignment_pattern_expression(vlog_get_type(vlog_ref(head)));
+      return p_assignment_pattern_expression(
+         vlog_uses_typeparam(vlog_ref(head))
+         ? vlog_ref(head) : vlog_get_type(vlog_ref(head)));
    else
       return head;
 }

@@ -3286,3 +3286,4 @@ vlog_typeparam_idx1 verilog
 vlog_bits_typeparam1 verilog
 vlog_class_param_dim1 verilog
 vlog_typeparam_arr1 verilog
+vlog_typeparam_pat1 verilog

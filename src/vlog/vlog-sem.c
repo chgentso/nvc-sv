@@ -498,8 +498,9 @@ static void vlog_check_same_type(vlog_node_t left, type_mask_t lmask,
                   "associative array of a different type");
       return;
    }
-   else if (((lmask | rmask) & TM_STRICT) == 0)
-      return;   // Convertible
+   else if (lmask == ~TM_CONST || rmask == ~TM_CONST
+            || ((lmask | rmask) & TM_STRICT) == 0)
+      return;   // Convertible or deferred to elaboration
    else if (lmask & rmask) {
       if (vlog_kind(left) == V_NULL)
          vlog_set_type(left, vlog_get_type(right));
@@ -1295,6 +1296,8 @@ static vlog_node_t vlog_target_outer_dim(vlog_node_t target)
 static void vlog_check_pattern_target(vlog_node_t target, vlog_node_t pat)
 {
    if (vlog_kind(pat) != V_PATTERN_EXPR)
+      return;
+   if (!vlog_has_type(pat) || vlog_uses_typeparam(vlog_type(pat)))
       return;
 
    const int nparams = vlog_params(pat);
@@ -4812,9 +4815,10 @@ static type_mask_t vlog_check_pattern_expr_ex(vlog_node_t v, bool sized_dyn)
    }
 
    vlog_node_t type = vlog_type(v);
+   const bool deferred_tp = vlog_uses_typeparam(type);
    vlog_node_t bt = vlog_get_type(type);
    const bool assoc = vlog_is_assoc_type(bt);
-   const bool unsized_arr = !sized_dyn && bt != NULL
+   const bool unsized_arr = !deferred_tp && !sized_dyn && bt != NULL
       && vlog_kind(bt) == V_DATA_TYPE
       && (vlog_subkind(bt) == DT_QUEUE
           || (vlog_subkind(bt) == DT_DYNARRAY && vlog_ranges(bt) == 0));
@@ -4862,10 +4866,10 @@ static type_mask_t vlog_check_pattern_expr_ex(vlog_node_t v, bool sized_dyn)
          else if (!assoc) {
             vlog_node_t key = vlog_left(item);
             bool is_field = false;
-            if (is_struct && vlog_kind(key) == V_REF) {
+            if ((is_struct || deferred_tp) && vlog_kind(key) == V_REF) {
                if (!vlog_has_ref(key))
                   is_field = true;
-               else {
+               else if (is_struct) {
                   vlog_node_t ref = vlog_ref(key);
                   const int ndecls = vlog_decls(bt);
                   for (int j = 0; j < ndecls; j++) {
@@ -4911,7 +4915,7 @@ static type_mask_t vlog_check_pattern_expr_ex(vlog_node_t v, bool sized_dyn)
       error_at(vlog_loc(v), "cannot mix positional and keyed items in "
                "assignment pattern");
 
-   return get_type_mask(type);
+   return deferred_tp ? ~TM_CONST : get_type_mask(type);
 }
 
 static type_mask_t vlog_check_pattern_expr(vlog_node_t v)

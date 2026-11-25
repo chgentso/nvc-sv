@@ -285,7 +285,7 @@ static bool copy_instance_pred(vlog_node_t v, void *ctx)
    switch (vlog_kind(v)) {
    case V_REF:
       if (!vlog_has_ref(v))
-         return false;
+         return copy_scope == NULL;
       switch (vlog_kind(vlog_ref(v))) {
       case V_ENUM_NAME:
          return is_param_enum_name(vlog_ref(v));
@@ -340,6 +340,9 @@ static bool copy_instance_pred(vlog_node_t v, void *ctx)
          && (copy_scope == NULL || hset_contains(copy_scope, v));
    case V_MEMBER_REF:
       return copy_scope == NULL && vlog_typeparam_pending(v);
+   case V_PATTERN_EXPR:
+      return copy_scope == NULL
+         && (!vlog_has_type(v) || vlog_uses_typeparam(vlog_type(v)));
    case V_TYPE_DECL:
       return copy_scope == NULL && (vlog_flags(v) & VLOG_F_TYPEPARAM);
    case V_SYS_TCALL:
@@ -393,6 +396,77 @@ static void round_delay(vlog_node_t ctrl)
    vlog_set_ival(ctrl, VLOG_TIME_ENCODE(1, VLOG_TIME_LOG10(ival)));
 }
 
+static void resolve_inst_pattern(vlog_node_t pat, vlog_node_t dt)
+{
+   if (dt == NULL)
+      return;
+
+   vlog_node_t bt = vlog_get_type(dt);
+   if (bt == NULL)
+      return;
+
+   vlog_set_type(pat, bt);
+
+   const bool is_struct = vlog_kind(bt) == V_STRUCT_DECL
+      || vlog_kind(bt) == V_UNION_DECL;
+
+   const int nparams = vlog_params(pat);
+   for (int i = 0; i < nparams; i++) {
+      vlog_node_t item = vlog_param(pat, i);
+      if (vlog_kind(item) != V_PATTERN_ITEM)
+         continue;
+
+      vlog_node_t member = NULL;
+      if (is_struct && vlog_subkind(item) == 0 && vlog_has_left(item)
+          && vlog_kind(vlog_left(item)) == V_REF
+          && !vlog_has_ref(vlog_left(item))) {
+         vlog_node_t key = vlog_left(item);
+         ident_t id = vlog_ident(key);
+         const int ndecls = vlog_decls(bt);
+         for (int j = 0; j < ndecls; j++) {
+            vlog_node_t d = vlog_decl(bt, j);
+            if (vlog_ident(d) == id) {
+               vlog_set_ref(key, d);
+               member = d;
+               break;
+            }
+         }
+         if (member == NULL) {
+            diag_t *d = diag_new(DIAG_ERROR, vlog_loc(key));
+            diag_printf(d, "struct or union has no field %pQ", id);
+            diag_hint(d, vlog_loc(bt), "data type declared here");
+            diag_emit(d);
+         }
+      }
+      else if (is_struct && !vlog_has_left(item) && vlog_subkind(item) == 0
+               && i < vlog_decls(bt))
+         member = vlog_decl(bt, i);
+
+      if (vlog_has_right(item)
+          && vlog_kind(vlog_right(item)) == V_PATTERN_EXPR) {
+         vlog_node_t sub_dt = NULL;
+         if (member != NULL)
+            sub_dt = vlog_get_type(vlog_type(member));
+         else if (vlog_kind(bt) == V_DATA_TYPE && vlog_has_type(bt))
+            sub_dt = vlog_get_type(vlog_type(bt));
+         resolve_inst_pattern(vlog_right(item), sub_dt);
+      }
+   }
+}
+
+static void resolve_inst_pattern_expr(vlog_node_t expr, vlog_node_t dt)
+{
+   if (expr == NULL || dt == NULL)
+      return;
+
+   if (vlog_kind(expr) == V_PATTERN_EXPR && !vlog_has_type(expr))
+      resolve_inst_pattern(expr, dt);
+   else if (vlog_kind(expr) == V_COND_EXPR) {
+      resolve_inst_pattern_expr(vlog_left(expr), dt);
+      resolve_inst_pattern_expr(vlog_right(expr), dt);
+   }
+}
+
 static vlog_node_t fixup_refs_cb(vlog_node_t v, void *ctx)
 {
    hash_t *map = ctx;
@@ -444,6 +518,21 @@ static vlog_node_t fixup_refs_cb(vlog_node_t v, void *ctx)
             error_at(vlog_loc(v), "%pQ is not a struct or union",
                      vlog_has_ident(vlog_value(v))
                      ? vlog_ident(vlog_value(v)) : vlog_ident(v));
+      }
+      break;
+   case V_PATTERN_EXPR:
+      if (vlog_has_type(v) && vlog_uses_typeparam(vlog_type(v)))
+         resolve_inst_pattern(v, vlog_type(v));
+      break;
+   case V_ASSIGN:
+   case V_BASSIGN:
+   case V_NBASSIGN:
+      if (vlog_has_value(v)) {
+         vlog_node_t tgt = vlog_target(v);
+         vlog_node_t dt = vlog_get_type(tgt);
+         if (dt == NULL && vlog_kind(tgt) == V_BIT_SELECT)
+            dt = vlog_select_type_packed(tgt);
+         resolve_inst_pattern_expr(vlog_value(v), dt);
       }
       break;
    case V_SYS_TCALL:

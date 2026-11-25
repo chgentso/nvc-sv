@@ -2495,7 +2495,7 @@ vlog_node_t vlog_get_type(vlog_node_t v)
    case V_NULL:
    case V_PATTERN_EXPR:
       if (vlog_has_type(v))
-         return vlog_type(v);
+         return vlog_get_type(vlog_type(v));
       else
          return NULL;
    default:
