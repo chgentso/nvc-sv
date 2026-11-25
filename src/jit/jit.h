@@ -131,6 +131,8 @@ bool jit_run_guarded(jit_t *j, void (*fn)(void *), void *ctx);
 void jit_call_closure_guarded(jit_t *j, ffi_closure_t *closure,
                               jit_scalar_t *result, jit_scalar_t arg,
                               tlab_t *tlab);
+void jit_fastcall_guarded(jit_t *j, jit_handle_t handle, jit_scalar_t *result,
+                          jit_scalar_t p1, jit_scalar_t p2, tlab_t *tlab);
 
 tlab_t jit_null_tlab(jit_t *j);
 

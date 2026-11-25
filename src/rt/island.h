@@ -102,6 +102,7 @@ typedef struct _rt_island_domain {
    uint32_t                 *write_sigs;
    uint32_t                  n_write_sigs;
    uint32_t                  cap_write_sigs;
+   uint64_t                  ff_dirty_mask;
    rt_watch_t               *clk_watch;
    rt_watch_t               *rst_watch;
 } rt_island_domain_t;

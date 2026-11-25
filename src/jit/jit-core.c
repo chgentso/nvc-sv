@@ -1091,6 +1091,35 @@ void jit_call_closure_guarded(jit_t *j, ffi_closure_t *closure,
    *result = args[0];
 }
 
+void jit_fastcall_guarded(jit_t *j, jit_handle_t handle, jit_scalar_t *result,
+                          jit_scalar_t p1, jit_scalar_t p2, tlab_t *tlab)
+{
+   jit_func_t *f = jit_get_func(j, handle);
+
+   jit_thread_local_t *thread = jit_thread_local();
+   assert(thread->jmp_buf != NULL);
+   assert(thread->guard_args != NULL);
+
+   jit_scalar_t *args = thread->guard_args;
+   args[0] = p1;
+   args[1] = p2;
+
+   const jit_state_t oldstate = thread->state;
+   jit_anchor_t *saved_anchor = thread->anchor;
+   jit_t *saved_jit = thread->jit;
+   thread->state = JIT_RUNNING;
+   thread->jit = j;
+
+   jit_entry_fn_t entry = load_acquire(&f->entry);
+   (*entry)(f, NULL, args, tlab);
+
+   thread->anchor = saved_anchor;
+   thread->state = oldstate;
+   thread->jit = saved_jit;
+
+   *result = args[0];
+}
+
 void *jit_call_thunk(jit_t *j, vcode_unit_t unit, void *context,
                      thunk_result_fn_t fn, void *arg)
 {

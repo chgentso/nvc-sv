@@ -98,6 +98,8 @@ typedef struct {
    bool                     two_state;
    bool                     is_ff;
    uint32_t                 ff_stride;
+   const vhdl_idom_t       *ff_dom;
+   mir_value_t              ff_dirty_var;
    vi_scope_t              *scope;
    mir_value_t              lut_not;
    mir_value_t              lut_and;
@@ -2688,6 +2690,26 @@ static bool vi_lower_expr(vi_lower_t *l, tree_t expr, vi_val_t *out)
    }
 }
 
+static void vi_mark_ff_dirty(vi_lower_t *l, const vhdl_isl_sig_t *isig)
+{
+   if (!l->is_ff || l->ff_dom == NULL || mir_is_null(l->ff_dirty_var))
+      return;
+   const uint32_t isl_sig_idx = (uint32_t)(isig - l->isl->sigs);
+   uint32_t bit = 62u;
+   for (uint32_t w = 0; w < l->ff_dom->n_write_sigs; w++) {
+      if (l->ff_dom->write_isl_sigs[w] == isl_sig_idx) {
+         bit = (w < 62u) ? w : 62u;
+         break;
+      }
+   }
+   mir_unit_t *mu = l->mu;
+   mir_type_t t64 = mir_vec2_type(mu, 64, false);
+   mir_value_t cur = mir_build_load(mu, l->ff_dirty_var);
+   mir_value_t upd = mir_build_binary(mu, MIR_VEC_BIT_OR, t64, cur,
+                                      mir_const_vec(mu, t64, UINT64_C(1) << bit, 0));
+   mir_build_store(mu, l->ff_dirty_var, upd);
+}
+
 static bool vi_assign_leaf_sig(vi_lower_t *l, const vhdl_isig_t *s,
                                const vhdl_isl_sig_t *isig,
                                mir_value_t elem_idx, int64_t pos_off,
@@ -2695,6 +2717,7 @@ static bool vi_assign_leaf_sig(vi_lower_t *l, const vhdl_isig_t *s,
 {
    mir_unit_t *mu = l->mu;
    const uint32_t dst_off = isig->a_off + (l->is_ff ? l->ff_stride : 0u);
+   vi_mark_ff_dirty(l, isig);
 
    if (s->elem_kind == VISIG_ENUM || s->elem_kind == VISIG_INT) {
       if (val.kind != VIVAL_INT)
@@ -2760,6 +2783,7 @@ static bool vi_assign_leaf_sig_dyn_pos(vi_lower_t *l, const vhdl_isig_t *s,
 {
    mir_unit_t *mu = l->mu;
    const uint32_t dst_off = isig->a_off + (l->is_ff ? l->ff_stride : 0u);
+   vi_mark_ff_dirty(l, isig);
    if (l->two_state) {
       mir_value_t cur = mir_build_island_load(
          mu, mir_vec2_type(mu, (int)s->width, s->is_signed),
@@ -3495,18 +3519,26 @@ static mir_unit_t *vi_build_ff_unit(mir_context_t *mc,
    mir_add_param(mu, t_ptr, MIR_NULL_STAMP, ident_new("context"));
    mir_value_t state = mir_add_param(mu, t_ptr, MIR_NULL_STAMP, ident_new("state"));
 
+   mir_type_t t_dm = mir_vec2_type(mu, 64, false);
+   mir_value_t ff_dirty_var = mir_add_var(mu, t_dm, MIR_NULL_STAMP,
+                                          ident_uniq("ffdm"), MIR_VAR_TEMP);
+   mir_build_store(mu, ff_dirty_var,
+                   mir_const_vec(mu, t_dm, UINT64_C(1) << 63, 0));
+
    vi_lower_t l = {
-      .mu        = mu,
-      .ctx       = ctx,
-      .isl       = isl,
-      .state_ptr = state,
-      .two_state = isl->two_state,
-      .is_ff     = true,
-      .ff_stride = RT_ISLAND_STRIDE(isl->state_bytes),
-      .lut_not   = MIR_NULL_VALUE,
-      .lut_and   = MIR_NULL_VALUE,
-      .lut_or    = MIR_NULL_VALUE,
-      .lut_xor   = MIR_NULL_VALUE,
+      .mu           = mu,
+      .ctx          = ctx,
+      .isl          = isl,
+      .state_ptr    = state,
+      .two_state    = isl->two_state,
+      .is_ff        = true,
+      .ff_stride    = RT_ISLAND_STRIDE(isl->state_bytes),
+      .ff_dom       = dm,
+      .ff_dirty_var = ff_dirty_var,
+      .lut_not      = MIR_NULL_VALUE,
+      .lut_and      = MIR_NULL_VALUE,
+      .lut_or       = MIR_NULL_VALUE,
+      .lut_xor      = MIR_NULL_VALUE,
    };
 
    if (dm->rst_isl_sig >= 0) {
@@ -3595,7 +3627,8 @@ static mir_unit_t *vi_build_ff_unit(mir_context_t *mc,
       }
    }
 
-   mir_build_return(mu, vi_off(mu, 0));
+   mir_build_return(mu, mir_build_cast(mu, t_off,
+                                       mir_build_load(mu, ff_dirty_var)));
    return mu;
 }
 
