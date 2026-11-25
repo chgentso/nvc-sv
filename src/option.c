@@ -153,13 +153,12 @@ static int get_bool_env(const char *var, int def)
 static int get_rtl_islands_env(void)
 {
    const char *env = getenv("NVC_RTL_ISLANDS");
-   if (env == NULL || *env == '\0' || strcasecmp(env, "off") == 0
-       || strcasecmp(env, "0") == 0)
+   if (env == NULL || *env == '\0' || strcasecmp(env, "hier") == 0)
+      return RTL_ISLANDS_HIER;
+   else if (strcasecmp(env, "off") == 0 || strcasecmp(env, "0") == 0)
       return RTL_ISLANDS_OFF;
    else if (strcasecmp(env, "module") == 0 || strcasecmp(env, "1") == 0)
       return RTL_ISLANDS_MODULE;
-   else if (strcasecmp(env, "hier") == 0)
-      return RTL_ISLANDS_HIER;
    else
       fatal("invalid value '%s' for NVC_RTL_ISLANDS "
             "(expected off, module, or hier)", env);

@@ -224,12 +224,12 @@ enum {
 
 static void parse_rtl_islands_option(const char *arg)
 {
-   if (arg == NULL || strcasecmp(arg, "module") == 0)
+   if (arg == NULL || strcasecmp(arg, "hier") == 0)
+      opt_set_int(OPT_RTL_ISLANDS, RTL_ISLANDS_HIER);
+   else if (strcasecmp(arg, "module") == 0)
       opt_set_int(OPT_RTL_ISLANDS, RTL_ISLANDS_MODULE);
    else if (strcasecmp(arg, "off") == 0)
       opt_set_int(OPT_RTL_ISLANDS, RTL_ISLANDS_OFF);
-   else if (strcasecmp(arg, "hier") == 0)
-      opt_set_int(OPT_RTL_ISLANDS, RTL_ISLANDS_HIER);
    else
       fatal("invalid $bold$--rtl-islands$$ option '%s' "
             "(expected off, module, or hier)", arg);
@@ -1573,8 +1573,7 @@ static int run_cmd(int argc, char **argv, cmd_state_t *state)
    // wanted if the design was elaborated with --debug-stmts
    if (meta->debug_stmts)
       opt_set_int(OPT_DEBUG_STMTS, 1);
-   if (meta->rtl_islands && opt_get_int(OPT_RTL_ISLANDS) == RTL_ISLANDS_OFF)
-      opt_set_int(OPT_RTL_ISLANDS, meta->rtl_islands);
+   opt_set_int(OPT_RTL_ISLANDS, meta->rtl_islands);
    if (meta->two_state && opt_get_int(OPT_TWO_STATE) == TWO_STATE_OFF)
       opt_set_int(OPT_TWO_STATE, meta->two_state);
 
@@ -2956,7 +2955,7 @@ static void usage(void)
            { "--no-collapse", "Do not collapse multiple signals into one" },
            { "--no-save", "Do not save the elaborated design to disk" },
            { "--rtl-islands[={off,module,hier}]",
-             "Enable compiled RTL island partitioning (default off)" },
+             "Enable compiled RTL island partitioning (default hier)" },
            { "--2state[={off,islands,all}]",
              "Enable 2-state SystemVerilog simulation (default off)" },
            { "--stats", "Print statistics about instantiated design units" },
