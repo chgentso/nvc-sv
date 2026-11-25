@@ -7375,7 +7375,7 @@ void model_set_event_cb(rt_model_t *m, rt_signal_t *s, int offset,
 
    s->shared.flags &= ~SIG_F_FAST_DIRECT;
 
-   if (unlikely(s->shared.flags & SIG_F_ISLAND))
+   if (unlikely(s->shared.flags & SIG_F_ISLAND) && !rt_island_is_input_watch(w))
       rt_island_on_observer_attached(m, s);
 
    if (unlikely(s->shared.flags & SIG_F_PACKED))

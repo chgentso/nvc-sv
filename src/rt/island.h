@@ -60,6 +60,13 @@ typedef struct {
    uint64_t *saved_b;
 } rt_island_force_t;
 
+typedef struct _rt_island_alias {
+   rt_signal_t             *sig;
+   struct _rt_island_sig   *src_s;
+   int32_t                  sig_offset;
+   struct _rt_island_alias *next;
+} rt_island_alias_t;
+
 typedef struct _rt_island_sig {
    rt_signal_t            *sig;
    struct _rt_island      *isl;
@@ -69,6 +76,8 @@ typedef struct _rt_island_sig {
    struct _rt_island_sig **direct_targets;
    struct _rt_island_sig  *direct_src;
    uint32_t                n_direct_targets;
+   rt_island_alias_t      *direct_aliases;
+   uint32_t                n_direct_aliases;
    int32_t                 sig_offset;
    uint32_t                a_off;
    uint32_t                b_off;
@@ -193,6 +202,7 @@ void rt_island_sync_to_signal(rt_model_t *m, rt_signal_t *sig);
 void rt_island_sync_slice_to_signal(rt_model_t *m, rt_signal_t *sig,
                                     uint32_t offset, uint32_t count);
 void rt_island_on_observer_attached(rt_model_t *m, rt_signal_t *sig);
+bool rt_island_is_input_watch(const rt_watch_t *w);
 void rt_island_on_ext_deposit(rt_model_t *m, rt_signal_t *sig);
 bool rt_island_vpi_put(rt_model_t *m, rt_signal_t *sig,
                        const uint64_t *a_val, const uint64_t *b_val,

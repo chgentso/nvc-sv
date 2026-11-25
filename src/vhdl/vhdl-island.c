@@ -2404,7 +2404,8 @@ static void mark_src_ref_sigs(const vhdl_island_ctx_t *ctx,
                               const tree_ptr_list_t *src_decls,
                               tree_t t, bool is_target,
                               u32_list_t *ext_reads, bool mark_ext_drivers,
-                              bool mark_child_read, sig_list_t *sigs_mut)
+                              bool mark_ext_read, bool mark_child_read,
+                              sig_list_t *sigs_mut)
 {
    tree_t decl = NULL;
    int path[VHDL_ISIG_MAX_DEPTH];
@@ -2412,7 +2413,6 @@ static void mark_src_ref_sigs(const vhdl_island_ctx_t *ctx,
    if (!vhdl_island_extract_path(t, &decl, path, &plen))
       return;
 
-   const bool by_ptr = false;
    const bool in_src = decl_in_list(src_decls, decl);
    ident_t did = tree_ident(decl);
 
@@ -2430,23 +2430,23 @@ static void mark_src_ref_sigs(const vhdl_island_ctx_t *ctx,
                sigs_mut->items[i].has_ext_driver = true;
          }
          else {
-            push_unique_u32(ext_reads, i);
-            if (sigs_mut != NULL) {
-               sigs_mut->items[i].ext_read = true;
-               if (mark_child_read)
-                  sigs_mut->items[i].child_read = true;
+            if (mark_ext_read) {
+               push_unique_u32(ext_reads, i);
+               if (sigs_mut != NULL)
+                  sigs_mut->items[i].ext_read = true;
             }
+            if (mark_child_read && sigs_mut != NULL)
+               sigs_mut->items[i].child_read = true;
          }
       }
    }
-   (void)by_ptr;
 }
 
 static void scan_src_tree_refs(const vhdl_island_ctx_t *ctx,
                                const tree_ptr_list_t *src_decls, tree_t t,
                                bool is_target, u32_list_t *ext_reads,
-                               bool mark_ext_drivers, sig_list_t *sigs_mut,
-                               int depth);
+                               bool mark_ext_drivers, bool mark_ext_read,
+                               sig_list_t *sigs_mut, int depth);
 
 static void scan_src_psl_refs(const vhdl_island_ctx_t *ctx,
                               const tree_ptr_list_t *src_decls, psl_node_t p,
@@ -2461,13 +2461,13 @@ static void scan_src_psl_refs(const vhdl_island_ctx_t *ctx,
    case P_CLOCK_DECL:
       if (psl_has_tree(p))
          scan_src_tree_refs(ctx, src_decls, psl_tree(p), false, ext_reads,
-                            false, sigs_mut, 0);
+                            false, true, sigs_mut, 0);
       return;
 
    case P_PARAM_DECL:
       if (psl_has_tree(p))
          scan_src_tree_refs(ctx, src_decls, psl_tree(p), false, ext_reads,
-                            false, sigs_mut, 0);
+                            false, true, sigs_mut, 0);
       if (psl_has_value(p))
          scan_src_psl_refs(ctx, src_decls, psl_value(p), ext_reads, sigs_mut,
                            depth + 1);
@@ -2476,7 +2476,7 @@ static void scan_src_psl_refs(const vhdl_island_ctx_t *ctx,
    case P_PROC_BLOCK:
       if (psl_has_tree(p))
          scan_src_tree_refs(ctx, src_decls, psl_tree(p), false, ext_reads,
-                            true, sigs_mut, 0);
+                            true, true, sigs_mut, 0);
       if (psl_has_value(p))
          scan_src_psl_refs(ctx, src_decls, psl_value(p), ext_reads, sigs_mut,
                            depth + 1);
@@ -2485,7 +2485,7 @@ static void scan_src_psl_refs(const vhdl_island_ctx_t *ctx,
    case P_CLOCKED:
       if (psl_has_tree(p))
          scan_src_tree_refs(ctx, src_decls, psl_tree(p), false, ext_reads,
-                            false, sigs_mut, 0);
+                            false, true, sigs_mut, 0);
       if (psl_has_value(p))
          scan_src_psl_refs(ctx, src_decls, psl_value(p), ext_reads, sigs_mut,
                            depth + 1);
@@ -2500,7 +2500,7 @@ static void scan_src_psl_refs(const vhdl_island_ctx_t *ctx,
    case P_COVER:
       if (psl_has_message(p))
          scan_src_tree_refs(ctx, src_decls, psl_message(p), false, ext_reads,
-                            false, sigs_mut, 0);
+                            false, true, sigs_mut, 0);
       if (psl_has_value(p))
          scan_src_psl_refs(ctx, src_decls, psl_value(p), ext_reads, sigs_mut,
                            depth + 1);
@@ -2509,7 +2509,7 @@ static void scan_src_psl_refs(const vhdl_island_ctx_t *ctx,
    case P_FAIRNESS:
       if (psl_has_message(p))
          scan_src_tree_refs(ctx, src_decls, psl_message(p), false, ext_reads,
-                            false, sigs_mut, 0);
+                            false, true, sigs_mut, 0);
       for (unsigned i = 0; i < psl_operands(p); i++)
          scan_src_psl_refs(ctx, src_decls, psl_operand(p, i), ext_reads,
                            sigs_mut, depth + 1);
@@ -2601,8 +2601,8 @@ static void scan_src_psl_refs(const vhdl_island_ctx_t *ctx,
 static void scan_src_tree_refs(const vhdl_island_ctx_t *ctx,
                                const tree_ptr_list_t *src_decls, tree_t t,
                                bool is_target, u32_list_t *ext_reads,
-                               bool mark_ext_drivers, sig_list_t *sigs_mut,
-                               int depth)
+                               bool mark_ext_drivers, bool mark_ext_read,
+                               sig_list_t *sigs_mut, int depth)
 {
    if (t == NULL || depth > 64)
       return;
@@ -2619,61 +2619,65 @@ static void scan_src_tree_refs(const vhdl_island_ctx_t *ctx,
             if (d != NULL && (tree_kind(d) == T_PORT_DECL
                               || tree_kind(d) == T_SIGNAL_DECL)) {
                mark_src_ref_sigs(ctx, src_decls, t, is_target, ext_reads,
-                                 mark_ext_drivers, true, sigs_mut);
+                                 mark_ext_drivers, mark_ext_read, true,
+                                 sigs_mut);
                return;
             }
          }
          if (tree_kind(t) == T_RECORD_REF)
             scan_src_tree_refs(ctx, src_decls, tree_value(t), is_target,
-                               ext_reads, mark_ext_drivers, sigs_mut,
-                               depth + 1);
+                               ext_reads, mark_ext_drivers, mark_ext_read,
+                               sigs_mut, depth + 1);
       }
       return;
 
    case T_SIGNAL_ASSIGN:
       scan_src_tree_refs(ctx, src_decls, tree_target(t), true, ext_reads,
-                         mark_ext_drivers, sigs_mut, depth + 1);
+                         mark_ext_drivers, mark_ext_read, sigs_mut, depth + 1);
       for (int i = 0; i < tree_waveforms(t); i++) {
          tree_t w = tree_waveform(t, i);
          if (tree_has_value(w))
             scan_src_tree_refs(ctx, src_decls, tree_value(w), false, ext_reads,
-                               mark_ext_drivers, sigs_mut, depth + 1);
+                               mark_ext_drivers, mark_ext_read, sigs_mut,
+                               depth + 1);
       }
       return;
 
    case T_VAR_ASSIGN:
       scan_src_tree_refs(ctx, src_decls, tree_target(t), false, ext_reads,
-                         mark_ext_drivers, sigs_mut, depth + 1);
+                         mark_ext_drivers, mark_ext_read, sigs_mut, depth + 1);
       scan_src_tree_refs(ctx, src_decls, tree_value(t), false, ext_reads,
-                         mark_ext_drivers, sigs_mut, depth + 1);
+                         mark_ext_drivers, mark_ext_read, sigs_mut, depth + 1);
       return;
 
    case T_ARRAY_REF:
       scan_src_tree_refs(ctx, src_decls, tree_value(t), is_target, ext_reads,
-                         mark_ext_drivers, sigs_mut, depth + 1);
+                         mark_ext_drivers, mark_ext_read, sigs_mut, depth + 1);
       for (int i = 0; i < tree_params(t); i++)
          scan_src_tree_refs(ctx, src_decls, tree_value(tree_param(t, i)), false,
-                            ext_reads, mark_ext_drivers, sigs_mut, depth + 1);
+                            ext_reads, mark_ext_drivers, mark_ext_read,
+                            sigs_mut, depth + 1);
       return;
 
    case T_ARRAY_SLICE:
       scan_src_tree_refs(ctx, src_decls, tree_value(t), is_target, ext_reads,
-                         mark_ext_drivers, sigs_mut, depth + 1);
+                         mark_ext_drivers, mark_ext_read, sigs_mut, depth + 1);
       return;
 
    case T_QUALIFIED:
    case T_TYPE_CONV:
    case T_CONV_FUNC:
       scan_src_tree_refs(ctx, src_decls, tree_value(t), is_target, ext_reads,
-                         mark_ext_drivers, sigs_mut, depth + 1);
+                         mark_ext_drivers, mark_ext_read, sigs_mut, depth + 1);
       return;
 
    case T_ATTR_REF:
       scan_src_tree_refs(ctx, src_decls, tree_name(t), false, ext_reads,
-                         mark_ext_drivers, sigs_mut, depth + 1);
+                         mark_ext_drivers, mark_ext_read, sigs_mut, depth + 1);
       for (int i = 0; i < tree_params(t); i++)
          scan_src_tree_refs(ctx, src_decls, tree_value(tree_param(t, i)), false,
-                            ext_reads, mark_ext_drivers, sigs_mut, depth + 1);
+                            ext_reads, mark_ext_drivers, mark_ext_read,
+                            sigs_mut, depth + 1);
       return;
 
    case T_AGGREGATE:
@@ -2681,9 +2685,11 @@ static void scan_src_tree_refs(const vhdl_island_ctx_t *ctx,
          tree_t a = tree_assoc(t, i);
          if (tree_subkind(a) == A_NAMED)
             scan_src_tree_refs(ctx, src_decls, tree_name(a), false, ext_reads,
-                               mark_ext_drivers, sigs_mut, depth + 1);
+                               mark_ext_drivers, mark_ext_read, sigs_mut,
+                               depth + 1);
          scan_src_tree_refs(ctx, src_decls, tree_value(a), is_target, ext_reads,
-                            mark_ext_drivers, sigs_mut, depth + 1);
+                            mark_ext_drivers, mark_ext_read, sigs_mut,
+                            depth + 1);
       }
       return;
 
@@ -2693,7 +2699,8 @@ static void scan_src_tree_refs(const vhdl_island_ctx_t *ctx,
    case T_PROT_FCALL:
       for (int i = 0; i < tree_params(t); i++)
          scan_src_tree_refs(ctx, src_decls, tree_value(tree_param(t, i)), false,
-                            ext_reads, mark_ext_drivers, sigs_mut, depth + 1);
+                            ext_reads, mark_ext_drivers, mark_ext_read,
+                            sigs_mut, depth + 1);
       return;
 
    case T_IF:
@@ -2703,11 +2710,12 @@ static void scan_src_tree_refs(const vhdl_island_ctx_t *ctx,
          tree_t c = tree_cond(t, i);
          if (tree_has_value(c))
             scan_src_tree_refs(ctx, src_decls, tree_value(c), false, ext_reads,
-                               mark_ext_drivers, sigs_mut, depth + 1);
+                               mark_ext_drivers, mark_ext_read, sigs_mut,
+                               depth + 1);
          for (int j = 0; j < tree_stmts(c); j++)
             scan_src_tree_refs(ctx, src_decls, tree_stmt(c, j), false,
-                               ext_reads, mark_ext_drivers, sigs_mut,
-                               depth + 1);
+                               ext_reads, mark_ext_drivers, mark_ext_read,
+                               sigs_mut, depth + 1);
       }
       return;
 
@@ -2715,13 +2723,13 @@ static void scan_src_tree_refs(const vhdl_island_ctx_t *ctx,
    case T_MATCH_CASE:
    case T_CASE_GENERATE:
       scan_src_tree_refs(ctx, src_decls, tree_value(t), false, ext_reads,
-                         mark_ext_drivers, sigs_mut, depth + 1);
+                         mark_ext_drivers, mark_ext_read, sigs_mut, depth + 1);
       for (int i = 0; i < tree_stmts(t); i++) {
          tree_t alt = tree_stmt(t, i);
          for (int j = 0; j < tree_stmts(alt); j++)
             scan_src_tree_refs(ctx, src_decls, tree_stmt(alt, j), false,
-                               ext_reads, mark_ext_drivers, sigs_mut,
-                               depth + 1);
+                               ext_reads, mark_ext_drivers, mark_ext_read,
+                               sigs_mut, depth + 1);
       }
       return;
 
@@ -2734,10 +2742,10 @@ static void scan_src_tree_refs(const vhdl_island_ctx_t *ctx,
             pm = tree_subkind(tree_port(t, j));
          if (pm == PORT_OUT || pm == PORT_INOUT || pm == PORT_BUFFER)
             scan_src_tree_refs(ctx, src_decls, actual, true, ext_reads,
-                               true, sigs_mut, depth + 1);
+                               true, mark_ext_read, sigs_mut, depth + 1);
          if (pm == PORT_IN || pm == PORT_INOUT || pm == PORT_BUFFER)
             scan_src_tree_refs(ctx, src_decls, actual, false, ext_reads,
-                               false, sigs_mut, depth + 1);
+                               false, mark_ext_read, sigs_mut, depth + 1);
       }
       for (int i = 0; i < tree_decls(t); i++) {
          tree_t cd = tree_decl(t, i);
@@ -2754,7 +2762,8 @@ static void scan_src_tree_refs(const vhdl_island_ctx_t *ctx,
    case T_SEQUENCE:
       for (int i = 0; i < tree_stmts(t); i++)
          scan_src_tree_refs(ctx, src_decls, tree_stmt(t, i), false, ext_reads,
-                            mark_ext_drivers, sigs_mut, depth + 1);
+                            mark_ext_drivers, mark_ext_read, sigs_mut,
+                            depth + 1);
       return;
 
    case T_INSTANCE:
@@ -2786,12 +2795,16 @@ static void scan_src_tree_refs(const vhdl_island_ctx_t *ctx,
                    && tree_kind(tree_ref(fn)) == T_PORT_DECL)
                   pm = tree_subkind(tree_ref(fn));
             }
+            // Entity/component PORT_IN reads mark child_read (so parent exposes
+            // the wire), NOT ext_read/SIG_F_EXT_READ, allowing direct-wire
+            // linking if the child fuses into an island. Unfused child readers
+            // mark SIG_F_EXT_READ or attach normal wakeups on the shared nexus.
             if (pm == PORT_OUT || pm == PORT_INOUT || pm == PORT_BUFFER)
                scan_src_tree_refs(ctx, src_decls, actual, true, ext_reads,
-                                  true, sigs_mut, depth + 1);
+                                  true, false, sigs_mut, depth + 1);
             if (pm == PORT_IN || pm == PORT_INOUT || pm == PORT_BUFFER)
                scan_src_tree_refs(ctx, src_decls, actual, false, ext_reads,
-                                  false, sigs_mut, depth + 1);
+                                  false, false, sigs_mut, depth + 1);
          }
       }
       return;
@@ -2799,43 +2812,50 @@ static void scan_src_tree_refs(const vhdl_island_ctx_t *ctx,
    case T_WAIT:
       if (tree_has_value(t))
          scan_src_tree_refs(ctx, src_decls, tree_value(t), false, ext_reads,
-                            mark_ext_drivers, sigs_mut, depth + 1);
+                            mark_ext_drivers, mark_ext_read, sigs_mut,
+                            depth + 1);
       for (int i = 0; i < tree_triggers(t); i++)
          scan_src_tree_refs(ctx, src_decls, tree_trigger(t, i), false,
-                            ext_reads, mark_ext_drivers, sigs_mut, depth + 1);
+                            ext_reads, mark_ext_drivers, mark_ext_read,
+                            sigs_mut, depth + 1);
       return;
 
    case T_ASSERT:
       if (tree_has_value(t))
          scan_src_tree_refs(ctx, src_decls, tree_value(t), false, ext_reads,
-                            mark_ext_drivers, sigs_mut, depth + 1);
+                            mark_ext_drivers, mark_ext_read, sigs_mut,
+                            depth + 1);
       // Fallthrough
    case T_REPORT:
       if (tree_has_message(t))
          scan_src_tree_refs(ctx, src_decls, tree_message(t), false, ext_reads,
-                            mark_ext_drivers, sigs_mut, depth + 1);
+                            mark_ext_drivers, mark_ext_read, sigs_mut,
+                            depth + 1);
       if (tree_has_severity(t))
          scan_src_tree_refs(ctx, src_decls, tree_severity(t), false, ext_reads,
-                            mark_ext_drivers, sigs_mut, depth + 1);
+                            mark_ext_drivers, mark_ext_read, sigs_mut,
+                            depth + 1);
       return;
 
    case T_FORCE:
       scan_src_tree_refs(ctx, src_decls, tree_target(t), true, ext_reads,
-                         mark_ext_drivers, sigs_mut, depth + 1);
+                         mark_ext_drivers, mark_ext_read, sigs_mut, depth + 1);
       if (tree_has_value(t))
          scan_src_tree_refs(ctx, src_decls, tree_value(t), false, ext_reads,
-                            mark_ext_drivers, sigs_mut, depth + 1);
+                            mark_ext_drivers, mark_ext_read, sigs_mut,
+                            depth + 1);
       return;
 
    case T_RELEASE:
       scan_src_tree_refs(ctx, src_decls, tree_target(t), true, ext_reads,
-                         mark_ext_drivers, sigs_mut, depth + 1);
+                         mark_ext_drivers, mark_ext_read, sigs_mut, depth + 1);
       return;
 
    case T_RETURN:
       if (tree_has_value(t))
          scan_src_tree_refs(ctx, src_decls, tree_value(t), false, ext_reads,
-                            mark_ext_drivers, sigs_mut, depth + 1);
+                            mark_ext_drivers, mark_ext_read, sigs_mut,
+                            depth + 1);
       return;
 
    case T_PSL_DIRECT:
@@ -2927,11 +2947,14 @@ static void scan_source_sub_blocks(const vhdl_island_ctx_t *ctx, tree_t block,
       tree_t s = tree_stmt(container, i);
       switch (tree_kind(s)) {
       case T_INSTANCE:
+         scan_src_tree_refs(ctx, &src_decls, s, false, ext_reads, true, false,
+                            sigs, 0);
+         break;
       case T_BLOCK:
       case T_IF_GENERATE:
       case T_FOR_GENERATE:
       case T_CASE_GENERATE:
-         scan_src_tree_refs(ctx, &src_decls, s, false, ext_reads, true,
+         scan_src_tree_refs(ctx, &src_decls, s, false, ext_reads, true, true,
                             sigs, 0);
          break;
       default:

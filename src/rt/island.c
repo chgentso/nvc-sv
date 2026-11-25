@@ -250,6 +250,7 @@ struct _rt_super_domain {
 struct _rt_island_mgr {
    rt_model_t             *model;
    hash_t                 *sig_map;
+   hash_t                 *alias_map;
    A(rt_island_t *)        islands;
    A(rt_island_t *)        dirty_q;
    A(rt_island_domain_t *) ff_sample_q;
@@ -483,6 +484,11 @@ __attribute__((noinline))
 static void island_input_watch_cb(uint64_t now, rt_signal_t *signal,
                                   rt_watch_t *watch, void *user);
 
+bool rt_island_is_input_watch(const rt_watch_t *w)
+{
+   return w != NULL && w->fn == island_input_watch_cb;
+}
+
 static inline bool island_wakeable_is_input_watch(const rt_wakeable_t *w)
 {
    if (w == NULL || w->kind != W_WATCH)
@@ -520,17 +526,146 @@ static inline bool island_nexus_overlaps_sig(const rt_nexus_t *nx,
    return n_hi > s_lo && n_lo < s_hi;
 }
 
+static bool island_sig_map_overlaps(const rt_island_mgr_t *mgr,
+                                    const rt_signal_t *sig,
+                                    uint32_t off, uint32_t width)
+{
+   for (rt_island_sig_t *own = hash_get(mgr->sig_map, sig);
+        own != NULL; own = own->next_owner) {
+      const uint32_t o_lo = (uint32_t)own->sig_offset;
+      const uint32_t o_hi = o_lo + own->width * own->nelems;
+      if (o_hi > off && o_lo < off + width)
+         return true;
+   }
+   return false;
+}
+
+static bool island_pending_watch_matches(void *pending,
+                                         const rt_island_sig_t *src_s,
+                                         const rt_signal_t *cur_sig,
+                                         uint32_t cur_off,
+                                         bool *found_out)
+{
+   if (pending == NULL)
+      return true;
+
+   if (pointer_tag(pending) == 1) {
+      const rt_wakeable_t *w = untag_pointer(pending, rt_wakeable_t);
+      if (!island_wakeable_is_input_watch(w))
+         return false;
+      const rt_watch_t *watch = container_of(w, rt_watch_t, wakeable);
+      const rt_island_sig_t *dst_s = watch->user_data;
+      if (dst_s->isl == src_s->isl
+          || dst_s->sig != cur_sig
+          || (uint32_t)dst_s->sig_offset != cur_off
+          || dst_s->width != src_s->width
+          || dst_s->nelems != src_s->nelems
+          || dst_s->elem_size != src_s->elem_size
+          || ((src_s->flags ^ dst_s->flags)
+              & (RT_ISIG_TWO_STATE | RT_ISIG_STD_LOGIC9)) != 0)
+         return false;
+      *found_out = true;
+      return true;
+   }
+
+   const rt_pending_t *p = untag_pointer(pending, rt_pending_t);
+   for (unsigned j = 0; j < p->count; j++) {
+      const rt_wakeable_t *w = p->wake[j];
+      if (w == NULL)
+         continue;
+      if (!island_wakeable_is_input_watch(w))
+         return false;
+      const rt_watch_t *watch = container_of(w, rt_watch_t, wakeable);
+      const rt_island_sig_t *dst_s = watch->user_data;
+      if (dst_s->isl == src_s->isl
+          || dst_s->sig != cur_sig
+          || (uint32_t)dst_s->sig_offset != cur_off
+          || dst_s->width != src_s->width
+          || dst_s->nelems != src_s->nelems
+          || dst_s->elem_size != src_s->elem_size
+          || ((src_s->flags ^ dst_s->flags)
+              & (RT_ISIG_TWO_STATE | RT_ISIG_STD_LOGIC9)) != 0)
+         return false;
+      *found_out = true;
+   }
+   return true;
+}
+
+static bool island_nexus_port_observed(const rt_nexus_t *nx,
+                                       const rt_island_sig_t *src_s,
+                                       bool *found_watch,
+                                       unsigned depth)
+{
+   if (nx->outputs == NULL)
+      return false;
+   if (depth >= 4)
+      return true;
+
+   const rt_island_mgr_t *mgr = src_s->isl->mgr;
+   const uint32_t total = src_s->width * src_s->nelems;
+   if (nx->size != src_s->elem_size || nx->width != total)
+      return true;
+
+   for (const rt_source_t *o = nx->outputs; o != NULL; o = o->chain_output) {
+      if (o->tag != SOURCE_PORT)
+         return true;
+      const rt_nexus_t *dst_nx = o->u.port.output;
+      if (dst_nx == NULL || dst_nx->signal == NULL)
+         return true;
+      if (dst_nx->n_sources != 1
+          || (dst_nx->flags & (NET_F_FORCED | NET_F_INOUT))
+          || dst_nx->width != nx->width
+          || dst_nx->size != nx->size)
+         return true;
+      const rt_signal_t *dst_sig = dst_nx->signal;
+      if (dst_sig->resolution != NULL && !(dst_nx->flags & NET_F_R_IDENT))
+         return true;
+      if (dst_sig->shared.flags
+          & (SIG_F_POLL_WATCHED | SIG_F_EXT_READ | SIG_F_PACKED))
+         return true;
+      const uint32_t dst_off = (uint32_t)(dst_nx->offset / dst_nx->size);
+      if (island_sig_map_overlaps(mgr, dst_sig, dst_off, dst_nx->width))
+         return true;
+
+      bool local_found = false;
+      if (!island_pending_watch_matches(dst_nx->pending, src_s,
+                                        dst_sig, dst_off, &local_found))
+         return true;
+
+      bool sub_found = false;
+      if (dst_nx->outputs != NULL) {
+         if (island_nexus_port_observed(dst_nx, src_s, &sub_found, depth + 1))
+            return true;
+      }
+
+      if (!local_found && !sub_found)
+         return true;
+      *found_watch = true;
+   }
+   return false;
+}
+
 static inline bool island_sig_observed(const rt_island_sig_t *s)
 {
    const rt_signal_t *sig = s->sig;
    if (sig->shared.flags & (SIG_F_POLL_WATCHED | SIG_F_EXT_READ))
       return true;
+   const uint32_t total = s->width * s->nelems;
    const rt_nexus_t *nx = &(sig->nexus);
    for (uint32_t i = 0; i < sig->n_nexus; i++, nx = nx->chain) {
       if (!island_nexus_overlaps_sig(nx, s))
          continue;
-      if (nx->outputs != NULL)
-         return true;
+      if (nx->outputs != NULL) {
+         if ((sig->shared.flags & SIG_F_PACKED)
+             || nx->size != s->elem_size
+             || nx->width != total
+             || (uint32_t)(nx->offset / nx->size) != (uint32_t)s->sig_offset)
+            return true;
+         bool found_port_watch = false;
+         if (island_nexus_port_observed(nx, s, &found_port_watch, 0)
+             || !found_port_watch)
+            return true;
+      }
       if (island_pending_has_ext_observer(nx->pending))
          return true;
    }
@@ -705,6 +840,7 @@ rt_island_mgr_t *rt_island_mgr_new(rt_model_t *m)
    rt_island_mgr_t *mgr = xcalloc(sizeof(rt_island_mgr_t));
    mgr->model = m;
    mgr->sig_map = hash_new(64);
+   mgr->alias_map = hash_new(64);
    return mgr;
 }
 
@@ -765,8 +901,10 @@ void rt_island_mgr_free(rt_island_mgr_t *mgr)
       for (uint32_t f = 0; f < isl->n_forces; f++)
          free(isl->forces[f].mask);
       free(isl->forces);
-      for (uint32_t s = 0; s < isl->nsigs; s++)
+      for (uint32_t s = 0; s < isl->nsigs; s++) {
          free(isl->sigs[s].direct_targets);
+         free(isl->sigs[s].direct_aliases);
+      }
       free(isl->comb_deps);
       free(isl->state);
       free(isl->sigs);
@@ -780,6 +918,7 @@ void rt_island_mgr_free(rt_island_mgr_t *mgr)
       free(isl);
    }
    hash_free(mgr->sig_map);
+   hash_free(mgr->alias_map);
    ACLEAR(mgr->islands);
    ACLEAR(mgr->dirty_q);
    ACLEAR(mgr->ff_sample_q);
@@ -1003,13 +1142,6 @@ void rt_island_finish(void *handle)
          rt_island_sig_t *prev = hash_get(isl->mgr->sig_map, s->sig);
          s->next_owner = prev;
          hash_put(isl->mgr->sig_map, s->sig, s);
-
-         if (island_sig_observed(s)) {
-            s->flags |= RT_ISIG_OBSERVED;
-            if ((s->flags & RT_ISIG_COMB_WRITTEN)
-                && !(s->flags & RT_ISIG_OUT))
-               island_add_obs_sig(isl, i);
-         }
       }
    }
 
@@ -1492,10 +1624,10 @@ static void island_sync_out_slice(rt_model_t *m, rt_island_t *isl,
    free(heap_buf);
 }
 
-static void island_sync_sig_raw(rt_island_t *isl, const rt_island_sig_t *s,
-                                bool update_last)
+static void island_sync_sig_raw_to(rt_island_t *isl, const rt_island_sig_t *s,
+                                   rt_signal_t *sig, int32_t sig_offset,
+                                   bool update_last)
 {
-   rt_signal_t *sig = s->sig;
    const uint32_t width = s->width;
    const uint32_t nelems = s->nelems;
 
@@ -1503,7 +1635,7 @@ static void island_sync_sig_raw(rt_island_t *isl, const rt_island_sig_t *s,
       assert(!(sig->shared.flags & SIG_F_PACKED));
       const size_t elem_sz = s->elem_size;
       const size_t total_bytes = (size_t)width * nelems * elem_sz;
-      const size_t byte_off = (size_t)s->sig_offset * elem_sz;
+      const size_t byte_off = (size_t)sig_offset * elem_sz;
       uint8_t *dst = sig->shared.data + byte_off;
       memcpy(dst, isl->state + s->a_off, total_bytes);
       if (update_last)
@@ -1528,7 +1660,7 @@ static void island_sync_sig_raw(rt_island_t *isl, const rt_island_sig_t *s,
       uint64_t *last_a = (uint64_t *)(sig->shared.data + sig->shared.size);
       uint64_t *last_b = sig_is4 ? last_a + sig_nw : NULL;
 
-      if (nelems == 1 && s->sig_offset == 0 && width == sig_w) {
+      if (nelems == 1 && sig_offset == 0 && width == sig_w) {
          for (uint32_t w = 0; w < nwords; w++) {
             const uint64_t msk = (w == nwords - 1) ? top_mask : ~UINT64_C(0);
             const uint64_t na = src_a[w] & msk;
@@ -1550,7 +1682,7 @@ static void island_sync_sig_raw(rt_island_t *isl, const rt_island_sig_t *s,
          const uint64_t *ea = src_a + e * nwords;
          const uint64_t *eb = src_b != NULL ? src_b + e * nwords : NULL;
          for (uint32_t i = 0; i < width; i++) {
-            const uint32_t msb_bit = (uint32_t)s->sig_offset + e * width + i;
+            const uint32_t msb_bit = (uint32_t)sig_offset + e * width + i;
             const uint32_t sig_bit = sig_w - 1u - msb_bit;
             const uint32_t src_bit = width - 1u - i;
             const uint64_t a = (ea[src_bit / 64u] >> (src_bit & 63u)) & 1u;
@@ -1572,8 +1704,8 @@ static void island_sync_sig_raw(rt_island_t *isl, const rt_island_sig_t *s,
    }
 
    const bool is_std = island_sig_is_std(sig, s->flags);
-   uint8_t *dst = sig->shared.data + s->sig_offset;
-   uint8_t *last_dst = sig->shared.data + sig->shared.size + s->sig_offset;
+   uint8_t *dst = sig->shared.data + sig_offset;
+   uint8_t *last_dst = sig->shared.data + sig->shared.size + sig_offset;
 
    for (uint32_t e = 0; e < nelems; e++) {
       const uint64_t *ea = src_a + e * nwords;
@@ -1592,23 +1724,29 @@ static void island_sync_sig_raw(rt_island_t *isl, const rt_island_sig_t *s,
       memcpy(last_dst, dst, width * nelems);
 }
 
-static void island_sync_sig_raw_slice(rt_island_t *isl,
-                                      const rt_island_sig_t *s,
-                                      uint32_t local_off, uint32_t local_cnt,
-                                      bool update_last)
+static void island_sync_sig_raw(rt_island_t *isl, const rt_island_sig_t *s,
+                                bool update_last)
+{
+   island_sync_sig_raw_to(isl, s, s->sig, s->sig_offset, update_last);
+}
+
+static void island_sync_sig_raw_slice_to(rt_island_t *isl,
+                                         const rt_island_sig_t *s,
+                                         rt_signal_t *sig, int32_t sig_offset,
+                                         uint32_t local_off, uint32_t local_cnt,
+                                         bool update_last)
 {
    if (local_cnt == 0)
       return;
    if (local_off == 0 && local_cnt >= s->width * s->nelems) {
-      island_sync_sig_raw(isl, s, update_last);
+      island_sync_sig_raw_to(isl, s, sig, sig_offset, update_last);
       return;
    }
 
-   rt_signal_t *sig = s->sig;
    if (s->flags & RT_ISIG_STD_LOGIC9) {
       assert(!(sig->shared.flags & SIG_F_PACKED));
       const size_t elem_sz = s->elem_size;
-      const size_t byte_off = ((size_t)s->sig_offset + local_off) * elem_sz;
+      const size_t byte_off = ((size_t)sig_offset + local_off) * elem_sz;
       const size_t byte_cnt = (size_t)local_cnt * elem_sz;
       uint8_t *dst = sig->shared.data + byte_off;
       memcpy(dst, isl->state + s->a_off + (size_t)local_off * elem_sz,
@@ -1638,7 +1776,7 @@ static void island_sync_sig_raw_slice(rt_island_t *isl,
          const uint32_t pos = local_off + k;
          const uint32_t e = pos / width;
          const uint32_t src_bit = width - 1u - (pos % width);
-         const uint32_t msb_bit = (uint32_t)s->sig_offset + pos;
+         const uint32_t msb_bit = (uint32_t)sig_offset + pos;
          const uint32_t sig_bit = sig_w - 1u - msb_bit;
          const uint64_t *ea = src_a + e * nwords;
          const uint64_t *eb = src_b != NULL ? src_b + e * nwords : NULL;
@@ -1660,8 +1798,8 @@ static void island_sync_sig_raw_slice(rt_island_t *isl,
    }
 
    const bool is_std = island_sig_is_std(sig, s->flags);
-   uint8_t *dst = sig->shared.data + s->sig_offset;
-   uint8_t *last_dst = sig->shared.data + sig->shared.size + s->sig_offset;
+   uint8_t *dst = sig->shared.data + sig_offset;
+   uint8_t *last_dst = sig->shared.data + sig->shared.size + sig_offset;
 
    for (uint32_t k = 0; k < local_cnt; k++) {
       const uint32_t pos = local_off + k;
@@ -1678,6 +1816,15 @@ static void island_sync_sig_raw_slice(rt_island_t *isl,
 
    if (update_last)
       memcpy(last_dst + local_off, dst + local_off, local_cnt);
+}
+
+static void island_sync_sig_raw_slice(rt_island_t *isl,
+                                      const rt_island_sig_t *s,
+                                      uint32_t local_off, uint32_t local_cnt,
+                                      bool update_last)
+{
+   island_sync_sig_raw_slice_to(isl, s, s->sig, s->sig_offset,
+                                local_off, local_cnt, update_last);
 }
 
 static inline const rt_island_force_t *island_find_force(const rt_island_t *isl,
@@ -1983,10 +2130,170 @@ static inline bool island_copy_direct_sig(const rt_island_sig_t *src_s,
 
 typedef A(rt_island_sig_t *) island_sig_ptr_list_t;
 
+typedef struct {
+   rt_signal_t *sig;
+   int32_t      sig_offset;
+} island_alias_spec_t;
+
+typedef A(island_alias_spec_t) island_alias_list_t;
+
+static bool island_collect_pending_consumers(void *pending,
+                                             const rt_island_sig_t *src_s,
+                                             const rt_signal_t *cur_sig,
+                                             int32_t cur_off,
+                                             bool require_exact_sig,
+                                             island_sig_ptr_list_t *consumers,
+                                             bool *found_out)
+{
+   if (pending == NULL)
+      return true;
+
+   if (pointer_tag(pending) == 1) {
+      rt_wakeable_t *w = untag_pointer(pending, rt_wakeable_t);
+      if (w->kind != W_WATCH)
+         return false;
+      rt_watch_t *watch = container_of(w, rt_watch_t, wakeable);
+      if (watch->fn != island_input_watch_cb)
+         return false;
+      rt_island_sig_t *dst_s = watch->user_data;
+      if (dst_s->isl == src_s->isl
+          || (require_exact_sig && dst_s->sig != cur_sig)
+          || dst_s->sig_offset != cur_off
+          || dst_s->width != src_s->width
+          || dst_s->nelems != src_s->nelems
+          || dst_s->elem_size != src_s->elem_size
+          || ((src_s->flags ^ dst_s->flags)
+              & (RT_ISIG_TWO_STATE | RT_ISIG_STD_LOGIC9)) != 0)
+         return false;
+
+      bool seen = false;
+      for (unsigned k = 0; k < consumers->count; k++) {
+         if (consumers->items[k] == dst_s) {
+            seen = true;
+            break;
+         }
+      }
+      if (!seen)
+         APUSH(*consumers, dst_s);
+      *found_out = true;
+      return true;
+   }
+
+   const rt_pending_t *p = untag_pointer(pending, rt_pending_t);
+   for (unsigned j = 0; j < p->count; j++) {
+      rt_wakeable_t *w = p->wake[j];
+      if (w == NULL)
+         continue;
+      if (w->kind != W_WATCH)
+         return false;
+      rt_watch_t *watch = container_of(w, rt_watch_t, wakeable);
+      if (watch->fn != island_input_watch_cb)
+         return false;
+      rt_island_sig_t *dst_s = watch->user_data;
+      if (dst_s->isl == src_s->isl
+          || (require_exact_sig && dst_s->sig != cur_sig)
+          || dst_s->sig_offset != cur_off
+          || dst_s->width != src_s->width
+          || dst_s->nelems != src_s->nelems
+          || dst_s->elem_size != src_s->elem_size
+          || ((src_s->flags ^ dst_s->flags)
+              & (RT_ISIG_TWO_STATE | RT_ISIG_STD_LOGIC9)) != 0)
+         return false;
+
+      bool seen = false;
+      for (unsigned k = 0; k < consumers->count; k++) {
+         if (consumers->items[k] == dst_s) {
+            seen = true;
+            break;
+         }
+      }
+      if (!seen)
+         APUSH(*consumers, dst_s);
+      *found_out = true;
+   }
+   return true;
+}
+
+static bool island_collect_port_consumers(const rt_nexus_t *nx,
+                                          const rt_island_sig_t *src_s,
+                                          island_sig_ptr_list_t *consumers,
+                                          island_alias_list_t *aliases,
+                                          bool *found_out,
+                                          unsigned depth)
+{
+   if (nx->outputs == NULL)
+      return true;
+   if (depth >= 4)
+      return false;
+
+   const rt_island_mgr_t *mgr = src_s->isl->mgr;
+   const uint32_t total = src_s->width * src_s->nelems;
+   if (nx->size != src_s->elem_size || nx->width != total)
+      return false;
+
+   for (const rt_source_t *o = nx->outputs; o != NULL; o = o->chain_output) {
+      if (o->tag != SOURCE_PORT)
+         return false;
+      const rt_nexus_t *dst_nx = o->u.port.output;
+      if (dst_nx == NULL || dst_nx->signal == NULL)
+         return false;
+      if (dst_nx->n_sources != 1
+          || (dst_nx->flags & (NET_F_FORCED | NET_F_INOUT))
+          || dst_nx->width != nx->width
+          || dst_nx->size != nx->size)
+         return false;
+      rt_signal_t *dst_sig = dst_nx->signal;
+      if (dst_sig->resolution != NULL && !(dst_nx->flags & NET_F_R_IDENT))
+         return false;
+      if (dst_sig->shared.flags
+          & (SIG_F_POLL_WATCHED | SIG_F_EXT_READ | SIG_F_PACKED))
+         return false;
+      const uint32_t dst_off = (uint32_t)(dst_nx->offset / dst_nx->size);
+      if (island_sig_map_overlaps(mgr, dst_sig, dst_off, dst_nx->width))
+         return false;
+
+      bool local_found = false;
+      if (!island_collect_pending_consumers(dst_nx->pending, src_s,
+                                            dst_sig, (int32_t)dst_off, true,
+                                            consumers, &local_found))
+         return false;
+
+      bool sub_found = false;
+      if (dst_nx->outputs != NULL) {
+         if (!island_collect_port_consumers(dst_nx, src_s, consumers, aliases,
+                                            &sub_found, depth + 1))
+            return false;
+      }
+
+      if (!local_found && !sub_found)
+         return false;
+
+      bool seen_alias = false;
+      for (unsigned k = 0; k < aliases->count; k++) {
+         if (aliases->items[k].sig == dst_sig
+             && aliases->items[k].sig_offset == (int32_t)dst_off) {
+            seen_alias = true;
+            break;
+         }
+      }
+      if (!seen_alias) {
+         APUSH(*aliases, ((island_alias_spec_t){
+            .sig        = dst_sig,
+            .sig_offset = (int32_t)dst_off,
+         }));
+      }
+
+      *found_out = true;
+   }
+   return true;
+}
+
 static bool island_check_direct_sig(const rt_island_sig_t *src_s,
-                                    island_sig_ptr_list_t *consumers)
+                                    island_sig_ptr_list_t *consumers,
+                                    island_alias_list_t *aliases)
 {
    consumers->count = 0;
+   aliases->count = 0;
    if (src_s->sig == NULL || src_s->next_owner != NULL
        || (src_s->flags & RT_ISIG_OBSERVED))
       return false;
@@ -1995,84 +2302,44 @@ static bool island_check_direct_sig(const rt_island_sig_t *src_s,
    if (sig->shared.flags & (SIG_F_POLL_WATCHED | SIG_F_EXT_READ))
       return false;
 
+   const uint32_t total = src_s->width * src_s->nelems;
    const rt_nexus_t *nx = &(sig->nexus);
    for (uint32_t i = 0; i < sig->n_nexus; i++, nx = nx->chain) {
       if (!island_nexus_overlaps_sig(nx, src_s))
          continue;
-      if (nx->n_sources != 0 || nx->outputs != NULL)
+      if (nx->n_sources != 0)
          return false;
-      if (nx->pending == NULL)
-         continue;
 
-      if (pointer_tag(nx->pending) == 1) {
-         rt_wakeable_t *w = untag_pointer(nx->pending, rt_wakeable_t);
-         if (w->kind != W_WATCH)
+      if (nx->outputs != NULL) {
+         if ((sig->shared.flags & SIG_F_PACKED)
+             || nx->size != src_s->elem_size
+             || nx->width != total
+             || (uint32_t)(nx->offset / nx->size) != (uint32_t)src_s->sig_offset)
             return false;
-         rt_watch_t *watch = container_of(w, rt_watch_t, wakeable);
-         if (watch->fn != island_input_watch_cb)
+         bool port_found = false;
+         if (!island_collect_port_consumers(nx, src_s, consumers, aliases,
+                                            &port_found, 0)
+             || !port_found)
             return false;
-         rt_island_sig_t *dst_s = watch->user_data;
-         if (dst_s->isl == src_s->isl
-             || dst_s->sig_offset != src_s->sig_offset
-             || dst_s->width != src_s->width
-             || dst_s->nelems != src_s->nelems
-             || dst_s->elem_size != src_s->elem_size
-             || ((src_s->flags ^ dst_s->flags)
-                 & (RT_ISIG_TWO_STATE | RT_ISIG_STD_LOGIC9)) != 0)
-            return false;
-
-         bool seen = false;
-         for (unsigned k = 0; k < consumers->count; k++) {
-            if (consumers->items[k] == dst_s) {
-               seen = true;
-               break;
-            }
-         }
-         if (!seen)
-            APUSH(*consumers, dst_s);
       }
-      else {
-         const rt_pending_t *p = untag_pointer(nx->pending, rt_pending_t);
-         for (unsigned j = 0; j < p->count; j++) {
-            rt_wakeable_t *w = p->wake[j];
-            if (w == NULL)
-               continue;
-            if (w->kind != W_WATCH)
-               return false;
-            rt_watch_t *watch = container_of(w, rt_watch_t, wakeable);
-            if (watch->fn != island_input_watch_cb)
-               return false;
-            rt_island_sig_t *dst_s = watch->user_data;
-            if (dst_s->isl == src_s->isl
-                || dst_s->sig_offset != src_s->sig_offset
-                || dst_s->width != src_s->width
-                || dst_s->nelems != src_s->nelems
-                || dst_s->elem_size != src_s->elem_size
-                || ((src_s->flags ^ dst_s->flags)
-                 & (RT_ISIG_TWO_STATE | RT_ISIG_STD_LOGIC9)) != 0)
-               return false;
 
-            bool seen = false;
-            for (unsigned k = 0; k < consumers->count; k++) {
-               if (consumers->items[k] == dst_s) {
-                  seen = true;
-                  break;
-               }
-            }
-            if (!seen)
-               APUSH(*consumers, dst_s);
-         }
-      }
+      bool dummy = false;
+      if (!island_collect_pending_consumers(nx->pending, src_s,
+                                            sig, src_s->sig_offset, false,
+                                            consumers, &dummy))
+         return false;
    }
 
    return consumers->count > 0;
 }
 
 typedef struct {
-   rt_island_sig_t  *src_s;
-   rt_island_sig_t **targets;
-   uint32_t          n_targets;
-   bool              rejected;
+   rt_island_sig_t     *src_s;
+   rt_island_sig_t    **targets;
+   uint32_t             n_targets;
+   island_alias_spec_t *aliases;
+   uint32_t             n_aliases;
+   bool                 rejected;
 } hier_cand_t;
 
 typedef struct {
@@ -2169,6 +2436,7 @@ static void island_build_hier(rt_island_mgr_t *mgr)
    // 1. Discover candidate clean inter-island direct wires
    A(hier_cand_t) cands = AINIT;
    island_sig_ptr_list_t tmp_cons = AINIT;
+   island_alias_list_t tmp_aliases = AINIT;
 
    for (uint32_t i = 0; i < N; i++) {
       rt_island_t *isl = mgr->islands.items[i];
@@ -2176,7 +2444,7 @@ static void island_build_hier(rt_island_mgr_t *mgr)
          rt_island_sig_t *src_s = &(isl->sigs[j]);
          if (!(src_s->flags & (RT_ISIG_COMB_WRITTEN | RT_ISIG_FF_WRITTEN)))
             continue;
-         if (!island_check_direct_sig(src_s, &tmp_cons))
+         if (!island_check_direct_sig(src_s, &tmp_cons, &tmp_aliases))
             continue;
 
          hier_cand_t c = {
@@ -2184,14 +2452,22 @@ static void island_build_hier(rt_island_mgr_t *mgr)
             .targets   = xmalloc_array(tmp_cons.count,
                                        sizeof(rt_island_sig_t *)),
             .n_targets = tmp_cons.count,
+            .aliases   = tmp_aliases.count > 0
+               ? xmalloc_array(tmp_aliases.count, sizeof(island_alias_spec_t))
+               : NULL,
+            .n_aliases = tmp_aliases.count,
             .rejected  = false,
          };
          memcpy(c.targets, tmp_cons.items,
                 tmp_cons.count * sizeof(rt_island_sig_t *));
+         if (tmp_aliases.count > 0)
+            memcpy(c.aliases, tmp_aliases.items,
+                   tmp_aliases.count * sizeof(island_alias_spec_t));
          APUSH(cands, c);
       }
    }
    ACLEAR(tmp_cons);
+   ACLEAR(tmp_aliases);
 
    // 2. Build combinational dependency graph & break any cycles via DFS
    uint32_t *comb_deg LOCAL = xcalloc_array(N, sizeof(uint32_t));
@@ -2281,6 +2557,7 @@ static void island_build_hier(rt_island_mgr_t *mgr)
       hier_cand_t *hc = &(cands.items[c]);
       if (hc->rejected) {
          free(hc->targets);
+         free(hc->aliases);
          continue;
       }
 
@@ -2288,6 +2565,23 @@ static void island_build_hier(rt_island_mgr_t *mgr)
       src_s->flags |= RT_ISIG_DIRECT_LINK;
       src_s->direct_targets = hc->targets;
       src_s->n_direct_targets = hc->n_targets;
+
+      if (hc->n_aliases > 0) {
+         src_s->direct_aliases = xcalloc_array(hc->n_aliases,
+                                               sizeof(rt_island_alias_t));
+         src_s->n_direct_aliases = hc->n_aliases;
+         for (uint32_t a = 0; a < hc->n_aliases; a++) {
+            rt_island_alias_t *al = &(src_s->direct_aliases[a]);
+            al->sig = hc->aliases[a].sig;
+            al->src_s = src_s;
+            al->sig_offset = hc->aliases[a].sig_offset;
+            al->sig->shared.flags |= SIG_F_ISLAND;
+            al->sig->shared.flags &= ~(SIG_F_FAST_NOOP | SIG_F_FAST_DIRECT);
+            al->next = hash_get(mgr->alias_map, al->sig);
+            hash_put(mgr->alias_map, al->sig, al);
+         }
+         free(hc->aliases);
+      }
 
       const uint32_t u = src_s->isl->isl_id;
       for (uint32_t t = 0; t < hc->n_targets; t++) {
@@ -2599,7 +2893,7 @@ void rt_island_reset_all(rt_island_mgr_t *mgr)
          rt_island_sig_t *s = &(isl->sigs[j]);
          if (s->sig == NULL
              || !(s->flags & (RT_ISIG_COMB_WRITTEN | RT_ISIG_FF_WRITTEN))
-             || (s->flags & RT_ISIG_OBSERVED))
+             || (s->flags & (RT_ISIG_OBSERVED | RT_ISIG_DIRECT_LINK)))
             continue;
          if (island_sig_observed(s)) {
             s->flags |= RT_ISIG_OBSERVED;
@@ -4670,6 +4964,13 @@ void rt_island_sync_to_signal(rt_model_t *m, rt_signal_t *sig)
          continue;
       island_sync_sig_raw(s->isl, s, false);
    }
+
+   for (rt_island_alias_t *a = hash_get(mgr->alias_map, sig);
+        a != NULL; a = a->next) {
+      if (a->src_s->flags & RT_ISIG_DIRECT_LINK)
+         island_sync_sig_raw_to(a->src_s->isl, a->src_s,
+                                a->sig, a->sig_offset, false);
+   }
 }
 
 void rt_island_sync_slice_to_signal(rt_model_t *m, rt_signal_t *sig,
@@ -4696,6 +4997,21 @@ void rt_island_sync_slice_to_signal(rt_model_t *m, rt_signal_t *sig,
          island_sync_sig_raw_slice(s->isl, s, r_start - s_start,
                                    r_end - r_start, false);
    }
+
+   for (rt_island_alias_t *a = hash_get(mgr->alias_map, sig);
+        a != NULL; a = a->next) {
+      if (!(a->src_s->flags & RT_ISIG_DIRECT_LINK))
+         continue;
+      const uint32_t a_start = (uint32_t)a->sig_offset;
+      const uint32_t a_end = a_start + a->src_s->width * a->src_s->nelems;
+      const uint32_t r_start = MAX(offset, a_start);
+      const uint32_t r_end = MIN(offset + count, a_end);
+      if (r_start < r_end)
+         island_sync_sig_raw_slice_to(a->src_s->isl, a->src_s,
+                                      a->sig, a->sig_offset,
+                                      r_start - a_start, r_end - r_start,
+                                      false);
+   }
 }
 
 static void island_break_direct_link(rt_model_t *m, rt_island_sig_t *src_s)
@@ -4706,6 +5022,10 @@ static void island_break_direct_link(rt_model_t *m, rt_island_sig_t *src_s)
    src_s->flags &= ~RT_ISIG_DIRECT_LINK;
    src_s->flags |= RT_ISIG_OBSERVED;
    island_sync_sig_raw(src_s->isl, src_s, true);
+   for (uint32_t a = 0; a < src_s->n_direct_aliases; a++) {
+      const rt_island_alias_t *al = &(src_s->direct_aliases[a]);
+      island_sync_sig_raw_to(src_s->isl, src_s, al->sig, al->sig_offset, true);
+   }
    if (src_s->flags & RT_ISIG_COMB_WRITTEN)
       island_add_obs_sig(src_s->isl, src_s->sig_idx);
 
@@ -4726,6 +5046,16 @@ static void island_break_direct_link(rt_model_t *m, rt_island_sig_t *src_s)
       if ((dst_s->flags & RT_ISIG_COMB_READ)
           && dst_s->isl->eval_handle != JIT_HANDLE_INVALID)
          island_mark_dirty(dst_s->isl);
+   }
+}
+
+static void island_break_aliases(rt_model_t *m, rt_island_mgr_t *mgr,
+                                 rt_signal_t *sig)
+{
+   for (rt_island_alias_t *a = hash_get(mgr->alias_map, sig);
+        a != NULL; a = a->next) {
+      if (a->src_s->flags & RT_ISIG_DIRECT_LINK)
+         island_break_direct_link(m, a->src_s);
    }
 }
 
@@ -4754,6 +5084,8 @@ void rt_island_on_ext_deposit(rt_model_t *m, rt_signal_t *sig)
    rt_island_mgr_t *mgr = rt_island_model_mgr(m);
    if (mgr == NULL || mgr->sig_map == NULL || sig == NULL)
       return;
+
+   island_break_aliases(m, mgr, sig);
 
    rt_island_sig_t *s = hash_get(mgr->sig_map, sig);
    for (; s != NULL; s = s->next_owner) {
@@ -4787,6 +5119,7 @@ void rt_island_on_observer_attached(rt_model_t *m, rt_signal_t *sig)
       return;
 
    sig->shared.flags &= ~(SIG_F_FAST_NOOP | SIG_F_FAST_DIRECT);
+   island_break_aliases(m, mgr, sig);
 
    rt_island_sig_t *s = hash_get(mgr->sig_map, sig);
    for (; s != NULL; s = s->next_owner) {
@@ -4975,6 +5308,7 @@ bool rt_island_vpi_put(rt_model_t *m, rt_signal_t *sig,
    if (mgr == NULL || mgr->sig_map == NULL || sig == NULL)
       return false;
 
+   island_break_aliases(m, mgr, sig);
    rt_island_sig_t *s = hash_get(mgr->sig_map, sig);
    if (s == NULL)
       return false;
@@ -5043,6 +5377,7 @@ bool rt_island_put_bytes(rt_model_t *m, rt_signal_t *sig,
    if (mgr == NULL || mgr->sig_map == NULL || sig == NULL || count == 0)
       return false;
 
+   island_break_aliases(m, mgr, sig);
    rt_island_sig_t *owners = hash_get(mgr->sig_map, sig);
    if (owners == NULL)
       return false;
@@ -5121,6 +5456,7 @@ bool rt_island_put_packed(rt_model_t *m, rt_signal_t *sig,
    if (mgr == NULL || mgr->sig_map == NULL || sig == NULL || count == 0)
       return false;
 
+   island_break_aliases(m, mgr, sig);
    rt_island_sig_t *owners = hash_get(mgr->sig_map, sig);
    if (owners == NULL)
       return false;
@@ -5247,6 +5583,7 @@ bool rt_island_vpi_release_slice(rt_model_t *m, rt_signal_t *sig,
    if (mgr == NULL || mgr->sig_map == NULL || sig == NULL || count == 0)
       return false;
 
+   island_break_aliases(m, mgr, sig);
    rt_island_sig_t *owners = hash_get(mgr->sig_map, sig);
    if (owners == NULL)
       return false;
