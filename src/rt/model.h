@@ -86,6 +86,7 @@ void model_set_timeout_cb(rt_model_t *m, uint64_t when, rt_event_fn_t fn,
                           void *user);
 
 void call_with_model(rt_model_t *m, void (*cb)(void *), void *arg);
+void model_run_island_init(rt_model_t *m, rt_scope_t *s, vcode_unit_t thunk);
 
 rt_model_t *get_model(void);
 rt_model_t *get_model_or_null(void);

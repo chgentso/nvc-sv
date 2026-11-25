@@ -1952,6 +1952,16 @@ static void elab_lower(tree_t b, elab_ctx_t *ctx)
       diag_remove_hint_fn(elab_hint_fn, ctx->inst);
 }
 
+static void elab_vhdl_islands(tree_t b, elab_ctx_t *ctx)
+{
+   if (ctx->lowered == NULL || ctx->scope == NULL || ctx->model == NULL)
+      return;
+
+   vcode_unit_t thunk = lower_vhdl_islands(ctx->registry, ctx->lowered,
+                                           ctx->cover, b);
+   model_run_island_init(ctx->model, ctx->scope, thunk);
+}
+
 static bool elab_can_clone_instance(elab_instance_t *ei, const elab_ctx_t *ctx)
 {
    if (ei == NULL)
@@ -7208,8 +7218,11 @@ static void elab_architecture(tree_t inst, tree_t arch, const elab_ctx_t *ctx)
       elab_lower(b, &new_ctx);
    }
 
-   if (elab_new_errors(&new_ctx) == 0)
+   if (elab_new_errors(&new_ctx) == 0) {
       elab_vhdl_sub_blocks(ei->block, &new_ctx);
+      if (elab_new_errors(&new_ctx) == 0)
+         elab_vhdl_islands(b, &new_ctx);
+   }
 
    elab_pop_scope(&new_ctx);
 }
@@ -7282,6 +7295,8 @@ static void elab_configuration(tree_t inst, tree_t unit, const elab_ctx_t *ctx)
       vhdl_cover_block(b, new_ctx.cover, new_ctx.cscope);
       elab_lower(b, &new_ctx);
       elab_vhdl_sub_blocks(ei->block, &new_ctx);
+      if (error_count() == 0)
+         elab_vhdl_islands(b, &new_ctx);
    }
 
    elab_pop_scope(&new_ctx);

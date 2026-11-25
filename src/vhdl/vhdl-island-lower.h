@@ -38,6 +38,7 @@ vhdl_island_ctx_t *vhdl_island_lower_prepare(mir_context_t *mc, tree_t block,
 
 void vhdl_island_lower_emit_vcode_init(const vhdl_island_ctx_t *ctx,
                                        lower_unit_t *lu,
-                                       vhdl_island_sig_lookup_fn_t get_sig_fn);
+                                       vhdl_island_sig_lookup_fn_t get_sig_fn,
+                                       int ctx_upref);
 
 #endif   // _VHDL_ISLAND_LOWER_H

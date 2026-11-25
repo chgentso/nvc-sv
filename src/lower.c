@@ -14352,32 +14352,6 @@ lower_unit_t *lower_instance(unit_registry_t *ur, lower_unit_t *parent,
    const bool use_mir = opt_get_int(OPT_LOWER_MIR);
    ident_t sym_prefix = tree_ident2(hier);
 
-   tree_t ancestors[VHDL_ISLAND_MAX_ANCESTORS];
-   int n_ancestors = 0;
-   if (!is_design_unit(unit) && tree_kind(unit) != T_COMPONENT) {
-      for (lower_unit_t *pu = lu->parent;
-           pu != NULL && n_ancestors < VHDL_ISLAND_MAX_ANCESTORS;
-           pu = pu->parent) {
-         tree_t pb = pu->container;
-         if (pb == NULL || tree_kind(pb) != T_BLOCK
-             || tree_decls(pb) == 0 || tree_kind(tree_decl(pb, 0)) != T_HIER)
-            break;
-         ancestors[n_ancestors++] = pb;
-         tree_t punit = tree_ref(tree_decl(pb, 0));
-         if (punit == NULL || is_design_unit(punit)
-             || tree_kind(punit) == T_COMPONENT)
-            break;
-      }
-   }
-
-   ident_t isl_prefix = lu->name;
-
-   vhdl_island_ctx_t *ictx = NULL;
-   if (ur != NULL && unit_registry_mir(ur) != NULL && !opt_get_int(OPT_DEBUG_STMTS))
-      ictx = vhdl_island_lower_prepare(unit_registry_mir(ur), block,
-                                       ancestors, n_ancestors,
-                                       isl_prefix, cover);
-
    const int nstmts = tree_stmts(block);
    for (int i = 0; i < nstmts; i++) {
       tree_t s = tree_stmt(block, i);
@@ -14385,10 +14359,6 @@ lower_unit_t *lower_instance(unit_registry_t *ur, lower_unit_t *parent,
       case T_PROCESS:
          {
             ident_t sym = ident_prefix(sym_prefix, tree_ident(s), '.');
-            if (ictx != NULL && vhdl_island_stmt_fused(ictx, i)) {
-               unit_registry_mark_fused(ur, ident_prefix(lu->name, tree_ident(s), '.'));
-               break;
-            }
             if (use_mir)
                unit_registry_defer2(ur, sym, lu, MIR_UNIT_PROCESS,
                                     vhdl_lower_deferred, tree_to_object(s));
@@ -14408,15 +14378,51 @@ lower_unit_t *lower_instance(unit_registry_t *ur, lower_unit_t *parent,
       }
    }
 
-   if (ictx != NULL) {
-      vhdl_island_lower_emit_vcode_init(ictx, lu, lower_get_island_leaf_sig);
-      vhdl_island_ctx_free(ictx);
-   }
-
    emit_return(VCODE_INVALID_REG);
 
    lower_finished(lu);
    return lu;
+}
+
+vcode_unit_t lower_vhdl_islands(unit_registry_t *ur, lower_unit_t *lu,
+                                cover_data_t *cover, tree_t block)
+{
+   if (ur == NULL || lu == NULL || unit_registry_mir(ur) == NULL
+       || opt_get_int(OPT_DEBUG_STMTS)
+       || opt_get_int(OPT_RTL_ISLANDS) == RTL_ISLANDS_OFF)
+      return NULL;
+
+   vhdl_island_ctx_t *ictx = vhdl_island_lower_prepare(
+      unit_registry_mir(ur), block, NULL, 0, lu->name, cover);
+   if (ictx == NULL)
+      return NULL;
+
+   for (uint32_t i = 0; i < ictx->n_procs; i++) {
+      const vhdl_iproc_t *p = &(ictx->procs[i]);
+      if (!p->rejected && p->island_idx >= 0 && p->fused_key != NULL)
+         unit_registry_mark_fused(ur, p->fused_key);
+   }
+
+   if (ictx->n_islands == 0 && ictx->n_ext_read_sigs == 0) {
+      vhdl_island_ctx_free(ictx);
+      return NULL;
+   }
+
+   vcode_unit_t thunk = emit_thunk(NULL, tree_to_object(block), lu->vunit);
+   lower_unit_t *init_lu = lower_unit_new(ur, lu, thunk, cover, block);
+
+   vcode_type_t vcontext = vtype_context(lu->name);
+   emit_param(vcontext, VCODE_INVALID_STAMP, ident_new("context"));
+
+   vhdl_island_lower_emit_vcode_init(ictx, init_lu, lower_get_island_leaf_sig, 1);
+   vhdl_island_ctx_free(ictx);
+
+   vcode_set_result(vtype_offset());
+   emit_return(emit_const(vtype_offset(), 0));
+   lower_finished(init_lu);
+   lower_unit_free(init_lu);
+   vcode_close();
+   return thunk;
 }
 
 lower_unit_t *lower_verilog_parent(unit_registry_t *ur, ident_t name,

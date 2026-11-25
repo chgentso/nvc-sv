@@ -656,6 +656,42 @@ void *jit_get_frame_var(jit_t *j, jit_handle_t handle, void *p, ident_t name)
    fatal_trace("%s has no variable %s", istr(f->name), istr(name));
 }
 
+static bool find_island_proc_loc(tree_t blk, const loc_t *loc, text_buf_t *tb,
+                                 int depth)
+{
+   if (blk == NULL || loc == NULL || depth > 16)
+      return false;
+
+   const int nstmts = tree_stmts(blk);
+   for (int i = 0; i < nstmts; i++) {
+      tree_t st = tree_stmt(blk, i);
+      if (tree_kind(st) == T_PROCESS) {
+         const loc_t *pl = tree_loc(st);
+         if (pl->file_ref == loc->file_ref
+             && loc->first_line >= pl->first_line
+             && loc->first_line <= pl->first_line + pl->line_delta) {
+            tb_append(tb, ':');
+            tb_istr(tb, ident_downcase(tree_ident(st)));
+            return true;
+         }
+      }
+      else if (tree_kind(st) == T_BLOCK && tree_decls(st) > 0
+               && tree_kind(tree_decl(st, 0)) == T_HIER) {
+         tree_t unit = tree_ref(tree_decl(st, 0));
+         if (unit != NULL && !is_design_unit(unit)
+             && tree_kind(unit) != T_COMPONENT) {
+            const size_t mark = tb_len(tb);
+            tb_append(tb, ':');
+            tb_istr(tb, ident_downcase(tree_ident(st)));
+            if (find_island_proc_loc(st, loc, tb, depth + 1))
+               return true;
+            tb_trim(tb, mark);
+         }
+      }
+   }
+   return false;
+}
+
 static void jit_emit_trace(diag_t *d, const loc_t *loc, object_t *enclosing,
                            const char *symbol)
 {
@@ -695,22 +731,7 @@ static void jit_emit_trace(diag_t *d, const loc_t *loc, object_t *enclosing,
                LOCAL_TEXT_BUF tb = tb_new();
                for (const char *p = dot; p < tag; p++)
                   tb_append(tb, *p == '.' ? ':' : tolower_iso88591(*p));
-               if (loc != NULL) {
-                  const int nstmts = tree_stmts(tree);
-                  for (int i = 0; i < nstmts; i++) {
-                     tree_t st = tree_stmt(tree, i);
-                     if (tree_kind(st) != T_PROCESS)
-                        continue;
-                     const loc_t *pl = tree_loc(st);
-                     if (pl->file_ref == loc->file_ref
-                         && loc->first_line >= pl->first_line
-                         && loc->first_line <= pl->first_line + pl->line_delta) {
-                        tb_append(tb, ':');
-                        tb_istr(tb, ident_downcase(tree_ident(st)));
-                        break;
-                     }
-                  }
-               }
+               find_island_proc_loc(tree, loc, tb, 0);
                diag_trace(d, loc, "Process$$ %s", tb_get(tb));
                break;
             }

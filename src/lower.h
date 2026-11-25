@@ -97,6 +97,8 @@ vcode_stamp_t lower_bounds(type_t type);
 lower_unit_t *lower_instance(unit_registry_t *ur, lower_unit_t *parent,
                              cover_data_t *cover, cover_obj_t cscope,
                              tree_t block);
+vcode_unit_t lower_vhdl_islands(unit_registry_t *ur, lower_unit_t *lu,
+                                cover_data_t *cover, tree_t block);
 lower_unit_t *lower_verilog_parent(unit_registry_t *ur, ident_t name,
                                    ident_t dotted, tree_t block,
                                    const int *slots);

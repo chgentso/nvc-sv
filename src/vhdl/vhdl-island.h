@@ -25,6 +25,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <string.h>
 
 #define VHDL_ISIG_MAX_DEPTH         8
 #define VHDL_ISLAND_MAX_ANCESTORS   16
@@ -95,6 +96,10 @@ typedef enum {
 typedef struct {
    tree_t            stmt;
    int               block_stmt_idx;
+   tree_t            owner_block;
+   tree_t            owner_ancestors[VHDL_ISLAND_MAX_ANCESTORS];
+   int               n_owner_ancestors;
+   ident_t           fused_key;
    vhdl_iproc_kind_t kind;
    bool              rejected;
    uint32_t          clk_sig;
@@ -157,6 +162,9 @@ typedef struct _vhdl_island_ctx {
    tree_t         block;
    tree_t         ancestors[VHDL_ISLAND_MAX_ANCESTORS];
    int            n_ancestors;
+   tree_t         eval_block;
+   tree_t         eval_ancestors[VHDL_ISLAND_MAX_ANCESTORS];
+   int            n_eval_ancestors;
    ident_t        scope_prefix;
    vhdl_isig_t   *sigs;
    uint32_t       n_sigs;
@@ -191,5 +199,18 @@ bool vhdl_island_const_slice_width(const vhdl_island_ctx_t *ctx, tree_t rg,
                                    uint32_t *width_out);
 bool vhdl_island_is_sig_root(tree_t expr);
 tree_t vhdl_island_resolve_func_body(tree_t decl);
+
+static inline void vhdl_island_set_eval_scope(vhdl_island_ctx_t *ctx,
+                                              tree_t blk,
+                                              const tree_t *ancs,
+                                              int n_ancs)
+{
+   ctx->eval_block = blk;
+   if (n_ancs > VHDL_ISLAND_MAX_ANCESTORS)
+      n_ancs = VHDL_ISLAND_MAX_ANCESTORS;
+   ctx->n_eval_ancestors = n_ancs;
+   if (n_ancs > 0)
+      memcpy(ctx->eval_ancestors, ancs, n_ancs * sizeof(tree_t));
+}
 
 #endif   // _VHDL_ISLAND_H

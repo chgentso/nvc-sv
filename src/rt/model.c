@@ -42,6 +42,7 @@
 #include "thread.h"
 #include "tree.h"
 #include "type.h"
+#include "vcode.h"
 #include "vlog/vlog-node.h"
 #include "vlog/vlog-util.h"
 
@@ -1177,6 +1178,28 @@ rt_scope_t *create_scope(rt_model_t *m, tree_t block, rt_scope_t *parent)
       thread->active_scope = NULL;
       return s;
    }
+}
+
+static void *island_init_noop(jit_scalar_t *args, void *arg)
+{
+   return NULL;
+}
+
+void model_run_island_init(rt_model_t *m, rt_scope_t *s, vcode_unit_t thunk)
+{
+   if (thunk == NULL)
+      return;
+
+   void *ctx = (s != NULL) ? *mptr_get(s->privdata) : NULL;
+   if (ctx != NULL) {
+      MODEL_ENTRY(m);
+      model_thread_t *thread = model_thread(m);
+      rt_scope_t *saved = thread->active_scope;
+      thread->active_scope = s;
+      jit_call_thunk(m->jit, thunk, ctx, island_init_noop, NULL);
+      thread->active_scope = saved;
+   }
+   vcode_unit_unref(thunk);
 }
 
 rt_scope_t *find_scope(rt_model_t *m, tree_t container)

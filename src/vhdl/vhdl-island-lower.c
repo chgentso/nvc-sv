@@ -2311,8 +2311,14 @@ static bool vi_lower_expr(vi_lower_t *l, tree_t expr, vi_val_t *out)
                   }
                }
                if (tree_kind(d) == T_GENERIC_DECL && l->ctx != NULL) {
-                  for (int ai = -1; ai < l->ctx->n_ancestors; ai++) {
-                     tree_t gb = (ai < 0) ? l->ctx->block : l->ctx->ancestors[ai];
+                  tree_t eblk = l->ctx->eval_block != NULL
+                     ? l->ctx->eval_block : l->ctx->block;
+                  const tree_t *eancs = l->ctx->eval_block != NULL
+                     ? l->ctx->eval_ancestors : l->ctx->ancestors;
+                  const int n_eancs = l->ctx->eval_block != NULL
+                     ? l->ctx->n_eval_ancestors : l->ctx->n_ancestors;
+                  for (int ai = -1; ai < n_eancs; ai++) {
+                     tree_t gb = (ai < 0) ? eblk : eancs[ai];
                      if (gb == NULL)
                         continue;
                      const int ng = tree_generics(gb);
@@ -4225,6 +4231,8 @@ static mir_unit_t *vi_build_comb_unit(mir_context_t *mc,
    for (uint32_t k = 0; k < isl->n_comb_procs; k++) {
       uint32_t pi = isl->comb_procs[k];
       const vhdl_iproc_t *p = &(ctx->procs[pi]);
+      vhdl_island_set_eval_scope((vhdl_island_ctx_t *)ctx, p->owner_block,
+                                 p->owner_ancestors, p->n_owner_ancestors);
       vi_scope_t sc = { .ret_bb = MIR_NULL_BLOCK };
       l.scope = &sc;
 
@@ -4235,6 +4243,8 @@ static mir_unit_t *vi_build_comb_unit(mir_context_t *mc,
 
       ACLEAR(sc.locals);
       l.scope = NULL;
+      vhdl_island_set_eval_scope((vhdl_island_ctx_t *)ctx, ctx->block,
+                                 ctx->ancestors, ctx->n_ancestors);
       if (!ok || l.failed) {
          *failed_proc_out = (int)pi;
          mir_unit_free(mu);
@@ -4313,6 +4323,8 @@ static mir_unit_t *vi_build_ff_unit(mir_context_t *mc,
       for (uint32_t k = 0; k < dm->n_procs; k++) {
          uint32_t pi = dm->proc_idxs[k];
          const vhdl_iproc_t *p = &(ctx->procs[pi]);
+         vhdl_island_set_eval_scope((vhdl_island_ctx_t *)ctx, p->owner_block,
+                                    p->owner_ancestors, p->n_owner_ancestors);
          vi_scope_t sc = { .ret_bb = MIR_NULL_BLOCK };
          l.scope = &sc;
          bool ok = vi_bind_process_locals(&l, p->stmt, &sc);
@@ -4320,6 +4332,8 @@ static mir_unit_t *vi_build_ff_unit(mir_context_t *mc,
             ok = vi_lower_stmt(&l, tree_stmt(p->rst_branch, j));
          ACLEAR(sc.locals);
          l.scope = NULL;
+         vhdl_island_set_eval_scope((vhdl_island_ctx_t *)ctx, ctx->block,
+                                    ctx->ancestors, ctx->n_ancestors);
          if (!ok || l.failed) {
             *failed_proc_out = (int)pi;
             mir_unit_free(mu);
@@ -4333,6 +4347,8 @@ static mir_unit_t *vi_build_ff_unit(mir_context_t *mc,
       for (uint32_t k = 0; k < dm->n_procs; k++) {
          uint32_t pi = dm->proc_idxs[k];
          const vhdl_iproc_t *p = &(ctx->procs[pi]);
+         vhdl_island_set_eval_scope((vhdl_island_ctx_t *)ctx, p->owner_block,
+                                    p->owner_ancestors, p->n_owner_ancestors);
          vi_scope_t sc = { .ret_bb = MIR_NULL_BLOCK };
          l.scope = &sc;
          bool ok = vi_bind_process_locals(&l, p->stmt, &sc);
@@ -4340,6 +4356,8 @@ static mir_unit_t *vi_build_ff_unit(mir_context_t *mc,
             ok = vi_lower_stmt(&l, tree_stmt(p->clk_branch, j));
          ACLEAR(sc.locals);
          l.scope = NULL;
+         vhdl_island_set_eval_scope((vhdl_island_ctx_t *)ctx, ctx->block,
+                                    ctx->ancestors, ctx->n_ancestors);
          if (!ok || l.failed) {
             *failed_proc_out = (int)pi;
             mir_unit_free(mu);
@@ -4353,6 +4371,8 @@ static mir_unit_t *vi_build_ff_unit(mir_context_t *mc,
       for (uint32_t k = 0; k < dm->n_procs; k++) {
          uint32_t pi = dm->proc_idxs[k];
          const vhdl_iproc_t *p = &(ctx->procs[pi]);
+         vhdl_island_set_eval_scope((vhdl_island_ctx_t *)ctx, p->owner_block,
+                                    p->owner_ancestors, p->n_owner_ancestors);
          vi_scope_t sc = { .ret_bb = MIR_NULL_BLOCK };
          l.scope = &sc;
          bool ok = vi_bind_process_locals(&l, p->stmt, &sc);
@@ -4360,6 +4380,8 @@ static mir_unit_t *vi_build_ff_unit(mir_context_t *mc,
             ok = vi_lower_stmt(&l, tree_stmt(p->clk_branch, j));
          ACLEAR(sc.locals);
          l.scope = NULL;
+         vhdl_island_set_eval_scope((vhdl_island_ctx_t *)ctx, ctx->block,
+                                    ctx->ancestors, ctx->n_ancestors);
          if (!ok || l.failed) {
             *failed_proc_out = (int)pi;
             mir_unit_free(mu);
@@ -4386,7 +4408,8 @@ static bool vi_rebuild_without_rejected(vhdl_island_ctx_t *ctx, int fail_proc)
       if (ctx->procs[i].island_idx == bad_isl) {
          ctx->procs[i].rejected = true;
          ctx->procs[i].island_idx = -1;
-         ctx->stmt_fused[ctx->procs[i].block_stmt_idx] = false;
+         if (ctx->procs[i].block_stmt_idx >= 0)
+            ctx->stmt_fused[ctx->procs[i].block_stmt_idx] = false;
          // Mark signals read by newly-ejected proc as ext_read
          for (uint32_t r = 0; r < ctx->procs[i].n_reads; r++) {
             uint32_t sid = ctx->procs[i].reads[r];
@@ -4505,7 +4528,8 @@ vhdl_island_ctx_t *vhdl_island_lower_prepare(mir_context_t *mc, tree_t block,
 
 void vhdl_island_lower_emit_vcode_init(const vhdl_island_ctx_t *ctx,
                                        lower_unit_t *lu,
-                                       vhdl_island_sig_lookup_fn_t get_sig_fn)
+                                       vhdl_island_sig_lookup_fn_t get_sig_fn,
+                                       int ctx_upref)
 {
    if (ctx == NULL)
       return;
@@ -4535,7 +4559,7 @@ void vhdl_island_lower_emit_vcode_init(const vhdl_island_ctx_t *ctx,
 
       vcode_reg_t clos;
       if (isl->eval_name != NULL) {
-         vcode_reg_t ctx_reg = emit_context_upref(0);
+         vcode_reg_t ctx_reg = emit_context_upref(ctx_upref);
          clos = emit_closure(isl->eval_name, voffset, &ctx_reg, 1);
       }
       else
@@ -4569,7 +4593,7 @@ void vhdl_island_lower_emit_vcode_init(const vhdl_island_ctx_t *ctx,
 
       for (uint32_t d = 0; d < isl->n_doms; d++) {
          const vhdl_idom_t *dm = &(isl->doms[d]);
-         vcode_reg_t ctx_reg = emit_context_upref(0);
+         vcode_reg_t ctx_reg = emit_context_upref(ctx_upref);
          vcode_reg_t ff_clos = emit_closure(dm->fn_name, voffset, &ctx_reg, 1);
          vcode_reg_t dom_args[7] = {
             handle,

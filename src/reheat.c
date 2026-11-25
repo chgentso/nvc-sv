@@ -166,6 +166,15 @@ static void reheat_block(tree_t b, const reheat_ctx_t *parent)
       if (tree_kind(s) == T_BLOCK)
          reheat_block(s, &ctx);
    }
+
+   if (ctx.lowered != NULL && ctx.scope != NULL && tree_subkind(hier) != T_VERILOG) {
+      tree_t unit = tree_ref(hier);
+      if (unit != NULL && is_design_unit(unit)) {
+         vcode_unit_t thunk = lower_vhdl_islands(ctx.registry, ctx.lowered,
+                                                 ctx.cover, b);
+         model_run_island_init(ctx.model, ctx.scope, thunk);
+      }
+   }
 }
 
 void reheat(tree_t top, unit_registry_t *ur, mir_context_t *mc,
