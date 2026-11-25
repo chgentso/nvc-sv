@@ -528,7 +528,7 @@ static vlog_node_t fixup_refs_cb(vlog_node_t v, void *ctx)
       }
       break;
    case V_REF:
-      {
+      if (vlog_has_ref(v)) {
          vlog_node_t new = hash_get(map, vlog_ref(v));
          if (new != NULL)
             vlog_set_ref(v, new);
