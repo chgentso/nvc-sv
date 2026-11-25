@@ -3184,7 +3184,8 @@ vhdl_island_ctx_t *vhdl_island_analyze(tree_t block, ident_t scope_prefix)
          const uint32_t gid = isl_sig_ids.items[j];
          const vhdl_isig_t *s = &(ctx->sigs[gid]);
          const uint8_t lf = loc_flags[j];
-         uint32_t f = s->two_state ? RT_ISIG_TWO_STATE : RT_ISIG_STD_LOGIC9;
+         uint32_t f = (s->two_state ? RT_ISIG_TWO_STATE : RT_ISIG_STD_LOGIC9)
+            | RT_ISIG_VHDL;
          if (s->elem_kind == VISIG_STD_LOGIC)
             f |= RT_ISIG_STD_LOGIC_ELEM;
          if (lf & LOC_COMB_READ)

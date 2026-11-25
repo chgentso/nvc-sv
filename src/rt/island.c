@@ -2581,7 +2581,8 @@ static bool island_eligible_sv_reset(const rt_island_t *isl)
       return false;
 
    for (uint32_t j = 0; j < isl->nsigs; j++) {
-      if (isl->sigs[j].flags & (RT_ISIG_STD_LOGIC9 | RT_ISIG_VHDL_SCHED))
+      if (isl->sigs[j].flags & (RT_ISIG_STD_LOGIC9 | RT_ISIG_VHDL_SCHED
+                                | RT_ISIG_VHDL))
          return false;
    }
 
@@ -2842,6 +2843,25 @@ static bool island_call_comb(jit_t *jit, rt_model_t *m, rt_island_t *isl,
    return true;
 }
 
+static void island_sched_out_sig(rt_model_t *m, rt_island_t *isl,
+                                 const rt_island_sig_t *s);
+
+static inline void island_flush_comb_out_sig(rt_model_t *m, rt_island_t *isl,
+                                             rt_island_sig_t *s)
+{
+   // VHDL combinational signal assignments (<=) take effect in the next delta
+   // cycle; using deposit_signal() synchronously during rt_island_eval_dirty()
+   // stamps event_delta with the current delta while woken VHDL processes run
+   // in the next delta, causing 'event / rising_edge() / falling_edge() to
+   // read false.
+   if ((s->flags & RT_ISIG_VHDL) && model_can_create_delta(m)) {
+      s->flags |= RT_ISIG_VHDL_SCHED;
+      island_sched_out_sig(m, isl, s);
+   }
+   else
+      island_sync_out_sig(m, isl, s);
+}
+
 static bool island_eval_cluster(jit_t *jit, rt_model_t *m,
                                 rt_super_island_t *cl, tlab_t *tlab)
 {
@@ -2879,10 +2899,10 @@ static bool island_eval_cluster(jit_t *jit, rt_model_t *m,
       }
 
       for (uint32_t j = 0; j < isl->n_ext_out_sigs; j++)
-         island_sync_out_sig(m, isl, &(isl->sigs[isl->ext_out_sigs[j]]));
+         island_flush_comb_out_sig(m, isl, &(isl->sigs[isl->ext_out_sigs[j]]));
       if (unlikely(isl->n_obs_sigs > 0)) {
          for (uint32_t j = 0; j < isl->n_obs_sigs; j++)
-            island_sync_out_sig(m, isl, &(isl->sigs[isl->obs_sigs[j]]));
+            island_flush_comb_out_sig(m, isl, &(isl->sigs[isl->obs_sigs[j]]));
       }
    }
 
@@ -3233,15 +3253,15 @@ static void island_sync_out_island(rt_model_t *m, rt_island_t *isl)
 {
    if (isl->n_direct_comb_outs > 0) {
       for (uint32_t j = 0; j < isl->n_ext_out_sigs; j++)
-         island_sync_out_sig(m, isl, &(isl->sigs[isl->ext_out_sigs[j]]));
+         island_flush_comb_out_sig(m, isl, &(isl->sigs[isl->ext_out_sigs[j]]));
    }
    else {
       for (uint32_t j = 0; j < isl->n_out_sigs; j++)
-         island_sync_out_sig(m, isl, &(isl->sigs[isl->out_sigs[j]]));
+         island_flush_comb_out_sig(m, isl, &(isl->sigs[isl->out_sigs[j]]));
    }
    if (unlikely(isl->n_obs_sigs > 0)) {
       for (uint32_t j = 0; j < isl->n_obs_sigs; j++)
-         island_sync_out_sig(m, isl, &(isl->sigs[isl->obs_sigs[j]]));
+         island_flush_comb_out_sig(m, isl, &(isl->sigs[isl->obs_sigs[j]]));
    }
 }
 
@@ -3425,12 +3445,12 @@ static bool island_eval_dirty_clusters(jit_t *jit, rt_model_t *m,
                         continue;
                      isl->need_sync_out = false;
                      for (uint32_t j = 0; j < isl->n_ext_out_sigs; j++)
-                        island_sync_out_sig(m, isl,
-                                            &(isl->sigs[isl->ext_out_sigs[j]]));
+                        island_flush_comb_out_sig(m, isl,
+                                                  &(isl->sigs[isl->ext_out_sigs[j]]));
                      if (unlikely(isl->n_obs_sigs > 0)) {
                         for (uint32_t j = 0; j < isl->n_obs_sigs; j++)
-                           island_sync_out_sig(m, isl,
-                                               &(isl->sigs[isl->obs_sigs[j]]));
+                           island_flush_comb_out_sig(m, isl,
+                                                     &(isl->sigs[isl->obs_sigs[j]]));
                      }
                   }
                   cl->mt_sync_start = 0;
@@ -3511,16 +3531,16 @@ bool rt_island_eval_dirty(jit_t *jit, rt_model_t *m, rt_island_mgr_t *mgr,
                   }
                }
                for (uint32_t j = 0; j < isl->n_ext_out_sigs; j++)
-                  island_sync_out_sig(m, isl,
-                                      &(isl->sigs[isl->ext_out_sigs[j]]));
+                  island_flush_comb_out_sig(m, isl,
+                                            &(isl->sigs[isl->ext_out_sigs[j]]));
             }
             else {
                for (uint32_t j = 0; j < isl->n_out_sigs; j++)
-                  island_sync_out_sig(m, isl, &(isl->sigs[isl->out_sigs[j]]));
+                  island_flush_comb_out_sig(m, isl, &(isl->sigs[isl->out_sigs[j]]));
             }
             if (unlikely(isl->n_obs_sigs > 0)) {
                for (uint32_t j = 0; j < isl->n_obs_sigs; j++)
-                  island_sync_out_sig(m, isl, &(isl->sigs[isl->obs_sigs[j]]));
+                  island_flush_comb_out_sig(m, isl, &(isl->sigs[isl->obs_sigs[j]]));
             }
          }
 
