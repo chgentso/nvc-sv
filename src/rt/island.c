@@ -3531,6 +3531,138 @@ static inline void island_ff_enqueue_dom(rt_island_mgr_t *mgr,
    }
 }
 
+static inline bool island_edge_is_vhdl(uint8_t edge_flags)
+{
+   return !!(edge_flags & (RT_IEDGE_VHDL | RT_IEDGE_VHDL_EVENT
+                           | RT_IEDGE_RST_LEVEL));
+}
+
+static void island_sched_out_sig(rt_model_t *m, rt_island_t *isl,
+                                 const rt_island_sig_t *s)
+{
+   rt_signal_t *sig = s->sig;
+   const uint32_t width = s->width;
+   const uint32_t nelems = s->nelems;
+
+   if (s->flags & RT_ISIG_STD_LOGIC9) {
+      assert(!(sig->shared.flags & SIG_F_PACKED));
+      const uint32_t total = width * nelems;
+      const size_t elem_sz = s->elem_size;
+      const size_t nbytes = (size_t)total * elem_sz;
+      const uint8_t *src = isl->state + s->a_off;
+      const uint8_t *cur = sig->shared.data + (size_t)s->sig_offset * elem_sz;
+      bool diff = (nbytes == 1) ? (*cur != *src) : (memcmp(cur, src, nbytes) != 0);
+      if (diff)
+         sched_deposit(m, sig, src, s->sig_offset, total, 0, false);
+      return;
+   }
+
+   if (sig->shared.flags & SIG_F_PACKED) {
+      island_sync_out_sig(m, isl, s);
+      return;
+   }
+
+   const uint32_t nwords = s->nwords;
+   const bool two_state = !!(s->flags & RT_ISIG_TWO_STATE);
+   const uint64_t *src_a = (const uint64_t *)(isl->state + s->a_off);
+   const uint64_t *src_b = two_state
+      ? NULL : (const uint64_t *)(isl->state + s->b_off);
+   const bool is_std = island_sig_is_std(sig, s->flags);
+   const uint32_t total = width * nelems;
+
+   uint8_t stack_buf[64];
+   uint8_t *heap_buf = NULL;
+   uint8_t *out_bytes = stack_buf;
+   if (total > sizeof(stack_buf)) {
+      heap_buf = xmalloc(total);
+      out_bytes = heap_buf;
+   }
+
+   for (uint32_t e = 0; e < nelems; e++) {
+      const uint64_t *ea = src_a + e * nwords;
+      const uint64_t *eb = src_b != NULL ? src_b + e * nwords : NULL;
+      for (uint32_t i = 0; i < width; i++) {
+         const uint32_t bit = width - 1u - i;
+         const uint8_t a = (ea[bit / 64u] >> (bit & 63u)) & 1u;
+         const uint8_t b = (eb != NULL)
+            ? ((eb[bit / 64u] >> (bit & 63u)) & 1u) : 0;
+         const uint8_t sv = (uint8_t)(a | (b << 1));
+         out_bytes[e * width + i] = is_std ? sv_to_std_logic(sv) : sv;
+      }
+   }
+
+   const uint8_t *cur = sig->shared.data + s->sig_offset;
+   if (memcmp(cur, out_bytes, total) != 0)
+      sched_deposit(m, sig, out_bytes, s->sig_offset, total, 0, false);
+
+   free(heap_buf);
+}
+
+static void island_commit_vhdl_domain(rt_model_t *m, rt_island_domain_t *dom)
+{
+   rt_island_t *isl = dom->isl;
+   bool comb_need_eval = false;
+   for (uint32_t j = 0; j < dom->n_write_sigs; j++) {
+      rt_island_sig_t *s = &(isl->sigs[dom->write_sigs[j]]);
+      if (unlikely(isl->has_forces)) {
+         const rt_island_force_t *f = island_find_force(isl, s->sig_idx);
+         if (f != NULL)
+            island_apply_force_entry(isl->next_state, s, f);
+      }
+
+      if (!island_commit_sig_buf(isl, s))
+         continue;
+
+      if (s->flags & RT_ISIG_COMB_READ)
+         comb_need_eval = true;
+
+      if (s->flags & RT_ISIG_DIRECT_LINK) {
+         for (uint32_t t = 0; t < s->n_direct_targets; t++) {
+            rt_island_sig_t *dst_s = s->direct_targets[t];
+            if (island_copy_direct_sig(s, dst_s)
+                && (dst_s->flags & RT_ISIG_COMB_READ)
+                && dst_s->isl->eval_handle != JIT_HANDLE_INVALID)
+               island_mark_dirty(dst_s->isl);
+         }
+      }
+      else if (s->flags & (RT_ISIG_OUT | RT_ISIG_OBSERVED)) {
+         s->flags |= RT_ISIG_VHDL_SCHED;
+         island_sched_out_sig(m, isl, s);
+      }
+   }
+
+   if (comb_need_eval && isl->eval_handle != JIT_HANDLE_INVALID)
+      island_mark_dirty(isl);
+}
+
+static void island_commit_vhdl_ff_domains(rt_model_t *m, rt_island_mgr_t *mgr)
+{
+   unsigned keep_ff = 0;
+   for (unsigned i = 0; i < mgr->ff_commit_q.count; i++) {
+      rt_island_domain_t *dom = mgr->ff_commit_q.items[i];
+      if (island_edge_is_vhdl(dom->edge_flags)) {
+         dom->in_commit_q = false;
+         island_commit_vhdl_domain(m, dom);
+      }
+      else
+         mgr->ff_commit_q.items[keep_ff++] = dom;
+   }
+   mgr->ff_commit_q.count = keep_ff;
+
+   unsigned keep_sd = 0;
+   for (unsigned i = 0; i < mgr->super_commit_q.count; i++) {
+      rt_super_domain_t *sd = mgr->super_commit_q.items[i];
+      if (island_edge_is_vhdl(sd->edge_flags)) {
+         sd->in_commit_q = false;
+         for (uint32_t d = 0; d < sd->n_doms; d++)
+            island_commit_vhdl_domain(m, sd->doms[d]);
+      }
+      else
+         mgr->super_commit_q.items[keep_sd++] = sd;
+   }
+   mgr->super_commit_q.count = keep_sd;
+}
+
 bool rt_island_eval_ff(jit_t *jit, rt_model_t *m, rt_island_mgr_t *mgr,
                        tlab_t *tlab)
 {
@@ -3667,6 +3799,9 @@ bool rt_island_eval_ff(jit_t *jit, rt_model_t *m, rt_island_mgr_t *mgr,
       if (do_probe && ok)
          island_mt_gate_record(&mgr->mt_gate_ff, get_timestamp_ns() - t0);
 
+      if (ok)
+         island_commit_vhdl_ff_domains(m, mgr);
+
       return ok;
    }
 
@@ -3769,6 +3904,9 @@ bool rt_island_eval_ff(jit_t *jit, rt_model_t *m, rt_island_mgr_t *mgr,
          }
       }
    }
+   else
+      island_commit_vhdl_ff_domains(m, mgr);
+
    return ok;
 }
 
@@ -3908,8 +4046,13 @@ void rt_island_sync_to_signal(rt_model_t *m, rt_signal_t *sig)
       return;
 
    rt_island_sig_t *s = hash_get(mgr->sig_map, sig);
-   for (; s != NULL; s = s->next_owner)
+   for (; s != NULL; s = s->next_owner) {
+      if ((s->flags & RT_ISIG_VHDL_SCHED)
+          && (s->flags & (RT_ISIG_OUT | RT_ISIG_OBSERVED))
+          && !(s->flags & RT_ISIG_DIRECT_LINK))
+         continue;
       island_sync_sig_raw(s->isl, s, false);
+   }
 }
 
 void rt_island_sync_slice_to_signal(rt_model_t *m, rt_signal_t *sig,
@@ -3924,6 +4067,10 @@ void rt_island_sync_slice_to_signal(rt_model_t *m, rt_signal_t *sig,
 
    rt_island_sig_t *s = hash_get(mgr->sig_map, sig);
    for (; s != NULL; s = s->next_owner) {
+      if ((s->flags & RT_ISIG_VHDL_SCHED)
+          && (s->flags & (RT_ISIG_OUT | RT_ISIG_OBSERVED))
+          && !(s->flags & RT_ISIG_DIRECT_LINK))
+         continue;
       const uint32_t s_start = (uint32_t)s->sig_offset;
       const uint32_t s_end = s_start + s->width * s->nelems;
       const uint32_t r_start = MAX(offset, s_start);

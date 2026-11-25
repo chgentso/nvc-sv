@@ -293,27 +293,6 @@ static bool vi_type_is_int_or_user_enum(type_t t)
    return false;
 }
 
-static mir_type_t vi_scalar_int_mir_type(mir_unit_t *mu, uint8_t byte_size,
-                                         bool is_signed)
-{
-   switch (byte_size) {
-   case 1:
-      return is_signed
-         ? mir_int_type(mu, INT8_MIN, INT8_MAX)
-         : mir_int_type(mu, 0, UINT8_MAX);
-   case 2:
-      return is_signed
-         ? mir_int_type(mu, INT16_MIN, INT16_MAX)
-         : mir_int_type(mu, 0, UINT16_MAX);
-   case 4:
-      return is_signed
-         ? mir_int_type(mu, INT32_MIN, INT32_MAX)
-         : mir_int_type(mu, 0, UINT32_MAX);
-   default:
-      return vi_i64_type(mu);
-   }
-}
-
 static bool vi_type_is_signed_vec(type_t t)
 {
    const char *n = istr(type_ident(type_base_recur(t)));
@@ -395,12 +374,35 @@ static mir_value_t vi_to_bool(vi_lower_t *l, vi_val_t v)
    return mir_const(mu, mir_bool_type(mu), 0);
 }
 
+static mir_value_t vi_cast_vec2(mir_unit_t *mu, mir_type_t vt, mir_value_t v)
+{
+   int64_t cval;
+   if (mir_get_const(mu, v, &cval)) {
+      const int w = mir_get_size(mu, vt);
+      const bool sg = mir_get_signed(mu, vt);
+      if (w <= 64) {
+         const uint64_t mask = (w == 64)
+            ? ~UINT64_C(0) : ((UINT64_C(1) << w) - 1u);
+         return mir_const_vec(mu, vt, (uint64_t)cval & mask, 0);
+      }
+      const int nw = (w + 63) / 64;
+      uint64_t *words LOCAL = xcalloc_array(nw, sizeof(uint64_t));
+      words[0] = (uint64_t)cval;
+      if (cval < 0) {
+         for (int i = 1; i < nw; i++)
+            words[i] = ~UINT64_C(0);
+      }
+      return vi_const_vec2(mu, w, sg, words);
+   }
+   return mir_build_cast(mu, vt, v);
+}
+
 static vi_val_t vi_from_bool_bit(vi_lower_t *l, mir_value_t bval, bool is_bool,
                                  bool is_std)
 {
    mir_unit_t *mu = l->mu;
    if (l->two_state) {
-      mir_value_t v1 = mir_build_cast(mu, mir_vec2_type(mu, 1, false), bval);
+      mir_value_t v1 = vi_cast_vec2(mu, mir_vec2_type(mu, 1, false), bval);
       return (vi_val_t){
          .kind = VIVAL_BIT, .val = v1, .width = 1,
          .is_std = is_std, .is_bool = is_bool,
@@ -423,11 +425,12 @@ static mir_value_t vi_to_vec2_1(vi_lower_t *l, vi_val_t v)
    if (v.kind == VIVAL_VEC && v.width == 1)
       return v.val;
    if (v.kind == VIVAL_BIT) {
-      if (mir_get_class(mu, mir_get_type(mu, v.val)) == MIR_TYPE_VEC2)
+      mir_type_t vt = mir_get_type(mu, v.val);
+      if (!mir_is_null(vt) && mir_get_class(mu, vt) == MIR_TYPE_VEC2)
          return v.val;
-      return mir_build_cast(mu, mir_vec2_type(mu, 1, false), v.val);
+      return vi_cast_vec2(mu, mir_vec2_type(mu, 1, false), v.val);
    }
-   return mir_build_cast(mu, mir_vec2_type(mu, 1, false), v.val);
+   return vi_cast_vec2(mu, mir_vec2_type(mu, 1, false), v.val);
 }
 
 static mir_value_t vi_modeb_alloc_vec(vi_lower_t *l, uint32_t width)
@@ -491,13 +494,19 @@ static bool vi_lower_sig_load(vi_lower_t *l, const vhdl_isig_t *s,
 {
    mir_unit_t *mu = l->mu;
    if (s->elem_kind == VISIG_ENUM || s->elem_kind == VISIG_INT) {
-      mir_type_t mt = vi_scalar_int_mir_type(mu, s->byte_size, s->is_signed);
-      mir_value_t ptr = vi_state_ptr_at(l, isig->a_off);
-      if (s->byte_size > 1 || s->is_signed)
-         ptr = mir_build_cast(mu, mir_pointer_type(mu, mt), ptr);
-      mir_value_t raw = mir_build_load(mu, ptr);
-      mir_value_t iv = (s->byte_size == 8 && s->is_signed)
-         ? raw : mir_build_cast(mu, vi_i64_type(mu), raw);
+      mir_value_t iv;
+      if (s->byte_size == 1 && !s->is_signed) {
+         mir_value_t ptr = vi_state_ptr_at(l, isig->a_off);
+         mir_value_t raw = mir_build_load(mu, ptr);
+         iv = mir_build_cast(mu, vi_i64_type(mu), raw);
+      }
+      else {
+         mir_type_t vt = mir_vec2_type(mu, (int)s->byte_size * 8, s->is_signed);
+         mir_value_t raw = mir_build_island_load(mu, vt, l->state_ptr,
+                                                 vi_off(mu, isig->a_off),
+                                                 vi_off(mu, -1), vi_off(mu, 0));
+         iv = mir_build_cast(mu, vi_i64_type(mu), raw);
+      }
       *out = (vi_val_t){
          .kind      = VIVAL_INT,
          .val       = iv,
@@ -1013,7 +1022,7 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
          mir_type_t tv = mir_vec2_type(mu, (int)sz, sg);
          mir_value_t v;
          if (a.kind == VIVAL_INT)
-            v = mir_build_cast(mu, tv, vi_to_i64(mu, a.val));
+            v = vi_cast_vec2(mu, tv, vi_to_i64(mu, a.val));
          else if (a.kind == VIVAL_VEC)
             v = mir_build_cast(mu, tv, a.val);
          else
@@ -1088,7 +1097,7 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
             mir_value_t clamped = mir_build_cmp(mu, MIR_CMP_GEQ, abs_amt, vi_i64(mu, w));
             mir_value_t safe_amt = mir_build_select(mu, vi_i64_type(mu), clamped,
                                                     vi_i64(mu, 0), abs_amt);
-            mir_value_t shv = mir_build_cast(mu, tv, safe_amt);
+            mir_value_t shv = vi_cast_vec2(mu, tv, safe_amt);
             mir_vec_op_t op = is_left ? MIR_VEC_SLL
                : (sg ? MIR_VEC_SRA : MIR_VEC_SRL);
             mir_value_t shifted = mir_build_binary(mu, op, tv, a.val, shv);
@@ -1117,9 +1126,9 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
          k = mir_build_rem(mu, vi_i64_type(mu), k, vi_i64(mu, w));
          mir_value_t wk = mir_build_sub(mu, vi_i64_type(mu), vi_i64(mu, w), k);
          mir_value_t lo = mir_build_binary(mu, MIR_VEC_SLL, tv, a.val,
-                                           mir_build_cast(mu, tv, k));
+                                           vi_cast_vec2(mu, tv, k));
          mir_value_t hi = mir_build_binary(mu, MIR_VEC_SRL, tv, a.val,
-                                           mir_build_cast(mu, tv, wk));
+                                           vi_cast_vec2(mu, tv, wk));
          mir_value_t rot = mir_build_binary(mu, MIR_VEC_BIT_OR, tv, lo, hi);
          *out = a;
          out->val = mir_build_select(mu, tv,
@@ -1191,7 +1200,7 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
          va = (a.width == w && a.is_signed == sg) ? src : mir_build_cast(mu, tv, src);
       }
       else if (a.kind == VIVAL_INT)
-         va = mir_build_cast(mu, tv, vi_to_i64(mu, a.val));
+         va = vi_cast_vec2(mu, tv, vi_to_i64(mu, a.val));
       else if (a.kind == VIVAL_BIT)
          va = mir_build_cast(mu, tv, vi_to_vec2_1(l, a));
       else
@@ -1204,7 +1213,7 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
          vb = (b.width == w && b.is_signed == sg) ? src : mir_build_cast(mu, tv, src);
       }
       else if (b.kind == VIVAL_INT)
-         vb = mir_build_cast(mu, tv, vi_to_i64(mu, b.val));
+         vb = vi_cast_vec2(mu, tv, vi_to_i64(mu, b.val));
       else if (b.kind == VIVAL_BIT)
          vb = mir_build_cast(mu, tv, vi_to_vec2_1(l, b));
       else
@@ -2690,12 +2699,17 @@ static bool vi_assign_leaf_sig(vi_lower_t *l, const vhdl_isig_t *s,
    if (s->elem_kind == VISIG_ENUM || s->elem_kind == VISIG_INT) {
       if (val.kind != VIVAL_INT)
          return false;
-      mir_type_t mt = vi_scalar_int_mir_type(mu, s->byte_size, s->is_signed);
-      mir_value_t ptr = vi_state_ptr_at(l, dst_off);
-      if (s->byte_size > 1 || s->is_signed)
-         ptr = mir_build_cast(mu, mir_pointer_type(mu, mt), ptr);
-      mir_value_t v = mir_build_cast(mu, mt, vi_to_i64(mu, val.val));
-      mir_build_store(mu, ptr, v);
+      if (s->byte_size == 1 && !s->is_signed) {
+         mir_value_t ptr = vi_state_ptr_at(l, dst_off);
+         mir_value_t v = mir_build_cast(mu, vi_u8_type(mu),
+                                        vi_to_i64(mu, val.val));
+         mir_build_store(mu, ptr, v);
+         return true;
+      }
+      mir_type_t vt = mir_vec2_type(mu, (int)s->byte_size * 8, s->is_signed);
+      mir_value_t v = vi_cast_vec2(mu, vt, vi_to_i64(mu, val.val));
+      mir_build_island_store(mu, l->state_ptr, vi_off(mu, dst_off),
+                             vi_off(mu, -1), vi_off(mu, 0), v);
       return true;
    }
 

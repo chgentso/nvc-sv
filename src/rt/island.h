@@ -36,6 +36,7 @@ typedef enum {
    RT_ISIG_DIRECT_LINK    = (1u << 8),
    RT_ISIG_STD_LOGIC9     = (1u << 9),
    RT_ISIG_STD_LOGIC_ELEM = (1u << 10),
+   RT_ISIG_VHDL_SCHED     = (1u << 11),
 } rt_island_sig_flags_t;
 
 #define RT_IEDGE_CLK_POSEDGE  (1u << 0)

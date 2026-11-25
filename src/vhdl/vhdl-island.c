@@ -1692,7 +1692,7 @@ static void analyze_process(vhdl_island_ctx_t *ctx, tree_t proc, int stmt_idx,
 
    tree_t wait = tree_stmt(proc, nstmts - 1);
    if (tree_kind(wait) != T_WAIT || tree_has_delay(wait)
-       || tree_has_value(wait))
+       || tree_has_value(wait) || tree_triggers(wait) == 0)
       goto eject_scan_reads;
 
    // Try FF classification first: single T_IF statement + final T_WAIT
