@@ -3560,7 +3560,7 @@ static void create_processes(rt_model_t *m, rt_scope_t *s)
          {
             ident_t name = tree_ident(t);
             ident_t sym = ident_prefix(sym_prefix, name, '.');
-            if (jit_is_fused_proc(m->jit, sym))
+            if (jit_is_fused_proc(m->jit, ident_prefix(s->name, name, '.')))
                break;
 
             rt_proc_t *p = xcalloc(sizeof(rt_proc_t));

@@ -31,6 +31,8 @@ typedef vcode_reg_t (*vhdl_island_sig_lookup_fn_t)(lower_unit_t *lu,
                                                    uint8_t path_len);
 
 vhdl_island_ctx_t *vhdl_island_lower_prepare(mir_context_t *mc, tree_t block,
+                                             const tree_t *ancestors,
+                                             int n_ancestors,
                                              ident_t scope_prefix,
                                              cover_data_t *cover);
 

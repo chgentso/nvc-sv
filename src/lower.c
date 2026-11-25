@@ -14269,7 +14269,10 @@ static vcode_reg_t lower_get_island_leaf_sig(lower_unit_t *lu, tree_t decl,
    for (uint8_t i = 0; i < len; i++) {
       if (vtype_kind(vcode_reg_type(reg)) == VCODE_TYPE_UARRAY)
          reg = emit_unwrap(reg);
-      reg = emit_record_ref(reg, path[i]);
+      if (path[i] < 0)
+         reg = emit_array_ref(reg, emit_const(vtype_offset(), -(path[i] + 1)));
+      else
+         reg = emit_record_ref(reg, path[i]);
    }
    vtype_kind_t vk = vcode_reg_kind(reg);
    if (vk == VCODE_TYPE_POINTER) {
@@ -14349,10 +14352,31 @@ lower_unit_t *lower_instance(unit_registry_t *ur, lower_unit_t *parent,
    const bool use_mir = opt_get_int(OPT_LOWER_MIR);
    ident_t sym_prefix = tree_ident2(hier);
 
+   tree_t ancestors[VHDL_ISLAND_MAX_ANCESTORS];
+   int n_ancestors = 0;
+   if (!is_design_unit(unit) && tree_kind(unit) != T_COMPONENT) {
+      for (lower_unit_t *pu = lu->parent;
+           pu != NULL && n_ancestors < VHDL_ISLAND_MAX_ANCESTORS;
+           pu = pu->parent) {
+         tree_t pb = pu->container;
+         if (pb == NULL || tree_kind(pb) != T_BLOCK
+             || tree_decls(pb) == 0 || tree_kind(tree_decl(pb, 0)) != T_HIER)
+            break;
+         ancestors[n_ancestors++] = pb;
+         tree_t punit = tree_ref(tree_decl(pb, 0));
+         if (punit == NULL || is_design_unit(punit)
+             || tree_kind(punit) == T_COMPONENT)
+            break;
+      }
+   }
+
+   ident_t isl_prefix = lu->name;
+
    vhdl_island_ctx_t *ictx = NULL;
    if (ur != NULL && unit_registry_mir(ur) != NULL && !opt_get_int(OPT_DEBUG_STMTS))
       ictx = vhdl_island_lower_prepare(unit_registry_mir(ur), block,
-                                       sym_prefix, cover);
+                                       ancestors, n_ancestors,
+                                       isl_prefix, cover);
 
    const int nstmts = tree_stmts(block);
    for (int i = 0; i < nstmts; i++) {
@@ -14362,7 +14386,7 @@ lower_unit_t *lower_instance(unit_registry_t *ur, lower_unit_t *parent,
          {
             ident_t sym = ident_prefix(sym_prefix, tree_ident(s), '.');
             if (ictx != NULL && vhdl_island_stmt_fused(ictx, i)) {
-               unit_registry_mark_fused(ur, sym);
+               unit_registry_mark_fused(ur, ident_prefix(lu->name, tree_ident(s), '.'));
                break;
             }
             if (use_mir)

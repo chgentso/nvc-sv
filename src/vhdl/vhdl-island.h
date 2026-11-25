@@ -27,9 +27,11 @@
 #include <stdbool.h>
 
 #define VHDL_ISIG_MAX_DEPTH         8
+#define VHDL_ISLAND_MAX_ANCESTORS   16
 #define VHDL_ISLAND_MAX_ELEMS       65536u
 #define VHDL_ISLAND_MAX_WIDTH       4096u
 #define VHDL_ISLAND_MAX_TOTAL_BITS  (1u << 20)
+#define VHDL_ISLAND_MAX_ARRAY2D_BITS 1024u
 #define VHDL_ISLAND_MAX_LOOP_ITERS  4096
 #define VHDL_ISLAND_MAX_CALL_DEPTH  6
 
@@ -107,6 +109,8 @@ typedef struct {
    uint32_t          n_reads;
    uint32_t         *writes;
    uint32_t          n_writes;
+   vhdl_write_range_t *read_ranges;
+   uint32_t          n_read_ranges;
    vhdl_write_range_t *write_ranges;
    uint32_t          n_write_ranges;
    int               island_idx;
@@ -151,6 +155,8 @@ static inline const vhdl_isl_sig_t *vhdl_island_find_sig(const vhdl_island_t *is
 
 typedef struct _vhdl_island_ctx {
    tree_t         block;
+   tree_t         ancestors[VHDL_ISLAND_MAX_ANCESTORS];
+   int            n_ancestors;
    ident_t        scope_prefix;
    vhdl_isig_t   *sigs;
    uint32_t       n_sigs;
@@ -164,17 +170,25 @@ typedef struct _vhdl_island_ctx {
    int            n_block_stmts;
 } vhdl_island_ctx_t;
 
-vhdl_island_ctx_t *vhdl_island_analyze(tree_t block, ident_t scope_prefix);
+vhdl_island_ctx_t *vhdl_island_analyze(tree_t block, const tree_t *ancestors,
+                                       int n_ancestors, ident_t scope_prefix);
 void vhdl_island_ctx_free(vhdl_island_ctx_t *ctx);
 
 bool vhdl_island_stmt_fused(const vhdl_island_ctx_t *ctx, int stmt_idx);
 int vhdl_island_lookup_leaf(const vhdl_island_ctx_t *ctx, tree_t decl,
                             const int *path, uint8_t path_len);
-bool vhdl_island_extract_path(tree_t expr, tree_t *decl_out,
+bool vhdl_island_extract_path(tree_t block, tree_t expr, tree_t *decl_out,
                               int *path_out, uint8_t *len_out);
+bool vhdl_island_extract_path_ctx(const vhdl_island_ctx_t *ctx, tree_t expr,
+                                  tree_t *decl_out, int *path_out,
+                                  uint8_t *len_out);
 bool vhdl_island_collect_expr_leaves(const vhdl_island_ctx_t *ctx, tree_t expr,
                                      uint32_t **out_ids, uint32_t *out_n);
 bool vhdl_island_eval_const_int(tree_t block, tree_t expr, int64_t *out);
+bool vhdl_island_eval_const_int_ctx(const vhdl_island_ctx_t *ctx, tree_t expr,
+                                    int64_t *out);
+bool vhdl_island_const_slice_width(const vhdl_island_ctx_t *ctx, tree_t rg,
+                                   uint32_t *width_out);
 bool vhdl_island_is_sig_root(tree_t expr);
 
 #endif   // _VHDL_ISLAND_H
