@@ -6180,6 +6180,32 @@ static void procsig_report(rt_signal_t *s, uint32_t first, uint32_t count,
    (*q->fn)(&out, q->user);
 }
 
+static void conn_report_procsig_ranges(const conn_range_t *ranges,
+                                       unsigned nranges, bool write,
+                                       vpi_nvc_procsig_fn_t fn, void *user_data)
+{
+   LOCAL_TEXT_BUF path = tb_new();
+   for (unsigned i = 0; i < nranges; i++) {
+      const conn_range_t *r = &(ranges[i]);
+      if (r->net == NULL || r->net->block == NULL)
+         continue;
+      tb_rewind(path);
+      conn_block_path(path, r->net->block);
+      tb_append(path, ' ');
+      conn_space_path(path, r->net->name,
+                      r->net->block->lang == CONN_VERILOG);
+
+      vpi_nvc_procsig_t out = {
+         .path     = tb_get(path),
+         .first    = r->lo,
+         .count    = r->hi - r->lo + 1,
+         .width    = r->net->width,
+         .is_write = write ? 1 : 0,
+      };
+      (*fn)(&out, user_data);
+   }
+}
+
 DLLEXPORT
 PLI_INT32 vpi_nvc_process_signals(const char *scope_path, const char *name,
                                   vpi_nvc_procsig_fn_t fn, void *user_data)
@@ -6191,12 +6217,48 @@ PLI_INT32 vpi_nvc_process_signals(const char *scope_path, const char *name,
       return -1;
 
    rt_proc_t *p = model_lookup_proc(c->model, scope_path, name);
-   if (p == NULL)
+   if (p != NULL) {
+      procsig_query_t q = { fn, user_data };
+      model_process_signals(c->model, p, procsig_report, &q);
+      return 0;
+   }
+
+   // Island-fused processes have no rt_proc_t; fall back to static connectivity
+   conn_design_t *cd = conn_design(c);
+   if (cd == NULL)
       return -1;
 
-   procsig_query_t q = { fn, user_data };
-   model_process_signals(c->model, p, procsig_report, &q);
-   return 0;
+   LOCAL_TEXT_BUF dotted = tb_new();
+   for (const char *s = scope_path; *s; s++)
+      tb_append(dotted, *s == ' ' ? '.' : *s);
+
+   conn_block_t *b = conn_find_block(cd, tb_get(dotted));
+   if (b != NULL && b->component && b->ninsts == 1)
+      b = b->insts[0]->child;
+   if (b == NULL)
+      return -1;
+
+   LOCAL_TEXT_BUF pname = tb_new();
+   const bool verilog = b->lang == CONN_VERILOG;
+   for (unsigned i = 0; i < b->nprocs; i++) {
+      const conn_proc_t *cp = b->procs[i];
+      if (cp->name == NULL)
+         continue;
+      tb_rewind(pname);
+      conn_space_path(pname, cp->name, verilog);
+      const bool match = verilog
+         ? (strcmp(tb_get(pname), name) == 0)
+         : (strcasecmp(tb_get(pname), name) == 0);
+      if (match) {
+         conn_report_procsig_ranges(cp->drives, cp->ndrives, true,
+                                    fn, user_data);
+         conn_report_procsig_ranges(cp->reads, cp->nreads, false,
+                                    fn, user_data);
+         return 0;
+      }
+   }
+
+   return -1;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
