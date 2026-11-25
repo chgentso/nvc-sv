@@ -14350,7 +14350,7 @@ lower_unit_t *lower_instance(unit_registry_t *ur, lower_unit_t *parent,
    ident_t sym_prefix = tree_ident2(hier);
 
    vhdl_island_ctx_t *ictx = NULL;
-   if (ur != NULL && unit_registry_mir(ur) != NULL)
+   if (ur != NULL && unit_registry_mir(ur) != NULL && !opt_get_int(OPT_DEBUG_STMTS))
       ictx = vhdl_island_lower_prepare(unit_registry_mir(ur), block,
                                        sym_prefix, cover);
 

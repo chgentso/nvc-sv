@@ -5956,6 +5956,7 @@ static void conn_load_report(const conn_end_t *e, void *arg)
 
    LOCAL_TEXT_BUF scope = tb_new();
    LOCAL_TEXT_BUF other = tb_new();
+   LOCAL_TEXT_BUF pname = tb_new();
 
 
    vpi_nvc_conn_t out = {
@@ -5991,7 +5992,11 @@ static void conn_load_report(const conn_end_t *e, void *arg)
             out.proc_kind = model_proc_kind(rp);
          }
          else {
-            name = e->proc->name;
+            if (e->proc->name != NULL) {
+               conn_space_path(pname, e->proc->name,
+                               e->block->lang == CONN_VERILOG);
+               name = tb_get(pname);
+            }
             out.proc_kind = conn_proc_kind_str(e->proc->kind);
             if (!l->is_load && e->proc->kind != CONN_PROC_ASSIGN
                 && e->proc->kind != CONN_PROC_GATE)

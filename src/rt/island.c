@@ -4197,9 +4197,10 @@ bool rt_island_put_bytes(rt_model_t *m, rt_signal_t *sig,
       if (r_start >= r_end)
          continue;
 
+      const size_t step = (s->flags & RT_ISIG_STD_LOGIC9) ? s->elem_size : 1u;
       island_write_bits_slice(s->isl, s, r_start - s_start, r_end - r_start,
-                              bytes + (r_start - offset), NULL, NULL,
-                              false, 0, is_force);
+                              bytes != NULL ? bytes + (size_t)(r_start - offset) * step : NULL,
+                              NULL, NULL, false, 0, is_force);
       island_sync_out_slice(m, s->isl, s, r_start - s_start, r_end - r_start);
 
       if (is_force || !(s->flags & RT_ISIG_COMB_WRITTEN)) {

@@ -38788,7 +38788,8 @@ void vlog_lower_instance(mir_context_t *mc, vlog_node_t body, ident_t parent,
    mir_value_t self = mir_build_context_upref(mu, 0);
 
    vlog_island_lower_ctx_t *island_ctx = NULL;
-   if (opt_get_int(OPT_RTL_ISLANDS) != RTL_ISLANDS_OFF)
+   if (opt_get_int(OPT_RTL_ISLANDS) != RTL_ISLANDS_OFF
+       && !opt_get_int(OPT_DEBUG_STMTS))
       island_ctx = vlog_island_lower_prepare(body, tree_ports(trans) > 0,
                                              mu, cover_counts);
 

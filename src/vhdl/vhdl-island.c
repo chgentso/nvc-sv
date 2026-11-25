@@ -1641,13 +1641,13 @@ static bool check_process_decls(check_ctx_t *c, tree_t proc)
             return false;
          APUSH(c->var_decls, d);
          {
-            bool init = false;
-            if (tree_has_value(d)) {
-               if (!check_expr(c, tree_value(d), false))
-                  return false;
-               init = true;
-            }
-            APUSH(c->var_assigned, init);
+            // In VHDL, process variables have static storage duration: their
+            // initializer runs once at t=0, not on every process activation.
+            // A variable is only safe as a stack-local island temporary if it
+            // is definitely assigned before any read on every activation path.
+            if (tree_has_value(d) && !check_expr(c, tree_value(d), false))
+               return false;
+            APUSH(c->var_assigned, false);
          }
          break;
       case T_CONST_DECL:
@@ -1730,7 +1730,7 @@ static void analyze_process(vhdl_island_ctx_t *ctx, tree_t proc, int stmt_idx,
          if (ok) {
             // Reset per-branch var assignment before checking clk_br
             for (unsigned i = 0; i < c.var_decls.count; i++)
-               c.var_assigned.items[i] = tree_has_value(c.var_decls.items[i]);
+               c.var_assigned.items[i] = false;
             ok = check_stmt_list(&c, clk_br, 0, tree_stmts(clk_br), false);
          }
          // FF must not write its own clk or rst signal

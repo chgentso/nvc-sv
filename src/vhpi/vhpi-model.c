@@ -2011,6 +2011,13 @@ static vhpiIntT vhpi_get_size(c_vhpiObject *obj)
    return vhpiUndefined;
 }
 
+static void vhpi_island_forced_cb(uint32_t first, uint32_t count, void *arg)
+{
+   (void)first;
+   (void)count;
+   *(bool *)arg = true;
+}
+
 static bool vhpi_is_signal(c_vhpiObject *obj)
 {
    if (is_sigDecl(obj) || is_portDecl(obj))
@@ -3273,10 +3280,18 @@ vhpiIntT vhpi_get(vhpiIntPropertyT property, vhpiHandleT handle)
          vhpi_collect_signals(obj, &slices);
 
          bool forced = false;
-         for (int i = 0; i < slices.count && !forced; i++)
+         rt_island_mgr_t *imgr = rt_island_model_mgr(vhpi_context()->model);
+         for (int i = 0; i < slices.count && !forced; i++) {
             forced = signal_is_forced(slices.items[i].signal,
                                       slices.items[i].offset,
                                       slices.items[i].count);
+            if (!forced && imgr != NULL
+                && (slices.items[i].signal->shared.flags & SIG_F_ISLAND))
+               rt_island_report_forces(imgr, slices.items[i].signal,
+                                       slices.items[i].offset,
+                                       slices.items[i].count,
+                                       vhpi_island_forced_cb, &forced);
+         }
 
          ACLEAR(slices);
          return forced ? vhpiTrue : vhpiFalse;
@@ -4193,10 +4208,15 @@ int vhpi_put_value(vhpiHandleT handle,
 
       switch (mode) {
       case vhpiForcePropagate:
+         if ((ptr.signal->shared.flags & SIG_F_ISLAND) && td->elem_bytes <= 8) {
+            rt_island_put_bytes(model, ptr.signal, src, ptr.offset,
+                                num_elems, true);
+            return 0;
+         }
          force_signal(model, ptr.signal, src, ptr.offset, num_elems);
          return 0;
       case vhpiDepositPropagate:
-         if ((ptr.signal->shared.flags & SIG_F_ISLAND) && td->elem_bytes == 1) {
+         if ((ptr.signal->shared.flags & SIG_F_ISLAND) && td->elem_bytes <= 8) {
             rt_island_put_bytes(model, ptr.signal, src, ptr.offset,
                                 num_elems, false);
             return 0;
@@ -4204,6 +4224,11 @@ int vhpi_put_value(vhpiHandleT handle,
          sched_deposit(model, ptr.signal, src, ptr.offset, num_elems, 0, false);
          return 0;
       case vhpiRelease:
+         if (ptr.signal->shared.flags & SIG_F_ISLAND) {
+            rt_island_vpi_release_slice(model, ptr.signal, ptr.offset,
+                                        num_elems);
+            return 0;
+         }
          release_signal(model, ptr.signal, ptr.offset, num_elems);
          return 0;
       default:

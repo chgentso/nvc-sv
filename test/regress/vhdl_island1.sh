@@ -359,4 +359,43 @@ for ts in off islands all; do
   diff -u oref.txt orun.txt
 done
 
+# Test 8: VHDL persistent process variable (initializer runs only at t=0) must not be reset each clock
+cat > persist_var.vhd <<'EOF'
+library ieee;
+use ieee.std_logic_1164.all;
+entity tb_persist_var is end entity;
+architecture rtl of tb_persist_var is
+  type st_t is (idle, run, done);
+  signal clk : std_logic := '0';
+  signal st  : st_t := idle;
+begin
+  p_st: process (clk) is
+    variable ticks : integer := 0;
+  begin
+    if rising_edge(clk) then
+      ticks := ticks + 1;
+      if ticks = 3 then
+        st <= run;
+      elsif ticks = 5 then
+        st <= done;
+      end if;
+    end if;
+  end process;
+  process begin
+    for i in 1 to 6 loop
+      wait for 5 ns; clk <= '1'; wait for 5 ns; clk <= '0';
+      report "PVAR i=" & integer'image(i) & " st=" & st_t'image(st);
+    end loop;
+    wait;
+  end process;
+end architecture;
+EOF
+nvc -a persist_var.vhd
+nvc --rtl-islands=off -e tb_persist_var && nvc --rtl-islands=off -r tb_persist_var > pv_off.txt 2>&1
+nvc --rtl-islands=hier -e tb_persist_var && nvc --rtl-islands=hier -r tb_persist_var > pv_hier.txt 2>&1
+grep -E '^\*\* Note:.*PVAR' pv_off.txt > pv_ref.txt
+grep -E '^\*\* Note:.*PVAR' pv_hier.txt > pv_run.txt
+grep -qi "PVAR i=5 st=done" pv_ref.txt
+diff -u pv_ref.txt pv_run.txt
+
 echo "PASS vhdl_island1"
