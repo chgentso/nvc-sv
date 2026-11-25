@@ -4216,11 +4216,8 @@ int vhpi_put_value(vhpiHandleT handle,
          force_signal(model, ptr.signal, src, ptr.offset, num_elems);
          return 0;
       case vhpiDepositPropagate:
-         if ((ptr.signal->shared.flags & SIG_F_ISLAND) && td->elem_bytes <= 8) {
-            rt_island_put_bytes(model, ptr.signal, src, ptr.offset,
-                                num_elems, false);
-            return 0;
-         }
+         if (ptr.signal->shared.flags & SIG_F_ISLAND)
+            rt_island_on_ext_deposit(model, ptr.signal);
          sched_deposit(model, ptr.signal, src, ptr.offset, num_elems, 0, false);
          return 0;
       case vhpiRelease:

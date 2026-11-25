@@ -4133,6 +4133,55 @@ static void island_break_direct_link(rt_model_t *m, rt_island_sig_t *src_s)
    }
 }
 
+static void island_ext_deposit_watch_cb(uint64_t now, rt_signal_t *signal,
+                                        rt_watch_t *watch, void *user)
+{
+   rt_island_sig_t *s = user;
+   rt_island_t *isl = s->isl;
+   island_sync_in_sig(isl, s);
+   if (unlikely(isl->has_forces)) {
+      const rt_island_force_t *f = island_find_force(isl, s->sig_idx);
+      if (f != NULL)
+         island_apply_force_entry(isl->state, s, f);
+   }
+   if (isl->next_state != NULL)
+      island_copy_sig_buf(isl->next_state, isl->state, s);
+   if ((s->flags & RT_ISIG_COMB_READ)
+       && isl->eval_handle != JIT_HANDLE_INVALID)
+      island_mark_dirty(isl);
+}
+
+void rt_island_on_ext_deposit(rt_model_t *m, rt_signal_t *sig)
+{
+   rt_island_mgr_t *mgr = rt_island_model_mgr(m);
+   if (mgr == NULL || mgr->sig_map == NULL || sig == NULL)
+      return;
+
+   rt_island_sig_t *s = hash_get(mgr->sig_map, sig);
+   for (; s != NULL; s = s->next_owner) {
+      if (s->flags & RT_ISIG_DIRECT_LINK)
+         island_break_direct_link(m, s);
+      if (!(s->flags & RT_ISIG_OBSERVED)) {
+         if (!(s->flags & RT_ISIG_OUT))
+            island_sync_sig_raw(s->isl, s, true);
+         s->flags |= RT_ISIG_OBSERVED;
+         if ((s->flags & RT_ISIG_COMB_WRITTEN) && !(s->flags & RT_ISIG_OUT))
+            island_add_obs_sig(s->isl, s->sig_idx);
+      }
+      s->flags |= RT_ISIG_VHDL_SCHED;
+      if (s->ext_write_watch == NULL && s->sig != NULL) {
+         s->ext_write_watch = watch_new(m, island_ext_deposit_watch_cb, s,
+                                        WATCH_EVENT, 1);
+         if (s->sig->shared.flags & SIG_F_PACKED)
+            model_set_event_cb(m, s->sig, 0, 1, s->ext_write_watch);
+         else
+            model_set_event_cb(m, s->sig, s->sig_offset,
+                               (int)(s->width * s->nelems),
+                               s->ext_write_watch);
+      }
+   }
+}
+
 void rt_island_on_observer_attached(rt_model_t *m, rt_signal_t *sig)
 {
    rt_island_mgr_t *mgr = rt_island_model_mgr(m);

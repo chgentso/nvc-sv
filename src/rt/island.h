@@ -75,6 +75,7 @@ typedef struct _rt_island_sig {
    uint32_t                flags;
    uint8_t                 elem_size;
    rt_watch_t             *watch;
+   rt_watch_t             *ext_write_watch;
 } rt_island_sig_t;
 
 typedef struct _rt_island_domain {
@@ -183,6 +184,7 @@ void rt_island_sync_to_signal(rt_model_t *m, rt_signal_t *sig);
 void rt_island_sync_slice_to_signal(rt_model_t *m, rt_signal_t *sig,
                                     uint32_t offset, uint32_t count);
 void rt_island_on_observer_attached(rt_model_t *m, rt_signal_t *sig);
+void rt_island_on_ext_deposit(rt_model_t *m, rt_signal_t *sig);
 bool rt_island_vpi_put(rt_model_t *m, rt_signal_t *sig,
                        const uint64_t *a_val, const uint64_t *b_val,
                        uint32_t width, bool is_force);
