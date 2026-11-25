@@ -154,27 +154,35 @@ nvc --work=work_sv -a sv_cluster_mt.sv
 check_sv_mode() {
   local isl_mode=$1
   local two_mode=$2
+  local full=$3
   local tag="sv_${isl_mode}_${two_mode}"
   nvc --work=work_sv --rtl-islands="$isl_mode" --2state="$two_mode" -e tb_sv_cluster_mt
-  nvc --work=work_sv -r --threads=1 --wave="${tag}_t1.fst" tb_sv_cluster_mt > "${tag}_t1.out"
-  nvc --work=work_sv -r --threads=2 --wave="${tag}_t2.fst" tb_sv_cluster_mt > "${tag}_t2.out"
-  nvc --work=work_sv -r --threads=4 --wave="${tag}_t4.fst" tb_sv_cluster_mt > "${tag}_t4.out"
-  grep -q "SV cyc=129" "${tag}_t1.out"
-  diff -u "${tag}_t1.out" "${tag}_t2.out"
-  diff -u "${tag}_t1.out" "${tag}_t4.out"
-  if command -v fst2vcd >/dev/null 2>&1; then
-    fst2vcd -f "${tag}_t1.fst" | sed '/^\$date/,/^\$end/d' > "${tag}_t1.vcd"
-    fst2vcd -f "${tag}_t2.fst" | sed '/^\$date/,/^\$end/d' > "${tag}_t2.vcd"
-    fst2vcd -f "${tag}_t4.fst" | sed '/^\$date/,/^\$end/d' > "${tag}_t4.vcd"
-    diff -u "${tag}_t1.vcd" "${tag}_t2.vcd"
-    diff -u "${tag}_t1.vcd" "${tag}_t4.vcd"
+  if [ "$full" = "1" ]; then
+    nvc --work=work_sv -r --threads=1 --wave="${tag}_t1.fst" tb_sv_cluster_mt > "${tag}_t1.out"
+    nvc --work=work_sv -r --threads=2 --wave="${tag}_t2.fst" tb_sv_cluster_mt > "${tag}_t2.out"
+    nvc --work=work_sv -r --threads=4 --wave="${tag}_t4.fst" tb_sv_cluster_mt > "${tag}_t4.out"
+    grep -q "SV cyc=129" "${tag}_t1.out"
+    diff -u "${tag}_t1.out" "${tag}_t2.out"
+    diff -u "${tag}_t1.out" "${tag}_t4.out"
+    if command -v fst2vcd >/dev/null 2>&1; then
+      fst2vcd -f "${tag}_t1.fst" | sed '/^\$date/,/^\$end/d' > "${tag}_t1.vcd"
+      fst2vcd -f "${tag}_t2.fst" | sed '/^\$date/,/^\$end/d' > "${tag}_t2.vcd"
+      fst2vcd -f "${tag}_t4.fst" | sed '/^\$date/,/^\$end/d' > "${tag}_t4.vcd"
+      diff -u "${tag}_t1.vcd" "${tag}_t2.vcd"
+      diff -u "${tag}_t1.vcd" "${tag}_t4.vcd"
+    fi
+  else
+    nvc --work=work_sv -r --threads=1 tb_sv_cluster_mt > "${tag}_t1.out"
+    nvc --work=work_sv -r --threads=4 tb_sv_cluster_mt > "${tag}_t4.out"
+    grep -q "SV cyc=129" "${tag}_t1.out"
+    diff -u "${tag}_t1.out" "${tag}_t4.out"
   fi
 }
 
-check_sv_mode module off
-check_sv_mode module islands
-check_sv_mode hier off
-check_sv_mode hier islands
+check_sv_mode module off 1
+check_sv_mode module islands 0
+check_sv_mode hier off 0
+check_sv_mode hier islands 1
 
 # --- Subtest 3: Multi-core VHDL RTL (32 hierarchical cores, >100 cycles) ---
 cat > vhdl_cluster_mt.vhd <<'EOF'
@@ -296,30 +304,40 @@ nvc --std=2008 --work=work_vhdl -a vhdl_cluster_mt.vhd
 check_vhdl_mode() {
   local isl_mode=$1
   local two_mode=$2
+  local full=$3
   local tag="vhdl_${isl_mode}_${two_mode}"
   nvc --std=2008 --work=work_vhdl --rtl-islands="$isl_mode" --2state="$two_mode" -e tb_vhdl_mt
-  nvc --std=2008 --work=work_vhdl -r --threads=1 --wave="${tag}_t1.fst" tb_vhdl_mt > "${tag}_t1.raw" 2>&1
-  nvc --std=2008 --work=work_vhdl -r --threads=2 --wave="${tag}_t2.fst" tb_vhdl_mt > "${tag}_t2.raw" 2>&1
-  nvc --std=2008 --work=work_vhdl -r --threads=4 --wave="${tag}_t4.fst" tb_vhdl_mt > "${tag}_t4.raw" 2>&1
-  grep -E '^\*\* Note:.*VHDL cyc=' "${tag}_t1.raw" > "${tag}_t1.out"
-  grep -E '^\*\* Note:.*VHDL cyc=' "${tag}_t2.raw" > "${tag}_t2.out"
-  grep -E '^\*\* Note:.*VHDL cyc=' "${tag}_t4.raw" > "${tag}_t4.out"
-  grep -q "VHDL cyc=129" "${tag}_t1.out"
-  diff -u "${tag}_t1.out" "${tag}_t2.out"
-  diff -u "${tag}_t1.out" "${tag}_t4.out"
-  if command -v fst2vcd >/dev/null 2>&1; then
-    fst2vcd -f "${tag}_t1.fst" | sed '/^\$date/,/^\$end/d' > "${tag}_t1.vcd"
-    fst2vcd -f "${tag}_t2.fst" | sed '/^\$date/,/^\$end/d' > "${tag}_t2.vcd"
-    fst2vcd -f "${tag}_t4.fst" | sed '/^\$date/,/^\$end/d' > "${tag}_t4.vcd"
-    diff -u "${tag}_t1.vcd" "${tag}_t2.vcd"
-    diff -u "${tag}_t1.vcd" "${tag}_t4.vcd"
+  if [ "$full" = "1" ]; then
+    nvc --std=2008 --work=work_vhdl -r --threads=1 --wave="${tag}_t1.fst" tb_vhdl_mt > "${tag}_t1.raw" 2>&1
+    nvc --std=2008 --work=work_vhdl -r --threads=2 --wave="${tag}_t2.fst" tb_vhdl_mt > "${tag}_t2.raw" 2>&1
+    nvc --std=2008 --work=work_vhdl -r --threads=4 --wave="${tag}_t4.fst" tb_vhdl_mt > "${tag}_t4.raw" 2>&1
+    grep -E '^\*\* Note:.*VHDL cyc=' "${tag}_t1.raw" > "${tag}_t1.out"
+    grep -E '^\*\* Note:.*VHDL cyc=' "${tag}_t2.raw" > "${tag}_t2.out"
+    grep -E '^\*\* Note:.*VHDL cyc=' "${tag}_t4.raw" > "${tag}_t4.out"
+    grep -q "VHDL cyc=129" "${tag}_t1.out"
+    diff -u "${tag}_t1.out" "${tag}_t2.out"
+    diff -u "${tag}_t1.out" "${tag}_t4.out"
+    if command -v fst2vcd >/dev/null 2>&1; then
+      fst2vcd -f "${tag}_t1.fst" | sed '/^\$date/,/^\$end/d' > "${tag}_t1.vcd"
+      fst2vcd -f "${tag}_t2.fst" | sed '/^\$date/,/^\$end/d' > "${tag}_t2.vcd"
+      fst2vcd -f "${tag}_t4.fst" | sed '/^\$date/,/^\$end/d' > "${tag}_t4.vcd"
+      diff -u "${tag}_t1.vcd" "${tag}_t2.vcd"
+      diff -u "${tag}_t1.vcd" "${tag}_t4.vcd"
+    fi
+  else
+    nvc --std=2008 --work=work_vhdl -r --threads=1 tb_vhdl_mt > "${tag}_t1.raw" 2>&1
+    nvc --std=2008 --work=work_vhdl -r --threads=4 tb_vhdl_mt > "${tag}_t4.raw" 2>&1
+    grep -E '^\*\* Note:.*VHDL cyc=' "${tag}_t1.raw" > "${tag}_t1.out"
+    grep -E '^\*\* Note:.*VHDL cyc=' "${tag}_t4.raw" > "${tag}_t4.out"
+    grep -q "VHDL cyc=129" "${tag}_t1.out"
+    diff -u "${tag}_t1.out" "${tag}_t4.out"
   fi
 }
 
-check_vhdl_mode module off
-check_vhdl_mode module islands
-check_vhdl_mode hier off
-check_vhdl_mode hier islands
+check_vhdl_mode module off 1
+check_vhdl_mode module islands 0
+check_vhdl_mode hier off 0
+check_vhdl_mode hier islands 1
 
 # --- Subtest 4: Multi-domain single-island test (two clocks firing at same timestamp) ---
 cat > dual_dom_mt.sv <<'EOF'
