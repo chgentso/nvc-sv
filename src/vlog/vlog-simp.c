@@ -116,14 +116,9 @@ static bool is_non_event_root(vlog_node_t root)
    if (rtype == NULL)
       return false;
 
-   if (vlog_kind(rtype) == V_CLASS_DECL)
-      return true;
-
    if (vlog_kind(rtype) == V_DATA_TYPE) {
       switch (vlog_subkind(rtype)) {
       case DT_ASSOC:
-      case DT_DYNARRAY:
-      case DT_QUEUE:
       case DT_EVENT:
       case DT_MAILBOX:
       case DT_SEMAPHORE:
