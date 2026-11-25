@@ -811,8 +811,20 @@ bool vlog_typeparam_pending(vlog_node_t v)
       case V_MEMBER_REF:
          if (vlog_has_ref(p)) {
             vlog_node_t d = vlog_ref(p);
-            if (vlog_has_type(d) && vlog_uses_typeparam(vlog_type(d)))
-               return true;
+            switch (vlog_kind(d)) {
+            case V_VAR_DECL:
+            case V_NET_DECL:
+            case V_PORT_DECL:
+            case V_PARAM_DECL:
+            case V_LOCALPARAM:
+            case V_LOCAL_DECL:
+            case V_TF_PORT_DECL:
+               if (vlog_has_type(d) && vlog_uses_typeparam(vlog_type(d)))
+                  return true;
+               break;
+            default:
+               break;
+            }
          }
          continue;
       case V_REF:

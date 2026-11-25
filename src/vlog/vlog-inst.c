@@ -370,8 +370,22 @@ static bool copy_instance_pred(vlog_node_t v, void *ctx)
          return false;
       if (vlog_typeparam_pending(v))
          return true;
-      return vlog_has_ref(v) && vlog_has_type(vlog_ref(v))
-         && type_contains_typeparam(vlog_type(vlog_ref(v)));
+      if (vlog_has_ref(v)) {
+         vlog_node_t d = vlog_ref(v);
+         switch (vlog_kind(d)) {
+         case V_VAR_DECL:
+         case V_NET_DECL:
+         case V_PORT_DECL:
+         case V_PARAM_DECL:
+         case V_LOCALPARAM:
+         case V_LOCAL_DECL:
+         case V_TF_PORT_DECL:
+            return vlog_has_type(d) && type_contains_typeparam(vlog_type(d));
+         default:
+            break;
+         }
+      }
+      return false;
    case V_PATTERN_EXPR:
       return copy_scope == NULL
          && (!vlog_has_type(v) || vlog_uses_typeparam(vlog_type(v)));
