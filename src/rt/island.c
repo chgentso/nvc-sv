@@ -2604,29 +2604,64 @@ static bool island_call_comb(jit_t *jit, rt_model_t *m, rt_island_t *isl,
                              tlab_t *tlab);
 
 bool rt_island_eval_sv_reset(jit_t *jit, rt_model_t *m, rt_island_mgr_t *mgr,
-                             tlab_t *tlab)
+                             tlab_t *tlab, bool first_pass, bool *progress_out)
 {
    if (mgr == NULL)
       return true;
 
-   // Evaluate combinational SV islands once at the end of model_reset() so
-   // continuous-assign outputs driven from decl-initialised registers are
-   // settled before cbStartOfSimulation / 0ms+0 VPI reads, matching non-island
-   // continuous assignments.
+   // Evaluate combinational SV islands at the end of model_reset() so
+   // continuous-assign chains driven from parameters or decl-initialised
+   // registers settle before cbStartOfSimulation / 0ms+0, matching
+   // non-island continuous assignments.
+   bool progress = false;
    for (unsigned i = 0; i < mgr->islands.count; i++) {
       rt_island_t *isl = mgr->islands.items[i];
-      if (!isl->dirty || !island_eligible_sv_reset(isl))
+      if (!island_eligible_sv_reset(isl))
          continue;
 
+      bool need_eval = isl->dirty;
       for (uint32_t j = 0; j < isl->n_in_sigs; j++) {
          rt_island_sig_t *s = &(isl->sigs[isl->in_sigs[j]]);
-         if (s->flags & RT_ISIG_DIRECT_LINK)
-            island_copy_direct_sig(s->direct_src, s);
-         else
-            island_sync_in_sig(isl, s);
+         if (s->flags & RT_ISIG_DIRECT_LINK) {
+            if (island_copy_direct_sig(s->direct_src, s))
+               need_eval = true;
+         }
+         else if (s->sig != NULL) {
+            if (first_pass || need_eval) {
+               island_sync_in_sig(isl, s);
+            }
+            else {
+               const uint32_t nbytes = s->nwords * sizeof(uint64_t);
+               const bool two_state = !!(s->flags & RT_ISIG_TWO_STATE);
+               uint64_t old_a[8], old_b[8];
+               uint64_t *ha = NULL, *hb = NULL;
+               uint64_t *pa = old_a, *pb = old_b;
+               if (s->nwords > ARRAY_LEN(old_a)) {
+                  ha = xmalloc(nbytes);
+                  pa = ha;
+                  if (!two_state) {
+                     hb = xmalloc(nbytes);
+                     pb = hb;
+                  }
+               }
+               memcpy(pa, isl->state + s->a_off, nbytes);
+               if (!two_state)
+                  memcpy(pb, isl->state + s->b_off, nbytes);
+               island_sync_in_sig(isl, s);
+               if (memcmp(pa, isl->state + s->a_off, nbytes) != 0
+                   || (!two_state
+                       && memcmp(pb, isl->state + s->b_off, nbytes) != 0))
+                  need_eval = true;
+               free(ha);
+               free(hb);
+            }
+         }
       }
       island_clear_in_dirty(isl);
       isl->has_dirty_inputs = false;
+
+      if (!need_eval)
+         continue;
 
       if (!island_call_comb(jit, m, isl, tlab))
          return false;
@@ -2659,7 +2694,18 @@ bool rt_island_eval_sv_reset(jit_t *jit, rt_model_t *m, rt_island_mgr_t *mgr,
       isl->dirty = false;
       if (isl->cluster != NULL && isl->cluster->dirty_count > 0)
          isl->cluster->dirty_count--;
+      progress = true;
    }
+
+   if (progress_out != NULL)
+      *progress_out = progress;
+   return true;
+}
+
+void rt_island_mark_sv_reset_edges(rt_island_mgr_t *mgr)
+{
+   if (mgr == NULL)
+      return;
 
    // Any SV clock/reset signal driven to a new value during model_reset()
    // (e.g. a continuous assign to a variable/net) already queued its watch
@@ -2700,8 +2746,6 @@ bool rt_island_eval_sv_reset(jit_t *jit, rt_model_t *m, rt_island_mgr_t *mgr,
             sd->reset_rst_edge = true;
       }
    }
-
-   return true;
 }
 
 bool rt_island_has_dirty(const rt_island_mgr_t *mgr)

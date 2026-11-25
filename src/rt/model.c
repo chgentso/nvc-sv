@@ -3702,17 +3702,36 @@ void model_reset(rt_model_t *m)
    rt_island_reset_all(m->islands);
 
    if (m->islands != NULL) {
-      if (!rt_island_eval_sv_reset(m->jit, m, m->islands, thread->tlab))
-         m->force_stop = true;
-      while (heap_size(m->driving_heap) > 0) {
-         rt_nexus_t *n = heap_extract_min(m->driving_heap);
-         update_driving(m, n, true);
+      for (unsigned pass = 0; pass < 16; pass++) {
+         bool progress = false;
+         if (!rt_island_eval_sv_reset(m->jit, m, m->islands, thread->tlab,
+                                      pass == 0, &progress)) {
+            m->force_stop = true;
+            break;
+         }
+         bool drained = false;
+         do {
+            for (int i = 0; i < m->reschedq.count; i++) {
+               (*m->reschedq.tasks[i].fn)(m, m->reschedq.tasks[i].arg);
+               drained = true;
+            }
+            m->reschedq.count = 0;
+            while (heap_size(m->driving_heap) > 0) {
+               rt_nexus_t *n = heap_extract_min(m->driving_heap);
+               update_driving(m, n, true);
+               drained = true;
+            }
+            while (heap_size(m->effective_heap) > 0) {
+               rt_nexus_t *n = heap_extract_min(m->effective_heap);
+               update_effective(m, n);
+               drained = true;
+            }
+         } while (m->reschedq.count > 0);
+         tlab_reset(thread->tlab);
+         if (!progress && !drained)
+            break;
       }
-      while (heap_size(m->effective_heap) > 0) {
-         rt_nexus_t *n = heap_extract_min(m->effective_heap);
-         update_effective(m, n);
-      }
-      tlab_reset(thread->tlab);
+      rt_island_mark_sv_reset_edges(m->islands);
    }
 
    run_callbacks(m, END_OF_INITIALISATION);
