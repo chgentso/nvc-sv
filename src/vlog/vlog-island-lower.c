@@ -621,6 +621,8 @@ static bool m2_append_module_spec(text_buf_t *tb, vlog_node_t body,
    for (int i = 0; i < ndecls; i++) {
       vlog_node_t d = vlog_decl(body, i);
       const vlog_kind_t dk = vlog_kind(d);
+      if (dk == V_IFACE_PORT)
+         return false;
       if (dk == V_PARAM_DECL || dk == V_LOCALPARAM) {
          if (vlog_ranges(d) > 0)
             return false;
