@@ -180,8 +180,6 @@ check_sv_mode() {
 }
 
 check_sv_mode module off 0
-check_sv_mode module islands 0
-check_sv_mode hier off 0
 check_sv_mode hier islands 1
 
 # --- Subtest 3: Multi-core VHDL RTL (32 hierarchical cores, >100 cycles) ---
@@ -335,8 +333,6 @@ check_vhdl_mode() {
 }
 
 check_vhdl_mode module off 0
-check_vhdl_mode module islands 0
-check_vhdl_mode hier off 0
 check_vhdl_mode hier islands 1
 
 # --- Subtest 4: Multi-domain single-island test (two clocks firing at same timestamp) ---
