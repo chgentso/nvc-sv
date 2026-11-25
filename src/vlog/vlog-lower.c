@@ -16380,7 +16380,8 @@ static void vlog_lower_sva_calls(vlog_gen_t *g, sva_build_t *b,
 
 static void vlog_lower_sva_sample(vlog_gen_t *g, vlog_node_t v,
                                   sva_build_t *b, mir_value_t *fails,
-                                  mir_value_t *passes, mir_value_t *disable_out)
+                                  mir_value_t *passes, mir_value_t *disable_out,
+                                  bool allow_defer)
 {
    mir_type_t t_offset = mir_offset_type(g->mu);
 
@@ -16552,17 +16553,51 @@ static void vlog_lower_sva_sample(vlog_gen_t *g, vlog_node_t v,
 
    mir_value_t handle = vlog_sva_handle(g, v);
 
-   *disable_out = disable;
+   if (disable_out != NULL)
+      *disable_out = disable;
 
-   mir_value_t targs[] = { handle, mask, disable };
-   *fails = mir_build_fcall(g->mu, ident_new("__sv_sva_tick"),
-                                       t_offset, MIR_NULL_STAMP, targs, 3);
+   if (allow_defer) {
+      mir_value_t targs[] = { handle, mask, disable };
+      mir_value_t deferred = mir_build_fcall(
+         g->mu, ident_new("__sv_sva_defer_tick"), t_offset, MIR_NULL_STAMP,
+         targs, 3);
 
-   mir_value_t pargs[] = {
-      handle, mir_const(g->mu, t_offset, SVA_RESULT_PASS_ACTIONS)
-   };
-   *passes = mir_build_fcall(g->mu, ident_new("__sv_sva_result"),
-                             t_offset, MIR_NULL_STAMP, pargs, 2);
+      mir_block_t wait_bb = mir_add_block(g->mu);
+      mir_block_t resume_bb = mir_add_block(g->mu);
+      mir_block_t cont_bb = mir_add_block(g->mu);
+      mir_build_cond(g->mu,
+                     mir_build_cmp(g->mu, MIR_CMP_EQ, deferred,
+                                   mir_const(g->mu, t_offset, 0)),
+                     cont_bb, wait_bb);
+
+      mir_set_cursor(g->mu, wait_bb, MIR_APPEND);
+      mir_build_wait(g->mu, resume_bb);
+
+      mir_set_cursor(g->mu, resume_bb, MIR_APPEND);
+      mir_build_jump(g->mu, cont_bb);
+
+      mir_set_cursor(g->mu, cont_bb, MIR_APPEND);
+
+      mir_value_t h2 = vlog_sva_handle(g, v);
+      *fails = mir_const(g->mu, t_offset, 0);
+
+      mir_value_t pargs[] = {
+         h2, mir_const(g->mu, t_offset, SVA_RESULT_PASS_ACTIONS)
+      };
+      *passes = mir_build_fcall(g->mu, ident_new("__sv_sva_result"),
+                                t_offset, MIR_NULL_STAMP, pargs, 2);
+   }
+   else {
+      mir_value_t targs[] = { handle, mask, disable };
+      *fails = mir_build_fcall(g->mu, ident_new("__sv_sva_tick"),
+                                          t_offset, MIR_NULL_STAMP, targs, 3);
+
+      mir_value_t pargs[] = {
+         handle, mir_const(g->mu, t_offset, SVA_RESULT_PASS_ACTIONS)
+      };
+      *passes = mir_build_fcall(g->mu, ident_new("__sv_sva_result"),
+                                t_offset, MIR_NULL_STAMP, pargs, 2);
+   }
 }
 
 static mir_value_t vlog_sva_result(vlog_gen_t *g, vlog_node_t v,
@@ -16612,8 +16647,8 @@ static void vlog_lower_property(vlog_gen_t *g, vlog_node_t v, gen_stack_t *gs)
    mir_set_cursor(g->mu, tick_bb, MIR_APPEND);
 
    sva_build_t b = { .g = g };
-   mir_value_t fails, passes, disable;
-   vlog_lower_sva_sample(g, v, &b, &fails, &passes, &disable);
+   mir_value_t fails, passes;
+   vlog_lower_sva_sample(g, v, &b, &fails, &passes, NULL, true);
 
    mir_value_t handle = vlog_sva_handle(g, v);
 
@@ -16700,7 +16735,7 @@ static void vlog_lower_expect(vlog_gen_t *g, vlog_node_t v, gen_stack_t *gs)
 
    sva_build_t b = { .g = g };
    mir_value_t fails, passes, disable;
-   vlog_lower_sva_sample(g, v, &b, &fails, &passes, &disable);
+   vlog_lower_sva_sample(g, v, &b, &fails, &passes, &disable, false);
 
    mir_value_t zero = mir_const(g->mu, t_offset, 0);
    mir_build_cond(g->mu, mir_build_cmp(g->mu, MIR_CMP_EQ, fails, zero),

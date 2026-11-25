@@ -2837,6 +2837,21 @@ static void sv_sva_tick(jit_func_t *func, jit_anchor_t *caller,
                               args[2].integer);
 }
 
+static void sv_sva_defer_tick(jit_func_t *func, jit_anchor_t *caller,
+                              jit_scalar_t *args, tlab_t *tlab)
+{
+   sva_t *s = args[0].pointer;
+   const uint64_t leaves = args[1].integer;
+   const int disable = args[2].integer;
+   if (x_sv_sva_defer_tick(s, leaves, disable))
+      args[0].integer = 1;
+   else {
+      sva_set_caller(sva_call_thunk, func->jit);
+      (void)sva_tick(s, leaves, disable);
+      args[0].integer = 0;
+   }
+}
+
 static void sv_sva_wanted(jit_func_t *func, jit_anchor_t *caller,
                           jit_scalar_t *args, tlab_t *tlab)
 {
@@ -3627,6 +3642,7 @@ static jit_intrinsic_t intrinsic_list[] = {
    { "__sv_sva_localw", sv_sva_localw },
    { "__sv_sva_root", sv_sva_root },
    { "__sv_sva_tick", sv_sva_tick },
+   { "__sv_sva_defer_tick", sv_sva_defer_tick },
    { "__sv_sva_callfn", sv_sva_callfn },
    { "__sv_sva_result", sv_sva_result },
    { "__sv_sva_wanted", sv_sva_wanted },

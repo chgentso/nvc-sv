@@ -124,6 +124,7 @@ struct _sva {
    int64_t     needed_t;   // Tick for which needed is valid
    int64_t     last_true[SVA_MAX_LEAVES];   // Latest tick where a leaf held
    bool        wide;       // Some local variable or slot is wider than 64 bits
+   bool        has_callfn; // Uses SVA_X_CALL JIT callback (main-thread only)
    int         lw[SVA_MAX_LOCALS];   // Width of a wide local variable or zero
    int         sw[SVA_MAX_SLOTS];    // Width of a wide slot or zero
    wpool_t     tpool;      // Wide values of local variables
@@ -457,6 +458,12 @@ void sva_set_callfn(sva_t *s, int idx, int handle, void *ctx)
    assert(idx >= 0 && idx < SVA_MAX_FCALLS);
    s->fhandle[idx] = handle;
    s->fctx[idx] = ctx;
+   s->has_callfn = true;
+}
+
+bool sva_is_mt_safe(const sva_t *s)
+{
+   return s != NULL && !s->has_callfn && s->kind != SVA_EXPECT;
 }
 
 void sva_free(sva_t *s)

@@ -24,6 +24,7 @@
 #include "rt/model.h"
 #include "rt/mspace.h"
 #include "rt/structs.h"
+#include "rt/sva.h"
 #include "thread.h"
 
 #include <assert.h>
@@ -42,6 +43,8 @@
 #define RT_ISLAND_MT_FF_THRESHOLD    16u
 #define RT_ISLAND_MT_DIRTY_THRESHOLD 8u
 #define RT_ISLAND_MT_MIN_BATCH_NS    25000u
+#define RT_SVA_MT_THRESHOLD          8u
+#define RT_SVA_MT_MIN_BATCH_NS       12000u
 #define RT_ISLAND_SPIN_ITERS         3000
 
 typedef struct {
@@ -170,6 +173,7 @@ typedef enum {
    ISLAND_TASK_EVAL_FF,
    ISLAND_TASK_EVAL_DIRTY_CLUSTERS,
    ISLAND_TASK_EVAL_DIRTY_ISLANDS,
+   ISLAND_TASK_EVAL_SVA,
 } rt_island_task_kind_t;
 
 typedef struct _rt_island_pool rt_island_pool_t;
@@ -264,9 +268,11 @@ struct _rt_island_mgr {
    A(rt_super_island_t *)  mt_cl_wave_q;
    A(rt_super_island_t *)  mt_cl_rem_q;
    A(rt_super_island_t *)  mt_cl_safe_q;
+   A(void *)               mt_sva_ptrs;
    rt_island_mt_gate_t     mt_gate_cl;
    rt_island_mt_gate_t     mt_gate_isl;
    rt_island_mt_gate_t     mt_gate_ff;
+   rt_island_mt_gate_t     mt_gate_sva;
    uint32_t                mt_wave_tag;
    uint32_t                eval_epoch;
    bool                    hier_built;
@@ -757,6 +763,7 @@ void rt_island_mgr_free(rt_island_mgr_t *mgr)
    ACLEAR(mgr->mt_cl_wave_q);
    ACLEAR(mgr->mt_cl_rem_q);
    ACLEAR(mgr->mt_cl_safe_q);
+   ACLEAR(mgr->mt_sva_ptrs);
    free(mgr);
 }
 
@@ -2388,6 +2395,7 @@ void rt_island_reset_all(rt_island_mgr_t *mgr)
    memset(&mgr->mt_gate_cl, 0, sizeof(mgr->mt_gate_cl));
    memset(&mgr->mt_gate_isl, 0, sizeof(mgr->mt_gate_isl));
    memset(&mgr->mt_gate_ff, 0, sizeof(mgr->mt_gate_ff));
+   memset(&mgr->mt_gate_sva, 0, sizeof(mgr->mt_gate_sva));
 
    for (unsigned i = 0; i < mgr->clusters.count; i++) {
       rt_super_island_t *cl = mgr->clusters.items[i];
@@ -2792,6 +2800,11 @@ static void island_pool_work(rt_island_pool_t *pool, tlab_t *tlab)
          case ISLAND_TASK_EVAL_DIRTY_ISLANDS:
             ok = island_eval_solo_mt(jit, items[i], tlab);
             break;
+         case ISLAND_TASK_EVAL_SVA: {
+            rt_sva_batch_item_t *it = items[i];
+            (void)sva_tick(it->sva, it->leaves, it->disable);
+            break;
+         }
          case ISLAND_TASK_NONE:
             break;
          }
@@ -2914,6 +2927,76 @@ static bool island_pool_run(rt_island_pool_t *pool,
    pool->task_kind = ISLAND_TASK_NONE;
    pool->items = NULL;
    return atomic_load(&pool->failed) == 0;
+}
+
+uint32_t rt_island_eval_sva_batch(jit_t *jit, rt_model_t *m,
+                                  rt_island_mgr_t **mgr_p,
+                                  rt_sva_batch_item_t *items, uint32_t count,
+                                  tlab_t *tlab)
+{
+   if (count == 0)
+      return 0;
+
+   const int nthreads = opt_get_int(OPT_SIM_THREADS);
+   if (nthreads <= 1) {
+      for (uint32_t i = 0; i < count; i++)
+         (void)sva_tick(items[i].sva, items[i].leaves, items[i].disable);
+      return 0;
+   }
+
+   rt_island_mgr_t *mgr = *mgr_p;
+   if (mgr == NULL) {
+      mgr = rt_island_mgr_new(m);
+      *mgr_p = mgr;
+   }
+
+   if (count < RT_SVA_MT_THRESHOLD) {
+      for (uint32_t i = 0; i < count; i++)
+         (void)sva_tick(items[i].sva, items[i].leaves, items[i].disable);
+      if (!mgr->mt_gate_sva.use_mt) {
+         mgr->mt_gate_sva.probes_done++;
+         if (mgr->mt_gate_sva.probes_done >= 8)
+            return 256u;
+      }
+      return 0;
+   }
+
+   bool do_probe = false;
+   const bool try_mt = island_mt_gate_should_run(&mgr->mt_gate_sva, &do_probe);
+   if (!try_mt) {
+      const uint64_t t0 = do_probe ? get_timestamp_ns() : 0;
+      for (uint32_t i = 0; i < count; i++)
+         (void)sva_tick(items[i].sva, items[i].leaves, items[i].disable);
+      if (do_probe) {
+         const uint64_t dt = get_timestamp_ns() - t0;
+         mgr->mt_gate_sva.use_mt = (dt >= RT_SVA_MT_MIN_BATCH_NS);
+         mgr->mt_gate_sva.probes_done++;
+         if (mgr->mt_gate_sva.probes_done == 1)
+            mgr->mt_gate_sva.next_probe = 64u;
+         else if (mgr->mt_gate_sva.probes_done == 2)
+            mgr->mt_gate_sva.next_probe = 128u;
+         else if (mgr->mt_gate_sva.probes_done == 3)
+            mgr->mt_gate_sva.next_probe = 256u;
+         else
+            mgr->mt_gate_sva.next_probe = 2048u;
+      }
+      if (!mgr->mt_gate_sva.use_mt && mgr->mt_gate_sva.next_probe > 0) {
+         const uint32_t skip = mgr->mt_gate_sva.next_probe;
+         mgr->mt_gate_sva.next_probe = 0;
+         return skip;
+      }
+      return 0;
+   }
+
+   mgr->mt_sva_ptrs.count = 0;
+   for (uint32_t i = 0; i < count; i++)
+      APUSH(mgr->mt_sva_ptrs, &(items[i]));
+
+   rt_island_pool_t *pool = island_pool_ensure(mgr, jit);
+   (void)island_pool_run(pool, ISLAND_TASK_EVAL_SVA,
+                         (void *const *)mgr->mt_sva_ptrs.items,
+                         count, tlab);
+   return 0;
 }
 
 static void island_sync_out_island(rt_model_t *m, rt_island_t *isl)

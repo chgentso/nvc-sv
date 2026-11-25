@@ -133,6 +133,7 @@ void x_sv_queue_wait(void *event);
 int64_t x_sv_program_begin(void);
 int64_t x_sv_reactive_yield(void);
 int64_t x_sv_sva_yield(void);
+int64_t x_sv_sva_defer_tick(void *sva, uint64_t leaves, int disable);
 void x_sv_program_end(void);
 void x_sv_event_trigger(void *event);
 void x_sv_event_trigger_nba(void *event, int64_t after);

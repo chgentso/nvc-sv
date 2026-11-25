@@ -116,6 +116,7 @@ int sva_node(sva_t *s, int op, int a, int b, int leaf, int64_t lo, int64_t hi);
 void sva_set_root(sva_t *s, int node);
 bool sva_wanted(sva_t *s, int leaf);
 bool sva_slot_wanted(sva_t *s, int slot, uint64_t leaves);
+bool sva_is_mt_safe(const sva_t *s);
 unsigned sva_tick(sva_t *s, uint64_t leaves, int disable);
 unsigned sva_result(const sva_t *s, sva_result_t which);
 unsigned sva_nevents(const sva_t *s);

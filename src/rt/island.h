@@ -150,6 +150,14 @@ typedef struct _rt_island {
 } rt_island_t;
 
 typedef struct _rt_island_mgr rt_island_mgr_t;
+typedef struct _sva sva_t;
+
+typedef struct {
+   sva_t     *sva;
+   uint64_t   leaves;
+   int        disable;
+   rt_proc_t *proc;
+} rt_sva_batch_item_t;
 
 rt_island_mgr_t *rt_island_mgr_new(rt_model_t *m);
 void rt_island_mgr_free(rt_island_mgr_t *mgr);
@@ -162,6 +170,10 @@ bool rt_island_eval_ff(jit_t *jit, rt_model_t *m, rt_island_mgr_t *mgr,
                        tlab_t *tlab);
 bool rt_island_has_ff_commits(const rt_island_mgr_t *mgr);
 void rt_island_commit_ff(rt_model_t *m, rt_island_mgr_t *mgr, tlab_t *tlab);
+uint32_t rt_island_eval_sva_batch(jit_t *jit, rt_model_t *m,
+                                  rt_island_mgr_t **mgr_p,
+                                  rt_sva_batch_item_t *items, uint32_t count,
+                                  tlab_t *tlab);
 
 bool rt_island_read_sig(rt_island_mgr_t *mgr, rt_signal_t *sig,
                         uint64_t *a_out, uint64_t *b_out,

@@ -38,6 +38,7 @@
 #include "rt/mtprof.h"
 #include "rt/random.h"
 #include "rt/structs.h"
+#include "rt/sva.h"
 #include "thread.h"
 #include "tree.h"
 #include "type.h"
@@ -122,6 +123,7 @@ typedef struct {
 } init_event_t;
 
 typedef A(init_event_t) init_event_list_t;
+typedef A(rt_sva_batch_item_t) sva_batch_list_t;
 
 #define DEFER_MAX 4096
 
@@ -197,11 +199,15 @@ typedef struct _rt_model {
    bool               sv_poll_mem_dirty;
    bool               sv_poll_sig_dirty;
    bool               sv_poll_susp_dirty;
+   bool               mt_sva_enabled;
+   uint32_t           sva_mt_skip;
    unsigned           ndeferred;
    unsigned           nsva_procs;
    unsigned           nfinal_procs;
    unsigned           n_signals;
    rt_proc_t        **sva_procs;
+   sva_batch_list_t   sva_batch;
+   sva_batch_list_t   sva_batch_tmp;
    rt_deferred_t     *deferred;
    rt_island_mgr_t   *islands;
    heap_t            *eventq_heap;
@@ -980,6 +986,9 @@ void model_free(rt_model_t *m)
       hash_free(m->packed_delayed);
       m->packed_delayed = NULL;
    }
+
+   ACLEAR(m->sva_batch);
+   ACLEAR(m->sva_batch_tmp);
 
    rt_island_mgr_free(m->islands);
    m->islands = NULL;
@@ -3377,10 +3386,16 @@ void model_reset(rt_model_t *m)
    // Initialisation is described in LRM 93 section 12.6.4
 
    m->proc_seq = 0;
+   m->mt_sva_enabled = false;
+   m->sva_mt_skip = 0;
+   m->sva_batch.count = 0;
+   m->sva_batch_tmp.count = 0;
    reset_scope(m, m->root);
 
    if (m->force_stop)
       return;   // Error in intialisation
+
+   m->mt_sva_enabled = (opt_get_int(OPT_SIM_THREADS) > 1);
 
 #if TRACE_SIGNALS > 0
    if (__trace_on)
@@ -4957,6 +4972,69 @@ static void reactive_sort(deferq_t *dq)
    }
 }
 
+static int sva_batch_cmp(const void *pa, const void *pb)
+{
+   const rt_sva_batch_item_t *a = pa;
+   const rt_sva_batch_item_t *b = pb;
+   if (a->proc->create_seq < b->proc->create_seq)
+      return -1;
+   if (a->proc->create_seq > b->proc->create_seq)
+      return 1;
+   return 0;
+}
+
+static void model_flush_sva_batch(rt_model_t *m)
+{
+   while (m->sva_batch.count > 0) {
+      sva_batch_list_t work = m->sva_batch;
+      m->sva_batch = m->sva_batch_tmp;
+      m->sva_batch.count = 0;
+      m->sva_batch_tmp = work;
+
+      const uint32_t skip = rt_island_eval_sva_batch(
+         m->jit, m, &m->islands, work.items, work.count,
+         model_thread(m)->tlab);
+      if (skip > 0)
+         m->sva_mt_skip = skip;
+
+      bool sorted = true;
+      for (unsigned i = 1; i < work.count; i++) {
+         if (work.items[i - 1].proc->create_seq
+             > work.items[i].proc->create_seq) {
+            sorted = false;
+            break;
+         }
+      }
+
+      if (!sorted) {
+         if (work.count <= 32) {
+            for (unsigned i = 1; i < work.count; i++) {
+               const rt_sva_batch_item_t key = work.items[i];
+               const uint32_t kseq = key.proc->create_seq;
+               int j = (int)i - 1;
+               while (j >= 0 && work.items[j].proc->create_seq > kseq) {
+                  work.items[j + 1] = work.items[j];
+                  j--;
+               }
+               work.items[j + 1] = key;
+            }
+         }
+         else
+            qsort(work.items, work.count, sizeof(rt_sva_batch_item_t),
+                  sva_batch_cmp);
+      }
+
+      for (unsigned i = 0; i < work.count; i++) {
+         rt_proc_t *proc = work.items[i].proc;
+         proc->wakeable.pending = true;
+         deferq_do(&m->next_procq, async_run_process, proc);
+      }
+      m->sva_batch_tmp.count = 0;
+
+      deferq_run_procs(m, &m->next_procq);
+   }
+}
+
 static void model_cycle_body(rt_model_t *m)
 {
    // Simulation cycle is described in LRM 93 section 12.6.4
@@ -4969,6 +5047,8 @@ static void model_cycle_body(rt_model_t *m)
    else {
       m->now = heap_min_key(m->eventq_heap);
       m->iteration = 0;
+      if (unlikely(m->sva_mt_skip > 0))
+         m->sva_mt_skip--;
    }
    if (unlikely(m->has_level_trigger) && unlikely(++m->event_seq == 0)) {
       m->event_seq = 1;
@@ -5110,6 +5190,8 @@ static void model_cycle_body(rt_model_t *m)
    deferq_swap(&m->next_procq, &m->procq);
    (void)mtp_enter(MTP_TASKQ);
    deferq_run_procs(m, &m->next_procq);
+   if (unlikely(m->sva_batch.count > 0))
+      model_flush_sva_batch(m);
    (void)mtp_enter(MTP_OTHER);
 
    if (unlikely(m->islands != NULL)) {
@@ -5118,6 +5200,8 @@ static void model_cycle_body(rt_model_t *m)
       else if (m->reschedq.count > 0) {
          deferq_swap(&m->next_procq, &m->reschedq);
          deferq_run_procs(m, &m->next_procq);
+         if (unlikely(m->sva_batch.count > 0))
+            model_flush_sva_batch(m);
       }
       if (!m->force_stop && rt_island_has_ff_sample(m->islands)) {
          if (!rt_island_eval_ff(m->jit, m, m->islands, model_thread(m)->tlab))
@@ -5143,6 +5227,8 @@ static void model_cycle_body(rt_model_t *m)
       deferq_swap(&m->next_inactiveq, &m->inactiveq);
       (void)mtp_enter(MTP_TASKQ);
       deferq_run_procs(m, &m->next_inactiveq);
+      if (unlikely(m->sva_batch.count > 0))
+         model_flush_sva_batch(m);
       (void)mtp_enter(MTP_OTHER);
    }
 
@@ -9833,6 +9919,31 @@ int64_t x_sv_sva_yield(void)
       proc->wait_seq = proc->create_seq;
 
    return x_sv_reactive_yield();
+}
+
+int64_t x_sv_sva_defer_tick(void *sva, uint64_t leaves, int disable)
+{
+   rt_model_t *m = get_model();
+   if (likely(!m->mt_sva_enabled || m->sva_mt_skip > 0))
+      return 0;
+
+   sva_t *s = sva;
+   if (unlikely(!sva_is_mt_safe(s) || m->sva_flush))
+      return 0;
+
+   rt_proc_t *proc = get_active_proc();
+   if (unlikely(proc == NULL || proc->wakeable.pending
+                || proc->wakeable.reactive))
+      return 0;
+
+   rt_sva_batch_item_t item = {
+      .sva     = s,
+      .leaves  = leaves,
+      .disable = disable,
+      .proc    = proc,
+   };
+   APUSH(m->sva_batch, item);
+   return 1;
 }
 
 void x_sv_program_end(void)
