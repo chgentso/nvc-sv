@@ -3702,6 +3702,8 @@ void model_reset(rt_model_t *m)
    rt_island_reset_all(m->islands);
 
    if (m->islands != NULL) {
+      if (!rt_island_eval_sv_reset(m->jit, m, m->islands, thread->tlab))
+         m->force_stop = true;
       while (heap_size(m->driving_heap) > 0) {
          rt_nexus_t *n = heap_extract_min(m->driving_heap);
          update_driving(m, n, true);

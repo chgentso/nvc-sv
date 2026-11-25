@@ -164,6 +164,8 @@ typedef struct {
 rt_island_mgr_t *rt_island_mgr_new(rt_model_t *m);
 void rt_island_mgr_free(rt_island_mgr_t *mgr);
 void rt_island_reset_all(rt_island_mgr_t *mgr);
+bool rt_island_eval_sv_reset(jit_t *jit, rt_model_t *m, rt_island_mgr_t *mgr,
+                             tlab_t *tlab);
 bool rt_island_has_dirty(const rt_island_mgr_t *mgr);
 bool rt_island_eval_dirty(jit_t *jit, rt_model_t *m, rt_island_mgr_t *mgr,
                           tlab_t *tlab);

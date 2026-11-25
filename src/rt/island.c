@@ -562,6 +562,24 @@ static void island_input_watch_cb(uint64_t now, rt_signal_t *signal,
       island_mark_dirty(isl);
 }
 
+static inline bool island_sv_edge_armed(rt_island_mgr_t *mgr,
+                                        const rt_signal_t *sig, uint64_t now)
+{
+   // Verilog always @(posedge/negedge ...) processes enter their first
+   // event control during delta 0 (now == 0, iteration == 0), so signal
+   // updates delivered in the 0ms+0 signal-update phase (e.g. VPI
+   // cbStartOfSimulation deposits) must not trigger SV edge domains,
+   // whereas signals with init events (decl/net initialisers) fire via
+   // fire_init_events() and delta-0 deposits fire at iteration >= 1.
+   if (likely(now > 0))
+      return true;
+   unsigned deltas = 0;
+   (void)model_now(mgr->model, &deltas);
+   if (deltas > 0)
+      return true;
+   return rt_model_has_init_event(mgr->model, sig);
+}
+
 static void island_super_clk_watch_cb(uint64_t now, rt_signal_t *signal,
                                       rt_watch_t *watch, void *user)
 {
@@ -582,7 +600,8 @@ static void island_super_clk_watch_cb(uint64_t now, rt_signal_t *signal,
    else {
       const uint8_t cur = island_read_sv_bit(sdom->clk_sig,
                                              sdom->clk_sig_offset);
-      hit = island_edge_match(sdom->prev_clk, cur, sdom->clk_posedge);
+      hit = island_sv_edge_armed(sdom->mgr, sdom->clk_sig, now)
+         && island_edge_match(sdom->prev_clk, cur, sdom->clk_posedge);
       sdom->prev_clk = cur;
    }
    if (hit && !sdom->in_sample_q) {
@@ -609,7 +628,8 @@ static void island_super_rst_watch_cb(uint64_t now, rt_signal_t *signal,
    else {
       const uint8_t cur = island_read_sv_bit(sdom->rst_sig,
                                              sdom->rst_sig_offset);
-      hit = island_edge_match(sdom->prev_rst, cur, sdom->rst_posedge);
+      hit = island_sv_edge_armed(sdom->mgr, sdom->rst_sig, now)
+         && island_edge_match(sdom->prev_rst, cur, sdom->rst_posedge);
       sdom->prev_rst = cur;
    }
    if (hit && !sdom->in_sample_q) {
@@ -634,7 +654,8 @@ static void island_clk_watch_cb(uint64_t now, rt_signal_t *signal,
    }
    else {
       const uint8_t cur = island_read_sv_bit(cs->sig, cs->sig_offset);
-      hit = island_edge_match(dom->prev_clk, cur, dom->clk_posedge);
+      hit = island_sv_edge_armed(dom->isl->mgr, cs->sig, now)
+         && island_edge_match(dom->prev_clk, cur, dom->clk_posedge);
       dom->prev_clk = cur;
    }
    if (hit && !dom->in_sample_q) {
@@ -658,7 +679,8 @@ static void island_rst_watch_cb(uint64_t now, rt_signal_t *signal,
    }
    else {
       const uint8_t cur = island_read_sv_bit(rs->sig, rs->sig_offset);
-      hit = island_edge_match(dom->prev_rst, cur, dom->rst_posedge);
+      hit = island_sv_edge_armed(dom->isl->mgr, rs->sig, now)
+         && island_edge_match(dom->prev_rst, cur, dom->rst_posedge);
       dom->prev_rst = cur;
    }
    if (hit && !dom->in_sample_q) {
@@ -2542,6 +2564,95 @@ void rt_island_reset_all(rt_island_mgr_t *mgr)
    mgr->reset_done = true;
 }
 
+static bool island_eligible_sv_reset(const rt_island_t *isl)
+{
+   if (isl->eval_handle == JIT_HANDLE_INVALID)
+      return false;
+
+   for (uint32_t j = 0; j < isl->nsigs; j++) {
+      if (isl->sigs[j].flags & (RT_ISIG_STD_LOGIC9 | RT_ISIG_VHDL_SCHED))
+         return false;
+   }
+
+   for (uint32_t d = 0; d < isl->ndomains; d++) {
+      const rt_island_domain_t *dom = &(isl->domains[d]);
+      if (dom->edge_flags & (RT_IEDGE_VHDL | RT_IEDGE_VHDL_EVENT
+                             | RT_IEDGE_RST_LEVEL))
+         return false;
+      if (isl->sigs[dom->clk_sig_idx].flags & RT_ISIG_COMB_WRITTEN)
+         return false;
+      if (dom->rst_sig_idx >= 0
+          && (isl->sigs[dom->rst_sig_idx].flags & RT_ISIG_COMB_WRITTEN))
+         return false;
+   }
+
+   return true;
+}
+
+static bool island_call_comb(jit_t *jit, rt_model_t *m, rt_island_t *isl,
+                             tlab_t *tlab);
+
+bool rt_island_eval_sv_reset(jit_t *jit, rt_model_t *m, rt_island_mgr_t *mgr,
+                             tlab_t *tlab)
+{
+   if (mgr == NULL)
+      return true;
+
+   // Evaluate combinational SV islands once at the end of model_reset() so
+   // continuous-assign outputs driven from decl-initialised registers are
+   // settled before cbStartOfSimulation / 0ms+0 VPI reads, matching non-island
+   // continuous assignments.
+   for (unsigned i = 0; i < mgr->islands.count; i++) {
+      rt_island_t *isl = mgr->islands.items[i];
+      if (!isl->dirty || !island_eligible_sv_reset(isl))
+         continue;
+
+      for (uint32_t j = 0; j < isl->n_in_sigs; j++) {
+         rt_island_sig_t *s = &(isl->sigs[isl->in_sigs[j]]);
+         if (s->flags & RT_ISIG_DIRECT_LINK)
+            island_copy_direct_sig(s->direct_src, s);
+         else
+            island_sync_in_sig(isl, s);
+      }
+      island_clear_in_dirty(isl);
+      isl->has_dirty_inputs = false;
+
+      if (!island_call_comb(jit, m, isl, tlab))
+         return false;
+
+      if (isl->n_direct_comb_outs > 0) {
+         for (uint32_t j = 0; j < isl->n_direct_comb_outs; j++) {
+            const rt_island_sig_t *src_s = &(isl->sigs[isl->direct_comb_outs[j]]);
+            if (unlikely(!(src_s->flags & RT_ISIG_DIRECT_LINK)))
+               continue;
+            for (uint32_t t = 0; t < src_s->n_direct_targets; t++) {
+               rt_island_sig_t *dst_s = src_s->direct_targets[t];
+               if (island_copy_direct_sig(src_s, dst_s)
+                   && (dst_s->flags & RT_ISIG_COMB_READ)
+                   && dst_s->isl->eval_handle != JIT_HANDLE_INVALID)
+                  island_mark_dirty(dst_s->isl);
+            }
+         }
+         for (uint32_t j = 0; j < isl->n_ext_out_sigs; j++)
+            island_sync_out_sig(m, isl, &(isl->sigs[isl->ext_out_sigs[j]]));
+      }
+      else {
+         for (uint32_t j = 0; j < isl->n_out_sigs; j++)
+            island_sync_out_sig(m, isl, &(isl->sigs[isl->out_sigs[j]]));
+      }
+      if (unlikely(isl->n_obs_sigs > 0)) {
+         for (uint32_t j = 0; j < isl->n_obs_sigs; j++)
+            island_sync_out_sig(m, isl, &(isl->sigs[isl->obs_sigs[j]]));
+      }
+
+      isl->dirty = false;
+      if (isl->cluster != NULL && isl->cluster->dirty_count > 0)
+         isl->cluster->dirty_count--;
+   }
+
+   return true;
+}
+
 bool rt_island_has_dirty(const rt_island_mgr_t *mgr)
 {
    return mgr != NULL
@@ -3493,7 +3604,22 @@ static bool island_sample_domain(jit_t *jit, rt_island_domain_t *dom,
                                  tlab_t *tlab)
 {
    rt_island_t *isl = dom->isl;
-   if (isl->has_dirty_inputs) {
+   const bool is_vhdl = !!(dom->edge_flags
+                           & (RT_IEDGE_VHDL | RT_IEDGE_VHDL_EVENT
+                              | RT_IEDGE_RST_LEVEL));
+   if (!is_vhdl) {
+      // Non-island SV processes (e.g. ejected always @*) use blocking deposits
+      // whose watch callbacks are deferred to the next delta; sync live inputs
+      // from rt_signal_t before sampling SV flip-flops.
+      for (uint32_t j = 0; j < isl->n_in_sigs; j++) {
+         const rt_island_sig_t *s = &(isl->sigs[isl->in_sigs[j]]);
+         if (!(s->flags & RT_ISIG_DIRECT_LINK) && s->sig != NULL)
+            island_sync_in_sig(isl, s);
+      }
+      island_clear_in_dirty(isl);
+      isl->has_dirty_inputs = false;
+   }
+   else if (isl->has_dirty_inputs) {
       island_sync_dirty_inputs(isl);
       isl->has_dirty_inputs = false;
    }
