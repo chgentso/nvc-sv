@@ -803,33 +803,40 @@ bool vlog_typeparam_pending(vlog_node_t v)
    if (vlog_kind(v) != V_MEMBER_REF || vlog_has_ref(v))
       return false;
 
-   vlog_node_t prefix = vlog_value(v);
-   while (vlog_kind(prefix) == V_BIT_SELECT || vlog_kind(prefix) == V_PART_SELECT
-          || (vlog_kind(prefix) == V_MEMBER_REF && !vlog_has_ref(prefix)))
-      prefix = vlog_value(prefix);   // Fields of fields
-
-   if ((vlog_kind(prefix) != V_REF && vlog_kind(prefix) != V_MEMBER_REF)
-       || !vlog_has_ref(prefix))
-      return false;
-
-   vlog_node_t decl = vlog_ref(prefix);
-   switch (vlog_kind(decl)) {
-   case V_VAR_DECL:
-   case V_NET_DECL:
-   case V_PORT_DECL:
-   case V_PARAM_DECL:
-   case V_LOCALPARAM:
-   case V_LOCAL_DECL:
-   case V_TF_PORT_DECL:
-      break;
-   default:
-      return false;
+   for (vlog_node_t p = vlog_value(v); ; p = vlog_value(p)) {
+      switch (vlog_kind(p)) {
+      case V_BIT_SELECT:
+      case V_PART_SELECT:
+         continue;
+      case V_MEMBER_REF:
+         if (vlog_has_ref(p)) {
+            vlog_node_t d = vlog_ref(p);
+            if (vlog_has_type(d) && vlog_uses_typeparam(vlog_type(d)))
+               return true;
+         }
+         continue;
+      case V_REF:
+         if (!vlog_has_ref(p))
+            return false;
+         {
+            vlog_node_t d = vlog_ref(p);
+            switch (vlog_kind(d)) {
+            case V_VAR_DECL:
+            case V_NET_DECL:
+            case V_PORT_DECL:
+            case V_PARAM_DECL:
+            case V_LOCALPARAM:
+            case V_LOCAL_DECL:
+            case V_TF_PORT_DECL:
+               return vlog_has_type(d) && vlog_uses_typeparam(vlog_type(d));
+            default:
+               return false;
+            }
+         }
+      default:
+         return false;
+      }
    }
-
-   if (!vlog_has_type(decl))
-      return false;
-
-   return vlog_uses_typeparam(vlog_type(decl));
 }
 
 bool vlog_type_matches_restrict(unsigned r, vlog_node_t dt)
