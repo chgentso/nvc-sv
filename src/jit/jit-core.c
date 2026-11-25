@@ -934,6 +934,26 @@ bool jit_try_call(jit_t *j, jit_handle_t handle, jit_scalar_t *result, ...)
    return true;
 }
 
+bool jit_try_call_tlab(jit_t *j, jit_handle_t handle, tlab_t *tlab,
+                       jit_scalar_t *result, ...)
+{
+   va_list ap;
+   va_start(ap, result);
+
+   jit_func_t *f = jit_get_func(j, handle);
+
+   jit_scalar_t args[JIT_MAX_ARGS];
+   jit_unpack_args(f, args, ap);
+
+   va_end(ap);
+
+   if (!jit_try_vcall(j, f, args, tlab))
+      return false;
+
+   *result = args[0];
+   return true;
+}
+
 jit_scalar_t jit_call(jit_t *j, jit_handle_t handle, ...)
 {
    va_list ap;
