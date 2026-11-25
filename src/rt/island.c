@@ -46,6 +46,7 @@ struct _rt_super_domain {
    int32_t              rst_sig_offset;
    bool                 clk_posedge;
    bool                 rst_posedge;
+   uint8_t              edge_flags;
    uint8_t              prev_clk;
    uint8_t              prev_rst;
    bool                 in_sample_q;
@@ -86,7 +87,7 @@ static inline uint64_t island_top_mask(uint32_t width)
    return (width & 63u) ? ((UINT64_C(1) << (width & 63u)) - 1u) : ~UINT64_C(0);
 }
 
-static void island_mark_dirty(rt_island_t *isl)
+static inline void island_mark_dirty(rt_island_t *isl)
 {
    if (isl->dirty)
       return;
@@ -200,6 +201,79 @@ static inline bool island_edge_match(uint8_t old_v, uint8_t new_v, bool posedge)
       return (old_v == 1 && new_v != 1) || (old_v != 0 && new_v == 0);
 }
 
+static inline bool island_sig_is_std(const rt_signal_t *sig, uint32_t sig_flags)
+{
+   return !!(sig->shared.flags & SIG_F_STD_LOGIC)
+      || !!(sig_flags & RT_ISIG_STD_LOGIC_ELEM);
+}
+
+static inline uint8_t island_read_raw_bit(const rt_signal_t *sig,
+                                          int32_t sig_offset)
+{
+   return sig->shared.data[sig_offset];
+}
+
+static inline uint8_t island_read_last_raw_bit(const rt_signal_t *sig,
+                                               int32_t sig_offset)
+{
+   return sig->shared.data[sig->shared.size + sig_offset];
+}
+
+static inline uint8_t island_initial_prev_domain_bit(const rt_model_t *m,
+                                                     const rt_signal_t *sig,
+                                                     int32_t sig_offset,
+                                                     uint8_t edge_flags)
+{
+   if (!(edge_flags & (RT_IEDGE_VHDL | RT_IEDGE_VHDL_EVENT
+                       | RT_IEDGE_RST_LEVEL)))
+      return island_initial_prev_sv_bit(m, sig, sig_offset);
+   if (sig == NULL)
+      return 0u;
+   if (rt_model_has_init_event(m, sig))
+      return island_read_last_raw_bit(sig, sig_offset);
+   return island_read_raw_bit(sig, sig_offset);
+}
+
+static inline bool island_vhdl_clk_match(uint8_t old_v, uint8_t new_v,
+                                         uint8_t edge_flags, bool is_std)
+{
+   const bool posedge = !!(edge_flags & RT_IEDGE_CLK_POSEDGE);
+   if (edge_flags & RT_IEDGE_VHDL) {
+      if (is_std) {
+         if (posedge)
+            return (old_v == 2u || old_v == 6u) && (new_v == 3u || new_v == 7u);
+         else
+            return (old_v == 3u || old_v == 7u) && (new_v == 2u || new_v == 6u);
+      }
+      else {
+         if (posedge)
+            return (old_v & 1u) == 0u && (new_v & 1u) == 1u;
+         else
+            return (old_v & 1u) == 1u && (new_v & 1u) == 0u;
+      }
+   }
+   else {
+      const uint8_t target = is_std ? (posedge ? 3u : 2u) : (posedge ? 1u : 0u);
+      return old_v != new_v && new_v == target;
+   }
+}
+
+static inline bool island_vhdl_rst_match(uint8_t cur, bool rst_posedge,
+                                         bool is_std, bool two_state)
+{
+   if (is_std) {
+      if (two_state) {
+         const uint8_t sv = std_logic_to_sv(cur);
+         const uint8_t bit = (sv == 1u) ? 1u : 0u;
+         return rst_posedge ? (bit == 1u) : (bit == 0u);
+      }
+      const uint8_t target = rst_posedge ? 3u : 2u;
+      return cur == target;
+   }
+   return rst_posedge ? ((cur & 1u) == 1u) : ((cur & 1u) == 0u);
+}
+
+__attribute__((noinline))
 static void island_input_watch_cb(uint64_t now, rt_signal_t *signal,
                                   rt_watch_t *watch, void *user);
 
@@ -270,9 +344,25 @@ static void island_super_clk_watch_cb(uint64_t now, rt_signal_t *signal,
                                       rt_watch_t *watch, void *user)
 {
    rt_super_domain_t *sdom = user;
-   const uint8_t cur = island_read_sv_bit(sdom->clk_sig, sdom->clk_sig_offset);
-   const bool hit = island_edge_match(sdom->prev_clk, cur, sdom->clk_posedge);
-   sdom->prev_clk = cur;
+   const bool is_vhdl = !!(sdom->edge_flags
+                           & (RT_IEDGE_VHDL | RT_IEDGE_VHDL_EVENT));
+   bool hit;
+   if (is_vhdl) {
+      const uint8_t cur = island_read_raw_bit(sdom->clk_sig,
+                                              sdom->clk_sig_offset);
+      const rt_island_domain_t *d0 = sdom->doms[0];
+      const rt_island_sig_t *cs0 = &(d0->isl->sigs[d0->clk_sig_idx]);
+      const bool is_std = island_sig_is_std(sdom->clk_sig, cs0->flags);
+      hit = island_vhdl_clk_match(sdom->prev_clk, cur, sdom->edge_flags,
+                                  is_std);
+      sdom->prev_clk = cur;
+   }
+   else {
+      const uint8_t cur = island_read_sv_bit(sdom->clk_sig,
+                                             sdom->clk_sig_offset);
+      hit = island_edge_match(sdom->prev_clk, cur, sdom->clk_posedge);
+      sdom->prev_clk = cur;
+   }
    if (hit && !sdom->in_sample_q) {
       sdom->in_sample_q = true;
       APUSH(sdom->mgr->super_sample_q, sdom);
@@ -283,9 +373,23 @@ static void island_super_rst_watch_cb(uint64_t now, rt_signal_t *signal,
                                       rt_watch_t *watch, void *user)
 {
    rt_super_domain_t *sdom = user;
-   const uint8_t cur = island_read_sv_bit(sdom->rst_sig, sdom->rst_sig_offset);
-   const bool hit = island_edge_match(sdom->prev_rst, cur, sdom->rst_posedge);
-   sdom->prev_rst = cur;
+   bool hit;
+   if (sdom->edge_flags & RT_IEDGE_RST_LEVEL) {
+      const uint8_t cur = island_read_raw_bit(sdom->rst_sig,
+                                              sdom->rst_sig_offset);
+      const rt_island_domain_t *d0 = sdom->doms[0];
+      const rt_island_sig_t *rs0 = &(d0->isl->sigs[d0->rst_sig_idx]);
+      const bool is_std = island_sig_is_std(sdom->rst_sig, rs0->flags);
+      const bool two_state = !!(rs0->flags & RT_ISIG_TWO_STATE);
+      hit = island_vhdl_rst_match(cur, sdom->rst_posedge, is_std, two_state);
+      sdom->prev_rst = cur;
+   }
+   else {
+      const uint8_t cur = island_read_sv_bit(sdom->rst_sig,
+                                             sdom->rst_sig_offset);
+      hit = island_edge_match(sdom->prev_rst, cur, sdom->rst_posedge);
+      sdom->prev_rst = cur;
+   }
    if (hit && !sdom->in_sample_q) {
       sdom->in_sample_q = true;
       APUSH(sdom->mgr->super_sample_q, sdom);
@@ -297,9 +401,20 @@ static void island_clk_watch_cb(uint64_t now, rt_signal_t *signal,
 {
    rt_island_domain_t *dom = user;
    const rt_island_sig_t *cs = &(dom->isl->sigs[dom->clk_sig_idx]);
-   const uint8_t cur = island_read_sv_bit(cs->sig, cs->sig_offset);
-   const bool hit = island_edge_match(dom->prev_clk, cur, dom->clk_posedge);
-   dom->prev_clk = cur;
+   const bool is_vhdl = !!(dom->edge_flags
+                           & (RT_IEDGE_VHDL | RT_IEDGE_VHDL_EVENT));
+   bool hit;
+   if (is_vhdl) {
+      const uint8_t cur = island_read_raw_bit(cs->sig, cs->sig_offset);
+      const bool is_std = island_sig_is_std(cs->sig, cs->flags);
+      hit = island_vhdl_clk_match(dom->prev_clk, cur, dom->edge_flags, is_std);
+      dom->prev_clk = cur;
+   }
+   else {
+      const uint8_t cur = island_read_sv_bit(cs->sig, cs->sig_offset);
+      hit = island_edge_match(dom->prev_clk, cur, dom->clk_posedge);
+      dom->prev_clk = cur;
+   }
    if (hit && !dom->in_sample_q) {
       dom->in_sample_q = true;
       APUSH(dom->isl->mgr->ff_sample_q, dom);
@@ -311,9 +426,19 @@ static void island_rst_watch_cb(uint64_t now, rt_signal_t *signal,
 {
    rt_island_domain_t *dom = user;
    const rt_island_sig_t *rs = &(dom->isl->sigs[dom->rst_sig_idx]);
-   const uint8_t cur = island_read_sv_bit(rs->sig, rs->sig_offset);
-   const bool hit = island_edge_match(dom->prev_rst, cur, dom->rst_posedge);
-   dom->prev_rst = cur;
+   bool hit;
+   if (dom->edge_flags & RT_IEDGE_RST_LEVEL) {
+      const uint8_t cur = island_read_raw_bit(rs->sig, rs->sig_offset);
+      const bool is_std = island_sig_is_std(rs->sig, rs->flags);
+      const bool two_state = !!(rs->flags & RT_ISIG_TWO_STATE);
+      hit = island_vhdl_rst_match(cur, dom->rst_posedge, is_std, two_state);
+      dom->prev_rst = cur;
+   }
+   else {
+      const uint8_t cur = island_read_sv_bit(rs->sig, rs->sig_offset);
+      hit = island_edge_match(dom->prev_rst, cur, dom->rst_posedge);
+      dom->prev_rst = cur;
+   }
    if (hit && !dom->in_sample_q) {
       dom->in_sample_q = true;
       APUSH(dom->isl->mgr->ff_sample_q, dom);
@@ -385,7 +510,8 @@ static void island_init_state_defaults(rt_island_t *isl)
 
    for (uint32_t i = 0; i < isl->nsigs; i++) {
       const rt_island_sig_t *s = &(isl->sigs[i]);
-      if (s->width == 0 || s->nelems == 0 || (s->flags & RT_ISIG_TWO_STATE))
+      if (s->width == 0 || s->nelems == 0
+          || (s->flags & (RT_ISIG_TWO_STATE | RT_ISIG_STD_LOGIC9)))
          continue;
 
       const uint64_t top_mask = island_top_mask(s->width);
@@ -468,6 +594,8 @@ void rt_island_bind_sig(void *handle, uint32_t idx, sig_shared_t *ss,
    s->nelems = nelems;
    s->nwords = (width + 63u) / 64u;
    s->flags = flags;
+   if (flags & RT_ISIG_STD_LOGIC9)
+      assert(a_off + ALIGN_UP(width * nelems, 8u) <= isl->state_bytes);
 }
 
 void rt_island_add_domain(void *handle, uint32_t dom_idx,
@@ -487,8 +615,9 @@ void rt_island_add_domain(void *handle, uint32_t dom_idx,
    dom->ff_handle = ff_handle;
    dom->clk_sig_idx = clk_sig_idx;
    dom->rst_sig_idx = rst_sig_idx;
-   dom->clk_posedge = !!(edge_flags & 1u);
-   dom->rst_posedge = !!(edge_flags & 2u);
+   dom->clk_posedge = !!(edge_flags & RT_IEDGE_CLK_POSEDGE);
+   dom->rst_posedge = !!(edge_flags & RT_IEDGE_RST_POSEDGE);
+   dom->edge_flags = (uint8_t)edge_flags;
    dom->cap_write_sigs = n_write_sigs;
    dom->n_write_sigs = 0;
    if (n_write_sigs > 0)
@@ -613,8 +742,16 @@ static void island_sync_in_sig(rt_island_t *isl, const rt_island_sig_t *s)
 {
    rt_signal_t *sig = s->sig;
    const uint32_t width = s->width;
-   const uint32_t nwords = s->nwords;
    const uint32_t nelems = s->nelems;
+
+   if (s->flags & RT_ISIG_STD_LOGIC9) {
+      assert(!(sig->shared.flags & SIG_F_PACKED));
+      memcpy(isl->state + s->a_off, sig->shared.data + s->sig_offset,
+             (size_t)width * nelems);
+      return;
+   }
+
+   const uint32_t nwords = s->nwords;
    const bool two_state = !!(s->flags & RT_ISIG_TWO_STATE);
    uint64_t *dst_a = (uint64_t *)(isl->state + s->a_off);
    uint64_t *dst_b = two_state ? NULL : (uint64_t *)(isl->state + s->b_off);
@@ -670,7 +807,7 @@ static void island_sync_in_sig(rt_island_t *isl, const rt_island_sig_t *s)
    }
 
    const uint8_t *bytes = sig->shared.data + s->sig_offset;
-   const bool is_std = !!(sig->shared.flags & SIG_F_STD_LOGIC);
+   const bool is_std = island_sig_is_std(sig, s->flags);
 
    if (nelems == 1 && width == 1) {
       const uint8_t raw = is_std ? std_logic_to_sv(bytes[0]) : (bytes[0] & 3u);
@@ -760,8 +897,19 @@ static void island_sync_out_sig(rt_model_t *m, rt_island_t *isl,
 {
    rt_signal_t *sig = s->sig;
    const uint32_t width = s->width;
-   const uint32_t nwords = s->nwords;
    const uint32_t nelems = s->nelems;
+
+   if (s->flags & RT_ISIG_STD_LOGIC9) {
+      assert(!(sig->shared.flags & SIG_F_PACKED));
+      const uint32_t total = width * nelems;
+      const uint8_t *src = isl->state + s->a_off;
+      const uint8_t *cur = sig->shared.data + s->sig_offset;
+      if (memcmp(cur, src, total) != 0)
+         deposit_signal(m, sig, src, s->sig_offset, total);
+      return;
+   }
+
+   const uint32_t nwords = s->nwords;
    const bool two_state = !!(s->flags & RT_ISIG_TWO_STATE);
    const uint64_t *src_a = (const uint64_t *)(isl->state + s->a_off);
    const uint64_t *src_b = two_state
@@ -826,7 +974,7 @@ static void island_sync_out_sig(rt_model_t *m, rt_island_t *isl,
       return;
    }
 
-   const bool is_std = !!(sig->shared.flags & SIG_F_STD_LOGIC);
+   const bool is_std = island_sig_is_std(sig, s->flags);
 
    if (nelems == 1 && width == 1) {
       const uint8_t a = (uint8_t)(src_a[0] & 1u);
@@ -909,6 +1057,15 @@ static void island_sync_out_slice(rt_model_t *m, rt_island_t *isl,
    }
 
    rt_signal_t *sig = s->sig;
+   if (s->flags & RT_ISIG_STD_LOGIC9) {
+      assert(!(sig->shared.flags & SIG_F_PACKED));
+      const uint32_t sig_off = (uint32_t)s->sig_offset + local_off;
+      const uint8_t *src = isl->state + s->a_off + local_off;
+      if (memcmp(sig->shared.data + sig_off, src, local_cnt) != 0)
+         deposit_signal(m, sig, src, (int)sig_off, (int)local_cnt);
+      return;
+   }
+
    const uint32_t width = s->width;
    const uint32_t nwords = s->nwords;
    const bool two_state = !!(s->flags & RT_ISIG_TWO_STATE);
@@ -964,7 +1121,7 @@ static void island_sync_out_slice(rt_model_t *m, rt_island_t *isl,
       return;
    }
 
-   const bool is_std = !!(sig->shared.flags & SIG_F_STD_LOGIC);
+   const bool is_std = island_sig_is_std(sig, s->flags);
    uint8_t stack_buf[64];
    uint8_t *heap_buf = NULL;
    uint8_t *out_bytes = stack_buf;
@@ -998,8 +1155,20 @@ static void island_sync_sig_raw(rt_island_t *isl, const rt_island_sig_t *s,
 {
    rt_signal_t *sig = s->sig;
    const uint32_t width = s->width;
-   const uint32_t nwords = s->nwords;
    const uint32_t nelems = s->nelems;
+
+   if (s->flags & RT_ISIG_STD_LOGIC9) {
+      assert(!(sig->shared.flags & SIG_F_PACKED));
+      const uint32_t total = width * nelems;
+      uint8_t *dst = sig->shared.data + s->sig_offset;
+      memcpy(dst, isl->state + s->a_off, total);
+      if (update_last)
+         memcpy(sig->shared.data + sig->shared.size + s->sig_offset,
+                dst, total);
+      return;
+   }
+
+   const uint32_t nwords = s->nwords;
    const bool two_state = !!(s->flags & RT_ISIG_TWO_STATE);
    const uint64_t *src_a = (const uint64_t *)(isl->state + s->a_off);
    const uint64_t *src_b = two_state
@@ -1058,7 +1227,7 @@ static void island_sync_sig_raw(rt_island_t *isl, const rt_island_sig_t *s,
       return;
    }
 
-   const bool is_std = !!(sig->shared.flags & SIG_F_STD_LOGIC);
+   const bool is_std = island_sig_is_std(sig, s->flags);
    uint8_t *dst = sig->shared.data + s->sig_offset;
    uint8_t *last_dst = sig->shared.data + sig->shared.size + s->sig_offset;
 
@@ -1092,6 +1261,16 @@ static void island_sync_sig_raw_slice(rt_island_t *isl,
    }
 
    rt_signal_t *sig = s->sig;
+   if (s->flags & RT_ISIG_STD_LOGIC9) {
+      assert(!(sig->shared.flags & SIG_F_PACKED));
+      uint8_t *dst = sig->shared.data + s->sig_offset + local_off;
+      memcpy(dst, isl->state + s->a_off + local_off, local_cnt);
+      if (update_last)
+         memcpy(sig->shared.data + sig->shared.size
+                + s->sig_offset + local_off, dst, local_cnt);
+      return;
+   }
+
    const uint32_t width = s->width;
    const uint32_t nwords = s->nwords;
    const bool two_state = !!(s->flags & RT_ISIG_TWO_STATE);
@@ -1133,7 +1312,7 @@ static void island_sync_sig_raw_slice(rt_island_t *isl,
       return;
    }
 
-   const bool is_std = !!(sig->shared.flags & SIG_F_STD_LOGIC);
+   const bool is_std = island_sig_is_std(sig, s->flags);
    uint8_t *dst = sig->shared.data + s->sig_offset;
    uint8_t *last_dst = sig->shared.data + sig->shared.size + s->sig_offset;
 
@@ -1178,13 +1357,24 @@ static rt_island_force_t *island_get_or_add_force(rt_island_t *isl,
                                    sizeof(rt_island_force_t));
    }
 
-   const uint32_t total_words = s->nwords * s->nelems;
-   uint64_t *mem = xcalloc_array(total_words * 3u, sizeof(uint64_t));
    rt_island_force_t *f = &(isl->forces[isl->n_forces++]);
    f->sig_idx = s->sig_idx;
-   f->mask = mem;
-   f->a = mem + total_words;
-   f->b = mem + total_words * 2u;
+   if (s->flags & RT_ISIG_STD_LOGIC9) {
+      const uint32_t total = s->width * s->nelems;
+      const uint32_t mask_words = (total + 63u) / 64u;
+      const uint32_t val_words = (total + 7u) / 8u;
+      uint64_t *mem = xcalloc_array(mask_words + val_words, sizeof(uint64_t));
+      f->mask = mem;
+      f->a = mem + mask_words;
+      f->b = NULL;
+   }
+   else {
+      const uint32_t total_words = s->nwords * s->nelems;
+      uint64_t *mem = xcalloc_array(total_words * 3u, sizeof(uint64_t));
+      f->mask = mem;
+      f->a = mem + total_words;
+      f->b = mem + total_words * 2u;
+   }
    isl->has_forces = true;
    return f;
 }
@@ -1192,6 +1382,17 @@ static rt_island_force_t *island_get_or_add_force(rt_island_t *isl,
 static void island_apply_force_entry(uint8_t *base, const rt_island_sig_t *s,
                                      const rt_island_force_t *f)
 {
+   if (s->flags & RT_ISIG_STD_LOGIC9) {
+      const uint32_t total = s->width * s->nelems;
+      uint8_t *dst = base + s->a_off;
+      const uint8_t *fa = (const uint8_t *)f->a;
+      for (uint32_t k = 0; k < total; k++) {
+         if (f->mask[k >> 6] & (UINT64_C(1) << (k & 63u)))
+            dst[k] = fa[k];
+      }
+      return;
+   }
+
    const uint32_t total_words = s->nwords * s->nelems;
    uint64_t *ap = (uint64_t *)(base + s->a_off);
    for (uint32_t w = 0; w < total_words; w++) {
@@ -1222,6 +1423,11 @@ static inline void island_copy_sig_buf(uint8_t *dst_base,
                                        const uint8_t *src_base,
                                        const rt_island_sig_t *s)
 {
+   if (s->flags & RT_ISIG_STD_LOGIC9) {
+      memcpy(dst_base + s->a_off, src_base + s->a_off,
+             (size_t)s->width * s->nelems);
+      return;
+   }
    const size_t bytes = (size_t)s->nwords * s->nelems * sizeof(uint64_t);
    memcpy(dst_base + s->a_off, src_base + s->a_off, bytes);
    if (!(s->flags & RT_ISIG_TWO_STATE))
@@ -1231,6 +1437,17 @@ static inline void island_copy_sig_buf(uint8_t *dst_base,
 static inline bool island_commit_sig_buf(rt_island_t *isl,
                                          const rt_island_sig_t *s)
 {
+   if (s->flags & RT_ISIG_STD_LOGIC9) {
+      const size_t total = (size_t)s->width * s->nelems;
+      uint8_t *dst = isl->state + s->a_off;
+      const uint8_t *src = isl->next_state + s->a_off;
+      if (memcmp(dst, src, total) != 0) {
+         memcpy(dst, src, total);
+         return true;
+      }
+      return false;
+   }
+
    const uint32_t total_words = s->nwords * s->nelems;
    uint64_t *dst_a = (uint64_t *)(isl->state + s->a_off);
    const uint64_t *src_a = (const uint64_t *)(isl->next_state + s->a_off);
@@ -1263,6 +1480,17 @@ static inline bool island_copy_direct_sig(const rt_island_sig_t *src_s,
 {
    const rt_island_t *src_isl = src_s->isl;
    rt_island_t *dst_isl = dst_s->isl;
+   if (src_s->flags & RT_ISIG_STD_LOGIC9) {
+      const size_t total = (size_t)src_s->width * src_s->nelems;
+      const uint8_t *src = src_isl->state + src_s->a_off;
+      uint8_t *dst = dst_isl->state + dst_s->a_off;
+      if (memcmp(dst, src, total) != 0) {
+         memcpy(dst, src, total);
+         return true;
+      }
+      return false;
+   }
+
    const uint32_t total_words = src_s->nwords * src_s->nelems;
    const uint64_t *sa = (const uint64_t *)(src_isl->state + src_s->a_off);
    uint64_t *da = (uint64_t *)(dst_isl->state + dst_s->a_off);
@@ -1323,7 +1551,8 @@ static bool island_check_direct_sig(const rt_island_sig_t *src_s,
              || dst_s->sig_offset != src_s->sig_offset
              || dst_s->width != src_s->width
              || dst_s->nelems != src_s->nelems
-             || ((src_s->flags ^ dst_s->flags) & RT_ISIG_TWO_STATE) != 0)
+             || ((src_s->flags ^ dst_s->flags)
+                 & (RT_ISIG_TWO_STATE | RT_ISIG_STD_LOGIC9)) != 0)
             return false;
 
          bool seen = false;
@@ -1352,7 +1581,8 @@ static bool island_check_direct_sig(const rt_island_sig_t *src_s,
                 || dst_s->sig_offset != src_s->sig_offset
                 || dst_s->width != src_s->width
                 || dst_s->nelems != src_s->nelems
-                || ((src_s->flags ^ dst_s->flags) & RT_ISIG_TWO_STATE) != 0)
+                || ((src_s->flags ^ dst_s->flags)
+                 & (RT_ISIG_TWO_STATE | RT_ISIG_STD_LOGIC9)) != 0)
                return false;
 
             bool seen = false;
@@ -1433,6 +1663,7 @@ typedef struct {
    int32_t      rst_sig_offset;
    bool         clk_posedge;
    bool         rst_posedge;
+   uint8_t      edge_flags;
 } sdom_key_t;
 
 static uint32_t sdom_key_hash(const void *key)
@@ -1442,7 +1673,8 @@ static uint32_t sdom_key_hash(const void *key)
    h ^= mix_bits_64((uint64_t)(uint32_t)k->clk_sig_offset);
    h ^= mix_bits_64((uintptr_t)k->rst_sig);
    h ^= mix_bits_64((uint64_t)(uint32_t)k->rst_sig_offset);
-   h ^= (k->clk_posedge ? 1u : 0u) | (k->rst_posedge ? 2u : 0u);
+   h ^= (k->clk_posedge ? 1u : 0u) | (k->rst_posedge ? 2u : 0u)
+      | ((uint32_t)k->edge_flags << 2);
    return h;
 }
 
@@ -1454,7 +1686,8 @@ static bool sdom_key_cmp(const void *a, const void *b)
       && ka->rst_sig == kb->rst_sig
       && ka->rst_sig_offset == kb->rst_sig_offset
       && ka->clk_posedge == kb->clk_posedge
-      && ka->rst_posedge == kb->rst_posedge;
+      && ka->rst_posedge == kb->rst_posedge
+      && ka->edge_flags == kb->edge_flags;
 }
 
 static void island_build_hier(rt_island_mgr_t *mgr)
@@ -1699,6 +1932,7 @@ static void island_build_hier(rt_island_mgr_t *mgr)
             .rst_sig_offset = rs != NULL ? rs->sig_offset : 0,
             .clk_posedge    = dom->clk_posedge,
             .rst_posedge    = dom->rst_posedge,
+            .edge_flags     = dom->edge_flags,
          };
 
          sdom_group_t *g = ghash_get(sdom_map, &k);
@@ -1723,6 +1957,7 @@ static void island_build_hier(rt_island_mgr_t *mgr)
          sd->rst_sig_offset = g->key.rst_sig_offset;
          sd->clk_posedge    = g->key.clk_posedge;
          sd->rst_posedge    = g->key.rst_posedge;
+         sd->edge_flags     = g->key.edge_flags;
          sd->prev_clk       = g->doms.items[0]->prev_clk;
          sd->prev_rst       = g->doms.items[0]->prev_rst;
          sd->n_doms         = g->doms.count;
@@ -1859,15 +2094,17 @@ void rt_island_reset_all(rt_island_mgr_t *mgr)
       for (uint32_t d = 0; d < isl->ndomains; d++) {
          rt_island_domain_t *dom = &(isl->domains[d]);
          const rt_island_sig_t *cs = &(isl->sigs[dom->clk_sig_idx]);
-         dom->prev_clk = island_initial_prev_sv_bit(mgr->model, cs->sig,
-                                                    cs->sig_offset);
+         dom->prev_clk = island_initial_prev_domain_bit(mgr->model, cs->sig,
+                                                        cs->sig_offset,
+                                                        dom->edge_flags);
          if (dom->rst_sig_idx >= 0) {
             const rt_island_sig_t *rs = &(isl->sigs[dom->rst_sig_idx]);
-            dom->prev_rst = island_initial_prev_sv_bit(mgr->model, rs->sig,
-                                                       rs->sig_offset);
+            dom->prev_rst = island_initial_prev_domain_bit(mgr->model, rs->sig,
+                                                           rs->sig_offset,
+                                                           dom->edge_flags);
          }
          else
-            dom->prev_rst = 3u;
+            dom->prev_rst = (dom->edge_flags & RT_IEDGE_VHDL) ? 0u : 3u;
          dom->in_sample_q = false;
          dom->in_commit_q = false;
       }
@@ -1885,10 +2122,12 @@ void rt_island_reset_all(rt_island_mgr_t *mgr)
       else {
          for (unsigned i = 0; i < mgr->super_domains.count; i++) {
             rt_super_domain_t *sd = mgr->super_domains.items[i];
-            sd->prev_clk = island_initial_prev_sv_bit(mgr->model, sd->clk_sig,
-                                                      sd->clk_sig_offset);
-            sd->prev_rst = island_initial_prev_sv_bit(mgr->model, sd->rst_sig,
-                                                      sd->rst_sig_offset);
+            sd->prev_clk = island_initial_prev_domain_bit(mgr->model, sd->clk_sig,
+                                                          sd->clk_sig_offset,
+                                                          sd->edge_flags);
+            sd->prev_rst = island_initial_prev_domain_bit(mgr->model, sd->rst_sig,
+                                                          sd->rst_sig_offset,
+                                                          sd->edge_flags);
             sd->in_sample_q = false;
             sd->in_commit_q = false;
          }
@@ -1900,17 +2139,42 @@ void rt_island_reset_all(rt_island_mgr_t *mgr)
       const bool no_comb = isl->eval_handle == JIT_HANDLE_INVALID;
       for (uint32_t j = 0; j < isl->nsigs; j++) {
          rt_island_sig_t *s = &(isl->sigs[j]);
-         if (!(s->flags & RT_ISIG_TWO_STATE)
+         if (!(s->flags & (RT_ISIG_TWO_STATE | RT_ISIG_STD_LOGIC9))
              || !(s->flags & (RT_ISIG_FF_WRITTEN | RT_ISIG_COMB_WRITTEN)))
             continue;
          if (s->flags & RT_ISIG_DIRECT_LINK) {
             for (uint32_t t = 0; t < s->n_direct_targets; t++)
                island_copy_direct_sig(s, s->direct_targets[t]);
          }
-         else if (s->sig != NULL
+         else if ((s->flags & RT_ISIG_TWO_STATE)
+                  && s->sig != NULL
                   && (s->flags & (RT_ISIG_OUT | RT_ISIG_OBSERVED))
                   && (!(s->flags & RT_ISIG_COMB_WRITTEN) || no_comb)) {
             island_sync_out_sig(mgr->model, isl, s);
+         }
+      }
+      for (uint32_t d = 0; d < isl->ndomains; d++) {
+         rt_island_domain_t *dom = &(isl->domains[d]);
+         if (dom->rst_sig_idx >= 0 && (dom->edge_flags & RT_IEDGE_RST_LEVEL)) {
+            const rt_island_sig_t *rs = &(isl->sigs[dom->rst_sig_idx]);
+            if (rs->sig != NULL) {
+               const uint8_t cur = island_read_raw_bit(rs->sig, rs->sig_offset);
+               const bool is_std = island_sig_is_std(rs->sig, rs->flags);
+               const bool two_state = !!(rs->flags & RT_ISIG_TWO_STATE);
+               if (island_vhdl_rst_match(cur, dom->rst_posedge,
+                                         is_std, two_state)) {
+                  if (dom->super_dom != NULL) {
+                     if (!dom->super_dom->in_sample_q) {
+                        dom->super_dom->in_sample_q = true;
+                        APUSH(mgr->super_sample_q, dom->super_dom);
+                     }
+                  }
+                  else if (!dom->in_sample_q) {
+                     dom->in_sample_q = true;
+                     APUSH(mgr->ff_sample_q, dom);
+                  }
+               }
+            }
          }
       }
       if (!no_comb)
@@ -2333,6 +2597,29 @@ bool rt_island_read_sig(rt_island_mgr_t *mgr, rt_signal_t *sig,
    rt_island_t *isl = s->isl;
    const uint32_t nwords = s->nwords;
    const uint32_t nelems = s->nelems;
+   if (s->flags & RT_ISIG_STD_LOGIC9) {
+      const uint8_t *src = isl->state + s->a_off;
+      for (uint32_t e = 0; e < nelems; e++) {
+         uint64_t *ea = a_out != NULL ? a_out + e * nwords : NULL;
+         uint64_t *eb = b_out != NULL ? b_out + e * nwords : NULL;
+         if (ea != NULL) memset(ea, 0, nwords * sizeof(uint64_t));
+         if (eb != NULL) memset(eb, 0, nwords * sizeof(uint64_t));
+         for (uint32_t i = 0; i < s->width; i++) {
+            const uint8_t sv = std_logic_to_sv(src[e * s->width + i]);
+            const uint32_t bit = s->width - 1u - i;
+            if (ea != NULL && (sv & 1u))
+               ea[bit / 64u] |= UINT64_C(1) << (bit & 63u);
+            if (eb != NULL && (sv & 2u))
+               eb[bit / 64u] |= UINT64_C(1) << (bit & 63u);
+         }
+      }
+      if (width_out != NULL)
+         *width_out = s->width;
+      if (two_state_out != NULL)
+         *two_state_out = false;
+      return true;
+   }
+
    const bool two_state = !!(s->flags & RT_ISIG_TWO_STATE);
    const uint64_t *src_a = (const uint64_t *)(isl->state + s->a_off);
    const uint64_t *src_b = two_state
@@ -2496,6 +2783,46 @@ static void island_write_bits_slice(rt_island_t *isl, rt_island_sig_t *s,
                                     bool is_packed_src, uint32_t total_src_w,
                                     bool is_force)
 {
+   rt_island_force_t *f = NULL;
+   if (is_force)
+      f = island_get_or_add_force(isl, s);
+   else if (unlikely(isl->has_forces))
+      f = (rt_island_force_t *)island_find_force(isl, s->sig_idx);
+
+   if (s->flags & RT_ISIG_STD_LOGIC9) {
+      uint8_t *dst = isl->state + s->a_off;
+      uint8_t *ndst = isl->next_state != NULL ? isl->next_state + s->a_off : NULL;
+      uint8_t *fa = f != NULL ? (uint8_t *)f->a : NULL;
+      for (uint32_t k = 0; k < local_cnt; k++) {
+         const uint32_t pos = local_off + k;
+         uint8_t val = 0;
+         if (is_packed_src) {
+            const uint32_t src_bit = total_src_w - 1u - k;
+            const uint8_t a = (a_words[src_bit / 64u] >> (src_bit & 63u)) & 1u;
+            const uint8_t b = b_words != NULL
+               ? ((b_words[src_bit / 64u] >> (src_bit & 63u)) & 1u) : 0u;
+            val = sv_to_std_logic((uint8_t)(a | (b << 1)));
+         }
+         else if (bytes != NULL)
+            val = bytes[k];
+
+         const uint64_t mbit = UINT64_C(1) << (pos & 63u);
+         if (is_force) {
+            f->mask[pos >> 6] |= mbit;
+            fa[pos] = val;
+            dst[pos] = val;
+            if (ndst != NULL)
+               ndst[pos] = val;
+         }
+         else {
+            if (f != NULL && (f->mask[pos >> 6] & mbit))
+               continue;
+            dst[pos] = val;
+         }
+      }
+      return;
+   }
+
    const bool two_state = !!(s->flags & RT_ISIG_TWO_STATE);
    uint64_t *ap = (uint64_t *)(isl->state + s->a_off);
    uint64_t *bp = two_state ? NULL : (uint64_t *)(isl->state + s->b_off);
@@ -2503,12 +2830,6 @@ static void island_write_bits_slice(rt_island_t *isl, rt_island_sig_t *s,
       ? (uint64_t *)(isl->next_state + s->a_off) : NULL;
    uint64_t *nbp = (nap != NULL && !two_state)
       ? (uint64_t *)(isl->next_state + s->b_off) : NULL;
-
-   rt_island_force_t *f = NULL;
-   if (is_force)
-      f = island_get_or_add_force(isl, s);
-   else if (unlikely(isl->has_forces))
-      f = (rt_island_force_t *)island_find_force(isl, s->sig_idx);
 
    for (uint32_t k = 0; k < local_cnt; k++) {
       const uint32_t pos = local_off + k;
@@ -2724,25 +3045,42 @@ void rt_island_vpi_release_slice(rt_model_t *m, rt_signal_t *sig,
          continue;
 
       rt_island_force_t *f = &(isl->forces[fidx]);
-      for (uint32_t k = r_start - s_start; k < r_end - s_start; k++) {
-         const uint32_t e = k / s->width;
-         const uint32_t lsb = s->width - 1u - (k % s->width);
-         const uint32_t widx = e * s->nwords + (lsb / 64u);
-         const uint64_t bit = UINT64_C(1) << (lsb & 63u);
-         f->mask[widx] &= ~bit;
+      if (s->flags & RT_ISIG_STD_LOGIC9) {
+         for (uint32_t k = r_start - s_start; k < r_end - s_start; k++)
+            f->mask[k >> 6] &= ~(UINT64_C(1) << (k & 63u));
+         const uint32_t mask_words = (s->width * s->nelems + 63u) / 64u;
+         bool any = false;
+         for (uint32_t w = 0; w < mask_words && !any; w++)
+            any = (f->mask[w] != 0);
+         if (!any) {
+            free(f->mask);
+            if ((uint32_t)fidx + 1u < isl->n_forces)
+               isl->forces[fidx] = isl->forces[isl->n_forces - 1u];
+            isl->n_forces--;
+            isl->has_forces = (isl->n_forces > 0);
+         }
       }
+      else {
+         for (uint32_t k = r_start - s_start; k < r_end - s_start; k++) {
+            const uint32_t e = k / s->width;
+            const uint32_t lsb = s->width - 1u - (k % s->width);
+            const uint32_t widx = e * s->nwords + (lsb / 64u);
+            const uint64_t bit = UINT64_C(1) << (lsb & 63u);
+            f->mask[widx] &= ~bit;
+         }
 
-      const uint32_t total_words = s->nwords * s->nelems;
-      bool any = false;
-      for (uint32_t w = 0; w < total_words && !any; w++)
-         any = (f->mask[w] != 0);
+         const uint32_t total_words = s->nwords * s->nelems;
+         bool any = false;
+         for (uint32_t w = 0; w < total_words && !any; w++)
+            any = (f->mask[w] != 0);
 
-      if (!any) {
-         free(f->mask);
-         if ((uint32_t)fidx + 1u < isl->n_forces)
-            isl->forces[fidx] = isl->forces[isl->n_forces - 1u];
-         isl->n_forces--;
-         isl->has_forces = (isl->n_forces > 0);
+         if (!any) {
+            free(f->mask);
+            if ((uint32_t)fidx + 1u < isl->n_forces)
+               isl->forces[fidx] = isl->forces[isl->n_forces - 1u];
+            isl->n_forces--;
+            isl->has_forces = (isl->n_forces > 0);
+         }
       }
 
       if ((s->flags & RT_ISIG_COMB_WRITTEN)
@@ -2805,12 +3143,18 @@ void rt_island_report_forces(rt_island_mgr_t *mgr, rt_signal_t *sig,
       uint32_t run_start = 0, run_len = 0;
       for (uint32_t pos = r_start; pos < r_end; pos++) {
          const uint32_t k = pos - s_start;
-         const uint32_t e = k / s->width;
-         const uint32_t lsb = s->width - 1u - (k % s->width);
-         const uint32_t widx = e * s->nwords + (lsb / 64u);
-         const uint64_t bit = UINT64_C(1) << (lsb & 63u);
+         bool masked;
+         if (s->flags & RT_ISIG_STD_LOGIC9)
+            masked = !!(f->mask[k >> 6] & (UINT64_C(1) << (k & 63u)));
+         else {
+            const uint32_t e = k / s->width;
+            const uint32_t lsb = s->width - 1u - (k % s->width);
+            const uint32_t widx = e * s->nwords + (lsb / 64u);
+            const uint64_t bit = UINT64_C(1) << (lsb & 63u);
+            masked = !!(f->mask[widx] & bit);
+         }
 
-         if (f->mask[widx] & bit) {
+         if (masked) {
             if (run_len == 0)
                run_start = pos - offset;
             run_len++;

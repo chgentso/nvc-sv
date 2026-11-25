@@ -1033,7 +1033,11 @@ static void bind_external_name(tree_t name, jit_handle_t scope,
 
       int pos = 0;
       if (tree_class(name) == C_SIGNAL && type_is_homogeneous(type)) {
-         slots[pos++].pointer = *(sig_shared_t **)ptr;
+         sig_shared_t *ss = *(sig_shared_t **)ptr;
+         if (ss != NULL && unlikely(ss->flags & SIG_F_ISLAND))
+            rt_island_on_observer_attached(get_model(),
+                                           container_of(ss, rt_signal_t, shared));
+         slots[pos++].pointer = ss;
          slots[pos++].integer = *(int32_t *)(ptr + 8);
       }
       else
@@ -1056,8 +1060,15 @@ static void bind_external_name(tree_t name, jit_handle_t scope,
 
       args[0].pointer = slots;
    }
-   else
+   else {
+      if (tree_class(name) == C_SIGNAL && type_is_scalar(type)) {
+         sig_shared_t *ss = *(sig_shared_t **)ptr;
+         if (ss != NULL && unlikely(ss->flags & SIG_F_ISLAND))
+            rt_island_on_observer_attached(get_model(),
+                                           container_of(ss, rt_signal_t, shared));
+      }
       args[0].pointer = ptr;
+   }
 }
 
 typedef struct {

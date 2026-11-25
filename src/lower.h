@@ -66,6 +66,8 @@ void unit_registry_defer2(unit_registry_t *ur, ident_t name,
                           lower_unit_t *parent, mir_unit_kind_t kind,
                           mir_lower_fn_t fn, object_t *object);
 bool unit_registry_query(unit_registry_t *ur, ident_t ident);
+void unit_registry_mark_fused(unit_registry_t *ur, ident_t ident);
+bool unit_registry_is_fused(unit_registry_t *ur, ident_t ident);
 
 // Lowers every unit that is still deferred and declared in a file that the
 // function accepts

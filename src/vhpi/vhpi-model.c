@@ -26,6 +26,7 @@
 #include "lib.h"
 #include "option.h"
 #include "printf.h"
+#include "rt/island.h"
 #include "rt/model.h"
 #include "rt/mtprof.h"
 #include "rt/structs.h"
@@ -3708,6 +3709,10 @@ int vhpi_get_value(vhpiHandleT expr, vhpiValueT *value_p)
       }
    }
 
+   if (ptr.kind == PTR_SIGNAL && (ptr.signal->shared.flags & SIG_F_ISLAND))
+      rt_island_sync_slice_to_signal(vhpi_context()->model, ptr.signal,
+                                     ptr.offset, num_elems);
+
    if (value_p->format == vhpiObjTypeVal)
       value_p->format = td->format;
    else if (value_p->format == vhpiBinStrVal && td->map_str != NULL)
@@ -4191,6 +4196,11 @@ int vhpi_put_value(vhpiHandleT handle,
          force_signal(model, ptr.signal, src, ptr.offset, num_elems);
          return 0;
       case vhpiDepositPropagate:
+         if ((ptr.signal->shared.flags & SIG_F_ISLAND) && td->elem_bytes == 1) {
+            rt_island_put_bytes(model, ptr.signal, src, ptr.offset,
+                                num_elems, false);
+            return 0;
+         }
          sched_deposit(model, ptr.signal, src, ptr.offset, num_elems, 0, false);
          return 0;
       case vhpiRelease:

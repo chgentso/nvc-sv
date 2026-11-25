@@ -284,6 +284,12 @@ jit_handle_t jit_lazy_compile(jit_t *j, ident_t name)
    return jit_lazy_compile_locked(j, name);
 }
 
+bool jit_is_fused_proc(jit_t *j, ident_t name)
+{
+   return j != NULL && j->registry != NULL
+      && unit_registry_is_fused(j->registry, name);
+}
+
 jit_func_t *jit_get_func(jit_t *j, jit_handle_t handle)
 {
    assert(handle != JIT_HANDLE_INVALID);

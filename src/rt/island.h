@@ -25,16 +25,24 @@
 #include <stdint.h>
 
 typedef enum {
-   RT_ISIG_IN           = (1u << 0),
-   RT_ISIG_OUT          = (1u << 1),
-   RT_ISIG_TWO_STATE    = (1u << 2),
-   RT_ISIG_IS_NET       = (1u << 3),
-   RT_ISIG_COMB_WRITTEN = (1u << 4),
-   RT_ISIG_COMB_READ    = (1u << 5),
-   RT_ISIG_FF_WRITTEN   = (1u << 6),
-   RT_ISIG_OBSERVED     = (1u << 7),
-   RT_ISIG_DIRECT_LINK  = (1u << 8),
+   RT_ISIG_IN             = (1u << 0),
+   RT_ISIG_OUT            = (1u << 1),
+   RT_ISIG_TWO_STATE      = (1u << 2),
+   RT_ISIG_IS_NET         = (1u << 3),
+   RT_ISIG_COMB_WRITTEN   = (1u << 4),
+   RT_ISIG_COMB_READ      = (1u << 5),
+   RT_ISIG_FF_WRITTEN     = (1u << 6),
+   RT_ISIG_OBSERVED       = (1u << 7),
+   RT_ISIG_DIRECT_LINK    = (1u << 8),
+   RT_ISIG_STD_LOGIC9     = (1u << 9),
+   RT_ISIG_STD_LOGIC_ELEM = (1u << 10),
 } rt_island_sig_flags_t;
+
+#define RT_IEDGE_CLK_POSEDGE  (1u << 0)
+#define RT_IEDGE_RST_POSEDGE  (1u << 1)
+#define RT_IEDGE_VHDL         (1u << 2)
+#define RT_IEDGE_VHDL_EVENT   (1u << 3)
+#define RT_IEDGE_RST_LEVEL    (1u << 4)
 
 typedef struct _rt_super_island rt_super_island_t;
 typedef struct _rt_super_domain rt_super_domain_t;
@@ -76,6 +84,7 @@ typedef struct {
    int32_t            rst_sig_idx;
    bool               clk_posedge;
    bool               rst_posedge;
+   uint8_t            edge_flags;
    uint8_t            prev_clk;
    uint8_t            prev_rst;
    bool               in_sample_q;

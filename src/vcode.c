@@ -733,7 +733,8 @@ void vcode_opt(void)
 
             switch (o->kind) {
             case VCODE_OP_FCALL:
-               if (o->result == VCODE_INVALID_REG)
+               if (o->result == VCODE_INVALID_REG
+                   || strncmp(istr(o->func), "__sv_island_", 12) == 0)
                   break;
             case VCODE_OP_CONST:
             case VCODE_OP_CONST_REAL:

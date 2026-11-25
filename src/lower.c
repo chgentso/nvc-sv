@@ -36,6 +36,8 @@
 #include "type.h"
 #include "vcode.h"
 #include "vhdl/vhdl-lower.h"
+#include "vhdl/vhdl-island.h"
+#include "vhdl/vhdl-island-lower.h"
 #include "vhdl/vhdl-util.h"
 #include "vhdl/vhdl-phase.h"
 
@@ -14256,6 +14258,30 @@ vcode_unit_t lower_thunk_in_context(unit_registry_t *registry, tree_t t,
    return thunk;
 }
 
+static mir_context_t *unit_registry_mir(unit_registry_t *ur);
+
+static vcode_reg_t lower_get_island_leaf_sig(lower_unit_t *lu, tree_t decl,
+                                             const int *path, uint8_t len)
+{
+   vcode_reg_t reg = (tree_kind(decl) == T_PORT_DECL)
+      ? lower_port_ref(lu, decl)
+      : lower_signal_ref(lu, decl);
+   for (uint8_t i = 0; i < len; i++) {
+      if (vtype_kind(vcode_reg_type(reg)) == VCODE_TYPE_UARRAY)
+         reg = emit_unwrap(reg);
+      reg = emit_record_ref(reg, path[i]);
+   }
+   vtype_kind_t vk = vcode_reg_kind(reg);
+   if (vk == VCODE_TYPE_POINTER) {
+      vtype_kind_t ptk = vtype_kind(vtype_pointed(vcode_reg_type(reg)));
+      if (ptk == VCODE_TYPE_SIGNAL || ptk == VCODE_TYPE_UARRAY)
+         reg = emit_load_indirect(reg);
+   }
+   if (vcode_reg_kind(reg) == VCODE_TYPE_UARRAY)
+      reg = emit_unwrap(reg);
+   return reg;
+}
+
 lower_unit_t *lower_instance(unit_registry_t *ur, lower_unit_t *parent,
                              cover_data_t *cover, cover_obj_t cscope,
                              tree_t block)
@@ -14322,6 +14348,12 @@ lower_unit_t *lower_instance(unit_registry_t *ur, lower_unit_t *parent,
 
    const bool use_mir = opt_get_int(OPT_LOWER_MIR);
    ident_t sym_prefix = tree_ident2(hier);
+
+   vhdl_island_ctx_t *ictx = NULL;
+   if (ur != NULL && unit_registry_mir(ur) != NULL)
+      ictx = vhdl_island_lower_prepare(unit_registry_mir(ur), block,
+                                       sym_prefix, cover);
+
    const int nstmts = tree_stmts(block);
    for (int i = 0; i < nstmts; i++) {
       tree_t s = tree_stmt(block, i);
@@ -14329,6 +14361,10 @@ lower_unit_t *lower_instance(unit_registry_t *ur, lower_unit_t *parent,
       case T_PROCESS:
          {
             ident_t sym = ident_prefix(sym_prefix, tree_ident(s), '.');
+            if (ictx != NULL && vhdl_island_stmt_fused(ictx, i)) {
+               unit_registry_mark_fused(ur, sym);
+               break;
+            }
             if (use_mir)
                unit_registry_defer2(ur, sym, lu, MIR_UNIT_PROCESS,
                                     vhdl_lower_deferred, tree_to_object(s));
@@ -14346,6 +14382,11 @@ lower_unit_t *lower_instance(unit_registry_t *ur, lower_unit_t *parent,
       default:
          should_not_reach_here();
       }
+   }
+
+   if (ictx != NULL) {
+      vhdl_island_lower_emit_vcode_init(ictx, lu, lower_get_island_leaf_sig);
+      vhdl_island_ctx_free(ictx);
    }
 
    emit_return(VCODE_INVALID_REG);
@@ -14447,8 +14488,14 @@ typedef bool (*dep_filter_fn_t)(ident_t, void *);
 typedef struct _unit_registry {
    hash_t        *map;
    hset_t        *visited;
+   hset_t        *fused_procs;
    mir_context_t *mir;
 } unit_registry_t;
+
+static mir_context_t *unit_registry_mir(unit_registry_t *ur)
+{
+   return ur->mir;
+}
 
 typedef struct {
    lower_unit_t *parent;
@@ -14505,8 +14552,25 @@ void unit_registry_free(unit_registry_t *ur)
       }
    }
 
+   if (ur->fused_procs != NULL)
+      hset_free(ur->fused_procs);
    hash_free(ur->map);
    free(ur);
+}
+
+void unit_registry_mark_fused(unit_registry_t *ur, ident_t ident)
+{
+   if (ur == NULL || ident == NULL)
+      return;
+   if (ur->fused_procs == NULL)
+      ur->fused_procs = hset_new(64);
+   hset_insert(ur->fused_procs, ident);
+}
+
+bool unit_registry_is_fused(unit_registry_t *ur, ident_t ident)
+{
+   return ur != NULL && ur->fused_procs != NULL && ident != NULL
+      && hset_contains(ur->fused_procs, ident);
 }
 
 void unit_registry_put(unit_registry_t *ur, lower_unit_t *lu)

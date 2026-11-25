@@ -281,6 +281,8 @@ static void free_value(rt_nexus_t *n, rt_value_t v);
 static rt_nexus_t *clone_nexus(rt_model_t *m, rt_nexus_t *old, int offset);
 static void put_driving(rt_model_t *m, rt_nexus_t *n, const void *value);
 static void put_effective(rt_model_t *m, rt_nexus_t *n, const void *value);
+static void update_driving(rt_model_t *m, rt_nexus_t *n, bool safe);
+static void update_effective(rt_model_t *m, rt_nexus_t *n);
 static bool run_trigger(rt_model_t *m, rt_trigger_t *t);
 static void wakeup_all(rt_model_t *m, void **pending);
 static void reset_scope(rt_model_t *m, rt_scope_t *s);
@@ -3298,6 +3300,8 @@ static void create_processes(rt_model_t *m, rt_scope_t *s)
          {
             ident_t name = tree_ident(t);
             ident_t sym = ident_prefix(sym_prefix, name, '.');
+            if (jit_is_fused_proc(m->jit, sym))
+               break;
 
             rt_proc_t *p = xcalloc(sizeof(rt_proc_t));
             p->where     = t;
@@ -3432,6 +3436,18 @@ void model_reset(rt_model_t *m)
    tlab_reset(thread->tlab);   // No allocations can be live past here
 
    rt_island_reset_all(m->islands);
+
+   if (m->islands != NULL) {
+      while (heap_size(m->driving_heap) > 0) {
+         rt_nexus_t *n = heap_extract_min(m->driving_heap);
+         update_driving(m, n, true);
+      }
+      while (heap_size(m->effective_heap) > 0) {
+         rt_nexus_t *n = heap_extract_min(m->effective_heap);
+         update_effective(m, n);
+      }
+      tlab_reset(thread->tlab);
+   }
 
    run_callbacks(m, END_OF_INITIALISATION);
 }
@@ -5107,7 +5123,8 @@ static void model_cycle_body(rt_model_t *m)
          if (!rt_island_eval_ff(m->jit, m, m->islands, model_thread(m)->tlab))
             m->force_stop = true;
       }
-      if (rt_island_has_dirty(m->islands))
+      if (rt_island_has_dirty(m->islands) || heap_size(m->driving_heap) > 0
+          || heap_size(m->effective_heap) > 0)
          m->next_is_delta = true;
    }
 
@@ -6479,6 +6496,21 @@ static void deposit_notify(rt_model_t *m, rt_nexus_t *n)
             enqueue_effective(m, s->u.port.input);
       }
    }
+
+   if (unlikely(n->signal->shared.flags & SIG_F_ISLAND) && n->n_sources == 0) {
+      for (rt_source_t *o = n->outputs; o; o = o->chain_output) {
+         switch (o->tag) {
+         case SOURCE_PORT:
+            update_driving(m, o->u.port.output, false);
+            break;
+         case SOURCE_ACTIVE:
+            wakeup_one(m, o->u.wakeable);
+            break;
+         default:
+            should_not_reach_here();
+         }
+      }
+   }
 }
 
 static void flush_deferred(rt_model_t *m)
@@ -6557,6 +6589,11 @@ void deposit_signal(rt_model_t *m, rt_signal_t *s, const void *values,
 
       if (!cmp_bytes(eff, vptr, valuesz)) {
          const bool defer = save_deferred(m, n, valuesz, eff);
+
+         if ((n->flags & NET_F_EFFECTIVE)
+             && unlikely(n->signal->shared.flags & SIG_F_ISLAND)
+             && n->n_sources == 0)
+            memcpy(nexus_driving(n), vptr, valuesz);
 
          copy2(last, eff, vptr, valuesz);
          m->trigger_epoch++;

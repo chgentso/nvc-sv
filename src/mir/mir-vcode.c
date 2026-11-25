@@ -22,6 +22,7 @@
 #include "vcode.h"
 
 #include <stdlib.h>
+#include <string.h>
 #include <assert.h>
 #include <float.h>
 
@@ -162,6 +163,8 @@ static void import_fcall(mir_unit_t *mu, mir_import_t *imp, int op)
       mir_type_t type = import_type(mu, imp, vcode_reg_type(result));
       imp->map[result] = mir_build_fcall(mu, func, type, MIR_NULL_STAMP,
                                          args, nargs);
+      if (strncmp(istr(func), "__sv_island_", 12) == 0)
+         mir_build_consume(mu, imp->map[result]);
    }
 }
 
