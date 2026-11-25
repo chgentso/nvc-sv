@@ -467,6 +467,22 @@ static void jit_prepare_deps(jit_t *j, jit_func_t *f)
    }
 }
 
+static bool jit_func_is_linked_pkg(const jit_func_t *f)
+{
+   if (f->irbuf == NULL || f->nirs < 5)
+      return false;
+   if (f->irbuf[0].op != MACRO_GETPRIV
+       || f->irbuf[0].arg1.kind != JIT_VALUE_HANDLE
+       || f->irbuf[0].arg1.handle != f->handle)
+      return false;
+   if (f->irbuf[1].op != J_CMP || f->irbuf[2].op != J_JUMP
+       || f->irbuf[3].op != J_SEND || f->irbuf[4].op != J_RET)
+      return false;
+
+   const mptr_t mp = load_acquire(&f->privdata);
+   return mp != MPTR_INVALID && *mptr_get(mp) != NULL;
+}
+
 bool jit_prepare_call(jit_t *j, jit_handle_t handle, unsigned count)
 {
    if (handle == JIT_HANDLE_INVALID)
@@ -488,7 +504,13 @@ bool jit_prepare_call(jit_t *j, jit_handle_t handle, unsigned count)
    if (!f->deps_prepared) {
       if (state != JIT_FUNC_READY || f->irbuf == NULL)
          jit_fill_irbuf(f);
-      jit_prepare_deps(j, f);
+      if (jit_func_is_linked_pkg(f))
+         f->deps_prepared = 1;
+      else
+         jit_prepare_deps(j, f);
+   }
+   else if (f->mt_unsafe && f->irbuf != NULL && jit_func_is_linked_pkg(f)) {
+      f->mt_unsafe = 0;
    }
 
    if (entry == jit_interp && f->next_tier != NULL && count > 0) {

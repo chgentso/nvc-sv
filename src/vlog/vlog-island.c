@@ -59,6 +59,12 @@ typedef struct {
 } sig_meta_t;
 
 typedef struct {
+   uint32_t sig_idx;
+   uint64_t bit_lo;
+   uint64_t bit_hi;
+} sv_write_range_t;
+
+typedef struct {
    vlog_node_t                stmt;
    bool                       eligible;
    island_proc_kind_t         kind;
@@ -66,6 +72,7 @@ typedef struct {
    uint32_t                   node_count;
    A(uint32_t)                reads;
    A(uint32_t)                writes;
+   A(sv_write_range_t)        write_ranges;
    int                        clk_sig_idx;   // Index into sig_metas[]
    bool                       clk_posedge;
    int                        rst_sig_idx;   // Index into sig_metas[] or -1
@@ -813,11 +820,6 @@ static void prescan_external_and_drivers(analyze_ctx_t *ctx)
    const int nstmts = vlog_stmts(ctx->body);
    for (int i = 0; i < nstmts; i++)
       prescan_stmt_drivers(ctx, vlog_stmt(ctx->body, i), false);
-
-   for (uint32_t i = 0; i < ctx->nsigs; i++) {
-      if (ctx->sigs[i].driver_count > 1)
-         mark_sig_external(&ctx->sigs[i], ISIG_EJ_MULTI_DRIVER);
-   }
 }
 
 static void mark_force_cb(vlog_node_t v, void *arg)
@@ -899,6 +901,247 @@ static bool is_pure_systf(vlog_node_t v)
 static bool check_expr(check_ctx_t *cc, vlog_node_t v);
 static bool check_stmt(check_ctx_t *cc, vlog_node_t v);
 
+static vlog_node_t unwrap_typedef(vlog_node_t t)
+{
+   while (t != NULL && vlog_kind(t) == V_TYPE_DECL && vlog_has_type(t))
+      t = vlog_type(t);
+   return t;
+}
+
+static void record_lvalue_write_ranges(check_ctx_t *cc, vlog_node_t lhs)
+{
+   if (lhs == NULL || cc->in_func)
+      return;
+
+   if (vlog_kind(lhs) == V_CONCAT) {
+      for (unsigned i = 0; i < vlog_params(lhs); i++)
+         record_lvalue_write_ranges(cc, vlog_param(lhs, i));
+      return;
+   }
+
+   vlog_node_t steps[16];
+   int nsteps = 0;
+   vlog_node_t cur = lhs;
+   while (cur != NULL && vlog_kind(cur) != V_REF) {
+      const vlog_kind_t k = vlog_kind(cur);
+      if (k != V_MEMBER_REF && k != V_BIT_SELECT && k != V_PART_SELECT)
+         return;
+      if (nsteps >= 16)
+         return;
+      steps[nsteps++] = cur;
+      cur = vlog_value(cur);
+   }
+
+   if (cur == NULL || vlog_kind(cur) != V_REF || !vlog_has_ref(cur))
+      return;
+   vlog_node_t d = vlog_ref(cur);
+   if (hset_contains(cc->locals, d))
+      return;
+
+   const int idx = find_sig_idx(cc->ctx, d);
+   if (idx < 0)
+      return;
+
+   const sig_meta_t *s = &(cc->ctx->sigs[idx]);
+   const uint64_t total_bits = (uint64_t)s->width * s->nelems;
+   uint64_t elem_lo = 0, elem_hi = s->nelems > 0 ? s->nelems - 1 : 0;
+   uint64_t bit_off = 0, bit_w = s->width;
+   vlog_node_t cur_type = vlog_has_type(s->decl) ? vlog_type(s->decl) : NULL;
+   const int n_unpacked = vlog_ranges(s->decl);
+   int unpacked_dim = 0, packed_dim = 0;
+   bool exact = (total_bits > 0 && cur_type != NULL);
+
+   for (int si = nsteps - 1; si >= 0 && exact; si--) {
+      vlog_node_t step = steps[si];
+      const vlog_kind_t sk = vlog_kind(step);
+      cur_type = unwrap_typedef(cur_type);
+      if (cur_type == NULL) {
+         exact = false;
+         break;
+      }
+
+      if (sk == V_MEMBER_REF) {
+         if (unpacked_dim != n_unpacked
+             || vlog_kind(cur_type) != V_STRUCT_DECL
+             || !(vlog_flags(cur_type) & VLOG_F_PACKED)) {
+            exact = false;
+            break;
+         }
+         vlog_node_t mdecl = NULL;
+         if (vlog_has_ref(step))
+            mdecl = vlog_ref(step);
+         else if (vlog_has_ident(step)) {
+            ident_t mid = vlog_ident(step);
+            const int nd = vlog_decls(cur_type);
+            for (int k = 0; k < nd; k++) {
+               vlog_node_t fd = vlog_decl(cur_type, k);
+               if (vlog_ident(fd) == mid) {
+                  mdecl = fd;
+                  break;
+               }
+            }
+         }
+         if (mdecl == NULL || !vlog_has_type(mdecl)) {
+            exact = false;
+            break;
+         }
+         const unsigned moff = vlog_packed_offset(cur_type, mdecl);
+         const unsigned mw = vlog_size(vlog_type(mdecl));
+         if (mw == 0 || moff + mw > bit_w) {
+            exact = false;
+            break;
+         }
+         bit_off += moff;
+         bit_w = mw;
+         cur_type = vlog_type(mdecl);
+         packed_dim = 0;
+      }
+      else if (sk == V_BIT_SELECT) {
+         const unsigned np = vlog_params(step);
+         for (unsigned p = 0; p < np && exact; p++) {
+            int64_t iv;
+            if (!vlog_get_const(vlog_param(step, p), &iv)) {
+               exact = false;
+               break;
+            }
+            if (unpacked_dim < n_unpacked) {
+               vlog_node_t r = vlog_range(s->decl, unpacked_dim);
+               int64_t l, rr;
+               const unsigned dsz = vlog_size(r);
+               if (dsz == 0 || !vlog_bounds(r, &l, &rr)) {
+                  exact = false;
+                  break;
+               }
+               const int64_t pos = (l <= rr) ? (iv - l) : (l - iv);
+               if (pos < 0 || (uint64_t)pos >= dsz) {
+                  exact = false;
+                  break;
+               }
+               const uint64_t stride = (elem_hi - elem_lo + 1) / dsz;
+               elem_lo += (uint64_t)pos * stride;
+               elem_hi = elem_lo + stride - 1;
+               unpacked_dim++;
+            }
+            else {
+               cur_type = unwrap_typedef(cur_type);
+               int64_t l = 0, rr = 0;
+               uint64_t dsz = 0;
+               if (cur_type != NULL && vlog_kind(cur_type) == V_DATA_TYPE
+                   && packed_dim < vlog_ranges(cur_type)) {
+                  vlog_node_t r = vlog_range(cur_type, packed_dim);
+                  dsz = vlog_size(r);
+                  if (dsz == 0 || !vlog_bounds(r, &l, &rr)) {
+                     exact = false;
+                     break;
+                  }
+                  packed_dim++;
+               }
+               else if (packed_dim == 0 && bit_w > 0) {
+                  l = (int64_t)bit_w - 1;
+                  rr = 0;
+                  dsz = bit_w;
+                  packed_dim++;
+               }
+               else {
+                  exact = false;
+                  break;
+               }
+               const int64_t pos = (l >= rr) ? (l - iv) : (iv - l);
+               if (pos < 0 || (uint64_t)pos >= dsz || bit_w < dsz) {
+                  exact = false;
+                  break;
+               }
+               const uint64_t ew = bit_w / dsz;
+               bit_off += (uint64_t)pos * ew;
+               bit_w = ew;
+            }
+         }
+      }
+      else if (sk == V_PART_SELECT) {
+         if (unpacked_dim != n_unpacked) {
+            exact = false;
+            break;
+         }
+         int64_t dl = 0, dr = 0;
+         uint64_t dsz = 0;
+         if (vlog_kind(cur_type) == V_DATA_TYPE
+             && packed_dim < vlog_ranges(cur_type)) {
+            vlog_node_t r = vlog_range(cur_type, packed_dim);
+            dsz = vlog_size(r);
+            if (dsz == 0 || !vlog_bounds(r, &dl, &dr)) {
+               exact = false;
+               break;
+            }
+         }
+         else if (packed_dim == 0 && bit_w > 0) {
+            dl = (int64_t)bit_w - 1;
+            dr = 0;
+            dsz = bit_w;
+         }
+         else {
+            exact = false;
+            break;
+         }
+
+         int64_t sl = 0, sr = 0;
+         const unsigned rk = vlog_subkind(step);
+         if (rk == V_RANGE_CONST) {
+            if (!vlog_get_const(vlog_left(step), &sl)
+                || !vlog_get_const(vlog_right(step), &sr)) {
+               exact = false;
+               break;
+            }
+         }
+         else if (rk == V_RANGE_POS || rk == V_RANGE_NEG) {
+            int64_t base, sw;
+            if (!vlog_get_const(vlog_left(step), &base)
+                || !vlog_get_const(vlog_right(step), &sw) || sw <= 0) {
+               exact = false;
+               break;
+            }
+            if (rk == V_RANGE_POS) {
+               sl = base;
+               sr = base + sw - 1;
+            }
+            else {
+               sl = base - sw + 1;
+               sr = base;
+            }
+         }
+         else {
+            exact = false;
+            break;
+         }
+
+         const int64_t p0 = (dl >= dr) ? (dl - sl) : (sl - dl);
+         const int64_t p1 = (dl >= dr) ? (dl - sr) : (sr - dl);
+         const int64_t plo = MIN(p0, p1), phi = MAX(p0, p1);
+         if (plo < 0 || (uint64_t)phi >= dsz || bit_w < dsz) {
+            exact = false;
+            break;
+         }
+         const uint64_t ew = bit_w / dsz;
+         bit_off += (uint64_t)plo * ew;
+         bit_w = (uint64_t)(phi - plo + 1) * ew;
+         packed_dim++;
+      }
+   }
+
+   sv_write_range_t wr;
+   wr.sig_idx = (uint32_t)idx;
+   if (exact) {
+      wr.bit_lo = elem_lo * s->width + bit_off;
+      wr.bit_hi = (elem_lo == elem_hi)
+         ? (wr.bit_lo + bit_w - 1)
+         : ((elem_hi + 1) * s->width - 1);
+   }
+   else {
+      wr.bit_lo = 0;
+      wr.bit_hi = total_bits > 0 ? total_bits - 1 : 0;
+   }
+   APUSH(cc->proc->write_ranges, wr);
+}
+
 static bool check_lvalue(check_ctx_t *cc, vlog_node_t lhs, bool is_nba,
                          bool is_read_modify_write)
 {
@@ -945,7 +1188,7 @@ static bool check_lvalue(check_ctx_t *cc, vlog_node_t lhs, bool is_nba,
             return false;
          }
 
-         if (s->driver_count > 1 || s->ext_written) {
+         if (s->ext_written) {
             fail_proc(cc, IPROC_EJ_MULTI_DRIVER_TARGET);
             return false;
          }
@@ -1297,7 +1540,10 @@ static bool check_expr(check_ctx_t *cc, vlog_node_t v)
 
    case V_PREFIX:
    case V_POSTFIX:
-      return check_lvalue(cc, vlog_target(v), false, true);
+      if (!check_lvalue(cc, vlog_target(v), false, true))
+         return false;
+      record_lvalue_write_ranges(cc, vlog_target(v));
+      return true;
 
    case V_METHOD_CALL:
    case V_CLASS_NEW:
@@ -1369,16 +1615,23 @@ static bool check_stmt(check_ctx_t *cc, vlog_node_t v)
          fail_proc(cc, IPROC_EJ_DELAY);
          return false;
       }
-      return check_lvalue(cc, vlog_target(v), false, false)
-          && check_expr(cc, vlog_value(v));
+      if (!check_lvalue(cc, vlog_target(v), false, false))
+         return false;
+      record_lvalue_write_ranges(cc, vlog_target(v));
+      return check_expr(cc, vlog_value(v));
 
    case V_OP_ASSIGN:
-      return check_lvalue(cc, vlog_target(v), false, true)
-          && check_expr(cc, vlog_value(v));
+      if (!check_lvalue(cc, vlog_target(v), false, true))
+         return false;
+      record_lvalue_write_ranges(cc, vlog_target(v));
+      return check_expr(cc, vlog_value(v));
 
    case V_PREFIX:
    case V_POSTFIX:
-      return check_lvalue(cc, vlog_target(v), false, true);
+      if (!check_lvalue(cc, vlog_target(v), false, true))
+         return false;
+      record_lvalue_write_ranges(cc, vlog_target(v));
+      return true;
 
    case V_ASSIGN:
    case V_NBASSIGN:
@@ -1390,8 +1643,10 @@ static bool check_stmt(check_ctx_t *cc, vlog_node_t v)
          fail_proc(cc, IPROC_EJ_DELAY);
          return false;
       }
-      return check_lvalue(cc, vlog_target(v), true, false)
-          && check_expr(cc, vlog_value(v));
+      if (!check_lvalue(cc, vlog_target(v), true, false))
+         return false;
+      record_lvalue_write_ranges(cc, vlog_target(v));
+      return check_expr(cc, vlog_value(v));
 
    case V_IF:
       for (unsigned i = 0; i < vlog_conds(v); i++) {
@@ -1602,6 +1857,7 @@ static void check_assign_proc(analyze_ctx_t *ctx, proc_meta_t *pm,
 
    if (check_lvalue(&cc, tgt, false, false)
        && check_expr(&cc, vlog_value(s))) {
+      record_lvalue_write_ranges(&cc, tgt);
       pm->eligible = true;
       pm->kind = IPROC_ASSIGN;
    }
@@ -2011,9 +2267,98 @@ static void check_all_procs(analyze_ctx_t *ctx)
       if (!pm->eligible) {
          ACLEAR(pm->reads);
          ACLEAR(pm->writes);
+         ACLEAR(pm->write_ranges);
          if (k == V_ASSIGN || k == V_ALWAYS)
             mark_ejected_proc_refs(ctx, s);
       }
+   }
+}
+
+static bool sv_procs_write_conflict(const proc_meta_t *a, const proc_meta_t *b,
+                                    uint32_t si)
+{
+   if ((a->kind == IPROC_FF) != (b->kind == IPROC_FF))
+      return true;
+   if (a->kind == IPROC_FF) {
+      if (a->clk_sig_idx != b->clk_sig_idx || a->clk_posedge != b->clk_posedge
+          || a->rst_sig_idx != b->rst_sig_idx
+          || (a->rst_sig_idx >= 0 && a->rst_posedge != b->rst_posedge))
+         return true;
+   }
+
+   bool a_has = false, b_has = false;
+   for (uint32_t i = 0; i < a->write_ranges.count; i++) {
+      const sv_write_range_t ra = a->write_ranges.items[i];
+      if (ra.sig_idx != si)
+         continue;
+      a_has = true;
+      for (uint32_t j = 0; j < b->write_ranges.count; j++) {
+         const sv_write_range_t rb = b->write_ranges.items[j];
+         if (rb.sig_idx != si)
+            continue;
+         b_has = true;
+         if (ra.bit_lo <= rb.bit_hi && rb.bit_lo <= ra.bit_hi)
+            return true;
+      }
+   }
+   return !a_has || !b_has;
+}
+
+static void resolve_multi_drivers(analyze_ctx_t *ctx)
+{
+   bool changed = true;
+   while (changed) {
+      changed = false;
+      for (uint32_t i = 0; i < ctx->nprocs; i++) {
+         proc_meta_t *p = &(ctx->procs[i]);
+         if (!p->eligible)
+            continue;
+
+         bool conflict = false;
+         for (uint32_t j = 0; j < p->writes.count && !conflict; j++) {
+            const uint32_t si = p->writes.items[j];
+            sig_meta_t *sm = &(ctx->sigs[si]);
+            if (sm->ext_written) {
+               conflict = true;
+               break;
+            }
+            if (sm->driver_count > 1) {
+               for (uint32_t k = 0; k < ctx->nprocs; k++) {
+                  if (k == i || !ctx->procs[k].eligible)
+                     continue;
+                  const proc_meta_t *q = &(ctx->procs[k]);
+                  bool q_writes = false;
+                  for (uint32_t w = 0; w < q->writes.count; w++) {
+                     if (q->writes.items[w] == si) {
+                        q_writes = true;
+                        break;
+                     }
+                  }
+                  if (q_writes && sv_procs_write_conflict(p, q, si)) {
+                     sm->ext_written = true;
+                     mark_sig_external(sm, ISIG_EJ_MULTI_DRIVER);
+                     conflict = true;
+                     break;
+                  }
+               }
+            }
+         }
+
+         if (conflict) {
+            p->eligible = false;
+            p->eject_reason = IPROC_EJ_MULTI_DRIVER_TARGET;
+            ACLEAR(p->reads);
+            ACLEAR(p->writes);
+            ACLEAR(p->write_ranges);
+            mark_ejected_proc_refs(ctx, p->stmt);
+            changed = true;
+         }
+      }
+   }
+
+   for (uint32_t i = 0; i < ctx->nsigs; i++) {
+      if (ctx->sigs[i].driver_count > 1 && ctx->sigs[i].ext_written)
+         mark_sig_external(&ctx->sigs[i], ISIG_EJ_MULTI_DRIVER);
    }
 }
 
@@ -2073,8 +2418,9 @@ static uint32_t partition_islands(analyze_ctx_t *ctx)
 
       for (uint32_t j = 0; j < pm->writes.count; j++) {
          uint32_t si = pm->writes.items[j];
-         if (!ctx->sigs[si].is_external && !ctx->sigs[si].is_input_port
-             && !ctx->sigs[si].is_output_port) {
+         if (ctx->sigs[si].driver_count > 1
+             || (!ctx->sigs[si].is_external && !ctx->sigs[si].is_input_port
+                 && !ctx->sigs[si].is_output_port)) {
             if (sig_owner[si] < 0)
                sig_owner[si] = (int)i;
             else
@@ -2153,11 +2499,36 @@ static uint32_t partition_islands(analyze_ctx_t *ctx)
 
    const uint32_t nislands = cur_island + 1;
 
-   // Any signal used across >1 island must be marked externally shared
+   // Any signal used across >1 island must be marked externally shared.
+   // If a multi-driver signal had its writers split across >1 island (due to
+   // budget slicing), eject its writers safely.
    if (nislands > 1) {
       int *sig_island = xmalloc_array(MAX(1u, ctx->nsigs), sizeof(int));
-      for (uint32_t i = 0; i < ctx->nsigs; i++)
+      int *sig_w_island = xmalloc_array(MAX(1u, ctx->nsigs), sizeof(int));
+      for (uint32_t i = 0; i < ctx->nsigs; i++) {
          sig_island[i] = -1;
+         sig_w_island[i] = -1;
+      }
+
+      bool split_multi = false;
+      for (uint32_t i = 0; i < ctx->nprocs; i++) {
+         const proc_meta_t *pm = &(ctx->procs[i]);
+         if (!pm->eligible)
+            continue;
+         for (uint32_t j = 0; j < pm->writes.count; j++) {
+            uint32_t si = pm->writes.items[j];
+            if (sig_w_island[si] < 0)
+               sig_w_island[si] = pm->island_idx;
+            else if (sig_w_island[si] != pm->island_idx) {
+               ctx->sigs[si].ext_written = true;
+               mark_sig_external(&ctx->sigs[si], ISIG_EJ_MULTI_DRIVER);
+               split_multi = true;
+            }
+         }
+      }
+      free(sig_w_island);
+      if (split_multi)
+         resolve_multi_drivers(ctx);
 
       for (uint32_t i = 0; i < ctx->nprocs; i++) {
          const proc_meta_t *pm = &(ctx->procs[i]);
@@ -2657,6 +3028,7 @@ vlog_island_plan_t *vlog_island_analyze(vlog_node_t body, bool is_mixed)
    prescan_external_and_drivers(&ctx);
    prescan_forces(&ctx);
    check_all_procs(&ctx);
+   resolve_multi_drivers(&ctx);
 
    const uint32_t nislands = partition_islands(&ctx);
 
@@ -2699,6 +3071,7 @@ vlog_island_plan_t *vlog_island_analyze(vlog_node_t body, bool is_mixed)
    for (uint32_t i = 0; i < ctx.nprocs; i++) {
       ACLEAR(ctx.procs[i].reads);
       ACLEAR(ctx.procs[i].writes);
+      ACLEAR(ctx.procs[i].write_ranges);
    }
    free(ctx.procs);
    free(ctx.sigs);
