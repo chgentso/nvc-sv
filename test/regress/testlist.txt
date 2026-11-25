@@ -3284,3 +3284,4 @@ vlog_pp_macro_dir1 verilog
 vlog_for_sens1  verilog
 vlog_typeparam_idx1 verilog
 vlog_bits_typeparam1 verilog
+vlog_class_param_dim1 verilog

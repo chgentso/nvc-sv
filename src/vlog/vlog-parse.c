@@ -584,6 +584,8 @@ typedef struct {
    bool        is_type;
    bool        has_def;
    ident_t     tname;    // Name of the data type of a value parameter
+   int         ntype;
+   tokenq_t   *type;
    int         ndef;
    tokenq_t   *def;
 } generic_param_t;
@@ -19140,6 +19142,40 @@ static vlog_node_t generic_param_type(const generic_param_t *p)
    return implicit_type();
 }
 
+static vlog_node_t replay_param_type(const generic_param_t *p)
+{
+   if (p->ntype == 0)
+      return generic_param_type(p);
+
+   generic_class_t tokens = {
+      .ntokens = p->ntype,
+      .tokens  = p->type,
+   };
+
+   parse_state_t saved = state;
+   generic_class_t *saved_class = replay_class;
+   const int saved_pos = replay_pos;
+
+   replay_class = &tokens;
+   replay_pos = 0;
+
+   state.lex_fn = replay_lex;
+   state.tokenq_head = state.tokenq_tail = 0;
+   state.start_loc = LOC_INVALID;
+
+   vlog_node_t result;
+   if (peek() == tID && is_type_name(peek_reference()))
+      result = p_data_type();
+   else
+      result = p_data_type_or_implicit();
+
+   state = saved;
+   replay_class = saved_class;
+   replay_pos = saved_pos;
+
+   return result;
+}
+
 static bool pfmt_class_member(vlog_node_t d)
 {
    // Whether a property is shown by %p of an object
@@ -19331,7 +19367,7 @@ static void p_class_body(vlog_node_t v, ident_t name, generic_class_t *g,
                vlog_set_type(d, str);
             }
             else
-               vlog_set_type(d, generic_param_type(&(g->params[i])));
+               vlog_set_type(d, replay_param_type(&(g->params[i])));
             vlog_set_value(d, actuals[i]);
          }
 
@@ -19509,26 +19545,71 @@ static vlog_node_t p_generic_class(ident_t name, vlog_flags_t flags)
 
    bool is_type = false;
    while (not_at_token(tRPAREN)) {
-      if (scan(tPARAMETER, tLOCALPARAM))
+      if (scan(tPARAMETER, tLOCALPARAM)) {
          (void)one_of(tPARAMETER, tLOCALPARAM);
+         is_type = false;
+      }
 
-      ident_t tname = NULL;
-      if (optional(tTYPE))
+      ident_t tname = NULL, pname = NULL;
+      int ntype = 0;
+      tokenq_t *type_toks = NULL;
+      if (optional(tTYPE)) {
          is_type = true;
-      else if (peek() != tID || (peek_nth(2) != tEQ && peek_nth(2) != tCOMMA
-                                 && peek_nth(2) != tRPAREN)) {
-         if (peek() == tID && peek_nth(2) == tID)
-            tname = peek_ident_nth(1);
-         (void)p_data_type_or_implicit();
+         pname = p_identifier();
+      }
+      else if (peek() == tID && (peek_nth(2) == tEQ || peek_nth(2) == tCOMMA
+                                 || peek_nth(2) == tRPAREN)) {
+         pname = p_identifier();
+      }
+      else {
+         // Collect all tokens up to =, ,, or ) at depth 0; the last tID at
+         // depth 0 is the parameter name and the tokens before it are the type
+         SCOPED_A(tokenq_t) toks = AINIT;
+         int name_pos = -1;
+         for (int depth = 0;;) {
+            const token_t tok = peek();
+            if (tok == tEOF)
+               break;
+            else if (depth == 0
+                     && (tok == tEQ || tok == tCOMMA || tok == tRPAREN))
+               break;
+            else if (tok == tLPAREN || tok == tLSQUARE || tok == tLBRACE)
+               depth++;
+            else if (tok == tRPAREN || tok == tRSQUARE || tok == tRBRACE)
+               depth--;
+            else if (depth == 0 && tok == tID)
+               name_pos = toks.count;
+
+            tokenq_t saved = state.tokenq[state.tokenq_tail];
+            drop_token(&state);
+            APUSH(toks, saved);
+         }
+
+         if (name_pos < 0) {
+            error_at(&state.last_loc, "expected parameter name in "
+                     "parameterised class");
+            break;
+         }
+
+         pname = toks.items[name_pos].lval.ident;
+         if (name_pos > 0) {
+            ntype = name_pos;
+            type_toks = xmalloc_array(ntype, sizeof(tokenq_t));
+            memcpy(type_toks, toks.items, ntype * sizeof(tokenq_t));
+            if (ntype == 1 && type_toks[0].token == tID)
+               tname = type_toks[0].lval.ident;
+         }
          is_type = false;
       }
 
       g->params = xrealloc_array(g->params, g->nparams + 1,
                                  sizeof(generic_param_t));
       generic_param_t *p = &(g->params[g->nparams++]);
-      p->name = p_identifier();
+      p->name = pname;
       p->is_type = is_type;
       p->tname = tname;
+      p->ntype = ntype;
+      p->type = type_toks;
       p->has_def = false;
       p->ndef = 0;
       p->def = NULL;
@@ -20429,7 +20510,7 @@ static vlog_node_t replay_default(vlog_node_t generic, generic_class_t *g,
       if (g->params[i].is_type)
          vlog_set_type(d, actuals[i]);
       else {
-         vlog_set_type(d, generic_param_type(&(g->params[i])));
+         vlog_set_type(d, replay_param_type(&(g->params[i])));
          vlog_set_value(d, actuals[i]);
       }
 
@@ -21153,6 +21234,10 @@ static void save_generic_classes(void)
          if (p->tname != NULL)
             tb_printf(tb, "T %zu %s\n", strlen(istr(p->tname)),
                       istr(p->tname));
+         if (p->ntype > 0) {
+            tb_cat(tb, "D\n");
+            put_generic_tokens(tb, p->type, p->ntype);
+         }
          put_generic_tokens(tb, p->def, p->ndef);
       }
 
@@ -21290,6 +21375,11 @@ static generic_class_t *load_generic_class(vlog_node_t generic)
          const size_t tlen = strtoul(p + 2, &eptr, 10);
          gp->tname = ident_new_n(eptr + 1, tlen);
          p = eptr + 1 + tlen + 1;
+      }
+
+      if (p[0] == 'D' && p[1] == '\n') {
+         p += 2;
+         p = get_generic_tokens(p, base, &gp->type, &gp->ntype);
       }
 
       p = get_generic_tokens(p, base, &gp->def, &gp->ndef);
