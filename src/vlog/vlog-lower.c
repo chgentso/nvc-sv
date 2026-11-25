@@ -2239,6 +2239,8 @@ static vlog_select_t vlog_lower_select(vlog_gen_t *g, vlog_node_t v)
 
          vlog_node_t decl = vlog_kind(value) == V_MEMBER_REF
             ? vlog_member_decl(value) : vlog_ref(value);
+         vlog_node_t udecl = vlog_kind(decl) == V_PORT_DECL && vlog_has_ref(decl)
+            ? vlog_ref(decl) : decl;
          // Only a variable in memory has its unpacked dimensions separate
          const int nunpacked = vlog_kind(decl) == V_LOCAL_DECL
             || vlog_kind(decl) == V_VAR_DECL
@@ -2255,11 +2257,11 @@ static vlog_select_t vlog_lower_select(vlog_gen_t *g, vlog_node_t v)
 
          const bool island_unpacked =
             prefix.island_sig_plus1 > 0 && prefix.island_need_elem
-            && nunpacked > 0;
+            && (vlog_ranges(decl) > 0 || vlog_ranges(udecl) > 0);
          const bool unpacked_var =
-            nunpacked > 0 && (island_unpacked
-                              || mir_points_to_vector(g->mu, prefix.obj)
-                              || real_mem);
+            island_unpacked
+            || (nunpacked > 0 && (mir_points_to_vector(g->mu, prefix.obj)
+                                  || real_mem));
 
          mir_type_t t_offset = mir_offset_type(g->mu);
          mir_value_t zero = mir_const(g->mu, t_offset, 0);
@@ -2269,18 +2271,22 @@ static vlog_select_t vlog_lower_select(vlog_gen_t *g, vlog_node_t v)
             mir_build_cmp(g->mu, MIR_CMP_NEQ, prefix.count, zero);
 
          unsigned elems = 1;
-         switch (vlog_kind(decl)) {
-         case V_VAR_DECL:
-         case V_NET_DECL:
-         case V_PORT_DECL:
-         case V_TF_PORT_DECL:
-         case V_LOCAL_DECL:
-         case V_PARAM_DECL:
-         case V_LOCALPARAM:
-            elems = vlog_size(decl);
-            break;
-         default:
-            break;
+         if (island_unpacked)
+            elems = prefix.island_nelems;
+         else {
+            switch (vlog_kind(decl)) {
+            case V_VAR_DECL:
+            case V_NET_DECL:
+            case V_PORT_DECL:
+            case V_TF_PORT_DECL:
+            case V_LOCAL_DECL:
+            case V_PARAM_DECL:
+            case V_LOCALPARAM:
+               elems = vlog_size(decl);
+               break;
+            default:
+               break;
+            }
          }
          unsigned size = unpacked_var
             ? (real_mem ? 1 : mir_get_size(g->mu, prefix.type))
