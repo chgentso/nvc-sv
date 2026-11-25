@@ -3272,4 +3272,5 @@ svpoll_dirty1   shell
 ieee_fast1      normal,2008
 vlog_jit_fold_reentry1 verilog
 vlog_packed2    verilog
+vlog_packed3    verilog
 svforkescape2   verilog

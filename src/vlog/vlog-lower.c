@@ -700,7 +700,16 @@ static bool vlog_var_can_pack(vlog_gen_t *g, vlog_node_t v)
 
    const type_info_t *ti = vlog_type_info(g, vlog_type(v));
    const mir_class_t cls = mir_get_class(g->mu, ti->type);
-   return (cls == MIR_TYPE_VEC2 || cls == MIR_TYPE_VEC4) && ti->size >= 1;
+   if ((cls != MIR_TYPE_VEC2 && cls != MIR_TYPE_VEC4) || ti->size < 1)
+      return false;
+
+   // Cap monolithic packed signal storage so wide packed arrays (e.g.
+   // multi-round crypto tables / regfiles) split into per-slice nexuses
+   // instead of amplifying wakeups and full-vector copies across watchers.
+   const int max_bits =
+      (vlog_kind(ti->node) == V_DATA_TYPE && vlog_ranges(ti->node) > 1)
+      ? 128 : 256;
+   return ti->size <= max_bits;
 }
 
 static mir_type_t vlog_signal_type(vlog_gen_t *g, vlog_node_t decl,
