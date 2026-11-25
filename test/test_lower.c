@@ -7212,11 +7212,17 @@ START_TEST(test_issue1707)
 }
 END_TEST
 
+static void setup_lower(void)
+{
+   opt_set_int(OPT_RTL_ISLANDS, RTL_ISLANDS_OFF);
+}
+
 Suite *get_lower_tests(void)
 {
    Suite *s = suite_create("lower");
 
    TCase *tc = nvc_unit_test();
+   tcase_add_checked_fixture(tc, setup_lower, NULL);
    tcase_add_test(tc, test_wait1);
    tcase_add_test(tc, test_assign1);
    tcase_add_test(tc, test_assign2);
