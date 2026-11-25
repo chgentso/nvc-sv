@@ -3295,3 +3295,4 @@ vlog_vif_typeparam1 verilog
 vlog_island_countbits1 verilog
 vlog_island_ifport1 verilog
 vlog_island_reset_hop1 verilog
+vlog_island_partial_sig1 verilog

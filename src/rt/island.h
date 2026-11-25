@@ -201,7 +201,7 @@ bool rt_island_put_packed(rt_model_t *m, rt_signal_t *sig,
                           uint32_t msb_off, uint32_t count,
                           uint64_t a_val, uint64_t b_val, uint32_t src_flags,
                           bool is_force);
-void rt_island_vpi_release_slice(rt_model_t *m, rt_signal_t *sig,
+bool rt_island_vpi_release_slice(rt_model_t *m, rt_signal_t *sig,
                                  uint32_t offset, uint32_t count);
 void rt_island_report_forces(rt_island_mgr_t *mgr, rt_signal_t *sig,
                              uint32_t offset, uint32_t count,
@@ -227,6 +227,17 @@ void rt_island_finish(void *handle);
 void rt_island_deposit_packed(rt_model_t *m, rt_signal_t *s, uint32_t msb_off,
                               uint32_t count, uint64_t a_val, uint64_t b_val,
                               uint32_t src_flags);
+void rt_island_deposit_unowned_packed(rt_model_t *m, rt_signal_t *s,
+                                      uint32_t msb_off, uint32_t count,
+                                      uint64_t a_val, uint64_t b_val,
+                                      uint32_t src_flags);
+void rt_island_force_unowned_packed(rt_model_t *m, rt_signal_t *s,
+                                    uint32_t msb_off, uint32_t count,
+                                    uint64_t a_val, uint64_t b_val,
+                                    uint32_t src_flags);
+void rt_island_force_unowned_bytes(rt_model_t *m, rt_signal_t *s,
+                                   const void *values, int offset,
+                                   size_t count);
 void rt_island_request_delta(rt_model_t *m);
 jit_t *rt_island_model_jit(rt_model_t *m);
 rt_island_mgr_t *rt_island_model_mgr(rt_model_t *m);

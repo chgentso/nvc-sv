@@ -4850,11 +4850,13 @@ static void vpi_write_signal(c_abstractDecl *d, rt_signal_t *s,
    if (unlikely(s->shared.flags & SIG_F_ISLAND)) {
       switch (flags & 0xff) {
       case vpiForceFlag:
-         rt_island_put_bytes(m, s, values, d->offset, count, true);
-         return;
+         if (rt_island_put_bytes(m, s, values, d->offset, count, true))
+            return;
+         break;
       case vpiReleaseFlag:
-         rt_island_vpi_release_slice(m, s, d->offset, count);
-         return;
+         if (rt_island_vpi_release_slice(m, s, d->offset, count))
+            return;
+         break;
       case vpiInertialDelay:
       case vpiTransportDelay:
       case vpiPureTransportDelay:
@@ -4862,8 +4864,9 @@ static void vpi_write_signal(c_abstractDecl *d, rt_signal_t *s,
          sched_deposit(m, s, values, d->offset, count, delay, false);
          return;
       default:
-         rt_island_put_bytes(m, s, values, d->offset, count, false);
-         return;
+         if (rt_island_put_bytes(m, s, values, d->offset, count, false))
+            return;
+         break;
       }
    }
 
@@ -9063,8 +9066,8 @@ static int hdl_write(hdl_target_t *t, const svLogicVecVal *value, bool force)
 
    rt_model_t *model = vpi_get_model(vpi_context());
    if (unlikely(t->signal->shared.flags & SIG_F_ISLAND)) {
-      rt_island_put_bytes(model, t->signal, vals, t->offset, t->count, force);
-      return 1;
+      if (rt_island_put_bytes(model, t->signal, vals, t->offset, t->count, force))
+         return 1;
    }
    if (force) {
       // The forced value of a variable is seen immediately
@@ -9086,8 +9089,8 @@ static void hdl_release(hdl_target_t *t)
    rt_model_t *model = vpi_get_model(vpi_context());
 
    if (unlikely(t->signal->shared.flags & SIG_F_ISLAND)) {
-      rt_island_vpi_release_slice(model, t->signal, t->offset, t->count);
-      return;
+      if (rt_island_vpi_release_slice(model, t->signal, t->offset, t->count))
+         return;
    }
 
    if (t->is_var) {
@@ -9173,8 +9176,9 @@ static void vpi_mem_bulk_flush(vpi_mem_bulk_t *b)
    const uint8_t *src = b->stage + (size_t)b->stage_head * b->width;
    const int off = (int)(b->base_offset + (uint64_t)b->run_start * b->width);
    const size_t cnt = (size_t)b->run_len * b->width;
-   if (unlikely(b->sig->shared.flags & SIG_F_ISLAND))
-      rt_island_put_bytes(m, b->sig, src, off, cnt, false);
+   if (unlikely(b->sig->shared.flags & SIG_F_ISLAND)
+       && rt_island_put_bytes(m, b->sig, src, off, cnt, false))
+      ;
    else
       deposit_signal(m, b->sig, src, off, cnt);
    b->run_len = 0;

@@ -4674,27 +4674,70 @@ bool rt_island_vpi_put(rt_model_t *m, rt_signal_t *sig,
    return true;
 }
 
+static bool island_build_cov_mask(rt_island_sig_t *owners, uint32_t offset,
+                                  uint32_t count, uint64_t *stack_buf,
+                                  size_t stack_words, uint64_t **mask_out,
+                                  uint64_t **heap_out)
+{
+   const uint32_t nwords = (count + 63u) / 64u;
+   uint64_t *mask = stack_buf;
+   *heap_out = NULL;
+   if (nwords > stack_words) {
+      *heap_out = xcalloc_array(nwords, sizeof(uint64_t));
+      mask = *heap_out;
+   }
+   else
+      memset(mask, 0, (size_t)nwords * sizeof(uint64_t));
+   *mask_out = mask;
+
+   for (rt_island_sig_t *s = owners; s != NULL; s = s->next_owner) {
+      const uint32_t s_start = (uint32_t)s->sig_offset;
+      const uint32_t s_end = s_start + s->width * s->nelems;
+      const uint32_t r_start = MAX(offset, s_start);
+      const uint32_t r_end = MIN(offset + count, s_end);
+      for (uint32_t pos = r_start; pos < r_end; pos++) {
+         const uint32_t k = pos - offset;
+         mask[k >> 6] |= UINT64_C(1) << (k & 63u);
+      }
+   }
+
+   for (uint32_t w = 0; w < nwords; w++) {
+      const uint64_t expect = (w + 1u == nwords && (count & 63u) != 0)
+         ? ((UINT64_C(1) << (count & 63u)) - 1u) : ~UINT64_C(0);
+      if ((mask[w] & expect) != expect)
+         return false;
+   }
+   return true;
+}
+
 bool rt_island_put_bytes(rt_model_t *m, rt_signal_t *sig,
                          const uint8_t *bytes, uint32_t offset, uint32_t count,
                          bool is_force)
 {
    rt_island_mgr_t *mgr = rt_island_model_mgr(m);
-   if (mgr == NULL || mgr->sig_map == NULL || sig == NULL)
+   if (mgr == NULL || mgr->sig_map == NULL || sig == NULL || count == 0)
       return false;
 
-   rt_island_sig_t *s = hash_get(mgr->sig_map, sig);
-   if (s == NULL)
+   rt_island_sig_t *owners = hash_get(mgr->sig_map, sig);
+   if (owners == NULL)
       return false;
 
-   for (; s != NULL; s = s->next_owner) {
-      if (s->flags & RT_ISIG_DIRECT_LINK)
-         island_break_direct_link(m, s);
+   bool any_hit = false;
+   bool full_cover = false;
+   for (rt_island_sig_t *s = owners; s != NULL; s = s->next_owner) {
       const uint32_t s_start = (uint32_t)s->sig_offset;
       const uint32_t s_end = s_start + s->width * s->nelems;
       const uint32_t r_start = MAX(offset, s_start);
       const uint32_t r_end = MIN(offset + count, s_end);
       if (r_start >= r_end)
          continue;
+
+      any_hit = true;
+      if (r_start == offset && r_end == offset + count)
+         full_cover = true;
+
+      if (s->flags & RT_ISIG_DIRECT_LINK)
+         island_break_direct_link(m, s);
 
       const size_t step = (s->flags & RT_ISIG_STD_LOGIC9) ? s->elem_size : 1u;
       island_write_bits_slice(s->isl, s, r_start - s_start, r_end - r_start,
@@ -4710,6 +4753,37 @@ bool rt_island_put_bytes(rt_model_t *m, rt_signal_t *sig,
          }
       }
    }
+
+   if (!any_hit)
+      return false;
+   if (full_cover)
+      return true;
+
+   uint64_t cov_stack[16];
+   uint64_t *cov = NULL, *cov_heap = NULL;
+   if (!island_build_cov_mask(owners, offset, count, cov_stack,
+                              ARRAY_LEN(cov_stack), &cov, &cov_heap)) {
+      const size_t step = (sig->shared.flags & SIG_F_PACKED)
+         ? 1u : (sig->nexus.size > 0 ? sig->nexus.size : 1u);
+      uint32_t k = 0;
+      while (k < count) {
+         if (cov[k >> 6] & (UINT64_C(1) << (k & 63u))) {
+            k++;
+            continue;
+         }
+         const uint32_t u_start = k;
+         while (k < count && !(cov[k >> 6] & (UINT64_C(1) << (k & 63u))))
+            k++;
+         const uint32_t u_cnt = k - u_start;
+         const uint8_t *src = bytes != NULL ? bytes + (size_t)u_start * step : NULL;
+         if (is_force)
+            rt_island_force_unowned_bytes(m, sig, src, (int)(offset + u_start),
+                                          u_cnt);
+         else
+            deposit_signal(m, sig, src, (int)(offset + u_start), u_cnt);
+      }
+   }
+   free(cov_heap);
    return true;
 }
 
@@ -4719,11 +4793,11 @@ bool rt_island_put_packed(rt_model_t *m, rt_signal_t *sig,
                           bool is_force)
 {
    rt_island_mgr_t *mgr = rt_island_model_mgr(m);
-   if (mgr == NULL || mgr->sig_map == NULL || sig == NULL)
+   if (mgr == NULL || mgr->sig_map == NULL || sig == NULL || count == 0)
       return false;
 
-   rt_island_sig_t *s = hash_get(mgr->sig_map, sig);
-   if (s == NULL)
+   rt_island_sig_t *owners = hash_get(mgr->sig_map, sig);
+   if (owners == NULL)
       return false;
 
    const uint64_t *src_a = (src_flags & PACK_SRC_SCALAR)
@@ -4732,15 +4806,22 @@ bool rt_island_put_packed(rt_model_t *m, rt_signal_t *sig,
       : ((src_flags & PACK_SRC_SCALAR)
          ? &b_val : (const uint64_t *)(uintptr_t)b_val);
 
-   for (; s != NULL; s = s->next_owner) {
-      if (s->flags & RT_ISIG_DIRECT_LINK)
-         island_break_direct_link(m, s);
+   bool any_hit = false;
+   bool full_cover = false;
+   for (rt_island_sig_t *s = owners; s != NULL; s = s->next_owner) {
       const uint32_t s_start = (uint32_t)s->sig_offset;
       const uint32_t s_end = s_start + s->width * s->nelems;
       const uint32_t r_start = MAX(msb_off, s_start);
       const uint32_t r_end = MIN(msb_off + count, s_end);
       if (r_start >= r_end)
          continue;
+
+      any_hit = true;
+      if (r_start == msb_off && r_end == msb_off + count)
+         full_cover = true;
+
+      if (s->flags & RT_ISIG_DIRECT_LINK)
+         island_break_direct_link(m, s);
 
       // For exact alignment with r_start == msb_off:
       const uint32_t skip = r_start - msb_off;
@@ -4775,27 +4856,92 @@ bool rt_island_put_packed(rt_model_t *m, rt_signal_t *sig,
          }
       }
    }
+
+   if (!any_hit)
+      return false;
+   if (full_cover)
+      return true;
+
+   uint64_t cov_stack[16];
+   uint64_t *cov = NULL, *cov_heap = NULL;
+   if (!island_build_cov_mask(owners, msb_off, count, cov_stack,
+                              ARRAY_LEN(cov_stack), &cov, &cov_heap)) {
+      const uint32_t vec_flags = src_flags & ~PACK_SRC_SCALAR;
+      uint32_t k = 0;
+      while (k < count) {
+         if (cov[k >> 6] & (UINT64_C(1) << (k & 63u))) {
+            k++;
+            continue;
+         }
+         const uint32_t u_start = k;
+         while (k < count && !(cov[k >> 6] & (UINT64_C(1) << (k & 63u))))
+            k++;
+         const uint32_t sub_cnt = k - u_start;
+         const uint32_t nw = (sub_cnt + 63u) / 64u;
+         uint64_t sa[4], sb[4];
+         uint64_t *heap = NULL;
+         uint64_t *wa = sa, *wb = sb;
+         if (nw > ARRAY_LEN(sa)) {
+            heap = xcalloc_array(nw * 2u, sizeof(uint64_t));
+            wa = heap;
+            wb = heap + nw;
+         }
+         else {
+            memset(sa, 0, (size_t)nw * sizeof(uint64_t));
+            memset(sb, 0, (size_t)nw * sizeof(uint64_t));
+         }
+         for (uint32_t j = 0; j < sub_cnt; j++) {
+            const uint32_t src_bit = count - 1u - (u_start + j);
+            const uint32_t dst_bit = sub_cnt - 1u - j;
+            if ((src_a[src_bit / 64u] >> (src_bit & 63u)) & 1u)
+               wa[dst_bit / 64u] |= UINT64_C(1) << (dst_bit & 63u);
+            if (src_b != NULL
+                && ((src_b[src_bit / 64u] >> (src_bit & 63u)) & 1u))
+               wb[dst_bit / 64u] |= UINT64_C(1) << (dst_bit & 63u);
+         }
+         if (is_force)
+            rt_island_force_unowned_packed(m, sig, msb_off + u_start, sub_cnt,
+                                           (uint64_t)(uintptr_t)wa,
+                                           (uint64_t)(uintptr_t)wb, vec_flags);
+         else
+            rt_island_deposit_unowned_packed(m, sig, msb_off + u_start, sub_cnt,
+                                             (uint64_t)(uintptr_t)wa,
+                                             (uint64_t)(uintptr_t)wb,
+                                             vec_flags);
+         free(heap);
+      }
+   }
+   free(cov_heap);
    return true;
 }
 
-void rt_island_vpi_release_slice(rt_model_t *m, rt_signal_t *sig,
+bool rt_island_vpi_release_slice(rt_model_t *m, rt_signal_t *sig,
                                  uint32_t offset, uint32_t count)
 {
    rt_island_mgr_t *mgr = rt_island_model_mgr(m);
-   if (mgr == NULL || mgr->sig_map == NULL || sig == NULL)
-      return;
+   if (mgr == NULL || mgr->sig_map == NULL || sig == NULL || count == 0)
+      return false;
 
-   rt_island_sig_t *s = hash_get(mgr->sig_map, sig);
-   for (; s != NULL; s = s->next_owner) {
-      rt_island_t *isl = s->isl;
-      if (!isl->has_forces)
-         continue;
+   rt_island_sig_t *owners = hash_get(mgr->sig_map, sig);
+   if (owners == NULL)
+      return false;
 
+   bool any_hit = false;
+   bool full_cover = false;
+   for (rt_island_sig_t *s = owners; s != NULL; s = s->next_owner) {
       const uint32_t s_start = (uint32_t)s->sig_offset;
       const uint32_t s_end = s_start + s->width * s->nelems;
       const uint32_t r_start = MAX(offset, s_start);
       const uint32_t r_end = MIN(offset + count, s_end);
       if (r_start >= r_end)
+         continue;
+
+      any_hit = true;
+      if (r_start == offset && r_end == offset + count)
+         full_cover = true;
+
+      rt_island_t *isl = s->isl;
+      if (!isl->has_forces)
          continue;
 
       int fidx = -1;
@@ -4870,6 +5016,20 @@ void rt_island_vpi_release_slice(rt_model_t *m, rt_signal_t *sig,
          rt_island_request_delta(m);
       }
    }
+
+   if (!any_hit)
+      return false;
+   if (full_cover)
+      return true;
+
+   uint64_t cov_stack[16];
+   uint64_t *cov = NULL, *cov_heap = NULL;
+   const bool all_covered = island_build_cov_mask(owners, offset, count,
+                                                  cov_stack,
+                                                  ARRAY_LEN(cov_stack),
+                                                  &cov, &cov_heap);
+   free(cov_heap);
+   return all_covered;
 }
 
 void rt_island_vpi_release(rt_model_t *m, rt_signal_t *sig)

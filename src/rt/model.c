@@ -6632,18 +6632,12 @@ static void sched_deposit_packed(rt_model_t *m, rt_signal_t *s,
    }
 }
 
-static void force_packed(rt_model_t *m, rt_signal_t *s, uint32_t msb_off,
-                         uint32_t count, uint64_t a_val, uint64_t b_val,
-                         uint32_t src_flags)
+static void force_packed_raw(rt_model_t *m, rt_signal_t *s, uint32_t msb_off,
+                             uint32_t count, uint64_t a_val, uint64_t b_val,
+                             uint32_t src_flags)
 {
    if (count == 0)
       return;
-
-   if (unlikely(s->shared.flags & SIG_F_ISLAND)) {
-      rt_island_put_packed(m, s, msb_off, count, a_val, b_val,
-                           src_flags, true);
-      return;
-   }
 
    const uint32_t width = s->bit_width;
    assert(msb_off + count <= width);
@@ -6693,16 +6687,30 @@ static void force_packed(rt_model_t *m, rt_signal_t *s, uint32_t msb_off,
                         false, false);
 }
 
+static void force_packed(rt_model_t *m, rt_signal_t *s, uint32_t msb_off,
+                         uint32_t count, uint64_t a_val, uint64_t b_val,
+                         uint32_t src_flags)
+{
+   if (count == 0)
+      return;
+
+   if (unlikely(s->shared.flags & SIG_F_ISLAND)
+       && rt_island_put_packed(m, s, msb_off, count, a_val, b_val,
+                               src_flags, true))
+      return;
+
+   force_packed_raw(m, s, msb_off, count, a_val, b_val, src_flags);
+}
+
 static void release_packed(rt_model_t *m, rt_signal_t *s, uint32_t msb_off,
                            uint32_t count, bool immediate)
 {
    if (count == 0)
       return;
 
-   if (unlikely(s->shared.flags & SIG_F_ISLAND)) {
-      rt_island_vpi_release_slice(m, s, msb_off, count);
+   if (unlikely(s->shared.flags & SIG_F_ISLAND)
+       && rt_island_vpi_release_slice(m, s, msb_off, count))
       return;
-   }
 
    if (!(s->nexus.flags & NET_F_FORCED))
       return;
@@ -6802,36 +6810,9 @@ static void release_packed(rt_model_t *m, rt_signal_t *s, uint32_t msb_off,
       s->shared.flags &= ~SIG_F_REGISTER;
 }
 
-void force_signal(rt_model_t *m, rt_signal_t *s, const void *values,
-                  int offset, size_t count)
+static void force_signal_raw(rt_model_t *m, rt_signal_t *s, const void *values,
+                             int offset, size_t count)
 {
-   if (unlikely(m->mixed_bridges != NULL))
-      mixed_bridge_force(m, s, values, offset, count);
-
-   RT_LOCK(s->lock);
-
-   if (unlikely(s->shared.flags & SIG_F_ISLAND)) {
-      if (s->shared.flags & SIG_F_PACKED) {
-         if (count == 0)
-            return;
-         const int nwords = (count + 63) / 64;
-         uint64_t sa[4], sb[4];
-         uint64_t *heap LOCAL = NULL;
-         uint64_t *pa = sa, *pb = sb;
-         if (nwords > ARRAY_LEN(sa)) {
-            heap = xmalloc_array(nwords * 2, sizeof(uint64_t));
-            pa = heap;
-            pb = heap + nwords;
-         }
-         packed_bytes_to_words(values, count, pa, pb);
-         rt_island_put_packed(m, s, offset, count, (uint64_t)(uintptr_t)pa,
-                              (uint64_t)(uintptr_t)pb, 0, true);
-         return;
-      }
-      rt_island_put_bytes(m, s, values, offset, count, true);
-      return;
-   }
-
    if (unlikely(s->shared.flags & SIG_F_PACKED)) {
       if (count == 0)
          return;
@@ -6845,8 +6826,8 @@ void force_signal(rt_model_t *m, rt_signal_t *s, const void *values,
          pb = heap + nwords;
       }
       packed_bytes_to_words(values, count, pa, pb);
-      force_packed(m, s, offset, count, (uint64_t)(uintptr_t)pa,
-                   (uint64_t)(uintptr_t)pb, 0);
+      force_packed_raw(m, s, offset, count, (uint64_t)(uintptr_t)pa,
+                       (uint64_t)(uintptr_t)pb, 0);
       return;
    }
 
@@ -6882,6 +6863,39 @@ void force_signal(rt_model_t *m, rt_signal_t *s, const void *values,
    }
 }
 
+void force_signal(rt_model_t *m, rt_signal_t *s, const void *values,
+                  int offset, size_t count)
+{
+   if (unlikely(m->mixed_bridges != NULL))
+      mixed_bridge_force(m, s, values, offset, count);
+
+   RT_LOCK(s->lock);
+
+   if (unlikely(s->shared.flags & SIG_F_ISLAND)) {
+      if (s->shared.flags & SIG_F_PACKED) {
+         if (count == 0)
+            return;
+         const int nwords = (count + 63) / 64;
+         uint64_t sa[4], sb[4];
+         uint64_t *heap LOCAL = NULL;
+         uint64_t *pa = sa, *pb = sb;
+         if (nwords > ARRAY_LEN(sa)) {
+            heap = xmalloc_array(nwords * 2, sizeof(uint64_t));
+            pa = heap;
+            pb = heap + nwords;
+         }
+         packed_bytes_to_words(values, count, pa, pb);
+         if (rt_island_put_packed(m, s, offset, count, (uint64_t)(uintptr_t)pa,
+                                  (uint64_t)(uintptr_t)pb, 0, true))
+            return;
+      }
+      else if (rt_island_put_bytes(m, s, values, offset, count, true))
+         return;
+   }
+
+   force_signal_raw(m, s, values, offset, count);
+}
+
 void release_signal(rt_model_t *m, rt_signal_t *s, int offset, size_t count)
 {
    if (unlikely(m->mixed_bridges != NULL))
@@ -6891,8 +6905,8 @@ void release_signal(rt_model_t *m, rt_signal_t *s, int offset, size_t count)
 
    if (unlikely(s->shared.flags & SIG_F_ISLAND)) {
       assert(m->can_create_delta);
-      rt_island_vpi_release_slice(m, s, offset, count);
-      return;
+      if (rt_island_vpi_release_slice(m, s, offset, count))
+         return;
    }
 
    if (unlikely(s->shared.flags & SIG_F_PACKED)) {
@@ -6937,8 +6951,8 @@ void release_signal_now(rt_model_t *m, rt_signal_t *s, int offset,
 
    if (unlikely(s->shared.flags & SIG_F_ISLAND)) {
       assert(m->can_create_delta);
-      rt_island_vpi_release_slice(m, s, offset, count);
-      return;
+      if (rt_island_vpi_release_slice(m, s, offset, count))
+         return;
    }
 
    if (unlikely(s->shared.flags & SIG_F_PACKED)) {
@@ -9652,10 +9666,9 @@ void x_deposit_signal(sig_shared_t *ss, uint32_t offset, int32_t count,
    rt_signal_t *s = container_of(ss, rt_signal_t, shared);
    rt_model_t *m = get_model();
 
-   if (unlikely(ss->flags & SIG_F_ISLAND)) {
-      rt_island_put_bytes(m, s, values, offset, count, false);
+   if (unlikely(ss->flags & SIG_F_ISLAND)
+       && rt_island_put_bytes(m, s, values, offset, count, false))
       return;
-   }
 
    deposit_signal(m, s, values, offset, count);
 }
@@ -9792,10 +9805,10 @@ void x_deposit_packed(sig_shared_t *ss, uint32_t offset, int32_t count,
    rt_signal_t *s = container_of(ss, rt_signal_t, shared);
    RT_LOCK(s->lock);
    rt_model_t *m = get_model();
-   if (unlikely(ss->flags & SIG_F_ISLAND)) {
-      rt_island_put_packed(m, s, offset, count, abits, bbits, src_flags, false);
+   if (unlikely(ss->flags & SIG_F_ISLAND)
+       && rt_island_put_packed(m, s, offset, count, abits, bbits, src_flags,
+                               false))
       return;
-   }
    deposit_packed_apply(m, s, offset, count, abits, bbits,
                         src_flags, true, true);
 }
@@ -10532,6 +10545,30 @@ void rt_island_deposit_packed(rt_model_t *m, rt_signal_t *s, uint32_t msb_off,
 {
    deposit_packed_apply(m, s, msb_off, count, a_val, b_val, src_flags,
                         true, false);
+}
+
+void rt_island_deposit_unowned_packed(rt_model_t *m, rt_signal_t *s,
+                                      uint32_t msb_off, uint32_t count,
+                                      uint64_t a_val, uint64_t b_val,
+                                      uint32_t src_flags)
+{
+   deposit_packed_apply(m, s, msb_off, count, a_val, b_val, src_flags,
+                        true, true);
+}
+
+void rt_island_force_unowned_packed(rt_model_t *m, rt_signal_t *s,
+                                    uint32_t msb_off, uint32_t count,
+                                    uint64_t a_val, uint64_t b_val,
+                                    uint32_t src_flags)
+{
+   force_packed_raw(m, s, msb_off, count, a_val, b_val, src_flags);
+}
+
+void rt_island_force_unowned_bytes(rt_model_t *m, rt_signal_t *s,
+                                   const void *values, int offset,
+                                   size_t count)
+{
+   force_signal_raw(m, s, values, offset, count);
 }
 
 void rt_island_request_delta(rt_model_t *m)
