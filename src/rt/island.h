@@ -94,6 +94,8 @@ typedef struct _rt_island_domain {
    bool                      in_sample_q;
    bool                      in_commit_q;
    bool                      needs_presync;
+   bool                      reset_clk_edge;
+   bool                      reset_rst_edge;
    uint32_t                 *write_sigs;
    uint32_t                  n_write_sigs;
    uint32_t                  cap_write_sigs;

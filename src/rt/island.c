@@ -235,6 +235,8 @@ struct _rt_super_domain {
    uint8_t              prev_rst;
    bool                 in_sample_q;
    bool                 in_commit_q;
+   bool                 reset_clk_edge;
+   bool                 reset_rst_edge;
    rt_watch_t          *clk_watch;
    rt_watch_t          *rst_watch;
    rt_island_domain_t **doms;
@@ -563,14 +565,19 @@ static void island_input_watch_cb(uint64_t now, rt_signal_t *signal,
 }
 
 static inline bool island_sv_edge_armed(rt_island_mgr_t *mgr,
-                                        const rt_signal_t *sig, uint64_t now)
+                                        const rt_signal_t *sig, uint64_t now,
+                                        bool *reset_edge)
 {
    // Verilog always @(posedge/negedge ...) processes enter their first
    // event control during delta 0 (now == 0, iteration == 0), so signal
    // updates delivered in the 0ms+0 signal-update phase (e.g. VPI
    // cbStartOfSimulation deposits) must not trigger SV edge domains,
-   // whereas signals with init events (decl/net initialisers) fire via
-   // fire_init_events() and delta-0 deposits fire at iteration >= 1.
+   // whereas signals driven during model_reset() (init events or
+   // rt_island_eval_sv_reset()) and delta-0 deposits (iteration >= 1) do.
+   if (*reset_edge) {
+      *reset_edge = false;
+      return true;
+   }
    if (likely(now > 0))
       return true;
    unsigned deltas = 0;
@@ -600,7 +607,8 @@ static void island_super_clk_watch_cb(uint64_t now, rt_signal_t *signal,
    else {
       const uint8_t cur = island_read_sv_bit(sdom->clk_sig,
                                              sdom->clk_sig_offset);
-      hit = island_sv_edge_armed(sdom->mgr, sdom->clk_sig, now)
+      hit = island_sv_edge_armed(sdom->mgr, sdom->clk_sig, now,
+                                 &sdom->reset_clk_edge)
          && island_edge_match(sdom->prev_clk, cur, sdom->clk_posedge);
       sdom->prev_clk = cur;
    }
@@ -628,7 +636,8 @@ static void island_super_rst_watch_cb(uint64_t now, rt_signal_t *signal,
    else {
       const uint8_t cur = island_read_sv_bit(sdom->rst_sig,
                                              sdom->rst_sig_offset);
-      hit = island_sv_edge_armed(sdom->mgr, sdom->rst_sig, now)
+      hit = island_sv_edge_armed(sdom->mgr, sdom->rst_sig, now,
+                                 &sdom->reset_rst_edge)
          && island_edge_match(sdom->prev_rst, cur, sdom->rst_posedge);
       sdom->prev_rst = cur;
    }
@@ -654,7 +663,8 @@ static void island_clk_watch_cb(uint64_t now, rt_signal_t *signal,
    }
    else {
       const uint8_t cur = island_read_sv_bit(cs->sig, cs->sig_offset);
-      hit = island_sv_edge_armed(dom->isl->mgr, cs->sig, now)
+      hit = island_sv_edge_armed(dom->isl->mgr, cs->sig, now,
+                                 &dom->reset_clk_edge)
          && island_edge_match(dom->prev_clk, cur, dom->clk_posedge);
       dom->prev_clk = cur;
    }
@@ -679,7 +689,8 @@ static void island_rst_watch_cb(uint64_t now, rt_signal_t *signal,
    }
    else {
       const uint8_t cur = island_read_sv_bit(rs->sig, rs->sig_offset);
-      hit = island_sv_edge_armed(dom->isl->mgr, rs->sig, now)
+      hit = island_sv_edge_armed(dom->isl->mgr, rs->sig, now,
+                                 &dom->reset_rst_edge)
          && island_edge_match(dom->prev_rst, cur, dom->rst_posedge);
       dom->prev_rst = cur;
    }
@@ -2648,6 +2659,46 @@ bool rt_island_eval_sv_reset(jit_t *jit, rt_model_t *m, rt_island_mgr_t *mgr,
       isl->dirty = false;
       if (isl->cluster != NULL && isl->cluster->dirty_count > 0)
          isl->cluster->dirty_count--;
+   }
+
+   // Any SV clock/reset signal driven to a new value during model_reset()
+   // (e.g. a continuous assign to a variable/net) already queued its watch
+   // callback for 0ms+0 and must not be suppressed as a VPI t=0 deposit.
+   for (unsigned i = 0; i < mgr->islands.count; i++) {
+      rt_island_t *isl = mgr->islands.items[i];
+      for (uint32_t d = 0; d < isl->ndomains; d++) {
+         rt_island_domain_t *dom = &(isl->domains[d]);
+         dom->reset_clk_edge = false;
+         dom->reset_rst_edge = false;
+         if (dom->super_dom != NULL)
+            continue;
+         if (!(dom->edge_flags & (RT_IEDGE_VHDL | RT_IEDGE_VHDL_EVENT))) {
+            const rt_island_sig_t *cs = &(isl->sigs[dom->clk_sig_idx]);
+            if (cs->sig != NULL
+                && island_read_sv_bit(cs->sig, cs->sig_offset) != dom->prev_clk)
+               dom->reset_clk_edge = true;
+         }
+         if (dom->rst_sig_idx >= 0 && !(dom->edge_flags & RT_IEDGE_RST_LEVEL)) {
+            const rt_island_sig_t *rs = &(isl->sigs[dom->rst_sig_idx]);
+            if (rs->sig != NULL
+                && island_read_sv_bit(rs->sig, rs->sig_offset) != dom->prev_rst)
+               dom->reset_rst_edge = true;
+         }
+      }
+   }
+   for (unsigned i = 0; i < mgr->super_domains.count; i++) {
+      rt_super_domain_t *sd = mgr->super_domains.items[i];
+      sd->reset_clk_edge = false;
+      sd->reset_rst_edge = false;
+      if (!(sd->edge_flags & (RT_IEDGE_VHDL | RT_IEDGE_VHDL_EVENT))) {
+         if (sd->clk_sig != NULL
+             && island_read_sv_bit(sd->clk_sig, sd->clk_sig_offset) != sd->prev_clk)
+            sd->reset_clk_edge = true;
+      }
+      if (sd->rst_sig != NULL && !(sd->edge_flags & RT_IEDGE_RST_LEVEL)) {
+         if (island_read_sv_bit(sd->rst_sig, sd->rst_sig_offset) != sd->prev_rst)
+            sd->reset_rst_edge = true;
+      }
    }
 
    return true;
