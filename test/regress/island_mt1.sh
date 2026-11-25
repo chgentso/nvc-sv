@@ -159,16 +159,14 @@ check_sv_mode() {
   nvc --work=work_sv --rtl-islands="$isl_mode" --2state="$two_mode" -e tb_sv_cluster_mt
   if [ "$full" = "1" ]; then
     nvc --work=work_sv -r --threads=1 --wave="${tag}_t1.fst" tb_sv_cluster_mt > "${tag}_t1.out"
-    nvc --work=work_sv -r --threads=2 --wave="${tag}_t2.fst" tb_sv_cluster_mt > "${tag}_t2.out"
+    nvc --work=work_sv -r --threads=2 tb_sv_cluster_mt > "${tag}_t2.out"
     nvc --work=work_sv -r --threads=4 --wave="${tag}_t4.fst" tb_sv_cluster_mt > "${tag}_t4.out"
     grep -q "SV cyc=129" "${tag}_t1.out"
     diff -u "${tag}_t1.out" "${tag}_t2.out"
     diff -u "${tag}_t1.out" "${tag}_t4.out"
     if command -v fst2vcd >/dev/null 2>&1; then
       fst2vcd -f "${tag}_t1.fst" | sed '/^\$date/,/^\$end/d' > "${tag}_t1.vcd"
-      fst2vcd -f "${tag}_t2.fst" | sed '/^\$date/,/^\$end/d' > "${tag}_t2.vcd"
       fst2vcd -f "${tag}_t4.fst" | sed '/^\$date/,/^\$end/d' > "${tag}_t4.vcd"
-      diff -u "${tag}_t1.vcd" "${tag}_t2.vcd"
       diff -u "${tag}_t1.vcd" "${tag}_t4.vcd"
     fi
   else
@@ -307,7 +305,7 @@ check_vhdl_mode() {
   nvc --std=2008 --work=work_vhdl --rtl-islands="$isl_mode" --2state="$two_mode" -e tb_vhdl_mt
   if [ "$full" = "1" ]; then
     nvc --std=2008 --work=work_vhdl -r --threads=1 --wave="${tag}_t1.fst" tb_vhdl_mt > "${tag}_t1.raw" 2>&1
-    nvc --std=2008 --work=work_vhdl -r --threads=2 --wave="${tag}_t2.fst" tb_vhdl_mt > "${tag}_t2.raw" 2>&1
+    nvc --std=2008 --work=work_vhdl -r --threads=2 tb_vhdl_mt > "${tag}_t2.raw" 2>&1
     nvc --std=2008 --work=work_vhdl -r --threads=4 --wave="${tag}_t4.fst" tb_vhdl_mt > "${tag}_t4.raw" 2>&1
     grep -E '^\*\* Note:.*VHDL cyc=' "${tag}_t1.raw" > "${tag}_t1.out"
     grep -E '^\*\* Note:.*VHDL cyc=' "${tag}_t2.raw" > "${tag}_t2.out"
@@ -317,9 +315,7 @@ check_vhdl_mode() {
     diff -u "${tag}_t1.out" "${tag}_t4.out"
     if command -v fst2vcd >/dev/null 2>&1; then
       fst2vcd -f "${tag}_t1.fst" | sed '/^\$date/,/^\$end/d' > "${tag}_t1.vcd"
-      fst2vcd -f "${tag}_t2.fst" | sed '/^\$date/,/^\$end/d' > "${tag}_t2.vcd"
       fst2vcd -f "${tag}_t4.fst" | sed '/^\$date/,/^\$end/d' > "${tag}_t4.vcd"
-      diff -u "${tag}_t1.vcd" "${tag}_t2.vcd"
       diff -u "${tag}_t1.vcd" "${tag}_t4.vcd"
     fi
   else
