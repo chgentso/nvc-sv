@@ -277,6 +277,33 @@ static bool is_param_enum_name(vlog_node_t d)
       && vlog_has_type(d) && hset_contains(param_enums, vlog_type(d));
 }
 
+static bool type_contains_typeparam(vlog_node_t type)
+{
+   while (type != NULL) {
+      if (vlog_kind(type) == V_TYPE_DECL) {
+         if (vlog_flags(type) & VLOG_F_TYPEPARAM)
+            return true;
+         type = vlog_has_type(type) ? vlog_type(type) : NULL;
+      }
+      else if (vlog_kind(type) == V_DATA_TYPE && vlog_has_type(type))
+         type = vlog_type(type);
+      else if (vlog_kind(type) == V_STRUCT_DECL
+               || vlog_kind(type) == V_UNION_DECL) {
+         const int ndecls = vlog_decls(type);
+         for (int i = 0; i < ndecls; i++) {
+            vlog_node_t d = vlog_decl(type, i);
+            if (vlog_has_type(d) && type_contains_typeparam(vlog_type(d)))
+               return true;
+         }
+         return false;
+      }
+      else
+         break;
+   }
+
+   return false;
+}
+
 static bool copy_instance_pred(vlog_node_t v, void *ctx)
 {
    if (copy_scope != NULL && !hset_contains(copy_scope, v))
@@ -298,7 +325,7 @@ static bool copy_instance_pred(vlog_node_t v, void *ctx)
          // Fall-through
       case V_NET_DECL:
          return copy_scope == NULL && vlog_has_type(vlog_ref(v))
-            && vlog_uses_typeparam(vlog_type(vlog_ref(v)));
+            && type_contains_typeparam(vlog_type(vlog_ref(v)));
       case V_FUNC_DECL:
          // The name of a function assigned to give its result
          return true;
@@ -323,7 +350,7 @@ static bool copy_instance_pred(vlog_node_t v, void *ctx)
             if (copy_scope != NULL)
                return false;
 
-            return vlog_uses_typeparam(vlog_type(d));
+            return type_contains_typeparam(vlog_type(d));
          }
       default:
          return false;
@@ -339,7 +366,12 @@ static bool copy_instance_pred(vlog_node_t v, void *ctx)
       return is_param_enum_name(v)
          && (copy_scope == NULL || hset_contains(copy_scope, v));
    case V_MEMBER_REF:
-      return copy_scope == NULL && vlog_typeparam_pending(v);
+      if (copy_scope != NULL)
+         return false;
+      if (vlog_typeparam_pending(v))
+         return true;
+      return vlog_has_ref(v) && vlog_has_type(vlog_ref(v))
+         && type_contains_typeparam(vlog_type(vlog_ref(v)));
    case V_PATTERN_EXPR:
       return copy_scope == NULL
          && (!vlog_has_type(v) || vlog_uses_typeparam(vlog_type(v)));
