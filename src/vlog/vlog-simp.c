@@ -107,6 +107,37 @@ static vlog_node_t simp_port_decl(vlog_node_t v, vlog_node_t mod)
    return v;
 }
 
+static bool is_non_event_root(vlog_node_t root)
+{
+   if (vlog_kind(root) != V_REF || !vlog_has_ref(root))
+      return false;
+
+   vlog_node_t rtype = vlog_get_type(vlog_ref(root));
+   if (rtype == NULL)
+      return false;
+
+   if (vlog_kind(rtype) == V_CLASS_DECL)
+      return true;
+
+   if (vlog_kind(rtype) == V_DATA_TYPE) {
+      switch (vlog_subkind(rtype)) {
+      case DT_ASSOC:
+      case DT_DYNARRAY:
+      case DT_QUEUE:
+      case DT_EVENT:
+      case DT_MAILBOX:
+      case DT_SEMAPHORE:
+      case DT_PROCESS:
+      case DT_CHANDLE:
+         return true;
+      default:
+         break;
+      }
+   }
+
+   return false;
+}
+
 static void build_sensitivity(vlog_node_t ctrl, vlog_node_t v, hset_t *set,
                               bool is_comb);
 
@@ -160,7 +191,8 @@ static void build_sensitivity(vlog_node_t ctrl, vlog_node_t v, hset_t *set,
    case V_REF:
       {
          vlog_node_t d = vlog_ref(v);
-         if (vlog_kind(d) == V_TYPE_DECL || hset_contains(set, d))
+         if (vlog_kind(d) == V_TYPE_DECL || is_non_event_root(v)
+             || hset_contains(set, d))
             break;
 
          hset_insert(set, d);
@@ -182,7 +214,8 @@ static void build_sensitivity(vlog_node_t ctrl, vlog_node_t v, hset_t *set,
              && hset_contains(set, vlog_ref(root)))
             break;
 
-         vlog_node_t lsp = vlog_longest_static_prefix(v);
+         vlog_node_t lsp = is_non_event_root(root) ? NULL
+            : vlog_longest_static_prefix(v);
          if (lsp == NULL) {
             // A select of a constant such as a parameter: the indices are
             // still read
