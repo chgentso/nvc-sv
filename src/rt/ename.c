@@ -914,6 +914,9 @@ static void bind_external_name(tree_t name, jit_handle_t scope,
       }
       else if (is_implicit_block(where)) {
          // Skip over implicit block for component declaration
+         if (tree_stmts(where) == 0)
+            jit_msg(tree_loc(pe), DIAG_FATAL, "component instance %s is not "
+                    "bound", istr(tree_ident(where)));
          where = tree_stmt(where, 0);
          assert(tree_kind(where) == T_BLOCK);
          path = ident_prefix(path, tree_ident(where), '.');
