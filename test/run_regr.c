@@ -52,6 +52,7 @@
 #include <windows.h>
 #include <fileapi.h>
 #define setenv(x, y, z) _putenv_s((x), (y))
+#define unsetenv(x) _putenv_s((x), "")
 #define realpath(N, R) _fullpath((R), (N), _MAX_PATH)
 #else
 #include <sys/wait.h>
@@ -936,9 +937,27 @@ static bool run_test(test_t *test)
 
    setenv("TEST_NAME", test->name, 1);
 
+   int nsaved_env = 0;
    for (param_t *p = test->params; p != NULL; p = p->next) {
       if (p->kind == P_ENVVAR)
-         setenv(p->name, p->value, 1);
+         nsaved_env++;
+   }
+
+   const char **saved_env_names = NULL;
+   char **saved_env_vals = NULL;
+   if (nsaved_env > 0) {
+      saved_env_names = calloc(nsaved_env, sizeof(const char *));
+      saved_env_vals  = calloc(nsaved_env, sizeof(char *));
+      int idx = 0;
+      for (param_t *p = test->params; p != NULL; p = p->next) {
+         if (p->kind == P_ENVVAR) {
+            saved_env_names[idx] = p->name;
+            const char *prev = getenv(p->name);
+            saved_env_vals[idx] = prev != NULL ? strdup(prev) : NULL;
+            idx++;
+            setenv(p->name, p->value, 1);
+         }
+      }
    }
 
    arglist_t *args = NULL;
@@ -1483,6 +1502,17 @@ static bool run_test(test_t *test)
 
  out_close:
    fclose(outf);
+
+   for (int i = nsaved_env - 1; i >= 0; i--) {
+      if (saved_env_vals[i] != NULL) {
+         setenv(saved_env_names[i], saved_env_vals[i], 1);
+         free(saved_env_vals[i]);
+      }
+      else
+         unsetenv(saved_env_names[i]);
+   }
+   free(saved_env_names);
+   free(saved_env_vals);
 
  out_chdir:
    if (chdir(cwd) != 0) {
