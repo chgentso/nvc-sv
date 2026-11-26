@@ -691,6 +691,31 @@ static void island_add_obs_sig(rt_island_t *isl, uint32_t sig_idx)
    isl->obs_sigs[isl->n_obs_sigs++] = sig_idx;
 }
 
+static void island_add_ext_out_sig(rt_island_t *isl, uint32_t sig_idx)
+{
+   for (uint32_t i = 0; i < isl->n_ext_out_sigs; i++) {
+      if (isl->ext_out_sigs[i] == sig_idx)
+         return;
+   }
+   isl->ext_out_sigs = xrealloc_array(isl->ext_out_sigs,
+                                      isl->n_ext_out_sigs + 1u,
+                                      sizeof(uint32_t));
+   isl->ext_out_sigs[isl->n_ext_out_sigs++] = sig_idx;
+}
+
+static void island_add_comb_flush_sig(rt_island_t *isl,
+                                      const rt_island_sig_t *s)
+{
+   if (!(s->flags & RT_ISIG_COMB_WRITTEN))
+      return;
+   if (s->flags & RT_ISIG_OUT) {
+      if (isl->mgr->hier_built)
+         island_add_ext_out_sig(isl, s->sig_idx);
+   }
+   else
+      island_add_obs_sig(isl, s->sig_idx);
+}
+
 void rt_island_input_watch_inline(rt_model_t *m, void *user, bool defer_comb)
 {
    rt_island_sig_t *s = user;
@@ -2007,6 +2032,10 @@ static rt_island_force_t *island_get_or_add_force(rt_island_t *isl,
       f->saved_a = mem + total_words * 3u;
       f->saved_b = mem + total_words * 4u;
    }
+   if (!isl->has_forces) {
+      for (uint32_t i = 0; i < isl->nsigs; i++)
+         isl->sigs[i].flags &= ~RT_ISIG_LAST_OUT_VALID;
+   }
    isl->has_forces = true;
    return f;
 }
@@ -2950,8 +2979,7 @@ static void island_build_hier(rt_island_mgr_t *mgr)
 
 static void island_classify_outputs(rt_island_mgr_t *mgr)
 {
-   const bool allow_prune = mgr->fast && mgr->hier_built
-      && !model_island_no_prune(mgr->model);
+   const bool allow_prune = mgr->fast && mgr->hier_built;
    uint32_t n_sole = 0, n_pruned = 0;
 
    for (unsigned i = 0; i < mgr->islands.count; i++) {
@@ -3022,9 +3050,8 @@ static void island_classify_outputs(rt_island_mgr_t *mgr)
    }
 
    if (mgr->fast && opt_get_int(OPT_DUMP_ISLANDS))
-      fprintf(stderr, "ISLAND_FAST: fast=%d no_prune=%d sole_owner=%u pruned=%u\n",
-              (int)mgr->fast, (int)model_island_no_prune(mgr->model),
-              n_sole, n_pruned);
+      fprintf(stderr, "ISLAND_FAST: fast=%d sole_owner=%u pruned=%u\n",
+              (int)mgr->fast, n_sole, n_pruned);
 }
 
 void rt_island_reset_all(rt_island_mgr_t *mgr)
@@ -3068,11 +3095,12 @@ void rt_island_reset_all(rt_island_mgr_t *mgr)
       isl->has_forces = false;
 
       island_init_state_defaults(isl);
+      const bool allow_inline = mgr->fast && !opt_get_int(OPT_SHUFFLE_PROCS);
       for (uint32_t j = 0; j < isl->nsigs; j++) {
          rt_island_sig_t *s = &(isl->sigs[j]);
          s->flags &= ~RT_ISIG_LAST_OUT_VALID;
          if (s->watch != NULL)
-            watch_set_inline_island(s->watch, mgr->fast);
+            watch_set_inline_island(s->watch, allow_inline);
          if (s->sig != NULL)
             island_sync_in_sig(isl, s);
       }
@@ -3305,6 +3333,8 @@ bool rt_island_eval_sv_reset(jit_t *jit, rt_model_t *m, rt_island_mgr_t *mgr,
                   island_mark_dirty(dst_s->isl);
             }
          }
+      }
+      if (mgr->hier_built) {
          for (uint32_t j = 0; j < isl->n_ext_out_sigs; j++) {
             rt_island_sig_t *os = &(isl->sigs[isl->ext_out_sigs[j]]);
             if (likely(!(os->flags & RT_ISIG_PRUNED)))
@@ -3674,7 +3704,9 @@ static bool island_eval_solo_mt(jit_t *jit, rt_island_t *isl, tlab_t *tlab)
    if (!island_call_comb(jit, isl->model, isl, tlab))
       return false;
 
-   if (isl->n_out_sigs > 0 || unlikely(isl->n_obs_sigs > 0))
+   const uint32_t n_outs = isl->mgr->hier_built
+      ? isl->n_ext_out_sigs : isl->n_out_sigs;
+   if (n_outs > 0 || unlikely(isl->n_obs_sigs > 0))
       isl->need_sync_out = true;
    return true;
 }
@@ -3930,7 +3962,7 @@ uint32_t rt_island_eval_sva_batch(jit_t *jit, rt_model_t *m,
 
 static void island_sync_out_island(rt_model_t *m, rt_island_t *isl)
 {
-   if (isl->n_direct_comb_outs > 0) {
+   if (isl->mgr->hier_built) {
       for (uint32_t j = 0; j < isl->n_ext_out_sigs; j++)
          island_flush_comb_out_sig(m, isl, &(isl->sigs[isl->ext_out_sigs[j]]));
    }
@@ -4252,6 +4284,8 @@ static bool rt_island_eval_dirty_inner(jit_t *jit, rt_model_t *m,
                         island_mark_dirty(dst_s->isl);
                   }
                }
+            }
+            if (mgr->hier_built) {
                for (uint32_t j = 0; j < isl->n_ext_out_sigs; j++)
                   island_flush_comb_out_sig(m, isl,
                                             &(isl->sigs[isl->ext_out_sigs[j]]));
@@ -4560,10 +4594,19 @@ static bool island_eval_ff_pre_sync(jit_t *jit, rt_model_t *m,
             isl->dirty = false;
             if (!island_call_comb(jit, m, isl, tlab))
                return false;
-            for (uint32_t j = 0; j < isl->n_out_sigs; j++) {
-               rt_island_sig_t *os = &(isl->sigs[isl->out_sigs[j]]);
-               if (likely(!(os->flags & RT_ISIG_PRUNED)))
-                  island_sync_out_sig(m, isl, os);
+            if (mgr->hier_built) {
+               for (uint32_t j = 0; j < isl->n_ext_out_sigs; j++) {
+                  rt_island_sig_t *os = &(isl->sigs[isl->ext_out_sigs[j]]);
+                  if (likely(!(os->flags & RT_ISIG_PRUNED)))
+                     island_sync_out_sig(m, isl, os);
+               }
+            }
+            else {
+               for (uint32_t j = 0; j < isl->n_out_sigs; j++) {
+                  rt_island_sig_t *os = &(isl->sigs[isl->out_sigs[j]]);
+                  if (likely(!(os->flags & RT_ISIG_PRUNED)))
+                     island_sync_out_sig(m, isl, os);
+               }
             }
             if (unlikely(isl->n_obs_sigs > 0)) {
                for (uint32_t j = 0; j < isl->n_obs_sigs; j++) {
@@ -4983,10 +5026,19 @@ static bool rt_island_eval_ff_inner(jit_t *jit, rt_model_t *m,
                      ok = false;
                      break;
                   }
-                  for (uint32_t j = 0; j < isl->n_out_sigs; j++) {
-                     rt_island_sig_t *os = &(isl->sigs[isl->out_sigs[j]]);
-                     if (likely(!(os->flags & RT_ISIG_PRUNED)))
-                        island_sync_out_sig(m, isl, os);
+                  if (mgr->hier_built) {
+                     for (uint32_t j = 0; j < isl->n_ext_out_sigs; j++) {
+                        rt_island_sig_t *os = &(isl->sigs[isl->ext_out_sigs[j]]);
+                        if (likely(!(os->flags & RT_ISIG_PRUNED)))
+                           island_sync_out_sig(m, isl, os);
+                     }
+                  }
+                  else {
+                     for (uint32_t j = 0; j < isl->n_out_sigs; j++) {
+                        rt_island_sig_t *os = &(isl->sigs[isl->out_sigs[j]]);
+                        if (likely(!(os->flags & RT_ISIG_PRUNED)))
+                           island_sync_out_sig(m, isl, os);
+                     }
                   }
                   if (unlikely(isl->n_obs_sigs > 0)) {
                      for (uint32_t j = 0; j < isl->n_obs_sigs; j++) {
@@ -5318,6 +5370,27 @@ void rt_island_sync_to_signal(rt_model_t *m, rt_signal_t *sig)
    }
 }
 
+void rt_island_sync_if_unobserved(rt_model_t *m, rt_signal_t *sig)
+{
+   rt_island_mgr_t *mgr = rt_island_model_mgr(m);
+   if (mgr == NULL || mgr->sig_map == NULL || sig == NULL)
+      return;
+
+   rt_island_sig_t *s = hash_get(mgr->sig_map, sig);
+   for (; s != NULL; s = s->next_owner) {
+      if ((s->flags & (RT_ISIG_PRUNED | RT_ISIG_DIRECT_LINK))
+          || !(s->flags & (RT_ISIG_OUT | RT_ISIG_OBSERVED)))
+         island_sync_sig_raw(s->isl, s, false);
+   }
+
+   for (rt_island_alias_t *a = hash_get(mgr->alias_map, sig);
+        a != NULL; a = a->next) {
+      if (a->src_s->flags & RT_ISIG_DIRECT_LINK)
+         island_sync_sig_raw_to(a->src_s->isl, a->src_s,
+                                a->sig, a->sig_offset, false);
+   }
+}
+
 void rt_island_sync_slice_to_signal(rt_model_t *m, rt_signal_t *sig,
                                     uint32_t offset, uint32_t count)
 {
@@ -5372,8 +5445,10 @@ static void island_break_direct_link(rt_model_t *m, rt_island_sig_t *src_s)
       island_sync_sig_raw_to(src_s->isl, src_s, al->sig, al->sig_offset, true);
    }
    if (src_s->flags & RT_ISIG_COMB_WRITTEN)
-      island_add_obs_sig(src_s->isl, src_s->sig_idx);
+      island_add_comb_flush_sig(src_s->isl, src_s);
 
+   const bool allow_inline = src_s->isl->mgr->fast
+      && !opt_get_int(OPT_SHUFFLE_PROCS);
    for (uint32_t t = 0; t < src_s->n_direct_targets; t++) {
       rt_island_sig_t *dst_s = src_s->direct_targets[t];
       island_copy_direct_sig(src_s, dst_s);
@@ -5381,7 +5456,7 @@ static void island_break_direct_link(rt_model_t *m, rt_island_sig_t *src_s)
       if (dst_s->watch == NULL && dst_s->sig != NULL) {
          dst_s->watch = watch_new(m, island_input_watch_cb, dst_s,
                                   WATCH_EVENT, 1);
-         watch_set_inline_island(dst_s->watch, dst_s->isl->mgr->fast);
+         watch_set_inline_island(dst_s->watch, allow_inline);
          if (dst_s->sig->shared.flags & SIG_F_PACKED)
             model_set_event_cb(m, dst_s->sig, 0, 1, dst_s->watch);
          else
@@ -5433,8 +5508,7 @@ static void island_unprune_sig(rt_island_mgr_t *mgr, rt_island_sig_t *s)
    s->flags |= RT_ISIG_OBSERVED;
    if (mgr->reset_done)
       island_sync_sig_raw(s->isl, s, true);
-   if (s->flags & RT_ISIG_COMB_WRITTEN)
-      island_add_obs_sig(s->isl, s->sig_idx);
+   island_add_comb_flush_sig(s->isl, s);
 }
 
 void rt_island_on_ext_deposit(rt_model_t *m, rt_signal_t *sig)
@@ -5529,6 +5603,8 @@ static void island_eval_comb_now(rt_model_t *m, rt_island_t *isl)
             }
          }
       }
+   }
+   if (isl->mgr->hier_built) {
       for (uint32_t j = 0; j < isl->n_ext_out_sigs; j++)
          island_flush_comb_out_sig(m, isl, &(isl->sigs[isl->ext_out_sigs[j]]));
    }
@@ -6185,4 +6261,20 @@ void rt_island_report_forces(rt_island_mgr_t *mgr, rt_signal_t *sig,
       if (run_len > 0)
          (*fn)(run_start, run_len, arg);
    }
+}
+
+static void island_is_forced_cb(uint32_t start, uint32_t len, void *arg)
+{
+   (void)start;
+   if (len > 0)
+      *(bool *)arg = true;
+}
+
+bool rt_island_is_forced(rt_island_mgr_t *mgr, rt_signal_t *sig,
+                         uint32_t offset, uint32_t count)
+{
+   bool forced = false;
+   rt_island_report_forces(mgr, sig, offset, count, island_is_forced_cb,
+                           &forced);
+   return forced;
 }

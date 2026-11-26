@@ -210,6 +210,7 @@ bool rt_island_read_sig(rt_island_mgr_t *mgr, rt_signal_t *sig,
                         uint64_t *a_out, uint64_t *b_out,
                         uint32_t *width_out, bool *two_state_out);
 void rt_island_sync_to_signal(rt_model_t *m, rt_signal_t *sig);
+void rt_island_sync_if_unobserved(rt_model_t *m, rt_signal_t *sig);
 void rt_island_sync_slice_to_signal(rt_model_t *m, rt_signal_t *sig,
                                     uint32_t offset, uint32_t count);
 void rt_island_on_observer_attached(rt_model_t *m, rt_signal_t *sig);
@@ -234,6 +235,8 @@ void rt_island_report_forces(rt_island_mgr_t *mgr, rt_signal_t *sig,
                              uint32_t offset, uint32_t count,
                              void (*fn)(uint32_t, uint32_t, void *),
                              void *arg);
+bool rt_island_is_forced(rt_island_mgr_t *mgr, rt_signal_t *sig,
+                         uint32_t offset, uint32_t count);
 
 void *rt_island_begin(rt_model_t *m, rt_island_mgr_t **mgr_p,
                       jit_handle_t eval_handle, void *inst_ctx,

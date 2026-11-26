@@ -200,7 +200,6 @@ typedef struct _rt_model {
    bool               sv_poll_mem_dirty;
    bool               sv_poll_susp_dirty;
    bool               mt_sva_enabled;
-   bool               island_no_prune;
    uint32_t           sva_mt_skip;
    unsigned           ndeferred;
    unsigned           nsva_procs;
@@ -1236,6 +1235,11 @@ rt_scope_t *child_scope_at(rt_scope_t *scope, int index)
 
 const void *signal_value(rt_signal_t *s)
 {
+   if (unlikely(s->shared.flags & SIG_F_ISLAND)) {
+      rt_model_t *m = get_model_or_null();
+      if (m != NULL)
+         rt_island_sync_if_unobserved(m, s);
+   }
    return s->shared.data;
 }
 
@@ -1259,6 +1263,11 @@ uint32_t signal_width(rt_signal_t *s)
 
 size_t signal_expand(rt_signal_t *s, uint64_t *buf, size_t max)
 {
+   if (unlikely(s->shared.flags & SIG_F_ISLAND)) {
+      rt_model_t *m = get_model_or_null();
+      if (m != NULL)
+         rt_island_sync_if_unobserved(m, s);
+   }
    if (s->shared.flags & SIG_F_PACKED) {
       const uint32_t total = s->bit_width;
       const int nwords = (total + 63) / 64;
@@ -6084,6 +6093,9 @@ sig_shared_t *model_mixed_signal_proxy(rt_model_t *m, rt_signal_t *sv_sig,
    b->next         = m->mixed_bridges;
    m->mixed_bridges = b;
 
+   if (unlikely(sv_sig->shared.flags & SIG_F_ISLAND))
+      rt_island_on_observer_attached(m, sv_sig);
+
    uint8_t *eff = s->shared.data;
    uint8_t *last = eff + total_bytes;
    uint8_t *driving = eff + 2 * total_bytes;
@@ -6110,9 +6122,6 @@ sig_shared_t *model_mixed_signal_proxy(rt_model_t *m, rt_signal_t *sv_sig,
 
    rt_watch_t *w = watch_new(m, mixed_bridge_sv_event, b, WATCH_EVENT, 1);
    model_set_event_cb(m, sv_sig, 0, sv_width, w);
-
-   if (unlikely(sv_sig->shared.flags & SIG_F_ISLAND))
-      rt_island_on_observer_attached(m, sv_sig);
 
    return &(s->shared);
 }
@@ -6544,6 +6553,10 @@ static void drain_nb_packed(rt_model_t *m)
          }
          continue;
       }
+      if (unlikely(sflags & SIG_F_ISLAND)
+          && rt_island_put_packed(m, s, 0, s->bit_width, items[i].a, items[i].b,
+                                  items[i].flags, false))
+         continue;
       deposit_packed_apply(m, s, 0, s->bit_width, items[i].a, items[i].b,
                            items[i].flags, true, false);
    }
@@ -9719,6 +9732,9 @@ void x_sched_deposit(sig_shared_t *ss, uint32_t offset, int32_t count,
    rt_signal_t *s = container_of(ss, rt_signal_t, shared);
    rt_model_t *m = get_model();
 
+   if (unlikely(ss->flags & SIG_F_ISLAND))
+      rt_island_on_ext_deposit(m, s);
+
    sched_deposit(m, s, values, offset, count, after, true);
 }
 
@@ -10631,17 +10647,6 @@ void watch_set_inline_island(rt_watch_t *w, bool enable)
 {
    if (w != NULL)
       w->inline_island_input = enable;
-}
-
-void model_set_island_no_prune(rt_model_t *m, bool disable)
-{
-   if (m != NULL)
-      m->island_no_prune = disable;
-}
-
-bool model_island_no_prune(const rt_model_t *m)
-{
-   return m == NULL || m->island_no_prune;
 }
 
 bool rt_model_has_init_event(const rt_model_t *m, const rt_signal_t *s)

@@ -53,6 +53,7 @@ static const vpi_test_t tests[] = {
    { "vpi_island2", vpi_island2_startup },
    { "vpi_island3", vpi_island3_startup },
    { "vpi_island4", vpi_island4_startup },
+   { "vpi_island5", vpi_island5_startup },
    { NULL,    NULL },
 };
 

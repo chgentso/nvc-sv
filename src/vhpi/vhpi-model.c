@@ -4208,11 +4208,10 @@ int vhpi_put_value(vhpiHandleT handle,
 
       switch (mode) {
       case vhpiForcePropagate:
-         if ((ptr.signal->shared.flags & SIG_F_ISLAND) && td->elem_bytes <= 8) {
-            rt_island_put_bytes(model, ptr.signal, src, ptr.offset,
-                                num_elems, true);
+         if ((ptr.signal->shared.flags & SIG_F_ISLAND) && td->elem_bytes <= 8
+             && rt_island_put_bytes(model, ptr.signal, src, ptr.offset,
+                                    num_elems, true))
             return 0;
-         }
          force_signal(model, ptr.signal, src, ptr.offset, num_elems);
          return 0;
       case vhpiDepositPropagate:
@@ -4221,11 +4220,10 @@ int vhpi_put_value(vhpiHandleT handle,
          sched_deposit(model, ptr.signal, src, ptr.offset, num_elems, 0, false);
          return 0;
       case vhpiRelease:
-         if (ptr.signal->shared.flags & SIG_F_ISLAND) {
-            rt_island_vpi_release_slice(model, ptr.signal, ptr.offset,
-                                        num_elems);
+         if ((ptr.signal->shared.flags & SIG_F_ISLAND)
+             && rt_island_vpi_release_slice(model, ptr.signal, ptr.offset,
+                                            num_elems))
             return 0;
-         }
          release_signal(model, ptr.signal, ptr.offset, num_elems);
          return 0;
       default:

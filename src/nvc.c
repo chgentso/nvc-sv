@@ -1658,10 +1658,6 @@ static int run_cmd(int argc, char **argv, cmd_state_t *state)
 
    set_ctrl_c_handler(ctrl_c_handler, state->model);
 
-   if (dumper != NULL || pli_plugins != NULL || state->plugins != NULL
-       || opt_get_int(OPT_DEBUG_STMTS) || opt_get_int(OPT_SHUFFLE_PROCS))
-      model_set_island_no_prune(state->model, true);
-
    model_reset(state->model);
 
    if (dumper != NULL)

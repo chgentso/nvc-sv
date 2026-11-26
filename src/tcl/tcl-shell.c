@@ -21,6 +21,7 @@
 #include "hash.h"
 #include "printf.h"
 #include "rt/assert.h"
+#include "rt/island.h"
 #include "rt/model.h"
 #include "rt/structs.h"
 #include "tcl/tcl-priv.h"
@@ -393,6 +394,9 @@ static int shell_cmd_examine(ClientData cd, Tcl_Interp *interp,
       if (!shell_get_printer(sh, ss))
          return TCL_ERROR;
 
+      if (unlikely(ss->signal->shared.flags & SIG_F_ISLAND))
+         rt_island_sync_to_signal(sh->model, ss->signal);
+
       const char *str = print_signal(ss->printer, ss->signal, flags);
       result[i] = Tcl_NewStringObj(str, -1);
    }
@@ -510,20 +514,34 @@ static int shell_cmd_force(ClientData cd, Tcl_Interp *interp,
       return syntax_error(sh, objv);
 
    if (objc == 1) {
+      rt_island_mgr_t *imgr = rt_island_model_mgr(sh->model);
       for (int i = 0; i < sh->nsignals; i++) {
          shell_signal_t *ss = &(sh->signals[i]);
-         if (!(ss->signal->nexus.flags & NET_F_FORCED))
+         const bool nexus_forced = !!(ss->signal->nexus.flags & NET_F_FORCED);
+         const bool island_forced = !nexus_forced
+            && (ss->signal->shared.flags & SIG_F_ISLAND)
+            && rt_island_is_forced(imgr, ss->signal, 0,
+                                   signal_width(ss->signal));
+         if (!nexus_forced && !island_forced)
             continue;
 
          if (!shell_get_printer(sh, ss))
             return TCL_ERROR;
 
          const size_t nbytes = ss->signal->shared.size;
-         uint8_t *value LOCAL = xmalloc(nbytes);
-         get_forcing_value(ss->signal, value);
+         if (island_forced) {
+            rt_island_sync_to_signal(sh->model, ss->signal);
+            shell_printf(sh, "force %s %s\n", istr(ss->obj.path),
+                         print_raw(ss->printer, ss->signal->shared.data,
+                                   nbytes, 0));
+         }
+         else {
+            uint8_t *value LOCAL = xmalloc(nbytes);
+            get_forcing_value(ss->signal, value);
 
-         shell_printf(sh, "force %s %s\n", istr(ss->obj.path),
-                      print_raw(ss->printer, value, nbytes, 0));
+            shell_printf(sh, "force %s %s\n", istr(ss->obj.path),
+                         print_raw(ss->printer, value, nbytes, 0));
+         }
       }
 
       return TCL_OK;
@@ -585,14 +603,17 @@ static int shell_cmd_noforce(ClientData cd, Tcl_Interp *interp,
    else if (objc == 1)
       return syntax_error(sh, objv);
 
+   rt_island_mgr_t *imgr = rt_island_model_mgr(sh->model);
    for (int i = 1; i < objc; i++) {
       const char *signame = Tcl_GetString(objv[i]);
       if (strcmp(signame, "*") == 0) {
-         for (int i = 0; i < sh->nsignals; i++) {
-            shell_signal_t *ss = &(sh->signals[i]);
-            if (ss->signal->nexus.flags & NET_F_FORCED)
-               release_signal(sh->model, ss->signal, 0,
-                              signal_width(ss->signal));
+         for (int j = 0; j < sh->nsignals; j++) {
+            shell_signal_t *ss = &(sh->signals[j]);
+            const uint32_t w = signal_width(ss->signal);
+            if ((ss->signal->nexus.flags & NET_F_FORCED)
+                || ((ss->signal->shared.flags & SIG_F_ISLAND)
+                    && rt_island_is_forced(imgr, ss->signal, 0, w)))
+               release_signal(sh->model, ss->signal, 0, w);
          }
       }
       else {
@@ -600,10 +621,13 @@ static int shell_cmd_noforce(ClientData cd, Tcl_Interp *interp,
          if (ss == NULL)
             return TCL_ERROR;
 
-         if (!(ss->signal->nexus.flags & NET_F_FORCED))
+         const uint32_t w = signal_width(ss->signal);
+         if (!(ss->signal->nexus.flags & NET_F_FORCED)
+             && !((ss->signal->shared.flags & SIG_F_ISLAND)
+                  && rt_island_is_forced(imgr, ss->signal, 0, w)))
             return tcl_error(sh, "signal %s is not forced", signame);
 
-         release_signal(sh->model, ss->signal, 0, signal_width(ss->signal));
+         release_signal(sh->model, ss->signal, 0, w);
       }
    }
 

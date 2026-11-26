@@ -3320,3 +3320,8 @@ vhdl_island_recvar1 normal,2008,$NVC_RTL_ISLANDS=hier
 vhdl_island_proc_inout1 normal,2008,$NVC_RTL_ISLANDS=hier
 vhdl_island_generic1 normal,2008,$NVC_RTL_ISLANDS=hier
 vhdl_island_comb_report1 gold,normal,2008,$NVC_RTL_ISLANDS=hier
+island_fast_wave1 shell
+vpi_island5     verilog,vpi
+vhdl_island_fast_force1 normal,2008
+vlog_island_fast_force1 verilog
+tcl_island_fast1 tcl,2008
