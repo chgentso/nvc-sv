@@ -269,7 +269,7 @@ void set_default_options(void)
       opt_set_size(OPT_JIT_CACHE_LIMIT, limit);
    }
    opt_set_int(OPT_RTL_ISLANDS, get_rtl_islands_env());
-   opt_set_int(OPT_ISLAND_FAST, get_bool_env("NVC_ISLAND_FAST", 0));
+   opt_set_int(OPT_ISLAND_FAST, get_bool_env("NVC_ISLAND_FAST", 1));
    opt_set_int(OPT_DUMP_ISLANDS, get_bool_env("NVC_DUMP_ISLANDS", 0));
    opt_set_int(OPT_TWO_STATE, get_two_state_env());
    opt_set_int(OPT_SIM_THREADS, get_sim_threads_env());

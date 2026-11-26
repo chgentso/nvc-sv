@@ -2983,6 +2983,9 @@ static void usage(void)
            { "--format={fst,vcd}", "Waveform dump format" },
            { "--include=GLOB",
              "Include signals matching GLOB in waveform dump" },
+           { "--island-fast, --no-island-fast",
+             "Enable/disable fast compiled island dispatch and sync "
+             "(default on; override with NVC_ISLAND_FAST=0)" },
            { "--shuffle", "Run processes in random order" },
            { "--stats", "Print time and memory usage at end of run" },
            { "--stop-delta=N", "Stop after N delta cycles (default 10000)" },

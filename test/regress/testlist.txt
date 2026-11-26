@@ -3326,3 +3326,4 @@ vhdl_island_fast_force1 normal,2008
 vhdl_island_fast_extread1 normal,2008
 vlog_island_fast_force1 verilog
 tcl_island_fast1 tcl,2008
+island_fast_opts1 shell
