@@ -70,6 +70,8 @@ typedef struct {
    mir_value_t  storage;    // Stack alloc pointer or param value
    bool         by_val;     // True if param is passed as direct vi_val_t
    vi_val_t     pval;
+   bool         has_const_int;
+   int64_t      const_int;
    // Subfields for local record variables (optional leaf array)
    mir_value_t *rec_leaf_ptrs;
    type_t      *rec_leaf_types;
@@ -84,6 +86,7 @@ typedef struct vi_scope {
    type_t           ret_type;
    bool             has_ret_val;
    bool             ret_is_vec;
+   bool             ret_ptr_indirect;
    uint32_t         ret_w;
    bool             ret_signed;
    range_kind_t     ret_dir;
@@ -244,27 +247,216 @@ static inline uint8_t std_enum_to_2bit(unsigned pos)
    return (pos == 3 || pos == 7) ? 1u : 0u;
 }
 
-static bool vi_eval_type_bounds(const vhdl_island_ctx_t *ctx, type_t t,
+static vi_local_t *vi_find_local(vi_lower_t *l, tree_t decl);
+static bool vi_eval_type_bounds(vi_lower_t *l, type_t t,
+                                range_kind_t *dir_out, int64_t *left_out,
+                                int64_t *right_out, uint32_t *width_out);
+
+static bool vi_eval_const_int_r(vi_lower_t *l, tree_t expr, int64_t *out,
+                                int depth)
+{
+   if (expr == NULL || depth > 16)
+      return false;
+
+   if (vhdl_island_eval_const_int_ctx(l->ctx, expr, out))
+      return true;
+
+   switch (tree_kind(expr)) {
+   case T_REF:
+      {
+         tree_t d = tree_ref(expr);
+         if (d == NULL)
+            return false;
+         vi_local_t *loc = vi_find_local(l, d);
+         if (loc != NULL && loc->has_const_int) {
+            *out = loc->const_int;
+            return true;
+         }
+         if (tree_kind(d) == T_CONST_DECL && tree_has_value(d))
+            return vi_eval_const_int_r(l, tree_value(d), out, depth + 1);
+         return false;
+      }
+
+   case T_QUALIFIED:
+   case T_TYPE_CONV:
+      return vi_eval_const_int_r(l, tree_value(expr), out, depth + 1);
+
+   case T_ATTR_REF:
+      {
+         const attr_kind_t ak = tree_subkind(expr);
+         if (ak != ATTR_LENGTH && ak != ATTR_LEFT && ak != ATTR_RIGHT
+             && ak != ATTR_LOW && ak != ATTR_HIGH)
+            return false;
+         int64_t dim = 1;
+         if (tree_params(expr) > 0) {
+            if (tree_params(expr) != 1
+                || !vi_eval_const_int_r(l, tree_value(tree_param(expr, 0)),
+                                        &dim, depth + 1)
+                || dim != 1)
+               return false;
+         }
+         tree_t nm = tree_name(expr);
+         range_kind_t dir = RANGE_DOWNTO;
+         int64_t lv = 0, rv = 0;
+         uint32_t w = 0;
+         bool have = false;
+         if (tree_kind(nm) == T_REF) {
+            vi_local_t *loc = vi_find_local(l, tree_ref(nm));
+            if (loc != NULL && loc->is_vec) {
+               dir = loc->dir;
+               lv = loc->left;
+               rv = loc->right;
+               w = loc->width;
+               have = true;
+            }
+         }
+         if (!have && nm != NULL && tree_type(nm) != NULL
+             && vi_eval_type_bounds(l, tree_type(nm), &dir, &lv, &rv, &w))
+            have = true;
+         if (!have)
+            return false;
+         switch (ak) {
+         case ATTR_LENGTH: *out = (int64_t)w; return true;
+         case ATTR_LEFT:   *out = lv; return true;
+         case ATTR_RIGHT:  *out = rv; return true;
+         case ATTR_LOW:    *out = (dir == RANGE_TO) ? lv : rv; return true;
+         case ATTR_HIGH:   *out = (dir == RANGE_TO) ? rv : lv; return true;
+         default:          return false;
+         }
+      }
+
+   case T_FCALL:
+      {
+         tree_t decl = tree_ref(expr);
+         const subprogram_kind_t sk = tree_subkind(decl);
+         if (tree_params(expr) == 1) {
+            int64_t a;
+            if (!vi_eval_const_int_r(l, tree_value(tree_param(expr, 0)),
+                                     &a, depth + 1))
+               return false;
+            switch (sk) {
+            case S_IDENTITY: *out = a; return true;
+            case S_NEGATE:   if (a == INT64_MIN) return false; *out = -a; return true;
+            case S_ABS:      if (a == INT64_MIN) return false; *out = (a < 0) ? -a : a; return true;
+            default:         return false;
+            }
+         }
+         else if (tree_params(expr) == 2) {
+            int64_t a, b;
+            if (!vi_eval_const_int_r(l, tree_value(tree_param(expr, 0)),
+                                     &a, depth + 1)
+                || !vi_eval_const_int_r(l, tree_value(tree_param(expr, 1)),
+                                        &b, depth + 1))
+               return false;
+            switch (sk) {
+            case S_ADD:     *out = a + b; return true;
+            case S_SUB:     *out = a - b; return true;
+            case S_MUL:     *out = a * b; return true;
+            case S_DIV:     if (b == 0 || (a == INT64_MIN && b == -1)) return false; *out = a / b; return true;
+            case S_REM:     if (b == 0 || (a == INT64_MIN && b == -1)) return false; *out = a % b; return true;
+            case S_MOD:
+               if (b == 0 || (a == INT64_MIN && b == -1))
+                  return false;
+               {
+                  int64_t r = a % b;
+                  if (r != 0 && ((r < 0) != (b < 0)))
+                     r += b;
+                  *out = r;
+               }
+               return true;
+            case S_EXP:
+               if (b < 0 || b > 62)
+                  return false;
+               {
+                  int64_t acc = 1;
+                  for (int64_t i = 0; i < b; i++) {
+                     if (a != 0 && llabs(acc) > INT64_MAX / llabs(a))
+                        return false;
+                     acc *= a;
+                  }
+                  *out = acc;
+               }
+               return true;
+            case S_MINIMUM: *out = MIN(a, b); return true;
+            case S_MAXIMUM: *out = MAX(a, b); return true;
+            default:        return false;
+            }
+         }
+         return false;
+      }
+
+   default:
+      return false;
+   }
+}
+
+static bool vi_eval_const_int(vi_lower_t *l, tree_t expr, int64_t *out)
+{
+   return vi_eval_const_int_r(l, expr, out, 0);
+}
+
+static bool vi_eval_type_bounds(vi_lower_t *l, type_t t,
                                 range_kind_t *dir_out, int64_t *left_out,
                                 int64_t *right_out, uint32_t *width_out)
 {
-   if (type_is_unconstrained(t) || !type_is_array(t) || dimension_of(t) < 1)
+   if (t == NULL || type_is_unconstrained(t) || !type_is_array(t)
+       || dimension_of(t) < 1)
       return false;
    tree_t r = range_of(t, 0);
    if (r == NULL || tree_kind(r) != T_RANGE)
       return false;
    range_kind_t rk = tree_subkind(r);
+   if (rk == RANGE_EXPR && tree_has_value(r)) {
+      tree_t re = tree_value(r);
+      if (tree_kind(re) != T_ATTR_REF || tree_params(re) > 0)
+         return false;
+      const attr_kind_t ak = tree_subkind(re);
+      if (ak != ATTR_RANGE && ak != ATTR_REVERSE_RANGE)
+         return false;
+      tree_t nm = tree_name(re);
+      range_kind_t bdir = RANGE_DOWNTO;
+      int64_t bl = 0, br = 0;
+      uint32_t bw = 0;
+      bool have = false;
+      if (tree_kind(nm) == T_REF) {
+         vi_local_t *loc = vi_find_local(l, tree_ref(nm));
+         if (loc != NULL && loc->is_vec && loc->width > 0) {
+            bdir = loc->dir;
+            bl = loc->left;
+            br = loc->right;
+            bw = loc->width;
+            have = true;
+         }
+      }
+      if (!have && nm != NULL && tree_type(nm) != NULL
+          && vi_eval_type_bounds(l, tree_type(nm), &bdir, &bl, &br, &bw))
+         have = true;
+      if (!have || bw == 0 || bw > 65536)
+         return false;
+      if (ak == ATTR_RANGE) {
+         *dir_out = bdir;
+         *left_out = bl;
+         *right_out = br;
+      }
+      else {
+         *dir_out = (bdir == RANGE_TO) ? RANGE_DOWNTO : RANGE_TO;
+         *left_out = br;
+         *right_out = bl;
+      }
+      *width_out = bw;
+      return true;
+   }
    if (rk != RANGE_TO && rk != RANGE_DOWNTO)
       return false;
-   int64_t l, rr;
-   if (!vhdl_island_eval_const_int_ctx(ctx, tree_left(r), &l)
-       || !vhdl_island_eval_const_int_ctx(ctx, tree_right(r), &rr))
+   int64_t lv, rr;
+   if (!vi_eval_const_int(l, tree_left(r), &lv)
+       || !vi_eval_const_int(l, tree_right(r), &rr))
       return false;
-   int64_t len = (rk == RANGE_TO) ? (rr - l + 1) : (l - rr + 1);
+   int64_t len = (rk == RANGE_TO) ? (rr - lv + 1) : (lv - rr + 1);
    if (len <= 0 || len > 65536)
       return false;
    *dir_out = rk;
-   *left_out = l;
+   *left_out = lv;
    *right_out = rr;
    *width_out = (uint32_t)len;
    return true;
@@ -607,7 +799,7 @@ static bool vi_lower_const_vec_eval(vi_lower_t *l, tree_t expr, type_t hint_t,
          int64_t left = (int64_t)width - 1, right = 0;
          uint32_t w = width;
          if (hint_t != NULL && type_is_array(hint_t) && !type_is_unconstrained(hint_t))
-            vi_eval_type_bounds(l->ctx, hint_t, &dir, &left, &right, &w);
+            vi_eval_type_bounds(l, hint_t, &dir, &left, &right, &w);
          if (w != width)
             return false;
 
@@ -649,7 +841,7 @@ static bool vi_lower_const_vec_eval(vi_lower_t *l, tree_t expr, type_t hint_t,
                {
                   int64_t k;
                   tree_t v = tree_value(a);
-                  if (!vhdl_island_eval_const_int_ctx(l->ctx, tree_name(a), &k)
+                  if (!vi_eval_const_int(l, tree_name(a), &k)
                       || tree_kind(v) != T_REF
                       || tree_kind(tree_ref(v)) != T_ENUM_LIT)
                      return false;
@@ -664,8 +856,8 @@ static bool vi_lower_const_vec_eval(vi_lower_t *l, tree_t expr, type_t hint_t,
                   tree_t rg = tree_range(a, 0);
                   int64_t rl, rr;
                   tree_t v = tree_value(a);
-                  if (!vhdl_island_eval_const_int_ctx(l->ctx, tree_left(rg), &rl)
-                      || !vhdl_island_eval_const_int_ctx(l->ctx, tree_right(rg), &rr)
+                  if (!vi_eval_const_int(l, tree_left(rg), &rl)
+                      || !vi_eval_const_int(l, tree_right(rg), &rr)
                       || tree_kind(v) != T_REF
                       || tree_kind(tree_ref(v)) != T_ENUM_LIT)
                      return false;
@@ -718,7 +910,7 @@ static void vi_check_int_bounds(vi_lower_t *l, type_t target_type,
 
    if (actual_expr != NULL) {
       int64_t cv;
-      if (vhdl_island_eval_const_int_ctx(l->ctx, actual_expr, &cv)
+      if (vi_eval_const_int(l, actual_expr, &cv)
           && cv >= f_lo && cv <= f_hi)
          return;
 
@@ -888,7 +1080,7 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
 
          if (fn_name_is(fn, "RESIZE") && a.kind == VIVAL_VEC && a.width >= 1) {
             int64_t sz;
-            if (vhdl_island_eval_const_int_ctx(l->ctx, e1, &sz)
+            if (vi_eval_const_int(l, e1, &sz)
                 && sz >= 1 && sz <= VHDL_ISLAND_MAX_WIDTH) {
                const uint32_t nw = (uint32_t)sz;
                const bool sg = a.is_signed || ret_signed;
@@ -1036,7 +1228,7 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
          range_kind_t rdir = RANGE_DOWNTO;
          int64_t rl = 0, rr = 0;
          uint32_t rw = 0;
-         if (!vi_eval_type_bounds(l->ctx, rtype, &rdir, &rl, &rr, &rw)) {
+         if (!vi_eval_type_bounds(l, rtype, &rdir, &rl, &rr, &rw)) {
             if (fn_name_is(fn, "\"*\"") && np == 2) {
                uint32_t w0 = pvals[0].kind == VIVAL_VEC ? pvals[0].width : first_vec.width;
                uint32_t w1 = pvals[1].kind == VIVAL_VEC ? pvals[1].width : first_vec.width;
@@ -1050,8 +1242,7 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
                       || fn_name_is(fn, "CONV_SIGNED"))
                      && np == 2) {
                int64_t sz;
-               if (!vhdl_island_eval_const_int_ctx(l->ctx,
-                                               tree_value(tree_param(fcall, 1)), &sz)
+               if (!vi_eval_const_int(l, tree_value(tree_param(fcall, 1)), &sz)
                    || sz <= 0)
                   return false;
                rw = (uint32_t)sz;
@@ -1301,7 +1492,7 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
           || fn_name_is(fn, "CONV_UNSIGNED") || fn_name_is(fn, "CONV_SIGNED")
           || fn_name_is(fn, "CONV_STD_LOGIC_VECTOR")) {
          int64_t sz;
-         if (!vhdl_island_eval_const_int_ctx(l->ctx, e1, &sz)
+         if (!vi_eval_const_int(l, e1, &sz)
              || sz <= 0 || sz > VHDL_ISLAND_MAX_WIDTH)
             return false;
          const bool sg = fn_name_is(fn, "TO_SIGNED") || fn_name_is(fn, "CONV_SIGNED");
@@ -1330,7 +1521,7 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
          if (a.kind != VIVAL_VEC)
             return false;
          int64_t sz;
-         if (!vhdl_island_eval_const_int_ctx(l->ctx, e1, &sz)
+         if (!vi_eval_const_int(l, e1, &sz)
              || sz <= 0 || sz > VHDL_ISLAND_MAX_WIDTH)
             return false;
          const uint32_t nw = (uint32_t)sz;
@@ -1560,6 +1751,8 @@ static bool vi_lower_inline_func(vi_lower_t *l, tree_t fcall, tree_t func,
 
    // Evaluate arguments in caller scope first
    vi_val_t *arg_vals LOCAL = xcalloc_array(MAX(1, np), sizeof(vi_val_t));
+   bool *arg_has_cint LOCAL = xcalloc_array(MAX(1, np), sizeof(bool));
+   int64_t *arg_cints LOCAL = xcalloc_array(MAX(1, np), sizeof(int64_t));
    for (int i = 0; i < np; i++) {
       tree_t pe = tree_value(tree_param(fcall, i));
       if (!vi_lower_expr(l, pe, &arg_vals[i]))
@@ -1568,6 +1761,12 @@ static bool vi_lower_inline_func(vi_lower_t *l, tree_t fcall, tree_t func,
          tree_t fp = tree_port(func, i);
          vi_check_int_bounds(l, tree_type(fp), vi_to_i64(mu, arg_vals[i].val),
                              pe, fp);
+         int64_t cv = 0;
+         if (vi_eval_const_int(l, pe, &cv)
+             || mir_get_const(mu, arg_vals[i].val, &cv)) {
+            arg_has_cint[i] = true;
+            arg_cints[i] = cv;
+         }
       }
    }
 
@@ -1577,6 +1776,31 @@ static bool vi_lower_inline_func(vi_lower_t *l, tree_t fcall, tree_t func,
       .ret_type = tree_type(fcall),
    };
 
+   // Bind formal parameters in callee scope first so return type & local decl
+   // bounds can resolve formal integer constants and array attributes.
+   for (int i = 0; i < np; i++) {
+      tree_t fp = tree_port(func, i);
+      vi_local_t loc = {
+         .decl          = fp,
+         .is_vec        = (arg_vals[i].kind == VIVAL_VEC),
+         .is_std        = arg_vals[i].is_std,
+         .is_bool       = arg_vals[i].is_bool,
+         .is_signed     = arg_vals[i].is_signed,
+         .width         = arg_vals[i].width,
+         .dir           = arg_vals[i].dir,
+         .left          = arg_vals[i].left,
+         .right         = arg_vals[i].right,
+         .by_val        = true,
+         .pval          = arg_vals[i],
+         .has_const_int = arg_has_cint[i],
+         .const_int     = arg_cints[i],
+      };
+      APUSH(child.locals, loc);
+   }
+
+   vi_scope_t *prev_scope = l->scope;
+   l->scope = &child;
+
    // Allocate return slot if function returns a value
    type_t rtype = tree_type(fcall);
    range_kind_t rdir = RANGE_DOWNTO;
@@ -1585,7 +1809,7 @@ static bool vi_lower_inline_func(vi_lower_t *l, tree_t fcall, tree_t func,
    if (type_is_array(rtype)) {
       child.ret_is_vec = true;
       child.ret_signed = vi_type_is_signed_vec(rtype);
-      if (vi_eval_type_bounds(l->ctx, rtype, &rdir, &rl, &rr, &rw)) {
+      if (vi_eval_type_bounds(l, rtype, &rdir, &rl, &rr, &rw)) {
          child.ret_w = rw;
          child.ret_dir = rdir;
          child.ret_left = rl;
@@ -1598,8 +1822,16 @@ static bool vi_lower_inline_func(vi_lower_t *l, tree_t fcall, tree_t func,
          else
             child.ret_slot = vi_modeb_alloc_vec(l, rw);
       }
+      else if (!l->two_state) {
+         // Unconstrained Mode B return: hold returned buffer pointer in a
+         // function-scoped var so branched returns always dominate ret_bb.
+         child.ret_ptr_indirect = true;
+         child.ret_slot = mir_add_var(mu, mir_pointer_type(mu, vi_u8_type(mu)),
+                                      MIR_NULL_STAMP, ident_uniq("fnretp"),
+                                      MIR_VAR_TEMP);
+      }
    }
-   else if (type_is_integer(rtype)) {
+   else if (vi_type_is_int_or_user_enum(rtype)) {
       child.ret_slot = mir_add_var(mu, vi_i64_type(mu), MIR_NULL_STAMP,
                                    ident_uniq("fnret"), MIR_VAR_TEMP);
    }
@@ -1610,31 +1842,10 @@ static bool vi_lower_inline_func(vi_lower_t *l, tree_t fcall, tree_t func,
                                    ident_uniq("fnret"), MIR_VAR_TEMP);
    }
    else {
+      l->scope = prev_scope;
       ACLEAR(child.locals);
       return false;
    }
-
-   // Bind parameters and local variables in callee scope
-   for (int i = 0; i < np; i++) {
-      tree_t fp = tree_port(func, i);
-      vi_local_t loc = {
-         .decl      = fp,
-         .is_vec    = (arg_vals[i].kind == VIVAL_VEC),
-         .is_std    = arg_vals[i].is_std,
-         .is_bool   = arg_vals[i].is_bool,
-         .is_signed = arg_vals[i].is_signed,
-         .width     = arg_vals[i].width,
-         .dir       = arg_vals[i].dir,
-         .left      = arg_vals[i].left,
-         .right     = arg_vals[i].right,
-         .by_val    = true,
-         .pval      = arg_vals[i],
-      };
-      APUSH(child.locals, loc);
-   }
-
-   vi_scope_t *prev_scope = l->scope;
-   l->scope = &child;
 
    for (int i = 0; i < tree_decls(func); i++) {
       tree_t d = tree_decl(func, i);
@@ -1645,7 +1856,7 @@ static bool vi_lower_inline_func(vi_lower_t *l, tree_t fcall, tree_t func,
             loc.is_vec = true;
             loc.is_std = vi_type_is_std_logic(type_elem(vt));
             loc.is_signed = vi_type_is_signed_vec(vt);
-            if (!vi_eval_type_bounds(l->ctx, vt, &loc.dir, &loc.left,
+            if (!vi_eval_type_bounds(l, vt, &loc.dir, &loc.left,
                                      &loc.right, &loc.width)) {
                l->scope = prev_scope;
                ACLEAR(child.locals);
@@ -1659,9 +1870,16 @@ static bool vi_lower_inline_func(vi_lower_t *l, tree_t fcall, tree_t func,
             else
                loc.storage = vi_modeb_alloc_vec(l, loc.width);
          }
-         else if (type_is_integer(vt)) {
+         else if (vi_type_is_int_or_user_enum(vt)) {
             loc.storage = mir_add_var(mu, vi_i64_type(mu), MIR_NULL_STAMP,
                                       tree_ident(d), MIR_VAR_TEMP);
+            if (tree_kind(d) == T_CONST_DECL && tree_has_value(d)) {
+               int64_t cv = 0;
+               if (vi_eval_const_int(l, tree_value(d), &cv)) {
+                  loc.has_const_int = true;
+                  loc.const_int = cv;
+               }
+            }
          }
          else if (type_is_enum(vt)) {
             loc.is_std = vi_type_is_std_logic(vt);
@@ -1718,7 +1936,8 @@ static bool vi_lower_inline_func(vi_lower_t *l, tree_t fcall, tree_t func,
    if (child.ret_is_vec) {
       *out = (vi_val_t){
          .kind      = VIVAL_VEC,
-         .val       = l->two_state ? mir_build_load(mu, child.ret_slot) : child.ret_slot,
+         .val       = (l->two_state || child.ret_ptr_indirect)
+                      ? mir_build_load(mu, child.ret_slot) : child.ret_slot,
          .width     = child.ret_w,
          .is_signed = child.ret_signed,
          .is_std    = vi_type_is_std_logic(type_elem(rtype)),
@@ -1727,7 +1946,7 @@ static bool vi_lower_inline_func(vi_lower_t *l, tree_t fcall, tree_t func,
          .right     = child.ret_right,
       };
    }
-   else if (type_is_integer(rtype)) {
+   else if (vi_type_is_int_or_user_enum(rtype)) {
       *out = (vi_val_t){
          .kind = VIVAL_INT,
          .val  = mir_build_load(mu, child.ret_slot),
@@ -2367,7 +2586,7 @@ static bool vi_lower_expr(vi_lower_t *l, tree_t expr, vi_val_t *out)
                }
                if (vi_type_is_int_or_user_enum(tree_type(d))) {
                   int64_t cval;
-                  if (vhdl_island_eval_const_int_ctx(l->ctx, expr, &cval)) {
+                  if (vi_eval_const_int(l, expr, &cval)) {
                      *out = (vi_val_t){ .kind = VIVAL_INT, .val = vi_i64(mu, cval) };
                      return true;
                   }
@@ -2504,8 +2723,8 @@ static bool vi_lower_expr(vi_lower_t *l, tree_t expr, vi_val_t *out)
             return false;
          int64_t sl = 0, sr = 0;
          const bool const_bounds =
-            vhdl_island_eval_const_int_ctx(l->ctx, tree_left(rg), &sl)
-            && vhdl_island_eval_const_int_ctx(l->ctx, tree_right(rg), &sr);
+            vi_eval_const_int(l, tree_left(rg), &sl)
+            && vi_eval_const_int(l, tree_right(rg), &sr);
 
          if (const_bounds) {
             int64_t sw = (sdir == RANGE_TO) ? (sr - sl + 1) : (sl - sr + 1);
@@ -2575,7 +2794,7 @@ static bool vi_lower_expr(vi_lower_t *l, tree_t expr, vi_val_t *out)
             out->is_signed = vi_type_is_signed_vec(tt);
             out->is_std = vi_type_is_std_logic(type_elem(tt));
             range_kind_t d; int64_t lv, rv; uint32_t w;
-            if (vi_eval_type_bounds(l->ctx, tt, &d, &lv, &rv, &w) && w == out->width) {
+            if (vi_eval_type_bounds(l, tt, &d, &lv, &rv, &w) && w == out->width) {
                out->dir = d;
                out->left = lv;
                out->right = rv;
@@ -2593,7 +2812,7 @@ static bool vi_lower_expr(vi_lower_t *l, tree_t expr, vi_val_t *out)
          type_t rt = tree_type(expr);
          if (type_is_array(rt)) {
             range_kind_t rd; int64_t rl, rr; uint32_t rw;
-            if (!vi_eval_type_bounds(l->ctx, rt, &rd, &rl, &rr, &rw))
+            if (!vi_eval_type_bounds(l, rt, &rd, &rl, &rr, &rw))
                return false;
             const bool rsg = vi_type_is_signed_vec(rt);
             const bool rstd = vi_type_is_std_logic(type_elem(rt));
@@ -2747,7 +2966,7 @@ static bool vi_lower_expr(vi_lower_t *l, tree_t expr, vi_val_t *out)
          range_kind_t dir = RANGE_DOWNTO;
          int64_t left = 0, right = 0;
          uint32_t w = 0;
-         if (!vi_eval_type_bounds(l->ctx, t, &dir, &left, &right, &w))
+         if (!vi_eval_type_bounds(l, t, &dir, &left, &right, &w))
             return false;
 
          if (l->two_state) {
@@ -2787,7 +3006,7 @@ static bool vi_lower_expr(vi_lower_t *l, tree_t expr, vi_val_t *out)
                }
                else if (tree_subkind(a) == A_NAMED) {
                   int64_t k;
-                  if (!vhdl_island_eval_const_int_ctx(l->ctx, tree_name(a), &k))
+                  if (!vi_eval_const_int(l, tree_name(a), &k))
                      return false;
                   int64_t pos = (dir == RANGE_TO) ? (k - left) : (left - k);
                   if (pos < 0 || pos >= w)
@@ -2797,8 +3016,8 @@ static bool vi_lower_expr(vi_lower_t *l, tree_t expr, vi_val_t *out)
                else if (tree_subkind(a) == A_RANGE) {
                   tree_t rg = tree_range(a, 0);
                   int64_t rl, rr;
-                  if (!vhdl_island_eval_const_int_ctx(l->ctx, tree_left(rg), &rl)
-                      || !vhdl_island_eval_const_int_ctx(l->ctx, tree_right(rg), &rr))
+                  if (!vi_eval_const_int(l, tree_left(rg), &rl)
+                      || !vi_eval_const_int(l, tree_right(rg), &rr))
                      return false;
                   int64_t p0 = (dir == RANGE_TO) ? (rl - left) : (left - rl);
                   int64_t p1 = (dir == RANGE_TO) ? (rr - left) : (left - rr);
@@ -2842,7 +3061,7 @@ static bool vi_lower_expr(vi_lower_t *l, tree_t expr, vi_val_t *out)
             }
             else if (tree_subkind(a) == A_NAMED) {
                int64_t k;
-               if (!vhdl_island_eval_const_int_ctx(l->ctx, tree_name(a), &k))
+               if (!vi_eval_const_int(l, tree_name(a), &k))
                   return false;
                int64_t pos = (dir == RANGE_TO) ? (k - left) : (left - k);
                if (pos < 0 || pos >= w)
@@ -2852,8 +3071,8 @@ static bool vi_lower_expr(vi_lower_t *l, tree_t expr, vi_val_t *out)
             else if (tree_subkind(a) == A_RANGE) {
                tree_t rg = tree_range(a, 0);
                int64_t rl, rr;
-               if (!vhdl_island_eval_const_int_ctx(l->ctx, tree_left(rg), &rl)
-                   || !vhdl_island_eval_const_int_ctx(l->ctx, tree_right(rg), &rr))
+               if (!vi_eval_const_int(l, tree_left(rg), &rl)
+                   || !vi_eval_const_int(l, tree_right(rg), &rr))
                   return false;
                int64_t p0 = (dir == RANGE_TO) ? (rl - left) : (left - rl);
                int64_t p1 = (dir == RANGE_TO) ? (rr - left) : (left - rr);
@@ -2875,7 +3094,7 @@ static bool vi_lower_expr(vi_lower_t *l, tree_t expr, vi_val_t *out)
    case T_ATTR_REF:
       {
          int64_t cv;
-         if (vhdl_island_eval_const_int_ctx(l->ctx, expr, &cv)) {
+         if (vi_eval_const_int(l, expr, &cv)) {
             *out = (vi_val_t){ .kind = VIVAL_INT, .val = vi_i64(mu, cv) };
             return true;
          }
@@ -2905,7 +3124,7 @@ static bool vi_lower_expr(vi_lower_t *l, tree_t expr, vi_val_t *out)
                return true;
             }
          }
-         if (tree_kind(base) == T_REF && tree_kind(tree_ref(base)) == T_PARAM_DECL) {
+         if (tree_kind(base) == T_REF) {
             vi_local_t *loc = vi_find_local(l, tree_ref(base));
             if (loc != NULL && loc->is_vec) {
                switch (ak) {
@@ -3321,8 +3540,8 @@ static bool vi_lower_sig_assign(vi_lower_t *l, tree_t stmt)
          return false;
       int64_t sl = 0, sr = 0;
       const bool const_bounds =
-         vhdl_island_eval_const_int_ctx(l->ctx, tree_left(rg), &sl)
-         && vhdl_island_eval_const_int_ctx(l->ctx, tree_right(rg), &sr);
+         vi_eval_const_int(l, tree_left(rg), &sl)
+         && vi_eval_const_int(l, tree_right(rg), &sr);
       uint32_t sw = 0;
       if (const_bounds) {
          int64_t sw64 = (sdir == RANGE_TO) ? (sr - sl + 1) : (sl - sr + 1);
@@ -3442,8 +3661,8 @@ static bool vi_lower_var_assign(vi_lower_t *l, tree_t stmt)
          return false;
       int64_t sl = 0, sr = 0;
       const bool const_bounds =
-         vhdl_island_eval_const_int_ctx(l->ctx, tree_left(rg), &sl)
-         && vhdl_island_eval_const_int_ctx(l->ctx, tree_right(rg), &sr);
+         vi_eval_const_int(l, tree_left(rg), &sl)
+         && vi_eval_const_int(l, tree_right(rg), &sr);
       tree_t base = tree_value(target);
       if (tree_kind(base) != T_REF)
          return false;
@@ -3804,29 +4023,44 @@ static bool vi_lower_stmt(vi_lower_t *l, tree_t stmt)
          if (l->scope->ret_is_vec) {
             if (rv.kind != VIVAL_VEC)
                return false;
-            if (mir_is_null(l->scope->ret_slot)) {
+            if (l->scope->has_ret_val && rv.width != l->scope->ret_w)
+               return false;
+            if (l->scope->ret_ptr_indirect) {
                l->scope->ret_w = rv.width;
                l->scope->ret_dir = rv.dir;
                l->scope->ret_left = rv.left;
                l->scope->ret_right = rv.right;
+               mir_value_t buf = vi_modeb_alloc_vec(l, rv.width);
+               mir_build_copy(mu, buf, rv.val, vi_off(mu, rv.width));
+               mir_build_store(mu, l->scope->ret_slot, buf);
+            }
+            else {
+               if (mir_is_null(l->scope->ret_slot)) {
+                  l->scope->ret_w = rv.width;
+                  l->scope->ret_dir = rv.dir;
+                  l->scope->ret_left = rv.left;
+                  l->scope->ret_right = rv.right;
+                  if (l->two_state) {
+                     mir_type_t vt = mir_vec2_type(mu, (int)rv.width, l->scope->ret_signed);
+                     l->scope->ret_slot = mir_add_var(mu, vt, MIR_NULL_STAMP,
+                                                      ident_uniq("fnret"), MIR_VAR_TEMP);
+                  }
+                  else
+                     l->scope->ret_slot = vi_modeb_alloc_vec(l, rv.width);
+               }
+               if (rv.width != l->scope->ret_w)
+                  return false;
                if (l->two_state) {
-                  mir_type_t vt = mir_vec2_type(mu, (int)rv.width, l->scope->ret_signed);
-                  l->scope->ret_slot = mir_add_var(mu, vt, MIR_NULL_STAMP,
-                                                   ident_uniq("fnret"), MIR_VAR_TEMP);
+                  mir_value_t v = (rv.is_signed != l->scope->ret_signed)
+                     ? mir_build_cast(mu, mir_vec2_type(mu, (int)l->scope->ret_w,
+                                                        l->scope->ret_signed),
+                                      rv.val)
+                     : rv.val;
+                  mir_build_store(mu, l->scope->ret_slot, v);
                }
                else
-                  l->scope->ret_slot = vi_modeb_alloc_vec(l, rv.width);
+                  mir_build_copy(mu, l->scope->ret_slot, rv.val, vi_off(mu, rv.width));
             }
-            if (l->two_state) {
-               mir_value_t v = (rv.is_signed != l->scope->ret_signed)
-                  ? mir_build_cast(mu, mir_vec2_type(mu, (int)l->scope->ret_w,
-                                                     l->scope->ret_signed),
-                                   rv.val)
-                  : rv.val;
-               mir_build_store(mu, l->scope->ret_slot, v);
-            }
-            else
-               mir_build_copy(mu, l->scope->ret_slot, rv.val, vi_off(mu, rv.width));
          }
          else if (vi_type_is_int_or_user_enum(l->scope->ret_type)) {
             if (rv.kind != VIVAL_INT)
@@ -3964,8 +4198,8 @@ static bool vi_lower_stmt(vi_lower_t *l, tree_t stmt)
                   else if (tree_ranges(ch) > 0 && sel.kind == VIVAL_INT) {
                      tree_t rg = tree_range(ch, 0);
                      int64_t rl, rr;
-                     if (!vhdl_island_eval_const_int_ctx(l->ctx, tree_left(rg), &rl)
-                         || !vhdl_island_eval_const_int_ctx(l->ctx, tree_right(rg), &rr))
+                     if (!vi_eval_const_int(l, tree_left(rg), &rl)
+                         || !vi_eval_const_int(l, tree_right(rg), &rr))
                         return false;
                      int64_t lo = MIN(rl, rr), hi = MAX(rl, rr);
                      mir_value_t sv = vi_to_i64(mu, sel.val);
@@ -4140,11 +4374,16 @@ static bool vi_lower_stmt(vi_lower_t *l, tree_t stmt)
             else
                return false;
          }
-         else if (!vhdl_island_eval_const_int_ctx(l->ctx, tree_left(rg), &lv)
-                  || !vhdl_island_eval_const_int_ctx(l->ctx, tree_right(rg), &rv))
+         else if (!vi_eval_const_int(l, tree_left(rg), &lv)
+                  || !vi_eval_const_int(l, tree_right(rg), &rv))
             return false;
          if ((rk == RANGE_TO && lv > rv) || (rk == RANGE_DOWNTO && lv < rv))
             return true;
+         {
+            const int64_t niters = (rk == RANGE_TO) ? (rv - lv + 1) : (lv - rv + 1);
+            if (niters > VHDL_ISLAND_MAX_LOOP_ITERS)
+               return false;
+         }
 
          tree_t loop_var = tree_decl(stmt, 0);
          mir_value_t lvar = mir_add_var(mu, vi_i64_type(mu), MIR_NULL_STAMP,
@@ -4159,9 +4398,14 @@ static bool vi_lower_stmt(vi_lower_t *l, tree_t stmt)
          vi_scope_t ls = { .parent = l->scope, .ret_bb = l->scope->ret_bb,
                            .ret_slot = l->scope->ret_slot,
                            .ret_type = l->scope->ret_type,
+                           .has_ret_val = l->scope->has_ret_val,
                            .ret_is_vec = l->scope->ret_is_vec,
+                           .ret_ptr_indirect = l->scope->ret_ptr_indirect,
                            .ret_signed = l->scope->ret_signed,
                            .ret_w = l->scope->ret_w,
+                           .ret_dir = l->scope->ret_dir,
+                           .ret_left = l->scope->ret_left,
+                           .ret_right = l->scope->ret_right,
                            .loop_next_bb = step_bb,
                            .loop_exit_bb = exit_bb };
          vi_local_t loc = { .decl = loop_var, .storage = lvar };
@@ -4202,6 +4446,9 @@ static bool vi_lower_stmt(vi_lower_t *l, tree_t stmt)
          l->scope->has_ret_val |= ls.has_ret_val;
          l->scope->ret_slot = ls.ret_slot;
          l->scope->ret_w = ls.ret_w;
+         l->scope->ret_dir = ls.ret_dir;
+         l->scope->ret_left = ls.ret_left;
+         l->scope->ret_right = ls.ret_right;
          l->scope = ls.parent;
          ACLEAR(ls.locals);
          mir_set_cursor(mu, exit_bb, MIR_APPEND);
@@ -4229,7 +4476,7 @@ static bool vi_bind_process_locals(vi_lower_t *l, tree_t proc, vi_scope_t *sc)
          loc.is_vec = true;
          loc.is_std = vi_type_is_std_logic(type_elem(vt));
          loc.is_signed = vi_type_is_signed_vec(vt);
-         if (!vi_eval_type_bounds(l->ctx, vt, &loc.dir, &loc.left,
+         if (!vi_eval_type_bounds(l, vt, &loc.dir, &loc.left,
                                   &loc.right, &loc.width))
             return false;
          if (l->two_state) {

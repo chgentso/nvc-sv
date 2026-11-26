@@ -3311,3 +3311,4 @@ vhdl_island_rangecheck1 fail,2008,$NVC_RTL_ISLANDS=hier
 ename_unbound1 fail,gold,2008
 vhdl_island_mul1 normal,2008,$NVC_RTL_ISLANDS=hier
 vhdl_island_fallback1 normal,2008,$NVC_RTL_ISLANDS=hier
+vhdl_island_inline_param1 normal,2008,$NVC_RTL_ISLANDS=hier

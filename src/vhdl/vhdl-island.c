@@ -1480,6 +1480,10 @@ static bool check_expr(check_ctx_t *c, tree_t expr, bool is_target)
          int64_t l, r;
          if (!vhdl_island_eval_const_int_ctx(c->ctx, tree_left(rg), &l)
              || !vhdl_island_eval_const_int_ctx(c->ctx, tree_right(rg), &r)) {
+            if (c->in_func
+                && check_expr(c, tree_left(rg), false)
+                && check_expr(c, tree_right(rg), false))
+               return check_expr(c, tree_value(expr), is_target);
             uint32_t sw = 0;
             if (!c->two_state
                 && vhdl_island_const_slice_width(c->ctx, rg, &sw)
@@ -1536,8 +1540,12 @@ static bool check_expr(check_ctx_t *c, tree_t expr, bool is_target)
                int64_t l, r;
                if (!vhdl_island_eval_const_int_ctx(c->ctx, tree_left(rg), &l)
                    || !vhdl_island_eval_const_int_ctx(c->ctx,
-                                                  tree_right(rg), &r))
-                  return false;
+                                                  tree_right(rg), &r)) {
+                  if (!c->in_func
+                      || !check_expr(c, tree_left(rg), false)
+                      || !check_expr(c, tree_right(rg), false))
+                     return false;
+               }
             }
             break;
          case A_POS:
@@ -1984,7 +1992,7 @@ static bool check_stmt(check_ctx_t *c, tree_t stmt, bool is_func)
             return false;
          const range_kind_t rk = tree_subkind(rg);
          if (rk == RANGE_EXPR) {
-            // Allow `for i in param'range` / `param'reverse_range` inside pure functions
+            // Allow `for i in param'range` / `v'reverse_range` inside pure functions
             if (!is_func || !tree_has_value(rg))
                return false;
             tree_t re = tree_value(rg);
@@ -1994,17 +2002,26 @@ static bool check_stmt(check_ctx_t *c, tree_t stmt, bool is_func)
             if ((ak != ATTR_RANGE && ak != ATTR_REVERSE_RANGE) || tree_params(re) > 0)
                return false;
             tree_t nm = tree_name(re);
-            if (tree_kind(nm) != T_REF || tree_kind(tree_ref(nm)) != T_PARAM_DECL)
+            if (tree_kind(nm) != T_REF)
+               return false;
+            tree_kind_t nk = tree_kind(tree_ref(nm));
+            if (nk != T_PARAM_DECL && nk != T_VAR_DECL && nk != T_CONST_DECL)
                return false;
          }
          else if (rk == RANGE_TO || rk == RANGE_DOWNTO) {
             int64_t l, r;
             if (!vhdl_island_eval_const_int_ctx(c->ctx, tree_left(rg), &l)
-                || !vhdl_island_eval_const_int_ctx(c->ctx, tree_right(rg), &r))
-               return false;
-            const int64_t niters = (rk == RANGE_TO) ? (r - l + 1) : (l - r + 1);
-            if (niters < 0 || niters > VHDL_ISLAND_MAX_LOOP_ITERS)
-               return false;
+                || !vhdl_island_eval_const_int_ctx(c->ctx, tree_right(rg), &r)) {
+               if (!is_func
+                   || !check_expr(c, tree_left(rg), false)
+                   || !check_expr(c, tree_right(rg), false))
+                  return false;
+            }
+            else {
+               const int64_t niters = (rk == RANGE_TO) ? (r - l + 1) : (l - r + 1);
+               if (niters < 0 || niters > VHDL_ISLAND_MAX_LOOP_ITERS)
+                  return false;
+            }
          }
          else
             return false;
