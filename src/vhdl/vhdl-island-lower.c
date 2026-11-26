@@ -3376,26 +3376,33 @@ static bool vi_lower_expr(vi_lower_t *l, tree_t expr, vi_val_t *out)
                      return true;
                   }
                }
-               if (tree_kind(d) == T_GENERIC_DECL && l->ctx != NULL) {
-                  tree_t eblk = l->ctx->eval_block != NULL
-                     ? l->ctx->eval_block : l->ctx->block;
-                  const tree_t *eancs = l->ctx->eval_block != NULL
-                     ? l->ctx->eval_ancestors : l->ctx->ancestors;
-                  const int n_eancs = l->ctx->eval_block != NULL
-                     ? l->ctx->n_eval_ancestors : l->ctx->n_ancestors;
-                  for (int ai = -1; ai < n_eancs; ai++) {
-                     tree_t gb = (ai < 0) ? eblk : eancs[ai];
-                     if (gb == NULL)
-                        continue;
-                     const int ng = tree_generics(gb);
-                     const int nm = tree_genmaps(gb);
-                     for (int gi = 0; gi < ng && gi < nm; gi++) {
-                        if (tree_generic(gb, gi) == d)
-                           return vi_lower_expr(l,
-                                                tree_value(tree_genmap(gb, gi)),
-                                                out);
+               if (tree_kind(d) == T_GENERIC_DECL) {
+                  if (l->ctx != NULL) {
+                     tree_t eblk = l->ctx->eval_block != NULL
+                        ? l->ctx->eval_block : l->ctx->block;
+                     const tree_t *eancs = l->ctx->eval_block != NULL
+                        ? l->ctx->eval_ancestors : l->ctx->ancestors;
+                     const int n_eancs = l->ctx->eval_block != NULL
+                        ? l->ctx->n_eval_ancestors : l->ctx->n_ancestors;
+                     for (int ai = -1; ai < n_eancs; ai++) {
+                        tree_t gb = (ai < 0) ? eblk : eancs[ai];
+                        if (gb == NULL)
+                           continue;
+                        const int ng = tree_generics(gb);
+                        const int nm = tree_genmaps(gb);
+                        for (int gi = 0; gi < ng; gi++) {
+                           if (tree_generic(gb, gi) == d) {
+                              if (gi < nm)
+                                 return vi_lower_expr(
+                                    l, tree_value(tree_genmap(gb, gi)), out);
+                              if (tree_has_value(d))
+                                 return vi_lower_expr(l, tree_value(d), out);
+                              return false;
+                           }
+                        }
                      }
                   }
+                  return false;
                }
                if (tree_has_value(d))
                   return vi_lower_expr(l, tree_value(d), out);
@@ -5477,20 +5484,29 @@ static bool vi_lower_str_expr(vi_lower_t *l, tree_t expr, vi_str_t *out)
          if (tree_kind(d) == T_CONST_DECL && tree_has_value(d))
             return vi_lower_str_expr(l, tree_value(d), out);
          if (tree_kind(d) == T_GENERIC_DECL && l->ctx != NULL) {
-            for (int ai = -1; ai < l->ctx->n_ancestors; ai++) {
-               tree_t gb = (ai < 0) ? l->ctx->block : l->ctx->ancestors[ai];
+            tree_t eblk = l->ctx->eval_block != NULL
+               ? l->ctx->eval_block : l->ctx->block;
+            const tree_t *eancs = l->ctx->eval_block != NULL
+               ? l->ctx->eval_ancestors : l->ctx->ancestors;
+            const int n_eancs = l->ctx->eval_block != NULL
+               ? l->ctx->n_eval_ancestors : l->ctx->n_ancestors;
+            for (int ai = -1; ai < n_eancs; ai++) {
+               tree_t gb = (ai < 0) ? eblk : eancs[ai];
                if (gb == NULL)
                   continue;
                const int ng = tree_generics(gb);
                const int nm = tree_genmaps(gb);
-               for (int gi = 0; gi < ng && gi < nm; gi++) {
-                  if (tree_generic(gb, gi) == d)
-                     return vi_lower_str_expr(
-                        l, tree_value(tree_genmap(gb, gi)), out);
+               for (int gi = 0; gi < ng; gi++) {
+                  if (tree_generic(gb, gi) == d) {
+                     if (gi < nm)
+                        return vi_lower_str_expr(
+                           l, tree_value(tree_genmap(gb, gi)), out);
+                     if (tree_has_value(d))
+                        return vi_lower_str_expr(l, tree_value(d), out);
+                     return false;
+                  }
                }
             }
-            if (tree_has_value(d))
-               return vi_lower_str_expr(l, tree_value(d), out);
          }
          return false;
       }

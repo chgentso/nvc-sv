@@ -14394,8 +14394,17 @@ vcode_unit_t lower_vhdl_islands(unit_registry_t *ur, lower_unit_t *lu,
        || opt_get_int(OPT_RTL_ISLANDS) == RTL_ISLANDS_OFF)
       return NULL;
 
+   tree_t ancestors[VHDL_ISLAND_MAX_ANCESTORS];
+   int n_ancestors = 0;
+   for (lower_unit_t *p = lu->parent;
+        p != NULL && n_ancestors < VHDL_ISLAND_MAX_ANCESTORS;
+        p = p->parent) {
+      if (p->container != NULL && tree_kind(p->container) == T_BLOCK)
+         ancestors[n_ancestors++] = p->container;
+   }
+
    vhdl_island_ctx_t *ictx = vhdl_island_lower_prepare(
-      unit_registry_mir(ur), block, NULL, 0, lu->name, cover);
+      unit_registry_mir(ur), block, ancestors, n_ancestors, lu->name, cover);
    if (ictx == NULL)
       return NULL;
 

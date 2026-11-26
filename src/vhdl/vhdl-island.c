@@ -132,17 +132,20 @@ static bool eval_const_int_blocks(tree_t block, const tree_t *ancestors,
                   continue;
                const int ng = tree_generics(gb);
                const int nm = tree_genmaps(gb);
-               for (int i = 0; i < ng && i < nm; i++) {
-                  if (tree_generic(gb, i) == decl
-                      || tree_ident(tree_generic(gb, i)) == tree_ident(decl))
-                     return eval_const_int_blocks(
-                        block, ancestors, n_ancestors,
-                        tree_value(tree_genmap(gb, i)), out, depth + 1);
+               for (int i = 0; i < ng; i++) {
+                  if (tree_generic(gb, i) == decl) {
+                     if (i < nm)
+                        return eval_const_int_blocks(
+                           block, ancestors, n_ancestors,
+                           tree_value(tree_genmap(gb, i)), out, depth + 1);
+                     if (tree_has_value(decl))
+                        return eval_const_int_blocks(
+                           block, ancestors, n_ancestors,
+                           tree_value(decl), out, depth + 1);
+                     return false;
+                  }
                }
             }
-            if (tree_has_value(decl))
-               return eval_const_int_blocks(block, ancestors, n_ancestors,
-                                            tree_value(decl), out, depth + 1);
             return false;
          default:
             return false;
@@ -1783,20 +1786,29 @@ static bool check_str_expr(check_ctx_t *c, tree_t expr, int depth)
          if (tree_kind(d) == T_CONST_DECL && tree_has_value(d))
             return check_str_expr(c, tree_value(d), depth + 1);
          if (tree_kind(d) == T_GENERIC_DECL && c->ctx != NULL) {
-            for (int ai = -1; ai < c->ctx->n_ancestors; ai++) {
-               tree_t gb = (ai < 0) ? c->ctx->block : c->ctx->ancestors[ai];
+            tree_t eblk = c->ctx->eval_block != NULL
+               ? c->ctx->eval_block : c->ctx->block;
+            const tree_t *eancs = c->ctx->eval_block != NULL
+               ? c->ctx->eval_ancestors : c->ctx->ancestors;
+            const int n_eancs = c->ctx->eval_block != NULL
+               ? c->ctx->n_eval_ancestors : c->ctx->n_ancestors;
+            for (int ai = -1; ai < n_eancs; ai++) {
+               tree_t gb = (ai < 0) ? eblk : eancs[ai];
                if (gb == NULL)
                   continue;
                const int ng = tree_generics(gb);
                const int nm = tree_genmaps(gb);
-               for (int gi = 0; gi < ng && gi < nm; gi++) {
-                  if (tree_generic(gb, gi) == d)
-                     return check_str_expr(c, tree_value(tree_genmap(gb, gi)),
-                                           depth + 1);
+               for (int gi = 0; gi < ng; gi++) {
+                  if (tree_generic(gb, gi) == d) {
+                     if (gi < nm)
+                        return check_str_expr(c, tree_value(tree_genmap(gb, gi)),
+                                              depth + 1);
+                     if (tree_has_value(d))
+                        return check_str_expr(c, tree_value(d), depth + 1);
+                     return false;
+                  }
                }
             }
-            if (tree_has_value(d))
-               return check_str_expr(c, tree_value(d), depth + 1);
          }
          return false;
       }

@@ -28,7 +28,7 @@
 #include <string.h>
 
 #define VHDL_ISIG_MAX_DEPTH         8
-#define VHDL_ISLAND_MAX_ANCESTORS   16
+#define VHDL_ISLAND_MAX_ANCESTORS   32
 #define VHDL_ISLAND_MAX_ELEMS       65536u
 #define VHDL_ISLAND_MAX_WIDTH       4096u
 #define VHDL_ISLAND_MAX_TOTAL_BITS  (1u << 20)
