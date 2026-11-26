@@ -111,6 +111,11 @@ typedef struct {
    mir_value_t              lut_and;
    mir_value_t              lut_or;
    mir_value_t              lut_xor;
+   struct {
+      tree_t      agg;
+      mir_value_t ptr;
+   } rom_cache[16];
+   unsigned                 n_rom_cache;
    bool                     failed;
 } vi_lower_t;
 
@@ -2417,6 +2422,338 @@ static bool vi_lower_builtin_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
    return false;
 }
 
+static bool vi_lower_const_array_ref(vi_lower_t *l, tree_t base_e,
+                                     vi_val_t idx_val, tree_t idx_expr,
+                                     vi_val_t *out)
+{
+   tree_t cur = base_e;
+   type_t arr_t = (cur != NULL) ? tree_type(cur) : NULL;
+   while (cur != NULL) {
+      if (tree_kind(cur) == T_QUALIFIED || tree_kind(cur) == T_TYPE_CONV) {
+         if (arr_t == NULL || type_is_unconstrained(arr_t))
+            arr_t = tree_type(cur);
+         cur = tree_value(cur);
+      }
+      else if (tree_kind(cur) == T_REF
+               && tree_kind(tree_ref(cur)) == T_CONST_DECL
+               && tree_has_value(tree_ref(cur))) {
+         tree_t cd = tree_ref(cur);
+         if (arr_t == NULL || type_is_unconstrained(arr_t))
+            arr_t = tree_type(cd);
+         cur = tree_value(cd);
+      }
+      else
+         break;
+   }
+   if (cur == NULL || tree_kind(cur) != T_AGGREGATE
+       || arr_t == NULL || !type_is_array(arr_t) || dimension_of(arr_t) != 1)
+      return false;
+
+   range_kind_t odir = RANGE_TO;
+   int64_t oleft = 0, oright = 0;
+   uint32_t nelems = 0;
+   if (!vi_eval_type_bounds(l, arr_t, &odir, &oleft, &oright, &nelems)
+       || nelems == 0)
+      return false;
+
+   mir_unit_t *mu = l->mu;
+   type_t elem_t = type_elem(arr_t);
+
+   // Case 1: Constant 2D array of vectors (e.g. ROM / S-box tables)
+   if (type_is_array(elem_t) && dimension_of(elem_t) == 1
+       && !type_is_array(type_elem(elem_t))
+       && !type_is_record(type_elem(elem_t))) {
+      range_kind_t idir = RANGE_DOWNTO;
+      int64_t ileft = 0, iright = 0;
+      uint32_t width = 0;
+      if (!vi_eval_type_bounds(l, elem_t, &idir, &ileft, &iright, &width)
+          || width == 0 || width > VHDL_ISLAND_MAX_WIDTH
+          || (uint64_t)nelems * width > 65536u)
+         return false;
+      if (l->two_state && width > 64)
+         return false;
+
+      const bool is_std = vi_type_is_std_logic(type_elem(elem_t));
+      const bool is_sg = vi_type_is_signed_vec(elem_t);
+
+      // Check cache for already-emitted ROM table
+      mir_value_t tbl_ptr = MIR_NULL_VALUE;
+      for (unsigned ci = 0; ci < l->n_rom_cache; ci++) {
+         if (l->rom_cache[ci].agg == cur) {
+            tbl_ptr = l->rom_cache[ci].ptr;
+            break;
+         }
+      }
+
+      if (mir_is_null(tbl_ptr)) {
+         const size_t total = (size_t)nelems * width;
+         uint8_t *tbl LOCAL = xcalloc_array(total, 1);
+         uint8_t *row LOCAL = xcalloc_array(width, 1);
+         bool *filled LOCAL = xcalloc_array(nelems, sizeof(bool));
+         bool has_others = false;
+
+         const int na = tree_assocs(cur);
+         for (int i = 0; i < na; i++) {
+            tree_t a = tree_assoc(cur, i);
+            if (tree_subkind(a) == A_OTHERS) {
+               if (!vi_lower_const_vec_eval(l, tree_value(a), elem_t, row, width))
+                  return false;
+               for (uint32_t p = 0; p < nelems; p++)
+                  memcpy(tbl + (size_t)p * width, row, width);
+               has_others = true;
+               break;
+            }
+         }
+         for (int i = 0; i < na; i++) {
+            tree_t a = tree_assoc(cur, i);
+            switch (tree_subkind(a)) {
+            case A_OTHERS:
+               break;
+            case A_POS:
+               if ((uint32_t)i >= nelems
+                   || !vi_lower_const_vec_eval(l, tree_value(a), elem_t,
+                                               tbl + (size_t)i * width, width))
+                  return false;
+               filled[i] = true;
+               break;
+            case A_NAMED:
+               {
+                  int64_t k = 0;
+                  if (!vi_eval_const_int(l, tree_name(a), &k))
+                     return false;
+                  int64_t pos = (odir == RANGE_TO) ? (k - oleft) : (oleft - k);
+                  if (pos < 0 || pos >= (int64_t)nelems
+                      || !vi_lower_const_vec_eval(l, tree_value(a), elem_t,
+                                                  tbl + (size_t)pos * width, width))
+                     return false;
+                  filled[pos] = true;
+               }
+               break;
+            case A_RANGE:
+               {
+                  tree_t rg = tree_range(a, 0);
+                  int64_t rl = 0, rr = 0;
+                  if (!vi_eval_const_int(l, tree_left(rg), &rl)
+                      || !vi_eval_const_int(l, tree_right(rg), &rr)
+                      || !vi_lower_const_vec_eval(l, tree_value(a), elem_t,
+                                                  row, width))
+                     return false;
+                  int64_t p0 = (odir == RANGE_TO) ? (rl - oleft) : (oleft - rl);
+                  int64_t p1 = (odir == RANGE_TO) ? (rr - oleft) : (oleft - rr);
+                  if (p0 > p1) { int64_t tmp = p0; p0 = p1; p1 = tmp; }
+                  if (p0 < 0 || p1 >= (int64_t)nelems)
+                     return false;
+                  for (int64_t p = p0; p <= p1; p++) {
+                     memcpy(tbl + (size_t)p * width, row, width);
+                     filled[p] = true;
+                  }
+               }
+               break;
+            default:
+               return false;
+            }
+         }
+         if (!has_others) {
+            for (uint32_t p = 0; p < nelems; p++) {
+               if (!filled[p])
+                  return false;
+            }
+         }
+
+         // Constant index fast path: emit single row directly without table
+         int64_t cidx = 0;
+         if (vi_eval_const_int(l, idx_expr, &cidx)) {
+            int64_t pos = (odir == RANGE_TO) ? (cidx - oleft) : (oleft - cidx);
+            if (pos < 0 || pos >= (int64_t)nelems)
+               return false;
+            const uint8_t *rp = tbl + (size_t)pos * width;
+            if (l->two_state) {
+               uint64_t w0 = 0;
+               vi_pack_bytes_to_words(rp, width, is_std, &w0);
+               *out = (vi_val_t){
+                  .kind = VIVAL_VEC,
+                  .val = vi_const_vec2(mu, (int)width, is_sg, &w0),
+                  .width = width, .is_signed = is_sg, .is_std = is_std,
+                  .dir = idir, .left = ileft, .right = iright,
+               };
+               return true;
+            }
+            mir_value_t *vals LOCAL = xmalloc_array(width, sizeof(mir_value_t));
+            for (uint32_t b = 0; b < width; b++)
+               vals[b] = vi_u8(mu, rp[b]);
+            mir_value_t ca = mir_const_array(
+               mu, mir_carray_type(mu, (int)width, vi_u8_type(mu)), vals, width);
+            *out = (vi_val_t){
+               .kind = VIVAL_VEC, .val = mir_build_address_of(mu, ca),
+               .width = width, .is_signed = is_sg, .is_std = is_std,
+               .dir = idir, .left = ileft, .right = iright,
+            };
+            return true;
+         }
+
+         if (l->two_state) {
+            mir_value_t *vals LOCAL = xmalloc_array(nelems, sizeof(mir_value_t));
+            for (uint32_t p = 0; p < nelems; p++) {
+               uint64_t w0 = 0;
+               vi_pack_bytes_to_words(tbl + (size_t)p * width, width, is_std, &w0);
+               vals[p] = vi_i64(mu, (int64_t)w0);
+            }
+            mir_value_t ca = mir_const_array(
+               mu, mir_carray_type(mu, (int)nelems, vi_i64_type(mu)),
+               vals, nelems);
+            tbl_ptr = mir_build_address_of(mu, ca);
+         }
+         else {
+            mir_value_t *vals LOCAL = xmalloc_array(total, sizeof(mir_value_t));
+            for (size_t k = 0; k < total; k++)
+               vals[k] = vi_u8(mu, tbl[k]);
+            mir_value_t ca = mir_const_array(
+               mu, mir_carray_type(mu, (int)total, vi_u8_type(mu)),
+               vals, total);
+            tbl_ptr = mir_build_address_of(mu, ca);
+         }
+
+         if (l->n_rom_cache < ARRAY_LEN(l->rom_cache)) {
+            l->rom_cache[l->n_rom_cache].agg = cur;
+            l->rom_cache[l->n_rom_cache].ptr = tbl_ptr;
+            l->n_rom_cache++;
+         }
+      }
+
+      vi_val_t fake_outer = { .dir = odir, .left = oleft, .right = oright };
+      mir_value_t elem_idx = vi_compute_elem_pos(l, fake_outer, idx_val.val, nelems);
+      if (l->two_state) {
+         mir_value_t raw = mir_build_load(
+            mu, mir_build_array_ref(mu, tbl_ptr, elem_idx));
+         mir_value_t v = mir_build_cast(
+            mu, mir_vec2_type(mu, (int)width, is_sg), raw);
+         *out = (vi_val_t){
+            .kind = VIVAL_VEC, .val = v, .width = width,
+            .is_signed = is_sg, .is_std = is_std,
+            .dir = idir, .left = ileft, .right = iright,
+         };
+         return true;
+      }
+      mir_value_t byte_off = mir_build_mul(mu, mir_offset_type(mu),
+                                           elem_idx, vi_off(mu, width));
+      *out = (vi_val_t){
+         .kind = VIVAL_VEC,
+         .val  = mir_build_array_ref(mu, tbl_ptr, byte_off),
+         .width = width, .is_signed = is_sg, .is_std = is_std,
+         .dir = idir, .left = ileft, .right = iright,
+      };
+      return true;
+   }
+
+   // Case 2: Constant 1D array of scalar int / user enum
+   if (!type_is_array(elem_t) && !type_is_record(elem_t)
+       && vi_type_is_int_or_user_enum(elem_t) && nelems <= 4096u) {
+      int64_t *tbl LOCAL = xcalloc_array(nelems, sizeof(int64_t));
+      bool *filled LOCAL = xcalloc_array(nelems, sizeof(bool));
+      bool has_others = false;
+      const int na = tree_assocs(cur);
+      for (int i = 0; i < na; i++) {
+         tree_t a = tree_assoc(cur, i);
+         if (tree_subkind(a) == A_OTHERS) {
+            int64_t ov = 0;
+            if (!vi_eval_const_int(l, tree_value(a), &ov))
+               return false;
+            for (uint32_t p = 0; p < nelems; p++)
+               tbl[p] = ov;
+            has_others = true;
+            break;
+         }
+      }
+      for (int i = 0; i < na; i++) {
+         tree_t a = tree_assoc(cur, i);
+         switch (tree_subkind(a)) {
+         case A_OTHERS:
+            break;
+         case A_POS:
+            {
+               int64_t ev = 0;
+               if ((uint32_t)i >= nelems || !vi_eval_const_int(l, tree_value(a), &ev))
+                  return false;
+               tbl[i] = ev;
+               filled[i] = true;
+            }
+            break;
+         case A_NAMED:
+            {
+               int64_t k = 0, ev = 0;
+               if (!vi_eval_const_int(l, tree_name(a), &k)
+                   || !vi_eval_const_int(l, tree_value(a), &ev))
+                  return false;
+               int64_t pos = (odir == RANGE_TO) ? (k - oleft) : (oleft - k);
+               if (pos < 0 || pos >= (int64_t)nelems)
+                  return false;
+               tbl[pos] = ev;
+               filled[pos] = true;
+            }
+            break;
+         case A_RANGE:
+            {
+               tree_t rg = tree_range(a, 0);
+               int64_t rl = 0, rr = 0, ev = 0;
+               if (!vi_eval_const_int(l, tree_left(rg), &rl)
+                   || !vi_eval_const_int(l, tree_right(rg), &rr)
+                   || !vi_eval_const_int(l, tree_value(a), &ev))
+                  return false;
+               int64_t p0 = (odir == RANGE_TO) ? (rl - oleft) : (oleft - rl);
+               int64_t p1 = (odir == RANGE_TO) ? (rr - oleft) : (oleft - rr);
+               if (p0 > p1) { int64_t tmp = p0; p0 = p1; p1 = tmp; }
+               if (p0 < 0 || p1 >= (int64_t)nelems)
+                  return false;
+               for (int64_t p = p0; p <= p1; p++) {
+                  tbl[p] = ev;
+                  filled[p] = true;
+               }
+            }
+            break;
+         default:
+            return false;
+         }
+      }
+      if (!has_others) {
+         for (uint32_t p = 0; p < nelems; p++) {
+            if (!filled[p])
+               return false;
+         }
+      }
+
+      mir_value_t tbl_ptr = MIR_NULL_VALUE;
+      for (unsigned ci = 0; ci < l->n_rom_cache; ci++) {
+         if (l->rom_cache[ci].agg == cur) {
+            tbl_ptr = l->rom_cache[ci].ptr;
+            break;
+         }
+      }
+      if (mir_is_null(tbl_ptr)) {
+         mir_value_t *vals LOCAL = xmalloc_array(nelems, sizeof(mir_value_t));
+         for (uint32_t p = 0; p < nelems; p++)
+            vals[p] = vi_i64(mu, tbl[p]);
+         mir_value_t ca = mir_const_array(
+            mu, mir_carray_type(mu, (int)nelems, vi_i64_type(mu)), vals, nelems);
+         tbl_ptr = mir_build_address_of(mu, ca);
+         if (l->n_rom_cache < ARRAY_LEN(l->rom_cache)) {
+            l->rom_cache[l->n_rom_cache].agg = cur;
+            l->rom_cache[l->n_rom_cache].ptr = tbl_ptr;
+            l->n_rom_cache++;
+         }
+      }
+
+      vi_val_t fake_outer = { .dir = odir, .left = oleft, .right = oright };
+      mir_value_t elem_idx = vi_compute_elem_pos(l, fake_outer, idx_val.val, nelems);
+      *out = (vi_val_t){
+         .kind = VIVAL_INT,
+         .val  = mir_build_load(mu, mir_build_array_ref(mu, tbl_ptr, elem_idx)),
+      };
+      return true;
+   }
+
+   return false;
+}
+
 static bool vi_lower_expr(vi_lower_t *l, tree_t expr, vi_val_t *out)
 {
    if (expr == NULL || l->failed)
@@ -2695,6 +3032,11 @@ static bool vi_lower_expr(vi_lower_t *l, tree_t expr, vi_val_t *out)
             mir_value_t elem_idx = vi_compute_elem_pos(l, fake_outer, iv.val, s->nelems);
             return vi_lower_sig_load(l, s, isig, elem_idx, out);
          }
+
+         if (s == NULL
+             && vi_lower_const_array_ref(l, base_e, iv,
+                                         tree_value(tree_param(expr, 0)), out))
+            return true;
 
          vi_val_t bv;
          if (!vi_lower_expr(l, base_e, &bv) || bv.kind != VIVAL_VEC)
