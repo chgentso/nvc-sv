@@ -3517,7 +3517,9 @@ static bool island_call_comb(jit_t *jit, rt_model_t *m, rt_island_t *isl,
       jit_fastcall_guarded(jit, isl->eval_handle, &result, p1, p2, use_tlab);
    else
       ok = jit_fastcall(jit, isl->eval_handle, &result, p1, p2, use_tlab);
-   if (tlab != NULL && (!isl->mgr->fast || unlikely(tlab->alloc != 0)))
+   if (tlab != NULL
+       && (!isl->mgr->fast
+           || unlikely(tlab->alloc != 0 || tlab->mem_dirty != 0)))
       tlab_reset(tlab);
    if (!ok)
       return false;
@@ -4538,7 +4540,9 @@ static bool island_sample_domain(jit_t *jit, rt_island_domain_t *dom,
       jit_fastcall_guarded(jit, dom->ff_handle, &result, p1, p2, use_tlab);
    else
       ok = jit_fastcall(jit, dom->ff_handle, &result, p1, p2, use_tlab);
-   if (tlab != NULL && (!isl->mgr->fast || unlikely(tlab->alloc != 0)))
+   if (tlab != NULL
+       && (!isl->mgr->fast
+           || unlikely(tlab->alloc != 0 || tlab->mem_dirty != 0)))
       tlab_reset(tlab);
    if (ok)
       dom->ff_dirty_mask |= (uint64_t)result.integer;
