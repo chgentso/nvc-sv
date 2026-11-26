@@ -6949,6 +6949,7 @@ void vhdl_island_lower_emit_vcode_init(const vhdl_island_ctx_t *ctx,
 
    ident_t begin_fn = ident_new("__sv_island_begin");
    ident_t bind_fn = ident_new("__sv_island_bind_sig");
+   ident_t bind_gen_fn = ident_new("__sv_island_bind_gen_sig");
    ident_t add_dom_fn = ident_new("__sv_island_add_domain");
    ident_t add_dom_w_fn = ident_new("__sv_island_add_domain_write");
    ident_t finish_fn = ident_new("__sv_island_finish");
@@ -6988,18 +6989,35 @@ void vhdl_island_lower_emit_vcode_init(const vhdl_island_ctx_t *ctx,
       for (uint32_t j = 0; j < isl->n_sigs; j++) {
          const vhdl_isl_sig_t *isig = &(isl->sigs[j]);
          const vhdl_isig_t *s = &(ctx->sigs[isig->sig_id]);
-         vcode_reg_t sig_reg = get_sig_fn(lu, s->decl, s->field_path, s->path_len);
-         vcode_reg_t bind_args[8] = {
-            handle,
-            emit_const(voffset, j),
-            sig_reg,
-            emit_const(voffset, isig->a_off),
-            emit_const(voffset, (int64_t)(uint32_t)isig->b_off),
-            emit_const(voffset, s->width),
-            emit_const(voffset, s->nelems),
-            emit_const(voffset, isig->rt_flags),
-         };
-         emit_fcall(bind_fn, voffset, VCODE_INVALID_STAMP, bind_args, 8);
+         if (s->owner_block != NULL) {
+            vcode_reg_t bind_gen_args[9] = {
+               handle,
+               emit_const(voffset, j),
+               emit_const(voffset, (int64_t)(intptr_t)s->owner_block),
+               emit_const(voffset, (int64_t)(intptr_t)s->decl),
+               emit_const(voffset, isig->a_off),
+               emit_const(voffset, (int64_t)(uint32_t)isig->b_off),
+               emit_const(voffset, s->width),
+               emit_const(voffset, s->nelems),
+               emit_const(voffset, isig->rt_flags),
+            };
+            emit_fcall(bind_gen_fn, voffset, VCODE_INVALID_STAMP,
+                       bind_gen_args, 9);
+         }
+         else {
+            vcode_reg_t sig_reg = get_sig_fn(lu, s->decl, s->field_path, s->path_len);
+            vcode_reg_t bind_args[8] = {
+               handle,
+               emit_const(voffset, j),
+               sig_reg,
+               emit_const(voffset, isig->a_off),
+               emit_const(voffset, (int64_t)(uint32_t)isig->b_off),
+               emit_const(voffset, s->width),
+               emit_const(voffset, s->nelems),
+               emit_const(voffset, isig->rt_flags),
+            };
+            emit_fcall(bind_fn, voffset, VCODE_INVALID_STAMP, bind_args, 8);
+         }
       }
 
       for (uint32_t d = 0; d < isl->n_doms; d++) {

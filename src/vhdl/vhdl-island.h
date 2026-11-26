@@ -54,6 +54,7 @@ typedef struct {
 typedef struct {
    uint32_t         id;
    tree_t           decl;
+   tree_t           owner_block;
    type_t           type;
    uint8_t          path_len;
    uint8_t          byte_size;
@@ -201,6 +202,7 @@ typedef struct _vhdl_island_ctx {
 
 vhdl_island_ctx_t *vhdl_island_analyze(tree_t block, const tree_t *ancestors,
                                        int n_ancestors, ident_t scope_prefix);
+bool vhdl_island_can_inline_gen_block(tree_t gb);
 bool vhdl_island_gen_block_eligible(tree_t block);
 void vhdl_island_rebuild(vhdl_island_ctx_t *ctx);
 void vhdl_island_dump_summary(const vhdl_island_ctx_t *ctx);

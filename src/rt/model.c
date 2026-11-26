@@ -10693,6 +10693,20 @@ void x_sv_island_bind_sig(void *handle, uint32_t idx, sig_shared_t *ss,
                       width, nelems, flags);
 }
 
+void x_sv_island_bind_gen_sig(void *handle, uint32_t idx, void *owner_block,
+                              void *decl, uint32_t a_off, uint32_t b_off,
+                              uint32_t width, uint32_t nelems, uint32_t flags)
+{
+   rt_model_t *m = get_model();
+   rt_scope_t *scope = find_scope(m, (tree_t)owner_block);
+   assert(scope != NULL);
+   uint32_t sig_off = 0;
+   rt_signal_t *sig = find_signal(scope, (tree_t)decl, &sig_off);
+   assert(sig != NULL);
+   rt_island_bind_sig(handle, idx, &(sig->shared), (int32_t)sig_off,
+                      a_off, b_off, width, nelems, flags);
+}
+
 void x_sv_island_add_domain(void *handle, uint32_t dom_idx,
                             struct _ffi_closure *ff_closure,
                             uint32_t clk_sig_idx, int32_t rst_sig_idx,

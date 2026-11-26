@@ -3832,7 +3832,7 @@ static void union_nodes(uint32_t *parent, uint32_t a, uint32_t b)
       parent[rb] = ra;
 }
 
-static bool can_inline_gen_block(tree_t gb)
+bool vhdl_island_can_inline_gen_block(tree_t gb)
 {
    if (gb == NULL || tree_kind(gb) != T_BLOCK)
       return false;
@@ -3852,6 +3852,13 @@ static bool can_inline_gen_block(tree_t gb)
       tree_t d = tree_decl(gb, i);
       switch (tree_kind(d)) {
       case T_SIGNAL_DECL:
+         {
+            type_t st = tree_type(d);
+            if (type_is_record(st)
+                || (type_is_array(st) && type_is_record(type_elem_recur(st))))
+               return false;
+            break;
+         }
       case T_PORT_DECL:
       case T_IMPLICIT_SIGNAL:
       case T_VAR_DECL:
@@ -3870,6 +3877,8 @@ static bool can_inline_gen_block(tree_t gb)
 
 bool vhdl_island_gen_block_eligible(tree_t block)
 {
+   if (vhdl_island_can_inline_gen_block(block))
+      return false;
    if (block == NULL || tree_kind(block) != T_BLOCK)
       return false;
    if (tree_ports(block) > 0 || tree_decls(block) == 0
@@ -3908,7 +3917,7 @@ bool vhdl_island_gen_block_eligible(tree_t block)
       tree_t s = tree_stmt(block, i);
       if (tree_kind(s) == T_PROCESS)
          return true;
-      if (tree_kind(s) == T_BLOCK && can_inline_gen_block(s))
+      if (tree_kind(s) == T_BLOCK && vhdl_island_can_inline_gen_block(s))
          return true;
    }
    return false;
@@ -4008,11 +4017,26 @@ static void collect_block_contents(vhdl_island_ctx_t *ctx, tree_t cur_blk,
       tree_t s = tree_stmt(cur_blk, i);
       switch (tree_kind(s)) {
       case T_BLOCK:
-         if (n_ancs + 1 < VHDL_ISLAND_MAX_ANCESTORS && can_inline_gen_block(s)) {
+         if (n_ancs + 1 < VHDL_ISLAND_MAX_ANCESTORS
+             && vhdl_island_can_inline_gen_block(s)) {
             tree_t next_ancs[VHDL_ISLAND_MAX_ANCESTORS];
             next_ancs[0] = cur_blk;
             if (n_ancs > 0)
                memcpy(next_ancs + 1, ancs, n_ancs * sizeof(tree_t));
+            int lpath[VHDL_ISIG_MAX_DEPTH];
+            const int lndecls = tree_decls(s);
+            for (int d_i = 0; d_i < lndecls; d_i++) {
+               tree_t ld = tree_decl(s, d_i);
+               if (tree_kind(ld) == T_SIGNAL_DECL) {
+                  const uint32_t before_cnt = sigs->count;
+                  collect_decl_leaves(s, next_ancs, n_ancs + 1, ld,
+                                      tree_type(ld), lpath, 0, two_state, sigs);
+                  for (uint32_t k = before_cnt; k < sigs->count; k++)
+                     sigs->items[k].owner_block = s;
+               }
+            }
+            ctx->sigs = sigs->items;
+            ctx->n_sigs = sigs->count;
             ident_t child_prefix = ident_prefix(cur_prefix, tree_ident(s), '.');
             collect_block_contents(ctx, s, next_ancs, n_ancs + 1, child_prefix,
                                    false, two_state, sigs, procs, ext_reads,
@@ -4898,6 +4922,8 @@ vhdl_island_ctx_t *vhdl_island_analyze(tree_t block, const tree_t *ancestors,
    collect_block_contents(ctx, block, ancestors, n_ancestors, scope_prefix,
                           true, two_state, &sigs, &procs, &ext_reads,
                           &total_procs);
+   ctx->sigs = sigs.items;
+   ctx->n_sigs = sigs.count;
 
    if (is_gen_block && arch_idx >= 0) {
       const tree_t *a_ancs = (arch_idx + 1 < n_ancestors)

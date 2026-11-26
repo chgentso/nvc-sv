@@ -5138,6 +5138,20 @@ static void sv_island_bind_sig(jit_func_t *func, jit_anchor_t *caller,
    args[0].integer = 0;
 }
 
+static void sv_island_bind_gen_sig(jit_func_t *func, jit_anchor_t *caller,
+                                   jit_scalar_t *args, tlab_t *tlab)
+{
+   x_sv_island_bind_gen_sig(args[0].pointer, (uint32_t)args[1].integer,
+                            (void *)(uintptr_t)args[2].integer,
+                            (void *)(uintptr_t)args[3].integer,
+                            (uint32_t)args[4].integer,
+                            (uint32_t)args[5].integer,
+                            (uint32_t)args[6].integer,
+                            (uint32_t)args[7].integer,
+                            (uint32_t)args[8].integer);
+   args[0].integer = 0;
+}
+
 static void sv_island_add_domain(jit_func_t *func, jit_anchor_t *caller,
                                  jit_scalar_t *args, tlab_t *tlab)
 {
@@ -6948,6 +6962,7 @@ jit_entry_fn_t jit_bind_intrinsic(ident_t name)
 {
    static ident_t dispatch_func_i = NULL, dispatch_proc_i = NULL;
    static ident_t island_begin_i = NULL, island_bind_i = NULL,
+      island_bind_gen_i = NULL,
       island_add_dom_i = NULL, island_add_dom_w_i = NULL,
       island_finish_i = NULL, island_ext_read_i = NULL,
       island_set_sparse_i = NULL, island_sparse_write_i = NULL;
@@ -6957,6 +6972,7 @@ jit_entry_fn_t jit_bind_intrinsic(ident_t name)
          dispatch_proc_i    = ident_new("__nvc_protected_dispatch_proc");
          island_begin_i     = ident_new("__sv_island_begin");
          island_bind_i      = ident_new("__sv_island_bind_sig");
+         island_bind_gen_i  = ident_new("__sv_island_bind_gen_sig");
          island_add_dom_i   = ident_new("__sv_island_add_domain");
          island_add_dom_w_i = ident_new("__sv_island_add_domain_write");
          island_finish_i    = ident_new("__sv_island_finish");
@@ -7011,6 +7027,8 @@ jit_entry_fn_t jit_bind_intrinsic(ident_t name)
       return sv_island_begin;
    else if (name == island_bind_i)
       return sv_island_bind_sig;
+   else if (name == island_bind_gen_i)
+      return sv_island_bind_gen_sig;
    else if (name == island_add_dom_i)
       return sv_island_add_domain;
    else if (name == island_add_dom_w_i)

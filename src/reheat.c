@@ -249,7 +249,7 @@ static void reheat_block(tree_t b, const reheat_ctx_t *parent)
                                                  ctx.cover, b);
          model_run_island_init(ctx.model, ctx.scope, thunk);
       }
-      else {
+      else if (!vhdl_island_can_inline_gen_block(b)) {
          vcode_unit_t thunk = lower_vhdl_ext_reads(ctx.registry, ctx.lowered, b);
          model_run_island_init(ctx.model, ctx.scope, thunk);
       }

@@ -1994,7 +1994,9 @@ static void elab_flush_gen_islands(gen_island_list_t *list,
          vcode_unit_t thunk = gi->eligible
             ? lower_vhdl_islands(ctx->registry, gi->lowered, ctx->cover,
                                  gi->block)
-            : lower_vhdl_ext_reads(ctx->registry, gi->lowered, gi->block);
+            : (vhdl_island_can_inline_gen_block(gi->block)
+               ? NULL
+               : lower_vhdl_ext_reads(ctx->registry, gi->lowered, gi->block));
          model_run_island_init(ctx->model, gi->scope, thunk);
       }
    }
