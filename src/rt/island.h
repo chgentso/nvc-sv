@@ -65,6 +65,26 @@ typedef struct {
    uint16_t b_delta;    // 4-state: (b_off - a_off) >> 3 if < 0xFFFF, else 0xFFFF
 } rt_island_ff_desc_t;
 
+#define RT_IDIR_STD_LOGIC9  (1u << 0)
+#define RT_IDIR_TWO_STATE   (1u << 1)
+
+typedef struct {
+   const uint8_t     *src_a;
+   uint8_t           *dst_a;
+   const uint8_t     *src_b;
+   uint8_t           *dst_b;
+   struct _rt_island *dst_isl;
+   uint32_t           count;    // STD_LOGIC9: total bytes; 2/4-state: nwords * nelems
+   uint32_t           flags;    // RT_IDIR_*
+} rt_island_direct_desc_t;
+
+typedef struct {
+   const uint8_t *src;
+   uint8_t       *dst;
+   uint32_t       nbytes;
+   uint32_t       sig_idx;
+} rt_island_in_desc_t;
+
 typedef struct _rt_super_island rt_super_island_t;
 typedef struct _rt_super_domain rt_super_domain_t;
 
@@ -157,17 +177,20 @@ typedef struct _rt_island {
    uint32_t               nsigs;
    rt_island_domain_t    *domains;
    uint32_t               ndomains;
-   uint32_t              *in_sigs;
-   uint32_t               n_in_sigs;
-   uint64_t               dirty_in_mask;
-   uint64_t              *dirty_in_words;
-   uint32_t               dirty_in_nwords;
-   uint32_t              *out_sigs;
-   uint32_t               n_out_sigs;
-   uint32_t              *ext_out_sigs;
-   uint32_t               n_ext_out_sigs;
-   uint32_t              *direct_comb_outs;
-   uint32_t               n_direct_comb_outs;
+   uint32_t                *in_sigs;
+   rt_island_in_desc_t     *in_descs;
+   uint32_t                 n_in_sigs;
+   uint64_t                 dirty_in_mask;
+   uint64_t                *dirty_in_words;
+   uint32_t                 dirty_in_nwords;
+   uint32_t                *out_sigs;
+   uint32_t                 n_out_sigs;
+   uint32_t                *ext_out_sigs;
+   uint32_t                 n_ext_out_sigs;
+   uint32_t                *direct_comb_outs;
+   uint32_t                 n_direct_comb_outs;
+   rt_island_direct_desc_t *direct_comb_descs;
+   uint32_t                 n_direct_comb_descs;
    uint32_t              *obs_sigs;
    uint32_t               n_obs_sigs;
    uint32_t               cap_obs_sigs;
