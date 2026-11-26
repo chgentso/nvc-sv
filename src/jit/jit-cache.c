@@ -36,6 +36,7 @@
 #include <unistd.h>
 
 #ifdef __MINGW32__
+#define WIN32_LEAN_AND_MEAN
 #include <direct.h>
 #include <io.h>
 #include <windows.h>
