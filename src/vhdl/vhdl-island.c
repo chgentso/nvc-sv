@@ -975,6 +975,7 @@ typedef struct {
    const vhdl_island_ctx_t *ctx;
    bool                     two_state;
    bool                     allow_signals;
+   bool                     allow_report;
    bool                     in_func;
    bool                     allow_sig_attr_event;
    int                      call_depth;
@@ -1155,6 +1156,7 @@ static bool check_pure_func_body(check_ctx_t *outer, tree_t func_decl)
       .ctx           = outer->ctx,
       .two_state     = outer->two_state,
       .allow_signals = false,
+      .allow_report  = outer->allow_report,
       .in_func       = true,
       .call_depth    = outer->call_depth + 1,
       .active_funcs  = outer->active_funcs,
@@ -1262,6 +1264,7 @@ static bool check_pure_proc_body(check_ctx_t *outer, tree_t proc_decl)
       .ctx           = outer->ctx,
       .two_state     = outer->two_state,
       .allow_signals = false,
+      .allow_report  = outer->allow_report,
       .in_func       = true,
       .call_depth    = outer->call_depth + 1,
       .active_funcs  = outer->active_funcs,
@@ -2084,6 +2087,8 @@ static bool check_stmt(check_ctx_t *c, tree_t stmt, bool is_func)
       return check_stmt_list(c, stmt, 0, tree_stmts(stmt), is_func);
 
    case T_ASSERT:
+      if (!c->allow_report)
+         return false;
       if (!tree_has_value(stmt) || !check_expr(c, tree_value(stmt), false))
          return false;
       if (tree_has_severity(stmt) && !check_expr(c, tree_severity(stmt), false))
@@ -2093,6 +2098,8 @@ static bool check_stmt(check_ctx_t *c, tree_t stmt, bool is_func)
       return true;
 
    case T_REPORT:
+      if (!c->allow_report)
+         return false;
       if (tree_has_severity(stmt) && !check_expr(c, tree_severity(stmt), false))
          return false;
       if (tree_has_message(stmt) && !check_str_expr(c, tree_message(stmt), 0))
@@ -2623,6 +2630,7 @@ static void analyze_process(vhdl_island_ctx_t *ctx, tree_t proc, int stmt_idx,
             .ctx           = ctx,
             .two_state     = two_state,
             .allow_signals = true,
+            .allow_report  = true,
             .in_func       = false,
          };
          bool ok = check_process_decls(&c, proc);
@@ -2694,12 +2702,17 @@ static void analyze_process(vhdl_island_ctx_t *ctx, tree_t proc, int stmt_idx,
       }
    }
 
-   // Try COMB classification
+   // Try COMB classification.
+   // Disallow report/assert in combinational island processes: multiple comb
+   // processes share a single island eval function, so an unrelated sibling
+   // wakeup or collapsed internal delta would fire comb reports/asserts
+   // differently from the standard VHDL event kernel.
    {
       check_ctx_t c = {
          .ctx           = ctx,
          .two_state     = two_state,
          .allow_signals = true,
+         .allow_report  = false,
          .in_func       = false,
       };
       bool ok = check_process_decls(&c, proc)

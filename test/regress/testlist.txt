@@ -3319,3 +3319,4 @@ vhdl_island_arr2d_assign1 normal,2008,$NVC_RTL_ISLANDS=hier
 vhdl_island_recvar1 normal,2008,$NVC_RTL_ISLANDS=hier
 vhdl_island_proc_inout1 normal,2008,$NVC_RTL_ISLANDS=hier
 vhdl_island_generic1 normal,2008,$NVC_RTL_ISLANDS=hier
+vhdl_island_comb_report1 gold,normal,2008,$NVC_RTL_ISLANDS=hier

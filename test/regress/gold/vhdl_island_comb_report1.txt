@@ -1,0 +1,8 @@
+Note: 2ns+1: comb rep din=42
+Process :vhdl_island_comb_report1:dut:p_comb_rep
+Note: 2ns+1: helper comb x=0A
+Process :vhdl_island_comb_report1:dut:p_comb_fn
+Note: 2ns+1: comb assert a=0A
+Process :vhdl_island_comb_report1:dut:p_comb_fn
+Note: 25ns+1: ff tick tb=02
+Process :vhdl_island_comb_report1:dut:p_ff
