@@ -1174,6 +1174,111 @@ static bool check_pure_func_body(check_ctx_t *outer, tree_t func_decl)
    return ok;
 }
 
+tree_t vhdl_island_resolve_proc_body(tree_t decl)
+{
+   if (decl == NULL)
+      return NULL;
+   if (tree_kind(decl) == T_PROC_BODY)
+      return decl;
+   if (tree_kind(decl) != T_PROC_DECL)
+      return NULL;
+
+   tree_t owner = tree_container(decl);
+   if (owner == NULL)
+      return NULL;
+   if (tree_kind(owner) == T_PACKAGE) {
+      owner = body_of(owner);
+      if (owner == NULL)
+         return NULL;
+   }
+   const tree_kind_t ok = tree_kind(owner);
+   if (ok != T_PACK_BODY && ok != T_ARCH && ok != T_BLOCK
+       && ok != T_PROCESS && ok != T_FUNC_BODY && ok != T_PROC_BODY)
+      return NULL;
+
+   ident_t target_id = tree_ident2(decl);
+   const int nd = tree_decls(owner);
+   for (int i = 0; i < nd; i++) {
+      tree_t d = tree_decl(owner, i);
+      if (tree_kind(d) == T_PROC_BODY && tree_ident2(d) == target_id)
+         return d;
+   }
+   return NULL;
+}
+
+static bool check_pure_proc_body(check_ctx_t *outer, tree_t proc_decl)
+{
+   if (outer->call_depth >= VHDL_ISLAND_MAX_CALL_DEPTH)
+      return false;
+   proc_decl = vhdl_island_resolve_proc_body(proc_decl);
+   if (proc_decl == NULL)
+      return false;
+
+   for (unsigned i = 0; i < outer->active_funcs.count; i++) {
+      if (outer->active_funcs.items[i] == proc_decl)
+         return false;
+   }
+
+   for (int i = 0; i < tree_ports(proc_decl); i++) {
+      tree_t p = tree_port(proc_decl, i);
+      if (tree_class(p) == C_SIGNAL || tree_class(p) == C_FILE)
+         return false;
+      const port_mode_t mode = tree_subkind(p);
+      if (mode != PORT_IN && mode != PORT_OUT && mode != PORT_INOUT)
+         return false;
+      if (!type_ok_for_local(tree_type(p)))
+         return false;
+   }
+
+   for (int i = 0; i < tree_decls(proc_decl); i++) {
+      tree_t d = tree_decl(proc_decl, i);
+      switch (tree_kind(d)) {
+      case T_VAR_DECL:
+         if (tree_flags(d) & TREE_F_SHARED)
+            return false;
+         if (!type_ok_for_local(tree_type(d)))
+            return false;
+         if (tree_has_value(d) && !check_expr(outer, tree_value(d), false))
+            return false;
+         break;
+      case T_CONST_DECL:
+         if (!type_ok_for_local(tree_type(d)))
+            return false;
+         if (tree_has_value(d) && !check_expr(outer, tree_value(d), false))
+            return false;
+         break;
+      case T_TYPE_DECL:
+      case T_SUBTYPE_DECL:
+         break;
+      default:
+         return false;
+      }
+   }
+
+   check_ctx_t fc = {
+      .ctx           = outer->ctx,
+      .two_state     = outer->two_state,
+      .allow_signals = false,
+      .in_func       = true,
+      .call_depth    = outer->call_depth + 1,
+      .active_funcs  = outer->active_funcs,
+   };
+   APUSH(fc.active_funcs, proc_decl);
+
+   const bool ok = check_stmt_list(&fc, proc_decl, 0,
+                                   tree_stmts(proc_decl), true);
+   ACLEAR(fc.reads);
+   ACLEAR(fc.writes);
+   ACLEAR(fc.read_ranges);
+   ACLEAR(fc.write_ranges);
+   ACLEAR(fc.var_decls);
+   ACLEAR(fc.var_assigned);
+   ACLEAR(fc.loop_vars);
+   if (fc.active_funcs.items != outer->active_funcs.items)
+      free(fc.active_funcs.items);
+   return ok;
+}
+
 static bool is_sig_root_expr(tree_t expr)
 {
    tree_t base = unwrap_signal_base(expr);
@@ -1810,9 +1915,12 @@ static bool check_stmt(check_ctx_t *c, tree_t stmt, bool is_func)
          while (tree_kind(base) == T_ARRAY_REF || tree_kind(base) == T_ARRAY_SLICE
                 || tree_kind(base) == T_RECORD_REF)
             base = tree_value(base);
-         if (tree_kind(base) != T_REF || tree_kind(tree_ref(base)) != T_VAR_DECL)
+         if (tree_kind(base) != T_REF)
             return false;
          tree_t vdecl = tree_ref(base);
+         if (tree_kind(vdecl) != T_VAR_DECL
+             && !(is_func && tree_kind(vdecl) == T_PARAM_DECL))
+            return false;
          if (!is_func) {
             int vi = find_var_idx(c, vdecl);
             if (vi < 0)
@@ -2048,6 +2156,55 @@ static bool check_stmt(check_ctx_t *c, tree_t stmt, bool is_func)
             free(saved);
          }
          return ok;
+      }
+
+   case T_PCALL:
+      {
+         if (!tree_has_ref(stmt))
+            return false;
+         tree_t pbody = vhdl_island_resolve_proc_body(tree_ref(stmt));
+         if (pbody == NULL)
+            return false;
+         const int np = tree_params(stmt);
+         if (np != tree_ports(pbody))
+            return false;
+         for (int i = 0; i < np; i++) {
+            tree_t pm = tree_param(stmt, i);
+            if (tree_subkind(pm) != P_POS)
+               return false;
+            tree_t fp = tree_port(pbody, i);
+            const port_mode_t mode = tree_subkind(fp);
+            tree_t actual = tree_value(pm);
+            if (mode == PORT_IN) {
+               if (!check_expr(c, actual, false))
+                  return false;
+            }
+            else if (mode == PORT_OUT || mode == PORT_INOUT) {
+               tree_t base = actual;
+               while (tree_kind(base) == T_RECORD_REF)
+                  base = tree_value(base);
+               if (tree_kind(base) != T_REF)
+                  return false;
+               tree_t bdecl = tree_ref(base);
+               if (tree_kind(bdecl) != T_VAR_DECL
+                   && !(is_func && tree_kind(bdecl) == T_PARAM_DECL))
+                  return false;
+               if (!is_func && tree_kind(bdecl) == T_VAR_DECL) {
+                  int vi = find_var_idx(c, bdecl);
+                  if (vi < 0)
+                     return false;
+                  if (mode == PORT_OUT && actual == base)
+                     c->var_assigned.items[vi] = true;
+                  else if (!c->var_assigned.items[vi])
+                     return false;
+               }
+               if (!check_expr(c, actual, true))
+                  return false;
+            }
+            else
+               return false;
+         }
+         return check_pure_proc_body(c, pbody);
       }
 
    default:

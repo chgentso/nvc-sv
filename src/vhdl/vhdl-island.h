@@ -207,6 +207,7 @@ bool vhdl_island_const_slice_width(const vhdl_island_ctx_t *ctx, tree_t rg,
                                    uint32_t *width_out);
 bool vhdl_island_is_sig_root(tree_t expr);
 tree_t vhdl_island_resolve_func_body(tree_t decl);
+tree_t vhdl_island_resolve_proc_body(tree_t decl);
 
 static inline void vhdl_island_set_eval_scope(vhdl_island_ctx_t *ctx,
                                               tree_t blk,

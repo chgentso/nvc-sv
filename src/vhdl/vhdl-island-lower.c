@@ -5626,6 +5626,191 @@ static bool vi_lower_str_expr(vi_lower_t *l, tree_t expr, vi_str_t *out)
    }
 }
 
+static bool vi_bind_process_locals(vi_lower_t *l, tree_t proc, vi_scope_t *sc);
+
+static bool vi_lower_inline_proc(vi_lower_t *l, tree_t pcall)
+{
+   if (!tree_has_ref(pcall))
+      return false;
+   tree_t proc = vhdl_island_resolve_proc_body(tree_ref(pcall));
+   if (proc == NULL)
+      return false;
+
+   mir_unit_t *mu = l->mu;
+   const int np = tree_params(pcall);
+   if (np != tree_ports(proc))
+      return false;
+
+   vi_local_t *param_locs LOCAL = xcalloc_array(MAX(1, np), sizeof(vi_local_t));
+   for (int i = 0; i < np; i++) {
+      tree_t fp = tree_port(proc, i);
+      tree_t pm = tree_param(pcall, i);
+      if (tree_subkind(pm) != P_POS) {
+         for (int k = 0; k < i; k++)
+            free(param_locs[k].rec_leaves);
+         return false;
+      }
+      tree_t pe = tree_value(pm);
+      type_t fpt = tree_type(fp);
+      const port_mode_t mode = tree_subkind(fp);
+
+      if (mode == PORT_IN) {
+         if (type_is_record(fpt)) {
+            vi_rec_leaf_list_t leaves = AINIT;
+            int rpath[VHDL_ISIG_MAX_DEPTH];
+            if (!vi_collect_rec_local_leaves(l, fpt, rpath, 0, tree_ident(fp),
+                                             &leaves)) {
+               ACLEAR(leaves);
+               for (int k = 0; k < i; k++)
+                  free(param_locs[k].rec_leaves);
+               return false;
+            }
+            param_locs[i] = (vi_local_t){
+               .decl         = fp,
+               .is_rec       = true,
+               .rec_type     = fpt,
+               .rec_leaves   = leaves.items,
+               .n_rec_leaves = leaves.count,
+            };
+            if (!vi_assign_rec_local(l, &param_locs[i], rpath, 0, fpt, pe)) {
+               for (int k = 0; k <= i; k++)
+                  free(param_locs[k].rec_leaves);
+               return false;
+            }
+         }
+         else {
+            vi_val_t av;
+            if (!vi_lower_expr(l, pe, &av)) {
+               for (int k = 0; k < i; k++)
+                  free(param_locs[k].rec_leaves);
+               return false;
+            }
+            bool has_cint = false;
+            int64_t cint = 0;
+            if (av.kind == VIVAL_INT) {
+               vi_check_int_bounds(l, fpt, vi_to_i64(mu, av.val), pe, fp);
+               if (vi_eval_const_int(l, pe, &cint)
+                   || mir_get_const(mu, av.val, &cint))
+                  has_cint = true;
+            }
+            param_locs[i] = (vi_local_t){
+               .decl          = fp,
+               .is_vec        = (av.kind == VIVAL_VEC),
+               .is_std        = av.is_std,
+               .is_bool       = av.is_bool,
+               .is_signed     = av.is_signed,
+               .is_int        = (av.kind == VIVAL_INT),
+               .width         = av.width,
+               .dir           = av.dir,
+               .left          = av.left,
+               .right         = av.right,
+               .by_val        = true,
+               .pval          = av,
+               .has_const_int = has_cint,
+               .const_int     = cint,
+            };
+         }
+      }
+      else if (mode == PORT_OUT || mode == PORT_INOUT) {
+         if (type_is_record(fpt)) {
+            vi_local_t *aloc = NULL;
+            int apath[VHDL_ISIG_MAX_DEPTH];
+            uint8_t alen = 0;
+            if (!vi_extract_local_rec_path(l, pe, &aloc, apath, &alen)) {
+               for (int k = 0; k < i; k++)
+                  free(param_locs[k].rec_leaves);
+               return false;
+            }
+            const vi_rec_leaf_t *matched[512];
+            uint32_t nm = vi_collect_rec_prefix_leaves(aloc, apath, alen,
+                                                       matched, 512);
+            if (nm == 0 || nm > 512) {
+               for (int k = 0; k < i; k++)
+                  free(param_locs[k].rec_leaves);
+               return false;
+            }
+            vi_rec_leaf_t *shifted = xmalloc_array(nm, sizeof(vi_rec_leaf_t));
+            for (uint32_t m = 0; m < nm; m++) {
+               shifted[m] = *matched[m];
+               shifted[m].path_len = (uint8_t)(matched[m]->path_len - alen);
+               if (shifted[m].path_len > 0)
+                  memcpy(shifted[m].path, matched[m]->path + alen,
+                         shifted[m].path_len * sizeof(int));
+            }
+            param_locs[i] = (vi_local_t){
+               .decl         = fp,
+               .is_rec       = true,
+               .rec_type     = fpt,
+               .rec_leaves   = shifted,
+               .n_rec_leaves = nm,
+            };
+         }
+         else {
+            vi_rec_leaf_t lf;
+            if (!vi_resolve_local_leaf(l, pe, &lf) || lf.is_array2d) {
+               for (int k = 0; k < i; k++)
+                  free(param_locs[k].rec_leaves);
+               return false;
+            }
+            param_locs[i] = (vi_local_t){
+               .decl      = fp,
+               .is_vec    = lf.is_vec,
+               .is_std    = lf.is_std,
+               .is_bool   = lf.is_bool,
+               .is_signed = lf.is_signed,
+               .is_int    = lf.is_int,
+               .width     = lf.width,
+               .dir       = lf.dir,
+               .left      = lf.left,
+               .right     = lf.right,
+               .storage   = lf.storage,
+            };
+         }
+      }
+      else {
+         for (int k = 0; k < i; k++)
+            free(param_locs[k].rec_leaves);
+         return false;
+      }
+   }
+
+   vi_scope_t child = {
+      .parent = l->scope,
+      .ret_bb = mir_add_block(mu),
+   };
+   for (int i = 0; i < np; i++)
+      APUSH(child.locals, param_locs[i]);
+
+   vi_scope_t *prev_scope = l->scope;
+   l->scope = &child;
+
+   if (!vi_bind_process_locals(l, proc, &child)) {
+      l->scope = prev_scope;
+      vi_scope_clear(&child);
+      return false;
+   }
+
+   for (int i = 0; i < tree_stmts(proc); i++) {
+      unsigned pos = 0;
+      if (mir_block_finished(mu, mir_get_cursor(mu, &pos)))
+         break;
+      if (!vi_lower_stmt(l, tree_stmt(proc, i))) {
+         l->scope = prev_scope;
+         vi_scope_clear(&child);
+         return false;
+      }
+   }
+
+   unsigned pos = 0;
+   if (!mir_block_finished(mu, mir_get_cursor(mu, &pos)))
+      mir_build_jump(mu, child.ret_bb);
+
+   mir_set_cursor(mu, child.ret_bb, MIR_APPEND);
+   l->scope = prev_scope;
+   vi_scope_clear(&child);
+   return true;
+}
+
 static bool vi_lower_stmt(vi_lower_t *l, tree_t stmt)
 {
    if (stmt == NULL || l->failed)
@@ -5707,6 +5892,9 @@ static bool vi_lower_stmt(vi_lower_t *l, tree_t stmt)
 
    case T_VAR_ASSIGN:
       return vi_lower_var_assign(l, stmt);
+
+   case T_PCALL:
+      return vi_lower_inline_proc(l, stmt);
 
    case T_IF:
       {
