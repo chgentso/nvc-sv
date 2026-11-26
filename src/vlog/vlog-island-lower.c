@@ -39,6 +39,7 @@ typedef struct {
    hash_t              *sig_map;   // vlog_node_t decl -> island_sig_t *
    hset_t              *local_vars;
    hset_t              *indexed_refs;
+   hset_t              *pattern_keys;
    hset_t              *allowed_timings;
    hset_t              *checked_funcs;
    A(vlog_node_t)       active_funcs;
@@ -204,6 +205,30 @@ static void m2_check_pre_cb(vlog_node_t v, void *arg)
       }
       break;
 
+   case V_PATTERN_EXPR:
+      if (vlog_has_type(v)) {
+         vlog_node_t bt = vlog_get_type(vlog_type(v));
+         if (bt != NULL && (vlog_kind(bt) == V_STRUCT_DECL
+                            || vlog_kind(bt) == V_UNION_DECL)) {
+            const int np = vlog_params(v);
+            for (int i = 0; i < np; i++) {
+               vlog_node_t item = vlog_param(v, i);
+               if (vlog_kind(item) == V_PATTERN_ITEM && vlog_has_left(item)
+                   && vlog_kind(vlog_left(item)) == V_REF)
+                  hset_insert(mc->pattern_keys, vlog_left(item));
+            }
+         }
+      }
+      break;
+
+   case V_PATTERN_ITEM:
+      if (vlog_has_left(v) && vlog_kind(vlog_left(v)) == V_REF) {
+         vlog_node_t key = vlog_left(v);
+         if (vlog_subkind(v) == 3 || !vlog_has_ref(key))
+            hset_insert(mc->pattern_keys, key);
+      }
+      break;
+
    default:
       break;
    }
@@ -238,6 +263,8 @@ static void m2_check_post_cb(vlog_node_t v, void *arg)
       return;
 
    case V_REF:
+      if (hset_contains(mc->pattern_keys, v))
+         return;
       m2_check_ref_decl(mc, v, hset_contains(mc->indexed_refs, v));
       return;
 
@@ -324,6 +351,7 @@ static bool m2_proc_eligible(const vlog_island_t *isl,
       .sig_map         = sig_map,
       .local_vars      = hset_new(16),
       .indexed_refs    = hset_new(32),
+      .pattern_keys    = hset_new(16),
       .allowed_timings = hset_new(4),
       .checked_funcs   = hset_new(8),
       .allow_nbassign  = (ip->kind == IPROC_FF),
@@ -346,6 +374,7 @@ static bool m2_proc_eligible(const vlog_island_t *isl,
    const bool ok = mc.ok;
    hset_free(mc.local_vars);
    hset_free(mc.indexed_refs);
+   hset_free(mc.pattern_keys);
    hset_free(mc.allowed_timings);
    hset_free(mc.checked_funcs);
    ACLEAR(mc.active_funcs);
