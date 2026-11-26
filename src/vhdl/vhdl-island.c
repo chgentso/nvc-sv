@@ -1219,6 +1219,9 @@ static bool vhdl_island_const_sig_range(const vhdl_island_ctx_t *ctx,
 
    if (tree_kind(expr) == T_ARRAY_SLICE) {
       tree_t rg = tree_range(expr, 0);
+      const range_kind_t rk = tree_subkind(rg);
+      if (rk != RANGE_TO && rk != RANGE_DOWNTO)
+         return false;
       int64_t sl, sr;
       if (!vhdl_island_eval_const_int_ctx(ctx, tree_left(rg), &sl)
           || !vhdl_island_eval_const_int_ctx(ctx, tree_right(rg), &sr))
@@ -1471,6 +1474,9 @@ static bool check_expr(check_ctx_t *c, tree_t expr, bool is_target)
    case T_ARRAY_SLICE:
       {
          tree_t rg = tree_range(expr, 0);
+         const range_kind_t rk = tree_subkind(rg);
+         if (rk != RANGE_TO && rk != RANGE_DOWNTO)
+            return false;
          int64_t l, r;
          if (!vhdl_island_eval_const_int_ctx(c->ctx, tree_left(rg), &l)
              || !vhdl_island_eval_const_int_ctx(c->ctx, tree_right(rg), &r)) {
@@ -1894,6 +1900,9 @@ static bool check_stmt(check_ctx_t *c, tree_t stmt, bool is_func)
                tree_t ch = tree_choice(alt, j);
                if (tree_ranges(ch) > 0) {
                   tree_t rg = tree_range(ch, 0);
+                  const range_kind_t rk = tree_subkind(rg);
+                  if (rk != RANGE_TO && rk != RANGE_DOWNTO)
+                     return false;
                   int64_t l, r;
                   if (!vhdl_island_eval_const_int_ctx(c->ctx,
                                                  tree_left(rg), &l)

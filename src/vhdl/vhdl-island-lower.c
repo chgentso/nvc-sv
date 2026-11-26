@@ -2438,6 +2438,8 @@ static bool vi_lower_expr(vi_lower_t *l, tree_t expr, vi_val_t *out)
       {
          tree_t rg = tree_range(expr, 0);
          range_kind_t sdir = tree_subkind(rg);
+         if (sdir != RANGE_TO && sdir != RANGE_DOWNTO)
+            return false;
          int64_t sl = 0, sr = 0;
          const bool const_bounds =
             vhdl_island_eval_const_int_ctx(l->ctx, tree_left(rg), &sl)
@@ -3253,6 +3255,8 @@ static bool vi_lower_sig_assign(vi_lower_t *l, tree_t stmt)
    if (tree_kind(target) == T_ARRAY_SLICE) {
       tree_t rg = tree_range(target, 0);
       range_kind_t sdir = tree_subkind(rg);
+      if (sdir != RANGE_TO && sdir != RANGE_DOWNTO)
+         return false;
       int64_t sl = 0, sr = 0;
       const bool const_bounds =
          vhdl_island_eval_const_int_ctx(l->ctx, tree_left(rg), &sl)
@@ -3372,6 +3376,8 @@ static bool vi_lower_var_assign(vi_lower_t *l, tree_t stmt)
    if (tree_kind(target) == T_ARRAY_SLICE) {
       tree_t rg = tree_range(target, 0);
       range_kind_t sdir = tree_subkind(rg);
+      if (sdir != RANGE_TO && sdir != RANGE_DOWNTO)
+         return false;
       int64_t sl = 0, sr = 0;
       const bool const_bounds =
          vhdl_island_eval_const_int_ctx(l->ctx, tree_left(rg), &sl)
