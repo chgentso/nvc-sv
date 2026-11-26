@@ -6757,13 +6757,10 @@ static void lower_wait(lower_unit_t *lu, tree_t wait, gen_stack_t *gs)
 
    vcode_select_block(resume);
 
-   if (!is_static) {
-      for (int i = 0; i < ntriggers; i++)
-         lower_clear_event(lu, tree_trigger(wait, i));
-   }
-
    if (has_value) {
-      // Generate code to loop until condition is met
+      // Generate code to loop until condition is met.  Keep triggers
+      // registered across re-waits rather than clearing and re-arming
+      // the same sensitivity set on every non-matching wakeup.
 
       vcode_reg_t until_reg = lower_rvalue(lu, tree_value(wait));
 
@@ -6786,15 +6783,17 @@ static void lower_wait(lower_unit_t *lu, tree_t wait, gen_stack_t *gs)
 
       vcode_select_block(again_bb);
 
-      for (int i = 0; i < ntriggers; i++)
-         lower_sched_event(lu, tree_trigger(wait, i), emit_sched_event);
-
       if (timeout_reg != VCODE_INVALID_REG)
          emit_sched_process(timeout_reg);
 
       emit_wait(resume);
 
       vcode_select_block(done_bb);
+   }
+
+   if (!is_static) {
+      for (int i = 0; i < ntriggers; i++)
+         lower_clear_event(lu, tree_trigger(wait, i));
    }
 }
 

@@ -5205,18 +5205,34 @@ START_TEST(test_wait2)
       { VCODE_OP_VAR_UPREF, .hops = 1, .name = "R" },
       { VCODE_OP_RECORD_REF },
       { VCODE_OP_LOAD_INDIRECT },
-      { VCODE_OP_CONST, .value = 1 },
-      { VCODE_OP_CLEAR_EVENT },
       { VCODE_OP_RESOLVED },
       { VCODE_OP_LOAD_INDIRECT },
       { VCODE_OP_CONST, .value = 1 },
       { VCODE_OP_CMP, .cmp = VCODE_CMP_EQ },
+      { VCODE_OP_CONST, .value = 1 },
       { VCODE_OP_EVENT },
       { VCODE_OP_AND },
       { VCODE_OP_COND, .target = 3, .target_else = 4 },
    };
 
    CHECK_BB(2);
+
+   EXPECT_BB(3) = {
+      { VCODE_OP_VAR_UPREF, .hops = 1, .name = "R" },
+      { VCODE_OP_RECORD_REF },
+      { VCODE_OP_LOAD_INDIRECT },
+      { VCODE_OP_CONST, .value = 1 },
+      { VCODE_OP_CLEAR_EVENT },
+      { VCODE_OP_WAIT, .target = 5 },
+   };
+
+   CHECK_BB(3);
+
+   EXPECT_BB(4) = {
+      { VCODE_OP_WAIT, .target = 2 },
+   };
+
+   CHECK_BB(4);
 }
 END_TEST
 

@@ -3811,16 +3811,22 @@ static inline void reg_pin(rt_wakeable_t *obj, void **pending)
 {
    proc_pin(obj);
 
-   if (obj->kind == W_PROC)
-      sv_task_note_reg(container_of(obj, rt_proc_t, wakeable), pending);
+   if (obj->kind == W_PROC) {
+      rt_proc_t *p = container_of(obj, rt_proc_t, wakeable);
+      if (unlikely(p->task != NULL))
+         sv_task_note_reg(p, pending);
+   }
 }
 
 static inline void reg_unpin(rt_wakeable_t *obj, void **pending)
 {
    proc_unpin(obj);
 
-   if (obj->kind == W_PROC)
-      sv_task_drop_reg(container_of(obj, rt_proc_t, wakeable), pending);
+   if (obj->kind == W_PROC) {
+      rt_proc_t *p = container_of(obj, rt_proc_t, wakeable);
+      if (unlikely(p->task != NULL))
+         sv_task_drop_reg(p, pending);
+   }
 }
 
 static void note_wait(rt_model_t *m, rt_proc_t *proc)
@@ -4025,11 +4031,14 @@ static void clear_event(rt_model_t *m, void **pending, rt_wakeable_t *obj)
       if (p->index == NULL) {
          for (unsigned i = 0; i < p->count; i++) {
             if (p->wake[i] == obj) {
-               p->wake[i] = NULL;
-               if (i < p->first_free)
-                  p->first_free = i;
-               if (i + 1 == p->count)
-                  pending_shrink_tail(p);
+               if (i + 1 < p->count)
+                  memmove(&p->wake[i], &p->wake[i + 1],
+                          (p->count - i - 1) * sizeof(rt_wakeable_t *));
+               p->count--;
+               p->wake[p->count] = NULL;
+               if (p->first_free > i)
+                  p->first_free--;
+               pending_shrink_tail(p);
                reg_unpin(obj, pending);
                return;
             }

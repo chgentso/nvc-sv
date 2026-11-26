@@ -2939,6 +2939,7 @@ textio_overflow normal
 textio_overflow2 gold,fail
 vhpi37          normal,vhpi
 wait31          normal,2008
+wait32          normal,2008
 attr23          normal,2008
 tostring1       normal,2008
 aggr2           normal,2008
