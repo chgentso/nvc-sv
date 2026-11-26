@@ -39545,6 +39545,29 @@ static void vlog_lower_island_always(vlog_gen_t *g, vlog_node_t s)
    }
 }
 
+static void vlog_lower_island_comb_proc(vlog_gen_t *g, const island_proc_t *ip)
+{
+   vlog_node_t s = ip->stmt;
+
+   if (ip->kind == IPROC_ASSIGN)
+      vlog_assign_variable(g, vlog_target(s), MIR_NULL_VALUE, vlog_value(s));
+   else {
+      assert(ip->kind == IPROC_COMB);
+      const vlog_always_kind_t ak = vlog_subkind(s);
+      if (ak == V_ALWAYS_COMB || ak == V_ALWAYS_COMB_DONE) {
+         gen_stack_t gs = {};
+         vlog_lower_stmts(g, s, &gs);
+      }
+      else
+         vlog_lower_island_always(g, s);
+   }
+
+   if (mir_block_finished(g->mu, MIR_NULL_BLOCK)) {
+      mir_block_t cont = mir_add_block(g->mu);
+      mir_set_cursor(g->mu, cont, MIR_APPEND);
+   }
+}
+
 void vlog_lower_island_comb_fn(mir_context_t *mc, vlog_node_t body,
                                ident_t qual, ident_t sym,
                                const vlog_island_t *isl,
@@ -39555,6 +39578,7 @@ void vlog_lower_island_comb_fn(mir_context_t *mc, vlog_node_t body,
                                  MIR_UNIT_FUNCTION, shape);
 
    mir_type_t t_offset = mir_offset_type(mu);
+   mir_type_t t_bool = mir_bool_type(mu);
    mir_set_result(mu, t_offset);
 
    mir_type_t t_ptr = mir_pointer_type(mu, mir_int_type(mu, 0, 255));
@@ -39576,32 +39600,141 @@ void vlog_lower_island_comb_fn(mir_context_t *mc, vlog_node_t body,
       .two_state      = opt_get_int(OPT_TWO_STATE) >= TWO_STATE_ISLANDS,
    };
 
-   for (uint32_t c = 0; c < isl->ntopo; c++) {
+   for (uint32_t c = 0; c < isl->ntopo; ) {
       const uint32_t pidx = isl->topo_order[c];
-      if (!fused_proc[pidx])
+      if (!fused_proc[pidx]) {
+         c++;
          continue;
+      }
 
       const island_proc_t *ip = &(isl->procs[pidx]);
-      vlog_node_t s = ip->stmt;
+      if (!ip->in_cycle) {
+         vlog_lower_island_comb_proc(&g, ip);
+         c++;
+         continue;
+      }
 
-      if (ip->kind == IPROC_ASSIGN)
-         vlog_assign_variable(&g, vlog_target(s), MIR_NULL_VALUE,
-                              vlog_value(s));
-      else {
-         assert(ip->kind == IPROC_COMB);
-         const vlog_always_kind_t ak = vlog_subkind(s);
-         if (ak == V_ALWAYS_COMB || ak == V_ALWAYS_COMB_DONE) {
-            gen_stack_t gs = {};
-            vlog_lower_stmts(&g, s, &gs);
+      // Small pure-combinational SCC: evaluate with bounded fixed-point loop
+      uint32_t end = c + 1;
+      while (end < isl->ntopo
+             && isl->procs[isl->topo_order[end]].scc_id == ip->scc_id)
+         end++;
+
+      const uint32_t k = end - c;
+      assert(k >= 2 && k <= NVC_ISLAND_MAX_SCC);
+
+      bool *seen LOCAL = xcalloc_array(MAX(1u, isl->nsigs), sizeof(bool));
+      A(uint32_t) back_sigs = AINIT;
+      for (uint32_t u = 0; u < k; u++) {
+         const island_proc_t *pu = &(isl->procs[isl->topo_order[c + u]]);
+         assert(fused_proc[isl->topo_order[c + u]]);
+         for (uint32_t wi = 0; wi < pu->nwrites; wi++) {
+            const uint32_t sidx = pu->writes[wi];
+            if (seen[sidx])
+               continue;
+            bool is_back = false;
+            for (uint32_t v = 0; v <= u && !is_back; v++) {
+               const island_proc_t *pv = &(isl->procs[isl->topo_order[c + v]]);
+               for (uint32_t ri = 0; ri < pv->nreads; ri++) {
+                  if (pv->reads[ri] == sidx) {
+                     is_back = true;
+                     break;
+                  }
+               }
+            }
+            if (is_back) {
+               seen[sidx] = true;
+               APUSH(back_sigs, sidx);
+            }
          }
-         else
-            vlog_lower_island_always(&g, s);
       }
 
-      if (mir_block_finished(mu, MIR_NULL_BLOCK)) {
-         mir_block_t cont = mir_add_block(mu);
-         mir_set_cursor(mu, cont, MIR_APPEND);
+      if (back_sigs.count == 0) {
+         for (uint32_t j = c; j < end; j++)
+            vlog_lower_island_comb_proc(&g, &(isl->procs[isl->topo_order[j]]));
+         ACLEAR(back_sigs);
+         c = end;
+         continue;
       }
+
+      typedef struct {
+         const island_sig_t *sig;
+         uint32_t            elem;
+         mir_type_t          elem_t;
+         mir_value_t         snap_var;
+      } scc_snap_t;
+
+      A(scc_snap_t) snaps = AINIT;
+      for (uint32_t bi = 0; bi < back_sigs.count; bi++) {
+         const island_sig_t *s = &(isl->sigs[back_sigs.items[bi]]);
+         mir_type_t elem_t = s->two_state
+            ? mir_vec2_type(mu, s->width, false)
+            : mir_vec4_type(mu, s->width, false);
+         for (uint32_t e = 0; e < s->nelems; e++) {
+            scc_snap_t sn = {
+               .sig      = s,
+               .elem     = e,
+               .elem_t   = elem_t,
+               .snap_var = mir_add_var(mu, elem_t, MIR_NULL_STAMP,
+                                       ident_uniq("scc_snap"), 0),
+            };
+            APUSH(snaps, sn);
+         }
+      }
+
+      mir_value_t iter_var = mir_add_var(mu, t_offset, MIR_NULL_STAMP,
+                                         ident_uniq("scc_iter"), 0);
+      mir_build_store(mu, iter_var, mir_const(mu, t_offset, 0));
+
+      mir_block_t loop_bb = mir_add_block(mu);
+      mir_block_t exit_bb = mir_add_block(mu);
+      mir_build_jump(mu, loop_bb);
+      mir_set_cursor(mu, loop_bb, MIR_APPEND);
+
+      for (uint32_t si = 0; si < snaps.count; si++) {
+         const scc_snap_t *sn = &(snaps.items[si]);
+         mir_value_t cur = mir_build_island_load(
+            mu, sn->elem_t, state,
+            mir_const(mu, t_offset, sn->sig->a_off),
+            mir_const(mu, t_offset,
+                      sn->sig->two_state ? -1 : (int64_t)sn->sig->b_off),
+            mir_const(mu, t_offset, sn->elem));
+         mir_build_store(mu, sn->snap_var, cur);
+      }
+
+      for (uint32_t j = c; j < end; j++)
+         vlog_lower_island_comb_proc(&g, &(isl->procs[isl->topo_order[j]]));
+
+      mir_value_t changed = mir_const(mu, t_bool, 0);
+      for (uint32_t si = 0; si < snaps.count; si++) {
+         const scc_snap_t *sn = &(snaps.items[si]);
+         mir_value_t cur = mir_build_island_load(
+            mu, sn->elem_t, state,
+            mir_const(mu, t_offset, sn->sig->a_off),
+            mir_const(mu, t_offset,
+                      sn->sig->two_state ? -1 : (int64_t)sn->sig->b_off),
+            mir_const(mu, t_offset, sn->elem));
+         mir_value_t old = mir_build_load(mu, sn->snap_var);
+         mir_value_t neq = mir_build_test(
+            mu, mir_build_binary(mu, MIR_VEC_CASE_NEQ, sn->elem_t, old, cur));
+         changed = mir_build_or(mu, changed, neq);
+      }
+
+      mir_value_t next_iter = mir_build_add(
+         mu, t_offset, mir_build_load(mu, iter_var),
+         mir_const(mu, t_offset, 1));
+      mir_build_store(mu, iter_var, next_iter);
+
+      const uint32_t max_iters = k + 2u;
+      mir_value_t under = mir_build_cmp(mu, MIR_CMP_LT, next_iter,
+                                        mir_const(mu, t_offset, max_iters));
+      mir_value_t cont = mir_build_and(mu, changed, under);
+      mir_build_cond(mu, cont, loop_bb, exit_bb);
+
+      mir_set_cursor(mu, exit_bb, MIR_APPEND);
+      ACLEAR(snaps);
+      ACLEAR(back_sigs);
+      c = end;
    }
 
    mir_build_return(mu, mir_const(mu, t_offset, 0));

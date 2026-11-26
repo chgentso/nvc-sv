@@ -997,41 +997,36 @@ static vlog_node_t unwrap_typedef(vlog_node_t t)
    return t;
 }
 
-static void record_lvalue_write_ranges(check_ctx_t *cc, vlog_node_t lhs)
+static bool sv_expr_exact_bit_range(const analyze_ctx_t *ctx, vlog_node_t expr,
+                                    uint32_t *sig_idx_out, uint64_t *bit_lo_out,
+                                    uint64_t *bit_hi_out, hset_t *locals)
 {
-   if (lhs == NULL || cc->in_func)
-      return;
-
-   if (vlog_kind(lhs) == V_CONCAT) {
-      for (unsigned i = 0; i < vlog_params(lhs); i++)
-         record_lvalue_write_ranges(cc, vlog_param(lhs, i));
-      return;
-   }
-
    vlog_node_t steps[16];
    int nsteps = 0;
-   vlog_node_t cur = lhs;
+   vlog_node_t cur = expr;
    while (cur != NULL && vlog_kind(cur) != V_REF) {
       const vlog_kind_t k = vlog_kind(cur);
       if (k != V_MEMBER_REF && k != V_BIT_SELECT && k != V_PART_SELECT)
-         return;
+         return false;
       if (nsteps >= 16)
-         return;
+         return false;
       steps[nsteps++] = cur;
       cur = vlog_value(cur);
    }
 
    if (cur == NULL || vlog_kind(cur) != V_REF || !vlog_has_ref(cur))
-      return;
+      return false;
    vlog_node_t d = vlog_ref(cur);
-   if (hset_contains(cc->locals, d))
-      return;
+   if (locals != NULL && hset_contains(locals, d))
+      return false;
 
-   const int idx = find_sig_idx(cc->ctx, d);
+   const int idx = find_sig_idx(ctx, d);
    if (idx < 0)
-      return;
+      return false;
 
-   const sig_meta_t *s = &(cc->ctx->sigs[idx]);
+   *sig_idx_out = (uint32_t)idx;
+
+   const sig_meta_t *s = &(ctx->sigs[idx]);
    const uint64_t total_bits = (uint64_t)s->width * s->nelems;
    uint64_t elem_lo = 0, elem_hi = s->nelems > 0 ? s->nelems - 1 : 0;
    uint64_t bit_off = 0, bit_w = s->width;
@@ -1216,19 +1211,34 @@ static void record_lvalue_write_ranges(check_ctx_t *cc, vlog_node_t lhs)
       }
    }
 
-   sv_write_range_t wr;
-   wr.sig_idx = (uint32_t)idx;
    if (exact) {
-      wr.bit_lo = elem_lo * s->width + bit_off;
-      wr.bit_hi = (elem_lo == elem_hi)
-         ? (wr.bit_lo + bit_w - 1)
+      *bit_lo_out = elem_lo * s->width + bit_off;
+      *bit_hi_out = (elem_lo == elem_hi)
+         ? (*bit_lo_out + bit_w - 1)
          : ((elem_hi + 1) * s->width - 1);
    }
    else {
-      wr.bit_lo = 0;
-      wr.bit_hi = total_bits > 0 ? total_bits - 1 : 0;
+      *bit_lo_out = 0;
+      *bit_hi_out = total_bits > 0 ? total_bits - 1 : 0;
    }
-   APUSH(cc->proc->write_ranges, wr);
+   return true;
+}
+
+static void record_lvalue_write_ranges(check_ctx_t *cc, vlog_node_t lhs)
+{
+   if (lhs == NULL || cc->in_func)
+      return;
+
+   if (vlog_kind(lhs) == V_CONCAT) {
+      for (unsigned i = 0; i < vlog_params(lhs); i++)
+         record_lvalue_write_ranges(cc, vlog_param(lhs, i));
+      return;
+   }
+
+   sv_write_range_t wr;
+   if (sv_expr_exact_bit_range(cc->ctx, lhs, &wr.sig_idx, &wr.bit_lo,
+                               &wr.bit_hi, cc->locals))
+      APUSH(cc->proc->write_ranges, wr);
 }
 
 static bool check_lvalue(check_ctx_t *cc, vlog_node_t lhs, bool is_nba,
@@ -2765,7 +2775,133 @@ static uint32_t partition_islands(analyze_ctx_t *ctx)
    return nislands;
 }
 
-static void run_comb_tarjan_topo(vlog_island_t *isl)
+static bool sv_expr_reads_overlap_sig(const analyze_ctx_t *ctx, vlog_node_t v,
+                                      uint32_t gsig, const proc_meta_t *pm)
+{
+   if (v == NULL)
+      return false;
+
+   const vlog_kind_t k = vlog_kind(v);
+   if (k == V_REF || k == V_BIT_SELECT || k == V_PART_SELECT
+       || k == V_MEMBER_REF) {
+      uint32_t rsig = 0;
+      uint64_t rlo = 0, rhi = 0;
+      if (sv_expr_exact_bit_range(ctx, v, &rsig, &rlo, &rhi, NULL)) {
+         if (rsig == gsig) {
+            for (uint32_t i = 0; i < pm->write_ranges.count; i++) {
+               const sv_write_range_t wr = pm->write_ranges.items[i];
+               if (wr.sig_idx == gsig && rlo <= wr.bit_hi && wr.bit_lo <= rhi)
+                  return true;
+            }
+         }
+         // Still check any dynamic index expressions inside selects
+         vlog_node_t cur = v;
+         while (cur != NULL && vlog_kind(cur) != V_REF) {
+            const vlog_kind_t ck = vlog_kind(cur);
+            if (ck == V_BIT_SELECT) {
+               for (unsigned i = 0; i < vlog_params(cur); i++) {
+                  if (sv_expr_reads_overlap_sig(ctx, vlog_param(cur, i),
+                                                gsig, pm))
+                     return true;
+               }
+            }
+            else if (ck == V_PART_SELECT) {
+               if (sv_expr_reads_overlap_sig(ctx, vlog_left(cur), gsig, pm)
+                   || (vlog_has_right(cur)
+                       && sv_expr_reads_overlap_sig(ctx, vlog_right(cur),
+                                                    gsig, pm)))
+                  return true;
+            }
+            cur = vlog_value(cur);
+         }
+         return false;
+      }
+   }
+
+   switch (k) {
+   case V_NUMBER:
+   case V_STRING:
+   case V_REAL:
+      return false;
+   case V_UNARY:
+   case V_CAST:
+   case V_MIN_TYP_MAX:
+      return sv_expr_reads_overlap_sig(ctx, vlog_value(v), gsig, pm);
+   case V_BINARY:
+   case V_INSIDE_RANGE:
+      return sv_expr_reads_overlap_sig(ctx, vlog_left(v), gsig, pm)
+          || sv_expr_reads_overlap_sig(ctx, vlog_right(v), gsig, pm);
+   case V_COND_EXPR:
+      return sv_expr_reads_overlap_sig(ctx, vlog_value(v), gsig, pm)
+          || sv_expr_reads_overlap_sig(ctx, vlog_left(v), gsig, pm)
+          || sv_expr_reads_overlap_sig(ctx, vlog_right(v), gsig, pm);
+   case V_CONCAT:
+      if (vlog_has_value(v)
+          && sv_expr_reads_overlap_sig(ctx, vlog_value(v), gsig, pm))
+         return true;
+      for (unsigned i = 0; i < vlog_params(v); i++) {
+         if (sv_expr_reads_overlap_sig(ctx, vlog_param(v, i), gsig, pm))
+            return true;
+      }
+      return false;
+   case V_INSIDE:
+      if (sv_expr_reads_overlap_sig(ctx, vlog_value(v), gsig, pm))
+         return true;
+      for (unsigned i = 0; i < vlog_params(v); i++) {
+         if (sv_expr_reads_overlap_sig(ctx, vlog_param(v, i), gsig, pm))
+            return true;
+      }
+      return false;
+   case V_PATTERN_EXPR:
+   case V_SYS_FCALL:
+      for (unsigned i = 0; i < vlog_params(v); i++) {
+         if (sv_expr_reads_overlap_sig(ctx, vlog_param(v, i), gsig, pm))
+            return true;
+      }
+      return false;
+   case V_PATTERN_ITEM:
+      return vlog_has_right(v)
+          && sv_expr_reads_overlap_sig(ctx, vlog_right(v), gsig, pm);
+   default:
+      return true;   // Conservative for complex expressions (e.g. user fcall)
+   }
+}
+
+static bool sv_assign_lvalue_idx_overlaps(const analyze_ctx_t *ctx,
+                                          vlog_node_t lhs, uint32_t gsig,
+                                          const proc_meta_t *pm)
+{
+   if (lhs == NULL)
+      return false;
+   switch (vlog_kind(lhs)) {
+   case V_CONCAT:
+      for (unsigned i = 0; i < vlog_params(lhs); i++) {
+         if (sv_assign_lvalue_idx_overlaps(ctx, vlog_param(lhs, i), gsig, pm))
+            return true;
+      }
+      return false;
+   case V_BIT_SELECT:
+      for (unsigned i = 0; i < vlog_params(lhs); i++) {
+         if (sv_expr_reads_overlap_sig(ctx, vlog_param(lhs, i), gsig, pm))
+            return true;
+      }
+      return sv_assign_lvalue_idx_overlaps(ctx, vlog_value(lhs), gsig, pm);
+   case V_PART_SELECT:
+      if (sv_expr_reads_overlap_sig(ctx, vlog_left(lhs), gsig, pm)
+          || (vlog_has_right(lhs)
+              && sv_expr_reads_overlap_sig(ctx, vlog_right(lhs), gsig, pm)))
+         return true;
+      return sv_assign_lvalue_idx_overlaps(ctx, vlog_value(lhs), gsig, pm);
+   case V_MEMBER_REF:
+      return sv_assign_lvalue_idx_overlaps(ctx, vlog_value(lhs), gsig, pm);
+   default:
+      return false;
+   }
+}
+
+static void run_comb_tarjan_topo(const analyze_ctx_t *ctx, vlog_island_t *isl,
+                                 const uint32_t *l_sigs,
+                                 const uint32_t *p_indices)
 {
    // Collect combinational processes (IPROC_ASSIGN and IPROC_COMB)
    A(uint32_t) comb_idx = AINIT;
@@ -2807,9 +2943,21 @@ static void run_comb_tarjan_topo(vlog_island_t *isl)
          for (uint32_t k = 0; k < sig_writers[s].count; k++) {
             uint32_t u = sig_writers[s].items[k];
             if (u == v) {
-               // Only continuous assign reading its own driven signal is a cycle
-               if (pv->kind == IPROC_ASSIGN)
-                  self_loop[u] = true;
+               // Only continuous assign reading bits overlapping its own
+               // written slice is a self-loop cycle (e.g. short_op_a[16] =
+               // ... & short_op_a[15] is acyclic).
+               if (pv->kind == IPROC_ASSIGN) {
+                  const proc_meta_t *pm =
+                     &(ctx->procs[p_indices[comb_idx.items[v]]]);
+                  const uint32_t gsig = l_sigs[s];
+                  if (pm->write_ranges.count == 0
+                      || sv_expr_reads_overlap_sig(ctx, vlog_value(pv->stmt),
+                                                   gsig, pm)
+                      || sv_assign_lvalue_idx_overlaps(ctx,
+                                                       vlog_target(pv->stmt),
+                                                       gsig, pm))
+                     self_loop[u] = true;
+               }
                continue;
             }
             uint64_t key = ((uint64_t)u << 32) | v;
@@ -2930,6 +3078,7 @@ static void run_comb_tarjan_topo(vlog_island_t *isl)
          isl->procs[pidx].topo_order = (int)pos;
          isl->procs[pidx].scc_id = topo_scc_id;
          isl->procs[pidx].in_cycle = g->is_cycle;
+         isl->procs[pidx].self_loop = (g->count == 1 && self_loop[u]);
          isl->procs[pidx].topo_level = 0;
          pos++;
       }
@@ -3188,7 +3337,7 @@ static vlog_island_t *build_island(analyze_ctx_t *ctx, uint32_t island_id)
    isl->ndomains = doms.count;
    isl->domains = doms.items;
 
-   run_comb_tarjan_topo(isl);
+   run_comb_tarjan_topo(ctx, isl, l_sigs.items, p_indices.items);
 
    free(g_to_l);
    free(sig_read);

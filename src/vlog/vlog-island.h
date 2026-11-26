@@ -25,6 +25,8 @@
 #include <stdint.h>
 
 #define NVC_ISLAND_MAX_NODES 8000
+#define NVC_ISLAND_MAX_SCC 8
+#define NVC_ISLAND_MAX_SCC_SNAP_ELEMS 32
 
 typedef enum {
    ISIG_INTERNAL = 0,
@@ -109,6 +111,7 @@ typedef struct {
    int                topo_level;
    int                scc_id;
    bool               in_cycle;
+   bool               self_loop;
 } island_proc_t;
 
 typedef struct {

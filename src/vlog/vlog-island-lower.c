@@ -303,7 +303,7 @@ static bool m2_proc_eligible(const vlog_island_t *isl,
    if (ip->kind != IPROC_ASSIGN && ip->kind != IPROC_COMB
        && ip->kind != IPROC_FF)
       return false;
-   if (ip->in_cycle)
+   if (ip->self_loop)
       return false;
 
    if (ip->kind == IPROC_FF) {
@@ -728,6 +728,51 @@ static ident_t m2_register_shared_sym(mir_context_t *mc, ident_t unit_base,
    return sym;
 }
 
+static bool m2_scc_is_fusable(const vlog_island_t *isl, const bool *fused_proc,
+                              uint32_t start, uint32_t end)
+{
+   const uint32_t k = end - start;
+   if (k < 2 || k > NVC_ISLAND_MAX_SCC)
+      return false;
+
+   for (uint32_t i = start; i < end; i++) {
+      if (!fused_proc[isl->topo_order[i]])
+         return false;
+   }
+
+   bool *seen LOCAL = xcalloc_array(MAX(1u, isl->nsigs), sizeof(bool));
+   uint32_t snap_elems = 0;
+   for (uint32_t u = 0; u < k; u++) {
+      const island_proc_t *pu = &(isl->procs[isl->topo_order[start + u]]);
+      for (uint32_t wi = 0; wi < pu->nwrites; wi++) {
+         const uint32_t sidx = pu->writes[wi];
+         if (sidx >= isl->nsigs || seen[sidx])
+            continue;
+         bool is_back = false;
+         for (uint32_t v = 0; v <= u && !is_back; v++) {
+            const island_proc_t *pv = &(isl->procs[isl->topo_order[start + v]]);
+            for (uint32_t ri = 0; ri < pv->nreads; ri++) {
+               if (pv->reads[ri] == sidx) {
+                  is_back = true;
+                  break;
+               }
+            }
+         }
+         if (is_back) {
+            seen[sidx] = true;
+            const island_sig_t *s = &(isl->sigs[sidx]);
+            if (s->width == 0 || s->nelems == 0)
+               return false;
+            snap_elems += s->nelems;
+            if (snap_elems > NVC_ISLAND_MAX_SCC_SNAP_ELEMS)
+               return false;
+         }
+      }
+   }
+
+   return true;
+}
+
 vlog_island_lower_ctx_t *vlog_island_lower_prepare(vlog_node_t body,
                                                    bool is_mixed,
                                                    mir_unit_t *inst_mu,
@@ -773,10 +818,32 @@ vlog_island_lower_ctx_t *vlog_island_lower_prepare(vlog_node_t body,
             m2->fused_proc[pidx] = true;
       }
 
-      // Eject any proc whose outputs collide with external/non-fused drivers
+      // Eject any proc whose outputs collide with external/non-fused drivers,
+      // and enforce all-or-nothing eligibility for small combinational SCCs.
       bool changed;
       do {
          changed = false;
+         for (uint32_t c = 0; c < isl->ntopo; ) {
+            const island_proc_t *ip = &(isl->procs[isl->topo_order[c]]);
+            if (!ip->in_cycle) {
+               c++;
+               continue;
+            }
+            uint32_t end = c + 1;
+            while (end < isl->ntopo
+                   && isl->procs[isl->topo_order[end]].scc_id == ip->scc_id)
+               end++;
+            if (!m2_scc_is_fusable(isl, m2->fused_proc, c, end)) {
+               for (uint32_t j = c; j < end; j++) {
+                  const uint32_t pidx = isl->topo_order[j];
+                  if (m2->fused_proc[pidx]) {
+                     m2->fused_proc[pidx] = false;
+                     changed = true;
+                  }
+               }
+            }
+            c = end;
+         }
          m2_compute_boundaries(m2);
          for (uint32_t p = 0; p < isl->nprocs; p++) {
             if (!m2->fused_proc[p])
