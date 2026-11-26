@@ -14539,7 +14539,7 @@ static void lower_scan_unfused_block(tree_t blk, hset_t *fused_procs,
          lower_ext_read_visit_tree(s, rc);
          break;
       case T_BLOCK:
-         if (!lower_block_is_instance(s))
+         if (!lower_block_is_instance(s) && !vhdl_island_gen_block_eligible(s))
             lower_scan_unfused_block(s, fused_procs, rc);
          break;
       default:

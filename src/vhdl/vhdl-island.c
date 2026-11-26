@@ -3763,6 +3763,123 @@ static bool can_inline_gen_block(tree_t gb)
    return true;
 }
 
+bool vhdl_island_gen_block_eligible(tree_t block)
+{
+   if (block == NULL || tree_kind(block) != T_BLOCK)
+      return false;
+   if (tree_ports(block) > 0 || tree_decls(block) == 0
+       || tree_kind(tree_decl(block, 0)) != T_HIER)
+      return false;
+
+   tree_t hier = tree_decl(block, 0);
+   if (tree_subkind(hier) == T_VERILOG)
+      return false;
+   tree_t unit = tree_ref(hier);
+   if (unit == NULL || is_design_unit(unit) || tree_kind(unit) == T_COMPONENT)
+      return false;
+
+   bool has_sig_decl = false;
+   const int nd = tree_decls(block);
+   for (int i = 1; i < nd; i++) {
+      switch (tree_kind(tree_decl(block, i))) {
+      case T_SIGNAL_DECL:
+         has_sig_decl = true;
+         break;
+      case T_PORT_DECL:
+      case T_FILE_DECL:
+      case T_ALIAS:
+      case T_PROT_DECL:
+      case T_PROT_BODY:
+         return false;
+      default:
+         break;
+      }
+   }
+   if (!has_sig_decl)
+      return false;
+
+   const int ns = tree_stmts(block);
+   for (int i = 0; i < ns; i++) {
+      tree_t s = tree_stmt(block, i);
+      if (tree_kind(s) == T_PROCESS)
+         return true;
+      if (tree_kind(s) == T_BLOCK && can_inline_gen_block(s))
+         return true;
+   }
+   return false;
+}
+
+static void scan_ancestor_outside(vhdl_island_ctx_t *ctx, tree_t cur_blk,
+                                  const tree_t *ancs, int n_ancs,
+                                  tree_t exclude_blk, u32_list_t *ext_reads,
+                                  sig_list_t *sigs, bool two_state, int depth)
+{
+   if (cur_blk == NULL || cur_blk == exclude_blk || depth > 16)
+      return;
+
+   vhdl_island_set_eval_scope(ctx, cur_blk, ancs, n_ancs);
+
+   const int ndecls = tree_decls(cur_blk);
+   for (int i = 0; i < ndecls; i++) {
+      tree_t d = tree_decl(cur_blk, i);
+      if (tree_kind(d) == T_PSL_DECL)
+         scan_psl_refs(ctx, tree_psl(d), ext_reads, sigs, 0);
+      else if (tree_kind(d) == T_PROC_BODY) {
+         mark_ineligible_attr_expr(ctx, sigs, d, 0);
+         scan_unfused_refs(ctx, d, false, ext_reads, true, sigs, 0);
+      }
+      else if (tree_kind(d) == T_FUNC_BODY)
+         scan_unfused_refs(ctx, d, false, ext_reads, false, sigs, 0);
+   }
+
+   const int nstmts = tree_stmts(cur_blk);
+   for (int i = 0; i < nstmts; i++) {
+      tree_t s = tree_stmt(cur_blk, i);
+      if (s == exclude_blk)
+         continue;
+      switch (tree_kind(s)) {
+      case T_BLOCK:
+         {
+            bool is_entity_inst = false;
+            if (tree_decls(s) > 0 && tree_kind(tree_decl(s, 0)) == T_HIER) {
+               tree_t unit = tree_ref(tree_decl(s, 0));
+               if (unit != NULL && (is_design_unit(unit)
+                                    || tree_kind(unit) == T_COMPONENT))
+                  is_entity_inst = true;
+            }
+            if (is_entity_inst) {
+               vhdl_island_set_eval_scope(ctx, cur_blk, ancs, n_ancs);
+               scan_child_block_uses(ctx, s, ext_reads, sigs, 0);
+            }
+            else if (n_ancs + 1 < VHDL_ISLAND_MAX_ANCESTORS) {
+               tree_t next_ancs[VHDL_ISLAND_MAX_ANCESTORS];
+               next_ancs[0] = cur_blk;
+               if (n_ancs > 0)
+                  memcpy(next_ancs + 1, ancs, n_ancs * sizeof(tree_t));
+               scan_ancestor_outside(ctx, s, next_ancs, n_ancs + 1,
+                                     exclude_blk, ext_reads, sigs, two_state,
+                                     depth + 1);
+               vhdl_island_set_eval_scope(ctx, cur_blk, ancs, n_ancs);
+            }
+            else {
+               vhdl_island_set_eval_scope(ctx, cur_blk, ancs, n_ancs);
+               scan_child_block_uses(ctx, s, ext_reads, sigs, 0);
+            }
+         }
+         break;
+      case T_PROCESS:
+      case T_PSL_DIRECT:
+         mark_ineligible_attr_expr(ctx, sigs, s, 0);
+         scan_unfused_refs(ctx, s, false, ext_reads, true, sigs, 0);
+         if (two_state)
+            mark_9state_drivers(ctx, sigs, s, 0);
+         break;
+      default:
+         break;
+      }
+   }
+}
+
 static void collect_block_contents(vhdl_island_ctx_t *ctx, tree_t cur_blk,
                                    const tree_t *ancs, int n_ancs,
                                    ident_t cur_prefix, bool is_root,
@@ -4486,7 +4603,8 @@ void vhdl_island_rebuild(vhdl_island_ctx_t *ctx)
             && (s->port_mode == PORT_OUT || s->port_mode == PORT_BUFFER
                 || s->port_mode == PORT_INOUT);
          if (is_driven_here
-             && (is_port_out || s->child_read || s->ext_read || edge_here))
+             && (is_port_out || s->is_ancestor_sig || s->child_read
+                 || s->ext_read || edge_here))
             f |= RT_ISIG_OUT;
 
          isl_sigs[j].rt_flags = f;
@@ -4547,6 +4665,58 @@ vhdl_island_ctx_t *vhdl_island_analyze(tree_t block, const tree_t *ancestors,
       }
    }
 
+   const bool is_gen_block = vhdl_island_gen_block_eligible(block);
+   int arch_idx = -1;
+   if (is_gen_block && n_ancestors > 0) {
+      for (int a = 0; a < n_ancestors; a++) {
+         tree_t anc = ancestors[a];
+         if (anc == NULL || tree_kind(anc) != T_BLOCK)
+            break;
+         bool anc_is_du = false;
+         if (tree_decls(anc) > 0 && tree_kind(tree_decl(anc, 0)) == T_HIER) {
+            tree_t ah = tree_decl(anc, 0);
+            if (tree_subkind(ah) == T_VERILOG)
+               break;
+            tree_t au = tree_ref(ah);
+            if (au != NULL && (is_design_unit(au) || tree_kind(au) == T_COMPONENT))
+               anc_is_du = true;
+         }
+         const uint32_t prev_cnt = sigs.count;
+         const tree_t *a_ancs = (a + 1 < n_ancestors) ? ancestors + a + 1 : NULL;
+         const int a_nancs = n_ancestors - a - 1;
+         const int ap = tree_ports(anc);
+         for (int i = 0; i < ap; i++) {
+            tree_t p = tree_port(anc, i);
+            if (tree_class(p) == C_SIGNAL)
+               collect_decl_leaves(anc, a_ancs, a_nancs, p, tree_type(p),
+                                   path, 0, two_state, &sigs);
+         }
+         const int ad = tree_decls(anc);
+         for (int i = 0; i < ad; i++) {
+            tree_t d = tree_decl(anc, i);
+            if (tree_kind(d) == T_SIGNAL_DECL)
+               collect_decl_leaves(anc, a_ancs, a_nancs, d, tree_type(d),
+                                   path, 0, two_state, &sigs);
+            else if (tree_kind(d) == T_IMPLICIT_SIGNAL) {
+               for (uint32_t j = prev_cnt; j < sigs.count; j++) {
+                  if (tree_ident(sigs.items[j].decl) != NULL
+                      && ident_starts_with(tree_ident(d),
+                                           tree_ident(sigs.items[j].decl)))
+                     sigs.items[j].ineligible = true;
+               }
+            }
+         }
+         for (uint32_t j = prev_cnt; j < sigs.count; j++) {
+            sigs.items[j].is_ancestor_sig = true;
+            if (sigs.items[j].is_port && sigs.items[j].port_mode == PORT_IN)
+               sigs.items[j].has_ext_driver = true;
+         }
+         arch_idx = a;
+         if (anc_is_du)
+            break;
+      }
+   }
+
    const int nstmts = tree_stmts(block);
    uint32_t total_procs = 0;
    for (int i = 0; i < nstmts; i++) {
@@ -4583,6 +4753,16 @@ vhdl_island_ctx_t *vhdl_island_analyze(tree_t block, const tree_t *ancestors,
    collect_block_contents(ctx, block, ancestors, n_ancestors, scope_prefix,
                           true, two_state, &sigs, &procs, &ext_reads,
                           &total_procs);
+
+   if (is_gen_block && arch_idx >= 0) {
+      const tree_t *a_ancs = (arch_idx + 1 < n_ancestors)
+         ? ancestors + arch_idx + 1 : NULL;
+      const int a_nancs = n_ancestors - arch_idx - 1;
+      scan_ancestor_outside(ctx, ancestors[arch_idx], a_ancs, a_nancs,
+                            block, &ext_reads, &sigs, two_state, 0);
+      vhdl_island_set_eval_scope(ctx, ctx->block, ctx->ancestors,
+                                 ctx->n_ancestors);
+   }
 
    ctx->total_procs = total_procs;
    ctx->procs = procs.items;

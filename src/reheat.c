@@ -30,6 +30,7 @@
 #include "vlog/vlog-node.h"
 #include "vlog/vlog-phase.h"
 #include "vlog/vlog-util.h"
+#include "vhdl/vhdl-island.h"
 #include "vhdl/vhdl-phase.h"
 
 #include <assert.h>
@@ -242,7 +243,8 @@ static void reheat_block(tree_t b, const reheat_ctx_t *parent)
 
    if (ctx.lowered != NULL && ctx.scope != NULL && tree_subkind(hier) != T_VERILOG) {
       tree_t unit = tree_ref(hier);
-      if (unit != NULL && is_design_unit(unit)) {
+      if (unit != NULL && (is_design_unit(unit)
+                           || vhdl_island_gen_block_eligible(b))) {
          vcode_unit_t thunk = lower_vhdl_islands(ctx.registry, ctx.lowered,
                                                  ctx.cover, b);
          model_run_island_init(ctx.model, ctx.scope, thunk);

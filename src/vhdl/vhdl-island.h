@@ -63,6 +63,7 @@ typedef struct {
    bool             is_vector;
    bool             is_array2d;
    bool             is_sparse_ram;
+   bool             is_ancestor_sig;
    bool             is_port;
    port_mode_t      port_mode;
    bool             two_state;
@@ -190,6 +191,7 @@ typedef struct _vhdl_island_ctx {
 
 vhdl_island_ctx_t *vhdl_island_analyze(tree_t block, const tree_t *ancestors,
                                        int n_ancestors, ident_t scope_prefix);
+bool vhdl_island_gen_block_eligible(tree_t block);
 void vhdl_island_rebuild(vhdl_island_ctx_t *ctx);
 void vhdl_island_dump_summary(const vhdl_island_ctx_t *ctx);
 void vhdl_island_ctx_free(vhdl_island_ctx_t *ctx);

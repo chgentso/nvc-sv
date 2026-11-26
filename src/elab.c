@@ -37,6 +37,7 @@
 #include "scan.h"
 #include "thread.h"
 #include "type.h"
+#include "vhdl/vhdl-island.h"
 #include "vhdl/vhdl-phase.h"
 #include "vlog/vlog-defs.h"
 #include "vlog/vlog-island.h"
@@ -73,6 +74,15 @@ typedef struct {
 } elab_gen_body_t;
 
 typedef A(elab_gen_body_t) gen_body_list_t;
+
+typedef struct {
+   tree_t        block;
+   lower_unit_t *lowered;
+   rt_scope_t   *scope;
+   bool          eligible;
+} elab_gen_island_t;
+
+typedef A(elab_gen_island_t) gen_island_list_t;
 
 typedef struct {
    tree_t      where;
@@ -168,6 +178,7 @@ typedef struct _elab_ctx {
    bool              shim;     // Verilog shim of a VHDL entity
    iface_conn_list_t *iface_conns;
    gen_body_list_t  *gen_bodies;
+   gen_island_list_t *gen_islands;
    hash_t           *block_parents;
    hash_t           *iface_first;
    hash_t           *iface_units;
@@ -1902,6 +1913,7 @@ static void elab_inherit_context(elab_ctx_t *ctx, const elab_ctx_t *parent)
    ctx->vucache  = parent->vucache;
    ctx->iface_conns = parent->iface_conns;
    ctx->gen_bodies = parent->gen_bodies;
+   ctx->gen_islands = ctx->gen_islands ?: parent->gen_islands;
    ctx->block_parents = parent->block_parents;
    ctx->iface_first = parent->iface_first;
    ctx->iface_units = parent->iface_units;
@@ -1969,6 +1981,46 @@ static void elab_vhdl_ext_reads(tree_t b, elab_ctx_t *ctx)
 
    vcode_unit_t thunk = lower_vhdl_ext_reads(ctx->registry, ctx->lowered, b);
    model_run_island_init(ctx->model, ctx->scope, thunk);
+}
+
+static void elab_flush_gen_islands(gen_island_list_t *list,
+                                   const elab_ctx_t *ctx, bool run_islands)
+{
+   if (run_islands && ctx->model != NULL) {
+      for (unsigned i = 0; i < list->count; i++) {
+         const elab_gen_island_t *gi = &(list->items[i]);
+         if (gi->lowered == NULL || gi->scope == NULL)
+            continue;
+         vcode_unit_t thunk = gi->eligible
+            ? lower_vhdl_islands(ctx->registry, gi->lowered, ctx->cover,
+                                 gi->block)
+            : lower_vhdl_ext_reads(ctx->registry, gi->lowered, gi->block);
+         model_run_island_init(ctx->model, gi->scope, thunk);
+      }
+   }
+   for (unsigned i = 0; i < list->count; i++) {
+      if (list->items[i].lowered != NULL)
+         unit_registry_finalise(ctx->registry, list->items[i].lowered);
+   }
+   ACLEAR(*list);
+}
+
+static void elab_finish_gen_block(tree_t b, elab_ctx_t *ctx)
+{
+   if (ctx->gen_islands != NULL && ctx->lowered != NULL) {
+      elab_gen_island_t gi = {
+         .block    = b,
+         .lowered  = ctx->lowered,
+         .scope    = ctx->scope,
+         .eligible = (elab_new_errors(ctx) == 0
+                      && vhdl_island_gen_block_eligible(b)),
+      };
+      APUSH(*ctx->gen_islands, gi);
+      return;
+   }
+   if (elab_new_errors(ctx) == 0)
+      elab_vhdl_ext_reads(b, ctx);
+   elab_pop_scope(ctx);
 }
 
 static bool elab_can_clone_instance(elab_instance_t *ei, const elab_ctx_t *ctx)
@@ -7171,9 +7223,11 @@ static void elab_architecture(tree_t inst, tree_t arch, const elab_ctx_t *ctx)
    ident_t label = tree_ident(inst);
    ident_t ndotted = ident_prefix(ctx->dotted, label, '.');
 
+   gen_island_list_t gen_islands = AINIT;
    elab_ctx_t new_ctx = {
-      .dotted = ndotted,
-      .inst   = ctx->parent != NULL ? inst : NULL,
+      .dotted      = ndotted,
+      .inst        = ctx->parent != NULL ? inst : NULL,
+      .gen_islands = &gen_islands,
    };
    elab_inherit_context(&new_ctx, ctx);
 
@@ -7229,9 +7283,13 @@ static void elab_architecture(tree_t inst, tree_t arch, const elab_ctx_t *ctx)
 
    if (elab_new_errors(&new_ctx) == 0) {
       elab_vhdl_sub_blocks(ei->block, &new_ctx);
-      if (elab_new_errors(&new_ctx) == 0)
+      const bool ok = (elab_new_errors(&new_ctx) == 0);
+      elab_flush_gen_islands(&gen_islands, &new_ctx, ok);
+      if (ok)
          elab_vhdl_islands(b, &new_ctx);
    }
+   else
+      elab_flush_gen_islands(&gen_islands, &new_ctx, false);
 
    elab_pop_scope(&new_ctx);
 }
@@ -7241,9 +7299,11 @@ static void elab_configuration(tree_t inst, tree_t unit, const elab_ctx_t *ctx)
    ident_t label = tree_ident(inst);
    ident_t ndotted = ident_prefix(ctx->dotted, label, '.');
 
+   gen_island_list_t gen_islands = AINIT;
    elab_ctx_t new_ctx = {
-      .dotted = ndotted,
-      .inst   = ctx->parent != NULL ? inst : NULL,
+      .dotted      = ndotted,
+      .inst        = ctx->parent != NULL ? inst : NULL,
+      .gen_islands = &gen_islands,
    };
    elab_inherit_context(&new_ctx, ctx);
 
@@ -7304,9 +7364,13 @@ static void elab_configuration(tree_t inst, tree_t unit, const elab_ctx_t *ctx)
       vhdl_cover_block(b, new_ctx.cover, new_ctx.cscope);
       elab_lower(b, &new_ctx);
       elab_vhdl_sub_blocks(ei->block, &new_ctx);
-      if (error_count() == 0)
+      const bool ok = (error_count() == 0);
+      elab_flush_gen_islands(&gen_islands, &new_ctx, ok);
+      if (ok)
          elab_vhdl_islands(b, &new_ctx);
    }
+   else
+      elab_flush_gen_islands(&gen_islands, &new_ctx, false);
 
    elab_pop_scope(&new_ctx);
 }
@@ -7762,8 +7826,6 @@ static void elab_for_generate(tree_t t, const elab_ctx_t *ctx)
          }
 
          elab_vhdl_sub_blocks(t, &new_ctx);
-         if (elab_new_errors(&new_ctx) == 0)
-            elab_vhdl_ext_reads(b, &new_ctx);
 
          bindings_overridden = was_overridden;
 
@@ -7778,7 +7840,7 @@ static void elab_for_generate(tree_t t, const elab_ctx_t *ctx)
          free(save.items);
       }
 
-      elab_pop_scope(&new_ctx);
+      elab_finish_gen_block(b, &new_ctx);
    }
 }
 
@@ -7828,11 +7890,9 @@ static void elab_if_generate(tree_t t, const elab_ctx_t *ctx)
             vhdl_cover_block(b, new_ctx.cover, new_ctx.cscope);
             elab_lower(b, &new_ctx);
             elab_vhdl_sub_blocks(cond, &new_ctx);
-            if (error_count() == 0)
-               elab_vhdl_ext_reads(b, &new_ctx);
          }
 
-         elab_pop_scope(&new_ctx);
+         elab_finish_gen_block(b, &new_ctx);
          return;
       }
    }
@@ -7871,11 +7931,9 @@ static void elab_case_generate(tree_t t, const elab_ctx_t *ctx)
       vhdl_cover_block(b, new_ctx.cover, new_ctx.cscope);
       elab_lower(b, &new_ctx);
       elab_vhdl_sub_blocks(chosen, &new_ctx);
-      if (error_count() == 0)
-         elab_vhdl_ext_reads(b, &new_ctx);
    }
 
-   elab_pop_scope(&new_ctx);
+   elab_finish_gen_block(b, &new_ctx);
 }
 
 static void elab_vhdl_processes(tree_t t, const elab_ctx_t *ctx)
@@ -7956,11 +8014,9 @@ static void elab_vhdl_block(tree_t t, const elab_ctx_t *ctx)
       vhdl_cover_block(b, new_ctx.cover, new_ctx.cscope);
       elab_lower(b, &new_ctx);
       elab_vhdl_sub_blocks(t, &new_ctx);
-      if (elab_new_errors(&new_ctx) == 0)
-         elab_vhdl_ext_reads(b, &new_ctx);
    }
 
-   elab_pop_scope(&new_ctx);
+   elab_finish_gen_block(b, &new_ctx);
 }
 
 static tree_t elab_top_level_binding(tree_t arch, const elab_ctx_t *ctx)
