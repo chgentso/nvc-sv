@@ -19,11 +19,15 @@
 #include "common.h"
 #include "cov/cov-api.h"
 #include "hash.h"
+#include "ident.h"
+#include "lib.h"
 #include "lower.h"
 #include "mir/mir-unit.h"
 #include "phase.h"
 #include "rt/model.h"
 #include "tree.h"
+#include "vlog/vlog-island.h"
+#include "vlog/vlog-node.h"
 #include "vlog/vlog-phase.h"
 #include "vlog/vlog-util.h"
 #include "vhdl/vhdl-phase.h"
@@ -44,6 +48,7 @@ typedef struct _reheat_ctx {
    ident_t             cloned;
    hset_t             *instances;
    hset_t             *lowered_blocks;
+   bool                has_config;
 } reheat_ctx_t;
 
 static void reheat_inherit(reheat_ctx_t *ctx, const reheat_ctx_t *parent)
@@ -55,6 +60,53 @@ static void reheat_inherit(reheat_ctx_t *ctx, const reheat_ctx_t *parent)
    ctx->cover     = parent->cover;
    ctx->instances = parent->instances;
    ctx->lowered_blocks = parent->lowered_blocks;
+   ctx->has_config = parent->has_config;
+}
+
+static bool reheat_is_instantiable(object_t *obj)
+{
+   if (vlog_from_object(obj) != NULL)
+      return true;
+
+   tree_t t = tree_from_object(obj);
+   return t != NULL && tree_kind(t) == T_ENTITY;
+}
+
+static bool reheat_is_config(tree_t top)
+{
+   ident_t base = ident_runtil(tree_ident(top), '.');
+   if (base == NULL)
+      return false;
+
+   ident_t libname = ident_until(base, '.');
+   lib_t lib = libname != NULL ? lib_find(libname) : lib_work();
+   if (lib == NULL)
+      return false;
+
+   object_t *obj = lib_get_generic(lib, base, NULL);
+   vlog_node_t v = obj != NULL ? vlog_from_object(obj) : NULL;
+   return v != NULL && vlog_kind(v) == V_CONFIG;
+}
+
+static vlog_node_t reheat_find_mod(vlog_node_t list, void *arg)
+{
+   lib_t lib = arg;
+
+   LOCAL_TEXT_BUF tb = tb_new();
+   tb_istr(tb, vlog_ident(list));
+   tb_upcase(tb);
+
+   ident_t unit = ident_new(tb_get(tb));
+   object_t *obj = NULL;
+   if (lib != NULL) {
+      ident_t qual = ident_prefix(lib_name(lib), unit, '.');
+      obj = lib_get_generic(lib, qual, NULL);
+   }
+   if (obj == NULL)
+      obj = lib_search_generic(unit, reheat_is_instantiable, NULL);
+
+   vlog_node_t mod = obj != NULL ? vlog_from_object(obj) : NULL;
+   return (mod != NULL && vlog_kind(mod) == V_MODULE) ? mod : NULL;
 }
 
 static bool reheat_is_vhdl_shim(tree_t b)
@@ -78,6 +130,25 @@ static cover_obj_t reheat_cover_scope(cover_data_t *cover, ident_t dotted)
    return cover_get_obj(cover, inst, COV_ATTR_ROOT);
 }
 
+static void reheat_lower_vlog_instance(const reheat_ctx_t *ctx,
+                                       vlog_node_t body, ident_t parent_cloned,
+                                       tree_t b, ident_t dotted)
+{
+   if (!ctx->has_config) {
+      ident_t libname = ident_until(vlog_ident(body), '.');
+      lib_t lib = libname != NULL ? lib_find(libname) : NULL;
+      if (lib == NULL)
+         lib = lib_work();
+      vlog_island_set_find_mod(reheat_find_mod, lib);
+   }
+
+   vlog_lower_instance(ctx->mir, body, parent_cloned, b, ctx->cover,
+                       reheat_cover_scope(ctx->cover, dotted));
+
+   if (!ctx->has_config)
+      vlog_island_set_find_mod(NULL, NULL);
+}
+
 static void reheat_lower_verilog(tree_t b, const reheat_ctx_t *parent,
                                  ident_t parent_cloned)
 {
@@ -94,8 +165,8 @@ static void reheat_lower_verilog(tree_t b, const reheat_ctx_t *parent,
    vlog_node_t body = tree_vlog(tree_ref(hier));
 
    if (!hset_contains(parent->instances, body)) {
-      vlog_lower_instance(parent->mir, body, parent_cloned, b, parent->cover,
-                          reheat_cover_scope(parent->cover, tree_ident(hier)));
+      reheat_lower_vlog_instance(parent, body, parent_cloned, b,
+                                 tree_ident(hier));
       hset_insert(parent->instances, body);
    }
 
@@ -126,8 +197,8 @@ static void reheat_block(tree_t b, const reheat_ctx_t *parent)
          vlog_node_t body = tree_vlog(tree_ref(hier));
 
          if (!hset_contains(ctx.instances, body)) {
-            vlog_lower_instance(ctx.mir, body, parent->cloned, b, ctx.cover,
-                                reheat_cover_scope(ctx.cover, ctx.dotted));
+            reheat_lower_vlog_instance(&ctx, body, parent->cloned, b,
+                                       ctx.dotted);
             hset_insert(ctx.instances, body);
          }
 
@@ -194,6 +265,7 @@ void reheat(tree_t top, unit_registry_t *ur, mir_context_t *mc,
       .mir       = mc,
       .instances = hset_new(16),
       .lowered_blocks = hset_new(16),
+      .has_config = reheat_is_config(top),
    };
 
    const int ntops = tree_stmts(top);
