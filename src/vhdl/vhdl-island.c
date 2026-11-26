@@ -2788,10 +2788,16 @@ static void scan_unfused_refs(const vhdl_island_ctx_t *ctx, tree_t t,
    case T_SIGNAL_ASSIGN:
       scan_unfused_refs(ctx, tree_target(t), true, ext_reads,
                         mark_ext_drivers, sigs_mut, depth + 1);
+      if (tree_has_reject(t))
+         scan_unfused_refs(ctx, tree_reject(t), false, ext_reads,
+                           mark_ext_drivers, sigs_mut, depth + 1);
       for (int i = 0; i < tree_waveforms(t); i++) {
          tree_t w = tree_waveform(t, i);
          if (tree_has_value(w))
             scan_unfused_refs(ctx, tree_value(w), false, ext_reads,
+                              mark_ext_drivers, sigs_mut, depth + 1);
+         if (tree_has_delay(w))
+            scan_unfused_refs(ctx, tree_delay(w), false, ext_reads,
                               mark_ext_drivers, sigs_mut, depth + 1);
       }
       return;
@@ -2814,6 +2820,22 @@ static void scan_unfused_refs(const vhdl_island_ctx_t *ctx, tree_t t,
    case T_ARRAY_SLICE:
       scan_unfused_refs(ctx, tree_value(t), is_target, ext_reads,
                         mark_ext_drivers, sigs_mut, depth + 1);
+      if (tree_ranges(t) > 0)
+         scan_unfused_refs(ctx, tree_range(t, 0), false, ext_reads,
+                           mark_ext_drivers, sigs_mut, depth + 1);
+      return;
+
+   case T_RANGE:
+      if (tree_subkind(t) == RANGE_TO || tree_subkind(t) == RANGE_DOWNTO) {
+         scan_unfused_refs(ctx, tree_left(t), false, ext_reads,
+                           mark_ext_drivers, sigs_mut, depth + 1);
+         scan_unfused_refs(ctx, tree_right(t), false, ext_reads,
+                           mark_ext_drivers, sigs_mut, depth + 1);
+      }
+      else if (tree_has_value(t)) {
+         scan_unfused_refs(ctx, tree_value(t), false, ext_reads,
+                           mark_ext_drivers, sigs_mut, depth + 1);
+      }
       return;
 
    case T_QUALIFIED:
@@ -2874,8 +2896,51 @@ static void scan_unfused_refs(const vhdl_island_ctx_t *ctx, tree_t t,
       return;
 
    case T_PROCESS:
+   case T_PROC_BODY:
+   case T_FUNC_BODY:
+      for (int i = 0; i < tree_decls(t); i++)
+         scan_unfused_refs(ctx, tree_decl(t, i), false, ext_reads,
+                           mark_ext_drivers, sigs_mut, depth + 1);
+      for (int i = 0; i < tree_stmts(t); i++)
+         scan_unfused_refs(ctx, tree_stmt(t, i), false, ext_reads,
+                           mark_ext_drivers, sigs_mut, depth + 1);
+      return;
+
+   case T_VAR_DECL:
+   case T_CONST_DECL:
+      if (tree_has_value(t))
+         scan_unfused_refs(ctx, tree_value(t), false, ext_reads,
+                           mark_ext_drivers, sigs_mut, depth + 1);
+      return;
+
+   case T_ALIAS:
+      if (tree_has_value(t)) {
+         scan_unfused_refs(ctx, tree_value(t), false, ext_reads,
+                           mark_ext_drivers, sigs_mut, depth + 1);
+         if (mark_ext_drivers)
+            scan_unfused_refs(ctx, tree_value(t), true, ext_reads,
+                              mark_ext_drivers, sigs_mut, depth + 1);
+      }
+      return;
+
    case T_FOR:
+      if (tree_ranges(t) > 0)
+         scan_unfused_refs(ctx, tree_range(t, 0), false, ext_reads,
+                           mark_ext_drivers, sigs_mut, depth + 1);
+      for (int i = 0; i < tree_stmts(t); i++)
+         scan_unfused_refs(ctx, tree_stmt(t, i), false, ext_reads,
+                           mark_ext_drivers, sigs_mut, depth + 1);
+      return;
+
    case T_WHILE:
+      if (tree_has_value(t))
+         scan_unfused_refs(ctx, tree_value(t), false, ext_reads,
+                           mark_ext_drivers, sigs_mut, depth + 1);
+      for (int i = 0; i < tree_stmts(t); i++)
+         scan_unfused_refs(ctx, tree_stmt(t, i), false, ext_reads,
+                           mark_ext_drivers, sigs_mut, depth + 1);
+      return;
+
    case T_LOOP:
    case T_SEQUENCE:
       for (int i = 0; i < tree_stmts(t); i++)
@@ -2883,9 +2948,19 @@ static void scan_unfused_refs(const vhdl_island_ctx_t *ctx, tree_t t,
                            mark_ext_drivers, sigs_mut, depth + 1);
       return;
 
+   case T_EXIT:
+   case T_NEXT:
+      if (tree_has_value(t))
+         scan_unfused_refs(ctx, tree_value(t), false, ext_reads,
+                           mark_ext_drivers, sigs_mut, depth + 1);
+      return;
+
    case T_WAIT:
       if (tree_has_value(t))
          scan_unfused_refs(ctx, tree_value(t), false, ext_reads,
+                           mark_ext_drivers, sigs_mut, depth + 1);
+      if (tree_has_delay(t))
+         scan_unfused_refs(ctx, tree_delay(t), false, ext_reads,
                            mark_ext_drivers, sigs_mut, depth + 1);
       for (int i = 0; i < tree_triggers(t); i++)
          scan_unfused_refs(ctx, tree_trigger(t, i), false, ext_reads,
@@ -2920,6 +2995,40 @@ static void scan_unfused_refs(const vhdl_island_ctx_t *ctx, tree_t t,
       return;
 
    case T_PCALL:
+      {
+         tree_t decl = tree_has_ref(t) ? tree_ref(t) : NULL;
+         const int nports = (decl != NULL && (tree_kind(decl) == T_PROC_DECL
+                                              || tree_kind(decl) == T_PROC_BODY))
+            ? tree_ports(decl) : 0;
+         for (int i = 0; i < tree_params(t); i++) {
+            tree_t p = tree_param(t, i);
+            tree_t actual = tree_value(p);
+            port_mode_t mode = PORT_INOUT;
+            if (tree_subkind(p) == P_POS) {
+               const unsigned pos = tree_pos(p);
+               if (pos < (unsigned)nports)
+                  mode = tree_subkind(tree_port(decl, pos));
+            }
+            else if (tree_subkind(p) == P_NAMED
+                     && tree_kind(tree_name(p)) == T_REF) {
+               tree_t fp = tree_ref(tree_name(p));
+               if (fp != NULL && tree_kind(fp) == T_PORT_DECL)
+                  mode = tree_subkind(fp);
+            }
+            const bool writes = (mode == PORT_OUT || mode == PORT_INOUT
+                                 || mode == PORT_BUFFER);
+            const bool reads = (mode == PORT_IN || mode == PORT_INOUT
+                                || mode == PORT_BUFFER);
+            if (writes)
+               scan_unfused_refs(ctx, actual, true, ext_reads,
+                                 mark_ext_drivers, sigs_mut, depth + 1);
+            if (reads)
+               scan_unfused_refs(ctx, actual, false, ext_reads,
+                                 mark_ext_drivers, sigs_mut, depth + 1);
+         }
+      }
+      return;
+
    case T_PROT_PCALL:
    case T_PROT_FCALL:
       for (int i = 0; i < tree_params(t); i++)
@@ -3108,6 +3217,10 @@ static void scan_child_block_uses(const vhdl_island_ctx_t *ctx, tree_t blk,
          tree_t cd = tree_decl(blk, i);
          if (tree_kind(cd) == T_PSL_DECL)
             scan_psl_refs(ctx, tree_psl(cd), ext_reads, sigs, 0);
+         else if (tree_kind(cd) == T_PROC_BODY)
+            scan_unfused_refs(ctx, cd, false, ext_reads, true, sigs, 0);
+         else if (tree_kind(cd) == T_FUNC_BODY)
+            scan_unfused_refs(ctx, cd, false, ext_reads, false, sigs, 0);
       }
       const int n = tree_stmts(blk);
       for (int i = 0; i < n; i++) {
@@ -3454,6 +3567,10 @@ static void collect_block_contents(vhdl_island_ctx_t *ctx, tree_t cur_blk,
       tree_t d = tree_decl(cur_blk, i);
       if (tree_kind(d) == T_PSL_DECL)
          scan_psl_refs(ctx, tree_psl(d), ext_reads, sigs, 0);
+      else if (tree_kind(d) == T_PROC_BODY)
+         scan_unfused_refs(ctx, d, false, ext_reads, true, sigs, 0);
+      else if (tree_kind(d) == T_FUNC_BODY)
+         scan_unfused_refs(ctx, d, false, ext_reads, false, sigs, 0);
    }
 
    const int nstmts = tree_stmts(cur_blk);
