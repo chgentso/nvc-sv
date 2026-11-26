@@ -85,6 +85,13 @@ typedef struct {
    uint32_t       sig_idx;
 } rt_island_in_desc_t;
 
+typedef struct {
+   const uint8_t *src;
+   const uint8_t *cur;
+   uint32_t       nbytes;
+   uint32_t       sig_idx;
+} rt_island_ext_out_desc_t;
+
 typedef struct _rt_super_island rt_super_island_t;
 typedef struct _rt_super_domain rt_super_domain_t;
 
@@ -185,8 +192,10 @@ typedef struct _rt_island {
    uint32_t                 dirty_in_nwords;
    uint32_t                *out_sigs;
    uint32_t                 n_out_sigs;
-   uint32_t                *ext_out_sigs;
-   uint32_t                 n_ext_out_sigs;
+   uint32_t                 *ext_out_sigs;
+   uint32_t                  n_ext_out_sigs;
+   rt_island_ext_out_desc_t *ext_out_descs;
+   uint32_t                  n_ext_out_descs;
    uint32_t                *direct_comb_outs;
    uint32_t                 n_direct_comb_outs;
    rt_island_direct_desc_t *direct_comb_descs;
@@ -210,6 +219,7 @@ typedef struct _rt_island {
    bool                   in_dirty_list;
    bool                   in_defer_dirty;
    bool                   has_dirty_inputs;
+   bool                   in_cl_dirty_in;
    bool                   initialized;
    bool                   has_forces;
    bool                   need_sync_out;

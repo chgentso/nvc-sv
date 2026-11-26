@@ -215,6 +215,8 @@ struct _rt_super_island {
    uint32_t            id;
    rt_island_t       **islands;
    uint32_t            n_islands;
+   rt_island_t       **dirty_in_list;
+   uint32_t            n_dirty_in;
    uint32_t            min_dirty_pos;
    uint32_t            dirty_count;
    rt_super_island_t **comb_deps;
@@ -706,16 +708,47 @@ static void island_add_obs_sig(rt_island_t *isl, uint32_t sig_idx)
    isl->obs_sigs[isl->n_obs_sigs++] = sig_idx;
 }
 
+static void island_refresh_ext_out_descs(rt_island_t *isl)
+{
+   free(isl->ext_out_descs);
+   isl->ext_out_descs = NULL;
+   isl->n_ext_out_descs = 0;
+   if (isl->n_ext_out_sigs == 0)
+      return;
+
+   isl->ext_out_descs = xcalloc_array(isl->n_ext_out_sigs,
+                                      sizeof(rt_island_ext_out_desc_t));
+   for (uint32_t j = 0; j < isl->n_ext_out_sigs; j++) {
+      const uint32_t sidx = isl->ext_out_sigs[j];
+      const rt_island_sig_t *os = &(isl->sigs[sidx]);
+      rt_island_ext_out_desc_t *ed = &(isl->ext_out_descs[j]);
+      ed->sig_idx = sidx;
+      if ((os->flags & (RT_ISIG_VHDL | RT_ISIG_STD_LOGIC9 | RT_ISIG_PRUNED))
+          == (RT_ISIG_VHDL | RT_ISIG_STD_LOGIC9)
+          && os->sig != NULL
+          && !(os->sig->shared.flags & SIG_F_PACKED)) {
+         const size_t elem_sz = os->elem_size;
+         ed->src    = isl->state + os->a_off;
+         ed->cur    = os->sig->shared.data + (size_t)os->sig_offset * elem_sz;
+         ed->nbytes = os->width * os->nelems * os->elem_size;
+      }
+   }
+   isl->n_ext_out_descs = isl->n_ext_out_sigs;
+}
+
 static void island_add_ext_out_sig(rt_island_t *isl, uint32_t sig_idx)
 {
    for (uint32_t i = 0; i < isl->n_ext_out_sigs; i++) {
-      if (isl->ext_out_sigs[i] == sig_idx)
+      if (isl->ext_out_sigs[i] == sig_idx) {
+         island_refresh_ext_out_descs(isl);
          return;
+      }
    }
    isl->ext_out_sigs = xrealloc_array(isl->ext_out_sigs,
                                       isl->n_ext_out_sigs + 1u,
                                       sizeof(uint32_t));
    isl->ext_out_sigs[isl->n_ext_out_sigs++] = sig_idx;
+   island_refresh_ext_out_descs(isl);
 }
 
 static void island_add_comb_flush_sig(rt_island_t *isl,
@@ -737,8 +770,14 @@ void rt_island_input_watch_inline(rt_model_t *m, void *user, bool defer_comb)
    rt_island_t *isl = s->isl;
    island_mark_in_dirty(isl, s->in_idx);
    isl->has_dirty_inputs = true;
-   if (isl->cluster != NULL)
-      isl->cluster->has_dirty_inputs = true;
+   if (isl->cluster != NULL) {
+      rt_super_island_t *cl = isl->cluster;
+      cl->has_dirty_inputs = true;
+      if (!isl->in_cl_dirty_in) {
+         isl->in_cl_dirty_in = true;
+         cl->dirty_in_list[cl->n_dirty_in++] = isl;
+      }
+   }
    if (s->flags & RT_ISIG_COMB_READ) {
       if (unlikely(defer_comb)) {
          if (!isl->in_defer_dirty) {
@@ -1013,6 +1052,7 @@ void rt_island_mgr_free(rt_island_mgr_t *mgr)
    for (unsigned i = 0; i < mgr->clusters.count; i++) {
       rt_super_island_t *cl = mgr->clusters.items[i];
       free(cl->comb_deps);
+      free(cl->dirty_in_list);
       free(cl->islands);
       free(cl);
    }
@@ -1050,6 +1090,7 @@ void rt_island_mgr_free(rt_island_mgr_t *mgr)
       free(isl->dirty_in_words);
       free(isl->out_sigs);
       free(isl->ext_out_sigs);
+      free(isl->ext_out_descs);
       free(isl->direct_comb_outs);
       free(isl->direct_comb_descs);
       free(isl->obs_sigs);
@@ -1468,32 +1509,11 @@ static inline void island_copy_bytes(uint8_t * restrict dst,
    memcpy(dst, src, n);
 }
 
-static inline bool island_bytes_diff(const uint8_t *a, const uint8_t *b,
-                                     size_t n)
+__attribute__((noinline))
+static bool island_bytes_diff_other(const uint8_t *a, const uint8_t *b,
+                                    size_t n)
 {
-   if (n == 1)
-      return *a != *b;
-   if (n == 32) {
-      uint64_t x0, x1, x2, x3, y0, y1, y2, y3;
-      memcpy(&x0, a, 8);      memcpy(&x1, a + 8, 8);
-      memcpy(&x2, a + 16, 8); memcpy(&x3, a + 24, 8);
-      memcpy(&y0, b, 8);      memcpy(&y1, b + 8, 8);
-      memcpy(&y2, b + 16, 8); memcpy(&y3, b + 24, 8);
-      return ((x0 ^ y0) | (x1 ^ y1) | (x2 ^ y2) | (x3 ^ y3)) != 0;
-   }
    if (n <= 8) {
-      if (n == 4) {
-         uint32_t x, y;
-         memcpy(&x, a, 4);
-         memcpy(&y, b, 4);
-         return x != y;
-      }
-      if (n == 8) {
-         uint64_t x, y;
-         memcpy(&x, a, 8);
-         memcpy(&y, b, 8);
-         return x != y;
-      }
       if (n == 2) {
          uint16_t x, y;
          memcpy(&x, a, 2);
@@ -1547,6 +1567,34 @@ static inline bool island_bytes_diff(const uint8_t *a, const uint8_t *b,
       return false;
    }
    return memcmp(a, b, n) != 0;
+}
+
+static inline __attribute__((always_inline)) bool
+island_bytes_diff(const uint8_t *a, const uint8_t *b, size_t n)
+{
+   if (n == 1)
+      return *a != *b;
+   if (n == 32) {
+      uint64_t x0, x1, x2, x3, y0, y1, y2, y3;
+      memcpy(&x0, a, 8);      memcpy(&x1, a + 8, 8);
+      memcpy(&x2, a + 16, 8); memcpy(&x3, a + 24, 8);
+      memcpy(&y0, b, 8);      memcpy(&y1, b + 8, 8);
+      memcpy(&y2, b + 16, 8); memcpy(&y3, b + 24, 8);
+      return ((x0 ^ y0) | (x1 ^ y1) | (x2 ^ y2) | (x3 ^ y3)) != 0;
+   }
+   if (n == 4) {
+      uint32_t x, y;
+      memcpy(&x, a, 4);
+      memcpy(&y, b, 4);
+      return x != y;
+   }
+   if (n == 8) {
+      uint64_t x, y;
+      memcpy(&x, a, 8);
+      memcpy(&y, b, 8);
+      return x != y;
+   }
+   return island_bytes_diff_other(a, b, n);
 }
 
 static void island_sync_in_sig(rt_island_t *isl, const rt_island_sig_t *s)
@@ -2421,50 +2469,11 @@ static inline void island_copy_sig_buf(uint8_t *dst_base,
       memcpy(dst_base + s->b_off, src_base + s->b_off, bytes);
 }
 
-static inline bool island_commit_bytes(uint8_t * restrict dst,
-                                       const uint8_t * restrict src, size_t n)
+__attribute__((noinline))
+static bool island_commit_bytes_other(uint8_t * restrict dst,
+                                      const uint8_t * restrict src, size_t n)
 {
-   if (n == 1) {
-      if (*dst != *src) {
-         *dst = *src;
-         return true;
-      }
-      return false;
-   }
-   if (n == 32) {
-      uint64_t d0, d1, d2, d3, s0, s1, s2, s3;
-      memcpy(&d0, dst, 8);      memcpy(&d1, dst + 8, 8);
-      memcpy(&d2, dst + 16, 8); memcpy(&d3, dst + 24, 8);
-      memcpy(&s0, src, 8);      memcpy(&s1, src + 8, 8);
-      memcpy(&s2, src + 16, 8); memcpy(&s3, src + 24, 8);
-      if (((d0 ^ s0) | (d1 ^ s1) | (d2 ^ s2) | (d3 ^ s3)) != 0) {
-         memcpy(dst, &s0, 8);      memcpy(dst + 8, &s1, 8);
-         memcpy(dst + 16, &s2, 8); memcpy(dst + 24, &s3, 8);
-         return true;
-      }
-      return false;
-   }
    if (n <= 8) {
-      if (n == 4) {
-         uint32_t d4, s4;
-         memcpy(&d4, dst, 4);
-         memcpy(&s4, src, 4);
-         if (d4 != s4) {
-            memcpy(dst, &s4, 4);
-            return true;
-         }
-         return false;
-      }
-      if (n == 8) {
-         uint64_t d8, s8;
-         memcpy(&d8, dst, 8);
-         memcpy(&s8, src, 8);
-         if (d8 != s8) {
-            memcpy(dst, &s8, 8);
-            return true;
-         }
-         return false;
-      }
       if (n == 2) {
          uint16_t d2, s2;
          memcpy(&d2, dst, 2);
@@ -2556,14 +2565,57 @@ static inline bool island_commit_bytes(uint8_t * restrict dst,
    return false;
 }
 
-static inline bool island_commit_desc_buf(rt_island_t *isl,
-                                          const rt_island_ff_desc_t *d)
+static inline __attribute__((always_inline)) bool
+island_commit_bytes(uint8_t * restrict dst,
+                    const uint8_t * restrict src, size_t n)
 {
-   if (likely(d->flags & RT_IFF_STD_LOGIC9))
-      return island_commit_bytes(isl->state + d->a_off,
-                                 isl->next_state + d->a_off,
-                                 d->count);
+   if (n == 1) {
+      if (*dst != *src) {
+         *dst = *src;
+         return true;
+      }
+      return false;
+   }
+   if (n == 32) {
+      uint64_t d0, d1, d2, d3, s0, s1, s2, s3;
+      memcpy(&d0, dst, 8);      memcpy(&d1, dst + 8, 8);
+      memcpy(&d2, dst + 16, 8); memcpy(&d3, dst + 24, 8);
+      memcpy(&s0, src, 8);      memcpy(&s1, src + 8, 8);
+      memcpy(&s2, src + 16, 8); memcpy(&s3, src + 24, 8);
+      if (((d0 ^ s0) | (d1 ^ s1) | (d2 ^ s2) | (d3 ^ s3)) != 0) {
+         memcpy(dst, &s0, 8);      memcpy(dst + 8, &s1, 8);
+         memcpy(dst + 16, &s2, 8); memcpy(dst + 24, &s3, 8);
+         return true;
+      }
+      return false;
+   }
+   if (n == 4) {
+      uint32_t d4, s4;
+      memcpy(&d4, dst, 4);
+      memcpy(&s4, src, 4);
+      if (d4 != s4) {
+         memcpy(dst, &s4, 4);
+         return true;
+      }
+      return false;
+   }
+   if (n == 8) {
+      uint64_t d8, s8;
+      memcpy(&d8, dst, 8);
+      memcpy(&s8, src, 8);
+      if (d8 != s8) {
+         memcpy(dst, &s8, 8);
+         return true;
+      }
+      return false;
+   }
+   return island_commit_bytes_other(dst, src, n);
+}
 
+__attribute__((noinline))
+static bool island_commit_words_slow(rt_island_t *isl,
+                                     const rt_island_ff_desc_t *d)
+{
    const uint32_t total_words = d->count;
    uint64_t *dst_a = (uint64_t *)(isl->state + d->a_off);
    const uint64_t *src_a = (const uint64_t *)(isl->next_state + d->a_off);
@@ -2608,6 +2660,16 @@ static inline bool island_commit_desc_buf(rt_island_t *isl,
       }
    }
    return changed;
+}
+
+static inline bool island_commit_desc_buf(rt_island_t *isl,
+                                          const rt_island_ff_desc_t *d)
+{
+   if (likely(d->flags & RT_IFF_STD_LOGIC9))
+      return island_commit_bytes(isl->state + d->a_off,
+                                 isl->next_state + d->a_off,
+                                 d->count);
+   return island_commit_words_slow(isl, d);
 }
 
 static inline bool island_copy_direct_sig(const rt_island_sig_t *src_s,
@@ -3280,6 +3342,7 @@ static void island_build_hier(rt_island_mgr_t *mgr)
          rt_super_island_t *cl = xcalloc(sizeof(rt_super_island_t));
          cl->id = mgr->clusters.count;
          cl->islands = xmalloc_array(uf_sz[r], sizeof(rt_island_t *));
+         cl->dirty_in_list = xmalloc_array(uf_sz[r], sizeof(rt_island_t *));
          cl->min_dirty_pos = UINT32_MAX;
          root_to_cl[r] = cl;
          APUSH(mgr->clusters, cl);
@@ -3553,6 +3616,7 @@ void rt_island_reset_all(rt_island_mgr_t *mgr)
       rt_super_island_t *cl = mgr->clusters.items[i];
       cl->has_dirty = false;
       cl->has_dirty_inputs = false;
+      cl->n_dirty_in = 0;
       cl->dirty_count = 0;
       cl->min_dirty_pos = UINT32_MAX;
       cl->mt_sync_start = 0;
@@ -3613,6 +3677,7 @@ void rt_island_reset_all(rt_island_mgr_t *mgr)
       isl->in_dirty_list = false;
       isl->in_defer_dirty = false;
       isl->has_dirty_inputs = false;
+      isl->in_cl_dirty_in = false;
    }
 
    // Re-scan observed status now that all child scopes have run map_signal
@@ -3666,6 +3731,7 @@ void rt_island_reset_all(rt_island_mgr_t *mgr)
       rt_island_t *isl = mgr->islands.items[i];
       island_refresh_domain_descs(isl);
       island_refresh_direct_comb_descs(isl);
+      island_refresh_ext_out_descs(isl);
    }
 
    for (unsigned i = 0; i < mgr->islands.count; i++) {
@@ -4040,6 +4106,27 @@ static inline void island_flush_comb_out_sig(rt_model_t *m, rt_island_t *isl,
       island_sync_out_sig(m, isl, s);
 }
 
+static inline void island_flush_ext_outs(rt_model_t *m, rt_island_t *isl)
+{
+   const uint32_t n_ext = isl->n_ext_out_descs;
+   if (n_ext == 0)
+      return;
+   const rt_island_ext_out_desc_t *ed = isl->ext_out_descs;
+   const bool can_delta = model_can_create_delta(m);
+   for (uint32_t j = 0; j < n_ext; j++, ed++) {
+      if (likely(ed->src != NULL && can_delta)) {
+         if (island_bytes_diff(ed->cur, ed->src, ed->nbytes)) {
+            rt_island_sig_t *os = &(isl->sigs[ed->sig_idx]);
+            os->flags |= RT_ISIG_VHDL_SCHED;
+            sched_deposit(m, os->sig, ed->src, os->sig_offset,
+                          os->width * os->nelems, 0, false);
+         }
+      }
+      else
+         island_flush_comb_out_sig(m, isl, &(isl->sigs[ed->sig_idx]));
+   }
+}
+
 static bool island_eval_cluster(jit_t *jit, rt_model_t *m,
                                 rt_super_island_t *cl, tlab_t *tlab)
 {
@@ -4067,8 +4154,7 @@ static bool island_eval_cluster(jit_t *jit, rt_model_t *m,
       if (isl->n_direct_comb_descs > 0)
          island_propagate_direct_comb(isl);
 
-      for (uint32_t j = 0; j < isl->n_ext_out_sigs; j++)
-         island_flush_comb_out_sig(m, isl, &(isl->sigs[isl->ext_out_sigs[j]]));
+      island_flush_ext_outs(m, isl);
       if (unlikely(isl->n_obs_sigs > 0)) {
          for (uint32_t j = 0; j < isl->n_obs_sigs; j++)
             island_flush_comb_out_sig(m, isl, &(isl->sigs[isl->obs_sigs[j]]));
@@ -4091,14 +4177,12 @@ static bool island_eval_cluster(jit_t *jit, rt_model_t *m,
          }
          else {
             cl->has_dirty = false;
-            cl->has_dirty_inputs = false;
             cl->min_dirty_pos = UINT32_MAX;
             cl->dirty_count = 0;
          }
       }
       else {
          cl->has_dirty = false;
-         cl->has_dirty_inputs = false;
          cl->min_dirty_pos = UINT32_MAX;
          cl->dirty_count = 0;
       }
@@ -4163,7 +4247,6 @@ static bool island_eval_cluster_mt(jit_t *jit, rt_super_island_t *cl,
 
    if (ok) {
       cl->has_dirty = false;
-      cl->has_dirty_inputs = false;
       cl->min_dirty_pos = UINT32_MAX;
       cl->dirty_count = 0;
       cl->mt_sync_start = sync_start;
@@ -4446,10 +4529,8 @@ uint32_t rt_island_eval_sva_batch(jit_t *jit, rt_model_t *m,
 
 static void island_sync_out_island(rt_model_t *m, rt_island_t *isl)
 {
-   if (isl->mgr->hier_built) {
-      for (uint32_t j = 0; j < isl->n_ext_out_sigs; j++)
-         island_flush_comb_out_sig(m, isl, &(isl->sigs[isl->ext_out_sigs[j]]));
-   }
+   if (isl->mgr->hier_built)
+      island_flush_ext_outs(m, isl);
    else {
       for (uint32_t j = 0; j < isl->n_out_sigs; j++)
          island_flush_comb_out_sig(m, isl, &(isl->sigs[isl->out_sigs[j]]));
@@ -4745,11 +4826,8 @@ static bool rt_island_eval_dirty_inner(jit_t *jit, rt_model_t *m,
 
             if (isl->n_direct_comb_descs > 0)
                island_propagate_direct_comb(isl);
-            if (mgr->hier_built) {
-               for (uint32_t j = 0; j < isl->n_ext_out_sigs; j++)
-                  island_flush_comb_out_sig(m, isl,
-                                            &(isl->sigs[isl->ext_out_sigs[j]]));
-            }
+            if (mgr->hier_built)
+               island_flush_ext_outs(m, isl);
             else {
                for (uint32_t j = 0; j < isl->n_out_sigs; j++)
                   island_flush_comb_out_sig(m, isl, &(isl->sigs[isl->out_sigs[j]]));
@@ -5035,13 +5113,15 @@ static bool island_eval_ff_pre_sync(jit_t *jit, rt_model_t *m,
          if (!is_vhdl && cl->has_dirty && !island_eval_cluster(jit, m, cl, tlab))
             return false;
          if (cl->has_dirty_inputs) {
-            for (uint32_t k = 0; k < cl->n_islands; k++) {
-               rt_island_t *isl = cl->islands[k];
+            for (uint32_t k = 0; k < cl->n_dirty_in; k++) {
+               rt_island_t *isl = cl->dirty_in_list[k];
+               isl->in_cl_dirty_in = false;
                if (isl->has_dirty_inputs) {
                   island_sync_dirty_inputs(isl);
                   isl->has_dirty_inputs = false;
                }
             }
+            cl->n_dirty_in = 0;
             cl->has_dirty_inputs = false;
          }
       }
@@ -5249,6 +5329,26 @@ static inline void island_flush_out_slice(rt_model_t *m, rt_island_t *isl,
       island_sync_out_slice(m, isl, s, local_off, local_cnt);
 }
 
+__attribute__((noinline))
+static void island_notify_vhdl_ff_desc(rt_model_t *m, rt_island_t *isl,
+                                       const rt_island_ff_desc_t *d)
+{
+   rt_island_sig_t *s = &(isl->sigs[d->sig_idx]);
+   if (d->flags & RT_IFF_DIRECT_LINK) {
+      for (uint32_t t = 0; t < s->n_direct_targets; t++) {
+         rt_island_sig_t *dst_s = s->direct_targets[t];
+         if (island_copy_direct_sig(s, dst_s)
+             && (dst_s->flags & RT_ISIG_COMB_READ)
+             && dst_s->isl->eval_handle != JIT_HANDLE_INVALID)
+            island_mark_dirty(dst_s->isl);
+      }
+   }
+   else {
+      s->flags |= RT_ISIG_VHDL_SCHED;
+      island_sched_out_sig(m, isl, s);
+   }
+}
+
 static inline void island_commit_vhdl_desc(rt_model_t *m, rt_island_t *isl,
                                            const rt_island_ff_desc_t *d,
                                            bool has_forces,
@@ -5267,77 +5367,101 @@ static inline void island_commit_vhdl_desc(rt_model_t *m, rt_island_t *isl,
    if (d->flags & RT_IFF_COMB_READ)
       *comb_need_eval = true;
 
-   if (unlikely(d->flags & RT_IFF_HAS_NOTIFY)) {
-      rt_island_sig_t *s = &(isl->sigs[d->sig_idx]);
-      if (d->flags & RT_IFF_DIRECT_LINK) {
-         for (uint32_t t = 0; t < s->n_direct_targets; t++) {
-            rt_island_sig_t *dst_s = s->direct_targets[t];
-            if (island_copy_direct_sig(s, dst_s)
-                && (dst_s->flags & RT_ISIG_COMB_READ)
-                && dst_s->isl->eval_handle != JIT_HANDLE_INVALID)
-               island_mark_dirty(dst_s->isl);
-         }
-      }
-      else {
-         s->flags |= RT_ISIG_VHDL_SCHED;
-         island_sched_out_sig(m, isl, s);
-      }
-   }
+   if (unlikely(d->flags & RT_IFF_HAS_NOTIFY))
+      island_notify_vhdl_ff_desc(m, isl, d);
 }
 
 static void island_commit_vhdl_domain_mask(rt_model_t *m,
                                            rt_island_domain_t *dom,
-                                           uint64_t dmask)
+                                           uint64_t dmask,
+                                           bool any_forces)
 {
    rt_island_t *isl = dom->isl;
    const rt_island_ff_desc_t *descs = dom->ff_descs;
    const uint32_t n_write = dom->n_write_sigs;
-   const bool has_forces = isl->has_forces;
    bool comb_need_eval = false;
 
-   if (likely(dmask & (UINT64_C(1) << 63))) {
+   if (likely(!any_forces && (dmask & (UINT64_C(1) << 63)))) {
       uint64_t bits = dmask & ((UINT64_C(1) << 62) - 1u);
       const bool overflow = !!(dmask & (UINT64_C(1) << 62));
       if (bits == 0 && !overflow)
          return;
+      uint8_t * restrict state = isl->state;
+      const uint8_t * restrict next_state = isl->next_state;
       while (bits != 0) {
          const uint32_t j = (uint32_t)__builtin_ctzll(bits);
          bits &= bits - 1u;
-         if (likely(j < n_write))
-            island_commit_vhdl_desc(m, isl, &(descs[j]), has_forces,
-                                    &comb_need_eval);
+         if (likely(j < n_write)) {
+            const rt_island_ff_desc_t *d = &(descs[j]);
+            bool changed;
+            if (likely(d->flags & RT_IFF_STD_LOGIC9))
+               changed = island_commit_bytes(state + d->a_off,
+                                             next_state + d->a_off,
+                                             d->count);
+            else
+               changed = island_commit_words_slow(isl, d);
+            if (changed) {
+               if (d->flags & RT_IFF_COMB_READ)
+                  comb_need_eval = true;
+               if (unlikely(d->flags & RT_IFF_HAS_NOTIFY))
+                  island_notify_vhdl_ff_desc(m, isl, d);
+            }
+         }
       }
       if (unlikely(overflow)) {
          for (uint32_t j = 62; j < n_write; j++)
-            island_commit_vhdl_desc(m, isl, &(descs[j]), has_forces,
+            island_commit_vhdl_desc(m, isl, &(descs[j]), false,
                                     &comb_need_eval);
       }
    }
    else {
-      for (uint32_t j = 0; j < n_write; j++)
-         island_commit_vhdl_desc(m, isl, &(descs[j]), has_forces,
-                                 &comb_need_eval);
+      const bool has_forces = any_forces && isl->has_forces;
+      if (likely(dmask & (UINT64_C(1) << 63))) {
+         uint64_t bits = dmask & ((UINT64_C(1) << 62) - 1u);
+         const bool overflow = !!(dmask & (UINT64_C(1) << 62));
+         if (bits == 0 && !overflow)
+            return;
+         while (bits != 0) {
+            const uint32_t j = (uint32_t)__builtin_ctzll(bits);
+            bits &= bits - 1u;
+            if (likely(j < n_write))
+               island_commit_vhdl_desc(m, isl, &(descs[j]), has_forces,
+                                       &comb_need_eval);
+         }
+         if (unlikely(overflow)) {
+            for (uint32_t j = 62; j < n_write; j++)
+               island_commit_vhdl_desc(m, isl, &(descs[j]), has_forces,
+                                       &comb_need_eval);
+         }
+      }
+      else {
+         for (uint32_t j = 0; j < n_write; j++)
+            island_commit_vhdl_desc(m, isl, &(descs[j]), has_forces,
+                                    &comb_need_eval);
+      }
    }
 
    if (comb_need_eval && isl->eval_handle != JIT_HANDLE_INVALID)
       island_mark_dirty(isl);
 }
 
-static void island_commit_vhdl_domain(rt_model_t *m, rt_island_domain_t *dom)
+static void island_commit_vhdl_domain(rt_model_t *m, rt_island_domain_t *dom,
+                                      bool any_forces)
 {
    const uint64_t dmask = dom->ff_dirty_mask;
    dom->ff_dirty_mask = 0;
-   island_commit_vhdl_domain_mask(m, dom, dmask);
+   island_commit_vhdl_domain_mask(m, dom, dmask, any_forces);
 }
 
 static void island_commit_vhdl_ff_domains(rt_model_t *m, rt_island_mgr_t *mgr)
 {
+   const bool any_forces = (mgr->n_forced_islands != 0);
    unsigned keep_ff = 0;
    for (unsigned i = 0; i < mgr->ff_commit_q.count; i++) {
       rt_island_domain_t *dom = mgr->ff_commit_q.items[i];
       if (island_edge_is_vhdl(dom->edge_flags)) {
          dom->in_commit_q = false;
-         island_commit_vhdl_domain(m, dom);
+         island_commit_vhdl_domain(m, dom, any_forces);
       }
       else
          mgr->ff_commit_q.items[keep_ff++] = dom;
@@ -5358,7 +5482,8 @@ static void island_commit_vhdl_ff_domains(rt_model_t *m, rt_island_mgr_t *mgr)
                entries[d].dirty_mask = 0;
                if (dmask == (UINT64_C(1) << 63))
                   continue;
-               island_commit_vhdl_domain_mask(m, entries[d].dom, dmask);
+               island_commit_vhdl_domain_mask(m, entries[d].dom, dmask,
+                                              any_forces);
             }
          }
          else {
@@ -5368,7 +5493,7 @@ static void island_commit_vhdl_ff_domains(rt_model_t *m, rt_island_mgr_t *mgr)
                   dom->ff_dirty_mask = 0;
                   continue;
                }
-               island_commit_vhdl_domain(m, dom);
+               island_commit_vhdl_domain(m, dom, any_forces);
             }
          }
       }
@@ -5489,13 +5614,15 @@ static bool rt_island_eval_ff_inner(jit_t *jit, rt_model_t *m,
                   break;
                }
                if (cl->has_dirty_inputs) {
-                  for (uint32_t k = 0; k < cl->n_islands; k++) {
-                     rt_island_t *isl = cl->islands[k];
+                  for (uint32_t k = 0; k < cl->n_dirty_in; k++) {
+                     rt_island_t *isl = cl->dirty_in_list[k];
+                     isl->in_cl_dirty_in = false;
                      if (isl->has_dirty_inputs) {
                         island_sync_dirty_inputs(isl);
                         isl->has_dirty_inputs = false;
                      }
                   }
+                  cl->n_dirty_in = 0;
                   cl->has_dirty_inputs = false;
                }
             }
