@@ -200,6 +200,7 @@ typedef struct _rt_model {
    bool               sv_poll_mem_dirty;
    bool               sv_poll_susp_dirty;
    bool               mt_sva_enabled;
+   bool               island_no_prune;
    uint32_t           sva_mt_skip;
    unsigned           ndeferred;
    unsigned           nsva_procs;
@@ -4480,6 +4481,10 @@ static void wakeup_one(rt_model_t *m, rt_wakeable_t *obj)
    case W_WATCH:
       {
          rt_watch_t *w = container_of(obj, rt_watch_t, wakeable);
+         if (likely(w->inline_island_input)) {
+            rt_island_input_watch_inline(m, w->user_data, m->blocking_update);
+            break;
+         }
          TRACE("wakeup %svalue change callback %p %s",
                obj->postponed ? "postponed " : "", w, debug_symbol_name(w->fn));
 
@@ -5531,6 +5536,9 @@ static void model_cycle_body(rt_model_t *m)
 
    if (m->shuffle)
       deferq_shuffle(&m->procq);
+
+   if (unlikely(m->islands != NULL))
+      rt_island_promote_deferred(m->islands);
 
    // Run all non-postponed processes and event callbacks
    deferq_swap(&m->next_procq, &m->procq);
@@ -10617,6 +10625,23 @@ jit_t *rt_island_model_jit(rt_model_t *m)
 rt_island_mgr_t *rt_island_model_mgr(rt_model_t *m)
 {
    return m != NULL ? m->islands : NULL;
+}
+
+void watch_set_inline_island(rt_watch_t *w, bool enable)
+{
+   if (w != NULL)
+      w->inline_island_input = enable;
+}
+
+void model_set_island_no_prune(rt_model_t *m, bool disable)
+{
+   if (m != NULL)
+      m->island_no_prune = disable;
+}
+
+bool model_island_no_prune(const rt_model_t *m)
+{
+   return m == NULL || m->island_no_prune;
 }
 
 bool rt_model_has_init_event(const rt_model_t *m, const rt_signal_t *s)

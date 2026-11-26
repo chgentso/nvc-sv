@@ -284,6 +284,7 @@ typedef struct _rt_watch {
    void           *user_data;
    unsigned        num_slots;
    unsigned        next_slot;
+   bool            inline_island_input;
    rt_signal_t    *signals[];
 } rt_watch_t;
 

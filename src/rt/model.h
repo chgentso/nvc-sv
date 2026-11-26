@@ -80,6 +80,9 @@ void model_set_phase_cb(rt_model_t *m, model_phase_t phase, rt_event_fn_t fn,
                         void *user);
 void model_set_event_cb(rt_model_t *m, rt_signal_t *s, int offset, int count,
                         rt_watch_t *w);
+void watch_set_inline_island(rt_watch_t *w, bool enable);
+void model_set_island_no_prune(rt_model_t *m, bool disable);
+bool model_island_no_prune(const rt_model_t *m);
 rt_sampler_t *model_add_sampler(rt_model_t *m, rt_event_fn_t fn, void *user);
 void model_remove_sampler(rt_model_t *m, rt_sampler_t *s);
 void model_set_timeout_cb(rt_model_t *m, uint64_t when, rt_event_fn_t fn,

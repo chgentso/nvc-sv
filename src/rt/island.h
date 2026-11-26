@@ -19,6 +19,7 @@
 #define _RT_ISLAND_H
 
 #include "prim.h"
+#include "jit/jit.h"
 #include "rt/defs.h"
 #include "rt/model.h"
 
@@ -38,6 +39,9 @@ typedef enum {
    RT_ISIG_STD_LOGIC_ELEM = (1u << 10),
    RT_ISIG_VHDL_SCHED     = (1u << 11),
    RT_ISIG_VHDL           = (1u << 12),
+   RT_ISIG_SOLE_OWNER     = (1u << 13),
+   RT_ISIG_LAST_OUT_VALID = (1u << 14),
+   RT_ISIG_PRUNED         = (1u << 15),
 } rt_island_sig_flags_t;
 
 #define RT_IEDGE_CLK_POSEDGE  (1u << 0)
@@ -88,6 +92,8 @@ typedef struct _rt_island_sig {
    uint8_t                 elem_size;
    rt_watch_t             *watch;
    rt_watch_t             *ext_write_watch;
+   uint64_t                last_out_a;
+   uint64_t                last_out_b;
 } rt_island_sig_t;
 
 typedef struct _rt_island_domain {
@@ -96,6 +102,8 @@ typedef struct _rt_island_domain {
    struct _rt_island_domain *ff_batch_next;
    uint32_t                  dom_idx;
    jit_handle_t              ff_handle;
+   void                     *ff_func;
+   jit_fast_entry_fn_t       ff_fn;
    uint32_t                  clk_sig_idx;
    int32_t                   rst_sig_idx;
    bool                      clk_posedge;
@@ -126,6 +134,8 @@ typedef struct _rt_island {
    uint8_t               *next_state;
    uint32_t               state_bytes;
    jit_handle_t           eval_handle;
+   void                  *eval_func;
+   jit_fast_entry_fn_t    eval_fn;
    void                  *inst_ctx;
    rt_island_sig_t       *sigs;
    uint32_t               nsigs;
@@ -158,6 +168,7 @@ typedef struct _rt_island {
    uint32_t               mt_wave_tag;
    bool                   dirty;
    bool                   in_dirty_list;
+   bool                   in_defer_dirty;
    bool                   has_dirty_inputs;
    bool                   initialized;
    bool                   has_forces;
@@ -203,6 +214,8 @@ void rt_island_sync_slice_to_signal(rt_model_t *m, rt_signal_t *sig,
                                     uint32_t offset, uint32_t count);
 void rt_island_on_observer_attached(rt_model_t *m, rt_signal_t *sig);
 bool rt_island_is_input_watch(const rt_watch_t *w);
+void rt_island_input_watch_inline(rt_model_t *m, void *user, bool defer_comb);
+void rt_island_promote_deferred(rt_island_mgr_t *mgr);
 void rt_island_on_ext_deposit(rt_model_t *m, rt_signal_t *sig);
 bool rt_island_vpi_put(rt_model_t *m, rt_signal_t *sig,
                        const uint64_t *a_val, const uint64_t *b_val,

@@ -134,6 +134,21 @@ void jit_call_closure_guarded(jit_t *j, ffi_closure_t *closure,
 void jit_fastcall_guarded(jit_t *j, jit_handle_t handle, jit_scalar_t *result,
                           jit_scalar_t p1, jit_scalar_t p2, tlab_t *tlab);
 
+typedef void (*jit_fast_entry_fn_t)(void *, void *, jit_scalar_t *, tlab_t *);
+
+typedef struct {
+   void         *thread;
+   void         *saved_anchor;
+   jit_t        *saved_jit;
+   jit_scalar_t *args;
+   int           saved_state;
+} jit_batch_ctx_t;
+
+void jit_batch_begin(jit_t *j, jit_batch_ctx_t *ctx);
+void jit_batch_end(const jit_batch_ctx_t *ctx);
+void *jit_try_resolve_native(jit_t *j, jit_handle_t handle,
+                             jit_fast_entry_fn_t *entry_out);
+
 tlab_t jit_null_tlab(jit_t *j);
 
 __attribute__((format(printf, 3, 4)))

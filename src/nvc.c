@@ -217,6 +217,8 @@ enum {
    OPT_CLI_NO_JIT_CACHE,
    OPT_CLI_JIT_CACHE_DIR,
    OPT_CLI_RTL_ISLANDS,
+   OPT_CLI_ISLAND_FAST,
+   OPT_CLI_NO_ISLAND_FAST,
    OPT_CLI_DUMP_ISLANDS,
    OPT_CLI_TWO_STATE,
    OPT_CLI_THREADS,
@@ -1387,6 +1389,8 @@ static int run_cmd(int argc, char **argv, cmd_state_t *state)
       { "jit-cache",     required_argument, 0, OPT_CLI_JIT_CACHE },
       { "no-jit-cache",  no_argument,       0, OPT_CLI_NO_JIT_CACHE },
       { "jit-cache-dir", required_argument, 0, OPT_CLI_JIT_CACHE_DIR },
+      { "island-fast",   no_argument,       0, OPT_CLI_ISLAND_FAST },
+      { "no-island-fast",no_argument,       0, OPT_CLI_NO_ISLAND_FAST },
       { "threads",       required_argument, 0, OPT_CLI_THREADS },
       { 0, 0, 0, 0 }
    };
@@ -1529,6 +1533,12 @@ static int run_cmd(int argc, char **argv, cmd_state_t *state)
       case OPT_CLI_JIT_CACHE_DIR:
          opt_set_str(OPT_JIT_CACHE_DIR, optarg);
          break;
+      case OPT_CLI_ISLAND_FAST:
+         opt_set_int(OPT_ISLAND_FAST, 1);
+         break;
+      case OPT_CLI_NO_ISLAND_FAST:
+         opt_set_int(OPT_ISLAND_FAST, 0);
+         break;
       case OPT_CLI_THREADS:
          parse_threads_option(optarg);
          break;
@@ -1647,6 +1657,10 @@ static int run_cmd(int argc, char **argv, cmd_state_t *state)
    dpi_load_libs();
 
    set_ctrl_c_handler(ctrl_c_handler, state->model);
+
+   if (dumper != NULL || pli_plugins != NULL || state->plugins != NULL
+       || opt_get_int(OPT_DEBUG_STMTS) || opt_get_int(OPT_SHUFFLE_PROCS))
+      model_set_island_no_prune(state->model, true);
 
    model_reset(state->model);
 

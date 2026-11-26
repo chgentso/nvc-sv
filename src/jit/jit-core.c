@@ -1168,6 +1168,45 @@ void jit_fastcall_guarded(jit_t *j, jit_handle_t handle, jit_scalar_t *result,
    *result = args[0];
 }
 
+void jit_batch_begin(jit_t *j, jit_batch_ctx_t *ctx)
+{
+   jit_thread_local_t *thread = jit_thread_local();
+   assert(thread->jmp_buf != NULL);
+   assert(thread->guard_args != NULL);
+
+   ctx->thread       = thread;
+   ctx->saved_anchor = thread->anchor;
+   ctx->saved_jit    = thread->jit;
+   ctx->saved_state  = thread->state;
+   ctx->args         = thread->guard_args;
+
+   thread->state = JIT_RUNNING;
+   thread->jit   = j;
+}
+
+void jit_batch_end(const jit_batch_ctx_t *ctx)
+{
+   jit_thread_local_t *thread = ctx->thread;
+   thread->anchor = ctx->saved_anchor;
+   thread->state  = (jit_state_t)ctx->saved_state;
+   thread->jit    = ctx->saved_jit;
+}
+
+void *jit_try_resolve_native(jit_t *j, jit_handle_t handle,
+                             jit_fast_entry_fn_t *entry_out)
+{
+   jit_func_t *f = jit_get_func(j, handle);
+   if (load_acquire(&f->state) != JIT_FUNC_READY)
+      return NULL;
+   if (relaxed_load(&f->next_tier) != NULL)
+      return NULL;
+   jit_entry_fn_t entry = load_acquire(&f->entry);
+   if (entry == NULL || entry == jit_interp)
+      return NULL;
+   *entry_out = (jit_fast_entry_fn_t)entry;
+   return f;
+}
+
 void *jit_call_thunk(jit_t *j, vcode_unit_t unit, void *context,
                      thunk_result_fn_t fn, void *arg)
 {
