@@ -4388,10 +4388,89 @@ static mir_value_t vlog_island_load_elem_at(vlog_gen_t *g,
                                             const vlog_select_t *select,
                                             uint32_t stride);
 
+static bool vlog_island_single_word_slice(vlog_gen_t *g,
+                                          const vlog_select_t *sel,
+                                          unsigned slice_w,
+                                          uint32_t *byte_off_out,
+                                          unsigned *word_w_out,
+                                          unsigned *in_word_pos_out)
+{
+   if (sel->island_width <= 64 || slice_w == 0 || slice_w > 64)
+      return false;
+
+   int64_t pos = -1;
+   if (!mir_get_const(g->mu, sel->dst_offset, &pos)
+       || pos < 0 || (uint64_t)pos + slice_w > sel->island_width)
+      return false;
+
+   int64_t elem_c = 0;
+   if (!mir_is_null(sel->island_elem)) {
+      if (!mir_get_const(g->mu, sel->island_elem, &elem_c)
+          || elem_c < 0 || (uint64_t)elem_c >= sel->island_nelems)
+         return false;
+   }
+
+   const uint32_t W = sel->island_width;
+   const uint32_t lsb = W - ((uint32_t)pos + slice_w);
+   const uint32_t msb = W - (uint32_t)pos - 1u;
+   const uint32_t w0 = lsb >> 6;
+   const uint32_t w1 = msb >> 6;
+   if (w0 != w1)
+      return false;
+
+   const uint32_t nwords = (W + 63u) >> 6;
+   const unsigned word_w = ((w0 + 1u) * 64u <= W) ? 64u : (W - w0 * 64u);
+   const unsigned in_word_pos = (w0 * 64u + word_w) - (W - (uint32_t)pos);
+
+   *byte_off_out = ((uint32_t)elem_c * nwords + w0) * 8u;
+   *word_w_out = word_w;
+   *in_word_pos_out = in_word_pos;
+   return true;
+}
+
 static void vlog_island_store_part(vlog_gen_t *g, const vlog_select_t *lval,
                                    mir_value_t part, uint32_t stride)
 {
    mir_type_t t_offset = mir_offset_type(g->mu);
+   const unsigned part_w = mir_get_size(g->mu, mir_get_type(g->mu, part));
+
+   uint32_t wbyte_off = 0;
+   unsigned word_w = 0, in_word_pos = 0;
+   if (vlog_island_single_word_slice(g, lval, part_w, &wbyte_off, &word_w,
+                                     &in_word_pos)) {
+      mir_type_t word_t = lval->island_two_state
+         ? mir_vec2_type(g->mu, word_w, false)
+         : mir_vec4_type(g->mu, word_w, false);
+      mir_value_t a_off = mir_const(g->mu, t_offset,
+                                    lval->island_a_off + stride + wbyte_off);
+      mir_value_t b_off = mir_const(
+         g->mu, t_offset,
+         lval->island_two_state
+         ? -1 : (int64_t)(lval->island_b_off + stride + wbyte_off));
+      mir_value_t zero_elem = mir_const(g->mu, t_offset, 0);
+
+      if (part_w == word_w && in_word_pos == 0) {
+         if (!mir_equals(mir_get_type(g->mu, part), word_t))
+            part = mir_build_cast(g->mu, word_t, part);
+         mir_build_island_store(g->mu, g->island_state, a_off, b_off,
+                                zero_elem, part);
+      }
+      else {
+         mir_value_t cur = mir_build_island_load(g->mu, word_t, g->island_state,
+                                                 a_off, b_off, zero_elem);
+         mir_type_t t_part = mir_get_type(g->mu, part);
+         if (mir_get_class(g->mu, word_t) != mir_get_class(g->mu, t_part))
+            part = mir_build_cast(
+               g->mu, mir_vector_slice(g->mu, word_t, part_w), part);
+         mir_value_t ins = mir_build_insert(g->mu, part, cur,
+                                            mir_const(g->mu, t_offset,
+                                                      in_word_pos));
+         mir_build_island_store(g->mu, g->island_state, a_off, b_off,
+                                zero_elem, ins);
+      }
+      return;
+   }
+
    mir_type_t elem_t = lval->island_two_state
       ? mir_vec2_type(g->mu, lval->island_width, false)
       : mir_vec4_type(g->mu, lval->island_width, false);
@@ -4403,7 +4482,6 @@ static void vlog_island_store_part(vlog_gen_t *g, const vlog_select_t *lval,
       ? mir_const(g->mu, t_offset, 0) : lval->island_elem;
 
    int64_t dst_c = -1;
-   const unsigned part_w = mir_get_size(g->mu, mir_get_type(g->mu, part));
    const bool whole_elem = part_w == lval->island_width
       && mir_get_const(g->mu, lval->dst_offset, &dst_c)
       && dst_c == 0;
@@ -9235,6 +9313,38 @@ static mir_value_t vlog_lower_full_select(vlog_gen_t *g,
                                           const vlog_select_t *select)
 {
    if (select->island_sig_plus1 > 0) {
+      uint32_t wbyte_off = 0;
+      unsigned word_w = 0, in_word_pos = 0;
+      if (vlog_island_single_word_slice(g, select, select->size, &wbyte_off,
+                                        &word_w, &in_word_pos)) {
+         mir_type_t t_offset = mir_offset_type(g->mu);
+         mir_type_t word_t = select->island_two_state
+            ? mir_vec2_type(g->mu, word_w, false)
+            : mir_vec4_type(g->mu, word_w, false);
+         mir_value_t a_off = mir_const(g->mu, t_offset,
+                                       select->island_a_off + wbyte_off);
+         mir_value_t b_off = mir_const(
+            g->mu, t_offset,
+            select->island_two_state
+            ? -1 : (int64_t)(select->island_b_off + wbyte_off));
+         mir_value_t data = mir_build_island_load(
+            g->mu, word_t, g->island_state, a_off, b_off,
+            mir_const(g->mu, t_offset, 0));
+
+         if (select->size == word_w && in_word_pos == 0)
+            return mir_equals(word_t, select->type)
+               ? data : mir_build_cast(g->mu, select->type, data);
+
+         mir_value_t pos_v = mir_const(g->mu, t_offset, in_word_pos);
+         if (mir_get_class(g->mu, word_t) != mir_get_class(g->mu, select->type)) {
+            mir_type_t t_part = mir_vector_slice(
+               g->mu, word_t, mir_get_size(g->mu, select->type));
+            mir_value_t part = mir_build_extract(g->mu, t_part, data, pos_v);
+            return mir_build_cast(g->mu, select->type, part);
+         }
+         return mir_build_extract(g->mu, select->type, data, pos_v);
+      }
+
       mir_value_t data = vlog_island_load_elem(g, select);
       mir_type_t t_data = mir_get_type(g->mu, data);
       if (mir_get_class(g->mu, t_data) != mir_get_class(g->mu, select->type)) {

@@ -3329,6 +3329,7 @@ vlog_island_fast_force1 verilog
 vlog_island_struct_pat1 verilog
 vlog_island_scc1 verilog
 vlog_island_gen1 verilog
+vlog_island_wide_slice1 verilog
 tcl_island_fast1 tcl,2008
 island_fast_opts1 shell
 vhdl_island_ff_desc1 normal,2008
