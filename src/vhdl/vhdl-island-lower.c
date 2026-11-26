@@ -5586,6 +5586,10 @@ static bool vi_lower_var_assign(vi_lower_t *l, tree_t stmt)
    vi_rec_leaf_t lf;
    if (!vi_resolve_local_leaf(l, target, &lf) || lf.is_array2d)
       return false;
+   if (tree_kind(target) == T_REF && tree_kind(tree_ref(target)) == T_VAR_DECL
+       && type_is_integer(tree_type(tree_ref(target))))
+      vhdl_island_var_def_set((vhdl_island_ctx_t *)l->ctx, tree_ref(target),
+                              val_e);
    return vi_store_rec_leaf(l, &lf, vi_off(mu, 0), rv);
 }
 
@@ -6111,8 +6115,17 @@ static bool vi_lower_stmt(vi_lower_t *l, tree_t stmt)
          mir_block_t exit_bb = mir_add_block(mu);
          for (int i = 0; i < nc; i++) {
             tree_t br = tree_cond(stmt, i);
-            mir_block_t next_bb = (i + 1 < nc) ? mir_add_block(mu) : exit_bb;
-            if (tree_has_value(br)) {
+            int64_t cval = 0;
+            bool const_true = false;
+            if (tree_has_value(br)
+                && vi_eval_const_int(l, tree_value(br), &cval)) {
+               if (cval == 0)
+                  continue;
+               const_true = true;
+            }
+            mir_block_t next_bb = (!const_true && i + 1 < nc)
+               ? mir_add_block(mu) : exit_bb;
+            if (tree_has_value(br) && !const_true) {
                vi_val_t cv;
                if (!vi_lower_expr(l, tree_value(br), &cv))
                   return false;
@@ -6130,10 +6143,16 @@ static bool vi_lower_stmt(vi_lower_t *l, tree_t stmt)
             unsigned pos = 0;
             if (!mir_block_finished(mu, mir_get_cursor(mu, &pos)))
                mir_build_jump(mu, exit_bb);
+            if (const_true)
+               break;
             if (i + 1 < nc)
                mir_set_cursor(mu, next_bb, MIR_APPEND);
          }
+         unsigned pos = 0;
+         if (!mir_block_finished(mu, mir_get_cursor(mu, &pos)))
+            mir_build_jump(mu, exit_bb);
          mir_set_cursor(mu, exit_bb, MIR_APPEND);
+         vhdl_island_var_defs_clear((vhdl_island_ctx_t *)l->ctx);
          return true;
       }
 
@@ -6443,16 +6462,19 @@ static bool vi_lower_stmt(vi_lower_t *l, tree_t stmt)
          mir_build_cond(mu, cond, body, exit_bb);
 
          mir_set_cursor(mu, body, MIR_APPEND);
+         vhdl_island_var_defs_clear((vhdl_island_ctx_t *)l->ctx);
          for (int j = 0; j < tree_stmts(stmt); j++) {
             unsigned pos = 0;
             if (mir_block_finished(mu, mir_get_cursor(mu, &pos)))
                break;
             if (!vi_lower_stmt(l, tree_stmt(stmt, j))) {
+               vhdl_island_var_defs_clear((vhdl_island_ctx_t *)l->ctx);
                l->scope = ls.parent;
                vi_scope_clear(&ls);
                return false;
             }
          }
+         vhdl_island_var_defs_clear((vhdl_island_ctx_t *)l->ctx);
          unsigned pos = 0;
          if (!mir_block_finished(mu, mir_get_cursor(mu, &pos)))
             mir_build_jump(mu, step_bb);
@@ -6651,6 +6673,7 @@ static mir_unit_t *vi_build_comb_unit(mir_context_t *mc,
    for (uint32_t k = 0; k < isl->n_comb_procs; k++) {
       uint32_t pi = isl->comb_procs[k];
       const vhdl_iproc_t *p = &(ctx->procs[pi]);
+      vhdl_island_var_defs_clear((vhdl_island_ctx_t *)ctx);
       vhdl_island_set_eval_scope((vhdl_island_ctx_t *)ctx, p->owner_block,
                                  p->owner_ancestors, p->n_owner_ancestors);
       vi_scope_t sc = { .ret_bb = MIR_NULL_BLOCK };
@@ -6743,6 +6766,7 @@ static mir_unit_t *vi_build_ff_unit(mir_context_t *mc,
       for (uint32_t k = 0; k < dm->n_procs; k++) {
          uint32_t pi = dm->proc_idxs[k];
          const vhdl_iproc_t *p = &(ctx->procs[pi]);
+         vhdl_island_var_defs_clear((vhdl_island_ctx_t *)ctx);
          vhdl_island_set_eval_scope((vhdl_island_ctx_t *)ctx, p->owner_block,
                                     p->owner_ancestors, p->n_owner_ancestors);
          vi_scope_t sc = { .ret_bb = MIR_NULL_BLOCK };
@@ -6767,6 +6791,7 @@ static mir_unit_t *vi_build_ff_unit(mir_context_t *mc,
       for (uint32_t k = 0; k < dm->n_procs; k++) {
          uint32_t pi = dm->proc_idxs[k];
          const vhdl_iproc_t *p = &(ctx->procs[pi]);
+         vhdl_island_var_defs_clear((vhdl_island_ctx_t *)ctx);
          vhdl_island_set_eval_scope((vhdl_island_ctx_t *)ctx, p->owner_block,
                                     p->owner_ancestors, p->n_owner_ancestors);
          vi_scope_t sc = { .ret_bb = MIR_NULL_BLOCK };
@@ -6791,6 +6816,7 @@ static mir_unit_t *vi_build_ff_unit(mir_context_t *mc,
       for (uint32_t k = 0; k < dm->n_procs; k++) {
          uint32_t pi = dm->proc_idxs[k];
          const vhdl_iproc_t *p = &(ctx->procs[pi]);
+         vhdl_island_var_defs_clear((vhdl_island_ctx_t *)ctx);
          vhdl_island_set_eval_scope((vhdl_island_ctx_t *)ctx, p->owner_block,
                                     p->owner_ancestors, p->n_owner_ancestors);
          vi_scope_t sc = { .ret_bb = MIR_NULL_BLOCK };

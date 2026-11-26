@@ -312,6 +312,59 @@ static bool trees_int_expr_eq(tree_t a, tree_t b, int depth)
    }
 }
 
+static bool expr_refs_decl(tree_t expr, tree_t decl, int depth)
+{
+   if (expr == NULL || depth > 16)
+      return false;
+   switch (tree_kind(expr)) {
+   case T_REF:
+      return tree_ref(expr) == decl;
+   case T_QUALIFIED:
+   case T_TYPE_CONV:
+      return expr_refs_decl(tree_value(expr), decl, depth + 1);
+   case T_FCALL:
+      for (int i = 0; i < tree_params(expr); i++) {
+         if (expr_refs_decl(tree_value(tree_param(expr, i)), decl, depth + 1))
+            return true;
+      }
+      return false;
+   default:
+      return false;
+   }
+}
+
+void vhdl_island_var_def_set(vhdl_island_ctx_t *ctx, tree_t decl, tree_t expr)
+{
+   if (ctx == NULL || decl == NULL)
+      return;
+   // Invalidate any existing definition that depends on decl
+   for (uint32_t i = 0; i < ctx->n_var_defs; i++) {
+      if (ctx->var_defs[i].decl != decl
+          && expr_refs_decl(ctx->var_defs[i].expr, decl, 0))
+         ctx->var_defs[i].expr = NULL;
+   }
+   for (uint32_t i = 0; i < ctx->n_var_defs; i++) {
+      if (ctx->var_defs[i].decl == decl) {
+         ctx->var_defs[i].expr = expr;
+         return;
+      }
+   }
+   if (ctx->n_var_defs == ctx->cap_var_defs) {
+      ctx->cap_var_defs = MAX(ctx->cap_var_defs * 2u, 16u);
+      ctx->var_defs = xrealloc_array(ctx->var_defs, ctx->cap_var_defs,
+                                     sizeof(vhdl_var_def_t));
+   }
+   ctx->var_defs[ctx->n_var_defs++] = (vhdl_var_def_t){
+      .decl = decl, .expr = expr,
+   };
+}
+
+void vhdl_island_var_defs_clear(vhdl_island_ctx_t *ctx)
+{
+   if (ctx != NULL)
+      ctx->n_var_defs = 0;
+}
+
 // Decompose an integer expression into scale * base + offset (base == NULL for const)
 static void decompose_int_linear(const vhdl_island_ctx_t *ctx, tree_t expr,
                                  tree_t *base_out, int64_t *scale_out,
@@ -327,6 +380,19 @@ static void decompose_int_linear(const vhdl_island_ctx_t *ctx, tree_t expr,
       return;
    }
    switch (tree_kind(expr)) {
+   case T_REF:
+      if (ctx != NULL && ctx->n_var_defs > 0
+          && tree_kind(tree_ref(expr)) == T_VAR_DECL) {
+         tree_t vd = tree_ref(expr);
+         for (uint32_t i = 0; i < ctx->n_var_defs; i++) {
+            if (ctx->var_defs[i].decl == vd && ctx->var_defs[i].expr != NULL) {
+               decompose_int_linear(ctx, ctx->var_defs[i].expr, base_out,
+                                    scale_out, off_out, depth + 1);
+               return;
+            }
+         }
+      }
+      break;
    case T_QUALIFIED:
    case T_TYPE_CONV:
       decompose_int_linear(ctx, tree_value(expr), base_out, scale_out,
@@ -1950,6 +2016,9 @@ static bool check_stmt(check_ctx_t *c, tree_t stmt, bool is_func)
                if (!check_expr(c, target, true))
                   return false;
                c->var_assigned.items[vi] = true;
+               if (type_is_integer(tree_type(vdecl)))
+                  vhdl_island_var_def_set((vhdl_island_ctx_t *)c->ctx, vdecl,
+                                          tree_value(stmt));
                return true;
             }
             else {
@@ -1980,8 +2049,15 @@ static bool check_stmt(check_ctx_t *c, tree_t stmt, bool is_func)
          const int nconds = tree_conds(stmt);
          for (int i = 0; i < nconds; i++) {
             tree_t br = tree_cond(stmt, i);
+            int64_t cval = 0;
+            bool const_cond = false;
             if (tree_has_value(br)) {
-               if (!check_expr(c, tree_value(br), false)) {
+               if (vhdl_island_eval_const_int_ctx(c->ctx, tree_value(br), &cval)) {
+                  const_cond = true;
+                  if (cval == 0)
+                     continue;
+               }
+               else if (!check_expr(c, tree_value(br), false)) {
                   free(saved);
                   free(all_assigned);
                   return false;
@@ -2004,7 +2080,13 @@ static bool check_stmt(check_ctx_t *c, tree_t stmt, bool is_func)
                for (unsigned v = 0; v < c->var_decls.count; v++)
                   all_assigned[v] = all_assigned[v] && c->var_assigned.items[v];
             }
+
+            if (const_cond && cval != 0) {
+               has_else = true;
+               break;
+            }
          }
+         vhdl_island_var_defs_clear((vhdl_island_ctx_t *)c->ctx);
 
          if (saved != NULL) {
             for (unsigned v = 0; v < c->var_decls.count; v++)
@@ -2171,7 +2253,9 @@ static bool check_stmt(check_ctx_t *c, tree_t stmt, bool is_func)
          ident_t saved_label = c->cur_loop_label;
          c->cur_loop_label = tree_has_ident(stmt) ? tree_ident(stmt) : NULL;
          c->loop_depth++;
+         vhdl_island_var_defs_clear((vhdl_island_ctx_t *)c->ctx);
          const bool ok = check_stmt_list(c, stmt, 0, tree_stmts(stmt), is_func);
+         vhdl_island_var_defs_clear((vhdl_island_ctx_t *)c->ctx);
          c->loop_depth--;
          c->cur_loop_label = saved_label;
          if (saved != NULL) {
@@ -2571,6 +2655,7 @@ static void analyze_process(vhdl_island_ctx_t *ctx, tree_t proc, int stmt_idx,
                             bool two_state, proc_list_t *procs,
                             u32_list_t *ext_reads)
 {
+   vhdl_island_var_defs_clear(ctx);
    const int nstmts = tree_stmts(proc);
    if (nstmts < 2)
       goto eject_scan_reads;
@@ -4795,6 +4880,7 @@ void vhdl_island_ctx_free(vhdl_island_ctx_t *ctx)
 
    free_ctx_islands(ctx);
    free(ctx->sigs);
+   free(ctx->var_defs);
    free(ctx->ext_read_sigs);
    free(ctx->stmt_fused);
    free(ctx);

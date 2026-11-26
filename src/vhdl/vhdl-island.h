@@ -166,6 +166,11 @@ static inline const vhdl_isl_sig_t *vhdl_island_find_sig(const vhdl_island_t *is
    return NULL;
 }
 
+typedef struct {
+   tree_t decl;
+   tree_t expr;
+} vhdl_var_def_t;
+
 typedef struct _vhdl_island_ctx {
    tree_t         block;
    tree_t         ancestors[VHDL_ISLAND_MAX_ANCESTORS];
@@ -173,6 +178,9 @@ typedef struct _vhdl_island_ctx {
    tree_t         eval_block;
    tree_t         eval_ancestors[VHDL_ISLAND_MAX_ANCESTORS];
    int            n_eval_ancestors;
+   vhdl_var_def_t *var_defs;
+   uint32_t       n_var_defs;
+   uint32_t       cap_var_defs;
    ident_t        scope_prefix;
    vhdl_isig_t   *sigs;
    uint32_t       n_sigs;
@@ -211,6 +219,8 @@ bool vhdl_island_eval_const_int_ctx(const vhdl_island_ctx_t *ctx, tree_t expr,
                                     int64_t *out);
 bool vhdl_island_const_slice_width(const vhdl_island_ctx_t *ctx, tree_t rg,
                                    uint32_t *width_out);
+void vhdl_island_var_def_set(vhdl_island_ctx_t *ctx, tree_t decl, tree_t expr);
+void vhdl_island_var_defs_clear(vhdl_island_ctx_t *ctx);
 bool vhdl_island_is_sig_root(tree_t expr);
 tree_t vhdl_island_resolve_func_body(tree_t decl);
 tree_t vhdl_island_resolve_proc_body(tree_t decl);
