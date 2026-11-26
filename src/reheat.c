@@ -287,7 +287,8 @@ void reheat(tree_t top, unit_registry_t *ur, mir_context_t *mc,
    for (int i = 0; i < ntops; i++)
       reheat_block(tree_stmt(top, i), &ctx);
 
-   discard_global_arena();
+   if (!discard_global_arena_if_last())
+      detach_global_arena();
    if (saved_arena != NULL)
       attach_global_arena(saved_arena);
 

@@ -39732,9 +39732,10 @@ void vlog_lower_island_comb_fn(mir_context_t *mc, vlog_node_t body,
    mir_value_t zero_off = mir_const(mu, t_offset, 0);
    ident_t apply_forces_fn = ident_new("__sv_island_apply_forces");
    if (need_mid_force) {
-      mir_value_t hdr_ptr = mir_build_cast(mu, mir_pointer_type(mu, t_offset),
-                                           state);
-      force_hdr = mir_build_load(mu, hdr_ptr);
+      mir_type_t t_vec64 = mir_vec2_type(mu, 64, false);
+      mir_value_t hdr_vec = mir_build_island_load(
+         mu, t_vec64, state, zero_off, mir_const(mu, t_offset, -1), zero_off);
+      force_hdr = mir_build_cast(mu, t_offset, hdr_vec);
    }
 
    int prev_lvl = -1;
