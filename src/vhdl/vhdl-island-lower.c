@@ -6728,15 +6728,6 @@ void vhdl_island_lower_emit_vcode_init(const vhdl_island_ctx_t *ctx,
    vcode_type_t voffset = vtype_offset();
    vcode_type_t vptr = vtype_pointer(vtype_opaque());
 
-   if (opt_get_int(OPT_RTL_ISLANDS) == RTL_ISLANDS_HIER) {
-      ident_t ext_read_fn = ident_new("__sv_island_mark_ext_read");
-      for (uint32_t i = 0; i < ctx->n_ext_read_sigs; i++) {
-         const vhdl_isig_t *s = &(ctx->sigs[ctx->ext_read_sigs[i]]);
-         vcode_reg_t sig_reg = get_sig_fn(lu, s->decl, s->field_path, s->path_len);
-         emit_fcall(ext_read_fn, voffset, VCODE_INVALID_STAMP, &sig_reg, 1);
-      }
-   }
-
    ident_t begin_fn = ident_new("__sv_island_begin");
    ident_t bind_fn = ident_new("__sv_island_bind_sig");
    ident_t add_dom_fn = ident_new("__sv_island_add_domain");

@@ -14386,6 +14386,300 @@ lower_unit_t *lower_instance(unit_registry_t *ur, lower_unit_t *parent,
    return lu;
 }
 
+typedef struct {
+   tree_t  decl;
+   int     field_path[VHDL_ISIG_MAX_DEPTH];
+   uint8_t path_len;
+} lower_ext_read_t;
+
+typedef struct {
+   A(lower_ext_read_t) items;
+   hset_t             *skip_nodes;
+   hset_t             *seen_aliases;
+} lower_ext_read_ctx_t;
+
+static void lower_push_ext_read(lower_ext_read_ctx_t *rc, tree_t decl,
+                                const int *path, uint8_t plen)
+{
+   for (unsigned i = 0; i < rc->items.count; i++) {
+      const lower_ext_read_t *e = &(rc->items.items[i]);
+      if (e->decl != decl)
+         continue;
+      if (e->path_len <= plen
+          && (e->path_len == 0
+              || memcmp(e->field_path, path, e->path_len * sizeof(int)) == 0))
+         return;
+   }
+
+   lower_ext_read_t item = {
+      .decl     = decl,
+      .path_len = plen,
+   };
+   if (plen > 0)
+      memcpy(item.field_path, path, plen * sizeof(int));
+   APUSH(rc->items, item);
+}
+
+static void lower_ext_read_visit_tree(tree_t root, lower_ext_read_ctx_t *rc);
+
+static void lower_ext_read_pre_cb(object_t *obj, void *context)
+{
+   if (obj->tag != OBJECT_TAG_TREE)
+      return;
+
+   lower_ext_read_ctx_t *rc = context;
+   tree_t t = tree_from_object(obj);
+   const tree_kind_t kind = tree_kind(t);
+
+   if (kind == T_RECORD_REF) {
+      if (hset_contains(rc->skip_nodes, t))
+         return;
+
+      int rev[VHDL_ISIG_MAX_DEPTH];
+      uint8_t n = 0;
+      bool ok = true;
+      tree_t cur = t;
+      while (tree_kind(cur) == T_RECORD_REF) {
+         tree_t field = tree_ref(cur);
+         if (field == NULL || tree_kind(field) != T_FIELD_DECL
+             || n >= VHDL_ISIG_MAX_DEPTH) {
+            ok = false;
+            break;
+         }
+         rev[n++] = tree_pos(field);
+         cur = tree_value(cur);
+      }
+
+      if (ok && tree_kind(cur) == T_REF && tree_has_ref(cur)) {
+         tree_t d = tree_ref(cur);
+         if (d != NULL && (tree_kind(d) == T_PORT_DECL
+                           || tree_kind(d) == T_SIGNAL_DECL)) {
+            for (tree_t p = t; p != cur; p = tree_value(p))
+               hset_insert(rc->skip_nodes, p);
+            hset_insert(rc->skip_nodes, cur);
+
+            int path[VHDL_ISIG_MAX_DEPTH];
+            for (uint8_t i = 0; i < n; i++)
+               path[i] = rev[n - 1 - i];
+            lower_push_ext_read(rc, d, path, n);
+         }
+      }
+   }
+   else if (kind == T_REF) {
+      if (hset_contains(rc->skip_nodes, t) || !tree_has_ref(t))
+         return;
+
+      tree_t d = tree_ref(t);
+      if (d == NULL)
+         return;
+
+      const tree_kind_t dk = tree_kind(d);
+      if (dk == T_PORT_DECL || dk == T_SIGNAL_DECL)
+         lower_push_ext_read(rc, d, NULL, 0);
+      else if (dk == T_ALIAS && tree_has_value(d)
+               && !hset_contains(rc->seen_aliases, d)) {
+         hset_insert(rc->seen_aliases, d);
+         lower_ext_read_visit_tree(tree_value(d), rc);
+      }
+   }
+}
+
+static void lower_ext_read_visit_tree(tree_t root, lower_ext_read_ctx_t *rc)
+{
+   if (root == NULL)
+      return;
+
+   object_visit_ctx_t vctx = {
+      .count      = 0,
+      .postorder  = NULL,
+      .preorder   = lower_ext_read_pre_cb,
+      .context    = rc,
+      .kind       = T_LAST_TREE_KIND,
+      .tag        = OBJECT_TAG_TREE,
+      .generation = object_next_generation(),
+      .deep       = false,
+   };
+   object_visit(tree_to_object(root), &vctx);
+}
+
+static bool lower_block_is_instance(tree_t blk)
+{
+   if (tree_decls(blk) == 0 || tree_kind(tree_decl(blk, 0)) != T_HIER)
+      return false;
+
+   tree_t hier = tree_decl(blk, 0);
+   if (tree_subkind(hier) == T_VERILOG)
+      return true;
+
+   tree_t unit = tree_ref(hier);
+   return unit != NULL
+      && (is_design_unit(unit) || tree_kind(unit) == T_COMPONENT);
+}
+
+static void lower_scan_unfused_block(tree_t blk, hset_t *fused_procs,
+                                     lower_ext_read_ctx_t *rc)
+{
+   const int ndecls = tree_decls(blk);
+   for (int i = 0; i < ndecls; i++) {
+      tree_t d = tree_decl(blk, i);
+      const tree_kind_t dk = tree_kind(d);
+      if (dk == T_PSL_DECL || dk == T_PROC_BODY || dk == T_FUNC_BODY)
+         lower_ext_read_visit_tree(d, rc);
+   }
+
+   const int nstmts = tree_stmts(blk);
+   for (int i = 0; i < nstmts; i++) {
+      tree_t s = tree_stmt(blk, i);
+      switch (tree_kind(s)) {
+      case T_PROCESS:
+         if (fused_procs == NULL || !hset_contains(fused_procs, s))
+            lower_ext_read_visit_tree(s, rc);
+         break;
+      case T_PSL_DIRECT:
+         lower_ext_read_visit_tree(s, rc);
+         break;
+      case T_BLOCK:
+         if (!lower_block_is_instance(s))
+            lower_scan_unfused_block(s, fused_procs, rc);
+         break;
+      default:
+         break;
+      }
+   }
+}
+
+static bool lower_ext_read_accessible(lower_unit_t *lu, tree_t decl,
+                                      bool local_only)
+{
+   const tree_kind_t dk = tree_kind(decl);
+   if (dk == T_PORT_DECL) {
+      if (tree_class(decl) != C_SIGNAL)
+         return false;
+      int hops = 0;
+      vcode_var_t var = lower_search_vcode_obj(decl, lu, &hops);
+      if (var == VCODE_INVALID_VAR)
+         return false;
+      return !local_only || hops == 0;
+   }
+   else if (dk == T_SIGNAL_DECL) {
+      int hops = 0;
+      vcode_var_t var = lower_search_vcode_obj(decl, lu, &hops);
+      if (var != VCODE_INVALID_VAR)
+         return !local_only || hops == 0;
+      if (local_only)
+         return false;
+      tree_t container = tree_container(decl);
+      if (container != NULL && is_package(container)
+          && !is_uninstantiated_package(container)) {
+         if (lower_search_vcode_obj(tree_ident(container), lu, &hops)
+             != VCODE_INVALID_REG)
+            return true;
+      }
+      return false;
+   }
+   return false;
+}
+
+static void lower_emit_mark_ext_read_type(lower_unit_t *lu, type_t type,
+                                          vcode_reg_t reg,
+                                          ident_t ext_read_fn)
+{
+   if (type_is_record(type)) {
+      type_t base = type_base_recur(type);
+      if (vcode_reg_kind(reg) != VCODE_TYPE_POINTER
+          || vtype_kind(vtype_pointed(vcode_reg_type(reg))) != VCODE_TYPE_RECORD)
+         return;
+      const int nfields = type_fields(base);
+      for (int i = 0; i < nfields; i++) {
+         tree_t f = type_field(base, i);
+         lower_emit_mark_ext_read_type(lu, tree_type(f),
+                                       emit_record_ref(reg, i), ext_read_fn);
+      }
+      return;
+   }
+
+   if (!type_is_array(type) || type_is_homogeneous(type)) {
+      vcode_reg_t sig = reg;
+      if (vcode_reg_kind(sig) == VCODE_TYPE_POINTER
+          && vtype_kind(vtype_pointed(vcode_reg_type(sig))) == VCODE_TYPE_SIGNAL)
+         sig = emit_load_indirect(sig);
+      else
+         sig = lower_array_data(sig);
+
+      if (vcode_reg_kind(sig) == VCODE_TYPE_SIGNAL)
+         emit_fcall(ext_read_fn, vtype_offset(), VCODE_INVALID_STAMP, &sig, 1);
+      return;
+   }
+
+   // Non-homogeneous array (e.g. array of records)
+   type_t elem = type_elem_recur(type);
+   vcode_type_t voffset = vtype_offset();
+   vcode_reg_t len_reg, ptr_reg;
+
+   if (vcode_reg_kind(reg) == VCODE_TYPE_UARRAY || have_uarray_ptr(reg)) {
+      if (vcode_reg_kind(reg) == VCODE_TYPE_POINTER)
+         reg = emit_load_indirect(reg);
+      const unsigned ndims = vtype_dims(vcode_reg_type(reg));
+      len_reg = emit_uarray_len(reg, 0);
+      for (unsigned d = 1; d < ndims; d++)
+         len_reg = emit_mul(len_reg, emit_uarray_len(reg, d));
+      ptr_reg = emit_unwrap(reg);
+   }
+   else if (type_const_bounds(type)) {
+      len_reg = emit_const(voffset, lower_array_const_size(type));
+      ptr_reg = lower_array_data(reg);
+   }
+   else
+      return;
+
+   vcode_var_t i_var = lower_temp_var(lu, "ext_i", voffset);
+   emit_store(emit_const(voffset, 0), i_var);
+
+   vcode_block_t cmp_bb  = emit_block();
+   vcode_block_t body_bb = emit_block();
+   vcode_block_t exit_bb = emit_block();
+
+   emit_jump(cmp_bb);
+
+   vcode_select_block(cmp_bb);
+   vcode_reg_t i_reg = emit_load(i_var);
+   vcode_reg_t done_reg = emit_cmp(VCODE_CMP_GEQ, i_reg, len_reg);
+   emit_cond(done_reg, exit_bb, body_bb);
+
+   vcode_select_block(body_bb);
+   vcode_reg_t elem_ptr = emit_array_ref(ptr_reg, i_reg);
+   lower_emit_mark_ext_read_type(lu, elem, elem_ptr, ext_read_fn);
+   emit_store(emit_add(i_reg, emit_const(voffset, 1)), i_var);
+   emit_jump(cmp_bb);
+
+   vcode_select_block(exit_bb);
+}
+
+static void lower_emit_ext_read_item(lower_unit_t *init_lu,
+                                     const lower_ext_read_t *item,
+                                     ident_t ext_read_fn)
+{
+   vcode_reg_t reg = (tree_kind(item->decl) == T_PORT_DECL)
+      ? lower_port_ref(init_lu, item->decl)
+      : lower_signal_ref(init_lu, item->decl);
+   type_t cur_type = tree_type(item->decl);
+
+   for (uint8_t i = 0; i < item->path_len; i++) {
+      if (!type_is_record(cur_type))
+         break;
+      type_t base = type_base_recur(cur_type);
+      if (item->field_path[i] < 0 || item->field_path[i] >= type_fields(base))
+         break;
+      if (vcode_reg_kind(reg) != VCODE_TYPE_POINTER
+          || vtype_kind(vtype_pointed(vcode_reg_type(reg))) != VCODE_TYPE_RECORD)
+         break;
+      reg = emit_record_ref(reg, item->field_path[i]);
+      cur_type = tree_type(type_field(base, item->field_path[i]));
+   }
+
+   lower_emit_mark_ext_read_type(init_lu, cur_type, reg, ext_read_fn);
+}
+
 vcode_unit_t lower_vhdl_islands(unit_registry_t *ur, lower_unit_t *lu,
                                 cover_data_t *cover, tree_t block)
 {
@@ -14405,17 +14699,47 @@ vcode_unit_t lower_vhdl_islands(unit_registry_t *ur, lower_unit_t *lu,
 
    vhdl_island_ctx_t *ictx = vhdl_island_lower_prepare(
       unit_registry_mir(ur), block, ancestors, n_ancestors, lu->name, cover);
-   if (ictx == NULL)
-      return NULL;
 
-   for (uint32_t i = 0; i < ictx->n_procs; i++) {
-      const vhdl_iproc_t *p = &(ictx->procs[i]);
-      if (!p->rejected && p->island_idx >= 0 && p->fused_key != NULL)
-         unit_registry_mark_fused(ur, p->fused_key);
+   hset_t *fused_procs = NULL;
+   if (ictx != NULL) {
+      for (uint32_t i = 0; i < ictx->n_procs; i++) {
+         const vhdl_iproc_t *p = &(ictx->procs[i]);
+         if (!p->rejected && p->island_idx >= 0) {
+            if (p->fused_key != NULL)
+               unit_registry_mark_fused(ur, p->fused_key);
+            if (p->stmt != NULL) {
+               if (fused_procs == NULL)
+                  fused_procs = hset_new(16);
+               hset_insert(fused_procs, p->stmt);
+            }
+         }
+      }
    }
 
-   if (ictx->n_islands == 0 && ictx->n_ext_read_sigs == 0) {
-      vhdl_island_ctx_free(ictx);
+   lower_ext_read_ctx_t rc = { .items = AINIT };
+   unsigned n_usable_ext = 0;
+   if (opt_get_int(OPT_RTL_ISLANDS) == RTL_ISLANDS_HIER) {
+      rc.skip_nodes = hset_new(32);
+      rc.seen_aliases = hset_new(8);
+      lower_scan_unfused_block(block, fused_procs, &rc);
+      hset_free(rc.skip_nodes);
+      hset_free(rc.seen_aliases);
+
+      for (unsigned i = 0; i < rc.items.count; i++) {
+         if (lower_ext_read_accessible(lu, rc.items.items[i].decl, false))
+            rc.items.items[n_usable_ext++] = rc.items.items[i];
+      }
+      rc.items.count = n_usable_ext;
+   }
+
+   if (fused_procs != NULL)
+      hset_free(fused_procs);
+
+   const bool has_islands = (ictx != NULL && ictx->n_islands > 0);
+   if (!has_islands && n_usable_ext == 0) {
+      if (ictx != NULL)
+         vhdl_island_ctx_free(ictx);
+      ACLEAR(rc.items);
       return NULL;
    }
 
@@ -14425,8 +14749,78 @@ vcode_unit_t lower_vhdl_islands(unit_registry_t *ur, lower_unit_t *lu,
    vcode_type_t vcontext = vtype_context(lu->name);
    emit_param(vcontext, VCODE_INVALID_STAMP, ident_new("context"));
 
-   vhdl_island_lower_emit_vcode_init(ictx, init_lu, lower_get_island_leaf_sig, 1);
-   vhdl_island_ctx_free(ictx);
+   if (n_usable_ext > 0) {
+      ident_t ext_read_fn = ident_new("__sv_island_mark_ext_read");
+      for (unsigned i = 0; i < n_usable_ext; i++)
+         lower_emit_ext_read_item(init_lu, &(rc.items.items[i]), ext_read_fn);
+   }
+   ACLEAR(rc.items);
+
+   if (has_islands)
+      vhdl_island_lower_emit_vcode_init(ictx, init_lu,
+                                        lower_get_island_leaf_sig, 1);
+   if (ictx != NULL)
+      vhdl_island_ctx_free(ictx);
+
+   vcode_set_result(vtype_offset());
+   emit_return(emit_const(vtype_offset(), 0));
+   lower_finished(init_lu);
+   lower_unit_free(init_lu);
+   vcode_close();
+   return thunk;
+}
+
+vcode_unit_t lower_vhdl_ext_reads(unit_registry_t *ur, lower_unit_t *lu,
+                                  tree_t block)
+{
+   if (ur == NULL || lu == NULL || opt_get_int(OPT_DEBUG_STMTS)
+       || opt_get_int(OPT_RTL_ISLANDS) != RTL_ISLANDS_HIER)
+      return NULL;
+
+   bool has_local_sigs = (tree_ports(block) > 0);
+   if (!has_local_sigs) {
+      const int ndecls = tree_decls(block);
+      for (int i = 0; i < ndecls; i++) {
+         if (tree_kind(tree_decl(block, i)) == T_SIGNAL_DECL) {
+            has_local_sigs = true;
+            break;
+         }
+      }
+   }
+   if (!has_local_sigs)
+      return NULL;
+
+   lower_ext_read_ctx_t rc = {
+      .items        = AINIT,
+      .skip_nodes   = hset_new(16),
+      .seen_aliases = hset_new(8),
+   };
+   lower_scan_unfused_block(block, NULL, &rc);
+   hset_free(rc.skip_nodes);
+   hset_free(rc.seen_aliases);
+
+   unsigned n_usable = 0;
+   for (unsigned i = 0; i < rc.items.count; i++) {
+      if (lower_ext_read_accessible(lu, rc.items.items[i].decl, true))
+         rc.items.items[n_usable++] = rc.items.items[i];
+   }
+   rc.items.count = n_usable;
+
+   if (n_usable == 0) {
+      ACLEAR(rc.items);
+      return NULL;
+   }
+
+   vcode_unit_t thunk = emit_thunk(NULL, tree_to_object(block), lu->vunit);
+   lower_unit_t *init_lu = lower_unit_new(ur, lu, thunk, NULL, block);
+
+   vcode_type_t vcontext = vtype_context(lu->name);
+   emit_param(vcontext, VCODE_INVALID_STAMP, ident_new("context"));
+
+   ident_t ext_read_fn = ident_new("__sv_island_mark_ext_read");
+   for (unsigned i = 0; i < n_usable; i++)
+      lower_emit_ext_read_item(init_lu, &(rc.items.items[i]), ext_read_fn);
+   ACLEAR(rc.items);
 
    vcode_set_result(vtype_offset());
    emit_return(emit_const(vtype_offset(), 0));
