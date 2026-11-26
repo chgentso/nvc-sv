@@ -10643,6 +10643,11 @@ rt_island_mgr_t *rt_island_model_mgr(rt_model_t *m)
    return m != NULL ? m->islands : NULL;
 }
 
+rt_scope_t *rt_island_model_active_scope(rt_model_t *m)
+{
+   return m != NULL ? model_thread(m)->active_scope : NULL;
+}
+
 void watch_set_inline_island(rt_watch_t *w, bool enable)
 {
    if (w != NULL)
@@ -10705,6 +10710,22 @@ void x_sv_island_bind_gen_sig(void *handle, uint32_t idx, void *owner_block,
    assert(sig != NULL);
    rt_island_bind_sig(handle, idx, &(sig->shared), (int32_t)sig_off,
                       a_off, b_off, width, nelems, flags);
+}
+
+void x_sv_island_set_gen_key(void *handle, uint32_t idx, uint64_t key_hash)
+{
+   rt_island_set_gen_key(handle, idx, key_hash);
+}
+
+void x_sv_island_attach_sig(void *handle, uint32_t idx, sig_shared_t *ss,
+                            int32_t sig_offset)
+{
+   rt_island_attach_sig(handle, idx, ss, sig_offset);
+}
+
+void x_sv_island_apply_forces(void *handle)
+{
+   rt_island_apply_forces(handle);
 }
 
 void x_sv_island_add_domain(void *handle, uint32_t dom_idx,

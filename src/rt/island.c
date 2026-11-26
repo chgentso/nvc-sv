@@ -18,7 +18,9 @@
 #include "util.h"
 #include "array.h"
 #include "hash.h"
+#include "ident.h"
 #include "jit/jit.h"
+#include "object.h"
 #include "option.h"
 #include "rt/island.h"
 #include "rt/model.h"
@@ -1165,6 +1167,7 @@ void *rt_island_begin(rt_model_t *m, rt_island_mgr_t **mgr_p,
    rt_island_t *isl = xcalloc(sizeof(rt_island_t));
    isl->model = m;
    isl->mgr = *mgr_p;
+   isl->root_scope = rt_island_model_active_scope(m);
    isl->isl_id = isl->mgr->islands.count;
    isl->eval_handle = eval_handle;
    isl->inst_ctx = inst_ctx;
@@ -1302,6 +1305,76 @@ void rt_island_bind_sig(void *handle, uint32_t idx, sig_shared_t *ss,
              <= isl->total_state_bytes);
 }
 
+static uint64_t island_gen_key_hash(const char *s)
+{
+   uint64_t h = UINT64_C(14695981039346656037);
+   for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+      h ^= (uint64_t)(*p);
+      h *= UINT64_C(1099511628211);
+   }
+   return h ?: 1u;
+}
+
+void rt_island_set_gen_key(void *handle, uint32_t idx, uint64_t key_hash)
+{
+   rt_island_t *isl = handle;
+   assert(idx < isl->nsigs);
+   isl->sigs[idx].gen_key_hash = key_hash;
+}
+
+void rt_island_attach_sig(void *handle, uint32_t idx, sig_shared_t *ss,
+                          int32_t sig_offset)
+{
+   rt_island_t *isl = handle;
+   if (ss == NULL)
+      return;
+
+   rt_signal_t *sig = container_of(ss, rt_signal_t, shared);
+
+   if (idx == UINT32_MAX) {
+      if (isl->root_scope == NULL || sig->parent == NULL || sig->where == NULL)
+         return;
+      const char *rname = istr(isl->root_scope->name);
+      const size_t rlen = strlen(rname);
+      const char *pname = istr(sig->parent->name);
+      if (strncmp(pname, rname, rlen) != 0 || pname[rlen] != '.')
+         return;
+      ident_t sname = object_ident((object_t *)sig->where);
+      if (sname == NULL)
+         return;
+      LOCAL_TEXT_BUF ktb = tb_new();
+      tb_printf(ktb, "%s.%s", pname + rlen + 1, istr(sname));
+      const uint64_t h = island_gen_key_hash(tb_get(ktb));
+      uint32_t found = UINT32_MAX;
+      for (uint32_t k = 0; k < isl->nsigs; k++) {
+         if (isl->sigs[k].gen_key_hash == h && isl->sigs[k].sig == NULL) {
+            found = k;
+            break;
+         }
+      }
+      if (found == UINT32_MAX)
+         return;
+      idx = found;
+   }
+
+   assert(idx < isl->nsigs);
+   rt_island_sig_t *s = &(isl->sigs[idx]);
+   s->sig = sig;
+   s->sig_offset = sig_offset;
+   s->elem_size = (!(sig->shared.flags & SIG_F_PACKED)
+                   && sig->nexus.size > 0)
+      ? (uint8_t)sig->nexus.size : 1u;
+
+   if (s->flags & (RT_ISIG_COMB_WRITTEN | RT_ISIG_FF_WRITTEN)) {
+      sig->shared.flags |= SIG_F_ISLAND;
+      sig->shared.flags &= ~(SIG_F_FAST_NOOP | SIG_F_FAST_DIRECT);
+
+      rt_island_sig_t *prev = hash_get(isl->mgr->sig_map, sig);
+      s->next_owner = prev;
+      hash_put(isl->mgr->sig_map, sig, s);
+   }
+}
+
 void rt_island_add_domain(void *handle, uint32_t dom_idx,
                           jit_handle_t ff_handle, void *inst_ctx,
                           uint32_t clk_sig_idx, int32_t rst_sig_idx,
@@ -1361,7 +1434,7 @@ static void island_refresh_domain_descs(rt_island_t *isl)
             fl |= RT_IFF_STD_LOGIC9;
          if (s->flags & RT_ISIG_TWO_STATE)
             fl |= RT_IFF_TWO_STATE;
-         if (s->flags & RT_ISIG_COMB_READ)
+         if (s->flags & (RT_ISIG_COMB_READ | RT_ISIG_COMB_WRITTEN))
             fl |= RT_IFF_COMB_READ;
          if (s->flags & RT_ISIG_DIRECT_LINK)
             fl |= RT_IFF_DIRECT_LINK;
@@ -2401,6 +2474,17 @@ static inline const rt_island_force_t *island_find_force(const rt_island_t *isl,
    return NULL;
 }
 
+static inline void island_sync_force_hdr(rt_island_t *isl)
+{
+   if (isl->nsigs == 0 || (isl->sigs[0].flags & RT_ISIG_VHDL)
+       || isl->sigs[0].a_off < sizeof(uint64_t))
+      return;
+   const uint64_t v = isl->has_forces ? (uint64_t)(uintptr_t)isl : 0;
+   *(uint64_t *)(isl->state) = v;
+   if (isl->next_state != NULL)
+      *(uint64_t *)(isl->next_state) = v;
+}
+
 static rt_island_force_t *island_get_or_add_force(rt_island_t *isl,
                                                   const rt_island_sig_t *s)
 {
@@ -2443,6 +2527,7 @@ static rt_island_force_t *island_get_or_add_force(rt_island_t *isl,
          isl->sigs[i].flags &= ~RT_ISIG_LAST_OUT_VALID;
       isl->has_forces = true;
       isl->mgr->n_forced_islands++;
+      island_sync_force_hdr(isl);
    }
    return f;
 }
@@ -2528,6 +2613,13 @@ static void island_apply_forces_comb(rt_island_t *isl)
       const rt_island_sig_t *s = &(isl->sigs[f->sig_idx]);
       island_apply_force_entry(isl->state, s, f, false);
    }
+}
+
+void rt_island_apply_forces(void *handle)
+{
+   rt_island_t *isl = handle;
+   if (isl != NULL && isl->has_forces)
+      island_apply_forces_comb(isl);
 }
 
 static inline void island_copy_sig_buf(uint8_t *dst_base,
@@ -6954,6 +7046,7 @@ bool rt_island_vpi_release_slice(rt_model_t *m, rt_signal_t *sig,
                isl->has_forces = false;
                assert(isl->mgr->n_forced_islands > 0);
                isl->mgr->n_forced_islands--;
+               island_sync_force_hdr(isl);
             }
          }
       }
@@ -6999,6 +7092,7 @@ bool rt_island_vpi_release_slice(rt_model_t *m, rt_signal_t *sig,
                isl->has_forces = false;
                assert(isl->mgr->n_forced_islands > 0);
                isl->mgr->n_forced_islands--;
+               island_sync_force_hdr(isl);
             }
          }
       }

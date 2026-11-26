@@ -5152,6 +5152,29 @@ static void sv_island_bind_gen_sig(jit_func_t *func, jit_anchor_t *caller,
    args[0].integer = 0;
 }
 
+static void sv_island_set_gen_key(jit_func_t *func, jit_anchor_t *caller,
+                                  jit_scalar_t *args, tlab_t *tlab)
+{
+   x_sv_island_set_gen_key(args[0].pointer, (uint32_t)args[1].integer,
+                           (uint64_t)args[2].integer);
+   args[0].integer = 0;
+}
+
+static void sv_island_attach_sig(jit_func_t *func, jit_anchor_t *caller,
+                                 jit_scalar_t *args, tlab_t *tlab)
+{
+   x_sv_island_attach_sig(args[0].pointer, (uint32_t)args[1].integer,
+                          args[2].pointer, (int32_t)args[3].integer);
+   args[0].integer = 0;
+}
+
+static void sv_island_apply_forces(jit_func_t *func, jit_anchor_t *caller,
+                                   jit_scalar_t *args, tlab_t *tlab)
+{
+   x_sv_island_apply_forces((void *)(uintptr_t)args[0].integer);
+   args[0].integer = 0;
+}
+
 static void sv_island_add_domain(jit_func_t *func, jit_anchor_t *caller,
                                  jit_scalar_t *args, tlab_t *tlab)
 {
@@ -6963,6 +6986,7 @@ jit_entry_fn_t jit_bind_intrinsic(ident_t name)
    static ident_t dispatch_func_i = NULL, dispatch_proc_i = NULL;
    static ident_t island_begin_i = NULL, island_bind_i = NULL,
       island_bind_gen_i = NULL,
+      island_gen_key_i = NULL, island_attach_i = NULL, island_apply_f_i = NULL,
       island_add_dom_i = NULL, island_add_dom_w_i = NULL,
       island_finish_i = NULL, island_ext_read_i = NULL,
       island_set_sparse_i = NULL, island_sparse_write_i = NULL;
@@ -6973,6 +6997,9 @@ jit_entry_fn_t jit_bind_intrinsic(ident_t name)
          island_begin_i     = ident_new("__sv_island_begin");
          island_bind_i      = ident_new("__sv_island_bind_sig");
          island_bind_gen_i  = ident_new("__sv_island_bind_gen_sig");
+         island_gen_key_i   = ident_new("__sv_island_set_gen_key");
+         island_attach_i    = ident_new("__sv_island_attach_sig");
+         island_apply_f_i   = ident_new("__sv_island_apply_forces");
          island_add_dom_i   = ident_new("__sv_island_add_domain");
          island_add_dom_w_i = ident_new("__sv_island_add_domain_write");
          island_finish_i    = ident_new("__sv_island_finish");
@@ -7029,6 +7056,12 @@ jit_entry_fn_t jit_bind_intrinsic(ident_t name)
       return sv_island_bind_sig;
    else if (name == island_bind_gen_i)
       return sv_island_bind_gen_sig;
+   else if (name == island_gen_key_i)
+      return sv_island_set_gen_key;
+   else if (name == island_attach_i)
+      return sv_island_attach_sig;
+   else if (name == island_apply_f_i)
+      return sv_island_apply_forces;
    else if (name == island_add_dom_i)
       return sv_island_add_domain;
    else if (name == island_add_dom_w_i)

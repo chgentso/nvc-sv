@@ -57,6 +57,8 @@ typedef struct {
    vlog_node_t               decl;
    vlog_node_t               port;
    ident_t                   name;
+   ident_t                   gen_path;
+   ident_t                   orig_name;
    uint32_t                  width;
    uint32_t                  nelems;
    bool                      two_state;
@@ -100,7 +102,9 @@ typedef enum {
 
 typedef struct {
    vlog_node_t        stmt;
+   vlog_node_t        orig_stmt;
    island_proc_kind_t kind;
+   bool               from_gen;
    int                domain_id;
    uint32_t          *reads;
    uint32_t           nreads;

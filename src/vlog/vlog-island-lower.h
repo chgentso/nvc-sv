@@ -64,4 +64,12 @@ void vlog_island_lower_emit_funcs(vlog_island_lower_ctx_t *ctx,
                                   ident_t qual);
 void vlog_island_lower_free(vlog_island_lower_ctx_t *ctx);
 
+void vlog_island_register_gen_scope(mir_context_t *mc, ident_t qual,
+                                    ident_t parent);
+bool vlog_island_gen_stmt_fused(mir_context_t *mc, ident_t qual,
+                                vlog_node_t stmt);
+void vlog_island_emit_gen_local_attaches(mir_context_t *mc, mir_unit_t *mu,
+                                         vlog_node_t body, ident_t qual,
+                                         ident_t parent);
+
 #endif  // _VLOG_ISLAND_LOWER_H

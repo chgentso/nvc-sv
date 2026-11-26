@@ -137,8 +137,8 @@ static PLI_INT32 at_28ns(p_cb_data cb)
 
    check_int(get_int(ff_q), 0xa5);
    check_int(get_int(comb_sum), 0x3c);
-   check_int(get_int(comb_xor), 0xa5 ^ 0x13);
-   check_int(get_int(dout), 0xa5 ^ 0x13);
+   check_int(get_int(comb_xor), 0xa5 ^ 0x3c);
+   check_int(get_int(dout), 0xa5 ^ 0x3c);
 
    // Release both: comb_sum immediately returns to din(0x03)+0x10 = 0x13;
    // ff_q keeps 0xa5 until next clock edge

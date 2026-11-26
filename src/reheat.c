@@ -23,6 +23,7 @@
 #include "lib.h"
 #include "lower.h"
 #include "mir/mir-unit.h"
+#include "object.h"
 #include "phase.h"
 #include "rt/model.h"
 #include "tree.h"
@@ -277,11 +278,18 @@ void reheat(tree_t top, unit_registry_t *ur, mir_context_t *mc,
    };
 
    const int ntops = tree_stmts(top);
+   object_arena_t *saved_arena = detach_global_arena();
+   make_new_arena();
+
    for (int i = 0; i < ntops; i++)
       reheat_lower_verilog(tree_stmt(top, i), &ctx, NULL);
 
    for (int i = 0; i < ntops; i++)
       reheat_block(tree_stmt(top, i), &ctx);
+
+   discard_global_arena();
+   if (saved_arena != NULL)
+      attach_global_arena(saved_arena);
 
    hset_free(ctx.instances);
    hset_free(ctx.lowered_blocks);

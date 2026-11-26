@@ -156,6 +156,10 @@ void x_sv_island_bind_sig(void *handle, uint32_t idx, sig_shared_t *ss,
 void x_sv_island_bind_gen_sig(void *handle, uint32_t idx, void *owner_block,
                               void *decl, uint32_t a_off, uint32_t b_off,
                               uint32_t width, uint32_t nelems, uint32_t flags);
+void x_sv_island_set_gen_key(void *handle, uint32_t idx, uint64_t key_hash);
+void x_sv_island_attach_sig(void *handle, uint32_t idx, sig_shared_t *ss,
+                            int32_t sig_offset);
+void x_sv_island_apply_forces(void *handle);
 void x_sv_island_add_domain(void *handle, uint32_t dom_idx,
                             struct _ffi_closure *ff_closure,
                             uint32_t clk_sig_idx, int32_t rst_sig_idx,

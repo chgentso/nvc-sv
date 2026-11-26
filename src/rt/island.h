@@ -155,6 +155,7 @@ typedef struct _rt_island_sig {
    rt_watch_t             *ext_write_watch;
    uint64_t                last_out_a;
    uint64_t                last_out_b;
+   uint64_t                gen_key_hash;
 } rt_island_sig_t;
 
 typedef struct _rt_island_domain {
@@ -189,6 +190,7 @@ typedef struct _rt_island_domain {
 typedef struct _rt_island {
    rt_model_t            *model;
    struct _rt_island_mgr *mgr;
+   rt_scope_t            *root_scope;
    rt_super_island_t     *cluster;
    uint32_t               isl_id;
    uint32_t               topo_pos;
@@ -327,6 +329,10 @@ void rt_island_sparse_write(void *isl_ptr, uint32_t sig_idx,
 void rt_island_bind_sig(void *handle, uint32_t idx, sig_shared_t *ss,
                         int32_t sig_offset, uint32_t a_off, uint32_t b_off,
                         uint32_t width, uint32_t nelems, uint32_t flags);
+void rt_island_set_gen_key(void *handle, uint32_t idx, uint64_t key_hash);
+void rt_island_attach_sig(void *handle, uint32_t idx, sig_shared_t *ss,
+                          int32_t sig_offset);
+void rt_island_apply_forces(void *handle);
 void rt_island_add_domain(void *handle, uint32_t dom_idx,
                           jit_handle_t ff_handle, void *inst_ctx,
                           uint32_t clk_sig_idx, int32_t rst_sig_idx,
@@ -353,5 +359,6 @@ void rt_island_force_unowned_bytes(rt_model_t *m, rt_signal_t *s,
 void rt_island_request_delta(rt_model_t *m);
 jit_t *rt_island_model_jit(rt_model_t *m);
 rt_island_mgr_t *rt_island_model_mgr(rt_model_t *m);
+rt_scope_t *rt_island_model_active_scope(rt_model_t *m);
 
 #endif  // _RT_ISLAND_H

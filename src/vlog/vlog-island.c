@@ -19,6 +19,7 @@
 #include "array.h"
 #include "hash.h"
 #include "ident.h"
+#include "object.h"
 #include "option.h"
 #include "vlog/vlog-island.h"
 #include "vlog/vlog-node.h"
@@ -53,12 +54,16 @@ bool vlog_island_body_is_mixed(vlog_node_t body)
 
 typedef struct {
    vlog_node_t               decl;
+   vlog_node_t               orig_decl;
    vlog_node_t               port;
    ident_t                   name;
+   ident_t                   gen_path;
+   ident_t                   orig_name;
    uint32_t                  width;
    uint32_t                  nelems;
    bool                      two_state;
    bool                      eligible;
+   bool                      is_gen_local;
    bool                      is_external;
    bool                      is_inout;
    bool                      is_input_port;
@@ -77,8 +82,15 @@ typedef struct {
 } sv_write_range_t;
 
 typedef struct {
+   vlog_node_t stmt;
+   vlog_node_t orig_stmt;
+} gen_proc_item_t;
+
+typedef struct {
    vlog_node_t                stmt;
+   vlog_node_t                orig_stmt;
    bool                       eligible;
+   bool                       from_gen;
    island_proc_kind_t         kind;
    island_proc_eject_reason_t eject_reason;
    uint32_t                   node_count;
@@ -93,15 +105,18 @@ typedef struct {
 } proc_meta_t;
 
 typedef struct {
-   vlog_node_t  body;
-   bool         is_mixed;
-   sig_meta_t  *sigs;
-   uint32_t     nsigs;
-   uint32_t     cap_sigs;
-   hash_t      *decl_map;      // vlog_node_t -> (void *)(uintptr_t)(idx + 1)
-   proc_meta_t *procs;
-   uint32_t     nprocs;
-   uint32_t     cap_procs;
+   vlog_node_t        body;
+   bool               is_mixed;
+   sig_meta_t        *sigs;
+   uint32_t           nsigs;
+   uint32_t           cap_sigs;
+   hash_t            *decl_map;      // vlog_node_t -> (void *)(uintptr_t)(idx + 1)
+   proc_meta_t       *procs;
+   uint32_t           nprocs;
+   uint32_t           cap_procs;
+   A(gen_proc_item_t) gen_procs;
+   A(vlog_node_t)     gen_ext_stmts;
+   hset_t            *expanded_gens;
 } analyze_ctx_t;
 
 const char *vlog_island_sig_eject_str(island_sig_eject_reason_t r)
@@ -366,11 +381,22 @@ static void scan_refs_cb(vlog_node_t v, void *arg)
    const vlog_kind_t k = vlog_kind(v);
 
    if (k == V_HIER_REF && vlog_has_ref(v)) {
-      const int idx = find_sig_idx(rs->ctx, vlog_ref(v));
+      vlog_node_t refd = unwrap_decl(vlog_ref(v));
+      const int idx = find_sig_idx(rs->ctx, refd);
       if (idx >= 0) {
          mark_sig_external(&rs->ctx->sigs[idx], ISIG_EJ_HIER_REF);
          rs->ctx->sigs[idx].ext_read = true;
          rs->ctx->sigs[idx].ext_written = true;
+      }
+      else {
+         for (uint32_t i = 0; i < rs->ctx->nsigs; i++) {
+            if (rs->ctx->sigs[i].is_gen_local
+                && rs->ctx->sigs[i].orig_decl == refd) {
+               mark_sig_external(&rs->ctx->sigs[i], ISIG_EJ_HIER_REF);
+               rs->ctx->sigs[i].ext_read = true;
+               rs->ctx->sigs[i].ext_written = true;
+            }
+         }
       }
       return;
    }
@@ -890,6 +916,8 @@ static void prescan_external_and_drivers(analyze_ctx_t *ctx)
    // Inline net assignments (wire w = expr;) and non-const var initializers
    for (uint32_t i = 0; i < ctx->nsigs; i++) {
       sig_meta_t *s = &(ctx->sigs[i]);
+      if (s->is_gen_local)
+         continue;
       if (vlog_kind(s->decl) == V_NET_DECL && vlog_has_value(s->decl)) {
          s->driver_count++;
          s->ext_written = true;
@@ -907,8 +935,746 @@ static void prescan_external_and_drivers(analyze_ctx_t *ctx)
    }
 
    const int nstmts = vlog_stmts(ctx->body);
-   for (int i = 0; i < nstmts; i++)
-      prescan_stmt_drivers(ctx, vlog_stmt(ctx->body, i), false);
+   for (int i = 0; i < nstmts; i++) {
+      vlog_node_t s = vlog_stmt(ctx->body, i);
+      if (ctx->expanded_gens != NULL && hset_contains(ctx->expanded_gens, s))
+         continue;
+      prescan_stmt_drivers(ctx, s, false);
+   }
+
+   for (unsigned i = 0; i < ctx->gen_procs.count; i++)
+      prescan_stmt_drivers(ctx, ctx->gen_procs.items[i].stmt, false);
+   for (unsigned i = 0; i < ctx->gen_ext_stmts.count; i++)
+      prescan_stmt_drivers(ctx, ctx->gen_ext_stmts.items[i], true);
+}
+
+#define NVC_ISLAND_MAX_GEN_ITERS 1024
+#define NVC_ISLAND_MAX_GEN_PROCS 2048
+
+typedef struct {
+   vlog_node_t decl;
+   int64_t     val;
+   vlog_node_t lp;
+} gen_env_entry_t;
+
+typedef A(gen_env_entry_t) gen_env_t;
+
+static bool gen_eval_const(vlog_node_t v, const gen_env_t *env, int64_t *out)
+{
+   if (v == NULL)
+      return false;
+
+   switch (vlog_kind(v)) {
+   case V_NUMBER:
+      {
+         number_t n = vlog_number(v);
+         if (!number_is_defined(n))
+            return false;
+         *out = number_integer(n);
+         return true;
+      }
+
+   case V_REF:
+      if (!vlog_has_ref(v))
+         return false;
+      {
+         vlog_node_t d = vlog_ref(v);
+         if (env != NULL) {
+            for (int i = (int)env->count - 1; i >= 0; i--) {
+               if (env->items[i].decl == d) {
+                  *out = env->items[i].val;
+                  return true;
+               }
+            }
+         }
+         switch (vlog_kind(d)) {
+         case V_PARAM_DECL:
+         case V_LOCALPARAM:
+            return vlog_has_value(d) && gen_eval_const(vlog_value(d), env, out);
+         case V_ENUM_NAME:
+            return vlog_get_const(v, out);
+         default:
+            return false;
+         }
+      }
+
+   case V_UNARY:
+      {
+         int64_t a;
+         if (!gen_eval_const(vlog_value(v), env, &a))
+            return false;
+         switch (vlog_subkind(v)) {
+         case V_UNARY_IDENTITY: *out = a; return true;
+         case V_UNARY_NEG:      *out = -a; return true;
+         case V_UNARY_NOT:      *out = !a; return true;
+         case V_UNARY_BITNEG:   *out = ~a; return true;
+         case V_UNARY_OR:       *out = (a != 0); return true;
+         case V_UNARY_NOR:      *out = (a == 0); return true;
+         default:               return false;
+         }
+      }
+
+   case V_BINARY:
+      {
+         int64_t a, b;
+         if (!gen_eval_const(vlog_left(v), env, &a)
+             || !gen_eval_const(vlog_right(v), env, &b))
+            return false;
+         switch (vlog_subkind(v)) {
+         case V_BINARY_PLUS:     *out = a + b; return true;
+         case V_BINARY_MINUS:    *out = a - b; return true;
+         case V_BINARY_TIMES:    *out = a * b; return true;
+         case V_BINARY_DIVIDE:   if (b == 0) return false; *out = a / b; return true;
+         case V_BINARY_MOD:      if (b == 0) return false; *out = a % b; return true;
+         case V_BINARY_EXP:
+            if (b < 0 || b > 62)
+               return false;
+            {
+               int64_t r = 1, base = a;
+               int64_t e = b;
+               while (e > 0) {
+                  if (e & 1) r *= base;
+                  e >>= 1;
+                  if (e > 0) base *= base;
+               }
+               *out = r;
+               return true;
+            }
+         case V_BINARY_SHIFT_LL:
+         case V_BINARY_SHIFT_LA:
+            if (b < 0 || b >= 63) return false;
+            *out = (int64_t)((uint64_t)a << b);
+            return true;
+         case V_BINARY_SHIFT_RL:
+            if (b < 0 || b >= 63) return false;
+            *out = (int64_t)((uint64_t)a >> b);
+            return true;
+         case V_BINARY_SHIFT_RA:
+            if (b < 0 || b >= 63) return false;
+            *out = a >> b;
+            return true;
+         case V_BINARY_LT:       *out = (a < b); return true;
+         case V_BINARY_LEQ:      *out = (a <= b); return true;
+         case V_BINARY_GT:       *out = (a > b); return true;
+         case V_BINARY_GEQ:      *out = (a >= b); return true;
+         case V_BINARY_LOG_EQ:
+         case V_BINARY_CASE_EQ:
+         case V_BINARY_WILD_EQ:  *out = (a == b); return true;
+         case V_BINARY_LOG_NEQ:
+         case V_BINARY_CASE_NEQ:
+         case V_BINARY_WILD_NEQ: *out = (a != b); return true;
+         case V_BINARY_AND:      *out = (a & b); return true;
+         case V_BINARY_OR:       *out = (a | b); return true;
+         case V_BINARY_XOR:      *out = (a ^ b); return true;
+         case V_BINARY_XNOR:     *out = ~(a ^ b); return true;
+         case V_BINARY_LOG_AND:  *out = (a && b); return true;
+         case V_BINARY_LOG_OR:   *out = (a || b); return true;
+         default:                return false;
+         }
+      }
+
+   case V_COND_EXPR:
+      {
+         int64_t c;
+         if (!gen_eval_const(vlog_value(v), env, &c))
+            return false;
+         return gen_eval_const(c ? vlog_left(v) : vlog_right(v), env, out);
+      }
+
+   case V_CONCAT:
+      if (!vlog_has_value(v) && vlog_params(v) == 1)
+         return gen_eval_const(vlog_param(v, 0), env, out);
+      return false;
+
+   case V_CAST:
+      if (vlog_subkind(v) == V_CAST_SIGN || vlog_subkind(v) == V_CAST_WIDTH
+          || vlog_subkind(v) == V_CAST_TYPE)
+         return gen_eval_const(vlog_value(v), env, out);
+      return false;
+
+   case V_SYS_FCALL:
+      if (vlog_params(v) == 1) {
+         int64_t a;
+         if (!gen_eval_const(vlog_param(v, 0), env, &a))
+            return false;
+         switch (vlog_subkind(v)) {
+         case V_SYSTF_SIGNED:
+         case V_SYSTF_UNSIGNED:
+            *out = a;
+            return true;
+         case V_SYSTF_CLOG2:
+            if (a <= 1) {
+               *out = 0;
+               return true;
+            }
+            {
+               uint64_t u = (uint64_t)(a - 1);
+               int64_t lg = 0;
+               while (u > 0) {
+                  lg++;
+                  u >>= 1;
+               }
+               *out = lg;
+               return true;
+            }
+         default:
+            return false;
+         }
+      }
+      return false;
+
+   default:
+      return false;
+   }
+}
+
+typedef struct {
+   vlog_node_t      root;
+   hash_t          *subst;
+   const gen_env_t *env;
+   hset_t          *in_stmt;
+} gen_copy_ctx_t;
+
+typedef struct {
+   hset_t           *in_stmt;
+   hset_t           *seen_arenas;
+   A(object_t *)     roots;
+} gen_stmt_scan_t;
+
+static void gen_stmt_scan_cb(vlog_node_t v, void *arg)
+{
+   gen_stmt_scan_t *gs = arg;
+   hset_insert(gs->in_stmt, v);
+   object_t *obj = vlog_to_object(v);
+   object_arena_t *a = object_arena(obj);
+   if (!hset_contains(gs->seen_arenas, a)) {
+      hset_insert(gs->seen_arenas, a);
+      APUSH(gs->roots, obj);
+   }
+}
+
+static bool gen_stmt_copy_pred(vlog_node_t v, void *arg)
+{
+   const gen_copy_ctx_t *gc = arg;
+   if (!hset_contains(gc->in_stmt, v))
+      return false;
+
+   switch (vlog_kind(v)) {
+   case V_REF:
+      return vlog_has_ref(v)
+          && (hash_get(gc->subst, vlog_ref(v)) != NULL
+              || hset_contains(gc->in_stmt, vlog_ref(v)));
+   case V_PART_SELECT:
+   case V_BIT_SELECT:
+   case V_CONCAT:
+   case V_CAST:
+      return true;
+   default:
+      return v == gc->root;
+   }
+}
+
+static vlog_node_t make_gen_number(int64_t val, const loc_t *loc)
+{
+   vlog_node_t num = vlog_new(V_NUMBER);
+   vlog_set_number(num, number_from_int(val));
+   vlog_set_loc(num, loc);
+   return num;
+}
+
+static vlog_node_t gen_stmt_rewrite_cb(vlog_node_t v, void *arg)
+{
+   const gen_copy_ctx_t *gc = arg;
+   switch (vlog_kind(v)) {
+   case V_REF:
+      if (vlog_has_ref(v)) {
+         vlog_node_t repl = hash_get(gc->subst, vlog_ref(v));
+         if (repl != NULL)
+            vlog_set_ref(v, repl);
+      }
+      return v;
+
+   case V_PART_SELECT:
+      {
+         int64_t cval;
+         if (vlog_kind(vlog_left(v)) != V_NUMBER
+             && gen_eval_const(vlog_left(v), gc->env, &cval))
+            vlog_set_left(v, make_gen_number(cval, vlog_loc(vlog_left(v))));
+         if (vlog_has_right(v) && vlog_kind(vlog_right(v)) != V_NUMBER
+             && gen_eval_const(vlog_right(v), gc->env, &cval))
+            vlog_set_right(v, make_gen_number(cval, vlog_loc(vlog_right(v))));
+      }
+      return v;
+
+   case V_BIT_SELECT:
+      {
+         const unsigned np = vlog_params(v);
+         for (unsigned i = 0; i < np; i++) {
+            vlog_node_t p = vlog_param(v, i);
+            int64_t cval;
+            if (vlog_kind(p) != V_NUMBER && gen_eval_const(p, gc->env, &cval))
+               vlog_set_param(v, i, make_gen_number(cval, vlog_loc(p)));
+         }
+      }
+      return v;
+
+   case V_CONCAT:
+      if (vlog_has_value(v) && vlog_kind(vlog_value(v)) != V_NUMBER) {
+         int64_t cval;
+         if (gen_eval_const(vlog_value(v), gc->env, &cval))
+            vlog_set_value(v, make_gen_number(cval, vlog_loc(vlog_value(v))));
+      }
+      return v;
+
+   case V_CAST:
+      if (vlog_subkind(v) == V_CAST_WIDTH && vlog_has_left(v)
+          && vlog_kind(vlog_left(v)) != V_NUMBER) {
+         int64_t cval;
+         if (gen_eval_const(vlog_left(v), gc->env, &cval))
+            vlog_set_left(v, make_gen_number(cval, vlog_loc(vlog_left(v))));
+      }
+      return v;
+
+   default:
+      return v;
+   }
+}
+
+static vlog_node_t specialize_gen_stmt(vlog_node_t s, const gen_env_t *env,
+                                       hash_t *subst, bool has_subst)
+{
+   if (!has_subst)
+      return s;
+
+   gen_stmt_scan_t gs = {
+      .in_stmt     = hset_new(32),
+      .seen_arenas = hset_new(8),
+      .roots       = AINIT,
+   };
+   object_t *root_obj = vlog_to_object(s);
+   hset_insert(gs.seen_arenas, object_arena(root_obj));
+   APUSH(gs.roots, root_obj);
+   vlog_visit(s, gen_stmt_scan_cb, &gs);
+
+   gen_copy_ctx_t gc = {
+      .root    = s,
+      .subst   = subst,
+      .env     = env,
+      .in_stmt = gs.in_stmt,
+   };
+
+   object_copy_ctx_t *copy = xcalloc_flex(sizeof(object_copy_ctx_t),
+                                          gs.roots.count, sizeof(object_t *));
+   copy->generation   = object_next_generation();
+   copy->pred_context = &gc;
+   copy->nroots       = gs.roots.count;
+   for (unsigned i = 0; i < gs.roots.count; i++)
+      copy->roots[i] = gs.roots.items[i];
+   copy->should_copy[OBJECT_TAG_VLOG] = (object_copy_pred_t)gen_stmt_copy_pred;
+
+   object_copy_begin(copy);
+   object_copy_finish(copy);
+
+   vlog_node_t copied = vlog_from_object(copy->roots[0]);
+   free(copy);
+   ACLEAR(gs.roots);
+   hset_free(gs.seen_arenas);
+   hset_free(gs.in_stmt);
+
+   return vlog_rewrite(copied, NULL, gen_stmt_rewrite_cb, &gc);
+}
+
+static vlog_node_t make_gen_localparam(vlog_node_t orig, int64_t val)
+{
+   vlog_node_t lp = vlog_new(V_LOCALPARAM);
+   vlog_set_ident(lp, vlog_ident(orig));
+   vlog_set_loc(lp, vlog_loc(orig));
+   if (vlog_has_type(orig))
+      vlog_set_type(lp, vlog_type(orig));
+   vlog_set_value(lp, make_gen_number(val, vlog_loc(orig)));
+   return lp;
+}
+
+static vlog_node_t clone_gen_local_sig(vlog_node_t d, ident_t gen_path)
+{
+   const vlog_kind_t k = vlog_kind(d);
+   vlog_node_t c = vlog_new(k);
+   vlog_set_ident(c, ident_sprintf("%s.%s", istr(gen_path),
+                                   istr(vlog_ident(d))));
+   vlog_set_loc(c, vlog_loc(d));
+   if (k == V_VAR_DECL)
+      vlog_set_flags(c, vlog_flags(d));
+   else if (k == V_NET_DECL)
+      vlog_set_subkind(c, vlog_subkind(d));
+   if (vlog_has_type(d))
+      vlog_set_type(c, vlog_type(d));
+   const int nr = vlog_ranges(d);
+   for (int i = 0; i < nr; i++)
+      vlog_add_range(c, vlog_range(d, i));
+   return c;
+}
+
+static bool add_gen_local_sig(analyze_ctx_t *ctx, vlog_node_t orig,
+                              ident_t gen_path, vlog_node_t *clone_out)
+{
+   if (sig_type_is_nettype(orig))
+      return false;
+   if (vlog_kind(orig) == V_NET_DECL && vlog_has_value(orig))
+      return false;   // Inline net assignment inside gen block
+   if (vlog_kind(orig) == V_VAR_DECL && vlog_has_value(orig))
+      return false;   // Var initializer inside gen block
+   if (vlog_kind(orig) == V_NET_DECL && vlog_has_delay(orig))
+      return false;
+
+   uint32_t w = 0, n = 0;
+   bool two_state = false;
+   island_sig_eject_reason_t r = ISIG_EJ_NONE;
+   if (!check_sig_type_eligible(orig, &w, &n, &two_state, &r))
+      return false;
+
+   vlog_node_t d_copy = clone_gen_local_sig(orig, gen_path);
+
+   uint32_t idx = ctx->nsigs++;
+   if (idx >= ctx->cap_sigs) {
+      ctx->cap_sigs *= 2;
+      ctx->sigs = xrealloc_array(ctx->sigs, ctx->cap_sigs, sizeof(sig_meta_t));
+   }
+
+   sig_meta_t *s = &(ctx->sigs[idx]);
+   memset(s, 0, sizeof(*s));
+   s->decl = d_copy;
+   s->orig_decl = orig;
+   s->name = vlog_ident(d_copy);
+   s->gen_path = gen_path;
+   s->orig_name = vlog_ident(orig);
+   s->width = w;
+   s->nelems = n;
+   s->two_state = two_state;
+   s->eligible = true;
+   s->is_gen_local = true;
+
+   hash_put(ctx->decl_map, d_copy, (void *)(uintptr_t)(idx + 1));
+   *clone_out = d_copy;
+   return true;
+}
+
+static bool expand_gen_node(analyze_ctx_t *ctx, vlog_node_t node,
+                            gen_env_t *env, hash_t *subst,
+                            ident_t path_prefix, bool in_for_iter,
+                            bool has_subst);
+
+static bool expand_gen_block(analyze_ctx_t *ctx, vlog_node_t blk,
+                             gen_env_t *env, hash_t *subst,
+                             ident_t blk_path, bool has_subst)
+{
+   const unsigned saved_env = env->count;
+   A(vlog_node_t) added_keys = AINIT;
+   A(vlog_node_t) saved_vals = AINIT;
+
+   const int ndecls = vlog_decls(blk);
+   for (int i = 0; i < ndecls; i++) {
+      vlog_node_t d = vlog_decl(blk, i);
+      const vlog_kind_t dk = vlog_kind(d);
+      if (dk == V_LOCALPARAM) {
+         if (vlog_ranges(d) > 0 || !vlog_has_value(d))
+            goto fail;
+         int64_t val;
+         if (!gen_eval_const(vlog_value(d), env, &val))
+            goto fail;
+         vlog_node_t lp = make_gen_localparam(d, val);
+         gen_env_entry_t e = { .decl = d, .val = val, .lp = lp };
+         APUSH(*env, e);
+         APUSH(added_keys, d);
+         APUSH(saved_vals, hash_get(subst, d));
+         hash_put(subst, d, lp);
+         has_subst = true;
+      }
+      else if (dk == V_VAR_DECL || dk == V_NET_DECL) {
+         vlog_node_t d_copy = NULL;
+         if (!add_gen_local_sig(ctx, d, blk_path, &d_copy))
+            goto fail;
+         APUSH(added_keys, d);
+         APUSH(saved_vals, hash_get(subst, d));
+         hash_put(subst, d, d_copy);
+         has_subst = true;
+      }
+      else if (dk == V_GENVAR_DECL || dk == V_TYPE_DECL || dk == V_ENUM_DECL
+               || dk == V_IMPORT_DECL) {
+         continue;
+      }
+      else
+         goto fail;
+   }
+
+   const int nstmts = vlog_stmts(blk);
+   for (int i = 0; i < nstmts; i++) {
+      vlog_node_t s = vlog_stmt(blk, i);
+      if (!expand_gen_node(ctx, s, env, subst, blk_path, false, has_subst))
+         goto fail;
+   }
+
+   for (int i = (int)added_keys.count - 1; i >= 0; i--)
+      hash_put(subst, added_keys.items[i], saved_vals.items[i]);
+   ACLEAR(added_keys);
+   ACLEAR(saved_vals);
+   env->count = saved_env;
+   return true;
+
+fail:
+   for (int i = (int)added_keys.count - 1; i >= 0; i--)
+      hash_put(subst, added_keys.items[i], saved_vals.items[i]);
+   ACLEAR(added_keys);
+   ACLEAR(saved_vals);
+   env->count = saved_env;
+   return false;
+}
+
+static bool eval_gen_for_step(vlog_node_t step_node, vlog_node_t gv,
+                              const gen_env_t *env, int64_t cur_val,
+                              int64_t *next_out)
+{
+   if (step_node == NULL || vlog_kind(step_node) != V_FOR_STEP
+       || vlog_stmts(step_node) != 1)
+      return false;
+
+   vlog_node_t st = vlog_stmt(step_node, 0);
+   switch (vlog_kind(st)) {
+   case V_PREFIX:
+   case V_POSTFIX:
+      if (!vlog_has_target(st) || vlog_kind(vlog_target(st)) != V_REF
+          || !vlog_has_ref(vlog_target(st))
+          || vlog_ref(vlog_target(st)) != gv)
+         return false;
+      if (vlog_subkind(st) == V_INCDEC_PLUS) {
+         *next_out = cur_val + 1;
+         return true;
+      }
+      if (vlog_subkind(st) == V_INCDEC_MINUS) {
+         *next_out = cur_val - 1;
+         return true;
+      }
+      return false;
+
+   case V_OP_ASSIGN:
+      if (!vlog_has_target(st) || vlog_kind(vlog_target(st)) != V_REF
+          || !vlog_has_ref(vlog_target(st))
+          || vlog_ref(vlog_target(st)) != gv)
+         return false;
+      {
+         int64_t rhs;
+         if (!gen_eval_const(vlog_value(st), env, &rhs))
+            return false;
+         switch (vlog_subkind(st)) {
+         case V_ASSIGN_PLUS:  *next_out = cur_val + rhs; return true;
+         case V_ASSIGN_MINUS: *next_out = cur_val - rhs; return true;
+         case V_ASSIGN_TIMES: *next_out = cur_val * rhs; return true;
+         default:             return false;
+         }
+      }
+
+   case V_BASSIGN:
+      if (!vlog_has_target(st) || vlog_kind(vlog_target(st)) != V_REF
+          || !vlog_has_ref(vlog_target(st))
+          || vlog_ref(vlog_target(st)) != gv)
+         return false;
+      return gen_eval_const(vlog_value(st), env, next_out);
+
+   default:
+      return false;
+   }
+}
+
+static bool expand_gen_node(analyze_ctx_t *ctx, vlog_node_t node,
+                            gen_env_t *env, hash_t *subst,
+                            ident_t path_prefix, bool in_for_iter,
+                            bool has_subst)
+{
+   (void)in_for_iter;
+   const vlog_kind_t k = vlog_kind(node);
+   switch (k) {
+   case V_ASSIGN:
+   case V_ALWAYS:
+      if (ctx->gen_procs.count >= NVC_ISLAND_MAX_GEN_PROCS)
+         return false;
+      {
+         vlog_node_t spec = specialize_gen_stmt(node, env, subst, has_subst);
+         gen_proc_item_t item = { .stmt = spec, .orig_stmt = node };
+         APUSH(ctx->gen_procs, item);
+      }
+      return true;
+
+   case V_GEN_BLOCK:
+      {
+         ident_t bname = vlog_ident(node);
+         ident_t bpath = path_prefix != NULL
+            ? ident_sprintf("%s%%%s", istr(path_prefix), istr(bname))
+            : ident_sprintf("%%%s", istr(bname));
+         return expand_gen_block(ctx, node, env, subst, bpath, has_subst);
+      }
+
+   case V_IF_GENERATE:
+      {
+         const int nconds = vlog_conds(node);
+         for (int c = 0; c < nconds; c++) {
+            vlog_node_t cond = vlog_cond(node, c);
+            if (vlog_has_value(cond)) {
+               int64_t val = 0;
+               if (!gen_eval_const(vlog_value(cond), env, &val))
+                  return false;
+               if (val == 0)
+                  continue;
+            }
+            const int ns = vlog_stmts(cond);
+            for (int j = 0; j < ns; j++) {
+               if (!expand_gen_node(ctx, vlog_stmt(cond, j), env, subst,
+                                    path_prefix, false, has_subst))
+                  return false;
+            }
+            return true;
+         }
+         return true;
+      }
+
+   case V_FOR_GENERATE:
+      {
+         if (!vlog_has_left(node) || !vlog_has_value(node)
+             || !vlog_has_right(node) || vlog_stmts(node) != 1)
+            return false;
+
+         vlog_node_t init = vlog_left(node);
+         if (vlog_kind(init) != V_FOR_INIT || vlog_stmts(init) != 1)
+            return false;
+
+         vlog_node_t is0 = vlog_stmt(init, 0);
+         if (vlog_kind(is0) != V_BASSIGN || vlog_kind(vlog_target(is0)) != V_REF
+             || !vlog_has_ref(vlog_target(is0)))
+            return false;
+
+         vlog_node_t gv = vlog_ref(vlog_target(is0));
+         if (vlog_kind(gv) != V_GENVAR_DECL)
+            return false;
+
+         vlog_node_t blk = vlog_stmt(node, 0);
+         if (vlog_kind(blk) != V_GEN_BLOCK)
+            return false;
+
+         int64_t cur_val = 0;
+         if (!gen_eval_const(vlog_value(is0), env, &cur_val))
+            return false;
+
+         vlog_node_t saved_sub = hash_get(subst, gv);
+         const unsigned saved_env = env->count;
+         gen_env_entry_t ge = { .decl = gv, .val = cur_val, .lp = NULL };
+         APUSH(*env, ge);
+
+         bool ok = true;
+         unsigned iters = 0;
+         while (true) {
+            env->items[saved_env].val = cur_val;
+            int64_t cond_val = 0;
+            if (!gen_eval_const(vlog_value(node), env, &cond_val)) {
+               ok = false;
+               break;
+            }
+            if (cond_val == 0)
+               break;
+            if (++iters > NVC_ISLAND_MAX_GEN_ITERS) {
+               ok = false;
+               break;
+            }
+
+            vlog_node_t lp = make_gen_localparam(gv, cur_val);
+            env->items[saved_env].lp = lp;
+            hash_put(subst, gv, lp);
+
+            ident_t bname = vlog_ident(blk);
+            ident_t ipath = path_prefix != NULL
+               ? ident_sprintf("%s%%%s[%" PRIi64 "]", istr(path_prefix),
+                               istr(bname), cur_val)
+               : ident_sprintf("%%%s[%" PRIi64 "]", istr(bname), cur_val);
+
+            if (!expand_gen_block(ctx, blk, env, subst, ipath, true)) {
+               ok = false;
+               break;
+            }
+
+            int64_t next_val = 0;
+            if (!eval_gen_for_step(vlog_right(node), gv, env, cur_val,
+                                   &next_val)) {
+               ok = false;
+               break;
+            }
+            cur_val = next_val;
+         }
+
+         hash_put(subst, gv, saved_sub);
+         env->count = saved_env;
+         return ok;
+      }
+
+   case V_INST_LIST:
+   case V_INITIAL:
+   case V_FINAL:
+   case V_GATE_INST:
+   case V_UDP_TABLE:
+   case V_SPECIFY:
+      APUSH(ctx->gen_ext_stmts,
+            specialize_gen_stmt(node, env, subst, has_subst));
+      return true;
+
+   case V_DEFPARAM:
+      return true;
+
+   default:
+      return false;
+   }
+}
+
+static void expand_module_generates(analyze_ctx_t *ctx)
+{
+   if (vlog_flags(ctx->body) & VLOG_F_GEN_BODY)
+      return;
+
+   const int nstmts = vlog_stmts(ctx->body);
+   bool has_gen = false;
+   for (int i = 0; i < nstmts; i++) {
+      const vlog_kind_t k = vlog_kind(vlog_stmt(ctx->body, i));
+      if (k == V_GEN_BLOCK || k == V_IF_GENERATE || k == V_FOR_GENERATE) {
+         has_gen = true;
+         break;
+      }
+   }
+   if (!has_gen)
+      return;
+
+   ctx->expanded_gens = hset_new(16);
+   gen_env_t env = AINIT;
+   hash_t *subst = hash_new(32);
+
+   for (int i = 0; i < nstmts; i++) {
+      vlog_node_t s = vlog_stmt(ctx->body, i);
+      const vlog_kind_t k = vlog_kind(s);
+      if (k != V_GEN_BLOCK && k != V_IF_GENERATE && k != V_FOR_GENERATE)
+         continue;
+
+      const unsigned saved_procs = ctx->gen_procs.count;
+      const unsigned saved_ext = ctx->gen_ext_stmts.count;
+      const uint32_t saved_sigs = ctx->nsigs;
+
+      if (expand_gen_node(ctx, s, &env, subst, NULL, false, false))
+         hset_insert(ctx->expanded_gens, s);
+      else {
+         // Roll back partial expansion and fall back to conservative prescan
+         for (uint32_t j = saved_sigs; j < ctx->nsigs; j++)
+            hash_put(ctx->decl_map, ctx->sigs[j].decl, NULL);
+         ctx->nsigs = saved_sigs;
+         ctx->gen_procs.count = saved_procs;
+         ctx->gen_ext_stmts.count = saved_ext;
+      }
+   }
+
+   hash_free(subst);
+   ACLEAR(env);
 }
 
 static void mark_force_cb(vlog_node_t v, void *arg)
@@ -2353,7 +3119,7 @@ static void mark_ejected_proc_refs(analyze_ctx_t *ctx, vlog_node_t s)
 static void check_all_procs(analyze_ctx_t *ctx)
 {
    const int nstmts = vlog_stmts(ctx->body);
-   ctx->cap_procs = MAX(8, nstmts);
+   ctx->cap_procs = MAX(8u, (uint32_t)nstmts + ctx->gen_procs.count);
    ctx->procs = xcalloc_array(ctx->cap_procs, sizeof(proc_meta_t));
 
    for (int i = 0; i < nstmts; i++) {
@@ -2381,6 +3147,8 @@ static void check_all_procs(analyze_ctx_t *ctx)
       proc_meta_t *pm = &(ctx->procs[pidx]);
       memset(pm, 0, sizeof(*pm));
       pm->stmt = s;
+      pm->orig_stmt = s;
+      pm->from_gen = false;
       pm->clk_sig_idx = -1;
       pm->rst_sig_idx = -1;
       pm->island_idx = -1;
@@ -2418,14 +3186,56 @@ static void check_all_procs(analyze_ctx_t *ctx)
             mark_ejected_proc_refs(ctx, s);
       }
    }
+
+   for (unsigned i = 0; i < ctx->gen_procs.count; i++) {
+      vlog_node_t s = ctx->gen_procs.items[i].stmt;
+      vlog_node_t orig = ctx->gen_procs.items[i].orig_stmt;
+      const vlog_kind_t k = vlog_kind(s);
+
+      uint32_t pidx = ctx->nprocs++;
+      if (pidx >= ctx->cap_procs) {
+         ctx->cap_procs *= 2;
+         ctx->procs = xrealloc_array(ctx->procs, ctx->cap_procs,
+                                     sizeof(proc_meta_t));
+      }
+
+      proc_meta_t *pm = &(ctx->procs[pidx]);
+      memset(pm, 0, sizeof(*pm));
+      pm->stmt = s;
+      pm->orig_stmt = orig;
+      pm->from_gen = true;
+      pm->clk_sig_idx = -1;
+      pm->rst_sig_idx = -1;
+      pm->island_idx = -1;
+
+      if (k == V_ASSIGN)
+         check_assign_proc(ctx, pm, s);
+      else if (k == V_ALWAYS)
+         check_always_proc(ctx, pm, s);
+      else
+         pm->eject_reason = IPROC_EJ_UNSUPPORTED_STMT;
+
+      if (!pm->eligible) {
+         ACLEAR(pm->reads);
+         ACLEAR(pm->writes);
+         ACLEAR(pm->write_ranges);
+         if (k == V_ASSIGN || k == V_ALWAYS)
+            mark_ejected_proc_refs(ctx, s);
+      }
+   }
 }
 
 static bool sv_procs_write_conflict(const proc_meta_t *a, const proc_meta_t *b,
                                     uint32_t si)
 {
-   if ((a->kind == IPROC_FF) != (b->kind == IPROC_FF))
-      return true;
-   if (a->kind == IPROC_FF) {
+   if ((a->kind == IPROC_FF) != (b->kind == IPROC_FF)) {
+      // Allow disjoint comb + FF writes on the same signal when the comb
+      // side is constant (e.g. tied-off generate elements alongside FFs).
+      const proc_meta_t *comb = (a->kind == IPROC_FF) ? b : a;
+      if (comb->reads.count > 0)
+         return true;
+   }
+   else if (a->kind == IPROC_FF) {
       if (a->clk_sig_idx != b->clk_sig_idx || a->clk_posedge != b->clk_posedge
           || a->rst_sig_idx != b->rst_sig_idx
           || (a->rst_sig_idx >= 0 && a->rst_posedge != b->rst_posedge))
@@ -2499,18 +3309,48 @@ static bool sv_output_port_fully_written(const analyze_ctx_t *ctx, uint32_t si)
 
 static void resolve_multi_drivers(analyze_ctx_t *ctx)
 {
+   hset_t *ejected_origs = hset_new(16);
    bool changed = true;
    while (changed) {
       changed = false;
+
+      // Record any generate template stmt that already has an ineligible iter
+      for (uint32_t i = 0; i < ctx->nprocs; i++) {
+         if (ctx->procs[i].from_gen && !ctx->procs[i].eligible)
+            hset_insert(ejected_origs, ctx->procs[i].orig_stmt);
+      }
+
       for (uint32_t i = 0; i < ctx->nprocs; i++) {
          proc_meta_t *p = &(ctx->procs[i]);
          if (!p->eligible)
             continue;
 
          bool conflict = false;
+         if (p->from_gen && hset_contains(ejected_origs, p->orig_stmt))
+            conflict = true;
+
+         // Generate-local signals must remain purely island-internal
+         for (uint32_t j = 0; j < p->reads.count && !conflict; j++) {
+            const sig_meta_t *sm = &(ctx->sigs[p->reads.items[j]]);
+            if (sm->is_gen_local
+                && (sm->ext_read || sm->ext_written || sm->is_external))
+               conflict = true;
+         }
+         if (!conflict && p->clk_sig_idx >= 0
+             && ctx->sigs[p->clk_sig_idx].is_gen_local)
+            conflict = true;
+         if (!conflict && p->rst_sig_idx >= 0
+             && ctx->sigs[p->rst_sig_idx].is_gen_local)
+            conflict = true;
+
          for (uint32_t j = 0; j < p->writes.count && !conflict; j++) {
             const uint32_t si = p->writes.items[j];
             sig_meta_t *sm = &(ctx->sigs[si]);
+            if (sm->is_gen_local
+                && (sm->ext_read || sm->ext_written || sm->is_external)) {
+               conflict = true;
+               break;
+            }
             if (sm->ext_written) {
                conflict = true;
                break;
@@ -2550,6 +3390,8 @@ static void resolve_multi_drivers(analyze_ctx_t *ctx)
          if (conflict) {
             p->eligible = false;
             p->eject_reason = IPROC_EJ_MULTI_DRIVER_TARGET;
+            if (p->from_gen)
+               hset_insert(ejected_origs, p->orig_stmt);
             ACLEAR(p->reads);
             ACLEAR(p->writes);
             ACLEAR(p->write_ranges);
@@ -2558,6 +3400,7 @@ static void resolve_multi_drivers(analyze_ctx_t *ctx)
          }
       }
    }
+   hset_free(ejected_origs);
 
    for (uint32_t i = 0; i < ctx->nsigs; i++) {
       if (ctx->sigs[i].driver_count > 1 && ctx->sigs[i].ext_written)
@@ -2609,6 +3452,7 @@ static uint32_t partition_islands(analyze_ctx_t *ctx)
    // packing components into islands up to NVC_ISLAND_MAX_NODES
    uint32_t *parent = xmalloc_array(ctx->nprocs, sizeof(uint32_t));
    int *sig_owner = xmalloc_array(MAX(1u, ctx->nsigs), sizeof(int));
+   hash_t *orig_owner = hash_new(32);
    for (uint32_t i = 0; i < ctx->nprocs; i++)
       parent[i] = i;
    for (uint32_t i = 0; i < ctx->nsigs; i++)
@@ -2619,9 +3463,17 @@ static uint32_t partition_islands(analyze_ctx_t *ctx)
       if (!pm->eligible)
          continue;
 
+      if (pm->from_gen) {
+         uintptr_t prev = (uintptr_t)hash_get(orig_owner, pm->orig_stmt);
+         if (prev == 0)
+            hash_put(orig_owner, pm->orig_stmt, (void *)(uintptr_t)(i + 1));
+         else
+            uf_union(parent, (uint32_t)(prev - 1), i);
+      }
+
       for (uint32_t j = 0; j < pm->writes.count; j++) {
          uint32_t si = pm->writes.items[j];
-         if (ctx->sigs[si].driver_count > 1
+         if (ctx->sigs[si].driver_count > 1 || ctx->sigs[si].is_gen_local
              || (!ctx->sigs[si].is_external && !ctx->sigs[si].is_input_port
                  && !ctx->sigs[si].is_output_port)) {
             if (sig_owner[si] < 0)
@@ -2632,8 +3484,9 @@ static uint32_t partition_islands(analyze_ctx_t *ctx)
       }
       for (uint32_t j = 0; j < pm->reads.count; j++) {
          uint32_t si = pm->reads.items[j];
-         if (!ctx->sigs[si].is_external && !ctx->sigs[si].is_input_port
-             && !ctx->sigs[si].is_output_port) {
+         if (ctx->sigs[si].is_gen_local
+             || (!ctx->sigs[si].is_external && !ctx->sigs[si].is_input_port
+                 && !ctx->sigs[si].is_output_port)) {
             if (sig_owner[si] < 0)
                sig_owner[si] = (int)i;
             else
@@ -2641,6 +3494,7 @@ static uint32_t partition_islands(analyze_ctx_t *ctx)
          }
       }
    }
+   hash_free(orig_owner);
 
    // Assign deterministic island ids respecting NVC_ISLAND_MAX_NODES
    int *comp_island = xmalloc_array(ctx->nprocs, sizeof(int));
@@ -2714,10 +3568,27 @@ static uint32_t partition_islands(analyze_ctx_t *ctx)
       }
 
       bool split_multi = false;
+      hash_t *orig_island = hash_new(32);
       for (uint32_t i = 0; i < ctx->nprocs; i++) {
-         const proc_meta_t *pm = &(ctx->procs[i]);
+         proc_meta_t *pm = &(ctx->procs[i]);
          if (!pm->eligible)
             continue;
+         if (pm->from_gen) {
+            uintptr_t prev = (uintptr_t)hash_get(orig_island, pm->orig_stmt);
+            if (prev == 0)
+               hash_put(orig_island, pm->orig_stmt,
+                        (void *)(uintptr_t)(pm->island_idx + 1));
+            else if ((int)(prev - 1) != pm->island_idx) {
+               pm->eligible = false;
+               pm->eject_reason = IPROC_EJ_TOO_LARGE;
+               ACLEAR(pm->reads);
+               ACLEAR(pm->writes);
+               ACLEAR(pm->write_ranges);
+               mark_ejected_proc_refs(ctx, pm->stmt);
+               split_multi = true;
+               continue;
+            }
+         }
          for (uint32_t j = 0; j < pm->writes.count; j++) {
             uint32_t si = pm->writes.items[j];
             if (sig_w_island[si] < 0)
@@ -2729,10 +3600,12 @@ static uint32_t partition_islands(analyze_ctx_t *ctx)
             }
          }
       }
+      hash_free(orig_island);
       free(sig_w_island);
       if (split_multi)
          resolve_multi_drivers(ctx);
 
+      bool split_gen_local = false;
       for (uint32_t i = 0; i < ctx->nprocs; i++) {
          const proc_meta_t *pm = &(ctx->procs[i]);
          if (!pm->eligible)
@@ -2741,15 +3614,21 @@ static uint32_t partition_islands(analyze_ctx_t *ctx)
             uint32_t si = pm->reads.items[j];
             if (sig_island[si] < 0)
                sig_island[si] = pm->island_idx;
-            else if (sig_island[si] != pm->island_idx)
+            else if (sig_island[si] != pm->island_idx) {
                ctx->sigs[si].ext_read = true;
+               if (ctx->sigs[si].is_gen_local)
+                  split_gen_local = true;
+            }
          }
          for (uint32_t j = 0; j < pm->writes.count; j++) {
             uint32_t si = pm->writes.items[j];
             if (sig_island[si] < 0)
                sig_island[si] = pm->island_idx;
-            else if (sig_island[si] != pm->island_idx)
+            else if (sig_island[si] != pm->island_idx) {
                ctx->sigs[si].ext_written = true;
+               if (ctx->sigs[si].is_gen_local)
+                  split_gen_local = true;
+            }
          }
          if (pm->clk_sig_idx >= 0) {
             uint32_t si = (uint32_t)pm->clk_sig_idx;
@@ -2766,6 +3645,8 @@ static uint32_t partition_islands(analyze_ctx_t *ctx)
                ctx->sigs[si].ext_read = true;
          }
       }
+      if (split_gen_local)
+         resolve_multi_drivers(ctx);
       free(sig_island);
    }
 
@@ -3199,6 +4080,8 @@ static vlog_island_t *build_island(analyze_ctx_t *ctx, uint32_t island_id)
       dst->decl = sm->decl;
       dst->port = sm->port;
       dst->name = sm->name;
+      dst->gen_path = sm->gen_path;
+      dst->orig_name = sm->orig_name;
       dst->width = sm->width;
       dst->nelems = sm->nelems;
       dst->two_state = sm->two_state
@@ -3275,7 +4158,9 @@ static vlog_island_t *build_island(analyze_ctx_t *ctx, uint32_t island_id)
       island_proc_t *ip = &(isl->procs[i]);
 
       ip->stmt = pm->stmt;
+      ip->orig_stmt = pm->orig_stmt;
       ip->kind = pm->kind;
+      ip->from_gen = pm->from_gen;
       ip->node_count = pm->node_count;
       ip->topo_order = -1;
       ip->topo_level = -1;
@@ -3372,6 +4257,7 @@ vlog_island_plan_t *vlog_island_analyze(vlog_node_t body, bool is_mixed)
    };
 
    collect_module_sigs(&ctx);
+   expand_module_generates(&ctx);
    prescan_external_and_drivers(&ctx);
    prescan_forces(&ctx);
    check_all_procs(&ctx);
@@ -3420,6 +4306,10 @@ vlog_island_plan_t *vlog_island_analyze(vlog_node_t body, bool is_mixed)
       ACLEAR(ctx.procs[i].writes);
       ACLEAR(ctx.procs[i].write_ranges);
    }
+   ACLEAR(ctx.gen_procs);
+   ACLEAR(ctx.gen_ext_stmts);
+   if (ctx.expanded_gens != NULL)
+      hset_free(ctx.expanded_gens);
    free(ctx.procs);
    free(ctx.sigs);
    hash_free(ctx.decl_map);

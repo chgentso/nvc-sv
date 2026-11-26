@@ -98,6 +98,9 @@ static bool m2_decl_in_island(mir_unit_t *inst_mu, hash_t *sig_map,
    if (isig == NULL || isig->width == 0 || isig->nelems == 0)
       return false;
 
+   if (isig->gen_path != NULL)
+      return true;   // Generate-local signal attached when child block runs
+
    int hops = 0;
    mir_value_t var = mir_search_object(inst_mu, decl, &hops);
    if (mir_is_null(var) || hops != 0)
@@ -462,9 +465,21 @@ static void m2_compute_boundaries(vlog_island_m2_t *m2)
    }
 }
 
+typedef struct _gen_local_attach {
+   uint32_t                  island_idx;
+   uint32_t                  sig_idx;
+   struct _gen_local_attach *next;
+} gen_local_attach_t;
+
 typedef struct _island_shared_cache {
    mir_context_t                *mc;
    shash_t                      *canon_map;
+   hash_t                       *gen_parent_map;   // gen_qual -> parent_qual
+   hash_t                       *mod_fused_gen;    // root_qual -> hset_t * (stmt idents)
+   hash_t                       *mod_gen_locals;   // root_qual -> shash_t * ("path:name" -> gen_local_attach_t *)
+   A(hset_t *)                   owned_hsets;
+   A(shash_t *)                  owned_shashes;
+   A(gen_local_attach_t *)       owned_attaches;
    uint32_t                      next_id;
    struct _island_shared_cache  *next;
 } island_shared_cache_t;
@@ -482,6 +497,18 @@ static void island_shared_cache_free(void *arg)
       }
    }
    shash_free(c->canon_map);
+   hash_free(c->gen_parent_map);
+   hash_free(c->mod_fused_gen);
+   hash_free(c->mod_gen_locals);
+   for (unsigned i = 0; i < c->owned_hsets.count; i++)
+      hset_free(c->owned_hsets.items[i]);
+   for (unsigned i = 0; i < c->owned_shashes.count; i++)
+      shash_free(c->owned_shashes.items[i]);
+   for (unsigned i = 0; i < c->owned_attaches.count; i++)
+      free(c->owned_attaches.items[i]);
+   ACLEAR(c->owned_hsets);
+   ACLEAR(c->owned_shashes);
+   ACLEAR(c->owned_attaches);
    free(c);
 }
 
@@ -495,10 +522,175 @@ static island_shared_cache_t *island_get_shared_cache(mir_context_t *mc)
    island_shared_cache_t *c = xcalloc(sizeof(island_shared_cache_t));
    c->mc = mc;
    c->canon_map = shash_new(64);
+   c->gen_parent_map = hash_new(64);
+   c->mod_fused_gen = hash_new(64);
+   c->mod_gen_locals = hash_new(32);
    c->next = shared_caches;
    shared_caches = c;
    mir_context_on_free(mc, island_shared_cache_free, c);
    return c;
+}
+
+static ident_t island_find_gen_root(island_shared_cache_t *cache, ident_t qual,
+                                    int *hops_out)
+{
+   ident_t cur = qual;
+   int hops = 0;
+   while (cur != NULL) {
+      ident_t parent = hash_get(cache->gen_parent_map, cur);
+      if (parent == NULL)
+         break;
+      cur = parent;
+      hops++;
+      if (hops > 64)
+         break;
+   }
+   if (hops_out != NULL)
+      *hops_out = hops;
+   return cur;
+}
+
+void vlog_island_register_gen_scope(mir_context_t *mc, ident_t qual,
+                                    ident_t parent)
+{
+   if (mc == NULL || qual == NULL || parent == NULL)
+      return;
+   island_shared_cache_t *cache = island_get_shared_cache(mc);
+   hash_put(cache->gen_parent_map, qual, parent);
+}
+
+bool vlog_island_gen_stmt_fused(mir_context_t *mc, ident_t qual,
+                                vlog_node_t stmt)
+{
+   if (mc == NULL || qual == NULL || stmt == NULL || !vlog_has_ident(stmt))
+      return false;
+   island_shared_cache_t *cache = island_get_shared_cache(mc);
+   ident_t root = island_find_gen_root(cache, qual, NULL);
+   if (root == NULL)
+      return false;
+   hset_t *set = hash_get(cache->mod_fused_gen, root);
+   return set != NULL && hset_contains(set, vlog_ident(stmt));
+}
+
+static uint64_t island_gen_key_hash_from_path(ident_t gen_path,
+                                              ident_t orig_name)
+{
+   const char *gp = istr(gen_path);
+   if (gp[0] == '%')
+      gp++;
+   LOCAL_TEXT_BUF tb = tb_new();
+   for (const char *p = gp; *p != '\0'; p++)
+      tb_append(tb, *p == '%' ? '.' : *p);
+   tb_append(tb, '.');
+   tb_cat(tb, istr(orig_name));
+
+   uint64_t h = UINT64_C(14695981039346656037);
+   for (const unsigned char *p = (const unsigned char *)tb_get(tb); *p; p++) {
+      h ^= (uint64_t)(*p);
+      h *= UINT64_C(1099511628211);
+   }
+   return h ?: 1u;
+}
+
+void vlog_island_emit_gen_local_attaches(mir_context_t *mc, mir_unit_t *mu,
+                                         vlog_node_t body, ident_t qual,
+                                         ident_t parent)
+{
+   if (mc == NULL || mu == NULL || body == NULL || qual == NULL
+       || parent == NULL)
+      return;
+
+   island_shared_cache_t *cache = island_get_shared_cache(mc);
+   int hops_to_root = 0;
+   ident_t root = island_find_gen_root(cache, qual, &hops_to_root);
+   if (root == NULL || hops_to_root <= 0)
+      return;
+
+   shash_t *lmap = hash_get(cache->mod_gen_locals, root);
+   if (lmap == NULL)
+      return;
+
+   const char *qstr = istr(qual);
+   const char *pct = strchr(qstr, '%');
+   if (pct == NULL)
+      return;
+
+   mir_shape_t *root_shape = mir_get_shape(mc, root);
+   if (root_shape == NULL)
+      return;
+
+   const bool is_shared = !!(vlog_flags(body) & VLOG_F_GEN_SHARED);
+   mir_type_t t_offset = mir_offset_type(mu);
+   ident_t attach_fn = ident_new("__sv_island_attach_sig");
+
+   const int ndecls = vlog_decls(body);
+   for (int i = 0; i < ndecls; i++) {
+      vlog_node_t d = vlog_decl(body, i);
+      const vlog_kind_t dk = vlog_kind(d);
+      if (dk != V_VAR_DECL && dk != V_NET_DECL)
+         continue;
+
+      const gen_local_attach_t *att = NULL;
+      if (!is_shared) {
+         LOCAL_TEXT_BUF key_tb = tb_new();
+         tb_printf(key_tb, "%s:%s", pct, istr(vlog_ident(d)));
+         att = shash_get(lmap, tb_get(key_tb));
+      }
+
+      const gen_local_attach_t *wild = NULL;
+      if (att == NULL) {
+         LOCAL_TEXT_BUF wkey = tb_new();
+         tb_printf(wkey, "*:%s", istr(vlog_ident(d)));
+         wild = shash_get(lmap, tb_get(wkey));
+      }
+
+      if (att == NULL && wild == NULL)
+         continue;
+
+      int dhops = 0;
+      mir_value_t dvar = mir_search_object(mu, d, &dhops);
+      if (mir_is_null(dvar) || dhops != 0
+          || !mir_points_to(mu, dvar, MIR_TYPE_SIGNAL))
+         continue;
+
+      mir_value_t sig_val = mir_build_load(mu, dvar);
+      if (att != NULL) {
+         ident_t hname = ident_sprintf("$island_h%u", att->island_idx);
+         const int hslot = mir_find_slot(root_shape, hname);
+         if (hslot < 0)
+            continue;
+         mir_value_t hptr = mir_build_var_upref(mu, hops_to_root, hslot);
+         mir_value_t handle = mir_build_load(mu, hptr);
+         mir_value_t a_args[] = {
+            handle,
+            mir_const(mu, t_offset, att->sig_idx),
+            sig_val,
+         };
+         mir_value_t res = mir_build_fcall(mu, attach_fn, t_offset,
+                                           MIR_NULL_STAMP, a_args,
+                                           ARRAY_LEN(a_args));
+         mir_build_consume(mu, res);
+      }
+      else {
+         for (const gen_local_attach_t *w = wild; w != NULL; w = w->next) {
+            ident_t hname = ident_sprintf("$island_h%u", w->island_idx);
+            const int hslot = mir_find_slot(root_shape, hname);
+            if (hslot < 0)
+               continue;
+            mir_value_t hptr = mir_build_var_upref(mu, hops_to_root, hslot);
+            mir_value_t handle = mir_build_load(mu, hptr);
+            mir_value_t a_args[] = {
+               handle,
+               mir_const(mu, t_offset, (int64_t)(uint32_t)UINT32_MAX),
+               sig_val,
+            };
+            mir_value_t res = mir_build_fcall(mu, attach_fn, t_offset,
+                                              MIR_NULL_STAMP, a_args,
+                                              ARRAY_LEN(a_args));
+            mir_build_consume(mu, res);
+         }
+      }
+   }
 }
 
 typedef struct {
@@ -684,7 +876,8 @@ static bool m2_append_module_spec(text_buf_t *tb, vlog_node_t body,
 
    for (uint32_t i = 0; i < isl->nsigs; i++) {
       const island_sig_t *s = &(isl->sigs[i]);
-      tb_printf(tb, "|S%u:%s:%u:%u:%d:%u:%u", i, istr(s->name),
+      tb_printf(tb, "|S%u:%s:%s:%u:%u:%d:%u:%u", i,
+                s->gen_path != NULL ? istr(s->gen_path) : "", istr(s->name),
                 s->width, s->nelems, s->two_state ? 1 : 0, s->a_off, s->b_off);
    }
 
@@ -819,10 +1012,23 @@ vlog_island_lower_ctx_t *vlog_island_lower_prepare(vlog_node_t body,
       }
 
       // Eject any proc whose outputs collide with external/non-fused drivers,
-      // and enforce all-or-nothing eligibility for small combinational SCCs.
+      // enforce all-or-nothing eligibility for small combinational SCCs and
+      // generate-block templates, and keep gen-local signals purely internal.
+      hset_t *ej_gen_orig = hset_new(16);
       bool changed;
       do {
          changed = false;
+         for (uint32_t p = 0; p < isl->nprocs; p++) {
+            if (isl->procs[p].from_gen && !m2->fused_proc[p])
+               hset_insert(ej_gen_orig, isl->procs[p].orig_stmt);
+         }
+         for (uint32_t p = 0; p < isl->nprocs; p++) {
+            if (m2->fused_proc[p] && isl->procs[p].from_gen
+                && hset_contains(ej_gen_orig, isl->procs[p].orig_stmt)) {
+               m2->fused_proc[p] = false;
+               changed = true;
+            }
+         }
          for (uint32_t c = 0; c < isl->ntopo; ) {
             const island_proc_t *ip = &(isl->procs[isl->topo_order[c]]);
             if (!ip->in_cycle) {
@@ -838,6 +1044,8 @@ vlog_island_lower_ctx_t *vlog_island_lower_prepare(vlog_node_t body,
                   const uint32_t pidx = isl->topo_order[j];
                   if (m2->fused_proc[pidx]) {
                      m2->fused_proc[pidx] = false;
+                     if (isl->procs[pidx].from_gen)
+                        hset_insert(ej_gen_orig, isl->procs[pidx].orig_stmt);
                      changed = true;
                   }
                }
@@ -849,16 +1057,30 @@ vlog_island_lower_ctx_t *vlog_island_lower_prepare(vlog_node_t body,
             if (!m2->fused_proc[p])
                continue;
             const island_proc_t *ip = &(isl->procs[p]);
-            for (uint32_t j = 0; j < ip->nwrites; j++) {
+            bool ej = false;
+            for (uint32_t j = 0; j < ip->nwrites && !ej; j++) {
                const uint32_t sidx = ip->writes[j];
-               if (m2->sig_in[sidx] || m2->sig_ext_w[sidx]) {
-                  m2->fused_proc[p] = false;
-                  changed = true;
-                  break;
-               }
+               if (m2->sig_in[sidx] || m2->sig_ext_w[sidx])
+                  ej = true;
+               if (isl->sigs[sidx].gen_path != NULL && m2->sig_out[sidx])
+                  ej = true;
+            }
+            for (uint32_t j = 0; j < ip->nreads && !ej; j++) {
+               const uint32_t sidx = ip->reads[j];
+               if (isl->sigs[sidx].gen_path != NULL
+                   && (m2->sig_in[sidx] || m2->sig_ext_w[sidx]
+                       || m2->sig_out[sidx]))
+                  ej = true;
+            }
+            if (ej) {
+               m2->fused_proc[p] = false;
+               if (ip->from_gen)
+                  hset_insert(ej_gen_orig, ip->orig_stmt);
+               changed = true;
             }
          }
       } while (changed);
+      hset_free(ej_gen_orig);
 
       m2->n_fused_comb = 0;
       for (uint32_t c = 0; c < isl->ntopo; c++) {
@@ -956,6 +1178,62 @@ vlog_island_lower_ctx_t *vlog_island_lower_prepare(vlog_node_t body,
          }
       }
 
+      if (m2->n_fused_comb > 0 || m2->n_fused_ff > 0) {
+         island_shared_cache_t *cache = island_get_shared_cache(mc);
+         hset_t *fgen = hash_get(cache->mod_fused_gen, qual);
+         for (uint32_t p = 0; p < isl->nprocs; p++) {
+            if (!m2->fused_proc[p] || !isl->procs[p].from_gen)
+               continue;
+            vlog_node_t orig = isl->procs[p].orig_stmt;
+            if (orig != NULL && vlog_has_ident(orig)) {
+               if (fgen == NULL) {
+                  fgen = hset_new(32);
+                  APUSH(cache->owned_hsets, fgen);
+                  hash_put(cache->mod_fused_gen, qual, fgen);
+               }
+               hset_insert(fgen, vlog_ident(orig));
+            }
+         }
+
+         shash_t *lmap = hash_get(cache->mod_gen_locals, qual);
+         for (uint32_t i = 0; i < isl->nsigs; i++) {
+            const island_sig_t *s = &(isl->sigs[i]);
+            if (s->gen_path == NULL || s->orig_name == NULL)
+               continue;
+            if (lmap == NULL) {
+               lmap = shash_new(32);
+               APUSH(cache->owned_shashes, lmap);
+               hash_put(cache->mod_gen_locals, qual, lmap);
+            }
+            LOCAL_TEXT_BUF key_tb = tb_new();
+            tb_printf(key_tb, "%s:%s", istr(s->gen_path), istr(s->orig_name));
+            gen_local_attach_t *att = xcalloc(sizeof(gen_local_attach_t));
+            att->island_idx = ii;
+            att->sig_idx = i;
+            APUSH(cache->owned_attaches, att);
+            shash_put(lmap, tb_get(key_tb), att);
+
+            LOCAL_TEXT_BUF wkey = tb_new();
+            tb_printf(wkey, "*:%s", istr(s->orig_name));
+            gen_local_attach_t *head = shash_get(lmap, tb_get(wkey));
+            bool seen_isl = false;
+            for (gen_local_attach_t *w = head; w != NULL; w = w->next) {
+               if (w->island_idx == ii) {
+                  seen_isl = true;
+                  break;
+               }
+            }
+            if (!seen_isl) {
+               gen_local_attach_t *wn = xcalloc(sizeof(gen_local_attach_t));
+               wn->island_idx = ii;
+               wn->sig_idx = UINT32_MAX;
+               wn->next = head;
+               APUSH(cache->owned_attaches, wn);
+               shash_put(lmap, tb_get(wkey), wn);
+            }
+         }
+      }
+
       hash_free(sig_map);
    }
 
@@ -1003,13 +1281,22 @@ void vlog_island_lower_emit_init(vlog_island_lower_ctx_t *ctx,
                                            t_ptr, MIR_NULL_STAMP,
                                            b_args, ARRAY_LEN(b_args));
 
+      bool has_gen_locals = false;
+      for (uint32_t i = 0; i < isl->nsigs; i++) {
+         if (isl->sigs[i].gen_path != NULL) {
+            has_gen_locals = true;
+            break;
+         }
+      }
+      if (has_gen_locals) {
+         ident_t hname = ident_sprintf("$island_h%u", ii);
+         mir_value_t hvar = mir_add_var(inst_mu, t_ptr, MIR_NULL_STAMP,
+                                        hname, 0);
+         mir_build_store(inst_mu, hvar, handle);
+      }
+
       for (uint32_t i = 0; i < isl->nsigs; i++) {
          const island_sig_t *s = &(isl->sigs[i]);
-         int hops = 0;
-         mir_value_t var = mir_search_object(inst_mu, s->decl, &hops);
-         assert(!mir_is_null(var) && hops == 0);
-         mir_value_t sig_val = mir_build_load(inst_mu, var);
-
          uint32_t flags = 0;
          if (m2->sig_in[i])
             flags |= RT_ISIG_IN;
@@ -1024,21 +1311,60 @@ void vlog_island_lower_emit_init(vlog_island_lower_ctx_t *ctx,
          if (vlog_kind(s->decl) == V_NET_DECL)
             flags |= RT_ISIG_IS_NET;
 
-         mir_value_t s_args[] = {
-            handle,
-            mir_const(inst_mu, t_offset, i),
-            sig_val,
-            mir_const(inst_mu, t_offset, s->a_off),
-            mir_const(inst_mu, t_offset,
-                      s->two_state ? UINT32_MAX : s->b_off),
-            mir_const(inst_mu, t_offset, s->width),
-            mir_const(inst_mu, t_offset, s->nelems),
-            mir_const(inst_mu, t_offset, flags),
-         };
-         mir_value_t bind_res =
-            mir_build_fcall(inst_mu, ident_new("__sv_island_bind_sig"),
-                            t_offset, MIR_NULL_STAMP,
-                            s_args, ARRAY_LEN(s_args));
+         mir_value_t bind_res;
+         if (s->gen_path != NULL) {
+            mir_value_t s_args[] = {
+               handle,
+               mir_const(inst_mu, t_offset, i),
+               mir_build_null(inst_mu, t_ptr),
+               mir_const(inst_mu, t_offset, 0),
+               mir_const(inst_mu, t_offset, s->a_off),
+               mir_const(inst_mu, t_offset,
+                         s->two_state ? UINT32_MAX : s->b_off),
+               mir_const(inst_mu, t_offset, s->width),
+               mir_const(inst_mu, t_offset, s->nelems),
+               mir_const(inst_mu, t_offset, flags),
+            };
+            bind_res = mir_build_fcall(inst_mu,
+                                       ident_new("__sv_island_bind_sig"),
+                                       t_offset, MIR_NULL_STAMP,
+                                       s_args, ARRAY_LEN(s_args));
+            mir_build_consume(inst_mu, bind_res);
+
+            const uint64_t kh = island_gen_key_hash_from_path(s->gen_path,
+                                                              s->orig_name);
+            mir_value_t k_args[] = {
+               handle,
+               mir_const(inst_mu, t_offset, i),
+               mir_const(inst_mu, t_offset, (int64_t)kh),
+            };
+            bind_res = mir_build_fcall(inst_mu,
+                                       ident_new("__sv_island_set_gen_key"),
+                                       t_offset, MIR_NULL_STAMP,
+                                       k_args, ARRAY_LEN(k_args));
+         }
+         else {
+            int hops = 0;
+            mir_value_t var = mir_search_object(inst_mu, s->decl, &hops);
+            assert(!mir_is_null(var) && hops == 0);
+            mir_value_t sig_val = mir_build_load(inst_mu, var);
+
+            mir_value_t s_args[] = {
+               handle,
+               mir_const(inst_mu, t_offset, i),
+               sig_val,
+               mir_const(inst_mu, t_offset, s->a_off),
+               mir_const(inst_mu, t_offset,
+                         s->two_state ? UINT32_MAX : s->b_off),
+               mir_const(inst_mu, t_offset, s->width),
+               mir_const(inst_mu, t_offset, s->nelems),
+               mir_const(inst_mu, t_offset, flags),
+            };
+            bind_res = mir_build_fcall(inst_mu,
+                                       ident_new("__sv_island_bind_sig"),
+                                       t_offset, MIR_NULL_STAMP,
+                                       s_args, ARRAY_LEN(s_args));
+         }
          mir_build_consume(inst_mu, bind_res);
       }
 
