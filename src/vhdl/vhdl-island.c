@@ -1094,6 +1094,8 @@ static bool type_ok_for_local(type_t t)
    if (dimension_of(t) != 1)
       return false;
    type_t elem = type_elem(t);
+   if (type_is_record(elem))
+      return type_ok_for_local(elem);
    if (type_is_array(elem))
       return !type_is_array(type_elem(elem)) && !type_is_record(type_elem(elem))
          && (type_is_enum(type_elem(elem)) || type_is_integer(type_elem(elem)));
