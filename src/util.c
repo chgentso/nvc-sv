@@ -320,16 +320,20 @@ void print_centred(const char *text)
 
 void fatal_exit(int status)
 {
-   // A worker cannot wait for the task it is running to complete
-   if (!thread_attached() || thread_id() == 0)
-      async_barrier();
-
    if (atomic_load(&crashing) != SIG_ATOMIC_MAX)
-      _exit(status);   // Exit during crash
-   else if (!thread_attached() || thread_id() != 0)
-      _exit(status);
-   else
-      exit(status);
+      _Exit(status);   // Exit immediately during crash
+
+   // Flush buffered output and terminate immediately without running
+   // atexit or C++ global destructors, which would race with live
+   // background threads (e.g. async LLVM JIT workers).
+   fflush(NULL);
+
+#ifdef __MINGW32__
+   if (win32_codepage != 0)
+      SetConsoleOutputCP(win32_codepage);
+#endif
+
+   _Exit(status);
 }
 
 void error_at(const loc_t *loc, const char *fmt, ...)

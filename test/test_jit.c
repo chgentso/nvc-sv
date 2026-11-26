@@ -39,6 +39,9 @@
 #include <inttypes.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#ifndef __MINGW32__
+#include <sys/wait.h>
+#endif
 
 #define REG(r) ((jit_value_t){ .kind = JIT_VALUE_REG, .reg = (r) })
 #define CONST(i) ((jit_value_t){ .kind = JIT_VALUE_INT64, .int64 = (i) })
@@ -2513,6 +2516,72 @@ START_TEST(test_cache_cold_warm_and_corrupt)
    rm_cache_dir(dir);
 }
 END_TEST
+
+#ifndef __MINGW32__
+START_TEST(test_fatal_exit_async_llvm)
+{
+   input_from_file(TESTDIR "/jit/context1.vhd");
+   parse_check_and_simplify(T_PACKAGE, T_PACK_BODY);
+
+   opt_set_int(OPT_JIT_CACHE, 0);
+   opt_set_int(OPT_JIT_THRESHOLD, 1);
+   opt_set_int(OPT_JIT_ASYNC, 1);
+   opt_set_int(OPT_SIM_THREADS, 2);
+
+   for (int iter = 0; iter < 8; iter++) {
+      int pfd[2];
+      ck_assert_int_eq(pipe(pfd), 0);
+
+      fflush(NULL);
+      pid_t pid = fork();
+      ck_assert_int_ge(pid, 0);
+
+      if (pid == 0) {
+         close(pfd[0]);
+         FILE *fp = fdopen(pfd[1], "w");
+         if (fp == NULL)
+            _Exit(99);
+
+         jit_t *j = jit_new(get_registry(), get_mir());
+         jit_register_llvm_plugin(j);
+
+         jit_handle_t handle = jit_lazy_compile(j, ident_new("WORK.PACK"));
+         void *ctx = jit_link(j, handle);
+         if (ctx == NULL)
+            _Exit(98);
+
+         jit_handle_t fn1 = compile_for_test(j, "WORK.PACK.GET_ELT(N)I");
+         jit_handle_t fn2 = compile_for_test(j, "WORK.PACK.NESTED_GET_ELT(N)I");
+         (void)jit_call(j, fn1, ctx, 1);
+         (void)jit_call(j, fn2, ctx, 5);
+
+         // Leave buffered output to verify fatal_exit flushes stdio before _Exit
+         fputs("FATAL_FLUSH_OK\n", fp);
+         fatal_exit(42);
+      }
+
+      close(pfd[1]);
+      char buf[64] = {};
+      ssize_t total = 0;
+      for (;;) {
+         ssize_t n = read(pfd[0], buf + total, sizeof(buf) - 1 - total);
+         if (n <= 0)
+            break;
+         total += n;
+      }
+      close(pfd[0]);
+
+      int status = 0;
+      ck_assert_int_eq(waitpid(pid, &status, 0), pid);
+      ck_assert_msg(WIFEXITED(status),
+                    "iter %d: child terminated by signal %d",
+                    iter, WIFSIGNALED(status) ? WTERMSIG(status) : -1);
+      ck_assert_int_eq(WEXITSTATUS(status), 42);
+      ck_assert_str_eq(buf, "FATAL_FLUSH_OK\n");
+   }
+}
+END_TEST
+#endif
 #endif
 
 Suite *get_jit_tests(void)
@@ -2578,6 +2647,9 @@ Suite *get_jit_tests(void)
    tcase_add_test(tc, test_cache_multi_instance);
 #ifdef ENABLE_LLVM
    tcase_add_test(tc, test_cache_cold_warm_and_corrupt);
+#ifndef __MINGW32__
+   tcase_add_test(tc, test_fatal_exit_async_llvm);
+#endif
 #endif
    suite_add_tcase(s, tc);
 
