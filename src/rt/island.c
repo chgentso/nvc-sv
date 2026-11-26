@@ -30,6 +30,9 @@
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef __MINGW32__
+#include <malloc.h>
+#endif
 
 #ifdef HAVE_PTHREAD
 #include <pthread.h>
@@ -906,7 +909,11 @@ void rt_island_mgr_free(rt_island_mgr_t *mgr)
          free(isl->sigs[s].direct_aliases);
       }
       free(isl->comb_deps);
+#ifdef __MINGW32__
+      _aligned_free(isl->state);
+#else
       free(isl->state);
+#endif
       free(isl->sigs);
       free(isl->in_sigs);
       free(isl->dirty_in_words);
@@ -992,8 +999,14 @@ void *rt_island_begin(rt_model_t *m, rt_island_mgr_t **mgr_p,
    const size_t total_bytes = ndomains > 0
       ? (size_t)isl->state_bytes * 2u : (size_t)isl->state_bytes;
    void *buf = NULL;
+#ifdef __MINGW32__
+   buf = _aligned_malloc(total_bytes, 64);
+   if (buf == NULL)
+      fatal("failed to allocate %zu bytes for island state", total_bytes);
+#else
    if (posix_memalign(&buf, 64, total_bytes) != 0)
       fatal("failed to allocate %zu bytes for island state", total_bytes);
+#endif
    isl->state = buf;
    isl->next_state = ndomains > 0 ? isl->state + isl->state_bytes : NULL;
    memset(isl->state, 0, total_bytes);
