@@ -705,6 +705,45 @@ static void vi_pack_bytes_to_words(const uint8_t *bytes, uint32_t width,
    }
 }
 
+static void vi_check_int_bounds(vi_lower_t *l, type_t target_type,
+                                mir_value_t val64, tree_t actual_expr,
+                                tree_t hint_decl)
+{
+   if (target_type == NULL || !type_is_integer(target_type))
+      return;
+   tree_t fr = range_of(target_type, 0);
+   int64_t f_lo, f_hi;
+   if (fr == NULL || !folded_bounds(fr, &f_lo, &f_hi))
+      return;
+
+   if (actual_expr != NULL) {
+      int64_t cv;
+      if (vhdl_island_eval_const_int_ctx(l->ctx, actual_expr, &cv)
+          && cv >= f_lo && cv <= f_hi)
+         return;
+
+      type_t at = tree_type(actual_expr);
+      if (at != NULL && type_is_integer(at)) {
+         tree_t ar = range_of(at, 0);
+         int64_t a_lo, a_hi;
+         if (ar != NULL && folded_bounds(ar, &a_lo, &a_hi)
+             && a_lo >= f_lo && a_hi <= f_hi)
+            return;
+      }
+   }
+
+   mir_unit_t *mu = l->mu;
+   mir_type_t it = vi_i64_type(mu);
+   mir_value_t left = mir_const(mu, it, f_lo);
+   mir_value_t right = mir_const(mu, it, f_hi);
+   mir_value_t dir = mir_const(mu, mir_bool_type(mu), RANGE_TO);
+   tree_t loc_tree = (actual_expr != NULL) ? actual_expr : hint_decl;
+   mir_value_t locus = mir_build_debug_locus(mu, tree_to_object(loc_tree));
+   mir_value_t hint = (hint_decl != NULL)
+      ? mir_build_debug_locus(mu, tree_to_object(hint_decl)) : locus;
+   mir_build_range_check(mu, val64, left, right, dir, locus, hint);
+}
+
 static bool vi_modeb_call_ieee(vi_lower_t *l, tree_t decl,
                                const vi_val_t *pvals, int np,
                                mir_type_t mret, mir_value_t *ret_out)
@@ -794,9 +833,16 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
       // Lower all arguments once
       vi_val_t *pvals LOCAL = xcalloc_array(MAX(1, np), sizeof(vi_val_t));
       vi_val_t first_vec = { 0 };
+      const int nports = tree_ports(decl);
       for (int i = 0; i < np; i++) {
-         if (!vi_lower_expr(l, tree_value(tree_param(fcall, i)), &pvals[i]))
+         tree_t pe = tree_value(tree_param(fcall, i));
+         if (!vi_lower_expr(l, pe, &pvals[i]))
             return false;
+         if (pvals[i].kind == VIVAL_INT && i < nports) {
+            tree_t fp = tree_port(decl, i);
+            vi_check_int_bounds(l, tree_type(fp), vi_to_i64(mu, pvals[i].val),
+                                pe, fp);
+         }
          if (pvals[i].kind == VIVAL_VEC && first_vec.width == 0)
             first_vec = pvals[i];
       }
@@ -1240,6 +1286,15 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
       vi_val_t a, b;
       if (!vi_lower_expr(l, e0, &a) || !vi_lower_expr(l, e1, &b))
          return false;
+      const int nports = tree_ports(decl);
+      if (a.kind == VIVAL_INT && nports >= 1) {
+         tree_t fp = tree_port(decl, 0);
+         vi_check_int_bounds(l, tree_type(fp), vi_to_i64(mu, a.val), e0, fp);
+      }
+      if (b.kind == VIVAL_INT && nports >= 2) {
+         tree_t fp = tree_port(decl, 1);
+         vi_check_int_bounds(l, tree_type(fp), vi_to_i64(mu, b.val), e1, fp);
+      }
 
       if (fn_name_is(fn, "TO_UNSIGNED") || fn_name_is(fn, "TO_SIGNED")
           || fn_name_is(fn, "CONV_UNSIGNED") || fn_name_is(fn, "CONV_SIGNED")
@@ -1505,8 +1560,14 @@ static bool vi_lower_inline_func(vi_lower_t *l, tree_t fcall, tree_t func,
    // Evaluate arguments in caller scope first
    vi_val_t *arg_vals LOCAL = xcalloc_array(MAX(1, np), sizeof(vi_val_t));
    for (int i = 0; i < np; i++) {
-      if (!vi_lower_expr(l, tree_value(tree_param(fcall, i)), &arg_vals[i]))
+      tree_t pe = tree_value(tree_param(fcall, i));
+      if (!vi_lower_expr(l, pe, &arg_vals[i]))
          return false;
+      if (arg_vals[i].kind == VIVAL_INT) {
+         tree_t fp = tree_port(func, i);
+         vi_check_int_bounds(l, tree_type(fp), vi_to_i64(mu, arg_vals[i].val),
+                             pe, fp);
+      }
    }
 
    vi_scope_t child = {

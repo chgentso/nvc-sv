@@ -3306,4 +3306,5 @@ vhdl_island_ieee_ops1 normal,2008,$NVC_RTL_ISLANDS=hier
 vhdl_island_assert1 gold,normal,2008,$NVC_RTL_ISLANDS=hier
 vhdl_island_geninline1 normal,2008,$NVC_RTL_ISLANDS=hier
 vhdl_island_subprog_refs1 normal,2008,$NVC_RTL_ISLANDS=hier
+vhdl_island_rangecheck1 fail,2008,$NVC_RTL_ISLANDS=hier
 ename_unbound1 fail,gold,2008
