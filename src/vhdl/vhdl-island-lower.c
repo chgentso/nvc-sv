@@ -3730,6 +3730,185 @@ static bool vi_assign_leaf_sig_dyn_slice(vi_lower_t *l, const vhdl_isig_t *s,
    return true;
 }
 
+static bool vi_copy_array2d_sig(vi_lower_t *l, const vhdl_isig_t *ds,
+                                const vhdl_isl_sig_t *dis,
+                                const vhdl_isig_t *ss,
+                                const vhdl_isl_sig_t *sis)
+{
+   if (!ds->is_array2d || !ss->is_array2d
+       || ds->nelems != ss->nelems || ds->width != ss->width)
+      return false;
+
+   mir_unit_t *mu = l->mu;
+   if (!l->two_state) {
+      const uint32_t dst_off = dis->a_off + (l->is_ff ? l->ff_stride : 0u);
+      vi_mark_ff_dirty(l, dis);
+      mir_build_copy(mu, vi_state_ptr_at(l, dst_off),
+                     vi_state_ptr_at(l, sis->a_off),
+                     vi_off(mu, (int64_t)ds->nelems * ds->width));
+      return true;
+   }
+
+   mir_value_t idx_v = mir_add_var(mu, mir_offset_type(mu), MIR_NULL_STAMP,
+                                   ident_uniq("a2c"), MIR_VAR_TEMP);
+   mir_build_store(mu, idx_v, vi_off(mu, 0));
+   mir_block_t hdr = mir_add_block(mu);
+   mir_block_t body = mir_add_block(mu);
+   mir_block_t done = mir_add_block(mu);
+   mir_build_jump(mu, hdr);
+
+   mir_set_cursor(mu, hdr, MIR_APPEND);
+   mir_value_t r = mir_build_load(mu, idx_v);
+   mir_build_cond(mu, mir_build_cmp(mu, MIR_CMP_LT, r, vi_off(mu, ds->nelems)),
+                  body, done);
+
+   mir_set_cursor(mu, body, MIR_APPEND);
+   vi_val_t rv;
+   if (!vi_lower_sig_load(l, ss, sis, r, &rv)
+       || !vi_assign_leaf_sig(l, ds, dis, r, 0, ds->width, true, rv))
+      return false;
+   mir_build_store(mu, idx_v, mir_build_add(mu, mir_offset_type(mu),
+                                            r, vi_off(mu, 1)));
+   mir_build_jump(mu, hdr);
+
+   mir_set_cursor(mu, done, MIR_APPEND);
+   return true;
+}
+
+static bool vi_assign_array2d_sig(vi_lower_t *l, const vhdl_isig_t *s,
+                                  const vhdl_isl_sig_t *isig, tree_t val_e)
+{
+   while (val_e != NULL) {
+      if (tree_kind(val_e) == T_REF
+          && tree_kind(tree_ref(val_e)) == T_CONST_DECL
+          && tree_has_value(tree_ref(val_e)))
+         val_e = tree_value(tree_ref(val_e));
+      else if (tree_kind(val_e) == T_QUALIFIED
+               || tree_kind(val_e) == T_TYPE_CONV)
+         val_e = tree_value(val_e);
+      else
+         break;
+   }
+   if (val_e == NULL)
+      return false;
+
+   const vhdl_isl_sig_t *sis = NULL;
+   const vhdl_isig_t *ss = vi_resolve_expr_sig(l, val_e, &sis);
+   if (ss != NULL && ss->is_array2d)
+      return vi_copy_array2d_sig(l, s, isig, ss, sis);
+
+   if (tree_kind(val_e) != T_AGGREGATE)
+      return false;
+
+   mir_unit_t *mu = l->mu;
+   const int na = tree_assocs(val_e);
+   bool *filled LOCAL = xcalloc_array(s->nelems, sizeof(bool));
+   bool has_others = false;
+
+   for (int i = 0; i < na; i++) {
+      tree_t a = tree_assoc(val_e, i);
+      if (tree_subkind(a) == A_OTHERS) {
+         vi_val_t ov;
+         if (!vi_lower_expr(l, tree_value(a), &ov)
+             || ov.kind != VIVAL_VEC || ov.width != s->width)
+            return false;
+
+         mir_value_t idx_v = mir_add_var(mu, mir_offset_type(mu),
+                                         MIR_NULL_STAMP, ident_uniq("a2r"),
+                                         MIR_VAR_TEMP);
+         mir_build_store(mu, idx_v, vi_off(mu, 0));
+         mir_block_t hdr = mir_add_block(mu);
+         mir_block_t body = mir_add_block(mu);
+         mir_block_t done = mir_add_block(mu);
+         mir_build_jump(mu, hdr);
+
+         mir_set_cursor(mu, hdr, MIR_APPEND);
+         mir_value_t r = mir_build_load(mu, idx_v);
+         mir_build_cond(mu, mir_build_cmp(mu, MIR_CMP_LT, r,
+                                          vi_off(mu, s->nelems)),
+                        body, done);
+
+         mir_set_cursor(mu, body, MIR_APPEND);
+         if (!vi_assign_leaf_sig(l, s, isig, r, 0, s->width, true, ov))
+            return false;
+         mir_build_store(mu, idx_v, mir_build_add(mu, mir_offset_type(mu),
+                                                  r, vi_off(mu, 1)));
+         mir_build_jump(mu, hdr);
+
+         mir_set_cursor(mu, done, MIR_APPEND);
+         has_others = true;
+         break;
+      }
+   }
+
+   for (int i = 0; i < na; i++) {
+      tree_t a = tree_assoc(val_e, i);
+      if (tree_subkind(a) == A_OTHERS)
+         continue;
+      vi_val_t ev;
+      if (!vi_lower_expr(l, tree_value(a), &ev)
+          || ev.kind != VIVAL_VEC || ev.width != s->width)
+         return false;
+      switch (tree_subkind(a)) {
+      case A_POS:
+         if ((uint32_t)i >= s->nelems)
+            return false;
+         if (!vi_assign_leaf_sig(l, s, isig, vi_off(mu, i), 0, s->width,
+                                 true, ev))
+            return false;
+         filled[i] = true;
+         break;
+      case A_NAMED:
+         {
+            int64_t k = 0;
+            if (!vi_eval_const_int(l, tree_name(a), &k))
+               return false;
+            int64_t pos = (s->outer_dir == RANGE_TO)
+               ? (k - s->outer_left) : (s->outer_left - k);
+            if (pos < 0 || pos >= (int64_t)s->nelems)
+               return false;
+            if (!vi_assign_leaf_sig(l, s, isig, vi_off(mu, pos), 0, s->width,
+                                    true, ev))
+               return false;
+            filled[pos] = true;
+         }
+         break;
+      case A_RANGE:
+         {
+            tree_t rg = tree_range(a, 0);
+            int64_t rl = 0, rr = 0;
+            if (!vi_eval_const_int(l, tree_left(rg), &rl)
+                || !vi_eval_const_int(l, tree_right(rg), &rr))
+               return false;
+            int64_t p0 = (s->outer_dir == RANGE_TO)
+               ? (rl - s->outer_left) : (s->outer_left - rl);
+            int64_t p1 = (s->outer_dir == RANGE_TO)
+               ? (rr - s->outer_left) : (s->outer_left - rr);
+            if (p0 > p1) { int64_t tmp = p0; p0 = p1; p1 = tmp; }
+            if (p0 < 0 || p1 >= (int64_t)s->nelems)
+               return false;
+            for (int64_t p = p0; p <= p1; p++) {
+               if (!vi_assign_leaf_sig(l, s, isig, vi_off(mu, p), 0, s->width,
+                                       true, ev))
+                  return false;
+               filled[p] = true;
+            }
+         }
+         break;
+      default:
+         return false;
+      }
+   }
+
+   if (!has_others) {
+      for (uint32_t p = 0; p < s->nelems; p++) {
+         if (!filled[p])
+            return false;
+      }
+   }
+   return true;
+}
+
 static bool vi_assign_record_expr(vi_lower_t *l, tree_t target_decl,
                                   int *path, uint8_t depth, type_t rec_type,
                                   tree_t rhs_e)
@@ -3796,8 +3975,10 @@ static bool vi_assign_record_expr(vi_lower_t *l, tree_t target_decl,
       return false;
    const vhdl_isig_t *ds = &(l->ctx->sigs[gid]);
    const vhdl_isl_sig_t *dis = vhdl_island_find_sig(l->isl, (uint32_t)gid);
-   if (dis == NULL || ds->is_array2d)
+   if (dis == NULL)
       return false;
+   if (ds->is_array2d)
+      return vi_assign_array2d_sig(l, ds, dis, rhs_e);
 
    vi_val_t rv;
    if (!vi_lower_expr(l, rhs_e, &rv))
@@ -3843,10 +4024,18 @@ static bool vi_lower_sig_assign(vi_lower_t *l, tree_t stmt)
             const vhdl_isl_sig_t *dis = vhdl_island_find_sig(l->isl, d_ids[i]);
             const vhdl_isl_sig_t *sis = vhdl_island_find_sig(l->isl, s_ids[i]);
             if (dis == NULL || sis == NULL
-                || ds->width != ss->width || ds->is_array2d || ss->is_array2d) {
+                || ds->width != ss->width || ds->is_array2d != ss->is_array2d) {
                free(d_ids);
                free(s_ids);
                return false;
+            }
+            if (ds->is_array2d) {
+               if (!vi_copy_array2d_sig(l, ds, dis, ss, sis)) {
+                  free(d_ids);
+                  free(s_ids);
+                  return false;
+               }
+               continue;
             }
             vi_val_t v;
             if (!vi_lower_sig_load(l, ss, sis, vi_off(mu, 0), &v)
@@ -3869,6 +4058,13 @@ static bool vi_lower_sig_assign(vi_lower_t *l, tree_t stmt)
          return vi_assign_record_expr(l, tdecl, tpath, tlen, tree_type(target),
                                       val_e);
       return false;
+   }
+
+   {
+      const vhdl_isl_sig_t *t_isig = NULL;
+      const vhdl_isig_t *t_sig = vi_resolve_expr_sig(l, target, &t_isig);
+      if (t_sig != NULL && t_sig->is_array2d)
+         return vi_assign_array2d_sig(l, t_sig, t_isig, val_e);
    }
 
    vi_val_t rv;

@@ -1528,7 +1528,9 @@ static bool check_expr(check_ctx_t *c, tree_t expr, bool is_target)
          tree_t a = tree_assoc(expr, i);
          switch (tree_subkind(a)) {
          case A_NAMED:
-            if (!check_expr(c, tree_name(a), false))
+            if (!(tree_kind(tree_name(a)) == T_REF
+                  && tree_kind(tree_ref(tree_name(a))) == T_FIELD_DECL)
+                && !check_expr(c, tree_name(a), false))
                return false;
             break;
          case A_RANGE:
