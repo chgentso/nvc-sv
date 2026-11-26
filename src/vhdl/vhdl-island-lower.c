@@ -1037,17 +1037,17 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
          int64_t rl = 0, rr = 0;
          uint32_t rw = 0;
          if (!vi_eval_type_bounds(l->ctx, rtype, &rdir, &rl, &rr, &rw)) {
-            if (strcmp(fn, "\"*\"") == 0 && np == 2) {
+            if (fn_name_is(fn, "\"*\"") && np == 2) {
                uint32_t w0 = pvals[0].kind == VIVAL_VEC ? pvals[0].width : first_vec.width;
                uint32_t w1 = pvals[1].kind == VIVAL_VEC ? pvals[1].width : first_vec.width;
                rw = w0 + w1;
             }
-            else if ((strncmp(fn, "RESIZE", 6) == 0
-                      || strncmp(fn, "TO_UNSIGNED", 11) == 0
-                      || strncmp(fn, "TO_SIGNED", 9) == 0
-                      || strncmp(fn, "CONV_STD_LOGIC_VECTOR", 21) == 0
-                      || strncmp(fn, "CONV_UNSIGNED", 13) == 0
-                      || strncmp(fn, "CONV_SIGNED", 11) == 0)
+            else if ((fn_name_is(fn, "RESIZE")
+                      || fn_name_is(fn, "TO_UNSIGNED")
+                      || fn_name_is(fn, "TO_SIGNED")
+                      || fn_name_is(fn, "CONV_STD_LOGIC_VECTOR")
+                      || fn_name_is(fn, "CONV_UNSIGNED")
+                      || fn_name_is(fn, "CONV_SIGNED"))
                      && np == 2) {
                int64_t sz;
                if (!vhdl_island_eval_const_int_ctx(l->ctx,
@@ -1056,7 +1056,8 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
                   return false;
                rw = (uint32_t)sz;
             }
-            else if ((strncmp(fn, "\"+\"", 3) == 0 || strncmp(fn, "\"-\"", 3) == 0)
+            else if ((fn_name_is(fn, "\"+\"") || fn_name_is(fn, "\"-\"")
+                      || fn_name_is(fn, "MINIMUM") || fn_name_is(fn, "MAXIMUM"))
                      && np == 2) {
                uint32_t w0 = pvals[0].kind == VIVAL_VEC ? pvals[0].width : 0;
                uint32_t w1 = pvals[1].kind == VIVAL_VEC ? pvals[1].width : 0;
