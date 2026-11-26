@@ -220,6 +220,7 @@ struct _rt_super_island {
    uint32_t            mt_wave_tag;
    uint32_t            mt_sync_start;
    uint32_t            mt_sync_end;
+   uint32_t            pending_vhdl_ff;
    bool                has_dirty;
    bool                has_dirty_inputs;
    bool                mt_eval_on_main;
@@ -783,6 +784,67 @@ static inline bool island_sv_edge_armed(rt_island_mgr_t *mgr,
    return rt_model_has_init_event(mgr->model, sig);
 }
 
+static inline void island_sdom_enqueue_sample(rt_island_mgr_t *mgr,
+                                              rt_super_domain_t *sdom)
+{
+   if (sdom->in_sample_q)
+      return;
+   sdom->in_sample_q = true;
+   APUSH(mgr->super_sample_q, sdom);
+   if (sdom->edge_flags & (RT_IEDGE_VHDL | RT_IEDGE_VHDL_EVENT)) {
+      for (uint32_t c = 0; c < sdom->n_clusters; c++)
+         sdom->clusters[c]->pending_vhdl_ff++;
+      for (uint32_t s = 0; s < sdom->n_solo_islands; s++)
+         sdom->solo_islands[s]->pending_vhdl_ff++;
+   }
+}
+
+static inline void island_sdom_dequeue_sample(rt_super_domain_t *sdom)
+{
+   assert(sdom->in_sample_q);
+   sdom->in_sample_q = false;
+   if (sdom->edge_flags & (RT_IEDGE_VHDL | RT_IEDGE_VHDL_EVENT)) {
+      for (uint32_t c = 0; c < sdom->n_clusters; c++) {
+         assert(sdom->clusters[c]->pending_vhdl_ff > 0);
+         sdom->clusters[c]->pending_vhdl_ff--;
+      }
+      for (uint32_t s = 0; s < sdom->n_solo_islands; s++) {
+         assert(sdom->solo_islands[s]->pending_vhdl_ff > 0);
+         sdom->solo_islands[s]->pending_vhdl_ff--;
+      }
+   }
+}
+
+static inline void island_dom_enqueue_sample(rt_island_mgr_t *mgr,
+                                             rt_island_domain_t *dom)
+{
+   if (dom->in_sample_q)
+      return;
+   dom->in_sample_q = true;
+   APUSH(mgr->ff_sample_q, dom);
+   if (dom->edge_flags & (RT_IEDGE_VHDL | RT_IEDGE_VHDL_EVENT)) {
+      rt_island_t *isl = dom->isl;
+      isl->pending_vhdl_ff++;
+      if (isl->cluster != NULL)
+         isl->cluster->pending_vhdl_ff++;
+   }
+}
+
+static inline void island_dom_dequeue_sample(rt_island_domain_t *dom)
+{
+   assert(dom->in_sample_q);
+   dom->in_sample_q = false;
+   if (dom->edge_flags & (RT_IEDGE_VHDL | RT_IEDGE_VHDL_EVENT)) {
+      rt_island_t *isl = dom->isl;
+      assert(isl->pending_vhdl_ff > 0);
+      isl->pending_vhdl_ff--;
+      if (isl->cluster != NULL) {
+         assert(isl->cluster->pending_vhdl_ff > 0);
+         isl->cluster->pending_vhdl_ff--;
+      }
+   }
+}
+
 static void island_super_clk_watch_cb(uint64_t now, rt_signal_t *signal,
                                       rt_watch_t *watch, void *user)
 {
@@ -808,10 +870,8 @@ static void island_super_clk_watch_cb(uint64_t now, rt_signal_t *signal,
          && island_edge_match(sdom->prev_clk, cur, sdom->clk_posedge);
       sdom->prev_clk = cur;
    }
-   if (hit && !sdom->in_sample_q) {
-      sdom->in_sample_q = true;
-      APUSH(sdom->mgr->super_sample_q, sdom);
-   }
+   if (hit)
+      island_sdom_enqueue_sample(sdom->mgr, sdom);
 }
 
 static void island_super_rst_watch_cb(uint64_t now, rt_signal_t *signal,
@@ -837,10 +897,8 @@ static void island_super_rst_watch_cb(uint64_t now, rt_signal_t *signal,
          && island_edge_match(sdom->prev_rst, cur, sdom->rst_posedge);
       sdom->prev_rst = cur;
    }
-   if (hit && !sdom->in_sample_q) {
-      sdom->in_sample_q = true;
-      APUSH(sdom->mgr->super_sample_q, sdom);
-   }
+   if (hit)
+      island_sdom_enqueue_sample(sdom->mgr, sdom);
 }
 
 static void island_clk_watch_cb(uint64_t now, rt_signal_t *signal,
@@ -864,10 +922,8 @@ static void island_clk_watch_cb(uint64_t now, rt_signal_t *signal,
          && island_edge_match(dom->prev_clk, cur, dom->clk_posedge);
       dom->prev_clk = cur;
    }
-   if (hit && !dom->in_sample_q) {
-      dom->in_sample_q = true;
-      APUSH(dom->isl->mgr->ff_sample_q, dom);
-   }
+   if (hit)
+      island_dom_enqueue_sample(dom->isl->mgr, dom);
 }
 
 static void island_rst_watch_cb(uint64_t now, rt_signal_t *signal,
@@ -890,10 +946,8 @@ static void island_rst_watch_cb(uint64_t now, rt_signal_t *signal,
          && island_edge_match(dom->prev_rst, cur, dom->rst_posedge);
       dom->prev_rst = cur;
    }
-   if (hit && !dom->in_sample_q) {
-      dom->in_sample_q = true;
-      APUSH(dom->isl->mgr->ff_sample_q, dom);
-   }
+   if (hit)
+      island_dom_enqueue_sample(dom->isl->mgr, dom);
 }
 
 rt_island_mgr_t *rt_island_mgr_new(rt_model_t *m)
@@ -3080,6 +3134,7 @@ void rt_island_reset_all(rt_island_mgr_t *mgr)
       cl->min_dirty_pos = UINT32_MAX;
       cl->mt_sync_start = 0;
       cl->mt_sync_end = 0;
+      cl->pending_vhdl_ff = 0;
    }
 
    for (unsigned i = 0; i < mgr->islands.count; i++) {
@@ -3089,6 +3144,7 @@ void rt_island_reset_all(rt_island_mgr_t *mgr)
       isl->need_sync_out = false;
       isl->ff_pending_head = NULL;
       isl->ff_pending_tail = NULL;
+      isl->pending_vhdl_ff = 0;
       for (uint32_t f = 0; f < isl->n_forces; f++)
          free(isl->forces[f].mask);
       isl->n_forces = 0;
@@ -3207,16 +3263,10 @@ void rt_island_reset_all(rt_island_mgr_t *mgr)
                const bool two_state = !!(rs->flags & RT_ISIG_TWO_STATE);
                if (island_vhdl_rst_match(cur, dom->rst_posedge,
                                          is_std, two_state)) {
-                  if (dom->super_dom != NULL) {
-                     if (!dom->super_dom->in_sample_q) {
-                        dom->super_dom->in_sample_q = true;
-                        APUSH(mgr->super_sample_q, dom->super_dom);
-                     }
-                  }
-                  else if (!dom->in_sample_q) {
-                     dom->in_sample_q = true;
-                     APUSH(mgr->ff_sample_q, dom);
-                  }
+                  if (dom->super_dom != NULL)
+                     island_sdom_enqueue_sample(mgr, dom->super_dom);
+                  else
+                     island_dom_enqueue_sample(mgr, dom);
                }
             }
          }
@@ -3978,26 +4028,14 @@ static void island_sync_out_island(rt_model_t *m, rt_island_t *isl)
    }
 }
 
-static bool island_has_pending_vhdl_ff(const rt_island_t *isl)
+static inline bool island_has_pending_vhdl_ff(const rt_island_t *isl)
 {
-   for (uint32_t d = 0; d < isl->ndomains; d++) {
-      const rt_island_domain_t *dom = &(isl->domains[d]);
-      if (!(dom->edge_flags & (RT_IEDGE_VHDL | RT_IEDGE_VHDL_EVENT)))
-         continue;
-      if (dom->in_sample_q
-          || (dom->super_dom != NULL && dom->super_dom->in_sample_q))
-         return true;
-   }
-   return false;
+   return isl->pending_vhdl_ff != 0;
 }
 
-static bool cluster_has_pending_vhdl_ff(const rt_super_island_t *cl)
+static inline bool cluster_has_pending_vhdl_ff(const rt_super_island_t *cl)
 {
-   for (uint32_t k = 0; k < cl->n_islands; k++) {
-      if (island_has_pending_vhdl_ff(cl->islands[k]))
-         return true;
-   }
-   return false;
+   return cl->pending_vhdl_ff != 0;
 }
 
 static bool island_eval_dirty_clusters(jit_t *jit, rt_model_t *m,
@@ -4956,7 +4994,7 @@ static bool rt_island_eval_ff_inner(jit_t *jit, rt_model_t *m,
       if (n_ff > 0) {
          for (unsigned i = 0; i < n_ff; i++) {
             rt_island_domain_t *dom = mgr->ff_sample_q.items[i];
-            dom->in_sample_q = false;
+            island_dom_dequeue_sample(dom);
 
             rt_island_t *isl = dom->isl;
             const bool is_vhdl = !!(dom->edge_flags
@@ -4992,7 +5030,7 @@ static bool rt_island_eval_ff_inner(jit_t *jit, rt_model_t *m,
       if (ok && n_sd > 0) {
          for (unsigned i = 0; i < n_sd; i++) {
             rt_super_domain_t *sd = mgr->super_sample_q.items[i];
-            sd->in_sample_q = false;
+            island_sdom_dequeue_sample(sd);
             const bool is_vhdl = !!(sd->edge_flags
                                     & (RT_IEDGE_VHDL | RT_IEDGE_VHDL_EVENT));
 
@@ -5098,7 +5136,7 @@ static bool rt_island_eval_ff_inner(jit_t *jit, rt_model_t *m,
    mgr->mt_ff_islands.count = 0;
    for (unsigned i = 0; i < n_ff; i++) {
       rt_island_domain_t *dom = mgr->ff_sample_q.items[i];
-      dom->in_sample_q = false;
+      island_dom_dequeue_sample(dom);
       const bool safe = jit_prepare_call(jit, dom->ff_handle, 1u);
       island_ff_enqueue_dom(mgr, dom, safe);
       if (!dom->in_commit_q) {
@@ -5119,7 +5157,7 @@ static bool rt_island_eval_ff_inner(jit_t *jit, rt_model_t *m,
 
    for (unsigned i = 0; i < n_sd; i++) {
       rt_super_domain_t *sd = mgr->super_sample_q.items[i];
-      sd->in_sample_q = false;
+      island_sdom_dequeue_sample(sd);
       for (uint32_t d = 0; d < sd->n_doms; d++) {
          rt_island_domain_t *dom = sd->doms[d];
          const bool safe = jit_prepare_call(jit, dom->ff_handle, 1u);

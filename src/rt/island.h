@@ -166,6 +166,7 @@ typedef struct _rt_island {
    struct _rt_island    **comb_deps;
    uint32_t               n_comb_deps;
    uint32_t               mt_wave_tag;
+   uint32_t               pending_vhdl_ff;
    bool                   dirty;
    bool                   in_dirty_list;
    bool                   in_defer_dirty;
