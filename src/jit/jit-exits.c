@@ -1905,7 +1905,7 @@ void *__nvc_mspace_alloc(uintptr_t size, jit_anchor_t *anchor)
    else if (size == 0)
       size = 1;   // Never return a NULL pointer
 
-   void *ptr = jit_mspace_alloc(size);
+   void *ptr = mspace_alloc(jit_get_mspace(thread->jit), size);
 
    thread->anchor = NULL;
    return ptr;

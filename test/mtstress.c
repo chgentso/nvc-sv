@@ -262,6 +262,75 @@ START_TEST(test_gc)
 }
 END_TEST
 
+__attribute__((noinline))
+static void gc_slab_loop(mspace_t *m)
+{
+   uint8_t *saved[16] = {};
+   size_t sizes[16] = {};
+   uint32_t rng = (uint32_t)(rand() ^ (thread_id() * 2654435761u));
+   const uint8_t tag = (uint8_t)(0x40 + thread_id());
+
+   while (load_acquire(&start) == 0)
+      spin_wait();
+
+   for (int i = 0; i < 250000; i++) {
+      // Sizes strictly within slab fast path (1..480 B) covering 1..16 lines
+      const size_t sz = 1 + (fast_rand(&rng) % 480);
+      uint8_t *mem = mspace_alloc(m, sz);
+      CHECK(mem != NULL);
+
+      const uint32_t r = fast_rand(&rng);
+      if ((r & 63) == 0) {
+         const int slot = (r >> 6) & 15;
+         const uint8_t pat = (uint8_t)(tag ^ slot);
+         memset(mem, pat, sz);
+         saved[slot] = mem;
+         sizes[slot] = sz;
+      }
+      else
+         mem[0] = tag;
+
+      if ((i & 4095) == 4095) {
+         for (int s = 0; s < 16; s++) {
+            if (saved[s] == NULL)
+               continue;
+            const uint8_t pat = (uint8_t)(tag ^ s);
+            for (size_t k = 0; k < sizes[s]; k++)
+               CHECK(saved[s][k] == pat);
+         }
+      }
+   }
+
+   for (int s = 0; s < 16; s++) {
+      if (saved[s] == NULL)
+         continue;
+      const uint8_t pat = (uint8_t)(tag ^ s);
+      for (size_t k = 0; k < sizes[s]; k++)
+         CHECK(saved[s][k] == pat);
+   }
+}
+
+static void *test_gc_slab_thread(void *arg)
+{
+   mspace_t *m = arg;
+   mspace_stack_limit(MSPACE_CURRENT_FRAME);
+   gc_slab_loop(m);
+
+   return NULL;
+}
+
+START_TEST(test_gc_slab)
+{
+   // Small heap with many threads forces frequent stop-the-world GC while
+   // worker threads are continuously executing the lockless slab fast path.
+   mspace_t *m = mspace_new(0x80000, NULL);
+
+   run_test(test_gc_slab_thread, m);
+
+   mspace_destroy(m);
+}
+END_TEST
+
 ////////////////////////////////////////////////////////////////////////////////
 // MIR concurrent access
 
@@ -344,7 +413,8 @@ int main(int argc, char **argv)
 #ifndef __SANITIZE_THREAD__
    TCase *tc_gc = tcase_create("gc");
    tcase_add_test(tc_gc, test_gc);
-   tcase_set_timeout(tc_gc, 20.0);
+   tcase_add_test(tc_gc, test_gc_slab);
+   tcase_set_timeout(tc_gc, 30.0);
    suite_add_tcase(s, tc_gc);
 
    TCase *tc_stop_world = tcase_create("stop_world");

@@ -35,7 +35,15 @@
 #define LINE_WORDS (LINE_SIZE / sizeof(intptr_t))
 #define MAX_HEAP   (UINT64_C(0x100000000) * LINE_SIZE)
 
+// Per-thread lockless bump slabs: 64-line (2 KB) aligned so distinct threads
+// never share a 64-bit word of headmask.
+#define MSPACE_SLAB_ALIGN   (64 * LINE_SIZE)
+#define MSPACE_SLAB_SIZE    (32 * 1024)
+#define MSPACE_SLAB_MAX_OBJ 512
+
 STATIC_ASSERT(OVERRUN_MARGIN % LINE_SIZE == 0);
+STATIC_ASSERT(MSPACE_SLAB_SIZE % MSPACE_SLAB_ALIGN == 0);
+STATIC_ASSERT(MSPACE_SLAB_MAX_OBJ < MSPACE_SLAB_ALIGN);
 
 struct _mptr {
    void       *ptr;
@@ -68,6 +76,13 @@ struct _free_list {
    size_t       size;
 };
 
+typedef struct {
+   char *base;
+   char *ptr;
+   char *end;
+   int   in_alloc;
+} __attribute__((aligned(64))) mspace_slab_t;
+
 struct _mspace {
    nvc_lock_t        lock;
    size_t            maxsize;
@@ -76,6 +91,7 @@ struct _mspace {
    size_t            gc_limit;
    uint64_t          last_gc_us;
    char             *space;
+   char             *faulted_hwm;
    bit_mask_t        headmask;
    mptr_t            roots;
    mptr_t            free_mptrs;
@@ -83,6 +99,7 @@ struct _mspace {
    free_list_t      *free_tail;
    unsigned          nallocs;   // Samples the debug check of the hints
    free_list_t      *hints[LARGE_OBJECT / LINE_SIZE + 1];
+   free_list_t      *slab_hint;
    uint64_t          create_us;
    mspace_handler_t  handler;
    unsigned          total_gc;
@@ -90,11 +107,15 @@ struct _mspace {
 #ifdef DEBUG
    bool              stress;
 #endif
+   mspace_slab_t     slabs[MAX_THREADS];
 };
 
 static intptr_t *stack_limit[MAX_THREADS];
 
+static void mspace_gc_locked(mspace_t *m);
+#ifdef DEBUG
 static void mspace_gc(mspace_t *m);
+#endif
 static bool is_mspace_ptr(mspace_t *m, char *p);
 
 mspace_t *mspace_new(size_t size, const mspace_handler_t *h)
@@ -111,6 +132,7 @@ mspace_t *mspace_new(size_t size, const mspace_handler_t *h)
    DEBUG_ONLY(m->stress = opt_get_int(OPT_GC_STRESS));
 
    m->space = map_huge_pages(LINE_SIZE, m->maxsize);
+   m->faulted_hwm = m->space;
 
    ASAN_POISON(m->space, m->maxsize);
 
@@ -269,17 +291,226 @@ bool mspace_check_free_list(mspace_t *m)
       }
    }
 
+   if (m->slab_hint != NULL && m->slab_hint != FREE_END) {
+      bool found = false;
+      for (free_list_t *it = m->free_list; it; it = it->next)
+         found |= (it == m->slab_hint);
+      if (!found)
+         return false;
+   }
+
    return true;
 }
 
-static void *mspace_try_alloc(mspace_t *m, size_t size, bool soft)
+static inline void mspace_clear_slab_tail(mspace_t *m, char *base,
+                                          size_t nlines)
+{
+   assert(m->headmask.size > 64);
+   assert(nlines >= 2 && nlines <= 64);
+
+   const size_t start = (size_t)(base - m->space) / LINE_SIZE + 1;
+   const size_t count = nlines - 1;
+   const size_t w0 = start >> 6;
+   const unsigned b0 = (unsigned)(start & 63u);
+
+   if (likely(b0 + count <= 64u)) {
+      const uint64_t mask = ((UINT64_C(1) << count) - 1u) << b0;
+      m->headmask.ptr[w0] &= ~mask;
+   }
+   else {
+      const unsigned lo = 64u - b0;
+      m->headmask.ptr[w0] &= ~(((UINT64_C(1) << lo) - 1u) << b0);
+      m->headmask.ptr[w0 + 1] &= ~((UINT64_C(1) << (count - lo)) - 1u);
+   }
+}
+
+static void mspace_touch_pages(mspace_t *m, char *base, size_t len)
+{
+#if !ASAN_ENABLED
+   // Make sure the first fault to each page is a write to allocate THP on Linux
+   char *end = base + len;
+   if (end > m->faulted_hwm) {
+      char *p = (base > m->faulted_hwm) ? base : m->faulted_hwm;
+      p = (char *)((uintptr_t)p & ~(uintptr_t)4095);
+      if (p < base)
+         p = base;
+      for (; p < end; p += 4096)
+         *(volatile char *)p = 0;
+      m->faulted_hwm = end;
+   }
+#else
+   (void)m;
+   (void)base;
+   (void)len;
+#endif
+}
+
+static void *mspace_try_refill_slab(mspace_t *m, mspace_slab_t *slab,
+                                    size_t size, size_t nlines, size_t asize,
+                                    bool soft)
+{
+   // Never let per-thread slabs reserve more than half the heap so
+   // concurrent non-slab allocations always have headroom on many-core hosts.
+   const size_t half = m->maxsize / 2;
+   if (m->allocated + MSPACE_SLAB_ALIGN > half)
+      return NULL;
+
+   size_t want = MSPACE_SLAB_SIZE;
+   const size_t per_thread_cap = (m->maxsize / 128) & ~(size_t)(MSPACE_SLAB_ALIGN - 1);
+   if (per_thread_cap < want)
+      want = MAX((size_t)MSPACE_SLAB_ALIGN, per_thread_cap);
+
+   const size_t headroom = half - m->allocated;
+   if (headroom < want)
+      want = headroom & ~(size_t)(MSPACE_SLAB_ALIGN - 1);
+
+   if (soft && m->gc_limit < m->maxsize) {
+      if (m->allocated >= m->gc_limit)
+         return NULL;
+      const size_t avail = m->gc_limit - m->allocated;
+      if (avail < want)
+         want = avail & ~(size_t)(MSPACE_SLAB_ALIGN - 1);
+   }
+
+   if (want < MSPACE_SLAB_ALIGN || want < asize)
+      return NULL;
+
+   if (m->slab_hint == FREE_END)
+      return NULL;
+
+   free_list_t *f = NULL;
+   char *aligned = NULL;
+   size_t take = 0;
+   free_list_t *it = m->slab_hint == NULL ? m->free_list : m->slab_hint;
+   for (; it != NULL && it != FREE_END; it = it->next) {
+      if (it->size < MSPACE_SLAB_ALIGN)
+         continue;
+      char *a = (char *)ALIGN_UP((uintptr_t)it->ptr, MSPACE_SLAB_ALIGN);
+      char *end = it->ptr + it->size;
+      if (a >= end)
+         continue;
+      const size_t rem = (size_t)(end - a) & ~(size_t)(MSPACE_SLAB_ALIGN - 1);
+      if (rem >= MSPACE_SLAB_ALIGN && rem >= asize) {
+         f = it;
+         aligned = a;
+         take = MIN(want, rem);
+         break;
+      }
+   }
+
+   if (f == NULL) {
+      m->slab_hint = FREE_END;
+      return NULL;
+   }
+
+   char *orig_end = f->ptr + f->size;
+   const size_t prefix = (size_t)(aligned - f->ptr);
+   const size_t suffix = (size_t)(orig_end - (aligned + take));
+
+   if (prefix == 0 && suffix == 0) {
+      free_list_t *next_hint = f->next != NULL ? f->next : FREE_END;
+      for (int i = 0; i < ARRAY_LEN(m->hints); i++) {
+         if (m->hints[i] == f)
+            m->hints[i] = next_hint;
+      }
+      m->slab_hint = next_hint;
+      if (f->prev != NULL)
+         f->prev->next = f->next;
+      else
+         m->free_list = f->next;
+
+      if (f->next != NULL)
+         f->next->prev = f->prev;
+      else
+         m->free_tail = f->prev;
+
+      free(f);
+   }
+   else if (prefix == 0) {
+      f->ptr += take;
+      f->size -= take;
+      free_list_t *next_hint = f->next != NULL ? f->next : FREE_END;
+      for (int i = 1; i < ARRAY_LEN(m->hints); i++) {
+         if (m->hints[i] == f && f->size < (size_t)i * LINE_SIZE)
+            m->hints[i] = next_hint;
+      }
+      m->slab_hint = f->size >= MSPACE_SLAB_ALIGN ? f : next_hint;
+   }
+   else if (suffix == 0) {
+      f->size = prefix;
+      free_list_t *next_hint = f->next != NULL ? f->next : FREE_END;
+      for (int i = 1; i < ARRAY_LEN(m->hints); i++) {
+         if (m->hints[i] == f && f->size < (size_t)i * LINE_SIZE)
+            m->hints[i] = next_hint;
+      }
+      m->slab_hint = next_hint;
+   }
+   else {
+      free_list_t *rem_node = xmalloc(sizeof(free_list_t));
+      rem_node->ptr  = aligned + take;
+      rem_node->size = suffix;
+      rem_node->prev = f;
+      rem_node->next = f->next;
+      if (f->next != NULL)
+         f->next->prev = rem_node;
+      else
+         m->free_tail = rem_node;
+      f->next = rem_node;
+      f->size = prefix;
+      for (int i = 1; i < ARRAY_LEN(m->hints); i++) {
+         if (m->hints[i] == f && f->size < (size_t)i * LINE_SIZE)
+            m->hints[i] = rem_node;
+      }
+      m->slab_hint = suffix >= MSPACE_SLAB_ALIGN
+         ? rem_node
+         : (rem_node->next != NULL ? rem_node->next : FREE_END);
+   }
+
+   mspace_touch_pages(m, aligned, take);
+
+   m->allocated += take;
+   if (!soft && m->allocated > m->gc_limit)
+      m->gc_limit = MIN(m->maxsize, MAX(m->gc_limit * 2, m->allocated * 2));
+
+#if ASAN_ENABLED
+   // Leave an OVERRUN_MARGIN guard line at both ends of each slab under ASan
+   // so ASAN_UNPOISON(obj, size + OVERRUN_MARGIN - 1) on an adjacent object
+   // before `aligned` or on the last object in this slab never races on
+   // shadow bytes across slab boundaries.
+   char *obj = aligned + OVERRUN_MARGIN;
+   assert(obj + asize + OVERRUN_MARGIN <= aligned + take);
+#else
+   char *obj = aligned;
+#endif
+
+   relaxed_store(&(slab->base), aligned);
+   relaxed_store(&(slab->ptr), obj + asize);
+   relaxed_store(&(slab->end), aligned + take);
+
+   if (nlines > 1)
+      mspace_clear_slab_tail(m, obj, nlines);
+
+   ASAN_UNPOISON(obj, size + OVERRUN_MARGIN - 1);
+#if ASAN_ENABLED
+   *(volatile char *)obj = 0;
+#endif
+
+   return obj;
+}
+
+static void *mspace_try_alloc_locked(mspace_t *m, size_t size, bool soft)
 {
    // Add one to size before rounding up to LINE_SIZE to allow a valid
    // pointer to point at one element past the end of an array
    const size_t nlines = (size + LINE_SIZE) / LINE_SIZE;
    const size_t asize = nlines * LINE_SIZE;
 
-   SCOPED_LOCK(m->lock);
+   if (size < MSPACE_SLAB_MAX_OBJ && m->maxsize >= 2 * MSPACE_SLAB_SIZE) {
+      mspace_slab_t *slab = &(m->slabs[thread_id()]);
+      void *p = mspace_try_refill_slab(m, slab, size, nlines, asize, soft);
+      if (p != NULL)
+         return p;
+   }
 
    // Trigger collection at the adaptive soft threshold before growing RSS
    // into the full virtual reservation.
@@ -338,10 +569,13 @@ static void *mspace_try_alloc(mspace_t *m, size_t size, bool soft)
          mask_clear_range(&(m->headmask), line + 1, nlines - 1);
 
       if (f->size == asize) {
+         free_list_t *next_hint = f->next != NULL ? f->next : FREE_END;
          for (int i = 0; i < ARRAY_LEN(m->hints); i++) {
             if (m->hints[i] == f)
-               m->hints[i] = f->next != NULL ? f->next : FREE_END;
+               m->hints[i] = next_hint;
          }
+         if (m->slab_hint == f)
+            m->slab_hint = next_hint;
 
          if (f->prev != NULL)
             f->prev->next = f->next;
@@ -377,7 +611,7 @@ static void *mspace_try_alloc(mspace_t *m, size_t size, bool soft)
 
 void *mspace_alloc(mspace_t *m, size_t size)
 {
-   if (size == 0)
+   if (unlikely(size == 0))
       return NULL;
 
 #ifdef DEBUG
@@ -387,14 +621,56 @@ void *mspace_alloc(mspace_t *m, size_t size)
       mspace_gc(m);
 #endif
 
-   int retry = 1;
-   do {
-      void *ptr = mspace_try_alloc(m, size, retry == 1);
+   if (likely(size < MSPACE_SLAB_MAX_OBJ)) {
+      const size_t nlines = (size + LINE_SIZE) / LINE_SIZE;
+      const size_t asize  = nlines * LINE_SIZE;
+      mspace_slab_t *slab = &(m->slabs[thread_id()]);
+
+      // Publish in_alloc before reading slab->ptr/end so stop_world() in
+      // mspace_gc() never clears an in-flight slab out from under us.
+      relaxed_store(&(slab->in_alloc), 1);
+      __atomic_signal_fence(__ATOMIC_SEQ_CST);
+
+      char *base = relaxed_load(&(slab->ptr));
+      char *end  = relaxed_load(&(slab->end));
+#if ASAN_ENABLED
+      const size_t need = asize + OVERRUN_MARGIN;
+#else
+      const size_t need = asize;
+#endif
+      if (likely(base < end && (size_t)(end - base) >= need)) {
+         relaxed_store(&(slab->ptr), base + asize);
+         if (unlikely(nlines > 1))
+            mspace_clear_slab_tail(m, base, nlines);
+         ASAN_UNPOISON(base, size + OVERRUN_MARGIN - 1);
+#if ASAN_ENABLED
+         *(volatile char *)base = 0;
+#endif
+         __atomic_signal_fence(__ATOMIC_SEQ_CST);
+         store_release(&(slab->in_alloc), 0);
+         return base;
+      }
+
+      __atomic_signal_fence(__ATOMIC_SEQ_CST);
+      store_release(&(slab->in_alloc), 0);
+   }
+
+   {
+      // Hold m->lock across GC and the hard retry so concurrent threads
+      // resuming after start_world() cannot starve the caller into a
+      // spurious OOM or trigger redundant back-to-back collections.
+      SCOPED_LOCK(m->lock);
+
+      void *ptr = mspace_try_alloc_locked(m, size, true);
       if (ptr != NULL)
          return ptr;
 
-      mspace_gc(m);
-   } while (retry--);
+      mspace_gc_locked(m);
+
+      ptr = mspace_try_alloc_locked(m, size, false);
+      if (ptr != NULL)
+         return ptr;
+   }
 
    if (m->handler.oom != NULL) {
       (*m->handler.oom)(m, size, m->handler.context);
@@ -509,7 +785,7 @@ static void mspace_suspend_cb(int thread_id, struct cpu_state *cpu, void *arg)
 }
 
 __attribute__((no_sanitize_address, noinline))
-static void mspace_gc(mspace_t *m)
+static void mspace_gc_locked(mspace_t *m)
 {
    const uint64_t start_ticks = get_timestamp_us();
 
@@ -529,9 +805,22 @@ static void mspace_gc(mspace_t *m)
    state.pending = xcalloc_array(npending, sizeof(uint64_t));
    state.active_words = xmalloc_array(npending, sizeof(uint32_t));
 
-   SCOPED_LOCK(m->lock);
-
    stop_world(mspace_suspend_cb, &state);
+
+   // Any thread suspended mid-fast-path keeps its 64-line-aligned slab
+   // pinned live across this cycle so sweep never touches its memory or
+   // headmask words after start_world().
+   bool pinned_slab[MAX_THREADS] = {};
+   for (int i = 0; i < MAX_THREADS; i++) {
+      if (load_acquire(&(m->slabs[i].in_alloc)) != 0
+          && m->slabs[i].end != NULL)
+         pinned_slab[i] = true;
+      else {
+         m->slabs[i].base = NULL;
+         m->slabs[i].ptr  = NULL;
+         m->slabs[i].end  = NULL;
+      }
+   }
 
    // Be very careful not to call library functions that could take
    // locks such as malloc between here and the start_world call below
@@ -609,6 +898,14 @@ static void mspace_gc(mspace_t *m)
       }
    }
 
+   for (int i = 0; i < MAX_THREADS; i++) {
+      if (pinned_slab[i]) {
+         const size_t first = (size_t)(m->slabs[i].base - m->space) / LINE_SIZE;
+         const size_t count = (size_t)(m->slabs[i].end - m->slabs[i].base) / LINE_SIZE;
+         mask_set_range(&(state.markmask), first, count);
+      }
+   }
+
    start_world();
 
    for (free_list_t *it = m->free_list, *tmp; it; it = tmp) {
@@ -617,6 +914,7 @@ static void mspace_gc(mspace_t *m)
    }
    m->free_list = m->free_tail = NULL;
    memset(m->hints, '\0', sizeof(m->hints));
+   m->slab_hint = NULL;
 
    int freefrags = 0;
    size_t freelines = 0;
@@ -673,6 +971,14 @@ static void mspace_gc(mspace_t *m)
    free(state.pending);
 }
 
+#ifdef DEBUG
+static void mspace_gc(mspace_t *m)
+{
+   SCOPED_LOCK(m->lock);
+   mspace_gc_locked(m);
+}
+#endif
+
 void mspace_user_mark(mspace_t *m, void *cookie, const void *ptr, size_t size)
 {
    assert((uintptr_t)ptr % sizeof(void *) == 0);
@@ -719,6 +1025,15 @@ void *mspace_find_live(mspace_t *m, void *ptr, size_t *size)
 
    for (free_list_t *it = m->free_list; it != NULL; it = it->next) {
       if ((char *)start >= it->ptr && (char *)start < it->ptr + it->size) {
+         *size = 0;
+         return NULL;
+      }
+   }
+
+   for (int i = 0; i < MAX_THREADS; i++) {
+      char *sptr = relaxed_load(&(m->slabs[i].ptr));
+      char *send = relaxed_load(&(m->slabs[i].end));
+      if ((char *)start >= sptr && (char *)start < send) {
          *size = 0;
          return NULL;
       }
