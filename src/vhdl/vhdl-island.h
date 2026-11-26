@@ -68,6 +68,9 @@ typedef struct {
    bool             has_ext_driver;
    bool             has_9state_driver;
    bool             ext_read;
+   bool             base_has_ext_driver;
+   bool             base_has_9state_driver;
+   bool             base_ext_read;
    bool             child_read;
    int              driver_proc;
    uint32_t         width;
@@ -174,12 +177,17 @@ typedef struct _vhdl_island_ctx {
    uint32_t       n_islands;
    uint32_t      *ext_read_sigs;
    uint32_t       n_ext_read_sigs;
+   uint32_t       base_n_ext_read_sigs;
    bool          *stmt_fused;
    int            n_block_stmts;
+   bool           two_state;
+   uint32_t       total_procs;
 } vhdl_island_ctx_t;
 
 vhdl_island_ctx_t *vhdl_island_analyze(tree_t block, const tree_t *ancestors,
                                        int n_ancestors, ident_t scope_prefix);
+void vhdl_island_rebuild(vhdl_island_ctx_t *ctx);
+void vhdl_island_dump_summary(const vhdl_island_ctx_t *ctx);
 void vhdl_island_ctx_free(vhdl_island_ctx_t *ctx);
 
 bool vhdl_island_stmt_fused(const vhdl_island_ctx_t *ctx, int stmt_idx);

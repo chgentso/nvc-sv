@@ -4463,62 +4463,17 @@ static mir_unit_t *vi_build_ff_unit(mir_context_t *mc,
    return mu;
 }
 
-static bool vi_rebuild_without_rejected(vhdl_island_ctx_t *ctx, int fail_proc)
+static void vi_reject_failed(vhdl_island_ctx_t *ctx, uint32_t isl_idx,
+                             int fail_proc)
 {
-   if (fail_proc < 0 || (uint32_t)fail_proc >= ctx->n_procs)
-      return false;
-   // Simple & exact: free ctx's derived structures? Even better:
-   // reject just that process by finding its island and ejecting it, or
-   // mark its entire island's procs unfused so boundary remains consistent!
-   // Wait: ejecting ALL procs of the failed island guarantees zero orphaned signals!
-   const int bad_isl = ctx->procs[fail_proc].island_idx;
-   for (uint32_t i = 0; i < ctx->n_procs; i++) {
-      if (ctx->procs[i].island_idx == bad_isl) {
-         ctx->procs[i].rejected = true;
-         ctx->procs[i].island_idx = -1;
-         if (ctx->procs[i].block_stmt_idx >= 0)
-            ctx->stmt_fused[ctx->procs[i].block_stmt_idx] = false;
-         // Mark signals read by newly-ejected proc as ext_read
-         for (uint32_t r = 0; r < ctx->procs[i].n_reads; r++) {
-            uint32_t sid = ctx->procs[i].reads[r];
-            ctx->sigs[sid].ext_read = true;
-            bool seen = false;
-            for (uint32_t e = 0; e < ctx->n_ext_read_sigs; e++) {
-               if (ctx->ext_read_sigs[e] == sid) {
-                  seen = true;
-                  break;
-               }
-            }
-            if (!seen) {
-               ctx->ext_read_sigs = xrealloc_array(ctx->ext_read_sigs,
-                                                   ctx->n_ext_read_sigs + 1,
-                                                   sizeof(uint32_t));
-               ctx->ext_read_sigs[ctx->n_ext_read_sigs++] = sid;
-            }
-            for (uint32_t dp = 0; dp < ctx->n_procs; dp++) {
-               if (ctx->procs[dp].rejected || ctx->procs[dp].island_idx < 0)
-                  continue;
-               bool writes_sid = false;
-               for (uint32_t w = 0; w < ctx->procs[dp].n_writes; w++) {
-                  if (ctx->procs[dp].writes[w] == sid) {
-                     writes_sid = true;
-                     break;
-                  }
-               }
-               if (writes_sid) {
-                  vhdl_isl_sig_t *ds = (vhdl_isl_sig_t *)vhdl_island_find_sig(
-                     &(ctx->islands[ctx->procs[dp].island_idx]), sid);
-                  if (ds != NULL)
-                     ds->rt_flags |= RT_ISIG_OUT;
-               }
-            }
-         }
-      }
+   if (fail_proc >= 0 && (uint32_t)fail_proc < ctx->n_procs) {
+      ctx->procs[fail_proc].rejected = true;
+      return;
    }
-   ctx->islands[bad_isl].n_sigs = 0;
-   ctx->islands[bad_isl].n_comb_procs = 0;
-   ctx->islands[bad_isl].n_doms = 0;
-   return true;
+   for (uint32_t i = 0; i < ctx->n_procs; i++) {
+      if (ctx->procs[i].island_idx == (int)isl_idx)
+         ctx->procs[i].rejected = true;
+   }
 }
 
 vhdl_island_ctx_t *vhdl_island_lower_prepare(mir_context_t *mc, tree_t block,
@@ -4537,52 +4492,60 @@ vhdl_island_ctx_t *vhdl_island_lower_prepare(mir_context_t *mc, tree_t block,
 
    vhdl_island_ctx_t *ctx = vhdl_island_analyze(block, ancestors, n_ancestors,
                                                 scope_prefix);
-   if (ctx == NULL || ctx->n_islands == 0)
+   if (ctx == NULL)
+      return NULL;
+   if (ctx->n_islands == 0) {
+      vhdl_island_dump_summary(ctx);
       return ctx;
+   }
 
+   const uint32_t max_retries = ctx->n_procs + 1;
    A(mir_unit_t *) built = AINIT;
-   for (uint32_t ii = 0; ii < ctx->n_islands; ii++) {
-      const vhdl_island_t *isl = &(ctx->islands[ii]);
-      if (isl->n_sigs == 0)
-         continue;
-
-      A(mir_unit_t *) isl_units = AINIT;
-      int failed_proc = -1;
-
-      if (isl->n_comb_procs > 0 && mir_get_shape(mc, isl->eval_name) == NULL) {
-         mir_unit_t *cmu = vi_build_comb_unit(mc, ctx, isl, &failed_proc);
-         if (cmu == NULL) {
-            vi_rebuild_without_rejected(ctx, failed_proc);
-            ACLEAR(isl_units);
+   for (uint32_t attempt = 0; attempt <= max_retries; attempt++) {
+      bool need_rebuild = false;
+      for (uint32_t ii = 0; ii < ctx->n_islands; ii++) {
+         const vhdl_island_t *isl = &(ctx->islands[ii]);
+         if (isl->n_sigs == 0)
             continue;
+
+         int failed_proc = -1;
+         if (isl->n_comb_procs > 0 && mir_get_shape(mc, isl->eval_name) == NULL) {
+            mir_unit_t *cmu = vi_build_comb_unit(mc, ctx, isl, &failed_proc);
+            if (cmu == NULL) {
+               vi_reject_failed(ctx, ii, failed_proc);
+               need_rebuild = true;
+               break;
+            }
+            APUSH(built, cmu);
          }
-         APUSH(isl_units, cmu);
-      }
 
-      bool ok = true;
-      for (uint32_t d = 0; d < isl->n_doms; d++) {
-         if (mir_get_shape(mc, isl->doms[d].fn_name) != NULL)
-            continue;
-         mir_unit_t *fmu = vi_build_ff_unit(mc, ctx, isl, &(isl->doms[d]),
-                                            &failed_proc);
-         if (fmu == NULL) {
-            ok = false;
-            vi_rebuild_without_rejected(ctx, failed_proc);
+         for (uint32_t d = 0; d < isl->n_doms; d++) {
+            if (mir_get_shape(mc, isl->doms[d].fn_name) != NULL)
+               continue;
+            mir_unit_t *fmu = vi_build_ff_unit(mc, ctx, isl, &(isl->doms[d]),
+                                               &failed_proc);
+            if (fmu == NULL) {
+               vi_reject_failed(ctx, ii, failed_proc);
+               need_rebuild = true;
+               break;
+            }
+            APUSH(built, fmu);
+         }
+
+         if (need_rebuild)
             break;
-         }
-         APUSH(isl_units, fmu);
       }
 
-      if (!ok) {
-         for (unsigned u = 0; u < isl_units.count; u++)
-            mir_unit_free(isl_units.items[u]);
-         ACLEAR(isl_units);
-         continue;
-      }
+      if (!need_rebuild)
+         break;
 
-      for (unsigned u = 0; u < isl_units.count; u++)
-         APUSH(built, isl_units.items[u]);
-      ACLEAR(isl_units);
+      for (unsigned u = 0; u < built.count; u++)
+         mir_unit_free(built.items[u]);
+      built.count = 0;
+
+      vhdl_island_rebuild(ctx);
+      if (ctx->n_islands == 0)
+         break;
    }
 
    for (unsigned u = 0; u < built.count; u++) {
@@ -4591,6 +4554,7 @@ vhdl_island_ctx_t *vhdl_island_lower_prepare(mir_context_t *mc, tree_t block,
    }
    ACLEAR(built);
 
+   vhdl_island_dump_summary(ctx);
    return ctx;
 }
 

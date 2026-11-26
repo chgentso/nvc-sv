@@ -3623,79 +3623,100 @@ static void collect_block_contents(vhdl_island_ctx_t *ctx, tree_t cur_blk,
    vhdl_island_set_eval_scope(ctx, ctx->block, ctx->ancestors, ctx->n_ancestors);
 }
 
-vhdl_island_ctx_t *vhdl_island_analyze(tree_t block, const tree_t *ancestors,
-                                       int n_ancestors, ident_t scope_prefix)
+static void free_ctx_islands(vhdl_island_ctx_t *ctx)
 {
-   const bool two_state = opt_get_int(OPT_TWO_STATE) >= TWO_STATE_ISLANDS;
-   if (n_ancestors > VHDL_ISLAND_MAX_ANCESTORS)
-      n_ancestors = VHDL_ISLAND_MAX_ANCESTORS;
+   for (uint32_t i = 0; i < ctx->n_islands; i++) {
+      vhdl_island_t *isl = &(ctx->islands[i]);
+      free(isl->sigs);
+      free(isl->comb_procs);
+      for (uint32_t d = 0; d < isl->n_doms; d++) {
+         free(isl->doms[d].proc_idxs);
+         free(isl->doms[d].write_isl_sigs);
+      }
+      free(isl->doms);
+   }
+   free(ctx->islands);
+   ctx->islands = NULL;
+   ctx->n_islands = 0;
+}
 
-   sig_list_t sigs = AINIT;
-   int path[VHDL_ISIG_MAX_DEPTH];
+void vhdl_island_dump_summary(const vhdl_island_ctx_t *ctx)
+{
+   if (ctx == NULL || !opt_get_int(OPT_DUMP_ISLANDS) || ctx->total_procs == 0)
+      return;
 
-   const int nports = tree_ports(block);
-   for (int i = 0; i < nports; i++) {
-      tree_t p = tree_port(block, i);
-      if (tree_class(p) == C_SIGNAL)
-         collect_decl_leaves(block, ancestors, n_ancestors, p, tree_type(p),
-                             path, 0, two_state, &sigs);
+   uint32_t n_live = 0;
+   for (uint32_t i = 0; i < ctx->n_procs; i++) {
+      if (!ctx->procs[i].rejected && ctx->procs[i].island_idx >= 0)
+         n_live++;
    }
 
-   const int ndecls = tree_decls(block);
-   for (int i = 0; i < ndecls; i++) {
-      tree_t d = tree_decl(block, i);
-      if (tree_kind(d) == T_SIGNAL_DECL)
-         collect_decl_leaves(block, ancestors, n_ancestors, d, tree_type(d),
-                             path, 0, two_state, &sigs);
-      else if (tree_kind(d) == T_IMPLICIT_SIGNAL) {
-         // Implicit attributes like 'delayed/'stable/'quiet invalidate target
-         for (uint32_t j = 0; j < sigs.count; j++) {
-            if (tree_ident(sigs.items[j].decl) != NULL
-                && ident_starts_with(tree_ident(d), tree_ident(sigs.items[j].decl)))
-               sigs.items[j].ineligible = true;
-         }
+   uint32_t total_state = 0, two_cnt = 0;
+   for (uint32_t i = 0; i < ctx->n_islands; i++) {
+      total_state += ctx->islands[i].state_bytes;
+      for (uint32_t j = 0; j < ctx->islands[i].n_sigs; j++) {
+         if (ctx->sigs[ctx->islands[i].sigs[j].sig_id].two_state)
+            two_cnt++;
       }
    }
+   printf("VHDL_ISLAND_ELAB: %s islands=%u fused_procs=%u/%u "
+          "sigs=%u state_bytes=%u two_state=%u\n",
+          istr(ctx->scope_prefix), ctx->n_islands, n_live, ctx->total_procs,
+          ctx->n_sigs, total_state, two_cnt);
+}
 
-   const int nstmts = tree_stmts(block);
-   uint32_t total_procs = 0;
-   for (int i = 0; i < nstmts; i++) {
-      if (tree_kind(tree_stmt(block, i)) == T_PROCESS)
-         total_procs++;
+void vhdl_island_rebuild(vhdl_island_ctx_t *ctx)
+{
+   if (ctx == NULL)
+      return;
+
+   free_ctx_islands(ctx);
+
+   const bool two_state = ctx->two_state;
+   sig_list_t sigs = {
+      .items = ctx->sigs,
+      .count = ctx->n_sigs,
+      .limit = ctx->n_sigs,
+   };
+   proc_list_t procs = {
+      .items = ctx->procs,
+      .count = ctx->n_procs,
+      .limit = ctx->n_procs,
+   };
+
+   for (uint32_t i = 0; i < ctx->n_sigs; i++) {
+      ctx->sigs[i].has_ext_driver = ctx->sigs[i].base_has_ext_driver;
+      ctx->sigs[i].has_9state_driver = ctx->sigs[i].base_has_9state_driver;
+      ctx->sigs[i].ext_read = ctx->sigs[i].base_ext_read;
+      ctx->sigs[i].driver_proc = -1;
    }
 
-   if (sigs.count == 0) {
-      if (opt_get_int(OPT_DUMP_ISLANDS) && total_procs > 0)
-         printf("VHDL_ISLAND_ELAB: %s islands=0 fused_procs=0/%u "
-                "sigs=0 state_bytes=0 two_state=0\n",
-                istr(scope_prefix), total_procs);
-      ACLEAR(sigs);
-      return NULL;
+   for (uint32_t i = 0; i < ctx->n_procs; i++) {
+      ctx->procs[i].island_idx = -1;
+      ctx->procs[i].dom_idx = -1;
    }
-
-   vhdl_island_ctx_t *ctx = xcalloc(sizeof(vhdl_island_ctx_t));
-   ctx->block = block;
-   ctx->n_ancestors = n_ancestors;
-   if (n_ancestors > 0)
-      memcpy(ctx->ancestors, ancestors, n_ancestors * sizeof(tree_t));
-   vhdl_island_set_eval_scope(ctx, block, ancestors, n_ancestors);
-   ctx->scope_prefix = scope_prefix;
-   ctx->sigs = sigs.items;
-   ctx->n_sigs = sigs.count;
-   ctx->n_block_stmts = nstmts;
-   ctx->stmt_fused = xcalloc_array(MAX(1, nstmts), sizeof(bool));
+   if (ctx->n_block_stmts > 0)
+      memset(ctx->stmt_fused, 0, (size_t)ctx->n_block_stmts * sizeof(bool));
 
    u32_list_t ext_reads = AINIT;
-   proc_list_t procs = AINIT;
-   total_procs = 0;
+   for (uint32_t i = 0; i < ctx->base_n_ext_read_sigs; i++)
+      APUSH(ext_reads, ctx->ext_read_sigs[i]);
+   free(ctx->ext_read_sigs);
+   ctx->ext_read_sigs = NULL;
+   ctx->n_ext_read_sigs = 0;
 
-   collect_block_contents(ctx, block, ancestors, n_ancestors, scope_prefix,
-                          true, two_state, &sigs, &procs, &ext_reads,
-                          &total_procs);
+   // Pre-mark external drivers from any already-rejected processes (e.g.
+   // processes rejected during MIR lowering) before conflict checks.
+   for (unsigned i = 0; i < procs.count; i++) {
+      if (!procs.items[i].rejected)
+         continue;
+      for (uint32_t j = 0; j < procs.items[i].n_writes; j++)
+         sigs.items[procs.items[i].writes[j]].has_ext_driver = true;
+   }
 
    // Iteratively resolve multi-driver conflicts (allowing pairwise-disjoint
    // constant-bit/slice writers of the same vector signal)
-   int *driver_count LOCAL = xcalloc_array(ctx->n_sigs, sizeof(int));
+   int *driver_count LOCAL = xcalloc_array(MAX(1u, ctx->n_sigs), sizeof(int));
    bool changed = true;
    while (changed) {
       changed = false;
@@ -3755,6 +3776,8 @@ vhdl_island_ctx_t *vhdl_island_analyze(tree_t block, const tree_t *ancestors,
          if (conflict) {
             p->rejected = true;
             changed = true;
+            for (uint32_t j = 0; j < p->n_writes; j++)
+               sigs.items[p->writes[j]].has_ext_driver = true;
             if (read_9state && p->kind == VIPROC_COMB) {
                for (uint32_t j = 0; j < p->n_writes; j++)
                   sigs.items[p->writes[j]].has_9state_driver = true;
@@ -3890,21 +3913,13 @@ vhdl_island_ctx_t *vhdl_island_analyze(tree_t block, const tree_t *ancestors,
    }
 
    if (n_live == 0) {
-      if (opt_get_int(OPT_DUMP_ISLANDS) && total_procs > 0)
-         printf("VHDL_ISLAND_ELAB: %s islands=0 fused_procs=0/%u "
-                "sigs=%u state_bytes=0 two_state=0\n",
-                istr(scope_prefix), total_procs, ctx->n_sigs);
       ACLEAR(topo_comb_procs);
-      ctx->procs = procs.items;
-      ctx->n_procs = procs.count;
       ctx->ext_read_sigs = ext_reads.items;
       ctx->n_ext_read_sigs = ext_reads.count;
-      return ctx;
+      return;
    }
 
    // Union-Find over live processes connected by shared internal signals
-   // (Wait: also connect processes if signal is NOT ext_read/port/child_read,
-   //  AND group same-clock FFs when connected or keep each connected component together!)
    uint32_t *uf_parent LOCAL = xmalloc_array(procs.count, sizeof(uint32_t));
    for (unsigned i = 0; i < procs.count; i++)
       uf_parent[i] = i;
@@ -3926,7 +3941,6 @@ vhdl_island_ctx_t *vhdl_island_analyze(tree_t block, const tree_t *ancestors,
       }
       for (uint32_t j = 0; j < p->n_reads; j++) {
          const uint32_t sid = p->reads[j];
-         // Merge producer & internal consumers into one island if driven locally
          if (ctx->sigs[sid].driver_proc >= 0) {
             if (sig_first_user[sid] < 0)
                sig_first_user[sid] = (int)i;
@@ -3937,7 +3951,6 @@ vhdl_island_ctx_t *vhdl_island_analyze(tree_t block, const tree_t *ancestors,
    }
 
    // Coalesce same-clock/reset-domain FF processes in this block into one island
-   // to eliminate small-island boundary & domain dispatch churn.
    for (unsigned i = 0; i < procs.count; i++) {
       const vhdl_iproc_t *pi = &(procs.items[i]);
       if (pi->rejected || pi->kind != VIPROC_FF)
@@ -3957,9 +3970,7 @@ vhdl_island_ctx_t *vhdl_island_analyze(tree_t block, const tree_t *ancestors,
    }
 
    // Prune unprofitable combinational-only islands with zero internal
-   // producer->consumer dataflow edges (every input & output crosses the
-   // island boundary, so native NVC fast-driver execution avoids watch/sync/
-   // deposit churn).
+   // producer->consumer dataflow edges
    uint32_t *root_comb_cnt LOCAL = xcalloc_array(procs.count, sizeof(uint32_t));
    uint32_t *root_ff_cnt LOCAL = xcalloc_array(procs.count, sizeof(uint32_t));
    bool *root_has_comb_edge LOCAL = xcalloc_array(procs.count, sizeof(bool));
@@ -4034,16 +4045,10 @@ vhdl_island_ctx_t *vhdl_island_analyze(tree_t block, const tree_t *ancestors,
    vhdl_island_set_eval_scope(ctx, ctx->block, ctx->ancestors, ctx->n_ancestors);
 
    if (n_live == 0) {
-      if (opt_get_int(OPT_DUMP_ISLANDS) && total_procs > 0)
-         printf("VHDL_ISLAND_ELAB: %s islands=0 fused_procs=0/%u "
-                "sigs=%u state_bytes=0 two_state=0\n",
-                istr(scope_prefix), total_procs, ctx->n_sigs);
       ACLEAR(topo_comb_procs);
-      ctx->procs = procs.items;
-      ctx->n_procs = procs.count;
       ctx->ext_read_sigs = ext_reads.items;
       ctx->n_ext_read_sigs = ext_reads.count;
-      return ctx;
+      return;
    }
 
    // Map UF roots to island indices
@@ -4089,14 +4094,12 @@ vhdl_island_ctx_t *vhdl_island_analyze(tree_t block, const tree_t *ancestors,
       u32_list_t isl_comb = AINIT;
       A(vhdl_idom_t) doms = AINIT;
 
-      // Add comb procs in global topo order
       for (unsigned k = 0; k < topo_comb_procs.count; k++) {
          uint32_t pi = topo_comb_procs.items[k];
          if (procs.items[pi].island_idx == (int)ii)
             APUSH(isl_comb, pi);
       }
 
-      // Collect signals touched by processes in this island
       for (unsigned i = 0; i < procs.count; i++) {
          const vhdl_iproc_t *p = &(procs.items[i]);
          if (p->island_idx != (int)ii)
@@ -4170,7 +4173,7 @@ vhdl_island_ctx_t *vhdl_island_analyze(tree_t block, const tree_t *ancestors,
                   .rst_posedge = p->rst_posedge,
                   .edge_flags  = p->edge_flags,
                   .fn_name     = ident_sprintf("%s.$vhdl_island_ff_%u_%u",
-                                               istr(scope_prefix), ii,
+                                               istr(ctx->scope_prefix), ii,
                                                (unsigned)doms.count),
                };
                found = (int)doms.count;
@@ -4179,7 +4182,6 @@ vhdl_island_ctx_t *vhdl_island_analyze(tree_t block, const tree_t *ancestors,
             p->dom_idx = found;
             vhdl_idom_t *dm = &(doms.items[found]);
 
-            // Append proc_idx and write_isl_sigs
             dm->proc_idxs = xrealloc_array(dm->proc_idxs, dm->n_procs + 1,
                                            sizeof(uint32_t));
             dm->proc_idxs[dm->n_procs++] = i;
@@ -4203,7 +4205,6 @@ vhdl_island_ctx_t *vhdl_island_analyze(tree_t block, const tree_t *ancestors,
          }
       }
 
-      // Compute per-island state offsets
       uint32_t off = 0;
       for (unsigned j = 0; j < isl_sig_ids.count; j++) {
          const uint32_t gid = isl_sig_ids.items[j];
@@ -4221,7 +4222,6 @@ vhdl_island_ctx_t *vhdl_island_analyze(tree_t block, const tree_t *ancestors,
       }
       isl->state_bytes = off;
 
-      // Compute runtime boundary flags for each signal in this island
       for (unsigned j = 0; j < isl_sig_ids.count; j++) {
          const uint32_t gid = isl_sig_ids.items[j];
          const vhdl_isig_t *s = &(ctx->sigs[gid]);
@@ -4260,35 +4260,103 @@ vhdl_island_ctx_t *vhdl_island_analyze(tree_t block, const tree_t *ancestors,
       isl->n_comb_procs = isl_comb.count;
       if (isl->n_comb_procs > 0)
          isl->eval_name = ident_sprintf("%s.$vhdl_island_comb_%u",
-                                        istr(scope_prefix), ii);
+                                        istr(ctx->scope_prefix), ii);
       isl->doms = doms.items;
       isl->n_doms = doms.count;
    }
 
    ACLEAR(topo_comb_procs);
 
-   ctx->procs = procs.items;
-   ctx->n_procs = procs.count;
    ctx->islands = islands.items;
    ctx->n_islands = islands.count;
    ctx->ext_read_sigs = ext_reads.items;
    ctx->n_ext_read_sigs = ext_reads.count;
+}
 
-   if (opt_get_int(OPT_DUMP_ISLANDS)) {
-      uint32_t total_state = 0, two_cnt = 0;
-      for (uint32_t i = 0; i < ctx->n_islands; i++) {
-         total_state += ctx->islands[i].state_bytes;
-         for (uint32_t j = 0; j < ctx->islands[i].n_sigs; j++) {
-            if (ctx->sigs[ctx->islands[i].sigs[j].sig_id].two_state)
-               two_cnt++;
-         }
-      }
-      printf("VHDL_ISLAND_ELAB: %s islands=%u fused_procs=%u/%u "
-             "sigs=%u state_bytes=%u two_state=%u\n",
-             istr(scope_prefix), ctx->n_islands, n_live, total_procs,
-             ctx->n_sigs, total_state, two_cnt);
+vhdl_island_ctx_t *vhdl_island_analyze(tree_t block, const tree_t *ancestors,
+                                       int n_ancestors, ident_t scope_prefix)
+{
+   const bool two_state = opt_get_int(OPT_TWO_STATE) >= TWO_STATE_ISLANDS;
+   if (n_ancestors > VHDL_ISLAND_MAX_ANCESTORS)
+      n_ancestors = VHDL_ISLAND_MAX_ANCESTORS;
+
+   sig_list_t sigs = AINIT;
+   int path[VHDL_ISIG_MAX_DEPTH];
+
+   const int nports = tree_ports(block);
+   for (int i = 0; i < nports; i++) {
+      tree_t p = tree_port(block, i);
+      if (tree_class(p) == C_SIGNAL)
+         collect_decl_leaves(block, ancestors, n_ancestors, p, tree_type(p),
+                             path, 0, two_state, &sigs);
    }
 
+   const int ndecls = tree_decls(block);
+   for (int i = 0; i < ndecls; i++) {
+      tree_t d = tree_decl(block, i);
+      if (tree_kind(d) == T_SIGNAL_DECL)
+         collect_decl_leaves(block, ancestors, n_ancestors, d, tree_type(d),
+                             path, 0, two_state, &sigs);
+      else if (tree_kind(d) == T_IMPLICIT_SIGNAL) {
+         // Implicit attributes like 'delayed/'stable/'quiet invalidate target
+         for (uint32_t j = 0; j < sigs.count; j++) {
+            if (tree_ident(sigs.items[j].decl) != NULL
+                && ident_starts_with(tree_ident(d), tree_ident(sigs.items[j].decl)))
+               sigs.items[j].ineligible = true;
+         }
+      }
+   }
+
+   const int nstmts = tree_stmts(block);
+   uint32_t total_procs = 0;
+   for (int i = 0; i < nstmts; i++) {
+      if (tree_kind(tree_stmt(block, i)) == T_PROCESS)
+         total_procs++;
+   }
+
+   if (sigs.count == 0) {
+      if (opt_get_int(OPT_DUMP_ISLANDS) && total_procs > 0)
+         printf("VHDL_ISLAND_ELAB: %s islands=0 fused_procs=0/%u "
+                "sigs=0 state_bytes=0 two_state=0\n",
+                istr(scope_prefix), total_procs);
+      ACLEAR(sigs);
+      return NULL;
+   }
+
+   vhdl_island_ctx_t *ctx = xcalloc(sizeof(vhdl_island_ctx_t));
+   ctx->block = block;
+   ctx->n_ancestors = n_ancestors;
+   if (n_ancestors > 0)
+      memcpy(ctx->ancestors, ancestors, n_ancestors * sizeof(tree_t));
+   vhdl_island_set_eval_scope(ctx, block, ancestors, n_ancestors);
+   ctx->scope_prefix = scope_prefix;
+   ctx->sigs = sigs.items;
+   ctx->n_sigs = sigs.count;
+   ctx->n_block_stmts = nstmts;
+   ctx->stmt_fused = xcalloc_array(MAX(1, nstmts), sizeof(bool));
+   ctx->two_state = two_state;
+
+   u32_list_t ext_reads = AINIT;
+   proc_list_t procs = AINIT;
+   total_procs = 0;
+
+   collect_block_contents(ctx, block, ancestors, n_ancestors, scope_prefix,
+                          true, two_state, &sigs, &procs, &ext_reads,
+                          &total_procs);
+
+   ctx->total_procs = total_procs;
+   ctx->procs = procs.items;
+   ctx->n_procs = procs.count;
+   ctx->ext_read_sigs = ext_reads.items;
+   ctx->n_ext_read_sigs = ext_reads.count;
+   ctx->base_n_ext_read_sigs = ext_reads.count;
+   for (uint32_t i = 0; i < ctx->n_sigs; i++) {
+      ctx->sigs[i].base_has_ext_driver = ctx->sigs[i].has_ext_driver;
+      ctx->sigs[i].base_has_9state_driver = ctx->sigs[i].has_9state_driver;
+      ctx->sigs[i].base_ext_read = ctx->sigs[i].ext_read;
+   }
+
+   vhdl_island_rebuild(ctx);
    return ctx;
 }
 
@@ -4305,17 +4373,7 @@ void vhdl_island_ctx_free(vhdl_island_ctx_t *ctx)
    }
    free(ctx->procs);
 
-   for (uint32_t i = 0; i < ctx->n_islands; i++) {
-      vhdl_island_t *isl = &(ctx->islands[i]);
-      free(isl->sigs);
-      free(isl->comb_procs);
-      for (uint32_t d = 0; d < isl->n_doms; d++) {
-         free(isl->doms[d].proc_idxs);
-         free(isl->doms[d].write_isl_sigs);
-      }
-      free(isl->doms);
-   }
-   free(ctx->islands);
+   free_ctx_islands(ctx);
    free(ctx->sigs);
    free(ctx->ext_read_sigs);
    free(ctx->stmt_fused);
