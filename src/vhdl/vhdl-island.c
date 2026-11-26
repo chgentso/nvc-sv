@@ -684,8 +684,13 @@ static void collect_decl_leaves(tree_t block, const tree_t *ancestors,
                                     &s.outer_dir, &s.outer_left,
                                     &s.outer_right, &s.nelems))
          return;
-      if ((uint64_t)s.width * s.nelems > VHDL_ISLAND_MAX_ARRAY2D_BITS)
-         return;
+      const uint64_t total_bits = (uint64_t)s.width * s.nelems;
+      if (total_bits > VHDL_ISLAND_MAX_ARRAY2D_BITS) {
+         if (two_state || s.byte_size != 1
+             || total_bits > VHDL_ISLAND_MAX_SPARSE_RAM_BITS)
+            return;
+         s.is_sparse_ram = true;
+      }
       s.is_vector = true;
       s.is_array2d = true;
       APUSH(*sigs, s);
@@ -3941,6 +3946,11 @@ void vhdl_island_rebuild(vhdl_island_ctx_t *ctx)
                conflict = true;
                break;
             }
+            if (sigs.items[sid].is_sparse_ram
+                && (p->kind != VIPROC_FF || driver_count[sid] > 1)) {
+               conflict = true;
+               break;
+            }
             if (driver_count[sid] > 1) {
                if (!sigs.items[sid].is_vector) {
                   conflict = true;
@@ -4409,9 +4419,14 @@ void vhdl_island_rebuild(vhdl_island_ctx_t *ctx)
       }
 
       uint32_t off = 0;
+      bool has_sparse = false;
       for (unsigned j = 0; j < isl_sig_ids.count; j++) {
          const uint32_t gid = isl_sig_ids.items[j];
          const vhdl_isig_t *s = &(ctx->sigs[gid]);
+         if (s->is_sparse_ram) {
+            has_sparse = true;
+            continue;
+         }
 
          isl_sigs[j].a_off = off;
          if (s->two_state) {
@@ -4424,6 +4439,26 @@ void vhdl_island_rebuild(vhdl_island_ctx_t *ctx)
          }
       }
       isl->state_bytes = off;
+      if (has_sparse) {
+         const uint32_t stride = RT_ISLAND_STRIDE(off);
+         uint32_t soff = (doms.count > 0 ? 2u : 1u) * stride;
+         isl->sparse_log_off = soff;
+         soff += ALIGN_UP((uint32_t)sizeof(rt_island_sparse_log_t), 64u);
+         for (unsigned j = 0; j < isl_sig_ids.count; j++) {
+            const uint32_t gid = isl_sig_ids.items[j];
+            const vhdl_isig_t *s = &(ctx->sigs[gid]);
+            if (!s->is_sparse_ram)
+               continue;
+            isl_sigs[j].a_off = soff;
+            const uint32_t nbytes = s->width * s->nelems * s->byte_size;
+            soff += ALIGN_UP(nbytes, 64u);
+         }
+         isl->total_state_bytes = ALIGN_UP(soff, 64u);
+      }
+      else {
+         isl->sparse_log_off = 0;
+         isl->total_state_bytes = 0;
+      }
 
       for (unsigned j = 0; j < isl_sig_ids.count; j++) {
          const uint32_t gid = isl_sig_ids.items[j];
@@ -4431,6 +4466,8 @@ void vhdl_island_rebuild(vhdl_island_ctx_t *ctx)
          const uint8_t lf = loc_flags[j];
          uint32_t f = (s->two_state ? RT_ISIG_TWO_STATE : RT_ISIG_STD_LOGIC9)
             | RT_ISIG_VHDL;
+         if (s->is_sparse_ram)
+            f |= RT_ISIG_SPARSE_RAM;
          if (s->elem_kind == VISIG_STD_LOGIC)
             f |= RT_ISIG_STD_LOGIC_ELEM;
          if (lf & LOC_COMB_READ)

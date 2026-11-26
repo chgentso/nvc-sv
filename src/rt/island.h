@@ -42,6 +42,7 @@ typedef enum {
    RT_ISIG_SOLE_OWNER     = (1u << 13),
    RT_ISIG_LAST_OUT_VALID = (1u << 14),
    RT_ISIG_PRUNED         = (1u << 15),
+   RT_ISIG_SPARSE_RAM     = (1u << 16),
 } rt_island_sig_flags_t;
 
 #define RT_IEDGE_CLK_POSEDGE  (1u << 0)
@@ -55,7 +56,25 @@ typedef enum {
 #define RT_IFF_COMB_READ    (1u << 2)
 #define RT_IFF_DIRECT_LINK  (1u << 3)
 #define RT_IFF_SYNC_OUT     (1u << 4)
+#define RT_IFF_SPARSE_RAM   (1u << 5)
 #define RT_IFF_HAS_NOTIFY   (RT_IFF_DIRECT_LINK | RT_IFF_SYNC_OUT)
+
+#define RT_ISLAND_SPARSE_INLINE_CAP   16u
+#define RT_ISLAND_SPARSE_INLINE_DATA  1024u
+
+typedef struct {
+   uint64_t sig_and_off;   // low32 = sig_idx, high32 = byte_off
+   uint64_t len_and_data;  // low32 = len,     high32 = data_off
+} rt_island_sparse_entry_t;
+
+typedef struct {
+   uint64_t                 count;
+   uint64_t                 data_used;
+   uint64_t                 isl_ptr;
+   uint64_t                 pad;
+   rt_island_sparse_entry_t entries[RT_ISLAND_SPARSE_INLINE_CAP];
+   uint8_t                  data[RT_ISLAND_SPARSE_INLINE_DATA];
+} rt_island_sparse_log_t;
 
 typedef struct {
    uint32_t a_off;
@@ -176,6 +195,14 @@ typedef struct _rt_island {
    uint8_t               *state;
    uint8_t               *next_state;
    uint32_t               state_bytes;
+   uint32_t               total_state_bytes;
+   uint32_t               sparse_log_off;
+   rt_island_sparse_entry_t *sparse_ovf_entries;
+   uint32_t               n_sparse_ovf;
+   uint32_t               cap_sparse_ovf;
+   uint8_t               *sparse_ovf_data;
+   uint32_t               sparse_ovf_data_used;
+   uint32_t               cap_sparse_ovf_data;
    jit_handle_t           eval_handle;
    void                  *eval_func;
    jit_fast_entry_fn_t    eval_fn;
@@ -292,6 +319,11 @@ void *rt_island_begin(rt_model_t *m, rt_island_mgr_t **mgr_p,
                       jit_handle_t eval_handle, void *inst_ctx,
                       uint32_t state_bytes, uint32_t nsigs,
                       uint32_t ndomains);
+void rt_island_set_sparse(void *handle, uint32_t sparse_log_off,
+                          uint32_t total_state_bytes);
+void rt_island_sparse_write(void *isl_ptr, uint32_t sig_idx,
+                            uint32_t byte_off, uint32_t len,
+                            const uint8_t *data);
 void rt_island_bind_sig(void *handle, uint32_t idx, sig_shared_t *ss,
                         int32_t sig_offset, uint32_t a_off, uint32_t b_off,
                         uint32_t width, uint32_t nelems, uint32_t flags);

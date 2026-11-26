@@ -10672,6 +10672,19 @@ void *x_sv_island_begin(struct _ffi_closure *closure, uint32_t state_bytes,
                           state_bytes, nsigs, ndomains);
 }
 
+void x_sv_island_set_sparse(void *handle, uint32_t sparse_log_off,
+                            uint32_t total_state_bytes)
+{
+   rt_island_set_sparse(handle, sparse_log_off, total_state_bytes);
+}
+
+void x_sv_island_sparse_write(void *isl_ptr, uint32_t sig_idx,
+                              uint32_t byte_off, uint32_t len,
+                              const void *data)
+{
+   rt_island_sparse_write(isl_ptr, sig_idx, byte_off, len, data);
+}
+
 void x_sv_island_bind_sig(void *handle, uint32_t idx, sig_shared_t *ss,
                           int32_t sig_offset, uint32_t a_off, uint32_t b_off,
                           uint32_t width, uint32_t nelems, uint32_t flags)

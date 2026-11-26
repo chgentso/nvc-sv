@@ -1095,6 +1095,8 @@ void rt_island_mgr_free(rt_island_mgr_t *mgr)
       free(isl->direct_comb_descs);
       free(isl->obs_sigs);
       free(isl->scratch);
+      free(isl->sparse_ovf_entries);
+      free(isl->sparse_ovf_data);
       free(isl);
    }
    hash_free(mgr->sig_map);
@@ -1183,6 +1185,7 @@ void *rt_island_begin(rt_model_t *m, rt_island_mgr_t **mgr_p,
 #endif
    isl->state = buf;
    isl->next_state = ndomains > 0 ? isl->state + isl->state_bytes : NULL;
+   isl->total_state_bytes = (uint32_t)total_bytes;
    memset(isl->state, 0, total_bytes);
 
    if (nsigs > 0)
@@ -1199,6 +1202,77 @@ void *rt_island_begin(rt_model_t *m, rt_island_mgr_t **mgr_p,
 
    APUSH(isl->mgr->islands, isl);
    return isl;
+}
+
+_Static_assert(offsetof(rt_island_sparse_log_t, count) == 0, "sparse log count");
+_Static_assert(offsetof(rt_island_sparse_log_t, data_used) == 8, "sparse log data_used");
+_Static_assert(offsetof(rt_island_sparse_log_t, isl_ptr) == 16, "sparse log isl_ptr");
+_Static_assert(offsetof(rt_island_sparse_log_t, entries) == 32, "sparse log entries");
+_Static_assert(offsetof(rt_island_sparse_log_t, data) == 288, "sparse log data");
+_Static_assert(sizeof(rt_island_sparse_entry_t) == 16, "sparse entry size");
+
+void rt_island_set_sparse(void *handle, uint32_t sparse_log_off,
+                          uint32_t total_state_bytes)
+{
+   rt_island_t *isl = handle;
+   assert(isl != NULL);
+   assert(sparse_log_off >= isl->total_state_bytes);
+   assert(total_state_bytes >= sparse_log_off + sizeof(rt_island_sparse_log_t));
+
+   const size_t aligned_total = ALIGN_UP((size_t)total_state_bytes, 64u);
+   void *buf = NULL;
+#ifdef __MINGW32__
+   buf = _aligned_malloc(aligned_total, 64);
+   if (buf == NULL)
+      fatal("failed to allocate %zu bytes for sparse island state", aligned_total);
+   _aligned_free(isl->state);
+#else
+   if (posix_memalign(&buf, 64, aligned_total) != 0)
+      fatal("failed to allocate %zu bytes for sparse island state", aligned_total);
+   free(isl->state);
+#endif
+   memset(buf, 0, aligned_total);
+   isl->state = buf;
+   isl->next_state = isl->ndomains > 0 ? isl->state + isl->state_bytes : NULL;
+   isl->sparse_log_off = sparse_log_off;
+   isl->total_state_bytes = (uint32_t)aligned_total;
+
+   rt_island_sparse_log_t *log =
+      (rt_island_sparse_log_t *)(isl->state + sparse_log_off);
+   log->isl_ptr = (uint64_t)(uintptr_t)isl;
+}
+
+void rt_island_sparse_write(void *isl_ptr, uint32_t sig_idx,
+                            uint32_t byte_off, uint32_t len,
+                            const uint8_t *data)
+{
+   rt_island_t *isl = isl_ptr;
+   assert(isl != NULL && sig_idx < isl->nsigs);
+
+   if (isl->n_sparse_ovf == isl->cap_sparse_ovf) {
+      isl->cap_sparse_ovf = MAX(isl->cap_sparse_ovf * 2u, 32u);
+      isl->sparse_ovf_entries = xrealloc_array(isl->sparse_ovf_entries,
+                                               isl->cap_sparse_ovf,
+                                               sizeof(rt_island_sparse_entry_t));
+   }
+
+   const uint32_t need_data = isl->sparse_ovf_data_used + len;
+   if (need_data > isl->cap_sparse_ovf_data) {
+      uint32_t new_cap = MAX(isl->cap_sparse_ovf_data * 2u, 2048u);
+      while (new_cap < need_data)
+         new_cap *= 2u;
+      isl->cap_sparse_ovf_data = new_cap;
+      isl->sparse_ovf_data = xrealloc(isl->sparse_ovf_data, new_cap);
+   }
+
+   const uint32_t doff = isl->sparse_ovf_data_used;
+   if (len > 0)
+      memcpy(isl->sparse_ovf_data + doff, data, len);
+   isl->sparse_ovf_data_used = need_data;
+
+   rt_island_sparse_entry_t *e = &(isl->sparse_ovf_entries[isl->n_sparse_ovf++]);
+   e->sig_and_off  = (uint64_t)sig_idx | ((uint64_t)byte_off << 32);
+   e->len_and_data = (uint64_t)len     | ((uint64_t)doff << 32);
 }
 
 void rt_island_bind_sig(void *handle, uint32_t idx, sig_shared_t *ss,
@@ -1225,7 +1299,7 @@ void rt_island_bind_sig(void *handle, uint32_t idx, sig_shared_t *ss,
       ? (uint8_t)sig->nexus.size : 1u;
    if (flags & RT_ISIG_STD_LOGIC9)
       assert(a_off + ALIGN_UP(width * nelems * s->elem_size, 8u)
-             <= isl->state_bytes);
+             <= isl->total_state_bytes);
 }
 
 void rt_island_add_domain(void *handle, uint32_t dom_idx,
@@ -1281,7 +1355,9 @@ static void island_refresh_domain_descs(rt_island_t *isl)
          const rt_island_sig_t *s = &(isl->sigs[sidx]);
          rt_island_ff_desc_t *fd = &(dom->ff_descs[j]);
          uint16_t fl = 0;
-         if (s->flags & RT_ISIG_STD_LOGIC9)
+         if (s->flags & RT_ISIG_SPARSE_RAM)
+            fl |= RT_IFF_SPARSE_RAM;
+         else if (s->flags & RT_ISIG_STD_LOGIC9)
             fl |= RT_IFF_STD_LOGIC9;
          if (s->flags & RT_ISIG_TWO_STATE)
             fl |= RT_IFF_TWO_STATE;
@@ -2990,7 +3066,7 @@ static bool island_check_direct_sig(const rt_island_sig_t *src_s,
    consumers->count = 0;
    aliases->count = 0;
    if (src_s->sig == NULL || src_s->next_owner != NULL
-       || (src_s->flags & RT_ISIG_OBSERVED))
+       || (src_s->flags & (RT_ISIG_OBSERVED | RT_ISIG_SPARSE_RAM)))
       return false;
 
    const rt_signal_t *sig = src_s->sig;
@@ -3638,6 +3714,15 @@ void rt_island_reset_all(rt_island_mgr_t *mgr)
       isl->has_forces = false;
 
       island_init_state_defaults(isl);
+      if (isl->sparse_log_off > 0) {
+         rt_island_sparse_log_t *log =
+            (rt_island_sparse_log_t *)(isl->state + isl->sparse_log_off);
+         log->count = 0;
+         log->data_used = 0;
+         log->isl_ptr = (uint64_t)(uintptr_t)isl;
+         isl->n_sparse_ovf = 0;
+         isl->sparse_ovf_data_used = 0;
+      }
       const bool allow_inline = mgr->fast && !opt_get_int(OPT_SHUFFLE_PROCS);
       for (uint32_t j = 0; j < isl->nsigs; j++) {
          rt_island_sig_t *s = &(isl->sigs[j]);
@@ -5034,14 +5119,16 @@ static bool island_sample_domain(jit_t *jit, rt_island_domain_t *dom,
    }
 
    if (unlikely(dom->needs_presync)) {
-      for (uint32_t j = 0; j < dom->n_write_sigs; j++)
-         island_copy_sig_buf(isl->next_state, isl->state,
-                             &(isl->sigs[dom->write_sigs[j]]));
+      for (uint32_t j = 0; j < dom->n_write_sigs; j++) {
+         const rt_island_sig_t *s = &(isl->sigs[dom->write_sigs[j]]);
+         if (!(s->flags & RT_ISIG_SPARSE_RAM))
+            island_copy_sig_buf(isl->next_state, isl->state, s);
+      }
    }
    if (unlikely(isl->has_forces)) {
       for (uint32_t j = 0; j < dom->n_write_sigs; j++) {
          const rt_island_sig_t *s = &(isl->sigs[dom->write_sigs[j]]);
-         if (!(s->flags & RT_ISIG_VHDL))
+         if (!(s->flags & RT_ISIG_VHDL) || (s->flags & RT_ISIG_SPARSE_RAM))
             continue;
          const rt_island_force_t *f = island_find_force(isl, s->sig_idx);
          if (f != NULL)
@@ -5349,11 +5436,91 @@ static void island_notify_vhdl_ff_desc(rt_model_t *m, rt_island_t *isl,
    }
 }
 
+static void island_commit_sparse_entries(rt_model_t *m, rt_island_t *isl,
+                                         const rt_island_sparse_entry_t *entries,
+                                         uint32_t count, const uint8_t *data,
+                                         bool has_forces, bool *comb_need_eval)
+{
+   uint8_t *state = isl->state;
+   for (uint32_t i = 0; i < count; i++) {
+      const uint32_t sig_idx = (uint32_t)entries[i].sig_and_off;
+      const uint32_t boff    = (uint32_t)(entries[i].sig_and_off >> 32);
+      const uint32_t len     = (uint32_t)entries[i].len_and_data;
+      const uint32_t doff    = (uint32_t)(entries[i].len_and_data >> 32);
+      rt_island_sig_t *s = &(isl->sigs[sig_idx]);
+      const uint8_t *src = data + doff;
+      uint8_t *dst = state + s->a_off + boff;
+      bool changed = false;
+
+      if (unlikely(has_forces)) {
+         rt_island_force_t *f =
+            (rt_island_force_t *)island_find_force(isl, sig_idx);
+         if (f != NULL) {
+            uint8_t *sa = (uint8_t *)f->saved_a;
+            for (uint32_t k = 0; k < len; k++) {
+               const uint32_t pos = boff + k;
+               const uint64_t mbit = UINT64_C(1) << (pos & 63u);
+               if (f->mask[pos >> 6] & mbit)
+                  sa[pos] = src[k];
+               else if (dst[k] != src[k]) {
+                  dst[k] = src[k];
+                  changed = true;
+               }
+            }
+         }
+         else
+            changed = island_commit_bytes(dst, src, len);
+      }
+      else
+         changed = island_commit_bytes(dst, src, len);
+
+      if (changed) {
+         if (s->flags & RT_ISIG_COMB_READ)
+            *comb_need_eval = true;
+         if (unlikely((s->flags & (RT_ISIG_OUT | RT_ISIG_OBSERVED))
+                      && !(s->flags & RT_ISIG_PRUNED))) {
+            s->flags |= RT_ISIG_VHDL_SCHED;
+            island_sched_out_slice(m, isl, s, boff, len);
+         }
+      }
+   }
+}
+
+__attribute__((noinline))
+static void island_commit_sparse_log(rt_model_t *m, rt_island_t *isl,
+                                     bool has_forces, bool *comb_need_eval)
+{
+   if (isl->sparse_log_off == 0)
+      return;
+   rt_island_sparse_log_t *log =
+      (rt_island_sparse_log_t *)(isl->state + isl->sparse_log_off);
+   const uint32_t n_inline = (uint32_t)log->count;
+   if (n_inline > 0) {
+      log->count = 0;
+      log->data_used = 0;
+      island_commit_sparse_entries(m, isl, log->entries, n_inline, log->data,
+                                   has_forces, comb_need_eval);
+   }
+   if (unlikely(isl->n_sparse_ovf > 0)) {
+      const uint32_t n_ovf = isl->n_sparse_ovf;
+      isl->n_sparse_ovf = 0;
+      isl->sparse_ovf_data_used = 0;
+      island_commit_sparse_entries(m, isl, isl->sparse_ovf_entries, n_ovf,
+                                   isl->sparse_ovf_data, has_forces,
+                                   comb_need_eval);
+   }
+}
+
 static inline void island_commit_vhdl_desc(rt_model_t *m, rt_island_t *isl,
                                            const rt_island_ff_desc_t *d,
                                            bool has_forces,
                                            bool *comb_need_eval)
 {
+   if (unlikely(d->flags & RT_IFF_SPARSE_RAM)) {
+      island_commit_sparse_log(m, isl, has_forces, comb_need_eval);
+      return;
+   }
+
    if (unlikely(has_forces)) {
       rt_island_force_t *f = (rt_island_force_t *)island_find_force(isl, d->sig_idx);
       if (f != NULL)
@@ -5398,6 +5565,10 @@ static void island_commit_vhdl_domain_mask(rt_model_t *m,
                changed = island_commit_bytes(state + d->a_off,
                                              next_state + d->a_off,
                                              d->count);
+            else if (d->flags & RT_IFF_SPARSE_RAM) {
+               island_commit_sparse_log(m, isl, false, &comb_need_eval);
+               continue;
+            }
             else
                changed = island_commit_words_slow(isl, d);
             if (changed) {
@@ -5866,6 +6037,10 @@ static void island_commit_domain(rt_model_t *m, rt_island_domain_t *dom)
    bool comb_need_eval = false;
    for (uint32_t j = 0; j < n_write; j++) {
       const rt_island_ff_desc_t *d = &(descs[j]);
+      if (unlikely(d->flags & RT_IFF_SPARSE_RAM)) {
+         island_commit_sparse_log(m, isl, has_forces, &comb_need_eval);
+         continue;
+      }
       if (unlikely(has_forces)) {
          rt_island_force_t *f = (rt_island_force_t *)island_find_force(isl, d->sig_idx);
          if (f != NULL)
@@ -6160,7 +6335,7 @@ static void island_ext_deposit_watch_cb(uint64_t now, rt_signal_t *signal,
          island_sync_sig_raw(isl, s, false);
       }
    }
-   if (isl->next_state != NULL)
+   if (isl->next_state != NULL && !(s->flags & RT_ISIG_SPARSE_RAM))
       island_copy_sig_buf(isl->next_state, isl->state, s);
    if ((s->flags & RT_ISIG_COMB_READ)
        && isl->eval_handle != JIT_HANDLE_INVALID)
@@ -6307,7 +6482,9 @@ static void island_write_bits_slice(rt_island_t *isl, rt_island_sig_t *s,
    if (s->flags & RT_ISIG_STD_LOGIC9) {
       const size_t elem_sz = s->elem_size;
       uint8_t *dst = isl->state + s->a_off;
-      uint8_t *ndst = isl->next_state != NULL ? isl->next_state + s->a_off : NULL;
+      uint8_t *ndst = (isl->next_state != NULL
+                       && !(s->flags & RT_ISIG_SPARSE_RAM))
+         ? isl->next_state + s->a_off : NULL;
       uint8_t *fa = f != NULL ? (uint8_t *)f->a : NULL;
       uint8_t *sa = f != NULL ? (uint8_t *)f->saved_a : NULL;
       for (uint32_t k = 0; k < local_cnt; k++) {
@@ -6746,7 +6923,9 @@ bool rt_island_vpi_release_slice(rt_model_t *m, rt_signal_t *sig,
       if (s->flags & RT_ISIG_STD_LOGIC9) {
          const size_t elem_sz = s->elem_size;
          uint8_t *dst = isl->state + s->a_off;
-         uint8_t *ndst = isl->next_state != NULL ? isl->next_state + s->a_off : NULL;
+         uint8_t *ndst = (isl->next_state != NULL
+                          && !(s->flags & RT_ISIG_SPARSE_RAM))
+            ? isl->next_state + s->a_off : NULL;
          const uint8_t *sa = (const uint8_t *)f->saved_a;
          for (uint32_t k = r_start - s_start; k < r_end - s_start; k++) {
             const uint64_t mbit = UINT64_C(1) << (k & 63u);

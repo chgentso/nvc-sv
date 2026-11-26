@@ -1448,6 +1448,71 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
          return true;
       }
 
+      if (np == 1 && fn_name_is(fn, "IS_X") && pvals[0].kind == VIVAL_VEC) {
+         const uint32_t w = pvals[0].width;
+         if (w <= 8) {
+            mir_value_t acc = mir_const(mu, mir_bool_type(mu), 0);
+            for (uint32_t k = 0; k < w; k++) {
+               mir_value_t av = mir_build_load(
+                  mu, mir_build_array_ref(mu, pvals[0].val, vi_off(mu, k)));
+               mir_value_t ok01 = mir_build_or(
+                  mu,
+                  mir_build_or(mu,
+                               mir_build_cmp(mu, MIR_CMP_EQ, av, vi_u8(mu, 2)),
+                               mir_build_cmp(mu, MIR_CMP_EQ, av, vi_u8(mu, 3))),
+                  mir_build_or(mu,
+                               mir_build_cmp(mu, MIR_CMP_EQ, av, vi_u8(mu, 6)),
+                               mir_build_cmp(mu, MIR_CMP_EQ, av, vi_u8(mu, 7))));
+               acc = mir_build_or(mu, acc, mir_build_not(mu, ok01));
+            }
+            *out = vi_from_bool_bit(l, acc, true, false);
+            return true;
+         }
+         mir_value_t idx_v = mir_add_var(mu, mir_offset_type(mu), MIR_NULL_STAMP,
+                                         ident_uniq("isx_i"), MIR_VAR_TEMP);
+         mir_value_t res_v = mir_add_var(mu, mir_bool_type(mu), MIR_NULL_STAMP,
+                                         ident_uniq("isx_r"), MIR_VAR_TEMP);
+         mir_build_store(mu, idx_v, vi_off(mu, 0));
+         mir_build_store(mu, res_v, mir_const(mu, mir_bool_type(mu), 0));
+         mir_block_t hdr  = mir_add_block(mu);
+         mir_block_t body = mir_add_block(mu);
+         mir_block_t hit  = mir_add_block(mu);
+         mir_block_t step = mir_add_block(mu);
+         mir_block_t done = mir_add_block(mu);
+         mir_build_jump(mu, hdr);
+
+         mir_set_cursor(mu, hdr, MIR_APPEND);
+         mir_value_t cur = mir_build_load(mu, idx_v);
+         mir_build_cond(mu, mir_build_cmp(mu, MIR_CMP_LT, cur, vi_off(mu, w)),
+                        body, done);
+
+         mir_set_cursor(mu, body, MIR_APPEND);
+         mir_value_t av = mir_build_load(
+            mu, mir_build_array_ref(mu, pvals[0].val, cur));
+         mir_value_t ok01 = mir_build_or(
+            mu,
+            mir_build_or(mu,
+                         mir_build_cmp(mu, MIR_CMP_EQ, av, vi_u8(mu, 2)),
+                         mir_build_cmp(mu, MIR_CMP_EQ, av, vi_u8(mu, 3))),
+            mir_build_or(mu,
+                         mir_build_cmp(mu, MIR_CMP_EQ, av, vi_u8(mu, 6)),
+                         mir_build_cmp(mu, MIR_CMP_EQ, av, vi_u8(mu, 7))));
+         mir_build_cond(mu, ok01, step, hit);
+
+         mir_set_cursor(mu, hit, MIR_APPEND);
+         mir_build_store(mu, res_v, mir_const(mu, mir_bool_type(mu), 1));
+         mir_build_jump(mu, done);
+
+         mir_set_cursor(mu, step, MIR_APPEND);
+         mir_build_store(mu, idx_v,
+                         mir_build_add(mu, mir_offset_type(mu), cur, vi_off(mu, 1)));
+         mir_build_jump(mu, hdr);
+
+         mir_set_cursor(mu, done, MIR_APPEND);
+         *out = vi_from_bool_bit(l, mir_build_load(mu, res_v), true, false);
+         return true;
+      }
+
       if (is_std1164) {
          if (np == 1 && fn_name_is(fn, "\"not\"") && pvals[0].kind == VIVAL_BIT) {
             *out = pvals[0];
@@ -4154,12 +4219,134 @@ static void vi_mark_ff_dirty(vi_lower_t *l, const vhdl_isl_sig_t *isig)
    mir_build_store(mu, l->ff_dirty_var, upd);
 }
 
+static bool vi_emit_sparse_ram_write(vi_lower_t *l, const vhdl_isig_t *s,
+                                     const vhdl_isl_sig_t *isig,
+                                     mir_value_t elem_idx,
+                                     mir_value_t sub_off, uint32_t len,
+                                     vi_val_t val)
+{
+   if (!l->is_ff || l->two_state || l->isl->sparse_log_off == 0 || len == 0)
+      return false;
+
+   vi_mark_ff_dirty(l, isig);
+
+   mir_unit_t *mu = l->mu;
+   mir_type_t t_off = mir_offset_type(mu);
+   mir_type_t t_i64 = vi_i64_type(mu);
+   mir_type_t t_v64 = mir_vec2_type(mu, 64, false);
+   const uint32_t log_off = l->isl->sparse_log_off;
+   const uint32_t isl_sig_idx = (uint32_t)(isig - l->isl->sigs);
+
+   mir_value_t byte_off = mir_build_add(
+      mu, t_off,
+      mir_build_mul(mu, t_off, elem_idx, vi_off(mu, s->width)),
+      sub_off);
+
+   mir_value_t cnt_v = mir_build_island_load(
+      mu, t_v64, l->state_ptr,
+      vi_off(mu, log_off + offsetof(rt_island_sparse_log_t, count)),
+      vi_off(mu, -1), vi_off(mu, 0));
+   mir_value_t cnt = mir_build_cast(mu, t_off, cnt_v);
+
+   mir_value_t dused_v = mir_build_island_load(
+      mu, t_v64, l->state_ptr,
+      vi_off(mu, log_off + offsetof(rt_island_sparse_log_t, data_used)),
+      vi_off(mu, -1), vi_off(mu, 0));
+   mir_value_t dused = mir_build_cast(mu, t_off, dused_v);
+   mir_value_t next_dused = mir_build_add(mu, t_off, dused, vi_off(mu, len));
+
+   mir_value_t ok_cnt = mir_build_cmp(mu, MIR_CMP_LT, cnt,
+                                      vi_off(mu, RT_ISLAND_SPARSE_INLINE_CAP));
+   mir_value_t ok_data = mir_build_cmp(mu, MIR_CMP_LEQ, next_dused,
+                                       vi_off(mu, RT_ISLAND_SPARSE_INLINE_DATA));
+   mir_value_t can_inline = mir_build_and(mu, ok_cnt, ok_data);
+
+   mir_block_t fast_bb = mir_add_block(mu);
+   mir_block_t slow_bb = mir_add_block(mu);
+   mir_block_t done_bb = mir_add_block(mu);
+   mir_build_cond(mu, can_inline, fast_bb, slow_bb);
+
+   mir_set_cursor(mu, fast_bb, MIR_APPEND);
+   mir_value_t e2 = mir_build_mul(mu, t_off, cnt, vi_off(mu, 2));
+   mir_value_t w0_i = mir_build_add(
+      mu, t_i64,
+      mir_build_mul(mu, t_i64, vi_to_i64(mu, byte_off),
+                    vi_i64(mu, INT64_C(1) << 32)),
+      vi_i64(mu, (int64_t)isl_sig_idx));
+   mir_value_t w1_i = mir_build_add(
+      mu, t_i64,
+      mir_build_mul(mu, t_i64, vi_to_i64(mu, dused),
+                    vi_i64(mu, INT64_C(1) << 32)),
+      vi_i64(mu, (int64_t)len));
+
+   const uint32_t ent_base = log_off + offsetof(rt_island_sparse_log_t, entries);
+   mir_build_island_store(mu, l->state_ptr, vi_off(mu, ent_base),
+                          vi_off(mu, -1), e2, mir_build_cast(mu, t_v64, w0_i));
+   mir_build_island_store(mu, l->state_ptr, vi_off(mu, ent_base + 8u),
+                          vi_off(mu, -1), e2, mir_build_cast(mu, t_v64, w1_i));
+
+   mir_value_t dst_off = mir_build_add(
+      mu, t_off,
+      vi_off(mu, log_off + offsetof(rt_island_sparse_log_t, data)), dused);
+   mir_value_t dst_ptr = mir_build_array_ref(mu, l->state_ptr, dst_off);
+   if (val.kind == VIVAL_VEC)
+      mir_build_copy(mu, dst_ptr, val.val, vi_off(mu, len));
+   else
+      mir_build_store(mu, dst_ptr, mir_build_cast(mu, vi_u8_type(mu), val.val));
+
+   mir_value_t next_cnt = mir_build_add(mu, t_off, cnt, vi_off(mu, 1));
+   mir_build_island_store(
+      mu, l->state_ptr,
+      vi_off(mu, log_off + offsetof(rt_island_sparse_log_t, count)),
+      vi_off(mu, -1), vi_off(mu, 0), mir_build_cast(mu, t_v64, next_cnt));
+   mir_build_island_store(
+      mu, l->state_ptr,
+      vi_off(mu, log_off + offsetof(rt_island_sparse_log_t, data_used)),
+      vi_off(mu, -1), vi_off(mu, 0), mir_build_cast(mu, t_v64, next_dused));
+   mir_build_jump(mu, done_bb);
+
+   mir_set_cursor(mu, slow_bb, MIR_APPEND);
+   mir_value_t src_ptr = val.val;
+   if (val.kind != VIVAL_VEC) {
+      src_ptr = vi_modeb_alloc_vec(l, 1);
+      mir_build_store(mu, src_ptr, mir_build_cast(mu, vi_u8_type(mu), val.val));
+   }
+   mir_value_t isl_v = mir_build_island_load(
+      mu, t_v64, l->state_ptr,
+      vi_off(mu, log_off + offsetof(rt_island_sparse_log_t, isl_ptr)),
+      vi_off(mu, -1), vi_off(mu, 0));
+   mir_value_t fargs[5] = {
+      mir_build_cast(mu, t_off, isl_v),
+      vi_off(mu, isl_sig_idx),
+      byte_off,
+      vi_off(mu, len),
+      src_ptr,
+   };
+   mir_value_t fret = mir_build_fcall(mu, ident_new("__sv_island_sparse_write"),
+                                      t_off, MIR_NULL_STAMP, fargs, 5);
+   // Keep call live through MIR DCE (helper returns 0)
+   if (!mir_is_null(l->ff_dirty_var)) {
+      mir_value_t cur_dm = mir_build_load(mu, l->ff_dirty_var);
+      mir_value_t upd_dm = mir_build_binary(mu, MIR_VEC_BIT_OR, t_v64, cur_dm,
+                                            mir_build_cast(mu, t_v64, fret));
+      mir_build_store(mu, l->ff_dirty_var, upd_dm);
+   }
+   mir_build_jump(mu, done_bb);
+
+   mir_set_cursor(mu, done_bb, MIR_APPEND);
+   return true;
+}
+
 static bool vi_assign_leaf_sig(vi_lower_t *l, const vhdl_isig_t *s,
                                const vhdl_isl_sig_t *isig,
                                mir_value_t elem_idx, int64_t pos_off,
                                uint32_t sub_w, bool is_full, vi_val_t val)
 {
    mir_unit_t *mu = l->mu;
+   if (s->is_sparse_ram)
+      return vi_emit_sparse_ram_write(l, s, isig, elem_idx,
+                                      vi_off(mu, is_full ? 0 : pos_off),
+                                      sub_w, val);
    const uint32_t dst_off = isig->a_off + (l->is_ff ? l->ff_stride : 0u);
    vi_mark_ff_dirty(l, isig);
 
@@ -4226,6 +4413,8 @@ static bool vi_assign_leaf_sig_dyn_pos(vi_lower_t *l, const vhdl_isig_t *s,
                                        mir_value_t elem_idx, mir_value_t dyn_pos,
                                        vi_val_t val)
 {
+   if (s->is_sparse_ram)
+      return vi_emit_sparse_ram_write(l, s, isig, elem_idx, dyn_pos, 1u, val);
    mir_unit_t *mu = l->mu;
    const uint32_t dst_off = isig->a_off + (l->is_ff ? l->ff_stride : 0u);
    vi_mark_ff_dirty(l, isig);
@@ -4258,6 +4447,8 @@ static bool vi_assign_leaf_sig_dyn_slice(vi_lower_t *l, const vhdl_isig_t *s,
 {
    if (l->two_state || val.kind != VIVAL_VEC)
       return false;
+   if (s->is_sparse_ram)
+      return vi_emit_sparse_ram_write(l, s, isig, elem_idx, dyn_pos, sub_w, val);
    mir_unit_t *mu = l->mu;
    const uint32_t dst_off = isig->a_off + (l->is_ff ? l->ff_stride : 0u);
    vi_mark_ff_dirty(l, isig);
@@ -4321,6 +4512,8 @@ static bool vi_copy_array2d_sig(vi_lower_t *l, const vhdl_isig_t *ds,
 static bool vi_assign_array2d_sig(vi_lower_t *l, const vhdl_isig_t *s,
                                   const vhdl_isl_sig_t *isig, tree_t val_e)
 {
+   if (s->is_sparse_ram)
+      return false;
    while (val_e != NULL) {
       if (tree_kind(val_e) == T_REF
           && tree_kind(tree_ref(val_e)) == T_CONST_DECL
@@ -6755,6 +6948,16 @@ void vhdl_island_lower_emit_vcode_init(const vhdl_island_ctx_t *ctx,
       };
       vcode_reg_t handle = emit_fcall(begin_fn, vptr, VCODE_INVALID_STAMP,
                                       begin_args, 4);
+
+      if (isl->sparse_log_off > 0) {
+         ident_t set_sparse_fn = ident_new("__sv_island_set_sparse");
+         vcode_reg_t sp_args[3] = {
+            handle,
+            emit_const(voffset, isl->sparse_log_off),
+            emit_const(voffset, isl->total_state_bytes),
+         };
+         emit_fcall(set_sparse_fn, voffset, VCODE_INVALID_STAMP, sp_args, 3);
+      }
 
       for (uint32_t j = 0; j < isl->n_sigs; j++) {
          const vhdl_isl_sig_t *isig = &(isl->sigs[j]);

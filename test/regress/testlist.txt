@@ -3330,3 +3330,6 @@ tcl_island_fast1 tcl,2008
 island_fast_opts1 shell
 vhdl_island_ff_desc1 normal,2008
 island_direct_break1 shell
+vhdl_island_sparse_ram1 normal,2008
+vhdl_island_sparse_force1 normal,2008
+island_sparse_wave1 shell

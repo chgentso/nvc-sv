@@ -32,7 +32,8 @@
 #define VHDL_ISLAND_MAX_ELEMS       65536u
 #define VHDL_ISLAND_MAX_WIDTH       4096u
 #define VHDL_ISLAND_MAX_TOTAL_BITS  (1u << 20)
-#define VHDL_ISLAND_MAX_ARRAY2D_BITS 1024u
+#define VHDL_ISLAND_MAX_ARRAY2D_BITS    1024u
+#define VHDL_ISLAND_MAX_SPARSE_RAM_BITS (1u << 19)
 #define VHDL_ISLAND_MAX_LOOP_ITERS  4096
 #define VHDL_ISLAND_MAX_CALL_DEPTH  6
 
@@ -61,6 +62,7 @@ typedef struct {
    bool             is_signed;
    bool             is_vector;
    bool             is_array2d;
+   bool             is_sparse_ram;
    bool             is_port;
    port_mode_t      port_mode;
    bool             two_state;
@@ -143,6 +145,8 @@ typedef struct {
    ident_t         eval_name;
    bool            two_state;
    uint32_t        state_bytes;
+   uint32_t        sparse_log_off;
+   uint32_t        total_state_bytes;
    vhdl_isl_sig_t *sigs;
    uint32_t        n_sigs;
    uint32_t       *comb_procs;
