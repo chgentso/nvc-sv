@@ -50,6 +50,8 @@
 #define RT_SVA_MT_MIN_BATCH_NS       12000u
 #define RT_ISLAND_SPIN_ITERS         3000
 
+STATIC_ASSERT(sizeof(rt_island_ff_desc_t) == 16);
+
 typedef struct {
    uint32_t next_probe;
    uint32_t probes_done;
@@ -1011,8 +1013,10 @@ void rt_island_mgr_free(rt_island_mgr_t *mgr)
    }
    for (unsigned i = 0; i < mgr->islands.count; i++) {
       rt_island_t *isl = mgr->islands.items[i];
-      for (uint32_t d = 0; d < isl->ndomains; d++)
+      for (uint32_t d = 0; d < isl->ndomains; d++) {
          free(isl->domains[d].write_sigs);
+         free(isl->domains[d].ff_descs);
+      }
       free(isl->domains);
       for (uint32_t f = 0; f < isl->n_forces; f++)
          free(isl->forces[f].mask);
@@ -1207,6 +1211,51 @@ void rt_island_add_domain_write(void *handle, uint32_t dom_idx,
    isl->sigs[sig_idx].flags |= RT_ISIG_FF_WRITTEN;
 }
 
+static void island_refresh_domain_descs(rt_island_t *isl)
+{
+   for (uint32_t d = 0; d < isl->ndomains; d++) {
+      rt_island_domain_t *dom = &(isl->domains[d]);
+      if (dom->n_write_sigs == 0)
+         continue;
+      if (dom->ff_descs == NULL)
+         dom->ff_descs = xmalloc_array(dom->n_write_sigs,
+                                       sizeof(rt_island_ff_desc_t));
+      for (uint32_t j = 0; j < dom->n_write_sigs; j++) {
+         const uint32_t sidx = dom->write_sigs[j];
+         const rt_island_sig_t *s = &(isl->sigs[sidx]);
+         rt_island_ff_desc_t *fd = &(dom->ff_descs[j]);
+         uint16_t fl = 0;
+         if (s->flags & RT_ISIG_STD_LOGIC9)
+            fl |= RT_IFF_STD_LOGIC9;
+         if (s->flags & RT_ISIG_TWO_STATE)
+            fl |= RT_IFF_TWO_STATE;
+         if (s->flags & RT_ISIG_COMB_READ)
+            fl |= RT_IFF_COMB_READ;
+         if (s->flags & RT_ISIG_DIRECT_LINK)
+            fl |= RT_IFF_DIRECT_LINK;
+         else if ((s->flags & (RT_ISIG_OUT | RT_ISIG_OBSERVED))
+                  && !(s->flags & RT_ISIG_PRUNED))
+            fl |= RT_IFF_SYNC_OUT;
+
+         fd->a_off   = s->a_off;
+         fd->count   = (fl & RT_IFF_STD_LOGIC9)
+            ? (s->width * s->nelems * s->elem_size)
+            : (s->nwords * s->nelems);
+         fd->sig_idx = sidx;
+         fd->flags   = fl;
+         if (!(fl & (RT_IFF_STD_LOGIC9 | RT_IFF_TWO_STATE))) {
+            if (s->b_off >= s->a_off && ((s->b_off - s->a_off) & 7u) == 0
+                && ((s->b_off - s->a_off) >> 3) < 0xFFFFu)
+               fd->b_delta = (uint16_t)((s->b_off - s->a_off) >> 3);
+            else
+               fd->b_delta = 0xFFFFu;
+         }
+         else
+            fd->b_delta = 0;
+      }
+   }
+}
+
 void rt_island_finish(void *handle)
 {
    rt_island_t *isl = handle;
@@ -1321,7 +1370,158 @@ void rt_island_finish(void *handle)
    }
 
    island_init_state_defaults(isl);
+   island_refresh_domain_descs(isl);
    isl->initialized = true;
+}
+
+static inline void island_copy_bytes(uint8_t * restrict dst,
+                                     const uint8_t * restrict src, size_t n)
+{
+   if (n == 1) {
+      *dst = *src;
+      return;
+   }
+   if (n == 32) {
+      uint64_t s0, s1, s2, s3;
+      memcpy(&s0, src, 8);      memcpy(&s1, src + 8, 8);
+      memcpy(&s2, src + 16, 8); memcpy(&s3, src + 24, 8);
+      memcpy(dst, &s0, 8);      memcpy(dst + 8, &s1, 8);
+      memcpy(dst + 16, &s2, 8); memcpy(dst + 24, &s3, 8);
+      return;
+   }
+   if (n <= 8) {
+      if (n == 4) {
+         uint32_t s4;
+         memcpy(&s4, src, 4);
+         memcpy(dst, &s4, 4);
+      }
+      else if (n == 8) {
+         uint64_t s8;
+         memcpy(&s8, src, 8);
+         memcpy(dst, &s8, 8);
+      }
+      else if (n == 2) {
+         uint16_t s2;
+         memcpy(&s2, src, 2);
+         memcpy(dst, &s2, 2);
+      }
+      else if (n >= 5) {
+         uint32_t s0, s1;
+         memcpy(&s0, src, 4);
+         memcpy(&s1, src + n - 4, 4);
+         memcpy(dst, &s0, 4);
+         memcpy(dst + n - 4, &s1, 4);
+      }
+      else if (n == 3) {
+         uint16_t s0;
+         memcpy(&s0, src, 2);
+         memcpy(dst, &s0, 2);
+         dst[2] = src[2];
+      }
+      return;
+   }
+   if (n <= 16) {
+      uint64_t s0, s1;
+      memcpy(&s0, src, 8);
+      memcpy(&s1, src + n - 8, 8);
+      memcpy(dst, &s0, 8);
+      memcpy(dst + n - 8, &s1, 8);
+      return;
+   }
+   if (n < 32) {
+      uint64_t s0, s1, s2, s3;
+      memcpy(&s0, src, 8);
+      memcpy(&s1, src + 8, 8);
+      memcpy(&s2, src + n - 16, 8);
+      memcpy(&s3, src + n - 8, 8);
+      memcpy(dst, &s0, 8);
+      memcpy(dst + 8, &s1, 8);
+      memcpy(dst + n - 16, &s2, 8);
+      memcpy(dst + n - 8, &s3, 8);
+      return;
+   }
+   memcpy(dst, src, n);
+}
+
+static inline bool island_bytes_diff(const uint8_t *a, const uint8_t *b,
+                                     size_t n)
+{
+   if (n == 1)
+      return *a != *b;
+   if (n == 32) {
+      uint64_t x0, x1, x2, x3, y0, y1, y2, y3;
+      memcpy(&x0, a, 8);      memcpy(&x1, a + 8, 8);
+      memcpy(&x2, a + 16, 8); memcpy(&x3, a + 24, 8);
+      memcpy(&y0, b, 8);      memcpy(&y1, b + 8, 8);
+      memcpy(&y2, b + 16, 8); memcpy(&y3, b + 24, 8);
+      return ((x0 ^ y0) | (x1 ^ y1) | (x2 ^ y2) | (x3 ^ y3)) != 0;
+   }
+   if (n <= 8) {
+      if (n == 4) {
+         uint32_t x, y;
+         memcpy(&x, a, 4);
+         memcpy(&y, b, 4);
+         return x != y;
+      }
+      if (n == 8) {
+         uint64_t x, y;
+         memcpy(&x, a, 8);
+         memcpy(&y, b, 8);
+         return x != y;
+      }
+      if (n == 2) {
+         uint16_t x, y;
+         memcpy(&x, a, 2);
+         memcpy(&y, b, 2);
+         return x != y;
+      }
+      if (n >= 5) {
+         uint32_t x0, x1, y0, y1;
+         memcpy(&x0, a, 4);         memcpy(&x1, a + n - 4, 4);
+         memcpy(&y0, b, 4);         memcpy(&y1, b + n - 4, 4);
+         return ((x0 ^ y0) | (x1 ^ y1)) != 0;
+      }
+      if (n == 3) {
+         uint16_t x0, y0;
+         memcpy(&x0, a, 2);
+         memcpy(&y0, b, 2);
+         return x0 != y0 || a[2] != b[2];
+      }
+      return false;
+   }
+   if (n <= 16) {
+      uint64_t x0, x1, y0, y1;
+      memcpy(&x0, a, 8);         memcpy(&x1, a + n - 8, 8);
+      memcpy(&y0, b, 8);         memcpy(&y1, b + n - 8, 8);
+      return ((x0 ^ y0) | (x1 ^ y1)) != 0;
+   }
+   if (n < 32) {
+      uint64_t x0, x1, x2, x3, y0, y1, y2, y3;
+      memcpy(&x0, a, 8);          memcpy(&x1, a + 8, 8);
+      memcpy(&x2, a + n - 16, 8); memcpy(&x3, a + n - 8, 8);
+      memcpy(&y0, b, 8);          memcpy(&y1, b + 8, 8);
+      memcpy(&y2, b + n - 16, 8); memcpy(&y3, b + n - 8, 8);
+      return ((x0 ^ y0) | (x1 ^ y1) | (x2 ^ y2) | (x3 ^ y3)) != 0;
+   }
+   if (n <= 64) {
+      size_t off = 0;
+      for (; off + 8u <= n; off += 8u) {
+         uint64_t x, y;
+         memcpy(&x, a + off, 8);
+         memcpy(&y, b + off, 8);
+         if (x != y)
+            return true;
+      }
+      if (off < n) {
+         uint64_t x, y;
+         memcpy(&x, a + n - 8u, 8);
+         memcpy(&y, b + n - 8u, 8);
+         if (x != y)
+            return true;
+      }
+      return false;
+   }
+   return memcmp(a, b, n) != 0;
 }
 
 static void island_sync_in_sig(rt_island_t *isl, const rt_island_sig_t *s)
@@ -1336,10 +1536,7 @@ static void island_sync_in_sig(rt_island_t *isl, const rt_island_sig_t *s)
       const size_t nbytes = (size_t)width * nelems * elem_sz;
       const uint8_t *src = sig->shared.data + (size_t)s->sig_offset * elem_sz;
       uint8_t *dst = isl->state + s->a_off;
-      if (nbytes == 1)
-         *dst = *src;
-      else
-         memcpy(dst, src, nbytes);
+      island_copy_bytes(dst, src, nbytes);
       return;
    }
 
@@ -1511,12 +1708,7 @@ static void island_sync_out_sig(rt_model_t *m, rt_island_t *isl,
       const size_t nbytes = (size_t)total * elem_sz;
       const uint8_t *src = isl->state + s->a_off;
       const uint8_t *cur = sig->shared.data + (size_t)s->sig_offset * elem_sz;
-      bool diff;
-      if (nbytes == 1)
-         diff = (*cur != *src);
-      else
-         diff = (memcmp(cur, src, nbytes) != 0);
-      if (diff)
+      if (island_bytes_diff(cur, src, nbytes))
          deposit_signal(m, sig, src, s->sig_offset, total);
       return;
    }
@@ -2192,62 +2384,31 @@ static inline void island_copy_sig_buf(uint8_t *dst_base,
       memcpy(dst_base + s->b_off, src_base + s->b_off, bytes);
 }
 
-static inline bool island_bytes_diff(const uint8_t *a, const uint8_t *b,
-                                     size_t n)
+static inline bool island_commit_bytes(uint8_t * restrict dst,
+                                       const uint8_t * restrict src, size_t n)
 {
-   if (n == 1)
-      return *a != *b;
+   if (n == 1) {
+      if (*dst != *src) {
+         *dst = *src;
+         return true;
+      }
+      return false;
+   }
    if (n == 32) {
-      uint64_t x0, x1, x2, x3, y0, y1, y2, y3;
-      memcpy(&x0, a, 8);      memcpy(&x1, a + 8, 8);
-      memcpy(&x2, a + 16, 8); memcpy(&x3, a + 24, 8);
-      memcpy(&y0, b, 8);      memcpy(&y1, b + 8, 8);
-      memcpy(&y2, b + 16, 8); memcpy(&y3, b + 24, 8);
-      return ((x0 ^ y0) | (x1 ^ y1) | (x2 ^ y2) | (x3 ^ y3)) != 0;
-   }
-   if (n == 4) {
-      uint32_t x, y;
-      memcpy(&x, a, 4);
-      memcpy(&y, b, 4);
-      return x != y;
-   }
-   if (n == 8) {
-      uint64_t x, y;
-      memcpy(&x, a, 8);
-      memcpy(&y, b, 8);
-      return x != y;
-   }
-   return memcmp(a, b, n) != 0;
-}
-
-static inline bool island_commit_sig_buf(rt_island_t *isl,
-                                         const rt_island_sig_t *s)
-{
-   if (s->flags & RT_ISIG_STD_LOGIC9) {
-      const size_t total = (size_t)s->width * s->nelems * s->elem_size;
-      uint8_t *dst = isl->state + s->a_off;
-      const uint8_t *src = isl->next_state + s->a_off;
-      if (total == 1) {
-         if (*dst != *src) {
-            *dst = *src;
-            return true;
-         }
-         return false;
+      uint64_t d0, d1, d2, d3, s0, s1, s2, s3;
+      memcpy(&d0, dst, 8);      memcpy(&d1, dst + 8, 8);
+      memcpy(&d2, dst + 16, 8); memcpy(&d3, dst + 24, 8);
+      memcpy(&s0, src, 8);      memcpy(&s1, src + 8, 8);
+      memcpy(&s2, src + 16, 8); memcpy(&s3, src + 24, 8);
+      if (((d0 ^ s0) | (d1 ^ s1) | (d2 ^ s2) | (d3 ^ s3)) != 0) {
+         memcpy(dst, &s0, 8);      memcpy(dst + 8, &s1, 8);
+         memcpy(dst + 16, &s2, 8); memcpy(dst + 24, &s3, 8);
+         return true;
       }
-      if (total == 32) {
-         uint64_t d0, d1, d2, d3, s0, s1, s2, s3;
-         memcpy(&d0, dst, 8);      memcpy(&d1, dst + 8, 8);
-         memcpy(&d2, dst + 16, 8); memcpy(&d3, dst + 24, 8);
-         memcpy(&s0, src, 8);      memcpy(&s1, src + 8, 8);
-         memcpy(&s2, src + 16, 8); memcpy(&s3, src + 24, 8);
-         if (((d0 ^ s0) | (d1 ^ s1) | (d2 ^ s2) | (d3 ^ s3)) != 0) {
-            memcpy(dst, &s0, 8);      memcpy(dst + 8, &s1, 8);
-            memcpy(dst + 16, &s2, 8); memcpy(dst + 24, &s3, 8);
-            return true;
-         }
-         return false;
-      }
-      if (total == 4) {
+      return false;
+   }
+   if (n <= 8) {
+      if (n == 4) {
          uint32_t d4, s4;
          memcpy(&d4, dst, 4);
          memcpy(&s4, src, 4);
@@ -2257,7 +2418,7 @@ static inline bool island_commit_sig_buf(rt_island_t *isl,
          }
          return false;
       }
-      if (total == 8) {
+      if (n == 8) {
          uint64_t d8, s8;
          memcpy(&d8, dst, 8);
          memcpy(&s8, src, 8);
@@ -2267,19 +2428,118 @@ static inline bool island_commit_sig_buf(rt_island_t *isl,
          }
          return false;
       }
-      if (memcmp(dst, src, total) != 0) {
-         memcpy(dst, src, total);
+      if (n == 2) {
+         uint16_t d2, s2;
+         memcpy(&d2, dst, 2);
+         memcpy(&s2, src, 2);
+         if (d2 != s2) {
+            memcpy(dst, &s2, 2);
+            return true;
+         }
+         return false;
+      }
+      if (n >= 5) {
+         uint32_t d0, d1, s0, s1;
+         memcpy(&d0, dst, 4);         memcpy(&d1, dst + n - 4, 4);
+         memcpy(&s0, src, 4);         memcpy(&s1, src + n - 4, 4);
+         if (((d0 ^ s0) | (d1 ^ s1)) != 0) {
+            memcpy(dst, &s0, 4);
+            memcpy(dst + n - 4, &s1, 4);
+            return true;
+         }
+         return false;
+      }
+      if (n == 3) {
+         uint16_t d0, s0;
+         memcpy(&d0, dst, 2);
+         memcpy(&s0, src, 2);
+         if (d0 != s0 || dst[2] != src[2]) {
+            memcpy(dst, &s0, 2);
+            dst[2] = src[2];
+            return true;
+         }
+         return false;
+      }
+      return false;
+   }
+   if (n <= 16) {
+      uint64_t d0, d1, s0, s1;
+      memcpy(&d0, dst, 8);         memcpy(&d1, dst + n - 8, 8);
+      memcpy(&s0, src, 8);         memcpy(&s1, src + n - 8, 8);
+      if (((d0 ^ s0) | (d1 ^ s1)) != 0) {
+         memcpy(dst, &s0, 8);
+         memcpy(dst + n - 8, &s1, 8);
          return true;
       }
       return false;
    }
+   if (n < 32) {
+      uint64_t d0, d1, d2, d3, s0, s1, s2, s3;
+      memcpy(&d0, dst, 8);          memcpy(&d1, dst + 8, 8);
+      memcpy(&d2, dst + n - 16, 8); memcpy(&d3, dst + n - 8, 8);
+      memcpy(&s0, src, 8);          memcpy(&s1, src + 8, 8);
+      memcpy(&s2, src + n - 16, 8); memcpy(&s3, src + n - 8, 8);
+      if (((d0 ^ s0) | (d1 ^ s1) | (d2 ^ s2) | (d3 ^ s3)) != 0) {
+         memcpy(dst, &s0, 8);          memcpy(dst + 8, &s1, 8);
+         memcpy(dst + n - 16, &s2, 8); memcpy(dst + n - 8, &s3, 8);
+         return true;
+      }
+      return false;
+   }
+   if (n <= 64) {
+      size_t off = 0;
+      for (; off + 8u <= n; off += 8u) {
+         uint64_t d, s;
+         memcpy(&d, dst + off, 8);
+         memcpy(&s, src + off, 8);
+         if (d != s) {
+            memcpy(dst + off, &s, 8);
+            for (off += 8u; off + 8u <= n; off += 8u)
+               memcpy(dst + off, src + off, 8);
+            if (off < n)
+               memcpy(dst + n - 8u, src + n - 8u, 8);
+            return true;
+         }
+      }
+      if (off < n) {
+         uint64_t d, s;
+         memcpy(&d, dst + n - 8u, 8);
+         memcpy(&s, src + n - 8u, 8);
+         if (d != s) {
+            memcpy(dst + n - 8u, &s, 8);
+            return true;
+         }
+      }
+      return false;
+   }
+   if (memcmp(dst, src, n) != 0) {
+      memcpy(dst, src, n);
+      return true;
+   }
+   return false;
+}
 
-   const uint32_t total_words = s->nwords * s->nelems;
-   uint64_t *dst_a = (uint64_t *)(isl->state + s->a_off);
-   const uint64_t *src_a = (const uint64_t *)(isl->next_state + s->a_off);
-   bool changed = false;
+static inline bool island_commit_desc_buf(rt_island_t *isl,
+                                          const rt_island_ff_desc_t *d)
+{
+   if (likely(d->flags & RT_IFF_STD_LOGIC9))
+      return island_commit_bytes(isl->state + d->a_off,
+                                 isl->next_state + d->a_off,
+                                 d->count);
 
-   if (s->flags & RT_ISIG_TWO_STATE) {
+   const uint32_t total_words = d->count;
+   uint64_t *dst_a = (uint64_t *)(isl->state + d->a_off);
+   const uint64_t *src_a = (const uint64_t *)(isl->next_state + d->a_off);
+
+   if (d->flags & RT_IFF_TWO_STATE) {
+      if (likely(total_words == 1)) {
+         if (dst_a[0] != src_a[0]) {
+            dst_a[0] = src_a[0];
+            return true;
+         }
+         return false;
+      }
+      bool changed = false;
       for (uint32_t i = 0; i < total_words; i++) {
          if (dst_a[i] != src_a[i]) {
             dst_a[i] = src_a[i];
@@ -2289,8 +2549,20 @@ static inline bool island_commit_sig_buf(rt_island_t *isl,
       return changed;
    }
 
-   uint64_t *dst_b = (uint64_t *)(isl->state + s->b_off);
-   const uint64_t *src_b = (const uint64_t *)(isl->next_state + s->b_off);
+   const uint32_t b_off = likely(d->b_delta != 0xFFFFu)
+      ? (d->a_off + ((uint32_t)d->b_delta << 3))
+      : isl->sigs[d->sig_idx].b_off;
+   uint64_t *dst_b = (uint64_t *)(isl->state + b_off);
+   const uint64_t *src_b = (const uint64_t *)(isl->next_state + b_off);
+   if (likely(total_words == 1)) {
+      if (dst_a[0] != src_a[0] || dst_b[0] != src_b[0]) {
+         dst_a[0] = src_a[0];
+         dst_b[0] = src_b[0];
+         return true;
+      }
+      return false;
+   }
+   bool changed = false;
    for (uint32_t i = 0; i < total_words; i++) {
       if (dst_a[i] != src_a[i] || dst_b[i] != src_b[i]) {
          dst_a[i] = src_a[i];
@@ -2308,13 +2580,8 @@ static inline bool island_copy_direct_sig(const rt_island_sig_t *src_s,
    rt_island_t *dst_isl = dst_s->isl;
    if (src_s->flags & RT_ISIG_STD_LOGIC9) {
       const size_t total = (size_t)src_s->width * src_s->nelems * src_s->elem_size;
-      const uint8_t *src = src_isl->state + src_s->a_off;
-      uint8_t *dst = dst_isl->state + dst_s->a_off;
-      if (memcmp(dst, src, total) != 0) {
-         memcpy(dst, src, total);
-         return true;
-      }
-      return false;
+      return island_commit_bytes(dst_isl->state + dst_s->a_off,
+                                 src_isl->state + src_s->a_off, total);
    }
 
    const uint32_t total_words = src_s->nwords * src_s->nelems;
@@ -3232,6 +3499,9 @@ void rt_island_reset_all(rt_island_mgr_t *mgr)
    }
 
    island_classify_outputs(mgr);
+
+   for (unsigned i = 0; i < mgr->islands.count; i++)
+      island_refresh_domain_descs(mgr->islands.items[i]);
 
    for (unsigned i = 0; i < mgr->islands.count; i++) {
       rt_island_t *isl = mgr->islands.items[i];
@@ -4829,35 +5099,39 @@ static inline void island_flush_out_slice(rt_model_t *m, rt_island_t *isl,
       island_sync_out_slice(m, isl, s, local_off, local_cnt);
 }
 
-static inline void island_commit_vhdl_sig(rt_model_t *m, rt_island_t *isl,
-                                          rt_island_sig_t *s,
-                                          bool *comb_need_eval)
+static inline void island_commit_vhdl_desc(rt_model_t *m, rt_island_t *isl,
+                                           const rt_island_ff_desc_t *d,
+                                           bool has_forces,
+                                           bool *comb_need_eval)
 {
-   if (unlikely(isl->has_forces)) {
-      rt_island_force_t *f = (rt_island_force_t *)island_find_force(isl, s->sig_idx);
+   if (unlikely(has_forces)) {
+      rt_island_force_t *f = (rt_island_force_t *)island_find_force(isl, d->sig_idx);
       if (f != NULL)
-         island_apply_force_entry(isl->next_state, s, f, true);
+         island_apply_force_entry(isl->next_state, &(isl->sigs[d->sig_idx]), f,
+                                  true);
    }
 
-   if (!island_commit_sig_buf(isl, s))
+   if (!island_commit_desc_buf(isl, d))
       return;
 
-   if (s->flags & RT_ISIG_COMB_READ)
+   if (d->flags & RT_IFF_COMB_READ)
       *comb_need_eval = true;
 
-   if (s->flags & RT_ISIG_DIRECT_LINK) {
-      for (uint32_t t = 0; t < s->n_direct_targets; t++) {
-         rt_island_sig_t *dst_s = s->direct_targets[t];
-         if (island_copy_direct_sig(s, dst_s)
-             && (dst_s->flags & RT_ISIG_COMB_READ)
-             && dst_s->isl->eval_handle != JIT_HANDLE_INVALID)
-            island_mark_dirty(dst_s->isl);
+   if (unlikely(d->flags & RT_IFF_HAS_NOTIFY)) {
+      rt_island_sig_t *s = &(isl->sigs[d->sig_idx]);
+      if (d->flags & RT_IFF_DIRECT_LINK) {
+         for (uint32_t t = 0; t < s->n_direct_targets; t++) {
+            rt_island_sig_t *dst_s = s->direct_targets[t];
+            if (island_copy_direct_sig(s, dst_s)
+                && (dst_s->flags & RT_ISIG_COMB_READ)
+                && dst_s->isl->eval_handle != JIT_HANDLE_INVALID)
+               island_mark_dirty(dst_s->isl);
+         }
       }
-   }
-   else if ((s->flags & (RT_ISIG_OUT | RT_ISIG_OBSERVED))
-            && !(s->flags & RT_ISIG_PRUNED)) {
-      s->flags |= RT_ISIG_VHDL_SCHED;
-      island_sched_out_sig(m, isl, s);
+      else {
+         s->flags |= RT_ISIG_VHDL_SCHED;
+         island_sched_out_sig(m, isl, s);
+      }
    }
 }
 
@@ -4867,6 +5141,9 @@ static void island_commit_vhdl_domain(rt_model_t *m, rt_island_domain_t *dom)
    dom->ff_dirty_mask = 0;
 
    rt_island_t *isl = dom->isl;
+   const rt_island_ff_desc_t *descs = dom->ff_descs;
+   const uint32_t n_write = dom->n_write_sigs;
+   const bool has_forces = isl->has_forces;
    bool comb_need_eval = false;
 
    if (likely(dmask & (UINT64_C(1) << 63))) {
@@ -4877,20 +5154,20 @@ static void island_commit_vhdl_domain(rt_model_t *m, rt_island_domain_t *dom)
       while (bits != 0) {
          const uint32_t j = (uint32_t)__builtin_ctzll(bits);
          bits &= bits - 1u;
-         if (likely(j < dom->n_write_sigs))
-            island_commit_vhdl_sig(m, isl, &(isl->sigs[dom->write_sigs[j]]),
-                                   &comb_need_eval);
+         if (likely(j < n_write))
+            island_commit_vhdl_desc(m, isl, &(descs[j]), has_forces,
+                                    &comb_need_eval);
       }
       if (unlikely(overflow)) {
-         for (uint32_t j = 62; j < dom->n_write_sigs; j++)
-            island_commit_vhdl_sig(m, isl, &(isl->sigs[dom->write_sigs[j]]),
-                                   &comb_need_eval);
+         for (uint32_t j = 62; j < n_write; j++)
+            island_commit_vhdl_desc(m, isl, &(descs[j]), has_forces,
+                                    &comb_need_eval);
       }
    }
    else {
-      for (uint32_t j = 0; j < dom->n_write_sigs; j++)
-         island_commit_vhdl_sig(m, isl, &(isl->sigs[dom->write_sigs[j]]),
-                                &comb_need_eval);
+      for (uint32_t j = 0; j < n_write; j++)
+         island_commit_vhdl_desc(m, isl, &(descs[j]), has_forces,
+                                 &comb_need_eval);
    }
 
    if (comb_need_eval && isl->eval_handle != JIT_HANDLE_INVALID)
@@ -5245,33 +5522,39 @@ bool rt_island_has_ff_commits(const rt_island_mgr_t *mgr)
 static void island_commit_domain(rt_model_t *m, rt_island_domain_t *dom)
 {
    rt_island_t *isl = dom->isl;
+   const rt_island_ff_desc_t *descs = dom->ff_descs;
+   const uint32_t n_write = dom->n_write_sigs;
+   const bool has_forces = isl->has_forces;
    bool comb_need_eval = false;
-   for (uint32_t j = 0; j < dom->n_write_sigs; j++) {
-      rt_island_sig_t *s = &(isl->sigs[dom->write_sigs[j]]);
-      if (unlikely(isl->has_forces)) {
-         rt_island_force_t *f = (rt_island_force_t *)island_find_force(isl, s->sig_idx);
+   for (uint32_t j = 0; j < n_write; j++) {
+      const rt_island_ff_desc_t *d = &(descs[j]);
+      if (unlikely(has_forces)) {
+         rt_island_force_t *f = (rt_island_force_t *)island_find_force(isl, d->sig_idx);
          if (f != NULL)
-            island_apply_force_entry(isl->next_state, s, f, true);
+            island_apply_force_entry(isl->next_state, &(isl->sigs[d->sig_idx]),
+                                     f, true);
       }
 
-      if (!island_commit_sig_buf(isl, s))
+      if (!island_commit_desc_buf(isl, d))
          continue;
 
-      if (s->flags & RT_ISIG_COMB_READ)
+      if (d->flags & RT_IFF_COMB_READ)
          comb_need_eval = true;
 
-      if (s->flags & RT_ISIG_DIRECT_LINK) {
-         for (uint32_t t = 0; t < s->n_direct_targets; t++) {
-            rt_island_sig_t *dst_s = s->direct_targets[t];
-            if (island_copy_direct_sig(s, dst_s)
-                && (dst_s->flags & RT_ISIG_COMB_READ)
-                && dst_s->isl->eval_handle != JIT_HANDLE_INVALID)
-               island_mark_dirty(dst_s->isl);
+      if (unlikely(d->flags & RT_IFF_HAS_NOTIFY)) {
+         rt_island_sig_t *s = &(isl->sigs[d->sig_idx]);
+         if (d->flags & RT_IFF_DIRECT_LINK) {
+            for (uint32_t t = 0; t < s->n_direct_targets; t++) {
+               rt_island_sig_t *dst_s = s->direct_targets[t];
+               if (island_copy_direct_sig(s, dst_s)
+                   && (dst_s->flags & RT_ISIG_COMB_READ)
+                   && dst_s->isl->eval_handle != JIT_HANDLE_INVALID)
+                  island_mark_dirty(dst_s->isl);
+            }
          }
+         else
+            island_sync_out_sig(m, isl, s);
       }
-      else if ((s->flags & (RT_ISIG_OUT | RT_ISIG_OBSERVED))
-               && !(s->flags & RT_ISIG_PRUNED))
-         island_sync_out_sig(m, isl, s);
    }
 
    if (comb_need_eval && isl->eval_handle != JIT_HANDLE_INVALID)
@@ -5509,7 +5792,10 @@ static void island_break_direct_link(rt_model_t *m, rt_island_sig_t *src_s)
       if ((dst_s->flags & RT_ISIG_COMB_READ)
           && dst_s->isl->eval_handle != JIT_HANDLE_INVALID)
          island_mark_dirty(dst_s->isl);
+      if (dst_s->flags & RT_ISIG_FF_WRITTEN)
+         island_refresh_domain_descs(dst_s->isl);
    }
+   island_refresh_domain_descs(src_s->isl);
 }
 
 static void island_break_aliases(rt_model_t *m, rt_island_mgr_t *mgr,
@@ -5551,6 +5837,7 @@ static void island_unprune_sig(rt_island_mgr_t *mgr, rt_island_sig_t *s)
    if (mgr->reset_done)
       island_sync_sig_raw(s->isl, s, true);
    island_add_comb_flush_sig(s->isl, s);
+   island_refresh_domain_descs(s->isl);
 }
 
 void rt_island_on_ext_deposit(rt_model_t *m, rt_signal_t *sig)
@@ -5574,6 +5861,7 @@ void rt_island_on_ext_deposit(rt_model_t *m, rt_signal_t *sig)
          s->flags |= RT_ISIG_OBSERVED;
          if ((s->flags & RT_ISIG_COMB_WRITTEN) && !(s->flags & RT_ISIG_OUT))
             island_add_obs_sig(s->isl, s->sig_idx);
+         island_refresh_domain_descs(s->isl);
       }
       s->flags |= RT_ISIG_VHDL_SCHED;
       if (s->ext_write_watch == NULL && s->sig != NULL) {
@@ -5611,6 +5899,7 @@ void rt_island_on_observer_attached(rt_model_t *m, rt_signal_t *sig)
          s->flags |= RT_ISIG_OBSERVED;
          if ((s->flags & RT_ISIG_COMB_WRITTEN) && !(s->flags & RT_ISIG_OUT))
             island_add_obs_sig(s->isl, s->sig_idx);
+         island_refresh_domain_descs(s->isl);
       }
    }
 }

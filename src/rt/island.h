@@ -50,6 +50,21 @@ typedef enum {
 #define RT_IEDGE_VHDL_EVENT   (1u << 3)
 #define RT_IEDGE_RST_LEVEL    (1u << 4)
 
+#define RT_IFF_STD_LOGIC9   (1u << 0)
+#define RT_IFF_TWO_STATE    (1u << 1)
+#define RT_IFF_COMB_READ    (1u << 2)
+#define RT_IFF_DIRECT_LINK  (1u << 3)
+#define RT_IFF_SYNC_OUT     (1u << 4)
+#define RT_IFF_HAS_NOTIFY   (RT_IFF_DIRECT_LINK | RT_IFF_SYNC_OUT)
+
+typedef struct {
+   uint32_t a_off;
+   uint32_t count;      // STD_LOGIC9: total bytes; 2/4-state: nwords * nelems
+   uint32_t sig_idx;
+   uint16_t flags;      // RT_IFF_*
+   uint16_t b_delta;    // 4-state: (b_off - a_off) >> 3 if < 0xFFFF, else 0xFFFF
+} rt_island_ff_desc_t;
+
 typedef struct _rt_super_island rt_super_island_t;
 typedef struct _rt_super_domain rt_super_domain_t;
 
@@ -117,6 +132,7 @@ typedef struct _rt_island_domain {
    bool                      reset_clk_edge;
    bool                      reset_rst_edge;
    uint32_t                 *write_sigs;
+   rt_island_ff_desc_t      *ff_descs;
    uint32_t                  n_write_sigs;
    uint32_t                  cap_write_sigs;
    uint64_t                  ff_dirty_mask;
