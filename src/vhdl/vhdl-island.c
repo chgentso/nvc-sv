@@ -752,10 +752,11 @@ static void collect_decl_leaves(tree_t block, const tree_t *ancestors,
          return;
       const uint64_t total_bits = (uint64_t)s.width * s.nelems;
       if (total_bits > VHDL_ISLAND_MAX_ARRAY2D_BITS) {
-         if (two_state || s.byte_size != 1
+         if (two_state || s.byte_size != 1 || s.is_port
              || total_bits > VHDL_ISLAND_MAX_SPARSE_RAM_BITS)
             return;
          s.is_sparse_ram = true;
+         s.base_is_sparse_ram = true;
       }
       s.is_vector = true;
       s.is_array2d = true;
@@ -1965,6 +1966,25 @@ static bool check_stmt(check_ctx_t *c, tree_t stmt, bool is_func)
          tree_t target = tree_target(stmt);
          if (!check_expr(c, target, true))
             return false;
+
+         // Track whole-array assignments to 2D arrays (cannot use sparse row writes)
+         {
+            tree_t wdecl = NULL;
+            int wpath[VHDL_ISIG_MAX_DEPTH];
+            uint8_t wplen = 0;
+            if (vhdl_island_extract_path_ctx(c->ctx, target, &wdecl, wpath,
+                                             &wplen)) {
+               for (uint32_t k = 0; k < c->ctx->n_sigs; k++) {
+                  vhdl_isig_t *ws = &(c->ctx->sigs[k]);
+                  if (ws->is_array2d && ws->decl == wdecl
+                      && ws->path_len >= wplen
+                      && (wplen == 0
+                          || memcmp(ws->field_path, wpath,
+                                    wplen * sizeof(int)) == 0))
+                     ws->has_whole_write = true;
+               }
+            }
+         }
 
          // Record exact constant bit/slice/element range for disjoint multi-driver support
          uint32_t wsid = 0, wlo = 0, whi = 0;
@@ -4098,6 +4118,7 @@ void vhdl_island_rebuild(vhdl_island_ctx_t *ctx)
       ctx->sigs[i].has_ext_driver = ctx->sigs[i].base_has_ext_driver;
       ctx->sigs[i].has_9state_driver = ctx->sigs[i].base_has_9state_driver;
       ctx->sigs[i].ext_read = ctx->sigs[i].base_ext_read;
+      ctx->sigs[i].is_sparse_ram = ctx->sigs[i].base_is_sparse_ram;
       ctx->sigs[i].driver_proc = -1;
    }
 
@@ -4149,7 +4170,9 @@ void vhdl_island_rebuild(vhdl_island_ctx_t *ctx)
                break;
             }
             if (sigs.items[sid].is_sparse_ram
-                && (p->kind != VIPROC_FF || driver_count[sid] > 1)) {
+                && (p->kind != VIPROC_FF || driver_count[sid] > 1
+                    || sigs.items[sid].is_ancestor_sig
+                    || sigs.items[sid].has_whole_write)) {
                conflict = true;
                break;
             }
@@ -4182,6 +4205,11 @@ void vhdl_island_rebuild(vhdl_island_ctx_t *ctx)
          for (uint32_t j = 0; j < p->n_reads && !conflict; j++) {
             const uint32_t rsid = p->reads[j];
             if (sigs.items[rsid].ineligible)
+               conflict = true;
+            else if (sigs.items[rsid].is_sparse_ram
+                     && (sigs.items[rsid].has_ext_driver
+                         || sigs.items[rsid].is_ancestor_sig
+                         || driver_count[rsid] == 0))
                conflict = true;
             else if (two_state && sigs.items[rsid].has_9state_driver) {
                conflict = true;
@@ -4297,6 +4325,17 @@ void vhdl_island_rebuild(vhdl_island_ctx_t *ctx)
                break;
             }
          }
+         if (p->rejected)
+            continue;
+         for (uint32_t j = 0; j < p->n_reads; j++) {
+            const uint32_t rsid = p->reads[j];
+            if (sigs.items[rsid].is_sparse_ram
+                && sigs.items[rsid].has_ext_driver) {
+               p->rejected = true;
+               cascade = true;
+               break;
+            }
+         }
       }
    }
 
@@ -4312,12 +4351,33 @@ void vhdl_island_rebuild(vhdl_island_ctx_t *ctx)
    vhdl_island_set_eval_scope(ctx, ctx->block, ctx->ancestors, ctx->n_ancestors);
 
    // Record unique driver for accepted processes
+   memset(driver_count, 0, ctx->n_sigs * sizeof(int));
    for (unsigned i = 0; i < procs.count; i++) {
       const vhdl_iproc_t *p = &(procs.items[i]);
       if (p->rejected)
          continue;
-      for (uint32_t j = 0; j < p->n_writes; j++)
-         ctx->sigs[p->writes[j]].driver_proc = (int)i;
+      for (uint32_t j = 0; j < p->n_writes; j++) {
+         const uint32_t sid = p->writes[j];
+         ctx->sigs[sid].driver_proc = (int)i;
+         driver_count[sid]++;
+      }
+   }
+
+   // Promote medium (>128-bit) local single-FF-writer 2D arrays without
+   // whole-array writes to sparse-row RAMs to avoid double-buffering and
+   // whole-array memcmp/memcpy at commit time.
+   if (!two_state) {
+      for (uint32_t sid = 0; sid < ctx->n_sigs; sid++) {
+         vhdl_isig_t *s = &(ctx->sigs[sid]);
+         if (s->is_array2d && !s->is_sparse_ram && !s->has_whole_write
+             && s->byte_size == 1 && !s->is_port && !s->is_ancestor_sig
+             && !s->has_ext_driver && !s->ineligible
+             && driver_count[sid] == 1 && s->driver_proc >= 0
+             && procs.items[s->driver_proc].kind == VIPROC_FF
+             && (uint64_t)s->width * s->nelems > 128u) {
+            s->is_sparse_ram = true;
+         }
+      }
    }
 
    // Count surviving accepted processes

@@ -63,6 +63,8 @@ typedef struct {
    bool             is_vector;
    bool             is_array2d;
    bool             is_sparse_ram;
+   bool             base_is_sparse_ram;
+   bool             has_whole_write;
    bool             is_ancestor_sig;
    bool             is_port;
    port_mode_t      port_mode;
