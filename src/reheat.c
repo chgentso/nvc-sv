@@ -102,8 +102,10 @@ static vlog_node_t reheat_find_mod(vlog_node_t list, void *arg)
       ident_t qual = ident_prefix(lib_name(lib), unit, '.');
       obj = lib_get_generic(lib, qual, NULL);
    }
-   if (obj == NULL)
-      obj = lib_search_generic(unit, reheat_is_instantiable, NULL);
+   if (obj == NULL) {
+      lib_t found = NULL;
+      obj = lib_search_generic(unit, reheat_is_instantiable, &found);
+   }
 
    vlog_node_t mod = obj != NULL ? vlog_from_object(obj) : NULL;
    return (mod != NULL && vlog_kind(mod) == V_MODULE) ? mod : NULL;

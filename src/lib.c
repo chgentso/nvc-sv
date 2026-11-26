@@ -842,7 +842,8 @@ static object_t *lib_search_loaded(ident_t unit, lib_accept_fn_t accept,
 
       object_t *obj = lib_search_unit(it->item, unit, accept);
       if (obj != NULL) {
-         *where = it->item;
+         if (where != NULL)
+            *where = it->item;
          return obj;
       }
    }
@@ -911,8 +912,10 @@ object_t *lib_search_generic(ident_t unit, lib_accept_fn_t accept,
          if (lib == NULL)
             continue;
 
-         if ((obj = lib_search_unit(lib, unit, accept)))
-            *where = lib;
+         if ((obj = lib_search_unit(lib, unit, accept))) {
+            if (where != NULL)
+               *where = lib;
+         }
       }
 
       for (unsigned i = 0; i < names.count; i++)
