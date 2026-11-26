@@ -3163,6 +3163,7 @@ svcrvstructrandc1 verilog
 svcrvstructunref1 verilog
 svcrvassocobj1 verilog
 svcrvassocobj2 verilog
+svcrvassocobj3 verilog
 svstdrandassoc1 verilog
 svcrvstdexpr1 verilog
 svcrvargobj1 verilog

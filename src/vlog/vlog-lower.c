@@ -23676,9 +23676,57 @@ static bool vlog_crv_is_reduction(vlog_node_t v)
    }
 }
 
-static bool vlog_crv_is_handle(vlog_node_t v)
+static void vlog_crv_rand_cb(vlog_node_t v, void *context)
 {
-   // A null literal or a name that holds an object handle
+   crv_visit_t *cv = context;
+
+   if (vlog_crv_std_arg(cv->gen, v) >= 0) {
+      cv->found = true;
+      return;
+   }
+
+   switch (vlog_kind(v)) {
+   case V_BIT_SELECT:
+      {
+         int salt;
+         vlog_node_t decl;
+         if (vlog_crv_std_elem(cv->gen, v, &salt, &decl))
+            cv->found = true;
+      }
+      break;
+   case V_REF:
+   case V_MEMBER_REF:
+      if (vlog_has_ref(v)) {
+         vlog_node_t decl = vlog_ref(v);
+         for (int i = 0; i < cv->gen->crv_nindex; i++) {
+            if (cv->gen->crv_index[i].decl == decl) {
+               if (!cv->gen->crv_index[i].known)
+                  cv->found = true;
+               return;
+            }
+         }
+
+         if (vlog_kind(decl) == V_VAR_DECL
+             && ((vlog_flags(decl) & (VLOG_F_RAND | VLOG_F_RANDC))
+                 || vlog_crv_is_std_var(cv->gen, decl)))
+            cv->found = true;
+      }
+      break;
+   default:
+      break;
+   }
+}
+
+static bool vlog_crv_has_rand(vlog_gen_t *g, vlog_node_t v)
+{
+   crv_visit_t cv = { .gen = g };
+   vlog_visit(v, vlog_crv_rand_cb, &cv);
+   return cv.found;
+}
+
+static bool vlog_crv_is_handle(vlog_gen_t *g, vlog_node_t v)
+{
+   // A null literal or a name/select that holds an object handle
 
    switch (vlog_kind(v)) {
    case V_NULL:
@@ -23689,6 +23737,22 @@ static bool vlog_crv_is_handle(vlog_node_t v)
       {
          vlog_node_t type = vlog_get_type(v);
          return type != NULL && vlog_kind(type) == V_CLASS_DECL;
+      }
+   case V_BIT_SELECT:
+      {
+         vlog_node_t type = vlog_get_type(v);
+         if (type == NULL || vlog_kind(type) != V_CLASS_DECL)
+            return false;
+
+         for (vlog_node_t sel = v; vlog_kind(sel) == V_BIT_SELECT;
+              sel = vlog_value(sel)) {
+            const int nparams = vlog_params(sel);
+            for (int i = 0; i < nparams; i++) {
+               if (vlog_crv_has_rand(g, vlog_param(sel, i)))
+                  return false;
+            }
+         }
+         return true;
       }
    default:
       return false;
@@ -23713,8 +23777,8 @@ static bool vlog_crv_is_state(vlog_gen_t *g, vlog_node_t v)
       case V_BINARY_LOG_NEQ:
       case V_BINARY_CASE_EQ:
       case V_BINARY_CASE_NEQ:
-         if (vlog_crv_is_handle(vlog_left(v))
-             && vlog_crv_is_handle(vlog_right(v)))
+         if (vlog_crv_is_handle(g, vlog_left(v))
+             && vlog_crv_is_handle(g, vlog_right(v)))
             return true;
          break;
       default:
@@ -25587,7 +25651,9 @@ static mir_value_t vlog_crv_assoc_elem(vlog_gen_t *g, vlog_node_t base,
    }
 
    if (mir_is_null(kv)) {
-      if (!vlog_crv_is_state(g, key))
+      if (!vlog_crv_is_state(g, key)
+          && !(vlog_assoc_key_is_string(vlog_assoc_key(aty))
+               && !vlog_crv_has_rand(g, key)))
          fatal_at(vlog_loc(key), "sorry, the index of an associative array in "
                   "a constraint must not be random or the loop variable of a "
                   "foreach over a random array");
@@ -28212,6 +28278,10 @@ static mir_value_t vlog_crv_expr(vlog_gen_t *g, vlog_node_t v, unsigned width,
                      && vlog_crv_is_integral(
                         g, vlog_crv_elem_type(vlog_ref(base)))) {
                node = vlog_crv_assoc_elem(g, base, v);
+            }
+            else if (vlog_crv_is_assoc_ref(base)) {
+               fatal_at(vlog_loc(v), "sorry, non-integral associative array "
+                        "element is not supported in this constraint");
             }
             else {
                // Bit of a scalar
