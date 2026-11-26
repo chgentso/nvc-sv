@@ -3297,6 +3297,7 @@ vlog_island_countbits1 verilog
 vlog_island_ifport1 verilog
 vlog_island_reset_hop1 verilog
 vlog_island_partial_sig1 verilog
+vlog_trig_opt1  verilog
 vhdl_island_force1 normal,2008,$NVC_RTL_ISLANDS=hier
 vhdl_island_comb_edge1 normal,2008,$NVC_RTL_ISLANDS=hier
 vhdl_island_subblock1 normal,2008,$NVC_RTL_ISLANDS=hier

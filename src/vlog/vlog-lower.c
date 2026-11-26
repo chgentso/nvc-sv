@@ -163,6 +163,7 @@ typedef struct {
    mir_block_t    sva_chk;
    mir_value_t    sva_steady;
    bool           sens_clear;
+   vlog_node_t    static_ctrl;
    struct {
       vlog_node_t expr;
       mir_value_t var;
@@ -13760,6 +13761,13 @@ static void vlog_lower_event_or_delay(vlog_gen_t *g, vlog_node_t ctrl)
       }
       else if (vlog_is_polled_control(ctrl)) {
          vlog_lower_poll_control(g, ctrl);
+         break;
+      }
+      else if (g->static_ctrl == ctrl) {
+         mir_block_t wait_bb = mir_add_block(g->mu);
+         mir_build_wait(g->mu, wait_bb);
+
+         mir_set_cursor(g->mu, wait_bb, MIR_APPEND);
          break;
       }
 
@@ -34536,39 +34544,450 @@ static vlog_node_t vlog_assertion_clock(vlog_node_t v)
    }
 }
 
+typedef struct {
+   bool    ok;
+   bool    collect_writes;
+   hset_t *written;
+   hset_t *seen_funcs;
+} vlog_static_wait_scan_t;
+
+static void vlog_collect_write_target(vlog_node_t t,
+                                      vlog_static_wait_scan_t *s)
+{
+   switch (vlog_kind(t)) {
+   case V_CONCAT:
+      {
+         const int nparams = vlog_params(t);
+         for (int i = 0; i < nparams; i++)
+            vlog_collect_write_target(vlog_param(t, i), s);
+      }
+      break;
+   case V_BIT_SELECT:
+   case V_PART_SELECT:
+   case V_MEMBER_REF:
+      vlog_collect_write_target(vlog_value(t), s);
+      break;
+   case V_REF:
+      if (vlog_has_ref(t)) {
+         vlog_node_t d = vlog_ref(t);
+         if (vlog_kind(d) == V_PORT_DECL && vlog_has_ref(d))
+            d = vlog_ref(d);
+         hset_insert(s->written, d);
+      }
+      else
+         s->ok = false;
+      break;
+   default:
+      s->ok = false;
+      break;
+   }
+}
+
+static void vlog_static_wait_scan_cb(vlog_node_t n, void *ctx)
+{
+   vlog_static_wait_scan_t *s = ctx;
+   if (!s->ok)
+      return;
+
+   switch (vlog_kind(n)) {
+   case V_TIMING:
+   case V_WAIT:
+   case V_EVENT_CONTROL:
+   case V_FORK:
+   case V_USER_TCALL:
+   case V_METHOD_CALL:
+   case V_DISABLE:
+      s->ok = false;
+      break;
+   case V_SEQ_BLOCK:
+      if (vlog_flags(n) & VLOG_F_NAMED_DISABLE)
+         s->ok = false;
+      break;
+   case V_SYS_FCALL:
+      if (vlog_ident(n) == ident_new("$process_self"))
+         s->ok = false;
+      break;
+   case V_ASSERT:
+   case V_ASSUME:
+   case V_COVER:
+      if (vlog_kind(vlog_value(n)) == V_PROP_SPEC)
+         s->ok = false;
+      break;
+   case V_BASSIGN:
+      if (vlog_has_delay(n))
+         s->ok = false;
+      // Fall-through
+   case V_OP_ASSIGN:
+   case V_PREFIX:
+   case V_POSTFIX:
+   case V_FORCE:
+   case V_RELEASE:
+   case V_DEASSIGN:
+      if (s->collect_writes && vlog_has_target(n))
+         vlog_collect_write_target(vlog_target(n), s);
+      break;
+   case V_USER_FCALL:
+      if (!vlog_has_ref(n) || vlog_kind(vlog_ref(n)) != V_FUNC_DECL
+          || (vlog_flags(vlog_ref(n)) & VLOG_F_DPI)) {
+         s->ok = false;
+         break;
+      }
+      if (s->collect_writes) {
+         vlog_node_t fn = vlog_ref(n);
+         const int nports = vlog_ports(fn);
+         for (int i = 0; i < nports; i++) {
+            if (vlog_subkind(vlog_port(fn, i)) != V_PORT_INPUT) {
+               s->ok = false;
+               return;
+            }
+         }
+         if (!hset_contains(s->seen_funcs, fn)) {
+            hset_insert(s->seen_funcs, fn);
+            vlog_visit(fn, vlog_static_wait_scan_cb, s);
+         }
+      }
+      break;
+   default:
+      break;
+   }
+}
+
+typedef struct {
+   hset_t *written;
+   bool    overlap;
+} vlog_write_overlap_t;
+
+static void vlog_write_overlap_cb(vlog_node_t n, void *ctx)
+{
+   vlog_write_overlap_t *o = ctx;
+   if (o->overlap)
+      return;
+
+   switch (vlog_kind(n)) {
+   case V_REF:
+      if (vlog_has_ref(n)) {
+         vlog_node_t d = vlog_ref(n);
+         if (vlog_kind(d) == V_PORT_DECL && vlog_has_ref(d))
+            d = vlog_ref(d);
+         if (hset_contains(o->written, d))
+            o->overlap = true;
+      }
+      break;
+   case V_HIER_REF:
+      o->overlap = true;
+      break;
+   default:
+      break;
+   }
+}
+
+static mir_value_t vlog_lower_static_event(vlog_gen_t *g, vlog_node_t v)
+{
+   const vlog_kind_t kind = vlog_kind(v);
+
+   vlog_node_t type = vlog_get_type(v);
+   if (type != NULL && vlog_kind(type) == V_DATA_TYPE
+       && vlog_subkind(type) == DT_EVENT)
+      return vlog_lower_trigger(g, v);
+
+   switch (kind) {
+   case V_REF:
+      switch (vlog_kind(vlog_ref(v))) {
+      case V_PORT_DECL:
+      case V_NET_DECL:
+      case V_VAR_DECL:
+      case V_LOCAL_DECL:
+         {
+            vlog_node_t decl = vlog_ref(v);
+            if (vlog_kind(decl) == V_PORT_DECL && vlog_has_ref(decl))
+               decl = vlog_ref(decl);
+            int hops;
+            if (mir_is_null(mir_search_object(g->mu, decl, &hops)))
+               return MIR_NULL_VALUE;
+
+            vlog_select_t lvalue = vlog_lower_select(g, v);
+            if (!mir_is_signal(g->mu, lvalue.obj))
+               return MIR_NULL_VALUE;
+
+            const int total_size = vlog_whole_size(g, v, &lvalue);
+            mir_type_t t_offset = mir_offset_type(g->mu);
+            mir_build_sched_event(g->mu, lvalue.obj,
+                                  mir_const(g->mu, t_offset, total_size));
+            return MIR_NULL_VALUE;
+         }
+      case V_PARAM_DECL:
+      case V_LOCALPARAM:
+      case V_ENUM_NAME:
+      case V_GENVAR_DECL:
+         return MIR_NULL_VALUE;
+      default:
+         return vlog_lower_trigger(g, v);
+      }
+   case V_HIER_REF:
+      return vlog_lower_trigger(g, v);
+   case V_BIT_SELECT:
+   case V_PART_SELECT:
+   case V_MEMBER_REF:
+      {
+         mir_value_t trigger = MIR_NULL_VALUE;
+         vlog_node_t prefix = vlog_longest_static_prefix(v);
+         if (prefix == v) {
+            vlog_node_t root = v;
+            while (vlog_kind(root) == V_BIT_SELECT
+                   || vlog_kind(root) == V_PART_SELECT
+                   || vlog_kind(root) == V_MEMBER_REF)
+               root = vlog_value(root);
+
+            if (vlog_kind(root) == V_HIER_REF)
+               trigger = vlog_lower_trigger(g, v);
+            else {
+               bool found = true;
+               if (vlog_kind(root) == V_REF && vlog_has_ref(root)) {
+                  vlog_node_t decl = vlog_ref(root);
+                  if (vlog_kind(decl) == V_PORT_DECL && vlog_has_ref(decl))
+                     decl = vlog_ref(decl);
+                  int hops;
+                  if (mir_is_null(mir_search_object(g->mu, decl, &hops)))
+                     found = false;
+               }
+               if (found) {
+                  vlog_select_t lvalue = vlog_lower_select(g, v);
+                  if (mir_is_signal(g->mu, lvalue.obj)) {
+                     mir_value_t nets =
+                        mir_build_array_ref(g->mu, lvalue.obj,
+                                            lvalue.dst_offset);
+                     if (vlog_is_packed_signal(g->mu, lvalue.obj))
+                        trigger = mir_build_level_trigger(g->mu, nets,
+                                                          lvalue.count);
+                     else
+                        mir_build_sched_event(g->mu, nets, lvalue.count);
+                  }
+               }
+            }
+         }
+         else if (prefix != NULL)
+            trigger = vlog_lower_static_event(g, prefix);
+         else if (kind != V_MEMBER_REF || vlog_is_param_select(v))
+            trigger = vlog_lower_static_event(g, vlog_value(v));
+
+         if (kind == V_MEMBER_REF)
+            return trigger;
+         else if (kind == V_BIT_SELECT) {
+            const int nparams = vlog_params(v);
+            for (int i = 0; i < nparams; i++) {
+               mir_value_t p = vlog_lower_static_event(g, vlog_param(v, i));
+               trigger = vlog_or_triggers(g, 2, trigger, p);
+            }
+         }
+         else {
+            mir_value_t left = vlog_lower_static_event(g, vlog_left(v));
+            trigger = vlog_or_triggers(g, 2, trigger, left);
+         }
+
+         return trigger;
+      }
+   case V_EVENT:
+      if (vlog_subkind(v) == V_EVENT_LEVEL)
+         return vlog_lower_static_event(g, vlog_value(v));
+      else
+         return vlog_lower_trigger(g, v);
+   case V_NUMBER:
+   case V_STRING:
+   case V_REAL:
+   case V_DOLLAR:
+      return MIR_NULL_VALUE;
+   case V_BINARY:
+   case V_INSIDE_RANGE:
+      {
+         mir_value_t left = vlog_lower_static_event(g, vlog_left(v));
+         mir_value_t right = vlog_lower_static_event(g, vlog_right(v));
+         return vlog_or_triggers(g, 2, left, right);
+      }
+   case V_INSIDE:
+      {
+         mir_value_t trigger = vlog_lower_static_event(g, vlog_value(v));
+         const int nparams = vlog_params(v);
+         for (int i = 0; i < nparams; i++) {
+            mir_value_t p = vlog_lower_static_event(g, vlog_param(v, i));
+            trigger = vlog_or_triggers(g, 2, trigger, p);
+         }
+         return trigger;
+      }
+   case V_UNARY:
+   case V_CAST:
+      return vlog_lower_static_event(g, vlog_value(v));
+   case V_COND_EXPR:
+      {
+         mir_value_t value = vlog_lower_static_event(g, vlog_value(v));
+         mir_value_t left = vlog_lower_static_event(g, vlog_left(v));
+         mir_value_t right = vlog_lower_static_event(g, vlog_right(v));
+         return vlog_or_triggers(g, 3, value, left, right);
+      }
+   case V_CONCAT:
+   case V_USER_FCALL:
+   case V_SYS_FCALL:
+   case V_STREAM:
+      {
+         mir_value_t trigger = MIR_NULL_VALUE;
+         const int nparams = vlog_params(v);
+         for (int i = 0; i < nparams; i++) {
+            mir_value_t p = vlog_lower_static_event(g, vlog_param(v, i));
+            trigger = vlog_or_triggers(g, 2, trigger, p);
+         }
+         return trigger;
+      }
+   case V_PATTERN_EXPR:
+      {
+         mir_value_t trigger = MIR_NULL_VALUE;
+         const int nparams = vlog_params(v);
+         for (int i = 0; i < nparams; i++) {
+            mir_value_t p =
+               vlog_lower_static_event(g, vlog_right(vlog_param(v, i)));
+            trigger = vlog_or_triggers(g, 2, trigger, p);
+         }
+         return trigger;
+      }
+   default:
+      return vlog_lower_trigger(g, v);
+   }
+}
+
+static bool vlog_always_can_static_wait(vlog_node_t v, vlog_node_t ctrl,
+                                        vlog_node_t body_node, bool is_comb)
+{
+   if (ident_starts_with(vlog_ident(v), ident_new("$postponed")))
+      return false;
+
+   if (vlog_assertion_clock(v) != NULL)
+      return false;
+
+   if (vlog_kind(ctrl) != V_EVENT_CONTROL || vlog_is_event_wait(ctrl)
+       || vlog_is_polled_control(ctrl) || vlog_params(ctrl) == 0)
+      return false;
+
+   const int nparams = vlog_params(ctrl);
+   for (int i = 0; i < nparams; i++) {
+      vlog_node_t e = vlog_param(ctrl, i);
+      if (vlog_kind(e) == V_EVENT && vlog_has_left(e))
+         return false;
+   }
+
+   vlog_static_wait_scan_t scan = {
+      .ok             = true,
+      .collect_writes = !is_comb,
+      .written        = !is_comb ? hset_new(16) : NULL,
+      .seen_funcs     = !is_comb ? hset_new(8) : NULL,
+   };
+
+   if (body_node != NULL)
+      vlog_visit(body_node, vlog_static_wait_scan_cb, &scan);
+   else {
+      // Leading V_TIMING: scan its child statements directly
+      vlog_node_t timing = vlog_stmt(v, 0);
+      const int nbody = vlog_stmts(timing);
+      for (int i = 0; i < nbody && scan.ok; i++)
+         vlog_visit(vlog_stmt(timing, i), vlog_static_wait_scan_cb, &scan);
+   }
+
+   bool ok = scan.ok;
+   if (ok && !is_comb) {
+      vlog_write_overlap_t ov = { .written = scan.written, .overlap = false };
+      vlog_visit(ctrl, vlog_write_overlap_cb, &ov);
+      if (ov.overlap)
+         ok = false;
+   }
+
+   if (scan.written != NULL)
+      hset_free(scan.written);
+   if (scan.seen_funcs != NULL)
+      hset_free(scan.seen_funcs);
+
+   return ok;
+}
+
 static void vlog_lower_always(vlog_gen_t *g, vlog_node_t v)
 {
    mir_block_t start_bb = mir_add_block(g->mu);
    assert(start_bb.id == 1);
 
+   const bool is_comb = vlog_subkind(v) == V_ALWAYS_COMB_DONE
+      || vlog_subkind(v) == V_ALWAYS_LATCH_DONE;
    const int nstmts = vlog_stmts(v);
-   for (int i = 0; i < nstmts; i++) {
-      vlog_node_t s0 = vlog_stmt(v, i);
-      if (vlog_kind(s0) != V_TIMING)
-         break;
 
-      // Cache the event control trigger once on reset to avoid
-      // regenerating it on each invocation
-      vlog_node_t ctrl = vlog_value(s0);
-      if (vlog_kind(ctrl) == V_EVENT_CONTROL && !vlog_is_event_wait(ctrl)
-          && !vlog_is_polled_control(ctrl))
-         vlog_lower_trigger_var(g, ctrl);
+   g->static_ctrl = NULL;
 
-      if (vlog_stmts(s0) > 0) {
-         vlog_node_t s1 = vlog_stmt(s0, 0);
-         switch (vlog_kind(s1)) {
-         case V_ASSERT:
-         case V_ASSUME:
-         case V_COVER:
-            if (vlog_kind(vlog_value(s1)) == V_PROP_SPEC) {
-               vlog_node_t spec = vlog_value(s1);
-               g->sva_clock = vlog_has_target(spec) ? vlog_target(spec) : ctrl;
-               vlog_lower_property_init(g, s1);
-               g->sva_clock = NULL;
+   if (is_comb && nstmts == 1) {
+      // simp_always wraps always_comb/always_latch in an unnamed V_SEQ_BLOCK
+      // containing the body followed by a trailing V_TIMING event control.
+      vlog_node_t blk = vlog_stmt(v, 0);
+      if (vlog_kind(blk) == V_SEQ_BLOCK && !vlog_has_ident(blk)
+          && vlog_decls(blk) == 0 && vlog_stmts(blk) == 2) {
+         vlog_node_t body = vlog_stmt(blk, 0);
+         vlog_node_t timing = vlog_stmt(blk, 1);
+         if (vlog_kind(timing) == V_TIMING && vlog_stmts(timing) == 0) {
+            vlog_node_t ctrl = vlog_value(timing);
+            if (vlog_always_can_static_wait(v, ctrl, body, true)) {
+               mir_value_t trigger = MIR_NULL_VALUE;
+               const int nparams = vlog_params(ctrl);
+               for (int i = 0; i < nparams; i++) {
+                  mir_value_t p =
+                     vlog_lower_static_event(g, vlog_param(ctrl, i));
+                  trigger = vlog_or_triggers(g, 2, trigger, p);
+               }
+               if (!mir_is_null(trigger))
+                  mir_build_sched_event(g->mu, trigger, MIR_NULL_VALUE);
+               g->static_ctrl = ctrl;
             }
+            else if (vlog_kind(ctrl) == V_EVENT_CONTROL
+                     && !vlog_is_event_wait(ctrl)
+                     && !vlog_is_polled_control(ctrl))
+               vlog_lower_trigger_var(g, ctrl);
+         }
+      }
+   }
+   else if (nstmts == 1 && vlog_kind(vlog_stmt(v, 0)) == V_TIMING
+            && vlog_always_can_static_wait(v, vlog_value(vlog_stmt(v, 0)),
+                                           NULL, false)) {
+      vlog_node_t ctrl = vlog_value(vlog_stmt(v, 0));
+      mir_value_t trigger = MIR_NULL_VALUE;
+      const int nparams = vlog_params(ctrl);
+      for (int i = 0; i < nparams; i++) {
+         mir_value_t p = vlog_lower_static_event(g, vlog_param(ctrl, i));
+         trigger = vlog_or_triggers(g, 2, trigger, p);
+      }
+      if (!mir_is_null(trigger))
+         mir_build_sched_event(g->mu, trigger, MIR_NULL_VALUE);
+      g->static_ctrl = ctrl;
+   }
+   else {
+      for (int i = 0; i < nstmts; i++) {
+         vlog_node_t s0 = vlog_stmt(v, i);
+         if (vlog_kind(s0) != V_TIMING)
             break;
-         default:
-            break;
+
+         // Cache the event control trigger once on reset to avoid
+         // regenerating it on each invocation
+         vlog_node_t ctrl = vlog_value(s0);
+         if (vlog_kind(ctrl) == V_EVENT_CONTROL && !vlog_is_event_wait(ctrl)
+             && !vlog_is_polled_control(ctrl))
+            vlog_lower_trigger_var(g, ctrl);
+
+         if (vlog_stmts(s0) > 0) {
+            vlog_node_t s1 = vlog_stmt(s0, 0);
+            switch (vlog_kind(s1)) {
+            case V_ASSERT:
+            case V_ASSUME:
+            case V_COVER:
+               if (vlog_kind(vlog_value(s1)) == V_PROP_SPEC) {
+                  vlog_node_t spec = vlog_value(s1);
+                  g->sva_clock = vlog_has_target(spec) ? vlog_target(spec) : ctrl;
+                  vlog_lower_property_init(g, s1);
+                  g->sva_clock = NULL;
+               }
+               break;
+            default:
+               break;
+            }
          }
       }
    }
@@ -34591,6 +35010,7 @@ static void vlog_lower_always(vlog_gen_t *g, vlog_node_t v)
 
    g->sva_clk = NULL;
    g->sva_stmt = NULL;
+   g->static_ctrl = NULL;
 
    if (!mir_block_finished(g->mu, MIR_NULL_BLOCK))
       mir_build_jump(g->mu, start_bb);

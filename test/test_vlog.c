@@ -1636,22 +1636,17 @@ START_TEST(test_lower1)
       static const mir_match_t bb0[] = {
          { MIR_OP_VAR_UPREF, ENUM(1), UPREF("x") },
          { MIR_OP_LOAD },
-         { MIR_OP_LEVEL_TRIGGER },
-         { MIR_OP_STORE, VAR("trigger") },
+         { MIR_OP_SCHED_EVENT },
          { MIR_OP_RETURN },
       };
       mir_match(mu, 0, bb0);
 
       static const mir_match_t bb1[] = {
-         { MIR_OP_LOAD, VAR("trigger") },
-         { MIR_OP_SCHED_EVENT },
          { MIR_OP_WAIT, BLOCK(2) },
       };
       mir_match(mu, 1, bb1);
 
       static const mir_match_t bb2[] = {
-         { MIR_OP_LOAD, VAR("trigger") },
-         { MIR_OP_CLEAR_EVENT },
          { MIR_OP_VAR_UPREF, ENUM(1), UPREF("r") },
          { MIR_OP_LOAD },
          { MIR_OP_VAR_UPREF, ENUM(1), UPREF("x") },
