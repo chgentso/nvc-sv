@@ -209,28 +209,29 @@ typedef struct _rt_island_act {
 } rt_island_act_t;
 
 typedef struct _rt_island_sig {
+   // Fields read per value change first (input watch, sync in and out)
    rt_signal_t            *sig;
    struct _rt_island      *isl;
    uint32_t                sig_idx;
    uint32_t                in_idx;
-   struct _rt_island_sig  *next_owner;
-   struct _rt_island_sig **direct_targets;
-   struct _rt_island_sig  *direct_src;
-   uint32_t                n_direct_targets;
-   rt_island_alias_t      *direct_aliases;
-   uint32_t                n_direct_aliases;
+   uint32_t                flags;
    int32_t                 sig_offset;
    uint32_t                a_off;
    uint32_t                b_off;
    uint32_t                width;
    uint32_t                nelems;
    uint32_t                nwords;
-   uint32_t                flags;
    uint8_t                 elem_size;
-   rt_watch_t             *watch;
-   rt_watch_t             *ext_write_watch;
    uint64_t                last_out_a;
    uint64_t                last_out_b;
+   rt_watch_t             *ext_write_watch;
+   rt_watch_t             *watch;
+   struct _rt_island_sig  *next_owner;
+   struct _rt_island_sig **direct_targets;
+   struct _rt_island_sig  *direct_src;
+   uint32_t                n_direct_targets;
+   uint32_t                n_direct_aliases;
+   rt_island_alias_t      *direct_aliases;
    uint64_t               *last_out_words;
    uint64_t                gen_key_hash;
    uint64_t                mix_memo;   // Packed source word last unpacked
@@ -238,13 +239,8 @@ typedef struct _rt_island_sig {
 } rt_island_sig_t;
 
 typedef struct _rt_island_domain {
+   // Fields used on every clock edge first
    struct _rt_island        *isl;
-   rt_super_domain_t        *super_dom;
-   struct _rt_island_domain *ff_batch_next;
-   uint32_t                  dom_idx;
-   jit_handle_t              ff_handle;
-   void                     *ff_func;
-   jit_fast_entry_fn_t       ff_fn;
    uint32_t                  clk_sig_idx;
    int32_t                   rst_sig_idx;
    bool                      clk_posedge;
@@ -258,25 +254,57 @@ typedef struct _rt_island_domain {
    bool                      reset_clk_edge;
    bool                      reset_rst_edge;
    bool                      spec_held_w;   // Writes a held signal
-   uint32_t                 *write_sigs;
-   rt_island_ff_desc_t      *ff_descs;
+   jit_handle_t              ff_handle;
+   void                     *ff_func;
+   jit_fast_entry_fn_t       ff_fn;
+   uint64_t                  ff_dirty_mask;
    rt_island_ff_desc_t      *ff_runs;      // SV: ff_descs with runs merged
    uint32_t                  n_ff_runs;
+   uint32_t                  dom_idx;
+   rt_super_domain_t        *super_dom;
+   struct _rt_island_domain *ff_batch_next;
+   uint32_t                 *write_sigs;
+   rt_island_ff_desc_t      *ff_descs;
    uint32_t                  n_write_sigs;
    uint32_t                  cap_write_sigs;
-   uint64_t                  ff_dirty_mask;
    rt_watch_t               *clk_watch;
    rt_watch_t               *rst_watch;
 } rt_island_domain_t;
 
 typedef struct _rt_island {
-   rt_model_t            *model;
+   // Fields used by every evaluation first, in two cache lines
    struct _rt_island_mgr *mgr;
-   rt_scope_t            *root_scope;
    rt_super_island_t     *cluster;
-   uint32_t               isl_id;
-   uint32_t               topo_pos;
    uint8_t               *state;
+   void                  *inst_ctx;
+   jit_fast_entry_fn_t    eval_fn;
+   void                  *eval_func;
+   uint64_t               dirty_in_mask;
+   uint32_t               topo_pos;
+   uint32_t               n_in_sigs;
+   rt_island_in_desc_t   *in_descs;
+   rt_island_ext_out_desc_t *ext_out_descs;
+   rt_island_direct_desc_t *direct_comb_descs;
+   rt_island_sig_t       *sigs;
+   uint32_t               n_ext_out_descs;
+   uint32_t               n_direct_comb_descs;
+   uint32_t               n_obs_sigs;
+   uint32_t               n_fb_sigs;
+   jit_handle_t           eval_handle;
+   bool                   dirty;
+   bool                   in_dirty_list;
+   bool                   in_defer_dirty;
+   bool                   has_dirty_inputs;
+   bool                   in_cl_dirty_in;
+   bool                   act_on;         // Comb function tests change bytes
+   bool                   is_vhdl;
+   bool                   has_forces;
+   bool                   spec_a;         // Running the Mode A variant now
+   bool                   direct_act;     // A direct comb desc has RT_IDIR_ACT
+   bool                   in_defer_direct;
+   rt_model_t            *model;
+   rt_scope_t            *root_scope;
+   uint32_t               isl_id;
    uint8_t               *next_state;
    uint32_t               state_bytes;
    uint32_t               total_state_bytes;
@@ -287,32 +315,19 @@ typedef struct _rt_island {
    uint8_t               *sparse_ovf_data;
    uint32_t               sparse_ovf_data_used;
    uint32_t               cap_sparse_ovf_data;
-   jit_handle_t           eval_handle;
-   void                  *eval_func;
-   jit_fast_entry_fn_t    eval_fn;
-   void                  *inst_ctx;
-   rt_island_sig_t       *sigs;
    uint32_t               nsigs;
    rt_island_domain_t    *domains;
    uint32_t               ndomains;
    uint32_t                *in_sigs;
-   rt_island_in_desc_t     *in_descs;
-   uint32_t                 n_in_sigs;
-   uint64_t                 dirty_in_mask;
    uint64_t                *dirty_in_words;
    uint32_t                 dirty_in_nwords;
    uint32_t                *out_sigs;
    uint32_t                 n_out_sigs;
    uint32_t                 *ext_out_sigs;
    uint32_t                  n_ext_out_sigs;
-   rt_island_ext_out_desc_t *ext_out_descs;
-   uint32_t                  n_ext_out_descs;
    uint32_t                *direct_comb_outs;
    uint32_t                 n_direct_comb_outs;
-   rt_island_direct_desc_t *direct_comb_descs;
-   uint32_t                 n_direct_comb_descs;
    uint32_t              *obs_sigs;
-   uint32_t               n_obs_sigs;
    uint32_t               cap_obs_sigs;
    rt_island_force_t     *forces;
    uint32_t               n_forces;
@@ -327,28 +342,16 @@ typedef struct _rt_island {
    uint32_t               mt_wave_tag;
    uint32_t               pending_vhdl_ff;
    uint32_t              *fb_sigs;
-   uint32_t               n_fb_sigs;
    uint8_t               *fb_shadow;
-   bool                   dirty;
-   bool                   in_dirty_list;
-   bool                   in_defer_dirty;
-   bool                   in_defer_direct;
    bool                   mt_fb_changed;
    bool                   mt_defer_direct;
-   bool                   has_dirty_inputs;
-   bool                   in_cl_dirty_in;
    bool                   initialized;
-   bool                   has_forces;
    bool                   has_reset_late;
    bool                   need_sync_out;
    bool                   mt_eval_on_main;
    bool                   mt_ff_unsafe;
-   bool                   is_vhdl;
    rt_island_spec_t      *spec;     // Speculative Mode A variant or NULL
-   bool                   spec_a;   // Running the Mode A variant now
    bool                   spec_held;   // Mode A with held signals
-   bool                   act_on;       // Comb function tests change bytes
-   bool                   direct_act;   // A direct comb desc has RT_IDIR_ACT
    jit_handle_t           reset_eval_handle;
    void                  *reset_eval_ctx;
    bool                   skip_sv_reset;
