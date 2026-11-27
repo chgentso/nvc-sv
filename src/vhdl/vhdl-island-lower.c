@@ -73,7 +73,7 @@ typedef struct {
    mir_value_t  storage;
 } vi_rec_leaf_t;
 
-typedef struct {
+typedef struct vi_local {
    tree_t         decl;
    bool           is_rec;
    type_t         rec_type;
@@ -117,6 +117,7 @@ typedef struct vi_scope {
    int64_t          ret_right;
    mir_block_t      loop_next_bb;
    mir_block_t      loop_exit_bb;
+   struct vi_local *ret_rec;   // Record result of an inlined function
 } vi_scope_t;
 
 typedef struct {
@@ -1165,7 +1166,10 @@ static bool vi_da_target(vi_da_t *da, tree_t target, uint32_t *lo,
    const vi_local_t *loc = da->loc;
    tree_t base = target;
    tree_t sel = NULL;
-   if (tree_kind(target) == T_ARRAY_REF || tree_kind(target) == T_ARRAY_SLICE) {
+   if (tree_kind(target) == T_ARRAY_REF && type_is_record(tree_type(target)))
+      ;   // An element of an array of records: a record path
+   else if (tree_kind(target) == T_ARRAY_REF
+            || tree_kind(target) == T_ARRAY_SLICE) {
       sel = target;
       base = tree_value(target);
    }
@@ -3170,8 +3174,10 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
    return false;
 }
 
+// Inlines a call FCALL of FUNC: the result is *OUT, or for a function
+// returning a record the leaves of RET_REC, a record local of that type
 static bool vi_lower_inline_func(vi_lower_t *l, tree_t fcall, tree_t func,
-                                 vi_val_t *out)
+                                 vi_val_t *out, vi_local_t *ret_rec)
 {
    func = vhdl_island_resolve_func_body(func);
    if (func == NULL || (tree_flags(func) & TREE_F_IMPURE))
@@ -3236,6 +3242,7 @@ static bool vi_lower_inline_func(vi_lower_t *l, tree_t fcall, tree_t func,
       .parent   = l->scope,
       .ret_bb   = mir_add_block(mu),
       .ret_type = tree_type(fcall),
+      .ret_rec  = ret_rec,
    };
 
    // Bind formal parameters in callee scope first so return type & local decl
@@ -3273,7 +3280,14 @@ static bool vi_lower_inline_func(vi_lower_t *l, tree_t fcall, tree_t func,
    range_kind_t rdir = RANGE_DOWNTO;
    int64_t rl = 0, rr = 0;
    uint32_t rw = 0;
-   if (type_is_array(rtype)) {
+   if (type_is_record(rtype)) {
+      if (ret_rec == NULL) {
+         l->scope = prev_scope;
+         vi_scope_clear(&child);
+         return false;
+      }
+   }
+   else if (type_is_array(rtype)) {
       child.ret_is_vec = true;
       child.ret_signed = vi_type_is_signed_vec(rtype);
       if (vi_eval_type_bounds(l, rtype, &rdir, &rl, &rr, &rw)) {
@@ -3428,6 +3442,12 @@ static bool vi_lower_inline_func(vi_lower_t *l, tree_t fcall, tree_t func,
 
    mir_set_cursor(mu, child.ret_bb, MIR_APPEND);
    l->scope = prev_scope;
+
+   if (ret_rec != NULL) {
+      const bool ok = child.has_ret_val;
+      vi_scope_clear(&child);
+      return ok;
+   }
 
    if (!child.has_ret_val || mir_is_null(child.ret_slot)) {
       vi_scope_clear(&child);
@@ -5272,7 +5292,7 @@ static bool vi_lower_expr_inner(vi_lower_t *l, tree_t expr, vi_val_t *out)
             if (strncmp(s, pkgs[i], plen) == 0)
                return vi_lower_std_fcall(l, expr, decl, pkgs[i], s + plen, out);
          }
-         return vi_lower_inline_func(l, expr, decl, out);
+         return vi_lower_inline_func(l, expr, decl, out, NULL);
       }
 
    default:
@@ -5898,6 +5918,75 @@ static bool vi_assign_array2d_local(vi_lower_t *l, const vi_rec_leaf_t *lf,
    return true;
 }
 
+static bool vi_copy_rec_local(vi_lower_t *l, const vi_local_t *dloc,
+                              const int *dpath, uint8_t dlen,
+                              const vi_local_t *sloc, const int *spath,
+                              uint8_t slen)
+{
+   mir_unit_t *mu = l->mu;
+   const vi_rec_leaf_t *d_leaves[512];
+   const vi_rec_leaf_t *s_leaves[512];
+   uint32_t dn = vi_collect_rec_prefix_leaves(dloc, dpath, dlen,
+                                              d_leaves, 512);
+   uint32_t sn = vi_collect_rec_prefix_leaves(sloc, spath, slen,
+                                              s_leaves, 512);
+   if (dn == 0 || dn > 512 || sn != dn)
+      return false;
+   for (uint32_t i = 0; i < dn; i++) {
+      const vi_rec_leaf_t *dlf = d_leaves[i];
+      const vi_rec_leaf_t *slf = s_leaves[i];
+      if (dlf->width != slf->width || dlf->is_array2d != slf->is_array2d)
+         return false;
+      if (dlf->is_array2d) {
+         if (dlf->nelems != slf->nelems)
+            return false;
+         mir_build_copy(mu, dlf->storage, slf->storage,
+                        vi_off(mu, vi_array2d_bytes(l, dlf->nelems,
+                                                    dlf->width)));
+         continue;
+      }
+      vi_val_t v;
+      if (!vi_load_rec_leaf(l, slf, vi_off(mu, 0), &v)
+          || !vi_store_rec_leaf(l, dlf, vi_off(mu, 0), v))
+         return false;
+   }
+   return true;
+}
+
+// RHS_E, a call of a user function that returns a record: inlines it with
+// the result in *TMP, a new record local whose leaves the caller frees.
+// The result has storage of its own: the function may read the variable
+// or signal the caller assigns it to, through its parameters.
+static bool vi_call_rec_func(vi_lower_t *l, tree_t rhs_e, vi_local_t *tmp)
+{
+   if (tree_kind(rhs_e) != T_FCALL || !tree_has_ref(rhs_e))
+      return false;
+   tree_t decl = tree_ref(rhs_e);
+   type_t rt = tree_type(rhs_e);
+   if (tree_subkind(decl) != S_USER || !type_is_record(rt))
+      return false;
+   vi_rec_leaf_list_t leaves = AINIT;
+   int rpath[VHDL_ISIG_MAX_DEPTH];
+   if (!vi_collect_rec_local_leaves(l, rt, rpath, 0, tree_ident(decl),
+                                    &leaves)) {
+      ACLEAR(leaves);
+      return false;
+   }
+   *tmp = (vi_local_t){
+      .decl         = decl,
+      .is_rec       = true,
+      .rec_type     = rt,
+      .rec_leaves   = leaves.items,
+      .n_rec_leaves = leaves.count,
+   };
+   vi_val_t unused;
+   if (!vi_lower_inline_func(l, rhs_e, decl, &unused, tmp)) {
+      free(tmp->rec_leaves);
+      return false;
+   }
+   return true;
+}
+
 static bool vi_assign_rec_local(vi_lower_t *l, vi_local_t *dloc,
                                 int *dpath, uint8_t dlen,
                                 type_t rec_type, tree_t rhs_e)
@@ -5997,33 +6086,18 @@ static bool vi_assign_rec_local(vi_lower_t *l, vi_local_t *dloc,
          if (sloc == dloc && slen == dlen
              && (dlen == 0 || memcmp(spath, dpath, dlen * sizeof(int)) == 0))
             return true;
-         const vi_rec_leaf_t *d_leaves[512];
-         const vi_rec_leaf_t *s_leaves[512];
-         uint32_t dn = vi_collect_rec_prefix_leaves(dloc, dpath, dlen,
-                                                    d_leaves, 512);
-         uint32_t sn = vi_collect_rec_prefix_leaves(sloc, spath, slen,
-                                                    s_leaves, 512);
-         if (dn == 0 || dn > 512 || sn != dn)
+         return vi_copy_rec_local(l, dloc, dpath, dlen, sloc, spath, slen);
+      }
+
+      // Call of a function returning a record: v := f(x)
+      if (tree_kind(rhs_e) == T_FCALL) {
+         vi_local_t tmp;
+         if (!vi_call_rec_func(l, rhs_e, &tmp))
             return false;
-         for (uint32_t i = 0; i < dn; i++) {
-            const vi_rec_leaf_t *dlf = d_leaves[i];
-            const vi_rec_leaf_t *slf = s_leaves[i];
-            if (dlf->width != slf->width || dlf->is_array2d != slf->is_array2d)
-               return false;
-            if (dlf->is_array2d) {
-               if (dlf->nelems != slf->nelems)
-                  return false;
-               mir_build_copy(mu, dlf->storage, slf->storage,
-                              vi_off(mu, vi_array2d_bytes(l, dlf->nelems,
-                                                          dlf->width)));
-               continue;
-            }
-            vi_val_t v;
-            if (!vi_load_rec_leaf(l, slf, vi_off(mu, 0), &v)
-                || !vi_store_rec_leaf(l, dlf, vi_off(mu, 0), v))
-               return false;
-         }
-         return true;
+         const bool ok = vi_copy_rec_local(l, dloc, dpath, dlen, &tmp,
+                                           NULL, 0);
+         free(tmp.rec_leaves);
+         return ok;
       }
 
       // Record aggregate / constant record initializer
@@ -6214,6 +6288,24 @@ static bool vi_assign_record_expr(vi_lower_t *l, tree_t target_decl,
          bool ok = vi_copy_rec_local_to_sig(l, d_ids.items, d_ids.count,
                                             sloc, spath, slen);
          ACLEAR(d_ids);
+         return ok;
+      }
+      if (tree_kind(rhs_e) == T_FCALL) {
+         vi_local_t tmp;
+         if (!vi_call_rec_func(l, rhs_e, &tmp))
+            return false;
+         A(uint32_t) d_ids = AINIT;
+         for (uint32_t i = 0; i < l->ctx->n_sigs; i++) {
+            const vhdl_isig_t *s = &(l->ctx->sigs[i]);
+            if (s->decl == target_decl && s->path_len >= depth
+                && (depth == 0 || memcmp(s->field_path, path,
+                                         depth * sizeof(int)) == 0))
+               APUSH(d_ids, i);
+         }
+         bool ok = vi_copy_rec_local_to_sig(l, d_ids.items, d_ids.count,
+                                            &tmp, NULL, 0);
+         ACLEAR(d_ids);
+         free(tmp.rec_leaves);
          return ok;
       }
       if (vhdl_island_is_sig_root(rhs_e)) {
@@ -7187,7 +7279,14 @@ static bool vi_lower_stmt_inner(vi_lower_t *l, tree_t stmt)
    case T_RETURN:
       if (mir_is_null(l->scope->ret_bb))
          return false;
-      if (tree_has_value(stmt)) {
+      if (tree_has_value(stmt) && l->scope->ret_rec != NULL) {
+         int rpath[VHDL_ISIG_MAX_DEPTH];
+         if (!vi_assign_rec_local(l, l->scope->ret_rec, rpath, 0,
+                                  l->scope->ret_type, tree_value(stmt)))
+            return false;
+         l->scope->has_ret_val = true;
+      }
+      else if (tree_has_value(stmt)) {
          vi_val_t rv;
          if (!vi_lower_expr(l, tree_value(stmt), &rv))
             return false;
@@ -7611,7 +7710,8 @@ static bool vi_lower_stmt_inner(vi_lower_t *l, tree_t stmt)
                            .ret_left = l->scope->ret_left,
                            .ret_right = l->scope->ret_right,
                            .loop_next_bb = step_bb,
-                           .loop_exit_bb = exit_bb };
+                           .loop_exit_bb = exit_bb,
+                           .ret_rec = l->scope->ret_rec };
          vi_local_t loc = { .decl = loop_var, .storage = lvar };
          APUSH(ls.locals, loc);
          l->scope = &ls;
@@ -7650,13 +7750,14 @@ static bool vi_lower_stmt_inner(vi_lower_t *l, tree_t stmt)
                                        mir_build_load(mu, lvar), step));
          mir_build_jump(mu, hdr);
 
+         // A return in the body sets the result of the enclosing function
+         l->scope = ls.parent;
          l->scope->has_ret_val |= ls.has_ret_val;
          l->scope->ret_slot = ls.ret_slot;
          l->scope->ret_w = ls.ret_w;
          l->scope->ret_dir = ls.ret_dir;
          l->scope->ret_left = ls.ret_left;
          l->scope->ret_right = ls.ret_right;
-         l->scope = ls.parent;
          vi_scope_clear(&ls);
          mir_set_cursor(mu, exit_bb, MIR_APPEND);
          return true;
