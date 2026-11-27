@@ -35,6 +35,7 @@
 #define VHDL_ISLAND_MAX_ARRAY2D_BITS    1024u
 #define VHDL_ISLAND_MAX_SPARSE_RAM_BITS (1u << 19)
 #define VHDL_ISLAND_MAX_LOOP_ITERS  4096
+#define VHDL_ISLAND_PRUNE_KEEP_WRITES 16   // See vhdl_island_rebuild
 #define VHDL_ISLAND_MAX_CALL_DEPTH  6
 
 typedef enum {

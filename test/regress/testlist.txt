@@ -3381,3 +3381,4 @@ vhdl_island_fdefault1 shell
 vhdl_island_recfunc1 shell
 vhdl_island_unroll1 shell
 vhdl_island_genopen1 shell
+vhdl_island_prune1 shell

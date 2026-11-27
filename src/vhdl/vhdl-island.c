@@ -5229,9 +5229,14 @@ void vhdl_island_rebuild(vhdl_island_ctx_t *ctx)
    }
 
    // Prune unprofitable combinational-only islands with zero internal
-   // producer->consumer dataflow edges
+   // producer->consumer dataflow edges: running such an island costs input
+   // syncing and output commits on top of what the process did.  Keep one
+   // that writes many signals (a process assigning every field of record
+   // outputs on each run): the island commits only the outputs that
+   // change, where the process schedules a transaction for each of them.
    uint32_t *root_comb_cnt LOCAL = xcalloc_array(procs.count, sizeof(uint32_t));
    uint32_t *root_ff_cnt LOCAL = xcalloc_array(procs.count, sizeof(uint32_t));
+   uint32_t *root_writes LOCAL = xcalloc_array(procs.count, sizeof(uint32_t));
    bool *root_has_comb_edge LOCAL = xcalloc_array(procs.count, sizeof(bool));
    for (unsigned i = 0; i < procs.count; i++) {
       if (procs.items[i].rejected)
@@ -5241,6 +5246,7 @@ void vhdl_island_rebuild(vhdl_island_ctx_t *ctx)
          root_ff_cnt[r]++;
       else
          root_comb_cnt[r]++;
+      root_writes[r] += procs.items[i].n_writes;
    }
    for (unsigned i = 0; i < procs.count; i++) {
       const vhdl_iproc_t *p = &(procs.items[i]);
@@ -5264,7 +5270,8 @@ void vhdl_island_rebuild(vhdl_island_ctx_t *ctx)
          continue;
       uint32_t r = find_root(uf_parent, i);
       if (root_ff_cnt[r] == 0
-          && (root_comb_cnt[r] == 1 || !root_has_comb_edge[r])) {
+          && (root_comb_cnt[r] == 1 || !root_has_comb_edge[r])
+          && root_writes[r] < VHDL_ISLAND_PRUNE_KEEP_WRITES) {
          p->rejected = true;
          p->reason = "prune: comb-only island without internal dataflow";
 
