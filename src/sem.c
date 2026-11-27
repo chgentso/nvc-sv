@@ -5350,6 +5350,21 @@ static bool sem_check_port_actual(formal_map_t *formals, int nformals,
             if (tree_kind(value) == T_OPEN)
                sem_error(name, "output conversion for formal %s must not "
                          "have OPEN actual", istr(tree_ident(decl)));
+
+            // LRM 93 section 3.2.1.1: result of a conversion in an
+            // association list for an unconstrained formal cannot be an
+            // unconstrained array type
+            if (mode != PORT_INOUT && type_is_unconstrained(tree_type(name))
+                && type_is_unconstrained(tree_type(out_conv))
+                && (standard() < STD_08 || tree_kind(out_conv) != T_TYPE_CONV)) {
+               diag_t *d = diag_new(DIAG_ERROR, tree_loc(out_conv));
+               diag_printf(d, "result of conversion for unconstrained formal "
+                           "%pI must be a constrained array type",
+                           tree_ident(decl));
+               diag_lrm(d, STD_93, "3.2.1.1");
+               diag_emit(d);
+               return false;
+            }
          }
          else
             type = tree_type(name);
