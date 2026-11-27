@@ -1108,6 +1108,23 @@ static vlog_node_t vlog_fold_post_cb(vlog_node_t v, void *context)
       }
       // Fall-through
    case V_PARAM_ASSIGN:
+      if (vlog_has_value(v) && vlog_kind(vlog_value(v)) == V_CONCAT
+          && !vlog_has_value(vlog_value(v))) {
+         // Keep bare concatenations intact until instantiation so an
+         // unpacked array parameter override can interpret them as elements
+         vlog_node_t c = vlog_value(v);
+         const int nparams = vlog_params(c);
+         for (int i = 0; i < nparams; i++) {
+            vlog_node_t item = vlog_param(c, i);
+            if (get_fold_state(item, context) == FOLD_POSSIBLE) {
+               vlog_node_t folded = fold_const_expr(item, context);
+               if (folded != NULL)
+                  vlog_set_param(c, i, folded);
+            }
+         }
+         return v;
+      }
+      // Fall-through
    case V_DEFPARAM:
       return fold_const_value(v, context);
    case V_ENUM_NAME:

@@ -26368,16 +26368,16 @@ static vlog_node_t p_param_expression(ident_t name, int pos)
 
    BEGIN("param expression");
 
-   if (peek() == tTICK && peek_nth(2) == tLBRACE) {
+   if ((peek() == tTICK && peek_nth(2) == tLBRACE) || peek() == tLBRACE) {
       int array_depth = 0;
       vlog_node_t type = param_pattern_type(name, pos, &array_depth);
-      if (type != NULL) {
+      if (type != NULL && (peek() == tTICK || array_depth > 0)) {
          pattern_array_elems = array_depth;
          vlog_node_t v = p_assignment_pattern_expression(type);
          pattern_array_elems = 0;
          return v;
       }
-      else if (param_target == NULL)
+      else if (peek() == tTICK && param_target == NULL)
          return p_deferred_pattern_expression();
    }
 

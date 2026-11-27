@@ -69,6 +69,29 @@ static int decl_unpacked_depth(vlog_node_t d)
    return depth;
 }
 
+static vlog_node_t concat_to_array_pattern(vlog_node_t c, vlog_node_t elem_type,
+                                           int depth)
+{
+   vlog_node_t pat = vlog_new(V_PATTERN_EXPR);
+   vlog_set_loc(pat, vlog_loc(c));
+   if (depth <= 1 && elem_type != NULL)
+      vlog_set_type(pat, vlog_get_type(elem_type));
+
+   const int nparams = vlog_params(c);
+   for (int i = 0; i < nparams; i++) {
+      vlog_node_t p = vlog_param(c, i);
+      if (depth > 1 && vlog_kind(p) == V_CONCAT && !vlog_has_value(p))
+         p = concat_to_array_pattern(p, elem_type, depth - 1);
+
+      vlog_node_t item = vlog_new(V_PATTERN_ITEM);
+      vlog_set_loc(item, vlog_loc(p));
+      vlog_set_right(item, p);
+      vlog_add_param(pat, item);
+   }
+
+   return pat;
+}
+
 static vlog_node_t bind_parameter(vlog_node_t decl, int nth, vlog_node_t inst)
 {
    vlog_node_t value = NULL;
@@ -134,7 +157,12 @@ static vlog_node_t bind_parameter(vlog_node_t decl, int nth, vlog_node_t inst)
       }
    }
 
-   if (given && vlog_has_type(decl)
+   if (given && vlog_has_type(decl) && decl_unpacked_depth(decl) > 0
+       && vlog_kind(value) == V_CONCAT && !vlog_has_value(value)) {
+      value = concat_to_array_pattern(value, vlog_type(decl),
+                                      decl_unpacked_depth(decl));
+   }
+   else if (given && vlog_has_type(decl)
        && ((vlog_kind(value) == V_PATTERN_EXPR && !vlog_has_type(value))
            || vlog_kind(value) == V_COND_EXPR)) {
       value = vlog_copy(value, copy_all_pred, NULL);
