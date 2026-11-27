@@ -124,7 +124,10 @@ static vlog_node_t vlog_const_element(vlog_node_t v)
          if (!vlog_has_ref(v))
             return NULL;
 
-         vlog_node_t base = vlog_const_element(vlog_value(v));
+         vlog_node_t val = vlog_value(v);
+         vlog_node_t decl = vlog_param_pattern(val);
+         vlog_node_t base = decl != NULL ? vlog_value(decl)
+            : vlog_const_element(val);
          if (base == NULL || vlog_kind(base) != V_PATTERN_EXPR)
             return NULL;
 
@@ -1820,9 +1823,34 @@ bool vlog_is_const_arith(vlog_node_t v)
             }
             return nparams > 0;
          }
+      case V_SYSTF_BITS:
+         if (vlog_params(v) == 1) {
+            vlog_node_t arg = vlog_param(v, 0);
+            return is_data_type(arg) || vlog_is_const_arith(arg);
+         }
+         return false;
       default:
          return false;
       }
+   case V_BIT_SELECT:
+      {
+         if (!vlog_is_const_arith(vlog_value(v)))
+            return false;
+         const int nparams = vlog_params(v);
+         for (int i = 0; i < nparams; i++) {
+            if (!vlog_is_const_arith(vlog_param(v, i)))
+               return false;
+         }
+         return true;
+      }
+   case V_PART_SELECT:
+      return vlog_is_const_arith(vlog_value(v))
+         && vlog_is_const_arith(vlog_left(v))
+         && vlog_is_const_arith(vlog_right(v));
+   case V_MEMBER_REF:
+      return vlog_is_const_arith(vlog_value(v)) || vlog_is_const(v);
+   case V_CAST:
+      return vlog_is_const_arith(vlog_value(v));
    default:
       return vlog_is_const(v);
    }
