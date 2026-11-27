@@ -1733,9 +1733,10 @@ static bool is_pure_systf(vlog_node_t v)
    switch (vlog_subkind(v)) {
    case V_SYSTF_SIGNED:
    case V_SYSTF_UNSIGNED:
-   case V_SYSTF_CLOG2:
    case V_SYSTF_BITS:
       return true;
+   // Non-constant $clog2 lowers to a VPI syscall (clog2_tf) which cannot run
+   // inside an island function (constant $clog2 is already folded to V_NUMBER).
    default:
       {
          static const char *const pure_names[] = {
