@@ -3345,3 +3345,5 @@ vhdl_island_cache_ram1 normal,2008
 textio_noeol normal,2008
 opsym_assign1 normal,2008
 genpack_pos1 normal,2008
+alias_base1 shell
+conv_sigparam1 shell

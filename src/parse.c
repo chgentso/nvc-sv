@@ -2157,6 +2157,8 @@ static tree_t fcall_to_conv_func(tree_t value)
    tree_t decl = tree_ref(value);
    if (tree_ports(decl) != 1)
       return value;
+   else if (tree_class(tree_port(decl, 0)) != C_CONSTANT)
+      return value;
 
    tree_t p0 = tree_value(tree_param(value, 0));
 
