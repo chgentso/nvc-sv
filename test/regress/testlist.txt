@@ -3447,6 +3447,11 @@ vhdl_island_longproc1 shell
 vhdl_island_var1 shell
 vhdl_island_loop1 shell
 vhdl_island_comb_report2 shell
+vhdl_island_fdefault1 shell
+vhdl_island_recfunc1 shell
+vhdl_island_unroll1 shell
+vhdl_island_genopen1 shell
+vhdl_island_prune1 shell
 sv_unique_defer2 verilog,gold
 vhdl_report_order1 shell
 vhpi_rorder1    vhpi,gold,2008
