@@ -48,5 +48,6 @@ vpi_mem_bulk_t *vpi_mem_bulk_open(vpiHandle mem, int64_t *low, int64_t *high,
 bool vpi_mem_bulk_write(vpi_mem_bulk_t *b, int64_t addr, const char *word,
                         bool binary);
 void vpi_mem_bulk_close(vpi_mem_bulk_t *b);
+bool vpi_mem_is_assoc(vpiHandle mem);
 
 #endif  // _VPI_PRIV_H

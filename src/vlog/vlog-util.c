@@ -1914,10 +1914,17 @@ vlog_node_t vlog_longest_static_prefix(vlog_node_t v)
          return v;
       }
    case V_NUMBER:
+   case V_STRING:
+   case V_REAL:
    case V_BINARY:
    case V_UNARY:
    case V_COND_EXPR:
-      return NULL;
+   case V_CONCAT:
+   case V_CAST:
+   case V_USER_FCALL:
+   case V_SYS_FCALL:
+   case V_METHOD_CALL:
+      return NULL;   // A value which is not part of any variable or net
    default:
       fatal_at(vlog_loc(v), "cannot calculate longest static prefix");
    }

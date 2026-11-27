@@ -4770,6 +4770,21 @@ static bool type_has_const_size(vlog_node_t t)
    }
 }
 
+static bool is_type_query(ident_t id)
+{
+   static const char *const names[] = {
+      "$bits", "$size", "$left", "$right", "$low", "$high", "$increment",
+      "$dimensions", "$unpacked_dimensions"
+   };
+
+   for (int i = 0; i < ARRAY_LEN(names); i++) {
+      if (id == ident_new(names[i]))
+         return true;
+   }
+
+   return false;
+}
+
 static vlog_node_t p_system_tf_call(vlog_kind_t kind)
 {
    // system_tf_identifier [ ( list_of_arguments ) ]
@@ -4909,6 +4924,43 @@ static vlog_node_t p_system_tf_call(vlog_kind_t kind)
          vlog_add_param(v, ref);
 
          consume(tRPAREN);
+         vlog_set_loc(v, CURRENT_LOC);
+         return v;
+      }
+
+      if (is_type_query(id) && peek_nth(2) != tTICK
+          && (is_simple_type_token(peek()) || scan(tSTRUCT, tUNION, tENUM))) {
+         // A built-in or anonymous data type as the argument of $bits or
+         // an array query function (IEEE 1800-2017 20.6.2, 20.7)
+         vlog_node_t dt = p_data_type();
+         consume(tRPAREN);
+
+         if (subk == V_SYSTF_BITS && vlog_kind(dt) == V_DATA_TYPE) {
+            switch (vlog_subkind(dt)) {
+            case DT_REAL:
+            case DT_REALTIME:
+               return foreach_number(64, &state.last_loc);
+            case DT_SHORTREAL:
+               return foreach_number(32, &state.last_loc);
+            default:
+               break;
+            }
+         }
+
+         if (subk == V_SYSTF_BITS && type_has_const_size(dt))
+            return foreach_number(vlog_size(dt), &state.last_loc);
+
+         vlog_node_t decl = vlog_new(V_VAR_DECL);
+         vlog_set_ident(decl, ident_uniq("typearg"));
+         vlog_set_type(decl, dt);
+         vlog_set_loc(decl, &state.last_loc);
+
+         vlog_node_t ref = vlog_new(V_REF);
+         vlog_set_ident(ref, vlog_ident(decl));
+         vlog_set_ref(ref, decl);
+         vlog_set_loc(ref, &state.last_loc);
+         vlog_add_param(v, ref);
+
          vlog_set_loc(v, CURRENT_LOC);
          return v;
       }
@@ -11081,6 +11133,15 @@ static vlog_node_t p_call_result_chain(vlog_node_t head)
             consume(tRSQUARE);
             vlog_set_loc(ps, CURRENT_LOC);
             head = ps;
+            continue;
+         }
+
+         if (vlog_kind(head) == V_BIT_SELECT) {
+            // Further dimensions are indices of the same select as for
+            // a variable
+            vlog_add_param(head, expr);
+            consume(tRSQUARE);
+            vlog_set_loc(head, CURRENT_LOC);
             continue;
          }
 
@@ -25161,6 +25222,77 @@ static vlog_node_t p_enable_gate_instance(vlog_gate_kind_t kind,
    return v;
 }
 
+static void p_cmos_switch_instance(vlog_node_t mod, vlog_node_t delay)
+{
+   // [ name_of_instance ] ( output_terminal , input_terminal ,
+   //     ncontrol_terminal , pcontrol_terminal )
+   //
+   // Modelled as an nmos and a pmos switch driving the same output
+   // (IEEE 1364-2005 section 7.8)
+
+   BEGIN("cmos switch instance");
+
+   vlog_node_t st = vlog_new(V_STRENGTH);
+   vlog_set_subkind(st, ST_STRONG);
+
+   vlog_node_t n = vlog_new(V_GATE_INST);
+   vlog_set_subkind(n, V_GATE_BUFIF1);
+   vlog_add_param(n, st);
+
+   p_gate_instance_name(n);
+
+   if (vlog_params(n) > 1)
+      parse_error(vlog_loc(vlog_param(n, 1)), "sorry, arrays of cmos "
+                  "switches are not supported");
+
+   consume(tLPAREN);
+
+   vlog_symtab_set_implicit(symtab, implicit_kind);
+
+   vlog_node_t target = p_net_lvalue();
+
+   consume(tCOMMA);
+
+   vlog_node_t input = p_expression();
+
+   consume(tCOMMA);
+
+   vlog_node_t nctl = p_expression();
+
+   consume(tCOMMA);
+
+   vlog_node_t pctl = p_expression();
+
+   vlog_symtab_set_implicit(symtab, V_NET_NONE);
+
+   consume(tRPAREN);
+
+   vlog_node_t p = vlog_new(V_GATE_INST);
+   vlog_set_subkind(p, V_GATE_BUFIF0);
+   vlog_set_ident(p, ident_prefix(vlog_ident(n), ident_new("pmos"), '$'));
+   vlog_add_param(p, st);
+
+   vlog_set_target(n, target);
+   vlog_add_param(n, input);
+   vlog_add_param(n, nctl);
+
+   // Each switch has its own copy of the terminals
+   vlog_set_target(p, vlog_copy(target, modport_expr_pred, NULL));
+   vlog_add_param(p, vlog_copy(input, modport_expr_pred, NULL));
+   vlog_add_param(p, pctl);
+
+   vlog_set_loc(n, CURRENT_LOC);
+   vlog_set_loc(p, CURRENT_LOC);
+
+   if (delay != NULL) {
+      vlog_set_delay(n, delay);
+      vlog_set_delay(p, delay);
+   }
+
+   vlog_add_stmt(mod, n);
+   vlog_add_stmt(mod, p);
+}
+
 static vlog_node_t p_pass_switch_instance(vlog_gate_kind_t kind)
 {
    // [ name_of_instance ] ( inout_terminal , inout_terminal )
@@ -25249,9 +25381,21 @@ static void p_gate_instantiation(vlog_node_t mod)
    token_t token = one_of(tPULLDOWN, tPULLUP, tAND, tNAND, tOR, tNOR,
                           tXOR, tXNOR, tNOT, tBUF, tBUFIF0, tBUFIF1,
                           tNOTIF0, tNOTIF1, tTRAN, tRTRAN, tTRANIF0, tTRANIF1,
-                          tRTRANIF0, tRTRANIF1);
+                          tRTRANIF0, tRTRANIF1, tCMOS);
 
    switch (token) {
+   case tCMOS:
+      {
+         vlog_node_t delay = NULL;
+         if (peek() == tHASH)
+            delay = p_delay3();
+
+         do {
+            p_cmos_switch_instance(mod, delay);
+         } while (optional(tCOMMA));
+      }
+      break;
+
    case tPULLDOWN:
       {
          vlog_node_t st;
@@ -25713,6 +25857,63 @@ static vlog_node_t p_path_declaration(void)
    return NULL;
 }
 
+static v_event_kind_t p_edge_control_specifier(void)
+{
+   // edge [ edge_descriptor { , edge_descriptor } ]
+   //
+   // edge_descriptor ::= 01 | 10 | z_or_x zero_or_one | zero_or_one z_or_x
+   //
+   // The event is a positive edge if every transition goes towards one
+   // and a negative edge if every transition goes towards zero
+
+   BEGIN("edge control specifier");
+
+   consume(tLSQUARE);
+
+   bool rise = false, fall = false;
+   do {
+      LOCAL_TEXT_BUF tb = tb_new();
+      while (not_at_token(tCOMMA, tRSQUARE, tEOF)) {
+         switch (peek()) {
+         case tUNSNUM:
+            consume(tUNSNUM);
+            tb_cat(tb, state.last_lval.str);
+            free(state.last_lval.str);
+            break;
+         case tID:
+            tb_istr(tb, p_identifier());
+            break;
+         default:
+            one_of(tUNSNUM, tID);
+            drop_tokens_until(&state, tRSQUARE);
+            return V_EVENT_EDGE;
+         }
+      }
+
+      const char *d = tb_get(tb);
+      const char from = tolower((unsigned char)d[0]);
+      const char to = from ? tolower((unsigned char)d[1]) : 0;
+      if (tb_len(tb) != 2 || from == to || !strchr("01xz", from)
+          || !strchr("01xz", to) || (from != '0' && from != '1'
+                                     && to != '0' && to != '1'))
+         parse_error(&state.last_loc, "'%s' is not a valid edge descriptor",
+                     d);
+      else if (to == '1' || from == '0')
+         rise = true;
+      else
+         fall = true;
+   } while (optional(tCOMMA));
+
+   consume(tRSQUARE);
+
+   if (rise && !fall)
+      return V_EVENT_POSEDGE;
+   else if (fall && !rise)
+      return V_EVENT_NEGEDGE;
+   else
+      return V_EVENT_EDGE;
+}
+
 static vlog_node_t p_timing_check_event_control(void)
 {
    // posedge | negedge | edge | edge_control_specifier
@@ -25725,8 +25926,12 @@ static vlog_node_t p_timing_check_event_control(void)
       vlog_set_subkind(v, V_EVENT_POSEDGE);
    else if (optional(tNEGEDGE))
       vlog_set_subkind(v, V_EVENT_NEGEDGE);
-   else if (optional(tEDGE))
-      vlog_set_subkind(v, V_EVENT_EDGE);
+   else if (optional(tEDGE)) {
+      if (peek() == tLSQUARE)
+         vlog_set_subkind(v, p_edge_control_specifier());
+      else
+         vlog_set_subkind(v, V_EVENT_EDGE);
+   }
    else
       vlog_set_subkind(v, V_EVENT_LEVEL);
 
@@ -25974,19 +26179,98 @@ static vlog_node_t p_width_timing_check(void)
 
    (void)p_mintypmax_expression();
 
-   consume(tCOMMA);
-
-   (void)p_constant_expression();
-
+   // The threshold may be omitted when there is no notifier
    if (optional(tCOMMA)) {
-      if (peek() == tID)
-         p_identifier();
+      (void)p_constant_expression();
+
+      if (optional(tCOMMA)) {
+         if (peek() == tID)
+            p_identifier();
+      }
    }
 
    consume(tRPAREN);
    consume(tSEMI);
 
    return NULL;
+}
+
+static vlog_node_t p_skew_or_nochange_timing_check(void)
+{
+   // $skew ( reference_event , data_event , timing_check_limit
+   //   [ , [ notifier ] ] ) ;
+   //
+   // $timeskew ( reference_event , data_event , timing_check_limit
+   //   [ , [ notifier ] [ , [ event_based_flag ]
+   //   [ , [ remain_active_flag ] ] ] ] ) ;
+   //
+   // $fullskew ( reference_event , data_event , timing_check_limit ,
+   //   timing_check_limit [ , [ notifier ] [ , [ event_based_flag ]
+   //   [ , [ remain_active_flag ] ] ] ] ) ;
+   //
+   // $nochange ( reference_event , data_event , start_edge_offset ,
+   //   end_edge_offset [ , [ notifier ] ] ) ;
+   //
+   // These checks are parsed but not modelled, as $width and $period
+
+   BEGIN("skew/nochange timing check");
+
+   int nlimits, nflags;
+   switch (one_of(tDLRSKEW, tDLRTIMESKEW, tDLRFULLSKEW, tDLRNOCHANGE)) {
+   case tDLRSKEW:     nlimits = 1; nflags = 0; break;
+   case tDLRTIMESKEW: nlimits = 1; nflags = 2; break;
+   case tDLRFULLSKEW: nlimits = 2; nflags = 2; break;
+   default:           nlimits = 2; nflags = 0; break;
+   }
+
+   consume(tLPAREN);
+
+   (void)p_timing_check_event();
+
+   consume(tCOMMA);
+
+   (void)p_timing_check_event();
+
+   for (int i = 0; i < nlimits; i++) {
+      consume(tCOMMA);
+      (void)p_mintypmax_expression();
+   }
+
+   if (optional(tCOMMA)) {
+      if (peek() == tID)
+         p_identifier();   // Notifier
+
+      for (int i = 0; i < nflags && optional(tCOMMA); i++) {
+         if (not_at_token(tCOMMA, tRPAREN))
+            (void)p_constant_expression();
+      }
+   }
+
+   consume(tRPAREN);
+   consume(tSEMI);
+
+   return NULL;
+}
+
+static void p_showcancelled_declaration(void)
+{
+   // showcancelled list_of_path_outputs ;
+   //   | noshowcancelled list_of_path_outputs ;
+   //
+   // pulsestyle_onevent list_of_path_outputs ;
+   //   | pulsestyle_ondetect list_of_path_outputs ;
+   //
+   // Path delays are not modelled so these only affect the parse
+
+   BEGIN("showcancelled or pulsestyle declaration");
+
+   one_of(tSHOWCANCEL, tNOSHOWCANCEL, tPULSEONEVENT, tPULSEONDETECT);
+
+   do {
+      (void)p_specify_terminal_descriptor();
+   } while (optional(tCOMMA));
+
+   consume(tSEMI);
 }
 
 static vlog_node_t p_delayed_data_or_reference(void)
@@ -26108,6 +26392,11 @@ static vlog_node_t p_system_timing_check(void)
    case tDLRSETUPHOLD:
    case tDLRRECREM:
       return p_setuphold_or_recrem_timing_check();
+   case tDLRSKEW:
+   case tDLRTIMESKEW:
+   case tDLRFULLSKEW:
+   case tDLRNOCHANGE:
+      return p_skew_or_nochange_timing_check();
    default:
       should_not_reach_here();
    }
@@ -26218,6 +26507,10 @@ static void p_specify_item(vlog_node_t parent)
    case tDLRRECREM:
    case tDLRWIDTH:
    case tDLRPERIOD:
+   case tDLRSKEW:
+   case tDLRTIMESKEW:
+   case tDLRFULLSKEW:
+   case tDLRNOCHANGE:
       {
          vlog_node_t tcheck = p_system_timing_check();
          // TODO: Remove once all timing checks are supported.
@@ -26225,10 +26518,18 @@ static void p_specify_item(vlog_node_t parent)
             vlog_add_stmt(parent, tcheck);
       }
       break;
+   case tSHOWCANCEL:
+   case tNOSHOWCANCEL:
+   case tPULSEONEVENT:
+   case tPULSEONDETECT:
+      p_showcancelled_declaration();
+      break;
    default:
       one_of(tSPECPARAM, tLPAREN, tIF, tIFNONE, tDLRSETUP, tDLRHOLD,
              tDLRRECOVERY, tDLRREMOVAL, tDLRSETUPHOLD, tDLRRECREM,
-             tDLRWIDTH, tDLRPERIOD);
+             tDLRWIDTH, tDLRPERIOD, tDLRSKEW, tDLRTIMESKEW, tDLRFULLSKEW,
+             tDLRNOCHANGE, tSHOWCANCEL, tNOSHOWCANCEL, tPULSEONEVENT,
+             tPULSEONDETECT);
    }
 }
 
@@ -27207,6 +27508,7 @@ static void p_module_or_generate_item_1(vlog_node_t mod)
    case tRTRAN:
    case tRTRANIF0:
    case tRTRANIF1:
+   case tCMOS:
       p_gate_instantiation(mod);
       break;
    case tDEFPARAM:
@@ -27358,6 +27660,7 @@ static void p_non_port_module_item(vlog_node_t mod)
    case tRTRAN:
    case tRTRANIF0:
    case tRTRANIF1:
+   case tCMOS:
    case tTYPEDEF:
    case tNETTYPE:
    case tENUM:

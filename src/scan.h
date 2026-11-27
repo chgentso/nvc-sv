@@ -672,5 +672,14 @@ void reset_sdf_parser(void);
 #define tENDCLOCKING   712
 #define tWILDEQ        713
 #define tWILDNEQ       714
+#define tDLRSKEW       715
+#define tDLRTIMESKEW   716
+#define tDLRFULLSKEW   717
+#define tDLRNOCHANGE   718
+#define tSHOWCANCEL    719
+#define tNOSHOWCANCEL  720
+#define tPULSEONEVENT  721
+#define tPULSEONDETECT 722
+#define tCMOS          723
 
 #endif  // _SCAN_H

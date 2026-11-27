@@ -5886,9 +5886,22 @@ static vlog_cmp_t vlog_member_compare(vlog_gen_t *g, vlog_node_t v,
              && sub != NULL && (vlog_kind(sub) == V_STRUCT_DECL
                                 || vlog_kind(sub) == V_UNION_DECL))
             return vlog_struct_compare(g, v, sub, lf, rf, casecmp);
+         else if (sub != NULL && vlog_kind(sub) == V_DATA_TYPE
+                  && vlog_subkind(sub) == DT_STRING) {
+            // Strings are equal when they have the same characters
+            mir_type_t t_offset = mir_offset_type(g->mu);
+            mir_value_t zero = mir_const(g->mu, t_offset, 0);
+            mir_value_t args[] = { lf, rf, zero };
+            mir_value_t cmp =
+               vlog_str_call(g, "__sv_str_cmp", t_offset, args, 3);
+            return (vlog_cmp_t){
+               .diff = mir_build_cmp(g->mu, MIR_CMP_NEQ, cmp, zero),
+               .unknown = mir_const(g->mu, t_bool, 0),
+            };
+         }
 
          fatal_at(vlog_loc(v), "sorry, only members of integral, real, "
-                  "and structure types can be compared");
+                  "string and structure types can be compared");
       }
    }
 }
@@ -37044,8 +37057,17 @@ static void vlog_lower_gate_inst(vlog_gen_t *g, vlog_node_t v)
 
    vlog_lower_driver(g, vlog_target(v));
 
-   if (vlog_has_delay(v))
-      vlog_lower_initial_x(g, vlog_target(v));
+   // A gate with a delay outputs x until its first update takes effect.
+   // This is driven when the gate first runs rather than during reset
+   // where the driving value of a net with other drivers cannot be
+   // resolved yet
+   mir_value_t first_var = MIR_NULL_VALUE;
+   if (vlog_has_delay(v)) {
+      mir_type_t t_bool = mir_bool_type(g->mu);
+      first_var = mir_add_var(g->mu, t_bool, MIR_NULL_STAMP,
+                              ident_new("first"), 0);
+      mir_build_store(g->mu, first_var, mir_const(g->mu, t_bool, 1));
+   }
 
    mir_type_t t_logic = mir_vec4_type(g->mu, 1, false);
 
@@ -37062,6 +37084,21 @@ static void vlog_lower_gate_inst(vlog_gen_t *g, vlog_node_t v)
    mir_build_return(g->mu, MIR_NULL_VALUE);
 
    mir_set_cursor(g->mu, start_bb, MIR_APPEND);
+
+   if (!mir_is_null(first_var)) {
+      mir_block_t init_bb = mir_add_block(g->mu);
+      mir_block_t eval_bb = mir_add_block(g->mu);
+      mir_build_cond(g->mu, mir_build_load(g->mu, first_var), init_bb,
+                     eval_bb);
+
+      mir_set_cursor(g->mu, init_bb, MIR_APPEND);
+      vlog_lower_initial_x(g, vlog_target(v));
+      mir_build_store(g->mu, first_var,
+                      mir_const(g->mu, mir_bool_type(g->mu), 0));
+      mir_build_jump(g->mu, eval_bb);
+
+      mir_set_cursor(g->mu, eval_bb, MIR_APPEND);
+   }
 
    bool negate = false;
    uint8_t strength = ST_STRONG;
@@ -40481,6 +40518,20 @@ void vlog_lower_instance(mir_context_t *mc, vlog_node_t body, ident_t parent,
          hash_put(alias_rep, rb, ra);
    }
 
+   // The result and the static variables of a static subroutine are kept
+   // in the instance and must exist before the initial value of a
+   // variable declared earlier calls the subroutine
+   for (int i = 0, hops; i < vlog_ndecls; i++) {
+      vlog_node_t d = vlog_decl(body, i);
+      if (vlog_kind(d) == V_FUNC_DECL)
+         vlog_lower_func_ret_storage(&g, d, hash_get(map, d) ?: trans);
+      else if (vlog_kind(d) == V_VAR_DECL && !vlog_has_value(d)
+               && (vlog_flags(d) & VLOG_F_SIGNAL_STATIC)
+               && mir_is_null(mir_search_object(mu, d, &hops)))
+         vlog_lower_var_decl_ex(&g, d, hash_get(map, d), SIG_F_INIT_EVENT,
+                                !(vlog_flags(body) & VLOG_F_INTERFACE));
+   }
+
    for (int i = 0, hops; i < vlog_ndecls; i++) {
       vlog_node_t d = vlog_decl(body, i);
 
@@ -40539,7 +40590,6 @@ void vlog_lower_instance(mir_context_t *mc, vlog_node_t body, ident_t parent,
       case V_LOCALPARAM:
          break;  // Always inlined for now
       case V_FUNC_DECL:
-         vlog_lower_func_ret_storage(&g, d, hash_get(map, d) ?: trans);
          mir_defer(mc, ident_prefix(vlog_ident2(d), vlog_ident(d), '.'), qual,
                    MIR_UNIT_FUNCTION, vlog_lower_func_decl, vlog_to_object(d));
          break;

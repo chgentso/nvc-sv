@@ -903,6 +903,8 @@ PROTECT           ?i:protect
 <VLOG>"rnmos"            { return tBUFIF1; }
 <VLOG>"pmos"             { return tBUFIF0; }
 <VLOG>"rpmos"            { return tBUFIF0; }
+<VLOG>"cmos"             { return tCMOS; }
+<VLOG>"rcmos"            { return tCMOS; }
 <VLOG>"notif0"           { return tNOTIF0; }
 <VLOG>"notif1"           { return tNOTIF1; }
 <VLOG>"tran"             { return tTRAN; }
@@ -965,6 +967,14 @@ PROTECT           ?i:protect
 <VLOG>"$recrem"          { return tDLRRECREM; }
 <VLOG>"$width"           { return tDLRWIDTH; }
 <VLOG>"$period"          { return tDLRPERIOD; }
+<VLOG>"$skew"            { return tDLRSKEW; }
+<VLOG>"$timeskew"        { return tDLRTIMESKEW; }
+<VLOG>"$fullskew"        { return tDLRFULLSKEW; }
+<VLOG>"$nochange"        { return tDLRNOCHANGE; }
+<VLOG>"showcancelled"    { return KEYWORD_2001(tSHOWCANCEL); }
+<VLOG>"noshowcancelled"  { return KEYWORD_2001(tNOSHOWCANCEL); }
+<VLOG>"pulsestyle_onevent" { return KEYWORD_2001(tPULSEONEVENT); }
+<VLOG>"pulsestyle_ondetect" { return KEYWORD_2001(tPULSEONDETECT); }
 <VLOG>"event"            { return tEVENT; }
 <VLOG>"genvar"           { return KEYWORD_2001(tGENVAR); }
 <VLOG>"assert"           { return KEYWORD_2005(tASSERT); }

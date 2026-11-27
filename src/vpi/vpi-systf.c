@@ -2138,7 +2138,17 @@ static PLI_INT32 readmem_tf(PLI_BYTE8 *userdata)
    };
 
    r.bulk = vpi_mem_bulk_open(mem_arg, &r.low, &r.high, &r.width);
-   if (r.bulk == NULL) {
+   if (r.bulk == NULL && vpi_mem_is_assoc(mem_arg)) {
+      jit_msg(NULL, DIAG_ERROR, "sorry, %s into an associative array with "
+              "this index or element type is not supported",
+              r.binary ? "$readmemb" : "$readmemh");
+      file_close(fh);
+      vpi_release_handle(mem_arg);
+      vpi_release_handle(argv);
+      vpi_release_handle(callh);
+      return 0;
+   }
+   else if (r.bulk == NULL) {
       const int64_t left = readmem_range_end(mem_arg, vpiLeftRange);
       const int64_t right = readmem_range_end(mem_arg, vpiRightRange);
       r.low = MIN(left, right);

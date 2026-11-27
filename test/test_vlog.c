@@ -217,11 +217,12 @@ START_TEST(test_ports3)
 
    const error_t expect[] = {
       { 22, "inconsistent dimensions for 'o'" },
+      { 49, "inconsistent dimensions for 'o'" },
       { -1, NULL }
    };
    expect_errors(expect);
 
-   for (int i = 0; i < 3; i++) {
+   for (int i = 0; i < 5; i++) {
       vlog_node_t m = do_parse_check(V_MODULE);
       vlog_fold(m, get_mir(), get_jit());
    }

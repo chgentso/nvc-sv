@@ -3466,3 +3466,11 @@ vlog_island_runs1 verilog,gold
 vhdl_report_order2 shell
 vlog_nexus_index1 verilog,gold
 vlog_replicate_wide1 verilog,gold
+svreadmemassoc1 verilog,gold
+specify9        verilog,fail,gold
+vlog_callsel1 verilog,gold
+svtypequery1 verilog,gold
+vlog_cmos1 verilog,gold
+svstructcmp3 verilog,gold
+svstaticinit3 verilog,gold
+svgatedelay2 verilog,gold
