@@ -184,6 +184,9 @@ nvc --std=2008 --work=w_a -a var1.vhd
 nvc --std=2008 --work=w_a --rtl-islands=hier --2state=islands -e var_tb
 nvc --std=2008 --work=w_a -r var_tb > a.log 2>&1
 
+# Debug builds print the size of the code compiled so far, which
+# depends on how far the background compilation got
+sed -i '/JIT code footprint/d' *.log
 for m in b bnf b0 bchk s a; do
     diff -u off.log $m.log
 done

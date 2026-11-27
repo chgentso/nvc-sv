@@ -157,6 +157,9 @@ nvc --std=2008 --work=w_a -r arr2d_tb 2>&1 | sort > a.log
 
 cat a_dump.log
 test $(wc -l < off.log) -ge 16
+# Debug builds print the size of the code compiled so far, which
+# depends on how far the background compilation got
+sed -i '/JIT code footprint/d' *.log
 diff -u off.log b.log
 diff -u off.log a.log
 

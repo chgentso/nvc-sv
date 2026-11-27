@@ -143,6 +143,9 @@ NVC_ISLAND_SPEC=1 NVC_DUMP_ISLANDS=1 nvc --std=2008 --work=w_s \
 grep -q 'SR_TB.DUT island=0 procs=9 mode=B a_variant=yes' s_dump.log
 NVC_ISLAND_SPEC_FORCE=A nvc --std=2008 --work=w_s -r sr_tb > s.log 2>&1
 
+# Debug builds print the size of the code compiled so far, which
+# depends on how far the background compilation got
+sed -i '/JIT code footprint/d' *.log
 for m in b bnf b0 bchk s; do
     diff -u off.log $m.log
 done
