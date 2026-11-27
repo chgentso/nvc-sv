@@ -330,8 +330,10 @@ struct _rt_island_mgr {
    bool                    spec_on;      // Speculative Mode A switching
    uint64_t                spec_tick;    // Delta cycles seen
    uint64_t                spec_next;    // Tick of the next promotion sweep
+   bool                    spec_trace;   // NVC_ISLAND_SPEC_STATS=3
    uint32_t                spec_n_a;     // Islands in Mode A now
    uint32_t                spec_timeline[40];   // spec_n_a at tick 2^k
+   uint32_t                spec_held_timeline[40];   // Of them holding
    uint32_t                n_spec_timeline;
 };
 
@@ -1016,6 +1018,16 @@ static void island_refresh_ext_out_descs(rt_island_t *isl)
          ed->cur    = os->sig->shared.data + (size_t)os->sig_offset * elem_sz;
          ed->nbytes = os->width * os->nelems * os->elem_size;
       }
+      else if ((os->flags & (RT_ISIG_VHDL | RT_ISIG_TWO_STATE
+                             | RT_ISIG_STD_LOGIC9 | RT_ISIG_SOLE_OWNER
+                             | RT_ISIG_PRUNED))
+               == (RT_ISIG_VHDL | RT_ISIG_TWO_STATE | RT_ISIG_SOLE_OWNER)
+               && os->nwords * os->nelems == 1
+               && isl->mgr->fast && os->sig != NULL
+               && !(os->sig->shared.flags & SIG_F_PACKED)) {
+         // The static part of island_out_memo_ok holds
+         ed->word = (const uint64_t *)(isl->state + os->a_off);
+      }
    }
    isl->n_ext_out_descs = isl->n_ext_out_sigs;
 }
@@ -1544,6 +1556,7 @@ void *rt_island_begin(rt_model_t *m, rt_island_mgr_t **mgr_p,
    isl->isl_id = isl->mgr->islands.count;
    isl->eval_handle = eval_handle;
    isl->inst_ctx = inst_ctx;
+   isl->reset_eval_handle = JIT_HANDLE_INVALID;
    isl->state_bytes = RT_ISLAND_STRIDE(state_bytes);
    isl->nsigs = nsigs;
    isl->ndomains = ndomains;
@@ -1586,6 +1599,15 @@ _Static_assert(offsetof(rt_island_sparse_log_t, isl_ptr) == 16, "sparse log isl_
 _Static_assert(offsetof(rt_island_sparse_log_t, entries) == 32, "sparse log entries");
 _Static_assert(offsetof(rt_island_sparse_log_t, data) == 288, "sparse log data");
 _Static_assert(sizeof(rt_island_sparse_entry_t) == 16, "sparse entry size");
+
+void rt_island_set_reset_comb(void *handle, jit_handle_t reset_handle,
+                              void *reset_ctx, bool skip_reset)
+{
+   rt_island_t *isl = handle;
+   isl->reset_eval_handle = reset_handle;
+   isl->reset_eval_ctx = reset_ctx;
+   isl->skip_sv_reset = skip_reset;
+}
 
 void rt_island_set_sparse(void *handle, uint32_t sparse_log_off,
                           uint32_t total_state_bytes)
@@ -1812,53 +1834,83 @@ static bool island_spec_force_a(void)
 }
 
 void rt_island_set_variant_a(void *handle, jit_handle_t eval_handle,
-                             uint32_t state_bytes, uint32_t hdr_bytes)
+                             jit_handle_t eval_handle_h,
+                             uint32_t state_bytes, uint32_t hdr_bytes,
+                             uint32_t sparse_log_off, uint32_t total_bytes)
 {
    rt_island_t *isl = handle;
    assert(isl->spec == NULL);
    assert(hdr_bytes <= state_bytes);
+   assert((sparse_log_off == 0) == (isl->sparse_log_off == 0));
 
    rt_island_spec_t *sp = xcalloc(sizeof(rt_island_spec_t));
    sp->eval_handle = eval_handle;
+   sp->eval_handle_h = eval_handle_h;
    sp->state_bytes = state_bytes;
    sp->stride      = RT_ISLAND_STRIDE(state_bytes);
    sp->hdr_bytes   = hdr_bytes;
+   sp->sparse_log_off = sparse_log_off;
+   sp->sparse_log_off_b = isl->sparse_log_off;
+   sp->total_bytes = sparse_log_off > 0 ? total_bytes : 0;
+   assert(sparse_log_off == 0
+          || (sparse_log_off >= isl->total_state_bytes
+              && total_bytes >= sparse_log_off
+              + sizeof(rt_island_sparse_log_t)));
    if (isl->nsigs > 0) {
       sp->a_off   = xcalloc_array(isl->nsigs, sizeof(uint32_t));
       sp->a_flags = xcalloc_array(isl->nsigs, sizeof(uint32_t));
       sp->b_bytes = xcalloc_array(isl->nsigs, sizeof(uint32_t));
+      sp->x_off   = xcalloc_array(isl->nsigs, sizeof(uint32_t));
    }
    if (isl->ndomains > 0) {
       sp->ff_handles = xmalloc_array(isl->ndomains, sizeof(jit_handle_t));
+      sp->ff_handles_h = xmalloc_array(isl->ndomains, sizeof(jit_handle_t));
       for (uint32_t d = 0; d < isl->ndomains; d++)
-         sp->ff_handles[d] = JIT_HANDLE_INVALID;
+         sp->ff_handles[d] = sp->ff_handles_h[d] = JIT_HANDLE_INVALID;
    }
    isl->spec = sp;
 }
 
 void rt_island_bind_sig_a(void *handle, uint32_t idx, uint32_t a_off,
-                          uint32_t a_flags, uint32_t b_bytes)
+                          uint32_t a_flags, uint32_t b_bytes, uint32_t x_off)
 {
    rt_island_t *isl = handle;
    rt_island_spec_t *sp = isl->spec;
    assert(sp != NULL && idx < isl->nsigs);
-   assert(!(isl->sigs[idx].flags & RT_ISIG_SPARSE_RAM));
    sp->a_off[idx] = a_off;
    sp->a_flags[idx] = a_flags;
    sp->b_bytes[idx] = b_bytes;
-   if (a_flags & RT_ISIG_TWO_STATE)
-      assert(a_off + isl->sigs[idx].nwords * isl->sigs[idx].nelems * 8u
-             <= sp->state_bytes);
+   sp->x_off[idx] = x_off;
+   assert(RT_ISLAND_SPEC_HELD_OFF(sp->hdr_bytes) + isl->nsigs <= sp->state_bytes);
+   if (isl->sigs[idx].flags & RT_ISIG_SPARSE_RAM) {
+      // After both halves, one copy
+      assert(a_off >= sp->sparse_log_off + sizeof(rt_island_sparse_log_t));
+      assert(a_off + b_bytes <= sp->total_bytes);
+      assert(!(a_flags & RT_ISIG_TWO_STATE)
+             || (x_off + b_bytes <= sp->total_bytes
+                 && (a_flags & RT_ISIG_SPEC_ROWF)));
+   }
+   else if (a_flags & RT_ISIG_TWO_STATE) {
+      const rt_island_sig_t *s = &(isl->sigs[idx]);
+      uint32_t end = a_off + s->nwords * s->nelems * 8u;
+      if (a_flags & RT_ISIG_SPEC_ROWF)
+         end += RT_ISLAND_SPEC_ROWF_BYTES(s->nelems);
+      assert(end <= sp->state_bytes);
+      assert(x_off >= end && x_off + b_bytes <= sp->state_bytes);
+      assert(b_bytes == s->width * s->nelems);
+      (void)end;
+   }
    else
       assert(a_off + b_bytes <= sp->state_bytes);
 }
 
 void rt_island_add_domain_a(void *handle, uint32_t dom_idx,
-                            jit_handle_t ff_handle)
+                            jit_handle_t ff_handle, jit_handle_t ff_handle_h)
 {
    rt_island_t *isl = handle;
    assert(isl->spec != NULL && dom_idx < isl->ndomains);
    isl->spec->ff_handles[dom_idx] = ff_handle;
+   isl->spec->ff_handles_h[dom_idx] = ff_handle_h;
 }
 
 // A signal that is neither an input nor written by the island, such as one
@@ -1951,7 +2003,7 @@ void rt_island_spec_unpack(const rt_island_t *isl, const uint8_t *a_state,
 static void island_spec_setup(rt_island_t *isl)
 {
    rt_island_spec_t *sp = isl->spec;
-   if (sp == NULL || !island_spec_force_a())
+   if (sp == NULL || !island_spec_force_a() || sp->sparse_log_off > 0)
       return;
 
    // NVC_ISLAND_SPEC_FORCE=A (test hook): every call converts the state to
@@ -1970,9 +2022,12 @@ static void island_spec_free(rt_island_t *isl)
    if (sp == NULL)
       return;
    free(sp->ff_handles);
+   free(sp->ff_handles_h);
    free(sp->a_off);
    free(sp->a_flags);
    free(sp->b_bytes);
+   free(sp->x_off);
+   free(sp->held_list);
    free(sp->buf);
    free(sp);
    isl->spec = NULL;
@@ -2050,6 +2105,8 @@ static void island_refresh_domain_descs(rt_island_t *isl)
          fd->count   = (fl & RT_IFF_STD_LOGIC9)
             ? (s->width * s->nelems * s->elem_size)
             : (s->nwords * s->nelems);
+         if (s->flags & RT_ISIG_SPEC_ROWF)   // Row clean bytes follow
+            fd->count += RT_ISLAND_SPEC_ROWF_BYTES(s->nelems) / 8u;
          fd->sig_idx = sidx;
          fd->flags   = fl;
          if (!(fl & (RT_IFF_STD_LOGIC9 | RT_IFF_TWO_STATE))) {
@@ -2532,22 +2589,45 @@ static inline void island_act_mark_sig(rt_island_t *isl,
 
 static bool island_spec_in_clean(const rt_island_sig_t *s);
 static void island_spec_demote(rt_island_t *isl, rt_island_deopt_t why);
+static bool island_spec_hold(rt_island_t *isl, uint32_t i, const uint8_t *cur);
+static bool island_spec_unhold(rt_island_t *isl, uint32_t i,
+                               const uint64_t *words);
+static inline bool island_spec_bytes_clean(const uint8_t *p, size_t n,
+                                           uint8_t zero);
 
 static void island_sync_in_sig(rt_island_t *isl, const rt_island_sig_t *s)
 {
-   if (unlikely(s->flags & RT_ISIG_SPEC_A) && (s->flags & RT_ISIG_TWO_STATE)) {
+   if (unlikely(s->flags & RT_ISIG_SPEC_A)
+       && (s->flags & (RT_ISIG_TWO_STATE | RT_ISIG_SPEC_HELD))) {
       // Mode A island: convert and check in one pass; a value other than
-      // '0'/'1' converts the island back to Mode B first
+      // '0'/'1' is held as Mode B bytes (island_spec_hold), or converts
+      // the island back to Mode B when it cannot be
       const rt_signal_t *sig = s->sig;
-      if (!(sig->shared.flags & SIG_F_PACKED)) {
+      const uint32_t idx = (uint32_t)(s - isl->sigs);
+      if ((s->flags & RT_ISIG_SPEC_HELD)
+          && (sig->shared.flags & SIG_F_PACKED))
+         island_spec_demote(isl, RT_ISLAND_DEOPT_INPUT);
+      else if (s->flags & RT_ISIG_SPEC_HELD) {
+         const uint8_t *src = sig->shared.data + s->sig_offset;
+         const size_t nbytes = (size_t)s->width * s->nelems;
+         island_act_mark_sig(isl, s);
+         island_copy_bytes(isl->state + s->a_off, src, nbytes);
          const uint8_t zero = island_sig_is_std(sig, s->flags) ? 2u : 0u;
+         if (island_spec_bytes_clean(src, nbytes, zero))
+            island_spec_unhold(isl, idx, NULL);
+         return;
+      }
+      else if (!(sig->shared.flags & SIG_F_PACKED)) {
+         const uint8_t zero = island_sig_is_std(sig, s->flags) ? 2u : 0u;
+         const uint8_t *src = sig->shared.data + s->sig_offset;
          if (island_spec_pack_elems((uint64_t *)(isl->state + s->a_off),
-                                    sig->shared.data + s->sig_offset,
-                                    s->nelems, s->width, s->nwords, zero)) {
+                                    src, s->nelems, s->width, s->nwords,
+                                    zero)) {
             island_act_mark_sig(isl, s);
             return;
          }
-         island_spec_demote(isl, RT_ISLAND_DEOPT_INPUT);
+         if (!island_spec_hold(isl, idx, src))
+            island_spec_demote(isl, RT_ISLAND_DEOPT_INPUT);
       }
       else if (!island_spec_in_clean(s))
          island_spec_demote(isl, RT_ISLAND_DEOPT_INPUT);
@@ -2755,9 +2835,13 @@ static void island_sync_dirty_inputs(rt_island_t *isl)
    }
 }
 
+static void island_spec_whole_read(rt_island_t *isl, rt_island_sig_t *s);
+
 static void island_sync_out_sig(rt_model_t *m, rt_island_t *isl,
                                 rt_island_sig_t *s)
 {
+   if (unlikely(s->flags & RT_ISIG_SPEC_ROWS))
+      island_spec_whole_read(isl, s);
    WSTAT_COUNT(s, 2);
    rt_signal_t *sig = s->sig;
    const uint32_t width = s->width;
@@ -2992,6 +3076,8 @@ static void island_sync_out_slice(rt_model_t *m, rt_island_t *isl,
       island_sync_out_sig(m, isl, s);
       return;
    }
+   if (unlikely(s->flags & RT_ISIG_SPEC_ROWS))
+      island_spec_whole_read(isl, s);
    s->flags &= ~RT_ISIG_LAST_OUT_VALID;
 
    rt_signal_t *sig = s->sig;
@@ -3471,6 +3557,12 @@ static inline void island_copy_sig_buf(uint8_t *dst_base,
       return;
    }
    const size_t bytes = (size_t)s->nwords * s->nelems * sizeof(uint64_t);
+   if (unlikely(s->flags & RT_ISIG_SPEC_ROWF)) {
+      // Mode A 2D signal: the row clean bytes follow the rows
+      memcpy(dst_base + s->a_off, src_base + s->a_off,
+             bytes + RT_ISLAND_SPEC_ROWF_BYTES(s->nelems));
+      return;
+   }
    memcpy(dst_base + s->a_off, src_base + s->a_off, bytes);
    if (!(s->flags & RT_ISIG_TWO_STATE))
       memcpy(dst_base + s->b_off, src_base + s->b_off, bytes);
@@ -4155,8 +4247,9 @@ static void island_refresh_direct_comb_descs(rt_island_t *isl)
             ? disl : NULL;
          dd->count = cnt;
          dd->flags = fl;
-         if ((src_s->flags ^ dst_s->flags)
-             & (RT_ISIG_TWO_STATE | RT_ISIG_STD_LOGIC9)) {
+         if (((src_s->flags ^ dst_s->flags)
+              & (RT_ISIG_TWO_STATE | RT_ISIG_STD_LOGIC9))
+             || (dst_s->flags & RT_ISIG_SPEC_HELD)) {
             dd->flags = RT_IDIR_STD_LOGIC9 | RT_IDIR_MIX;
             dd->mix_src = src_s;
             dd->mix_dst = dst_s;
@@ -4203,6 +4296,20 @@ static void island_refresh_direct_comb_descs(rt_island_t *isl)
 
 #define ISLAND_SPEC_PIN_DEOPTS   32u
 #define ISLAND_SPEC_PIN_REPORTS  4u
+
+// Promotion has a cost: the state is converted twice, every descriptor of
+// the island and its neighbours is rebuilt, and holding a value needs the
+// checked functions ("$ah"), lowered on their first call.  Values that are
+// not '0'/'1' just after time zero mostly clear when reset ends, so an
+// island that would hold values waits ISLAND_SPEC_HOLD_WAIT ticks from its
+// first such check before it is promoted holding them.  An island that
+// deopts within ISLAND_SPEC_QUICK ticks of ISLAND_SPEC_COST_PIN successive
+// promotions loses more than it gains: it is retried only every
+// ISLAND_SPEC_COST_RETRY ticks until it stays in Mode A longer.
+#define ISLAND_SPEC_HOLD_WAIT    1024u
+#define ISLAND_SPEC_QUICK        64u
+#define ISLAND_SPEC_COST_PIN     4u
+#define ISLAND_SPEC_COST_RETRY   (UINT64_C(1) << 20)
 #define ISLAND_SPEC_MAX_IVAL     (UINT32_C(1) << 14)
 #define ISLAND_SPEC_TIMELINE     40u
 
@@ -4219,6 +4326,20 @@ static uint32_t island_spec_stress_n(void)
    return (uint32_t)island_spec_stress;
 }
 
+static int64_t island_spec_hold_wait_env = -1;
+
+// Ticks an island waits before it is promoted holding values;
+// NVC_ISLAND_SPEC_HOLD_WAIT=N overrides it (test knob)
+static uint64_t island_spec_hold_wait(void)
+{
+   if (island_spec_hold_wait_env < 0) {
+      const char *env = getenv("NVC_ISLAND_SPEC_HOLD_WAIT");
+      island_spec_hold_wait_env =
+         env != NULL ? MAX(0, atoi(env)) : ISLAND_SPEC_HOLD_WAIT;
+   }
+   return (uint64_t)island_spec_hold_wait_env;
+}
+
 static uint8_t *island_spec_scratch(size_t n)
 {
    if (n > island_spec_tmp_size) {
@@ -4228,33 +4349,137 @@ static uint8_t *island_spec_scratch(size_t n)
    return island_spec_tmp;
 }
 
+// Held bytes of a Mode A island (RT_ISLAND_SPEC_HELD_OFF)
+static inline uint8_t *island_spec_held(const rt_island_t *isl)
+{
+   return isl->state + RT_ISLAND_SPEC_HELD_OFF(isl->spec->hdr_bytes);
+}
+
+static inline uint8_t *island_spec_req(const rt_island_t *isl)
+{
+   return isl->state + RT_ISLAND_SPEC_REQ_OFF(isl->spec->hdr_bytes,
+                                              isl->nsigs);
+}
+
+static inline uint32_t island_spec_rows_bytes(const rt_island_sig_t *s)
+{
+   return s->nwords * s->nelems * 8u;
+}
+
+// Row clean tracking keeps the rows of a 2D signal packed while some are
+// held.  Only the island's own flip-flop functions and its comb processes
+// read or write such a signal; any other reader of the state (outputs,
+// direct wires, inputs, observers) needs the whole value, so a 2D signal
+// with one of those is held whole instead.
+static bool island_spec_rows_ok(const rt_island_t *isl, uint32_t i)
+{
+   const rt_island_sig_t *s = &(isl->sigs[i]);
+   if (!(isl->spec->a_flags[i] & RT_ISIG_SPEC_ROWF))
+      return false;
+   const uint32_t ext = RT_ISIG_IN | RT_ISIG_OUT | RT_ISIG_OBSERVED
+      | RT_ISIG_DIRECT_LINK | RT_ISIG_COMB_WRITTEN;
+   return (s->flags & RT_ISIG_FF_WRITTEN) && !(s->flags & ext)
+      && s->n_direct_targets == 0 && s->direct_src == NULL
+      && s->n_direct_aliases == 0;
+}
+
+// Layout of signal I of the island after a switch (TO_A) or a change of its
+// held byte, which must already be in the state
+static void island_spec_set_sig_layout(rt_island_t *isl, uint32_t i,
+                                       bool to_a)
+{
+   rt_island_spec_t *sp = isl->spec;
+   rt_island_sig_t *s = &(isl->sigs[i]);
+   const bool packed = !!(sp->a_flags[i] & RT_ISIG_TWO_STATE);
+   s->flags &= ~(RT_ISIG_SPEC_A | RT_ISIG_SPEC_HELD | RT_ISIG_SPEC_ROWF
+                 | RT_ISIG_SPEC_ROWS | RT_ISIG_LAST_OUT_VALID);
+   if (!to_a) {
+      s->a_off = sp->b_off[i];
+      if (packed)
+         s->flags = (s->flags & ~RT_ISIG_TWO_STATE) | RT_ISIG_STD_LOGIC9;
+      return;
+   }
+
+   s->flags |= RT_ISIG_SPEC_A;
+   if (!packed) {
+      s->a_off = sp->a_off[i];
+      return;
+   }
+   if (island_spec_held(isl)[i]) {
+      s->a_off = sp->x_off[i];
+      s->flags = (s->flags & ~RT_ISIG_TWO_STATE) | RT_ISIG_STD_LOGIC9
+         | RT_ISIG_SPEC_HELD;
+      return;
+   }
+   s->a_off = sp->a_off[i];
+   s->flags = (s->flags & ~RT_ISIG_STD_LOGIC9) | RT_ISIG_TWO_STATE;
+   if (sp->a_flags[i] & RT_ISIG_SPEC_ROWF) {
+      s->flags |= RT_ISIG_SPEC_ROWF;
+      // Some row may be held: the runtime must not read the whole value
+      const uint32_t nb = RT_ISLAND_SPEC_ROWF_BYTES(s->nelems);
+      const uint8_t *rf = isl->state + s->a_off + island_spec_rows_bytes(s);
+      bool any = false;
+      const bool two = isl->next_state != NULL
+         && !(s->flags & RT_ISIG_SPARSE_RAM);
+      for (uint32_t k = 0; k < nb && !any; k++)
+         any = rf[k] != 0 || (two && rf[k + sp->stride] != 0);
+      if (any)
+         s->flags |= RT_ISIG_SPEC_ROWS;
+   }
+}
+
+// NVC_ISLAND_SPEC_STATS=3: one line per switch on stderr
+static void island_spec_trace(rt_island_t *isl, const char *what, int arg)
+{
+   static const char *names[RT_ISLAND_DEOPT_COUNT] = {
+      "none", "literal", "range", "conv", "report", "state", "input",
+      "put", "stress", "unclean", "row", "novar"
+   };
+   unsigned deltas = 0;
+   const uint64_t now = model_now(isl->model, &deltas);
+   if (strcmp(what, "promote") == 0)
+      fprintf(stderr, "ISLAND_SPEC_TRACE: %"PRIu64"+%u tick=%"PRIu64
+              " island=%u promote held=%d held_rows=%d\n", now, deltas,
+              isl->mgr->spec_tick, isl->isl_id, arg & 0xffff, arg >> 16);
+   else
+      fprintf(stderr, "ISLAND_SPEC_TRACE: %"PRIu64"+%u tick=%"PRIu64
+              " island=%u %s %s\n", now, deltas, isl->mgr->spec_tick,
+              isl->isl_id, what, names[arg]);
+}
+
+static void island_spec_set_handles(rt_island_t *isl);
+
 static void island_spec_set_layout(rt_island_t *isl, bool to_a)
 {
    rt_island_spec_t *sp = isl->spec;
-   for (uint32_t i = 0; i < isl->nsigs; i++) {
-      rt_island_sig_t *s = &(isl->sigs[i]);
-      const bool packed = !!(sp->a_flags[i] & RT_ISIG_TWO_STATE);
-      if (to_a) {
-         s->a_off = sp->a_off[i];
-         if (packed)
-            s->flags = (s->flags & ~RT_ISIG_STD_LOGIC9) | RT_ISIG_TWO_STATE;
-         s->flags |= RT_ISIG_SPEC_A;
-      }
-      else {
-         s->a_off = sp->b_off[i];
-         if (packed)
-            s->flags = (s->flags & ~RT_ISIG_TWO_STATE) | RT_ISIG_STD_LOGIC9;
-         s->flags &= ~RT_ISIG_SPEC_A;
-      }
-      s->flags &= ~RT_ISIG_LAST_OUT_VALID;
-   }
+   isl->state_bytes = to_a ? sp->stride : sp->stride_b;
+   if (isl->next_state != NULL)
+      isl->next_state = isl->state + isl->state_bytes;
+   isl->spec_a = to_a;
+   if (sp->sparse_log_off > 0)
+      isl->sparse_log_off = to_a ? sp->sparse_log_off : sp->sparse_log_off_b;
 
-   isl->eval_handle = to_a ? sp->eval_handle : sp->eval_handle_b;
+   for (uint32_t i = 0; i < isl->nsigs; i++)
+      island_spec_set_sig_layout(isl, i, to_a);
+
+   sp->checks = false;
+   island_spec_set_handles(isl);
+}
+
+// The functions of the island for its mode: Mode A ones that test the held
+// bytes while a signal or row is held (sp->checks), the others otherwise
+static void island_spec_set_handles(rt_island_t *isl)
+{
+   rt_island_spec_t *sp = isl->spec;
+   const bool to_a = isl->spec_a;
+   isl->eval_handle = !to_a ? sp->eval_handle_b
+      : sp->checks ? sp->eval_handle_h : sp->eval_handle;
    isl->eval_func = NULL;
    isl->eval_fn = NULL;
    for (uint32_t d = 0; d < isl->ndomains; d++) {
       rt_island_domain_t *dom = &(isl->domains[d]);
-      dom->ff_handle = to_a ? sp->ff_handles[d] : sp->ff_handles_b[d];
+      dom->ff_handle = !to_a ? sp->ff_handles_b[d]
+         : sp->checks ? sp->ff_handles_h[d] : sp->ff_handles[d];
       dom->ff_func = NULL;
       dom->ff_fn = NULL;
       rt_super_domain_t *sd = dom->super_dom;
@@ -4267,11 +4492,6 @@ static void island_spec_set_layout(rt_island_t *isl, bool to_a)
          }
       }
    }
-
-   isl->state_bytes = to_a ? sp->stride : sp->stride_b;
-   if (isl->next_state != NULL)
-      isl->next_state = isl->state + isl->state_bytes;
-   isl->spec_a = to_a;
 }
 
 static void island_spec_refresh_in_descs(rt_island_t *isl)
@@ -4280,7 +4500,10 @@ static void island_spec_refresh_in_descs(rt_island_t *isl)
       const rt_island_sig_t *s = &(isl->sigs[isl->in_sigs[j]]);
       rt_island_in_desc_t *id = &(isl->in_descs[j]);
       id->sig_idx = s->sig_idx;
-      if ((s->flags & RT_ISIG_STD_LOGIC9) && s->sig != NULL) {
+      // A held signal of a Mode A island goes through island_sync_in_sig,
+      // which packs it again once its value is clean
+      if ((s->flags & RT_ISIG_STD_LOGIC9) && s->sig != NULL
+          && !(s->flags & RT_ISIG_SPEC_HELD)) {
          const size_t elem_sz = s->elem_size;
          id->src    = s->sig->shared.data + (size_t)s->sig_offset * elem_sz;
          id->dst    = isl->state + s->a_off;
@@ -4301,8 +4524,11 @@ static void island_spec_update_mix(rt_island_t *isl)
    for (uint32_t i = 0; i < isl->nsigs; i++) {
       rt_island_sig_t *s = &(isl->sigs[i]);
       bool mix = false;
-      for (uint32_t t = 0; t < s->n_direct_targets && !mix; t++)
-         mix = ((s->direct_targets[t]->flags ^ s->flags) & repr) != 0;
+      for (uint32_t t = 0; t < s->n_direct_targets; t++) {
+         s->direct_targets[t]->flags &= ~RT_ISIG_MIX_MEMO;
+         mix = mix || ((s->direct_targets[t]->flags ^ s->flags) & repr) != 0
+            || (s->direct_targets[t]->flags & RT_ISIG_SPEC_HELD);
+      }
       if (mix)
          s->flags |= RT_ISIG_SPEC_MIX;
       else
@@ -4312,11 +4538,50 @@ static void island_spec_update_mix(rt_island_t *isl)
 
 static void island_spec_rebuild(rt_island_t *isl)
 {
+   // The held signals, for island_spec_ff_unhold at every commit
+   rt_island_spec_t *sp = isl->spec;
+   sp->n_held_list = 0;
+   bool checks = false;
+   if (isl->spec_a) {
+      const uint8_t *held = island_spec_held(isl);
+      for (uint32_t i = 0; i < isl->nsigs; i++) {
+         checks |= !!(isl->sigs[i].flags & RT_ISIG_SPEC_ROWS);
+         if (!held[i])
+            continue;
+         if (sp->held_list == NULL)
+            sp->held_list = xmalloc_array(isl->nsigs, sizeof(uint32_t));
+         sp->held_list[sp->n_held_list++] = i;
+      }
+      checks |= sp->n_held_list > 0;
+   }
+   isl->spec_held = sp->n_held_list > 0;
+   for (uint32_t d = 0; d < isl->ndomains; d++) {
+      rt_island_domain_t *dom = &(isl->domains[d]);
+      dom->spec_held_w = false;
+      if (!isl->spec_held)
+         continue;
+      const uint8_t *held = island_spec_held(isl);
+      for (uint32_t j = 0; j < dom->n_write_sigs; j++)
+         dom->spec_held_w |= !!held[dom->write_sigs[j]];
+   }
+   if (checks != sp->checks) {
+      sp->checks = checks;
+      island_spec_set_handles(isl);
+   }
+
+   // A switch changes no value and the change bytes (in the leading bytes
+   // both layouts share) survive it: the next comb call need not run every
+   // process, which would load the held signals of a Mode A island
+   const bool was_on = isl->act_on;
+   const bool was_all = was_on && island_act_info(isl)->all;
+
    island_spec_refresh_in_descs(isl);
    island_refresh_domain_descs(isl);
    island_refresh_ext_out_descs(isl);
    island_init_feedback(isl);
    island_init_act(isl);
+   if (was_on && isl->act_on)
+      island_act_info(isl)->all = was_all;
 
    // Direct wires out of the island and into it (rebuilt in place: a
    // deopt may happen while the source island walks its descriptors)
@@ -4334,6 +4599,176 @@ static void island_spec_rebuild(rt_island_t *isl)
 
 static void island_spec_pin(rt_island_t *isl, rt_island_deopt_t why);
 
+static void island_spec_unpack_words(uint8_t *out, const uint64_t *words,
+                                     uint32_t width, uint32_t nwords,
+                                     uint32_t nelems, uint8_t base);
+
+static inline uint8_t island_spec_zero(const rt_island_t *isl, uint32_t i)
+{
+   return (isl->spec->a_flags[i] & RT_ISIG_STD_LOGIC_ELEM) ? 2u : 0u;
+}
+
+// Promotion: signal I from the Mode B half B to the Mode A half A (zeroed),
+// whose held bytes are HELD.  A value that is not all '0'/'1' keeps its
+// Mode B bytes at x_off and is held, or with ROWS only its rows that are
+// not clean (row clean bytes after the rows).  Returns the held rows.
+static uint32_t island_spec_promote_sig(const rt_island_t *isl, uint32_t i,
+                                        const uint8_t *b, uint8_t *a,
+                                        uint8_t *held, bool rows, bool hold)
+{
+   const rt_island_spec_t *sp = isl->spec;
+   const rt_island_sig_t *s = &(isl->sigs[i]);
+   if (!island_spec_sig_live(s))
+      return 0;
+   const uint8_t *src = b + sp->b_off[i];
+   uint8_t *dst = a + sp->a_off[i];
+   if (!(sp->a_flags[i] & RT_ISIG_TWO_STATE)) {
+      memcpy(dst, src, sp->b_bytes[i]);
+      return 0;
+   }
+
+   const uint8_t zero = island_spec_zero(isl, i);
+   if (!hold && island_spec_pack_elems((uint64_t *)dst, src, s->nelems,
+                                       s->width, s->nwords, zero))
+      return 0;
+
+   uint8_t *x = a + sp->x_off[i];
+   if (!rows || hold) {
+      memset(dst, 0, island_spec_rows_bytes(s));
+      memcpy(x, src, sp->b_bytes[i]);
+      held[i] = 1;
+      return 0;
+   }
+
+   uint8_t *rf = dst + island_spec_rows_bytes(s);
+   uint32_t n = 0;
+   for (uint32_t e = 0; e < s->nelems; e++) {
+      const uint8_t *er = src + (size_t)e * s->width;
+      uint64_t *ew = (uint64_t *)dst + (size_t)e * s->nwords;
+      if (island_spec_pack_elems(ew, er, 1, s->width, s->nwords, zero))
+         continue;
+      memset(ew, 0, s->nwords * sizeof(uint64_t));
+      memcpy(x + (size_t)e * s->width, er, s->width);
+      rf[e] = 1;
+      n++;
+   }
+   return n;
+}
+
+static void island_spec_unpack_sig_to(const rt_island_t *isl, uint32_t i,
+                                      const uint8_t *a, uint8_t *dst,
+                                      const uint8_t *held);
+
+// The exact inverse of island_spec_promote_sig for the Mode A half A whose
+// signals are held as in HELD (sparse RAMs: island_spec_demote)
+static void island_spec_unpack_half(const rt_island_t *isl, const uint8_t *a,
+                                    uint8_t *b, const uint8_t *held,
+                                    const uint8_t *req)
+{
+   const rt_island_spec_t *sp = isl->spec;
+   memcpy(b, a, sp->hdr_bytes);
+   for (uint32_t i = 0; i < isl->nsigs; i++) {
+      const rt_island_sig_t *s = &(isl->sigs[i]);
+      if (!island_spec_sig_live(s) || (s->flags & RT_ISIG_SPARSE_RAM))
+         continue;
+      if (req != NULL && held[i] && req[i]) {
+         // A flip-flop store waiting for its commit (island_spec_ff_unhold)
+         island_spec_unpack_words(b + sp->b_off[i],
+                                  (const uint64_t *)(a + sp->a_off[i]),
+                                  s->width, s->nwords, s->nelems,
+                                  island_spec_zero(isl, i));
+         continue;
+      }
+      island_spec_unpack_sig_to(isl, i, a, b + sp->b_off[i], held);
+   }
+}
+
+// Signal I of the Mode A state A (held as in HELD) to its Mode B bytes DST
+static void island_spec_unpack_sig_to(const rt_island_t *isl, uint32_t i,
+                                      const uint8_t *a, uint8_t *dst,
+                                      const uint8_t *held)
+{
+   const rt_island_spec_t *sp = isl->spec;
+   const rt_island_sig_t *s = &(isl->sigs[i]);
+   if (!(sp->a_flags[i] & RT_ISIG_TWO_STATE)) {
+      memcpy(dst, a + sp->a_off[i], sp->b_bytes[i]);
+      return;
+   }
+   const uint8_t *x = a + sp->x_off[i];
+   if (held[i]) {
+      memcpy(dst, x, sp->b_bytes[i]);
+      return;
+   }
+   const uint8_t zero = island_spec_zero(isl, i);
+   const uint64_t *words = (const uint64_t *)(a + sp->a_off[i]);
+   if (!(sp->a_flags[i] & RT_ISIG_SPEC_ROWF)) {
+      island_spec_unpack_words(dst, words, s->width, s->nwords, s->nelems,
+                               zero);
+      return;
+   }
+   const uint8_t *rf = a + sp->a_off[i] + island_spec_rows_bytes(s);
+   for (uint32_t e = 0; e < s->nelems; e++) {
+      uint8_t *eb = dst + (size_t)e * s->width;
+      if (rf[e])
+         memcpy(eb, x + (size_t)e * s->width, s->width);
+      else
+         island_spec_unpack_words(eb, words + (size_t)e * s->nwords,
+                                  s->width, s->nwords, 1, zero);
+   }
+}
+
+// Pending entries of the Mode A sparse log of ISL (packed whole rows of
+// packed sparse RAMs, the Mode B bytes of the others) appended to the
+// Mode B log in the Mode B image B, which the next commit applies
+static void island_spec_log_to_b(rt_island_t *isl, uint8_t *b)
+{
+   const rt_island_spec_t *sp = isl->spec;
+   const rt_island_sparse_log_t *la =
+      (const rt_island_sparse_log_t *)(isl->state + sp->sparse_log_off);
+   rt_island_sparse_log_t *lb =
+      (rt_island_sparse_log_t *)(b + sp->sparse_log_off_b);
+   lb->count = 0;
+   lb->data_used = 0;
+   lb->pad = 0;
+   lb->isl_ptr = (uint64_t)(uintptr_t)isl;
+   assert(isl->n_sparse_ovf == 0);   // The Mode A variant never spills
+
+   bool spill = false;
+   for (uint32_t k = 0; k < (uint32_t)la->count; k++) {
+      const uint32_t sig_idx = (uint32_t)la->entries[k].sig_and_off;
+      uint32_t boff = (uint32_t)(la->entries[k].sig_and_off >> 32);
+      uint32_t len = (uint32_t)la->entries[k].len_and_data;
+      const uint32_t doff = (uint32_t)(la->entries[k].len_and_data >> 32);
+      const rt_island_sig_t *s = &(isl->sigs[sig_idx]);
+      const uint8_t *data = la->data + doff;
+      uint8_t row[256];
+      uint8_t *heap = NULL;
+      if (sp->a_flags[sig_idx] & RT_ISIG_TWO_STATE) {
+         const uint32_t rb = s->nwords * 8u;
+         assert(len == rb && boff % rb == 0);
+         uint8_t *out = s->width <= sizeof(row) ? row
+            : (heap = xmalloc(s->width));
+         island_spec_unpack_words(out, (const uint64_t *)data, s->width,
+                                  s->nwords, 1, island_spec_zero(isl, sig_idx));
+         boff = (boff / rb) * s->width;
+         len = s->width;
+         data = out;
+      }
+      spill |= lb->count >= RT_ISLAND_SPARSE_INLINE_CAP
+         || lb->data_used + len > RT_ISLAND_SPARSE_INLINE_DATA;
+      if (spill)
+         rt_island_sparse_write(isl, sig_idx, boff, len, data);
+      else {
+         rt_island_sparse_entry_t *e = &(lb->entries[lb->count++]);
+         e->sig_and_off  = (uint64_t)sig_idx | ((uint64_t)boff << 32);
+         e->len_and_data = (uint64_t)len | (lb->data_used << 32);
+         memcpy(lb->data + lb->data_used, data, len);
+         lb->data_used += len;
+      }
+      free(heap);
+   }
+}
+
 // Convert a Mode A island back to Mode B: always allowed outside a call of
 // its functions, changes no value and schedules nothing
 static void island_spec_demote(rt_island_t *isl, rt_island_deopt_t why)
@@ -4345,21 +4780,70 @@ static void island_spec_demote(rt_island_t *isl, rt_island_deopt_t why)
    const uint32_t stride_a = sp->stride;
    const size_t total = isl->total_state_bytes;
    uint8_t *tmp = island_spec_scratch(total);
-   island_spec_set_layout(isl, false);
    memset(tmp, 0, total);
-   rt_island_spec_unpack(isl, isl->state, tmp);
+   const uint8_t *held = island_spec_held(isl);
+   island_spec_unpack_half(isl, isl->state, tmp, held, NULL);
    if (isl->next_state != NULL)
-      rt_island_spec_unpack(isl, isl->state + stride_a, tmp + sp->stride_b);
-   memcpy(isl->state, tmp, isl->next_state != NULL
-          ? 2u * (size_t)sp->stride_b : sp->stride_b);
+      island_spec_unpack_half(isl, isl->state + stride_a, tmp + sp->stride_b,
+                              held, island_spec_req(isl));
+   size_t nbytes = isl->next_state != NULL
+      ? 2u * (size_t)sp->stride_b : sp->stride_b;
+   if (sp->sparse_log_off > 0) {
+      // The Mode A halves may cover the Mode B sparse RAMs and log
+      for (uint32_t i = 0; i < isl->nsigs; i++) {
+         if (isl->sigs[i].flags & RT_ISIG_SPARSE_RAM)
+            island_spec_unpack_sig_to(isl, i, isl->state, tmp + sp->b_off[i],
+                                      held);
+      }
+      island_spec_log_to_b(isl, tmp);
+      nbytes = sp->total_bytes_b;
+   }
+   island_spec_set_layout(isl, false);
+   memcpy(isl->state, tmp, nbytes);
 
    sp->deopts[why]++;
-   sp->ticks_a += mgr->spec_tick - sp->tick_promoted;
+   if (unlikely(mgr->spec_trace))
+      island_spec_trace(isl, "deopt", why);
+   const uint64_t ran_a = mgr->spec_tick - sp->tick_promoted;
+   sp->ticks_a += ran_a;
+   sp->n_held = 0;
    mgr->spec_n_a--;
    island_spec_rebuild(isl);
 
    if (why == RT_ISLAND_DEOPT_STRESS) {
       sp->next_check = mgr->spec_tick + 1;
+      return;
+   }
+   if (why == RT_ISLAND_DEOPT_NOVAR) {
+      // The function was lowered on its first call and that failed
+      // (vi_lazy_build): this island stays in Mode B
+      sp->pinned = true;
+      sp->pin_reason = why;
+      return;
+   }
+   if (ran_a < ISLAND_SPEC_QUICK)
+      sp->n_quick++;
+   else {
+      sp->n_quick = 0;
+      sp->cost_pinned = false;
+   }
+   if (why == RT_ISLAND_DEOPT_UNCLEAN || why == RT_ISLAND_DEOPT_ROW) {
+      // A held value was read: try again once Mode B may have made it
+      // clean, backing off but never pinning (it may become clean later)
+      if (sp->pinned)
+         return;
+      sp->n_unclean++;
+      if (sp->n_quick >= ISLAND_SPEC_COST_PIN) {
+         if (!sp->cost_pinned)
+            sp->cost_pins++;
+         sp->cost_pinned = true;
+         sp->next_check = mgr->spec_tick + ISLAND_SPEC_COST_RETRY;
+      }
+      else
+         sp->next_check = mgr->spec_tick
+            + (UINT64_C(16) << MIN(sp->n_unclean, 12u));
+      sp->check_ival = 16;
+      mgr->spec_next = MIN(mgr->spec_next, sp->next_check);
       return;
    }
    sp->n_deopt++;
@@ -4374,6 +4858,91 @@ static void island_spec_demote(rt_island_t *isl, rt_island_deopt_t why)
       sp->check_ival = 16;
       mgr->spec_next = MIN(mgr->spec_next, sp->next_check);
    }
+}
+
+// Signal I of Mode A island ISL takes a value that is not all '0'/'1':
+// keep it as Mode B bytes from now on (both halves), CUR (when not NULL)
+// being its new value in the first half.  False when it cannot be held.
+static bool island_spec_hold(rt_island_t *isl, uint32_t i, const uint8_t *cur)
+{
+   rt_island_spec_t *sp = isl->spec;
+   rt_island_sig_t *s = &(isl->sigs[i]);
+   assert(isl->spec_a);
+   if (!(s->flags & RT_ISIG_TWO_STATE)
+       || (s->flags & (RT_ISIG_SPEC_ROWS | RT_ISIG_SPARSE_RAM))
+       || s->elem_size != 1)
+      return false;
+
+   const uint8_t zero = island_spec_zero(isl, i);
+   uint8_t *x = isl->state + sp->x_off[i];
+   if (cur != NULL)
+      memcpy(x, cur, sp->b_bytes[i]);
+   else
+      island_spec_unpack_words(x, (const uint64_t *)(isl->state + s->a_off),
+                               s->width, s->nwords, s->nelems, zero);
+   if (isl->next_state != NULL)
+      island_spec_unpack_words(isl->next_state + sp->x_off[i],
+                               (const uint64_t *)(isl->next_state + s->a_off),
+                               s->width, s->nwords, s->nelems, zero);
+   if (s->flags & RT_ISIG_SPEC_ROWF) {
+      // Row clean bytes are all clear (no RT_ISIG_SPEC_ROWS)
+      memset(isl->state + s->a_off + island_spec_rows_bytes(s), 0,
+             RT_ISLAND_SPEC_ROWF_BYTES(s->nelems));
+   }
+
+   island_spec_held(isl)[i] = 1;
+   sp->n_held++;
+   sp->holds++;
+   island_spec_set_sig_layout(isl, i, true);
+   island_spec_rebuild(isl);
+   return true;
+}
+
+// Held signal I of Mode A island ISL is all '0'/'1' again (its first half;
+// WORDS when not NULL is the packed new value): pack it.  False when the
+// second half of a flip-flop written signal is not clean.
+static bool island_spec_unhold(rt_island_t *isl, uint32_t i,
+                               const uint64_t *words)
+{
+   rt_island_spec_t *sp = isl->spec;
+   rt_island_sig_t *s = &(isl->sigs[i]);
+   assert(isl->spec_a && (s->flags & RT_ISIG_SPEC_HELD));
+
+   const uint8_t zero = island_spec_zero(isl, i);
+   const size_t nw = (size_t)s->nwords * s->nelems;
+   uint64_t *dst = (uint64_t *)(isl->state + sp->a_off[i]);
+   uint64_t *dst2 = isl->next_state != NULL
+      ? (uint64_t *)(isl->next_state + sp->a_off[i]) : NULL;
+   if (dst2 != NULL && (s->flags & RT_ISIG_FF_WRITTEN)) {
+      uint64_t small[4];
+      uint64_t *tmp = nw <= 4 ? small : xmalloc_array(nw, sizeof(uint64_t));
+      const bool ok = island_spec_pack_elems(tmp, isl->next_state + s->a_off,
+                                             s->nelems, s->width, s->nwords,
+                                             zero);
+      if (ok)
+         memcpy(dst2, tmp, nw * sizeof(uint64_t));
+      if (tmp != small)
+         free(tmp);
+      if (!ok)
+         return false;
+      dst2 = NULL;
+   }
+
+   if (words != NULL)
+      memcpy(dst, words, nw * sizeof(uint64_t));
+   else if (!island_spec_pack_elems(dst, isl->state + s->a_off, s->nelems,
+                                    s->width, s->nwords, zero))
+      fatal_trace("held signal is not clean");
+   if (dst2 != NULL)
+      memcpy(dst2, dst, nw * sizeof(uint64_t));
+
+   island_spec_held(isl)[i] = 0;
+   assert(sp->n_held > 0);
+   sp->n_held--;
+   sp->unholds++;
+   island_spec_set_sig_layout(isl, i, true);
+   island_spec_rebuild(isl);
+   return true;
 }
 
 static void island_spec_pin(rt_island_t *isl, rt_island_deopt_t why)
@@ -4401,6 +4970,50 @@ static void island_spec_pin_sig(rt_island_mgr_t *mgr, rt_signal_t *sig,
       island_spec_pin(s->isl, why);
 }
 
+// Commit of domain DOM of a Mode A island with held signals: a held signal
+// the flip-flop function stored a whole value into (its request byte is
+// set, RT_ISLAND_SPEC_REQ_OFF) is packed again, its current words set to
+// differ from the next ones in every bit so the commit takes the new value
+// and notifies its readers as for any change
+__attribute__((noinline))
+static void island_spec_ff_unhold(rt_island_domain_t *dom)
+{
+   rt_island_t *isl = dom->isl;
+   rt_island_spec_t *sp = isl->spec;
+   uint8_t *req = island_spec_req(isl);
+   uint8_t *held = island_spec_held(isl);
+   bool any = false;
+   // Only this domain's stores (another domain commits its own)
+   for (uint32_t k = 0; k < dom->n_write_sigs; k++) {
+      const uint32_t i = dom->write_sigs[k];
+      if (!req[i] || !held[i])
+         continue;
+      req[i] = 0;
+      const rt_island_sig_t *s = &(isl->sigs[i]);
+      uint64_t *cur = (uint64_t *)(isl->state + sp->a_off[i]);
+      const uint64_t *nxt = (const uint64_t *)(isl->next_state + sp->a_off[i]);
+      for (uint32_t w = 0; w < s->nwords * s->nelems; w++)
+         cur[w] = ~nxt[w];
+      held[i] = 0;
+      assert(sp->n_held > 0);
+      sp->n_held--;
+      sp->unholds++;
+      island_spec_set_sig_layout(isl, i, true);
+      any = true;
+   }
+   if (any)
+      island_spec_rebuild(isl);
+}
+
+// The runtime is about to read the whole value of signal S, a 2D signal of
+// a Mode A island whose rows may be held: convert the island back to Mode B
+__attribute__((noinline))
+static void island_spec_whole_read(rt_island_t *isl, rt_island_sig_t *s)
+{
+   assert(isl->spec_a && s->isl == isl);
+   island_spec_demote(isl, RT_ISLAND_DEOPT_ROW);
+}
+
 static bool island_spec_try_promote(rt_island_t *isl)
 {
    rt_island_spec_t *sp = isl->spec;
@@ -4412,27 +5025,72 @@ static bool island_spec_try_promote(rt_island_t *isl)
       safe = dom->ff_dirty_mask == 0 && !dom->in_commit_q
          && (dom->super_dom == NULL || !dom->super_dom->in_commit_q);
    }
+   if (safe && sp->sparse_log_off > 0) {
+      const rt_island_sparse_log_t *lb =
+         (const rt_island_sparse_log_t *)(isl->state + isl->sparse_log_off);
+      safe = lb->count == 0 && isl->n_sparse_ovf == 0;
+   }
    if (!safe) {
       sp->next_check = mgr->spec_tick + 1;
       return false;
    }
 
+   // Every signal whose value is not all '0'/'1' is held (or, for an
+   // internal 2D signal, its rows that are not): the Mode A functions
+   // deopt when they load or store one, so Mode B computes with it
    const size_t total = isl->total_state_bytes;
    uint8_t *tmp = island_spec_scratch(total);
    memset(tmp, 0, total);
-   if (!rt_island_spec_pack(isl, isl->state, tmp)) {
-      sp->failed_checks++;
-      sp->next_check = mgr->spec_tick + sp->check_ival;
-      sp->check_ival = MIN(sp->check_ival * 2u, ISLAND_SPEC_MAX_IVAL);
-      return false;
+   memcpy(tmp, isl->state, sp->hdr_bytes);
+   uint8_t *held = tmp + RT_ISLAND_SPEC_HELD_OFF(sp->hdr_bytes);
+   uint32_t n_rows = 0, n_held = 0;
+   for (uint32_t i = 0; i < isl->nsigs; i++) {
+      const rt_island_sig_t *s = &(isl->sigs[i]);
+      // Only the island's own functions read a packed sparse RAM: its
+      // commit logs rows, an output or observer would need the bytes
+      const bool hold = (s->flags & RT_ISIG_SPARSE_RAM)
+         && (sp->a_flags[i] & RT_ISIG_TWO_STATE)
+         && (s->flags & (RT_ISIG_OUT | RT_ISIG_OBSERVED));
+      n_rows += island_spec_promote_sig(isl, i, isl->state, tmp, held,
+                                        island_spec_rows_ok(isl, i), hold);
+      n_held += held[i];
    }
 
+   if (n_held == 0 && n_rows == 0)
+      sp->unclean_since = 0;
+   else if (island_spec_stress_n() == 0) {
+      const uint64_t tick = mgr->spec_tick, wait = island_spec_hold_wait();
+      if (sp->unclean_since == 0)
+         sp->unclean_since = tick + 1;
+      const uint64_t waited = tick + 1 - sp->unclean_since;
+      if (waited < wait) {
+         // Check again soon: the values may become clean
+         sp->hold_waits++;
+         sp->check_ival = MIN(MAX(sp->check_ival, 16u) * 2u, wait);
+         sp->next_check = tick + MIN(sp->check_ival, wait - waited);
+         return false;
+      }
+   }
+
+   size_t nbytes = sp->stride;
+   if (isl->next_state != NULL) {
+      memcpy(tmp + sp->stride, tmp, sp->stride);
+      nbytes += sp->stride;
+   }
+   if (sp->sparse_log_off > 0) {
+      rt_island_sparse_log_t *la =
+         (rt_island_sparse_log_t *)(tmp + sp->sparse_log_off);
+      la->isl_ptr = (uint64_t)(uintptr_t)isl;
+      nbytes = sp->total_bytes;
+   }
+   memcpy(isl->state, tmp, nbytes);
    island_spec_set_layout(isl, true);
-   memcpy(isl->state, tmp, sp->stride);
-   if (isl->next_state != NULL)
-      memcpy(isl->next_state, tmp, sp->stride);
    sp->promotions++;
+   if (unlikely(mgr->spec_trace))
+      island_spec_trace(isl, "promote", n_held | (n_rows << 16));
    sp->tick_promoted = mgr->spec_tick;
+   sp->n_held = n_held;
+   sp->n_held_rows = n_rows;
    mgr->spec_n_a++;
    island_spec_rebuild(isl);
    return true;
@@ -4465,8 +5123,16 @@ static void island_spec_sweep(rt_island_mgr_t *mgr)
 static void island_spec_tick(rt_island_mgr_t *mgr)
 {
    const uint64_t tick = ++mgr->spec_tick;
-   if ((tick & (tick - 1)) == 0 && mgr->n_spec_timeline < ISLAND_SPEC_TIMELINE)
+   if ((tick & (tick - 1)) == 0 && mgr->n_spec_timeline < ISLAND_SPEC_TIMELINE) {
+      uint32_t n_held = 0;
+      for (unsigned i = 0; i < mgr->islands.count; i++) {
+         const rt_island_t *isl = mgr->islands.items[i];
+         n_held += isl->spec_a && (isl->spec->n_held > 0
+                                   || isl->spec->n_held_rows > 0);
+      }
+      mgr->spec_held_timeline[mgr->n_spec_timeline] = n_held;
       mgr->spec_timeline[mgr->n_spec_timeline++] = mgr->spec_n_a;
+   }
    if (tick >= mgr->spec_next)
       island_spec_sweep(mgr);
 }
@@ -4528,16 +5194,14 @@ static void island_spec_unpack_words(uint8_t *out, const uint64_t *words,
    }
 }
 
-// A direct wire between a Mode A and a Mode B island (VHDL signals only:
-// one byte per element or packed two-state words)
+// A direct wire between a Mode A and a Mode B island, or into a held signal
+// of a Mode A island (VHDL signals only: one byte per element or packed
+// two-state words)
 __attribute__((noinline))
 static bool island_spec_copy_mixed(const rt_island_sig_t *src_s,
                                    rt_island_sig_t *dst_s)
 {
    const uint32_t repr = RT_ISIG_TWO_STATE | RT_ISIG_STD_LOGIC9;
-   if (((src_s->flags ^ dst_s->flags) & repr) == 0)
-      return island_copy_direct_sig_same(src_s, dst_s);
-
    const rt_island_t *src_isl = src_s->isl;
    rt_island_t *dst_isl = dst_s->isl;
    const uint32_t width = src_s->width, nelems = src_s->nelems;
@@ -4545,16 +5209,45 @@ static bool island_spec_copy_mixed(const rt_island_sig_t *src_s,
    const size_t total = (size_t)width * nelems;
    const uint8_t base =
       ((src_s->flags | dst_s->flags) & RT_ISIG_STD_LOGIC_ELEM) ? 2u : 0u;
+   const uint32_t dst_idx = (uint32_t)(dst_s - dst_isl->sigs);
+
+   if (((src_s->flags ^ dst_s->flags) & repr) == 0) {
+      if (!(dst_s->flags & RT_ISIG_SPEC_HELD))
+         return island_copy_direct_sig_same(src_s, dst_s);
+      // Bytes into a held signal: pack it once the value is clean
+      if (!island_copy_direct_sig_same(src_s, dst_s))
+         return false;
+      if (island_spec_bytes_clean(dst_isl->state + dst_s->a_off, total, base))
+         island_spec_unhold(dst_isl, dst_idx, NULL);
+      return true;
+   }
+
    assert(src_s->elem_size == 1 && dst_s->elem_size == 1);
 
    if (src_s->flags & RT_ISIG_TWO_STATE) {
+      const uint64_t *sw = (const uint64_t *)(src_isl->state + src_s->a_off);
+      if ((dst_s->flags & RT_ISIG_SPEC_HELD)
+          && island_spec_unhold(dst_isl, dst_idx, sw)) {
+         island_act_mark_sig(dst_isl, dst_s);
+         return true;   // Was not all '0'/'1'
+      }
+      // A one-word value unchanged since the last copy: the target bytes,
+      // written only by this wire, still hold it (island_spec_update_mix
+      // drops the memo on every layout change at either end)
+      const bool one = nwords * nelems == 1;
+      if (one && (dst_s->flags & RT_ISIG_MIX_MEMO) && dst_s->mix_memo == sw[0])
+         return false;
       uint8_t small[72];
       uint8_t *tmp = total + 8u <= sizeof(small) ? small
          : island_spec_scratch(total + 8u);
-      island_spec_unpack_words(tmp, (const uint64_t *)
-                               (src_isl->state + src_s->a_off),
-                               width, nwords, nelems, base);
-      if (!island_commit_bytes(dst_isl->state + dst_s->a_off, tmp, total))
+      island_spec_unpack_words(tmp, sw, width, nwords, nelems, base);
+      const bool changed =
+         island_commit_bytes(dst_isl->state + dst_s->a_off, tmp, total);
+      if (one) {
+         dst_s->mix_memo = sw[0];
+         dst_s->flags |= RT_ISIG_MIX_MEMO;
+      }
+      if (!changed)
          return false;
       island_act_mark_sig(dst_isl, dst_s);
       return true;
@@ -4566,8 +5259,12 @@ static bool island_spec_copy_mixed(const rt_island_sig_t *src_s,
    uint64_t *tmp = nw <= 4 ? small
       : (uint64_t *)island_spec_scratch(nw * sizeof(uint64_t));
    if (!island_spec_pack_elems(tmp, src, nelems, width, nwords, base)) {
-      island_spec_demote(dst_isl, RT_ISLAND_DEOPT_INPUT);
-      return island_copy_direct_sig_same(src_s, dst_s);
+      if (!island_spec_hold(dst_isl, dst_idx, src)) {
+         island_spec_demote(dst_isl, RT_ISLAND_DEOPT_INPUT);
+         return island_copy_direct_sig_same(src_s, dst_s);
+      }
+      island_act_mark_sig(dst_isl, dst_s);
+      return true;   // Was all '0'/'1'
    }
    uint64_t *dst = (uint64_t *)(dst_isl->state + dst_s->a_off);
    if (nw == 1) {
@@ -4618,6 +5315,17 @@ static bool island_spec_ff_deopt(jit_t *jit, rt_island_domain_t *dom,
 {
    rt_island_t *isl = dom->isl;
    assert(code > 0 && code < RT_ISLAND_DEOPT_COUNT);
+   // Drop the requests of the call (only this domain writes the signals)
+   uint8_t *req = island_spec_req(isl);
+   for (uint32_t j = 0; j < dom->n_write_sigs; j++)
+      req[dom->write_sigs[j]] = 0;
+   if (isl->spec->sparse_log_off > 0) {
+      // Drop the log entries of the call (see vi_spec_sparse_mark)
+      rt_island_sparse_log_t *la =
+         (rt_island_sparse_log_t *)(isl->state + isl->spec->sparse_log_off);
+      la->count = la->pad & UINT32_MAX;
+      la->data_used = la->pad >> 32;
+   }
    island_spec_demote(isl, (rt_island_deopt_t)code);
    // Outside a flip-flop call the next state of the signals a domain
    // writes equals the state (and a domain whose signals another writer
@@ -4684,10 +5392,12 @@ static void island_spec_rt_setup(rt_island_t *isl)
 
    // Both layouts use the same buffer (super-domain entries keep its
    // address): room for two halves of the larger one
-   const size_t need = (isl->ndomains > 0 ? 2u : 1u)
-      * (size_t)MAX(sp->stride_b, sp->stride);
+   // (and the Mode A sparse RAMs after the whole Mode B state)
+   sp->total_bytes_b = isl->sparse_log_off > 0 ? isl->total_state_bytes : 0;
+   const size_t need = MAX((isl->ndomains > 0 ? 2u : 1u)
+                           * (size_t)MAX(sp->stride_b, sp->stride),
+                           (size_t)sp->total_bytes);
    if (need > isl->total_state_bytes) {
-      assert(isl->sparse_log_off == 0);
       void *buf = NULL;
 #ifdef __MINGW32__
       buf = _aligned_malloc(need, 64);
@@ -4704,6 +5414,11 @@ static void island_spec_rt_setup(rt_island_t *isl)
       isl->next_state = isl->ndomains > 0 ? isl->state + isl->state_bytes
          : NULL;
       isl->total_state_bytes = (uint32_t)need;
+      if (isl->sparse_log_off > 0) {
+         rt_island_sparse_log_t *log =
+            (rt_island_sparse_log_t *)(isl->state + isl->sparse_log_off);
+         log->isl_ptr = (uint64_t)(uintptr_t)isl;
+      }
    }
 
    sp->check_ival = 8;
@@ -4711,6 +5426,8 @@ static void island_spec_rt_setup(rt_island_t *isl)
    if (!mgr->spec_on) {
       mgr->spec_on = true;
       mgr->spec_next = 8;
+      const char *env = getenv("NVC_ISLAND_SPEC_STATS");
+      mgr->spec_trace = env != NULL && atoi(env) >= 3;
    }
 }
 
@@ -4726,17 +5443,22 @@ static void island_spec_rt_report(rt_island_mgr_t *mgr)
 
    static const char *names[RT_ISLAND_DEOPT_COUNT] = {
       "none", "literal", "range", "conv", "report", "state", "input",
-      "put", "stress"
+      "put", "stress", "unclean", "row", "novar"
    };
    uint64_t deopts[RT_ISLAND_DEOPT_COUNT] = {}, pins[RT_ISLAND_DEOPT_COUNT] = {};
-   uint64_t promotions = 0, failed = 0, ticks_a = 0;
+   uint64_t promotions = 0, failed = 0, ticks_a = 0, holds = 0, unholds = 0;
    uint32_t n_var = 0, n_ever = 0, n_a = 0, n_pinned = 0;
+   uint32_t n_a_held = 0, n_held = 0, n_rows = 0, n_cost = 0;
+   uint64_t cost_pins = 0, hold_waits = 0;
    for (unsigned i = 0; i < mgr->islands.count; i++) {
       const rt_island_t *isl = mgr->islands.items[i];
       const rt_island_spec_t *sp = isl->spec;
       if (sp == NULL || sp->force_a)
          continue;
       n_var++;
+      n_cost += sp->cost_pinned && !isl->spec_a && !sp->pinned;
+      cost_pins += sp->cost_pins;
+      hold_waits += sp->hold_waits;
       n_ever += sp->promotions > 0;
       n_a += isl->spec_a;
       uint64_t ta = sp->ticks_a;
@@ -4751,29 +5473,39 @@ static void island_spec_rt_report(rt_island_mgr_t *mgr)
       }
       for (int k = 0; k < RT_ISLAND_DEOPT_COUNT; k++)
          deopts[k] += sp->deopts[k];
+      holds += sp->holds;
+      unholds += sp->unholds;
+      if (isl->spec_a) {
+         n_a_held += (sp->n_held > 0 || sp->n_held_rows > 0);
+         n_held += sp->n_held;
+         n_rows += sp->n_held_rows;
+      }
       if (atoi(env) >= 2 || env[0] == '/')
          fprintf(f, "ISLAND_SPEC_RT: island=%u mode=%c promotions=%"PRIu64
-                 " deopts=%u failed_checks=%"PRIu64" ticks_a=%"PRIu64
-                 "%s%s scope=%s\n", isl->isl_id, isl->spec_a ? 'A' : 'B',
-                 sp->promotions, sp->n_deopt, sp->failed_checks, ta,
-                 sp->pinned ? " pinned=" : "",
+                 " deopts=%u unclean=%"PRIu64" row=%"PRIu64" held=%u"
+                 " held_rows=%u holds=%"PRIu64" unholds=%"PRIu64
+                 " ticks_a=%"PRIu64"%s%s scope=%s\n", isl->isl_id,
+                 isl->spec_a ? 'A' : 'B', sp->promotions, sp->n_deopt,
+                 sp->deopts[RT_ISLAND_DEOPT_UNCLEAN],
+                 sp->deopts[RT_ISLAND_DEOPT_ROW], isl->spec_a ? sp->n_held : 0,
+                 isl->spec_a ? sp->n_held_rows : 0, sp->holds, sp->unholds,
+                 ta, sp->pinned ? " pinned=" : "",
                  sp->pinned ? names[sp->pin_reason] : "",
                  isl->root_scope != NULL ? istr(isl->root_scope->name) : "?");
-      if (!isl->spec_a && !sp->pinned && sp->failed_checks > 0
+      if (isl->spec_a && sp->n_held > 0
           && (atoi(env) >= 2 || env[0] == '/')) {
-         // Signals that keep the island in Mode B
-         uint8_t *tmp = island_spec_scratch(isl->total_state_bytes);
+         // Signals held as Mode B bytes
+         const uint8_t *held = island_spec_held(isl);
          int shown = 0;
          for (uint32_t j = 0; j < isl->nsigs && shown < 4; j++) {
             const rt_island_sig_t *s = &(isl->sigs[j]);
-            if (island_spec_pack_sig(isl, j, isl->state, tmp))
+            if (!held[j])
                continue;
             ident_t name = (s->sig != NULL && s->sig->where != NULL)
                ? object_ident((object_t *)s->sig->where) : NULL;
-            fprintf(f, "ISLAND_SPEC_RT:   unclean sig=%u %s width=%u "
-                    "nelems=%u flags=%x\n", j,
-                    name != NULL ? istr(name) : "?", s->width, s->nelems,
-                    s->flags);
+            fprintf(f, "ISLAND_SPEC_RT:   held sig=%u %s width=%u "
+                    "nelems=%u\n", j, name != NULL ? istr(name) : "?",
+                    s->width, s->nelems);
             shown++;
          }
       }
@@ -4785,15 +5517,24 @@ static void island_spec_rt_report(rt_island_mgr_t *mgr)
            "in_a=%u pinned=%u promotions=%"PRIu64" failed_checks=%"PRIu64
            " time_in_a=%.1f%%\n", mgr->spec_tick, n_var, n_ever, n_a,
            n_pinned, promotions, failed, frac);
+   fprintf(f, "ISLAND_SPEC_RT: held in_a_with_held=%u signals=%u rows=%u"
+           " holds=%"PRIu64" unholds=%"PRIu64"\n", n_a_held, n_held, n_rows,
+           holds, unholds);
    fprintf(f, "ISLAND_SPEC_RT: deopts");
    for (int k = 1; k < RT_ISLAND_DEOPT_COUNT; k++)
       fprintf(f, " %s=%"PRIu64, names[k], deopts[k]);
    fprintf(f, "\nISLAND_SPEC_RT: pinned");
    for (int k = 0; k < RT_ISLAND_DEOPT_COUNT; k++)
       fprintf(f, " %s=%"PRIu64, names[k], pins[k]);
+   fprintf(f, "\nISLAND_SPEC_RT: cost pinned_by_cost=%u cost_pins=%"PRIu64
+           " hold_waits=%"PRIu64, n_cost, cost_pins, hold_waits);
    fprintf(f, "\nISLAND_SPEC_RT: in_a_at_tick");
    for (uint32_t k = 0; k < mgr->n_spec_timeline; k++)
       fprintf(f, " %"PRIu64":%u", UINT64_C(1) << k, mgr->spec_timeline[k]);
+   fprintf(f, "\nISLAND_SPEC_RT: in_a_holding_at_tick");
+   for (uint32_t k = 0; k < mgr->n_spec_timeline; k++)
+      fprintf(f, " %"PRIu64":%u", UINT64_C(1) << k,
+              mgr->spec_held_timeline[k]);
    fprintf(f, "\n");
    if (f != stdout)
       fclose(f);
@@ -6051,7 +6792,7 @@ void rt_island_reset_all(rt_island_mgr_t *mgr)
          || (mgr->fast && !opt_get_int(OPT_SHUFFLE_PROCS));
       for (uint32_t j = 0; j < isl->nsigs; j++) {
          rt_island_sig_t *s = &(isl->sigs[j]);
-         s->flags &= ~RT_ISIG_LAST_OUT_VALID;
+         s->flags &= ~(RT_ISIG_LAST_OUT_VALID | RT_ISIG_MIX_MEMO);
          if (s->watch != NULL)
             watch_set_inline_island(s->watch, allow_inline);
          if (s->sig != NULL)
@@ -6306,7 +7047,21 @@ bool rt_island_eval_sv_reset(jit_t *jit, rt_model_t *m, rt_island_mgr_t *mgr,
 
       island_clear_dirty(isl);
 
-      if (!island_call_comb(jit, m, isl, tlab))
+      if (isl->skip_sv_reset)
+         continue;
+
+      if (isl->reset_eval_handle != JIT_HANDLE_INVALID) {
+         jit_scalar_t args[] = {
+            { .pointer = isl->reset_eval_ctx },
+            { .pointer = isl->state },
+         };
+         if (!jit_vfastcall(jit, isl->reset_eval_handle, args, ARRAY_LEN(args),
+                            NULL, 0, tlab))
+            return false;
+         if (unlikely(isl->has_forces))
+            island_apply_forces_comb(isl);
+      }
+      else if (!island_call_comb(jit, m, isl, tlab))
          return false;
 
       // Signals written by always_comb blocks, and those computed from
@@ -6776,6 +7531,17 @@ static inline void island_flush_ext_outs(rt_model_t *m, rt_island_t *isl)
             sched_deposit(m, os->sig, ed->src, os->sig_offset,
                           os->width * os->nelems, 0, false);
          }
+      }
+      else if (ed->word != NULL && can_delta) {
+         // island_flush_comb_out_sig for a one-word packed output whose
+         // value is the one last scheduled
+         rt_island_sig_t *os = &(isl->sigs[ed->sig_idx]);
+         os->flags |= RT_ISIG_VHDL_SCHED;
+         if ((os->flags & RT_ISIG_LAST_OUT_VALID)
+             && os->last_out_a == *ed->word && os->last_out_b == 0
+             && !isl->has_forces && os->ext_write_watch == NULL)
+            continue;
+         island_sched_out_sig(m, isl, os);
       }
       else
          island_flush_comb_out_sig(m, isl, &(isl->sigs[ed->sig_idx]));
@@ -8163,6 +8929,15 @@ static void island_commit_sparse_entries(rt_model_t *m, rt_island_t *isl,
       uint8_t *dst = state + s->a_off + boff;
       bool changed = false;
 
+      if (unlikely(s->flags & RT_ISIG_SPEC_ROWF)) {
+         // Mode A: a whole packed row, which is clean now
+         const uint32_t rb = s->nwords * 8u;
+         uint8_t *rf = state + s->a_off + rb * s->nelems + boff / rb;
+         assert(len == rb && boff % rb == 0 && !has_forces);
+         changed = *rf != 0;
+         *rf = 0;
+      }
+
       if (unlikely(has_forces)) {
          rt_island_force_t *f =
             (rt_island_force_t *)island_find_force(isl, sig_idx);
@@ -8183,7 +8958,7 @@ static void island_commit_sparse_entries(rt_model_t *m, rt_island_t *isl,
             changed = island_commit_bytes(dst, src, len);
       }
       else
-         changed = island_commit_bytes(dst, src, len);
+         changed |= island_commit_bytes(dst, src, len);
 
       if (changed) {
          if (s->flags & RT_ISIG_COMB_READ)
@@ -8252,12 +9027,16 @@ static inline void island_commit_vhdl_desc(rt_model_t *m, rt_island_t *isl,
       island_notify_vhdl_ff_desc(m, isl, d);
 }
 
+static void island_spec_ff_unhold(rt_island_domain_t *dom);
+
 static void island_commit_vhdl_domain_mask(rt_model_t *m,
                                            rt_island_domain_t *dom,
                                            uint64_t dmask,
                                            bool any_forces)
 {
    rt_island_t *isl = dom->isl;
+   if (unlikely(dom->spec_held_w))
+      island_spec_ff_unhold(dom);
    const rt_island_ff_desc_t *descs = dom->ff_descs;
    const uint32_t n_write = dom->n_write_sigs;
    bool comb_need_eval = false;
@@ -8754,6 +9533,8 @@ bool rt_island_has_ff_commits(const rt_island_mgr_t *mgr)
 static void island_commit_domain(rt_model_t *m, rt_island_domain_t *dom)
 {
    rt_island_t *isl = dom->isl;
+   if (unlikely(dom->spec_held_w))
+      island_spec_ff_unhold(dom);
    const rt_island_ff_desc_t *descs = dom->ff_descs;
    const uint32_t n_write = dom->n_write_sigs;
    const bool has_forces = isl->has_forces;
@@ -8856,11 +9637,13 @@ bool rt_island_read_sig(rt_island_mgr_t *mgr, rt_signal_t *sig,
    if (mgr == NULL || mgr->sig_map == NULL || sig == NULL)
       return false;
 
-   const rt_island_sig_t *s = hash_get(mgr->sig_map, sig);
+   rt_island_sig_t *s = hash_get(mgr->sig_map, sig);
    if (s == NULL)
       return false;
 
    rt_island_t *isl = s->isl;
+   if (unlikely(s->flags & RT_ISIG_SPEC_ROWS))
+      island_spec_whole_read(isl, s);
    const uint32_t nwords = s->nwords;
    const uint32_t nelems = s->nelems;
    if (s->flags & RT_ISIG_STD_LOGIC9) {
@@ -9145,6 +9928,13 @@ void rt_island_on_observer_attached(rt_model_t *m, rt_signal_t *sig)
    for (; s != NULL; s = s->next_owner) {
       if (unlikely(island_wstats_on))
          island_wstat_cause(s, WB_OBSERVER);
+      // A packed sparse RAM or 2D signal with held rows of a Mode A island
+      // has no exact whole value for the observer (and a sparse RAM logs
+      // packed rows): back to Mode B, promoted again with the signal held
+      if (unlikely(s->flags & RT_ISIG_SPEC_A)
+          && (s->flags & (RT_ISIG_SPEC_ROWS | RT_ISIG_SPARSE_RAM))
+          && (s->flags & RT_ISIG_TWO_STATE))
+         island_spec_demote(s->isl, RT_ISLAND_DEOPT_ROW);
       s->flags &= ~RT_ISIG_LAST_OUT_VALID;
       if (s->flags & RT_ISIG_DIRECT_LINK)
          island_break_direct_link(m, s);

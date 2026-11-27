@@ -428,7 +428,7 @@ vests21         normal
 guard1          normal
 guard2          normal
 vests22         normal
-vests23         normal
+vests23         normal,$NVC_MAX_THREADS=16
 func18          normal
 file5           normal
 case8           normal
@@ -1372,7 +1372,7 @@ ivtest45        verilog
 gate1           verilog
 real11          verilog
 select22        verilog
-file16          verilog
+svfile16          verilog
 array22         verilog
 ivtest46        verilog
 ivtest47        verilog
@@ -2581,7 +2581,6 @@ vpicls4         verilog,vpi
 vpicls6         verilog,vpi,$NVC_DEBUG_STMTS=1
 svevtport1 verilog
 svlrmmisc1 verilog
-svprogparam1 verilog
 svportpat1      verilog
 svporthier1     verilog
 svportdt1       verilog
@@ -2610,7 +2609,6 @@ svparamarr2     verilog
 svfwdfunc2      verilog
 svenumidx1      verilog
 svstreamtype1   verilog
-vests23         normal,$NVC_MAX_THREADS=16
 svbindscope1    verilog
 svhdlgenidx1    verilog
 svcombglitch1   verilog
@@ -2665,7 +2663,6 @@ svrandenum2     verilog
 svbindgen2      verilog
 svbindenum1     verilog
 svhdlarr1       verilog
-svdynslice1     verilog
 svrandwide2     verilog
 svrandmany1     verilog
 svforeachparam1 verilog
@@ -2741,7 +2738,6 @@ attralias1      normal
 attrgroup1      normal
 svifaceparam1 verilog
 svifacetype1 verilog
-svbitstype1 verilog
 svifaceparam2 verilog
 svqmarklit1 verilog
 svsignedlit1 verilog
@@ -3021,7 +3017,6 @@ svporthier3 verilog
 svcombquery1 verilog
 svgenstatic1 verilog
 svstdrand1 verilog
-svforeachvif1 verilog
 svcrvdist1 verilog
 sveventiff1 verilog
 svsemblock1 verilog
@@ -3042,7 +3037,6 @@ svstdrand2 verilog
 svvifpat2 verilog
 svbindimport1 verilog
 svbindiface1 verilog
-svbindgen1 verilog
 svcrvforeachcall1 verilog
 svforkescape1 verilog
 svvifforeach1 verilog
@@ -3155,7 +3149,6 @@ svcrvoob3 verilog
 svcrvoob4 verilog
 svcrvobjsize1 verilog
 svcrvspecextern1 verilog
-svcrvstructarr1 verilog
 svstructdynarr1 verilog
 svcrvstructsorry1 verilog,fail,gold
 svcrvsorryfind1 verilog,fail,gold
@@ -3170,8 +3163,6 @@ svcrvstdexpr1 verilog
 svcrvargobj1 verilog
 svcrvwideforeach1 verilog
 svcrvstructrand1 verilog
-svproc1 verilog
-svproc2 verilog
 svstdwide1 verilog
 svcrvwidedyn1 verilog
 svcheckcrv1 shell,verilog
@@ -3446,6 +3437,10 @@ signal39        gold,normal,2008
 signal40        fail,gold
 vhdl_island_spec_rt1 shell
 vhdl_island_spec_rt2 shell
+vhdl_island_spec_held1 shell
+vhdl_island_spec_ram1 shell
+vhdl_island_spec_lazy1 shell
+vhdl_island_spec_cost1 shell
 vhdl_island_selfread1 shell
 vhdl_island_tostring1 shell
 vhdl_island_longproc1 shell

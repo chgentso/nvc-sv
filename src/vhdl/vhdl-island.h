@@ -94,6 +94,7 @@ typedef struct {
    uint32_t a_off;
    uint32_t b_off;
    uint32_t rt_flags;
+   uint32_t x_off;      // Mode A variant: Mode B bytes kept while not clean
 } vhdl_isl_sig_t;
 
 typedef enum {
@@ -231,6 +232,7 @@ typedef struct _vhdl_island_ctx {
    vhdl_rej_note_t *notes;   // NVC_DUMP_ISLANDS: ejected processes
    uint32_t       n_notes;
    uint32_t       cap_notes;
+   int            refs;     // Deferred Mode A functions still to lower
 } vhdl_island_ctx_t;
 
 vhdl_island_ctx_t *vhdl_island_analyze(tree_t block, const tree_t *ancestors,

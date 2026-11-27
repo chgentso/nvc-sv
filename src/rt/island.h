@@ -48,7 +48,32 @@ typedef enum {
    RT_ISIG_ACT            = (1u << 19),   // Change byte read by VHDL comb
    RT_ISIG_SPEC_A         = (1u << 20),   // Island runs its Mode A variant
    RT_ISIG_SPEC_MIX       = (1u << 21),   // A direct target differs in layout
+   RT_ISIG_SPEC_HELD      = (1u << 22),   // Mode A: kept as Mode B bytes
+   RT_ISIG_SPEC_ROWF      = (1u << 23),   // Mode A layout: row clean bytes
+   RT_ISIG_SPEC_ROWS      = (1u << 24),   // Mode A: some rows may be held
+   RT_ISIG_MIX_MEMO       = (1u << 25),   // mix_memo is valid
 } rt_island_sig_flags_t;
+
+// Speculative Mode A clean tracking (NVC_ISLAND_SPEC).  The Mode A state of
+// an island has one "held" byte per island signal at
+// RT_ISLAND_SPEC_HELD_OFF(hdr_bytes): a packed signal whose value is not all
+// '0'/'1' is held, its exact Mode B bytes kept at its x_off in the same
+// state half (rt_island_bind_sig_a) and its packed words unused.  The Mode A
+// functions test the held byte before every load or store of a packed
+// signal and return RT_ISLAND_DEOPT_UNCLEAN when it is set.  A 2D signal
+// with RT_ISIG_SPEC_ROWF has one byte per row after its packed rows (in each
+// state half, rounded up to 8 bytes): a set byte means the row is held (its
+// Mode B bytes at x_off + row * width); loads of the row and partial stores
+// into it return RT_ISLAND_DEOPT_ROW, a store of the whole row clears it.
+// A sparse RAM keeps its row bytes after its packed rows in its own area.
+// A flip-flop function storing a whole value into a held signal writes
+// its packed next value and sets the signal's request byte (at
+// RT_ISLAND_SPEC_REQ_OFF): the commit packs the signal again.
+
+#define RT_ISLAND_SPEC_HELD_OFF(hdr)   ALIGN_UP((hdr), 8u)
+#define RT_ISLAND_SPEC_REQ_OFF(hdr, n) (RT_ISLAND_SPEC_HELD_OFF(hdr) \
+                                        + ALIGN_UP((n), 8u))
+#define RT_ISLAND_SPEC_ROWF_BYTES(n)   ALIGN_UP((n), 8u)
 
 // Process activity of VHDL island combinational functions: the state of a
 // VHDL island with combinational processes starts with one change byte per
@@ -133,10 +158,11 @@ typedef struct {
 } rt_island_in_desc_t;
 
 typedef struct {
-   const uint8_t *src;
-   const uint8_t *cur;
-   uint32_t       nbytes;
-   uint32_t       sig_idx;
+   const uint8_t  *src;
+   const uint8_t  *cur;
+   const uint64_t *word;   // Packed one-word output with a memo (Mode A)
+   uint32_t        nbytes;
+   uint32_t        sig_idx;
 } rt_island_ext_out_desc_t;
 
 typedef struct _rt_island_spec rt_island_spec_t;
@@ -192,6 +218,8 @@ typedef struct _rt_island_sig {
    uint64_t                last_out_b;
    uint64_t               *last_out_words;
    uint64_t                gen_key_hash;
+   uint64_t                mix_memo;   // Packed source word last unpacked
+                                       // into this direct target
 } rt_island_sig_t;
 
 typedef struct _rt_island_domain {
@@ -214,6 +242,7 @@ typedef struct _rt_island_domain {
    bool                      needs_presync;
    bool                      reset_clk_edge;
    bool                      reset_rst_edge;
+   bool                      spec_held_w;   // Writes a held signal
    uint32_t                 *write_sigs;
    rt_island_ff_desc_t      *ff_descs;
    uint32_t                  n_write_sigs;
@@ -300,8 +329,12 @@ typedef struct _rt_island {
    bool                   is_vhdl;
    rt_island_spec_t      *spec;     // Speculative Mode A variant or NULL
    bool                   spec_a;   // Running the Mode A variant now
+   bool                   spec_held;   // Mode A with held signals
    bool                   act_on;       // Comb function tests change bytes
    bool                   direct_act;   // A direct comb desc has RT_IDIR_ACT
+   jit_handle_t           reset_eval_handle;
+   void                  *reset_eval_ctx;
+   bool                   skip_sv_reset;
 } rt_island_t;
 
 // Speculative Mode A (NVC_ISLAND_SPEC): a VHDL island lowered in Mode B
@@ -321,12 +354,18 @@ typedef enum {
    RT_ISLAND_DEOPT_INPUT   = 6,   // (runtime) input value not '0'/'1'
    RT_ISLAND_DEOPT_PUT     = 7,   // (runtime) force, deposit or release
    RT_ISLAND_DEOPT_STRESS  = 8,   // (runtime) NVC_ISLAND_SPEC_STRESS
+   RT_ISLAND_DEOPT_UNCLEAN = 9,   // load or store of a held signal
+   RT_ISLAND_DEOPT_ROW     = 10,  // load or partial store of a held row
+   RT_ISLAND_DEOPT_NOVAR   = 11,  // Mode A function could not be lowered
    RT_ISLAND_DEOPT_COUNT
 } rt_island_deopt_t;
 
 struct _rt_island_spec {
    jit_handle_t  eval_handle;     // Mode A comb function
    jit_handle_t *ff_handles;      // Mode A flip-flop function per domain
+   jit_handle_t  eval_handle_h;   // The same testing held bytes ("$ah")
+   jit_handle_t *ff_handles_h;
+   bool          checks;          // Running the "$ah" functions
    uint32_t      state_bytes;     // Mode A state size (one half)
    uint32_t      stride;          // RT_ISLAND_STRIDE(state_bytes)
    uint32_t      hdr_bytes;       // Leading bytes copied unchanged
@@ -353,6 +392,26 @@ struct _rt_island_spec {
    uint64_t      ticks_a;         // Ticks spent in Mode A
    uint64_t      promotions;
    uint64_t      failed_checks;
+   // Clean tracking (RT_ISLAND_SPEC_HELD_OFF)
+   uint32_t     *x_off;           // Mode B bytes of a held packed signal
+   uint32_t      sparse_log_off;  // Mode A sparse log (0: no sparse RAM)
+   uint32_t      sparse_log_off_b;
+   uint32_t      total_bytes;     // Mode A state including sparse RAMs
+   uint32_t      total_bytes_b;   // Mode B state including sparse RAMs
+   uint32_t      n_unclean;       // Unclean read deopts so far (back-off)
+   uint32_t      n_held;          // Held signals now (Mode A)
+   uint32_t     *held_list;       // Their indices (island_spec_rebuild)
+   uint32_t      n_held_list;
+   uint32_t      n_held_rows;     // Held rows at the last promotion
+   uint64_t      holds;           // Signals held after promotion
+   uint64_t      unholds;
+   // Cost of promotion (island_spec_try_promote, island_spec_demote)
+   uint64_t      unclean_since;   // Tick+1 of the first check with held
+                                  // values since the last clean one
+   uint32_t      n_quick;         // Successive deopts soon after promotion
+   bool          cost_pinned;     // Retried only every ISLAND_SPEC_COST_RETRY
+   uint64_t      cost_pins;
+   uint64_t      hold_waits;      // Checks that waited before holding
 };
 
 typedef struct _rt_island_mgr rt_island_mgr_t;
@@ -423,6 +482,8 @@ void *rt_island_begin(rt_model_t *m, rt_island_mgr_t **mgr_p,
                       jit_handle_t eval_handle, void *inst_ctx,
                       uint32_t state_bytes, uint32_t nsigs,
                       uint32_t ndomains);
+void rt_island_set_reset_comb(void *handle, jit_handle_t reset_handle,
+                              void *reset_ctx, bool skip_reset);
 void rt_island_set_sparse(void *handle, uint32_t sparse_log_off,
                           uint32_t total_state_bytes);
 void rt_island_sparse_write(void *isl_ptr, uint32_t sig_idx,
@@ -443,11 +504,13 @@ void rt_island_add_domain_write(void *handle, uint32_t dom_idx,
                                 uint32_t sig_idx);
 void rt_island_finish(void *handle);
 void rt_island_set_variant_a(void *handle, jit_handle_t eval_handle,
-                             uint32_t state_bytes, uint32_t hdr_bytes);
+                             jit_handle_t eval_handle_h,
+                             uint32_t state_bytes, uint32_t hdr_bytes,
+                             uint32_t sparse_log_off, uint32_t total_bytes);
 void rt_island_bind_sig_a(void *handle, uint32_t idx, uint32_t a_off,
-                          uint32_t a_flags, uint32_t b_bytes);
+                          uint32_t a_flags, uint32_t b_bytes, uint32_t x_off);
 void rt_island_add_domain_a(void *handle, uint32_t dom_idx,
-                            jit_handle_t ff_handle);
+                            jit_handle_t ff_handle, jit_handle_t ff_handle_h);
 bool rt_island_spec_pack(const rt_island_t *isl, const uint8_t *b_state,
                          uint8_t *a_state);
 void rt_island_spec_unpack(const rt_island_t *isl, const uint8_t *a_state,

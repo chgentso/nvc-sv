@@ -47,6 +47,10 @@ typedef struct {
    ident_t               eval_sym;
    bool                  comb_shared;
    bool                  emit_comb;
+   ident_t               reset_eval_sym;
+   bool                  reset_comb_shared;
+   bool                  emit_reset_comb;
+   bool                  skip_sv_reset;
 } vlog_island_m2_t;
 
 typedef struct {

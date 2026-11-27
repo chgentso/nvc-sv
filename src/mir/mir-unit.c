@@ -289,6 +289,25 @@ void mir_unit_free(mir_unit_t *mu)
    mir_unit_free_memory(mu);
 }
 
+ident_t mir_get_unit_name(mir_unit_t *mu)
+{
+   return mu->name;
+}
+
+// Give DST, a unit being built by its deferred lowering function, the body
+// of SRC, an unregistered unit built under another name, and free SRC
+void mir_unit_move(mir_unit_t *dst, mir_unit_t *src)
+{
+   assert(dst->context == src->context);
+   assert(dst->shape == NULL && src->shape == NULL);
+
+   mir_unit_t tmp = *dst;
+   *dst = *src;
+   dst->name = tmp.name;
+   *src = tmp;
+   mir_unit_free_memory(src);
+}
+
 void mir_put_unit(mir_context_t *mc, mir_unit_t *mu)
 {
    assert(mu->context == mc);

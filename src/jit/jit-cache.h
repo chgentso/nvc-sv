@@ -81,4 +81,7 @@ void jit_cache_clear(void);
 void jit_cache_hex(const jit_cache_key_t *key, char out[65]);
 void jit_cache_sha256(const void *data, size_t len, uint8_t out[32]);
 
+const char *jit_cache_binary_id(void);
+char *jit_cache_file_id(const char *path);
+
 #endif  // _JIT_CACHE_H

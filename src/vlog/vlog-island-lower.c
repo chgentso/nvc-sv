@@ -1132,9 +1132,21 @@ vlog_island_lower_ctx_t *vlog_island_lower_prepare(vlog_node_t body,
       ident_t unit_base = ident_runtil(vlog_ident(body), '#');
 
       if (m2->n_fused_comb > 0) {
-         if (can_share
-             && m2_procs_are_pure_state(body, qual, isl, m2->fused_proc,
-                                        isl->topo_order, isl->ntopo)) {
+         bool has_always_comb = false, has_assign = false;
+         for (uint32_t c = 0; c < isl->ntopo; c++) {
+            const uint32_t pidx = isl->topo_order[c];
+            if (!m2->fused_proc[pidx])
+               continue;
+            if (isl->procs[pidx].kind == IPROC_COMB)
+               has_always_comb = true;
+            else
+               has_assign = true;
+         }
+
+         const bool pure_state = can_share
+            && m2_procs_are_pure_state(body, qual, isl, m2->fused_proc,
+                                       isl->topo_order, isl->ntopo);
+         if (pure_state) {
             LOCAL_TEXT_BUF key_tb = tb_new();
             tb_printf(key_tb, "comb:%u|%s|topo:", ii, tb_get(spec_tb));
             for (uint32_t c = 0; c < isl->ntopo; c++) {
@@ -1150,6 +1162,29 @@ vlog_island_lower_ctx_t *vlog_island_lower_prepare(vlog_node_t body,
             m2->comb_shared = false;
             m2->emit_comb = true;
             m2->eval_sym = ident_sprintf("%s.$island_comb%u", istr(qual), ii);
+         }
+
+         if (has_always_comb) {
+            if (!has_assign)
+               m2->skip_sv_reset = true;
+            else if (pure_state) {
+               LOCAL_TEXT_BUF rkey_tb = tb_new();
+               tb_printf(rkey_tb, "rcomb:%u|%s|topo:", ii, tb_get(spec_tb));
+               for (uint32_t c = 0; c < isl->ntopo; c++) {
+                  if (m2->fused_proc[isl->topo_order[c]])
+                     tb_printf(rkey_tb, "%u,", isl->topo_order[c]);
+               }
+               m2->reset_comb_shared = true;
+               m2->reset_eval_sym = m2_register_shared_sym(
+                  mc, unit_base, "reset_comb", tb_get(rkey_tb),
+                  &m2->emit_reset_comb);
+            }
+            else {
+               m2->reset_comb_shared = false;
+               m2->emit_reset_comb = true;
+               m2->reset_eval_sym = ident_sprintf("%s.$island_reset_comb%u",
+                                                  istr(qual), ii);
+            }
          }
       }
 
@@ -1316,6 +1351,27 @@ void vlog_island_lower_emit_init(vlog_island_lower_ctx_t *ctx,
                                            t_ptr, MIR_NULL_STAMP,
                                            b_args, ARRAY_LEN(b_args));
 
+      if (m2->skip_sv_reset || m2->reset_eval_sym != NULL) {
+         mir_value_t r_cl;
+         if (m2->reset_eval_sym != NULL) {
+            mir_value_t rcl_args[] = { self };
+            r_cl = mir_build_closure(inst_mu, m2->reset_eval_sym, t_offset,
+                                     rcl_args, 1);
+         }
+         else
+            r_cl = mir_const(inst_mu, t_offset, 0);
+
+         mir_value_t r_args[] = {
+            handle,
+            r_cl,
+            mir_const(inst_mu, t_offset, m2->skip_sv_reset ? 1 : 0),
+         };
+         mir_value_t r_res = mir_build_fcall(
+            inst_mu, ident_new("__sv_island_set_reset_comb"),
+            t_offset, MIR_NULL_STAMP, r_args, ARRAY_LEN(r_args));
+         mir_build_consume(inst_mu, r_res);
+      }
+
       bool has_gen_locals = false;
       for (uint32_t i = 0; i < isl->nsigs; i++) {
          if (isl->sigs[i].gen_path != NULL) {
@@ -1473,6 +1529,11 @@ void vlog_island_lower_emit_funcs(vlog_island_lower_ctx_t *ctx,
       if (m2->n_fused_comb > 0 && m2->emit_comb)
          vlog_lower_island_comb_fn(mc, body, qual, m2->eval_sym,
                                    m2->isl, m2->fused_proc, m2->comb_shared);
+
+      if (m2->reset_eval_sym != NULL && m2->emit_reset_comb)
+         vlog_lower_island_reset_comb_fn(mc, body, qual, m2->reset_eval_sym,
+                                         m2->isl, m2->fused_proc,
+                                         m2->reset_comb_shared);
 
       for (uint32_t d = 0; d < m2->isl->ndomains; d++) {
          if (m2->doms[d].n_fused_ff > 0 && m2->doms[d].emit_fn)

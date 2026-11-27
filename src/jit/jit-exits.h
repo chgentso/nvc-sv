@@ -154,6 +154,8 @@ void x_sv_poll_fired(void);
 struct _ffi_closure;
 void *x_sv_island_begin(struct _ffi_closure *closure, uint32_t state_bytes,
                         uint32_t nsigs, uint32_t ndomains);
+void x_sv_island_set_reset_comb(void *handle, struct _ffi_closure *closure,
+                                bool skip_reset);
 void x_sv_island_set_sparse(void *handle, uint32_t sparse_log_off,
                             uint32_t total_state_bytes);
 void x_sv_island_sparse_write(void *isl_ptr, uint32_t sig_idx,
@@ -177,11 +179,15 @@ void x_sv_island_add_domain_write(void *handle, uint32_t dom_idx,
                                   uint32_t sig_idx);
 void x_sv_island_finish(void *handle);
 void x_sv_island_set_variant_a(void *handle, struct _ffi_closure *closure,
-                               uint32_t state_bytes, uint32_t hdr_bytes);
+                               struct _ffi_closure *closure_h,
+                               uint32_t state_bytes, uint32_t hdr_bytes,
+                               uint32_t sparse_log_off, uint32_t total_bytes);
 void x_sv_island_bind_sig_a(void *handle, uint32_t idx, uint32_t a_off,
-                            uint32_t a_flags, uint32_t b_bytes);
+                            uint32_t a_flags, uint32_t b_bytes,
+                            uint32_t x_off);
 void x_sv_island_add_domain_a(void *handle, uint32_t dom_idx,
-                              struct _ffi_closure *ff_closure);
+                              struct _ffi_closure *ff_closure,
+                              struct _ffi_closure *ff_closure_h);
 void x_sv_island_mark_ext_read(sig_shared_t *ss);
 int64_t x_sv_event_triggered(void *event);
 void x_sv_nba_store(void *dest, const void *value, int64_t bytes,
@@ -222,6 +228,5 @@ int64_t x_sv_class_oid(void);
 void x_sv_unique_flush(void *ctx, int64_t proc_id);
 void x_sv_unique_warn(void *ctx, int64_t proc_id, const uint8_t *msg,
                       int32_t len, object_t *where);
-int64_t x_sv_island_in_reset(void);
 
 #endif  // _JIT_EXITS_H

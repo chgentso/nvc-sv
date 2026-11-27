@@ -2530,6 +2530,95 @@ START_TEST(test_cache_multi_instance)
 }
 END_TEST
 
+START_TEST(test_cache_binary_id)
+{
+   const char *id1 = jit_cache_binary_id();
+   const char *id2 = jit_cache_binary_id();
+   ck_assert_ptr_nonnull(id1);
+   ck_assert_uint_gt(strlen(id1), 0);
+   ck_assert_str_eq(id1, id2);
+#if defined(__linux__)
+   ck_assert(strncmp(id1, "elf-build-id:", 13) == 0
+             || strncmp(id1, "file-sha256:", 12) == 0);
+#endif
+
+   char tmpl[] = "/tmp/nvc-jitcache-binid-XXXXXX";
+   char *dir = mkdtemp(tmpl);
+   ck_assert_ptr_nonnull(dir);
+
+   char *p1 LOCAL = xasprintf("%s/bin1", dir);
+   char *p2 LOCAL = xasprintf("%s/bin2", dir);
+   char *p3 LOCAL = xasprintf("%s/bin3", dir);
+
+   FILE *fp = fopen(p1, "wb");
+   ck_assert_ptr_nonnull(fp);
+   fwrite("nvc-binary-content-A", 1, 20, fp);
+   fclose(fp);
+
+   fp = fopen(p2, "wb");
+   ck_assert_ptr_nonnull(fp);
+   fwrite("nvc-binary-content-B", 1, 20, fp);
+   fclose(fp);
+
+   fp = fopen(p3, "wb");
+   ck_assert_ptr_nonnull(fp);
+   fwrite("nvc-binary-content-A", 1, 20, fp);
+   fclose(fp);
+
+   char *fid1 LOCAL = jit_cache_file_id(p1);
+   char *fid2 LOCAL = jit_cache_file_id(p2);
+   char *fid3 LOCAL = jit_cache_file_id(p3);
+   ck_assert_ptr_nonnull(fid1);
+   ck_assert_ptr_nonnull(fid2);
+   ck_assert_ptr_nonnull(fid3);
+   ck_assert_str_eq(fid1, fid3);
+   ck_assert_str_ne(fid1, fid2);
+
+   opt_set_int(OPT_JIT_CACHE, 1);
+   opt_set_str(OPT_JIT_CACHE_DIR, dir);
+
+   jit_t *j = jit_new(NULL, NULL);
+   const char *text =
+      "    RECV    R0, #0    \n"
+      "    ADD     R0, R0, #1    \n"
+      "    SEND    #0, R0    \n"
+      "    RET               \n";
+   jit_handle_t h = jit_assemble(j, ident_new("BINID_FN"), text);
+   jit_func_t *f = jit_get_func(j, h);
+
+   jit_cache_cfg_t cfg = { .code_model = 1, .reloc_mode = 0 };
+   char *fp1 LOCAL = xasprintf("1.24:same-sha:%s", fid1);
+   char *fp2 LOCAL = xasprintf("1.24:same-sha:%s", fid2);
+   char *fp3 LOCAL = xasprintf("1.24:same-sha:%s", fid3);
+
+   jit_cache_t *c1 = jit_cache_new("x86_64-pc-linux-gnu", "", "", fp1, &cfg);
+   jit_cache_t *c2 = jit_cache_new("x86_64-pc-linux-gnu", "", "", fp2, &cfg);
+   jit_cache_t *c3 = jit_cache_new("x86_64-pc-linux-gnu", "", "", fp3, &cfg);
+
+   jit_cache_key_t k1, k2, k3;
+   void **r1 = NULL, **r2 = NULL, **r3 = NULL;
+   unsigned nr1 = 0, nr2 = 0, nr3 = 0;
+   jit_cache_prepare(c1, f, false, 1, &k1, &r1, &nr1, NULL);
+   jit_cache_prepare(c2, f, false, 1, &k2, &r2, &nr2, NULL);
+   jit_cache_prepare(c3, f, false, 1, &k3, &r3, &nr3, NULL);
+
+   ck_assert_mem_eq(k1.bytes, k3.bytes, sizeof(k1.bytes));
+   ck_assert_int_ne(memcmp(k1.bytes, k2.bytes, sizeof(k1.bytes)), 0);
+
+   free(r1);
+   free(r2);
+   free(r3);
+   jit_cache_free(c1);
+   jit_cache_free(c2);
+   jit_cache_free(c3);
+   jit_free(j);
+   (void)unlink(p1);
+   (void)unlink(p2);
+   (void)unlink(p3);
+   rm_cache_dir(dir);
+}
+END_TEST
+
 #ifdef ENABLE_LLVM
 START_TEST(test_cache_cold_warm_and_corrupt)
 {
@@ -2786,6 +2875,7 @@ Suite *get_jit_tests(void)
    tcase_add_test(tc, test_cache_eviction);
    tcase_add_test(tc, test_island_cpool);
    tcase_add_test(tc, test_cache_multi_instance);
+   tcase_add_test(tc, test_cache_binary_id);
 #ifdef ENABLE_LLVM
    tcase_add_test(tc, test_llvm_no_slp);
    tcase_add_test(tc, test_cache_cold_warm_and_corrupt);

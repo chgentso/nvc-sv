@@ -5107,6 +5107,14 @@ static void sv_island_begin(jit_func_t *func, jit_anchor_t *caller,
                                        (uint32_t)args[3].integer);
 }
 
+static void sv_island_set_reset_comb(jit_func_t *func, jit_anchor_t *caller,
+                                     jit_scalar_t *args, tlab_t *tlab)
+{
+   x_sv_island_set_reset_comb(args[0].pointer, args[1].pointer,
+                              args[2].integer != 0);
+   args[0].integer = 0;
+}
+
 static void sv_island_set_sparse(jit_func_t *func, jit_anchor_t *caller,
                                  jit_scalar_t *args, tlab_t *tlab)
 {
@@ -5204,8 +5212,11 @@ static void sv_island_set_variant_a(jit_func_t *func, jit_anchor_t *caller,
                                     jit_scalar_t *args, tlab_t *tlab)
 {
    x_sv_island_set_variant_a(args[0].pointer, args[1].pointer,
-                             (uint32_t)args[2].integer,
-                             (uint32_t)args[3].integer);
+                             args[2].pointer,
+                             (uint32_t)args[3].integer,
+                             (uint32_t)args[4].integer,
+                             (uint32_t)args[5].integer,
+                             (uint32_t)args[6].integer);
    args[0].integer = 0;
 }
 
@@ -5214,7 +5225,7 @@ static void sv_island_bind_sig_a(jit_func_t *func, jit_anchor_t *caller,
 {
    x_sv_island_bind_sig_a(args[0].pointer, (uint32_t)args[1].integer,
                           (uint32_t)args[2].integer, (uint32_t)args[3].integer,
-                          (uint32_t)args[4].integer);
+                          (uint32_t)args[4].integer, (uint32_t)args[5].integer);
    args[0].integer = 0;
 }
 
@@ -5222,7 +5233,7 @@ static void sv_island_add_domain_a(jit_func_t *func, jit_anchor_t *caller,
                                    jit_scalar_t *args, tlab_t *tlab)
 {
    x_sv_island_add_domain_a(args[0].pointer, (uint32_t)args[1].integer,
-                            args[2].pointer);
+                            args[2].pointer, args[3].pointer);
    args[0].integer = 0;
 }
 
@@ -5246,29 +5257,12 @@ static void sv_unique_pending_i(jit_func_t *func, jit_anchor_t *caller,
    args[0].integer = relaxed_load(&sv_unique_pending);
 }
 
-static void sv_island_comb_entry(jit_func_t *func, jit_anchor_t *caller,
-                                 jit_scalar_t *args, tlab_t *tlab)
-{
-   // -1 during the reset evaluation, else the number of queued unique
-   // violation reports
-   if (x_sv_island_in_reset())
-      args[0].integer = -1;
-   else
-      args[0].integer = relaxed_load(&sv_unique_pending);
-}
-
 static void sv_unique_warn(jit_func_t *func, jit_anchor_t *caller,
                            jit_scalar_t *args, tlab_t *tlab)
 {
    x_sv_unique_warn(args[0].pointer, args[1].integer, args[2].pointer,
                     (int32_t)args[3].integer, args[4].pointer);
    args[0].integer = 0;
-}
-
-static void sv_island_in_reset(jit_func_t *func, jit_anchor_t *caller,
-                               jit_scalar_t *args, tlab_t *tlab)
-{
-   args[0].integer = x_sv_island_in_reset();
 }
 
 static void sv_event_triggered(jit_func_t *func, jit_anchor_t *caller,
@@ -7056,13 +7050,13 @@ jit_entry_fn_t jit_bind_intrinsic(ident_t name)
       island_set_sparse_i = NULL, island_sparse_write_i = NULL,
       island_variant_a_i = NULL, island_bind_a_i = NULL,
       island_add_dom_a_i = NULL, unique_flush_i = NULL, unique_warn_i = NULL,
-      island_in_reset_i = NULL, unique_pending_i = NULL,
-      comb_entry_i = NULL;
+      unique_pending_i = NULL, island_set_reset_i = NULL;
 
    INIT_ONCE({
          dispatch_func_i    = ident_new("__nvc_protected_dispatch_func");
          dispatch_proc_i    = ident_new("__nvc_protected_dispatch_proc");
          island_begin_i     = ident_new("__sv_island_begin");
+         island_set_reset_i = ident_new("__sv_island_set_reset_comb");
          island_bind_i      = ident_new("__sv_island_bind_sig");
          island_bind_gen_i  = ident_new("__sv_island_bind_gen_sig");
          island_gen_key_i   = ident_new("__sv_island_set_gen_key");
@@ -7080,8 +7074,6 @@ jit_entry_fn_t jit_bind_intrinsic(ident_t name)
          unique_flush_i     = ident_new("__sv_unique_flush");
          unique_warn_i      = ident_new("__sv_unique_warn");
          unique_pending_i   = ident_new("__sv_unique_pending");
-         comb_entry_i       = ident_new("__sv_island_comb_entry");
-         island_in_reset_i  = ident_new("__sv_island_in_reset");
 
          const bool want_intrinsics = !!opt_get_int(OPT_JIT_INTRINSICS);
 
@@ -7128,6 +7120,8 @@ jit_entry_fn_t jit_bind_intrinsic(ident_t name)
       return protected_dispatch_proc;
    else if (name == island_begin_i)
       return sv_island_begin;
+   else if (name == island_set_reset_i)
+      return sv_island_set_reset_comb;
    else if (name == island_bind_i)
       return sv_island_bind_sig;
    else if (name == island_bind_gen_i)
@@ -7162,10 +7156,6 @@ jit_entry_fn_t jit_bind_intrinsic(ident_t name)
       return sv_unique_warn;
    else if (name == unique_pending_i)
       return sv_unique_pending_i;
-   else if (name == comb_entry_i)
-      return sv_island_comb_entry;
-   else if (name == island_in_reset_i)
-      return sv_island_in_reset;
 
    for (const jit_intrinsic_t *it = intrinsic_list; it->name; it++) {
       if (it->ident == name)
