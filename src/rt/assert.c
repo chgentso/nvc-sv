@@ -77,6 +77,7 @@ static format_part_t   *format[SEVERITY_FAILURE + 1];
 static vhdl_severity_t  exit_severity = SEVERITY_FAILURE;
 static vhdl_severity_t  status_severity = SEVERITY_ERROR;
 static unsigned         counts[SEVERITY_FAILURE + 1];
+static unsigned         report_counts[SEVERITY_FAILURE + 1];
 static unsigned         enable_mask = ~0u;
 
 static void free_format(format_part_t *f)
@@ -394,7 +395,8 @@ void notify_assert_hook(diag_t *d, vhdl_severity_t severity)
                      assert_hook_context);
 }
 
-void emit_vhdl_diag(diag_t *d, vhdl_severity_t severity)
+static void emit_vhdl_diag_internal(diag_t *d, vhdl_severity_t severity,
+                                    bool count_assert)
 {
    notify_assert_hook(d, severity);
 
@@ -407,17 +409,21 @@ void emit_vhdl_diag(diag_t *d, vhdl_severity_t severity)
 
    if (severity >= exit_severity)
       jit_abort_with_status(EXIT_FAILURE);
-   else
+   else if (count_assert)
       relaxed_add(&counts[severity], 1);
+   else
+      relaxed_add(&report_counts[severity], 1);
+}
+
+void emit_vhdl_diag(diag_t *d, vhdl_severity_t severity)
+{
+   emit_vhdl_diag_internal(d, severity, true);
 }
 
 void x_report(const uint8_t *msg, int32_t msg_len, int8_t severity,
               object_t *where)
 {
    assert(severity <= SEVERITY_FAILURE);
-
-   if (!(enable_mask & (1 << severity)))
-      return;
 
    const diag_level_t level = get_diag_severity(severity);
 
@@ -435,7 +441,7 @@ void x_report(const uint8_t *msg, int32_t msg_len, int8_t severity,
       diag_show_source(d, false);
    }
 
-   emit_vhdl_diag(d, severity);
+   emit_vhdl_diag_internal(d, severity, false);
 }
 
 void x_assert_fail(const uint8_t *msg, int32_t msg_len, int8_t severity,
@@ -545,7 +551,7 @@ bool get_vhdl_assert_enable(vhdl_severity_t severity)
 int get_vhdl_assert_exit_status(void)
 {
    for (int s = status_severity; s <= SEVERITY_FAILURE; s++) {
-      if (counts[s] > 0)
+      if (counts[s] > 0 || report_counts[s] > 0)
          return EXIT_FAILURE;
    }
 
