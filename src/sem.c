@@ -5537,7 +5537,7 @@ static bool sem_check_port_map(tree_t t, tree_t unit, nametab_t *tab)
       ok &= sem_check_port_actual(formals, nformals, actual, unit, i,
                                   is_binding, tab);
 
-      if (!ok && tree_subkind(actual) == P_POS && i >= nformals)
+      if (!ok && tree_subkind(actual) == P_POS && tree_pos(actual) >= nformals)
          break;   // Prevent useless repeated errors
    }
 
@@ -5584,18 +5584,15 @@ static bool sem_check_generic_actual(formal_map_t *formals, int nformals,
    case P_POS:
       {
          pos = tree_pos(param);
-         if (pos >= nformals)
+         if (pos >= nformals) {
+            int nexplicit = 0;
+            for (int j = 0; j < nformals; j++) {
+               if (!(tree_flags(formals[j].decl) & TREE_F_PREDEFINED))
+                  nexplicit++;
+            }
             sem_error(param, "found at least %d positional actuals but %s "
-                      "has only %d generic%s", pos + 1, istr(tree_ident(unit)),
-                      nformals, nformals == 1 ? "" : "s");
-         else if (tree_flags(formals[pos].decl) & TREE_F_PREDEFINED) {
-            diag_t *d = diag_new(DIAG_WARN, tree_loc(param));
-            diag_printf(d, "positional generic actual is associated with "
-                        "implicit generic subprogram %s for type %s",
-                        istr(tree_ident(formals[pos].decl)),
-                        type_pp(tree_type(tree_port(formals[pos].decl, 0))));
-            diag_hint(d, NULL, "use a named association if this was intended");
-            diag_emit(d);
+                      "has only %d generic%s", nth + 1, istr(tree_ident(unit)),
+                      nexplicit, nexplicit == 1 ? "" : "s");
          }
       }
       break;
@@ -5918,7 +5915,7 @@ static bool sem_check_generic_map(tree_t t, tree_t unit, nametab_t *tab)
       tree_t actual = tree_genmap(t, i);
       ok &= sem_check_generic_actual(formals, nformals, actual, unit, i, tab);
 
-      if (!ok && tree_subkind(actual) == P_POS && i >= nformals)
+      if (!ok && tree_subkind(actual) == P_POS && tree_pos(actual) >= nformals)
          break;   // Prevent useless repeated errors
    }
 

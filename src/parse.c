@@ -4836,6 +4836,10 @@ static void p_generic_association_list(tree_t map, tree_t unit)
 
    int pos = 0;
    do {
+      while (pos < ngenerics
+             && (tree_flags(tree_generic(unit, pos)) & TREE_F_PREDEFINED))
+         pos++;
+
       tree_t g = pos < ngenerics ? tree_generic(unit, pos) : NULL;
       tree_t elem = unit != NULL && unit == black_box_comp
          ? p_inferred_association(unit, pos++, F_GENERIC_MAP)
