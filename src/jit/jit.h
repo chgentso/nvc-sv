@@ -98,6 +98,7 @@ mir_context_t *jit_get_mir(jit_t *j);
 tlab_t *tlab_acquire(jit_t *j);
 void tlab_release(jit_t *j, tlab_t *t);
 bool jit_is_fused_proc(jit_t *j, ident_t name);
+ident_t jit_last_island_proc(void);
 
 void *jit_mspace_alloc(size_t size) RETURNS_NONNULL;
 void *tlab_alloc(tlab_t *t, size_t size) RETURNS_NONNULL;

@@ -37,6 +37,7 @@
 #include "rt/model.h"
 #include "rt/mtprof.h"
 #include "rt/random.h"
+#include "rt/rorder.h"
 #include "rt/structs.h"
 #include "rt/sva.h"
 #include "thread.h"
@@ -212,6 +213,7 @@ typedef struct _rt_model {
    sva_batch_list_t   sva_batch_tmp;
    rt_deferred_t     *deferred;
    rt_island_mgr_t   *islands;
+   bool               has_fused;
    heap_t            *eventq_heap;
    ihash_t           *res_memo;
    rt_watch_t        *watches;
@@ -280,6 +282,7 @@ static void pending_clear(rt_pending_t *p, unsigned slot);
    __model_entry(m, &__save);                                           \
 
 static __thread rt_model_t *__model = NULL;
+static hash_t *fused_keys = NULL;   // Start order of fused processes
 
 static bool __trace_on = false;
 
@@ -867,6 +870,30 @@ rt_proc_t *get_active_proc(void)
    return container_of(obj, rt_proc_t, wakeable);
 }
 
+int64_t model_output_key(bool *verilog)
+{
+   // The output of a process is written in the order processes start,
+   // see rorder.c
+   rt_wakeable_t *obj = get_active_wakeable();
+   if (obj == NULL || obj->kind != W_PROC)
+      return -1;
+
+   rt_proc_t *p = container_of(obj, rt_proc_t, wakeable);
+   *verilog = p->verilog;
+   return p->create_seq;
+}
+
+int64_t model_fused_proc_key(ident_t name)
+{
+   // Also called on island worker threads which have no current model
+   hash_t *keys = load_acquire(&fused_keys);
+   if (keys == NULL)
+      return -1;
+
+   void *key = hash_get(keys, name);
+   return key == NULL ? -1 : (uintptr_t)key;
+}
+
 rt_scope_t *get_active_scope(rt_model_t *m)
 {
    return model_thread(m)->active_scope;
@@ -943,6 +970,12 @@ static void sv_poll_free(void);
 
 void model_free(rt_model_t *m)
 {
+   rorder_disable();
+   if (fused_keys != NULL) {
+      hash_free(fused_keys);
+      fused_keys = NULL;
+   }
+
    sv_poll_free();
    for (rt_mixed_bridge_t *b = m->mixed_bridges, *tmp; b; b = tmp) {
       tmp = b->next;
@@ -2013,6 +2046,11 @@ static void run_process_inner(rt_model_t *m, rt_proc_t *proc)
    if (unlikely(sv_unique_pending > 0))
       sv_unique_flush_proc(proc);
 
+   // The output of a Verilog process may depend on what another one
+   // wrote before it in the same step: written now, it keeps its order
+   if (unlikely(rorder_sv_pending > 0) && proc->verilog)
+      rorder_flush_window();
+
    model_thread_t *thread = model_thread(m);
    assert(thread->tlab != NULL);
    assert(thread->tlab->alloc == 0);
@@ -2105,15 +2143,33 @@ static void run_process(rt_model_t *m, rt_proc_t *proc)
    MTP_LEAVE(prev);
 }
 
-static bool scope_precedes(rt_scope_t *child, rt_proc_t *proc)
+static bool tree_precedes(tree_t a, tree_t b)
 {
-   const loc_t *cl = tree_loc(child->where), *pl = tree_loc(proc->where);
-   if (loc_invalid_p(cl) || loc_invalid_p(pl) || cl->file_ref != pl->file_ref)
+   const loc_t *al = tree_loc(a), *bl = tree_loc(b);
+   if (loc_invalid_p(al) || loc_invalid_p(bl) || al->file_ref != bl->file_ref)
       return true;
-   else if (cl->first_line != pl->first_line)
-      return cl->first_line < pl->first_line;
+   else if (al->first_line != bl->first_line)
+      return al->first_line < bl->first_line;
    else
-      return cl->first_column <= pl->first_column;   // Same place: a macro
+      return al->first_column <= bl->first_column;   // Same place: a macro
+}
+
+static void reset_fused_process(rt_model_t *m, rt_scope_t *s, tree_t t)
+{
+   // A process fused into an RTL island takes its place in the start
+   // order, which orders the output of processes (see rorder.c), under
+   // the name the stack trace of a report in the island gives it
+
+   LOCAL_TEXT_BUF tb = tb_new();
+   get_path_name(s, tb);
+   tb_append(tb, ':');
+   tb_istr(tb, ident_downcase(tree_ident(t)));
+
+   if (fused_keys == NULL)
+      store_release(&fused_keys, hash_new(64));
+
+   const uintptr_t key = ++(m->proc_seq);
+   hash_put(fused_keys, ident_new(tb_get(tb)), (void *)key);
 }
 
 static void reset_scope(rt_model_t *m, rt_scope_t *s)
@@ -2122,19 +2178,50 @@ static void reset_scope(rt_model_t *m, rt_scope_t *s)
    // text, those of an instance or a generate block at the place where it
    // is declared.  IEEE 1800-2017 4.7 leaves this order unspecified
 
+   tree_t *fused LOCAL = NULL;
+   int nfused = 0, fi = 0;
+   if (m->has_fused && s->kind == SCOPE_INSTANCE) {
+      const int nstmts = tree_stmts(s->where);
+      for (int i = 0; i < nstmts; i++) {
+         tree_t t = tree_stmt(s->where, i);
+         if (tree_kind(t) != T_PROCESS)
+            continue;
+         else if (!jit_is_fused_proc(m->jit, ident_prefix(s->name,
+                                                          tree_ident(t), '.')))
+            continue;
+         if (fused == NULL)
+            fused = xmalloc_array(nstmts, sizeof(tree_t));
+         fused[nfused++] = t;
+      }
+   }
+
    int pi = 0, ci = 0;
-   while (pi < s->procs.count && ci < s->children.count) {
-      if (scope_precedes(s->children.items[ci], s->procs.items[pi]))
+   for (;;) {
+      // The next process in declaration order, fused or not
+      tree_t next = NULL;
+      bool is_fused = false;
+      if (fi < nfused && (pi == s->procs.count
+                          || tree_precedes(fused[fi],
+                                           s->procs.items[pi]->where))) {
+         next = fused[fi];
+         is_fused = true;
+      }
+      else if (pi < s->procs.count)
+         next = s->procs.items[pi]->where;
+      else
+         break;
+
+      if (ci < s->children.count
+          && tree_precedes(s->children.items[ci]->where, next))
          reset_scope(m, s->children.items[ci++]);
+      else if (is_fused)
+         reset_fused_process(m, s, fused[fi++]);
       else
          reset_process(m, s->procs.items[pi++]);
    }
 
    for (; ci < s->children.count; ci++)
       reset_scope(m, s->children.items[ci]);
-
-   for (; pi < s->procs.count; pi++)
-      reset_process(m, s->procs.items[pi]);
 
    for (int i = 0; i < s->properties.count; i++)
       reset_property(m, s->properties.items[i]);
@@ -3623,8 +3710,10 @@ static void create_processes(rt_model_t *m, rt_scope_t *s)
          {
             ident_t name = tree_ident(t);
             ident_t sym = ident_prefix(sym_prefix, name, '.');
-            if (jit_is_fused_proc(m->jit, ident_prefix(s->name, name, '.')))
+            if (jit_is_fused_proc(m->jit, ident_prefix(s->name, name, '.'))) {
+               m->has_fused = true;
                break;
+            }
 
             rt_proc_t *p = xcalloc(sizeof(rt_proc_t));
             p->where     = t;
@@ -3686,6 +3775,8 @@ void model_reset(rt_model_t *m)
    m->stop_delta = opt_get_int(OPT_STOP_DELTA);
    m->shuffle    = opt_get_int(OPT_SHUFFLE_PROCS);
 
+   rorder_enable(opt_get_int(OPT_REPORT_ORDER));
+
    __trace_on = opt_get_int(OPT_RT_TRACE);
 
    m->sv_poll_mem_dirty = true;
@@ -3704,8 +3795,10 @@ void model_reset(rt_model_t *m)
    m->sva_batch_tmp.count = 0;
    reset_scope(m, m->root);
 
-   if (m->force_stop)
+   if (m->force_stop) {
+      rorder_window_end();
       return;   // Error in intialisation
+   }
 
    m->mt_sva_enabled = (opt_get_int(OPT_SIM_THREADS) > 1);
 
@@ -3798,6 +3891,8 @@ void model_reset(rt_model_t *m)
       m->in_reset = false;
       rt_island_mark_sv_reset_edges(m->islands);
    }
+
+   rorder_window_end();
 
    run_callbacks(m, END_OF_INITIALISATION);
 }
@@ -5640,6 +5735,8 @@ static void model_cycle_body(rt_model_t *m)
          m->next_is_delta = true;
    }
 
+   rorder_window_end();
+
    run_callbacks(m, END_OF_PROCESSES);
 
    if (m->init_events.count > 0)
@@ -5658,6 +5755,7 @@ static void model_cycle_body(rt_model_t *m)
       if (unlikely(m->sva_batch.count > 0))
          model_flush_sva_batch(m);
       (void)mtp_enter(MTP_OTHER);
+      rorder_window_end();
    }
 
    if (m->next_is_delta)
@@ -5690,6 +5788,8 @@ static void model_cycle_body(rt_model_t *m)
       // next delta cycle
       if (heap_size(m->driving_heap) > 0)
          m->next_is_delta = true;
+
+      rorder_window_end();
    }
 
    if (!m->next_is_delta && unlikely(m->reactiveq.count > 0)) {
@@ -5725,6 +5825,8 @@ static void model_cycle_body(rt_model_t *m)
       deferq_run_procs(m, &m->latepostq);
       (void)mtp_enter(MTP_OTHER);
 
+      rorder_window_end();
+
       run_callbacks(m, END_TIME_STEP);
 
       m->can_create_delta = true;
@@ -5737,12 +5839,14 @@ static void model_cycle(rt_model_t *m)
 {
    if (likely(!mtp.on)) {
       model_cycle_body(m);
+      rorder_window_end();
       return;
    }
 
    const bool is_delta = m->next_is_delta;
    mtp_cycle_begin();
    model_cycle_body(m);
+   rorder_window_end();
    mtp_cycle_end(is_delta);
 }
 
@@ -5831,6 +5935,8 @@ void model_run(rt_model_t *m, uint64_t stop_time)
       m->nfinal_procs = 0;
       run_final_procs(m, m->root);
    }
+
+   rorder_window_end();
 
    run_callbacks(m, END_OF_SIMULATION);
 

@@ -48,7 +48,7 @@ _nvc () {
                       -f --files --no-save --preserve-case'
   local elab_opts='--cover --disable-opt --dump-llvm --dump-vcode --jit --no-save
                    -V --verbose'
-  local run_opts='--trace --stop-time= --stats= --stop-delta=
+  local run_opts='--trace --stop-time= --stats= --stop-delta= --report-order=
                   -w --wave --format='
   local export_opts='--format= -o --output='
   local merge_opts='-o --output='

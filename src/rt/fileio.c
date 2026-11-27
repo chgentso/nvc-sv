@@ -19,6 +19,7 @@
 #include "jit/jit-exits.h"
 #include "jit/jit-ffi.h"
 #include "jit/jit.h"
+#include "printf.h"
 #include "rt/fileio.h"
 
 #include <assert.h>
@@ -524,6 +525,12 @@ void x_file_write(void **_fp, void *data, int64_t size, int64_t count)
    file_slot_t *slot = decode_handle(*handle);
    if (slot == NULL)
       jit_msg(NULL, DIAG_FATAL, "write to closed file");
+
+   if (slot->file == stdout) {
+      // May be held to be written in a fixed order (see rorder.c)
+      stdio_ostream_write(data, size * count, stdout);
+      return;
+   }
 
    if (fwrite(data, size, count, slot->file) != count)
       jit_msg(NULL, DIAG_FATAL, "write to file failed");

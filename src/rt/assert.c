@@ -24,6 +24,7 @@
 #include "psl/psl-node.h"
 #include "rt/assert.h"
 #include "rt/model.h"
+#include "rt/rorder.h"
 #include "rt/structs.h"
 #include "thread.h"
 #include "tree.h"
@@ -406,7 +407,9 @@ static void emit_vhdl_diag_internal(diag_t *d, vhdl_severity_t severity,
                 "$bold$--exit-severity=%s$$",
                 get_severity_string(exit_severity));
 
+   const int64_t saved_key = rorder_report_begin();
    diag_emit(d);
+   rorder_report_end(saved_key);
 
    if (severity >= exit_severity)
       jit_abort_with_status(EXIT_FAILURE);

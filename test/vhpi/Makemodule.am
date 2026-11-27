@@ -46,6 +46,7 @@ lib_vhpi_test_so_SOURCES = \
 	test/vhpi/issue1579.c \
 	test/vhpi/issue1616.c \
 	test/vhpi/issue1621.c \
+	test/vhpi/vhpi_rorder1.c \
 	test/vhpi/vhpi25.c \
 	test/vhpi/vhpi26.c \
 	test/vhpi/vhpi27.c \

@@ -3453,3 +3453,5 @@ vhdl_island_var1 shell
 vhdl_island_loop1 shell
 vhdl_island_comb_report2 shell
 sv_unique_defer2 verilog,gold
+vhdl_report_order1 shell
+vhpi_rorder1    vhpi,gold,2008
