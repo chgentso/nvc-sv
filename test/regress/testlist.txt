@@ -3480,3 +3480,4 @@ vlog_udpinit1 verilog,gold
 vlog_nettype_port1 verilog,gold
 vlog_tcheck_init1 verilog,fail,gold
 vlog_let_unit1 verilog,gold
+vlog_strcast_wide1 verilog,gold

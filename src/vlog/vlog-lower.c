@@ -18668,6 +18668,24 @@ static mir_value_t vlog_vector_bytes(vlog_gen_t *g, mir_value_t value,
    mir_value_t count = mir_const(g->mu, t_offset, nbytes);
    mir_value_t data = vlog_alloc_array(g, t_char, count);
    mir_type_t t_int = mir_int_type(g->mu, INT64_MIN, INT64_MAX);
+
+   if (nbytes > 8) {
+      // Too wide for an integer: take each byte from the most significant
+      mir_type_t t_wide = mir_vec2_type(g->mu, nbytes * 8, false);
+      mir_type_t t_byte = mir_vec2_type(g->mu, 8, false);
+      mir_value_t wide = mir_build_cast(g->mu, t_wide, value);
+      for (int j = 0; j < nbytes; j++) {
+         mir_value_t byte = mir_build_extract(g->mu, t_byte, wide,
+                                              mir_const(g->mu, t_offset, j * 8));
+         mir_value_t idx = mir_const(g->mu, t_offset, j);
+         mir_build_store(g->mu, mir_build_array_ref(g->mu, data, idx),
+                         mir_build_cast(g->mu, t_char,
+                                        vlog_lower_cast(g, t_int, byte)));
+      }
+
+      return vlog_wrap_array(g, data, count);
+   }
+
    mir_value_t ival = vlog_lower_cast(g, t_int, value);
    for (int j = 0; j < nbytes; j++) {
       mir_value_t shift = mir_const(g->mu, t_int,
