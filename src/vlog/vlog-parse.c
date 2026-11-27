@@ -19431,12 +19431,12 @@ static void add_pfmt_methods(vlog_node_t class)
    tb_printf(tb, "virtual function string __cname();\nreturn \"%s\";\n"
              "endfunction\n", cname);
    tb_cat(tb, "function int __oidn();\nreturn $__clsoid;\nendfunction\n");
-   tb_printf(tb, "virtual function %s __cl();\n%s __r = new this;\n"
-             "return __r;\nendfunction\n", cname, cname);
-   tb_printf(tb, "static function string __pn(%s h);\n"
-             "if (h == null) return \"null\";\n"
-             "return $sformatf(\"%%s#%%0d\", h.__cname(), h.__oidn());\n"
-             "endfunction\n", cname);
+   tb_cat(tb, "virtual function __pfmt_self __cl();\n__pfmt_self __r = new this;\n"
+          "return __r;\nendfunction\n");
+   tb_cat(tb, "static function string __pn(__pfmt_self h);\n"
+          "if (h == null) return \"null\";\n"
+          "return $sformatf(\"%%s#%%0d\", h.__cname(), h.__oidn());\n"
+          "endfunction\n");
 
    for (int plain = 0; plain < 2; plain++) {
       tb_printf(tb, "virtual function string __p%d();\n", plain);
@@ -19486,7 +19486,7 @@ static void add_pfmt_methods(vlog_node_t class)
 
       tb_cat(tb, "return __r;\nendfunction\n");
 
-      tb_printf(tb, "static function string __ps%d(%s h);\n", plain, cname);
+      tb_printf(tb, "static function string __ps%d(__pfmt_self h);\n", plain);
       tb_cat(tb, "if (h == null) return \"null\";\n");
       tb_printf(tb, "return {\"'{\", h.__p%d(), \"}\"};\n", plain);
       tb_cat(tb, "endfunction\n");
@@ -19526,6 +19526,12 @@ static void add_pfmt_methods(vlog_node_t class)
       COV_PUSH(toks, ntoks, eof);
       ntoks--;
    }
+
+   vlog_node_t self_td = vlog_new(V_TYPE_DECL);
+   vlog_set_ident(self_td, ident_new("__pfmt_self"));
+   vlog_set_type(self_td, class);
+   vlog_set_loc(self_td, loc);
+   vlog_symtab_put(symtab, self_td);
 
    cov_replay(class, toks, ntoks);
 }

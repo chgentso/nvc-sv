@@ -3386,3 +3386,4 @@ svparamimp1     verilog
 svparamarrcat2  verilog
 svparamarr3     verilog
 svarrcmp2d1     verilog
+svclassself3    verilog
