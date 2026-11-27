@@ -118,15 +118,15 @@ end architecture;
 VHDL_EOF
 
 nvc --std=2008 --work=w_off -a match_a.vhd
-nvc --std=2008 --work=w_off --rtl-islands=off -e match_tb -r 2>&1 | sort > off.log
+nvc --std=2008 --work=w_off --rtl-islands=off -e match_tb -r 2>&1 | sed '/JIT code footprint/d' | sort > off.log
 
 nvc --std=2008 --work=w_b -a match_a.vhd
 NVC_DUMP_ISLANDS=1 nvc --std=2008 --work=w_b --rtl-islands=hier -e match_tb >b_dump.log
-nvc --std=2008 --work=w_b -r match_tb 2>&1 | sort > b.log
+nvc --std=2008 --work=w_b -r match_tb 2>&1 | sed '/JIT code footprint/d' | sort > b.log
 
 nvc --std=2008 --work=w_a -a match_a.vhd
 NVC_DUMP_ISLANDS=1 nvc --std=2008 --work=w_a --rtl-islands=hier --2state=islands -e match_tb >a_dump.log
-nvc --std=2008 --work=w_a -r match_tb 2>&1 | sort > a.log
+nvc --std=2008 --work=w_a -r match_tb 2>&1 | sed '/JIT code footprint/d' | sort > a.log
 
 cat a_dump.log b_dump.log
 grep -q "'1''1'" off.log

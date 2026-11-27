@@ -129,6 +129,10 @@ for t in act2_tb vhdl_island_act1; do
     nvc --std=2008 --work=w_a -r $t > $t.a.log 2>&1
     NVC_ISLAND_ACT=0 nvc --std=2008 --work=w_a -r $t > $t.a0.log 2>&1
 
+    # Debug builds print the size of the code compiled so far, which
+    # depends on how far the background compilation got
+    sed -i '/JIT code footprint/d' $t.*.log
+
     cat $t.b_dump.log $t.a_dump.log
     grep -q "done" $t.off.log
     for m in b b0 bnf; do
