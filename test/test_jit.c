@@ -24,6 +24,8 @@
 #include "jit/jit-layout.h"
 #include "jit/jit-priv.h"
 #include "jit/jit.h"
+#include "mir/mir-node.h"
+#include "mir/mir-unit.h"
 #include "mask.h"
 #include "object.h"
 #include "option.h"
@@ -2320,6 +2322,144 @@ START_TEST(test_cache_eviction)
 }
 END_TEST
 
+START_TEST(test_island_cpool)
+{
+   // An island load and store whose state pointer is the address of a
+   // constant array has a constant-pool address and a variable element index
+   mir_context_t *mc = get_mir();
+
+   mir_unit_t *mu = mir_unit_new(mc, ident_new("ISLAND_CPOOL"), NULL,
+                                 MIR_UNIT_FUNCTION, NULL);
+
+   mir_type_t t_off = mir_offset_type(mu);
+   mir_type_t t_i64 = mir_int_type(mu, INT64_MIN, INT64_MAX);
+   mir_type_t t_vec = mir_vec2_type(mu, 64, false);
+
+   mir_set_result(mu, t_i64);
+
+   mir_add_param(mu, mir_context_type(mu, ident_new("WORK")), MIR_NULL_STAMP,
+                 ident_new("context"));
+   mir_value_t idx = mir_add_param(mu, t_off, MIR_NULL_STAMP, ident_new("idx"));
+
+   mir_value_t vals[4];
+   for (int i = 0; i < 4; i++)
+      vals[i] = mir_const(mu, t_i64, 100 + i);
+   mir_value_t ca = mir_const_array(mu, mir_carray_type(mu, 4, t_i64), vals, 4);
+   mir_value_t tbl = mir_build_address_of(mu, ca);
+   mir_value_t state = tbl;
+
+   mir_value_t zero = mir_const(mu, t_off, 0);
+   mir_value_t minus1 = mir_const(mu, t_off, -1);
+
+   mir_value_t row = mir_build_island_load(mu, t_vec, state, zero, minus1, idx);
+
+   mir_build_return(mu, mir_build_cast(mu, t_i64, row));
+
+   mir_optimise(mu, MIR_PASS_O1);
+   mir_put_unit(mc, mu);
+
+   jit_t *j = jit_new(get_registry(), mc);
+
+   jit_handle_t h = jit_lazy_compile(j, ident_new("ISLAND_CPOOL"));
+   for (int i = 0; i < 4; i++)
+      ck_assert_int_eq(jit_call(j, h, NULL, (int64_t)i).integer, 100 + i);
+
+   jit_free(j);
+}
+END_TEST
+
+#ifdef ENABLE_LLVM
+START_TEST(test_llvm_no_slp)
+{
+   // The island optimisation pipeline must not run the SLP vectorizer: it
+   // dominated the compile time of large island functions.  Eight byte
+   // compares of unrelated values against a constant array are the pattern
+   // it turns into vector instructions.
+   const char *name = "WORK.SLP.$vhdl_island_slp";
+   const char *dump = "WORK.SLP.$vhdl_island_slp.final.ll";
+   const char *initial = "WORK.SLP.$vhdl_island_slp.initial.ll";
+
+   // The cache makes the constant pool a symbol, which SLP can see through
+   char tmpl[] = "/tmp/nvc-jit-slp-XXXXXX";
+   char *dir = mkdtemp(tmpl);
+   ck_assert_ptr_nonnull(dir);
+
+   opt_set_int(OPT_JIT_CACHE, 1);
+   opt_set_str(OPT_JIT_CACHE_DIR, dir);
+   opt_set_int(OPT_JIT_THRESHOLD, 1);
+   opt_set_int(OPT_JIT_ASYNC, 0);
+   opt_set_str(OPT_LLVM_VERBOSE, "$vhdl_island_slp");
+
+   mir_context_t *mc = get_mir();
+
+   mir_unit_t *mu = mir_unit_new(mc, ident_new(name), NULL,
+                                 MIR_UNIT_FUNCTION, NULL);
+
+   mir_type_t t_off = mir_offset_type(mu);
+   mir_type_t t_u8 = mir_int_type(mu, 0, 255);
+   mir_type_t t_bool = mir_bool_type(mu);
+
+   mir_set_result(mu, t_bool);
+
+   mir_add_param(mu, mir_context_type(mu, ident_new("WORK")), MIR_NULL_STAMP,
+                 ident_new("context"));
+   mir_value_t p = mir_add_param(mu, mir_pointer_type(mu, t_u8),
+                                 MIR_NULL_STAMP, ident_new("p"));
+
+   mir_value_t vals[8];
+   for (int i = 0; i < 8; i++)
+      vals[i] = mir_const(mu, t_u8, 3 * i + 1);
+   mir_value_t ca = mir_const_array(mu, mir_carray_type(mu, 8, t_u8), vals, 8);
+   mir_value_t tbl = mir_build_address_of(mu, ca);
+
+   mir_value_t acc = mir_const(mu, t_bool, 1);
+   for (int i = 0; i < 8; i++) {
+      mir_value_t off = mir_const(mu, t_off, i);
+      mir_value_t a = mir_build_load(mu, mir_build_array_ref(mu, p, off));
+      mir_value_t b = mir_build_load(mu, mir_build_array_ref(mu, tbl, off));
+      acc = mir_build_and(mu, acc, mir_build_cmp(mu, MIR_CMP_EQ, a, b));
+   }
+
+   mir_build_return(mu, acc);
+
+   mir_optimise(mu, MIR_PASS_O1);
+   mir_put_unit(mc, mu);
+
+   jit_t *j = jit_new(get_registry(), mc);
+   jit_register_llvm_plugin(j);
+
+   uint8_t d[8];
+   for (int i = 0; i < 8; i++)
+      d[i] = 3 * i + 1;
+
+   jit_handle_t h = jit_lazy_compile(j, ident_new(name));
+   ck_assert_int_eq(jit_call(j, h, NULL, d).integer, 1);
+   d[5]++;
+   ck_assert_int_eq(jit_call(j, h, NULL, d).integer, 0);
+
+   jit_free(j);
+
+   FILE *f = fopen(dump, "r");
+   ck_assert_ptr_nonnull(f);
+
+   char line[1024];
+   bool vectors = false;
+   while (fgets(line, sizeof(line), f)) {
+      if (strstr(line, " x i") != NULL && strchr(line, '<') != NULL)
+         vectors = true;
+   }
+   fclose(f);
+   unlink(initial);
+   unlink(dump);
+
+   rm_cache_dir(dir);
+   opt_set_str(OPT_LLVM_VERBOSE, NULL);
+
+   ck_assert(!vectors);
+}
+END_TEST
+#endif
+
 START_TEST(test_cache_multi_instance)
 {
    char tmpl[] = "/tmp/nvc-jitcache-share-XXXXXX";
@@ -2644,8 +2784,10 @@ Suite *get_jit_tests(void)
    tcase_add_test(tc, test_lvn12);
    tcase_add_test(tc, test_cache_sha256);
    tcase_add_test(tc, test_cache_eviction);
+   tcase_add_test(tc, test_island_cpool);
    tcase_add_test(tc, test_cache_multi_instance);
 #ifdef ENABLE_LLVM
+   tcase_add_test(tc, test_llvm_no_slp);
    tcase_add_test(tc, test_cache_cold_warm_and_corrupt);
 #ifndef __MINGW32__
    tcase_add_test(tc, test_fatal_exit_async_llvm);

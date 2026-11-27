@@ -625,6 +625,21 @@ static mir_value_t vi_alloc_array2d_local(vi_lower_t *l, uint32_t nelems,
    return vi_modeb_alloc_vec(l, vi_array2d_bytes(l, nelems, width));
 }
 
+// A wide Mode A vector variable is a pointer to its words and a variable has
+// no pointer until it is first stored, so a variable that is read before it is
+// assigned (a function local or record field with no initial value, partly
+// assigned) must start as zero, the 2-state image of the default value.
+static mir_value_t vi_add_vec2_var(vi_lower_t *l, uint32_t width,
+                                   bool is_signed, ident_t name)
+{
+   mir_unit_t *mu = l->mu;
+   mir_value_t var = mir_add_var(mu, mir_vec2_type(mu, (int)width, is_signed),
+                                 MIR_NULL_STAMP, name, MIR_VAR_TEMP);
+   if (width > 64)
+      mir_build_store(mu, var, vi_const_vec2(mu, (int)width, is_signed, NULL));
+   return var;
+}
+
 static bool vi_collect_rec_local_leaves(vi_lower_t *l, type_t type,
                                         int *path, uint8_t depth,
                                         ident_t name_hint,
@@ -694,11 +709,9 @@ static bool vi_collect_rec_local_leaves(vi_lower_t *l, type_t type,
       if (!vi_eval_type_bounds(l, type, &lf.dir, &lf.left, &lf.right, &lf.width)
           || lf.width == 0 || lf.width > VHDL_ISLAND_MAX_WIDTH)
          return false;
-      if (l->two_state) {
-         mir_type_t mvt = mir_vec2_type(mu, (int)lf.width, lf.is_signed);
-         lf.storage = mir_add_var(mu, mvt, MIR_NULL_STAMP,
-                                  ident_uniq(istr(name_hint)), MIR_VAR_TEMP);
-      }
+      if (l->two_state)
+         lf.storage = vi_add_vec2_var(l, lf.width, lf.is_signed,
+                                      ident_uniq(istr(name_hint)));
       else
          lf.storage = vi_modeb_alloc_vec(l, lf.width);
       APUSH(*out, lf);
@@ -2551,11 +2564,9 @@ static bool vi_lower_inline_func(vi_lower_t *l, tree_t fcall, tree_t func,
                vi_scope_clear(&child);
                return false;
             }
-            if (l->two_state) {
-               mir_type_t mvt = mir_vec2_type(mu, (int)loc.width, loc.is_signed);
-               loc.storage = mir_add_var(mu, mvt, MIR_NULL_STAMP,
-                                         tree_ident(d), MIR_VAR_TEMP);
-            }
+            if (l->two_state)
+               loc.storage = vi_add_vec2_var(l, loc.width, loc.is_signed,
+                                             tree_ident(d));
             else
                loc.storage = vi_modeb_alloc_vec(l, loc.width);
          }

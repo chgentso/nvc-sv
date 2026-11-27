@@ -38,7 +38,9 @@
 #include <llvm-c/Core.h>
 #include <llvm-c/DebugInfo.h>
 #include <llvm-c/Error.h>
+#include <llvm-c/Support.h>
 #include <llvm-c/TargetMachine.h>
+#include <llvm/Config/llvm-config.h>
 
 #if HAVE_GIT_SHA
 #include "gitsha.h"
@@ -1380,6 +1382,15 @@ static void llvm_native_setup(void)
 
       if (!LLVMIsMultithreaded())
          fatal("LLVM was built without multithreaded support");
+
+#if LLVM_HAS_PASS_BUILDER && LLVM_VERSION_MAJOR >= 23
+      // LLVMPassBuilderOptionsSetSLPVectorization(false) no longer stops the
+      // default<O2> pipeline running the SLP vectorizer, which makes up most
+      // of the compile time of a large island function, so also turn it off
+      // with its command line flag
+      static const char *args[] = { "nvc", "-vectorize-slp=false" };
+      LLVMParseCommandLineOptions(ARRAY_LEN(args), args, NULL);
+#endif
 
       store_release(&initialised, true);
    }
