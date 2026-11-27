@@ -1692,8 +1692,6 @@ static bool check_expr_inner(check_ctx_t *c, tree_t expr, bool is_target)
             if (vhdl_island_const_slice_width(c->ctx, rg, &sw)
                 && check_expr(c, tree_left(rg), false)
                 && check_expr(c, tree_right(rg), false)) {
-               if (chk_note(c, "A7 dynamic slice"))
-                  return false;
                return check_expr(c, tree_value(expr), is_target);
             }
             return false;
@@ -1985,8 +1983,6 @@ static bool check_str_expr(check_ctx_t *c, tree_t expr, int depth)
              && tree_params(expr) == 1
              && (fn_name_is(fn, "TO_HSTRING") || fn_name_is(fn, "TO_STRING")
                  || fn_name_is(fn, "TO_OSTRING") || fn_name_is(fn, "TO_BSTRING"))) {
-            if (chk_note(c, "A8 to_string of vector"))
-               return false;
             return check_expr(c, tree_value(tree_param(expr, 0)), false);
          }
          return false;

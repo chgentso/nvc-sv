@@ -143,17 +143,6 @@ typedef struct {
    const char              *reason;    // NVC_DUMP_ISLANDS: first failure
 } vi_lower_t;
 
-// Mark a construct Mode A cannot lower yet: the caller must fail (this
-// returns true) in Mode A; Mode B lowers it normally.
-static bool vi_note(vi_lower_t *l, const char *code)
-{
-   if (!l->two_state)
-      return false;
-   if (l->reason == NULL)
-      l->reason = code;
-   return true;
-}
-
 static void vi_generic_reason(vi_lower_t *l, const char *what, tree_t t)
 {
    if (l->reason != NULL || t == NULL || !opt_get_int(OPT_DUMP_ISLANDS))
@@ -1397,6 +1386,46 @@ static void vi_check_int_bounds(vi_lower_t *l, type_t target_type,
    mir_value_t hint = (hint_decl != NULL)
       ? mir_build_debug_locus(mu, tree_to_object(hint_decl)) : locus;
    mir_build_range_check(mu, val64, left, right, dir, locus, hint);
+}
+
+// Mode A: turn a packed vector into the byte-per-element form the IEEE
+// image functions take.  Only 0 and 1 exist in Mode A, so std_logic elements
+// become '0' and '1' and bit elements the same positions of BIT.
+static bool vi_vec2_to_bytes(vi_lower_t *l, vi_val_t *v)
+{
+   if (v->kind != VIVAL_VEC)
+      return false;
+
+   mir_unit_t *mu = l->mu;
+   mir_value_t buf = mir_build_alloc(mu, vi_u8_type(mu), MIR_NULL_STAMP,
+                                     vi_off(mu, v->width));
+   mir_value_t idx_v = mir_add_var(mu, mir_offset_type(mu), MIR_NULL_STAMP,
+                                   ident_uniq("v2b"), MIR_VAR_TEMP);
+   mir_build_store(mu, idx_v, vi_off(mu, 0));
+   mir_block_t hdr = mir_add_block(mu);
+   mir_block_t body = mir_add_block(mu);
+   mir_block_t done = mir_add_block(mu);
+   mir_build_jump(mu, hdr);
+
+   mir_set_cursor(mu, hdr, MIR_APPEND);
+   mir_value_t i = mir_build_load(mu, idx_v);
+   mir_build_cond(mu, mir_build_cmp(mu, MIR_CMP_LT, i, vi_off(mu, v->width)),
+                  body, done);
+
+   mir_set_cursor(mu, body, MIR_APPEND);
+   mir_value_t bit = mir_build_extract(mu, mir_vec2_type(mu, 1, false),
+                                       v->val, i);
+   mir_value_t b = mir_build_select(mu, vi_u8_type(mu), mir_build_test(mu, bit),
+                                    vi_u8(mu, v->is_std ? 3 : 1),
+                                    vi_u8(mu, v->is_std ? 2 : 0));
+   mir_build_store(mu, mir_build_array_ref(mu, buf, i), b);
+   mir_build_store(mu, idx_v, mir_build_add(mu, mir_offset_type(mu),
+                                            i, vi_off(mu, 1)));
+   mir_build_jump(mu, hdr);
+
+   mir_set_cursor(mu, done, MIR_APPEND);
+   v->val = buf;
+   return true;
 }
 
 static bool vi_modeb_call_ieee(vi_lower_t *l, tree_t decl,
@@ -3051,8 +3080,7 @@ static bool vi_lower_const_array_ref(vi_lower_t *l, tree_t base_e,
           || width == 0 || width > VHDL_ISLAND_MAX_WIDTH
           || (uint64_t)nelems * width > 65536u)
          return false;
-      if (width > 64 && vi_note(l, "L4 ROM element wider than 64 bits"))
-         return false;
+      const uint32_t nw = (width + 63u) / 64u;
 
       const bool is_std = vi_type_is_std_logic(type_elem(elem_t));
       const bool is_sg = vi_type_is_signed_vec(elem_t);
@@ -3143,7 +3171,8 @@ static bool vi_lower_const_array_ref(vi_lower_t *l, tree_t base_e,
 
          // Constant index fast path: emit single row directly without table
          int64_t cidx = 0;
-         if (vi_eval_const_int(l, idx_expr, &cidx)) {
+         if (!(l->two_state && width > 64)
+             && vi_eval_const_int(l, idx_expr, &cidx)) {
             int64_t pos = (odir == RANGE_TO) ? (cidx - oleft) : (oleft - cidx);
             if (pos < 0 || pos >= (int64_t)nelems)
                return false;
@@ -3173,15 +3202,20 @@ static bool vi_lower_const_array_ref(vi_lower_t *l, tree_t base_e,
          }
 
          if (l->two_state) {
-            mir_value_t *vals LOCAL = xmalloc_array(nelems, sizeof(mir_value_t));
+            // ceil(width / 64) i64 words per element, least significant
+            // word first
+            const size_t nvals = (size_t)nelems * nw;
+            mir_value_t *vals LOCAL = xmalloc_array(nvals, sizeof(mir_value_t));
+            uint64_t *words LOCAL = xcalloc_array(nw, sizeof(uint64_t));
             for (uint32_t p = 0; p < nelems; p++) {
-               uint64_t w0 = 0;
-               vi_pack_bytes_to_words(tbl + (size_t)p * width, width, is_std, &w0);
-               vals[p] = vi_i64(mu, (int64_t)w0);
+               vi_pack_bytes_to_words(tbl + (size_t)p * width, width, is_std,
+                                      words);
+               for (uint32_t k = 0; k < nw; k++)
+                  vals[(size_t)p * nw + k] = vi_i64(mu, (int64_t)words[k]);
             }
             mir_value_t ca = mir_const_array(
-               mu, mir_carray_type(mu, (int)nelems, vi_i64_type(mu)),
-               vals, nelems);
+               mu, mir_carray_type(mu, (int)nvals, vi_i64_type(mu)),
+               vals, nvals);
             tbl_ptr = mir_build_address_of(mu, ca);
          }
          else {
@@ -3203,6 +3237,30 @@ static bool vi_lower_const_array_ref(vi_lower_t *l, tree_t base_e,
 
       vi_val_t fake_outer = { .dir = odir, .left = oleft, .right = oright };
       mir_value_t elem_idx = vi_compute_elem_pos(l, fake_outer, idx_val.val, nelems);
+      if (l->two_state && width > 64) {
+         // Assemble the row from its words, least significant word first
+         mir_value_t base = mir_build_mul(mu, mir_offset_type(mu), elem_idx,
+                                          vi_off(mu, nw));
+         mir_value_t v = vi_cast_vec2(
+            mu, mir_vec2_type(mu, (int)width, is_sg),
+            mir_build_load(mu, mir_build_array_ref(mu, tbl_ptr, base)));
+         for (uint32_t k = 1; k < nw; k++) {
+            const int cw = MIN(64, (int)width - (int)(k * 64));
+            mir_value_t at = mir_build_add(mu, mir_offset_type(mu), base,
+                                           vi_off(mu, k));
+            mir_value_t chunk = vi_cast_vec2(
+               mu, mir_vec2_type(mu, cw, false),
+               mir_build_load(mu, mir_build_array_ref(mu, tbl_ptr, at)));
+            v = mir_build_insert(mu, chunk, v,
+                                 vi_off(mu, (int)width - (int)(k * 64) - cw));
+         }
+         *out = (vi_val_t){
+            .kind = VIVAL_VEC, .val = v, .width = width,
+            .is_signed = is_sg, .is_std = is_std,
+            .dir = idir, .left = ileft, .right = iright,
+         };
+         return true;
+      }
       if (l->two_state) {
          mir_value_t raw = mir_build_load(
             mu, mir_build_array_ref(mu, tbl_ptr, elem_idx));
@@ -3724,8 +3782,6 @@ static bool vi_lower_expr_inner(vi_lower_t *l, tree_t expr, vi_val_t *out)
             return true;
          }
 
-         if (l->two_state)
-            return false;
          uint32_t sw = 0;
          if (!vhdl_island_const_slice_width(l->ctx, rg, &sw))
             return false;
@@ -3738,6 +3794,18 @@ static bool vi_lower_expr_inner(vi_lower_t *l, tree_t expr, vi_val_t *out)
             return false;
          mir_value_t pos = vi_compute_elem_pos(l, bv, lv.val,
                                                bv.width - sw + 1u);
+         if (l->two_state) {
+            mir_value_t sub = mir_build_extract(
+               mu, mir_vec2_type(mu, (int)sw, false), bv.val, pos);
+            *out = (vi_val_t){
+               .kind = VIVAL_VEC, .val = sub, .width = sw,
+               .is_signed = bv.is_signed, .is_std = bv.is_std,
+               .dir = sdir,
+               .left = (sdir == RANGE_TO) ? 0 : (int64_t)sw - 1,
+               .right = (sdir == RANGE_TO) ? (int64_t)sw - 1 : 0,
+            };
+            return true;
+         }
          mir_value_t sub_ptr = mir_build_array_ref(mu, bv.val, pos);
          *out = (vi_val_t){
             .kind = VIVAL_VEC, .val = sub_ptr, .width = sw,
@@ -4523,14 +4591,25 @@ static bool vi_assign_leaf_sig_dyn_slice(vi_lower_t *l, const vhdl_isig_t *s,
                                          mir_value_t dyn_pos,
                                          uint32_t sub_w, vi_val_t val)
 {
-   if (vi_note(l, "L3 dynamic slice store into signal")
-       || val.kind != VIVAL_VEC)
+   if (val.kind != VIVAL_VEC)
       return false;
    if (s->is_sparse_ram)
       return vi_emit_sparse_ram_write(l, s, isig, elem_idx, dyn_pos, sub_w, val);
    mir_unit_t *mu = l->mu;
    const uint32_t dst_off = isig->a_off + (l->is_ff ? l->ff_stride : 0u);
    vi_mark_ff_dirty(l, isig);
+   if (l->two_state) {
+      mir_value_t cur = mir_build_island_load(
+         mu, mir_vec2_type(mu, (int)s->width, s->is_signed),
+         l->state_ptr, vi_off(mu, dst_off), vi_off(mu, -1), elem_idx);
+      mir_value_t part = val.is_signed
+         ? mir_build_cast(mu, mir_vec2_type(mu, (int)sub_w, false), val.val)
+         : val.val;
+      mir_build_island_store(mu, l->state_ptr, vi_off(mu, dst_off),
+                             vi_off(mu, -1), elem_idx,
+                             mir_build_insert(mu, part, cur, dyn_pos));
+      return true;
+   }
    mir_value_t base = vi_state_ptr_at(l, dst_off);
    mir_value_t off = dyn_pos;
    if (s->is_array2d) {
@@ -5407,8 +5486,7 @@ static bool vi_lower_sig_assign(vi_lower_t *l, tree_t stmt)
             return false;
          sw = (uint32_t)sw64;
       }
-      else if (!vhdl_island_const_slice_width(l->ctx, rg, &sw)
-               || vi_note(l, "A7 dynamic slice"))
+      else if (!vhdl_island_const_slice_width(l->ctx, rg, &sw))
          return false;
 
       tree_t base = tree_value(target);
@@ -5576,8 +5654,7 @@ static bool vi_lower_var_assign(vi_lower_t *l, tree_t stmt)
             return false;
          sw = (uint32_t)sw64;
       }
-      else if (!vhdl_island_const_slice_width(l->ctx, rg, &sw)
-               || vi_note(l, "A7 dynamic slice"))
+      else if (!vhdl_island_const_slice_width(l->ctx, rg, &sw))
          return false;
       if (sdir != lf.dir || rv.kind != VIVAL_VEC || sw != rv.width
           || sw > lf.width)
@@ -5614,6 +5691,25 @@ static bool vi_lower_var_assign(vi_lower_t *l, tree_t stmt)
          return false;
       vi_val_t fake = { .dir = lf.dir, .left = lf.left, .right = lf.right };
       mir_value_t pos = vi_compute_elem_pos(l, fake, lv.val, lf.width - sw + 1u);
+      if (l->two_state) {
+         mir_value_t part = rv.is_signed
+            ? mir_build_cast(mu, mir_vec2_type(mu, (int)sw, false), rv.val)
+            : rv.val;
+         if (is_2d_row) {
+            mir_value_t cur = mir_build_island_load(
+               mu, mir_vec2_type(mu, (int)lf.width, lf.is_signed), lf.storage,
+               vi_off(mu, 0), vi_off(mu, -1), row_idx);
+            mir_build_island_store(mu, lf.storage, vi_off(mu, 0),
+                                   vi_off(mu, -1), row_idx,
+                                   mir_build_insert(mu, part, cur, pos));
+         }
+         else {
+            mir_value_t cur = mir_build_load(mu, lf.storage);
+            mir_build_store(mu, lf.storage,
+                            mir_build_insert(mu, part, cur, pos));
+         }
+         return true;
+      }
       mir_value_t off = is_2d_row
          ? mir_build_add(mu, mir_offset_type(mu), elem_off, pos) : pos;
       mir_build_copy(mu, mir_build_array_ref(mu, lf.storage, off),
@@ -5921,10 +6017,11 @@ static bool vi_lower_str_expr(vi_lower_t *l, tree_t expr, vi_str_t *out)
             out->len = tot;
             return true;
          }
-         if (tree_params(expr) == 1
-             && !vi_note(l, "A8 to_string of vector")) {
+         if (tree_params(expr) == 1) {
             vi_val_t av;
             if (!vi_lower_expr(l, tree_value(tree_param(expr, 0)), &av))
+               return false;
+            if (l->two_state && !vi_vec2_to_bytes(l, &av))
                return false;
             mir_type_t str_t = mir_uarray_type(mu, 1, vi_u8_type(mu));
             mir_value_t uarr;
