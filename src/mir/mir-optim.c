@@ -223,44 +223,116 @@ static void mir_free_cfg(mir_unit_t *mu, cfg_block_t *cfg)
 ////////////////////////////////////////////////////////////////////////////////
 // Dominator tree construction
 
+static int mir_dom_intersect(const int *po, const int *idom, int a, int b)
+{
+   while (a != b) {
+      while (po[a] < po[b])
+         a = idom[a];
+      while (po[b] < po[a])
+         b = idom[b];
+   }
+   return a;
+}
+
 static void mir_dominator_tree(mir_unit_t *mu, cfg_block_t *cfg)
 {
-   // TODO: use more efficient algorithm
+   // Cooper, Harvey and Kennedy, "A Simple, Fast Dominance Algorithm":
+   // immediate dominators over the blocks reachable from an entry block in
+   // reverse postorder, with a virtual root above every entry block, then
+   // the dominator set of each block from its immediate dominator's
 
-   for (int i = 0; i < mu->blocks.count; i++) {
-      mask_init(&cfg[i].dom, mu->blocks.count);
+   const int nblocks = mu->blocks.count;
+   const int root = nblocks;
 
-      if (cfg[i].entry)
-         mask_set(&cfg[i].dom, i);
-      else
-         mask_setall(&cfg[i].dom);
+   int *po LOCAL = xmalloc_array(nblocks + 1, sizeof(int));
+   int *order LOCAL = xmalloc_array(nblocks, sizeof(int));
+   int *idom LOCAL = xmalloc_array(nblocks + 1, sizeof(int));
+   int *stack LOCAL = xmalloc_array(nblocks, sizeof(int));
+   unsigned *next LOCAL = xmalloc_array(nblocks, sizeof(unsigned));
+
+   for (int i = 0; i < nblocks; i++) {
+      po[i] = -1;
+      idom[i] = -1;
    }
 
-   bit_mask_t tmp;
-   mask_init(&tmp, mu->blocks.count);
+   // Postorder numbers by an iterative depth-first walk from each entry
+   int npo = 0;
+   for (int e = 0; e < nblocks; e++) {
+      if (!cfg[e].entry || idom[e] != -1)
+         continue;
+
+      int sp = 0;
+      stack[sp++] = e;
+      next[e] = 0;
+      idom[e] = root;   // Marks the block visited
+
+      while (sp > 0) {
+         const int b = stack[sp - 1];
+         if (next[b] < cfg[b].out.count) {
+            const int s = cfg_get_edge(&cfg[b].out, next[b]++).id;
+            if (idom[s] == -1) {
+               idom[s] = root;
+               next[s] = 0;
+               stack[sp++] = s;
+            }
+         }
+         else {
+            po[b] = npo;
+            order[npo++] = b;
+            sp--;
+         }
+      }
+   }
+
+   po[root] = npo;
+   idom[root] = root;
+
+   for (int k = 0; k < npo; k++) {
+      const int b = order[k];
+      if (!cfg[b].entry)
+         idom[b] = -1;
+   }
 
    bool changes;
    do {
       changes = false;
 
-      for (int i = 0; i < mu->blocks.count; i++) {
-         if (cfg[i].entry) continue;
+      for (int k = npo - 1; k >= 0; k--) {
+         const int b = order[k];
+         if (cfg[b].entry)
+            continue;
 
-         mask_setall(&tmp);
-
-         for (int j = 0; j < cfg[i].in.count; j++) {
-            mir_block_t pred = cfg_get_edge(&cfg[i].in, j);
-            mask_intersect(&tmp, &cfg[pred.id].dom);
+         int new_idom = -1;
+         for (int j = 0; j < cfg[b].in.count; j++) {
+            const int p = cfg_get_edge(&cfg[b].in, j).id;
+            if (idom[p] == -1)
+               continue;
+            else if (new_idom == -1)
+               new_idom = p;
+            else
+               new_idom = mir_dom_intersect(po, idom, p, new_idom);
          }
 
-         mask_set(&tmp, i);
-
-         if (!changes && !mask_eq(&tmp, &cfg[i].dom))
+         if (new_idom != idom[b]) {
+            idom[b] = new_idom;
             changes = true;
-
-         mask_copy(&cfg[i].dom, &tmp);
+         }
       }
    } while (changes);
+
+   for (int i = 0; i < nblocks; i++) {
+      mask_init(&cfg[i].dom, nblocks);
+      if (po[i] == -1)
+         mask_setall(&cfg[i].dom);   // Unreachable
+   }
+
+   // A block's immediate dominator comes before it in reverse postorder
+   for (int k = npo - 1; k >= 0; k--) {
+      const int b = order[k];
+      if (idom[b] != root)
+         mask_copy(&cfg[b].dom, &cfg[idom[b]].dom);
+      mask_set(&cfg[b].dom, b);
+   }
 }
 
 ////////////////////////////////////////////////////////////////////////////////
