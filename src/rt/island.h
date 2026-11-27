@@ -238,6 +238,7 @@ typedef struct _rt_island_domain {
    bool                      needs_presync;
    bool                      reset_clk_edge;
    bool                      reset_rst_edge;
+   bool                      spec_held_w;   // Writes a held signal
    uint32_t                 *write_sigs;
    rt_island_ff_desc_t      *ff_descs;
    uint32_t                  n_write_sigs;

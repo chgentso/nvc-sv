@@ -4505,6 +4505,15 @@ static void island_spec_rebuild(rt_island_t *isl)
       checks |= sp->n_held_list > 0;
    }
    isl->spec_held = sp->n_held_list > 0;
+   for (uint32_t d = 0; d < isl->ndomains; d++) {
+      rt_island_domain_t *dom = &(isl->domains[d]);
+      dom->spec_held_w = false;
+      if (!isl->spec_held)
+         continue;
+      const uint8_t *held = island_spec_held(isl);
+      for (uint32_t j = 0; j < dom->n_write_sigs; j++)
+         dom->spec_held_w |= !!held[dom->write_sigs[j]];
+   }
    if (checks != sp->checks) {
       sp->checks = checks;
       island_spec_set_handles(isl);
@@ -4911,15 +4920,11 @@ static void island_spec_ff_unhold(rt_island_domain_t *dom)
    uint8_t *req = island_spec_req(isl);
    uint8_t *held = island_spec_held(isl);
    bool any = false;
-   for (uint32_t k = 0; k < sp->n_held_list; k++) {
-      const uint32_t i = sp->held_list[k];
+   // Only this domain's stores (another domain commits its own)
+   for (uint32_t k = 0; k < dom->n_write_sigs; k++) {
+      const uint32_t i = dom->write_sigs[k];
       if (!req[i] || !held[i])
          continue;
-      bool mine = false;
-      for (uint32_t j = 0; j < dom->n_write_sigs && !mine; j++)
-         mine = dom->write_sigs[j] == i;
-      if (!mine)
-         continue;   // Another domain's store, committed with it
       req[i] = 0;
       const rt_island_sig_t *s = &(isl->sigs[i]);
       uint64_t *cur = (uint64_t *)(isl->state + sp->a_off[i]);
@@ -8908,7 +8913,7 @@ static void island_commit_vhdl_domain_mask(rt_model_t *m,
                                            bool any_forces)
 {
    rt_island_t *isl = dom->isl;
-   if (unlikely(isl->spec_held))
+   if (unlikely(dom->spec_held_w))
       island_spec_ff_unhold(dom);
    const rt_island_ff_desc_t *descs = dom->ff_descs;
    const uint32_t n_write = dom->n_write_sigs;
@@ -9406,7 +9411,7 @@ bool rt_island_has_ff_commits(const rt_island_mgr_t *mgr)
 static void island_commit_domain(rt_model_t *m, rt_island_domain_t *dom)
 {
    rt_island_t *isl = dom->isl;
-   if (unlikely(isl->spec_held))
+   if (unlikely(dom->spec_held_w))
       island_spec_ff_unhold(dom);
    const rt_island_ff_desc_t *descs = dom->ff_descs;
    const uint32_t n_write = dom->n_write_sigs;
