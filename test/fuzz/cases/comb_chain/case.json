@@ -1,0 +1,14 @@
+{
+ "format": 1,
+ "run": {
+  "dut_entity": "m0",
+  "dut_instance": "dut",
+  "end_marker": "FZ END",
+  "files": ["dut.vhd", "tb.vhd"],
+  "lang": "vhdl",
+  "observe": {"final": true, "monitors": true, "sampler": true, "vcd": true},
+  "std": "2008",
+  "stop_time_ns": 100,
+  "top": "fz_tb"
+ }
+}
