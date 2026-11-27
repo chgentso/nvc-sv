@@ -184,7 +184,9 @@ def cmd_worker(args):
 def cmd_buckets(args):
     b = campaign.write_buckets(os.path.abspath(args.out))
     for s, e in b.items():
-        print("%5d  %s  %s" % (e["count"], s, ",".join(e["cases"])))
+        print("%5d  %s  %s  [%s]" % (
+            e["count"], s, ",".join(e["cases"]),
+            " ".join("%s:%d" % kv for kv in e["configs"].items())))
     return 0
 
 

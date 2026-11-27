@@ -101,6 +101,21 @@ class SingleTests(unittest.TestCase):
                          "l1-vcd/default-vs-ref/extra-event/vec/within-time/"
                          "comb-driven")
 
+    def test_group_island_configs(self):
+        a = sg.Difference("L1", "report", "spec", "ref", "extra-record", "x")
+        b = sg.Difference("L1", "report", "nofast", "ref", "extra-record", "x")
+        self.assertNotEqual(a.signature(), b.signature())
+        self.assertEqual(a.signature(True), b.signature(True))
+        self.assertEqual(a.signature(True), "l1-report/islands-vs-ref/"
+                         "extra-record/x")
+        # reference and other tools keep their name
+        c = sg.Difference("L3", "vcd", "ref", "ghdl", "value", "vec/later")
+        self.assertEqual(c.signature(True), c.signature())
+        d = sg.Difference("L0", "crash", "ghdl", shape="f")
+        self.assertEqual(d.signature(True), "l0-crash/ghdl/f")
+        e = sg.Difference("L0", "crash", "specA", shape="f")
+        self.assertEqual(e.signature(True), "l0-crash/islands/f")
+
 
 if __name__ == "__main__":
     unittest.main()

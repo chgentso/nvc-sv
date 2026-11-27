@@ -44,6 +44,7 @@ RULE_METAVALUE = "x-drop-metavalue-warnings"
 RULE_PROC = "x-drop-process-line"
 RULE_FINISH = "x-drop-finish-note"
 RULE_NODELTA = "x-reports-without-delta"
+RULE_CUT = "x-cut-at-early-end"
 
 UNIT_FS = {"fs": 1, "ps": 10**3, "ns": 10**6, "us": 10**9, "ms": 10**12,
            "sec": 10**15, "s": 10**15}
@@ -308,15 +309,23 @@ def common_series(va, vb):
     return fa, fb, wb
 
 
-def compare_vcd_cross(res_a, res_b):
+def compare_vcd_cross(res_a, res_b, cut=False):
     """L3: config a (nvc) against b (other tool); returns (Difference|None,
-    number of common names)."""
+    number of common names).  cut=True: a run ended early (fatal or failure)
+    and each tool dumps a different part of the last time step, so everything
+    from the earlier of the two end times on is left out of both."""
     va, vb = vcdmod.parse(res_a.wave), vcdmod.parse(res_b.wave)
+    rules = []
+    if cut:
+        t = min(va.end_time, vb.end_time)
+        va.events = vcdmod.cut_before(va.events, t)
+        vb.events = vcdmod.cut_before(vb.events, t)
+        rules.append(RULE_CUT)
     fa, fb, wb = common_series(va, vb)
     d = diff_event_maps(fa, fb, wb, "L3", res_a.config, res_b.config,
                         series=True)
     if d:
-        d.rules += [RULE_9VAL, RULE_NAMES]
+        d.rules += [RULE_9VAL, RULE_NAMES] + rules
     return d, len(fa)
 
 
@@ -364,20 +373,29 @@ class Verdict:
     blame: str = ""
     info: Dict[str, object] = field(default_factory=dict)
 
-    def signatures(self):
+    def signatures(self, group=False):
+        """Distinct signatures in order of discovery; group=True merges the
+        island configurations into one name."""
         seen, out = set(), []
         for d in self.diffs:
-            s = d.signature()
+            s = d.signature(group)
             if s not in seen:
                 seen.add(s)
                 out.append(s)
         return out
 
-    def primary(self):
+    def configs(self):
+        """Grouped signature -> sorted list of the configs that show it."""
+        m = {}
+        for d in self.diffs:
+            m.setdefault(d.signature(True), set()).add(d.cfg)
+        return {s: sorted(c) for s, c in m.items()}
+
+    def primary(self, group=False):
         """Signature of the first difference by priority (L0 first)."""
         order = {"L0": 0, "L1": 1, "L2": 2, "L3": 3}
         ds = sorted(self.diffs, key=lambda d: order.get(d.level, 9))
-        return ds[0].signature() if ds else ""
+        return ds[0].signature(group) if ds else ""
 
 
 def compare_case(results, ref="ref", levels=("L0", "L1", "L3"),
@@ -437,6 +455,11 @@ def _nvc_pair(v, ref, res, levels, stable):
             v.notes.append("%s: no waveform to compare" % res.config)
 
 
+def _ended_early(a, b):
+    """True if either run stopped with a failure instead of the end marker."""
+    return a.outcome == "failure" or b.outcome == "failure"
+
+
 def _cross(v, ref, g, levels):
     if _bad(ref) or _bad(g):
         return
@@ -452,7 +475,7 @@ def _cross(v, ref, g, levels):
             d.cfg, d.ref = g.config, ref.config
             v.diffs.append(d)
     if "L3" in levels and ref.wave and g.wave:
-        d, ncommon = compare_vcd_cross(ref, g)
+        d, ncommon = compare_vcd_cross(ref, g, _ended_early(ref, g))
         v.info["ghdl.common_names"] = ncommon
         if ncommon == 0:
             v.notes.append("L3: no common names with ghdl (rule gap)")
@@ -475,8 +498,9 @@ def _blame(v, results, ref):
     if other is None or not other.wave:
         v.blame = "islands"
         return
-    d_ref, _ = compare_vcd_cross(results[ref], g)
-    d_oth, _ = compare_vcd_cross(other, g)
+    d_ref, _ = compare_vcd_cross(results[ref], g,
+                                 _ended_early(results[ref], g))
+    d_oth, _ = compare_vcd_cross(other, g, _ended_early(other, g))
     if d_ref is None and d_oth is not None:
         v.blame = "islands"
     elif d_ref is not None and d_oth is None:

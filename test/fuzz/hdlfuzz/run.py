@@ -356,8 +356,9 @@ def run_case(tools: Tools, case, config_names=DEFAULT_CONFIGS, workdir=None,
 
 
 def island_stats(tools: Tools, case, workdir):
-    """Fused-process share from NVC_DUMP_ISLANDS=1 at elaboration (not
-    compared; statistics only)."""
+    """Fused-process share of the DUT from NVC_DUMP_ISLANDS=1 at elaboration
+    (not compared; statistics only).  The testbench has its own islands that
+    would dilute the share, so only scopes below the DUT instance count."""
     d = os.path.join(workdir, "stats")
     os.makedirs(d, exist_ok=True)
     env = worker_env(tools, {"NVC_DUMP_ISLANDS": "1"})
@@ -365,16 +366,36 @@ def island_stats(tools: Tools, case, workdir):
     rc, text, to, _ = call(base + ["-a"] + case.files, d, env, tools.timeout)
     if rc == 0 and not to:
         rc, text, to, _ = call(base + ["-e", case.top], d, env, tools.timeout)
-    return parse_island_stats(text)
+    return parse_island_stats(text, "WORK.%s.DUT" % case.top.upper())
 
 
-def parse_island_stats(text):
-    st = dict(fused_procs=0, total_procs=0, islands=0)
+def parse_island_stats(text, dut_scope=None):
+    """Island statistics of a dump.  With dut_scope (upper-case path of the
+    DUT instance, e.g. WORK.FZ_TB.DUT) only that scope and the ones below it
+    are counted; without it every scope is.  Returns fused/total processes,
+    islands, the reject reasons (shape/prune/... keyword) and the number of
+    islands per mode."""
+    st = dict(fused_procs=0, total_procs=0, islands=0, rejects={}, modes={})
+
+    def mine(scope):
+        return dut_scope is None or scope == dut_scope or \
+            scope.startswith(dut_scope + ".")
+
     for line in text.splitlines():
-        m = re.search(r'VHDL_ISLAND_ELAB: .*?islands=(\d+) '
+        m = re.search(r'VHDL_ISLAND_ELAB: (\S+) .*?islands=(\d+) '
                       r'fused_procs=(\d+)/(\d+)', line)
-        if m:
-            st["islands"] += int(m.group(1))
-            st["fused_procs"] += int(m.group(2))
-            st["total_procs"] += int(m.group(3))
+        if m and mine(m.group(1)):
+            st["islands"] += int(m.group(2))
+            st["fused_procs"] += int(m.group(3))
+            st["total_procs"] += int(m.group(4))
+            continue
+        m = re.search(r'VHDL_ISLAND_REJECT: (\S+) reason=([\w-]+)', line)
+        if m and mine(m.group(1)):
+            r = m.group(2)
+            st["rejects"][r] = st["rejects"].get(r, 0) + 1
+            continue
+        m = re.search(r'VHDL_ISLAND_INFO: (\S+) .*?mode=(\w+)', line)
+        if m and mine(m.group(1)):
+            md = m.group(2)
+            st["modes"][md] = st["modes"].get(md, 0) + 1
     return st

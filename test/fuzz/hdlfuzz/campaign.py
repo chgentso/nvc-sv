@@ -104,13 +104,13 @@ def run_one(tools, case, config_names, out, worker_dir, tier="", seed=None,
     wd = os.path.join(worker_dir, "case-" + case.name)
     results = run.run_case(tools, case, config_names, wd)
     verdict = compare.compare_case(results, report_stable=report_stable)
-    sigs = verdict.signatures()
+    sigs = verdict.signatures(group=True)
     reproduced = None
     if sigs and confirm:
         wd2 = wd + "-again"
         res2 = run.run_case(tools, case, config_names, wd2)
         v2 = compare.compare_case(res2, report_stable=report_stable)
-        again = set(v2.signatures())
+        again = set(v2.signatures(group=True))
         reproduced = bool(set(sigs) & again)
         verdict.notes.append("reproduced" if reproduced
                              else "not reproduced: " + ",".join(sorted(again)))
@@ -120,7 +120,8 @@ def run_one(tools, case, config_names, out, worker_dir, tier="", seed=None,
         "case": case.name, "seed": seed, "tier": tier, "lang": case.lang,
         "outcomes": {k: r.outcome for k, r in results.items()},
         "walls": {k: round(r.wall, 3) for k, r in results.items()},
-        "signatures": sigs, "primary": verdict.primary() if sigs else "",
+        "signatures": sigs, "configs": verdict.configs(),
+        "primary": verdict.primary(True) if sigs else "",
         "blame": verdict.blame, "notes": verdict.notes,
         "info": verdict.info, "reproduced": reproduced,
         "size": case.source_size(), "time": round(time.time() - t0, 3),
@@ -148,14 +149,17 @@ def keep(out, case, results, verdict, rec):
         if r.wave and os.path.exists(r.wave):
             shutil.copy(r.wave, os.path.join(d, name + ".vcd"))
     with open(os.path.join(d, "verdict.json"), "w") as f:
-        json.dump({"signatures": verdict.signatures(), "blame": verdict.blame,
+        json.dump({"signatures": verdict.signatures(),
+                   "grouped": verdict.signatures(True),
+                   "blame": verdict.blame,
                    "notes": verdict.notes, "info": verdict.info,
                    "diffs": [vars(x) for x in verdict.diffs]}, f, indent=1,
                   sort_keys=True)
 
 
 def build_buckets(jsonl, keep_n=3):
-    """signature -> {count, cases: the keep_n smallest cases}."""
+    """grouped signature -> {count, cases: the keep_n smallest cases,
+    configs: {config: number of cases it showed the difference in}}."""
     b = {}
     if not os.path.exists(jsonl):
         return b
@@ -166,11 +170,14 @@ def build_buckets(jsonl, keep_n=3):
             except ValueError:
                 continue
             for s in r.get("signatures", []):
-                e = b.setdefault(s, {"count": 0, "cases": []})
+                e = b.setdefault(s, {"count": 0, "cases": [], "configs": {}})
                 e["count"] += 1
+                for c in r.get("configs", {}).get(s, []):
+                    e["configs"][c] = e["configs"].get(c, 0) + 1
                 e["cases"].append((r.get("size", 0), r["case"]))
                 e["cases"] = sorted(e["cases"])[:keep_n]
-    return {s: {"count": e["count"], "cases": [c for _, c in e["cases"]]}
+    return {s: {"count": e["count"], "cases": [c for _, c in e["cases"]],
+                "configs": dict(sorted(e["configs"].items()))}
             for s, e in sorted(b.items())}
 
 

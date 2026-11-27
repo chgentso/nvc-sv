@@ -51,6 +51,18 @@ _FRAME_SKIP = re.compile(
     r'^raise$|^gsignal$|^__|^_?show_|^backtrace|libc|ld-linux|^\?\?$', re.I)
 
 
+# nvc configurations that run the same elaborated design through the island
+# path (or a variant of it): one bug usually shows in several of them, so the
+# campaign buckets them as one ("islands") and keeps the per-config detail.
+ISLAND_CONFIGS = frozenset(("default", "nofast", "module", "spec", "specA",
+                            "stress", "threads", "jit", "interp", "O0"))
+GROUP = "islands"
+
+
+def group_name(cfg):
+    return GROUP if cfg in ISLAND_CONFIGS else cfg
+
+
 @dataclass
 class Difference:
     level: str                  # L0 | L1 | L2 | L3
@@ -63,8 +75,10 @@ class Difference:
     rules: List[str] = field(default_factory=list)
     hint: str = ""
 
-    def signature(self):
-        where = self.cfg if not self.ref else "%s-vs-%s" % (self.cfg, self.ref)
+    def signature(self, group=False):
+        """group=True: island configurations share one name ("islands")."""
+        cfg = group_name(self.cfg) if group else self.cfg
+        where = cfg if not self.ref else "%s-vs-%s" % (cfg, self.ref)
         parts = ["%s-%s" % (self.level, self.what), where]
         if self.kind:
             parts.append(self.kind)

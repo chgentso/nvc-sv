@@ -91,6 +91,7 @@ class Vcd:
         self.width = {}                       # name -> declared width
         self.events = {}                      # name -> [(time, value)]
         self.dup_ids = 0
+        self.end_time = 0                     # last #time marker in the file
 
     def names(self):
         return self.events.keys()
@@ -133,6 +134,7 @@ def parse(path):
             if c == "#":
                 try:
                     t = int(s[1:])
+                    vcd.end_time = max(vcd.end_time, t)
                 except ValueError:
                     pass
             elif c in "bBrR":
@@ -175,3 +177,8 @@ def final_series(events, reduce=False):
         if not ded or ded[-1][1] != v:
             ded.append((t, v))
     return ded
+
+
+def cut_before(events_by_name, t):
+    """The same map with every change at time t or later removed."""
+    return {n: [e for e in ev if e[0] < t] for n, ev in events_by_name.items()}

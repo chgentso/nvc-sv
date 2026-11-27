@@ -231,8 +231,58 @@ b10 "
                          "l3-vcd/ref-vs-ghdl/value/vec/later")
         self.assertIn(compare.RULE_9VAL, d.rules)
 
+    def test_cross_tool_early_end(self):
+        # fatal at 45: nvc has dumped a change inside the failing time step,
+        # the other tool stopped before dumping it
+        hdr = """\
+$scope module top $end
+$var reg 1 a clk $end
+$var reg 4 b n [3:0] $end
+$upscope $end
+$enddefinitions $end
+#0
+0a
+b0000 b
+#40
+1a
+"""
+        n = write(self.tmp.name, "n.vcd", hdr + "#45\nb0100 b\n")
+        g = write(self.tmp.name, "g.vcd", hdr + "#45\n")
+        a = RunResult("ref", wave=n, outcome="failure")
+        b = RunResult("ghdl", wave=g, outcome="failure")
+        d, _ = compare.compare_vcd_cross(a, b)
+        self.assertEqual(d.kind, "extra-event")        # spurious without cut
+        d, ncommon = compare.compare_vcd_cross(a, b, cut=True)
+        self.assertIsNone(d)
+        self.assertEqual(ncommon, 2)
+        # a real earlier difference is still seen with the cut
+        g2 = write(self.tmp.name, "g2.vcd", hdr.replace("b0000", "b0001") + "#45\n")
+        d, _ = compare.compare_vcd_cross(a, RunResult("ghdl", wave=g2),
+                                         cut=True)
+        self.assertEqual(d.kind, "value")
+        self.assertIn(compare.RULE_CUT, d.rules)
+        # compare_case switches the cut on for failing runs
+        v = compare.compare_case({"ref": a, "ghdl": b})
+        self.assertEqual(v.signatures(), [])
+        ok = RunResult("ref", wave=n, outcome="ok")
+        okg = RunResult("ghdl", wave=g, outcome="ok")
+        self.assertEqual(len(compare.compare_case(
+            {"ref": ok, "ghdl": okg}).signatures()), 1)
+
 
 class VerdictTests(unittest.TestCase):
+    def test_signatures_grouped_with_configs(self):
+        ref = RunResult("ref", text="** Note: 1ns+1: a\n")
+        res = {"ref": ref}
+        for c in ("default", "nofast", "spec"):
+            res[c] = RunResult(c, text="** Note: 1ns+3: a\n")
+        v = compare.compare_case(res)
+        self.assertEqual(len(v.signatures()), 3)
+        g = v.signatures(group=True)
+        self.assertEqual(g, ["l1-report/islands-vs-ref/delta-shift/note:a"])
+        self.assertEqual(v.configs()[g[0]], ["default", "nofast", "spec"])
+        self.assertEqual(v.primary(True), g[0])
+
     def test_outcome_and_blame_free(self):
         ok = RunResult("ref", text="")
         bad = RunResult("default", outcome="failure", rc=1, text="")

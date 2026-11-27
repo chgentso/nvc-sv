@@ -192,6 +192,9 @@ class StubTest(unittest.TestCase):
         campaign.append_line(os.path.join(out, "cases.jsonl"), rec)
         b = campaign.write_buckets(out)
         self.assertEqual(b[rec["primary"]]["count"], 1)
+        # island configs are one bucket; the per-config detail is kept
+        self.assertIn("islands-vs-ref", rec["primary"])
+        self.assertIn("default", b[rec["primary"]]["configs"])
         fails = os.listdir(os.path.join(out, "fail"))
         self.assertEqual(len(fails), 1)
         kept = os.path.join(out, "fail", fails[0], "chain")
@@ -206,6 +209,34 @@ class StubTest(unittest.TestCase):
                                out, os.path.join(out, "w0"), stats=False)
         self.assertEqual(rec["signatures"], [])
         self.assertFalse(os.path.exists(os.path.join(out, "fail")))
+
+
+ISLAND_DUMP = """\
+VHDL_ISLAND_ELAB: WORK.FZ_TB.DUT.U0 islands=1 fused_procs=10/10 sigs=18 two_state=0
+VHDL_ISLAND_INFO: WORK.FZ_TB.DUT.U0 island=0 procs=10 mode=B a_variant=yes
+VHDL_ISLAND_ELAB: WORK.FZ_TB.DUT islands=1 fused_procs=11/12 sigs=22 two_state=0
+VHDL_ISLAND_REJECT: WORK.FZ_TB.DUT.A7 reason=prune: comb-only island
+VHDL_ISLAND_INFO: WORK.FZ_TB.DUT island=0 procs=11 mode=A a_variant=yes
+VHDL_ISLAND_ELAB: WORK.FZ_TB islands=1 fused_procs=2/10 sigs=10 two_state=0
+VHDL_ISLAND_REJECT: WORK.FZ_TB.FZ_CLOCK reason=shape: process is not sensitivity-list only
+VHDL_ISLAND_INFO: WORK.FZ_TB island=0 procs=2 mode=B a_variant=yes
+VHDL_ISLAND_ELAB: WORK.FZ_TB.DUTY islands=1 fused_procs=1/1 sigs=1 two_state=0
+"""
+
+
+class IslandStatsTests(unittest.TestCase):
+    def test_all_scopes(self):
+        st = run.parse_island_stats(ISLAND_DUMP)
+        self.assertEqual((st["fused_procs"], st["total_procs"]), (24, 33))
+
+    def test_dut_only(self):
+        st = run.parse_island_stats(ISLAND_DUMP, "WORK.FZ_TB.DUT")
+        # the testbench scope (2/10) and the name that only shares a prefix
+        # (DUTY) are not counted
+        self.assertEqual((st["fused_procs"], st["total_procs"], st["islands"]),
+                         (21, 22, 2))
+        self.assertEqual(st["rejects"], {"prune": 1})
+        self.assertEqual(st["modes"], {"A": 1, "B": 1})
 
 
 class CampaignGuardTests(unittest.TestCase):
