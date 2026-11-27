@@ -17,6 +17,8 @@ lib_libnvc_a_SOURCES += \
 	src/rt/island.c \
 	src/rt/model.h \
 	src/rt/model.c \
+	src/rt/rorder.h \
+	src/rt/rorder.c \
 	src/rt/crv.c \
 	src/rt/crv-blast.c \
 	src/rt/crv-blast.h \

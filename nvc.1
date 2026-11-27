@@ -967,6 +967,28 @@ the interpreter takes about 1.7 times as long (1.7 s against 2.9 s for 200
 million statements) and compiled code about 1.25 times as long (0.82 s
 against 1.03 s for 120 million statements); designs which spend their time on
 signals are affected much less.
+.\" --report-order
+.It Fl \-report-order= Ns Ar stable|immediate
+How the reports, assertion messages and other output that processes write
+to the standard output and error streams are ordered within a delta cycle.
+The VHDL standard does not specify the order in which the processes of a
+delta cycle run, and processes that are fused into an RTL island run at one
+point of the cycle.  With
+.Cm stable ,
+the default, this output is held until the end of the delta cycle and then
+written in the order in which the processes start, which is the order of
+their declarations, and in the order each process wrote it.  The output of
+a simulation is then the same whether RTL islands are used or not.  A report
+that stops the simulation keeps its place among the others.  The output of a
+Verilog process is written before the next Verilog process runs, so Verilog
+output keeps the order in which the processes ran.  Output from VPI and VHPI
+callbacks, foreign subprograms and the simulator itself, including fatal
+errors, is written as it happens after anything held so far.  Output written
+to other files is never held.  With
+.Cm immediate
+all output is written as it happens.  The environment variable
+.Ev NVC_REPORT_ORDER
+sets the default.
 .\" --shuffle
 .It Fl \-shuffle
 Run processes in random order.  The VHDL standard does not specify the

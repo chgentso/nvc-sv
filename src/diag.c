@@ -1326,6 +1326,11 @@ void diag_emit(diag_t *d)
             && diag_has_message(d))
       goto cleanup;
    else {
+      // A fatal error may end the program: it appears after any output
+      // held to be written in a fixed order
+      if (d->level == DIAG_FATAL)
+         nvc_output_urgent_begin();
+
       // The stderr and stdout streams are often redirected to the same
       // file so ensure that the output appears in a logical order
       fflush(stderr);
@@ -1343,6 +1348,9 @@ void diag_emit(diag_t *d)
          diag_format_full(d, d->ostream);
 
       fflush(d->ostream->context);
+
+      if (d->level == DIAG_FATAL)
+         nvc_output_urgent_end();
    }
 
    const unsigned count = relaxed_add(&n_diags[d->level], 1);

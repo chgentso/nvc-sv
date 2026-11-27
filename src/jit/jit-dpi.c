@@ -30,6 +30,7 @@
 #include "jit/jit.h"
 #include "rt/model.h"
 #include "rt/mspace.h"
+#include "rt/rorder.h"
 #include "rt/structs.h"
 #include "vpi/svdpi.h"
 #include "vpi/vpi-model.h"
@@ -1093,6 +1094,8 @@ static void dpi_fiber_enter(dpi_call_t *c)
    void *fake = NULL;
    (void)fake;
 
+   const bool saved_order = rorder_foreign_begin();
+
 #if ASAN_ENABLED
    __sanitizer_start_switch_fiber(&fake, c->stack, DPI_STACK_SIZE);
 #endif
@@ -1106,6 +1109,8 @@ static void dpi_fiber_enter(dpi_call_t *c)
 #if ASAN_ENABLED
    __sanitizer_finish_switch_fiber(fake, NULL, NULL);
 #endif
+
+   rorder_foreign_end(saved_order);
 
    if (limit != NULL) {
       mspace_stack_limit(limit);
@@ -1280,7 +1285,9 @@ int64_t dpi_call(const char *sig, int64_t siglen, void *context,
    const dpi_entry_t *saved_import = dpi_import;
    dpi_import = e;
 
+   const bool saved_order = rorder_foreign_begin();
    ffi_call(&e->cif, FFI_FN(e->fn), &call.ret, call.avalues);
+   rorder_foreign_end(saved_order);
 
    dpi_import = saved_import;
    dpi_current = saved;

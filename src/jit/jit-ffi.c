@@ -22,6 +22,7 @@
 #include "jit/jit-priv.h"
 #include "jit/jit.h"
 #include "option.h"
+#include "rt/rorder.h"
 #include "thread.h"
 #include "type.h"
 #include "vhpi/vhpi-model.h"
@@ -334,8 +335,11 @@ static void jit_vhpi_entry(jit_func_t *f, jit_anchor_t *caller,
       f->entry = jit_interp;
       jit_interp(f, caller, args, tlab);
    }
-   else
+   else {
+      const bool saved_order = rorder_foreign_begin();
       vhpi_call_foreign(handle, args, tlab);
+      rorder_foreign_end(saved_order);
+   }
 
    thread->anchor = NULL;
 }
@@ -369,7 +373,9 @@ static void jit_ghdl_entry(jit_func_t *f, jit_anchor_t *caller,
       }
 
       intmax_t result = 0;
+      const bool saved_order = rorder_foreign_begin();
       ffi_call(&(gffi->cif), gffi->ptr, &result, aptrs);
+      rorder_foreign_end(saved_order);
 
       args[0].integer = result;
    }

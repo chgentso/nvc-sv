@@ -33,7 +33,10 @@ typedef struct _tlab {
    uint32_t  alloc;
    uint32_t  limit;
    uint64_t  mem_dirty;
-   uint64_t  _pad;
+   union {
+      void     *quiet;   // Model state for generated code (rt_quiet_t)
+      uint64_t  _pad;
+   };
    char      data[0];
 } tlab_t;
 
@@ -98,6 +101,7 @@ mir_context_t *jit_get_mir(jit_t *j);
 tlab_t *tlab_acquire(jit_t *j);
 void tlab_release(jit_t *j, tlab_t *t);
 bool jit_is_fused_proc(jit_t *j, ident_t name);
+ident_t jit_last_island_proc(void);
 
 void *jit_mspace_alloc(size_t size) RETURNS_NONNULL;
 void *tlab_alloc(tlab_t *t, size_t size) RETURNS_NONNULL;

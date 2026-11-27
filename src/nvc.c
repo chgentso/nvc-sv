@@ -37,6 +37,7 @@
 #include "rt/defs.h"
 #include "rt/model.h"
 #include "rt/mspace.h"
+#include "rt/rorder.h"
 #include "rt/wave.h"
 #include "scan.h"
 #include "scandeps.h"
@@ -222,6 +223,7 @@ enum {
    OPT_CLI_DUMP_ISLANDS,
    OPT_CLI_TWO_STATE,
    OPT_CLI_THREADS,
+   OPT_CLI_REPORT_ORDER,
 };
 
 static void parse_rtl_islands_option(const char *arg)
@@ -1393,6 +1395,7 @@ static int run_cmd(int argc, char **argv, cmd_state_t *state)
       { "island-fast",   no_argument,       0, OPT_CLI_ISLAND_FAST },
       { "no-island-fast",no_argument,       0, OPT_CLI_NO_ISLAND_FAST },
       { "threads",       required_argument, 0, OPT_CLI_THREADS },
+      { "report-order",  required_argument, 0, OPT_CLI_REPORT_ORDER },
       { 0, 0, 0, 0 }
    };
 
@@ -1542,6 +1545,15 @@ static int run_cmd(int argc, char **argv, cmd_state_t *state)
          break;
       case OPT_CLI_THREADS:
          parse_threads_option(optarg);
+         break;
+      case OPT_CLI_REPORT_ORDER:
+         if (strcasecmp(optarg, "stable") == 0)
+            opt_set_int(OPT_REPORT_ORDER, REPORT_ORDER_STABLE);
+         else if (strcasecmp(optarg, "immediate") == 0)
+            opt_set_int(OPT_REPORT_ORDER, REPORT_ORDER_IMMEDIATE);
+         else
+            fatal("invalid $bold$--report-order$$ option '%s' "
+                  "(expected stable or immediate)", optarg);
          break;
       default:
          should_not_reach_here();
@@ -2989,6 +3001,10 @@ static void usage(void)
            { "--island-fast, --no-island-fast",
              "Enable/disable fast compiled island dispatch and sync "
              "(default on; override with NVC_ISLAND_FAST=0)" },
+           { "--report-order={stable,immediate}",
+             "Write the output of the processes of a delta cycle in the "
+             "order they start, or as it happens (default stable; "
+             "override with NVC_REPORT_ORDER)" },
            { "--shuffle", "Run processes in random order" },
            { "--stats", "Print time and memory usage at end of run" },
            { "--stop-delta=N", "Stop after N delta cycles (default 10000)" },
