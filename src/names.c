@@ -1445,6 +1445,24 @@ static scope_t *private_scope_for(nametab_t *tab, tree_t unit)
          }
          break;
 
+      case T_FUNC_BODY:
+      case T_PROC_BODY:
+      case T_FUNC_INST:
+      case T_PROC_INST:
+         {
+            const int nports = tree_ports(unit);
+            for (int i = 0; i < nports; i++) {
+               tree_t p = tree_port(unit, i);
+               make_visible_fast(s, tree_ident(p), p);
+            }
+            const int ngenerics = tree_generics(unit);
+            for (int i = 0; i < ngenerics; i++) {
+               tree_t g = tree_generic(unit, i);
+               make_visible_fast(s, tree_ident(g), g);
+            }
+         }
+         break;
+
       default:
          break;
       }

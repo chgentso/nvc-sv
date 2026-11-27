@@ -13260,6 +13260,14 @@ static tree_t p_sequential_statement(void)
    case tLTLT:
       break;
 
+   case tSTRING:
+      if (peek_nth(2) == tDOT)
+         break;
+      expect(tWAIT, tID, tASSERT, tREPORT, tIF, tNULL, tRETURN, tCASE, tWHILE,
+             tFOR, tLOOP, tEXIT, tNEXT, tWITH, tLTLT, tLPAREN, tBLOCK);
+      parse_sync(&state, 2);
+      return tree_new(T_NULL);
+
    case tLPAREN:
       {
          tree_t agg = p_aggregate();
