@@ -9065,6 +9065,48 @@ static mir_value_t vi_emit_words_differ_at(vi_lower_t *l, mir_value_t any,
 // first call mark every signal), so compare each signal with the copy taken
 // on the last run.  Branches to RUN_BB, which updates the copies, or to
 // SKIP_BB.
+// OR into ANY whether the NBYTES bytes at A_OFF of A_BASE and B_OFF of the
+// state differ, for a long slice that does not start on a word
+static mir_value_t vi_emit_bytes_differ_at(vi_lower_t *l, mir_value_t any,
+                                           mir_value_t a_base, uint32_t a_off,
+                                           uint32_t b_off, uint32_t nbytes)
+{
+   mir_unit_t *mu = l->mu;
+   mir_type_t t_off = mir_offset_type(mu);
+   mir_value_t idx_v = mir_add_var(mu, t_off, MIR_NULL_STAMP,
+                                   ident_uniq("evb"), MIR_VAR_TEMP);
+   mir_value_t any_v = mir_add_var(mu, mir_bool_type(mu), MIR_NULL_STAMP,
+                                   ident_uniq("evd"), MIR_VAR_TEMP);
+   mir_build_store(mu, idx_v, vi_off(mu, 0));
+   mir_build_store(mu, any_v, any);
+
+   mir_block_t hdr = mir_add_block(mu);
+   mir_block_t body = mir_add_block(mu);
+   mir_block_t done = mir_add_block(mu);
+   mir_build_jump(mu, hdr);
+
+   mir_set_cursor(mu, hdr, MIR_APPEND);
+   mir_value_t i = mir_build_load(mu, idx_v);
+   mir_build_cond(mu, mir_build_cmp(mu, MIR_CMP_LT, i, vi_off(mu, nbytes)),
+                  body, done);
+
+   mir_set_cursor(mu, body, MIR_APPEND);
+   mir_value_t a = mir_build_load(
+      mu, mir_build_array_ref(mu, a_base,
+                              mir_build_add(mu, t_off, vi_off(mu, a_off), i)));
+   mir_value_t b = mir_build_load(
+      mu, mir_build_array_ref(mu, l->state_ptr,
+                              mir_build_add(mu, t_off, vi_off(mu, b_off), i)));
+   mir_build_store(mu, any_v,
+                   mir_build_or(mu, mir_build_load(mu, any_v),
+                                mir_build_cmp(mu, MIR_CMP_NEQ, a, b)));
+   mir_build_store(mu, idx_v, mir_build_add(mu, t_off, i, vi_off(mu, 1)));
+   mir_build_jump(mu, hdr);
+
+   mir_set_cursor(mu, done, MIR_APPEND);
+   return mir_build_load(mu, any_v);
+}
+
 // Where the process reads ISIG from (at byte PART_OFF): a signal that a
 // process inside a combinational loop may already have assigned in this
 // call is read from its copy taken when the island function started (see
@@ -9102,12 +9144,11 @@ static bool vi_emit_report_guard(vi_lower_t *l, const vhdl_iproc_t *p,
       mir_value_t base = MIR_NULL_VALUE;
       if (isig != NULL)
          base = vi_guard_base(l, isig, p->evt_part_off[i], &src);
-      if (isig != NULL && !p->has_report
-          && (nbytes == 0 || (nbytes > 64 && (src % 8 || nbytes % 8)))) {
+      if (isig != NULL && !p->has_report && nbytes == 0) {
          // A process that only calls functions that may warn reads a
-         // sparse RAM or a long unaligned slice, which is not copied:
-         // run it when the change byte of the signal is set (an input
-         // sync may set it without a change), or always without one
+         // sparse RAM, which is not copied: run it when the change byte
+         // of the signal is set (an input sync may set it without a
+         // change), or always without one
          if (l->isl->has_act && (isig->rt_flags & RT_ISIG_ACT)) {
             const uint32_t idx = (uint32_t)(isig - l->isl->sigs);
             mir_value_t chg = mir_build_load(mu, vi_state_ptr_at(l, idx));
@@ -9139,10 +9180,9 @@ static bool vi_emit_report_guard(vi_lower_t *l, const vhdl_iproc_t *p,
             any = mir_build_or(mu, any, mir_build_cmp(mu, MIR_CMP_NEQ, a, b));
          }
       }
-      else {
-         l->reason = "comb: report process sensitive to a long slice";
-         return false;
-      }
+      else
+         any = vi_emit_bytes_differ_at(l, any, base, src, p->evt_copy_off[i],
+                                       nbytes);
    }
 
    mir_block_t run_bb = mir_add_block(mu);
@@ -9155,7 +9195,7 @@ static bool vi_emit_report_guard(vi_lower_t *l, const vhdl_iproc_t *p,
       uint32_t src;
       mir_value_t base = vi_guard_base(l, isig, p->evt_part_off[i], &src);
       const uint32_t nbytes = p->evt_copy_bytes[i];
-      if (nbytes == 0 || (nbytes > 64 && (src % 8 || nbytes % 8)))
+      if (nbytes == 0)
          continue;   // Not copied, see above
       mir_build_copy(mu, vi_state_ptr_at(l, p->evt_copy_off[i]),
                      mir_build_array_ref(mu, base, vi_off(mu, src)),
