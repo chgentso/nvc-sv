@@ -1439,6 +1439,7 @@ void rt_island_mgr_free(rt_island_mgr_t *mgr)
       for (uint32_t d = 0; d < isl->ndomains; d++) {
          free(isl->domains[d].write_sigs);
          free(isl->domains[d].ff_descs);
+         free(isl->domains[d].ff_runs);
       }
       free(isl->domains);
       for (uint32_t f = 0; f < isl->n_forces; f++)
@@ -2071,6 +2072,71 @@ static void island_spec_report(rt_island_mgr_t *mgr)
       fflush(stdout);
 }
 
+// Registers of an SV flip-flop domain that nothing outside the island state
+// observes on a change (no direct link, output, activity byte, log or
+// forces) are committed together: consecutive ones whose a and b planes are
+// adjacent in the state form one run of words compared and copied at once,
+// instead of one descriptor per register.  A run only combines registers
+// with the same RT_IFF_COMB_READ so a change of the run wakes the
+// combinational logic exactly when a change of one of its registers would.
+static bool island_ff_desc_mergeable(const rt_island_ff_desc_t *d)
+{
+   if (d->flags & (RT_IFF_STD_LOGIC9 | RT_IFF_SPARSE_RAM | RT_IFF_ACT
+                   | RT_IFF_TOUCH_LOG | RT_IFF_HAS_NOTIFY))
+      return false;
+   return (d->flags & RT_IFF_TWO_STATE) || d->b_delta == d->count;
+}
+
+static int island_ff_desc_cmp(const void *a, const void *b)
+{
+   const uint32_t ao = ((const rt_island_ff_desc_t *)a)->a_off;
+   const uint32_t bo = ((const rt_island_ff_desc_t *)b)->a_off;
+   return (ao > bo) - (ao < bo);
+}
+
+static void island_merge_ff_runs(rt_island_domain_t *dom)
+{
+   if (dom->ff_runs == NULL)
+      dom->ff_runs = xmalloc_array(MAX(dom->n_write_sigs, 1),
+                                   sizeof(rt_island_ff_desc_t));
+
+   // The other descriptors keep their order; the runs follow them, merged
+   // in state order as the registers are written in statement order
+   uint32_t n = 0, nm = 0;
+   rt_island_ff_desc_t *merge LOCAL =
+      xmalloc_array(MAX(dom->n_write_sigs, 1), sizeof(rt_island_ff_desc_t));
+   for (uint32_t j = 0; j < dom->n_write_sigs; j++) {
+      const rt_island_ff_desc_t *d = &(dom->ff_descs[j]);
+      if (island_ff_desc_mergeable(d))
+         merge[nm++] = *d;
+      else
+         dom->ff_runs[n++] = *d;
+   }
+
+   qsort(merge, nm, sizeof(rt_island_ff_desc_t), island_ff_desc_cmp);
+
+   const uint32_t first_run = n;
+   for (uint32_t j = 0; j < nm; j++) {
+      const rt_island_ff_desc_t *d = &(merge[j]);
+      const uint32_t nwords =
+         (d->flags & RT_IFF_TWO_STATE) ? d->count : 2 * d->count;
+      const uint16_t comb = d->flags & RT_IFF_COMB_READ;
+      rt_island_ff_desc_t *prev = n > first_run ? &(dom->ff_runs[n - 1]) : NULL;
+      if (prev != NULL && (prev->flags & RT_IFF_COMB_READ) == comb
+          && prev->a_off + prev->count * 8u == d->a_off)
+         prev->count += nwords;
+      else {
+         dom->ff_runs[n++] = (rt_island_ff_desc_t){
+            .a_off   = d->a_off,
+            .count   = nwords,
+            .sig_idx = d->sig_idx,
+            .flags   = RT_IFF_RUN | comb,
+         };
+      }
+   }
+   dom->n_ff_runs = n;
+}
+
 static void island_refresh_domain_descs(rt_island_t *isl)
 {
    for (uint32_t d = 0; d < isl->ndomains; d++) {
@@ -2100,6 +2166,9 @@ static void island_refresh_domain_descs(rt_island_t *isl)
          else if ((s->flags & (RT_ISIG_OUT | RT_ISIG_OBSERVED))
                   && !(s->flags & RT_ISIG_PRUNED))
             fl |= RT_IFF_SYNC_OUT;
+         if ((s->flags & RT_ISIG_TOUCH_LOG)
+             && !(fl & (RT_IFF_SPARSE_RAM | RT_IFF_STD_LOGIC9)))
+            fl |= RT_IFF_TOUCH_LOG;
 
          fd->a_off   = s->a_off;
          fd->count   = (fl & RT_IFF_STD_LOGIC9)
@@ -2119,6 +2188,9 @@ static void island_refresh_domain_descs(rt_island_t *isl)
          else
             fd->b_delta = 0;
       }
+
+      if (!isl->is_vhdl)
+         island_merge_ff_runs(dom);
    }
 }
 
@@ -3399,8 +3471,36 @@ static inline const rt_island_force_t *island_find_force(const rt_island_t *isl,
    return NULL;
 }
 
+// Element write log of an SV island memory in the next-state half (see
+// RT_ISLAND_TOUCH_CAP): it directly follows the planes of the signal
+static inline uint64_t *island_touch_log(rt_island_t *isl,
+                                         const rt_island_sig_t *s)
+{
+   const uint32_t plane = s->nwords * s->nelems * 8u;
+   const uint32_t off =
+      ((s->flags & RT_ISIG_TWO_STATE) ? s->a_off : s->b_off) + plane;
+   assert(isl->next_state != NULL);
+   assert(off + RT_ISLAND_TOUCH_BYTES <= isl->state_bytes);
+   return (uint64_t *)(isl->next_state + off);
+}
+
+// A force or release may leave the next state of any element different from
+// the current one: the next commit of each memory compares all of it
+static void island_touch_invalidate(rt_island_t *isl)
+{
+   if (isl->next_state == NULL)
+      return;
+   for (uint32_t i = 0; i < isl->nsigs; i++) {
+      const rt_island_sig_t *s = &(isl->sigs[i]);
+      if (s->flags & RT_ISIG_TOUCH_LOG)
+         island_touch_log(isl, s)[0] = RT_ISLAND_TOUCH_CAP + 1;
+   }
+}
+
 static inline void island_sync_force_hdr(rt_island_t *isl)
 {
+   island_touch_invalidate(isl);
+
    if (isl->nsigs == 0 || (isl->sigs[0].flags & RT_ISIG_VHDL)
        || isl->sigs[0].a_off < sizeof(uint64_t))
       return;
@@ -9530,31 +9630,117 @@ bool rt_island_has_ff_commits(const rt_island_mgr_t *mgr)
       && (mgr->ff_commit_q.count > 0 || mgr->super_commit_q.count > 0);
 }
 
+// Commit of an SV island memory with an element write log: compares and
+// copies only the logged elements and publishes each changed one.  Returns
+// false when the whole memory must be committed instead (log overflowed,
+// forces).
+__attribute__((noinline))
+static bool island_commit_touch(rt_model_t *m, rt_island_t *isl,
+                                const rt_island_ff_desc_t *d,
+                                bool has_forces, bool *changed_out)
+{
+   rt_island_sig_t *s = &(isl->sigs[d->sig_idx]);
+   uint64_t *log = island_touch_log(isl, s);
+   const uint64_t count = log[0];
+   log[0] = 0;
+   if (has_forces || count > RT_ISLAND_TOUCH_CAP)
+      return false;
+
+   const uint32_t nwords = s->nwords;
+   const bool two_state = !!(s->flags & RT_ISIG_TWO_STATE);
+   uint64_t *dst_a = (uint64_t *)(isl->state + s->a_off);
+   const uint64_t *src_a = (const uint64_t *)(isl->next_state + s->a_off);
+   uint64_t *dst_b = two_state ? NULL : (uint64_t *)(isl->state + s->b_off);
+   const uint64_t *src_b = two_state
+      ? NULL : (const uint64_t *)(isl->next_state + s->b_off);
+   const bool sync_out = !!(d->flags & RT_IFF_SYNC_OUT);
+
+   bool changed = false;
+   for (uint64_t k = 0; k < count; k++) {
+      const uint64_t e = log[1 + k];
+      if (e >= s->nelems)
+         continue;
+      const size_t base = (size_t)e * nwords;
+      bool elem_changed = false;
+      for (uint32_t w = 0; w < nwords; w++) {
+         if (dst_a[base + w] != src_a[base + w]) {
+            dst_a[base + w] = src_a[base + w];
+            elem_changed = true;
+         }
+         if (dst_b != NULL && dst_b[base + w] != src_b[base + w]) {
+            dst_b[base + w] = src_b[base + w];
+            elem_changed = true;
+         }
+      }
+      if (elem_changed) {
+         changed = true;
+         if (sync_out)
+            island_sync_out_slice(m, isl, s, (uint32_t)e * s->width,
+                                  s->width);
+      }
+   }
+
+   *changed_out = changed;
+   return true;
+}
+
+// Commit of a run of registers (RT_IFF_RUN)
+static inline bool island_commit_run(rt_island_t *isl,
+                                     const rt_island_ff_desc_t *d)
+{
+   uint8_t *dst = isl->state + d->a_off;
+   const uint8_t *src = isl->next_state + d->a_off;
+   const size_t nbytes = (size_t)d->count * sizeof(uint64_t);
+   if (memcmp(dst, src, nbytes) == 0)
+      return false;
+   memcpy(dst, src, nbytes);
+   return true;
+}
+
 static void island_commit_domain(rt_model_t *m, rt_island_domain_t *dom)
 {
    rt_island_t *isl = dom->isl;
    if (unlikely(dom->spec_held_w))
       island_spec_ff_unhold(dom);
-   const rt_island_ff_desc_t *descs = dom->ff_descs;
-   const uint32_t n_write = dom->n_write_sigs;
    const bool has_forces = isl->has_forces;
+   const bool use_runs = !has_forces && dom->ff_runs != NULL;
+   const rt_island_ff_desc_t *descs = use_runs ? dom->ff_runs : dom->ff_descs;
+   const uint32_t n_write = use_runs ? dom->n_ff_runs : dom->n_write_sigs;
    const bool act = isl->act_on;
    bool comb_need_eval = false;
    for (uint32_t j = 0; j < n_write; j++) {
       const rt_island_ff_desc_t *d = &(descs[j]);
+      if (likely(d->flags & RT_IFF_RUN)) {
+         if (island_commit_run(isl, d) && (d->flags & RT_IFF_COMB_READ))
+            comb_need_eval = true;
+         continue;
+      }
       if (unlikely(d->flags & RT_IFF_SPARSE_RAM)) {
          island_commit_sparse_log(m, isl, has_forces, &comb_need_eval);
          continue;
       }
-      if (unlikely(has_forces)) {
-         rt_island_force_t *f = (rt_island_force_t *)island_find_force(isl, d->sig_idx);
-         if (f != NULL)
-            island_apply_force_entry(isl->next_state, &(isl->sigs[d->sig_idx]),
-                                     f, true);
+      bool whole = true;
+      if (unlikely(d->flags & RT_IFF_TOUCH_LOG)) {
+         bool changed = false;
+         if (island_commit_touch(m, isl, d, has_forces, &changed)) {
+            if (!changed)
+               continue;
+            whole = false;   // Changed elements are already published
+         }
       }
 
-      if (!island_commit_desc_buf(isl, d))
-         continue;
+      if (whole) {
+         if (unlikely(has_forces)) {
+            rt_island_force_t *f =
+               (rt_island_force_t *)island_find_force(isl, d->sig_idx);
+            if (f != NULL)
+               island_apply_force_entry(isl->next_state,
+                                        &(isl->sigs[d->sig_idx]), f, true);
+         }
+
+         if (!island_commit_desc_buf(isl, d))
+            continue;
+      }
 
       if (unlikely(act) && (d->flags & RT_IFF_ACT))
          isl->state[d->sig_idx] = 1;
@@ -9573,7 +9759,7 @@ static void island_commit_domain(rt_model_t *m, rt_island_domain_t *dom)
                   island_mark_dirty(dst_s->isl);
             }
          }
-         else
+         else if (whole)
             island_sync_out_sig(m, isl, s);
       }
    }

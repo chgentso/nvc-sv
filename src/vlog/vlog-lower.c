@@ -86,6 +86,7 @@ typedef struct {
    uint32_t    island_b_off;
    uint32_t    island_width;
    uint32_t    island_nelems;
+   uint32_t    island_touch_off;
    mir_value_t island_elem;
 } vlog_select_t;
 
@@ -1989,6 +1990,7 @@ static vlog_select_t vlog_lower_select(vlog_gen_t *g, vlog_node_t v)
                   .island_b_off     = isig->b_off,
                   .island_width     = isig->width,
                   .island_nelems    = isig->nelems,
+                  .island_touch_off = isig->touch_off,
                   .island_elem      = zero,
                };
                return result;
@@ -2439,6 +2441,7 @@ static vlog_select_t vlog_lower_select(vlog_gen_t *g, vlog_node_t v)
             .island_b_off     = prefix.island_b_off,
             .island_width     = prefix.island_width,
             .island_nelems    = prefix.island_nelems,
+            .island_touch_off = prefix.island_touch_off,
             .island_elem      = ielem,
          };
          return result;
@@ -2557,6 +2560,7 @@ static vlog_select_t vlog_lower_select(vlog_gen_t *g, vlog_node_t v)
             .island_b_off     = prefix.island_b_off,
             .island_width     = prefix.island_width,
             .island_nelems    = prefix.island_nelems,
+            .island_touch_off = prefix.island_touch_off,
             .island_elem      = prefix.island_elem,
          };
          return result;
@@ -2783,6 +2787,7 @@ static vlog_select_t vlog_lower_select(vlog_gen_t *g, vlog_node_t v)
             .island_b_off     = prefix.island_b_off,
             .island_width     = prefix.island_width,
             .island_nelems    = prefix.island_nelems,
+            .island_touch_off = prefix.island_touch_off,
             .island_elem      = prefix.island_elem,
          };
          return result;
@@ -4569,10 +4574,58 @@ static bool vlog_island_single_word_slice(vlog_gen_t *g,
    return true;
 }
 
+// Appends the element stored through LVAL to the element write log of an
+// island memory (RT_ISIG_TOUCH_LOG in rt/island.h) so the commit visits
+// only the elements written.  A store that is not to a single element
+// marks the log as overflowed and the commit compares the whole memory.
+static void vlog_island_touch(vlog_gen_t *g, const vlog_select_t *lval)
+{
+   if (lval->island_touch_off == 0 || !g->in_island_ff)
+      return;
+
+   mir_type_t t_offset = mir_offset_type(g->mu);
+   mir_type_t t_word = mir_vec2_type(g->mu, 64, false);
+   const uint32_t log_off = lval->island_touch_off + g->island_state_stride;
+
+   mir_value_t zero = mir_const(g->mu, t_offset, 0);
+   mir_value_t no_b = mir_const(g->mu, t_offset, -1);
+   mir_value_t count_off = mir_const(g->mu, t_offset, log_off);
+
+   if (lval->island_need_elem || mir_is_null(lval->island_elem)) {
+      mir_value_t over = mir_const_vec(g->mu, t_word,
+                                       RT_ISLAND_TOUCH_CAP + 1, 0);
+      mir_build_island_store(g->mu, g->island_state, count_off, no_b, zero,
+                             over);
+      return;
+   }
+
+   mir_value_t cap = mir_const(g->mu, t_offset, RT_ISLAND_TOUCH_CAP);
+   mir_value_t count = mir_build_cast(
+      g->mu, t_offset, mir_build_island_load(g->mu, t_word, g->island_state,
+                                             count_off, no_b, zero));
+
+   // Entry RT_ISLAND_TOUCH_CAP is a spare slot written once the log is full
+   mir_value_t below = mir_build_cmp(g->mu, MIR_CMP_LT, count, cap);
+   mir_value_t slot = mir_build_select(g->mu, t_offset, below, count, cap);
+   mir_value_t elem = mir_build_cast(g->mu, t_word, lval->island_elem);
+   mir_build_island_store(g->mu, g->island_state,
+                          mir_const(g->mu, t_offset, log_off + 8), no_b,
+                          slot, elem);
+
+   mir_value_t next = mir_build_select(
+      g->mu, t_offset, below,
+      mir_build_add(g->mu, t_offset, count, mir_const(g->mu, t_offset, 1)),
+      mir_const(g->mu, t_offset, RT_ISLAND_TOUCH_CAP + 1));
+   mir_build_island_store(g->mu, g->island_state, count_off, no_b, zero,
+                          mir_build_cast(g->mu, t_word, next));
+}
+
 static void vlog_island_store_part(vlog_gen_t *g, const vlog_select_t *lval,
                                    mir_value_t part, uint32_t stride)
 {
    mir_type_t t_offset = mir_offset_type(g->mu);
+
+   vlog_island_touch(g, lval);
    const unsigned part_w = mir_get_size(g->mu, mir_get_type(g->mu, part));
 
    uint32_t wbyte_off = 0;
@@ -15131,6 +15184,10 @@ static void vlog_lower_non_blocking_assignment(vlog_gen_t *g, vlog_node_t v)
           && vlog_array_elem_info(g, target)->size == 8
           && mir_is_vector_type(g->mu, vlog_array_elem_info(g, target)->type))
          value = vlog_lower_string_bytes(g, rhs, vlog_unpacked_count(dims, 1));
+      else if (nlvalues == 1 && vlog_kind(rhs) == V_PATTERN_EXPR
+               && (ndims = vlog_unpacked_dims(target, dims)) > 0)
+         value = vlog_lower_array_pattern(g, rhs, dims, ndims,
+                                          vlog_array_elem_info(g, target));
       else {
          mir_type_t context = vlog_assign_context(g, type, rhs);
          value = vlog_lower_with_context(g, rhs, context);

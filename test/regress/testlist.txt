@@ -3454,3 +3454,7 @@ signal41        gold,2008,$NVC_JIT_THRESHOLD=1,$NVC_JIT_ASYNC=0
 signal42        fail,gold,2008,$NVC_JIT_THRESHOLD=1,$NVC_JIT_ASYNC=0
 signal43        shell
 signal44        shell
+vlog_island_mem1 verilog,gold
+vlog_island_mem2 verilog,gold
+vlog_nba_pattern1 verilog,gold
+vlog_island_runs1 verilog,gold

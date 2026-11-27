@@ -1,0 +1,15 @@
+reset: 00 05 21 3f
+plain: 5a 04
+last wins: f0
+again: cc
+same value: cc
+halves: cc
+loop: 01 5b 14 14
+x/z: x1z01010
+copy: x1z01010 x1z01010
+rd: x1z01010
+mem2: 90 180
+wmem: 5a00000000000000000000005 3c00000000000000000000028
+events: 3 4
+reset again: 05 06 28 4 5
+cycles 11
