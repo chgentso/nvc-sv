@@ -9,7 +9,7 @@ import argparse
 import os
 import sys
 
-from . import casefile, gen, ir
+from . import casefile, gen, ir, runcli
 from .prng import case_seed
 
 
@@ -65,6 +65,7 @@ def main(argv=None):
     c = sub.add_parser("check", help="check case.json files")
     c.add_argument("cases", nargs="+")
     c.set_defaults(fn=cmd_check)
+    runcli.register(sub)   # run, campaign, buckets (and the internal worker)
     args = ap.parse_args(argv)
     return args.fn(args)
 
