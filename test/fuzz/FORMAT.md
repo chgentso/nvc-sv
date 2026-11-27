@@ -85,7 +85,8 @@ and `ir.features` (sorted tags such as `item:ccond`, `timing:delta`,
 
 All observer messages start with `FZ ` and are `report ... severity note`
 (nvc prints `** Note: <time>+<delta>: FZ ...`, GHDL prints
-`tb.vhd:L:C:@<time>:(report note): FZ ...`).  Values are 9-valued strings:
+`tb.vhd:L:C:@<time>:(report note): FZ ...`; both print the time in the
+largest unit that divides it, e.g. `0ms`, `130ns`, so parse the unit).  Values are 9-valued strings:
 vectors through `to_string` (MSB first, e.g. `01UX`), scalars through
 `std_logic'image` (with the apostrophes, e.g. `'1'`).
 
