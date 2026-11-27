@@ -5524,27 +5524,25 @@ static mir_value_t vlog_lower_vector_binary(vlog_gen_t *g, vlog_binary_t binop,
    return result;
 }
 
-static mir_value_t vlog_lower_array_compare(vlog_gen_t *g, vlog_node_t v,
-                                            vlog_node_t type)
+static mir_value_t vlog_lower_array_eq(vlog_gen_t *g, vlog_node_t where,
+                                       vlog_node_t type, mir_value_t l,
+                                       mir_value_t r)
 {
    // Equal if the sizes match and each pair of elements is identical
 
-   const type_info_t *ti = vlog_type_info(g, type);
-   const type_info_t *eti = vlog_type_info(g, vlog_type(type));
+   vlog_node_t elem_type = vlog_get_type(vlog_type(type));
+   const type_info_t *eti = vlog_type_info(g, elem_type);
 
    const mir_class_t eclass = mir_get_class(g->mu, eti->type);
    if (eclass != MIR_TYPE_VEC2 && eclass != MIR_TYPE_VEC4
        && eclass != MIR_TYPE_REAL && eclass != MIR_TYPE_CONTEXT
        && eclass != MIR_TYPE_UARRAY)
-      fatal_at(vlog_loc(v), "sorry, only arrays of integral, real, string or "
-               "class handle types can be compared");
+      fatal_at(vlog_loc(where), "sorry, only arrays of integral, real, string "
+               "or class handle types can be compared");
 
    mir_type_t t_offset = mir_offset_type(g->mu);
    mir_type_t t_bool = mir_bool_type(g->mu);
-   mir_type_t t_bit = mir_vec2_type(g->mu, 1, false);
 
-   mir_value_t l = vlog_lower_with_context(g, vlog_left(v), ti->type);
-   mir_value_t r = vlog_lower_with_context(g, vlog_right(v), ti->type);
    mir_value_t len = mir_build_uarray_len(g->mu, l, 0);
 
    mir_value_t result = mir_add_var(g->mu, t_bool, MIR_NULL_STAMP,
@@ -5587,12 +5585,15 @@ static mir_value_t vlog_lower_array_compare(vlog_gen_t *g, vlog_node_t v,
                            mir_build_cast(g->mu, eti->type, relem));
       break;
    case MIR_TYPE_UARRAY:
-      {
+      if (elem_type != NULL && vlog_kind(elem_type) == V_DATA_TYPE
+          && vlog_subkind(elem_type) == DT_STRING) {
          mir_value_t zero = mir_const(g->mu, t_offset, 0);
          mir_value_t args[] = { lelem, relem, zero };
          mir_value_t sc = vlog_str_call(g, "__sv_str_cmp", t_offset, args, 3);
          same = mir_build_cmp(g->mu, MIR_CMP_EQ, sc, zero);
       }
+      else
+         same = vlog_lower_array_eq(g, where, elem_type, lelem, relem);
       break;
    default:
       same = mir_build_test(
@@ -5617,10 +5618,24 @@ static mir_value_t vlog_lower_array_compare(vlog_gen_t *g, vlog_node_t v,
 
    mir_set_cursor(g->mu, exit_bb, MIR_APPEND);
 
+   return mir_build_load(g->mu, result);
+}
+
+static mir_value_t vlog_lower_array_compare(vlog_gen_t *g, vlog_node_t v,
+                                            vlog_node_t type)
+{
+   const type_info_t *ti = vlog_type_info(g, type);
+   mir_type_t t_bool = mir_bool_type(g->mu);
+   mir_type_t t_bit = mir_vec2_type(g->mu, 1, false);
+
+   mir_value_t l = vlog_lower_with_context(g, vlog_left(v), ti->type);
+   mir_value_t r = vlog_lower_with_context(g, vlog_right(v), ti->type);
+
+   mir_value_t eq = vlog_lower_array_eq(g, v, type, l, r);
+
    const vlog_binary_t op = vlog_subkind(v);
    const int want = op == V_BINARY_LOG_EQ || op == V_BINARY_CASE_EQ;
-   mir_value_t test = mir_build_cmp(g->mu, MIR_CMP_EQ,
-                                    mir_build_load(g->mu, result),
+   mir_value_t test = mir_build_cmp(g->mu, MIR_CMP_EQ, eq,
                                     mir_const(g->mu, t_bool, want));
    return mir_build_select(g->mu, t_bit, test,
                            mir_const_vec(g->mu, t_bit, 1, 0),
