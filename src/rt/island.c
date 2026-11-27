@@ -1337,6 +1337,94 @@ static void island_rst_watch_cb(uint64_t now, rt_signal_t *signal,
       island_dom_enqueue_sample(dom->isl->mgr, dom);
 }
 
+// The clock and reset watches of SV domains detect the edge when the
+// signal changes, as the trigger of an always process does, instead of when
+// their callback runs: a change and a change back in one region (two
+// blocking assignments, or non-blocking ones that overwrite each other) is
+// still an edge, and a change that is not an edge schedules no callback
+// (and so no delta cycle).  The callback, run when it would otherwise,
+// samples the domain if an edge was seen and the domain is armed.
+bool rt_island_edge_watch_hit(rt_model_t *m, rt_watch_t *w)
+{
+   void *user = w->user_data;
+   bool edge;
+   if (w->fn == island_clk_watch_cb) {
+      if (unlikely(island_wstats_on))
+         __atomic_fetch_add(&island_wstat_clk_cb, 1, __ATOMIC_RELAXED);
+      rt_island_domain_t *dom = user;
+      const rt_island_sig_t *cs = &(dom->isl->sigs[dom->clk_sig_idx]);
+      const uint8_t cur = island_read_sv_bit(cs->sig, cs->sig_offset);
+      edge = island_edge_match(dom->prev_clk, cur, dom->clk_posedge);
+      dom->prev_clk = cur;
+   }
+   else if (w->fn == island_rst_watch_cb) {
+      if (unlikely(island_wstats_on))
+         __atomic_fetch_add(&island_wstat_rst_cb, 1, __ATOMIC_RELAXED);
+      rt_island_domain_t *dom = user;
+      const rt_island_sig_t *rs = &(dom->isl->sigs[dom->rst_sig_idx]);
+      const uint8_t cur = island_read_sv_bit(rs->sig, rs->sig_offset);
+      edge = island_edge_match(dom->prev_rst, cur, dom->rst_posedge);
+      dom->prev_rst = cur;
+   }
+   else if (w->fn == island_super_clk_watch_cb) {
+      if (unlikely(island_wstats_on))
+         __atomic_fetch_add(&island_wstat_sclk_cb, 1, __ATOMIC_RELAXED);
+      rt_super_domain_t *sdom = user;
+      const uint8_t cur = island_read_sv_bit(sdom->clk_sig,
+                                             sdom->clk_sig_offset);
+      edge = island_edge_match(sdom->prev_clk, cur, sdom->clk_posedge);
+      sdom->prev_clk = cur;
+   }
+   else {
+      assert(w->fn == island_super_rst_watch_cb);
+      if (unlikely(island_wstats_on))
+         __atomic_fetch_add(&island_wstat_srst_cb, 1, __ATOMIC_RELAXED);
+      rt_super_domain_t *sdom = user;
+      const uint8_t cur = island_read_sv_bit(sdom->rst_sig,
+                                             sdom->rst_sig_offset);
+      edge = island_edge_match(sdom->prev_rst, cur, sdom->rst_posedge);
+      sdom->prev_rst = cur;
+   }
+   return edge;
+}
+
+void rt_island_edge_watch_fire(rt_model_t *m, rt_watch_t *w, bool edge)
+{
+   // Changes while the callback was pending need no test: the domain is
+   // sampled anyway, and the next edge is tested against the value now
+   const uint64_t now = model_now(m, NULL);
+   if (w->fn == island_clk_watch_cb) {
+      rt_island_domain_t *dom = w->user_data;
+      const rt_island_sig_t *cs = &(dom->isl->sigs[dom->clk_sig_idx]);
+      dom->prev_clk = island_read_sv_bit(cs->sig, cs->sig_offset);
+      if (island_sv_edge_armed(dom->isl->mgr, cs->sig, now,
+                               &dom->reset_clk_edge) && edge)
+         island_dom_enqueue_sample(dom->isl->mgr, dom);
+   }
+   else if (w->fn == island_rst_watch_cb) {
+      rt_island_domain_t *dom = w->user_data;
+      const rt_island_sig_t *rs = &(dom->isl->sigs[dom->rst_sig_idx]);
+      dom->prev_rst = island_read_sv_bit(rs->sig, rs->sig_offset);
+      if (island_sv_edge_armed(dom->isl->mgr, rs->sig, now,
+                               &dom->reset_rst_edge) && edge)
+         island_dom_enqueue_sample(dom->isl->mgr, dom);
+   }
+   else if (w->fn == island_super_clk_watch_cb) {
+      rt_super_domain_t *sdom = w->user_data;
+      sdom->prev_clk = island_read_sv_bit(sdom->clk_sig, sdom->clk_sig_offset);
+      if (island_sv_edge_armed(sdom->mgr, sdom->clk_sig, now,
+                               &sdom->reset_clk_edge) && edge)
+         island_sdom_enqueue_sample(sdom->mgr, sdom);
+   }
+   else {
+      rt_super_domain_t *sdom = w->user_data;
+      sdom->prev_rst = island_read_sv_bit(sdom->rst_sig, sdom->rst_sig_offset);
+      if (island_sv_edge_armed(sdom->mgr, sdom->rst_sig, now,
+                               &sdom->reset_rst_edge) && edge)
+         island_sdom_enqueue_sample(sdom->mgr, sdom);
+   }
+}
+
 rt_island_mgr_t *rt_island_mgr_new(rt_model_t *m)
 {
    rt_island_mgr_t *mgr = xcalloc(sizeof(rt_island_mgr_t));
@@ -1440,6 +1528,7 @@ void rt_island_mgr_free(rt_island_mgr_t *mgr)
          free(isl->domains[d].write_sigs);
          free(isl->domains[d].ff_descs);
          free(isl->domains[d].ff_runs);
+         free(isl->domains[d].glitch_resets);
       }
       free(isl->domains);
       for (uint32_t f = 0; f < isl->n_forces; f++)
@@ -2079,6 +2168,14 @@ static void island_spec_report(rt_island_mgr_t *mgr)
 // instead of one descriptor per register.  A run only combines registers
 // with the same RT_IFF_COMB_READ so a change of the run wakes the
 // combinational logic exactly when a change of one of its registers would.
+// Offset in the next-state half of the overwritten NBA log of an SV island
+// register (RT_ISIG_GLITCH_LOG), after its planes
+static inline uint32_t island_glitch_log_off(const rt_island_sig_t *s)
+{
+   const uint32_t plane = s->nwords * s->nelems * 8u;
+   return ((s->flags & RT_ISIG_TWO_STATE) ? s->a_off : s->b_off) + plane;
+}
+
 static bool island_ff_desc_mergeable(const rt_island_ff_desc_t *d)
 {
    if (d->flags & (RT_IFF_STD_LOGIC9 | RT_IFF_SPARSE_RAM | RT_IFF_ACT
@@ -2146,6 +2243,10 @@ static void island_refresh_domain_descs(rt_island_t *isl)
       if (dom->ff_descs == NULL)
          dom->ff_descs = xmalloc_array(dom->n_write_sigs,
                                        sizeof(rt_island_ff_desc_t));
+      if (dom->glitch_resets == NULL)
+         dom->glitch_resets = xmalloc_array(dom->n_write_sigs,
+                                            sizeof(uint32_t));
+      dom->n_glitch_resets = 0;
       for (uint32_t j = 0; j < dom->n_write_sigs; j++) {
          const uint32_t sidx = dom->write_sigs[j];
          const rt_island_sig_t *s = &(isl->sigs[sidx]);
@@ -2169,6 +2270,16 @@ static void island_refresh_domain_descs(rt_island_t *isl)
          if ((s->flags & RT_ISIG_TOUCH_LOG)
              && !(fl & (RT_IFF_SPARSE_RAM | RT_IFF_STD_LOGIC9)))
             fl |= RT_IFF_TOUCH_LOG;
+         // The overwritten NBA values of a register only matter to those
+         // woken by its changes; the log of another is only reset
+         if ((s->flags & RT_ISIG_GLITCH_LOG)
+             && !(fl & (RT_IFF_SPARSE_RAM | RT_IFF_STD_LOGIC9))) {
+            if (fl & RT_IFF_HAS_NOTIFY)
+               fl |= RT_IFF_GLITCH;
+            else
+               dom->glitch_resets[dom->n_glitch_resets++] =
+                  island_glitch_log_off(s);
+         }
 
          fd->a_off   = s->a_off;
          fd->count   = (fl & RT_IFF_STD_LOGIC9)
@@ -2316,7 +2427,12 @@ void rt_island_finish(void *handle)
 
       const rt_island_sig_t *cs = &(isl->sigs[dom->clk_sig_idx]);
       assert(cs->sig != NULL);
+      // An SV edge is detected when the clock changes (a VHDL process
+      // tests the edge when it runs)
+      const bool sv_edge = !(dom->edge_flags
+                             & (RT_IEDGE_VHDL | RT_IEDGE_VHDL_EVENT));
       dom->clk_watch = watch_new(m, island_clk_watch_cb, dom, WATCH_EVENT, 1);
+      watch_set_inline_edge(dom->clk_watch, sv_edge);
       if (cs->sig->shared.flags & SIG_F_PACKED)
          model_set_event_cb(m, cs->sig, 0, 1, dom->clk_watch);
       else
@@ -2327,6 +2443,8 @@ void rt_island_finish(void *handle)
          assert(rs->sig != NULL);
          dom->rst_watch = watch_new(m, island_rst_watch_cb, dom,
                                     WATCH_EVENT, 1);
+         watch_set_inline_edge(dom->rst_watch, sv_edge
+                               && !(dom->edge_flags & RT_IEDGE_RST_LEVEL));
          if (rs->sig->shared.flags & SIG_F_PACKED)
             model_set_event_cb(m, rs->sig, 0, 1, dom->rst_watch);
          else
@@ -6698,6 +6816,9 @@ static void island_build_hier(rt_island_mgr_t *mgr)
 
          sd->clk_watch = watch_new(mgr->model, island_super_clk_watch_cb,
                                    sd, WATCH_EVENT, 1);
+         const bool sv_edge = !(sd->edge_flags
+                                & (RT_IEDGE_VHDL | RT_IEDGE_VHDL_EVENT));
+         watch_set_inline_edge(sd->clk_watch, sv_edge);
          if (sd->clk_sig->shared.flags & SIG_F_PACKED)
             model_set_event_cb(mgr->model, sd->clk_sig, 0, 1, sd->clk_watch);
          else
@@ -6707,6 +6828,8 @@ static void island_build_hier(rt_island_mgr_t *mgr)
          if (sd->rst_sig != NULL) {
             sd->rst_watch = watch_new(mgr->model, island_super_rst_watch_cb,
                                       sd, WATCH_EVENT, 1);
+            watch_set_inline_edge(sd->rst_watch, sv_edge
+                                  && !(sd->edge_flags & RT_IEDGE_RST_LEVEL));
             if (sd->rst_sig->shared.flags & SIG_F_PACKED)
                model_set_event_cb(mgr->model, sd->rst_sig, 0, 1,
                                   sd->rst_watch);
@@ -9684,6 +9807,80 @@ static bool island_commit_touch(rt_model_t *m, rt_island_t *isl,
    return true;
 }
 
+static inline uint64_t *island_glitch_log(rt_island_t *isl,
+                                          const rt_island_sig_t *s)
+{
+   const uint32_t off = island_glitch_log_off(s);
+   assert(isl->next_state != NULL);
+   assert(off + RT_ISLAND_GLITCH_BYTES(s->nwords,
+                                       s->flags & RT_ISIG_TWO_STATE)
+          <= isl->state_bytes);
+   return (uint64_t *)(isl->next_state + off);
+}
+
+static void island_publish_direct(rt_island_sig_t *s)
+{
+   for (uint32_t t = 0; t < s->n_direct_targets; t++) {
+      rt_island_sig_t *dst_s = s->direct_targets[t];
+      if (island_copy_direct_sig(s, dst_s)
+          && (dst_s->flags & RT_ISIG_COMB_READ)
+          && dst_s->isl->eval_handle != JIT_HANDLE_INVALID)
+         island_mark_dirty(dst_s->isl);
+   }
+}
+
+// Publishes the values of an SV island register that non-blocking
+// assignments of this time step overwrote (RT_ISIG_GLITCH_LOG), in order,
+// before its commit publishes the final value.  Returns true when the
+// state now holds the last of them.
+__attribute__((noinline))
+static bool island_commit_glitch(rt_model_t *m, rt_island_t *isl,
+                                 const rt_island_ff_desc_t *d, uint64_t *log)
+{
+   rt_island_sig_t *s = &(isl->sigs[d->sig_idx]);
+   const uint64_t count = log[0];
+   log[0] = 0;
+
+   // A forced register does not change
+   if (isl->has_forces)
+      return false;
+
+   if (unlikely(count > RT_ISLAND_GLITCH_CAP)) {
+      static bool warned = false;
+      if (!warned) {
+         warnf("%s was assigned more than %u different values by "
+               "non-blocking assignments in one time step: the events of "
+               "the later ones are not reproduced, run with "
+               "--rtl-islands=off for exact results",
+               s->sig != NULL && s->sig->where != NULL
+               ? istr(tree_ident(s->sig->where)) : "a register",
+               RT_ISLAND_GLITCH_CAP);
+         warned = true;
+      }
+   }
+
+   const uint32_t nwords = s->nwords;
+   const bool two_state = !!(s->flags & RT_ISIG_TWO_STATE);
+   const uint32_t n = MIN(count, RT_ISLAND_GLITCH_CAP);
+   const uint64_t *ent_a = log + 1;
+   const uint64_t *ent_b = ent_a + RT_ISLAND_GLITCH_CAP * nwords;
+   uint64_t *dst_a = (uint64_t *)(isl->state + s->a_off);
+   uint64_t *dst_b = two_state ? NULL : (uint64_t *)(isl->state + s->b_off);
+   const size_t nbytes = nwords * sizeof(uint64_t);
+
+   for (uint32_t e = 0; e < n; e++) {
+      memcpy(dst_a, ent_a + e * nwords, nbytes);
+      if (dst_b != NULL)
+         memcpy(dst_b, ent_b + e * nwords, nbytes);
+      if (d->flags & RT_IFF_DIRECT_LINK)
+         island_publish_direct(s);
+      else
+         island_sync_out_sig(m, isl, s);
+   }
+
+   return true;
+}
+
 // Commit of a run of registers (RT_IFF_RUN)
 static inline bool island_commit_run(rt_island_t *isl,
                                      const rt_island_ff_desc_t *d)
@@ -9708,6 +9905,11 @@ static void island_commit_domain(rt_model_t *m, rt_island_domain_t *dom)
    const uint32_t n_write = use_runs ? dom->n_ff_runs : dom->n_write_sigs;
    const bool act = isl->act_on;
    bool comb_need_eval = false;
+   for (uint32_t j = 0; j < dom->n_glitch_resets; j++) {
+      uint64_t *count = (uint64_t *)(isl->next_state + dom->glitch_resets[j]);
+      if (unlikely(*count != 0))
+         *count = 0;
+   }
    for (uint32_t j = 0; j < n_write; j++) {
       const rt_island_ff_desc_t *d = &(descs[j]);
       if (likely(d->flags & RT_IFF_RUN)) {
@@ -9727,6 +9929,17 @@ static void island_commit_domain(rt_model_t *m, rt_island_domain_t *dom)
                continue;
             whole = false;   // Changed elements are already published
          }
+      }
+
+      uint64_t *glog;
+      if (unlikely(d->flags & RT_IFF_GLITCH)
+          && unlikely(*(glog = island_glitch_log(isl, &(isl->sigs[d->sig_idx])))
+                      != 0)
+          && island_commit_glitch(m, isl, d, glog)) {
+         if (unlikely(act) && (d->flags & RT_IFF_ACT))
+            isl->state[d->sig_idx] = 1;
+         if (d->flags & RT_IFF_COMB_READ)
+            comb_need_eval = true;
       }
 
       if (whole) {
@@ -9750,15 +9963,8 @@ static void island_commit_domain(rt_model_t *m, rt_island_domain_t *dom)
 
       if (unlikely(d->flags & RT_IFF_HAS_NOTIFY)) {
          rt_island_sig_t *s = &(isl->sigs[d->sig_idx]);
-         if (d->flags & RT_IFF_DIRECT_LINK) {
-            for (uint32_t t = 0; t < s->n_direct_targets; t++) {
-               rt_island_sig_t *dst_s = s->direct_targets[t];
-               if (island_copy_direct_sig(s, dst_s)
-                   && (dst_s->flags & RT_ISIG_COMB_READ)
-                   && dst_s->isl->eval_handle != JIT_HANDLE_INVALID)
-                  island_mark_dirty(dst_s->isl);
-            }
-         }
+         if (d->flags & RT_IFF_DIRECT_LINK)
+            island_publish_direct(s);
          else if (whole)
             island_sync_out_sig(m, isl, s);
       }

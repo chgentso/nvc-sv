@@ -3485,3 +3485,5 @@ vlog_procstate1 verilog,gold
 vlog_externmod1 verilog,gold
 vlog_classparam_shadow1 verilog,gold
 vlog_vifcmp1 verilog,gold
+vlog_island_edge1 shell
+vlog_island_nba_glitch1 shell

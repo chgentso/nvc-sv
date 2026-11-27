@@ -87,6 +87,7 @@ typedef struct {
    uint32_t    island_width;
    uint32_t    island_nelems;
    uint32_t    island_touch_off;
+   uint32_t    island_glitch_off;
    mir_value_t island_elem;
 } vlog_select_t;
 
@@ -1991,6 +1992,7 @@ static vlog_select_t vlog_lower_select(vlog_gen_t *g, vlog_node_t v)
                   .island_width     = isig->width,
                   .island_nelems    = isig->nelems,
                   .island_touch_off = isig->touch_off,
+                  .island_glitch_off = isig->glitch_off,
                   .island_elem      = zero,
                };
                return result;
@@ -2442,6 +2444,7 @@ static vlog_select_t vlog_lower_select(vlog_gen_t *g, vlog_node_t v)
             .island_width     = prefix.island_width,
             .island_nelems    = prefix.island_nelems,
             .island_touch_off = prefix.island_touch_off,
+            .island_glitch_off = prefix.island_glitch_off,
             .island_elem      = ielem,
          };
          return result;
@@ -2561,6 +2564,7 @@ static vlog_select_t vlog_lower_select(vlog_gen_t *g, vlog_node_t v)
             .island_width     = prefix.island_width,
             .island_nelems    = prefix.island_nelems,
             .island_touch_off = prefix.island_touch_off,
+            .island_glitch_off = prefix.island_glitch_off,
             .island_elem      = prefix.island_elem,
          };
          return result;
@@ -2788,6 +2792,7 @@ static vlog_select_t vlog_lower_select(vlog_gen_t *g, vlog_node_t v)
             .island_width     = prefix.island_width,
             .island_nelems    = prefix.island_nelems,
             .island_touch_off = prefix.island_touch_off,
+            .island_glitch_off = prefix.island_glitch_off,
             .island_elem      = prefix.island_elem,
          };
          return result;
@@ -4620,8 +4625,9 @@ static void vlog_island_touch(vlog_gen_t *g, const vlog_select_t *lval)
                           mir_build_cast(g->mu, t_word, next));
 }
 
-static void vlog_island_store_part(vlog_gen_t *g, const vlog_select_t *lval,
-                                   mir_value_t part, uint32_t stride)
+static void vlog_island_store_part_raw(vlog_gen_t *g,
+                                       const vlog_select_t *lval,
+                                       mir_value_t part, uint32_t stride)
 {
    mir_type_t t_offset = mir_offset_type(g->mu);
 
@@ -4694,6 +4700,148 @@ static void vlog_island_store_part(vlog_gen_t *g, const vlog_select_t *lval,
       mir_value_t ins = mir_build_insert(g->mu, part, cur, lval->dst_offset);
       mir_build_island_store(g->mu, g->island_state, a_off, b_off, elem, ins);
    }
+}
+
+// A non-blocking assignment to an island register with an overwritten
+// value log (RT_ISIG_GLITCH_LOG in rt/island.h): after the store, if it
+// changed a bit which the value it overwrote had already changed against
+// the last value the commit will publish (the state or the last logged
+// value), append the overwritten value to the log so the commit publishes
+// it as an update of its own
+static void vlog_island_glitch_store(vlog_gen_t *g, const vlog_select_t *lval,
+                                     mir_value_t part, uint32_t stride)
+{
+   mir_unit_t *mu = g->mu;
+   mir_type_t t_offset = mir_offset_type(mu);
+   mir_type_t t_word = mir_vec2_type(mu, 64, false);
+
+   const uint32_t nwords = (lval->island_width + 63u) / 64u;
+   const unsigned nplanes = lval->island_two_state ? 1 : 2;
+   const uint32_t plane_off[2] = { lval->island_a_off, lval->island_b_off };
+   assert(nwords <= RT_ISLAND_GLITCH_MAX_WORDS);
+
+   mir_value_t zero = mir_const(mu, t_offset, 0);
+   mir_value_t no_b = mir_const(mu, t_offset, -1);
+
+   mir_value_t pend[2][RT_ISLAND_GLITCH_MAX_WORDS];
+   for (unsigned pl = 0; pl < nplanes; pl++) {
+      for (uint32_t w = 0; w < nwords; w++) {
+         mir_value_t off = mir_const(mu, t_offset,
+                                     plane_off[pl] + stride + w * 8u);
+         pend[pl][w] = mir_build_island_load(mu, t_word, g->island_state,
+                                             off, no_b, zero);
+      }
+   }
+
+   vlog_island_store_part_raw(g, lval, part, stride);
+
+   // Bits this store changed
+   mir_value_t chg[2][RT_ISLAND_GLITCH_MAX_WORDS];
+   mir_value_t any = MIR_NULL_VALUE;
+   for (unsigned pl = 0; pl < nplanes; pl++) {
+      for (uint32_t w = 0; w < nwords; w++) {
+         mir_value_t off = mir_const(mu, t_offset,
+                                     plane_off[pl] + stride + w * 8u);
+         mir_value_t now = mir_build_island_load(mu, t_word, g->island_state,
+                                                 off, no_b, zero);
+         chg[pl][w] = mir_build_binary(mu, MIR_VEC_BIT_XOR, t_word,
+                                       pend[pl][w], now);
+         any = mir_is_null(any) ? chg[pl][w]
+            : mir_build_binary(mu, MIR_VEC_BIT_OR, t_word, any, chg[pl][w]);
+      }
+   }
+
+   mir_block_t check_bb = mir_add_block(mu);
+   mir_block_t log_bb = mir_add_block(mu);
+   mir_block_t append_bb = mir_add_block(mu);
+   mir_block_t over_bb = mir_add_block(mu);
+   mir_block_t done_bb = mir_add_block(mu);
+
+   mir_build_cond(mu, mir_build_test(mu, any), check_bb, done_bb);
+
+   mir_set_cursor(mu, check_bb, MIR_APPEND);
+
+   const uint32_t log_off = lval->island_glitch_off + stride;
+   const uint32_t entries = RT_ISLAND_GLITCH_CAP * nwords * 8u;
+   mir_value_t count_off = mir_const(mu, t_offset, log_off);
+   mir_value_t count = mir_build_cast(
+      mu, t_offset, mir_build_island_load(mu, t_word, g->island_state,
+                                          count_off, no_b, zero));
+   mir_value_t cap = mir_const(mu, t_offset, RT_ISLAND_GLITCH_CAP);
+   mir_value_t one = mir_const(mu, t_offset, 1);
+   mir_value_t empty = mir_build_cmp(mu, MIR_CMP_EQ, count, zero);
+   mir_value_t used = mir_build_select(
+      mu, t_offset, mir_build_cmp(mu, MIR_CMP_GT, count, cap), cap, count);
+   mir_value_t last = mir_build_select(mu, t_offset, empty, zero,
+                                       mir_build_sub(mu, t_offset, used, one));
+   mir_value_t last_base = mir_build_mul(mu, t_offset, last,
+                                         mir_const(mu, t_offset, nwords));
+
+   // The bits the overwritten value had changed against the last value
+   // the commit publishes, and changes again
+   mir_value_t hit = MIR_NULL_VALUE;
+   for (unsigned pl = 0; pl < nplanes; pl++) {
+      mir_value_t ent_off = mir_const(mu, t_offset,
+                                      log_off + 8u + pl * entries);
+      for (uint32_t w = 0; w < nwords; w++) {
+         mir_value_t st_off = mir_const(mu, t_offset, plane_off[pl] + w * 8u);
+         mir_value_t st = mir_build_island_load(mu, t_word, g->island_state,
+                                                st_off, no_b, zero);
+         mir_value_t idx = mir_build_add(mu, t_offset, last_base,
+                                         mir_const(mu, t_offset, w));
+         mir_value_t lg = mir_build_island_load(mu, t_word, g->island_state,
+                                                ent_off, no_b, idx);
+         mir_value_t ref = mir_build_select(mu, t_word, empty, st, lg);
+         mir_value_t twice = mir_build_binary(
+            mu, MIR_VEC_BIT_AND, t_word,
+            mir_build_binary(mu, MIR_VEC_BIT_XOR, t_word, ref, pend[pl][w]),
+            chg[pl][w]);
+         hit = mir_is_null(hit) ? twice
+            : mir_build_binary(mu, MIR_VEC_BIT_OR, t_word, hit, twice);
+      }
+   }
+
+   mir_build_cond(mu, mir_build_test(mu, hit), log_bb, done_bb);
+
+   mir_set_cursor(mu, log_bb, MIR_APPEND);
+   mir_build_cond(mu, mir_build_cmp(mu, MIR_CMP_LT, count, cap),
+                  append_bb, over_bb);
+
+   mir_set_cursor(mu, append_bb, MIR_APPEND);
+   mir_value_t base = mir_build_mul(mu, t_offset, count,
+                                    mir_const(mu, t_offset, nwords));
+   for (unsigned pl = 0; pl < nplanes; pl++) {
+      mir_value_t ent_off = mir_const(mu, t_offset,
+                                      log_off + 8u + pl * entries);
+      for (uint32_t w = 0; w < nwords; w++) {
+         mir_value_t idx = mir_build_add(mu, t_offset, base,
+                                         mir_const(mu, t_offset, w));
+         mir_build_island_store(mu, g->island_state, ent_off, no_b, idx,
+                                pend[pl][w]);
+      }
+   }
+   mir_build_island_store(mu, g->island_state, count_off, no_b, zero,
+                          mir_build_cast(mu, t_word,
+                                         mir_build_add(mu, t_offset,
+                                                       count, one)));
+   mir_build_jump(mu, done_bb);
+
+   mir_set_cursor(mu, over_bb, MIR_APPEND);
+   mir_build_island_store(mu, g->island_state, count_off, no_b, zero,
+                          mir_const_vec(mu, t_word,
+                                        RT_ISLAND_GLITCH_CAP + 1, 0));
+   mir_build_jump(mu, done_bb);
+
+   mir_set_cursor(mu, done_bb, MIR_APPEND);
+}
+
+static void vlog_island_store_part(vlog_gen_t *g, const vlog_select_t *lval,
+                                   mir_value_t part, uint32_t stride)
+{
+   if (stride != 0 && lval->island_glitch_off != 0 && g->in_island_ff)
+      vlog_island_glitch_store(g, lval, part, stride);
+   else
+      vlog_island_store_part_raw(g, lval, part, stride);
 }
 
 static void vlog_store_var_slice(vlog_gen_t *g, const vlog_select_t *lv,

@@ -69,6 +69,7 @@ typedef struct {
    uint32_t                  b_off;
    uint32_t                  nwords;
    uint32_t                  touch_off;   // Element write log or zero
+   uint32_t                  glitch_off;  // Overwritten NBA log or zero
 } island_sig_t;
 
 typedef enum {
