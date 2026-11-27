@@ -7,7 +7,8 @@ set -xe
 # variable; a process that reads a field kept from its previous run stays
 # unfused.  The output must be identical to --rtl-islands=off in Mode B,
 # with --no-island-fast, without the activity test, in the speculative
-# Mode A variant and with --2state=islands.
+# Mode A variant and with --2state=islands.  An (others => X) aggregate
+# assigned to a slice with dynamic bounds and a constant width is lowered.
 
 cat >var1.vhd <<'VHDL_EOF'
 library ieee;
@@ -33,7 +34,7 @@ architecture rtl of var_dut is
         y : inner_t;
         z : unsigned(3 downto 0);
     end record;
-    signal q, d1, d2, d3, d4 : std_logic_vector(7 downto 0) := (others => '0');
+    signal q, d1, d2, d3, d4, d5, d6 : std_logic_vector(7 downto 0) := (others => '0');
 begin
     p_ff : process (clk) is
     begin
@@ -84,6 +85,31 @@ begin
         d4 <= s;
     end process;
 
+    -- (others => ...) for slices with dynamic bounds and a constant width
+    p_aggr : process (all) is
+        variable t : std_logic_vector(7 downto 0);
+    begin
+        for i in 0 to 1 loop
+            if q(i) = '1' then
+                t(i * 4 + 3 downto i * 4) := (others => '1');
+            else
+                t(i * 4 + 3 downto i * 4) := q(i * 4 + 3 downto i * 4);
+            end if;
+        end loop;
+        d5 <= t;
+    end process;
+
+    p_aggr_sig : process (all) is
+    begin
+        for i in 0 to 3 loop
+            if q(i + 4) = '1' then
+                d6(i * 2 + 1 downto i * 2) <= (others => q(i));
+            else
+                d6(i * 2 + 1 downto i * 2) <= (others => '0');
+            end if;
+        end loop;
+    end process;
+
     -- Keeps a field between runs: must stay unfused
     p_keep : process (all) is
         variable k : rec_t := ("0000", ('0', "000"), "0000");
@@ -95,7 +121,7 @@ begin
 
     dout <= d1;
     rout <= d2;
-    kout <= d3 xor d4;
+    kout <= d3 xor d4 xor d5 xor d6;
 end architecture;
 
 library ieee;
@@ -142,7 +168,7 @@ nvc --std=2008 --work=w_b -a var1.vhd
 NVC_DUMP_ISLANDS=1 nvc --std=2008 --work=w_b --rtl-islands=hier -e var_tb \
     > b_dump.log
 cat b_dump.log
-grep -q 'VAR_TB.DUT islands=1 fused_procs=7/8' b_dump.log
+grep -q 'VAR_TB.DUT islands=1 fused_procs=9/10' b_dump.log
 grep -q 'P_KEEP reason=var: read before assignment of K' b_dump.log
 
 nvc --std=2008 --work=w_b -r --wave=b.vcd --format=vcd var_tb > b.log 2>&1

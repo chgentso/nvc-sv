@@ -4420,8 +4420,19 @@ static bool vi_lower_expr_inner(vi_lower_t *l, tree_t expr, vi_val_t *out)
          range_kind_t dir = RANGE_DOWNTO;
          int64_t left = 0, right = 0;
          uint32_t w = 0;
-         if (!vi_eval_type_bounds(l, t, &dir, &left, &right, &w))
-            return false;
+         if (!vi_eval_type_bounds(l, t, &dir, &left, &right, &w)) {
+            // (others => X) for a slice with dynamic bounds and a constant
+            // width, as in v(i * 8 + 7 downto i * 8) := (others => '0'):
+            // only the width matters
+            tree_t rg = (na == 1 && tree_subkind(tree_assoc(expr, 0)) == A_OTHERS
+                         && !type_is_unconstrained(t) && dimension_of(t) == 1)
+               ? range_of(t, 0) : NULL;
+            if (rg == NULL || !vhdl_island_const_slice_width(l->ctx, rg, &w))
+               return false;
+            dir = tree_subkind(rg);
+            left = dir == RANGE_DOWNTO ? (int64_t)w - 1 : 0;
+            right = dir == RANGE_DOWNTO ? 0 : (int64_t)w - 1;
+         }
 
          if (l->two_state) {
             mir_type_t tv = mir_vec2_type(mu, (int)w, is_sg);
