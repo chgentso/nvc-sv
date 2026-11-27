@@ -33,3 +33,18 @@ module ports3c (o);
   output [clogb2(255):2] o;
   wire [8:2] o;               // OK
 endmodule // ports3c
+
+module ports3d (o, p);
+  parameter N = 8;
+  localparam M = N + 2;
+  output [7:0] o;
+  wire [N-1:0] o;             // OK
+  output [M-1:0] p;
+  wire [9:0] p;               // OK
+endmodule // ports3d
+
+module ports3e (o);
+  parameter N = 8;
+  output [N:0] o;
+  wire [7:0] o;               // Error
+endmodule // ports3e

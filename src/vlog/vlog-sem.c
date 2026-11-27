@@ -1660,6 +1660,13 @@ static bool vlog_has_user_call(vlog_node_t v)
    return found;
 }
 
+static bool vlog_has_name_ref(vlog_node_t v)
+{
+   bool found = false;
+   vlog_visit_only(v, vlog_has_call_cb, &found, V_REF);
+   return found;
+}
+
 static void vlog_check_consistent(vlog_node_t a, vlog_node_t b)
 {
    vlog_node_t at = vlog_type(a);
@@ -1685,13 +1692,19 @@ static void vlog_check_consistent(vlog_node_t a, vlog_node_t b)
           || vlog_has_user_call(bleft) || vlog_has_user_call(bright))
          continue;   // Constant function calls are checked after folding
 
-      if (!vlog_equal_node(aleft, bleft) || !vlog_equal_node(aright, bright)) {
-         diag_t *d = diag_new(DIAG_ERROR, vlog_loc(br));
-         diag_printf(d, "inconsistent dimensions for '%s'",
-                     istr(vlog_ident(b)));
-         diag_hint(d, vlog_loc(a), "earlier declaration here");
-         diag_emit(d);
-      }
+      if (vlog_equal_node(aleft, bleft) && vlog_equal_node(aright, bright))
+         continue;
+
+      // The ranges must have the same value: bounds written with
+      // different parameters or literals are compared after folding
+      if (vlog_has_name_ref(aleft) || vlog_has_name_ref(aright)
+          || vlog_has_name_ref(bleft) || vlog_has_name_ref(bright))
+         continue;
+
+      diag_t *d = diag_new(DIAG_ERROR, vlog_loc(br));
+      diag_printf(d, "inconsistent dimensions for '%s'", istr(vlog_ident(b)));
+      diag_hint(d, vlog_loc(a), "earlier declaration here");
+      diag_emit(d);
    }
 }
 
