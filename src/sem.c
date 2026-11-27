@@ -392,7 +392,9 @@ static bool sem_check_subtype_helper(tree_t decl, type_t type, nametab_t *tab)
 
    assert(!is_anonymous_subtype(base));
 
-   if (type_is_protected(base))
+   if (type_is_protected(base)
+       && (standard() < STD_08 || type_has_constraint(type)
+           || type_has_resolution(type)))
       sem_error(decl, "subtypes may not have protected base types");
    else if (!sem_check_incomplete(decl, type))
       return false;

@@ -5375,7 +5375,8 @@ static vcode_reg_t lower_protected_init(lower_unit_t *lu, type_t type,
    }
 
    vcode_type_t vtype = lower_type(type);
-   vcode_reg_t context_reg = lower_context_for_mangled(lu, type_ident(type));
+   type_t base = type_base_recur(type);
+   vcode_reg_t context_reg = lower_context_for_mangled(lu, type_ident(base));
    return emit_protected_init(vtype, context_reg, names[0], names[1]);
 }
 

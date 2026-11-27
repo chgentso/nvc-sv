@@ -3360,3 +3360,4 @@ rec_arr_agg1 shell
 eval_recurse1 shell
 env_trec_str1 normal,2019
 tostring_real1 normal,2008
+subtype_prot1 normal,2008
