@@ -4441,7 +4441,7 @@ static type_mask_t vlog_check_binary(vlog_node_t v)
       break;
    case V_BINARY_WILD_EQ:
    case V_BINARY_WILD_NEQ:
-      allow = TM_INTEGRAL | TM_CONST;
+      allow = TM_INTEGRAL | TM(DT_STRING) | TM_CONST;
       result = TM(DT_LOGIC);
       break;
    }

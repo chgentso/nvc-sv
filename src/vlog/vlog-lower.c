@@ -5926,10 +5926,6 @@ static mir_value_t vlog_lower_wildcard_eq(vlog_gen_t *g, vlog_node_t v)
 static mir_value_t vlog_lower_binary(vlog_gen_t *g, vlog_node_t v,
                                      mir_type_t context)
 {
-   if (vlog_subkind(v) == V_BINARY_WILD_EQ
-       || vlog_subkind(v) == V_BINARY_WILD_NEQ)
-      return vlog_widen_vector(g, vlog_lower_wildcard_eq(g, v), context);
-
    // A string literal compared with an integral value is a number
    vlog_node_t lexpr = vlog_left(v), rexpr = vlog_right(v);
    bool lstr = vlog_is_string(lexpr) && vlog_kind(lexpr) != V_STRING;
@@ -5974,7 +5970,8 @@ static mir_value_t vlog_lower_binary(vlog_gen_t *g, vlog_node_t v,
          return vlog_widen_vector(g, sel, context);
       }
       else if (op == V_BINARY_LOG_EQ || op == V_BINARY_LOG_NEQ
-          || op == V_BINARY_CASE_EQ || op == V_BINARY_CASE_NEQ) {
+          || op == V_BINARY_CASE_EQ || op == V_BINARY_CASE_NEQ
+          || op == V_BINARY_WILD_EQ || op == V_BINARY_WILD_NEQ) {
          mir_type_t t_str = mir_uarray_type(g->mu, 1, mir_char_type(g->mu));
          mir_type_t t_offset = mir_offset_type(g->mu);
          mir_value_t l = lconv ? vlog_integral_string(g, lexpr)
@@ -5989,7 +5986,8 @@ static mir_value_t vlog_lower_binary(vlog_gen_t *g, vlog_node_t v,
          mir_type_t t_bit = mir_vec2_type(g->mu, 1, false);
          mir_value_t want = mir_const(g->mu, t_offset,
                                       op == V_BINARY_LOG_EQ
-                                      || op == V_BINARY_CASE_EQ);
+                                      || op == V_BINARY_CASE_EQ
+                                      || op == V_BINARY_WILD_EQ);
          mir_value_t test = mir_build_cmp(g->mu, MIR_CMP_EQ, eq, want);
          mir_value_t sel =
             mir_build_select(g->mu, t_bit, test,
@@ -5998,6 +5996,10 @@ static mir_value_t vlog_lower_binary(vlog_gen_t *g, vlog_node_t v,
          return vlog_widen_vector(g, sel, context);
       }
    }
+
+   if (vlog_subkind(v) == V_BINARY_WILD_EQ
+       || vlog_subkind(v) == V_BINARY_WILD_NEQ)
+      return vlog_widen_vector(g, vlog_lower_wildcard_eq(g, v), context);
 
    vlog_node_t ltype = vlog_get_type(vlog_left(v));
    if (ltype != NULL && (vlog_kind(ltype) == V_STRUCT_DECL

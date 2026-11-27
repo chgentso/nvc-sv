@@ -3370,3 +3370,4 @@ svdriveconst1   verilog
 svfmtbin1       verilog
 svcastctx2      verilog
 vpi_genvar1     verilog,vpi
+svwildeq2       verilog
