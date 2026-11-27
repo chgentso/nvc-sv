@@ -3355,3 +3355,4 @@ vlog_island_xcycle1 verilog
 vlog_island_xcycle2 verilog,fail,gold,$NVC_RTL_ISLANDS=hier
 island_xcycle_mt1 shell
 vhdl_island_widevar_a1 shell
+vhdl_island_bitvec_logic1 normal,2008,$NVC_RTL_ISLANDS=hier

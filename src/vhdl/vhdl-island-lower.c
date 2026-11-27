@@ -225,6 +225,18 @@ static inline mir_value_t vi_u8(mir_unit_t *mu, uint8_t v)
    return mir_const(mu, vi_u8_type(mu), v);
 }
 
+// A bit/boolean array element is a byte holding 0 or 1; the MIR logical
+// operators only take booleans
+static inline mir_value_t vi_u8_to_bool(mir_unit_t *mu, mir_value_t v)
+{
+   return mir_build_cmp(mu, MIR_CMP_NEQ, v, vi_u8(mu, 0));
+}
+
+static inline mir_value_t vi_u8_from_bool(mir_unit_t *mu, mir_value_t b)
+{
+   return mir_build_select(mu, vi_u8_type(mu), b, vi_u8(mu, 1), vi_u8(mu, 0));
+}
+
 static mir_value_t vi_to_off(mir_unit_t *mu, mir_value_t v)
 {
    if (mir_is_offset(mu, v))
@@ -2743,7 +2755,7 @@ static bool vi_lower_builtin_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
             mir_set_cursor(mu, body, MIR_APPEND);
             mir_value_t elem = mir_build_load(mu, mir_build_array_ref(mu, a.val, i));
             mir_value_t res = a.is_std ? vi_std_scalar_not(l, elem)
-               : mir_build_xor(mu, elem, vi_u8(mu, 1));
+               : vi_u8_from_bool(mu, mir_build_not(mu, vi_u8_to_bool(mu, elem)));
             mir_build_store(mu, mir_build_array_ref(mu, dst, i), res);
             mir_build_store(mu, idx_v, mir_build_add(mu, mir_offset_type(mu),
                                                      i, vi_off(mu, 1)));
@@ -2995,11 +3007,15 @@ static bool vi_lower_builtin_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
             if (a.is_std)
                r = vi_std_scalar_bin(l, tbl_kind, ea, eb, neg);
             else {
-               if (tbl_kind == 1)      r = mir_build_and(mu, ea, eb);
-               else if (tbl_kind == 2) r = mir_build_or(mu, ea, eb);
-               else                    r = mir_build_xor(mu, ea, eb);
+               mir_value_t ba = vi_u8_to_bool(mu, ea);
+               mir_value_t bb = vi_u8_to_bool(mu, eb);
+               mir_value_t rb;
+               if (tbl_kind == 1)      rb = mir_build_and(mu, ba, bb);
+               else if (tbl_kind == 2) rb = mir_build_or(mu, ba, bb);
+               else                    rb = mir_build_xor(mu, ba, bb);
                if (neg)
-                  r = mir_build_xor(mu, r, vi_u8(mu, 1));
+                  rb = mir_build_not(mu, rb);
+               r = vi_u8_from_bool(mu, rb);
             }
             mir_build_store(mu, mir_build_array_ref(mu, dst, i), r);
             mir_build_store(mu, idx_v, mir_build_add(mu, mir_offset_type(mu),
