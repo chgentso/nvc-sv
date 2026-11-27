@@ -148,6 +148,8 @@ typedef struct {
    uint32_t                 n_act_rd;
    uint32_t                 cap_act_rd;
    bool                     act_track;
+   const loc_t             *loc;           // Of the current statement
+   unsigned                 inline_depth;  // Inlined subprogram bodies
    bool                     failed;
    const char              *reason;    // NVC_DUMP_ISLANDS: first failure
    // Speculative Mode A variant of a Mode B island (NVC_ISLAND_SPEC): a
@@ -1705,6 +1707,51 @@ static mir_value_t vi_read_ptr(vi_lower_t *l, const vhdl_isl_sig_t *isig)
 
 static bool vi_lower_expr(vi_lower_t *l, tree_t expr, vi_val_t *out);
 static bool vi_lower_stmt(vi_lower_t *l, tree_t stmt);
+static bool vi_lower_inline_func_inner(vi_lower_t *l, tree_t fcall,
+                                       tree_t func, vi_val_t *out,
+                                       vi_local_t *ret_rec);
+static bool vi_lower_inline_proc_inner(vi_lower_t *l, tree_t pcall);
+
+// The code of a statement or expression carries its location, so that the
+// stack trace of a report from a function the island calls (such as an
+// IEEE metavalue warning) names the line and with it the fused process
+// (see find_island_proc_loc in jit/jit-core.c), as with the process
+// unfused.  The body of an inlined subprogram keeps the location of the
+// call.
+static const loc_t *vi_push_loc(vi_lower_t *l, tree_t t)
+{
+   const loc_t *old = l->loc;
+   if (l->inline_depth == 0) {
+      l->loc = tree_loc(t);
+      mir_set_loc(l->mu, l->loc);
+   }
+   return old;
+}
+
+static void vi_pop_loc(vi_lower_t *l, const loc_t *old)
+{
+   if (l->inline_depth == 0 && old != NULL) {
+      l->loc = old;
+      mir_set_loc(l->mu, old);
+   }
+}
+
+static bool vi_lower_inline_func(vi_lower_t *l, tree_t fcall, tree_t func,
+                                 vi_val_t *out, vi_local_t *ret_rec)
+{
+   l->inline_depth++;
+   const bool ok = vi_lower_inline_func_inner(l, fcall, func, out, ret_rec);
+   l->inline_depth--;
+   return ok;
+}
+
+static bool vi_lower_inline_proc(vi_lower_t *l, tree_t pcall)
+{
+   l->inline_depth++;
+   const bool ok = vi_lower_inline_proc_inner(l, pcall);
+   l->inline_depth--;
+   return ok;
+}
 
 // Speculative Mode A: the constant B as a value that MIR does not fold, for
 // a branch whose untaken side must stay reachable in the CFG
@@ -3406,8 +3453,9 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
 
 // Inlines a call FCALL of FUNC: the result is *OUT, or for a function
 // returning a record the leaves of RET_REC, a record local of that type
-static bool vi_lower_inline_func(vi_lower_t *l, tree_t fcall, tree_t func,
-                                 vi_val_t *out, vi_local_t *ret_rec)
+static bool vi_lower_inline_func_inner(vi_lower_t *l, tree_t fcall,
+                                       tree_t func, vi_val_t *out,
+                                       vi_local_t *ret_rec)
 {
    func = vhdl_island_resolve_func_body(func);
    if (func == NULL || (tree_flags(func) & TREE_F_IMPURE))
@@ -4573,7 +4621,9 @@ static bool vi_lower_expr_inner(vi_lower_t *l, tree_t expr, vi_val_t *out);
 
 static bool vi_lower_expr(vi_lower_t *l, tree_t expr, vi_val_t *out)
 {
+   const loc_t *old_loc = expr ? vi_push_loc(l, expr) : NULL;
    const bool ok = vi_lower_expr_inner(l, expr, out);
+   vi_pop_loc(l, old_loc);
    if (!ok)
       vi_generic_reason(l, "expr", expr);
    return ok;
@@ -7545,7 +7595,7 @@ static bool vi_lower_str_expr(vi_lower_t *l, tree_t expr, vi_str_t *out)
 static bool vi_bind_process_locals(vi_lower_t *l, tree_t proc, vi_scope_t *sc,
                                    bool subprog);
 
-static bool vi_lower_inline_proc(vi_lower_t *l, tree_t pcall)
+static bool vi_lower_inline_proc_inner(vi_lower_t *l, tree_t pcall)
 {
    if (!tree_has_ref(pcall))
       return false;
@@ -7919,6 +7969,7 @@ static bool vi_lower_stmt_inner(vi_lower_t *l, tree_t stmt);
 
 static bool vi_lower_stmt(vi_lower_t *l, tree_t stmt)
 {
+   const loc_t *old_loc = vi_push_loc(l, stmt);
    bool ok;
    if (tree_kind(stmt) == T_CASE) {
       // Each alternative starts from the values known before the case
@@ -7935,6 +7986,7 @@ static bool vi_lower_stmt(vi_lower_t *l, tree_t stmt)
       ok = vi_lower_stmt_inner(l, stmt);
    if (!ok)
       vi_generic_reason(l, "stmt", stmt);
+   vi_pop_loc(l, old_loc);
    return ok;
 }
 
