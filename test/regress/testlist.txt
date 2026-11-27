@@ -3352,3 +3352,4 @@ overload_predef1 shell
 sig_idxbounds1 shell
 nested_pkg_body1 shell
 sig_rec_agg1 shell
+pstring_quote1 shell
