@@ -40456,6 +40456,20 @@ void vlog_lower_instance(mir_context_t *mc, vlog_node_t body, ident_t parent,
          hash_put(alias_rep, rb, ra);
    }
 
+   // The result and the static variables of a static subroutine are kept
+   // in the instance and must exist before the initial value of a
+   // variable declared earlier calls the subroutine
+   for (int i = 0, hops; i < vlog_ndecls; i++) {
+      vlog_node_t d = vlog_decl(body, i);
+      if (vlog_kind(d) == V_FUNC_DECL)
+         vlog_lower_func_ret_storage(&g, d, hash_get(map, d) ?: trans);
+      else if (vlog_kind(d) == V_VAR_DECL && !vlog_has_value(d)
+               && (vlog_flags(d) & VLOG_F_SIGNAL_STATIC)
+               && mir_is_null(mir_search_object(mu, d, &hops)))
+         vlog_lower_var_decl_ex(&g, d, hash_get(map, d), SIG_F_INIT_EVENT,
+                                !(vlog_flags(body) & VLOG_F_INTERFACE));
+   }
+
    for (int i = 0, hops; i < vlog_ndecls; i++) {
       vlog_node_t d = vlog_decl(body, i);
 
@@ -40514,7 +40528,6 @@ void vlog_lower_instance(mir_context_t *mc, vlog_node_t body, ident_t parent,
       case V_LOCALPARAM:
          break;  // Always inlined for now
       case V_FUNC_DECL:
-         vlog_lower_func_ret_storage(&g, d, hash_get(map, d) ?: trans);
          mir_defer(mc, ident_prefix(vlog_ident2(d), vlog_ident(d), '.'), qual,
                    MIR_UNIT_FUNCTION, vlog_lower_func_decl, vlog_to_object(d));
          break;
