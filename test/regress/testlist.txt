@@ -3343,3 +3343,4 @@ island_sparse_wave1 shell
 vhdl_island_gen_ram1 normal,2008
 vhdl_island_cache_ram1 normal,2008
 vhdl_island_delta1 normal,2008
+island_wire_stats1 shell

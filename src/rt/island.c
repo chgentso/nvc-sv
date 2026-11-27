@@ -30,6 +30,8 @@
 #include "thread.h"
 
 #include <assert.h>
+#include <inttypes.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #ifdef __MINGW32__
@@ -311,6 +313,197 @@ struct _rt_island_mgr {
    bool                    has_vhdl;
 };
 
+// Direct-wire diagnostics: NVC_ISLAND_WIRE_STATS=1 prints, at the end of the
+// run, why each island-written signal is not a direct inter-island wire and
+// how many input wakeups / syncs it causes.  Level 2 also prints the return
+// addresses of the callers that attached observers.  Diagnostics only: the
+// reason codes are recorded on the side and never influence an island
+// decision.
+
+typedef enum {
+   WR_NONE,
+   WR_DIRECT,           // wired directly
+   WR_NO_CONSUMER,      // nothing outside the island reads it
+   WR_OBSERVED_PRE,     // observed before the build (wave/VPI/VHPI/force)
+   WR_MULTI_OWNER,      // several islands write overlapping slices
+   WR_SPARSE_RAM,
+   WR_POLL,             // SIG_F_POLL_WATCHED
+   WR_EXT_READ,         // read by an unfused process / testbench code
+   WR_SRC_NEXUS,        // nexus has other sources (extra driver, resolved)
+   WR_PACKED,           // packed signal representation
+   WR_SRC_SLICE,        // src nexus not 1:1 with the island signal
+   WR_PORT_KIND,        // output chain is not a plain port connection
+   WR_PORT_DEPTH,       // port chain deeper than the search limit
+   WR_DST_SOURCES,      // destination port has != 1 source
+   WR_DST_FORCED,       // destination forced or inout
+   WR_DST_SLICE,        // destination port narrower/wider than the source
+   WR_DST_RESOLVED,     // destination port resolved
+   WR_DST_PACKED,       // destination signal packed
+   WR_DST_POLL_EXT,     // destination polled or read by unfused code
+   WR_DST_ISLAND_OWNED, // destination port itself written by an island
+   WR_DST_NO_READER,    // destination port has no island reader
+   WR_READER_PROC,      // a process waits on the signal
+   WR_READER_WATCH,     // foreign watch (wave/VPI/VHPI/...)
+   WR_READER_SAME_ISL,  // reader is in the writer's island
+   WR_READER_SIG,       // reader reads through a different signal object
+   WR_READER_OFFSET,    // reader reads a sub-range
+   WR_READER_SHAPE,     // reader width/elements/size differ
+   WR_READER_REPR,      // two-state / 9-state representation differs
+   WR_CYCLE,            // rejected to break a combinational loop
+   WR_MAX
+} island_wire_reason_t;
+
+typedef enum {
+   WB_NONE,
+   WB_EXT_DEPOSIT,
+   WB_OBSERVER,
+   WB_VPI_PUT,
+   WB_ALIAS,
+   WB_MAX
+} island_wire_cause_t;
+
+static const char *const island_wr_names[WR_MAX] = {
+   "unclassified",
+   "DIRECT",
+   "no-consumer (island-internal)",
+   "observed-before-build",
+   "multi-owner",
+   "sparse-ram",
+   "sv-poll-watched",
+   "ext-read (unfused reader)",
+   "src-nexus-has-sources",
+   "packed-signal",
+   "src-sliced",
+   "port-chain-not-port",
+   "port-chain-too-deep",
+   "dst-port-sources!=1",
+   "dst-port-forced/inout",
+   "dst-port-sliced",
+   "dst-port-resolved",
+   "dst-port-packed",
+   "dst-port-poll/ext-read",
+   "dst-port-island-owned (forwarding)",
+   "dst-port-no-island-reader",
+   "reader-is-process",
+   "reader-is-foreign-watch",
+   "reader-same-island",
+   "reader-other-signal-object",
+   "reader-sub-range",
+   "reader-shape-mismatch",
+   "reader-repr-mismatch",
+   "comb-cycle",
+};
+
+static const char *const island_wb_names[WB_MAX] = {
+   "", "ext-deposit", "observer-attached", "vpi/vhpi-put", "alias-break",
+};
+
+typedef enum {
+   RK_NONE,
+   RK_ISLAND,    // driven by an island signal (attributed to its class)
+   RK_PROC,      // driven by a non-island process
+   RK_UNDRIVEN,
+   RK_OTHER,
+   RK_MAX
+} island_reader_kind_t;
+
+typedef struct {
+   rt_island_sig_t *s;
+   rt_island_sig_t *writer;
+   uint8_t          reason;
+   uint8_t          cause;
+   uint8_t          rd_kind;
+   uint64_t         wake;
+   uint64_t         sync_in;
+   uint64_t         sync_out;   // out-sync routine calls (diff checks)
+   uint64_t         deposit;    // deposits actually scheduled
+   const rt_signal_t *other_sig;   // offending signal of the reject reason
+   ident_t          other_proc;    // offending process of the reject reason
+   void            *observer_ra;   // caller that attached the first observer
+} island_wstat_t;
+
+static bool                   island_wstats_on = false;
+static int                    island_wstats_level = 0;
+static hash_t                *island_wstats = NULL;
+static A(island_wstat_t *)    island_wstat_list = AINIT;
+static island_wire_reason_t   island_wire_why = WR_NONE;
+static const rt_signal_t     *island_wire_obj_sig = NULL;
+static ident_t                island_wire_obj_proc = NULL;
+static island_wire_cause_t    island_wb_cur = WB_NONE;
+static void                  *island_wb_ra = NULL;
+static uint64_t               island_wstat_clk_cb = 0;
+static uint64_t               island_wstat_rst_cb = 0;
+static uint64_t               island_wstat_sclk_cb = 0;
+static uint64_t               island_wstat_srst_cb = 0;
+
+static inline bool island_wr_no(island_wire_reason_t r)
+{
+   island_wire_why = r;
+   return false;
+}
+
+static inline bool island_wr_yes(island_wire_reason_t r)
+{
+   island_wire_why = r;
+   return true;
+}
+
+static island_wstat_t *island_wstat_get(const rt_island_sig_t *s, bool create)
+{
+   if (island_wstats == NULL)
+      return NULL;
+   island_wstat_t *e = hash_get(island_wstats, s);
+   if (e == NULL && create) {
+      e = xcalloc(sizeof(island_wstat_t));
+      e->s = (rt_island_sig_t *)s;
+      hash_put(island_wstats, s, e);
+      APUSH(island_wstat_list, e);
+   }
+   return e;
+}
+
+static void island_wstat_note(const rt_island_sig_t *s,
+                              island_wire_reason_t r)
+{
+   island_wstat_t *e = island_wstat_get(s, true);
+   if (e != NULL) {
+      e->reason = r;
+      if (r != WR_DIRECT) {
+         e->other_sig = island_wire_obj_sig;
+         e->other_proc = island_wire_obj_proc;
+      }
+   }
+}
+
+static void island_wstat_cause(const rt_island_sig_t *s,
+                               island_wire_cause_t c)
+{
+   island_wstat_t *e = island_wstat_get(s, true);
+   if (e != NULL && e->cause == WB_NONE) {
+      e->cause = c;
+      if (c == WB_OBSERVER)
+         e->observer_ra = island_wb_ra;
+   }
+}
+
+static void island_wstat_count(const rt_island_sig_t *s, int which)
+{
+   island_wstat_t *e = island_wstat_get(s, false);
+   if (e == NULL)
+      return;
+   uint64_t *p = which == 0 ? &e->wake : which == 1 ? &e->sync_in
+      : which == 2 ? &e->sync_out : &e->deposit;
+   __atomic_fetch_add(p, 1, __ATOMIC_RELAXED);
+}
+
+static void island_wstat_report(const rt_island_mgr_t *mgr);
+static void island_wstat_free(void);
+
+#define WSTAT_COUNT(s, w) do {                          \
+      if (unlikely(island_wstats_on))                   \
+         island_wstat_count((s), (w));                  \
+   } while (0)
+
 static inline bool island_is_hier_mode(void)
 {
    return opt_get_int(OPT_RTL_ISLANDS) == RTL_ISLANDS_HIER;
@@ -536,18 +729,27 @@ static inline bool island_wakeable_is_input_watch(const rt_wakeable_t *w)
    return watch->fn == island_input_watch_cb;
 }
 
+static island_wire_reason_t island_wake_reason(const rt_wakeable_t *w)
+{
+   if (w->kind == W_PROC)
+      island_wire_obj_proc = container_of(w, rt_proc_t, wakeable)->name;
+   return w->kind == W_WATCH ? WR_READER_WATCH : WR_READER_PROC;
+}
+
 static inline bool island_pending_has_ext_observer(void *pending)
 {
    if (pending == NULL)
       return false;
    if (pointer_tag(pending) == 1) {
       const rt_wakeable_t *w = untag_pointer(pending, rt_wakeable_t);
-      return !island_wakeable_is_input_watch(w);
+      if (island_wakeable_is_input_watch(w))
+         return false;
+      return island_wr_yes(island_wake_reason(w));
    }
    const rt_pending_t *p = untag_pointer(pending, rt_pending_t);
    for (unsigned j = 0; j < p->count; j++) {
       if (p->wake[j] != NULL && !island_wakeable_is_input_watch(p->wake[j]))
-         return true;
+         return island_wr_yes(island_wake_reason(p->wake[j]));
    }
    return false;
 }
@@ -579,6 +781,26 @@ static bool island_sig_map_overlaps(const rt_island_mgr_t *mgr,
    return false;
 }
 
+static island_wire_reason_t island_reader_mismatch(
+   const rt_island_sig_t *src_s, const rt_island_sig_t *dst_s,
+   const rt_signal_t *cur_sig, int32_t cur_off, bool exact_sig)
+{
+   if (dst_s->isl == src_s->isl)
+      return WR_READER_SAME_ISL;
+   if (exact_sig && dst_s->sig != cur_sig)
+      return WR_READER_SIG;
+   if (dst_s->sig_offset != cur_off)
+      return WR_READER_OFFSET;
+   if (dst_s->width != src_s->width
+       || dst_s->nelems != src_s->nelems
+       || dst_s->elem_size != src_s->elem_size)
+      return WR_READER_SHAPE;
+   if (((src_s->flags ^ dst_s->flags)
+        & (RT_ISIG_TWO_STATE | RT_ISIG_STD_LOGIC9)) != 0)
+      return WR_READER_REPR;
+   return WR_NONE;
+}
+
 static bool island_pending_watch_matches(void *pending,
                                          const rt_island_sig_t *src_s,
                                          const rt_signal_t *cur_sig,
@@ -591,18 +813,14 @@ static bool island_pending_watch_matches(void *pending,
    if (pointer_tag(pending) == 1) {
       const rt_wakeable_t *w = untag_pointer(pending, rt_wakeable_t);
       if (!island_wakeable_is_input_watch(w))
-         return false;
+         return island_wr_no(island_wake_reason(w));
       const rt_watch_t *watch = container_of(w, rt_watch_t, wakeable);
       const rt_island_sig_t *dst_s = watch->user_data;
-      if (dst_s->isl == src_s->isl
-          || dst_s->sig != cur_sig
-          || (uint32_t)dst_s->sig_offset != cur_off
-          || dst_s->width != src_s->width
-          || dst_s->nelems != src_s->nelems
-          || dst_s->elem_size != src_s->elem_size
-          || ((src_s->flags ^ dst_s->flags)
-              & (RT_ISIG_TWO_STATE | RT_ISIG_STD_LOGIC9)) != 0)
-         return false;
+      island_wire_obj_sig = dst_s->sig;
+      const island_wire_reason_t why =
+         island_reader_mismatch(src_s, dst_s, cur_sig, (int32_t)cur_off, true);
+      if (why != WR_NONE)
+         return island_wr_no(why);
       *found_out = true;
       return true;
    }
@@ -613,18 +831,14 @@ static bool island_pending_watch_matches(void *pending,
       if (w == NULL)
          continue;
       if (!island_wakeable_is_input_watch(w))
-         return false;
+         return island_wr_no(island_wake_reason(w));
       const rt_watch_t *watch = container_of(w, rt_watch_t, wakeable);
       const rt_island_sig_t *dst_s = watch->user_data;
-      if (dst_s->isl == src_s->isl
-          || dst_s->sig != cur_sig
-          || (uint32_t)dst_s->sig_offset != cur_off
-          || dst_s->width != src_s->width
-          || dst_s->nelems != src_s->nelems
-          || dst_s->elem_size != src_s->elem_size
-          || ((src_s->flags ^ dst_s->flags)
-              & (RT_ISIG_TWO_STATE | RT_ISIG_STD_LOGIC9)) != 0)
-         return false;
+      island_wire_obj_sig = dst_s->sig;
+      const island_wire_reason_t why =
+         island_reader_mismatch(src_s, dst_s, cur_sig, (int32_t)cur_off, true);
+      if (why != WR_NONE)
+         return island_wr_no(why);
       *found_out = true;
    }
    return true;
@@ -638,38 +852,41 @@ static bool island_nexus_port_observed(const rt_nexus_t *nx,
    if (nx->outputs == NULL)
       return false;
    if (depth >= 4)
-      return true;
+      return island_wr_yes(WR_PORT_DEPTH);
 
    const rt_island_mgr_t *mgr = src_s->isl->mgr;
    const uint32_t total = src_s->width * src_s->nelems;
    if (nx->size != src_s->elem_size || nx->width != total)
-      return true;
+      return island_wr_yes(WR_SRC_SLICE);
 
    for (const rt_source_t *o = nx->outputs; o != NULL; o = o->chain_output) {
       if (o->tag != SOURCE_PORT)
-         return true;
+         return island_wr_yes(WR_PORT_KIND);
       const rt_nexus_t *dst_nx = o->u.port.output;
       if (dst_nx == NULL || dst_nx->signal == NULL)
-         return true;
-      if (dst_nx->n_sources != 1
-          || (dst_nx->flags & (NET_F_FORCED | NET_F_INOUT))
-          || dst_nx->width != nx->width
-          || dst_nx->size != nx->size)
-         return true;
+         return island_wr_yes(WR_PORT_KIND);
+      island_wire_obj_sig = dst_nx->signal;
+      if (dst_nx->n_sources != 1)
+         return island_wr_yes(WR_DST_SOURCES);
+      if (dst_nx->flags & (NET_F_FORCED | NET_F_INOUT))
+         return island_wr_yes(WR_DST_FORCED);
+      if (dst_nx->width != nx->width || dst_nx->size != nx->size)
+         return island_wr_yes(WR_DST_SLICE);
       const rt_signal_t *dst_sig = dst_nx->signal;
       if (dst_sig->resolution != NULL && !(dst_nx->flags & NET_F_R_IDENT))
-         return true;
-      if (dst_sig->shared.flags
-          & (SIG_F_POLL_WATCHED | SIG_F_EXT_READ | SIG_F_PACKED))
-         return true;
+         return island_wr_yes(WR_DST_RESOLVED);
+      if (dst_sig->shared.flags & SIG_F_PACKED)
+         return island_wr_yes(WR_DST_PACKED);
+      if (dst_sig->shared.flags & (SIG_F_POLL_WATCHED | SIG_F_EXT_READ))
+         return island_wr_yes(WR_DST_POLL_EXT);
       const uint32_t dst_off = (uint32_t)(dst_nx->offset / dst_nx->size);
       if (island_sig_map_overlaps(mgr, dst_sig, dst_off, dst_nx->width))
-         return true;
+         return island_wr_yes(WR_DST_ISLAND_OWNED);
 
       bool local_found = false;
       if (!island_pending_watch_matches(dst_nx->pending, src_s,
                                         dst_sig, dst_off, &local_found))
-         return true;
+         return true;   // reason set by the matcher
 
       bool sub_found = false;
       if (dst_nx->outputs != NULL) {
@@ -678,7 +895,7 @@ static bool island_nexus_port_observed(const rt_nexus_t *nx,
       }
 
       if (!local_found && !sub_found)
-         return true;
+         return island_wr_yes(WR_DST_NO_READER);
       *found_watch = true;
    }
    return false;
@@ -687,23 +904,29 @@ static bool island_nexus_port_observed(const rt_nexus_t *nx,
 static inline bool island_sig_observed(const rt_island_sig_t *s)
 {
    const rt_signal_t *sig = s->sig;
-   if (sig->shared.flags & (SIG_F_POLL_WATCHED | SIG_F_EXT_READ))
-      return true;
+   island_wire_obj_sig = NULL;
+   island_wire_obj_proc = NULL;
+   if (sig->shared.flags & SIG_F_POLL_WATCHED)
+      return island_wr_yes(WR_POLL);
+   if (sig->shared.flags & SIG_F_EXT_READ)
+      return island_wr_yes(WR_EXT_READ);
    const uint32_t total = s->width * s->nelems;
    const rt_nexus_t *nx = &(sig->nexus);
    for (uint32_t i = 0; i < sig->n_nexus; i++, nx = nx->chain) {
       if (!island_nexus_overlaps_sig(nx, s))
          continue;
       if (nx->outputs != NULL) {
-         if ((sig->shared.flags & SIG_F_PACKED)
-             || nx->size != s->elem_size
+         if (sig->shared.flags & SIG_F_PACKED)
+            return island_wr_yes(WR_PACKED);
+         if (nx->size != s->elem_size
              || nx->width != total
              || (uint32_t)(nx->offset / nx->size) != (uint32_t)s->sig_offset)
-            return true;
+            return island_wr_yes(WR_SRC_SLICE);
          bool found_port_watch = false;
-         if (island_nexus_port_observed(nx, s, &found_port_watch, 0)
-             || !found_port_watch)
-            return true;
+         if (island_nexus_port_observed(nx, s, &found_port_watch, 0))
+            return true;   // reason set by the port walk
+         if (!found_port_watch)
+            return island_wr_yes(WR_DST_NO_READER);
       }
       if (island_pending_has_ext_observer(nx->pending))
          return true;
@@ -785,6 +1008,7 @@ void rt_island_input_watch_inline(rt_model_t *m, void *user, bool defer_comb)
 {
    rt_island_sig_t *s = user;
    rt_island_t *isl = s->isl;
+   WSTAT_COUNT(s, 0);
    island_mark_in_dirty(isl, s->in_idx);
    isl->has_dirty_inputs = true;
    if (isl->cluster != NULL) {
@@ -932,6 +1156,8 @@ static inline void island_dom_dequeue_sample(rt_island_domain_t *dom)
 static void island_super_clk_watch_cb(uint64_t now, rt_signal_t *signal,
                                       rt_watch_t *watch, void *user)
 {
+   if (unlikely(island_wstats_on))
+      __atomic_fetch_add(&island_wstat_sclk_cb, 1, __ATOMIC_RELAXED);
    rt_super_domain_t *sdom = user;
    const bool is_vhdl = !!(sdom->edge_flags
                            & (RT_IEDGE_VHDL | RT_IEDGE_VHDL_EVENT));
@@ -961,6 +1187,8 @@ static void island_super_clk_watch_cb(uint64_t now, rt_signal_t *signal,
 static void island_super_rst_watch_cb(uint64_t now, rt_signal_t *signal,
                                       rt_watch_t *watch, void *user)
 {
+   if (unlikely(island_wstats_on))
+      __atomic_fetch_add(&island_wstat_srst_cb, 1, __ATOMIC_RELAXED);
    rt_super_domain_t *sdom = user;
    bool hit;
    if (sdom->edge_flags & RT_IEDGE_RST_LEVEL) {
@@ -988,6 +1216,8 @@ static void island_super_rst_watch_cb(uint64_t now, rt_signal_t *signal,
 static void island_clk_watch_cb(uint64_t now, rt_signal_t *signal,
                                 rt_watch_t *watch, void *user)
 {
+   if (unlikely(island_wstats_on))
+      __atomic_fetch_add(&island_wstat_clk_cb, 1, __ATOMIC_RELAXED);
    rt_island_domain_t *dom = user;
    const rt_island_sig_t *cs = &(dom->isl->sigs[dom->clk_sig_idx]);
    const bool is_vhdl = !!(dom->edge_flags
@@ -1013,6 +1243,8 @@ static void island_clk_watch_cb(uint64_t now, rt_signal_t *signal,
 static void island_rst_watch_cb(uint64_t now, rt_signal_t *signal,
                                 rt_watch_t *watch, void *user)
 {
+   if (unlikely(island_wstats_on))
+      __atomic_fetch_add(&island_wstat_rst_cb, 1, __ATOMIC_RELAXED);
    rt_island_domain_t *dom = user;
    const rt_island_sig_t *rs = &(dom->isl->sigs[dom->rst_sig_idx]);
    bool hit;
@@ -1041,6 +1273,13 @@ rt_island_mgr_t *rt_island_mgr_new(rt_model_t *m)
    mgr->sig_map = hash_new(64);
    mgr->alias_map = hash_new(64);
    mgr->fast = !!opt_get_int(OPT_ISLAND_FAST);
+   {
+      const char *ws = getenv("NVC_ISLAND_WIRE_STATS");
+      island_wstats_level = ws != NULL ? atoi(ws) : 0;
+      island_wstats_on = island_wstats_level > 0;
+      if (island_wstats_on && island_wstats == NULL)
+         island_wstats = hash_new(256);
+   }
    return mgr;
 }
 
@@ -1074,6 +1313,11 @@ void rt_island_mgr_free(rt_island_mgr_t *mgr)
 {
    if (mgr == NULL)
       return;
+
+   if (island_wstats_on) {
+      island_wstat_report(mgr);
+      island_wstat_free();
+   }
 
    if (mgr->pool != NULL) {
       island_pool_free(mgr->pool);
@@ -1934,6 +2178,7 @@ static void island_sync_in_sig(rt_island_t *isl, const rt_island_sig_t *s)
 static inline void island_sync_in_desc(rt_island_t *isl,
                                        const rt_island_in_desc_t *d)
 {
+   WSTAT_COUNT(&(isl->sigs[d->sig_idx]), 1);
    if (likely(d->src != NULL))
       island_copy_bytes(d->dst, d->src, d->nbytes);
    else
@@ -1974,6 +2219,7 @@ static void island_sync_dirty_inputs(rt_island_t *isl)
 static void island_sync_out_sig(rt_model_t *m, rt_island_t *isl,
                                 rt_island_sig_t *s)
 {
+   WSTAT_COUNT(s, 2);
    rt_signal_t *sig = s->sig;
    const uint32_t width = s->width;
    const uint32_t nelems = s->nelems;
@@ -1985,8 +2231,10 @@ static void island_sync_out_sig(rt_model_t *m, rt_island_t *isl,
       const size_t nbytes = (size_t)total * elem_sz;
       const uint8_t *src = isl->state + s->a_off;
       const uint8_t *cur = sig->shared.data + (size_t)s->sig_offset * elem_sz;
-      if (island_bytes_diff(cur, src, nbytes))
+      if (island_bytes_diff(cur, src, nbytes)) {
+         WSTAT_COUNT(s, 3);
          deposit_signal(m, sig, src, s->sig_offset, total);
+      }
       return;
    }
 
@@ -3168,20 +3416,17 @@ static bool island_collect_pending_consumers(void *pending,
    if (pointer_tag(pending) == 1) {
       rt_wakeable_t *w = untag_pointer(pending, rt_wakeable_t);
       if (w->kind != W_WATCH)
-         return false;
+         return island_wr_no(island_wake_reason(w));
       rt_watch_t *watch = container_of(w, rt_watch_t, wakeable);
       if (watch->fn != island_input_watch_cb)
-         return false;
+         return island_wr_no(WR_READER_WATCH);
       rt_island_sig_t *dst_s = watch->user_data;
-      if (dst_s->isl == src_s->isl
-          || (require_exact_sig && dst_s->sig != cur_sig)
-          || dst_s->sig_offset != cur_off
-          || dst_s->width != src_s->width
-          || dst_s->nelems != src_s->nelems
-          || dst_s->elem_size != src_s->elem_size
-          || ((src_s->flags ^ dst_s->flags)
-              & (RT_ISIG_TWO_STATE | RT_ISIG_STD_LOGIC9)) != 0)
-         return false;
+      island_wire_obj_sig = dst_s->sig;
+      const island_wire_reason_t why =
+         island_reader_mismatch(src_s, dst_s, cur_sig, cur_off,
+                                require_exact_sig);
+      if (why != WR_NONE)
+         return island_wr_no(why);
 
       bool seen = false;
       for (unsigned k = 0; k < consumers->count; k++) {
@@ -3202,20 +3447,17 @@ static bool island_collect_pending_consumers(void *pending,
       if (w == NULL)
          continue;
       if (w->kind != W_WATCH)
-         return false;
+         return island_wr_no(island_wake_reason(w));
       rt_watch_t *watch = container_of(w, rt_watch_t, wakeable);
       if (watch->fn != island_input_watch_cb)
-         return false;
+         return island_wr_no(WR_READER_WATCH);
       rt_island_sig_t *dst_s = watch->user_data;
-      if (dst_s->isl == src_s->isl
-          || (require_exact_sig && dst_s->sig != cur_sig)
-          || dst_s->sig_offset != cur_off
-          || dst_s->width != src_s->width
-          || dst_s->nelems != src_s->nelems
-          || dst_s->elem_size != src_s->elem_size
-          || ((src_s->flags ^ dst_s->flags)
-              & (RT_ISIG_TWO_STATE | RT_ISIG_STD_LOGIC9)) != 0)
-         return false;
+      island_wire_obj_sig = dst_s->sig;
+      const island_wire_reason_t why =
+         island_reader_mismatch(src_s, dst_s, cur_sig, cur_off,
+                                require_exact_sig);
+      if (why != WR_NONE)
+         return island_wr_no(why);
 
       bool seen = false;
       for (unsigned k = 0; k < consumers->count; k++) {
@@ -3241,33 +3483,36 @@ static bool island_collect_port_consumers(const rt_nexus_t *nx,
    if (nx->outputs == NULL)
       return true;
    if (depth >= 4)
-      return false;
+      return island_wr_no(WR_PORT_DEPTH);
 
    const rt_island_mgr_t *mgr = src_s->isl->mgr;
    const uint32_t total = src_s->width * src_s->nelems;
    if (nx->size != src_s->elem_size || nx->width != total)
-      return false;
+      return island_wr_no(WR_SRC_SLICE);
 
    for (const rt_source_t *o = nx->outputs; o != NULL; o = o->chain_output) {
       if (o->tag != SOURCE_PORT)
-         return false;
+         return island_wr_no(WR_PORT_KIND);
       const rt_nexus_t *dst_nx = o->u.port.output;
       if (dst_nx == NULL || dst_nx->signal == NULL)
-         return false;
-      if (dst_nx->n_sources != 1
-          || (dst_nx->flags & (NET_F_FORCED | NET_F_INOUT))
-          || dst_nx->width != nx->width
-          || dst_nx->size != nx->size)
-         return false;
+         return island_wr_no(WR_PORT_KIND);
+      island_wire_obj_sig = dst_nx->signal;
+      if (dst_nx->n_sources != 1)
+         return island_wr_no(WR_DST_SOURCES);
+      if (dst_nx->flags & (NET_F_FORCED | NET_F_INOUT))
+         return island_wr_no(WR_DST_FORCED);
+      if (dst_nx->width != nx->width || dst_nx->size != nx->size)
+         return island_wr_no(WR_DST_SLICE);
       rt_signal_t *dst_sig = dst_nx->signal;
       if (dst_sig->resolution != NULL && !(dst_nx->flags & NET_F_R_IDENT))
-         return false;
-      if (dst_sig->shared.flags
-          & (SIG_F_POLL_WATCHED | SIG_F_EXT_READ | SIG_F_PACKED))
-         return false;
+         return island_wr_no(WR_DST_RESOLVED);
+      if (dst_sig->shared.flags & SIG_F_PACKED)
+         return island_wr_no(WR_DST_PACKED);
+      if (dst_sig->shared.flags & (SIG_F_POLL_WATCHED | SIG_F_EXT_READ))
+         return island_wr_no(WR_DST_POLL_EXT);
       const uint32_t dst_off = (uint32_t)(dst_nx->offset / dst_nx->size);
       if (island_sig_map_overlaps(mgr, dst_sig, dst_off, dst_nx->width))
-         return false;
+         return island_wr_no(WR_DST_ISLAND_OWNED);
 
       bool local_found = false;
       if (!island_collect_pending_consumers(dst_nx->pending, src_s,
@@ -3283,7 +3528,7 @@ static bool island_collect_port_consumers(const rt_nexus_t *nx,
       }
 
       if (!local_found && !sub_found)
-         return false;
+         return island_wr_no(WR_DST_NO_READER);
 
       bool seen_alias = false;
       for (unsigned k = 0; k < aliases->count; k++) {
@@ -3311,13 +3556,22 @@ static bool island_check_direct_sig(const rt_island_sig_t *src_s,
 {
    consumers->count = 0;
    aliases->count = 0;
-   if (src_s->sig == NULL || src_s->next_owner != NULL
-       || (src_s->flags & (RT_ISIG_OBSERVED | RT_ISIG_SPARSE_RAM)))
-      return false;
+   island_wire_obj_sig = NULL;
+   island_wire_obj_proc = NULL;
+   if (src_s->sig == NULL)
+      return island_wr_no(WR_NONE);
+   if (src_s->next_owner != NULL)
+      return island_wr_no(WR_MULTI_OWNER);
+   if (src_s->flags & RT_ISIG_SPARSE_RAM)
+      return island_wr_no(WR_SPARSE_RAM);
+   if (src_s->flags & RT_ISIG_OBSERVED)
+      return island_wr_no(WR_OBSERVED_PRE);
 
    const rt_signal_t *sig = src_s->sig;
-   if (sig->shared.flags & (SIG_F_POLL_WATCHED | SIG_F_EXT_READ))
-      return false;
+   if (sig->shared.flags & SIG_F_POLL_WATCHED)
+      return island_wr_no(WR_POLL);
+   if (sig->shared.flags & SIG_F_EXT_READ)
+      return island_wr_no(WR_EXT_READ);
 
    const uint32_t total = src_s->width * src_s->nelems;
    const rt_nexus_t *nx = &(sig->nexus);
@@ -3325,30 +3579,391 @@ static bool island_check_direct_sig(const rt_island_sig_t *src_s,
       if (!island_nexus_overlaps_sig(nx, src_s))
          continue;
       if (nx->n_sources != 0)
-         return false;
+         return island_wr_no(WR_SRC_NEXUS);
 
       if (nx->outputs != NULL) {
-         if ((sig->shared.flags & SIG_F_PACKED)
-             || nx->size != src_s->elem_size
+         if (sig->shared.flags & SIG_F_PACKED)
+            return island_wr_no(WR_PACKED);
+         if (nx->size != src_s->elem_size
              || nx->width != total
              || (uint32_t)(nx->offset / nx->size) != (uint32_t)src_s->sig_offset)
-            return false;
+            return island_wr_no(WR_SRC_SLICE);
          bool port_found = false;
          if (!island_collect_port_consumers(nx, src_s, consumers, aliases,
-                                            &port_found, 0)
-             || !port_found)
-            return false;
+                                            &port_found, 0))
+            return false;   // reason set by the port walk
+         if (!port_found)
+            return island_wr_no(WR_DST_NO_READER);
       }
 
       bool dummy = false;
       if (!island_collect_pending_consumers(nx->pending, src_s,
                                             sig, src_s->sig_offset, false,
                                             consumers, &dummy))
-         return false;
+         return false;   // reason set by the consumer walk
    }
 
-   return consumers->count > 0;
+   if (consumers->count == 0)
+      return island_wr_no(WR_NO_CONSUMER);
+   return true;
 }
+
+static const rt_nexus_t *island_wstat_nexus_at(const rt_signal_t *sig,
+                                               uint32_t off)
+{
+   const rt_nexus_t *nx = &(sig->nexus);
+   if (sig->shared.flags & SIG_F_PACKED)
+      return nx;
+   for (uint32_t i = 0; i < sig->n_nexus && nx != NULL; i++, nx = nx->chain) {
+      const uint32_t n_sz = nx->size > 0 ? nx->size : 1u;
+      const uint32_t lo = (uint32_t)(nx->offset / n_sz);
+      if (off >= lo && off < lo + nx->width)
+         return nx;
+   }
+   return NULL;
+}
+
+static rt_island_sig_t *island_wstat_owner_at(const rt_island_mgr_t *mgr,
+                                              const rt_signal_t *sig,
+                                              uint32_t off, uint32_t width)
+{
+   for (rt_island_sig_t *own = hash_get(mgr->sig_map, sig);
+        own != NULL; own = own->next_owner) {
+      const uint32_t o_lo = (uint32_t)own->sig_offset;
+      const uint32_t o_hi = o_lo + own->width * own->nelems;
+      if (o_hi > off && o_lo < off + width)
+         return own;
+   }
+   return NULL;
+}
+
+static void island_wstat_find_writer(const rt_island_mgr_t *mgr,
+                                     const rt_island_sig_t *dst_s,
+                                     island_wstat_t *e)
+{
+   e->rd_kind = RK_OTHER;
+   const rt_nexus_t *nx = island_wstat_nexus_at(dst_s->sig,
+                                                (uint32_t)dst_s->sig_offset);
+   for (unsigned depth = 0; depth < 8 && nx != NULL; depth++) {
+      const uint32_t n_sz = nx->size > 0 ? nx->size : 1u;
+      rt_island_sig_t *w = nx->signal == NULL ? NULL
+         : island_wstat_owner_at(mgr, nx->signal,
+                                 (uint32_t)(nx->offset / n_sz), nx->width);
+      if (w != NULL && w != dst_s) {
+         e->rd_kind = RK_ISLAND;
+         e->writer = w;
+         return;
+      }
+      if (nx->n_sources == 0) {
+         e->rd_kind = RK_UNDRIVEN;
+         return;
+      }
+      const rt_source_t *src = &(nx->sources);
+      if (nx->n_sources > 1) {
+         bool all_drv = true;
+         for (const rt_source_t *q = src; q != NULL; q = q->chain_input)
+            all_drv &= (q->tag == SOURCE_DRIVER);
+         e->rd_kind = all_drv ? RK_PROC : RK_OTHER;
+         return;
+      }
+      if (src->tag == SOURCE_PORT) {
+         nx = src->u.port.input;
+         continue;
+      }
+      e->rd_kind = src->tag == SOURCE_DRIVER ? RK_PROC : RK_OTHER;
+      return;
+   }
+}
+
+static void island_wstat_note_fail(const rt_island_sig_t *s,
+                                   island_wire_reason_t r)
+{
+   if (r == WR_NONE)
+      return;
+   island_wstat_t *e = island_wstat_get(s, true);
+   if (e == NULL)
+      return;
+   if (r == WR_OBSERVED_PRE && e->reason != WR_NONE)
+      return;   // the observed scan already recorded the precise reason
+   e->reason = r;
+   e->other_sig = island_wire_obj_sig;
+   e->other_proc = island_wire_obj_proc;
+}
+
+static void island_wstat_finalize(rt_island_mgr_t *mgr)
+{
+   for (unsigned i = 0; i < mgr->islands.count; i++) {
+      const rt_island_t *isl = mgr->islands.items[i];
+      for (uint32_t j = 0; j < isl->nsigs; j++) {
+         const rt_island_sig_t *s = &(isl->sigs[j]);
+         if (s->sig == NULL)
+            continue;
+         if (!(s->flags & (RT_ISIG_COMB_WRITTEN | RT_ISIG_FF_WRITTEN
+                           | RT_ISIG_IN)))
+            continue;
+         island_wstat_t *e = island_wstat_get(s, true);
+         if ((s->flags & RT_ISIG_IN) && e->rd_kind == RK_NONE)
+            island_wstat_find_writer(mgr, s, e);
+      }
+   }
+}
+
+typedef struct {
+   const island_wstat_t *e;
+   uint64_t wake, sync_in, sync_out, deposit;
+   uint32_t n;
+} island_wstat_hot_t;
+
+static int island_wstat_cmp_hot(const void *a, const void *b)
+{
+   const island_wstat_hot_t *x = a, *y = b;
+   const uint64_t cx = x->wake + x->sync_in + x->sync_out;
+   const uint64_t cy = y->wake + y->sync_in + y->sync_out;
+   return cx < cy ? 1 : cx > cy ? -1 : 0;
+}
+
+static int island_wstat_cmp_obj(const void *a, const void *b)
+{
+   const rt_island_sig_t *x = (*(const island_wstat_t *const *)a)->s;
+   const rt_island_sig_t *y = (*(const island_wstat_t *const *)b)->s;
+   if (x->sig != y->sig)
+      return x->sig < y->sig ? -1 : 1;
+   if (x->sig_offset != y->sig_offset)
+      return x->sig_offset < y->sig_offset ? -1 : 1;
+   return x->width < y->width ? -1 : x->width > y->width ? 1 : 0;
+}
+
+static const char *island_wstat_label(const island_wstat_t *w, char *buf,
+                                      size_t len)
+{
+   if (w->cause != WB_NONE)
+      snprintf(buf, len, "%s -> broken:%s", island_wr_names[w->reason],
+               island_wb_names[w->cause]);
+   else
+      snprintf(buf, len, "%s", island_wr_names[w->reason]);
+   return buf;
+}
+
+static void island_wstat_name(const rt_island_sig_t *s, char *buf, size_t len)
+{
+   const rt_signal_t *sig = s->sig;
+   const char *scope = (sig->parent != NULL && sig->parent->name != NULL)
+      ? istr(sig->parent->name) : "?";
+   const char *nm = sig->where != NULL ? istr(tree_ident(sig->where)) : "?";
+   snprintf(buf, len, "%s.%s[%d+%u]", scope, nm, s->sig_offset,
+            s->width * s->nelems);
+}
+
+typedef struct {
+   char     label[96];
+   uint32_t n_sigs, n_out;
+   uint64_t bits, sync_out, deposit;
+   uint32_t n_readers;
+   uint64_t wake, sync_in;
+} island_wstat_row_t;
+
+static void island_wstat_report(const rt_island_mgr_t *mgr)
+{
+   if (island_wstat_list.count == 0)
+      return;
+
+   const unsigned nrows = WR_MAX * WB_MAX + RK_MAX;
+   island_wstat_row_t *rows = xcalloc_array(nrows, sizeof(island_wstat_row_t));
+   island_wstat_row_t tot = { .label = "TOTAL" };
+
+   static const char *const rk_names[RK_MAX] = {
+      "reader:unmapped", "reader:island", "READER<-non-island-process",
+      "READER<-undriven", "READER<-other-source",
+   };
+
+   for (unsigned k = 0; k < island_wstat_list.count; k++) {
+      const island_wstat_t *e = island_wstat_list.items[k];
+      const rt_island_sig_t *s = e->s;
+      const bool written = !!(s->flags & (RT_ISIG_COMB_WRITTEN
+                                          | RT_ISIG_FF_WRITTEN));
+      if (written) {
+         island_wstat_row_t *r = &rows[e->reason * WB_MAX + e->cause];
+         island_wstat_label(e, r->label, sizeof(r->label));
+         r->n_sigs++;
+         if (s->flags & RT_ISIG_OUT)
+            r->n_out++;
+         r->bits += (uint64_t)s->width * s->nelems;
+         r->sync_out += e->sync_out;
+         r->deposit += e->deposit;
+         tot.n_sigs++;
+         tot.sync_out += e->sync_out;
+         tot.deposit += e->deposit;
+      }
+      if (s->flags & RT_ISIG_IN) {
+         island_wstat_row_t *r;
+         if (e->rd_kind == RK_ISLAND && e->writer != NULL) {
+            const island_wstat_t *we = island_wstat_get(e->writer, false);
+            const unsigned ri = we != NULL
+               ? we->reason * WB_MAX + we->cause : 0;
+            r = &rows[ri];
+            if (we != NULL)
+               island_wstat_label(we, r->label, sizeof(r->label));
+         }
+         else {
+            r = &rows[WR_MAX * WB_MAX + e->rd_kind];
+            snprintf(r->label, sizeof(r->label), "%s", rk_names[e->rd_kind]);
+         }
+         r->n_readers++;
+         r->wake += e->wake;
+         r->sync_in += e->sync_in;
+         tot.n_readers++;
+         tot.wake += e->wake;
+         tot.sync_in += e->sync_in;
+      }
+   }
+
+   FILE *f = stderr;
+   fprintf(f, "ISLAND_WIRE: islands=%u super_islands=%u super_domains=%u\n",
+           mgr->islands.count, mgr->clusters.count, mgr->super_domains.count);
+   fprintf(f, "ISLAND_WIRE: clk_cb=%"PRIu64" rst_cb=%"PRIu64
+           " super_clk_cb=%"PRIu64" super_rst_cb=%"PRIu64"\n",
+           island_wstat_clk_cb, island_wstat_rst_cb,
+           island_wstat_sclk_cb, island_wstat_srst_cb);
+   fprintf(f, "ISLAND_WIRE: %-44s %6s %6s %8s %9s %9s | %5s %10s %10s\n",
+           "class (writer side)", "wsigs", "out", "bits", "out_call",
+           "deposit", "rdrs", "wake", "sync_in");
+   for (unsigned i = 0; i < nrows; i++) {
+      const island_wstat_row_t *r = &rows[i];
+      if (r->n_sigs == 0 && r->n_readers == 0)
+         continue;
+      fprintf(f, "ISLAND_WIRE: %-44s %6u %6u %8"PRIu64" %9"PRIu64" %9"PRIu64
+              " | %5u %10"PRIu64" %10"PRIu64"\n", r->label, r->n_sigs,
+              r->n_out, r->bits, r->sync_out, r->deposit, r->n_readers,
+              r->wake, r->sync_in);
+   }
+   fprintf(f, "ISLAND_WIRE: %-44s %6u %6s %8s %9"PRIu64" %9"PRIu64
+           " | %5u %10"PRIu64" %10"PRIu64"\n", tot.label, tot.n_sigs, "", "",
+           tot.sync_out, tot.deposit, tot.n_readers, tot.wake, tot.sync_in);
+   free(rows);
+   // Callers that attached observers to island-written signals (level 2:
+   // addresses differ per run so they are not part of the default output)
+   if (island_wstats_level >= 2) {
+      void *ras[64];
+      unsigned cnt[64] = { 0 };
+      unsigned nra = 0;
+      for (unsigned k = 0; k < island_wstat_list.count; k++) {
+         const island_wstat_t *e = island_wstat_list.items[k];
+         if (e->observer_ra == NULL)
+            continue;
+         unsigned q;
+         for (q = 0; q < nra; q++) {
+            if (ras[q] == e->observer_ra)
+               break;
+         }
+         if (q == nra) {
+            if (nra == 64)
+               continue;
+            ras[nra++] = e->observer_ra;
+         }
+         cnt[q]++;
+      }
+      // Resolve offline: addr2line -f -e <nvc> <ra - ref + nm(rt_island_mgr_new)>
+      for (unsigned q = 0; q < nra; q++)
+         fprintf(f, "ISLAND_WIRE_OBS: sigs=%u ra=%p ref=%p\n", cnt[q],
+                 ras[q], (void *)rt_island_mgr_new);
+   }
+
+   // A few examples per writer-side class
+   {
+      unsigned shown[WR_MAX * WB_MAX] = { 0 };
+      for (unsigned k = 0; k < island_wstat_list.count; k++) {
+         const island_wstat_t *e = island_wstat_list.items[k];
+         if (!(e->s->flags & (RT_ISIG_COMB_WRITTEN | RT_ISIG_FF_WRITTEN))
+             || e->reason == WR_DIRECT || e->reason == WR_NO_CONSUMER)
+            continue;
+         const unsigned ri = e->reason * WB_MAX + e->cause;
+         if (shown[ri]++ >= 4)
+            continue;
+         char nm[256], lb[128], on[256] = "";
+         island_wstat_name(e->s, nm, sizeof(nm));
+         if (e->other_sig != NULL) {
+            const rt_signal_t *o = e->other_sig;
+            snprintf(on, sizeof(on), " -> %s.%s",
+                     o->parent != NULL && o->parent->name != NULL
+                     ? istr(o->parent->name) : "?",
+                     o->where != NULL ? istr(tree_ident(o->where)) : "?");
+         }
+         else if (e->other_proc != NULL)
+            snprintf(on, sizeof(on), " -> proc %s", istr(e->other_proc));
+         fprintf(f, "ISLAND_WIRE_EX: [%s] %s%s\n",
+                 island_wstat_label(e, lb, sizeof(lb)), nm, on);
+      }
+   }
+
+   // Hottest signals, merged over the islands that share the signal object
+   island_wstat_t **tmp = xmalloc_array(island_wstat_list.count,
+                                        sizeof(island_wstat_t *));
+   memcpy(tmp, island_wstat_list.items,
+          island_wstat_list.count * sizeof(island_wstat_t *));
+   qsort(tmp, island_wstat_list.count, sizeof(island_wstat_t *),
+         island_wstat_cmp_obj);
+
+   island_wstat_hot_t *hot = xcalloc_array(island_wstat_list.count,
+                                           sizeof(island_wstat_hot_t));
+   unsigned nhot = 0;
+   for (unsigned k = 0; k < island_wstat_list.count; k++) {
+      const island_wstat_t *e = tmp[k];
+      if (nhot > 0
+          && hot[nhot - 1].e->s->sig == e->s->sig
+          && hot[nhot - 1].e->s->sig_offset == e->s->sig_offset
+          && hot[nhot - 1].e->s->width == e->s->width) {
+         island_wstat_hot_t *h = &hot[nhot - 1];
+         h->wake += e->wake;
+         h->sync_in += e->sync_in;
+         h->sync_out += e->sync_out;
+         h->deposit += e->deposit;
+         h->n++;
+         if (e->writer != NULL && h->e->writer == NULL)
+            h->e = e;
+      }
+      else {
+         hot[nhot++] = (island_wstat_hot_t){ e, e->wake, e->sync_in, e->sync_out,
+                                e->deposit, 1 };
+      }
+   }
+   qsort(hot, nhot, sizeof(island_wstat_hot_t), island_wstat_cmp_hot);
+   const unsigned top = MIN(nhot, 40u);
+   for (unsigned k = 0; k < top; k++) {
+      const island_wstat_hot_t *h = &hot[k];
+      const island_wstat_t *e = h->e;
+      if (h->wake + h->sync_in + h->sync_out == 0)
+         break;
+      char nm[256], lb[128];
+      island_wstat_name(e->s, nm, sizeof(nm));
+      const island_wstat_t *we = e->rd_kind == RK_ISLAND && e->writer != NULL
+         ? island_wstat_get(e->writer, false) : e;
+      const char *rk = e->rd_kind == RK_PROC ? " <-proc"
+         : e->rd_kind == RK_UNDRIVEN ? " <-undriven" : "";
+      fprintf(f, "ISLAND_WIRE_TOP: wake=%"PRIu64" sync_in=%"PRIu64
+              " out_call=%"PRIu64" deposit=%"PRIu64" n=%u w=%u %s%s%s%s%s [%s]\n",
+              h->wake, h->sync_in, h->sync_out, h->deposit, h->n,
+              e->s->width * e->s->nelems,
+              (e->s->flags & RT_ISIG_IN) ? "in " : "",
+              (e->s->flags & RT_ISIG_OUT) ? "out " : "",
+              (e->s->flags & RT_ISIG_COMB_WRITTEN) ? "comb " : "",
+              nm, rk,
+              island_wstat_label(we != NULL ? we : e, lb, sizeof(lb)));
+   }
+   free(hot);
+   free(tmp);
+}
+
+static void island_wstat_free(void)
+{
+   for (unsigned k = 0; k < island_wstat_list.count; k++)
+      free(island_wstat_list.items[k]);
+   ACLEAR(island_wstat_list);
+   if (island_wstats != NULL) {
+      hash_free(island_wstats);
+      island_wstats = NULL;
+   }
+}
+
 
 typedef struct {
    rt_island_sig_t     *src_s;
@@ -3461,8 +4076,11 @@ static void island_build_hier(rt_island_mgr_t *mgr)
          rt_island_sig_t *src_s = &(isl->sigs[j]);
          if (!(src_s->flags & (RT_ISIG_COMB_WRITTEN | RT_ISIG_FF_WRITTEN)))
             continue;
-         if (!island_check_direct_sig(src_s, &tmp_cons, &tmp_aliases))
+         if (!island_check_direct_sig(src_s, &tmp_cons, &tmp_aliases)) {
+            if (unlikely(island_wstats_on))
+               island_wstat_note_fail(src_s, island_wire_why);
             continue;
+         }
 
          hier_cand_t c = {
             .src_s     = src_s,
@@ -3539,8 +4157,11 @@ static void island_build_hier(rt_island_mgr_t *mgr)
          if (top->edge_idx < comb_deg[u]) {
             const hier_comb_edge_t e = comb_adj[u][top->edge_idx++];
             const uint32_t v = e.dst_isl;
-            if (color[v] == 1)
+            if (color[v] == 1) {
                cands.items[e.cand_idx].rejected = true;
+               if (unlikely(island_wstats_on))
+                  island_wstat_note(cands.items[e.cand_idx].src_s, WR_CYCLE);
+            }
             else if (color[v] == 0) {
                color[v] = 1;
                APUSH(dfs_stk,
@@ -3579,6 +4200,8 @@ static void island_build_hier(rt_island_mgr_t *mgr)
       }
 
       rt_island_sig_t *src_s = hc->src_s;
+      if (unlikely(island_wstats_on))
+         island_wstat_note(src_s, WR_DIRECT);
       src_s->flags |= RT_ISIG_DIRECT_LINK;
       src_s->direct_targets = hc->targets;
       src_s->n_direct_targets = hc->n_targets;
@@ -3836,6 +4459,9 @@ static void island_build_hier(rt_island_mgr_t *mgr)
              "super_domains=%u\n",
              N, mgr->clusters.count, n_direct, mgr->super_domains.count);
    }
+
+   if (unlikely(island_wstats_on))
+      island_wstat_finalize(mgr);
 }
 
 static void island_classify_outputs(rt_island_mgr_t *mgr)
@@ -4042,6 +4668,8 @@ void rt_island_reset_all(rt_island_mgr_t *mgr)
              || (s->flags & (RT_ISIG_OBSERVED | RT_ISIG_DIRECT_LINK)))
             continue;
          if (island_sig_observed(s)) {
+            if (unlikely(island_wstats_on))
+               island_wstat_note(s, island_wire_why);
             s->flags |= RT_ISIG_OBSERVED;
             if ((s->flags & RT_ISIG_COMB_WRITTEN)
                 && !(s->flags & RT_ISIG_OUT))
@@ -4496,8 +5124,10 @@ static inline void island_flush_ext_outs(rt_model_t *m, rt_island_t *isl)
    const bool can_delta = model_can_create_delta(m);
    for (uint32_t j = 0; j < n_ext; j++, ed++) {
       if (likely(ed->src != NULL && can_delta)) {
+         WSTAT_COUNT(&(isl->sigs[ed->sig_idx]), 2);
          if (island_bytes_diff(ed->cur, ed->src, ed->nbytes)) {
             rt_island_sig_t *os = &(isl->sigs[ed->sig_idx]);
+            WSTAT_COUNT(os, 3);
             os->flags |= RT_ISIG_VHDL_SCHED;
             sched_deposit(m, os->sig, ed->src, os->sig_offset,
                           os->width * os->nelems, 0, false);
@@ -5641,6 +6271,7 @@ static inline bool island_edge_is_vhdl(uint8_t edge_flags)
 static void island_sched_out_sig(rt_model_t *m, rt_island_t *isl,
                                  rt_island_sig_t *s)
 {
+   WSTAT_COUNT(s, 2);
    s->flags &= ~RT_ISIG_LAST_OUT_VALID;
    rt_signal_t *sig = s->sig;
    const uint32_t width = s->width;
@@ -5653,8 +6284,10 @@ static void island_sched_out_sig(rt_model_t *m, rt_island_t *isl,
       const size_t nbytes = (size_t)total * elem_sz;
       const uint8_t *src = isl->state + s->a_off;
       const uint8_t *cur = sig->shared.data + (size_t)s->sig_offset * elem_sz;
-      if (island_bytes_diff(cur, src, nbytes))
+      if (island_bytes_diff(cur, src, nbytes)) {
+         WSTAT_COUNT(s, 3);
          sched_deposit(m, sig, src, s->sig_offset, total, 0, false);
+      }
       return;
    }
 
@@ -5693,8 +6326,10 @@ static void island_sched_out_sig(rt_model_t *m, rt_island_t *isl,
    }
 
    const uint8_t *cur = sig->shared.data + s->sig_offset;
-   if (memcmp(cur, out_bytes, total) != 0)
+   if (memcmp(cur, out_bytes, total) != 0) {
+      WSTAT_COUNT(s, 3);
       sched_deposit(m, sig, out_bytes, s->sig_offset, total, 0, false);
+   }
 
    free(heap_buf);
 }
@@ -6636,6 +7271,8 @@ static void island_break_direct_link(rt_model_t *m, rt_island_sig_t *src_s)
    if (!(src_s->flags & RT_ISIG_DIRECT_LINK))
       return;
 
+   if (unlikely(island_wstats_on))
+      island_wstat_cause(src_s, island_wb_cur);
    src_s->flags &= ~RT_ISIG_DIRECT_LINK;
    src_s->flags |= RT_ISIG_OBSERVED;
    island_sync_sig_raw(src_s->isl, src_s, true);
@@ -6677,11 +7314,14 @@ static void island_break_direct_link(rt_model_t *m, rt_island_sig_t *src_s)
 static void island_break_aliases(rt_model_t *m, rt_island_mgr_t *mgr,
                                  rt_signal_t *sig)
 {
+   const island_wire_cause_t saved = island_wb_cur;
+   island_wb_cur = WB_ALIAS;
    for (rt_island_alias_t *a = hash_get(mgr->alias_map, sig);
         a != NULL; a = a->next) {
       if (a->src_s->flags & RT_ISIG_DIRECT_LINK)
          island_break_direct_link(m, a->src_s);
    }
+   island_wb_cur = saved;
 }
 
 static void island_ext_deposit_watch_cb(uint64_t now, rt_signal_t *signal,
@@ -6722,10 +7362,13 @@ void rt_island_on_ext_deposit(rt_model_t *m, rt_signal_t *sig)
    if (mgr == NULL || mgr->sig_map == NULL || sig == NULL)
       return;
 
+   island_wb_cur = WB_EXT_DEPOSIT;
    island_break_aliases(m, mgr, sig);
 
    rt_island_sig_t *s = hash_get(mgr->sig_map, sig);
    for (; s != NULL; s = s->next_owner) {
+      if (unlikely(island_wstats_on))
+         island_wstat_cause(s, WB_EXT_DEPOSIT);
       s->flags &= ~(RT_ISIG_SOLE_OWNER | RT_ISIG_LAST_OUT_VALID);
       if (s->flags & RT_ISIG_DIRECT_LINK)
          island_break_direct_link(m, s);
@@ -6755,15 +7398,20 @@ void rt_island_on_ext_deposit(rt_model_t *m, rt_signal_t *sig)
 
 void rt_island_on_observer_attached(rt_model_t *m, rt_signal_t *sig)
 {
+   if (unlikely(island_wstats_on))
+      island_wb_ra = __builtin_return_address(0);
    rt_island_mgr_t *mgr = rt_island_model_mgr(m);
    if (mgr == NULL || mgr->sig_map == NULL || sig == NULL)
       return;
 
    sig->shared.flags &= ~(SIG_F_FAST_NOOP | SIG_F_FAST_DIRECT);
+   island_wb_cur = WB_OBSERVER;
    island_break_aliases(m, mgr, sig);
 
    rt_island_sig_t *s = hash_get(mgr->sig_map, sig);
    for (; s != NULL; s = s->next_owner) {
+      if (unlikely(island_wstats_on))
+         island_wstat_cause(s, WB_OBSERVER);
       s->flags &= ~RT_ISIG_LAST_OUT_VALID;
       if (s->flags & RT_ISIG_DIRECT_LINK)
          island_break_direct_link(m, s);
@@ -6961,6 +7609,7 @@ bool rt_island_vpi_put(rt_model_t *m, rt_signal_t *sig,
    if (mgr == NULL || mgr->sig_map == NULL || sig == NULL)
       return false;
 
+   island_wb_cur = WB_VPI_PUT;
    island_break_aliases(m, mgr, sig);
    rt_island_sig_t *s = hash_get(mgr->sig_map, sig);
    if (s == NULL)
@@ -7033,6 +7682,7 @@ bool rt_island_put_bytes(rt_model_t *m, rt_signal_t *sig,
    if (mgr == NULL || mgr->sig_map == NULL || sig == NULL || count == 0)
       return false;
 
+   island_wb_cur = WB_VPI_PUT;
    island_break_aliases(m, mgr, sig);
    rt_island_sig_t *owners = hash_get(mgr->sig_map, sig);
    if (owners == NULL)
@@ -7115,6 +7765,7 @@ bool rt_island_put_packed(rt_model_t *m, rt_signal_t *sig,
    if (mgr == NULL || mgr->sig_map == NULL || sig == NULL || count == 0)
       return false;
 
+   island_wb_cur = WB_VPI_PUT;
    island_break_aliases(m, mgr, sig);
    rt_island_sig_t *owners = hash_get(mgr->sig_map, sig);
    if (owners == NULL)
@@ -7245,6 +7896,7 @@ bool rt_island_vpi_release_slice(rt_model_t *m, rt_signal_t *sig,
    if (mgr == NULL || mgr->sig_map == NULL || sig == NULL || count == 0)
       return false;
 
+   island_wb_cur = WB_VPI_PUT;
    island_break_aliases(m, mgr, sig);
    rt_island_sig_t *owners = hash_get(mgr->sig_map, sig);
    if (owners == NULL)
