@@ -37,6 +37,7 @@
 #include "rt/model.h"
 #include "rt/mtprof.h"
 #include "rt/random.h"
+#include "rt/rorder.h"
 #include "rt/structs.h"
 #include "rt/sva.h"
 #include "thread.h"
@@ -187,8 +188,7 @@ typedef struct _rt_model {
    uint64_t           trigger_epoch;
    bool               can_create_delta;
    bool               in_reset;
-   bool               next_is_delta;
-   uint16_t           quiet_count;
+   rt_quiet_t         quiet;
    bool               force_stop;
    bool               sva_flush;
    bool               finished;
@@ -212,6 +212,7 @@ typedef struct _rt_model {
    sva_batch_list_t   sva_batch_tmp;
    rt_deferred_t     *deferred;
    rt_island_mgr_t   *islands;
+   bool               has_fused;
    heap_t            *eventq_heap;
    ihash_t           *res_memo;
    rt_watch_t        *watches;
@@ -280,8 +281,31 @@ static void pending_clear(rt_pending_t *p, unsigned slot);
    __model_entry(m, &__save);                                           \
 
 static __thread rt_model_t *__model = NULL;
+static hash_t *fused_keys = NULL;   // Start order of fused processes
 
 static bool __trace_on = false;
+
+static inline void sync_quiet(rt_model_t *m)
+{
+   // Copy the state read by the inline test for zero-delay transactions
+   // that change nothing in generated code: must be called after every
+   // change to the current time, delta cycle, can_create_delta or tracing
+   m->quiet.now = m->now;
+   m->quiet.iteration = m->iteration;
+   m->quiet.enabled = m->can_create_delta && !__trace_on;
+}
+
+static tlab_t *model_tlab_acquire(rt_model_t *m)
+{
+   tlab_t *tlab = tlab_acquire(m->jit);
+#if !RT_MULTITHREADED
+   // Generated code running in processes with this TLAB may complete
+   // zero-delay transactions that change nothing without calling into
+   // the kernel (see sched_waveform_quiet)
+   tlab->quiet = &(m->quiet);
+#endif
+   return tlab;
+}
 
 static void *source_value(rt_nexus_t *nexus, rt_source_t *src);
 static bool has_active_source(const rt_nexus_t *n);
@@ -642,6 +666,7 @@ static void deferq_run_body(void *arg)
                       >= (uint64_t)m->stop_delta)) {
          if (m->iteration < (int)m->stop_delta)
             m->iteration = m->stop_delta;
+         sync_quiet(m);
          reached_iteration_limit(m);
          m->reschedq.count = 0;
          break;
@@ -715,6 +740,7 @@ static void deferq_run(rt_model_t *m, deferq_t *dq)
                       >= (uint64_t)m->stop_delta)) {
          if (m->iteration < (int)m->stop_delta)
             m->iteration = m->stop_delta;
+         sync_quiet(m);
          reached_iteration_limit(m);
          m->reschedq.count = 0;
          break;
@@ -823,13 +849,14 @@ rt_model_t *model_new(jit_t *jit, cover_data_t *cover)
    m->effective_heap = heap_new(64);
 
    m->can_create_delta  = true;
-   m->next_is_delta     = true;
+   m->quiet.next_is_delta = true;
    m->sv_poll_mem_dirty = true;
    m->sv_poll_susp_dirty = false;
 
    m->threads[thread_id()] = static_alloc(m, sizeof(model_thread_t));
 
    __trace_on = opt_get_int(OPT_RT_TRACE);
+   sync_quiet(m);
 
    mtp_init();
 
@@ -865,6 +892,30 @@ rt_proc_t *get_active_proc(void)
 
    assert(obj->kind == W_PROC);
    return container_of(obj, rt_proc_t, wakeable);
+}
+
+int64_t model_output_key(bool *verilog)
+{
+   // The output of a process is written in the order processes start,
+   // see rorder.c
+   rt_wakeable_t *obj = get_active_wakeable();
+   if (obj == NULL || obj->kind != W_PROC)
+      return -1;
+
+   rt_proc_t *p = container_of(obj, rt_proc_t, wakeable);
+   *verilog = p->verilog;
+   return p->create_seq;
+}
+
+int64_t model_fused_proc_key(ident_t name)
+{
+   // Also called on island worker threads which have no current model
+   hash_t *keys = load_acquire(&fused_keys);
+   if (keys == NULL)
+      return -1;
+
+   void *key = hash_get(keys, name);
+   return key == NULL ? -1 : (uintptr_t)key;
 }
 
 rt_scope_t *get_active_scope(rt_model_t *m)
@@ -943,6 +994,12 @@ static void sv_poll_free(void);
 
 void model_free(rt_model_t *m)
 {
+   rorder_disable();
+   if (fused_keys != NULL) {
+      hash_free(fused_keys);
+      fused_keys = NULL;
+   }
+
    sv_poll_free();
    for (rt_mixed_bridge_t *b = m->mixed_bridges, *tmp; b; b = tmp) {
       tmp = b->next;
@@ -1356,7 +1413,7 @@ static void deltaq_insert_proc(rt_model_t *m, uint64_t delta, rt_proc_t *proc)
    if (delta == 0) {
       set_pending(&proc->wakeable);
       deferq_do(&m->procq, async_run_process, proc);
-      m->next_is_delta = true;
+      m->quiet.next_is_delta = true;
    }
    else {
       assert(!proc->wakeable.delayed);
@@ -1376,7 +1433,7 @@ static void deltaq_insert_driver(rt_model_t *m, uint64_t delta,
 {
    if (delta == 0) {
       deferq_do(&m->driverq, async_update_driver, source);
-      m->next_is_delta = true;
+      m->quiet.next_is_delta = true;
    }
    else {
       void *e = tag_pointer(source, EVENT_DRIVER);
@@ -1389,7 +1446,7 @@ static void deltaq_insert_pseudo_source(rt_model_t *m, uint64_t delta,
 {
    if (delta == 0) {
       deferq_do(&m->driverq, async_pseudo_source, src);
-      m->next_is_delta = true;
+      m->quiet.next_is_delta = true;
    }
    else {
       void *e = tag_pointer(src, nonblock ? EVENT_NONBLOCK : EVENT_PSEUDO);
@@ -2013,6 +2070,11 @@ static void run_process_inner(rt_model_t *m, rt_proc_t *proc)
    if (unlikely(sv_unique_pending > 0))
       sv_unique_flush_proc(proc);
 
+   // The output of a Verilog process may depend on what another one
+   // wrote before it in the same step: written now, it keeps its order
+   if (unlikely(rorder_sv_pending > 0) && proc->verilog)
+      rorder_flush_window();
+
    model_thread_t *thread = model_thread(m);
    assert(thread->tlab != NULL);
    assert(thread->tlab->alloc == 0);
@@ -2072,7 +2134,7 @@ static void run_process_inner(rt_model_t *m, rt_proc_t *proc)
       TRACE("claiming TLAB for private use (used %u/%u)",
             thread->tlab->alloc, thread->tlab->limit);
       proc->tlab = thread->tlab;
-      thread->tlab = tlab_acquire(m->jit);
+      thread->tlab = model_tlab_acquire(m);
    }
    else if (proc->tlab == NULL)
       tlab_reset(thread->tlab);   // All data inside the TLAB is dead
@@ -2105,15 +2167,33 @@ static void run_process(rt_model_t *m, rt_proc_t *proc)
    MTP_LEAVE(prev);
 }
 
-static bool scope_precedes(rt_scope_t *child, rt_proc_t *proc)
+static bool tree_precedes(tree_t a, tree_t b)
 {
-   const loc_t *cl = tree_loc(child->where), *pl = tree_loc(proc->where);
-   if (loc_invalid_p(cl) || loc_invalid_p(pl) || cl->file_ref != pl->file_ref)
+   const loc_t *al = tree_loc(a), *bl = tree_loc(b);
+   if (loc_invalid_p(al) || loc_invalid_p(bl) || al->file_ref != bl->file_ref)
       return true;
-   else if (cl->first_line != pl->first_line)
-      return cl->first_line < pl->first_line;
+   else if (al->first_line != bl->first_line)
+      return al->first_line < bl->first_line;
    else
-      return cl->first_column <= pl->first_column;   // Same place: a macro
+      return al->first_column <= bl->first_column;   // Same place: a macro
+}
+
+static void reset_fused_process(rt_model_t *m, rt_scope_t *s, tree_t t)
+{
+   // A process fused into an RTL island takes its place in the start
+   // order, which orders the output of processes (see rorder.c), under
+   // the name the stack trace of a report in the island gives it
+
+   LOCAL_TEXT_BUF tb = tb_new();
+   get_path_name(s, tb);
+   tb_append(tb, ':');
+   tb_istr(tb, ident_downcase(tree_ident(t)));
+
+   if (fused_keys == NULL)
+      store_release(&fused_keys, hash_new(64));
+
+   const uintptr_t key = ++(m->proc_seq);
+   hash_put(fused_keys, ident_new(tb_get(tb)), (void *)key);
 }
 
 static void reset_scope(rt_model_t *m, rt_scope_t *s)
@@ -2122,19 +2202,50 @@ static void reset_scope(rt_model_t *m, rt_scope_t *s)
    // text, those of an instance or a generate block at the place where it
    // is declared.  IEEE 1800-2017 4.7 leaves this order unspecified
 
+   tree_t *fused LOCAL = NULL;
+   int nfused = 0, fi = 0;
+   if (m->has_fused && s->kind == SCOPE_INSTANCE) {
+      const int nstmts = tree_stmts(s->where);
+      for (int i = 0; i < nstmts; i++) {
+         tree_t t = tree_stmt(s->where, i);
+         if (tree_kind(t) != T_PROCESS)
+            continue;
+         else if (!jit_is_fused_proc(m->jit, ident_prefix(s->name,
+                                                          tree_ident(t), '.')))
+            continue;
+         if (fused == NULL)
+            fused = xmalloc_array(nstmts, sizeof(tree_t));
+         fused[nfused++] = t;
+      }
+   }
+
    int pi = 0, ci = 0;
-   while (pi < s->procs.count && ci < s->children.count) {
-      if (scope_precedes(s->children.items[ci], s->procs.items[pi]))
+   for (;;) {
+      // The next process in declaration order, fused or not
+      tree_t next = NULL;
+      bool is_fused = false;
+      if (fi < nfused && (pi == s->procs.count
+                          || tree_precedes(fused[fi],
+                                           s->procs.items[pi]->where))) {
+         next = fused[fi];
+         is_fused = true;
+      }
+      else if (pi < s->procs.count)
+         next = s->procs.items[pi]->where;
+      else
+         break;
+
+      if (ci < s->children.count
+          && tree_precedes(s->children.items[ci]->where, next))
          reset_scope(m, s->children.items[ci++]);
+      else if (is_fused)
+         reset_fused_process(m, s, fused[fi++]);
       else
          reset_process(m, s->procs.items[pi++]);
    }
 
    for (; ci < s->children.count; ci++)
       reset_scope(m, s->children.items[ci]);
-
-   for (; pi < s->procs.count; pi++)
-      reset_process(m, s->procs.items[pi]);
 
    for (int i = 0; i < s->properties.count; i++)
       reset_property(m, s->properties.items[i]);
@@ -3623,8 +3734,10 @@ static void create_processes(rt_model_t *m, rt_scope_t *s)
          {
             ident_t name = tree_ident(t);
             ident_t sym = ident_prefix(sym_prefix, name, '.');
-            if (jit_is_fused_proc(m->jit, ident_prefix(s->name, name, '.')))
+            if (jit_is_fused_proc(m->jit, ident_prefix(s->name, name, '.'))) {
+               m->has_fused = true;
                break;
+            }
 
             rt_proc_t *p = xcalloc(sizeof(rt_proc_t));
             p->where     = t;
@@ -3686,7 +3799,10 @@ void model_reset(rt_model_t *m)
    m->stop_delta = opt_get_int(OPT_STOP_DELTA);
    m->shuffle    = opt_get_int(OPT_SHUFFLE_PROCS);
 
+   rorder_enable(opt_get_int(OPT_REPORT_ORDER));
+
    __trace_on = opt_get_int(OPT_RT_TRACE);
+   sync_quiet(m);
 
    m->sv_poll_mem_dirty = true;
    m->sv_poll_susp_dirty = false;
@@ -3704,8 +3820,10 @@ void model_reset(rt_model_t *m)
    m->sva_batch_tmp.count = 0;
    reset_scope(m, m->root);
 
-   if (m->force_stop)
+   if (m->force_stop) {
+      rorder_window_end();
       return;   // Error in intialisation
+   }
 
    m->mt_sva_enabled = (opt_get_int(OPT_SIM_THREADS) > 1);
 
@@ -3717,7 +3835,7 @@ void model_reset(rt_model_t *m)
    TRACE("calculate initial signal values");
 
    model_thread_t *thread = model_thread(m);
-   thread->tlab = tlab_acquire(m->jit);
+   thread->tlab = model_tlab_acquire(m);
 
    // The signals in the model are updated as follows in an order such
    // that if a given signal R depends upon the current value of another
@@ -3798,6 +3916,8 @@ void model_reset(rt_model_t *m)
       m->in_reset = false;
       rt_island_mark_sv_reset_edges(m->islands);
    }
+
+   rorder_window_end();
 
    run_callbacks(m, END_OF_INITIALISATION);
 }
@@ -4219,26 +4339,26 @@ static void sched_driver(rt_model_t *m, rt_nexus_t *n, uint64_t after,
       rt_source_t *d0 = &(signal->nexus.sources);
 
       if (d->fastqueued)
-         assert(m->next_is_delta);
+         assert(m->quiet.next_is_delta);
       else if ((signal->shared.flags & NET_F_FAST_DRIVER) && d0->sigqueued) {
-         assert(m->next_is_delta);
+         assert(m->quiet.next_is_delta);
          d->fastqueued = 1;
       }
       else if (!will_observe_active(n, value, w)) {
-         m->next_is_delta = true;
+         m->quiet.next_is_delta = true;
          d->was_active = (n->active_delta == m->iteration);
          n->active_delta = m->iteration + 1;
          return;
       }
       else if (signal->shared.flags & NET_F_FAST_DRIVER) {
          deferq_do(&m->driverq, async_fast_all_drivers, signal);
-         m->next_is_delta = true;
+         m->quiet.next_is_delta = true;
          d0->sigqueued = 1;
          d->fastqueued = 1;
       }
       else {
          deferq_do(&m->driverq, async_fast_driver, d);
-         m->next_is_delta = true;
+         m->quiet.next_is_delta = true;
          d->fastqueued = 1;
       }
 
@@ -4469,7 +4589,7 @@ static void procq_do(rt_model_t *m, rt_wakeable_t *obj, defer_fn_t fn,
    }
    else {
       deferq_do(&m->procq, fn, arg);
-      m->next_is_delta |= m->blocking_update;
+      m->quiet.next_is_delta |= m->blocking_update;
    }
 
    set_pending(obj);
@@ -4500,7 +4620,7 @@ static void wakeup_one(rt_model_t *m, rt_wakeable_t *obj)
          // run it with the signal updates in the next delta cycle
          deferq_do(&m->driverq, async_run_process, proc);
          set_pending(obj);
-         m->next_is_delta = true;
+         m->quiet.next_is_delta = true;
       }
       else
          procq_do(m, obj, async_run_process, proc);
@@ -5317,7 +5437,7 @@ static void fire_init_events(rt_model_t *m)
 
          if (known) {
             notify_event(m, n);
-            m->next_is_delta = true;
+            m->quiet.next_is_delta = true;
          }
          continue;
       }
@@ -5337,7 +5457,7 @@ static void fire_init_events(rt_model_t *m)
 
          if (known) {
             notify_event(m, n);
-            m->next_is_delta = true;
+            m->quiet.next_is_delta = true;
          }
       }
    }
@@ -5432,14 +5552,14 @@ static void model_cycle_body(rt_model_t *m)
 {
    // Simulation cycle is described in LRM 93 section 12.6.4
 
-   const bool is_delta_cycle = m->next_is_delta;
-   m->next_is_delta = false;
+   const bool is_delta_cycle = m->quiet.next_is_delta;
+   m->quiet.next_is_delta = false;
 
    if (is_delta_cycle)
-      m->iteration = m->iteration + 1;
+      m->quiet.iteration = m->iteration = m->iteration + 1;
    else {
-      m->now = heap_min_key(m->eventq_heap);
-      m->iteration = 0;
+      m->quiet.now = m->now = heap_min_key(m->eventq_heap);
+      m->quiet.iteration = m->iteration = 0;
       if (unlikely(m->sva_mt_skip > 0))
          m->sva_mt_skip--;
    }
@@ -5564,6 +5684,7 @@ static void model_cycle_body(rt_model_t *m)
                                                >= (uint64_t)m->stop_delta)) {
          if (m->iteration < (int)m->stop_delta)
             m->iteration = m->stop_delta;
+         sync_quiet(m);
          reached_iteration_limit(m);
          m->reschedq.count = 0;
          break;
@@ -5637,8 +5758,10 @@ static void model_cycle_body(rt_model_t *m)
       }
       if (rt_island_has_dirty(m->islands) || heap_size(m->driving_heap) > 0
           || heap_size(m->effective_heap) > 0)
-         m->next_is_delta = true;
+         m->quiet.next_is_delta = true;
    }
+
+   rorder_window_end();
 
    run_callbacks(m, END_OF_PROCESSES);
 
@@ -5647,7 +5770,7 @@ static void model_cycle_body(rt_model_t *m)
 
    // Verilog scheduling regions
 
-   if (m->next_is_delta)
+   if (m->quiet.next_is_delta)
       goto next_delta;
 
    if (unlikely(m->inactiveq.count > 0)) {
@@ -5658,9 +5781,10 @@ static void model_cycle_body(rt_model_t *m)
       if (unlikely(m->sva_batch.count > 0))
          model_flush_sva_batch(m);
       (void)mtp_enter(MTP_OTHER);
+      rorder_window_end();
    }
 
-   if (m->next_is_delta)
+   if (m->quiet.next_is_delta)
       goto next_delta;
 
    if (unlikely(m->nonblockq.count > 0 || m->nb_packed_q.count > 0
@@ -5681,7 +5805,7 @@ static void model_cycle_body(rt_model_t *m)
             deferq_run(m, &m->nonblockq);
          }
          if (rt_island_has_dirty(m->islands))
-            m->next_is_delta = true;
+            m->quiet.next_is_delta = true;
       }
       (void)mtp_enter(MTP_OTHER);
       sv_procs_run++;   // May have changed state a poller depends on
@@ -5689,24 +5813,26 @@ static void model_cycle_body(rt_model_t *m)
       // A net with several sources updates its driving value in the
       // next delta cycle
       if (heap_size(m->driving_heap) > 0)
-         m->next_is_delta = true;
+         m->quiet.next_is_delta = true;
+
+      rorder_window_end();
    }
 
-   if (!m->next_is_delta && unlikely(m->reactiveq.count > 0)) {
+   if (!m->quiet.next_is_delta && unlikely(m->reactiveq.count > 0)) {
       // Program processes run once nothing else is scheduled in the time
       // step, in the order they began waiting, and may then schedule more
       // events
       TRACE("begin reactive region");
       reactive_sort(&m->reactiveq);
       deferq_swap(&m->procq, &m->reactiveq);
-      m->next_is_delta = true;
+      m->quiet.next_is_delta = true;
    }
 
  next_delta:
    if (unlikely(m->has_verilog))
       sv_poll_end_cycle(m);
 
-   if (!m->next_is_delta) {
+   if (!m->quiet.next_is_delta) {
       if (m->samplers != NULL) {
          (void)mtp_enter(MTP_PHASECB);
          run_samplers(m);
@@ -5716,8 +5842,9 @@ static void model_cycle_body(rt_model_t *m)
       run_callbacks(m, LAST_KNOWN_DELTA_CYCLE);
    }
 
-   if (!m->next_is_delta) {
+   if (!m->quiet.next_is_delta) {
       m->can_create_delta = false;
+      sync_quiet(m);
 
       // Run all postponed processes and event callbacks
       (void)mtp_enter(MTP_TASKQ);
@@ -5725,9 +5852,12 @@ static void model_cycle_body(rt_model_t *m)
       deferq_run_procs(m, &m->latepostq);
       (void)mtp_enter(MTP_OTHER);
 
+      rorder_window_end();
+
       run_callbacks(m, END_TIME_STEP);
 
       m->can_create_delta = true;
+      sync_quiet(m);
    }
    else if (!m->force_stop && m->stop_delta > 0 && m->iteration == m->stop_delta)
       reached_iteration_limit(m);
@@ -5737,12 +5867,14 @@ static void model_cycle(rt_model_t *m)
 {
    if (likely(!mtp.on)) {
       model_cycle_body(m);
+      rorder_window_end();
       return;
    }
 
-   const bool is_delta = m->next_is_delta;
+   const bool is_delta = m->quiet.next_is_delta;
    mtp_cycle_begin();
    model_cycle_body(m);
+   rorder_window_end();
    mtp_cycle_end(is_delta);
 }
 
@@ -5754,7 +5886,7 @@ static bool should_stop_now(rt_model_t *m, uint64_t stop_time)
       jit_check_interrupt(m->jit);
       return true;
    }
-   else if (m->next_is_delta)
+   else if (m->quiet.next_is_delta)
       return false;
    else if (heap_size(m->eventq_heap) == 0)
       return true;
@@ -5827,10 +5959,13 @@ void model_run(rt_model_t *m, uint64_t stop_time)
       // Final procedures run once at the end of simulation
       if (!m->force_stop && stop_time != TIME_HIGH && m->now < stop_time)
          m->now = stop_time;
+      sync_quiet(m);
 
       m->nfinal_procs = 0;
       run_final_procs(m, m->root);
    }
+
+   rorder_window_end();
 
    run_callbacks(m, END_OF_SIMULATION);
 
@@ -9007,7 +9142,7 @@ void x_sched_inactive(void)
 
    set_pending(&proc->wakeable);
    deferq_do(&m->inactiveq, async_run_process, proc);
-   m->next_is_delta = true;
+   m->quiet.next_is_delta = true;
 }
 
 int64_t x_sv_sva_flushing(void)
@@ -9087,7 +9222,7 @@ static bool quiet_slices(rt_model_t *m, rt_signal_t *s, uint32_t offset,
       left -= n->width;
    }
 
-   m->next_is_delta = true;
+   m->quiet.next_is_delta = true;
    return true;
 }
 
@@ -9103,9 +9238,14 @@ static inline bool sched_waveform_quiet(sig_shared_t *ss, uint32_t offset,
    rt_signal_t *s = container_of(ss, rt_signal_t, shared);
    rt_model_t *m = __model;
 
+   // The inline test in generated code reads copies of these
+   assert(m->quiet.now == m->now);
+   assert(m->quiet.iteration == m->iteration);
+   assert(m->quiet.enabled == (m->can_create_delta && !__trace_on));
+
    if (unlikely(__trace_on) || unlikely(!m->can_create_delta))
       return false;   // Postponed processes go through check_postponed
-   else if (unlikely(++m->quiet_count == 0))
+   else if (unlikely(++m->quiet.budget == 0))
       return false;   // The full path checks for interrupts now and then
    else if (ss->flags & SIG_F_PACKED)
       return false;
@@ -9119,7 +9259,7 @@ static inline bool sched_waveform_quiet(sig_shared_t *ss, uint32_t offset,
 
       RT_LOCK(s->lock);
       quiet_transaction(m, n);
-      m->next_is_delta = true;
+      m->quiet.next_is_delta = true;
       return true;
    }
    else
@@ -9975,13 +10115,13 @@ void x_put_driver(sig_shared_t *ss, uint32_t offset, int32_t count,
 
       // The effective value is updated in the next delta cycle
       if (n->flags & NET_F_EFFECTIVE)
-         m->next_is_delta = true;
+         m->quiet.next_is_delta = true;
 
       for (rt_source_t *o = n->outputs; o; o = o->chain_output) {
          switch (o->tag) {
          case SOURCE_PORT:
             defer_driving_update(m, o->u.port.output);
-            m->next_is_delta = true;
+            m->quiet.next_is_delta = true;
             break;
          case SOURCE_ACTIVE:
             wakeup_one(m, o->u.wakeable);
@@ -10823,7 +10963,7 @@ void rt_island_force_unowned_bytes(rt_model_t *m, rt_signal_t *s,
 void rt_island_request_delta(rt_model_t *m)
 {
    if (m != NULL && m->can_create_delta)
-      m->next_is_delta = true;
+      m->quiet.next_is_delta = true;
 }
 
 jit_t *rt_island_model_jit(rt_model_t *m)
@@ -11416,7 +11556,7 @@ static void async_spawn_process(rt_model_t *m, void *arg)
 
    // Runs until it first blocks before any other process
    run_process(m, proc);
-   m->next_is_delta = true;
+   m->quiet.next_is_delta = true;
 
    // The state of the process now keeps the frame alive
    mptr_free(m->mspace, &task->frame);
@@ -11974,7 +12114,7 @@ void x_sv_spawn(const ffi_closure_t *closure, void *group, int64_t label)
 
    set_pending(&p->wakeable);
    deferq_do(&m->spawnq, async_spawn_process, task);
-   m->next_is_delta = true;
+   m->quiet.next_is_delta = true;
 }
 
 void *x_function_trigger(jit_handle_t handle, unsigned nargs,

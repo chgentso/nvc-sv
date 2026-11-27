@@ -617,9 +617,38 @@ int nvc_fprintf(ostream_t *os, const char *fmt, ...)
    return nchars;
 }
 
+static output_capture_fn_t output_capture = NULL;
+static output_urgent_fn_t  output_urgent = NULL;
+
+void nvc_set_output_capture(output_capture_fn_t capture,
+                            output_urgent_fn_t urgent)
+{
+   output_capture = capture;
+   output_urgent = urgent;
+}
+
+void nvc_output_urgent_begin(void)
+{
+   // Write what the capture function holds and write what follows as it
+   // happens, for something that must appear after it such as a fatal
+   // error
+   if (output_urgent != NULL)
+      (*output_urgent)(true);
+}
+
+void nvc_output_urgent_end(void)
+{
+   if (output_urgent != NULL)
+      (*output_urgent)(false);
+}
+
 void stdio_ostream_write(const char *buf, size_t len, void *ctx)
 {
    FILE *f = ctx;
+   if (unlikely(output_capture != NULL) && (f == stdout || f == stderr)
+       && (*output_capture)(f, buf, len))
+      return;
+
    fwrite(buf, len, 1, f);
 }
 

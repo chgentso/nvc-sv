@@ -25,6 +25,7 @@
 #include "object.h"
 #include "option.h"
 #include "rt/defs.h"
+#include "rt/structs.h"
 #include "thread.h"
 
 #include <assert.h>
@@ -2904,6 +2905,227 @@ static void cgen_ir(llvm_obj_t *obj, cgen_block_t *cgb, jit_ir_t *ir)
    }
 }
 
+
+static LLVMValueRef cgen_quiet_ptr(llvm_obj_t *obj, LLVMValueRef base,
+                                   int offset, LLVMTypeRef type)
+{
+   LLVMValueRef idx[] = { llvm_intptr(obj, offset) };
+   LLVMValueRef ptr = LLVMBuildInBoundsGEP2(obj->builder,
+                                            obj->types[LLVM_INT8],
+                                            base, idx, 1, "");
+#ifndef LLVM_HAS_OPAQUE_POINTERS
+   ptr = LLVMBuildPointerCast(obj->builder, ptr, LLVMPointerType(type, 0), "");
+#endif
+   return ptr;
+}
+
+static LLVMValueRef cgen_quiet_load(llvm_obj_t *obj, LLVMValueRef base,
+                                    int offset, LLVMTypeRef type,
+                                    unsigned align, const char *name)
+{
+   LLVMValueRef ptr = cgen_quiet_ptr(obj, base, offset, type);
+   LLVMValueRef load = LLVMBuildLoad2(obj->builder, type, ptr, name);
+   LLVMSetAlignment(load, align);
+   return load;
+}
+
+static void cgen_quiet_store(llvm_obj_t *obj, LLVMValueRef value,
+                             LLVMValueRef base, int offset, unsigned align)
+{
+   LLVMValueRef ptr = cgen_quiet_ptr(obj, base, offset, LLVMTypeOf(value));
+   LLVMValueRef store = LLVMBuildStore(obj->builder, value, ptr);
+   LLVMSetAlignment(store, align);
+}
+
+#define QUIET_MAX_BYTES 128
+
+static bool cgen_quiet_waveform(llvm_obj_t *obj, cgen_block_t *cgb,
+                                jit_ir_t *ir, LLVMValueRef shared, LLVMValueRef offset,
+                                LLVMValueRef value, LLVMBasicBlockRef *slow,
+                                LLVMBasicBlockRef *done)
+{
+   // Inline test for a zero-delay transaction that does not change the
+   // value of a fast driver of the whole first nexus: does the same as
+   // sched_waveform_quiet and branches to the slow block for the full
+   // path through the exit in every other case
+
+   if (RT_MULTITHREADED)
+      return false;
+   else if (ir[1].arg2.kind == JIT_VALUE_INT64 && ir[1].arg2.int64 != 0)
+      return false;   // Never the start of the first nexus
+   else if (ir[2].arg2.kind != JIT_VALUE_INT64)
+      return false;   // Size not known
+   else if (ir[5].arg2.kind != JIT_VALUE_INT64 || ir[5].arg2.int64 <= 0)
+      return false;   // Element size not known
+
+   const bool scalar =
+      ir[4].arg2.kind == JIT_VALUE_INT64 && ir[4].arg2.int64 == 1;
+   const int64_t count = ir[2].arg2.int64;
+   const int64_t scale = ir[5].arg2.int64;
+   const int64_t bytes = count * scale;
+
+   if (count < 1 || scale > UINT8_MAX || bytes > QUIET_MAX_BYTES)
+      return false;
+   else if (scalar && (count != 1 || bytes > sizeof(uint64_t)))
+      return false;
+
+   LLVMValueRef fn = cgb->func->llvmfn;
+   LLVMBasicBlockRef check_bb = llvm_append_block(obj, fn, "quiet_check");
+   LLVMBasicBlockRef update_bb = llvm_append_block(obj, fn, "quiet_update");
+   *slow = llvm_append_block(obj, fn, "quiet_slow");
+   *done = llvm_append_block(obj, fn, "quiet_done");
+
+   LLVMTypeRef i16_type = obj->types[LLVM_INT16];
+   LLVMTypeRef i32_type = obj->types[LLVM_INT32];
+   LLVMTypeRef i64_type = obj->types[LLVM_INT64];
+   LLVMTypeRef data_type = LLVMIntTypeInContext(obj->context, bytes * 8);
+
+   // Model state from the TLAB, NULL outside processes
+   LLVMValueRef qptr = LLVMBuildStructGEP2(obj->builder,
+                                           obj->types[LLVM_TLAB],
+                                           cgb->func->tlab, 4, "");
+   LLVMValueRef quiet = llvm_load_ptr(obj, qptr, "quiet");
+   LLVMValueRef cond = LLVMBuildIsNotNull(obj->builder, quiet, "");
+
+   // One fast driver, no effective value, the transaction covers the
+   // whole first nexus and the element size is as expected
+   const uint64_t nexus_mask = UINT64_C(0xffffffff)
+      | ((uint64_t)(NET_F_FAST_DRIVER | NET_F_EFFECTIVE) << 32)
+      | (UINT64_C(0xff) << 40);
+   const uint64_t nexus_want = (uint64_t)count
+      | ((uint64_t)NET_F_FAST_DRIVER << 32)
+      | ((uint64_t)scale << 40);
+   LLVMValueRef nword = cgen_quiet_load(obj, shared, QUIET_WIDTH_OFFSET,
+                                        i64_type, 4, "nword");
+   LLVMValueRef nmasked = LLVMBuildAnd(obj->builder, nword,
+                                       llvm_int64(obj, nexus_mask), "");
+   cond = LLVMBuildAnd(obj->builder, cond,
+                       LLVMBuildICmp(obj->builder, LLVMIntEQ, nmasked,
+                                     llvm_int64(obj, nexus_want), ""), "");
+
+   // Not a packed signal
+   LLVMValueRef sflags = cgen_quiet_load(obj, shared,
+                                         offsetof(sig_shared_t, flags),
+                                         i32_type, 4, "sflags");
+   LLVMValueRef packed = LLVMBuildAnd(obj->builder, sflags,
+                                      llvm_int32(obj, SIG_F_PACKED), "");
+   cond = LLVMBuildAnd(obj->builder, cond,
+                       LLVMBuildICmp(obj->builder, LLVMIntEQ, packed,
+                                     llvm_int32(obj, 0), ""), "");
+
+   // No update of this driver or of all drivers already scheduled
+   LLVMValueRef dflags = cgen_quiet_load(obj, shared, QUIET_SFLAGS_OFFSET,
+                                         i32_type, 4, "dflags");
+   LLVMValueRef busy =
+      LLVMBuildAnd(obj->builder, dflags,
+                   llvm_int32(obj, quiet_source_mask(QUIET_FLAG_BUSY)), "");
+   cond = LLVMBuildAnd(obj->builder, cond,
+                       LLVMBuildICmp(obj->builder, LLVMIntEQ, busy,
+                                     llvm_int32(obj, 0), ""), "");
+
+   if (ir[1].arg2.kind != JIT_VALUE_INT64) {
+      LLVMValueRef zero = LLVMBuildICmp(obj->builder, LLVMIntEQ, offset,
+                                        llvm_int32(obj, 0), "");
+      cond = LLVMBuildAnd(obj->builder, cond, zero, "");
+   }
+
+   LLVMBuildCondBr(obj->builder, cond, check_bb, *slow);
+
+   LLVMPositionBuilderAtEnd(obj->builder, check_bb);
+
+   // Delta cycles can be created, no tracing, and not the turn of the
+   // full path which checks for interrupts
+   LLVMValueRef enabled = cgen_quiet_load(obj, quiet,
+                                          offsetof(rt_quiet_t, enabled),
+                                          obj->types[LLVM_INT8], 1, "");
+   LLVMValueRef budget = cgen_quiet_load(obj, quiet,
+                                         offsetof(rt_quiet_t, budget),
+                                         i16_type, 2, "budget");
+   LLVMValueRef next_budget = LLVMBuildAdd(obj->builder, budget,
+                                           LLVMConstInt(i16_type, 1, false),
+                                           "");
+   LLVMValueRef cond2 =
+      LLVMBuildAnd(obj->builder,
+                   LLVMBuildICmp(obj->builder, LLVMIntNE, enabled,
+                                 llvm_int8(obj, 0), ""),
+                   LLVMBuildICmp(obj->builder, LLVMIntNE, next_budget,
+                                 LLVMConstInt(i16_type, 0, false), ""), "");
+
+   // The new value equals the value of the driver
+   LLVMValueRef dval;
+   if (bytes <= sizeof(rt_value_t))
+      dval = cgen_quiet_load(obj, shared, QUIET_VALUE_OFFSET, data_type,
+                             1, "dval");
+   else {
+      LLVMValueRef vptr = cgen_quiet_ptr(obj, shared, QUIET_VALUE_OFFSET,
+                                         obj->types[LLVM_PTR]);
+      LLVMValueRef ext = llvm_load_ptr(obj, vptr, "ext");
+#ifndef LLVM_HAS_OPAQUE_POINTERS
+      ext = LLVMBuildPointerCast(obj->builder, ext,
+                                 LLVMPointerType(data_type, 0), "");
+#endif
+      dval = LLVMBuildLoad2(obj->builder, data_type, ext, "dval");
+      LLVMSetAlignment(dval, 1);
+   }
+
+   LLVMValueRef nval;
+   if (scalar)
+      nval = LLVMBuildTrunc(obj->builder, value, data_type, "");
+   else {
+      LLVMValueRef ptr = LLVMBuildIntToPtr(obj->builder, value,
+                                           LLVMPointerType(data_type, 0), "");
+      nval = LLVMBuildLoad2(obj->builder, data_type, ptr, "nval");
+      LLVMSetAlignment(nval, 1);
+   }
+
+   cond2 = LLVMBuildAnd(obj->builder, cond2,
+                        LLVMBuildICmp(obj->builder, LLVMIntEQ, dval, nval, ""),
+                        "");
+   LLVMBuildCondBr(obj->builder, cond2, update_bb, *slow);
+
+   LLVMPositionBuilderAtEnd(obj->builder, update_bb);
+
+   // Same as quiet_transaction: the driver is active in the next delta
+   // cycle and the next cycle is a delta cycle
+   cgen_quiet_store(obj, next_budget, quiet, offsetof(rt_quiet_t, budget), 2);
+
+   LLVMValueRef now = cgen_quiet_load(obj, quiet, offsetof(rt_quiet_t, now),
+                                      i64_type, 8, "now");
+   cgen_quiet_store(obj, now, shared, QUIET_WHEN_OFFSET, 8);
+
+   LLVMValueRef iteration = cgen_quiet_load(obj, quiet,
+                                            offsetof(rt_quiet_t, iteration),
+                                            i32_type, 4, "iteration");
+   LLVMValueRef active = cgen_quiet_load(obj, shared, QUIET_ACTIVE_OFFSET,
+                                         i16_type, 2, "active");
+   LLVMValueRef was_active =
+      LLVMBuildICmp(obj->builder, LLVMIntEQ,
+                    LLVMBuildZExt(obj->builder, active, i32_type, ""),
+                    iteration, "");
+   const uint32_t was_mask = quiet_source_mask(QUIET_FLAG_WAS_ACTIVE);
+   LLVMValueRef dflags2 =
+      LLVMBuildOr(obj->builder,
+                  LLVMBuildAnd(obj->builder, dflags,
+                               llvm_int32(obj, ~was_mask), ""),
+                  LLVMBuildSelect(obj->builder, was_active,
+                                  llvm_int32(obj, was_mask),
+                                  llvm_int32(obj, 0), ""), "");
+   cgen_quiet_store(obj, dflags2, shared, QUIET_SFLAGS_OFFSET, 4);
+
+   LLVMValueRef next_iter =
+      LLVMBuildAdd(obj->builder, iteration, llvm_int32(obj, 1), "");
+   cgen_quiet_store(obj, LLVMBuildTrunc(obj->builder, next_iter, i16_type, ""),
+                    shared, QUIET_ACTIVE_OFFSET, 2);
+
+   cgen_quiet_store(obj, llvm_int8(obj, 1), quiet,
+                    offsetof(rt_quiet_t, next_is_delta), 1);
+
+   LLVMBuildBr(obj->builder, *done);
+
+   LLVMPositionBuilderAtEnd(obj->builder, *slow);
+   return true;
+}
+
 static int cgen_fuse_ir(llvm_obj_t *obj, cgen_block_t *cgb, jit_ir_t *ir)
 {
    if (ir->op != J_SEND)
@@ -2938,11 +3160,15 @@ static int cgen_fuse_ir(llvm_obj_t *obj, cgen_block_t *cgb, jit_ir_t *ir)
 
       return nsend;
    }
-   else if (exit->arg1.exit == JIT_EXIT_SCHED_ZERO && nsend == 5) {
+   else if (exit->arg1.exit == JIT_EXIT_SCHED_ZERO && nsend == 6) {
       LLVMValueRef shared = cgen_coerce_value(obj, cgb, ir[0].arg2, LLVM_PTR);
       LLVMValueRef offset = cgen_coerce_value(obj, cgb, ir[1].arg2, LLVM_INT32);
       LLVMValueRef count  = cgen_coerce_value(obj, cgb, ir[2].arg2, LLVM_INT32);
       LLVMValueRef value  = cgen_coerce_value(obj, cgb, ir[3].arg2, LLVM_INT64);
+
+      LLVMBasicBlockRef slow_bb = NULL, done_bb = NULL;
+      cgen_quiet_waveform(obj, cgb, ir, shared, offset, value,
+                          &slow_bb, &done_bb);
 
       cgen_sync_irpos(obj, cgb, exit);
 
@@ -2959,6 +3185,12 @@ static int cgen_fuse_ir(llvm_obj_t *obj, cgen_block_t *cgb, jit_ir_t *ir)
             shared, offset, count, value,
          };
          llvm_call_fn(obj, LLVM_SCHED_WAVEFORM_0, args, ARRAY_LEN(args));
+      }
+
+      if (done_bb != NULL) {
+         LLVMBuildBr(obj->builder, done_bb);
+         LLVMPositionBuilderAtEnd(obj->builder, done_bb);
+         cgb->exitbb = done_bb;
       }
 
       return nsend;

@@ -164,6 +164,19 @@ static int get_rtl_islands_env(void)
             "(expected off, module, or hier)", env);
 }
 
+static int get_report_order_env(void)
+{
+   // Values of report_order_t
+   const char *env = getenv("NVC_REPORT_ORDER");
+   if (env == NULL || *env == '\0' || strcasecmp(env, "stable") == 0)
+      return 1;
+   else if (strcasecmp(env, "immediate") == 0)
+      return 0;
+   else
+      fatal("invalid value '%s' for NVC_REPORT_ORDER "
+            "(expected stable or immediate)", env);
+}
+
 static int get_two_state_env(void)
 {
    const char *env = getenv("NVC_2STATE");
@@ -274,6 +287,7 @@ void set_default_options(void)
    opt_set_int(OPT_TWO_STATE, get_two_state_env());
    opt_set_int(OPT_ISLAND_SPEC, get_bool_env("NVC_ISLAND_SPEC", 0));
    opt_set_int(OPT_SIM_THREADS, get_sim_threads_env());
+   opt_set_int(OPT_REPORT_ORDER, get_report_order_env());
 }
 
 bool opt_black_box_allowed(const char *lib)

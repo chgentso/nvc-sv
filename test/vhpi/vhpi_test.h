@@ -73,6 +73,7 @@ void vhpi33_startup(void);
 void vhpi34_startup(void);
 void vhpi36_startup(void);
 void vhpi37_startup(void);
+void vhpi_rorder1_startup(void);
 void vhpi35_startup(void);
 void issue744_startup(void);
 void issue762_startup(void);

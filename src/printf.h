@@ -21,6 +21,7 @@
 #include "prim.h"
 
 #include <stdarg.h>
+#include <stdio.h>
 
 typedef void (*write_fn_t)(const char *buf, size_t len, void *ctx);
 
@@ -55,6 +56,16 @@ int ostream_putc(ostream_t *os, char ch);
 int ostream_puts(ostream_t *os, const char *str);
 
 void stdio_ostream_write(const char *buf, size_t len, void *ctx);
+
+// A capture function takes text written to stdout or stderr and returns
+// true if it keeps it to write later
+typedef bool (*output_capture_fn_t)(FILE *f, const char *buf, size_t len);
+typedef void (*output_urgent_fn_t)(bool begin);
+
+void nvc_set_output_capture(output_capture_fn_t capture,
+                            output_urgent_fn_t urgent);
+void nvc_output_urgent_begin(void);
+void nvc_output_urgent_end(void);
 
 ostream_t *nvc_stdout(void);
 ostream_t *nvc_stderr(void);

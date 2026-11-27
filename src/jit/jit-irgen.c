@@ -3719,7 +3719,24 @@ static void irgen_op_sched_waveform(jit_irgen_t *g, mir_value_t n)
       && after.kind == JIT_VALUE_INT64 && after.int64 == 0;
 
    if (zero_delay) {
+      // The element size lets the code generator compare with the driver
+      // value inline (see cgen_quiet_waveform)
+      mir_type_t type = mir_get_type(g->mu, mir_get_arg(g->mu, n, 0));
+      int scale = 0;   // Unknown
+      if (mir_get_class(g->mu, type) == MIR_TYPE_SIGNAL) {
+         mir_type_t elem = mir_get_base(g->mu, type);
+         switch (mir_get_class(g->mu, elem)) {
+         case MIR_TYPE_INT:
+         case MIR_TYPE_REAL:
+            scale = irgen_size_bytes(g, elem);
+            break;
+         default:
+            break;
+         }
+      }
+
       j_send(g, 4, scalar);
+      j_send(g, 5, jit_value_from_int64(scale));
 
       macro_exit(g, JIT_EXIT_SCHED_ZERO);
    }

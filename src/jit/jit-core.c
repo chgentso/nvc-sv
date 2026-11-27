@@ -720,6 +720,14 @@ static bool find_island_proc_loc(tree_t blk, const loc_t *loc, text_buf_t *tb)
    return true;
 }
 
+// The process named by the last stack trace of an RTL island function
+static __thread ident_t last_island_proc = NULL;
+
+ident_t jit_last_island_proc(void)
+{
+   return last_island_proc;
+}
+
 static void jit_emit_trace(diag_t *d, const loc_t *loc, object_t *enclosing,
                            const char *symbol)
 {
@@ -761,6 +769,7 @@ static void jit_emit_trace(diag_t *d, const loc_t *loc, object_t *enclosing,
                   tb_append(tb, *p == '.' ? ':' : tolower_iso88591(*p));
                find_island_proc_loc(tree, loc, tb);
                diag_trace(d, loc, "Process$$ %s", tb_get(tb));
+               last_island_proc = ident_new(tb_get(tb));
                break;
             }
          }
@@ -905,6 +914,8 @@ jit_stack_trace_t *jit_stack_trace(void)
 static void jit_diag_cb(diag_t *d, void *arg)
 {
    jit_t *j = arg;
+
+   last_island_proc = NULL;
 
    if (jit_thread_local()->state != JIT_RUNNING)
       return;
@@ -2087,6 +2098,7 @@ tlab_t *tlab_acquire(jit_t *j)
    lt->tlab.alloc = ALIGN_UP(data_off, sizeof(double)) - data_off;
    lt->tlab.limit = TLAB_SIZE - OVERRUN_MARGIN;
    lt->tlab.mem_dirty = 0;
+   lt->tlab.quiet = NULL;
 
    return &(lt->tlab);
 }

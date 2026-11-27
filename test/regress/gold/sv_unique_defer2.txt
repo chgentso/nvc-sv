@@ -1,0 +1,6 @@
+** Warning: 10ns+2: priority case violation: no case item matches and there is no default
+y=0 z=2
+** Warning: 20ns+2: unique case violation: no case item matches and there is no default
+q=x
+** Warning: 30ns+1: unique if violation: no condition matches and there is no else
+y=2 z=0

@@ -93,6 +93,8 @@ void model_run_island_init(rt_model_t *m, rt_scope_t *s, vcode_unit_t thunk);
 rt_model_t *get_model(void);
 rt_model_t *get_model_or_null(void);
 rt_proc_t *get_active_proc(void);
+int64_t model_output_key(bool *verilog);
+int64_t model_fused_proc_key(ident_t name);
 
 // Statement breakpoints: code generated with --debug-stmts calls the hook
 // before a statement on a line with a breakpoint runs

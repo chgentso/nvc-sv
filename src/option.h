@@ -96,6 +96,7 @@ typedef enum {
    OPT_TWO_STATE,
    OPT_ISLAND_SPEC,
    OPT_SIM_THREADS,
+   OPT_REPORT_ORDER,
 
    OPT_LAST_NAME
 } opt_name_t;
