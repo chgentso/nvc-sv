@@ -3451,7 +3451,12 @@ static void analyze_process(vhdl_island_ctx_t *ctx, tree_t proc, int stmt_idx,
                ok = false;
                reason = er;
             }
-            for (uint32_t i = 0; ok && i < evt.n_evt_sigs; i++) {
+            // A signal of the sensitivity list of a process that only
+            // calls functions that may warn, read only by a branch that is
+            // never taken, does not count as read: the island takes it in
+            // only if another process reads it (see vi_emit_report_guard)
+            for (uint32_t i = 0; ok && c.n_reports > 0
+                    && i < evt.n_evt_sigs; i++) {
                const unsigned before = c.reads.count;
                push_unique_u32(&c.reads, evt.evt_sigs[i]);
                if (c.reads.count > before)

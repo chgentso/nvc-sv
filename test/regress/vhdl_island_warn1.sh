@@ -3,9 +3,10 @@ set -xe
 # A combinational process that calls a function that may report a warning
 # (here the metavalue warnings of the numeric_std relational operators)
 # runs in an RTL island exactly when it would run unfused: not on an event
-# on a bit outside the slice of a signal it reads, but on every event on a
-# signal of its sensitivity list, even one that only a branch that is
-# never taken reads.  The output must be identical to --rtl-islands=off.
+# on a bit outside the slice of a signal it reads.  One that is sensitive to
+# a signal only a branch that is never taken reads runs on every event on
+# that signal: it is not fused unless its island has the signal anyway.
+# The output must be identical to --rtl-islands=off.
 
 cat >warn1.vhd <<'VHDL_EOF'
 library ieee;
@@ -24,7 +25,7 @@ architecture rtl of warn_dut is
     signal x : unsigned(3 downto 0);   -- Never driven: all 'U'
     signal b : unsigned(3 downto 0);
     signal c : unsigned(3 downto 0) := "0000";
-    signal y : std_logic;
+    signal y, z : std_logic;
 begin
     p_ff : process (clk) is
     begin
@@ -39,7 +40,8 @@ begin
                    else "1111";
 
     -- Sensitive to c, which only a branch that is never taken reads:
-    -- every event on c wakes it
+    -- every event on c wakes it (not fused: no other process of the
+    -- island reads c)
     p_dead : process (x, c) is
     begin
         if x = "0000" then
@@ -51,8 +53,20 @@ begin
         end if;
     end process;
 
+    -- Likewise with a, which other processes of the island read
+    p_dead2 : process (x, a) is
+    begin
+        if x = "0001" then
+            z <= '1';
+        elsif unsigned'("0011") >= unsigned'("1111") then
+            z <= a(0);
+        else
+            z <= '0';
+        end if;
+    end process;
+
     q <= b;
-    o <= y;
+    o <= y xor z;
 end architecture;
 
 library ieee;
@@ -75,12 +89,14 @@ VHDL_EOF
 
 nvc --std=2008 --work=w_off -a warn1.vhd
 nvc --std=2008 --work=w_off --rtl-islands=off -e warn_tb -r > off.log 2>&1
-test $(grep -c 'metavalue detected' off.log) -eq 6
+test $(grep -c 'metavalue detected' off.log) -eq 11
 
 nvc --std=2008 --work=w_b -a warn1.vhd
 NVC_DUMP_ISLANDS=1 nvc --std=2008 --work=w_b --rtl-islands=hier -e warn_tb \
     > b_dump.log
-grep -q 'WARN_TB.DUT islands=1 fused_procs=5/5' b_dump.log
+cat b_dump.log
+grep -q 'WARN_TB.DUT islands=1 fused_procs=3/6' b_dump.log
+grep -q 'P_DEAD reason=comb: process that may warn is sensitive to a signal outside its island' b_dump.log
 nvc --std=2008 --work=w_b -r warn_tb > b.log 2>&1
 nvc --std=2008 --work=w_b -r --no-island-fast warn_tb > bnf.log 2>&1
 NVC_ISLAND_ACT=0 nvc --std=2008 --work=w_b -r warn_tb > bna.log 2>&1

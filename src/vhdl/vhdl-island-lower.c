@@ -8815,6 +8815,14 @@ static bool vi_act_add_read(vi_lower_t *l, uint32_t idx)
 // the process reads is set.  The read set is the union of what the
 // analysis found and what the lowering of the body loaded; a process that
 // reads a signal without a change byte always runs.
+// A process that runs only when its sensitivity list changed, see
+// vi_emit_report_guard.  A Mode A variant has no metavalue warnings
+// (vhdl_island_new_a_variant keeps report processes out of it).
+static bool vi_proc_guarded(const vi_lower_t *l, const vhdl_iproc_t *p)
+{
+   return p->has_report || (p->has_warn && !l->two_state);
+}
+
 static void vi_emit_act_test(vi_lower_t *l, const vhdl_iproc_t *p,
                              mir_block_t body_bb, mir_block_t next_bb)
 {
@@ -8826,6 +8834,14 @@ static void vi_emit_act_test(vi_lower_t *l, const vhdl_iproc_t *p,
       always = !(isl->sigs[l->act_rd[i]].rt_flags & RT_ISIG_ACT);
    for (uint32_t i = 0; i < p->n_reads && !always; i++) {
       const vhdl_isl_sig_t *isig = vhdl_island_find_sig(isl, p->reads[i]);
+      always = isig == NULL
+         || !vi_act_add_read(l, (uint32_t)(isig - isl->sigs));
+   }
+   // The sensitivity list of a guarded process may name signals that it
+   // does not read (vi_emit_report_guard)
+   for (uint32_t i = 0; vi_proc_guarded(l, p) && i < p->n_evt_sigs && !always;
+        i++) {
+      const vhdl_isl_sig_t *isig = vhdl_island_find_sig(isl, p->evt_sigs[i]);
       always = isig == NULL
          || !vi_act_add_read(l, (uint32_t)(isig - isl->sigs));
    }
@@ -9075,6 +9091,13 @@ static bool vi_emit_report_guard(vi_lower_t *l, const vhdl_iproc_t *p,
    for (uint32_t i = 0; i < p->n_evt_sigs; i++) {
       const vhdl_isl_sig_t *isig = vhdl_island_find_sig(l->isl, p->evt_sigs[i]);
       const uint32_t nbytes = p->evt_copy_bytes[i];
+      if (isig == NULL && !p->has_report) {
+         // Read only by a branch that is never taken and by no other
+         // process of the island: the island does not see its events
+         l->reason = "comb: process that may warn is sensitive to a signal "
+            "outside its island";
+         return false;
+      }
       uint32_t src = 0;
       mir_value_t base = MIR_NULL_VALUE;
       if (isig != NULL)
@@ -9208,9 +9231,7 @@ static mir_unit_t *vi_build_comb_unit(mir_context_t *mc,
 
       mir_block_t test_bb = MIR_NULL_BLOCK, body_bb = MIR_NULL_BLOCK;
       mir_block_t next_bb = MIR_NULL_BLOCK;
-      // A Mode A variant has no metavalue warnings (vhdl_island_new_a_variant
-      // keeps report processes out of it)
-      const bool guard = p->has_report || (p->has_warn && !l.two_state);
+      const bool guard = vi_proc_guarded(&l, p);
       if (act || guard)
          next_bb = mir_add_block(mu);
       if (act) {
