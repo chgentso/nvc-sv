@@ -2580,7 +2580,7 @@ START_TEST(test_cache_binary_id)
    jit_t *j = jit_new(NULL, NULL);
    const char *text =
       "    RECV    R0, #0    \n"
-      "    ADD     R0, R0, #1\n"
+      "    ADD     R0, R0, #1    \n"
       "    SEND    #0, R0    \n"
       "    RET               \n";
    jit_handle_t h = jit_assemble(j, ident_new("BINID_FN"), text);
