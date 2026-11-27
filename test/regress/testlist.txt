@@ -3366,3 +3366,4 @@ vhdl_island_spec1 shell
 vhdl_island_spec_deopt1 shell
 vhdl_island_act1 gold,normal,2008
 vhdl_island_act2 shell
+vhdl_island_spec_fold1 shell

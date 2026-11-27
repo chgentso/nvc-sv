@@ -70,8 +70,7 @@ library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
--- Integer conversions: truncation warning, integer compared with a narrower
--- vector
+-- Integer conversion with a truncation warning
 entity conv_e is
     port ( clk : in std_logic; din : in unsigned(7 downto 0);
            q : out unsigned(3 downto 0); big : out std_logic );
