@@ -3358,5 +3358,9 @@ vhdl_island_widevar_a1 shell
 vhdl_island_bitvec_logic1 normal,2008,$NVC_RTL_ISLANDS=hier
 vhdl_island_edge_a1 shell
 vhdl_island_memo_a1 shell
+vhdl_island_force_a1 normal,2008,$NVC_2STATE=islands
+vhdl_island_force_delta1 gold,normal,2008
+vlog_island_time0 verilog,gold
+vpi_island_cb1  verilog,vpi,gold
 vhdl_island_spec1 shell
 vhdl_island_spec_deopt1 shell

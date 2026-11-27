@@ -74,7 +74,9 @@ static PLI_INT32 at_28ns(p_cb_data cb)
    s_vpi_value vr = { .format = vpiIntVal };
    vpi_put_value(w_mid, &vr, NULL, vpiReleaseFlag);
    check_error();
-   check_int(vr.value.integer, 0x13);
+   // w_mid is written by an always_comb block: it keeps the forced value
+   // until the block runs again (IEEE 1800-2017 10.6.2)
+   check_int(vr.value.integer, 0xa5);
    return 0;
 }
 
@@ -101,7 +103,7 @@ static PLI_INT32 start_of_sim(p_cb_data cb)
 
 static PLI_INT32 end_of_sim(p_cb_data cb)
 {
-   fail_unless(w_mid_changes >= 3);
+   fail_unless(w_mid_changes >= 2);
    fail_unless(last_w_mid == 0x14);
    vpi_test_pass();
    return 0;
