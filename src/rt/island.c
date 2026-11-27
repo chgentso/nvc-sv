@@ -1528,6 +1528,7 @@ void rt_island_mgr_free(rt_island_mgr_t *mgr)
          free(isl->domains[d].write_sigs);
          free(isl->domains[d].ff_descs);
          free(isl->domains[d].ff_runs);
+         free(isl->domains[d].glitch_resets);
       }
       free(isl->domains);
       for (uint32_t f = 0; f < isl->n_forces; f++)
@@ -2167,6 +2168,14 @@ static void island_spec_report(rt_island_mgr_t *mgr)
 // instead of one descriptor per register.  A run only combines registers
 // with the same RT_IFF_COMB_READ so a change of the run wakes the
 // combinational logic exactly when a change of one of its registers would.
+// Offset in the next-state half of the overwritten NBA log of an SV island
+// register (RT_ISIG_GLITCH_LOG), after its planes
+static inline uint32_t island_glitch_log_off(const rt_island_sig_t *s)
+{
+   const uint32_t plane = s->nwords * s->nelems * 8u;
+   return ((s->flags & RT_ISIG_TWO_STATE) ? s->a_off : s->b_off) + plane;
+}
+
 static bool island_ff_desc_mergeable(const rt_island_ff_desc_t *d)
 {
    if (d->flags & (RT_IFF_STD_LOGIC9 | RT_IFF_SPARSE_RAM | RT_IFF_ACT
@@ -2234,6 +2243,10 @@ static void island_refresh_domain_descs(rt_island_t *isl)
       if (dom->ff_descs == NULL)
          dom->ff_descs = xmalloc_array(dom->n_write_sigs,
                                        sizeof(rt_island_ff_desc_t));
+      if (dom->glitch_resets == NULL)
+         dom->glitch_resets = xmalloc_array(dom->n_write_sigs,
+                                            sizeof(uint32_t));
+      dom->n_glitch_resets = 0;
       for (uint32_t j = 0; j < dom->n_write_sigs; j++) {
          const uint32_t sidx = dom->write_sigs[j];
          const rt_island_sig_t *s = &(isl->sigs[sidx]);
@@ -2257,6 +2270,16 @@ static void island_refresh_domain_descs(rt_island_t *isl)
          if ((s->flags & RT_ISIG_TOUCH_LOG)
              && !(fl & (RT_IFF_SPARSE_RAM | RT_IFF_STD_LOGIC9)))
             fl |= RT_IFF_TOUCH_LOG;
+         // The overwritten NBA values of a register only matter to those
+         // woken by its changes; the log of another is only reset
+         if ((s->flags & RT_ISIG_GLITCH_LOG)
+             && !(fl & (RT_IFF_SPARSE_RAM | RT_IFF_STD_LOGIC9))) {
+            if (fl & RT_IFF_HAS_NOTIFY)
+               fl |= RT_IFF_GLITCH;
+            else
+               dom->glitch_resets[dom->n_glitch_resets++] =
+                  island_glitch_log_off(s);
+         }
 
          fd->a_off   = s->a_off;
          fd->count   = (fl & RT_IFF_STD_LOGIC9)
@@ -9784,6 +9807,80 @@ static bool island_commit_touch(rt_model_t *m, rt_island_t *isl,
    return true;
 }
 
+static inline uint64_t *island_glitch_log(rt_island_t *isl,
+                                          const rt_island_sig_t *s)
+{
+   const uint32_t off = island_glitch_log_off(s);
+   assert(isl->next_state != NULL);
+   assert(off + RT_ISLAND_GLITCH_BYTES(s->nwords,
+                                       s->flags & RT_ISIG_TWO_STATE)
+          <= isl->state_bytes);
+   return (uint64_t *)(isl->next_state + off);
+}
+
+static void island_publish_direct(rt_island_sig_t *s)
+{
+   for (uint32_t t = 0; t < s->n_direct_targets; t++) {
+      rt_island_sig_t *dst_s = s->direct_targets[t];
+      if (island_copy_direct_sig(s, dst_s)
+          && (dst_s->flags & RT_ISIG_COMB_READ)
+          && dst_s->isl->eval_handle != JIT_HANDLE_INVALID)
+         island_mark_dirty(dst_s->isl);
+   }
+}
+
+// Publishes the values of an SV island register that non-blocking
+// assignments of this time step overwrote (RT_ISIG_GLITCH_LOG), in order,
+// before its commit publishes the final value.  Returns true when the
+// state now holds the last of them.
+__attribute__((noinline))
+static bool island_commit_glitch(rt_model_t *m, rt_island_t *isl,
+                                 const rt_island_ff_desc_t *d, uint64_t *log)
+{
+   rt_island_sig_t *s = &(isl->sigs[d->sig_idx]);
+   const uint64_t count = log[0];
+   log[0] = 0;
+
+   // A forced register does not change
+   if (isl->has_forces)
+      return false;
+
+   if (unlikely(count > RT_ISLAND_GLITCH_CAP)) {
+      static bool warned = false;
+      if (!warned) {
+         warnf("%s was assigned more than %u different values by "
+               "non-blocking assignments in one time step: the events of "
+               "the later ones are not reproduced, run with "
+               "--rtl-islands=off for exact results",
+               s->sig != NULL && s->sig->where != NULL
+               ? istr(tree_ident(s->sig->where)) : "a register",
+               RT_ISLAND_GLITCH_CAP);
+         warned = true;
+      }
+   }
+
+   const uint32_t nwords = s->nwords;
+   const bool two_state = !!(s->flags & RT_ISIG_TWO_STATE);
+   const uint32_t n = MIN(count, RT_ISLAND_GLITCH_CAP);
+   const uint64_t *ent_a = log + 1;
+   const uint64_t *ent_b = ent_a + RT_ISLAND_GLITCH_CAP * nwords;
+   uint64_t *dst_a = (uint64_t *)(isl->state + s->a_off);
+   uint64_t *dst_b = two_state ? NULL : (uint64_t *)(isl->state + s->b_off);
+   const size_t nbytes = nwords * sizeof(uint64_t);
+
+   for (uint32_t e = 0; e < n; e++) {
+      memcpy(dst_a, ent_a + e * nwords, nbytes);
+      if (dst_b != NULL)
+         memcpy(dst_b, ent_b + e * nwords, nbytes);
+      if (d->flags & RT_IFF_DIRECT_LINK)
+         island_publish_direct(s);
+      else
+         island_sync_out_sig(m, isl, s);
+   }
+
+   return true;
+}
+
 // Commit of a run of registers (RT_IFF_RUN)
 static inline bool island_commit_run(rt_island_t *isl,
                                      const rt_island_ff_desc_t *d)
@@ -9808,6 +9905,11 @@ static void island_commit_domain(rt_model_t *m, rt_island_domain_t *dom)
    const uint32_t n_write = use_runs ? dom->n_ff_runs : dom->n_write_sigs;
    const bool act = isl->act_on;
    bool comb_need_eval = false;
+   for (uint32_t j = 0; j < dom->n_glitch_resets; j++) {
+      uint64_t *count = (uint64_t *)(isl->next_state + dom->glitch_resets[j]);
+      if (unlikely(*count != 0))
+         *count = 0;
+   }
    for (uint32_t j = 0; j < n_write; j++) {
       const rt_island_ff_desc_t *d = &(descs[j]);
       if (likely(d->flags & RT_IFF_RUN)) {
@@ -9827,6 +9929,17 @@ static void island_commit_domain(rt_model_t *m, rt_island_domain_t *dom)
                continue;
             whole = false;   // Changed elements are already published
          }
+      }
+
+      uint64_t *glog;
+      if (unlikely(d->flags & RT_IFF_GLITCH)
+          && unlikely(*(glog = island_glitch_log(isl, &(isl->sigs[d->sig_idx])))
+                      != 0)
+          && island_commit_glitch(m, isl, d, glog)) {
+         if (unlikely(act) && (d->flags & RT_IFF_ACT))
+            isl->state[d->sig_idx] = 1;
+         if (d->flags & RT_IFF_COMB_READ)
+            comb_need_eval = true;
       }
 
       if (whole) {
@@ -9850,15 +9963,8 @@ static void island_commit_domain(rt_model_t *m, rt_island_domain_t *dom)
 
       if (unlikely(d->flags & RT_IFF_HAS_NOTIFY)) {
          rt_island_sig_t *s = &(isl->sigs[d->sig_idx]);
-         if (d->flags & RT_IFF_DIRECT_LINK) {
-            for (uint32_t t = 0; t < s->n_direct_targets; t++) {
-               rt_island_sig_t *dst_s = s->direct_targets[t];
-               if (island_copy_direct_sig(s, dst_s)
-                   && (dst_s->flags & RT_ISIG_COMB_READ)
-                   && dst_s->isl->eval_handle != JIT_HANDLE_INVALID)
-                  island_mark_dirty(dst_s->isl);
-            }
-         }
+         if (d->flags & RT_IFF_DIRECT_LINK)
+            island_publish_direct(s);
          else if (whole)
             island_sync_out_sig(m, isl, s);
       }

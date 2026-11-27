@@ -53,6 +53,7 @@ typedef enum {
    RT_ISIG_SPEC_ROWS      = (1u << 24),   // Mode A: some rows may be held
    RT_ISIG_MIX_MEMO       = (1u << 25),   // mix_memo is valid
    RT_ISIG_TOUCH_LOG      = (1u << 26),   // SV memory: element write log
+   RT_ISIG_GLITCH_LOG     = (1u << 27),   // SV register: overwritten NBA log
 } rt_island_sig_flags_t;
 
 // Speculative Mode A clean tracking (NVC_ISLAND_SPEC).  The Mode A state of
@@ -104,6 +105,7 @@ typedef enum {
 #define RT_IFF_ACT          (1u << 6)
 #define RT_IFF_TOUCH_LOG    (1u << 7)
 #define RT_IFF_RUN          (1u << 8)   // Contiguous words of several signals
+#define RT_IFF_GLITCH       (1u << 9)   // Overwritten NBA value log
 #define RT_IFF_HAS_NOTIFY   (RT_IFF_DIRECT_LINK | RT_IFF_SYNC_OUT)
 
 // Element write log of a SystemVerilog island memory (RT_ISIG_TOUCH_LOG):
@@ -117,6 +119,27 @@ typedef enum {
 #define RT_ISLAND_TOUCH_CAP        16u
 #define RT_ISLAND_TOUCH_MIN_ELEMS  16u
 #define RT_ISLAND_TOUCH_BYTES      ((RT_ISLAND_TOUCH_CAP + 2u) * 8u)
+
+// Overwritten non-blocking assignment log of a SystemVerilog island
+// register (RT_ISIG_GLITCH_LOG): each non-blocking assignment is an update
+// event of its own (IEEE 1800 4.9.4 and 10.4.2), so a register assigned
+// more than once in a time step can change and change back, which wakes
+// processes waiting for a change or an edge although its final value is
+// the old one.  A register with more than one non-blocking assignment in
+// the flip-flop processes of its island gets a log that follows its planes
+// in the next-state half: a count, then RT_ISLAND_GLITCH_CAP entries of its
+// a-plane words and as many of its b-plane words (4-state only), entry E
+// word W at index E * nwords + W.  A store that changes a bit which the
+// value it overwrites had already changed (against the state or the last
+// logged value) appends the overwritten value; the commit publishes the
+// logged values in order before the final one, so every bit goes through
+// the same transitions as with --rtl-islands=off.  A count above
+// RT_ISLAND_GLITCH_CAP means the log overflowed.  The commit resets the
+// count.
+#define RT_ISLAND_GLITCH_CAP        8u
+#define RT_ISLAND_GLITCH_MAX_WORDS  16u
+#define RT_ISLAND_GLITCH_BYTES(nwords, two_state) \
+   (8u + RT_ISLAND_GLITCH_CAP * (nwords) * 8u * ((two_state) ? 1u : 2u))
 
 #define RT_ISLAND_SPARSE_INLINE_CAP   16u
 #define RT_ISLAND_SPARSE_INLINE_DATA  1024u
@@ -262,6 +285,8 @@ typedef struct _rt_island_domain {
    rt_island_ff_desc_t      *ff_descs;
    rt_island_ff_desc_t      *ff_runs;      // SV: ff_descs with runs merged
    uint32_t                  n_ff_runs;
+   uint32_t                 *glitch_resets;   // Unobserved NBA log offsets
+   uint32_t                  n_glitch_resets;
    uint32_t                  n_write_sigs;
    uint32_t                  cap_write_sigs;
    uint64_t                  ff_dirty_mask;

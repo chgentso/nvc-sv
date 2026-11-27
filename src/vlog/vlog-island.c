@@ -182,6 +182,165 @@ static int find_sig_idx(const analyze_ctx_t *ctx, vlog_node_t d)
    return v == 0 ? -1 : (int)(v - 1);
 }
 
+// Counts the non-blocking assignment sites of each signal in the
+// flip-flop processes of an island: a register with more than one (or one
+// in a loop) may be assigned several times in one time step and gets an
+// overwritten value log (RT_ISIG_GLITCH_LOG in rt/island.h)
+typedef struct {
+   const analyze_ctx_t *ctx;
+   uint8_t                   *sites;
+   uint8_t                    weight;
+} nba_count_ctx_t;
+
+static void nba_count_target(nba_count_ctx_t *nc, vlog_node_t lhs)
+{
+   for (;;) {
+      switch (vlog_kind(lhs)) {
+      case V_BIT_SELECT:
+      case V_PART_SELECT:
+      case V_MEMBER_REF:
+         lhs = vlog_value(lhs);
+         continue;
+      case V_CONCAT:
+         for (unsigned i = 0; i < vlog_params(lhs); i++)
+            nba_count_target(nc, vlog_param(lhs, i));
+         return;
+      case V_REF:
+         if (vlog_has_ref(lhs)) {
+            const int idx = find_sig_idx(nc->ctx, vlog_ref(lhs));
+            if (idx >= 0)
+               nc->sites[idx] = MIN(255, nc->sites[idx] + nc->weight);
+         }
+         return;
+      default:
+         return;
+      }
+   }
+}
+
+static void nba_count_cb(vlog_node_t v, void *context)
+{
+   nba_count_target(context, vlog_target(v));
+}
+
+static void nba_count_loop_cb(vlog_node_t v, void *context)
+{
+   // A site in a loop may run more than once
+   vlog_visit_only(v, nba_count_cb, context, V_NBASSIGN);
+}
+
+// The most non-blocking assignments to signal IDX that one activation of
+// STMT can run: the branches of an if or case statement exclude each other,
+// a loop may repeat
+static int nba_path_count(const analyze_ctx_t *ctx, vlog_node_t v, int idx)
+{
+   if (v == NULL)
+      return 0;
+
+   switch (vlog_kind(v)) {
+   case V_NBASSIGN:
+      {
+         uint8_t site = 0;
+         // Count the parts of the target that are IDX
+         vlog_node_t lhs = vlog_target(v);
+         A(vlog_node_t) work = AINIT;
+         APUSH(work, lhs);
+         while (work.count > 0) {
+            vlog_node_t t = work.items[--work.count];
+            switch (vlog_kind(t)) {
+            case V_BIT_SELECT:
+            case V_PART_SELECT:
+            case V_MEMBER_REF:
+               APUSH(work, vlog_value(t));
+               break;
+            case V_CONCAT:
+               for (unsigned i = 0; i < vlog_params(t); i++)
+                  APUSH(work, vlog_param(t, i));
+               break;
+            case V_REF:
+               if (vlog_has_ref(t) && find_sig_idx(ctx, vlog_ref(t)) == idx)
+                  site++;
+               break;
+            default:
+               break;
+            }
+         }
+         ACLEAR(work);
+         return site;
+      }
+   case V_ALWAYS:
+   case V_INITIAL:
+   case V_SEQ_BLOCK:
+   case V_TIMING:
+      {
+         int sum = 0;
+         for (unsigned i = 0; i < vlog_stmts(v); i++)
+            sum += nba_path_count(ctx, vlog_stmt(v, i), idx);
+         return sum;
+      }
+   case V_IF:
+      {
+         int most = 0;
+         for (unsigned i = 0; i < vlog_conds(v); i++) {
+            vlog_node_t c = vlog_cond(v, i);
+            int sum = 0;
+            for (unsigned j = 0; j < vlog_stmts(c); j++)
+               sum += nba_path_count(ctx, vlog_stmt(c, j), idx);
+            most = MAX(most, sum);
+         }
+         return most;
+      }
+   case V_CASE:
+      {
+         int most = 0;
+         for (unsigned i = 0; i < vlog_stmts(v); i++) {
+            vlog_node_t item = vlog_stmt(v, i);
+            int sum = 0;
+            for (unsigned j = 0; j < vlog_stmts(item); j++)
+               sum += nba_path_count(ctx, vlog_stmt(item, j), idx);
+            most = MAX(most, sum);
+         }
+         return most;
+      }
+   case V_FOR_LOOP:
+   case V_WHILE:
+   case V_DO_WHILE:
+   case V_REPEAT:
+   case V_FOREACH:
+   case V_FOREVER:
+      {
+         int sum = 0;
+         for (unsigned i = 0; i < vlog_stmts(v); i++)
+            sum += nba_path_count(ctx, vlog_stmt(v, i), idx);
+         return sum > 0 ? 2 : 0;   // May run more than once
+      }
+   default:
+      return 0;
+   }
+}
+
+static void count_nba_sites(const analyze_ctx_t *ctx, vlog_node_t stmt,
+                            uint8_t *sites)
+{
+   // Sites of this process alone, then the most of them one activation
+   // can run (branches that exclude each other do not both run)
+   uint8_t *local LOCAL = xcalloc_array(MAX(1u, ctx->nsigs), sizeof(uint8_t));
+   nba_count_ctx_t nc = { .ctx = ctx, .sites = local, .weight = 1 };
+   vlog_visit_only(stmt, nba_count_cb, &nc, V_NBASSIGN);
+   static const vlog_kind_t loops[] = {
+      V_FOR_LOOP, V_WHILE, V_DO_WHILE, V_REPEAT, V_FOREACH, V_FOREVER,
+   };
+   nc.weight = 2;
+   for (size_t i = 0; i < ARRAY_LEN(loops); i++)
+      vlog_visit_only(stmt, nba_count_loop_cb, &nc, loops[i]);
+
+   for (unsigned i = 0; i < ctx->nsigs; i++) {
+      if (local[i] > 1)
+         local[i] = MIN(255, nba_path_count(ctx, stmt, (int)i));
+      sites[i] = MIN(255, sites[i] + local[i]);
+   }
+}
+
 static void mark_sig_external(sig_meta_t *s, island_sig_eject_reason_t reason)
 {
    s->is_external = true;
@@ -4023,6 +4182,8 @@ static vlog_island_t *build_island(analyze_ctx_t *ctx, uint32_t island_id)
    bool *sig_write = xcalloc_array(MAX(1u, ctx->nsigs), sizeof(bool));
    bool *sig_clk = xcalloc_array(MAX(1u, ctx->nsigs), sizeof(bool));
    bool *sig_rst = xcalloc_array(MAX(1u, ctx->nsigs), sizeof(bool));
+   uint8_t *nba_sites LOCAL = xcalloc_array(MAX(1u, ctx->nsigs),
+                                            sizeof(uint8_t));
    for (uint32_t i = 0; i < ctx->nsigs; i++)
       g_to_l[i] = -1;
 
@@ -4069,6 +4230,8 @@ static vlog_island_t *build_island(analyze_ctx_t *ctx, uint32_t island_id)
             APUSH(l_sigs, gs);
          }
       }
+      if (pm->kind == IPROC_FF)
+         count_nba_sites(ctx, pm->stmt, nba_sites);
    }
 
    isl->nsigs = l_sigs.count;
@@ -4155,6 +4318,19 @@ static vlog_island_t *build_island(analyze_ctx_t *ctx, uint32_t island_id)
           && (dst->kind == ISIG_INTERNAL || dst->kind == ISIG_BOUNDARY_OUT)) {
          dst->touch_off = offset;
          offset += RT_ISLAND_TOUCH_BYTES;
+      }
+
+      // A register the flip-flop processes may assign more than once in
+      // a time step gets an overwritten value log, if something outside
+      // the island or a domain clocked by it can wait for its changes
+      // (the island logic only reads its final value)
+      dst->glitch_off = 0;
+      if (dst->nelems == 1 && dst->nwords <= RT_ISLAND_GLITCH_MAX_WORDS
+          && nba_sites[l_sigs.items[i]] > 1 && sig_write[l_sigs.items[i]]
+          && (dst->kind == ISIG_BOUNDARY_OUT || dst->kind == ISIG_CLOCK
+              || dst->kind == ISIG_RESET)) {
+         dst->glitch_off = offset;
+         offset += RT_ISLAND_GLITCH_BYTES(dst->nwords, dst->two_state);
       }
    }
    isl->state_bytes = offset;
@@ -4363,19 +4539,21 @@ void vlog_island_dump(const vlog_island_plan_t *plan)
 
    for (uint32_t i = 0; i < plan->nislands; i++) {
       const vlog_island_t *isl = plan->islands[i];
-      uint32_t n_two_state = 0;
+      uint32_t n_two_state = 0, n_nba_logs = 0;
       for (uint32_t j = 0; j < isl->nsigs; j++) {
          if (isl->sigs[j].two_state)
             n_two_state++;
+         if (isl->sigs[j].glitch_off != 0)
+            n_nba_logs++;
       }
       printf("  ISLAND %u: assign=%u comb=%u ff=%u domains=%u topo_levels=%u "
              "comb_sccs=%u sigs(int=%u in=%u out=%u inout=%u clk=%u rst=%u) "
-             "state_bytes=%u two_state=%u/%u\n",
+             "state_bytes=%u two_state=%u/%u nba_logs=%u\n",
              isl->island_id, isl->n_assign, isl->n_comb, isl->n_ff,
              isl->ndomains, isl->comb_levels, isl->comb_sccs,
              isl->n_internal_sigs, isl->n_boundary_in, isl->n_boundary_out,
              isl->n_boundary_inout, isl->n_clock_sigs, isl->n_reset_sigs,
-             isl->state_bytes, n_two_state, isl->nsigs);
+             isl->state_bytes, n_two_state, isl->nsigs, n_nba_logs);
 
       for (uint32_t d = 0; d < isl->ndomains; d++) {
          const island_domain_t *dom = &(isl->domains[d]);

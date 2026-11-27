@@ -3475,3 +3475,4 @@ svstructcmp3 verilog,gold
 svstaticinit3 verilog,gold
 svgatedelay2 verilog,gold
 vlog_island_edge1 shell
+vlog_island_nba_glitch1 shell
