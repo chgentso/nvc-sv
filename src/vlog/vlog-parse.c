@@ -14376,10 +14376,10 @@ static vlog_node_t p_statement(void)
    case tASSERT:
    case tASSUME:
    case tCOVER:
-      if (id != NULL)
-         check_assertion_label(id, &state.tokenq[state.tokenq_tail].loc);
       wrap = id != NULL && peek_nth(2) != tPROPERTY
          && peek_nth(2) != tSEQUENCE;
+      if (id != NULL && !wrap)
+         check_assertion_label(id, &state.tokenq[state.tokenq_tail].loc);
       break;
    default:
       break;
