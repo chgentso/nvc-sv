@@ -1222,7 +1222,11 @@ static vlog_node_t get_data_type(ident_t id)
 {
    vlog_node_t v = vlog_symtab_query_at(symtab, id, &state.last_loc);
    if (v == NULL) {
-      if (!(skipped_unit && parse_recovery()))
+      if (id == ident_new("wreal"))
+         error_at(&state.last_loc, "sorry, wreal nets of Verilog-AMS are "
+                  "not supported: use a net of a user-defined nettype of "
+                  "type real instead");
+      else if (!(skipped_unit && parse_recovery()))
          error_at(&state.last_loc, "no data type declaration for %pQ", id);
       return logic_type();
    }
@@ -27387,6 +27391,19 @@ static void p_module_or_generate_item_1(vlog_node_t mod)
 
    if (is_let_declaration()) {
       p_let_declaration(NULL);
+      return;
+   }
+
+   if (peek() == tID && peek_ident_nth(1) == ident_new("wreal")
+       && peek_nth(2) == tID && vlog_symtab_query(symtab, peek_ident_nth(1))
+       == NULL) {
+      consume(tID);
+      error_at(&state.last_loc, "sorry, wreal nets of Verilog-AMS are not "
+               "supported: use a net of a user-defined nettype of type real "
+               "instead");
+      while (not_at_token(tSEMI))
+         consume(peek());
+      consume(tSEMI);
       return;
    }
 

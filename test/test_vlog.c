@@ -5144,6 +5144,25 @@ START_TEST(test_portexpr2)
 }
 END_TEST
 
+START_TEST(test_wreal1)
+{
+   const error_t expect[] = {
+      { 1, "sorry, wreal nets of Verilog-AMS are not supported" },
+      { 2, "sorry, wreal nets of Verilog-AMS are not supported" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/wreal1.v");
+
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
 Suite *get_vlog_tests(void)
 {
    Suite *s = suite_create("vlog");
@@ -5347,6 +5366,7 @@ Suite *get_vlog_tests(void)
    tcase_add_test(tc, test_typeref1);
    tcase_add_test(tc, test_fwdrec1);
    tcase_add_test(tc, test_portexpr2);
+   tcase_add_test(tc, test_wreal1);
    suite_add_tcase(s, tc);
 
    return s;
