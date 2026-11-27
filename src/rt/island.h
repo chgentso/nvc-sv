@@ -103,6 +103,7 @@ typedef enum {
 #define RT_IFF_SPARSE_RAM   (1u << 5)
 #define RT_IFF_ACT          (1u << 6)
 #define RT_IFF_TOUCH_LOG    (1u << 7)
+#define RT_IFF_RUN          (1u << 8)   // Contiguous words of several signals
 #define RT_IFF_HAS_NOTIFY   (RT_IFF_DIRECT_LINK | RT_IFF_SYNC_OUT)
 
 // Element write log of a SystemVerilog island memory (RT_ISIG_TOUCH_LOG):
@@ -259,6 +260,8 @@ typedef struct _rt_island_domain {
    bool                      spec_held_w;   // Writes a held signal
    uint32_t                 *write_sigs;
    rt_island_ff_desc_t      *ff_descs;
+   rt_island_ff_desc_t      *ff_runs;      // SV: ff_descs with runs merged
+   uint32_t                  n_ff_runs;
    uint32_t                  n_write_sigs;
    uint32_t                  cap_write_sigs;
    uint64_t                  ff_dirty_mask;
