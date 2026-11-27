@@ -24,6 +24,8 @@
 #include "jit/jit-layout.h"
 #include "jit/jit-priv.h"
 #include "jit/jit.h"
+#include "mir/mir-node.h"
+#include "mir/mir-unit.h"
 #include "mask.h"
 #include "object.h"
 #include "option.h"
@@ -2320,6 +2322,52 @@ START_TEST(test_cache_eviction)
 }
 END_TEST
 
+START_TEST(test_island_cpool)
+{
+   // An island load and store whose state pointer is the address of a
+   // constant array has a constant-pool address and a variable element index
+   mir_context_t *mc = get_mir();
+
+   mir_unit_t *mu = mir_unit_new(mc, ident_new("ISLAND_CPOOL"), NULL,
+                                 MIR_UNIT_FUNCTION, NULL);
+
+   mir_type_t t_off = mir_offset_type(mu);
+   mir_type_t t_i64 = mir_int_type(mu, INT64_MIN, INT64_MAX);
+   mir_type_t t_vec = mir_vec2_type(mu, 64, false);
+
+   mir_set_result(mu, t_i64);
+
+   mir_add_param(mu, mir_context_type(mu, ident_new("WORK")), MIR_NULL_STAMP,
+                 ident_new("context"));
+   mir_value_t idx = mir_add_param(mu, t_off, MIR_NULL_STAMP, ident_new("idx"));
+
+   mir_value_t vals[4];
+   for (int i = 0; i < 4; i++)
+      vals[i] = mir_const(mu, t_i64, 100 + i);
+   mir_value_t ca = mir_const_array(mu, mir_carray_type(mu, 4, t_i64), vals, 4);
+   mir_value_t tbl = mir_build_address_of(mu, ca);
+   mir_value_t state = tbl;
+
+   mir_value_t zero = mir_const(mu, t_off, 0);
+   mir_value_t minus1 = mir_const(mu, t_off, -1);
+
+   mir_value_t row = mir_build_island_load(mu, t_vec, state, zero, minus1, idx);
+
+   mir_build_return(mu, mir_build_cast(mu, t_i64, row));
+
+   mir_optimise(mu, MIR_PASS_O1);
+   mir_put_unit(mc, mu);
+
+   jit_t *j = jit_new(get_registry(), mc);
+
+   jit_handle_t h = jit_lazy_compile(j, ident_new("ISLAND_CPOOL"));
+   for (int i = 0; i < 4; i++)
+      ck_assert_int_eq(jit_call(j, h, NULL, (int64_t)i).integer, 100 + i);
+
+   jit_free(j);
+}
+END_TEST
+
 START_TEST(test_cache_multi_instance)
 {
    char tmpl[] = "/tmp/nvc-jitcache-share-XXXXXX";
@@ -2644,6 +2692,7 @@ Suite *get_jit_tests(void)
    tcase_add_test(tc, test_lvn12);
    tcase_add_test(tc, test_cache_sha256);
    tcase_add_test(tc, test_cache_eviction);
+   tcase_add_test(tc, test_island_cpool);
    tcase_add_test(tc, test_cache_multi_instance);
 #ifdef ENABLE_LLVM
    tcase_add_test(tc, test_cache_cold_warm_and_corrupt);

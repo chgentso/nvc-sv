@@ -4684,7 +4684,14 @@ static void irgen_island_addrs(jit_irgen_t *g, jit_value_t state,
       jit_value_t ebytes = irgen_alloc_temp(g);
       j_mul(g, ebytes, elem_v, jit_value_from_int64(wbytes));
       jit_value_t base = irgen_alloc_temp(g);
-      j_add(g, base, state, ebytes);
+      if (jit_value_is_addr(state)) {
+         // The state may be a constant array: add to its address in a register
+         jit_value_t ptr = irgen_alloc_temp(g);
+         irgen_lea(g, ptr, state);
+         j_add(g, base, ptr, ebytes);
+      }
+      else
+         j_add(g, base, state, ebytes);
       *a_addr = jit_addr_from_value(base, a_off);
       *b_addr = jit_addr_from_value(base, b_off);
    }
