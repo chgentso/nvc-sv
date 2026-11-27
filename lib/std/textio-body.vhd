@@ -954,6 +954,7 @@ package body textio is
 
         tmp := new string(1 to LINE_BUFFER_SIZE);
         loop
+            exit when endfile(f);
             read(f, ch, got);
             exit when got /= 1;
 
