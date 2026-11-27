@@ -3483,3 +3483,4 @@ vlog_let_unit1 verilog,gold
 vlog_strcast_wide1 verilog,gold
 vlog_procstate1 verilog,gold
 vlog_externmod1 verilog,gold
+vlog_classparam_shadow1 verilog,gold

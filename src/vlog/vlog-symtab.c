@@ -515,6 +515,31 @@ static vlog_node_t nested_interface_decl(vlog_node_t iface, ident_t id)
    return NULL;
 }
 
+static vlog_node_t class_member_or_param(vlog_node_t class, ident_t id)
+{
+   // A parameter of a derived class hides a member of the same name in a
+   // base class (8.13)
+
+   vlog_node_t m = vlog_class_member(class, id);
+   for (vlog_node_t c = class; c != NULL;
+        c = vlog_has_ref(c) ? vlog_ref(c) : NULL) {
+      const int ndecls = vlog_decls(c);
+      for (int i = 0; i < ndecls; i++) {
+         vlog_node_t d = vlog_decl(c, i);
+         if (d == m)
+            return m;
+         else if ((vlog_kind(d) == V_PARAM_DECL
+                   || vlog_kind(d) == V_LOCALPARAM) && vlog_ident(d) == id)
+            return d;
+      }
+
+      if (vlog_kind(c) != V_CLASS_DECL)
+         break;
+   }
+
+   return m;
+}
+
 static void lookup_member(vlog_symtab_t *st, vlog_node_t v)
 {
    vlog_node_t prefix = vlog_value(v), type = vlog_get_type(prefix);
@@ -586,7 +611,7 @@ static void lookup_member(vlog_symtab_t *st, vlog_node_t v)
    }
 
    if (kind == V_CLASS_DECL) {
-      vlog_node_t m = vlog_class_member(type, id);
+      vlog_node_t m = class_member_or_param(type, id);
       if (m == NULL) {
          // Parameters and enumeration names are constants of the class
          m = vlog_scope_member(type, id);
