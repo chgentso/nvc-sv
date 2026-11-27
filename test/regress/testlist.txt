@@ -3358,3 +3358,4 @@ attr_ent_ext1 shell
 port_scalar_sub1 shell
 rec_arr_agg1 shell
 eval_recurse1 shell
+env_trec_str1 normal,2019
