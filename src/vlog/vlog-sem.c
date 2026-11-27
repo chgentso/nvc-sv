@@ -3772,8 +3772,19 @@ static void vlog_check_port_conn(vlog_node_t v)
 
 static void vlog_check_param_assign(vlog_node_t v)
 {
-   if (vlog_has_value(v) && !is_data_type(vlog_value(v)))
-      vlog_check_expr(vlog_value(v));
+   if (!vlog_has_value(v))
+      return;
+
+   vlog_node_t value = vlog_value(v);
+   if (vlog_kind(value) == V_DELAY_CONTROL) {
+      // Delay of a UDP instance written without parentheses
+      vlog_check_expr(vlog_value(value));
+      const int nparams = vlog_params(value);
+      for (int i = 0; i < nparams; i++)
+         vlog_check_expr(vlog_param(value, i));
+   }
+   else if (!is_data_type(value))
+      vlog_check_expr(value);
 }
 
 static void vlog_check_enum_name(vlog_node_t v)

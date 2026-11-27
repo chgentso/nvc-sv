@@ -3593,6 +3593,10 @@ static vlog_node_t elab_early_port_body(vlog_node_t port, void *arg)
 
 static vlog_node_t elab_gen_find_mod(vlog_node_t list, void *arg);
 
+// Time unit and precision of the Verilog module whose instances are
+// being elaborated: the unit of the delays of UDP instances
+static int64_t elab_vlog_time = 0;
+
 static void elab_verilog_module(tree_t comp, ident_t label, vlog_node_t mod,
                                 vlog_node_t list, vlog_node_t inst,
                                 tree_t entity, const elab_ctx_t *ctx)
@@ -3669,6 +3673,7 @@ static void elab_verilog_module(tree_t comp, ident_t label, vlog_node_t mod,
 
       const int base_errors = error_count();
       vlog_set_instance_scope(ndotted);
+      vlog_set_instance_time(elab_vlog_time);
       vlog_node_t body = vlog_new_instance(mod, list, id);
       bool folded = false;
 
@@ -3829,8 +3834,13 @@ static void elab_verilog_module(tree_t comp, ident_t label, vlog_node_t mod,
    if (elab_new_errors(&new_ctx) == 0)
       elab_lower(b, &new_ctx);
 
-   if (elab_new_errors(&new_ctx) == 0)
+   if (elab_new_errors(&new_ctx) == 0) {
+      const int64_t saved_time = elab_vlog_time;
+      if (vlog_kind(mod) != V_PRIMITIVE)
+         elab_vlog_time = vlog_ival(ei->body);
       elab_verilog_sub_blocks(ei->body, &new_ctx);
+      elab_vlog_time = saved_time;
+   }
 
    elab_check_defparams(ei->body, &new_ctx);
 

@@ -942,10 +942,75 @@ bool vlog_bind_has_hier_ref(vlog_node_t mod)
 }
 
 static ident_t inst_dotted = NULL;
+static int64_t inst_time = 0;
 
 void vlog_set_instance_scope(ident_t dotted)
 {
    inst_dotted = dotted;
+}
+
+void vlog_set_instance_time(int64_t ival)
+{
+   // Time unit and precision of the module containing the instance
+   inst_time = ival;
+}
+
+static vlog_node_t udp_instance_table(vlog_node_t table, vlog_node_t inst)
+{
+   // The delay of a UDP instance is parsed as the values of parameters
+   // as the name is not known to be a UDP until elaboration (29.9).  The
+   // delays are in the time unit of the module containing the instance.
+
+   const int nparams = vlog_params(inst);
+   if (nparams == 0)
+      return table;
+
+   vlog_node_t delay = NULL;
+   for (int i = 0; i < nparams; i++) {
+      vlog_node_t p = vlog_param(inst, i);
+      if (vlog_has_ident(p)) {
+         error_at(vlog_loc(p), "a UDP instance cannot have a named "
+                  "parameter assignment");
+         return table;
+      }
+      else if (!vlog_has_value(p))
+         continue;
+
+      vlog_node_t value = vlog_value(p);
+      if (vlog_kind(value) == V_DELAY_CONTROL)
+         delay = value;   // Written without parentheses
+      else if (delay == NULL) {
+         delay = vlog_new(V_DELAY_CONTROL);
+         vlog_set_value(delay, value);
+         vlog_set_ival(delay, inst_time ?: VLOG_TIME_ENCODE(1, VLOG_TIME_UNSCALED));
+         vlog_set_loc(delay, vlog_loc(p));
+      }
+      else
+         vlog_add_param(delay, value);
+   }
+
+   if (delay == NULL)
+      return table;
+   else if (vlog_params(delay) > 1) {
+      error_at(vlog_loc(inst), "a UDP instance can have at most two delays");
+      return table;
+   }
+
+   vlog_node_t copy = vlog_new(V_UDP_TABLE);
+   vlog_set_subkind(copy, vlog_subkind(table));
+   vlog_set_ident(copy, vlog_ident(table));
+   vlog_set_loc(copy, vlog_loc(table));
+
+   const int nentries = vlog_params(table);
+   for (int i = 0; i < nentries; i++)
+      vlog_add_param(copy, vlog_param(table, i));
+
+   const int nstmts = vlog_stmts(table);
+   for (int i = 0; i < nstmts; i++)
+      vlog_add_stmt(copy, vlog_stmt(table, i));
+
+   vlog_add_stmt(copy, delay);
+   return copy;
 }
 
 bool vlog_bind_is_selective(vlog_node_t mod)
@@ -1176,6 +1241,7 @@ vlog_node_t vlog_new_instance(vlog_node_t mod, vlog_node_t inst, ident_t id)
    }
 
    if (inst != NULL && !bind_is_vhdl_shim(mod)
+       && vlog_kind(mod) != V_PRIMITIVE
        && !(vlog_kind(mod) == V_MODULE
             && (vlog_flags(mod) & VLOG_F_BLACKBOX))) {
       const int nparams = vlog_params(inst);
@@ -1228,8 +1294,12 @@ vlog_node_t vlog_new_instance(vlog_node_t mod, vlog_node_t inst, ident_t id)
    }
 
    const int nstmts = vlog_stmts(copy);
-   for (int i = 0; i < nstmts; i++)
-      vlog_add_stmt(v, vlog_stmt(copy, i));
+   for (int i = 0; i < nstmts; i++) {
+      vlog_node_t s = vlog_stmt(copy, i);
+      if (vlog_kind(s) == V_UDP_TABLE && inst != NULL)
+         s = udp_instance_table(s, inst);
+      vlog_add_stmt(v, s);
+   }
 
    if (vlog_kind(mod) == V_MODULE)
       add_bound_instances(v, mod, copy);

@@ -22,14 +22,11 @@
 #include "vlog/vlog-node.h"
 #include "vlog/vlog-number.h"
 #include "vlog/vlog-phase.h"
+#include "vlog/vlog-util.h"
 
 #include <assert.h>
+#include <math.h>
 #include <stdlib.h>
-
-#define CANNOT_HANDLE(v) do {                                           \
-      fatal_at(vlog_loc(v), "cannot handle %s in %s" ,                  \
-               vlog_kind_str(vlog_kind(v)), __FUNCTION__);              \
-   } while (0)
 
 static mir_value_t vlog_lower_rvalue(mir_unit_t *mu, vlog_node_t v)
 {
@@ -44,6 +41,86 @@ static mir_value_t vlog_lower_rvalue(mir_unit_t *mu, vlog_node_t v)
    default:
       CANNOT_HANDLE(v);
    }
+}
+
+static vlog_node_t vlog_udp_delay(vlog_node_t table)
+{
+   // The delay of the instance follows the initial statement
+   const int nstmts = vlog_stmts(table);
+   if (nstmts > 0 && vlog_kind(vlog_stmt(table, nstmts - 1)) == V_DELAY_CONTROL)
+      return vlog_stmt(table, nstmts - 1);
+   else
+      return NULL;
+}
+
+static vlog_node_t vlog_udp_initial(vlog_node_t table)
+{
+   if (vlog_stmts(table) > 0
+       && vlog_kind(vlog_stmt(table, 0)) != V_DELAY_CONTROL)
+      return vlog_stmt(table, 0);
+   else
+      return NULL;
+}
+
+static int64_t vlog_udp_delay_fs(vlog_node_t v, int64_t ival)
+{
+   ival = vlog_time_resolve(ival);
+   const int64_t scale = VLOG_TIME_UNIT(ival);
+   const unsigned log10 = VLOG_TIME_LOG10(ival);
+
+   switch (vlog_kind(v)) {
+   case V_NUMBER:
+      if (number_is_defined(vlog_number(v))) {
+         const int64_t value = number_integer(vlog_number(v));
+         if (vlog_flags(v) & VLOG_F_ONESTEP)
+            return vlog_time_quantum(log10);
+         else if (vlog_flags(v) & VLOG_F_TIMELIT)
+            return vlog_round_time(value, log10);
+         else
+            return value * scale;
+      }
+      break;
+   case V_REAL:
+      {
+         const int64_t quantum = vlog_time_quantum(log10);
+         return llround(vlog_dval(v) * scale / quantum) * quantum;
+      }
+   default:
+      break;
+   }
+
+   fatal_at(vlog_loc(v), "sorry, the delay of a UDP instance must be a "
+            "constant number");
+}
+
+static mir_value_t vlog_udp_after(mir_unit_t *mu, vlog_node_t delay,
+                                  mir_value_t result)
+{
+   // The rise delay applies when the output changes to 1, the fall delay
+   // when it changes to 0 and the lesser of the two when it changes to x
+
+   mir_type_t t_time = mir_time_type(mu);
+   mir_type_t t_logic = mir_vec4_type(mu, 1, false);
+
+   const int64_t ival = vlog_ival(delay);
+   const int64_t rise = vlog_udp_delay_fs(vlog_value(delay), ival);
+   if (vlog_params(delay) == 0)
+      return mir_const(mu, t_time, rise);
+
+   const int64_t fall = vlog_udp_delay_fs(vlog_param(delay, 0), ival);
+
+   mir_value_t is1 = mir_build_test(
+      mu, mir_build_binary(mu, MIR_VEC_CASE_EQ, t_logic, result,
+                           mir_const_vec(mu, t_logic, 1, 0)));
+   mir_value_t is0 = mir_build_test(
+      mu, mir_build_binary(mu, MIR_VEC_CASE_EQ, t_logic, result,
+                           mir_const_vec(mu, t_logic, 0, 0)));
+
+   mir_value_t after = mir_const(mu, t_time, MIN(rise, fall));
+   after = mir_build_select(mu, t_time, is0, mir_const(mu, t_time, fall),
+                            after);
+   return mir_build_select(mu, t_time, is1, mir_const(mu, t_time, rise),
+                           after);
 }
 
 static mir_value_t vlog_udp_cmp(mir_unit_t *mu, mir_value_t left,
@@ -107,6 +184,17 @@ static void vlog_lower_comb_udp(mir_unit_t *mu, vlog_node_t udp)
    mir_value_t result_var = mir_add_var(mu, t_logic, MIR_NULL_STAMP,
                                         ident_new("result"), MIR_VAR_TEMP);
 
+   // An instance with a delay outputs x until its first update takes
+   // effect
+   vlog_node_t delay = vlog_udp_delay(table);
+   mir_value_t first_var = MIR_NULL_VALUE;
+   if (delay != NULL) {
+      mir_type_t t_bool = mir_bool_type(mu);
+      first_var = mir_add_var(mu, t_bool, MIR_NULL_STAMP,
+                              ident_new("first"), 0);
+      mir_build_store(mu, first_var, mir_const(mu, t_bool, 1));
+   }
+
    {
       const int nports = vlog_ports(udp);
       for (int i = 0; i < nports; i++) {
@@ -131,6 +219,24 @@ static void vlog_lower_comb_udp(mir_unit_t *mu, vlog_node_t udp)
    }
 
    mir_set_cursor(mu, start_bb, MIR_APPEND);
+
+   if (!mir_is_null(first_var)) {
+      mir_block_t init_bb = mir_add_block(mu);
+      mir_block_t eval_bb = mir_add_block(mu);
+      mir_build_cond(mu, mir_build_load(mu, first_var), init_bb, eval_bb);
+
+      mir_set_cursor(mu, init_bb, MIR_APPEND);
+
+      mir_value_t upref = mir_build_var_upref(mu, hops, out_var.id);
+      mir_value_t out = mir_build_load(mu, upref);
+      mir_value_t x = mir_build_unpack(mu, mir_const_vec(mu, t_logic, 1, 1),
+                                       ST_STRONG, MIR_NULL_VALUE);
+      mir_build_put_driver(mu, out, mir_const(mu, t_offset, 1), x);
+      mir_build_store(mu, first_var, mir_const(mu, mir_bool_type(mu), 0));
+      mir_build_jump(mu, eval_bb);
+
+      mir_set_cursor(mu, eval_bb, MIR_APPEND);
+   }
 
    mir_block_t wait_bb = mir_add_block(mu);
 
@@ -245,7 +351,13 @@ static void vlog_lower_comb_udp(mir_unit_t *mu, vlog_node_t udp)
    mir_value_t upref = mir_build_var_upref(mu, hops, out_var.id);
    mir_value_t out = mir_build_load(mu, upref);
 
-   mir_build_put_driver(mu, out, one, drive);
+   if (delay != NULL) {
+      mir_value_t after = vlog_udp_after(mu, delay, result);
+      mir_build_sched_waveform(mu, out, one, drive, after, after);
+   }
+   else
+      mir_build_put_driver(mu, out, one, drive);
+
    mir_build_wait(mu, start_bb);
 
    mir_optimise(mu, MIR_PASS_O1);
@@ -294,10 +406,11 @@ static void vlog_lower_seq_udp(mir_unit_t *mu, vlog_node_t udp)
          mir_build_sched_event(mu, nets, one);
       }
 
-      if (vlog_stmts(table) > 0) {
+      vlog_node_t initial = vlog_udp_initial(table);
+      if (initial != NULL) {
          mir_value_t upref = mir_build_var_upref(mu, hops, out_var.id);
          mir_value_t out = mir_build_load(mu, upref);
-         vlog_node_t init = vlog_value(vlog_stmt(table, 0));
+         vlog_node_t init = vlog_value(initial);
          mir_build_map_const(mu, vlog_lower_rvalue(mu, init), out, one);
       }
 
@@ -476,7 +589,13 @@ static void vlog_lower_seq_udp(mir_unit_t *mu, vlog_node_t udp)
 
       mir_value_t upref = mir_build_var_upref(mu, hops, out_var.id);
       mir_value_t out = mir_build_load(mu, upref);
-      mir_build_deposit_signal(mu, out, one, drive);
+      vlog_node_t delay = vlog_udp_delay(table);
+      if (delay != NULL) {
+         mir_value_t after = vlog_udp_after(mu, delay, result);
+         mir_build_sched_deposit(mu, out, one, drive, after);
+      }
+      else
+         mir_build_deposit_signal(mu, out, one, drive);
 
       mir_build_wait(mu, start_bb);
    }

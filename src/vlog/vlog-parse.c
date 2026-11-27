@@ -27101,7 +27101,15 @@ static void p_module_or_udp_instantiation(vlog_node_t mod)
    vlog_node_t v = vlog_new(V_INST_LIST);
    vlog_set_ident(v, p_identifier());
 
-   if (peek() == tHASH) {
+   if (peek() == tHASH && peek_nth(2) != tLPAREN) {
+      // A delay value without parentheses can only be the delay of a UDP
+      // instance which is applied during elaboration
+      vlog_node_t p = vlog_new(V_PARAM_ASSIGN);
+      vlog_set_value(p, p_delay2());
+      vlog_set_loc(p, vlog_loc(vlog_value(p)));
+      vlog_add_param(v, p);
+   }
+   else if (peek() == tHASH) {
       vlog_node_t target = lookup_interface(vlog_ident(v));
       if (target != NULL && vlog_kind(target) != V_MODULE)
          target = NULL;

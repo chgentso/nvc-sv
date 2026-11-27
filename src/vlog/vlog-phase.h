@@ -62,6 +62,7 @@ void vlog_lower_const_funcs(mir_context_t *mc, vlog_node_t inst);
 mir_unit_t *vlog_lower_thunk(mir_context_t *mc, ident_t parent, vlog_node_t v);
 vlog_node_t vlog_new_instance(vlog_node_t mod, vlog_node_t inst, ident_t id);
 void vlog_set_instance_scope(ident_t dotted);
+void vlog_set_instance_time(int64_t ival);
 bool vlog_bind_is_selective(vlog_node_t mod);
 vlog_node_t vlog_generate_instance(vlog_node_t v, vlog_node_t genvar,
                                    int32_t value, ident_t prefix);

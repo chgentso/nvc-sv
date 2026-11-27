@@ -3475,3 +3475,4 @@ svstructcmp3 verilog,gold
 svstaticinit3 verilog,gold
 svgatedelay2 verilog,gold
 vlog_portexpr1 verilog,gold
+vlog_udpdelay1 verilog,gold
