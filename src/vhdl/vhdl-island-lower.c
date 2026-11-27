@@ -133,6 +133,8 @@ typedef struct {
    const vhdl_idom_t       *ff_dom;
    mir_value_t              ff_dirty_var;
    vi_scope_t              *scope;
+   mir_block_t              const_bb;  // Entry block: shared tables
+   mir_block_t              body_bb;   // First block after const_bb
    mir_value_t              lut_not;
    mir_value_t              lut_and;
    mir_value_t              lut_or;
@@ -580,6 +582,36 @@ static bool vi_type_is_signed_vec(type_t t)
       || strcmp(n, "IEEE.NUMERIC_STD.UNRESOLVED_SIGNED") == 0;
 }
 
+// The tables shared by the processes of a unit (std_logic operator tables,
+// constant ROMs) are built in the entry block, which dominates every other
+// block: a table first needed inside a branch is used again in other
+// branches and processes.  The entry block jumps to the body only when the
+// unit is complete (vi_unit_close).
+static void vi_unit_open(vi_lower_t *l)
+{
+   l->const_bb = mir_get_cursor(l->mu, NULL);
+   l->body_bb = mir_add_block(l->mu);
+   mir_set_cursor(l->mu, l->body_bb, MIR_APPEND);
+}
+
+static void vi_unit_close(vi_lower_t *l)
+{
+   mir_set_cursor(l->mu, l->const_bb, MIR_APPEND);
+   mir_build_jump(l->mu, l->body_bb);
+}
+
+static mir_block_t vi_const_begin(vi_lower_t *l, unsigned *pos)
+{
+   mir_block_t bb = mir_get_cursor(l->mu, pos);
+   mir_set_cursor(l->mu, l->const_bb, MIR_APPEND);
+   return bb;
+}
+
+static void vi_const_end(vi_lower_t *l, mir_block_t bb, unsigned pos)
+{
+   mir_set_cursor(l->mu, bb, pos);
+}
+
 static mir_value_t vi_get_std_lut(vi_lower_t *l, int kind)
 {
    mir_value_t *slot = NULL;
@@ -596,12 +628,15 @@ static mir_value_t vi_get_std_lut(vi_lower_t *l, int kind)
       return *slot;
 
    mir_unit_t *mu = l->mu;
+   unsigned pos;
+   mir_block_t bb = vi_const_begin(l, &pos);
    mir_value_t vals[81];
    for (int i = 0; i < len; i++)
       vals[i] = vi_u8(mu, tbl[i]);
    mir_value_t ca = mir_const_array(mu, mir_carray_type(mu, len, vi_u8_type(mu)),
                                     vals, len);
    *slot = mir_build_address_of(mu, ca);
+   vi_const_end(l, bb, pos);
    return *slot;
 }
 
@@ -4336,6 +4371,8 @@ static bool vi_lower_const_array_ref(vi_lower_t *l, tree_t base_e,
             l->failed = true;
             return false;
          }
+         unsigned cpos;
+         mir_block_t cbb = vi_const_begin(l, &cpos);
          if (l->two_state) {
             // ceil(width / 64) i64 words per element, least significant
             // word first
@@ -4362,6 +4399,7 @@ static bool vi_lower_const_array_ref(vi_lower_t *l, tree_t base_e,
                vals, total);
             tbl_ptr = mir_build_address_of(mu, ca);
          }
+         vi_const_end(l, cbb, cpos);
 
          if (l->n_rom_cache < ARRAY_LEN(l->rom_cache)) {
             l->rom_cache[l->n_rom_cache].agg = cur;
@@ -4503,12 +4541,15 @@ static bool vi_lower_const_array_ref(vi_lower_t *l, tree_t base_e,
          }
       }
       if (mir_is_null(tbl_ptr)) {
+         unsigned cpos;
+         mir_block_t cbb = vi_const_begin(l, &cpos);
          mir_value_t *vals LOCAL = xmalloc_array(nelems, sizeof(mir_value_t));
          for (uint32_t p = 0; p < nelems; p++)
             vals[p] = vi_i64(mu, tbl[p]);
          mir_value_t ca = mir_const_array(
             mu, mir_carray_type(mu, (int)nelems, vi_i64_type(mu)), vals, nelems);
          tbl_ptr = mir_build_address_of(mu, ca);
+         vi_const_end(l, cbb, cpos);
          if (l->n_rom_cache < ARRAY_LEN(l->rom_cache)) {
             l->rom_cache[l->n_rom_cache].agg = cur;
             l->rom_cache[l->n_rom_cache].ptr = tbl_ptr;
@@ -8966,6 +9007,7 @@ static mir_unit_t *vi_build_comb_unit(mir_context_t *mc,
    const bool act = isl->has_act;
    const bool act_stats = act && getenv("NVC_ISLAND_ACT_STATS") != NULL;
    const uint32_t act_cnt = RT_ISLAND_ACT_CNT(isl->n_sigs);
+   vi_unit_open(&l);
    if (act_stats)
       vi_act_count(&l, act_cnt + 8u, isl->n_comb_procs);
 
@@ -9001,9 +9043,6 @@ static mir_unit_t *vi_build_comb_unit(mir_context_t *mc,
          mir_build_jump(mu, test_bb);
          mir_set_cursor(mu, body_bb, MIR_APPEND);
 
-         // Values built in an earlier process may not have been computed
-         l.lut_not = l.lut_and = l.lut_or = l.lut_xor = MIR_NULL_VALUE;
-         l.n_rom_cache = 0;
          l.n_act_rd = 0;
          l.act_track = true;
       }
@@ -9054,6 +9093,7 @@ static mir_unit_t *vi_build_comb_unit(mir_context_t *mc,
    free(l.entry_sig);
    free(l.entry_ptr);
    mir_build_return(mu, vi_off(mu, 0));
+   vi_unit_close(&l);
    return mu;
 }
 
@@ -9097,6 +9137,7 @@ static mir_unit_t *vi_build_ff_unit(mir_context_t *mc,
       .lut_xor      = MIR_NULL_VALUE,
    };
 
+   vi_unit_open(&l);
    vi_spec_sparse_mark(&l);
 
    if (dm->rst_isl_sig >= 0) {
@@ -9205,6 +9246,7 @@ static mir_unit_t *vi_build_ff_unit(mir_context_t *mc,
 
    mir_build_return(mu, mir_build_cast(mu, t_off,
                                        mir_build_load(mu, ff_dirty_var)));
+   vi_unit_close(&l);
    return mu;
 }
 
