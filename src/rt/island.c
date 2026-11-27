@@ -272,6 +272,17 @@ struct _rt_super_domain {
    uint32_t             n_solo_islands;
 };
 
+// A change of island state made by a VHDL force or release that the island
+// processes must only see from the next delta cycle on
+typedef struct {
+   rt_island_t *isl;
+   uint32_t     a_off;
+   uint32_t     b_off;
+   uint32_t     bytes;
+   bool         has_b;
+   uint8_t     *buf;   // Changed bits then new values, for a then b
+} island_defer_put_t;
+
 struct _rt_island_mgr {
    rt_model_t             *model;
    hash_t                 *sig_map;
@@ -280,6 +291,7 @@ struct _rt_island_mgr {
    A(rt_island_t *)        dirty_q;
    A(rt_island_t *)        defer_dirty_q;
    A(rt_island_t *)        defer_direct_q;
+   A(island_defer_put_t)   defer_put_q;
    A(rt_island_domain_t *) ff_sample_q;
    A(rt_island_domain_t *) ff_commit_q;
    A(rt_super_island_t *)  clusters;
@@ -1034,9 +1046,13 @@ void rt_island_input_watch_inline(rt_model_t *m, void *user, bool defer_comb)
 }
 
 static void island_apply_direct_outs(rt_island_t *isl);
+static void island_apply_deferred_puts(rt_island_mgr_t *mgr);
 
 void rt_island_promote_deferred(rt_island_mgr_t *mgr)
 {
+   if (unlikely(mgr->defer_put_q.count > 0))
+      island_apply_deferred_puts(mgr);
+
    if (unlikely(mgr->defer_direct_q.count > 0)) {
       // Direct comb wires out of VHDL islands deliver their value one delta
       // after the source island ran, like the signal they replace
@@ -1383,6 +1399,9 @@ void rt_island_mgr_free(rt_island_mgr_t *mgr)
    ACLEAR(mgr->dirty_q);
    ACLEAR(mgr->defer_dirty_q);
    ACLEAR(mgr->defer_direct_q);
+   for (unsigned i = 0; i < mgr->defer_put_q.count; i++)
+      free(mgr->defer_put_q.items[i].buf);
+   ACLEAR(mgr->defer_put_q);
    ACLEAR(mgr->ff_sample_q);
    ACLEAR(mgr->ff_commit_q);
    ACLEAR(mgr->clusters);
@@ -4565,6 +4584,9 @@ void rt_island_reset_all(rt_island_mgr_t *mgr)
    mgr->dirty_q.count = 0;
    mgr->defer_dirty_q.count = 0;
    mgr->defer_direct_q.count = 0;
+   for (unsigned i = 0; i < mgr->defer_put_q.count; i++)
+      free(mgr->defer_put_q.items[i].buf);
+   mgr->defer_put_q.count = 0;
    mgr->ff_sample_q.count = 0;
    mgr->ff_commit_q.count = 0;
    mgr->dirty_clusters.count = 0;
@@ -4959,7 +4981,8 @@ bool rt_island_has_dirty(const rt_island_mgr_t *mgr)
 {
    return mgr != NULL
       && (mgr->dirty_q.count > 0 || mgr->dirty_clusters.count > 0
-          || mgr->defer_dirty_q.count > 0 || mgr->defer_direct_q.count > 0);
+          || mgr->defer_dirty_q.count > 0 || mgr->defer_direct_q.count > 0
+          || mgr->defer_put_q.count > 0);
 }
 
 bool rt_island_has_sv_dirty(const rt_island_mgr_t *mgr)
@@ -7713,6 +7736,99 @@ static bool island_build_cov_mask(rt_island_sig_t *owners, uint32_t offset,
    return true;
 }
 
+// A force or release issued by a VHDL process changes the effective value
+// of the signal in the next simulation cycle (IEEE 1076-2008 10.5.2.2), so
+// the island processes that read it must see the new value only from the
+// next delta cycle on, as with --rtl-islands=off.  The force entry and the
+// scheduled update of the signal are created at once, but the island state
+// keeps its current value until rt_island_promote_deferred (forced bits are
+// also applied after an evaluation of the island in the current delta).
+static inline bool island_defer_vhdl_put(rt_model_t *m,
+                                         const rt_island_sig_t *s)
+{
+   return (s->flags & RT_ISIG_VHDL) && model_can_create_delta(m);
+}
+
+static size_t island_sig_buf_bytes(const rt_island_sig_t *s)
+{
+   if (s->flags & RT_ISIG_STD_LOGIC9)
+      return (size_t)s->width * s->nelems * s->elem_size;
+   return (size_t)s->nwords * s->nelems * sizeof(uint64_t);
+}
+
+static inline bool island_sig_has_b(const rt_island_sig_t *s)
+{
+   return !(s->flags & (RT_ISIG_STD_LOGIC9 | RT_ISIG_TWO_STATE));
+}
+
+static uint8_t *island_save_sig_state(const rt_island_t *isl,
+                                      const rt_island_sig_t *s)
+{
+   const size_t bytes = island_sig_buf_bytes(s);
+   const bool has_b = island_sig_has_b(s);
+   uint8_t *buf = xmalloc(MAX(1u, has_b ? bytes * 2 : bytes));
+   memcpy(buf, isl->state + s->a_off, bytes);
+   if (has_b)
+      memcpy(buf + bytes, isl->state + s->b_off, bytes);
+   return buf;
+}
+
+static void island_defer_part(uint8_t *state, uint8_t *diff, uint8_t *val,
+                              const uint8_t *old, size_t bytes)
+{
+   for (size_t i = 0; i < bytes; i++) {
+      diff[i] = state[i] ^ old[i];
+      val[i] = state[i];
+      state[i] = old[i];
+   }
+}
+
+// Puts back the state saved by island_save_sig_state and queues the change
+// made since then for the next delta cycle
+static void island_defer_sig_state(rt_island_t *isl, const rt_island_sig_t *s,
+                                   uint8_t *old)
+{
+   const size_t bytes = island_sig_buf_bytes(s);
+   const bool has_b = island_sig_has_b(s);
+   uint8_t *buf = xmalloc(MAX(1u, bytes * (has_b ? 4 : 2)));
+   island_defer_part(isl->state + s->a_off, buf, buf + bytes, old, bytes);
+   if (has_b)
+      island_defer_part(isl->state + s->b_off, buf + 2 * bytes,
+                        buf + 3 * bytes, old + bytes, bytes);
+   free(old);
+
+   island_defer_put_t d = {
+      .isl   = isl,
+      .a_off = s->a_off,
+      .b_off = s->b_off,
+      .bytes = bytes,
+      .has_b = has_b,
+      .buf   = buf,
+   };
+   APUSH(isl->mgr->defer_put_q, d);
+   rt_island_request_delta(isl->model);
+}
+
+static void island_apply_deferred_puts(rt_island_mgr_t *mgr)
+{
+   const unsigned n = mgr->defer_put_q.count;
+   for (unsigned i = 0; i < n; i++) {
+      island_defer_put_t *d = &(mgr->defer_put_q.items[i]);
+      rt_island_t *isl = d->isl;
+      for (int part = 0; part < (d->has_b ? 2 : 1); part++) {
+         uint8_t *state = isl->state + (part ? d->b_off : d->a_off);
+         const uint8_t *diff = d->buf + 2 * part * d->bytes;
+         const uint8_t *val = diff + d->bytes;
+         for (uint32_t k = 0; k < d->bytes; k++)
+            state[k] = (state[k] & ~diff[k]) | (val[k] & diff[k]);
+      }
+      free(d->buf);
+      if (isl->eval_handle != JIT_HANDLE_INVALID)
+         island_mark_dirty(isl);
+   }
+   mgr->defer_put_q.count = 0;
+}
+
 bool rt_island_put_bytes(rt_model_t *m, rt_signal_t *sig,
                          const uint8_t *bytes, uint32_t offset, uint32_t count,
                          bool is_force)
@@ -7747,13 +7863,19 @@ bool rt_island_put_bytes(rt_model_t *m, rt_signal_t *sig,
       if (s->flags & RT_ISIG_PRUNED)
          island_unprune_sig(mgr, s);
 
+      uint8_t *saved = NULL;
+      if (is_force && island_defer_vhdl_put(m, s))
+         saved = island_save_sig_state(s->isl, s);
+
       const size_t step = (s->flags & RT_ISIG_STD_LOGIC9) ? s->elem_size : 1u;
       island_write_bits_slice(s->isl, s, r_start - s_start, r_end - r_start,
                               bytes != NULL ? bytes + (size_t)(r_start - offset) * step : NULL,
                               NULL, NULL, false, 0, is_force);
       island_flush_out_slice(m, s->isl, s, r_start - s_start, r_end - r_start);
 
-      if (is_force || !(s->flags & RT_ISIG_COMB_WRITTEN)) {
+      if (saved != NULL)
+         island_defer_sig_state(s->isl, s, saved);
+      else if (is_force || !(s->flags & RT_ISIG_COMB_WRITTEN)) {
          if ((s->flags & RT_ISIG_COMB_READ)
              && s->isl->eval_handle != JIT_HANDLE_INVALID) {
             island_mark_dirty(s->isl);
@@ -7976,6 +8098,10 @@ bool rt_island_vpi_release_slice(rt_model_t *m, rt_signal_t *sig,
       // next procedural assignment (IEEE 1800-2017 10.6.2).
       const bool restore_saved = !(s->flags & RT_ISIG_COMB_WRITTEN)
          && !!(s->flags & RT_ISIG_VHDL);
+      uint8_t *saved = NULL;
+      if (restore_saved && island_defer_vhdl_put(m, s)
+          && !(s->flags & RT_ISIG_DIRECT_LINK))
+         saved = island_save_sig_state(isl, s);
       bool released_any = false;
       if (s->flags & RT_ISIG_STD_LOGIC9) {
          const size_t elem_sz = s->elem_size;
@@ -8080,6 +8206,13 @@ bool rt_island_vpi_release_slice(rt_model_t *m, rt_signal_t *sig,
             island_sync_sig_raw(isl, s, true);
       }
       else {
+         if (released_any && saved != NULL) {
+            island_flush_out_slice(m, isl, s, r_start - s_start,
+                                   r_end - r_start);
+            island_defer_sig_state(isl, s, saved);
+            continue;
+         }
+         free(saved);
          if (released_any) {
             island_flush_out_slice(m, isl, s, r_start - s_start,
                                    r_end - r_start);
