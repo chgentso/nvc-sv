@@ -40829,9 +40829,36 @@ void vlog_lower_island_comb_fn(mir_context_t *mc, vlog_node_t body,
       .two_state      = opt_get_int(OPT_TWO_STATE) >= TWO_STATE_ISLANDS,
    };
 
+   bool has_always_comb = false, has_assign = false;
+   for (uint32_t c = 0; c < isl->ntopo; c++) {
+      const uint32_t pidx = isl->topo_order[c];
+      if (!fused_proc[pidx])
+         continue;
+      if (isl->procs[pidx].kind == IPROC_COMB)
+         has_always_comb = true;
+      else
+         has_assign = true;
+   }
+
+   mir_value_t zero_off = mir_const(mu, t_offset, 0);
+   mir_value_t in_reset = MIR_NULL_VALUE;
+   if (has_always_comb) {
+      mir_value_t r_res = mir_build_fcall(mu, ident_new("__sv_island_in_reset"),
+                                          t_offset, MIR_NULL_STAMP, NULL, 0);
+      in_reset = mir_build_cmp(mu, MIR_CMP_NEQ, r_res, zero_off);
+      if (!has_assign) {
+         mir_block_t skip_bb = mir_add_block(mu);
+         mir_block_t body_bb = mir_add_block(mu);
+         mir_build_cond(mu, in_reset, skip_bb, body_bb);
+         mir_set_cursor(mu, skip_bb, MIR_APPEND);
+         mir_build_return(mu, zero_off);
+         mir_set_cursor(mu, body_bb, MIR_APPEND);
+         in_reset = MIR_NULL_VALUE;
+      }
+   }
+
    const bool need_mid_force = (isl->comb_levels > 1 || isl->comb_sccs > 0);
    mir_value_t force_hdr = MIR_NULL_VALUE;
-   mir_value_t zero_off = mir_const(mu, t_offset, 0);
    ident_t apply_forces_fn = ident_new("__sv_island_apply_forces");
    if (need_mid_force) {
       mir_type_t t_vec64 = mir_vec2_type(mu, 64, false);
@@ -40865,7 +40892,17 @@ void vlog_lower_island_comb_fn(mir_context_t *mc, vlog_node_t body,
       prev_lvl = ip->topo_level;
 
       if (!ip->in_cycle) {
-         vlog_lower_island_comb_proc(&g, ip, pidx);
+         if (!mir_is_null(in_reset) && ip->kind == IPROC_COMB) {
+            mir_block_t run_bb = mir_add_block(mu);
+            mir_block_t skip_bb = mir_add_block(mu);
+            mir_build_cond(mu, in_reset, skip_bb, run_bb);
+            mir_set_cursor(mu, run_bb, MIR_APPEND);
+            vlog_lower_island_comb_proc(&g, ip, pidx);
+            mir_build_jump(mu, skip_bb);
+            mir_set_cursor(mu, skip_bb, MIR_APPEND);
+         }
+         else
+            vlog_lower_island_comb_proc(&g, ip, pidx);
          c++;
          continue;
       }
@@ -40878,6 +40915,21 @@ void vlog_lower_island_comb_fn(mir_context_t *mc, vlog_node_t body,
 
       const uint32_t k = end - c;
       assert(k >= 2 && k <= NVC_ISLAND_MAX_SCC);
+
+      mir_block_t scc_skip_bb = MIR_NULL_BLOCK;
+      if (!mir_is_null(in_reset)) {
+         bool scc_has_comb = false;
+         for (uint32_t j = c; j < end && !scc_has_comb; j++) {
+            if (isl->procs[isl->topo_order[j]].kind == IPROC_COMB)
+               scc_has_comb = true;
+         }
+         if (scc_has_comb) {
+            mir_block_t scc_run_bb = mir_add_block(mu);
+            scc_skip_bb = mir_add_block(mu);
+            mir_build_cond(mu, in_reset, scc_skip_bb, scc_run_bb);
+            mir_set_cursor(mu, scc_run_bb, MIR_APPEND);
+         }
+      }
 
       bool *seen LOCAL = xcalloc_array(MAX(1u, isl->nsigs), sizeof(bool));
       A(uint32_t) back_sigs = AINIT;
@@ -40909,6 +40961,10 @@ void vlog_lower_island_comb_fn(mir_context_t *mc, vlog_node_t body,
          for (uint32_t j = c; j < end; j++) {
             const uint32_t jp = isl->topo_order[j];
             vlog_lower_island_comb_proc(&g, &(isl->procs[jp]), jp);
+         }
+         if (!mir_is_null(scc_skip_bb)) {
+            mir_build_jump(mu, scc_skip_bb);
+            mir_set_cursor(mu, scc_skip_bb, MIR_APPEND);
          }
          ACLEAR(back_sigs);
          c = end;
@@ -41006,6 +41062,10 @@ void vlog_lower_island_comb_fn(mir_context_t *mc, vlog_node_t body,
       mir_build_cond(mu, cont, loop_bb, exit_bb);
 
       mir_set_cursor(mu, exit_bb, MIR_APPEND);
+      if (!mir_is_null(scc_skip_bb)) {
+         mir_build_jump(mu, scc_skip_bb);
+         mir_set_cursor(mu, scc_skip_bb, MIR_APPEND);
+      }
       ACLEAR(snaps);
       ACLEAR(back_sigs);
       c = end;

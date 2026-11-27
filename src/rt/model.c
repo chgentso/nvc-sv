@@ -186,6 +186,7 @@ typedef struct _rt_model {
    uint64_t           now;
    uint64_t           trigger_epoch;
    bool               can_create_delta;
+   bool               in_reset;
    bool               next_is_delta;
    bool               force_stop;
    bool               sva_flush;
@@ -3763,6 +3764,7 @@ void model_reset(rt_model_t *m)
    rt_island_reset_all(m->islands);
 
    if (m->islands != NULL) {
+      m->in_reset = true;
       for (unsigned pass = 0; pass < 16; pass++) {
          bool progress = false;
          if (!rt_island_eval_sv_reset(m->jit, m, m->islands, thread->tlab,
@@ -3792,6 +3794,7 @@ void model_reset(rt_model_t *m)
          if (!progress && !drained)
             break;
       }
+      m->in_reset = false;
       rt_island_mark_sv_reset_edges(m->islands);
    }
 
@@ -7336,6 +7339,16 @@ void sched_deposit(rt_model_t *m, rt_signal_t *s, const void *values,
 bool model_can_create_delta(rt_model_t *m)
 {
    return m->can_create_delta;
+}
+
+bool model_in_reset(rt_model_t *m)
+{
+   return m != NULL && m->in_reset;
+}
+
+int64_t x_sv_island_in_reset(void)
+{
+   return model_in_reset(get_model_or_null()) ? 1 : 0;
 }
 
 int64_t model_now(rt_model_t *m, unsigned *deltas)

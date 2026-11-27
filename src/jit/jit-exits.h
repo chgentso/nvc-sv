@@ -213,5 +213,6 @@ int64_t x_sv_class_oid(void);
 void x_sv_unique_flush(void *ctx, int64_t proc_id);
 void x_sv_unique_warn(void *ctx, int64_t proc_id, const uint8_t *msg,
                       int32_t len, object_t *where);
+int64_t x_sv_island_in_reset(void);
 
 #endif  // _JIT_EXITS_H
