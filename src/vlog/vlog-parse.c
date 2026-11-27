@@ -12960,10 +12960,13 @@ static vlog_node_t p_disable_statement(void)
 
    vlog_node_t decl = vlog_symtab_query(symtab, id);
 
-   if (decl != NULL && vlog_kind(decl) == V_TASK_DECL && peek() == tDOT) {
-      // A named block inside a task
-      consume(tDOT);
-      id = p_identifier();
+   if (decl != NULL && (vlog_kind(decl) == V_TASK_DECL
+                        || vlog_kind(decl) == V_SEQ_BLOCK
+                        || vlog_kind(decl) == V_FORK)
+       && peek() == tDOT) {
+      // A named block inside a task, sequential block, or fork
+      while (optional(tDOT))
+         id = p_identifier();
       decl = NULL;
    }
    else if ((decl != NULL && (vlog_kind(decl) == V_MOD_INST

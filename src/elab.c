@@ -9428,6 +9428,39 @@ static void elab_check_handle_call(vlog_node_t v, const elab_href_ctx_t *hctx)
    }
 }
 
+typedef struct {
+   ident_t name;
+   bool    found;
+} find_named_blk_t;
+
+static void elab_find_named_blk_cb(vlog_node_t v, void *ctx)
+{
+   find_named_blk_t *f = ctx;
+   if (f->found)
+      return;
+
+   const vlog_kind_t k = vlog_kind(v);
+   if ((k == V_SEQ_BLOCK || k == V_FORK)
+       && vlog_has_ident(v) && vlog_ident(v) == f->name)
+      f->found = true;
+}
+
+static bool elab_has_named_proc_block(tree_t b, ident_t name)
+{
+   const int nstmts = tree_stmts(b);
+   for (int i = 0; i < nstmts; i++) {
+      tree_t s = tree_stmt(b, i);
+      if (tree_kind(s) != T_VERILOG)
+         continue;
+
+      find_named_blk_t f = { .name = name, .found = false };
+      vlog_visit(tree_vlog(s), elab_find_named_blk_cb, &f);
+      if (f.found)
+         return true;
+   }
+   return false;
+}
+
 static void elab_rewrite_hier_ref_pre_cb(vlog_node_t v, void *arg)
 {
    // A nested generate block is rewritten from its own scope
@@ -9440,7 +9473,44 @@ static void elab_rewrite_hier_ref_pre_cb(vlog_node_t v, void *arg)
          defparam_targets = hset_new(16);
       hset_insert(defparam_targets, vlog_target(v));
    }
-   else if ((vlog_kind(v) == V_METHOD_CALL || vlog_kind(v) == V_DISABLE)
+   else if (vlog_kind(v) == V_DISABLE && hctx->gen_depth == 0
+            && vlog_has_value(v) && vlog_kind(vlog_value(v)) == V_HIER_REF) {
+      // Same-instance hierarchical disable of a named block or fork
+      // (e.g. disable t.named; or disable fork_blk.begin_blk;)
+      vlog_node_t target = vlog_value(v);
+      vlog_node_t mods[16];
+      int nmods = 0;
+      bool plain = true;
+      for (vlog_node_t it = vlog_value(target); ; it = vlog_value(it)) {
+         if (nmods == ARRAY_LEN(mods) || vlog_params(it) > 0) {
+            plain = false;
+            break;
+         }
+         mods[nmods++] = it;
+         if (!vlog_has_value(it))
+            break;
+      }
+
+      if (plain && nmods > 0) {
+         vlog_node_t root = mods[nmods - 1];
+         ident_t rname = vlog_ident(root);
+         const bool same_inst =
+            vlog_block_is_named(hctx->where, rname)
+            || (!elab_has_child_block(hctx->where, rname)
+                && elab_has_named_proc_block(hctx->where, rname));
+         if (same_inst
+             && elab_hier_ref_decl(hctx->where, vlog_ident(target)) == NULL
+             && elab_has_named_proc_block(hctx->where, vlog_ident(target))) {
+            vlog_set_value(v, NULL);
+            return;
+         }
+      }
+
+      if (call_values == NULL)
+         call_values = hset_new(16);
+      hset_insert(call_values, vlog_value(v));
+   }
+   else if (vlog_kind(v) == V_METHOD_CALL
             && vlog_has_value(v)
             && vlog_kind(vlog_value(v)) == V_HIER_REF) {
       if (call_values == NULL)
