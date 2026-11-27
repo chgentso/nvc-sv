@@ -3882,11 +3882,72 @@ static vlog_node_t p_method_call_rest(vlog_node_t prefix, ident_t id)
    return v;
 }
 
+static vlog_node_t process_state_name(vlog_node_t status, const loc_t *loc)
+{
+   // There is no declaration of the process::state enumeration so name()
+   // of the result of status() selects the name of the state (9.7)
+
+   static const char *names[] = {
+      "FINISHED", "RUNNING", "WAITING", "SUSPENDED", "KILLED"
+   };
+
+   vlog_node_t st = vlog_new(V_DATA_TYPE);
+   vlog_set_subkind(st, DT_STRING);
+   vlog_set_loc(st, loc);
+
+   vlog_node_t result = NULL;
+   for (int i = ARRAY_LEN(names) - 1; i >= 0; i--) {
+      vlog_node_t lit = vlog_new(V_STRING);
+      vlog_set_number(lit, number_from_string(names[i], strlen(names[i])));
+      vlog_set_loc(lit, loc);
+
+      vlog_node_t cast = vlog_new(V_CAST);
+      vlog_set_subkind(cast, V_CAST_TYPE);
+      vlog_set_type(cast, st);
+      vlog_set_value(cast, lit);
+      vlog_set_loc(cast, loc);
+
+      if (result == NULL) {
+         result = cast;
+         continue;
+      }
+
+      vlog_node_t num = vlog_new(V_NUMBER);
+      vlog_set_number(num, number_from_int(i));
+      vlog_set_loc(num, loc);
+
+      vlog_node_t eq = vlog_new(V_BINARY);
+      vlog_set_subkind(eq, V_BINARY_LOG_EQ);
+      vlog_set_left(eq, status);
+      vlog_set_right(eq, num);
+      vlog_set_loc(eq, loc);
+
+      vlog_node_t cond = vlog_new(V_COND_EXPR);
+      vlog_set_value(cond, eq);
+      vlog_set_left(cond, cast);
+      vlog_set_right(cond, result);
+      vlog_set_loc(cond, loc);
+
+      result = cond;
+   }
+
+   return result;
+}
+
 static vlog_node_t p_method_call_tail(vlog_node_t prefix)
 {
    // method_call_body with the prefix already parsed
 
    EXTEND("method call");
+
+   if (vlog_kind(prefix) == V_METHOD_CALL
+       && vlog_subkind(prefix) == V_METHOD_PROC_STATUS
+       && peek() == tID && peek_ident_nth(1) == ident_new("name")) {
+      consume(tID);
+      if (optional(tLPAREN))
+         consume(tRPAREN);
+      return process_state_name(prefix, CURRENT_LOC);
+   }
 
    return p_method_call_rest(prefix, p_method_name());
 }
