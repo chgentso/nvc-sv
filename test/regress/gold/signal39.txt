@@ -1,0 +1,9 @@
+Note: 0ms+0: low event 0000
+Note: 0ms+0: postponed trig=0 v'last_active=9223372036854775807 fs
+Note: 1ns+1: step 1 v'active=true v'event=false l'active=true w'active=true v'last_active=0 fs
+Note: 2ns+1: step 2 v'active=true v'event=false l'active=false w'active=false v'last_active=0 fs
+Note: 3ns+1: low event 0001
+Note: 3ns+1: step 3 v'active=true v'event=true l'active=false w'active=false v'last_active=0 fs
+Note: 4ns+1: step 4 v'active=true v'event=false l'active=false w'active=false v'last_active=0 fs
+Note: 5ns+1: step 5 v'active=true v'event=false l'active=false w'active=false v'last_active=0 fs
+Note: 6ns+2: postponed trig=1 v'last_active=0 fs
