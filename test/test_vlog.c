@@ -5130,12 +5130,17 @@ START_TEST(test_portexpr2)
       { 1, "sorry, inout ports in port expressions are not supported" },
       { 8, "'nope' in a port expression must be declared with a port "
         "direction" },
+      { 11, "duplicate port name 'p'" },
+      { 15, "duplicate port name 'a'" },
+      { 15, "missing port declaration for 'a'" },
       { -1, NULL }
    };
    expect_errors(expect);
 
    input_from_file(TESTDIR "/vlog/portexpr2.v");
 
+   vlog_check(do_parse_only(V_MODULE));
+   vlog_check(do_parse_only(V_MODULE));
    vlog_check(do_parse_only(V_MODULE));
    vlog_check(do_parse_only(V_MODULE));
 

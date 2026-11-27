@@ -28368,6 +28368,27 @@ static void p_port(vlog_node_t mod)
    else
       expr = p_port_expression();
 
+   if (name != NULL) {
+      // The names of the ports must be unique (23.2.2.1)
+      const int nports = vlog_ports(mod);
+      for (int i = 0; i < nports; i++) {
+         if (vlog_ident(vlog_port(mod, i)) == name) {
+            error_at(CURRENT_LOC, "duplicate port name %pQ", name);
+            break;
+         }
+      }
+   }
+   else if (expr != NULL && vlog_kind(expr) == V_REF) {
+      // The name of a port reference cannot be that of an explicit port
+      for (unsigned i = first_port_expr; i < port_exprs.count; i++) {
+         if (vlog_ident(port_exprs.items[i].port) == vlog_ident(expr)) {
+            error_at(CURRENT_LOC, "duplicate port name %pQ",
+                     vlog_ident(expr));
+            break;
+         }
+      }
+   }
+
    if (expr != NULL && vlog_kind(expr) == V_REF
        && (name == NULL || name == vlog_ident(expr))) {
       vlog_add_port(mod, expr);
