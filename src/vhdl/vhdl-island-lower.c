@@ -1053,6 +1053,492 @@ static bool vi_assign_rec_local(vi_lower_t *l, vi_local_t *dloc,
                                 int *dpath, uint8_t dlen,
                                 type_t rec_type, tree_t rhs_e);
 
+// Position of T'LEFT, the default value of scalar type T
+static bool vi_type_default_pos(vi_lower_t *l, type_t t, int64_t *pos)
+{
+   if (!type_is_scalar(t))
+      return false;
+   tree_t r = range_of(t, 0);
+   if (r == NULL || tree_kind(r) != T_RANGE)
+      return false;
+   tree_t left = tree_left(r);
+   if (tree_kind(left) == T_REF && tree_has_ref(left)
+       && tree_kind(tree_ref(left)) == T_ENUM_LIT) {
+      *pos = tree_pos(tree_ref(left));
+      return true;
+   }
+   return vi_eval_const_int(l, left, pos);
+}
+
+// A subprogram variable declared without an initial value starts as
+// T'LEFT of its type, element by element for an array (LRM 14.4.2.5),
+// and an inlined call must give the storage of LF of type T that value
+// rather than whatever the stack held.  Mode A stores 0, the 2-state image
+// of the default; the speculative variant cannot hold a std_ulogic default
+// such as 'U', see vi_check_spec_defaults.
+static bool vi_init_default_leaf(vi_lower_t *l, const vi_rec_leaf_t *lf,
+                                 type_t t)
+{
+   mir_unit_t *mu = l->mu;
+   type_t st = t;
+   while (type_is_array(st))
+      st = type_elem(st);
+   int64_t pos = 0;
+   if (!vi_type_default_pos(l, st, &pos))
+      return false;
+
+   if (lf->is_array2d) {
+      const uint32_t bytes = vi_array2d_bytes(l, lf->nelems, lf->width);
+      mir_build_set(mu, lf->storage,
+                    vi_u8(mu, l->two_state ? 0 : (uint8_t)pos),
+                    vi_off(mu, bytes));
+      return true;
+   }
+   if (lf->is_vec) {
+      if (l->two_state) {
+         uint8_t b = lf->is_std ? std_enum_to_2bit(pos) : (uint8_t)(pos & 1);
+         mir_build_store(mu, lf->storage,
+                         vi_const_vec2_rep(mu, (int)lf->width, lf->is_signed,
+                                           b));
+      }
+      else
+         mir_build_set(mu, lf->storage, vi_u8(mu, (uint8_t)pos),
+                       vi_off(mu, lf->width));
+      return true;
+   }
+   if (lf->is_int) {
+      mir_build_store(mu, lf->storage, vi_i64(mu, pos));
+      return true;
+   }
+   if (l->two_state) {
+      uint8_t b = lf->is_std ? std_enum_to_2bit(pos) : (uint8_t)(pos & 1);
+      mir_build_store(mu, lf->storage,
+                      mir_const_vec(mu, mir_vec2_type(mu, 1, false), b, 0));
+   }
+   else
+      mir_build_store(mu, lf->storage, vi_u8(mu, (uint8_t)pos));
+   return true;
+}
+
+// Definite assignment of a subprogram variable without an initial value
+// (the speculative variant only, which cannot hold a 'U' default): true
+// when every path through the body assigns each element of the variable
+// before anything reads any part of it.  Positions are the elements of
+// each leaf (one per scalar or 2D-array leaf).
+typedef struct {
+   vi_lower_t       *l;
+   const vi_local_t *loc;
+   uint32_t          npos;
+   uint32_t         *leaf_off;   // First position of each record leaf
+   bool              read_early;
+} vi_da_t;
+
+static uint32_t vi_da_leaf_npos(const vi_rec_leaf_t *lf)
+{
+   return (lf->is_vec && !lf->is_array2d) ? lf->width : 1;
+}
+
+static void vi_da_ref_cb(tree_t t, void *ctx)
+{
+   vi_da_t *da = ctx;
+   if (tree_has_ref(t) && tree_ref(t) == da->loc->decl)
+      da->read_early = true;
+}
+
+// A read of any part of the variable while some position is unassigned
+static void vi_da_read(vi_da_t *da, tree_t expr, const bool *asg)
+{
+   if (expr == NULL)
+      return;
+   for (uint32_t i = 0; i < da->npos; i++) {
+      if (!asg[i]) {
+         tree_visit_only(expr, vi_da_ref_cb, da, T_REF);
+         return;
+      }
+   }
+}
+
+// Positions *LO, *N that TARGET overwrites completely, or false
+static bool vi_da_target(vi_da_t *da, tree_t target, uint32_t *lo,
+                         uint32_t *n)
+{
+   const vi_local_t *loc = da->loc;
+   tree_t base = target;
+   tree_t sel = NULL;
+   if (tree_kind(target) == T_ARRAY_REF || tree_kind(target) == T_ARRAY_SLICE) {
+      sel = target;
+      base = tree_value(target);
+   }
+
+   uint32_t blo = 0, bn = da->npos;
+   const vi_rec_leaf_t *leaf = NULL;
+   if (tree_kind(base) == T_REF) {
+      if (tree_ref(base) != loc->decl)
+         return false;
+   }
+   else {
+      vi_local_t *rl = NULL;
+      int path[VHDL_ISIG_MAX_DEPTH];
+      uint8_t plen = 0;
+      if (!loc->is_rec || !vi_extract_local_rec_path(da->l, base, &rl, path,
+                                                     &plen)
+          || rl->decl != loc->decl)
+         return false;
+      const vi_rec_leaf_t *lv[512];
+      const uint32_t nl = vi_collect_rec_prefix_leaves(loc, path, plen,
+                                                       lv, 512);
+      if (nl == 0 || nl > 512)
+         return false;
+      // Leaves of a prefix are consecutive
+      const uint32_t first = lv[0] - loc->rec_leaves;
+      const uint32_t last = lv[nl - 1] - loc->rec_leaves;
+      blo = da->leaf_off[first];
+      bn = da->leaf_off[last] + vi_da_leaf_npos(lv[nl - 1]) - blo;
+      if (nl == 1)
+         leaf = lv[0];
+   }
+
+   if (sel == NULL) {
+      *lo = blo;
+      *n = bn;
+      return true;
+   }
+
+   // An element or slice of a vector
+   range_kind_t dir;
+   int64_t left;
+   uint32_t width;
+   if (leaf != NULL) {
+      if (!leaf->is_vec || leaf->is_array2d)
+         return false;
+      dir = leaf->dir;
+      left = leaf->left;
+      width = leaf->width;
+   }
+   else if (!loc->is_rec && loc->is_vec && !loc->is_array2d) {
+      dir = loc->dir;
+      left = loc->left;
+      width = loc->width;
+   }
+   else
+      return false;
+
+   int64_t il, ir;
+   if (tree_kind(sel) == T_ARRAY_REF) {
+      if (tree_params(sel) != 1
+          || !vi_eval_const_int(da->l, tree_value(tree_param(sel, 0)), &il))
+         return false;
+      ir = il;
+   }
+   else {
+      tree_t rg = tree_range(sel, 0);
+      if (tree_subkind(rg) != dir
+          || !vi_eval_const_int(da->l, tree_left(rg), &il)
+          || !vi_eval_const_int(da->l, tree_right(rg), &ir))
+         return false;
+   }
+   const int64_t p0 = (dir == RANGE_TO) ? il - left : left - il;
+   const int64_t p1 = (dir == RANGE_TO) ? ir - left : left - ir;
+   if (p0 < 0 || p1 < p0 || p1 >= width)
+      return false;
+   *lo = blo + (uint32_t)p0;
+   *n = (uint32_t)(p1 - p0 + 1);
+   return true;
+}
+
+// Reads in the index expressions of TARGET (the variable itself is written)
+static void vi_da_target_reads(vi_da_t *da, tree_t target, const bool *asg)
+{
+   for (tree_t t = target; ; ) {
+      switch (tree_kind(t)) {
+      case T_ARRAY_REF:
+         for (int i = 0; i < tree_params(t); i++)
+            vi_da_read(da, tree_value(tree_param(t, i)), asg);
+         t = tree_value(t);
+         continue;
+      case T_ARRAY_SLICE:
+         {
+            tree_t rg = tree_range(t, 0);
+            if (tree_subkind(rg) == RANGE_EXPR)
+               vi_da_read(da, tree_value(rg), asg);
+            else {
+               vi_da_read(da, tree_left(rg), asg);
+               vi_da_read(da, tree_right(rg), asg);
+            }
+            t = tree_value(t);
+            continue;
+         }
+      case T_RECORD_REF:
+         t = tree_value(t);
+         continue;
+      case T_REF:
+         return;
+      default:
+         vi_da_read(da, t, asg);
+         return;
+      }
+   }
+}
+
+static bool vi_da_stmts(vi_da_t *da, tree_t owner, bool *asg);
+
+static void vi_da_and(vi_da_t *da, bool *acc, const bool *b)
+{
+   for (uint32_t i = 0; i < da->npos; i++)
+      acc[i] = acc[i] && b[i];
+}
+
+// Analyses STMT with positions ASG assigned on entry; returns false when
+// the statement does not complete normally (a return), so what follows is
+// unreachable on that path
+static bool vi_da_stmt(vi_da_t *da, tree_t stmt, bool *asg)
+{
+   const size_t sz = MAX(1u, da->npos) * sizeof(bool);
+   switch (tree_kind(stmt)) {
+   case T_VAR_ASSIGN:
+   case T_SIGNAL_ASSIGN:
+      {
+         if (tree_kind(stmt) == T_VAR_ASSIGN)
+            vi_da_read(da, tree_value(stmt), asg);
+         else {
+            for (int i = 0; i < tree_waveforms(stmt); i++) {
+               tree_t w = tree_waveform(stmt, i);
+               if (tree_has_value(w))
+                  vi_da_read(da, tree_value(w), asg);
+               if (tree_has_delay(w))
+                  vi_da_read(da, tree_delay(w), asg);
+            }
+            vi_da_read(da, tree_target(stmt), asg);
+            return true;
+         }
+         tree_t target = tree_target(stmt);
+         vi_da_target_reads(da, target, asg);
+         uint32_t lo, n;
+         if (vi_da_target(da, target, &lo, &n))
+            memset(asg + lo, true, n);
+         return true;
+      }
+   case T_RETURN:
+      if (tree_has_value(stmt))
+         vi_da_read(da, tree_value(stmt), asg);
+      return false;
+   case T_NULL:
+      return true;
+   case T_ASSERT:
+   case T_REPORT:
+      if (tree_has_value(stmt))
+         vi_da_read(da, tree_value(stmt), asg);
+      if (tree_has_message(stmt))
+         vi_da_read(da, tree_message(stmt), asg);
+      if (tree_has_severity(stmt))
+         vi_da_read(da, tree_severity(stmt), asg);
+      return true;
+   case T_SEQUENCE:
+      return vi_da_stmts(da, stmt, asg);
+   case T_IF:
+      {
+         bool *acc LOCAL = xmalloc(sz);
+         bool *br LOCAL = xmalloc(sz);
+         memset(acc, true, sz);
+         bool any = false, has_else = false;
+         for (int i = 0; i < tree_conds(stmt); i++) {
+            tree_t c = tree_cond(stmt, i);
+            if (tree_has_value(c))
+               vi_da_read(da, tree_value(c), asg);
+            else
+               has_else = true;
+            memcpy(br, asg, sz);
+            if (vi_da_stmts(da, c, br)) {
+               vi_da_and(da, acc, br);
+               any = true;
+            }
+         }
+         if (!has_else) {
+            vi_da_and(da, acc, asg);
+            any = true;
+         }
+         if (!any)
+            return false;
+         memcpy(asg, acc, sz);
+         return true;
+      }
+   case T_CASE:
+      {
+         vi_da_read(da, tree_value(stmt), asg);
+         bool *acc LOCAL = xmalloc(sz);
+         bool *br LOCAL = xmalloc(sz);
+         memset(acc, true, sz);
+         bool any = false;
+         // A case statement covers every value of its expression
+         for (int i = 0; i < tree_stmts(stmt); i++) {
+            memcpy(br, asg, sz);
+            if (vi_da_stmts(da, tree_stmt(stmt, i), br)) {
+               vi_da_and(da, acc, br);
+               any = true;
+            }
+         }
+         if (tree_stmts(stmt) == 0)
+            return true;
+         if (!any)
+            return false;
+         memcpy(asg, acc, sz);
+         return true;
+      }
+   case T_FOR:
+      {
+         tree_t rg = tree_range(stmt, 0);
+         if (tree_subkind(rg) == RANGE_EXPR)
+            vi_da_read(da, tree_value(rg), asg);
+         else {
+            vi_da_read(da, tree_left(rg), asg);
+            vi_da_read(da, tree_right(rg), asg);
+         }
+         // The body may run zero times: it assigns nothing for what
+         // follows, except a loop that assigns an element on every pass
+         // (as in r(i) := ...), which covers the elements its parameter
+         // selects
+         bool *br LOCAL = xmalloc(sz);
+         memcpy(br, asg, sz);
+         const bool plain = tree_visit_only(stmt, NULL, NULL, T_EXIT) == 0
+            && tree_visit_only(stmt, NULL, NULL, T_NEXT) == 0
+            && tree_visit_only(stmt, NULL, NULL, T_RETURN) == 0;
+         vi_da_stmts(da, stmt, br);   // Reads in the body
+         int64_t lv, rv;
+         const range_kind_t rk = tree_subkind(rg);
+         if (!plain || (rk != RANGE_TO && rk != RANGE_DOWNTO)
+             || !vi_eval_const_int(da->l, tree_left(rg), &lv)
+             || !vi_eval_const_int(da->l, tree_right(rg), &rv))
+            return true;
+         const int64_t lo = MIN(lv, rv), hi = MAX(lv, rv);
+         if ((rk == RANGE_TO) ? lv > rv : lv < rv)
+            return true;
+         if (hi - lo >= VHDL_ISLAND_MAX_LOOP_ITERS)
+            return true;
+         // Evaluate the targets with the loop parameter as a constant
+         vi_local_t pl = { .decl = tree_decl(stmt, 0), .has_const_int = true };
+         APUSH(da->l->scope->locals, pl);
+         const unsigned pidx = da->l->scope->locals.count - 1;
+         for (int64_t v = lo; v <= hi; v++) {
+            da->l->scope->locals.items[pidx].const_int = v;
+            for (int i = 0; i < tree_stmts(stmt); i++) {
+               tree_t s = tree_stmt(stmt, i);
+               uint32_t plo, pn;
+               if (tree_kind(s) == T_VAR_ASSIGN
+                   && vi_da_target(da, tree_target(s), &plo, &pn))
+                  memset(asg + plo, true, pn);
+            }
+         }
+         da->l->scope->locals.count--;
+         return true;
+      }
+   case T_EXIT:
+   case T_NEXT:
+      if (tree_has_value(stmt))
+         vi_da_read(da, tree_value(stmt), asg);
+      return true;
+   case T_PCALL:
+      for (int i = 0; i < tree_params(stmt); i++)
+         vi_da_read(da, tree_value(tree_param(stmt, i)), asg);
+      return true;
+   default:
+      da->read_early = true;
+      return true;
+   }
+}
+
+static bool vi_da_stmts(vi_da_t *da, tree_t owner, bool *asg)
+{
+   for (int i = 0; i < tree_stmts(owner); i++) {
+      if (!vi_da_stmt(da, tree_stmt(owner, i), asg))
+         return false;
+   }
+   return true;
+}
+
+// LOC, a variable of subprogram BODY without an initial value, bound in the
+// current scope: whether the body assigns all of it before reading it
+static bool vi_def_assigned(vi_lower_t *l, tree_t body, const vi_local_t *loc)
+{
+   // A copy: the loop analysis adds to the scope that holds LOC
+   const vi_local_t copy = *loc;
+   vi_da_t da = { .l = l, .loc = &copy };
+   uint32_t *offs LOCAL = NULL;
+   if (loc->is_rec) {
+      offs = xmalloc_array(MAX(1u, loc->n_rec_leaves), sizeof(uint32_t));
+      for (uint32_t i = 0; i < loc->n_rec_leaves; i++) {
+         offs[i] = da.npos;
+         da.npos += vi_da_leaf_npos(&(loc->rec_leaves[i]));
+      }
+      da.leaf_off = offs;
+   }
+   else
+      da.npos = (loc->is_vec && !loc->is_array2d) ? loc->width : 1;
+   if (da.npos == 0 || da.npos > 65536)
+      return false;
+   bool *asg LOCAL = xcalloc_array(da.npos, sizeof(bool));
+   vi_da_stmts(&da, body, asg);
+   return !da.read_early;
+}
+
+static bool vi_local_has_std(const vi_local_t *loc)
+{
+   if (!loc->is_rec)
+      return loc->is_std;
+   for (uint32_t i = 0; i < loc->n_rec_leaves; i++) {
+      if (loc->rec_leaves[i].is_std)
+         return true;
+   }
+   return false;
+}
+
+static bool vi_init_default_local(vi_lower_t *l, const vi_local_t *loc)
+{
+   if (loc->is_rec) {
+      for (uint32_t i = 0; i < loc->n_rec_leaves; i++) {
+         const vi_rec_leaf_t *lf = &(loc->rec_leaves[i]);
+         if (!vi_init_default_leaf(l, lf, lf->type))
+            return false;
+      }
+      return true;
+   }
+   const vi_rec_leaf_t lf = {
+      .is_array2d = loc->is_array2d,
+      .is_vec     = loc->is_vec,
+      .is_std     = loc->is_std,
+      .is_bool    = loc->is_bool,
+      .is_signed  = loc->is_signed,
+      .is_int     = loc->is_int,
+      .width      = loc->width,
+      .nelems     = loc->nelems,
+      .storage    = loc->storage,
+   };
+   return vi_init_default_leaf(l, &lf, tree_type(loc->decl));
+}
+
+// Speculative variant: the 2-state zero that stands for the 'U' default of
+// a std_ulogic variable of subprogram BODY must never be read, so every
+// such variable in SC must be assigned before it is read
+static bool vi_check_spec_defaults(vi_lower_t *l, tree_t body,
+                                   const vi_scope_t *sc)
+{
+   if (!l->spec)
+      return true;
+   for (unsigned i = 0; i < sc->locals.count; i++) {
+      const vi_local_t *loc = &(sc->locals.items[i]);
+      if (tree_kind(loc->decl) != T_VAR_DECL || tree_has_value(loc->decl)
+          || !vi_local_has_std(loc))
+         continue;
+      if (!vi_def_assigned(l, body, loc)) {
+         if (l->reason == NULL && opt_get_int(OPT_DUMP_ISLANDS))
+            l->reason = istr(ident_sprintf(
+               "spec: %s may be read before assignment (default 'U')",
+               istr(tree_ident(loc->decl))));
+         return false;
+      }
+   }
+   return true;
+}
+
 static mir_value_t vi_to_bool(vi_lower_t *l, vi_val_t v)
 {
    mir_unit_t *mu = l->mu;
@@ -2847,7 +3333,8 @@ static bool vi_lower_inline_func(vi_lower_t *l, tree_t fcall, tree_t func,
             loc.rec_leaves = leaves.items;
             loc.n_rec_leaves = leaves.count;
             if (tree_has_value(d)
-                && !vi_assign_rec_local(l, &loc, rpath, 0, vt, tree_value(d))) {
+                ? !vi_assign_rec_local(l, &loc, rpath, 0, vt, tree_value(d))
+                : !vi_init_default_local(l, &loc)) {
                free(loc.rec_leaves);
                l->scope = prev_scope;
                vi_scope_clear(&child);
@@ -2911,8 +3398,19 @@ static bool vi_lower_inline_func(vi_lower_t *l, tree_t fcall, tree_t func,
             else
                mir_build_copy(mu, loc.storage, initv.val, vi_off(mu, loc.width));
          }
+         else if (!vi_init_default_local(l, &loc)) {
+            l->scope = prev_scope;
+            vi_scope_clear(&child);
+            return false;
+         }
          APUSH(child.locals, loc);
       }
+   }
+
+   if (!vi_check_spec_defaults(l, func, &child)) {
+      l->scope = prev_scope;
+      vi_scope_clear(&child);
+      return false;
    }
 
    for (int i = 0; i < tree_stmts(func); i++) {
@@ -6478,7 +6976,8 @@ static bool vi_lower_str_expr(vi_lower_t *l, tree_t expr, vi_str_t *out)
    }
 }
 
-static bool vi_bind_process_locals(vi_lower_t *l, tree_t proc, vi_scope_t *sc);
+static bool vi_bind_process_locals(vi_lower_t *l, tree_t proc, vi_scope_t *sc,
+                                   bool subprog);
 
 static bool vi_lower_inline_proc(vi_lower_t *l, tree_t pcall)
 {
@@ -6636,7 +7135,8 @@ static bool vi_lower_inline_proc(vi_lower_t *l, tree_t pcall)
    vi_scope_t *prev_scope = l->scope;
    l->scope = &child;
 
-   if (!vi_bind_process_locals(l, proc, &child)) {
+   if (!vi_bind_process_locals(l, proc, &child, true)
+       || !vi_check_spec_defaults(l, proc, &child)) {
       l->scope = prev_scope;
       vi_scope_clear(&child);
       return false;
@@ -7167,7 +7667,11 @@ static bool vi_lower_stmt_inner(vi_lower_t *l, tree_t stmt)
    }
 }
 
-static bool vi_bind_process_locals(vi_lower_t *l, tree_t proc, vi_scope_t *sc)
+// SUBPROG: the declarations of an inlined procedure, whose variables start
+// with their default value; a fused process assigns each variable before it
+// reads it (see check_process_decls)
+static bool vi_bind_process_locals(vi_lower_t *l, tree_t proc, vi_scope_t *sc,
+                                   bool subprog)
 {
    mir_unit_t *mu = l->mu;
    const int nd = tree_decls(proc);
@@ -7189,7 +7693,8 @@ static bool vi_bind_process_locals(vi_lower_t *l, tree_t proc, vi_scope_t *sc)
          loc.rec_leaves = leaves.items;
          loc.n_rec_leaves = leaves.count;
          if (tree_has_value(d)
-             && !vi_assign_rec_local(l, &loc, rpath, 0, vt, tree_value(d))) {
+             ? !vi_assign_rec_local(l, &loc, rpath, 0, vt, tree_value(d))
+             : (subprog && !vi_init_default_local(l, &loc))) {
             free(loc.rec_leaves);
             return false;
          }
@@ -7235,6 +7740,8 @@ static bool vi_bind_process_locals(vi_lower_t *l, tree_t proc, vi_scope_t *sc)
                if (!vi_assign_array2d_local(l, &lf, tree_value(d)))
                   return false;
             }
+            else if (subprog && !vi_init_default_local(l, &loc))
+               return false;
             APUSH(sc->locals, loc);
             continue;
          }
@@ -7250,7 +7757,8 @@ static bool vi_bind_process_locals(vi_lower_t *l, tree_t proc, vi_scope_t *sc)
             loc.rec_leaves = leaves.items;
             loc.n_rec_leaves = leaves.count;
             if (tree_has_value(d)
-                && !vi_assign_rec_local(l, &loc, rpath, 0, vt, tree_value(d))) {
+                ? !vi_assign_rec_local(l, &loc, rpath, 0, vt, tree_value(d))
+                : (subprog && !vi_init_default_local(l, &loc))) {
                free(loc.rec_leaves);
                return false;
             }
@@ -7302,6 +7810,8 @@ static bool vi_bind_process_locals(vi_lower_t *l, tree_t proc, vi_scope_t *sc)
          else
             mir_build_copy(mu, loc.storage, initv.val, vi_off(mu, loc.width));
       }
+      else if (subprog && !vi_init_default_local(l, &loc))
+         return false;
       APUSH(sc->locals, loc);
    }
    return true;
@@ -7702,7 +8212,7 @@ static mir_unit_t *vi_build_comb_unit(mir_context_t *mc,
 
       bool ok = (!p->has_report || vi_emit_report_guard(&l, p, next_bb))
          && vi_emit_self_shadow(&l, p)
-         && vi_bind_process_locals(&l, p->stmt, &sc);
+         && vi_bind_process_locals(&l, p->stmt, &sc, false);
       const int ns = tree_stmts(p->stmt) - 1;
       for (int i = 0; i < ns && ok; i++)
          ok = vi_lower_stmt(&l, tree_stmt(p->stmt, i));
@@ -7823,7 +8333,7 @@ static mir_unit_t *vi_build_ff_unit(mir_context_t *mc,
                                     p->owner_ancestors, p->n_owner_ancestors);
          vi_scope_t sc = { .ret_bb = MIR_NULL_BLOCK };
          l.scope = &sc;
-         bool ok = vi_bind_process_locals(&l, p->stmt, &sc);
+         bool ok = vi_bind_process_locals(&l, p->stmt, &sc, false);
          for (int j = 0; j < tree_stmts(p->rst_branch) && ok; j++)
             ok = vi_lower_stmt(&l, tree_stmt(p->rst_branch, j));
          vi_scope_clear(&sc);
@@ -7849,7 +8359,7 @@ static mir_unit_t *vi_build_ff_unit(mir_context_t *mc,
                                     p->owner_ancestors, p->n_owner_ancestors);
          vi_scope_t sc = { .ret_bb = MIR_NULL_BLOCK };
          l.scope = &sc;
-         bool ok = vi_bind_process_locals(&l, p->stmt, &sc);
+         bool ok = vi_bind_process_locals(&l, p->stmt, &sc, false);
          for (int j = 0; j < tree_stmts(p->clk_branch) && ok; j++)
             ok = vi_lower_stmt(&l, tree_stmt(p->clk_branch, j));
          vi_scope_clear(&sc);
@@ -7875,7 +8385,7 @@ static mir_unit_t *vi_build_ff_unit(mir_context_t *mc,
                                     p->owner_ancestors, p->n_owner_ancestors);
          vi_scope_t sc = { .ret_bb = MIR_NULL_BLOCK };
          l.scope = &sc;
-         bool ok = vi_bind_process_locals(&l, p->stmt, &sc);
+         bool ok = vi_bind_process_locals(&l, p->stmt, &sc, false);
          for (int j = 0; j < tree_stmts(p->clk_branch) && ok; j++)
             ok = vi_lower_stmt(&l, tree_stmt(p->clk_branch, j));
          vi_scope_clear(&sc);
