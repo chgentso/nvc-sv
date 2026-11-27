@@ -187,6 +187,7 @@ typedef struct _rt_model {
    uint64_t           trigger_epoch;
    bool               can_create_delta;
    bool               next_is_delta;
+   uint16_t           quiet_count;
    bool               force_stop;
    bool               sva_flush;
    bool               finished;
@@ -8970,6 +8971,123 @@ void x_sv_sched_postponed(bool late)
 
    set_pending(&proc->wakeable);
    deferq_do(late ? &m->latepostq : &m->postponedq, async_run_process, proc);
+}
+
+static inline bool quiet_driver(rt_nexus_t *n, const void *value)
+{
+   // True if a zero-delay transaction with this value on the only driver
+   // of the nexus would take the "will not observe" fast driver path of
+   // sched_driver without any other effect
+   if ((n->flags & (NET_F_FAST_DRIVER | NET_F_EFFECTIVE)) != NET_F_FAST_DRIVER)
+      return false;
+
+   rt_source_t *d = &(n->sources);
+   if (d->fastqueued)
+      return false;
+
+   return cmp_bytes(value, value_ptr(n, &(d->u.driver.waveforms.value)),
+                    n->width * n->size);
+}
+
+static inline void quiet_transaction(rt_model_t *m, rt_nexus_t *n)
+{
+   // Same as the fast driver path of sched_driver for a transaction that
+   // does not change the value of the driver: the driver is active in the
+   // next delta cycle but there is nothing to update
+   rt_source_t *d = &(n->sources);
+   d->u.driver.waveforms.when = m->now;
+   d->was_active = (n->active_delta == m->iteration);
+   n->active_delta = m->iteration + 1;
+}
+
+__attribute__((noinline))
+static bool quiet_slices(rt_model_t *m, rt_signal_t *s, uint32_t offset,
+                         const void *values, int32_t count)
+{
+   rt_nexus_t *n = &(s->nexus);
+   if (offset != 0) {
+      int off = offset;
+      for (n = lookup_index(s, &off); n != NULL && off >= n->width;
+           n = n->chain)
+         off -= n->width;
+
+      if (n == NULL || off != 0)
+         return false;   // Would split a nexus
+   }
+
+   const uint8_t *vptr = values;
+   rt_nexus_t *it = n;
+   for (int left = count; left > 0; it = it->chain) {
+      if (it == NULL || it->width > left)
+         return false;   // Would split a nexus
+      else if (!quiet_driver(it, vptr))
+         return false;
+
+      vptr += it->width * it->size;
+      left -= it->width;
+   }
+
+   RT_LOCK(s->lock);
+
+   for (int left = count; left > 0; n = n->chain) {
+      quiet_transaction(m, n);
+      left -= n->width;
+   }
+
+   m->next_is_delta = true;
+   return true;
+}
+
+static inline bool sched_waveform_quiet(sig_shared_t *ss, uint32_t offset,
+                                        const void *values, int32_t count)
+{
+   // Short path for the most common transaction in RTL designs: a
+   // zero-delay assignment which does not change the value of any of the
+   // drivers it updates, where each nexus has a single fast driver.
+   // Returns false without any effect for anything else, and then the
+   // caller takes the full path through x_sched_waveform.
+
+   rt_signal_t *s = container_of(ss, rt_signal_t, shared);
+   rt_model_t *m = __model;
+
+   if (unlikely(__trace_on) || unlikely(!m->can_create_delta))
+      return false;   // Postponed processes go through check_postponed
+   else if (unlikely(++m->quiet_count == 0))
+      return false;   // The full path checks for interrupts now and then
+   else if (ss->flags & SIG_F_PACKED)
+      return false;
+   else if ((ss->flags & NET_F_FAST_DRIVER) && s->nexus.sources.sigqueued)
+      return false;   // Update of all drivers already scheduled
+
+   rt_nexus_t *n = &(s->nexus);
+   if (likely(offset == 0 && n->width == count)) {
+      if (!quiet_driver(n, values))
+         return false;
+
+      RT_LOCK(s->lock);
+      quiet_transaction(m, n);
+      m->next_is_delta = true;
+      return true;
+   }
+   else
+      return quiet_slices(m, s, offset, values, count);
+}
+
+void x_sched_waveform_zero(struct _jit_anchor *anchor, sig_shared_t *ss,
+                           uint32_t offset, int32_t count, void *values)
+{
+   // Entry from the fast exit for a zero-delay waveform: the full path
+   // runs only when the short path does not apply, as a tail call so the
+   // short path needs no stack frame
+   if (!sched_waveform_quiet(ss, offset, values, count))
+      slow_sched_waveform_0(anchor, ss, offset, count, values);
+}
+
+void x_sched_waveform_zero_s(struct _jit_anchor *anchor, sig_shared_t *ss,
+                             uint32_t offset, uint64_t scalar)
+{
+   if (!sched_waveform_quiet(ss, offset, &scalar, 1))
+      slow_sched_waveform_s0(anchor, ss, offset, scalar);
 }
 
 void x_sched_waveform_s(sig_shared_t *ss, uint32_t offset, uint64_t scalar,
