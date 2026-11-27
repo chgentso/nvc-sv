@@ -2008,6 +2008,9 @@ static void run_process_inner(rt_model_t *m, rt_proc_t *proc)
    if (unlikely(proc->task != NULL))
       sv_task_note_run(proc);
 
+   if (unlikely(sv_unique_pending > 0))
+      sv_unique_flush_proc(proc);
+
    model_thread_t *thread = model_thread(m);
    assert(thread->tlab != NULL);
    assert(thread->tlab->alloc == 0);

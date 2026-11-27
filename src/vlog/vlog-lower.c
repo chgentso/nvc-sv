@@ -173,6 +173,7 @@ typedef struct {
    mir_value_t    island_state;
    hash_t        *island_sigs;
    uint32_t       island_state_stride;
+   uint32_t       island_proc_id;
    bool           in_island_comb;
    bool           in_island_ff;
    bool           two_state;
@@ -15325,11 +15326,38 @@ static void vlog_report_warning(vlog_gen_t *g, vlog_node_t v, const char *msg)
    mir_build_report(g->mu, ptr, len, severity, locus);
 }
 
+static void vlog_report_unique_warning(vlog_gen_t *g, vlog_node_t v,
+                                       const char *msg)
+{
+   if (g->constfunc || mir_get_kind(g->mu) == MIR_UNIT_THUNK) {
+      vlog_report_warning(g, v, msg);
+      return;
+   }
+
+   mir_type_t t_offset = mir_offset_type(g->mu);
+   mir_type_t t_ptr = mir_pointer_type(g->mu, mir_int_type(g->mu, 0, 255));
+
+   mir_value_t ctx = !mir_is_null(g->island_state)
+      ? g->island_state : mir_build_null(g->mu, t_ptr);
+   mir_value_t pid = mir_const(g->mu, t_offset, g->island_proc_id);
+   mir_value_t buf = mir_const_string(g->mu, msg);
+   mir_value_t ptr = mir_build_address_of(g->mu, buf);
+   mir_value_t len = mir_const(g->mu, t_offset, strlen(msg));
+   mir_value_t locus = mir_build_debug_locus(g->mu, vlog_to_object(v));
+
+   mir_value_t args[] = { ctx, pid, ptr, len, locus };
+   mir_value_t res = mir_build_fcall(g->mu, ident_new("__sv_unique_warn"),
+                                     t_offset, MIR_NULL_STAMP, args,
+                                     ARRAY_LEN(args));
+   mir_build_consume(g->mu, res);
+}
+
 static void vlog_lower_unique_checks(vlog_gen_t *g, vlog_node_t v,
                                      mir_value_t *tests, int ntests,
                                      bool has_default)
 {
    // Run time violations of unique, unique0, and priority are warnings
+   // deferred to the end of the time step (IEEE 1800-2017 12.4.2.1 & 12.5.3.1)
 
    const vlog_flags_t flags = vlog_flags(v);
    const bool is_case = vlog_kind(v) != V_IF;
@@ -15355,7 +15383,7 @@ static void vlog_lower_unique_checks(vlog_gen_t *g, vlog_node_t v,
       tb_printf(tb, "%s %s violation: more than one %s matches",
                 (flags & VLOG_F_UNIQUE0) ? "unique0" : "unique",
                 is_case ? "case" : "if", is_case ? "case item" : "condition");
-      vlog_report_warning(g, v, tb_get(tb));
+      vlog_report_unique_warning(g, v, tb_get(tb));
       mir_build_jump(g->mu, cont_bb);
 
       mir_set_cursor(g->mu, cont_bb, MIR_APPEND);
@@ -15373,7 +15401,7 @@ static void vlog_lower_unique_checks(vlog_gen_t *g, vlog_node_t v,
                 (flags & VLOG_F_PRIORITY) ? "priority" : "unique",
                 is_case ? "case" : "if", is_case ? "case item" : "condition",
                 is_case ? "default" : "else");
-      vlog_report_warning(g, v, tb_get(tb));
+      vlog_report_unique_warning(g, v, tb_get(tb));
       mir_build_jump(g->mu, cont_bb);
 
       mir_set_cursor(g->mu, cont_bb, MIR_APPEND);
@@ -40684,7 +40712,63 @@ static void vlog_lower_island_always(vlog_gen_t *g, vlog_node_t s)
    }
 }
 
-static void vlog_lower_island_comb_proc(vlog_gen_t *g, const island_proc_t *ip)
+typedef struct {
+   bool    found;
+   hset_t *seen_funcs;
+} vlog_unique_scan_t;
+
+static void vlog_unique_scan_cb(vlog_node_t v, void *ctx)
+{
+   vlog_unique_scan_t *sc = ctx;
+   if (sc->found)
+      return;
+
+   switch (vlog_kind(v)) {
+   case V_IF:
+   case V_CASE:
+      if (vlog_flags(v) & (VLOG_F_UNIQUE | VLOG_F_UNIQUE0 | VLOG_F_PRIORITY))
+         sc->found = true;
+      break;
+   case V_USER_FCALL:
+   case V_USER_TCALL:
+      if (vlog_has_ref(v)) {
+         vlog_node_t decl = vlog_ref(v);
+         if (sc->seen_funcs == NULL)
+            sc->seen_funcs = hset_new(8);
+         if (!hset_contains(sc->seen_funcs, decl)) {
+            hset_insert(sc->seen_funcs, decl);
+            vlog_visit(decl, vlog_unique_scan_cb, sc);
+         }
+      }
+      break;
+   default:
+      break;
+   }
+}
+
+static bool vlog_stmt_has_unique(vlog_node_t v)
+{
+   vlog_unique_scan_t sc = {};
+   vlog_visit(v, vlog_unique_scan_cb, &sc);
+   if (sc.seen_funcs != NULL)
+      hset_free(sc.seen_funcs);
+   return sc.found;
+}
+
+static void vlog_island_emit_unique_flush(vlog_gen_t *g, uint32_t pidx)
+{
+   mir_type_t t_offset = mir_offset_type(g->mu);
+   mir_value_t f_args[] = {
+      g->island_state,
+      mir_const(g->mu, t_offset, pidx + 1),
+   };
+   mir_value_t f_res = mir_build_fcall(g->mu, ident_new("__sv_unique_flush"),
+                                       t_offset, MIR_NULL_STAMP, f_args, 2);
+   mir_build_consume(g->mu, f_res);
+}
+
+static void vlog_lower_island_comb_proc(vlog_gen_t *g, const island_proc_t *ip,
+                                        uint32_t pidx)
 {
    vlog_node_t s = ip->stmt;
 
@@ -40692,6 +40776,11 @@ static void vlog_lower_island_comb_proc(vlog_gen_t *g, const island_proc_t *ip)
       vlog_assign_variable(g, vlog_target(s), MIR_NULL_VALUE, vlog_value(s));
    else {
       assert(ip->kind == IPROC_COMB);
+      const bool has_uniq = vlog_stmt_has_unique(s);
+      if (has_uniq) {
+         vlog_island_emit_unique_flush(g, pidx);
+         g->island_proc_id = pidx + 1;
+      }
       const vlog_always_kind_t ak = vlog_subkind(s);
       if (ak == V_ALWAYS_COMB || ak == V_ALWAYS_COMB_DONE) {
          gen_stack_t gs = {};
@@ -40699,6 +40788,7 @@ static void vlog_lower_island_comb_proc(vlog_gen_t *g, const island_proc_t *ip)
       }
       else
          vlog_lower_island_always(g, s);
+      g->island_proc_id = 0;
    }
 
    if (mir_block_finished(g->mu, MIR_NULL_BLOCK)) {
@@ -40775,7 +40865,7 @@ void vlog_lower_island_comb_fn(mir_context_t *mc, vlog_node_t body,
       prev_lvl = ip->topo_level;
 
       if (!ip->in_cycle) {
-         vlog_lower_island_comb_proc(&g, ip);
+         vlog_lower_island_comb_proc(&g, ip, pidx);
          c++;
          continue;
       }
@@ -40816,8 +40906,10 @@ void vlog_lower_island_comb_fn(mir_context_t *mc, vlog_node_t body,
       }
 
       if (back_sigs.count == 0) {
-         for (uint32_t j = c; j < end; j++)
-            vlog_lower_island_comb_proc(&g, &(isl->procs[isl->topo_order[j]]));
+         for (uint32_t j = c; j < end; j++) {
+            const uint32_t jp = isl->topo_order[j];
+            vlog_lower_island_comb_proc(&g, &(isl->procs[jp]), jp);
+         }
          ACLEAR(back_sigs);
          c = end;
          continue;
@@ -40869,7 +40961,8 @@ void vlog_lower_island_comb_fn(mir_context_t *mc, vlog_node_t body,
       }
 
       for (uint32_t j = c; j < end; j++) {
-         vlog_lower_island_comb_proc(&g, &(isl->procs[isl->topo_order[j]]));
+         const uint32_t jp = isl->topo_order[j];
+         vlog_lower_island_comb_proc(&g, &(isl->procs[jp]), jp);
          if (need_mid_force) {
             mir_value_t has_f = mir_build_cmp(mu, MIR_CMP_NEQ, force_hdr,
                                               zero_off);
@@ -40970,7 +41063,13 @@ void vlog_lower_island_ff_fn(mir_context_t *mc, vlog_node_t body,
 
       const island_proc_t *ip = &(isl->procs[pidx]);
       assert(ip->kind == IPROC_FF);
+      const bool has_uniq = vlog_stmt_has_unique(ip->stmt);
+      if (has_uniq) {
+         vlog_island_emit_unique_flush(&g, pidx);
+         g.island_proc_id = pidx + 1;
+      }
       vlog_lower_island_always(&g, ip->stmt);
+      g.island_proc_id = 0;
 
       if (mir_block_finished(mu, MIR_NULL_BLOCK)) {
          mir_block_t cont = mir_add_block(mu);

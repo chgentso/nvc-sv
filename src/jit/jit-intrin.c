@@ -5233,6 +5233,21 @@ static void sv_island_mark_ext_read(jit_func_t *func, jit_anchor_t *caller,
    args[0].integer = 0;
 }
 
+static void sv_unique_flush(jit_func_t *func, jit_anchor_t *caller,
+                            jit_scalar_t *args, tlab_t *tlab)
+{
+   x_sv_unique_flush(args[0].pointer, args[1].integer);
+   args[0].integer = 0;
+}
+
+static void sv_unique_warn(jit_func_t *func, jit_anchor_t *caller,
+                           jit_scalar_t *args, tlab_t *tlab)
+{
+   x_sv_unique_warn(args[0].pointer, args[1].integer, args[2].pointer,
+                    (int32_t)args[3].integer, args[4].pointer);
+   args[0].integer = 0;
+}
+
 static void sv_event_triggered(jit_func_t *func, jit_anchor_t *caller,
                                jit_scalar_t *args, tlab_t *tlab)
 {
@@ -7017,7 +7032,7 @@ jit_entry_fn_t jit_bind_intrinsic(ident_t name)
       island_finish_i = NULL, island_ext_read_i = NULL,
       island_set_sparse_i = NULL, island_sparse_write_i = NULL,
       island_variant_a_i = NULL, island_bind_a_i = NULL,
-      island_add_dom_a_i = NULL;
+      island_add_dom_a_i = NULL, unique_flush_i = NULL, unique_warn_i = NULL;
 
    INIT_ONCE({
          dispatch_func_i    = ident_new("__nvc_protected_dispatch_func");
@@ -7037,6 +7052,8 @@ jit_entry_fn_t jit_bind_intrinsic(ident_t name)
          island_variant_a_i = ident_new("__sv_island_set_variant_a");
          island_bind_a_i    = ident_new("__sv_island_bind_sig_a");
          island_add_dom_a_i = ident_new("__sv_island_add_domain_a");
+         unique_flush_i     = ident_new("__sv_unique_flush");
+         unique_warn_i      = ident_new("__sv_unique_warn");
 
          const bool want_intrinsics = !!opt_get_int(OPT_JIT_INTRINSICS);
 
@@ -7111,6 +7128,10 @@ jit_entry_fn_t jit_bind_intrinsic(ident_t name)
       return sv_island_bind_sig_a;
    else if (name == island_add_dom_a_i)
       return sv_island_add_domain_a;
+   else if (name == unique_flush_i)
+      return sv_unique_flush;
+   else if (name == unique_warn_i)
+      return sv_unique_warn;
 
    for (const jit_intrinsic_t *it = intrinsic_list; it->name; it++) {
       if (it->ident == name)

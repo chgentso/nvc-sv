@@ -25,6 +25,7 @@
 #include "rt/assert.h"
 #include "rt/model.h"
 #include "rt/structs.h"
+#include "thread.h"
 #include "tree.h"
 
 #include <string.h>
@@ -556,4 +557,217 @@ int get_vhdl_assert_exit_status(void)
    }
 
    return 0;
+}
+
+typedef struct {
+   void     *ctx;
+   int64_t   proc_id;
+   char     *msg;
+   int32_t   len;
+   object_t *where;
+} sv_unique_entry_t;
+
+unsigned sv_unique_pending = 0;
+
+static __thread void    *sv_cur_island_ctx = NULL;
+static __thread int64_t  sv_cur_island_proc_id = 0;
+
+static nvc_lock_t sv_unique_lock = 0;
+
+static struct {
+   rt_model_t        *model;
+   sv_unique_entry_t *items;
+   unsigned           count;
+   unsigned           max;
+   bool               cb_registered;
+   bool               eos_registered;
+} sv_unique_q;
+
+static void sv_unique_clear_locked(void)
+{
+   for (unsigned i = 0; i < sv_unique_q.count; i++)
+      free(sv_unique_q.items[i].msg);
+   sv_unique_q.count = 0;
+   relaxed_store(&sv_unique_pending, 0);
+}
+
+static void sv_unique_emit_all(sv_unique_entry_t *items, unsigned count)
+{
+   for (unsigned i = 0; i < count; i++) {
+      char *msg = items[i].msg;
+      const int32_t len = items[i].len;
+      object_t *where = items[i].where;
+      items[i].msg = NULL;
+      x_report((const uint8_t *)msg, len, SEVERITY_WARNING, where);
+      free(msg);
+   }
+   free(items);
+}
+
+static void sv_unique_emit_cb(rt_model_t *m, void *user)
+{
+   sv_unique_entry_t *items = NULL;
+   unsigned count = 0;
+
+   {
+      SCOPED_LOCK(sv_unique_lock);
+      sv_cur_island_ctx = NULL;
+      sv_cur_island_proc_id = 0;
+      sv_unique_q.cb_registered = false;
+      if (sv_unique_q.count > 0) {
+         items = sv_unique_q.items;
+         count = sv_unique_q.count;
+         sv_unique_q.items = NULL;
+         sv_unique_q.count = 0;
+         sv_unique_q.max = 0;
+         relaxed_store(&sv_unique_pending, 0);
+      }
+   }
+
+   if (count > 0)
+      sv_unique_emit_all(items, count);
+}
+
+static void sv_unique_eos_cb(rt_model_t *m, void *user)
+{
+   sv_unique_entry_t *items = NULL;
+   unsigned count = 0;
+
+   {
+      SCOPED_LOCK(sv_unique_lock);
+      sv_cur_island_ctx = NULL;
+      sv_cur_island_proc_id = 0;
+      sv_unique_q.cb_registered = false;
+      sv_unique_q.eos_registered = false;
+      sv_unique_q.model = NULL;
+      items = sv_unique_q.items;
+      count = sv_unique_q.count;
+      sv_unique_q.items = NULL;
+      sv_unique_q.count = 0;
+      sv_unique_q.max = 0;
+      relaxed_store(&sv_unique_pending, 0);
+   }
+
+   if (count > 0)
+      sv_unique_emit_all(items, count);
+   else
+      free(items);
+}
+
+static void sv_unique_remove(void *ctx, int64_t proc_id)
+{
+   SCOPED_LOCK(sv_unique_lock);
+
+   unsigned keep = 0;
+   for (unsigned i = 0; i < sv_unique_q.count; i++) {
+      if (sv_unique_q.items[i].ctx == ctx
+          && sv_unique_q.items[i].proc_id == proc_id) {
+         free(sv_unique_q.items[i].msg);
+      }
+      else {
+         if (keep != i)
+            sv_unique_q.items[keep] = sv_unique_q.items[i];
+         keep++;
+      }
+   }
+
+   if (keep != sv_unique_q.count) {
+      sv_unique_q.count = keep;
+      relaxed_store(&sv_unique_pending, keep);
+   }
+}
+
+void sv_unique_flush_proc(void *proc)
+{
+   if (likely(relaxed_load(&sv_unique_pending) == 0))
+      return;
+
+   if (proc != NULL)
+      sv_unique_remove(proc, 0);
+}
+
+void x_sv_unique_flush(void *ctx, int64_t proc_id)
+{
+   if (ctx != NULL) {
+      sv_cur_island_ctx = ctx;
+      sv_cur_island_proc_id = proc_id;
+   }
+
+   if (likely(relaxed_load(&sv_unique_pending) == 0))
+      return;
+
+   if (ctx == NULL) {
+      ctx = get_active_proc();
+      proc_id = 0;
+   }
+
+   if (ctx != NULL)
+      sv_unique_remove(ctx, proc_id);
+}
+
+void x_sv_unique_warn(void *ctx, int64_t proc_id, const uint8_t *msg,
+                      int32_t len, object_t *where)
+{
+   rt_model_t *m = get_model_or_null();
+   if (m == NULL) {
+      x_report(msg, len, SEVERITY_WARNING, where);
+      return;
+   }
+
+   void *key_ctx = ctx;
+   int64_t key_id = proc_id;
+   if (key_ctx == NULL) {
+      rt_proc_t *p = get_active_proc();
+      if (p != NULL) {
+         key_ctx = p;
+         key_id = 0;
+      }
+      else if (sv_cur_island_ctx != NULL) {
+         key_ctx = sv_cur_island_ctx;
+         key_id = sv_cur_island_proc_id;
+      }
+   }
+
+   bool need_cb = false, need_eos = false;
+   {
+      SCOPED_LOCK(sv_unique_lock);
+
+      if (sv_unique_q.model != m) {
+         sv_unique_clear_locked();
+         sv_unique_q.model = m;
+         sv_unique_q.cb_registered = false;
+         sv_unique_q.eos_registered = false;
+      }
+
+      if (sv_unique_q.count == sv_unique_q.max) {
+         sv_unique_q.max = MAX(sv_unique_q.max * 2, 16);
+         sv_unique_q.items = xrealloc_array(sv_unique_q.items, sv_unique_q.max,
+                                            sizeof(sv_unique_entry_t));
+      }
+
+      sv_unique_entry_t *e = &(sv_unique_q.items[sv_unique_q.count++]);
+      e->ctx = key_ctx;
+      e->proc_id = key_id;
+      e->msg = xmalloc(len + 1);
+      memcpy(e->msg, msg, len);
+      e->msg[len] = '\0';
+      e->len = len;
+      e->where = where;
+
+      relaxed_store(&sv_unique_pending, sv_unique_q.count);
+
+      if (!sv_unique_q.cb_registered) {
+         sv_unique_q.cb_registered = true;
+         need_cb = true;
+      }
+      if (!sv_unique_q.eos_registered) {
+         sv_unique_q.eos_registered = true;
+         need_eos = true;
+      }
+   }
+
+   if (need_cb)
+      model_set_phase_cb(m, LAST_KNOWN_DELTA_CYCLE, sv_unique_emit_cb, NULL);
+   if (need_eos)
+      model_set_phase_cb(m, END_OF_SIMULATION, sv_unique_eos_cb, NULL);
 }

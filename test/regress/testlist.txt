@@ -2460,6 +2460,7 @@ svprinttimescale3 verilog,fail,gold
 svrandnull3     verilog,gold
 svchandlefmt1   verilog,svlib=dpi_test
 svuniqmsg1      verilog,gold
+sv_unique_defer1 verilog,gold
 svhandlefmt2    verilog
 svpfmtref1      verilog
 svpfmtpacked1   verilog
