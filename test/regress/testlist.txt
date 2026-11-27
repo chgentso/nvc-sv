@@ -3376,3 +3376,4 @@ svunitscope1    verilog
 svcaseimpure1   verilog
 svpatfwd1       verilog
 svpatparam1     verilog
+svtypeinst1     verilog

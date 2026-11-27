@@ -26397,6 +26397,82 @@ static bool scan_skip_macro_args(void)
    return true;
 }
 
+static bool scan_module_instantiation(vlog_node_t ref)
+{
+   // When a typedef shares a name with a module or interface, a parameter
+   // override #( ... ) (when ref is not a generic class) or an instance port
+   // list id [dims] ( ... ) distinguishes instantiation from a variable
+   // declaration (IEEE 1800-2017 23.3.2)
+
+   if (peek() != tID)
+      return false;
+
+   if (peek_nth(2) == tHASH) {
+      if (ref == NULL)
+         return false;
+      if (vlog_kind(ref) == V_CLASS_DECL
+          && (vlog_flags(ref) & (VLOG_F_GENERIC | VLOG_F_FORWARD)))
+         return false;
+      if (vlog_kind(ref) == V_TYPE_DECL && generic_classes != NULL
+          && hash_get(generic_classes, ref))
+         return false;
+      return true;
+   }
+
+   int n = 2;
+   while (n < TOKENQ_SIZE - 2) {
+      if (peek_nth(n) != tID)
+         return false;
+      n++;
+
+      while (n < TOKENQ_SIZE - 2 && peek_nth(n) == tLSQUARE) {
+         int depth = 1;
+         for (n++; depth > 0 && n < TOKENQ_SIZE - 2; n++) {
+            const token_t tok = peek_nth(n);
+            if (tok == tLSQUARE)
+               depth++;
+            else if (tok == tRSQUARE)
+               depth--;
+            else if (tok == tEOF || tok == tSEMI)
+               return false;
+         }
+      }
+
+      if (n >= TOKENQ_SIZE - 2)
+         return false;
+
+      const token_t tok = peek_nth(n);
+      if (tok == tLPAREN)
+         return true;
+      else if (tok == tCOMMA) {
+         n++;
+         continue;
+      }
+      else if (tok == tEQ) {
+         // Skip initializer expression up to top-level ',' or ';'
+         int depth = 0;
+         for (n++; n < TOKENQ_SIZE - 2; n++) {
+            const token_t itok = peek_nth(n);
+            if (itok == tEOF || (depth == 0 && itok == tSEMI))
+               return false;
+            else if (depth == 0 && itok == tCOMMA) {
+               n++;
+               break;
+            }
+            else if (itok == tLPAREN || itok == tLSQUARE || itok == tLBRACE)
+               depth++;
+            else if (itok == tRPAREN || itok == tRSQUARE || itok == tRBRACE)
+               depth--;
+         }
+         continue;
+      }
+      else
+         return false;
+   }
+
+   return false;
+}
+
 static bool scan_unknown_type_declaration(void)
 {
    // When scanning a file on its own the type of a declaration may come
@@ -26685,6 +26761,10 @@ static void p_module_or_generate_item_1(vlog_node_t mod)
                       || (peek_nth(2) == tID && (peek_nth(3) == tLPAREN
                                                  || peek_nth(3) == tLSQUARE)))) {
             // An instance may have the same name as its module
+            p_module_or_udp_instantiation(mod);
+            break;
+         }
+         else if (is_data_type(ref) && scan_module_instantiation(ref)) {
             p_module_or_udp_instantiation(mod);
             break;
          }
