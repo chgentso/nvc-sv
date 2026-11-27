@@ -13996,6 +13996,14 @@ static bool vlog_uses_memory_member(vlog_node_t v)
    switch (vlog_kind(v)) {
    case V_REF:
       {
+         // A variable declared outside any module (package/$unit) or a static
+         // class property is held in memory rather than in a signal
+         if (vlog_has_ref(v)) {
+            vlog_node_t decl = vlog_ref(v);
+            if (vlog_kind(decl) == V_VAR_DECL && vlog_has_ident2(decl))
+               return true;
+         }
+
          // A whole unpacked structure is not a vector of signals either,
          // nor is a string, queue, dynamic array or class handle
          vlog_node_t type = vlog_get_type(v);
@@ -36250,6 +36258,9 @@ static void vlog_lower_sensitivity(vlog_gen_t *g, vlog_node_t v)
                }
 
                vlog_select_t lvalue = vlog_lower_select(g, v);
+               if (!mir_is_signal(g->mu, lvalue.obj))
+                  break;
+
                int total_size = lvalue.size;
                if (vlog_kind(v) == V_REF)
                   total_size = vlog_whole_size(g, v, &lvalue);
@@ -36279,11 +36290,12 @@ static void vlog_lower_sensitivity(vlog_gen_t *g, vlog_node_t v)
          vlog_node_t prefix = vlog_longest_static_prefix(v);
          if (prefix == v) {
             vlog_select_t lvalue = vlog_lower_select(g, v);
+            if (mir_is_signal(g->mu, lvalue.obj)) {
+               mir_value_t nets =
+                  mir_build_array_ref(g->mu, lvalue.obj, lvalue.dst_offset);
 
-            mir_value_t nets =
-               mir_build_array_ref(g->mu, lvalue.obj, lvalue.dst_offset);
-
-            vlog_sensitivity_event(g, nets, lvalue.count);
+               vlog_sensitivity_event(g, nets, lvalue.count);
+            }
          }
          else if (prefix != NULL) {
             vlog_lower_sensitivity(g, prefix);
