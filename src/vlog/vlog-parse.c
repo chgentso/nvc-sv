@@ -19737,8 +19737,141 @@ static void p_class_body(vlog_node_t v, ident_t name, generic_class_t *g,
    const bool saved_in_subroutine = in_subroutine;
    in_subroutine = false;
 
-   while (not_at_token(tENDCLASS))
+   // Pre-parse top-level localparams in a parameterised class body whose
+   // dependencies are already visible, so earlier property declarations (e.g.
+   // Foo #(LOCALP) f;) can reference localparams declared later in the class.
+   int pre_lp[64];
+   int npre_lp = 0;
+   if (g != NULL && replay_class == g) {
+      const int queued = (state.tokenq_head - state.tokenq_tail)
+         & (TOKENQ_SIZE - 1);
+      const int body_start = replay_pos - queued;
+      int depth = 0;
+      for (int i = body_start; i < g->ntokens && npre_lp < ARRAY_LEN(pre_lp);
+           i++) {
+         const token_t tok = g->tokens[i].token;
+         if (tok == tCLASS || tok == tFUNCTION || tok == tTASK
+             || (tok == tID && g->tokens[i].lval.ident == ident_new("covergroup"))
+             || tok == tLBRACE || tok == tLPAREN
+             || tok == tLSQUARE || tok == tBEGIN || tok == tFORK) {
+            depth++;
+            continue;
+         }
+         if (tok == tENDCLASS || tok == tENDFUNCTION || tok == tENDTASK
+             || (tok == tID && g->tokens[i].lval.ident == ident_new("endgroup"))
+             || tok == tRBRACE || tok == tRPAREN
+             || tok == tRSQUARE || tok == tEND || tok == tJOIN
+             || tok == tJOINANY || tok == tJOINNONE) {
+            if (depth == 0)
+               break;
+            depth--;
+            continue;
+         }
+         if (depth == 0 && tok == tLOCALPARAM) {
+            // Find matching ';' at depth 0 and check all referenced ids
+            int end = i + 1, sub = 0;
+            bool ok = true;
+            bool past_eq = false;
+            int eq_pos = -1;
+            for (; end < g->ntokens; end++) {
+               const token_t t2 = g->tokens[end].token;
+               if (t2 == tLPAREN || t2 == tLSQUARE || t2 == tLBRACE)
+                  sub++;
+               else if (t2 == tRPAREN || t2 == tRSQUARE || t2 == tRBRACE) {
+                  if (sub == 0) { ok = false; break; }
+                  sub--;
+               }
+               else if (sub == 0 && t2 == tSEMI)
+                  break;
+               else if (sub == 0 && t2 == tTYPE) {
+                  ok = false;   // Skip localparam type for normal pass
+                  break;
+               }
+               else if (sub == 0 && t2 == tCOMMA) {
+                  ok = false;   // Multi-item list: handle in normal pass
+                  break;
+               }
+               else if (sub == 0 && t2 == tEQ && !past_eq) {
+                  past_eq = true;
+                  eq_pos = end;
+               }
+            }
+            if (!ok || !past_eq || end >= g->ntokens) {
+               i = end;
+               continue;
+            }
+            // Check every identifier except the declared name itself (right
+            // before '=' or before any unpacked dims preceding '=')
+            int name_pos = eq_pos - 1;
+            while (name_pos > i && g->tokens[name_pos].token == tRSQUARE) {
+               int b = 1;
+               name_pos--;
+               while (name_pos > i && b > 0) {
+                  if (g->tokens[name_pos].token == tRSQUARE) b++;
+                  else if (g->tokens[name_pos].token == tLSQUARE) b--;
+                  name_pos--;
+               }
+            }
+            if (name_pos <= i || g->tokens[name_pos].token != tID) {
+               i = end;
+               continue;
+            }
+            for (int k = i + 1; k < end && ok; k++) {
+               if (k == name_pos)
+                  continue;
+               if (g->tokens[k].token == tID) {
+                  // Allow scope::member only if scope is known
+                  if (k > i + 1 && (g->tokens[k - 1].token == tSCOPE
+                                    || g->tokens[k - 1].token == tDOT))
+                     continue;
+                  if (vlog_symtab_query(symtab, g->tokens[k].lval.ident) == NULL)
+                     ok = false;
+               }
+            }
+            if (ok) {
+               parse_state_t *ps = save_parse_state();
+               const int saved_rpos = replay_pos;
+               replay_pos = i;
+               state.tokenq_head = state.tokenq_tail = 0;
+               state.start_loc = LOC_INVALID;
+               p_local_parameter_declaration(v);
+               consume(tSEMI);
+               restore_parse_state(ps);
+               replay_pos = saved_rpos;
+               pre_lp[npre_lp++] = i;
+            }
+            i = end;
+         }
+      }
+   }
+
+   while (not_at_token(tENDCLASS)) {
+      if (npre_lp > 0 && peek() == tLOCALPARAM && replay_class == g) {
+         const int queued = (state.tokenq_head - state.tokenq_tail)
+            & (TOKENQ_SIZE - 1);
+         const int cur_pos = replay_pos - queued;
+         bool skip = false;
+         for (int k = 0; k < npre_lp && !skip; k++)
+            skip = (pre_lp[k] == cur_pos);
+         if (skip) {
+            int sub = 0;
+            for (;;) {
+               const token_t tok = peek();
+               if (tok == tEOF)
+                  break;
+               drop_token(&state);
+               if (tok == tLPAREN || tok == tLSQUARE || tok == tLBRACE)
+                  sub++;
+               else if (tok == tRPAREN || tok == tRSQUARE || tok == tRBRACE)
+                  sub--;
+               else if (sub == 0 && tok == tSEMI)
+                  break;
+            }
+            continue;
+         }
+      }
       p_class_item(v);
+   }
 
    in_subroutine = saved_in_subroutine;
 

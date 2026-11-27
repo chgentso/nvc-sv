@@ -3404,3 +3404,4 @@ vlog_gen_case_if verilog
 sv_gen_class1   verilog
 sv_extern_param_ret1 verilog
 sv_assert_disable1 verilog
+sv_class_fwd_lparam1 verilog
