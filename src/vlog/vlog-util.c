@@ -2814,7 +2814,8 @@ tree_t vlog_iface_port_target(tree_t b, vlog_node_t port, ident_t id)
          if (tree_ident(d) == id)
             return tree_has_ref(d) ? tree_ref(d) : NULL;
       }
-      else if (port != NULL ? vd == port : vlog_ident(vd) == id)
+      else if (port != NULL ? vd == port
+                            : (tree_ident(d) == id || vlog_ident(vd) == id))
          return tree_has_ref(d) ? tree_ref(d) : NULL;
    }
 
