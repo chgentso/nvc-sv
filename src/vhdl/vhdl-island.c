@@ -1060,6 +1060,7 @@ typedef struct {
    bool                     allow_report;
    bool                     report_in_body;  // not in subprograms
    uint32_t                 n_reports;
+   uint32_t                 n_warns;   // Calls that may report a warning
    bool                     in_func;
    bool                     allow_sig_attr_event;
    int                      call_depth;
@@ -1449,6 +1450,33 @@ static bool is_supported_std_fn(check_ctx_t *c, const char *pkg, const char *fn)
    return false;
 }
 
+// A function of the IEEE (or Synopsys) packages that may report a warning
+// with valid arguments of the right length, such as the metavalue warnings
+// of the numeric_std relational operators and TO_INTEGER: a process that
+// calls one must run exactly when it would run unfused (see
+// comb_report_events), as an extra run repeats the warning.  Mode A has no
+// metavalues (the truncation warning of TO_UNSIGNED and TO_SIGNED is not
+// kept exact there).
+static bool std_fn_may_warn(check_ctx_t *c, const char *pkg, const char *fn)
+{
+   if (c->two_state)
+      return false;
+   if (strcmp(pkg, "IEEE.NUMERIC_STD.") == 0
+       || strcmp(pkg, "IEEE.NUMERIC_STD_UNSIGNED.") == 0) {
+      return fn_name_is(fn, "\"=\"") || fn_name_is(fn, "\"/=\"")
+         || fn_name_is(fn, "\"<\"") || fn_name_is(fn, "\"<=\"")
+         || fn_name_is(fn, "\">\"") || fn_name_is(fn, "\">=\"")
+         || fn_name_is(fn, "TO_INTEGER") || fn_name_is(fn, "TO_UNSIGNED")
+         || fn_name_is(fn, "TO_SIGNED") || fn_name_is(fn, "MINIMUM")
+         || fn_name_is(fn, "MAXIMUM") || fn_name_is(fn, "STD_MATCH");
+   }
+   if (strcmp(pkg, "IEEE.STD_LOGIC_UNSIGNED.") == 0
+       || strcmp(pkg, "IEEE.STD_LOGIC_SIGNED.") == 0
+       || strcmp(pkg, "IEEE.STD_LOGIC_ARITH.") == 0)
+      return true;
+   return false;
+}
+
 static bool type_ok_for_local(type_t t)
 {
    if (type_is_record(t)) {
@@ -1538,6 +1566,7 @@ static bool check_pure_func_body(check_ctx_t *outer, tree_t func_decl)
                                    tree_stmts(func_decl), true);
    if (outer->reason == NULL)
       outer->reason = fc.reason;
+   outer->n_warns += fc.n_warns;
    ACLEAR(fc.reads);
    ACLEAR(fc.writes);
    ACLEAR(fc.read_ranges);
@@ -1649,6 +1678,7 @@ static bool check_pure_proc_body(check_ctx_t *outer, tree_t proc_decl)
 
    const bool ok = check_stmt_list(&fc, proc_decl, 0,
                                    tree_stmts(proc_decl), true);
+   outer->n_warns += fc.n_warns;
    ACLEAR(fc.reads);
    ACLEAR(fc.writes);
    ACLEAR(fc.read_ranges);
@@ -2111,8 +2141,13 @@ static bool check_expr_inner(check_ctx_t *c, tree_t expr, bool is_target)
          }
 
          const char *pkg = NULL, *fn = NULL;
-         if (ident_has_std_pkg_fn(decl, &pkg, &fn))
-            return is_supported_std_fn(c, pkg, fn);
+         if (ident_has_std_pkg_fn(decl, &pkg, &fn)) {
+            if (!is_supported_std_fn(c, pkg, fn))
+               return false;
+            if (std_fn_may_warn(c, pkg, fn))
+               c->n_warns++;
+            return true;
+         }
 
          // Allow pure user VHDL functions (either in same arch or package body!)
          return check_pure_func_body(c, decl);
@@ -3410,7 +3445,7 @@ static void analyze_process(vhdl_island_ctx_t *ctx, tree_t proc, int stmt_idx,
          // copy taken when the process starts (see vi_build_comb_unit) and
          // the island runs again in the next delta when they changed.
          vhdl_iproc_t evt = { .n_evt_sigs = 0 };
-         if (ok && c.n_reports > 0) {
+         if (ok && (c.n_reports > 0 || c.n_warns > 0)) {
             const char *er = comb_report_events(&evt, ctx, wait);
             if (er != NULL) {
                ok = false;
@@ -3433,6 +3468,7 @@ static void analyze_process(vhdl_island_ctx_t *ctx, tree_t proc, int stmt_idx,
                .kind              = VIPROC_COMB,
                .rst_sig        = -1,
                .has_report     = c.n_reports > 0,
+               .has_warn       = c.n_warns > 0,
                .evt_sigs       = evt.evt_sigs,
                .evt_part_off   = evt.evt_part_off,
                .evt_part_bytes = evt.evt_part_bytes,
@@ -5556,7 +5592,7 @@ void vhdl_island_rebuild(vhdl_island_ctx_t *ctx)
       // processes with report statements, compared on each call
       for (unsigned k = 0; k < isl_comb.count; k++) {
          vhdl_iproc_t *p = &(procs.items[isl_comb.items[k]]);
-         if (!p->has_report)
+         if (!p->has_report && !p->has_warn)
             continue;
          free(p->evt_copy_off);
          free(p->evt_copy_bytes);

@@ -137,6 +137,9 @@ typedef struct {
    // with the process unfused: the island state keeps a run flag and a
    // copy of each such signal (offsets set with the island layout)
    bool              has_report;
+   // Likewise a Mode B process that calls a function that may report a
+   // warning (an IEEE metavalue warning)
+   bool              has_warn;
    uint32_t         *evt_sigs;
    uint32_t          n_evt_sigs;
    uint32_t         *evt_part_off;    // Byte range of a signal element or

@@ -3476,3 +3476,4 @@ svstaticinit3 verilog,gold
 svgatedelay2 verilog,gold
 vhdl_island_lut1 shell
 vhdl_island_trace1 shell
+vhdl_island_warn1 shell
