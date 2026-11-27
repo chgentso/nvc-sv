@@ -5427,8 +5427,14 @@ static vcode_reg_t lower_new(lower_unit_t *lu, tree_t expr)
          if (!in_place_aggregate)
             init_reg = bounds_reg = lower_rvalue(lu, qual);
       }
-      else if (wrap_value)
-         bounds_reg = lower_get_type_bounds(lu, type);
+      else {
+         if (wrap_value)
+            bounds_reg = lower_get_type_bounds(lu, type);
+
+         if (!type_is_unconstrained(type))
+            lower_check_indexes(lu, type, type_base_recur(type),
+                                bounds_reg, expr);
+      }
 
       vcode_reg_t length_reg =
          lower_array_total_len(lu, value_type, bounds_reg);
@@ -9302,6 +9308,9 @@ static void lower_sub_signals(lower_unit_t *lu, type_t type, type_t var_type,
    else if (type_is_homogeneous(type)) {
       assert(type_is_array(type));
 
+      if (!type_is_unconstrained(type))
+         lower_check_indexes(lu, type, type_base_recur(type), bounds_reg, where);
+
       vcode_type_t voffset = vtype_offset();
       vcode_reg_t size_reg = emit_const(voffset, type_byte_width(type));
       vcode_reg_t len_reg = lower_array_total_len(lu, type, bounds_reg);
@@ -9347,6 +9356,9 @@ static void lower_sub_signals(lower_unit_t *lu, type_t type, type_t var_type,
    else if (type_is_array(type)) {
       // Array of non-homogeneous type (e.g. records). Need a loop to
       // initialise each sub-signal.
+
+      if (!type_is_unconstrained(type))
+         lower_check_indexes(lu, type, type_base_recur(type), bounds_reg, where);
 
       type_t elem = type_elem_recur(type);
 
