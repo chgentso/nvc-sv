@@ -335,6 +335,14 @@ void fast_sched_waveform(jit_anchor_t *anchor, sig_shared_t *shared,
                          int32_t offset, int32_t count, jit_scalar_t value,
                          int64_t after, int64_t reject, bool scalar)
 {
+   if (after == 0 && reject == 0) {
+      if (scalar)
+         x_sched_waveform_zero_s(anchor, shared, offset, value.integer);
+      else
+         x_sched_waveform_zero(anchor, shared, offset, count, value.pointer);
+      return;
+   }
+
    jit_thread_local_t *thread = jit_attach_thread(anchor);
 
    if (scalar)
@@ -349,19 +357,33 @@ void fast_sched_waveform(jit_anchor_t *anchor, sig_shared_t *shared,
 void fast_sched_waveform_s0(jit_anchor_t *anchor, sig_shared_t *shared,
                             int32_t offset, jit_scalar_t value)
 {
-   jit_thread_local_t *thread = jit_attach_thread(anchor);
-
-   x_sched_waveform_s0(shared, offset, value.integer);
-
-   thread->anchor = NULL;
+   // Tries the short path for a transaction that changes nothing first
+   x_sched_waveform_zero_s(anchor, shared, offset, value.integer);
 }
 
 void fast_sched_waveform_0(jit_anchor_t *anchor, sig_shared_t *shared,
                            int32_t offset, int32_t count, jit_scalar_t value)
 {
+   // Tries the short path for a transaction that changes nothing first
+   x_sched_waveform_zero(anchor, shared, offset, count, value.pointer);
+}
+
+void slow_sched_waveform_s0(jit_anchor_t *anchor, sig_shared_t *shared,
+                            uint32_t offset, uint64_t scalar)
+{
    jit_thread_local_t *thread = jit_attach_thread(anchor);
 
-   x_sched_waveform(shared, offset, value.pointer, count, 0, 0);
+   x_sched_waveform_s0(shared, offset, scalar);
+
+   thread->anchor = NULL;
+}
+
+void slow_sched_waveform_0(jit_anchor_t *anchor, sig_shared_t *shared,
+                           uint32_t offset, int32_t count, void *values)
+{
+   jit_thread_local_t *thread = jit_attach_thread(anchor);
+
+   x_sched_waveform(shared, offset, values, count, 0, 0);
 
    thread->anchor = NULL;
 }
@@ -731,9 +753,10 @@ void __nvc_do_exit(jit_exit_t which, jit_anchor_t *anchor, jit_scalar_t *args,
          bool          scalar = args[4].integer;
 
          if (scalar)
-            x_sched_waveform_s(shared, offset, value.integer, 0, 0);
+            x_sched_waveform_zero_s(anchor, shared, offset, value.integer);
          else
-            x_sched_waveform(shared, offset, value.pointer, count, 0, 0);
+            x_sched_waveform_zero(anchor, shared, offset, count,
+                                  value.pointer);
       }
       break;
 
