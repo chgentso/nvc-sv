@@ -617,6 +617,25 @@ static mir_value_t vi_modeb_alloc_vec(vi_lower_t *l, uint32_t width);
 
 typedef A(vi_rec_leaf_t) vi_rec_leaf_list_t;
 
+// A local 2D array is a byte array (one byte per element) in Mode B.  In
+// Mode A it has the layout of a 2D signal in the island state: one row of
+// ceil(width / 64) words per element, accessed with island load and store on
+// the local buffer.  Whole-array copies with a signal are then plain copies.
+static uint32_t vi_array2d_bytes(const vi_lower_t *l, uint32_t nelems,
+                                 uint32_t width)
+{
+   if (l->two_state)
+      return nelems * 8u * ((width + 63u) / 64u);
+   return nelems * width;
+}
+
+static mir_value_t vi_alloc_array2d_local(vi_lower_t *l, uint32_t nelems,
+                                          uint32_t width, ident_t name)
+{
+   (void)name;
+   return vi_modeb_alloc_vec(l, vi_array2d_bytes(l, nelems, width));
+}
+
 static bool vi_collect_rec_local_leaves(vi_lower_t *l, type_t type,
                                         int *path, uint8_t depth,
                                         ident_t name_hint,
@@ -716,7 +735,7 @@ static bool vi_collect_rec_local_leaves(vi_lower_t *l, type_t type,
    }
 
    if (type_is_array(elem) && !type_is_record(elem) && dimension_of(elem) == 1) {
-      if (!type_is_enum(type_elem(elem)) || vi_note(l, "L1 2D array local"))
+      if (!type_is_enum(type_elem(elem)))
          return false;
       if (!vi_eval_type_bounds(l, elem, &lf.dir, &lf.left, &lf.right, &lf.width)
           || lf.width == 0 || lf.width > VHDL_ISLAND_MAX_WIDTH)
@@ -730,7 +749,7 @@ static bool vi_collect_rec_local_leaves(vi_lower_t *l, type_t type,
       lf.is_array2d = true;
       lf.is_std = vi_type_is_std_logic(type_elem(elem));
       lf.is_signed = vi_type_is_signed_vec(elem);
-      lf.storage = vi_modeb_alloc_vec(l, lf.nelems * lf.width);
+      lf.storage = vi_alloc_array2d_local(l, lf.nelems, lf.width, name_hint);
       APUSH(*out, lf);
       return true;
    }
@@ -880,8 +899,22 @@ static bool vi_load_rec_leaf(vi_lower_t *l, const vi_rec_leaf_t *lf,
 {
    mir_unit_t *mu = l->mu;
    if (lf->is_array2d) {
-      if (l->two_state)
-         return false;
+      if (l->two_state) {
+         mir_value_t row = mir_build_island_load(
+            mu, mir_vec2_type(mu, (int)lf->width, lf->is_signed),
+            lf->storage, vi_off(mu, 0), vi_off(mu, -1), elem_idx);
+         *out = (vi_val_t){
+            .kind      = VIVAL_VEC,
+            .val       = row,
+            .width     = lf->width,
+            .is_signed = lf->is_signed,
+            .is_std    = lf->is_std,
+            .dir       = lf->dir,
+            .left      = lf->left,
+            .right     = lf->right,
+         };
+         return true;
+      }
       mir_value_t off = mir_build_mul(mu, mir_offset_type(mu),
                                       elem_idx, vi_off(mu, lf->width));
       *out = (vi_val_t){
@@ -931,9 +964,17 @@ static bool vi_store_rec_leaf(vi_lower_t *l, const vi_rec_leaf_t *lf,
 {
    mir_unit_t *mu = l->mu;
    if (lf->is_array2d) {
-      if (vi_note(l, "L2 2D element store") || rv.kind != VIVAL_VEC
-          || rv.width != lf->width)
+      if (rv.kind != VIVAL_VEC || rv.width != lf->width)
          return false;
+      if (l->two_state) {
+         mir_value_t row = (rv.is_signed != lf->is_signed)
+            ? mir_build_cast(mu, mir_vec2_type(mu, (int)lf->width,
+                                               lf->is_signed), rv.val)
+            : rv.val;
+         mir_build_island_store(mu, lf->storage, vi_off(mu, 0),
+                                vi_off(mu, -1), elem_idx, row);
+         return true;
+      }
       mir_value_t off = mir_build_mul(mu, mir_offset_type(mu),
                                       elem_idx, vi_off(mu, lf->width));
       mir_build_copy(mu, mir_build_array_ref(mu, lf->storage, off),
@@ -4574,12 +4615,11 @@ static bool vi_assign_array2d_sig(vi_lower_t *l, const vhdl_isig_t *s,
    {
       vi_rec_leaf_t slf;
       if (vi_resolve_local_leaf(l, val_e, &slf)
-          && slf.is_array2d && slf.nelems == s->nelems && slf.width == s->width
-          && !vi_note(l, "L2 2D array copy")) {
+          && slf.is_array2d && slf.nelems == s->nelems && slf.width == s->width) {
          const uint32_t dst_off = isig->a_off + (l->is_ff ? l->ff_stride : 0u);
          vi_mark_ff_dirty(l, isig);
          mir_build_copy(l->mu, vi_state_ptr_at(l, dst_off), slf.storage,
-                        vi_off(l->mu, (int64_t)s->nelems * s->width));
+                        vi_off(l->mu, vi_array2d_bytes(l, s->nelems, s->width)));
          return true;
       }
    }
@@ -4699,7 +4739,7 @@ static bool vi_assign_array2d_sig(vi_lower_t *l, const vhdl_isig_t *s,
 static bool vi_assign_array2d_local(vi_lower_t *l, const vi_rec_leaf_t *lf,
                                     tree_t val_e)
 {
-   if (!lf->is_array2d || vi_note(l, "L2 whole 2D array assign"))
+   if (!lf->is_array2d)
       return false;
 
    while (val_e != NULL) {
@@ -4723,7 +4763,7 @@ static bool vi_assign_array2d_local(vi_lower_t *l, const vi_rec_leaf_t *lf,
       if (ss->nelems != lf->nelems || ss->width != lf->width)
          return false;
       mir_build_copy(mu, lf->storage, vi_state_ptr_at(l, sis->a_off),
-                     vi_off(mu, (int64_t)lf->nelems * lf->width));
+                     vi_off(mu, vi_array2d_bytes(l, lf->nelems, lf->width)));
       return true;
    }
 
@@ -4733,7 +4773,7 @@ static bool vi_assign_array2d_local(vi_lower_t *l, const vi_rec_leaf_t *lf,
          return false;
       if (!mir_equals(slf.storage, lf->storage))
          mir_build_copy(mu, lf->storage, slf.storage,
-                        vi_off(mu, (int64_t)lf->nelems * lf->width));
+                        vi_off(mu, vi_array2d_bytes(l, lf->nelems, lf->width)));
       return true;
    }
 
@@ -4912,12 +4952,13 @@ static bool vi_assign_rec_local(vi_lower_t *l, vi_local_t *dloc,
                return false;
             }
             if (dlf->is_array2d) {
-               if (vi_note(l, "L2 2D array copy") || dlf->nelems != ss->nelems) {
+               if (dlf->nelems != ss->nelems) {
                   free(s_ids);
                   return false;
                }
                mir_build_copy(mu, dlf->storage, vi_state_ptr_at(l, sis->a_off),
-                              vi_off(mu, (int64_t)dlf->nelems * dlf->width));
+                              vi_off(mu, vi_array2d_bytes(l, dlf->nelems,
+                                                          dlf->width)));
                continue;
             }
             vi_val_t v;
@@ -4953,10 +4994,11 @@ static bool vi_assign_rec_local(vi_lower_t *l, vi_local_t *dloc,
             if (dlf->width != slf->width || dlf->is_array2d != slf->is_array2d)
                return false;
             if (dlf->is_array2d) {
-               if (vi_note(l, "L2 2D array copy") || dlf->nelems != slf->nelems)
+               if (dlf->nelems != slf->nelems)
                   return false;
                mir_build_copy(mu, dlf->storage, slf->storage,
-                              vi_off(mu, (int64_t)dlf->nelems * dlf->width));
+                              vi_off(mu, vi_array2d_bytes(l, dlf->nelems,
+                                                          dlf->width)));
                continue;
             }
             vi_val_t v;
@@ -5104,12 +5146,12 @@ static bool vi_copy_rec_local_to_sig(vi_lower_t *l,
           || ds->is_array2d != slf->is_array2d)
          return false;
       if (ds->is_array2d) {
-         if (vi_note(l, "L2 2D array copy") || ds->nelems != slf->nelems)
+         if (ds->nelems != slf->nelems)
             return false;
          const uint32_t dst_off = dis->a_off + (l->is_ff ? l->ff_stride : 0u);
          vi_mark_ff_dirty(l, dis);
          mir_build_copy(mu, vi_state_ptr_at(l, dst_off), slf->storage,
-                        vi_off(mu, (int64_t)ds->nelems * ds->width));
+                        vi_off(mu, vi_array2d_bytes(l, ds->nelems, ds->width)));
          continue;
       }
       vi_val_t v;
@@ -5502,6 +5544,7 @@ static bool vi_lower_var_assign(vi_lower_t *l, tree_t stmt)
       tree_t base = tree_value(target);
       vi_rec_leaf_t lf;
       mir_value_t elem_off = vi_off(mu, 0);
+      mir_value_t row_idx = vi_off(mu, 0);
       bool is_2d_row = false;
       if (vi_resolve_local_leaf(l, base, &lf)) {
          if (!lf.is_vec || lf.is_array2d)
@@ -5509,7 +5552,7 @@ static bool vi_lower_var_assign(vi_lower_t *l, tree_t stmt)
       }
       else if (tree_kind(base) == T_ARRAY_REF && tree_params(base) == 1
                && vi_resolve_local_leaf(l, tree_value(base), &lf)
-               && lf.is_array2d && !vi_note(l, "L3 slice store into 2D local")) {
+               && lf.is_array2d) {
          vi_val_t eiv;
          if (!vi_lower_expr(l, tree_value(tree_param(base, 0)), &eiv)
              || eiv.kind != VIVAL_INT)
@@ -5520,6 +5563,7 @@ static bool vi_lower_var_assign(vi_lower_t *l, tree_t stmt)
          mir_value_t eidx = vi_compute_elem_pos(l, fake_outer, eiv.val, lf.nelems);
          elem_off = mir_build_mul(mu, mir_offset_type(mu),
                                   eidx, vi_off(mu, lf.width));
+         row_idx = eidx;
          is_2d_row = true;
       }
       else
@@ -5542,7 +5586,16 @@ static bool vi_lower_var_assign(vi_lower_t *l, tree_t stmt)
          int64_t pos = (lf.dir == RANGE_TO) ? (sl - lf.left) : (lf.left - sl);
          if (pos < 0 || pos + (int64_t)sw > lf.width)
             return false;
-         if (l->two_state) {
+         if (l->two_state && is_2d_row) {
+            mir_value_t cur = mir_build_island_load(
+               mu, mir_vec2_type(mu, (int)lf.width, lf.is_signed), lf.storage,
+               vi_off(mu, 0), vi_off(mu, -1), row_idx);
+            mir_value_t upd = mir_build_insert(mu, rv.val, cur,
+                                               vi_off(mu, pos));
+            mir_build_island_store(mu, lf.storage, vi_off(mu, 0),
+                                   vi_off(mu, -1), row_idx, upd);
+         }
+         else if (l->two_state) {
             mir_value_t cur = mir_build_load(mu, lf.storage);
             mir_value_t upd = mir_build_insert(mu, rv.val, cur, vi_off(mu, pos));
             mir_build_store(mu, lf.storage, upd);
@@ -5601,7 +5654,7 @@ static bool vi_lower_var_assign(vi_lower_t *l, tree_t stmt)
       }
       if (tree_kind(base) == T_ARRAY_REF && tree_params(base) == 1
           && vi_resolve_local_leaf(l, tree_value(base), &lf) && lf.is_array2d
-          && rv.kind == VIVAL_BIT && !vi_note(l, "L3 bit store into 2D local")) {
+          && rv.kind == VIVAL_BIT) {
          vi_val_t eiv;
          if (!vi_lower_expr(l, tree_value(tree_param(base, 0)), &eiv)
              || eiv.kind != VIVAL_INT)
@@ -5616,6 +5669,15 @@ static bool vi_lower_var_assign(vi_lower_t *l, tree_t stmt)
             mu, mir_offset_type(mu),
             mir_build_mul(mu, mir_offset_type(mu), eidx, vi_off(mu, lf.width)),
             pos);
+         if (l->two_state) {
+            mir_value_t cur = mir_build_island_load(
+               mu, mir_vec2_type(mu, (int)lf.width, lf.is_signed), lf.storage,
+               vi_off(mu, 0), vi_off(mu, -1), eidx);
+            mir_build_island_store(
+               mu, lf.storage, vi_off(mu, 0), vi_off(mu, -1), eidx,
+               mir_build_insert(mu, vi_to_vec2_1(l, rv), cur, pos));
+            return true;
+         }
          mir_build_store(mu, mir_build_array_ref(mu, lf.storage, off),
                          mir_build_cast(mu, vi_u8_type(mu), rv.val));
          return true;
@@ -6588,8 +6650,7 @@ static bool vi_bind_process_locals(vi_lower_t *l, tree_t proc, vi_scope_t *sc)
             return false;
          type_t elem = type_elem(vt);
          if (type_is_array(elem) && !type_is_record(elem) && dimension_of(elem) == 1) {
-            if (!type_is_enum(type_elem(elem))
-                || vi_note(l, "L1 2D array local"))
+            if (!type_is_enum(type_elem(elem)))
                return false;
             loc.is_vec = true;
             loc.is_array2d = true;
@@ -6602,7 +6663,8 @@ static bool vi_bind_process_locals(vi_lower_t *l, tree_t proc, vi_scope_t *sc)
                 || loc.width == 0 || loc.nelems == 0
                 || (uint64_t)loc.width * loc.nelems > 4096u)
                return false;
-            loc.storage = vi_modeb_alloc_vec(l, loc.nelems * loc.width);
+            loc.storage = vi_alloc_array2d_local(l, loc.nelems, loc.width,
+                                                 tree_ident(d));
             if (tree_has_value(d)) {
                vi_rec_leaf_t lf = {
                   .is_array2d  = true,
