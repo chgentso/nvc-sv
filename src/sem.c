@@ -5163,6 +5163,20 @@ static bool sem_check_attr_ref(tree_t t, bool allow_range, nametab_t *tab)
             sem_error(name, "invalid attribute reference");
       }
 
+      if (tree_kind(name) == T_REF && tree_has_ref(name)) {
+         tree_t decl = tree_ref(name);
+         if (tree_kind(decl) == T_ENTITY) {
+            tree_t du = find_enclosing(tab, S_DESIGN_UNIT);
+            const bool same_entity = du == decl
+               || (du != NULL && tree_kind(du) == T_ARCH
+                   && tree_primary(du) == decl);
+            if (!same_entity && !sem_locally_static(tree_value(t)))
+               sem_error(t, "cannot read non-static attribute %pI of "
+                         "entity %pI from outside its declarative region",
+                         attr, tree_ident(decl));
+         }
+      }
+
       return true;
 
    default:
