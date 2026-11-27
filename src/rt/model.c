@@ -2562,6 +2562,41 @@ static inline bool index_valid(rt_index_t *index, unsigned offset)
       return offset % -(index->how) == 0;
 }
 
+static inline void index_set(rt_index_t *index, unsigned key, rt_nexus_t *n)
+{
+   assert(key < index->count);
+   assert(index->nexus[key] == NULL);
+
+   index->nexus[key] = n;
+   index->bits[key / 64] |= UINT64_C(1) << (key % 64);
+   index->summary[key / 4096] |= UINT64_C(1) << ((key / 64) % 64);
+}
+
+static unsigned index_pred(rt_index_t *index, unsigned key)
+{
+   // Find the greatest key less than or equal to KEY with a nexus
+   const uint64_t below = UINT64_C(2) << (key % 64);
+   uint64_t word = key / 64, bits = index->bits[word];
+   if (key % 64 != 63)
+      bits &= below - 1;
+
+   if (bits == 0) {
+      unsigned sword = word / 64;
+      uint64_t sbits = index->summary[sword];
+      sbits &= (UINT64_C(1) << (word % 64)) - 1;
+      while (sbits == 0) {
+         assert(sword > 0);   // Key zero is always present
+         sbits = index->summary[--sword];
+      }
+
+      word = sword * 64 + 63 - __builtin_clzll(sbits);
+      bits = index->bits[word];
+      assert(bits != 0);
+   }
+
+   return word * 64 + 63 - __builtin_clzll(bits);
+}
+
 static void build_index(rt_signal_t *signal)
 {
    const unsigned signal_w = signal->shared.size / signal->nexus.size;
@@ -2590,15 +2625,25 @@ static void build_index(rt_signal_t *signal)
    TRACE("create index for signal %pi how=%d count=%d",
          tree_ident(signal->where), how, count);
 
-   rt_index_t *index = xcalloc_flex(sizeof(rt_index_t), count,
-                                    sizeof(rt_nexus_t *));
+   // The two bitmaps after the nexus pointers find the closest
+   // preceding nexus of a key without walking all the empty slots
+   // between them: bits has one bit per key and summary one bit per
+   // non-zero word of bits
+   const size_t nbits = ALIGN_UP(count, 64) / 64;
+   const size_t nsummary = ALIGN_UP(nbits, 64) / 64;
+   const size_t total = (nbits + nsummary) * sizeof(uint64_t)
+      + count * sizeof(rt_nexus_t *);
+
+   rt_index_t *index = xcalloc_flex(sizeof(rt_index_t), total, 1);
    index->how = how;
+   index->count = count;
+   index->bits = (uint64_t *)(index->nexus + count);
+   index->summary = index->bits + nbits;
 
    n = &(signal->nexus);
    for (int i = 0, offset = 0; i < signal->n_nexus;
-        i++, offset += n->width, n = n->chain) {
-      index->nexus[map_index(index, offset)] = n;
-   }
+        i++, offset += n->width, n = n->chain)
+      index_set(index, map_index(index, offset), n);
 
    free(signal->index);
    signal->index = index;
@@ -2615,33 +2660,24 @@ static void update_index(rt_signal_t *s, rt_nexus_t *n)
       assert(s->index->nexus[map_index(s->index, offset)] == n);
    }
    else {
-      const int elt = map_index(s->index, offset);
-      assert(s->index->nexus[elt] == NULL);
-      s->index->nexus[elt] = n;
+      index_set(s->index, map_index(s->index, offset), n);
    }
 }
 
 static rt_nexus_t *lookup_index(rt_signal_t *s, int *offset)
 {
-   if (likely(offset == 0 || s->index == NULL))
+   if (likely(*offset == 0 || s->index == NULL))
       return &(s->nexus);
-   else if (!index_valid(s->index, *offset)) {
-      TRACE("invalid index for %pi offset=%d how=%d", tree_ident(s->where),
-            *offset, s->index->how);
-      free(s->index);
-      s->index = NULL;
-      return &(s->nexus);
-   }
    else {
-      const int key = map_index(s->index, *offset);
-      for (int k = key; k >= 0; k--) {
-         rt_nexus_t *n = s->index->nexus[k];
-         if (n != NULL) {
-            *offset = unmap_index(s->index, key - k);
-            return n;
-         }
-      }
-      return &(s->nexus);
+      // Every nexus starts at an offset the index can represent so the
+      // nexus containing OFFSET is the closest one at or before the
+      // rounded down key
+      const unsigned key = map_index(s->index, *offset);
+      const unsigned pred = index_pred(s->index, key);
+      rt_nexus_t *n = s->index->nexus[pred];
+      assert(n != NULL);
+      *offset -= unmap_index(s->index, pred);
+      return n;
    }
 }
 

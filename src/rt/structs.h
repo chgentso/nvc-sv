@@ -223,6 +223,9 @@ typedef struct _sig_shared {
 
 typedef struct {
    int         how;
+   unsigned    count;
+   uint64_t   *bits;
+   uint64_t   *summary;
    rt_nexus_t *nexus[];
 } rt_index_t;
 

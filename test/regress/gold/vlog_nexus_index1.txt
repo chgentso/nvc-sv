@@ -1,0 +1,8 @@
+sum 9078557
+events 1 2 1
+q 64 0c
+q 07 00
+q ee 9f
+mem 3c 3c events 2 2
+mem 1c ee events 3 2 2
+q 1c 3c
