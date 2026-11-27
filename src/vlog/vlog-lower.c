@@ -1506,6 +1506,40 @@ static vlog_node_t vlog_sized_dimension(vlog_node_t type)
    return NULL;
 }
 
+static mir_value_t vlog_index_valid(vlog_gen_t *g, mir_value_t index)
+{
+   mir_value_t ok = mir_build_defined(g->mu, index);
+   if (!mir_is_vector(g->mu, index))
+      return ok;
+
+   mir_type_t itype = mir_get_type(g->mu, index);
+   const int size = mir_get_size(g->mu, itype);
+   const bool issigned = mir_get_signed(g->mu, itype);
+   if (size < 60)
+      return ok;
+
+   mir_value_t vec2 = index;
+   if (mir_get_class(g->mu, itype) == MIR_TYPE_VEC4)
+      vec2 = mir_build_cast(g->mu, mir_vec2_type(g->mu, size, issigned), index);
+
+   // Require the index to fit well inside signed 64-bit mir_offset_t so
+   // downstream bound and stride arithmetic cannot overflow
+   const int top = issigned ? (size - 58) : (size - 59);
+   mir_type_t t_hi = mir_vec2_type(g->mu, top, false);
+   mir_value_t hi = mir_build_extract(g->mu, t_hi, vec2,
+                                      mir_const(g->mu, mir_offset_type(g->mu), 0));
+   mir_value_t all_zero = mir_build_not(g->mu, mir_build_test(g->mu, hi));
+
+   mir_value_t fits = all_zero;
+   if (issigned) {
+      mir_value_t inv = mir_build_unary(g->mu, MIR_VEC_BIT_NOT, t_hi, hi);
+      mir_value_t all_ones = mir_build_not(g->mu, mir_build_test(g->mu, inv));
+      fits = mir_build_or(g->mu, all_zero, all_ones);
+   }
+
+   return mir_build_and(g->mu, ok, fits);
+}
+
 static mir_value_t vlog_lower_array_off(vlog_gen_t *g, vlog_node_t r,
                                         mir_value_t index)
 {
@@ -2214,7 +2248,7 @@ static vlog_select_t vlog_lower_select(vlog_gen_t *g, vlog_node_t v)
 
                mir_value_t index = vlog_lower_rvalue(g, vlog_param(v, i));
                mir_value_t off = vlog_lower_array_off(g, dim, index);
-               mir_value_t known = mir_build_defined(g->mu, index);
+               mir_value_t known = vlog_index_valid(g, index);
                mir_value_t in_range = mir_build_and(
                   g->mu, mir_build_cmp(g->mu, MIR_CMP_GEQ, off, zero),
                   mir_build_cmp(g->mu, MIR_CMP_LT, off,
@@ -2327,7 +2361,7 @@ static vlog_select_t vlog_lower_select(vlog_gen_t *g, vlog_node_t v)
             mir_value_t this_off = dim != NULL
                ? vlog_lower_array_off(g, dim, index)
                : vlog_lower_struct_off(g, dim_size, index);
-            mir_value_t known = mir_build_defined(g->mu, index);
+            mir_value_t known = vlog_index_valid(g, index);
 
             mir_value_t count = mir_const(g->mu, t_offset, dim_size);
             mir_value_t cmp_low =
@@ -2485,7 +2519,7 @@ static vlog_select_t vlog_lower_select(vlog_gen_t *g, vlog_node_t v)
          mir_value_t valid_count = vlog_lower_offset_max(g, raw_count, zero);
 
          if (kind != V_RANGE_CONST) {
-            mir_value_t known = mir_build_defined(g->mu, index);
+            mir_value_t known = vlog_index_valid(g, index);
             valid_count = mir_build_select(g->mu, t_offset, known, valid_count,
                                            zero);
          }
@@ -4509,6 +4543,97 @@ static void vlog_island_store_part(vlog_gen_t *g, const vlog_select_t *lval,
    }
 }
 
+static void vlog_store_var_slice(vlog_gen_t *g, const vlog_select_t *lv,
+                                 mir_value_t cast, int offset,
+                                 mir_type_t part_type, bool dynamic_count)
+{
+   mir_type_t t_offset = mir_offset_type(g->mu);
+   mir_type_t t_cast = mir_get_type(g->mu, cast);
+   mir_value_t pos = mir_build_add(g->mu, t_offset,
+                                   mir_const(g->mu, t_offset, offset),
+                                   lv->src_offset);
+
+   if (!dynamic_count || lv->size <= 1) {
+      mir_value_t part = mir_build_extract(
+         g->mu, mir_vector_slice(g->mu, t_cast,
+                                 mir_get_size(g->mu, part_type)),
+         cast, pos);
+      mir_value_t cur = mir_build_load(g->mu, lv->obj);
+      mir_type_t t_cur = mir_get_type(g->mu, cur);
+      mir_type_t t_part = mir_get_type(g->mu, part);
+      if (mir_get_class(g->mu, t_cur) != mir_get_class(g->mu, t_part))
+         part = mir_build_cast(
+            g->mu, mir_vector_slice(g->mu, t_cur,
+                                    mir_get_size(g->mu, t_part)),
+            part);
+      mir_value_t ins = mir_build_insert(g->mu, part, cur, lv->dst_offset);
+      mir_build_store(g->mu, lv->obj, ins);
+      return;
+   }
+
+   // A dynamic part-select may partially overlap the target vector
+   mir_block_t full_bb = mir_add_block(g->mu);
+   mir_block_t part_bb = mir_add_block(g->mu);
+   mir_block_t done_bb = mir_add_block(g->mu);
+
+   mir_value_t is_full = mir_build_cmp(g->mu, MIR_CMP_EQ, lv->count,
+                                       mir_const(g->mu, t_offset, lv->size));
+   mir_build_cond(g->mu, is_full, full_bb, part_bb);
+
+   mir_set_cursor(g->mu, full_bb, MIR_APPEND);
+   {
+      mir_value_t part = mir_build_extract(
+         g->mu, mir_vector_slice(g->mu, t_cast,
+                                 mir_get_size(g->mu, part_type)),
+         cast, pos);
+      mir_value_t cur = mir_build_load(g->mu, lv->obj);
+      mir_type_t t_cur = mir_get_type(g->mu, cur);
+      mir_type_t t_part = mir_get_type(g->mu, part);
+      if (mir_get_class(g->mu, t_cur) != mir_get_class(g->mu, t_part))
+         part = mir_build_cast(
+            g->mu, mir_vector_slice(g->mu, t_cur,
+                                    mir_get_size(g->mu, t_part)),
+            part);
+      mir_value_t ins = mir_build_insert(g->mu, part, cur, lv->dst_offset);
+      mir_build_store(g->mu, lv->obj, ins);
+      mir_build_jump(g->mu, done_bb);
+   }
+
+   mir_set_cursor(g->mu, part_bb, MIR_APPEND);
+   {
+      mir_value_t zero = mir_const(g->mu, t_offset, 0);
+      mir_value_t one = mir_const(g->mu, t_offset, 1);
+      mir_value_t j_var = mir_add_var(g->mu, t_offset, MIR_NULL_STAMP,
+                                      ident_uniq("psj"), MIR_VAR_TEMP);
+      mir_build_store(g->mu, j_var, zero);
+
+      mir_block_t cond_bb = mir_add_block(g->mu);
+      mir_block_t body_bb = mir_add_block(g->mu);
+      mir_build_jump(g->mu, cond_bb);
+
+      mir_set_cursor(g->mu, cond_bb, MIR_APPEND);
+      mir_value_t j = mir_build_load(g->mu, j_var);
+      mir_build_cond(g->mu, mir_build_cmp(g->mu, MIR_CMP_LT, j, lv->count),
+                     body_bb, done_bb);
+
+      mir_set_cursor(g->mu, body_bb, MIR_APPEND);
+      mir_value_t bit = mir_build_extract(
+         g->mu, mir_vector_slice(g->mu, t_cast, 1), cast,
+         mir_build_add(g->mu, t_offset, pos, j));
+      mir_value_t cur = mir_build_load(g->mu, lv->obj);
+      mir_type_t t_cur = mir_get_type(g->mu, cur);
+      if (mir_get_class(g->mu, t_cur) != mir_get_class(g->mu, t_cast))
+         bit = mir_build_cast(g->mu, mir_vector_slice(g->mu, t_cur, 1), bit);
+      mir_value_t ins = mir_build_insert(
+         g->mu, bit, cur, mir_build_add(g->mu, t_offset, lv->dst_offset, j));
+      mir_build_store(g->mu, lv->obj, ins);
+      mir_build_store(g->mu, j_var, mir_build_add(g->mu, t_offset, j, one));
+      mir_build_jump(g->mu, cond_bb);
+   }
+
+   mir_set_cursor(g->mu, done_bb, MIR_APPEND);
+}
+
 static void vlog_assign_variable(vlog_gen_t *g, vlog_node_t target,
                                  mir_value_t value, vlog_node_t rhs)
 {
@@ -5004,39 +5129,29 @@ static void vlog_assign_variable(vlog_gen_t *g, vlog_node_t target,
             part_type = lvalues[i].type;
          }
 
-         mir_value_t pos = mir_build_add(g->mu, t_offset,
-                                         mir_const(g->mu, t_offset, offset),
-                                         lvalues[i].src_offset);
-         mir_type_t t_cast = mir_get_type(g->mu, cast);
-         mir_value_t part = mir_build_extract(
-            g->mu, mir_vector_slice(g->mu, t_cast,
-                                    mir_get_size(g->mu, part_type)),
-            cast, pos);
-         if (mir_get_class(g->mu, t_cast) != mir_get_class(g->mu, part_type))
-            part = mir_build_cast(g->mu, part_type, part);
-
          bool whole = vlog_kind(nodes[i]) == V_REF;
          if (vlog_kind(nodes[i]) == V_MEMBER_REF) {
             vlog_node_t ptype = vlog_get_type(vlog_value(nodes[i]));
             whole = ptype != NULL && vlog_is_dynamic_type(ptype);
          }
 
-         if (whole)
+         if (whole) {
+            mir_value_t pos = mir_build_add(g->mu, t_offset,
+                                            mir_const(g->mu, t_offset, offset),
+                                            lvalues[i].src_offset);
+            mir_type_t t_cast = mir_get_type(g->mu, cast);
+            mir_value_t part = mir_build_extract(
+               g->mu, mir_vector_slice(g->mu, t_cast,
+                                       mir_get_size(g->mu, part_type)),
+               cast, pos);
+            if (mir_get_class(g->mu, t_cast)
+                != mir_get_class(g->mu, part_type))
+               part = mir_build_cast(g->mu, part_type, part);
             mir_build_store(g->mu, lvalues[i].obj, part);
-         else {
-            mir_value_t cur = mir_build_load(g->mu, lvalues[i].obj);
-            mir_type_t t_cur = mir_get_type(g->mu, cur);
-            mir_type_t t_part = mir_get_type(g->mu, part);
-            if (mir_get_class(g->mu, t_cur) != mir_get_class(g->mu, t_part))
-               part = mir_build_cast(
-                  g->mu, mir_vector_slice(g->mu, t_cur,
-                                          mir_get_size(g->mu, t_part)),
-                  part);
-
-            mir_value_t ins =
-               mir_build_insert(g->mu, part, cur, lvalues[i].dst_offset);
-            mir_build_store(g->mu, lvalues[i].obj, ins);
          }
+         else
+            vlog_store_var_slice(g, &(lvalues[i]), cast, offset, part_type,
+                                 !mir_is_null(merge_bb));
 
          if (!mir_is_null(merge_bb)) {
             mir_build_jump(g->mu, merge_bb);
