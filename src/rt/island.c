@@ -1844,6 +1844,13 @@ static inline bool island_spec_sig_live(const rt_island_sig_t *s)
                          | RT_ISIG_FF_WRITTEN));
 }
 
+// Convert the NELEMS elements of WIDTH bytes at SRC to packed words of NWORDS
+// each, true if every byte was ZERO or ZERO + 1; a byte is a
+// set bit iff it is ZERO + 1
+static bool island_spec_pack_elems(uint64_t *words, const uint8_t *src,
+                                   uint32_t nelems, uint32_t width,
+                                   uint32_t nwords, uint8_t zero);
+
 // Convert signal I of the island from the Mode B state B_STATE to the Mode A
 // state A_STATE, true if every value was '0' or '1'
 static bool island_spec_pack_sig(const rt_island_t *isl, uint32_t i,
@@ -1863,22 +1870,8 @@ static bool island_spec_pack_sig(const rt_island_t *isl, uint32_t i,
    // Bit 0 of a packed element is its last byte ("lsb" of a downto vector),
    // as in the Mode A lowering
    const uint8_t zero = (sp->a_flags[i] & RT_ISIG_STD_LOGIC_ELEM) ? 2 : 0;
-   uint64_t *words = (uint64_t *)dst;
-   memset(words, 0, (size_t)s->nwords * s->nelems * sizeof(uint64_t));
-   bool clean = true;
-   for (uint32_t e = 0; e < s->nelems; e++) {
-      const uint8_t *eb = src + (size_t)e * s->width;
-      uint64_t *ew = words + (size_t)e * s->nwords;
-      for (uint32_t k = 0; k < s->width; k++) {
-         const uint8_t v = eb[k] - zero;
-         clean &= (v <= 1);
-         if (v == 1) {
-            const uint32_t lsb = s->width - 1u - k;
-            ew[lsb / 64u] |= UINT64_C(1) << (lsb & 63u);
-         }
-      }
-   }
-   return clean;
+   return island_spec_pack_elems((uint64_t *)dst, src, s->nelems, s->width,
+                                 s->nwords, zero);
 }
 
 // The exact inverse of island_spec_pack_sig for a '0'/'1' value
@@ -2421,6 +2414,72 @@ static inline void island_pack_elem_2s(uint64_t *ea, uint32_t nwords,
       eb[k] = island_pack8_2s(w, is_std);
       src += 8;
    }
+}
+
+// Eight bytes (byte 0 first) to eight bits (byte 0 in bit 7): bit set iff the
+// byte is ONE8 / 0x01010101..., exact for every byte value
+static inline uint8_t island_pack8_eq(uint64_t w, uint64_t one8)
+{
+   const uint64_t x = w ^ one8;
+   const uint64_t nz = (((x & (ISL_ONES8 * 0x7f)) + (ISL_ONES8 * 0x7f)) | x)
+      & ISL_HIGH8;
+   const uint64_t bits = (~nz & ISL_HIGH8) >> 7;
+   return (uint8_t)((bits * ISL_GATHER) >> 56);
+}
+
+static bool island_spec_pack_elems(uint64_t *words, const uint8_t *src,
+                                   uint32_t nelems, uint32_t width,
+                                   uint32_t nwords, uint8_t zero)
+{
+   const uint64_t zero8 = ISL_ONES8 * zero;
+   const uint64_t one8 = ISL_ONES8 * (uint8_t)(zero + 1u);
+   const uint32_t r = width & 7u;
+   uint64_t bad = 0;
+
+   memset(words, 0, (size_t)nwords * nelems * sizeof(uint64_t));
+   for (uint32_t e = 0; e < nelems; e++, src += width) {
+      const uint8_t *p = src;
+      uint8_t *eb = (uint8_t *)(words + (size_t)e * nwords);
+      uint32_t k = width >> 3;
+
+      if (r != 0) {
+         // The padding bytes of the last partial word read as a clean '0'
+         uint64_t w = zero8;
+         memcpy(&w, p, r);
+         bad |= (w & (ISL_ONES8 * 0xfe)) ^ zero8;
+         eb[k] = (uint8_t)(island_pack8_eq(w, one8) >> (8u - r));
+         p += r;
+      }
+      while (k-- > 0) {
+         uint64_t w;
+         memcpy(&w, p, 8);
+         bad |= (w & (ISL_ONES8 * 0xfe)) ^ zero8;
+         eb[k] = island_pack8_eq(w, one8);
+         p += 8;
+      }
+   }
+   return bad == 0;
+}
+#else
+static bool island_spec_pack_elems(uint64_t *words, const uint8_t *src,
+                                   uint32_t nelems, uint32_t width,
+                                   uint32_t nwords, uint8_t zero)
+{
+   memset(words, 0, (size_t)nwords * nelems * sizeof(uint64_t));
+   bool clean = true;
+   for (uint32_t e = 0; e < nelems; e++) {
+      const uint8_t *eb = src + (size_t)e * width;
+      uint64_t *ew = words + (size_t)e * nwords;
+      for (uint32_t k = 0; k < width; k++) {
+         const uint8_t v = eb[k] - zero;
+         clean &= (v <= 1);
+         if (v == 1) {
+            const uint32_t lsb = width - 1u - k;
+            ew[lsb / 64u] |= UINT64_C(1) << (lsb & 63u);
+         }
+      }
+   }
+   return clean;
 }
 #endif
 
