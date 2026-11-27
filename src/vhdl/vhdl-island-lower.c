@@ -6980,7 +6980,12 @@ static mir_unit_t *vi_build_comb_unit(mir_context_t *mc,
       .lut_xor   = MIR_NULL_VALUE,
    };
 
-   for (uint32_t k = 0; k < isl->n_comb_procs; k++) {
+   // Readers before writers: comb_procs is in topological order, so going
+   // backwards every process reads the signal values of the current delta
+   // cycle, as a VHDL signal assignment only takes effect in the next one.
+   // The runtime runs the island again when such a signal changed (see
+   // island_check_feedback in rt/island.c).
+   for (uint32_t k = isl->n_comb_procs; k-- > 0; ) {
       uint32_t pi = isl->comb_procs[k];
       const vhdl_iproc_t *p = &(ctx->procs[pi]);
       vhdl_island_var_defs_clear((vhdl_island_ctx_t *)ctx);

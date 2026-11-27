@@ -5543,11 +5543,32 @@ static void model_cycle_body(rt_model_t *m)
 
    run_callbacks(m, START_OF_PROCESSES);
 
+   if (unlikely(m->islands != NULL)) {
+      rt_island_promote_deferred(m->islands);
+      if (unlikely(m->has_verilog) && rt_island_has_sv_dirty(m->islands)) {
+         for (unsigned pass = 0; pass < 16; pass++) {
+            if (!rt_island_eval_sv_dirty(m->jit, m, m->islands,
+                                         model_thread(m)->tlab)) {
+               m->force_stop = true;
+               break;
+            }
+            if (m->reschedq.count > 0) {
+               deferq_swap(&m->next_procq, &m->reschedq);
+               deferq_run_procs(m, &m->next_procq);
+               if (unlikely(m->sva_batch.count > 0))
+                  model_flush_sva_batch(m);
+            }
+            rt_island_promote_deferred(m->islands);
+            if (!rt_island_has_sv_dirty(m->islands))
+               break;
+         }
+         if (unlikely(m->force_stop))
+            return;
+      }
+   }
+
    if (m->shuffle)
       deferq_shuffle(&m->procq);
-
-   if (unlikely(m->islands != NULL))
-      rt_island_promote_deferred(m->islands);
 
    // Run all non-postponed processes and event callbacks
    deferq_swap(&m->next_procq, &m->procq);

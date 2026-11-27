@@ -244,9 +244,15 @@ typedef struct _rt_island {
    uint32_t               n_comb_deps;
    uint32_t               mt_wave_tag;
    uint32_t               pending_vhdl_ff;
+   uint32_t              *fb_sigs;
+   uint32_t               n_fb_sigs;
+   uint8_t               *fb_shadow;
    bool                   dirty;
    bool                   in_dirty_list;
    bool                   in_defer_dirty;
+   bool                   in_defer_direct;
+   bool                   mt_fb_changed;
+   bool                   mt_defer_direct;
    bool                   has_dirty_inputs;
    bool                   in_cl_dirty_in;
    bool                   initialized;
@@ -254,6 +260,7 @@ typedef struct _rt_island {
    bool                   need_sync_out;
    bool                   mt_eval_on_main;
    bool                   mt_ff_unsafe;
+   bool                   is_vhdl;
 } rt_island_t;
 
 typedef struct _rt_island_mgr rt_island_mgr_t;
@@ -273,8 +280,11 @@ bool rt_island_eval_sv_reset(jit_t *jit, rt_model_t *m, rt_island_mgr_t *mgr,
                              tlab_t *tlab, bool first_pass, bool *progress);
 void rt_island_mark_sv_reset_edges(rt_island_mgr_t *mgr);
 bool rt_island_has_dirty(const rt_island_mgr_t *mgr);
+bool rt_island_has_sv_dirty(const rt_island_mgr_t *mgr);
 bool rt_island_eval_dirty(jit_t *jit, rt_model_t *m, rt_island_mgr_t *mgr,
                           tlab_t *tlab);
+bool rt_island_eval_sv_dirty(jit_t *jit, rt_model_t *m, rt_island_mgr_t *mgr,
+                             tlab_t *tlab);
 bool rt_island_has_ff_sample(const rt_island_mgr_t *mgr);
 bool rt_island_eval_ff(jit_t *jit, rt_model_t *m, rt_island_mgr_t *mgr,
                        tlab_t *tlab);
