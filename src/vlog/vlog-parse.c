@@ -26074,9 +26074,30 @@ static bool is_param_decl(vlog_node_t d)
       || (vlog_kind(d) == V_TYPE_DECL && (vlog_flags(d) & VLOG_F_TYPEPARAM));
 }
 
-static vlog_node_t param_pattern_type(ident_t name, int pos)
+static int decl_unpacked_depth(vlog_node_t d)
+{
+   int depth = 0;
+   const int nr = vlog_ranges(d);
+   for (int i = 0; i < nr; i++) {
+      if (vlog_subkind(vlog_range(d, i)) == V_DIM_UNPACKED)
+         depth++;
+   }
+
+   for (vlog_node_t t = vlog_has_type(d) ? vlog_get_type(vlog_type(d)) : NULL;
+        t != NULL && vlog_kind(t) == V_DATA_TYPE
+        && vlog_subkind(t) == DT_DYNARRAY && vlog_ranges(t) == 1
+        && vlog_subkind(vlog_range(t, 0)) != V_DIM_UNSIZED;
+        t = vlog_has_type(t) ? vlog_get_type(vlog_type(t)) : NULL)
+      depth++;
+
+   return depth;
+}
+
+static vlog_node_t param_pattern_type(ident_t name, int pos, int *array_depth)
 {
    // The type an assignment pattern takes as the value of a parameter
+
+   *array_depth = 0;
 
    if (param_target == NULL)
       return NULL;
@@ -26087,9 +26108,12 @@ static vlog_node_t param_pattern_type(ident_t name, int pos)
       vlog_node_t d = vlog_decl(param_target, i);
       if (!is_param_decl(d))
          continue;
-      else if (name != NULL ? vlog_ident(d) == name : index++ == pos)
-         return vlog_kind(d) == V_PARAM_DECL && vlog_has_type(d)
-            ? vlog_get_type(vlog_type(d)) : NULL;
+      else if (name != NULL ? vlog_ident(d) == name : index++ == pos) {
+         if (vlog_kind(d) != V_PARAM_DECL || !vlog_has_type(d))
+            return NULL;
+         *array_depth = decl_unpacked_depth(d);
+         return vlog_get_type(vlog_type(d));
+      }
    }
 
    return NULL;
@@ -26146,9 +26170,16 @@ static vlog_node_t p_param_expression(ident_t name, int pos)
    BEGIN("param expression");
 
    if (peek() == tTICK && peek_nth(2) == tLBRACE) {
-      vlog_node_t type = param_pattern_type(name, pos);
-      if (type != NULL)
-         return p_assignment_pattern_expression(type);
+      int array_depth = 0;
+      vlog_node_t type = param_pattern_type(name, pos, &array_depth);
+      if (type != NULL) {
+         pattern_array_elems = array_depth;
+         vlog_node_t v = p_assignment_pattern_expression(type);
+         pattern_array_elems = 0;
+         return v;
+      }
+      else if (param_target == NULL)
+         return p_deferred_pattern_expression();
    }
 
    if (param_is_type(name, pos)
