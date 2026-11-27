@@ -340,6 +340,18 @@ static inline void island_mark_dirty(rt_island_t *isl)
    }
 }
 
+static inline void island_clear_dirty(rt_island_t *isl)
+{
+   if (!isl->dirty)
+      return;
+
+   isl->dirty = false;
+   if (isl->cluster != NULL) {
+      assert(isl->cluster->dirty_count > 0);
+      isl->cluster->dirty_count--;
+   }
+}
+
 static inline void island_mark_in_dirty(rt_island_t *isl, uint32_t in_idx)
 {
    if (likely(isl->n_in_sigs <= 64))
@@ -4045,6 +4057,8 @@ bool rt_island_eval_sv_reset(jit_t *jit, rt_model_t *m, rt_island_mgr_t *mgr,
       if (!need_eval)
          continue;
 
+      island_clear_dirty(isl);
+
       if (!island_call_comb(jit, m, isl, tlab))
          return false;
 
@@ -4072,9 +4086,6 @@ bool rt_island_eval_sv_reset(jit_t *jit, rt_model_t *m, rt_island_mgr_t *mgr,
          }
       }
 
-      isl->dirty = false;
-      if (isl->cluster != NULL && isl->cluster->dirty_count > 0)
-         isl->cluster->dirty_count--;
       progress = true;
    }
 
@@ -6554,7 +6565,7 @@ static void island_eval_comb_now(rt_model_t *m, rt_island_t *isl)
          island_flush_comb_out_sig(m, isl, &(isl->sigs[isl->obs_sigs[j]]));
    }
 
-   isl->dirty = false;
+   island_clear_dirty(isl);
 }
 
 static void island_write_bits_slice(rt_island_t *isl, rt_island_sig_t *s,
