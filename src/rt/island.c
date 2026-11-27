@@ -4385,7 +4385,7 @@ static void island_spec_trace(rt_island_t *isl, const char *what, int arg)
 {
    static const char *names[RT_ISLAND_DEOPT_COUNT] = {
       "none", "literal", "range", "conv", "report", "state", "input",
-      "put", "stress", "unclean", "row"
+      "put", "stress", "unclean", "row", "novar"
    };
    unsigned deltas = 0;
    const uint64_t now = model_now(isl->model, &deltas);
@@ -4753,6 +4753,13 @@ static void island_spec_demote(rt_island_t *isl, rt_island_deopt_t why)
 
    if (why == RT_ISLAND_DEOPT_STRESS) {
       sp->next_check = mgr->spec_tick + 1;
+      return;
+   }
+   if (why == RT_ISLAND_DEOPT_NOVAR) {
+      // The function was lowered on its first call and that failed
+      // (vi_lazy_build): this island stays in Mode B
+      sp->pinned = true;
+      sp->pin_reason = why;
       return;
    }
    if (why == RT_ISLAND_DEOPT_UNCLEAN || why == RT_ISLAND_DEOPT_ROW) {
@@ -5340,7 +5347,7 @@ static void island_spec_rt_report(rt_island_mgr_t *mgr)
 
    static const char *names[RT_ISLAND_DEOPT_COUNT] = {
       "none", "literal", "range", "conv", "report", "state", "input",
-      "put", "stress", "unclean", "row"
+      "put", "stress", "unclean", "row", "novar"
    };
    uint64_t deopts[RT_ISLAND_DEOPT_COUNT] = {}, pins[RT_ISLAND_DEOPT_COUNT] = {};
    uint64_t promotions = 0, failed = 0, ticks_a = 0, holds = 0, unholds = 0;

@@ -23,6 +23,7 @@
 #include "option.h"
 #include "psl/psl-node.h"
 #include "rt/island.h"
+#include "thread.h"
 #include "tree.h"
 #include "type.h"
 #include "vhdl/vhdl-island.h"
@@ -5818,6 +5819,11 @@ vhdl_island_ctx_t *vhdl_island_analyze_mode(tree_t block,
 void vhdl_island_ctx_free(vhdl_island_ctx_t *ctx)
 {
    if (ctx == NULL)
+      return;
+
+   // Each deferred Mode A function holds a reference (vi_lazy_defer) and
+   // drops it once lowered; the owner's call is the last one
+   if (atomic_fetch_add(&(ctx->refs), -1) > 0)
       return;
 
    for (uint32_t i = 0; i < ctx->n_procs; i++) {

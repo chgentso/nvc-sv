@@ -71,6 +71,8 @@ object_t *mir_get_object(mir_unit_t *mu);
 ident_t mir_get_parent(mir_unit_t *mu);
 ident_t mir_get_shape_parent(mir_shape_t *shape);
 mir_context_t *mir_get_context(mir_unit_t *mu);
+ident_t mir_get_unit_name(mir_unit_t *mu);
+void mir_unit_move(mir_unit_t *dst, mir_unit_t *src);
 int mir_find_slot(mir_shape_t *shape, ident_t name);
 
 mir_value_t mir_search_object(mir_unit_t *mu, const void *obj, int *hops);

@@ -18,12 +18,14 @@
 #include "util.h"
 #include "array.h"
 #include "common.h"
+#include "hash.h"
 #include "ident.h"
 #include "mir/mir-node.h"
 #include "mir/mir-unit.h"
 #include "option.h"
 #include "rt/assert.h"
 #include "rt/island.h"
+#include "thread.h"
 #include "tree.h"
 #include "type.h"
 #include "vcode.h"
@@ -8005,12 +8007,14 @@ static bool vi_emit_report_guard(vi_lower_t *l, const vhdl_iproc_t *p,
    return true;
 }
 
+// NAME, when not NULL, replaces the function name (vi_lazy_build)
 static mir_unit_t *vi_build_comb_unit(mir_context_t *mc,
                                       const vhdl_island_ctx_t *ctx,
                                       const vhdl_island_t *isl, int spec,
-                                      int *failed_proc_out)
+                                      int *failed_proc_out, ident_t name)
 {
-   mir_unit_t *mu = mir_unit_new(mc, vi_spec_name(isl->eval_name, spec),
+   mir_unit_t *mu = mir_unit_new(mc,
+                                 name ?: vi_spec_name(isl->eval_name, spec),
                                  tree_to_object(ctx->block),
                                  MIR_UNIT_FUNCTION, NULL);
    mir_type_t t_off = mir_offset_type(mu);
@@ -8137,9 +8141,9 @@ static mir_unit_t *vi_build_ff_unit(mir_context_t *mc,
                                     const vhdl_island_ctx_t *ctx,
                                     const vhdl_island_t *isl,
                                     const vhdl_idom_t *dm, int spec,
-                                    int *failed_proc_out)
+                                    int *failed_proc_out, ident_t name)
 {
-   mir_unit_t *mu = mir_unit_new(mc, vi_spec_name(dm->fn_name, spec),
+   mir_unit_t *mu = mir_unit_new(mc, name ?: vi_spec_name(dm->fn_name, spec),
                                  tree_to_object(ctx->block),
                                  MIR_UNIT_FUNCTION, NULL);
    mir_type_t t_off = mir_offset_type(mu);
@@ -8318,7 +8322,7 @@ static void vi_lower_ctx(mir_context_t *mc, vhdl_island_ctx_t *ctx, bool put)
          if (isl->n_comb_procs > 0
              && (!put || mir_get_shape(mc, isl->eval_name) == NULL)) {
             mir_unit_t *cmu = vi_build_comb_unit(mc, ctx, isl, 0,
-                                                 &failed_proc);
+                                                 &failed_proc, NULL);
             if (cmu == NULL) {
                vi_reject_failed(ctx, ii, failed_proc);
                need_rebuild = true;
@@ -8331,7 +8335,7 @@ static void vi_lower_ctx(mir_context_t *mc, vhdl_island_ctx_t *ctx, bool put)
             if (put && mir_get_shape(mc, isl->doms[d].fn_name) != NULL)
                continue;
             mir_unit_t *fmu = vi_build_ff_unit(mc, ctx, isl, &(isl->doms[d]),
-                                               0, &failed_proc);
+                                               0, &failed_proc, NULL);
             if (fmu == NULL) {
                vi_reject_failed(ctx, ii, failed_proc);
                need_rebuild = true;
@@ -8367,12 +8371,98 @@ static void vi_lower_ctx(mir_context_t *mc, vhdl_island_ctx_t *ctx, bool put)
    ACLEAR(built);
 }
 
+// A Mode A function of an island that is lowered the first time the
+// runtime calls it (see vi_lower_spec)
+typedef struct {
+   vhdl_island_ctx_t   *ctx;
+   const vhdl_island_t *a;
+   int                  dom;    // Flip-flop domain or -1 for the comb unit
+   int                  spec;
+} vi_lazy_t;
+
+static hash_t     *vi_lazy_map;    // Function name to vi_lazy_t
+static nvc_lock_t  vi_lazy_lock;
+
+// Body of a Mode A function whose lowering failed: give up Mode A for the
+// island before it computes anything
+static void vi_build_novar_stub(mir_unit_t *mu)
+{
+   mir_type_t t_ptr = mir_pointer_type(mu, vi_u8_type(mu));
+   mir_set_result(mu, mir_offset_type(mu));
+   mir_add_param(mu, t_ptr, MIR_NULL_STAMP, ident_new("context"));
+   mir_add_param(mu, t_ptr, MIR_NULL_STAMP, ident_new("state"));
+   mir_build_return(mu, vi_off(mu, RT_ISLAND_DEOPT_NOVAR));
+}
+
+static void vi_lazy_build(mir_unit_t *mu, object_t *obj)
+{
+   SCOPED_LOCK(vi_lazy_lock);
+   (void)obj;
+
+   ident_t name = mir_get_unit_name(mu);
+   vi_lazy_t *lz = hash_get(vi_lazy_map, name);
+   assert(lz != NULL);
+
+   mir_context_t *mc = mir_get_context(mu);
+   int failed_proc = -1;
+   // Built under another name: the deferred one is still registered
+   ident_t tmp_name = ident_prefix(name, ident_new("lazy"), '$');
+   mir_unit_t *real = lz->dom < 0
+      ? vi_build_comb_unit(mc, lz->ctx, lz->a, lz->spec, &failed_proc,
+                           tmp_name)
+      : vi_build_ff_unit(mc, lz->ctx, lz->a, &(lz->a->doms[lz->dom]),
+                         lz->spec, &failed_proc, tmp_name);
+   if (real != NULL) {
+      mir_optimise(real, MIR_PASS_O1);
+      mir_unit_move(mu, real);
+   }
+   else
+      vi_build_novar_stub(mu);
+
+   hash_put(vi_lazy_map, name, NULL);
+   vhdl_island_ctx_free(lz->ctx);
+   free(lz);
+}
+
+// Defer the Mode A function NAME of variant A of an island of CTX
+static void vi_lazy_defer(mir_context_t *mc, vhdl_island_ctx_t *ctx,
+                          const vhdl_island_t *a, int dom, int spec,
+                          ident_t name)
+{
+   SCOPED_LOCK(vi_lazy_lock);
+
+   if (vi_lazy_map == NULL)
+      vi_lazy_map = hash_new(256);
+   else if (hash_get(vi_lazy_map, name) != NULL)
+      return;   // Same unit as an earlier island (still deferred)
+
+   vi_lazy_t *lz = xmalloc(sizeof(vi_lazy_t));
+   lz->ctx  = ctx;
+   lz->a    = a;
+   lz->dom  = dom;
+   lz->spec = spec;
+   hash_put(vi_lazy_map, name, lz);
+
+   atomic_add(&(ctx->refs), 1);
+   mir_defer(mc, name, NULL, MIR_UNIT_FUNCTION, vi_lazy_build,
+             tree_to_object(ctx->block));
+}
+
 // Speculative Mode A (NVC_ISLAND_SPEC): lower each island of the final
 // Mode B CTX a second time with a packed two-state layout.  The processes
 // and the island set are the ones of Mode B; an island whose Mode A
 // lowering fails keeps no variant and its processes stay fused.
+//
+// The Mode A functions are lowered when the runtime first calls them: most
+// islands never call the "$ah" variant and some never get promoted, and
+// lowering every function up front was a large part of the start-up time.
+// A function whose lowering then fails returns RT_ISLAND_DEOPT_NOVAR, which
+// pins its island in Mode B.  NVC_DUMP_ISLANDS lowers them all now to report
+// which islands have no variant and why.
 static void vi_lower_spec(mir_context_t *mc, vhdl_island_ctx_t *ctx)
 {
+   const bool lazy = !opt_get_int(OPT_DUMP_ISLANDS);
+
    for (uint32_t ii = 0; ii < ctx->n_islands; ii++) {
       vhdl_island_t *isl = &(ctx->islands[ii]);
       if (isl->n_sigs == 0)
@@ -8382,6 +8472,19 @@ static void vi_lower_spec(mir_context_t *mc, vhdl_island_ctx_t *ctx)
       if (a == NULL)
          continue;
 
+      if (lazy) {
+         for (int spec = 1; spec <= 2; spec++) {
+            if (a->n_comb_procs > 0)
+               vi_lazy_defer(mc, ctx, a, -1, spec,
+                             vi_spec_name(a->eval_name, spec));
+            for (uint32_t d = 0; d < a->n_doms; d++)
+               vi_lazy_defer(mc, ctx, a, d, spec,
+                             vi_spec_name(a->doms[d].fn_name, spec));
+         }
+         isl->a_variant = a;
+         continue;
+      }
+
       A(mir_unit_t *) built = AINIT;
       int failed_proc = -1;
       bool ok = true;
@@ -8389,7 +8492,7 @@ static void vi_lower_spec(mir_context_t *mc, vhdl_island_ctx_t *ctx)
          if (a->n_comb_procs > 0
              && mir_get_shape(mc, vi_spec_name(a->eval_name, spec)) == NULL) {
             mir_unit_t *cmu = vi_build_comb_unit(mc, ctx, a, spec,
-                                                 &failed_proc);
+                                                 &failed_proc, NULL);
             if (cmu != NULL)
                APUSH(built, cmu);
             else
@@ -8400,7 +8503,7 @@ static void vi_lower_spec(mir_context_t *mc, vhdl_island_ctx_t *ctx)
             if (mir_get_shape(mc, name) != NULL)
                continue;
             mir_unit_t *fmu = vi_build_ff_unit(mc, ctx, a, &(a->doms[d]),
-                                               spec, &failed_proc);
+                                               spec, &failed_proc, NULL);
             if (fmu != NULL)
                APUSH(built, fmu);
             else

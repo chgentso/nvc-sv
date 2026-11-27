@@ -232,6 +232,7 @@ typedef struct _vhdl_island_ctx {
    vhdl_rej_note_t *notes;   // NVC_DUMP_ISLANDS: ejected processes
    uint32_t       n_notes;
    uint32_t       cap_notes;
+   int            refs;     // Deferred Mode A functions still to lower
 } vhdl_island_ctx_t;
 
 vhdl_island_ctx_t *vhdl_island_analyze(tree_t block, const tree_t *ancestors,

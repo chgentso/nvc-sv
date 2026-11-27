@@ -348,6 +348,7 @@ typedef enum {
    RT_ISLAND_DEOPT_STRESS  = 8,   // (runtime) NVC_ISLAND_SPEC_STRESS
    RT_ISLAND_DEOPT_UNCLEAN = 9,   // load or store of a held signal
    RT_ISLAND_DEOPT_ROW     = 10,  // load or partial store of a held row
+   RT_ISLAND_DEOPT_NOVAR   = 11,  // Mode A function could not be lowered
    RT_ISLAND_DEOPT_COUNT
 } rt_island_deopt_t;
 
