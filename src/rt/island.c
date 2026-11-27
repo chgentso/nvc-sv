@@ -7580,6 +7580,9 @@ static void island_write_bits_slice(rt_island_t *isl, rt_island_sig_t *s,
    uint64_t *nbp = (nap != NULL && !two_state)
       ? (uint64_t *)(isl->next_state + s->b_off) : NULL;
 
+   // Bytes come in the encoding of the signal: std_logic for VHDL
+   const bool is_std = bytes != NULL && island_sig_is_std(s->sig, s->flags);
+
    for (uint32_t k = 0; k < local_cnt; k++) {
       const uint32_t pos = local_off + k;
       const uint32_t e = pos / s->width;
@@ -7596,7 +7599,7 @@ static void island_write_bits_slice(rt_island_t *isl, rt_island_sig_t *s,
             ? ((b_words[src_bit / 64u] >> (src_bit & 63u)) & 1u) : 0;
       }
       else if (bytes != NULL) {
-         const uint8_t v = bytes[k];
+         const uint8_t v = is_std ? std_logic_to_sv(bytes[k]) : bytes[k];
          a = v & 1u;
          b = (v >> 1) & 1u;
       }
