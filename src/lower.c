@@ -12813,9 +12813,52 @@ static void lower_map_view_field_cb(lower_unit_t *lu, tree_t field,
                              lower_map_signal_field_cb, NULL);
 }
 
+static void lower_check_scalar_port_bounds(lower_unit_t *lu,
+                                           vcode_reg_t src_reg,
+                                           type_t src_type, type_t dst_type,
+                                           tree_t where, tree_t hint)
+{
+   if (!type_is_scalar(src_type) || !type_is_scalar(dst_type)
+       || src_type == dst_type)
+      return;
+
+   if (type_is_real(src_type)) {
+      tree_t sr = range_of(src_type, 0), dr = range_of(dst_type, 0);
+      double sl, sr_v, dl, dr_v;
+      if (folded_real(tree_left(sr), &sl) && folded_real(tree_right(sr), &sr_v)
+          && folded_real(tree_left(dr), &dl)
+          && folded_real(tree_right(dr), &dr_v)) {
+         const double slow = tree_subkind(sr) == RANGE_TO ? sl : sr_v;
+         const double shigh = tree_subkind(sr) == RANGE_TO ? sr_v : sl;
+         const double dlow = tree_subkind(dr) == RANGE_TO ? dl : dr_v;
+         const double dhigh = tree_subkind(dr) == RANGE_TO ? dr_v : dl;
+         if (slow <= shigh && dlow <= dhigh && slow >= dlow && shigh <= dhigh)
+            return;
+      }
+   }
+   else {
+      int64_t slow, shigh, dlow, dhigh;
+      if (folded_bounds(range_of(src_type, 0), &slow, &shigh)
+          && folded_bounds(range_of(dst_type, 0), &dlow, &dhigh)
+          && slow <= shigh && dlow <= dhigh && slow >= dlow && shigh <= dhigh)
+         return;
+   }
+
+   vcode_reg_t val_reg;
+   if (lower_have_signal(src_reg))
+      val_reg = emit_load_indirect(emit_resolved(src_reg, VCODE_INVALID_REG));
+   else if (vcode_reg_kind(src_reg) == VCODE_TYPE_POINTER)
+      val_reg = emit_load_indirect(src_reg);
+   else
+      val_reg = src_reg;
+
+   lower_check_scalar_bounds(lu, val_reg, dst_type, where,
+                             hint ?: range_of(dst_type, 0));
+}
+
 static void lower_map_signal(lower_unit_t *lu, vcode_reg_t src_reg,
                              vcode_reg_t dst_reg, type_t src_type,
-                             type_t dst_type, tree_t where)
+                             type_t dst_type, tree_t where, tree_t hint)
 {
    if (!type_is_homogeneous(src_type)) {
       vcode_reg_t locus = lower_debug_locus(where);
@@ -12837,6 +12880,9 @@ static void lower_map_signal(lower_unit_t *lu, vcode_reg_t src_reg,
          emit_map_const(src_nets, dst_nets, count_reg);
    }
    else {
+      lower_check_scalar_port_bounds(lu, src_reg, src_type, dst_type,
+                                     where, hint);
+
       vcode_reg_t count_reg = emit_const(vtype_offset(), 1);
       vcode_reg_t dst_nets = lower_array_data(dst_reg);
 
@@ -13160,7 +13206,14 @@ static void lower_port_map(lower_unit_t *lu, tree_t block, tree_t map,
             vcode_select_block(map_bb);
          }
 
-         lower_map_signal(lu, src_reg, dst_reg, src_type, dst_type, map);
+         if ((mode == PORT_INOUT || mode == PORT_BUFFER)
+             && type_is_scalar(value_type) && type_is_scalar(name_type))
+            lower_check_scalar_port_bounds(lu, value_reg, value_type,
+                                           name_type, map, name);
+
+         tree_t dst_hint = mode == PORT_IN ? name : value;
+         lower_map_signal(lu, src_reg, dst_reg, src_type, dst_type, map,
+                          dst_hint);
 
          if (skip_bb != VCODE_INVALID_BLOCK) {
             emit_jump(skip_bb);
@@ -13174,7 +13227,8 @@ static void lower_port_map(lower_unit_t *lu, tree_t block, tree_t map,
    else {
       type_t value_type = tree_type(value);
       type_t name_type = tree_type(name);
-      lower_map_signal(lu, value_reg, port_reg, value_type, name_type, map);
+      lower_map_signal(lu, value_reg, port_reg, value_type, name_type, map,
+                       name);
    }
 }
 
@@ -13344,8 +13398,11 @@ static void lower_direct_mapped_port(lower_unit_t *lu, tree_t block, tree_t map,
             emit_copy(field_reg, data_reg, count_reg);
          }
       }
-      else
+      else {
+         lower_check_scalar_port_bounds(lu, src_reg, type, field_type, map,
+                                        type_field(tree_type(port), field));
          emit_store_indirect(src_reg, field_reg);
+      }
    }
    else if (type_is_record(type)) {
       vcode_reg_t ptr_reg = emit_index(var, VCODE_INVALID_REG);
@@ -13370,6 +13427,7 @@ static void lower_direct_mapped_port(lower_unit_t *lu, tree_t block, tree_t map,
          emit_store(data_reg, var);
    }
    else {
+      lower_check_scalar_port_bounds(lu, src_reg, type, field_type, map, port);
       emit_alias_signal(src_reg, lower_debug_locus(port));
       emit_store(src_reg, var);
    }
