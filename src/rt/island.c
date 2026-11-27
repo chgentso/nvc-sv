@@ -321,6 +321,7 @@ struct _rt_island_mgr {
    bool                    hier_built;
    bool                    reset_done;
    bool                    late_pending;
+   bool                    pub_pending;   // Dormant RT_ISIG_DIRECT_PUB
    bool                    mt_deps_built;
    bool                    mt_has_comb_deps;
    bool                    fast;
@@ -374,6 +375,7 @@ typedef enum {
    WR_READER_SHAPE,     // reader width/elements/size differ
    WR_READER_REPR,      // two-state / 9-state representation differs
    WR_CYCLE,            // rejected to break a combinational loop
+   WR_DIRECT_PUB,       // direct to island readers, published for the others
    WR_MAX
 } island_wire_reason_t;
 
@@ -416,6 +418,7 @@ static const char *const island_wr_names[WR_MAX] = {
    "reader-shape-mismatch",
    "reader-repr-mismatch",
    "comb-cycle",
+   "DIRECT+published",
 };
 
 static const char *const island_wb_names[WB_MAX] = {
@@ -549,6 +552,16 @@ static void island_wstat_free(void);
       if (unlikely(island_wstats_on))                   \
          island_wstat_count((s), (w));                  \
    } while (0)
+
+// Comb output in ext_out_sigs: not a direct wire, or one that is published
+// too (RT_ISIG_DIRECT_PUB)
+static inline bool island_sig_published(uint32_t flags)
+{
+   return !(flags & RT_ISIG_DIRECT_LINK) || (flags & RT_ISIG_DIRECT_PUB);
+}
+
+// NVC_ISLAND_DIRECT_PUB=0 turns RT_ISIG_DIRECT_PUB wires off (diagnosis)
+static bool island_direct_pub_on = true;
 
 static inline bool island_is_hier_mode(void)
 {
@@ -1097,8 +1110,13 @@ static void island_spec_pin_sig(rt_island_mgr_t *mgr, rt_signal_t *sig,
 static void island_init_act(rt_island_t *isl);
 static void island_act_report(rt_island_mgr_t *mgr);
 
+static void island_activate_direct_pub(rt_island_mgr_t *mgr);
+
 void rt_island_promote_deferred(rt_island_mgr_t *mgr)
 {
+   if (unlikely(mgr->pub_pending))
+      island_activate_direct_pub(mgr);
+
    if (unlikely(mgr->defer_put_q.count > 0))
       island_apply_deferred_puts(mgr);
 
@@ -1352,6 +1370,11 @@ rt_island_mgr_t *rt_island_mgr_new(rt_model_t *m)
          island_wstats = hash_new(256);
       const char *act = getenv("NVC_ISLAND_ACT");
       island_act_enabled = act == NULL || atoi(act) != 0;
+      // Off with simulation threads: island_eval_cluster_mt marks the
+      // readers in the cluster directly
+      const char *dpub = getenv("NVC_ISLAND_DIRECT_PUB");
+      island_direct_pub_on = (dpub == NULL || atoi(dpub) != 0)
+         && opt_get_int(OPT_SIM_THREADS) <= 1;
       island_act_stats = getenv("NVC_ISLAND_ACT_STATS") != NULL;
       const char *chk = getenv("NVC_ISLAND_ACT_CHECK");
 #ifdef DEBUG
@@ -4048,23 +4071,37 @@ static inline bool island_copy_direct_desc(const rt_island_direct_desc_t *dd)
    return changed;
 }
 
+static inline void island_defer_dirty(rt_island_t *isl);
+
+// A reader of a RT_ISIG_DIRECT_PUB source runs when it would have through
+// its input watch on the kernel signal (rt_island_input_watch_inline): in
+// the next delta cycle when the source changed in the blocking update phase
+static inline void island_direct_wake(rt_island_t *dst_isl, bool pub)
+{
+   if (pub && model_blocking_update(dst_isl->model))
+      island_defer_dirty(dst_isl);
+   else
+      island_mark_dirty(dst_isl);
+}
+
+__attribute__((noinline))
+static void island_direct_wake_desc(const rt_island_direct_desc_t *dd)
+{
+   if (dd->flags & RT_IDIR_ACT)
+      dd->dst_isl->state[dd->flags >> RT_IDIR_IDX_SHIFT] = 1;
+   island_direct_wake(dd->dst_isl, !!(dd->flags & RT_IDIR_PUB));
+}
+
 static inline void island_propagate_direct_comb(rt_island_t *isl)
 {
    const uint32_t n = isl->n_direct_comb_descs;
    const rt_island_direct_desc_t *dd = isl->direct_comb_descs;
-   if (likely(!isl->direct_act)) {
-      for (uint32_t j = 0; j < n; j++, dd++) {
-         if (island_copy_direct_desc(dd) && dd->dst_isl != NULL)
-            island_mark_dirty(dd->dst_isl);
-      }
-      return;
-   }
-
    for (uint32_t j = 0; j < n; j++, dd++) {
       if (island_copy_direct_desc(dd) && dd->dst_isl != NULL) {
-         if (dd->flags & RT_IDIR_ACT)
-            dd->dst_isl->state[dd->flags >> RT_IDIR_IDX_SHIFT] = 1;
-         island_mark_dirty(dd->dst_isl);
+         if (likely(!(dd->flags & (RT_IDIR_ACT | RT_IDIR_PUB))))
+            island_mark_dirty(dd->dst_isl);
+         else
+            island_direct_wake_desc(dd);
       }
    }
 }
@@ -4085,7 +4122,8 @@ static void island_apply_direct_outs(rt_island_t *isl)
          if (island_copy_direct_sig(src_s, dst_s)
              && (dst_s->flags & RT_ISIG_COMB_READ)
              && dst_s->isl->eval_handle != JIT_HANDLE_INVALID)
-            island_mark_dirty(dst_s->isl);
+            island_direct_wake(dst_s->isl,
+                               !!(src_s->flags & RT_ISIG_DIRECT_PUB));
       }
    }
 }
@@ -4384,10 +4422,13 @@ static void island_refresh_direct_comb_descs(rt_island_t *isl)
             ? disl : NULL;
          dd->count = cnt;
          dd->flags = fl;
+         if (src_s->flags & RT_ISIG_DIRECT_PUB)
+            dd->flags |= RT_IDIR_PUB;
          if (((src_s->flags ^ dst_s->flags)
               & (RT_ISIG_TWO_STATE | RT_ISIG_STD_LOGIC9))
              || (dst_s->flags & RT_ISIG_SPEC_HELD)) {
-            dd->flags = RT_IDIR_STD_LOGIC9 | RT_IDIR_MIX;
+            dd->flags = RT_IDIR_STD_LOGIC9 | RT_IDIR_MIX
+               | (dd->flags & RT_IDIR_PUB);
             dd->mix_src = src_s;
             dd->mix_dst = dst_s;
          }
@@ -5911,6 +5952,70 @@ static bool island_check_direct_sig(const rt_island_sig_t *src_s,
    return true;
 }
 
+// A Verilog combinational output that cannot be a direct wire because the
+// kernel signal has other readers (processes, clock watches, observers,
+// ports) can still feed the island inputs that watch the signal itself
+// directly, if the island keeps publishing it: those readers then see the
+// value when the source island runs, as they do through the input watch,
+// and every other reader still sees the kernel signal.
+static bool island_check_direct_pub(const rt_island_sig_t *src_s,
+                                    island_sig_ptr_list_t *consumers)
+{
+   consumers->count = 0;
+   const rt_signal_t *sig = src_s->sig;
+   if (sig == NULL || src_s->isl->is_vhdl
+       || src_s->next_owner != NULL
+       || (src_s->flags & (RT_ISIG_SPARSE_RAM | RT_ISIG_FF_WRITTEN
+                           | RT_ISIG_VHDL | RT_ISIG_STD_LOGIC9))
+       || (src_s->flags & (RT_ISIG_COMB_WRITTEN | RT_ISIG_OUT))
+          != (RT_ISIG_COMB_WRITTEN | RT_ISIG_OUT))
+      return false;
+
+   const rt_nexus_t *nx = &(sig->nexus);
+   for (uint32_t i = 0; i < sig->n_nexus; i++, nx = nx->chain) {
+      if (!island_nexus_overlaps_sig(nx, src_s))
+         continue;
+      if (nx->n_sources != 0)
+         return false;
+      if (nx->pending == NULL)
+         continue;
+
+      rt_wakeable_t *const *wake;
+      unsigned count;
+      rt_wakeable_t *one;
+      if (pointer_tag(nx->pending) == 1) {
+         one = untag_pointer(nx->pending, rt_wakeable_t);
+         wake = &one;
+         count = 1;
+      }
+      else {
+         const rt_pending_t *p = untag_pointer(nx->pending, rt_pending_t);
+         wake = p->wake;
+         count = p->count;
+      }
+
+      for (unsigned j = 0; j < count; j++) {
+         rt_wakeable_t *w = wake[j];
+         if (w == NULL || w->kind != W_WATCH)
+            continue;
+         rt_watch_t *watch = container_of(w, rt_watch_t, wakeable);
+         if (watch->fn != island_input_watch_cb)
+            continue;
+         rt_island_sig_t *dst_s = watch->user_data;
+         if (dst_s->isl->is_vhdl
+             || island_reader_mismatch(src_s, dst_s, sig, src_s->sig_offset,
+                                       true) != WR_NONE)
+            continue;
+         bool seen = false;
+         for (unsigned k = 0; k < consumers->count && !seen; k++)
+            seen = consumers->items[k] == dst_s;
+         if (!seen)
+            APUSH(*consumers, dst_s);
+      }
+   }
+   return consumers->count > 0;
+}
+
 static const rt_nexus_t *island_wstat_nexus_at(const rt_signal_t *sig,
                                                uint32_t off)
 {
@@ -6275,6 +6380,7 @@ typedef struct {
    island_alias_spec_t *aliases;
    uint32_t             n_aliases;
    bool                 rejected;
+   bool                 pub;   // RT_ISIG_DIRECT_PUB
 } hier_cand_t;
 
 typedef struct {
@@ -6379,10 +6485,15 @@ static void island_build_hier(rt_island_mgr_t *mgr)
          rt_island_sig_t *src_s = &(isl->sigs[j]);
          if (!(src_s->flags & (RT_ISIG_COMB_WRITTEN | RT_ISIG_FF_WRITTEN)))
             continue;
+         bool pub = false;
          if (!island_check_direct_sig(src_s, &tmp_cons, &tmp_aliases)) {
             if (unlikely(island_wstats_on))
                island_wstat_note_fail(src_s, island_wire_why);
-            continue;
+            if (!island_direct_pub_on
+                || !island_check_direct_pub(src_s, &tmp_cons))
+               continue;
+            tmp_aliases.count = 0;
+            pub = true;
          }
 
          hier_cand_t c = {
@@ -6395,6 +6506,7 @@ static void island_build_hier(rt_island_mgr_t *mgr)
                : NULL,
             .n_aliases = tmp_aliases.count,
             .rejected  = false,
+            .pub       = pub,
          };
          memcpy(c.targets, tmp_cons.items,
                 tmp_cons.count * sizeof(rt_island_sig_t *));
@@ -6409,9 +6521,12 @@ static void island_build_hier(rt_island_mgr_t *mgr)
 
    // 2. Build combinational dependency graph & break any cycles via DFS
    uint32_t *comb_deg LOCAL = xcalloc_array(N, sizeof(uint32_t));
+   // The readers of a published source (RT_ISIG_DIRECT_PUB) run in the
+   // next delta cycle like those of a kernel signal: no ordering edge and
+   // no cluster, as without the wire
    for (unsigned c = 0; c < cands.count; c++) {
       const hier_cand_t *hc = &(cands.items[c]);
-      if (!(hc->src_s->flags & RT_ISIG_COMB_WRITTEN))
+      if (!(hc->src_s->flags & RT_ISIG_COMB_WRITTEN) || hc->pub)
          continue;
       const uint32_t u = hc->src_s->isl->isl_id;
       for (uint32_t t = 0; t < hc->n_targets; t++) {
@@ -6430,7 +6545,7 @@ static void island_build_hier(rt_island_mgr_t *mgr)
 
    for (unsigned c = 0; c < cands.count; c++) {
       const hier_cand_t *hc = &(cands.items[c]);
-      if (!(hc->src_s->flags & RT_ISIG_COMB_WRITTEN))
+      if (!(hc->src_s->flags & RT_ISIG_COMB_WRITTEN) || hc->pub)
          continue;
       const uint32_t u = hc->src_s->isl->isl_id;
       for (uint32_t t = 0; t < hc->n_targets; t++) {
@@ -6517,10 +6632,18 @@ static void island_build_hier(rt_island_mgr_t *mgr)
 
       rt_island_sig_t *src_s = hc->src_s;
       if (unlikely(island_wstats_on))
-         island_wstat_note(src_s, WR_DIRECT);
-      src_s->flags |= RT_ISIG_DIRECT_LINK;
+         island_wstat_note(src_s, hc->pub ? WR_DIRECT_PUB : WR_DIRECT);
       src_s->direct_targets = hc->targets;
       src_s->n_direct_targets = hc->n_targets;
+      if (hc->pub) {
+         // Dormant until island_activate_direct_pub(): the readers keep
+         // their input watches through time zero
+         src_s->flags |= RT_ISIG_DIRECT_PUB;
+         src_s->isl->has_direct_pub = true;
+         mgr->pub_pending = true;
+         continue;
+      }
+      src_s->flags |= RT_ISIG_DIRECT_LINK;
 
       if (hc->n_aliases > 0) {
          src_s->direct_aliases = xcalloc_array(hc->n_aliases,
@@ -6558,7 +6681,7 @@ static void island_build_hier(rt_island_mgr_t *mgr)
       rt_island_t *isl = mgr->islands.items[i];
       uint32_t n_ext = 0, n_dir = 0;
       for (uint32_t j = 0; j < isl->n_out_sigs; j++) {
-         if (!(isl->sigs[isl->out_sigs[j]].flags & RT_ISIG_DIRECT_LINK))
+         if (island_sig_published(isl->sigs[isl->out_sigs[j]].flags))
             n_ext++;
       }
       for (uint32_t j = 0; j < isl->nsigs; j++) {
@@ -6574,7 +6697,7 @@ static void island_build_hier(rt_island_mgr_t *mgr)
          uint32_t p = 0;
          for (uint32_t j = 0; j < isl->n_out_sigs; j++) {
             const uint32_t sidx = isl->out_sigs[j];
-            if (!(isl->sigs[sidx].flags & RT_ISIG_DIRECT_LINK))
+            if (island_sig_published(isl->sigs[sidx].flags))
                isl->ext_out_sigs[p++] = sidx;
          }
       }
@@ -6832,8 +6955,8 @@ static void island_classify_outputs(rt_island_mgr_t *mgr)
          uint32_t n_ext = 0;
          for (uint32_t j = 0; j < isl->n_out_sigs; j++) {
             const uint32_t sidx = isl->out_sigs[j];
-            if (!(isl->sigs[sidx].flags
-                  & (RT_ISIG_DIRECT_LINK | RT_ISIG_PRUNED)))
+            const uint32_t f = isl->sigs[sidx].flags;
+            if (island_sig_published(f) && !(f & RT_ISIG_PRUNED))
                n_ext++;
          }
          free(isl->ext_out_sigs);
@@ -6844,8 +6967,8 @@ static void island_classify_outputs(rt_island_mgr_t *mgr)
             uint32_t p = 0;
             for (uint32_t j = 0; j < isl->n_out_sigs; j++) {
                const uint32_t sidx = isl->out_sigs[j];
-               if (!(isl->sigs[sidx].flags
-                     & (RT_ISIG_DIRECT_LINK | RT_ISIG_PRUNED)))
+               const uint32_t f = isl->sigs[sidx].flags;
+               if (island_sig_published(f) && !(f & RT_ISIG_PRUNED))
                   isl->ext_out_sigs[p++] = sidx;
             }
          }
@@ -6857,10 +6980,24 @@ static void island_classify_outputs(rt_island_mgr_t *mgr)
               (int)mgr->fast, n_sole, n_pruned);
 }
 
+static void island_break_direct_link(rt_model_t *m, rt_island_sig_t *src_s);
+
 void rt_island_reset_all(rt_island_mgr_t *mgr)
 {
    if (mgr == NULL)
       return;
+
+   // A reset after time zero (restart) goes back to the input watches of
+   // the RT_ISIG_DIRECT_PUB readers for good: they are only made once
+   for (unsigned i = 0; i < mgr->islands.count; i++) {
+      rt_island_t *isl = mgr->islands.items[i];
+      if (!isl->has_direct_pub)
+         continue;
+      for (uint32_t j = 0; j < isl->nsigs; j++) {
+         if (isl->sigs[j].flags & RT_ISIG_DIRECT_PUB)
+            island_break_direct_link(mgr->model, &(isl->sigs[j]));
+      }
+   }
 
    mgr->fast = !!opt_get_int(OPT_ISLAND_FAST);
    mgr->n_forced_islands = 0;
@@ -8799,6 +8936,8 @@ static bool island_eval_ff_pre_sync(jit_t *jit, rt_model_t *m,
             isl->dirty = false;
             if (!island_call_comb(jit, m, isl, tlab))
                return false;
+            if (isl->n_direct_comb_descs > 0)   // RT_ISIG_DIRECT_PUB only
+               island_propagate_direct_comb(isl);
             if (mgr->hier_built) {
                for (uint32_t j = 0; j < isl->n_ext_out_sigs; j++) {
                   rt_island_sig_t *os = &(isl->sigs[isl->ext_out_sigs[j]]);
@@ -9445,6 +9584,8 @@ static bool rt_island_eval_ff_inner(jit_t *jit, rt_model_t *m,
                      ok = false;
                      break;
                   }
+                  if (isl->n_direct_comb_descs > 0)   // RT_ISIG_DIRECT_PUB
+                     island_propagate_direct_comb(isl);
                   if (mgr->hier_built) {
                      for (uint32_t j = 0; j < isl->n_ext_out_sigs; j++) {
                         rt_island_sig_t *os = &(isl->sigs[isl->ext_out_sigs[j]]);
@@ -10005,12 +10146,14 @@ void rt_island_sync_slice_to_signal(rt_model_t *m, rt_signal_t *sig,
 
 static void island_break_direct_link(rt_model_t *m, rt_island_sig_t *src_s)
 {
-   if (!(src_s->flags & RT_ISIG_DIRECT_LINK))
+   if (!(src_s->flags & RT_ISIG_DIRECT_LINK)) {
+      src_s->flags &= ~RT_ISIG_DIRECT_PUB;   // Dormant: never made
       return;
+   }
 
    if (unlikely(island_wstats_on))
       island_wstat_cause(src_s, island_wb_cur);
-   src_s->flags &= ~RT_ISIG_DIRECT_LINK;
+   src_s->flags &= ~(RT_ISIG_DIRECT_LINK | RT_ISIG_DIRECT_PUB);
    src_s->flags |= RT_ISIG_OBSERVED;
    island_sync_sig_raw(src_s->isl, src_s, true);
    for (uint32_t a = 0; a < src_s->n_direct_aliases; a++) {
@@ -10046,6 +10189,66 @@ static void island_break_direct_link(rt_model_t *m, rt_island_sig_t *src_s)
    }
    island_refresh_domain_descs(src_s->isl);
    island_refresh_direct_comb_descs(src_s->isl);
+}
+
+// RT_ISIG_DIRECT_PUB wires are made at the start of the first delta cycle
+// after time zero: until then the readers take the value from the kernel
+// signal through their input watches, which follows the late publication
+// of always_comb values and the reset-time evaluation exactly.  At this
+// point the source island state, its kernel signal and every reader agree
+// (a reader with a pending input sync takes the same kernel value later).
+static void island_activate_direct_pub(rt_island_mgr_t *mgr)
+{
+   const int64_t now = model_now(mgr->model, NULL);
+   if (now == 0)
+      return;
+
+   mgr->pub_pending = false;
+   for (unsigned i = 0; i < mgr->islands.count; i++) {
+      rt_island_t *isl = mgr->islands.items[i];
+      if (!isl->has_direct_pub)
+         continue;
+
+      bool any = false;
+      for (uint32_t j = 0; j < isl->nsigs; j++) {
+         rt_island_sig_t *src_s = &(isl->sigs[j]);
+         if ((src_s->flags & (RT_ISIG_DIRECT_PUB | RT_ISIG_DIRECT_LINK))
+             != RT_ISIG_DIRECT_PUB)
+            continue;
+         src_s->flags |= RT_ISIG_DIRECT_LINK;
+         for (uint32_t t = 0; t < src_s->n_direct_targets; t++) {
+            rt_island_sig_t *dst_s = src_s->direct_targets[t];
+            dst_s->flags |= RT_ISIG_DIRECT_LINK;
+            dst_s->direct_src = src_s;
+            if (dst_s->watch != NULL) {
+               watch_free(mgr->model, dst_s->watch);
+               dst_s->watch = NULL;
+            }
+            island_copy_direct_sig(src_s, dst_s);
+         }
+         any = true;
+      }
+      if (!any)
+         continue;
+
+      uint32_t n_dir = 0;
+      for (uint32_t j = 0; j < isl->nsigs; j++) {
+         const uint32_t f = isl->sigs[j].flags;
+         if ((f & (RT_ISIG_COMB_WRITTEN | RT_ISIG_DIRECT_LINK))
+             == (RT_ISIG_COMB_WRITTEN | RT_ISIG_DIRECT_LINK))
+            n_dir++;
+      }
+      free(isl->direct_comb_outs);
+      isl->direct_comb_outs = xmalloc_array(n_dir, sizeof(uint32_t));
+      isl->n_direct_comb_outs = 0;
+      for (uint32_t j = 0; j < isl->nsigs; j++) {
+         const uint32_t f = isl->sigs[j].flags;
+         if ((f & (RT_ISIG_COMB_WRITTEN | RT_ISIG_DIRECT_LINK))
+             == (RT_ISIG_COMB_WRITTEN | RT_ISIG_DIRECT_LINK))
+            isl->direct_comb_outs[isl->n_direct_comb_outs++] = j;
+      }
+      island_refresh_direct_comb_descs(isl);
+   }
 }
 
 static void island_break_aliases(rt_model_t *m, rt_island_mgr_t *mgr,
@@ -10159,7 +10362,9 @@ void rt_island_on_observer_attached(rt_model_t *m, rt_signal_t *sig)
           && (s->flags & RT_ISIG_TWO_STATE))
          island_spec_demote(s->isl, RT_ISLAND_DEOPT_ROW);
       s->flags &= ~RT_ISIG_LAST_OUT_VALID;
-      if (s->flags & RT_ISIG_DIRECT_LINK)
+      if (s->flags & RT_ISIG_DIRECT_PUB)
+         continue;   // The kernel signal is up to date
+      else if (s->flags & RT_ISIG_DIRECT_LINK)
          island_break_direct_link(m, s);
       else if (s->flags & RT_ISIG_PRUNED)
          island_unprune_sig(mgr, s);
@@ -10203,7 +10408,8 @@ static void island_eval_comb_now(rt_model_t *m, rt_island_t *isl)
             if (island_copy_direct_sig(src_s, dst_s)
                 && (dst_s->flags & RT_ISIG_COMB_READ)
                 && dst_s->isl->eval_handle != JIT_HANDLE_INVALID) {
-               island_mark_dirty(dst_s->isl);
+               island_direct_wake(dst_s->isl,
+                                  !!(src_s->flags & RT_ISIG_DIRECT_PUB));
                rt_island_request_delta(m);
             }
          }
@@ -10896,7 +11102,8 @@ bool rt_island_vpi_release_slice(rt_model_t *m, rt_signal_t *sig,
                if (island_copy_direct_sig(s, dst_s)
                    && (dst_s->flags & RT_ISIG_COMB_READ)
                    && dst_s->isl->eval_handle != JIT_HANDLE_INVALID) {
-                  island_mark_dirty(dst_s->isl);
+                  island_direct_wake(dst_s->isl,
+                                     !!(s->flags & RT_ISIG_DIRECT_PUB));
                   rt_island_request_delta(m);
                }
             }
@@ -10921,7 +11128,8 @@ bool rt_island_vpi_release_slice(rt_model_t *m, rt_signal_t *sig,
                   if (island_copy_direct_sig(s, dst_s)
                       && (dst_s->flags & RT_ISIG_COMB_READ)
                       && dst_s->isl->eval_handle != JIT_HANDLE_INVALID) {
-                     island_mark_dirty(dst_s->isl);
+                     island_direct_wake(dst_s->isl,
+                                        !!(s->flags & RT_ISIG_DIRECT_PUB));
                      rt_island_request_delta(m);
                   }
                }

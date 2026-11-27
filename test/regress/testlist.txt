@@ -3475,3 +3475,5 @@ svstructcmp3 verilog,gold
 svstaticinit3 verilog,gold
 svgatedelay2 verilog,gold
 vlog_island_meminit1 verilog,gold
+vlog_island_dpub1 verilog,gold
+island_dpub2 shell

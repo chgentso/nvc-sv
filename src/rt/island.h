@@ -53,6 +53,7 @@ typedef enum {
    RT_ISIG_SPEC_ROWS      = (1u << 24),   // Mode A: some rows may be held
    RT_ISIG_MIX_MEMO       = (1u << 25),   // mix_memo is valid
    RT_ISIG_TOUCH_LOG      = (1u << 26),   // SV memory: element write log
+   RT_ISIG_DIRECT_PUB     = (1u << 27),   // Direct source also published
 } rt_island_sig_flags_t;
 
 // Speculative Mode A clean tracking (NVC_ISLAND_SPEC).  The Mode A state of
@@ -147,6 +148,7 @@ typedef struct {
 #define RT_IDIR_TWO_STATE   (1u << 1)
 #define RT_IDIR_ACT         (1u << 2)   // Set the change byte (flags >> 8)
 #define RT_IDIR_MIX         (1u << 3)   // With STD_LOGIC9: Mode A <-> Mode B
+#define RT_IDIR_PUB         (1u << 4)   // Source is RT_ISIG_DIRECT_PUB
 #define RT_IDIR_IDX_SHIFT   8u
 
 typedef struct {
@@ -355,6 +357,7 @@ typedef struct _rt_island {
    jit_handle_t           reset_eval_handle;
    void                  *reset_eval_ctx;
    bool                   skip_sv_reset;
+   bool                   has_direct_pub;   // A RT_ISIG_DIRECT_PUB source
 } rt_island_t;
 
 // Speculative Mode A (NVC_ISLAND_SPEC): a VHDL island lowered in Mode B
