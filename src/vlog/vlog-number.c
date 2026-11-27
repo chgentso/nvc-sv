@@ -1420,18 +1420,46 @@ void vec2_itoa(int size, const uint64_t *a, bool is_signed, text_buf_t *tb)
 double vec4_itor(int size, bool is_signed, const uint64_t *a,
                  const uint64_t *b)
 {
+   if (size <= 0)
+      return 0.0;
+
+   const uint64_t smask = UINT64_C(1) << ((size - 1) % 64);
+   const bool neg = is_signed
+      && !(b[(size - 1) / 64] & smask) && !!(a[(size - 1) / 64] & smask);
+
+   if (neg) {
+      // Exact two's complement magnitude: find lowest 1-bit (treating X/Z as 0)
+      int low1 = -1;
+      for (int i = 0; i < size; i++) {
+         const uint64_t mask = UINT64_C(1) << (i % 64);
+         if (!(b[i / 64] & mask) && !!(a[i / 64] & mask)) {
+            low1 = i;
+            break;
+         }
+      }
+
+      double mag = 0.0;
+      for (int i = size - 1; i >= 0; i--) {
+         mag *= 2.0;
+         if (i > low1) {
+            const uint64_t mask = UINT64_C(1) << (i % 64);
+            const bool bit = !(b[i / 64] & mask) && !!(a[i / 64] & mask);
+            if (!bit)
+               mag += 1.0;
+         }
+         else if (i == low1)
+            mag += 1.0;
+      }
+
+      return -mag;
+   }
+
    double result = 0.0;
    for (int i = size - 1; i >= 0; i--) {
       result *= 2.0;
       const uint64_t mask = UINT64_C(1) << (i % 64);
       if (!(b[i / 64] & mask) && !!(a[i / 64] & mask))
          result += 1.0;
-   }
-
-   if (is_signed && size > 0) {
-      const uint64_t mask = UINT64_C(1) << ((size - 1) % 64);
-      if (!(b[(size - 1) / 64] & mask) && !!(a[(size - 1) / 64] & mask))
-         result -= ldexp(1.0, size);
    }
 
    return result;
