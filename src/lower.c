@@ -143,6 +143,8 @@ static void lower_predef_field_eq_cb(lower_unit_t *lu, tree_t field,
                                      vcode_reg_t locus, void *context);
 static void lower_check_indexes(lower_unit_t *lu, type_t from, type_t to,
                                 vcode_reg_t array, tree_t where);
+static void lower_check_type_indexes(lower_unit_t *lu, type_t type,
+                                     vcode_reg_t bounds_reg, tree_t where);
 static vcode_reg_t lower_conversion(lower_unit_t *lu, vcode_reg_t value_reg,
                                     tree_t where, type_t from, type_t to);
 static vcode_reg_t lower_get_type_bounds(lower_unit_t *lu, type_t type);
@@ -5431,9 +5433,9 @@ static vcode_reg_t lower_new(lower_unit_t *lu, tree_t expr)
          if (wrap_value)
             bounds_reg = lower_get_type_bounds(lu, type);
 
-         if (!type_is_unconstrained(type))
-            lower_check_indexes(lu, type, type_base_recur(type),
-                                bounds_reg, expr);
+         if (!type_is_unconstrained(type)
+             && (!type_has_ident(type) || type_const_bounds(type)))
+            lower_check_type_indexes(lu, type, bounds_reg, expr);
       }
 
       vcode_reg_t length_reg =
@@ -8819,6 +8821,85 @@ static void lower_check_indexes(lower_unit_t *lu, type_t from, type_t to,
    }
 }
 
+static void lower_check_type_indexes(lower_unit_t *lu, type_t type,
+                                     vcode_reg_t bounds_reg, tree_t where)
+{
+   assert(!type_is_unconstrained(type));
+
+   type_t base = type_base_recur(type);
+   const int ndims = dimension_of(base);
+   for (int i = 0; i < ndims; i++) {
+      type_t index = index_type_of(base, i);
+
+      int64_t ilow = 0, ihigh = 0;
+      const bool folded_index =
+         folded_bounds(range_of(index, 0), &ilow, &ihigh) && ilow <= ihigh;
+
+      if (folded_index) {
+         int64_t alow, ahigh;
+         if (folded_bounds(range_of(type, i), &alow, &ahigh)) {
+            if (alow > ahigh || (alow >= ilow && ahigh <= ihigh))
+               continue;   // Statically null or within index subtype bounds
+         }
+      }
+
+      vcode_reg_t aleft_reg  = lower_array_left(lu, type, i, bounds_reg);
+      vcode_reg_t aright_reg = lower_array_right(lu, type, i, bounds_reg);
+      vcode_reg_t adir_reg   = lower_array_dir(lu, type, i, bounds_reg);
+
+      if (folded_index) {
+         int64_t llow, lhigh, rlow, rhigh;
+         if (vcode_reg_bounds(aleft_reg, &llow, &lhigh)
+             && vcode_reg_bounds(aright_reg, &rlow, &rhigh)) {
+            if (llow >= ilow && lhigh <= ihigh
+                && rlow >= ilow && rhigh <= ihigh)
+               continue;
+
+            int64_t dconst;
+            if (vcode_reg_const(adir_reg, &dconst)) {
+               if (dconst == RANGE_TO && llow >= ilow && rhigh <= ihigh)
+                  continue;
+               if (dconst == RANGE_DOWNTO && rlow >= ilow && lhigh <= ihigh)
+                  continue;
+            }
+         }
+      }
+
+      vcode_reg_t ileft_reg, iright_reg, idir_reg;
+      lower_get_scalar_type_bounds(lu, index, &ileft_reg,
+                                   &iright_reg, &idir_reg);
+
+      vcode_reg_t null_reg = emit_range_null(aleft_reg, aright_reg, adir_reg);
+
+      vcode_block_t after_bb = VCODE_INVALID_BLOCK;
+
+      int64_t null_const;
+      if (vcode_reg_const(null_reg, &null_const)) {
+         if (null_const == 1)
+            continue;
+      }
+      else {
+         vcode_block_t check_bb = emit_block();
+         after_bb = emit_block();
+         emit_cond(null_reg, after_bb, check_bb);
+         vcode_select_block(check_bb);
+      }
+
+      vcode_reg_t hint_reg = lower_debug_locus(range_of(index, 0));
+      vcode_reg_t locus = where ? lower_debug_locus(where) : hint_reg;
+
+      emit_index_check(aleft_reg, ileft_reg, iright_reg, idir_reg,
+                       locus, hint_reg);
+      emit_index_check(aright_reg, ileft_reg, iright_reg, idir_reg,
+                       locus, hint_reg);
+
+      if (after_bb != VCODE_INVALID_BLOCK) {
+         emit_jump(after_bb);
+         vcode_select_block(after_bb);
+      }
+   }
+}
+
 static vcode_reg_t lower_var_constraints(lower_unit_t *lu, type_t var_type,
                                          type_t init_type, vcode_reg_t init_reg,
                                          vcode_reg_t mem_reg)
@@ -9308,8 +9389,9 @@ static void lower_sub_signals(lower_unit_t *lu, type_t type, type_t var_type,
    else if (type_is_homogeneous(type)) {
       assert(type_is_array(type));
 
-      if (!type_is_unconstrained(type))
-         lower_check_indexes(lu, type, type_base_recur(type), bounds_reg, where);
+      if (!type_is_unconstrained(type)
+          && (!type_has_ident(type) || type_const_bounds(type)))
+         lower_check_type_indexes(lu, type, bounds_reg, where);
 
       vcode_type_t voffset = vtype_offset();
       vcode_reg_t size_reg = emit_const(voffset, type_byte_width(type));
@@ -9357,8 +9439,9 @@ static void lower_sub_signals(lower_unit_t *lu, type_t type, type_t var_type,
       // Array of non-homogeneous type (e.g. records). Need a loop to
       // initialise each sub-signal.
 
-      if (!type_is_unconstrained(type))
-         lower_check_indexes(lu, type, type_base_recur(type), bounds_reg, where);
+      if (!type_is_unconstrained(type)
+          && (!type_has_ident(type) || type_const_bounds(type)))
+         lower_check_type_indexes(lu, type, bounds_reg, where);
 
       type_t elem = type_elem_recur(type);
 
@@ -11062,6 +11145,8 @@ static void lower_type_bounds_var(lower_unit_t *lu, type_t type)
 
       vcode_reg_t null_reg = emit_null(vtype_pointer(velem));
       vcode_reg_t wrap_reg = lower_wrap(lu, type, null_reg);
+      if (!type_is_unconstrained(type))
+         lower_check_type_indexes(lu, type, wrap_reg, NULL);
       emit_store(wrap_reg, var);
 
       lower_put_vcode_obj(type, var, lu);
