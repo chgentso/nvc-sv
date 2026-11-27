@@ -2932,36 +2932,10 @@ static void analyze_process(vhdl_island_ctx_t *ctx, tree_t proc, int stmt_idx,
          }
          if (!ok)
             reason = "comb: sensitivity list does not cover reads";
-         // Eject self-reading combinational loops inside a single process
-         // (only a conflict if read_ranges and write_ranges overlap on the same signal)
-         for (unsigned i = 0; i < c.reads.count && ok; i++) {
-            for (unsigned j = 0; j < c.writes.count; j++) {
-               if (c.reads.items[i] == c.writes.items[j]) {
-                  const uint32_t sid = c.reads.items[i];
-                  bool has_r = false, has_w = false, overlap = false;
-                  for (unsigned ri = 0; ri < c.read_ranges.count && !overlap; ri++) {
-                     if (c.read_ranges.items[ri].sig_id != sid)
-                        continue;
-                     has_r = true;
-                     for (unsigned wi = 0; wi < c.write_ranges.count; wi++) {
-                        if (c.write_ranges.items[wi].sig_id != sid)
-                           continue;
-                        has_w = true;
-                        if (c.read_ranges.items[ri].pos_lo <= c.write_ranges.items[wi].pos_hi
-                            && c.write_ranges.items[wi].pos_lo <= c.read_ranges.items[ri].pos_hi) {
-                           overlap = true;
-                           break;
-                        }
-                     }
-                  }
-                  if (overlap || !has_r || !has_w) {
-                     ok = false;
-                     reason = "comb: process reads a signal it also writes";
-                     break;
-                  }
-               }
-            }
-         }
+         // A process that reads a signal it also writes sees the value of
+         // the current delta cycle: the lowering reads such signals from a
+         // copy taken when the process starts (see vi_build_comb_unit) and
+         // the island runs again in the next delta when they changed.
          if (ok) {
             vhdl_iproc_t p = {
                .stmt              = proc,
@@ -4560,7 +4534,9 @@ void vhdl_island_rebuild(vhdl_island_ctx_t *ctx)
             for (unsigned wi = 0; wi < wl->count; wi++) {
                const uint32_t w = wl->items[wi];
                const vhdl_iproc_t *pw = &(procs.items[comb_idxs.items[w]]);
-               if (proc_reads_overlap_writes(p, pw, sid))
+               // A process reading its own output is not a loop: it reads
+               // the value of the current delta from a shadow copy
+               if (w != c && proc_reads_overlap_writes(p, pw, sid))
                   adj[c][w] = true;  // c depends on w: visit w first
             }
          }

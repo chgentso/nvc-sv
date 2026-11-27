@@ -3369,3 +3369,4 @@ vhdl_island_act2 shell
 vhdl_island_spec_fold1 shell
 signal39        gold,normal,2008
 signal40        fail,gold
+vhdl_island_selfread1 shell

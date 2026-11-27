@@ -150,6 +150,12 @@ typedef struct {
    // deopt code (rt_island_deopt_t) instead
    bool                     spec;
    mir_value_t              spec_var;
+   // Signals the current combinational process reads and also writes:
+   // reads load the copy taken when the process started, the value of the
+   // current delta cycle (see vi_emit_self_shadow)
+   const vhdl_isl_sig_t   **shadow_sig;
+   mir_value_t             *shadow_ptr;
+   uint32_t                 n_shadow;
 } vi_lower_t;
 
 static void vi_generic_reason(vi_lower_t *l, const char *what, tree_t t)
@@ -1127,6 +1133,28 @@ static mir_value_t vi_state_ptr_at(vi_lower_t *l, uint32_t byte_off)
    return mir_build_array_ref(l->mu, l->state_ptr, vi_off(l->mu, byte_off));
 }
 
+// Base pointer and offset to read ISIG from: the island state, or the
+// shadow copy when the current process also writes the signal
+static mir_value_t vi_read_base(vi_lower_t *l, const vhdl_isl_sig_t *isig,
+                                uint32_t *off)
+{
+   for (uint32_t i = 0; i < l->n_shadow; i++) {
+      if (l->shadow_sig[i] == isig) {
+         *off = 0;
+         return l->shadow_ptr[i];
+      }
+   }
+   *off = isig->a_off;
+   return l->state_ptr;
+}
+
+static mir_value_t vi_read_ptr(vi_lower_t *l, const vhdl_isl_sig_t *isig)
+{
+   uint32_t off;
+   mir_value_t base = vi_read_base(l, isig, &off);
+   return mir_build_array_ref(l->mu, base, vi_off(l->mu, off));
+}
+
 static bool vi_lower_expr(vi_lower_t *l, tree_t expr, vi_val_t *out);
 static bool vi_lower_stmt(vi_lower_t *l, tree_t stmt);
 
@@ -1381,17 +1409,19 @@ static bool vi_lower_sig_load(vi_lower_t *l, const vhdl_isig_t *s,
 {
    mir_unit_t *mu = l->mu;
    vi_note_read(l, isig);
+   uint32_t rd_off;
+   mir_value_t rd_base = vi_read_base(l, isig, &rd_off);
    if (s->elem_kind == VISIG_ENUM || s->elem_kind == VISIG_INT) {
       mir_value_t iv;
       if (s->byte_size == 1 && !s->is_signed) {
-         mir_value_t ptr = vi_state_ptr_at(l, isig->a_off);
+         mir_value_t ptr = mir_build_array_ref(mu, rd_base, vi_off(mu, rd_off));
          mir_value_t raw = mir_build_load(mu, ptr);
          iv = mir_build_cast(mu, vi_i64_type(mu), raw);
       }
       else {
          mir_type_t vt = mir_vec2_type(mu, (int)s->byte_size * 8, s->is_signed);
-         mir_value_t raw = mir_build_island_load(mu, vt, l->state_ptr,
-                                                 vi_off(mu, isig->a_off),
+         mir_value_t raw = mir_build_island_load(mu, vt, rd_base,
+                                                 vi_off(mu, rd_off),
                                                  vi_off(mu, -1), vi_off(mu, 0));
          iv = mir_build_cast(mu, vi_i64_type(mu), raw);
       }
@@ -1407,7 +1437,7 @@ static bool vi_lower_sig_load(vi_lower_t *l, const vhdl_isig_t *s,
    if (l->two_state) {
       mir_value_t r = mir_build_island_load(
          mu, mir_vec2_type(mu, s->width, s->is_signed),
-         l->state_ptr, vi_off(mu, isig->a_off), vi_off(mu, -1), elem_idx);
+         rd_base, vi_off(mu, rd_off), vi_off(mu, -1), elem_idx);
       *out = (vi_val_t){
          .kind      = s->is_vector ? VIVAL_VEC : VIVAL_BIT,
          .val       = r,
@@ -1423,7 +1453,7 @@ static bool vi_lower_sig_load(vi_lower_t *l, const vhdl_isig_t *s,
    }
 
    if (!s->is_vector && !s->is_array2d) {
-      mir_value_t ptr = vi_state_ptr_at(l, isig->a_off);
+      mir_value_t ptr = mir_build_array_ref(mu, rd_base, vi_off(mu, rd_off));
       mir_value_t b = mir_build_load(mu, ptr);
       *out = (vi_val_t){
          .kind    = VIVAL_BIT,
@@ -1435,13 +1465,13 @@ static bool vi_lower_sig_load(vi_lower_t *l, const vhdl_isig_t *s,
       return true;
    }
 
-   mir_value_t byte_off = vi_off(mu, isig->a_off);
+   mir_value_t byte_off = vi_off(mu, rd_off);
    if (s->is_array2d) {
       mir_value_t mul = mir_build_mul(mu, mir_offset_type(mu), elem_idx,
                                       vi_off(mu, s->width));
       byte_off = mir_build_add(mu, mir_offset_type(mu), byte_off, mul);
    }
-   mir_value_t ptr = mir_build_array_ref(mu, l->state_ptr, byte_off);
+   mir_value_t ptr = mir_build_array_ref(mu, rd_base, byte_off);
    *out = (vi_val_t){
       .kind      = VIVAL_VEC,
       .val       = ptr,
@@ -5023,7 +5053,7 @@ static bool vi_copy_array2d_sig(vi_lower_t *l, const vhdl_isig_t *ds,
       const uint32_t dst_off = dis->a_off + (l->is_ff ? l->ff_stride : 0u);
       vi_mark_ff_dirty(l, dis);
       mir_build_copy(mu, vi_state_ptr_at(l, dst_off),
-                     vi_state_ptr_at(l, sis->a_off),
+                     vi_read_ptr(l, sis),
                      vi_off(mu, (int64_t)ds->nelems * ds->width));
       return true;
    }
@@ -5229,7 +5259,7 @@ static bool vi_assign_array2d_local(vi_lower_t *l, const vi_rec_leaf_t *lf,
       if (ss->nelems != lf->nelems || ss->width != lf->width)
          return false;
       vi_note_read(l, sis);
-      mir_build_copy(mu, lf->storage, vi_state_ptr_at(l, sis->a_off),
+      mir_build_copy(mu, lf->storage, vi_read_ptr(l, sis),
                      vi_off(mu, vi_array2d_bytes(l, lf->nelems, lf->width)));
       return true;
    }
@@ -5424,7 +5454,7 @@ static bool vi_assign_rec_local(vi_lower_t *l, vi_local_t *dloc,
                   return false;
                }
                vi_note_read(l, sis);
-               mir_build_copy(mu, dlf->storage, vi_state_ptr_at(l, sis->a_off),
+               mir_build_copy(mu, dlf->storage, vi_read_ptr(l, sis),
                               vi_off(mu, vi_array2d_bytes(l, dlf->nelems,
                                                           dlf->width)));
                continue;
@@ -7336,6 +7366,67 @@ static void vi_emit_act_test(vi_lower_t *l, const vhdl_iproc_t *p,
    mir_build_cond(mu, any, body_bb, next_bb);
 }
 
+// Bytes of island state holding signal S in the layout being lowered
+static uint32_t vi_sig_state_bytes(const vi_lower_t *l, const vhdl_isig_t *s)
+{
+   const bool packed = l->two_state
+      ? (s->elem_kind != VISIG_ENUM && s->elem_kind != VISIG_INT)
+      : s->two_state;
+   if (packed)
+      return (s->width + 63u) / 64u * s->nelems * 8u;
+   return s->width * s->nelems * s->byte_size;
+}
+
+// Largest copy of self-read signals one process may take on every run
+#define VI_MAX_SHADOW_BYTES 4096
+
+// A VHDL process that reads a signal it also assigns sees the value of the
+// current delta cycle, not the one it assigned.  Island signal assignments
+// store straight into the state, so copy the signals process P both reads
+// and writes when it starts and read them from the copy.  A changed value
+// makes the island run again in the next delta (island_check_feedback in
+// rt/island.c), where P sees it, as with the process unfused.
+static bool vi_emit_self_shadow(vi_lower_t *l, const vhdl_iproc_t *p)
+{
+   l->n_shadow = 0;
+   uint32_t total = 0;
+   for (uint32_t i = 0; i < p->n_reads; i++) {
+      bool written = false;
+      for (uint32_t j = 0; j < p->n_writes && !written; j++)
+         written = p->writes[j] == p->reads[i];
+      if (!written)
+         continue;
+
+      const vhdl_isl_sig_t *isig = vhdl_island_find_sig(l->isl, p->reads[i]);
+      const vhdl_isig_t *s = &(l->ctx->sigs[p->reads[i]]);
+      if (isig == NULL || s->is_sparse_ram) {
+         l->reason = "comb: process reads a sparse RAM it also writes";
+         return false;
+      }
+
+      const uint32_t bytes = vi_sig_state_bytes(l, s);
+      total += bytes;
+      if (total > VI_MAX_SHADOW_BYTES) {
+         l->reason = "comb: signals the process reads and writes are too large";
+         return false;
+      }
+
+      mir_unit_t *mu = l->mu;
+      mir_value_t copy = vi_modeb_alloc_vec(l, ALIGN_UP(bytes, 8u));
+      mir_build_copy(mu, copy, vi_state_ptr_at(l, isig->a_off),
+                     vi_off(mu, bytes));
+
+      l->shadow_sig = xrealloc_array(l->shadow_sig, l->n_shadow + 1,
+                                     sizeof(const vhdl_isl_sig_t *));
+      l->shadow_ptr = xrealloc_array(l->shadow_ptr, l->n_shadow + 1,
+                                     sizeof(mir_value_t));
+      l->shadow_sig[l->n_shadow] = isig;
+      l->shadow_ptr[l->n_shadow] = copy;
+      l->n_shadow++;
+   }
+   return true;
+}
+
 static mir_unit_t *vi_build_comb_unit(mir_context_t *mc,
                                       const vhdl_island_ctx_t *ctx,
                                       const vhdl_island_t *isl, bool spec,
@@ -7404,11 +7495,13 @@ static mir_unit_t *vi_build_comb_unit(mir_context_t *mc,
          l.act_track = true;
       }
 
-      bool ok = vi_bind_process_locals(&l, p->stmt, &sc);
+      bool ok = vi_emit_self_shadow(&l, p)
+         && vi_bind_process_locals(&l, p->stmt, &sc);
       const int ns = tree_stmts(p->stmt) - 1;
       for (int i = 0; i < ns && ok; i++)
          ok = vi_lower_stmt(&l, tree_stmt(p->stmt, i));
 
+      l.n_shadow = 0;
       l.act_track = false;
       vi_scope_clear(&sc);
       l.scope = NULL;
@@ -7419,6 +7512,8 @@ static mir_unit_t *vi_build_comb_unit(mir_context_t *mc,
       if (!ok || l.failed) {
          *failed_proc_out = (int)pi;
          free(l.act_rd);
+         free(l.shadow_sig);
+         free(l.shadow_ptr);
          mir_unit_free(mu);
          return NULL;
       }
@@ -7434,6 +7529,8 @@ static mir_unit_t *vi_build_comb_unit(mir_context_t *mc,
    }
 
    free(l.act_rd);
+   free(l.shadow_sig);
+   free(l.shadow_ptr);
    mir_build_return(mu, vi_off(mu, 0));
    return mu;
 }
