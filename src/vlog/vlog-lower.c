@@ -1411,13 +1411,20 @@ static mir_value_t vlog_lower_cast(vlog_gen_t *g, mir_type_t type,
 
       return real;
    }
-   else if (from == MIR_TYPE_VEC4 && (to == MIR_TYPE_INT
-                                      || to == MIR_TYPE_OFFSET)) {
+   else if (from_vec && (to == MIR_TYPE_INT || to == MIR_TYPE_OFFSET)) {
       // TODO: how to handle X here
       const int size = mir_get_size(g->mu, value_type);
       const bool issigned = mir_get_signed(g->mu, value_type);
-      mir_type_t t_vec2 = mir_vec2_type(g->mu, size, issigned);
-      mir_value_t vec2 = mir_build_cast(g->mu, t_vec2, value);
+      mir_value_t vec2 = value;
+      if (from == MIR_TYPE_VEC4) {
+         mir_type_t t_vec2 = mir_vec2_type(g->mu, size, issigned);
+         vec2 = mir_build_cast(g->mu, t_vec2, value);
+      }
+      if (size > 64) {
+         mir_type_t t_lo = mir_vec2_type(g->mu, 64, issigned);
+         mir_value_t pos = mir_const(g->mu, mir_offset_type(g->mu), size - 64);
+         vec2 = mir_build_extract(g->mu, t_lo, vec2, pos);
+      }
       return mir_build_cast(g->mu, type, vec2);
    }
    else
@@ -14854,6 +14861,10 @@ static void vlog_lower_repeat(vlog_gen_t *g, vlog_node_t v, gen_stack_t *gs)
 
    mir_value_t rvalue = vlog_lower_rvalue(g, vlog_value(v));
    mir_value_t limit = vlog_lower_cast(g, t_offset, rvalue);
+   if (mir_is_vector(g->mu, rvalue)) {
+      mir_value_t known = mir_build_defined(g->mu, rvalue);
+      limit = mir_build_select(g->mu, t_offset, known, limit, zero);
+   }
    mir_build_store(g->mu, limit_var, limit);
 
    mir_value_t enter = mir_build_cmp(g->mu, MIR_CMP_LT, zero, limit);

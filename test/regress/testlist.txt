@@ -3378,3 +3378,4 @@ svpatfwd1       verilog
 svpatparam1     verilog
 svtypeinst1     verilog
 svarrmap1       verilog
+svrepeatxz1     verilog
