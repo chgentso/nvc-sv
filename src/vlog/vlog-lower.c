@@ -11102,7 +11102,7 @@ static mir_value_t vlog_lower_with_context(vlog_gen_t *g, vlog_node_t v,
    case V_UNARY:
       return vlog_lower_unary(g, v, context);
    case V_SYS_FCALL:
-      return vlog_lower_sys_fcall(g, v);
+      return vlog_widen_vector(g, vlog_lower_sys_fcall(g, v), context);
    case V_MIN_TYP_MAX:
       return vlog_lower_with_context(g, vlog_value(v), context);
    case V_CONCAT:
@@ -11404,8 +11404,9 @@ static mir_value_t vlog_lower_with_context(vlog_gen_t *g, vlog_node_t v,
                return vlog_lower_with_context(g, arg, ti->type);
 
             if (vlog_is_fill_literal(arg))
-               return vlog_lower_cast(g, ti->type, vlog_lower_with_context(
-                                         g, arg, ti->type));
+               return vlog_widen_vector(
+                  g, vlog_lower_cast(g, ti->type, vlog_lower_with_context(
+                                        g, arg, ti->type)), context);
 
             // The operand is evaluated as if assigned to the type
             const mir_class_t class = mir_get_class(g->mu, ti->type);
@@ -11413,11 +11414,12 @@ static mir_value_t vlog_lower_with_context(vlog_gen_t *g, vlog_node_t v,
                 && !vlog_is_real(arg) && !vlog_is_string(arg)
                 && vlog_is_context_operand(arg)
                 && mir_get_size(g->mu, ti->type) > vlog_width(arg))
-               return vlog_lower_cast(g, ti->type, vlog_lower_with_context(
-                                         g, arg, vlog_vec_type_for(
-                                            g->mu, ti->type,
-                                            mir_get_size(g->mu, ti->type),
-                                            vlog_is_signed(arg))));
+               return vlog_widen_vector(
+                  g, vlog_lower_cast(g, ti->type, vlog_lower_with_context(
+                                        g, arg, vlog_vec_type_for(
+                                           g->mu, ti->type,
+                                           mir_get_size(g->mu, ti->type),
+                                           vlog_is_signed(arg)))), context);
 
             // A cast to a dynamic array or queue from an unpacked array
             // converts the bit-stream unless the elements are the same (6.24.3)
@@ -11496,7 +11498,9 @@ static mir_value_t vlog_lower_with_context(vlog_gen_t *g, vlog_node_t v,
                fatal_at(vlog_loc(v), "sorry, a cast between an unpacked "
                         "structure and another type is not supported");
 
-            return vlog_lower_cast(g, ti->type, vlog_lower_rvalue(g, arg));
+            return vlog_widen_vector(
+               g, vlog_lower_cast(g, ti->type, vlog_lower_rvalue(g, arg)),
+               context);
          }
 
          assert(vlog_subkind(v) == V_CAST_WIDTH);
@@ -11518,14 +11522,16 @@ static mir_value_t vlog_lower_with_context(vlog_gen_t *g, vlog_node_t v,
          if (mir_is(g->mu, value, MIR_TYPE_REAL)) {
             // Rounded to a signed integer of this width (6.24.1)
             mir_type_t type = vlog_vec_type(g, width, true);
-            return vlog_lower_cast(g, type, value);
+            return vlog_widen_vector(g, vlog_lower_cast(g, type, value),
+                                     context);
          }
 
          bool issigned = mir_get_signed(g->mu, mir_get_type(g->mu, value));
          mir_type_t type = vlog_vec_type_for(
             g->mu, mir_get_type(g->mu, value), width, issigned);
 
-         return mir_build_cast(g->mu, type, value);
+         return vlog_widen_vector(g, mir_build_cast(g->mu, type, value),
+                                  context);
       }
    default:
       CANNOT_HANDLE(v);
