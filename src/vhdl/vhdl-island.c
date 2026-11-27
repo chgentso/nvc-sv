@@ -4993,7 +4993,10 @@ void vhdl_island_rebuild(vhdl_island_ctx_t *ctx)
          }
       }
 
-      uint32_t off = 0;
+      // Combinational processes of a VHDL island only run when a signal
+      // they read changed (see RT_ISLAND_ACT_BYTES in rt/island.h)
+      isl->has_act = isl_comb.count > 0;
+      uint32_t off = isl->has_act ? RT_ISLAND_ACT_BYTES(isl_sig_ids.count) : 0;
       bool has_sparse = false;
       for (unsigned j = 0; j < isl_sig_ids.count; j++) {
          const uint32_t gid = isl_sig_ids.items[j];
@@ -5047,6 +5050,9 @@ void vhdl_island_rebuild(vhdl_island_ctx_t *ctx)
             f |= RT_ISIG_STD_LOGIC_ELEM;
          if (lf & LOC_COMB_READ)
             f |= RT_ISIG_COMB_READ;
+         // A sparse RAM is written through its log: its readers always run
+         if ((lf & LOC_COMB_READ) && isl->has_act && !s->is_sparse_ram)
+            f |= RT_ISIG_ACT;
          if (lf & LOC_COMB_WRITTEN)
             f |= RT_ISIG_COMB_WRITTEN;
          if (lf & LOC_FF_WRITTEN)
