@@ -3397,3 +3397,4 @@ tostring_comp1 normal,2019
 gen_array_cons1 shell
 reflect_conv1 normal,2019
 assert_only1 normal,2019
+res_record1 normal,2008

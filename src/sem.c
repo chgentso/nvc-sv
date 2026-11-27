@@ -88,9 +88,20 @@ static bool sem_check_resolution(type_t type, tree_t res)
          tree_t sub = tree_value(tree_assoc(res, 0));
          return sem_check_resolution(type_elem(type), sub);
       }
-      else if (type_is_record(type))
-         sem_error(res, "sorry, record element resolution functions are not"
-                   "supported yet");
+      else if (type_is_record(type)) {
+         const int nassocs = tree_assocs(res);
+         bool ok = true;
+         for (int i = 0; i < nassocs; i++) {
+            tree_t a = tree_assoc(res, i);
+            if (tree_subkind(a) != A_NAMED)
+               return false;
+            tree_t ref = tree_name(a);
+            if (!tree_has_ref(ref))
+               return false;
+            ok &= sem_check_resolution(tree_type(tree_ref(ref)), tree_value(a));
+         }
+         return ok;
+      }
       else {
          // Should have been caught during name resolution
          assert(error_count() > 0);

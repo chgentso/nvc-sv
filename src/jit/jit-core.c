@@ -755,6 +755,9 @@ static void jit_emit_trace(diag_t *d, const loc_t *loc, object_t *enclosing,
       case T_PARAM:
          diag_trace(d, loc, "Port conversion");
          break;
+      case T_ASSOC:
+         diag_trace(d, loc, "Resolution wrapper");
+         break;
       default:
          {
             const char *class = class_str(class_of(tree));

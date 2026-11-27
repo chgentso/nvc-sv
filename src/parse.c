@@ -5770,7 +5770,17 @@ static tree_t p_element_resolution(void)
 
    do {
       tree_t a = tree_new(T_ASSOC);
-      tree_set_subkind(a, A_POS);
+      if (peek() == tID && (peek_nth(2) == tID || peek_nth(2) == tLPAREN)) {
+         ident_t field = p_identifier();
+         tree_t ref = tree_new(T_REF);
+         tree_set_ident(ref, field);
+         tree_set_loc(ref, &state.last_loc);
+         tree_set_subkind(a, A_NAMED);
+         tree_set_name(a, ref);
+      }
+      else
+         tree_set_subkind(a, A_POS);
+
       tree_set_value(a, p_resolution_indication());
       tree_set_loc(a, CURRENT_LOC);
 

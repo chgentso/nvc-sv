@@ -9173,14 +9173,24 @@ static bool lower_needs_constrained_resolution(type_t type)
 
 static void lower_resolution_wrapper(lower_unit_t *lu, object_t *obj)
 {
-   type_t type = type_from_object(obj);
-   type_t rtype_decl = find_resolution_type(type);
-   assert(rtype_decl != NULL);
+   type_t type;
+   tree_t rname;
+   if (obj->tag == OBJECT_TAG_TREE) {
+      tree_t a = tree_from_object(obj);
+      assert(tree_kind(a) == T_ASSOC);
+      type = tree_type(tree_ref(tree_name(a)));
+      rname = tree_value(a);
+   }
+   else {
+      type = type_from_object(obj);
+      type_t rtype_decl = find_resolution_type(type);
+      assert(rtype_decl != NULL);
+      rname = type_resolution(rtype_decl);
+   }
 
-   tree_t rname = type_resolution(rtype_decl);
    type_t elem = type;
    while (tree_kind(rname) == T_ELEM_RESOLUTION) {
-      assert(type_is_array(type));
+      assert(type_is_array(elem));
       assert(tree_assocs(rname) == 1);
 
       rname = tree_value(tree_assoc(rname, 0));
@@ -9263,20 +9273,27 @@ static void lower_resolution_wrapper(lower_unit_t *lu, object_t *obj)
       emit_return(call_reg);
 }
 
-static void lower_resolution_var(lower_unit_t *lu, tree_t decl, type_t type)
+static void lower_emit_resolution_var(lower_unit_t *lu, ident_t prefix,
+                                      type_t elem, tree_t rname,
+                                      void *key, object_t *wrap_obj)
 {
-   type_t rtype_decl = find_resolution_type(type);
-   assert(rtype_decl != NULL);
-
-   tree_t rname = type_resolution(rtype_decl);
-
-   type_t elem = type;
-   while (tree_kind(rname) == T_ELEM_RESOLUTION) {
-      assert(type_is_array(type));
+   while (tree_kind(rname) == T_ELEM_RESOLUTION && type_is_array(elem)) {
       assert(tree_assocs(rname) == 1);
-
       rname = tree_value(tree_assoc(rname, 0));
       elem = type_elem(elem);
+   }
+
+   if (tree_kind(rname) == T_ELEM_RESOLUTION && type_is_record(elem)) {
+      const int nassocs = tree_assocs(rname);
+      for (int i = 0; i < nassocs; i++) {
+         tree_t a = tree_assoc(rname, i);
+         assert(tree_subkind(a) == A_NAMED);
+         tree_t f = tree_ref(tree_name(a));
+         ident_t sub_prefix = ident_prefix(prefix, tree_ident(f), '$');
+         lower_emit_resolution_var(lu, sub_prefix, tree_type(f), tree_value(a),
+                                   a, tree_to_object(a));
+      }
+      return;
    }
 
    vcode_reg_t nlits_reg;
@@ -9293,16 +9310,10 @@ static void lower_resolution_var(lower_unit_t *lu, tree_t decl, type_t type)
    else
       nlits_reg = emit_const(vtype_offset(), 0);
 
-   ident_t prefix;
-   if (is_anonymous_subtype(type))
-      prefix = ident_prefix(lu->name, tree_ident(decl), '.');
-   else
-      prefix = type_ident(type);
-
    ident_t name = ident_prefix(prefix, well_known(W_RESOLUTION), '$');
 
    unit_registry_defer(lu->registry, name, lu, emit_function,
-                       lower_resolution_wrapper, NULL, type_to_object(type));
+                       lower_resolution_wrapper, NULL, wrap_obj);
 
    vcode_type_t rtype = lower_func_result_type(elem);
 
@@ -9317,7 +9328,54 @@ static void lower_resolution_var(lower_unit_t *lu, tree_t decl, type_t type)
                               name, VAR_CONST);
    emit_store(wrapper_reg, var);
 
-   lower_put_vcode_obj(type, var, lu);
+   lower_put_vcode_obj(key, var, lu);
+}
+
+static void lower_resolution_var(lower_unit_t *lu, tree_t decl, type_t type)
+{
+   type_t rtype_decl = find_resolution_type(type);
+   assert(rtype_decl != NULL);
+
+   tree_t rname = type_resolution(rtype_decl);
+
+   ident_t prefix;
+   if (is_anonymous_subtype(type))
+      prefix = ident_prefix(lu->name, tree_ident(decl), '.');
+   else
+      prefix = type_ident(type);
+
+   lower_emit_resolution_var(lu, prefix, type, rname, type,
+                             type_to_object(type));
+}
+
+static vcode_reg_t lower_lookup_resolution_var(lower_unit_t *lu,
+                                               void *key,
+                                               type_t rtype,
+                                               ident_t prefix,
+                                               type_t elem)
+{
+   int hops;
+   vcode_var_t var = lower_search_vcode_obj(key, lu, &hops);
+   if (var == VCODE_INVALID_VAR) {
+      vcode_type_t vtype = lower_func_result_type(elem);
+      ident_t var_name = ident_prefix(prefix, well_known(W_RESOLUTION), '$');
+      vcode_reg_t context_reg = lower_nested_package_context(lu, rtype, true);
+      if (context_reg == VCODE_INVALID_REG)
+         context_reg = lower_context_for_mangled(lu, var_name);
+      return emit_link_var(context_reg, var_name, vtype_resolution(vtype));
+   }
+   else if (var & INSTANCE_BIT) {
+      vcode_var_t pkg_var = var & ~INSTANCE_BIT;
+      vcode_reg_t pkg_reg = hops == 0 ? emit_load(pkg_var)
+         : emit_load_indirect(emit_var_upref(hops, pkg_var));
+      vcode_type_t vtype = lower_func_result_type(elem);
+      ident_t var_name = ident_prefix(prefix, well_known(W_RESOLUTION), '$');
+      return emit_link_var(pkg_reg, var_name, vtype_resolution(vtype));
+   }
+   else if (hops == 0)
+      return emit_index(var, VCODE_INVALID_REG);
+   else
+      return emit_var_upref(hops, var);
 }
 
 static vcode_reg_t lower_resolution_func(lower_unit_t *lu, type_t type,
@@ -9361,50 +9419,58 @@ static vcode_reg_t lower_resolution_func(lower_unit_t *lu, type_t type,
    tree_t rname = type_resolution(rtype);
 
    type_t elem = rtype;
-   while (tree_kind(rname) == T_ELEM_RESOLUTION) {
-      assert(type_is_array(type));
+   while (tree_kind(rname) == T_ELEM_RESOLUTION && type_is_array(elem)) {
       assert(tree_assocs(rname) == 1);
 
       rname = tree_value(tree_assoc(rname, 0));
       elem = type_elem(elem);
    }
 
+   if (tree_kind(rname) == T_ELEM_RESOLUTION && type_is_record(elem))
+      return VCODE_INVALID_REG;
+
    *is_array = type_is_array(elem);
 
-   int hops;
-   vcode_var_t var = lower_search_vcode_obj(rtype, lu, &hops);
-   if (var == VCODE_INVALID_VAR) {
-      vcode_type_t vtype = lower_func_result_type(elem);
-      ident_t var_name =
-         ident_prefix(type_ident(rtype), well_known(W_RESOLUTION), '$');
-      vcode_reg_t context_reg = lower_nested_package_context(lu, rtype, true);
-      if (context_reg == VCODE_INVALID_REG)
-         context_reg = lower_context_for_mangled(lu, var_name);
-      return emit_link_var(context_reg, var_name, vtype_resolution(vtype));
-   }
-   else if (var & INSTANCE_BIT) {
-      vcode_var_t pkg_var = var & ~INSTANCE_BIT;
-      vcode_reg_t pkg_reg = hops == 0 ? emit_load(pkg_var)
-         : emit_load_indirect(emit_var_upref(hops, pkg_var));
-      vcode_type_t vtype = lower_func_result_type(elem);
-      ident_t var_name =
-         ident_prefix(type_ident(rtype), well_known(W_RESOLUTION), '$');
-      return emit_link_var(pkg_reg, var_name, vtype_resolution(vtype));
-   }
-   else if (hops == 0)
-      return emit_index(var, VCODE_INVALID_REG);
-   else
-      return emit_var_upref(hops, var);
+   return lower_lookup_resolution_var(lu, rtype, rtype, type_ident(rtype),
+                                      elem);
 }
+
+typedef struct {
+   tree_t  res;
+   type_t  rtype;
+   ident_t prefix;
+} elem_res_ctx_t;
 
 static void lower_sub_signals(lower_unit_t *lu, type_t type, type_t var_type,
                               type_t init_type, tree_t where, tree_t view,
                               vcode_var_t sig_var, vcode_reg_t sig_ptr,
                               vcode_reg_t init_reg, vcode_reg_t resolution,
                               vcode_reg_t null_reg, sig_flags_t flags,
-                              vcode_reg_t bounds_reg)
+                              vcode_reg_t bounds_reg, bool resolution_is_array,
+                              const elem_res_ctx_t *erctx)
 {
-   bool has_scope = false;
+   elem_res_ctx_t local_erctx;
+   if (erctx == NULL && resolution == VCODE_INVALID_REG) {
+      type_t rtype = find_resolution_type(type);
+      if (rtype != NULL) {
+         tree_t rname = type_resolution(rtype);
+         type_t pelem = type;
+         while (tree_kind(rname) == T_ELEM_RESOLUTION && type_is_array(pelem)) {
+            rname = tree_value(tree_assoc(rname, 0));
+            pelem = type_elem(pelem);
+         }
+         if (tree_kind(rname) == T_ELEM_RESOLUTION && type_is_record(pelem)) {
+            local_erctx.res = rname;
+            local_erctx.rtype = rtype;
+            local_erctx.prefix = is_anonymous_subtype(rtype)
+               ? ident_prefix(lu->name, tree_ident(where), '.')
+               : type_ident(rtype);
+            erctx = &local_erctx;
+         }
+      }
+   }
+
+   bool has_scope = resolution_is_array;
    if (resolution == VCODE_INVALID_REG)
       resolution = lower_resolution_func(lu, type, &has_scope);
 
@@ -9562,7 +9628,7 @@ static void lower_sub_signals(lower_unit_t *lu, type_t type, type_t var_type,
 
       lower_sub_signals(lu, elem, elem, elem, where, view, VCODE_INVALID_VAR,
                         ptr_reg, data_reg, resolution, null_off_reg,
-                        flags, ebounds_reg);
+                        flags, ebounds_reg, false, erctx);
 
       emit_store(emit_add(i_reg, emit_const(voffset, 1)), i_var);
 
@@ -9644,11 +9710,49 @@ static void lower_sub_signals(lower_unit_t *lu, type_t type, type_t var_type,
                  || lower_needs_constrained_resolution(et)))
             lower_resolution_var(lu, f, et);
 
+         vcode_reg_t field_res = resolution;
+         bool field_res_is_array = false;
+         elem_res_ctx_t sub_erctx;
+         const elem_res_ctx_t *field_erctx = NULL;
+
+         if (erctx != NULL && field_res == VCODE_INVALID_REG) {
+            const int nassocs = tree_assocs(erctx->res);
+            for (int j = 0; j < nassocs; j++) {
+               tree_t a = tree_assoc(erctx->res, j);
+               if (tree_ref(tree_name(a)) != f)
+                  continue;
+
+               ident_t sub_prefix = ident_prefix(erctx->prefix,
+                                                 tree_ident(f), '$');
+               tree_t sub_rname = tree_value(a);
+               type_t sub_elem = et;
+               while (tree_kind(sub_rname) == T_ELEM_RESOLUTION
+                      && type_is_array(sub_elem)) {
+                  sub_rname = tree_value(tree_assoc(sub_rname, 0));
+                  sub_elem = type_elem(sub_elem);
+               }
+
+               if (tree_kind(sub_rname) == T_ELEM_RESOLUTION
+                   && type_is_record(sub_elem)) {
+                  sub_erctx.res = sub_rname;
+                  sub_erctx.rtype = erctx->rtype;
+                  sub_erctx.prefix = sub_prefix;
+                  field_erctx = &sub_erctx;
+               }
+               else {
+                  field_res = lower_lookup_resolution_var(lu, a, erctx->rtype,
+                                                          sub_prefix, sub_elem);
+                  field_res_is_array = type_is_array(sub_elem);
+               }
+               break;
+            }
+         }
+
          vcode_reg_t ptr_reg = emit_record_ref(sig_ptr, i);
 
          lower_sub_signals(lu, et, ft, ft, f, fview, VCODE_INVALID_VAR, ptr_reg,
-                           field_reg, resolution, null_field_reg, newflags,
-                           fbounds_reg);
+                           field_reg, field_res, null_field_reg, newflags,
+                           fbounds_reg, field_res_is_array, field_erctx);
       }
 
       emit_pop_scope();
@@ -9692,7 +9796,7 @@ static void lower_signal_decl(lower_unit_t *lu, tree_t decl, gen_stack_t *gs)
 
    lower_sub_signals(lu, type, type, value_type, decl, NULL, var,
                      VCODE_INVALID_REG, init_reg, VCODE_INVALID_REG,
-                     VCODE_INVALID_REG, flags, bounds_reg);
+                     VCODE_INVALID_REG, flags, bounds_reg, false, NULL);
 
    if (cover_enabled(lu->cover, COVER_MASK_TOGGLE)) {
       gen_stack_t this = lower_push_cscope(lu, gs, decl, 0);
@@ -9942,7 +10046,7 @@ static void lower_implicit_decl(lower_unit_t *parent, tree_t decl)
 
          lower_sub_signals(parent, type, type, type, decl, NULL, var,
                            VCODE_INVALID_REG, init_reg, VCODE_INVALID_REG,
-                           VCODE_INVALID_REG, 0, VCODE_INVALID_REG);
+                           VCODE_INVALID_REG, 0, VCODE_INVALID_REG, false, NULL);
 
          ident_t qual = ident_prefix(parent->name, name, '.');
          ident_t func = ident_prefix(qual, ident_new("guard"), '$');
@@ -9966,7 +10070,7 @@ static void lower_implicit_decl(lower_unit_t *parent, tree_t decl)
 
          lower_sub_signals(parent, type, type, type, decl, NULL, var,
                            VCODE_INVALID_REG, init_reg, VCODE_INVALID_REG,
-                           VCODE_INVALID_REG, 0, VCODE_INVALID_REG);
+                           VCODE_INVALID_REG, 0, VCODE_INVALID_REG, false, NULL);
 
          object_t *obj = tree_to_object(decl);
          ident_t name = ident_prefix(parent->name, tree_ident(decl), '.');
@@ -9989,7 +10093,7 @@ static void lower_implicit_decl(lower_unit_t *parent, tree_t decl)
 
          lower_sub_signals(parent, type, type, type, decl, NULL, var,
                            VCODE_INVALID_REG, init_reg, VCODE_INVALID_REG,
-                           VCODE_INVALID_REG, 0, VCODE_INVALID_REG);
+                           VCODE_INVALID_REG, 0, VCODE_INVALID_REG, false, NULL);
 
          object_t *obj = tree_to_object(decl);
          ident_t qual = ident_prefix(parent->name, name, '.');
@@ -10013,7 +10117,7 @@ static void lower_implicit_decl(lower_unit_t *parent, tree_t decl)
 
          lower_sub_signals(parent, type, type, type, decl, NULL, var,
                            VCODE_INVALID_REG, init_reg, VCODE_INVALID_REG,
-                           VCODE_INVALID_REG, 0, VCODE_INVALID_REG);
+                           VCODE_INVALID_REG, 0, VCODE_INVALID_REG, false, NULL);
 
          object_t *obj = tree_to_object(decl);
          ident_t qual = ident_prefix(parent->name, name, '.');
@@ -13529,9 +13633,14 @@ static void lower_port_signal(lower_unit_t *lu, tree_t port,
    if (mode == PORT_INOUT)
       flags |= NET_F_EFFECTIVE | NET_F_INOUT;
 
+   if (is_anonymous_subtype(type)
+       && (type_has_resolution(type)
+           || lower_needs_constrained_resolution(type)))
+      lower_resolution_var(lu, port, type);
+
    lower_sub_signals(lu, type, type, value_type, port, view, var,
                      VCODE_INVALID_REG, init_reg, VCODE_INVALID_REG,
-                     VCODE_INVALID_REG, flags, bounds_reg);
+                     VCODE_INVALID_REG, flags, bounds_reg, false, NULL);
 }
 
 static vcode_reg_t lower_constrain_port(lower_unit_t *lu, tree_t port, int pos,
