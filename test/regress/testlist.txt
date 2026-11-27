@@ -3357,3 +3357,4 @@ island_xcycle_mt1 shell
 vhdl_island_widevar_a1 shell
 vhdl_island_force_a1 normal,2008,$NVC_2STATE=islands
 vhdl_island_force_delta1 gold,normal,2008
+vlog_island_time0 verilog,gold

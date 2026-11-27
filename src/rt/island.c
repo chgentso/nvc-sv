@@ -320,6 +320,7 @@ struct _rt_island_mgr {
    uint32_t                n_forced_islands;
    bool                    hier_built;
    bool                    reset_done;
+   bool                    late_pending;
    bool                    mt_deps_built;
    bool                    mt_has_comb_deps;
    bool                    fast;
@@ -1593,6 +1594,8 @@ void rt_island_bind_sig(void *handle, uint32_t idx, sig_shared_t *ss,
    s->nelems = nelems;
    s->nwords = (width + 63u) / 64u;
    s->flags = flags;
+   if (flags & RT_ISIG_RESET_LATE)
+      isl->has_reset_late = true;
    s->elem_size = (sig != NULL && !(sig->shared.flags & SIG_F_PACKED)
                    && sig->nexus.size > 0)
       ? (uint8_t)sig->nexus.size : 1u;
@@ -2575,6 +2578,12 @@ static void island_sync_sig_raw_to(rt_island_t *isl, const rt_island_sig_t *s,
                                    rt_signal_t *sig, int32_t sig_offset,
                                    bool update_last)
 {
+   // Before the first delta cycle the island state already holds the
+   // values of signals written by always_comb blocks, which are published
+   // at time zero (see rt_island_eval_sv_reset)
+   if (unlikely(isl->mgr->late_pending) && (s->flags & RT_ISIG_RESET_LATE))
+      return;
+
    const uint32_t width = s->width;
    const uint32_t nelems = s->nelems;
 
@@ -2685,6 +2694,8 @@ static void island_sync_sig_raw_slice_to(rt_island_t *isl,
                                          bool update_last)
 {
    if (local_cnt == 0)
+      return;
+   if (unlikely(isl->mgr->late_pending) && (s->flags & RT_ISIG_RESET_LATE))
       return;
    if (local_off == 0 && local_cnt >= s->width * s->nelems) {
       island_sync_sig_raw_to(isl, s, sig, sig_offset, update_last);
@@ -4581,6 +4592,7 @@ void rt_island_reset_all(rt_island_mgr_t *mgr)
 
    mgr->fast = !!opt_get_int(OPT_ISLAND_FAST);
    mgr->n_forced_islands = 0;
+   mgr->late_pending = false;
    mgr->dirty_q.count = 0;
    mgr->defer_dirty_q.count = 0;
    mgr->defer_direct_q.count = 0;
@@ -4899,26 +4911,46 @@ bool rt_island_eval_sv_reset(jit_t *jit, rt_model_t *m, rt_island_mgr_t *mgr,
       if (!island_call_comb(jit, m, isl, tlab))
          return false;
 
-      if (isl->n_direct_comb_descs > 0)
+      // Signals written by always_comb blocks, and those computed from
+      // them, change at time zero as without islands: they are published
+      // by island_publish_late()
+      const uint32_t skip = RT_ISIG_PRUNED | RT_ISIG_RESET_LATE;
+      if (isl->n_direct_comb_descs > 0 && !isl->has_reset_late)
          island_propagate_direct_comb(isl);
+      else if (isl->n_direct_comb_outs > 0) {
+         for (uint32_t j = 0; j < isl->n_direct_comb_outs; j++) {
+            const rt_island_sig_t *src_s =
+               &(isl->sigs[isl->direct_comb_outs[j]]);
+            if (!(src_s->flags & RT_ISIG_DIRECT_LINK)
+                || (src_s->flags & RT_ISIG_RESET_LATE))
+               continue;
+            for (uint32_t t = 0; t < src_s->n_direct_targets; t++) {
+               rt_island_sig_t *dst_s = src_s->direct_targets[t];
+               if (island_copy_direct_sig(src_s, dst_s)
+                   && (dst_s->flags & RT_ISIG_COMB_READ)
+                   && dst_s->isl->eval_handle != JIT_HANDLE_INVALID)
+                  island_mark_dirty(dst_s->isl);
+            }
+         }
+      }
       if (mgr->hier_built) {
          for (uint32_t j = 0; j < isl->n_ext_out_sigs; j++) {
             rt_island_sig_t *os = &(isl->sigs[isl->ext_out_sigs[j]]);
-            if (likely(!(os->flags & RT_ISIG_PRUNED)))
+            if (likely(!(os->flags & skip)))
                island_sync_out_sig(m, isl, os);
          }
       }
       else {
          for (uint32_t j = 0; j < isl->n_out_sigs; j++) {
             rt_island_sig_t *os = &(isl->sigs[isl->out_sigs[j]]);
-            if (likely(!(os->flags & RT_ISIG_PRUNED)))
+            if (likely(!(os->flags & skip)))
                island_sync_out_sig(m, isl, os);
          }
       }
       if (unlikely(isl->n_obs_sigs > 0)) {
          for (uint32_t j = 0; j < isl->n_obs_sigs; j++) {
             rt_island_sig_t *os = &(isl->sigs[isl->obs_sigs[j]]);
-            if (likely(!(os->flags & RT_ISIG_PRUNED)))
+            if (likely(!(os->flags & skip)))
                island_sync_out_sig(m, isl, os);
          }
       }
@@ -4941,6 +4973,8 @@ void rt_island_mark_sv_reset_edges(rt_island_mgr_t *mgr)
    // callback for 0ms+0 and must not be suppressed as a VPI t=0 deposit.
    for (unsigned i = 0; i < mgr->islands.count; i++) {
       rt_island_t *isl = mgr->islands.items[i];
+      if (isl->has_reset_late && island_eligible_sv_reset(isl))
+         mgr->late_pending = true;   // See island_publish_late
       for (uint32_t d = 0; d < isl->ndomains; d++) {
          rt_island_domain_t *dom = &(isl->domains[d]);
          dom->reset_clk_edge = false;
@@ -5894,9 +5928,23 @@ static bool rt_island_eval_dirty_mode(jit_t *jit, rt_model_t *m,
    return ran && g.ok;
 }
 
+static void island_publish_late(rt_island_mgr_t *mgr)
+{
+   // Signals written by always_comb blocks change after the processes of
+   // the first delta cycle have run, as without islands
+   mgr->late_pending = false;
+   for (unsigned i = 0; i < mgr->islands.count; i++) {
+      rt_island_t *isl = mgr->islands.items[i];
+      if (isl->has_reset_late && island_eligible_sv_reset(isl))
+         island_mark_dirty(isl);
+   }
+}
+
 bool rt_island_eval_dirty(jit_t *jit, rt_model_t *m, rt_island_mgr_t *mgr,
                           tlab_t *tlab)
 {
+   if (unlikely(mgr->late_pending))
+      island_publish_late(mgr);
    return rt_island_eval_dirty_mode(jit, m, mgr, tlab, false);
 }
 

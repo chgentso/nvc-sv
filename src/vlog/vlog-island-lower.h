@@ -41,6 +41,8 @@ typedef struct {
    bool                 *sig_comb_w;   // [isl->nsigs]
    bool                 *sig_comb_r;   // [isl->nsigs]
    bool                 *sig_ext_w;    // [isl->nsigs]
+   bool                 *sig_proc_w;   // [isl->nsigs]
+   bool                 *sig_late;     // [isl->nsigs]
    vlog_island_dom_m3_t *doms;         // [isl->ndomains]
    ident_t               eval_sym;
    bool                  comb_shared;
