@@ -2564,6 +2564,34 @@ tree_t change_ref(tree_t name, tree_t new)
          return t;
       }
 
+   case T_PROT_FCALL:
+      {
+         tree_t t = tree_new(T_PROT_FCALL);
+         tree_set_loc(t, tree_loc(name));
+         tree_set_ident(t, tree_ident(name));
+         tree_set_type(t, tree_type(name));
+         tree_set_ref(t, tree_ref(name));
+         if (tree_has_name(name))
+            tree_set_name(t, tree_name(name));
+
+         const int nparams = tree_params(name);
+         for (int i = 0; i < nparams; i++) {
+            tree_t p = tree_param(name, i);
+            tree_t np = tree_new(T_PARAM);
+            tree_set_loc(np, tree_loc(p));
+            tree_set_subkind(np, tree_subkind(p));
+            if (tree_subkind(p) == P_POS)
+               tree_set_pos(np, tree_pos(p));
+            else
+               tree_set_name(np, tree_name(p));
+            tree_set_value(np, i == 0 ? change_ref(tree_value(p), new)
+                           : tree_value(p));
+            tree_add_param(t, np);
+         }
+
+         return t;
+      }
+
    case T_TYPE_CONV:
       {
          tree_t t = tree_new(T_TYPE_CONV);

@@ -1464,6 +1464,10 @@ static void elab_ports(tree_t entity, tree_t bind, const elab_ctx_t *ctx)
                   is_conv = true;
                   ref = name_to_ref(tree_value(name));
                   break;
+               case T_PROT_FCALL:
+                  is_conv = true;
+                  ref = name_to_ref(tree_value(tree_param(name, 0)));
+                  break;
                default:
                   ref = name_to_ref(name);
                   break;

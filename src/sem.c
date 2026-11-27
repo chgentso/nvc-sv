@@ -5220,6 +5220,21 @@ static bool sem_static_signal_name(tree_t t)
    return class_of(t) == C_SIGNAL;
 }
 
+static bool is_prot_conv_func(tree_t t)
+{
+   if (tree_kind(t) != T_PROT_FCALL || !tree_has_ref(t)
+       || tree_params(t) != 1)
+      return false;
+
+   tree_t decl = tree_ref(t);
+   if (tree_ports(decl) != 1 || tree_class(tree_port(decl, 0)) != C_CONSTANT)
+      return false;
+
+   tree_t p0 = tree_value(tree_param(t, 0));
+   tree_t ref = name_to_ref(p0);
+   return ref != NULL && class_of(ref) == C_SIGNAL;
+}
+
 static bool sem_check_port_actual(formal_map_t *formals, int nformals,
                                   tree_t param, tree_t unit, int pos,
                                   bool is_binding, nametab_t *tab)
@@ -5265,6 +5280,20 @@ static bool sem_check_port_actual(formal_map_t *formals, int nformals,
          case T_TYPE_CONV:
             out_conv = name;
             name = ref = tree_value(name);
+            break;
+
+         case T_PROT_FCALL:
+            if (tree_params(name) != 1)
+               sem_error(name, "output conversion function must have "
+                         "exactly one parameter");
+            else if (!tree_has_ref(name)
+                     || tree_ports(tree_ref(name)) != 1
+                     || tree_class(tree_port(tree_ref(name), 0)) != C_CONSTANT)
+               sem_error(name, "invalid output conversion %s",
+                         istr(tree_ident(name)));
+
+            out_conv = name;
+            name = ref = tree_value(tree_param(name, 0));
             break;
 
          default:
@@ -5377,9 +5406,10 @@ static bool sem_check_port_actual(formal_map_t *formals, int nformals,
    // These only apply if the class of the formal is not constant
 
    tree_t actual;
-   if (kind == T_TYPE_CONV || kind == T_CONV_FUNC) {
+   if (kind == T_TYPE_CONV || kind == T_CONV_FUNC || is_prot_conv_func(value)) {
       // Conversion functions are in LRM 93 section 4.3.2.2
-      actual = tree_value(value);
+      actual = kind == T_PROT_FCALL
+         ? tree_value(tree_param(value, 0)) : tree_value(value);
 
       // LRM 93 section 3.2.1.1 result of a type conversion in an
       // association list cannot be an unconstrained array type

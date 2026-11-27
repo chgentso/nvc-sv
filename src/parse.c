@@ -4065,6 +4065,9 @@ static tree_t p_formal_part(tree_t head, type_t *signature, formal_kind_t kind)
    case T_FCALL:
       return fcall_to_conv_func(name);
 
+   case T_PROT_FCALL:
+      break;
+
    case T_REF:
       break;
 

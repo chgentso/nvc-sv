@@ -12414,6 +12414,12 @@ static void lower_put_signal_field_cb(lower_unit_t *lu, tree_t field,
                              lower_put_signal_field_cb, ctx);
 }
 
+static inline tree_t lower_conv_target(tree_t conv)
+{
+   return tree_kind(conv) == T_PROT_FCALL
+      ? tree_value(tree_param(conv, 0)) : tree_value(conv);
+}
+
 static void lower_converter_body(lower_unit_t *lu, tree_t conv, bool has_driver,
                                  put_signal_fn_t put_fn, event_fn_t event_fn,
                                  lower_value_fn_t value_fn, bool delay_first,
@@ -12422,6 +12428,7 @@ static void lower_converter_body(lower_unit_t *lu, tree_t conv, bool has_driver,
    type_t src_type, dst_type;
    switch (tree_kind(conv)) {
    case T_CONV_FUNC:
+   case T_PROT_FCALL:
       {
          type_t ftype = tree_type(tree_ref(conv));
          src_type = type_param(ftype, 0);
@@ -12500,6 +12507,7 @@ static void lower_converter_body(lower_unit_t *lu, tree_t conv, bool has_driver,
    vcode_reg_t result_reg;
    switch (tree_kind(conv)) {
    case T_CONV_FUNC:
+   case T_PROT_FCALL:
       {
          tree_t fdecl = tree_ref(conv);
          const subprogram_kind_t kind = tree_subkind(fdecl);
@@ -12539,7 +12547,11 @@ static void lower_converter_body(lower_unit_t *lu, tree_t conv, bool has_driver,
             vcode_reg_t args[2];
             int nargs = 0;
 
-            vcode_reg_t context_reg = lower_context_for_call(lu, fdecl);
+            vcode_reg_t context_reg;
+            if (tree_kind(conv) == T_PROT_FCALL && tree_has_name(conv))
+               context_reg = lower_rvalue(lu, tree_name(conv));
+            else
+               context_reg = lower_context_for_call(lu, fdecl);
             if (context_reg != VCODE_INVALID_REG)
                args[nargs++] = context_reg;
 
@@ -12668,6 +12680,7 @@ static bool lower_is_trivial_conversion(tree_t conv)
          return false;
       }
    case T_CONV_FUNC:
+   case T_PROT_FCALL:
       return false;
    default:
       should_not_reach_here();
@@ -12717,8 +12730,9 @@ static void lower_converter(lower_unit_t *parent, tree_t map,
          tree_t dst = tree_name(map);
 
          const tree_kind_t kind = tree_kind(dst);
-         if (kind == T_CONV_FUNC || kind == T_TYPE_CONV)
-            dst = tree_value(dst);
+         if (kind == T_CONV_FUNC || kind == T_TYPE_CONV
+             || kind == T_PROT_FCALL)
+            dst = lower_conv_target(dst);
 
          if (tree_kind(dst) == T_REF)
             name = ident_sprintf("%s.%s.%s", istr(parent->name),
@@ -12739,6 +12753,7 @@ static void lower_converter(lower_unit_t *parent, tree_t map,
    type_t src_arg_type, dst_arg_type;
    switch (tree_kind(conv)) {
    case T_CONV_FUNC:
+   case T_PROT_FCALL:
       {
          type_t ftype = tree_type(tree_ref(conv));
          src_arg_type = type_param(ftype, 0);
@@ -13144,10 +13159,11 @@ static void lower_port_map(lower_unit_t *lu, tree_t block, tree_t map,
 
    tree_t in_conv = NULL;
    const tree_kind_t value_kind = tree_kind(value);
-   if (value_kind == T_CONV_FUNC || value_kind == T_TYPE_CONV) {
+   if (value_kind == T_CONV_FUNC || value_kind == T_TYPE_CONV
+       || value_kind == T_PROT_FCALL) {
       assert(value_reg == VCODE_INVALID_REG);
 
-      tree_t p0 = tree_value(value);
+      tree_t p0 = lower_conv_target(value);
       value_reg = lower_lvalue(lu, p0);
 
       if (lower_is_trivial_conversion(value))
@@ -13181,9 +13197,10 @@ static void lower_port_map(lower_unit_t *lu, tree_t block, tree_t map,
          name = tree_name(map);
 
          const tree_kind_t kind = tree_kind(name);
-         if (kind == T_CONV_FUNC || kind == T_TYPE_CONV) {
+         if (kind == T_CONV_FUNC || kind == T_TYPE_CONV
+             || kind == T_PROT_FCALL) {
             out_conv = name;
-            name = tree_value(name);
+            name = lower_conv_target(name);
          }
 
          tree_t port = tree_ref(name_to_ref(name));
@@ -13306,7 +13323,8 @@ static void lower_direct_mapped_port(lower_unit_t *lu, tree_t block, tree_t map,
             kind  = tree_kind(name);
          }
 
-         if (kind == T_CONV_FUNC || kind == T_TYPE_CONV)
+         if (kind == T_CONV_FUNC || kind == T_TYPE_CONV
+             || kind == T_PROT_FCALL)
             return;
          else if (kind != T_REF) {
             // Cannot use direct mapping for any sub-element of this signal
@@ -13556,6 +13574,9 @@ static vcode_reg_t lower_constrain_port(lower_unit_t *lu, tree_t port, int pos,
             case T_CONV_FUNC:
                ref = name_to_ref(tree_value(name));
                break;
+            case T_PROT_FCALL:
+               ref = name_to_ref(tree_value(tree_param(name, 0)));
+               break;
             default:
                ref = name_to_ref(name);
                break;
@@ -13589,7 +13610,8 @@ static vcode_reg_t lower_constrain_port(lower_unit_t *lu, tree_t port, int pos,
             value = tree_value(value);
          else
             assert(tree_kind(value) == T_CONV_FUNC
-                   || tree_kind(value) == T_TYPE_CONV);
+                   || tree_kind(value) == T_TYPE_CONV
+                   || tree_kind(value) == T_PROT_FCALL);
 
          // TODO: lower_get_type_bounds does not support records
          type_t type = tree_type(value);
@@ -13680,6 +13702,7 @@ static vcode_reg_t lower_constrain_port(lower_unit_t *lu, tree_t port, int pos,
 
       case T_CONV_FUNC:
       case T_TYPE_CONV:
+      case T_PROT_FCALL:
          return lower_get_type_bounds(lu, tree_type(name));
 
       default:
@@ -13770,7 +13793,8 @@ static void lower_ports(lower_unit_t *lu, tree_t block, tree_t src,
 
       tree_t value = tree_value(p);
       const tree_kind_t kind = tree_kind(value);
-      if (kind == T_TYPE_CONV || kind == T_CONV_FUNC || kind == T_INERTIAL)
+      if (kind == T_TYPE_CONV || kind == T_CONV_FUNC || kind == T_PROT_FCALL
+          || kind == T_INERTIAL)
          map_regs[i] = VCODE_INVALID_REG;
       else if (lower_is_signal_ref(value))
          map_regs[i] = lower_lvalue(lu, value);
