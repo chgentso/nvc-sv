@@ -316,6 +316,7 @@ START_TEST(test_island_spec_pack)
       sigs[i].width = width[i];
       sigs[i].nelems = nelems[i];
       sigs[i].nwords = (width[i] + 63) / 64;
+      sigs[i].flags = RT_ISIG_IN;   // Loaded by the island: converted
    }
 
    uint32_t spec_a_off[NSIGS], spec_a_flags[NSIGS], spec_b_bytes[NSIGS];
