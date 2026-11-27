@@ -2761,6 +2761,7 @@ static void analyze_process(vhdl_island_ctx_t *ctx, tree_t proc, int stmt_idx,
             }
          }
          if (ok && c.writes.count > 0) {
+            const uint32_t n_body_reads = c.reads.count;
             push_unique_u32(&c.reads, clk_sig);
             if (rst_sig >= 0)
                push_unique_u32(&c.reads, (uint32_t)rst_sig);
@@ -2782,6 +2783,7 @@ static void analyze_process(vhdl_island_ctx_t *ctx, tree_t proc, int stmt_idx,
                .rst_branch     = rst_br,
                .reads          = c.reads.items,
                .n_reads        = c.reads.count,
+               .n_body_reads   = n_body_reads,
                .writes         = c.writes.items,
                .n_writes       = c.writes.count,
                .read_ranges    = c.read_ranges.items,
@@ -4585,6 +4587,9 @@ void vhdl_island_rebuild(vhdl_island_ctx_t *ctx)
       LOC_FF_READ      = 1u << 2,
       LOC_FF_WRITTEN   = 1u << 3,
       LOC_USED_EDGE    = 1u << 4,
+      LOC_USED_CLK     = 1u << 5,
+      LOC_USED_RST     = 1u << 6,
+      LOC_BODY_READ    = 1u << 7,
    };
 
    for (uint32_t ii = 0; ii < islands.count; ii++) {
@@ -4635,6 +4640,8 @@ void vhdl_island_rebuild(vhdl_island_ctx_t *ctx)
             assert(loc >= 0);
             loc_flags[loc] |= (p->kind == VIPROC_COMB)
                ? LOC_COMB_READ : LOC_FF_READ;
+            if (p->kind == VIPROC_FF && j < p->n_body_reads)
+               loc_flags[loc] |= LOC_BODY_READ;
          }
          for (uint32_t j = 0; j < p->n_writes; j++) {
             const int32_t loc = gid_to_loc[p->writes[j]];
@@ -4648,9 +4655,9 @@ void vhdl_island_rebuild(vhdl_island_ctx_t *ctx)
             const int32_t rst_l = (p->rst_sig >= 0)
                ? gid_to_loc[p->rst_sig] : -1;
             assert(clk_l >= 0);
-            loc_flags[clk_l] |= LOC_USED_EDGE;
+            loc_flags[clk_l] |= LOC_USED_EDGE | LOC_USED_CLK;
             if (rst_l >= 0)
-               loc_flags[rst_l] |= LOC_USED_EDGE;
+               loc_flags[rst_l] |= LOC_USED_EDGE | LOC_USED_RST;
 
             int found = -1;
             for (unsigned d = 0; d < doms.count; d++) {
@@ -4765,7 +4772,13 @@ void vhdl_island_rebuild(vhdl_island_ctx_t *ctx)
 
          const bool is_driven_here = !!(lf & (LOC_COMB_WRITTEN | LOC_FF_WRITTEN));
          const bool edge_here = !!(lf & LOC_USED_EDGE);
-         if (!is_driven_here || edge_here)
+         // A signal used only as a flip-flop clock is sampled through the
+         // domain clock watch which reads the raw signal, so the island's
+         // local copy is never loaded and needs no input watch.  The reset
+         // value is loaded by the domain function and keeps its watch.
+         const bool clk_only = !is_driven_here && (lf & LOC_USED_CLK)
+            && !(lf & (LOC_USED_RST | LOC_COMB_READ | LOC_BODY_READ));
+         if ((!is_driven_here || edge_here) && !clk_only)
             f |= RT_ISIG_IN;
 
          const bool is_port_out = s->is_port

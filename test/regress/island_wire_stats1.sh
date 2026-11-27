@@ -109,7 +109,8 @@ if grep -q ISLAND_WIRE plain.txt; then
 fi
 
 # Both producer outputs and the record port are wired directly; the
-# testbench-driven clock is the only reader without an island writer
+# testbench-driven clock is only a flip-flop trigger, so it has no input
+# watch and no reader row
 export NVC_ISLAND_WIRE_STATS=1
 nvc --std=2008 -r wire_stats >stats.txt 2>&1
 cat stats.txt
@@ -117,9 +118,9 @@ grep -E '^ISLAND_WIRE: islands=2 super_islands=1 ' stats.txt
 grep -E '^ISLAND_WIRE: DIRECT +4 +4 +17 ' stats.txt
 grep -E '^ISLAND_WIRE: no-consumer \(island-internal\) +2 +0 +16 ' stats.txt
 grep -E '^ISLAND_WIRE: dst-port-poll/ext-read +1 +1 +8 ' stats.txt
-grep -E '^ISLAND_WIRE: READER<-non-island-process +0 +0 +0 +0 +0 \| +2 ' stats.txt
+! grep -E '^ISLAND_WIRE: READER<-' stats.txt
 grep -E '^ISLAND_WIRE_EX: \[dst-port-poll/ext-read\] WORK.WIRE_STATS.U2.Y\[0\+8\] -> WORK.WIRE_STATS.Y$' stats.txt
-grep -E '^ISLAND_WIRE_TOP: wake=160 sync_in=80 .* in WORK.WIRE_STATS.CLK\[0\+1\] <-proc ' stats.txt
+! grep -E '^ISLAND_WIRE_TOP: .* in WORK.WIRE_STATS.CLK' stats.txt
 
 # A waveform dumper observes every signal, so the direct wires are broken
 nvc --std=2008 -r wire_stats --wave=wire_stats.fst >wave.txt 2>&1
