@@ -31,6 +31,67 @@
 #include <string.h>
 #include <inttypes.h>
 
+static bool copy_all_pred(vlog_node_t v, void *ctx);
+static void resolve_inst_pattern_expr(vlog_node_t expr, vlog_node_t dt,
+                                      int array_depth);
+
+static int decl_unpacked_depth(vlog_node_t d)
+{
+   int depth = 0;
+   switch (vlog_kind(d)) {
+   case V_VAR_DECL:
+   case V_NET_DECL:
+   case V_PORT_DECL:
+   case V_TF_PORT_DECL:
+   case V_PARAM_DECL:
+   case V_LOCALPARAM:
+   case V_LOCAL_DECL:
+   case V_DATA_TYPE:
+      {
+         const int nr = vlog_ranges(d);
+         for (int i = 0; i < nr; i++) {
+            if (vlog_subkind(vlog_range(d, i)) == V_DIM_UNPACKED)
+               depth++;
+         }
+      }
+      break;
+   default:
+      break;
+   }
+
+   for (vlog_node_t t = vlog_has_type(d) ? vlog_get_type(vlog_type(d)) : NULL;
+        t != NULL && vlog_kind(t) == V_DATA_TYPE
+        && vlog_subkind(t) == DT_DYNARRAY && vlog_ranges(t) == 1
+        && vlog_subkind(vlog_range(t, 0)) != V_DIM_UNSIZED;
+        t = vlog_has_type(t) ? vlog_get_type(vlog_type(t)) : NULL)
+      depth++;
+
+   return depth;
+}
+
+static vlog_node_t concat_to_array_pattern(vlog_node_t c, vlog_node_t elem_type,
+                                           int depth)
+{
+   vlog_node_t pat = vlog_new(V_PATTERN_EXPR);
+   vlog_set_loc(pat, vlog_loc(c));
+   if (depth <= 1 && elem_type != NULL)
+      vlog_set_type(pat, vlog_get_type(elem_type));
+
+   const int nparams = vlog_params(c);
+   for (int i = 0; i < nparams; i++) {
+      vlog_node_t p = vlog_param(c, i);
+      if (depth > 1 && vlog_kind(p) == V_CONCAT && !vlog_has_value(p))
+         p = concat_to_array_pattern(p, elem_type, depth - 1);
+
+      vlog_node_t item = vlog_new(V_PATTERN_ITEM);
+      vlog_set_loc(item, vlog_loc(p));
+      vlog_set_right(item, p);
+      vlog_add_param(pat, item);
+   }
+
+   return pat;
+}
+
 static vlog_node_t bind_parameter(vlog_node_t decl, int nth, vlog_node_t inst)
 {
    vlog_node_t value = NULL;
@@ -94,6 +155,19 @@ static vlog_node_t bind_parameter(vlog_node_t decl, int nth, vlog_node_t inst)
             value = cast;
          }
       }
+   }
+
+   if (given && vlog_has_type(decl) && decl_unpacked_depth(decl) > 0
+       && vlog_kind(value) == V_CONCAT && !vlog_has_value(value)) {
+      value = concat_to_array_pattern(value, vlog_type(decl),
+                                      decl_unpacked_depth(decl));
+   }
+   else if (given && vlog_has_type(decl)
+       && ((vlog_kind(value) == V_PATTERN_EXPR && !vlog_has_type(value))
+           || vlog_kind(value) == V_COND_EXPR)) {
+      value = vlog_copy(value, copy_all_pred, NULL);
+      resolve_inst_pattern_expr(value, vlog_type(decl),
+                                decl_unpacked_depth(decl));
    }
 
    vlog_node_t local = vlog_new(V_LOCALPARAM);
@@ -442,7 +516,8 @@ static void round_delay(vlog_node_t ctrl)
    vlog_set_ival(ctrl, VLOG_TIME_ENCODE(1, VLOG_TIME_LOG10(ival)));
 }
 
-static void resolve_inst_pattern(vlog_node_t pat, vlog_node_t dt)
+static void resolve_inst_pattern(vlog_node_t pat, vlog_node_t dt,
+                                 int array_depth)
 {
    if (dt == NULL)
       return;
@@ -453,8 +528,8 @@ static void resolve_inst_pattern(vlog_node_t pat, vlog_node_t dt)
 
    vlog_set_type(pat, bt);
 
-   const bool is_struct = vlog_kind(bt) == V_STRUCT_DECL
-      || vlog_kind(bt) == V_UNION_DECL;
+   const bool is_struct = array_depth == 0
+      && (vlog_kind(bt) == V_STRUCT_DECL || vlog_kind(bt) == V_UNION_DECL);
 
    const int nparams = vlog_params(pat);
    for (int i = 0; i < nparams; i++) {
@@ -491,25 +566,35 @@ static void resolve_inst_pattern(vlog_node_t pat, vlog_node_t dt)
       if (vlog_has_right(item)
           && vlog_kind(vlog_right(item)) == V_PATTERN_EXPR) {
          vlog_node_t sub_dt = NULL;
-         if (member != NULL)
-            sub_dt = vlog_get_type(vlog_type(member));
+         int sub_depth = 0;
+         if (array_depth > 1) {
+            sub_dt = dt;
+            sub_depth = array_depth - 1;
+         }
+         else if (array_depth == 1)
+            sub_dt = dt;
+         else if (member != NULL) {
+            sub_dt = vlog_type(member);
+            sub_depth = decl_unpacked_depth(member);
+         }
          else if (vlog_kind(bt) == V_DATA_TYPE && vlog_has_type(bt))
-            sub_dt = vlog_get_type(vlog_type(bt));
-         resolve_inst_pattern(vlog_right(item), sub_dt);
+            sub_dt = vlog_type(bt);
+         resolve_inst_pattern(vlog_right(item), sub_dt, sub_depth);
       }
    }
 }
 
-static void resolve_inst_pattern_expr(vlog_node_t expr, vlog_node_t dt)
+static void resolve_inst_pattern_expr(vlog_node_t expr, vlog_node_t dt,
+                                      int array_depth)
 {
    if (expr == NULL || dt == NULL)
       return;
 
    if (vlog_kind(expr) == V_PATTERN_EXPR && !vlog_has_type(expr))
-      resolve_inst_pattern(expr, dt);
+      resolve_inst_pattern(expr, dt, array_depth);
    else if (vlog_kind(expr) == V_COND_EXPR) {
-      resolve_inst_pattern_expr(vlog_left(expr), dt);
-      resolve_inst_pattern_expr(vlog_right(expr), dt);
+      resolve_inst_pattern_expr(vlog_left(expr), dt, array_depth);
+      resolve_inst_pattern_expr(vlog_right(expr), dt, array_depth);
    }
 }
 
@@ -568,7 +653,7 @@ static vlog_node_t fixup_refs_cb(vlog_node_t v, void *ctx)
       break;
    case V_PATTERN_EXPR:
       if (vlog_has_type(v) && vlog_uses_typeparam(vlog_type(v)))
-         resolve_inst_pattern(v, vlog_type(v));
+         resolve_inst_pattern(v, vlog_type(v), 0);
       break;
    case V_ASSIGN:
    case V_BASSIGN:
@@ -578,7 +663,9 @@ static vlog_node_t fixup_refs_cb(vlog_node_t v, void *ctx)
          vlog_node_t dt = vlog_get_type(tgt);
          if (dt == NULL && vlog_kind(tgt) == V_BIT_SELECT)
             dt = vlog_select_type_packed(tgt);
-         resolve_inst_pattern_expr(vlog_value(v), dt);
+         const int depth = vlog_kind(tgt) == V_REF && vlog_has_ref(tgt)
+            ? decl_unpacked_depth(vlog_ref(tgt)) : 0;
+         resolve_inst_pattern_expr(vlog_value(v), dt, depth);
       }
       break;
    case V_SYS_TCALL:
@@ -1172,6 +1259,8 @@ static bool copy_generate_pred(vlog_node_t v, void *ctx)
       return v == ctx;
    case V_FUNC_DECL:
    case V_TASK_DECL:
+   case V_CLASS_DECL:
+   case V_CONSTRUCTOR:
       return !(vlog_flags(v) & VLOG_F_GLOBAL);
    default:
       return false;

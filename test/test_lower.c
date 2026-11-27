@@ -258,6 +258,7 @@ static void check_bb(int bb, const check_bb_t *expect, int len)
       case VCODE_OP_OR_TRIGGER:
       case VCODE_OP_CMP_TRIGGER:
       case VCODE_OP_BIND_EXTERNAL:
+      case VCODE_OP_INSTANCE_NAME:
          break;
 
       case VCODE_OP_CONST_ARRAY:
@@ -6604,10 +6605,47 @@ START_TEST(test_issue1191)
    vcode_select_unit(vu);
 
    EXPECT_BB(0) = {
+      { VCODE_OP_CONST, .value = 6 },
+      { VCODE_OP_INSTANCE_NAME },
+      { VCODE_OP_STORE, .name = "instance_name" },
+      { VCODE_OP_CONST, .value = 5 },
+      { VCODE_OP_INSTANCE_NAME },
+      { VCODE_OP_STORE, .name = "path_name" },
       { VCODE_OP_PACKAGE_INIT, .name = "STD.STANDARD" },
       { VCODE_OP_CONTEXT_UPREF, .hops = 0 },
       { VCODE_OP_PACKAGE_INIT, .name = "WORK.TEST.TEST_PKG_INST" },
       { VCODE_OP_STORE, .name = "WORK.TEST.TEST_PKG_INST" },
+      { VCODE_OP_CONST, .value = ':' },
+      { VCODE_OP_CONST, .value = 's' },
+      { VCODE_OP_CONST, .value = '_' },
+      { VCODE_OP_CONST, .value = 't' },
+      { VCODE_OP_CONST, .value = 'e' },
+      { VCODE_OP_CONST, .value = 'p' },
+      { VCODE_OP_CONST, .value = 'k' },
+      { VCODE_OP_CONST, .value = 'g' },
+      { VCODE_OP_CONST, .value = 'i' },
+      { VCODE_OP_CONST, .value = 'n' },
+      { VCODE_OP_CONST_ARRAY, .length = 16 },
+      { VCODE_OP_UARRAY_LEN, .dim = 0 },
+      { VCODE_OP_CONST, .value = 16 },
+      { VCODE_OP_ADD },
+      { VCODE_OP_ALLOC },
+      { VCODE_OP_ARRAY_REF },
+      { VCODE_OP_UNWRAP },
+      { VCODE_OP_COPY },
+      { VCODE_OP_ADDRESS_OF },
+      { VCODE_OP_COPY },
+      { VCODE_OP_CONST, .value = 1 },
+      { VCODE_OP_CONST, .value = 0 },
+      { VCODE_OP_WRAP },
+      { VCODE_OP_UARRAY_LEN, .dim = 0 },
+      { VCODE_OP_ADD },
+      { VCODE_OP_ALLOC },
+      { VCODE_OP_ARRAY_REF },
+      { VCODE_OP_UNWRAP },
+      { VCODE_OP_COPY },
+      { VCODE_OP_COPY },
+      { VCODE_OP_WRAP },
       { VCODE_OP_NULL },
       { VCODE_OP_PROTECTED_INIT, .name = "WORK.TEST-SIM.TEST_PKG_INST.T_TEST" },
       { VCODE_OP_STORE, .name = "S_TEST_PKG_INST" },

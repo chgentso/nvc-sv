@@ -453,6 +453,9 @@ PROTECT           ?i:protect
 
 <PSTRING>"%%"            { string_append("%"); }
 <PSTRING>"%"             { return string_end(); }
+<PSTRING>"\""            { error_at(&yylloc, "string literal delimited by "
+                                    "'%%' cannot contain '\"'");
+                         }
 <PSTRING>"\n"            { return report_unterminated_string(); }
 <PSTRING>.               { string_append(yytext); }
 

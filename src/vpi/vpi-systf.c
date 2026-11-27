@@ -425,6 +425,42 @@ static void format_quoted(ostream_t *out, vpiHandle it, int fwidth)
    vpi_release_handle(arg);
 }
 
+static void format_unformatted(ostream_t *out, vpiHandle it, bool four_state)
+{
+   vpiHandle arg = vpi_scan(it);
+   if (arg == NULL)
+      return;
+
+   s_vpi_value value = { .format = vpiBinStrVal };
+   vpi_get_value(arg, &value);
+
+   const char *bits = (const char *)value.value.str;
+   const size_t len = bits != NULL ? strlen(bits) : 0;
+   const size_t nwords = len > 0 ? (len + 31) / 32 : 1;
+
+   // IEEE 1800-2017 21.2.1.1: write native-endian 32-bit chunks, LSB word first
+   for (size_t w = 0; w < nwords; w++) {
+      uint32_t aval = 0, bval = 0;
+      for (size_t k = 0; k < 32 && w * 32 + k < len; k++) {
+         const char ch = bits[len - 1 - (w * 32 + k)];
+         if (ch == '1')
+            aval |= UINT32_C(1) << k;
+         else if (four_state && ch == 'x') {
+            aval |= UINT32_C(1) << k;
+            bval |= UINT32_C(1) << k;
+         }
+         else if (four_state && ch == 'z')
+            bval |= UINT32_C(1) << k;
+      }
+
+      ostream_write(out, (const char *)&aval, sizeof(aval));
+      if (four_state)
+         ostream_write(out, (const char *)&bval, sizeof(bval));
+   }
+
+   vpi_release_handle(arg);
+}
+
 static void interpret_format(ostream_t *out, const char *fmt, vpiHandle it)
 {
    const char *start = fmt, *p = fmt;
@@ -435,6 +471,12 @@ static void interpret_format(ostream_t *out, const char *fmt, vpiHandle it)
             ostream_write(out, start, p - start);
 
          p++;   // Skip over '%'
+
+         if (*p == '\0') {
+            ostream_putc(out, '%');
+            start = p;
+            break;
+         }
 
          const bool left = *p == '-';
          if (left)
@@ -513,6 +555,12 @@ static void interpret_format(ostream_t *out, const char *fmt, vpiHandle it)
             break;
          case 'c':
             format_char(dst, it, fwidth);
+            break;
+         case 'u':
+            format_unformatted(dst, it, false);
+            break;
+         case 'z':
+            format_unformatted(dst, it, true);
             break;
          case '%':
             ostream_putc(dst, '%');
@@ -1217,7 +1265,8 @@ static bool scan_digits(scan_src_t *src, char conv, char *buf, size_t size)
       case 'f':
       case 'e':
       case 'g':
-         valid = isdigit_iso88591(ch) || ch == '.'
+      case 't':
+         valid = isdigit_iso88591(ch) || ch == '.' || ch == '_'
             || (len > 0 && (ch == 'e' || ch == 'E'))
             || ((len == 0 || tolower(buf[len - 1]) == 'e')
                 && (ch == '-' || ch == '+'));
@@ -1268,6 +1317,18 @@ static bool scan_assign(vpiHandle arg, char conv, const char *tok)
    case 'g':
       value.format = vpiRealVal;
       value.value.real = strtod(clean, NULL);
+      break;
+   case 't':
+      {
+         double val = strtod(clean, NULL);
+         const uint64_t ts = vpi_caller_timescale();
+         if (time_format.valid && ts > 0)
+            val = val * pow(10.0, 15 + time_format.units) / (double)ts;
+         else if (ts > 1)
+            val = val * (double)vpi_caller_design_precision() / (double)ts;
+         value.format = vpiRealVal;
+         value.value.real = val;
+      }
       break;
    case 'c':
       value.format = vpiIntVal;
@@ -1328,7 +1389,8 @@ static PLI_INT32 scan_format(scan_src_t *src, const char *fmt, vpiHandle argv)
             break;
       }
       else if (*p == 'd' || *p == 'b' || *p == 'o' || *p == 'h'
-               || *p == 'x' || *p == 'f' || *p == 'e' || *p == 'g') {
+               || *p == 'x' || *p == 'f' || *p == 'e' || *p == 'g'
+               || *p == 't') {
          if (!scan_digits(src, *p, tok, sizeof(tok)))
             break;
       }
@@ -2569,15 +2631,41 @@ static PLI_INT32 clog2_tf(PLI_BYTE8 *userdata)
    vpiHandle arg = vpi_scan(argv);
    assert(arg != NULL);
 
-   s_vpi_value value = { .format = vpiIntVal };
+   s_vpi_value value = { .format = vpiBinStrVal };
    vpi_get_value(arg, &value);
 
    vpi_release_handle(arg);
    vpi_release_handle(argv);
 
+   // IEEE 1800-2017 20.8.1: treat the argument as an arbitrary-width
+   // unsigned value; an argument of 0 produces 0.
+   PLI_INT32 r = 0;
+   const char *bits = (const char *)value.value.str;
+   if (bits != NULL) {
+      const size_t len = strlen(bits);
+      int hi = -1;
+      bool any_lower = false, has_xz = false;
+      for (size_t i = 0; i < len; i++) {
+         if (bits[i] == '1') {
+            const int pos = (int)(len - 1 - i);
+            if (hi < 0)
+               hi = pos;
+            else
+               any_lower = true;
+         }
+         else if (bits[i] != '0') {
+            has_xz = true;
+            break;
+         }
+      }
+
+      if (!has_xz && hi > 0)
+         r = any_lower ? hi + 1 : hi;
+   }
+
    s_vpi_value result = {
       .format = vpiIntVal,
-      .value = { .integer = ilog2(value.value.integer) },
+      .value = { .integer = r },
    };
 
    vpi_put_value(call, &result, NULL, 0);
@@ -3343,6 +3431,28 @@ static PLI_INT32 fgetc_tf(PLI_BYTE8 *userdata)
    return 0;
 }
 
+static PLI_INT32 fputc_tf(PLI_BYTE8 *userdata)
+{
+   vpiHandle call = vpi_handle(vpiSysTfCall, NULL);
+   assert(call != NULL);
+
+   vpiHandle argv = vpi_iterate(vpiArgument, call);
+   vpiHandle c_arg = vpi_scan(argv);
+   vpiHandle fd_arg = vpi_scan(argv);
+   assert(c_arg != NULL);
+   assert(fd_arg != NULL);
+
+   const int c = get_int_arg(c_arg) & 0xff;
+   FILE *f = get_file_stream(fd_arg, true);
+   put_int_result(f == NULL || fputc(c, f) == EOF ? -1 : 0);
+
+   vpi_release_handle(c_arg);
+   vpi_release_handle(fd_arg);
+   vpi_release_handle(argv);
+   vpi_release_handle(call);
+   return 0;
+}
+
 static PLI_INT32 ungetc_tf(PLI_BYTE8 *userdata)
 {
    vpiHandle call = vpi_handle(vpiSysTfCall, NULL);
@@ -3555,6 +3665,12 @@ static s_vpi_systf_data builtins[] = {
       .tfname      = "$fgetc",
       .sysfunctype = vpiIntFunc,
       .calltf      = fgetc_tf
+   },
+   {
+      .type        = vpiSysFunc,
+      .tfname      = "$fputc",
+      .sysfunctype = vpiIntFunc,
+      .calltf      = fputc_tf
    },
    {
       .type        = vpiSysFunc,

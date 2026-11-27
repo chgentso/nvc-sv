@@ -1,0 +1,7 @@
+after_glitch y_comb=2 y_star=2
+** Warning: 20ns+1: unique if violation: no condition matches and there is no else
+** Warning: 20ns+1: unique case violation: no case item matches and there is no default
+after_nomatch y_comb=0 y_star=0
+** Warning: 40ns+1: unique if violation: more than one condition matches
+** Warning: 40ns+1: unique case violation: more than one case item matches
+PASSED

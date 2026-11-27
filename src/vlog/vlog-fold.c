@@ -568,12 +568,16 @@ static void fold_report_non_const(vlog_node_t v, fold_ctx_t *ctx)
    }
 }
 
+static vlog_node_t fold_pattern_items(vlog_node_t v, fold_ctx_t *ctx);
+
 static vlog_node_t fold_const_expr(vlog_node_t v, fold_ctx_t *ctx)
 {
    switch (get_fold_state(v, ctx)) {
    case FOLD_CONST:
       return v;
    case FOLD_POSSIBLE:
+      if (vlog_kind(v) == V_PATTERN_EXPR)
+         return fold_pattern_items(v, ctx);
       return fold_call_thunk(v, ctx);
    case FOLD_LATER:
       return NULL;
@@ -624,6 +628,105 @@ static vlog_node_t fold_pattern_items(vlog_node_t v, fold_ctx_t *ctx)
    return copy;
 }
 
+static bool is_packed_elem_type(vlog_node_t et)
+{
+   if (et == NULL)
+      return false;
+
+   switch (vlog_kind(et)) {
+   case V_DATA_TYPE:
+      switch (vlog_subkind(et)) {
+      case DT_LOGIC:
+      case DT_BIT:
+      case DT_BYTE:
+      case DT_SHORTINT:
+      case DT_INT:
+      case DT_INTEGER:
+      case DT_LONGINT:
+      case DT_TIME:
+         return true;
+      default:
+         return false;
+      }
+   case V_ENUM_DECL:
+      return true;
+   case V_STRUCT_DECL:
+   case V_UNION_DECL:
+      return !!(vlog_flags(et) & VLOG_F_PACKED);
+   default:
+      return false;
+   }
+}
+
+static bool is_unpacked_array_expr(vlog_node_t v)
+{
+   switch (vlog_kind(v)) {
+   case V_REF:
+   case V_MEMBER_REF:
+   case V_HIER_REF:
+      return vlog_has_ref(v) && vlog_is_fixed_unpacked(vlog_ref(v));
+   case V_BIT_SELECT:
+      {
+         vlog_node_t base = vlog_value(v);
+         int depth = 0;
+         while (vlog_kind(base) == V_BIT_SELECT) {
+            depth += vlog_params(base);
+            base = vlog_value(base);
+         }
+         if ((vlog_kind(base) == V_REF || vlog_kind(base) == V_MEMBER_REF
+              || vlog_kind(base) == V_HIER_REF)
+             && vlog_has_ref(base) && vlog_is_fixed_unpacked(vlog_ref(base)))
+            return vlog_ranges(vlog_ref(base)) > depth + vlog_params(v);
+         return false;
+      }
+   case V_PART_SELECT:
+      return is_unpacked_array_expr(vlog_value(v));
+   case V_USER_FCALL:
+      if (vlog_has_ref(v) && vlog_has_type(vlog_ref(v))) {
+         vlog_node_t rt = vlog_get_type(vlog_type(vlog_ref(v)));
+         return rt != NULL && vlog_kind(rt) == V_DATA_TYPE
+            && vlog_subkind(rt) == DT_DYNARRAY && vlog_ranges(rt) == 1
+            && vlog_subkind(vlog_range(rt, 0)) != V_DIM_UNSIZED;
+      }
+      return false;
+   default:
+      return false;
+   }
+}
+
+static vlog_node_t fold_unpack_array_pattern(number_t flat, vlog_node_t v,
+                                             int dim_idx, unsigned *bit_off,
+                                             unsigned elem_bits, bool issigned)
+{
+   const int nranges = vlog_ranges(v);
+   vlog_node_t pat = vlog_new(V_PATTERN_EXPR);
+   vlog_set_loc(pat, vlog_loc(v));
+   if (dim_idx == nranges - 1)
+      vlog_set_type(pat, vlog_get_type(vlog_type(v)));
+
+   const unsigned nelems = vlog_size(vlog_range(v, dim_idx));
+   for (unsigned i = 0; i < nelems; i++) {
+      vlog_node_t elem;
+      if (dim_idx + 1 < nranges)
+         elem = fold_unpack_array_pattern(flat, v, dim_idx + 1, bit_off,
+                                          elem_bits, issigned);
+      else {
+         *bit_off -= elem_bits;
+         elem = vlog_new(V_NUMBER);
+         vlog_set_loc(elem, vlog_loc(v));
+         vlog_set_number(elem, number_slice(flat, *bit_off, elem_bits,
+                                            issigned));
+      }
+
+      vlog_node_t item = vlog_new(V_PATTERN_ITEM);
+      vlog_set_loc(item, vlog_loc(v));
+      vlog_set_right(item, elem);
+      vlog_add_param(pat, item);
+   }
+
+   return pat;
+}
+
 static vlog_node_t fold_localparam(vlog_node_t v, fold_ctx_t *ctx)
 {
    vlog_node_t value = vlog_value(v);
@@ -637,6 +740,32 @@ static vlog_node_t fold_localparam(vlog_node_t v, fold_ctx_t *ctx)
             return v;
 
          vlog_set_value(v, (value = result));
+         break;
+      }
+      else if (vlog_ranges(v) > 0) {
+         if (!vlog_is_fixed_unpacked(v)
+             || get_ranges_state(v, ctx) != FOLD_CONST
+             || get_type_state(vlog_type(v), ctx) != FOLD_CONST)
+            return v;
+
+         vlog_node_t et = vlog_get_type(vlog_type(v));
+         if (!is_packed_elem_type(et))
+            return v;
+
+         const unsigned nelems = vlog_size(v);
+         const unsigned elem_bits = vlog_size(et);
+         if (nelems == 0 || elem_bits == 0)
+            return v;
+
+         vlog_node_t flat = fold_call_thunk(v, ctx);
+         if (flat == NULL || vlog_kind(flat) != V_NUMBER
+             || number_width(vlog_number(flat)) != nelems * elem_bits)
+            return v;
+
+         unsigned bit_off = nelems * elem_bits;
+         vlog_node_t pat = fold_unpack_array_pattern(
+            vlog_number(flat), v, 0, &bit_off, elem_bits, vlog_is_signed(et));
+         vlog_set_value(v, (value = pat));
          break;
       }
       else {
@@ -941,7 +1070,11 @@ static vlog_node_t fold_if_generate(vlog_node_t v, fold_ctx_t *ctx)
             continue;
       }
 
-      return vlog_stmts(c) == 1 ? vlog_stmt(c, 0) : NULL;
+      if (vlog_stmts(c) == 1) {
+         vlog_node_t s = vlog_stmt(c, 0);
+         return vlog_kind(s) == V_IF_GENERATE ? fold_if_generate(s, ctx) : s;
+      }
+      return NULL;
    }
 
    return NULL;   // None of the conditions are true
@@ -1108,6 +1241,25 @@ static vlog_node_t vlog_fold_post_cb(vlog_node_t v, void *context)
       }
       // Fall-through
    case V_PARAM_ASSIGN:
+      if (vlog_has_value(v) && vlog_kind(vlog_value(v)) == V_CONCAT
+          && !vlog_has_value(vlog_value(v))) {
+         // Keep bare concatenations intact until instantiation so an
+         // unpacked array parameter override can interpret them as elements
+         vlog_node_t c = vlog_value(v);
+         const int nparams = vlog_params(c);
+         for (int i = 0; i < nparams; i++) {
+            vlog_node_t item = vlog_param(c, i);
+            if (get_fold_state(item, context) == FOLD_POSSIBLE) {
+               vlog_node_t folded = fold_const_expr(item, context);
+               if (folded != NULL)
+                  vlog_set_param(c, i, folded);
+            }
+         }
+         return v;
+      }
+      if (vlog_has_value(v) && is_unpacked_array_expr(vlog_value(v)))
+         return v;
+      // Fall-through
    case V_DEFPARAM:
       return fold_const_value(v, context);
    case V_ENUM_NAME:

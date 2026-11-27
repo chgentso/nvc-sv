@@ -113,8 +113,9 @@ package ENV is
   -- Convert TIME_RECORD to a string in ISO 8601 format.
   -- TO_STRING(x)    => "1973-09-16T01:03:52"
   -- TO_STRING(x, 6) => "1973-09-16T01:03:52.000001"
+  function TO_STRING(TREC: TIME_RECORD) return STRING;
   function TO_STRING(TREC: TIME_RECORD;
-                     FRAC_DIGITS: INTEGER range 0 to 6 := 0)
+                     FRAC_DIGITS: INTEGER range 0 to 6)
                      return STRING;
 
   impure function GETENV(Name : STRING) return STRING;

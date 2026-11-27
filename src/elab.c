@@ -1464,6 +1464,10 @@ static void elab_ports(tree_t entity, tree_t bind, const elab_ctx_t *ctx)
                   is_conv = true;
                   ref = name_to_ref(tree_value(name));
                   break;
+               case T_PROT_FCALL:
+                  is_conv = true;
+                  ref = name_to_ref(tree_value(tree_param(name, 0)));
+                  break;
                default:
                   ref = name_to_ref(name);
                   break;
@@ -2777,6 +2781,51 @@ static void elab_verilog_ports(vlog_node_t inst, elab_instance_t *ei,
 
             if (value != NULL)
                break;
+         }
+
+         if (value == NULL) {
+            // Also search visible compilation-unit ($unit) namespaces
+            const int nstmts = vlog_stmts(parent);
+            for (int j = 0; j < nstmts && value == NULL; j++) {
+               vlog_node_t s = vlog_stmt(parent, j);
+               if (vlog_kind(s) != V_INITIAL || vlog_stmts(s) != 1)
+                  continue;
+               vlog_node_t call = vlog_stmt(s, 0);
+               if (vlog_kind(call) != V_SYS_TCALL
+                   || !ident_starts_with(vlog_ident(call), ident_new("$__init:")))
+                  continue;
+
+               ident_t ns_name = ident_new(istr(vlog_ident(call)) + 8);
+               ident_t lib_id = ident_until(ns_name, '.');
+               lib_t lib = lib_id != NULL ? lib_find(lib_id) : NULL;
+               if (lib == NULL)
+                  continue;
+
+               object_t *obj = lib_get_generic(lib, ns_name, NULL);
+               vlog_node_t ns = obj != NULL ? vlog_from_object(obj) : NULL;
+               if (ns == NULL || vlog_kind(ns) != V_NAMESPACE)
+                  continue;
+
+               const int nns = vlog_decls(ns);
+               for (int k = 0; k < nns; k++) {
+                  vlog_node_t d = vlog_decl(ns, k);
+                  if ((vlog_kind(d) == V_NET_DECL || vlog_kind(d) == V_VAR_DECL)
+                      && vlog_ident(d) == port_name) {
+                     const loc_t *dloc = vlog_loc(d);
+                     if (dloc->file_ref == wloc->file_ref
+                         && (dloc->first_line > wloc->first_line
+                             || (dloc->first_line == wloc->first_line
+                                 && dloc->first_column > wloc->first_column)))
+                        continue;
+
+                     value = vlog_new(V_REF);
+                     vlog_set_ident(value, port_name);
+                     vlog_set_ref(value, d);
+                     vlog_set_loc(value, wloc);
+                     break;
+                  }
+               }
+            }
          }
 
          where = wloc;
@@ -9424,6 +9473,152 @@ static void elab_check_handle_call(vlog_node_t v, const elab_href_ctx_t *hctx)
    }
 }
 
+typedef struct {
+   ident_t name;
+   bool    found;
+} find_named_blk_t;
+
+static void elab_find_named_blk_cb(vlog_node_t v, void *ctx)
+{
+   find_named_blk_t *f = ctx;
+   if (f->found)
+      return;
+
+   const vlog_kind_t k = vlog_kind(v);
+   if ((k == V_SEQ_BLOCK || k == V_FORK)
+       && vlog_has_ident(v) && vlog_ident(v) == f->name)
+      f->found = true;
+}
+
+static bool elab_has_named_proc_block(tree_t b, ident_t name)
+{
+   const int nstmts = tree_stmts(b);
+   for (int i = 0; i < nstmts; i++) {
+      tree_t s = tree_stmt(b, i);
+      if (tree_kind(s) != T_VERILOG)
+         continue;
+
+      find_named_blk_t f = { .name = name, .found = false };
+      vlog_visit(tree_vlog(s), elab_find_named_blk_cb, &f);
+      if (f.found)
+         return true;
+   }
+   return false;
+}
+
+static ident_t elab_static_base_name(ident_t id)
+{
+   const char *s = istr(id);
+   const char *p = strstr(s, "$static");
+   return p != NULL ? ident_new_n(s, p - s) : id;
+}
+
+static vlog_node_t elab_find_blk_var_rec(vlog_node_t n, const ident_t *path,
+                                         int npath, ident_t var_name)
+{
+   if (n == NULL)
+      return NULL;
+
+   const vlog_kind_t k = vlog_kind(n);
+   if (k == V_GEN_BLOCK || k == V_MOD_INST || k == V_INST_LIST)
+      return NULL;
+
+   if ((k == V_SEQ_BLOCK || k == V_FORK) && vlog_has_ident(n)) {
+      if (vlog_ident(n) == path[0]) {
+         if (npath == 1) {
+            const int ndecls = vlog_decls(n);
+            for (int i = 0; i < ndecls; i++) {
+               vlog_node_t d = vlog_decl(n, i);
+               if (vlog_kind(d) == V_VAR_DECL
+                   && elab_static_base_name(vlog_ident(d)) == var_name)
+                  return d;
+            }
+            return NULL;
+         }
+         path++;
+         npath--;
+      }
+      else
+         return NULL;   // Different named scope along the path
+   }
+
+   switch (k) {
+   case V_INITIAL:
+   case V_ALWAYS:
+   case V_FINAL:
+   case V_SEQ_BLOCK:
+   case V_FORK:
+   case V_TIMING:
+   case V_FOR_LOOP:
+   case V_FOREACH:
+   case V_WHILE:
+   case V_DO_WHILE:
+   case V_REPEAT:
+   case V_FOREVER:
+   case V_COND:
+   case V_CASE_ITEM:
+      {
+         const int nstmts = vlog_stmts(n);
+         for (int i = 0; i < nstmts; i++) {
+            vlog_node_t r = elab_find_blk_var_rec(vlog_stmt(n, i), path,
+                                                  npath, var_name);
+            if (r != NULL)
+               return r;
+         }
+      }
+      break;
+   case V_IF:
+   case V_ASSERT:
+   case V_ASSUME:
+   case V_COVER:
+      {
+         const int nconds = vlog_conds(n);
+         for (int i = 0; i < nconds; i++) {
+            vlog_node_t r = elab_find_blk_var_rec(vlog_cond(n, i), path,
+                                                  npath, var_name);
+            if (r != NULL)
+               return r;
+         }
+      }
+      break;
+   case V_CASE:
+      {
+         const int nstmts = vlog_stmts(n);
+         for (int i = 0; i < nstmts; i++) {
+            vlog_node_t r = elab_find_blk_var_rec(vlog_stmt(n, i), path,
+                                                  npath, var_name);
+            if (r != NULL)
+               return r;
+         }
+      }
+      break;
+   default:
+      break;
+   }
+
+   return NULL;
+}
+
+static vlog_node_t elab_find_block_static(tree_t b, const ident_t *path,
+                                          int npath, ident_t var_name)
+{
+   if (npath <= 0)
+      return NULL;
+
+   const int nstmts = tree_stmts(b);
+   for (int i = 0; i < nstmts; i++) {
+      tree_t s = tree_stmt(b, i);
+      if (tree_kind(s) != T_VERILOG)
+         continue;
+
+      vlog_node_t r = elab_find_blk_var_rec(tree_vlog(s), path, npath, var_name);
+      if (r != NULL)
+         return r;
+   }
+
+   return NULL;
+}
+
 static void elab_rewrite_hier_ref_pre_cb(vlog_node_t v, void *arg)
 {
    // A nested generate block is rewritten from its own scope
@@ -9436,7 +9631,44 @@ static void elab_rewrite_hier_ref_pre_cb(vlog_node_t v, void *arg)
          defparam_targets = hset_new(16);
       hset_insert(defparam_targets, vlog_target(v));
    }
-   else if ((vlog_kind(v) == V_METHOD_CALL || vlog_kind(v) == V_DISABLE)
+   else if (vlog_kind(v) == V_DISABLE && hctx->gen_depth == 0
+            && vlog_has_value(v) && vlog_kind(vlog_value(v)) == V_HIER_REF) {
+      // Same-instance hierarchical disable of a named block or fork
+      // (e.g. disable t.named; or disable fork_blk.begin_blk;)
+      vlog_node_t target = vlog_value(v);
+      vlog_node_t mods[16];
+      int nmods = 0;
+      bool plain = true;
+      for (vlog_node_t it = vlog_value(target); ; it = vlog_value(it)) {
+         if (nmods == ARRAY_LEN(mods) || vlog_params(it) > 0) {
+            plain = false;
+            break;
+         }
+         mods[nmods++] = it;
+         if (!vlog_has_value(it))
+            break;
+      }
+
+      if (plain && nmods > 0) {
+         vlog_node_t root = mods[nmods - 1];
+         ident_t rname = vlog_ident(root);
+         const bool same_inst =
+            vlog_block_is_named(hctx->where, rname)
+            || (!elab_has_child_block(hctx->where, rname)
+                && elab_has_named_proc_block(hctx->where, rname));
+         if (same_inst
+             && elab_hier_ref_decl(hctx->where, vlog_ident(target)) == NULL
+             && elab_has_named_proc_block(hctx->where, vlog_ident(target))) {
+            vlog_set_value(v, NULL);
+            return;
+         }
+      }
+
+      if (call_values == NULL)
+         call_values = hset_new(16);
+      hset_insert(call_values, vlog_value(v));
+   }
+   else if (vlog_kind(v) == V_METHOD_CALL
             && vlog_has_value(v)
             && vlog_kind(vlog_value(v)) == V_HIER_REF) {
       if (call_values == NULL)
@@ -9565,6 +9797,53 @@ static vlog_node_t elab_hier_ref_variable(vlog_node_t v,
       mods[nmods - 1 - i] = tmp;
    }
 
+   // Check if the path starts with a local named-block prefix (e.g. A.B.x)
+   // before walking module instances (which reports an error if not found)
+   if (nmods >= 2 && vlog_kind(mods[0]) == V_MOD_REF
+       && (!vlog_has_ref(mods[0])
+           || vlog_kind(vlog_ref(mods[0])) == V_SEQ_BLOCK
+           || vlog_kind(vlog_ref(mods[0])) == V_FORK)
+       && vlog_params(mods[0]) == 0) {
+      ident_t first = vlog_ident(mods[0]);
+      bool is_mod_or_blk = false;
+      for (tree_t it = hctx->where; it != NULL && !is_mod_or_blk;
+           it = hash_get(hctx->parents, it)) {
+         if (tree_kind(it) != T_BLOCK)
+            break;
+         if (elab_has_child_block(it, first) || vlog_block_is_named(it, first)
+             || elab_hier_ref_decl(it, first) != NULL)
+            is_mod_or_blk = true;
+      }
+
+      if (!is_mod_or_blk) {
+         bool all_plain = true;
+         for (int k = 0; k < nmods && all_plain; k++)
+            all_plain = (vlog_params(mods[k]) == 0);
+
+         if (all_plain) {
+            ident_t path[16];
+            for (int k = 0; k < nmods; k++)
+               path[k] = vlog_ident(mods[k]);
+
+            for (tree_t it = hctx->where; it != NULL;
+                 it = hash_get(hctx->parents, it)) {
+               if (tree_kind(it) != T_BLOCK)
+                  break;
+               vlog_node_t bd = elab_find_block_static(it, path, nmods,
+                                                       vlog_ident(v));
+               if (bd != NULL) {
+                  vlog_node_t mr = vlog_new(V_MOD_REF);
+                  vlog_set_ident(mr, tree_ident(it));
+                  vlog_set_loc(mr, vlog_loc(mods[0]));
+                  vlog_set_value(v, mr);
+                  vlog_set_ident(v, vlog_ident(bd));
+                  return NULL;
+               }
+            }
+         }
+      }
+   }
+
    for (int i = 1; i < nmods; i++) {
       tree_t pb = elab_walk_mod_refs(mods[i - 1], hctx->where, hctx->parents);
       if (pb == NULL)
@@ -9582,6 +9861,74 @@ static vlog_node_t elab_hier_ref_variable(vlog_node_t v,
             if (elab_hier_ref_decl(pb, cbsig) != NULL) {
                vlog_set_value(v, mods[i - 1]);
                vlog_set_ident(v, cbsig);
+               return NULL;
+            }
+         }
+
+         // Try resolving remaining unindexed segments as named procedural
+         // blocks containing a hoisted static variable (e.g. d.first.n,
+         // test.A.B.value, test.FOR.FOREACH.INNER.value)
+         bool all_plain = true;
+         for (int k = i; k < nmods && all_plain; k++)
+            all_plain = (vlog_params(mods[k]) == 0);
+
+         if (all_plain) {
+            ident_t path[16];
+            for (int k = i; k < nmods; k++)
+               path[k - i] = vlog_ident(mods[k]);
+            vlog_node_t bd = elab_find_block_static(pb, path, nmods - i,
+                                                    vlog_ident(v));
+            if (bd != NULL) {
+               vlog_set_value(v, mods[i - 1]);
+               vlog_set_ident(v, vlog_ident(bd));
+               return NULL;
+            }
+         }
+
+         // Also try shorter prefixes when accessing a member/element of a
+         // named-block variable (e.g. inst.blk.s.field)
+         for (int k = nmods - 1; k > i; k--) {
+            bool prefix_plain = true;
+            for (int m = i; m < k && prefix_plain; m++)
+               prefix_plain = (vlog_params(mods[m]) == 0);
+            if (!prefix_plain)
+               continue;
+
+            ident_t path[16];
+            for (int m = i; m < k; m++)
+               path[m - i] = vlog_ident(mods[m]);
+            vd = elab_find_block_static(pb, path, k - i, vlog_ident(mods[k]));
+            if (vd != NULL) {
+               vlog_node_t base = vlog_new(V_HIER_REF);
+               vlog_set_value(base, mods[i - 1]);
+               vlog_set_ident(base, vlog_ident(vd));
+               vlog_set_ref(base, vd);
+               vlog_set_loc(base, vlog_loc(v));
+               vlog_set_global_flags(base, VLOG_GF_HIER_REF);
+
+               base = elab_hier_ref_select(base, mods[k]);
+
+               for (int j = k + 1; j < nmods; j++) {
+                  vlog_node_t mem = elab_hier_ref_member(base, vlog_ident(mods[j]),
+                                                         vlog_loc(mods[j]));
+                  if (mem == NULL) {
+                     error_at(vlog_loc(mods[j]), "%pQ has no member named %pQ",
+                              vlog_ident(mods[j - 1]), vlog_ident(mods[j]));
+                     return v;
+                  }
+                  base = elab_hier_ref_select(mem, mods[j]);
+               }
+
+               vlog_node_t mem = elab_hier_ref_member(base, vlog_ident(v),
+                                                      vlog_loc(v));
+               if (mem != NULL)
+                  return mem;
+               else if (call_values != NULL && hset_contains(call_values, v))
+                  return base;
+
+               error_at(vlog_loc(v), "%pQ has no member named %pQ",
+                        vlog_ident(mods[nmods - 1]), vlog_ident(v));
+               return v;
             }
          }
          return NULL;
@@ -9738,17 +10085,23 @@ static vlog_node_t elab_rewrite_hier_ref_cb(vlog_node_t v, void *arg)
 
    // A name before the member may be a structure variable or clocking block
    if (vlog_has_value(prefix)) {
-      vlog_node_t rec = elab_hier_ref_vhdl_record(v, hctx);
-      if (rec != NULL)
-         return rec;
-
-      rec = elab_hier_ref_variable(v, hctx);
+      vlog_node_t rec = elab_hier_ref_variable(v, hctx);
       if (rec != NULL)
          return rec;
 
       prefix = vlog_value(v);
+      if (vlog_has_value(prefix)) {
+         rec = elab_hier_ref_vhdl_record(v, hctx);
+         if (rec != NULL)
+            return rec;
+
+         prefix = vlog_value(v);
+      }
    }
-   else if (vlog_kind(prefix) == V_MOD_REF && !vlog_has_ref(prefix)
+   else if (vlog_kind(prefix) == V_MOD_REF
+            && (!vlog_has_ref(prefix)
+                || vlog_kind(vlog_ref(prefix)) == V_SEQ_BLOCK
+                || vlog_kind(vlog_ref(prefix)) == V_FORK)
             && vlog_params(prefix) == 0) {
       ident_t cbname = vlog_ident(prefix);
       ident_t cbsig = ident_sprintf("%s$%s", istr(cbname), istr(vlog_ident(v)));
@@ -9766,6 +10119,19 @@ static vlog_node_t elab_rewrite_hier_ref_cb(vlog_node_t v, void *arg)
             vlog_set_ident(v, cbsig);
             prefix = mr;
             break;
+         }
+         else {
+            vlog_node_t bd = elab_find_block_static(it, &cbname, 1,
+                                                    vlog_ident(v));
+            if (bd != NULL) {
+               vlog_node_t mr = vlog_new(V_MOD_REF);
+               vlog_set_ident(mr, tree_ident(it));
+               vlog_set_loc(mr, vlog_loc(prefix));
+               vlog_set_value(v, mr);
+               vlog_set_ident(v, vlog_ident(bd));
+               prefix = mr;
+               break;
+            }
          }
       }
    }

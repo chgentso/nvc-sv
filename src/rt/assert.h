@@ -50,4 +50,9 @@ void set_assert_hook(assert_hook_t fn, void *context);
 // Tell the hook about a message that is emitted without emit_vhdl_diag
 void notify_assert_hook(diag_t *d, vhdl_severity_t severity);
 
+// Deferred SystemVerilog unique/unique0/priority violation reports
+// (IEEE 1800-2017 12.4.2.1 & 12.5.3.1)
+extern unsigned sv_unique_pending;
+void sv_unique_flush_proc(void *proc);
+
 #endif   // _RT_ASSERT_H
