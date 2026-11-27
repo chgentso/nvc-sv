@@ -11084,6 +11084,15 @@ static vlog_node_t p_call_result_chain(vlog_node_t head)
             continue;
          }
 
+         if (vlog_kind(head) == V_BIT_SELECT) {
+            // Further dimensions are indices of the same select as for
+            // a variable
+            vlog_add_param(head, expr);
+            consume(tRSQUARE);
+            vlog_set_loc(head, CURRENT_LOC);
+            continue;
+         }
+
          vlog_node_t bs = vlog_new(V_BIT_SELECT);
          vlog_set_value(bs, head);
          vlog_add_param(bs, expr);
