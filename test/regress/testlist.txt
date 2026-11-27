@@ -3348,3 +3348,4 @@ vhdl_island_dynslice_a1 shell
 vhdl_island_rom_wide_a1 shell
 vhdl_island_match_a1 shell
 vhdl_island_delta1 normal,2008
+vhdl_island_widevar_a1 shell
