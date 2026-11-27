@@ -167,6 +167,12 @@ void x_sv_island_add_domain(void *handle, uint32_t dom_idx,
 void x_sv_island_add_domain_write(void *handle, uint32_t dom_idx,
                                   uint32_t sig_idx);
 void x_sv_island_finish(void *handle);
+void x_sv_island_set_variant_a(void *handle, struct _ffi_closure *closure,
+                               uint32_t state_bytes, uint32_t hdr_bytes);
+void x_sv_island_bind_sig_a(void *handle, uint32_t idx, uint32_t a_off,
+                            uint32_t a_flags, uint32_t b_bytes);
+void x_sv_island_add_domain_a(void *handle, uint32_t dom_idx,
+                              struct _ffi_closure *ff_closure);
 void x_sv_island_mark_ext_read(sig_shared_t *ss);
 int64_t x_sv_event_triggered(void *event);
 void x_sv_nba_store(void *dest, const void *value, int64_t bytes,

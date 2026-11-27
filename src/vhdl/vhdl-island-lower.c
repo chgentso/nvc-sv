@@ -139,8 +139,30 @@ typedef struct {
       mir_value_t ptr;
    } rom_cache[16];
    unsigned                 n_rom_cache;
+   uint32_t                *act_rd;    // island signals read by the process
+   uint32_t                 n_act_rd;
+   uint32_t                 cap_act_rd;
+   bool                     act_track;
    bool                     failed;
+   const char              *reason;    // NVC_DUMP_ISLANDS: first failure
+   // Speculative Mode A variant of a Mode B island (NVC_ISLAND_SPEC): a
+   // value two-state storage cannot hold makes the function return a
+   // deopt code (rt_island_deopt_t) instead
+   bool                     spec;
+   mir_value_t              spec_var;
 } vi_lower_t;
+
+static void vi_generic_reason(vi_lower_t *l, const char *what, tree_t t)
+{
+   if (l->reason != NULL || t == NULL || !opt_get_int(OPT_DUMP_ISLANDS))
+      return;
+   const tree_kind_t k = tree_kind(t);
+   if (k == T_FCALL || k == T_PCALL)
+      l->reason = istr(ident_sprintf("lower %s %s %s", what, tree_kind_str(k),
+                                     istr(tree_ident(t))));
+   else
+      l->reason = istr(ident_sprintf("lower %s %s", what, tree_kind_str(k)));
+}
 
 static bool fn_name_is(const char *rest, const char *target)
 {
@@ -210,6 +232,18 @@ static inline mir_value_t vi_i64(mir_unit_t *mu, int64_t v)
 static inline mir_value_t vi_u8(mir_unit_t *mu, uint8_t v)
 {
    return mir_const(mu, vi_u8_type(mu), v);
+}
+
+// A bit/boolean array element is a byte holding 0 or 1; the MIR logical
+// operators only take booleans
+static inline mir_value_t vi_u8_to_bool(mir_unit_t *mu, mir_value_t v)
+{
+   return mir_build_cmp(mu, MIR_CMP_NEQ, v, vi_u8(mu, 0));
+}
+
+static inline mir_value_t vi_u8_from_bool(mir_unit_t *mu, mir_value_t b)
+{
+   return mir_build_select(mu, vi_u8_type(mu), b, vi_u8(mu, 1), vi_u8(mu, 0));
 }
 
 static mir_value_t vi_to_off(mir_unit_t *mu, mir_value_t v)
@@ -593,6 +627,40 @@ static mir_value_t vi_modeb_alloc_vec(vi_lower_t *l, uint32_t width);
 
 typedef A(vi_rec_leaf_t) vi_rec_leaf_list_t;
 
+// A local 2D array is a byte array (one byte per element) in Mode B.  In
+// Mode A it has the layout of a 2D signal in the island state: one row of
+// ceil(width / 64) words per element, accessed with island load and store on
+// the local buffer.  Whole-array copies with a signal are then plain copies.
+static uint32_t vi_array2d_bytes(const vi_lower_t *l, uint32_t nelems,
+                                 uint32_t width)
+{
+   if (l->two_state)
+      return nelems * 8u * ((width + 63u) / 64u);
+   return nelems * width;
+}
+
+static mir_value_t vi_alloc_array2d_local(vi_lower_t *l, uint32_t nelems,
+                                          uint32_t width, ident_t name)
+{
+   (void)name;
+   return vi_modeb_alloc_vec(l, vi_array2d_bytes(l, nelems, width));
+}
+
+// A wide Mode A vector variable is a pointer to its words and a variable has
+// no pointer until it is first stored, so a variable that is read before it is
+// assigned (a function local or record field with no initial value, partly
+// assigned) must start as zero, the 2-state image of the default value.
+static mir_value_t vi_add_vec2_var(vi_lower_t *l, uint32_t width,
+                                   bool is_signed, ident_t name)
+{
+   mir_unit_t *mu = l->mu;
+   mir_value_t var = mir_add_var(mu, mir_vec2_type(mu, (int)width, is_signed),
+                                 MIR_NULL_STAMP, name, MIR_VAR_TEMP);
+   if (width > 64)
+      mir_build_store(mu, var, vi_const_vec2(mu, (int)width, is_signed, NULL));
+   return var;
+}
+
 static bool vi_collect_rec_local_leaves(vi_lower_t *l, type_t type,
                                         int *path, uint8_t depth,
                                         ident_t name_hint,
@@ -662,11 +730,9 @@ static bool vi_collect_rec_local_leaves(vi_lower_t *l, type_t type,
       if (!vi_eval_type_bounds(l, type, &lf.dir, &lf.left, &lf.right, &lf.width)
           || lf.width == 0 || lf.width > VHDL_ISLAND_MAX_WIDTH)
          return false;
-      if (l->two_state) {
-         mir_type_t mvt = mir_vec2_type(mu, (int)lf.width, lf.is_signed);
-         lf.storage = mir_add_var(mu, mvt, MIR_NULL_STAMP,
-                                  ident_uniq(istr(name_hint)), MIR_VAR_TEMP);
-      }
+      if (l->two_state)
+         lf.storage = vi_add_vec2_var(l, lf.width, lf.is_signed,
+                                      ident_uniq(istr(name_hint)));
       else
          lf.storage = vi_modeb_alloc_vec(l, lf.width);
       APUSH(*out, lf);
@@ -692,7 +758,7 @@ static bool vi_collect_rec_local_leaves(vi_lower_t *l, type_t type,
    }
 
    if (type_is_array(elem) && !type_is_record(elem) && dimension_of(elem) == 1) {
-      if (l->two_state || !type_is_enum(type_elem(elem)))
+      if (!type_is_enum(type_elem(elem)))
          return false;
       if (!vi_eval_type_bounds(l, elem, &lf.dir, &lf.left, &lf.right, &lf.width)
           || lf.width == 0 || lf.width > VHDL_ISLAND_MAX_WIDTH)
@@ -706,7 +772,7 @@ static bool vi_collect_rec_local_leaves(vi_lower_t *l, type_t type,
       lf.is_array2d = true;
       lf.is_std = vi_type_is_std_logic(type_elem(elem));
       lf.is_signed = vi_type_is_signed_vec(elem);
-      lf.storage = vi_modeb_alloc_vec(l, lf.nelems * lf.width);
+      lf.storage = vi_alloc_array2d_local(l, lf.nelems, lf.width, name_hint);
       APUSH(*out, lf);
       return true;
    }
@@ -856,8 +922,22 @@ static bool vi_load_rec_leaf(vi_lower_t *l, const vi_rec_leaf_t *lf,
 {
    mir_unit_t *mu = l->mu;
    if (lf->is_array2d) {
-      if (l->two_state)
-         return false;
+      if (l->two_state) {
+         mir_value_t row = mir_build_island_load(
+            mu, mir_vec2_type(mu, (int)lf->width, lf->is_signed),
+            lf->storage, vi_off(mu, 0), vi_off(mu, -1), elem_idx);
+         *out = (vi_val_t){
+            .kind      = VIVAL_VEC,
+            .val       = row,
+            .width     = lf->width,
+            .is_signed = lf->is_signed,
+            .is_std    = lf->is_std,
+            .dir       = lf->dir,
+            .left      = lf->left,
+            .right     = lf->right,
+         };
+         return true;
+      }
       mir_value_t off = mir_build_mul(mu, mir_offset_type(mu),
                                       elem_idx, vi_off(mu, lf->width));
       *out = (vi_val_t){
@@ -907,8 +987,17 @@ static bool vi_store_rec_leaf(vi_lower_t *l, const vi_rec_leaf_t *lf,
 {
    mir_unit_t *mu = l->mu;
    if (lf->is_array2d) {
-      if (l->two_state || rv.kind != VIVAL_VEC || rv.width != lf->width)
+      if (rv.kind != VIVAL_VEC || rv.width != lf->width)
          return false;
+      if (l->two_state) {
+         mir_value_t row = (rv.is_signed != lf->is_signed)
+            ? mir_build_cast(mu, mir_vec2_type(mu, (int)lf->width,
+                                               lf->is_signed), rv.val)
+            : rv.val;
+         mir_build_island_store(mu, lf->storage, vi_off(mu, 0),
+                                vi_off(mu, -1), elem_idx, row);
+         return true;
+      }
       mir_value_t off = mir_build_mul(mu, mir_offset_type(mu),
                                       elem_idx, vi_off(mu, lf->width));
       mir_build_copy(mu, mir_build_array_ref(mu, lf->storage, off),
@@ -962,6 +1051,8 @@ static mir_value_t vi_to_bool(vi_lower_t *l, vi_val_t v)
    }
    if (v.kind == VIVAL_INT)
       return mir_build_cmp(mu, MIR_CMP_NEQ, vi_to_i64(mu, v.val), vi_i64(mu, 0));
+   if (l->reason == NULL)
+      l->reason = "lower: condition is neither bit nor integer";
    l->failed = true;
    return mir_const(mu, mir_bool_type(mu), 0);
 }
@@ -1039,6 +1130,158 @@ static mir_value_t vi_state_ptr_at(vi_lower_t *l, uint32_t byte_off)
 static bool vi_lower_expr(vi_lower_t *l, tree_t expr, vi_val_t *out);
 static bool vi_lower_stmt(vi_lower_t *l, tree_t stmt);
 
+// Speculative Mode A: the constant B as a value that MIR does not fold, for
+// a branch whose untaken side must stay reachable in the CFG
+static mir_value_t vi_spec_opaque_bool(vi_lower_t *l, bool b)
+{
+   mir_unit_t *mu = l->mu;
+   if (mir_is_null(l->spec_var))
+      l->spec_var = mir_add_var(mu, mir_offset_type(mu), MIR_NULL_STAMP,
+                                ident_uniq("spec"), MIR_VAR_TEMP);
+   mir_build_store(mu, l->spec_var, vi_off(mu, b));
+   return mir_build_cmp(mu, MIR_CMP_NEQ, mir_build_load(mu, l->spec_var),
+                        vi_off(mu, 0));
+}
+
+// Speculative Mode A: return deopt code KIND from the function when OK is
+// false.  The function has written nothing the caller keeps at that point:
+// all values reach the state through stores that follow their computation.
+static void vi_emit_deopt_unless(vi_lower_t *l, mir_value_t ok,
+                                 rt_island_deopt_t kind)
+{
+   assert(l->spec);
+   mir_unit_t *mu = l->mu;
+   int64_t cval;
+   if (mir_get_const(mu, ok, &cval) && cval != 0)
+      return;
+
+   mir_block_t deopt_bb = mir_add_block(mu);
+   mir_block_t cont_bb = mir_add_block(mu);
+   if (mir_get_const(mu, ok, &cval)) {
+      // Keep the code after an unconditional stub reachable in the CFG so
+      // the values it uses stay dominated by their definitions
+      ok = vi_spec_opaque_bool(l, false);
+   }
+   mir_build_cond(mu, ok, cont_bb, deopt_bb);
+
+   mir_set_cursor(mu, deopt_bb, MIR_APPEND);
+   mir_build_return(mu, vi_off(mu, kind));
+
+   mir_set_cursor(mu, cont_bb, MIR_APPEND);
+}
+
+static inline void vi_emit_deopt(vi_lower_t *l, rt_island_deopt_t kind)
+{
+   vi_emit_deopt_unless(l, mir_const(l->mu, mir_bool_type(l->mu), 0), kind);
+}
+
+// Speculative Mode A: deopt unless the i64 value V is in [LO, HI]
+static void vi_spec_deopt_range(vi_lower_t *l, mir_value_t v, int64_t lo,
+                                int64_t hi, rt_island_deopt_t kind)
+{
+   mir_unit_t *mu = l->mu;
+   mir_type_t it = vi_i64_type(mu);
+   v = mir_build_cast(mu, it, v);
+   mir_value_t ok = mir_build_and(
+      mu, mir_build_cmp(mu, MIR_CMP_GEQ, v, mir_const(mu, it, lo)),
+      mir_build_cmp(mu, MIR_CMP_LEQ, v, mir_const(mu, it, hi)));
+   vi_emit_deopt_unless(l, ok, kind);
+}
+
+// Speculative Mode A: deopt unless the integer V fits a WIDTH-bit vector of
+// the given signedness, which is when the IEEE conversion to the vector is
+// exact and silent
+static void vi_spec_deopt_int_fit(vi_lower_t *l, mir_value_t v, uint32_t width,
+                                  bool is_signed)
+{
+   if (width >= 64 && is_signed)
+      return;
+   else if (width >= 64)
+      vi_spec_deopt_range(l, v, 0, INT64_MAX, RT_ISLAND_DEOPT_CONV);
+   else if (is_signed)
+      vi_spec_deopt_range(l, v, -(INT64_C(1) << (width - 1)),
+                          (INT64_C(1) << (width - 1)) - 1,
+                          RT_ISLAND_DEOPT_CONV);
+   else
+      vi_spec_deopt_range(l, v, 0, (INT64_C(1) << width) - 1,
+                          RT_ISLAND_DEOPT_CONV);
+}
+
+// Speculative Mode A: deopt unless the integer result IV of FCALL is in
+// the range of its type, where the IEEE function fails or warns otherwise
+static void vi_spec_deopt_result(vi_lower_t *l, tree_t fcall, mir_value_t iv)
+{
+   type_t rt = tree_type(fcall);
+   tree_t r = type_is_integer(rt) ? range_of(rt, 0) : NULL;
+   int64_t lo = INT32_MIN, hi = INT32_MAX;
+   if (r != NULL)
+      folded_bounds(r, &lo, &hi);
+   vi_spec_deopt_range(l, iv, lo, hi, RT_ISLAND_DEOPT_CONV);
+}
+
+// Speculative Mode A: Mode B reports the division by zero
+static void vi_spec_deopt_zero(vi_lower_t *l, mir_value_t divisor)
+{
+   mir_unit_t *mu = l->mu;
+   vi_emit_deopt_unless(l, mir_build_cmp(mu, MIR_CMP_NEQ,
+                                         vi_to_i64(mu, divisor), vi_i64(mu, 0)),
+                        RT_ISLAND_DEOPT_RANGE);
+}
+
+// True if BYTES (std_logic positions) holds a value other than '0' and '1'
+static bool vi_bytes_non01(const uint8_t *bytes, size_t n)
+{
+   for (size_t i = 0; i < n; i++) {
+      if (bytes[i] != 2 && bytes[i] != 3)
+         return true;
+   }
+   return false;
+}
+
+static bool vi_lower_const_vec_eval(vi_lower_t *l, tree_t expr, type_t hint_t,
+                                    uint8_t *bytes_out, uint32_t width);
+
+// Speculative Mode A: a case choice with a std_logic value other than '0'
+// and '1' cannot match the selector, which only holds '0' and '1'
+static bool vi_spec_choice_non01(vi_lower_t *l, tree_t choice, vi_val_t sel)
+{
+   if (!sel.is_std)
+      return false;
+   if (sel.kind == VIVAL_BIT) {
+      if (tree_kind(choice) != T_REF || !tree_has_ref(choice)
+          || tree_kind(tree_ref(choice)) != T_ENUM_LIT)
+         return false;
+      const unsigned pos = tree_pos(tree_ref(choice));
+      return pos != 2 && pos != 3;
+   }
+   else if (sel.kind == VIVAL_VEC && sel.width > 0) {
+      uint8_t *bytes LOCAL = xmalloc_array(sel.width, 1);
+      return vi_lower_const_vec_eval(l, choice, tree_type(choice), bytes,
+                                     sel.width)
+         && vi_bytes_non01(bytes, sel.width);
+   }
+   return false;
+}
+
+// Record that the combinational process being lowered reads ISIG: the
+// process is skipped when none of the signals it reads changed
+static void vi_note_read(vi_lower_t *l, const vhdl_isl_sig_t *isig)
+{
+   if (!l->act_track)
+      return;
+   const uint32_t idx = (uint32_t)(isig - l->isl->sigs);
+   assert(idx < l->isl->n_sigs);
+   for (uint32_t i = 0; i < l->n_act_rd; i++) {
+      if (l->act_rd[i] == idx)
+         return;
+   }
+   if (l->n_act_rd == l->cap_act_rd) {
+      l->cap_act_rd = MAX(l->cap_act_rd * 2u, 16u);
+      l->act_rd = xrealloc_array(l->act_rd, l->cap_act_rd, sizeof(uint32_t));
+   }
+   l->act_rd[l->n_act_rd++] = idx;
+}
+
 static mir_value_t vi_compute_elem_pos(vi_lower_t *l, vi_val_t base,
                                        mir_value_t idx_val, uint32_t elem_w)
 {
@@ -1085,6 +1328,7 @@ static bool vi_lower_sig_load(vi_lower_t *l, const vhdl_isig_t *s,
                               mir_value_t elem_idx, vi_val_t *out)
 {
    mir_unit_t *mu = l->mu;
+   vi_note_read(l, isig);
    if (s->elem_kind == VISIG_ENUM || s->elem_kind == VISIG_INT) {
       mir_value_t iv;
       if (s->byte_size == 1 && !s->is_signed) {
@@ -1319,6 +1563,12 @@ static void vi_check_int_bounds(vi_lower_t *l, type_t target_type,
       }
    }
 
+   if (l->spec) {
+      // Mode B reports the failure
+      vi_spec_deopt_range(l, val64, f_lo, f_hi, RT_ISLAND_DEOPT_RANGE);
+      return;
+   }
+
    mir_unit_t *mu = l->mu;
    mir_type_t it = vi_i64_type(mu);
    mir_value_t left = mir_const(mu, it, f_lo);
@@ -1329,6 +1579,46 @@ static void vi_check_int_bounds(vi_lower_t *l, type_t target_type,
    mir_value_t hint = (hint_decl != NULL)
       ? mir_build_debug_locus(mu, tree_to_object(hint_decl)) : locus;
    mir_build_range_check(mu, val64, left, right, dir, locus, hint);
+}
+
+// Mode A: turn a packed vector into the byte-per-element form the IEEE
+// image functions take.  Only 0 and 1 exist in Mode A, so std_logic elements
+// become '0' and '1' and bit elements the same positions of BIT.
+static bool vi_vec2_to_bytes(vi_lower_t *l, vi_val_t *v)
+{
+   if (v->kind != VIVAL_VEC)
+      return false;
+
+   mir_unit_t *mu = l->mu;
+   mir_value_t buf = mir_build_alloc(mu, vi_u8_type(mu), MIR_NULL_STAMP,
+                                     vi_off(mu, v->width));
+   mir_value_t idx_v = mir_add_var(mu, mir_offset_type(mu), MIR_NULL_STAMP,
+                                   ident_uniq("v2b"), MIR_VAR_TEMP);
+   mir_build_store(mu, idx_v, vi_off(mu, 0));
+   mir_block_t hdr = mir_add_block(mu);
+   mir_block_t body = mir_add_block(mu);
+   mir_block_t done = mir_add_block(mu);
+   mir_build_jump(mu, hdr);
+
+   mir_set_cursor(mu, hdr, MIR_APPEND);
+   mir_value_t i = mir_build_load(mu, idx_v);
+   mir_build_cond(mu, mir_build_cmp(mu, MIR_CMP_LT, i, vi_off(mu, v->width)),
+                  body, done);
+
+   mir_set_cursor(mu, body, MIR_APPEND);
+   mir_value_t bit = mir_build_extract(mu, mir_vec2_type(mu, 1, false),
+                                       v->val, i);
+   mir_value_t b = mir_build_select(mu, vi_u8_type(mu), mir_build_test(mu, bit),
+                                    vi_u8(mu, v->is_std ? 3 : 1),
+                                    vi_u8(mu, v->is_std ? 2 : 0));
+   mir_build_store(mu, mir_build_array_ref(mu, buf, i), b);
+   mir_build_store(mu, idx_v, mir_build_add(mu, mir_offset_type(mu),
+                                            i, vi_off(mu, 1)));
+   mir_build_jump(mu, hdr);
+
+   mir_set_cursor(mu, done, MIR_APPEND);
+   v->val = buf;
+   return true;
 }
 
 static bool vi_modeb_call_ieee(vi_lower_t *l, tree_t decl,
@@ -1382,6 +1672,59 @@ static bool vi_modeb_call_ieee(vi_lower_t *l, tree_t decl,
    *ret_out = mir_build_fcall(mu, tree_ident2(decl), mret, MIR_NULL_STAMP,
                               args.items, args.count);
    ACLEAR(args);
+   return true;
+}
+
+typedef enum { VIM_EQ, VIM_NEQ, VIM_LT, VIM_LE, VIM_GT, VIM_GE } vi_match_op_t;
+
+// Mode A matching comparison.  There are no metavalues in Mode A, so STD_MATCH
+// and the matching operators compare exactly like "=" and the ordering
+// operators.  BOOL_RESULT selects a boolean result (STD_MATCH) instead of a
+// bit or std_ulogic one (the matching operators).
+static bool vi_lower_match_cmp(vi_lower_t *l, vi_match_op_t op, vi_val_t a,
+                               vi_val_t b, bool bool_result, bool is_std,
+                               vi_val_t *out)
+{
+   mir_unit_t *mu = l->mu;
+   mir_value_t c;
+   if (a.kind == VIVAL_BIT && b.kind == VIVAL_BIT) {
+      const mir_cmp_t cmp = (op == VIM_EQ) ? MIR_CMP_EQ
+         : (op == VIM_NEQ) ? MIR_CMP_NEQ
+         : (op == VIM_LT) ? MIR_CMP_LT
+         : (op == VIM_LE) ? MIR_CMP_LEQ
+         : (op == VIM_GT) ? MIR_CMP_GT : MIR_CMP_GEQ;
+      c = mir_build_cmp(mu, cmp,
+                        mir_build_cast(mu, vi_u8_type(mu), vi_to_vec2_1(l, a)),
+                        mir_build_cast(mu, vi_u8_type(mu), vi_to_vec2_1(l, b)));
+   }
+   else if (a.kind == VIVAL_VEC && b.kind == VIVAL_VEC
+            && (op == VIM_EQ || op == VIM_NEQ)) {
+      if (a.width != b.width)
+         c = mir_const(mu, mir_bool_type(mu), op == VIM_NEQ);
+      else
+         c = mir_build_binary(mu, (op == VIM_EQ)
+                              ? MIR_VEC_CASE_EQ : MIR_VEC_CASE_NEQ,
+                              mir_vec2_type(mu, (int)a.width, false),
+                              a.val, b.val);
+   }
+   else
+      return false;
+
+   *out = bool_result ? vi_from_bool_bit(l, c, true, false)
+      : vi_from_bool_bit(l, c, false, is_std);
+   return true;
+}
+
+static bool vi_match_op_from_name(const char *fn, vi_match_op_t *op)
+{
+   if (fn_name_is(fn, "\"?=\""))        *op = VIM_EQ;
+   else if (fn_name_is(fn, "\"?/=\"")) *op = VIM_NEQ;
+   else if (fn_name_is(fn, "\"?<\""))  *op = VIM_LT;
+   else if (fn_name_is(fn, "\"?<=\"")) *op = VIM_LE;
+   else if (fn_name_is(fn, "\"?>\""))  *op = VIM_GT;
+   else if (fn_name_is(fn, "\"?>=\"")) *op = VIM_GE;
+   else
+      return false;
    return true;
 }
 
@@ -1785,6 +2128,14 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
             *out = vi_from_bool_bit(l, vi_to_bool(l, a), true, false);
             return true;
          }
+         if (fn_name_is(fn, "IS_X")) {
+            // Mode A holds only '0' and '1'
+            if (a.kind != VIVAL_BIT && a.kind != VIVAL_VEC)
+               return false;
+            *out = vi_from_bool_bit(l, mir_const(mu, mir_bool_type(mu), 0),
+                                    true, false);
+            return true;
+         }
          if (fn_name_is(fn, "\"not\"")) {
             if (a.kind == VIVAL_BIT) {
                mir_value_t v1 = mir_build_unary(mu, MIR_VEC_BIT_NOT,
@@ -1819,6 +2170,11 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
          if (!vi_lower_expr(l, tree_value(tree_param(fcall, 0)), &a)
              || !vi_lower_expr(l, tree_value(tree_param(fcall, 1)), &b))
             return false;
+         vi_match_op_t mop;
+         if (vi_match_op_from_name(fn, &mop))
+            return vi_lower_match_cmp(l, mop, a, b, false, true, out);
+         if (fn_name_is(fn, "STD_MATCH"))
+            return vi_lower_match_cmp(l, VIM_EQ, a, b, true, false, out);
          bool neg = false;
          mir_vec_op_t op;
          if (fn_name_is(fn, "\"and\""))        op = MIR_VEC_BIT_AND;
@@ -1883,8 +2239,15 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
          out->val = mir_build_unary(mu, MIR_VEC_BIT_NOT, tv, a.val);
          return true;
       }
-      if (fn_name_is(fn, "TO_INTEGER")) {
+      if (fn_name_is(fn, "IS_X")) {
          if (a.kind != VIVAL_VEC)
+            return false;
+         *out = vi_from_bool_bit(l, mir_const(mu, mir_bool_type(mu), 0),
+                                 true, false);
+         return true;
+      }
+      if (fn_name_is(fn, "TO_INTEGER")) {
+         if (a.kind != VIVAL_VEC || (l->spec && a.width > 63))
             return false;
          const bool sg = a.is_signed || pkg_signed;
          mir_value_t src = a.val;
@@ -1893,21 +2256,23 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
          else if (sg != a.is_signed)
             src = mir_build_cast(mu, mir_vec2_type(mu, a.width, sg), src);
          mir_value_t iv = mir_build_cast(mu, vi_i64_type(mu), src);
+         if (l->spec)
+            vi_spec_deopt_result(l, fcall, iv);
          *out = (vi_val_t){ .kind = VIVAL_INT, .val = iv };
          return true;
       }
       if (fn_name_is(fn, "UNSIGNED") || fn_name_is(fn, "SIGNED")
           || fn_name_is(fn, "CONV_INTEGER")) {
          if (fn_name_is(fn, "CONV_INTEGER")) {
-            if (a.kind != VIVAL_VEC)
+            if (a.kind != VIVAL_VEC || (l->spec && a.width > 63))
                return false;
             mir_value_t src = (a.width > 64)
                ? mir_build_cast(mu, mir_vec2_type(mu, 64, pkg_signed), a.val)
                : mir_build_cast(mu, mir_vec2_type(mu, a.width, pkg_signed), a.val);
-            *out = (vi_val_t){
-               .kind = VIVAL_INT,
-               .val  = mir_build_cast(mu, vi_i64_type(mu), src),
-            };
+            mir_value_t iv = mir_build_cast(mu, vi_i64_type(mu), src);
+            if (l->spec)
+               vi_spec_deopt_result(l, fcall, iv);
+            *out = (vi_val_t){ .kind = VIVAL_INT, .val = iv };
             return true;
          }
          *out = a;
@@ -1938,6 +2303,8 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
       vi_val_t a, b;
       if (!vi_lower_expr(l, e0, &a) || !vi_lower_expr(l, e1, &b))
          return false;
+      if (fn_name_is(fn, "STD_MATCH"))
+         return vi_lower_match_cmp(l, VIM_EQ, a, b, true, false, out);
       const int nports = tree_ports(decl);
       if (a.kind == VIVAL_INT && nports >= 1) {
          tree_t fp = tree_port(decl, 0);
@@ -1958,6 +2325,9 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
          const bool sg = fn_name_is(fn, "TO_SIGNED") || fn_name_is(fn, "CONV_SIGNED");
          mir_type_t tv = mir_vec2_type(mu, (int)sz, sg);
          mir_value_t v;
+         if (l->spec && a.kind == VIVAL_INT
+             && (fn_name_is(fn, "TO_UNSIGNED") || fn_name_is(fn, "TO_SIGNED")))
+            vi_spec_deopt_int_fit(l, vi_to_i64(mu, a.val), (uint32_t)sz, sg);
          if (a.kind == VIVAL_INT)
             v = vi_cast_vec2(mu, tv, vi_to_i64(mu, a.val));
          else if (a.kind == VIVAL_VEC)
@@ -2122,6 +2492,18 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
          return false;
 
       const bool sg = pkg_signed || ret_signed || a.is_signed || b.is_signed;
+      if (l->spec) {
+         // Unsigned with signed operands extend differently in the IEEE
+         // packages; an integer operand that does not fit the width of the
+         // vector one is converted with a truncation warning or compared
+         // as a mathematical value
+         if (wa > 0 && wb > 0 && a.is_signed != b.is_signed)
+            return false;
+         if (a.kind == VIVAL_INT && wb > 0)
+            vi_spec_deopt_int_fit(l, vi_to_i64(mu, a.val), wb, sg);
+         if (b.kind == VIVAL_INT && wa > 0)
+            vi_spec_deopt_int_fit(l, vi_to_i64(mu, b.val), wa, sg);
+      }
       uint32_t w;
       if (is_mul)
          w = (wa > 0 && wb > 0) ? (wa + wb) : (MAX(wa, wb) * 2u);
@@ -2379,11 +2761,9 @@ static bool vi_lower_inline_func(vi_lower_t *l, tree_t fcall, tree_t func,
                vi_scope_clear(&child);
                return false;
             }
-            if (l->two_state) {
-               mir_type_t mvt = mir_vec2_type(mu, (int)loc.width, loc.is_signed);
-               loc.storage = mir_add_var(mu, mvt, MIR_NULL_STAMP,
-                                         tree_ident(d), MIR_VAR_TEMP);
-            }
+            if (l->two_state)
+               loc.storage = vi_add_vec2_var(l, loc.width, loc.is_signed,
+                                             tree_ident(d));
             else
                loc.storage = vi_modeb_alloc_vec(l, loc.width);
          }
@@ -2560,7 +2940,7 @@ static bool vi_lower_builtin_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
             mir_set_cursor(mu, body, MIR_APPEND);
             mir_value_t elem = mir_build_load(mu, mir_build_array_ref(mu, a.val, i));
             mir_value_t res = a.is_std ? vi_std_scalar_not(l, elem)
-               : mir_build_xor(mu, elem, vi_u8(mu, 1));
+               : vi_u8_from_bool(mu, mir_build_not(mu, vi_u8_to_bool(mu, elem)));
             mir_build_store(mu, mir_build_array_ref(mu, dst, i), res);
             mir_build_store(mu, idx_v, mir_build_add(mu, mir_offset_type(mu),
                                                      i, vi_off(mu, 1)));
@@ -2656,6 +3036,8 @@ static bool vi_lower_builtin_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
          };
          return true;
       case S_DIV:
+         if (l->spec)
+            vi_spec_deopt_zero(l, b.val);
          *out = (vi_val_t){
             .kind = VIVAL_INT,
             .val  = mir_build_div(mu, vi_i64_type(mu), vi_to_i64(mu, a.val),
@@ -2663,6 +3045,8 @@ static bool vi_lower_builtin_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
          };
          return true;
       case S_REM:
+         if (l->spec)
+            vi_spec_deopt_zero(l, b.val);
          *out = (vi_val_t){
             .kind = VIVAL_INT,
             .val  = mir_build_rem(mu, vi_i64_type(mu), vi_to_i64(mu, a.val),
@@ -2670,6 +3054,8 @@ static bool vi_lower_builtin_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
          };
          return true;
       case S_MOD:
+         if (l->spec)
+            vi_spec_deopt_zero(l, b.val);
          *out = (vi_val_t){
             .kind = VIVAL_INT,
             .val  = mir_build_mod(mu, vi_i64_type(mu), vi_to_i64(mu, a.val),
@@ -2812,11 +3198,15 @@ static bool vi_lower_builtin_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
             if (a.is_std)
                r = vi_std_scalar_bin(l, tbl_kind, ea, eb, neg);
             else {
-               if (tbl_kind == 1)      r = mir_build_and(mu, ea, eb);
-               else if (tbl_kind == 2) r = mir_build_or(mu, ea, eb);
-               else                    r = mir_build_xor(mu, ea, eb);
+               mir_value_t ba = vi_u8_to_bool(mu, ea);
+               mir_value_t bb = vi_u8_to_bool(mu, eb);
+               mir_value_t rb;
+               if (tbl_kind == 1)      rb = mir_build_and(mu, ba, bb);
+               else if (tbl_kind == 2) rb = mir_build_or(mu, ba, bb);
+               else                    rb = mir_build_xor(mu, ba, bb);
                if (neg)
-                  r = mir_build_xor(mu, r, vi_u8(mu, 1));
+                  rb = mir_build_not(mu, rb);
+               r = vi_u8_from_bool(mu, rb);
             }
             mir_build_store(mu, mir_build_array_ref(mu, dst, i), r);
             mir_build_store(mu, idx_v, mir_build_add(mu, mir_offset_type(mu),
@@ -2885,6 +3275,21 @@ static bool vi_lower_builtin_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
             *out = vi_from_bool_bit(l, eqv, true, false);
             return true;
          }
+
+      case S_MATCH_EQ:
+      case S_MATCH_NEQ:
+      case S_MATCH_LT:
+      case S_MATCH_LE:
+      case S_MATCH_GT:
+      case S_MATCH_GE:
+         if (!l->two_state)
+            return false;
+         return vi_lower_match_cmp(l, (sk == S_MATCH_EQ) ? VIM_EQ
+                                   : (sk == S_MATCH_NEQ) ? VIM_NEQ
+                                   : (sk == S_MATCH_LT) ? VIM_LT
+                                   : (sk == S_MATCH_LE) ? VIM_LE
+                                   : (sk == S_MATCH_GT) ? VIM_GT : VIM_GE,
+                                   a, b, false, false, out);
 
       case S_ARRAY_LT:
       case S_ARRAY_LE:
@@ -2983,8 +3388,7 @@ static bool vi_lower_const_array_ref(vi_lower_t *l, tree_t base_e,
           || width == 0 || width > VHDL_ISLAND_MAX_WIDTH
           || (uint64_t)nelems * width > 65536u)
          return false;
-      if (l->two_state && width > 64)
-         return false;
+      const uint32_t nw = (width + 63u) / 64u;
 
       const bool is_std = vi_type_is_std_logic(type_elem(elem_t));
       const bool is_sg = vi_type_is_signed_vec(elem_t);
@@ -3075,11 +3479,14 @@ static bool vi_lower_const_array_ref(vi_lower_t *l, tree_t base_e,
 
          // Constant index fast path: emit single row directly without table
          int64_t cidx = 0;
-         if (vi_eval_const_int(l, idx_expr, &cidx)) {
+         if (!(l->two_state && width > 64)
+             && vi_eval_const_int(l, idx_expr, &cidx)) {
             int64_t pos = (odir == RANGE_TO) ? (cidx - oleft) : (oleft - cidx);
             if (pos < 0 || pos >= (int64_t)nelems)
                return false;
             const uint8_t *rp = tbl + (size_t)pos * width;
+            if (l->spec && is_std && vi_bytes_non01(rp, width))
+               vi_emit_deopt(l, RT_ISLAND_DEOPT_LITERAL);
             if (l->two_state) {
                uint64_t w0 = 0;
                vi_pack_bytes_to_words(rp, width, is_std, &w0);
@@ -3104,16 +3511,28 @@ static bool vi_lower_const_array_ref(vi_lower_t *l, tree_t base_e,
             return true;
          }
 
+         if (l->spec && is_std && vi_bytes_non01(tbl, (size_t)nelems * width)) {
+            // A row read at a dynamic index can be any of them
+            if (l->reason == NULL)
+               l->reason = "spec: constant table with metavalues";
+            l->failed = true;
+            return false;
+         }
          if (l->two_state) {
-            mir_value_t *vals LOCAL = xmalloc_array(nelems, sizeof(mir_value_t));
+            // ceil(width / 64) i64 words per element, least significant
+            // word first
+            const size_t nvals = (size_t)nelems * nw;
+            mir_value_t *vals LOCAL = xmalloc_array(nvals, sizeof(mir_value_t));
+            uint64_t *words LOCAL = xcalloc_array(nw, sizeof(uint64_t));
             for (uint32_t p = 0; p < nelems; p++) {
-               uint64_t w0 = 0;
-               vi_pack_bytes_to_words(tbl + (size_t)p * width, width, is_std, &w0);
-               vals[p] = vi_i64(mu, (int64_t)w0);
+               vi_pack_bytes_to_words(tbl + (size_t)p * width, width, is_std,
+                                      words);
+               for (uint32_t k = 0; k < nw; k++)
+                  vals[(size_t)p * nw + k] = vi_i64(mu, (int64_t)words[k]);
             }
             mir_value_t ca = mir_const_array(
-               mu, mir_carray_type(mu, (int)nelems, vi_i64_type(mu)),
-               vals, nelems);
+               mu, mir_carray_type(mu, (int)nvals, vi_i64_type(mu)),
+               vals, nvals);
             tbl_ptr = mir_build_address_of(mu, ca);
          }
          else {
@@ -3135,6 +3554,30 @@ static bool vi_lower_const_array_ref(vi_lower_t *l, tree_t base_e,
 
       vi_val_t fake_outer = { .dir = odir, .left = oleft, .right = oright };
       mir_value_t elem_idx = vi_compute_elem_pos(l, fake_outer, idx_val.val, nelems);
+      if (l->two_state && width > 64) {
+         // Assemble the row from its words, least significant word first
+         mir_value_t base = mir_build_mul(mu, mir_offset_type(mu), elem_idx,
+                                          vi_off(mu, nw));
+         mir_value_t v = vi_cast_vec2(
+            mu, mir_vec2_type(mu, (int)width, is_sg),
+            mir_build_load(mu, mir_build_array_ref(mu, tbl_ptr, base)));
+         for (uint32_t k = 1; k < nw; k++) {
+            const int cw = MIN(64, (int)width - (int)(k * 64));
+            mir_value_t at = mir_build_add(mu, mir_offset_type(mu), base,
+                                           vi_off(mu, k));
+            mir_value_t chunk = vi_cast_vec2(
+               mu, mir_vec2_type(mu, cw, false),
+               mir_build_load(mu, mir_build_array_ref(mu, tbl_ptr, at)));
+            v = mir_build_insert(mu, chunk, v,
+                                 vi_off(mu, (int)width - (int)(k * 64) - cw));
+         }
+         *out = (vi_val_t){
+            .kind = VIVAL_VEC, .val = v, .width = width,
+            .is_signed = is_sg, .is_std = is_std,
+            .dir = idir, .left = ileft, .right = iright,
+         };
+         return true;
+      }
       if (l->two_state) {
          mir_value_t raw = mir_build_load(
             mu, mir_build_array_ref(mu, tbl_ptr, elem_idx));
@@ -3267,7 +3710,17 @@ static bool vi_lower_const_array_ref(vi_lower_t *l, tree_t base_e,
    return false;
 }
 
+static bool vi_lower_expr_inner(vi_lower_t *l, tree_t expr, vi_val_t *out);
+
 static bool vi_lower_expr(vi_lower_t *l, tree_t expr, vi_val_t *out)
+{
+   const bool ok = vi_lower_expr_inner(l, expr, out);
+   if (!ok)
+      vi_generic_reason(l, "expr", expr);
+   return ok;
+}
+
+static bool vi_lower_expr_inner(vi_lower_t *l, tree_t expr, vi_val_t *out)
 {
    if (expr == NULL || l->failed)
       return false;
@@ -3292,6 +3745,8 @@ static bool vi_lower_expr(vi_lower_t *l, tree_t expr, vi_val_t *out)
          uint8_t *bytes LOCAL = xmalloc_array(n, 1);
          if (!vi_lower_const_vec_eval(l, expr, t, bytes, n))
             return false;
+         if (l->spec && is_std && vi_bytes_non01(bytes, n))
+            vi_emit_deopt(l, RT_ISLAND_DEOPT_LITERAL);
          if (l->two_state) {
             const uint32_t nw = (n + 63u) / 64u;
             uint64_t *w LOCAL = xmalloc_array(nw, sizeof(uint64_t));
@@ -3330,6 +3785,8 @@ static bool vi_lower_expr(vi_lower_t *l, tree_t expr, vi_val_t *out)
                   const bool is_std = vi_type_is_std_logic(et);
                   const bool is_bool = vi_type_is_bool(et);
                   unsigned pos = tree_pos(d);
+                  if (l->spec && is_std && pos != 2 && pos != 3)
+                     vi_emit_deopt(l, RT_ISLAND_DEOPT_LITERAL);
                   if (l->two_state) {
                      uint8_t b = is_std ? std_enum_to_2bit(pos) : (uint8_t)(pos & 1u);
                      *out = (vi_val_t){
@@ -3646,8 +4103,6 @@ static bool vi_lower_expr(vi_lower_t *l, tree_t expr, vi_val_t *out)
             return true;
          }
 
-         if (l->two_state)
-            return false;
          uint32_t sw = 0;
          if (!vhdl_island_const_slice_width(l->ctx, rg, &sw))
             return false;
@@ -3660,6 +4115,18 @@ static bool vi_lower_expr(vi_lower_t *l, tree_t expr, vi_val_t *out)
             return false;
          mir_value_t pos = vi_compute_elem_pos(l, bv, lv.val,
                                                bv.width - sw + 1u);
+         if (l->two_state) {
+            mir_value_t sub = mir_build_extract(
+               mu, mir_vec2_type(mu, (int)sw, false), bv.val, pos);
+            *out = (vi_val_t){
+               .kind = VIVAL_VEC, .val = sub, .width = sw,
+               .is_signed = bv.is_signed, .is_std = bv.is_std,
+               .dir = sdir,
+               .left = (sdir == RANGE_TO) ? 0 : (int64_t)sw - 1,
+               .right = (sdir == RANGE_TO) ? (int64_t)sw - 1 : 0,
+            };
+            return true;
+         }
          mir_value_t sub_ptr = mir_build_array_ref(mu, bv.val, pos);
          *out = (vi_val_t){
             .kind = VIVAL_VEC, .val = sub_ptr, .width = sw,
@@ -4445,13 +4912,25 @@ static bool vi_assign_leaf_sig_dyn_slice(vi_lower_t *l, const vhdl_isig_t *s,
                                          mir_value_t dyn_pos,
                                          uint32_t sub_w, vi_val_t val)
 {
-   if (l->two_state || val.kind != VIVAL_VEC)
+   if (val.kind != VIVAL_VEC)
       return false;
    if (s->is_sparse_ram)
       return vi_emit_sparse_ram_write(l, s, isig, elem_idx, dyn_pos, sub_w, val);
    mir_unit_t *mu = l->mu;
    const uint32_t dst_off = isig->a_off + (l->is_ff ? l->ff_stride : 0u);
    vi_mark_ff_dirty(l, isig);
+   if (l->two_state) {
+      mir_value_t cur = mir_build_island_load(
+         mu, mir_vec2_type(mu, (int)s->width, s->is_signed),
+         l->state_ptr, vi_off(mu, dst_off), vi_off(mu, -1), elem_idx);
+      mir_value_t part = val.is_signed
+         ? mir_build_cast(mu, mir_vec2_type(mu, (int)sub_w, false), val.val)
+         : val.val;
+      mir_build_island_store(mu, l->state_ptr, vi_off(mu, dst_off),
+                             vi_off(mu, -1), elem_idx,
+                             mir_build_insert(mu, part, cur, dyn_pos));
+      return true;
+   }
    mir_value_t base = vi_state_ptr_at(l, dst_off);
    mir_value_t off = dyn_pos;
    if (s->is_array2d) {
@@ -4474,6 +4953,7 @@ static bool vi_copy_array2d_sig(vi_lower_t *l, const vhdl_isig_t *ds,
       return false;
 
    mir_unit_t *mu = l->mu;
+   vi_note_read(l, sis);
    if (!l->two_state) {
       const uint32_t dst_off = dis->a_off + (l->is_ff ? l->ff_stride : 0u);
       vi_mark_ff_dirty(l, dis);
@@ -4535,12 +5015,12 @@ static bool vi_assign_array2d_sig(vi_lower_t *l, const vhdl_isig_t *s,
 
    {
       vi_rec_leaf_t slf;
-      if (!l->two_state && vi_resolve_local_leaf(l, val_e, &slf)
+      if (vi_resolve_local_leaf(l, val_e, &slf)
           && slf.is_array2d && slf.nelems == s->nelems && slf.width == s->width) {
          const uint32_t dst_off = isig->a_off + (l->is_ff ? l->ff_stride : 0u);
          vi_mark_ff_dirty(l, isig);
          mir_build_copy(l->mu, vi_state_ptr_at(l, dst_off), slf.storage,
-                        vi_off(l->mu, (int64_t)s->nelems * s->width));
+                        vi_off(l->mu, vi_array2d_bytes(l, s->nelems, s->width)));
          return true;
       }
    }
@@ -4660,7 +5140,7 @@ static bool vi_assign_array2d_sig(vi_lower_t *l, const vhdl_isig_t *s,
 static bool vi_assign_array2d_local(vi_lower_t *l, const vi_rec_leaf_t *lf,
                                     tree_t val_e)
 {
-   if (l->two_state || !lf->is_array2d)
+   if (!lf->is_array2d)
       return false;
 
    while (val_e != NULL) {
@@ -4683,8 +5163,9 @@ static bool vi_assign_array2d_local(vi_lower_t *l, const vi_rec_leaf_t *lf,
    if (ss != NULL && ss->is_array2d) {
       if (ss->nelems != lf->nelems || ss->width != lf->width)
          return false;
+      vi_note_read(l, sis);
       mir_build_copy(mu, lf->storage, vi_state_ptr_at(l, sis->a_off),
-                     vi_off(mu, (int64_t)lf->nelems * lf->width));
+                     vi_off(mu, vi_array2d_bytes(l, lf->nelems, lf->width)));
       return true;
    }
 
@@ -4694,7 +5175,7 @@ static bool vi_assign_array2d_local(vi_lower_t *l, const vi_rec_leaf_t *lf,
          return false;
       if (!mir_equals(slf.storage, lf->storage))
          mir_build_copy(mu, lf->storage, slf.storage,
-                        vi_off(mu, (int64_t)lf->nelems * lf->width));
+                        vi_off(mu, vi_array2d_bytes(l, lf->nelems, lf->width)));
       return true;
    }
 
@@ -4873,12 +5354,14 @@ static bool vi_assign_rec_local(vi_lower_t *l, vi_local_t *dloc,
                return false;
             }
             if (dlf->is_array2d) {
-               if (l->two_state || dlf->nelems != ss->nelems) {
+               if (dlf->nelems != ss->nelems) {
                   free(s_ids);
                   return false;
                }
+               vi_note_read(l, sis);
                mir_build_copy(mu, dlf->storage, vi_state_ptr_at(l, sis->a_off),
-                              vi_off(mu, (int64_t)dlf->nelems * dlf->width));
+                              vi_off(mu, vi_array2d_bytes(l, dlf->nelems,
+                                                          dlf->width)));
                continue;
             }
             vi_val_t v;
@@ -4914,10 +5397,11 @@ static bool vi_assign_rec_local(vi_lower_t *l, vi_local_t *dloc,
             if (dlf->width != slf->width || dlf->is_array2d != slf->is_array2d)
                return false;
             if (dlf->is_array2d) {
-               if (l->two_state || dlf->nelems != slf->nelems)
+               if (dlf->nelems != slf->nelems)
                   return false;
                mir_build_copy(mu, dlf->storage, slf->storage,
-                              vi_off(mu, (int64_t)dlf->nelems * dlf->width));
+                              vi_off(mu, vi_array2d_bytes(l, dlf->nelems,
+                                                          dlf->width)));
                continue;
             }
             vi_val_t v;
@@ -5065,12 +5549,12 @@ static bool vi_copy_rec_local_to_sig(vi_lower_t *l,
           || ds->is_array2d != slf->is_array2d)
          return false;
       if (ds->is_array2d) {
-         if (l->two_state || ds->nelems != slf->nelems)
+         if (ds->nelems != slf->nelems)
             return false;
          const uint32_t dst_off = dis->a_off + (l->is_ff ? l->ff_stride : 0u);
          vi_mark_ff_dirty(l, dis);
          mir_build_copy(mu, vi_state_ptr_at(l, dst_off), slf->storage,
-                        vi_off(mu, (int64_t)ds->nelems * ds->width));
+                        vi_off(mu, vi_array2d_bytes(l, ds->nelems, ds->width)));
          continue;
       }
       vi_val_t v;
@@ -5326,7 +5810,7 @@ static bool vi_lower_sig_assign(vi_lower_t *l, tree_t stmt)
             return false;
          sw = (uint32_t)sw64;
       }
-      else if (l->two_state || !vhdl_island_const_slice_width(l->ctx, rg, &sw))
+      else if (!vhdl_island_const_slice_width(l->ctx, rg, &sw))
          return false;
 
       tree_t base = tree_value(target);
@@ -5462,13 +5946,13 @@ static bool vi_lower_var_assign(vi_lower_t *l, tree_t stmt)
       tree_t base = tree_value(target);
       vi_rec_leaf_t lf;
       mir_value_t elem_off = vi_off(mu, 0);
+      mir_value_t row_idx = vi_off(mu, 0);
       bool is_2d_row = false;
       if (vi_resolve_local_leaf(l, base, &lf)) {
          if (!lf.is_vec || lf.is_array2d)
             return false;
       }
       else if (tree_kind(base) == T_ARRAY_REF && tree_params(base) == 1
-               && !l->two_state
                && vi_resolve_local_leaf(l, tree_value(base), &lf)
                && lf.is_array2d) {
          vi_val_t eiv;
@@ -5481,6 +5965,7 @@ static bool vi_lower_var_assign(vi_lower_t *l, tree_t stmt)
          mir_value_t eidx = vi_compute_elem_pos(l, fake_outer, eiv.val, lf.nelems);
          elem_off = mir_build_mul(mu, mir_offset_type(mu),
                                   eidx, vi_off(mu, lf.width));
+         row_idx = eidx;
          is_2d_row = true;
       }
       else
@@ -5493,7 +5978,7 @@ static bool vi_lower_var_assign(vi_lower_t *l, tree_t stmt)
             return false;
          sw = (uint32_t)sw64;
       }
-      else if (l->two_state || !vhdl_island_const_slice_width(l->ctx, rg, &sw))
+      else if (!vhdl_island_const_slice_width(l->ctx, rg, &sw))
          return false;
       if (sdir != lf.dir || rv.kind != VIVAL_VEC || sw != rv.width
           || sw > lf.width)
@@ -5502,7 +5987,16 @@ static bool vi_lower_var_assign(vi_lower_t *l, tree_t stmt)
          int64_t pos = (lf.dir == RANGE_TO) ? (sl - lf.left) : (lf.left - sl);
          if (pos < 0 || pos + (int64_t)sw > lf.width)
             return false;
-         if (l->two_state) {
+         if (l->two_state && is_2d_row) {
+            mir_value_t cur = mir_build_island_load(
+               mu, mir_vec2_type(mu, (int)lf.width, lf.is_signed), lf.storage,
+               vi_off(mu, 0), vi_off(mu, -1), row_idx);
+            mir_value_t upd = mir_build_insert(mu, rv.val, cur,
+                                               vi_off(mu, pos));
+            mir_build_island_store(mu, lf.storage, vi_off(mu, 0),
+                                   vi_off(mu, -1), row_idx, upd);
+         }
+         else if (l->two_state) {
             mir_value_t cur = mir_build_load(mu, lf.storage);
             mir_value_t upd = mir_build_insert(mu, rv.val, cur, vi_off(mu, pos));
             mir_build_store(mu, lf.storage, upd);
@@ -5521,6 +6015,25 @@ static bool vi_lower_var_assign(vi_lower_t *l, tree_t stmt)
          return false;
       vi_val_t fake = { .dir = lf.dir, .left = lf.left, .right = lf.right };
       mir_value_t pos = vi_compute_elem_pos(l, fake, lv.val, lf.width - sw + 1u);
+      if (l->two_state) {
+         mir_value_t part = rv.is_signed
+            ? mir_build_cast(mu, mir_vec2_type(mu, (int)sw, false), rv.val)
+            : rv.val;
+         if (is_2d_row) {
+            mir_value_t cur = mir_build_island_load(
+               mu, mir_vec2_type(mu, (int)lf.width, lf.is_signed), lf.storage,
+               vi_off(mu, 0), vi_off(mu, -1), row_idx);
+            mir_build_island_store(mu, lf.storage, vi_off(mu, 0),
+                                   vi_off(mu, -1), row_idx,
+                                   mir_build_insert(mu, part, cur, pos));
+         }
+         else {
+            mir_value_t cur = mir_build_load(mu, lf.storage);
+            mir_build_store(mu, lf.storage,
+                            mir_build_insert(mu, part, cur, pos));
+         }
+         return true;
+      }
       mir_value_t off = is_2d_row
          ? mir_build_add(mu, mir_offset_type(mu), elem_off, pos) : pos;
       mir_build_copy(mu, mir_build_array_ref(mu, lf.storage, off),
@@ -5559,7 +6072,7 @@ static bool vi_lower_var_assign(vi_lower_t *l, tree_t stmt)
                             mir_build_cast(mu, vi_u8_type(mu), rv.val));
          return true;
       }
-      if (!l->two_state && tree_kind(base) == T_ARRAY_REF && tree_params(base) == 1
+      if (tree_kind(base) == T_ARRAY_REF && tree_params(base) == 1
           && vi_resolve_local_leaf(l, tree_value(base), &lf) && lf.is_array2d
           && rv.kind == VIVAL_BIT) {
          vi_val_t eiv;
@@ -5576,6 +6089,15 @@ static bool vi_lower_var_assign(vi_lower_t *l, tree_t stmt)
             mu, mir_offset_type(mu),
             mir_build_mul(mu, mir_offset_type(mu), eidx, vi_off(mu, lf.width)),
             pos);
+         if (l->two_state) {
+            mir_value_t cur = mir_build_island_load(
+               mu, mir_vec2_type(mu, (int)lf.width, lf.is_signed), lf.storage,
+               vi_off(mu, 0), vi_off(mu, -1), eidx);
+            mir_build_island_store(
+               mu, lf.storage, vi_off(mu, 0), vi_off(mu, -1), eidx,
+               mir_build_insert(mu, vi_to_vec2_1(l, rv), cur, pos));
+            return true;
+         }
          mir_build_store(mu, mir_build_array_ref(mu, lf.storage, off),
                          mir_build_cast(mu, vi_u8_type(mu), rv.val));
          return true;
@@ -5819,9 +6341,11 @@ static bool vi_lower_str_expr(vi_lower_t *l, tree_t expr, vi_str_t *out)
             out->len = tot;
             return true;
          }
-         if (!l->two_state && tree_params(expr) == 1) {
+         if (tree_params(expr) == 1) {
             vi_val_t av;
             if (!vi_lower_expr(l, tree_value(tree_param(expr, 0)), &av))
+               return false;
+            if (l->two_state && !vi_vec2_to_bytes(l, &av))
                return false;
             mir_type_t str_t = mir_uarray_type(mu, 1, vi_u8_type(mu));
             mir_value_t uarr;
@@ -6024,7 +6548,17 @@ static bool vi_lower_inline_proc(vi_lower_t *l, tree_t pcall)
    return true;
 }
 
+static bool vi_lower_stmt_inner(vi_lower_t *l, tree_t stmt);
+
 static bool vi_lower_stmt(vi_lower_t *l, tree_t stmt)
+{
+   const bool ok = vi_lower_stmt_inner(l, stmt);
+   if (!ok)
+      vi_generic_reason(l, "stmt", stmt);
+   return ok;
+}
+
+static bool vi_lower_stmt_inner(vi_lower_t *l, tree_t stmt)
 {
    if (stmt == NULL || l->failed)
       return false;
@@ -6188,6 +6722,11 @@ static bool vi_lower_stmt(vi_lower_t *l, tree_t stmt)
                for (int j = 0; j < nch; j++) {
                   tree_t ch = tree_choice(alt, j);
                   if (tree_ranges(ch) == 0 && tree_has_name(ch)) {
+                     if (l->spec && vi_spec_choice_non01(l, tree_name(ch), sel)) {
+                        // Never matches a '0'/'1' selector
+                        any = mir_build_or(mu, any, vi_spec_opaque_bool(l, false));
+                        continue;
+                     }
                      vi_val_t cv;
                      if (!vi_lower_expr(l, tree_name(ch), &cv))
                         return false;
@@ -6300,6 +6839,12 @@ static bool vi_lower_stmt(vi_lower_t *l, tree_t stmt)
          mir_build_cond(mu, cond, cont_bb, fail_bb);
 
          mir_set_cursor(mu, fail_bb, MIR_APPEND);
+         if (l->spec) {
+            // Mode B reports the failure
+            mir_build_return(mu, vi_off(mu, RT_ISLAND_DEOPT_REPORT));
+            mir_set_cursor(mu, cont_bb, MIR_APPEND);
+            return true;
+         }
          mir_value_t msg_ptr = MIR_NULL_VALUE, msg_len = MIR_NULL_VALUE;
          if (tree_has_message(stmt)) {
             vi_str_t ms;
@@ -6330,6 +6875,10 @@ static bool vi_lower_stmt(vi_lower_t *l, tree_t stmt)
       }
 
    case T_REPORT:
+      if (l->spec) {
+         vi_emit_deopt(l, RT_ISLAND_DEOPT_REPORT);   // Mode B reports
+         return true;
+      }
       {
          vi_str_t ms;
          if (tree_has_message(stmt)) {
@@ -6537,7 +7086,7 @@ static bool vi_bind_process_locals(vi_lower_t *l, tree_t proc, vi_scope_t *sc)
             return false;
          type_t elem = type_elem(vt);
          if (type_is_array(elem) && !type_is_record(elem) && dimension_of(elem) == 1) {
-            if (l->two_state || !type_is_enum(type_elem(elem)))
+            if (!type_is_enum(type_elem(elem)))
                return false;
             loc.is_vec = true;
             loc.is_array2d = true;
@@ -6550,7 +7099,8 @@ static bool vi_bind_process_locals(vi_lower_t *l, tree_t proc, vi_scope_t *sc)
                 || loc.width == 0 || loc.nelems == 0
                 || (uint64_t)loc.width * loc.nelems > 4096u)
                return false;
-            loc.storage = vi_modeb_alloc_vec(l, loc.nelems * loc.width);
+            loc.storage = vi_alloc_array2d_local(l, loc.nelems, loc.width,
+                                                 tree_ident(d));
             if (tree_has_value(d)) {
                vi_rec_leaf_t lf = {
                   .is_array2d  = true,
@@ -6644,9 +7194,86 @@ static bool vi_bind_process_locals(vi_lower_t *l, tree_t proc, vi_scope_t *sc)
    return true;
 }
 
+static void vi_proc_done(vi_lower_t *l, const vhdl_island_ctx_t *ctx,
+                         uint32_t pi, bool ok)
+{
+   vhdl_iproc_t *p = &(((vhdl_island_ctx_t *)ctx)->procs[pi]);
+   if (!ok && l->spec)
+      p->a_block = l->reason ? l->reason : "spec: unsupported construct";
+   else if (!ok)
+      p->reason = l->reason ? l->reason : "lower: unsupported construct";
+   l->reason = NULL;
+}
+
+static void vi_act_count(vi_lower_t *l, uint32_t off, uint32_t n)
+{
+   mir_unit_t *mu = l->mu;
+   mir_type_t t_v64 = mir_vec2_type(mu, 64, false);
+   mir_value_t cur = mir_build_island_load(mu, t_v64, l->state_ptr,
+                                           vi_off(mu, off), vi_off(mu, -1),
+                                           vi_off(mu, 0));
+   mir_value_t upd = mir_build_add(mu, vi_i64_type(mu),
+                                   mir_build_cast(mu, vi_i64_type(mu), cur),
+                                   vi_i64(mu, n));
+   mir_build_island_store(mu, l->state_ptr, vi_off(mu, off), vi_off(mu, -1),
+                          vi_off(mu, 0), mir_build_cast(mu, t_v64, upd));
+}
+
+static bool vi_act_add_read(vi_lower_t *l, uint32_t idx)
+{
+   if (!(l->isl->sigs[idx].rt_flags & RT_ISIG_ACT))
+      return false;
+   for (uint32_t i = 0; i < l->n_act_rd; i++) {
+      if (l->act_rd[i] == idx)
+         return true;
+   }
+   if (l->n_act_rd == l->cap_act_rd) {
+      l->cap_act_rd = MAX(l->cap_act_rd * 2u, 16u);
+      l->act_rd = xrealloc_array(l->act_rd, l->cap_act_rd, sizeof(uint32_t));
+   }
+   l->act_rd[l->n_act_rd++] = idx;
+   return true;
+}
+
+// Branch to BODY_BB when the run-all byte or the change byte of a signal
+// the process reads is set.  The read set is the union of what the
+// analysis found and what the lowering of the body loaded; a process that
+// reads a signal without a change byte always runs.
+static void vi_emit_act_test(vi_lower_t *l, const vhdl_iproc_t *p,
+                             mir_block_t body_bb, mir_block_t next_bb)
+{
+   mir_unit_t *mu = l->mu;
+   const vhdl_island_t *isl = l->isl;
+
+   bool always = false;
+   for (uint32_t i = 0; i < l->n_act_rd && !always; i++)
+      always = !(isl->sigs[l->act_rd[i]].rt_flags & RT_ISIG_ACT);
+   for (uint32_t i = 0; i < p->n_reads && !always; i++) {
+      const vhdl_isl_sig_t *isig = vhdl_island_find_sig(isl, p->reads[i]);
+      always = isig == NULL
+         || !vi_act_add_read(l, (uint32_t)(isig - isl->sigs));
+   }
+
+   if (always) {
+      mir_build_jump(mu, body_bb);
+      return;
+   }
+
+   mir_value_t zero = vi_u8(mu, 0);
+   mir_value_t any = mir_build_cmp(
+      mu, MIR_CMP_NEQ,
+      mir_build_load(mu, vi_state_ptr_at(l, RT_ISLAND_ACT_ALL(isl->n_sigs))),
+      zero);
+   for (uint32_t i = 0; i < l->n_act_rd; i++) {
+      mir_value_t chg = mir_build_load(mu, vi_state_ptr_at(l, l->act_rd[i]));
+      any = mir_build_or(mu, any, mir_build_cmp(mu, MIR_CMP_NEQ, chg, zero));
+   }
+   mir_build_cond(mu, any, body_bb, next_bb);
+}
+
 static mir_unit_t *vi_build_comb_unit(mir_context_t *mc,
                                       const vhdl_island_ctx_t *ctx,
-                                      const vhdl_island_t *isl,
+                                      const vhdl_island_t *isl, bool spec,
                                       int *failed_proc_out)
 {
    mir_unit_t *mu = mir_unit_new(mc, isl->eval_name, tree_to_object(ctx->block),
@@ -6663,6 +7290,8 @@ static mir_unit_t *vi_build_comb_unit(mir_context_t *mc,
       .isl       = isl,
       .state_ptr = state,
       .two_state = isl->two_state,
+      .spec      = spec,
+      .spec_var  = MIR_NULL_VALUE,
       .is_ff     = false,
       .lut_not   = MIR_NULL_VALUE,
       .lut_and   = MIR_NULL_VALUE,
@@ -6670,7 +7299,22 @@ static mir_unit_t *vi_build_comb_unit(mir_context_t *mc,
       .lut_xor   = MIR_NULL_VALUE,
    };
 
-   for (uint32_t k = 0; k < isl->n_comb_procs; k++) {
+   // With process activity (isl->has_act) each process is guarded by a
+   // test of the change bytes of the island signals it reads, which the
+   // runtime sets before every call (island_act_prepare in rt/island.c), so
+   // a delta cycle only runs the processes whose inputs changed.
+   const bool act = isl->has_act;
+   const bool act_stats = act && getenv("NVC_ISLAND_ACT_STATS") != NULL;
+   const uint32_t act_cnt = RT_ISLAND_ACT_CNT(isl->n_sigs);
+   if (act_stats)
+      vi_act_count(&l, act_cnt + 8u, isl->n_comb_procs);
+
+   // Readers before writers: comb_procs is in topological order, so going
+   // backwards every process reads the signal values of the current delta
+   // cycle, as a VHDL signal assignment only takes effect in the next one.
+   // The runtime runs the island again when such a signal changed (see
+   // island_check_feedback in rt/island.c).
+   for (uint32_t k = isl->n_comb_procs; k-- > 0; ) {
       uint32_t pi = isl->comb_procs[k];
       const vhdl_iproc_t *p = &(ctx->procs[pi]);
       vhdl_island_var_defs_clear((vhdl_island_ctx_t *)ctx);
@@ -6679,22 +7323,52 @@ static mir_unit_t *vi_build_comb_unit(mir_context_t *mc,
       vi_scope_t sc = { .ret_bb = MIR_NULL_BLOCK };
       l.scope = &sc;
 
+      mir_block_t test_bb = MIR_NULL_BLOCK, body_bb = MIR_NULL_BLOCK;
+      mir_block_t next_bb = MIR_NULL_BLOCK;
+      if (act) {
+         test_bb = mir_add_block(mu);
+         body_bb = mir_add_block(mu);
+         next_bb = mir_add_block(mu);
+         mir_build_jump(mu, test_bb);
+         mir_set_cursor(mu, body_bb, MIR_APPEND);
+
+         // Values built in an earlier process may not have been computed
+         l.lut_not = l.lut_and = l.lut_or = l.lut_xor = MIR_NULL_VALUE;
+         l.n_rom_cache = 0;
+         l.n_act_rd = 0;
+         l.act_track = true;
+      }
+
       bool ok = vi_bind_process_locals(&l, p->stmt, &sc);
       const int ns = tree_stmts(p->stmt) - 1;
       for (int i = 0; i < ns && ok; i++)
          ok = vi_lower_stmt(&l, tree_stmt(p->stmt, i));
 
+      l.act_track = false;
       vi_scope_clear(&sc);
       l.scope = NULL;
+
+      vi_proc_done(&l, ctx, pi, ok && !l.failed);
       vhdl_island_set_eval_scope((vhdl_island_ctx_t *)ctx, ctx->block,
                                  ctx->ancestors, ctx->n_ancestors);
       if (!ok || l.failed) {
          *failed_proc_out = (int)pi;
+         free(l.act_rd);
          mir_unit_free(mu);
          return NULL;
       }
+
+      if (act) {
+         if (act_stats)
+            vi_act_count(&l, act_cnt, 1);
+         mir_build_jump(mu, next_bb);
+         mir_set_cursor(mu, test_bb, MIR_APPEND);
+         vi_emit_act_test(&l, p, body_bb, next_bb);
+         mir_set_cursor(mu, next_bb, MIR_APPEND);
+      }
    }
 
+   free(l.act_rd);
    mir_build_return(mu, vi_off(mu, 0));
    return mu;
 }
@@ -6702,7 +7376,7 @@ static mir_unit_t *vi_build_comb_unit(mir_context_t *mc,
 static mir_unit_t *vi_build_ff_unit(mir_context_t *mc,
                                     const vhdl_island_ctx_t *ctx,
                                     const vhdl_island_t *isl,
-                                    const vhdl_idom_t *dm,
+                                    const vhdl_idom_t *dm, bool spec,
                                     int *failed_proc_out)
 {
    mir_unit_t *mu = mir_unit_new(mc, dm->fn_name, tree_to_object(ctx->block),
@@ -6725,6 +7399,8 @@ static mir_unit_t *vi_build_ff_unit(mir_context_t *mc,
       .isl          = isl,
       .state_ptr    = state,
       .two_state    = isl->two_state,
+      .spec         = spec,
+      .spec_var     = MIR_NULL_VALUE,
       .is_ff        = true,
       .ff_stride    = RT_ISLAND_STRIDE(isl->state_bytes),
       .ff_dom       = dm,
@@ -6776,6 +7452,7 @@ static mir_unit_t *vi_build_ff_unit(mir_context_t *mc,
             ok = vi_lower_stmt(&l, tree_stmt(p->rst_branch, j));
          vi_scope_clear(&sc);
          l.scope = NULL;
+         vi_proc_done(&l, ctx, pi, ok && !l.failed);
          vhdl_island_set_eval_scope((vhdl_island_ctx_t *)ctx, ctx->block,
                                     ctx->ancestors, ctx->n_ancestors);
          if (!ok || l.failed) {
@@ -6801,6 +7478,7 @@ static mir_unit_t *vi_build_ff_unit(mir_context_t *mc,
             ok = vi_lower_stmt(&l, tree_stmt(p->clk_branch, j));
          vi_scope_clear(&sc);
          l.scope = NULL;
+         vi_proc_done(&l, ctx, pi, ok && !l.failed);
          vhdl_island_set_eval_scope((vhdl_island_ctx_t *)ctx, ctx->block,
                                     ctx->ancestors, ctx->n_ancestors);
          if (!ok || l.failed) {
@@ -6826,6 +7504,7 @@ static mir_unit_t *vi_build_ff_unit(mir_context_t *mc,
             ok = vi_lower_stmt(&l, tree_stmt(p->clk_branch, j));
          vi_scope_clear(&sc);
          l.scope = NULL;
+         vi_proc_done(&l, ctx, pi, ok && !l.failed);
          vhdl_island_set_eval_scope((vhdl_island_ctx_t *)ctx, ctx->block,
                                     ctx->ancestors, ctx->n_ancestors);
          if (!ok || l.failed) {
@@ -6849,8 +7528,134 @@ static void vi_reject_failed(vhdl_island_ctx_t *ctx, uint32_t isl_idx,
       return;
    }
    for (uint32_t i = 0; i < ctx->n_procs; i++) {
-      if (ctx->procs[i].island_idx == (int)isl_idx)
+      if (ctx->procs[i].island_idx == (int)isl_idx) {
          ctx->procs[i].rejected = true;
+         if (ctx->procs[i].reason == NULL)
+            ctx->procs[i].reason = "lower: island clock/reset signal load failed";
+      }
+   }
+}
+
+// Lower every island of CTX, retrying with the failing processes ejected.
+// With PUT false the units are discarded (used for the dump-only Mode A
+// trial, which must not register units under the Mode B names).
+static void vi_lower_ctx(mir_context_t *mc, vhdl_island_ctx_t *ctx, bool put)
+{
+   const uint32_t max_retries = ctx->n_procs + 1;
+   A(mir_unit_t *) built = AINIT;
+   for (uint32_t attempt = 0; attempt <= max_retries; attempt++) {
+      bool need_rebuild = false;
+      for (uint32_t ii = 0; ii < ctx->n_islands; ii++) {
+         const vhdl_island_t *isl = &(ctx->islands[ii]);
+         if (isl->n_sigs == 0)
+            continue;
+
+         int failed_proc = -1;
+         if (isl->n_comb_procs > 0
+             && (!put || mir_get_shape(mc, isl->eval_name) == NULL)) {
+            mir_unit_t *cmu = vi_build_comb_unit(mc, ctx, isl, false,
+                                                 &failed_proc);
+            if (cmu == NULL) {
+               vi_reject_failed(ctx, ii, failed_proc);
+               need_rebuild = true;
+               break;
+            }
+            APUSH(built, cmu);
+         }
+
+         for (uint32_t d = 0; d < isl->n_doms; d++) {
+            if (put && mir_get_shape(mc, isl->doms[d].fn_name) != NULL)
+               continue;
+            mir_unit_t *fmu = vi_build_ff_unit(mc, ctx, isl, &(isl->doms[d]),
+                                               false, &failed_proc);
+            if (fmu == NULL) {
+               vi_reject_failed(ctx, ii, failed_proc);
+               need_rebuild = true;
+               break;
+            }
+            APUSH(built, fmu);
+         }
+
+         if (need_rebuild)
+            break;
+      }
+
+      if (!need_rebuild)
+         break;
+
+      for (unsigned u = 0; u < built.count; u++)
+         mir_unit_free(built.items[u]);
+      built.count = 0;
+
+      vhdl_island_rebuild(ctx);
+      if (ctx->n_islands == 0)
+         break;
+   }
+
+   for (unsigned u = 0; u < built.count; u++) {
+      if (put) {
+         mir_optimise(built.items[u], MIR_PASS_O1);
+         mir_put_unit(mc, built.items[u]);
+      }
+      else
+         mir_unit_free(built.items[u]);
+   }
+   ACLEAR(built);
+}
+
+// Speculative Mode A (NVC_ISLAND_SPEC): lower each island of the final
+// Mode B CTX a second time with a packed two-state layout.  The processes
+// and the island set are the ones of Mode B; an island whose Mode A
+// lowering fails keeps no variant and its processes stay fused.
+static void vi_lower_spec(mir_context_t *mc, vhdl_island_ctx_t *ctx)
+{
+   for (uint32_t ii = 0; ii < ctx->n_islands; ii++) {
+      vhdl_island_t *isl = &(ctx->islands[ii]);
+      if (isl->n_sigs == 0)
+         continue;
+
+      vhdl_island_t *a = vhdl_island_new_a_variant(ctx, isl, &isl->a_reason);
+      if (a == NULL)
+         continue;
+
+      A(mir_unit_t *) built = AINIT;
+      int failed_proc = -1;
+      bool ok = true;
+      if (a->n_comb_procs > 0 && mir_get_shape(mc, a->eval_name) == NULL) {
+         mir_unit_t *cmu = vi_build_comb_unit(mc, ctx, a, true, &failed_proc);
+         if (cmu != NULL)
+            APUSH(built, cmu);
+         else
+            ok = false;
+      }
+      for (uint32_t d = 0; ok && d < a->n_doms; d++) {
+         if (mir_get_shape(mc, a->doms[d].fn_name) != NULL)
+            continue;
+         mir_unit_t *fmu = vi_build_ff_unit(mc, ctx, a, &(a->doms[d]), true,
+                                            &failed_proc);
+         if (fmu != NULL)
+            APUSH(built, fmu);
+         else
+            ok = false;
+      }
+
+      for (unsigned u = 0; u < built.count; u++) {
+         if (ok) {
+            mir_optimise(built.items[u], MIR_PASS_O1);
+            mir_put_unit(mc, built.items[u]);
+         }
+         else
+            mir_unit_free(built.items[u]);
+      }
+      ACLEAR(built);
+
+      if (ok)
+         isl->a_variant = a;
+      else {
+         isl->a_reason = (failed_proc >= 0 && ctx->procs[failed_proc].a_block)
+            ? ctx->procs[failed_proc].a_block : "spec: lowering failed";
+         vhdl_island_free_a_variant(a);
+      }
    }
 }
 
@@ -6877,63 +7682,81 @@ vhdl_island_ctx_t *vhdl_island_lower_prepare(mir_context_t *mc, tree_t block,
       return ctx;
    }
 
-   const uint32_t max_retries = ctx->n_procs + 1;
-   A(mir_unit_t *) built = AINIT;
-   for (uint32_t attempt = 0; attempt <= max_retries; attempt++) {
-      bool need_rebuild = false;
-      for (uint32_t ii = 0; ii < ctx->n_islands; ii++) {
-         const vhdl_island_t *isl = &(ctx->islands[ii]);
-         if (isl->n_sigs == 0)
-            continue;
-
-         int failed_proc = -1;
-         if (isl->n_comb_procs > 0 && mir_get_shape(mc, isl->eval_name) == NULL) {
-            mir_unit_t *cmu = vi_build_comb_unit(mc, ctx, isl, &failed_proc);
-            if (cmu == NULL) {
-               vi_reject_failed(ctx, ii, failed_proc);
-               need_rebuild = true;
-               break;
-            }
-            APUSH(built, cmu);
-         }
-
-         for (uint32_t d = 0; d < isl->n_doms; d++) {
-            if (mir_get_shape(mc, isl->doms[d].fn_name) != NULL)
-               continue;
-            mir_unit_t *fmu = vi_build_ff_unit(mc, ctx, isl, &(isl->doms[d]),
-                                               &failed_proc);
-            if (fmu == NULL) {
-               vi_reject_failed(ctx, ii, failed_proc);
-               need_rebuild = true;
-               break;
-            }
-            APUSH(built, fmu);
-         }
-
-         if (need_rebuild)
-            break;
-      }
-
-      if (!need_rebuild)
-         break;
-
-      for (unsigned u = 0; u < built.count; u++)
-         mir_unit_free(built.items[u]);
-      built.count = 0;
-
-      vhdl_island_rebuild(ctx);
-      if (ctx->n_islands == 0)
-         break;
+   // NVC_DUMP_ISLANDS in Mode B: also analyse and lower the block as Mode A
+   // (discarding the result) so the dump can say which processes would not
+   // be Mode A and why.
+   vhdl_island_ctx_t *trial = NULL;
+   const bool spec = opt_get_int(OPT_ISLAND_SPEC) && !ctx->two_state;
+   const bool want_trial =
+      opt_get_int(OPT_DUMP_ISLANDS) && !ctx->two_state && !spec;
+   if (want_trial) {
+      trial = vhdl_island_analyze_mode(block, ancestors, n_ancestors,
+                                       scope_prefix, true);
+      if (trial != NULL && trial->n_islands > 0)
+         vi_lower_ctx(mc, trial, false);
    }
 
-   for (unsigned u = 0; u < built.count; u++) {
-      mir_optimise(built.items[u], MIR_PASS_O1);
-      mir_put_unit(mc, built.items[u]);
+   vi_lower_ctx(mc, ctx, true);
+
+   if (spec)
+      vi_lower_spec(mc, ctx);
+
+   if (want_trial) {
+      vhdl_island_mark_a_blocks(ctx, trial);
+      vhdl_island_ctx_free(trial);
    }
-   ACLEAR(built);
 
    vhdl_island_dump_summary(ctx);
    return ctx;
+}
+
+// Register the speculative Mode A variant of ISL with island HANDLE
+static void vi_emit_variant_a_init(const vhdl_island_ctx_t *ctx,
+                                   const vhdl_island_t *isl,
+                                   vcode_reg_t handle, int ctx_upref)
+{
+   const vhdl_island_t *a = isl->a_variant;
+   vcode_type_t voffset = vtype_offset();
+   vcode_type_t vptr = vtype_pointer(vtype_opaque());
+
+   vcode_reg_t clos;
+   if (a->eval_name != NULL) {
+      vcode_reg_t ctx_reg = emit_context_upref(ctx_upref);
+      clos = emit_closure(a->eval_name, voffset, &ctx_reg, 1);
+   }
+   else
+      clos = emit_null(vptr);
+
+   vcode_reg_t v_args[4] = {
+      handle,
+      clos,
+      emit_const(voffset, a->state_bytes),
+      emit_const(voffset, a->hdr_bytes),
+   };
+   emit_fcall(ident_new("__sv_island_set_variant_a"), voffset,
+              VCODE_INVALID_STAMP, v_args, 4);
+
+   ident_t bind_a_fn = ident_new("__sv_island_bind_sig_a");
+   for (uint32_t j = 0; j < a->n_sigs; j++) {
+      const vhdl_isig_t *s = &(ctx->sigs[a->sigs[j].sig_id]);
+      vcode_reg_t b_args[5] = {
+         handle,
+         emit_const(voffset, j),
+         emit_const(voffset, a->sigs[j].a_off),
+         emit_const(voffset, a->sigs[j].rt_flags),
+         emit_const(voffset, s->width * s->nelems * s->byte_size),
+      };
+      emit_fcall(bind_a_fn, voffset, VCODE_INVALID_STAMP, b_args, 5);
+   }
+
+   ident_t add_dom_a_fn = ident_new("__sv_island_add_domain_a");
+   for (uint32_t d = 0; d < a->n_doms; d++) {
+      vcode_reg_t ctx_reg = emit_context_upref(ctx_upref);
+      vcode_reg_t ff_clos = emit_closure(a->doms[d].fn_name, voffset,
+                                         &ctx_reg, 1);
+      vcode_reg_t d_args[3] = { handle, emit_const(voffset, d), ff_clos };
+      emit_fcall(add_dom_a_fn, voffset, VCODE_INVALID_STAMP, d_args, 3);
+   }
 }
 
 void vhdl_island_lower_emit_vcode_init(const vhdl_island_ctx_t *ctx,
@@ -7044,6 +7867,9 @@ void vhdl_island_lower_emit_vcode_init(const vhdl_island_ctx_t *ctx,
             emit_fcall(add_dom_w_fn, voffset, VCODE_INVALID_STAMP, w_args, 3);
          }
       }
+
+      if (isl->a_variant != NULL)
+         vi_emit_variant_a_init(ctx, isl, handle, ctx_upref);
 
       emit_fcall(finish_fn, voffset, VCODE_INVALID_STAMP, &handle, 1);
    }

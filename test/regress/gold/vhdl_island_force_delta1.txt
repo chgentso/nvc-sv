@@ -1,0 +1,35 @@
+Note: 0ms+1: 0 c=00
+Note: 0ms+1: 0 d=00
+Note: 0ms+2: 0 c=01
+Note: 0ms+2: 0 d=01
+Note: 0ms+3: 0 c=02
+Note: 0ms+3: 0 d=02
+Note: 1ns+4: 4 c=07
+Note: 1ns+4: 4 d=07
+Note: 2ns+1: force
+Note: 2ns+4: 3 c=56
+Note: 2ns+4: 3 d=56
+Note: 4ns+1: release
+Note: 4ns+4: 3 c=0B
+Note: 4ns+4: 3 d=0B
+Note: 5ns+1: force ci
+Note: 5ns+3: 2 c=77
+Note: 5ns+3: 2 d=77
+Note: 6ns+4: 3 d=87
+Note: 7ns+3: 2 c=0B
+Note: 7ns+3: 2 d=1B
+Note: 8ns+1: force with input
+Note: 8ns+4: 3 c=67
+Note: 8ns+4: 3 d=77
+Note: 9ns+4: 3 c=0E
+Note: 9ns+4: 3 d=1E
+Note: 10ns+1: force q
+Note: 10ns+3: 2 d=3E
+Note: 13ns+3: 2 d=4E
+Note: 15ns+4: 3 d=5E
+Note: 16ns+1: force a port
+Note: 16ns+5: 4 c=42
+Note: 16ns+5: 4 d=92
+Note: 18ns+5: 4 c=43
+Note: 18ns+5: 4 d=93
+Note: 19ns+1: done

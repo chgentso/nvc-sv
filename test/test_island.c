@@ -19,6 +19,7 @@
 #include "ident.h"
 #include "lib.h"
 #include "phase.h"
+#include "rt/island.h"
 #include "scan.h"
 #include "vlog/vlog-island.h"
 #include "vlog/vlog-node.h"
@@ -294,6 +295,85 @@ START_TEST(test_island_mixed_vhdl_and_func)
 }
 END_TEST
 
+START_TEST(test_island_spec_pack)
+{
+   // Mode B layout: an 11-bit std_logic vector, a 70-bit bit vector, a 3x5
+   // std_logic 2D array, a boolean and a 4-byte integer
+   enum { NSIGS = 5 };
+   static const uint32_t width[NSIGS]  = { 11, 70, 5, 1, 1 };
+   static const uint32_t nelems[NSIGS] = { 1, 1, 3, 1, 1 };
+   static const uint32_t b_off[NSIGS]  = { 8, 24, 96, 112, 120 };
+   static const uint32_t b_bytes[NSIGS] = { 11, 70, 15, 1, 4 };
+   static const uint32_t a_off[NSIGS]  = { 8, 16, 32, 56, 64 };
+   static const uint32_t a_flags[NSIGS] = {
+      RT_ISIG_TWO_STATE | RT_ISIG_STD_LOGIC_ELEM, RT_ISIG_TWO_STATE,
+      RT_ISIG_TWO_STATE | RT_ISIG_STD_LOGIC_ELEM, RT_ISIG_TWO_STATE, 0,
+   };
+
+   rt_island_sig_t sigs[NSIGS] = {};
+   for (int i = 0; i < NSIGS; i++) {
+      sigs[i].a_off = b_off[i];
+      sigs[i].width = width[i];
+      sigs[i].nelems = nelems[i];
+      sigs[i].nwords = (width[i] + 63) / 64;
+   }
+
+   uint32_t spec_a_off[NSIGS], spec_a_flags[NSIGS], spec_b_bytes[NSIGS];
+   memcpy(spec_a_off, a_off, sizeof(a_off));
+   memcpy(spec_a_flags, a_flags, sizeof(a_flags));
+   memcpy(spec_b_bytes, b_bytes, sizeof(b_bytes));
+
+   rt_island_spec_t spec = {
+      .state_bytes = 72,
+      .stride      = 128,
+      .hdr_bytes   = 8,
+      .a_off       = spec_a_off,
+      .a_flags     = spec_a_flags,
+      .b_bytes     = spec_b_bytes,
+   };
+   rt_island_t isl = { .sigs = sigs, .nsigs = NSIGS, .spec = &spec };
+
+   uint8_t b[128] = {}, b2[128] = {};
+   uint64_t a[16];
+   for (int i = 0; i < 8; i++)
+      b[i] = 0x11 * i;   // Header bytes copied unchanged
+   for (int k = 0; k < 11; k++)
+      b[8 + k] = 2 + ((k * 7) % 3 == 0);   // '0' and '1'
+   for (int k = 0; k < 70; k++)
+      b[24 + k] = (k % 5) == 1;
+   for (int k = 0; k < 15; k++)
+      b[96 + k] = 2 + (k % 2);
+   b[112] = 1;
+   memcpy(b + 120, "\x78\x56\x34\x12", 4);
+
+   ck_assert(rt_island_spec_pack(&isl, b, (uint8_t *)a));
+   ck_assert_int_eq(a[1] & 0x7ff, 0x492);   // Bit 0 is the last element
+   ck_assert_int_eq(a[7] & 1, 1);
+   ck_assert_int_eq(((uint8_t *)a)[64], 0x78);
+
+   rt_island_spec_unpack(&isl, (uint8_t *)a, b2);
+   for (int i = 0; i < NSIGS; i++)
+      ck_assert_mem_eq(b + b_off[i], b2 + b_off[i], b_bytes[i]);
+   ck_assert_mem_eq(b, b2, 8);
+
+   // Every std_logic value other than '0' and '1' makes the state unclean
+   for (int sig = 0; sig < 3; sig += 2) {
+      for (uint8_t v = 0; v < 9; v++) {
+         uint8_t *p = b + b_off[sig] + (sig == 0 ? 10 : 7);
+         const uint8_t save = *p;
+         *p = v;
+         ck_assert_int_eq(rt_island_spec_pack(&isl, b, (uint8_t *)a),
+                          v == 2 || v == 3);
+         *p = save;
+      }
+   }
+
+   // A bit or boolean byte above 1 is not a BIT value either
+   b[24 + 3] = 2;
+   ck_assert(!rt_island_spec_pack(&isl, b, (uint8_t *)a));
+}
+END_TEST
+
 Suite *get_island_tests(void)
 {
    Suite *s = suite_create("island");
@@ -303,6 +383,7 @@ Suite *get_island_tests(void)
    tcase_add_test(tc, test_island_mixed_ejections);
    tcase_add_test(tc, test_island_comb_cycle);
    tcase_add_test(tc, test_island_mixed_vhdl_and_func);
+   tcase_add_test(tc, test_island_spec_pack);
    suite_add_tcase(s, tc);
 
    return s;

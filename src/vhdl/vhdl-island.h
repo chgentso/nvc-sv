@@ -121,6 +121,7 @@ typedef struct {
    tree_t            rst_branch;
    uint32_t         *reads;
    uint32_t          n_reads;
+   uint32_t          n_body_reads;   // reads[] before clk/rst were appended
    uint32_t         *writes;
    uint32_t          n_writes;
    vhdl_write_range_t *read_ranges;
@@ -129,6 +130,10 @@ typedef struct {
    uint32_t          n_write_ranges;
    int               island_idx;
    int               dom_idx;
+   // Diagnostics for NVC_DUMP_ISLANDS: why the process is not fused
+   // (reason) and what keeps its island out of Mode A (a_block).
+   const char       *reason;
+   const char       *a_block;
 } vhdl_iproc_t;
 
 typedef struct {
@@ -144,10 +149,11 @@ typedef struct {
    uint32_t  n_write_sigs;
 } vhdl_idom_t;
 
-typedef struct {
+typedef struct _vhdl_island {
    uint32_t        id;
    ident_t         eval_name;
    bool            two_state;
+   bool            has_act;          // state starts with RT_ISLAND_ACT_BYTES
    uint32_t        state_bytes;
    uint32_t        sparse_log_off;
    uint32_t        total_state_bytes;
@@ -157,6 +163,12 @@ typedef struct {
    uint32_t        n_comb_procs;
    vhdl_idom_t    *doms;
    uint32_t        n_doms;
+   // Speculative Mode A (NVC_ISLAND_SPEC): the island with a packed
+   // two-state layout and its own functions, or NULL with the reason in
+   // a_reason.  hdr_bytes leading bytes of the state are the same in both.
+   struct _vhdl_island *a_variant;
+   const char     *a_reason;
+   uint32_t        hdr_bytes;
 } vhdl_island_t;
 
 static inline const vhdl_isl_sig_t *vhdl_island_find_sig(const vhdl_island_t *isl,
@@ -173,6 +185,12 @@ typedef struct {
    tree_t decl;
    tree_t expr;
 } vhdl_var_def_t;
+
+typedef struct vhdl_rej_note {
+   ident_t     key;
+   const char *reason;
+   const char *a_block;
+} vhdl_rej_note_t;
 
 typedef struct _vhdl_island_ctx {
    tree_t         block;
@@ -198,15 +216,29 @@ typedef struct _vhdl_island_ctx {
    int            n_block_stmts;
    bool           two_state;
    uint32_t       total_procs;
+   vhdl_rej_note_t *notes;   // NVC_DUMP_ISLANDS: ejected processes
+   uint32_t       n_notes;
+   uint32_t       cap_notes;
 } vhdl_island_ctx_t;
 
 vhdl_island_ctx_t *vhdl_island_analyze(tree_t block, const tree_t *ancestors,
                                        int n_ancestors, ident_t scope_prefix);
+vhdl_island_ctx_t *vhdl_island_analyze_mode(tree_t block,
+                                            const tree_t *ancestors,
+                                            int n_ancestors,
+                                            ident_t scope_prefix,
+                                            bool two_state);
 bool vhdl_island_can_inline_gen_block(tree_t gb);
 bool vhdl_island_gen_block_eligible(tree_t block);
 void vhdl_island_rebuild(vhdl_island_ctx_t *ctx);
 void vhdl_island_dump_summary(const vhdl_island_ctx_t *ctx);
+void vhdl_island_mark_a_blocks(vhdl_island_ctx_t *ctx,
+                               const vhdl_island_ctx_t *trial);
 void vhdl_island_ctx_free(vhdl_island_ctx_t *ctx);
+vhdl_island_t *vhdl_island_new_a_variant(const vhdl_island_ctx_t *ctx,
+                                         const vhdl_island_t *isl,
+                                         const char **reason);
+void vhdl_island_free_a_variant(vhdl_island_t *a);
 
 bool vhdl_island_stmt_fused(const vhdl_island_ctx_t *ctx, int stmt_idx);
 int vhdl_island_lookup_leaf(const vhdl_island_ctx_t *ctx, tree_t decl,
