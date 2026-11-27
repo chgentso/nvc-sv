@@ -40810,6 +40810,25 @@ mir_unit_t *vlog_lower_thunk(mir_context_t *mc, ident_t parent, vlog_node_t v)
          mir_build_return(mu, res);
       }
       break;
+   case V_GENVAR_DECL:
+      {
+         int hops;
+         mir_value_t var = mir_search_object(mu, v, &hops);
+         assert(!mir_is_null(var));
+         mir_value_t ref = hops > 0
+            ? mir_build_var_upref(mu, hops, var.id) : var;
+         mir_value_t value = mir_build_load(mu, ref);
+         if (mir_is_vector(mu, value)
+             && mir_get_class(mu, mir_get_type(mu, value)) == MIR_TYPE_VEC2) {
+            mir_type_t vt = mir_get_type(mu, value);
+            value = mir_build_cast(
+               mu, mir_vec4_type(mu, mir_get_size(mu, vt),
+                                 mir_get_signed(mu, vt)), value);
+         }
+         mir_set_result(mu, mir_get_type(mu, value));
+         mir_build_return(mu, value);
+      }
+      break;
    default:
       {
          mir_value_t value = vlog_lower_rvalue(&g, v);

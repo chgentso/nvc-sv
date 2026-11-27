@@ -154,5 +154,6 @@ void vpi_island2_startup(void);
 void vpi_island3_startup(void);
 void vpi_island4_startup(void);
 void vpi_island5_startup(void);
+void vpi_genvar1_startup(void);
 
 #endif  // _VPI_TEST_H

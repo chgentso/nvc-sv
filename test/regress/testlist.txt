@@ -3369,3 +3369,4 @@ svclog2wide1    verilog
 svdriveconst1   verilog
 svfmtbin1       verilog
 svcastctx2      verilog
+vpi_genvar1     verilog,vpi
