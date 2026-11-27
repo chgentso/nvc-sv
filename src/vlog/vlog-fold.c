@@ -568,12 +568,16 @@ static void fold_report_non_const(vlog_node_t v, fold_ctx_t *ctx)
    }
 }
 
+static vlog_node_t fold_pattern_items(vlog_node_t v, fold_ctx_t *ctx);
+
 static vlog_node_t fold_const_expr(vlog_node_t v, fold_ctx_t *ctx)
 {
    switch (get_fold_state(v, ctx)) {
    case FOLD_CONST:
       return v;
    case FOLD_POSSIBLE:
+      if (vlog_kind(v) == V_PATTERN_EXPR)
+         return fold_pattern_items(v, ctx);
       return fold_call_thunk(v, ctx);
    case FOLD_LATER:
       return NULL;
