@@ -5886,9 +5886,22 @@ static vlog_cmp_t vlog_member_compare(vlog_gen_t *g, vlog_node_t v,
              && sub != NULL && (vlog_kind(sub) == V_STRUCT_DECL
                                 || vlog_kind(sub) == V_UNION_DECL))
             return vlog_struct_compare(g, v, sub, lf, rf, casecmp);
+         else if (sub != NULL && vlog_kind(sub) == V_DATA_TYPE
+                  && vlog_subkind(sub) == DT_STRING) {
+            // Strings are equal when they have the same characters
+            mir_type_t t_offset = mir_offset_type(g->mu);
+            mir_value_t zero = mir_const(g->mu, t_offset, 0);
+            mir_value_t args[] = { lf, rf, zero };
+            mir_value_t cmp =
+               vlog_str_call(g, "__sv_str_cmp", t_offset, args, 3);
+            return (vlog_cmp_t){
+               .diff = mir_build_cmp(g->mu, MIR_CMP_NEQ, cmp, zero),
+               .unknown = mir_const(g->mu, t_bool, 0),
+            };
+         }
 
          fatal_at(vlog_loc(v), "sorry, only members of integral, real, "
-                  "and structure types can be compared");
+                  "string and structure types can be compared");
       }
    }
 }
