@@ -120,11 +120,11 @@ VHDL_EOF
 unset NVC_ISLAND_SPEC NVC_ISLAND_SPEC_FORCE NVC_ISLAND_SPEC_STATS
 
 nvc --std=2008 --work=w_off -a spec1.vhd
-nvc --std=2008 --work=w_off --rtl-islands=off -e spec1_tb -r --wave=off.vcd \
+nvc --std=2008 --work=w_off --rtl-islands=off -e spec1_tb -r --wave=off.vcd --format=vcd \
     2>&1 | grep -v '^\*\* Debug' > off.log
 
 nvc --std=2008 --work=w_b -a spec1.vhd
-nvc --std=2008 --work=w_b --rtl-islands=hier -e spec1_tb -r --wave=b.vcd \
+nvc --std=2008 --work=w_b --rtl-islands=hier -e spec1_tb -r --wave=b.vcd --format=vcd \
     2>&1 | grep -v '^\*\* Debug' > b.log
 
 export NVC_ISLAND_SPEC=1
@@ -132,7 +132,7 @@ nvc --std=2008 --work=w_s -a spec1.vhd
 NVC_DUMP_ISLANDS=1 nvc --std=2008 --work=w_s --rtl-islands=hier -e spec1_tb \
     > s_dump.log
 NVC_ISLAND_SPEC_FORCE=A NVC_ISLAND_SPEC_STATS=1 \
-    nvc --std=2008 --work=w_s -r --wave=s.vcd spec1_tb 2>&1 \
+    nvc --std=2008 --work=w_s -r --wave=s.vcd --format=vcd spec1_tb 2>&1 \
     | grep -v '^\*\* Debug' > s_raw.log
 grep -v '^ISLAND_SPEC:' s_raw.log > s.log
 
@@ -142,7 +142,9 @@ diff -u off.log b.log
 diff -u off.log s.log
 sed '/^\$date/,/\$end/d' b.vcd > b_nd.vcd
 sed '/^\$date/,/\$end/d' s.vcd > s_nd.vcd
+sed '/^\$date/,/\$end/d' off.vcd > off_nd.vcd
 diff -u b_nd.vcd s_nd.vcd
+diff -u off_nd.vcd s_nd.vcd
 
 # Every island of the DUT has a Mode A variant.  Only the first calls see
 # 'U' (the outputs before their first evaluation); after that the state is
