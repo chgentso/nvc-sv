@@ -37816,6 +37816,12 @@ static void vlog_lower_tcheck(vlog_gen_t *g, vlog_node_t tcheck)
          mir_value_t stamp_var = mir_add_var(g->mu, t_time,  MIR_NULL_STAMP,
                                              ident_new("stamp"), 0);
          mir_build_store(g->mu, stamp_var, t_zero);
+
+         // There is no violation until the first stamp event (31.3)
+         mir_type_t t_bool = mir_bool_type(g->mu);
+         mir_value_t stamped_var = mir_add_var(g->mu, t_bool, MIR_NULL_STAMP,
+                                               ident_new("stamped"), 0);
+         mir_build_store(g->mu, stamped_var, mir_const(g->mu, t_bool, 0));
          mir_build_return(g->mu, MIR_NULL_VALUE);
 
          mir_block_t start_bb = mir_add_block(g->mu);
@@ -37857,6 +37863,9 @@ static void vlog_lower_tcheck(vlog_gen_t *g, vlog_node_t tcheck)
          mir_value_t limit_time =
             vlog_lower_scaled_time(g, v_limit, vlog_ival(tcheck));
          mir_value_t ok = mir_build_cmp(g->mu, MIR_CMP_GEQ, diff_time, limit_time);
+         ok = mir_build_or(g->mu, ok,
+                           mir_build_not(g->mu,
+                                         mir_build_load(g->mu, stamped_var)));
 
          mir_value_t stamp_display = stamp;
          if (fail_simul) {
@@ -37886,6 +37895,7 @@ static void vlog_lower_tcheck(vlog_gen_t *g, vlog_node_t tcheck)
 
          mir_set_cursor(g->mu, sample_bb, MIR_APPEND);
          mir_build_store(g->mu, stamp_var, now);
+         mir_build_store(g->mu, stamped_var, mir_const(g->mu, t_bool, 1));
          mir_build_jump(g->mu, start_bb);
       }
       break;
