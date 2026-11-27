@@ -2569,15 +2569,41 @@ static PLI_INT32 clog2_tf(PLI_BYTE8 *userdata)
    vpiHandle arg = vpi_scan(argv);
    assert(arg != NULL);
 
-   s_vpi_value value = { .format = vpiIntVal };
+   s_vpi_value value = { .format = vpiBinStrVal };
    vpi_get_value(arg, &value);
 
    vpi_release_handle(arg);
    vpi_release_handle(argv);
 
+   // IEEE 1800-2017 20.8.1: treat the argument as an arbitrary-width
+   // unsigned value; an argument of 0 produces 0.
+   PLI_INT32 r = 0;
+   const char *bits = (const char *)value.value.str;
+   if (bits != NULL) {
+      const size_t len = strlen(bits);
+      int hi = -1;
+      bool any_lower = false, has_xz = false;
+      for (size_t i = 0; i < len; i++) {
+         if (bits[i] == '1') {
+            const int pos = (int)(len - 1 - i);
+            if (hi < 0)
+               hi = pos;
+            else
+               any_lower = true;
+         }
+         else if (bits[i] != '0') {
+            has_xz = true;
+            break;
+         }
+      }
+
+      if (!has_xz && hi > 0)
+         r = any_lower ? hi + 1 : hi;
+   }
+
    s_vpi_value result = {
       .format = vpiIntVal,
-      .value = { .integer = ilog2(value.value.integer) },
+      .value = { .integer = r },
    };
 
    vpi_put_value(call, &result, NULL, 0);
