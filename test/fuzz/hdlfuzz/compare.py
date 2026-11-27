@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 from . import vcd as vcdmod
-from .signatures import Difference, mask, single_difference
+from .signatures import Difference, mask, mask_report, single_difference
 
 RULE_N1 = "N1-sort-within-delta"
 RULE_VCD_ORDER = "vcd-order-within-time"
@@ -145,8 +145,8 @@ def nvc_records(items):
 
 def _item_shape(it):
     if isinstance(it, Rec):
-        return "%s:%s" % (it.sev, mask(it.msg.split("\n")[0]))
-    return "plain:" + mask(it)
+        return "%s:%s" % (it.sev, mask_report(it.msg.split("\n")[0]))
+    return "plain:" + mask_report(it)
 
 
 def diff_items(a, b):
@@ -357,7 +357,7 @@ def compare_reports_cross(res_nvc, res_other):
         else:
             kind, r = "missing-record", only_b[0]
         return Difference("L2", "report", res_nvc.config, res_other.config,
-                          kind, "%s:%s" % (r[1], mask(r[2])),
+                          kind, "%s:%s" % (r[1], mask_report(r[2])),
                           "at %d fs: nvc-only %s, other-only %s" % (
                               t, only_a[:1], only_b[:1]),
                           [RULE_NODELTA, RULE_METAVALUE, RULE_FINISH])

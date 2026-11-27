@@ -52,6 +52,19 @@ class MaskTests(unittest.TestCase):
                          "signal '_' not found")
         self.assertEqual(sg.mask("x" * 100, 10), "x" * 10)
 
+    def test_mask_report(self):
+        # one bug, many values and signal names: one shape
+        for a, b in (("FZ M m0.s7 xxxx0000uuuu", "FZ M m12.s3 0101"),
+                     ("FZ M m1.s9 'U'", "FZ M m4.s2 xx"),
+                     ("FZ S 12 o0=0000 o1=xx", "FZ S 7 o0=1u1u o1='U'")):
+            self.assertEqual(sg.mask_report(a), sg.mask_report(b))
+        self.assertEqual(sg.mask_report("FZ M m0.s7 xxxx"), "FZ M #")
+        self.assertEqual(sg.mask_report("FZ S 12 o0=0000 o1=xx"),
+                         "FZ S # o0=# o1=#")
+        # words stay
+        self.assertEqual(sg.mask_report("signal not found"),
+                         "signal not found")
+
     def test_crash_frames(self):
         self.assertEqual(sg.crash_frames(CRASH),
                          ["rt_island_eval_comb", "model_cycle"])

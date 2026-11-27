@@ -41,6 +41,7 @@ SMOKE_LIMIT = 20
 MIN_FREE = 12 * 1024 ** 3
 MAX_OUT = 2 * 1024 ** 3
 SLOT_CAP = "3G"
+KEEP_PER_BUCKET = 5     # failing cases kept in full per bucket (smallest)
 
 
 def slug(sig):
@@ -134,9 +135,35 @@ def run_one(tools, case, config_names, out, worker_dir, tier="", seed=None,
     return rec
 
 
+def make_room(bdir, size):
+    """True if a case of this size may be kept in bucket folder bdir; drops
+    the largest kept case when the bucket is full and this one is smaller."""
+    kept = []
+    if os.path.isdir(bdir):
+        for n in os.listdir(bdir):
+            try:
+                with open(os.path.join(bdir, n, "verdict.json")) as f:
+                    kept.append((json.load(f).get("size", 0), n))
+            except (OSError, ValueError):
+                kept.append((0, n))
+    if len(kept) < KEEP_PER_BUCKET:
+        return True
+    big = max(kept)
+    if big[0] <= size:
+        return False
+    shutil.rmtree(os.path.join(bdir, big[1]), ignore_errors=True)
+    return True
+
+
 def keep(out, case, results, verdict, rec):
-    """Failing case: sources, logs, waveforms and the verdict stay."""
-    d = os.path.join(out, "fail", slug(rec["primary"] or "unknown"), case.name)
+    """Failing case: sources, logs, waveforms and the verdict stay.  A bucket
+    keeps at most KEEP_PER_BUCKET cases in full (the smallest); the others
+    stay as records in cases.jsonl, so a long campaign does not fill the
+    disk."""
+    bdir = os.path.join(out, "fail", slug(rec["primary"] or "unknown"))
+    if not make_room(bdir, rec["size"]):
+        return
+    d = os.path.join(bdir, case.name)
     os.makedirs(d, exist_ok=True)
     for f in case.files:
         shutil.copy(f, d)
@@ -150,7 +177,7 @@ def keep(out, case, results, verdict, rec):
             shutil.copy(r.wave, os.path.join(d, name + ".vcd"))
     with open(os.path.join(d, "verdict.json"), "w") as f:
         json.dump({"signatures": verdict.signatures(),
-                   "grouped": verdict.signatures(True),
+                   "grouped": verdict.signatures(True), "size": rec["size"],
                    "blame": verdict.blame,
                    "notes": verdict.notes, "info": verdict.info,
                    "diffs": [vars(x) for x in verdict.diffs]}, f, indent=1,

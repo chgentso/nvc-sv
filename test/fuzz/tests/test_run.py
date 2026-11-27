@@ -202,6 +202,20 @@ class StubTest(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(kept, "tb.vhd")))
         self.assertFalse(os.path.exists(os.path.join(out, "w0", "case-chain")))
 
+    def test_bucket_keeps_smallest(self):
+        out = os.path.join(self.tmp.name, "out")
+        bdir = os.path.join(out, "fail", "b")
+        for n, size in (("a", 50), ("b", 10), ("c", 30), ("d", 40),
+                        ("e", 20)):
+            self.assertTrue(campaign.make_room(bdir, size))
+            os.makedirs(os.path.join(bdir, n))
+            with open(os.path.join(bdir, n, "verdict.json"), "w") as f:
+                json.dump({"size": size}, f)
+        self.assertEqual(campaign.KEEP_PER_BUCKET, 5)
+        self.assertFalse(campaign.make_room(bdir, 60))     # bigger: dropped
+        self.assertTrue(campaign.make_room(bdir, 5))       # replaces "a"
+        self.assertEqual(sorted(os.listdir(bdir)), ["b", "c", "d", "e"])
+
     def test_passing_case_leaves_nothing(self):
         out = os.path.join(self.tmp.name, "out")
         os.makedirs(out)

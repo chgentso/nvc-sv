@@ -101,6 +101,24 @@ def mask(msg, limit=48):
     return m[:limit]
 
 
+_BITS = re.compile(r"\b(?=[01xzuwlh-]*[01xzuw])[01xzuwlh-]{2,}\b", re.I)
+_SIGID = re.compile(r"\b[a-z]\w*?\d+(?:\.[a-z]\w*?\d+)+\b", re.I)
+
+
+def mask_report(msg, limit=48):
+    """mask() for the text of a monitor or sampler report: also hides
+    std_logic strings (a run of 0/1/x/u/z/w/l/h/-) and generated signal
+    paths (m3.s7), which otherwise split one bug into one bucket per
+    value."""
+    m = mask(msg, 1000)
+    m = _SIGID.sub("#", m)
+    m = _BITS.sub("#", m)
+    m = re.sub(r"=\s*'_'", "=#", m)
+    m = re.sub(r"(?<=\s)'_'$", "#", m)
+    m = re.sub(r"#(?:\s+#)+", "#", m)
+    return m[:limit]
+
+
 def crash_frames(text, n=2):
     """Top n function names of a crash trace, no addresses.  nvc prints
     '[0x55d...] ../src/util.c:123 show_stacktrace' style lines, sanitizers
