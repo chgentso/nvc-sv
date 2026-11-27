@@ -1281,7 +1281,7 @@ static bool is_array_method_name(ident_t id)
    static const char *const names[] = {
       "reverse", "sort", "rsort", "shuffle", "sum", "product", "and", "or",
       "xor", "min", "max", "unique", "unique_index", "find", "find_index",
-      "find_first", "find_first_index", "find_last", "find_last_index",
+      "find_first", "find_first_index", "find_last", "find_last_index", "map",
    };
 
    for (int i = 0; i < ARRAY_LEN(names); i++) {

@@ -2493,6 +2493,7 @@ vlog_node_t vlog_get_type(vlog_node_t v)
       case V_METHOD_ARR_FIND_FIRST_INDEX:
       case V_METHOD_ARR_FIND_LAST:
       case V_METHOD_ARR_FIND_LAST_INDEX:
+      case V_METHOD_ARR_MAP:
       case V_METHOD_RANDSTATE_GET:
       case V_METHOD_EVENT_TRIGGERED:
       case V_METHOD_ENUM_NAME:

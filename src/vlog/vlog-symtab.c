@@ -782,6 +782,7 @@ static bool lookup_array_method(vlog_node_t v, vlog_node_t prefix,
       { "find_first_index", V_METHOD_ARR_FIND_FIRST_INDEX },
       { "find_last",        V_METHOD_ARR_FIND_LAST },
       { "find_last_index",  V_METHOD_ARR_FIND_LAST_INDEX },
+      { "map",              V_METHOD_ARR_MAP },
       { "insert",           V_METHOD_ARR_INSERT },
    };
 
@@ -820,6 +821,7 @@ static bool lookup_array_method(vlog_node_t v, vlog_node_t prefix,
       case V_METHOD_ARR_FIND_FIRST_INDEX:
       case V_METHOD_ARR_FIND_LAST:
       case V_METHOD_ARR_FIND_LAST_INDEX:
+      case V_METHOD_ARR_MAP:
       case V_METHOD_ARR_SUM:
       case V_METHOD_ARR_PRODUCT:
       case V_METHOD_ARR_AND:
@@ -858,6 +860,21 @@ static bool lookup_array_method(vlog_node_t v, vlog_node_t prefix,
    case V_METHOD_ARR_FIND_FIRST:
    case V_METHOD_ARR_FIND_LAST:
       vlog_set_ref(v, make_queue_type(elem, loc));
+      break;
+   case V_METHOD_ARR_MAP:
+      {
+         vlog_node_t rtype = NULL;
+         if (has_with) {
+            vlog_node_t w = vlog_stmt(v, 2);
+            if (vlog_is_real(w))
+               rtype = make_atom_type(DT_REAL, 64, 0, loc);
+            else if (vlog_get_type(w) != NULL)
+               rtype = vlog_get_type(w);
+         }
+         if (rtype == NULL)
+            rtype = make_atom_type(DT_INT, 32, VLOG_F_SIGNED, loc);
+         vlog_set_ref(v, make_queue_type(rtype, loc));
+      }
       break;
    case V_METHOD_ARR_UNIQUE_INDEX:
    case V_METHOD_ARR_FIND_INDEX:

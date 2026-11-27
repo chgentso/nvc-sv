@@ -19978,7 +19978,8 @@ static mir_value_t vlog_lower_array_method(vlog_gen_t *g, vlog_node_t v)
          || method == V_METHOD_ARR_FIND_FIRST
          || method == V_METHOD_ARR_FIND_FIRST_INDEX
          || method == V_METHOD_ARR_FIND_LAST
-         || method == V_METHOD_ARR_FIND_LAST_INDEX;
+         || method == V_METHOD_ARR_FIND_LAST_INDEX
+         || method == V_METHOD_ARR_MAP;
 
       const bool keyed = method == V_METHOD_ARR_SORT
          || method == V_METHOD_ARR_RSORT
@@ -20020,11 +20021,13 @@ static mir_value_t vlog_lower_array_method(vlog_gen_t *g, vlog_node_t v)
       mir_put_object(g->mu, item, a.item_var);
       mir_put_object(g->mu, index, a.index_var);
 
-      if (vlog_is_real(a.with))
+      if (method != V_METHOD_ARR_MAP && vlog_is_real(a.with))
          fatal_at(vlog_loc(a.with), "sorry, real valued with expressions "
                   "are not supported");
 
-      if (vlog_is_string(a.with))
+      if (vlog_is_real(a.with))
+         a.ktype = mir_real_type(g->mu, -DBL_MAX, DBL_MAX);
+      else if (vlog_is_string(a.with))
          a.ktype = mir_uarray_type(g->mu, 1, mir_char_type(g->mu));
       else
          a.ktype = mir_vec4_type(g->mu, MAX(vlog_width(a.with), 1),
@@ -20038,6 +20041,7 @@ static mir_value_t vlog_lower_array_method(vlog_gen_t *g, vlog_node_t v)
    case V_METHOD_ARR_FIND_FIRST_INDEX:
    case V_METHOD_ARR_FIND_LAST:
    case V_METHOD_ARR_FIND_LAST_INDEX:
+   case V_METHOD_ARR_MAP:
       if (a.with == NULL)
          fatal_at(vlog_loc(v), "the %pQ method requires a with clause",
                   vlog_ident(v));
@@ -20098,7 +20102,8 @@ static mir_value_t vlog_lower_array_method(vlog_gen_t *g, vlog_node_t v)
       || method == V_METHOD_ARR_FIND_FIRST
       || method == V_METHOD_ARR_FIND_FIRST_INDEX
       || method == V_METHOD_ARR_FIND_LAST
-      || method == V_METHOD_ARR_FIND_LAST_INDEX;
+      || method == V_METHOD_ARR_FIND_LAST_INDEX
+      || method == V_METHOD_ARR_MAP;
 
    mir_value_t entries = src;
 
@@ -20452,6 +20457,40 @@ static mir_value_t vlog_lower_array_method(vlog_gen_t *g, vlog_node_t v)
          return vlog_wrap_array(g, data, mir_build_load(g->mu, count));
       }
 
+   case V_METHOD_ARR_MAP:
+      {
+         mir_type_t t_res = vlog_type_info(
+            g, vlog_type(vlog_ref(v)))->type;
+         mir_value_t data = vlog_alloc_array(g, t_res, len);
+
+         vlog_loop_t l;
+         vlog_loop_begin(g, &l, zero, len);
+
+         mir_value_t elem, index;
+         if (assoc) {
+            mir_value_t entry = mir_build_array_ref(g->mu, src, l.i);
+            elem = mir_build_load(g->mu, mir_build_record_ref(g->mu, entry, 1));
+            index = vlog_lower_cast(
+               g, a.iti->type,
+               mir_build_load(g->mu, mir_build_record_ref(g->mu, entry, 0)));
+         }
+         else {
+            elem = vlog_arr_elem(g, src, l.i);
+            index = vlog_offset_to_int(g, vlog_arr_index(g, &a, l.i));
+         }
+
+         mir_build_store(g->mu, a.item_var, elem);
+         mir_build_store(g->mu, a.index_var, index);
+
+         mir_value_t mapped = vlog_lower_cast(
+            g, t_res, vlog_lower_with_context(g, a.with, t_res));
+         mir_build_store(g->mu, mir_build_array_ref(g->mu, data, l.i), mapped);
+
+         vlog_loop_end(g, &l);
+
+         return vlog_wrap_array(g, data, len);
+      }
+
    default:
       should_not_reach_here();
    }
@@ -20657,6 +20696,7 @@ static mir_value_t vlog_lower_builtin_method(vlog_gen_t *g, vlog_node_t v)
    case V_METHOD_ARR_FIND_FIRST_INDEX:
    case V_METHOD_ARR_FIND_LAST:
    case V_METHOD_ARR_FIND_LAST_INDEX:
+   case V_METHOD_ARR_MAP:
       return vlog_lower_array_method(g, v);
    case V_METHOD_ENUM_FIRST:
    case V_METHOD_ENUM_LAST:
