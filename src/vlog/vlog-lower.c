@@ -6241,6 +6241,13 @@ static mir_value_t vlog_lower_wildcard_eq(vlog_gen_t *g, vlog_node_t v)
    return sel;
 }
 
+static bool vlog_is_iface_value(vlog_node_t v)
+{
+   // An interface instance used as a value
+   return vlog_kind(v) == V_HIER_REF && !vlog_has_ref(v)
+      && vlog_ident(v) == ident_new("$self");
+}
+
 static mir_value_t vlog_lower_binary(vlog_gen_t *g, vlog_node_t v,
                                      mir_type_t context)
 {
@@ -6373,6 +6380,34 @@ static mir_value_t vlog_lower_binary(vlog_gen_t *g, vlog_node_t v,
          mir_value_t left = nl > 0 ? aval : pval;
          mir_value_t right = nl > 0 ? pval : aval;
          return vlog_lower_vector_binary(g, op, left, right, context);
+      }
+   }
+
+   if (op == V_BINARY_LOG_EQ || op == V_BINARY_LOG_NEQ
+       || op == V_BINARY_CASE_EQ || op == V_BINARY_CASE_NEQ) {
+      // An interface instance compared with a virtual interface is a
+      // handle of the type of the other operand
+      vlog_node_t vtype = NULL;
+      if (vlog_is_iface_value(lexpr))
+         vtype = vlog_get_type(rexpr);
+      else if (vlog_is_iface_value(rexpr))
+         vtype = vlog_get_type(lexpr);
+
+      if (vtype != NULL && vlog_kind(vtype) == V_DATA_TYPE
+          && vlog_subkind(vtype) == DT_VIRTUAL) {
+         mir_type_t t_handle = vlog_type_info(g, vtype)->type;
+         mir_value_t l = vlog_lower_with_context(g, lexpr, t_handle);
+         mir_value_t r = vlog_lower_with_context(g, rexpr, t_handle);
+         r = mir_build_cast(g->mu, mir_get_type(g->mu, l), r);
+         const bool equal = op == V_BINARY_LOG_EQ || op == V_BINARY_CASE_EQ;
+         mir_value_t test = mir_build_cmp(g->mu, equal ? MIR_CMP_EQ
+                                          : MIR_CMP_NEQ, l, r);
+         mir_type_t t_bit = mir_vec2_type(g->mu, 1, false);
+         mir_value_t sel =
+            mir_build_select(g->mu, t_bit, test,
+                             mir_const_vec(g->mu, t_bit, 1, 0),
+                             mir_const_vec(g->mu, t_bit, 0, 0));
+         return vlog_widen_vector(g, sel, context);
       }
    }
 
