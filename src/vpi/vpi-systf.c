@@ -472,6 +472,12 @@ static void interpret_format(ostream_t *out, const char *fmt, vpiHandle it)
 
          p++;   // Skip over '%'
 
+         if (*p == '\0') {
+            ostream_putc(out, '%');
+            start = p;
+            break;
+         }
+
          const bool left = *p == '-';
          if (left)
             p++;
