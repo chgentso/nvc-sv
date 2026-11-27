@@ -3467,3 +3467,4 @@ vhdl_report_order2 shell
 svreadmemassoc1 verilog,gold
 specify9        verilog,fail,gold
 vlog_callsel1 verilog,gold
+svtypequery1 verilog,gold

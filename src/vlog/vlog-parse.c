@@ -4770,6 +4770,21 @@ static bool type_has_const_size(vlog_node_t t)
    }
 }
 
+static bool is_type_query(ident_t id)
+{
+   static const char *const names[] = {
+      "$bits", "$size", "$left", "$right", "$low", "$high", "$increment",
+      "$dimensions", "$unpacked_dimensions"
+   };
+
+   for (int i = 0; i < ARRAY_LEN(names); i++) {
+      if (id == ident_new(names[i]))
+         return true;
+   }
+
+   return false;
+}
+
 static vlog_node_t p_system_tf_call(vlog_kind_t kind)
 {
    // system_tf_identifier [ ( list_of_arguments ) ]
@@ -4909,6 +4924,43 @@ static vlog_node_t p_system_tf_call(vlog_kind_t kind)
          vlog_add_param(v, ref);
 
          consume(tRPAREN);
+         vlog_set_loc(v, CURRENT_LOC);
+         return v;
+      }
+
+      if (is_type_query(id) && peek_nth(2) != tTICK
+          && (is_simple_type_token(peek()) || scan(tSTRUCT, tUNION, tENUM))) {
+         // A built-in or anonymous data type as the argument of $bits or
+         // an array query function (IEEE 1800-2017 20.6.2, 20.7)
+         vlog_node_t dt = p_data_type();
+         consume(tRPAREN);
+
+         if (subk == V_SYSTF_BITS && vlog_kind(dt) == V_DATA_TYPE) {
+            switch (vlog_subkind(dt)) {
+            case DT_REAL:
+            case DT_REALTIME:
+               return foreach_number(64, &state.last_loc);
+            case DT_SHORTREAL:
+               return foreach_number(32, &state.last_loc);
+            default:
+               break;
+            }
+         }
+
+         if (subk == V_SYSTF_BITS && type_has_const_size(dt))
+            return foreach_number(vlog_size(dt), &state.last_loc);
+
+         vlog_node_t decl = vlog_new(V_VAR_DECL);
+         vlog_set_ident(decl, ident_uniq("typearg"));
+         vlog_set_type(decl, dt);
+         vlog_set_loc(decl, &state.last_loc);
+
+         vlog_node_t ref = vlog_new(V_REF);
+         vlog_set_ident(ref, vlog_ident(decl));
+         vlog_set_ref(ref, decl);
+         vlog_set_loc(ref, &state.last_loc);
+         vlog_add_param(v, ref);
+
          vlog_set_loc(v, CURRENT_LOC);
          return v;
       }
