@@ -3343,3 +3343,4 @@ vhdl_island_reasons1 shell
 vhdl_island_arr2d_a1 shell
 vhdl_island_dynslice_a1 shell
 vhdl_island_rom_wide_a1 shell
+vhdl_island_match_a1 shell

@@ -1116,9 +1116,14 @@ tree_t vhdl_island_resolve_func_body(tree_t decl)
 static bool is_supported_std_fn(check_ctx_t *c, const char *pkg, const char *fn)
 {
    if (strcmp(pkg, "IEEE.STD_LOGIC_1164.") == 0) {
-      if ((fn_name_is(fn, "IS_X") || fn_name_is(fn, "STD_MATCH"))
-          && chk_note(c, "A5 IS_X/STD_MATCH"))
-         return false;
+      // Mode A has no metavalues: IS_X is false, matching is equality and
+      // the matching operators compare like their non-matching relatives
+      if (c->two_state
+          && (fn_name_is(fn, "STD_MATCH") || fn_name_is(fn, "\"?=\"")
+              || fn_name_is(fn, "\"?/=\"") || fn_name_is(fn, "\"?<\"")
+              || fn_name_is(fn, "\"?<=\"") || fn_name_is(fn, "\"?>\"")
+              || fn_name_is(fn, "\"?>=\"")))
+         return true;
       return fn_name_is(fn, "\"and\"") || fn_name_is(fn, "\"or\"")
          || fn_name_is(fn, "\"nand\"") || fn_name_is(fn, "\"nor\"")
          || fn_name_is(fn, "\"xor\"") || fn_name_is(fn, "\"xnor\"")
@@ -1137,9 +1142,8 @@ static bool is_supported_std_fn(check_ctx_t *c, const char *pkg, const char *fn)
        || strcmp(pkg, "IEEE.STD_LOGIC_UNSIGNED.") == 0
        || strcmp(pkg, "IEEE.STD_LOGIC_SIGNED.") == 0
        || strcmp(pkg, "IEEE.STD_LOGIC_ARITH.") == 0) {
-      if ((fn_name_is(fn, "STD_MATCH") || fn_name_is(fn, "IS_X"))
-          && chk_note(c, "A5 IS_X/STD_MATCH"))
-         return false;
+      if (c->two_state && fn_name_is(fn, "STD_MATCH"))
+         return true;
       return fn_name_is(fn, "\"+\"") || fn_name_is(fn, "\"-\"")
          || fn_name_is(fn, "\"*\"")
          || fn_name_is(fn, "\"=\"") || fn_name_is(fn, "\"/=\"")
@@ -1797,11 +1801,6 @@ static bool check_expr_inner(check_ctx_t *c, tree_t expr, bool is_target)
             return false;
          tree_t decl = tree_ref(expr);
          const subprogram_kind_t sk = tree_subkind(decl);
-         if ((sk == S_MATCH_LT || sk == S_MATCH_LE
-              || sk == S_MATCH_GT || sk == S_MATCH_GE
-              || sk == S_MATCH_EQ || sk == S_MATCH_NEQ)
-             && chk_note(c, "A6 matching operator"))
-            return false;
          if (sk == S_RISING_EDGE || sk == S_FALLING_EDGE)
             return false;
 

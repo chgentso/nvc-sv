@@ -1482,6 +1482,59 @@ static bool vi_modeb_call_ieee(vi_lower_t *l, tree_t decl,
    return true;
 }
 
+typedef enum { VIM_EQ, VIM_NEQ, VIM_LT, VIM_LE, VIM_GT, VIM_GE } vi_match_op_t;
+
+// Mode A matching comparison.  There are no metavalues in Mode A, so STD_MATCH
+// and the matching operators compare exactly like "=" and the ordering
+// operators.  BOOL_RESULT selects a boolean result (STD_MATCH) instead of a
+// bit or std_ulogic one (the matching operators).
+static bool vi_lower_match_cmp(vi_lower_t *l, vi_match_op_t op, vi_val_t a,
+                               vi_val_t b, bool bool_result, bool is_std,
+                               vi_val_t *out)
+{
+   mir_unit_t *mu = l->mu;
+   mir_value_t c;
+   if (a.kind == VIVAL_BIT && b.kind == VIVAL_BIT) {
+      const mir_cmp_t cmp = (op == VIM_EQ) ? MIR_CMP_EQ
+         : (op == VIM_NEQ) ? MIR_CMP_NEQ
+         : (op == VIM_LT) ? MIR_CMP_LT
+         : (op == VIM_LE) ? MIR_CMP_LEQ
+         : (op == VIM_GT) ? MIR_CMP_GT : MIR_CMP_GEQ;
+      c = mir_build_cmp(mu, cmp,
+                        mir_build_cast(mu, vi_u8_type(mu), vi_to_vec2_1(l, a)),
+                        mir_build_cast(mu, vi_u8_type(mu), vi_to_vec2_1(l, b)));
+   }
+   else if (a.kind == VIVAL_VEC && b.kind == VIVAL_VEC
+            && (op == VIM_EQ || op == VIM_NEQ)) {
+      if (a.width != b.width)
+         c = mir_const(mu, mir_bool_type(mu), op == VIM_NEQ);
+      else
+         c = mir_build_binary(mu, (op == VIM_EQ)
+                              ? MIR_VEC_CASE_EQ : MIR_VEC_CASE_NEQ,
+                              mir_vec2_type(mu, (int)a.width, false),
+                              a.val, b.val);
+   }
+   else
+      return false;
+
+   *out = bool_result ? vi_from_bool_bit(l, c, true, false)
+      : vi_from_bool_bit(l, c, false, is_std);
+   return true;
+}
+
+static bool vi_match_op_from_name(const char *fn, vi_match_op_t *op)
+{
+   if (fn_name_is(fn, "\"?=\""))        *op = VIM_EQ;
+   else if (fn_name_is(fn, "\"?/=\"")) *op = VIM_NEQ;
+   else if (fn_name_is(fn, "\"?<\""))  *op = VIM_LT;
+   else if (fn_name_is(fn, "\"?<=\"")) *op = VIM_LE;
+   else if (fn_name_is(fn, "\"?>\""))  *op = VIM_GT;
+   else if (fn_name_is(fn, "\"?>=\"")) *op = VIM_GE;
+   else
+      return false;
+   return true;
+}
+
 static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
                                const char *pkg, const char *fn, vi_val_t *out)
 {
@@ -1882,6 +1935,14 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
             *out = vi_from_bool_bit(l, vi_to_bool(l, a), true, false);
             return true;
          }
+         if (fn_name_is(fn, "IS_X")) {
+            // Mode A holds only '0' and '1'
+            if (a.kind != VIVAL_BIT && a.kind != VIVAL_VEC)
+               return false;
+            *out = vi_from_bool_bit(l, mir_const(mu, mir_bool_type(mu), 0),
+                                    true, false);
+            return true;
+         }
          if (fn_name_is(fn, "\"not\"")) {
             if (a.kind == VIVAL_BIT) {
                mir_value_t v1 = mir_build_unary(mu, MIR_VEC_BIT_NOT,
@@ -1916,6 +1977,11 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
          if (!vi_lower_expr(l, tree_value(tree_param(fcall, 0)), &a)
              || !vi_lower_expr(l, tree_value(tree_param(fcall, 1)), &b))
             return false;
+         vi_match_op_t mop;
+         if (vi_match_op_from_name(fn, &mop))
+            return vi_lower_match_cmp(l, mop, a, b, false, true, out);
+         if (fn_name_is(fn, "STD_MATCH"))
+            return vi_lower_match_cmp(l, VIM_EQ, a, b, true, false, out);
          bool neg = false;
          mir_vec_op_t op;
          if (fn_name_is(fn, "\"and\""))        op = MIR_VEC_BIT_AND;
@@ -1980,6 +2046,13 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
          out->val = mir_build_unary(mu, MIR_VEC_BIT_NOT, tv, a.val);
          return true;
       }
+      if (fn_name_is(fn, "IS_X")) {
+         if (a.kind != VIVAL_VEC)
+            return false;
+         *out = vi_from_bool_bit(l, mir_const(mu, mir_bool_type(mu), 0),
+                                 true, false);
+         return true;
+      }
       if (fn_name_is(fn, "TO_INTEGER")) {
          if (a.kind != VIVAL_VEC)
             return false;
@@ -2035,6 +2108,8 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
       vi_val_t a, b;
       if (!vi_lower_expr(l, e0, &a) || !vi_lower_expr(l, e1, &b))
          return false;
+      if (fn_name_is(fn, "STD_MATCH"))
+         return vi_lower_match_cmp(l, VIM_EQ, a, b, true, false, out);
       const int nports = tree_ports(decl);
       if (a.kind == VIVAL_INT && nports >= 1) {
          tree_t fp = tree_port(decl, 0);
@@ -2982,6 +3057,21 @@ static bool vi_lower_builtin_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
             *out = vi_from_bool_bit(l, eqv, true, false);
             return true;
          }
+
+      case S_MATCH_EQ:
+      case S_MATCH_NEQ:
+      case S_MATCH_LT:
+      case S_MATCH_LE:
+      case S_MATCH_GT:
+      case S_MATCH_GE:
+         if (!l->two_state)
+            return false;
+         return vi_lower_match_cmp(l, (sk == S_MATCH_EQ) ? VIM_EQ
+                                   : (sk == S_MATCH_NEQ) ? VIM_NEQ
+                                   : (sk == S_MATCH_LT) ? VIM_LT
+                                   : (sk == S_MATCH_LE) ? VIM_LE
+                                   : (sk == S_MATCH_GT) ? VIM_GT : VIM_GE,
+                                   a, b, false, false, out);
 
       case S_ARRAY_LT:
       case S_ARRAY_LE:
