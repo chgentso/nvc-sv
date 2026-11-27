@@ -4911,23 +4911,29 @@ static void solve_subprogram_params(nametab_t *tab, tree_t call, overload_t *o)
 
    // Attempt to solve remaining parameters but suppress errors
 
-   for (int i = 0; i < nparams; i++) {
-      if (mask_test(&pmask, i))
-         continue;
+   bool progress;
+   do {
+      progress = false;
+      for (int i = 0; i < nparams; i++) {
+         if (mask_test(&pmask, i))
+            continue;
 
-      tree_t p = tree_param(call, i);
-      tree_t value = tree_value(p);
+         tree_t p = tree_param(call, i);
 
-      const bool trial = o->trial
-         || (o->candidates.count > 1 && mask_popcount(&pmask) + 1 < nparams);
+         const bool trial = o->trial
+            || (o->candidates.count > 1 && mask_popcount(&pmask) + 1 < nparams);
 
-      if (o->error) {
-         solve_erroneous_param(tab, p);
-         mask_set(&pmask, i);
+         if (o->error) {
+            solve_erroneous_param(tab, p);
+            mask_set(&pmask, i);
+            progress = true;
+         }
+         else if (solve_one_param(tab, p, o, trial)) {
+            mask_set(&pmask, i);
+            progress = true;
+         }
       }
-      else if (solve_one_param(tab, p, o, trial))
-         mask_set(&pmask, i);
-   }
+   } while (progress && mask_popcount(&pmask) < nparams);
 
    if (o->trial && mask_popcount(&pmask) < nparams) {
       o->cancelled = true;
