@@ -2574,6 +2574,35 @@ static inline void island_pack_elem_2s(uint64_t *ea, uint32_t nwords,
    }
 }
 
+// One element of Verilog byte storage (bit 0 = a, bit 1 = b, the rule of
+// the bit loop in island_sync_in_sig) to packed four-state words
+static inline void island_pack_elem_4s(uint64_t *ea, uint64_t *eb,
+                                       uint32_t nwords, const uint8_t *src,
+                                       uint32_t width)
+{
+   uint8_t *pa = (uint8_t *)ea, *pb = (uint8_t *)eb;
+   const uint32_t r = width & 7u;
+   uint32_t k = width >> 3;
+
+   memset(ea, 0, nwords * sizeof(uint64_t));
+   memset(eb, 0, nwords * sizeof(uint64_t));
+   if (r != 0) {
+      uint64_t w = 0;
+      memcpy(&w, src, r);
+      pa[k] = (uint8_t)((((w & ISL_ONES8) * ISL_GATHER) >> 56) >> (8u - r));
+      pb[k] = (uint8_t)(((((w >> 1) & ISL_ONES8) * ISL_GATHER) >> 56)
+                        >> (8u - r));
+      src += r;
+   }
+   while (k-- > 0) {
+      uint64_t w;
+      memcpy(&w, src, 8);
+      pa[k] = (uint8_t)(((w & ISL_ONES8) * ISL_GATHER) >> 56);
+      pb[k] = (uint8_t)((((w >> 1) & ISL_ONES8) * ISL_GATHER) >> 56);
+      src += 8;
+   }
+}
+
 // Eight bytes (byte 0 first) to eight bits (byte 0 in bit 7): bit set iff the
 // byte is ONE8 / 0x01010101..., exact for every byte value
 static inline uint8_t island_pack8_eq(uint64_t w, uint64_t one8)
@@ -2783,6 +2812,14 @@ static void island_sync_in_sig(rt_island_t *isl, const rt_island_sig_t *s)
       for (uint32_t e = 0; e < nelems; e++)
          island_pack_elem_2s(dst_a + e * nwords, nwords, bytes + e * width,
                              width, is_std);
+      return;
+   }
+   if (!two_state && !is_std && nelems > 1) {
+      // Memories: word-wise, the bit loop below costs seconds at reset on
+      // arrays of millions of bits
+      for (uint32_t e = 0; e < nelems; e++)
+         island_pack_elem_4s(dst_a + e * nwords, dst_b + e * nwords, nwords,
+                             bytes + (size_t)e * width, width);
       return;
    }
 #endif
