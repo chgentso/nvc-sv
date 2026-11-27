@@ -3356,3 +3356,4 @@ pstring_quote1 shell
 alloc_res1 shell
 attr_ent_ext1 shell
 port_scalar_sub1 shell
+rec_arr_agg1 shell

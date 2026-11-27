@@ -124,6 +124,9 @@ static void lower_decls(lower_unit_t *lu, tree_t scope, gen_stack_t *gs);
 static void lower_check_array_sizes(lower_unit_t *lu, type_t ltype,
                                     type_t rtype, vcode_reg_t lval,
                                     vcode_reg_t rval, vcode_reg_t locus);
+static void lower_check_record_sizes(lower_unit_t *lu, type_t type,
+                                     vcode_reg_t rec0, vcode_reg_t rec1,
+                                     vcode_reg_t locus);
 static vcode_type_t lower_alias_type(tree_t alias);
 static void lower_predef(lower_unit_t *lu, object_t *obj);
 static void lower_generics(lower_unit_t *lu, tree_t inst, tree_t src);
@@ -5020,6 +5023,9 @@ static vcode_reg_t lower_array_aggregate(lower_unit_t *lu, tree_t expr,
 
    vcode_reg_t low_reg = emit_select(dir_reg, right_reg, left_reg);
    vcode_reg_t length0_reg = VCODE_INVALID_REG;
+   vcode_reg_t first_rec_reg = VCODE_INVALID_REG;
+   const bool need_rec_check =
+      type_is_record(elem_type) && !type_const_bounds(elem_type) && ndims == 1;
 
    for (int i = 0; i < nassocs; i++) {
       tree_t a = tree_assoc(expr, i);
@@ -5204,6 +5210,15 @@ static vcode_reg_t lower_array_aggregate(lower_unit_t *lu, tree_t expr,
                               emit_const(voffset, 0));
          }
       }
+      else if (need_rec_check && akind != A_CONCAT && akind != A_SLICE) {
+         if (first_rec_reg == VCODE_INVALID_REG)
+            first_rec_reg = value_regs[i];
+         else {
+            vcode_reg_t locus = lower_debug_locus(a);
+            lower_check_record_sizes(lu, elem_type, first_rec_reg,
+                                     value_regs[i], locus);
+         }
+      }
 
       if (count_reg != VCODE_INVALID_REG) {
          vcode_reg_t total_reg = count_reg;
@@ -5258,6 +5273,30 @@ static vcode_reg_t lower_array_aggregate(lower_unit_t *lu, tree_t expr,
    }
 
    return wrap_reg;
+}
+
+static void lower_check_record_sizes(lower_unit_t *lu, type_t type,
+                                     vcode_reg_t rec0, vcode_reg_t rec1,
+                                     vcode_reg_t locus)
+{
+   assert(type_is_record(type));
+
+   const int nfields = type_fields(type);
+   for (int i = 0; i < nfields; i++) {
+      type_t ftype = tree_type(type_field(type, i));
+      if (type_const_bounds(ftype))
+         continue;
+
+      vcode_reg_t f0 = emit_record_ref(rec0, i);
+      vcode_reg_t f1 = emit_record_ref(rec1, i);
+      if (type_is_array(ftype)) {
+         vcode_reg_t a0 = emit_load_indirect(f0);
+         vcode_reg_t a1 = emit_load_indirect(f1);
+         lower_check_array_sizes(lu, ftype, ftype, a0, a1, locus);
+      }
+      else if (type_is_record(ftype))
+         lower_check_record_sizes(lu, ftype, f0, f1, locus);
+   }
 }
 
 static vcode_reg_t lower_aggregate(lower_unit_t *lu, tree_t expr,
