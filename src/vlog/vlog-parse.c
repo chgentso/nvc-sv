@@ -15640,7 +15640,7 @@ static vlog_node_t p_type_declaration(void)
 
       consume(tSEMI);
 
-      if (vlog_symtab_query(symtab, id) == NULL) {
+      if (vlog_symtab_query_local(symtab, id) == NULL) {
          vlog_node_t c = vlog_new(V_CLASS_DECL);
          vlog_set_ident(c, id);
          vlog_set_flags(c, VLOG_F_FORWARD);
@@ -15659,7 +15659,7 @@ static vlog_node_t p_type_declaration(void)
       const loc_t loc = state.last_loc;
       consume(tSEMI);
 
-      if (vlog_symtab_query(symtab, id) == NULL) {
+      if (vlog_symtab_query_local(symtab, id) == NULL) {
          vlog_node_t c = vlog_new(V_CLASS_DECL);
          vlog_set_ident(c, id);
          vlog_set_flags(c, VLOG_F_FORWARD);
@@ -15681,7 +15681,7 @@ static vlog_node_t p_type_declaration(void)
       const loc_t loc = state.last_loc;
       consume(tSEMI);
 
-      if (vlog_symtab_query(symtab, id) == NULL) {
+      if (vlog_symtab_query_local(symtab, id) == NULL) {
          vlog_node_t fwd_td = vlog_new(V_TYPE_DECL);
          vlog_set_ident(fwd_td, id);
          vlog_set_flags(fwd_td, VLOG_F_FORWARD);
@@ -15701,7 +15701,7 @@ static vlog_node_t p_type_declaration(void)
    typedef_depth--;
    ident_t id = p_identifier();
 
-   vlog_node_t existing = vlog_symtab_query(symtab, id);
+   vlog_node_t existing = vlog_symtab_query_local(symtab, id);
    vlog_node_t v;
    if (existing != NULL && vlog_kind(existing) == V_TYPE_DECL
        && (vlog_flags(existing) & VLOG_F_FORWARD)) {
@@ -15724,7 +15724,7 @@ static vlog_node_t p_type_declaration(void)
          i--;
       }
    }
-   vlog_node_t fwd_cls = vlog_symtab_query(symtab, vlog_ident(v));
+   vlog_node_t fwd_cls = vlog_symtab_query_local(symtab, vlog_ident(v));
    if (fwd_cls != NULL && vlog_kind(fwd_cls) == V_CLASS_DECL
        && (vlog_flags(fwd_cls) & VLOG_F_FORWARD)) {
       for (int i = 0; i < forward_classes.count; i++) {
@@ -19769,7 +19769,7 @@ static vlog_node_t resolve_forward_class(ident_t name)
 {
    // The class named by an earlier forward declaration is this one
 
-   vlog_node_t d = vlog_symtab_query(symtab, name);
+   vlog_node_t d = vlog_symtab_query_local(symtab, name);
    if (d == NULL || vlog_kind(d) != V_CLASS_DECL
        || !(vlog_flags(d) & VLOG_F_FORWARD))
       return NULL;
@@ -19972,7 +19972,7 @@ static vlog_node_t p_generic_class(ident_t name, vlog_flags_t flags)
       }
    }
 
-   vlog_node_t fwd = vlog_symtab_query(symtab, name);
+   vlog_node_t fwd = vlog_symtab_query_local(symtab, name);
    if (fwd != NULL && (vlog_kind(fwd) != V_CLASS_DECL
                        || !(vlog_flags(fwd) & VLOG_F_FORWARD)))
       fwd = NULL;

@@ -45,6 +45,7 @@ void vlog_symtab_suppress(vlog_symtab_t *st);
 void vlog_symtab_lenient(vlog_symtab_t *st);
 
 vlog_node_t vlog_symtab_query(vlog_symtab_t *st, ident_t name);
+vlog_node_t vlog_symtab_query_local(vlog_symtab_t *st, ident_t name);
 vlog_node_t vlog_symtab_query_unit(vlog_symtab_t *st, ident_t name);
 vlog_node_t vlog_symtab_query_at(vlog_symtab_t *st, ident_t name,
                                  const loc_t *loc);

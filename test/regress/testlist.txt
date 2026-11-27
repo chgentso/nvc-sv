@@ -3399,3 +3399,4 @@ reflect_conv1 normal,2019
 assert_only1 normal,2019
 res_record1 normal,2008
 vlog_bits_slice verilog
+sv_fwd_shadow1  verilog
