@@ -2224,6 +2224,9 @@ static void vlog_const_func_cb(vlog_node_t v, void *context)
 
 static void vlog_check_func_decl(vlog_node_t v)
 {
+   if (vlog_flags(v) & VLOG_F_LET)
+      return;   // The body is checked where it is expanded
+
    vlog_set_flags(v, VLOG_F_CONST);
 
    vlog_check_ref_ports(v);

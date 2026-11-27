@@ -5945,7 +5945,7 @@ static bool is_let_declaration(void)
       && peek_nth(2) == tID && (peek_nth(3) == tLPAREN || peek_nth(3) == tEQ);
 }
 
-static void p_let_declaration(void)
+static void p_let_declaration(vlog_node_t parent)
 {
    // let let_identifier [ ( [ let_port_list ] ) ] = expression ;
 
@@ -5973,6 +5973,11 @@ static void p_let_declaration(void)
    consume(tSEMI);
 
    scope_leave();
+
+   // A let declared outside a module must be kept with the compilation
+   // unit as it is expanded where it is used later
+   if (parent != NULL)
+      vlog_add_decl(parent, v);
 }
 
 static vlog_node_t p_tf_call(vlog_kind_t kind)
@@ -27381,7 +27386,7 @@ static void p_module_or_generate_item_1(vlog_node_t mod)
    }
 
    if (is_let_declaration()) {
-      p_let_declaration();
+      p_let_declaration(NULL);
       return;
    }
 
@@ -29946,6 +29951,10 @@ static void p_package_item(vlog_node_t parent)
       p_timeunits_declaration();
       return;
    }
+   else if (is_let_declaration()) {
+      p_let_declaration(parent);
+      return;
+   }
 
    p_package_or_generate_item_declaration(parent);
 }
@@ -30413,7 +30422,7 @@ static bool at_namespace_item(void)
       return true;
    case tID:
       {
-         if (at_covergroup())
+         if (at_covergroup() || is_let_declaration())
             return true;
 
          vlog_node_t d = peek_reference();
