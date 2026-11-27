@@ -244,9 +244,15 @@ typedef struct _rt_island {
    uint32_t               n_comb_deps;
    uint32_t               mt_wave_tag;
    uint32_t               pending_vhdl_ff;
+   uint32_t              *fb_sigs;
+   uint32_t               n_fb_sigs;
+   uint8_t               *fb_shadow;
    bool                   dirty;
    bool                   in_dirty_list;
    bool                   in_defer_dirty;
+   bool                   in_defer_direct;
+   bool                   mt_fb_changed;
+   bool                   mt_defer_direct;
    bool                   has_dirty_inputs;
    bool                   in_cl_dirty_in;
    bool                   initialized;
