@@ -1597,8 +1597,8 @@ static void get_hierarchical_name(text_buf_t *tb, lower_unit_t *lu,
       break;
 
    case T_PROT_BODY:
-      // LCS-2016-032 requires dynamic name
-      if (standard() < STD_19) {
+      // Dynamic name from VHDL-2008 onwards (LRM 08 16.2.5 / LCS-2016-032)
+      if (standard() < STD_08) {
          get_hierarchical_name(tb, lu->parent, which);
          tb_istr(tb, tree_ident(lu->container));
          tb_downcase(tb);
@@ -5354,8 +5354,8 @@ static vcode_reg_t lower_protected_init(lower_unit_t *lu, type_t type,
 {
    vcode_reg_t names[2] = { VCODE_INVALID_REG, VCODE_INVALID_REG };
 
-   if (standard() >= STD_19) {
-      // Pass path name and instance names as arguments for LCS-2016-032
+   if (standard() >= STD_08) {
+      // Pass path name and instance names as arguments (LRM 08 16.2.5)
 
       LOCAL_TEXT_BUF tb = tb_new();
       static const attr_kind_t which[2] = {
@@ -11468,9 +11468,9 @@ static void lower_protected_body(lower_unit_t *lu, object_t *obj)
       .cscope = lower_get_cscope(lu),
    };
 
-   if (standard() >= STD_19) {
-      // LCS-2016-032 requires dynamic 'PATH_NAME and 'INSTANCE_NAME for
-      // protected type
+   if (standard() >= STD_08) {
+      // Dynamic 'PATH_NAME and 'INSTANCE_NAME for protected type
+      // (LRM 08 16.2.5 / LCS-2016-032)
       ident_t path_i = well_known(W_PATH_NAME);
       ident_t inst_i = well_known(W_INSTANCE_NAME);
 
@@ -11482,13 +11482,13 @@ static void lower_protected_body(lower_unit_t *lu, object_t *obj)
 
       const tree_global_flags_t gflags = tree_global_flags(body);
 
-      if (gflags & TREE_GF_INSTANCE_NAME) {
+      if (gflags & TREE_GF_PATH_NAME) {
          vcode_var_t path_var = emit_var(vstring, vstamp, path_i, VAR_CONST);
          lower_put_vcode_obj(path_i, path_var, lu);
          emit_store(path_reg, path_var);
       }
 
-      if (gflags & TREE_GF_PATH_NAME) {
+      if (gflags & TREE_GF_INSTANCE_NAME) {
          vcode_var_t inst_var = emit_var(vstring, vstamp, inst_i, VAR_CONST);
          lower_put_vcode_obj(inst_i, inst_var, lu);
          emit_store(inst_reg, inst_var);

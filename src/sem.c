@@ -1320,9 +1320,9 @@ static bool sem_check_var_decl(tree_t t, nametab_t *tab)
       if (!sem_check_protected_instance(t, type, tab))
          return false;
 
-      // The 2019 standard needs access to the instance and path name at
-      // the point of declaration
-      if (standard() >= STD_19)
+      // Protected body 'PATH_NAME and 'INSTANCE_NAME are dynamic from
+      // VHDL-2008 onwards (LRM 08 16.2.5 / LCS-2016-032)
+      if (standard() >= STD_08)
          tree_set_global_flags(t, TREE_GF_INSTANCE_NAME | TREE_GF_PATH_NAME);
    }
 
@@ -7091,11 +7091,11 @@ static bool sem_check_new(tree_t t, nametab_t *tab)
    else if (type_is_protected(type)) {
       if (has_initial)
          sem_error(t, "protected type %pT cannot have initial value", type);
-      else if (standard() >= STD_19)
+      else if (standard() >= STD_08)
          tree_set_global_flags(t, TREE_GF_INSTANCE_NAME | TREE_GF_PATH_NAME);
    }
    else if (type_has_protected(type) && !has_initial
-            && standard() >= STD_19)
+            && standard() >= STD_08)
       tree_set_global_flags(t, TREE_GF_INSTANCE_NAME | TREE_GF_PATH_NAME);
 
    type_t designated = type_designated(access_type);
