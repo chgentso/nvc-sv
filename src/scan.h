@@ -680,5 +680,6 @@ void reset_sdf_parser(void);
 #define tNOSHOWCANCEL  720
 #define tPULSEONEVENT  721
 #define tPULSEONDETECT 722
+#define tCMOS          723
 
 #endif  // _SCAN_H

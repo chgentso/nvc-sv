@@ -25222,6 +25222,77 @@ static vlog_node_t p_enable_gate_instance(vlog_gate_kind_t kind,
    return v;
 }
 
+static void p_cmos_switch_instance(vlog_node_t mod, vlog_node_t delay)
+{
+   // [ name_of_instance ] ( output_terminal , input_terminal ,
+   //     ncontrol_terminal , pcontrol_terminal )
+   //
+   // Modelled as an nmos and a pmos switch driving the same output
+   // (IEEE 1364-2005 section 7.8)
+
+   BEGIN("cmos switch instance");
+
+   vlog_node_t st = vlog_new(V_STRENGTH);
+   vlog_set_subkind(st, ST_STRONG);
+
+   vlog_node_t n = vlog_new(V_GATE_INST);
+   vlog_set_subkind(n, V_GATE_BUFIF1);
+   vlog_add_param(n, st);
+
+   p_gate_instance_name(n);
+
+   if (vlog_params(n) > 1)
+      parse_error(vlog_loc(vlog_param(n, 1)), "sorry, arrays of cmos "
+                  "switches are not supported");
+
+   consume(tLPAREN);
+
+   vlog_symtab_set_implicit(symtab, implicit_kind);
+
+   vlog_node_t target = p_net_lvalue();
+
+   consume(tCOMMA);
+
+   vlog_node_t input = p_expression();
+
+   consume(tCOMMA);
+
+   vlog_node_t nctl = p_expression();
+
+   consume(tCOMMA);
+
+   vlog_node_t pctl = p_expression();
+
+   vlog_symtab_set_implicit(symtab, V_NET_NONE);
+
+   consume(tRPAREN);
+
+   vlog_node_t p = vlog_new(V_GATE_INST);
+   vlog_set_subkind(p, V_GATE_BUFIF0);
+   vlog_set_ident(p, ident_prefix(vlog_ident(n), ident_new("pmos"), '$'));
+   vlog_add_param(p, st);
+
+   vlog_set_target(n, target);
+   vlog_add_param(n, input);
+   vlog_add_param(n, nctl);
+
+   // Each switch has its own copy of the terminals
+   vlog_set_target(p, vlog_copy(target, modport_expr_pred, NULL));
+   vlog_add_param(p, vlog_copy(input, modport_expr_pred, NULL));
+   vlog_add_param(p, pctl);
+
+   vlog_set_loc(n, CURRENT_LOC);
+   vlog_set_loc(p, CURRENT_LOC);
+
+   if (delay != NULL) {
+      vlog_set_delay(n, delay);
+      vlog_set_delay(p, delay);
+   }
+
+   vlog_add_stmt(mod, n);
+   vlog_add_stmt(mod, p);
+}
+
 static vlog_node_t p_pass_switch_instance(vlog_gate_kind_t kind)
 {
    // [ name_of_instance ] ( inout_terminal , inout_terminal )
@@ -25310,9 +25381,21 @@ static void p_gate_instantiation(vlog_node_t mod)
    token_t token = one_of(tPULLDOWN, tPULLUP, tAND, tNAND, tOR, tNOR,
                           tXOR, tXNOR, tNOT, tBUF, tBUFIF0, tBUFIF1,
                           tNOTIF0, tNOTIF1, tTRAN, tRTRAN, tTRANIF0, tTRANIF1,
-                          tRTRANIF0, tRTRANIF1);
+                          tRTRANIF0, tRTRANIF1, tCMOS);
 
    switch (token) {
+   case tCMOS:
+      {
+         vlog_node_t delay = NULL;
+         if (peek() == tHASH)
+            delay = p_delay3();
+
+         do {
+            p_cmos_switch_instance(mod, delay);
+         } while (optional(tCOMMA));
+      }
+      break;
+
    case tPULLDOWN:
       {
          vlog_node_t st;
@@ -27425,6 +27508,7 @@ static void p_module_or_generate_item_1(vlog_node_t mod)
    case tRTRAN:
    case tRTRANIF0:
    case tRTRANIF1:
+   case tCMOS:
       p_gate_instantiation(mod);
       break;
    case tDEFPARAM:
@@ -27576,6 +27660,7 @@ static void p_non_port_module_item(vlog_node_t mod)
    case tRTRAN:
    case tRTRANIF0:
    case tRTRANIF1:
+   case tCMOS:
    case tTYPEDEF:
    case tNETTYPE:
    case tENUM:

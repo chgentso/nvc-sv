@@ -601,7 +601,7 @@ const char *token_str(token_t tok)
          "endsequence", "timeunit", "timeprecision", "1step", "matches",
          "endproperty", "expect", "first_match", "throughout", "intersect", "weak", "nexttime", "s_nexttime", "s_always", "s_eventually", "implies", "iff", "accept_on", "reject_on", "sync_accept_on", "sync_reject_on", "s_until", "until_with", "s_until_with", "untyped", "#-#", "#=#", "clocking", "endclocking", "==?", "!=?",
          "$skew", "$timeskew", "$fullskew", "$nochange", "showcancelled",
-         "noshowcancelled", "pulsestyle_onevent", "pulsestyle_ondetect",
+         "noshowcancelled", "pulsestyle_onevent", "pulsestyle_ondetect", "cmos",
       };
 
       if (tok >= 200 && tok - 200 < ARRAY_LEN(token_strs))

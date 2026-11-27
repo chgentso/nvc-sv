@@ -903,6 +903,8 @@ PROTECT           ?i:protect
 <VLOG>"rnmos"            { return tBUFIF1; }
 <VLOG>"pmos"             { return tBUFIF0; }
 <VLOG>"rpmos"            { return tBUFIF0; }
+<VLOG>"cmos"             { return tCMOS; }
+<VLOG>"rcmos"            { return tCMOS; }
 <VLOG>"notif0"           { return tNOTIF0; }
 <VLOG>"notif1"           { return tNOTIF1; }
 <VLOG>"tran"             { return tTRAN; }
