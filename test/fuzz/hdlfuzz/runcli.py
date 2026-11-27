@@ -94,6 +94,12 @@ def cmd_run(args):
         case = caseio.load_case(d)
         results = run.run_case(tools, case, names,
                                os.path.join(work, "case-" + case.name))
+        ld = os.path.join(work, "logs", case.name)
+        os.makedirs(ld, exist_ok=True)
+        for k, r in results.items():
+            with open(os.path.join(ld, k + ".log"), "w") as f:
+                f.write("outcome=%s stage=%s rc=%d\n%s" % (
+                    r.outcome, r.stage, r.rc, r.text))
         v = compare.compare_case(results, report_stable=args.report_stable)
         print("%s: %s" % (case.name, " ".join(
             "%s=%s" % (k, r.outcome) for k, r in results.items())))

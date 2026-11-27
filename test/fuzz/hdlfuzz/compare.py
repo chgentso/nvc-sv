@@ -402,7 +402,7 @@ def compare_case(results, ref="ref", levels=("L0", "L1", "L3"),
 
 def _bad(res):
     return res.outcome in ("crash", "timeout", "unsupported", "reject",
-                           "deltalimit")
+                           "deltalimit", "incomplete")
 
 
 def _nvc_pair(v, ref, res, levels, stable):

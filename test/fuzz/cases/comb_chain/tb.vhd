@@ -1,68 +1,34 @@
--- Hand-written case: a combinational chain of four processes that read each
--- other, observed from outside by an unfused process (delta-stamped).
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
-entity tb is
+entity fz_tb is
 end entity;
 
-architecture sim of tb is
+architecture sim of fz_tb is
     signal clk : std_logic := '0';
-    signal q   : unsigned(7 downto 0) := (others => '0');
-    signal a, b, c, d : unsigned(7 downto 0) := (others => '0');
-    signal tick : natural := 0;
+    signal i0  : unsigned(3 downto 0) := (others => '0');
+    signal o0  : unsigned(7 downto 0);
 begin
-    p_ff : process (clk) is
-    begin
-        if rising_edge(clk) then
-            q <= q + 3;
-        end if;
-    end process;
+    dut : entity work.m0 port map (clk => clk, i0 => i0, o0 => o0);
 
-    p_a : process (all) is
-    begin
-        a <= q + 1;
-    end process;
-
-    p_b : process (all) is
-    begin
-        b <= a xor q;
-    end process;
-
-    p_c : process (all) is
-    begin
-        c <= b + a;
-    end process;
-
-    p_d : process (all) is
-    begin
-        d <= c - b;
-    end process;
-
-    -- Outside observer: reports each event of d together with the delta
-    -- counter driven by the stimulus.
-    p_mon : process (d) is
-    begin
-        if d'event then
-            report "d=" & to_hstring(d) & " tick=" & integer'image(tick);
-        end if;
-    end process;
-
-    p_stim : process is
+    -- Raises the clock, then counts zero-delay stages so the monitor can
+    -- tell in which delta cycle d changed.
+    fz_clock : process is
     begin
         wait for 1 ns;
         for n in 1 to 4 loop
             clk <= '1';
             for i in 1 to 6 loop
-                tick <= i;
+                i0 <= to_unsigned(i, 4);
                 wait for 0 ns;
             end loop;
             wait for 1 ns;
             clk <= '0';
             wait for 1 ns;
         end loop;
-        report "end of test";
+        report "FZ F o0 " & to_string(o0);
+        report "FZ END";
         std.env.finish;
     end process;
 end architecture;

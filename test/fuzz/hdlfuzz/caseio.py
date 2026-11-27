@@ -17,18 +17,21 @@
 
 """Adapter between a case directory on disk and the runner.
 
-The generator lane defines the real directory layout (FORMAT.md); the runner
-only needs the few facts in Case below.  Everything that depends on the
-layout lives in load_case(), so a layout change is a change to this file only.
+Native reader of the generator lane's case format (FORMAT.md, format 1): the
+directory holds case.json ({"format": 1, "run": {...}, "ir": {...}}) and the
+sources named in run.files.  The runner needs only the run block:
 
-Layout understood here (the hand-written cases use it, and a generator can
-write the same file next to its sources):
+    run.lang, run.std       "vhdl", "2008"
+    run.files               analysis order
+    run.top                 testbench entity (fz_tb)
+    run.stop_time_ns        guard for --stop-time
+    run.end_marker          report text that proves the run completed
+    run.observe.vcd         false: run without a wave dump
 
-    <case dir>/case.json   optional; keys: lang ("vhdl"|"sv"), std ("2008"),
-                           top ("tb"), files (relative names, in analysis
-                           order), stop_time ("10us"), waves (bool)
-    <case dir>/*.vhd|*.vhdl|*.sv|*.v    sources, used when "files" is absent
-                           (sorted by name; package-like names first)
+Hand-written cases use the same layout with "ir" left out.  A directory
+without case.json is read by file extension (sources sorted by name, top
+"tb"), which is only a convenience for experiments.  Everything that depends
+on the layout lives in load_case().
 """
 
 import json
@@ -38,6 +41,7 @@ from typing import List
 
 VHDL_EXT = (".vhd", ".vhdl")
 SV_EXT = (".sv", ".v")
+SUPPORTED_FORMAT = 1
 
 
 @dataclass
@@ -50,6 +54,7 @@ class Case:
     files: List[str] = field(default_factory=list)   # absolute paths
     stop_time: str = "10us"
     waves: bool = True
+    end_marker: str = ""
     meta: dict = field(default_factory=dict)
 
     def source_size(self):
@@ -58,24 +63,30 @@ class Case:
 
 def load_case(path):
     path = os.path.abspath(path)
-    cfg = {}
+    doc = {}
     cj = os.path.join(path, "case.json")
     if os.path.exists(cj):
         with open(cj) as f:
-            cfg = json.load(f)
-    names = cfg.get("files")
+            doc = json.load(f)
+        fmt = doc.get("format", SUPPORTED_FORMAT)
+        if fmt != SUPPORTED_FORMAT:
+            raise ValueError("case %s: unsupported format %r" % (path, fmt))
+    run = doc.get("run", {})
+    names = run.get("files")
     if names is None:
         names = sorted(n for n in os.listdir(path)
                        if n.endswith(VHDL_EXT + SV_EXT))
         names.sort(key=lambda n: (0 if "pkg" in n or "package" in n else 1, n))
     if not names:
         raise ValueError("case %s has no source files" % path)
-    lang = cfg.get("lang")
+    lang = run.get("lang")
     if lang is None:
         lang = "vhdl" if names[0].endswith(VHDL_EXT) else "sv"
+    stop = run.get("stop_time_ns")
     return Case(dir=path, name=os.path.basename(path),
-                lang=lang, std=str(cfg.get("std", "2008")),
-                top=cfg.get("top", "tb"),
+                lang=lang, std=str(run.get("std", "2008")),
+                top=run.get("top", "tb"),
                 files=[os.path.join(path, n) for n in names],
-                stop_time=cfg.get("stop_time", "10us"),
-                waves=bool(cfg.get("waves", True)), meta=cfg)
+                stop_time=("%dns" % stop) if stop is not None else "10us",
+                waves=bool(run.get("observe", {}).get("vcd", True)),
+                end_marker=run.get("end_marker", ""), meta=run)

@@ -73,8 +73,8 @@ class ClassifyTests(unittest.TestCase):
         self.assertEqual(classify(0, "", True), "timeout")
         self.assertEqual(classify(1, "** Fatal: sorry, not supported", False),
                          "unsupported")
-        self.assertEqual(classify(1, "iteration limit of 1000 delta cycles "
-                                  "reached", False), "deltalimit")
+        self.assertEqual(classify(1, "limit of 1000 delta cycles reached",
+                                  False), "deltalimit")
 
 
 class SingleTests(unittest.TestCase):

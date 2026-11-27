@@ -1,26 +1,15 @@
--- Hand-written case: a failing assertion ends the run with a non-zero status.
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
-entity tb is
+entity fz_tb is
 end entity;
 
-architecture sim of tb is
+architecture sim of fz_tb is
     signal clk : std_logic := '0';
-    signal n   : unsigned(3 downto 0) := (others => '0');
+    signal o0  : unsigned(3 downto 0);
 begin
+    dut : entity work.m0 port map (clk => clk, o0 => o0);
+
     clk <= not clk after 5 ns;
-
-    p_n : process (clk) is
-    begin
-        if rising_edge(clk) then
-            n <= n + 1;
-        end if;
-    end process;
-
-    p_chk : process (n) is
-    begin
-        assert n /= 5 report "n reached 5" severity failure;
-    end process;
 end architecture;

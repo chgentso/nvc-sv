@@ -51,13 +51,20 @@ CRASH_RE = re.compile(
     r'Aborted|core dumped|fatal_trace', re.I)
 UNSUPPORTED_RE = re.compile(r'\bsorry\b|not (?:yet )?(?:supported|implemented)',
                             re.I)
-DELTA_LIMIT_RE = re.compile(r'iteration limit|delta cycle limit|'
-                            r'stop-delta|too many delta', re.I)
+DELTA_LIMIT_RE = re.compile(r'iteration limit|limit of \d+ delta cycles|'
+                            r'delta cycle limit|too many delta', re.I)
 ERROR_RE = re.compile(r'^\*\* (?:Error|Fatal): ', re.M)
 FAILURE_RE = re.compile(r'^\*\* (?:Failure|Fatal): ', re.M)
 
 OUTCOMES = ("ok", "failure", "reject", "unsupported", "crash", "timeout",
-            "deltalimit")
+            "deltalimit", "incomplete")
+
+
+def finished(case, outcome, text):
+    """A clean exit counts as ok only if the end marker report is there."""
+    if outcome == "ok" and case.end_marker and case.end_marker not in text:
+        return "incomplete"
+    return outcome
 
 
 @dataclass(frozen=True)
@@ -213,8 +220,9 @@ def _std_arg(case):
 
 
 def _nvc_base(tools, case, workdir):
+    # the library 'work' lives in the cwd of each call (the elab dir)
     return [tools.build.bin, "-L" + tools.build.lib, _std_arg(case),
-            "--work=" + os.path.join(workdir, "work")]
+            "--work=work"]
 
 
 def run_nvc(tools: Tools, case, cfg: Config, workdir, elab_done: dict,
@@ -258,7 +266,7 @@ def run_nvc(tools: Tools, case, cfg: Config, workdir, elab_done: dict,
     env.update(dict(cfg.run_env))
     rc, text, to, w = call(cmd, edir, env, tools.timeout)
     res.stage, res.rc, res.text, res.wall = "run", rc, text, w
-    res.outcome = classify(rc, text, to)
+    res.outcome = finished(case, classify(rc, text, to), text)
     if waves and os.path.exists(wave):
         res.wave = wave
     return res
@@ -311,7 +319,7 @@ def run_ghdl(tools: Tools, case, cfg: Config, workdir, waves=None) -> RunResult:
         cmd.append("--vcd=" + wave)
     rc, text, to, w = call(cmd, gd, env, tools.timeout)
     res.stage, res.rc, res.text, res.wall = "run", rc, text, w
-    res.outcome = classify(rc, text, to)
+    res.outcome = finished(case, classify(rc, text, to), text)
     if waves and os.path.exists(wave):
         res.wave = wave
     return res

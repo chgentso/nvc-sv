@@ -231,7 +231,7 @@ class CampaignGuardTests(unittest.TestCase):
 
 
 class CaseIoTests(unittest.TestCase):
-    def test_infer_and_json(self):
+    def test_infer(self):
         with tempfile.TemporaryDirectory() as d:
             for n in ("b.vhd", "a_pkg.vhd"):
                 open(os.path.join(d, n), "w").close()
@@ -239,12 +239,46 @@ class CaseIoTests(unittest.TestCase):
             self.assertEqual([os.path.basename(f) for f in c.files],
                              ["a_pkg.vhd", "b.vhd"])
             self.assertEqual((c.lang, c.std, c.top), ("vhdl", "2008", "tb"))
+
+    def test_format1(self):
+        with tempfile.TemporaryDirectory() as d:
+            for n in ("dut.vhd", "tb.vhd"):
+                open(os.path.join(d, n), "w").close()
+            doc = {"format": 1, "ir": {"seed": 3},
+                   "run": {"files": ["dut.vhd", "tb.vhd"], "top": "fz_tb",
+                           "stop_time_ns": 440, "end_marker": "FZ END",
+                           "observe": {"vcd": False}, "lang": "vhdl",
+                           "std": "2008"}}
             with open(os.path.join(d, "case.json"), "w") as f:
-                json.dump({"top": "dut", "stop_time": "1us", "waves": False,
-                           "files": ["b.vhd"]}, f)
+                json.dump(doc, f)
             c = caseio.load_case(d)
-            self.assertEqual((c.top, c.stop_time, c.waves, len(c.files)),
-                             ("dut", "1us", False, 1))
+            self.assertEqual((c.top, c.stop_time, c.waves, c.end_marker),
+                             ("fz_tb", "440ns", False, "FZ END"))
+            self.assertEqual([os.path.basename(f) for f in c.files],
+                             ["dut.vhd", "tb.vhd"])
+            doc["format"] = 2
+            with open(os.path.join(d, "case.json"), "w") as f:
+                json.dump(doc, f)
+            with self.assertRaises(ValueError):
+                caseio.load_case(d)
+
+    def test_hand_written_cases(self):
+        root = os.path.join(os.path.dirname(__file__), "..", "cases")
+        for n in sorted(os.listdir(root)):
+            c = caseio.load_case(os.path.join(root, n))
+            self.assertEqual(c.top, "fz_tb")
+            self.assertTrue(all(os.path.exists(f) for f in c.files))
+
+
+class EndMarkerTests(unittest.TestCase):
+    def test_incomplete(self):
+        c = caseio.Case("d", "n", end_marker="FZ END")
+        self.assertEqual(run.finished(c, "ok", "** Note: 1ns+0: FZ S 0\n"),
+                         "incomplete")
+        self.assertEqual(run.finished(c, "ok", "** Note: 1ns+0: FZ END\n"),
+                         "ok")
+        self.assertEqual(run.finished(c, "crash", ""), "crash")
+        self.assertEqual(run.finished(caseio.Case("d", "n"), "ok", ""), "ok")
 
 
 if __name__ == "__main__":
