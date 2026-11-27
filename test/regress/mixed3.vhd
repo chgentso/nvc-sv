@@ -21,9 +21,9 @@ begin
 
     check: process is
     begin
-	assert q = 'U';  		-- XXX: should be '1'?
+	assert q = '1';                 -- Initial statement of the UDP
 	wait for 0 ns;
-	assert q = 'U';
+	assert q = '1';
 	wait until falling_edge(cp);
 	assert q = '0';
 	wait for 1 ps;
