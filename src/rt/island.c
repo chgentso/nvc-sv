@@ -4514,9 +4514,11 @@ static void island_spec_update_mix(rt_island_t *isl)
    for (uint32_t i = 0; i < isl->nsigs; i++) {
       rt_island_sig_t *s = &(isl->sigs[i]);
       bool mix = false;
-      for (uint32_t t = 0; t < s->n_direct_targets && !mix; t++)
-         mix = ((s->direct_targets[t]->flags ^ s->flags) & repr) != 0
+      for (uint32_t t = 0; t < s->n_direct_targets; t++) {
+         s->direct_targets[t]->flags &= ~RT_ISIG_MIX_MEMO;
+         mix = mix || ((s->direct_targets[t]->flags ^ s->flags) & repr) != 0
             || (s->direct_targets[t]->flags & RT_ISIG_SPEC_HELD);
+      }
       if (mix)
          s->flags |= RT_ISIG_SPEC_MIX;
       else
@@ -5219,11 +5221,23 @@ static bool island_spec_copy_mixed(const rt_island_sig_t *src_s,
          island_act_mark_sig(dst_isl, dst_s);
          return true;   // Was not all '0'/'1'
       }
+      // A one-word value unchanged since the last copy: the target bytes,
+      // written only by this wire, still hold it (island_spec_update_mix
+      // drops the memo on every layout change at either end)
+      const bool one = nwords * nelems == 1;
+      if (one && (dst_s->flags & RT_ISIG_MIX_MEMO) && dst_s->mix_memo == sw[0])
+         return false;
       uint8_t small[72];
       uint8_t *tmp = total + 8u <= sizeof(small) ? small
          : island_spec_scratch(total + 8u);
       island_spec_unpack_words(tmp, sw, width, nwords, nelems, base);
-      if (!island_commit_bytes(dst_isl->state + dst_s->a_off, tmp, total))
+      const bool changed =
+         island_commit_bytes(dst_isl->state + dst_s->a_off, tmp, total);
+      if (one) {
+         dst_s->mix_memo = sw[0];
+         dst_s->flags |= RT_ISIG_MIX_MEMO;
+      }
+      if (!changed)
          return false;
       island_act_mark_sig(dst_isl, dst_s);
       return true;
@@ -6768,7 +6782,7 @@ void rt_island_reset_all(rt_island_mgr_t *mgr)
          || (mgr->fast && !opt_get_int(OPT_SHUFFLE_PROCS));
       for (uint32_t j = 0; j < isl->nsigs; j++) {
          rt_island_sig_t *s = &(isl->sigs[j]);
-         s->flags &= ~RT_ISIG_LAST_OUT_VALID;
+         s->flags &= ~(RT_ISIG_LAST_OUT_VALID | RT_ISIG_MIX_MEMO);
          if (s->watch != NULL)
             watch_set_inline_island(s->watch, allow_inline);
          if (s->sig != NULL)

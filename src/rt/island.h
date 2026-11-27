@@ -51,6 +51,7 @@ typedef enum {
    RT_ISIG_SPEC_HELD      = (1u << 22),   // Mode A: kept as Mode B bytes
    RT_ISIG_SPEC_ROWF      = (1u << 23),   // Mode A layout: row clean bytes
    RT_ISIG_SPEC_ROWS      = (1u << 24),   // Mode A: some rows may be held
+   RT_ISIG_MIX_MEMO       = (1u << 25),   // mix_memo is valid
 } rt_island_sig_flags_t;
 
 // Speculative Mode A clean tracking (NVC_ISLAND_SPEC).  The Mode A state of
@@ -217,6 +218,8 @@ typedef struct _rt_island_sig {
    uint64_t                last_out_b;
    uint64_t               *last_out_words;
    uint64_t                gen_key_hash;
+   uint64_t                mix_memo;   // Packed source word last unpacked
+                                       // into this direct target
 } rt_island_sig_t;
 
 typedef struct _rt_island_domain {
