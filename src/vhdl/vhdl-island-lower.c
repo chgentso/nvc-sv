@@ -149,6 +149,7 @@ typedef struct {
    // value two-state storage cannot hold makes the function return a
    // deopt code (rt_island_deopt_t) instead
    bool                     spec;
+   bool                     spec_checks;   // Held bytes may be set ($ah)
    mir_value_t              spec_var;
 } vi_lower_t;
 
@@ -1280,6 +1281,153 @@ static void vi_spec_deopt_zero(vi_lower_t *l, mir_value_t divisor)
                         RT_ISLAND_DEOPT_RANGE);
 }
 
+// Speculative Mode A clean tracking (see RT_ISLAND_SPEC_HELD_OFF in
+// rt/island.h): every load or store of a packed signal first tests its held
+// byte, and every access to a row of a 2D signal its row clean byte, so the
+// variant never computes with nor overwrites part of a value that is not
+// all '0'/'1'.  The runtime then runs the island in Mode B, which propagates
+// the metavalue exactly.
+
+static void vi_spec_check_held(vi_lower_t *l, const vhdl_isl_sig_t *isig)
+{
+   if (!l->spec_checks || !(isig->rt_flags & RT_ISIG_TWO_STATE))
+      return;
+   mir_unit_t *mu = l->mu;
+   const uint32_t idx = (uint32_t)(isig - l->isl->sigs);
+   assert(idx < l->isl->n_sigs);
+   const uint32_t off = RT_ISLAND_SPEC_HELD_OFF(l->isl->hdr_bytes) + idx;
+   mir_value_t h = mir_build_load(mu, vi_state_ptr_at(l, off));
+   vi_emit_deopt_unless(l, mir_build_cmp(mu, MIR_CMP_EQ, h, vi_u8(mu, 0)),
+                        RT_ISLAND_DEOPT_UNCLEAN);
+}
+
+// A flip-flop function stores a whole value into the packed signal ISIG:
+// when it is held, set its request byte so the commit packs it again (see
+// RT_ISLAND_SPEC_REQ_OFF)
+static void vi_spec_store_held(vi_lower_t *l, const vhdl_isl_sig_t *isig)
+{
+   if (!l->spec_checks || !(isig->rt_flags & RT_ISIG_TWO_STATE))
+      return;
+   const uint32_t idx = (uint32_t)(isig - l->isl->sigs);
+   // Only for a signal no other domain writes: a deopt of the domain then
+   // drops exactly the requests of its call
+   unsigned nw = 0;
+   for (uint32_t d = 0; d < l->isl->n_doms; d++) {
+      for (uint32_t w = 0; w < l->isl->doms[d].n_write_sigs; w++)
+         nw += (l->isl->doms[d].write_isl_sigs[w] == idx);
+   }
+   if (nw != 1 || (isig->rt_flags & RT_ISIG_COMB_WRITTEN)) {
+      vi_spec_check_held(l, isig);
+      return;
+   }
+   mir_unit_t *mu = l->mu;
+   const uint32_t hdr = l->isl->hdr_bytes;
+   mir_value_t h = mir_build_load(
+      mu, vi_state_ptr_at(l, RT_ISLAND_SPEC_HELD_OFF(hdr) + idx));
+   mir_build_store(
+      mu, vi_state_ptr_at(l, RT_ISLAND_SPEC_REQ_OFF(hdr, l->isl->n_sigs) + idx),
+      h);
+}
+
+// Byte offset of the row clean bytes of ISIG in the state half at HALF_OFF
+static uint32_t vi_spec_rowf_off(const vi_lower_t *l, const vhdl_isig_t *s,
+                                 const vhdl_isl_sig_t *isig, uint32_t half_off)
+{
+   (void)l;
+   const uint32_t nwords = (s->width + 63u) / 64u;
+   return isig->a_off + half_off + nwords * s->nelems * 8u;
+}
+
+static inline bool vi_spec_has_rowf(const vi_lower_t *l,
+                                    const vhdl_isl_sig_t *isig)
+{
+   return l->spec_checks && (isig->rt_flags & RT_ISIG_SPEC_ROWF);
+}
+
+static mir_value_t vi_spec_rowf_ptr(vi_lower_t *l, const vhdl_isig_t *s,
+                                    const vhdl_isl_sig_t *isig,
+                                    uint32_t half_off, mir_value_t row)
+{
+   mir_unit_t *mu = l->mu;
+   mir_value_t off = mir_build_add(mu, mir_offset_type(mu),
+                                   vi_off(mu, vi_spec_rowf_off(l, s, isig,
+                                                               half_off)),
+                                   vi_to_off(mu, row));
+   return mir_build_array_ref(mu, l->state_ptr, off);
+}
+
+// Deopt when row ROW of ISIG in the state half at HALF_OFF is held
+static void vi_spec_check_row(vi_lower_t *l, const vhdl_isig_t *s,
+                              const vhdl_isl_sig_t *isig, uint32_t half_off,
+                              mir_value_t row)
+{
+   if (!vi_spec_has_rowf(l, isig))
+      return;
+   mir_unit_t *mu = l->mu;
+   mir_value_t f = mir_build_load(mu, vi_spec_rowf_ptr(l, s, isig, half_off,
+                                                       row));
+   vi_emit_deopt_unless(l, mir_build_cmp(mu, MIR_CMP_EQ, f, vi_u8(mu, 0)),
+                        RT_ISLAND_DEOPT_ROW);
+}
+
+// A store of the whole of row ROW: the row is clean
+static void vi_spec_clear_row(vi_lower_t *l, const vhdl_isig_t *s,
+                              const vhdl_isl_sig_t *isig, uint32_t half_off,
+                              mir_value_t row)
+{
+   if (!vi_spec_has_rowf(l, isig))
+      return;
+   mir_build_store(l->mu, vi_spec_rowf_ptr(l, s, isig, half_off, row),
+                   vi_u8(l->mu, 0));
+}
+
+// A whole-array load (CLEAR false: deopt when any row is held) or store
+// (CLEAR true: every row is clean) of the 2D signal ISIG
+static void vi_spec_all_rows(vi_lower_t *l, const vhdl_isig_t *s,
+                             const vhdl_isl_sig_t *isig, uint32_t half_off,
+                             bool clear)
+{
+   if (!vi_spec_has_rowf(l, isig))
+      return;
+   mir_unit_t *mu = l->mu;
+   mir_type_t t64 = mir_vec2_type(mu, 64, false);
+   const uint32_t base = vi_spec_rowf_off(l, s, isig, half_off);
+   const uint32_t nw = RT_ISLAND_SPEC_ROWF_BYTES(s->nelems) / 8u;
+
+   mir_value_t k_v = mir_add_var(mu, mir_offset_type(mu), MIR_NULL_STAMP,
+                                 ident_uniq("rowf"), MIR_VAR_TEMP);
+   mir_build_store(mu, k_v, vi_off(mu, 0));
+   mir_block_t hdr = mir_add_block(mu);
+   mir_block_t body = mir_add_block(mu);
+   mir_block_t done = mir_add_block(mu);
+   mir_build_jump(mu, hdr);
+
+   mir_set_cursor(mu, hdr, MIR_APPEND);
+   mir_value_t k = mir_build_load(mu, k_v);
+   mir_build_cond(mu, mir_build_cmp(mu, MIR_CMP_LT, k, vi_off(mu, nw)),
+                  body, done);
+
+   mir_set_cursor(mu, body, MIR_APPEND);
+   if (clear)
+      mir_build_island_store(mu, l->state_ptr, vi_off(mu, base),
+                             vi_off(mu, -1), k, mir_const_vec(mu, t64, 0, 0));
+   else {
+      mir_value_t w = mir_build_island_load(mu, t64, l->state_ptr,
+                                            vi_off(mu, base), vi_off(mu, -1),
+                                            k);
+      vi_emit_deopt_unless(l, mir_build_cmp(mu, MIR_CMP_EQ,
+                                            mir_build_cast(mu, vi_i64_type(mu),
+                                                           w),
+                                            vi_i64(mu, 0)),
+                           RT_ISLAND_DEOPT_ROW);
+   }
+   mir_build_store(mu, k_v, mir_build_add(mu, mir_offset_type(mu), k,
+                                          vi_off(mu, 1)));
+   mir_build_jump(mu, hdr);
+
+   mir_set_cursor(mu, done, MIR_APPEND);
+}
+
 // True if BYTES (std_logic positions) holds a value other than '0' and '1'
 static bool vi_bytes_non01(const uint8_t *bytes, size_t n)
 {
@@ -1405,6 +1553,9 @@ static bool vi_lower_sig_load(vi_lower_t *l, const vhdl_isig_t *s,
    }
 
    if (l->two_state) {
+      vi_spec_check_held(l, isig);
+      if (s->is_array2d)
+         vi_spec_check_row(l, s, isig, 0, elem_idx);
       mir_value_t r = mir_build_island_load(
          mu, mir_vec2_type(mu, s->width, s->is_signed),
          l->state_ptr, vi_off(mu, isig->a_off), vi_off(mu, -1), elem_idx);
@@ -4751,12 +4902,210 @@ static void vi_mark_ff_dirty(vi_lower_t *l, const vhdl_isl_sig_t *isig)
    mir_build_store(mu, l->ff_dirty_var, upd);
 }
 
+// Speculative Mode A: a store of the whole of row ELEM_IDX of the sparse RAM
+// ISIG appends the packed row to the inline log, which the runtime copies
+// to the rows at commit (and clears the row clean byte, see
+// island_commit_sparse_entries in rt/island.c).  A full log, which Mode B
+// spills to the runtime, returns a deopt code instead: the variant never
+// calls out, so the runtime can drop the entries of a call that deopts
+// (the function saves the log position in the pad word on entry).
+static bool vi_emit_sparse_ram_write_a(vi_lower_t *l, const vhdl_isig_t *s,
+                                       const vhdl_isl_sig_t *isig,
+                                       mir_value_t elem_idx, bool is_full,
+                                       mir_value_t sub_off, vi_val_t val)
+{
+   if (!(isig->rt_flags & RT_ISIG_TWO_STATE)) {
+      l->reason = "spec: sparse RAM of non-logic elements";
+      return false;
+   }
+
+   vi_spec_check_held(l, isig);
+   vi_mark_ff_dirty(l, isig);
+
+   mir_unit_t *mu = l->mu;
+   mir_type_t t_off = mir_offset_type(mu);
+   mir_type_t t_i64 = vi_i64_type(mu);
+   mir_type_t t_v64 = mir_vec2_type(mu, 64, false);
+   mir_type_t t_row = mir_vec2_type(mu, (int)s->width, false);
+   const uint32_t log_off = l->isl->sparse_log_off;
+   const uint32_t isl_sig_idx = (uint32_t)(isig - l->isl->sigs);
+   const uint32_t len = ((s->width + 63u) / 64u) * 8u;
+   const uint32_t ent_base = log_off + offsetof(rt_island_sparse_log_t, entries);
+   const uint32_t data_base = log_off + offsetof(rt_island_sparse_log_t, data);
+
+   mir_value_t byte_off = mir_build_mul(mu, t_off, vi_to_off(mu, elem_idx),
+                                        vi_off(mu, len));
+   mir_value_t key = mir_build_add(
+      mu, t_i64,
+      mir_build_mul(mu, t_i64, vi_to_i64(mu, byte_off),
+                    vi_i64(mu, INT64_C(1) << 32)),
+      vi_i64(mu, (int64_t)isl_sig_idx));
+
+   mir_value_t part = (val.kind == VIVAL_VEC) ? val.val : vi_to_vec2_1(l, val);
+   if (val.is_signed)
+      part = mir_build_cast(mu, mir_vec2_type(mu, (int)(val.kind == VIVAL_VEC
+                                                       ? val.width : 1),
+                                               false), part);
+   mir_value_t v = part;
+   if (!is_full) {
+      // A partial store merges into the latest pending store of the row
+      // (the log holds whole rows), or else into the row, which must be
+      // clean
+      mir_value_t base_v = mir_add_var(mu, mir_pointer_type(mu, vi_u8_type(mu)),
+                                       MIR_NULL_STAMP, ident_uniq("srow"),
+                                       MIR_VAR_TEMP);
+      mir_value_t k_v = mir_add_var(mu, t_off, MIR_NULL_STAMP,
+                                    ident_uniq("slog"), MIR_VAR_TEMP);
+      mir_build_store(mu, base_v, mir_build_array_ref(
+                         mu, l->state_ptr,
+                         mir_build_add(mu, t_off, vi_off(mu, isig->a_off),
+                                       byte_off)));
+      mir_build_store(mu, k_v, mir_build_cast(
+                         mu, t_off, mir_build_island_load(
+                            mu, t_v64, l->state_ptr,
+                            vi_off(mu, log_off
+                                   + offsetof(rt_island_sparse_log_t, count)),
+                            vi_off(mu, -1), vi_off(mu, 0))));
+      mir_block_t hdr = mir_add_block(mu);
+      mir_block_t body = mir_add_block(mu);
+      mir_block_t hit = mir_add_block(mu);
+      mir_block_t next = mir_add_block(mu);
+      mir_block_t miss = mir_add_block(mu);
+      mir_block_t done = mir_add_block(mu);
+      mir_build_jump(mu, hdr);
+
+      mir_set_cursor(mu, hdr, MIR_APPEND);
+      mir_value_t k = mir_build_load(mu, k_v);
+      mir_build_cond(mu, mir_build_cmp(mu, MIR_CMP_GT, k, vi_off(mu, 0)),
+                     body, miss);
+
+      mir_set_cursor(mu, body, MIR_APPEND);
+      mir_value_t km1 = mir_build_sub(mu, t_off, k, vi_off(mu, 1));
+      mir_build_store(mu, k_v, km1);
+      mir_value_t e2 = mir_build_mul(mu, t_off, km1, vi_off(mu, 2));
+      mir_value_t w0 = mir_build_cast(
+         mu, t_i64, mir_build_island_load(mu, t_v64, l->state_ptr,
+                                          vi_off(mu, ent_base),
+                                          vi_off(mu, -1), e2));
+      mir_build_cond(mu, mir_build_cmp(mu, MIR_CMP_EQ, w0, key), hit, next);
+
+      mir_set_cursor(mu, hit, MIR_APPEND);
+      mir_value_t w1 = mir_build_cast(
+         mu, t_i64, mir_build_island_load(mu, t_v64, l->state_ptr,
+                                          vi_off(mu, ent_base + 8u),
+                                          vi_off(mu, -1), e2));
+      mir_value_t doff = mir_build_div(mu, t_i64, w1,
+                                       vi_i64(mu, INT64_C(1) << 32));
+      mir_build_store(mu, base_v, mir_build_array_ref(
+                         mu, l->state_ptr,
+                         mir_build_add(mu, t_off, vi_off(mu, data_base),
+                                       vi_to_off(mu, doff))));
+      mir_build_jump(mu, done);
+
+      mir_set_cursor(mu, next, MIR_APPEND);
+      mir_build_jump(mu, hdr);
+
+      mir_set_cursor(mu, miss, MIR_APPEND);
+      vi_spec_check_row(l, s, isig, 0, elem_idx);
+      mir_build_jump(mu, done);
+
+      mir_set_cursor(mu, done, MIR_APPEND);
+      mir_value_t cur = mir_build_island_load(mu, t_row,
+                                              mir_build_load(mu, base_v),
+                                              vi_off(mu, 0), vi_off(mu, -1),
+                                              vi_off(mu, 0));
+      v = mir_build_insert(mu, part, cur, sub_off);
+   }
+
+   mir_value_t cnt = mir_build_cast(
+      mu, t_off, mir_build_island_load(
+         mu, t_v64, l->state_ptr,
+         vi_off(mu, log_off + offsetof(rt_island_sparse_log_t, count)),
+         vi_off(mu, -1), vi_off(mu, 0)));
+   mir_value_t dused = mir_build_cast(
+      mu, t_off, mir_build_island_load(
+         mu, t_v64, l->state_ptr,
+         vi_off(mu, log_off + offsetof(rt_island_sparse_log_t, data_used)),
+         vi_off(mu, -1), vi_off(mu, 0)));
+   mir_value_t next_dused = mir_build_add(mu, t_off, dused, vi_off(mu, len));
+
+   mir_value_t ok_cnt = mir_build_cmp(mu, MIR_CMP_LT, cnt,
+                                      vi_off(mu, RT_ISLAND_SPARSE_INLINE_CAP));
+   mir_value_t ok_data = mir_build_cmp(mu, MIR_CMP_LEQ, next_dused,
+                                       vi_off(mu, RT_ISLAND_SPARSE_INLINE_DATA));
+   vi_emit_deopt_unless(l, mir_build_and(mu, ok_cnt, ok_data),
+                        RT_ISLAND_DEOPT_RANGE);
+
+   mir_value_t e2 = mir_build_mul(mu, t_off, cnt, vi_off(mu, 2));
+   mir_value_t w1_i = mir_build_add(
+      mu, t_i64,
+      mir_build_mul(mu, t_i64, vi_to_i64(mu, dused),
+                    vi_i64(mu, INT64_C(1) << 32)),
+      vi_i64(mu, (int64_t)len));
+   mir_build_island_store(mu, l->state_ptr, vi_off(mu, ent_base),
+                          vi_off(mu, -1), e2, mir_build_cast(mu, t_v64, key));
+   mir_build_island_store(mu, l->state_ptr, vi_off(mu, ent_base + 8u),
+                          vi_off(mu, -1), e2, mir_build_cast(mu, t_v64, w1_i));
+
+   mir_value_t dst_ptr = mir_build_array_ref(
+      mu, l->state_ptr, mir_build_add(mu, t_off, vi_off(mu, data_base), dused));
+   mir_build_island_store(mu, dst_ptr, vi_off(mu, 0), vi_off(mu, -1),
+                          vi_off(mu, 0), v);
+
+   mir_build_island_store(
+      mu, l->state_ptr,
+      vi_off(mu, log_off + offsetof(rt_island_sparse_log_t, count)),
+      vi_off(mu, -1), vi_off(mu, 0),
+      mir_build_cast(mu, t_v64, mir_build_add(mu, t_off, cnt, vi_off(mu, 1))));
+   mir_build_island_store(
+      mu, l->state_ptr,
+      vi_off(mu, log_off + offsetof(rt_island_sparse_log_t, data_used)),
+      vi_off(mu, -1), vi_off(mu, 0), mir_build_cast(mu, t_v64, next_dused));
+   return true;
+}
+
+// Speculative Mode A flip-flop function entry: save the log position (count
+// in the low half of the pad word, data used in the high half)
+static void vi_spec_sparse_mark(vi_lower_t *l)
+{
+   if (!l->spec || l->isl->sparse_log_off == 0)
+      return;
+   mir_unit_t *mu = l->mu;
+   mir_type_t t_v64 = mir_vec2_type(mu, 64, false);
+   mir_type_t t_i64 = vi_i64_type(mu);
+   const uint32_t log_off = l->isl->sparse_log_off;
+   mir_value_t cnt = mir_build_cast(
+      mu, t_i64, mir_build_island_load(
+         mu, t_v64, l->state_ptr,
+         vi_off(mu, log_off + offsetof(rt_island_sparse_log_t, count)),
+         vi_off(mu, -1), vi_off(mu, 0)));
+   mir_value_t dused = mir_build_cast(
+      mu, t_i64, mir_build_island_load(
+         mu, t_v64, l->state_ptr,
+         vi_off(mu, log_off + offsetof(rt_island_sparse_log_t, data_used)),
+         vi_off(mu, -1), vi_off(mu, 0)));
+   mir_value_t mark = mir_build_add(
+      mu, t_i64, cnt,
+      mir_build_mul(mu, t_i64, dused, vi_i64(mu, INT64_C(1) << 32)));
+   mir_build_island_store(
+      mu, l->state_ptr,
+      vi_off(mu, log_off + offsetof(rt_island_sparse_log_t, pad)),
+      vi_off(mu, -1), vi_off(mu, 0), mir_build_cast(mu, t_v64, mark));
+}
+
 static bool vi_emit_sparse_ram_write(vi_lower_t *l, const vhdl_isig_t *s,
                                      const vhdl_isl_sig_t *isig,
                                      mir_value_t elem_idx,
                                      mir_value_t sub_off, uint32_t len,
                                      vi_val_t val)
 {
+   if (l->spec && l->is_ff && l->isl->sparse_log_off != 0) {
+      int64_t c = -1;
+      const bool full = mir_get_const(l->mu, sub_off, &c) && c == 0
+         && len == s->width;
+      return vi_emit_sparse_ram_write_a(l, s, isig, elem_idx, full, sub_off,
+                                        val);
+   }
    if (!l->is_ff || l->two_state || l->isl->sparse_log_off == 0 || len == 0)
       return false;
 
@@ -4900,7 +5249,14 @@ static bool vi_assign_leaf_sig(vi_lower_t *l, const vhdl_isig_t *s,
    }
 
    if (l->two_state) {
+      const uint32_t half = l->is_ff ? l->ff_stride : 0u;
+      if (l->is_ff && is_full && sub_w == s->width && !s->is_array2d)
+         vi_spec_store_held(l, isig);
+      else
+         vi_spec_check_held(l, isig);
       if (is_full && sub_w == s->width) {
+         if (s->is_array2d)
+            vi_spec_clear_row(l, s, isig, half, elem_idx);
          mir_value_t v = (val.kind == VIVAL_VEC) ? val.val : vi_to_vec2_1(l, val);
          if (val.is_signed != s->is_signed)
             v = mir_build_cast(mu, mir_vec2_type(mu, (int)s->width, s->is_signed), v);
@@ -4908,6 +5264,8 @@ static bool vi_assign_leaf_sig(vi_lower_t *l, const vhdl_isig_t *s,
                                 vi_off(mu, -1), elem_idx, v);
          return true;
       }
+      if (s->is_array2d)
+         vi_spec_check_row(l, s, isig, half, elem_idx);
       mir_value_t cur = mir_build_island_load(
          mu, mir_vec2_type(mu, (int)s->width, s->is_signed),
          l->state_ptr, vi_off(mu, dst_off), vi_off(mu, -1), elem_idx);
@@ -4951,6 +5309,10 @@ static bool vi_assign_leaf_sig_dyn_pos(vi_lower_t *l, const vhdl_isig_t *s,
    const uint32_t dst_off = isig->a_off + (l->is_ff ? l->ff_stride : 0u);
    vi_mark_ff_dirty(l, isig);
    if (l->two_state) {
+      vi_spec_check_held(l, isig);
+      if (s->is_array2d)
+         vi_spec_check_row(l, s, isig, l->is_ff ? l->ff_stride : 0u,
+                           elem_idx);
       mir_value_t cur = mir_build_island_load(
          mu, mir_vec2_type(mu, (int)s->width, s->is_signed),
          l->state_ptr, vi_off(mu, dst_off), vi_off(mu, -1), elem_idx);
@@ -4985,6 +5347,10 @@ static bool vi_assign_leaf_sig_dyn_slice(vi_lower_t *l, const vhdl_isig_t *s,
    const uint32_t dst_off = isig->a_off + (l->is_ff ? l->ff_stride : 0u);
    vi_mark_ff_dirty(l, isig);
    if (l->two_state) {
+      vi_spec_check_held(l, isig);
+      if (s->is_array2d)
+         vi_spec_check_row(l, s, isig, l->is_ff ? l->ff_stride : 0u,
+                           elem_idx);
       mir_value_t cur = mir_build_island_load(
          mu, mir_vec2_type(mu, (int)s->width, s->is_signed),
          l->state_ptr, vi_off(mu, dst_off), vi_off(mu, -1), elem_idx);
@@ -5084,6 +5450,8 @@ static bool vi_assign_array2d_sig(vi_lower_t *l, const vhdl_isig_t *s,
           && slf.is_array2d && slf.nelems == s->nelems && slf.width == s->width) {
          const uint32_t dst_off = isig->a_off + (l->is_ff ? l->ff_stride : 0u);
          vi_mark_ff_dirty(l, isig);
+         vi_spec_check_held(l, isig);
+         vi_spec_all_rows(l, s, isig, l->is_ff ? l->ff_stride : 0u, true);
          mir_build_copy(l->mu, vi_state_ptr_at(l, dst_off), slf.storage,
                         vi_off(l->mu, vi_array2d_bytes(l, s->nelems, s->width)));
          return true;
@@ -5229,6 +5597,8 @@ static bool vi_assign_array2d_local(vi_lower_t *l, const vi_rec_leaf_t *lf,
       if (ss->nelems != lf->nelems || ss->width != lf->width)
          return false;
       vi_note_read(l, sis);
+      vi_spec_check_held(l, sis);
+      vi_spec_all_rows(l, ss, sis, 0, false);
       mir_build_copy(mu, lf->storage, vi_state_ptr_at(l, sis->a_off),
                      vi_off(mu, vi_array2d_bytes(l, lf->nelems, lf->width)));
       return true;
@@ -5424,6 +5794,8 @@ static bool vi_assign_rec_local(vi_lower_t *l, vi_local_t *dloc,
                   return false;
                }
                vi_note_read(l, sis);
+               vi_spec_check_held(l, sis);
+               vi_spec_all_rows(l, ss, sis, 0, false);
                mir_build_copy(mu, dlf->storage, vi_state_ptr_at(l, sis->a_off),
                               vi_off(mu, vi_array2d_bytes(l, dlf->nelems,
                                                           dlf->width)));
@@ -5618,6 +5990,8 @@ static bool vi_copy_rec_local_to_sig(vi_lower_t *l,
             return false;
          const uint32_t dst_off = dis->a_off + (l->is_ff ? l->ff_stride : 0u);
          vi_mark_ff_dirty(l, dis);
+         vi_spec_check_held(l, dis);
+         vi_spec_all_rows(l, ds, dis, l->is_ff ? l->ff_stride : 0u, true);
          mir_build_copy(mu, vi_state_ptr_at(l, dst_off), slf->storage,
                         vi_off(mu, vi_array2d_bytes(l, ds->nelems, ds->width)));
          continue;
@@ -7336,12 +7710,21 @@ static void vi_emit_act_test(vi_lower_t *l, const vhdl_iproc_t *p,
    mir_build_cond(mu, any, body_bb, next_bb);
 }
 
+// Speculative Mode A (vi_lower_spec): SPEC 1 is the variant that assumes
+// no held signal or row ("$a"), 2 the one that tests the held and row clean
+// bytes ("$ah"), which the runtime calls while some are set
+static ident_t vi_spec_name(ident_t name, int spec)
+{
+   return spec == 2 ? ident_sprintf("%sh", istr(name)) : name;
+}
+
 static mir_unit_t *vi_build_comb_unit(mir_context_t *mc,
                                       const vhdl_island_ctx_t *ctx,
-                                      const vhdl_island_t *isl, bool spec,
+                                      const vhdl_island_t *isl, int spec,
                                       int *failed_proc_out)
 {
-   mir_unit_t *mu = mir_unit_new(mc, isl->eval_name, tree_to_object(ctx->block),
+   mir_unit_t *mu = mir_unit_new(mc, vi_spec_name(isl->eval_name, spec),
+                                 tree_to_object(ctx->block),
                                  MIR_UNIT_FUNCTION, NULL);
    mir_type_t t_off = mir_offset_type(mu);
    mir_type_t t_ptr = mir_pointer_type(mu, vi_u8_type(mu));
@@ -7355,7 +7738,8 @@ static mir_unit_t *vi_build_comb_unit(mir_context_t *mc,
       .isl       = isl,
       .state_ptr = state,
       .two_state = isl->two_state,
-      .spec      = spec,
+      .spec      = spec != 0,
+      .spec_checks = spec == 2,
       .spec_var  = MIR_NULL_VALUE,
       .is_ff     = false,
       .lut_not   = MIR_NULL_VALUE,
@@ -7441,10 +7825,11 @@ static mir_unit_t *vi_build_comb_unit(mir_context_t *mc,
 static mir_unit_t *vi_build_ff_unit(mir_context_t *mc,
                                     const vhdl_island_ctx_t *ctx,
                                     const vhdl_island_t *isl,
-                                    const vhdl_idom_t *dm, bool spec,
+                                    const vhdl_idom_t *dm, int spec,
                                     int *failed_proc_out)
 {
-   mir_unit_t *mu = mir_unit_new(mc, dm->fn_name, tree_to_object(ctx->block),
+   mir_unit_t *mu = mir_unit_new(mc, vi_spec_name(dm->fn_name, spec),
+                                 tree_to_object(ctx->block),
                                  MIR_UNIT_FUNCTION, NULL);
    mir_type_t t_off = mir_offset_type(mu);
    mir_type_t t_ptr = mir_pointer_type(mu, vi_u8_type(mu));
@@ -7464,7 +7849,8 @@ static mir_unit_t *vi_build_ff_unit(mir_context_t *mc,
       .isl          = isl,
       .state_ptr    = state,
       .two_state    = isl->two_state,
-      .spec         = spec,
+      .spec         = spec != 0,
+      .spec_checks  = spec == 2,
       .spec_var     = MIR_NULL_VALUE,
       .is_ff        = true,
       .ff_stride    = RT_ISLAND_STRIDE(isl->state_bytes),
@@ -7475,6 +7861,8 @@ static mir_unit_t *vi_build_ff_unit(mir_context_t *mc,
       .lut_or       = MIR_NULL_VALUE,
       .lut_xor      = MIR_NULL_VALUE,
    };
+
+   vi_spec_sparse_mark(&l);
 
    if (dm->rst_isl_sig >= 0) {
       const vhdl_isl_sig_t *ris = &(isl->sigs[dm->rst_isl_sig]);
@@ -7618,7 +8006,7 @@ static void vi_lower_ctx(mir_context_t *mc, vhdl_island_ctx_t *ctx, bool put)
          int failed_proc = -1;
          if (isl->n_comb_procs > 0
              && (!put || mir_get_shape(mc, isl->eval_name) == NULL)) {
-            mir_unit_t *cmu = vi_build_comb_unit(mc, ctx, isl, false,
+            mir_unit_t *cmu = vi_build_comb_unit(mc, ctx, isl, 0,
                                                  &failed_proc);
             if (cmu == NULL) {
                vi_reject_failed(ctx, ii, failed_proc);
@@ -7632,7 +8020,7 @@ static void vi_lower_ctx(mir_context_t *mc, vhdl_island_ctx_t *ctx, bool put)
             if (put && mir_get_shape(mc, isl->doms[d].fn_name) != NULL)
                continue;
             mir_unit_t *fmu = vi_build_ff_unit(mc, ctx, isl, &(isl->doms[d]),
-                                               false, &failed_proc);
+                                               0, &failed_proc);
             if (fmu == NULL) {
                vi_reject_failed(ctx, ii, failed_proc);
                need_rebuild = true;
@@ -7686,22 +8074,27 @@ static void vi_lower_spec(mir_context_t *mc, vhdl_island_ctx_t *ctx)
       A(mir_unit_t *) built = AINIT;
       int failed_proc = -1;
       bool ok = true;
-      if (a->n_comb_procs > 0 && mir_get_shape(mc, a->eval_name) == NULL) {
-         mir_unit_t *cmu = vi_build_comb_unit(mc, ctx, a, true, &failed_proc);
-         if (cmu != NULL)
-            APUSH(built, cmu);
-         else
-            ok = false;
-      }
-      for (uint32_t d = 0; ok && d < a->n_doms; d++) {
-         if (mir_get_shape(mc, a->doms[d].fn_name) != NULL)
-            continue;
-         mir_unit_t *fmu = vi_build_ff_unit(mc, ctx, a, &(a->doms[d]), true,
-                                            &failed_proc);
-         if (fmu != NULL)
-            APUSH(built, fmu);
-         else
-            ok = false;
+      for (int spec = 1; spec <= 2 && ok; spec++) {
+         if (a->n_comb_procs > 0
+             && mir_get_shape(mc, vi_spec_name(a->eval_name, spec)) == NULL) {
+            mir_unit_t *cmu = vi_build_comb_unit(mc, ctx, a, spec,
+                                                 &failed_proc);
+            if (cmu != NULL)
+               APUSH(built, cmu);
+            else
+               ok = false;
+         }
+         for (uint32_t d = 0; ok && d < a->n_doms; d++) {
+            ident_t name = vi_spec_name(a->doms[d].fn_name, spec);
+            if (mir_get_shape(mc, name) != NULL)
+               continue;
+            mir_unit_t *fmu = vi_build_ff_unit(mc, ctx, a, &(a->doms[d]),
+                                               spec, &failed_proc);
+            if (fmu != NULL)
+               APUSH(built, fmu);
+            else
+               ok = false;
+         }
       }
 
       for (unsigned u = 0; u < built.count; u++) {
@@ -7784,34 +8177,41 @@ static void vi_emit_variant_a_init(const vhdl_island_ctx_t *ctx,
    vcode_type_t voffset = vtype_offset();
    vcode_type_t vptr = vtype_pointer(vtype_opaque());
 
-   vcode_reg_t clos;
+   vcode_reg_t clos, clos_h;
    if (a->eval_name != NULL) {
       vcode_reg_t ctx_reg = emit_context_upref(ctx_upref);
       clos = emit_closure(a->eval_name, voffset, &ctx_reg, 1);
+      ctx_reg = emit_context_upref(ctx_upref);
+      clos_h = emit_closure(vi_spec_name(a->eval_name, 2), voffset,
+                            &ctx_reg, 1);
    }
    else
-      clos = emit_null(vptr);
+      clos = clos_h = emit_null(vptr);
 
-   vcode_reg_t v_args[4] = {
+   vcode_reg_t v_args[7] = {
       handle,
       clos,
+      clos_h,
       emit_const(voffset, a->state_bytes),
       emit_const(voffset, a->hdr_bytes),
+      emit_const(voffset, a->sparse_log_off),
+      emit_const(voffset, a->total_state_bytes),
    };
    emit_fcall(ident_new("__sv_island_set_variant_a"), voffset,
-              VCODE_INVALID_STAMP, v_args, 4);
+              VCODE_INVALID_STAMP, v_args, 7);
 
    ident_t bind_a_fn = ident_new("__sv_island_bind_sig_a");
    for (uint32_t j = 0; j < a->n_sigs; j++) {
       const vhdl_isig_t *s = &(ctx->sigs[a->sigs[j].sig_id]);
-      vcode_reg_t b_args[5] = {
+      vcode_reg_t b_args[6] = {
          handle,
          emit_const(voffset, j),
          emit_const(voffset, a->sigs[j].a_off),
          emit_const(voffset, a->sigs[j].rt_flags),
          emit_const(voffset, s->width * s->nelems * s->byte_size),
+         emit_const(voffset, a->sigs[j].x_off),
       };
-      emit_fcall(bind_a_fn, voffset, VCODE_INVALID_STAMP, b_args, 5);
+      emit_fcall(bind_a_fn, voffset, VCODE_INVALID_STAMP, b_args, 6);
    }
 
    ident_t add_dom_a_fn = ident_new("__sv_island_add_domain_a");
@@ -7819,8 +8219,13 @@ static void vi_emit_variant_a_init(const vhdl_island_ctx_t *ctx,
       vcode_reg_t ctx_reg = emit_context_upref(ctx_upref);
       vcode_reg_t ff_clos = emit_closure(a->doms[d].fn_name, voffset,
                                          &ctx_reg, 1);
-      vcode_reg_t d_args[3] = { handle, emit_const(voffset, d), ff_clos };
-      emit_fcall(add_dom_a_fn, voffset, VCODE_INVALID_STAMP, d_args, 3);
+      ctx_reg = emit_context_upref(ctx_upref);
+      vcode_reg_t ff_clos_h = emit_closure(vi_spec_name(a->doms[d].fn_name, 2),
+                                           voffset, &ctx_reg, 1);
+      vcode_reg_t d_args[4] = {
+         handle, emit_const(voffset, d), ff_clos, ff_clos_h
+      };
+      emit_fcall(add_dom_a_fn, voffset, VCODE_INVALID_STAMP, d_args, 4);
    }
 }
 

@@ -5204,8 +5204,11 @@ static void sv_island_set_variant_a(jit_func_t *func, jit_anchor_t *caller,
                                     jit_scalar_t *args, tlab_t *tlab)
 {
    x_sv_island_set_variant_a(args[0].pointer, args[1].pointer,
-                             (uint32_t)args[2].integer,
-                             (uint32_t)args[3].integer);
+                             args[2].pointer,
+                             (uint32_t)args[3].integer,
+                             (uint32_t)args[4].integer,
+                             (uint32_t)args[5].integer,
+                             (uint32_t)args[6].integer);
    args[0].integer = 0;
 }
 
@@ -5214,7 +5217,7 @@ static void sv_island_bind_sig_a(jit_func_t *func, jit_anchor_t *caller,
 {
    x_sv_island_bind_sig_a(args[0].pointer, (uint32_t)args[1].integer,
                           (uint32_t)args[2].integer, (uint32_t)args[3].integer,
-                          (uint32_t)args[4].integer);
+                          (uint32_t)args[4].integer, (uint32_t)args[5].integer);
    args[0].integer = 0;
 }
 
@@ -5222,7 +5225,7 @@ static void sv_island_add_domain_a(jit_func_t *func, jit_anchor_t *caller,
                                    jit_scalar_t *args, tlab_t *tlab)
 {
    x_sv_island_add_domain_a(args[0].pointer, (uint32_t)args[1].integer,
-                            args[2].pointer);
+                            args[2].pointer, args[3].pointer);
    args[0].integer = 0;
 }
 

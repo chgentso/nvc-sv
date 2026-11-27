@@ -10891,25 +10891,32 @@ void x_sv_island_finish(void *handle)
 }
 
 void x_sv_island_set_variant_a(void *handle, struct _ffi_closure *closure,
-                               uint32_t state_bytes, uint32_t hdr_bytes)
+                               struct _ffi_closure *closure_h,
+                               uint32_t state_bytes, uint32_t hdr_bytes,
+                               uint32_t sparse_log_off, uint32_t total_bytes)
 {
    ffi_closure_t *c = (ffi_closure_t *)closure;
+   ffi_closure_t *ch = (ffi_closure_t *)closure_h;
    rt_island_set_variant_a(handle, c != NULL ? c->handle : JIT_HANDLE_INVALID,
-                           state_bytes, hdr_bytes);
+                           ch != NULL ? ch->handle : JIT_HANDLE_INVALID,
+                           state_bytes, hdr_bytes, sparse_log_off,
+                           total_bytes);
 }
 
 void x_sv_island_bind_sig_a(void *handle, uint32_t idx, uint32_t a_off,
-                            uint32_t a_flags, uint32_t b_bytes)
+                            uint32_t a_flags, uint32_t b_bytes, uint32_t x_off)
 {
-   rt_island_bind_sig_a(handle, idx, a_off, a_flags, b_bytes);
+   rt_island_bind_sig_a(handle, idx, a_off, a_flags, b_bytes, x_off);
 }
 
 void x_sv_island_add_domain_a(void *handle, uint32_t dom_idx,
-                              struct _ffi_closure *ff_closure)
+                              struct _ffi_closure *ff_closure,
+                              struct _ffi_closure *ff_closure_h)
 {
    ffi_closure_t *c = (ffi_closure_t *)ff_closure;
-   assert(c != NULL);
-   rt_island_add_domain_a(handle, dom_idx, c->handle);
+   ffi_closure_t *ch = (ffi_closure_t *)ff_closure_h;
+   assert(c != NULL && ch != NULL);
+   rt_island_add_domain_a(handle, dom_idx, c->handle, ch->handle);
 }
 
 void x_sv_island_mark_ext_read(sig_shared_t *ss)

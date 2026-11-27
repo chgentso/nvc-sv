@@ -1,13 +1,13 @@
 set -xe
 
 # Speculative Mode A at run time (NVC_ISLAND_SPEC=1, no FORCE): islands run
-# Mode B from time zero and switch to their Mode A variant once their whole
-# state is '0'/'1'.  Covered: promotion after reset; a register left 'U'
-# that feeds comb logic and an output read by another island and by an
-# unfused process, later written (its island and the reader stay Mode B
-# until then); a register written for a while and read later; 'X', 'Z',
-# 'H', 'L' and 'U' arriving on an input of a Mode A island (deopt, then
-# promotion again); two clock domains with an asynchronous reset; a report
+# Mode B from time zero and switch to their Mode A variant, holding the
+# signals that are not '0'/'1' as Mode B bytes.  Covered: promotion after
+# reset; a register left 'U' that feeds comb logic and an output read by
+# another island and by an unfused process, later written (its readers
+# deopt until then); a register written for a while and read later; 'X',
+# 'Z', 'H', 'L' and 'U' arriving on an input of a Mode A island (held, then
+# packed again once clean); two clock domains with an asynchronous reset; a report
 # in a clocked process (pinned to Mode B after a few deopts); forces; and
 # a full waveform dump (islands still switch: the kernel signals the dump
 # reads get the same values in both modes).  Output and
@@ -278,9 +278,10 @@ cat s0_raw.log full_raw.log | grep ISLAND_SPEC
 grep -q ' 0 u=UUUUUUUU y=UUUUUUUU .* s=XXXXXXXX .* dn=UUUUUUUU ' off.log
 grep -q ' 31 u=10001000 y=10001000 ' off.log
 # Every island was promoted, also with all signals dumped; the 'X' input
-# deopted; the report island was pinned
+# is held as Mode B bytes, then packed again; the report island was pinned
 grep -q '^ISLAND_SPEC_RT: ticks=[0-9]* variants=5 promoted=5 ' s0_raw.log
-grep -q '^ISLAND_SPEC_RT: deopts .* report=[1-9][0-9]* .*input=[1-9]' s0_raw.log
+grep -q '^ISLAND_SPEC_RT: deopts .* report=[1-9][0-9]* ' s0_raw.log
+grep -q '^ISLAND_SPEC_RT: held .* holds=[1-9][0-9]* unholds=[1-9]' s0_raw.log
 grep -q '^ISLAND_SPEC_RT: pinned .* report=1 ' s0_raw.log
 grep -q '^ISLAND_SPEC_RT: deopts .*stress=[1-9]' s1_raw.log
 grep -q '^ISLAND_SPEC_RT: ticks=[0-9]* variants=5 promoted=5 ' full_raw.log

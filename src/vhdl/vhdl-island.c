@@ -4192,14 +4192,12 @@ vhdl_island_t *vhdl_island_new_a_variant(const vhdl_island_ctx_t *ctx,
                                          const char **reason)
 {
    assert(!isl->two_state);
-   if (isl->sparse_log_off > 0) {
-      *reason = "A1 sparse RAM";
-      return NULL;
-   }
 
    uint32_t hdr = isl->state_bytes;
-   for (uint32_t j = 0; j < isl->n_sigs; j++)
-      hdr = MIN(hdr, isl->sigs[j].a_off);
+   for (uint32_t j = 0; j < isl->n_sigs; j++) {
+      if (!ctx->sigs[isl->sigs[j].sig_id].is_sparse_ram)
+         hdr = MIN(hdr, isl->sigs[j].a_off);
+   }
 
    vhdl_island_t *a = xmalloc(sizeof(vhdl_island_t));
    *a = *isl;
@@ -4219,12 +4217,19 @@ vhdl_island_t *vhdl_island_new_a_variant(const vhdl_island_ctx_t *ctx,
                                             istr(isl->doms[d].fn_name));
    }
 
-   uint32_t off = hdr;
+   // Held and request bytes (RT_ISLAND_SPEC_HELD_OFF), then the signals:
+   // packed words for std_logic, bit and boolean (and a row clean byte per
+   // row after the rows of a 2D signal), Mode B bytes for the others, then
+   // for each packed signal room for its Mode B bytes while it is held
+   uint32_t off = RT_ISLAND_SPEC_REQ_OFF(hdr, a->n_sigs)
+      + ALIGN_UP(a->n_sigs, 8u);
    for (uint32_t j = 0; j < a->n_sigs; j++) {
       vhdl_isl_sig_t *isig = &(a->sigs[j]);
       const vhdl_isig_t *s = &(ctx->sigs[isig->sig_id]);
-      assert(!s->is_sparse_ram);
+      if (s->is_sparse_ram)
+         continue;
       isig->a_off = off;
+      isig->x_off = 0;
       if (s->elem_kind == VISIG_ENUM || s->elem_kind == VISIG_INT) {
          off += ALIGN_UP(s->width * s->nelems * s->byte_size, 8u);
          continue;
@@ -4233,8 +4238,52 @@ vhdl_island_t *vhdl_island_new_a_variant(const vhdl_island_ctx_t *ctx,
       off += nwords * s->nelems * 8u;
       isig->rt_flags &= ~RT_ISIG_STD_LOGIC9;
       isig->rt_flags |= RT_ISIG_TWO_STATE;
+      if (s->is_array2d) {
+         isig->rt_flags |= RT_ISIG_SPEC_ROWF;
+         off += RT_ISLAND_SPEC_ROWF_BYTES(s->nelems);
+      }
+   }
+   for (uint32_t j = 0; j < a->n_sigs; j++) {
+      vhdl_isl_sig_t *isig = &(a->sigs[j]);
+      const vhdl_isig_t *s = &(ctx->sigs[isig->sig_id]);
+      if (!(isig->rt_flags & RT_ISIG_TWO_STATE) || s->is_sparse_ram)
+         continue;
+      isig->x_off = off;
+      off += ALIGN_UP(s->width * s->nelems * s->byte_size, 8u);
    }
    a->state_bytes = off;
+
+   if (isl->sparse_log_off > 0) {
+      // Sparse RAMs (one copy, written through the log at commit) after
+      // both halves and after the whole Mode B state, which the runtime
+      // keeps in the same buffer: packed rows, row clean bytes, Mode B
+      // bytes of the held rows
+      const uint32_t halves =
+         (a->n_doms > 0 ? 2u : 1u) * RT_ISLAND_STRIDE(a->state_bytes);
+      uint32_t soff = ALIGN_UP(MAX(halves, isl->total_state_bytes), 64u);
+      a->sparse_log_off = soff;
+      soff += ALIGN_UP((uint32_t)sizeof(rt_island_sparse_log_t), 64u);
+      for (uint32_t j = 0; j < a->n_sigs; j++) {
+         vhdl_isl_sig_t *isig = &(a->sigs[j]);
+         const vhdl_isig_t *s = &(ctx->sigs[isig->sig_id]);
+         if (!s->is_sparse_ram)
+            continue;
+         isig->a_off = soff;
+         isig->x_off = 0;
+         if (s->elem_kind == VISIG_ENUM || s->elem_kind == VISIG_INT) {
+            soff += ALIGN_UP(s->width * s->nelems * s->byte_size, 64u);
+            continue;
+         }
+         const uint32_t nwords = (s->width + 63u) / 64u;
+         const uint32_t rows = nwords * s->nelems * 8u
+            + RT_ISLAND_SPEC_ROWF_BYTES(s->nelems);
+         isig->x_off = soff + rows;
+         isig->rt_flags &= ~RT_ISIG_STD_LOGIC9;
+         isig->rt_flags |= RT_ISIG_TWO_STATE | RT_ISIG_SPEC_ROWF;
+         soff += ALIGN_UP(rows + s->width * s->nelems, 64u);
+      }
+      a->total_state_bytes = ALIGN_UP(soff, 64u);
+   }
    return a;
 }
 

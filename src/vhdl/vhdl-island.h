@@ -94,6 +94,7 @@ typedef struct {
    uint32_t a_off;
    uint32_t b_off;
    uint32_t rt_flags;
+   uint32_t x_off;      // Mode A variant: Mode B bytes kept while not clean
 } vhdl_isl_sig_t;
 
 typedef enum {
