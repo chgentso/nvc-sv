@@ -3391,3 +3391,4 @@ svhiertype1     verilog
 svsscanft1      verilog
 svwith2d1       verilog
 svstaticret1    verilog
+svdyn2fixed1    verilog

@@ -3251,6 +3251,48 @@ static mir_value_t vlog_load_nested_array(vlog_gen_t *g, mir_value_t ua,
    return result;
 }
 
+static mir_value_t vlog_load_uarray_dims(vlog_gen_t *g, mir_value_t ua,
+                                         vlog_node_t *dims, int ndims,
+                                         const type_info_t *eti)
+{
+   // Gather elements from a (possibly multi-dimensional) dynamic array or
+   // queue into a flat vector matching fixed unpacked dimensions dims[0..ndims-1]
+
+   if (ndims <= 1
+       || mir_get_class(g->mu, mir_get_elem(g->mu, mir_get_type(g->mu, ua)))
+          != MIR_TYPE_UARRAY)
+      return vlog_load_flat_array(g, mir_build_unwrap(g->mu, ua),
+                                  vlog_unpacked_count(dims, ndims), eti, false);
+
+   const unsigned n = vlog_size(dims[0]);
+   const unsigned sub = vlog_unpacked_count(dims + 1, ndims - 1) * eti->size;
+
+   mir_type_t t_offset = mir_offset_type(g->mu);
+   mir_type_t t_total = mir_vec4_type(g->mu, n * sub, false);
+   mir_type_t t_sub = mir_vec4_type(g->mu, sub, false);
+
+   mir_value_t result;
+   if (n * sub <= 64)
+      result = mir_const_vec(g->mu, t_total, 0, 0);
+   else {
+      mir_type_t t_bit = mir_vec4_type(g->mu, 1, false);
+      result = mir_build_cast(g->mu, t_total,
+                              mir_const_vec(g->mu, t_bit, 0, 0));
+   }
+
+   mir_value_t data = mir_build_unwrap(g->mu, ua);
+   for (unsigned i = 0; i < n; i++) {
+      mir_value_t ptr = mir_build_array_ref(g->mu, data,
+                                            mir_const(g->mu, t_offset, i));
+      mir_value_t inner = vlog_load_uarray_dims(
+         g, mir_build_load(g->mu, ptr), dims + 1, ndims - 1, eti);
+      result = mir_build_insert(g->mu, mir_build_cast(g->mu, t_sub, inner),
+                                result, mir_const(g->mu, t_offset, i * sub));
+   }
+
+   return result;
+}
+
 static mir_value_t vlog_load_array_of(vlog_gen_t *g, mir_value_t ua,
                                       vlog_node_t expr, unsigned count,
                                       const type_info_t *eti)
@@ -4889,10 +4931,18 @@ static void vlog_assign_variable(vlog_gen_t *g, vlog_node_t target,
             }
             value = vlog_lower_rvalue(g, rhs);
 
-            // An array declared with a typedef is held as a dynamic array
+            // An array declared with a typedef or nested dynamic array is held
+            // as a uarray
             if (mir_get_class(g->mu, mir_get_type(g->mu, value))
-                == MIR_TYPE_UARRAY)
-               value = vlog_load_array_of(g, value, rhs, count, eti);
+                == MIR_TYPE_UARRAY) {
+               if (ndims > 1
+                   && mir_get_class(g->mu, mir_get_elem(
+                                       g->mu, mir_get_type(g->mu, value)))
+                      == MIR_TYPE_UARRAY)
+                  value = vlog_load_uarray_dims(g, value, dims, ndims, eti);
+               else
+                  value = vlog_load_array_of(g, value, rhs, count, eti);
+            }
          }
 
          if (!mir_is_null(value) && mir_points_to_vector(g->mu, lvalue1.obj)) {
@@ -4915,10 +4965,17 @@ static void vlog_assign_variable(vlog_gen_t *g, vlog_node_t target,
          if (vlog_kind(target) != V_CONCAT
              && mir_get_class(g->mu, mir_get_type(g->mu, value))
              == MIR_TYPE_UARRAY
-             && (tn = vlog_unpacked_dims(target, tdims)) > 0)
-            value = vlog_load_array_of(
-               g, value, rhs, vlog_unpacked_count(tdims, tn),
-               vlog_array_elem_info(g, target));
+             && (tn = vlog_unpacked_dims(target, tdims)) > 0) {
+            const type_info_t *teti = vlog_array_elem_info(g, target);
+            if (tn > 1
+                && mir_get_class(g->mu, mir_get_elem(
+                                    g->mu, mir_get_type(g->mu, value)))
+                   == MIR_TYPE_UARRAY)
+               value = vlog_load_uarray_dims(g, value, tdims, tn, teti);
+            else
+               value = vlog_load_array_of(
+                  g, value, rhs, vlog_unpacked_count(tdims, tn), teti);
+         }
       }
    }
 
