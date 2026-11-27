@@ -109,7 +109,9 @@ nvc --std=2008 --work=w_a -r dynslice_tb 2>&1 | sort > a.log
 
 cat a_dump.log b_dump.log
 grep -q 'n=0[0-9A-F] d=' off.log
+sed -i '/^\*\* Debug: /d' *.log   # debug builds only: JIT code footprint etc.
 diff -u off.log b.log
+sed -i '/^\*\* Debug: /d' *.log   # debug builds only: JIT code footprint etc.
 diff -u off.log a.log
 
 # all processes of the DUT are fused in both modes

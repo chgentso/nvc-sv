@@ -134,6 +134,7 @@ NVC_ISLAND_SPEC=1 nvc --std=2008 --work=w_s --rtl-islands=hier -e prune_tb
 NVC_ISLAND_SPEC_FORCE=A nvc --std=2008 --work=w_s -r prune_tb > s.log 2>&1
 
 for m in b bnf bchk s; do
+    sed -i '/^\*\* Debug: /d' *.log   # debug builds only: JIT code footprint etc.
     diff -u off.log $m.log
 done
 sed '/^\$date/,/\$end/d' off.vcd > off.vcd.s

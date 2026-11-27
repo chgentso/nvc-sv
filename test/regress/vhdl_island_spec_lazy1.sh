@@ -99,6 +99,7 @@ for st in 0 1 3; do
         nvc --std=2008 --work=w_s -r --wave=s$st.vcd --format=vcd \
         lazy_tb 2>&1 | grep -v '^\*\* Debug' > s${st}_raw.log
     grep -v '^ISLAND_SPEC' s${st}_raw.log > s$st.log
+    sed -i '/^\*\* Debug: /d' *.log   # debug builds only: JIT code footprint etc.
     diff -u off.log s$st.log
     diff -u <(nd off.vcd) <(nd s$st.vcd)
 done

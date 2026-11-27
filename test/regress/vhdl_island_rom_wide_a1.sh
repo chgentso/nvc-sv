@@ -125,7 +125,9 @@ nvc --std=2008 --work=w_a -r rom_wide_tb 2>&1 | sort > a.log
 
 cat a_dump.log b_dump.log
 test $(grep -c ' 0123456789ABCDEF01234567 ' off.log) -ge 1
+sed -i '/^\*\* Debug: /d' *.log   # debug builds only: JIT code footprint etc.
 diff -u off.log b.log
+sed -i '/^\*\* Debug: /d' *.log   # debug builds only: JIT code footprint etc.
 diff -u off.log a.log
 
 # all processes of the DUT are fused in both modes

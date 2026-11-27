@@ -61,4 +61,5 @@ NVC_DUMP_ISLANDS=1 nvc --std=2008 --work=w_b --rtl-islands=hier -e longproc1 \
     > b_dump.log
 grep -q 'LONGPROC1 islands=1 fused_procs=2/3' b_dump.log
 nvc --std=2008 --work=w_b -r longproc1 > b.log 2>&1
+sed -i '/^\*\* Debug: /d' *.log   # debug builds only: JIT code footprint etc.
 diff -u off.log b.log

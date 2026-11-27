@@ -117,6 +117,8 @@ nvc --std=2008 --work=w_a -r memo_tb 2>&1 | grep -v '^\*\* Debug' | sort > a.log
 
 cat a_dump.log
 grep -q released off.log
+sed -i '/^\*\* Debug: /d' *.log   # debug builds only: JIT code footprint etc.
 diff -u off.log b.log
+sed -i '/^\*\* Debug: /d' *.log   # debug builds only: JIT code footprint etc.
 diff -u off.log a.log
 grep -q 'MEMO_TB.DUT islands=1 fused_procs=3/3 .* two_state=[1-9]' a_dump.log

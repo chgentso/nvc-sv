@@ -138,7 +138,9 @@ grep -v '^ISLAND_SPEC:' s_raw.log > s.log
 
 cat s_dump.log s_raw.log
 grep -q '^\*\* Note: .* 40 ' off.log
+sed -i '/^\*\* Debug: /d' *.log   # debug builds only: JIT code footprint etc.
 diff -u off.log b.log
+sed -i '/^\*\* Debug: /d' *.log   # debug builds only: JIT code footprint etc.
 diff -u off.log s.log
 sed '/^\$date/,/\$end/d' b.vcd > b_nd.vcd
 sed '/^\$date/,/\$end/d' s.vcd > s_nd.vcd

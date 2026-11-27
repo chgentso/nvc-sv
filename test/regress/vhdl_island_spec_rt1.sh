@@ -250,6 +250,7 @@ nvc --std=2008 --work=w_off -r --wave=offfull.vcd --format=vcd rt1_tb \
 nvc --std=2008 --work=w_b -a rt1.vhd
 nvc --std=2008 --work=w_b --rtl-islands=hier -e rt1_tb \
     -r --wave=b.vcd --format=vcd $mon 2>&1 | grep -v '^\*\* Debug' > b.log
+sed -i '/^\*\* Debug: /d' *.log   # debug builds only: JIT code footprint etc.
 diff -u off.log b.log
 diff -u <(nd off.vcd) <(nd b.vcd)
 
@@ -263,14 +264,17 @@ for st in 0 1 2 5; do
         nvc --std=2008 --work=w_s -r --wave=s$st.vcd --format=vcd $mon \
         rt1_tb 2>&1 | grep -v '^\*\* Debug' > s${st}_raw.log
     grep -v '^ISLAND_SPEC' s${st}_raw.log > s$st.log
+    sed -i '/^\*\* Debug: /d' *.log   # debug builds only: JIT code footprint etc.
     diff -u off.log s$st.log
     diff -u <(nd off.vcd) <(nd s$st.vcd)
 done
 NVC_ISLAND_SPEC_STATS=1 nvc --std=2008 --work=w_s -r --no-island-fast \
     rt1_tb 2>&1 | grep -v '^\*\* Debug' > nf_raw.log
+sed -i '/^\*\* Debug: /d' *.log   # debug builds only: JIT code footprint etc.
 diff -u off.log <(grep -v '^ISLAND_SPEC' nf_raw.log)
 NVC_ISLAND_SPEC_STATS=1 nvc --std=2008 --work=w_s -r --wave=full.vcd \
     --format=vcd rt1_tb 2>&1 | grep -v '^\*\* Debug' > full_raw.log
+sed -i '/^\*\* Debug: /d' *.log   # debug builds only: JIT code footprint etc.
 diff -u off.log <(grep -v '^ISLAND_SPEC' full_raw.log)
 diff -u <(nd offfull.vcd) <(nd full.vcd)
 

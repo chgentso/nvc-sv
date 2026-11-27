@@ -101,7 +101,9 @@ nvc --std=2008 --work=w_a -r widevar_tb 2>&1 | sort > a.log
 
 cat a_dump.log
 test $(wc -l < off.log) -ge 8
+sed -i '/^\*\* Debug: /d' *.log   # debug builds only: JIT code footprint etc.
 diff -u off.log b.log
+sed -i '/^\*\* Debug: /d' *.log   # debug builds only: JIT code footprint etc.
 diff -u off.log a.log
 
 grep -q 'WIDEVAR_TB.DUT islands=[0-9]* fused_procs=2/2' a_dump.log

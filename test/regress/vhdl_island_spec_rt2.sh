@@ -82,6 +82,7 @@ nvc --std=2008 --work=w_off --rtl-islands=off -e rt2_tb -r 2>&1 \
 nvc --std=2008 --work=w_b -a rt2.vhd
 nvc --std=2008 --work=w_b --rtl-islands=hier -e rt2_tb -r 2>&1 \
     | grep -v '^\*\* Debug' > b.log
+sed -i '/^\*\* Debug: /d' *.log   # debug builds only: JIT code footprint etc.
 diff -u off.log b.log
 
 export NVC_ISLAND_SPEC=1
@@ -91,6 +92,7 @@ for st in 0 1 3; do
     NVC_ISLAND_SPEC_STRESS=$st NVC_ISLAND_SPEC_STATS=1 \
         nvc --std=2008 --work=w_s -r rt2_tb 2>&1 \
         | grep -v '^\*\* Debug' > s${st}_raw.log
+    sed -i '/^\*\* Debug: /d' *.log   # debug builds only: JIT code footprint etc.
     diff -u off.log <(grep -v '^ISLAND_SPEC' s${st}_raw.log)
 done
 cat s0_raw.log | grep ISLAND_SPEC

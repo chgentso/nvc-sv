@@ -320,7 +320,9 @@ nvc --std=2008 --work=w_a -r edge_tb 2>&1 | grep -v '^\*\* Debug' | sort > a9.lo
 cat a_dump.log
 ! grep -q "MISMATCH\|FAILED" off.log b.log a.log off9.log b9.log a9.log
 grep -q "errors 0" a9.log
+sed -i '/^\*\* Debug: /d' *.log   # debug builds only: JIT code footprint etc.
 diff -u off.log b.log
+sed -i '/^\*\* Debug: /d' *.log   # debug builds only: JIT code footprint etc.
 diff -u off.log a.log
 diff -u off9.log b9.log
 

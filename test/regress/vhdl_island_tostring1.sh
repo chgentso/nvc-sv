@@ -58,6 +58,7 @@ NVC_DUMP_ISLANDS=1 nvc --std=2008 --work=w_b --rtl-islands=hier -e tostring1 \
     > b_dump.log
 grep -q 'TOSTRING1 islands=1 fused_procs=1/2' b_dump.log
 nvc --std=2008 --work=w_b -r tostring1 > b.log 2>&1
+sed -i '/^\*\* Debug: /d' *.log   # debug builds only: JIT code footprint etc.
 diff -u off.log b.log
 
 nvc --std=2008 --work=w_a -a tostring1.vhd
@@ -65,4 +66,5 @@ NVC_DUMP_ISLANDS=1 nvc --std=2008 --work=w_a --rtl-islands=hier \
     --2state=islands -e tostring1 > a_dump.log
 grep -q 'TOSTRING1 islands=1 fused_procs=1/2' a_dump.log
 nvc --std=2008 --work=w_a -r tostring1 > a.log 2>&1
+sed -i '/^\*\* Debug: /d' *.log   # debug builds only: JIT code footprint etc.
 diff -u off.log a.log

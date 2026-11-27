@@ -191,6 +191,7 @@ nvc --std=2008 --work=w_a --rtl-islands=hier --2state=islands -e unroll_tb
 nvc --std=2008 --work=w_a -r unroll_tb > a.log 2>&1
 
 for m in b bnf b0 bchk s a; do
+    sed -i '/^\*\* Debug: /d' *.log   # debug builds only: JIT code footprint etc.
     diff -u off.log $m.log
 done
 sed '/^\$date/,/\$end/d' off.vcd > off.vcd.s
