@@ -4085,27 +4085,22 @@ static tree_t finish_overload_resolution(overload_t *o)
    const bool prefer_explicit = standard() >= STD_08 || relaxed_rules();
 
    if (o->candidates.count > 1 && prefer_explicit) {
-      unsigned wptr = 0;
+      int nexplicit = 0;
       for (unsigned i = 0; i < o->candidates.count; i++) {
-         tree_t c = o->candidates.items[i];
-         bool hidden = false;
-         if (tree_flags(c) & TREE_F_PREDEFINED) {
-            type_t ctype = tree_type(c);
-            for (unsigned j = 0; j < o->candidates.count; j++) {
-               tree_t other = o->candidates.items[j];
-               if (!(tree_flags(other) & TREE_F_PREDEFINED)
-                   && type_eq(ctype, tree_type(other))) {
-                  hidden = true;
-                  break;
-               }
-            }
-         }
-         if (hidden)
-            overload_prune_candidate(o, i);
-         else
-            o->candidates.items[wptr++] = c;
+         if (!(tree_flags(o->candidates.items[i]) & TREE_F_PREDEFINED))
+            nexplicit++;
       }
-      ATRIM(o->candidates, wptr);
+
+      if (nexplicit > 0) {
+         unsigned wptr = 0;
+         for (unsigned i = 0; i < o->candidates.count; i++) {
+            if (tree_flags(o->candidates.items[i]) & TREE_F_PREDEFINED)
+               overload_prune_candidate(o, i);
+            else
+               o->candidates.items[wptr++] = o->candidates.items[i];
+         }
+         ATRIM(o->candidates, wptr);
+      }
    }
 
    // Prune candidates which do not have all the required arguments

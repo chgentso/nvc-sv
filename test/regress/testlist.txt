@@ -3347,7 +3347,7 @@ textio_noeol normal,2008
 opsym_assign1 normal,2008
 genpack_pos1 normal,2008
 conv_sigparam1 shell
-overload_predef1 shell
+overload_predef1 normal,2019
 sig_idxbounds1 shell
 nested_pkg_body1 shell
 sig_rec_agg1 shell
