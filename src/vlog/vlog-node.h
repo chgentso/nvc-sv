@@ -672,6 +672,7 @@ typedef enum {
 #define ST_PULLUP MAKE_STRENGTH(V_STRENGTH_PULL, V_STRENGTH_PULL)
 
 vlog_node_t vlog_new(vlog_kind_t kind);
+void vlog_change_kind(vlog_node_t v, vlog_kind_t kind);
 vlog_kind_t vlog_kind(vlog_node_t v);
 const char *vlog_kind_str(vlog_kind_t kind);
 

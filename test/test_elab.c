@@ -2584,6 +2584,26 @@ START_TEST(test_udnport1)
 }
 END_TEST
 
+START_TEST(test_udnport2)
+{
+   const error_t expect[] = {
+      { 26, "cannot connect net 'r' of nettype rnet to port 'o' of a "
+        "built-in net type" },
+      { 27, "sorry, connecting a port of a built-in net type or variable to "
+        "a net of nettype pnet is not supported for this data type" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/elab/udnport2.sv");
+
+   tree_t top = run_elab();
+   fail_unless(top == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
 START_TEST(test_vlogarrwidth1)
 {
    const error_t expect[] = {
@@ -2783,6 +2803,7 @@ Suite *get_elab_tests(void)
    tcase_add_test(tc, test_issue1638);
    tcase_add_test(tc, test_assert8);
    tcase_add_test(tc, test_udnport1);
+   tcase_add_test(tc, test_udnport2);
    tcase_add_test(tc, test_vlogarrwidth1);
    tcase_add_test(tc, test_vlogparam1);
    suite_add_tcase(s, tc);

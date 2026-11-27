@@ -511,6 +511,7 @@ static const char *kind_text_map[V_LAST_NODE_KIND] = {
 };
 
 static const change_allowed_t change_allowed[] = {
+   { V_NET_DECL, V_VAR_DECL },
    { -1, -1 }
 };
 
@@ -546,6 +547,11 @@ vlog_node_t vlog_new(vlog_kind_t kind)
 {
    object_t *o = object_new(NULL, &vlog_object, kind);
    return container_of(o, struct _vlog_node, object);
+}
+
+void vlog_change_kind(vlog_node_t v, vlog_kind_t kind)
+{
+   object_change_kind(&vlog_object, &(v->object), kind);
 }
 
 vlog_kind_t vlog_kind(vlog_node_t v)

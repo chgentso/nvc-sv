@@ -3477,4 +3477,5 @@ svgatedelay2 verilog,gold
 vlog_portexpr1 verilog,gold
 vlog_udpdelay1 verilog,gold
 vlog_udpinit1 verilog,gold
+vlog_nettype_port1 verilog,gold
 vlog_tcheck_init1 verilog,fail,gold

@@ -56,6 +56,7 @@ vlog_node_t vlog_class_member(vlog_node_t class, ident_t id);
 vlog_node_t vlog_class_prop_enum(vlog_node_t class, vlog_node_t prop);
 vlog_node_t vlog_select_type(vlog_node_t v);
 bool vlog_is_dynamic_type(vlog_node_t type);
+bool vlog_nettype_is_flat(vlog_node_t type);
 bool is_implicit_data_type(vlog_node_t v);
 vlog_node_t vlog_longest_static_prefix(vlog_node_t v);
 bool vlog_is_const_arith(vlog_node_t v);

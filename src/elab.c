@@ -2433,6 +2433,31 @@ static vlog_node_t elab_nettype_of(vlog_node_t decl)
    return t;
 }
 
+static bool elab_same_data_type(vlog_node_t a, vlog_node_t b)
+{
+   // Matching data types of a nettype or declaration on each side of a
+   // port (6.22.1)
+
+   if (!vlog_has_type(a) || !vlog_has_type(b))
+      return false;
+   else if (vlog_ranges(a) != vlog_ranges(b))
+      return false;   // Unpacked dimensions
+
+   vlog_node_t ta = vlog_get_type(a), tb = vlog_get_type(b);
+   if (ta == NULL || tb == NULL)
+      return false;
+   else if (ta == tb)
+      return true;
+   else if (vlog_kind(ta) != V_DATA_TYPE || vlog_kind(tb) != V_DATA_TYPE)
+      return false;
+   else if (vlog_is_real(ta) || vlog_is_real(tb))
+      return vlog_subkind(ta) == vlog_subkind(tb);
+   else
+      return vlog_size(ta) == vlog_size(tb)
+         && vlog_is_signed(ta) == vlog_is_signed(tb)
+         && vlog_is_four_state(ta) == vlog_is_four_state(tb);
+}
+
 static bool elab_is_interconnect(vlog_node_t decl)
 {
    if (!vlog_has_type(decl))
@@ -2597,7 +2622,30 @@ static void elab_check_nettype_conn(vlog_node_t port, vlog_node_t value,
       return;
    }
 
-   if (pt != NULL && nt == NULL && vlog_kind(decl) == V_NET_DECL)
+   // If only one side is of a user-defined nettype the connection is a
+   // continuous assignment from source to sink which needs matching data
+   // types and an input or output port
+   const bool one_sided = (pt != NULL && nt == NULL
+                           && vlog_kind(decl) == V_NET_DECL)
+      || (pt == NULL && nt != NULL && vlog_kind(port) == V_PORT_DECL);
+   const bool assignable = vlog_kind(port) == V_PORT_DECL
+      && (vlog_subkind(port) == V_PORT_INPUT
+          || vlog_subkind(port) == V_PORT_OUTPUT)
+      && whole && elab_same_data_type(port, decl);
+
+   if (one_sided && assignable) {
+      // A net of a structure type mixing real and integral members is
+      // resolved from the drivers in its own module only
+      vlog_node_t udn = pt ?: nt;
+      if (vlog_has_ident2(udn) && vlog_has_type(udn)
+          && vlog_is_dynamic_type(vlog_type(udn))
+          && !vlog_nettype_is_flat(vlog_type(udn)))
+         error_at(where, "sorry, connecting a port of a built-in net type "
+                  "or variable to a net of nettype %s is not supported for "
+                  "this data type", istr(vlog_ident(udn)));
+      return;
+   }
+   else if (pt != NULL && nt == NULL && vlog_kind(decl) == V_NET_DECL)
       error_at(where, "cannot connect net '%s' of a built-in net type to "
                "port '%s' of nettype %s", istr(vlog_ident(decl)),
                istr(vlog_ident(port)), istr(vlog_ident(pt)));

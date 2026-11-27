@@ -3109,3 +3109,37 @@ int64_t vlog_label_hash(ident_t name)
       hash = (hash ^ (uint8_t)*p) * UINT64_C(1099511628211);
    return hash;
 }
+
+bool vlog_nettype_is_flat(vlog_node_t type)
+{
+   // A structure whose members are all integral or all real can be held
+   // in a signal
+
+   vlog_node_t st = vlog_get_type(type);
+   if (st == NULL || vlog_kind(st) != V_STRUCT_DECL
+       || (vlog_flags(st) & VLOG_F_PACKED))
+      return false;
+
+   int nreal = 0, nint = 0;
+   const int ndecls = vlog_decls(st);
+   for (int i = 0; i < ndecls; i++) {
+      vlog_node_t d = vlog_decl(st, i);
+      if (vlog_kind(d) != V_VAR_DECL || vlog_ranges(d) > 0)
+         return false;
+
+      vlog_node_t mt = vlog_get_type(vlog_type(d));
+      if (mt == NULL)
+         return false;
+      else if (vlog_kind(mt) == V_DATA_TYPE
+               && (vlog_subkind(mt) == DT_REAL
+                   || vlog_subkind(mt) == DT_SHORTREAL
+                   || vlog_subkind(mt) == DT_REALTIME))
+         nreal++;
+      else if (vlog_is_dynamic_type(mt))
+         return false;
+      else
+         nint++;
+   }
+
+   return ndecls > 0 && (nreal == 0 || nint == 0);
+}

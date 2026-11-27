@@ -18444,40 +18444,6 @@ static void check_user_net_procedural(vlog_node_t lhs)
                istr(vlog_ident(root)));
 }
 
-static bool nettype_is_flat(vlog_node_t type)
-{
-   // A structure whose members are all integral or all real can be held
-   // in a signal
-
-   vlog_node_t st = vlog_get_type(type);
-   if (st == NULL || vlog_kind(st) != V_STRUCT_DECL
-       || (vlog_flags(st) & VLOG_F_PACKED))
-      return false;
-
-   int nreal = 0, nint = 0;
-   const int ndecls = vlog_decls(st);
-   for (int i = 0; i < ndecls; i++) {
-      vlog_node_t d = vlog_decl(st, i);
-      if (vlog_kind(d) != V_VAR_DECL || vlog_ranges(d) > 0)
-         return false;
-
-      vlog_node_t mt = vlog_get_type(vlog_type(d));
-      if (mt == NULL)
-         return false;
-      else if (vlog_kind(mt) == V_DATA_TYPE
-               && (vlog_subkind(mt) == DT_REAL
-                   || vlog_subkind(mt) == DT_SHORTREAL
-                   || vlog_subkind(mt) == DT_REALTIME))
-         nreal++;
-      else if (vlog_is_dynamic_type(mt))
-         return false;
-      else
-         nint++;
-   }
-
-   return ndecls > 0 && (nreal == 0 || nint == 0);
-}
-
 static vlog_node_t user_net_driver(vlog_node_t target)
 {
    // Each continuous assignment to a net with a resolution function
@@ -18505,7 +18471,7 @@ static vlog_node_t user_net_driver(vlog_node_t target)
    // resolution function with the values of all its drivers, which may be
    // anywhere in the design
    if (!vlog_is_dynamic_type(vlog_type(net->decl))
-       || nettype_is_flat(vlog_type(net->decl)))
+       || vlog_nettype_is_flat(vlog_type(net->decl)))
       return target;
 
    if (current_module != module_root) {
@@ -26638,6 +26604,31 @@ static vlog_node_t port_formal(ident_t name, int pos)
    return NULL;
 }
 
+static void coerce_implicit_net(vlog_node_t v, vlog_node_t formal)
+{
+   // A net declared implicitly by a connection to a port of a
+   // user-defined nettype has that nettype (23.3.3.7)
+
+   if (formal == NULL || vlog_kind(v) != V_REF || !vlog_has_ref(v)
+       || current_module != module_root
+       || vlog_kind(current_module) != V_MODULE)
+      return;
+
+   vlog_node_t decl = vlog_ref(v), dt = vlog_type(formal);
+   if (vlog_kind(decl) != V_NET_DECL || !vlog_has_type(decl)
+       || vlog_kind(vlog_type(decl)) != V_DATA_TYPE
+       || !(vlog_flags(vlog_type(decl)) & VLOG_F_IMPLICIT_NET))
+      return;
+   else if (vlog_kind(dt) != V_TYPE_DECL || !(vlog_flags(dt) & VLOG_F_NETTYPE))
+      return;
+
+   // Nets of a user-defined nettype are variables resolved from their
+   // drivers
+   vlog_change_kind(decl, V_VAR_DECL);
+   vlog_set_type(decl, dt);
+   register_user_net(decl, nettype_root(dt));
+}
+
 static vlog_node_t p_connection_expression(ident_t name, int index)
 {
    // An edge of a signal connected to an event port is an event which a
@@ -26659,8 +26650,11 @@ static vlog_node_t p_connection_expression(ident_t name, int index)
          return p_deferred_pattern_expression();
    }
 
-   if ((peek() != tPOSEDGE && peek() != tNEGEDGE) || current_module == NULL)
-      return p_expression();
+   if ((peek() != tPOSEDGE && peek() != tNEGEDGE) || current_module == NULL) {
+      vlog_node_t v = p_expression();
+      coerce_implicit_net(v, port_formal(name, index));
+      return v;
+   }
 
    const bool pos = peek() == tPOSEDGE;
    consume(pos ? tPOSEDGE : tNEGEDGE);
