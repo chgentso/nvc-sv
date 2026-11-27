@@ -139,6 +139,10 @@ typedef struct {
       mir_value_t ptr;
    } rom_cache[16];
    unsigned                 n_rom_cache;
+   uint32_t                *act_rd;    // island signals read by the process
+   uint32_t                 n_act_rd;
+   uint32_t                 cap_act_rd;
+   bool                     act_track;
    bool                     failed;
    const char              *reason;    // NVC_DUMP_ISLANDS: first failure
 } vi_lower_t;
@@ -1121,6 +1125,25 @@ static mir_value_t vi_state_ptr_at(vi_lower_t *l, uint32_t byte_off)
 static bool vi_lower_expr(vi_lower_t *l, tree_t expr, vi_val_t *out);
 static bool vi_lower_stmt(vi_lower_t *l, tree_t stmt);
 
+// Record that the combinational process being lowered reads ISIG: the
+// process is skipped when none of the signals it reads changed
+static void vi_note_read(vi_lower_t *l, const vhdl_isl_sig_t *isig)
+{
+   if (!l->act_track)
+      return;
+   const uint32_t idx = (uint32_t)(isig - l->isl->sigs);
+   assert(idx < l->isl->n_sigs);
+   for (uint32_t i = 0; i < l->n_act_rd; i++) {
+      if (l->act_rd[i] == idx)
+         return;
+   }
+   if (l->n_act_rd == l->cap_act_rd) {
+      l->cap_act_rd = MAX(l->cap_act_rd * 2u, 16u);
+      l->act_rd = xrealloc_array(l->act_rd, l->cap_act_rd, sizeof(uint32_t));
+   }
+   l->act_rd[l->n_act_rd++] = idx;
+}
+
 static mir_value_t vi_compute_elem_pos(vi_lower_t *l, vi_val_t base,
                                        mir_value_t idx_val, uint32_t elem_w)
 {
@@ -1167,6 +1190,7 @@ static bool vi_lower_sig_load(vi_lower_t *l, const vhdl_isig_t *s,
                               mir_value_t elem_idx, vi_val_t *out)
 {
    mir_unit_t *mu = l->mu;
+   vi_note_read(l, isig);
    if (s->elem_kind == VISIG_ENUM || s->elem_kind == VISIG_INT) {
       mir_value_t iv;
       if (s->byte_size == 1 && !s->is_signed) {
@@ -4749,6 +4773,7 @@ static bool vi_copy_array2d_sig(vi_lower_t *l, const vhdl_isig_t *ds,
       return false;
 
    mir_unit_t *mu = l->mu;
+   vi_note_read(l, sis);
    if (!l->two_state) {
       const uint32_t dst_off = dis->a_off + (l->is_ff ? l->ff_stride : 0u);
       vi_mark_ff_dirty(l, dis);
@@ -4958,6 +4983,7 @@ static bool vi_assign_array2d_local(vi_lower_t *l, const vi_rec_leaf_t *lf,
    if (ss != NULL && ss->is_array2d) {
       if (ss->nelems != lf->nelems || ss->width != lf->width)
          return false;
+      vi_note_read(l, sis);
       mir_build_copy(mu, lf->storage, vi_state_ptr_at(l, sis->a_off),
                      vi_off(mu, vi_array2d_bytes(l, lf->nelems, lf->width)));
       return true;
@@ -5152,6 +5178,7 @@ static bool vi_assign_rec_local(vi_lower_t *l, vi_local_t *dloc,
                   free(s_ids);
                   return false;
                }
+               vi_note_read(l, sis);
                mir_build_copy(mu, dlf->storage, vi_state_ptr_at(l, sis->a_off),
                               vi_off(mu, vi_array2d_bytes(l, dlf->nelems,
                                                           dlf->width)));
@@ -6981,6 +7008,72 @@ static void vi_proc_done(vi_lower_t *l, const vhdl_island_ctx_t *ctx,
    l->reason = NULL;
 }
 
+static void vi_act_count(vi_lower_t *l, uint32_t off, uint32_t n)
+{
+   mir_unit_t *mu = l->mu;
+   mir_type_t t_v64 = mir_vec2_type(mu, 64, false);
+   mir_value_t cur = mir_build_island_load(mu, t_v64, l->state_ptr,
+                                           vi_off(mu, off), vi_off(mu, -1),
+                                           vi_off(mu, 0));
+   mir_value_t upd = mir_build_add(mu, vi_i64_type(mu),
+                                   mir_build_cast(mu, vi_i64_type(mu), cur),
+                                   vi_i64(mu, n));
+   mir_build_island_store(mu, l->state_ptr, vi_off(mu, off), vi_off(mu, -1),
+                          vi_off(mu, 0), mir_build_cast(mu, t_v64, upd));
+}
+
+static bool vi_act_add_read(vi_lower_t *l, uint32_t idx)
+{
+   if (!(l->isl->sigs[idx].rt_flags & RT_ISIG_ACT))
+      return false;
+   for (uint32_t i = 0; i < l->n_act_rd; i++) {
+      if (l->act_rd[i] == idx)
+         return true;
+   }
+   if (l->n_act_rd == l->cap_act_rd) {
+      l->cap_act_rd = MAX(l->cap_act_rd * 2u, 16u);
+      l->act_rd = xrealloc_array(l->act_rd, l->cap_act_rd, sizeof(uint32_t));
+   }
+   l->act_rd[l->n_act_rd++] = idx;
+   return true;
+}
+
+// Branch to BODY_BB when the run-all byte or the change byte of a signal
+// the process reads is set.  The read set is the union of what the
+// analysis found and what the lowering of the body loaded; a process that
+// reads a signal without a change byte always runs.
+static void vi_emit_act_test(vi_lower_t *l, const vhdl_iproc_t *p,
+                             mir_block_t body_bb, mir_block_t next_bb)
+{
+   mir_unit_t *mu = l->mu;
+   const vhdl_island_t *isl = l->isl;
+
+   bool always = false;
+   for (uint32_t i = 0; i < l->n_act_rd && !always; i++)
+      always = !(isl->sigs[l->act_rd[i]].rt_flags & RT_ISIG_ACT);
+   for (uint32_t i = 0; i < p->n_reads && !always; i++) {
+      const vhdl_isl_sig_t *isig = vhdl_island_find_sig(isl, p->reads[i]);
+      always = isig == NULL
+         || !vi_act_add_read(l, (uint32_t)(isig - isl->sigs));
+   }
+
+   if (always) {
+      mir_build_jump(mu, body_bb);
+      return;
+   }
+
+   mir_value_t zero = vi_u8(mu, 0);
+   mir_value_t any = mir_build_cmp(
+      mu, MIR_CMP_NEQ,
+      mir_build_load(mu, vi_state_ptr_at(l, RT_ISLAND_ACT_ALL(isl->n_sigs))),
+      zero);
+   for (uint32_t i = 0; i < l->n_act_rd; i++) {
+      mir_value_t chg = mir_build_load(mu, vi_state_ptr_at(l, l->act_rd[i]));
+      any = mir_build_or(mu, any, mir_build_cmp(mu, MIR_CMP_NEQ, chg, zero));
+   }
+   mir_build_cond(mu, any, body_bb, next_bb);
+}
+
 static mir_unit_t *vi_build_comb_unit(mir_context_t *mc,
                                       const vhdl_island_ctx_t *ctx,
                                       const vhdl_island_t *isl,
@@ -7007,6 +7100,16 @@ static mir_unit_t *vi_build_comb_unit(mir_context_t *mc,
       .lut_xor   = MIR_NULL_VALUE,
    };
 
+   // With process activity (isl->has_act) each process is guarded by a
+   // test of the change bytes of the island signals it reads, which the
+   // runtime sets before every call (island_act_prepare in rt/island.c), so
+   // a delta cycle only runs the processes whose inputs changed.
+   const bool act = isl->has_act;
+   const bool act_stats = act && getenv("NVC_ISLAND_ACT_STATS") != NULL;
+   const uint32_t act_cnt = RT_ISLAND_ACT_CNT(isl->n_sigs);
+   if (act_stats)
+      vi_act_count(&l, act_cnt + 8u, isl->n_comb_procs);
+
    // Readers before writers: comb_procs is in topological order, so going
    // backwards every process reads the signal values of the current delta
    // cycle, as a VHDL signal assignment only takes effect in the next one.
@@ -7021,11 +7124,28 @@ static mir_unit_t *vi_build_comb_unit(mir_context_t *mc,
       vi_scope_t sc = { .ret_bb = MIR_NULL_BLOCK };
       l.scope = &sc;
 
+      mir_block_t test_bb = MIR_NULL_BLOCK, body_bb = MIR_NULL_BLOCK;
+      mir_block_t next_bb = MIR_NULL_BLOCK;
+      if (act) {
+         test_bb = mir_add_block(mu);
+         body_bb = mir_add_block(mu);
+         next_bb = mir_add_block(mu);
+         mir_build_jump(mu, test_bb);
+         mir_set_cursor(mu, body_bb, MIR_APPEND);
+
+         // Values built in an earlier process may not have been computed
+         l.lut_not = l.lut_and = l.lut_or = l.lut_xor = MIR_NULL_VALUE;
+         l.n_rom_cache = 0;
+         l.n_act_rd = 0;
+         l.act_track = true;
+      }
+
       bool ok = vi_bind_process_locals(&l, p->stmt, &sc);
       const int ns = tree_stmts(p->stmt) - 1;
       for (int i = 0; i < ns && ok; i++)
          ok = vi_lower_stmt(&l, tree_stmt(p->stmt, i));
 
+      l.act_track = false;
       vi_scope_clear(&sc);
       l.scope = NULL;
 
@@ -7034,11 +7154,22 @@ static mir_unit_t *vi_build_comb_unit(mir_context_t *mc,
                                  ctx->ancestors, ctx->n_ancestors);
       if (!ok || l.failed) {
          *failed_proc_out = (int)pi;
+         free(l.act_rd);
          mir_unit_free(mu);
          return NULL;
       }
+
+      if (act) {
+         if (act_stats)
+            vi_act_count(&l, act_cnt, 1);
+         mir_build_jump(mu, next_bb);
+         mir_set_cursor(mu, test_bb, MIR_APPEND);
+         vi_emit_act_test(&l, p, body_bb, next_bb);
+         mir_set_cursor(mu, next_bb, MIR_APPEND);
+      }
    }
 
+   free(l.act_rd);
    mir_build_return(mu, vi_off(mu, 0));
    return mu;
 }

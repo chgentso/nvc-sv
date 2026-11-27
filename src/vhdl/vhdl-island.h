@@ -153,6 +153,7 @@ typedef struct {
    uint32_t        id;
    ident_t         eval_name;
    bool            two_state;
+   bool            has_act;          // state starts with RT_ISLAND_ACT_BYTES
    uint32_t        state_bytes;
    uint32_t        sparse_log_off;
    uint32_t        total_state_bytes;

@@ -3362,3 +3362,5 @@ vhdl_island_force_a1 normal,2008,$NVC_2STATE=islands
 vhdl_island_force_delta1 gold,normal,2008
 vlog_island_time0 verilog,gold
 vpi_island_cb1  verilog,vpi,gold
+vhdl_island_act1 gold,normal,2008
+vhdl_island_act2 shell

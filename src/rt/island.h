@@ -45,7 +45,21 @@ typedef enum {
    RT_ISIG_SPARSE_RAM     = (1u << 16),
    RT_ISIG_PROC_COMB      = (1u << 17),   // Written by always_comb/always @*
    RT_ISIG_RESET_LATE     = (1u << 18),   // Not settled before time zero
+   RT_ISIG_ACT            = (1u << 19),   // Change byte read by VHDL comb
 } rt_island_sig_flags_t;
+
+// Process activity of VHDL island combinational functions: the state of a
+// VHDL island with combinational processes starts with one change byte per
+// island signal, then a byte that makes every process run, then two 64-bit
+// counters (processes run, processes visited) that the comb function only
+// updates when NVC_ISLAND_ACT_STATS was set when it was lowered.  A process
+// runs when the run-all byte or the change byte of a signal it reads is
+// set; a process that reads a signal without RT_ISIG_ACT always runs.  The
+// runtime sets the change byte wherever it writes a new value into the
+// island state (island_act_mark) and clears them after each call.
+#define RT_ISLAND_ACT_ALL(nsigs)    (nsigs)
+#define RT_ISLAND_ACT_CNT(nsigs)    ALIGN_UP((nsigs) + 1u, 8u)
+#define RT_ISLAND_ACT_BYTES(nsigs)  (RT_ISLAND_ACT_CNT(nsigs) + 16u)
 
 #define RT_IEDGE_CLK_POSEDGE  (1u << 0)
 #define RT_IEDGE_RST_POSEDGE  (1u << 1)
@@ -59,6 +73,7 @@ typedef enum {
 #define RT_IFF_DIRECT_LINK  (1u << 3)
 #define RT_IFF_SYNC_OUT     (1u << 4)
 #define RT_IFF_SPARSE_RAM   (1u << 5)
+#define RT_IFF_ACT          (1u << 6)
 #define RT_IFF_HAS_NOTIFY   (RT_IFF_DIRECT_LINK | RT_IFF_SYNC_OUT)
 
 #define RT_ISLAND_SPARSE_INLINE_CAP   16u
@@ -88,6 +103,8 @@ typedef struct {
 
 #define RT_IDIR_STD_LOGIC9  (1u << 0)
 #define RT_IDIR_TWO_STATE   (1u << 1)
+#define RT_IDIR_ACT         (1u << 2)   // Set the change byte (flags >> 8)
+#define RT_IDIR_IDX_SHIFT   8u
 
 typedef struct {
    const uint8_t     *src_a;
@@ -96,7 +113,7 @@ typedef struct {
    uint8_t           *dst_b;
    struct _rt_island *dst_isl;
    uint32_t           count;    // STD_LOGIC9: total bytes; 2/4-state: nwords * nelems
-   uint32_t           flags;    // RT_IDIR_*
+   uint32_t           flags;    // RT_IDIR_*, RT_IDIR_ACT index in bits 8+
 } rt_island_direct_desc_t;
 
 typedef struct {
@@ -133,6 +150,12 @@ typedef struct _rt_island_alias {
    int32_t                  sig_offset;
    struct _rt_island_alias *next;
 } rt_island_alias_t;
+
+typedef struct _rt_island_act {
+   uint32_t off;      // Byte offset of the signal value, 8-byte aligned
+   uint32_t nwords;   // Value size in 64-bit words including padding
+   uint32_t idx;      // Island signal index (change byte)
+} rt_island_act_t;
 
 typedef struct _rt_island_sig {
    rt_signal_t            *sig;
@@ -265,6 +288,8 @@ typedef struct _rt_island {
    bool                   mt_eval_on_main;
    bool                   mt_ff_unsafe;
    bool                   is_vhdl;
+   bool                   act_on;       // Comb function tests change bytes
+   bool                   direct_act;   // A direct comb desc has RT_IDIR_ACT
 } rt_island_t;
 
 typedef struct _rt_island_mgr rt_island_mgr_t;
