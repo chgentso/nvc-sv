@@ -41,6 +41,7 @@ typedef struct _object_arena {
    void           *base;
    void           *alloc;
    void           *limit;
+   void           *reserve;
    uint32_t       *forward;
    mark_mask_t    *mark_bits;
    size_t          mark_sz;
@@ -62,6 +63,13 @@ typedef struct _object_arena {
 
 #if !ASAN_ENABLED
 #define OBJECT_UNMAP_UNUSED 1
+#endif
+
+#if !ASAN_ENABLED && SIZE_MAX > UINT32_MAX
+// A new arena reserves this much address space and commits memory as
+// it grows so that large designs do not need the -M option: object
+// offsets within an arena are 32 bits
+#define OBJECT_ARENA_RESERVE ((size_t)UINT32_MAX + 1 - OBJECT_PAGE_SZ)
 #endif
 
 #define ITEM_IDENT       (I_IDENT | I_IDENT2 | I_TEXT | I_IDENT3)
@@ -487,6 +495,37 @@ static bool is_gc_root(const object_class_t *class, int kind)
    return false;
 }
 
+static bool object_arena_grow(object_arena_t *arena, size_t size)
+{
+   assert(!arena->frozen);
+
+   const size_t used = arena->alloc - arena->base;
+   const size_t avail = arena->reserve - arena->base;
+   if (avail - used < size)
+      return false;
+
+#ifdef OBJECT_ARENA_RESERVE
+   const size_t committed = arena->limit - arena->base;
+   const size_t want = MAX(committed * 2, ALIGN_UP(used + size, OBJECT_PAGE_SZ));
+   const size_t newsz = MIN(want, avail);
+
+   nvc_commit(arena->limit, newsz - committed);
+   arena->limit = arena->base + newsz;
+
+   if (arena->mark_bits != NULL) {
+      // Keep the marks of the current generation: words past the high
+      // water mark are cleared when first used
+      const size_t nbits = newsz / OBJECT_ALIGN;
+      arena->mark_sz = ALIGN_UP(nbits, 64) / 8;
+      arena->mark_bits = xrealloc(arena->mark_bits, arena->mark_sz);
+   }
+
+   return true;
+#else
+   should_not_reach_here();
+#endif
+}
+
 object_t *object_new(object_arena_t *arena,
                      const object_class_t *class, int kind)
 {
@@ -503,14 +542,15 @@ object_t *object_new(object_arena_t *arena,
 
    assert(((uintptr_t)arena->alloc & (OBJECT_ALIGN - 1)) == 0);
 
-   if (unlikely(arena->limit - arena->alloc < size)) {
+   if (unlikely(arena->limit - arena->alloc < size)
+       && !object_arena_grow(arena, size)) {
       diag_t *d = diag_new(DIAG_FATAL, NULL);
       diag_suppress(d, false);
       diag_printf(d, "memory exhausted while creating unit %s",
                   istr(object_arena_name(arena)));
       diag_hint(d, NULL, "The current limit is %zu bytes which you can "
                 "increase with the $bold$-M$$ option, for example "
-                "$bold$-M 32m$$", object_arena_default_size());
+                "$bold$-M 32m$$", (size_t)(arena->reserve - arena->base));
       diag_emit(d);
       fatal_exit(EXIT_FAILURE);
    }
@@ -1225,7 +1265,8 @@ size_t object_arena_default_size(void)
    return ALIGN_UP(opt_get_size(OPT_ARENA_SIZE), OBJECT_PAGE_SZ);
 }
 
-object_arena_t *object_arena_new(size_t size, unsigned std)
+static object_arena_t *object_arena_alloc(size_t size, size_t reserve,
+                                          unsigned std)
 {
    object_one_time_init();
 
@@ -1233,9 +1274,24 @@ object_arena_t *object_arena_new(size_t size, unsigned std)
       APUSH(all_arenas, NULL);   // Dummy null arena
 
    object_arena_t *arena = xcalloc(sizeof(object_arena_t));
-   arena->base   = nvc_memalign(OBJECT_PAGE_SZ, size);
-   arena->alloc  = arena->base;
-   arena->limit  = (char *)arena->base + size;
+
+#ifdef OBJECT_ARENA_RESERVE
+   if (reserve > size) {
+      if ((arena->base = nvc_reserve(OBJECT_PAGE_SZ, reserve)) != NULL)
+         nvc_commit(arena->base, size);
+      else
+         reserve = size;   // Address space exhausted
+   }
+#else
+   reserve = size;
+#endif
+
+   if (reserve == size)
+      arena->base = nvc_memalign(OBJECT_PAGE_SZ, size);
+
+   arena->alloc   = arena->base;
+   arena->limit   = (char *)arena->base + size;
+   arena->reserve = (char *)arena->base + reserve;
    arena->key    = all_arenas.count;
    arena->source = OBJ_FRESH;
    arena->std    = std;
@@ -1246,6 +1302,11 @@ object_arena_t *object_arena_new(size_t size, unsigned std)
       fatal_trace("too many object arenas");
 
    return arena;
+}
+
+object_arena_t *object_arena_new(size_t size, unsigned std)
+{
+   return object_arena_alloc(size, size, std);
 }
 
 void object_arena_freeze(object_arena_t *arena)
@@ -1267,10 +1328,10 @@ void object_arena_freeze(object_arena_t *arena)
    void *next_page = ALIGN_UP(arena->alloc, OBJECT_PAGE_SZ);
    nvc_memprotect(arena->base, next_page - arena->base, MEM_RO);
 
-   if (next_page < arena->limit) {
+   if (next_page < arena->reserve) {
 #if OBJECT_UNMAP_UNUSED
-      nvc_munmap(next_page, arena->limit - next_page);
-      arena->limit = next_page;
+      nvc_munmap(next_page, arena->reserve - next_page);
+      arena->limit = arena->reserve = next_page;
 #else
       // This can be useful for debugging use-after-free
       nvc_decommit(next_page, arena->limit - next_page);
@@ -1390,7 +1451,9 @@ unsigned object_global_arena_used_pct(void)
    if (global_arena == NULL)
       return 0;
 
-   const size_t total = (char *)global_arena->limit - (char *)global_arena->base;
+   // Relative to the size set with -M rather than the memory committed
+   // so far as the arena grows past it on demand
+   const size_t total = object_arena_default_size();
    const size_t used = (char *)global_arena->alloc - (char *)global_arena->base;
    return total == 0 ? 0 : (unsigned)(used * 100 / total);
 }
@@ -1408,7 +1471,13 @@ void freeze_global_arena(void)
 void make_new_arena(void)
 {
    freeze_global_arena();
-   global_arena = object_arena_new(object_arena_default_size(), standard());
+   const size_t size = object_arena_default_size();
+#ifdef OBJECT_ARENA_RESERVE
+   const size_t reserve = MAX(size, OBJECT_ARENA_RESERVE);
+#else
+   const size_t reserve = size;
+#endif
+   global_arena = object_arena_alloc(size, reserve, standard());
 }
 
 object_arena_t *detach_global_arena(void)
@@ -1443,7 +1512,7 @@ void discard_global_arena(void)
       p = (char *)p + size;
    }
 
-   nvc_munmap(global_arena->base, global_arena->limit - global_arena->base);
+   nvc_munmap(global_arena->base, global_arena->reserve - global_arena->base);
 
    assert(all_arenas.items[all_arenas.count - 1] == global_arena);
    APOP(all_arenas);

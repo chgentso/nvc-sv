@@ -293,6 +293,10 @@ void *nvc_memalign(size_t align, size_t sz);
 void nvc_munmap(void *ptr, size_t length);
 void nvc_memprotect(void *ptr, size_t length, mem_access_t prot);
 void nvc_decommit(void *ptr, size_t length);
+#if !ASAN_ENABLED
+void *nvc_reserve(size_t align, size_t sz);
+void nvc_commit(void *ptr, size_t length);
+#endif
 void *map_huge_pages(size_t align, size_t sz);
 void *map_jit_pages(size_t align, size_t sz);
 

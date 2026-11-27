@@ -19,6 +19,7 @@
 #include "common.h"
 #include "lib.h"
 #include "object.h"
+#include "option.h"
 #include "tree.h"
 #include "type.h"
 #include "util.h"
@@ -325,6 +326,40 @@ START_TEST(test_lib_save)
 }
 END_TEST
 
+#if !ASAN_ENABLED
+START_TEST(test_arena_grow)
+{
+   // A new arena commits more memory when it fills up instead of
+   // failing at the size given with -M
+   const size_t old_size = opt_get_size(OPT_ARENA_SIZE);
+   opt_set_size(OPT_ARENA_SIZE, 64 * 1024);
+
+   make_new_arena();
+
+   tree_t ent = tree_new(T_ENTITY);
+   tree_set_ident(ent, ident_new("TEST_LIB.big"));
+
+   const int count = 50000;
+   for (int i = 0; i < count; i++) {
+      tree_t g = tree_new(T_GENERIC_DECL);
+      tree_set_ident(g, ident_new("g"));
+      tree_set_type(g, my_int_type());
+      tree_add_generic(ent, g);
+   }
+
+   for (int i = 0; i < count; i += 997)
+      ck_assert_ptr_eq(tree_ident(tree_generic(ent, i)), ident_new("g"));
+
+   lib_put(work, ent);
+   freeze_global_arena();
+
+   ck_assert_int_eq(tree_generics(ent), count);
+
+   opt_set_size(OPT_ARENA_SIZE, old_size);
+}
+END_TEST
+#endif
+
 Suite *get_lib_tests(void)
 {
    Suite *s = suite_create("lib");
@@ -334,6 +369,9 @@ Suite *get_lib_tests(void)
    tcase_add_test(tc_core, test_lib_new);
    tcase_add_test(tc_core, test_lib_fopen);
    tcase_add_test(tc_core, test_lib_save);
+#if !ASAN_ENABLED
+   tcase_add_test(tc_core, test_arena_grow);
+#endif
    suite_add_tcase(s, tc_core);
 
    return s;

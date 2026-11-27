@@ -1199,6 +1199,61 @@ void *nvc_memalign(size_t align, size_t sz)
 #endif
 }
 
+#if !ASAN_ENABLED
+void *nvc_reserve(size_t align, size_t sz)
+{
+   // Reserve address space without committing memory: the pages must
+   // be made accessible with nvc_commit before use
+   assert(is_power_of_2(align));
+   const size_t mapalign = MAX(align, nvc_page_size());
+   const size_t mapsz = ALIGN_UP(sz + mapalign - 1, mapalign);
+
+#if defined __MINGW32__
+   void *ptr = VirtualAlloc(NULL, mapsz, MEM_RESERVE, PAGE_NOACCESS);
+   if (ptr == NULL)
+      return NULL;
+
+   // Address space reserved on Windows can only be released as a whole
+   // so reserve again at the aligned address inside this region
+   void *aligned = ALIGN_UP(ptr, align);
+   if (!VirtualFree(ptr, 0, MEM_RELEASE))
+      fatal_win32("VirtualFree");
+
+   if (VirtualAlloc(aligned, sz, MEM_RESERVE, PAGE_NOACCESS) != aligned)
+      return NULL;
+
+   return aligned;
+#else
+   void *ptr = mmap(NULL, mapsz, PROT_NONE,
+                    MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
+   if (ptr == MAP_FAILED)
+      return NULL;
+
+   void *aligned = ALIGN_UP(ptr, align);
+   void *limit = aligned + sz;
+
+   const size_t low_waste = aligned - ptr;
+   const size_t high_waste = ptr + mapsz - limit;
+
+   if (low_waste > 0) nvc_munmap(ptr, low_waste);
+   if (high_waste > 0) nvc_munmap(limit, high_waste);
+
+   return aligned;
+#endif
+}
+
+void nvc_commit(void *ptr, size_t length)
+{
+#if defined __MINGW32__
+   if (VirtualAlloc(ptr, length, MEM_COMMIT, PAGE_READWRITE) == NULL)
+      fatal_win32("VirtualAlloc");
+#else
+   if (mprotect(ptr, length, PROT_READ | PROT_WRITE) < 0)
+      fatal_errno("mprotect");
+#endif
+}
+#endif
+
 void nvc_memprotect(void *ptr, size_t length, mem_access_t prot)
 {
 #if defined __MINGW32__
