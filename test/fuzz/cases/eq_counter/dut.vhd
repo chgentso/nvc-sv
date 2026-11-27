@@ -36,7 +36,7 @@ begin
 
     p2 : process (all) is
     begin
-        wide <= resize(cnt, 80) * 16#10001# + 3;
+        wide <= shift_left(resize(cnt, 80), 70) + 3;
     end process;
 
     p3 : process (clk) is

@@ -41,6 +41,8 @@ RULE_VCD_ORDER = "vcd-order-within-time"
 RULE_9VAL = "x-9val-reduce"
 RULE_NAMES = "x-common-names-only"
 RULE_METAVALUE = "x-drop-metavalue-warnings"
+RULE_PROC = "x-drop-process-line"
+RULE_FINISH = "x-drop-finish-note"
 RULE_NODELTA = "x-reports-without-delta"
 
 UNIT_FS = {"fs": 1, "ps": 10**3, "ns": 10**6, "us": 10**9, "ms": 10**12,
@@ -65,7 +67,10 @@ def time_fs(num, unit):
     return int(float(num) * UNIT_FS.get(unit, 1))
 
 
-def parse_nvc(text):
+PROC_LINE = re.compile(r'^\s+Process :')
+
+
+def parse_nvc(text, drop_process=False):
     """Items of nvc output in order: Rec for '** Sev: time+delta: msg' blocks
     (with indented continuation lines), plain strings for the rest."""
     items, cur = [], None
@@ -77,7 +82,9 @@ def parse_nvc(text):
             cur = [m.group(1).lower(), m.group(2) + m.group(3),
                    int(m.group(4) or 0), [m.group(5)]]
         elif cur is not None and line[:1] in (" ", "\t"):
-            cur[3].append(line.rstrip())
+            # a fused process is named differently in the trace
+            if not (drop_process and PROC_LINE.match(line)):
+                cur[3].append(line.rstrip())
         else:
             if cur:
                 items.append(_mk(cur))
@@ -184,8 +191,9 @@ def _short(it):
 
 def compare_reports(res_a, res_b, stable=False):
     """L1 report text of config a against reference b."""
-    a, b = parse_nvc(res_a.text), parse_nvc(res_b.text)
-    rules = []
+    a = parse_nvc(res_a.text, drop_process=True)
+    b = parse_nvc(res_b.text, drop_process=True)
+    rules = [RULE_PROC]
     if not stable:
         a, b = n1_sort(a), n1_sort(b)
         rules.append(RULE_N1)
@@ -315,8 +323,10 @@ def compare_vcd_cross(res_a, res_b):
 # --------------------------------------------------------- L2 cross tool
 
 def _drop_noise(recs):
+    """Records that exist in one tool only: IEEE metavalue warnings (other
+    wording) and nvc's note for std.env.finish."""
     return [r for r in recs if "metavalue" not in r[2].lower()
-            and "ieee" not in r[2].lower()]
+            and "ieee" not in r[2].lower() and r[2] != "FINISH called"]
 
 
 def compare_reports_cross(res_nvc, res_other):
@@ -341,7 +351,7 @@ def compare_reports_cross(res_nvc, res_other):
                           kind, "%s:%s" % (r[1], mask(r[2])),
                           "at %d fs: nvc-only %s, other-only %s" % (
                               t, only_a[:1], only_b[:1]),
-                          [RULE_NODELTA, RULE_METAVALUE])
+                          [RULE_NODELTA, RULE_METAVALUE, RULE_FINISH])
     return None
 
 

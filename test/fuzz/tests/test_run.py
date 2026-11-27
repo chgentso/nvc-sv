@@ -150,6 +150,15 @@ class StubTest(unittest.TestCase):
         v = compare.compare_case(res)
         self.assertIn("l0-crash/spec/island_boom+model_cycle", v.signatures())
 
+    def test_missing_capability_skips_config(self):
+        self.tools.build.caps = {"rtl_islands": True, "no_island_fast": False}
+        res = self.run_case("collapse")
+        self.assertFalse(res["nofast"].available)
+        self.assertIn("no_island_fast", res["nofast"].text)
+        v = compare.compare_case(res)
+        self.assertFalse([d for d in v.diffs if d.cfg == "nofast"])
+        self.assertTrue([n for n in v.notes if n.startswith("nofast")])
+
     def test_no_ghdl(self):
         self.tools.ghdl = None
         res = self.run_case("", ("ref", "default", "ghdl"))

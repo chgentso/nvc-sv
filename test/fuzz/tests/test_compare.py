@@ -81,7 +81,7 @@ class ReportTests(unittest.TestCase):
         self.assertIsNone(compare.compare_reports(a, b))
         d = compare.compare_reports(a, b, stable=True)
         self.assertIsNotNone(d)
-        self.assertEqual(d.rules, [])
+        self.assertEqual(d.rules, [compare.RULE_PROC])
 
     def test_delta_shift(self):
         a = RunResult("default", text="** Note: 4ns+1: d=0A tick=1\n")
@@ -104,6 +104,22 @@ class ReportTests(unittest.TestCase):
         a = RunResult("x", text="** Note: 5ns+1: p\n")
         b = RunResult("ref", text="** Note: 4ns+1: p\n")
         self.assertEqual(compare.compare_reports(a, b).kind, "time-shift")
+
+    def test_process_line_ignored(self):
+        # a fused process is named differently in the trace
+        a = RunResult("default", text="** Note: 1ns+1: m\n   Process :tb:dut at "
+                      "tb.vhd:14\n")
+        b = RunResult("ref", text="** Note: 1ns+1: m\n   Process :tb:dut:_p3 "
+                      "at dut.vhd:52\n")
+        self.assertIsNone(compare.compare_reports(a, b))
+        a = RunResult("default", text="** Note: 1ns+1: m\n   Function F at x:1\n")
+        b = RunResult("ref", text="** Note: 1ns+1: m\n   Function G at x:1\n")
+        self.assertEqual(compare.compare_reports(a, b).kind, "text-change")
+
+    def test_finish_note_is_not_cross_tool_difference(self):
+        n = RunResult("ref", text="** Note: 9ns+0: FINISH called\n")
+        g = RunResult("ghdl", text="")
+        self.assertIsNone(compare.compare_reports_cross(n, g))
 
     def test_ghdl_records(self):
         g = ("tb.vhd:55:13:@4ns:(report note): d=0A tick=2\n"

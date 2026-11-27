@@ -76,6 +76,7 @@ class Config:
     run_args: Tuple[str, ...] = ()
     run_env: Tuple[Tuple[str, str], ...] = ()
     waves: bool = True
+    needs: Tuple[str, ...] = ()           # capabilities the build must have
 
     def elab_key(self):
         return (self.tool, self.elab_args, self.elab_env)
@@ -84,9 +85,10 @@ class Config:
 # plan section 5.2 (C2 subset); C7 adds the rest
 _SPEC = (("NVC_ISLAND_SPEC", "1"),)
 CONFIGS: Dict[str, Config] = {c.name: c for c in (
-    Config("ref", elab_args=("--rtl-islands=off",)),
+    Config("ref", elab_args=("--rtl-islands=off",), needs=("rtl_islands",)),
     Config("default"),
-    Config("nofast", run_args=("--no-island-fast",)),
+    Config("nofast", run_args=("--no-island-fast",),
+           needs=("no_island_fast",)),
     Config("spec", elab_env=_SPEC),
     Config("specA", elab_env=_SPEC,
            run_env=(("NVC_ISLAND_SPEC_FORCE", "A"),)),
@@ -338,7 +340,15 @@ def run_case(tools: Tools, case, config_names=DEFAULT_CONFIGS, workdir=None,
     out = {}
     for name in config_names:
         cfg = configs[name]
-        if cfg.tool == "ghdl":
+        missing = [c for c in cfg.needs
+                   if not probe_build(tools.build, worker_env(tools)).get(c)] \
+            if cfg.tool == "nvc" else []
+        if missing:
+            # an older build without the option: the config is not run
+            out[name] = RunResult(name, outcome="unsupported",
+                                  available=False,
+                                  text="build lacks " + ",".join(missing))
+        elif cfg.tool == "ghdl":
             out[name] = run_ghdl(tools, case, cfg, workdir)
         else:
             out[name] = run_nvc(tools, case, cfg, workdir, elab_done)
