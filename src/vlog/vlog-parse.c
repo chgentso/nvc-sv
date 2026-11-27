@@ -706,7 +706,7 @@ static bool        qualify_unit = false;
 static bool is_unit_scope(void)
 {
    return peek() == tSYSTASK && peek_nth(2) == tSCOPE
-      && peek_ident_nth(1) == ident_new("$unit");
+      && state.tokenq[state.tokenq_tail].lval.ident == ident_new("$unit");
 }
 
 static vlog_node_t lookup_unit_decl(ident_t id, const loc_t *loc)
