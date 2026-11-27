@@ -45,6 +45,7 @@ RULE_PROC = "x-drop-process-line"
 RULE_FINISH = "x-drop-finish-note"
 RULE_NODELTA = "x-reports-without-delta"
 RULE_CUT = "x-cut-at-early-end"
+RULE_IEEE = "x-ieee-warnings-apart"
 
 UNIT_FS = {"fs": 1, "ps": 10**3, "ns": 10**6, "us": 10**9, "ms": 10**12,
            "sec": 10**15, "s": 10**15}
@@ -190,19 +191,34 @@ def _short(it):
     return it[:60]
 
 
-def compare_reports(res_a, res_b, stable=False):
-    """L1 report text of config a against reference b."""
+IEEE_WARN = re.compile(r'^[A-Z][A-Z_0-9]*\.".*?": |metavalue detected')
+
+
+def is_ieee_warning(it):
+    """A warning raised inside an IEEE package function (metavalue and
+    similar): its count and place follow how often a process is evaluated,
+    which is a different question from the values and reports of the
+    design, so it is compared apart (L1 'ieee')."""
+    return isinstance(it, Rec) and it.sev == "warning" and \
+        bool(IEEE_WARN.search(it.msg.split("\n")[0]))
+
+
+def compare_reports(res_a, res_b, stable=False, ieee=False):
+    """L1 report text of config a against reference b.  The IEEE package
+    warnings are left out here; ieee=True compares only those."""
     a = parse_nvc(res_a.text, drop_process=True)
     b = parse_nvc(res_b.text, drop_process=True)
-    rules = [RULE_PROC]
+    a = [x for x in a if is_ieee_warning(x) == ieee]
+    b = [x for x in b if is_ieee_warning(x) == ieee]
+    rules = [RULE_PROC, RULE_IEEE]
     if not stable:
         a, b = n1_sort(a), n1_sort(b)
         rules.append(RULE_N1)
     d = diff_items(a, b)
     if d is None:
         return None
-    return Difference("L1", "report", res_a.config, res_b.config,
-                      d[0], d[1], d[2], rules)
+    return Difference("L1", "ieee" if ieee else "report", res_a.config,
+                      res_b.config, d[0], d[1], d[2], rules)
 
 
 # -------------------------------------------------------------- VCD diffs
@@ -443,14 +459,18 @@ def _nvc_pair(v, ref, res, levels, stable):
             "outcome %s vs ref %s" % (res.outcome, ref.outcome)))
         return
     if "L1" in levels:
-        d = compare_reports(res, ref, stable)
-        if d:
-            v.diffs.append(d)
-        elif not stable:
+        found = False
+        for ieee in (False, True):
+            d = compare_reports(res, ref, stable, ieee)
+            if d:
+                v.diffs.append(d)
+                found = True
+        if not found and not stable:
             # equal after N1: record whether the order inside a delta cycle
             # also agrees (class B information, not a finding)
-            v.info["%s.reports_strict_equal" % res.config] = \
-                compare_reports(res, ref, True) is None
+            v.info["%s.reports_strict_equal" % res.config] = all(
+                compare_reports(res, ref, True, i) is None
+                for i in (False, True))
         if res.wave and ref.wave:
             d, strict_eq = compare_vcd_nvc(res, ref)
             v.info["%s.vcd_strict_equal" % res.config] = strict_eq

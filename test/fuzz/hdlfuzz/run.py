@@ -377,7 +377,8 @@ def parse_island_stats(text, dut_scope=None):
     are counted; without it every scope is.  Returns fused/total processes,
     islands, the reject reasons (shape/prune/... keyword) and the number of
     islands per mode."""
-    st = dict(fused_procs=0, total_procs=0, islands=0, rejects={}, modes={})
+    st = dict(fused_procs=0, total_procs=0, islands=0, rejects={}, modes={},
+              a_variant=0)
 
     def mine(scope):
         return dut_scope is None or scope == dut_scope or \
@@ -400,4 +401,6 @@ def parse_island_stats(text, dut_scope=None):
         if m and mine(m.group(1)):
             md = m.group(2)
             st["modes"][md] = st["modes"].get(md, 0) + 1
+            if "a_variant=yes" in line:
+                st["a_variant"] += 1
     return st

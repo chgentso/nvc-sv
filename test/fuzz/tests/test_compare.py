@@ -81,7 +81,7 @@ class ReportTests(unittest.TestCase):
         self.assertIsNone(compare.compare_reports(a, b))
         d = compare.compare_reports(a, b, stable=True)
         self.assertIsNotNone(d)
-        self.assertEqual(d.rules, [compare.RULE_PROC])
+        self.assertEqual(d.rules, [compare.RULE_PROC, compare.RULE_IEEE])
 
     def test_delta_shift(self):
         a = RunResult("default", text="** Note: 4ns+1: d=0A tick=1\n")
@@ -271,6 +271,30 @@ b0000 b
 
 
 class VerdictTests(unittest.TestCase):
+    def test_ieee_warnings_apart(self):
+        w = ("** Warning: 5ns+1: NUMERIC_STD.\"<=\": metavalue detected, "
+             "returning FALSE\n   Function \"<=\" at x:1\n")
+        note = "** Note: 5ns+1: FZ M m0.s1 'U'\n"
+        ref = RunResult("ref", text=note)
+        isl = RunResult("default", text=w + note)
+        # an extra IEEE warning is its own signature and does not hide or
+        # shift the comparison of the design's own reports
+        self.assertIsNone(compare.compare_reports(isl, ref))
+        d = compare.compare_reports(isl, ref, ieee=True)
+        self.assertEqual(d.kind, "extra-record")
+        v = compare.compare_case({"ref": ref, "default": isl})
+        self.assertEqual(v.signatures(), [
+            "l1-ieee/default-vs-ref/extra-record/warning:numeric_std.'_': "
+            "metavalue detected, returning f"])
+        # a real difference in the notes next to it is still a report one
+        isl2 = RunResult("default", text=w + "** Note: 5ns+1: FZ M m0.s1 '0'\n")
+        v = compare.compare_case({"ref": ref, "default": isl2})
+        self.assertEqual(len(v.diffs), 2)
+        self.assertEqual(v.diffs[0].what, "report")
+        self.assertTrue(compare.is_ieee_warning(compare.parse_nvc(w)[0]))
+        self.assertFalse(compare.is_ieee_warning(compare.parse_nvc(
+            "** Warning: 1ns+0: user warning\n")[0]))
+
     def test_report_order_info(self):
         ref = RunResult("ref", text="** Note: 1ns+1: a\n** Note: 1ns+1: b\n")
         same = RunResult("default", text=ref.text)

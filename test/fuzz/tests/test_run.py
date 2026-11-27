@@ -267,6 +267,7 @@ class IslandStatsTests(unittest.TestCase):
                          (21, 22, 2))
         self.assertEqual(st["rejects"], {"prune": 1})
         self.assertEqual(st["modes"], {"A": 1, "B": 1})
+        self.assertEqual(st["a_variant"], 2)
 
 
 class CampaignGuardTests(unittest.TestCase):
