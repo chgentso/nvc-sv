@@ -4,10 +4,11 @@ set -xe
 # into RTL islands: the call is inlined into a record of its own and copied
 # to the variable, field or signal it is assigned to.  Covers nested records,
 # an array of records, a function with variables, a case and a loop inside,
-# a return from inside a loop and a record result passed to another
-# function.  The output must be identical to --rtl-islands=off in Mode B,
-# with --no-island-fast, without the activity test, in the speculative
-# Mode A variant and with --2state=islands.
+# a return from inside a loop, a record result passed to another function
+# and T'VAL of an enumeration.  The output must be identical to
+# --rtl-islands=off in Mode B, with --no-island-fast, without the activity
+# test, in the speculative Mode A variant and with --2state=islands, also
+# the error of a T'VAL out of range.
 
 cat >recfunc1.vhd <<'VHDL_EOF'
 library ieee;
@@ -156,13 +157,10 @@ begin
         c_out <= score(decode(q));
     end process;
 
+    -- T'VAL of an enumeration
     p_val : process (q) is
     begin
-        if q(0) = '1' then
-            e_out <= op_add;
-        else
-            e_out <= op_sub;
-        end if;
+        e_out <= op_t'val(to_integer(unsigned(q(1 downto 0))) + 1);
     end process;
 
     d_out <= w.dec;
@@ -251,3 +249,55 @@ done
 sed '/^\$date/,/\$end/d' off.vcd > off.vcd.s
 sed '/^\$date/,/\$end/d' b.vcd > b.vcd.s
 cmp off.vcd.s b.vcd.s
+
+cat >valerr.vhd <<'VHDL_EOF'
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+entity valerr is
+end entity;
+
+architecture test of valerr is
+    type col_t is (red, green, blue);
+    subtype warm_t is col_t range red to green;
+    signal clk : std_logic := '0';
+    signal d, q : unsigned(1 downto 0) := "00";
+    signal c : warm_t;
+begin
+    p_ff : process (clk) is
+    begin
+        if rising_edge(clk) then
+            q <= d;
+        end if;
+    end process;
+
+    p_val : process (q) is
+    begin
+        c <= warm_t'val(to_integer(q));
+    end process;
+
+    p_stim : process is
+    begin
+        for k in 0 to 3 loop
+            d <= to_unsigned(k, 2);
+            wait for 1 ns;
+            clk <= '1'; wait for 1 ns; clk <= '0'; wait for 1 ns;
+            report col_t'image(c);
+        end loop;
+        wait;
+    end process;
+end architecture;
+VHDL_EOF
+
+nvc --std=2008 --work=v_off -a valerr.vhd
+! nvc --std=2008 --work=v_off --rtl-islands=off -e valerr -r > voff.log 2>&1
+nvc --std=2008 --work=v_b -a valerr.vhd
+NVC_DUMP_ISLANDS=1 nvc --std=2008 --work=v_b --rtl-islands=hier -e valerr \
+    > v_dump.log
+cat v_dump.log
+grep -q 'VALERR islands=1 fused_procs=2/3' v_dump.log
+! nvc --std=2008 --work=v_b -r valerr > vb.log 2>&1
+cat voff.log
+grep -q "value BLUE outside of WARM_T range RED to GREEN for attribute 'VAL" voff.log
+diff -u voff.log vb.log

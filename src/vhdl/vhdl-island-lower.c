@@ -2163,6 +2163,38 @@ static void vi_check_int_bounds(vi_lower_t *l, type_t target_type,
    mir_build_range_check(mu, val64, left, right, dir, locus, hint);
 }
 
+// The range check of a scalar conversion such as T'VAL, as lower.c makes
+// it: against the base type, then the subtype
+static bool vi_check_scalar_bounds(vi_lower_t *l, type_t type,
+                                   mir_value_t val64, tree_t where)
+{
+   tree_t r = range_of(type, 0);
+   int64_t low, high, left, right;
+   if (r == NULL || tree_kind(r) != T_RANGE
+       || !folded_bounds(r, &low, &high)
+       || !folded_int(tree_left(r), &left)
+       || !folded_int(tree_right(r), &right))
+      return false;
+   int64_t cv;
+   if (mir_get_const(l->mu, val64, &cv) && cv >= low && cv <= high)
+      return true;
+   if (type_kind(type) == T_SUBTYPE
+       && !vi_check_scalar_bounds(l, type_base(type), val64, where))
+      return false;
+   if (l->spec) {
+      vi_spec_deopt_range(l, val64, low, high, RT_ISLAND_DEOPT_RANGE);
+      return true;
+   }
+   mir_unit_t *mu = l->mu;
+   mir_type_t it = vi_i64_type(mu);
+   mir_value_t locus = mir_build_debug_locus(mu, tree_to_object(where));
+   mir_build_range_check(mu, val64, mir_const(mu, it, left),
+                         mir_const(mu, it, right),
+                         mir_const(mu, mir_bool_type(mu), tree_subkind(r)),
+                         locus, locus);
+   return true;
+}
+
 // Mode A: turn a packed vector into the byte-per-element form the IEEE
 // image functions take.  Only 0 and 1 exist in Mode A, so std_logic elements
 // become '0' and '1' and bit elements the same positions of BIT.
@@ -5111,6 +5143,16 @@ static bool vi_lower_expr_inner(vi_lower_t *l, tree_t expr, vi_val_t *out)
                   *out = (vi_val_t){ .kind = VIVAL_INT, .val = vi_to_i64(mu, av.val) };
                return true;
             }
+            // T'VAL(X) of an integer or a user enumeration, both held as
+            // their position
+            type_t rt = tree_type(expr);
+            if (av.kind != VIVAL_INT || !vi_type_is_int_or_user_enum(rt))
+               return false;
+            mir_value_t v = vi_to_i64(mu, av.val);
+            if (!vi_check_scalar_bounds(l, rt, v, expr))
+               return false;
+            *out = (vi_val_t){ .kind = VIVAL_INT, .val = v };
+            return true;
          }
          if (tree_kind(base) == T_REF) {
             vi_local_t *loc = vi_find_local(l, tree_ref(base));
