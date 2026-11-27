@@ -37027,7 +37027,7 @@ static void vlog_lower_gate_inst(vlog_gen_t *g, vlog_node_t v)
       break;
 
    default:
-      CANNOT_HANDLE(v);
+      fatal_at(vlog_loc(v), "sorry, switch primitives are not supported");
    }
 
    mir_value_t unpacked =
