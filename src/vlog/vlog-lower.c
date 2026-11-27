@@ -1240,6 +1240,8 @@ static mir_value_t vlog_lower_zero(vlog_gen_t *g, mir_type_t type)
 
 static mir_value_t vlog_convert_uarray(vlog_gen_t *g, mir_type_t type,
                                        mir_value_t value);
+static mir_value_t vlog_string_to_vec(vlog_gen_t *g, mir_type_t type,
+                                      mir_value_t value);
 
 static mir_value_t vlog_lower_cast(vlog_gen_t *g, mir_type_t type,
                                    mir_value_t value)
@@ -1264,6 +1266,10 @@ static mir_value_t vlog_lower_cast(vlog_gen_t *g, mir_type_t type,
       return vlog_drop_nuls(g, mir_build_unwrap(g->mu, bytes),
                             mir_build_uarray_len(g->mu, bytes, 0));
    }
+   else if (from == MIR_TYPE_UARRAY && to_vec
+            && mir_equals(mir_get_elem(g->mu, value_type),
+                          mir_char_type(g->mu)))
+      return vlog_string_to_vec(g, type, value);
 
    mir_value_t finite = MIR_NULL_VALUE;
    if (from == MIR_TYPE_REAL && to_vec) {
@@ -3503,6 +3509,55 @@ static void vlog_loop_end(vlog_gen_t *g, vlog_loop_t *l)
    mir_set_cursor(g->mu, l->exit_bb, MIR_APPEND);
 }
 
+static mir_value_t vlog_string_to_vec(vlog_gen_t *g, mir_type_t type,
+                                      mir_value_t value)
+{
+   // String converted to integral vector: right-justified, zero-padded on
+   // the left, leftmost characters truncated if longer (IEEE 1800 6.16)
+   mir_type_t t_offset = mir_offset_type(g->mu);
+   mir_type_t t_u8 = mir_vec2_type(g->mu, 8, false);
+   const unsigned width = mir_get_size(g->mu, type);
+   const unsigned nbytes = (width + 7) / 8;
+
+   mir_value_t acc = mir_add_var(g->mu, type, MIR_NULL_STAMP,
+                                 ident_uniq("strvec"), MIR_VAR_TEMP);
+   mir_build_store(g->mu, acc, vlog_lower_zero(g, type));
+
+   mir_value_t len = mir_build_uarray_len(g->mu, value, 0);
+   mir_value_t data = mir_build_unwrap(g->mu, value);
+   mir_value_t maxb = mir_const(g->mu, t_offset, nbytes);
+   mir_value_t zero = mir_const(g->mu, t_offset, 0);
+   mir_value_t start = mir_build_select(
+      g->mu, t_offset, mir_build_cmp(g->mu, MIR_CMP_GT, len, maxb),
+      mir_build_sub(g->mu, t_offset, len, maxb), zero);
+
+   mir_value_t sh8 = MIR_NULL_VALUE;
+   if (width > 8)
+      sh8 = mir_build_cast(g->mu, type,
+                           mir_const_vec(g->mu, mir_vec2_type(g->mu, 32, false),
+                                         8, 0));
+
+   vlog_loop_t l;
+   vlog_loop_begin(g, &l, start, len);
+   mir_value_t ch = mir_build_load(g->mu,
+                                   mir_build_array_ref(g->mu, data, l.i));
+   mir_value_t bval = mir_build_cast(g->mu, type,
+                                     mir_build_cast(g->mu, t_u8, ch));
+   if (width > 8) {
+      mir_value_t cur = mir_build_load(g->mu, acc);
+      mir_value_t shifted = mir_build_binary(g->mu, MIR_VEC_SLL, type,
+                                             cur, sh8);
+      mir_build_store(g->mu, acc,
+                      mir_build_binary(g->mu, MIR_VEC_BIT_OR, type,
+                                       shifted, bval));
+   }
+   else
+      mir_build_store(g->mu, acc, bval);
+   vlog_loop_end(g, &l);
+
+   return mir_build_load(g->mu, acc);
+}
+
 static mir_value_t vlog_convert_uarray(vlog_gen_t *g, mir_type_t type,
                                        mir_value_t value)
 {
@@ -5006,7 +5061,7 @@ static void vlog_assign_variable(vlog_gen_t *g, vlog_node_t target,
       return;
    }
 
-   if (mir_is(g->mu, value, MIR_TYPE_UARRAY)) {
+   if (mir_is(g->mu, value, MIR_TYPE_UARRAY) && !mir_is_vector_type(g->mu, type)) {
       mir_build_store(g->mu, lvalues[0].obj, value);
       return;
    }
