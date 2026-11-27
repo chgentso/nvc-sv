@@ -33,11 +33,12 @@ begin
         assert not PslIsCovered;
 
         wait for 10 ns;                 -- 10 ns
-        assert PslIsAssertCovered;
+        assert not PslIsAssertCovered;  -- GetPslCoverAssert is still FALSE
         assert not PslIsCovered;
 
         SetPslCoverAssert(TRUE);
         assert GetPslCoverAssert;
+        assert PslIsAssertCovered;
         assert not PslIsCovered;        -- C1 not yet covered
 
         wait for 20 ns;                 -- 30 ns
@@ -54,6 +55,7 @@ begin
         assert not PslIsCovered;        -- C1 not covered again
 
         SetPslCoverAssert(FALSE);
+        assert not PslIsAssertCovered;
         assert not PslIsCovered;
 
         wait;

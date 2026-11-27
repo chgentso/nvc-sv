@@ -9372,7 +9372,8 @@ bool model_psl_status(rt_model_t *m, psl_query_t query)
    switch (query) {
    case PSL_QUERY_COVERED: return status.has_cover && status.all_covered;
    case PSL_QUERY_ASSERT_COVERED:
-      return status.has_assert && status.all_asserts_covered;
+      return m->psl_cover_assert && status.has_assert
+         && status.all_asserts_covered;
    case PSL_QUERY_FAILED: return status.any_failed;
    }
 
