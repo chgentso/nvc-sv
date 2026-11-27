@@ -3413,3 +3413,4 @@ sv_iface_port_arr1 verilog
 sv_wild_unit1   verilog
 sv_var_init_hier1 verilog
 vlog_itor_wide1 verilog
+vpi_fputc1      verilog

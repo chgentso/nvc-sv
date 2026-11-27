@@ -1626,7 +1626,7 @@ bool vlog_is_signed(vlog_node_t v)
             static const char *const names[] = {
                "$random", "$dist_uniform", "$dist_normal", "$dist_exponential",
                "$dist_poisson", "$dist_chi_square", "$dist_t", "$dist_erlang",
-               "$countbits", "$countones", "$ftell", "$fgetc", "$ferror",
+               "$countbits", "$countones", "$ftell", "$fgetc", "$fputc", "$ferror",
                "$fseek", "$test$plusargs", "$value$plusargs", "$dimensions",
                "$unpacked_dimensions", "$left", "$right", "$low", "$high",
                "$increment", "$size", "$rtoi", "$clog2", "$bits", "$fopen",

@@ -3431,6 +3431,28 @@ static PLI_INT32 fgetc_tf(PLI_BYTE8 *userdata)
    return 0;
 }
 
+static PLI_INT32 fputc_tf(PLI_BYTE8 *userdata)
+{
+   vpiHandle call = vpi_handle(vpiSysTfCall, NULL);
+   assert(call != NULL);
+
+   vpiHandle argv = vpi_iterate(vpiArgument, call);
+   vpiHandle c_arg = vpi_scan(argv);
+   vpiHandle fd_arg = vpi_scan(argv);
+   assert(c_arg != NULL);
+   assert(fd_arg != NULL);
+
+   const int c = get_int_arg(c_arg) & 0xff;
+   FILE *f = get_file_stream(fd_arg, true);
+   put_int_result(f == NULL || fputc(c, f) == EOF ? -1 : 0);
+
+   vpi_release_handle(c_arg);
+   vpi_release_handle(fd_arg);
+   vpi_release_handle(argv);
+   vpi_release_handle(call);
+   return 0;
+}
+
 static PLI_INT32 ungetc_tf(PLI_BYTE8 *userdata)
 {
    vpiHandle call = vpi_handle(vpiSysTfCall, NULL);
@@ -3643,6 +3665,12 @@ static s_vpi_systf_data builtins[] = {
       .tfname      = "$fgetc",
       .sysfunctype = vpiIntFunc,
       .calltf      = fgetc_tf
+   },
+   {
+      .type        = vpiSysFunc,
+      .tfname      = "$fputc",
+      .sysfunctype = vpiIntFunc,
+      .calltf      = fputc_tf
    },
    {
       .type        = vpiSysFunc,
