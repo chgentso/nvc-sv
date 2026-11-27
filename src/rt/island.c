@@ -8236,7 +8236,12 @@ bool rt_island_vpi_release_slice(rt_model_t *m, rt_signal_t *sig,
          }
       }
 
-      if ((s->flags & RT_ISIG_COMB_WRITTEN)
+      if ((s->flags & (RT_ISIG_PROC_COMB | RT_ISIG_VHDL)) == RT_ISIG_PROC_COMB) {
+         // A variable written by an always_comb block keeps the forced value
+         // until the block assigns it again (IEEE 1800-2017 10.6.2)
+         continue;
+      }
+      else if ((s->flags & RT_ISIG_COMB_WRITTEN)
           && isl->eval_handle != JIT_HANDLE_INVALID) {
          island_eval_comb_now(m, isl);
          if (s->flags & RT_ISIG_DIRECT_LINK) {
