@@ -14371,6 +14371,12 @@ static vlog_node_t p_statement(void)
    case tPRIORITY:
       wrap = id != NULL;
       break;
+   case tASSERT:
+   case tASSUME:
+   case tCOVER:
+      wrap = id != NULL && peek_nth(2) != tPROPERTY
+         && peek_nth(2) != tSEQUENCE;
+      break;
    default:
       break;
    }

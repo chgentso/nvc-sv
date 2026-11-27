@@ -3403,3 +3403,4 @@ sv_fwd_shadow1  verilog
 vlog_gen_case_if verilog
 sv_gen_class1   verilog
 sv_extern_param_ret1 verilog
+sv_assert_disable1 verilog
