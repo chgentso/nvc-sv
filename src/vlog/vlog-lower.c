@@ -14234,8 +14234,11 @@ static void vlog_lower_blocking_assignment(vlog_gen_t *g, vlog_node_t v)
    // The right hand side is evaluated before the delay or event
 
    vlog_node_t target = vlog_target(v), rhs = vlog_value(v);
+   vlog_node_t ttype = vlog_get_type(target);
+   const bool is_str = ttype != NULL && vlog_kind(ttype) == V_DATA_TYPE
+      && vlog_subkind(ttype) == DT_STRING;
    if (vlog_kind(target) == V_CONCAT || vlog_kind(rhs) == V_PATTERN_EXPR
-       || vlog_is_dynamic_type(vlog_get_type(target)))
+       || (vlog_is_dynamic_type(ttype) && !is_str))
       fatal_at(vlog_loc(v), "sorry, this kind of intra-assignment timing "
                "control is not supported");
 
@@ -14245,7 +14248,8 @@ static void vlog_lower_blocking_assignment(vlog_gen_t *g, vlog_node_t v)
 
    vlog_select_t lvalue = vlog_lower_select(g, target);
    const mir_class_t class = mir_get_class(g->mu, lvalue.type);
-   if (class != MIR_TYPE_VEC2 && class != MIR_TYPE_VEC4)
+   if (class != MIR_TYPE_VEC2 && class != MIR_TYPE_VEC4
+       && class != MIR_TYPE_REAL && !is_str)
       fatal_at(vlog_loc(v), "sorry, this kind of intra-assignment timing "
                "control is not supported");
 
@@ -14253,6 +14257,8 @@ static void vlog_lower_blocking_assignment(vlog_gen_t *g, vlog_node_t v)
    mir_value_t value = vlog_lower_with_context(
       g, rhs, vlog_assign_context(g, type, rhs));
    mir_value_t cast = vlog_lower_cast(g, type, value);
+   if (is_str)
+      cast = vlog_copy_value(g, cast, ttype);
 
    // Not a temporary as it must survive suspending the process
    mir_value_t saved = mir_add_var(g->mu, type, MIR_NULL_STAMP,
