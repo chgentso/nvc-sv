@@ -701,6 +701,21 @@ static vlog_node_t qualify_scope = NULL;
 static int pattern_array_elems = 0;   // Unpacked array depth for nested patterns
 static vlog_scope_t *select_scope = NULL;
 static bool        qualify_failed = false;
+static bool        qualify_unit = false;
+
+static bool is_unit_scope(void)
+{
+   return peek() == tSYSTASK && peek_nth(2) == tSCOPE
+      && peek_ident_nth(1) == ident_new("$unit");
+}
+
+static vlog_node_t lookup_unit_decl(ident_t id, const loc_t *loc)
+{
+   vlog_node_t d = vlog_symtab_query_unit(symtab, id);
+   if (d == NULL)
+      error_at(loc, "%pQ is not declared in compilation unit $unit", id);
+   return d;
+}
 
 // Set after parsing the definition of a method outside of its class
 static bool extern_definition = false;
@@ -1183,6 +1198,15 @@ static bool scan_type_declaration(void)
    case tSTRINGK: case tCHANDLE:   case tEVENT:    case tVIRTUAL: case tAUTOMATIC:
    case tSTATIC:    case tCONST:    case tVAR:     case tTYPE:
       return true;
+   case tSYSTASK:
+      if (is_unit_scope() && peek_nth(3) == tID) {
+         vlog_node_t dt = vlog_symtab_query_unit(symtab, peek_ident_nth(3));
+         if (dt != NULL)
+            return is_data_type(dt)
+               || (vlog_kind(dt) == V_CLASS_DECL
+                   && (peek_nth(4) == tSCOPE || peek_nth(4) == tHASH));
+      }
+      return false;
    case tID:
       {
          if (is_specialised_scope())
@@ -2796,6 +2820,46 @@ static vlog_node_t p_data_type(void)
          return v;
       }
 
+   case tSYSTASK:
+      if (is_unit_scope()) {
+         consume(tSYSTASK);
+         consume(tSCOPE);
+
+         ident_t id = p_identifier();
+         vlog_node_t d = lookup_unit_decl(id, &state.last_loc);
+         while (d != NULL && peek() == tSCOPE) {
+            if (vlog_kind(d) == V_TYPE_DECL)
+               d = vlog_get_type(d);
+            consume(tSCOPE);
+            ident_t mid = p_identifier();
+            if (d != NULL && vlog_kind(d) == V_CLASS_DECL)
+               d = vlog_scope_member(d, mid);
+            else {
+               error_at(&state.last_loc, "%pQ is not a class", id);
+               d = NULL;
+            }
+            id = mid;
+         }
+
+         if (d != NULL && !is_data_type(d)) {
+            error_at(&state.last_loc, "%pQ is not a data type", id);
+            d = NULL;
+         }
+         else if (d != NULL && vlog_kind(d) == V_CLASS_DECL
+                  && (vlog_flags(d) & VLOG_F_GENERIC))
+            return specialise_scoped(d, false);
+
+         if (d != NULL && peek() == tLSQUARE)
+            d = p_typedef_dimensions(d);
+         else if (d == NULL) {
+            d = logic_type();
+            while (peek() == tLSQUARE)
+               vlog_add_range(d, p_packed_dimension());
+         }
+
+         return d;
+      }
+      // Fall-through
    case tID:
       {
          int hlen;
@@ -2967,6 +3031,10 @@ static vlog_node_t p_data_type_or_implicit(void)
    BEGIN("data type or implicit");
 
    switch (peek()) {
+   case tSYSTASK:
+      if (is_unit_scope())
+         return p_data_type();
+      return p_implicit_data_type();
    case tID:
       if (peek_nth(2) == tID || peek_nth(2) == tHASH || is_scoped_type_start()
           || (is_process_name() && peek_nth(2) == tSCOPE)
@@ -3988,8 +4056,10 @@ static vlog_node_t p_select(ident_t id)
 
    vlog_node_t qscope = qualify_scope;
    const bool qfailed = qualify_failed;
+   const bool qunit = qualify_unit;
    qualify_scope = NULL;
    qualify_failed = false;
+   qualify_unit = false;
 
    vlog_scope_t *sscope = select_scope;
    select_scope = NULL;
@@ -4024,6 +4094,15 @@ static vlog_node_t p_select(ident_t id)
 
       if (!defer_class_lookup(prefix, qscope))
          vlog_symtab_lookup_in(symtab, prefix, qscope);
+   }
+   else if (qunit) {
+      prefix = vlog_new(V_REF);
+      vlog_set_ident(prefix, id);
+      vlog_set_loc(prefix, CURRENT_LOC);
+
+      vlog_node_t d = lookup_unit_decl(id, &state.last_loc);
+      if (d != NULL)
+         vlog_set_ref(prefix, d);
    }
    else if (clocking_names != NULL && hset_contains(clocking_names, id)
             && vlog_symtab_query(symtab, id) == NULL) {
@@ -5752,8 +5831,10 @@ static vlog_node_t p_tf_call(vlog_kind_t kind)
 
    vlog_node_t scope = qualify_scope;
    const bool failed = qualify_failed;
+   const bool qunit = qualify_unit;
    qualify_scope = NULL;
    qualify_failed = false;
+   qualify_unit = false;
 
    vlog_node_t v = vlog_new(kind);
    vlog_set_ident(v, p_identifier());
@@ -5764,6 +5845,8 @@ static vlog_node_t p_tf_call(vlog_kind_t kind)
       vlog_node_t saved_callee = callee_decl;
       if (scope != NULL)
          callee_decl = failed ? NULL : vlog_scope_member(scope, vlog_ident(v));
+      else if (qunit)
+         callee_decl = vlog_symtab_query_unit(symtab, vlog_ident(v));
       else
          callee_decl = !failed ? vlog_symtab_query(symtab, vlog_ident(v)) : NULL;
       p_list_of_arguments(v);
@@ -5779,6 +5862,11 @@ static vlog_node_t p_tf_call(vlog_kind_t kind)
 
    if (scope != NULL)
       vlog_symtab_lookup_in(symtab, v, scope);
+   else if (qunit) {
+      vlog_node_t d = lookup_unit_decl(vlog_ident(v), vlog_loc(v));
+      if (d != NULL)
+         vlog_set_ref(v, d);
+   }
    else if (!failed)
       vlog_symtab_lookup(symtab, v);   // Otherwise reported already
 
@@ -5877,7 +5965,7 @@ static vlog_node_t p_subroutine_call(vlog_kind_t kind)
       return p_system_tf_call(kind);
    else if (is_std_randomize())
       return p_std_randomize();
-   else if (qualify_scope != NULL || qualify_failed)
+   else if (qualify_scope != NULL || qualify_failed || qualify_unit)
       return p_tf_call(kind);
    else if (is_implicit_this_call())
       return p_implicit_this_call();
@@ -6241,12 +6329,22 @@ static vlog_node_t p_scope_prefix(void)
       consume(tSCOPE);
 
       if (scope == NULL) {
-         vlog_node_t declared = vlog_symtab_query(symtab, id), d = declared;
+         vlog_node_t declared = qualify_unit
+            ? vlog_symtab_query_unit(symtab, id)
+            : vlog_symtab_query(symtab, id);
+         const bool was_unit = qualify_unit;
+         qualify_unit = false;
+         vlog_node_t d = declared;
          if (d != NULL && vlog_kind(d) == V_TYPE_DECL)
             d = vlog_get_type(d);
 
          if (d != NULL && vlog_kind(d) == V_CLASS_DECL)
             scope = d;
+         else if (was_unit) {
+            error_at(&loc, "%pQ is not a class in compilation unit $unit", id);
+            qualify_failed = true;
+            return NULL;
+         }
          else if (lib_scan_active() && is_scope_declaration(declared))
             scope = NULL;   // Declared here: not a package to be found
          else
@@ -7990,6 +8088,11 @@ static vlog_node_t p_primary(void)
                      root);
 
       consume(tDOT);
+   }
+   else if (is_unit_scope()) {
+      consume(tSYSTASK);
+      consume(tSCOPE);
+      qualify_unit = true;
    }
 
    vlog_node_t head;
@@ -11034,6 +11137,11 @@ static vlog_node_t p_subroutine_call_statement(void)
                            "unexpected system name %pi before '.'", root);
             consume(tDOT);
          }
+         else if (is_unit_scope()) {
+            consume(tSYSTASK);
+            consume(tSCOPE);
+            qualify_unit = true;
+         }
 
          const vlog_kind_t kind =
             peek() == tSYSTASK ? V_SYS_FCALL : V_USER_FCALL;
@@ -13955,13 +14063,20 @@ static vlog_node_t p_statement_item(ident_t id)
       // Fall-through
    case tSYSTASK:
       if (peek() == tSYSTASK) {
-         if (peek_nth(2) != tDOT)
+         if (is_unit_scope()) {
+            consume(tSYSTASK);
+            consume(tSCOPE);
+            qualify_unit = true;
+         }
+         else if (peek_nth(2) != tDOT)
             return p_subroutine_call_statement();
-         ident_t root = p_system_tf_identifier();
-         if (root != ident_new("$root"))
-            parse_error(&state.last_loc,
-                        "unexpected system name %pi before '.'", root);
-         consume(tDOT);
+         else {
+            ident_t root = p_system_tf_identifier();
+            if (root != ident_new("$root"))
+               parse_error(&state.last_loc,
+                           "unexpected system name %pi before '.'", root);
+            consume(tDOT);
+         }
       }
       // Fall-through
    case tID:
@@ -22074,6 +22189,7 @@ static void p_package_or_generate_item_declaration(vlog_node_t parent)
    case tLONGINT:
    case tBYTE:
    case tSTRINGK: case tCHANDLE:
+   case tSYSTASK:
    case tIMPORT:
       p_data_declaration(parent, V_VAR_DECL);
       break;
@@ -24296,6 +24412,7 @@ static void p_module_common_item(vlog_node_t mod)
    case tLONGINT:
    case tBYTE:
    case tSTRINGK: case tCHANDLE:
+   case tSYSTASK:
    case tIMPORT:
    case tSEQUENCE:
    case tPROPERTY:
@@ -26295,7 +26412,7 @@ static void p_module_or_generate_item_1(vlog_node_t mod)
    if (scan_skip_macro_args())
       return;
 
-   if (peek() == tSYSTASK) {
+   if (peek() == tSYSTASK && !is_unit_scope()) {
       // Elaboration system task: reported when the simulation starts
       vlog_node_t v = vlog_new(V_INITIAL);
       vlog_set_ident(v, default_label("initial"));
@@ -26449,6 +26566,7 @@ static void p_module_or_generate_item_1(vlog_node_t mod)
    case tLONGINT:
    case tBYTE:
    case tSTRINGK: case tCHANDLE:
+   case tSYSTASK:
    case tIMPORT:
    case tFINAL:
    case tASSERT:
@@ -30136,6 +30254,7 @@ void reset_verilog_parser(void)
    }
 
    class_depth = 0;
+   qualify_unit = false;
    flushing_bodies = false;
    spec_into = NULL;
 

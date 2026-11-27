@@ -1362,6 +1362,27 @@ vlog_node_t vlog_symtab_query(vlog_symtab_t *st, ident_t name)
    return sym->node;
 }
 
+vlog_node_t vlog_symtab_query_unit(vlog_symtab_t *st, ident_t name)
+{
+   vlog_scope_t *s = st->top;
+   while (s != NULL && s->parent != NULL)
+      s = s->parent;
+
+   if (s == NULL || s->num_symbols == 0)
+      return NULL;
+
+   for (int slot = ident_hash(name) & (s->max_symbols - 1);
+        s->symbols[slot].name != NULL;
+        slot = (slot + 1) & (s->max_symbols - 1)) {
+      if (s->symbols[slot].name == name) {
+         const vlog_node_t n = s->symbols[slot].node;
+         return n == POISON_NODE ? NULL : n;
+      }
+   }
+
+   return NULL;
+}
+
 void vlog_symtab_lenient(vlog_symtab_t *st)
 {
    st->lenient = true;
