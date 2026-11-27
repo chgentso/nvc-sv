@@ -1518,6 +1518,7 @@ void *rt_island_begin(rt_model_t *m, rt_island_mgr_t **mgr_p,
    isl->isl_id = isl->mgr->islands.count;
    isl->eval_handle = eval_handle;
    isl->inst_ctx = inst_ctx;
+   isl->reset_eval_handle = JIT_HANDLE_INVALID;
    isl->state_bytes = RT_ISLAND_STRIDE(state_bytes);
    isl->nsigs = nsigs;
    isl->ndomains = ndomains;
@@ -1560,6 +1561,15 @@ _Static_assert(offsetof(rt_island_sparse_log_t, isl_ptr) == 16, "sparse log isl_
 _Static_assert(offsetof(rt_island_sparse_log_t, entries) == 32, "sparse log entries");
 _Static_assert(offsetof(rt_island_sparse_log_t, data) == 288, "sparse log data");
 _Static_assert(sizeof(rt_island_sparse_entry_t) == 16, "sparse entry size");
+
+void rt_island_set_reset_comb(void *handle, jit_handle_t reset_handle,
+                              void *reset_ctx, bool skip_reset)
+{
+   rt_island_t *isl = handle;
+   isl->reset_eval_handle = reset_handle;
+   isl->reset_eval_ctx = reset_ctx;
+   isl->skip_sv_reset = skip_reset;
+}
 
 void rt_island_set_sparse(void *handle, uint32_t sparse_log_off,
                           uint32_t total_state_bytes)
@@ -5526,7 +5536,21 @@ bool rt_island_eval_sv_reset(jit_t *jit, rt_model_t *m, rt_island_mgr_t *mgr,
 
       island_clear_dirty(isl);
 
-      if (!island_call_comb(jit, m, isl, tlab))
+      if (isl->skip_sv_reset)
+         continue;
+
+      if (isl->reset_eval_handle != JIT_HANDLE_INVALID) {
+         jit_scalar_t args[] = {
+            { .pointer = isl->reset_eval_ctx },
+            { .pointer = isl->state },
+         };
+         if (!jit_vfastcall(jit, isl->reset_eval_handle, args, ARRAY_LEN(args),
+                            NULL, 0, tlab))
+            return false;
+         if (unlikely(isl->has_forces))
+            island_apply_forces_comb(isl);
+      }
+      else if (!island_call_comb(jit, m, isl, tlab))
          return false;
 
       // Signals written by always_comb blocks, and those computed from

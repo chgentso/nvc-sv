@@ -10752,6 +10752,15 @@ void *x_sv_island_begin(struct _ffi_closure *closure, uint32_t state_bytes,
                           state_bytes, nsigs, ndomains);
 }
 
+void x_sv_island_set_reset_comb(void *handle, struct _ffi_closure *closure,
+                                bool skip_reset)
+{
+   ffi_closure_t *c = (ffi_closure_t *)closure;
+   jit_handle_t rh = c != NULL ? c->handle : JIT_HANDLE_INVALID;
+   void *rctx = (c != NULL && c->nargs > 0) ? c->args[0].pointer : NULL;
+   rt_island_set_reset_comb(handle, rh, rctx, skip_reset);
+}
+
 void x_sv_island_set_sparse(void *handle, uint32_t sparse_log_off,
                             uint32_t total_state_bytes)
 {

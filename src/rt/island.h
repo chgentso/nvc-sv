@@ -292,6 +292,9 @@ typedef struct _rt_island {
    rt_island_spec_t      *spec;     // Speculative Mode A variant or NULL
    bool                   act_on;       // Comb function tests change bytes
    bool                   direct_act;   // A direct comb desc has RT_IDIR_ACT
+   jit_handle_t           reset_eval_handle;
+   void                  *reset_eval_ctx;
+   bool                   skip_sv_reset;
 } rt_island_t;
 
 // Speculative Mode A (NVC_ISLAND_SPEC): a VHDL island lowered in Mode B
@@ -394,6 +397,8 @@ void *rt_island_begin(rt_model_t *m, rt_island_mgr_t **mgr_p,
                       jit_handle_t eval_handle, void *inst_ctx,
                       uint32_t state_bytes, uint32_t nsigs,
                       uint32_t ndomains);
+void rt_island_set_reset_comb(void *handle, jit_handle_t reset_handle,
+                              void *reset_ctx, bool skip_reset);
 void rt_island_set_sparse(void *handle, uint32_t sparse_log_off,
                           uint32_t total_state_bytes);
 void rt_island_sparse_write(void *isl_ptr, uint32_t sig_idx,

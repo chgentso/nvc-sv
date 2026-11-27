@@ -40,6 +40,10 @@ void vlog_lower_island_comb_fn(mir_context_t *mc, vlog_node_t body,
                                ident_t qual, ident_t sym,
                                const struct _vlog_island *isl,
                                const bool *fused_proc, bool is_shared);
+void vlog_lower_island_reset_comb_fn(mir_context_t *mc, vlog_node_t body,
+                                     ident_t qual, ident_t sym,
+                                     const struct _vlog_island *isl,
+                                     const bool *fused_proc, bool is_shared);
 void vlog_lower_island_ff_fn(mir_context_t *mc, vlog_node_t body,
                              ident_t qual, ident_t sym,
                              const struct _vlog_island *isl,
