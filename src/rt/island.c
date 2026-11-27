@@ -5561,6 +5561,23 @@ static bool island_spec_call_ff(jit_t *jit, rt_island_domain_t *dom,
    return true;
 }
 
+// NVC_ISLAND_SPEC_FORCE=A: the flip-flop call of island_sample_domain, in
+// Mode A when it completes there, else in Mode B
+static bool island_spec_sample_domain(jit_t *jit, rt_island_domain_t *dom,
+                                      tlab_t *tlab)
+{
+   rt_island_t *isl = dom->isl;
+   jit_scalar_t result;
+   bool done;
+   if (!island_spec_call_ff(jit, dom, tlab, &result, &done))
+      return false;
+   if (!done && !island_spec_jit_call(jit, isl, dom->ff_handle, isl->state,
+                                      tlab, &result))
+      return false;
+   dom->ff_dirty_mask |= (uint64_t)result.integer;
+   return true;
+}
+
 static bool island_call_comb_slow(jit_t *jit, rt_model_t *m, rt_island_t *isl,
                                   tlab_t *tlab)
 {
@@ -6740,29 +6757,18 @@ static bool island_sample_domain(jit_t *jit, rt_island_domain_t *dom,
       null_tlab = jit_null_tlab(jit);
       use_tlab = &null_tlab;
    }
-   bool ok = true, spec_done = false;
-   if (unlikely(isl->spec != NULL && isl->spec->force_a)) {
-      ok = island_spec_call_ff(jit, dom, tlab, &result, &spec_done);
-      if (!ok || spec_done) {
-         if (ok)
-            dom->ff_dirty_mask |= (uint64_t)result.integer;
-         return ok;
-      }
+   bool ok = true;
+   if (likely(island_batch_args != NULL && dom->ff_fn != NULL)) {
+      island_batch_args[0] = p1;
+      island_batch_args[1] = p2;
+      (*dom->ff_fn)(dom->ff_func, NULL, island_batch_args, use_tlab);
+      result = island_batch_args[0];
    }
-
-   if (likely(island_batch_args != NULL)) {
-      if (likely(dom->ff_fn != NULL)) {
-         island_batch_args[0] = p1;
-         island_batch_args[1] = p2;
-         (*dom->ff_fn)(dom->ff_func, NULL, island_batch_args, use_tlab);
-         result = island_batch_args[0];
-      }
-      else {
-         jit_fastcall_guarded(jit, dom->ff_handle, &result, p1, p2, use_tlab);
-         if (likely(isl->spec == NULL || !isl->spec->force_a))
-            dom->ff_func = jit_try_resolve_native(jit, dom->ff_handle,
-                                                  &dom->ff_fn);
-      }
+   else if (unlikely(isl->spec != NULL && isl->spec->force_a))
+      return island_spec_sample_domain(jit, dom, tlab);
+   else if (likely(island_batch_args != NULL)) {
+      jit_fastcall_guarded(jit, dom->ff_handle, &result, p1, p2, use_tlab);
+      dom->ff_func = jit_try_resolve_native(jit, dom->ff_handle, &dom->ff_fn);
    }
    else if (likely(island_jit_guarded))
       jit_fastcall_guarded(jit, dom->ff_handle, &result, p1, p2, use_tlab);
