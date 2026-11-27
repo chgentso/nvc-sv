@@ -31433,6 +31433,26 @@ static vlog_node_t p_source_text(void)
          continue;
       }
 
+      const token_t ext_kind = peek_nth(2);
+      if (peek() == tEXTERN && (ext_kind == tMODULE || ext_kind == tINTERFACE
+                                || ext_kind == tPROGRAM)) {
+         // An extern module declaration only declares the ports of a module
+         // declared in full elsewhere (23.2.1)
+         consume(tEXTERN);
+         for (int depth = 0; peek() != tEOF; ) {
+            const token_t tok = peek();
+            consume(tok);
+            if (tok == tLPAREN)
+               depth++;
+            else if (tok == tRPAREN)
+               depth--;
+            else if (tok == tSEMI && depth == 0)
+               break;
+         }
+         p_directive_list();
+         continue;
+      }
+
       vlog_node_t v = p_description();
       if (v == NULL && parse_recovery() && peek() != tEOF) {
          // Nothing in this arena can be used: skip to the next design unit
