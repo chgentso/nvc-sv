@@ -1006,7 +1006,7 @@ static subtype_mirror *get_subtype_mirror(void *context, type_t type,
          fields[i].f_name = get_string(istr(tree_ident(f)));
 
          type_t ft = tree_type(f);
-         if (type_is_array(ft)) {
+         if (type_is_array(ft) && bounds != NULL) {
             void *ptr = bounds[0].pointer + l->parts[i].offset;
             jit_scalar_t *fbounds LOCAL = get_array_bounds(ft, ptr);
             fields[i].f_subtype = get_subtype_mirror(context, ft, fbounds);

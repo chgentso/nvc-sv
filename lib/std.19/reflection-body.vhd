@@ -842,55 +842,46 @@ package body reflection is
 
         impure function to_enumeration return enumeration_subtype_mirror is
         begin
-            assert f_class = CLASS_ENUMERATION;
             return f_enumeration;
         end function;
 
         impure function to_integer return integer_subtype_mirror is
         begin
-            assert f_class = CLASS_INTEGER;
             return f_integer;
         end function;
 
         impure function to_floating return floating_subtype_mirror is
         begin
-            assert f_class = CLASS_FLOATING;
             return f_floating;
         end function;
 
         impure function to_physical return physical_subtype_mirror is
         begin
-            assert f_class = CLASS_PHYSICAL;
             return f_physical;
         end function;
 
         impure function to_record return record_subtype_mirror is
         begin
-            assert f_class = CLASS_RECORD;
             return f_record;
         end function;
 
         impure function to_array return array_subtype_mirror is
         begin
-            assert f_class = CLASS_ARRAY;
             return f_array;
         end function;
 
         impure function to_access return access_subtype_mirror is
         begin
-            assert f_class = CLASS_ACCESS;
             return f_access;
         end function;
 
         impure function to_file return file_subtype_mirror is
         begin
-            assert f_class = CLASS_FILE;
             return f_file;
         end function;
 
         impure function to_protected return protected_subtype_mirror is
         begin
-            assert f_class = CLASS_PROTECTED;
             return f_protected;
         end function;
 
@@ -927,55 +918,46 @@ package body reflection is
 
         impure function to_enumeration return enumeration_value_mirror is
         begin
-            assert f_class = CLASS_ENUMERATION;
             return f_enumeration;
         end function;
 
         impure function to_integer return integer_value_mirror is
         begin
-            assert f_class = CLASS_INTEGER;
             return f_integer;
         end function;
 
         impure function to_floating return floating_value_mirror is
         begin
-            assert f_class = CLASS_FLOATING;
             return f_floating;
         end function;
 
         impure function to_physical return physical_value_mirror is
         begin
-            assert f_class = CLASS_PHYSICAL;
             return f_physical;
         end function;
 
         impure function to_record return record_value_mirror is
         begin
-            assert f_class = CLASS_RECORD;
             return f_record;
         end function;
 
         impure function to_array return array_value_mirror is
         begin
-            assert f_class = CLASS_ARRAY;
             return f_array;
         end function;
 
         impure function to_access return access_value_mirror is
         begin
-            assert f_class = CLASS_ACCESS;
             return f_access;
         end function;
 
         impure function to_file return file_value_mirror is
         begin
-            assert f_class = CLASS_FILE;
             return f_file;
         end function;
 
         impure function to_protected return protected_value_mirror is
         begin
-            assert f_class = CLASS_PROTECTED;
             return f_protected;
         end function;
     end protected body;
