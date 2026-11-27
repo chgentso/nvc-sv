@@ -3471,3 +3471,4 @@ svtypequery1 verilog,gold
 vlog_cmos1 verilog,gold
 svstructcmp3 verilog,gold
 svstaticinit3 verilog,gold
+svgatedelay2 verilog,gold

@@ -37019,8 +37019,17 @@ static void vlog_lower_gate_inst(vlog_gen_t *g, vlog_node_t v)
 
    vlog_lower_driver(g, vlog_target(v));
 
-   if (vlog_has_delay(v))
-      vlog_lower_initial_x(g, vlog_target(v));
+   // A gate with a delay outputs x until its first update takes effect.
+   // This is driven when the gate first runs rather than during reset
+   // where the driving value of a net with other drivers cannot be
+   // resolved yet
+   mir_value_t first_var = MIR_NULL_VALUE;
+   if (vlog_has_delay(v)) {
+      mir_type_t t_bool = mir_bool_type(g->mu);
+      first_var = mir_add_var(g->mu, t_bool, MIR_NULL_STAMP,
+                              ident_new("first"), 0);
+      mir_build_store(g->mu, first_var, mir_const(g->mu, t_bool, 1));
+   }
 
    mir_type_t t_logic = mir_vec4_type(g->mu, 1, false);
 
@@ -37037,6 +37046,21 @@ static void vlog_lower_gate_inst(vlog_gen_t *g, vlog_node_t v)
    mir_build_return(g->mu, MIR_NULL_VALUE);
 
    mir_set_cursor(g->mu, start_bb, MIR_APPEND);
+
+   if (!mir_is_null(first_var)) {
+      mir_block_t init_bb = mir_add_block(g->mu);
+      mir_block_t eval_bb = mir_add_block(g->mu);
+      mir_build_cond(g->mu, mir_build_load(g->mu, first_var), init_bb,
+                     eval_bb);
+
+      mir_set_cursor(g->mu, init_bb, MIR_APPEND);
+      vlog_lower_initial_x(g, vlog_target(v));
+      mir_build_store(g->mu, first_var,
+                      mir_const(g->mu, mir_bool_type(g->mu), 0));
+      mir_build_jump(g->mu, eval_bb);
+
+      mir_set_cursor(g->mu, eval_bb, MIR_APPEND);
+   }
 
    bool negate = false;
    uint8_t strength = ST_STRONG;
