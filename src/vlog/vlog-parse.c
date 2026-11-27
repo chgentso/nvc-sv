@@ -19492,7 +19492,7 @@ static void add_pfmt_methods(vlog_node_t class)
           "return __r;\nendfunction\n");
    tb_cat(tb, "static function string __pn(__pfmt_self h);\n"
           "if (h == null) return \"null\";\n"
-          "return $sformatf(\"%%s#%%0d\", h.__cname(), h.__oidn());\n"
+          "return $sformatf(\"%s#%0d\", h.__cname(), h.__oidn());\n"
           "endfunction\n");
 
    for (int plain = 0; plain < 2; plain++) {
