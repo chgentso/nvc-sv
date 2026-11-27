@@ -41,6 +41,19 @@
 #include <inttypes.h>
 
 static parse_state_t    state;
+
+static parse_state_t *save_parse_state(void)
+{
+   parse_state_t *saved = xmalloc(sizeof(parse_state_t));
+   *saved = state;
+   return saved;
+}
+
+static void restore_parse_state(parse_state_t *saved)
+{
+   state = *saved;
+   free(saved);
+}
 static vlog_kind_t      param_kind;
 static int              systf_depth;
 static vlog_net_kind_t  implicit_kind;
@@ -18217,7 +18230,7 @@ static void cov_replay(vlog_node_t parent, tokenq_t *toks, int ntoks)
       .tokens  = toks,
    };
 
-   parse_state_t saved = state;
+   parse_state_t *saved = save_parse_state();
    generic_class_t *saved_class = replay_class;
    const int saved_pos = replay_pos;
 
@@ -18246,7 +18259,7 @@ static void cov_replay(vlog_node_t parent, tokenq_t *toks, int ntoks)
    }
 
    cov_replaying = saved_replaying;
-   state = saved;
+   restore_parse_state(saved);
    replay_class = saved_class;
    replay_pos = saved_pos;
 }
@@ -18496,7 +18509,7 @@ static vlog_node_t bind_replay(cov_toks_t toks, bool bind)
       .tokens  = copy,
    };
 
-   parse_state_t saved = state;
+   parse_state_t *saved = save_parse_state();
    generic_class_t *saved_class = replay_class;
    const int saved_pos = replay_pos;
 
@@ -18509,7 +18522,7 @@ static vlog_node_t bind_replay(cov_toks_t toks, bool bind)
 
    vlog_node_t v = p_description();
 
-   state = saved;
+   restore_parse_state(saved);
    replay_class = saved_class;
    replay_pos = saved_pos;
    return v;
@@ -19404,7 +19417,7 @@ static vlog_node_t replay_param_type(const generic_param_t *p)
       .tokens  = p->type,
    };
 
-   parse_state_t saved = state;
+   parse_state_t *saved = save_parse_state();
    generic_class_t *saved_class = replay_class;
    const int saved_pos = replay_pos;
 
@@ -19421,7 +19434,7 @@ static vlog_node_t replay_param_type(const generic_param_t *p)
    else
       result = p_data_type_or_implicit();
 
-   state = saved;
+   restore_parse_state(saved);
    replay_class = saved_class;
    replay_pos = saved_pos;
 
@@ -20316,7 +20329,7 @@ static vlog_node_t p_checker_call(void)
       .tokens  = out,
    };
 
-   parse_state_t saved = state;
+   parse_state_t *saved = save_parse_state();
    generic_class_t *saved_class = replay_class;
    const int saved_pos = replay_pos;
 
@@ -20329,7 +20342,7 @@ static vlog_node_t p_checker_call(void)
 
    vlog_node_t v = p_statement_or_null();
 
-   state = saved;
+   restore_parse_state(saved);
    replay_class = saved_class;
    replay_pos = saved_pos;
 
@@ -20847,7 +20860,7 @@ static vlog_node_t replay_default(vlog_node_t generic, generic_class_t *g,
       .tokens  = g->params[pos].def,
    };
 
-   parse_state_t saved = state;
+   parse_state_t *saved = save_parse_state();
    generic_class_t *saved_class = replay_class;
    const int saved_pos = replay_pos;
    vlog_node_t saved_container = spec_container;
@@ -20885,7 +20898,7 @@ static vlog_node_t replay_default(vlog_node_t generic, generic_class_t *g,
    scope_leave();
    vlog_symtab_enter(symtab, saved_scope);
 
-   state = saved;
+   restore_parse_state(saved);
    replay_class = saved_class;
    replay_pos = saved_pos;
    spec_container = saved_container;
@@ -20901,7 +20914,7 @@ static vlog_node_t replay_param_type_in_scope(vlog_node_t generic,
    if (g->params[pos].ntype == 0 && g->params[pos].tname == NULL)
       return NULL;
 
-   parse_state_t saved = state;
+   parse_state_t *saved = save_parse_state();
    vlog_node_t saved_container = spec_container;
    spec_container = container;
 
@@ -20930,7 +20943,7 @@ static vlog_node_t replay_param_type_in_scope(vlog_node_t generic,
    scope_leave();
    vlog_symtab_enter(symtab, saved_scope);
 
-   state = saved;
+   restore_parse_state(saved);
    spec_container = saved_container;
 
    return result;
@@ -21147,7 +21160,7 @@ static vlog_node_t specialise_class(vlog_node_t generic)
    // Added first so that a class can refer to itself
    vlog_add_decl(container, v);
 
-   parse_state_t saved = state;
+   parse_state_t *saved = save_parse_state();
    generic_class_t *saved_class = replay_class;
    const int saved_pos = replay_pos;
    const bool saved_proto = parsing_prototype;
@@ -21177,7 +21190,7 @@ static vlog_node_t specialise_class(vlog_node_t generic)
    p_class_body(v, g->name, g, actuals);
    spec_depth--;
 
-   state = saved;
+   restore_parse_state(saved);
    replay_class = saved_class;
    replay_pos = saved_pos;
    parsing_prototype = saved_proto;
@@ -21208,7 +21221,7 @@ static void replay_generic_extern(generic_class_t *ext, vlog_node_t spec,
 {
    // Parse a method defined outside of the class for one specialisation
 
-   parse_state_t saved = state;
+   parse_state_t *saved = save_parse_state();
    generic_class_t *saved_class = replay_class;
    const int saved_pos = replay_pos;
    vlog_node_t saved_extern = spec_extern_class;
@@ -21238,7 +21251,7 @@ static void replay_generic_extern(generic_class_t *ext, vlog_node_t spec,
 
    vlog_symtab_enter(symtab, saved_scope);
 
-   state = saved;
+   restore_parse_state(saved);
    replay_class = saved_class;
    replay_pos = saved_pos;
    spec_extern_class = saved_extern;
@@ -21976,7 +21989,7 @@ static void flush_deferred_bodies(bool end_of_unit)
 
    flushing_bodies = true;
 
-   parse_state_t saved = state;
+   parse_state_t *saved = save_parse_state();
    generic_class_t *saved_class = replay_class;
    const int saved_pos = replay_pos;
    const bool saved_proc = proc_automatic, saved_subr = subr_automatic;
@@ -22022,7 +22035,7 @@ static void flush_deferred_bodies(bool end_of_unit)
    if (end_of_unit)
       fix_spec_scopes();
 
-   state = saved;
+   restore_parse_state(saved);
    replay_class = saved_class;
    replay_pos = saved_pos;
    proc_automatic = saved_proc;
@@ -22121,7 +22134,7 @@ static void resolve_forward_specs(vlog_node_t class)
       if (f.forward != class)
          continue;
 
-      parse_state_t saved = state;
+      parse_state_t *saved = save_parse_state();
       generic_class_t *saved_class = replay_class;
       const int saved_pos = replay_pos;
       vlog_node_t saved_container = spec_container;
@@ -22142,7 +22155,7 @@ static void resolve_forward_specs(vlog_node_t class)
 
       vlog_symtab_enter(symtab, saved_scope);
 
-      state = saved;
+      restore_parse_state(saved);
       replay_class = saved_class;
       replay_pos = saved_pos;
       spec_container = saved_container;
