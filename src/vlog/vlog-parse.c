@@ -11027,6 +11027,14 @@ static vlog_node_t p_subroutine_call_statement(void)
          consume(tTICK);
          consume(tLPAREN);
 
+         if (peek() == tSYSTASK && peek_nth(2) == tDOT) {
+            ident_t root = p_system_tf_identifier();
+            if (root != ident_new("$root"))
+               parse_error(&state.last_loc,
+                           "unexpected system name %pi before '.'", root);
+            consume(tDOT);
+         }
+
          const vlog_kind_t kind =
             peek() == tSYSTASK ? V_SYS_FCALL : V_USER_FCALL;
 
@@ -13945,6 +13953,17 @@ static vlog_node_t p_statement_item(ident_t id)
          return v;
       }
       // Fall-through
+   case tSYSTASK:
+      if (peek() == tSYSTASK) {
+         if (peek_nth(2) != tDOT)
+            return p_subroutine_call_statement();
+         ident_t root = p_system_tf_identifier();
+         if (root != ident_new("$root"))
+            parse_error(&state.last_loc,
+                        "unexpected system name %pi before '.'", root);
+         consume(tDOT);
+      }
+      // Fall-through
    case tID:
       if (at_checker_call())
          return p_checker_call();
@@ -14049,7 +14068,6 @@ static vlog_node_t p_statement_item(ident_t id)
       return p_seq_block(id);
    case tFORK:
       return p_par_block(id);
-   case tSYSTASK:
    case tVOID:
       return p_subroutine_call_statement();
    case tIF:

@@ -3364,3 +3364,4 @@ subtype_prot1 normal,2008
 prot_path1 normal,2008
 conv_prot1 normal,2008
 conv_uncons_out1 shell
+svrootcall1     verilog
