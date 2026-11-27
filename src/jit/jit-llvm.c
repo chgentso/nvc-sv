@@ -4233,11 +4233,12 @@ static void *jit_llvm_init(jit_t *jit)
       .inline_limit = INLINE_LIMIT,
    };
 
-   const char *build_fp = PACKAGE_VERSION ":" NVC_SV_VERSION ":" LLVM_VERSION
+   char *build_fp LOCAL = xasprintf(
+      PACKAGE_VERSION ":" NVC_SV_VERSION ":" LLVM_VERSION
 #if HAVE_GIT_SHA
       ":" GIT_SHA
 #endif
-      ":" __DATE__ " " __TIME__;
+      ":%s", jit_cache_binary_id());
 
    llvm_jit_state_t *state = xcalloc(sizeof(llvm_jit_state_t));
    state->code  = code_cache_new();

@@ -7482,11 +7482,6 @@ bool model_in_reset(rt_model_t *m)
    return m != NULL && m->in_reset;
 }
 
-int64_t x_sv_island_in_reset(void)
-{
-   return model_in_reset(get_model_or_null()) ? 1 : 0;
-}
-
 int64_t model_now(rt_model_t *m, unsigned *deltas)
 {
    if (deltas != NULL)
@@ -11008,6 +11003,15 @@ void *x_sv_island_begin(struct _ffi_closure *closure, uint32_t state_bytes,
    void *inst_ctx = (c != NULL && c->nargs > 0) ? c->args[0].pointer : NULL;
    return rt_island_begin(m, &m->islands, eval_handle, inst_ctx,
                           state_bytes, nsigs, ndomains);
+}
+
+void x_sv_island_set_reset_comb(void *handle, struct _ffi_closure *closure,
+                                bool skip_reset)
+{
+   ffi_closure_t *c = (ffi_closure_t *)closure;
+   jit_handle_t rh = c != NULL ? c->handle : JIT_HANDLE_INVALID;
+   void *rctx = (c != NULL && c->nargs > 0) ? c->args[0].pointer : NULL;
+   rt_island_set_reset_comb(handle, rh, rctx, skip_reset);
 }
 
 void x_sv_island_set_sparse(void *handle, uint32_t sparse_log_off,

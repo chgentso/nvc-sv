@@ -513,8 +513,7 @@ static bool jit_intrinsic_is_mt_safe(ident_t name)
       || strcmp(s, "__sv_real_finite") == 0
       || strcmp(s, "__sv_wildcard_eq") == 0
       || strcmp(s, "__sv_logic_to_std") == 0
-      || strcmp(s, "__sv_std_to_logic") == 0
-      || strcmp(s, "__sv_island_in_reset") == 0;
+      || strcmp(s, "__sv_std_to_logic") == 0;
 }
 
 static void jit_prepare_deps(jit_t *j, jit_func_t *f)

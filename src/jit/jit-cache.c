@@ -35,6 +35,14 @@
 #include <time.h>
 #include <unistd.h>
 
+#if defined(__linux__) || defined(__FreeBSD__)
+#include <elf.h>
+#include <link.h>
+#elif defined(__APPLE__)
+#include <mach-o/dyld.h>
+#include <mach-o/loader.h>
+#endif
+
 #ifdef __MINGW32__
 #define WIN32_LEAN_AND_MEAN
 #include <direct.h>
@@ -279,6 +287,150 @@ void jit_cache_hex(const jit_cache_key_t *key, char out[65])
       out[i * 2 + 1] = hex[key->bytes[i] & 0xf];
    }
    out[64] = '\0';
+}
+
+static char *format_hex_id(const char *prefix, const uint8_t *bytes, size_t len)
+{
+   static const char hex[] = "0123456789abcdef";
+   const size_t plen = strlen(prefix);
+   char *out = xmalloc(plen + len * 2 + 1);
+   memcpy(out, prefix, plen);
+   for (size_t i = 0; i < len; i++) {
+      out[plen + i * 2 + 0] = hex[(bytes[i] >> 4) & 0xf];
+      out[plen + i * 2 + 1] = hex[bytes[i] & 0xf];
+   }
+   out[plen + len * 2] = '\0';
+   return out;
+}
+
+#if defined(__linux__) || defined(__FreeBSD__)
+static int elf_build_id_cb(struct dl_phdr_info *info, size_t size, void *data)
+{
+   (void)size;
+   if (info->dlpi_name != NULL && info->dlpi_name[0] != '\0')
+      return 0;   // Main executable only
+
+   char **out = data;
+   for (ElfW(Half) i = 0; i < info->dlpi_phnum; i++) {
+      const ElfW(Phdr) *ph = &(info->dlpi_phdr[i]);
+      if (ph->p_type != PT_NOTE || ph->p_memsz == 0)
+         continue;
+
+      const uint8_t *base = (const uint8_t *)(info->dlpi_addr + ph->p_vaddr);
+      const size_t align = (ph->p_align == 8) ? 8 : 4;
+      size_t off = 0;
+      while (off + sizeof(ElfW(Nhdr)) <= ph->p_memsz) {
+         ElfW(Nhdr) nh;
+         memcpy(&nh, base + off, sizeof(nh));
+         off += sizeof(nh);
+
+         const size_t name_off = off;
+         const size_t name_step = (nh.n_namesz + align - 1) & ~(align - 1);
+         if (name_step < nh.n_namesz || name_off + name_step > ph->p_memsz)
+            break;
+
+         const size_t desc_off = name_off + name_step;
+         const size_t desc_step = (nh.n_descsz + align - 1) & ~(align - 1);
+         if (desc_step < nh.n_descsz || desc_off + nh.n_descsz > ph->p_memsz)
+            break;
+
+         if (nh.n_type == NT_GNU_BUILD_ID && nh.n_namesz == 4
+             && memcmp(base + name_off, "GNU\0", 4) == 0 && nh.n_descsz > 0) {
+            *out = format_hex_id("elf-build-id:", base + desc_off, nh.n_descsz);
+            return 1;
+         }
+
+         if (desc_off + desc_step > ph->p_memsz)
+            break;
+         off = desc_off + desc_step;
+      }
+   }
+
+   return 1;
+}
+#endif
+
+char *jit_cache_file_id(const char *path)
+{
+   if (path == NULL || *path == '\0')
+      return NULL;
+
+   int fd = open(path, O_RDONLY | O_BINARY);
+   if (fd < 0)
+      return NULL;
+
+   sha256_t ctx;
+   sha256_init(&ctx);
+
+   uint8_t buf[65536];
+   for (;;) {
+      ssize_t n = read(fd, buf, sizeof(buf));
+      if (n < 0) {
+         if (errno == EINTR)
+            continue;
+         close(fd);
+         return NULL;
+      }
+      if (n == 0)
+         break;
+      sha256_update(&ctx, buf, (size_t)n);
+   }
+
+   close(fd);
+
+   uint8_t digest[32];
+   sha256_final(&ctx, digest);
+   return format_hex_id("file-sha256:", digest, sizeof(digest));
+}
+
+const char *jit_cache_binary_id(void)
+{
+   static char *cached = NULL;
+
+   INIT_ONCE({
+#if defined(__linux__) || defined(__FreeBSD__)
+      dl_iterate_phdr(elf_build_id_cb, &cached);
+#elif defined(__APPLE__)
+      const struct mach_header_64 *hdr =
+         (const struct mach_header_64 *)_dyld_get_image_header(0);
+      if (hdr != NULL && hdr->magic == MH_MAGIC_64) {
+         const uint8_t *p = (const uint8_t *)(hdr + 1);
+         for (uint32_t i = 0; i < hdr->ncmds; i++) {
+            const struct load_command *lc = (const struct load_command *)p;
+            if (lc->cmd == LC_UUID && lc->cmdsize >= sizeof(struct uuid_command)) {
+               const struct uuid_command *uc = (const struct uuid_command *)p;
+               cached = format_hex_id("macho-uuid:", uc->uuid, sizeof(uc->uuid));
+               break;
+            }
+            p += lc->cmdsize;
+         }
+      }
+#elif defined(__MINGW32__)
+      const uint8_t *base = (const uint8_t *)GetModuleHandleA(NULL);
+      if (base != NULL) {
+         const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)base;
+         if (dos->e_magic == IMAGE_DOS_SIGNATURE) {
+            const IMAGE_NT_HEADERS *nt =
+               (const IMAGE_NT_HEADERS *)(base + dos->e_lfanew);
+            if (nt->Signature == IMAGE_NT_SIGNATURE) {
+               cached = xasprintf("pe:%08lx-%08lx-%08lx",
+                                  (unsigned long)nt->FileHeader.TimeDateStamp,
+                                  (unsigned long)nt->OptionalHeader.SizeOfImage,
+                                  (unsigned long)nt->OptionalHeader.CheckSum);
+            }
+         }
+      }
+#endif
+      if (cached == NULL) {
+         LOCAL_TEXT_BUF tb = tb_new();
+         if (get_exe_path(tb))
+            cached = jit_cache_file_id(tb_get(tb));
+      }
+      if (cached == NULL)
+         cached = xstrdup("");
+   });
+
+   return cached;
 }
 
 static inline void hash_u8(sha256_t *ctx, uint8_t v)

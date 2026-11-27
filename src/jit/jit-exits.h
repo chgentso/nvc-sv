@@ -154,6 +154,8 @@ void x_sv_poll_fired(void);
 struct _ffi_closure;
 void *x_sv_island_begin(struct _ffi_closure *closure, uint32_t state_bytes,
                         uint32_t nsigs, uint32_t ndomains);
+void x_sv_island_set_reset_comb(void *handle, struct _ffi_closure *closure,
+                                bool skip_reset);
 void x_sv_island_set_sparse(void *handle, uint32_t sparse_log_off,
                             uint32_t total_state_bytes);
 void x_sv_island_sparse_write(void *isl_ptr, uint32_t sig_idx,
@@ -226,6 +228,5 @@ int64_t x_sv_class_oid(void);
 void x_sv_unique_flush(void *ctx, int64_t proc_id);
 void x_sv_unique_warn(void *ctx, int64_t proc_id, const uint8_t *msg,
                       int32_t len, object_t *where);
-int64_t x_sv_island_in_reset(void);
 
 #endif  // _JIT_EXITS_H
