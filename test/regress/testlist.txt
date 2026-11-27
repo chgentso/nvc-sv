@@ -3465,3 +3465,4 @@ signal43        shell
 signal44        shell
 vlog_island_mem1 verilog,gold
 vlog_island_mem2 verilog,gold
+vlog_nba_pattern1 verilog,gold

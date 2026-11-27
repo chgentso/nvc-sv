@@ -15184,6 +15184,10 @@ static void vlog_lower_non_blocking_assignment(vlog_gen_t *g, vlog_node_t v)
           && vlog_array_elem_info(g, target)->size == 8
           && mir_is_vector_type(g->mu, vlog_array_elem_info(g, target)->type))
          value = vlog_lower_string_bytes(g, rhs, vlog_unpacked_count(dims, 1));
+      else if (nlvalues == 1 && vlog_kind(rhs) == V_PATTERN_EXPR
+               && (ndims = vlog_unpacked_dims(target, dims)) > 0)
+         value = vlog_lower_array_pattern(g, rhs, dims, ndims,
+                                          vlog_array_elem_info(g, target));
       else {
          mir_type_t context = vlog_assign_context(g, type, rhs);
          value = vlog_lower_with_context(g, rhs, context);
