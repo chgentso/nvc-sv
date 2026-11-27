@@ -5200,6 +5200,32 @@ static void sv_island_finish(jit_func_t *func, jit_anchor_t *caller,
    args[0].integer = 0;
 }
 
+static void sv_island_set_variant_a(jit_func_t *func, jit_anchor_t *caller,
+                                    jit_scalar_t *args, tlab_t *tlab)
+{
+   x_sv_island_set_variant_a(args[0].pointer, args[1].pointer,
+                             (uint32_t)args[2].integer,
+                             (uint32_t)args[3].integer);
+   args[0].integer = 0;
+}
+
+static void sv_island_bind_sig_a(jit_func_t *func, jit_anchor_t *caller,
+                                 jit_scalar_t *args, tlab_t *tlab)
+{
+   x_sv_island_bind_sig_a(args[0].pointer, (uint32_t)args[1].integer,
+                          (uint32_t)args[2].integer, (uint32_t)args[3].integer,
+                          (uint32_t)args[4].integer);
+   args[0].integer = 0;
+}
+
+static void sv_island_add_domain_a(jit_func_t *func, jit_anchor_t *caller,
+                                   jit_scalar_t *args, tlab_t *tlab)
+{
+   x_sv_island_add_domain_a(args[0].pointer, (uint32_t)args[1].integer,
+                            args[2].pointer);
+   args[0].integer = 0;
+}
+
 static void sv_island_mark_ext_read(jit_func_t *func, jit_anchor_t *caller,
                                     jit_scalar_t *args, tlab_t *tlab)
 {
@@ -6989,7 +7015,9 @@ jit_entry_fn_t jit_bind_intrinsic(ident_t name)
       island_gen_key_i = NULL, island_attach_i = NULL, island_apply_f_i = NULL,
       island_add_dom_i = NULL, island_add_dom_w_i = NULL,
       island_finish_i = NULL, island_ext_read_i = NULL,
-      island_set_sparse_i = NULL, island_sparse_write_i = NULL;
+      island_set_sparse_i = NULL, island_sparse_write_i = NULL,
+      island_variant_a_i = NULL, island_bind_a_i = NULL,
+      island_add_dom_a_i = NULL;
 
    INIT_ONCE({
          dispatch_func_i    = ident_new("__nvc_protected_dispatch_func");
@@ -7006,6 +7034,9 @@ jit_entry_fn_t jit_bind_intrinsic(ident_t name)
          island_ext_read_i  = ident_new("__sv_island_mark_ext_read");
          island_set_sparse_i = ident_new("__sv_island_set_sparse");
          island_sparse_write_i = ident_new("__sv_island_sparse_write");
+         island_variant_a_i = ident_new("__sv_island_set_variant_a");
+         island_bind_a_i    = ident_new("__sv_island_bind_sig_a");
+         island_add_dom_a_i = ident_new("__sv_island_add_domain_a");
 
          const bool want_intrinsics = !!opt_get_int(OPT_JIT_INTRINSICS);
 
@@ -7074,6 +7105,12 @@ jit_entry_fn_t jit_bind_intrinsic(ident_t name)
       return sv_island_set_sparse;
    else if (name == island_sparse_write_i)
       return sv_island_sparse_write;
+   else if (name == island_variant_a_i)
+      return sv_island_set_variant_a;
+   else if (name == island_bind_a_i)
+      return sv_island_bind_sig_a;
+   else if (name == island_add_dom_a_i)
+      return sv_island_add_domain_a;
 
    for (const jit_intrinsic_t *it = intrinsic_list; it->name; it++) {
       if (it->ident == name)

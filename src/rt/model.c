@@ -10772,6 +10772,28 @@ void x_sv_island_finish(void *handle)
    rt_island_finish(handle);
 }
 
+void x_sv_island_set_variant_a(void *handle, struct _ffi_closure *closure,
+                               uint32_t state_bytes, uint32_t hdr_bytes)
+{
+   ffi_closure_t *c = (ffi_closure_t *)closure;
+   rt_island_set_variant_a(handle, c != NULL ? c->handle : JIT_HANDLE_INVALID,
+                           state_bytes, hdr_bytes);
+}
+
+void x_sv_island_bind_sig_a(void *handle, uint32_t idx, uint32_t a_off,
+                            uint32_t a_flags, uint32_t b_bytes)
+{
+   rt_island_bind_sig_a(handle, idx, a_off, a_flags, b_bytes);
+}
+
+void x_sv_island_add_domain_a(void *handle, uint32_t dom_idx,
+                              struct _ffi_closure *ff_closure)
+{
+   ffi_closure_t *c = (ffi_closure_t *)ff_closure;
+   assert(c != NULL);
+   rt_island_add_domain_a(handle, dom_idx, c->handle);
+}
+
 void x_sv_island_mark_ext_read(sig_shared_t *ss)
 {
    if (ss == NULL)

@@ -4180,10 +4180,78 @@ static void collect_block_contents(vhdl_island_ctx_t *ctx, tree_t cur_blk,
    vhdl_island_set_eval_scope(ctx, ctx->block, ctx->ancestors, ctx->n_ancestors);
 }
 
+// Speculative Mode A (NVC_ISLAND_SPEC): a copy of the Mode B island ISL
+// with the layout of Mode A for its std_logic, bit and boolean signals
+// (packed two-state words, as vhdl_island_rebuild lays them out with
+// --2state=islands) and the same bytes as Mode B for the others.  The
+// leading bytes before the first signal are kept.  The copy shares the
+// process lists of ISL and names its functions with a "$a" suffix.  Returns
+// NULL with *REASON set when the island must stay Mode B.
+vhdl_island_t *vhdl_island_new_a_variant(const vhdl_island_ctx_t *ctx,
+                                         const vhdl_island_t *isl,
+                                         const char **reason)
+{
+   assert(!isl->two_state);
+   if (isl->sparse_log_off > 0) {
+      *reason = "A1 sparse RAM";
+      return NULL;
+   }
+
+   uint32_t hdr = isl->state_bytes;
+   for (uint32_t j = 0; j < isl->n_sigs; j++)
+      hdr = MIN(hdr, isl->sigs[j].a_off);
+
+   vhdl_island_t *a = xmalloc(sizeof(vhdl_island_t));
+   *a = *isl;
+   a->two_state = true;
+   a->a_variant = NULL;
+   a->a_reason = NULL;
+   a->hdr_bytes = hdr;
+   if (isl->eval_name != NULL)
+      a->eval_name = ident_sprintf("%s$a", istr(isl->eval_name));
+   a->sigs = xmalloc_array(isl->n_sigs, sizeof(vhdl_isl_sig_t));
+   memcpy(a->sigs, isl->sigs, isl->n_sigs * sizeof(vhdl_isl_sig_t));
+   if (isl->n_doms > 0) {
+      a->doms = xmalloc_array(isl->n_doms, sizeof(vhdl_idom_t));
+      memcpy(a->doms, isl->doms, isl->n_doms * sizeof(vhdl_idom_t));
+      for (uint32_t d = 0; d < isl->n_doms; d++)
+         a->doms[d].fn_name = ident_sprintf("%s$a",
+                                            istr(isl->doms[d].fn_name));
+   }
+
+   uint32_t off = hdr;
+   for (uint32_t j = 0; j < a->n_sigs; j++) {
+      vhdl_isl_sig_t *isig = &(a->sigs[j]);
+      const vhdl_isig_t *s = &(ctx->sigs[isig->sig_id]);
+      assert(!s->is_sparse_ram);
+      isig->a_off = off;
+      if (s->elem_kind == VISIG_ENUM || s->elem_kind == VISIG_INT) {
+         off += ALIGN_UP(s->width * s->nelems * s->byte_size, 8u);
+         continue;
+      }
+      const uint32_t nwords = (s->width + 63u) / 64u;
+      off += nwords * s->nelems * 8u;
+      isig->rt_flags &= ~RT_ISIG_STD_LOGIC9;
+      isig->rt_flags |= RT_ISIG_TWO_STATE;
+   }
+   a->state_bytes = off;
+   return a;
+}
+
+void vhdl_island_free_a_variant(vhdl_island_t *a)
+{
+   if (a == NULL)
+      return;
+   free(a->sigs);
+   free(a->doms);
+   free(a);
+}
+
 static void free_ctx_islands(vhdl_island_ctx_t *ctx)
 {
    for (uint32_t i = 0; i < ctx->n_islands; i++) {
       vhdl_island_t *isl = &(ctx->islands[i]);
+      vhdl_island_free_a_variant(isl->a_variant);
       free(isl->sigs);
       free(isl->comb_procs);
       for (uint32_t d = 0; d < isl->n_doms; d++) {
@@ -4298,6 +4366,12 @@ void vhdl_island_dump_summary(const vhdl_island_ctx_t *ctx)
          for (uint32_t k = 0; k < isl->doms[d].n_procs; k++)
             vi_add_reason(why, &nwhy,
                           ctx->procs[isl->doms[d].proc_idxs[k]].a_block);
+      }
+      if (opt_get_int(OPT_ISLAND_SPEC) && !isl->two_state) {
+         // Speculative Mode A: the variant that was actually lowered
+         nwhy = 0;
+         if (isl->a_variant == NULL)
+            why[nwhy++] = isl->a_reason ? isl->a_reason : "unknown";
       }
       printf("VHDL_ISLAND_INFO: %s island=%u procs=%u mode=%c a_variant=%s",
              istr(ctx->scope_prefix), isl->id, np, isl->two_state ? 'A' : 'B',

@@ -1310,6 +1310,9 @@ static void island_pool_free(rt_island_pool_t *pool)
    free(pool);
 }
 
+static void island_spec_free(rt_island_t *isl);
+static void island_spec_report(rt_island_mgr_t *mgr);
+
 void rt_island_mgr_free(rt_island_mgr_t *mgr)
 {
    if (mgr == NULL)
@@ -1324,6 +1327,8 @@ void rt_island_mgr_free(rt_island_mgr_t *mgr)
       island_pool_free(mgr->pool);
       mgr->pool = NULL;
    }
+
+   island_spec_report(mgr);
 
    for (unsigned i = 0; i < mgr->clusters.count; i++) {
       rt_super_island_t *cl = mgr->clusters.items[i];
@@ -1376,6 +1381,7 @@ void rt_island_mgr_free(rt_island_mgr_t *mgr)
       free(isl->fb_shadow);
       free(isl->sparse_ovf_entries);
       free(isl->sparse_ovf_data);
+      island_spec_free(isl);
       free(isl);
    }
    hash_free(mgr->sig_map);
@@ -1692,6 +1698,227 @@ void rt_island_add_domain_write(void *handle, uint32_t dom_idx,
    isl->sigs[sig_idx].flags |= RT_ISIG_FF_WRITTEN;
 }
 
+////////////////////////////////////////////////////////////////////////////////
+// Speculative Mode A variant of a VHDL island (NVC_ISLAND_SPEC)
+//
+// The island runs with its Mode B layout and functions.  The Mode A layout
+// keeps the same leading bytes, stores std_logic, bit and boolean signals
+// as packed two-state words ('0' = 0, '1' = 1) and other signals as the
+// same bytes as Mode B.  rt_island_spec_pack converts one half of the state
+// to Mode A and says whether every std_logic value was '0' or '1', the only
+// case where the conversion is exact; rt_island_spec_unpack is the exact
+// inverse for such a state.
+
+static int island_spec_force = -1;
+
+static bool island_spec_force_a(void)
+{
+   if (island_spec_force < 0) {
+      const char *env = getenv("NVC_ISLAND_SPEC_FORCE");
+      island_spec_force = env != NULL && (env[0] == 'A' || env[0] == 'a');
+   }
+   return island_spec_force;
+}
+
+void rt_island_set_variant_a(void *handle, jit_handle_t eval_handle,
+                             uint32_t state_bytes, uint32_t hdr_bytes)
+{
+   rt_island_t *isl = handle;
+   assert(isl->spec == NULL);
+   assert(hdr_bytes <= state_bytes);
+
+   rt_island_spec_t *sp = xcalloc(sizeof(rt_island_spec_t));
+   sp->eval_handle = eval_handle;
+   sp->state_bytes = state_bytes;
+   sp->stride      = RT_ISLAND_STRIDE(state_bytes);
+   sp->hdr_bytes   = hdr_bytes;
+   if (isl->nsigs > 0) {
+      sp->a_off   = xcalloc_array(isl->nsigs, sizeof(uint32_t));
+      sp->a_flags = xcalloc_array(isl->nsigs, sizeof(uint32_t));
+      sp->b_bytes = xcalloc_array(isl->nsigs, sizeof(uint32_t));
+   }
+   if (isl->ndomains > 0) {
+      sp->ff_handles = xmalloc_array(isl->ndomains, sizeof(jit_handle_t));
+      for (uint32_t d = 0; d < isl->ndomains; d++)
+         sp->ff_handles[d] = JIT_HANDLE_INVALID;
+   }
+   isl->spec = sp;
+}
+
+void rt_island_bind_sig_a(void *handle, uint32_t idx, uint32_t a_off,
+                          uint32_t a_flags, uint32_t b_bytes)
+{
+   rt_island_t *isl = handle;
+   rt_island_spec_t *sp = isl->spec;
+   assert(sp != NULL && idx < isl->nsigs);
+   assert(!(isl->sigs[idx].flags & RT_ISIG_SPARSE_RAM));
+   sp->a_off[idx] = a_off;
+   sp->a_flags[idx] = a_flags;
+   sp->b_bytes[idx] = b_bytes;
+   if (a_flags & RT_ISIG_TWO_STATE)
+      assert(a_off + isl->sigs[idx].nwords * isl->sigs[idx].nelems * 8u
+             <= sp->state_bytes);
+   else
+      assert(a_off + b_bytes <= sp->state_bytes);
+}
+
+void rt_island_add_domain_a(void *handle, uint32_t dom_idx,
+                            jit_handle_t ff_handle)
+{
+   rt_island_t *isl = handle;
+   assert(isl->spec != NULL && dom_idx < isl->ndomains);
+   isl->spec->ff_handles[dom_idx] = ff_handle;
+}
+
+// Convert signal I of the island from the Mode B state B_STATE to the Mode A
+// state A_STATE, true if every value was '0' or '1'
+static bool island_spec_pack_sig(const rt_island_t *isl, uint32_t i,
+                                 const uint8_t *b_state, uint8_t *a_state)
+{
+   const rt_island_spec_t *sp = isl->spec;
+   const rt_island_sig_t *s = &(isl->sigs[i]);
+   const uint8_t *src = b_state + s->a_off;
+   uint8_t *dst = a_state + sp->a_off[i];
+   if (!(sp->a_flags[i] & RT_ISIG_TWO_STATE)) {
+      memcpy(dst, src, sp->b_bytes[i]);
+      return true;
+   }
+
+   // Bit 0 of a packed element is its last byte ("lsb" of a downto vector),
+   // as in the Mode A lowering
+   const uint8_t zero = (sp->a_flags[i] & RT_ISIG_STD_LOGIC_ELEM) ? 2 : 0;
+   uint64_t *words = (uint64_t *)dst;
+   memset(words, 0, (size_t)s->nwords * s->nelems * sizeof(uint64_t));
+   bool clean = true;
+   for (uint32_t e = 0; e < s->nelems; e++) {
+      const uint8_t *eb = src + (size_t)e * s->width;
+      uint64_t *ew = words + (size_t)e * s->nwords;
+      for (uint32_t k = 0; k < s->width; k++) {
+         const uint8_t v = eb[k] - zero;
+         clean &= (v <= 1);
+         if (v == 1) {
+            const uint32_t lsb = s->width - 1u - k;
+            ew[lsb / 64u] |= UINT64_C(1) << (lsb & 63u);
+         }
+      }
+   }
+   return clean;
+}
+
+// The exact inverse of island_spec_pack_sig for a '0'/'1' value
+static void island_spec_unpack_sig(const rt_island_t *isl, uint32_t i,
+                                   const uint8_t *a_state, uint8_t *b_state)
+{
+   const rt_island_spec_t *sp = isl->spec;
+   const rt_island_sig_t *s = &(isl->sigs[i]);
+   uint8_t *dst = b_state + s->a_off;
+   const uint8_t *src = a_state + sp->a_off[i];
+   if (!(sp->a_flags[i] & RT_ISIG_TWO_STATE)) {
+      memcpy(dst, src, sp->b_bytes[i]);
+      return;
+   }
+
+   const uint8_t zero = (sp->a_flags[i] & RT_ISIG_STD_LOGIC_ELEM) ? 2 : 0;
+   const uint64_t *words = (const uint64_t *)src;
+   for (uint32_t e = 0; e < s->nelems; e++) {
+      uint8_t *eb = dst + (size_t)e * s->width;
+      const uint64_t *ew = words + (size_t)e * s->nwords;
+      for (uint32_t k = 0; k < s->width; k++) {
+         const uint32_t lsb = s->width - 1u - k;
+         eb[k] = zero + (uint8_t)((ew[lsb / 64u] >> (lsb & 63u)) & 1u);
+      }
+   }
+}
+
+bool rt_island_spec_pack(const rt_island_t *isl, const uint8_t *b_state,
+                         uint8_t *a_state)
+{
+   const rt_island_spec_t *sp = isl->spec;
+   memset(a_state, 0, sp->state_bytes);
+   memcpy(a_state, b_state, sp->hdr_bytes);
+
+   bool clean = true;
+   for (uint32_t i = 0; i < isl->nsigs; i++)
+      clean &= island_spec_pack_sig(isl, i, b_state, a_state);
+   return clean;
+}
+
+void rt_island_spec_unpack(const rt_island_t *isl, const uint8_t *a_state,
+                           uint8_t *b_state)
+{
+   memcpy(b_state, a_state, isl->spec->hdr_bytes);
+   for (uint32_t i = 0; i < isl->nsigs; i++)
+      island_spec_unpack_sig(isl, i, a_state, b_state);
+}
+
+static void island_spec_setup(rt_island_t *isl)
+{
+   rt_island_spec_t *sp = isl->spec;
+   if (sp == NULL || !island_spec_force_a())
+      return;
+
+   // NVC_ISLAND_SPEC_FORCE=A (test hook): every call converts the state to
+   // Mode A, runs the Mode A function and converts back, or runs the Mode B
+   // function when the state is not all '0'/'1' or the Mode A function
+   // returned a deopt code
+   sp->force_a = true;
+   const size_t nbytes = (size_t)sp->stride * 2u;
+   sp->buf = xmalloc_array(nbytes / 8u, sizeof(uint64_t));
+   memset(sp->buf, 0, nbytes);
+}
+
+static void island_spec_free(rt_island_t *isl)
+{
+   rt_island_spec_t *sp = isl->spec;
+   if (sp == NULL)
+      return;
+   free(sp->ff_handles);
+   free(sp->a_off);
+   free(sp->a_flags);
+   free(sp->b_bytes);
+   free(sp->buf);
+   free(sp);
+   isl->spec = NULL;
+}
+
+static void island_spec_report(rt_island_mgr_t *mgr)
+{
+   // NVC_ISLAND_SPEC_STATS=1 prints to stdout, an absolute path appends
+   // to that file
+   const char *env = getenv("NVC_ISLAND_SPEC_STATS");
+   if (env == NULL || *env == '\0')
+      return;
+
+   FILE *f = stdout;
+   if (env[0] == '/' && (f = fopen(env, "a")) == NULL)
+      return;
+
+   uint32_t n_a = 0;
+   for (unsigned i = 0; i < mgr->islands.count; i++)
+      n_a += (mgr->islands.items[i]->spec != NULL);
+   fprintf(f, "ISLAND_SPEC: islands=%u a_variant=%u\n", mgr->islands.count,
+           n_a);
+
+   for (unsigned i = 0; i < mgr->islands.count; i++) {
+      const rt_island_t *isl = mgr->islands.items[i];
+      const rt_island_spec_t *sp = isl->spec;
+      if (sp == NULL || !sp->force_a)
+         continue;
+      fprintf(f, "ISLAND_SPEC: island=%u calls_a=%"PRIu64" deopt literal=%"PRIu64
+             " range=%"PRIu64" conv=%"PRIu64" report=%"PRIu64
+             " state=%"PRIu64"\n", isl->isl_id, sp->calls_a,
+             sp->deopts[RT_ISLAND_DEOPT_LITERAL],
+             sp->deopts[RT_ISLAND_DEOPT_RANGE],
+             sp->deopts[RT_ISLAND_DEOPT_CONV],
+             sp->deopts[RT_ISLAND_DEOPT_REPORT],
+             sp->deopts[RT_ISLAND_DEOPT_STATE]);
+   }
+   if (f != stdout)
+      fclose(f);
+   else
+      fflush(stdout);
+}
+
 static void island_refresh_domain_descs(rt_island_t *isl)
 {
    for (uint32_t d = 0; d < isl->ndomains; d++) {
@@ -1743,6 +1970,8 @@ void rt_island_finish(void *handle)
 {
    rt_island_t *isl = handle;
    rt_model_t *m = isl->model;
+
+   island_spec_setup(isl);
 
    uint32_t n_in = 0, n_out = 0, max_words = 1;
    for (uint32_t i = 0; i < isl->nsigs; i++) {
@@ -5170,10 +5399,112 @@ static void island_build_mt_deps(rt_island_mgr_t *mgr)
 static __thread bool island_jit_guarded = false;
 static __thread jit_scalar_t *island_batch_args = NULL;
 
+// Call the Mode A function HANDLE of the island on the Mode A state BUF
+static bool island_spec_jit_call(jit_t *jit, rt_island_t *isl,
+                                 jit_handle_t handle, uint8_t *buf,
+                                 tlab_t *tlab, jit_scalar_t *result)
+{
+   jit_scalar_t p1 = { .pointer = isl->inst_ctx };
+   jit_scalar_t p2 = { .pointer = buf };
+   result->integer = 0;
+   tlab_t null_tlab;
+   tlab_t *use_tlab = tlab;
+   if (unlikely(use_tlab == NULL)) {
+      null_tlab = jit_null_tlab(jit);
+      use_tlab = &null_tlab;
+   }
+   bool ok = true;
+   if (island_batch_args != NULL || island_jit_guarded)
+      jit_fastcall_guarded(jit, handle, result, p1, p2, use_tlab);
+   else
+      ok = jit_fastcall(jit, handle, result, p1, p2, use_tlab);
+   if (tlab != NULL)
+      tlab_reset(tlab);
+   return ok;
+}
+
+// NVC_ISLAND_SPEC_FORCE=A: run the Mode A comb function on a converted
+// copy of the state.  Returns false with *DONE false when the island must
+// run its Mode B function instead.
+static bool island_spec_call_comb(jit_t *jit, rt_island_t *isl, tlab_t *tlab,
+                                  bool *done)
+{
+   rt_island_spec_t *sp = isl->spec;
+   *done = false;
+   if (!rt_island_spec_pack(isl, isl->state, sp->buf)) {
+      sp->deopts[RT_ISLAND_DEOPT_STATE]++;
+      return true;
+   }
+
+   jit_scalar_t result;
+   if (!island_spec_jit_call(jit, isl, sp->eval_handle, sp->buf, tlab,
+                             &result))
+      return false;
+   sp->calls_a++;
+   if (result.integer != RT_ISLAND_DEOPT_NONE) {
+      assert(result.integer > 0 && result.integer < RT_ISLAND_DEOPT_COUNT);
+      sp->deopts[result.integer]++;
+      return true;
+   }
+
+   rt_island_spec_unpack(isl, sp->buf, isl->state);
+   *done = true;
+   return true;
+}
+
+// NVC_ISLAND_SPEC_FORCE=A: the same for a flip-flop function, which reads
+// both halves of the state and writes the second
+static bool island_spec_call_ff(jit_t *jit, rt_island_domain_t *dom,
+                                tlab_t *tlab, jit_scalar_t *result,
+                                bool *done)
+{
+   rt_island_t *isl = dom->isl;
+   rt_island_spec_t *sp = isl->spec;
+   *done = false;
+
+   // Only the signals the domain writes have a value in the second half:
+   // the function may read them back after a partial write
+   uint8_t *next_a = sp->buf + sp->stride;
+   bool clean = rt_island_spec_pack(isl, isl->state, sp->buf);
+   memcpy(next_a, sp->buf, sp->state_bytes);
+   for (uint32_t j = 0; clean && j < dom->n_write_sigs; j++)
+      clean = island_spec_pack_sig(isl, dom->write_sigs[j], isl->next_state,
+                                   next_a);
+   if (!clean) {
+      sp->deopts[RT_ISLAND_DEOPT_STATE]++;
+      return true;
+   }
+
+   if (!island_spec_jit_call(jit, isl, sp->ff_handles[dom->dom_idx], sp->buf,
+                             tlab, result))
+      return false;
+   sp->calls_a++;
+   if (!(result->integer & (INT64_C(1) << 63))) {
+      assert(result->integer > 0 && result->integer < RT_ISLAND_DEOPT_COUNT);
+      sp->deopts[result->integer]++;
+      return true;
+   }
+
+   for (uint32_t j = 0; j < dom->n_write_sigs; j++)
+      island_spec_unpack_sig(isl, dom->write_sigs[j], next_a, isl->next_state);
+   *done = true;
+   return true;
+}
+
 static bool island_call_comb_slow(jit_t *jit, rt_model_t *m, rt_island_t *isl,
                                   tlab_t *tlab)
 {
    (void)m;
+   if (unlikely(isl->spec != NULL && isl->spec->force_a)) {
+      bool done;
+      if (!island_spec_call_comb(jit, isl, tlab, &done))
+         return false;
+      if (done) {
+         if (unlikely(isl->has_forces))
+            island_apply_forces_comb(isl);
+         return true;
+      }
+   }
    jit_scalar_t p1 = { .pointer = isl->inst_ctx };
    jit_scalar_t p2 = { .pointer = isl->state };
    jit_scalar_t result = { .integer = 0 };
@@ -5193,8 +5524,9 @@ static bool island_call_comb_slow(jit_t *jit, rt_model_t *m, rt_island_t *isl,
       }
       else {
          jit_fastcall_guarded(jit, isl->eval_handle, &result, p1, p2, use_tlab);
-         isl->eval_func = jit_try_resolve_native(jit, isl->eval_handle,
-                                                 &isl->eval_fn);
+         if (likely(isl->spec == NULL || !isl->spec->force_a))
+            isl->eval_func = jit_try_resolve_native(jit, isl->eval_handle,
+                                                    &isl->eval_fn);
       }
    }
    else if (likely(island_jit_guarded))
@@ -6324,7 +6656,16 @@ static bool island_sample_domain(jit_t *jit, rt_island_domain_t *dom,
       null_tlab = jit_null_tlab(jit);
       use_tlab = &null_tlab;
    }
-   bool ok = true;
+   bool ok = true, spec_done = false;
+   if (unlikely(isl->spec != NULL && isl->spec->force_a)) {
+      ok = island_spec_call_ff(jit, dom, tlab, &result, &spec_done);
+      if (!ok || spec_done) {
+         if (ok)
+            dom->ff_dirty_mask |= (uint64_t)result.integer;
+         return ok;
+      }
+   }
+
    if (likely(island_batch_args != NULL)) {
       if (likely(dom->ff_fn != NULL)) {
          island_batch_args[0] = p1;
@@ -6334,8 +6675,9 @@ static bool island_sample_domain(jit_t *jit, rt_island_domain_t *dom,
       }
       else {
          jit_fastcall_guarded(jit, dom->ff_handle, &result, p1, p2, use_tlab);
-         dom->ff_func = jit_try_resolve_native(jit, dom->ff_handle,
-                                               &dom->ff_fn);
+         if (likely(isl->spec == NULL || !isl->spec->force_a))
+            dom->ff_func = jit_try_resolve_native(jit, dom->ff_handle,
+                                                  &dom->ff_fn);
       }
    }
    else if (likely(island_jit_guarded))

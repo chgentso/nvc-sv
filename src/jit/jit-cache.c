@@ -770,6 +770,8 @@ void jit_cache_prepare_slots(jit_cache_t *cache, jit_func_t *f, bool huge,
       hash_u8(&ctx, huge ? 1 : 0);
       hash_u8(&ctx, opt_level);
       hash_u8(&ctx, (uint8_t)opt_get_int(OPT_TWO_STATE));
+      if (opt_get_int(OPT_ISLAND_SPEC))
+         hash_u8(&ctx, 0x5a);   // Keys without NVC_ISLAND_SPEC unchanged
 
       // Canonical function metadata & constant pool
       hash_u32(&ctx, f->nirs);

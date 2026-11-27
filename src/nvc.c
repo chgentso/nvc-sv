@@ -1141,6 +1141,7 @@ static int elaborate(int argc, char **argv, cmd_state_t *state)
    meta.black_boxes = elab_black_boxes() > 0;
    meta.rtl_islands = opt_get_int(OPT_RTL_ISLANDS);
    meta.two_state = opt_get_int(OPT_TWO_STATE);
+   meta.island_spec = opt_get_int(OPT_ISLAND_SPEC);
 
    lib_put_meta(state->work, e, &meta);
 
@@ -1586,6 +1587,8 @@ static int run_cmd(int argc, char **argv, cmd_state_t *state)
    opt_set_int(OPT_RTL_ISLANDS, meta->rtl_islands);
    if (meta->two_state && opt_get_int(OPT_TWO_STATE) == TWO_STATE_OFF)
       opt_set_int(OPT_TWO_STATE, meta->two_state);
+   if (meta->island_spec)
+      opt_set_int(OPT_ISLAND_SPEC, 1);
 
    wave_dumper_t *dumper = NULL;
    if (wave_fname != NULL) {

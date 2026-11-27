@@ -141,6 +141,11 @@ typedef struct {
    unsigned                 n_rom_cache;
    bool                     failed;
    const char              *reason;    // NVC_DUMP_ISLANDS: first failure
+   // Speculative Mode A variant of a Mode B island (NVC_ISLAND_SPEC): a
+   // value two-state storage cannot hold makes the function return a
+   // deopt code (rt_island_deopt_t) instead
+   bool                     spec;
+   mir_value_t              spec_var;
 } vi_lower_t;
 
 static void vi_generic_reason(vi_lower_t *l, const char *what, tree_t t)
@@ -1121,6 +1126,139 @@ static mir_value_t vi_state_ptr_at(vi_lower_t *l, uint32_t byte_off)
 static bool vi_lower_expr(vi_lower_t *l, tree_t expr, vi_val_t *out);
 static bool vi_lower_stmt(vi_lower_t *l, tree_t stmt);
 
+// Speculative Mode A: the constant B as a value that MIR does not fold, for
+// a branch whose untaken side must stay reachable in the CFG
+static mir_value_t vi_spec_opaque_bool(vi_lower_t *l, bool b)
+{
+   mir_unit_t *mu = l->mu;
+   if (mir_is_null(l->spec_var))
+      l->spec_var = mir_add_var(mu, mir_offset_type(mu), MIR_NULL_STAMP,
+                                ident_uniq("spec"), MIR_VAR_TEMP);
+   mir_build_store(mu, l->spec_var, vi_off(mu, b));
+   return mir_build_cmp(mu, MIR_CMP_NEQ, mir_build_load(mu, l->spec_var),
+                        vi_off(mu, 0));
+}
+
+// Speculative Mode A: return deopt code KIND from the function when OK is
+// false.  The function has written nothing the caller keeps at that point:
+// all values reach the state through stores that follow their computation.
+static void vi_emit_deopt_unless(vi_lower_t *l, mir_value_t ok,
+                                 rt_island_deopt_t kind)
+{
+   assert(l->spec);
+   mir_unit_t *mu = l->mu;
+   int64_t cval;
+   if (mir_get_const(mu, ok, &cval) && cval != 0)
+      return;
+
+   mir_block_t deopt_bb = mir_add_block(mu);
+   mir_block_t cont_bb = mir_add_block(mu);
+   if (mir_get_const(mu, ok, &cval)) {
+      // Keep the code after an unconditional stub reachable in the CFG so
+      // the values it uses stay dominated by their definitions
+      ok = vi_spec_opaque_bool(l, false);
+   }
+   mir_build_cond(mu, ok, cont_bb, deopt_bb);
+
+   mir_set_cursor(mu, deopt_bb, MIR_APPEND);
+   mir_build_return(mu, vi_off(mu, kind));
+
+   mir_set_cursor(mu, cont_bb, MIR_APPEND);
+}
+
+static inline void vi_emit_deopt(vi_lower_t *l, rt_island_deopt_t kind)
+{
+   vi_emit_deopt_unless(l, mir_const(l->mu, mir_bool_type(l->mu), 0), kind);
+}
+
+// Speculative Mode A: deopt unless the i64 value V is in [LO, HI]
+static void vi_spec_deopt_range(vi_lower_t *l, mir_value_t v, int64_t lo,
+                                int64_t hi, rt_island_deopt_t kind)
+{
+   mir_unit_t *mu = l->mu;
+   mir_type_t it = vi_i64_type(mu);
+   v = mir_build_cast(mu, it, v);
+   mir_value_t ok = mir_build_and(
+      mu, mir_build_cmp(mu, MIR_CMP_GEQ, v, mir_const(mu, it, lo)),
+      mir_build_cmp(mu, MIR_CMP_LEQ, v, mir_const(mu, it, hi)));
+   vi_emit_deopt_unless(l, ok, kind);
+}
+
+// Speculative Mode A: deopt unless the integer V fits a WIDTH-bit vector of
+// the given signedness, which is when the IEEE conversion to the vector is
+// exact and silent
+static void vi_spec_deopt_int_fit(vi_lower_t *l, mir_value_t v, uint32_t width,
+                                  bool is_signed)
+{
+   if (width >= 64 && is_signed)
+      return;
+   else if (width >= 64)
+      vi_spec_deopt_range(l, v, 0, INT64_MAX, RT_ISLAND_DEOPT_CONV);
+   else if (is_signed)
+      vi_spec_deopt_range(l, v, -(INT64_C(1) << (width - 1)),
+                          (INT64_C(1) << (width - 1)) - 1,
+                          RT_ISLAND_DEOPT_CONV);
+   else
+      vi_spec_deopt_range(l, v, 0, (INT64_C(1) << width) - 1,
+                          RT_ISLAND_DEOPT_CONV);
+}
+
+// Speculative Mode A: deopt unless the integer result IV of FCALL is in
+// the range of its type, where the IEEE function fails or warns otherwise
+static void vi_spec_deopt_result(vi_lower_t *l, tree_t fcall, mir_value_t iv)
+{
+   type_t rt = tree_type(fcall);
+   tree_t r = type_is_integer(rt) ? range_of(rt, 0) : NULL;
+   int64_t lo = INT32_MIN, hi = INT32_MAX;
+   if (r != NULL)
+      folded_bounds(r, &lo, &hi);
+   vi_spec_deopt_range(l, iv, lo, hi, RT_ISLAND_DEOPT_CONV);
+}
+
+// Speculative Mode A: Mode B reports the division by zero
+static void vi_spec_deopt_zero(vi_lower_t *l, mir_value_t divisor)
+{
+   mir_unit_t *mu = l->mu;
+   vi_emit_deopt_unless(l, mir_build_cmp(mu, MIR_CMP_NEQ,
+                                         vi_to_i64(mu, divisor), vi_i64(mu, 0)),
+                        RT_ISLAND_DEOPT_RANGE);
+}
+
+// True if BYTES (std_logic positions) holds a value other than '0' and '1'
+static bool vi_bytes_non01(const uint8_t *bytes, size_t n)
+{
+   for (size_t i = 0; i < n; i++) {
+      if (bytes[i] != 2 && bytes[i] != 3)
+         return true;
+   }
+   return false;
+}
+
+static bool vi_lower_const_vec_eval(vi_lower_t *l, tree_t expr, type_t hint_t,
+                                    uint8_t *bytes_out, uint32_t width);
+
+// Speculative Mode A: a case choice with a std_logic value other than '0'
+// and '1' cannot match the selector, which only holds '0' and '1'
+static bool vi_spec_choice_non01(vi_lower_t *l, tree_t choice, vi_val_t sel)
+{
+   if (!sel.is_std)
+      return false;
+   if (sel.kind == VIVAL_BIT) {
+      if (tree_kind(choice) != T_REF || !tree_has_ref(choice)
+          || tree_kind(tree_ref(choice)) != T_ENUM_LIT)
+         return false;
+      const unsigned pos = tree_pos(tree_ref(choice));
+      return pos != 2 && pos != 3;
+   }
+   else if (sel.kind == VIVAL_VEC && sel.width > 0) {
+      uint8_t *bytes LOCAL = xmalloc_array(sel.width, 1);
+      return vi_lower_const_vec_eval(l, choice, tree_type(choice), bytes,
+                                     sel.width)
+         && vi_bytes_non01(bytes, sel.width);
+   }
+   return false;
+}
+
 static mir_value_t vi_compute_elem_pos(vi_lower_t *l, vi_val_t base,
                                        mir_value_t idx_val, uint32_t elem_w)
 {
@@ -1399,6 +1537,12 @@ static void vi_check_int_bounds(vi_lower_t *l, type_t target_type,
              && a_lo >= f_lo && a_hi <= f_hi)
             return;
       }
+   }
+
+   if (l->spec) {
+      // Mode B reports the failure
+      vi_spec_deopt_range(l, val64, f_lo, f_hi, RT_ISLAND_DEOPT_RANGE);
+      return;
    }
 
    mir_unit_t *mu = l->mu;
@@ -2079,7 +2223,7 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
          return true;
       }
       if (fn_name_is(fn, "TO_INTEGER")) {
-         if (a.kind != VIVAL_VEC)
+         if (a.kind != VIVAL_VEC || (l->spec && a.width > 63))
             return false;
          const bool sg = a.is_signed || pkg_signed;
          mir_value_t src = a.val;
@@ -2088,21 +2232,23 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
          else if (sg != a.is_signed)
             src = mir_build_cast(mu, mir_vec2_type(mu, a.width, sg), src);
          mir_value_t iv = mir_build_cast(mu, vi_i64_type(mu), src);
+         if (l->spec)
+            vi_spec_deopt_result(l, fcall, iv);
          *out = (vi_val_t){ .kind = VIVAL_INT, .val = iv };
          return true;
       }
       if (fn_name_is(fn, "UNSIGNED") || fn_name_is(fn, "SIGNED")
           || fn_name_is(fn, "CONV_INTEGER")) {
          if (fn_name_is(fn, "CONV_INTEGER")) {
-            if (a.kind != VIVAL_VEC)
+            if (a.kind != VIVAL_VEC || (l->spec && a.width > 63))
                return false;
             mir_value_t src = (a.width > 64)
                ? mir_build_cast(mu, mir_vec2_type(mu, 64, pkg_signed), a.val)
                : mir_build_cast(mu, mir_vec2_type(mu, a.width, pkg_signed), a.val);
-            *out = (vi_val_t){
-               .kind = VIVAL_INT,
-               .val  = mir_build_cast(mu, vi_i64_type(mu), src),
-            };
+            mir_value_t iv = mir_build_cast(mu, vi_i64_type(mu), src);
+            if (l->spec)
+               vi_spec_deopt_result(l, fcall, iv);
+            *out = (vi_val_t){ .kind = VIVAL_INT, .val = iv };
             return true;
          }
          *out = a;
@@ -2155,6 +2301,9 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
          const bool sg = fn_name_is(fn, "TO_SIGNED") || fn_name_is(fn, "CONV_SIGNED");
          mir_type_t tv = mir_vec2_type(mu, (int)sz, sg);
          mir_value_t v;
+         if (l->spec && a.kind == VIVAL_INT
+             && (fn_name_is(fn, "TO_UNSIGNED") || fn_name_is(fn, "TO_SIGNED")))
+            vi_spec_deopt_int_fit(l, vi_to_i64(mu, a.val), (uint32_t)sz, sg);
          if (a.kind == VIVAL_INT)
             v = vi_cast_vec2(mu, tv, vi_to_i64(mu, a.val));
          else if (a.kind == VIVAL_VEC)
@@ -2319,6 +2468,18 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
          return false;
 
       const bool sg = pkg_signed || ret_signed || a.is_signed || b.is_signed;
+      if (l->spec) {
+         // Unsigned with signed operands extend differently in the IEEE
+         // packages; an integer operand that does not fit the width of the
+         // vector one is converted with a truncation warning or compared
+         // as a mathematical value
+         if (wa > 0 && wb > 0 && a.is_signed != b.is_signed)
+            return false;
+         if (a.kind == VIVAL_INT && wb > 0)
+            vi_spec_deopt_int_fit(l, vi_to_i64(mu, a.val), wb, sg);
+         if (b.kind == VIVAL_INT && wa > 0)
+            vi_spec_deopt_int_fit(l, vi_to_i64(mu, b.val), wa, sg);
+      }
       uint32_t w;
       if (is_mul)
          w = (wa > 0 && wb > 0) ? (wa + wb) : (MAX(wa, wb) * 2u);
@@ -2851,6 +3012,8 @@ static bool vi_lower_builtin_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
          };
          return true;
       case S_DIV:
+         if (l->spec)
+            vi_spec_deopt_zero(l, b.val);
          *out = (vi_val_t){
             .kind = VIVAL_INT,
             .val  = mir_build_div(mu, vi_i64_type(mu), vi_to_i64(mu, a.val),
@@ -2858,6 +3021,8 @@ static bool vi_lower_builtin_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
          };
          return true;
       case S_REM:
+         if (l->spec)
+            vi_spec_deopt_zero(l, b.val);
          *out = (vi_val_t){
             .kind = VIVAL_INT,
             .val  = mir_build_rem(mu, vi_i64_type(mu), vi_to_i64(mu, a.val),
@@ -2865,6 +3030,8 @@ static bool vi_lower_builtin_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
          };
          return true;
       case S_MOD:
+         if (l->spec)
+            vi_spec_deopt_zero(l, b.val);
          *out = (vi_val_t){
             .kind = VIVAL_INT,
             .val  = mir_build_mod(mu, vi_i64_type(mu), vi_to_i64(mu, a.val),
@@ -3294,6 +3461,8 @@ static bool vi_lower_const_array_ref(vi_lower_t *l, tree_t base_e,
             if (pos < 0 || pos >= (int64_t)nelems)
                return false;
             const uint8_t *rp = tbl + (size_t)pos * width;
+            if (l->spec && is_std && vi_bytes_non01(rp, width))
+               vi_emit_deopt(l, RT_ISLAND_DEOPT_LITERAL);
             if (l->two_state) {
                uint64_t w0 = 0;
                vi_pack_bytes_to_words(rp, width, is_std, &w0);
@@ -3318,6 +3487,13 @@ static bool vi_lower_const_array_ref(vi_lower_t *l, tree_t base_e,
             return true;
          }
 
+         if (l->spec && is_std && vi_bytes_non01(tbl, (size_t)nelems * width)) {
+            // A row read at a dynamic index can be any of them
+            if (l->reason == NULL)
+               l->reason = "spec: constant table with metavalues";
+            l->failed = true;
+            return false;
+         }
          if (l->two_state) {
             // ceil(width / 64) i64 words per element, least significant
             // word first
@@ -3545,6 +3721,8 @@ static bool vi_lower_expr_inner(vi_lower_t *l, tree_t expr, vi_val_t *out)
          uint8_t *bytes LOCAL = xmalloc_array(n, 1);
          if (!vi_lower_const_vec_eval(l, expr, t, bytes, n))
             return false;
+         if (l->spec && is_std && vi_bytes_non01(bytes, n))
+            vi_emit_deopt(l, RT_ISLAND_DEOPT_LITERAL);
          if (l->two_state) {
             const uint32_t nw = (n + 63u) / 64u;
             uint64_t *w LOCAL = xmalloc_array(nw, sizeof(uint64_t));
@@ -3583,6 +3761,8 @@ static bool vi_lower_expr_inner(vi_lower_t *l, tree_t expr, vi_val_t *out)
                   const bool is_std = vi_type_is_std_logic(et);
                   const bool is_bool = vi_type_is_bool(et);
                   unsigned pos = tree_pos(d);
+                  if (l->spec && is_std && pos != 2 && pos != 3)
+                     vi_emit_deopt(l, RT_ISLAND_DEOPT_LITERAL);
                   if (l->two_state) {
                      uint8_t b = is_std ? std_enum_to_2bit(pos) : (uint8_t)(pos & 1u);
                      *out = (vi_val_t){
@@ -6515,6 +6695,11 @@ static bool vi_lower_stmt_inner(vi_lower_t *l, tree_t stmt)
                for (int j = 0; j < nch; j++) {
                   tree_t ch = tree_choice(alt, j);
                   if (tree_ranges(ch) == 0 && tree_has_name(ch)) {
+                     if (l->spec && vi_spec_choice_non01(l, tree_name(ch), sel)) {
+                        // Never matches a '0'/'1' selector
+                        any = mir_build_or(mu, any, vi_spec_opaque_bool(l, false));
+                        continue;
+                     }
                      vi_val_t cv;
                      if (!vi_lower_expr(l, tree_name(ch), &cv))
                         return false;
@@ -6627,6 +6812,12 @@ static bool vi_lower_stmt_inner(vi_lower_t *l, tree_t stmt)
          mir_build_cond(mu, cond, cont_bb, fail_bb);
 
          mir_set_cursor(mu, fail_bb, MIR_APPEND);
+         if (l->spec) {
+            // Mode B reports the failure
+            mir_build_return(mu, vi_off(mu, RT_ISLAND_DEOPT_REPORT));
+            mir_set_cursor(mu, cont_bb, MIR_APPEND);
+            return true;
+         }
          mir_value_t msg_ptr = MIR_NULL_VALUE, msg_len = MIR_NULL_VALUE;
          if (tree_has_message(stmt)) {
             vi_str_t ms;
@@ -6657,6 +6848,10 @@ static bool vi_lower_stmt_inner(vi_lower_t *l, tree_t stmt)
       }
 
    case T_REPORT:
+      if (l->spec) {
+         vi_emit_deopt(l, RT_ISLAND_DEOPT_REPORT);   // Mode B reports
+         return true;
+      }
       {
          vi_str_t ms;
          if (tree_has_message(stmt)) {
@@ -6976,14 +7171,16 @@ static void vi_proc_done(vi_lower_t *l, const vhdl_island_ctx_t *ctx,
                          uint32_t pi, bool ok)
 {
    vhdl_iproc_t *p = &(((vhdl_island_ctx_t *)ctx)->procs[pi]);
-   if (!ok)
+   if (!ok && l->spec)
+      p->a_block = l->reason ? l->reason : "spec: unsupported construct";
+   else if (!ok)
       p->reason = l->reason ? l->reason : "lower: unsupported construct";
    l->reason = NULL;
 }
 
 static mir_unit_t *vi_build_comb_unit(mir_context_t *mc,
                                       const vhdl_island_ctx_t *ctx,
-                                      const vhdl_island_t *isl,
+                                      const vhdl_island_t *isl, bool spec,
                                       int *failed_proc_out)
 {
    mir_unit_t *mu = mir_unit_new(mc, isl->eval_name, tree_to_object(ctx->block),
@@ -7000,6 +7197,8 @@ static mir_unit_t *vi_build_comb_unit(mir_context_t *mc,
       .isl       = isl,
       .state_ptr = state,
       .two_state = isl->two_state,
+      .spec      = spec,
+      .spec_var  = MIR_NULL_VALUE,
       .is_ff     = false,
       .lut_not   = MIR_NULL_VALUE,
       .lut_and   = MIR_NULL_VALUE,
@@ -7046,7 +7245,7 @@ static mir_unit_t *vi_build_comb_unit(mir_context_t *mc,
 static mir_unit_t *vi_build_ff_unit(mir_context_t *mc,
                                     const vhdl_island_ctx_t *ctx,
                                     const vhdl_island_t *isl,
-                                    const vhdl_idom_t *dm,
+                                    const vhdl_idom_t *dm, bool spec,
                                     int *failed_proc_out)
 {
    mir_unit_t *mu = mir_unit_new(mc, dm->fn_name, tree_to_object(ctx->block),
@@ -7069,6 +7268,8 @@ static mir_unit_t *vi_build_ff_unit(mir_context_t *mc,
       .isl          = isl,
       .state_ptr    = state,
       .two_state    = isl->two_state,
+      .spec         = spec,
+      .spec_var     = MIR_NULL_VALUE,
       .is_ff        = true,
       .ff_stride    = RT_ISLAND_STRIDE(isl->state_bytes),
       .ff_dom       = dm,
@@ -7221,7 +7422,8 @@ static void vi_lower_ctx(mir_context_t *mc, vhdl_island_ctx_t *ctx, bool put)
          int failed_proc = -1;
          if (isl->n_comb_procs > 0
              && (!put || mir_get_shape(mc, isl->eval_name) == NULL)) {
-            mir_unit_t *cmu = vi_build_comb_unit(mc, ctx, isl, &failed_proc);
+            mir_unit_t *cmu = vi_build_comb_unit(mc, ctx, isl, false,
+                                                 &failed_proc);
             if (cmu == NULL) {
                vi_reject_failed(ctx, ii, failed_proc);
                need_rebuild = true;
@@ -7234,7 +7436,7 @@ static void vi_lower_ctx(mir_context_t *mc, vhdl_island_ctx_t *ctx, bool put)
             if (put && mir_get_shape(mc, isl->doms[d].fn_name) != NULL)
                continue;
             mir_unit_t *fmu = vi_build_ff_unit(mc, ctx, isl, &(isl->doms[d]),
-                                               &failed_proc);
+                                               false, &failed_proc);
             if (fmu == NULL) {
                vi_reject_failed(ctx, ii, failed_proc);
                need_rebuild = true;
@@ -7270,6 +7472,62 @@ static void vi_lower_ctx(mir_context_t *mc, vhdl_island_ctx_t *ctx, bool put)
    ACLEAR(built);
 }
 
+// Speculative Mode A (NVC_ISLAND_SPEC): lower each island of the final
+// Mode B CTX a second time with a packed two-state layout.  The processes
+// and the island set are the ones of Mode B; an island whose Mode A
+// lowering fails keeps no variant and its processes stay fused.
+static void vi_lower_spec(mir_context_t *mc, vhdl_island_ctx_t *ctx)
+{
+   for (uint32_t ii = 0; ii < ctx->n_islands; ii++) {
+      vhdl_island_t *isl = &(ctx->islands[ii]);
+      if (isl->n_sigs == 0)
+         continue;
+
+      vhdl_island_t *a = vhdl_island_new_a_variant(ctx, isl, &isl->a_reason);
+      if (a == NULL)
+         continue;
+
+      A(mir_unit_t *) built = AINIT;
+      int failed_proc = -1;
+      bool ok = true;
+      if (a->n_comb_procs > 0 && mir_get_shape(mc, a->eval_name) == NULL) {
+         mir_unit_t *cmu = vi_build_comb_unit(mc, ctx, a, true, &failed_proc);
+         if (cmu != NULL)
+            APUSH(built, cmu);
+         else
+            ok = false;
+      }
+      for (uint32_t d = 0; ok && d < a->n_doms; d++) {
+         if (mir_get_shape(mc, a->doms[d].fn_name) != NULL)
+            continue;
+         mir_unit_t *fmu = vi_build_ff_unit(mc, ctx, a, &(a->doms[d]), true,
+                                            &failed_proc);
+         if (fmu != NULL)
+            APUSH(built, fmu);
+         else
+            ok = false;
+      }
+
+      for (unsigned u = 0; u < built.count; u++) {
+         if (ok) {
+            mir_optimise(built.items[u], MIR_PASS_O1);
+            mir_put_unit(mc, built.items[u]);
+         }
+         else
+            mir_unit_free(built.items[u]);
+      }
+      ACLEAR(built);
+
+      if (ok)
+         isl->a_variant = a;
+      else {
+         isl->a_reason = (failed_proc >= 0 && ctx->procs[failed_proc].a_block)
+            ? ctx->procs[failed_proc].a_block : "spec: lowering failed";
+         vhdl_island_free_a_variant(a);
+      }
+   }
+}
+
 vhdl_island_ctx_t *vhdl_island_lower_prepare(mir_context_t *mc, tree_t block,
                                              const tree_t *ancestors,
                                              int n_ancestors,
@@ -7297,7 +7555,9 @@ vhdl_island_ctx_t *vhdl_island_lower_prepare(mir_context_t *mc, tree_t block,
    // (discarding the result) so the dump can say which processes would not
    // be Mode A and why.
    vhdl_island_ctx_t *trial = NULL;
-   const bool want_trial = opt_get_int(OPT_DUMP_ISLANDS) && !ctx->two_state;
+   const bool spec = opt_get_int(OPT_ISLAND_SPEC) && !ctx->two_state;
+   const bool want_trial =
+      opt_get_int(OPT_DUMP_ISLANDS) && !ctx->two_state && !spec;
    if (want_trial) {
       trial = vhdl_island_analyze_mode(block, ancestors, n_ancestors,
                                        scope_prefix, true);
@@ -7307,6 +7567,9 @@ vhdl_island_ctx_t *vhdl_island_lower_prepare(mir_context_t *mc, tree_t block,
 
    vi_lower_ctx(mc, ctx, true);
 
+   if (spec)
+      vi_lower_spec(mc, ctx);
+
    if (want_trial) {
       vhdl_island_mark_a_blocks(ctx, trial);
       vhdl_island_ctx_free(trial);
@@ -7314,6 +7577,55 @@ vhdl_island_ctx_t *vhdl_island_lower_prepare(mir_context_t *mc, tree_t block,
 
    vhdl_island_dump_summary(ctx);
    return ctx;
+}
+
+// Register the speculative Mode A variant of ISL with island HANDLE
+static void vi_emit_variant_a_init(const vhdl_island_ctx_t *ctx,
+                                   const vhdl_island_t *isl,
+                                   vcode_reg_t handle, int ctx_upref)
+{
+   const vhdl_island_t *a = isl->a_variant;
+   vcode_type_t voffset = vtype_offset();
+   vcode_type_t vptr = vtype_pointer(vtype_opaque());
+
+   vcode_reg_t clos;
+   if (a->eval_name != NULL) {
+      vcode_reg_t ctx_reg = emit_context_upref(ctx_upref);
+      clos = emit_closure(a->eval_name, voffset, &ctx_reg, 1);
+   }
+   else
+      clos = emit_null(vptr);
+
+   vcode_reg_t v_args[4] = {
+      handle,
+      clos,
+      emit_const(voffset, a->state_bytes),
+      emit_const(voffset, a->hdr_bytes),
+   };
+   emit_fcall(ident_new("__sv_island_set_variant_a"), voffset,
+              VCODE_INVALID_STAMP, v_args, 4);
+
+   ident_t bind_a_fn = ident_new("__sv_island_bind_sig_a");
+   for (uint32_t j = 0; j < a->n_sigs; j++) {
+      const vhdl_isig_t *s = &(ctx->sigs[a->sigs[j].sig_id]);
+      vcode_reg_t b_args[5] = {
+         handle,
+         emit_const(voffset, j),
+         emit_const(voffset, a->sigs[j].a_off),
+         emit_const(voffset, a->sigs[j].rt_flags),
+         emit_const(voffset, s->width * s->nelems * s->byte_size),
+      };
+      emit_fcall(bind_a_fn, voffset, VCODE_INVALID_STAMP, b_args, 5);
+   }
+
+   ident_t add_dom_a_fn = ident_new("__sv_island_add_domain_a");
+   for (uint32_t d = 0; d < a->n_doms; d++) {
+      vcode_reg_t ctx_reg = emit_context_upref(ctx_upref);
+      vcode_reg_t ff_clos = emit_closure(a->doms[d].fn_name, voffset,
+                                         &ctx_reg, 1);
+      vcode_reg_t d_args[3] = { handle, emit_const(voffset, d), ff_clos };
+      emit_fcall(add_dom_a_fn, voffset, VCODE_INVALID_STAMP, d_args, 3);
+   }
 }
 
 void vhdl_island_lower_emit_vcode_init(const vhdl_island_ctx_t *ctx,
@@ -7424,6 +7736,9 @@ void vhdl_island_lower_emit_vcode_init(const vhdl_island_ctx_t *ctx,
             emit_fcall(add_dom_w_fn, voffset, VCODE_INVALID_STAMP, w_args, 3);
          }
       }
+
+      if (isl->a_variant != NULL)
+         vi_emit_variant_a_init(ctx, isl, handle, ctx_upref);
 
       emit_fcall(finish_fn, voffset, VCODE_INVALID_STAMP, &handle, 1);
    }

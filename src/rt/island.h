@@ -111,6 +111,7 @@ typedef struct {
    uint32_t       sig_idx;
 } rt_island_ext_out_desc_t;
 
+typedef struct _rt_island_spec rt_island_spec_t;
 typedef struct _rt_super_island rt_super_island_t;
 typedef struct _rt_super_domain rt_super_domain_t;
 
@@ -262,7 +263,40 @@ typedef struct _rt_island {
    bool                   mt_eval_on_main;
    bool                   mt_ff_unsafe;
    bool                   is_vhdl;
+   rt_island_spec_t      *spec;     // Speculative Mode A variant or NULL
 } rt_island_t;
+
+// Speculative Mode A (NVC_ISLAND_SPEC): a VHDL island lowered in Mode B
+// can also carry a packed two-state variant of its functions.  The variant
+// returns one of these codes instead of computing a value that two-state
+// storage cannot hold (the comb function returns 0 and a flip-flop function
+// a mask with bit 63 set when it completed).  It writes nothing visible
+// before it returns a code: the caller converts the state back with
+// rt_island_spec_unpack and runs the Mode B function instead.
+typedef enum {
+   RT_ISLAND_DEOPT_NONE    = 0,
+   RT_ISLAND_DEOPT_LITERAL = 1,   // std_logic literal other than '0'/'1'
+   RT_ISLAND_DEOPT_RANGE   = 2,   // failing range check or zero divisor
+   RT_ISLAND_DEOPT_CONV    = 3,   // integer conversion out of range
+   RT_ISLAND_DEOPT_REPORT  = 4,   // report statement or failing assertion
+   RT_ISLAND_DEOPT_STATE   = 5,   // (runtime) state not all '0'/'1'
+   RT_ISLAND_DEOPT_COUNT
+} rt_island_deopt_t;
+
+struct _rt_island_spec {
+   jit_handle_t  eval_handle;     // Mode A comb function
+   jit_handle_t *ff_handles;      // Mode A flip-flop function per domain
+   uint32_t      state_bytes;     // Mode A state size (one half)
+   uint32_t      stride;          // RT_ISLAND_STRIDE(state_bytes)
+   uint32_t      hdr_bytes;       // Leading bytes copied unchanged
+   uint32_t     *a_off;           // Mode A offset per island signal
+   uint32_t     *a_flags;         // Mode A RT_ISIG_* flags per signal
+   uint32_t     *b_bytes;         // Mode B storage bytes per signal
+   uint8_t      *buf;             // NVC_ISLAND_SPEC_FORCE=A: state + next
+   bool          force_a;
+   uint64_t      calls_a;
+   uint64_t      deopts[RT_ISLAND_DEOPT_COUNT];
+};
 
 typedef struct _rt_island_mgr rt_island_mgr_t;
 typedef struct _sva sva_t;
@@ -351,6 +385,16 @@ void rt_island_add_domain(void *handle, uint32_t dom_idx,
 void rt_island_add_domain_write(void *handle, uint32_t dom_idx,
                                 uint32_t sig_idx);
 void rt_island_finish(void *handle);
+void rt_island_set_variant_a(void *handle, jit_handle_t eval_handle,
+                             uint32_t state_bytes, uint32_t hdr_bytes);
+void rt_island_bind_sig_a(void *handle, uint32_t idx, uint32_t a_off,
+                          uint32_t a_flags, uint32_t b_bytes);
+void rt_island_add_domain_a(void *handle, uint32_t dom_idx,
+                            jit_handle_t ff_handle);
+bool rt_island_spec_pack(const rt_island_t *isl, const uint8_t *b_state,
+                         uint8_t *a_state);
+void rt_island_spec_unpack(const rt_island_t *isl, const uint8_t *a_state,
+                           uint8_t *b_state);
 
 // Runtime hooks provided by model.c
 void rt_island_deposit_packed(rt_model_t *m, rt_signal_t *s, uint32_t msb_off,

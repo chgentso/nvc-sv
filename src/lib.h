@@ -32,6 +32,7 @@ typedef struct {
    bool     black_boxes;   // Contains black boxes for missing units
    uint8_t  rtl_islands;   // Elaborated with --rtl-islands=...
    uint8_t  two_state;     // Elaborated with --2state=...
+   bool     island_spec;   // Elaborated with NVC_ISLAND_SPEC=1
 } unit_meta_t;
 
 lib_t lib_find(ident_t name);

@@ -149,7 +149,7 @@ typedef struct {
    uint32_t  n_write_sigs;
 } vhdl_idom_t;
 
-typedef struct {
+typedef struct _vhdl_island {
    uint32_t        id;
    ident_t         eval_name;
    bool            two_state;
@@ -162,6 +162,12 @@ typedef struct {
    uint32_t        n_comb_procs;
    vhdl_idom_t    *doms;
    uint32_t        n_doms;
+   // Speculative Mode A (NVC_ISLAND_SPEC): the island with a packed
+   // two-state layout and its own functions, or NULL with the reason in
+   // a_reason.  hdr_bytes leading bytes of the state are the same in both.
+   struct _vhdl_island *a_variant;
+   const char     *a_reason;
+   uint32_t        hdr_bytes;
 } vhdl_island_t;
 
 static inline const vhdl_isl_sig_t *vhdl_island_find_sig(const vhdl_island_t *isl,
@@ -228,6 +234,10 @@ void vhdl_island_dump_summary(const vhdl_island_ctx_t *ctx);
 void vhdl_island_mark_a_blocks(vhdl_island_ctx_t *ctx,
                                const vhdl_island_ctx_t *trial);
 void vhdl_island_ctx_free(vhdl_island_ctx_t *ctx);
+vhdl_island_t *vhdl_island_new_a_variant(const vhdl_island_ctx_t *ctx,
+                                         const vhdl_island_t *isl,
+                                         const char **reason);
+void vhdl_island_free_a_variant(vhdl_island_t *a);
 
 bool vhdl_island_stmt_fused(const vhdl_island_ctx_t *ctx, int stmt_idx);
 int vhdl_island_lookup_leaf(const vhdl_island_ctx_t *ctx, tree_t decl,
