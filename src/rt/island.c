@@ -2035,6 +2035,84 @@ island_bytes_diff(const uint8_t *a, const uint8_t *b, size_t n)
    return island_bytes_diff_other(a, b, n);
 }
 
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+// Word-wise conversion between one-byte-per-bit VHDL signal storage and the
+// packed two-state words of a Mode A island.  Bit 0 of the packed element is
+// the last byte of the element; on a little-endian host byte j of the word
+// array holds the bits of element bytes [width - 8(j+1), width - 8j).
+
+#define ISL_ONES8  UINT64_C(0x0101010101010101)
+#define ISL_HIGH8  UINT64_C(0x8080808080808080)
+#define ISL_GATHER UINT64_C(0x8040201008040201)
+
+// Eight bytes (byte 0 first) to eight bits (byte 0 in bit 7): bit set iff the
+// byte is '1' or 'H' for std_logic, or an odd value without bit 1 otherwise
+// (the same rule as a & ~b after std_logic_to_sv)
+static inline uint8_t island_pack8_2s(uint64_t w, bool is_std)
+{
+   uint64_t bits;
+   if (is_std) {
+      const uint64_t y = (w & (ISL_ONES8 * 0xfb)) ^ (ISL_ONES8 * 0x03);
+      const uint64_t nz = (((y & (ISL_ONES8 * 0x7f)) + (ISL_ONES8 * 0x7f)) | y)
+         & ISL_HIGH8;
+      bits = (~nz & ISL_HIGH8) >> 7;
+   }
+   else
+      bits = w & ~(w >> 1) & ISL_ONES8;
+   return (uint8_t)((bits * ISL_GATHER) >> 56);
+}
+
+// Bits of one packed element (width bits at ea) to one byte each
+static inline void island_unpack_elem_2s(uint8_t *out, const uint64_t *ea,
+                                         uint32_t width, uint64_t base)
+{
+   const uint8_t *eb = (const uint8_t *)ea;
+   const uint32_t r = width & 7u;
+   uint32_t k = width >> 3;
+
+   if (r != 0) {
+      const uint8_t x = eb[k] & (uint8_t)((1u << r) - 1u);
+      uint64_t v = ((((uint64_t)x * ISL_ONES8) & UINT64_C(0x0102040810204080))
+                    + (ISL_ONES8 * 0x7f)) >> 7;
+      v = (v & ISL_ONES8) + base;
+      memcpy(out, (const uint8_t *)&v + (8u - r), r);
+      out += r;
+   }
+   while (k-- > 0) {
+      uint64_t v = ((((uint64_t)eb[k] * ISL_ONES8)
+                     & UINT64_C(0x0102040810204080))
+                    + (ISL_ONES8 * 0x7f)) >> 7;
+      v = (v & ISL_ONES8) + base;
+      memcpy(out, &v, 8);
+      out += 8;
+   }
+}
+
+// One element of VHDL byte storage to packed two-state words
+static inline void island_pack_elem_2s(uint64_t *ea, uint32_t nwords,
+                                       const uint8_t *src, uint32_t width,
+                                       bool is_std)
+{
+   uint8_t *eb = (uint8_t *)ea;
+   const uint32_t r = width & 7u;
+   uint32_t k = width >> 3;
+
+   memset(ea, 0, nwords * sizeof(uint64_t));
+   if (r != 0) {
+      uint64_t w = 0;
+      memcpy(&w, src, r);
+      eb[k] = (uint8_t)(island_pack8_2s(w, is_std) >> (8u - r));
+      src += r;
+   }
+   while (k-- > 0) {
+      uint64_t w;
+      memcpy(&w, src, 8);
+      eb[k] = island_pack8_2s(w, is_std);
+      src += 8;
+   }
+}
+#endif
+
 static void island_sync_in_sig(rt_island_t *isl, const rt_island_sig_t *s)
 {
    rt_signal_t *sig = s->sig;
@@ -2108,6 +2186,15 @@ static void island_sync_in_sig(rt_island_t *isl, const rt_island_sig_t *s)
 
    const uint8_t *bytes = sig->shared.data + s->sig_offset;
    const bool is_std = island_sig_is_std(sig, s->flags);
+
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+   if (two_state && (nelems != 1 || width != 1)) {
+      for (uint32_t e = 0; e < nelems; e++)
+         island_pack_elem_2s(dst_a + e * nwords, nwords, bytes + e * width,
+                             width, is_std);
+      return;
+   }
+#endif
 
    if (nelems == 1 && width == 1) {
       const uint8_t raw = is_std ? std_logic_to_sv(bytes[0]) : (bytes[0] & 3u);
@@ -3123,6 +3210,40 @@ static bool island_commit_words_slow(rt_island_t *isl,
    return changed;
 }
 
+// Commit of a Mode A (packed two-state) register: the common one and two word
+// cases are compared and copied inline, wider ones with a single OR-reduced
+// compare before the copy.
+static inline bool island_commit_words(rt_island_t *isl,
+                                       const rt_island_ff_desc_t *d)
+{
+   if (likely(d->flags & RT_IFF_TWO_STATE)) {
+      uint64_t *dst = (uint64_t *)(isl->state + d->a_off);
+      const uint64_t *src = (const uint64_t *)(isl->next_state + d->a_off);
+      const uint32_t n = d->count;
+      if (likely(n == 1)) {
+         if (dst[0] == src[0])
+            return false;
+         dst[0] = src[0];
+         return true;
+      }
+      if (n == 2) {
+         if (((dst[0] ^ src[0]) | (dst[1] ^ src[1])) == 0)
+            return false;
+         dst[0] = src[0];
+         dst[1] = src[1];
+         return true;
+      }
+      uint64_t diff = 0;
+      for (uint32_t i = 0; i < n; i++)
+         diff |= dst[i] ^ src[i];
+      if (diff == 0)
+         return false;
+      memcpy(dst, src, n * sizeof(uint64_t));
+      return true;
+   }
+   return island_commit_words_slow(isl, d);
+}
+
 static inline bool island_commit_desc_buf(rt_island_t *isl,
                                           const rt_island_ff_desc_t *d)
 {
@@ -3130,7 +3251,7 @@ static inline bool island_commit_desc_buf(rt_island_t *isl,
       return island_commit_bytes(isl->state + d->a_off,
                                  isl->next_state + d->a_off,
                                  d->count);
-   return island_commit_words_slow(isl, d);
+   return island_commit_words(isl, d);
 }
 
 static inline bool island_copy_direct_sig(const rt_island_sig_t *src_s,
@@ -6340,7 +6461,7 @@ static void island_sched_out_sig(rt_model_t *m, rt_island_t *isl,
    const bool is_std = island_sig_is_std(sig, s->flags);
    const uint32_t total = width * nelems;
 
-   uint8_t stack_buf[64];
+   uint8_t stack_buf[256];
    uint8_t *heap_buf = NULL;
    uint8_t *out_bytes = stack_buf;
    if (total > sizeof(stack_buf)) {
@@ -6348,6 +6469,15 @@ static void island_sched_out_sig(rt_model_t *m, rt_island_t *isl,
       out_bytes = heap_buf;
    }
 
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+   if (two_state) {
+      const uint64_t base = is_std ? ISL_ONES8 * 2u : 0u;
+      for (uint32_t e = 0; e < nelems; e++)
+         island_unpack_elem_2s(out_bytes + e * width, src_a + e * nwords,
+                               width, base);
+   }
+   else
+#endif
    for (uint32_t e = 0; e < nelems; e++) {
       const uint64_t *ea = src_a + e * nwords;
       const uint64_t *eb = src_b != NULL ? src_b + e * nwords : NULL;
@@ -6602,7 +6732,7 @@ static void island_commit_vhdl_domain_mask(rt_model_t *m,
                continue;
             }
             else
-               changed = island_commit_words_slow(isl, d);
+               changed = island_commit_words(isl, d);
             if (changed) {
                if (d->flags & RT_IFF_COMB_READ)
                   comb_need_eval = true;
