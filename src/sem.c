@@ -7063,7 +7063,11 @@ static bool sem_check_new(tree_t t, nametab_t *tab)
 
    const bool has_initial = tree_has_value(value);
 
-   if (!has_initial && type_is_unconstrained(type))
+   if (!has_initial && type_kind(type) == T_SUBTYPE && !type_has_ident(type)
+       && type_has_resolution(type))
+      sem_error(value, "allocator subtype indication cannot include a "
+                "resolution indication");
+   else if (!has_initial && type_is_unconstrained(type))
       sem_error(t, "unconstrained array type %pT not allowed in allocator "
                 "expression", type);
    else if (!sem_check_incomplete(t, type))
