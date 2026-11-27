@@ -332,7 +332,7 @@ void vlog_symtab_resolve_deferred(vlog_symtab_t *st)
    for (int i = 0; i < st->top->deferred.count; i++) {
       vlog_node_t v = st->top->deferred.items[i];
       vlog_node_t d = vlog_symtab_query(st, vlog_ident(v));
-      if (d != NULL) {
+      if (d != NULL && !(vlog_kind(v) == V_MOD_REF && is_data_type(d))) {
          check_forward_ref(v, d);
          vlog_set_ref(v, d);
       }
@@ -392,6 +392,7 @@ void vlog_symtab_pop(vlog_symtab_t *st)
       vlog_node_t d = (sym != NULL && sym->node != POISON_NODE)
          ? sym->node : NULL;
       if (d != NULL
+          && !(vlog_kind(v) == V_MOD_REF && is_data_type(d))
           && (leaving_to_root || found == NULL || found->parent != NULL
               || (vlog_kind(v) != V_USER_TCALL
                   && vlog_kind(v) != V_USER_FCALL))) {
@@ -1196,7 +1197,9 @@ void vlog_symtab_lookup(vlog_symtab_t *st, vlog_node_t v)
 
       fresh_symbol_for(st, name)->node = decl;
    }
-   else if (sym == NULL) {
+   else if (sym == NULL
+            || (vlog_kind(v) == V_MOD_REF && sym->node != POISON_NODE
+                && is_data_type(sym->node))) {
       switch (vlog_kind(v)) {
       case V_USER_FCALL:
       case V_USER_TCALL:

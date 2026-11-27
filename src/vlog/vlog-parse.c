@@ -1229,7 +1229,8 @@ static bool scan_type_declaration(void)
                return true;
          }
 
-         return (dt != NULL && is_data_type(dt)) || peek_nth(2) == tHASH;
+         return (dt != NULL && is_data_type(dt) && peek_nth(2) != tDOT)
+            || peek_nth(2) == tHASH;
       }
    default:
       return false;
@@ -4131,8 +4132,9 @@ static vlog_node_t p_select(ident_t id)
       }
       else if (is_inst)
          prefix = p_hierarchical_identifier(id);
-      else if (d == NULL && (peek() == tDOT || at_instance_index(true))) {
-         // Assume this is a hierarchical reference to a later instance
+      else if ((d == NULL || is_data_type(d))
+               && (peek() == tDOT || at_instance_index(true))) {
+         // Assume this is a hierarchical reference to a later instance or block
          prefix = p_hierarchical_identifier(id);
       }
       else {
