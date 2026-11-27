@@ -398,6 +398,13 @@ struct _rt_island_spec {
    uint32_t      n_held_rows;     // Held rows at the last promotion
    uint64_t      holds;           // Signals held after promotion
    uint64_t      unholds;
+   // Cost of promotion (island_spec_try_promote, island_spec_demote)
+   uint64_t      unclean_since;   // Tick+1 of the first check with held
+                                  // values since the last clean one
+   uint32_t      n_quick;         // Successive deopts soon after promotion
+   bool          cost_pinned;     // Retried only every ISLAND_SPEC_COST_RETRY
+   uint64_t      cost_pins;
+   uint64_t      hold_waits;      // Checks that waited before holding
 };
 
 typedef struct _rt_island_mgr rt_island_mgr_t;

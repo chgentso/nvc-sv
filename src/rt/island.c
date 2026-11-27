@@ -4276,6 +4276,20 @@ static void island_refresh_direct_comb_descs(rt_island_t *isl)
 
 #define ISLAND_SPEC_PIN_DEOPTS   32u
 #define ISLAND_SPEC_PIN_REPORTS  4u
+
+// Promotion has a cost: the state is converted twice, every descriptor of
+// the island and its neighbours is rebuilt, and holding a value needs the
+// checked functions ("$ah"), lowered on their first call.  Values that are
+// not '0'/'1' just after time zero mostly clear when reset ends, so an
+// island that would hold values waits ISLAND_SPEC_HOLD_WAIT ticks from its
+// first such check before it is promoted holding them.  An island that
+// deopts within ISLAND_SPEC_QUICK ticks of ISLAND_SPEC_COST_PIN successive
+// promotions loses more than it gains: it is retried only every
+// ISLAND_SPEC_COST_RETRY ticks until it stays in Mode A longer.
+#define ISLAND_SPEC_HOLD_WAIT    1024u
+#define ISLAND_SPEC_QUICK        64u
+#define ISLAND_SPEC_COST_PIN     4u
+#define ISLAND_SPEC_COST_RETRY   (UINT64_C(1) << 20)
 #define ISLAND_SPEC_MAX_IVAL     (UINT32_C(1) << 14)
 #define ISLAND_SPEC_TIMELINE     40u
 
@@ -4290,6 +4304,20 @@ static uint32_t island_spec_stress_n(void)
       island_spec_stress = env != NULL ? MAX(0, atoi(env)) : 0;
    }
    return (uint32_t)island_spec_stress;
+}
+
+static int64_t island_spec_hold_wait_env = -1;
+
+// Ticks an island waits before it is promoted holding values;
+// NVC_ISLAND_SPEC_HOLD_WAIT=N overrides it (test knob)
+static uint64_t island_spec_hold_wait(void)
+{
+   if (island_spec_hold_wait_env < 0) {
+      const char *env = getenv("NVC_ISLAND_SPEC_HOLD_WAIT");
+      island_spec_hold_wait_env =
+         env != NULL ? MAX(0, atoi(env)) : ISLAND_SPEC_HOLD_WAIT;
+   }
+   return (uint64_t)island_spec_hold_wait_env;
 }
 
 static uint8_t *island_spec_scratch(size_t n)
@@ -4771,14 +4799,27 @@ static void island_spec_demote(rt_island_t *isl, rt_island_deopt_t why)
       sp->pin_reason = why;
       return;
    }
+   if (ran_a < ISLAND_SPEC_QUICK)
+      sp->n_quick++;
+   else {
+      sp->n_quick = 0;
+      sp->cost_pinned = false;
+   }
    if (why == RT_ISLAND_DEOPT_UNCLEAN || why == RT_ISLAND_DEOPT_ROW) {
       // A held value was read: try again once Mode B may have made it
       // clean, backing off but never pinning (it may become clean later)
       if (sp->pinned)
          return;
       sp->n_unclean++;
-      sp->next_check = mgr->spec_tick
-         + (UINT64_C(16) << MIN(sp->n_unclean, 12u));
+      if (sp->n_quick >= ISLAND_SPEC_COST_PIN) {
+         if (!sp->cost_pinned)
+            sp->cost_pins++;
+         sp->cost_pinned = true;
+         sp->next_check = mgr->spec_tick + ISLAND_SPEC_COST_RETRY;
+      }
+      else
+         sp->next_check = mgr->spec_tick
+            + (UINT64_C(16) << MIN(sp->n_unclean, 12u));
       sp->check_ival = 16;
       mgr->spec_next = MIN(mgr->spec_next, sp->next_check);
       return;
@@ -4991,6 +5032,22 @@ static bool island_spec_try_promote(rt_island_t *isl)
       n_rows += island_spec_promote_sig(isl, i, isl->state, tmp, held,
                                         island_spec_rows_ok(isl, i), hold);
       n_held += held[i];
+   }
+
+   if (n_held == 0 && n_rows == 0)
+      sp->unclean_since = 0;
+   else if (island_spec_stress_n() == 0) {
+      const uint64_t tick = mgr->spec_tick, wait = island_spec_hold_wait();
+      if (sp->unclean_since == 0)
+         sp->unclean_since = tick + 1;
+      const uint64_t waited = tick + 1 - sp->unclean_since;
+      if (waited < wait) {
+         // Check again soon: the values may become clean
+         sp->hold_waits++;
+         sp->check_ival = MIN(MAX(sp->check_ival, 16u) * 2u, wait);
+         sp->next_check = tick + MIN(sp->check_ival, wait - waited);
+         return false;
+      }
    }
 
    size_t nbytes = sp->stride;
@@ -5357,13 +5414,17 @@ static void island_spec_rt_report(rt_island_mgr_t *mgr)
    uint64_t deopts[RT_ISLAND_DEOPT_COUNT] = {}, pins[RT_ISLAND_DEOPT_COUNT] = {};
    uint64_t promotions = 0, failed = 0, ticks_a = 0, holds = 0, unholds = 0;
    uint32_t n_var = 0, n_ever = 0, n_a = 0, n_pinned = 0;
-   uint32_t n_a_held = 0, n_held = 0, n_rows = 0;
+   uint32_t n_a_held = 0, n_held = 0, n_rows = 0, n_cost = 0;
+   uint64_t cost_pins = 0, hold_waits = 0;
    for (unsigned i = 0; i < mgr->islands.count; i++) {
       const rt_island_t *isl = mgr->islands.items[i];
       const rt_island_spec_t *sp = isl->spec;
       if (sp == NULL || sp->force_a)
          continue;
       n_var++;
+      n_cost += sp->cost_pinned && !isl->spec_a && !sp->pinned;
+      cost_pins += sp->cost_pins;
+      hold_waits += sp->hold_waits;
       n_ever += sp->promotions > 0;
       n_a += isl->spec_a;
       uint64_t ta = sp->ticks_a;
@@ -5431,6 +5492,8 @@ static void island_spec_rt_report(rt_island_mgr_t *mgr)
    fprintf(f, "\nISLAND_SPEC_RT: pinned");
    for (int k = 0; k < RT_ISLAND_DEOPT_COUNT; k++)
       fprintf(f, " %s=%"PRIu64, names[k], pins[k]);
+   fprintf(f, "\nISLAND_SPEC_RT: cost pinned_by_cost=%u cost_pins=%"PRIu64
+           " hold_waits=%"PRIu64, n_cost, cost_pins, hold_waits);
    fprintf(f, "\nISLAND_SPEC_RT: in_a_at_tick");
    for (uint32_t k = 0; k < mgr->n_spec_timeline; k++)
       fprintf(f, " %"PRIu64":%u", UINT64_C(1) << k, mgr->spec_timeline[k]);

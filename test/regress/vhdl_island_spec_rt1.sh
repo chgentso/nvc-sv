@@ -254,6 +254,8 @@ diff -u off.log b.log
 diff -u <(nd off.vcd) <(nd b.vcd)
 
 export NVC_ISLAND_SPEC=1
+# Promote holding values at once, not after the default wait
+export NVC_ISLAND_SPEC_HOLD_WAIT=0
 nvc --std=2008 --work=w_s -a rt1.vhd
 nvc --std=2008 --work=w_s --rtl-islands=hier -e rt1_tb
 for st in 0 1 2 5; do
