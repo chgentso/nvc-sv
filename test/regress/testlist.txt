@@ -3357,3 +3357,4 @@ island_xcycle_mt1 shell
 vhdl_island_widevar_a1 shell
 vhdl_island_bitvec_logic1 normal,2008,$NVC_RTL_ISLANDS=hier
 vhdl_island_edge_a1 shell
+vhdl_island_memo_a1 shell

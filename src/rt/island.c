@@ -1353,6 +1353,7 @@ void rt_island_mgr_free(rt_island_mgr_t *mgr)
       for (uint32_t s = 0; s < isl->nsigs; s++) {
          free(isl->sigs[s].direct_targets);
          free(isl->sigs[s].direct_aliases);
+         free(isl->sigs[s].last_out_words);
       }
       free(isl->comb_deps);
 #ifdef __MINGW32__
@@ -5228,6 +5229,34 @@ static inline bool island_call_comb(jit_t *jit, rt_model_t *m, rt_island_t *isl,
    return island_call_comb_slow(jit, m, isl, tlab);
 }
 
+// A Mode A signal that only this island drives is converted back to one byte
+// per bit only when its packed words differ from the ones that were last
+// compared against the kernel value: most flushes of a combinational output
+// see an unchanged value.
+static inline bool island_out_memo_ok(const rt_island_t *isl,
+                                      const rt_island_sig_t *s)
+{
+   return isl->mgr->fast
+      && (s->flags & (RT_ISIG_TWO_STATE | RT_ISIG_STD_LOGIC9
+                      | RT_ISIG_SOLE_OWNER))
+         == (RT_ISIG_TWO_STATE | RT_ISIG_SOLE_OWNER)
+      && !(s->sig->shared.flags & SIG_F_PACKED)
+      && !isl->has_forces && s->ext_write_watch == NULL;
+}
+
+static inline bool island_out_memo_hit(const rt_island_t *isl,
+                                       const rt_island_sig_t *s)
+{
+   if (!(s->flags & RT_ISIG_LAST_OUT_VALID))
+      return false;
+   const uint64_t *src = (const uint64_t *)(isl->state + s->a_off);
+   const uint32_t nw = s->nwords * s->nelems;
+   if (nw == 1)
+      return s->last_out_a == src[0] && s->last_out_b == 0;
+   return s->last_out_words != NULL
+      && memcmp(s->last_out_words, src, nw * sizeof(uint64_t)) == 0;
+}
+
 static void island_sched_out_sig(rt_model_t *m, rt_island_t *isl,
                                  rt_island_sig_t *s);
 
@@ -5244,6 +5273,8 @@ static inline void island_flush_comb_out_sig(rt_model_t *m, rt_island_t *isl,
    // read false.
    if ((s->flags & RT_ISIG_VHDL) && model_can_create_delta(m)) {
       s->flags |= RT_ISIG_VHDL_SCHED;
+      if (island_out_memo_ok(isl, s) && island_out_memo_hit(isl, s))
+         return;
       island_sched_out_sig(m, isl, s);
    }
    else
@@ -6429,7 +6460,18 @@ static void island_sched_out_sig(rt_model_t *m, rt_island_t *isl,
                                  rt_island_sig_t *s)
 {
    WSTAT_COUNT(s, 2);
-   s->flags &= ~RT_ISIG_LAST_OUT_VALID;
+
+   const bool memo = island_out_memo_ok(isl, s);
+   const uint64_t *memo_src = memo
+      ? (const uint64_t *)(isl->state + s->a_off) : NULL;
+   const uint32_t memo_words = s->nwords * s->nelems;
+   if (memo) {
+      if (island_out_memo_hit(isl, s))
+         return;
+   }
+   else
+      s->flags &= ~RT_ISIG_LAST_OUT_VALID;
+
    rt_signal_t *sig = s->sig;
    const uint32_t width = s->width;
    const uint32_t nelems = s->nelems;
@@ -6498,6 +6540,19 @@ static void island_sched_out_sig(rt_model_t *m, rt_island_t *isl,
    }
 
    free(heap_buf);
+
+   if (memo) {
+      if (memo_words == 1) {
+         s->last_out_a = memo_src[0];
+         s->last_out_b = 0;
+      }
+      else {
+         if (s->last_out_words == NULL)
+            s->last_out_words = xmalloc(memo_words * sizeof(uint64_t));
+         memcpy(s->last_out_words, memo_src, memo_words * sizeof(uint64_t));
+      }
+      s->flags |= RT_ISIG_LAST_OUT_VALID;
+   }
 }
 
 static void island_sched_out_slice(rt_model_t *m, rt_island_t *isl,

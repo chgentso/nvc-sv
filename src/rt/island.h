@@ -155,6 +155,7 @@ typedef struct _rt_island_sig {
    rt_watch_t             *ext_write_watch;
    uint64_t                last_out_a;
    uint64_t                last_out_b;
+   uint64_t               *last_out_words;
    uint64_t                gen_key_hash;
 } rt_island_sig_t;
 
