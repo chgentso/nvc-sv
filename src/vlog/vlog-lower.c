@@ -9417,6 +9417,8 @@ static mir_value_t vlog_lower_sys_fcall(vlog_gen_t *g, vlog_node_t v)
          vlog_node_t pdims[MAX_UNPACKED_DIMS];
          const int npdims = vlog_unpacked_dims(param, pdims);
          vlog_node_t ptype = vlog_get_type(param);
+         if (ptype == NULL && npdims > 0 && vlog_kind(param) == V_PART_SELECT)
+            ptype = vlog_get_type(vlog_value(param));
          const vlog_kind_t pkind = vlog_kind(param);
          if (ptype != NULL && is_data_type(ptype)
              && (npdims > 0 || vlog_kind(ptype) == V_STRUCT_DECL
