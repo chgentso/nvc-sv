@@ -1063,9 +1063,22 @@ typedef struct {
    ident_t                  cur_loop_label;
    tree_t                   clk_sig_ref;
    bool                     rejected;
+   const char              *reason;     // first reason the check failed
 } check_ctx_t;
 
+// A construct that Mode A (--2state=islands) does not support: the check
+// fails in Mode A (returns true) and is unaffected in Mode B.
+static bool chk_note(check_ctx_t *c, const char *code)
+{
+   if (!c->two_state)
+      return false;
+   if (c->reason == NULL)
+      c->reason = code;
+   return true;
+}
+
 static bool check_expr(check_ctx_t *c, tree_t expr, bool is_target);
+static bool check_stmt(check_ctx_t *c, tree_t stmt, bool is_func);
 static bool check_stmt_list(check_ctx_t *c, tree_t owner, int start, int end,
                             bool is_func);
 
@@ -1100,10 +1113,11 @@ tree_t vhdl_island_resolve_func_body(tree_t decl)
    return NULL;
 }
 
-static bool is_supported_std_fn(const char *pkg, const char *fn, bool two_state)
+static bool is_supported_std_fn(check_ctx_t *c, const char *pkg, const char *fn)
 {
    if (strcmp(pkg, "IEEE.STD_LOGIC_1164.") == 0) {
-      if (two_state && (fn_name_is(fn, "IS_X") || fn_name_is(fn, "STD_MATCH")))
+      if ((fn_name_is(fn, "IS_X") || fn_name_is(fn, "STD_MATCH"))
+          && chk_note(c, "A5 IS_X/STD_MATCH"))
          return false;
       return fn_name_is(fn, "\"and\"") || fn_name_is(fn, "\"or\"")
          || fn_name_is(fn, "\"nand\"") || fn_name_is(fn, "\"nor\"")
@@ -1123,7 +1137,8 @@ static bool is_supported_std_fn(const char *pkg, const char *fn, bool two_state)
        || strcmp(pkg, "IEEE.STD_LOGIC_UNSIGNED.") == 0
        || strcmp(pkg, "IEEE.STD_LOGIC_SIGNED.") == 0
        || strcmp(pkg, "IEEE.STD_LOGIC_ARITH.") == 0) {
-      if (two_state && (fn_name_is(fn, "STD_MATCH") || fn_name_is(fn, "IS_X")))
+      if ((fn_name_is(fn, "STD_MATCH") || fn_name_is(fn, "IS_X"))
+          && chk_note(c, "A5 IS_X/STD_MATCH"))
          return false;
       return fn_name_is(fn, "\"+\"") || fn_name_is(fn, "\"-\"")
          || fn_name_is(fn, "\"*\"")
@@ -1237,6 +1252,8 @@ static bool check_pure_func_body(check_ctx_t *outer, tree_t func_decl)
 
    const bool ok = check_stmt_list(&fc, func_decl, 0,
                                    tree_stmts(func_decl), true);
+   if (outer->reason == NULL)
+      outer->reason = fc.reason;
    ACLEAR(fc.reads);
    ACLEAR(fc.writes);
    ACLEAR(fc.read_ranges);
@@ -1517,7 +1534,7 @@ static bool vhdl_island_const_sig_range(const vhdl_island_ctx_t *ctx,
    return false;
 }
 
-static bool check_expr(check_ctx_t *c, tree_t expr, bool is_target)
+static bool check_expr_inner(check_ctx_t *c, tree_t expr, bool is_target)
 {
    if (expr == NULL || c->rejected)
       return false;
@@ -1538,7 +1555,8 @@ static bool check_expr(check_ctx_t *c, tree_t expr, bool is_target)
             tree_t ch = tree_char(expr, i);
             if (tree_kind(ch) != T_REF || tree_kind(tree_ref(ch)) != T_ENUM_LIT)
                return false;
-            if (c->two_state && enum_lit_disallowed_in_2state(tree_ref(ch)))
+            if (enum_lit_disallowed_in_2state(tree_ref(ch))
+                && chk_note(c, "A3 non-01 literal"))
                return false;
          }
          return true;
@@ -1551,7 +1569,8 @@ static bool check_expr(check_ctx_t *c, tree_t expr, bool is_target)
             return false;
          switch (tree_kind(decl)) {
          case T_ENUM_LIT:
-            if (c->two_state && enum_lit_disallowed_in_2state(decl))
+            if (enum_lit_disallowed_in_2state(decl)
+                && chk_note(c, "A3 non-01 literal"))
                return false;
             return true;
          case T_PORT_DECL:
@@ -1670,11 +1689,13 @@ static bool check_expr(check_ctx_t *c, tree_t expr, bool is_target)
                 && check_expr(c, tree_right(rg), false))
                return check_expr(c, tree_value(expr), is_target);
             uint32_t sw = 0;
-            if (!c->two_state
-                && vhdl_island_const_slice_width(c->ctx, rg, &sw)
+            if (vhdl_island_const_slice_width(c->ctx, rg, &sw)
                 && check_expr(c, tree_left(rg), false)
-                && check_expr(c, tree_right(rg), false))
+                && check_expr(c, tree_right(rg), false)) {
+               if (chk_note(c, "A7 dynamic slice"))
+                  return false;
                return check_expr(c, tree_value(expr), is_target);
+            }
             return false;
          }
          if (!is_target) {
@@ -1778,9 +1799,10 @@ static bool check_expr(check_ctx_t *c, tree_t expr, bool is_target)
             return false;
          tree_t decl = tree_ref(expr);
          const subprogram_kind_t sk = tree_subkind(decl);
-         if (c->two_state && (sk == S_MATCH_LT || sk == S_MATCH_LE
-                              || sk == S_MATCH_GT || sk == S_MATCH_GE
-                              || sk == S_MATCH_EQ || sk == S_MATCH_NEQ))
+         if ((sk == S_MATCH_LT || sk == S_MATCH_LE
+              || sk == S_MATCH_GT || sk == S_MATCH_GE
+              || sk == S_MATCH_EQ || sk == S_MATCH_NEQ)
+             && chk_note(c, "A6 matching operator"))
             return false;
          if (sk == S_RISING_EDGE || sk == S_FALLING_EDGE)
             return false;
@@ -1804,7 +1826,7 @@ static bool check_expr(check_ctx_t *c, tree_t expr, bool is_target)
 
          const char *pkg = NULL, *fn = NULL;
          if (ident_has_std_pkg_fn(decl, &pkg, &fn))
-            return is_supported_std_fn(pkg, fn, c->two_state);
+            return is_supported_std_fn(c, pkg, fn);
 
          // Allow pure user VHDL functions (either in same arch or package body!)
          return check_pure_func_body(c, decl);
@@ -1813,6 +1835,41 @@ static bool check_expr(check_ctx_t *c, tree_t expr, bool is_target)
    default:
       return false;
    }
+}
+
+static void chk_generic(check_ctx_t *c, const char *what, tree_t t)
+{
+   if (c->reason != NULL || t == NULL)
+      return;
+   if (!opt_get_int(OPT_DUMP_ISLANDS))
+      return;
+   const tree_kind_t k = tree_kind(t);
+   if (k == T_REF && c->two_state && tree_has_ref(t)
+       && (tree_kind(tree_ref(t)) == T_SIGNAL_DECL
+           || tree_kind(tree_ref(t)) == T_PORT_DECL)) {
+      type_t ty = tree_type(tree_ref(t));
+      if (type_is_array(ty) && type_is_array(type_elem(ty))) {
+         c->reason = "A1 2D signal not collected in Mode A";
+         return;
+      }
+   }
+   if (k == T_FCALL || k == T_PCALL)
+      c->reason = istr(ident_sprintf("%s %s %s", what, tree_kind_str(k),
+                                     istr(tree_ident(t))));
+   else if (k == T_REF && tree_has_ref(t) && tree_ref(t) != NULL)
+      c->reason = istr(ident_sprintf("%s T_REF %s %s", what,
+                                     tree_kind_str(tree_kind(tree_ref(t))),
+                                     istr(tree_ident(t))));
+   else
+      c->reason = istr(ident_sprintf("%s %s", what, tree_kind_str(k)));
+}
+
+static bool check_expr(check_ctx_t *c, tree_t expr, bool is_target)
+{
+   const bool ok = check_expr_inner(c, expr, is_target);
+   if (!ok)
+      chk_generic(c, "expr", expr);
+   return ok;
 }
 
 static bool check_str_expr(check_ctx_t *c, tree_t expr, int depth)
@@ -1924,10 +1981,12 @@ static bool check_str_expr(check_ctx_t *c, tree_t expr, int depth)
                return check_expr(c, arg, false);
          }
          const char *pkg = NULL, *fn = NULL;
-         if (!c->two_state && ident_has_std_pkg_fn(decl, &pkg, &fn)
+         if (ident_has_std_pkg_fn(decl, &pkg, &fn)
              && tree_params(expr) == 1
              && (fn_name_is(fn, "TO_HSTRING") || fn_name_is(fn, "TO_STRING")
                  || fn_name_is(fn, "TO_OSTRING") || fn_name_is(fn, "TO_BSTRING"))) {
+            if (chk_note(c, "A8 to_string of vector"))
+               return false;
             return check_expr(c, tree_value(tree_param(expr, 0)), false);
          }
          return false;
@@ -1937,7 +1996,7 @@ static bool check_str_expr(check_ctx_t *c, tree_t expr, int depth)
    }
 }
 
-static bool check_stmt(check_ctx_t *c, tree_t stmt, bool is_func)
+static bool check_stmt_inner(check_ctx_t *c, tree_t stmt, bool is_func)
 {
    if (stmt == NULL || c->rejected)
       return false;
@@ -2340,6 +2399,14 @@ static bool check_stmt(check_ctx_t *c, tree_t stmt, bool is_func)
    }
 }
 
+static bool check_stmt(check_ctx_t *c, tree_t stmt, bool is_func)
+{
+   const bool ok = check_stmt_inner(c, stmt, is_func);
+   if (!ok)
+      chk_generic(c, "stmt", stmt);
+   return ok;
+}
+
 static bool check_stmt_list(check_ctx_t *c, tree_t owner, int start, int end,
                             bool is_func)
 {
@@ -2669,6 +2736,21 @@ static bool check_process_decls(check_ctx_t *c, tree_t proc)
    return true;
 }
 
+static void note_ejected(vhdl_island_ctx_t *ctx, ident_t key,
+                         const char *reason)
+{
+   if (!opt_get_int(OPT_DUMP_ISLANDS))
+      return;
+   if (ctx->n_notes == ctx->cap_notes) {
+      ctx->cap_notes = MAX(16u, ctx->cap_notes * 2);
+      ctx->notes = xrealloc_array(ctx->notes, ctx->cap_notes,
+                                  sizeof(vhdl_rej_note_t));
+   }
+   ctx->notes[ctx->n_notes++] = (vhdl_rej_note_t){
+      .key = key, .reason = reason ? reason : "unknown",
+   };
+}
+
 static void analyze_process(vhdl_island_ctx_t *ctx, tree_t proc, int stmt_idx,
                             tree_t owner_block, const tree_t *owner_ancs,
                             int n_owner_ancs, ident_t owner_prefix,
@@ -2677,13 +2759,20 @@ static void analyze_process(vhdl_island_ctx_t *ctx, tree_t proc, int stmt_idx,
 {
    vhdl_island_var_defs_clear(ctx);
    const int nstmts = tree_stmts(proc);
+   const char *reason = "shape: process has no sensitivity wait";
+   const char *ff_reason = NULL;
+   ident_t key = NULL;
+   if (opt_get_int(OPT_DUMP_ISLANDS))
+      key = ident_prefix(owner_prefix, tree_ident(proc), '.');
    if (nstmts < 2)
       goto eject_scan_reads;
 
    tree_t wait = tree_stmt(proc, nstmts - 1);
    if (tree_kind(wait) != T_WAIT || tree_has_delay(wait)
-       || tree_has_value(wait) || tree_triggers(wait) == 0)
+       || tree_has_value(wait) || tree_triggers(wait) == 0) {
+      reason = "shape: process is not sensitivity-list only";
       goto eject_scan_reads;
+   }
 
    // Try FF classification first: single T_IF statement (ignoring T_DUMMY_DRIVER) + final T_WAIT
    tree_t ff_if = NULL;
@@ -2801,6 +2890,12 @@ static void analyze_process(vhdl_island_ctx_t *ctx, tree_t proc, int stmt_idx,
             APUSH(*procs, p);
             return;
          }
+         if (c.reason != NULL)
+            ff_reason = c.reason;
+         else if (!ok)
+            ff_reason = "ff: clock/reset branch writes its own clock or reset";
+         else
+            ff_reason = "ff: no signal writes";
          ACLEAR(c.reads);
          ACLEAR(c.writes);
          ACLEAR(c.read_ranges);
@@ -2827,6 +2922,10 @@ static void analyze_process(vhdl_island_ctx_t *ctx, tree_t proc, int stmt_idx,
       };
       bool ok = check_process_decls(&c, proc)
          && check_stmt_list(&c, proc, 0, nstmts - 1, false);
+      if (!ok)
+         reason = c.reason ? c.reason : "comb: unsupported declaration";
+      else if (c.writes.count == 0)
+         reason = "comb: no signal writes";
       if (ok && c.writes.count > 0) {
          // Verify all read signals covered by sensitivity list
          for (unsigned i = 0; i < c.reads.count && ok; i++) {
@@ -2834,6 +2933,8 @@ static void analyze_process(vhdl_island_ctx_t *ctx, tree_t proc, int stmt_idx,
                                        c.read_ranges.items, c.read_ranges.count))
                ok = false;
          }
+         if (!ok)
+            reason = "comb: sensitivity list does not cover reads";
          // Eject self-reading combinational loops inside a single process
          // (only a conflict if read_ranges and write_ranges overlap on the same signal)
          for (unsigned i = 0; i < c.reads.count && ok; i++) {
@@ -2858,6 +2959,7 @@ static void analyze_process(vhdl_island_ctx_t *ctx, tree_t proc, int stmt_idx,
                   }
                   if (overlap || !has_r || !has_w) {
                      ok = false;
+                     reason = "comb: process reads a signal it also writes";
                      break;
                   }
                }
@@ -2904,7 +3006,11 @@ static void analyze_process(vhdl_island_ctx_t *ctx, tree_t proc, int stmt_idx,
       ACLEAR(c.active_funcs);
    }
 
+   if (ff_reason != NULL)
+      reason = ff_reason;
+
 eject_scan_reads:
+   note_ejected(ctx, key, reason);
    // Walk conservatively to collect any signal references by unfused process
    // Note: below walk is done cleanly by scan_unfused_tree
    (void)ext_reads;
@@ -4094,6 +4200,51 @@ static void free_ctx_islands(vhdl_island_ctx_t *ctx)
    ctx->n_islands = 0;
 }
 
+static void vi_add_reason(const char **why, unsigned *n, const char *r)
+{
+   if (r == NULL)
+      return;
+   for (unsigned i = 0; i < *n; i++) {
+      if (why[i] == r || strcmp(why[i], r) == 0)
+         return;
+   }
+   if (*n < 8)
+      why[(*n)++] = r;
+}
+
+void vhdl_island_mark_a_blocks(vhdl_island_ctx_t *ctx,
+                               const vhdl_island_ctx_t *trial)
+{
+   for (uint32_t i = 0; i < ctx->n_procs; i++) {
+      vhdl_iproc_t *p = &(ctx->procs[i]);
+      p->a_block = NULL;
+      if (p->rejected || p->island_idx < 0)
+         continue;
+
+      const vhdl_iproc_t *q = NULL;
+      for (uint32_t k = 0; trial != NULL && k < trial->n_procs; k++) {
+         if (trial->procs[k].fused_key == p->fused_key) {
+            q = &(trial->procs[k]);
+            break;
+         }
+      }
+      if (q != NULL) {
+         if (q->rejected || q->island_idx < 0)
+            p->a_block = q->reason ? q->reason : "unknown";
+         continue;
+      }
+
+      p->a_block = trial == NULL
+         ? "A1 no signal of the block is Mode A" : "not analysed in Mode A";
+      for (uint32_t k = 0; trial != NULL && k < trial->n_notes; k++) {
+         if (trial->notes[k].key == p->fused_key) {
+            p->a_block = trial->notes[k].reason;
+            break;
+         }
+      }
+   }
+}
+
 void vhdl_island_dump_summary(const vhdl_island_ctx_t *ctx)
 {
    if (ctx == NULL || !opt_get_int(OPT_DUMP_ISLANDS) || ctx->total_procs == 0)
@@ -4117,6 +4268,47 @@ void vhdl_island_dump_summary(const vhdl_island_ctx_t *ctx)
           "sigs=%u state_bytes=%u two_state=%u\n",
           istr(ctx->scope_prefix), ctx->n_islands, n_live, ctx->total_procs,
           ctx->n_sigs, total_state, two_cnt);
+   // Per-process and per-island reasons.  REJECT lines give the first thing
+   // that kept a process out of an island.  In Mode B the block is also
+   // analysed and lowered as Mode A (vhdl_island_mark_a_blocks), and an
+   // ABLOCK line gives the reason a fused process would not be fused in
+   // Mode A; an island with such a process has no Mode A variant.  Codes
+   // A1..A8 and L1..L7 are Mode A gaps, the rest applies to both modes.
+   for (uint32_t i = 0; i < ctx->n_notes; i++)
+      printf("VHDL_ISLAND_REJECT: %s reason=%s\n",
+             ctx->notes[i].key ? istr(ctx->notes[i].key) : "?",
+             ctx->notes[i].reason);
+   for (uint32_t i = 0; i < ctx->n_procs; i++) {
+      const vhdl_iproc_t *p = &(ctx->procs[i]);
+      if (p->rejected || p->island_idx < 0)
+         printf("VHDL_ISLAND_REJECT: %s reason=%s\n", istr(p->fused_key),
+                p->reason ? p->reason : "unknown");
+      else if (p->a_block != NULL)
+         printf("VHDL_ISLAND_ABLOCK: %s block=%s\n", istr(p->fused_key),
+                p->a_block);
+   }
+   for (uint32_t i = 0; i < ctx->n_islands; i++) {
+      const vhdl_island_t *isl = &(ctx->islands[i]);
+      const char *why[8];
+      unsigned nwhy = 0;
+      uint32_t np = isl->n_comb_procs;
+      if (isl->sparse_log_off > 0)
+         why[nwhy++] = "A1 sparse RAM";
+      for (uint32_t k = 0; k < isl->n_comb_procs; k++)
+         vi_add_reason(why, &nwhy, ctx->procs[isl->comb_procs[k]].a_block);
+      for (uint32_t d = 0; d < isl->n_doms; d++) {
+         np += isl->doms[d].n_procs;
+         for (uint32_t k = 0; k < isl->doms[d].n_procs; k++)
+            vi_add_reason(why, &nwhy,
+                          ctx->procs[isl->doms[d].proc_idxs[k]].a_block);
+      }
+      printf("VHDL_ISLAND_INFO: %s island=%u procs=%u mode=%c a_variant=%s",
+             istr(ctx->scope_prefix), isl->id, np, isl->two_state ? 'A' : 'B',
+             nwhy == 0 ? "yes" : "no");
+      for (unsigned k = 0; k < nwhy; k++)
+         printf("%s%s", k == 0 ? " reason=" : "; ", why[k]);
+      printf("\n");
+   }
 }
 
 void vhdl_island_rebuild(vhdl_island_ctx_t *ctx)
@@ -4187,10 +4379,14 @@ void vhdl_island_rebuild(vhdl_island_ctx_t *ctx)
          if (p->rejected)
             continue;
          bool conflict = false;
+         const char *cr = "conflict";
          for (uint32_t j = 0; j < p->n_writes; j++) {
             const uint32_t sid = p->writes[j];
             if (sigs.items[sid].has_ext_driver || sigs.items[sid].ineligible) {
                conflict = true;
+               cr = sigs.items[sid].ineligible
+                  ? "conflict: written signal is ineligible (attribute use)"
+                  : "conflict: written signal has an outside driver";
                break;
             }
             if (sigs.items[sid].is_sparse_ram
@@ -4198,11 +4394,13 @@ void vhdl_island_rebuild(vhdl_island_ctx_t *ctx)
                     || sigs.items[sid].is_ancestor_sig
                     || sigs.items[sid].has_whole_write)) {
                conflict = true;
+               cr = "conflict: sparse RAM written outside a single FF process";
                break;
             }
             if (driver_count[sid] > 1) {
                if (!sigs.items[sid].is_vector) {
                   conflict = true;
+                  cr = "conflict: scalar signal with several drivers";
                   break;
                }
                for (unsigned k = 0; k < procs.count; k++) {
@@ -4218,6 +4416,7 @@ void vhdl_island_rebuild(vhdl_island_ctx_t *ctx)
                   if (k_writes
                       && procs_have_write_conflict(p, &(procs.items[k]), sid)) {
                      conflict = true;
+                     cr = "conflict: overlapping writes of a vector signal";
                      break;
                   }
                }
@@ -4228,20 +4427,27 @@ void vhdl_island_rebuild(vhdl_island_ctx_t *ctx)
          bool read_9state = false;
          for (uint32_t j = 0; j < p->n_reads && !conflict; j++) {
             const uint32_t rsid = p->reads[j];
-            if (sigs.items[rsid].ineligible)
+            if (sigs.items[rsid].ineligible) {
                conflict = true;
+               cr = "conflict: read signal is ineligible (attribute use)";
+            }
             else if (sigs.items[rsid].is_sparse_ram
                      && (sigs.items[rsid].has_ext_driver
                          || sigs.items[rsid].is_ancestor_sig
-                         || driver_count[rsid] == 0))
+                         || driver_count[rsid] == 0)) {
                conflict = true;
+               cr = "conflict: sparse RAM read without a unique FF writer";
+            }
             else if (two_state && sigs.items[rsid].has_9state_driver) {
                conflict = true;
                read_9state = true;
+               cr = "A4 reads a signal driven by a non-01 literal";
             }
          }
          if (conflict) {
             p->rejected = true;
+            if (p->reason == NULL)
+               p->reason = cr;
             changed = true;
             for (uint32_t j = 0; j < p->n_writes; j++)
                sigs.items[p->writes[j]].has_ext_driver = true;
@@ -4306,8 +4512,11 @@ void vhdl_island_rebuild(vhdl_island_ctx_t *ctx)
             tarjan_dfs(&st, c);
       }
       for (uint32_t c = 0; c < nc; c++) {
-         if (st.in_cycle[c])
+         if (st.in_cycle[c]) {
             procs.items[comb_idxs.items[c]].rejected = true;
+            procs.items[comb_idxs.items[c]].reason =
+               "cycle: combinational loop between processes";
+         }
       }
       for (uint32_t i = 0; i < st.topo_n; i++) {
          uint32_t c = st.topo[i];
@@ -4345,6 +4554,7 @@ void vhdl_island_rebuild(vhdl_island_ctx_t *ctx)
          for (uint32_t j = 0; j < p->n_writes; j++) {
             if (sigs.items[p->writes[j]].has_ext_driver) {
                p->rejected = true;
+               p->reason = "cascade: shares a written signal with an ejected process";
                cascade = true;
                break;
             }
@@ -4356,6 +4566,7 @@ void vhdl_island_rebuild(vhdl_island_ctx_t *ctx)
             if (sigs.items[rsid].is_sparse_ram
                 && sigs.items[rsid].has_ext_driver) {
                p->rejected = true;
+               p->reason = "cascade: reads a sparse RAM whose writer was ejected";
                cascade = true;
                break;
             }
@@ -4506,6 +4717,7 @@ void vhdl_island_rebuild(vhdl_island_ctx_t *ctx)
       if (root_ff_cnt[r] == 0
           && (root_comb_cnt[r] == 1 || !root_has_comb_edge[r])) {
          p->rejected = true;
+         p->reason = "prune: comb-only island without internal dataflow";
          n_live--;
          for (uint32_t j = 0; j < p->n_writes; j++) {
             ctx->sigs[p->writes[j]].driver_proc = -1;
@@ -4526,6 +4738,7 @@ void vhdl_island_rebuild(vhdl_island_ctx_t *ctx)
          for (uint32_t j = 0; j < p->n_writes; j++) {
             if (sigs.items[p->writes[j]].has_ext_driver) {
                p->rejected = true;
+               p->reason = "cascade: writes a signal of a pruned process";
                n_live--;
                prune_cascade = true;
                for (uint32_t k = 0; k < p->n_writes; k++) {
@@ -4803,7 +5016,17 @@ void vhdl_island_rebuild(vhdl_island_ctx_t *ctx)
 vhdl_island_ctx_t *vhdl_island_analyze(tree_t block, const tree_t *ancestors,
                                        int n_ancestors, ident_t scope_prefix)
 {
-   const bool two_state = opt_get_int(OPT_TWO_STATE) >= TWO_STATE_ISLANDS;
+   return vhdl_island_analyze_mode(block, ancestors, n_ancestors, scope_prefix,
+                                   opt_get_int(OPT_TWO_STATE)
+                                   >= TWO_STATE_ISLANDS);
+}
+
+vhdl_island_ctx_t *vhdl_island_analyze_mode(tree_t block,
+                                            const tree_t *ancestors,
+                                            int n_ancestors,
+                                            ident_t scope_prefix,
+                                            bool two_state)
+{
    if (n_ancestors > VHDL_ISLAND_MAX_ANCESTORS)
       n_ancestors = VHDL_ISLAND_MAX_ANCESTORS;
 
@@ -4969,6 +5192,7 @@ void vhdl_island_ctx_free(vhdl_island_ctx_t *ctx)
    free(ctx->var_defs);
    free(ctx->ext_read_sigs);
    free(ctx->stmt_fused);
+   free(ctx->notes);
    free(ctx);
 }
 

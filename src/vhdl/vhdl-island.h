@@ -129,6 +129,10 @@ typedef struct {
    uint32_t          n_write_ranges;
    int               island_idx;
    int               dom_idx;
+   // Diagnostics for NVC_DUMP_ISLANDS: why the process is not fused
+   // (reason) and what keeps its island out of Mode A (a_block).
+   const char       *reason;
+   const char       *a_block;
 } vhdl_iproc_t;
 
 typedef struct {
@@ -174,6 +178,12 @@ typedef struct {
    tree_t expr;
 } vhdl_var_def_t;
 
+typedef struct vhdl_rej_note {
+   ident_t     key;
+   const char *reason;
+   const char *a_block;
+} vhdl_rej_note_t;
+
 typedef struct _vhdl_island_ctx {
    tree_t         block;
    tree_t         ancestors[VHDL_ISLAND_MAX_ANCESTORS];
@@ -198,14 +208,24 @@ typedef struct _vhdl_island_ctx {
    int            n_block_stmts;
    bool           two_state;
    uint32_t       total_procs;
+   vhdl_rej_note_t *notes;   // NVC_DUMP_ISLANDS: ejected processes
+   uint32_t       n_notes;
+   uint32_t       cap_notes;
 } vhdl_island_ctx_t;
 
 vhdl_island_ctx_t *vhdl_island_analyze(tree_t block, const tree_t *ancestors,
                                        int n_ancestors, ident_t scope_prefix);
+vhdl_island_ctx_t *vhdl_island_analyze_mode(tree_t block,
+                                            const tree_t *ancestors,
+                                            int n_ancestors,
+                                            ident_t scope_prefix,
+                                            bool two_state);
 bool vhdl_island_can_inline_gen_block(tree_t gb);
 bool vhdl_island_gen_block_eligible(tree_t block);
 void vhdl_island_rebuild(vhdl_island_ctx_t *ctx);
 void vhdl_island_dump_summary(const vhdl_island_ctx_t *ctx);
+void vhdl_island_mark_a_blocks(vhdl_island_ctx_t *ctx,
+                               const vhdl_island_ctx_t *trial);
 void vhdl_island_ctx_free(vhdl_island_ctx_t *ctx);
 
 bool vhdl_island_stmt_fused(const vhdl_island_ctx_t *ctx, int stmt_idx);
