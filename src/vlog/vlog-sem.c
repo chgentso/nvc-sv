@@ -5180,14 +5180,18 @@ static void vlog_check_cons_integral(vlog_node_t v, const char *what)
    if (tmask == TM_ERROR)
       return;
 
-   vlog_node_t real = NULL;
-   if (!(tmask & TM_INTEGRAL) || (real = vlog_real_operand(v)) != NULL) {
+   vlog_node_t real = vlog_is_real(v) ? v : vlog_real_operand(v);
+   if (real != NULL) {
+      // Real operands are allowed since IEEE 1800-2023
+      diag_t *d = diag_new(DIAG_ERROR, vlog_loc(v));
+      diag_printf(d, "sorry, real operands in a %s are not supported", what);
+      diag_hint(d, vlog_loc(real), "operand has type 'real'");
+      diag_emit(d);
+   }
+   else if (!(tmask & TM_INTEGRAL)) {
       diag_t *d = diag_new(DIAG_ERROR, vlog_loc(v));
       diag_printf(d, "%s must have an integral type", what);
-      if (real != NULL)
-         diag_hint(d, vlog_loc(real), "operand has type 'real'");
-      else
-         diag_hint(d, vlog_loc(v), "have '%s'", type_mask_str(tmask));
+      diag_hint(d, vlog_loc(v), "have '%s'", type_mask_str(tmask));
       diag_emit(d);
    }
 }

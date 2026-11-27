@@ -2939,11 +2939,12 @@ START_TEST(test_crv3)
       { 15, "rand variable 's' must have an integral, enum, or class handle "
         "type or be an array of these" },
       { 18, "constraint expression must have an integral type" },
-      { 19, "condition must have an integral type" },
+      { 19, "sorry, real operands in a condition are not supported" },
       { 20, "inside set item must be integral or an array" },
       { 21, "soft constraint cannot be used with dist" },
       { 22, "inside set item must be integral or an array" },
-      { 23, "constraint expression must have an integral type" },
+      { 23, "sorry, real operands in a constraint expression are not "
+        "supported" },
       { 30, "target cannot be assigned in a procedural block" },
       { 31, "inside set item must be integral or an array" },
       { 32, "expression before inside must have an integral type" },
