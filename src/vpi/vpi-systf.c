@@ -425,6 +425,42 @@ static void format_quoted(ostream_t *out, vpiHandle it, int fwidth)
    vpi_release_handle(arg);
 }
 
+static void format_unformatted(ostream_t *out, vpiHandle it, bool four_state)
+{
+   vpiHandle arg = vpi_scan(it);
+   if (arg == NULL)
+      return;
+
+   s_vpi_value value = { .format = vpiBinStrVal };
+   vpi_get_value(arg, &value);
+
+   const char *bits = (const char *)value.value.str;
+   const size_t len = bits != NULL ? strlen(bits) : 0;
+   const size_t nwords = len > 0 ? (len + 31) / 32 : 1;
+
+   // IEEE 1800-2017 21.2.1.1: write native-endian 32-bit chunks, LSB word first
+   for (size_t w = 0; w < nwords; w++) {
+      uint32_t aval = 0, bval = 0;
+      for (size_t k = 0; k < 32 && w * 32 + k < len; k++) {
+         const char ch = bits[len - 1 - (w * 32 + k)];
+         if (ch == '1')
+            aval |= UINT32_C(1) << k;
+         else if (four_state && ch == 'x') {
+            aval |= UINT32_C(1) << k;
+            bval |= UINT32_C(1) << k;
+         }
+         else if (four_state && ch == 'z')
+            bval |= UINT32_C(1) << k;
+      }
+
+      ostream_write(out, (const char *)&aval, sizeof(aval));
+      if (four_state)
+         ostream_write(out, (const char *)&bval, sizeof(bval));
+   }
+
+   vpi_release_handle(arg);
+}
+
 static void interpret_format(ostream_t *out, const char *fmt, vpiHandle it)
 {
    const char *start = fmt, *p = fmt;
@@ -513,6 +549,12 @@ static void interpret_format(ostream_t *out, const char *fmt, vpiHandle it)
             break;
          case 'c':
             format_char(dst, it, fwidth);
+            break;
+         case 'u':
+            format_unformatted(dst, it, false);
+            break;
+         case 'z':
+            format_unformatted(dst, it, true);
             break;
          case '%':
             ostream_putc(dst, '%');

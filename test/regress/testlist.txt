@@ -3367,3 +3367,4 @@ conv_uncons_out1 shell
 svrootcall1     verilog
 svclog2wide1    verilog
 svdriveconst1   verilog
+svfmtbin1       verilog
