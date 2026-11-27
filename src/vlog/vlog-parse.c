@@ -30442,7 +30442,8 @@ static vlog_node_t p_description(void)
          // Only matters if it has anything other than plain declarations
          for (int i = 0; i < vlog_decls(v); i++) {
             const vlog_kind_t dk = vlog_kind(vlog_decl(v, i));
-            if (dk == V_CLASS_DECL || dk == V_IMPORT_DECL) {
+            if (dk == V_CLASS_DECL || dk == V_IMPORT_DECL
+                || dk == V_VAR_DECL || dk == V_NET_DECL) {
                APUSH(file_namespaces, vlog_ident(v));
                break;
             }

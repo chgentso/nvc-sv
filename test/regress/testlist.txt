@@ -3410,3 +3410,4 @@ sv_named_blk_hier1 verilog
 sv_sformat_vec1 verilog
 sv_disable_hier1 verilog
 sv_iface_port_arr1 verilog
+sv_wild_unit1   verilog

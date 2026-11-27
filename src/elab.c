@@ -2783,6 +2783,51 @@ static void elab_verilog_ports(vlog_node_t inst, elab_instance_t *ei,
                break;
          }
 
+         if (value == NULL) {
+            // Also search visible compilation-unit ($unit) namespaces
+            const int nstmts = vlog_stmts(parent);
+            for (int j = 0; j < nstmts && value == NULL; j++) {
+               vlog_node_t s = vlog_stmt(parent, j);
+               if (vlog_kind(s) != V_INITIAL || vlog_stmts(s) != 1)
+                  continue;
+               vlog_node_t call = vlog_stmt(s, 0);
+               if (vlog_kind(call) != V_SYS_TCALL
+                   || !ident_starts_with(vlog_ident(call), ident_new("$__init:")))
+                  continue;
+
+               ident_t ns_name = ident_new(istr(vlog_ident(call)) + 8);
+               ident_t lib_id = ident_until(ns_name, '.');
+               lib_t lib = lib_id != NULL ? lib_find(lib_id) : NULL;
+               if (lib == NULL)
+                  continue;
+
+               object_t *obj = lib_get_generic(lib, ns_name, NULL);
+               vlog_node_t ns = obj != NULL ? vlog_from_object(obj) : NULL;
+               if (ns == NULL || vlog_kind(ns) != V_NAMESPACE)
+                  continue;
+
+               const int nns = vlog_decls(ns);
+               for (int k = 0; k < nns; k++) {
+                  vlog_node_t d = vlog_decl(ns, k);
+                  if ((vlog_kind(d) == V_NET_DECL || vlog_kind(d) == V_VAR_DECL)
+                      && vlog_ident(d) == port_name) {
+                     const loc_t *dloc = vlog_loc(d);
+                     if (dloc->file_ref == wloc->file_ref
+                         && (dloc->first_line > wloc->first_line
+                             || (dloc->first_line == wloc->first_line
+                                 && dloc->first_column > wloc->first_column)))
+                        continue;
+
+                     value = vlog_new(V_REF);
+                     vlog_set_ident(value, port_name);
+                     vlog_set_ref(value, d);
+                     vlog_set_loc(value, wloc);
+                     break;
+                  }
+               }
+            }
+         }
+
          where = wloc;
       }
 
