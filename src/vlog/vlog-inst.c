@@ -38,10 +38,25 @@ static void resolve_inst_pattern_expr(vlog_node_t expr, vlog_node_t dt,
 static int decl_unpacked_depth(vlog_node_t d)
 {
    int depth = 0;
-   const int nr = vlog_ranges(d);
-   for (int i = 0; i < nr; i++) {
-      if (vlog_subkind(vlog_range(d, i)) == V_DIM_UNPACKED)
-         depth++;
+   switch (vlog_kind(d)) {
+   case V_VAR_DECL:
+   case V_NET_DECL:
+   case V_PORT_DECL:
+   case V_TF_PORT_DECL:
+   case V_PARAM_DECL:
+   case V_LOCALPARAM:
+   case V_LOCAL_DECL:
+   case V_DATA_TYPE:
+      {
+         const int nr = vlog_ranges(d);
+         for (int i = 0; i < nr; i++) {
+            if (vlog_subkind(vlog_range(d, i)) == V_DIM_UNPACKED)
+               depth++;
+         }
+      }
+      break;
+   default:
+      break;
    }
 
    for (vlog_node_t t = vlog_has_type(d) ? vlog_get_type(vlog_type(d)) : NULL;
