@@ -73,8 +73,8 @@ begin
         assert stm.get_type_class = CLASS_PHYSICAL;
         pstm := stm.to_physical;
         assert pstm.units_length = 8;
-        assert pstm.unit_index("ns") = 3;
-        assert pstm.unit_name(5) = "MS";
+        assert pstm.unit_index("ns") = 2;
+        assert pstm.unit_name(4) = "MS";
         assert pstm.scale("fs") = 1;
         assert pstm.scale("ns") = 1000000;
 

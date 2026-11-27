@@ -192,7 +192,7 @@ package body env is
     end function;
 
     function to_string (trec        : time_record;
-                        frac_digits : integer range 0 to 6 := 0)
+                        frac_digits : integer range 0 to 6)
         return string
     is
         function zero_pad (value, width : integer) return string is
@@ -226,6 +226,11 @@ package body env is
         else
             return buf(1 to 19);
         end if;
+    end function;
+
+    function to_string (trec : time_record) return string is
+    begin
+        return to_string(trec, 0);
     end function;
 
     attribute foreign of getenv [string return string] : function is

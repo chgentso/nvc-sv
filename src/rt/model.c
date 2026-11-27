@@ -186,6 +186,7 @@ typedef struct _rt_model {
    uint64_t           now;
    uint64_t           trigger_epoch;
    bool               can_create_delta;
+   bool               in_reset;
    bool               next_is_delta;
    uint16_t           quiet_count;
    bool               force_stop;
@@ -295,6 +296,7 @@ static void wakeup_all(rt_model_t *m, void **pending);
 static void reset_scope(rt_model_t *m, rt_scope_t *s);
 static void async_run_process(rt_model_t *m, void *arg);
 static void reset_process(rt_model_t *m, rt_proc_t *proc);
+static void reached_iteration_limit(rt_model_t *m);
 typedef struct _sv_task sv_task_t;
 static void sv_task_destroy(rt_model_t *m, rt_proc_t *p);
 static bool sv_task_hold(rt_proc_t *p);
@@ -591,6 +593,7 @@ typedef struct {
    deferq_t   *dq;
    int         idx;
    int         spawn_idx;
+   unsigned    resched_iters;
 } deferq_guard_ctx_t;
 
 static void flush_deferred(rt_model_t *m);
@@ -634,6 +637,16 @@ static void deferq_run_body(void *arg)
       if (m->reschedq.count == 0)
          break;
 
+      if (unlikely(m->stop_delta > 0
+                   && (uint64_t)MAX(m->iteration, 0) + ++ctx->resched_iters
+                      >= (uint64_t)m->stop_delta)) {
+         if (m->iteration < (int)m->stop_delta)
+            m->iteration = m->stop_delta;
+         reached_iteration_limit(m);
+         m->reschedq.count = 0;
+         break;
+      }
+
       deferq_swap(&m->reschedq, dq);
    }
 }
@@ -644,7 +657,9 @@ static void deferq_run_procs(rt_model_t *m, deferq_t *dq)
       return;
 
    model_thread_t *thread = model_thread(m);
-   deferq_guard_ctx_t ctx = { .m = m, .dq = dq, .idx = 0, .spawn_idx = 0 };
+   deferq_guard_ctx_t ctx = {
+      .m = m, .dq = dq, .idx = 0, .spawn_idx = 0, .resched_iters = 0
+   };
 
    const bool prev_guarded = thread->jit_guarded;
    thread->jit_guarded = true;
@@ -667,6 +682,7 @@ static void deferq_run(rt_model_t *m, deferq_t *dq)
    // A Verilog process whose delay expired may already be on the reschedule
    // queue: it is run after the tasks in this queue as if it was added by one
 
+   unsigned resched_iters = 0;
    while (dq->count > 0) {
       const defer_task_t *tasks = dq->tasks;
       const int count = dq->count;
@@ -693,6 +709,16 @@ static void deferq_run(rt_model_t *m, deferq_t *dq)
 
       if (m->reschedq.count == 0)
          break;
+
+      if (unlikely(m->stop_delta > 0
+                   && (uint64_t)MAX(m->iteration, 0) + ++resched_iters
+                      >= (uint64_t)m->stop_delta)) {
+         if (m->iteration < (int)m->stop_delta)
+            m->iteration = m->stop_delta;
+         reached_iteration_limit(m);
+         m->reschedq.count = 0;
+         break;
+      }
 
       deferq_swap(&m->reschedq, dq);
    }
@@ -1983,6 +2009,9 @@ static void run_process_inner(rt_model_t *m, rt_proc_t *proc)
 
    if (unlikely(proc->task != NULL))
       sv_task_note_run(proc);
+
+   if (unlikely(sv_unique_pending > 0))
+      sv_unique_flush_proc(proc);
 
    model_thread_t *thread = model_thread(m);
    assert(thread->tlab != NULL);
@@ -3736,6 +3765,7 @@ void model_reset(rt_model_t *m)
    rt_island_reset_all(m->islands);
 
    if (m->islands != NULL) {
+      m->in_reset = true;
       for (unsigned pass = 0; pass < 16; pass++) {
          bool progress = false;
          if (!rt_island_eval_sv_reset(m->jit, m, m->islands, thread->tlab,
@@ -3765,6 +3795,7 @@ void model_reset(rt_model_t *m)
          if (!progress && !drained)
             break;
       }
+      m->in_reset = false;
       rt_island_mark_sv_reset_edges(m->islands);
    }
 
@@ -4988,6 +5019,7 @@ static void reached_iteration_limit(rt_model_t *m)
    diag_printf(d, "limit of %d delta cycles reached", m->stop_delta);
 
    deferq_scan(&m->procq, iteration_limit_proc_cb, d);
+   deferq_scan(&m->reschedq, iteration_limit_proc_cb, d);
    deferq_scan(&m->driverq, iteration_limit_driver_cb, d);
 
    diag_hint(d, NULL, "you can increase this limit with $bold$--stop-delta$$");
@@ -5508,6 +5540,7 @@ static void model_cycle_body(rt_model_t *m)
    deferq_swap(&m->next_driverq, &m->driverq);
    deferq_run(m, &m->next_driverq);
 
+   unsigned resched_iters = 0;
    do {
       for (int i = 0; i < m->reschedq.count; i++)
          (*m->reschedq.tasks[i].fn)(m, m->reschedq.tasks[i].arg);
@@ -5525,6 +5558,16 @@ static void model_cycle_body(rt_model_t *m)
          update_effective(m, n);
       }
       (void)mtp_enter(MTP_DRIVERQ);
+      if (m->reschedq.count > 0 && unlikely(m->stop_delta > 0
+                                            && (uint64_t)MAX(m->iteration, 0)
+                                               + ++resched_iters
+                                               >= (uint64_t)m->stop_delta)) {
+         if (m->iteration < (int)m->stop_delta)
+            m->iteration = m->stop_delta;
+         reached_iteration_limit(m);
+         m->reschedq.count = 0;
+         break;
+      }
    } while (m->reschedq.count > 0);
 
    (void)mtp_enter(MTP_OTHER);
@@ -5686,7 +5729,7 @@ static void model_cycle_body(rt_model_t *m)
 
       m->can_create_delta = true;
    }
-   else if (m->stop_delta > 0 && m->iteration == m->stop_delta)
+   else if (!m->force_stop && m->stop_delta > 0 && m->iteration == m->stop_delta)
       reached_iteration_limit(m);
 }
 
@@ -7297,6 +7340,16 @@ void sched_deposit(rt_model_t *m, rt_signal_t *s, const void *values,
 bool model_can_create_delta(rt_model_t *m)
 {
    return m->can_create_delta;
+}
+
+bool model_in_reset(rt_model_t *m)
+{
+   return m != NULL && m->in_reset;
+}
+
+int64_t x_sv_island_in_reset(void)
+{
+   return model_in_reset(get_model_or_null()) ? 1 : 0;
 }
 
 int64_t model_now(rt_model_t *m, unsigned *deltas)
@@ -9490,7 +9543,8 @@ bool model_psl_status(rt_model_t *m, psl_query_t query)
    switch (query) {
    case PSL_QUERY_COVERED: return status.has_cover && status.all_covered;
    case PSL_QUERY_ASSERT_COVERED:
-      return status.has_assert && status.all_asserts_covered;
+      return m->psl_cover_assert && status.has_assert
+         && status.all_asserts_covered;
    case PSL_QUERY_FAILED: return status.any_failed;
    }
 

@@ -1392,9 +1392,16 @@ static bool vpi_shared_param_value(vlog_node_t v, c_abstractScope *scope,
    // iteration of the loop
 
    if (scope->rtscope == NULL || vlog_kind(scope->where) != V_INST_BODY
-       || !(vlog_flags(scope->where) & VLOG_F_GEN_SHARED)
-       || vlog_ranges(v) > 0 || !vlog_has_value(v))
+       || !(vlog_flags(scope->where) & VLOG_F_GEN_SHARED))
       return false;
+
+   vlog_node_t expr;
+   if (vlog_kind(v) == V_GENVAR_DECL)
+      expr = v;
+   else if (vlog_ranges(v) > 0 || !vlog_has_value(v))
+      return false;
+   else
+      expr = vlog_value(v);
 
    const int width = vlog_width(v);
    if (width == 0 || width > 64)
@@ -1406,8 +1413,7 @@ static bool vpi_shared_param_value(vlog_node_t v, c_abstractScope *scope,
 
    jit_t *jit = vpi_get_jit(vpi_context());
    mir_unit_t *thunk = vlog_lower_thunk(jit_get_mir(jit),
-                                        vlog_ident(scope->where),
-                                        vlog_value(v));
+                                        vlog_ident(scope->where), expr);
 
    int64_t value;
    const bool ok = jit_call_thunk2(jit, thunk, context,
@@ -1434,7 +1440,12 @@ static void build_parameter(vlog_node_t v, c_abstractScope *scope)
    param->decl.dtype = vlog_has_type(v) ? vlog_get_type(v) : NULL;
    param->decl.storage = STORE_NONE;
 
-   if (vlog_has_value(v)) {
+   if (vlog_kind(v) == V_GENVAR_DECL) {
+      int64_t ival;
+      if (vpi_shared_param_value(v, scope, &ival))
+         param->value = &(build_int_constant(ival)->expr.object);
+   }
+   else if (vlog_has_value(v)) {
       vlog_node_t value = vlog_value(v);
       int64_t ival;
       switch (vlog_kind(value)) {
@@ -1842,6 +1853,11 @@ static void vpi_lazy_decls(c_vpiObject *obj)
       case V_LOCALPARAM:
       case V_PARAM_DECL:
          if (!(vlog_flags(v) & VLOG_F_SPECPARAM) || vlog_kind(v) != V_LOCALPARAM)
+            build_parameter(v, s);
+         break;
+      case V_GENVAR_DECL:
+         if (obj->type == vpiGenScope
+             && (vlog_flags(s->where) & VLOG_F_GEN_SHARED))
             build_parameter(v, s);
          break;
 

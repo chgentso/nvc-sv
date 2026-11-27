@@ -343,7 +343,7 @@ package body reflection is
 
         impure function unit_index return index is
         begin
-            return 1;
+            return 0;
         end function;
 
         impure function value return integer is
@@ -353,7 +353,7 @@ package body reflection is
 
         impure function image return string is
         begin
-            return integer'image(f_value) & " " & f_subtype.unit_name(1);
+            return integer'image(f_value) & " " & f_subtype.unit_name(0);
         end function;
     end protected body;
 

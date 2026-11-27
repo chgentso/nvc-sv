@@ -132,10 +132,10 @@ begin
         report "Warning report" severity warning;
         report "Error report" severity error;
 
-        assert (GetVhdlAssertCount          = 2);
-        assert (GetVhdlAssertCount(note)    = 1);
-        assert (GetVhdlAssertCount(warning) = 1);
-        assert (GetVhdlAssertCount(error)   = 1);
+        assert (GetVhdlAssertCount          = 0);
+        assert (GetVhdlAssertCount(note)    = 0);
+        assert (GetVhdlAssertCount(warning) = 0);
+        assert (GetVhdlAssertCount(error)   = 0);
         assert (GetVhdlAssertCount(failure) = 0);
 
         -- TODO: How to test failure severity when it always stops simulation?

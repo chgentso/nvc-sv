@@ -739,6 +739,29 @@ void number_word(number_t val, unsigned n, uint64_t *a, uint64_t *b)
    }
 }
 
+number_t number_slice(number_t val, unsigned offset, unsigned width,
+                      bool issigned)
+{
+   bignum_t *result;
+   bignum_scratch(width, issigned, 1, &result);
+
+   uint64_t *dst_a = bignum_abits(result);
+   uint64_t *dst_b = bignum_bbits(result);
+   const size_t nwords = BIGNUM_WORDS(width);
+   for (size_t i = 0; i < nwords; i++)
+      dst_a[i] = dst_b[i] = 0;
+
+   const unsigned src_width = val.big->width;
+   for (unsigned i = 0; i < width && offset + i < src_width; i++) {
+      if (bignum_abit(val.big, offset + i))
+         dst_a[i / 64] |= UINT64_C(1) << (i % 64);
+      if (bignum_bbit(val.big, offset + i))
+         dst_b[i / 64] |= UINT64_C(1) << (i % 64);
+   }
+
+   return number_intern(result);
+}
+
 uint32_t number_hash(number_t n)
 {
    return bignum_hash(n.big);
@@ -1397,18 +1420,46 @@ void vec2_itoa(int size, const uint64_t *a, bool is_signed, text_buf_t *tb)
 double vec4_itor(int size, bool is_signed, const uint64_t *a,
                  const uint64_t *b)
 {
+   if (size <= 0)
+      return 0.0;
+
+   const uint64_t smask = UINT64_C(1) << ((size - 1) % 64);
+   const bool neg = is_signed
+      && !(b[(size - 1) / 64] & smask) && !!(a[(size - 1) / 64] & smask);
+
+   if (neg) {
+      // Exact two's complement magnitude: find lowest 1-bit (treating X/Z as 0)
+      int low1 = -1;
+      for (int i = 0; i < size; i++) {
+         const uint64_t mask = UINT64_C(1) << (i % 64);
+         if (!(b[i / 64] & mask) && !!(a[i / 64] & mask)) {
+            low1 = i;
+            break;
+         }
+      }
+
+      double mag = 0.0;
+      for (int i = size - 1; i >= 0; i--) {
+         mag *= 2.0;
+         if (i > low1) {
+            const uint64_t mask = UINT64_C(1) << (i % 64);
+            const bool bit = !(b[i / 64] & mask) && !!(a[i / 64] & mask);
+            if (!bit)
+               mag += 1.0;
+         }
+         else if (i == low1)
+            mag += 1.0;
+      }
+
+      return -mag;
+   }
+
    double result = 0.0;
    for (int i = size - 1; i >= 0; i--) {
       result *= 2.0;
       const uint64_t mask = UINT64_C(1) << (i % 64);
       if (!(b[i / 64] & mask) && !!(a[i / 64] & mask))
          result += 1.0;
-   }
-
-   if (is_signed && size > 0) {
-      const uint64_t mask = UINT64_C(1) << ((size - 1) % 64);
-      if (!(b[(size - 1) / 64] & mask) && !!(a[(size - 1) / 64] & mask))
-         result -= ldexp(1.0, size);
    }
 
    return result;

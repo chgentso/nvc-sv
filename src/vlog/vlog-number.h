@@ -66,6 +66,8 @@ bool number_equal(number_t a, number_t b);
 bool number_truthy(number_t a);
 bool number_signed(number_t a);
 number_t number_with_sign(number_t val, bool issigned);
+number_t number_slice(number_t val, unsigned offset, unsigned width,
+                      bool issigned);
 uint32_t number_hash(number_t n);
 
 void number_write(number_t val, fbuf_t *f);

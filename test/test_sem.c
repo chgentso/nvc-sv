@@ -2681,10 +2681,9 @@ START_TEST(test_gentype)
    const error_t expect[] = {
       { 10, "range constraint cannot be used with non-scalar type T" },
       { 66, "type of actual universal_real does not match type T of" },
-      { 69, "positional generic actual is associated with implicit generic "
-        "subprogram \"=\" for type T" },
-      { 69, "positional generic actual is associated with implicit generic "
-        "subprogram \"/=\" for type T" },
+      { 69, "type of string literal cannot be determined from the surrounding" },
+      { 69, "type of string literal cannot be determined from the surrounding" },
+      { 69, "found at least 3 positional actuals but WORK.SUB has only 2 generics" },
       { 72, "unexpected integer while parsing subtype indication" },
       { 72, "type of actual universal_integer does not match type T of " },
       { 81, "no visible subprogram MY_FUNC matches signature [T return T]" },

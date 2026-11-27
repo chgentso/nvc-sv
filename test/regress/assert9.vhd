@@ -41,39 +41,39 @@ begin
         assert (GetVhdlAssertEnable(error))         report "FAIL" severity failure;
         wait for 1 ns;
 
-        -- Check all reports but failure are thrown
+        -- Check all asserts but failure are thrown
         SetVhdlAssertEnable(failure, false);
-        report "EXAMPLE NOTE"    severity note;
-        report "EXAMPLE WARNING" severity warning;
-        report "EXAMPLE ERROR"   severity error;
-        report "EXAMPLE FAILURE" severity failure;
+        assert false report "EXAMPLE NOTE"    severity note;
+        assert false report "EXAMPLE WARNING" severity warning;
+        assert false report "EXAMPLE ERROR"   severity error;
+        assert false report "EXAMPLE FAILURE" severity failure;
         wait for 1 ns;
 
         -- Disable one-by-one and make sure it is the only one not shown
         SetVhdlAssertEnable(note, false);
-        report "EXAMPLE NOTE"    severity note;
-        report "EXAMPLE WARNING" severity warning;
-        report "EXAMPLE ERROR"   severity error;
-        report "EXAMPLE FAILURE" severity failure;
+        assert false report "EXAMPLE NOTE"    severity note;
+        assert false report "EXAMPLE WARNING" severity warning;
+        assert false report "EXAMPLE ERROR"   severity error;
+        assert false report "EXAMPLE FAILURE" severity failure;
         wait for 1 ns;
 
         SetVhdlAssertEnable(warning, false);
-        report "EXAMPLE NOTE"    severity note;
-        report "EXAMPLE WARNING" severity warning;
-        report "EXAMPLE ERROR"   severity error;
-        report "EXAMPLE FAILURE" severity failure;
+        assert false report "EXAMPLE NOTE"    severity note;
+        assert false report "EXAMPLE WARNING" severity warning;
+        assert false report "EXAMPLE ERROR"   severity error;
+        assert false report "EXAMPLE FAILURE" severity failure;
         wait for 1 ns;
 
         SetVhdlAssertEnable(error, false);
-        report "EXAMPLE NOTE"    severity note;
-        report "EXAMPLE WARNING" severity warning;
-        report "EXAMPLE ERROR"   severity error;
-        report "EXAMPLE FAILURE" severity failure;
+        assert false report "EXAMPLE NOTE"    severity note;
+        assert false report "EXAMPLE WARNING" severity warning;
+        assert false report "EXAMPLE ERROR"   severity error;
+        assert false report "EXAMPLE FAILURE" severity failure;
         wait for 1 ns;
 
         -- Re-enable just failure to kill the test and check it
         SetVhdlAssertEnable(failure, true);
-        report "END THE TEST" severity failure;
+        assert false report "END THE TEST" severity failure;
 
     end process;
 

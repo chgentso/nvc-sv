@@ -17,7 +17,7 @@ use work.my_package.all;
 architecture test of record38 is
     function init return my_array_t is
     begin
-        return (0 => (state => "101", aux => "1"), 1 => (state => "1", aux => "1"));
+        return (0 => (state => "101", aux => "1"), 1 => (state => "001", aux => "1"));
     end function;
 
     signal s : my_array_t(0 to 0)(state(1 to 3), aux(1 to 1)) := init;

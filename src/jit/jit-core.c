@@ -513,7 +513,8 @@ static bool jit_intrinsic_is_mt_safe(ident_t name)
       || strcmp(s, "__sv_real_finite") == 0
       || strcmp(s, "__sv_wildcard_eq") == 0
       || strcmp(s, "__sv_logic_to_std") == 0
-      || strcmp(s, "__sv_std_to_logic") == 0;
+      || strcmp(s, "__sv_std_to_logic") == 0
+      || strcmp(s, "__sv_island_in_reset") == 0;
 }
 
 static void jit_prepare_deps(jit_t *j, jit_func_t *f)
@@ -781,6 +782,9 @@ static void jit_emit_trace(diag_t *d, const loc_t *loc, object_t *enclosing,
          break;
       case T_PARAM:
          diag_trace(d, loc, "Port conversion");
+         break;
+      case T_ASSOC:
+         diag_trace(d, loc, "Resolution wrapper");
          break;
       default:
          {
@@ -1306,6 +1310,11 @@ bool jit_set_silent(jit_t *j, bool silent)
    const bool prev = j->silent;
    j->silent = silent;
    return prev;
+}
+
+bool jit_is_silent(jit_t *j)
+{
+   return j->silent;
 }
 
 void jit_msg(const loc_t *where, diag_level_t level, const char *fmt, ...)
