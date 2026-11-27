@@ -6215,6 +6215,70 @@ typedef struct {
    mir_value_t len;
 } vi_str_t;
 
+// VAL_E'IMAGE, or TO_STRING(VAL_E) when TO_STRING: like 'IMAGE without the
+// apostrophes around a character literal
+static bool vi_lower_image(vi_lower_t *l, tree_t val_e, bool to_string,
+                           vi_str_t *out)
+{
+   mir_unit_t *mu = l->mu;
+   vi_val_t v;
+   if (!vi_lower_expr(l, val_e, &v))
+      return false;
+   type_t base = type_base_recur(tree_type(val_e));
+   ident_t func = ident_prefix(type_ident(base), ident_new("image"), '$');
+   mir_value_t arg;
+   bool has_chars = false;
+   if (type_is_enum(base)) {
+      const unsigned nlits = type_enum_literals(base);
+      for (unsigned i = 0; i < nlits && !has_chars; i++)
+         has_chars = ident_char(tree_ident(type_enum_literal(base, i)), 0)
+            == '\'';
+      mir_type_t at = mir_int_type(mu, 0, (int64_t)nlits - 1);
+      well_known_t wk = is_well_known(type_ident(base));
+      if (l->two_state && (wk == W_IEEE_ULOGIC || wk == W_IEEE_LOGIC)) {
+         mir_value_t b = vi_to_bool(l, v);
+         arg = mir_build_select(mu, at, b, mir_const(mu, at, 3),
+                                mir_const(mu, at, 2));
+      }
+      else if (l->two_state && (wk == W_STD_BIT || wk == W_STD_BOOL)) {
+         mir_value_t b = vi_to_bool(l, v);
+         arg = mir_build_select(mu, at, b, mir_const(mu, at, 1),
+                                mir_const(mu, at, 0));
+      }
+      else
+         arg = mir_build_cast(mu, at, v.val);
+   }
+   else if (type_is_integer(base)) {
+      int64_t lo = INT64_MIN, hi = INT64_MAX;
+      if (type_dims(base) > 0)
+         folded_bounds(type_dim(base, 0), &lo, &hi);
+      mir_type_t at = mir_int_type(mu, lo, hi);
+      arg = mir_build_cast(mu, at, vi_to_i64(mu, v.val));
+   }
+   else
+      return false;
+   mir_type_t str_t = mir_uarray_type(mu, 1, vi_u8_type(mu));
+   mir_value_t uarr = mir_build_fcall(mu, func, str_t, MIR_NULL_STAMP,
+                                      &arg, 1);
+   out->ptr = mir_build_unwrap(mu, uarr);
+   out->len = mir_build_uarray_len(mu, uarr, 0);
+
+   if (to_string && has_chars) {
+      // 'IMAGE of a character literal is the literal with its apostrophes
+      mir_value_t first = mir_build_load(mu, out->ptr);
+      mir_value_t quoted = mir_build_cmp(mu, MIR_CMP_EQ, first,
+                                         vi_u8(mu, '\''));
+      mir_type_t t_off = mir_offset_type(mu);
+      out->ptr = mir_build_select(
+         mu, mir_get_type(mu, out->ptr), quoted,
+         mir_build_array_ref(mu, out->ptr, vi_off(mu, 1)), out->ptr);
+      out->len = mir_build_select(
+         mu, t_off, quoted, mir_build_sub(mu, t_off, out->len, vi_off(mu, 2)),
+         out->len);
+   }
+   return true;
+}
+
 static bool vi_lower_str_expr(vi_lower_t *l, tree_t expr, vi_str_t *out)
 {
    mir_unit_t *mu = l->mu;
@@ -6326,82 +6390,17 @@ static bool vi_lower_str_expr(vi_lower_t *l, tree_t expr, vi_str_t *out)
       }
 
    case T_ATTR_REF:
-      if (tree_subkind(expr) == ATTR_IMAGE && tree_params(expr) == 1) {
-         tree_t val_e = tree_value(tree_param(expr, 0));
-         vi_val_t v;
-         if (!vi_lower_expr(l, val_e, &v))
-            return false;
-         type_t base = type_base_recur(tree_type(val_e));
-         ident_t func = ident_prefix(type_ident(base), ident_new("image"), '$');
-         mir_value_t arg;
-         if (type_is_enum(base)) {
-            const unsigned nlits = type_enum_literals(base);
-            mir_type_t at = mir_int_type(mu, 0, (int64_t)nlits - 1);
-            well_known_t wk = is_well_known(type_ident(base));
-            if (l->two_state && (wk == W_IEEE_ULOGIC || wk == W_IEEE_LOGIC)) {
-               mir_value_t b = vi_to_bool(l, v);
-               arg = mir_build_select(mu, at, b, mir_const(mu, at, 3),
-                                      mir_const(mu, at, 2));
-            }
-            else if (l->two_state && (wk == W_STD_BIT || wk == W_STD_BOOL)) {
-               mir_value_t b = vi_to_bool(l, v);
-               arg = mir_build_select(mu, at, b, mir_const(mu, at, 1),
-                                      mir_const(mu, at, 0));
-            }
-            else
-               arg = mir_build_cast(mu, at, v.val);
-         }
-         else if (type_is_integer(base)) {
-            int64_t lo = INT64_MIN, hi = INT64_MAX;
-            if (type_dims(base) > 0)
-               folded_bounds(type_dim(base, 0), &lo, &hi);
-            mir_type_t at = mir_int_type(mu, lo, hi);
-            arg = mir_build_cast(mu, at, vi_to_i64(mu, v.val));
-         }
-         else
-            return false;
-         mir_type_t str_t = mir_uarray_type(mu, 1, vi_u8_type(mu));
-         mir_value_t uarr = mir_build_fcall(mu, func, str_t, MIR_NULL_STAMP,
-                                            &arg, 1);
-         out->ptr = mir_build_unwrap(mu, uarr);
-         out->len = mir_build_uarray_len(mu, uarr, 0);
-         return true;
-      }
+      if (tree_subkind(expr) == ATTR_IMAGE && tree_params(expr) == 1)
+         return vi_lower_image(l, tree_value(tree_param(expr, 0)), false, out);
       return false;
 
    case T_FCALL:
       {
          tree_t decl = tree_ref(expr);
          const subprogram_kind_t sk = tree_subkind(decl);
-         if (sk == S_TO_STRING && tree_params(expr) == 1) {
-            tree_t val_e = tree_value(tree_param(expr, 0));
-            vi_val_t v;
-            if (!vi_lower_expr(l, val_e, &v))
-               return false;
-            type_t base = type_base_recur(tree_type(val_e));
-            ident_t func = ident_prefix(type_ident(base), ident_new("image"), '$');
-            mir_value_t arg;
-            if (type_is_enum(base)) {
-               const unsigned nlits = type_enum_literals(base);
-               mir_type_t at = mir_int_type(mu, 0, (int64_t)nlits - 1);
-               arg = mir_build_cast(mu, at, v.val);
-            }
-            else if (type_is_integer(base)) {
-               int64_t lo = INT64_MIN, hi = INT64_MAX;
-               if (type_dims(base) > 0)
-                  folded_bounds(type_dim(base, 0), &lo, &hi);
-               mir_type_t at = mir_int_type(mu, lo, hi);
-               arg = mir_build_cast(mu, at, vi_to_i64(mu, v.val));
-            }
-            else
-               return false;
-            mir_type_t str_t = mir_uarray_type(mu, 1, vi_u8_type(mu));
-            mir_value_t uarr = mir_build_fcall(mu, func, str_t, MIR_NULL_STAMP,
-                                               &arg, 1);
-            out->ptr = mir_build_unwrap(mu, uarr);
-            out->len = mir_build_uarray_len(mu, uarr, 0);
-            return true;
-         }
+         if (sk == S_TO_STRING && tree_params(expr) == 1)
+            return vi_lower_image(l, tree_value(tree_param(expr, 0)), true,
+                                  out);
          if (sk == S_CONCAT && tree_params(expr) >= 1) {
             const int np = tree_params(expr);
             vi_str_t *parts LOCAL = xcalloc_array(np, sizeof(vi_str_t));
