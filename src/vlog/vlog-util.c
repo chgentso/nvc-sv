@@ -124,7 +124,10 @@ static vlog_node_t vlog_const_element(vlog_node_t v)
          if (!vlog_has_ref(v))
             return NULL;
 
-         vlog_node_t base = vlog_const_element(vlog_value(v));
+         vlog_node_t val = vlog_value(v);
+         vlog_node_t decl = vlog_param_pattern(val);
+         vlog_node_t base = decl != NULL ? vlog_value(decl)
+            : vlog_const_element(val);
          if (base == NULL || vlog_kind(base) != V_PATTERN_EXPR)
             return NULL;
 
@@ -1623,7 +1626,7 @@ bool vlog_is_signed(vlog_node_t v)
             static const char *const names[] = {
                "$random", "$dist_uniform", "$dist_normal", "$dist_exponential",
                "$dist_poisson", "$dist_chi_square", "$dist_t", "$dist_erlang",
-               "$countbits", "$countones", "$ftell", "$fgetc", "$ferror",
+               "$countbits", "$countones", "$ftell", "$fgetc", "$fputc", "$ferror",
                "$fseek", "$test$plusargs", "$value$plusargs", "$dimensions",
                "$unpacked_dimensions", "$left", "$right", "$low", "$high",
                "$increment", "$size", "$rtoi", "$clog2", "$bits", "$fopen",
@@ -1820,9 +1823,34 @@ bool vlog_is_const_arith(vlog_node_t v)
             }
             return nparams > 0;
          }
+      case V_SYSTF_BITS:
+         if (vlog_params(v) == 1) {
+            vlog_node_t arg = vlog_param(v, 0);
+            return is_data_type(arg) || vlog_is_const_arith(arg);
+         }
+         return false;
       default:
          return false;
       }
+   case V_BIT_SELECT:
+      {
+         if (!vlog_is_const_arith(vlog_value(v)))
+            return false;
+         const int nparams = vlog_params(v);
+         for (int i = 0; i < nparams; i++) {
+            if (!vlog_is_const_arith(vlog_param(v, i)))
+               return false;
+         }
+         return true;
+      }
+   case V_PART_SELECT:
+      return vlog_is_const_arith(vlog_value(v))
+         && vlog_is_const_arith(vlog_left(v))
+         && vlog_is_const_arith(vlog_right(v));
+   case V_MEMBER_REF:
+      return vlog_is_const_arith(vlog_value(v)) || vlog_is_const(v);
+   case V_CAST:
+      return vlog_is_const_arith(vlog_value(v));
    default:
       return vlog_is_const(v);
    }
@@ -2465,6 +2493,7 @@ vlog_node_t vlog_get_type(vlog_node_t v)
       case V_METHOD_ARR_FIND_FIRST_INDEX:
       case V_METHOD_ARR_FIND_LAST:
       case V_METHOD_ARR_FIND_LAST_INDEX:
+      case V_METHOD_ARR_MAP:
       case V_METHOD_RANDSTATE_GET:
       case V_METHOD_EVENT_TRIGGERED:
       case V_METHOD_ENUM_NAME:
@@ -2785,7 +2814,8 @@ tree_t vlog_iface_port_target(tree_t b, vlog_node_t port, ident_t id)
          if (tree_ident(d) == id)
             return tree_has_ref(d) ? tree_ref(d) : NULL;
       }
-      else if (port != NULL ? vd == port : vlog_ident(vd) == id)
+      else if (port != NULL ? vd == port
+                            : (tree_ident(d) == id || vlog_ident(vd) == id))
          return tree_has_ref(d) ? tree_ref(d) : NULL;
    }
 

@@ -88,9 +88,20 @@ static bool sem_check_resolution(type_t type, tree_t res)
          tree_t sub = tree_value(tree_assoc(res, 0));
          return sem_check_resolution(type_elem(type), sub);
       }
-      else if (type_is_record(type))
-         sem_error(res, "sorry, record element resolution functions are not"
-                   "supported yet");
+      else if (type_is_record(type)) {
+         const int nassocs = tree_assocs(res);
+         bool ok = true;
+         for (int i = 0; i < nassocs; i++) {
+            tree_t a = tree_assoc(res, i);
+            if (tree_subkind(a) != A_NAMED)
+               return false;
+            tree_t ref = tree_name(a);
+            if (!tree_has_ref(ref))
+               return false;
+            ok &= sem_check_resolution(tree_type(tree_ref(ref)), tree_value(a));
+         }
+         return ok;
+      }
       else {
          // Should have been caught during name resolution
          assert(error_count() > 0);
@@ -392,7 +403,9 @@ static bool sem_check_subtype_helper(tree_t decl, type_t type, nametab_t *tab)
 
    assert(!is_anonymous_subtype(base));
 
-   if (type_is_protected(base))
+   if (type_is_protected(base)
+       && (standard() < STD_08 || type_has_constraint(type)
+           || type_has_resolution(type)))
       sem_error(decl, "subtypes may not have protected base types");
    else if (!sem_check_incomplete(decl, type))
       return false;
@@ -1318,9 +1331,9 @@ static bool sem_check_var_decl(tree_t t, nametab_t *tab)
       if (!sem_check_protected_instance(t, type, tab))
          return false;
 
-      // The 2019 standard needs access to the instance and path name at
-      // the point of declaration
-      if (standard() >= STD_19)
+      // Protected body 'PATH_NAME and 'INSTANCE_NAME are dynamic from
+      // VHDL-2008 onwards (LRM 08 16.2.5 / LCS-2016-032)
+      if (standard() >= STD_08)
          tree_set_global_flags(t, TREE_GF_INSTANCE_NAME | TREE_GF_PATH_NAME);
    }
 
@@ -2500,6 +2513,34 @@ static bool sem_check_process(tree_t t, nametab_t *tab)
    sem_check_missing_wait(t, tab);
 
    return true;
+}
+
+static void sem_missing_pack_body_cb(tree_t t, tree_t parent, nametab_t *tab)
+{
+   if (parent == NULL || !opt_get_int(OPT_MISSING_BODY))
+      return;
+   else if (have_name_errors(tab))
+      return;   // May be missing due to parse errors
+
+   if (tree_kind(parent) == T_PACKAGE)
+      return;   // Must appear in the enclosing package body
+
+   const int ndecls = tree_decls(parent);
+   for (int i = 0; i < ndecls; i++) {
+      tree_t b = tree_decl(parent, i);
+      if (tree_kind(b) == T_PACK_BODY && tree_has_primary(b)
+          && tree_primary(b) == t)
+         return;
+   }
+
+   error_at(tree_loc(t), "missing package body for nested package %pI",
+            tree_ident(t));
+}
+
+void sem_defer_pack_body(tree_t t, nametab_t *tab)
+{
+   if (package_needs_body(t))
+      defer_check(tab, sem_missing_pack_body_cb, t);
 }
 
 static bool sem_check_package(tree_t t, nametab_t *tab)
@@ -5135,6 +5176,20 @@ static bool sem_check_attr_ref(tree_t t, bool allow_range, nametab_t *tab)
             sem_error(name, "invalid attribute reference");
       }
 
+      if (tree_kind(name) == T_REF && tree_has_ref(name)) {
+         tree_t decl = tree_ref(name);
+         if (tree_kind(decl) == T_ENTITY) {
+            tree_t du = find_enclosing(tab, S_DESIGN_UNIT);
+            const bool same_entity = du == decl
+               || (du != NULL && tree_kind(du) == T_ARCH
+                   && tree_primary(du) == decl);
+            if (!same_entity && !sem_locally_static(tree_value(t)))
+               sem_error(t, "cannot read non-static attribute %pI of "
+                         "entity %pI from outside its declarative region",
+                         attr, tree_ident(decl));
+         }
+      }
+
       return true;
 
    default:
@@ -5174,6 +5229,21 @@ static bool sem_static_signal_name(tree_t t)
       return false;
 
    return class_of(t) == C_SIGNAL;
+}
+
+static bool is_prot_conv_func(tree_t t)
+{
+   if (tree_kind(t) != T_PROT_FCALL || !tree_has_ref(t)
+       || tree_params(t) != 1)
+      return false;
+
+   tree_t decl = tree_ref(t);
+   if (tree_ports(decl) != 1 || tree_class(tree_port(decl, 0)) != C_CONSTANT)
+      return false;
+
+   tree_t p0 = tree_value(tree_param(t, 0));
+   tree_t ref = name_to_ref(p0);
+   return ref != NULL && class_of(ref) == C_SIGNAL;
 }
 
 static bool sem_check_port_actual(formal_map_t *formals, int nformals,
@@ -5221,6 +5291,20 @@ static bool sem_check_port_actual(formal_map_t *formals, int nformals,
          case T_TYPE_CONV:
             out_conv = name;
             name = ref = tree_value(name);
+            break;
+
+         case T_PROT_FCALL:
+            if (tree_params(name) != 1)
+               sem_error(name, "output conversion function must have "
+                         "exactly one parameter");
+            else if (!tree_has_ref(name)
+                     || tree_ports(tree_ref(name)) != 1
+                     || tree_class(tree_port(tree_ref(name), 0)) != C_CONSTANT)
+               sem_error(name, "invalid output conversion %s",
+                         istr(tree_ident(name)));
+
+            out_conv = name;
+            name = ref = tree_value(tree_param(name, 0));
             break;
 
          default:
@@ -5277,6 +5361,21 @@ static bool sem_check_port_actual(formal_map_t *formals, int nformals,
             if (tree_kind(value) == T_OPEN)
                sem_error(name, "output conversion for formal %s must not "
                          "have OPEN actual", istr(tree_ident(decl)));
+
+            // LRM 93 section 3.2.1.1: result of a conversion in an
+            // association list for an unconstrained formal cannot be an
+            // unconstrained array type
+            if (mode != PORT_INOUT && type_is_unconstrained(tree_type(name))
+                && type_is_unconstrained(tree_type(out_conv))
+                && (standard() < STD_08 || tree_kind(out_conv) != T_TYPE_CONV)) {
+               diag_t *d = diag_new(DIAG_ERROR, tree_loc(out_conv));
+               diag_printf(d, "result of conversion for unconstrained formal "
+                           "%pI must be a constrained array type",
+                           tree_ident(decl));
+               diag_lrm(d, STD_93, "3.2.1.1");
+               diag_emit(d);
+               return false;
+            }
          }
          else
             type = tree_type(name);
@@ -5333,9 +5432,10 @@ static bool sem_check_port_actual(formal_map_t *formals, int nformals,
    // These only apply if the class of the formal is not constant
 
    tree_t actual;
-   if (kind == T_TYPE_CONV || kind == T_CONV_FUNC) {
+   if (kind == T_TYPE_CONV || kind == T_CONV_FUNC || is_prot_conv_func(value)) {
       // Conversion functions are in LRM 93 section 4.3.2.2
-      actual = tree_value(value);
+      actual = kind == T_PROT_FCALL
+         ? tree_value(tree_param(value, 0)) : tree_value(value);
 
       // LRM 93 section 3.2.1.1 result of a type conversion in an
       // association list cannot be an unconstrained array type
@@ -5537,7 +5637,7 @@ static bool sem_check_port_map(tree_t t, tree_t unit, nametab_t *tab)
       ok &= sem_check_port_actual(formals, nformals, actual, unit, i,
                                   is_binding, tab);
 
-      if (!ok && tree_subkind(actual) == P_POS && i >= nformals)
+      if (!ok && tree_subkind(actual) == P_POS && tree_pos(actual) >= nformals)
          break;   // Prevent useless repeated errors
    }
 
@@ -5584,18 +5684,15 @@ static bool sem_check_generic_actual(formal_map_t *formals, int nformals,
    case P_POS:
       {
          pos = tree_pos(param);
-         if (pos >= nformals)
+         if (pos >= nformals) {
+            int nexplicit = 0;
+            for (int j = 0; j < nformals; j++) {
+               if (!(tree_flags(formals[j].decl) & TREE_F_PREDEFINED))
+                  nexplicit++;
+            }
             sem_error(param, "found at least %d positional actuals but %s "
-                      "has only %d generic%s", pos + 1, istr(tree_ident(unit)),
-                      nformals, nformals == 1 ? "" : "s");
-         else if (tree_flags(formals[pos].decl) & TREE_F_PREDEFINED) {
-            diag_t *d = diag_new(DIAG_WARN, tree_loc(param));
-            diag_printf(d, "positional generic actual is associated with "
-                        "implicit generic subprogram %s for type %s",
-                        istr(tree_ident(formals[pos].decl)),
-                        type_pp(tree_type(tree_port(formals[pos].decl, 0))));
-            diag_hint(d, NULL, "use a named association if this was intended");
-            diag_emit(d);
+                      "has only %d generic%s", nth + 1, istr(tree_ident(unit)),
+                      nexplicit, nexplicit == 1 ? "" : "s");
          }
       }
       break;
@@ -5785,9 +5882,23 @@ static bool sem_check_generic_actual(formal_map_t *formals, int nformals,
              && type_subkind(map) == GTYPE_CONSTRAINED_ARRAY)
             actual_constrained = true;
 
+         bool all_anon_index = nindex > 0;
+         for (int i = 0; i < nindex; i++) {
+            type_t itype = type_index(type, i);
+            if (type_kind(itype) != T_GENERIC || type_has_ident(itype)) {
+               all_anon_index = false;
+               break;
+            }
+         }
+
          if (class == GTYPE_CONSTRAINED_ARRAY && !actual_constrained)
             sem_error(param, "cannot map unconstrained array type %s to "
                       "constrained formal generic array type %s",
+                      type_pp(map), istr(tree_ident(decl)));
+         else if (class == GTYPE_ARRAY && actual_constrained
+                  && type_has_ident(type) && !all_anon_index)
+            sem_error(param, "cannot map constrained array type %s to "
+                      "unconstrained formal generic array type %s",
                       type_pp(map), istr(tree_ident(decl)));
       }
 
@@ -5918,7 +6029,7 @@ static bool sem_check_generic_map(tree_t t, tree_t unit, nametab_t *tab)
       tree_t actual = tree_genmap(t, i);
       ok &= sem_check_generic_actual(formals, nformals, actual, unit, i, tab);
 
-      if (!ok && tree_subkind(actual) == P_POS && i >= nformals)
+      if (!ok && tree_subkind(actual) == P_POS && tree_pos(actual) >= nformals)
          break;   // Prevent useless repeated errors
    }
 
@@ -7038,7 +7149,11 @@ static bool sem_check_new(tree_t t, nametab_t *tab)
 
    const bool has_initial = tree_has_value(value);
 
-   if (!has_initial && type_is_unconstrained(type))
+   if (!has_initial && type_kind(type) == T_SUBTYPE && !type_has_ident(type)
+       && type_has_resolution(type))
+      sem_error(value, "allocator subtype indication cannot include a "
+                "resolution indication");
+   else if (!has_initial && type_is_unconstrained(type))
       sem_error(t, "unconstrained array type %pT not allowed in allocator "
                 "expression", type);
    else if (!sem_check_incomplete(t, type))
@@ -7046,11 +7161,11 @@ static bool sem_check_new(tree_t t, nametab_t *tab)
    else if (type_is_protected(type)) {
       if (has_initial)
          sem_error(t, "protected type %pT cannot have initial value", type);
-      else if (standard() >= STD_19)
+      else if (standard() >= STD_08)
          tree_set_global_flags(t, TREE_GF_INSTANCE_NAME | TREE_GF_PATH_NAME);
    }
    else if (type_has_protected(type) && !has_initial
-            && standard() >= STD_19)
+            && standard() >= STD_08)
       tree_set_global_flags(t, TREE_GF_INSTANCE_NAME | TREE_GF_PATH_NAME);
 
    type_t designated = type_designated(access_type);

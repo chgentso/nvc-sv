@@ -1708,6 +1708,7 @@ static void bounds_check_port_map(tree_t t, tree_t unit)
       switch (tree_kind(formal)) {
       case T_TYPE_CONV:
       case T_CONV_FUNC:
+      case T_PROT_FCALL:
          continue;   // Ignore for now
       default:
          bounds_check_assignment(formal, value);

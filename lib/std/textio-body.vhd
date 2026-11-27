@@ -943,10 +943,11 @@ package body textio is
     constant LINE_BUFFER_SIZE : positive := 127;
 
     procedure readline (file f: text; l: inout line) is
-        variable tmp  : line;
-        variable ch   : string(1 to 1);
-        variable used : natural;
-        variable got  : integer;
+        variable tmp   : line;
+        variable ch    : string(1 to 1);
+        variable used  : natural;
+        variable got   : integer;
+        variable first : boolean := true;
     begin
         if l /= null then
             deallocate(l);
@@ -954,6 +955,8 @@ package body textio is
 
         tmp := new string(1 to LINE_BUFFER_SIZE);
         loop
+            exit when not first and endfile(f);
+            first := false;
             read(f, ch, got);
             exit when got /= 1;
 

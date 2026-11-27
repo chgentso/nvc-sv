@@ -25,10 +25,10 @@ architecture rtl of issue1201 is
     constant INPUTS : positive := 3;
 
     subtype data_type_1 is bit_vector(7 downto 0);
-    type data_array_type_1 is array (0 to INPUTS - 1) of data_type_1;
+    type data_array_type_1 is array (natural range <>) of data_type_1;
 
     signal selector : bit_vector(INPUTS - 1 downto 0) := (others => '0');
-    signal input : data_array_type_1 := (others => (others => '0'));
+    signal input : data_array_type_1(0 to INPUTS - 1) := (others => (others => '0'));
     signal output : data_type_1;
 
 begin

@@ -131,6 +131,18 @@ typedef struct {
    uint32_t          n_write_ranges;
    int               island_idx;
    int               dom_idx;
+   // A combinational process with report or assert statements runs only
+   // when a signal of its sensitivity list changed since it last ran, as
+   // with the process unfused: the island state keeps a run flag and a
+   // copy of each such signal (offsets set with the island layout)
+   bool              has_report;
+   uint32_t         *evt_sigs;
+   uint32_t          n_evt_sigs;
+   uint32_t         *evt_part_off;    // Byte range of a signal element or
+   uint32_t         *evt_part_bytes;  // slice, 0 bytes for the whole signal
+   uint32_t         *evt_copy_off;
+   uint32_t         *evt_copy_bytes;
+   uint32_t          evt_flag_off;
    // Diagnostics for NVC_DUMP_ISLANDS: why the process is not fused
    // (reason) and what keeps its island out of Mode A (a_block).
    const char       *reason;

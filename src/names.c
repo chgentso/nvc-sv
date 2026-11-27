@@ -1445,6 +1445,24 @@ static scope_t *private_scope_for(nametab_t *tab, tree_t unit)
          }
          break;
 
+      case T_FUNC_BODY:
+      case T_PROC_BODY:
+      case T_FUNC_INST:
+      case T_PROC_INST:
+         {
+            const int nports = tree_ports(unit);
+            for (int i = 0; i < nports; i++) {
+               tree_t p = tree_port(unit, i);
+               make_visible_fast(s, tree_ident(p), p);
+            }
+            const int ngenerics = tree_generics(unit);
+            for (int i = 0; i < ngenerics; i++) {
+               tree_t g = tree_generic(unit, i);
+               make_visible_fast(s, tree_ident(g), g);
+            }
+         }
+         break;
+
       default:
          break;
       }
@@ -3198,18 +3216,61 @@ tree_t resolve_resolution(nametab_t *tab, tree_t rname, type_t type)
 
    switch (tree_kind(rname)) {
    case T_ELEM_RESOLUTION:
-      if (type_is_record(type))
-         error_at(tree_loc(rname), "sorry, record element resolution is not "
-                  "supported yet");
+      if (type_is_record(type)) {
+         type_t base = type_base_recur(type);
+         const int nassocs = tree_assocs(rname);
+         const int nfields = type_fields(base);
+         bit_mask_t seen;
+         mask_init(&seen, nfields);
+
+         for (int i = 0; i < nassocs; i++) {
+            tree_t a = tree_assoc(rname, i);
+            if (tree_subkind(a) != A_NAMED) {
+               error_at(tree_loc(a), "record type %pT requires record element "
+                        "resolution indication", type);
+               continue;
+            }
+
+            tree_t ref = tree_name(a);
+            ident_t fname = tree_ident(ref);
+            tree_t fdecl = NULL;
+            for (int j = 0; j < nfields; j++) {
+               tree_t f = type_field(base, j);
+               if (tree_ident(f) == fname) {
+                  fdecl = f;
+                  if (mask_test(&seen, j))
+                     error_at(tree_loc(ref), "duplicate resolution indication "
+                              "for record element %pI", fname);
+                  mask_set(&seen, j);
+                  break;
+               }
+            }
+
+            if (fdecl == NULL) {
+               error_at(tree_loc(ref), "record type %pT has no element named "
+                        "%pI", type, fname);
+               continue;
+            }
+
+            tree_set_ref(ref, fdecl);
+            tree_set_type(ref, tree_type(fdecl));
+            tree_set_value(a, resolve_resolution(tab, tree_value(a),
+                                                 tree_type(fdecl)));
+         }
+
+         mask_free(&seen);
+      }
       else if (!type_is_array(type))
          error_at(tree_loc(rname), "non-composite type %pT may not have "
                   "element resolution indication", type);
-      else if (tree_assocs(rname) != 1)
+      else if (tree_assocs(rname) != 1
+               || tree_subkind(tree_assoc(rname, 0)) != A_POS)
          error_at(tree_loc(rname), "non-record type %pT may not have record "
                   "element resolution indication", type);
       else {
-         tree_t a0 = tree_value(tree_assoc(rname, 0));
-         resolve_resolution(tab, a0, type_elem(type));
+         tree_t a0 = tree_assoc(rname, 0);
+         tree_set_value(a0, resolve_resolution(tab, tree_value(a0),
+                                               type_elem(type)));
       }
       return rname;
 
@@ -4888,23 +4949,29 @@ static void solve_subprogram_params(nametab_t *tab, tree_t call, overload_t *o)
 
    // Attempt to solve remaining parameters but suppress errors
 
-   for (int i = 0; i < nparams; i++) {
-      if (mask_test(&pmask, i))
-         continue;
+   bool progress;
+   do {
+      progress = false;
+      for (int i = 0; i < nparams; i++) {
+         if (mask_test(&pmask, i))
+            continue;
 
-      tree_t p = tree_param(call, i);
-      tree_t value = tree_value(p);
+         tree_t p = tree_param(call, i);
 
-      const bool trial = o->trial
-         || (o->candidates.count > 1 && mask_popcount(&pmask) + 1 < nparams);
+         const bool trial = o->trial
+            || (o->candidates.count > 1 && mask_popcount(&pmask) + 1 < nparams);
 
-      if (o->error) {
-         solve_erroneous_param(tab, p);
-         mask_set(&pmask, i);
+         if (o->error) {
+            solve_erroneous_param(tab, p);
+            mask_set(&pmask, i);
+            progress = true;
+         }
+         else if (solve_one_param(tab, p, o, trial)) {
+            mask_set(&pmask, i);
+            progress = true;
+         }
       }
-      else if (solve_one_param(tab, p, o, trial))
-         mask_set(&pmask, i);
-   }
+   } while (progress && mask_popcount(&pmask) < nparams);
 
    if (o->trial && mask_popcount(&pmask) < nparams) {
       o->cancelled = true;

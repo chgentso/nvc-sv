@@ -2157,6 +2157,8 @@ static tree_t fcall_to_conv_func(tree_t value)
    tree_t decl = tree_ref(value);
    if (tree_ports(decl) != 1)
       return value;
+   else if (tree_class(tree_port(decl, 0)) != C_CONSTANT)
+      return value;
 
    tree_t p0 = tree_value(tree_param(value, 0));
 
@@ -4063,6 +4065,9 @@ static tree_t p_formal_part(tree_t head, type_t *signature, formal_kind_t kind)
    case T_FCALL:
       return fcall_to_conv_func(name);
 
+   case T_PROT_FCALL:
+      break;
+
    case T_REF:
       break;
 
@@ -4836,6 +4841,10 @@ static void p_generic_association_list(tree_t map, tree_t unit)
 
    int pos = 0;
    do {
+      while (pos < ngenerics
+             && (tree_flags(tree_generic(unit, pos)) & TREE_F_PREDEFINED))
+         pos++;
+
       tree_t g = pos < ngenerics ? tree_generic(unit, pos) : NULL;
       tree_t elem = unit != NULL && unit == black_box_comp
          ? p_inferred_association(unit, pos++, F_GENERIC_MAP)
@@ -5761,7 +5770,17 @@ static tree_t p_element_resolution(void)
 
    do {
       tree_t a = tree_new(T_ASSOC);
-      tree_set_subkind(a, A_POS);
+      if (peek() == tID && (peek_nth(2) == tID || peek_nth(2) == tLPAREN)) {
+         ident_t field = p_identifier();
+         tree_t ref = tree_new(T_REF);
+         tree_set_ident(ref, field);
+         tree_set_loc(ref, &state.last_loc);
+         tree_set_subkind(a, A_NAMED);
+         tree_set_name(a, ref);
+      }
+      else
+         tree_set_subkind(a, A_POS);
+
       tree_set_value(a, p_resolution_indication());
       tree_set_loc(a, CURRENT_LOC);
 
@@ -11256,6 +11275,10 @@ static tree_t p_package_declaration(tree_t unit)
    }
 
    pop_scope(nametab);
+
+   if (unit == NULL)
+      sem_defer_pack_body(pack, nametab);
+
    return pack;
 }
 
@@ -13259,6 +13282,14 @@ static tree_t p_sequential_statement(void)
    case tID:
    case tLTLT:
       break;
+
+   case tSTRING:
+      if (peek_nth(2) == tDOT)
+         break;
+      expect(tWAIT, tID, tASSERT, tREPORT, tIF, tNULL, tRETURN, tCASE, tWHILE,
+             tFOR, tLOOP, tEXIT, tNEXT, tWITH, tLTLT, tLPAREN, tBLOCK);
+      parse_sync(&state, 2);
+      return tree_new(T_NULL);
 
    case tLPAREN:
       {

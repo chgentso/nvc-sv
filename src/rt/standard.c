@@ -27,6 +27,7 @@
 #include <inttypes.h>
 #include <string.h>
 #include <float.h>
+#include <math.h>
 
 static void bit_vec_to_string(jit_scalar_t *args, tlab_t *tlab, int log_base,
                               int first_arg)
@@ -178,6 +179,12 @@ void _std_to_string_real(jit_scalar_t *args, tlab_t *tlab)
    const size_t max = 32;
    char *buf = tlab_alloc(tlab, max);
    size_t len = checked_sprintf(buf, max, "%.*g", DBL_DIG, args[1].real);
+
+   if (isfinite(args[1].real) && strpbrk(buf, ".eE") == NULL && len + 2 < max) {
+      buf[len++] = '.';
+      buf[len++] = '0';
+      buf[len] = '\0';
+   }
 
    args[0].pointer = buf;
    args[1].integer = 1;

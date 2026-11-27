@@ -513,7 +513,8 @@ static bool jit_intrinsic_is_mt_safe(ident_t name)
       || strcmp(s, "__sv_real_finite") == 0
       || strcmp(s, "__sv_wildcard_eq") == 0
       || strcmp(s, "__sv_logic_to_std") == 0
-      || strcmp(s, "__sv_std_to_logic") == 0;
+      || strcmp(s, "__sv_std_to_logic") == 0
+      || strcmp(s, "__sv_island_in_reset") == 0;
 }
 
 static void jit_prepare_deps(jit_t *j, jit_func_t *f)
@@ -656,8 +657,13 @@ void *jit_get_frame_var(jit_t *j, jit_handle_t handle, void *p, ident_t name)
    fatal_trace("%s has no variable %s", istr(f->name), istr(name));
 }
 
-static bool find_island_proc_loc(tree_t blk, const loc_t *loc, text_buf_t *tb,
-                                 int depth)
+// Name the process of an RTL island function that contains LOC.  A process
+// longer than a loc_t line delta can express (DELTA_INVALID) contains every
+// line after its first: the one starting last before LOC is taken when no
+// process range contains it.
+static bool find_island_proc_loc_r(tree_t blk, const loc_t *loc,
+                                   text_buf_t *tb, int depth, bool open_end,
+                                   unsigned *best_line, text_buf_t *best)
 {
    if (blk == NULL || loc == NULL || depth > 16)
       return false;
@@ -667,12 +673,20 @@ static bool find_island_proc_loc(tree_t blk, const loc_t *loc, text_buf_t *tb,
       tree_t st = tree_stmt(blk, i);
       if (tree_kind(st) == T_PROCESS) {
          const loc_t *pl = tree_loc(st);
-         if (pl->file_ref == loc->file_ref
-             && loc->first_line >= pl->first_line
-             && loc->first_line <= pl->first_line + pl->line_delta) {
+         if (pl->file_ref != loc->file_ref || loc->first_line < pl->first_line)
+            continue;
+         if (loc->first_line <= pl->first_line + pl->line_delta) {
             tb_append(tb, ':');
             tb_istr(tb, ident_downcase(tree_ident(st)));
             return true;
+         }
+         else if (open_end && pl->line_delta == DELTA_INVALID
+                  && (*best_line == 0 || pl->first_line > *best_line)) {
+            *best_line = pl->first_line;
+            tb_rewind(best);
+            tb_cat(best, tb_get(tb));
+            tb_append(best, ':');
+            tb_istr(best, ident_downcase(tree_ident(st)));
          }
       }
       else if (tree_kind(st) == T_BLOCK && tree_decls(st) > 0
@@ -683,13 +697,27 @@ static bool find_island_proc_loc(tree_t blk, const loc_t *loc, text_buf_t *tb,
             const size_t mark = tb_len(tb);
             tb_append(tb, ':');
             tb_istr(tb, ident_downcase(tree_ident(st)));
-            if (find_island_proc_loc(st, loc, tb, depth + 1))
+            if (find_island_proc_loc_r(st, loc, tb, depth + 1, open_end,
+                                       best_line, best))
                return true;
             tb_trim(tb, mark);
          }
       }
    }
    return false;
+}
+
+static bool find_island_proc_loc(tree_t blk, const loc_t *loc, text_buf_t *tb)
+{
+   LOCAL_TEXT_BUF best = tb_new();
+   unsigned best_line = 0;
+   if (find_island_proc_loc_r(blk, loc, tb, 0, true, &best_line, best))
+      return true;
+   else if (best_line == 0)
+      return false;
+   tb_rewind(tb);
+   tb_cat(tb, tb_get(best));
+   return true;
 }
 
 static void jit_emit_trace(diag_t *d, const loc_t *loc, object_t *enclosing,
@@ -731,7 +759,7 @@ static void jit_emit_trace(diag_t *d, const loc_t *loc, object_t *enclosing,
                LOCAL_TEXT_BUF tb = tb_new();
                for (const char *p = dot; p < tag; p++)
                   tb_append(tb, *p == '.' ? ':' : tolower_iso88591(*p));
-               find_island_proc_loc(tree, loc, tb, 0);
+               find_island_proc_loc(tree, loc, tb);
                diag_trace(d, loc, "Process$$ %s", tb_get(tb));
                break;
             }
@@ -754,6 +782,9 @@ static void jit_emit_trace(diag_t *d, const loc_t *loc, object_t *enclosing,
          break;
       case T_PARAM:
          diag_trace(d, loc, "Port conversion");
+         break;
+      case T_ASSOC:
+         diag_trace(d, loc, "Resolution wrapper");
          break;
       default:
          {
@@ -1279,6 +1310,11 @@ bool jit_set_silent(jit_t *j, bool silent)
    const bool prev = j->silent;
    j->silent = silent;
    return prev;
+}
+
+bool jit_is_silent(jit_t *j)
+{
+   return j->silent;
 }
 
 void jit_msg(const loc_t *where, diag_level_t level, const char *fmt, ...)

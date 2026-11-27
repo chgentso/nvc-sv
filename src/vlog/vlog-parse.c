@@ -41,6 +41,19 @@
 #include <inttypes.h>
 
 static parse_state_t    state;
+
+static parse_state_t *save_parse_state(void)
+{
+   parse_state_t *saved = xmalloc(sizeof(parse_state_t));
+   *saved = state;
+   return saved;
+}
+
+static void restore_parse_state(parse_state_t *saved)
+{
+   state = *saved;
+   free(saved);
+}
 static vlog_kind_t      param_kind;
 static int              systf_depth;
 static vlog_net_kind_t  implicit_kind;
@@ -701,6 +714,21 @@ static vlog_node_t qualify_scope = NULL;
 static int pattern_array_elems = 0;   // Unpacked array depth for nested patterns
 static vlog_scope_t *select_scope = NULL;
 static bool        qualify_failed = false;
+static bool        qualify_unit = false;
+
+static bool is_unit_scope(void)
+{
+   return peek() == tSYSTASK && peek_nth(2) == tSCOPE
+      && state.tokenq[state.tokenq_tail].lval.ident == ident_new("$unit");
+}
+
+static vlog_node_t lookup_unit_decl(ident_t id, const loc_t *loc)
+{
+   vlog_node_t d = vlog_symtab_query_unit(symtab, id);
+   if (d == NULL)
+      error_at(loc, "%pQ is not declared in compilation unit $unit", id);
+   return d;
+}
 
 // Set after parsing the definition of a method outside of its class
 static bool extern_definition = false;
@@ -1183,6 +1211,15 @@ static bool scan_type_declaration(void)
    case tSTRINGK: case tCHANDLE:   case tEVENT:    case tVIRTUAL: case tAUTOMATIC:
    case tSTATIC:    case tCONST:    case tVAR:     case tTYPE:
       return true;
+   case tSYSTASK:
+      if (is_unit_scope() && peek_nth(3) == tID) {
+         vlog_node_t dt = vlog_symtab_query_unit(symtab, peek_ident_nth(3));
+         if (dt != NULL)
+            return is_data_type(dt)
+               || (vlog_kind(dt) == V_CLASS_DECL
+                   && (peek_nth(4) == tSCOPE || peek_nth(4) == tHASH));
+      }
+      return false;
    case tID:
       {
          if (is_specialised_scope())
@@ -1205,7 +1242,8 @@ static bool scan_type_declaration(void)
                return true;
          }
 
-         return (dt != NULL && is_data_type(dt)) || peek_nth(2) == tHASH;
+         return (dt != NULL && is_data_type(dt) && peek_nth(2) != tDOT)
+            || peek_nth(2) == tHASH;
       }
    default:
       return false;
@@ -1257,7 +1295,7 @@ static bool is_array_method_name(ident_t id)
    static const char *const names[] = {
       "reverse", "sort", "rsort", "shuffle", "sum", "product", "and", "or",
       "xor", "min", "max", "unique", "unique_index", "find", "find_index",
-      "find_first", "find_first_index", "find_last", "find_last_index",
+      "find_first", "find_first_index", "find_last", "find_last_index", "map",
    };
 
    for (int i = 0; i < ARRAY_LEN(names); i++) {
@@ -2796,6 +2834,46 @@ static vlog_node_t p_data_type(void)
          return v;
       }
 
+   case tSYSTASK:
+      if (is_unit_scope()) {
+         consume(tSYSTASK);
+         consume(tSCOPE);
+
+         ident_t id = p_identifier();
+         vlog_node_t d = lookup_unit_decl(id, &state.last_loc);
+         while (d != NULL && peek() == tSCOPE) {
+            if (vlog_kind(d) == V_TYPE_DECL)
+               d = vlog_get_type(d);
+            consume(tSCOPE);
+            ident_t mid = p_identifier();
+            if (d != NULL && vlog_kind(d) == V_CLASS_DECL)
+               d = vlog_scope_member(d, mid);
+            else {
+               error_at(&state.last_loc, "%pQ is not a class", id);
+               d = NULL;
+            }
+            id = mid;
+         }
+
+         if (d != NULL && !is_data_type(d)) {
+            error_at(&state.last_loc, "%pQ is not a data type", id);
+            d = NULL;
+         }
+         else if (d != NULL && vlog_kind(d) == V_CLASS_DECL
+                  && (vlog_flags(d) & VLOG_F_GENERIC))
+            return specialise_scoped(d, false);
+
+         if (d != NULL && peek() == tLSQUARE)
+            d = p_typedef_dimensions(d);
+         else if (d == NULL) {
+            d = logic_type();
+            while (peek() == tLSQUARE)
+               vlog_add_range(d, p_packed_dimension());
+         }
+
+         return d;
+      }
+      // Fall-through
    case tID:
       {
          int hlen;
@@ -2967,6 +3045,10 @@ static vlog_node_t p_data_type_or_implicit(void)
    BEGIN("data type or implicit");
 
    switch (peek()) {
+   case tSYSTASK:
+      if (is_unit_scope())
+         return p_data_type();
+      return p_implicit_data_type();
    case tID:
       if (peek_nth(2) == tID || peek_nth(2) == tHASH || is_scoped_type_start()
           || (is_process_name() && peek_nth(2) == tSCOPE)
@@ -3690,6 +3772,27 @@ static vlog_node_t p_method_call_rest(vlog_node_t prefix, ident_t id)
       vlog_set_type(item, arraytype);
       vlog_set_loc(item, &state.last_loc);
 
+      // When reducing a multi-dimensional fixed unpacked array, the iterator
+      // carries the remaining inner unpacked dimensions
+      if (vlog_kind(prefix) == V_REF || vlog_kind(prefix) == V_MEMBER_REF
+          || vlog_kind(prefix) == V_HIER_REF
+          || vlog_kind(prefix) == V_BIT_SELECT) {
+         vlog_node_t base = prefix;
+         int skip = 0;
+         while (vlog_kind(base) == V_BIT_SELECT) {
+            skip += vlog_params(base);
+            base = vlog_value(base);
+         }
+         if ((vlog_kind(base) == V_REF || vlog_kind(base) == V_MEMBER_REF
+              || vlog_kind(base) == V_HIER_REF)
+             && vlog_has_ref(base) && vlog_is_fixed_unpacked(vlog_ref(base))) {
+            vlog_node_t d = vlog_ref(base);
+            const int nr = vlog_ranges(d);
+            for (int i = skip + 1; i < nr; i++)
+               vlog_add_range(item, vlog_range(d, i));
+         }
+      }
+
       vlog_node_t index = vlog_new(V_LOCAL_DECL);
       vlog_set_ident(index, ident_new("index"));
       vlog_node_t inttype = make_integer_atom_type(DT_INT);
@@ -3976,6 +4079,19 @@ static bool foreach_at_last_index(void)
    return peek_nth(n) == tRPAREN;
 }
 
+static bool is_non_agg_data_type(vlog_node_t d)
+{
+   if (d == NULL || !is_data_type(d))
+      return false;
+
+   vlog_node_t t = vlog_get_type(d);
+   if (t == NULL)
+      return true;
+
+   const vlog_kind_t k = vlog_kind(t);
+   return k != V_STRUCT_DECL && k != V_UNION_DECL && k != V_CLASS_DECL;
+}
+
 static vlog_node_t p_select(ident_t id)
 {
    // [ { . member_identifier bit_select } . member_identifier ]
@@ -3988,8 +4104,10 @@ static vlog_node_t p_select(ident_t id)
 
    vlog_node_t qscope = qualify_scope;
    const bool qfailed = qualify_failed;
+   const bool qunit = qualify_unit;
    qualify_scope = NULL;
    qualify_failed = false;
+   qualify_unit = false;
 
    vlog_scope_t *sscope = select_scope;
    select_scope = NULL;
@@ -4025,6 +4143,15 @@ static vlog_node_t p_select(ident_t id)
       if (!defer_class_lookup(prefix, qscope))
          vlog_symtab_lookup_in(symtab, prefix, qscope);
    }
+   else if (qunit) {
+      prefix = vlog_new(V_REF);
+      vlog_set_ident(prefix, id);
+      vlog_set_loc(prefix, CURRENT_LOC);
+
+      vlog_node_t d = lookup_unit_decl(id, &state.last_loc);
+      if (d != NULL)
+         vlog_set_ref(prefix, d);
+   }
    else if (clocking_names != NULL && hset_contains(clocking_names, id)
             && vlog_symtab_query(symtab, id) == NULL) {
       prefix = vlog_new(V_REF);
@@ -4052,8 +4179,10 @@ static vlog_node_t p_select(ident_t id)
       }
       else if (is_inst)
          prefix = p_hierarchical_identifier(id);
-      else if (d == NULL && (peek() == tDOT || at_instance_index(true))) {
-         // Assume this is a hierarchical reference to a later instance
+      else if ((d == NULL || is_non_agg_data_type(d)
+                || vlog_kind(d) == V_SEQ_BLOCK || vlog_kind(d) == V_FORK)
+               && (peek() == tDOT || at_instance_index(true))) {
+         // Assume this is a hierarchical reference to a later instance or block
          prefix = p_hierarchical_identifier(id);
       }
       else {
@@ -4152,6 +4281,11 @@ static vlog_node_t p_select(ident_t id)
             if (vlog_kind(sub) == V_FUNC_DECL
                 || vlog_kind(sub) == V_TASK_DECL) {
                ident_t id = peek_ident_nth(1);
+               if (vlog_kind(sub) == V_FUNC_DECL && id == vlog_ident(sub)
+                   && (vlog_flags(sub) & VLOG_F_STATIC) && vlog_has_type(sub)) {
+                  consume(tID);
+                  continue;
+               }
                ident_t prefix_id = ident_sprintf("%s$static", istr(id));
                vlog_node_t found = NULL;
                const int ndecls = vlog_decls(sub);
@@ -4513,8 +4647,11 @@ static void p_list_of_arguments(vlog_node_t call)
       else if (peek() == tTICK && peek_nth(2) == tLBRACE) {
          if ((pattern_type = arg_pattern_type(call, vlog_params(call))))
             vlog_add_param(call, p_assignment_pattern_expression(pattern_type));
-         else if (vlog_kind(call) == V_METHOD_CALL
-                  && vlog_virtual_pending(call))
+         else if ((vlog_kind(call) == V_METHOD_CALL
+                   && vlog_virtual_pending(call))
+                  || ((vlog_kind(call) == V_USER_FCALL
+                       || vlog_kind(call) == V_USER_TCALL)
+                      && callee_decl == NULL))
             vlog_add_param(call, p_deferred_pattern_expression());
          else
             vlog_add_param(call, p_expression());
@@ -5752,8 +5889,10 @@ static vlog_node_t p_tf_call(vlog_kind_t kind)
 
    vlog_node_t scope = qualify_scope;
    const bool failed = qualify_failed;
+   const bool qunit = qualify_unit;
    qualify_scope = NULL;
    qualify_failed = false;
+   qualify_unit = false;
 
    vlog_node_t v = vlog_new(kind);
    vlog_set_ident(v, p_identifier());
@@ -5764,6 +5903,8 @@ static vlog_node_t p_tf_call(vlog_kind_t kind)
       vlog_node_t saved_callee = callee_decl;
       if (scope != NULL)
          callee_decl = failed ? NULL : vlog_scope_member(scope, vlog_ident(v));
+      else if (qunit)
+         callee_decl = vlog_symtab_query_unit(symtab, vlog_ident(v));
       else
          callee_decl = !failed ? vlog_symtab_query(symtab, vlog_ident(v)) : NULL;
       p_list_of_arguments(v);
@@ -5779,6 +5920,11 @@ static vlog_node_t p_tf_call(vlog_kind_t kind)
 
    if (scope != NULL)
       vlog_symtab_lookup_in(symtab, v, scope);
+   else if (qunit) {
+      vlog_node_t d = lookup_unit_decl(vlog_ident(v), vlog_loc(v));
+      if (d != NULL)
+         vlog_set_ref(v, d);
+   }
    else if (!failed)
       vlog_symtab_lookup(symtab, v);   // Otherwise reported already
 
@@ -5877,7 +6023,7 @@ static vlog_node_t p_subroutine_call(vlog_kind_t kind)
       return p_system_tf_call(kind);
    else if (is_std_randomize())
       return p_std_randomize();
-   else if (qualify_scope != NULL || qualify_failed)
+   else if (qualify_scope != NULL || qualify_failed || qualify_unit)
       return p_tf_call(kind);
    else if (is_implicit_this_call())
       return p_implicit_this_call();
@@ -6241,12 +6387,22 @@ static vlog_node_t p_scope_prefix(void)
       consume(tSCOPE);
 
       if (scope == NULL) {
-         vlog_node_t declared = vlog_symtab_query(symtab, id), d = declared;
+         vlog_node_t declared = qualify_unit
+            ? vlog_symtab_query_unit(symtab, id)
+            : vlog_symtab_query(symtab, id);
+         const bool was_unit = qualify_unit;
+         qualify_unit = false;
+         vlog_node_t d = declared;
          if (d != NULL && vlog_kind(d) == V_TYPE_DECL)
             d = vlog_get_type(d);
 
          if (d != NULL && vlog_kind(d) == V_CLASS_DECL)
             scope = d;
+         else if (was_unit) {
+            error_at(&loc, "%pQ is not a class in compilation unit $unit", id);
+            qualify_failed = true;
+            return NULL;
+         }
          else if (lib_scan_active() && is_scope_declaration(declared))
             scope = NULL;   // Declared here: not a package to be found
          else
@@ -7990,6 +8146,11 @@ static vlog_node_t p_primary(void)
                      root);
 
       consume(tDOT);
+   }
+   else if (is_unit_scope()) {
+      consume(tSYSTASK);
+      consume(tSCOPE);
+      qualify_unit = true;
    }
 
    vlog_node_t head;
@@ -11027,6 +11188,19 @@ static vlog_node_t p_subroutine_call_statement(void)
          consume(tTICK);
          consume(tLPAREN);
 
+         if (peek() == tSYSTASK && peek_nth(2) == tDOT) {
+            ident_t root = p_system_tf_identifier();
+            if (root != ident_new("$root"))
+               parse_error(&state.last_loc,
+                           "unexpected system name %pi before '.'", root);
+            consume(tDOT);
+         }
+         else if (is_unit_scope()) {
+            consume(tSYSTASK);
+            consume(tSCOPE);
+            qualify_unit = true;
+         }
+
          const vlog_kind_t kind =
             peek() == tSYSTASK ? V_SYS_FCALL : V_USER_FCALL;
 
@@ -11649,8 +11823,10 @@ static vlog_node_t p_foreach_statement(void)
 
          if (top == NULL)
             top = loop;
-         else
+         else {
+            vlog_set_flags(d, vlog_flags(d) | VLOG_F_FOREACH_INNER);
             vlog_add_stmt(inner, loop);
+         }
 
          inner = loop;
          continue;
@@ -11750,8 +11926,10 @@ static vlog_node_t p_foreach_statement(void)
 
          if (top == NULL)
             top = loop;
-         else
+         else {
+            vlog_set_flags(d, vlog_flags(d) | VLOG_F_FOREACH_INNER);
             vlog_add_stmt(inner, loop);
+         }
 
          inner = loop;
          continue;
@@ -11886,8 +12064,10 @@ static vlog_node_t p_foreach_statement(void)
 
       if (top == NULL)
          top = loop;
-      else
+      else {
+         vlog_set_flags(d, vlog_flags(d) | VLOG_F_FOREACH_INNER);
          vlog_add_stmt(inner, loop);
+      }
 
       inner = loop;
    }
@@ -12780,10 +12960,13 @@ static vlog_node_t p_disable_statement(void)
 
    vlog_node_t decl = vlog_symtab_query(symtab, id);
 
-   if (decl != NULL && vlog_kind(decl) == V_TASK_DECL && peek() == tDOT) {
-      // A named block inside a task
-      consume(tDOT);
-      id = p_identifier();
+   if (decl != NULL && (vlog_kind(decl) == V_TASK_DECL
+                        || vlog_kind(decl) == V_SEQ_BLOCK
+                        || vlog_kind(decl) == V_FORK)
+       && peek() == tDOT) {
+      // A named block inside a task, sequential block, or fork
+      while (optional(tDOT))
+         id = p_identifier();
       decl = NULL;
    }
    else if ((decl != NULL && (vlog_kind(decl) == V_MOD_INST
@@ -13945,6 +14128,24 @@ static vlog_node_t p_statement_item(ident_t id)
          return v;
       }
       // Fall-through
+   case tSYSTASK:
+      if (peek() == tSYSTASK) {
+         if (is_unit_scope()) {
+            consume(tSYSTASK);
+            consume(tSCOPE);
+            qualify_unit = true;
+         }
+         else if (peek_nth(2) != tDOT)
+            return p_subroutine_call_statement();
+         else {
+            ident_t root = p_system_tf_identifier();
+            if (root != ident_new("$root"))
+               parse_error(&state.last_loc,
+                           "unexpected system name %pi before '.'", root);
+            consume(tDOT);
+         }
+      }
+      // Fall-through
    case tID:
       if (at_checker_call())
          return p_checker_call();
@@ -14049,7 +14250,6 @@ static vlog_node_t p_statement_item(ident_t id)
       return p_seq_block(id);
    case tFORK:
       return p_par_block(id);
-   case tSYSTASK:
    case tVOID:
       return p_subroutine_call_statement();
    case tIF:
@@ -14123,8 +14323,6 @@ static vlog_node_t p_statement_item(ident_t id)
    case tASSERT:
    case tASSUME:
    case tCOVER:
-      if (id != NULL)
-         check_assertion_label(id, &state.tokenq[state.tokenq_tail].loc);
       if (peek_nth(2) == tPROPERTY || peek_nth(2) == tSEQUENCE)
          return p_procedural_concurrent_assertion();
       if (id != NULL)
@@ -14175,22 +14373,39 @@ static vlog_node_t p_statement(void)
    case tPRIORITY:
       wrap = id != NULL;
       break;
+   case tASSERT:
+   case tASSUME:
+   case tCOVER:
+      wrap = id != NULL && peek_nth(2) != tPROPERTY
+         && peek_nth(2) != tSEQUENCE;
+      if (id != NULL && !wrap)
+         check_assertion_label(id, &state.tokenq[state.tokenq_tail].loc);
+      break;
    default:
       break;
+   }
+
+   vlog_node_t wrap_block = NULL;
+   if (wrap) {
+      wrap_block = vlog_new(V_SEQ_BLOCK);
+      vlog_set_ident(wrap_block, id);
+      vlog_set_loc(wrap_block, CURRENT_LOC);
+      vlog_symtab_push(symtab, wrap_block);
+      note_block_name(id);
    }
 
    const int depth = match_depth;
    vlog_node_t v = p_statement_item(id);
    match_unwind(depth);
 
-   if (wrap && v != NULL) {
-      vlog_node_t b = vlog_new(V_SEQ_BLOCK);
-      vlog_set_ident(b, id);
-      vlog_set_loc(b, vlog_loc(v));
-      vlog_add_stmt(b, v);
-      vlog_symtab_put(symtab, b);
-      note_block_name(id);
-      return b;
+   if (wrap_block != NULL) {
+      scope_leave();
+      if (v != NULL) {
+         vlog_set_loc(wrap_block, vlog_loc(v));
+         vlog_add_stmt(wrap_block, v);
+         vlog_symtab_put(symtab, wrap_block);
+         return wrap_block;
+      }
    }
 
    return v;
@@ -15444,7 +15659,7 @@ static vlog_node_t p_type_declaration(void)
 
       consume(tSEMI);
 
-      if (vlog_symtab_query(symtab, id) == NULL) {
+      if (vlog_symtab_query_local(symtab, id) == NULL) {
          vlog_node_t c = vlog_new(V_CLASS_DECL);
          vlog_set_ident(c, id);
          vlog_set_flags(c, VLOG_F_FORWARD);
@@ -15463,7 +15678,7 @@ static vlog_node_t p_type_declaration(void)
       const loc_t loc = state.last_loc;
       consume(tSEMI);
 
-      if (vlog_symtab_query(symtab, id) == NULL) {
+      if (vlog_symtab_query_local(symtab, id) == NULL) {
          vlog_node_t c = vlog_new(V_CLASS_DECL);
          vlog_set_ident(c, id);
          vlog_set_flags(c, VLOG_F_FORWARD);
@@ -15485,7 +15700,7 @@ static vlog_node_t p_type_declaration(void)
       const loc_t loc = state.last_loc;
       consume(tSEMI);
 
-      if (vlog_symtab_query(symtab, id) == NULL) {
+      if (vlog_symtab_query_local(symtab, id) == NULL) {
          vlog_node_t fwd_td = vlog_new(V_TYPE_DECL);
          vlog_set_ident(fwd_td, id);
          vlog_set_flags(fwd_td, VLOG_F_FORWARD);
@@ -15505,7 +15720,7 @@ static vlog_node_t p_type_declaration(void)
    typedef_depth--;
    ident_t id = p_identifier();
 
-   vlog_node_t existing = vlog_symtab_query(symtab, id);
+   vlog_node_t existing = vlog_symtab_query_local(symtab, id);
    vlog_node_t v;
    if (existing != NULL && vlog_kind(existing) == V_TYPE_DECL
        && (vlog_flags(existing) & VLOG_F_FORWARD)) {
@@ -15528,7 +15743,7 @@ static vlog_node_t p_type_declaration(void)
          i--;
       }
    }
-   vlog_node_t fwd_cls = vlog_symtab_query(symtab, vlog_ident(v));
+   vlog_node_t fwd_cls = vlog_symtab_query_local(symtab, vlog_ident(v));
    if (fwd_cls != NULL && vlog_kind(fwd_cls) == V_CLASS_DECL
        && (vlog_flags(fwd_cls) & VLOG_F_FORWARD)) {
       for (int i = 0; i < forward_classes.count; i++) {
@@ -16618,6 +16833,10 @@ static void p_function_body_declaration(vlog_node_t func)
 
    vlog_symtab_put(symtab, func);
 
+   if (!parsing_prototype && !proc_automatic && class_depth == 0
+       && rtype != NULL && !(vlog_flags(func) & VLOG_F_DPI))
+      vlog_set_flags(func, VLOG_F_STATIC);
+
    vlog_symtab_push(symtab, func);
 
    const vlog_kind_t old_param_kind = param_kind;
@@ -16728,6 +16947,8 @@ static vlog_node_t p_constant_param_expression(void)
    return p_mintypmax_expression();
 }
 
+static int decl_unpacked_depth(vlog_node_t d);
+
 static vlog_node_t p_param_assignment(vlog_node_t datatype, vlog_kind_t kind)
 {
    // parameter_identifier { unpacked_dimension }
@@ -16750,6 +16971,32 @@ static vlog_node_t p_param_assignment(vlog_node_t datatype, vlog_kind_t kind)
       }
       else
          vlog_set_value(v, p_constant_param_expression());
+
+      // An untyped parameter takes the type of a struct, union, enum, or
+      // string initialiser (1800-2017 6.20.2)
+      if (is_implicit_data_type(dt) && vlog_ranges(dt) == 0
+          && vlog_ranges(v) == 0
+          && (vlog_flags(dt) & (VLOG_F_SIGNED | VLOG_F_UNSIGNED)) == 0) {
+         vlog_node_t init = vlog_value(v);
+         vlog_node_t it = vlog_get_type(init);
+         if (vlog_kind(init) == V_SYS_FCALL
+             && vlog_is_sformatf(vlog_ident(init))) {
+            vlog_node_t str = vlog_new(V_DATA_TYPE);
+            vlog_set_subkind(str, DT_STRING);
+            vlog_set_loc(str, vlog_loc(init));
+            vlog_set_type(v, str);
+         }
+         else if (it != NULL
+                  && (vlog_kind(init) != V_REF || !vlog_has_ref(init)
+                      || decl_unpacked_depth(vlog_ref(init)) == 0)
+                  && (vlog_kind(it) == V_STRUCT_DECL
+                      || vlog_kind(it) == V_UNION_DECL
+                      || vlog_kind(it) == V_ENUM_DECL
+                      || (vlog_kind(it) == V_DATA_TYPE
+                          && vlog_subkind(it) == DT_STRING))) {
+            vlog_set_type(v, it);
+         }
+      }
    }
 
    vlog_set_loc(v, CURRENT_LOC);
@@ -18002,7 +18249,7 @@ static void cov_replay(vlog_node_t parent, tokenq_t *toks, int ntoks)
       .tokens  = toks,
    };
 
-   parse_state_t saved = state;
+   parse_state_t *saved = save_parse_state();
    generic_class_t *saved_class = replay_class;
    const int saved_pos = replay_pos;
 
@@ -18031,7 +18278,7 @@ static void cov_replay(vlog_node_t parent, tokenq_t *toks, int ntoks)
    }
 
    cov_replaying = saved_replaying;
-   state = saved;
+   restore_parse_state(saved);
    replay_class = saved_class;
    replay_pos = saved_pos;
 }
@@ -18281,7 +18528,7 @@ static vlog_node_t bind_replay(cov_toks_t toks, bool bind)
       .tokens  = copy,
    };
 
-   parse_state_t saved = state;
+   parse_state_t *saved = save_parse_state();
    generic_class_t *saved_class = replay_class;
    const int saved_pos = replay_pos;
 
@@ -18294,7 +18541,7 @@ static vlog_node_t bind_replay(cov_toks_t toks, bool bind)
 
    vlog_node_t v = p_description();
 
-   state = saved;
+   restore_parse_state(saved);
    replay_class = saved_class;
    replay_pos = saved_pos;
    return v;
@@ -19189,7 +19436,7 @@ static vlog_node_t replay_param_type(const generic_param_t *p)
       .tokens  = p->type,
    };
 
-   parse_state_t saved = state;
+   parse_state_t *saved = save_parse_state();
    generic_class_t *saved_class = replay_class;
    const int saved_pos = replay_pos;
 
@@ -19206,7 +19453,7 @@ static vlog_node_t replay_param_type(const generic_param_t *p)
    else
       result = p_data_type_or_implicit();
 
-   state = saved;
+   restore_parse_state(saved);
    replay_class = saved_class;
    replay_pos = saved_pos;
 
@@ -19267,12 +19514,12 @@ static void add_pfmt_methods(vlog_node_t class)
    tb_printf(tb, "virtual function string __cname();\nreturn \"%s\";\n"
              "endfunction\n", cname);
    tb_cat(tb, "function int __oidn();\nreturn $__clsoid;\nendfunction\n");
-   tb_printf(tb, "virtual function %s __cl();\n%s __r = new this;\n"
-             "return __r;\nendfunction\n", cname, cname);
-   tb_printf(tb, "static function string __pn(%s h);\n"
-             "if (h == null) return \"null\";\n"
-             "return $sformatf(\"%%s#%%0d\", h.__cname(), h.__oidn());\n"
-             "endfunction\n", cname);
+   tb_cat(tb, "virtual function __pfmt_self __cl();\n__pfmt_self __r = new this;\n"
+          "return __r;\nendfunction\n");
+   tb_cat(tb, "static function string __pn(__pfmt_self h);\n"
+          "if (h == null) return \"null\";\n"
+          "return $sformatf(\"%s#%0d\", h.__cname(), h.__oidn());\n"
+          "endfunction\n");
 
    for (int plain = 0; plain < 2; plain++) {
       tb_printf(tb, "virtual function string __p%d();\n", plain);
@@ -19322,7 +19569,7 @@ static void add_pfmt_methods(vlog_node_t class)
 
       tb_cat(tb, "return __r;\nendfunction\n");
 
-      tb_printf(tb, "static function string __ps%d(%s h);\n", plain, cname);
+      tb_printf(tb, "static function string __ps%d(__pfmt_self h);\n", plain);
       tb_cat(tb, "if (h == null) return \"null\";\n");
       tb_printf(tb, "return {\"'{\", h.__p%d(), \"}\"};\n", plain);
       tb_cat(tb, "endfunction\n");
@@ -19362,6 +19609,12 @@ static void add_pfmt_methods(vlog_node_t class)
       COV_PUSH(toks, ntoks, eof);
       ntoks--;
    }
+
+   vlog_node_t self_td = vlog_new(V_TYPE_DECL);
+   vlog_set_ident(self_td, ident_new("__pfmt_self"));
+   vlog_set_type(self_td, class);
+   vlog_set_loc(self_td, loc);
+   vlog_symtab_put(symtab, self_td);
 
    cov_replay(class, toks, ntoks);
 }
@@ -19497,8 +19750,156 @@ static void p_class_body(vlog_node_t v, ident_t name, generic_class_t *g,
    const bool saved_in_subroutine = in_subroutine;
    in_subroutine = false;
 
-   while (not_at_token(tENDCLASS))
+   // Pre-parse top-level localparams in a parameterised class body whose
+   // dependencies are already visible, so earlier property declarations (e.g.
+   // Foo #(LOCALP) f;) can reference localparams declared later in the class.
+   int pre_lp[64];
+   int npre_lp = 0;
+   if (g != NULL && replay_class == g) {
+      const int queued = (state.tokenq_head - state.tokenq_tail)
+         & (TOKENQ_SIZE - 1);
+      const int body_start = replay_pos - queued;
+      int depth = 0;
+      for (int i = body_start; i < g->ntokens && npre_lp < ARRAY_LEN(pre_lp);
+           i++) {
+         const token_t tok = g->tokens[i].token;
+         if (tok == tCLASS || tok == tFUNCTION || tok == tTASK
+             || (tok == tID && g->tokens[i].lval.ident == ident_new("covergroup"))
+             || tok == tLBRACE || tok == tLPAREN
+             || tok == tLSQUARE || tok == tBEGIN || tok == tFORK) {
+            depth++;
+            continue;
+         }
+         if (tok == tENDCLASS || tok == tENDFUNCTION || tok == tENDTASK
+             || (tok == tID && g->tokens[i].lval.ident == ident_new("endgroup"))
+             || tok == tRBRACE || tok == tRPAREN
+             || tok == tRSQUARE || tok == tEND || tok == tJOIN
+             || tok == tJOINANY || tok == tJOINNONE) {
+            if (depth == 0)
+               break;
+            depth--;
+            continue;
+         }
+         if (depth == 0 && tok == tLOCALPARAM) {
+            // Find matching ';' at depth 0 and check all referenced ids
+            int end = i + 1, sub = 0;
+            bool ok = true;
+            bool past_eq = false;
+            int eq_pos = -1;
+            for (; end < g->ntokens; end++) {
+               const token_t t2 = g->tokens[end].token;
+               if (t2 == tLPAREN || t2 == tLSQUARE || t2 == tLBRACE)
+                  sub++;
+               else if (t2 == tRPAREN || t2 == tRSQUARE || t2 == tRBRACE) {
+                  if (sub == 0) { ok = false; break; }
+                  sub--;
+               }
+               else if (sub == 0 && t2 == tSEMI)
+                  break;
+               else if (sub == 0 && t2 == tTYPE) {
+                  ok = false;   // Skip localparam type for normal pass
+                  break;
+               }
+               else if (sub == 0 && t2 == tCOMMA) {
+                  ok = false;   // Multi-item list: handle in normal pass
+                  break;
+               }
+               else if (sub == 0 && t2 == tEQ && !past_eq) {
+                  past_eq = true;
+                  eq_pos = end;
+               }
+            }
+            if (!ok || !past_eq || end >= g->ntokens) {
+               i = end;
+               continue;
+            }
+            // Check every identifier except the declared name itself (right
+            // before '=' or before any unpacked dims preceding '=')
+            int name_pos = eq_pos - 1;
+            while (name_pos > i && g->tokens[name_pos].token == tRSQUARE) {
+               int b = 1;
+               name_pos--;
+               while (name_pos > i && b > 0) {
+                  if (g->tokens[name_pos].token == tRSQUARE) b++;
+                  else if (g->tokens[name_pos].token == tLSQUARE) b--;
+                  name_pos--;
+               }
+            }
+            if (name_pos <= i || g->tokens[name_pos].token != tID) {
+               i = end;
+               continue;
+            }
+            for (int k = i + 1; k < end && ok; k++) {
+               if (k == name_pos)
+                  continue;
+               if (g->tokens[k].token == tID) {
+                  // Allow scope::member only if scope is known
+                  if (k > i + 1 && (g->tokens[k - 1].token == tSCOPE
+                                    || g->tokens[k - 1].token == tDOT))
+                     continue;
+                  ident_t ref_id = g->tokens[k].lval.ident;
+                  if (vlog_symtab_query_local(symtab, ref_id) != NULL)
+                     continue;
+                  if (vlog_symtab_query(symtab, ref_id) == NULL) {
+                     ok = false;
+                     break;
+                  }
+                  // Do not pre-parse if an outer identifier may be shadowed
+                  // by an earlier declaration in this class body (e.g. a
+                  // local typedef before this localparam).
+                  for (int m = body_start; m < i; m++) {
+                     if (g->tokens[m].token == tID
+                         && g->tokens[m].lval.ident == ref_id) {
+                        ok = false;
+                        break;
+                     }
+                  }
+               }
+            }
+            if (ok) {
+               parse_state_t *ps = save_parse_state();
+               const int saved_rpos = replay_pos;
+               replay_pos = i;
+               state.tokenq_head = state.tokenq_tail = 0;
+               state.start_loc = LOC_INVALID;
+               p_local_parameter_declaration(v);
+               consume(tSEMI);
+               restore_parse_state(ps);
+               replay_pos = saved_rpos;
+               pre_lp[npre_lp++] = i;
+            }
+            i = end;
+         }
+      }
+   }
+
+   while (not_at_token(tENDCLASS)) {
+      if (npre_lp > 0 && peek() == tLOCALPARAM && replay_class == g) {
+         const int queued = (state.tokenq_head - state.tokenq_tail)
+            & (TOKENQ_SIZE - 1);
+         const int cur_pos = replay_pos - queued;
+         bool skip = false;
+         for (int k = 0; k < npre_lp && !skip; k++)
+            skip = (pre_lp[k] == cur_pos);
+         if (skip) {
+            int sub = 0;
+            for (;;) {
+               const token_t tok = peek();
+               if (tok == tEOF)
+                  break;
+               drop_token(&state);
+               if (tok == tLPAREN || tok == tLSQUARE || tok == tLBRACE)
+                  sub++;
+               else if (tok == tRPAREN || tok == tRSQUARE || tok == tRBRACE)
+                  sub--;
+               else if (sub == 0 && tok == tSEMI)
+                  break;
+            }
+            continue;
+         }
+      }
       p_class_item(v);
+   }
 
    in_subroutine = saved_in_subroutine;
 
@@ -19535,7 +19936,7 @@ static vlog_node_t resolve_forward_class(ident_t name)
 {
    // The class named by an earlier forward declaration is this one
 
-   vlog_node_t d = vlog_symtab_query(symtab, name);
+   vlog_node_t d = vlog_symtab_query_local(symtab, name);
    if (d == NULL || vlog_kind(d) != V_CLASS_DECL
        || !(vlog_flags(d) & VLOG_F_FORWARD))
       return NULL;
@@ -19738,7 +20139,7 @@ static vlog_node_t p_generic_class(ident_t name, vlog_flags_t flags)
       }
    }
 
-   vlog_node_t fwd = vlog_symtab_query(symtab, name);
+   vlog_node_t fwd = vlog_symtab_query_local(symtab, name);
    if (fwd != NULL && (vlog_kind(fwd) != V_CLASS_DECL
                        || !(vlog_flags(fwd) & VLOG_F_FORWARD)))
       fwd = NULL;
@@ -20095,7 +20496,7 @@ static vlog_node_t p_checker_call(void)
       .tokens  = out,
    };
 
-   parse_state_t saved = state;
+   parse_state_t *saved = save_parse_state();
    generic_class_t *saved_class = replay_class;
    const int saved_pos = replay_pos;
 
@@ -20108,7 +20509,7 @@ static vlog_node_t p_checker_call(void)
 
    vlog_node_t v = p_statement_or_null();
 
-   state = saved;
+   restore_parse_state(saved);
    replay_class = saved_class;
    replay_pos = saved_pos;
 
@@ -20123,6 +20524,77 @@ typedef struct {
    int64_t     value;
    bool        known;
 } spec_env_t;
+
+static int64_t spec_truncate(int64_t val, int width, bool is_signed)
+{
+   if (width <= 0 || width >= 64)
+      return val;
+
+   const uint64_t mask = (UINT64_C(1) << width) - 1;
+   uint64_t u = (uint64_t)val & mask;
+   if (is_signed && (u & (UINT64_C(1) << (width - 1))))
+      u |= ~mask;
+   return (int64_t)u;
+}
+
+static bool spec_eval(vlog_node_t v, const spec_env_t *env, int nenv,
+                      int64_t *result);
+
+static bool spec_type_width(vlog_node_t dt, const spec_env_t *env, int nenv,
+                            int *width, bool *is_signed)
+{
+   while (dt != NULL
+          && (vlog_kind(dt) == V_TYPE_DECL || vlog_kind(dt) == V_ENUM_DECL)
+          && vlog_has_type(dt))
+      dt = vlog_type(dt);
+
+   if (dt == NULL || vlog_kind(dt) != V_DATA_TYPE)
+      return false;
+
+   int base = 0;
+   switch (vlog_subkind(dt)) {
+   case DT_BYTE:
+      base = 8;
+      break;
+   case DT_SHORTINT:
+      base = 16;
+      break;
+   case DT_INT:
+   case DT_INTEGER:
+      base = 32;
+      break;
+   case DT_LONGINT:
+   case DT_TIME:
+      base = 64;
+      break;
+   case DT_BIT:
+   case DT_LOGIC:
+      base = 1;
+      break;
+   default:
+      return false;
+   }
+
+   int64_t total = base;
+   const int nranges = vlog_ranges(dt);
+   for (int i = 0; i < nranges; i++) {
+      vlog_node_t dim = vlog_range(dt, i);
+      if (vlog_subkind(dim) != V_DIM_PACKED)
+         return false;
+      int64_t l, r;
+      if (!spec_eval(vlog_left(dim), env, nenv, &l)
+          || !spec_eval(vlog_right(dim), env, nenv, &r))
+         return false;
+      const int64_t sz = (l > r ? l - r : r - l) + 1;
+      if (sz <= 0 || total > INT_MAX / sz)
+         return false;
+      total *= sz;
+   }
+
+   *width = (int)total;
+   *is_signed = !!(vlog_flags(dt) & VLOG_F_SIGNED);
+   return true;
+}
 
 static bool spec_eval(vlog_node_t v, const spec_env_t *env, int nenv,
                       int64_t *result)
@@ -20177,6 +20649,39 @@ static bool spec_eval(vlog_node_t v, const spec_env_t *env, int nenv,
          case V_UNARY_BITNEG:   *result = ~val; return true;
          case V_UNARY_NOT:      *result = !val; return true;
          default:               return false;
+         }
+      }
+   case V_CAST:
+      {
+         int64_t val;
+         if (!spec_eval(vlog_value(v), env, nenv, &val))
+            return false;
+
+         switch (vlog_subkind(v)) {
+         case V_CAST_TYPE:
+            {
+               int width;
+               bool is_signed;
+               if (!spec_type_width(vlog_type(v), env, nenv,
+                                    &width, &is_signed))
+                  return false;
+               *result = spec_truncate(val, width, is_signed);
+               return true;
+            }
+         case V_CAST_WIDTH:
+            {
+               int64_t w;
+               if (!spec_eval(vlog_left(v), env, nenv, &w) || w <= 0)
+                  return false;
+               *result = spec_truncate(val, (int)w, false);
+               return true;
+            }
+         case V_CAST_SIGN:
+         case V_CAST_CONST:
+            *result = val;
+            return true;
+         default:
+            return false;
          }
       }
    case V_COND_EXPR:
@@ -20522,7 +21027,7 @@ static vlog_node_t replay_default(vlog_node_t generic, generic_class_t *g,
       .tokens  = g->params[pos].def,
    };
 
-   parse_state_t saved = state;
+   parse_state_t *saved = save_parse_state();
    generic_class_t *saved_class = replay_class;
    const int saved_pos = replay_pos;
    vlog_node_t saved_container = spec_container;
@@ -20560,9 +21065,52 @@ static vlog_node_t replay_default(vlog_node_t generic, generic_class_t *g,
    scope_leave();
    vlog_symtab_enter(symtab, saved_scope);
 
-   state = saved;
+   restore_parse_state(saved);
    replay_class = saved_class;
    replay_pos = saved_pos;
+   spec_container = saved_container;
+
+   return result;
+}
+
+static vlog_node_t replay_param_type_in_scope(vlog_node_t generic,
+                                              generic_class_t *g,
+                                              int pos, vlog_node_t *actuals,
+                                              vlog_node_t container)
+{
+   if (g->params[pos].ntype == 0 && g->params[pos].tname == NULL)
+      return NULL;
+
+   parse_state_t *saved = save_parse_state();
+   vlog_node_t saved_container = spec_container;
+   spec_container = container;
+
+   vlog_scope_t *saved_scope = vlog_symtab_enter(symtab, g->scope);
+   vlog_symtab_push(symtab, generic);
+
+   const loc_t *loc = g->ntokens > 0 ? &(g->tokens[0].loc) : &LOC_INVALID;
+   for (int i = 0; i < pos; i++) {
+      vlog_node_t d = vlog_new(g->params[i].is_type ? V_TYPE_DECL
+                               : V_LOCALPARAM);
+      vlog_set_ident(d, g->params[i].name);
+      vlog_set_loc(d, loc);
+
+      if (g->params[i].is_type)
+         vlog_set_type(d, actuals[i]);
+      else {
+         vlog_set_type(d, replay_param_type(&(g->params[i])));
+         vlog_set_value(d, actuals[i]);
+      }
+
+      vlog_symtab_put(symtab, d);
+   }
+
+   vlog_node_t result = replay_param_type(&(g->params[pos]));
+
+   scope_leave();
+   vlog_symtab_enter(symtab, saved_scope);
+
+   restore_parse_state(saved);
    spec_container = saved_container;
 
    return result;
@@ -20716,8 +21264,17 @@ static vlog_node_t specialise_class(vlog_node_t generic)
          spec_key_for(key, actuals[i]);
       else if (vlog_kind(actuals[i]) == V_STRING)
          tb_printf(key, "s%x", number_hash(vlog_number(actuals[i])));
-      else if (spec_eval(actuals[i], NULL, 0, &ival))
+      else if (spec_eval(actuals[i], NULL, 0, &ival)) {
+         if (g->params[i].ntype > 0 || g->params[i].tname != NULL) {
+            vlog_node_t pt = replay_param_type_in_scope(
+               generic, g, i, actuals, container);
+            int width;
+            bool is_signed;
+            if (pt != NULL && spec_type_width(pt, NULL, 0, &width, &is_signed))
+               ival = spec_truncate(ival, width, is_signed);
+         }
          tb_printf(key, "%"PRIi64, ival);
+      }
       else {
          const loc_t *loc = vlog_loc(actuals[i]);
          tb_printf(key, "e%u_%u", loc->first_line, loc->first_column);
@@ -20770,7 +21327,7 @@ static vlog_node_t specialise_class(vlog_node_t generic)
    // Added first so that a class can refer to itself
    vlog_add_decl(container, v);
 
-   parse_state_t saved = state;
+   parse_state_t *saved = save_parse_state();
    generic_class_t *saved_class = replay_class;
    const int saved_pos = replay_pos;
    const bool saved_proto = parsing_prototype;
@@ -20800,7 +21357,7 @@ static vlog_node_t specialise_class(vlog_node_t generic)
    p_class_body(v, g->name, g, actuals);
    spec_depth--;
 
-   state = saved;
+   restore_parse_state(saved);
    replay_class = saved_class;
    replay_pos = saved_pos;
    parsing_prototype = saved_proto;
@@ -20831,7 +21388,7 @@ static void replay_generic_extern(generic_class_t *ext, vlog_node_t spec,
 {
    // Parse a method defined outside of the class for one specialisation
 
-   parse_state_t saved = state;
+   parse_state_t *saved = save_parse_state();
    generic_class_t *saved_class = replay_class;
    const int saved_pos = replay_pos;
    vlog_node_t saved_extern = spec_extern_class;
@@ -20861,7 +21418,7 @@ static void replay_generic_extern(generic_class_t *ext, vlog_node_t spec,
 
    vlog_symtab_enter(symtab, saved_scope);
 
-   state = saved;
+   restore_parse_state(saved);
    replay_class = saved_class;
    replay_pos = saved_pos;
    spec_extern_class = saved_extern;
@@ -20934,6 +21491,20 @@ static bool capture_generic_extern(token_t end_token)
       const token_t tok = peek_nth(n);
       if (tok == tEOF || tok == tLPAREN || tok == tSEMI)
          return false;
+      else if (tok == tHASH && peek_nth(n + 1) == tLPAREN) {
+         // Skip parameterised return type arguments e.g. Foo#(Foo::T) Foo::bar
+         int depth = 1;
+         for (n += 2; n < TOKENQ_SIZE - 8 && depth > 0; n++) {
+            const token_t inner = peek_nth(n);
+            if (inner == tEOF)
+               return false;
+            else if (inner == tLPAREN)
+               depth++;
+            else if (inner == tRPAREN)
+               depth--;
+         }
+         n--;   // Loop increment advances past matching ')'
+      }
       else if (tok == tID && peek_nth(n + 1) == tSCOPE
                && peek_nth(n + 3) != tID && peek_nth(n + 3) != tSCOPE) {
          const int pos = (state.tokenq_tail + n - 1) & (TOKENQ_SIZE - 1);
@@ -21599,7 +22170,7 @@ static void flush_deferred_bodies(bool end_of_unit)
 
    flushing_bodies = true;
 
-   parse_state_t saved = state;
+   parse_state_t *saved = save_parse_state();
    generic_class_t *saved_class = replay_class;
    const int saved_pos = replay_pos;
    const bool saved_proc = proc_automatic, saved_subr = subr_automatic;
@@ -21645,7 +22216,7 @@ static void flush_deferred_bodies(bool end_of_unit)
    if (end_of_unit)
       fix_spec_scopes();
 
-   state = saved;
+   restore_parse_state(saved);
    replay_class = saved_class;
    replay_pos = saved_pos;
    proc_automatic = saved_proc;
@@ -21744,7 +22315,7 @@ static void resolve_forward_specs(vlog_node_t class)
       if (f.forward != class)
          continue;
 
-      parse_state_t saved = state;
+      parse_state_t *saved = save_parse_state();
       generic_class_t *saved_class = replay_class;
       const int saved_pos = replay_pos;
       vlog_node_t saved_container = spec_container;
@@ -21765,7 +22336,7 @@ static void resolve_forward_specs(vlog_node_t class)
 
       vlog_symtab_enter(symtab, saved_scope);
 
-      state = saved;
+      restore_parse_state(saved);
       replay_class = saved_class;
       replay_pos = saved_pos;
       spec_container = saved_container;
@@ -22056,6 +22627,7 @@ static void p_package_or_generate_item_declaration(vlog_node_t parent)
    case tLONGINT:
    case tBYTE:
    case tSTRINGK: case tCHANDLE:
+   case tSYSTASK:
    case tIMPORT:
       p_data_declaration(parent, V_VAR_DECL);
       break;
@@ -22380,6 +22952,21 @@ static bool gen_literal(vlog_node_t v, int64_t *value)
    }
 }
 
+static vlog_node_t p_case_generate_construct(void);
+static vlog_node_t p_if_generate_construct(void);
+
+static vlog_node_t p_cond_generate_branch(void)
+{
+   // IEEE 1800-2017 27.5: a directly nested if-generate or case-generate
+   // construct does not introduce an unnamed intermediate generate block.
+   if (peek() == tIF)
+      return p_if_generate_construct();
+   else if (peek() == tCASE)
+      return p_case_generate_construct();
+   else
+      return p_generate_block();
+}
+
 static vlog_node_t p_if_generate_construct(void)
 {
    // if ( constant_expression ) generate_block
@@ -22406,7 +22993,7 @@ static vlog_node_t p_if_generate_construct(void)
 
    vlog_set_loc(c0, CURRENT_LOC);
    gen_dead += dead;
-   vlog_add_stmt(c0, p_generate_block());
+   vlog_add_stmt(c0, p_cond_generate_branch());
    gen_dead -= dead;
 
    vlog_add_cond(v, c0);
@@ -22429,7 +23016,7 @@ static vlog_node_t p_if_generate_construct(void)
 
          vlog_set_loc(cn, CURRENT_LOC);
          gen_dead += dead_n;
-         vlog_add_stmt(cn, p_generate_block());
+         vlog_add_stmt(cn, p_cond_generate_branch());
          gen_dead -= dead_n;
 
          vlog_add_cond(v, cn);
@@ -22439,7 +23026,7 @@ static vlog_node_t p_if_generate_construct(void)
          vlog_node_t ce = vlog_new(V_COND);
          vlog_set_loc(ce, &state.last_loc);
          gen_dead += taken;
-         vlog_add_stmt(ce, p_generate_block());
+         vlog_add_stmt(ce, p_cond_generate_branch());
          gen_dead -= taken;
 
          vlog_add_cond(v, ce);
@@ -22508,7 +23095,7 @@ static vlog_node_t p_case_generate_construct(void)
       }
 
       vlog_set_loc(cn, CURRENT_LOC);
-      vlog_add_stmt(cn, p_generate_block());
+      vlog_add_stmt(cn, p_cond_generate_branch());
       vlog_add_cond(v, cn);
    }
 
@@ -22516,6 +23103,33 @@ static vlog_node_t p_case_generate_construct(void)
 
    vlog_set_loc(v, CURRENT_LOC);
    return v;
+}
+
+static void declare_cond_gen_blocks(vlog_node_t v, ident_t **seen,
+                                    int *nseen, int *cap)
+{
+   const int nconds = vlog_conds(v);
+   for (int i = 0; i < nconds; i++) {
+      vlog_node_t s = vlog_stmt(vlog_cond(v, i), 0);
+      if (vlog_kind(s) == V_IF_GENERATE) {
+         declare_cond_gen_blocks(s, seen, nseen, cap);
+         continue;
+      }
+
+      ident_t id = vlog_ident(s);
+      bool dup = false;
+      for (int j = 0; j < *nseen && !dup; j++)
+         dup = (*seen)[j] == id;
+
+      if (!dup) {
+         if (*nseen == *cap) {
+            *cap = *cap > 0 ? *cap * 2 : 8;
+            *seen = xrealloc_array(*seen, *cap, sizeof(ident_t));
+         }
+         (*seen)[(*nseen)++] = id;
+         declare_gen_block(s);
+      }
+   }
 }
 
 static vlog_node_t p_conditional_generate_construct(void)
@@ -22539,16 +23153,12 @@ static vlog_node_t p_conditional_generate_construct(void)
       should_not_reach_here();
    }
 
-   // The branches of one construct may share a block name
-   const int nconds = vlog_conds(v);
-   for (int i = 0; i < nconds; i++) {
-      vlog_node_t b = vlog_stmt(vlog_cond(v, i), 0);
-      bool seen = false;
-      for (int j = 0; j < i && !seen; j++)
-         seen = vlog_ident(vlog_stmt(vlog_cond(v, j), 0)) == vlog_ident(b);
-      if (!seen)
-         declare_gen_block(b);
-   }
+   // The branches of one construct (including directly nested if/case
+   // generate constructs per IEEE 1800-2017 27.5) may share a block name
+   ident_t *seen = NULL;
+   int nseen = 0, cap = 0;
+   declare_cond_gen_blocks(v, &seen, &nseen, &cap);
+   free(seen);
 
    gen_construct = saved_construct;
    return v;
@@ -24278,6 +24888,7 @@ static void p_module_common_item(vlog_node_t mod)
    case tLONGINT:
    case tBYTE:
    case tSTRINGK: case tCHANDLE:
+   case tSYSTASK:
    case tIMPORT:
    case tSEQUENCE:
    case tPROPERTY:
@@ -25936,9 +26547,45 @@ static bool is_param_decl(vlog_node_t d)
       || (vlog_kind(d) == V_TYPE_DECL && (vlog_flags(d) & VLOG_F_TYPEPARAM));
 }
 
-static vlog_node_t param_pattern_type(ident_t name, int pos)
+static int decl_unpacked_depth(vlog_node_t d)
+{
+   int depth = 0;
+   switch (vlog_kind(d)) {
+   case V_VAR_DECL:
+   case V_NET_DECL:
+   case V_PORT_DECL:
+   case V_TF_PORT_DECL:
+   case V_PARAM_DECL:
+   case V_LOCALPARAM:
+   case V_LOCAL_DECL:
+   case V_DATA_TYPE:
+      {
+         const int nr = vlog_ranges(d);
+         for (int i = 0; i < nr; i++) {
+            if (vlog_subkind(vlog_range(d, i)) == V_DIM_UNPACKED)
+               depth++;
+         }
+      }
+      break;
+   default:
+      break;
+   }
+
+   for (vlog_node_t t = vlog_has_type(d) ? vlog_get_type(vlog_type(d)) : NULL;
+        t != NULL && vlog_kind(t) == V_DATA_TYPE
+        && vlog_subkind(t) == DT_DYNARRAY && vlog_ranges(t) == 1
+        && vlog_subkind(vlog_range(t, 0)) != V_DIM_UNSIZED;
+        t = vlog_has_type(t) ? vlog_get_type(vlog_type(t)) : NULL)
+      depth++;
+
+   return depth;
+}
+
+static vlog_node_t param_pattern_type(ident_t name, int pos, int *array_depth)
 {
    // The type an assignment pattern takes as the value of a parameter
+
+   *array_depth = 0;
 
    if (param_target == NULL)
       return NULL;
@@ -25949,9 +26596,12 @@ static vlog_node_t param_pattern_type(ident_t name, int pos)
       vlog_node_t d = vlog_decl(param_target, i);
       if (!is_param_decl(d))
          continue;
-      else if (name != NULL ? vlog_ident(d) == name : index++ == pos)
-         return vlog_kind(d) == V_PARAM_DECL && vlog_has_type(d)
-            ? vlog_get_type(vlog_type(d)) : NULL;
+      else if (name != NULL ? vlog_ident(d) == name : index++ == pos) {
+         if (vlog_kind(d) != V_PARAM_DECL || !vlog_has_type(d))
+            return NULL;
+         *array_depth = decl_unpacked_depth(d);
+         return vlog_get_type(vlog_type(d));
+      }
    }
 
    return NULL;
@@ -26007,10 +26657,17 @@ static vlog_node_t p_param_expression(ident_t name, int pos)
 
    BEGIN("param expression");
 
-   if (peek() == tTICK && peek_nth(2) == tLBRACE) {
-      vlog_node_t type = param_pattern_type(name, pos);
-      if (type != NULL)
-         return p_assignment_pattern_expression(type);
+   if ((peek() == tTICK && peek_nth(2) == tLBRACE) || peek() == tLBRACE) {
+      int array_depth = 0;
+      vlog_node_t type = param_pattern_type(name, pos, &array_depth);
+      if (type != NULL && (peek() == tTICK || array_depth > 0)) {
+         pattern_array_elems = array_depth;
+         vlog_node_t v = p_assignment_pattern_expression(type);
+         pattern_array_elems = 0;
+         return v;
+      }
+      else if (peek() == tTICK && param_target == NULL)
+         return p_deferred_pattern_expression();
    }
 
    if (param_is_type(name, pos)
@@ -26228,6 +26885,82 @@ static bool scan_skip_macro_args(void)
    return true;
 }
 
+static bool scan_module_instantiation(vlog_node_t ref)
+{
+   // When a typedef shares a name with a module or interface, a parameter
+   // override #( ... ) (when ref is not a generic class) or an instance port
+   // list id [dims] ( ... ) distinguishes instantiation from a variable
+   // declaration (IEEE 1800-2017 23.3.2)
+
+   if (peek() != tID)
+      return false;
+
+   if (peek_nth(2) == tHASH) {
+      if (ref == NULL)
+         return false;
+      if (vlog_kind(ref) == V_CLASS_DECL
+          && (vlog_flags(ref) & (VLOG_F_GENERIC | VLOG_F_FORWARD)))
+         return false;
+      if (vlog_kind(ref) == V_TYPE_DECL && generic_classes != NULL
+          && hash_get(generic_classes, ref))
+         return false;
+      return true;
+   }
+
+   int n = 2;
+   while (n < TOKENQ_SIZE - 2) {
+      if (peek_nth(n) != tID)
+         return false;
+      n++;
+
+      while (n < TOKENQ_SIZE - 2 && peek_nth(n) == tLSQUARE) {
+         int depth = 1;
+         for (n++; depth > 0 && n < TOKENQ_SIZE - 2; n++) {
+            const token_t tok = peek_nth(n);
+            if (tok == tLSQUARE)
+               depth++;
+            else if (tok == tRSQUARE)
+               depth--;
+            else if (tok == tEOF || tok == tSEMI)
+               return false;
+         }
+      }
+
+      if (n >= TOKENQ_SIZE - 2)
+         return false;
+
+      const token_t tok = peek_nth(n);
+      if (tok == tLPAREN)
+         return true;
+      else if (tok == tCOMMA) {
+         n++;
+         continue;
+      }
+      else if (tok == tEQ) {
+         // Skip initializer expression up to top-level ',' or ';'
+         int depth = 0;
+         for (n++; n < TOKENQ_SIZE - 2; n++) {
+            const token_t itok = peek_nth(n);
+            if (itok == tEOF || (depth == 0 && itok == tSEMI))
+               return false;
+            else if (depth == 0 && itok == tCOMMA) {
+               n++;
+               break;
+            }
+            else if (itok == tLPAREN || itok == tLSQUARE || itok == tLBRACE)
+               depth++;
+            else if (itok == tRPAREN || itok == tRSQUARE || itok == tRBRACE)
+               depth--;
+         }
+         continue;
+      }
+      else
+         return false;
+   }
+
+   return false;
+}
+
 static bool scan_unknown_type_declaration(void)
 {
    // When scanning a file on its own the type of a declaration may come
@@ -26277,7 +27010,7 @@ static void p_module_or_generate_item_1(vlog_node_t mod)
    if (scan_skip_macro_args())
       return;
 
-   if (peek() == tSYSTASK) {
+   if (peek() == tSYSTASK && !is_unit_scope()) {
       // Elaboration system task: reported when the simulation starts
       vlog_node_t v = vlog_new(V_INITIAL);
       vlog_set_ident(v, default_label("initial"));
@@ -26431,6 +27164,7 @@ static void p_module_or_generate_item_1(vlog_node_t mod)
    case tLONGINT:
    case tBYTE:
    case tSTRINGK: case tCHANDLE:
+   case tSYSTASK:
    case tIMPORT:
    case tFINAL:
    case tASSERT:
@@ -26515,6 +27249,10 @@ static void p_module_or_generate_item_1(vlog_node_t mod)
                       || (peek_nth(2) == tID && (peek_nth(3) == tLPAREN
                                                  || peek_nth(3) == tLSQUARE)))) {
             // An instance may have the same name as its module
+            p_module_or_udp_instantiation(mod);
+            break;
+         }
+         else if (is_data_type(ref) && scan_module_instantiation(ref)) {
             p_module_or_udp_instantiation(mod);
             break;
          }
@@ -29193,6 +29931,11 @@ static vlog_node_t bind_find_child(vlog_node_t scope, ident_t id)
                   if (r != NULL)
                      return r;
                }
+               else if (vlog_kind(blk) == V_IF_GENERATE) {
+                  vlog_node_t r = bind_find_child(c, id);
+                  if (r != NULL)
+                     return r;
+               }
             }
          }
          break;
@@ -29253,6 +29996,11 @@ static tree_t bind_find_child_entity(vlog_node_t scope, ident_t id)
                vlog_node_t blk = vlog_stmt(c, 0);
                if (vlog_kind(blk) == V_GEN_BLOCK) {
                   tree_t r = bind_find_child_entity(blk, id);
+                  if (r != NULL)
+                     return r;
+               }
+               else if (vlog_kind(blk) == V_IF_GENERATE) {
+                  tree_t r = bind_find_child_entity(c, id);
                   if (r != NULL)
                      return r;
                }
@@ -29686,7 +30434,8 @@ static vlog_node_t p_description(void)
          // Only matters if it has anything other than plain declarations
          for (int i = 0; i < vlog_decls(v); i++) {
             const vlog_kind_t dk = vlog_kind(vlog_decl(v, i));
-            if (dk == V_CLASS_DECL || dk == V_IMPORT_DECL) {
+            if (dk == V_CLASS_DECL || dk == V_IMPORT_DECL
+                || dk == V_VAR_DECL || dk == V_NET_DECL) {
                APUSH(file_namespaces, vlog_ident(v));
                break;
             }
@@ -30118,6 +30867,7 @@ void reset_verilog_parser(void)
    }
 
    class_depth = 0;
+   qualify_unit = false;
    flushing_bodies = false;
    spec_into = NULL;
 

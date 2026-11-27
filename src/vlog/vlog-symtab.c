@@ -324,6 +324,19 @@ static void check_forward_ref(vlog_node_t v, vlog_node_t d)
    diag_emit(dg);
 }
 
+static bool is_non_agg_data_type(vlog_node_t d)
+{
+   if (d == NULL || !is_data_type(d))
+      return false;
+
+   vlog_node_t t = vlog_get_type(d);
+   if (t == NULL)
+      return true;
+
+   const vlog_kind_t k = vlog_kind(t);
+   return k != V_STRUCT_DECL && k != V_UNION_DECL && k != V_CLASS_DECL;
+}
+
 void vlog_symtab_resolve_deferred(vlog_symtab_t *st)
 {
    // Names used in subroutines of the compilation unit scope may be
@@ -332,7 +345,8 @@ void vlog_symtab_resolve_deferred(vlog_symtab_t *st)
    for (int i = 0; i < st->top->deferred.count; i++) {
       vlog_node_t v = st->top->deferred.items[i];
       vlog_node_t d = vlog_symtab_query(st, vlog_ident(v));
-      if (d != NULL) {
+      if (d != NULL && !(vlog_kind(v) == V_MOD_REF
+                         && is_non_agg_data_type(d))) {
          check_forward_ref(v, d);
          vlog_set_ref(v, d);
       }
@@ -392,6 +406,7 @@ void vlog_symtab_pop(vlog_symtab_t *st)
       vlog_node_t d = (sym != NULL && sym->node != POISON_NODE)
          ? sym->node : NULL;
       if (d != NULL
+          && !(vlog_kind(v) == V_MOD_REF && is_non_agg_data_type(d))
           && (leaving_to_root || found == NULL || found->parent != NULL
               || (vlog_kind(v) != V_USER_TCALL
                   && vlog_kind(v) != V_USER_FCALL))) {
@@ -782,6 +797,7 @@ static bool lookup_array_method(vlog_node_t v, vlog_node_t prefix,
       { "find_first_index", V_METHOD_ARR_FIND_FIRST_INDEX },
       { "find_last",        V_METHOD_ARR_FIND_LAST },
       { "find_last_index",  V_METHOD_ARR_FIND_LAST_INDEX },
+      { "map",              V_METHOD_ARR_MAP },
       { "insert",           V_METHOD_ARR_INSERT },
    };
 
@@ -820,6 +836,7 @@ static bool lookup_array_method(vlog_node_t v, vlog_node_t prefix,
       case V_METHOD_ARR_FIND_FIRST_INDEX:
       case V_METHOD_ARR_FIND_LAST:
       case V_METHOD_ARR_FIND_LAST_INDEX:
+      case V_METHOD_ARR_MAP:
       case V_METHOD_ARR_SUM:
       case V_METHOD_ARR_PRODUCT:
       case V_METHOD_ARR_AND:
@@ -858,6 +875,21 @@ static bool lookup_array_method(vlog_node_t v, vlog_node_t prefix,
    case V_METHOD_ARR_FIND_FIRST:
    case V_METHOD_ARR_FIND_LAST:
       vlog_set_ref(v, make_queue_type(elem, loc));
+      break;
+   case V_METHOD_ARR_MAP:
+      {
+         vlog_node_t rtype = NULL;
+         if (has_with) {
+            vlog_node_t w = vlog_stmt(v, 2);
+            if (vlog_is_real(w))
+               rtype = make_atom_type(DT_REAL, 64, 0, loc);
+            else if (vlog_get_type(w) != NULL)
+               rtype = vlog_get_type(w);
+         }
+         if (rtype == NULL)
+            rtype = make_atom_type(DT_INT, 32, VLOG_F_SIGNED, loc);
+         vlog_set_ref(v, make_queue_type(rtype, loc));
+      }
       break;
    case V_METHOD_ARR_UNIQUE_INDEX:
    case V_METHOD_ARR_FIND_INDEX:
@@ -1179,7 +1211,9 @@ void vlog_symtab_lookup(vlog_symtab_t *st, vlog_node_t v)
 
       fresh_symbol_for(st, name)->node = decl;
    }
-   else if (sym == NULL) {
+   else if (sym == NULL
+            || (vlog_kind(v) == V_MOD_REF && sym->node != POISON_NODE
+                && is_non_agg_data_type(sym->node))) {
       switch (vlog_kind(v)) {
       case V_USER_FCALL:
       case V_USER_TCALL:
@@ -1360,6 +1394,45 @@ vlog_node_t vlog_symtab_query(vlog_symtab_t *st, ident_t name)
       return NULL;
 
    return sym->node;
+}
+
+vlog_node_t vlog_symtab_query_local(vlog_symtab_t *st, ident_t name)
+{
+   vlog_scope_t *s = st->top;
+   if (s == NULL || s->num_symbols == 0)
+      return NULL;
+
+   for (int slot = ident_hash(name) & (s->max_symbols - 1);
+        s->symbols[slot].name != NULL;
+        slot = (slot + 1) & (s->max_symbols - 1)) {
+      if (s->symbols[slot].name == name) {
+         const vlog_node_t n = s->symbols[slot].node;
+         return n == POISON_NODE ? NULL : n;
+      }
+   }
+
+   return NULL;
+}
+
+vlog_node_t vlog_symtab_query_unit(vlog_symtab_t *st, ident_t name)
+{
+   vlog_scope_t *s = st->top;
+   while (s != NULL && s->parent != NULL)
+      s = s->parent;
+
+   if (s == NULL || s->num_symbols == 0)
+      return NULL;
+
+   for (int slot = ident_hash(name) & (s->max_symbols - 1);
+        s->symbols[slot].name != NULL;
+        slot = (slot + 1) & (s->max_symbols - 1)) {
+      if (s->symbols[slot].name == name) {
+         const vlog_node_t n = s->symbols[slot].node;
+         return n == POISON_NODE ? NULL : n;
+      }
+   }
+
+   return NULL;
 }
 
 void vlog_symtab_lenient(vlog_symtab_t *st)

@@ -2704,6 +2704,83 @@ static void vlog_check_open_arg(vlog_node_t sub, vlog_node_t port,
                "array argument '%s'", istr(vlog_ident(port)));
 }
 
+static void vlog_resolve_deferred_pattern(vlog_node_t expr, vlog_node_t dt,
+                                          int array_depth)
+{
+   if (expr == NULL || dt == NULL)
+      return;
+
+   if (vlog_kind(expr) == V_COND_EXPR) {
+      vlog_resolve_deferred_pattern(vlog_left(expr), dt, array_depth);
+      vlog_resolve_deferred_pattern(vlog_right(expr), dt, array_depth);
+      return;
+   }
+
+   if (vlog_kind(expr) != V_PATTERN_EXPR || vlog_has_type(expr))
+      return;
+
+   vlog_node_t bt = vlog_get_type(dt);
+   if (bt == NULL)
+      return;
+
+   vlog_set_type(expr, bt);
+
+   const bool is_struct = array_depth == 0
+      && (vlog_kind(bt) == V_STRUCT_DECL || vlog_kind(bt) == V_UNION_DECL);
+
+   const int nparams = vlog_params(expr);
+   for (int i = 0; i < nparams; i++) {
+      vlog_node_t item = vlog_param(expr, i);
+      if (vlog_kind(item) != V_PATTERN_ITEM)
+         continue;
+
+      vlog_node_t member = NULL;
+      if (is_struct && vlog_subkind(item) == 0 && vlog_has_left(item)
+          && vlog_kind(vlog_left(item)) == V_REF
+          && !vlog_has_ref(vlog_left(item))) {
+         vlog_node_t key = vlog_left(item);
+         ident_t id = vlog_ident(key);
+         const int ndecls = vlog_decls(bt);
+         for (int j = 0; j < ndecls; j++) {
+            vlog_node_t d = vlog_decl(bt, j);
+            if (vlog_ident(d) == id) {
+               vlog_set_ref(key, d);
+               member = d;
+               break;
+            }
+         }
+         if (member == NULL) {
+            diag_t *d = diag_new(DIAG_ERROR, vlog_loc(key));
+            diag_printf(d, "struct or union has no field %pQ", id);
+            diag_hint(d, vlog_loc(bt), "data type declared here");
+            diag_emit(d);
+         }
+      }
+      else if (is_struct && !vlog_has_left(item) && vlog_subkind(item) == 0
+               && i < vlog_decls(bt))
+         member = vlog_decl(bt, i);
+
+      if (vlog_has_right(item)) {
+         vlog_node_t right = vlog_right(item);
+         if (vlog_kind(right) == V_PATTERN_EXPR && !vlog_has_type(right)) {
+            vlog_node_t sub_dt = dt;
+            int sub_depth = 0;
+            if (array_depth > 1)
+               sub_depth = array_depth - 1;
+            else if (array_depth == 1)
+               sub_dt = dt;
+            else if (member != NULL) {
+               sub_dt = vlog_type(member);
+               sub_depth = vlog_unpacked_dims(member);
+            }
+            else if (vlog_kind(bt) == V_DATA_TYPE && vlog_has_type(bt))
+               sub_dt = vlog_type(bt);
+            vlog_resolve_deferred_pattern(right, sub_dt, sub_depth);
+         }
+      }
+   }
+}
+
 static void vlog_check_arg_type(vlog_node_t port, vlog_node_t arg)
 {
    if (vlog_kind(arg) == V_EMPTY || vlog_kind(arg) == V_NULL
@@ -2767,9 +2844,6 @@ static void vlog_check_call_args(vlog_node_t v, vlog_node_t sub)
             return;
          }
 
-         if (vlog_has_value(p))
-            vlog_check_expr(vlog_value(p));
-
          bool found = false;
          for (int j = npositional; j < nports; j++) {
             vlog_node_t port = vlog_port(sub, j);
@@ -2778,6 +2852,9 @@ static void vlog_check_call_args(vlog_node_t v, vlog_node_t sub)
 
             found = true;
             if (vlog_has_value(p)) {
+               vlog_resolve_deferred_pattern(vlog_value(p), vlog_type(port),
+                                             vlog_unpacked_dims(port));
+               vlog_check_expr(vlog_value(p));
                vlog_check_output_arg(port, vlog_value(p));
                vlog_check_open_arg(sub, port, vlog_value(p));
                vlog_check_arg_type(port, vlog_value(p));
@@ -2785,6 +2862,8 @@ static void vlog_check_call_args(vlog_node_t v, vlog_node_t sub)
          }
 
          if (!found) {
+            if (vlog_has_value(p))
+               vlog_check_expr(vlog_value(p));
             error_at(vlog_loc(p), "%pQ has no argument named %pQ that does "
                      "not already have a value", vlog_ident(sub),
                      vlog_ident(p));
@@ -2793,10 +2872,13 @@ static void vlog_check_call_args(vlog_node_t v, vlog_node_t sub)
       }
 
       for (int i = 0; i < npositional && i < nports; i++) {
+         vlog_node_t port = vlog_port(sub, i);
+         vlog_resolve_deferred_pattern(vlog_param(v, i), vlog_type(port),
+                                       vlog_unpacked_dims(port));
          vlog_check_expr(vlog_param(v, i));
-         vlog_check_output_arg(vlog_port(sub, i), vlog_param(v, i));
-         vlog_check_open_arg(sub, vlog_port(sub, i), vlog_param(v, i));
-         vlog_check_arg_type(vlog_port(sub, i), vlog_param(v, i));
+         vlog_check_output_arg(port, vlog_param(v, i));
+         vlog_check_open_arg(sub, port, vlog_param(v, i));
+         vlog_check_arg_type(port, vlog_param(v, i));
       }
 
       for (int i = npositional; i < nports; i++) {
@@ -2841,6 +2923,8 @@ static void vlog_check_call_args(vlog_node_t v, vlog_node_t sub)
 
       if (i < nparams) {
          vlog_node_t p = vlog_param(v, i);
+         vlog_resolve_deferred_pattern(p, vlog_type(port),
+                                       vlog_unpacked_dims(port));
          vlog_check_expr(p);
          vlog_check_output_arg(port, p);
          vlog_check_open_arg(sub, port, p);
@@ -4441,7 +4525,7 @@ static type_mask_t vlog_check_binary(vlog_node_t v)
       break;
    case V_BINARY_WILD_EQ:
    case V_BINARY_WILD_NEQ:
-      allow = TM_INTEGRAL | TM_CONST;
+      allow = TM_INTEGRAL | TM(DT_STRING) | TM_CONST;
       result = TM(DT_LOGIC);
       break;
    }

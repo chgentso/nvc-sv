@@ -1,0 +1,6 @@
+t=1 pass_o=41 y_pure=11 y_mix=41
+** Warning: 1ns+1: unique case violation: no case item matches and there is no default
+** Warning: 1ns+1: unique case violation: no case item matches and there is no default
+t=2 y_pure=00 y_mix=00
+t=3 y_pure=22 y_mix=51
+PASSED
