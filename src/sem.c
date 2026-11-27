@@ -5875,6 +5875,10 @@ static bool sem_check_generic_actual(formal_map_t *formals, int nformals,
             sem_error(param, "cannot map unconstrained array type %s to "
                       "constrained formal generic array type %s",
                       type_pp(map), istr(tree_ident(decl)));
+         else if (class == GTYPE_ARRAY && actual_constrained)
+            sem_error(param, "cannot map constrained array type %s to "
+                      "unconstrained formal generic array type %s",
+                      type_pp(map), istr(tree_ident(decl)));
       }
 
       break;
