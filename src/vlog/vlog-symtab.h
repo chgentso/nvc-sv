@@ -63,5 +63,6 @@ typedef enum { HIER_INSTANCE, HIER_PACKAGE, HIER_UNIT } hier_owner_t;
 
 ident_t vlog_symtab_hier_suffix(vlog_symtab_t *st, hier_owner_t *owner,
                                 vlog_node_t *pkg);
+ident_t vlog_symtab_block_prefix(vlog_symtab_t *st, vlog_node_t home);
 
 #endif  // _VLOG_SYMTAB

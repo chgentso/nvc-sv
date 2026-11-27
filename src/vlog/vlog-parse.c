@@ -4179,7 +4179,8 @@ static vlog_node_t p_select(ident_t id)
       }
       else if (is_inst)
          prefix = p_hierarchical_identifier(id);
-      else if ((d == NULL || is_non_agg_data_type(d))
+      else if ((d == NULL || is_non_agg_data_type(d)
+                || vlog_kind(d) == V_SEQ_BLOCK || vlog_kind(d) == V_FORK)
                && (peek() == tDOT || at_instance_index(true))) {
          // Assume this is a hierarchical reference to a later instance or block
          prefix = p_hierarchical_identifier(id);
@@ -14319,8 +14320,6 @@ static vlog_node_t p_statement_item(ident_t id)
    case tASSERT:
    case tASSUME:
    case tCOVER:
-      if (id != NULL)
-         check_assertion_label(id, &state.tokenq[state.tokenq_tail].loc);
       if (peek_nth(2) == tPROPERTY || peek_nth(2) == tSEQUENCE)
          return p_procedural_concurrent_assertion();
       if (id != NULL)
@@ -14374,6 +14373,8 @@ static vlog_node_t p_statement(void)
    case tASSERT:
    case tASSUME:
    case tCOVER:
+      if (id != NULL)
+         check_assertion_label(id, &state.tokenq[state.tokenq_tail].loc);
       wrap = id != NULL && peek_nth(2) != tPROPERTY
          && peek_nth(2) != tSEQUENCE;
       break;
@@ -14381,18 +14382,27 @@ static vlog_node_t p_statement(void)
       break;
    }
 
+   vlog_node_t wrap_block = NULL;
+   if (wrap) {
+      wrap_block = vlog_new(V_SEQ_BLOCK);
+      vlog_set_ident(wrap_block, id);
+      vlog_set_loc(wrap_block, CURRENT_LOC);
+      vlog_symtab_push(symtab, wrap_block);
+      note_block_name(id);
+   }
+
    const int depth = match_depth;
    vlog_node_t v = p_statement_item(id);
    match_unwind(depth);
 
-   if (wrap && v != NULL) {
-      vlog_node_t b = vlog_new(V_SEQ_BLOCK);
-      vlog_set_ident(b, id);
-      vlog_set_loc(b, vlog_loc(v));
-      vlog_add_stmt(b, v);
-      vlog_symtab_put(symtab, b);
-      note_block_name(id);
-      return b;
+   if (wrap_block != NULL) {
+      scope_leave();
+      if (v != NULL) {
+         vlog_set_loc(wrap_block, vlog_loc(v));
+         vlog_add_stmt(wrap_block, v);
+         vlog_symtab_put(symtab, wrap_block);
+         return wrap_block;
+      }
    }
 
    return v;
@@ -15326,8 +15336,31 @@ static void p_static_local_decls(vlog_node_t parent, vlog_node_t home,
       }
 
       const loc_t *loc = vlog_loc(d);
-      vlog_set_ident(d, ident_sprintf("%s$static%u_%u", istr(vlog_ident(d)),
-                                      loc->first_line, loc->first_column));
+      ident_t orig_id = vlog_ident(d);
+      ident_t static_id = NULL;
+      if (vlog_kind(home) == V_MODULE || vlog_kind(home) == V_PROGRAM
+          || vlog_kind(home) == V_GEN_BLOCK) {
+         ident_t bprefix = vlog_symtab_block_prefix(symtab, home);
+         if (bprefix != NULL) {
+            ident_t cand = ident_sprintf("%s$%s", istr(bprefix), istr(orig_id));
+            bool clash = false;
+            const int nh = vlog_decls(home);
+            for (int k = 0; k < nh && !clash; k++) {
+               vlog_node_t hd = vlog_decl(home, k);
+               clash = vlog_has_ident(hd) && vlog_ident(hd) == cand;
+            }
+            for (int k = 0; k < pending_statics.count && !clash; k++) {
+               vlog_node_t pd = pending_statics.items[k];
+               clash = vlog_has_ident(pd) && vlog_ident(pd) == cand;
+            }
+            if (!clash)
+               static_id = cand;
+         }
+      }
+      if (static_id == NULL)
+         static_id = ident_sprintf("%s$static%u_%u", istr(orig_id),
+                                   loc->first_line, loc->first_column);
+      vlog_set_ident(d, static_id);
       vlog_set_flags(d, VLOG_F_STATIC);
       if (vlog_kind(home) == V_MODULE || vlog_kind(home) == V_PROGRAM
           || vlog_kind(home) == V_GEN_BLOCK)

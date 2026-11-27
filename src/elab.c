@@ -9569,6 +9569,53 @@ static vlog_node_t elab_hier_ref_variable(vlog_node_t v,
       mods[nmods - 1 - i] = tmp;
    }
 
+   // Check if the path starts with a local named-block prefix (e.g. A.B.x)
+   // before walking module instances (which reports an error if not found)
+   if (nmods >= 2 && vlog_kind(mods[0]) == V_MOD_REF
+       && (!vlog_has_ref(mods[0])
+           || vlog_kind(vlog_ref(mods[0])) == V_SEQ_BLOCK
+           || vlog_kind(vlog_ref(mods[0])) == V_FORK)
+       && vlog_params(mods[0]) == 0) {
+      ident_t first = vlog_ident(mods[0]);
+      bool is_mod_or_blk = false;
+      for (tree_t it = hctx->where; it != NULL && !is_mod_or_blk;
+           it = hash_get(hctx->parents, it)) {
+         if (tree_kind(it) != T_BLOCK)
+            break;
+         if (elab_has_child_block(it, first) || vlog_block_is_named(it, first)
+             || elab_hier_ref_decl(it, first) != NULL)
+            is_mod_or_blk = true;
+      }
+
+      if (!is_mod_or_blk) {
+         bool all_plain = true;
+         for (int k = 0; k < nmods && all_plain; k++)
+            all_plain = (vlog_params(mods[k]) == 0);
+
+         if (all_plain) {
+            LOCAL_TEXT_BUF tb = tb_new();
+            for (int k = 0; k < nmods; k++)
+               tb_printf(tb, "%s$", istr(vlog_ident(mods[k])));
+            tb_cat(tb, istr(vlog_ident(v)));
+            ident_t scoped = ident_new(tb_get(tb));
+
+            for (tree_t it = hctx->where; it != NULL;
+                 it = hash_get(hctx->parents, it)) {
+               if (tree_kind(it) != T_BLOCK)
+                  break;
+               if (elab_hier_ref_decl(it, scoped) != NULL) {
+                  vlog_node_t mr = vlog_new(V_MOD_REF);
+                  vlog_set_ident(mr, tree_ident(it));
+                  vlog_set_loc(mr, vlog_loc(mods[0]));
+                  vlog_set_value(v, mr);
+                  vlog_set_ident(v, scoped);
+                  return NULL;
+               }
+            }
+         }
+      }
+   }
+
    for (int i = 1; i < nmods; i++) {
       tree_t pb = elab_walk_mod_refs(mods[i - 1], hctx->where, hctx->parents);
       if (pb == NULL)
@@ -9580,12 +9627,71 @@ static vlog_node_t elab_hier_ref_variable(vlog_node_t v,
 
       vlog_node_t vd = elab_hier_ref_decl(pb, id);
       if (vd == NULL) {
-         if (i == nmods - 1 && vlog_params(mods[i]) == 0) {
-            ident_t cbsig = ident_sprintf("%s$%s", istr(id),
-                                          istr(vlog_ident(v)));
-            if (elab_hier_ref_decl(pb, cbsig) != NULL) {
+         // Try joining remaining unindexed segments as a clocking block or
+         // named procedural block prefix (e.g. first$n, A$B$value)
+         bool all_plain = true;
+         for (int k = i; k < nmods && all_plain; k++)
+            all_plain = (vlog_params(mods[k]) == 0);
+
+         if (all_plain) {
+            LOCAL_TEXT_BUF tb = tb_new();
+            for (int k = i; k < nmods; k++)
+               tb_printf(tb, "%s$", istr(vlog_ident(mods[k])));
+            tb_cat(tb, istr(vlog_ident(v)));
+            ident_t scoped = ident_new(tb_get(tb));
+            if (elab_hier_ref_decl(pb, scoped) != NULL) {
                vlog_set_value(v, mods[i - 1]);
-               vlog_set_ident(v, cbsig);
+               vlog_set_ident(v, scoped);
+               return NULL;
+            }
+         }
+
+         // Also try shorter prefixes when accessing a member/element of a
+         // named-block variable (e.g. inst.blk.s.field)
+         for (int k = nmods - 1; k > i; k--) {
+            bool prefix_plain = true;
+            for (int m = i; m < k && prefix_plain; m++)
+               prefix_plain = (vlog_params(mods[m]) == 0);
+            if (!prefix_plain)
+               continue;
+
+            LOCAL_TEXT_BUF tb = tb_new();
+            for (int m = i; m < k; m++)
+               tb_printf(tb, "%s$", istr(vlog_ident(mods[m])));
+            tb_cat(tb, istr(vlog_ident(mods[k])));
+            ident_t scoped = ident_new(tb_get(tb));
+            vd = elab_hier_ref_decl(pb, scoped);
+            if (vd != NULL) {
+               vlog_node_t base = vlog_new(V_HIER_REF);
+               vlog_set_value(base, mods[i - 1]);
+               vlog_set_ident(base, scoped);
+               vlog_set_ref(base, vd);
+               vlog_set_loc(base, vlog_loc(v));
+               vlog_set_global_flags(base, VLOG_GF_HIER_REF);
+
+               base = elab_hier_ref_select(base, mods[k]);
+
+               for (int j = k + 1; j < nmods; j++) {
+                  vlog_node_t mem = elab_hier_ref_member(base, vlog_ident(mods[j]),
+                                                         vlog_loc(mods[j]));
+                  if (mem == NULL) {
+                     error_at(vlog_loc(mods[j]), "%pQ has no member named %pQ",
+                              vlog_ident(mods[j - 1]), vlog_ident(mods[j]));
+                     return v;
+                  }
+                  base = elab_hier_ref_select(mem, mods[j]);
+               }
+
+               vlog_node_t mem = elab_hier_ref_member(base, vlog_ident(v),
+                                                      vlog_loc(v));
+               if (mem != NULL)
+                  return mem;
+               else if (call_values != NULL && hset_contains(call_values, v))
+                  return base;
+
+               error_at(vlog_loc(v), "%pQ has no member named %pQ",
+                        vlog_ident(mods[nmods - 1]), vlog_ident(v));
+               return v;
             }
          }
          return NULL;
@@ -9742,17 +9848,23 @@ static vlog_node_t elab_rewrite_hier_ref_cb(vlog_node_t v, void *arg)
 
    // A name before the member may be a structure variable or clocking block
    if (vlog_has_value(prefix)) {
-      vlog_node_t rec = elab_hier_ref_vhdl_record(v, hctx);
-      if (rec != NULL)
-         return rec;
-
-      rec = elab_hier_ref_variable(v, hctx);
+      vlog_node_t rec = elab_hier_ref_variable(v, hctx);
       if (rec != NULL)
          return rec;
 
       prefix = vlog_value(v);
+      if (vlog_has_value(prefix)) {
+         rec = elab_hier_ref_vhdl_record(v, hctx);
+         if (rec != NULL)
+            return rec;
+
+         prefix = vlog_value(v);
+      }
    }
-   else if (vlog_kind(prefix) == V_MOD_REF && !vlog_has_ref(prefix)
+   else if (vlog_kind(prefix) == V_MOD_REF
+            && (!vlog_has_ref(prefix)
+                || vlog_kind(vlog_ref(prefix)) == V_SEQ_BLOCK
+                || vlog_kind(vlog_ref(prefix)) == V_FORK)
             && vlog_params(prefix) == 0) {
       ident_t cbname = vlog_ident(prefix);
       ident_t cbsig = ident_sprintf("%s$%s", istr(cbname), istr(vlog_ident(v)));

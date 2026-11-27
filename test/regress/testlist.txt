@@ -3406,3 +3406,4 @@ sv_extern_param_ret1 verilog
 sv_assert_disable1 verilog
 sv_class_fwd_lparam1 verilog
 vlog_nba_event1 verilog
+sv_named_blk_hier1 verilog
