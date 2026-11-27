@@ -1,0 +1,2 @@
+y=5c r=4 pair=a al=0 t=1
+y=a3 r=4 pair=4 al=1 t=0

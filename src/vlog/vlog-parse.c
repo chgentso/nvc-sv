@@ -1152,6 +1152,47 @@ static vlog_gate_kind_t get_gate_kind(token_t tok)
    }
 }
 
+typedef struct {
+   vlog_node_t port;   // Placeholder in the list of ports
+   vlog_node_t expr;   // Port expression or NULL if empty
+} port_expr_t;
+
+static A(port_expr_t) port_exprs = AINIT;
+static unsigned first_port_expr = 0;   // First of the current module
+
+static bool port_expr_uses(vlog_node_t expr, ident_t id)
+{
+   switch (vlog_kind(expr)) {
+   case V_REF:
+      return vlog_ident(expr) == id;
+   case V_BIT_SELECT:
+   case V_PART_SELECT:
+      return port_expr_uses(vlog_value(expr), id);
+   case V_CONCAT:
+      {
+         const int nparams = vlog_params(expr);
+         for (int i = 0; i < nparams; i++) {
+            if (port_expr_uses(vlog_param(expr, i), id))
+               return true;
+         }
+         return false;
+      }
+   default:
+      return false;
+   }
+}
+
+static bool in_port_expr(ident_t id)
+{
+   for (unsigned i = first_port_expr; i < port_exprs.count; i++) {
+      if (port_exprs.items[i].expr != NULL
+          && port_expr_uses(port_exprs.items[i].expr, id))
+         return true;
+   }
+
+   return false;
+}
+
 static void declare_port(vlog_node_t mod, vlog_node_t port)
 {
    ident_t id = vlog_ident(port);
@@ -1166,7 +1207,9 @@ static void declare_port(vlog_node_t mod, vlog_node_t port)
       }
    }
 
-   if (!found && !(header_damaged && parse_recovery())) {
+   if (!found && in_port_expr(id))
+      return;   // Connected by expand_port_exprs
+   else if (!found && !(header_damaged && parse_recovery())) {
       diag_t *d = diag_new(DIAG_ERROR, vlog_loc(port));
       diag_printf(d, "'%s' does not appear in module port list", istr(id));
       diag_hint(d, vlog_loc(mod), "module declaration for '%s'",
@@ -28170,10 +28213,34 @@ static vlog_node_t p_port_reference(void)
 
    BEGIN("port reference");
 
+   // The name is bound when the module has been parsed as the port
+   // declarations follow the header
    vlog_node_t v = vlog_new(V_REF);
    vlog_set_ident(v, p_identifier());
    vlog_set_loc(v, CURRENT_LOC);
-   return v;
+
+   if (peek() != tLSQUARE)
+      return v;
+
+   consume(tLSQUARE);
+
+   vlog_node_t expr = p_constant_expression(), sel;
+   if (scan(tCOLON, tINDEXPOS, tINDEXNEG)) {
+      sel = vlog_new(V_PART_SELECT);
+      vlog_set_left(sel, expr);
+      vlog_set_value(sel, v);
+      p_part_select_range(sel);
+   }
+   else {
+      sel = vlog_new(V_BIT_SELECT);
+      vlog_set_value(sel, v);
+      vlog_add_param(sel, expr);
+   }
+
+   consume(tRSQUARE);
+
+   vlog_set_loc(sel, CURRENT_LOC);
+   return sel;
 }
 
 static vlog_node_t p_port_expression(void)
@@ -28182,16 +28249,55 @@ static vlog_node_t p_port_expression(void)
 
    BEGIN("port expression");
 
-   return p_port_reference();
+   if (peek() != tLBRACE)
+      return p_port_reference();
+
+   consume(tLBRACE);
+
+   vlog_node_t v = vlog_new(V_CONCAT);
+   do {
+      vlog_add_param(v, p_port_reference());
+   } while (optional(tCOMMA));
+
+   consume(tRBRACE);
+
+   vlog_set_loc(v, CURRENT_LOC);
+   return v;
 }
 
-static vlog_node_t p_port(void)
+static void p_port(vlog_node_t mod)
 {
    // [ port_expression ] | . port_identifier ( [ port_expression ] )
 
    BEGIN("port");
 
-   return p_port_expression();
+   ident_t name = NULL;
+   vlog_node_t expr = NULL;
+   if (optional(tDOT)) {
+      name = p_identifier();
+      consume(tLPAREN);
+      if (peek() != tRPAREN)
+         expr = p_port_expression();
+      consume(tRPAREN);
+   }
+   else
+      expr = p_port_expression();
+
+   if (expr != NULL && vlog_kind(expr) == V_REF
+       && (name == NULL || name == vlog_ident(expr))) {
+      vlog_add_port(mod, expr);
+      return;
+   }
+
+   // Any other port expression connects a port declared when the module
+   // ends to the names it contains (23.2.2.1)
+   vlog_node_t port = vlog_new(V_REF);
+   vlog_set_ident(port, name ?: ident_sprintf("$port%d", vlog_ports(mod)));
+   vlog_set_loc(port, CURRENT_LOC);
+   vlog_add_port(mod, port);
+
+   port_expr_t pe = { port, expr };
+   APUSH(port_exprs, pe);
 }
 
 static void p_list_of_ports(vlog_node_t mod)
@@ -28203,7 +28309,7 @@ static void p_list_of_ports(vlog_node_t mod)
    consume(tLPAREN);
 
    do {
-      vlog_add_port(mod, p_port());
+      p_port(mod);
    } while (optional(tCOMMA));
 
    consume(tRPAREN);
@@ -28837,6 +28943,232 @@ static void attach_cover_pragmas(vlog_node_t mod, int first, int last)
    }
 }
 
+static bool bind_port_expr(vlog_node_t expr, vlog_node_t mod,
+                           v_port_kind_t *dir)
+{
+   switch (vlog_kind(expr)) {
+   case V_BIT_SELECT:
+   case V_PART_SELECT:
+      return bind_port_expr(vlog_value(expr), mod, dir);
+   case V_CONCAT:
+      {
+         bool ok = true;
+         const int nparams = vlog_params(expr);
+         for (int i = 0; i < nparams; i++)
+            ok &= bind_port_expr(vlog_param(expr, i), mod, dir);
+         return ok;
+      }
+   case V_REF:
+      break;
+   default:
+      return false;
+   }
+
+   ident_t id = vlog_ident(expr);
+   vlog_node_t d = vlog_symtab_query(symtab, id);
+   if (d == NULL || vlog_kind(d) != V_PORT_DECL) {
+      error_at(vlog_loc(expr), "%pQ in a port expression must be declared "
+               "with a port direction", id);
+      return false;
+   }
+
+   vlog_set_ref(expr, d);
+
+   if (vlog_subkind(d) == V_PORT_INOUT || vlog_subkind(d) == V_PORT_REF) {
+      error_at(vlog_loc(expr), "sorry, %s ports in port expressions are not "
+               "supported", vlog_subkind(d) == V_PORT_REF ? "ref" : "inout");
+      return false;
+   }
+   else if (*dir != V_PORT_INOUT && *dir != vlog_subkind(d)) {
+      error_at(vlog_loc(expr), "all the names in a port expression must "
+               "have the same direction");
+      return false;
+   }
+
+   *dir = vlog_subkind(d);
+
+   if (*dir == V_PORT_INPUT && !vlog_has_ref(d)) {
+      // The port is driven by the continuous assignment from the port
+      // expression as if it was also declared as a net
+      vlog_node_t net = vlog_new(V_NET_DECL);
+      vlog_set_subkind(net, V_NET_WIRE);
+      vlog_set_ident(net, id);
+      vlog_set_type(net, vlog_type(d));
+      vlog_set_loc(net, vlog_loc(d));
+
+      const int nranges = vlog_ranges(d);
+      for (int i = 0; i < nranges; i++)
+         vlog_add_range(net, vlog_range(d, i));
+
+      vlog_add_decl(mod, net);
+      vlog_set_ref(d, net);
+   }
+
+   return true;
+}
+
+static vlog_node_t port_expr_binary(vlog_binary_t kind, vlog_node_t left,
+                                    vlog_node_t right)
+{
+   vlog_node_t v = vlog_new(V_BINARY);
+   vlog_set_subkind(v, kind);
+   vlog_set_left(v, left);
+   vlog_set_right(v, right);
+   vlog_set_loc(v, vlog_loc(left));
+   return v;
+}
+
+static vlog_node_t port_expr_int(int value, const loc_t *loc)
+{
+   vlog_node_t v = vlog_new(V_NUMBER);
+   vlog_set_number(v, number_from_int(value));
+   vlog_set_loc(v, loc);
+   return v;
+}
+
+static vlog_node_t port_expr_width(vlog_node_t expr)
+{
+   const loc_t *loc = vlog_loc(expr);
+
+   switch (vlog_kind(expr)) {
+   case V_REF:
+      {
+         vlog_node_t bits = vlog_new(V_SYS_FCALL);
+         vlog_set_ident(bits, ident_new("$bits"));
+         vlog_set_subkind(bits, V_SYSTF_BITS);
+         vlog_add_param(bits, expr);
+         vlog_set_loc(bits, loc);
+         return bits;
+      }
+   case V_PART_SELECT:
+      if (vlog_subkind(expr) == V_RANGE_CONST) {
+         // The bounds may be in either order
+         vlog_node_t l = vlog_left(expr), r = vlog_right(expr);
+         vlog_node_t cond = vlog_new(V_COND_EXPR);
+         vlog_set_value(cond, port_expr_binary(V_BINARY_GEQ, l, r));
+         vlog_set_left(cond, port_expr_binary(V_BINARY_MINUS, l, r));
+         vlog_set_right(cond, port_expr_binary(V_BINARY_MINUS, r, l));
+         vlog_set_loc(cond, loc);
+         return port_expr_binary(V_BINARY_PLUS, cond, port_expr_int(1, loc));
+      }
+      else
+         return vlog_right(expr);
+   case V_CONCAT:
+      {
+         vlog_node_t sum = NULL;
+         const int nparams = vlog_params(expr);
+         for (int i = 0; i < nparams; i++) {
+            vlog_node_t w = port_expr_width(vlog_param(expr, i));
+            sum = sum ? port_expr_binary(V_BINARY_PLUS, sum, w) : w;
+         }
+         return sum;
+      }
+   default:
+      return port_expr_int(1, loc);
+   }
+}
+
+static vlog_node_t port_expr_type(vlog_node_t expr, vlog_node_t decl)
+{
+   // The port has the width of the port expression (23.2.2.1)
+
+   const loc_t *loc = vlog_loc(expr);
+   vlog_node_t left, right;
+
+   switch (vlog_kind(expr)) {
+   case V_REF:
+      {
+         vlog_node_t d = vlog_ref(expr);
+         if (vlog_has_ref(d))
+            d = vlog_ref(d);
+
+         const int nranges = vlog_ranges(d);
+         for (int i = 0; i < nranges; i++)
+            vlog_add_range(decl, vlog_range(d, i));
+
+         return vlog_type(d);
+      }
+   case V_BIT_SELECT:
+      return logic_type();
+   case V_PART_SELECT:
+      if (vlog_subkind(expr) == V_RANGE_CONST) {
+         left = vlog_left(expr);
+         right = vlog_right(expr);
+         break;
+      }
+      // Fall-through
+   default:
+      left = port_expr_binary(V_BINARY_MINUS, port_expr_width(expr),
+                              port_expr_int(1, loc));
+      right = port_expr_int(0, loc);
+      break;
+   }
+
+   vlog_node_t r = vlog_new(V_DIMENSION);
+   vlog_set_subkind(r, V_DIM_PACKED);
+   vlog_set_left(r, left);
+   vlog_set_right(r, right);
+   vlog_set_loc(r, loc);
+
+   vlog_node_t vec = logic_type();
+   vlog_add_range(vec, r);
+   vlog_set_loc(vec, loc);
+   return vec;
+}
+
+static void expand_port_exprs(vlog_node_t mod, unsigned first)
+{
+   // A port expression other than the name of a port declares a port
+   // connected to the names in the expression (23.2.2.1): this becomes a
+   // port of the same width and a continuous assignment between the two
+
+   for (unsigned i = first; i < port_exprs.count; i++) {
+      vlog_node_t port = port_exprs.items[i].port;
+      vlog_node_t expr = port_exprs.items[i].expr;
+      ident_t name = vlog_ident(port);
+      const loc_t *loc = vlog_loc(port);
+
+      v_port_kind_t dir = V_PORT_INOUT;   // Not yet known
+      const bool ok = expr != NULL && bind_port_expr(expr, mod, &dir);
+
+      vlog_node_t decl = vlog_new(V_PORT_DECL);
+      vlog_set_subkind(decl, dir == V_PORT_OUTPUT ? dir : V_PORT_INPUT);
+      vlog_set_ident(decl, name);
+      vlog_set_ident2(decl, name);
+      vlog_set_type(decl, ok ? port_expr_type(expr, decl) : logic_type());
+      vlog_set_loc(decl, loc);
+
+      vlog_add_decl(mod, decl);
+      vlog_set_ref(port, decl);
+
+      vlog_node_t other = vlog_symtab_query(symtab, name);
+      if (other != NULL && vlog_kind(other) != V_MODULE) {
+         diag_t *d = diag_new(DIAG_ERROR, loc);
+         diag_printf(d, "sorry, port %pQ with the name of a declaration "
+                     "in the module is not supported", name);
+         diag_hint(d, vlog_loc(other), "%pQ declared here", name);
+         diag_emit(d);
+         continue;
+      }
+      else if (!ok)
+         continue;
+
+      vlog_node_t ref = vlog_new(V_REF);
+      vlog_set_ident(ref, name);
+      vlog_set_ref(ref, decl);
+      vlog_set_loc(ref, loc);
+
+      vlog_node_t assign = vlog_new(V_ASSIGN);
+      vlog_set_ident(assign, default_label("assign"));
+      vlog_set_target(assign, dir == V_PORT_INPUT ? expr : ref);
+      vlog_set_value(assign, dir == V_PORT_INPUT ? ref : expr);
+      vlog_set_loc(assign, loc);
+      vlog_add_stmt(mod, assign);
+   }
+
+   port_exprs.count = first;
+}
+
 static vlog_node_t p_module_declaration(void)
 {
    // module_nonansi_header [ timeunits_declaration ] { module_item }
@@ -28928,8 +29260,14 @@ static vlog_node_t p_module_declaration(void)
    const bool saved_damaged = header_damaged;
    header_damaged = false;
 
-   if (!is_checker && peek() == tLPAREN && peek_nth(2) == tID
-       && peek_nth(3) != tID && peek_nth(3) != tDOT)
+   const unsigned saved_first_port_expr = first_port_expr;
+   first_port_expr = port_exprs.count;
+
+   if (!is_checker && peek() == tLPAREN
+       && ((peek_nth(2) == tID && peek_nth(3) != tID && peek_nth(3) != tDOT)
+           || peek_nth(2) == tLBRACE
+           || (peek_nth(2) == tDOT && peek_nth(3) == tID
+               && peek_nth(4) == tLPAREN)))
       p_module_nonansi_header(mod);
    else
       p_module_ansi_header(mod);
@@ -28967,6 +29305,9 @@ static vlog_node_t p_module_declaration(void)
 
       consume(tENDMODULE);
    }
+
+   expand_port_exprs(mod, first_port_expr);
+   first_port_expr = saved_first_port_expr;
 
    expand_user_nets(mod);
    header_damaged = saved_damaged;
@@ -31130,6 +31471,8 @@ void reset_verilog_parser(void)
    syntax_errors_seen = 0;
    header_damaged = false;
    skipped_unit = false;
+   ACLEAR(port_exprs);
+   first_port_expr = 0;
 
    const bool keep_unit = opt_get_int(OPT_SINGLE_UNIT) && error_count() == 0;
 

@@ -5122,6 +5122,28 @@ START_TEST(test_fwdrec1)
 }
 END_TEST
 
+START_TEST(test_portexpr2)
+{
+   const error_t expect[] = {
+      { 1, "all the names in a port expression must have the same direction" },
+      { 1, "sorry, inout ports in port expressions are not supported" },
+      { 8, "'nope' in a port expression must be declared with a port "
+        "direction" },
+      { -1, NULL }
+   };
+   expect_errors(expect);
+
+   input_from_file(TESTDIR "/vlog/portexpr2.v");
+
+   vlog_check(do_parse_only(V_MODULE));
+   vlog_check(do_parse_only(V_MODULE));
+
+   fail_unless(vlog_parse() == NULL);
+
+   check_expected_errors();
+}
+END_TEST
+
 Suite *get_vlog_tests(void)
 {
    Suite *s = suite_create("vlog");
@@ -5324,6 +5346,7 @@ Suite *get_vlog_tests(void)
    tcase_add_test(tc, test_pkgexp1);
    tcase_add_test(tc, test_typeref1);
    tcase_add_test(tc, test_fwdrec1);
+   tcase_add_test(tc, test_portexpr2);
    suite_add_tcase(s, tc);
 
    return s;
