@@ -271,6 +271,17 @@ b0000 b
 
 
 class VerdictTests(unittest.TestCase):
+    def test_report_order_info(self):
+        ref = RunResult("ref", text="** Note: 1ns+1: a\n** Note: 1ns+1: b\n")
+        same = RunResult("default", text=ref.text)
+        swapped = RunResult("nofast",
+                            text="** Note: 1ns+1: b\n** Note: 1ns+1: a\n")
+        v = compare.compare_case({"ref": ref, "default": same,
+                                  "nofast": swapped})
+        self.assertEqual(v.signatures(), [])
+        self.assertTrue(v.info["default.reports_strict_equal"])
+        self.assertFalse(v.info["nofast.reports_strict_equal"])
+
     def test_signatures_grouped_with_configs(self):
         ref = RunResult("ref", text="** Note: 1ns+1: a\n")
         res = {"ref": ref}

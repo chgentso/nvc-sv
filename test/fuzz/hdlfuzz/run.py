@@ -122,6 +122,7 @@ class Tools:
     ghdl: Optional[str] = None            # path of the ghdl binary or None
     cache_root: str = ""                  # worker-private scratch (JIT cache, tmp)
     timeout: int = TOOL_TIMEOUT
+    nvc_run_args: tuple = ()              # extra args of every nvc -r (triage)
 
 
 @dataclass
@@ -259,7 +260,8 @@ def run_nvc(tools: Tools, case, cfg: Config, workdir, elab_done: dict,
         return res
     res.elab_text = text
     wave = os.path.join(workdir, "wave_%s.vcd" % cfg.name)
-    cmd = _nvc_base(tools, case, edir) + ["-r"] + list(cfg.run_args)
+    cmd = _nvc_base(tools, case, edir) + ["-r"] + list(cfg.run_args) + \
+        list(tools.nvc_run_args)
     cmd += ["--stop-time=" + case.stop_time, "--stop-delta=%d" % STOP_DELTA]
     if waves:
         cmd += ["--wave=" + wave, "--format=vcd", "--dump-arrays"]

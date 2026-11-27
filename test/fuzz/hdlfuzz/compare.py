@@ -446,6 +446,11 @@ def _nvc_pair(v, ref, res, levels, stable):
         d = compare_reports(res, ref, stable)
         if d:
             v.diffs.append(d)
+        elif not stable:
+            # equal after N1: record whether the order inside a delta cycle
+            # also agrees (class B information, not a finding)
+            v.info["%s.reports_strict_equal" % res.config] = \
+                compare_reports(res, ref, True) is None
         if res.wave and ref.wave:
             d, strict_eq = compare_vcd_nvc(res, ref)
             v.info["%s.vcd_strict_equal" % res.config] = strict_eq

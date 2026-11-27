@@ -71,7 +71,8 @@ def parse_seeds(s):
 
 def make_tools(args, cache_root):
     b = run.Build(args.build, args.label)
-    tools = run.Tools(b, cache_root=cache_root, timeout=args.timeout)
+    tools = run.Tools(b, cache_root=cache_root, timeout=args.timeout,
+                      nvc_run_args=tuple(args.nvc_run_arg or ()))
     g = args.ghdl
     if g == "auto":
         g = shutil.which("ghdl")
@@ -86,6 +87,9 @@ def add_common(ap):
     ap.add_argument("--ghdl", default="auto", help="ghdl binary, auto or none")
     ap.add_argument("--configs", default=",".join(run.DEFAULT_CONFIGS))
     ap.add_argument("--timeout", type=int, default=run.TOOL_TIMEOUT)
+    ap.add_argument("--nvc-run-arg", action="append", metavar="ARG",
+                    help="extra argument of every nvc run step (triage, "
+                    "e.g. --ieee-warnings=off); repeatable")
     ap.add_argument("--report-stable", action="store_true",
                     help="build orders reports itself: no N1 sort")
 
@@ -138,6 +142,8 @@ def cmd_campaign(args):
              "--tier", args.tier]
         if args.report_stable:
             a.append("--report-stable")
+        for x in args.nvc_run_arg or ():
+            a.append("--nvc-run-arg=" + x)
         a += (["--cases"] + args.cases) if args.cases else \
             ["--seeds", args.seeds]
         return a

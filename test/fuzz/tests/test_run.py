@@ -56,6 +56,8 @@ if "-r" in a:
                          "[0x1] ../src/rt/island.c:1 island_boom\\n"
                          "[0x2] ../src/rt/model.c:2 model_cycle\\n")
         sys.exit(1)
+    if "--ieee-warnings=off" in a:
+        print("** Note: 0ns+0: warnings off", file=sys.stderr)
     delta = 3 if off else 1
     if mode != "collapse":
         delta = 3
@@ -130,6 +132,20 @@ class StubTest(unittest.TestCase):
         v = compare.compare_case(res)
         self.assertEqual(v.signatures(), [])
         self.assertEqual(v.info["ghdl.common_names"], 1)
+
+    def test_extra_run_args(self):
+        self.assertNotIn("warnings off", self.run_case("")["ref"].text)
+        self.tools.nvc_run_args = ("--ieee-warnings=off",)
+        res = self.run_case("")
+        self.assertIn("warnings off", res["ref"].text)
+        self.assertNotIn("warnings off", res["ghdl"].text)
+
+    def test_cli_option(self):
+        ap = __import__("argparse").ArgumentParser()
+        runcli.add_common(ap)
+        a = ap.parse_args(["--build", "b", "--nvc-run-arg=--ieee-warnings=off",
+                           "--nvc-run-arg=--x"])
+        self.assertEqual(a.nvc_run_arg, ["--ieee-warnings=off", "--x"])
 
     def test_collapse_difference(self):
         res = self.run_case("collapse")
