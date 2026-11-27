@@ -4066,6 +4066,19 @@ static bool foreach_at_last_index(void)
    return peek_nth(n) == tRPAREN;
 }
 
+static bool is_non_agg_data_type(vlog_node_t d)
+{
+   if (d == NULL || !is_data_type(d))
+      return false;
+
+   vlog_node_t t = vlog_get_type(d);
+   if (t == NULL)
+      return true;
+
+   const vlog_kind_t k = vlog_kind(t);
+   return k != V_STRUCT_DECL && k != V_UNION_DECL && k != V_CLASS_DECL;
+}
+
 static vlog_node_t p_select(ident_t id)
 {
    // [ { . member_identifier bit_select } . member_identifier ]
@@ -4153,7 +4166,7 @@ static vlog_node_t p_select(ident_t id)
       }
       else if (is_inst)
          prefix = p_hierarchical_identifier(id);
-      else if ((d == NULL || is_data_type(d))
+      else if ((d == NULL || is_non_agg_data_type(d))
                && (peek() == tDOT || at_instance_index(true))) {
          // Assume this is a hierarchical reference to a later instance or block
          prefix = p_hierarchical_identifier(id);
@@ -4254,6 +4267,11 @@ static vlog_node_t p_select(ident_t id)
             if (vlog_kind(sub) == V_FUNC_DECL
                 || vlog_kind(sub) == V_TASK_DECL) {
                ident_t id = peek_ident_nth(1);
+               if (vlog_kind(sub) == V_FUNC_DECL && id == vlog_ident(sub)
+                   && (vlog_flags(sub) & VLOG_F_STATIC) && vlog_has_type(sub)) {
+                  consume(tID);
+                  continue;
+               }
                ident_t prefix_id = ident_sprintf("%s$static", istr(id));
                vlog_node_t found = NULL;
                const int ndecls = vlog_decls(sub);
@@ -16784,32 +16802,8 @@ static void p_function_body_declaration(vlog_node_t func)
    vlog_symtab_put(symtab, func);
 
    if (!parsing_prototype && !proc_automatic && class_depth == 0
-       && rtype != NULL && !(vlog_flags(func) & VLOG_F_DPI)
-       && !vlog_uses_typeparam(rtype)) {
-      vlog_node_t home = vlog_symtab_design_unit(symtab);
-      if (home != NULL
-          && (vlog_kind(home) == V_MODULE || vlog_kind(home) == V_PROGRAM
-              || vlog_kind(home) == V_PACKAGE
-              || vlog_kind(home) == V_GEN_BLOCK)) {
-         const loc_t *floc = vlog_loc(func);
-         vlog_node_t retvar = vlog_new(V_VAR_DECL);
-         vlog_set_ident(retvar, ident_sprintf("%s$static_ret%u_%u", istr(id),
-                                              floc->first_line,
-                                              floc->first_column));
-         vlog_set_type(retvar, rtype);
-         vlog_set_loc(retvar, floc);
-         vlog_set_flags(retvar, VLOG_F_STATIC);
-         if (vlog_kind(home) == V_MODULE || vlog_kind(home) == V_PROGRAM
-             || vlog_kind(home) == V_GEN_BLOCK)
-            vlog_set_flags(retvar, VLOG_F_SIGNAL_STATIC);
-
-         vlog_add_decl(func, retvar);
-         if (vlog_kind(home) == V_MODULE || vlog_kind(home) == V_PACKAGE)
-            APUSH(pending_statics, retvar);
-         else
-            vlog_add_decl(home, retvar);
-      }
-   }
+       && rtype != NULL && !(vlog_flags(func) & VLOG_F_DPI))
+      vlog_set_flags(func, VLOG_F_STATIC);
 
    vlog_symtab_push(symtab, func);
 

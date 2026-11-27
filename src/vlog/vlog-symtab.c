@@ -324,6 +324,19 @@ static void check_forward_ref(vlog_node_t v, vlog_node_t d)
    diag_emit(dg);
 }
 
+static bool is_non_agg_data_type(vlog_node_t d)
+{
+   if (d == NULL || !is_data_type(d))
+      return false;
+
+   vlog_node_t t = vlog_get_type(d);
+   if (t == NULL)
+      return true;
+
+   const vlog_kind_t k = vlog_kind(t);
+   return k != V_STRUCT_DECL && k != V_UNION_DECL && k != V_CLASS_DECL;
+}
+
 void vlog_symtab_resolve_deferred(vlog_symtab_t *st)
 {
    // Names used in subroutines of the compilation unit scope may be
@@ -332,7 +345,8 @@ void vlog_symtab_resolve_deferred(vlog_symtab_t *st)
    for (int i = 0; i < st->top->deferred.count; i++) {
       vlog_node_t v = st->top->deferred.items[i];
       vlog_node_t d = vlog_symtab_query(st, vlog_ident(v));
-      if (d != NULL && !(vlog_kind(v) == V_MOD_REF && is_data_type(d))) {
+      if (d != NULL && !(vlog_kind(v) == V_MOD_REF
+                         && is_non_agg_data_type(d))) {
          check_forward_ref(v, d);
          vlog_set_ref(v, d);
       }
@@ -392,7 +406,7 @@ void vlog_symtab_pop(vlog_symtab_t *st)
       vlog_node_t d = (sym != NULL && sym->node != POISON_NODE)
          ? sym->node : NULL;
       if (d != NULL
-          && !(vlog_kind(v) == V_MOD_REF && is_data_type(d))
+          && !(vlog_kind(v) == V_MOD_REF && is_non_agg_data_type(d))
           && (leaving_to_root || found == NULL || found->parent != NULL
               || (vlog_kind(v) != V_USER_TCALL
                   && vlog_kind(v) != V_USER_FCALL))) {
@@ -1199,7 +1213,7 @@ void vlog_symtab_lookup(vlog_symtab_t *st, vlog_node_t v)
    }
    else if (sym == NULL
             || (vlog_kind(v) == V_MOD_REF && sym->node != POISON_NODE
-                && is_data_type(sym->node))) {
+                && is_non_agg_data_type(sym->node))) {
       switch (vlog_kind(v)) {
       case V_USER_FCALL:
       case V_USER_TCALL:
