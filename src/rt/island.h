@@ -157,10 +157,11 @@ typedef struct {
 } rt_island_in_desc_t;
 
 typedef struct {
-   const uint8_t *src;
-   const uint8_t *cur;
-   uint32_t       nbytes;
-   uint32_t       sig_idx;
+   const uint8_t  *src;
+   const uint8_t  *cur;
+   const uint64_t *word;   // Packed one-word output with a memo (Mode A)
+   uint32_t        nbytes;
+   uint32_t        sig_idx;
 } rt_island_ext_out_desc_t;
 
 typedef struct _rt_island_spec rt_island_spec_t;

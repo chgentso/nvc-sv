@@ -1018,6 +1018,16 @@ static void island_refresh_ext_out_descs(rt_island_t *isl)
          ed->cur    = os->sig->shared.data + (size_t)os->sig_offset * elem_sz;
          ed->nbytes = os->width * os->nelems * os->elem_size;
       }
+      else if ((os->flags & (RT_ISIG_VHDL | RT_ISIG_TWO_STATE
+                             | RT_ISIG_STD_LOGIC9 | RT_ISIG_SOLE_OWNER
+                             | RT_ISIG_PRUNED))
+               == (RT_ISIG_VHDL | RT_ISIG_TWO_STATE | RT_ISIG_SOLE_OWNER)
+               && os->nwords * os->nelems == 1
+               && isl->mgr->fast && os->sig != NULL
+               && !(os->sig->shared.flags & SIG_F_PACKED)) {
+         // The static part of island_out_memo_ok holds
+         ed->word = (const uint64_t *)(isl->state + os->a_off);
+      }
    }
    isl->n_ext_out_descs = isl->n_ext_out_sigs;
 }
@@ -7483,6 +7493,17 @@ static inline void island_flush_ext_outs(rt_model_t *m, rt_island_t *isl)
             sched_deposit(m, os->sig, ed->src, os->sig_offset,
                           os->width * os->nelems, 0, false);
          }
+      }
+      else if (ed->word != NULL && can_delta) {
+         // island_flush_comb_out_sig for a one-word packed output whose
+         // value is the one last scheduled
+         rt_island_sig_t *os = &(isl->sigs[ed->sig_idx]);
+         os->flags |= RT_ISIG_VHDL_SCHED;
+         if ((os->flags & RT_ISIG_LAST_OUT_VALID)
+             && os->last_out_a == *ed->word && os->last_out_b == 0
+             && !isl->has_forces && os->ext_write_watch == NULL)
+            continue;
+         island_sched_out_sig(m, isl, os);
       }
       else
          island_flush_comb_out_sig(m, isl, &(isl->sigs[ed->sig_idx]));
