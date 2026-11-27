@@ -43,6 +43,8 @@ typedef enum {
    RT_ISIG_LAST_OUT_VALID = (1u << 14),
    RT_ISIG_PRUNED         = (1u << 15),
    RT_ISIG_SPARSE_RAM     = (1u << 16),
+   RT_ISIG_PROC_COMB      = (1u << 17),   // Written by always_comb/always @*
+   RT_ISIG_RESET_LATE     = (1u << 18),   // Not settled before time zero
 } rt_island_sig_flags_t;
 
 #define RT_IEDGE_CLK_POSEDGE  (1u << 0)
@@ -258,6 +260,7 @@ typedef struct _rt_island {
    bool                   in_cl_dirty_in;
    bool                   initialized;
    bool                   has_forces;
+   bool                   has_reset_late;
    bool                   need_sync_out;
    bool                   mt_eval_on_main;
    bool                   mt_ff_unsafe;

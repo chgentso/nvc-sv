@@ -74,6 +74,7 @@ module vpi_island2;
       din = 8'h03;
       // t=25ns posedge: u_src.q <= 0x03, u_dst.q_out <= (0xa5+1) ^ 0x20 = 0x86
       #10;
+      // t=28ns: force released, w_mid keeps 0xa5 until the always_comb runs
       // t=32ns: force released at 28ns; din=0x04 -> w_mid=0x14, dout=0x15
       din = 8'h04;
       #10;

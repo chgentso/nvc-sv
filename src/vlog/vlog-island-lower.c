@@ -463,6 +463,39 @@ static void m2_compute_boundaries(vlog_island_m2_t *m2)
       m2->sig_comb_r[i] = read_comb[i];
       m2->sig_ext_w[i] = ext_w;
    }
+
+   // Without islands an always_comb or always @* block first runs at time
+   // zero, whereas continuous assignments are settled before the start of
+   // simulation.  Mark the signals written by such a block and those
+   // computed from them by continuous assignments: the island must not
+   // publish their values before time zero.
+   memset(m2->sig_proc_w, 0, MAX(1u, nsigs) * sizeof(bool));
+   memset(m2->sig_late, 0, MAX(1u, nsigs) * sizeof(bool));
+   for (uint32_t p = 0; p < isl->nprocs; p++) {
+      const island_proc_t *ip = &(isl->procs[p]);
+      if (!m2->fused_proc[p] || ip->kind != IPROC_COMB)
+         continue;
+      for (uint32_t j = 0; j < ip->nwrites; j++)
+         m2->sig_proc_w[ip->writes[j]] = m2->sig_late[ip->writes[j]] = true;
+   }
+
+   for (bool changed = true; changed; ) {
+      changed = false;
+      for (uint32_t p = 0; p < isl->nprocs; p++) {
+         const island_proc_t *ip = &(isl->procs[p]);
+         if (!m2->fused_proc[p] || ip->kind != IPROC_ASSIGN)
+            continue;
+         bool late = false;
+         for (uint32_t j = 0; j < ip->nreads && !late; j++)
+            late = m2->sig_late[ip->reads[j]];
+         if (!late)
+            continue;
+         for (uint32_t j = 0; j < ip->nwrites; j++) {
+            if (!m2->sig_late[ip->writes[j]])
+               m2->sig_late[ip->writes[j]] = changed = true;
+         }
+      }
+   }
 }
 
 typedef struct _gen_local_attach {
@@ -1005,6 +1038,8 @@ vlog_island_lower_ctx_t *vlog_island_lower_prepare(vlog_node_t body,
       m2->sig_comb_w = xcalloc_array(MAX(1u, isl->nsigs), sizeof(bool));
       m2->sig_comb_r = xcalloc_array(MAX(1u, isl->nsigs), sizeof(bool));
       m2->sig_ext_w = xcalloc_array(MAX(1u, isl->nsigs), sizeof(bool));
+      m2->sig_proc_w = xcalloc_array(MAX(1u, isl->nsigs), sizeof(bool));
+      m2->sig_late = xcalloc_array(MAX(1u, isl->nsigs), sizeof(bool));
 
       for (uint32_t pidx = 0; pidx < isl->nprocs; pidx++) {
          if (m2_proc_eligible(isl, &(isl->procs[pidx]), sig_map, inst_mu))
@@ -1310,6 +1345,10 @@ void vlog_island_lower_emit_init(vlog_island_lower_ctx_t *ctx,
             flags |= RT_ISIG_TWO_STATE;
          if (vlog_kind(s->decl) == V_NET_DECL)
             flags |= RT_ISIG_IS_NET;
+         if (m2->sig_proc_w[i])
+            flags |= RT_ISIG_PROC_COMB;
+         if (m2->sig_late[i])
+            flags |= RT_ISIG_RESET_LATE;
 
          mir_value_t bind_res;
          if (s->gen_path != NULL) {
@@ -1461,6 +1500,8 @@ void vlog_island_lower_free(vlog_island_lower_ctx_t *ctx)
       free(m2->sig_out);
       free(m2->sig_comb_w);
       free(m2->sig_comb_r);
+      free(m2->sig_proc_w);
+      free(m2->sig_late);
       free(m2->sig_ext_w);
    }
    free(ctx->islands);
