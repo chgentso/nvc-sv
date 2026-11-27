@@ -25713,6 +25713,63 @@ static vlog_node_t p_path_declaration(void)
    return NULL;
 }
 
+static v_event_kind_t p_edge_control_specifier(void)
+{
+   // edge [ edge_descriptor { , edge_descriptor } ]
+   //
+   // edge_descriptor ::= 01 | 10 | z_or_x zero_or_one | zero_or_one z_or_x
+   //
+   // The event is a positive edge if every transition goes towards one
+   // and a negative edge if every transition goes towards zero
+
+   BEGIN("edge control specifier");
+
+   consume(tLSQUARE);
+
+   bool rise = false, fall = false;
+   do {
+      LOCAL_TEXT_BUF tb = tb_new();
+      while (not_at_token(tCOMMA, tRSQUARE, tEOF)) {
+         switch (peek()) {
+         case tUNSNUM:
+            consume(tUNSNUM);
+            tb_cat(tb, state.last_lval.str);
+            free(state.last_lval.str);
+            break;
+         case tID:
+            tb_istr(tb, p_identifier());
+            break;
+         default:
+            one_of(tUNSNUM, tID);
+            drop_tokens_until(&state, tRSQUARE);
+            return V_EVENT_EDGE;
+         }
+      }
+
+      const char *d = tb_get(tb);
+      const char from = tolower((unsigned char)d[0]);
+      const char to = from ? tolower((unsigned char)d[1]) : 0;
+      if (tb_len(tb) != 2 || from == to || !strchr("01xz", from)
+          || !strchr("01xz", to) || (from != '0' && from != '1'
+                                     && to != '0' && to != '1'))
+         parse_error(&state.last_loc, "'%s' is not a valid edge descriptor",
+                     d);
+      else if (to == '1' || from == '0')
+         rise = true;
+      else
+         fall = true;
+   } while (optional(tCOMMA));
+
+   consume(tRSQUARE);
+
+   if (rise && !fall)
+      return V_EVENT_POSEDGE;
+   else if (fall && !rise)
+      return V_EVENT_NEGEDGE;
+   else
+      return V_EVENT_EDGE;
+}
+
 static vlog_node_t p_timing_check_event_control(void)
 {
    // posedge | negedge | edge | edge_control_specifier
@@ -25725,8 +25782,12 @@ static vlog_node_t p_timing_check_event_control(void)
       vlog_set_subkind(v, V_EVENT_POSEDGE);
    else if (optional(tNEGEDGE))
       vlog_set_subkind(v, V_EVENT_NEGEDGE);
-   else if (optional(tEDGE))
-      vlog_set_subkind(v, V_EVENT_EDGE);
+   else if (optional(tEDGE)) {
+      if (peek() == tLSQUARE)
+         vlog_set_subkind(v, p_edge_control_specifier());
+      else
+         vlog_set_subkind(v, V_EVENT_EDGE);
+   }
    else
       vlog_set_subkind(v, V_EVENT_LEVEL);
 
@@ -25974,19 +26035,98 @@ static vlog_node_t p_width_timing_check(void)
 
    (void)p_mintypmax_expression();
 
-   consume(tCOMMA);
-
-   (void)p_constant_expression();
-
+   // The threshold may be omitted when there is no notifier
    if (optional(tCOMMA)) {
-      if (peek() == tID)
-         p_identifier();
+      (void)p_constant_expression();
+
+      if (optional(tCOMMA)) {
+         if (peek() == tID)
+            p_identifier();
+      }
    }
 
    consume(tRPAREN);
    consume(tSEMI);
 
    return NULL;
+}
+
+static vlog_node_t p_skew_or_nochange_timing_check(void)
+{
+   // $skew ( reference_event , data_event , timing_check_limit
+   //   [ , [ notifier ] ] ) ;
+   //
+   // $timeskew ( reference_event , data_event , timing_check_limit
+   //   [ , [ notifier ] [ , [ event_based_flag ]
+   //   [ , [ remain_active_flag ] ] ] ] ) ;
+   //
+   // $fullskew ( reference_event , data_event , timing_check_limit ,
+   //   timing_check_limit [ , [ notifier ] [ , [ event_based_flag ]
+   //   [ , [ remain_active_flag ] ] ] ] ) ;
+   //
+   // $nochange ( reference_event , data_event , start_edge_offset ,
+   //   end_edge_offset [ , [ notifier ] ] ) ;
+   //
+   // These checks are parsed but not modelled, as $width and $period
+
+   BEGIN("skew/nochange timing check");
+
+   int nlimits, nflags;
+   switch (one_of(tDLRSKEW, tDLRTIMESKEW, tDLRFULLSKEW, tDLRNOCHANGE)) {
+   case tDLRSKEW:     nlimits = 1; nflags = 0; break;
+   case tDLRTIMESKEW: nlimits = 1; nflags = 2; break;
+   case tDLRFULLSKEW: nlimits = 2; nflags = 2; break;
+   default:           nlimits = 2; nflags = 0; break;
+   }
+
+   consume(tLPAREN);
+
+   (void)p_timing_check_event();
+
+   consume(tCOMMA);
+
+   (void)p_timing_check_event();
+
+   for (int i = 0; i < nlimits; i++) {
+      consume(tCOMMA);
+      (void)p_mintypmax_expression();
+   }
+
+   if (optional(tCOMMA)) {
+      if (peek() == tID)
+         p_identifier();   // Notifier
+
+      for (int i = 0; i < nflags && optional(tCOMMA); i++) {
+         if (not_at_token(tCOMMA, tRPAREN))
+            (void)p_constant_expression();
+      }
+   }
+
+   consume(tRPAREN);
+   consume(tSEMI);
+
+   return NULL;
+}
+
+static void p_showcancelled_declaration(void)
+{
+   // showcancelled list_of_path_outputs ;
+   //   | noshowcancelled list_of_path_outputs ;
+   //
+   // pulsestyle_onevent list_of_path_outputs ;
+   //   | pulsestyle_ondetect list_of_path_outputs ;
+   //
+   // Path delays are not modelled so these only affect the parse
+
+   BEGIN("showcancelled or pulsestyle declaration");
+
+   one_of(tSHOWCANCEL, tNOSHOWCANCEL, tPULSEONEVENT, tPULSEONDETECT);
+
+   do {
+      (void)p_specify_terminal_descriptor();
+   } while (optional(tCOMMA));
+
+   consume(tSEMI);
 }
 
 static vlog_node_t p_delayed_data_or_reference(void)
@@ -26108,6 +26248,11 @@ static vlog_node_t p_system_timing_check(void)
    case tDLRSETUPHOLD:
    case tDLRRECREM:
       return p_setuphold_or_recrem_timing_check();
+   case tDLRSKEW:
+   case tDLRTIMESKEW:
+   case tDLRFULLSKEW:
+   case tDLRNOCHANGE:
+      return p_skew_or_nochange_timing_check();
    default:
       should_not_reach_here();
    }
@@ -26218,6 +26363,10 @@ static void p_specify_item(vlog_node_t parent)
    case tDLRRECREM:
    case tDLRWIDTH:
    case tDLRPERIOD:
+   case tDLRSKEW:
+   case tDLRTIMESKEW:
+   case tDLRFULLSKEW:
+   case tDLRNOCHANGE:
       {
          vlog_node_t tcheck = p_system_timing_check();
          // TODO: Remove once all timing checks are supported.
@@ -26225,10 +26374,18 @@ static void p_specify_item(vlog_node_t parent)
             vlog_add_stmt(parent, tcheck);
       }
       break;
+   case tSHOWCANCEL:
+   case tNOSHOWCANCEL:
+   case tPULSEONEVENT:
+   case tPULSEONDETECT:
+      p_showcancelled_declaration();
+      break;
    default:
       one_of(tSPECPARAM, tLPAREN, tIF, tIFNONE, tDLRSETUP, tDLRHOLD,
              tDLRRECOVERY, tDLRREMOVAL, tDLRSETUPHOLD, tDLRRECREM,
-             tDLRWIDTH, tDLRPERIOD);
+             tDLRWIDTH, tDLRPERIOD, tDLRSKEW, tDLRTIMESKEW, tDLRFULLSKEW,
+             tDLRNOCHANGE, tSHOWCANCEL, tNOSHOWCANCEL, tPULSEONEVENT,
+             tPULSEONDETECT);
    }
 }
 
