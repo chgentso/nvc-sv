@@ -3372,3 +3372,4 @@ signal40        fail,gold
 vhdl_island_selfread1 shell
 vhdl_island_tostring1 shell
 vhdl_island_longproc1 shell
+vhdl_island_var1 shell

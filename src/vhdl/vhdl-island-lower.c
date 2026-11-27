@@ -163,11 +163,14 @@ static void vi_generic_reason(vi_lower_t *l, const char *what, tree_t t)
    if (l->reason != NULL || t == NULL || !opt_get_int(OPT_DUMP_ISLANDS))
       return;
    const tree_kind_t k = tree_kind(t);
+   const unsigned line = tree_loc(t)->first_line;
    if (k == T_FCALL || k == T_PCALL)
-      l->reason = istr(ident_sprintf("lower %s %s %s", what, tree_kind_str(k),
-                                     istr(tree_ident(t))));
+      l->reason = istr(ident_sprintf("lower %s %s %s line %u", what,
+                                     tree_kind_str(k), istr(tree_ident(t)),
+                                     line));
    else
-      l->reason = istr(ident_sprintf("lower %s %s", what, tree_kind_str(k)));
+      l->reason = istr(ident_sprintf("lower %s %s line %u", what,
+                                     tree_kind_str(k), line));
 }
 
 static bool fn_name_is(const char *rest, const char *target)
@@ -653,17 +656,19 @@ static mir_value_t vi_alloc_array2d_local(vi_lower_t *l, uint32_t nelems,
 }
 
 // A wide Mode A vector variable is a pointer to its words and a variable has
-// no pointer until it is first stored, so a variable that is read before it is
-// assigned (a function local or record field with no initial value, partly
-// assigned) must start as zero, the 2-state image of the default value.
+// no pointer until it is first stored, and an element assignment to a
+// narrow one keeps the bits it does not write, which concatenation and
+// comparison read as part of the value.  So a variable that is read before
+// it is assigned or assigned element by element (a function local or record
+// field with no initial value, a process variable) must start as zero, the
+// 2-state image of the default value.
 static mir_value_t vi_add_vec2_var(vi_lower_t *l, uint32_t width,
                                    bool is_signed, ident_t name)
 {
    mir_unit_t *mu = l->mu;
    mir_value_t var = mir_add_var(mu, mir_vec2_type(mu, (int)width, is_signed),
                                  MIR_NULL_STAMP, name, MIR_VAR_TEMP);
-   if (width > 64)
-      mir_build_store(mu, var, vi_const_vec2(mu, (int)width, is_signed, NULL));
+   mir_build_store(mu, var, vi_const_vec2(mu, (int)width, is_signed, NULL));
    return var;
 }
 
@@ -7242,11 +7247,9 @@ static bool vi_bind_process_locals(vi_lower_t *l, tree_t proc, vi_scope_t *sc)
          if (!vi_eval_type_bounds(l, vt, &loc.dir, &loc.left,
                                   &loc.right, &loc.width))
             return false;
-         if (l->two_state) {
-            mir_type_t mvt = mir_vec2_type(mu, (int)loc.width, loc.is_signed);
-            loc.storage = mir_add_var(mu, mvt, MIR_NULL_STAMP,
-                                      tree_ident(d), MIR_VAR_TEMP);
-         }
+         if (l->two_state)
+            loc.storage = vi_add_vec2_var(l, loc.width, loc.is_signed,
+                                          tree_ident(d));
          else
             loc.storage = vi_modeb_alloc_vec(l, loc.width);
       }
