@@ -1162,6 +1162,7 @@ static vcode_reg_t lower_signal_record_aggregate(lower_unit_t *lu, tree_t expr)
       vals[i] = VCODE_INVALID_REG;
 
    type_t *value_types LOCAL = xcalloc_array(nfields, sizeof(type));
+   tree_t *assocs LOCAL = xcalloc_array(nfields, sizeof(tree_t));
 
    for (int i = 0; i < nassocs; i++) {
       tree_t a = tree_assoc(expr, i);
@@ -1182,6 +1183,7 @@ static vcode_reg_t lower_signal_record_aggregate(lower_unit_t *lu, tree_t expr)
 
       vals[pos] = lower_lvalue(lu, value);
       value_types[pos] = tree_type(value);
+      assocs[pos] = value;
    }
 
    for (int i = 0; i < nfields; i++)
@@ -1199,8 +1201,19 @@ static vcode_reg_t lower_signal_record_aggregate(lower_unit_t *lu, tree_t expr)
 
       if (type_is_record(ftype))
          emit_copy(ptr_reg, val_reg, VCODE_INVALID_REG);
-      else
+      else {
+         if (type_is_array(ftype)) {
+            if (!type_is_unconstrained(ftype)) {
+               vcode_reg_t bounds_reg = type_const_bounds(ftype)
+                  ? VCODE_INVALID_REG : lower_get_type_bounds(lu, ftype);
+               vcode_reg_t locus = lower_debug_locus(assocs[i]);
+               lower_check_array_sizes(lu, ftype, value_types[i],
+                                       bounds_reg, val_reg, locus);
+            }
+            val_reg = lower_coerce_arrays(lu, value_types[i], ftype, val_reg);
+         }
          emit_store_indirect(val_reg, ptr_reg);
+      }
    }
 
    return mem_reg;
