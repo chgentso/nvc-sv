@@ -4592,8 +4592,11 @@ static void p_list_of_arguments(vlog_node_t call)
       else if (peek() == tTICK && peek_nth(2) == tLBRACE) {
          if ((pattern_type = arg_pattern_type(call, vlog_params(call))))
             vlog_add_param(call, p_assignment_pattern_expression(pattern_type));
-         else if (vlog_kind(call) == V_METHOD_CALL
-                  && vlog_virtual_pending(call))
+         else if ((vlog_kind(call) == V_METHOD_CALL
+                   && vlog_virtual_pending(call))
+                  || ((vlog_kind(call) == V_USER_FCALL
+                       || vlog_kind(call) == V_USER_TCALL)
+                      && callee_decl == NULL))
             vlog_add_param(call, p_deferred_pattern_expression());
          else
             vlog_add_param(call, p_expression());

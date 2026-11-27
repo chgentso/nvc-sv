@@ -3374,3 +3374,4 @@ svwildeq2       verilog
 svdelaytype1    verilog
 svunitscope1    verilog
 svcaseimpure1   verilog
+svpatfwd1       verilog
