@@ -316,7 +316,7 @@ START_TEST(test_island_spec_pack)
       sigs[i].width = width[i];
       sigs[i].nelems = nelems[i];
       sigs[i].nwords = (width[i] + 63) / 64;
-      sigs[i].flags = RT_ISIG_IN;   // Loaded by the island: converted
+      sigs[i].flags = RT_ISIG_IN;   // Live: converted by the state check
    }
 
    uint32_t spec_a_off[NSIGS], spec_a_flags[NSIGS], spec_b_bytes[NSIGS];
@@ -375,6 +375,88 @@ START_TEST(test_island_spec_pack)
 }
 END_TEST
 
+// The word-wise conversion must agree with the byte-wise definition for every
+// byte value, width and element count: bit set iff the byte is ZERO + 1,
+// clean iff every byte is ZERO or ZERO + 1
+START_TEST(test_island_spec_pack_widths)
+{
+   static const uint32_t widths[] = {
+      1, 2, 3, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 70, 127, 128, 130,
+   };
+   uint64_t seed = UINT64_C(0x9e3779b97f4a7c15);
+
+   for (int is_std = 0; is_std < 2; is_std++) {
+      const uint8_t zero = is_std ? 2 : 0;
+      for (size_t wi = 0; wi < ARRAY_LEN(widths); wi++) {
+         for (uint32_t nelems = 1; nelems <= 3; nelems += 2) {
+            const uint32_t width = widths[wi];
+            const uint32_t nwords = (width + 63) / 64;
+            const uint32_t nbytes = width * nelems;
+
+            rt_island_sig_t sig = {
+               .a_off = 8, .width = width, .nelems = nelems, .nwords = nwords,
+               .flags = RT_ISIG_IN,
+            };
+            uint32_t a_off = 8, a_flags = RT_ISIG_TWO_STATE
+               | (is_std ? RT_ISIG_STD_LOGIC_ELEM : 0), b_bytes = nbytes;
+            rt_island_spec_t spec = {
+               .state_bytes = 8 + nwords * nelems * 8,
+               .hdr_bytes   = 8,
+               .a_off       = &a_off,
+               .a_flags     = &a_flags,
+               .b_bytes     = &b_bytes,
+            };
+            rt_island_t isl = { .sigs = &sig, .nsigs = 1, .spec = &spec };
+
+            uint8_t *b = xcalloc(8 + nbytes);
+            uint64_t *a = xcalloc(8 + nwords * nelems * 8 + 8);
+            uint64_t *want = xcalloc(nwords * nelems * 8);
+
+            // Clean and unclean inputs: values 0..8 (every std_logic value)
+            // and arbitrary bytes
+            for (int iter = 0; iter < 200; iter++) {
+               bool clean = true;
+               memset(want, 0, nwords * nelems * 8);
+               for (uint32_t i = 0; i < nbytes; i++) {
+                  seed = seed * UINT64_C(6364136223846793005) + 1442695040888963407;
+                  const uint32_t r = (uint32_t)(seed >> 33);
+                  uint8_t v;
+                  if (iter < 100)
+                     v = zero + (r & 1);   // Clean
+                  else if (iter < 150)
+                     v = r % 9;
+                  else
+                     v = r & 0xff;
+                  if (iter >= 100 && (r >> 12) % 8 != 0)
+                     v = zero + (r & 1);   // Mostly clean with a few others
+                  b[8 + i] = v;
+
+                  const uint8_t d = v - zero;
+                  clean &= (d <= 1);
+                  if (d == 1) {
+                     const uint32_t e = i / width, k = i % width;
+                     const uint32_t lsb = width - 1u - k;
+                     want[e * nwords + lsb / 64] |= UINT64_C(1) << (lsb & 63);
+                  }
+               }
+
+               memset(a, 0xa5, 8 + nwords * nelems * 8 + 8);
+               ck_assert_int_eq(rt_island_spec_pack(&isl, b, (uint8_t *)a),
+                                clean);
+               ck_assert_mem_eq(a + 1, want, nwords * nelems * 8);
+               // Nothing is written past the signal
+               ck_assert_int_eq(((uint8_t *)a)[8 + nwords * nelems * 8], 0xa5);
+            }
+
+            free(b);
+            free(a);
+            free(want);
+         }
+      }
+   }
+}
+END_TEST
+
 Suite *get_island_tests(void)
 {
    Suite *s = suite_create("island");
@@ -385,6 +467,7 @@ Suite *get_island_tests(void)
    tcase_add_test(tc, test_island_comb_cycle);
    tcase_add_test(tc, test_island_mixed_vhdl_and_func);
    tcase_add_test(tc, test_island_spec_pack);
+   tcase_add_test(tc, test_island_spec_pack_widths);
    suite_add_tcase(s, tc);
 
    return s;

@@ -1207,6 +1207,58 @@ static void vi_spec_deopt_int_fit(vi_lower_t *l, mir_value_t v, uint32_t width,
                           RT_ISLAND_DEOPT_CONV);
 }
 
+// Speculative Mode A: a relational operator between a vector of WIDTH bits
+// and an integer constant that does not fit the vector.  The IEEE numeric
+// package (all versions) return before any conversion and without a warning
+// once the vector has no metavalue, which is always the case in Mode A, so
+// the result is the mathematical comparison and the vector can be ignored.  Returns false if IV is not such a constant.
+static bool vi_spec_fold_int_cmp(vi_lower_t *l, mir_vec_op_t op, bool int_left,
+                                 vi_val_t iv, uint32_t width, bool is_signed,
+                                 bool *res)
+{
+   int64_t c;
+   if (!mir_get_const(l->mu, vi_to_i64(l->mu, iv.val), &c))
+      return false;
+
+   bool above;   // the integer is greater than any vector value
+   if (is_signed && width < 64)
+      above = (c > (INT64_C(1) << (width - 1)) - 1);
+   else if (!is_signed && width < 63)
+      above = (c > (INT64_C(1) << width) - 1);
+   else
+      return false;
+
+   bool below = false;
+   if (is_signed)
+      below = (c < -(INT64_C(1) << (width - 1)));
+   else if (c < 0)
+      return false;   // Not a NATURAL
+
+   if (!above && !below)
+      return false;
+
+   // Normalise to "vector OP integer"
+   if (int_left) {
+      switch (op) {
+      case MIR_VEC_LT:  op = MIR_VEC_GT;  break;
+      case MIR_VEC_LEQ: op = MIR_VEC_GEQ; break;
+      case MIR_VEC_GT:  op = MIR_VEC_LT;  break;
+      case MIR_VEC_GEQ: op = MIR_VEC_LEQ; break;
+      default: break;
+      }
+   }
+
+   switch (op) {
+   case MIR_VEC_LT:
+   case MIR_VEC_LEQ:      *res = above; return true;
+   case MIR_VEC_GT:
+   case MIR_VEC_GEQ:      *res = below; return true;
+   case MIR_VEC_CASE_EQ:  *res = false; return true;
+   case MIR_VEC_CASE_NEQ: *res = true;  return true;
+   default:               return false;
+   }
+}
+
 // Speculative Mode A: deopt unless the integer result IV of FCALL is in
 // the range of its type, where the IEEE function fails or warns otherwise
 static void vi_spec_deopt_result(vi_lower_t *l, tree_t fcall, mir_value_t iv)
@@ -2499,6 +2551,19 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
          // as a mathematical value
          if (wa > 0 && wb > 0 && a.is_signed != b.is_signed)
             return false;
+         if (is_rel && strcmp(pkg, "IEEE.NUMERIC_STD.") == 0
+             && (a.kind == VIVAL_INT) != (b.kind == VIVAL_INT)) {
+            const bool int_left = (a.kind == VIVAL_INT);
+            const vi_val_t iv = int_left ? a : b;
+            const uint32_t wv = int_left ? wb : wa;
+            bool res;
+            if (wv > 0 && vi_spec_fold_int_cmp(l, op, int_left, iv, wv, sg,
+                                               &res)) {
+               *out = vi_from_bool_bit(l, mir_const(mu, mir_bool_type(mu), res),
+                                       true, false);
+               return true;
+            }
+         }
          if (a.kind == VIVAL_INT && wb > 0)
             vi_spec_deopt_int_fit(l, vi_to_i64(mu, a.val), wb, sg);
          if (b.kind == VIVAL_INT && wa > 0)
