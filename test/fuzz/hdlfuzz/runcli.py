@@ -53,10 +53,15 @@ def find_cases(paths):
 
 
 def generate_case(seed, tier, dest):
-    """Hook for the generator (chunk C3 wires hdlfuzz.gen/testbench here):
-    must write the case directory under dest and return its path."""
-    raise SystemExit("seed mode: the generator is not wired to the runner "
-                     "yet (use --cases)")
+    """Write the case of a seed with the generator lane's modules (gen,
+    casefile) and return its directory."""
+    try:
+        from . import casefile, gen
+    except ImportError:
+        raise SystemExit("seed mode needs the generator modules (gen, "
+                         "casefile); use --cases")
+    casefile.write_case(gen.generate(seed, tier), dest)
+    return dest
 
 
 def parse_seeds(s):
@@ -183,18 +188,18 @@ def cmd_buckets(args):
     return 0
 
 
-def main(argv=None):
-    ap = argparse.ArgumentParser(prog="hdlfuzz.runcli")
-    sub = ap.add_subparsers(dest="cmd", required=True)
-
-    p = sub.add_parser("run")
+def register(sub):
+    """Add the runner subcommands to an argparse subparsers object (used by
+    hdlfuzz.__main__: `runcli.register(sub)`)."""
+    p = sub.add_parser("run", help="run cases in all configurations and compare")
     add_common(p)
     p.add_argument("cases", nargs="+")
     p.add_argument("--work", required=True)
     p.set_defaults(fn=cmd_run)
 
     for name, fn in (("campaign", cmd_campaign), ("worker", cmd_worker)):
-        p = sub.add_parser(name)
+        p = sub.add_parser(name, help="campaign driver" if name == "campaign"
+                           else argparse.SUPPRESS)
         add_common(p)
         p.add_argument("--out", required=True)
         p.add_argument("--tier", default="V1")
@@ -209,10 +214,15 @@ def main(argv=None):
             p.add_argument("--shard", required=True)
         p.set_defaults(fn=fn)
 
-    p = sub.add_parser("buckets")
+    p = sub.add_parser("buckets", help="summarise cases.jsonl of a campaign")
     p.add_argument("out")
     p.set_defaults(fn=cmd_buckets)
 
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="hdlfuzz.runcli")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    register(sub)
     args = ap.parse_args(argv)
     return args.fn(args)
 
