@@ -3392,3 +3392,4 @@ svstaticret1    verilog
 svdyn2fixed1    verilog
 svforeachbrk1   verilog
 svpatparam2     verilog
+svcmdline_arg1  shell

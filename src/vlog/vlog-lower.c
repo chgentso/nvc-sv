@@ -39015,11 +39015,12 @@ static void vlog_lower_dpi_body(vlog_gen_t *g, vlog_node_t v,
       mir_build_consume(g->mu, len);
 
       mir_block_t copy_bb = mir_add_block(g->mu);
+      mir_block_t empty_bb = mir_add_block(g->mu);
       mir_block_t done_bb = mir_add_block(g->mu);
 
       mir_build_cond(g->mu, mir_build_cmp(g->mu, MIR_CMP_GT, len,
                                           mir_const(g->mu, t_offset, 0)),
-                     copy_bb, done_bb);
+                     copy_bb, empty_bb);
 
       mir_set_cursor(g->mu, copy_bb, MIR_APPEND);
 
@@ -39029,6 +39030,11 @@ static void vlog_lower_dpi_body(vlog_gen_t *g, vlog_node_t v,
                                         t_offset, MIR_NULL_STAMP, cargs, 1);
       mir_build_consume(g->mu, res);
       mir_build_store(g->mu, result, vlog_wrap_array(g, data, len));
+      mir_build_jump(g->mu, done_bb);
+
+      mir_set_cursor(g->mu, empty_bb, MIR_APPEND);
+      const type_info_t *ti = vlog_type_info(g, vlog_type(v));
+      mir_build_store(g->mu, result, vlog_lower_default_value(g, ti));
       mir_build_jump(g->mu, done_bb);
 
       mir_set_cursor(g->mu, done_bb, MIR_APPEND);
@@ -39145,10 +39151,15 @@ static void vlog_lower_func_decl(mir_unit_t *mu, object_t *obj)
       mir_put_object(mu, port, local);
    }
 
+   // Without foreign code the UVM library cannot read the command line so
+   // this is provided here instead of the empty version in the library
+   const bool builtin = !is_ctor
+      && vlog_ident(v) == ident_new("uvm_dpi_get_next_arg");
+
    mir_value_t result = MIR_NULL_VALUE;
    if (has_result) {
       if (!g.constfunc && (vlog_flags(v) & VLOG_F_STATIC)
-          && !(vlog_flags(v) & VLOG_F_DPI)) {
+          && !(vlog_flags(v) & VLOG_F_DPI) && !builtin) {
          int hops = 0;
          mir_value_t sret = mir_search_object(mu, v, &hops);
          if (!mir_is_null(sret) && hops > 0)
@@ -39167,11 +39178,6 @@ static void vlog_lower_func_decl(mir_unit_t *mu, object_t *obj)
    }
 
    gen_stack_t gs = {};
-
-   // Without foreign code the UVM library cannot read the command line so
-   // this is provided here instead of the empty version in the library
-   const bool builtin = !is_ctor
-      && vlog_ident(v) == ident_new("uvm_dpi_get_next_arg");
 
    if ((vlog_flags(v) & VLOG_F_DPI) || builtin)
       vlog_lower_dpi_body(&g, v, result);
