@@ -35,7 +35,7 @@ module vlog_nba_event1;
     #1;
     if (a !== 8'h33) $fatal(1, "repeat 0 a=%h", a);
 
-    $display("PASS");
+    $display("PASSED");
     $finish;
   end
 endmodule

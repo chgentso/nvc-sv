@@ -49,6 +49,6 @@ module sv_named_blk_hier1;
       $fatal(1, "scope=%s", scope);
     if (sv_named_blk_hier1.FOR.FOREACH.INNER.val !== 3)
       $fatal(1, "loop=%0d", sv_named_blk_hier1.FOR.FOREACH.INNER.val);
-    $display("PASS");
+    $display("PASSED");
   end
 endmodule

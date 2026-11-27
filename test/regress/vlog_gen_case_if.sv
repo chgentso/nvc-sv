@@ -38,6 +38,6 @@ module vlog_gen_case_if;
       $fatal(1, "o1=%0d o2=%0d o3=%0d", o1, o2, o3);
     if (u1.blk.w !== 10 || u2.blk.w !== 20 || u3.blk.w !== 30)
       $fatal(1, "w=%0d %0d %0d", u1.blk.w, u2.blk.w, u3.blk.w);
-    $display("PASS");
+    $display("PASSED");
   end
 endmodule

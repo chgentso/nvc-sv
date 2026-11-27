@@ -1616,39 +1616,6 @@ ident_t vlog_symtab_hier_suffix(vlog_symtab_t *st, hier_owner_t *owner,
    return suffix;
 }
 
-ident_t vlog_symtab_block_prefix(vlog_symtab_t *st, vlog_node_t home)
-{
-   ident_t prefix = NULL;
-
-   for (vlog_scope_t *s = st->top; s != NULL; s = s->parent) {
-      vlog_node_t c = s->container;
-      if (c == NULL)
-         continue;
-      if (c == home)
-         return prefix;
-
-      switch (vlog_kind(c)) {
-      case V_MODULE:
-      case V_PROGRAM:
-      case V_PACKAGE:
-      case V_GEN_BLOCK:
-      case V_CLASS_DECL:
-         return prefix;
-      case V_SEQ_BLOCK:
-      case V_FORK:
-      case V_FUNC_DECL:
-      case V_TASK_DECL:
-         if (vlog_has_ident(c))
-            prefix = ident_prefix(vlog_ident(c), prefix, '$');
-         break;
-      default:
-         break;
-      }
-   }
-
-   return prefix;
-}
-
 static void put_imported(vlog_symtab_t *st, vlog_node_t d, ident_t via,
                          ident_t from)
 {

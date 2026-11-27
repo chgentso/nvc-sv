@@ -19,7 +19,7 @@ module sv_wild_unit_child;
   initial begin
     #1;
     if (ok !== 1'b1) $fatal(1, "expected ok=1");
-    $display("PASS");
+    $display("PASSED");
   end
 endmodule
 

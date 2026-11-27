@@ -31,7 +31,7 @@ module sv_disable_hier1;
       if (x !== 3) $fatal(1, "expected x=3, got %0d", x);
     end
 
-    $display("PASS");
+    $display("PASSED");
     $finish;
   end
 endmodule

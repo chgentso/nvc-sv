@@ -13,6 +13,6 @@ module vlog_bits_slice;
     if ($bits(arr[i-:2]) !== 48) $fatal(1, "arr[i-:2]=%0d", $bits(arr[i-:2]));
     if ($bits(arr[i+:2]) !== 48) $fatal(1, "arr[i+:2]=%0d", $bits(arr[i+:2]));
     if ($bits(packed_v[7:0]) !== 8) $fatal(1, "packed_v[7:0]=%0d", $bits(packed_v[7:0]));
-    $display("PASS");
+    $display("PASSED");
   end
 endmodule

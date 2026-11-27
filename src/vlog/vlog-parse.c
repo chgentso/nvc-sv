@@ -15339,31 +15339,8 @@ static void p_static_local_decls(vlog_node_t parent, vlog_node_t home,
       }
 
       const loc_t *loc = vlog_loc(d);
-      ident_t orig_id = vlog_ident(d);
-      ident_t static_id = NULL;
-      if (vlog_kind(home) == V_MODULE || vlog_kind(home) == V_PROGRAM
-          || vlog_kind(home) == V_GEN_BLOCK) {
-         ident_t bprefix = vlog_symtab_block_prefix(symtab, home);
-         if (bprefix != NULL) {
-            ident_t cand = ident_sprintf("%s$%s", istr(bprefix), istr(orig_id));
-            bool clash = false;
-            const int nh = vlog_decls(home);
-            for (int k = 0; k < nh && !clash; k++) {
-               vlog_node_t hd = vlog_decl(home, k);
-               clash = vlog_has_ident(hd) && vlog_ident(hd) == cand;
-            }
-            for (int k = 0; k < pending_statics.count && !clash; k++) {
-               vlog_node_t pd = pending_statics.items[k];
-               clash = vlog_has_ident(pd) && vlog_ident(pd) == cand;
-            }
-            if (!clash)
-               static_id = cand;
-         }
-      }
-      if (static_id == NULL)
-         static_id = ident_sprintf("%s$static%u_%u", istr(orig_id),
-                                   loc->first_line, loc->first_column);
-      vlog_set_ident(d, static_id);
+      vlog_set_ident(d, ident_sprintf("%s$static%u_%u", istr(vlog_ident(d)),
+                                      loc->first_line, loc->first_column));
       vlog_set_flags(d, VLOG_F_STATIC);
       if (vlog_kind(home) == V_MODULE || vlog_kind(home) == V_PROGRAM
           || vlog_kind(home) == V_GEN_BLOCK)

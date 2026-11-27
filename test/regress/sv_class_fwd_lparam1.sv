@@ -22,6 +22,6 @@ module sv_class_fwd_lparam1;
     Outer #(20) o;
     o = new;
     if (o.get_p() !== 20) $fatal(1, "expected 20, got %0d", o.get_p());
-    $display("PASS");
+    $display("PASSED");
   end
 endmodule

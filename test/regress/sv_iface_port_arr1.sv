@@ -19,6 +19,6 @@ module sv_iface_port_arr1;
     #1;
     if (sub.bus[0].data !== 8'hA0 || sub.bus[1].data !== 8'hA1)
       $fatal(1, "got %h %h", sub.bus[0].data, sub.bus[1].data);
-    $display("PASS");
+    $display("PASSED");
   end
 endmodule

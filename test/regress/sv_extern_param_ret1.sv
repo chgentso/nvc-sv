@@ -11,10 +11,10 @@ endfunction
 
 module sv_extern_param_ret1;
   initial begin
-    Box#(string) bs = Box#(string)::make("hello");
-    Box#(int) bi = Box#(int)::make(42);
+    automatic Box#(string) bs = Box#(string)::make("hello");
+    automatic Box#(int) bi = Box#(int)::make(42);
     if (bs.value !== "hello" || bi.value !== 42)
       $fatal(1, "got %s %0d", bs.value, bi.value);
-    $display("PASS");
+    $display("PASSED");
   end
 endmodule

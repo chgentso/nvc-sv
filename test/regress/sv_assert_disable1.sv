@@ -17,6 +17,6 @@ module sv_assert_disable1;
     end
     if (v !== 10) $fatal(1, "expected 10, got %0d", v);
 
-    $display("PASS");
+    $display("PASSED");
   end
 endmodule

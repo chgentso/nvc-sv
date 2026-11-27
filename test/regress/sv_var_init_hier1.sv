@@ -20,6 +20,6 @@ module sv_var_init_hier1;
       $fatal(1, "gen=%0d %0d", gen[0].val, gen[1].val);
     if (top_val !== 8'd15)
       $fatal(1, "top_val=%0d", top_val);
-    $display("PASS");
+    $display("PASSED");
   end
 endmodule

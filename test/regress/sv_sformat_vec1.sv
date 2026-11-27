@@ -20,6 +20,6 @@ module sv_sformat_vec1;
     end
     if (wide !== "sv_sformat_vec1.FOR.INNER") $fatal(1, "hier=%0s", wide);
 
-    $display("PASS");
+    $display("PASSED");
   end
 endmodule
