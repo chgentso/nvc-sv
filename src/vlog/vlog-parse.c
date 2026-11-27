@@ -19837,8 +19837,23 @@ static void p_class_body(vlog_node_t v, ident_t name, generic_class_t *g,
                   if (k > i + 1 && (g->tokens[k - 1].token == tSCOPE
                                     || g->tokens[k - 1].token == tDOT))
                      continue;
-                  if (vlog_symtab_query(symtab, g->tokens[k].lval.ident) == NULL)
+                  ident_t ref_id = g->tokens[k].lval.ident;
+                  if (vlog_symtab_query_local(symtab, ref_id) != NULL)
+                     continue;
+                  if (vlog_symtab_query(symtab, ref_id) == NULL) {
                      ok = false;
+                     break;
+                  }
+                  // Do not pre-parse if an outer identifier may be shadowed
+                  // by an earlier declaration in this class body (e.g. a
+                  // local typedef before this localparam).
+                  for (int m = body_start; m < i; m++) {
+                     if (g->tokens[m].token == tID
+                         && g->tokens[m].lval.ident == ref_id) {
+                        ok = false;
+                        break;
+                     }
+                  }
                }
             }
             if (ok) {
