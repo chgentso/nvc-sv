@@ -1265,7 +1265,8 @@ static bool scan_digits(scan_src_t *src, char conv, char *buf, size_t size)
       case 'f':
       case 'e':
       case 'g':
-         valid = isdigit_iso88591(ch) || ch == '.'
+      case 't':
+         valid = isdigit_iso88591(ch) || ch == '.' || ch == '_'
             || (len > 0 && (ch == 'e' || ch == 'E'))
             || ((len == 0 || tolower(buf[len - 1]) == 'e')
                 && (ch == '-' || ch == '+'));
@@ -1316,6 +1317,18 @@ static bool scan_assign(vpiHandle arg, char conv, const char *tok)
    case 'g':
       value.format = vpiRealVal;
       value.value.real = strtod(clean, NULL);
+      break;
+   case 't':
+      {
+         double val = strtod(clean, NULL);
+         const uint64_t ts = vpi_caller_timescale();
+         if (time_format.valid && ts > 0)
+            val = val * pow(10.0, 15 + time_format.units) / (double)ts;
+         else if (ts > 1)
+            val = val * (double)vpi_caller_design_precision() / (double)ts;
+         value.format = vpiRealVal;
+         value.value.real = val;
+      }
       break;
    case 'c':
       value.format = vpiIntVal;
@@ -1376,7 +1389,8 @@ static PLI_INT32 scan_format(scan_src_t *src, const char *fmt, vpiHandle argv)
             break;
       }
       else if (*p == 'd' || *p == 'b' || *p == 'o' || *p == 'h'
-               || *p == 'x' || *p == 'f' || *p == 'e' || *p == 'g') {
+               || *p == 'x' || *p == 'f' || *p == 'e' || *p == 'g'
+               || *p == 't') {
          if (!scan_digits(src, *p, tok, sizeof(tok)))
             break;
       }
