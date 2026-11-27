@@ -162,6 +162,9 @@ typedef struct {
    const vhdl_isl_sig_t   **entry_sig;
    mir_value_t             *entry_ptr;
    uint32_t                 n_entry;
+   // Loop passes lowered one by one so far (see vi_loop_wants_unroll)
+   uint32_t                 unrolled;
+   struct vi_const_snap    *case_snap;
 } vi_lower_t;
 
 static void vi_generic_reason(vi_lower_t *l, const char *what, tree_t t)
@@ -624,6 +627,13 @@ static void vi_scope_clear(vi_scope_t *sc)
    for (unsigned i = 0; i < sc->locals.count; i++)
       free(sc->locals.items[i].rec_leaves);
    ACLEAR(sc->locals);
+}
+
+// An integer variable whose value may be known (see vi_const_forget)
+static bool vi_is_const_var(const vi_local_t *loc)
+{
+   return loc->is_int && !loc->by_val && loc->decl != NULL
+      && tree_kind(loc->decl) == T_VAR_DECL;
 }
 
 static vi_local_t *vi_find_local(vi_lower_t *l, tree_t decl)
@@ -4505,6 +4515,12 @@ static bool vi_lower_expr_inner(vi_lower_t *l, tree_t expr, vi_val_t *out)
                      };
                      return true;
                   }
+                  if (loc->has_const_int && vi_is_const_var(loc)) {
+                     *out = (vi_val_t){
+                        .kind = VIVAL_INT, .val = vi_i64(mu, loc->const_int),
+                     };
+                     return true;
+                  }
                   *out = (vi_val_t){
                      .kind = VIVAL_INT, .val = mir_build_load(mu, loc->storage),
                   };
@@ -6860,6 +6876,15 @@ static bool vi_lower_var_assign(vi_lower_t *l, tree_t stmt)
        && type_is_integer(tree_type(tree_ref(target))))
       vhdl_island_var_def_set((vhdl_island_ctx_t *)l->ctx, tree_ref(target),
                               val_e);
+   if (tree_kind(target) == T_REF) {
+      vi_local_t *loc = vi_find_local(l, tree_ref(target));
+      if (loc != NULL && vi_is_const_var(loc)) {
+         int64_t cv = 0;
+         loc->has_const_int = vi_eval_const_int(l, val_e, &cv)
+            || (rv.kind == VIVAL_INT && mir_get_const(mu, rv.val, &cv));
+         loc->const_int = cv;
+      }
+   }
    return vi_store_rec_leaf(l, &lf, vi_off(mu, 0), rv);
 }
 
@@ -7297,11 +7322,210 @@ static bool vi_lower_inline_proc(vi_lower_t *l, tree_t pcall)
    return true;
 }
 
+// Integer variables with a value known while lowering: an assignment of a
+// constant sets has_const_int on the variable, which holds until the next
+// assignment along straight-line code.  Statements that branch or repeat
+// forget what their bodies assign (see vi_const_forget), so a value never
+// reaches code that a different path could reach with another value.  This
+// gives constant bounds to loops and slices whose bounds come from such
+// variables, as in a loop that doubles a stride on every pass.
+
+typedef struct {
+   tree_t  *decls;
+   unsigned n;
+   unsigned cap;
+} vi_decl_set_t;
+
+static void vi_assigned_cb(tree_t t, void *ctx)
+{
+   vi_decl_set_t *set = ctx;
+   tree_t target = tree_target(t);
+   while (tree_kind(target) == T_ARRAY_REF || tree_kind(target) == T_ARRAY_SLICE
+          || tree_kind(target) == T_RECORD_REF)
+      target = tree_value(target);
+   if (tree_kind(target) != T_REF || !tree_has_ref(target))
+      return;
+   if (set->n == set->cap) {
+      set->cap = MAX(set->cap * 2, 8u);
+      set->decls = xrealloc_array(set->decls, set->cap, sizeof(tree_t));
+   }
+   set->decls[set->n++] = tree_ref(target);
+}
+
+// Variables STMT may assign; *ALL when it calls a procedure, which may
+// assign any variable through a parameter
+static void vi_collect_assigned(tree_t stmt, vi_decl_set_t *set, bool *all)
+{
+   tree_visit_only(stmt, vi_assigned_cb, set, T_VAR_ASSIGN);
+   *all = tree_visit_only(stmt, NULL, NULL, T_PCALL) > 0;
+}
+
+static bool vi_decl_set_has(const vi_decl_set_t *set, tree_t decl)
+{
+   for (unsigned i = 0; i < set->n; i++) {
+      if (set->decls[i] == decl)
+         return true;
+   }
+   return false;
+}
+
+// Forget the known values of the variables STMT may assign
+static void vi_const_forget(vi_lower_t *l, tree_t stmt)
+{
+   vi_decl_set_t set = { NULL, 0, 0 };
+   bool all = false;
+   vi_collect_assigned(stmt, &set, &all);
+   for (vi_scope_t *sc = l->scope; sc != NULL; sc = sc->parent) {
+      for (unsigned i = 0; i < sc->locals.count; i++) {
+         vi_local_t *loc = &(sc->locals.items[i]);
+         if (vi_is_const_var(loc) && (all || vi_decl_set_has(&set, loc->decl)))
+            loc->has_const_int = false;
+      }
+   }
+   free(set.decls);
+}
+
+static void vi_const_forget_all(vi_lower_t *l)
+{
+   for (vi_scope_t *sc = l->scope; sc != NULL; sc = sc->parent) {
+      for (unsigned i = 0; i < sc->locals.count; i++) {
+         vi_local_t *loc = &(sc->locals.items[i]);
+         if (vi_is_const_var(loc))
+            loc->has_const_int = false;
+      }
+   }
+}
+
+typedef struct {
+   vi_local_t *loc;
+   bool        has;
+   int64_t     val;
+} vi_const_save_t;
+
+typedef struct vi_const_snap {
+   vi_const_save_t *items;
+   uint32_t         count;
+   uint32_t         limit;
+} vi_const_snap_t;
+
+// The known values on entry to a branching statement, restored for each
+// branch
+static void vi_const_snapshot(vi_lower_t *l, vi_const_snap_t *snap)
+{
+   for (vi_scope_t *sc = l->scope; sc != NULL; sc = sc->parent) {
+      for (unsigned i = 0; i < sc->locals.count; i++) {
+         vi_local_t *loc = &(sc->locals.items[i]);
+         if (vi_is_const_var(loc)) {
+            vi_const_save_t sv = { loc, loc->has_const_int, loc->const_int };
+            APUSH(*snap, sv);
+         }
+      }
+   }
+}
+
+static void vi_const_restore(const vi_const_snap_t *snap)
+{
+   for (unsigned i = 0; i < snap->count; i++) {
+      snap->items[i].loc->has_const_int = snap->items[i].has;
+      snap->items[i].loc->const_int = snap->items[i].val;
+   }
+}
+
+typedef struct {
+   const vi_decl_set_t *vars;
+   tree_t               param;
+   bool                 hit;
+} vi_unroll_scan_t;
+
+static void vi_unroll_ref_cb(tree_t t, void *ctx)
+{
+   vi_unroll_scan_t *us = ctx;
+   if (!tree_has_ref(t))
+      return;
+   tree_t d = tree_ref(t);
+   if (d == us->param || vi_decl_set_has(us->vars, d))
+      us->hit = true;
+}
+
+static void vi_unroll_range(vi_unroll_scan_t *us, tree_t rg)
+{
+   if (tree_subkind(rg) == RANGE_EXPR)
+      tree_visit_only(tree_value(rg), vi_unroll_ref_cb, us, T_REF);
+   else {
+      tree_visit_only(tree_left(rg), vi_unroll_ref_cb, us, T_REF);
+      tree_visit_only(tree_right(rg), vi_unroll_ref_cb, us, T_REF);
+   }
+}
+
+typedef struct {
+   tree_t           loop;
+   vi_unroll_scan_t loops;    // Inner loop ranges: variables or parameter
+   vi_unroll_scan_t slices;   // Slice ranges: variables
+} vi_unroll_ctx_t;
+
+static void vi_unroll_for_cb(tree_t t, void *ctx)
+{
+   vi_unroll_ctx_t *uc = ctx;
+   if (t != uc->loop)
+      vi_unroll_range(&uc->loops, tree_range(t, 0));
+}
+
+static void vi_unroll_slice_cb(tree_t t, void *ctx)
+{
+   vi_unroll_ctx_t *uc = ctx;
+   vi_unroll_range(&uc->slices, tree_range(t, 0));
+}
+
+// Whether loop STMT of NITERS passes is lowered pass by pass, with its
+// parameter and the variables its body assigns known in each pass: when
+// the body has an inner loop whose bounds or a slice whose bounds depend
+// on them, which a single body with a dynamic parameter cannot lower
+#define VI_UNROLL_MAX_ITERS  64
+#define VI_UNROLL_MAX_TOTAL  2048
+
+static bool vi_loop_wants_unroll(vi_lower_t *l, tree_t stmt, int64_t niters)
+{
+   if (niters > VI_UNROLL_MAX_ITERS
+       || l->unrolled + niters > VI_UNROLL_MAX_TOTAL)
+      return false;
+   // A pass that ends early has no straight-line successor
+   if (tree_visit_only(stmt, NULL, NULL, T_EXIT) > 0
+       || tree_visit_only(stmt, NULL, NULL, T_NEXT) > 0
+       || tree_visit_only(stmt, NULL, NULL, T_RETURN) > 0)
+      return false;
+
+   vi_decl_set_t set = { NULL, 0, 0 };
+   bool all = false;
+   vi_collect_assigned(stmt, &set, &all);
+   vi_unroll_ctx_t uc = {
+      .loop   = stmt,
+      .loops  = { .vars = &set, .param = tree_decl(stmt, 0) },
+      .slices = { .vars = &set, .param = NULL },
+   };
+   tree_visit_only(stmt, vi_unroll_for_cb, &uc, T_FOR);
+   tree_visit_only(stmt, vi_unroll_slice_cb, &uc, T_ARRAY_SLICE);
+   free(set.decls);
+   return uc.loops.hit || uc.slices.hit;
+}
+
 static bool vi_lower_stmt_inner(vi_lower_t *l, tree_t stmt);
 
 static bool vi_lower_stmt(vi_lower_t *l, tree_t stmt)
 {
-   const bool ok = vi_lower_stmt_inner(l, stmt);
+   bool ok;
+   if (tree_kind(stmt) == T_CASE) {
+      // Each alternative starts from the values known before the case
+      vi_const_snap_t snap = AINIT, *prev = l->case_snap;
+      vi_const_snapshot(l, &snap);
+      l->case_snap = &snap;
+      ok = vi_lower_stmt_inner(l, stmt);
+      l->case_snap = prev;
+      vi_const_restore(&snap);
+      ACLEAR(snap);
+      vi_const_forget(l, stmt);
+   }
+   else
+      ok = vi_lower_stmt_inner(l, stmt);
    if (!ok)
       vi_generic_reason(l, "stmt", stmt);
    return ok;
@@ -7397,14 +7621,21 @@ static bool vi_lower_stmt_inner(vi_lower_t *l, tree_t stmt)
       return vi_lower_var_assign(l, stmt);
 
    case T_PCALL:
-      return vi_lower_inline_proc(l, stmt);
+      {
+         const bool ok = vi_lower_inline_proc(l, stmt);
+         vi_const_forget_all(l);   // Through out and inout parameters
+         return ok;
+      }
 
    case T_IF:
       {
          const int nc = tree_conds(stmt);
          mir_block_t exit_bb = mir_add_block(mu);
+         vi_const_snap_t snap = AINIT;
+         vi_const_snapshot(l, &snap);
          for (int i = 0; i < nc; i++) {
             tree_t br = tree_cond(stmt, i);
+            vi_const_restore(&snap);
             int64_t cval = 0;
             bool const_true = false;
             if (tree_has_value(br)
@@ -7427,8 +7658,10 @@ static bool vi_lower_stmt_inner(vi_lower_t *l, tree_t stmt)
                unsigned pos = 0;
                if (mir_block_finished(mu, mir_get_cursor(mu, &pos)))
                   break;
-               if (!vi_lower_stmt(l, tree_stmt(br, j)))
+               if (!vi_lower_stmt(l, tree_stmt(br, j))) {
+                  ACLEAR(snap);
                   return false;
+               }
             }
             unsigned pos = 0;
             if (!mir_block_finished(mu, mir_get_cursor(mu, &pos)))
@@ -7443,6 +7676,9 @@ static bool vi_lower_stmt_inner(vi_lower_t *l, tree_t stmt)
             mir_build_jump(mu, exit_bb);
          mir_set_cursor(mu, exit_bb, MIR_APPEND);
          vhdl_island_var_defs_clear((vhdl_island_ctx_t *)l->ctx);
+         vi_const_restore(&snap);
+         ACLEAR(snap);
+         vi_const_forget(l, stmt);
          return true;
       }
 
@@ -7551,6 +7787,7 @@ static bool vi_lower_stmt_inner(vi_lower_t *l, tree_t stmt)
             }
 
             mir_set_cursor(mu, body_bb, MIR_APPEND);
+            vi_const_restore(l->case_snap);
             for (int j = 0; j < tree_stmts(alt); j++) {
                unsigned pos = 0;
                if (mir_block_finished(mu, mir_get_cursor(mu, &pos)))
@@ -7724,16 +7961,55 @@ static bool vi_lower_stmt_inner(vi_lower_t *l, tree_t stmt)
             return false;
          if ((rk == RANGE_TO && lv > rv) || (rk == RANGE_DOWNTO && lv < rv))
             return true;
-         {
-            const int64_t niters = (rk == RANGE_TO) ? (rv - lv + 1) : (lv - rv + 1);
-            if (niters > VHDL_ISLAND_MAX_LOOP_ITERS)
-               return false;
-         }
+         const int64_t niters = (rk == RANGE_TO) ? (rv - lv + 1) : (lv - rv + 1);
+         if (niters > VHDL_ISLAND_MAX_LOOP_ITERS)
+            return false;
 
          tree_t loop_var = tree_decl(stmt, 0);
          mir_value_t lvar = mir_add_var(mu, vi_i64_type(mu), MIR_NULL_STAMP,
                                         tree_ident(loop_var), MIR_VAR_TEMP);
+
+         if (vi_loop_wants_unroll(l, stmt, niters)) {
+            // One copy of the body per pass, straight-line: the parameter
+            // and the variables the body assigns are known in each pass
+            l->unrolled += niters;
+            vi_scope_t us = { .parent = l->scope, .ret_bb = l->scope->ret_bb,
+                              .ret_slot = l->scope->ret_slot,
+                              .ret_type = l->scope->ret_type,
+                              .has_ret_val = l->scope->has_ret_val,
+                              .ret_is_vec = l->scope->ret_is_vec,
+                              .ret_ptr_indirect = l->scope->ret_ptr_indirect,
+                              .ret_signed = l->scope->ret_signed,
+                              .ret_w = l->scope->ret_w,
+                              .ret_dir = l->scope->ret_dir,
+                              .ret_left = l->scope->ret_left,
+                              .ret_right = l->scope->ret_right,
+                              .loop_next_bb = MIR_NULL_BLOCK,
+                              .loop_exit_bb = MIR_NULL_BLOCK,
+                              .ret_rec = l->scope->ret_rec };
+            vi_local_t ploc = { .decl = loop_var, .storage = lvar,
+                                .has_const_int = true };
+            APUSH(us.locals, ploc);
+            l->scope = &us;
+            const int64_t step = (rk == RANGE_TO) ? 1 : -1;
+            bool ok = true;
+            for (int64_t k = 0; k < niters && ok; k++) {
+               const int64_t pv = lv + k * step;
+               us.locals.items[0].const_int = pv;
+               mir_build_store(mu, lvar, vi_i64(mu, pv));
+               vhdl_island_var_defs_clear((vhdl_island_ctx_t *)l->ctx);
+               for (int j = 0; j < tree_stmts(stmt) && ok; j++)
+                  ok = vi_lower_stmt(l, tree_stmt(stmt, j));
+            }
+            vhdl_island_var_defs_clear((vhdl_island_ctx_t *)l->ctx);
+            l->scope = us.parent;
+            vi_scope_clear(&us);
+            return ok;
+         }
+
          mir_build_store(mu, lvar, vi_i64(mu, lv));
+         // The body runs with values from earlier passes
+         vi_const_forget(l, stmt);
 
          mir_block_t hdr = mir_add_block(mu);
          mir_block_t body = mir_add_block(mu);
@@ -7801,6 +8077,7 @@ static bool vi_lower_stmt_inner(vi_lower_t *l, tree_t stmt)
          l->scope->ret_left = ls.ret_left;
          l->scope->ret_right = ls.ret_right;
          vi_scope_clear(&ls);
+         vi_const_forget(l, stmt);
          mir_set_cursor(mu, exit_bb, MIR_APPEND);
          return true;
       }
