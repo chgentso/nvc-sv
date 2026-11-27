@@ -21324,6 +21324,20 @@ static bool capture_generic_extern(token_t end_token)
       const token_t tok = peek_nth(n);
       if (tok == tEOF || tok == tLPAREN || tok == tSEMI)
          return false;
+      else if (tok == tHASH && peek_nth(n + 1) == tLPAREN) {
+         // Skip parameterised return type arguments e.g. Foo#(Foo::T) Foo::bar
+         int depth = 1;
+         for (n += 2; n < TOKENQ_SIZE - 8 && depth > 0; n++) {
+            const token_t inner = peek_nth(n);
+            if (inner == tEOF)
+               return false;
+            else if (inner == tLPAREN)
+               depth++;
+            else if (inner == tRPAREN)
+               depth--;
+         }
+         n--;   // Loop increment advances past matching ')'
+      }
       else if (tok == tID && peek_nth(n + 1) == tSCOPE
                && peek_nth(n + 3) != tID && peek_nth(n + 3) != tSCOPE) {
          const int pos = (state.tokenq_tail + n - 1) & (TOKENQ_SIZE - 1);
