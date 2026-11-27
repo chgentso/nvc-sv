@@ -46,6 +46,8 @@ typedef enum {
    RT_ISIG_PROC_COMB      = (1u << 17),   // Written by always_comb/always @*
    RT_ISIG_RESET_LATE     = (1u << 18),   // Not settled before time zero
    RT_ISIG_ACT            = (1u << 19),   // Change byte read by VHDL comb
+   RT_ISIG_SPEC_A         = (1u << 20),   // Island runs its Mode A variant
+   RT_ISIG_SPEC_MIX       = (1u << 21),   // A direct target differs in layout
 } rt_island_sig_flags_t;
 
 // Process activity of VHDL island combinational functions: the state of a
@@ -104,13 +106,20 @@ typedef struct {
 #define RT_IDIR_STD_LOGIC9  (1u << 0)
 #define RT_IDIR_TWO_STATE   (1u << 1)
 #define RT_IDIR_ACT         (1u << 2)   // Set the change byte (flags >> 8)
+#define RT_IDIR_MIX         (1u << 3)   // Mode A <-> Mode B: mix_src/mix_dst
 #define RT_IDIR_IDX_SHIFT   8u
 
 typedef struct {
    const uint8_t     *src_a;
    uint8_t           *dst_a;
-   const uint8_t     *src_b;
-   uint8_t           *dst_b;
+   union {
+      const uint8_t                *src_b;
+      const struct _rt_island_sig  *mix_src;   // RT_IDIR_MIX
+   };
+   union {
+      uint8_t                      *dst_b;
+      struct _rt_island_sig        *mix_dst;   // RT_IDIR_MIX
+   };
    struct _rt_island *dst_isl;
    uint32_t           count;    // STD_LOGIC9: total bytes; 2/4-state: nwords * nelems
    uint32_t           flags;    // RT_IDIR_*, RT_IDIR_ACT index in bits 8+
@@ -290,6 +299,7 @@ typedef struct _rt_island {
    bool                   mt_ff_unsafe;
    bool                   is_vhdl;
    rt_island_spec_t      *spec;     // Speculative Mode A variant or NULL
+   bool                   spec_a;   // Running the Mode A variant now
    bool                   act_on;       // Comb function tests change bytes
    bool                   direct_act;   // A direct comb desc has RT_IDIR_ACT
 } rt_island_t;
@@ -308,6 +318,9 @@ typedef enum {
    RT_ISLAND_DEOPT_CONV    = 3,   // integer conversion out of range
    RT_ISLAND_DEOPT_REPORT  = 4,   // report statement or failing assertion
    RT_ISLAND_DEOPT_STATE   = 5,   // (runtime) state not all '0'/'1'
+   RT_ISLAND_DEOPT_INPUT   = 6,   // (runtime) input value not '0'/'1'
+   RT_ISLAND_DEOPT_PUT     = 7,   // (runtime) force, deposit or release
+   RT_ISLAND_DEOPT_STRESS  = 8,   // (runtime) NVC_ISLAND_SPEC_STRESS
    RT_ISLAND_DEOPT_COUNT
 } rt_island_deopt_t;
 
@@ -324,6 +337,22 @@ struct _rt_island_spec {
    bool          force_a;
    uint64_t      calls_a;
    uint64_t      deopts[RT_ISLAND_DEOPT_COUNT];
+   // Run-time switching between the variants on the one live state (see
+   // "Speculative Mode A at run time" in island.c)
+   jit_handle_t  eval_handle_b;   // Mode B comb function
+   jit_handle_t *ff_handles_b;    // Mode B flip-flop function per domain
+   uint32_t     *b_off;           // Mode B offset per island signal
+   uint32_t      stride_b;        // Mode B state half
+   bool          pinned;          // Stays Mode B for the rest of the run
+   uint8_t       pin_reason;      // rt_island_deopt_t
+   uint32_t      n_deopt;         // Deopts so far (back-off)
+   uint32_t      n_report;        // Report deopts so far
+   uint32_t      check_ival;      // Promotion check interval (ticks)
+   uint64_t      next_check;      // Tick of the next promotion check
+   uint64_t      tick_promoted;   // Tick of the last promotion
+   uint64_t      ticks_a;         // Ticks spent in Mode A
+   uint64_t      promotions;
+   uint64_t      failed_checks;
 };
 
 typedef struct _rt_island_mgr rt_island_mgr_t;
