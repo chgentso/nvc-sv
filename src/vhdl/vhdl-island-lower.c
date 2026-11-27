@@ -156,6 +156,11 @@ typedef struct {
    const vhdl_isl_sig_t   **shadow_sig;
    mir_value_t             *shadow_ptr;
    uint32_t                 n_shadow;
+   // Signals of a combinational loop: copied when the island function
+   // starts, read by the processes that run after one of their writers
+   const vhdl_isl_sig_t   **entry_sig;
+   mir_value_t             *entry_ptr;
+   uint32_t                 n_entry;
 } vi_lower_t;
 
 static void vi_generic_reason(vi_lower_t *l, const char *what, tree_t t)
@@ -7399,18 +7404,40 @@ static uint32_t vi_sig_state_bytes(const vi_lower_t *l, const vhdl_isig_t *s)
 // and writes when it starts and read them from the copy.  A changed value
 // makes the island run again in the next delta (island_check_feedback in
 // rt/island.c), where P sees it, as with the process unfused.
+static void vi_add_shadow(vi_lower_t *l, const vhdl_isl_sig_t *isig,
+                          mir_value_t copy)
+{
+   l->shadow_sig = xrealloc_array(l->shadow_sig, l->n_shadow + 1,
+                                  sizeof(const vhdl_isl_sig_t *));
+   l->shadow_ptr = xrealloc_array(l->shadow_ptr, l->n_shadow + 1,
+                                  sizeof(mir_value_t));
+   l->shadow_sig[l->n_shadow] = isig;
+   l->shadow_ptr[l->n_shadow] = copy;
+   l->n_shadow++;
+}
+
 static bool vi_emit_self_shadow(vi_lower_t *l, const vhdl_iproc_t *p)
 {
    l->n_shadow = 0;
    uint32_t total = 0;
    for (uint32_t i = 0; i < p->n_reads; i++) {
+      const vhdl_isl_sig_t *isig = vhdl_island_find_sig(l->isl, p->reads[i]);
+      bool in_entry = false;
+      for (uint32_t j = 0; j < l->n_entry && !in_entry; j++) {
+         if (l->entry_sig[j] == isig) {
+            vi_add_shadow(l, isig, l->entry_ptr[j]);
+            in_entry = true;
+         }
+      }
+      if (in_entry)
+         continue;
+
       bool written = false;
       for (uint32_t j = 0; j < p->n_writes && !written; j++)
          written = p->writes[j] == p->reads[i];
       if (!written)
          continue;
 
-      const vhdl_isl_sig_t *isig = vhdl_island_find_sig(l->isl, p->reads[i]);
       const vhdl_isig_t *s = &(l->ctx->sigs[p->reads[i]]);
       if (isig == NULL || s->is_sparse_ram) {
          l->reason = "comb: process reads a sparse RAM it also writes";
@@ -7428,14 +7455,63 @@ static bool vi_emit_self_shadow(vi_lower_t *l, const vhdl_iproc_t *p)
       mir_value_t copy = vi_modeb_alloc_vec(l, ALIGN_UP(bytes, 8u));
       mir_build_copy(mu, copy, vi_state_ptr_at(l, isig->a_off),
                      vi_off(mu, bytes));
+      vi_add_shadow(l, isig, copy);
+   }
+   return true;
+}
 
-      l->shadow_sig = xrealloc_array(l->shadow_sig, l->n_shadow + 1,
-                                     sizeof(const vhdl_isl_sig_t *));
-      l->shadow_ptr = xrealloc_array(l->shadow_ptr, l->n_shadow + 1,
-                                     sizeof(mir_value_t));
-      l->shadow_sig[l->n_shadow] = isig;
-      l->shadow_ptr[l->n_shadow] = copy;
-      l->n_shadow++;
+// Processes run readers first, so outside a combinational loop no process
+// runs after the writer of a signal it reads.  Inside a loop some do: copy
+// those signals when the island function starts, the values of the current
+// delta cycle, and read them from the copy.
+static bool vi_emit_entry_shadow(vi_lower_t *l, int *failed_proc_out)
+{
+   const vhdl_island_t *isl = l->isl;
+   bool *written LOCAL = xcalloc_array(MAX(1u, isl->n_sigs), sizeof(bool));
+   bool *need LOCAL = xcalloc_array(MAX(1u, isl->n_sigs), sizeof(bool));
+   uint32_t total = 0;
+   for (uint32_t k = isl->n_comb_procs; k-- > 0; ) {
+      const vhdl_iproc_t *p = &(l->ctx->procs[isl->comb_procs[k]]);
+      for (uint32_t i = 0; i < p->n_reads; i++) {
+         const vhdl_isl_sig_t *isig = vhdl_island_find_sig(isl, p->reads[i]);
+         if (isig == NULL)
+            continue;
+         const uint32_t idx = (uint32_t)(isig - isl->sigs);
+         if (!written[idx] || need[idx])
+            continue;
+         const vhdl_isig_t *s = &(l->ctx->sigs[p->reads[i]]);
+         total += vi_sig_state_bytes(l, s);
+         if (s->is_sparse_ram || total > VI_MAX_SHADOW_BYTES) {
+            l->reason = "comb: loop through signals too large to copy";
+            *failed_proc_out = (int)isl->comb_procs[k];
+            return false;
+         }
+         need[idx] = true;
+      }
+      for (uint32_t j = 0; j < p->n_writes; j++) {
+         const vhdl_isl_sig_t *isig = vhdl_island_find_sig(isl, p->writes[j]);
+         if (isig != NULL)
+            written[isig - isl->sigs] = true;
+      }
+   }
+
+   mir_unit_t *mu = l->mu;
+   for (uint32_t j = 0; j < isl->n_sigs; j++) {
+      if (!need[j])
+         continue;
+      const vhdl_isl_sig_t *isig = &(isl->sigs[j]);
+      const uint32_t bytes =
+         vi_sig_state_bytes(l, &(l->ctx->sigs[isig->sig_id]));
+      mir_value_t copy = vi_modeb_alloc_vec(l, ALIGN_UP(bytes, 8u));
+      mir_build_copy(mu, copy, vi_state_ptr_at(l, isig->a_off),
+                     vi_off(mu, bytes));
+      l->entry_sig = xrealloc_array(l->entry_sig, l->n_entry + 1,
+                                    sizeof(const vhdl_isl_sig_t *));
+      l->entry_ptr = xrealloc_array(l->entry_ptr, l->n_entry + 1,
+                                    sizeof(mir_value_t));
+      l->entry_sig[l->n_entry] = isig;
+      l->entry_ptr[l->n_entry] = copy;
+      l->n_entry++;
    }
    return true;
 }
@@ -7477,6 +7553,14 @@ static mir_unit_t *vi_build_comb_unit(mir_context_t *mc,
    const uint32_t act_cnt = RT_ISLAND_ACT_CNT(isl->n_sigs);
    if (act_stats)
       vi_act_count(&l, act_cnt + 8u, isl->n_comb_procs);
+
+   if (!vi_emit_entry_shadow(&l, failed_proc_out)) {
+      vi_proc_done(&l, ctx, (uint32_t)*failed_proc_out, false);
+      free(l.entry_sig);
+      free(l.entry_ptr);
+      mir_unit_free(mu);
+      return NULL;
+   }
 
    // Readers before writers: comb_procs is in topological order, so going
    // backwards every process reads the signal values of the current delta
@@ -7527,6 +7611,8 @@ static mir_unit_t *vi_build_comb_unit(mir_context_t *mc,
          free(l.act_rd);
          free(l.shadow_sig);
          free(l.shadow_ptr);
+         free(l.entry_sig);
+         free(l.entry_ptr);
          mir_unit_free(mu);
          return NULL;
       }
@@ -7544,6 +7630,8 @@ static mir_unit_t *vi_build_comb_unit(mir_context_t *mc,
    free(l.act_rd);
    free(l.shadow_sig);
    free(l.shadow_ptr);
+   free(l.entry_sig);
+   free(l.entry_ptr);
    mir_build_return(mu, vi_off(mu, 0));
    return mu;
 }

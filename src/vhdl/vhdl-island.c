@@ -4215,8 +4215,10 @@ static void tarjan_dfs(scc_state_t *st, uint32_t v)
             break;
       }
       if (count > 1 || (count == 1 && st->adj[v][v])) {
-         for (uint32_t k = st->sp; k < start; k++)
+         for (uint32_t k = st->sp; k < start; k++) {
             st->in_cycle[st->stack[k]] = true;
+            st->topo[st->topo_n++] = st->stack[k];
+         }
       }
       else
          st->topo[st->topo_n++] = v;
@@ -4938,13 +4940,11 @@ void vhdl_island_rebuild(vhdl_island_ctx_t *ctx)
          if (st.index[c] == 0)
             tarjan_dfs(&st, c);
       }
-      for (uint32_t c = 0; c < nc; c++) {
-         if (st.in_cycle[c]) {
-            procs.items[comb_idxs.items[c]].rejected = true;
-            procs.items[comb_idxs.items[c]].reason =
-               "cycle: combinational loop between processes";
-         }
-      }
+      // The processes of a combinational loop stay in the island: a
+      // process that runs after the writer of a signal it reads loads the
+      // value of the current delta cycle from a copy taken when the island
+      // function starts (see vi_emit_self_shadow)
+      (void)st.in_cycle;
       for (uint32_t i = 0; i < st.topo_n; i++) {
          uint32_t c = st.topo[i];
          if (!procs.items[comb_idxs.items[c]].rejected)
