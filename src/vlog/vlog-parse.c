@@ -16864,6 +16864,8 @@ static vlog_node_t p_constant_param_expression(void)
    return p_mintypmax_expression();
 }
 
+static int decl_unpacked_depth(vlog_node_t d);
+
 static vlog_node_t p_param_assignment(vlog_node_t datatype, vlog_kind_t kind)
 {
    // parameter_identifier { unpacked_dimension }
@@ -16886,6 +16888,32 @@ static vlog_node_t p_param_assignment(vlog_node_t datatype, vlog_kind_t kind)
       }
       else
          vlog_set_value(v, p_constant_param_expression());
+
+      // An untyped parameter takes the type of a struct, union, enum, or
+      // string initialiser (1800-2017 6.20.2)
+      if (is_implicit_data_type(dt) && vlog_ranges(dt) == 0
+          && vlog_ranges(v) == 0
+          && (vlog_flags(dt) & (VLOG_F_SIGNED | VLOG_F_UNSIGNED)) == 0) {
+         vlog_node_t init = vlog_value(v);
+         vlog_node_t it = vlog_get_type(init);
+         if (vlog_kind(init) == V_SYS_FCALL
+             && vlog_is_sformatf(vlog_ident(init))) {
+            vlog_node_t str = vlog_new(V_DATA_TYPE);
+            vlog_set_subkind(str, DT_STRING);
+            vlog_set_loc(str, vlog_loc(init));
+            vlog_set_type(v, str);
+         }
+         else if (it != NULL
+                  && (vlog_kind(init) != V_REF || !vlog_has_ref(init)
+                      || decl_unpacked_depth(vlog_ref(init)) == 0)
+                  && (vlog_kind(it) == V_STRUCT_DECL
+                      || vlog_kind(it) == V_UNION_DECL
+                      || vlog_kind(it) == V_ENUM_DECL
+                      || (vlog_kind(it) == V_DATA_TYPE
+                          && vlog_subkind(it) == DT_STRING))) {
+            vlog_set_type(v, it);
+         }
+      }
    }
 
    vlog_set_loc(v, CURRENT_LOC);
