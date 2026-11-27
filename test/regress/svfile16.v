@@ -1,4 +1,4 @@
-module file16;
+module svfile16;
   integer fd;
   integer n;
   integer i;
@@ -17,7 +17,7 @@ module file16;
   initial begin
     failed = 0;
 
-    fd = $fopen("file16.tmp", "w");
+    fd = $fopen("svfile16.tmp", "w");
     if (fd == 0)
       failed = 1;
 
@@ -30,7 +30,7 @@ module file16;
     $fflush(fd);
     $fclose(fd);
 
-    fd = $fopen("file16.tmp", "r");
+    fd = $fopen("svfile16.tmp", "r");
     n = $fscanf(fd, "%d %h %b %o %s %c\n", dec, hex, bin, oct, str, ch);
     if (n != 6 || dec != 123 || hex != 8'hab || bin != 8'd10
         || oct != 8'd15 || str[15:0] != "hi" || ch != "Z")
@@ -60,12 +60,12 @@ module file16;
         || str[15:0] != "ok" || ch != "Q")
       failed = 1;
 
-    fd = $fopen("file16.mem", "w");
+    fd = $fopen("svfile16.mem", "w");
     $fdisplay(fd, "1010");
     $fdisplay(fd, "0101");
     $fclose(fd);
 
-    $readmemb("file16.mem", mem);
+    $readmemb("svfile16.mem", mem);
     if (mem[0] != 8'd10 || mem[1] != 8'd5)
       failed = 1;
 

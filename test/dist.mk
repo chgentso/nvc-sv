@@ -1088,7 +1088,7 @@ EXTRA_DIST += \
 	test/regress/file13.vhd \
 	test/regress/file14.vhd \
 	test/regress/file15.vhd \
-	test/regress/file16.v \
+	test/regress/svfile16.v \
 	test/regress/file1.vhd \
 	test/regress/file2.vhd \
 	test/regress/file3.vhd \
