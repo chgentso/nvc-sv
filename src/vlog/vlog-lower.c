@@ -19859,6 +19859,7 @@ typedef struct {
    mir_value_t        keys;     // Index of each element of an associative array
    const type_info_t *eti;
    const type_info_t *iti;
+   unsigned           item_count; // > 1 when item is a fixed unpacked sub-array
    bool               is_real;
    mir_type_t         ktype;    // Type of the sort or reduction key
    int64_t            left;     // Bound of the first element
@@ -19898,7 +19899,10 @@ static mir_value_t vlog_arr_key(vlog_gen_t *g, const vlog_arr_t *a,
    else
       idx = vlog_arr_elem(g, a->keys, index);
 
-   mir_build_store(g->mu, a->item_var, elem);
+   if (a->item_count > 1)
+      vlog_store_flat_array(g, a->item_var, a->item_count, a->eti, elem);
+   else
+      mir_build_store(g->mu, a->item_var, elem);
    mir_build_store(g->mu, a->index_var, idx);
 
    mir_value_t value = vlog_lower_rvalue(g, a->with);
@@ -19964,7 +19968,9 @@ static mir_value_t vlog_arr_const(vlog_gen_t *g, mir_type_t type, int kind)
 }
 
 static mir_value_t vlog_arr_to_uarray(vlog_gen_t *g, vlog_node_t prefix,
-                                      const type_info_t *eti, bool fixed)
+                                      const type_info_t *eti, bool fixed,
+                                      unsigned outer_count,
+                                      unsigned inner_count)
 {
    if (!fixed)
       return vlog_lower_rvalue(g, prefix);
@@ -19972,14 +19978,33 @@ static mir_value_t vlog_arr_to_uarray(vlog_gen_t *g, vlog_node_t prefix,
    // Fixed-size array: copy the elements out of the flat value
    mir_type_t t_offset = mir_offset_type(g->mu);
 
-   const unsigned count = vlog_size(vlog_ref(prefix));
+   const unsigned count = outer_count > 0 ? outer_count
+      : vlog_size(vlog_ref(prefix));
    mir_value_t flat = vlog_lower_rvalue(g, prefix);
+   mir_value_t num = mir_const(g->mu, t_offset, count);
+
+   if (inner_count > 1) {
+      const unsigned sub_bits = inner_count * eti->size;
+      mir_type_t t_sub = vlog_vec_type_for(
+         g->mu, mir_get_type(g->mu, flat), sub_bits, false);
+      mir_value_t data = vlog_alloc_array(g, t_sub, num);
+
+      for (unsigned i = 0; i < count; i++) {
+         mir_value_t part = mir_build_extract(
+            g->mu, t_sub, flat, mir_const(g->mu, t_offset, i * sub_bits));
+         mir_build_store(g->mu, mir_build_array_ref(
+                            g->mu, data, mir_const(g->mu, t_offset, i)),
+                         part);
+      }
+
+      return vlog_wrap_array(g, data, num);
+   }
+
    mir_type_t t_elem = vlog_vec_type_for(
       g->mu, mir_get_type(g->mu, flat), eti->size, false);
-   mir_value_t num = mir_const(g->mu, t_offset, count);
    mir_value_t data = vlog_alloc_array(g, eti->type, num);
 
-   for (int i = 0; i < count; i++) {
+   for (unsigned i = 0; i < count; i++) {
       mir_value_t part = mir_build_extract(
          g->mu, t_elem, flat, mir_const(g->mu, t_offset, i * eti->size));
       mir_build_store(g->mu, mir_build_array_ref(
@@ -20112,8 +20137,11 @@ static mir_value_t vlog_lower_array_method(vlog_gen_t *g, vlog_node_t v)
    vlog_arr_t a = { .eti = vlog_type_info(g, etype), .up = true };
 
    vlog_node_t dims[MAX_UNPACKED_DIMS];
-   vlog_node_t dim = fixed && vlog_unpacked_dims(prefix, dims) > 0
-      ? dims[0] : vlog_sized_dimension(type);
+   const int ndims = fixed ? vlog_unpacked_dims(prefix, dims) : 0;
+   const unsigned outer_count = ndims > 0 ? vlog_size(dims[0]) : 0;
+   const unsigned inner_count = ndims > 1
+      ? vlog_unpacked_count(dims + 1, ndims - 1) : 1;
+   vlog_node_t dim = ndims > 0 ? dims[0] : vlog_sized_dimension(type);
 
    int64_t left, right;
    if (dim != NULL && vlog_bounds(dim, &left, &right)) {
@@ -20166,11 +20194,17 @@ static mir_value_t vlog_lower_array_method(vlog_gen_t *g, vlog_node_t v)
       a.with = vlog_stmt(v, 2);
 
       a.iti = vlog_type_info(g, vlog_type(index));
-      a.item_var = mir_add_var(g->mu, a.eti->type, a.eti->stamp,
-                               vlog_ident(item), 0);
+      if (inner_count > 1 && vlog_is_fixed_unpacked(item)) {
+         a.item_count = inner_count;
+         a.item_var = vlog_add_local_var(g, item, vlog_ident(item));
+      }
+      else {
+         a.item_var = mir_add_var(g->mu, a.eti->type, a.eti->stamp,
+                                  vlog_ident(item), 0);
+         mir_put_object(g->mu, item, a.item_var);
+      }
       a.index_var = mir_add_var(g->mu, a.iti->type, a.iti->stamp,
                                 ident_new("index"), 0);
-      mir_put_object(g->mu, item, a.item_var);
       mir_put_object(g->mu, index, a.index_var);
 
       if (method != V_METHOD_ARR_MAP && vlog_is_real(a.with))
@@ -20238,7 +20272,8 @@ static mir_value_t vlog_lower_array_method(vlog_gen_t *g, vlog_node_t v)
       return MIR_NULL_VALUE;
    }
 
-   mir_value_t arr = vlog_arr_to_uarray(g, prefix, a.eti, fixed);
+   mir_value_t arr = vlog_arr_to_uarray(g, prefix, a.eti, fixed,
+                                        outer_count, inner_count);
    mir_value_t len = mir_build_uarray_len(g->mu, arr, 0);
    mir_value_t src = mir_build_unwrap(g->mu, arr);
 

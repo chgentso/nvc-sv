@@ -3389,3 +3389,4 @@ svarrcmp2d1     verilog
 svclassself3    verilog
 svhiertype1     verilog
 svsscanft1      verilog
+svwith2d1       verilog

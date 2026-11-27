@@ -3759,6 +3759,27 @@ static vlog_node_t p_method_call_rest(vlog_node_t prefix, ident_t id)
       vlog_set_type(item, arraytype);
       vlog_set_loc(item, &state.last_loc);
 
+      // When reducing a multi-dimensional fixed unpacked array, the iterator
+      // carries the remaining inner unpacked dimensions
+      if (vlog_kind(prefix) == V_REF || vlog_kind(prefix) == V_MEMBER_REF
+          || vlog_kind(prefix) == V_HIER_REF
+          || vlog_kind(prefix) == V_BIT_SELECT) {
+         vlog_node_t base = prefix;
+         int skip = 0;
+         while (vlog_kind(base) == V_BIT_SELECT) {
+            skip += vlog_params(base);
+            base = vlog_value(base);
+         }
+         if ((vlog_kind(base) == V_REF || vlog_kind(base) == V_MEMBER_REF
+              || vlog_kind(base) == V_HIER_REF)
+             && vlog_has_ref(base) && vlog_is_fixed_unpacked(vlog_ref(base))) {
+            vlog_node_t d = vlog_ref(base);
+            const int nr = vlog_ranges(d);
+            for (int i = skip + 1; i < nr; i++)
+               vlog_add_range(item, vlog_range(d, i));
+         }
+      }
+
       vlog_node_t index = vlog_new(V_LOCAL_DECL);
       vlog_set_ident(index, ident_new("index"));
       vlog_node_t inttype = make_integer_atom_type(DT_INT);
