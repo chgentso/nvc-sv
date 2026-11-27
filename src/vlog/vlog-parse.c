@@ -22771,6 +22771,21 @@ static bool gen_literal(vlog_node_t v, int64_t *value)
    }
 }
 
+static vlog_node_t p_case_generate_construct(void);
+static vlog_node_t p_if_generate_construct(void);
+
+static vlog_node_t p_cond_generate_branch(void)
+{
+   // IEEE 1800-2017 27.5: a directly nested if-generate or case-generate
+   // construct does not introduce an unnamed intermediate generate block.
+   if (peek() == tIF)
+      return p_if_generate_construct();
+   else if (peek() == tCASE)
+      return p_case_generate_construct();
+   else
+      return p_generate_block();
+}
+
 static vlog_node_t p_if_generate_construct(void)
 {
    // if ( constant_expression ) generate_block
@@ -22797,7 +22812,7 @@ static vlog_node_t p_if_generate_construct(void)
 
    vlog_set_loc(c0, CURRENT_LOC);
    gen_dead += dead;
-   vlog_add_stmt(c0, p_generate_block());
+   vlog_add_stmt(c0, p_cond_generate_branch());
    gen_dead -= dead;
 
    vlog_add_cond(v, c0);
@@ -22820,7 +22835,7 @@ static vlog_node_t p_if_generate_construct(void)
 
          vlog_set_loc(cn, CURRENT_LOC);
          gen_dead += dead_n;
-         vlog_add_stmt(cn, p_generate_block());
+         vlog_add_stmt(cn, p_cond_generate_branch());
          gen_dead -= dead_n;
 
          vlog_add_cond(v, cn);
@@ -22830,7 +22845,7 @@ static vlog_node_t p_if_generate_construct(void)
          vlog_node_t ce = vlog_new(V_COND);
          vlog_set_loc(ce, &state.last_loc);
          gen_dead += taken;
-         vlog_add_stmt(ce, p_generate_block());
+         vlog_add_stmt(ce, p_cond_generate_branch());
          gen_dead -= taken;
 
          vlog_add_cond(v, ce);
@@ -22899,7 +22914,7 @@ static vlog_node_t p_case_generate_construct(void)
       }
 
       vlog_set_loc(cn, CURRENT_LOC);
-      vlog_add_stmt(cn, p_generate_block());
+      vlog_add_stmt(cn, p_cond_generate_branch());
       vlog_add_cond(v, cn);
    }
 
@@ -22907,6 +22922,33 @@ static vlog_node_t p_case_generate_construct(void)
 
    vlog_set_loc(v, CURRENT_LOC);
    return v;
+}
+
+static void declare_cond_gen_blocks(vlog_node_t v, ident_t **seen,
+                                    int *nseen, int *cap)
+{
+   const int nconds = vlog_conds(v);
+   for (int i = 0; i < nconds; i++) {
+      vlog_node_t s = vlog_stmt(vlog_cond(v, i), 0);
+      if (vlog_kind(s) == V_IF_GENERATE) {
+         declare_cond_gen_blocks(s, seen, nseen, cap);
+         continue;
+      }
+
+      ident_t id = vlog_ident(s);
+      bool dup = false;
+      for (int j = 0; j < *nseen && !dup; j++)
+         dup = (*seen)[j] == id;
+
+      if (!dup) {
+         if (*nseen == *cap) {
+            *cap = *cap > 0 ? *cap * 2 : 8;
+            *seen = xrealloc_array(*seen, *cap, sizeof(ident_t));
+         }
+         (*seen)[(*nseen)++] = id;
+         declare_gen_block(s);
+      }
+   }
 }
 
 static vlog_node_t p_conditional_generate_construct(void)
@@ -22930,16 +22972,12 @@ static vlog_node_t p_conditional_generate_construct(void)
       should_not_reach_here();
    }
 
-   // The branches of one construct may share a block name
-   const int nconds = vlog_conds(v);
-   for (int i = 0; i < nconds; i++) {
-      vlog_node_t b = vlog_stmt(vlog_cond(v, i), 0);
-      bool seen = false;
-      for (int j = 0; j < i && !seen; j++)
-         seen = vlog_ident(vlog_stmt(vlog_cond(v, j), 0)) == vlog_ident(b);
-      if (!seen)
-         declare_gen_block(b);
-   }
+   // The branches of one construct (including directly nested if/case
+   // generate constructs per IEEE 1800-2017 27.5) may share a block name
+   ident_t *seen = NULL;
+   int nseen = 0, cap = 0;
+   declare_cond_gen_blocks(v, &seen, &nseen, &cap);
+   free(seen);
 
    gen_construct = saved_construct;
    return v;
@@ -29712,6 +29750,11 @@ static vlog_node_t bind_find_child(vlog_node_t scope, ident_t id)
                   if (r != NULL)
                      return r;
                }
+               else if (vlog_kind(blk) == V_IF_GENERATE) {
+                  vlog_node_t r = bind_find_child(c, id);
+                  if (r != NULL)
+                     return r;
+               }
             }
          }
          break;
@@ -29772,6 +29815,11 @@ static tree_t bind_find_child_entity(vlog_node_t scope, ident_t id)
                vlog_node_t blk = vlog_stmt(c, 0);
                if (vlog_kind(blk) == V_GEN_BLOCK) {
                   tree_t r = bind_find_child_entity(blk, id);
+                  if (r != NULL)
+                     return r;
+               }
+               else if (vlog_kind(blk) == V_IF_GENERATE) {
+                  tree_t r = bind_find_child_entity(c, id);
                   if (r != NULL)
                      return r;
                }

@@ -1070,7 +1070,11 @@ static vlog_node_t fold_if_generate(vlog_node_t v, fold_ctx_t *ctx)
             continue;
       }
 
-      return vlog_stmts(c) == 1 ? vlog_stmt(c, 0) : NULL;
+      if (vlog_stmts(c) == 1) {
+         vlog_node_t s = vlog_stmt(c, 0);
+         return vlog_kind(s) == V_IF_GENERATE ? fold_if_generate(s, ctx) : s;
+      }
+      return NULL;
    }
 
    return NULL;   // None of the conditions are true
