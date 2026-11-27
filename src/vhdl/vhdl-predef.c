@@ -1076,6 +1076,9 @@ static void predef_mixed_bit_vec_op(mir_unit_t *mu, tree_t decl,
 static void enum_image_helper(vhdl_gen_t *g, type_t type, mir_value_t arg,
                               bool for_to_string);
 
+static void record_image_helper(vhdl_gen_t *g, type_t type, mir_value_t arg,
+                                bool for_to_string);
+
 static void predef_to_string(vhdl_gen_t *g, tree_t decl)
 {
    // LRM 08 section 5.7 on string representations
@@ -1107,6 +1110,11 @@ static void predef_to_string(vhdl_gen_t *g, tree_t decl)
       return;
    }
 
+   if (type_is_record(arg_type)) {
+      record_image_helper(g, arg_type, r0, true);
+      return;
+   }
+
    ident_t func = ident_prefix(type_ident(arg_type), ident_new("image"), '$');
 
    mir_value_t args[] = { r0 };
@@ -1115,7 +1123,9 @@ static void predef_to_string(vhdl_gen_t *g, tree_t decl)
 
    if (type_is_array(arg_type)) {
       type_t elem = type_elem(arg_type);
-      if (type_is_enum(elem) && all_character_literals(elem)) {
+      if (type_is_enum(elem)
+          && (all_character_literals(elem)
+              || type_eq(elem, type_elem(std_type(NULL, STD_STRING))))) {
          // Remove the surrounding quotes
          mir_value_t len = mir_build_uarray_len(mu, str, 0);
          mir_value_t one = mir_const(mu, t_offset, 1);
@@ -1156,6 +1166,8 @@ void vhdl_lower_predef(mir_unit_t *mu, object_t *obj)
       mir_type_t type = ti->type;
       if (tree_class(p) == C_SIGNAL)
          type = mir_signal_type(mu, type);
+      else if (ti->kind == T_RECORD)
+         type = mir_pointer_type(mu, type);
 
       mir_add_param(mu, type, ti->stamp, tree_ident(p));
    }
@@ -1375,7 +1387,8 @@ static void physical_image_helper(mir_unit_t *mu, type_t type, mir_value_t arg)
    mir_build_return(mu, mir_build_wrap(mu, mem, dims, 1));
 }
 
-static void record_image_helper(vhdl_gen_t *g, type_t type, mir_value_t arg)
+static void record_image_helper(vhdl_gen_t *g, type_t type, mir_value_t arg,
+                                bool for_to_string)
 {
    const int nfields = type_fields(type);
    mir_value_t regs[nfields];
@@ -1391,7 +1404,19 @@ static void record_image_helper(vhdl_gen_t *g, type_t type, mir_value_t arg)
    for (int i = 0; i < nfields; i++) {
       type_t ftype = tree_type(type_field(type, i));
       type_t base = type_base_recur(ftype);
-      ident_t func = ident_prefix(type_ident(base), ident_new("image"), '$');
+      ident_t func;
+      if (for_to_string) {
+         LOCAL_TEXT_BUF tb = tb_new();
+         tb_printf(tb, "%s.TO_STRING(",
+                   istr(ident_runtil(type_ident(base), '.')));
+         mangle_one_type(tb, base);
+         tb_cat(tb, ")");
+         mangle_one_type(tb, std_type(NULL, STD_STRING));
+         tb_cat(tb, "$predef");
+         func = ident_new(tb_get(tb));
+      }
+      else
+         func = ident_prefix(type_ident(base), ident_new("image"), '$');
 
       mir_value_t field = mir_build_record_ref(g->mu, arg, i);
 
@@ -1736,7 +1761,7 @@ void vhdl_lower_image_helper(mir_unit_t *mu, object_t *obj)
       physical_image_helper(mu, type, arg);
       break;
    case T_RECORD:
-      record_image_helper(&g, type, arg);
+      record_image_helper(&g, type, arg, false);
       break;
    case T_ARRAY:
       {
