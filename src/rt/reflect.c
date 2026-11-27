@@ -1087,7 +1087,7 @@ static subtype_mirror *get_subtype_mirror(void *context, type_t type,
 
       psm->pt.f_units =
          zero_alloc(sizeof(ffi_uarray_t) + nunits * sizeof(unit_rec));
-      psm->pt.f_units->dims[0].left = 1;
+      psm->pt.f_units->dims[0].left = 0;
       psm->pt.f_units->dims[0].length = nunits;
       psm->pt.f_units->ptr = psm->pt.f_units + 1;
 
