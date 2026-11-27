@@ -1281,6 +1281,11 @@ bool jit_set_silent(jit_t *j, bool silent)
    return prev;
 }
 
+bool jit_is_silent(jit_t *j)
+{
+   return j->silent;
+}
+
 void jit_msg(const loc_t *where, diag_level_t level, const char *fmt, ...)
 {
    diag_t *d = diag_new(level, where);

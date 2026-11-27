@@ -1142,6 +1142,15 @@ void jit_interp(jit_func_t *f, jit_anchor_t *caller, jit_scalar_t *args,
 
    jit_fill_irbuf(f);
 
+   if (unlikely(jit_is_silent(f->jit))) {
+      unsigned depth = 0;
+      for (jit_anchor_t *a = caller; a != NULL; a = a->caller) {
+         if (++depth >= 256)
+            jit_msg(NULL, DIAG_FATAL, "maximum recursion depth exceeded "
+                    "during constant evaluation");
+      }
+   }
+
    if (relaxed_load(&f->next_tier) != NULL && thread_id() == 0
        && --(f->hotness) <= 0)
       jit_tier_up(f);
