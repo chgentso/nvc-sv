@@ -3552,7 +3552,7 @@ START_TEST(test_names)
       { 107, "invalid procedure call statement" },
       { 108, "no visible subprogram declaration for FOO" },
       { 222, "ambiguous use of name FOO" },
-      { 233, "name X not found in function \"+\"" },
+      { 233, "type of value MYTYPE does not match type of target INTEGER" },
       { 256, "no visible declaration for NOTHERE" },
       { 313, "no visible declaration for FNORK" },
       { 323, "no matching subprogram P26_1 [universal_integer" },
