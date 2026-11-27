@@ -3459,3 +3459,4 @@ signal41        gold,2008,$NVC_JIT_THRESHOLD=1,$NVC_JIT_ASYNC=0
 signal42        fail,gold,2008,$NVC_JIT_THRESHOLD=1,$NVC_JIT_ASYNC=0
 signal43        shell
 signal44        shell
+vhdl_report_order2 shell

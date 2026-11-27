@@ -326,6 +326,7 @@ void fatal_exit(int status)
    // Flush buffered output and terminate immediately without running
    // atexit or C++ global destructors, which would race with live
    // background threads (e.g. async LLVM JIT workers).
+   nvc_output_urgent_begin();
    fflush(NULL);
 
 #ifdef __MINGW32__
@@ -729,6 +730,7 @@ static void signal_handler(int sig, siginfo_t *info, void *context)
        && (uintptr_t)info->si_addr <= cpu.sp + STACK_GUARD_RANGE) {
       // The faulting address is next to the stack pointer: this is
       // almost certainly unbounded recursion in the design
+      nvc_output_crash();
       static const char msg[] =
          "\n** Fatal: stack overflow: possible infinite recursion\n";
       for (int n, o = 0; o < (int)sizeof(msg) - 1
@@ -739,6 +741,8 @@ static void signal_handler(int sig, siginfo_t *info, void *context)
 
    for (fault_handler_t *f = fault_handlers; f; f = f->next)
       (*f->fn)(sig, info->si_addr, &cpu, f->context);
+
+   nvc_output_crash();   // Output held to be written in a fixed order
 
    print_fatal_signal(sig, info, &cpu);
 
