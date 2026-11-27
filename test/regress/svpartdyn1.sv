@@ -33,6 +33,13 @@ module svpartdyn1;
       if (op_ret(-2) !== 8'b101001xx) $fatal(1, "op_ret(-2)=%b", op_ret(-2));
       if (op_ret(8) !== 8'ha5)       $fatal(1, "op_ret(8)=%b", op_ret(8));
 
+      // Wide 65-bit overflow index into a dynamic array must be out of range
+      begin
+         automatic int da[] = '{11, 22};
+         automatic logic [64:0] big = 65'h10000000000000000;
+         if (da[big] !== 0) $fatal(1, "da[big]=%0d", da[big]);
+      end
+
       $display("PASSED");
    end
 endmodule

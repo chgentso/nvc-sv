@@ -11226,7 +11226,17 @@ static mir_value_t vlog_lower_with_context(vlog_gen_t *g, vlog_node_t v,
    case V_UNARY:
       return vlog_lower_unary(g, v, context);
    case V_SYS_FCALL:
-      return vlog_widen_vector(g, vlog_lower_sys_fcall(g, v), context);
+      {
+         mir_value_t res = vlog_lower_sys_fcall(g, v);
+         if (!mir_is_null(context) && mir_is_vector(g->mu, res)) {
+            mir_class_t c = mir_get_class(g->mu, context);
+            if ((c == MIR_TYPE_VEC2 || c == MIR_TYPE_VEC4)
+                && mir_get_size(g->mu, context)
+                   > mir_get_size(g->mu, mir_get_type(g->mu, res)))
+               return vlog_widen_vector(g, res, context);
+         }
+         return res;
+      }
    case V_MIN_TYP_MAX:
       return vlog_lower_with_context(g, vlog_value(v), context);
    case V_CONCAT:
@@ -18465,10 +18475,11 @@ static mir_value_t vlog_lower_dyn_element(vlog_gen_t *g, vlog_node_t v,
          ? vlog_lower_array_off(g, sized, index)
          : vlog_lower_cast(g, t_offset, index);
 
-      // An index with unknown bits selects no element (7.4.6)
+      // An index with unknown bits or outside offset range selects no element
+      // (7.4.6)
       mir_value_t known = mir_const(g->mu, mir_bool_type(g->mu), 1);
-      if (mir_is(g->mu, index, MIR_TYPE_VEC4)) {
-         known = mir_build_defined(g->mu, index);
+      if (mir_is_vector(g->mu, index)) {
+         known = vlog_index_valid(g, index);
          off = mir_build_select(g->mu, t_offset, known, off,
                                 mir_const(g->mu, t_offset, -1));
       }
