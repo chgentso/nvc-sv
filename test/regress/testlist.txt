@@ -3401,3 +3401,4 @@ res_record1 normal,2008
 vlog_bits_slice verilog
 sv_fwd_shadow1  verilog
 vlog_gen_case_if verilog
+sv_gen_class1   verilog

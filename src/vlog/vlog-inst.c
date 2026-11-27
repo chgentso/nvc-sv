@@ -1259,6 +1259,8 @@ static bool copy_generate_pred(vlog_node_t v, void *ctx)
       return v == ctx;
    case V_FUNC_DECL:
    case V_TASK_DECL:
+   case V_CLASS_DECL:
+   case V_CONSTRUCTOR:
       return !(vlog_flags(v) & VLOG_F_GLOBAL);
    default:
       return false;
