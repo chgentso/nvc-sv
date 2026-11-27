@@ -143,4 +143,4 @@ diff -u act2_tb.off.log act2_tb.a.log
 
 grep -q 'ACT2_TB.DUT islands=1 fused_procs=8/8' act2_tb.b_dump.log
 grep -q 'ACT2_TB.DUT islands=1 fused_procs=8/8' act2_tb.a_dump.log
-grep -q 'ACT1.DUT islands=1 fused_procs=10/12' vhdl_island_act1.a_dump.log
+grep -q 'ACT1.DUT islands=2 fused_procs=12/12' vhdl_island_act1.a_dump.log

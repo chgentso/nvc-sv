@@ -1048,6 +1048,8 @@ typedef struct {
    bool                     two_state;
    bool                     allow_signals;
    bool                     allow_report;
+   bool                     report_in_body;  // not in subprograms
+   uint32_t                 n_reports;
    bool                     in_func;
    bool                     allow_sig_attr_event;
    int                      call_depth;
@@ -1056,7 +1058,16 @@ typedef struct {
    A(vhdl_write_range_t)    read_ranges;
    A(vhdl_write_range_t)    write_ranges;
    A(tree_t)                var_decls;
+   // Definite assignment of process variables, one entry per position
+   // (record leaf or array element, see var_type_npos) starting at
+   // var_base[vi] for var_npos[vi] entries
    A(bool)                  var_assigned;
+   A(uint32_t)              var_base;
+   A(uint32_t)              var_npos;
+   tree_t                   var_ok_ref;   // Base of a read checked by range
+   tree_t                   loop_param[4];   // Unrolled loops: parameter
+   int64_t                  loop_value[4];   // and value of this pass
+   unsigned                 n_unrolled;
    A(tree_t)                loop_vars;
    A(tree_t)                active_funcs;
    int                      loop_depth;
@@ -1078,6 +1089,264 @@ static bool chk_note(check_ctx_t *c, const char *code)
 }
 
 static bool check_expr(check_ctx_t *c, tree_t expr, bool is_target);
+
+// NVC_DUMP_ISLANDS: a process variable that may keep a value between runs
+static void chk_var_reason(check_ctx_t *c, const char *what, tree_t decl)
+{
+   if (c->reason == NULL && opt_get_int(OPT_DUMP_ISLANDS))
+      c->reason = istr(ident_sprintf("var: %s %s", what,
+                                     istr(tree_ident(decl))));
+}
+
+static int find_var_idx(check_ctx_t *c, tree_t decl);
+
+// A process variable keeps its value between runs, so a fused process may
+// only read what it assigned earlier in the same run.  The check tracks
+// positions: each leaf of a record and each element of a one-dimensional
+// array with constant bounds, so assigning every field or every element
+// one by one also counts as assigning the whole variable.
+#define VAR_MAX_POS 1024
+
+static bool var_array_bounds(type_t t, int64_t *left, range_kind_t *dir,
+                             int64_t *len)
+{
+   if (!type_is_array(t) || type_is_unconstrained(t) || dimension_of(t) != 1)
+      return false;
+   tree_t r = range_of(t, 0);
+   if (tree_kind(r) != T_RANGE)
+      return false;
+   const range_kind_t rk = tree_subkind(r);
+   int64_t lo, hi, l;
+   if ((rk != RANGE_TO && rk != RANGE_DOWNTO) || !folded_bounds(r, &lo, &hi)
+       || hi < lo || !folded_int(tree_left(r), &l))
+      return false;
+   *left = l;
+   *dir = rk;
+   *len = hi - lo + 1;
+   return true;
+}
+
+static uint32_t var_type_npos(type_t t, int depth)
+{
+   if (depth > 8)
+      return 1;
+   if (type_is_record(t)) {
+      uint32_t n = 0;
+      const int nf = type_fields(t);
+      for (int i = 0; i < nf; i++)
+         n += var_type_npos(tree_type(type_field(t, i)), depth + 1);
+      return MAX(n, 1u);
+   }
+   int64_t left, len;
+   range_kind_t dir;
+   if (var_array_bounds(t, &left, &dir, &len) && len <= VAR_MAX_POS)
+      return (uint32_t)len;
+   return 1;
+}
+
+// Integer value of EXPR, with the parameter of an unrolled loop known
+static bool var_eval_int(check_ctx_t *c, tree_t expr, int64_t *out, int depth)
+{
+   if (depth > 16)
+      return false;
+   switch (tree_kind(expr)) {
+   case T_REF:
+      for (unsigned i = 0; i < c->n_unrolled; i++) {
+         if (tree_ref(expr) == c->loop_param[i]) {
+            *out = c->loop_value[i];
+            return true;
+         }
+      }
+      break;
+   case T_QUALIFIED:
+   case T_TYPE_CONV:
+      return var_eval_int(c, tree_value(expr), out, depth + 1);
+   case T_FCALL:
+      if (c->n_unrolled > 0 && tree_params(expr) == 2) {
+         const subprogram_kind_t sk = tree_subkind(tree_ref(expr));
+         int64_t a, b;
+         if ((sk == S_ADD || sk == S_SUB || sk == S_MUL)
+             && var_eval_int(c, tree_value(tree_param(expr, 0)), &a, depth + 1)
+             && var_eval_int(c, tree_value(tree_param(expr, 1)), &b, depth + 1)) {
+            *out = sk == S_ADD ? a + b : sk == S_SUB ? a - b : a * b;
+            return true;
+         }
+      }
+      break;
+   default:
+      break;
+   }
+   return vhdl_island_eval_const_int_ctx(c->ctx, expr, out);
+}
+
+// The positions of process variable VI that name EXPR covers, rooted at the
+// variable reference *BASE_OUT.  *EXACT is false when EXPR is part of a
+// position (a dynamic index, a field of an array element...), which an
+// assignment does not fully overwrite.
+static bool var_name_range(check_ctx_t *c, tree_t expr, tree_t *base_out,
+                           int *vi_out, uint32_t *lo_out, uint32_t *n_out,
+                           bool *exact)
+{
+   tree_t chain[16];
+   int depth = 0;
+   tree_t t = expr;
+   for (;;) {
+      const tree_kind_t k = tree_kind(t);
+      if (k == T_REF)
+         break;
+      if ((k != T_RECORD_REF && k != T_ARRAY_REF && k != T_ARRAY_SLICE)
+          || depth == ARRAY_LEN(chain))
+         return false;
+      chain[depth++] = t;
+      t = tree_value(t);
+   }
+   if (!tree_has_ref(t) || tree_kind(tree_ref(t)) != T_VAR_DECL)
+      return false;
+   const int vi = find_var_idx(c, tree_ref(t));
+   if (vi < 0)
+      return false;
+
+   type_t type = tree_type(tree_ref(t));
+   uint32_t lo = 0, n = c->var_npos.items[vi], arr_lo = 0;
+   bool in_elem = false;
+   *exact = true;
+   for (int d = depth - 1; d >= 0; d--) {
+      tree_t e = chain[d];
+      if (in_elem) {
+         *exact = false;    // Part of one position
+         continue;
+      }
+      switch (tree_kind(e)) {
+      case T_RECORD_REF:
+         {
+            if (!type_is_record(type))
+               return false;
+            tree_t f = tree_ref(e);
+            const int nf = type_fields(type);
+            uint32_t off = 0;
+            int fi = 0;
+            for (; fi < nf && type_field(type, fi) != f; fi++)
+               off += var_type_npos(tree_type(type_field(type, fi)), 0);
+            if (fi == nf)
+               return false;
+            if (n != var_type_npos(type, 0))
+               return false;
+            lo += off;
+            type = tree_type(f);
+            n = var_type_npos(type, 0);
+         }
+         break;
+      case T_ARRAY_REF:
+      case T_ARRAY_SLICE:
+         {
+            int64_t left, len;
+            range_kind_t dir;
+            const bool elems = var_array_bounds(type, &left, &dir, &len)
+               && len <= VAR_MAX_POS;
+            // A slice keeps the index space of the array it is part of
+            if (d + 1 == depth || tree_kind(chain[d + 1]) != T_ARRAY_SLICE)
+               arr_lo = lo;
+            int64_t il, ir;
+            bool known = false;
+            uint32_t plo = 0, pn = 0;
+            if (!elems)
+               ;
+            else if (tree_kind(e) == T_ARRAY_REF) {
+               if (tree_params(e) == 1
+                   && var_eval_int(c, tree_value(tree_param(e, 0)), &il, 0)) {
+                  const int64_t pos = dir == RANGE_TO ? il - left : left - il;
+                  if (pos >= 0 && pos < len) {
+                     plo = arr_lo + (uint32_t)pos;
+                     pn = 1;
+                     known = true;
+                  }
+               }
+            }
+            else {
+               tree_t rg = tree_range(e, 0);
+               if (tree_kind(rg) == T_RANGE && tree_subkind(rg) == dir
+                   && var_eval_int(c, tree_left(rg), &il, 0)
+                   && var_eval_int(c, tree_right(rg), &ir, 0)) {
+                  const int64_t p0 = dir == RANGE_TO ? il - left : left - il;
+                  const int64_t p1 = dir == RANGE_TO ? ir - left : left - ir;
+                  if (p0 >= 0 && p1 >= p0 && p1 < len) {
+                     plo = arr_lo + (uint32_t)p0;
+                     pn = (uint32_t)(p1 - p0 + 1);
+                     known = true;
+                  }
+               }
+            }
+            if (known && plo >= lo && plo + pn <= lo + n) {
+               lo = plo;
+               n = pn;
+            }
+            else
+               *exact = false;
+            if (tree_kind(e) == T_ARRAY_REF) {
+               // Anything selected from an element is part of a position
+               type = type_elem(type);
+               in_elem = true;
+            }
+         }
+         break;
+      default:
+         return false;
+      }
+   }
+
+   *base_out = t;
+   *vi_out = vi;
+   *lo_out = lo;
+   *n_out = n;
+   return true;
+}
+
+static bool var_range_assigned(check_ctx_t *c, int vi, uint32_t lo, uint32_t n)
+{
+   const bool *a = c->var_assigned.items + c->var_base.items[vi];
+   for (uint32_t i = lo; i < lo + n; i++) {
+      if (!a[i])
+         return false;
+   }
+   return true;
+}
+
+static void var_range_assign(check_ctx_t *c, int vi, uint32_t lo, uint32_t n)
+{
+   bool *a = c->var_assigned.items + c->var_base.items[vi];
+   for (uint32_t i = lo; i < lo + n; i++)
+      a[i] = true;
+}
+
+// Assignment to process variable VI through TARGET (BASE when the whole
+// variable): marks the positions it covers or, for part of a position,
+// requires that position assigned already
+static bool var_assign_target(check_ctx_t *c, int vi, tree_t target,
+                              tree_t base)
+{
+   if (target == base) {
+      var_range_assign(c, vi, 0, c->var_npos.items[vi]);
+      return true;
+   }
+   tree_t b;
+   int bvi;
+   uint32_t lo, n;
+   bool exact;
+   if (!var_name_range(c, target, &b, &bvi, &lo, &n, &exact)
+       || bvi != vi) {
+      lo = 0;
+      n = c->var_npos.items[vi];
+      exact = false;
+   }
+   if (exact)
+      var_range_assign(c, vi, lo, n);
+   else if (!var_range_assigned(c, vi, lo, n)) {
+      chk_var_reason(c, "partial assignment before a full one of",
+                     tree_ref(base));
+      return false;
+   }
+   return true;
+}
 static bool check_stmt(check_ctx_t *c, tree_t stmt, bool is_func);
 static bool check_stmt_list(check_ctx_t *c, tree_t owner, int start, int end,
                             bool is_func);
@@ -1247,7 +1516,8 @@ static bool check_pure_func_body(check_ctx_t *outer, tree_t func_decl)
       .ctx           = outer->ctx,
       .two_state     = outer->two_state,
       .allow_signals = false,
-      .allow_report  = outer->allow_report,
+      // An inlined subprogram has no frame of its own in a report
+      .allow_report  = outer->allow_report && !outer->report_in_body,
       .in_func       = true,
       .call_depth    = outer->call_depth + 1,
       .active_funcs  = outer->active_funcs,
@@ -1264,6 +1534,8 @@ static bool check_pure_func_body(check_ctx_t *outer, tree_t func_decl)
    ACLEAR(fc.write_ranges);
    ACLEAR(fc.var_decls);
    ACLEAR(fc.var_assigned);
+   ACLEAR(fc.var_base);
+   ACLEAR(fc.var_npos);
    ACLEAR(fc.loop_vars);
    // fc.active_funcs aliases outer->active_funcs only on items pushed? Wait: APUSH reallocates!
    // So don't share buffer blindly; clean if reallocated or keep separate copy.
@@ -1357,7 +1629,8 @@ static bool check_pure_proc_body(check_ctx_t *outer, tree_t proc_decl)
       .ctx           = outer->ctx,
       .two_state     = outer->two_state,
       .allow_signals = false,
-      .allow_report  = outer->allow_report,
+      // An inlined subprogram has no frame of its own in a report
+      .allow_report  = outer->allow_report && !outer->report_in_body,
       .in_func       = true,
       .call_depth    = outer->call_depth + 1,
       .active_funcs  = outer->active_funcs,
@@ -1372,6 +1645,8 @@ static bool check_pure_proc_body(check_ctx_t *outer, tree_t proc_decl)
    ACLEAR(fc.write_ranges);
    ACLEAR(fc.var_decls);
    ACLEAR(fc.var_assigned);
+   ACLEAR(fc.var_base);
+   ACLEAR(fc.var_npos);
    ACLEAR(fc.loop_vars);
    if (fc.active_funcs.items != outer->active_funcs.items)
       free(fc.active_funcs.items);
@@ -1605,8 +1880,12 @@ static bool check_expr_inner(check_ctx_t *c, tree_t expr, bool is_target)
                   const int vi = find_var_idx(c, decl);
                   if (vi < 0)
                      return false;
-                  if (!is_target && !c->var_assigned.items[vi])
+                  if (!is_target && expr != c->var_ok_ref
+                      && !var_range_assigned(c, vi, 0,
+                                             c->var_npos.items[vi])) {
+                     chk_var_reason(c, "read before assignment of", decl);
                      return false;
+                  }
                }
                return true;
             }
@@ -1863,6 +2142,26 @@ static void chk_generic(check_ctx_t *c, const char *what, tree_t t)
 
 static bool check_expr(check_ctx_t *c, tree_t expr, bool is_target)
 {
+   const tree_kind_t k = tree_kind(expr);
+   if (!is_target && !c->in_func
+       && (k == T_RECORD_REF || k == T_ARRAY_REF || k == T_ARRAY_SLICE)) {
+      // A read of part of a variable needs only those positions assigned
+      tree_t base;
+      int vi;
+      uint32_t lo, n;
+      bool exact;
+      if (var_name_range(c, expr, &base, &vi, &lo, &n, &exact)
+          && base != c->var_ok_ref && var_range_assigned(c, vi, lo, n)) {
+         tree_t saved = c->var_ok_ref;
+         c->var_ok_ref = base;
+         const bool ok = check_expr_inner(c, expr, is_target);
+         c->var_ok_ref = saved;
+         if (!ok)
+            chk_generic(c, "expr", expr);
+         return ok;
+      }
+   }
+
    const bool ok = check_expr_inner(c, expr, is_target);
    if (!ok)
       chk_generic(c, "expr", expr);
@@ -1991,6 +2290,73 @@ static bool check_str_expr(check_ctx_t *c, tree_t expr, int depth)
    }
 }
 
+// Iterations of a loop with constant bounds whose body assigns parts of a
+// variable, which only counts as a definite assignment when the indices of
+// every pass are known (for i in 0 to 7 loop v(i) := ...)
+#define VAR_MAX_UNROLL 64
+
+static bool loop_needs_unroll(tree_t stmt, int depth)
+{
+   if (depth > 16)
+      return false;
+   bool partial = false;
+   const int ns = tree_stmts(stmt);
+   for (int i = 0; i < ns; i++) {
+      tree_t s = tree_stmt(stmt, i);
+      switch (tree_kind(s)) {
+      case T_EXIT:
+      case T_NEXT:
+         return false;   // A pass may end early
+      case T_VAR_ASSIGN:
+         partial |= tree_kind(tree_target(s)) != T_REF;
+         break;
+      case T_IF:
+         for (int j = 0; j < tree_conds(s); j++) {
+            tree_t br = tree_cond(s, j);
+            for (int k = 0; k < tree_stmts(br); k++) {
+               if (tree_kind(tree_stmt(br, k)) == T_EXIT
+                   || tree_kind(tree_stmt(br, k)) == T_NEXT)
+                  return false;
+            }
+            partial |= loop_needs_unroll(br, depth + 1);
+         }
+         break;
+      case T_CASE:
+         for (int j = 0; j < tree_stmts(s); j++)
+            partial |= loop_needs_unroll(tree_stmt(s, j), depth + 1);
+         break;
+      case T_FOR:
+      case T_SEQUENCE:
+         partial |= loop_needs_unroll(s, depth + 1);
+         break;
+      default:
+         break;
+      }
+   }
+   return partial;
+}
+
+static bool check_unrolled_loop(check_ctx_t *c, tree_t stmt, int64_t first,
+                                int64_t step, int64_t niters)
+{
+   const unsigned slot = c->n_unrolled++;
+   c->loop_param[slot] = tree_decl(stmt, 0);
+   ident_t saved_label = c->cur_loop_label;
+   c->cur_loop_label = tree_has_ident(stmt) ? tree_ident(stmt) : NULL;
+   c->loop_depth++;
+   bool ok = true;
+   for (int64_t i = 0; i < niters && ok; i++) {
+      c->loop_value[slot] = first + i * step;
+      vhdl_island_var_defs_clear((vhdl_island_ctx_t *)c->ctx);
+      ok = check_stmt_list(c, stmt, 0, tree_stmts(stmt), false);
+   }
+   vhdl_island_var_defs_clear((vhdl_island_ctx_t *)c->ctx);
+   c->loop_depth--;
+   c->cur_loop_label = saved_label;
+   c->n_unrolled--;
+   return ok;
+}
+
 static bool check_stmt_inner(check_ctx_t *c, tree_t stmt, bool is_func)
 {
    if (stmt == NULL || c->rejected)
@@ -2085,22 +2451,13 @@ static bool check_stmt_inner(check_ctx_t *c, tree_t stmt, bool is_func)
             int vi = find_var_idx(c, vdecl);
             if (vi < 0)
                return false;
-            if (target == base) {
-               // Full variable assignment marks it definitely assigned
-               if (!check_expr(c, target, true))
-                  return false;
-               c->var_assigned.items[vi] = true;
-               if (type_is_integer(tree_type(vdecl)))
-                  vhdl_island_var_def_set((vhdl_island_ctx_t *)c->ctx, vdecl,
-                                          tree_value(stmt));
-               return true;
-            }
-            else {
-               // Partial element/slice write reads prior value unless already assigned
-               if (!c->var_assigned.items[vi])
-                  return false;
-               return check_expr(c, target, true);
-            }
+            if (!check_expr(c, target, true)
+                || !var_assign_target(c, vi, target, base))
+               return false;
+            if (target == base && type_is_integer(tree_type(vdecl)))
+               vhdl_island_var_def_set((vhdl_island_ctx_t *)c->ctx, vdecl,
+                                       tree_value(stmt));
+            return true;
          }
          return check_expr(c, target, true);
       }
@@ -2108,16 +2465,16 @@ static bool check_stmt_inner(check_ctx_t *c, tree_t stmt, bool is_func)
    case T_IF:
       {
          bool *saved = NULL;
-         if (!is_func && c->var_decls.count > 0) {
-            saved = xmalloc_array(c->var_decls.count, sizeof(bool));
+         if (!is_func && c->var_assigned.count > 0) {
+            saved = xmalloc_array(c->var_assigned.count, sizeof(bool));
             memcpy(saved, c->var_assigned.items,
-                   c->var_decls.count * sizeof(bool));
+                   c->var_assigned.count * sizeof(bool));
          }
          bool has_else = false;
          bool *all_assigned = NULL;
          if (saved != NULL) {
-            all_assigned = xmalloc_array(c->var_decls.count, sizeof(bool));
-            memset(all_assigned, 1, c->var_decls.count * sizeof(bool));
+            all_assigned = xmalloc_array(c->var_assigned.count, sizeof(bool));
+            memset(all_assigned, 1, c->var_assigned.count * sizeof(bool));
          }
 
          const int nconds = tree_conds(stmt);
@@ -2142,7 +2499,7 @@ static bool check_stmt_inner(check_ctx_t *c, tree_t stmt, bool is_func)
 
             if (saved != NULL)
                memcpy(c->var_assigned.items, saved,
-                      c->var_decls.count * sizeof(bool));
+                      c->var_assigned.count * sizeof(bool));
 
             if (!check_stmt_list(c, br, 0, tree_stmts(br), is_func)) {
                free(saved);
@@ -2151,7 +2508,7 @@ static bool check_stmt_inner(check_ctx_t *c, tree_t stmt, bool is_func)
             }
 
             if (all_assigned != NULL) {
-               for (unsigned v = 0; v < c->var_decls.count; v++)
+               for (unsigned v = 0; v < c->var_assigned.count; v++)
                   all_assigned[v] = all_assigned[v] && c->var_assigned.items[v];
             }
 
@@ -2163,7 +2520,7 @@ static bool check_stmt_inner(check_ctx_t *c, tree_t stmt, bool is_func)
          vhdl_island_var_defs_clear((vhdl_island_ctx_t *)c->ctx);
 
          if (saved != NULL) {
-            for (unsigned v = 0; v < c->var_decls.count; v++)
+            for (unsigned v = 0; v < c->var_assigned.count; v++)
                c->var_assigned.items[v] = saved[v] || (has_else && all_assigned[v]);
             free(saved);
             free(all_assigned);
@@ -2177,15 +2534,15 @@ static bool check_stmt_inner(check_ctx_t *c, tree_t stmt, bool is_func)
             return false;
 
          bool *saved = NULL;
-         if (!is_func && c->var_decls.count > 0) {
-            saved = xmalloc_array(c->var_decls.count, sizeof(bool));
+         if (!is_func && c->var_assigned.count > 0) {
+            saved = xmalloc_array(c->var_assigned.count, sizeof(bool));
             memcpy(saved, c->var_assigned.items,
-                   c->var_decls.count * sizeof(bool));
+                   c->var_assigned.count * sizeof(bool));
          }
          bool *all_assigned = NULL;
          if (saved != NULL) {
-            all_assigned = xmalloc_array(c->var_decls.count, sizeof(bool));
-            memset(all_assigned, 1, c->var_decls.count * sizeof(bool));
+            all_assigned = xmalloc_array(c->var_assigned.count, sizeof(bool));
+            memset(all_assigned, 1, c->var_assigned.count * sizeof(bool));
          }
 
          const int nalts = tree_stmts(stmt);
@@ -2220,7 +2577,7 @@ static bool check_stmt_inner(check_ctx_t *c, tree_t stmt, bool is_func)
 
             if (saved != NULL)
                memcpy(c->var_assigned.items, saved,
-                      c->var_decls.count * sizeof(bool));
+                      c->var_assigned.count * sizeof(bool));
 
             if (!check_stmt_list(c, alt, 0, tree_stmts(alt), is_func)) {
                free(saved);
@@ -2229,14 +2586,14 @@ static bool check_stmt_inner(check_ctx_t *c, tree_t stmt, bool is_func)
             }
 
             if (all_assigned != NULL) {
-               for (unsigned v = 0; v < c->var_decls.count; v++)
+               for (unsigned v = 0; v < c->var_assigned.count; v++)
                   all_assigned[v] = all_assigned[v] && c->var_assigned.items[v];
             }
          }
 
          if (saved != NULL) {
             // VHDL case statements are exhaustive
-            for (unsigned v = 0; v < c->var_decls.count; v++)
+            for (unsigned v = 0; v < c->var_assigned.count; v++)
                c->var_assigned.items[v] = saved[v] || all_assigned[v];
             free(saved);
             free(all_assigned);
@@ -2250,6 +2607,7 @@ static bool check_stmt_inner(check_ctx_t *c, tree_t stmt, bool is_func)
    case T_ASSERT:
       if (!c->allow_report)
          return false;
+      c->n_reports++;
       if (!tree_has_value(stmt) || !check_expr(c, tree_value(stmt), false))
          return false;
       if (tree_has_severity(stmt) && !check_expr(c, tree_severity(stmt), false))
@@ -2261,6 +2619,7 @@ static bool check_stmt_inner(check_ctx_t *c, tree_t stmt, bool is_func)
    case T_REPORT:
       if (!c->allow_report)
          return false;
+      c->n_reports++;
       if (tree_has_severity(stmt) && !check_expr(c, tree_severity(stmt), false))
          return false;
       if (tree_has_message(stmt) && !check_str_expr(c, tree_message(stmt), 0))
@@ -2318,11 +2677,23 @@ static bool check_stmt_inner(check_ctx_t *c, tree_t stmt, bool is_func)
          else
             return false;
 
+         int64_t ul, ur;
+         if (!is_func && c->n_unrolled < ARRAY_LEN(c->loop_param)
+             && tree_decls(stmt) == 1 && (rk == RANGE_TO || rk == RANGE_DOWNTO)
+             && var_eval_int(c, tree_left(rg), &ul, 0)
+             && var_eval_int(c, tree_right(rg), &ur, 0)
+             && loop_needs_unroll(stmt, 0)) {
+            const int64_t step = rk == RANGE_TO ? 1 : -1;
+            const int64_t niters = (ur - ul) * step + 1;
+            if (niters >= 1 && niters <= VAR_MAX_UNROLL)
+               return check_unrolled_loop(c, stmt, ul, step, niters);
+         }
+
          bool *saved = NULL;
-         if (!is_func && c->var_decls.count > 0) {
-            saved = xmalloc_array(c->var_decls.count, sizeof(bool));
+         if (!is_func && c->var_assigned.count > 0) {
+            saved = xmalloc_array(c->var_assigned.count, sizeof(bool));
             memcpy(saved, c->var_assigned.items,
-                   c->var_decls.count * sizeof(bool));
+                   c->var_assigned.count * sizeof(bool));
          }
          ident_t saved_label = c->cur_loop_label;
          c->cur_loop_label = tree_has_ident(stmt) ? tree_ident(stmt) : NULL;
@@ -2334,7 +2705,7 @@ static bool check_stmt_inner(check_ctx_t *c, tree_t stmt, bool is_func)
          c->cur_loop_label = saved_label;
          if (saved != NULL) {
             memcpy(c->var_assigned.items, saved,
-                   c->var_decls.count * sizeof(bool));
+                   c->var_assigned.count * sizeof(bool));
             free(saved);
          }
          return ok;
@@ -2375,9 +2746,12 @@ static bool check_stmt_inner(check_ctx_t *c, tree_t stmt, bool is_func)
                   int vi = find_var_idx(c, bdecl);
                   if (vi < 0)
                      return false;
-                  if (mode == PORT_OUT && actual == base)
-                     c->var_assigned.items[vi] = true;
-                  else if (!c->var_assigned.items[vi])
+                  if (mode == PORT_OUT) {
+                     if (!var_assign_target(c, vi, actual, base))
+                        return false;
+                  }
+                  else if (!var_range_assigned(c, vi, 0,
+                                               c->var_npos.items[vi]))
                      return false;
                }
                if (!check_expr(c, actual, true))
@@ -2693,6 +3067,91 @@ static bool wait_covers_sig_reads(const vhdl_island_ctx_t *ctx, tree_t wait_stmt
    return has_read && all_ok;
 }
 
+// The island signals of the sensitivity list of a combinational process
+// with report or assert statements: its run flag compares their values with
+// the ones of its last run.  An element or slice with constant bounds is
+// compared on its own, which needs one byte per element (Mode B).  Returns a
+// reason when the process cannot be fused.
+static const char *comb_report_events(vhdl_iproc_t *p,
+                                      const vhdl_island_ctx_t *ctx,
+                                      tree_t wait_stmt)
+{
+   u32_list_t ids = AINIT, part_off = AINIT, part_bytes = AINIT;
+   const char *reason = NULL;
+   const int ntrig = tree_triggers(wait_stmt);
+   for (int i = 0; i < ntrig && reason == NULL; i++) {
+      tree_t t = tree_trigger(wait_stmt, i);
+      tree_t base = t;
+      bool partial = false;
+      for (;;) {
+         const tree_kind_t k = tree_kind(base);
+         if (k == T_ARRAY_REF || k == T_ARRAY_SLICE)
+            partial = true;
+         else if (k != T_RECORD_REF)
+            break;
+         base = tree_value(base);
+      }
+      if (tree_kind(base) != T_REF || !tree_has_ref(base)
+          || (tree_kind(tree_ref(base)) != T_SIGNAL_DECL
+              && tree_kind(tree_ref(base)) != T_PORT_DECL)) {
+         reason = "comb: report process sensitivity list not supported";
+         break;
+      }
+
+      if (partial) {
+         uint32_t sid = 0, lo = 0, hi = 0;
+         if (!vhdl_island_const_sig_range(ctx, t, &sid, &lo, &hi)) {
+            reason = "comb: report process sensitive to a dynamic element";
+            break;
+         }
+         const vhdl_isig_t *s = &(ctx->sigs[sid]);
+         if (s->two_state) {
+            reason = "comb: report process sensitive to a packed element";
+            break;
+         }
+         APUSH(ids, sid);
+         APUSH(part_off, lo * s->byte_size);
+         APUSH(part_bytes, (hi - lo + 1) * s->byte_size);
+         continue;
+      }
+
+      tree_t decl = NULL;
+      int path[VHDL_ISIG_MAX_DEPTH];
+      uint8_t len = 0;
+      if (!vhdl_island_extract_path_ctx(ctx, t, &decl, path, &len)) {
+         reason = "comb: report process sensitivity list not supported";
+         break;
+      }
+      bool found = false;
+      for (uint32_t k = 0; k < ctx->n_sigs; k++) {
+         const vhdl_isig_t *s = &(ctx->sigs[k]);
+         if (s->decl == decl && s->path_len >= len
+             && (len == 0
+                 || memcmp(s->field_path, path, len * sizeof(int)) == 0)) {
+            APUSH(ids, k);
+            APUSH(part_off, 0);
+            APUSH(part_bytes, 0);
+            found = true;
+         }
+      }
+      if (!found)
+         reason = "comb: report process sensitivity list not supported";
+   }
+
+   if (reason != NULL) {
+      ACLEAR(ids);
+      ACLEAR(part_off);
+      ACLEAR(part_bytes);
+      return reason;
+   }
+
+   p->evt_sigs = ids.items;
+   p->evt_part_off = part_off.items;
+   p->evt_part_bytes = part_bytes.items;
+   p->n_evt_sigs = ids.count;
+   return NULL;
+}
+
 static bool check_process_decls(check_ctx_t *c, tree_t proc)
 {
    const int nd = tree_decls(proc);
@@ -2712,7 +3171,11 @@ static bool check_process_decls(check_ctx_t *c, tree_t proc)
             // is definitely assigned before any read on every activation path.
             if (tree_has_value(d) && !check_expr(c, tree_value(d), false))
                return false;
-            APUSH(c->var_assigned, false);
+            const uint32_t npos = var_type_npos(tree_type(d), 0);
+            APUSH(c->var_base, c->var_assigned.count);
+            APUSH(c->var_npos, npos);
+            for (uint32_t k = 0; k < npos; k++)
+               APUSH(c->var_assigned, false);
          }
          break;
       case T_CONST_DECL:
@@ -2832,7 +3295,7 @@ static void analyze_process(vhdl_island_ctx_t *ctx, tree_t proc, int stmt_idx,
             ok = check_stmt_list(&c, rst_br, 0, tree_stmts(rst_br), false);
          if (ok) {
             // Reset per-branch var assignment before checking clk_br
-            for (unsigned i = 0; i < c.var_decls.count; i++)
+            for (unsigned i = 0; i < c.var_assigned.count; i++)
                c.var_assigned.items[i] = false;
             ok = check_stmt_list(&c, clk_br, 0, tree_stmts(clk_br), false);
          }
@@ -2882,6 +3345,8 @@ static void analyze_process(vhdl_island_ctx_t *ctx, tree_t proc, int stmt_idx,
                       n_owner_ancs * sizeof(tree_t));
             ACLEAR(c.var_decls);
             ACLEAR(c.var_assigned);
+            ACLEAR(c.var_base);
+            ACLEAR(c.var_npos);
             ACLEAR(c.loop_vars);
             ACLEAR(c.active_funcs);
             APUSH(*procs, p);
@@ -2899,23 +3364,26 @@ static void analyze_process(vhdl_island_ctx_t *ctx, tree_t proc, int stmt_idx,
          ACLEAR(c.write_ranges);
          ACLEAR(c.var_decls);
          ACLEAR(c.var_assigned);
+         ACLEAR(c.var_base);
+         ACLEAR(c.var_npos);
          ACLEAR(c.loop_vars);
          ACLEAR(c.active_funcs);
       }
    }
 
-   // Try COMB classification.
-   // Disallow report/assert in combinational island processes: multiple comb
-   // processes share a single island eval function, so an unrelated sibling
-   // wakeup or collapsed internal delta would fire comb reports/asserts
-   // differently from the standard VHDL event kernel.
+   // Try COMB classification.  Report and assert statements are allowed in
+   // the process body (an inlined subprogram would lose its frame in the
+   // message): such a process runs only when a signal of its sensitivity
+   // list changed since its last run (see comb_report_events), so the
+   // statements fire in the same delta cycles as with the process unfused.
    {
       check_ctx_t c = {
-         .ctx           = ctx,
-         .two_state     = two_state,
-         .allow_signals = true,
-         .allow_report  = false,
-         .in_func       = false,
+         .ctx            = ctx,
+         .two_state      = two_state,
+         .allow_signals  = true,
+         .allow_report   = true,
+         .report_in_body = true,
+         .in_func        = false,
       };
       bool ok = check_process_decls(&c, proc)
          && check_stmt_list(&c, proc, 0, nstmts - 1, false);
@@ -2932,34 +3400,22 @@ static void analyze_process(vhdl_island_ctx_t *ctx, tree_t proc, int stmt_idx,
          }
          if (!ok)
             reason = "comb: sensitivity list does not cover reads";
-         // Eject self-reading combinational loops inside a single process
-         // (only a conflict if read_ranges and write_ranges overlap on the same signal)
-         for (unsigned i = 0; i < c.reads.count && ok; i++) {
-            for (unsigned j = 0; j < c.writes.count; j++) {
-               if (c.reads.items[i] == c.writes.items[j]) {
-                  const uint32_t sid = c.reads.items[i];
-                  bool has_r = false, has_w = false, overlap = false;
-                  for (unsigned ri = 0; ri < c.read_ranges.count && !overlap; ri++) {
-                     if (c.read_ranges.items[ri].sig_id != sid)
-                        continue;
-                     has_r = true;
-                     for (unsigned wi = 0; wi < c.write_ranges.count; wi++) {
-                        if (c.write_ranges.items[wi].sig_id != sid)
-                           continue;
-                        has_w = true;
-                        if (c.read_ranges.items[ri].pos_lo <= c.write_ranges.items[wi].pos_hi
-                            && c.write_ranges.items[wi].pos_lo <= c.read_ranges.items[ri].pos_hi) {
-                           overlap = true;
-                           break;
-                        }
-                     }
-                  }
-                  if (overlap || !has_r || !has_w) {
-                     ok = false;
-                     reason = "comb: process reads a signal it also writes";
-                     break;
-                  }
-               }
+         // A process that reads a signal it also writes sees the value of
+         // the current delta cycle: the lowering reads such signals from a
+         // copy taken when the process starts (see vi_build_comb_unit) and
+         // the island runs again in the next delta when they changed.
+         vhdl_iproc_t evt = { .n_evt_sigs = 0 };
+         if (ok && c.n_reports > 0) {
+            const char *er = comb_report_events(&evt, ctx, wait);
+            if (er != NULL) {
+               ok = false;
+               reason = er;
+            }
+            for (uint32_t i = 0; ok && i < evt.n_evt_sigs; i++) {
+               const unsigned before = c.reads.count;
+               push_unique_u32(&c.reads, evt.evt_sigs[i]);
+               if (c.reads.count > before)
+                  record_full_read_range(&c, evt.evt_sigs[i]);
             }
          }
          if (ok) {
@@ -2971,6 +3427,11 @@ static void analyze_process(vhdl_island_ctx_t *ctx, tree_t proc, int stmt_idx,
                .fused_key         = ident_prefix(owner_prefix, tree_ident(proc), '.'),
                .kind              = VIPROC_COMB,
                .rst_sig        = -1,
+               .has_report     = c.n_reports > 0,
+               .evt_sigs       = evt.evt_sigs,
+               .evt_part_off   = evt.evt_part_off,
+               .evt_part_bytes = evt.evt_part_bytes,
+               .n_evt_sigs     = evt.n_evt_sigs,
                .reads          = c.reads.items,
                .n_reads        = c.reads.count,
                .writes         = c.writes.items,
@@ -2987,6 +3448,8 @@ static void analyze_process(vhdl_island_ctx_t *ctx, tree_t proc, int stmt_idx,
                       n_owner_ancs * sizeof(tree_t));
             ACLEAR(c.var_decls);
             ACLEAR(c.var_assigned);
+            ACLEAR(c.var_base);
+            ACLEAR(c.var_npos);
             ACLEAR(c.loop_vars);
             ACLEAR(c.active_funcs);
             APUSH(*procs, p);
@@ -2999,6 +3462,8 @@ static void analyze_process(vhdl_island_ctx_t *ctx, tree_t proc, int stmt_idx,
       ACLEAR(c.write_ranges);
       ACLEAR(c.var_decls);
       ACLEAR(c.var_assigned);
+      ACLEAR(c.var_base);
+      ACLEAR(c.var_npos);
       ACLEAR(c.loop_vars);
       ACLEAR(c.active_funcs);
    }
@@ -3861,8 +4326,10 @@ static void tarjan_dfs(scc_state_t *st, uint32_t v)
             break;
       }
       if (count > 1 || (count == 1 && st->adj[v][v])) {
-         for (uint32_t k = st->sp; k < start; k++)
+         for (uint32_t k = st->sp; k < start; k++) {
             st->in_cycle[st->stack[k]] = true;
+            st->topo[st->topo_n++] = st->stack[k];
+         }
       }
       else
          st->topo[st->topo_n++] = v;
@@ -4195,6 +4662,13 @@ vhdl_island_t *vhdl_island_new_a_variant(const vhdl_island_ctx_t *ctx,
    if (isl->sparse_log_off > 0) {
       *reason = "A1 sparse RAM";
       return NULL;
+   }
+   for (uint32_t k = 0; k < isl->n_comb_procs; k++) {
+      if (ctx->procs[isl->comb_procs[k]].has_report) {
+         // Its run flag and signal copies follow the Mode B layout
+         *reason = "A1 combinational process with report statements";
+         return NULL;
+      }
    }
 
    uint32_t hdr = isl->state_bytes;
@@ -4560,7 +5034,9 @@ void vhdl_island_rebuild(vhdl_island_ctx_t *ctx)
             for (unsigned wi = 0; wi < wl->count; wi++) {
                const uint32_t w = wl->items[wi];
                const vhdl_iproc_t *pw = &(procs.items[comb_idxs.items[w]]);
-               if (proc_reads_overlap_writes(p, pw, sid))
+               // A process reading its own output is not a loop: it reads
+               // the value of the current delta from a shadow copy
+               if (w != c && proc_reads_overlap_writes(p, pw, sid))
                   adj[c][w] = true;  // c depends on w: visit w first
             }
          }
@@ -4582,13 +5058,11 @@ void vhdl_island_rebuild(vhdl_island_ctx_t *ctx)
          if (st.index[c] == 0)
             tarjan_dfs(&st, c);
       }
-      for (uint32_t c = 0; c < nc; c++) {
-         if (st.in_cycle[c]) {
-            procs.items[comb_idxs.items[c]].rejected = true;
-            procs.items[comb_idxs.items[c]].reason =
-               "cycle: combinational loop between processes";
-         }
-      }
+      // The processes of a combinational loop stay in the island: a
+      // process that runs after the writer of a signal it reads loads the
+      // value of the current delta cycle from a copy taken when the island
+      // function starts (see vi_emit_self_shadow)
+      (void)st.in_cycle;
       for (uint32_t i = 0; i < st.topo_n; i++) {
          uint32_t c = st.topo[i];
          if (!procs.items[comb_idxs.items[c]].rejected)
@@ -5016,6 +5490,36 @@ void vhdl_island_rebuild(vhdl_island_ctx_t *ctx)
             off += ALIGN_UP(nbytes, 8u);
          }
       }
+      // Run flag and copies of the sensitivity signals of combinational
+      // processes with report statements, compared on each call
+      for (unsigned k = 0; k < isl_comb.count; k++) {
+         vhdl_iproc_t *p = &(procs.items[isl_comb.items[k]]);
+         if (!p->has_report)
+            continue;
+         free(p->evt_copy_off);
+         free(p->evt_copy_bytes);
+         const uint32_t n = MAX(1u, p->n_evt_sigs);
+         p->evt_copy_off = xmalloc_array(n, sizeof(uint32_t));
+         p->evt_copy_bytes = xmalloc_array(n, sizeof(uint32_t));
+         p->evt_flag_off = off;
+         off += 8;
+         for (uint32_t i = 0; i < p->n_evt_sigs; i++) {
+            const vhdl_isig_t *s = &(ctx->sigs[p->evt_sigs[i]]);
+            uint32_t nbytes = 0;
+            if (s->is_sparse_ram)
+               nbytes = 0;   // The lowering ejects the process
+            else if (p->evt_part_bytes[i] > 0)
+               nbytes = p->evt_part_bytes[i];
+            else if (s->two_state)
+               nbytes = (s->width + 63u) / 64u * s->nelems * 8u;
+            else
+               nbytes = ALIGN_UP(s->width * s->nelems * s->byte_size, 8u);
+            p->evt_copy_off[i] = off;
+            p->evt_copy_bytes[i] = nbytes;
+            off += ALIGN_UP(nbytes, 8u);
+         }
+      }
+
       isl->state_bytes = off;
       if (has_sparse) {
          const uint32_t stride = RT_ISLAND_STRIDE(off);
@@ -5272,6 +5776,11 @@ void vhdl_island_ctx_free(vhdl_island_ctx_t *ctx)
       free(ctx->procs[i].writes);
       free(ctx->procs[i].read_ranges);
       free(ctx->procs[i].write_ranges);
+      free(ctx->procs[i].evt_sigs);
+      free(ctx->procs[i].evt_part_off);
+      free(ctx->procs[i].evt_part_bytes);
+      free(ctx->procs[i].evt_copy_off);
+      free(ctx->procs[i].evt_copy_bytes);
    }
    free(ctx->procs);
 
