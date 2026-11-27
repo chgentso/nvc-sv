@@ -150,6 +150,7 @@ typedef struct {
    }              crv_index[8];
    mir_value_t    last_index;
    vlog_node_t    subr;
+   vlog_node_t    static_ret;
    const type_info_t *unbound;
    unsigned           bind_size;   // Number of nets expected when binding
    vlog_node_t    fork_root;
@@ -17598,6 +17599,49 @@ static void vlog_lower_case(vlog_gen_t *g, vlog_node_t v, gen_stack_t *gs)
    mir_comment(g->mu, "End case statement");
 }
 
+static mir_value_t vlog_load_static_ret(vlog_gen_t *g, vlog_node_t retvar,
+                                        const type_info_t *ti)
+{
+   mir_value_t ptr = vlog_lower_decl_ptr(g, retvar);
+   if (mir_points_to(g->mu, ptr, MIR_TYPE_SIGNAL)) {
+      mir_value_t nets = mir_build_load(g->mu, ptr);
+      mir_value_t res = mir_build_resolved(g->mu, nets);
+      if (mir_get_class(g->mu, ti->type) == MIR_TYPE_REAL
+          || vlog_is_packed_signal(g->mu, nets))
+         return mir_build_load(g->mu, res);
+      else
+         return mir_build_pack(g->mu, ti->type, res);
+   }
+
+   return mir_build_load(g->mu, ptr);
+}
+
+static void vlog_store_static_ret(vlog_gen_t *g, vlog_node_t retvar,
+                                  const type_info_t *ti, mir_value_t rval)
+{
+   mir_value_t ptr = vlog_lower_decl_ptr(g, retvar);
+   if (mir_points_to(g->mu, ptr, MIR_TYPE_SIGNAL)) {
+      mir_value_t nets = mir_build_load(g->mu, ptr);
+      mir_type_t t_offset = mir_offset_type(g->mu);
+      mir_value_t count = mir_const(g->mu, t_offset, ti->size);
+      if (mir_get_class(g->mu, ti->type) == MIR_TYPE_REAL
+          || vlog_is_packed_signal(g->mu, nets))
+         mir_build_deposit_signal(g->mu, nets, count, rval);
+      else {
+         mir_value_t tmp = MIR_NULL_VALUE;
+         if (ti->size > 1) {
+            mir_type_t t_elem = mir_logic_type(g->mu);
+            mir_type_t t_array = mir_carray_type(g->mu, ti->size, t_elem);
+            tmp = vlog_get_temp(g, t_array);
+         }
+         mir_value_t unpacked = mir_build_unpack(g->mu, rval, 0, tmp);
+         mir_build_deposit_signal(g->mu, nets, count, unpacked);
+      }
+   }
+   else
+      mir_build_store(g->mu, ptr, rval);
+}
+
 static void vlog_lower_return(vlog_gen_t *g, vlog_node_t v)
 {
    mir_value_t result = MIR_NULL_VALUE;
@@ -17607,6 +17651,8 @@ static void vlog_lower_return(vlog_gen_t *g, vlog_node_t v)
       mir_value_t value = vlog_lower_with_context(
          g, expr, vlog_assign_context(g, ti->type, expr));
       result = vlog_lower_cast(g, ti->type, value);
+      if (g->static_ret != NULL)
+         vlog_store_static_ret(g, g->static_ret, ti, result);
    }
 
    if (mir_is_null(g->exit)) {
@@ -38989,7 +39035,25 @@ static void vlog_lower_func_decl(mir_unit_t *mu, object_t *obj)
       result = mir_add_var(mu, ti->type, ti->stamp, vlog_ident(v), 0);
       mir_put_object(mu, v, result);
 
-      mir_build_store(mu, result, vlog_lower_default_value(&g, ti));
+      if (!g.constfunc && !(vlog_flags(v) & VLOG_F_DPI)) {
+         ident_t prefix = ident_sprintf("%s$static_ret", istr(vlog_ident(v)));
+         const int ndecls = vlog_decls(v);
+         for (int i = 0; i < ndecls; i++) {
+            vlog_node_t d = vlog_decl(v, i);
+            if (vlog_kind(d) == V_VAR_DECL && (vlog_flags(d) & VLOG_F_STATIC)
+                && ident_starts_with(vlog_ident(d), prefix)) {
+               g.static_ret = d;
+               break;
+            }
+         }
+      }
+
+      if (g.static_ret != NULL) {
+         mir_value_t prev = vlog_load_static_ret(&g, g.static_ret, ti);
+         mir_build_store(mu, result, vlog_lower_cast(&g, ti->type, prev));
+      }
+      else
+         mir_build_store(mu, result, vlog_lower_default_value(&g, ti));
    }
 
    gen_stack_t gs = {};
@@ -39011,8 +39075,12 @@ static void vlog_lower_func_decl(mir_unit_t *mu, object_t *obj)
       vlog_lower_stmts(&g, v, &gs);
 
    if (!mir_block_finished(mu, MIR_NULL_BLOCK)) {
-      if (has_result)
-         mir_build_return(mu, mir_build_load(mu, result));
+      if (has_result) {
+         mir_value_t rval = mir_build_load(mu, result);
+         if (g.static_ret != NULL)
+            vlog_store_static_ret(&g, g.static_ret, ti, rval);
+         mir_build_return(mu, rval);
+      }
       else
          mir_build_return(mu, mir_const(mu, mir_offset_type(mu), 0));
    }

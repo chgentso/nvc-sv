@@ -16777,6 +16777,34 @@ static void p_function_body_declaration(vlog_node_t func)
 
    vlog_symtab_put(symtab, func);
 
+   if (!parsing_prototype && !proc_automatic && class_depth == 0
+       && rtype != NULL && !(vlog_flags(func) & VLOG_F_DPI)
+       && !vlog_uses_typeparam(rtype)) {
+      vlog_node_t home = vlog_symtab_design_unit(symtab);
+      if (home != NULL
+          && (vlog_kind(home) == V_MODULE || vlog_kind(home) == V_PROGRAM
+              || vlog_kind(home) == V_PACKAGE
+              || vlog_kind(home) == V_GEN_BLOCK)) {
+         const loc_t *floc = vlog_loc(func);
+         vlog_node_t retvar = vlog_new(V_VAR_DECL);
+         vlog_set_ident(retvar, ident_sprintf("%s$static_ret%u_%u", istr(id),
+                                              floc->first_line,
+                                              floc->first_column));
+         vlog_set_type(retvar, rtype);
+         vlog_set_loc(retvar, floc);
+         vlog_set_flags(retvar, VLOG_F_STATIC);
+         if (vlog_kind(home) == V_MODULE || vlog_kind(home) == V_PROGRAM
+             || vlog_kind(home) == V_GEN_BLOCK)
+            vlog_set_flags(retvar, VLOG_F_SIGNAL_STATIC);
+
+         vlog_add_decl(func, retvar);
+         if (vlog_kind(home) == V_MODULE || vlog_kind(home) == V_PACKAGE)
+            APUSH(pending_statics, retvar);
+         else
+            vlog_add_decl(home, retvar);
+      }
+   }
+
    vlog_symtab_push(symtab, func);
 
    const vlog_kind_t old_param_kind = param_kind;
