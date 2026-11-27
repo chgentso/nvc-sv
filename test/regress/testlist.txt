@@ -3374,3 +3374,4 @@ vhdl_island_tostring1 shell
 vhdl_island_longproc1 shell
 vhdl_island_var1 shell
 vhdl_island_loop1 shell
+vhdl_island_comb_report2 shell

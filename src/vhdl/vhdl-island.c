@@ -1048,6 +1048,8 @@ typedef struct {
    bool                     two_state;
    bool                     allow_signals;
    bool                     allow_report;
+   bool                     report_in_body;  // not in subprograms
+   uint32_t                 n_reports;
    bool                     in_func;
    bool                     allow_sig_attr_event;
    int                      call_depth;
@@ -1514,7 +1516,8 @@ static bool check_pure_func_body(check_ctx_t *outer, tree_t func_decl)
       .ctx           = outer->ctx,
       .two_state     = outer->two_state,
       .allow_signals = false,
-      .allow_report  = outer->allow_report,
+      // An inlined subprogram has no frame of its own in a report
+      .allow_report  = outer->allow_report && !outer->report_in_body,
       .in_func       = true,
       .call_depth    = outer->call_depth + 1,
       .active_funcs  = outer->active_funcs,
@@ -1626,7 +1629,8 @@ static bool check_pure_proc_body(check_ctx_t *outer, tree_t proc_decl)
       .ctx           = outer->ctx,
       .two_state     = outer->two_state,
       .allow_signals = false,
-      .allow_report  = outer->allow_report,
+      // An inlined subprogram has no frame of its own in a report
+      .allow_report  = outer->allow_report && !outer->report_in_body,
       .in_func       = true,
       .call_depth    = outer->call_depth + 1,
       .active_funcs  = outer->active_funcs,
@@ -2603,6 +2607,7 @@ static bool check_stmt_inner(check_ctx_t *c, tree_t stmt, bool is_func)
    case T_ASSERT:
       if (!c->allow_report)
          return false;
+      c->n_reports++;
       if (!tree_has_value(stmt) || !check_expr(c, tree_value(stmt), false))
          return false;
       if (tree_has_severity(stmt) && !check_expr(c, tree_severity(stmt), false))
@@ -2614,6 +2619,7 @@ static bool check_stmt_inner(check_ctx_t *c, tree_t stmt, bool is_func)
    case T_REPORT:
       if (!c->allow_report)
          return false;
+      c->n_reports++;
       if (tree_has_severity(stmt) && !check_expr(c, tree_severity(stmt), false))
          return false;
       if (tree_has_message(stmt) && !check_str_expr(c, tree_message(stmt), 0))
@@ -3061,6 +3067,91 @@ static bool wait_covers_sig_reads(const vhdl_island_ctx_t *ctx, tree_t wait_stmt
    return has_read && all_ok;
 }
 
+// The island signals of the sensitivity list of a combinational process
+// with report or assert statements: its run flag compares their values with
+// the ones of its last run.  An element or slice with constant bounds is
+// compared on its own, which needs one byte per element (Mode B).  Returns a
+// reason when the process cannot be fused.
+static const char *comb_report_events(vhdl_iproc_t *p,
+                                      const vhdl_island_ctx_t *ctx,
+                                      tree_t wait_stmt)
+{
+   u32_list_t ids = AINIT, part_off = AINIT, part_bytes = AINIT;
+   const char *reason = NULL;
+   const int ntrig = tree_triggers(wait_stmt);
+   for (int i = 0; i < ntrig && reason == NULL; i++) {
+      tree_t t = tree_trigger(wait_stmt, i);
+      tree_t base = t;
+      bool partial = false;
+      for (;;) {
+         const tree_kind_t k = tree_kind(base);
+         if (k == T_ARRAY_REF || k == T_ARRAY_SLICE)
+            partial = true;
+         else if (k != T_RECORD_REF)
+            break;
+         base = tree_value(base);
+      }
+      if (tree_kind(base) != T_REF || !tree_has_ref(base)
+          || (tree_kind(tree_ref(base)) != T_SIGNAL_DECL
+              && tree_kind(tree_ref(base)) != T_PORT_DECL)) {
+         reason = "comb: report process sensitivity list not supported";
+         break;
+      }
+
+      if (partial) {
+         uint32_t sid = 0, lo = 0, hi = 0;
+         if (!vhdl_island_const_sig_range(ctx, t, &sid, &lo, &hi)) {
+            reason = "comb: report process sensitive to a dynamic element";
+            break;
+         }
+         const vhdl_isig_t *s = &(ctx->sigs[sid]);
+         if (s->two_state) {
+            reason = "comb: report process sensitive to a packed element";
+            break;
+         }
+         APUSH(ids, sid);
+         APUSH(part_off, lo * s->byte_size);
+         APUSH(part_bytes, (hi - lo + 1) * s->byte_size);
+         continue;
+      }
+
+      tree_t decl = NULL;
+      int path[VHDL_ISIG_MAX_DEPTH];
+      uint8_t len = 0;
+      if (!vhdl_island_extract_path_ctx(ctx, t, &decl, path, &len)) {
+         reason = "comb: report process sensitivity list not supported";
+         break;
+      }
+      bool found = false;
+      for (uint32_t k = 0; k < ctx->n_sigs; k++) {
+         const vhdl_isig_t *s = &(ctx->sigs[k]);
+         if (s->decl == decl && s->path_len >= len
+             && (len == 0
+                 || memcmp(s->field_path, path, len * sizeof(int)) == 0)) {
+            APUSH(ids, k);
+            APUSH(part_off, 0);
+            APUSH(part_bytes, 0);
+            found = true;
+         }
+      }
+      if (!found)
+         reason = "comb: report process sensitivity list not supported";
+   }
+
+   if (reason != NULL) {
+      ACLEAR(ids);
+      ACLEAR(part_off);
+      ACLEAR(part_bytes);
+      return reason;
+   }
+
+   p->evt_sigs = ids.items;
+   p->evt_part_off = part_off.items;
+   p->evt_part_bytes = part_bytes.items;
+   p->n_evt_sigs = ids.count;
+   return NULL;
+}
+
 static bool check_process_decls(check_ctx_t *c, tree_t proc)
 {
    const int nd = tree_decls(proc);
@@ -3280,18 +3371,19 @@ static void analyze_process(vhdl_island_ctx_t *ctx, tree_t proc, int stmt_idx,
       }
    }
 
-   // Try COMB classification.
-   // Disallow report/assert in combinational island processes: multiple comb
-   // processes share a single island eval function, so an unrelated sibling
-   // wakeup or collapsed internal delta would fire comb reports/asserts
-   // differently from the standard VHDL event kernel.
+   // Try COMB classification.  Report and assert statements are allowed in
+   // the process body (an inlined subprogram would lose its frame in the
+   // message): such a process runs only when a signal of its sensitivity
+   // list changed since its last run (see comb_report_events), so the
+   // statements fire in the same delta cycles as with the process unfused.
    {
       check_ctx_t c = {
-         .ctx           = ctx,
-         .two_state     = two_state,
-         .allow_signals = true,
-         .allow_report  = false,
-         .in_func       = false,
+         .ctx            = ctx,
+         .two_state      = two_state,
+         .allow_signals  = true,
+         .allow_report   = true,
+         .report_in_body = true,
+         .in_func        = false,
       };
       bool ok = check_process_decls(&c, proc)
          && check_stmt_list(&c, proc, 0, nstmts - 1, false);
@@ -3312,6 +3404,20 @@ static void analyze_process(vhdl_island_ctx_t *ctx, tree_t proc, int stmt_idx,
          // the current delta cycle: the lowering reads such signals from a
          // copy taken when the process starts (see vi_build_comb_unit) and
          // the island runs again in the next delta when they changed.
+         vhdl_iproc_t evt = { .n_evt_sigs = 0 };
+         if (ok && c.n_reports > 0) {
+            const char *er = comb_report_events(&evt, ctx, wait);
+            if (er != NULL) {
+               ok = false;
+               reason = er;
+            }
+            for (uint32_t i = 0; ok && i < evt.n_evt_sigs; i++) {
+               const unsigned before = c.reads.count;
+               push_unique_u32(&c.reads, evt.evt_sigs[i]);
+               if (c.reads.count > before)
+                  record_full_read_range(&c, evt.evt_sigs[i]);
+            }
+         }
          if (ok) {
             vhdl_iproc_t p = {
                .stmt              = proc,
@@ -3321,6 +3427,11 @@ static void analyze_process(vhdl_island_ctx_t *ctx, tree_t proc, int stmt_idx,
                .fused_key         = ident_prefix(owner_prefix, tree_ident(proc), '.'),
                .kind              = VIPROC_COMB,
                .rst_sig        = -1,
+               .has_report     = c.n_reports > 0,
+               .evt_sigs       = evt.evt_sigs,
+               .evt_part_off   = evt.evt_part_off,
+               .evt_part_bytes = evt.evt_part_bytes,
+               .n_evt_sigs     = evt.n_evt_sigs,
                .reads          = c.reads.items,
                .n_reads        = c.reads.count,
                .writes         = c.writes.items,
@@ -4552,6 +4663,13 @@ vhdl_island_t *vhdl_island_new_a_variant(const vhdl_island_ctx_t *ctx,
       *reason = "A1 sparse RAM";
       return NULL;
    }
+   for (uint32_t k = 0; k < isl->n_comb_procs; k++) {
+      if (ctx->procs[isl->comb_procs[k]].has_report) {
+         // Its run flag and signal copies follow the Mode B layout
+         *reason = "A1 combinational process with report statements";
+         return NULL;
+      }
+   }
 
    uint32_t hdr = isl->state_bytes;
    for (uint32_t j = 0; j < isl->n_sigs; j++)
@@ -5372,6 +5490,36 @@ void vhdl_island_rebuild(vhdl_island_ctx_t *ctx)
             off += ALIGN_UP(nbytes, 8u);
          }
       }
+      // Run flag and copies of the sensitivity signals of combinational
+      // processes with report statements, compared on each call
+      for (unsigned k = 0; k < isl_comb.count; k++) {
+         vhdl_iproc_t *p = &(procs.items[isl_comb.items[k]]);
+         if (!p->has_report)
+            continue;
+         free(p->evt_copy_off);
+         free(p->evt_copy_bytes);
+         const uint32_t n = MAX(1u, p->n_evt_sigs);
+         p->evt_copy_off = xmalloc_array(n, sizeof(uint32_t));
+         p->evt_copy_bytes = xmalloc_array(n, sizeof(uint32_t));
+         p->evt_flag_off = off;
+         off += 8;
+         for (uint32_t i = 0; i < p->n_evt_sigs; i++) {
+            const vhdl_isig_t *s = &(ctx->sigs[p->evt_sigs[i]]);
+            uint32_t nbytes = 0;
+            if (s->is_sparse_ram)
+               nbytes = 0;   // The lowering ejects the process
+            else if (p->evt_part_bytes[i] > 0)
+               nbytes = p->evt_part_bytes[i];
+            else if (s->two_state)
+               nbytes = (s->width + 63u) / 64u * s->nelems * 8u;
+            else
+               nbytes = ALIGN_UP(s->width * s->nelems * s->byte_size, 8u);
+            p->evt_copy_off[i] = off;
+            p->evt_copy_bytes[i] = nbytes;
+            off += ALIGN_UP(nbytes, 8u);
+         }
+      }
+
       isl->state_bytes = off;
       if (has_sparse) {
          const uint32_t stride = RT_ISLAND_STRIDE(off);
@@ -5628,6 +5776,11 @@ void vhdl_island_ctx_free(vhdl_island_ctx_t *ctx)
       free(ctx->procs[i].writes);
       free(ctx->procs[i].read_ranges);
       free(ctx->procs[i].write_ranges);
+      free(ctx->procs[i].evt_sigs);
+      free(ctx->procs[i].evt_part_off);
+      free(ctx->procs[i].evt_part_bytes);
+      free(ctx->procs[i].evt_copy_off);
+      free(ctx->procs[i].evt_copy_bytes);
    }
    free(ctx->procs);
 

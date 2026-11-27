@@ -7516,6 +7516,113 @@ static bool vi_emit_entry_shadow(vi_lower_t *l, int *failed_proc_out)
    return true;
 }
 
+// OR into ANY whether the NWORDS 64-bit words at A_OFF and B_OFF differ
+static mir_value_t vi_emit_words_differ(vi_lower_t *l, mir_value_t any,
+                                        uint32_t a_off, uint32_t b_off,
+                                        uint32_t nwords)
+{
+   mir_unit_t *mu = l->mu;
+   mir_type_t t_v64 = mir_vec2_type(mu, 64, false);
+
+   if (nwords <= 4) {
+      for (uint32_t w = 0; w < nwords; w++) {
+         mir_value_t a = mir_build_island_load(mu, t_v64, l->state_ptr,
+                                               vi_off(mu, a_off + 8u * w),
+                                               vi_off(mu, -1), vi_off(mu, 0));
+         mir_value_t b = mir_build_island_load(mu, t_v64, l->state_ptr,
+                                               vi_off(mu, b_off + 8u * w),
+                                               vi_off(mu, -1), vi_off(mu, 0));
+         any = mir_build_or(mu, any, mir_build_cmp(mu, MIR_CMP_NEQ, a, b));
+      }
+      return any;
+   }
+
+   mir_type_t t_off = mir_offset_type(mu);
+   mir_value_t idx_v = mir_add_var(mu, t_off, MIR_NULL_STAMP,
+                                   ident_uniq("evw"), MIR_VAR_TEMP);
+   mir_value_t any_v = mir_add_var(mu, mir_bool_type(mu), MIR_NULL_STAMP,
+                                   ident_uniq("evd"), MIR_VAR_TEMP);
+   mir_build_store(mu, idx_v, vi_off(mu, 0));
+   mir_build_store(mu, any_v, any);
+
+   mir_block_t hdr = mir_add_block(mu);
+   mir_block_t body = mir_add_block(mu);
+   mir_block_t done = mir_add_block(mu);
+   mir_build_jump(mu, hdr);
+
+   mir_set_cursor(mu, hdr, MIR_APPEND);
+   mir_value_t i = mir_build_load(mu, idx_v);
+   mir_build_cond(mu, mir_build_cmp(mu, MIR_CMP_LT, i, vi_off(mu, nwords)),
+                  body, done);
+
+   mir_set_cursor(mu, body, MIR_APPEND);
+   mir_value_t a = mir_build_island_load(mu, t_v64, l->state_ptr,
+                                         vi_off(mu, a_off), vi_off(mu, -1), i);
+   mir_value_t b = mir_build_island_load(mu, t_v64, l->state_ptr,
+                                         vi_off(mu, b_off), vi_off(mu, -1), i);
+   mir_build_store(mu, any_v,
+                   mir_build_or(mu, mir_build_load(mu, any_v),
+                                mir_build_cmp(mu, MIR_CMP_NEQ, a, b)));
+   mir_build_store(mu, idx_v, mir_build_add(mu, t_off, i, vi_off(mu, 1)));
+   mir_build_jump(mu, hdr);
+
+   mir_set_cursor(mu, done, MIR_APPEND);
+   return mir_build_load(mu, any_v);
+}
+
+// A combinational process with report or assert statements must run
+// exactly when it would run unfused: on its first call and after a signal
+// of its sensitivity list changed.  The change bytes are not enough for
+// that (an input sync marks its signal without comparing, and forces or the
+// first call mark every signal), so compare each signal with the copy taken
+// on the last run.  Branches to RUN_BB, which updates the copies, or to
+// SKIP_BB.
+static bool vi_emit_report_guard(vi_lower_t *l, const vhdl_iproc_t *p,
+                                 mir_block_t skip_bb)
+{
+   mir_unit_t *mu = l->mu;
+   mir_value_t ran = mir_build_load(mu, vi_state_ptr_at(l, p->evt_flag_off));
+   mir_value_t any = mir_build_cmp(mu, MIR_CMP_EQ, ran, vi_u8(mu, 0));
+   for (uint32_t i = 0; i < p->n_evt_sigs; i++) {
+      const vhdl_isl_sig_t *isig = vhdl_island_find_sig(l->isl, p->evt_sigs[i]);
+      const uint32_t nbytes = p->evt_copy_bytes[i];
+      if (isig == NULL || nbytes == 0) {
+         l->reason = "comb: report process sensitive to a sparse RAM";
+         return false;
+      }
+      const uint32_t src = isig->a_off + p->evt_part_off[i];
+      if (src % 8 == 0 && nbytes % 8 == 0)
+         any = vi_emit_words_differ(l, any, src, p->evt_copy_off[i],
+                                    nbytes / 8);
+      else if (nbytes <= 64) {
+         // An element or a short slice
+         for (uint32_t k = 0; k < nbytes; k++) {
+            mir_value_t a = mir_build_load(mu, vi_state_ptr_at(l, src + k));
+            mir_value_t b = mir_build_load(
+               mu, vi_state_ptr_at(l, p->evt_copy_off[i] + k));
+            any = mir_build_or(mu, any, mir_build_cmp(mu, MIR_CMP_NEQ, a, b));
+         }
+      }
+      else {
+         l->reason = "comb: report process sensitive to a long slice";
+         return false;
+      }
+   }
+
+   mir_block_t run_bb = mir_add_block(mu);
+   mir_build_cond(mu, any, run_bb, skip_bb);
+
+   mir_set_cursor(mu, run_bb, MIR_APPEND);
+   mir_build_store(mu, vi_state_ptr_at(l, p->evt_flag_off), vi_u8(mu, 1));
+   for (uint32_t i = 0; i < p->n_evt_sigs; i++) {
+      const vhdl_isl_sig_t *isig = vhdl_island_find_sig(l->isl, p->evt_sigs[i]);
+      mir_build_copy(mu, vi_state_ptr_at(l, p->evt_copy_off[i]),
+                     vi_state_ptr_at(l, isig->a_off + p->evt_part_off[i]),
+                     vi_off(mu, p->evt_copy_bytes[i]));
+   }
+   return true;
+}
+
 static mir_unit_t *vi_build_comb_unit(mir_context_t *mc,
                                       const vhdl_island_ctx_t *ctx,
                                       const vhdl_island_t *isl, bool spec,
@@ -7578,10 +7685,11 @@ static mir_unit_t *vi_build_comb_unit(mir_context_t *mc,
 
       mir_block_t test_bb = MIR_NULL_BLOCK, body_bb = MIR_NULL_BLOCK;
       mir_block_t next_bb = MIR_NULL_BLOCK;
+      if (act || p->has_report)
+         next_bb = mir_add_block(mu);
       if (act) {
          test_bb = mir_add_block(mu);
          body_bb = mir_add_block(mu);
-         next_bb = mir_add_block(mu);
          mir_build_jump(mu, test_bb);
          mir_set_cursor(mu, body_bb, MIR_APPEND);
 
@@ -7592,7 +7700,8 @@ static mir_unit_t *vi_build_comb_unit(mir_context_t *mc,
          l.act_track = true;
       }
 
-      bool ok = vi_emit_self_shadow(&l, p)
+      bool ok = (!p->has_report || vi_emit_report_guard(&l, p, next_bb))
+         && vi_emit_self_shadow(&l, p)
          && vi_bind_process_locals(&l, p->stmt, &sc);
       const int ns = tree_stmts(p->stmt) - 1;
       for (int i = 0; i < ns && ok; i++)
@@ -7623,6 +7732,10 @@ static mir_unit_t *vi_build_comb_unit(mir_context_t *mc,
          mir_build_jump(mu, next_bb);
          mir_set_cursor(mu, test_bb, MIR_APPEND);
          vi_emit_act_test(&l, p, body_bb, next_bb);
+         mir_set_cursor(mu, next_bb, MIR_APPEND);
+      }
+      else if (p->has_report) {
+         mir_build_jump(mu, next_bb);
          mir_set_cursor(mu, next_bb, MIR_APPEND);
       }
    }
