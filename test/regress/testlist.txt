@@ -3384,3 +3384,4 @@ svpartdyn1      verilog
 svclassparam3   verilog
 svparamimp1     verilog
 svparamarrcat2  verilog
+svparamarr3     verilog

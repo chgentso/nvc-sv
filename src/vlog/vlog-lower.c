@@ -41030,7 +41030,27 @@ mir_unit_t *vlog_lower_thunk(mir_context_t *mc, ident_t parent, vlog_node_t v)
       {
          vlog_node_t dt = vlog_type(v);
          mir_value_t res;
-         if (is_implicit_data_type(dt) && vlog_ranges(dt) == 0) {
+         if (vlog_is_fixed_unpacked(v)) {
+            const type_info_t *ti = vlog_type_info(&g, dt);
+            const unsigned nelems = vlog_size(v);
+            const mir_class_t eclass = mir_get_class(mu, ti->type);
+            if ((eclass == MIR_TYPE_VEC2 || eclass == MIR_TYPE_VEC4)
+                && nelems > 0 && ti->size > 0) {
+               mir_type_t t_flat = mir_vec4_type(mu, ti->size * nelems, false);
+               mir_value_t packed =
+                  vlog_lower_with_context(&g, vlog_value(v), t_flat);
+               if (mir_get_class(mu, mir_get_type(mu, packed))
+                   == MIR_TYPE_UARRAY)
+                  packed = vlog_load_array_of(&g, packed, vlog_value(v),
+                                              nelems, ti);
+               res = vlog_lower_cast(&g, t_flat, packed);
+            }
+            else {
+               mir_build_return(mu, MIR_NULL_VALUE);
+               break;
+            }
+         }
+         else if (is_implicit_data_type(dt) && vlog_ranges(dt) == 0) {
             // TODO: better to set null type?
             res = vlog_lower_rvalue(&g, vlog_value(v));
          }

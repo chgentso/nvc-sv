@@ -739,6 +739,29 @@ void number_word(number_t val, unsigned n, uint64_t *a, uint64_t *b)
    }
 }
 
+number_t number_slice(number_t val, unsigned offset, unsigned width,
+                      bool issigned)
+{
+   bignum_t *result;
+   bignum_scratch(width, issigned, 1, &result);
+
+   uint64_t *dst_a = bignum_abits(result);
+   uint64_t *dst_b = bignum_bbits(result);
+   const size_t nwords = BIGNUM_WORDS(width);
+   for (size_t i = 0; i < nwords; i++)
+      dst_a[i] = dst_b[i] = 0;
+
+   const unsigned src_width = val.big->width;
+   for (unsigned i = 0; i < width && offset + i < src_width; i++) {
+      if (bignum_abit(val.big, offset + i))
+         dst_a[i / 64] |= UINT64_C(1) << (i % 64);
+      if (bignum_bbit(val.big, offset + i))
+         dst_b[i / 64] |= UINT64_C(1) << (i % 64);
+   }
+
+   return number_intern(result);
+}
+
 uint32_t number_hash(number_t n)
 {
    return bignum_hash(n.big);
