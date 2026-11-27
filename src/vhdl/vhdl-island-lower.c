@@ -1736,6 +1736,47 @@ static void vi_pop_loc(vi_lower_t *l, const loc_t *old)
    }
 }
 
+// True if evaluating EXPR cannot report anything (no function call that may
+// warn, no index or range check): it can be evaluated when the LRM would
+// skip it, as the right operand of a short-circuit operator
+static bool vi_expr_quiet(tree_t expr, int depth)
+{
+   if (depth > 8)
+      return false;
+   switch (tree_kind(expr)) {
+   case T_LITERAL:
+   case T_REF:
+      return true;
+   case T_QUALIFIED:
+      return vi_expr_quiet(tree_value(expr), depth + 1);
+   case T_RECORD_REF:
+      return vi_expr_quiet(tree_value(expr), depth + 1);
+   case T_FCALL:
+      {
+         if (!tree_has_ref(expr))
+            return false;
+         switch (tree_subkind(tree_ref(expr))) {
+         case S_SCALAR_EQ: case S_SCALAR_NEQ: case S_SCALAR_LT:
+         case S_SCALAR_LE: case S_SCALAR_GT: case S_SCALAR_GE:
+         case S_SCALAR_AND: case S_SCALAR_OR: case S_SCALAR_XOR:
+         case S_SCALAR_NAND: case S_SCALAR_NOR: case S_SCALAR_XNOR:
+         case S_SCALAR_NOT:
+            break;
+         default:
+            return false;
+         }
+         const int np = tree_params(expr);
+         for (int i = 0; i < np; i++) {
+            if (!vi_expr_quiet(tree_value(tree_param(expr, i)), depth + 1))
+               return false;
+         }
+         return true;
+      }
+   default:
+      return false;
+   }
+}
+
 static bool vi_lower_inline_func(vi_lower_t *l, tree_t fcall, tree_t func,
                                  vi_val_t *out, vi_local_t *ret_rec)
 {
@@ -3894,16 +3935,49 @@ static bool vi_lower_builtin_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
    }
 
    if (np == 2) {
-      // Short-circuit boolean AND/OR for scalars
-      if (sk == S_SCALAR_AND || sk == S_SCALAR_OR) {
+      // Boolean and bit AND/OR (and NAND/NOR) evaluate their right operand
+      // only when the left one does not decide the result (LRM 9.2.2).  An
+      // operand that cannot report anything is evaluated anyway, which
+      // needs no branch.
+      if (sk == S_SCALAR_AND || sk == S_SCALAR_OR
+          || ((sk == S_SCALAR_NAND || sk == S_SCALAR_NOR)
+              && !vi_expr_quiet(tree_value(tree_param(fcall, 1)), 0))) {
+         const bool is_and = (sk == S_SCALAR_AND || sk == S_SCALAR_NAND);
+         const bool neg = (sk == S_SCALAR_NAND || sk == S_SCALAR_NOR);
          vi_val_t a, b;
-         if (!vi_lower_expr(l, tree_value(tree_param(fcall, 0)), &a)
-             || !vi_lower_expr(l, tree_value(tree_param(fcall, 1)), &b))
+         if (!vi_lower_expr(l, tree_value(tree_param(fcall, 0)), &a))
             return false;
-         mir_value_t ab = vi_to_bool(l, a);
-         mir_value_t bb = vi_to_bool(l, b);
-         mir_value_t r = (sk == S_SCALAR_AND)
-            ? mir_build_and(mu, ab, bb) : mir_build_or(mu, ab, bb);
+         mir_value_t ab = vi_to_bool(l, a), r;
+         tree_t rhs = tree_value(tree_param(fcall, 1));
+         if (vi_expr_quiet(rhs, 0)) {
+            if (!vi_lower_expr(l, rhs, &b))
+               return false;
+            mir_value_t bb = vi_to_bool(l, b);
+            r = is_and ? mir_build_and(mu, ab, bb) : mir_build_or(mu, ab, bb);
+         }
+         else {
+            mir_type_t t_bool = mir_bool_type(mu);
+            mir_value_t var = mir_add_var(mu, t_bool, MIR_NULL_STAMP,
+                                          ident_uniq("sc"), MIR_VAR_TEMP);
+            mir_build_store(mu, var, ab);
+            mir_block_t rhs_bb = mir_add_block(mu);
+            mir_block_t join_bb = mir_add_block(mu);
+            if (is_and)
+               mir_build_cond(mu, ab, rhs_bb, join_bb);
+            else
+               mir_build_cond(mu, ab, join_bb, rhs_bb);
+            mir_set_cursor(mu, rhs_bb, MIR_APPEND);
+            if (!vi_lower_expr(l, rhs, &b))
+               return false;
+            mir_build_store(mu, var, vi_to_bool(l, b));
+            mir_build_jump(mu, join_bb);
+            mir_set_cursor(mu, join_bb, MIR_APPEND);
+            if (l->loc != NULL)
+               mir_set_loc(mu, l->loc);
+            r = mir_build_load(mu, var);
+         }
+         if (neg)
+            r = mir_build_not(mu, r);
          *out = vi_from_bool_bit(l, r, a.is_bool, a.is_std);
          return true;
       }
