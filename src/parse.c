@@ -11262,6 +11262,10 @@ static tree_t p_package_declaration(tree_t unit)
    }
 
    pop_scope(nametab);
+
+   if (unit == NULL)
+      sem_defer_pack_body(pack, nametab);
+
    return pack;
 }
 

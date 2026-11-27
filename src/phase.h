@@ -26,6 +26,7 @@
 // Annotate types and perform other semantics checks on a tree.
 // Returns false on error.
 bool sem_check(tree_t t, nametab_t *tab);
+void sem_defer_pack_body(tree_t t, nametab_t *tab);
 
 // Rewrite to simpler forms folding locally static expressions
 void simplify_local(tree_t top, jit_t *jit, unit_registry_t *ur,

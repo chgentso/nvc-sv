@@ -2502,6 +2502,34 @@ static bool sem_check_process(tree_t t, nametab_t *tab)
    return true;
 }
 
+static void sem_missing_pack_body_cb(tree_t t, tree_t parent, nametab_t *tab)
+{
+   if (parent == NULL || !opt_get_int(OPT_MISSING_BODY))
+      return;
+   else if (have_name_errors(tab))
+      return;   // May be missing due to parse errors
+
+   if (tree_kind(parent) == T_PACKAGE)
+      return;   // Must appear in the enclosing package body
+
+   const int ndecls = tree_decls(parent);
+   for (int i = 0; i < ndecls; i++) {
+      tree_t b = tree_decl(parent, i);
+      if (tree_kind(b) == T_PACK_BODY && tree_has_primary(b)
+          && tree_primary(b) == t)
+         return;
+   }
+
+   error_at(tree_loc(t), "missing package body for nested package %pI",
+            tree_ident(t));
+}
+
+void sem_defer_pack_body(tree_t t, nametab_t *tab)
+{
+   if (package_needs_body(t))
+      defer_check(tab, sem_missing_pack_body_cb, t);
+}
+
 static bool sem_check_package(tree_t t, nametab_t *tab)
 {
    if (!sem_check_context_clause(t, tab))
