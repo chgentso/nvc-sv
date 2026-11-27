@@ -1,5 +1,9 @@
 set -xe
 
+# The test elaborates with and without islands itself; an inherited
+# NVC_RTL_ISLANDS (light-gate mode runs) would turn the islands phase off
+unset NVC_RTL_ISLANDS
+
 # The output of the processes of a delta cycle (reports, assertions, TEXTIO
 # writes to OUTPUT, Verilog $display) is written in the order in which the
 # processes start, so it is the same with RTL islands on or off: processes
