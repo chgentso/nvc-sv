@@ -4631,6 +4631,24 @@ static void procq_do(rt_model_t *m, rt_wakeable_t *obj, defer_fn_t fn,
    set_pending(obj);
 }
 
+static void async_edge_callback(rt_model_t *m, void *arg)
+{
+   rt_watch_t *w = arg;
+
+   assert(w->wakeable.pending);
+   w->wakeable.pending = false;
+
+   const bool edge = w->edge_seen;
+   w->edge_seen = false;
+
+   if (w->wakeable.zombie)
+      free(w);
+   else if (m->now == 0)
+      (*w->fn)(m->now, w->signals[0], w, w->user_data);
+   else
+      rt_island_edge_watch_fire(m, w, edge);
+}
+
 static void wakeup_one(rt_model_t *m, rt_wakeable_t *obj)
 {
    if (obj->pending)
@@ -4680,6 +4698,19 @@ static void wakeup_one(rt_model_t *m, rt_wakeable_t *obj)
          rt_watch_t *w = container_of(obj, rt_watch_t, wakeable);
          if (likely(w->inline_island_input)) {
             rt_island_input_watch_inline(m, w->user_data, m->blocking_update);
+            break;
+         }
+         else if (unlikely(w->inline_edge)) {
+            // A Verilog edge is detected when the value changes, like a
+            // trigger, so a change and a change back in one region is
+            // still an edge, and a change that is not an edge schedules
+            // nothing; the callback runs when it would otherwise.  At
+            // time zero the callback tests the edge itself, as the arming
+            // of the domains during reset expects.
+            if (m->now > 0)
+               w->edge_seen = rt_island_edge_watch_hit(m, w);
+            if (m->now == 0 || w->edge_seen)
+               procq_do(m, obj, async_edge_callback, w);
             break;
          }
          TRACE("wakeup %svalue change callback %p %s",
@@ -11016,6 +11047,12 @@ void watch_set_inline_island(rt_watch_t *w, bool enable)
 {
    if (w != NULL)
       w->inline_island_input = enable;
+}
+
+void watch_set_inline_edge(rt_watch_t *w, bool enable)
+{
+   if (w != NULL)
+      w->inline_edge = enable;
 }
 
 bool rt_model_has_init_event(const rt_model_t *m, const rt_signal_t *s)

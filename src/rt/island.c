@@ -1337,6 +1337,94 @@ static void island_rst_watch_cb(uint64_t now, rt_signal_t *signal,
       island_dom_enqueue_sample(dom->isl->mgr, dom);
 }
 
+// The clock and reset watches of SV domains detect the edge when the
+// signal changes, as the trigger of an always process does, instead of when
+// their callback runs: a change and a change back in one region (two
+// blocking assignments, or non-blocking ones that overwrite each other) is
+// still an edge, and a change that is not an edge schedules no callback
+// (and so no delta cycle).  The callback, run when it would otherwise,
+// samples the domain if an edge was seen and the domain is armed.
+bool rt_island_edge_watch_hit(rt_model_t *m, rt_watch_t *w)
+{
+   void *user = w->user_data;
+   bool edge;
+   if (w->fn == island_clk_watch_cb) {
+      if (unlikely(island_wstats_on))
+         __atomic_fetch_add(&island_wstat_clk_cb, 1, __ATOMIC_RELAXED);
+      rt_island_domain_t *dom = user;
+      const rt_island_sig_t *cs = &(dom->isl->sigs[dom->clk_sig_idx]);
+      const uint8_t cur = island_read_sv_bit(cs->sig, cs->sig_offset);
+      edge = island_edge_match(dom->prev_clk, cur, dom->clk_posedge);
+      dom->prev_clk = cur;
+   }
+   else if (w->fn == island_rst_watch_cb) {
+      if (unlikely(island_wstats_on))
+         __atomic_fetch_add(&island_wstat_rst_cb, 1, __ATOMIC_RELAXED);
+      rt_island_domain_t *dom = user;
+      const rt_island_sig_t *rs = &(dom->isl->sigs[dom->rst_sig_idx]);
+      const uint8_t cur = island_read_sv_bit(rs->sig, rs->sig_offset);
+      edge = island_edge_match(dom->prev_rst, cur, dom->rst_posedge);
+      dom->prev_rst = cur;
+   }
+   else if (w->fn == island_super_clk_watch_cb) {
+      if (unlikely(island_wstats_on))
+         __atomic_fetch_add(&island_wstat_sclk_cb, 1, __ATOMIC_RELAXED);
+      rt_super_domain_t *sdom = user;
+      const uint8_t cur = island_read_sv_bit(sdom->clk_sig,
+                                             sdom->clk_sig_offset);
+      edge = island_edge_match(sdom->prev_clk, cur, sdom->clk_posedge);
+      sdom->prev_clk = cur;
+   }
+   else {
+      assert(w->fn == island_super_rst_watch_cb);
+      if (unlikely(island_wstats_on))
+         __atomic_fetch_add(&island_wstat_srst_cb, 1, __ATOMIC_RELAXED);
+      rt_super_domain_t *sdom = user;
+      const uint8_t cur = island_read_sv_bit(sdom->rst_sig,
+                                             sdom->rst_sig_offset);
+      edge = island_edge_match(sdom->prev_rst, cur, sdom->rst_posedge);
+      sdom->prev_rst = cur;
+   }
+   return edge;
+}
+
+void rt_island_edge_watch_fire(rt_model_t *m, rt_watch_t *w, bool edge)
+{
+   // Changes while the callback was pending need no test: the domain is
+   // sampled anyway, and the next edge is tested against the value now
+   const uint64_t now = model_now(m, NULL);
+   if (w->fn == island_clk_watch_cb) {
+      rt_island_domain_t *dom = w->user_data;
+      const rt_island_sig_t *cs = &(dom->isl->sigs[dom->clk_sig_idx]);
+      dom->prev_clk = island_read_sv_bit(cs->sig, cs->sig_offset);
+      if (island_sv_edge_armed(dom->isl->mgr, cs->sig, now,
+                               &dom->reset_clk_edge) && edge)
+         island_dom_enqueue_sample(dom->isl->mgr, dom);
+   }
+   else if (w->fn == island_rst_watch_cb) {
+      rt_island_domain_t *dom = w->user_data;
+      const rt_island_sig_t *rs = &(dom->isl->sigs[dom->rst_sig_idx]);
+      dom->prev_rst = island_read_sv_bit(rs->sig, rs->sig_offset);
+      if (island_sv_edge_armed(dom->isl->mgr, rs->sig, now,
+                               &dom->reset_rst_edge) && edge)
+         island_dom_enqueue_sample(dom->isl->mgr, dom);
+   }
+   else if (w->fn == island_super_clk_watch_cb) {
+      rt_super_domain_t *sdom = w->user_data;
+      sdom->prev_clk = island_read_sv_bit(sdom->clk_sig, sdom->clk_sig_offset);
+      if (island_sv_edge_armed(sdom->mgr, sdom->clk_sig, now,
+                               &sdom->reset_clk_edge) && edge)
+         island_sdom_enqueue_sample(sdom->mgr, sdom);
+   }
+   else {
+      rt_super_domain_t *sdom = w->user_data;
+      sdom->prev_rst = island_read_sv_bit(sdom->rst_sig, sdom->rst_sig_offset);
+      if (island_sv_edge_armed(sdom->mgr, sdom->rst_sig, now,
+                               &sdom->reset_rst_edge) && edge)
+         island_sdom_enqueue_sample(sdom->mgr, sdom);
+   }
+}
+
 rt_island_mgr_t *rt_island_mgr_new(rt_model_t *m)
 {
    rt_island_mgr_t *mgr = xcalloc(sizeof(rt_island_mgr_t));
@@ -2316,7 +2404,12 @@ void rt_island_finish(void *handle)
 
       const rt_island_sig_t *cs = &(isl->sigs[dom->clk_sig_idx]);
       assert(cs->sig != NULL);
+      // An SV edge is detected when the clock changes (a VHDL process
+      // tests the edge when it runs)
+      const bool sv_edge = !(dom->edge_flags
+                             & (RT_IEDGE_VHDL | RT_IEDGE_VHDL_EVENT));
       dom->clk_watch = watch_new(m, island_clk_watch_cb, dom, WATCH_EVENT, 1);
+      watch_set_inline_edge(dom->clk_watch, sv_edge);
       if (cs->sig->shared.flags & SIG_F_PACKED)
          model_set_event_cb(m, cs->sig, 0, 1, dom->clk_watch);
       else
@@ -2327,6 +2420,8 @@ void rt_island_finish(void *handle)
          assert(rs->sig != NULL);
          dom->rst_watch = watch_new(m, island_rst_watch_cb, dom,
                                     WATCH_EVENT, 1);
+         watch_set_inline_edge(dom->rst_watch, sv_edge
+                               && !(dom->edge_flags & RT_IEDGE_RST_LEVEL));
          if (rs->sig->shared.flags & SIG_F_PACKED)
             model_set_event_cb(m, rs->sig, 0, 1, dom->rst_watch);
          else
@@ -6698,6 +6793,9 @@ static void island_build_hier(rt_island_mgr_t *mgr)
 
          sd->clk_watch = watch_new(mgr->model, island_super_clk_watch_cb,
                                    sd, WATCH_EVENT, 1);
+         const bool sv_edge = !(sd->edge_flags
+                                & (RT_IEDGE_VHDL | RT_IEDGE_VHDL_EVENT));
+         watch_set_inline_edge(sd->clk_watch, sv_edge);
          if (sd->clk_sig->shared.flags & SIG_F_PACKED)
             model_set_event_cb(mgr->model, sd->clk_sig, 0, 1, sd->clk_watch);
          else
@@ -6707,6 +6805,8 @@ static void island_build_hier(rt_island_mgr_t *mgr)
          if (sd->rst_sig != NULL) {
             sd->rst_watch = watch_new(mgr->model, island_super_rst_watch_cb,
                                       sd, WATCH_EVENT, 1);
+            watch_set_inline_edge(sd->rst_watch, sv_edge
+                                  && !(sd->edge_flags & RT_IEDGE_RST_LEVEL));
             if (sd->rst_sig->shared.flags & SIG_F_PACKED)
                model_set_event_cb(mgr->model, sd->rst_sig, 0, 1,
                                   sd->rst_watch);

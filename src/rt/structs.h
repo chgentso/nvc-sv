@@ -352,6 +352,8 @@ typedef struct _rt_watch {
    unsigned        num_slots;
    unsigned        next_slot;
    bool            inline_island_input;
+   bool            inline_edge;
+   bool            edge_seen;
    rt_signal_t    *signals[];
 } rt_watch_t;
 
