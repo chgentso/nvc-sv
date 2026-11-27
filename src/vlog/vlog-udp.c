@@ -447,6 +447,27 @@ static void vlog_lower_seq_udp(mir_unit_t *mu, vlog_node_t udp)
 
       mir_block_t test_bb = start_bb;
 
+      if (vlog_udp_initial(table) != NULL) {
+         // The output keeps the value of the initial statement until an
+         // input changes (29.7): no input has changed when the process
+         // first runs at time zero
+         mir_value_t changed = MIR_NULL_VALUE;
+         for (int i = 1; i < nports; i++) {
+            mir_value_t event = mir_build_event_flag(mu, in_nets[i - 1], one);
+            changed = mir_is_null(changed)
+               ? event : mir_build_or(mu, changed, event);
+         }
+
+         mir_block_t idle_bb = mir_add_block(mu);
+         test_bb = mir_add_block(mu);
+         mir_build_cond(mu, changed, test_bb, idle_bb);
+
+         mir_set_cursor(mu, idle_bb, MIR_APPEND);
+         mir_build_wait(mu, start_bb);
+
+         mir_set_cursor(mu, test_bb, MIR_APPEND);
+      }
+
       const int nentries = vlog_params(table);
       for (int i = 0; i < nentries; i++) {
          vlog_node_t entry = vlog_param(table, i);
