@@ -15,7 +15,7 @@ entity sub is
     port ( x : inout natural;
            x2 : inout integer := 5;
            y : out natural;
-           y2 : out integer );
+           y2 : out integer := 0 );
 end entity;
 
 use work.p.all;
