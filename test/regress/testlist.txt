@@ -3465,3 +3465,4 @@ vlog_nba_pattern1 verilog,gold
 vlog_island_runs1 verilog,gold
 vhdl_report_order2 shell
 vlog_nexus_index1 verilog,gold
+vlog_replicate_wide1 verilog,gold

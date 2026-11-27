@@ -1,0 +1,15 @@
+1023 ones 0 x 0 z
+1 ones 0 x 0 z
+200 ones 100 x 0 z
+XXXXX
+6 ones 0 x 0 z
+0110
+1536 ones 0 x 1536 z
+10z10z10z10z
+16b5ad6b5ad6b5ad6
+66 ones 33 x 0 z
+01x11x1
+818181818181818181818181818XXXXX
+341 ones 0 x 341 z
+10z10z10z
+0 ones 1023 x 0 z

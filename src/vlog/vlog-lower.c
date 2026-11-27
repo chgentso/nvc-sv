@@ -11491,6 +11491,44 @@ static mir_value_t vlog_lower_with_context(vlog_gen_t *g, vlog_node_t v,
 
          mir_type_t t_offset = mir_offset_type(g->mu);
 
+         if (repeat > 2 && size > 64) {
+            // Build one copy and double it: inserting each copy into a
+            // wide result is quadratic in the replication count
+            const int unit = size / repeat;
+            mir_value_t one = inputs[0];
+            if (nparams > 1) {
+               mir_type_t t_unit = mk_vec(g->mu, unit, false);
+               if (unit <= 64)
+                  one = mir_const_vec(g->mu, t_unit, 0, 0);
+               else
+                  one = mir_build_cast(g->mu, t_unit,
+                                       mir_const_vec(g->mu,
+                                                     mk_vec(g->mu, 1, false),
+                                                     0, 0));
+               for (int j = nparams - 1, pos = unit; j >= 0; j--) {
+                  pos -= mir_get_size(g->mu, mir_get_type(g->mu, inputs[j]));
+                  one = mir_build_insert(g->mu, inputs[j], one,
+                                         mir_const(g->mu, t_offset, pos));
+               }
+            }
+
+            result = mir_build_insert(g->mu, one, result,
+                                      mir_const(g->mu, t_offset, 0));
+
+            for (int have = 1; have < repeat;) {
+               const int count = MIN(have, repeat - have);
+               mir_type_t t_part = mk_vec(g->mu, count * unit, false);
+               mir_value_t part = mir_build_extract(
+                  g->mu, t_part, result, mir_const(g->mu, t_offset, 0));
+               result = mir_build_insert(g->mu, part, result,
+                                         mir_const(g->mu, t_offset,
+                                                   have * unit));
+               have += count;
+            }
+
+            return vlog_widen_vector(g, result, context);
+         }
+
          for (int i = 0, pos = size; i < repeat; i++) {
             for (int j = nparams - 1; j >= 0; j--) {
                pos -= mir_get_size(g->mu, mir_get_type(g->mu, inputs[j]));
