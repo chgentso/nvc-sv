@@ -984,7 +984,10 @@ Verilog process is written before the next Verilog process runs, so Verilog
 output keeps the order in which the processes ran.  Output from VPI and VHPI
 callbacks, foreign subprograms and the simulator itself, including fatal
 errors, is written as it happens after anything held so far.  Output written
-to other files is never held.  With
+to other files is never held.  Held output is also written when the
+simulation is interrupted or the program exits early, and when a single delta
+cycle runs for more than about a second, so that a process stuck in a loop can
+be found; the order is then not fixed for that delta cycle.  With
 .Cm immediate
 all output is written as it happens.  The environment variable
 .Ev NVC_REPORT_ORDER

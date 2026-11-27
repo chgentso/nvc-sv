@@ -61,9 +61,12 @@ void stdio_ostream_write(const char *buf, size_t len, void *ctx);
 // true if it keeps it to write later
 typedef bool (*output_capture_fn_t)(FILE *f, const char *buf, size_t len);
 typedef void (*output_urgent_fn_t)(bool begin);
+typedef void (*output_crash_fn_t)(void);
 
 void nvc_set_output_capture(output_capture_fn_t capture,
-                            output_urgent_fn_t urgent);
+                            output_urgent_fn_t urgent,
+                            output_crash_fn_t crash);
+void nvc_output_crash(void);
 void nvc_output_urgent_begin(void);
 void nvc_output_urgent_end(void);
 

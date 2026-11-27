@@ -619,12 +619,21 @@ int nvc_fprintf(ostream_t *os, const char *fmt, ...)
 
 static output_capture_fn_t output_capture = NULL;
 static output_urgent_fn_t  output_urgent = NULL;
+static output_crash_fn_t   output_crash = NULL;
 
 void nvc_set_output_capture(output_capture_fn_t capture,
-                            output_urgent_fn_t urgent)
+                            output_urgent_fn_t urgent,
+                            output_crash_fn_t crash)
 {
    output_capture = capture;
    output_urgent = urgent;
+   output_crash = crash;
+}
+
+void nvc_output_crash(void)
+{
+   if (output_crash != NULL)
+      (*output_crash)();
 }
 
 void nvc_output_urgent_begin(void)

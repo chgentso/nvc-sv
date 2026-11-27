@@ -1,18 +1,18 @@
 Note: 0ms+0: tx --
 Note: 0ms+1: act -------- v16=1234 int=-7 ev=--
 Note: 1ns+1: again b8'active=true sl'active=true
-Note: 1ns+1: step 1 b8'last_active=0 fs v200'last_active=0 fs re'last_active=0 fs v100'last_active=0 fs int'last_active=0 fs
-Note: 1ns+1: act AAAAAAAA v16=1234 int=-7 ev=--
 Note: 1ns+1: tx AA
+Note: 1ns+1: act AAAAAAAA v16=1234 int=-7 ev=--
+Note: 1ns+1: step 1 b8'last_active=0 fs v200'last_active=0 fs re'last_active=0 fs v100'last_active=0 fs int'last_active=0 fs
 Note: 1ns+2: after b8'active=true sl'active=false
 Note: 1ns+2: tx A-
-Note: 2ns+1: step 2 b8'last_active=0 fs v200'last_active=0 fs re'last_active=0 fs v100'last_active=0 fs int'last_active=0 fs
-Note: 2ns+1: act AAAAAAAA v16=4321 int=-7 ev=A-
 Note: 2ns+1: tx AA
-Note: 3ns+1: step 3 b8'last_active=0 fs v200'last_active=0 fs re'last_active=0 fs v100'last_active=0 fs int'last_active=0 fs
-Note: 3ns+1: act AAAAAAAA v16=1234 int=8 ev=AA
+Note: 2ns+1: act AAAAAAAA v16=4321 int=-7 ev=A-
+Note: 2ns+1: step 2 b8'last_active=0 fs v200'last_active=0 fs re'last_active=0 fs v100'last_active=0 fs int'last_active=0 fs
 Note: 3ns+1: tx AA
-Note: 4ns+1: step 4 b8'last_active=0 fs v200'last_active=0 fs re'last_active=0 fs v100'last_active=0 fs int'last_active=0 fs
-Note: 4ns+1: act AAAAAAAA v16=1234 int=-7 ev=-A
+Note: 3ns+1: act AAAAAAAA v16=1234 int=8 ev=AA
+Note: 3ns+1: step 3 b8'last_active=0 fs v200'last_active=0 fs re'last_active=0 fs v100'last_active=0 fs int'last_active=0 fs
 Note: 4ns+1: tx AA
+Note: 4ns+1: act AAAAAAAA v16=1234 int=-7 ev=-A
+Note: 4ns+1: step 4 b8'last_active=0 fs v200'last_active=0 fs re'last_active=0 fs v100'last_active=0 fs int'last_active=0 fs
 Note: 10ns+0: final b8'last_active=6000000 fs v16'last_active=6000000 fs v100'last_active=6000000 fs v200'last_active=6000000 fs sl'last_active=6000000 fs int'last_active=6000000 fs re'last_active=6000000 fs sp'last_active=6000000 fs

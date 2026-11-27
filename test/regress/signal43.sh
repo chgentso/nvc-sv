@@ -32,11 +32,21 @@ export NVC_JIT_ASYNC=0
 nvc --std=2008 -a loop43.vhd -e loop43
 nvc --std=2008 -r loop43 >out43.txt 2>&1 &
 pid=$!
+# Never leave the simulation running (timeout would not pass on SIGINT,
+# which a background job of a script ignores)
+( sleep 60; kill -9 $pid ) >/dev/null 2>&1 &
+guard=$!
+trap 'kill -9 $pid $guard 2>/dev/null || true' EXIT
 
-for i in $(seq 1 600); do
+for i in $(seq 1 300); do
   grep -q spinning out43.txt && break
   sleep 0.1
 done
+if ! grep -q spinning out43.txt; then
+  cat out43.txt
+  echo "no report before the interrupt"
+  exit 1
+fi
 sleep 0.5
 
 kill -INT $pid
