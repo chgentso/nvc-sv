@@ -21,6 +21,7 @@
 #include "ident.h"
 #include "object.h"
 #include "option.h"
+#include "rt/island.h"
 #include "vlog/vlog-island.h"
 #include "vlog/vlog-node.h"
 #include "vlog/vlog-number.h"
@@ -4146,6 +4147,15 @@ static vlog_island_t *build_island(analyze_ctx_t *ctx, uint32_t island_id)
       }
       else
          dst->b_off = UINT32_MAX;
+
+      // A memory written by the island gets an element write log so a
+      // flip-flop commit costs the elements written, not the memory size
+      dst->touch_off = 0;
+      if (dst->nelems >= RT_ISLAND_TOUCH_MIN_ELEMS
+          && (dst->kind == ISIG_INTERNAL || dst->kind == ISIG_BOUNDARY_OUT)) {
+         dst->touch_off = offset;
+         offset += RT_ISLAND_TOUCH_BYTES;
+      }
    }
    isl->state_bytes = offset;
 

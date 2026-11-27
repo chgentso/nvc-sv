@@ -1349,6 +1349,8 @@ void vlog_island_lower_emit_init(vlog_island_lower_ctx_t *ctx,
             flags |= RT_ISIG_PROC_COMB;
          if (m2->sig_late[i])
             flags |= RT_ISIG_RESET_LATE;
+         if (s->touch_off != 0 && !m2->sig_in[i] && !m2->sig_comb_w[i])
+            flags |= RT_ISIG_TOUCH_LOG;
 
          mir_value_t bind_res;
          if (s->gen_path != NULL) {

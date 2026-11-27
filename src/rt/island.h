@@ -52,6 +52,7 @@ typedef enum {
    RT_ISIG_SPEC_ROWF      = (1u << 23),   // Mode A layout: row clean bytes
    RT_ISIG_SPEC_ROWS      = (1u << 24),   // Mode A: some rows may be held
    RT_ISIG_MIX_MEMO       = (1u << 25),   // mix_memo is valid
+   RT_ISIG_TOUCH_LOG      = (1u << 26),   // SV memory: element write log
 } rt_island_sig_flags_t;
 
 // Speculative Mode A clean tracking (NVC_ISLAND_SPEC).  The Mode A state of
@@ -101,7 +102,20 @@ typedef enum {
 #define RT_IFF_SYNC_OUT     (1u << 4)
 #define RT_IFF_SPARSE_RAM   (1u << 5)
 #define RT_IFF_ACT          (1u << 6)
+#define RT_IFF_TOUCH_LOG    (1u << 7)
 #define RT_IFF_HAS_NOTIFY   (RT_IFF_DIRECT_LINK | RT_IFF_SYNC_OUT)
+
+// Element write log of a SystemVerilog island memory (RT_ISIG_TOUCH_LOG):
+// the flip-flop functions append the index of each element they store to a
+// log that follows the planes of the signal in the next-state half, so the
+// commit compares and copies only those elements instead of the whole
+// memory.  The log is a count followed by RT_ISLAND_TOUCH_CAP entries and a
+// spare slot; a count above RT_ISLAND_TOUCH_CAP means the log overflowed
+// (or a store was not to a single element) and the commit compares the
+// whole signal.  The commit resets the count.
+#define RT_ISLAND_TOUCH_CAP        16u
+#define RT_ISLAND_TOUCH_MIN_ELEMS  16u
+#define RT_ISLAND_TOUCH_BYTES      ((RT_ISLAND_TOUCH_CAP + 2u) * 8u)
 
 #define RT_ISLAND_SPARSE_INLINE_CAP   16u
 #define RT_ISLAND_SPARSE_INLINE_DATA  1024u
