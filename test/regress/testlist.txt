@@ -3347,3 +3347,5 @@ opsym_assign1 normal,2008
 genpack_pos1 normal,2008
 alias_base1 shell
 conv_sigparam1 shell
+incomp_pkg1 shell
+overload_predef1 shell
