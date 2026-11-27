@@ -85,7 +85,8 @@ use ieee.numeric_std.all;
 entity spec1_tb is end entity;
 
 architecture test of spec1_tb is
-    signal clk  : std_logic := '0';
+    signal clk  : std_logic;   -- 'U' in the island state for the whole run:
+                               -- the clock-only copy is never updated
     signal rst  : std_logic := '1';
     signal din  : std_logic_vector(7 downto 0) := x"00";
     signal sel  : unsigned(1 downto 0) := "00";
@@ -98,6 +99,7 @@ begin
 
     stim : process is
     begin
+        clk <= '0';
         wait for 3 ns;
         rst <= '0';
         for k in 0 to 40 loop

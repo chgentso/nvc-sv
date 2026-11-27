@@ -1792,6 +1792,15 @@ void rt_island_add_domain_a(void *handle, uint32_t dom_idx,
    isl->spec->ff_handles[dom_idx] = ff_handle;
 }
 
+// A signal that is neither an input nor written by the island, such as one
+// used only as a flip-flop clock (sampled by the domain watch from the
+// signal itself), has a copy in the state that is never updated nor loaded
+static inline bool island_spec_sig_live(const rt_island_sig_t *s)
+{
+   return !!(s->flags & (RT_ISIG_IN | RT_ISIG_COMB_WRITTEN
+                         | RT_ISIG_FF_WRITTEN));
+}
+
 // Convert signal I of the island from the Mode B state B_STATE to the Mode A
 // state A_STATE, true if every value was '0' or '1'
 static bool island_spec_pack_sig(const rt_island_t *isl, uint32_t i,
@@ -1799,6 +1808,8 @@ static bool island_spec_pack_sig(const rt_island_t *isl, uint32_t i,
 {
    const rt_island_spec_t *sp = isl->spec;
    const rt_island_sig_t *s = &(isl->sigs[i]);
+   if (!island_spec_sig_live(s))
+      return true;
    const uint8_t *src = b_state + s->a_off;
    uint8_t *dst = a_state + sp->a_off[i];
    if (!(sp->a_flags[i] & RT_ISIG_TWO_STATE)) {
@@ -1833,6 +1844,8 @@ static void island_spec_unpack_sig(const rt_island_t *isl, uint32_t i,
 {
    const rt_island_spec_t *sp = isl->spec;
    const rt_island_sig_t *s = &(isl->sigs[i]);
+   if (!island_spec_sig_live(s))
+      return;
    uint8_t *dst = b_state + s->a_off;
    const uint8_t *src = a_state + sp->a_off[i];
    if (!(sp->a_flags[i] & RT_ISIG_TWO_STATE)) {
