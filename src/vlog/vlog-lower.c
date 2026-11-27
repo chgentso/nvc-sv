@@ -14528,6 +14528,365 @@ static void vlog_lower_blocking_assignment(vlog_gen_t *g, vlog_node_t v)
 static void vlog_lower_nba_store(vlog_gen_t *g, vlog_node_t v,
                                  const vlog_select_t *lvalue,
                                  mir_value_t value, int offset,
+                                 mir_value_t after);
+
+typedef struct {
+   bool        is_signal;
+   bool        is_packed_sig;
+   bool        obj_is_logic;
+   mir_class_t obj_class;
+   unsigned    obj_size;
+   bool        obj_signed;
+   mir_class_t val_class;
+   unsigned    val_size;
+   bool        val_signed;
+   unsigned    size;
+   unsigned    offset;
+} nba_event_lv_t;
+
+typedef struct {
+   vlog_node_t     stmt;
+   mir_class_t     src_class;
+   unsigned        src_size;
+   bool            src_signed;
+   unsigned        targetsz;
+   bool            is_net;
+   unsigned        nlvalues;
+   nba_event_lv_t *lvalues;
+} nba_event_info_t;
+
+static hash_t *sv_nba_events = NULL;
+
+static mir_type_t nba_reconstruct_type(mir_unit_t *mu, mir_class_t cls,
+                                       unsigned size, bool is_signed,
+                                       bool is_logic)
+{
+   if (is_logic)
+      return mir_logic_type(mu);
+   switch (cls) {
+   case MIR_TYPE_VEC2:
+      return mir_vec2_type(mu, size, is_signed);
+   case MIR_TYPE_VEC4:
+      return mir_vec4_type(mu, size, is_signed);
+   case MIR_TYPE_REAL:
+      return mir_real_type(mu, -DBL_MAX, DBL_MAX);
+   case MIR_TYPE_INT:
+      return mir_offset_type(mu);
+   default:
+      fatal_trace("unexpected MIR type class %d in NBA event control", cls);
+   }
+}
+
+static mir_type_t nba_reconstruct_obj_type(mir_unit_t *mu,
+                                           const nba_event_lv_t *lv)
+{
+   mir_type_t elem = nba_reconstruct_type(mu, lv->obj_class, lv->obj_size,
+                                          lv->obj_signed, lv->obj_is_logic);
+   return lv->is_signal ? mir_signal_type(mu, elem)
+      : mir_pointer_type(mu, elem);
+}
+
+static void vlog_lower_nba_frame(mir_unit_t *mu, object_t *obj)
+{
+   ident_t key = mir_get_name(mu, MIR_NULL_VALUE);
+   nba_event_info_t *info = hash_get(sv_nba_events, key);
+   assert(info != NULL);
+
+   mir_type_t t_offset = mir_offset_type(mu);
+   mir_type_t t_src = nba_reconstruct_type(mu, info->src_class, info->src_size,
+                                           info->src_signed, false);
+
+   mir_add_param(mu, mir_context_type(mu, mir_get_parent(mu)), MIR_NULL_STAMP,
+                 ident_new("context"));
+
+   mir_add_var(mu, t_offset, MIR_NULL_STAMP, ident_new("remain"), 0);
+   mir_add_var(mu, t_src, MIR_NULL_STAMP, ident_new("rhs"), 0);
+
+   for (unsigned i = 0; i < info->nlvalues; i++) {
+      mir_type_t t_obj = nba_reconstruct_obj_type(mu, &(info->lvalues[i]));
+      mir_add_var(mu, t_obj, MIR_NULL_STAMP, ident_sprintf("obj$%u", i), 0);
+      mir_add_var(mu, t_offset, MIR_NULL_STAMP, ident_sprintf("dst$%u", i), 0);
+      mir_add_var(mu, t_offset, MIR_NULL_STAMP, ident_sprintf("src$%u", i), 0);
+      mir_add_var(mu, t_offset, MIR_NULL_STAMP, ident_sprintf("cnt$%u", i), 0);
+   }
+
+   mir_build_return(mu, MIR_NULL_VALUE);
+   mir_optimise(mu, MIR_PASS_O0);
+}
+
+static void vlog_lower_nba_proc(mir_unit_t *mu, object_t *obj)
+{
+   ident_t frame_name = mir_get_parent(mu);
+   nba_event_info_t *info = hash_get(sv_nba_events, frame_name);
+   assert(info != NULL);
+
+   vlog_gen_t g = {
+      .mu        = mu,
+      .mir       = mir_get_context(mu),
+      .two_state = opt_get_int(OPT_TWO_STATE) == TWO_STATE_ALL,
+   };
+
+   mir_block_t start_bb = mir_add_block(mu);
+   assert(start_bb.id == 1);
+   mir_build_return(mu, MIR_NULL_VALUE);
+
+   mir_set_cursor(mu, start_bb, MIR_APPEND);
+
+   mir_type_t t_offset = mir_offset_type(mu);
+   mir_type_t t_time = mir_time_type(mu);
+   mir_value_t zero = mir_const(mu, t_offset, 0);
+   mir_value_t one = mir_const(mu, t_offset, 1);
+   mir_value_t after = mir_const(mu, t_time, 0);
+
+   mir_block_t test_bb = mir_add_block(mu);
+   mir_block_t body_bb = mir_add_block(mu);
+   mir_block_t done_bb = mir_add_block(mu);
+
+   mir_build_jump(mu, test_bb);
+
+   mir_set_cursor(mu, test_bb, MIR_APPEND);
+   mir_value_t test_frame = mir_build_context_upref(mu, 1);
+   mir_value_t remain_var = mir_build_link_var(mu, test_frame,
+                                               ident_new("remain"), t_offset);
+   mir_value_t left = mir_build_load(mu, remain_var);
+   mir_build_cond(mu, mir_build_cmp(mu, MIR_CMP_NEQ, left, zero),
+                  body_bb, done_bb);
+
+   mir_set_cursor(mu, body_bb, MIR_APPEND);
+   mir_build_store(mu, remain_var, mir_build_sub(mu, t_offset, left, one));
+   vlog_lower_timing_ctrl(&g, vlog_delay(info->stmt));
+   mir_build_jump(mu, test_bb);
+
+   mir_set_cursor(mu, done_bb, MIR_APPEND);
+
+   mir_value_t frame = mir_build_context_upref(mu, 1);
+   mir_type_t t_src = nba_reconstruct_type(mu, info->src_class, info->src_size,
+                                           info->src_signed, false);
+   mir_value_t source = mir_build_load(
+      mu, mir_build_link_var(mu, frame, ident_new("rhs"), t_src));
+
+   mir_value_t unpacked = source;
+   if (info->src_class == MIR_TYPE_VEC2 || info->src_class == MIR_TYPE_VEC4) {
+      bool any_unpacked = false;
+      for (unsigned i = 0; i < info->nlvalues && !any_unpacked; i++)
+         any_unpacked = info->lvalues[i].is_signal
+            && !info->lvalues[i].is_packed_sig;
+
+      if (any_unpacked) {
+         mir_value_t tmp = MIR_NULL_VALUE;
+         if (info->targetsz > 1) {
+            mir_type_t t_elem = mir_logic_type(mu);
+            mir_type_t t_array = mir_carray_type(mu, info->targetsz, t_elem);
+            tmp = vlog_get_temp(&g, t_array);
+         }
+         const uint8_t strength = info->is_net ? ST_STRONG : 0;
+         unpacked = mir_build_unpack(mu, source, strength, tmp);
+      }
+   }
+
+   for (unsigned i = 0; i < info->nlvalues; i++) {
+      const nba_event_lv_t *lv_info = &(info->lvalues[i]);
+      mir_type_t t_obj = nba_reconstruct_obj_type(mu, lv_info);
+
+      vlog_select_t lv = {
+         .obj        = mir_build_load(mu, mir_build_link_var(
+                                         mu, frame, ident_sprintf("obj$%u", i),
+                                         t_obj)),
+         .dst_offset = mir_build_load(mu, mir_build_link_var(
+                                         mu, frame, ident_sprintf("dst$%u", i),
+                                         t_offset)),
+         .src_offset = mir_build_load(mu, mir_build_link_var(
+                                         mu, frame, ident_sprintf("src$%u", i),
+                                         t_offset)),
+         .count      = mir_build_load(mu, mir_build_link_var(
+                                         mu, frame, ident_sprintf("cnt$%u", i),
+                                         t_offset)),
+         .type       = nba_reconstruct_type(mu, lv_info->val_class,
+                                            lv_info->val_size,
+                                            lv_info->val_signed, false),
+         .size       = lv_info->size,
+      };
+
+      mir_block_t guarded_bb = mir_add_block(mu);
+      mir_block_t merge_bb = mir_add_block(mu);
+      mir_value_t overlaps = mir_build_cmp(mu, MIR_CMP_NEQ, lv.count, zero);
+      mir_build_cond(mu, overlaps, guarded_bb, merge_bb);
+
+      mir_set_cursor(mu, guarded_bb, MIR_APPEND);
+
+      if (!lv_info->is_signal) {
+         vlog_lower_nba_store(&g, info->stmt, &lv, source, lv_info->offset,
+                              after);
+      }
+      else {
+         mir_value_t nets = mir_build_array_ref(mu, lv.obj, lv.dst_offset);
+         if (lv_info->is_packed_sig) {
+            mir_value_t pval =
+               vlog_packed_lvalue_slice(&g, source, lv_info->offset, &lv);
+            mir_build_sched_deposit(mu, nets, lv.count, pval, after);
+         }
+         else if (info->src_class == MIR_TYPE_VEC2
+                  || info->src_class == MIR_TYPE_VEC4) {
+            mir_value_t pos = mir_build_add(
+               mu, t_offset, mir_const(mu, t_offset, lv_info->offset),
+               lv.src_offset);
+            mir_value_t src = mir_build_array_ref(mu, unpacked, pos);
+            src = vlog_lvalue_source(&g, &lv, src);
+            mir_build_sched_deposit(mu, nets, lv.count, src, after);
+         }
+         else
+            mir_build_sched_deposit(mu, nets, lv.count, unpacked, after);
+      }
+
+      mir_build_jump(mu, merge_bb);
+      mir_set_cursor(mu, merge_bb, MIR_APPEND);
+   }
+
+   mir_value_t res = mir_build_fcall(mu, ident_new("__sv_fork_finish"),
+                                     t_offset, MIR_NULL_STAMP, NULL, 0);
+   mir_build_consume(mu, res);
+   mir_build_return(mu, MIR_NULL_VALUE);
+
+   mir_optimise(mu, MIR_PASS_O1);
+   vlog_lower_cleanup(&g);
+}
+
+static bool nba_can_reconstruct_class(mir_class_t cls)
+{
+   return cls == MIR_TYPE_VEC2 || cls == MIR_TYPE_VEC4
+      || cls == MIR_TYPE_REAL || cls == MIR_TYPE_INT;
+}
+
+static void vlog_lower_nba_event(vlog_gen_t *g, vlog_node_t v,
+                                 vlog_node_t target, unsigned nlvalues,
+                                 const vlog_select_t *lvalues,
+                                 unsigned targetsz, mir_value_t source,
+                                 mir_value_t repeat_count)
+{
+   mir_type_t t_src = mir_get_type(g->mu, source);
+   mir_class_t src_class = mir_get_class(g->mu, t_src);
+   if (!nba_can_reconstruct_class(src_class))
+      fatal_at(vlog_loc(v), "sorry, an event control in a non-blocking "
+               "assignment to this type is not supported");
+
+   nba_event_info_t *info = xcalloc(sizeof(nba_event_info_t));
+   info->stmt       = v;
+   info->src_class  = src_class;
+   info->src_size   = mir_is_vector_type(g->mu, t_src)
+      ? mir_get_size(g->mu, t_src) : 0;
+   info->src_signed = mir_is_vector_type(g->mu, t_src)
+      ? mir_get_signed(g->mu, t_src) : false;
+   info->targetsz   = targetsz;
+   info->is_net     = vlog_is_net(target);
+   info->nlvalues   = nlvalues;
+   info->lvalues    = xcalloc_array(nlvalues, sizeof(nba_event_lv_t));
+
+   mir_type_t t_logic = mir_logic_type(g->mu);
+
+   for (unsigned i = 0, offset = 0; i < nlvalues;
+        offset += lvalues[i].size, i++) {
+      const bool is_sig = mir_is_signal(g->mu, lvalues[i].obj);
+      mir_type_t t_obj = mir_get_type(g->mu, lvalues[i].obj);
+      mir_type_t t_elem = is_sig ? mir_get_base(g->mu, t_obj)
+         : mir_get_pointer(g->mu, t_obj);
+      mir_class_t ecls = mir_get_class(g->mu, t_elem);
+      mir_class_t vcls = mir_get_class(g->mu, lvalues[i].type);
+
+      if (!nba_can_reconstruct_class(ecls) || !nba_can_reconstruct_class(vcls))
+         fatal_at(vlog_loc(v), "sorry, an event control in a non-blocking "
+                  "assignment to this type is not supported");
+
+      info->lvalues[i] = (nba_event_lv_t){
+         .is_signal     = is_sig,
+         .is_packed_sig = is_sig && vlog_is_packed_signal(g->mu, lvalues[i].obj),
+         .obj_is_logic  = mir_equals(t_elem, t_logic),
+         .obj_class     = ecls,
+         .obj_size      = mir_is_vector_type(g->mu, t_elem)
+            ? mir_get_size(g->mu, t_elem) : 0,
+         .obj_signed    = mir_is_vector_type(g->mu, t_elem)
+            ? mir_get_signed(g->mu, t_elem) : false,
+         .val_class     = vcls,
+         .val_size      = mir_is_vector_type(g->mu, lvalues[i].type)
+            ? mir_get_size(g->mu, lvalues[i].type) : 0,
+         .val_signed    = mir_is_vector_type(g->mu, lvalues[i].type)
+            ? mir_get_signed(g->mu, lvalues[i].type) : false,
+         .size          = lvalues[i].size,
+         .offset        = offset,
+      };
+   }
+
+   ident_t unit = mir_get_name(g->mu, MIR_NULL_VALUE);
+   const loc_t *loc = vlog_loc(v);
+   ident_t base = ident_sprintf("%s.nba$%u_%u", istr(unit),
+                                loc->first_line, loc->first_column);
+
+   static hset_t *nba_names = NULL;
+   if (nba_names == NULL)
+      nba_names = hset_new(16);
+   for (int n = 1; hset_contains(nba_names, base); n++)
+      base = ident_sprintf("%s.nba$%u_%u_%d", istr(unit),
+                           loc->first_line, loc->first_column, n);
+   hset_insert(nba_names, base);
+
+   ident_t frame_name = ident_prefix(base, ident_new("frame"), '$');
+
+   if (sv_nba_events == NULL)
+      sv_nba_events = hash_new(16);
+   hash_put(sv_nba_events, frame_name, info);
+
+   ident_t parent = mir_get_parent(g->mu);
+   mir_defer(g->mir, frame_name, parent, MIR_UNIT_PROTECTED,
+             vlog_lower_nba_frame, vlog_to_object(v));
+   mir_defer(g->mir, base, frame_name, MIR_UNIT_PROCESS,
+             vlog_lower_nba_proc, vlog_to_object(v));
+
+   mir_type_t t_offset = mir_offset_type(g->mu);
+   mir_type_t t_frame = mir_context_type(g->mu, frame_name);
+   mir_value_t frame = mir_build_protected_init(
+      g->mu, t_frame, mir_build_context_upref(g->mu, 1),
+      MIR_NULL_VALUE, MIR_NULL_VALUE);
+
+   mir_build_store(g->mu, mir_build_link_var(g->mu, frame, ident_new("remain"),
+                                             t_offset), repeat_count);
+   mir_build_store(g->mu, mir_build_link_var(g->mu, frame, ident_new("rhs"),
+                                             t_src), source);
+
+   for (unsigned i = 0; i < nlvalues; i++) {
+      mir_type_t t_obj = mir_get_type(g->mu, lvalues[i].obj);
+      mir_build_store(g->mu, mir_build_link_var(
+                         g->mu, frame, ident_sprintf("obj$%u", i), t_obj),
+                      lvalues[i].obj);
+      mir_build_store(g->mu, mir_build_link_var(
+                         g->mu, frame, ident_sprintf("dst$%u", i), t_offset),
+                      lvalues[i].dst_offset);
+      mir_build_store(g->mu, mir_build_link_var(
+                         g->mu, frame, ident_sprintf("src$%u", i), t_offset),
+                      lvalues[i].src_offset);
+      mir_build_store(g->mu, mir_build_link_var(
+                         g->mu, frame, ident_sprintf("cnt$%u", i), t_offset),
+                      lvalues[i].count);
+   }
+
+   mir_value_t group = mir_build_fcall(g->mu, ident_new("__sv_fork_begin"),
+                                       t_offset, MIR_NULL_STAMP, NULL, 0);
+   mir_build_consume(g->mu, group);
+
+   mir_value_t args[] = { frame };
+   mir_value_t closure = mir_build_closure(g->mu, base, t_offset, args, 1);
+   mir_value_t spawn_args[] = { closure, group, mir_const(g->mu, t_offset, 0) };
+   mir_value_t sres = mir_build_fcall(g->mu, ident_new("__sv_spawn"),
+                                      t_offset, MIR_NULL_STAMP, spawn_args, 3);
+   mir_build_consume(g->mu, sres);
+
+   mir_value_t end_args[] = { group };
+   mir_value_t eres = mir_build_fcall(g->mu, ident_new("__sv_fork_end"),
+                                      t_offset, MIR_NULL_STAMP, end_args, 1);
+   mir_build_consume(g->mu, eres);
+}
+
+static void vlog_lower_nba_store(vlog_gen_t *g, vlog_node_t v,
+                                 const vlog_select_t *lvalue,
+                                 mir_value_t value, int offset,
                                  mir_value_t after)
 {
    // The target is plain memory so the runtime keeps a copy of the new
@@ -14661,13 +15020,36 @@ static void vlog_lower_non_blocking_assignment(vlog_gen_t *g, vlog_node_t v)
    // The delay is evaluated first as it may have side effects which must
    // not overwrite the temporaries holding the value
    mir_value_t after;
+   mir_value_t event_repeat = MIR_NULL_VALUE;
    if (vlog_has_delay(v)) {
       vlog_node_t delay = vlog_delay(v);
-      if (vlog_kind(delay) != V_DELAY_CONTROL)
-         fatal_at(vlog_loc(v), "sorry, an event control in a non-blocking "
+      if (vlog_kind(delay) == V_DELAY_CONTROL)
+         after = vlog_lower_delay(g, delay);
+      else if (vlog_kind(delay) == V_EVENT_CONTROL) {
+         after = mir_const(g->mu, t_time, 0);
+         mir_value_t zero = mir_const(g->mu, t_offset, 0);
+         if (vlog_has_value(delay)) {
+            vlog_node_t cexpr = vlog_value(delay);
+            mir_value_t cval = vlog_lower_rvalue(g, cexpr);
+            if (vlog_is_signed(cexpr)) {
+               mir_type_t t_s64 = mir_vec2_type(g->mu, 64, true);
+               mir_value_t c64 = vlog_lower_cast(g, t_s64, cval);
+               mir_value_t coff = mir_build_cast(g->mu, t_offset, c64);
+               mir_value_t neg = mir_build_cmp(g->mu, MIR_CMP_LT, coff, zero);
+               event_repeat = mir_build_select(g->mu, t_offset, neg, zero, coff);
+            }
+            else {
+               mir_type_t t_u64 = mir_vec2_type(g->mu, 64, false);
+               mir_value_t c64 = vlog_lower_cast(g, t_u64, cval);
+               event_repeat = mir_build_cast(g->mu, t_offset, c64);
+            }
+         }
+         else
+            event_repeat = mir_const(g->mu, t_offset, 1);
+      }
+      else
+         fatal_at(vlog_loc(v), "sorry, this timing control in a non-blocking "
                   "assignment is not supported");
-
-      after = vlog_lower_delay(g, delay);
    }
    else
       after = mir_const(g->mu, t_time, 0);
@@ -14781,6 +15163,24 @@ static void vlog_lower_non_blocking_assignment(vlog_gen_t *g, vlog_node_t v)
       return;
    }
 
+   mir_block_t event_done_bb = MIR_NULL_BLOCK;
+   if (!mir_is_null(event_repeat)) {
+      mir_value_t zero = mir_const(g->mu, t_offset, 0);
+      mir_block_t imm_bb = mir_add_block(g->mu);
+      mir_block_t defer_bb = mir_add_block(g->mu);
+      event_done_bb = mir_add_block(g->mu);
+
+      mir_value_t is_zero = mir_build_cmp(g->mu, MIR_CMP_EQ, event_repeat, zero);
+      mir_build_cond(g->mu, is_zero, imm_bb, defer_bb);
+
+      mir_set_cursor(g->mu, defer_bb, MIR_APPEND);
+      vlog_lower_nba_event(g, v, target, nlvalues, lvalues, targetsz, source,
+                           event_repeat);
+      mir_build_jump(g->mu, event_done_bb);
+
+      mir_set_cursor(g->mu, imm_bb, MIR_APPEND);
+   }
+
    for (int i = 0, offset = 0; i < nlvalues;
         offset += lvalues[i].size, i++) {
       const bool is_signal = mir_is_signal(g->mu, lvalues[i].obj);
@@ -14840,6 +15240,11 @@ static void vlog_lower_non_blocking_assignment(vlog_gen_t *g, vlog_node_t v)
          mir_build_jump(g->mu, merge_bb);
          mir_set_cursor(g->mu, merge_bb, MIR_APPEND);
       }
+   }
+
+   if (!mir_is_null(event_done_bb)) {
+      mir_build_jump(g->mu, event_done_bb);
+      mir_set_cursor(g->mu, event_done_bb, MIR_APPEND);
    }
 }
 
