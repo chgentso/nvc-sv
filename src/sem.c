@@ -5882,11 +5882,21 @@ static bool sem_check_generic_actual(formal_map_t *formals, int nformals,
              && type_subkind(map) == GTYPE_CONSTRAINED_ARRAY)
             actual_constrained = true;
 
+         bool all_anon_index = nindex > 0;
+         for (int i = 0; i < nindex; i++) {
+            type_t itype = type_index(type, i);
+            if (type_kind(itype) != T_GENERIC || type_has_ident(itype)) {
+               all_anon_index = false;
+               break;
+            }
+         }
+
          if (class == GTYPE_CONSTRAINED_ARRAY && !actual_constrained)
             sem_error(param, "cannot map unconstrained array type %s to "
                       "constrained formal generic array type %s",
                       type_pp(map), istr(tree_ident(decl)));
-         else if (class == GTYPE_ARRAY && actual_constrained)
+         else if (class == GTYPE_ARRAY && actual_constrained
+                  && type_has_ident(type) && !all_anon_index)
             sem_error(param, "cannot map constrained array type %s to "
                       "unconstrained formal generic array type %s",
                       type_pp(map), istr(tree_ident(decl)));
