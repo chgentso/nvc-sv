@@ -4582,15 +4582,10 @@ static bool vi_lower_expr_inner(vi_lower_t *l, tree_t expr, vi_val_t *out)
                         if (gb == NULL)
                            continue;
                         const int ng = tree_generics(gb);
-                        const int nm = tree_genmaps(gb);
                         for (int gi = 0; gi < ng; gi++) {
                            if (tree_generic(gb, gi) == d) {
-                              if (gi < nm)
-                                 return vi_lower_expr(
-                                    l, tree_value(tree_genmap(gb, gi)), out);
-                              if (tree_has_value(d))
-                                 return vi_lower_expr(l, tree_value(d), out);
-                              return false;
+                              tree_t v = vhdl_island_generic_value(gb, gi);
+                              return v != NULL && vi_lower_expr(l, v, out);
                            }
                         }
                      }
@@ -7051,15 +7046,10 @@ static bool vi_lower_str_expr(vi_lower_t *l, tree_t expr, vi_str_t *out)
                if (gb == NULL)
                   continue;
                const int ng = tree_generics(gb);
-               const int nm = tree_genmaps(gb);
                for (int gi = 0; gi < ng; gi++) {
                   if (tree_generic(gb, gi) == d) {
-                     if (gi < nm)
-                        return vi_lower_str_expr(
-                           l, tree_value(tree_genmap(gb, gi)), out);
-                     if (tree_has_value(d))
-                        return vi_lower_str_expr(l, tree_value(d), out);
-                     return false;
+                     tree_t v = vhdl_island_generic_value(gb, gi);
+                     return v != NULL && vi_lower_str_expr(l, v, out);
                   }
                }
             }

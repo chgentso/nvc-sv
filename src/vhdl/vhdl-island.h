@@ -263,6 +263,7 @@ bool vhdl_island_extract_path_ctx(const vhdl_island_ctx_t *ctx, tree_t expr,
 bool vhdl_island_collect_expr_leaves(const vhdl_island_ctx_t *ctx, tree_t expr,
                                      uint32_t **out_ids, uint32_t *out_n);
 bool vhdl_island_eval_const_int(tree_t block, tree_t expr, int64_t *out);
+tree_t vhdl_island_generic_value(tree_t gb, int gi);
 bool vhdl_island_eval_const_int_ctx(const vhdl_island_ctx_t *ctx, tree_t expr,
                                     int64_t *out);
 bool vhdl_island_const_slice_width(const vhdl_island_ctx_t *ctx, tree_t rg,

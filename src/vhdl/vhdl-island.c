@@ -90,6 +90,20 @@ static bool fn_name_is(const char *rest, const char *target)
       && (rest[len] == '(' || rest[len] == '[' || rest[len] == '\0');
 }
 
+// Value of generic number GI of block GB: the actual in its generic map,
+// or the default of the generic when the map leaves it open (elab adds an
+// open actual for a generic without one)
+tree_t vhdl_island_generic_value(tree_t gb, int gi)
+{
+   tree_t g = tree_generic(gb, gi);
+   if (gi < tree_genmaps(gb)) {
+      tree_t v = tree_value(tree_genmap(gb, gi));
+      if (tree_kind(v) != T_OPEN)
+         return v;
+   }
+   return tree_has_value(g) ? tree_value(g) : NULL;
+}
+
 static bool eval_const_int_blocks(tree_t block, const tree_t *ancestors,
                                   int n_ancestors, tree_t expr, int64_t *out,
                                   int depth)
@@ -131,18 +145,13 @@ static bool eval_const_int_blocks(tree_t block, const tree_t *ancestors,
                if (gb == NULL)
                   continue;
                const int ng = tree_generics(gb);
-               const int nm = tree_genmaps(gb);
                for (int i = 0; i < ng; i++) {
                   if (tree_generic(gb, i) == decl) {
-                     if (i < nm)
-                        return eval_const_int_blocks(
-                           block, ancestors, n_ancestors,
-                           tree_value(tree_genmap(gb, i)), out, depth + 1);
-                     if (tree_has_value(decl))
-                        return eval_const_int_blocks(
-                           block, ancestors, n_ancestors,
-                           tree_value(decl), out, depth + 1);
-                     return false;
+                     tree_t v = vhdl_island_generic_value(gb, i);
+                     return v != NULL
+                        && eval_const_int_blocks(block, ancestors,
+                                                 n_ancestors, v, out,
+                                                 depth + 1);
                   }
                }
             }
@@ -2225,15 +2234,10 @@ static bool check_str_expr(check_ctx_t *c, tree_t expr, int depth)
                if (gb == NULL)
                   continue;
                const int ng = tree_generics(gb);
-               const int nm = tree_genmaps(gb);
                for (int gi = 0; gi < ng; gi++) {
                   if (tree_generic(gb, gi) == d) {
-                     if (gi < nm)
-                        return check_str_expr(c, tree_value(tree_genmap(gb, gi)),
-                                              depth + 1);
-                     if (tree_has_value(d))
-                        return check_str_expr(c, tree_value(d), depth + 1);
-                     return false;
+                     tree_t v = vhdl_island_generic_value(gb, gi);
+                     return v != NULL && check_str_expr(c, v, depth + 1);
                   }
                }
             }
@@ -5263,6 +5267,7 @@ void vhdl_island_rebuild(vhdl_island_ctx_t *ctx)
           && (root_comb_cnt[r] == 1 || !root_has_comb_edge[r])) {
          p->rejected = true;
          p->reason = "prune: comb-only island without internal dataflow";
+
          n_live--;
          for (uint32_t j = 0; j < p->n_writes; j++) {
             ctx->sigs[p->writes[j]].driver_proc = -1;
