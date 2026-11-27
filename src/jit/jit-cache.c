@@ -755,6 +755,17 @@ void jit_cache_prepare_slots(jit_cache_t *cache, jit_func_t *f, bool huge,
       hash_u64(&ctx, sizeof(jit_value_t));
       hash_u64(&ctx, RT_ALIGN_MASK);
 
+      // Inline test for zero-delay transactions (cgen_quiet_waveform)
+      hash_u64(&ctx, offsetof(tlab_t, quiet));
+      hash_u64(&ctx, sizeof(rt_quiet_t));
+      hash_u64(&ctx, offsetof(rt_quiet_t, budget));
+      hash_u64(&ctx, offsetof(rt_quiet_t, next_is_delta));
+      hash_u64(&ctx, (uint64_t)QUIET_WIDTH_OFFSET);
+      hash_u64(&ctx, (uint64_t)QUIET_SFLAGS_OFFSET);
+      hash_u64(&ctx, (uint64_t)QUIET_VALUE_OFFSET);
+      hash_u32(&ctx, quiet_source_mask(QUIET_FLAG_BUSY));
+      hash_u32(&ctx, quiet_source_mask(QUIET_FLAG_WAS_ACTIVE));
+
       // Target & codegen configuration
       hash_str(&ctx, cache->triple);
       hash_str(&ctx, cache->cpu);

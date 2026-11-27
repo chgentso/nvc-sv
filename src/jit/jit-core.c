@@ -2087,6 +2087,7 @@ tlab_t *tlab_acquire(jit_t *j)
    lt->tlab.alloc = ALIGN_UP(data_off, sizeof(double)) - data_off;
    lt->tlab.limit = TLAB_SIZE - OVERRUN_MARGIN;
    lt->tlab.mem_dirty = 0;
+   lt->tlab.quiet = NULL;
 
    return &(lt->tlab);
 }

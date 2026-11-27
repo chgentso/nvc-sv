@@ -3452,3 +3452,7 @@ vhdl_island_longproc1 shell
 vhdl_island_var1 shell
 vhdl_island_loop1 shell
 vhdl_island_comb_report2 shell
+signal41        gold,2008,$NVC_JIT_THRESHOLD=1,$NVC_JIT_ASYNC=0
+signal42        fail,gold,2008,$NVC_JIT_THRESHOLD=1,$NVC_JIT_ASYNC=0
+signal43        shell
+signal44        shell
