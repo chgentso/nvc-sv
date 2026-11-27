@@ -20260,6 +20260,77 @@ typedef struct {
    bool        known;
 } spec_env_t;
 
+static int64_t spec_truncate(int64_t val, int width, bool is_signed)
+{
+   if (width <= 0 || width >= 64)
+      return val;
+
+   const uint64_t mask = (UINT64_C(1) << width) - 1;
+   uint64_t u = (uint64_t)val & mask;
+   if (is_signed && (u & (UINT64_C(1) << (width - 1))))
+      u |= ~mask;
+   return (int64_t)u;
+}
+
+static bool spec_eval(vlog_node_t v, const spec_env_t *env, int nenv,
+                      int64_t *result);
+
+static bool spec_type_width(vlog_node_t dt, const spec_env_t *env, int nenv,
+                            int *width, bool *is_signed)
+{
+   while (dt != NULL
+          && (vlog_kind(dt) == V_TYPE_DECL || vlog_kind(dt) == V_ENUM_DECL)
+          && vlog_has_type(dt))
+      dt = vlog_type(dt);
+
+   if (dt == NULL || vlog_kind(dt) != V_DATA_TYPE)
+      return false;
+
+   int base = 0;
+   switch (vlog_subkind(dt)) {
+   case DT_BYTE:
+      base = 8;
+      break;
+   case DT_SHORTINT:
+      base = 16;
+      break;
+   case DT_INT:
+   case DT_INTEGER:
+      base = 32;
+      break;
+   case DT_LONGINT:
+   case DT_TIME:
+      base = 64;
+      break;
+   case DT_BIT:
+   case DT_LOGIC:
+      base = 1;
+      break;
+   default:
+      return false;
+   }
+
+   int64_t total = base;
+   const int nranges = vlog_ranges(dt);
+   for (int i = 0; i < nranges; i++) {
+      vlog_node_t dim = vlog_range(dt, i);
+      if (vlog_subkind(dim) != V_DIM_PACKED)
+         return false;
+      int64_t l, r;
+      if (!spec_eval(vlog_left(dim), env, nenv, &l)
+          || !spec_eval(vlog_right(dim), env, nenv, &r))
+         return false;
+      const int64_t sz = (l > r ? l - r : r - l) + 1;
+      if (sz <= 0 || total > INT_MAX / sz)
+         return false;
+      total *= sz;
+   }
+
+   *width = (int)total;
+   *is_signed = !!(vlog_flags(dt) & VLOG_F_SIGNED);
+   return true;
+}
+
 static bool spec_eval(vlog_node_t v, const spec_env_t *env, int nenv,
                       int64_t *result)
 {
@@ -20313,6 +20384,39 @@ static bool spec_eval(vlog_node_t v, const spec_env_t *env, int nenv,
          case V_UNARY_BITNEG:   *result = ~val; return true;
          case V_UNARY_NOT:      *result = !val; return true;
          default:               return false;
+         }
+      }
+   case V_CAST:
+      {
+         int64_t val;
+         if (!spec_eval(vlog_value(v), env, nenv, &val))
+            return false;
+
+         switch (vlog_subkind(v)) {
+         case V_CAST_TYPE:
+            {
+               int width;
+               bool is_signed;
+               if (!spec_type_width(vlog_type(v), env, nenv,
+                                    &width, &is_signed))
+                  return false;
+               *result = spec_truncate(val, width, is_signed);
+               return true;
+            }
+         case V_CAST_WIDTH:
+            {
+               int64_t w;
+               if (!spec_eval(vlog_left(v), env, nenv, &w) || w <= 0)
+                  return false;
+               *result = spec_truncate(val, (int)w, false);
+               return true;
+            }
+         case V_CAST_SIGN:
+         case V_CAST_CONST:
+            *result = val;
+            return true;
+         default:
+            return false;
          }
       }
    case V_COND_EXPR:
@@ -20704,6 +20808,49 @@ static vlog_node_t replay_default(vlog_node_t generic, generic_class_t *g,
    return result;
 }
 
+static vlog_node_t replay_param_type_in_scope(vlog_node_t generic,
+                                              generic_class_t *g,
+                                              int pos, vlog_node_t *actuals,
+                                              vlog_node_t container)
+{
+   if (g->params[pos].ntype == 0 && g->params[pos].tname == NULL)
+      return NULL;
+
+   parse_state_t saved = state;
+   vlog_node_t saved_container = spec_container;
+   spec_container = container;
+
+   vlog_scope_t *saved_scope = vlog_symtab_enter(symtab, g->scope);
+   vlog_symtab_push(symtab, generic);
+
+   const loc_t *loc = g->ntokens > 0 ? &(g->tokens[0].loc) : &LOC_INVALID;
+   for (int i = 0; i < pos; i++) {
+      vlog_node_t d = vlog_new(g->params[i].is_type ? V_TYPE_DECL
+                               : V_LOCALPARAM);
+      vlog_set_ident(d, g->params[i].name);
+      vlog_set_loc(d, loc);
+
+      if (g->params[i].is_type)
+         vlog_set_type(d, actuals[i]);
+      else {
+         vlog_set_type(d, replay_param_type(&(g->params[i])));
+         vlog_set_value(d, actuals[i]);
+      }
+
+      vlog_symtab_put(symtab, d);
+   }
+
+   vlog_node_t result = replay_param_type(&(g->params[pos]));
+
+   scope_leave();
+   vlog_symtab_enter(symtab, saved_scope);
+
+   state = saved;
+   spec_container = saved_container;
+
+   return result;
+}
+
 static vlog_node_t specialise_scoped(vlog_node_t d, bool forward)
 {
    // The parameters of the specialisation may contain a scope prefix of their
@@ -20852,8 +20999,17 @@ static vlog_node_t specialise_class(vlog_node_t generic)
          spec_key_for(key, actuals[i]);
       else if (vlog_kind(actuals[i]) == V_STRING)
          tb_printf(key, "s%x", number_hash(vlog_number(actuals[i])));
-      else if (spec_eval(actuals[i], NULL, 0, &ival))
+      else if (spec_eval(actuals[i], NULL, 0, &ival)) {
+         if (g->params[i].ntype > 0 || g->params[i].tname != NULL) {
+            vlog_node_t pt = replay_param_type_in_scope(
+               generic, g, i, actuals, container);
+            int width;
+            bool is_signed;
+            if (pt != NULL && spec_type_width(pt, NULL, 0, &width, &is_signed))
+               ival = spec_truncate(ival, width, is_signed);
+         }
          tb_printf(key, "%"PRIi64, ival);
+      }
       else {
          const loc_t *loc = vlog_loc(actuals[i]);
          tb_printf(key, "e%u_%u", loc->first_line, loc->first_column);

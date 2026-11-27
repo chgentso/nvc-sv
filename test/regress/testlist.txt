@@ -3381,3 +3381,4 @@ svarrmap1       verilog
 svrepeatxz1     verilog
 svfmtpct1       verilog
 svpartdyn1      verilog
+svclassparam3   verilog
