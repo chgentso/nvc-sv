@@ -121,6 +121,7 @@ typedef struct {
    tree_t            rst_branch;
    uint32_t         *reads;
    uint32_t          n_reads;
+   uint32_t          n_body_reads;   // reads[] before clk/rst were appended
    uint32_t         *writes;
    uint32_t          n_writes;
    vhdl_write_range_t *read_ranges;
