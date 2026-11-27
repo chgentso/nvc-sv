@@ -188,8 +188,7 @@ typedef struct _rt_model {
    uint64_t           trigger_epoch;
    bool               can_create_delta;
    bool               in_reset;
-   bool               next_is_delta;
-   uint16_t           quiet_count;
+   rt_quiet_t         quiet;
    bool               force_stop;
    bool               sva_flush;
    bool               finished;
@@ -285,6 +284,28 @@ static __thread rt_model_t *__model = NULL;
 static hash_t *fused_keys = NULL;   // Start order of fused processes
 
 static bool __trace_on = false;
+
+static inline void sync_quiet(rt_model_t *m)
+{
+   // Copy the state read by the inline test for zero-delay transactions
+   // that change nothing in generated code: must be called after every
+   // change to the current time, delta cycle, can_create_delta or tracing
+   m->quiet.now = m->now;
+   m->quiet.iteration = m->iteration;
+   m->quiet.enabled = m->can_create_delta && !__trace_on;
+}
+
+static tlab_t *model_tlab_acquire(rt_model_t *m)
+{
+   tlab_t *tlab = tlab_acquire(m->jit);
+#if !RT_MULTITHREADED
+   // Generated code running in processes with this TLAB may complete
+   // zero-delay transactions that change nothing without calling into
+   // the kernel (see sched_waveform_quiet)
+   tlab->quiet = &(m->quiet);
+#endif
+   return tlab;
+}
 
 static void *source_value(rt_nexus_t *nexus, rt_source_t *src);
 static bool has_active_source(const rt_nexus_t *n);
@@ -645,6 +666,7 @@ static void deferq_run_body(void *arg)
                       >= (uint64_t)m->stop_delta)) {
          if (m->iteration < (int)m->stop_delta)
             m->iteration = m->stop_delta;
+         sync_quiet(m);
          reached_iteration_limit(m);
          m->reschedq.count = 0;
          break;
@@ -718,6 +740,7 @@ static void deferq_run(rt_model_t *m, deferq_t *dq)
                       >= (uint64_t)m->stop_delta)) {
          if (m->iteration < (int)m->stop_delta)
             m->iteration = m->stop_delta;
+         sync_quiet(m);
          reached_iteration_limit(m);
          m->reschedq.count = 0;
          break;
@@ -826,13 +849,14 @@ rt_model_t *model_new(jit_t *jit, cover_data_t *cover)
    m->effective_heap = heap_new(64);
 
    m->can_create_delta  = true;
-   m->next_is_delta     = true;
+   m->quiet.next_is_delta = true;
    m->sv_poll_mem_dirty = true;
    m->sv_poll_susp_dirty = false;
 
    m->threads[thread_id()] = static_alloc(m, sizeof(model_thread_t));
 
    __trace_on = opt_get_int(OPT_RT_TRACE);
+   sync_quiet(m);
 
    mtp_init();
 
@@ -1389,7 +1413,7 @@ static void deltaq_insert_proc(rt_model_t *m, uint64_t delta, rt_proc_t *proc)
    if (delta == 0) {
       set_pending(&proc->wakeable);
       deferq_do(&m->procq, async_run_process, proc);
-      m->next_is_delta = true;
+      m->quiet.next_is_delta = true;
    }
    else {
       assert(!proc->wakeable.delayed);
@@ -1409,7 +1433,7 @@ static void deltaq_insert_driver(rt_model_t *m, uint64_t delta,
 {
    if (delta == 0) {
       deferq_do(&m->driverq, async_update_driver, source);
-      m->next_is_delta = true;
+      m->quiet.next_is_delta = true;
    }
    else {
       void *e = tag_pointer(source, EVENT_DRIVER);
@@ -1422,7 +1446,7 @@ static void deltaq_insert_pseudo_source(rt_model_t *m, uint64_t delta,
 {
    if (delta == 0) {
       deferq_do(&m->driverq, async_pseudo_source, src);
-      m->next_is_delta = true;
+      m->quiet.next_is_delta = true;
    }
    else {
       void *e = tag_pointer(src, nonblock ? EVENT_NONBLOCK : EVENT_PSEUDO);
@@ -2110,7 +2134,7 @@ static void run_process_inner(rt_model_t *m, rt_proc_t *proc)
       TRACE("claiming TLAB for private use (used %u/%u)",
             thread->tlab->alloc, thread->tlab->limit);
       proc->tlab = thread->tlab;
-      thread->tlab = tlab_acquire(m->jit);
+      thread->tlab = model_tlab_acquire(m);
    }
    else if (proc->tlab == NULL)
       tlab_reset(thread->tlab);   // All data inside the TLAB is dead
@@ -3778,6 +3802,7 @@ void model_reset(rt_model_t *m)
    rorder_enable(opt_get_int(OPT_REPORT_ORDER));
 
    __trace_on = opt_get_int(OPT_RT_TRACE);
+   sync_quiet(m);
 
    m->sv_poll_mem_dirty = true;
    m->sv_poll_susp_dirty = false;
@@ -3810,7 +3835,7 @@ void model_reset(rt_model_t *m)
    TRACE("calculate initial signal values");
 
    model_thread_t *thread = model_thread(m);
-   thread->tlab = tlab_acquire(m->jit);
+   thread->tlab = model_tlab_acquire(m);
 
    // The signals in the model are updated as follows in an order such
    // that if a given signal R depends upon the current value of another
@@ -4314,26 +4339,26 @@ static void sched_driver(rt_model_t *m, rt_nexus_t *n, uint64_t after,
       rt_source_t *d0 = &(signal->nexus.sources);
 
       if (d->fastqueued)
-         assert(m->next_is_delta);
+         assert(m->quiet.next_is_delta);
       else if ((signal->shared.flags & NET_F_FAST_DRIVER) && d0->sigqueued) {
-         assert(m->next_is_delta);
+         assert(m->quiet.next_is_delta);
          d->fastqueued = 1;
       }
       else if (!will_observe_active(n, value, w)) {
-         m->next_is_delta = true;
+         m->quiet.next_is_delta = true;
          d->was_active = (n->active_delta == m->iteration);
          n->active_delta = m->iteration + 1;
          return;
       }
       else if (signal->shared.flags & NET_F_FAST_DRIVER) {
          deferq_do(&m->driverq, async_fast_all_drivers, signal);
-         m->next_is_delta = true;
+         m->quiet.next_is_delta = true;
          d0->sigqueued = 1;
          d->fastqueued = 1;
       }
       else {
          deferq_do(&m->driverq, async_fast_driver, d);
-         m->next_is_delta = true;
+         m->quiet.next_is_delta = true;
          d->fastqueued = 1;
       }
 
@@ -4564,7 +4589,7 @@ static void procq_do(rt_model_t *m, rt_wakeable_t *obj, defer_fn_t fn,
    }
    else {
       deferq_do(&m->procq, fn, arg);
-      m->next_is_delta |= m->blocking_update;
+      m->quiet.next_is_delta |= m->blocking_update;
    }
 
    set_pending(obj);
@@ -4595,7 +4620,7 @@ static void wakeup_one(rt_model_t *m, rt_wakeable_t *obj)
          // run it with the signal updates in the next delta cycle
          deferq_do(&m->driverq, async_run_process, proc);
          set_pending(obj);
-         m->next_is_delta = true;
+         m->quiet.next_is_delta = true;
       }
       else
          procq_do(m, obj, async_run_process, proc);
@@ -5412,7 +5437,7 @@ static void fire_init_events(rt_model_t *m)
 
          if (known) {
             notify_event(m, n);
-            m->next_is_delta = true;
+            m->quiet.next_is_delta = true;
          }
          continue;
       }
@@ -5432,7 +5457,7 @@ static void fire_init_events(rt_model_t *m)
 
          if (known) {
             notify_event(m, n);
-            m->next_is_delta = true;
+            m->quiet.next_is_delta = true;
          }
       }
    }
@@ -5527,14 +5552,14 @@ static void model_cycle_body(rt_model_t *m)
 {
    // Simulation cycle is described in LRM 93 section 12.6.4
 
-   const bool is_delta_cycle = m->next_is_delta;
-   m->next_is_delta = false;
+   const bool is_delta_cycle = m->quiet.next_is_delta;
+   m->quiet.next_is_delta = false;
 
    if (is_delta_cycle)
-      m->iteration = m->iteration + 1;
+      m->quiet.iteration = m->iteration = m->iteration + 1;
    else {
-      m->now = heap_min_key(m->eventq_heap);
-      m->iteration = 0;
+      m->quiet.now = m->now = heap_min_key(m->eventq_heap);
+      m->quiet.iteration = m->iteration = 0;
       if (unlikely(m->sva_mt_skip > 0))
          m->sva_mt_skip--;
    }
@@ -5659,6 +5684,7 @@ static void model_cycle_body(rt_model_t *m)
                                                >= (uint64_t)m->stop_delta)) {
          if (m->iteration < (int)m->stop_delta)
             m->iteration = m->stop_delta;
+         sync_quiet(m);
          reached_iteration_limit(m);
          m->reschedq.count = 0;
          break;
@@ -5732,7 +5758,7 @@ static void model_cycle_body(rt_model_t *m)
       }
       if (rt_island_has_dirty(m->islands) || heap_size(m->driving_heap) > 0
           || heap_size(m->effective_heap) > 0)
-         m->next_is_delta = true;
+         m->quiet.next_is_delta = true;
    }
 
    rorder_window_end();
@@ -5744,7 +5770,7 @@ static void model_cycle_body(rt_model_t *m)
 
    // Verilog scheduling regions
 
-   if (m->next_is_delta)
+   if (m->quiet.next_is_delta)
       goto next_delta;
 
    if (unlikely(m->inactiveq.count > 0)) {
@@ -5758,7 +5784,7 @@ static void model_cycle_body(rt_model_t *m)
       rorder_window_end();
    }
 
-   if (m->next_is_delta)
+   if (m->quiet.next_is_delta)
       goto next_delta;
 
    if (unlikely(m->nonblockq.count > 0 || m->nb_packed_q.count > 0
@@ -5779,7 +5805,7 @@ static void model_cycle_body(rt_model_t *m)
             deferq_run(m, &m->nonblockq);
          }
          if (rt_island_has_dirty(m->islands))
-            m->next_is_delta = true;
+            m->quiet.next_is_delta = true;
       }
       (void)mtp_enter(MTP_OTHER);
       sv_procs_run++;   // May have changed state a poller depends on
@@ -5787,26 +5813,26 @@ static void model_cycle_body(rt_model_t *m)
       // A net with several sources updates its driving value in the
       // next delta cycle
       if (heap_size(m->driving_heap) > 0)
-         m->next_is_delta = true;
+         m->quiet.next_is_delta = true;
 
       rorder_window_end();
    }
 
-   if (!m->next_is_delta && unlikely(m->reactiveq.count > 0)) {
+   if (!m->quiet.next_is_delta && unlikely(m->reactiveq.count > 0)) {
       // Program processes run once nothing else is scheduled in the time
       // step, in the order they began waiting, and may then schedule more
       // events
       TRACE("begin reactive region");
       reactive_sort(&m->reactiveq);
       deferq_swap(&m->procq, &m->reactiveq);
-      m->next_is_delta = true;
+      m->quiet.next_is_delta = true;
    }
 
  next_delta:
    if (unlikely(m->has_verilog))
       sv_poll_end_cycle(m);
 
-   if (!m->next_is_delta) {
+   if (!m->quiet.next_is_delta) {
       if (m->samplers != NULL) {
          (void)mtp_enter(MTP_PHASECB);
          run_samplers(m);
@@ -5816,8 +5842,9 @@ static void model_cycle_body(rt_model_t *m)
       run_callbacks(m, LAST_KNOWN_DELTA_CYCLE);
    }
 
-   if (!m->next_is_delta) {
+   if (!m->quiet.next_is_delta) {
       m->can_create_delta = false;
+      sync_quiet(m);
 
       // Run all postponed processes and event callbacks
       (void)mtp_enter(MTP_TASKQ);
@@ -5830,6 +5857,7 @@ static void model_cycle_body(rt_model_t *m)
       run_callbacks(m, END_TIME_STEP);
 
       m->can_create_delta = true;
+      sync_quiet(m);
    }
    else if (!m->force_stop && m->stop_delta > 0 && m->iteration == m->stop_delta)
       reached_iteration_limit(m);
@@ -5843,7 +5871,7 @@ static void model_cycle(rt_model_t *m)
       return;
    }
 
-   const bool is_delta = m->next_is_delta;
+   const bool is_delta = m->quiet.next_is_delta;
    mtp_cycle_begin();
    model_cycle_body(m);
    rorder_window_end();
@@ -5858,7 +5886,7 @@ static bool should_stop_now(rt_model_t *m, uint64_t stop_time)
       jit_check_interrupt(m->jit);
       return true;
    }
-   else if (m->next_is_delta)
+   else if (m->quiet.next_is_delta)
       return false;
    else if (heap_size(m->eventq_heap) == 0)
       return true;
@@ -5931,6 +5959,7 @@ void model_run(rt_model_t *m, uint64_t stop_time)
       // Final procedures run once at the end of simulation
       if (!m->force_stop && stop_time != TIME_HIGH && m->now < stop_time)
          m->now = stop_time;
+      sync_quiet(m);
 
       m->nfinal_procs = 0;
       run_final_procs(m, m->root);
@@ -9113,7 +9142,7 @@ void x_sched_inactive(void)
 
    set_pending(&proc->wakeable);
    deferq_do(&m->inactiveq, async_run_process, proc);
-   m->next_is_delta = true;
+   m->quiet.next_is_delta = true;
 }
 
 int64_t x_sv_sva_flushing(void)
@@ -9193,7 +9222,7 @@ static bool quiet_slices(rt_model_t *m, rt_signal_t *s, uint32_t offset,
       left -= n->width;
    }
 
-   m->next_is_delta = true;
+   m->quiet.next_is_delta = true;
    return true;
 }
 
@@ -9209,9 +9238,14 @@ static inline bool sched_waveform_quiet(sig_shared_t *ss, uint32_t offset,
    rt_signal_t *s = container_of(ss, rt_signal_t, shared);
    rt_model_t *m = __model;
 
+   // The inline test in generated code reads copies of these
+   assert(m->quiet.now == m->now);
+   assert(m->quiet.iteration == m->iteration);
+   assert(m->quiet.enabled == (m->can_create_delta && !__trace_on));
+
    if (unlikely(__trace_on) || unlikely(!m->can_create_delta))
       return false;   // Postponed processes go through check_postponed
-   else if (unlikely(++m->quiet_count == 0))
+   else if (unlikely(++m->quiet.budget == 0))
       return false;   // The full path checks for interrupts now and then
    else if (ss->flags & SIG_F_PACKED)
       return false;
@@ -9225,7 +9259,7 @@ static inline bool sched_waveform_quiet(sig_shared_t *ss, uint32_t offset,
 
       RT_LOCK(s->lock);
       quiet_transaction(m, n);
-      m->next_is_delta = true;
+      m->quiet.next_is_delta = true;
       return true;
    }
    else
@@ -10081,13 +10115,13 @@ void x_put_driver(sig_shared_t *ss, uint32_t offset, int32_t count,
 
       // The effective value is updated in the next delta cycle
       if (n->flags & NET_F_EFFECTIVE)
-         m->next_is_delta = true;
+         m->quiet.next_is_delta = true;
 
       for (rt_source_t *o = n->outputs; o; o = o->chain_output) {
          switch (o->tag) {
          case SOURCE_PORT:
             defer_driving_update(m, o->u.port.output);
-            m->next_is_delta = true;
+            m->quiet.next_is_delta = true;
             break;
          case SOURCE_ACTIVE:
             wakeup_one(m, o->u.wakeable);
@@ -10929,7 +10963,7 @@ void rt_island_force_unowned_bytes(rt_model_t *m, rt_signal_t *s,
 void rt_island_request_delta(rt_model_t *m)
 {
    if (m != NULL && m->can_create_delta)
-      m->next_is_delta = true;
+      m->quiet.next_is_delta = true;
 }
 
 jit_t *rt_island_model_jit(rt_model_t *m)
@@ -11522,7 +11556,7 @@ static void async_spawn_process(rt_model_t *m, void *arg)
 
    // Runs until it first blocks before any other process
    run_process(m, proc);
-   m->next_is_delta = true;
+   m->quiet.next_is_delta = true;
 
    // The state of the process now keeps the frame alive
    mptr_free(m->mspace, &task->frame);
@@ -12080,7 +12114,7 @@ void x_sv_spawn(const ffi_closure_t *closure, void *group, int64_t label)
 
    set_pending(&p->wakeable);
    deferq_do(&m->spawnq, async_spawn_process, task);
-   m->next_is_delta = true;
+   m->quiet.next_is_delta = true;
 }
 
 void *x_function_trigger(jit_handle_t handle, unsigned nargs,

@@ -33,7 +33,10 @@ typedef struct _tlab {
    uint32_t  alloc;
    uint32_t  limit;
    uint64_t  mem_dirty;
-   uint64_t  _pad;
+   union {
+      void     *quiet;   // Model state for generated code (rt_quiet_t)
+      uint64_t  _pad;
+   };
    char      data[0];
 } tlab_t;
 

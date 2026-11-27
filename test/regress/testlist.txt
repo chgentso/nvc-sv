@@ -3455,3 +3455,7 @@ vhdl_island_comb_report2 shell
 sv_unique_defer2 verilog,gold
 vhdl_report_order1 shell
 vhpi_rorder1    vhpi,gold,2008
+signal41        gold,2008,$NVC_JIT_THRESHOLD=1,$NVC_JIT_ASYNC=0
+signal42        fail,gold,2008,$NVC_JIT_THRESHOLD=1,$NVC_JIT_ASYNC=0
+signal43        shell
+signal44        shell

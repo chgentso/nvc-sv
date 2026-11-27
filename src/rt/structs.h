@@ -27,6 +27,9 @@
 #include "rt/mspace.h"
 #include "thread.h"
 
+#include <stddef.h>
+#include <string.h>
+
 typedef void *(*value_fn_t)(rt_nexus_t *);
 
 typedef A(rt_scope_t *) scope_list_t;
@@ -240,6 +243,66 @@ typedef struct _rt_signal {
 } rt_signal_t;
 
 STATIC_ASSERT(sizeof(rt_signal_t) + 8 <= 192);
+
+// Generated code tests whether a zero-delay transaction leaves the value
+// of a fast driver unchanged and then makes the same updates as the short
+// path in sched_waveform_quiet without leaving generated code.  It finds
+// the model state through the TLAB and everything else from the
+// sig_shared_t pointer with the offsets below.  The code generator knows
+// the layout of this struct.
+typedef struct {
+   uint64_t now;
+   int32_t  iteration;
+   uint16_t budget;          // Full path when this wraps to zero
+   uint8_t  enabled;         // Delta cycles can be created and no tracing
+   uint8_t  next_is_delta;   // Same as next_is_delta in the model
+} rt_quiet_t;
+
+#define QUIET_NEXUS_OFFSET \
+   ((int)offsetof(rt_signal_t, nexus) - (int)offsetof(rt_signal_t, shared))
+#define QUIET_SOURCE_OFFSET \
+   (QUIET_NEXUS_OFFSET + (int)offsetof(rt_nexus_t, sources))
+#define QUIET_WIDTH_OFFSET \
+   (QUIET_NEXUS_OFFSET + (int)offsetof(rt_nexus_t, width))
+#define QUIET_ACTIVE_OFFSET \
+   (QUIET_NEXUS_OFFSET + (int)offsetof(rt_nexus_t, active_delta))
+#define QUIET_SFLAGS_OFFSET \
+   (QUIET_SOURCE_OFFSET + (int)offsetof(rt_source_t, tag) \
+    + (int)sizeof(source_kind_t))
+#define QUIET_WHEN_OFFSET \
+   (QUIET_SOURCE_OFFSET + (int)offsetof(rt_source_t, u.driver.waveforms.when))
+#define QUIET_VALUE_OFFSET \
+   (QUIET_SOURCE_OFFSET + (int)offsetof(rt_source_t, u.driver.waveforms.value))
+
+// The width, flags and size of a nexus are tested with one 64-bit load
+STATIC_ASSERT(offsetof(rt_nexus_t, flags) == offsetof(rt_nexus_t, width) + 4);
+STATIC_ASSERT(offsetof(rt_nexus_t, size) == offsetof(rt_nexus_t, width) + 5);
+STATIC_ASSERT(sizeof(delta_cycle_t) == 2);
+
+// The source flag bit-fields share one 32-bit word after the tag whose
+// layout is up to the compiler, so the masks are found at run time
+STATIC_ASSERT(offsetof(rt_source_t, u)
+              >= offsetof(rt_source_t, tag) + sizeof(source_kind_t) + 4);
+
+typedef enum {
+   QUIET_FLAG_BUSY,         // fastqueued or sigqueued
+   QUIET_FLAG_WAS_ACTIVE,   // was_active
+} quiet_flag_t;
+
+static inline uint32_t quiet_source_mask(quiet_flag_t which)
+{
+   rt_source_t probe;
+   memset(&probe, '\0', sizeof(probe));
+   if (which == QUIET_FLAG_BUSY)
+      probe.fastqueued = probe.sigqueued = 1;
+   else
+      probe.was_active = 1;
+
+   uint32_t word;
+   memcpy(&word, (char *)&probe + QUIET_SFLAGS_OFFSET - QUIET_SOURCE_OFFSET,
+          sizeof(word));
+   return word;
+}
 
 typedef struct {
    rt_wakeable_t  wakeable;
