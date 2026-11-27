@@ -1276,6 +1276,11 @@ static c_operation *build_operation(vlog_node_t v)
    return op;
 }
 
+static bool vpi_is_dyn_var(vlog_node_t d)
+{
+   return vlog_kind(d) == V_VAR_DECL && vlog_is_dynamic_type(vlog_type(d));
+}
+
 static c_vpiObject *build_expr(vlog_node_t v, c_abstractScope *scope)
 {
    switch (vlog_kind(v)) {
@@ -1292,8 +1297,14 @@ static c_vpiObject *build_expr(vlog_node_t v, c_abstractScope *scope)
          else if (kind == V_TF_PORT_DECL || kind == V_FUNC_DECL
                   || kind == V_MODULE)
             return &(build_operation(v)->expr.object);  /// XXX: hack
-         else if (kind == V_VAR_DECL && (vlog_is_dynamic_type(vlog_type(d))
-                                         || (vlog_flags(d) & VLOG_F_STATIC)))
+         else if (vpi_is_dyn_var(d)) {
+            // A dynamic array of the scope may be the memory argument of
+            // a system task such as $readmemh
+            c_operation *op = build_operation(v);
+            op->hier_scope = &(scope->object);
+            return &(op->expr.object);
+         }
+         else if (kind == V_VAR_DECL && (vlog_flags(d) & VLOG_F_STATIC))
             return &(build_operation(v)->expr.object);
          else if (kind == V_PARAM_DECL || kind == V_LOCALPARAM
                   || kind == V_ENUM_NAME)
@@ -1342,7 +1353,8 @@ static c_vpiObject *build_expr(vlog_node_t v, c_abstractScope *scope)
    case V_HIER_REF:
       {
          c_operation *op = build_operation(v);
-         if (vlog_has_ref(v) && vlog_is_fixed_unpacked(vlog_ref(v)))
+         if (vlog_has_ref(v) && (vlog_is_fixed_unpacked(vlog_ref(v))
+                                 || vpi_is_dyn_var(vlog_ref(v))))
             op->hier_scope = &(scope->object);   // A memory found by name
          return &(op->expr.object);
       }
@@ -6750,6 +6762,23 @@ static c_vpiObject *vpi_memory_alias(c_vpiObject *obj)
 
    vlog_node_t v = op->expr.where;
 
+   if (vlog_kind(v) == V_REF) {
+      // A dynamic array, queue or associative array declared in the scope
+      // of the call or an enclosing scope
+      vlog_node_t d = vlog_ref(v);
+      for (c_abstractScope *s = is_abstractScope(op->hier_scope);
+           s != NULL; s = parent_scope(s)) {
+         vpiObjectList *list = expand_lazy_list(&(s->object), &(s->decls));
+         for (int i = 0; i < list->count; i++) {
+            c_abstractDecl *decl = is_abstractDecl(list->items[i]);
+            if (decl != NULL && decl->where == d)
+               return &(decl->object);
+         }
+      }
+
+      return obj;
+   }
+
    const ident_t last = vlog_ident(v);
    ident_t names[16];
    int nnames = 0;
@@ -9163,8 +9192,22 @@ int uvm_hdl_release_and_read(const char *path, svLogicVecVal *value)
    return hdl_read(&t, value);
 }
 
+typedef struct {
+   int64_t  key;
+   uint32_t seq;
+   uint64_t abits;
+   uint64_t bbits;
+} vpi_assoc_load_t;
+
 struct _vpi_mem_bulk {
    bool          is_signal;
+   bool          is_assoc;
+   bool          key_signed;
+   int           key_width;
+   c_regArray   *assoc;
+   vpi_assoc_load_t *loads;
+   uint32_t      nloads;
+   uint32_t      maxloads;
    bool          two_state;
    bool          four;
    int64_t       left;
@@ -9200,6 +9243,180 @@ static void vpi_mem_bulk_flush(vpi_mem_bulk_t *b)
    b->run_len = 0;
 }
 
+static vpi_mem_bulk_t *vpi_assoc_bulk_open(c_regArray *arr, int64_t *low,
+                                           int64_t *high, int *width)
+{
+   // Words loaded into an associative array with an integral index are
+   // collected and merged with the existing entries when the load is
+   // complete (IEEE 1800-2017 section 21.4.1)
+
+   if (arr->dyn != vpiAssocArray || arr->esize == 0
+       || vpi_assoc_key_kind(arr) != KEY_INT)
+      return NULL;
+
+   unsigned esz;
+   const storage_t estore = vpi_mem_layout(arr->etype, &esz);
+   if (estore != STORE_FVEC2 && estore != STORE_FVEC4)
+      return NULL;
+
+   const int w = vlog_size(arr->etype);
+   if (w <= 0 || w > 64)
+      return NULL;
+
+   const int kw = arr->key != NULL ? vlog_size(arr->key) : 64;
+   if (kw <= 0 || kw > 64)
+      return NULL;
+
+   vpi_mem_bulk_t *b = xcalloc(sizeof(vpi_mem_bulk_t));
+   b->is_assoc   = true;
+   b->assoc      = arr;
+   b->four       = (estore == STORE_FVEC4);
+   b->width      = w;
+   b->key_width  = kw;
+   b->key_signed = arr->key != NULL && vlog_is_signed(arr->key);
+   b->loc        = arr->decl.object.loc;
+   b->stage      = xmalloc(w);
+
+   // Addresses in the file are the bit patterns of the index
+   *low   = 0;
+   *high  = kw >= 63 ? INT64_MAX : (INT64_C(1) << kw) - 1;
+   *width = w;
+   return b;
+}
+
+static bool vpi_assoc_bulk_write(vpi_mem_bulk_t *b, int64_t addr,
+                                 s_vpi_value *val)
+{
+   if (!unpack_value(val, b->stage, b->width, &(b->loc)))
+      return false;
+
+   uint64_t abits = 0, bbits = 0;
+   for (int i = 0; i < b->width; i++) {
+      const uint8_t bit = b->stage[i];
+      const uint64_t mask = UINT64_C(1) << (b->width - 1 - i);
+      if (b->four) {
+         if (bit & 1) abits |= mask;
+         if (bit & 2) bbits |= mask;
+      }
+      else if (bit == 1)
+         abits |= mask;
+   }
+
+   int64_t key = addr;
+   if (b->key_signed && b->key_width < 64) {
+      const int sh = 64 - b->key_width;
+      key = (int64_t)((uint64_t)key << sh) >> sh;
+   }
+
+   if (b->nloads == b->maxloads) {
+      b->maxloads = MAX(64, b->maxloads * 2);
+      b->loads = xrealloc_array(b->loads, b->maxloads,
+                                sizeof(vpi_assoc_load_t));
+   }
+
+   b->loads[b->nloads] = (vpi_assoc_load_t){
+      .key   = key,
+      .seq   = b->nloads,
+      .abits = abits,
+      .bbits = bbits,
+   };
+   b->nloads++;
+   return true;
+}
+
+static int vpi_assoc_load_cmp(const void *a, const void *b)
+{
+   const vpi_assoc_load_t *la = a, *lb = b;
+   if (la->key != lb->key)
+      return la->key < lb->key ? -1 : 1;
+   else
+      return la->seq < lb->seq ? -1 : la->seq > lb->seq;
+}
+
+static void vpi_assoc_bulk_close(vpi_mem_bulk_t *b)
+{
+   // Merge the sorted words with the existing entries into a new array of
+   // key and value pairs, the later of two words for the same key wins
+
+   if (b->nloads == 0)
+      return;
+
+   qsort(b->loads, b->nloads, sizeof(vpi_assoc_load_t), vpi_assoc_load_cmp);
+
+   uint32_t nuniq = 0;
+   for (uint32_t i = 0; i < b->nloads; i++) {
+      if (nuniq > 0 && b->loads[nuniq - 1].key == b->loads[i].key)
+         b->loads[nuniq - 1] = b->loads[i];
+      else
+         b->loads[nuniq++] = b->loads[i];
+   }
+
+   c_regArray *arr = b->assoc;
+   ffi_uarray_t *u = vpi_field_ptr(&(arr->decl));
+   if (u == NULL)
+      return;
+
+   const bool has_default = u->ptr != NULL && ffi_array_dir(u->dims[0].length);
+   const int64_t count =
+      u->ptr != NULL ? ffi_array_length(u->dims[0].length) : 0;
+   const uint8_t *old = u->ptr;
+   const size_t esize = arr->esize;
+
+   int64_t nnew = 0;
+   for (int64_t i = 0, j = 0; i < count || j < nuniq; nnew++) {
+      if (j == nuniq)
+         i++;
+      else if (i == count)
+         j++;
+      else {
+         const int64_t k = *(const int64_t *)(old + i * esize);
+         if (k < b->loads[j].key)
+            i++;
+         else if (k > b->loads[j].key)
+            j++;
+         else
+            i++, j++;
+      }
+   }
+
+   const int64_t total = nnew + (has_default ? 1 : 0);
+   mspace_t *mspace = jit_get_mspace(vpi_get_jit(vpi_context()));
+   uint8_t *data = mspace_alloc(mspace, total * esize);
+   memset(data, '\0', total * esize);
+
+   for (int64_t i = 0, j = 0, n = 0; n < nnew; n++) {
+      uint8_t *dst = data + n * esize;
+      const int64_t k = i < count ? *(const int64_t *)(old + i * esize) : 0;
+      if (j == nuniq || (i < count && k < b->loads[j].key))
+         memcpy(dst, old + (i++) * esize, esize);
+      else {
+         if (i < count && k == b->loads[j].key)
+            memcpy(dst, old + (i++) * esize, esize);
+
+         const vpi_assoc_load_t *l = &(b->loads[j++]);
+         *(int64_t *)dst = l->key;
+
+         uint64_t *cell = (uint64_t *)(dst + arr->valoff);
+         cell[0] = l->abits;
+         if (b->four)
+            cell[1] = l->bbits;
+      }
+   }
+
+   if (has_default)
+      memcpy(data + nnew * esize, old + count * esize, esize);
+
+   u->ptr = data;
+   if (has_default) {
+      u->dims[0].left = nnew - 1;
+      u->dims[0].length = ~nnew;
+   }
+   else {
+      u->dims[0].left = 0;
+      u->dims[0].length = nnew;
+   }
+}
+
 vpi_mem_bulk_t *vpi_mem_bulk_open(vpiHandle mem, int64_t *low, int64_t *high,
                                   int *width)
 {
@@ -9213,8 +9430,9 @@ vpi_mem_bulk_t *vpi_mem_bulk_open(vpiHandle mem, int64_t *low, int64_t *high,
    if (p != NULL && p->low != NULL)
       obj = p->low;
 
-   if (vpi_dyn_array(obj) != NULL)
-      return NULL;
+   c_regArray *dyn = vpi_dyn_array(obj);
+   if (dyn != NULL)
+      return vpi_assoc_bulk_open(dyn, low, high, width);
 
    c_regArray *arr = is_regArray(obj);
    if (arr == NULL || arr->count == 0 || arr->decl.dtype == NULL)
@@ -9303,6 +9521,14 @@ vpi_mem_bulk_t *vpi_mem_bulk_open(vpiHandle mem, int64_t *low, int64_t *high,
 bool vpi_mem_bulk_write(vpi_mem_bulk_t *b, int64_t addr, const char *word,
                         bool binary)
 {
+   if (b->is_assoc) {
+      s_vpi_value val = {
+         .format    = binary ? vpiBinStrVal : vpiHexStrVal,
+         .value.str = (PLI_BYTE8 *)word,
+      };
+      return vpi_assoc_bulk_write(b, addr, &val);
+   }
+
    const int64_t pos = b->left > b->right ? b->left - addr : addr - b->left;
    if (pos < 0 || pos >= b->count)
       return false;
@@ -9374,12 +9600,27 @@ bool vpi_mem_bulk_write(vpi_mem_bulk_t *b, int64_t addr, const char *word,
    return true;
 }
 
+bool vpi_mem_is_assoc(vpiHandle mem)
+{
+   c_vpiObject *obj = from_handle(mem);
+   if (obj == NULL)
+      return false;
+
+   c_regArray *arr = vpi_dyn_array(vpi_memory_alias(obj));
+   return arr != NULL && arr->dyn == vpiAssocArray;
+}
+
 void vpi_mem_bulk_close(vpi_mem_bulk_t *b)
 {
    if (b == NULL)
       return;
 
-   vpi_mem_bulk_flush(b);
+   if (b->is_assoc)
+      vpi_assoc_bulk_close(b);
+   else
+      vpi_mem_bulk_flush(b);
+
+   free(b->loads);
    free(b->stage);
    free(b);
 }
