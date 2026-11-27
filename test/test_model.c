@@ -403,6 +403,69 @@ START_TEST(test_event1)
 }
 END_TEST
 
+static void watch_count_cb(uint64_t now, rt_signal_t *signal,
+                           rt_watch_t *watch, void *user)
+{
+   (*(int *)user)++;
+}
+
+START_TEST(test_watch1)
+{
+   input_from_file(TESTDIR "/model/event1.vhd");
+
+   rt_model_t *m = model_new(get_jit(), NULL);
+
+   tree_t top = run_elab_with_model(m);
+   fail_if(top == NULL);
+
+   model_reset(m);
+
+   tree_t b0 = tree_stmt(top, 0);
+
+   rt_scope_t *root = find_scope(m, b0);
+   fail_if(root == NULL);
+
+   rt_signal_t *ss = find_signal(root, get_decl(b0, "S"), NULL);
+   fail_if(ss == NULL);
+
+   // Free watches from the head, the middle and the tail of the list
+   // of all watches in any order
+   const int nwatch = 64;
+   rt_watch_t *watches[nwatch];
+   int counts[nwatch];
+   for (int i = 0; i < nwatch; i++) {
+      counts[i] = 0;
+      watches[i] = watch_new(m, watch_count_cb, &(counts[i]),
+                             WATCH_EVENT, 1);
+      model_set_event_cb(m, ss, 0, 1, watches[i]);
+   }
+
+   watch_free(m, watches[nwatch - 1]);
+   watch_free(m, watches[0]);
+   for (int i = 3; i < nwatch - 1; i += 3)
+      watch_free(m, watches[i]);
+   watch_free(m, watches[nwatch / 2 - 1]);
+
+   while (!model_step(m))
+      ;
+
+   for (int i = 0; i < nwatch; i++) {
+      const bool freed = i == 0 || i == nwatch - 1 || i % 3 == 0
+         || i == nwatch / 2 - 1;
+      ck_assert_int_eq(counts[i], freed ? 0 : 1);
+   }
+
+   for (int i = 1; i < nwatch - 1; i++) {
+      if (i % 3 != 0 && i != nwatch / 2 - 1)
+         watch_free(m, watches[i]);
+   }
+
+   model_free(m);
+
+   fail_if_errors();
+}
+END_TEST
+
 START_TEST(test_process1)
 {
    input_from_file(TESTDIR "/model/process1.vhd");
@@ -657,6 +720,7 @@ Suite *get_model_tests(void)
    tcase_add_test(tc, test_pending1);
    tcase_add_test(tc, test_fast2);
    tcase_add_test(tc, test_event1);
+   tcase_add_test(tc, test_watch1);
    tcase_add_test(tc, test_process1);
    tcase_add_test(tc, test_split1);
    tcase_add_test(tc, test_drivers1);

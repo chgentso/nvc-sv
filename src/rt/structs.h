@@ -347,6 +347,7 @@ typedef struct _rt_watch {
    rt_wakeable_t   wakeable;
    sig_event_fn_t  fn;
    rt_watch_t     *chain_all;
+   rt_watch_t    **prev_all;
    void           *user_data;
    unsigned        num_slots;
    unsigned        next_slot;

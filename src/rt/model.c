@@ -7617,6 +7617,7 @@ rt_watch_t *watch_new(rt_model_t *m, sig_event_fn_t fn, void *user,
                                 sizeof(rt_signal_t *));
    w->fn        = fn;
    w->chain_all = m->watches;
+   w->prev_all  = &(m->watches);
    w->user_data = user;
    w->num_slots = slots;
 
@@ -7625,6 +7626,8 @@ rt_watch_t *watch_new(rt_model_t *m, sig_event_fn_t fn, void *user,
    w->wakeable.pending   = false;
    w->wakeable.delayed   = false;
 
+   if (m->watches != NULL)
+      m->watches->prev_all = &(w->chain_all);
    m->watches = w;
 
    return w;
@@ -7640,20 +7643,17 @@ void watch_free(rt_model_t *m, rt_watch_t *w)
          clear_event(m, &(n->pending), &(w->wakeable));
    }
 
-   rt_watch_t **last = &m->watches;
-   for (rt_watch_t *it = *last; it;
-        last = &(it->chain_all), it = it->chain_all) {
-      if (it == w) {
-         *last = it->chain_all;
-         if (w->wakeable.pending)
-            w->wakeable.zombie = true;   // Will be freed in callback
-         else
-            free(w);
-         return;
-      }
-   }
+   // Unlink in constant time: designs with many islands free a watch
+   // for each signal that becomes a direct wire
+   assert(*(w->prev_all) == w);
+   *(w->prev_all) = w->chain_all;
+   if (w->chain_all != NULL)
+      w->chain_all->prev_all = w->prev_all;
 
-   should_not_reach_here();
+   if (w->wakeable.pending)
+      w->wakeable.zombie = true;   // Will be freed in callback
+   else
+      free(w);
 }
 
 void model_set_event_cb(rt_model_t *m, rt_signal_t *s, int offset,
