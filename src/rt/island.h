@@ -106,7 +106,7 @@ typedef struct {
 #define RT_IDIR_STD_LOGIC9  (1u << 0)
 #define RT_IDIR_TWO_STATE   (1u << 1)
 #define RT_IDIR_ACT         (1u << 2)   // Set the change byte (flags >> 8)
-#define RT_IDIR_MIX         (1u << 3)   // Mode A <-> Mode B: mix_src/mix_dst
+#define RT_IDIR_MIX         (1u << 3)   // With STD_LOGIC9: Mode A <-> Mode B
 #define RT_IDIR_IDX_SHIFT   8u
 
 typedef struct {

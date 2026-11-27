@@ -3769,11 +3769,12 @@ static inline bool island_copy_direct_sig(const rt_island_sig_t *src_s,
 
 static inline bool island_copy_direct_desc(const rt_island_direct_desc_t *dd)
 {
-   if (likely(dd->flags & RT_IDIR_STD_LOGIC9))
+   if (likely(dd->flags & RT_IDIR_STD_LOGIC9)) {
+      // A wire between a Mode A and a Mode B island is a VHDL one too
+      if (unlikely(dd->flags & RT_IDIR_MIX))
+         return island_spec_copy_mixed(dd->mix_src, dd->mix_dst);
       return island_commit_bytes(dd->dst_a, dd->src_a, dd->count);
-
-   if (unlikely(dd->flags & RT_IDIR_MIX))
-      return island_spec_copy_mixed(dd->mix_src, dd->mix_dst);
+   }
 
    const uint32_t total_words = dd->count;
    const uint64_t *sa = (const uint64_t *)dd->src_a;
@@ -4156,7 +4157,7 @@ static void island_refresh_direct_comb_descs(rt_island_t *isl)
          dd->flags = fl;
          if ((src_s->flags ^ dst_s->flags)
              & (RT_ISIG_TWO_STATE | RT_ISIG_STD_LOGIC9)) {
-            dd->flags = RT_IDIR_MIX;
+            dd->flags = RT_IDIR_STD_LOGIC9 | RT_IDIR_MIX;
             dd->mix_src = src_s;
             dd->mix_dst = dst_s;
          }
