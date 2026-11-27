@@ -232,6 +232,7 @@ struct _rt_super_island {
    bool                has_dirty;
    bool                has_dirty_inputs;
    bool                mt_eval_on_main;
+   bool                mt_requeue;
    bool                is_vhdl;
 };
 
@@ -4158,9 +4159,22 @@ static void island_build_hier(rt_island_mgr_t *mgr)
             const hier_comb_edge_t e = comb_adj[u][top->edge_idx++];
             const uint32_t v = e.dst_isl;
             if (color[v] == 1) {
-               cands.items[e.cand_idx].rejected = true;
-               if (unlikely(island_wstats_on))
-                  island_wstat_note(cands.items[e.cand_idx].src_s, WR_CYCLE);
+               // A back edge closes a cycle in the island graph.  This is
+               // usually not a combinational loop between signals: two
+               // islands often feed each other through independent
+               // paths.  SV islands keep the wire: the reader sits
+               // earlier in the cluster order, so a change marks it dirty
+               // again and island_eval_cluster() requeues the cluster for
+               // the next pass, which is when the reader would have seen
+               // the signal update otherwise.  A real loop then still
+               // counts delta cycles.  VHDL islands keep the signal.
+               hier_cand_t *hc = &(cands.items[e.cand_idx]);
+               if (hc->src_s->isl->is_vhdl
+                   || mgr->islands.items[v]->is_vhdl) {
+                  hc->rejected = true;
+                  if (unlikely(island_wstats_on))
+                     island_wstat_note(hc->src_s, WR_CYCLE);
+               }
             }
             else if (color[v] == 0) {
                color[v] = 1;
@@ -5208,6 +5222,7 @@ static bool island_eval_cluster_mt(jit_t *jit, rt_super_island_t *cl,
    bool ok = true;
    const uint32_t sync_start = cl->min_dirty_pos;
    uint32_t sync_end = 0;
+   uint32_t redo_pos = UINT32_MAX;
 
    for (uint32_t k = cl->min_dirty_pos;
         k < cl->n_islands && cl->dirty_count > 0; k++) {
@@ -5256,10 +5271,11 @@ static bool island_eval_cluster_mt(jit_t *jit, rt_super_island_t *cl,
             if (island_copy_direct_sig(src_s, dst_s)
                 && (dst_s->flags & RT_ISIG_COMB_READ)
                 && dst_s->isl->eval_handle != JIT_HANDLE_INVALID) {
-               assert(dst_s->isl->topo_pos > k);
                if (!dst_s->isl->dirty) {
                   dst_s->isl->dirty = true;
                   cl->dirty_count++;
+                  if (dst_s->isl->topo_pos <= k)
+                     redo_pos = MIN(redo_pos, dst_s->isl->topo_pos);
                }
             }
          }
@@ -5272,9 +5288,25 @@ static bool island_eval_cluster_mt(jit_t *jit, rt_super_island_t *cl,
    }
 
    if (ok) {
-      cl->has_dirty = false;
-      cl->min_dirty_pos = UINT32_MAX;
-      cl->dirty_count = 0;
+      if (unlikely(redo_pos != UINT32_MAX)) {
+         // A direct wire back to an island earlier in the order (a cycle
+         // in the island graph) changed: the main thread requeues the
+         // cluster for the next pass as island_eval_cluster() does
+         uint32_t n_dirty = 0;
+         for (uint32_t k = redo_pos; k < cl->n_islands; k++) {
+            if (cl->islands[k]->dirty)
+               n_dirty++;
+         }
+         cl->has_dirty = n_dirty > 0;
+         cl->min_dirty_pos = n_dirty > 0 ? redo_pos : UINT32_MAX;
+         cl->dirty_count = n_dirty;
+         cl->mt_requeue = n_dirty > 0;
+      }
+      else {
+         cl->has_dirty = false;
+         cl->min_dirty_pos = UINT32_MAX;
+         cl->dirty_count = 0;
+      }
       cl->mt_sync_start = sync_start;
       cl->mt_sync_end = sync_end;
    }
@@ -5765,6 +5797,10 @@ static bool island_eval_dirty_clusters(jit_t *jit, rt_model_t *m,
                   }
                   cl->mt_sync_start = 0;
                   cl->mt_sync_end = 0;
+                  if (unlikely(cl->mt_requeue)) {
+                     cl->mt_requeue = false;
+                     APUSH(mgr->dirty_clusters, cl);
+                  }
                }
             }
          }
