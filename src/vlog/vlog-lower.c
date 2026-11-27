@@ -15153,7 +15153,13 @@ static void vlog_lower_for_loop(vlog_gen_t *g, vlog_node_t v, gen_stack_t *gs)
 
    mir_comment(g->mu, "For loop body");
 
-   loop_info_t loop = { .test_bb = step_bb, .exit_bb = exit_bb };
+   mir_block_t break_bb = exit_bb;
+   if (gs->loop != NULL && vlog_decls(init) > 0
+       && vlog_kind(vlog_decl(init, 0)) == V_LOCAL_DECL
+       && (vlog_flags(vlog_decl(init, 0)) & VLOG_F_FOREACH_INNER))
+      break_bb = gs->loop->exit_bb;
+
+   loop_info_t loop = { .test_bb = step_bb, .exit_bb = break_bb };
    gen_stack_t this = vlog_push_loop(gs, &loop);
 
    vlog_lower_stmts(g, v, &this);
@@ -34609,7 +34615,8 @@ static int vlog_lower_foreach_dims(vlog_node_t decl, lower_foreach_dim_t *dims,
 static void vlog_lower_foreach_level(vlog_gen_t *g, vlog_node_t v,
                                      gen_stack_t *gs,
                                      const lower_foreach_dim_t *dims,
-                                     int nvars, int level, mir_value_t cur)
+                                     int nvars, int level, mir_value_t cur,
+                                     mir_block_t outer_exit)
 {
    if (level == nvars) {
       vlog_lower_stmts(g, v, gs);
@@ -34619,7 +34626,7 @@ static void vlog_lower_foreach_level(vlog_gen_t *g, vlog_node_t v,
    vlog_node_t idecl = vlog_decl(v, level);
    if (vlog_kind(idecl) == V_EMPTY) {
       vlog_lower_foreach_level(g, v, gs, dims, nvars, level + 1,
-                               MIR_NULL_VALUE);
+                               MIR_NULL_VALUE, outer_exit);
       return;
    }
 
@@ -34687,10 +34694,12 @@ static void vlog_lower_foreach_level(vlog_gen_t *g, vlog_node_t v,
          next_cur = mir_build_load(
             g->mu, mir_build_record_ref(g->mu, entry, 1));
 
-      loop_info_t loop = { .test_bb = step_bb, .exit_bb = exit_bb };
+      mir_block_t break_bb = mir_is_null(outer_exit) ? exit_bb : outer_exit;
+      loop_info_t loop = { .test_bb = step_bb, .exit_bb = break_bb };
       gen_stack_t this = vlog_push_loop(gs, &loop);
 
-      vlog_lower_foreach_level(g, v, &this, dims, nvars, level + 1, next_cur);
+      vlog_lower_foreach_level(g, v, &this, dims, nvars, level + 1, next_cur,
+                               break_bb);
 
       if (!mir_block_finished(g->mu, MIR_NULL_BLOCK))
          mir_build_jump(g->mu, step_bb);
@@ -34736,10 +34745,12 @@ static void vlog_lower_foreach_level(vlog_gen_t *g, vlog_node_t v,
          next_cur = mir_build_load(
             g->mu, mir_build_array_ref(g->mu, mir_build_unwrap(g->mu, cur), i));
 
-      loop_info_t loop = { .test_bb = step_bb, .exit_bb = exit_bb };
+      mir_block_t break_bb = mir_is_null(outer_exit) ? exit_bb : outer_exit;
+      loop_info_t loop = { .test_bb = step_bb, .exit_bb = break_bb };
       gen_stack_t this = vlog_push_loop(gs, &loop);
 
-      vlog_lower_foreach_level(g, v, &this, dims, nvars, level + 1, next_cur);
+      vlog_lower_foreach_level(g, v, &this, dims, nvars, level + 1, next_cur,
+                               break_bb);
 
       if (!mir_block_finished(g->mu, MIR_NULL_BLOCK))
          mir_build_jump(g->mu, step_bb);
@@ -34799,10 +34810,12 @@ static void vlog_lower_foreach_level(vlog_gen_t *g, vlog_node_t v,
          next_cur = mir_build_load(g->mu, mir_build_array_ref(g->mu, cur, k));
    }
 
-   loop_info_t loop = { .test_bb = step_bb, .exit_bb = exit_bb };
+   mir_block_t break_bb = mir_is_null(outer_exit) ? exit_bb : outer_exit;
+   loop_info_t loop = { .test_bb = step_bb, .exit_bb = break_bb };
    gen_stack_t this = vlog_push_loop(gs, &loop);
 
-   vlog_lower_foreach_level(g, v, &this, dims, nvars, level + 1, next_cur);
+   vlog_lower_foreach_level(g, v, &this, dims, nvars, level + 1, next_cur,
+                            break_bb);
 
    if (!mir_block_finished(g->mu, MIR_NULL_BLOCK))
       mir_build_jump(g->mu, step_bb);
@@ -34867,7 +34880,7 @@ static void vlog_lower_foreach(vlog_gen_t *g, vlog_node_t v, gen_stack_t *gs)
    else if (need_cur)
       cur = vlog_lower_rvalue(g, arr);
 
-   vlog_lower_foreach_level(g, v, gs, dims, nvars, 0, cur);
+   vlog_lower_foreach_level(g, v, gs, dims, nvars, 0, cur, MIR_NULL_BLOCK);
 }
 
 static bool vlog_lower_one_stmt(vlog_gen_t *g, vlog_node_t s, gen_stack_t *gs)

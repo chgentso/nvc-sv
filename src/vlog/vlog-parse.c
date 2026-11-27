@@ -11791,8 +11791,10 @@ static vlog_node_t p_foreach_statement(void)
 
          if (top == NULL)
             top = loop;
-         else
+         else {
+            vlog_set_flags(d, vlog_flags(d) | VLOG_F_FOREACH_INNER);
             vlog_add_stmt(inner, loop);
+         }
 
          inner = loop;
          continue;
@@ -11892,8 +11894,10 @@ static vlog_node_t p_foreach_statement(void)
 
          if (top == NULL)
             top = loop;
-         else
+         else {
+            vlog_set_flags(d, vlog_flags(d) | VLOG_F_FOREACH_INNER);
             vlog_add_stmt(inner, loop);
+         }
 
          inner = loop;
          continue;
@@ -12028,8 +12032,10 @@ static vlog_node_t p_foreach_statement(void)
 
       if (top == NULL)
          top = loop;
-      else
+      else {
+         vlog_set_flags(d, vlog_flags(d) | VLOG_F_FOREACH_INNER);
          vlog_add_stmt(inner, loop);
+      }
 
       inner = loop;
    }

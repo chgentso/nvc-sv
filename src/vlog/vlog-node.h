@@ -645,6 +645,7 @@ typedef enum {
    VLOG_F_OVERRIDE_EXTENDS = VLOG_F_UNIQUE0, // On a method declared :extends
    VLOG_F_OVERRIDE_FINAL = VLOG_F_PRIORITY,  // On a method declared :final
    VLOG_F_SIGNAL_STATIC = VLOG_F_UNIQUE0,    // Static local lowered as signal
+   VLOG_F_FOREACH_INNER = VLOG_F_PRIORITY,   // Inner dim var of multi-dim foreach
    VLOG_F_PORT_VAR = (1U << 31),     // Var backing a module/interface port
 } vlog_flags_t;
 
