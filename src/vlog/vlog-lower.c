@@ -17275,7 +17275,11 @@ static void vlog_lower_case(vlog_gen_t *g, vlog_node_t v, gen_stack_t *gs)
       nexprs += nparams;
    }
 
-   mir_value_t *exprs LOCAL = xmalloc_array(nexprs, sizeof(mir_value_t));
+   const bool eager =
+      !!(vlog_flags(v) & (VLOG_F_UNIQUE | VLOG_F_UNIQUE0 | VLOG_F_PRIORITY));
+
+   mir_value_t *exprs LOCAL = eager
+      ? xmalloc_array(nexprs, sizeof(mir_value_t)) : NULL;
 
    // See 1800-2023 section 12.5 for type rules
 
@@ -17294,17 +17298,29 @@ static void vlog_lower_case(vlog_gen_t *g, vlog_node_t v, gen_stack_t *gs)
 
       const int nparams = vlog_params(item);
       for (int j = 0; j < nparams; j++) {
-         mir_value_t expr = vlog_lower_rvalue(g, vlog_param(item, j));
-         exprs[nexpr++] = expr;
+         vlog_node_t p = vlog_param(item, j);
+         if (eager) {
+            mir_value_t expr = vlog_lower_rvalue(g, p);
+            exprs[nexpr++] = expr;
 
-         if (mir_is(g->mu, expr, MIR_TYPE_REAL))
+            if (mir_is(g->mu, expr, MIR_TYPE_REAL))
+               is_real = true;
+            else {
+               mir_type_t expr_type = mir_get_type(g->mu, expr);
+               is_signed &= mir_get_signed(g->mu, expr_type);
+               width = MAX(width, mir_get_size(g->mu, expr_type));
+               if (mir_get_class(g->mu, expr_type) == MIR_TYPE_VEC4)
+                  any_vec4 = true;
+            }
+         }
+         else if (vlog_is_real(p))
             is_real = true;
          else {
-            mir_type_t expr_type = mir_get_type(g->mu, expr);
-            is_signed &= mir_get_signed(g->mu, expr_type);
-            width = MAX(width, mir_get_size(g->mu, expr_type));
-            if (mir_get_class(g->mu, expr_type) == MIR_TYPE_VEC4)
-               any_vec4 = true;
+            is_signed &= vlog_is_signed(p);
+            const unsigned pw = vlog_width(p);
+            if (pw > 0)
+               width = MAX(width, (int)pw);
+            any_vec4 = true;
          }
       }
    }
@@ -17327,7 +17343,7 @@ static void vlog_lower_case(vlog_gen_t *g, vlog_node_t v, gen_stack_t *gs)
 
    value = vlog_lower_cast(g, type, value);
 
-   if (vlog_flags(v) & (VLOG_F_UNIQUE | VLOG_F_UNIQUE0 | VLOG_F_PRIORITY)) {
+   if (eager) {
       mir_value_t *tests LOCAL = xmalloc_array(nitems, sizeof(mir_value_t));
       int ntests = 0;
       for (int i = 0, nexpr = 0; i < nitems; i++) {
@@ -17342,26 +17358,68 @@ static void vlog_lower_case(vlog_gen_t *g, vlog_node_t v, gen_stack_t *gs)
       }
 
       vlog_lower_unique_checks(g, v, tests, ntests, default_item != -1);
+
+      for (int i = 0, nexpr = 0; i < nitems; i++) {
+         vlog_node_t item = vlog_stmt(v, i);
+         assert(vlog_kind(item) == V_CASE_ITEM);
+
+         if (i == default_item)
+            continue;
+
+         mir_block_t else_bb = mir_add_block(g->mu);
+
+         mir_value_t comb = vlog_case_match(g, item, exprs, &nexpr, type, value,
+                                            op, is_signed, is_real);
+
+         if (mir_is_null(comb))
+            mir_build_jump(g->mu, blocks[i]);
+         else
+            mir_build_cond(g->mu, comb, blocks[i], else_bb);
+
+         mir_set_cursor(g->mu, else_bb, MIR_APPEND);
+      }
    }
+   else {
+      // Evaluate case item expressions in order, stopping at the first match
+      // (IEEE 1800-2017 section 12.5)
+      for (int i = 0; i < nitems; i++) {
+         vlog_node_t item = vlog_stmt(v, i);
+         assert(vlog_kind(item) == V_CASE_ITEM);
 
-   for (int i = 0, nexpr = 0; i < nitems; i++) {
-      vlog_node_t item = vlog_stmt(v, i);
-      assert(vlog_kind(item) == V_CASE_ITEM);
+         if (i == default_item)
+            continue;
 
-      if (i == default_item)
-         continue;
+         const int nparams = vlog_params(item);
+         for (int j = 0; j < nparams; j++) {
+            const bool pxz = g->preserve_xz;
+            if (g->two_state)
+               g->preserve_xz = true;
+            mir_value_t expr = vlog_lower_rvalue(g, vlog_param(item, j));
+            g->preserve_xz = pxz;
 
-      mir_block_t else_bb = mir_add_block(g->mu);
+            mir_type_t expr_type = mir_get_type(g->mu, expr);
+            if (!is_signed && !is_real && mir_is_vector(g->mu, expr)) {
+               const int size = mir_get_size(g->mu, expr_type);
+               mir_type_t us_type =
+                  vlog_vec_type_for(g->mu, expr_type, size, false);
+               expr = mir_build_cast(g->mu, us_type, expr);
+            }
 
-      mir_value_t comb = vlog_case_match(g, item, exprs, &nexpr, type, value, op,
-                                         is_signed, is_real);
+            mir_value_t cast = vlog_lower_cast(g, type, expr);
 
-      if (mir_is_null(comb))
-         mir_build_jump(g->mu, blocks[i]);
-      else
-         mir_build_cond(g->mu, comb, blocks[i], else_bb);
+            mir_value_t test;
+            if (mir_is_vector(g->mu, cast)) {
+               mir_value_t eq = mir_build_binary(g->mu, op, type, cast, value);
+               test = mir_build_test(g->mu, eq);
+            }
+            else
+               test = mir_build_cmp(g->mu, MIR_CMP_EQ, cast, value);
 
-      mir_set_cursor(g->mu, else_bb, MIR_APPEND);
+            mir_block_t else_bb = mir_add_block(g->mu);
+            mir_build_cond(g->mu, test, blocks[i], else_bb);
+            mir_set_cursor(g->mu, else_bb, MIR_APPEND);
+         }
+      }
    }
 
    mir_block_t exit_bb;

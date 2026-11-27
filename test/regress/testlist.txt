@@ -3373,3 +3373,4 @@ vpi_genvar1     verilog,vpi
 svwildeq2       verilog
 svdelaytype1    verilog
 svunitscope1    verilog
+svcaseimpure1   verilog
