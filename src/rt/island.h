@@ -254,6 +254,7 @@ typedef struct _rt_island {
    bool                   need_sync_out;
    bool                   mt_eval_on_main;
    bool                   mt_ff_unsafe;
+   bool                   is_vhdl;
 } rt_island_t;
 
 typedef struct _rt_island_mgr rt_island_mgr_t;
@@ -273,8 +274,11 @@ bool rt_island_eval_sv_reset(jit_t *jit, rt_model_t *m, rt_island_mgr_t *mgr,
                              tlab_t *tlab, bool first_pass, bool *progress);
 void rt_island_mark_sv_reset_edges(rt_island_mgr_t *mgr);
 bool rt_island_has_dirty(const rt_island_mgr_t *mgr);
+bool rt_island_has_sv_dirty(const rt_island_mgr_t *mgr);
 bool rt_island_eval_dirty(jit_t *jit, rt_model_t *m, rt_island_mgr_t *mgr,
                           tlab_t *tlab);
+bool rt_island_eval_sv_dirty(jit_t *jit, rt_model_t *m, rt_island_mgr_t *mgr,
+                             tlab_t *tlab);
 bool rt_island_has_ff_sample(const rt_island_mgr_t *mgr);
 bool rt_island_eval_ff(jit_t *jit, rt_model_t *m, rt_island_mgr_t *mgr,
                        tlab_t *tlab);

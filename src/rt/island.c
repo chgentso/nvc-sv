@@ -230,6 +230,7 @@ struct _rt_super_island {
    bool                has_dirty;
    bool                has_dirty_inputs;
    bool                mt_eval_on_main;
+   bool                is_vhdl;
 };
 
 typedef struct {
@@ -306,6 +307,7 @@ struct _rt_island_mgr {
    bool                    mt_deps_built;
    bool                    mt_has_comb_deps;
    bool                    fast;
+   bool                    has_vhdl;
 };
 
 static inline bool island_is_hier_mode(void)
@@ -1509,6 +1511,17 @@ void rt_island_finish(void *handle)
    isl->scratch_words = max_words;
    isl->scratch = xcalloc_array(max_words * 2u, sizeof(uint64_t));
 
+   isl->is_vhdl = false;
+   for (uint32_t i = 0; i < isl->nsigs; i++) {
+      if (isl->sigs[i].flags & (RT_ISIG_VHDL | RT_ISIG_STD_LOGIC9
+                                | RT_ISIG_VHDL_SCHED)) {
+         isl->is_vhdl = true;
+         break;
+      }
+   }
+   const bool allow_inline = !isl->is_vhdl
+      || (isl->mgr->fast && !opt_get_int(OPT_SHUFFLE_PROCS));
+
    uint32_t in_pos = 0, out_pos = 0;
    for (uint32_t i = 0; i < isl->nsigs; i++) {
       rt_island_sig_t *s = &(isl->sigs[i]);
@@ -1528,6 +1541,7 @@ void rt_island_finish(void *handle)
          }
          in_pos++;
          s->watch = watch_new(m, island_input_watch_cb, s, WATCH_EVENT, 1);
+         watch_set_inline_island(s->watch, allow_inline);
          if (s->sig->shared.flags & SIG_F_PACKED)
             model_set_event_cb(m, s->sig, 0, 1, s->watch);
          else
@@ -3827,7 +3841,16 @@ void rt_island_reset_all(rt_island_mgr_t *mgr)
          isl->n_sparse_ovf = 0;
          isl->sparse_ovf_data_used = 0;
       }
-      const bool allow_inline = mgr->fast && !opt_get_int(OPT_SHUFFLE_PROCS);
+      isl->is_vhdl = false;
+      for (uint32_t j = 0; j < isl->nsigs; j++) {
+         if (isl->sigs[j].flags & (RT_ISIG_VHDL | RT_ISIG_STD_LOGIC9
+                                   | RT_ISIG_VHDL_SCHED)) {
+            isl->is_vhdl = true;
+            break;
+         }
+      }
+      const bool allow_inline = !isl->is_vhdl
+         || (mgr->fast && !opt_get_int(OPT_SHUFFLE_PROCS));
       for (uint32_t j = 0; j < isl->nsigs; j++) {
          rt_island_sig_t *s = &(isl->sigs[j]);
          s->flags &= ~RT_ISIG_LAST_OUT_VALID;
@@ -3871,10 +3894,16 @@ void rt_island_reset_all(rt_island_mgr_t *mgr)
 
    // Re-scan observed status now that all child scopes have run map_signal
    // and sched_event (rt_island_finish ran per-scope before child init).
+   mgr->has_vhdl = false;
    for (unsigned i = 0; i < mgr->islands.count; i++) {
       rt_island_t *isl = mgr->islands.items[i];
+      isl->is_vhdl = false;
       for (uint32_t j = 0; j < isl->nsigs; j++) {
          rt_island_sig_t *s = &(isl->sigs[j]);
+         if (s->flags & (RT_ISIG_VHDL | RT_ISIG_STD_LOGIC9 | RT_ISIG_VHDL_SCHED)) {
+            isl->is_vhdl = true;
+            mgr->has_vhdl = true;
+         }
          if (s->sig == NULL
              || !(s->flags & (RT_ISIG_COMB_WRITTEN | RT_ISIG_FF_WRITTEN))
              || (s->flags & (RT_ISIG_OBSERVED | RT_ISIG_DIRECT_LINK)))
@@ -3909,6 +3938,17 @@ void rt_island_reset_all(rt_island_mgr_t *mgr)
                sd->ff_entries[d].ff_func = NULL;
                sd->ff_entries[d].ff_fn = NULL;
                sd->ff_entries[d].dirty_mask = 0;
+            }
+         }
+      }
+
+      for (unsigned i = 0; i < mgr->clusters.count; i++) {
+         rt_super_island_t *cl = mgr->clusters.items[i];
+         cl->is_vhdl = false;
+         for (uint32_t k = 0; k < cl->n_islands; k++) {
+            if (cl->islands[k]->is_vhdl) {
+               cl->is_vhdl = true;
+               break;
             }
          }
       }
@@ -4145,6 +4185,26 @@ bool rt_island_has_dirty(const rt_island_mgr_t *mgr)
    return mgr != NULL
       && (mgr->dirty_q.count > 0 || mgr->dirty_clusters.count > 0
           || mgr->defer_dirty_q.count > 0);
+}
+
+bool rt_island_has_sv_dirty(const rt_island_mgr_t *mgr)
+{
+   if (mgr == NULL
+       || (mgr->dirty_q.count == 0 && mgr->dirty_clusters.count == 0))
+      return false;
+   if (likely(!mgr->has_vhdl))
+      return true;
+   for (unsigned i = 0; i < mgr->dirty_q.count; i++) {
+      const rt_island_t *isl = mgr->dirty_q.items[i];
+      if (isl->dirty && !isl->is_vhdl)
+         return true;
+   }
+   for (unsigned i = 0; i < mgr->dirty_clusters.count; i++) {
+      const rt_super_island_t *cl = mgr->dirty_clusters.items[i];
+      if (cl->has_dirty && !cl->is_vhdl)
+         return true;
+   }
+   return false;
 }
 
 static void island_add_isl_dep(rt_island_t *isl, rt_island_t *dep)
@@ -4740,11 +4800,13 @@ static inline bool cluster_has_pending_vhdl_ff(const rt_super_island_t *cl)
 }
 
 static bool island_eval_dirty_clusters(jit_t *jit, rt_model_t *m,
-                                       rt_island_mgr_t *mgr, tlab_t *tlab)
+                                       rt_island_mgr_t *mgr, tlab_t *tlab,
+                                       bool sv_only)
 {
    if (mgr->dirty_clusters.count == 0)
       return true;
 
+   const bool skip_vhdl = sv_only && mgr->has_vhdl;
    const int nthreads = opt_get_int(OPT_SIM_THREADS);
    unsigned n = mgr->dirty_clusters.count;
    bool do_probe = false;
@@ -4757,7 +4819,8 @@ static bool island_eval_dirty_clusters(jit_t *jit, rt_model_t *m,
          rt_super_island_t *cl = mgr->dirty_clusters.items[i];
          if (!cl->has_dirty)
             continue;
-         if (unlikely(cluster_has_pending_vhdl_ff(cl))) {
+         if (unlikely(cluster_has_pending_vhdl_ff(cl)
+                      || (skip_vhdl && cl->is_vhdl))) {
             APUSH(mgr->dirty_clusters, cl);
             continue;
          }
@@ -4788,7 +4851,8 @@ static bool island_eval_dirty_clusters(jit_t *jit, rt_model_t *m,
       rt_super_island_t *cl = mgr->dirty_clusters.items[i];
       if (!cl->has_dirty)
          continue;
-      if (unlikely(cluster_has_pending_vhdl_ff(cl)))
+      if (unlikely(cluster_has_pending_vhdl_ff(cl)
+                   || (skip_vhdl && cl->is_vhdl)))
          APUSH(mgr->dirty_clusters, cl);
       else
          APUSH(mgr->mt_cl_work_q, cl);
@@ -4933,11 +4997,13 @@ typedef struct {
    rt_model_t      *m;
    rt_island_mgr_t *mgr;
    tlab_t          *tlab;
+   bool             sv_only;
    bool             ok;
 } island_eval_guard_ctx_t;
 
 static bool rt_island_eval_dirty_inner(jit_t *jit, rt_model_t *m,
-                                       rt_island_mgr_t *mgr, tlab_t *tlab);
+                                       rt_island_mgr_t *mgr, tlab_t *tlab,
+                                       bool sv_only);
 
 static void island_eval_dirty_tramp(void *arg)
 {
@@ -4947,23 +5013,27 @@ static void island_eval_dirty_tramp(void *arg)
       jit_batch_ctx_t batch;
       jit_batch_begin(g->jit, &batch);
       island_batch_args = batch.args;
-      g->ok = rt_island_eval_dirty_inner(g->jit, g->m, g->mgr, g->tlab);
+      g->ok = rt_island_eval_dirty_inner(g->jit, g->m, g->mgr, g->tlab,
+                                         g->sv_only);
       island_batch_args = NULL;
       jit_batch_end(&batch);
    }
    else
-      g->ok = rt_island_eval_dirty_inner(g->jit, g->m, g->mgr, g->tlab);
+      g->ok = rt_island_eval_dirty_inner(g->jit, g->m, g->mgr, g->tlab,
+                                         g->sv_only);
 }
 
-bool rt_island_eval_dirty(jit_t *jit, rt_model_t *m, rt_island_mgr_t *mgr,
-                          tlab_t *tlab)
+static bool rt_island_eval_dirty_mode(jit_t *jit, rt_model_t *m,
+                                      rt_island_mgr_t *mgr, tlab_t *tlab,
+                                      bool sv_only)
 {
    if (mgr == NULL || (mgr->dirty_q.count == 0 && mgr->dirty_clusters.count == 0))
       return true;
    if (island_jit_guarded)
-      return rt_island_eval_dirty_inner(jit, m, mgr, tlab);
+      return rt_island_eval_dirty_inner(jit, m, mgr, tlab, sv_only);
    island_eval_guard_ctx_t g = {
-      .jit = jit, .m = m, .mgr = mgr, .tlab = tlab, .ok = false,
+      .jit = jit, .m = m, .mgr = mgr, .tlab = tlab, .sv_only = sv_only,
+      .ok = false,
    };
    const bool ran = jit_run_guarded(jit, island_eval_dirty_tramp, &g);
    island_jit_guarded = false;
@@ -4971,12 +5041,26 @@ bool rt_island_eval_dirty(jit_t *jit, rt_model_t *m, rt_island_mgr_t *mgr,
    return ran && g.ok;
 }
 
+bool rt_island_eval_dirty(jit_t *jit, rt_model_t *m, rt_island_mgr_t *mgr,
+                          tlab_t *tlab)
+{
+   return rt_island_eval_dirty_mode(jit, m, mgr, tlab, false);
+}
+
+bool rt_island_eval_sv_dirty(jit_t *jit, rt_model_t *m, rt_island_mgr_t *mgr,
+                             tlab_t *tlab)
+{
+   return rt_island_eval_dirty_mode(jit, m, mgr, tlab, true);
+}
+
 static bool rt_island_eval_dirty_inner(jit_t *jit, rt_model_t *m,
-                                       rt_island_mgr_t *mgr, tlab_t *tlab)
+                                       rt_island_mgr_t *mgr, tlab_t *tlab,
+                                       bool sv_only)
 {
    if (mgr == NULL || (mgr->dirty_q.count == 0 && mgr->dirty_clusters.count == 0))
       return true;
 
+   const bool skip_vhdl = sv_only && mgr->has_vhdl;
    bool ok = true;
    if (mgr->dirty_q.count > 0) {
       const int nthreads = opt_get_int(OPT_SIM_THREADS);
@@ -4993,7 +5077,8 @@ static bool rt_island_eval_dirty_inner(jit_t *jit, rt_model_t *m,
                isl->in_dirty_list = false;
                continue;
             }
-            if (unlikely(island_has_pending_vhdl_ff(isl))) {
+            if (unlikely(island_has_pending_vhdl_ff(isl)
+                         || (skip_vhdl && isl->is_vhdl))) {
                APUSH(mgr->dirty_q, isl);
                continue;
             }
@@ -5047,7 +5132,8 @@ static bool rt_island_eval_dirty_inner(jit_t *jit, rt_model_t *m,
                isl->in_dirty_list = false;
                continue;
             }
-            if (unlikely(island_has_pending_vhdl_ff(isl))) {
+            if (unlikely(island_has_pending_vhdl_ff(isl)
+                         || (skip_vhdl && isl->is_vhdl))) {
                APUSH(mgr->dirty_q, isl);
                continue;
             }
@@ -5186,7 +5272,7 @@ static bool rt_island_eval_dirty_inner(jit_t *jit, rt_model_t *m,
    }
 
    if (ok && mgr->dirty_clusters.count > 0)
-      ok = island_eval_dirty_clusters(jit, m, mgr, tlab);
+      ok = island_eval_dirty_clusters(jit, m, mgr, tlab, sv_only);
 
    return ok;
 }
@@ -6184,7 +6270,7 @@ static void island_eval_clusters_tramp(void *arg)
    jit_batch_ctx_t batch;
    jit_batch_begin(g->jit, &batch);
    island_batch_args = batch.args;
-   g->ok = island_eval_dirty_clusters(g->jit, g->m, g->mgr, g->tlab);
+   g->ok = island_eval_dirty_clusters(g->jit, g->m, g->mgr, g->tlab, false);
    island_batch_args = NULL;
    jit_batch_end(&batch);
 }
@@ -6221,7 +6307,7 @@ void rt_island_commit_ff(rt_model_t *m, rt_island_mgr_t *mgr, tlab_t *tlab)
          island_batch_args = NULL;
       }
       else
-         island_eval_dirty_clusters(jit, m, mgr, tlab);
+         island_eval_dirty_clusters(jit, m, mgr, tlab, false);
    }
 }
 
@@ -6388,7 +6474,7 @@ static void island_break_direct_link(rt_model_t *m, rt_island_sig_t *src_s)
    if (src_s->flags & RT_ISIG_COMB_WRITTEN)
       island_add_comb_flush_sig(src_s->isl, src_s);
 
-   const bool allow_inline = src_s->isl->mgr->fast
+   const bool allow_vhdl_inline = src_s->isl->mgr->fast
       && !opt_get_int(OPT_SHUFFLE_PROCS);
    for (uint32_t t = 0; t < src_s->n_direct_targets; t++) {
       rt_island_sig_t *dst_s = src_s->direct_targets[t];
@@ -6397,7 +6483,8 @@ static void island_break_direct_link(rt_model_t *m, rt_island_sig_t *src_s)
       if (dst_s->watch == NULL && dst_s->sig != NULL) {
          dst_s->watch = watch_new(m, island_input_watch_cb, dst_s,
                                   WATCH_EVENT, 1);
-         watch_set_inline_island(dst_s->watch, allow_inline);
+         watch_set_inline_island(dst_s->watch,
+                                 !dst_s->isl->is_vhdl || allow_vhdl_inline);
          if (dst_s->sig->shared.flags & SIG_F_PACKED)
             model_set_event_cb(m, dst_s->sig, 0, 1, dst_s->watch);
          else
