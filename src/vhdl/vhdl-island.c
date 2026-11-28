@@ -5574,27 +5574,11 @@ void vhdl_island_rebuild(vhdl_island_ctx_t *ctx)
       // they read changed (see RT_ISLAND_ACT_BYTES in rt/island.h)
       isl->has_act = isl_comb.count > 0;
       uint32_t off = isl->has_act ? RT_ISLAND_ACT_BYTES(isl_sig_ids.count) : 0;
-      bool has_sparse = false;
-      for (unsigned j = 0; j < isl_sig_ids.count; j++) {
-         const uint32_t gid = isl_sig_ids.items[j];
-         const vhdl_isig_t *s = &(ctx->sigs[gid]);
-         if (s->is_sparse_ram) {
-            has_sparse = true;
-            continue;
-         }
-
-         isl_sigs[j].a_off = off;
-         if (s->two_state) {
-            const uint32_t nwords = (s->width + 63u) / 64u;
-            off += nwords * s->nelems * 8u;
-         }
-         else {
-            const uint32_t nbytes = s->width * s->nelems * s->byte_size;
-            off += ALIGN_UP(nbytes, 8u);
-         }
-      }
       // Run flag and copies of the sensitivity signals of combinational
-      // processes with report statements, compared on each call
+      // processes with report statements or warnings, compared on each
+      // call.  They come before the signals so that the speculative Mode
+      // A layout keeps them (vhdl_island_new_a_variant): a process that
+      // ran in Mode A clears its run flag (vi_build_comb_unit).
       for (unsigned k = 0; k < isl_comb.count; k++) {
          vhdl_iproc_t *p = &(procs.items[isl_comb.items[k]]);
          if (!p->has_report && !p->has_warn)
@@ -5623,6 +5607,25 @@ void vhdl_island_rebuild(vhdl_island_ctx_t *ctx)
          }
       }
 
+      bool has_sparse = false;
+      for (unsigned j = 0; j < isl_sig_ids.count; j++) {
+         const uint32_t gid = isl_sig_ids.items[j];
+         const vhdl_isig_t *s = &(ctx->sigs[gid]);
+         if (s->is_sparse_ram) {
+            has_sparse = true;
+            continue;
+         }
+
+         isl_sigs[j].a_off = off;
+         if (s->two_state) {
+            const uint32_t nwords = (s->width + 63u) / 64u;
+            off += nwords * s->nelems * 8u;
+         }
+         else {
+            const uint32_t nbytes = s->width * s->nelems * s->byte_size;
+            off += ALIGN_UP(nbytes, 8u);
+         }
+      }
       isl->state_bytes = off;
       if (has_sparse) {
          const uint32_t stride = RT_ISLAND_STRIDE(off);

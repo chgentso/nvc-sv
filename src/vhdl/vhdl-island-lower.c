@@ -9352,6 +9352,14 @@ static mir_unit_t *vi_build_comb_unit(mir_context_t *mc,
          l.act_track = true;
       }
 
+      if (!guard && l.spec && p->has_warn) {
+         // A speculative Mode A variant runs the process without its Mode
+         // B guard and copies: clear the run flag so that Mode B runs it
+         // and takes new copies on its next call (vi_emit_report_guard)
+         mir_build_store(mu, vi_state_ptr_at(&l, p->evt_flag_off),
+                         vi_u8(mu, 0));
+      }
+
       bool ok = (!guard || vi_emit_report_guard(&l, p, next_bb))
          && vi_emit_self_shadow(&l, p)
          && vi_bind_process_locals(&l, p->stmt, &sc, false);
