@@ -4168,6 +4168,72 @@ static void run_comb_tarjan_topo(const analyze_ctx_t *ctx, vlog_island_t *isl,
    ACLEAR(comb_idx);
 }
 
+static int copy_ref_sig(const analyze_ctx_t *ctx, vlog_node_t v)
+{
+   if (vlog_kind(v) != V_REF || !vlog_has_ref(v))
+      return -1;
+   return find_sig_idx(ctx, vlog_ref(v));
+}
+
+// Continuous assignments that copy one whole signal into another (the
+// pass-through clock of a clock gating cell model, assign clk_out = clk_in)
+static void find_island_copies(const analyze_ctx_t *ctx, vlog_island_t *isl,
+                               const uint32_t *l_sigs,
+                               const uint32_t *p_indices)
+{
+   A(island_copy_t) copies = AINIT;
+   for (uint32_t i = 0; i < isl->nprocs; i++) {
+      const island_proc_t *ip = &(isl->procs[i]);
+      if (ip->kind != IPROC_ASSIGN || ip->from_gen
+          || ip->nreads != 1 || ip->nwrites != 1
+          || ip->reads[0] == ip->writes[0])
+         continue;
+
+      vlog_node_t stmt = ctx->procs[p_indices[i]].stmt;
+      if (vlog_kind(stmt) != V_ASSIGN)
+         continue;
+      const int gd = copy_ref_sig(ctx, vlog_target(stmt));
+      const int gs = copy_ref_sig(ctx, vlog_value(stmt));
+      const uint32_t dst = ip->writes[0], src = ip->reads[0];
+      if (gd < 0 || gs < 0 || (uint32_t)gd != l_sigs[dst]
+          || (uint32_t)gs != l_sigs[src])
+         continue;
+
+      const sig_meta_t *dm = &(ctx->sigs[gd]);
+      const island_sig_t *ds = &(isl->sigs[dst]);
+      const island_sig_t *ss = &(isl->sigs[src]);
+      if (dm->driver_count != 1 || dm->is_inout || ds->gen_path != NULL
+          || ss->gen_path != NULL || ds->width != ss->width
+          || ds->nelems != 1 || ss->nelems != 1
+          || ds->two_state != ss->two_state)
+         continue;
+
+      bool exclusive = true;
+      for (uint32_t j = 0; j < isl->nprocs && exclusive; j++) {
+         if (j == i)
+            continue;
+         const island_proc_t *op = &(isl->procs[j]);
+         for (uint32_t k = 0; k < op->nreads; k++) {
+            if (op->reads[k] == src || op->reads[k] == dst) {
+               exclusive = false;
+               break;
+            }
+         }
+         for (uint32_t k = 0; k < op->nwrites; k++) {
+            if (op->writes[k] == src || op->writes[k] == dst) {
+               exclusive = false;
+               break;
+            }
+         }
+      }
+
+      APUSH(copies, ((island_copy_t){
+               .dst = dst, .src = src, .exclusive = exclusive }));
+   }
+   isl->copies = copies.items;
+   isl->ncopies = copies.count;
+}
+
 static vlog_island_t *build_island(analyze_ctx_t *ctx, uint32_t island_id)
 {
    vlog_island_t *isl = xcalloc(sizeof(vlog_island_t));
@@ -4409,6 +4475,8 @@ static vlog_island_t *build_island(analyze_ctx_t *ctx, uint32_t island_id)
    isl->ndomains = doms.count;
    isl->domains = doms.items;
 
+   find_island_copies(ctx, isl, l_sigs.items, p_indices.items);
+
    run_comb_tarjan_topo(ctx, isl, l_sigs.items, p_indices.items);
 
    free(g_to_l);
@@ -4521,6 +4589,7 @@ void vlog_island_plan_free(vlog_island_plan_t *plan)
       free(isl->procs);
       free(isl->domains);
       free(isl->topo_order);
+      free(isl->copies);
       free(isl);
    }
 

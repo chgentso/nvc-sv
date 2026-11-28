@@ -134,6 +134,17 @@ typedef struct {
    island_proc_eject_reason_t reason;
 } island_ejected_proc_t;
 
+// A continuous assignment that copies one whole island signal into
+// another (assign dst = src, same width and representation, dst has no
+// other driver).  EXCLUSIVE: no other process of the island reads either
+// signal, so the island need not run when src changes if the runtime
+// keeps dst equal to src (rt_island_set_copy).
+typedef struct {
+   uint32_t dst;
+   uint32_t src;
+   bool     exclusive;
+} island_copy_t;
+
 typedef struct _vlog_island {
    ident_t          mod_name;
    ident_t          body_name;
@@ -160,6 +171,8 @@ typedef struct _vlog_island {
    uint32_t         header_bytes;
    uint32_t         state_bytes;
    uint32_t         total_nodes;
+   island_copy_t   *copies;
+   uint32_t         ncopies;
 } vlog_island_t;
 
 typedef struct {

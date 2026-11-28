@@ -1467,6 +1467,20 @@ void vlog_island_lower_emit_init(vlog_island_lower_ctx_t *ctx,
          mir_build_consume(inst_mu, bind_res);
       }
 
+      for (uint32_t i = 0; i < isl->ncopies; i++) {
+         const island_copy_t *cp = &(isl->copies[i]);
+         mir_value_t c_args[] = {
+            handle,
+            mir_const(inst_mu, t_offset, cp->dst),
+            mir_const(inst_mu, t_offset, cp->src),
+            mir_const(inst_mu, t_offset, cp->exclusive),
+         };
+         mir_value_t c_res = mir_build_fcall(
+            inst_mu, ident_new("__sv_island_set_copy"), t_offset,
+            MIR_NULL_STAMP, c_args, ARRAY_LEN(c_args));
+         mir_build_consume(inst_mu, c_res);
+      }
+
       uint32_t rt_dom_idx = 0;
       for (uint32_t d = 0; d < isl->ndomains; d++) {
          const vlog_island_dom_m3_t *dm = &(m2->doms[d]);

@@ -298,6 +298,15 @@ typedef struct _rt_island_domain {
    rt_watch_t               *rst_watch;
 } rt_island_domain_t;
 
+// assign dst = src copying one whole island signal into another
+// (rt_island_set_copy); EXCLUSIVE: no other process of the island reads
+// or writes either signal
+typedef struct {
+   uint32_t dst;
+   uint32_t src;
+   bool     exclusive;
+} rt_island_copy_t;
+
 typedef struct _rt_island {
    // Fields used by every evaluation first, in two cache lines
    struct _rt_island_mgr *mgr;
@@ -383,6 +392,8 @@ typedef struct _rt_island {
    void                  *reset_eval_ctx;
    bool                   skip_sv_reset;
    bool                   has_direct_pub;   // A RT_ISIG_DIRECT_PUB source
+   rt_island_copy_t      *copies;
+   uint32_t               n_copies;
 } rt_island_t;
 
 // Speculative Mode A (NVC_ISLAND_SPEC): a VHDL island lowered in Mode B
@@ -543,6 +554,8 @@ void rt_island_bind_sig(void *handle, uint32_t idx, sig_shared_t *ss,
                         int32_t sig_offset, uint32_t a_off, uint32_t b_off,
                         uint32_t width, uint32_t nelems, uint32_t flags);
 void rt_island_set_gen_key(void *handle, uint32_t idx, uint64_t key_hash);
+void rt_island_set_copy(void *handle, uint32_t dst_idx, uint32_t src_idx,
+                        bool exclusive);
 void rt_island_attach_sig(void *handle, uint32_t idx, sig_shared_t *ss,
                           int32_t sig_offset);
 void rt_island_apply_forces(void *handle);

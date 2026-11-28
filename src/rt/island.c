@@ -270,6 +270,8 @@ struct _rt_super_domain {
    uint32_t             n_clusters;
    rt_island_t        **solo_islands;
    uint32_t             n_solo_islands;
+   struct _island_clk_group *clk_group;   // Clocked through a copy group
+   uint32_t             n_orphans;   // Dissolved with a callback pending
 };
 
 // A change of island state made by a VHDL force or release that the island
@@ -287,6 +289,8 @@ struct _rt_island_mgr {
    rt_model_t             *model;
    hash_t                 *sig_map;
    hash_t                 *alias_map;
+   hash_t                 *clk_copy_map;   // Signal -> island_clk_copy_t
+   A(struct _island_clk_group *) clk_groups;
    A(rt_island_t *)        islands;
    A(rt_island_t *)        dirty_q;
    A(rt_island_t *)        defer_dirty_q;
@@ -1240,6 +1244,20 @@ static inline void island_dom_dequeue_sample(rt_island_domain_t *dom)
    }
 }
 
+// A super-domain of a dissolved clock copy group (island_clk_group_dissolve)
+// with a callback pending samples its former domains once
+static inline void island_sdom_hit(rt_island_mgr_t *mgr,
+                                   rt_super_domain_t *sdom)
+{
+   if (likely(sdom->n_doms > 0))
+      island_sdom_enqueue_sample(mgr, sdom);
+   else {
+      for (uint32_t i = 0; i < sdom->n_orphans; i++)
+         island_dom_enqueue_sample(mgr, sdom->doms[i]);
+      sdom->n_orphans = 0;
+   }
+}
+
 static void island_super_clk_watch_cb(uint64_t now, rt_signal_t *signal,
                                       rt_watch_t *watch, void *user)
 {
@@ -1268,7 +1286,7 @@ static void island_super_clk_watch_cb(uint64_t now, rt_signal_t *signal,
       sdom->prev_clk = cur;
    }
    if (hit)
-      island_sdom_enqueue_sample(sdom->mgr, sdom);
+      island_sdom_hit(sdom->mgr, sdom);
 }
 
 static void island_super_rst_watch_cb(uint64_t now, rt_signal_t *signal,
@@ -1298,7 +1316,7 @@ static void island_super_rst_watch_cb(uint64_t now, rt_signal_t *signal,
       sdom->prev_rst = cur;
    }
    if (hit)
-      island_sdom_enqueue_sample(sdom->mgr, sdom);
+      island_sdom_hit(sdom->mgr, sdom);
 }
 
 static void island_clk_watch_cb(uint64_t now, rt_signal_t *signal,
@@ -1432,14 +1450,14 @@ void rt_island_edge_watch_fire(rt_model_t *m, rt_watch_t *w, bool edge)
       sdom->prev_clk = island_read_sv_bit(sdom->clk_sig, sdom->clk_sig_offset);
       if (island_sv_edge_armed(sdom->mgr, sdom->clk_sig, now,
                                &sdom->reset_clk_edge) && edge)
-         island_sdom_enqueue_sample(sdom->mgr, sdom);
+         island_sdom_hit(sdom->mgr, sdom);
    }
    else {
       rt_super_domain_t *sdom = w->user_data;
       sdom->prev_rst = island_read_sv_bit(sdom->rst_sig, sdom->rst_sig_offset);
       if (island_sv_edge_armed(sdom->mgr, sdom->rst_sig, now,
                                &sdom->reset_rst_edge) && edge)
-         island_sdom_enqueue_sample(sdom->mgr, sdom);
+         island_sdom_hit(sdom->mgr, sdom);
    }
 }
 
@@ -1506,6 +1524,8 @@ static void island_spec_rt_report(rt_island_mgr_t *mgr);
 static uint8_t *island_spec_tmp = NULL;   // Conversion scratch
 static size_t island_spec_tmp_size = 0;
 
+static void island_clk_copy_free(rt_island_mgr_t *mgr);
+
 void rt_island_mgr_free(rt_island_mgr_t *mgr)
 {
    if (mgr == NULL)
@@ -1563,6 +1583,7 @@ void rt_island_mgr_free(rt_island_mgr_t *mgr)
          free(isl->sigs[s].last_out_words);
       }
       free(isl->comb_deps);
+      free(isl->copies);
 #ifdef __MINGW32__
       _aligned_free(isl->state);
 #else
@@ -1592,6 +1613,7 @@ void rt_island_mgr_free(rt_island_mgr_t *mgr)
    }
    hash_free(mgr->sig_map);
    hash_free(mgr->alias_map);
+   island_clk_copy_free(mgr);
    for (uint32_t i = 0; i < mgr->n_act_info; i++) {
       free(mgr->act_info[i].sigs);
       free(mgr->act_info[i].shadow);
@@ -1830,6 +1852,20 @@ void rt_island_set_gen_key(void *handle, uint32_t idx, uint64_t key_hash)
    rt_island_t *isl = handle;
    assert(idx < isl->nsigs);
    isl->sigs[idx].gen_key_hash = key_hash;
+}
+
+void rt_island_set_copy(void *handle, uint32_t dst_idx, uint32_t src_idx,
+                        bool exclusive)
+{
+   rt_island_t *isl = handle;
+   assert(dst_idx < isl->nsigs && src_idx < isl->nsigs);
+   isl->copies = xrealloc_array(isl->copies, isl->n_copies + 1,
+                                sizeof(rt_island_copy_t));
+   isl->copies[isl->n_copies++] = (rt_island_copy_t){
+      .dst       = dst_idx,
+      .src       = src_idx,
+      .exclusive = exclusive,
+   };
 }
 
 void rt_island_attach_sig(void *handle, uint32_t idx, sig_shared_t *ss,
@@ -2330,6 +2366,36 @@ static void island_refresh_domain_descs(rt_island_t *isl)
 
 static void island_spec_rt_setup(rt_island_t *isl);
 
+static void island_dom_add_watches(rt_model_t *m, rt_island_domain_t *dom)
+{
+   const rt_island_t *isl = dom->isl;
+   const rt_island_sig_t *cs = &(isl->sigs[dom->clk_sig_idx]);
+   assert(cs->sig != NULL);
+   // An SV edge is detected when the clock changes (a VHDL process
+   // tests the edge when it runs)
+   const bool sv_edge = !(dom->edge_flags
+                          & (RT_IEDGE_VHDL | RT_IEDGE_VHDL_EVENT));
+   dom->clk_watch = watch_new(m, island_clk_watch_cb, dom, WATCH_EVENT, 1);
+   watch_set_inline_edge(dom->clk_watch, sv_edge);
+   if (cs->sig->shared.flags & SIG_F_PACKED)
+      model_set_event_cb(m, cs->sig, 0, 1, dom->clk_watch);
+   else
+      model_set_event_cb(m, cs->sig, cs->sig_offset, 1, dom->clk_watch);
+
+   if (dom->rst_sig_idx >= 0) {
+      const rt_island_sig_t *rs = &(isl->sigs[dom->rst_sig_idx]);
+      assert(rs->sig != NULL);
+      dom->rst_watch = watch_new(m, island_rst_watch_cb, dom,
+                                 WATCH_EVENT, 1);
+      watch_set_inline_edge(dom->rst_watch, sv_edge
+                            && !(dom->edge_flags & RT_IEDGE_RST_LEVEL));
+      if (rs->sig->shared.flags & SIG_F_PACKED)
+         model_set_event_cb(m, rs->sig, 0, 1, dom->rst_watch);
+      else
+         model_set_event_cb(m, rs->sig, rs->sig_offset, 1, dom->rst_watch);
+   }
+}
+
 void rt_island_finish(void *handle)
 {
    rt_island_t *isl = handle;
@@ -2448,31 +2514,7 @@ void rt_island_finish(void *handle)
             break;
       }
 
-      const rt_island_sig_t *cs = &(isl->sigs[dom->clk_sig_idx]);
-      assert(cs->sig != NULL);
-      // An SV edge is detected when the clock changes (a VHDL process
-      // tests the edge when it runs)
-      const bool sv_edge = !(dom->edge_flags
-                             & (RT_IEDGE_VHDL | RT_IEDGE_VHDL_EVENT));
-      dom->clk_watch = watch_new(m, island_clk_watch_cb, dom, WATCH_EVENT, 1);
-      watch_set_inline_edge(dom->clk_watch, sv_edge);
-      if (cs->sig->shared.flags & SIG_F_PACKED)
-         model_set_event_cb(m, cs->sig, 0, 1, dom->clk_watch);
-      else
-         model_set_event_cb(m, cs->sig, cs->sig_offset, 1, dom->clk_watch);
-
-      if (dom->rst_sig_idx >= 0) {
-         const rt_island_sig_t *rs = &(isl->sigs[dom->rst_sig_idx]);
-         assert(rs->sig != NULL);
-         dom->rst_watch = watch_new(m, island_rst_watch_cb, dom,
-                                    WATCH_EVENT, 1);
-         watch_set_inline_edge(dom->rst_watch, sv_edge
-                               && !(dom->edge_flags & RT_IEDGE_RST_LEVEL));
-         if (rs->sig->shared.flags & SIG_F_PACKED)
-            model_set_event_cb(m, rs->sig, 0, 1, dom->rst_watch);
-         else
-            model_set_event_cb(m, rs->sig, rs->sig_offset, 1, dom->rst_watch);
-      }
+      island_dom_add_watches(m, dom);
    }
 
    island_init_state_defaults(isl);
@@ -6583,6 +6625,453 @@ static bool sdom_key_cmp(const void *a, const void *b)
       && ka->edge_flags == kb->edge_flags;
 }
 
+// Clock copies.  A clock gating cell model is often assign clk_out =
+// clk_in, instantiated thousands of times: every edge of the clock then
+// wakes the clock watch of every domain clocked by a copy.  The copies of
+// one clock (and the copies of those) are SV islands that compute the
+// same value from it in the same delta cycle, and plain port connections
+// below an island output change with it, so the domains clocked by any of
+// them are grouped into super-domains watching the output of one of the
+// copies, the group's leader: an edge of the leader's output is an edge of
+// every copy, seen when the leader's output changes, which is in the same
+// delta cycle as the other copies' outputs change, and the domains are
+// sampled after the islands have settled, as with a watch on each copy.
+// The copies are still evaluated and published as before, so every other
+// reader sees the same values at the same time.  The top-level copies of a
+// group read the same signal through the same number of port connections.
+// A force, deposit or VPI write of any signal between that signal and a
+// domain can make a copy differ from the leader: the group's super-domains
+// are then dissolved into domains watching their own clocks again
+// (island_clk_copy_break) before the write takes effect.
+
+typedef struct _island_clk_group {
+   A(rt_super_domain_t *) sds;
+   bool                   broken;
+} island_clk_group_t;
+
+typedef struct _island_clk_copy {
+   const rt_signal_t       *sig;      // A signal of the group
+   int32_t                  off;
+   rt_signal_t             *canon;    // Domain clock: the leader's output
+   int32_t                  canon_off;
+   island_clk_group_t      *group;
+   struct _island_clk_copy *next;     // Other bits of the same signal
+} island_clk_copy_t;
+
+typedef struct {
+   const rt_signal_t *sig;
+   int32_t            off;
+   uint32_t           hops;
+} island_bit_key_t;
+
+typedef A(island_bit_key_t) island_bit_list_t;
+
+typedef struct {
+   island_bit_key_t   dkey;     // Output bit (hops 0)
+   rt_island_sig_t   *dst;
+   island_bit_key_t   root;     // Driver of the chain and port hops to it
+   island_bit_list_t  path;     // Port signals up to the parent or root
+   int32_t            parent;   // Copy whose output feeds our input
+   int32_t            group;
+   int8_t             valid;    // -1 unknown
+} island_clk_cand_t;
+
+typedef struct {
+   int32_t            leader;
+   uint32_t           ndoms;
+   island_clk_group_t *group;
+} island_clk_grp_tmp_t;
+
+typedef struct {
+   rt_island_domain_t *dom;
+   int32_t             group;
+   island_bit_list_t   path;
+} island_clk_dom_tmp_t;
+
+static uint32_t island_bit_key_hash(const void *key)
+{
+   const island_bit_key_t *k = key;
+   return mix_bits_64((uintptr_t)k->sig)
+      ^ mix_bits_64(((uint64_t)k->hops << 32) | (uint32_t)k->off);
+}
+
+static bool island_bit_key_cmp(const void *a, const void *b)
+{
+   const island_bit_key_t *ka = a, *kb = b;
+   return ka->sig == kb->sig && ka->off == kb->off && ka->hops == kb->hops;
+}
+
+static bool island_clk_copy_dst_ok(const rt_island_mgr_t *mgr,
+                                   const rt_island_sig_t *d)
+{
+   if (d->sig == NULL || d->width != 1 || d->nelems != 1
+       || (d->flags & (RT_ISIG_FF_WRITTEN | RT_ISIG_VHDL | RT_ISIG_STD_LOGIC9
+                       | RT_ISIG_SPARSE_RAM))
+       || !(d->flags & RT_ISIG_COMB_WRITTEN)
+       || d->next_owner != NULL || hash_get(mgr->sig_map, d->sig) != d)
+      return false;
+
+   const rt_signal_t *sig = d->sig;
+   const rt_nexus_t *nx = &(sig->nexus);
+   for (uint32_t i = 0; i < sig->n_nexus; i++, nx = nx->chain) {
+      if (!island_nexus_overlaps_sig(nx, d))
+         continue;
+      if (nx->n_sources != 0 || (nx->flags & (NET_F_FORCED | NET_F_INOUT)))
+         return false;
+   }
+   return true;
+}
+
+// Follows the plain port connection that drives bit KEY up to its source
+static bool island_port_up(island_bit_key_t *key)
+{
+   const rt_signal_t *sig = key->sig;
+   if (sig->shared.flags & SIG_F_PACKED)
+      return false;
+   const rt_nexus_t *n = island_wstat_nexus_at(sig, (uint32_t)key->off);
+   if (n == NULL || n->n_sources != 1 || n->sources.tag != SOURCE_PORT
+       || (n->flags & (NET_F_FORCED | NET_F_INOUT)))
+      return false;
+   if (sig->resolution != NULL && !(n->flags & NET_F_R_IDENT))
+      return false;
+   const rt_nexus_t *in = n->sources.u.port.input;
+   if (in == NULL || in->signal == NULL || in->size != n->size
+       || in->width != n->width || n->size == 0
+       || (in->signal->shared.flags & SIG_F_PACKED))
+      return false;
+   const int32_t n_lo = (int32_t)(n->offset / n->size);
+   const int32_t in_lo = (int32_t)(in->offset / in->size);
+   key->sig = in->signal;
+   key->off = in_lo + (key->off - n_lo);
+   key->hops++;
+   return true;
+}
+
+static bool island_clk_same_value(const rt_model_t *m,
+                                  const island_bit_key_t *a,
+                                  const island_bit_key_t *b)
+{
+   // The edge detection starts from the last value of a signal with an
+   // init event (island_initial_prev_sv_bit)
+   const uint8_t cur = island_read_sv_bit(a->sig, a->off);
+   const uint8_t last = island_read_last_sv_bit(a->sig, a->off);
+   return cur == island_read_sv_bit(b->sig, b->off)
+      && last == island_read_last_sv_bit(b->sig, b->off)
+      && (cur == last || rt_model_has_init_event(m, a->sig)
+          == rt_model_has_init_event(m, b->sig));
+}
+
+static island_clk_copy_t *island_clk_copy_get(rt_island_mgr_t *mgr,
+                                              const island_bit_key_t *k,
+                                              island_clk_group_t *g)
+{
+   for (island_clk_copy_t *e = hash_get(mgr->clk_copy_map, k->sig);
+        e != NULL; e = e->next) {
+      if (e->off == k->off)
+         return e->group == g ? e : NULL;
+   }
+
+   island_clk_copy_t *e = xcalloc(sizeof(island_clk_copy_t));
+   e->sig   = k->sig;
+   e->off   = k->off;
+   e->group = g;
+   e->next  = hash_get(mgr->clk_copy_map, k->sig);
+   hash_put(mgr->clk_copy_map, k->sig, e);
+
+   // Forces, deposits and VPI writes of the signal go through
+   // island_clk_copy_break
+   rt_signal_t *sig = (rt_signal_t *)k->sig;
+   sig->shared.flags |= SIG_F_ISLAND;
+   sig->shared.flags &= ~(SIG_F_FAST_NOOP | SIG_F_FAST_DIRECT);
+   return e;
+}
+
+static int8_t island_clk_cand_valid(const rt_model_t *m,
+                                    island_clk_cand_t *cands,
+                                    const island_clk_grp_tmp_t *grps,
+                                    uint32_t i)
+{
+   island_clk_cand_t *c = &(cands[i]);
+   if (c->valid >= 0)
+      return c->valid;
+   c->valid = 0;   // Also ends a loop of copies
+   if (c->group < 0 || grps[c->group].leader < 0)
+      return 0;
+   if (c->parent >= 0 && !island_clk_cand_valid(m, cands, grps, c->parent))
+      return 0;
+   const island_clk_cand_t *lc = &(cands[grps[c->group].leader]);
+   c->valid = island_clk_same_value(m, &(c->dkey), &(lc->dkey));
+   return c->valid;
+}
+
+static void island_build_clk_copies(rt_island_mgr_t *mgr)
+{
+   const char *env = getenv("NVC_ISLAND_CLK_COPY");
+   if (env != NULL && atoi(env) == 0)
+      return;
+
+   A(island_clk_cand_t) cands = AINIT;
+   for (unsigned i = 0; i < mgr->islands.count; i++) {
+      rt_island_t *isl = mgr->islands.items[i];
+      if (isl->is_vhdl || isl->n_copies == 0)
+         continue;
+      for (uint32_t c = 0; c < isl->n_copies; c++) {
+         rt_island_sig_t *d = &(isl->sigs[isl->copies[c].dst]);
+         const rt_island_sig_t *s = &(isl->sigs[isl->copies[c].src]);
+         if (!island_clk_copy_dst_ok(mgr, d) || s->sig == NULL
+             || s->width != 1 || s->nelems != 1
+             || ((s->flags ^ d->flags) & RT_ISIG_TWO_STATE))
+            continue;
+         APUSH(cands, ((island_clk_cand_t){
+                  .dkey   = { d->sig, d->sig_offset, 0 },
+                  .root   = { s->sig, s->sig_offset, 0 },
+                  .dst    = d,
+                  .parent = -1,
+                  .group  = -1,
+                  .valid  = -1,
+               }));
+      }
+   }
+
+   const uint32_t n = cands.count;
+   if (n == 0) {
+      ACLEAR(cands);
+      return;
+   }
+
+   ghash_t *by_dst = ghash_new(n * 2, island_bit_key_hash, island_bit_key_cmp);
+   for (uint32_t i = 0; i < n; i++)
+      ghash_put(by_dst, &(cands.items[i].dkey), &(cands.items[i]));
+
+   // Each input up to the output of another copy or to its driver
+   for (uint32_t i = 0; i < n; i++) {
+      island_clk_cand_t *c = &(cands.items[i]);
+      island_bit_key_t key = c->root;
+      for (unsigned depth = 0; depth < 64; depth++) {
+         const island_bit_key_t probe = { key.sig, key.off, 0 };
+         island_clk_cand_t *p = ghash_get(by_dst, &probe);
+         if (p != NULL && p != c) {
+            c->parent = p - cands.items;
+            break;
+         }
+         island_bit_key_t up = key;
+         if (!island_port_up(&up)) {
+            c->root = key;
+            break;
+         }
+         APUSH(c->path, ((island_bit_key_t){ key.sig, key.off, 0 }));
+         key = up;
+      }
+   }
+
+   // The top-level copies that read the same driver through the same
+   // number of port connections and everything below them
+   ghash_t *by_root = ghash_new(n * 2, island_bit_key_hash, island_bit_key_cmp);
+   A(island_clk_grp_tmp_t) grps = AINIT;
+   for (uint32_t i = 0; i < n; i++) {
+      int32_t t = i;
+      for (uint32_t depth = 0; cands.items[t].parent >= 0 && depth <= n; depth++)
+         t = cands.items[t].parent;
+      if (cands.items[t].parent >= 0)
+         continue;   // A loop of copies
+      island_clk_cand_t *tc = &(cands.items[t]);
+      void *gp = ghash_get(by_root, &(tc->root));
+      int32_t gi;
+      if (gp == NULL) {
+         gi = grps.count;
+         APUSH(grps, ((island_clk_grp_tmp_t){ .leader = -1 }));
+         ghash_put(by_root, &(tc->root), (void *)(uintptr_t)(gi + 1));
+      }
+      else
+         gi = (uintptr_t)gp - 1;
+      cands.items[i].group = gi;
+      if (grps.items[gi].leader < 0 && t == (int32_t)i
+          && !(tc->dst->flags & RT_ISIG_DIRECT_LINK))
+         grps.items[gi].leader = i;   // Its output is published
+   }
+
+   for (uint32_t i = 0; i < n; i++)
+      island_clk_cand_valid(mgr->model, cands.items, grps.items, i);
+
+   // The SV domains clocked by a copy, through plain port connections
+   A(island_clk_dom_tmp_t) doms = AINIT;
+   for (unsigned i = 0; i < mgr->islands.count; i++) {
+      rt_island_t *isl = mgr->islands.items[i];
+      for (uint32_t d = 0; d < isl->ndomains; d++) {
+         rt_island_domain_t *dom = &(isl->domains[d]);
+         if (dom->ff_handle == JIT_HANDLE_INVALID
+             || (dom->edge_flags & (RT_IEDGE_VHDL | RT_IEDGE_VHDL_EVENT
+                                    | RT_IEDGE_RST_LEVEL)))
+            continue;
+         const rt_island_sig_t *cs = &(isl->sigs[dom->clk_sig_idx]);
+         if (cs->sig == NULL)
+            continue;
+         island_clk_dom_tmp_t dt = { .dom = dom, .group = -1 };
+         island_bit_key_t key = { cs->sig, cs->sig_offset, 0 };
+         const island_bit_key_t clk = key;
+         for (unsigned depth = 0; depth < 64; depth++) {
+            island_clk_cand_t *p = ghash_get(by_dst, &key);
+            if (p != NULL) {
+               if (p->valid > 0) {
+                  const island_clk_cand_t *lc =
+                     &(cands.items[grps.items[p->group].leader]);
+                  if (island_clk_same_value(mgr->model, &clk, &(lc->dkey)))
+                     dt.group = p->group;
+               }
+               break;
+            }
+            APUSH(dt.path, key);
+            if (!island_port_up(&key))
+               break;
+            key.hops = 0;
+         }
+         if (dt.group >= 0) {
+            grps.items[dt.group].ndoms++;
+            APUSH(doms, dt);
+         }
+         else
+            ACLEAR(dt.path);
+      }
+   }
+
+   // Groups clocking two domains or more: super-domains are made of two
+   uint32_t n_grouped = 0, n_doms = 0, n_groups = 0;
+   for (unsigned i = 0; i < grps.count; i++) {
+      if (grps.items[i].ndoms < 2)
+         continue;
+      grps.items[i].group = xcalloc(sizeof(island_clk_group_t));
+      APUSH(mgr->clk_groups, grps.items[i].group);
+      n_groups++;
+      if (mgr->clk_copy_map == NULL)
+         mgr->clk_copy_map = hash_new(256);
+   }
+
+   for (uint32_t i = 0; i < n; i++) {
+      island_clk_cand_t *c = &(cands.items[i]);
+      if (c->valid > 0 && grps.items[c->group].group != NULL) {
+         island_clk_group_t *g = grps.items[c->group].group;
+         island_clk_copy_get(mgr, &(c->dkey), g);
+         for (unsigned k = 0; k < c->path.count; k++)
+            island_clk_copy_get(mgr, &(c->path.items[k]), g);
+         n_grouped++;
+      }
+      ACLEAR(c->path);
+   }
+
+   for (unsigned i = 0; i < doms.count; i++) {
+      island_clk_dom_tmp_t *dt = &(doms.items[i]);
+      island_clk_group_t *g = grps.items[dt->group].group;
+      if (g != NULL) {
+         const island_clk_cand_t *lc =
+            &(cands.items[grps.items[dt->group].leader]);
+         const rt_island_sig_t *cs = &(dt->dom->isl->sigs[dt->dom->clk_sig_idx]);
+         const island_bit_key_t clk = { cs->sig, cs->sig_offset, 0 };
+         for (unsigned k = 0; k < dt->path.count; k++)
+            island_clk_copy_get(mgr, &(dt->path.items[k]), g);
+         island_clk_copy_t *e = island_clk_copy_get(mgr, &clk, g);
+         if (e != NULL) {
+            e->canon = lc->dst->sig;
+            e->canon_off = lc->dst->sig_offset;
+            n_doms++;
+         }
+      }
+      ACLEAR(dt->path);
+   }
+
+   if (opt_get_int(OPT_DUMP_ISLANDS))
+      fprintf(stderr, "ISLAND_CLK_COPY: copies=%u grouped=%u groups=%u "
+              "domains=%u\n", n, n_grouped, n_groups, n_doms);
+
+   ACLEAR(doms);
+   ACLEAR(grps);
+   ghash_free(by_root);
+   ghash_free(by_dst);
+   ACLEAR(cands);
+}
+
+static const island_clk_copy_t *island_clk_copy_find(
+   const rt_island_mgr_t *mgr, const rt_signal_t *sig, int32_t off)
+{
+   if (likely(mgr->clk_copy_map == NULL))
+      return NULL;
+   for (const island_clk_copy_t *e = hash_get(mgr->clk_copy_map, sig);
+        e != NULL; e = e->next) {
+      if (e->off == off)
+         return e->group->broken || e->canon == NULL ? NULL : e;
+   }
+   return NULL;
+}
+
+static void island_clk_group_dissolve(rt_island_mgr_t *mgr,
+                                      island_clk_group_t *g)
+{
+   g->broken = true;
+   for (unsigned i = 0; i < g->sds.count; i++) {
+      rt_super_domain_t *sd = g->sds.items[i];
+      for (uint32_t d = 0; d < sd->n_doms; d++) {
+         rt_island_domain_t *dom = sd->doms[d];
+         dom->super_dom = NULL;
+         dom->prev_clk = sd->prev_clk;
+         dom->prev_rst = sd->prev_rst;
+         dom->reset_clk_edge = sd->reset_clk_edge;
+         dom->reset_rst_edge = sd->reset_rst_edge;
+         island_dom_add_watches(mgr->model, dom);
+         if (sd->in_sample_q)
+            island_dom_enqueue_sample(mgr, dom);
+         if (sd->in_commit_q && !dom->in_commit_q) {
+            dom->in_commit_q = true;
+            APUSH(mgr->ff_commit_q, dom);
+         }
+      }
+      // An edge seen before the break whose callback is still to run
+      // samples the domains as it would have (island_sdom_hit)
+      const bool pending =
+         (sd->clk_watch != NULL && sd->clk_watch->wakeable.pending)
+         || (sd->rst_watch != NULL && sd->rst_watch->wakeable.pending);
+      sd->n_orphans = pending ? sd->n_doms : 0;
+      sd->n_doms = 0;
+      if (!pending) {
+         if (sd->clk_watch != NULL)
+            watch_free(mgr->model, sd->clk_watch);
+         if (sd->rst_watch != NULL)
+            watch_free(mgr->model, sd->rst_watch);
+         sd->clk_watch = sd->rst_watch = NULL;
+      }
+   }
+}
+
+static void island_clk_copy_break(rt_island_mgr_t *mgr, const rt_signal_t *sig)
+{
+   if (likely(mgr->clk_copy_map == NULL))
+      return;
+   for (const island_clk_copy_t *e = hash_get(mgr->clk_copy_map, sig);
+        e != NULL; e = e->next) {
+      if (!e->group->broken)
+         island_clk_group_dissolve(mgr, e->group);
+   }
+}
+
+static void island_clk_copy_free(rt_island_mgr_t *mgr)
+{
+   if (mgr->clk_copy_map != NULL) {
+      const void *key;
+      void *value;
+      for (hash_iter_t it = HASH_BEGIN;
+           hash_iter(mgr->clk_copy_map, &it, &key, &value); ) {
+         for (island_clk_copy_t *e = value, *next; e != NULL; e = next) {
+            next = e->next;
+            free(e);
+         }
+      }
+      hash_free(mgr->clk_copy_map);
+   }
+   for (unsigned i = 0; i < mgr->clk_groups.count; i++) {
+      ACLEAR(mgr->clk_groups.items[i]->sds);
+      free(mgr->clk_groups.items[i]);
+   }
+   ACLEAR(mgr->clk_groups);
+}
+
 static void island_build_hier(rt_island_mgr_t *mgr)
 {
    const uint32_t N = mgr->islands.count;
@@ -6869,7 +7358,10 @@ static void island_build_hier(rt_island_mgr_t *mgr)
    typedef struct {
       sdom_key_t              key;
       A(rt_island_domain_t *) doms;
+      island_clk_group_t     *clk_group;
    } sdom_group_t;
+
+   island_build_clk_copies(mgr);
 
    ghash_t *sdom_map = ghash_new(64, sdom_key_hash, sdom_key_cmp);
    A(sdom_group_t *) groups = AINIT;
@@ -6894,10 +7386,19 @@ static void island_build_hier(rt_island_mgr_t *mgr)
             .edge_flags     = dom->edge_flags,
          };
 
+         const island_clk_copy_t *cc = NULL;
+         if (!(dom->edge_flags & (RT_IEDGE_VHDL | RT_IEDGE_VHDL_EVENT
+                                  | RT_IEDGE_RST_LEVEL))
+             && (cc = island_clk_copy_find(mgr, cs->sig, cs->sig_offset))) {
+            k.clk_sig = cc->canon;
+            k.clk_sig_offset = cc->canon_off;
+         }
+
          sdom_group_t *g = ghash_get(sdom_map, &k);
          if (g == NULL) {
             g = xcalloc(sizeof(sdom_group_t));
             g->key = k;
+            g->clk_group = cc != NULL ? cc->group : NULL;
             ghash_put(sdom_map, &(g->key), g);
             APUSH(groups, g);
          }
@@ -6920,6 +7421,9 @@ static void island_build_hier(rt_island_mgr_t *mgr)
          sd->prev_clk       = g->doms.items[0]->prev_clk;
          sd->prev_rst       = g->doms.items[0]->prev_rst;
          sd->n_doms         = g->doms.count;
+         sd->clk_group      = g->clk_group;
+         if (g->clk_group != NULL)
+            APUSH(g->clk_group->sds, sd);
          sd->doms           = xmalloc_array(sd->n_doms,
                                             sizeof(rt_island_domain_t *));
          sd->ff_entries     = xcalloc_array(sd->n_doms,
@@ -10512,6 +11016,7 @@ void rt_island_on_ext_deposit(rt_model_t *m, rt_signal_t *sig)
    island_spec_pin_sig(mgr, sig, RT_ISLAND_DEOPT_PUT);
    island_wb_cur = WB_EXT_DEPOSIT;
    island_break_aliases(m, mgr, sig);
+   island_clk_copy_break(mgr, sig);
 
    rt_island_sig_t *s = hash_get(mgr->sig_map, sig);
    for (; s != NULL; s = s->next_owner) {
@@ -10774,6 +11279,7 @@ bool rt_island_vpi_put(rt_model_t *m, rt_signal_t *sig,
    island_spec_pin_sig(mgr, sig, RT_ISLAND_DEOPT_PUT);
    island_wb_cur = WB_VPI_PUT;
    island_break_aliases(m, mgr, sig);
+   island_clk_copy_break(mgr, sig);
    rt_island_sig_t *s = hash_get(mgr->sig_map, sig);
    if (s == NULL)
       return false;
@@ -10942,6 +11448,7 @@ bool rt_island_put_bytes(rt_model_t *m, rt_signal_t *sig,
    island_spec_pin_sig(mgr, sig, RT_ISLAND_DEOPT_PUT);
    island_wb_cur = WB_VPI_PUT;
    island_break_aliases(m, mgr, sig);
+   island_clk_copy_break(mgr, sig);
    rt_island_sig_t *owners = hash_get(mgr->sig_map, sig);
    if (owners == NULL)
       return false;
@@ -11032,6 +11539,7 @@ bool rt_island_put_packed(rt_model_t *m, rt_signal_t *sig,
    island_spec_pin_sig(mgr, sig, RT_ISLAND_DEOPT_PUT);
    island_wb_cur = WB_VPI_PUT;
    island_break_aliases(m, mgr, sig);
+   island_clk_copy_break(mgr, sig);
    rt_island_sig_t *owners = hash_get(mgr->sig_map, sig);
    if (owners == NULL)
       return false;
@@ -11164,6 +11672,7 @@ bool rt_island_vpi_release_slice(rt_model_t *m, rt_signal_t *sig,
    island_spec_pin_sig(mgr, sig, RT_ISLAND_DEOPT_PUT);
    island_wb_cur = WB_VPI_PUT;
    island_break_aliases(m, mgr, sig);
+   island_clk_copy_break(mgr, sig);
    rt_island_sig_t *owners = hash_get(mgr->sig_map, sig);
    if (owners == NULL)
       return false;

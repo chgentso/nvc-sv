@@ -11132,6 +11132,12 @@ void x_sv_island_set_gen_key(void *handle, uint32_t idx, uint64_t key_hash)
    rt_island_set_gen_key(handle, idx, key_hash);
 }
 
+void x_sv_island_set_copy(void *handle, uint32_t dst_idx, uint32_t src_idx,
+                          bool exclusive)
+{
+   rt_island_set_copy(handle, dst_idx, src_idx, exclusive);
+}
+
 void x_sv_island_attach_sig(void *handle, uint32_t idx, sig_shared_t *ss,
                             int32_t sig_offset)
 {
