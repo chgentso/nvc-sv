@@ -45,7 +45,7 @@ if "-a" in a:
     sys.exit(0)
 if "-e" in a:
     open(os.path.join(work, "elab"), "w").write(" ".join(a) + "\\n" +
-        ("SPEC" if os.environ.get("NVC_ISLAND_SPEC") else ""))
+        ("SPEC" if os.environ.get("NVC_ISLAND_SPEC") == "1" else ""))
     sys.exit(0)
 if "-r" in a:
     elab = open(os.path.join(work, "elab")).read()
@@ -161,6 +161,7 @@ class StubTest(unittest.TestCase):
     def test_crash_only_in_spec(self):
         res = self.run_case("crash")
         self.assertEqual(res["ref"].outcome, "ok")
+        self.assertEqual(res["nospec"].outcome, "ok")
         self.assertEqual(res["spec"].outcome, "crash")
         self.assertEqual(res["specA"].outcome, "crash")
         v = compare.compare_case(res)

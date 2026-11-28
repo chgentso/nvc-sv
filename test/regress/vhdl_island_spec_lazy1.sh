@@ -1,8 +1,8 @@
 set -xe
 
 # Speculative Mode A functions are lowered the first time the runtime calls
-# them.  nv_e has a Mode A variant whose lowering fails (a reduction "or"
-# of a slice expression): its first Mode A call returns the "novar" deopt
+# them.  nv_e has a Mode A variant whose lowering fails (TO_INTEGER of a
+# vector wider than 63 bits): its first Mode A call returns the "novar" deopt
 # and pins the island to Mode B; ok_e is promoted and runs Mode A.  Output
 # and waveforms must be those of --rtl-islands=off, also with
 # NVC_ISLAND_SPEC_STRESS (conversions on every delta).
@@ -10,6 +10,7 @@ set -xe
 cat >lazy.vhd <<'VHDL_EOF'
 library ieee;
 use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
 
 entity nv_e is
     port ( clk : in std_logic;
@@ -23,7 +24,13 @@ begin
         variable nz : std_logic;
     begin
         if rising_edge(clk) then
-            nz := or(a(36 downto 2) and not b(34 downto 0));
+            if to_integer(unsigned(x"0000000000" & a(23 downto 0))
+                          xor unsigned(x"0000000000" & b(23 downto 0)))
+                mod 3 = 0 then
+                nz := '1';
+            else
+                nz := '0';
+            end if;
             r <= nz;
         end if;
     end process;
@@ -106,7 +113,7 @@ for st in 0 1 3; do
 done
 
 cat s0_raw.log | grep ISLAND_SPEC
-grep -q ' 39 nz=.1. q=' off.log
+grep -q ' 36 nz=.1. q=' off.log
 # Both islands have a variant; nv_e was promoted once and pinned by its
 # failed lowering, ok_e ends in Mode A
 grep -q '^ISLAND_SPEC_RT: ticks=[0-9]* variants=2 promoted=2 in_a=1 pinned=1 ' s0_raw.log
@@ -117,5 +124,5 @@ grep -q '^ISLAND_SPEC_RT: pinned .* novar=1' s3_raw.log
 # NVC_DUMP_ISLANDS lowers the Mode A functions at once to give the reason
 NVC_DUMP_ISLANDS=1 nvc --std=2008 --work=w_s --rtl-islands=hier \
     -e lazy_tb > dump.log 2>&1
-grep -q 'U_NV island=0 .* a_variant=no reason=lower expr T_FCALL "or"' dump.log
+grep -q 'U_NV island=0 .* a_variant=no reason=lower expr T_FCALL TO_INTEGER' dump.log
 grep -q 'U_OK island=0 .* a_variant=yes' dump.log

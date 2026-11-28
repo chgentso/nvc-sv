@@ -163,6 +163,20 @@ details of each option.  Known limits are in [TODO.md](TODO.md).
 - `--wave-flush` keeps the FST file written by `--wave` readable while
   the simulation runs.
 
+## Simulation speed
+
+- RTL islands: clocked and combinational processes of RTL code (VHDL and
+  SystemVerilog) are fused into compiled functions per instance that keep
+  the delta cycles of every value change.  `--rtl-islands=off` when
+  elaborating turns them off; the output is the same either way.
+- Speculative two-state islands, on by default: an island whose values
+  are all `'0'`/`'1'` (0/1) switches to a packed two-state variant and
+  goes back to the four-state code as soon as another value appears, with
+  the same results.  `--no-island-spec` (elaboration or run) or
+  `NVC_ISLAND_SPEC=0` turns them off.
+- Output of the processes of a delta cycle is written in a stable order
+  (`--report-order`).
+
 ## Windows
 
 nvc-sv builds and runs on Windows x64 with MSYS2.

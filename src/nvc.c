@@ -220,6 +220,8 @@ enum {
    OPT_CLI_RTL_ISLANDS,
    OPT_CLI_ISLAND_FAST,
    OPT_CLI_NO_ISLAND_FAST,
+   OPT_CLI_ISLAND_SPEC,
+   OPT_CLI_NO_ISLAND_SPEC,
    OPT_CLI_DUMP_ISLANDS,
    OPT_CLI_TWO_STATE,
    OPT_CLI_THREADS,
@@ -953,6 +955,8 @@ static int elaborate(int argc, char **argv, cmd_state_t *state)
       { "rtl-islands",     optional_argument, 0, OPT_CLI_RTL_ISLANDS },
       { "dump-islands",    no_argument,       0, OPT_CLI_DUMP_ISLANDS },
       { "2state",          optional_argument, 0, OPT_CLI_TWO_STATE },
+      { "island-spec",     no_argument,       0, OPT_CLI_ISLAND_SPEC },
+      { "no-island-spec",  no_argument,       0, OPT_CLI_NO_ISLAND_SPEC },
       { 0, 0, 0, 0 }
    };
 
@@ -1040,6 +1044,12 @@ static int elaborate(int argc, char **argv, cmd_state_t *state)
          break;
       case OPT_CLI_TWO_STATE:
          parse_two_state_option(optarg);
+         break;
+      case OPT_CLI_ISLAND_SPEC:
+         opt_set_int(OPT_ISLAND_SPEC, 1);
+         break;
+      case OPT_CLI_NO_ISLAND_SPEC:
+         opt_set_int(OPT_ISLAND_SPEC, 0);
          break;
       case OPT_CLI_DUMP_ISLANDS:
          opt_set_int(OPT_DUMP_ISLANDS, 1);
@@ -1394,6 +1404,7 @@ static int run_cmd(int argc, char **argv, cmd_state_t *state)
       { "jit-cache-dir", required_argument, 0, OPT_CLI_JIT_CACHE_DIR },
       { "island-fast",   no_argument,       0, OPT_CLI_ISLAND_FAST },
       { "no-island-fast",no_argument,       0, OPT_CLI_NO_ISLAND_FAST },
+      { "no-island-spec",no_argument,       0, OPT_CLI_NO_ISLAND_SPEC },
       { "threads",       required_argument, 0, OPT_CLI_THREADS },
       { "report-order",  required_argument, 0, OPT_CLI_REPORT_ORDER },
       { 0, 0, 0, 0 }
@@ -1543,6 +1554,9 @@ static int run_cmd(int argc, char **argv, cmd_state_t *state)
       case OPT_CLI_NO_ISLAND_FAST:
          opt_set_int(OPT_ISLAND_FAST, 0);
          break;
+      case OPT_CLI_NO_ISLAND_SPEC:
+         opt_set_int(OPT_ISLAND_SPEC, 0);
+         break;
       case OPT_CLI_THREADS:
          parse_threads_option(optarg);
          break;
@@ -1599,8 +1613,10 @@ static int run_cmd(int argc, char **argv, cmd_state_t *state)
    opt_set_int(OPT_RTL_ISLANDS, meta->rtl_islands);
    if (meta->two_state && opt_get_int(OPT_TWO_STATE) == TWO_STATE_OFF)
       opt_set_int(OPT_TWO_STATE, meta->two_state);
-   if (meta->island_spec)
-      opt_set_int(OPT_ISLAND_SPEC, 1);
+   // Speculative two-state islands: as elaborated, unless turned off for
+   // this run (--no-island-spec or NVC_ISLAND_SPEC=0)
+   opt_set_int(OPT_ISLAND_SPEC,
+               meta->island_spec && opt_get_int(OPT_ISLAND_SPEC));
 
    wave_dumper_t *dumper = NULL;
    if (wave_fname != NULL) {
@@ -2983,6 +2999,9 @@ static void usage(void)
              "Enable compiled RTL island partitioning (default hier)" },
            { "--2state[={off,islands,all}]",
              "Enable 2-state SystemVerilog simulation (default off)" },
+           { "--island-spec, --no-island-spec",
+             "Enable/disable speculative two-state variants of RTL islands "
+             "(default on; override with NVC_ISLAND_SPEC=0)" },
            { "--stats", "Print statistics about instantiated design units" },
            { "-V, --verbose", "Print resource usage at each step" },
         }
@@ -3001,6 +3020,9 @@ static void usage(void)
            { "--island-fast, --no-island-fast",
              "Enable/disable fast compiled island dispatch and sync "
              "(default on; override with NVC_ISLAND_FAST=0)" },
+           { "--no-island-spec",
+             "Do not use the speculative two-state variants of RTL "
+             "islands (same as NVC_ISLAND_SPEC=0)" },
            { "--report-order={stable,immediate}",
              "Write the output of the processes of a delta cycle in the "
              "order they start, or as it happens (default stable; "

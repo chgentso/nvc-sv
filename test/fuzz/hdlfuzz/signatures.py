@@ -54,8 +54,9 @@ _FRAME_SKIP = re.compile(
 # nvc configurations that run the same elaborated design through the island
 # path (or a variant of it): one bug usually shows in several of them, so the
 # campaign buckets them as one ("islands") and keeps the per-config detail.
-ISLAND_CONFIGS = frozenset(("default", "nofast", "module", "spec", "specA",
-                            "stress", "threads", "jit", "interp", "O0"))
+ISLAND_CONFIGS = frozenset(("default", "nospec", "nofast", "module", "spec",
+                            "specA", "stress", "threads", "jit", "interp",
+                            "O0"))
 GROUP = "islands"
 
 

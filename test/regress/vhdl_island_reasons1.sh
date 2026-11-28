@@ -1,7 +1,9 @@
 set -xe
 
-# The ABLOCK lines come from the Mode A trial of the default build
-unset NVC_ISLAND_SPEC NVC_ISLAND_SPEC_FORCE
+# The ABLOCK lines come from the Mode A trial of a build without
+# speculative islands
+unset NVC_ISLAND_SPEC_FORCE
+export NVC_ISLAND_SPEC=0
 
 # NVC_DUMP_ISLANDS reports why a process is not fused and which fused
 # processes keep an island from having a Mode A (--2state=islands) variant.

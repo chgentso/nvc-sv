@@ -2669,6 +2669,59 @@ static bool vi_match_op_from_name(const char *fn, vi_match_op_t *op)
    return true;
 }
 
+// The STD_LOGIC_1164 logical operator FN as a bitwise operation, NEG set
+// for the negated ones
+static bool vi_logic_op_from_name(const char *fn, mir_vec_op_t *op, bool *neg)
+{
+   *neg = false;
+   if (fn_name_is(fn, "\"and\""))        *op = MIR_VEC_BIT_AND;
+   else if (fn_name_is(fn, "\"nand\"")) { *op = MIR_VEC_BIT_AND; *neg = true; }
+   else if (fn_name_is(fn, "\"or\""))   *op = MIR_VEC_BIT_OR;
+   else if (fn_name_is(fn, "\"nor\""))  { *op = MIR_VEC_BIT_OR; *neg = true; }
+   else if (fn_name_is(fn, "\"xor\""))  *op = MIR_VEC_BIT_XOR;
+   else if (fn_name_is(fn, "\"xnor\"")) { *op = MIR_VEC_BIT_XOR; *neg = true; }
+   else
+      return false;
+   return true;
+}
+
+// Mode A reduction of the two-state vector A (VHDL-2008 unary logical
+// operators): OP is the bitwise operation, NEG negates the result
+static bool vi_lower_reduce2(vi_lower_t *l, mir_vec_op_t op, bool neg,
+                             vi_val_t a, bool is_std, vi_val_t *out)
+{
+   mir_unit_t *mu = l->mu;
+   const uint32_t w = a.width;
+   if (a.kind != VIVAL_VEC || w == 0)
+      return false;
+
+   mir_type_t t1 = mir_vec2_type(mu, 1, false);
+   mir_type_t tv = mir_vec2_type(mu, (int)w, a.is_signed);
+   mir_value_t b = MIR_NULL_VALUE;
+   if (op == MIR_VEC_BIT_OR) {
+      mir_value_t eq0 = mir_build_binary(mu, MIR_VEC_CASE_EQ, tv, a.val,
+                                         vi_const_vec2(mu, (int)w, a.is_signed,
+                                                       NULL));
+      b = mir_build_unary(mu, MIR_VEC_BIT_NOT, t1, eq0);
+   }
+   else if (op == MIR_VEC_BIT_AND)
+      b = mir_build_binary(mu, MIR_VEC_CASE_EQ, tv, a.val,
+                           vi_const_vec2_rep(mu, (int)w, a.is_signed, 1));
+   else {
+      b = mir_build_extract(mu, t1, a.val, vi_off(mu, 0));
+      for (uint32_t i = 1; i < w; i++) {
+         mir_value_t bi = mir_build_extract(mu, t1, a.val, vi_off(mu, i));
+         b = mir_build_binary(mu, MIR_VEC_BIT_XOR, t1, b, bi);
+      }
+   }
+   if (neg)
+      b = mir_build_unary(mu, MIR_VEC_BIT_NOT, t1, b);
+   *out = (vi_val_t){
+      .kind = VIVAL_BIT, .val = b, .width = 1, .is_std = is_std,
+   };
+   return true;
+}
+
 static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
                                const char *pkg, const char *fn, vi_val_t *out)
 {
@@ -3094,6 +3147,11 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
                return true;
             }
          }
+         // VHDL-2008 reduction operators of STD_ULOGIC_VECTOR
+         bool neg = false;
+         mir_vec_op_t op;
+         if (a.kind == VIVAL_VEC && vi_logic_op_from_name(fn, &op, &neg))
+            return vi_lower_reduce2(l, op, neg, a, true, out);
          if (fn_name_is(fn, "TO_STDLOGICVECTOR") || fn_name_is(fn, "TO_STDULOGICVECTOR")
              || fn_name_is(fn, "TO_BITVECTOR") || fn_name_is(fn, "TO_X01")
              || fn_name_is(fn, "TO_01") || fn_name_is(fn, "TO_BIT")) {
@@ -3118,13 +3176,8 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
             return vi_lower_match_cmp(l, VIM_EQ, a, b, true, false, out);
          bool neg = false;
          mir_vec_op_t op;
-         if (fn_name_is(fn, "\"and\""))        op = MIR_VEC_BIT_AND;
-         else if (fn_name_is(fn, "\"nand\"")) { op = MIR_VEC_BIT_AND; neg = true; }
-         else if (fn_name_is(fn, "\"or\""))   op = MIR_VEC_BIT_OR;
-         else if (fn_name_is(fn, "\"nor\""))  { op = MIR_VEC_BIT_OR; neg = true; }
-         else if (fn_name_is(fn, "\"xor\""))  op = MIR_VEC_BIT_XOR;
-         else if (fn_name_is(fn, "\"xnor\"")) { op = MIR_VEC_BIT_XOR; neg = true; }
-         else return false;
+         if (!vi_logic_op_from_name(fn, &op, &neg))
+            return false;
 
          if (a.kind == VIVAL_BIT && b.kind == VIVAL_BIT) {
             mir_type_t t1 = mir_vec2_type(mu, 1, false);
@@ -3180,6 +3233,12 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
          out->val = mir_build_unary(mu, MIR_VEC_BIT_NOT, tv, a.val);
          return true;
       }
+      // VHDL-2008 reduction operators of UNSIGNED and SIGNED
+      bool neg = false;
+      mir_vec_op_t op;
+      if (a.kind == VIVAL_VEC && strcmp(pkg, "IEEE.NUMERIC_STD.") == 0
+          && type_is_enum(rtype) && vi_logic_op_from_name(fn, &op, &neg))
+         return vi_lower_reduce2(l, op, neg, a, true, out);
       if (fn_name_is(fn, "IS_X")) {
          if (a.kind != VIVAL_VEC)
             return false;
@@ -3940,33 +3999,13 @@ static bool vi_lower_builtin_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
          if (a.kind != VIVAL_VEC || !l->two_state)
             return false;
          {
-            const uint32_t w = a.width;
-            mir_type_t t1 = mir_vec2_type(mu, 1, false);
-            mir_type_t tv = mir_vec2_type(mu, (int)w, a.is_signed);
-            mir_value_t b = MIR_NULL_VALUE;
-            if (sk == S_REDUCE_OR || sk == S_REDUCE_NOR) {
-               mir_value_t eq0 = mir_build_binary(mu, MIR_VEC_CASE_EQ, tv, a.val,
-                                                  vi_const_vec2(mu, (int)w, a.is_signed, NULL));
-               b = mir_build_unary(mu, MIR_VEC_BIT_NOT, t1, eq0);
-            }
-            else if (sk == S_REDUCE_AND || sk == S_REDUCE_NAND) {
-               b = mir_build_binary(mu, MIR_VEC_CASE_EQ, tv, a.val,
-                                    vi_const_vec2_rep(mu, (int)w, a.is_signed, 1));
-            }
-            else {
-               // XOR reduction
-               b = mir_build_extract(mu, t1, a.val, vi_off(mu, 0));
-               for (uint32_t i = 1; i < w; i++) {
-                  mir_value_t bi = mir_build_extract(mu, t1, a.val, vi_off(mu, i));
-                  b = mir_build_binary(mu, MIR_VEC_BIT_XOR, t1, b, bi);
-               }
-            }
-            if (sk == S_REDUCE_NAND || sk == S_REDUCE_NOR || sk == S_REDUCE_XNOR)
-               b = mir_build_unary(mu, MIR_VEC_BIT_NOT, t1, b);
-            *out = (vi_val_t){
-               .kind = VIVAL_BIT, .val = b, .width = 1, .is_std = a.is_std,
-            };
-            return true;
+            const mir_vec_op_t op =
+               (sk == S_REDUCE_AND || sk == S_REDUCE_NAND) ? MIR_VEC_BIT_AND
+               : (sk == S_REDUCE_OR || sk == S_REDUCE_NOR) ? MIR_VEC_BIT_OR
+               : MIR_VEC_BIT_XOR;
+            const bool neg = sk == S_REDUCE_NAND || sk == S_REDUCE_NOR
+               || sk == S_REDUCE_XNOR;
+            return vi_lower_reduce2(l, op, neg, a, a.is_std, out);
          }
       default:
          return false;

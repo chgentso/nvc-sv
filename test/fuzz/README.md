@@ -42,7 +42,8 @@ marker (`FZ END`) and an optional VCD.
 | name | what |
 |---|---|
 | `ref` | `--rtl-islands=off` (the reference) |
-| `default` | islands with the default options |
+| `default` | islands with the default options (speculative 2-state islands on, promotion after 2^17 ticks) |
+| `nospec` | elaborated with `NVC_ISLAND_SPEC=0` (no speculative 2-state islands) |
 | `nofast` | `--no-island-fast` |
 | `spec` | elaborated with `NVC_ISLAND_SPEC=1` (speculative 2-state islands), run with `NVC_ISLAND_SPEC_START=0` (promotion from the start) |
 | `specA` | `spec` plus `NVC_ISLAND_SPEC_FORCE=A` (all eligible islands in 2-state from t=0) |
@@ -71,7 +72,7 @@ Every normalisation is a named rule recorded with the difference.
 
 `<level>-<what>/<cfg>-vs-<ref>/<kind>/<shape>`, lower case, with no numbers,
 names or paths (monitor values are masked), so one bug gives one bucket. The
-island configurations (`default`, `nofast`, `spec`, `specA`) share one bucket
+island configurations (`default`, `nospec`, `nofast`, `spec`, `specA`) share one bucket
 (`islands-vs-ref`) and keep per-configuration counts. A differing case is rerun
 once and kept only if the difference reproduces; a bucket keeps its five
 smallest cases on disk. Results: `<out>/cases.jsonl`, `<out>/buckets.json`,

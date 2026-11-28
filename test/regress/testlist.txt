@@ -3517,3 +3517,6 @@ island_stats1 shell
 island_arena1 shell
 vlog_island_pack1 shell
 vlog_island_pack2 shell
+vhdl_island_spec_mix1 shell
+vhdl_island_spec_reduce1 shell
+vhdl_island_spec_default1 shell
