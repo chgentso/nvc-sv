@@ -2,8 +2,10 @@ set -xe
 
 # Domains clocked by copies of one clock (assign clk_out = clk_in, as in
 # clock gating cell models, and copies of copies) share super-domains
-# watching one copy.  Zero-width pulses, forces of the root clock and of a
-# copy (which dissolves the group) must give the same results and waves as
+# watching one copy, and after time zero the copies that only copy are
+# kept by that copy's island instead of running.  Zero-width pulses, Z and
+# X, forces of the root clock and of a copy (which dissolves the group),
+# with and without waves, must give the same results and waves as
 # NVC_RTL_ISLANDS=off and NVC_ISLAND_CLK_COPY=0.
 
 cat >clkcopy1.sv <<'EOF'
@@ -68,6 +70,16 @@ module clkcopy1;
     #1 show("b");
     #1 clk = 1; #0 clk = 0;       // Pulse over two delta cycles
     #1 show("c");
+    #1 clk = 1'bz;                // Z passes through a copy
+    #1 show("z");
+    #1 clk = 0;
+    #1 clk = 1'bx;
+    #1 clk = 1;
+    #1 clk = 0;
+    #1 show("x");
+    en = 0;                       // The copies' islands run for en
+    clocks(1);
+    en = 1;
     force clk = 1'b1;             // The root clock: the copies follow
     #1 show("d");
     clocks(2);
@@ -102,10 +114,10 @@ run_mode() {
      export NVC_RTL_ISLANDS=$2 NVC_ISLAND_FAST=$3 NVC_ISLAND_CLK_COPY=$4
      nvc -a ../clkcopy1.sv -e clkcopy1
      for p in plain nested; do
-        NVC_DUMP_ISLANDS=1 nvc -r --wave=$p.vcd --format=vcd clkcopy1 +$p \
-                        >$p.txt 2>$p.err
-        strip_date $p.vcd $p.norm
+        NVC_DUMP_ISLANDS=1 nvc -r clkcopy1 +$p >$p.txt 2>$p.err
         grep -v '^ISLAND' $p.txt > $p.out
+        nvc -r --wave=$p.vcd --format=vcd clkcopy1 +$p >$p.wout 2>/dev/null
+        strip_date $p.vcd $p.norm
      done )
 }
 
@@ -114,11 +126,12 @@ run_mode nofast hier 0 1
 run_mode nocopy hier 1 0
 run_mode off off 0 1
 
-grep -q 'ISLAND_CLK_COPY: copies=8 grouped=4 groups=1 domains=8' fast/plain.err
+grep -q 'ISLAND_CLK_COPY: copies=8 grouped=4 groups=1 domains=8 kept=3' fast/plain.err
 
 for m in fast nofast nocopy; do
    for p in plain nested; do
       diff -u off/$p.out $m/$p.out
+      diff -u off/$p.out $m/$p.wout
       diff -u off/$p.norm $m/$p.norm
    done
 done

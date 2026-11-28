@@ -291,6 +291,8 @@ struct _rt_island_mgr {
    hash_t                 *alias_map;
    hash_t                 *clk_copy_map;   // Signal -> island_clk_copy_t
    A(struct _island_clk_group *) clk_groups;
+   bool                    clk_elide_pending;
+   uint64_t                clk_elide_tried;
    A(rt_island_t *)        islands;
    A(rt_island_t *)        dirty_q;
    A(rt_island_t *)        defer_dirty_q;
@@ -1115,11 +1117,15 @@ static void island_init_act(rt_island_t *isl);
 static void island_act_report(rt_island_mgr_t *mgr);
 
 static void island_activate_direct_pub(rt_island_mgr_t *mgr);
+static void island_activate_clk_elide(rt_island_mgr_t *mgr);
 
 void rt_island_promote_deferred(rt_island_mgr_t *mgr)
 {
    if (unlikely(mgr->pub_pending))
       island_activate_direct_pub(mgr);
+
+   if (unlikely(mgr->clk_elide_pending))
+      island_activate_clk_elide(mgr);
 
    if (unlikely(mgr->defer_put_q.count > 0))
       island_apply_deferred_puts(mgr);
@@ -3129,9 +3135,14 @@ static void island_sync_dirty_inputs(rt_island_t *isl)
 
 static void island_spec_whole_read(rt_island_t *isl, rt_island_sig_t *s);
 
+static void island_clk_fanout(rt_model_t *m, rt_island_t *isl,
+                              const rt_island_sig_t *s);
+
 static void island_sync_out_sig(rt_model_t *m, rt_island_t *isl,
                                 rt_island_sig_t *s)
 {
+   if (unlikely(s->flags & RT_ISIG_CLK_FANOUT))
+      island_clk_fanout(m, isl, s);
    if (unlikely(s->flags & RT_ISIG_SPEC_ROWS))
       island_spec_whole_read(isl, s);
    WSTAT_COUNT(s, 2);
@@ -6644,9 +6655,25 @@ static bool sdom_key_cmp(const void *a, const void *b)
 // are then dissolved into domains watching their own clocks again
 // (island_clk_copy_break) before the write takes effect.
 
+typedef struct {
+   rt_island_t     *isl;
+   uint32_t         src;
+   uint32_t         dst;
+   uint32_t         tries;
+   // Kept: where island_clk_fanout writes
+   rt_island_sig_t *so;
+   uint64_t        *si_a, *si_b;   // b NULL for two-state
+   uint64_t        *so_a, *so_b;
+} island_clk_member_t;
+
 typedef struct _island_clk_group {
    A(rt_super_domain_t *) sds;
    bool                   broken;
+   rt_island_t           *leader;     // Island of the leader copy
+   uint32_t               leader_dst;
+   A(island_clk_member_t) members;    // Exclusive copies the leader can keep
+   A(island_clk_member_t) kept;       // Those it keeps: inputs unwatched
+   bool                   elided;     // RT_ISIG_CLK_FANOUT is set
 } island_clk_group_t;
 
 typedef struct _island_clk_copy {
@@ -6669,6 +6696,8 @@ typedef A(island_bit_key_t) island_bit_list_t;
 typedef struct {
    island_bit_key_t   dkey;     // Output bit (hops 0)
    rt_island_sig_t   *dst;
+   rt_island_sig_t   *src;
+   bool               exclusive;
    island_bit_key_t   root;     // Driver of the chain and port hops to it
    island_bit_list_t  path;     // Port signals up to the parent or root
    int32_t            parent;   // Copy whose output feeds our input
@@ -6804,6 +6833,38 @@ static int8_t island_clk_cand_valid(const rt_model_t *m,
    return c->valid;
 }
 
+// A copy whose island need not run when its input changes: the leader of
+// its group keeps its input and output equal to the leader's
+static bool island_clk_elidable(const rt_island_sig_t *src,
+                                const rt_island_sig_t *dst)
+{
+   const rt_island_t *isl = dst->isl;
+   return !isl->is_vhdl && src->watch != NULL
+      && !(src->flags & (RT_ISIG_DIRECT_LINK | RT_ISIG_STD_LOGIC9))
+      && !(dst->flags & (RT_ISIG_DIRECT_LINK | RT_ISIG_CLK_FANOUT))
+      && dst->ext_write_watch == NULL
+      && (dst->flags & RT_ISIG_OUT) && isl->spec == NULL;
+}
+
+// Removes S from the targets of the RT_ISIG_DIRECT_PUB source that feeds
+// it, before island_activate_direct_pub
+static void island_unpub_target(rt_island_mgr_t *mgr, rt_island_sig_t *s)
+{
+   for (rt_island_sig_t *o = hash_get(mgr->sig_map, s->sig); o != NULL;
+        o = o->next_owner) {
+      if (!(o->flags & RT_ISIG_DIRECT_PUB))
+         continue;
+      for (uint32_t t = 0; t < o->n_direct_targets; t++) {
+         if (o->direct_targets[t] == s) {
+            o->direct_targets[t] = o->direct_targets[--o->n_direct_targets];
+            if (o->n_direct_targets == 0)
+               o->flags &= ~RT_ISIG_DIRECT_PUB;   // A plain output again
+            break;
+         }
+      }
+   }
+}
+
 static void island_build_clk_copies(rt_island_mgr_t *mgr)
 {
    const char *env = getenv("NVC_ISLAND_CLK_COPY");
@@ -6826,6 +6887,8 @@ static void island_build_clk_copies(rt_island_mgr_t *mgr)
                   .dkey   = { d->sig, d->sig_offset, 0 },
                   .root   = { s->sig, s->sig_offset, 0 },
                   .dst    = d,
+                  .src    = (rt_island_sig_t *)s,
+                  .exclusive = isl->copies[c].exclusive,
                   .parent = -1,
                   .group  = -1,
                   .valid  = -1,
@@ -6946,6 +7009,7 @@ static void island_build_clk_copies(rt_island_mgr_t *mgr)
          mgr->clk_copy_map = hash_new(256);
    }
 
+   const bool elide = island_direct_pub_on;   // Also off with threads
    for (uint32_t i = 0; i < n; i++) {
       island_clk_cand_t *c = &(cands.items[i]);
       if (c->valid > 0 && grps.items[c->group].group != NULL) {
@@ -6954,8 +7018,50 @@ static void island_build_clk_copies(rt_island_mgr_t *mgr)
          for (unsigned k = 0; k < c->path.count; k++)
             island_clk_copy_get(mgr, &(c->path.items[k]), g);
          n_grouped++;
+
+         const island_clk_cand_t *lc =
+            &(cands.items[grps.items[c->group].leader]);
+         if (elide && c == lc && !(c->src->flags & RT_ISIG_DIRECT_LINK)
+             && c->dst->isl->spec == NULL) {
+            g->leader = c->dst->isl;
+            g->leader_dst = c->dst->sig_idx;
+         }
+         else if (elide && c != lc && island_clk_elidable(c->src, c->dst)
+                  && c->exclusive && !(lc->src->flags & RT_ISIG_DIRECT_LINK))
+            APUSH(g->members, ((island_clk_member_t){
+                     .isl = c->dst->isl,
+                     .src = c->src->sig_idx,
+                     .dst = c->dst->sig_idx,
+                  }));
       }
       ACLEAR(c->path);
+   }
+
+   for (unsigned i = 0; i < mgr->clk_groups.count; i++) {
+      island_clk_group_t *g = mgr->clk_groups.items[i];
+      if (g->leader == NULL || g->members.count == 0) {
+         ACLEAR(g->members);
+         continue;
+      }
+      // The members keep their input watches through time zero
+      // (island_activate_clk_elide); not fed by a published source
+      for (unsigned k = 0; k < g->members.count; k++) {
+         const island_clk_member_t *mb = &(g->members.items[k]);
+         island_unpub_target(mgr, &(mb->isl->sigs[mb->src]));
+      }
+      // A member whose output is a published source must run for its
+      // other readers; one that only fed other members is plain again
+      unsigned keep = 0;
+      for (unsigned k = 0; k < g->members.count; k++) {
+         const island_clk_member_t *mb = &(g->members.items[k]);
+         rt_island_sig_t *so = &(mb->isl->sigs[mb->dst]);
+         if (so->flags & RT_ISIG_DIRECT_PUB)
+            continue;
+         g->members.items[keep++] = *mb;
+      }
+      g->members.count = keep;
+      if (keep > 0)
+         mgr->clk_elide_pending = true;
    }
 
    for (unsigned i = 0; i < doms.count; i++) {
@@ -6978,9 +7084,14 @@ static void island_build_clk_copies(rt_island_mgr_t *mgr)
       ACLEAR(dt->path);
    }
 
-   if (opt_get_int(OPT_DUMP_ISLANDS))
+   if (opt_get_int(OPT_DUMP_ISLANDS)) {
+      uint32_t n_members = 0;
+      for (unsigned i = 0; i < mgr->clk_groups.count; i++)
+         n_members += mgr->clk_groups.items[i]->members.count;
       fprintf(stderr, "ISLAND_CLK_COPY: copies=%u grouped=%u groups=%u "
-              "domains=%u\n", n, n_grouped, n_groups, n_doms);
+              "domains=%u kept=%u\n", n, n_grouped, n_groups, n_doms,
+              n_members);
+   }
 
    ACLEAR(doms);
    ACLEAR(grps);
@@ -7002,10 +7113,14 @@ static const island_clk_copy_t *island_clk_copy_find(
    return NULL;
 }
 
+static void island_clk_unelide(rt_island_mgr_t *mgr, island_clk_group_t *g);
+
 static void island_clk_group_dissolve(rt_island_mgr_t *mgr,
                                       island_clk_group_t *g)
 {
    g->broken = true;
+   island_clk_unelide(mgr, g);
+   ACLEAR(g->members);
    for (unsigned i = 0; i < g->sds.count; i++) {
       rt_super_domain_t *sd = g->sds.items[i];
       for (uint32_t d = 0; d < sd->n_doms; d++) {
@@ -7040,6 +7155,184 @@ static void island_clk_group_dissolve(rt_island_mgr_t *mgr,
    }
 }
 
+// The copies of a group whose island only copies their input (the
+// exclusive members) stop watching it after time zero: the leader, which
+// runs when they would, writes the new value into their inputs and outputs
+// and publishes the outputs (island_clk_fanout), so they publish in the
+// same delta cycle as before (in the leader's pass) and their islands stay
+// consistent if something else makes them run.  An output nothing reads
+// any more is pruned: it is synced from the island state on demand.
+static inline uint64_t *island_sig_word(rt_island_t *isl,
+                                        const rt_island_sig_t *s, bool b)
+{
+   return (uint64_t *)(isl->state + (b ? s->b_off : s->a_off));
+}
+
+static bool island_clk_member_ready(const island_clk_group_t *g,
+                                    const island_clk_member_t *mb)
+{
+   const rt_island_t *isl = mb->isl;
+   if (isl->dirty || isl->in_defer_dirty || isl->has_dirty_inputs
+       || isl->in_dirty_list)
+      return false;
+   return true;
+}
+
+static bool island_clk_member_same(island_clk_group_t *g,
+                                   island_clk_member_t *mb)
+{
+   rt_island_t *l = g->leader;
+   const rt_island_sig_t *ls = &(l->sigs[g->leader_dst]);
+   const rt_island_sig_t *si = &(mb->isl->sigs[mb->src]);
+   const rt_island_sig_t *so = &(mb->isl->sigs[mb->dst]);
+   const bool two = !!(ls->flags & RT_ISIG_TWO_STATE);
+   const uint64_t a = *island_sig_word(l, ls, false) & 1u;
+   if ((*island_sig_word(mb->isl, si, false) & 1u) != a
+       || (*island_sig_word(mb->isl, so, false) & 1u) != a)
+      return false;
+   if (two)
+      return true;
+   const uint64_t b = *island_sig_word(l, ls, true) & 1u;
+   return (*island_sig_word(mb->isl, si, true) & 1u) == b
+      && (*island_sig_word(mb->isl, so, true) & 1u) == b;
+}
+
+static void island_activate_clk_elide(rt_island_mgr_t *mgr)
+{
+   // Tried once per time step: a member waits for a quiet delta cycle
+   const uint64_t now = model_now(mgr->model, NULL);
+   if (now == 0 || now == mgr->clk_elide_tried)
+      return;
+   mgr->clk_elide_tried = now;
+
+   mgr->clk_elide_pending = false;
+   for (unsigned i = 0; i < mgr->clk_groups.count; i++) {
+      island_clk_group_t *g = mgr->clk_groups.items[i];
+      if (g->broken || g->members.count == 0)
+         continue;
+
+      rt_island_sig_t *ls = &(g->leader->sigs[g->leader_dst]);
+      if (!island_sig_published(ls->flags) || (ls->flags & RT_ISIG_PRUNED)
+          || g->leader->has_forces) {
+         ACLEAR(g->members);
+         continue;
+      }
+
+      unsigned wait = 0;
+      for (unsigned k = 0; k < g->members.count; k++) {
+         island_clk_member_t *mb = &(g->members.items[k]);
+         rt_island_sig_t *si = &(mb->isl->sigs[mb->src]);
+         rt_island_sig_t *so = &(mb->isl->sigs[mb->dst]);
+         if (si->watch == NULL || mb->isl->has_forces
+             || (so->flags & RT_ISIG_DIRECT_LINK)
+             || ((so->flags ^ ls->flags) & RT_ISIG_TWO_STATE))
+            continue;   // Stays as it is
+         else if (!island_clk_member_ready(g, mb)
+                  || !island_clk_member_same(g, mb)) {
+            if (++mb->tries < 16)
+               g->members.items[wait++] = *mb;
+            continue;
+         }
+
+         watch_free(mgr->model, si->watch);
+         si->watch = NULL;
+
+         if (mgr->fast && (so->flags & RT_ISIG_SOLE_OWNER)
+             && !(so->flags & RT_ISIG_PRUNED)
+             && !(so->sig->shared.flags & (SIG_F_POLL_WATCHED
+                                           | SIG_F_EXT_READ))) {
+            bool obs = false;
+            const rt_nexus_t *nx = &(so->sig->nexus);
+            for (uint32_t ni = 0; ni < so->sig->n_nexus; ni++, nx = nx->chain) {
+               if (island_nexus_overlaps_sig(nx, so)
+                   && (nx->outputs != NULL || nx->pending != NULL
+                       || (nx->flags & NET_F_FORCED)))
+                  obs = true;
+            }
+            if (!obs) {
+               so->flags &= ~(RT_ISIG_OBSERVED | RT_ISIG_LAST_OUT_VALID);
+               so->flags |= RT_ISIG_PRUNED;
+            }
+         }
+         const bool two = !!(so->flags & RT_ISIG_TWO_STATE);
+         mb->so   = so;
+         mb->si_a = island_sig_word(mb->isl, si, false);
+         mb->so_a = island_sig_word(mb->isl, so, false);
+         mb->si_b = two ? NULL : island_sig_word(mb->isl, si, true);
+         mb->so_b = two ? NULL : island_sig_word(mb->isl, so, true);
+         APUSH(g->kept, *mb);
+      }
+      g->members.count = wait;
+      if (wait > 0)
+         mgr->clk_elide_pending = true;
+
+      if (g->kept.count > 0 && !g->elided) {
+         g->elided = true;
+         ls->flags |= RT_ISIG_CLK_FANOUT;
+         g->leader->clk_fanout = g;
+      }
+   }
+}
+
+static void island_clk_fanout(rt_model_t *m, rt_island_t *isl,
+                              const rt_island_sig_t *s)
+{
+   island_clk_group_t *g = isl->clk_fanout;
+   assert(g != NULL && g->elided);
+   const bool two = !!(s->flags & RT_ISIG_TWO_STATE);
+   const uint64_t a = *island_sig_word(isl, s, false) & 1u;
+   const uint64_t b = two ? 0 : *island_sig_word(isl, s, true) & 1u;
+   const island_clk_member_t *mb = g->kept.items;
+   for (unsigned k = 0; k < g->kept.count; k++, mb++) {
+      if (*mb->so_a == a && (two || *mb->so_b == b))
+         continue;
+      *mb->si_a = a;
+      *mb->so_a = a;
+      if (!two) {
+         *mb->si_b = b;
+         *mb->so_b = b;
+      }
+      if (!(mb->so->flags & RT_ISIG_PRUNED))
+         island_sync_out_sig(m, mb->isl, mb->so);
+   }
+}
+
+static void island_clk_unelide(rt_island_mgr_t *mgr, island_clk_group_t *g)
+{
+   if (!g->elided)
+      return;
+   g->elided = false;
+   g->members.count = 0;   // Not tried again
+   g->leader->sigs[g->leader_dst].flags &= ~RT_ISIG_CLK_FANOUT;
+   g->leader->clk_fanout = NULL;
+   rt_model_t *m = mgr->model;
+   for (unsigned k = 0; k < g->kept.count; k++) {
+      island_clk_member_t *mb = &(g->kept.items[k]);
+      rt_island_sig_t *si = &(mb->isl->sigs[mb->src]);
+      assert(si->watch == NULL);
+      si->watch = watch_new(m, island_input_watch_cb, si, WATCH_EVENT, 1);
+      watch_set_inline_island(si->watch, true);
+      if (si->sig->shared.flags & SIG_F_PACKED)
+         model_set_event_cb(m, si->sig, 0, 1, si->watch);
+      else
+         model_set_event_cb(m, si->sig, si->sig_offset,
+                            (int)(si->width * si->nelems), si->watch);
+
+      // A change of the input the leader has yet to see: the member runs
+      // when the leader would have
+      const uint64_t a = *island_sig_word(mb->isl, si, false) & 1u;
+      const uint64_t b = (si->flags & RT_ISIG_TWO_STATE)
+         ? 0 : *island_sig_word(mb->isl, si, true) & 1u;
+      if (island_read_sv_bit(si->sig, si->sig_offset) != (a | (b << 1))) {
+         const rt_island_t *l = g->leader;
+         const bool defer = l->in_defer_dirty ? true
+            : l->dirty ? false : model_blocking_update(m);
+         rt_island_input_watch_inline(m, si, defer);
+      }
+   }
+   ACLEAR(g->kept);
+}
+
 static void island_clk_copy_break(rt_island_mgr_t *mgr, const rt_signal_t *sig)
 {
    if (likely(mgr->clk_copy_map == NULL))
@@ -7065,8 +7358,24 @@ static void island_clk_copy_free(rt_island_mgr_t *mgr)
       }
       hash_free(mgr->clk_copy_map);
    }
+   if (opt_get_int(OPT_DUMP_ISLANDS) && mgr->clk_groups.count > 0) {
+      uint32_t n_kept = 0, n_broken = 0, n_pruned = 0;
+      for (unsigned i = 0; i < mgr->clk_groups.count; i++) {
+         const island_clk_group_t *g = mgr->clk_groups.items[i];
+         n_kept += g->kept.count;
+         n_broken += g->broken;
+         for (unsigned k = 0; k < g->kept.count; k++) {
+            const island_clk_member_t *mb = &(g->kept.items[k]);
+            n_pruned += !!(mb->isl->sigs[mb->dst].flags & RT_ISIG_PRUNED);
+         }
+      }
+      fprintf(stderr, "ISLAND_CLK_COPY: kept=%u pruned=%u broken=%u\n",
+              n_kept, n_pruned, n_broken);
+   }
    for (unsigned i = 0; i < mgr->clk_groups.count; i++) {
       ACLEAR(mgr->clk_groups.items[i]->sds);
+      ACLEAR(mgr->clk_groups.items[i]->members);
+      ACLEAR(mgr->clk_groups.items[i]->kept);
       free(mgr->clk_groups.items[i]);
    }
    ACLEAR(mgr->clk_groups);
@@ -7615,7 +7924,13 @@ void rt_island_reset_all(rt_island_mgr_t *mgr)
       return;
 
    // A reset after time zero (restart) goes back to the input watches of
-   // the RT_ISIG_DIRECT_PUB readers for good: they are only made once
+   // the RT_ISIG_DIRECT_PUB readers and the copies kept by a leader
+   // (island_activate_clk_elide) for good: they are only made once
+   for (unsigned i = 0; i < mgr->clk_groups.count; i++) {
+      island_clk_unelide(mgr, mgr->clk_groups.items[i]);
+      ACLEAR(mgr->clk_groups.items[i]->members);
+   }
+   mgr->clk_elide_pending = false;
    for (unsigned i = 0; i < mgr->islands.count; i++) {
       rt_island_t *isl = mgr->islands.items[i];
       if (!isl->has_direct_pub)

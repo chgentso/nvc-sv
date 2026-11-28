@@ -55,6 +55,7 @@ typedef enum {
    RT_ISIG_TOUCH_LOG      = (1u << 26),   // SV memory: element write log
    RT_ISIG_GLITCH_LOG     = (1u << 27),   // SV register: overwritten NBA log
    RT_ISIG_DIRECT_PUB     = (1u << 28),   // Direct source also published
+   RT_ISIG_CLK_FANOUT     = (1u << 29),   // Leader copy of a clock copy group
 } rt_island_sig_flags_t;
 
 // Speculative Mode A clean tracking (NVC_ISLAND_SPEC).  The Mode A state of
@@ -394,6 +395,7 @@ typedef struct _rt_island {
    bool                   has_direct_pub;   // A RT_ISIG_DIRECT_PUB source
    rt_island_copy_t      *copies;
    uint32_t               n_copies;
+   struct _island_clk_group *clk_fanout;   // RT_ISIG_CLK_FANOUT
 } rt_island_t;
 
 // Speculative Mode A (NVC_ISLAND_SPEC): a VHDL island lowered in Mode B
