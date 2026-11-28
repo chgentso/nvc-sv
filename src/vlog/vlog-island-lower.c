@@ -1899,10 +1899,12 @@ void vlog_island_lower_emit_init(vlog_island_lower_ctx_t *ctx,
 
 // A speculative variant of an island function is lowered the first time
 // the runtime calls it: most islands never call "$ah" and some are never
-// promoted.  An island with processes or signals of generate blocks is
-// lowered at once: their specialised copies (expand_gen_node) do not live
-// longer than the lowering of the instance.  NVC_DUMP_ISLANDS lowers them
-// all at once too.
+// promoted.  The specialised copies of the processes and signals of
+// generate blocks (expand_gen_node) live in the arena of the lowering: they
+// are deferred too when the lowering at the start of a run keeps that arena
+// (vlog_island_lower_lazy_gen, vlog_island_lower_keep_arena), and lowered
+// at once otherwise (elaboration frees what the design does not reference).
+// NVC_DUMP_ISLANDS lowers them all at once.
 typedef struct {
    vlog_island_lower_ctx_t *ctx;
    vlog_node_t              body;
@@ -1914,6 +1916,8 @@ typedef struct {
 
 static hash_t     *lazy_map;    // Function name to vlog_island_lazy_t
 static nvc_lock_t  lazy_lock;
+static bool        lazy_gen;    // A deferred variant reads generate copies
+static bool        lazy_gen_ok; // vlog_island_lower_lazy_gen
 
 static void vlog_island_ctx_release(vlog_island_lower_ctx_t *ctx);
 
@@ -1964,13 +1968,13 @@ static void vlog_island_lower_variant(mir_context_t *mc,
                                       vlog_island_spec_t spec, ident_t name)
 {
    const vlog_island_m2_t *m2 = &(ctx->islands[ii]);
-   bool lazy = !opt_get_int(OPT_DUMP_ISLANDS);
-   for (uint32_t p = 0; p < m2->isl->nprocs && lazy; p++)
-      lazy = !m2->fused_proc[p] || !m2->isl->procs[p].from_gen;
-   for (uint32_t i = 0; i < m2->isl->nsigs && lazy; i++)
-      lazy = m2->isl->sigs[i].gen_path == NULL;
+   bool gen = false;
+   for (uint32_t p = 0; p < m2->isl->nprocs && !gen; p++)
+      gen = m2->fused_proc[p] && m2->isl->procs[p].from_gen;
+   for (uint32_t i = 0; i < m2->isl->nsigs && !gen; i++)
+      gen = m2->isl->sigs[i].gen_path != NULL;
 
-   if (!lazy) {
+   if (opt_get_int(OPT_DUMP_ISLANDS) || (gen && !lazy_gen_ok)) {
       mir_put_unit(mc, vlog_island_build_variant(mc, ctx, body, qual, ii,
                                                  dom, spec, name));
       return;
@@ -1991,6 +1995,8 @@ static void vlog_island_lower_variant(mir_context_t *mc,
    lz->dom    = dom;
    lz->spec   = spec;
    hash_put(lazy_map, name, lz);
+
+   lazy_gen |= gen;
 
    atomic_add(&(ctx->refs), 1);
    mir_defer(mc, name, NULL, MIR_UNIT_FUNCTION, vlog_island_lazy_build,
@@ -2042,6 +2048,23 @@ void vlog_island_lower_emit_funcs(vlog_island_lower_ctx_t *ctx,
          }
       }
    }
+}
+
+// The lowering that follows may defer the variants of islands with generate
+// block processes or signals: its caller keeps the arena of the lowering
+// for the run if vlog_island_lower_keep_arena then says so
+void vlog_island_lower_lazy_gen(bool allow)
+{
+   SCOPED_LOCK(lazy_lock);
+   lazy_gen_ok = allow;
+}
+
+// The arena that holds the copies of generate block processes and signals
+// must stay: a deferred variant lowered later reads them
+bool vlog_island_lower_keep_arena(void)
+{
+   SCOPED_LOCK(lazy_lock);
+   return lazy_gen;
 }
 
 void vlog_island_lower_free(vlog_island_lower_ctx_t *ctx)
