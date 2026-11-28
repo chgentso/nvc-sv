@@ -559,6 +559,230 @@ static void island_wstat_free(void);
          island_wstat_count((s), (w));                  \
    } while (0)
 
+// Evaluation census: NVC_ISLAND_STATS=1 prints, at the end of the run, how
+// often islands are evaluated, how often one island runs more than once in
+// a delta cycle or a time step, how many direct wires and outputs each
+// evaluation touches, and which module bodies take the evaluations.
+// Diagnostics only: never influences an island decision.
+
+typedef struct {
+   uint64_t evals;
+   uint64_t rep_delta;   // Evaluated again in the same delta cycle
+   uint64_t rep_step;    // Again in a later delta of the same time step
+   int64_t  last_now;
+   uint32_t last_delta;
+   bool     seen;
+} island_istat_t;
+
+typedef struct {
+   uint64_t        evals;
+   uint64_t        rep_delta;
+   uint64_t        rep_step;
+   uint64_t        steps;         // Time steps with an evaluation
+   uint64_t        deltas;        // Delta cycles with an evaluation
+   uint64_t        wire_copies;   // Direct comb wires copied
+   uint64_t        wire_changed;  // Of them changed (reader marked)
+   uint64_t        ext_flushes;   // Output descriptors checked
+   uint64_t        cl_evals;      // island_eval_cluster calls
+   uint64_t        sd_samples;    // Super-domain edges sampled
+   uint64_t        dom_samples;   // Island domains sampled
+   uint64_t        dom_commits;   // Island domains committed
+   int64_t         now;
+   uint32_t        delta;
+   island_istat_t *isl;
+   uint32_t        n_isl;
+} island_stats_t;
+
+static bool           island_stats_on = false;
+static island_stats_t island_stats;
+
+#define ISTAT(stmt) do {                                \
+      if (unlikely(island_stats_on)) { stmt; }          \
+   } while (0)
+
+__attribute__((noinline))
+static void island_stats_eval(rt_island_t *isl)
+{
+   island_stats_t *st = &island_stats;
+   unsigned delta = 0;
+   const int64_t now = model_now(isl->model, &delta);
+   if (now != st->now || st->steps == 0) {
+      st->steps++;
+      st->deltas++;
+   }
+   else if (delta != st->delta)
+      st->deltas++;
+   st->now = now;
+   st->delta = delta;
+
+   if (isl->isl_id >= st->n_isl) {
+      const uint32_t n = MAX(isl->isl_id + 1u, st->n_isl * 2u);
+      st->isl = xrealloc_array(st->isl, n, sizeof(island_istat_t));
+      memset(st->isl + st->n_isl, 0, (n - st->n_isl) * sizeof(island_istat_t));
+      st->n_isl = n;
+   }
+   island_istat_t *e = &(st->isl[isl->isl_id]);
+   if (e->seen && e->last_now == now) {
+      if (e->last_delta == delta) {
+         e->rep_delta++;
+         st->rep_delta++;
+      }
+      else {
+         e->rep_step++;
+         st->rep_step++;
+      }
+   }
+   e->seen = true;
+   e->last_now = now;
+   e->last_delta = delta;
+   e->evals++;
+   st->evals++;
+}
+
+typedef struct {
+   jit_handle_t handle;
+   uint32_t     n_inst;
+   uint32_t     nsigs;
+   uint32_t     state_bytes;
+   uint32_t     n_leaf;
+   uint64_t     evals;
+   uint64_t     reps;
+} island_istat_body_t;
+
+static int island_istat_body_cmp(const void *a, const void *b)
+{
+   const island_istat_body_t *x = a, *y = b;
+   return x->evals < y->evals ? 1 : x->evals > y->evals ? -1 : 0;
+}
+
+static void island_stats_report(rt_island_mgr_t *mgr)
+{
+   island_stats_t *st = &island_stats;
+   const unsigned n = mgr->islands.count;
+   if (st->evals == 0 && st->dom_samples == 0 && !mgr->hier_built)
+      return;   // Elaboration only
+
+   // A leaf island: no other island lives in a scope below its instance
+   hset_t *inner = hset_new(MAX(n, 16u));
+   for (unsigned i = 0; i < n; i++) {
+      const rt_island_t *isl = mgr->islands.items[i];
+      if (isl->root_scope == NULL)
+         continue;
+      for (rt_scope_t *s = isl->root_scope->parent; s != NULL; s = s->parent) {
+         if (hset_contains(inner, s))
+            break;
+         hset_insert(inner, s);
+      }
+   }
+
+   uint64_t ev_tiny_leaf = 0, ev_leaf = 0, ev_comb_only = 0, ev_copy = 0;
+   uint64_t ev_cl = 0;
+   unsigned n_tiny_leaf = 0, n_leaf = 0, n_evald = 0;
+   island_istat_body_t *bodies = xcalloc_array(MAX(n, 1u),
+                                               sizeof(island_istat_body_t));
+   unsigned n_bodies = 0;
+   hash_t *bmap = hash_new(256);
+   for (unsigned i = 0; i < n; i++) {
+      const rt_island_t *isl = mgr->islands.items[i];
+      const island_istat_t *e =
+         isl->isl_id < st->n_isl ? &(st->isl[isl->isl_id]) : NULL;
+      const uint64_t ev = e ? e->evals : 0;
+      const bool leaf = isl->root_scope != NULL
+         && !hset_contains(inner, isl->root_scope);
+      // Proxy for a small cell: few signals and a state of at most four
+      // cache lines (node counts are not known at run time)
+      const bool tiny = isl->nsigs <= 16 && isl->state_bytes <= 256;
+      bool is_copy = false;
+      for (uint32_t c = 0; c < isl->n_copies; c++)
+         is_copy |= isl->copies[c].exclusive;
+      if (leaf) {
+         n_leaf++;
+         ev_leaf += ev;
+      }
+      if (leaf && tiny && !is_copy) {
+         n_tiny_leaf++;
+         ev_tiny_leaf += ev;
+      }
+      if (isl->ndomains == 0)
+         ev_comb_only += ev;
+      if (is_copy)
+         ev_copy += ev;
+      if (isl->cluster != NULL)
+         ev_cl += ev;
+      if (ev > 0)
+         n_evald++;
+
+      if (isl->eval_handle == JIT_HANDLE_INVALID)
+         continue;
+      void *key = (void *)(uintptr_t)(isl->eval_handle + 1u);
+      island_istat_body_t *b = hash_get(bmap, key);
+      if (b == NULL) {
+         b = &(bodies[n_bodies++]);
+         b->handle = isl->eval_handle;
+         b->nsigs = isl->nsigs;
+         b->state_bytes = isl->state_bytes;
+         hash_put(bmap, key, b);
+      }
+      b->n_inst++;
+      b->n_leaf += leaf;
+      b->evals += ev;
+      b->reps += e ? e->rep_delta + e->rep_step : 0;
+   }
+
+   const double evs = MAX(st->evals, 1u);
+   const double steps = MAX(st->steps, 1u);
+   unsigned n_cl_isl = 0;
+   for (unsigned i = 0; i < mgr->clusters.count; i++)
+      n_cl_isl += mgr->clusters.items[i]->n_islands;
+
+   printf("ISLAND_STATS: %u islands (%u in %u clusters, %u evaluated), "
+          "%u super-domains\n", n, n_cl_isl, mgr->clusters.count, n_evald,
+          mgr->super_domains.count);
+   printf("ISLAND_STATS: comb evaluations %" PRIu64 " in %" PRIu64 " time steps / %"
+          PRIu64 " deltas: %.1f per step, %.1f per delta\n",
+          st->evals, st->steps, st->deltas, st->evals / steps,
+          st->evals / (double)MAX(st->deltas, 1u));
+   printf("ISLAND_STATS: repeats: same delta %" PRIu64 " (%.1f%%), later delta of the "
+          "same step %" PRIu64 " (%.1f%%)\n", st->rep_delta,
+          100.0 * st->rep_delta / evs, st->rep_step,
+          100.0 * st->rep_step / evs);
+   printf("ISLAND_STATS: cluster passes %" PRIu64 ", evaluations in clusters %.1f%%, "
+          "comb-only islands %.1f%%, clock copies %.1f%%\n", st->cl_evals,
+          100.0 * ev_cl / evs, 100.0 * ev_comb_only / evs,
+          100.0 * ev_copy / evs);
+   printf("ISLAND_STATS: leaf islands %u take %.1f%%; tiny leaf (<= 16 signals, <= 256 "
+          "state bytes, not a clock copy) %u take %.1f%%\n", n_leaf,
+          100.0 * ev_leaf / evs, n_tiny_leaf, 100.0 * ev_tiny_leaf / evs);
+   printf("ISLAND_STATS: per evaluation: %.2f direct wires copied (%.2f changed), "
+          "%.2f outputs checked\n", st->wire_copies / evs,
+          st->wire_changed / evs, st->ext_flushes / evs);
+   printf("ISLAND_STATS: flip-flops: %" PRIu64 " super-domain edges sampling %" PRIu64
+          " domains, %" PRIu64 " domain commits; per step %.1f islands "
+          "evaluated, %.1f domains sampled\n", st->sd_samples,
+          st->dom_samples, st->dom_commits,
+          (st->evals - st->rep_delta - st->rep_step) / steps,
+          st->dom_samples / steps);
+
+   qsort(bodies, n_bodies, sizeof(island_istat_body_t), island_istat_body_cmp);
+   jit_t *jit = rt_island_model_jit(mgr->model);
+   const unsigned top = MIN(n_bodies, 15u);
+   for (unsigned i = 0; i < top && bodies[i].evals > 0; i++) {
+      const island_istat_body_t *b = &(bodies[i]);
+      printf("ISLAND_STATS: %5.1f%% %8" PRIu64 " evals %5.1f%% repeats %5u inst "
+             "(%u leaf) %4u sigs %6u B  %s\n", 100.0 * b->evals / evs,
+             b->evals, 100.0 * b->reps / MAX(b->evals, 1u), b->n_inst,
+             b->n_leaf, b->nsigs, b->state_bytes,
+             istr(jit_get_name(jit, b->handle)));
+   }
+   fflush(stdout);
+
+   hash_free(bmap);
+   hset_free(inner);
+   free(bodies);
+   free(st->isl);
+   memset(st, 0, sizeof(*st));
+}
+
 // Comb output in ext_out_sigs: not a direct wire, or one that is published
 // too (RT_ISIG_DIRECT_PUB)
 static inline bool island_sig_published(uint32_t flags)
@@ -1497,6 +1721,8 @@ rt_island_mgr_t *rt_island_mgr_new(rt_model_t *m)
       island_direct_pub_on = (dpub == NULL || atoi(dpub) != 0)
          && opt_get_int(OPT_SIM_THREADS) <= 1;
       island_act_stats = getenv("NVC_ISLAND_ACT_STATS") != NULL;
+      const char *ist = getenv("NVC_ISLAND_STATS");
+      island_stats_on = ist != NULL && atoi(ist) != 0;
       const char *chk = getenv("NVC_ISLAND_ACT_CHECK");
 #ifdef DEBUG
       island_act_check = chk == NULL || atoi(chk) != 0;
@@ -1553,6 +1779,9 @@ void rt_island_mgr_free(rt_island_mgr_t *mgr)
 
    if (island_act_stats)
       island_act_report(mgr);
+
+   if (island_stats_on)
+      island_stats_report(mgr);
 
    if (mgr->pool != NULL) {
       island_pool_free(mgr->pool);
@@ -4365,8 +4594,10 @@ static inline void island_propagate_direct_comb(rt_island_t *isl)
 {
    const uint32_t n = isl->n_direct_comb_descs;
    const rt_island_direct_desc_t *dd = isl->direct_comb_descs;
+   ISTAT(island_stats.wire_copies += n);
    for (uint32_t j = 0; j < n; j++, dd++) {
       if (island_copy_direct_desc(dd) && dd->dst_isl != NULL) {
+         ISTAT(island_stats.wire_changed++);
          if (likely(!(dd->flags & (RT_IDIR_ACT | RT_IDIR_PUB))))
             island_mark_dirty(dd->dst_isl);
          else
@@ -9145,6 +9376,7 @@ static bool island_call_comb_act(jit_t *jit, rt_model_t *m, rt_island_t *isl,
 static inline bool island_call_comb(jit_t *jit, rt_model_t *m, rt_island_t *isl,
                                     tlab_t *tlab)
 {
+   ISTAT(island_stats_eval(isl));
    if (isl->act_on)
       return island_call_comb_act(jit, m, isl, tlab);
    return island_call_comb_raw(jit, m, isl, tlab);
@@ -9179,6 +9411,7 @@ static inline void island_flush_ext_outs(rt_model_t *m, rt_island_t *isl)
    const uint32_t n_ext = isl->n_ext_out_descs;
    if (n_ext == 0)
       return;
+   ISTAT(island_stats.ext_flushes += n_ext);
    const rt_island_ext_out_desc_t *ed = isl->ext_out_descs;
    const bool can_delta = model_can_create_delta(m);
    for (uint32_t j = 0; j < n_ext; j++, ed++) {
@@ -9211,6 +9444,7 @@ static inline void island_flush_ext_outs(rt_model_t *m, rt_island_t *isl)
 static bool island_eval_cluster(jit_t *jit, rt_model_t *m,
                                 rt_super_island_t *cl, tlab_t *tlab)
 {
+   ISTAT(island_stats.cl_evals++);
    bool ok = true;
    for (uint32_t k = cl->min_dirty_pos;
         k < cl->n_islands && cl->dirty_count > 0; k++) {
@@ -10911,6 +11145,7 @@ static bool rt_island_eval_ff_inner(jit_t *jit, rt_model_t *m,
                ok = false;
                break;
             }
+            ISTAT(island_stats.dom_samples++);
 
             if (!dom->in_commit_q) {
                dom->in_commit_q = true;
@@ -11055,6 +11290,8 @@ static bool rt_island_eval_ff_inner(jit_t *jit, rt_model_t *m,
             if (!ok)
                break;
 
+            ISTAT(island_stats.sd_samples++;
+                  island_stats.dom_samples += sd->n_doms);
             if (!sd->in_commit_q) {
                sd->in_commit_q = true;
                APUSH(mgr->super_commit_q, sd);
@@ -11339,6 +11576,7 @@ static inline bool island_commit_run(rt_island_t *isl,
 static void island_commit_domain(rt_model_t *m, rt_island_domain_t *dom)
 {
    rt_island_t *isl = dom->isl;
+   ISTAT(island_stats.dom_commits++);
    if (unlikely(dom->spec_held_w))
       island_spec_ff_unhold(dom);
    const bool has_forces = isl->has_forces;
