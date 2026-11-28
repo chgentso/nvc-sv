@@ -9170,6 +9170,49 @@ static mir_value_t vi_emit_guard_cmp(vi_lower_t *l, const vhdl_iproc_t *p,
    if (src % 8 == 0 && nbytes % 8 == 0)
       return vi_emit_words_differ_at(l, any, base, src, p->evt_copy_off[i],
                                      nbytes / 8);
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+   else if (nbytes <= 64 && nbytes > 2) {
+      // A slice that does not start or end on a word: compare and copy
+      // it a word at a time, each word assembled from the one or two
+      // words that hold its bytes.  Every word loaded holds a byte of the
+      // slice, so it lies inside the state or the entry copy, both of
+      // which end on a word
+      mir_type_t t_v64 = mir_vec2_type(mu, 64, false);
+      const uint32_t sh = (src % 8) * 8;
+      for (uint32_t c = 0; c * 8 < nbytes; c++) {
+         const uint32_t w = src / 8 + c;
+         const uint32_t len = MIN(8u, nbytes - c * 8);
+         mir_value_t a = mir_build_island_load(mu, t_v64, base,
+                                               vi_off(mu, 8u * w),
+                                               vi_off(mu, -1), vi_off(mu, 0));
+         if (sh > 0) {
+            a = mir_build_binary(mu, MIR_VEC_SRL, t_v64, a,
+                                 mir_const_vec(mu, t_v64, sh, 0));
+            if (src % 8 + len > 8) {
+               mir_value_t hi = mir_build_island_load(
+                  mu, t_v64, base, vi_off(mu, 8u * (w + 1)), vi_off(mu, -1),
+                  vi_off(mu, 0));
+               hi = mir_build_binary(mu, MIR_VEC_SLL, t_v64, hi,
+                                     mir_const_vec(mu, t_v64, 64 - sh, 0));
+               a = mir_build_binary(mu, MIR_VEC_BIT_OR, t_v64, a, hi);
+            }
+         }
+         if (len < 8) {
+            const uint64_t mask = (UINT64_C(1) << (8 * len)) - 1;
+            a = mir_build_binary(mu, MIR_VEC_BIT_AND, t_v64, a,
+                                 mir_const_vec(mu, t_v64, mask, 0));
+         }
+         const uint32_t b_off = p->evt_copy_off[i] + 8u * c;
+         mir_value_t b = mir_build_island_load(mu, t_v64, l->state_ptr,
+                                               vi_off(mu, b_off),
+                                               vi_off(mu, -1), vi_off(mu, 0));
+         any = mir_build_or(mu, any, mir_build_cmp(mu, MIR_CMP_NEQ, a, b));
+         mir_build_island_store(mu, l->state_ptr, vi_off(mu, b_off),
+                                vi_off(mu, -1), vi_off(mu, 0), a);
+      }
+      return any;
+   }
+#endif
    else if (nbytes <= 64) {
       // An element or a short slice
       for (uint32_t k = 0; k < nbytes; k++) {
