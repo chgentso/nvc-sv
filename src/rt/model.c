@@ -7544,6 +7544,11 @@ bool model_can_create_delta(rt_model_t *m)
    return m->can_create_delta;
 }
 
+bool model_blocking_update(rt_model_t *m)
+{
+   return m->blocking_update;
+}
+
 bool model_in_reset(rt_model_t *m)
 {
    return m != NULL && m->in_reset;
