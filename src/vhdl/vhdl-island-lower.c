@@ -8878,9 +8878,12 @@ static void vi_emit_act_test(vi_lower_t *l, const vhdl_iproc_t *p,
          || !vi_act_add_read(l, (uint32_t)(isig - isl->sigs));
    }
    // The sensitivity list of a guarded process may name signals that it
-   // does not read (vi_emit_report_guard)
-   for (uint32_t i = 0; vi_proc_guarded(l, p) && i < p->n_evt_sigs && !always;
-        i++) {
+   // does not read (vi_emit_report_guard).  So may the one of a process
+   // that may warn in a speculative Mode A variant: an event on such a
+   // signal must run it there too, so that a metavalue it loads deopts
+   // and Mode B runs it with its guard and warns.
+   const bool evt = vi_proc_guarded(l, p) || (l->spec && p->has_warn);
+   for (uint32_t i = 0; evt && i < p->n_evt_sigs && !always; i++) {
       const vhdl_isl_sig_t *isig = vhdl_island_find_sig(isl, p->evt_sigs[i]);
       always = isig == NULL
          || !vi_act_add_read(l, (uint32_t)(isig - isl->sigs));
