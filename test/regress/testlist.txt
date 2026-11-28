@@ -3502,3 +3502,4 @@ island_arm1 shell
 vhdl_island_spec_resize1 shell
 vhdl_island_spec_sign1 shell
 vhdl_island_spec_guard1 shell
+vlog_island_clkcopy_spec1 shell
