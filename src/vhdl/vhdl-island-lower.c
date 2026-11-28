@@ -169,6 +169,14 @@ typedef struct {
    const vhdl_isl_sig_t   **entry_sig;
    mir_value_t             *entry_ptr;
    uint32_t                 n_entry;
+   // Speculative Mode A: signals the current combinational process that
+   // may warn writes, copied when it starts and stored back by a deopt
+   // inside it (see vi_emit_restore_copies)
+   const vhdl_isl_sig_t   **restore_sig;
+   mir_value_t             *restore_ptr;
+   uint32_t                *restore_bytes;
+   uint32_t                 n_restore;
+   mir_value_t              restore_cond;   // The copies were taken
    // Loop passes lowered one by one so far (see vi_loop_wants_unroll)
    uint32_t                 unrolled;
    struct vi_const_snap    *case_snap;
@@ -1820,6 +1828,26 @@ static mir_value_t vi_spec_opaque_bool(vi_lower_t *l, bool b)
                         vi_off(mu, 0));
 }
 
+// Speculative Mode A: return deopt code KIND, after storing back the
+// signals the current process assigned when it copied them
+// (vi_emit_restore_copies)
+static void vi_emit_deopt_return(vi_lower_t *l, rt_island_deopt_t kind)
+{
+   mir_unit_t *mu = l->mu;
+   if (l->n_restore > 0) {
+      mir_block_t copy_bb = mir_add_block(mu);
+      mir_block_t ret_bb = mir_add_block(mu);
+      mir_build_cond(mu, l->restore_cond, copy_bb, ret_bb);
+      mir_set_cursor(mu, copy_bb, MIR_APPEND);
+      for (uint32_t i = 0; i < l->n_restore; i++)
+         mir_build_copy(mu, vi_state_ptr_at(l, l->restore_sig[i]->a_off),
+                        l->restore_ptr[i], vi_off(mu, l->restore_bytes[i]));
+      mir_build_jump(mu, ret_bb);
+      mir_set_cursor(mu, ret_bb, MIR_APPEND);
+   }
+   mir_build_return(mu, vi_off(mu, kind));
+}
+
 // Speculative Mode A: return deopt code KIND from the function when OK is
 // false.  The function has written nothing the caller keeps at that point:
 // all values reach the state through stores that follow their computation.
@@ -1842,7 +1870,7 @@ static void vi_emit_deopt_unless(vi_lower_t *l, mir_value_t ok,
    mir_build_cond(mu, ok, cont_bb, deopt_bb);
 
    mir_set_cursor(mu, deopt_bb, MIR_APPEND);
-   mir_build_return(mu, vi_off(mu, kind));
+   vi_emit_deopt_return(l, kind);
 
    mir_set_cursor(mu, cont_bb, MIR_APPEND);
 }
@@ -8379,7 +8407,7 @@ static bool vi_lower_stmt_inner(vi_lower_t *l, tree_t stmt)
          mir_set_cursor(mu, fail_bb, MIR_APPEND);
          if (l->spec) {
             // Mode B reports the failure
-            mir_build_return(mu, vi_off(mu, RT_ISLAND_DEOPT_REPORT));
+            vi_emit_deopt_return(l, RT_ISLAND_DEOPT_REPORT);
             mir_set_cursor(mu, cont_bb, MIR_APPEND);
             return true;
          }
@@ -8959,6 +8987,61 @@ static bool vi_emit_self_shadow(vi_lower_t *l, const vhdl_iproc_t *p)
    return true;
 }
 
+// A combinational process that may warn runs in Mode B only when a signal
+// of its sensitivity list changed (vi_emit_report_guard).  When its
+// speculative Mode A variant deopts inside the body, the Mode B call that
+// replaces it decides with that guard, so the signals the process already
+// assigned must get back their values: copy them when it starts, and a
+// deopt stub stores the copies back (vi_emit_deopt_return).  Only while
+// its run flag is set: with the flag clear (after a run in Mode A, or when
+// Mode B runs it without the guard) Mode B runs it anyway.
+static bool vi_emit_restore_copies(vi_lower_t *l, const vhdl_iproc_t *p)
+{
+   mir_unit_t *mu = l->mu;
+   l->n_restore = 0;
+   uint32_t total = 0;
+   for (uint32_t j = 0; j < p->n_writes; j++) {
+      const vhdl_isl_sig_t *isig = vhdl_island_find_sig(l->isl, p->writes[j]);
+      if (isig == NULL)
+         continue;
+      const vhdl_isig_t *s = &(l->ctx->sigs[p->writes[j]]);
+      const uint32_t bytes = vi_sig_state_bytes(l, s);
+      total += bytes;
+      if (s->is_sparse_ram || total > VI_MAX_SHADOW_BYTES) {
+         l->reason = "spec: signals a process that may warn writes are too "
+            "large to copy";
+         return false;
+      }
+
+      const uint32_t n = l->n_restore + 1;
+      l->restore_sig = xrealloc_array(l->restore_sig, n,
+                                      sizeof(const vhdl_isl_sig_t *));
+      l->restore_ptr = xrealloc_array(l->restore_ptr, n, sizeof(mir_value_t));
+      l->restore_bytes = xrealloc_array(l->restore_bytes, n,
+                                        sizeof(uint32_t));
+      l->restore_sig[l->n_restore] = isig;
+      l->restore_ptr[l->n_restore] = vi_modeb_alloc_vec(l, ALIGN_UP(bytes, 8u));
+      l->restore_bytes[l->n_restore] = bytes;
+      l->n_restore = n;
+   }
+   if (l->n_restore == 0)
+      return true;
+
+   mir_value_t ran = mir_build_load(mu, vi_state_ptr_at(l, p->evt_flag_off));
+   l->restore_cond = mir_build_cmp(mu, MIR_CMP_NEQ, ran, vi_u8(mu, 0));
+   mir_block_t copy_bb = mir_add_block(mu);
+   mir_block_t join_bb = mir_add_block(mu);
+   mir_build_cond(mu, l->restore_cond, copy_bb, join_bb);
+   mir_set_cursor(mu, copy_bb, MIR_APPEND);
+   for (uint32_t i = 0; i < l->n_restore; i++)
+      mir_build_copy(mu, l->restore_ptr[i],
+                     vi_state_ptr_at(l, l->restore_sig[i]->a_off),
+                     vi_off(mu, l->restore_bytes[i]));
+   mir_build_jump(mu, join_bb);
+   mir_set_cursor(mu, join_bb, MIR_APPEND);
+   return true;
+}
+
 // Processes run readers first, so outside a combinational loop no process
 // runs after the writer of a signal it reads.  Inside a loop some do: copy
 // those signals when the island function starts, the values of the current
@@ -9459,20 +9542,27 @@ static mir_unit_t *vi_build_comb_unit(mir_context_t *mc,
          l.act_track = true;
       }
 
-      if (!guard && l.spec && p->has_warn) {
-         // A speculative Mode A variant runs the process without its Mode
-         // B guard and copies: clear the run flag so that Mode B runs it
-         // and takes new copies on its next call (vi_emit_report_guard)
-         mir_build_store(mu, vi_state_ptr_at(&l, p->evt_flag_off),
-                         vi_u8(mu, 0));
-      }
-
+      const bool restore = !guard && l.spec && p->has_warn;
       bool ok = (!guard || vi_emit_report_guard(&l, p, next_bb))
          && vi_emit_self_shadow(&l, p)
+         && (!restore || vi_emit_restore_copies(&l, p))
          && vi_bind_process_locals(&l, p->stmt, &sc, false);
       const int ns = tree_stmts(p->stmt) - 1;
       for (int i = 0; i < ns && ok; i++)
          ok = vi_lower_stmt(&l, tree_stmt(p->stmt, i));
+      l.n_restore = 0;
+
+      if (ok && !l.failed && !guard && l.spec && p->has_warn) {
+         // A speculative Mode A variant runs the process without its Mode
+         // B guard and copies: clear the run flag so that Mode B runs it
+         // and takes new copies on its next call (vi_emit_report_guard).
+         // Only once the process completed: on a deopt in its body the
+         // Mode B call that replaces this one must decide with the flag
+         // and copies of the last run, or it runs the process on a
+         // non-event with the metavalue that caused the deopt and warns.
+         mir_build_store(mu, vi_state_ptr_at(&l, p->evt_flag_off),
+                         vi_u8(mu, 0));
+      }
 
       l.n_shadow = 0;
       l.act_track = false;
@@ -9489,6 +9579,9 @@ static mir_unit_t *vi_build_comb_unit(mir_context_t *mc,
          free(l.shadow_ptr);
          free(l.entry_sig);
          free(l.entry_ptr);
+         free(l.restore_sig);
+         free(l.restore_ptr);
+         free(l.restore_bytes);
          mir_unit_free(mu);
          return NULL;
       }
@@ -9512,6 +9605,9 @@ static mir_unit_t *vi_build_comb_unit(mir_context_t *mc,
    free(l.shadow_ptr);
    free(l.entry_sig);
    free(l.entry_ptr);
+   free(l.restore_sig);
+   free(l.restore_ptr);
+   free(l.restore_bytes);
    mir_build_return(mu, vi_off(mu, 0));
    vi_unit_close(&l);
    return mu;
