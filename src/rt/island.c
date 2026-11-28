@@ -1611,6 +1611,7 @@ void rt_island_mgr_free(rt_island_mgr_t *mgr)
          free(isl->sigs[s].direct_targets);
          free(isl->sigs[s].direct_aliases);
          free(isl->sigs[s].last_out_words);
+         free(isl->sigs[s].mix_shadow);
       }
       free(isl->comb_deps);
       free(isl->copies);
@@ -4299,14 +4300,38 @@ static inline bool island_copy_direct_desc_sv(const rt_island_direct_desc_t *dd)
    return changed && !(dd->flags & RT_IDIR_NOWAKE);
 }
 
+// RT_IDIR_MEMO: the source value (packed word or Mode B bytes) equals the
+// one the last island_spec_copy_mixed of this wire left in its target
+static inline bool island_spec_mix_memo_hit(const rt_island_direct_desc_t *dd)
+{
+   const rt_island_sig_t *dst_s = dd->mix_dst;
+   if (dd->count > 8)
+      return (dst_s->flags & (RT_ISIG_MIX_MEMO | RT_ISIG_SPEC_HELD))
+         == RT_ISIG_MIX_MEMO
+         && memcmp(dst_s->mix_shadow, dd->src_a, dd->count) == 0;
+
+   uint64_t raw = 0;
+   if (dd->count == 8)
+      memcpy(&raw, dd->src_a, 8);
+   else if (dd->count == 1)
+      raw = dd->src_a[0];
+   else
+      memcpy(&raw, dd->src_a, dd->count);
+   return (dst_s->flags & (RT_ISIG_MIX_MEMO | RT_ISIG_SPEC_HELD))
+      == RT_ISIG_MIX_MEMO && dst_s->mix_memo == raw;
+}
+
 static inline bool island_copy_direct_desc(const rt_island_direct_desc_t *dd)
 {
    if (likely(dd->flags & RT_IDIR_STD_LOGIC9)) {
       // A wire between a Mode A and a Mode B island is a VHDL one too
-      if (unlikely(dd->flags & RT_IDIR_MIX))
-         return (dd->flags & RT_IDIR_SPEC_SV)
-            ? island_copy_direct_desc_sv(dd)
-            : island_spec_copy_mixed(dd->mix_src, dd->mix_dst);
+      if (unlikely(dd->flags & RT_IDIR_MIX)) {
+         if (dd->flags & RT_IDIR_SPEC_SV)
+            return island_copy_direct_desc_sv(dd);
+         if ((dd->flags & RT_IDIR_MEMO) && island_spec_mix_memo_hit(dd))
+            return false;
+         return island_spec_copy_mixed(dd->mix_src, dd->mix_dst);
+      }
       return island_commit_bytes(dd->dst_a, dd->src_a, dd->count);
    }
 
@@ -4742,6 +4767,23 @@ static void island_refresh_direct_comb_descs(rt_island_t *isl)
                | (dd->flags & RT_IDIR_PUB);
             dd->mix_src = src_s;
             dd->mix_dst = dst_s;
+            // Values island_spec_copy_mixed memoises in the target
+            const uint32_t total = src_s->width * src_s->nelems;
+            if (!(dst_s->flags & RT_ISIG_SPEC_HELD)
+                && src_s->elem_size == 1 && dst_s->elem_size == 1) {
+               if ((src_s->flags & RT_ISIG_TWO_STATE)
+                   && (dst_s->flags & RT_ISIG_STD_LOGIC9)
+                   && src_s->nwords * src_s->nelems == 1) {
+                  dd->flags |= RT_IDIR_MEMO;
+                  dd->count = 8;
+               }
+               else if ((src_s->flags & RT_ISIG_STD_LOGIC9)
+                        && (dst_s->flags & RT_ISIG_TWO_STATE)
+                        && total >= 1) {
+                  dd->flags |= RT_IDIR_MEMO;
+                  dd->count = total;
+               }
+            }
          }
          if (!(dd->flags & (RT_IDIR_STD_LOGIC9 | RT_IDIR_TWO_STATE))
              && disl->spec != NULL && disl->spec->sv && !disl->spec->pinned) {
@@ -5904,7 +5946,28 @@ static bool island_spec_copy_mixed(const rt_island_sig_t *src_s,
       return true;
    }
 
+   // Mode B bytes into a Mode A target: most source values are unchanged
+   // since the last call, and the bytes then need not be packed again (the
+   // target words, written only by this wire, still hold them; the memo
+   // is dropped on every layout change at either end, see
+   // island_spec_update_mix)
    const uint8_t *src = src_isl->state + src_s->a_off;
+   const bool memo = !(dst_s->flags & RT_ISIG_SPEC_HELD);
+   uint64_t raw = 0;
+   if (memo && total <= 8) {
+      if (total == 8)
+         memcpy(&raw, src, 8);
+      else if (total == 1)
+         raw = src[0];
+      else
+         memcpy(&raw, src, total);
+      if ((dst_s->flags & RT_ISIG_MIX_MEMO) && dst_s->mix_memo == raw)
+         return false;
+   }
+   else if (memo && (dst_s->flags & RT_ISIG_MIX_MEMO)
+            && memcmp(dst_s->mix_shadow, src, total) == 0)
+      return false;
+
    const size_t nw = (size_t)nwords * nelems;
    uint64_t small[4];
    uint64_t *tmp = nw <= 4 ? small
@@ -5916,6 +5979,16 @@ static bool island_spec_copy_mixed(const rt_island_sig_t *src_s,
       }
       island_act_mark_sig(dst_isl, dst_s);
       return true;   // Was all '0'/'1'
+   }
+   if (memo) {
+      if (total <= 8)
+         dst_s->mix_memo = raw;
+      else {
+         if (dst_s->mix_shadow == NULL)
+            dst_s->mix_shadow = xmalloc(total);
+         memcpy(dst_s->mix_shadow, src, total);
+      }
+      dst_s->flags |= RT_ISIG_MIX_MEMO;
    }
    uint64_t *dst = (uint64_t *)(dst_isl->state + dst_s->a_off);
    if (nw == 1) {

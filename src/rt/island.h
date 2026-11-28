@@ -181,6 +181,7 @@ typedef struct {
 #define RT_IDIR_PUB         (1u << 4)   // Source is RT_ISIG_DIRECT_PUB
 #define RT_IDIR_SPEC_SV     (1u << 5)   // With MIX: target has SV variants
 #define RT_IDIR_NOWAKE      (1u << 6)   // With SPEC_SV: comb does not read it
+#define RT_IDIR_MEMO        (1u << 7)   // With MIX: count source bytes memo
 #define RT_IDIR_IDX_SHIFT   8u
 
 typedef struct {
@@ -269,7 +270,9 @@ typedef struct _rt_island_sig {
    uint64_t               *last_out_words;
    uint64_t                gen_key_hash;
    uint64_t                mix_memo;   // Packed source word last unpacked
-                                       // into this direct target
+                                       // into this direct target, or the
+                                       // source bytes last packed (<= 8)
+   uint8_t                *mix_shadow; // Source bytes last packed (> 8)
 } rt_island_sig_t;
 
 typedef struct _rt_island_domain {
