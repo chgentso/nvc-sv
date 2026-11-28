@@ -173,6 +173,8 @@ typedef struct {
 #define RT_IDIR_ACT         (1u << 2)   // Set the change byte (flags >> 8)
 #define RT_IDIR_MIX         (1u << 3)   // With STD_LOGIC9: Mode A <-> Mode B
 #define RT_IDIR_PUB         (1u << 4)   // Source is RT_ISIG_DIRECT_PUB
+#define RT_IDIR_SPEC_SV     (1u << 5)   // With MIX: target has SV variants
+#define RT_IDIR_NOWAKE      (1u << 6)   // With SPEC_SV: comb does not read it
 #define RT_IDIR_IDX_SHIFT   8u
 
 typedef struct {
@@ -384,7 +386,12 @@ typedef struct _rt_island {
    void                  *reset_eval_ctx;
    bool                   skip_sv_reset;
    bool                   has_direct_pub;   // A RT_ISIG_DIRECT_PUB source
+   uint8_t                spec_sv;   // RT_ISLAND_SPEC_SV_* (SV variants)
 } rt_island_t;
+
+// rt_island_t.spec_sv: a SystemVerilog island running a speculative variant
+#define RT_ISLAND_SPEC_SV_A    (1u << 0)   // "$a": state must stay all 0/1
+#define RT_ISLAND_SPEC_SV_FB   (1u << 1)   // Keep RT_ISIG_SPEC_FB signals
 
 // Speculative Mode A (NVC_ISLAND_SPEC): a VHDL island lowered in Mode B
 // can also carry a packed two-state variant of its functions (and a
@@ -464,8 +471,15 @@ struct _rt_island_spec {
    bool          cost_pinned;     // Retried only every ISLAND_SPEC_COST_RETRY
    uint64_t      cost_pins;
    uint64_t      hold_waits;      // Checks that waited before holding
-   // SystemVerilog islands: the variants use the four-state layout
+   // SystemVerilog islands: the variants use the four-state layout (see
+   // "Speculative variants of SystemVerilog islands" in island.c)
    bool          sv;
+   bool          force_sv;        // NVC_ISLAND_SPEC_FORCE=A
+   uint32_t     *fb_sigs;         // Offsets of the RT_ISIG_SPEC_FB words
+   uint32_t      n_fb_sigs;       // Number of words
+   uint8_t      *fb_buf;          // Their values before the call
+   uint64_t      sv_checked;      // Switches from "$a" to "$ah"
+   uint64_t      sv_unchecked;    // Switches from "$ah" to "$a"
 };
 
 typedef struct _rt_island_mgr rt_island_mgr_t;
