@@ -1636,6 +1636,19 @@ static mir_value_t vi_cast_vec2(mir_unit_t *mu, mir_type_t vt, mir_value_t v)
    return mir_build_cast(mu, vt, v);
 }
 
+// The two-state vector V as a MIR vector of its own width with signedness
+// SG.  The signedness of the MIR type of V's value may differ from V's own
+// flag (a slice or SIGNED()/UNSIGNED() keeps the bits of its operand), and
+// MIR casts, comparisons and shifts take the signedness from the type.
+static mir_value_t vi_vec2_as(vi_lower_t *l, const vi_val_t *v, bool sg)
+{
+   mir_unit_t *mu = l->mu;
+   mir_type_t t = mir_get_type(mu, v->val);
+   if (mir_get_signed(mu, t) == sg)
+      return v->val;
+   return mir_build_cast(mu, mir_vec2_type(mu, (int)v->width, sg), v->val);
+}
+
 static vi_val_t vi_from_bool_bit(vi_lower_t *l, mir_value_t bval, bool is_bool,
                                  bool is_std)
 {
@@ -3150,11 +3163,9 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
          if (a.kind != VIVAL_VEC || (l->spec && a.width > 63))
             return false;
          const bool sg = a.is_signed || pkg_signed;
-         mir_value_t src = a.val;
+         mir_value_t src = vi_vec2_as(l, &a, sg);
          if (a.width > 64)
             src = mir_build_cast(mu, mir_vec2_type(mu, 64, sg), src);
-         else if (sg != a.is_signed)
-            src = mir_build_cast(mu, mir_vec2_type(mu, a.width, sg), src);
          mir_value_t iv = mir_build_cast(mu, vi_i64_type(mu), src);
          if (l->spec)
             vi_spec_deopt_result(l, fcall, iv);
@@ -3166,9 +3177,9 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
          if (fn_name_is(fn, "CONV_INTEGER")) {
             if (a.kind != VIVAL_VEC || (l->spec && a.width > 63))
                return false;
-            mir_value_t src = (a.width > 64)
-               ? mir_build_cast(mu, mir_vec2_type(mu, 64, pkg_signed), a.val)
-               : mir_build_cast(mu, mir_vec2_type(mu, a.width, pkg_signed), a.val);
+            mir_value_t src = vi_vec2_as(l, &a, pkg_signed);
+            if (a.width > 64)
+               src = mir_build_cast(mu, mir_vec2_type(mu, 64, pkg_signed), src);
             mir_value_t iv = mir_build_cast(mu, vi_i64_type(mu), src);
             if (l->spec)
                vi_spec_deopt_result(l, fcall, iv);
@@ -3177,6 +3188,8 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
          }
          *out = a;
          out->is_signed = fn_name_is(fn, "SIGNED");
+         if (a.kind == VIVAL_VEC)
+            out->val = vi_vec2_as(l, &a, out->is_signed);
          return true;
       }
       if (fn_name_is(fn, "TO_01")) {
@@ -3257,8 +3270,7 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
          const uint32_t nw = (uint32_t)sz;
          const bool sg = a.is_signed || ret_signed;
          mir_type_t tv = mir_vec2_type(mu, (int)nw, sg);
-         mir_value_t src = (a.is_signed != sg)
-            ? mir_build_cast(mu, mir_vec2_type(mu, a.width, sg), a.val) : a.val;
+         mir_value_t src = vi_vec2_as(l, &a, sg);
          mir_value_t res = mir_build_cast(mu, tv, src);
          if (sg && nw < a.width) {
             // Preserve sign bit at MSB (pos 0) per IEEE numeric_std
@@ -3292,6 +3304,7 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
          const uint32_t w = a.width;
          const bool sg = a.is_signed;
          mir_type_t tv = mir_vec2_type(mu, (int)w, sg);
+         a.val = vi_vec2_as(l, &a, sg);
 
          const bool is_left = fn_name_is(fn, "SHIFT_LEFT") || fn_name_is(fn, "\"sll\"")
             || fn_name_is(fn, "\"sla\"");
@@ -3428,10 +3441,8 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
       mir_type_t tv = mir_vec2_type(mu, (int)w, sg);
       mir_value_t va, vb;
       if (a.kind == VIVAL_VEC) {
-         mir_value_t src = (a.is_signed != sg)
-            ? mir_build_cast(mu, mir_vec2_type(mu, (int)a.width, sg), a.val)
-            : a.val;
-         va = (a.width == w && a.is_signed == sg) ? src : mir_build_cast(mu, tv, src);
+         mir_value_t src = vi_vec2_as(l, &a, sg);
+         va = (a.width == w) ? src : mir_build_cast(mu, tv, src);
       }
       else if (a.kind == VIVAL_INT)
          va = vi_cast_vec2(mu, tv, vi_to_i64(mu, a.val));
@@ -3441,10 +3452,8 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
          return false;
 
       if (b.kind == VIVAL_VEC) {
-         mir_value_t src = (b.is_signed != sg)
-            ? mir_build_cast(mu, mir_vec2_type(mu, (int)b.width, sg), b.val)
-            : b.val;
-         vb = (b.width == w && b.is_signed == sg) ? src : mir_build_cast(mu, tv, src);
+         mir_value_t src = vi_vec2_as(l, &b, sg);
+         vb = (b.width == w) ? src : mir_build_cast(mu, tv, src);
       }
       else if (b.kind == VIVAL_INT)
          vb = vi_cast_vec2(mu, tv, vi_to_i64(mu, b.val));
@@ -5071,8 +5080,9 @@ static bool vi_lower_expr_inner(vi_lower_t *l, tree_t expr, vi_val_t *out)
                return false;
 
             if (l->two_state) {
-               mir_value_t sub = mir_build_extract(mu, mir_vec2_type(mu, (int)sw, false),
-                                                   bv.val, vi_off(mu, pos));
+               mir_value_t sub = mir_build_extract(
+                  mu, mir_vec2_type(mu, (int)sw, bv.is_signed), bv.val,
+                  vi_off(mu, pos));
                *out = (vi_val_t){
                   .kind = VIVAL_VEC, .val = sub, .width = (uint32_t)sw,
                   .is_signed = bv.is_signed, .is_std = bv.is_std,
@@ -5103,7 +5113,7 @@ static bool vi_lower_expr_inner(vi_lower_t *l, tree_t expr, vi_val_t *out)
                                                bv.width - sw + 1u);
          if (l->two_state) {
             mir_value_t sub = mir_build_extract(
-               mu, mir_vec2_type(mu, (int)sw, false), bv.val, pos);
+               mu, mir_vec2_type(mu, (int)sw, bv.is_signed), bv.val, pos);
             *out = (vi_val_t){
                .kind = VIVAL_VEC, .val = sub, .width = sw,
                .is_signed = bv.is_signed, .is_std = bv.is_std,
