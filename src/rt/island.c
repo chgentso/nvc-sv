@@ -645,6 +645,7 @@ static void island_stats_eval(rt_island_t *isl)
    e->last_delta = delta;
    e->evals++;
    st->evals++;
+   st->ext_flushes += isl->n_ext_out_descs;   // Checked after this call
 }
 
 typedef struct {
@@ -4613,6 +4614,7 @@ static inline bool island_copy_direct_desc_sv(const rt_island_direct_desc_t *dd)
    return changed && !(dd->flags & RT_IDIR_NOWAKE);
 }
 
+__attribute__((always_inline))
 static inline bool island_copy_direct_desc(const rt_island_direct_desc_t *dd)
 {
    if (likely(dd->flags & RT_IDIR_STD_LOGIC9)) {
@@ -4688,14 +4690,34 @@ static void island_direct_wake_desc(const rt_island_direct_desc_t *dd)
    island_direct_wake(dd->dst_isl, !!(dd->flags & RT_IDIR_PUB));
 }
 
-static inline void island_propagate_direct_comb(rt_island_t *isl)
+// island_propagate_direct_comb counting the changed wires (NVC_ISLAND_STATS)
+__attribute__((noinline))
+static void island_propagate_direct_comb_stats(rt_island_t *isl)
 {
    const uint32_t n = isl->n_direct_comb_descs;
    const rt_island_direct_desc_t *dd = isl->direct_comb_descs;
-   ISTAT(island_stats.wire_copies += n);
+   island_stats.wire_copies += n;
    for (uint32_t j = 0; j < n; j++, dd++) {
       if (island_copy_direct_desc(dd) && dd->dst_isl != NULL) {
-         ISTAT(island_stats.wire_changed++);
+         island_stats.wire_changed++;
+         if (likely(!(dd->flags & (RT_IDIR_ACT | RT_IDIR_PUB))))
+            island_mark_dirty(dd->dst_isl);
+         else
+            island_direct_wake_desc(dd);
+      }
+   }
+}
+
+static inline void island_propagate_direct_comb(rt_island_t *isl)
+{
+   if (unlikely(island_stats_on)) {
+      island_propagate_direct_comb_stats(isl);
+      return;
+   }
+   const uint32_t n = isl->n_direct_comb_descs;
+   const rt_island_direct_desc_t *dd = isl->direct_comb_descs;
+   for (uint32_t j = 0; j < n; j++, dd++) {
+      if (island_copy_direct_desc(dd) && dd->dst_isl != NULL) {
          if (likely(!(dd->flags & (RT_IDIR_ACT | RT_IDIR_PUB))))
             island_mark_dirty(dd->dst_isl);
          else
@@ -9520,7 +9542,6 @@ static inline void island_flush_ext_outs(rt_model_t *m, rt_island_t *isl)
    const uint32_t n_ext = isl->n_ext_out_descs;
    if (n_ext == 0)
       return;
-   ISTAT(island_stats.ext_flushes += n_ext);
    const rt_island_ext_out_desc_t *ed = isl->ext_out_descs;
    const bool can_delta = model_can_create_delta(m);
    for (uint32_t j = 0; j < n_ext; j++, ed++) {
@@ -11779,7 +11800,6 @@ static inline bool island_commit_run(rt_island_t *isl,
 static void island_commit_domain(rt_model_t *m, rt_island_domain_t *dom)
 {
    rt_island_t *isl = dom->isl;
-   ISTAT(island_stats.dom_commits++);
    if (unlikely(dom->spec_held_w))
       island_spec_ff_unhold(dom);
    const bool has_forces = isl->has_forces;
@@ -11885,6 +11905,7 @@ void rt_island_commit_ff(rt_model_t *m, rt_island_mgr_t *mgr, tlab_t *tlab)
        || (mgr->ff_commit_q.count == 0 && mgr->super_commit_q.count == 0))
       return;
 
+   ISTAT(island_stats.dom_commits += mgr->ff_commit_q.count);
    for (unsigned i = 0; i < mgr->ff_commit_q.count; i++) {
       rt_island_domain_t *dom = mgr->ff_commit_q.items[i];
       dom->in_commit_q = false;
@@ -11895,6 +11916,7 @@ void rt_island_commit_ff(rt_model_t *m, rt_island_mgr_t *mgr, tlab_t *tlab)
    for (unsigned i = 0; i < mgr->super_commit_q.count; i++) {
       rt_super_domain_t *sd = mgr->super_commit_q.items[i];
       sd->in_commit_q = false;
+      ISTAT(island_stats.dom_commits += sd->n_doms);
       for (uint32_t d = 0; d < sd->n_doms; d++)
          island_commit_domain(m, sd->doms[d]);
    }
