@@ -1061,6 +1061,7 @@ typedef struct {
    bool                     report_in_body;  // not in subprograms
    uint32_t                 n_reports;
    uint32_t                 n_warns;   // Calls that may report a warning
+   uint32_t                 n_xwarns;  // Of those, not only IEEE warnings
    bool                     in_func;
    bool                     allow_sig_attr_event;
    int                      call_depth;
@@ -1567,6 +1568,7 @@ static bool check_pure_func_body(check_ctx_t *outer, tree_t func_decl)
    if (outer->reason == NULL)
       outer->reason = fc.reason;
    outer->n_warns += fc.n_warns;
+   outer->n_xwarns += fc.n_xwarns;
    ACLEAR(fc.reads);
    ACLEAR(fc.writes);
    ACLEAR(fc.read_ranges);
@@ -1679,6 +1681,7 @@ static bool check_pure_proc_body(check_ctx_t *outer, tree_t proc_decl)
    const bool ok = check_stmt_list(&fc, proc_decl, 0,
                                    tree_stmts(proc_decl), true);
    outer->n_warns += fc.n_warns;
+   outer->n_xwarns += fc.n_xwarns;
    ACLEAR(fc.reads);
    ACLEAR(fc.writes);
    ACLEAR(fc.read_ranges);
@@ -2144,8 +2147,13 @@ static bool check_expr_inner(check_ctx_t *c, tree_t expr, bool is_target)
          if (ident_has_std_pkg_fn(decl, &pkg, &fn)) {
             if (!is_supported_std_fn(c, pkg, fn))
                return false;
-            if (std_fn_may_warn(c, pkg, fn))
+            if (std_fn_may_warn(c, pkg, fn)) {
                c->n_warns++;
+               // The NUMERIC_STD warnings are all metavalue, null and
+               // truncation warnings, which --ieee-warnings controls
+               if (strncmp(pkg, "IEEE.NUMERIC_STD", 16) != 0)
+                  c->n_xwarns++;
+            }
             return true;
          }
 
@@ -3474,6 +3482,7 @@ static void analyze_process(vhdl_island_ctx_t *ctx, tree_t proc, int stmt_idx,
                .rst_sig        = -1,
                .has_report     = c.n_reports > 0,
                .has_warn       = c.n_warns > 0,
+               .warn_ieee_only = c.n_warns > 0 && c.n_xwarns == 0,
                .evt_sigs       = evt.evt_sigs,
                .evt_part_off   = evt.evt_part_off,
                .evt_part_bytes = evt.evt_part_bytes,
@@ -5501,6 +5510,17 @@ void vhdl_island_rebuild(vhdl_island_ctx_t *ctx)
                ? LOC_COMB_READ : LOC_FF_READ;
             if (p->kind == VIPROC_FF && j < p->n_body_reads)
                loc_flags[loc] |= LOC_BODY_READ;
+         }
+         // A combinational process that may warn runs on every event on
+         // its sensitivity list, also on a signal it does not read
+         // (vi_emit_report_guard): the island must wake for it like for a
+         // signal a combinational process reads, and the change byte lets
+         // the guard skip it when it did not change
+         for (uint32_t j = 0; p->kind == VIPROC_COMB
+                 && (p->has_report || p->has_warn) && j < p->n_evt_sigs; j++) {
+            const int32_t loc = gid_to_loc[p->evt_sigs[j]];
+            if (loc >= 0)
+               loc_flags[loc] |= LOC_COMB_READ;
          }
          for (uint32_t j = 0; j < p->n_writes; j++) {
             const int32_t loc = gid_to_loc[p->writes[j]];

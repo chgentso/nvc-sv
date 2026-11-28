@@ -89,10 +89,14 @@ typedef enum {
 // runs when the run-all byte or the change byte of a signal it reads is
 // set; a process that reads a signal without RT_ISIG_ACT always runs.  The
 // runtime sets the change byte wherever it writes a new value into the
-// island state (island_act_mark) and clears them after each call.
+// island state (island_act_mark) and clears them after each call.  Then
+// a byte set for the whole run when IEEE warnings are off (not off at time
+// 0 only): the run guard of a process whose calls can only report IEEE
+// warnings is then not needed (vi_emit_report_guard).
 #define RT_ISLAND_ACT_ALL(nsigs)    (nsigs)
 #define RT_ISLAND_ACT_CNT(nsigs)    ALIGN_UP((nsigs) + 1u, 8u)
-#define RT_ISLAND_ACT_BYTES(nsigs)  (RT_ISLAND_ACT_CNT(nsigs) + 16u)
+#define RT_ISLAND_ACT_NOWARN(nsigs) (RT_ISLAND_ACT_CNT(nsigs) + 16u)
+#define RT_ISLAND_ACT_BYTES(nsigs)  (RT_ISLAND_ACT_CNT(nsigs) + 24u)
 
 #define RT_IEDGE_CLK_POSEDGE  (1u << 0)
 #define RT_IEDGE_RST_POSEDGE  (1u << 1)
