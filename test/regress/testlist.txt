@@ -3503,3 +3503,4 @@ vhdl_island_spec_resize1 shell
 vhdl_island_spec_sign1 shell
 vhdl_island_spec_guard1 shell
 vhdl_island_warn3 shell
+vhdl_island_warn4 shell
