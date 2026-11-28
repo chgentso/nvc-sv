@@ -5965,7 +5965,7 @@ static void island_spec_sv_set_mode(rt_island_t *isl, bool checks)
 {
    rt_island_spec_t *sp = isl->spec;
    sp->checks = checks;
-   isl->spec_sv = (checks ? 0 : RT_ISLAND_SPEC_SV_A)
+   isl->spec_sv = RT_ISLAND_SPEC_SV_ON | (checks ? 0 : RT_ISLAND_SPEC_SV_A)
       | (sp->n_fb_sigs > 0 ? RT_ISLAND_SPEC_SV_FB : 0);
    island_spec_set_handles(isl);
 }
@@ -10427,8 +10427,11 @@ static bool island_sample_domain(jit_t *jit, rt_island_domain_t *dom,
        && (!isl->mgr->fast
            || unlikely(tlab->alloc != 0 || tlab->mem_dirty != 0)))
       tlab_reset(tlab);
+   // SV variants return a deopt code, VHDL ones clear bit 63 (the island's
+   // own byte rather than isl->spec, which would miss the cache here)
    if (unlikely(isl->spec_a) && ok
-       && unlikely(isl->spec->sv ? result.integer != 0
+       && unlikely((isl->spec_sv & RT_ISLAND_SPEC_SV_ON)
+                   ? result.integer != 0
                    : !(result.integer & (INT64_C(1) << 63))))
       return island_spec_ff_deopt(jit, dom, tlab, result.integer);
    if (ok)
