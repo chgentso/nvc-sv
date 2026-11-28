@@ -1,3 +1,6 @@
+## Unreleased
+- Speed: speculative two-state RTL islands are on by default.  An island whose values are all `'0'`/`'1'` runs a packed two-state variant and returns to the four-state code as soon as another value appears; results are unchanged.  `--no-island-spec` (when elaborating or running) or `NVC_ISLAND_SPEC=0` turns them off.
+
 ## nvc-sv 0.19.0
 - Library format changed: reinstall libraries compiled with an earlier version (OSVVM, VUnit, UVVM, vendor libraries).
 - Constrained random: new solver with exact uniform sampling (rejection sampler, BDD and SAT stages in front of a finite-domain search), per-component decomposition, incremental sums, `unique` propagation and soft-constraint relaxation; per-value `dist` weights, `dist` under `if`/`foreach` and over solver-sized arrays, `<->`, `disable soft` under conditions, `std::randomize` on arrays, associative arrays and members, `rand`/`randc` struct members, static `constraint_mode`/`rand_mode`, array reductions, values wider than 64 bits, staged solving for functions with random arguments, more than 64 constraint blocks. Each process has its own random stream (18.13-18.15); values for a given seed differ from 0.18.0. `--check-crv` lowers all constraint code at elaboration; `NVC_CRV_STATS=1` prints solver statistics.

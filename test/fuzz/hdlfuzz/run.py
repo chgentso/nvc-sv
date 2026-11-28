@@ -87,6 +87,8 @@ _SPEC = (("NVC_ISLAND_SPEC", "1"),)
 CONFIGS: Dict[str, Config] = {c.name: c for c in (
     Config("ref", elab_args=("--rtl-islands=off",), needs=("rtl_islands",)),
     Config("default"),
+    # Speculative 2-state islands are on by default: nospec turns them off
+    Config("nospec", elab_env=(("NVC_ISLAND_SPEC", "0"),)),
     Config("nofast", run_args=("--no-island-fast",),
            needs=("no_island_fast",)),
     # Fuzz runs are short: promote from the start (NVC_ISLAND_SPEC_START)
@@ -96,7 +98,8 @@ CONFIGS: Dict[str, Config] = {c.name: c for c in (
            run_env=(("NVC_ISLAND_SPEC_FORCE", "A"),)),
     Config("ghdl", tool="ghdl"),
 )}
-DEFAULT_CONFIGS = ("ref", "default", "nofast", "spec", "specA", "ghdl")
+DEFAULT_CONFIGS = ("ref", "default", "nospec", "nofast", "spec", "specA",
+                   "ghdl")
 
 
 @dataclass
