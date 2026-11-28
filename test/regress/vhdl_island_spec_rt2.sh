@@ -75,6 +75,7 @@ VHDL_EOF
 
 unset NVC_ISLAND_SPEC NVC_ISLAND_SPEC_FORCE NVC_ISLAND_SPEC_STATS
 unset NVC_ISLAND_SPEC_STRESS NVC_ISLAND_SPEC_RT
+export NVC_ISLAND_SPEC_START=0   # Short run: promote from the start
 
 nvc --std=2008 --work=w_off -a rt2.vhd
 nvc --std=2008 --work=w_off --rtl-islands=off -e rt2_tb -r 2>&1 \

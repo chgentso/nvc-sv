@@ -285,6 +285,13 @@ typedef struct {
    uint8_t     *buf;   // Changed bits then new values, for a then b
 } island_defer_put_t;
 
+// A promotion or "$ah" recheck of an island due at a tick (min-heap
+// ordered by tick then island number; stale entries are skipped)
+typedef struct {
+   uint64_t     tick;
+   rt_island_t *isl;
+} island_spec_ev_t;
+
 struct _rt_island_mgr {
    rt_model_t             *model;
    hash_t                 *sig_map;
@@ -337,11 +344,16 @@ struct _rt_island_mgr {
    bool                    spec_on;      // Speculative Mode A switching
    uint64_t                spec_tick;    // Delta cycles seen
    uint64_t                spec_next;    // Tick of the next promotion sweep
+   A(island_spec_ev_t)     spec_heap;    // Pending checks by tick
    bool                    spec_trace;   // NVC_ISLAND_SPEC_STATS=3
    uint32_t                spec_n_a;     // Islands in Mode A now
    uint32_t                spec_timeline[40];   // spec_n_a at tick 2^k
    uint32_t                spec_held_timeline[40];   // Of them holding
    uint32_t                n_spec_timeline;
+   uint64_t                spec_sweeps;  // Statistics: promotion sweeps,
+   uint64_t                spec_visits;  // islands they looked at,
+   uint64_t                spec_tries;   // promotion attempts and
+   uint64_t                spec_unsafe;  // attempts while not safe
 };
 
 // Direct-wire diagnostics: NVC_ISLAND_WIRE_STATS=1 prints, at the end of the
@@ -1561,6 +1573,7 @@ void rt_island_mgr_free(rt_island_mgr_t *mgr)
 
    island_spec_report(mgr);
    island_spec_rt_report(mgr);
+   ACLEAR(mgr->spec_heap);
    island_clk_copy_free(mgr);   // Its report reads the kept copies' islands
    free(island_spec_tmp);
    island_spec_tmp = NULL;
@@ -4795,6 +4808,14 @@ static void island_refresh_direct_comb_descs(rt_island_t *isl)
 #define ISLAND_SPEC_COST_PIN     4u
 #define ISLAND_SPEC_COST_RETRY   (UINT64_C(1) << 20)
 #define ISLAND_SPEC_MAX_IVAL     (UINT32_C(1) << 14)
+
+// Promoting an island lowers its variants and runs them interpreted until
+// the JIT compiles them: the cost of thousands of evaluations, which a
+// short run never gets back (VeeR hello: 16k ticks, 1,752 islands, 18%
+// slower when they are all promoted).  No island is promoted before
+// ISLAND_SPEC_START ticks; reset and initialisation settle meanwhile, and a
+// long run loses only the start of its time in Mode A.
+#define ISLAND_SPEC_START        (UINT64_C(1) << 17)
 #define ISLAND_SPEC_TIMELINE     40u
 
 static int island_spec_stress = -1;
@@ -4822,6 +4843,20 @@ static uint64_t island_spec_hold_wait(void)
          env != NULL ? MAX(0, atoi(env)) : ISLAND_SPEC_HOLD_WAIT;
    }
    return (uint64_t)island_spec_hold_wait_env;
+}
+
+static int64_t island_spec_start_env = -1;
+
+// Tick of the first promotion check; NVC_ISLAND_SPEC_START=N overrides it
+// (test knob)
+static uint64_t island_spec_start(void)
+{
+   if (island_spec_start_env < 0) {
+      const char *env = getenv("NVC_ISLAND_SPEC_START");
+      island_spec_start_env =
+         env != NULL ? MAX(8, atoll(env)) : (int64_t)ISLAND_SPEC_START;
+   }
+   return (uint64_t)island_spec_start_env;
 }
 
 static uint8_t *island_spec_scratch(size_t n)
@@ -5256,6 +5291,57 @@ static void island_spec_log_to_b(rt_island_t *isl, uint8_t *b)
 static void island_spec_demoted(rt_island_t *isl, rt_island_deopt_t why);
 static void island_spec_sv_demote(rt_island_t *isl, rt_island_deopt_t why);
 
+static inline bool island_spec_ev_before(const island_spec_ev_t *a,
+                                         const island_spec_ev_t *b)
+{
+   return a->tick < b->tick
+      || (a->tick == b->tick && a->isl->isl_id < b->isl->isl_id);
+}
+
+// The next check of island ISL is at TICK: the sweep at that tick looks at
+// it (and only the islands due then, not every island)
+static void island_spec_schedule(rt_island_t *isl, uint64_t tick)
+{
+   rt_island_mgr_t *mgr = isl->mgr;
+   isl->spec->next_check = tick;
+   const island_spec_ev_t ev = { tick, isl };
+   APUSH(mgr->spec_heap, ev);
+   island_spec_ev_t *h = mgr->spec_heap.items;
+   uint32_t i = mgr->spec_heap.count - 1;
+   while (i > 0) {
+      const uint32_t parent = (i - 1) / 2;
+      if (!island_spec_ev_before(&ev, &(h[parent])))
+         break;
+      h[i] = h[parent];
+      i = parent;
+   }
+   h[i] = ev;
+   mgr->spec_next = MIN(mgr->spec_next, h[0].tick);
+}
+
+static island_spec_ev_t island_spec_heap_pop(rt_island_mgr_t *mgr)
+{
+   island_spec_ev_t *h = mgr->spec_heap.items;
+   const island_spec_ev_t top = h[0];
+   const island_spec_ev_t last = h[--mgr->spec_heap.count];
+   const uint32_t n = mgr->spec_heap.count;
+   uint32_t i = 0;
+   for (;;) {
+      uint32_t c = 2 * i + 1;
+      if (c >= n)
+         break;
+      if (c + 1 < n && island_spec_ev_before(&(h[c + 1]), &(h[c])))
+         c++;
+      if (!island_spec_ev_before(&(h[c]), &last))
+         break;
+      h[i] = h[c];
+      i = c;
+   }
+   if (n > 0)
+      h[i] = last;
+   return top;
+}
+
 // Convert a Mode A island back to Mode B: always allowed outside a call of
 // its functions, changes no value and schedules nothing
 static void island_spec_demote(rt_island_t *isl, rt_island_deopt_t why)
@@ -5310,8 +5396,7 @@ static void island_spec_demoted(rt_island_t *isl, rt_island_deopt_t why)
    mgr->spec_n_a--;
 
    if (why == RT_ISLAND_DEOPT_STRESS || sp->force_sv) {
-      sp->next_check = mgr->spec_tick + 1;
-      mgr->spec_next = MIN(mgr->spec_next, sp->next_check);
+      island_spec_schedule(isl, mgr->spec_tick + 1);
       return;
    }
    if (why == RT_ISLAND_DEOPT_NOVAR) {
@@ -5337,13 +5422,12 @@ static void island_spec_demoted(rt_island_t *isl, rt_island_deopt_t why)
          if (!sp->cost_pinned)
             sp->cost_pins++;
          sp->cost_pinned = true;
-         sp->next_check = mgr->spec_tick + ISLAND_SPEC_COST_RETRY;
+         island_spec_schedule(isl, mgr->spec_tick + ISLAND_SPEC_COST_RETRY);
       }
       else
-         sp->next_check = mgr->spec_tick
-            + (UINT64_C(16) << MIN(sp->n_unclean, 12u));
+         island_spec_schedule(isl, mgr->spec_tick
+                              + (UINT64_C(16) << MIN(sp->n_unclean, 12u)));
       sp->check_ival = 16;
-      mgr->spec_next = MIN(mgr->spec_next, sp->next_check);
       return;
    }
    sp->n_deopt++;
@@ -5353,10 +5437,9 @@ static void island_spec_demoted(rt_island_t *isl, rt_island_deopt_t why)
        || sp->n_report >= ISLAND_SPEC_PIN_REPORTS)
       island_spec_pin(isl, why);
    else {
-      sp->next_check = mgr->spec_tick
-         + (UINT64_C(16) << MIN(sp->n_deopt, 12u));
+      island_spec_schedule(isl, mgr->spec_tick
+                           + (UINT64_C(16) << MIN(sp->n_deopt, 12u)));
       sp->check_ival = 16;
-      mgr->spec_next = MIN(mgr->spec_next, sp->next_check);
    }
 }
 
@@ -5564,8 +5647,10 @@ static bool island_spec_try_promote(rt_island_t *isl)
    rt_island_spec_t *sp = isl->spec;
    rt_island_mgr_t *mgr = isl->mgr;
 
+   mgr->spec_tries++;
    if (!island_spec_safe(isl)) {
-      sp->next_check = mgr->spec_tick + 1;
+      mgr->spec_unsafe++;
+      island_spec_schedule(isl, mgr->spec_tick + 1);
       return false;
    }
    if (sp->sv)
@@ -5603,7 +5688,7 @@ static bool island_spec_try_promote(rt_island_t *isl)
          // Check again soon: the values may become clean
          sp->hold_waits++;
          sp->check_ival = MIN(MAX(sp->check_ival, 16u) * 2u, wait);
-         sp->next_check = tick + MIN(sp->check_ival, wait - waited);
+         island_spec_schedule(isl, tick + MIN(sp->check_ival, wait - waited));
          return false;
       }
    }
@@ -5632,36 +5717,58 @@ static bool island_spec_try_promote(rt_island_t *isl)
    return true;
 }
 
-static void island_spec_sweep(rt_island_mgr_t *mgr)
+// NVC_ISLAND_SPEC_STRESS: every island at every tick
+static void island_spec_stress_sweep(rt_island_mgr_t *mgr, uint32_t stress)
 {
    const uint64_t tick = mgr->spec_tick;
-   const uint32_t stress = island_spec_stress_n();
-   uint64_t next = UINT64_MAX;
    for (unsigned i = 0; i < mgr->islands.count; i++) {
       rt_island_t *isl = mgr->islands.items[i];
       rt_island_spec_t *sp = isl->spec;
       if (sp == NULL || sp->pinned || sp->force_a)
          continue;
+      mgr->spec_visits++;
       if (isl->spec_a) {
-         if (stress > 0 && tick % stress == 0)
+         if (tick % stress == 0)
             island_spec_demote(isl, RT_ISLAND_DEOPT_STRESS);
          else {
-            if (sp->sv && sp->checks) {
-               // "$ah": back to "$a" once the state is all 0/1
-               if (tick >= sp->next_check)
-                  island_spec_sv_recheck(isl);
-               if (isl->spec_a && sp->checks)
-                  next = MIN(next, sp->next_check);
-            }
+            if (sp->sv && sp->checks && tick >= sp->next_check)
+               island_spec_sv_recheck(isl);
             continue;
          }
       }
       if (tick >= sp->next_check)
          island_spec_try_promote(isl);
-      if (!isl->spec_a && !sp->pinned)
-         next = MIN(next, sp->next_check);
    }
-   mgr->spec_next = stress > 0 ? tick + 1 : next;
+   mgr->spec_heap.count = 0;
+   mgr->spec_next = tick + 1;
+}
+
+// The islands whose check is due: promotion of a Mode B island, "$ah" to
+// "$a" of an SV island holding values
+static void island_spec_sweep(rt_island_mgr_t *mgr)
+{
+   const uint64_t tick = mgr->spec_tick;
+   mgr->spec_sweeps++;
+   const uint32_t stress = island_spec_stress_n();
+   if (stress > 0) {
+      island_spec_stress_sweep(mgr, stress);
+      return;
+   }
+   mgr->spec_next = UINT64_MAX;
+   while (mgr->spec_heap.count > 0 && mgr->spec_heap.items[0].tick <= tick) {
+      const island_spec_ev_t ev = island_spec_heap_pop(mgr);
+      rt_island_t *isl = ev.isl;
+      rt_island_spec_t *sp = isl->spec;
+      if (sp->pinned || sp->force_a || ev.tick != sp->next_check)
+         continue;   // Stale entry
+      mgr->spec_visits++;
+      if (!isl->spec_a)
+         island_spec_try_promote(isl);
+      else if (sp->sv && sp->checks)
+         island_spec_sv_recheck(isl);
+   }
+   if (mgr->spec_heap.count > 0)
+      mgr->spec_next = MIN(mgr->spec_next, mgr->spec_heap.items[0].tick);
 }
 
 static void island_spec_tick(rt_island_mgr_t *mgr)
@@ -5860,23 +5967,56 @@ static inline bool island_spec_sv_sig_clean(const rt_island_sig_t *s,
    return any == 0;
 }
 
-// Live four-state signals of SV island ISL with an unknown bit
-static uint32_t island_spec_sv_unclean(const rt_island_t *isl)
+// Words [FROM, TO) of the unknown plane of signal S hold an unknown bit:
+// the index of the first such word, or TO
+static size_t island_spec_sv_find_x(const rt_island_t *isl,
+                                    const rt_island_sig_t *s,
+                                    size_t from, size_t to)
 {
-   uint32_t n = 0;
-   for (uint32_t i = 0; i < isl->nsigs; i++) {
-      const rt_island_sig_t *s = &(isl->sigs[i]);
-      if (island_spec_sig_live(s) && !island_spec_sv_sig_clean(s, isl->state))
-         n++;
+   const uint64_t *b = (const uint64_t *)(isl->state + s->b_off);
+   for (size_t w = from; w < to; w++) {
+      if (b[w] != 0)
+         return w;
    }
-   return n;
+   return to;
+}
+
+// Some live four-state signal of SV island ISL has an unknown bit.  The
+// search starts at the word where the last one was found: a value that is
+// not '0'/'1' (an uninitialised memory row, a floating bus) mostly stays,
+// and a big memory is then not scanned again at every check.
+static bool island_spec_sv_unclean(rt_island_t *isl)
+{
+   rt_island_spec_t *sp = isl->spec;
+   const uint32_t n = isl->nsigs;
+   if (n == 0)
+      return false;
+   for (uint32_t k = 0; k <= n; k++) {
+      // The hinted signal from the hinted word, every other signal, then
+      // the words of the hinted signal before the hinted word
+      const uint32_t i = (sp->x_hint_sig + k) % n;
+      const rt_island_sig_t *s = &(isl->sigs[i]);
+      if (!island_spec_sig_live(s) || (s->flags & RT_ISIG_TWO_STATE))
+         continue;
+      const size_t nw = (size_t)s->nwords * s->nelems;
+      const size_t hint = MIN(sp->x_hint_word, nw);
+      const size_t from = k == 0 ? hint : 0;
+      const size_t to = k == n ? hint : nw;
+      const size_t w = island_spec_sv_find_x(isl, s, from, to);
+      if (w < to) {
+         sp->x_hint_sig = i;
+         sp->x_hint_word = w;
+         return true;
+      }
+   }
+   return false;
 }
 
 static void island_spec_sv_set_mode(rt_island_t *isl, bool checks)
 {
    rt_island_spec_t *sp = isl->spec;
    sp->checks = checks;
-   isl->spec_sv = (checks ? 0 : RT_ISLAND_SPEC_SV_A)
+   isl->spec_sv = RT_ISLAND_SPEC_SV_ON | (checks ? 0 : RT_ISLAND_SPEC_SV_A)
       | (sp->n_fb_sigs > 0 ? RT_ISLAND_SPEC_SV_FB : 0);
    island_spec_set_handles(isl);
 }
@@ -5886,7 +6026,7 @@ static bool island_spec_sv_try_promote(rt_island_t *isl)
    rt_island_spec_t *sp = isl->spec;
    rt_island_mgr_t *mgr = isl->mgr;
 
-   const uint32_t n_unclean = island_spec_sv_unclean(isl);
+   const uint32_t n_unclean = island_spec_sv_unclean(isl);   // 0 or 1
    if (n_unclean == 0)
       sp->unclean_since = 0;
    else if (!sp->force_sv && island_spec_stress_n() == 0) {
@@ -5899,7 +6039,7 @@ static bool island_spec_sv_try_promote(rt_island_t *isl)
       if (waited < wait) {
          sp->hold_waits++;
          sp->check_ival = MIN(MAX(sp->check_ival, 16u) * 2u, wait);
-         sp->next_check = tick + MIN(sp->check_ival, wait - waited);
+         island_spec_schedule(isl, tick + MIN(sp->check_ival, wait - waited));
          return false;
       }
    }
@@ -5913,7 +6053,8 @@ static bool island_spec_sv_try_promote(rt_island_t *isl)
    sp->n_held = n_unclean;
    sp->holds += n_unclean;
    sp->check_ival = 16;
-   sp->next_check = mgr->spec_tick + sp->check_ival;
+   if (n_unclean > 0)
+      island_spec_schedule(isl, mgr->spec_tick + sp->check_ival);
    mgr->spec_n_a++;
    return true;
 }
@@ -5925,15 +6066,16 @@ static void island_spec_sv_recheck(rt_island_t *isl)
    rt_island_mgr_t *mgr = isl->mgr;
    assert(isl->spec_a && sp->checks);
 
-   if (island_spec_safe(isl) && island_spec_sv_unclean(isl) == 0) {
+   if (island_spec_safe(isl) && !island_spec_sv_unclean(isl)) {
       island_spec_sv_set_mode(isl, false);
       sp->sv_unchecked++;
       sp->n_held = 0;
       sp->check_ival = 16;
+      sp->tick_unchecked = mgr->spec_tick;
       return;
    }
    sp->check_ival = MIN(MAX(sp->check_ival, 16u) * 2u, ISLAND_SPEC_MAX_IVAL);
-   sp->next_check = mgr->spec_tick + sp->check_ival;
+   island_spec_schedule(isl, mgr->spec_tick + sp->check_ival);
 }
 
 static void island_spec_sv_demote(rt_island_t *isl, rt_island_deopt_t why)
@@ -5956,9 +6098,17 @@ static void island_spec_sv_unclean_in(rt_island_t *isl)
    assert(isl->spec_a && sp->sv && !sp->checks);
    island_spec_sv_set_mode(isl, true);
    sp->sv_checked++;
-   sp->check_ival = 16;
-   sp->next_check = mgr->spec_tick + sp->check_ival;
-   mgr->spec_next = MIN(mgr->spec_next, sp->next_check);
+   // Values with unknown bits that keep arriving (a bus that is x while
+   // idle) would switch the island back and forth at every recheck: when
+   // it ran "$a" only briefly, it stays in "$ah" twice as long as the last
+   // time before the next recheck
+   const uint64_t ran = mgr->spec_tick - sp->tick_unchecked;
+   if (ran < 2u * (uint64_t)sp->sv_ah_ival)
+      sp->sv_ah_ival = MIN(MAX(sp->sv_ah_ival, 16u) * 2u, ISLAND_SPEC_MAX_IVAL);
+   else
+      sp->sv_ah_ival = 16;
+   sp->check_ival = sp->sv_ah_ival;
+   island_spec_schedule(isl, mgr->spec_tick + sp->check_ival);
 }
 
 static inline void island_spec_sv_check_in(rt_island_t *isl,
@@ -5990,6 +6140,27 @@ static void island_spec_sv_restore(rt_island_t *isl)
 static inline uint64_t *island_glitch_log(rt_island_t *isl,
                                           const rt_island_sig_t *s);
 
+// The elements of memory S in its write log get back their value in the
+// current state
+static void island_spec_sv_undo_touched(rt_island_t *isl,
+                                        const rt_island_sig_t *s,
+                                        const uint64_t *log)
+{
+   const uint32_t nwords = s->nwords;
+   const bool two_state = !!(s->flags & RT_ISIG_TWO_STATE);
+   for (uint64_t k = 0; k < log[0]; k++) {
+      const uint64_t e = log[1 + k];
+      if (e >= s->nelems)
+         continue;
+      const size_t off = (size_t)e * nwords * 8u;
+      memcpy(isl->next_state + s->a_off + off, isl->state + s->a_off + off,
+             nwords * 8u);
+      if (!two_state)
+         memcpy(isl->next_state + s->b_off + off,
+                isl->state + s->b_off + off, nwords * 8u);
+   }
+}
+
 // A flip-flop variant of DOM returned a deopt code: drop what it wrote
 // into the next state (outside a call the next state of the signals a
 // domain writes equals the state and their logs are empty)
@@ -5998,9 +6169,18 @@ static void island_spec_sv_ff_undo(rt_island_domain_t *dom)
    rt_island_t *isl = dom->isl;
    for (uint32_t j = 0; j < dom->n_write_sigs; j++) {
       const rt_island_sig_t *s = &(isl->sigs[dom->write_sigs[j]]);
-      island_copy_sig_buf(isl->next_state, isl->state, s);
-      if (s->flags & RT_ISIG_TOUCH_LOG)
-         *island_touch_log(isl, s) = 0;
+      if (s->flags & RT_ISIG_TOUCH_LOG) {
+         // Only the logged elements of a memory can differ (a store that
+         // is not logged overflows the log)
+         uint64_t *log = island_touch_log(isl, s);
+         if (log[0] <= RT_ISLAND_TOUCH_CAP)
+            island_spec_sv_undo_touched(isl, s, log);
+         else
+            island_copy_sig_buf(isl->next_state, isl->state, s);
+         log[0] = 0;
+      }
+      else
+         island_copy_sig_buf(isl->next_state, isl->state, s);
       if (s->flags & RT_ISIG_GLITCH_LOG)
          *island_glitch_log(isl, s) = 0;
    }
@@ -6187,13 +6367,15 @@ static void island_spec_rt_setup(rt_island_t *isl)
 
 enable:
    sp->check_ival = 8;
-   sp->next_check = 8;
    if (!mgr->spec_on) {
       mgr->spec_on = true;
-      mgr->spec_next = 8;
+      mgr->spec_next = UINT64_MAX;
       const char *env = getenv("NVC_ISLAND_SPEC_STATS");
       mgr->spec_trace = env != NULL && atoi(env) >= 3;
    }
+   // NVC_ISLAND_SPEC_FORCE and NVC_ISLAND_SPEC_STRESS switch from the start
+   const bool now = island_spec_force_a() || island_spec_stress_n() > 0;
+   island_spec_schedule(isl, now ? 8 : island_spec_start());
 }
 
 static void island_spec_rt_report(rt_island_mgr_t *mgr)
@@ -6318,6 +6500,9 @@ static void island_spec_rt_report(rt_island_mgr_t *mgr)
               " in_ah=%u to_checked=%"PRIu64" to_unchecked=%"PRIu64
               " fb_words=%u", n_sv, n_sv_ever, n_sv_a, n_sv_ah, sv_checked,
               sv_unchecked, sv_fb);
+   fprintf(f, "\nISLAND_SPEC_RT: sweeps=%"PRIu64" visits=%"PRIu64
+           " tries=%"PRIu64" unsafe=%"PRIu64, mgr->spec_sweeps,
+           mgr->spec_visits, mgr->spec_tries, mgr->spec_unsafe);
    fprintf(f, "\nISLAND_SPEC_RT: in_a_at_tick");
    for (uint32_t k = 0; k < mgr->n_spec_timeline; k++)
       fprintf(f, " %"PRIu64":%u", UINT64_C(1) << k, mgr->spec_timeline[k]);
@@ -6339,6 +6524,9 @@ static void island_spec_reset(rt_island_mgr_t *mgr)
       rt_island_t *isl = mgr->islands.items[i];
       if (isl->spec == NULL)
          continue;
+      if (isl->spec_a && !isl->spec->pinned && !isl->spec->force_a)
+         island_spec_schedule(isl, MAX(isl->spec->next_check,
+                                       mgr->spec_tick + 1));
       if (isl->spec_a && isl->spec->sv) {
          isl->spec_a = false;
          isl->spec_sv = 0;
@@ -10292,8 +10480,11 @@ static bool island_sample_domain(jit_t *jit, rt_island_domain_t *dom,
        && (!isl->mgr->fast
            || unlikely(tlab->alloc != 0 || tlab->mem_dirty != 0)))
       tlab_reset(tlab);
+   // SV variants return a deopt code, VHDL ones clear bit 63 (the island's
+   // own byte rather than isl->spec, which would miss the cache here)
    if (unlikely(isl->spec_a) && ok
-       && unlikely(isl->spec->sv ? result.integer != 0
+       && unlikely((isl->spec_sv & RT_ISLAND_SPEC_SV_ON)
+                   ? result.integer != 0
                    : !(result.integer & (INT64_C(1) << 63))))
       return island_spec_ff_deopt(jit, dom, tlab, result.integer);
    if (ok)

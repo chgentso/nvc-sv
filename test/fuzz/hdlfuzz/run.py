@@ -89,7 +89,9 @@ CONFIGS: Dict[str, Config] = {c.name: c for c in (
     Config("default"),
     Config("nofast", run_args=("--no-island-fast",),
            needs=("no_island_fast",)),
-    Config("spec", elab_env=_SPEC),
+    # Fuzz runs are short: promote from the start (NVC_ISLAND_SPEC_START)
+    Config("spec", elab_env=_SPEC,
+           run_env=(("NVC_ISLAND_SPEC_START", "0"),)),
     Config("specA", elab_env=_SPEC,
            run_env=(("NVC_ISLAND_SPEC_FORCE", "A"),)),
     Config("ghdl", tool="ghdl"),

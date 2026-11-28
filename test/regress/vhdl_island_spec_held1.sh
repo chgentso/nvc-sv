@@ -170,6 +170,7 @@ VHDL_EOF
 
 unset NVC_ISLAND_SPEC NVC_ISLAND_SPEC_FORCE NVC_ISLAND_SPEC_STATS
 unset NVC_ISLAND_SPEC_STRESS NVC_ISLAND_SPEC_RT
+export NVC_ISLAND_SPEC_START=0   # Short run: promote from the start
 
 nd() { sed '/^\$date/,/\$end/d' $1; }
 # Island processes report warnings under the island's name

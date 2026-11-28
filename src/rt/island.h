@@ -347,6 +347,7 @@ typedef struct _rt_island {
    bool                   is_vhdl;
    bool                   has_forces;
    bool                   spec_a;         // Running the Mode A variant now
+   uint8_t                spec_sv;        // RT_ISLAND_SPEC_SV_* (SV variants)
    bool                   direct_act;     // A direct comb desc has RT_IDIR_ACT
    bool                   in_defer_direct;
    rt_model_t            *model;
@@ -406,12 +407,12 @@ typedef struct _rt_island {
    rt_island_copy_t      *copies;
    uint32_t               n_copies;
    struct _island_clk_group *clk_fanout;   // RT_ISIG_CLK_FANOUT
-   uint8_t                spec_sv;   // RT_ISLAND_SPEC_SV_* (SV variants)
 } rt_island_t;
 
 // rt_island_t.spec_sv: a SystemVerilog island running a speculative variant
 #define RT_ISLAND_SPEC_SV_A    (1u << 0)   // "$a": state must stay all 0/1
 #define RT_ISLAND_SPEC_SV_FB   (1u << 1)   // Keep RT_ISIG_SPEC_FB signals
+#define RT_ISLAND_SPEC_SV_ON   (1u << 2)   // "$a" or "$ah"
 
 // Speculative Mode A (NVC_ISLAND_SPEC): a VHDL island lowered in Mode B
 // can also carry a packed two-state variant of its functions (and a
@@ -500,6 +501,10 @@ struct _rt_island_spec {
    uint8_t      *fb_buf;          // Their values before the call
    uint64_t      sv_checked;      // Switches from "$a" to "$ah"
    uint64_t      sv_unchecked;    // Switches from "$ah" to "$a"
+   uint64_t      tick_unchecked;  // Tick of the last switch to "$a"
+   uint32_t      sv_ah_ival;      // Ticks in "$ah" before a recheck
+   uint32_t      x_hint_sig;      // Where an unknown bit was last found
+   uint64_t      x_hint_word;
 };
 
 typedef struct _rt_island_mgr rt_island_mgr_t;

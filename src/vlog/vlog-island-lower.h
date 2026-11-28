@@ -76,6 +76,8 @@ void vlog_island_lower_emit_funcs(vlog_island_lower_ctx_t *ctx,
                                   mir_context_t *mc, vlog_node_t body,
                                   ident_t qual);
 void vlog_island_lower_free(vlog_island_lower_ctx_t *ctx);
+void vlog_island_lower_lazy_gen(bool allow);
+bool vlog_island_lower_keep_arena(void);
 
 void vlog_island_register_gen_scope(mir_context_t *mc, ident_t qual,
                                     ident_t parent);

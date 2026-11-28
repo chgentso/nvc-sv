@@ -44,7 +44,7 @@ marker (`FZ END`) and an optional VCD.
 | `ref` | `--rtl-islands=off` (the reference) |
 | `default` | islands with the default options |
 | `nofast` | `--no-island-fast` |
-| `spec` | elaborated with `NVC_ISLAND_SPEC=1` (speculative 2-state islands) |
+| `spec` | elaborated with `NVC_ISLAND_SPEC=1` (speculative 2-state islands), run with `NVC_ISLAND_SPEC_START=0` (promotion from the start) |
 | `specA` | `spec` plus `NVC_ISLAND_SPEC_FORCE=A` (all eligible islands in 2-state from t=0) |
 | `ghdl` | GHDL, when `--ghdl` points at a binary (`auto` searches `PATH`) |
 

@@ -3507,3 +3507,7 @@ vhdl_island_warn3 shell
 vhdl_island_warn4 shell
 vhdl_island_warn5 shell
 vhdl_island_warn6 shell
+vlog_island_spec_sweep1 shell
+vlog_island_spec_mem1 shell
+vlog_island_spec_flip1 shell
+vlog_island_spec_gen1 shell

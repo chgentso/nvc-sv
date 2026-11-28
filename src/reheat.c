@@ -28,6 +28,7 @@
 #include "rt/model.h"
 #include "tree.h"
 #include "vlog/vlog-island.h"
+#include "vlog/vlog-island-lower.h"
 #include "vlog/vlog-node.h"
 #include "vlog/vlog-phase.h"
 #include "vlog/vlog-util.h"
@@ -281,13 +282,18 @@ void reheat(tree_t top, unit_registry_t *ur, mir_context_t *mc,
    object_arena_t *saved_arena = detach_global_arena();
    make_new_arena();
 
+   vlog_island_lower_lazy_gen(true);
+
    for (int i = 0; i < ntops; i++)
       reheat_lower_verilog(tree_stmt(top, i), &ctx, NULL);
 
    for (int i = 0; i < ntops; i++)
       reheat_block(tree_stmt(top, i), &ctx);
 
-   if (!discard_global_arena_if_last())
+   vlog_island_lower_lazy_gen(false);
+
+   // Deferred island variants may read objects made while lowering
+   if (vlog_island_lower_keep_arena() || !discard_global_arena_if_last())
       detach_global_arena();
    if (saved_arena != NULL)
       attach_global_arena(saved_arena);
