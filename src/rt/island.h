@@ -55,6 +55,7 @@ typedef enum {
    RT_ISIG_TOUCH_LOG      = (1u << 26),   // SV memory: element write log
    RT_ISIG_GLITCH_LOG     = (1u << 27),   // SV register: overwritten NBA log
    RT_ISIG_DIRECT_PUB     = (1u << 28),   // Direct source also published
+   RT_ISIG_SPEC_FB        = (1u << 29),   // SV: kept to undo a variant call
 } rt_island_sig_flags_t;
 
 // Speculative Mode A clean tracking (NVC_ISLAND_SPEC).  The Mode A state of
@@ -386,7 +387,9 @@ typedef struct _rt_island {
 } rt_island_t;
 
 // Speculative Mode A (NVC_ISLAND_SPEC): a VHDL island lowered in Mode B
-// can also carry a packed two-state variant of its functions.  The variant
+// can also carry a packed two-state variant of its functions (and a
+// SystemVerilog island two-state variants on its four-state layout, which
+// complete with 0 like the four-state functions).  The variant
 // returns one of these codes instead of computing a value that two-state
 // storage cannot hold (the comb function returns 0 and a flip-flop function
 // a mask with bit 63 set when it completed).  It writes nothing visible
@@ -405,6 +408,7 @@ typedef enum {
    RT_ISLAND_DEOPT_UNCLEAN = 9,   // load or store of a held signal
    RT_ISLAND_DEOPT_ROW     = 10,  // load or partial store of a held row
    RT_ISLAND_DEOPT_NOVAR   = 11,  // Mode A function could not be lowered
+   RT_ISLAND_DEOPT_XSTORE  = 12,  // SV "$a": store of a value not all 0/1
    RT_ISLAND_DEOPT_COUNT
 } rt_island_deopt_t;
 
@@ -460,6 +464,8 @@ struct _rt_island_spec {
    bool          cost_pinned;     // Retried only every ISLAND_SPEC_COST_RETRY
    uint64_t      cost_pins;
    uint64_t      hold_waits;      // Checks that waited before holding
+   // SystemVerilog islands: the variants use the four-state layout
+   bool          sv;
 };
 
 typedef struct _rt_island_mgr rt_island_mgr_t;

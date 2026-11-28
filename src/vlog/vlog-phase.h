@@ -36,10 +36,30 @@ void vlog_set_interconnect_nettype(vlog_node_t decl, vlog_node_t nettype);
 void vlog_lower_instance(mir_context_t *mc, vlog_node_t body, ident_t parent,
                          tree_t trans, cover_data_t *cover, cover_obj_t cscope);
 struct _vlog_island;
+
+// Variant of an island function (speculative two-state, NVC_ISLAND_SPEC)
+typedef enum {
+   VLOG_ISLAND_SPEC_NONE,        // Four-state
+   VLOG_ISLAND_SPEC_UNCHECKED,   // "$a": four-state state values are 0/1
+   VLOG_ISLAND_SPEC_CHECKED,     // "$ah": loads check the unknown bits
+} vlog_island_spec_t;
+
 void vlog_lower_island_comb_fn(mir_context_t *mc, vlog_node_t body,
                                ident_t qual, ident_t sym,
                                const struct _vlog_island *isl,
-                               const bool *fused_proc, bool is_shared);
+                               const bool *fused_proc, bool is_shared,
+                               vlog_island_spec_t spec);
+mir_unit_t *vlog_lower_island_comb_unit(mir_context_t *mc, vlog_node_t body,
+                                        ident_t qual, ident_t sym,
+                                        const struct _vlog_island *isl,
+                                        const bool *fused_proc, bool is_shared,
+                                        vlog_island_spec_t spec);
+mir_unit_t *vlog_lower_island_ff_unit(mir_context_t *mc, vlog_node_t body,
+                                      ident_t qual, ident_t sym,
+                                      const struct _vlog_island *isl,
+                                      uint32_t domain_idx,
+                                      const bool *fused_proc, bool is_shared,
+                                      vlog_island_spec_t spec);
 void vlog_lower_island_reset_comb_fn(mir_context_t *mc, vlog_node_t body,
                                      ident_t qual, ident_t sym,
                                      const struct _vlog_island *isl,
@@ -48,7 +68,7 @@ void vlog_lower_island_ff_fn(mir_context_t *mc, vlog_node_t body,
                              ident_t qual, ident_t sym,
                              const struct _vlog_island *isl,
                              uint32_t domain_idx, const bool *fused_proc,
-                             bool is_shared);
+                             bool is_shared, vlog_island_spec_t spec);
 void vlog_cover_block(vlog_node_t body, cover_data_t *db, cover_obj_t cs);
 void vlog_cover_bind(vlog_node_t body, cover_data_t *db, cover_obj_t cs);
 bool vlog_cover_tag(ident_t body, vlog_node_t v, cover_item_kind_t kind,

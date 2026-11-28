@@ -1953,6 +1953,27 @@ void rt_island_set_variant_a(void *handle, jit_handle_t eval_handle,
 {
    rt_island_t *isl = handle;
    assert(isl->spec == NULL);
+
+   if (state_bytes == 0) {
+      // SystemVerilog island: the variants use the four-state layout
+      assert(isl->sparse_log_off == 0);
+      rt_island_spec_t *sp = xcalloc(sizeof(rt_island_spec_t));
+      sp->sv = true;
+      sp->eval_handle = eval_handle;
+      sp->eval_handle_h = eval_handle_h;
+      sp->state_bytes = isl->state_bytes;
+      sp->stride = RT_ISLAND_STRIDE(isl->state_bytes);
+      if (isl->ndomains > 0) {
+         sp->ff_handles = xmalloc_array(isl->ndomains, sizeof(jit_handle_t));
+         sp->ff_handles_h = xmalloc_array(isl->ndomains,
+                                          sizeof(jit_handle_t));
+         for (uint32_t d = 0; d < isl->ndomains; d++)
+            sp->ff_handles[d] = sp->ff_handles_h[d] = JIT_HANDLE_INVALID;
+      }
+      isl->spec = sp;
+      return;
+   }
+
    assert(hdr_bytes <= state_bytes);
    assert((sparse_log_off == 0) == (isl->sparse_log_off == 0));
 
@@ -2116,7 +2137,8 @@ void rt_island_spec_unpack(const rt_island_t *isl, const uint8_t *a_state,
 static void island_spec_setup(rt_island_t *isl)
 {
    rt_island_spec_t *sp = isl->spec;
-   if (sp == NULL || !island_spec_force_a() || sp->sparse_log_off > 0)
+   if (sp == NULL || sp->sv || !island_spec_force_a()
+       || sp->sparse_log_off > 0)
       return;
 
    // NVC_ISLAND_SPEC_FORCE=A (test hook): every call converts the state to
@@ -4729,7 +4751,7 @@ static void island_spec_trace(rt_island_t *isl, const char *what, int arg)
 {
    static const char *names[RT_ISLAND_DEOPT_COUNT] = {
       "none", "literal", "range", "conv", "report", "state", "input",
-      "put", "stress", "unclean", "row", "novar"
+      "put", "stress", "unclean", "row", "novar", "xstore"
    };
    unsigned deltas = 0;
    const uint64_t now = model_now(isl->model, &deltas);
@@ -5660,6 +5682,13 @@ static void island_spec_rt_setup(rt_island_t *isl)
       return;
    rt_island_mgr_t *mgr = isl->mgr;
 
+   if (sp->sv) {
+      // Not switched at run time yet: the island runs its four-state
+      // functions
+      sp->pinned = true;
+      return;
+   }
+
    sp->eval_handle_b = isl->eval_handle;
    sp->stride_b = isl->state_bytes;
    if (isl->nsigs > 0) {
@@ -5739,7 +5768,7 @@ static void island_spec_rt_report(rt_island_mgr_t *mgr)
 
    static const char *names[RT_ISLAND_DEOPT_COUNT] = {
       "none", "literal", "range", "conv", "report", "state", "input",
-      "put", "stress", "unclean", "row", "novar"
+      "put", "stress", "unclean", "row", "novar", "xstore"
    };
    uint64_t deopts[RT_ISLAND_DEOPT_COUNT] = {}, pins[RT_ISLAND_DEOPT_COUNT] = {};
    uint64_t promotions = 0, failed = 0, ticks_a = 0, holds = 0, unholds = 0;

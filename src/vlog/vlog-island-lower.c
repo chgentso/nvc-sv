@@ -17,10 +17,12 @@
 
 #include "util.h"
 #include "array.h"
+#include "thread.h"
 #include "hash.h"
 #include "ident.h"
 #include "mir/mir-node.h"
 #include "mir/mir-unit.h"
+#include "option.h"
 #include "rt/island.h"
 #include "vlog/vlog-island-lower.h"
 #include "vlog/vlog-node.h"
@@ -999,6 +1001,286 @@ static bool m2_scc_is_fusable(const vlog_island_t *isl, const bool *fused_proc,
    return true;
 }
 
+// Speculative two-state variants (NVC_ISLAND_SPEC): a deopt in the middle
+// of a call of a "$a" or "$ah" function is undone and the call made again
+// with the four-state function, so the island functions may only change
+// state the runtime can restore: the island state, and not a static
+// variable of a process or function, which the call may read before it
+// writes it.  A blocking assignment of a flip-flop process to an island
+// signal writes the current state, which the runtime does not restore.
+
+typedef struct {
+   hash_t *sig_map;
+   hset_t *funcs;
+   bool    in_ff;
+   bool    ok;
+} m2_spec_check_t;
+
+static void m2_spec_check_cb(vlog_node_t v, void *arg);
+
+static void m2_spec_check_decls(vlog_node_t v, m2_spec_check_t *sc)
+{
+   const int nd = vlog_decls(v);
+   for (int i = 0; i < nd; i++) {
+      vlog_node_t d = vlog_decl(v, i);
+      if (vlog_kind(d) == V_VAR_DECL && (vlog_flags(d) & VLOG_F_STATIC))
+         sc->ok = false;
+   }
+}
+
+static vlog_node_t m2_spec_target_decl(vlog_node_t target)
+{
+   for (;;) {
+      switch (vlog_kind(target)) {
+      case V_BIT_SELECT:
+      case V_PART_SELECT:
+      case V_MEMBER_REF:
+         target = vlog_value(target);
+         continue;
+      case V_REF:
+         if (!vlog_has_ref(target))
+            return NULL;
+         {
+            vlog_node_t d = vlog_ref(target);
+            if (vlog_kind(d) == V_PORT_DECL)
+               d = vlog_ref(d);
+            return d;
+         }
+      default:
+         return NULL;
+      }
+   }
+}
+
+static void m2_spec_check_cb(vlog_node_t v, void *arg)
+{
+   m2_spec_check_t *sc = arg;
+   if (!sc->ok)
+      return;
+
+   switch (vlog_kind(v)) {
+   case V_SEQ_BLOCK:
+   case V_FOR_INIT:
+      m2_spec_check_decls(v, sc);
+      break;
+
+   case V_BASSIGN:
+   case V_OP_ASSIGN:
+   case V_PREFIX:
+   case V_POSTFIX:
+      if (sc->in_ff) {
+         vlog_node_t target = vlog_target(v);
+         if (vlog_kind(target) == V_CONCAT)
+            sc->ok = false;   // Conservative
+         else {
+            vlog_node_t d = m2_spec_target_decl(target);
+            if (d == NULL || hash_get(sc->sig_map, d) != NULL)
+               sc->ok = false;
+         }
+      }
+      break;
+
+   case V_USER_FCALL:
+   case V_USER_TCALL:
+      if (!vlog_has_ref(v))
+         sc->ok = false;
+      else {
+         vlog_node_t fn = vlog_ref(v);
+         if (hset_contains(sc->funcs, fn))
+            break;
+         hset_insert(sc->funcs, fn);
+         m2_spec_check_decls(fn, sc);
+         const bool saved_ff = sc->in_ff;
+         sc->in_ff = false;
+         const int ns = vlog_stmts(fn);
+         for (int i = 0; i < ns && sc->ok; i++)
+            vlog_visit(vlog_stmt(fn, i), m2_spec_check_cb, sc);
+         sc->in_ff = saved_ff;
+      }
+      break;
+
+   default:
+      break;
+   }
+}
+
+static bool m2_spec_eligible(const vlog_island_m2_t *m2, hash_t *sig_map)
+{
+   const vlog_island_t *isl = m2->isl;
+   m2_spec_check_t sc = {
+      .sig_map = sig_map,
+      .funcs   = hset_new(8),
+      .ok      = true,
+   };
+   for (uint32_t p = 0; p < isl->nprocs && sc.ok; p++) {
+      if (!m2->fused_proc[p])
+         continue;
+      sc.in_ff = isl->procs[p].kind == IPROC_FF;
+      vlog_visit(isl->procs[p].stmt, m2_spec_check_cb, &sc);
+   }
+   hset_free(sc.funcs);
+   return sc.ok;
+}
+
+#define M2_FB_MAX_DEPTH 64
+
+typedef struct {
+   const vlog_island_t *isl;
+   hash_t              *sig_map;
+   vlog_node_t          skip[M2_FB_MAX_DEPTH];   // Assignment target bases
+   int                  depth;
+   bool                *defined;   // Assigned whole before any read
+   bool                *early;     // Read before it is assigned whole
+} m2_fb_scan_t;
+
+static vlog_node_t m2_fb_target_base(vlog_node_t target)
+{
+   while (vlog_kind(target) == V_BIT_SELECT
+          || vlog_kind(target) == V_PART_SELECT
+          || vlog_kind(target) == V_MEMBER_REF)
+      target = vlog_value(target);
+   return target;
+}
+
+static const island_sig_t *m2_fb_ref_sig(m2_fb_scan_t *fs, vlog_node_t v)
+{
+   if (vlog_kind(v) != V_REF || !vlog_has_ref(v))
+      return NULL;
+   vlog_node_t d = vlog_ref(v);
+   if (vlog_kind(d) == V_PORT_DECL)
+      d = vlog_ref(d);
+   return hash_get(fs->sig_map, d);
+}
+
+static void m2_fb_pre_cb(vlog_node_t v, void *arg)
+{
+   m2_fb_scan_t *fs = arg;
+   switch (vlog_kind(v)) {
+   case V_BASSIGN:
+   case V_NBASSIGN:
+      // The variable assigned (or a part of) is not read
+      if (fs->depth < M2_FB_MAX_DEPTH)
+         fs->skip[fs->depth] = m2_fb_target_base(vlog_target(v));
+      fs->depth++;
+      break;
+   case V_REF:
+      {
+         for (int i = 0; i < MIN(fs->depth, M2_FB_MAX_DEPTH); i++) {
+            if (fs->skip[i] == v)
+               return;
+         }
+         const island_sig_t *isig = m2_fb_ref_sig(fs, v);
+         if (isig != NULL && !fs->defined[isig - fs->isl->sigs])
+            fs->early[isig - fs->isl->sigs] = true;
+      }
+      break;
+   default:
+      break;
+   }
+}
+
+static void m2_fb_post_cb(vlog_node_t v, void *arg)
+{
+   m2_fb_scan_t *fs = arg;
+   if (vlog_kind(v) == V_BASSIGN || vlog_kind(v) == V_NBASSIGN)
+      fs->depth--;
+}
+
+// Statements of a comb process in order: a blocking assignment of a whole
+// island signal at the top level defines it for the statements after it
+static void m2_fb_scan_stmt(vlog_node_t s, m2_fb_scan_t *fs)
+{
+   switch (vlog_kind(s)) {
+   case V_ALWAYS:
+   case V_TIMING:
+   case V_SEQ_BLOCK:
+      {
+         if (vlog_kind(s) == V_TIMING && vlog_has_value(s))
+            vlog_visit_prepost(vlog_value(s), m2_fb_pre_cb, m2_fb_post_cb, fs);
+         const int ns = vlog_stmts(s);
+         for (int i = 0; i < ns; i++)
+            m2_fb_scan_stmt(vlog_stmt(s, i), fs);
+      }
+      return;
+
+   default:
+      {
+         vlog_visit_prepost(s, m2_fb_pre_cb, m2_fb_post_cb, fs);
+         if (vlog_kind(s) != V_BASSIGN)
+            return;
+         vlog_node_t target = vlog_target(s);
+         const island_sig_t *isig = m2_fb_ref_sig(fs, target);
+         if (isig != NULL && isig->nelems == 1)
+            fs->defined[isig - fs->isl->sigs] = true;
+      }
+      return;
+   }
+}
+
+// The signals a call of the comb function may read after writing them:
+// those a fused comb process reads before it assigns their whole value
+// (in the order of its statements) and also writes, and those written and
+// read within a fused cycle.  The runtime keeps their values before a call
+// of a speculative variant to undo it (RT_ISIG_SPEC_FB).  A continuous
+// assignment in no cycle never reads the bits it writes (self_loop).
+static void m2_spec_feedback(vlog_island_m2_t *m2, hash_t *sig_map)
+{
+   const vlog_island_t *isl = m2->isl;
+   m2->sig_spec_fb = xcalloc_array(MAX(1u, isl->nsigs), sizeof(bool));
+   bool *w LOCAL = xcalloc_array(MAX(1u, isl->nsigs), sizeof(bool));
+   bool *defined LOCAL = xcalloc_array(MAX(1u, isl->nsigs), sizeof(bool));
+   bool *early LOCAL = xcalloc_array(MAX(1u, isl->nsigs), sizeof(bool));
+
+   for (uint32_t p = 0; p < isl->nprocs; p++) {
+      const island_proc_t *ip = &(isl->procs[p]);
+      if (!m2->fused_proc[p] || ip->kind != IPROC_COMB || ip->in_cycle)
+         continue;
+      memset(defined, 0, MAX(1u, isl->nsigs) * sizeof(bool));
+      memset(early, 0, MAX(1u, isl->nsigs) * sizeof(bool));
+      m2_fb_scan_t fs = {
+         .isl = isl, .sig_map = sig_map, .defined = defined, .early = early,
+      };
+      m2_fb_scan_stmt(ip->stmt, &fs);
+      memset(w, 0, MAX(1u, isl->nsigs) * sizeof(bool));
+      for (uint32_t k = 0; k < ip->nwrites; k++)
+         w[ip->writes[k]] = true;
+      for (uint32_t k = 0; k < ip->nreads; k++) {
+         if (early[ip->reads[k]] && w[ip->reads[k]])
+            m2->sig_spec_fb[ip->reads[k]] = true;
+      }
+   }
+
+   for (uint32_t c = 0; c < isl->ntopo; ) {
+      uint32_t end = c + 1;
+      const island_proc_t *ip = &(isl->procs[isl->topo_order[c]]);
+      if (ip->in_cycle) {
+         while (end < isl->ntopo
+                && isl->procs[isl->topo_order[end]].scc_id == ip->scc_id)
+            end++;
+      }
+      memset(w, 0, MAX(1u, isl->nsigs) * sizeof(bool));
+      for (uint32_t j = c; j < end; j++) {
+         const uint32_t pidx = isl->topo_order[j];
+         if (!m2->fused_proc[pidx])
+            continue;
+         const island_proc_t *pj = &(isl->procs[pidx]);
+         for (uint32_t k = 0; k < pj->nwrites; k++)
+            w[pj->writes[k]] = true;
+      }
+      for (uint32_t j = c; j < end && ip->in_cycle; j++) {
+         const uint32_t pidx = isl->topo_order[j];
+         if (!m2->fused_proc[pidx])
+            continue;
+         const island_proc_t *pj = &(isl->procs[pidx]);
+         for (uint32_t k = 0; k < pj->nreads; k++) {
+            if (w[pj->reads[k]])
+               m2->sig_spec_fb[pj->reads[k]] = true;
+         }
+      }
+      c = end;
+   }
+}
+
 vlog_island_lower_ctx_t *vlog_island_lower_prepare(vlog_node_t body,
                                                    bool is_mixed,
                                                    mir_unit_t *inst_mu,
@@ -1014,6 +1296,7 @@ vlog_island_lower_ctx_t *vlog_island_lower_prepare(vlog_node_t body,
    }
 
    vlog_island_lower_ctx_t *ctx = xcalloc(sizeof(vlog_island_lower_ctx_t));
+   ctx->refs = 1;
    ctx->plan = plan;
    ctx->islands = xcalloc_array(plan->nislands, sizeof(vlog_island_m2_t));
    ctx->fused_stmts = hset_new(64);
@@ -1248,6 +1531,25 @@ vlog_island_lower_ctx_t *vlog_island_lower_prepare(vlog_node_t body,
          }
       }
 
+      if ((m2->n_fused_comb > 0 || m2->n_fused_ff > 0)
+          && opt_get_int(OPT_ISLAND_SPEC)
+          && opt_get_int(OPT_TWO_STATE) < TWO_STATE_ISLANDS
+          && m2_spec_eligible(m2, sig_map)) {
+         m2->spec = true;
+         if (m2->n_fused_comb > 0) {
+            m2->eval_sym_a = ident_prefix(m2->eval_sym, ident_new("a"), '$');
+            m2->eval_sym_ah = ident_prefix(m2->eval_sym, ident_new("ah"), '$');
+            m2_spec_feedback(m2, sig_map);
+         }
+         for (uint32_t d = 0; d < isl->ndomains; d++) {
+            vlog_island_dom_m3_t *dm = &(m2->doms[d]);
+            if (dm->n_fused_ff == 0)
+               continue;
+            dm->ff_sym_a = ident_prefix(dm->ff_sym, ident_new("a"), '$');
+            dm->ff_sym_ah = ident_prefix(dm->ff_sym, ident_new("ah"), '$');
+         }
+      }
+
       if (m2->n_fused_comb > 0 || m2->n_fused_ff > 0) {
          island_shared_cache_t *cache = island_get_shared_cache(mc);
          hset_t *fgen = hash_get(cache->mod_fused_gen, qual);
@@ -1308,6 +1610,53 @@ vlog_island_lower_ctx_t *vlog_island_lower_prepare(vlog_node_t body,
    }
 
    return ctx;
+}
+
+// Registers the speculative variants of an island (rt_island_set_variant_a
+// with a zero state size: the variants use the four-state layout)
+static void vlog_island_emit_variant_init(const vlog_island_m2_t *m2,
+                                          mir_unit_t *inst_mu,
+                                          mir_value_t self,
+                                          mir_value_t handle)
+{
+   const vlog_island_t *isl = m2->isl;
+   mir_type_t t_offset = mir_offset_type(inst_mu);
+   mir_value_t zero = mir_const(inst_mu, t_offset, 0);
+
+   mir_value_t cl_a = zero, cl_ah = zero;
+   if (m2->eval_sym_a != NULL) {
+      mir_value_t cl_args[] = { self };
+      cl_a = mir_build_closure(inst_mu, m2->eval_sym_a, t_offset, cl_args, 1);
+      cl_ah = mir_build_closure(inst_mu, m2->eval_sym_ah, t_offset,
+                                cl_args, 1);
+   }
+
+   mir_value_t v_args[] = { handle, cl_a, cl_ah, zero, zero, zero, zero };
+   mir_value_t v_res = mir_build_fcall(
+      inst_mu, ident_new("__sv_island_set_variant_a"), t_offset,
+      MIR_NULL_STAMP, v_args, ARRAY_LEN(v_args));
+   mir_build_consume(inst_mu, v_res);
+
+   uint32_t rt_dom_idx = 0;
+   for (uint32_t d = 0; d < isl->ndomains; d++) {
+      const vlog_island_dom_m3_t *dm = &(m2->doms[d]);
+      if (dm->n_fused_ff == 0)
+         continue;
+
+      mir_value_t cl_args[] = { self };
+      mir_value_t ff_a = mir_build_closure(inst_mu, dm->ff_sym_a, t_offset,
+                                           cl_args, 1);
+      mir_value_t ff_ah = mir_build_closure(inst_mu, dm->ff_sym_ah, t_offset,
+                                            cl_args, 1);
+      mir_value_t d_args[] = {
+         handle, mir_const(inst_mu, t_offset, rt_dom_idx), ff_a, ff_ah,
+      };
+      mir_value_t d_res = mir_build_fcall(
+         inst_mu, ident_new("__sv_island_add_domain_a"), t_offset,
+         MIR_NULL_STAMP, d_args, ARRAY_LEN(d_args));
+      mir_build_consume(inst_mu, d_res);
+      rt_dom_idx++;
+   }
 }
 
 void vlog_island_lower_emit_init(vlog_island_lower_ctx_t *ctx,
@@ -1409,6 +1758,8 @@ void vlog_island_lower_emit_init(vlog_island_lower_ctx_t *ctx,
             flags |= RT_ISIG_TOUCH_LOG;
          if (s->glitch_off != 0 && !m2->sig_in[i] && !m2->sig_comb_w[i])
             flags |= RT_ISIG_GLITCH_LOG;
+         if (m2->sig_spec_fb != NULL && m2->sig_spec_fb[i])
+            flags |= RT_ISIG_SPEC_FB;
 
          mir_value_t bind_res;
          if (s->gen_path != NULL) {
@@ -1512,6 +1863,9 @@ void vlog_island_lower_emit_init(vlog_island_lower_ctx_t *ctx,
          rt_dom_idx++;
       }
 
+      if (m2->spec)
+         vlog_island_emit_variant_init(m2, inst_mu, self, handle);
+
       mir_value_t f_args[] = { handle };
       mir_value_t fin_res =
          mir_build_fcall(inst_mu, ident_new("__sv_island_finish"),
@@ -1519,6 +1873,106 @@ void vlog_island_lower_emit_init(vlog_island_lower_ctx_t *ctx,
                          f_args, ARRAY_LEN(f_args));
       mir_build_consume(inst_mu, fin_res);
    }
+}
+
+// A speculative variant of an island function is lowered the first time
+// the runtime calls it: most islands never call "$ah" and some are never
+// promoted.  An island with processes or signals of generate blocks is
+// lowered at once: their specialised copies (expand_gen_node) do not live
+// longer than the lowering of the instance.  NVC_DUMP_ISLANDS lowers them
+// all at once too.
+typedef struct {
+   vlog_island_lower_ctx_t *ctx;
+   vlog_node_t              body;
+   ident_t                  qual;
+   uint32_t                 island;
+   int                      dom;    // Flip-flop domain or -1 for comb
+   vlog_island_spec_t       spec;
+} vlog_island_lazy_t;
+
+static hash_t     *lazy_map;    // Function name to vlog_island_lazy_t
+static nvc_lock_t  lazy_lock;
+
+static void vlog_island_ctx_release(vlog_island_lower_ctx_t *ctx);
+
+static mir_unit_t *vlog_island_build_variant(mir_context_t *mc,
+                                             vlog_island_lower_ctx_t *ctx,
+                                             vlog_node_t body, ident_t qual,
+                                             uint32_t ii, int dom,
+                                             vlog_island_spec_t spec,
+                                             ident_t name)
+{
+   const vlog_island_m2_t *m2 = &(ctx->islands[ii]);
+   if (dom < 0)
+      return vlog_lower_island_comb_unit(mc, body, qual, name, m2->isl,
+                                         m2->fused_proc, m2->comb_shared,
+                                         spec);
+   else
+      return vlog_lower_island_ff_unit(mc, body, qual, name, m2->isl, dom,
+                                       m2->fused_proc, m2->doms[dom].shared,
+                                       spec);
+}
+
+static void vlog_island_lazy_build(mir_unit_t *mu, object_t *obj)
+{
+   SCOPED_LOCK(lazy_lock);
+   (void)obj;
+
+   ident_t name = mir_get_unit_name(mu);
+   vlog_island_lazy_t *lz = hash_get(lazy_map, name);
+   assert(lz != NULL);
+
+   // Built under another name: the deferred one is still registered
+   mir_context_t *mc = mir_get_context(mu);
+   ident_t tmp_name = ident_prefix(name, ident_new("lazy"), '$');
+   mir_unit_t *real = vlog_island_build_variant(mc, lz->ctx, lz->body,
+                                                lz->qual, lz->island, lz->dom,
+                                                lz->spec, tmp_name);
+   mir_unit_move(mu, real);
+
+   hash_put(lazy_map, name, NULL);
+   vlog_island_ctx_release(lz->ctx);
+   free(lz);
+}
+
+static void vlog_island_lower_variant(mir_context_t *mc,
+                                      vlog_island_lower_ctx_t *ctx,
+                                      vlog_node_t body, ident_t qual,
+                                      uint32_t ii, int dom,
+                                      vlog_island_spec_t spec, ident_t name)
+{
+   const vlog_island_m2_t *m2 = &(ctx->islands[ii]);
+   bool lazy = !opt_get_int(OPT_DUMP_ISLANDS);
+   for (uint32_t p = 0; p < m2->isl->nprocs && lazy; p++)
+      lazy = !m2->fused_proc[p] || !m2->isl->procs[p].from_gen;
+   for (uint32_t i = 0; i < m2->isl->nsigs && lazy; i++)
+      lazy = m2->isl->sigs[i].gen_path == NULL;
+
+   if (!lazy) {
+      mir_put_unit(mc, vlog_island_build_variant(mc, ctx, body, qual, ii,
+                                                 dom, spec, name));
+      return;
+   }
+
+   SCOPED_LOCK(lazy_lock);
+
+   if (lazy_map == NULL)
+      lazy_map = hash_new(256);
+   else if (hash_get(lazy_map, name) != NULL)
+      return;
+
+   vlog_island_lazy_t *lz = xmalloc(sizeof(vlog_island_lazy_t));
+   lz->ctx    = ctx;
+   lz->body   = body;
+   lz->qual   = qual;
+   lz->island = ii;
+   lz->dom    = dom;
+   lz->spec   = spec;
+   hash_put(lazy_map, name, lz);
+
+   atomic_add(&(ctx->refs), 1);
+   mir_defer(mc, name, NULL, MIR_UNIT_FUNCTION, vlog_island_lazy_build,
+             vlog_to_object(body));
 }
 
 void vlog_island_lower_emit_funcs(vlog_island_lower_ctx_t *ctx,
@@ -1530,9 +1984,19 @@ void vlog_island_lower_emit_funcs(vlog_island_lower_ctx_t *ctx,
 
    for (uint32_t ii = 0; ii < ctx->plan->nislands; ii++) {
       const vlog_island_m2_t *m2 = &(ctx->islands[ii]);
-      if (m2->n_fused_comb > 0 && m2->emit_comb)
+      if (m2->n_fused_comb > 0 && m2->emit_comb) {
          vlog_lower_island_comb_fn(mc, body, qual, m2->eval_sym,
-                                   m2->isl, m2->fused_proc, m2->comb_shared);
+                                   m2->isl, m2->fused_proc, m2->comb_shared,
+                                   VLOG_ISLAND_SPEC_NONE);
+         if (m2->spec) {
+            vlog_island_lower_variant(mc, ctx, body, qual, ii, -1,
+                                      VLOG_ISLAND_SPEC_UNCHECKED,
+                                      m2->eval_sym_a);
+            vlog_island_lower_variant(mc, ctx, body, qual, ii, -1,
+                                      VLOG_ISLAND_SPEC_CHECKED,
+                                      m2->eval_sym_ah);
+         }
+      }
 
       if (m2->reset_eval_sym != NULL && m2->emit_reset_comb)
          vlog_lower_island_reset_comb_fn(mc, body, qual, m2->reset_eval_sym,
@@ -1540,10 +2004,20 @@ void vlog_island_lower_emit_funcs(vlog_island_lower_ctx_t *ctx,
                                          m2->reset_comb_shared);
 
       for (uint32_t d = 0; d < m2->isl->ndomains; d++) {
-         if (m2->doms[d].n_fused_ff > 0 && m2->doms[d].emit_fn)
-            vlog_lower_island_ff_fn(mc, body, qual, m2->doms[d].ff_sym,
-                                    m2->isl, d, m2->fused_proc,
-                                    m2->doms[d].shared);
+         const vlog_island_dom_m3_t *dm = &(m2->doms[d]);
+         if (dm->n_fused_ff == 0 || !dm->emit_fn)
+            continue;
+         vlog_lower_island_ff_fn(mc, body, qual, dm->ff_sym, m2->isl, d,
+                                 m2->fused_proc, dm->shared,
+                                 VLOG_ISLAND_SPEC_NONE);
+         if (m2->spec) {
+            vlog_island_lower_variant(mc, ctx, body, qual, ii, d,
+                                      VLOG_ISLAND_SPEC_UNCHECKED,
+                                      dm->ff_sym_a);
+            vlog_island_lower_variant(mc, ctx, body, qual, ii, d,
+                                      VLOG_ISLAND_SPEC_CHECKED,
+                                      dm->ff_sym_ah);
+         }
       }
    }
 }
@@ -1551,6 +2025,15 @@ void vlog_island_lower_emit_funcs(vlog_island_lower_ctx_t *ctx,
 void vlog_island_lower_free(vlog_island_lower_ctx_t *ctx)
 {
    if (ctx == NULL)
+      return;
+
+   SCOPED_LOCK(lazy_lock);
+   vlog_island_ctx_release(ctx);
+}
+
+static void vlog_island_ctx_release(vlog_island_lower_ctx_t *ctx)
+{
+   if (--(ctx->refs) > 0)
       return;
 
    for (uint32_t ii = 0; ii < ctx->plan->nislands; ii++) {
@@ -1568,6 +2051,7 @@ void vlog_island_lower_free(vlog_island_lower_ctx_t *ctx)
       free(m2->sig_proc_w);
       free(m2->sig_late);
       free(m2->sig_ext_w);
+      free(m2->sig_spec_fb);
    }
    free(ctx->islands);
    if (ctx->fused_stmts != NULL)

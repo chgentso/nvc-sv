@@ -3495,3 +3495,4 @@ vhdl_island_warn2 shell
 vlog_island_meminit1 verilog,gold
 vlog_island_dpub1 verilog,gold
 island_dpub2 shell
+vlog_island_spec_lower1 shell
