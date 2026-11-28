@@ -133,6 +133,8 @@ typedef struct {
    const vhdl_idom_t       *ff_dom;
    mir_value_t              ff_dirty_var;
    vi_scope_t              *scope;
+   mir_block_t              const_bb;  // Entry block: shared tables
+   mir_block_t              body_bb;   // First block after const_bb
    mir_value_t              lut_not;
    mir_value_t              lut_and;
    mir_value_t              lut_or;
@@ -146,6 +148,8 @@ typedef struct {
    uint32_t                 n_act_rd;
    uint32_t                 cap_act_rd;
    bool                     act_track;
+   const loc_t             *loc;           // Of the current statement
+   unsigned                 inline_depth;  // Inlined subprogram bodies
    bool                     failed;
    const char              *reason;    // NVC_DUMP_ISLANDS: first failure
    // Speculative Mode A variant of a Mode B island (NVC_ISLAND_SPEC): a
@@ -580,6 +584,36 @@ static bool vi_type_is_signed_vec(type_t t)
       || strcmp(n, "IEEE.NUMERIC_STD.UNRESOLVED_SIGNED") == 0;
 }
 
+// The tables shared by the processes of a unit (std_logic operator tables,
+// constant ROMs) are built in the entry block, which dominates every other
+// block: a table first needed inside a branch is used again in other
+// branches and processes.  The entry block jumps to the body only when the
+// unit is complete (vi_unit_close).
+static void vi_unit_open(vi_lower_t *l)
+{
+   l->const_bb = mir_get_cursor(l->mu, NULL);
+   l->body_bb = mir_add_block(l->mu);
+   mir_set_cursor(l->mu, l->body_bb, MIR_APPEND);
+}
+
+static void vi_unit_close(vi_lower_t *l)
+{
+   mir_set_cursor(l->mu, l->const_bb, MIR_APPEND);
+   mir_build_jump(l->mu, l->body_bb);
+}
+
+static mir_block_t vi_const_begin(vi_lower_t *l, unsigned *pos)
+{
+   mir_block_t bb = mir_get_cursor(l->mu, pos);
+   mir_set_cursor(l->mu, l->const_bb, MIR_APPEND);
+   return bb;
+}
+
+static void vi_const_end(vi_lower_t *l, mir_block_t bb, unsigned pos)
+{
+   mir_set_cursor(l->mu, bb, pos);
+}
+
 static mir_value_t vi_get_std_lut(vi_lower_t *l, int kind)
 {
    mir_value_t *slot = NULL;
@@ -596,12 +630,15 @@ static mir_value_t vi_get_std_lut(vi_lower_t *l, int kind)
       return *slot;
 
    mir_unit_t *mu = l->mu;
+   unsigned pos;
+   mir_block_t bb = vi_const_begin(l, &pos);
    mir_value_t vals[81];
    for (int i = 0; i < len; i++)
       vals[i] = vi_u8(mu, tbl[i]);
    mir_value_t ca = mir_const_array(mu, mir_carray_type(mu, len, vi_u8_type(mu)),
                                     vals, len);
    *slot = mir_build_address_of(mu, ca);
+   vi_const_end(l, bb, pos);
    return *slot;
 }
 
@@ -1670,6 +1707,92 @@ static mir_value_t vi_read_ptr(vi_lower_t *l, const vhdl_isl_sig_t *isig)
 
 static bool vi_lower_expr(vi_lower_t *l, tree_t expr, vi_val_t *out);
 static bool vi_lower_stmt(vi_lower_t *l, tree_t stmt);
+static bool vi_lower_inline_func_inner(vi_lower_t *l, tree_t fcall,
+                                       tree_t func, vi_val_t *out,
+                                       vi_local_t *ret_rec);
+static bool vi_lower_inline_proc_inner(vi_lower_t *l, tree_t pcall);
+
+// The code of a statement or expression carries its location, so that the
+// stack trace of a report from a function the island calls (such as an
+// IEEE metavalue warning) names the line and with it the fused process
+// (see find_island_proc_loc in jit/jit-core.c), as with the process
+// unfused.  The body of an inlined subprogram keeps the location of the
+// call.
+static const loc_t *vi_push_loc(vi_lower_t *l, tree_t t)
+{
+   const loc_t *old = l->loc;
+   if (l->inline_depth == 0) {
+      l->loc = tree_loc(t);
+      mir_set_loc(l->mu, l->loc);
+   }
+   return old;
+}
+
+static void vi_pop_loc(vi_lower_t *l, const loc_t *old)
+{
+   if (l->inline_depth == 0 && old != NULL) {
+      l->loc = old;
+      mir_set_loc(l->mu, old);
+   }
+}
+
+// True if evaluating EXPR cannot report anything (no function call that may
+// warn, no index or range check): it can be evaluated when the LRM would
+// skip it, as the right operand of a short-circuit operator
+static bool vi_expr_quiet(tree_t expr, int depth)
+{
+   if (depth > 8)
+      return false;
+   switch (tree_kind(expr)) {
+   case T_LITERAL:
+   case T_REF:
+      return true;
+   case T_QUALIFIED:
+      return vi_expr_quiet(tree_value(expr), depth + 1);
+   case T_RECORD_REF:
+      return vi_expr_quiet(tree_value(expr), depth + 1);
+   case T_FCALL:
+      {
+         if (!tree_has_ref(expr))
+            return false;
+         switch (tree_subkind(tree_ref(expr))) {
+         case S_SCALAR_EQ: case S_SCALAR_NEQ: case S_SCALAR_LT:
+         case S_SCALAR_LE: case S_SCALAR_GT: case S_SCALAR_GE:
+         case S_SCALAR_AND: case S_SCALAR_OR: case S_SCALAR_XOR:
+         case S_SCALAR_NAND: case S_SCALAR_NOR: case S_SCALAR_XNOR:
+         case S_SCALAR_NOT:
+            break;
+         default:
+            return false;
+         }
+         const int np = tree_params(expr);
+         for (int i = 0; i < np; i++) {
+            if (!vi_expr_quiet(tree_value(tree_param(expr, i)), depth + 1))
+               return false;
+         }
+         return true;
+      }
+   default:
+      return false;
+   }
+}
+
+static bool vi_lower_inline_func(vi_lower_t *l, tree_t fcall, tree_t func,
+                                 vi_val_t *out, vi_local_t *ret_rec)
+{
+   l->inline_depth++;
+   const bool ok = vi_lower_inline_func_inner(l, fcall, func, out, ret_rec);
+   l->inline_depth--;
+   return ok;
+}
+
+static bool vi_lower_inline_proc(vi_lower_t *l, tree_t pcall)
+{
+   l->inline_depth++;
+   const bool ok = vi_lower_inline_proc_inner(l, pcall);
+   l->inline_depth--;
+   return ok;
+}
 
 // Speculative Mode A: the constant B as a value that MIR does not fold, for
 // a branch whose untaken side must stay reachable in the CFG
@@ -3371,8 +3494,9 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
 
 // Inlines a call FCALL of FUNC: the result is *OUT, or for a function
 // returning a record the leaves of RET_REC, a record local of that type
-static bool vi_lower_inline_func(vi_lower_t *l, tree_t fcall, tree_t func,
-                                 vi_val_t *out, vi_local_t *ret_rec)
+static bool vi_lower_inline_func_inner(vi_lower_t *l, tree_t fcall,
+                                       tree_t func, vi_val_t *out,
+                                       vi_local_t *ret_rec)
 {
    func = vhdl_island_resolve_func_body(func);
    if (func == NULL || (tree_flags(func) & TREE_F_IMPURE))
@@ -3811,16 +3935,49 @@ static bool vi_lower_builtin_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
    }
 
    if (np == 2) {
-      // Short-circuit boolean AND/OR for scalars
-      if (sk == S_SCALAR_AND || sk == S_SCALAR_OR) {
+      // Boolean and bit AND/OR (and NAND/NOR) evaluate their right operand
+      // only when the left one does not decide the result (LRM 9.2.2).  An
+      // operand that cannot report anything is evaluated anyway, which
+      // needs no branch.
+      if (sk == S_SCALAR_AND || sk == S_SCALAR_OR
+          || ((sk == S_SCALAR_NAND || sk == S_SCALAR_NOR)
+              && !vi_expr_quiet(tree_value(tree_param(fcall, 1)), 0))) {
+         const bool is_and = (sk == S_SCALAR_AND || sk == S_SCALAR_NAND);
+         const bool neg = (sk == S_SCALAR_NAND || sk == S_SCALAR_NOR);
          vi_val_t a, b;
-         if (!vi_lower_expr(l, tree_value(tree_param(fcall, 0)), &a)
-             || !vi_lower_expr(l, tree_value(tree_param(fcall, 1)), &b))
+         if (!vi_lower_expr(l, tree_value(tree_param(fcall, 0)), &a))
             return false;
-         mir_value_t ab = vi_to_bool(l, a);
-         mir_value_t bb = vi_to_bool(l, b);
-         mir_value_t r = (sk == S_SCALAR_AND)
-            ? mir_build_and(mu, ab, bb) : mir_build_or(mu, ab, bb);
+         mir_value_t ab = vi_to_bool(l, a), r;
+         tree_t rhs = tree_value(tree_param(fcall, 1));
+         if (vi_expr_quiet(rhs, 0)) {
+            if (!vi_lower_expr(l, rhs, &b))
+               return false;
+            mir_value_t bb = vi_to_bool(l, b);
+            r = is_and ? mir_build_and(mu, ab, bb) : mir_build_or(mu, ab, bb);
+         }
+         else {
+            mir_type_t t_bool = mir_bool_type(mu);
+            mir_value_t var = mir_add_var(mu, t_bool, MIR_NULL_STAMP,
+                                          ident_uniq("sc"), MIR_VAR_TEMP);
+            mir_build_store(mu, var, ab);
+            mir_block_t rhs_bb = mir_add_block(mu);
+            mir_block_t join_bb = mir_add_block(mu);
+            if (is_and)
+               mir_build_cond(mu, ab, rhs_bb, join_bb);
+            else
+               mir_build_cond(mu, ab, join_bb, rhs_bb);
+            mir_set_cursor(mu, rhs_bb, MIR_APPEND);
+            if (!vi_lower_expr(l, rhs, &b))
+               return false;
+            mir_build_store(mu, var, vi_to_bool(l, b));
+            mir_build_jump(mu, join_bb);
+            mir_set_cursor(mu, join_bb, MIR_APPEND);
+            if (l->loc != NULL)
+               mir_set_loc(mu, l->loc);
+            r = mir_build_load(mu, var);
+         }
+         if (neg)
+            r = mir_build_not(mu, r);
          *out = vi_from_bool_bit(l, r, a.is_bool, a.is_std);
          return true;
       }
@@ -4336,6 +4493,8 @@ static bool vi_lower_const_array_ref(vi_lower_t *l, tree_t base_e,
             l->failed = true;
             return false;
          }
+         unsigned cpos;
+         mir_block_t cbb = vi_const_begin(l, &cpos);
          if (l->two_state) {
             // ceil(width / 64) i64 words per element, least significant
             // word first
@@ -4362,6 +4521,7 @@ static bool vi_lower_const_array_ref(vi_lower_t *l, tree_t base_e,
                vals, total);
             tbl_ptr = mir_build_address_of(mu, ca);
          }
+         vi_const_end(l, cbb, cpos);
 
          if (l->n_rom_cache < ARRAY_LEN(l->rom_cache)) {
             l->rom_cache[l->n_rom_cache].agg = cur;
@@ -4503,12 +4663,15 @@ static bool vi_lower_const_array_ref(vi_lower_t *l, tree_t base_e,
          }
       }
       if (mir_is_null(tbl_ptr)) {
+         unsigned cpos;
+         mir_block_t cbb = vi_const_begin(l, &cpos);
          mir_value_t *vals LOCAL = xmalloc_array(nelems, sizeof(mir_value_t));
          for (uint32_t p = 0; p < nelems; p++)
             vals[p] = vi_i64(mu, tbl[p]);
          mir_value_t ca = mir_const_array(
             mu, mir_carray_type(mu, (int)nelems, vi_i64_type(mu)), vals, nelems);
          tbl_ptr = mir_build_address_of(mu, ca);
+         vi_const_end(l, cbb, cpos);
          if (l->n_rom_cache < ARRAY_LEN(l->rom_cache)) {
             l->rom_cache[l->n_rom_cache].agg = cur;
             l->rom_cache[l->n_rom_cache].ptr = tbl_ptr;
@@ -4532,7 +4695,9 @@ static bool vi_lower_expr_inner(vi_lower_t *l, tree_t expr, vi_val_t *out);
 
 static bool vi_lower_expr(vi_lower_t *l, tree_t expr, vi_val_t *out)
 {
+   const loc_t *old_loc = expr ? vi_push_loc(l, expr) : NULL;
    const bool ok = vi_lower_expr_inner(l, expr, out);
+   vi_pop_loc(l, old_loc);
    if (!ok)
       vi_generic_reason(l, "expr", expr);
    return ok;
@@ -7504,7 +7669,7 @@ static bool vi_lower_str_expr(vi_lower_t *l, tree_t expr, vi_str_t *out)
 static bool vi_bind_process_locals(vi_lower_t *l, tree_t proc, vi_scope_t *sc,
                                    bool subprog);
 
-static bool vi_lower_inline_proc(vi_lower_t *l, tree_t pcall)
+static bool vi_lower_inline_proc_inner(vi_lower_t *l, tree_t pcall)
 {
    if (!tree_has_ref(pcall))
       return false;
@@ -7878,6 +8043,7 @@ static bool vi_lower_stmt_inner(vi_lower_t *l, tree_t stmt);
 
 static bool vi_lower_stmt(vi_lower_t *l, tree_t stmt)
 {
+   const loc_t *old_loc = vi_push_loc(l, stmt);
    bool ok;
    if (tree_kind(stmt) == T_CASE) {
       // Each alternative starts from the values known before the case
@@ -7894,6 +8060,7 @@ static bool vi_lower_stmt(vi_lower_t *l, tree_t stmt)
       ok = vi_lower_stmt_inner(l, stmt);
    if (!ok)
       vi_generic_reason(l, "stmt", stmt);
+   vi_pop_loc(l, old_loc);
    return ok;
 }
 
@@ -8648,6 +8815,14 @@ static bool vi_act_add_read(vi_lower_t *l, uint32_t idx)
 // the process reads is set.  The read set is the union of what the
 // analysis found and what the lowering of the body loaded; a process that
 // reads a signal without a change byte always runs.
+// A process that runs only when its sensitivity list changed, see
+// vi_emit_report_guard.  A Mode A variant has no metavalue warnings
+// (vhdl_island_new_a_variant keeps report processes out of it).
+static bool vi_proc_guarded(const vi_lower_t *l, const vhdl_iproc_t *p)
+{
+   return p->has_report || (p->has_warn && !l->two_state);
+}
+
 static void vi_emit_act_test(vi_lower_t *l, const vhdl_iproc_t *p,
                              mir_block_t body_bb, mir_block_t next_bb)
 {
@@ -8659,6 +8834,14 @@ static void vi_emit_act_test(vi_lower_t *l, const vhdl_iproc_t *p,
       always = !(isl->sigs[l->act_rd[i]].rt_flags & RT_ISIG_ACT);
    for (uint32_t i = 0; i < p->n_reads && !always; i++) {
       const vhdl_isl_sig_t *isig = vhdl_island_find_sig(isl, p->reads[i]);
+      always = isig == NULL
+         || !vi_act_add_read(l, (uint32_t)(isig - isl->sigs));
+   }
+   // The sensitivity list of a guarded process may name signals that it
+   // does not read (vi_emit_report_guard)
+   for (uint32_t i = 0; vi_proc_guarded(l, p) && i < p->n_evt_sigs && !always;
+        i++) {
+      const vhdl_isl_sig_t *isig = vhdl_island_find_sig(isl, p->evt_sigs[i]);
       always = isig == NULL
          || !vi_act_add_read(l, (uint32_t)(isig - isl->sigs));
    }
@@ -8820,17 +9003,18 @@ static bool vi_emit_entry_shadow(vi_lower_t *l, int *failed_proc_out)
    return true;
 }
 
-// OR into ANY whether the NWORDS 64-bit words at A_OFF and B_OFF differ
-static mir_value_t vi_emit_words_differ(vi_lower_t *l, mir_value_t any,
-                                        uint32_t a_off, uint32_t b_off,
-                                        uint32_t nwords)
+// OR into ANY whether the NWORDS 64-bit words at A_OFF of A_BASE and B_OFF
+// of the state differ
+static mir_value_t vi_emit_words_differ_at(vi_lower_t *l, mir_value_t any,
+                                           mir_value_t a_base, uint32_t a_off,
+                                           uint32_t b_off, uint32_t nwords)
 {
    mir_unit_t *mu = l->mu;
    mir_type_t t_v64 = mir_vec2_type(mu, 64, false);
 
    if (nwords <= 4) {
       for (uint32_t w = 0; w < nwords; w++) {
-         mir_value_t a = mir_build_island_load(mu, t_v64, l->state_ptr,
+         mir_value_t a = mir_build_island_load(mu, t_v64, a_base,
                                                vi_off(mu, a_off + 8u * w),
                                                vi_off(mu, -1), vi_off(mu, 0));
          mir_value_t b = mir_build_island_load(mu, t_v64, l->state_ptr,
@@ -8860,7 +9044,7 @@ static mir_value_t vi_emit_words_differ(vi_lower_t *l, mir_value_t any,
                   body, done);
 
    mir_set_cursor(mu, body, MIR_APPEND);
-   mir_value_t a = mir_build_island_load(mu, t_v64, l->state_ptr,
+   mir_value_t a = mir_build_island_load(mu, t_v64, a_base,
                                          vi_off(mu, a_off), vi_off(mu, -1), i);
    mir_value_t b = mir_build_island_load(mu, t_v64, l->state_ptr,
                                          vi_off(mu, b_off), vi_off(mu, -1), i);
@@ -8881,35 +9065,161 @@ static mir_value_t vi_emit_words_differ(vi_lower_t *l, mir_value_t any,
 // first call mark every signal), so compare each signal with the copy taken
 // on the last run.  Branches to RUN_BB, which updates the copies, or to
 // SKIP_BB.
+// OR into ANY whether the NBYTES bytes at A_OFF of A_BASE and B_OFF of the
+// state differ, for a long slice that does not start on a word
+static mir_value_t vi_emit_bytes_differ_at(vi_lower_t *l, mir_value_t any,
+                                           mir_value_t a_base, uint32_t a_off,
+                                           uint32_t b_off, uint32_t nbytes)
+{
+   mir_unit_t *mu = l->mu;
+   mir_type_t t_off = mir_offset_type(mu);
+   mir_value_t idx_v = mir_add_var(mu, t_off, MIR_NULL_STAMP,
+                                   ident_uniq("evb"), MIR_VAR_TEMP);
+   mir_value_t any_v = mir_add_var(mu, mir_bool_type(mu), MIR_NULL_STAMP,
+                                   ident_uniq("evd"), MIR_VAR_TEMP);
+   mir_build_store(mu, idx_v, vi_off(mu, 0));
+   mir_build_store(mu, any_v, any);
+
+   mir_block_t hdr = mir_add_block(mu);
+   mir_block_t body = mir_add_block(mu);
+   mir_block_t done = mir_add_block(mu);
+   mir_build_jump(mu, hdr);
+
+   mir_set_cursor(mu, hdr, MIR_APPEND);
+   mir_value_t i = mir_build_load(mu, idx_v);
+   mir_build_cond(mu, mir_build_cmp(mu, MIR_CMP_LT, i, vi_off(mu, nbytes)),
+                  body, done);
+
+   mir_set_cursor(mu, body, MIR_APPEND);
+   mir_value_t a = mir_build_load(
+      mu, mir_build_array_ref(mu, a_base,
+                              mir_build_add(mu, t_off, vi_off(mu, a_off), i)));
+   mir_value_t b = mir_build_load(
+      mu, mir_build_array_ref(mu, l->state_ptr,
+                              mir_build_add(mu, t_off, vi_off(mu, b_off), i)));
+   mir_build_store(mu, any_v,
+                   mir_build_or(mu, mir_build_load(mu, any_v),
+                                mir_build_cmp(mu, MIR_CMP_NEQ, a, b)));
+   mir_build_store(mu, idx_v, mir_build_add(mu, t_off, i, vi_off(mu, 1)));
+   mir_build_jump(mu, hdr);
+
+   mir_set_cursor(mu, done, MIR_APPEND);
+   return mir_build_load(mu, any_v);
+}
+
+// True when the change byte of ISIG is set or every signal counts as
+// changed (RT_ISLAND_ACT_ALL), or the null value if ISIG has no change byte
+static mir_value_t vi_guard_changed(vi_lower_t *l, const vhdl_isl_sig_t *isig)
+{
+   if (!l->isl->has_act || !(isig->rt_flags & RT_ISIG_ACT))
+      return MIR_NULL_VALUE;
+   mir_unit_t *mu = l->mu;
+   const uint32_t idx = (uint32_t)(isig - l->isl->sigs);
+   mir_value_t chg = mir_build_load(mu, vi_state_ptr_at(l, idx));
+   mir_value_t all = mir_build_load(
+      mu, vi_state_ptr_at(l, RT_ISLAND_ACT_ALL(l->isl->n_sigs)));
+   return mir_build_or(mu, mir_build_cmp(mu, MIR_CMP_NEQ, chg, vi_u8(mu, 0)),
+                       mir_build_cmp(mu, MIR_CMP_NEQ, all, vi_u8(mu, 0)));
+}
+
+// Copies longer than this are compared and updated only when the change
+// byte of their signal is set
+#define VI_GUARD_GATE_BYTES 16
+
+// Where the process reads ISIG from (at byte PART_OFF): a signal that a
+// process inside a combinational loop may already have assigned in this
+// call is read from its copy taken when the island function started (see
+// vi_emit_entry_shadow), which holds the value of the current delta cycle
+static mir_value_t vi_guard_base(vi_lower_t *l, const vhdl_isl_sig_t *isig,
+                                 uint32_t part_off, uint32_t *off)
+{
+   for (uint32_t j = 0; j < l->n_entry; j++) {
+      if (l->entry_sig[j] == isig) {
+         *off = part_off;
+         return l->entry_ptr[j];
+      }
+   }
+   *off = isig->a_off + part_off;
+   return l->state_ptr;
+}
+
 static bool vi_emit_report_guard(vi_lower_t *l, const vhdl_iproc_t *p,
                                  mir_block_t skip_bb)
 {
    mir_unit_t *mu = l->mu;
    mir_value_t ran = mir_build_load(mu, vi_state_ptr_at(l, p->evt_flag_off));
-   mir_value_t any = mir_build_cmp(mu, MIR_CMP_EQ, ran, vi_u8(mu, 0));
+   mir_value_t first = mir_build_cmp(mu, MIR_CMP_EQ, ran, vi_u8(mu, 0));
+   mir_value_t any = first, any_v = MIR_NULL_VALUE;
    for (uint32_t i = 0; i < p->n_evt_sigs; i++) {
       const vhdl_isl_sig_t *isig = vhdl_island_find_sig(l->isl, p->evt_sigs[i]);
       const uint32_t nbytes = p->evt_copy_bytes[i];
+      if (isig == NULL && !p->has_report) {
+         // Read only by a branch that is never taken and by no other
+         // process of the island: the island does not see its events
+         l->reason = "comb: process that may warn is sensitive to a signal "
+            "outside its island";
+         return false;
+      }
+      uint32_t src = 0;
+      mir_value_t base = MIR_NULL_VALUE;
+      if (isig != NULL)
+         base = vi_guard_base(l, isig, p->evt_part_off[i], &src);
+      if (isig != NULL && !p->has_report && nbytes == 0) {
+         // A process that only calls functions that may warn reads a
+         // sparse RAM, which is not copied: run it when the change byte
+         // of the signal is set (an input sync may set it without a
+         // change), or always without one
+         mir_value_t chg = vi_guard_changed(l, isig);
+         if (mir_is_null(chg))
+            any = mir_const(mu, mir_bool_type(mu), 1);
+         else
+            any = mir_build_or(mu, any, chg);
+         continue;
+      }
       if (isig == NULL || nbytes == 0) {
          l->reason = "comb: report process sensitive to a sparse RAM";
          return false;
       }
-      const uint32_t src = isig->a_off + p->evt_part_off[i];
+      // A long copy is compared only when the change byte of its signal
+      // is set: a signal without it has not changed since the previous
+      // call, so its copy still holds the value of the last run
+      mir_block_t next_bb = MIR_NULL_BLOCK;
+      mir_value_t chg = MIR_NULL_VALUE;
+      if (nbytes > VI_GUARD_GATE_BYTES)
+         chg = vi_guard_changed(l, isig);
+      if (!mir_is_null(chg)) {
+         if (mir_is_null(any_v))
+            any_v = mir_add_var(mu, mir_bool_type(mu), MIR_NULL_STAMP,
+                                ident_uniq("evany"), MIR_VAR_TEMP);
+         mir_build_store(mu, any_v, any);
+         mir_block_t cmp_bb = mir_add_block(mu);
+         next_bb = mir_add_block(mu);
+         mir_build_cond(mu, chg, cmp_bb, next_bb);
+         mir_set_cursor(mu, cmp_bb, MIR_APPEND);
+      }
+
       if (src % 8 == 0 && nbytes % 8 == 0)
-         any = vi_emit_words_differ(l, any, src, p->evt_copy_off[i],
-                                    nbytes / 8);
+         any = vi_emit_words_differ_at(l, any, base, src, p->evt_copy_off[i],
+                                       nbytes / 8);
       else if (nbytes <= 64) {
          // An element or a short slice
          for (uint32_t k = 0; k < nbytes; k++) {
-            mir_value_t a = mir_build_load(mu, vi_state_ptr_at(l, src + k));
+            mir_value_t a = mir_build_load(
+               mu, mir_build_array_ref(mu, base, vi_off(mu, src + k)));
             mir_value_t b = mir_build_load(
                mu, vi_state_ptr_at(l, p->evt_copy_off[i] + k));
             any = mir_build_or(mu, any, mir_build_cmp(mu, MIR_CMP_NEQ, a, b));
          }
       }
-      else {
-         l->reason = "comb: report process sensitive to a long slice";
-         return false;
+      else
+         any = vi_emit_bytes_differ_at(l, any, base, src, p->evt_copy_off[i],
+                                       nbytes);
+
+      if (!mir_is_null(chg)) {
+         mir_build_store(mu, any_v, any);
+         mir_build_jump(mu, next_bb);
+         mir_set_cursor(mu, next_bb, MIR_APPEND);
+         any = mir_build_load(mu, any_v);
       }
    }
 
@@ -8920,9 +9230,32 @@ static bool vi_emit_report_guard(vi_lower_t *l, const vhdl_iproc_t *p,
    mir_build_store(mu, vi_state_ptr_at(l, p->evt_flag_off), vi_u8(mu, 1));
    for (uint32_t i = 0; i < p->n_evt_sigs; i++) {
       const vhdl_isl_sig_t *isig = vhdl_island_find_sig(l->isl, p->evt_sigs[i]);
+      uint32_t src;
+      mir_value_t base = vi_guard_base(l, isig, p->evt_part_off[i], &src);
+      const uint32_t nbytes = p->evt_copy_bytes[i];
+      if (nbytes == 0)
+         continue;   // Not copied, see above
+
+      mir_block_t next_bb = MIR_NULL_BLOCK;
+      mir_value_t chg = MIR_NULL_VALUE;
+      if (nbytes > VI_GUARD_GATE_BYTES)
+         chg = vi_guard_changed(l, isig);
+      if (!mir_is_null(chg)) {
+         chg = mir_build_or(mu, chg, first);   // No copy taken yet
+         mir_block_t copy_bb = mir_add_block(mu);
+         next_bb = mir_add_block(mu);
+         mir_build_cond(mu, chg, copy_bb, next_bb);
+         mir_set_cursor(mu, copy_bb, MIR_APPEND);
+      }
+
       mir_build_copy(mu, vi_state_ptr_at(l, p->evt_copy_off[i]),
-                     vi_state_ptr_at(l, isig->a_off + p->evt_part_off[i]),
-                     vi_off(mu, p->evt_copy_bytes[i]));
+                     mir_build_array_ref(mu, base, vi_off(mu, src)),
+                     vi_off(mu, nbytes));
+
+      if (!mir_is_null(chg)) {
+         mir_build_jump(mu, next_bb);
+         mir_set_cursor(mu, next_bb, MIR_APPEND);
+      }
    }
    return true;
 }
@@ -8966,6 +9299,7 @@ static mir_unit_t *vi_build_comb_unit(mir_context_t *mc,
    const bool act = isl->has_act;
    const bool act_stats = act && getenv("NVC_ISLAND_ACT_STATS") != NULL;
    const uint32_t act_cnt = RT_ISLAND_ACT_CNT(isl->n_sigs);
+   vi_unit_open(&l);
    if (act_stats)
       vi_act_count(&l, act_cnt + 8u, isl->n_comb_procs);
 
@@ -8993,7 +9327,8 @@ static mir_unit_t *vi_build_comb_unit(mir_context_t *mc,
 
       mir_block_t test_bb = MIR_NULL_BLOCK, body_bb = MIR_NULL_BLOCK;
       mir_block_t next_bb = MIR_NULL_BLOCK;
-      if (act || p->has_report)
+      const bool guard = vi_proc_guarded(&l, p);
+      if (act || guard)
          next_bb = mir_add_block(mu);
       if (act) {
          test_bb = mir_add_block(mu);
@@ -9001,14 +9336,11 @@ static mir_unit_t *vi_build_comb_unit(mir_context_t *mc,
          mir_build_jump(mu, test_bb);
          mir_set_cursor(mu, body_bb, MIR_APPEND);
 
-         // Values built in an earlier process may not have been computed
-         l.lut_not = l.lut_and = l.lut_or = l.lut_xor = MIR_NULL_VALUE;
-         l.n_rom_cache = 0;
          l.n_act_rd = 0;
          l.act_track = true;
       }
 
-      bool ok = (!p->has_report || vi_emit_report_guard(&l, p, next_bb))
+      bool ok = (!guard || vi_emit_report_guard(&l, p, next_bb))
          && vi_emit_self_shadow(&l, p)
          && vi_bind_process_locals(&l, p->stmt, &sc, false);
       const int ns = tree_stmts(p->stmt) - 1;
@@ -9042,7 +9374,7 @@ static mir_unit_t *vi_build_comb_unit(mir_context_t *mc,
          vi_emit_act_test(&l, p, body_bb, next_bb);
          mir_set_cursor(mu, next_bb, MIR_APPEND);
       }
-      else if (p->has_report) {
+      else if (guard) {
          mir_build_jump(mu, next_bb);
          mir_set_cursor(mu, next_bb, MIR_APPEND);
       }
@@ -9054,6 +9386,7 @@ static mir_unit_t *vi_build_comb_unit(mir_context_t *mc,
    free(l.entry_sig);
    free(l.entry_ptr);
    mir_build_return(mu, vi_off(mu, 0));
+   vi_unit_close(&l);
    return mu;
 }
 
@@ -9097,6 +9430,7 @@ static mir_unit_t *vi_build_ff_unit(mir_context_t *mc,
       .lut_xor      = MIR_NULL_VALUE,
    };
 
+   vi_unit_open(&l);
    vi_spec_sparse_mark(&l);
 
    if (dm->rst_isl_sig >= 0) {
@@ -9205,6 +9539,7 @@ static mir_unit_t *vi_build_ff_unit(mir_context_t *mc,
 
    mir_build_return(mu, mir_build_cast(mu, t_off,
                                        mir_build_load(mu, ff_dirty_var)));
+   vi_unit_close(&l);
    return mu;
 }
 
