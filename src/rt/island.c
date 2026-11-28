@@ -1084,6 +1084,15 @@ void rt_island_input_watch_inline(rt_model_t *m, void *user, bool defer_comb)
    rt_island_sig_t *s = user;
    rt_island_t *isl = s->isl;
    WSTAT_COUNT(s, 0);
+   if (unlikely(s->flags & RT_ISIG_ARM_EVT) && model_now(m, NULL) > 0) {
+      // An always @(...) block waiting for this input runs even when the
+      // value changes back before the island is evaluated (a variable
+      // assigned twice by a process outside the island).  Not at time
+      // zero: the drivers of the nets an island reads may be evaluated
+      // only then (island_eligible_sv_reset), changing z to x where without
+      // islands the value was already x (island_layout_arm)
+      *(uint64_t *)(isl->state + s->a_off - 8) = 1;
+   }
    island_mark_in_dirty(isl, s->in_idx);
    isl->has_dirty_inputs = true;
    if (isl->cluster != NULL) {
@@ -1578,6 +1587,7 @@ void rt_island_mgr_free(rt_island_mgr_t *mgr)
          free(isl->domains[d].ff_descs);
          free(isl->domains[d].ff_runs);
          free(isl->domains[d].glitch_resets);
+         free(isl->domains[d].arm_words);
       }
       free(isl->domains);
       for (uint32_t f = 0; f < isl->n_forces; f++)
@@ -2339,11 +2349,18 @@ static void island_refresh_domain_descs(rt_island_t *isl)
          dom->glitch_resets = xmalloc_array(dom->n_write_sigs,
                                             sizeof(uint32_t));
       dom->n_glitch_resets = 0;
+      dom->n_arm_words = 0;
       for (uint32_t j = 0; j < dom->n_write_sigs; j++) {
          const uint32_t sidx = dom->write_sigs[j];
          const rt_island_sig_t *s = &(isl->sigs[sidx]);
          rt_island_ff_desc_t *fd = &(dom->ff_descs[j]);
          uint16_t fl = 0;
+         if (s->flags & RT_ISIG_ARM_EVT) {
+            if (dom->arm_words == NULL)
+               dom->arm_words = xmalloc_array(dom->n_write_sigs,
+                                              sizeof(uint32_t));
+            dom->arm_words[dom->n_arm_words++] = s->a_off - 8;
+         }
          if (s->flags & RT_ISIG_SPARSE_RAM)
             fl |= RT_IFF_SPARSE_RAM;
          else if (s->flags & RT_ISIG_STD_LOGIC9)
@@ -8664,8 +8681,20 @@ bool rt_island_eval_sv_reset(jit_t *jit, rt_model_t *m, rt_island_mgr_t *mgr,
 
       island_clear_dirty(isl);
 
-      if (isl->skip_sv_reset)
+      if (isl->skip_sv_reset) {
+         // Only records the event control values of always @(...)
+         // blocks (see island_layout_arm): nothing to publish
+         if (isl->reset_eval_handle != JIT_HANDLE_INVALID) {
+            jit_scalar_t args[] = {
+               { .pointer = isl->reset_eval_ctx },
+               { .pointer = isl->state },
+            };
+            if (!jit_vfastcall(jit, isl->reset_eval_handle, args,
+                               ARRAY_LEN(args), NULL, 0, tlab))
+               return false;
+         }
          continue;
+      }
 
       if (isl->reset_eval_handle != JIT_HANDLE_INVALID) {
          jit_scalar_t args[] = {
@@ -11368,6 +11397,16 @@ static void island_commit_domain(rt_model_t *m, rt_island_domain_t *dom)
             island_publish_direct(s);
          else if (whole)
             island_sync_out_sig(m, isl, s);
+      }
+   }
+
+   // A flip-flop process assigned a value an always @(...) block still
+   // waiting for its first event wakes up for (vlog_island_arm_after_store)
+   for (uint32_t j = 0; j < dom->n_arm_words; j++) {
+      uint64_t *word = (uint64_t *)(isl->state + dom->arm_words[j]);
+      if (unlikely(*word == 2)) {
+         *word = 1;
+         comb_need_eval = true;
       }
    }
 

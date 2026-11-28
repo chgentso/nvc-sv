@@ -70,6 +70,7 @@ typedef struct {
    uint32_t                  nwords;
    uint32_t                  touch_off;   // Element write log or zero
    uint32_t                  glitch_off;  // Overwritten NBA log or zero
+   bool                      arm_evt;     // Event word before a_off
 } island_sig_t;
 
 typedef enum {
@@ -118,7 +119,27 @@ typedef struct {
    int                scc_id;
    bool               in_cycle;
    bool               self_loop;
+   // A fused always @(...) block runs only after an event on its event
+   // control, as without islands: arm_off is the offset of its state word
+   // (0 if the block always runs), arm_snap[k] the a-plane offset of the
+   // value of event expression k when the simulation started, with the b
+   // plane arm_plane[k] bytes after it, and arm_sig[k] the island signal
+   // the expression selects from; arm_init[k] is set when that signal is
+   // continuously driven, so it has an event when the simulation starts if
+   // it is then driven to a value with a 0 or 1 bit (see fire_init_events)
+   uint32_t           arm_off;
+   uint32_t           n_arm;
+   uint32_t          *arm_snap;
+   uint32_t          *arm_plane;
+   uint32_t          *arm_sig;
+   bool              *arm_init;
+   uint32_t           arm_tmp;   // Scratch planes shared by the island
 } island_proc_t;
+
+// State word of a fused always @(...) block (island_proc_t arm_off)
+#define ISLAND_ARM_NONE     0   // No snapshot: the block always runs
+#define ISLAND_ARM_WAITING  1   // No event yet since time zero
+#define ISLAND_ARM_ARMED    2   // An event happened: the block runs
 
 typedef struct {
    int       clk_sig;
@@ -193,6 +214,7 @@ typedef struct {
 void vlog_island_set_find_mod(vlog_find_mod_fn_t fn, void *ctx);
 bool vlog_island_body_is_mixed(vlog_node_t body);
 vlog_island_plan_t *vlog_island_analyze(vlog_node_t body, bool is_mixed);
+vlog_node_t vlog_island_event_ctrl(vlog_node_t s);
 void vlog_island_plan_free(vlog_island_plan_t *plan);
 void vlog_island_dump(const vlog_island_plan_t *plan);
 

@@ -1415,7 +1415,7 @@ vlog_island_lower_ctx_t *vlog_island_lower_prepare(vlog_node_t body,
       ident_t unit_base = ident_runtil(vlog_ident(body), '#');
 
       if (m2->n_fused_comb > 0) {
-         bool has_always_comb = false, has_assign = false;
+         bool has_always_comb = false, has_assign = false, has_arm = false;
          for (uint32_t c = 0; c < isl->ntopo; c++) {
             const uint32_t pidx = isl->topo_order[c];
             if (!m2->fused_proc[pidx])
@@ -1424,6 +1424,8 @@ vlog_island_lower_ctx_t *vlog_island_lower_prepare(vlog_node_t body,
                has_always_comb = true;
             else
                has_assign = true;
+            if (isl->procs[pidx].arm_off != 0)
+               has_arm = true;
          }
 
          const bool pure_state = can_share
@@ -1447,10 +1449,14 @@ vlog_island_lower_ctx_t *vlog_island_lower_prepare(vlog_node_t body,
             m2->eval_sym = ident_sprintf("%s.$island_comb%u", istr(qual), ii);
          }
 
-         if (has_always_comb) {
-            if (!has_assign)
-               m2->skip_sv_reset = true;
-            else if (pure_state) {
+         // Without continuous assignments nothing settles before time
+         // zero, but the reset function still records the values the event
+         // controls of always @(...) blocks start from
+         if (has_always_comb && !has_assign)
+            m2->skip_sv_reset = true;
+
+         if (has_always_comb && (has_assign || has_arm)) {
+            if (pure_state) {
                LOCAL_TEXT_BUF rkey_tb = tb_new();
                tb_printf(rkey_tb, "rcomb:%u|%s|topo:", ii, tb_get(spec_tb));
                for (uint32_t c = 0; c < isl->ntopo; c++) {
@@ -1760,6 +1766,8 @@ void vlog_island_lower_emit_init(vlog_island_lower_ctx_t *ctx,
             flags |= RT_ISIG_GLITCH_LOG;
          if (m2->sig_spec_fb != NULL && m2->sig_spec_fb[i])
             flags |= RT_ISIG_SPEC_FB;
+         if (s->arm_evt)
+            flags |= RT_ISIG_ARM_EVT;
 
          mir_value_t bind_res;
          if (s->gen_path != NULL) {

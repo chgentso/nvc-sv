@@ -176,6 +176,9 @@ typedef struct {
    hash_t        *island_sigs;
    uint32_t       island_state_stride;
    uint32_t       island_proc_id;
+   const vlog_island_t *island;          // Island of a comb function
+   const bool    *island_fused;
+   int            island_cur_proc;       // Process lowered, -1 if none
    mir_value_t    unique_pend;   // Unique reports may be queued
    uint8_t        island_spec;   // VLOG_ISLAND_SPEC_* variant lowered
    bool           in_island_comb;
@@ -4967,6 +4970,9 @@ static void vlog_island_glitch_store(vlog_gen_t *g, const vlog_select_t *lval,
    mir_set_cursor(mu, done_bb, MIR_APPEND);
 }
 
+static void vlog_island_arm_after_store(vlog_gen_t *g, uint32_t a_off,
+                                        uint32_t stride);
+
 static void vlog_island_store_part(vlog_gen_t *g, const vlog_select_t *lval,
                                    mir_value_t part, uint32_t stride)
 {
@@ -4974,6 +4980,9 @@ static void vlog_island_store_part(vlog_gen_t *g, const vlog_select_t *lval,
       vlog_island_glitch_store(g, lval, part, stride);
    else
       vlog_island_store_part_raw(g, lval, part, stride);
+
+   if (g->island != NULL)
+      vlog_island_arm_after_store(g, lval->island_a_off, stride);
 }
 
 static void vlog_store_var_slice(vlog_gen_t *g, const vlog_select_t *lv,
@@ -41321,10 +41330,348 @@ static void vlog_island_emit_unique_flush(vlog_gen_t *g, uint32_t pidx,
    mir_set_cursor(g->mu, cont_bb, MIR_APPEND);
 }
 
+static bool vlog_island_arm_fits(vlog_gen_t *g, const island_proc_t *ip,
+                                 uint32_t k, mir_value_t value)
+{
+   if (!mir_is_vector(g->mu, value))
+      return false;
+
+   mir_type_t type = mir_get_type(g->mu, value);
+   const uint32_t nbytes = ((mir_get_size(g->mu, type) + 63u) / 64u) * 8u;
+   return nbytes <= ip->arm_plane[k];
+}
+
+static bool vlog_island_arm_values(vlog_gen_t *g, const island_proc_t *ip,
+                                   mir_value_t *values)
+{
+   // Values of the event expressions of a fused always @(...) block, false
+   // if one does not fit its snapshot (the block then always runs)
+   vlog_node_t ctrl = vlog_island_event_ctrl(ip->stmt);
+   assert(ctrl != NULL && vlog_params(ctrl) == ip->n_arm);
+
+   bool ok = true;
+   for (uint32_t k = 0; k < ip->n_arm; k++) {
+      values[k] = vlog_lower_rvalue(g, vlog_value(vlog_param(ctrl, k)));
+      ok &= vlog_island_arm_fits(g, ip, k, values[k]);
+   }
+
+   return ok;
+}
+
+static mir_value_t vlog_island_arm_load(vlog_gen_t *g, const island_proc_t *ip,
+                                        uint32_t k, mir_type_t type)
+{
+   mir_type_t t_offset = mir_offset_type(g->mu);
+   const bool two_state = mir_get_class(g->mu, type) == MIR_TYPE_VEC2;
+   return mir_build_island_load(
+      g->mu, type, g->island_state,
+      mir_const(g->mu, t_offset, ip->arm_snap[k]),
+      mir_const(g->mu, t_offset,
+                two_state ? -1 : (int64_t)(ip->arm_snap[k] + ip->arm_plane[k])),
+      mir_const(g->mu, t_offset, 0));
+}
+
+static mir_value_t vlog_island_arm_plane(vlog_gen_t *g, mir_type_t t_bits,
+                                         uint32_t off)
+{
+   mir_type_t t_offset = mir_offset_type(g->mu);
+   return mir_build_island_load(g->mu, t_bits, g->island_state,
+                                mir_const(g->mu, t_offset, off),
+                                mir_const(g->mu, t_offset, -1),
+                                mir_const(g->mu, t_offset, 0));
+}
+
+static void vlog_island_arm_store(vlog_gen_t *g, const island_proc_t *ip,
+                                  uint32_t k, mir_value_t value);
+
+static mir_value_t vlog_island_arm_changed(vlog_gen_t *g,
+                                           const island_proc_t *ip,
+                                           uint32_t k, mir_value_t value)
+{
+   // True if event expression K changed since the last test
+   mir_unit_t *mu = g->mu;
+   mir_type_t type = mir_get_type(mu, value);
+   if (!ip->arm_init[k] || mir_get_class(mu, type) != MIR_TYPE_VEC4) {
+      mir_value_t old = vlog_island_arm_load(g, ip, k, type);
+      return mir_build_test(
+         mu, mir_build_binary(mu, MIR_VEC_CASE_NEQ, type, old, value));
+   }
+
+   // The island state of a continuously driven signal may still hold the
+   // z of an undriven net when the simulation starts where without islands
+   // the driver had already set it to x (an island not evaluated before
+   // time zero, see island_eligible_sv_reset).  A bit going from z to x is
+   // not a change there; the copy follows the value so a later x to z is.
+   mir_type_t t_offset = mir_offset_type(mu);
+   mir_type_t t_bits = mir_vec2_type(mu, mir_get_size(mu, type), false);
+   const uint32_t plane = ip->arm_plane[k];
+   mir_build_island_store(mu, g->island_state,
+                          mir_const(mu, t_offset, ip->arm_tmp),
+                          mir_const(mu, t_offset, ip->arm_tmp + plane),
+                          mir_const(mu, t_offset, 0), value);
+
+   mir_value_t oa = vlog_island_arm_plane(g, t_bits, ip->arm_snap[k]);
+   mir_value_t ob = vlog_island_arm_plane(g, t_bits, ip->arm_snap[k] + plane);
+   mir_value_t na = vlog_island_arm_plane(g, t_bits, ip->arm_tmp);
+   mir_value_t nb = vlog_island_arm_plane(g, t_bits, ip->arm_tmp + plane);
+
+   mir_value_t diff = mir_build_binary(
+      mu, MIR_VEC_BIT_OR, t_bits,
+      mir_build_binary(mu, MIR_VEC_BIT_XOR, t_bits, oa, na),
+      mir_build_binary(mu, MIR_VEC_BIT_XOR, t_bits, ob, nb));
+   mir_value_t old_z = mir_build_binary(
+      mu, MIR_VEC_BIT_AND, t_bits,
+      mir_build_unary(mu, MIR_VEC_BIT_NOT, t_bits, oa), ob);
+   mir_value_t new_x = mir_build_binary(mu, MIR_VEC_BIT_AND, t_bits, na, nb);
+   mir_value_t settle = mir_build_binary(mu, MIR_VEC_BIT_AND, t_bits,
+                                         old_z, new_x);
+   mir_value_t real = mir_build_binary(
+      mu, MIR_VEC_BIT_AND, t_bits, diff,
+      mir_build_unary(mu, MIR_VEC_BIT_NOT, t_bits, settle));
+
+   vlog_island_arm_store(g, ip, k, value);
+
+   return mir_build_test(mu, mir_build_unary(mu, MIR_VEC_BIT_OR, t_bits, real));
+}
+
+static void vlog_island_arm_store(vlog_gen_t *g, const island_proc_t *ip,
+                                  uint32_t k, mir_value_t value)
+{
+   mir_type_t t_offset = mir_offset_type(g->mu);
+   mir_type_t type = mir_get_type(g->mu, value);
+   const bool two_state = mir_get_class(g->mu, type) == MIR_TYPE_VEC2;
+   mir_build_island_store(
+      g->mu, g->island_state,
+      mir_const(g->mu, t_offset, ip->arm_snap[k]),
+      mir_const(g->mu, t_offset,
+                two_state ? -1 : (int64_t)(ip->arm_snap[k] + ip->arm_plane[k])),
+      mir_const(g->mu, t_offset, 0), value);
+}
+
+static void vlog_island_arm_set(vlog_gen_t *g, const island_proc_t *ip,
+                                int state)
+{
+   mir_type_t t_offset = mir_offset_type(g->mu);
+   mir_type_t t_vec64 = mir_vec2_type(g->mu, 64, false);
+   mir_build_island_store(g->mu, g->island_state,
+                          mir_const(g->mu, t_offset, ip->arm_off),
+                          mir_const(g->mu, t_offset, -1),
+                          mir_const(g->mu, t_offset, 0),
+                          mir_const_vec(g->mu, t_vec64, state, 0));
+}
+
+static void vlog_island_arm_snapshot(vlog_gen_t *g, const island_proc_t *ip)
+{
+   // At the end of the reset evaluation: the values the event expressions
+   // of a fused always @(...) block have when the simulation starts
+   mir_unit_t *mu = g->mu;
+   mir_type_t t_offset = mir_offset_type(mu);
+
+   mir_value_t *values LOCAL = xmalloc_array(ip->n_arm, sizeof(mir_value_t));
+   if (!vlog_island_arm_values(g, ip, values))
+      return;
+
+   for (uint32_t k = 0; k < ip->n_arm; k++)
+      vlog_island_arm_store(g, ip, k, values[k]);
+
+   // A continuously driven signal with a 0 or 1 bit has an event at time
+   // zero (see fire_init_events)
+   mir_value_t init = mir_const(mu, mir_bool_type(mu), 0);
+   for (uint32_t k = 0; k < ip->n_arm; k++) {
+      if (!ip->arm_init[k])
+         continue;
+
+      mir_type_t type = mir_get_type(mu, values[k]);
+      if (mir_get_class(mu, type) == MIR_TYPE_VEC2) {
+         init = mir_const(mu, mir_bool_type(mu), 1);
+         break;
+      }
+
+      mir_type_t t_bits = mir_vec2_type(mu, mir_get_size(mu, type), false);
+      mir_value_t bbits = mir_build_island_load(
+         mu, t_bits, g->island_state,
+         mir_const(mu, t_offset, ip->arm_snap[k] + ip->arm_plane[k]),
+         mir_const(mu, t_offset, -1), mir_const(mu, t_offset, 0));
+      mir_value_t known = mir_build_unary(mu, MIR_VEC_BIT_NOT, t_bits, bbits);
+      mir_value_t any = mir_build_test(
+         mu, mir_build_unary(mu, MIR_VEC_BIT_OR, t_bits, known));
+      init = mir_build_or(mu, init, any);
+   }
+
+   mir_type_t t_vec64 = mir_vec2_type(mu, 64, false);
+   mir_value_t word = mir_build_select(
+      mu, t_vec64, init,
+      mir_const_vec(mu, t_vec64, ISLAND_ARM_ARMED, 0),
+      mir_const_vec(mu, t_vec64, ISLAND_ARM_WAITING, 0));
+   mir_build_island_store(mu, g->island_state,
+                          mir_const(mu, t_offset, ip->arm_off),
+                          mir_const(mu, t_offset, -1),
+                          mir_const(mu, t_offset, 0), word);
+}
+
+static mir_block_t vlog_island_arm_check(vlog_gen_t *g, const island_proc_t *ip)
+{
+   // Skip a fused always @(...) block until one of its event expressions
+   // has a value different from the one it had when the simulation started
+   // (see island_layout_arm).  Returns the block after the process.
+   mir_unit_t *mu = g->mu;
+   mir_type_t t_offset = mir_offset_type(mu);
+   mir_type_t t_vec64 = mir_vec2_type(mu, 64, false);
+
+   mir_value_t word = mir_build_cast(
+      mu, t_offset,
+      mir_build_island_load(mu, t_vec64, g->island_state,
+                            mir_const(mu, t_offset, ip->arm_off),
+                            mir_const(mu, t_offset, -1),
+                            mir_const(mu, t_offset, 0)));
+   mir_value_t waiting = mir_build_cmp(mu, MIR_CMP_EQ, word,
+                                       mir_const(mu, t_offset,
+                                                 ISLAND_ARM_WAITING));
+
+   mir_block_t check_bb = mir_add_block(mu);
+   mir_block_t arm_bb = mir_add_block(mu);
+   mir_block_t body_bb = mir_add_block(mu);
+   mir_block_t skip_bb = mir_add_block(mu);
+   mir_build_cond(mu, waiting, check_bb, body_bb);
+
+   mir_set_cursor(mu, check_bb, MIR_APPEND);
+   mir_value_t *values LOCAL = xmalloc_array(ip->n_arm, sizeof(mir_value_t));
+   if (vlog_island_arm_values(g, ip, values)) {
+      mir_value_t changed = mir_const(mu, mir_bool_type(mu), 0);
+      for (uint32_t k = 0; k < ip->n_arm; k++) {
+         changed = mir_build_or(mu, changed,
+                                vlog_island_arm_changed(g, ip, k, values[k]));
+
+         // Set by the runtime when an input had an event (RT_ISIG_ARM_EVT)
+         const island_sig_t *s = &(g->island->sigs[ip->arm_sig[k]]);
+         assert(s->arm_evt);
+         mir_value_t evt = mir_build_cast(
+            mu, t_offset,
+            vlog_island_arm_plane(g, t_vec64, s->a_off - 8));
+         changed = mir_build_or(
+            mu, changed,
+            mir_build_cmp(mu, MIR_CMP_NEQ, evt, mir_const(mu, t_offset, 0)));
+      }
+      mir_build_cond(mu, changed, arm_bb, skip_bb);
+   }
+   else
+      mir_build_jump(mu, arm_bb);   // Never WAITING: see the snapshot
+
+   mir_set_cursor(mu, arm_bb, MIR_APPEND);
+   vlog_island_arm_set(g, ip, ISLAND_ARM_ARMED);
+   mir_build_jump(mu, body_bb);
+
+   mir_set_cursor(mu, body_bb, MIR_APPEND);
+   return skip_bb;
+}
+
+static void vlog_island_arm_after_store(vlog_gen_t *g, uint32_t a_off,
+                                        uint32_t stride)
+{
+   // A blocking assignment wakes a block waiting on the variable it
+   // changes even when a later assignment of the same process restores the
+   // old value: compare after each store, so a block that still waits for
+   // its first event sees every intermediate value
+   mir_unit_t *mu = g->mu;
+   mir_type_t t_offset = mir_offset_type(mu);
+   mir_type_t t_vec64 = mir_vec2_type(mu, 64, false);
+   const vlog_island_t *isl = g->island;
+
+   for (uint32_t c = 0; c < isl->ntopo; c++) {
+      const uint32_t pidx = isl->topo_order[c];
+      const island_proc_t *ip = &(isl->procs[pidx]);
+      if (ip->arm_off == 0 || !g->island_fused[pidx]
+          || (int)pidx == g->island_cur_proc)
+         continue;
+
+      vlog_node_t ctrl = vlog_island_event_ctrl(ip->stmt);
+      for (uint32_t k = 0; k < ip->n_arm; k++) {
+         if (isl->sigs[ip->arm_sig[k]].a_off != a_off)
+            continue;
+
+         mir_value_t word = mir_build_cast(
+            mu, t_offset,
+            mir_build_island_load(mu, t_vec64, g->island_state,
+                                  mir_const(mu, t_offset, ip->arm_off),
+                                  mir_const(mu, t_offset, -1),
+                                  mir_const(mu, t_offset, 0)));
+         mir_value_t waiting =
+            mir_build_cmp(mu, MIR_CMP_EQ, word,
+                          mir_const(mu, t_offset, ISLAND_ARM_WAITING));
+
+         mir_block_t check_bb = mir_add_block(mu);
+         mir_block_t arm_bb = mir_add_block(mu);
+         mir_block_t cont_bb = mir_add_block(mu);
+         mir_build_cond(mu, waiting, check_bb, cont_bb);
+
+         mir_set_cursor(mu, check_bb, MIR_APPEND);
+         if (stride != 0) {
+            // A non-blocking assignment of a flip-flop process: each
+            // update is an event when its value differs from the one
+            // before, so the updates of the time step have one when a
+            // value differs from the current one
+            const island_sig_t *s = &(isl->sigs[ip->arm_sig[k]]);
+            mir_type_t t_bits = mir_vec2_type(mu, s->width, false);
+            mir_value_t neq = mir_const(mu, mir_bool_type(mu), 0);
+            if (s->nelems != 1)
+               neq = mir_const(mu, mir_bool_type(mu), 1);
+            else {
+               const unsigned nplanes = s->two_state ? 1 : 2;
+               const uint32_t plane_off[2] = { s->a_off, s->b_off };
+               for (unsigned pl = 0; pl < nplanes; pl++) {
+                  mir_value_t cur =
+                     vlog_island_arm_plane(g, t_bits, plane_off[pl]);
+                  mir_value_t next =
+                     vlog_island_arm_plane(g, t_bits, plane_off[pl] + stride);
+                  neq = mir_build_or(
+                     mu, neq,
+                     mir_build_test(mu, mir_build_binary(mu, MIR_VEC_LOG_NEQ,
+                                                         t_bits, cur, next)));
+               }
+            }
+            mir_block_t evt_bb = mir_add_block(mu);
+            mir_build_cond(mu, neq, evt_bb, cont_bb);
+
+            // The commit sets the signal's event word to one and evaluates
+            // the island (island_commit_domain)
+            mir_set_cursor(mu, evt_bb, MIR_APPEND);
+            assert(s->arm_evt);
+            mir_build_island_store(mu, g->island_state,
+                                   mir_const(mu, t_offset, s->a_off - 8),
+                                   mir_const(mu, t_offset, -1),
+                                   mir_const(mu, t_offset, 0),
+                                   mir_const_vec(mu, t_vec64, 2, 0));
+            mir_build_jump(mu, cont_bb);
+         }
+         else {
+            mir_value_t value =
+               vlog_lower_rvalue(g, vlog_value(vlog_param(ctrl, k)));
+            if (vlog_island_arm_fits(g, ip, k, value))
+               mir_build_cond(mu, vlog_island_arm_changed(g, ip, k, value),
+                              arm_bb, cont_bb);
+            else
+               mir_build_jump(mu, cont_bb);   // Never WAITING
+         }
+
+         mir_set_cursor(mu, arm_bb, MIR_APPEND);
+         vlog_island_arm_set(g, ip, ISLAND_ARM_ARMED);
+         mir_build_jump(mu, cont_bb);
+
+         mir_set_cursor(mu, cont_bb, MIR_APPEND);
+         break;   // One test per block
+      }
+   }
+}
+
 static void vlog_lower_island_comb_proc(vlog_gen_t *g, const island_proc_t *ip,
                                         uint32_t pidx, const uint8_t *ukind)
 {
    vlog_node_t s = ip->stmt;
+   g->island_cur_proc = pidx;
+
+   mir_block_t after_bb = MIR_NULL_BLOCK;
+   if (ip->arm_off != 0)
+      after_bb = vlog_island_arm_check(g, ip);
 
    if (ip->kind == IPROC_ASSIGN)
       vlog_assign_variable(g, vlog_target(s), MIR_NULL_VALUE, vlog_value(s));
@@ -41344,10 +41691,17 @@ static void vlog_lower_island_comb_proc(vlog_gen_t *g, const island_proc_t *ip,
       g->island_proc_id = 0;
    }
 
-   if (mir_block_finished(g->mu, MIR_NULL_BLOCK)) {
+   if (!mir_is_null(after_bb)) {
+      if (!mir_block_finished(g->mu, MIR_NULL_BLOCK))
+         mir_build_jump(g->mu, after_bb);
+      mir_set_cursor(g->mu, after_bb, MIR_APPEND);
+   }
+   else if (mir_block_finished(g->mu, MIR_NULL_BLOCK)) {
       mir_block_t cont = mir_add_block(g->mu);
       mir_set_cursor(g->mu, cont, MIR_APPEND);
    }
+
+   g->island_cur_proc = -1;
 }
 
 static void vlog_lower_island_comb_body(vlog_gen_t *g, const vlog_island_t *isl,
@@ -41567,6 +41921,14 @@ static void vlog_lower_island_comb_body(vlog_gen_t *g, const vlog_island_t *isl,
       c = end;
    }
 
+   if (skip_comb) {
+      for (uint32_t c = 0; c < isl->ntopo; c++) {
+         const uint32_t pidx = isl->topo_order[c];
+         if (fused_proc[pidx] && isl->procs[pidx].arm_off != 0)
+            vlog_island_arm_snapshot(g, &(isl->procs[pidx]));
+      }
+   }
+
    mir_build_return(mu, zero_off);
 }
 
@@ -41603,6 +41965,9 @@ static mir_unit_t *vlog_lower_island_comb_fn_impl(mir_context_t *mc,
       .in_island_comb = true,
       .two_state      = opt_get_int(OPT_TWO_STATE) >= TWO_STATE_ISLANDS,
       .island_spec    = spec,
+      .island         = skip_comb ? NULL : isl,
+      .island_fused   = fused_proc,
+      .island_cur_proc = -1,
    };
 
    const bool need_mid_force = (isl->comb_levels > 1 || isl->comb_sccs > 0);
@@ -41705,6 +42070,9 @@ mir_unit_t *vlog_lower_island_ff_unit(mir_context_t *mc, vlog_node_t body,
       .in_island_ff        = true,
       .two_state           = opt_get_int(OPT_TWO_STATE) >= TWO_STATE_ISLANDS,
       .island_spec         = spec,
+      .island              = isl,
+      .island_fused        = fused_proc,
+      .island_cur_proc     = -1,
    };
 
    uint8_t *ukind LOCAL = xcalloc_array(MAX(dom->nff_procs, 1),

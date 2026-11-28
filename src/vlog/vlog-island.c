@@ -2962,6 +2962,125 @@ static bool sensitivity_covers_reads(analyze_ctx_t *ctx, vlog_node_t ctrl,
    return ok;
 }
 
+vlog_node_t vlog_island_event_ctrl(vlog_node_t s)
+{
+   // The event control of an always @(...) block fused as IPROC_COMB
+   assert(vlog_kind(s) == V_ALWAYS);
+   if (vlog_subkind(s) != V_ALWAYS_PLAIN || vlog_stmts(s) == 0)
+      return NULL;
+
+   vlog_node_t timing = vlog_stmt(s, 0);
+   if (vlog_stmts(s) == 1 && vlog_kind(timing) == V_SEQ_BLOCK
+       && vlog_stmts(timing) > 0)
+      timing = vlog_stmt(timing, 0);
+
+   if (vlog_kind(timing) != V_TIMING)
+      return NULL;
+
+   vlog_node_t ctrl = vlog_value(timing);
+   return vlog_kind(ctrl) == V_EVENT_CONTROL ? ctrl : NULL;
+}
+
+static int island_event_base(analyze_ctx_t *ctx, vlog_node_t ev)
+{
+   // The signal a level event of an always @(...) block selects from
+   if (vlog_kind(ev) != V_EVENT || vlog_has_left(ev)
+       || vlog_subkind(ev) != V_EVENT_LEVEL)
+      return -1;
+
+   vlog_node_t val = vlog_value(ev);
+   while (vlog_kind(val) == V_BIT_SELECT || vlog_kind(val) == V_PART_SELECT
+          || vlog_kind(val) == V_MEMBER_REF)
+      val = vlog_value(val);
+
+   if (vlog_kind(val) == V_REF && vlog_has_ref(val))
+      return find_sig_idx(ctx, vlog_ref(val));
+   else
+      return -1;
+}
+
+static bool island_sig_init_event(analyze_ctx_t *ctx, const vlog_island_t *isl,
+                                  int gs, uint32_t lidx)
+{
+   // A net, an input port and a variable written by a continuous
+   // assignment get their first value from a driver when the simulation
+   // starts (SIG_F_INIT_EVENT)
+   const island_sig_t *s = &(isl->sigs[lidx]);
+   if (vlog_kind(s->decl) == V_NET_DECL || ctx->sigs[gs].is_input_port)
+      return true;
+
+   for (uint32_t i = 0; i < isl->nprocs; i++) {
+      const island_proc_t *ip = &(isl->procs[i]);
+      if (ip->kind != IPROC_ASSIGN)
+         continue;
+      for (uint32_t j = 0; j < ip->nwrites; j++) {
+         if (ip->writes[j] == lidx)
+            return true;
+      }
+   }
+
+   return false;
+}
+
+static void island_layout_arm(analyze_ctx_t *ctx, vlog_island_t *isl,
+                              const int *g_to_l)
+{
+   // Without islands an always @(...) block waits for an event on its
+   // event control before it first runs, so its outputs keep their initial
+   // values until then.  The island comb function runs every fused block
+   // whenever the island is evaluated: give each such block a state word
+   // and a copy of the value of each event expression when the simulation
+   // started, and let it run only once one of them changed (after that,
+   // running it again with unchanged inputs changes nothing)
+   uint32_t offset = ALIGN_UP(isl->state_bytes, 8u), tmp_bytes = 0;
+   for (uint32_t i = 0; i < isl->nprocs; i++) {
+      island_proc_t *ip = &(isl->procs[i]);
+      if (ip->kind != IPROC_COMB)
+         continue;
+
+      vlog_node_t ctrl = vlog_island_event_ctrl(ip->stmt);
+      if (ctrl == NULL)
+         continue;
+
+      const unsigned np = vlog_params(ctrl);
+      int *lidx LOCAL = xmalloc_array(MAX(np, 1u), sizeof(int));
+      int *gidx LOCAL = xmalloc_array(MAX(np, 1u), sizeof(int));
+      bool ok = np > 0;
+      for (unsigned k = 0; k < np && ok; k++) {
+         const int gs = island_event_base(ctx, vlog_param(ctrl, k));
+         gidx[k] = gs;
+         lidx[k] = gs >= 0 ? g_to_l[gs] : -1;
+         ok = lidx[k] >= 0 && isl->sigs[lidx[k]].arm_evt;
+      }
+
+      if (!ok)
+         continue;   // Runs whenever the island is evaluated
+
+      ip->arm_off = offset;
+      offset += 8u;
+      ip->n_arm = np;
+      ip->arm_snap = xmalloc_array(np, sizeof(uint32_t));
+      ip->arm_plane = xmalloc_array(np, sizeof(uint32_t));
+      ip->arm_sig = xmalloc_array(np, sizeof(uint32_t));
+      ip->arm_init = xmalloc_array(np, sizeof(bool));
+      for (unsigned k = 0; k < np; k++) {
+         const island_sig_t *sig = &(isl->sigs[lidx[k]]);
+         const uint32_t plane = sig->nwords * sig->nelems * 8u;
+         ip->arm_snap[k] = offset;
+         ip->arm_plane[k] = plane;
+         ip->arm_sig[k] = lidx[k];
+         ip->arm_init[k] = island_sig_init_event(ctx, isl, gidx[k], lidx[k]);
+         offset += 2u * plane;
+         tmp_bytes = MAX(tmp_bytes, 2u * plane);
+      }
+   }
+
+   for (uint32_t i = 0; i < isl->nprocs; i++)
+      isl->procs[i].arm_tmp = offset;
+
+   isl->state_bytes = offset + tmp_bytes;
+}
+
 static void check_always_proc(analyze_ctx_t *ctx, proc_meta_t *pm,
                               vlog_node_t s)
 {
@@ -4360,6 +4479,21 @@ static vlog_island_t *build_island(analyze_ctx_t *ctx, uint32_t island_id)
       }
    }
 
+   // Signals an always @(...) block of the island waits for get a word
+   // before their value which the runtime sets when an input has an event
+   // (see island_layout_arm)
+   for (uint32_t i = 0; i < p_indices.count; i++) {
+      const proc_meta_t *pm = &(ctx->procs[p_indices.items[i]]);
+      vlog_node_t ctrl = NULL;
+      if (pm->kind == IPROC_COMB && vlog_kind(pm->stmt) == V_ALWAYS)
+         ctrl = vlog_island_event_ctrl(pm->stmt);
+      for (unsigned k = 0; ctrl != NULL && k < vlog_params(ctrl); k++) {
+         const int gs = island_event_base(ctx, vlog_param(ctrl, k));
+         if (gs >= 0 && g_to_l[gs] >= 0)
+            isl->sigs[g_to_l[gs]].arm_evt = true;
+      }
+   }
+
    // Compute flat island_state_t layout offsets (dirty_out_mask header + a/b planes)
    const uint32_t dirty_words = MAX(1u, (isl->n_boundary_out + 63u) / 64u);
    isl->header_bytes = dirty_words * 8u;
@@ -4368,6 +4502,8 @@ static vlog_island_t *build_island(analyze_ctx_t *ctx, uint32_t island_id)
    for (uint32_t i = 0; i < isl->nsigs; i++) {
       island_sig_t *dst = &(isl->sigs[i]);
       const uint32_t plane_bytes = dst->nwords * dst->nelems * 8u;
+      if (dst->arm_evt)
+         offset += 8u;
       dst->a_off = offset;
       offset += plane_bytes;
       if (!dst->two_state) {
@@ -4474,6 +4610,8 @@ static vlog_island_t *build_island(analyze_ctx_t *ctx, uint32_t island_id)
 
    isl->ndomains = doms.count;
    isl->domains = doms.items;
+
+   island_layout_arm(ctx, isl, g_to_l);
 
    find_island_copies(ctx, isl, l_sigs.items, p_indices.items);
 
@@ -4582,6 +4720,10 @@ void vlog_island_plan_free(vlog_island_plan_t *plan)
       for (uint32_t j = 0; j < isl->nprocs; j++) {
          free(isl->procs[j].reads);
          free(isl->procs[j].writes);
+         free(isl->procs[j].arm_snap);
+         free(isl->procs[j].arm_plane);
+         free(isl->procs[j].arm_sig);
+         free(isl->procs[j].arm_init);
       }
       for (uint32_t j = 0; j < isl->ndomains; j++)
          free(isl->domains[j].ff_procs);

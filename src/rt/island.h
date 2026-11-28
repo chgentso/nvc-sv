@@ -57,6 +57,7 @@ typedef enum {
    RT_ISIG_DIRECT_PUB     = (1u << 28),   // Direct source also published
    RT_ISIG_CLK_FANOUT     = (1u << 29),   // Leader copy of a clock copy group
    RT_ISIG_SPEC_FB        = (1u << 30),   // SV: kept to undo a variant call
+   RT_ISIG_ARM_EVT        = (1u << 31),   // Event word before a_off
 } rt_island_sig_flags_t;
 
 // Speculative Mode A clean tracking (NVC_ISLAND_SPEC).  The Mode A state of
@@ -296,6 +297,8 @@ typedef struct _rt_island_domain {
    rt_island_ff_desc_t      *ff_descs;
    uint32_t                 *glitch_resets;   // Unobserved NBA log offsets
    uint32_t                  n_glitch_resets;
+   uint32_t                 *arm_words;       // RT_ISIG_ARM_EVT words
+   uint32_t                  n_arm_words;
    uint32_t                  n_write_sigs;
    uint32_t                  cap_write_sigs;
    rt_watch_t               *clk_watch;
