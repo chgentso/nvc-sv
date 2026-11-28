@@ -6116,6 +6116,8 @@ static void island_spec_rt_report(rt_island_mgr_t *mgr)
    uint32_t n_var = 0, n_ever = 0, n_a = 0, n_pinned = 0;
    uint32_t n_a_held = 0, n_held = 0, n_rows = 0, n_cost = 0;
    uint64_t cost_pins = 0, hold_waits = 0;
+   uint32_t n_sv = 0, n_sv_ever = 0, n_sv_a = 0, n_sv_ah = 0, sv_fb = 0;
+   uint64_t sv_checked = 0, sv_unchecked = 0;
    for (unsigned i = 0; i < mgr->islands.count; i++) {
       const rt_island_t *isl = mgr->islands.items[i];
       const rt_island_spec_t *sp = isl->spec;
@@ -6146,19 +6148,36 @@ static void island_spec_rt_report(rt_island_mgr_t *mgr)
          n_held += sp->n_held;
          n_rows += sp->n_held_rows;
       }
+      if (sp->sv) {
+         n_sv++;
+         n_sv_ever += sp->promotions > 0;
+         n_sv_a += isl->spec_a && !sp->checks;
+         n_sv_ah += isl->spec_a && sp->checks;
+         sv_checked += sp->sv_checked;
+         sv_unchecked += sp->sv_unchecked;
+         sv_fb += sp->n_fb_sigs;
+      }
       if (atoi(env) >= 2 || env[0] == '/')
          fprintf(f, "ISLAND_SPEC_RT: island=%u mode=%c promotions=%"PRIu64
                  " deopts=%u unclean=%"PRIu64" row=%"PRIu64" held=%u"
                  " held_rows=%u holds=%"PRIu64" unholds=%"PRIu64
                  " ticks_a=%"PRIu64"%s%s scope=%s\n", isl->isl_id,
-                 isl->spec_a ? 'A' : 'B', sp->promotions, sp->n_deopt,
+                 !isl->spec_a ? 'B' : (sp->sv && sp->checks) ? 'H' : 'A',
+                 sp->promotions, sp->n_deopt,
                  sp->deopts[RT_ISLAND_DEOPT_UNCLEAN],
                  sp->deopts[RT_ISLAND_DEOPT_ROW], isl->spec_a ? sp->n_held : 0,
                  isl->spec_a ? sp->n_held_rows : 0, sp->holds, sp->unholds,
                  ta, sp->pinned ? " pinned=" : "",
                  sp->pinned ? names[sp->pin_reason] : "",
                  isl->root_scope != NULL ? istr(isl->root_scope->name) : "?");
-
+      if (sp->sv && (atoi(env) >= 2 || env[0] == '/'))
+         fprintf(f, "ISLAND_SPEC_RT:   sv island=%u xstore=%"PRIu64
+                 " put=%"PRIu64" stress=%"PRIu64" to_checked=%"PRIu64
+                 " to_unchecked=%"PRIu64" fb_words=%u\n", isl->isl_id,
+                 sp->deopts[RT_ISLAND_DEOPT_XSTORE],
+                 sp->deopts[RT_ISLAND_DEOPT_PUT],
+                 sp->deopts[RT_ISLAND_DEOPT_STRESS], sp->sv_checked,
+                 sp->sv_unchecked, sp->n_fb_sigs);
       if (isl->spec_a && sp->n_held > 0
           && (atoi(env) >= 2 || env[0] == '/')) {
          // Signals held as Mode B bytes
@@ -6195,7 +6214,11 @@ static void island_spec_rt_report(rt_island_mgr_t *mgr)
       fprintf(f, " %s=%"PRIu64, names[k], pins[k]);
    fprintf(f, "\nISLAND_SPEC_RT: cost pinned_by_cost=%u cost_pins=%"PRIu64
            " hold_waits=%"PRIu64, n_cost, cost_pins, hold_waits);
-
+   if (n_sv > 0)
+      fprintf(f, "\nISLAND_SPEC_RT: sv variants=%u promoted=%u in_a=%u"
+              " in_ah=%u to_checked=%"PRIu64" to_unchecked=%"PRIu64
+              " fb_words=%u", n_sv, n_sv_ever, n_sv_a, n_sv_ah, sv_checked,
+              sv_unchecked, sv_fb);
    fprintf(f, "\nISLAND_SPEC_RT: in_a_at_tick");
    for (uint32_t k = 0; k < mgr->n_spec_timeline; k++)
       fprintf(f, " %"PRIu64":%u", UINT64_C(1) << k, mgr->spec_timeline[k]);

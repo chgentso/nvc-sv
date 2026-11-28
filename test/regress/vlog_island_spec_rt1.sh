@@ -172,7 +172,7 @@ nvc --work=w_s -a spec1.sv
 nvc --work=w_s -e spec1
 for mode in "" NVC_ISLAND_SPEC_FORCE=A NVC_ISLAND_SPEC_STRESS=3 \
             NVC_ISLAND_SPEC_HOLD_WAIT=0 NVC_ISLAND_ACT_CHECK=1; do
-    env $mode NVC_ISLAND_SPEC_STATS=1 nvc --work=w_s -r --wave=s.vcd \
+    env $mode NVC_ISLAND_SPEC_STATS=2 nvc --work=w_s -r --wave=s.vcd \
         --format=vcd spec1 2>&1 | nodebug > s_raw.log
     grep -v '^ISLAND_SPEC' s_raw.log > s.log
     diff -u off.log s.log
@@ -196,3 +196,12 @@ grep -q '^ISLAND_SPEC_RT: ticks=[0-9]* variants=9 promoted=9 ' \
 grep -q '^ISLAND_SPEC_RT: deopts .* unclean=[1-9][0-9]* .*xstore=[1-9]' \
      s_NVC_ISLAND_SPEC_FORCE=A.log
 grep -q '^ISLAND_SPEC_RT: pinned .* put=1 ' s_default.log
+# Statistics of SV islands: deopts by reason per island, switches between
+# "$a" and "$ah" (an x input switched a "$a" island to "$ah"), islands
+# running "$ah" (mode=H) at the end
+grep -q '^ISLAND_SPEC_RT: sv variants=9 promoted=[1-9] .* to_checked=[1-9]' \
+     s_default.log
+grep -q '^ISLAND_SPEC_RT:   sv island=[0-9]* xstore=[1-9]' s_default.log
+grep -q '^ISLAND_SPEC_RT: sv variants=9 promoted=9 in_a=[1-9] in_ah=[1-9] .* to_unchecked=[1-9]' \
+     s_NVC_ISLAND_SPEC_FORCE=A.log
+grep -q '^ISLAND_SPEC_RT: island=[0-9]* mode=H ' s_NVC_ISLAND_SPEC_FORCE=A.log
