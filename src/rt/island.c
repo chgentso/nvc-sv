@@ -1995,6 +1995,27 @@ void rt_island_set_variant_a(void *handle, jit_handle_t eval_handle,
 {
    rt_island_t *isl = handle;
    assert(isl->spec == NULL);
+
+   if (state_bytes == 0) {
+      // SystemVerilog island: the variants use the four-state layout
+      assert(isl->sparse_log_off == 0);
+      rt_island_spec_t *sp = xcalloc(sizeof(rt_island_spec_t));
+      sp->sv = true;
+      sp->eval_handle = eval_handle;
+      sp->eval_handle_h = eval_handle_h;
+      sp->state_bytes = isl->state_bytes;
+      sp->stride = RT_ISLAND_STRIDE(isl->state_bytes);
+      if (isl->ndomains > 0) {
+         sp->ff_handles = xmalloc_array(isl->ndomains, sizeof(jit_handle_t));
+         sp->ff_handles_h = xmalloc_array(isl->ndomains,
+                                          sizeof(jit_handle_t));
+         for (uint32_t d = 0; d < isl->ndomains; d++)
+            sp->ff_handles[d] = sp->ff_handles_h[d] = JIT_HANDLE_INVALID;
+      }
+      isl->spec = sp;
+      return;
+   }
+
    assert(hdr_bytes <= state_bytes);
    assert((sparse_log_off == 0) == (isl->sparse_log_off == 0));
 
@@ -2158,6 +2179,10 @@ void rt_island_spec_unpack(const rt_island_t *isl, const uint8_t *a_state,
 static void island_spec_setup(rt_island_t *isl)
 {
    rt_island_spec_t *sp = isl->spec;
+   if (sp != NULL && sp->sv) {
+      sp->force_sv = island_spec_force_a();
+      return;
+   }
    if (sp == NULL || !island_spec_force_a() || sp->sparse_log_off > 0)
       return;
 
@@ -2184,6 +2209,8 @@ static void island_spec_free(rt_island_t *isl)
    free(sp->x_off);
    free(sp->held_list);
    free(sp->buf);
+   free(sp->fb_sigs);
+   free(sp->fb_buf);
    free(sp);
    isl->spec = NULL;
 }
@@ -2885,7 +2912,17 @@ static bool island_spec_unhold(rt_island_t *isl, uint32_t i,
 static inline bool island_spec_bytes_clean(const uint8_t *p, size_t n,
                                            uint8_t zero);
 
+static void island_sync_in_sig_raw(rt_island_t *isl, const rt_island_sig_t *s);
+static inline void island_spec_sv_check_in(rt_island_t *isl,
+                                           const rt_island_sig_t *s);
+
 static void island_sync_in_sig(rt_island_t *isl, const rt_island_sig_t *s)
+{
+   island_sync_in_sig_raw(isl, s);
+   island_spec_sv_check_in(isl, s);
+}
+
+static void island_sync_in_sig_raw(rt_island_t *isl, const rt_island_sig_t *s)
 {
    if (unlikely(s->flags & RT_ISIG_SPEC_A)
        && (s->flags & (RT_ISIG_TWO_STATE | RT_ISIG_SPEC_HELD))) {
@@ -4136,6 +4173,8 @@ static inline bool island_commit_desc_buf(rt_island_t *isl,
    return island_commit_words(isl, d);
 }
 
+static void island_spec_sv_unclean_in(rt_island_t *isl);
+
 static inline bool island_copy_direct_sig_same(const rt_island_sig_t *src_s,
                                                rt_island_sig_t *dst_s)
 {
@@ -4176,6 +4215,8 @@ static inline bool island_copy_direct_sig_same(const rt_island_sig_t *src_s,
          changed = true;
       }
    }
+   if (changed)
+      island_spec_sv_check_in(dst_isl, dst_s);
    return changed;   // Four-state: never a VHDL island signal
 }
 
@@ -4190,12 +4231,52 @@ static inline bool island_copy_direct_sig(const rt_island_sig_t *src_s,
    return island_copy_direct_sig_same(src_s, dst_s);
 }
 
+// A four-state direct wire into an SV island with variants (flagged as a
+// Mode A <-> Mode B wire to stay off the common path): a value with an
+// unknown bit makes a "$a" island run "$ah".  DD->dst_isl is the target
+// island; RT_IDIR_NOWAKE when its comb function does not read the signal.
+static inline bool island_copy_direct_desc_sv(const rt_island_direct_desc_t *dd)
+{
+   const uint64_t *sa = (const uint64_t *)dd->src_a;
+   const uint64_t *sb = (const uint64_t *)dd->src_b;
+   uint64_t *da = (uint64_t *)dd->dst_a;
+   uint64_t *db = (uint64_t *)dd->dst_b;
+   const uint32_t count = dd->count;
+   bool changed = false;
+   uint64_t unk = 0;
+   if (likely(count == 1)) {
+      const uint64_t a = sa[0], b = sb[0];
+      if (da[0] != a || db[0] != b) {
+         da[0] = a;
+         db[0] = b;
+         changed = true;
+      }
+      unk = b;
+   }
+   else {
+      for (uint32_t i = 0; i < count; i++) {
+         const uint64_t a = sa[i], b = sb[i];
+         if (da[i] != a || db[i] != b) {
+            da[i] = a;
+            db[i] = b;
+            changed = true;
+         }
+         unk |= b;
+      }
+   }
+   if (unlikely(unk != 0) && (dd->dst_isl->spec_sv & RT_ISLAND_SPEC_SV_A))
+      island_spec_sv_unclean_in(dd->dst_isl);
+   return changed && !(dd->flags & RT_IDIR_NOWAKE);
+}
+
 static inline bool island_copy_direct_desc(const rt_island_direct_desc_t *dd)
 {
    if (likely(dd->flags & RT_IDIR_STD_LOGIC9)) {
       // A wire between a Mode A and a Mode B island is a VHDL one too
       if (unlikely(dd->flags & RT_IDIR_MIX))
-         return island_spec_copy_mixed(dd->mix_src, dd->mix_dst);
+         return (dd->flags & RT_IDIR_SPEC_SV)
+            ? island_copy_direct_desc_sv(dd)
+            : island_spec_copy_mixed(dd->mix_src, dd->mix_dst);
       return island_commit_bytes(dd->dst_a, dd->src_a, dd->count);
    }
 
@@ -4603,6 +4684,14 @@ static void island_refresh_direct_comb_descs(rt_island_t *isl)
             dd->mix_src = src_s;
             dd->mix_dst = dst_s;
          }
+         if (!(dd->flags & (RT_IDIR_STD_LOGIC9 | RT_IDIR_TWO_STATE))
+             && disl->spec != NULL && disl->spec->sv && !disl->spec->pinned) {
+            assert(!(dd->flags & RT_IDIR_ACT));
+            dd->flags |= RT_IDIR_STD_LOGIC9 | RT_IDIR_MIX | RT_IDIR_SPEC_SV;
+            if (dd->dst_isl == NULL)
+               dd->flags |= RT_IDIR_NOWAKE;
+            dd->dst_isl = disl;
+         }
          if (dst_s->flags & RT_ISIG_ACT) {
             assert(dst_s->sig_idx < (UINT32_C(1) << (32 - RT_IDIR_IDX_SHIFT)));
             dd->flags |= RT_IDIR_ACT | (dst_s->sig_idx << RT_IDIR_IDX_SHIFT);
@@ -4782,7 +4871,7 @@ static void island_spec_trace(rt_island_t *isl, const char *what, int arg)
 {
    static const char *names[RT_ISLAND_DEOPT_COUNT] = {
       "none", "literal", "range", "conv", "report", "state", "input",
-      "put", "stress", "unclean", "row", "novar"
+      "put", "stress", "unclean", "row", "novar", "xstore"
    };
    unsigned deltas = 0;
    const uint64_t now = model_now(isl->model, &deltas);
@@ -5118,13 +5207,19 @@ static void island_spec_log_to_b(rt_island_t *isl, uint8_t *b)
    }
 }
 
+static void island_spec_demoted(rt_island_t *isl, rt_island_deopt_t why);
+static void island_spec_sv_demote(rt_island_t *isl, rt_island_deopt_t why);
+
 // Convert a Mode A island back to Mode B: always allowed outside a call of
 // its functions, changes no value and schedules nothing
 static void island_spec_demote(rt_island_t *isl, rt_island_deopt_t why)
 {
    rt_island_spec_t *sp = isl->spec;
-   rt_island_mgr_t *mgr = isl->mgr;
    assert(isl->spec_a);
+   if (sp->sv) {
+      island_spec_sv_demote(isl, why);
+      return;
+   }
 
    const uint32_t stride_a = sp->stride;
    const size_t total = isl->total_state_bytes;
@@ -5150,17 +5245,27 @@ static void island_spec_demote(rt_island_t *isl, rt_island_deopt_t why)
    island_spec_set_layout(isl, false);
    memcpy(isl->state, tmp, nbytes);
 
+   sp->n_held = 0;
+   island_spec_rebuild(isl);
+   island_spec_demoted(isl, why);
+}
+
+// Statistics and back-off after island ISL went back to Mode B for WHY
+static void island_spec_demoted(rt_island_t *isl, rt_island_deopt_t why)
+{
+   rt_island_spec_t *sp = isl->spec;
+   rt_island_mgr_t *mgr = isl->mgr;
+
    sp->deopts[why]++;
    if (unlikely(mgr->spec_trace))
       island_spec_trace(isl, "deopt", why);
    const uint64_t ran_a = mgr->spec_tick - sp->tick_promoted;
    sp->ticks_a += ran_a;
-   sp->n_held = 0;
    mgr->spec_n_a--;
-   island_spec_rebuild(isl);
 
-   if (why == RT_ISLAND_DEOPT_STRESS) {
+   if (why == RT_ISLAND_DEOPT_STRESS || sp->force_sv) {
       sp->next_check = mgr->spec_tick + 1;
+      mgr->spec_next = MIN(mgr->spec_next, sp->next_check);
       return;
    }
    if (why == RT_ISLAND_DEOPT_NOVAR) {
@@ -5319,6 +5424,30 @@ static void island_spec_pin_sig(rt_island_mgr_t *mgr, rt_signal_t *sig,
       island_spec_pin(s->isl, why);
 }
 
+// A deposit, VPI value write or force (IS_FORCE) of SIG is about to change
+// the state of its islands.  A VHDL island and a forced one stay in Mode B.
+// A deposit only changes the value of an SV island signal: one the island
+// writes goes back to Mode B (with back-off), and the write itself makes a
+// "$a" island run "$ah" if the value is not all 0/1 (island_write_bits_slice
+// and island_sync_in_sig), as for an input.
+static void island_spec_put_sig(rt_island_mgr_t *mgr, rt_signal_t *sig,
+                                bool is_force)
+{
+   if (mgr->sig_map == NULL)
+      return;
+   for (rt_island_sig_t *s = hash_get(mgr->sig_map, sig); s != NULL;
+        s = s->next_owner) {
+      rt_island_t *isl = s->isl;
+      if (isl->spec == NULL)
+         continue;
+      else if (!isl->spec->sv || is_force)
+         island_spec_pin(isl, RT_ISLAND_DEOPT_PUT);
+      else if (isl->spec_a
+               && (s->flags & (RT_ISIG_COMB_WRITTEN | RT_ISIG_FF_WRITTEN)))
+         island_spec_demote(isl, RT_ISLAND_DEOPT_PUT);
+   }
+}
+
 // Commit of domain DOM of a Mode A island with held signals: a held signal
 // the flip-flop function stored a whole value into (its request byte is
 // set, RT_ISLAND_SPEC_REQ_OFF) is packed again, its current words set to
@@ -5363,26 +5492,38 @@ static void island_spec_whole_read(rt_island_t *isl, rt_island_sig_t *s)
    island_spec_demote(isl, RT_ISLAND_DEOPT_ROW);
 }
 
-static bool island_spec_try_promote(rt_island_t *isl)
+// No flip-flop commit of island ISL is pending and nothing forces it: its
+// functions can be switched
+static bool island_spec_safe(const rt_island_t *isl)
 {
-   rt_island_spec_t *sp = isl->spec;
-   rt_island_mgr_t *mgr = isl->mgr;
-
    bool safe = !isl->has_forces && isl->pending_vhdl_ff == 0;
    for (uint32_t d = 0; d < isl->ndomains && safe; d++) {
       const rt_island_domain_t *dom = &(isl->domains[d]);
       safe = dom->ff_dirty_mask == 0 && !dom->in_commit_q
          && (dom->super_dom == NULL || !dom->super_dom->in_commit_q);
    }
-   if (safe && sp->sparse_log_off > 0) {
+   if (safe && isl->spec->sparse_log_off > 0) {
       const rt_island_sparse_log_t *lb =
          (const rt_island_sparse_log_t *)(isl->state + isl->sparse_log_off);
       safe = lb->count == 0 && isl->n_sparse_ovf == 0;
    }
-   if (!safe) {
+   return safe;
+}
+
+static bool island_spec_sv_try_promote(rt_island_t *isl);
+static void island_spec_sv_recheck(rt_island_t *isl);
+
+static bool island_spec_try_promote(rt_island_t *isl)
+{
+   rt_island_spec_t *sp = isl->spec;
+   rt_island_mgr_t *mgr = isl->mgr;
+
+   if (!island_spec_safe(isl)) {
       sp->next_check = mgr->spec_tick + 1;
       return false;
    }
+   if (sp->sv)
+      return island_spec_sv_try_promote(isl);
 
    // Every signal whose value is not all '0'/'1' is held (or, for an
    // internal 2D signal, its rows that are not): the Mode A functions
@@ -5458,8 +5599,16 @@ static void island_spec_sweep(rt_island_mgr_t *mgr)
       if (isl->spec_a) {
          if (stress > 0 && tick % stress == 0)
             island_spec_demote(isl, RT_ISLAND_DEOPT_STRESS);
-         else
+         else {
+            if (sp->sv && sp->checks) {
+               // "$ah": back to "$a" once the state is all 0/1
+               if (tick >= sp->next_check)
+                  island_spec_sv_recheck(isl);
+               if (isl->spec_a && sp->checks)
+                  next = MIN(next, sp->next_check);
+            }
             continue;
+         }
       }
       if (tick >= sp->next_check)
          island_spec_try_promote(isl);
@@ -5629,6 +5778,210 @@ static bool island_spec_copy_mixed(const rt_island_sig_t *src_s,
    return true;
 }
 
+////////////////////////////////////////////////////////////////////////////////
+// Speculative variants of SystemVerilog islands
+//
+// An SV island elaborated with NVC_ISLAND_SPEC=1 can carry two two-state
+// variants of its functions (vlog_island_read in vlog-lower.c) that use the
+// four-state layout of its state: "$a" loads the value bits of a four-state
+// signal and takes its unknown bits as zero, "$ah" also checks that they are
+// zero and returns RT_ISLAND_DEOPT_UNCLEAN when one is not.  Both compute
+// every other value with the four-state operations and store both planes,
+// and "$a" returns RT_ISLAND_DEOPT_XSTORE instead of storing a value that is
+// not all 0/1.  A switch therefore converts nothing and changes no value:
+// the island runs "$a" while the unknown bits of every live four-state
+// signal in its state are zero (RT_ISLAND_SPEC_SV_A), "$ah" while some may
+// not be, and its four-state functions otherwise.  A value with an unknown
+// bit that enters a "$a" island (input sync, direct wire) makes it run
+// "$ah", and a sweep switches it back once its state is all 0/1 again.
+// Forces, deposits and releases pin the island as for VHDL.  A call that
+// returns a deopt code is undone and made again with the four-state
+// function in the same delta: a comb call gets back the values of the
+// signals it may read after writing them (RT_ISIG_SPEC_FB, kept before
+// each call), a flip-flop call loses its next-state writes and logs.
+
+// The unknown bits of signal S in the state half BASE are all zero
+static inline bool island_spec_sv_sig_clean(const rt_island_sig_t *s,
+                                            const uint8_t *base)
+{
+   if (s->flags & RT_ISIG_TWO_STATE)
+      return true;
+   const uint64_t *b = (const uint64_t *)(base + s->b_off);
+   const size_t n = (size_t)s->nwords * s->nelems;
+   uint64_t any = 0;
+   for (size_t i = 0; i < n; i++)
+      any |= b[i];
+   return any == 0;
+}
+
+// Live four-state signals of SV island ISL with an unknown bit
+static uint32_t island_spec_sv_unclean(const rt_island_t *isl)
+{
+   uint32_t n = 0;
+   for (uint32_t i = 0; i < isl->nsigs; i++) {
+      const rt_island_sig_t *s = &(isl->sigs[i]);
+      if (island_spec_sig_live(s) && !island_spec_sv_sig_clean(s, isl->state))
+         n++;
+   }
+   return n;
+}
+
+static void island_spec_sv_set_mode(rt_island_t *isl, bool checks)
+{
+   rt_island_spec_t *sp = isl->spec;
+   sp->checks = checks;
+   isl->spec_sv = (checks ? 0 : RT_ISLAND_SPEC_SV_A)
+      | (sp->n_fb_sigs > 0 ? RT_ISLAND_SPEC_SV_FB : 0);
+   island_spec_set_handles(isl);
+}
+
+static bool island_spec_sv_try_promote(rt_island_t *isl)
+{
+   rt_island_spec_t *sp = isl->spec;
+   rt_island_mgr_t *mgr = isl->mgr;
+
+   const uint32_t n_unclean = island_spec_sv_unclean(isl);
+   if (n_unclean == 0)
+      sp->unclean_since = 0;
+   else if (!sp->force_sv && island_spec_stress_n() == 0) {
+      // As island_spec_try_promote: values not 0/1 just after time zero
+      // mostly clear when reset ends
+      const uint64_t tick = mgr->spec_tick, wait = island_spec_hold_wait();
+      if (sp->unclean_since == 0)
+         sp->unclean_since = tick + 1;
+      const uint64_t waited = tick + 1 - sp->unclean_since;
+      if (waited < wait) {
+         sp->hold_waits++;
+         sp->check_ival = MIN(MAX(sp->check_ival, 16u) * 2u, wait);
+         sp->next_check = tick + MIN(sp->check_ival, wait - waited);
+         return false;
+      }
+   }
+
+   isl->spec_a = true;
+   island_spec_sv_set_mode(isl, n_unclean > 0);
+   sp->promotions++;
+   if (unlikely(mgr->spec_trace))
+      island_spec_trace(isl, "promote", n_unclean);
+   sp->tick_promoted = mgr->spec_tick;
+   sp->n_held = n_unclean;
+   sp->holds += n_unclean;
+   sp->check_ival = 16;
+   sp->next_check = mgr->spec_tick + sp->check_ival;
+   mgr->spec_n_a++;
+   return true;
+}
+
+// A "$ah" island at a sweep: "$a" when its state is all 0/1
+static void island_spec_sv_recheck(rt_island_t *isl)
+{
+   rt_island_spec_t *sp = isl->spec;
+   rt_island_mgr_t *mgr = isl->mgr;
+   assert(isl->spec_a && sp->checks);
+
+   if (island_spec_safe(isl) && island_spec_sv_unclean(isl) == 0) {
+      island_spec_sv_set_mode(isl, false);
+      sp->sv_unchecked++;
+      sp->n_held = 0;
+      sp->check_ival = 16;
+      return;
+   }
+   sp->check_ival = MIN(MAX(sp->check_ival, 16u) * 2u, ISLAND_SPEC_MAX_IVAL);
+   sp->next_check = mgr->spec_tick + sp->check_ival;
+}
+
+static void island_spec_sv_demote(rt_island_t *isl, rt_island_deopt_t why)
+{
+   rt_island_spec_t *sp = isl->spec;
+   isl->spec_a = false;
+   isl->spec_sv = 0;
+   sp->checks = false;
+   sp->n_held = 0;
+   island_spec_set_handles(isl);
+   island_spec_demoted(isl, why);
+}
+
+// A value with an unknown bit entered "$a" island ISL: run "$ah"
+__attribute__((noinline))
+static void island_spec_sv_unclean_in(rt_island_t *isl)
+{
+   rt_island_spec_t *sp = isl->spec;
+   rt_island_mgr_t *mgr = isl->mgr;
+   assert(isl->spec_a && sp->sv && !sp->checks);
+   island_spec_sv_set_mode(isl, true);
+   sp->sv_checked++;
+   sp->check_ival = 16;
+   sp->next_check = mgr->spec_tick + sp->check_ival;
+   mgr->spec_next = MIN(mgr->spec_next, sp->next_check);
+}
+
+static inline void island_spec_sv_check_in(rt_island_t *isl,
+                                           const rt_island_sig_t *s)
+{
+   if (unlikely(isl->spec_sv & RT_ISLAND_SPEC_SV_A)
+       && !island_spec_sv_sig_clean(s, isl->state))
+      island_spec_sv_unclean_in(isl);
+}
+
+// Before a call of a comb variant of ISL (RT_ISLAND_SPEC_SV_FB): the words
+// of the RT_ISIG_SPEC_FB signals
+static void island_spec_sv_save(rt_island_t *isl)
+{
+   const rt_island_spec_t *sp = isl->spec;
+   uint64_t *buf = (uint64_t *)sp->fb_buf;
+   for (uint32_t k = 0; k < sp->n_fb_sigs; k++)
+      buf[k] = unaligned_load(isl->state + sp->fb_sigs[k], uint64_t);
+}
+
+static void island_spec_sv_restore(rt_island_t *isl)
+{
+   const rt_island_spec_t *sp = isl->spec;
+   const uint64_t *buf = (const uint64_t *)sp->fb_buf;
+   for (uint32_t k = 0; k < sp->n_fb_sigs; k++)
+      memcpy(isl->state + sp->fb_sigs[k], &(buf[k]), sizeof(uint64_t));
+}
+
+static inline uint64_t *island_glitch_log(rt_island_t *isl,
+                                          const rt_island_sig_t *s);
+
+// A flip-flop variant of DOM returned a deopt code: drop what it wrote
+// into the next state (outside a call the next state of the signals a
+// domain writes equals the state and their logs are empty)
+static void island_spec_sv_ff_undo(rt_island_domain_t *dom)
+{
+   rt_island_t *isl = dom->isl;
+   for (uint32_t j = 0; j < dom->n_write_sigs; j++) {
+      const rt_island_sig_t *s = &(isl->sigs[dom->write_sigs[j]]);
+      island_copy_sig_buf(isl->next_state, isl->state, s);
+      if (s->flags & RT_ISIG_TOUCH_LOG)
+         *island_touch_log(isl, s) = 0;
+      if (s->flags & RT_ISIG_GLITCH_LOG)
+         *island_glitch_log(isl, s) = 0;
+   }
+}
+
+static void island_spec_sv_rt_setup(rt_island_t *isl)
+{
+   // fb_sigs holds the byte offset of each word to keep
+   rt_island_spec_t *sp = isl->spec;
+   A(uint32_t) offs = AINIT;
+   for (uint32_t i = 0; i < isl->nsigs; i++) {
+      const rt_island_sig_t *s = &(isl->sigs[i]);
+      if (!(s->flags & RT_ISIG_SPEC_FB))
+         continue;
+      const uint32_t nw = s->nwords * s->nelems;
+      for (uint32_t w = 0; w < nw; w++) {
+         APUSH(offs, s->a_off + w * 8u);
+         if (!(s->flags & RT_ISIG_TWO_STATE))
+            APUSH(offs, s->b_off + w * 8u);
+      }
+   }
+   sp->fb_sigs = offs.items;
+   sp->n_fb_sigs = offs.count;
+   if (sp->n_fb_sigs > 0)
+      sp->fb_buf = xmalloc_array(sp->n_fb_sigs, sizeof(uint64_t));
+}
+
 static bool island_call_comb_raw(jit_t *jit, rt_model_t *m,
                                  rt_island_t *isl, tlab_t *tlab);
 
@@ -5640,6 +5993,11 @@ static bool island_spec_comb_deopt(jit_t *jit, rt_model_t *m,
                                    int64_t code)
 {
    assert(code > 0 && code < RT_ISLAND_DEOPT_COUNT);
+   if (isl->spec->sv) {
+      island_spec_sv_restore(isl);
+      island_spec_demote(isl, (rt_island_deopt_t)code);
+      return island_call_comb_raw(jit, m, isl, tlab);
+   }
    // A comb process computes its outputs from the signals it reads only:
    // the signals written and read by comb processes get back the values
    // they had before the call (the feedback shadow holds them), the
@@ -5664,6 +6022,11 @@ static bool island_spec_ff_deopt(jit_t *jit, rt_island_domain_t *dom,
 {
    rt_island_t *isl = dom->isl;
    assert(code > 0 && code < RT_ISLAND_DEOPT_COUNT);
+   if (isl->spec->sv) {
+      island_spec_sv_ff_undo(dom);
+      island_spec_demote(isl, (rt_island_deopt_t)code);
+      return island_sample_domain(jit, dom, tlab);
+   }
    // Drop the requests of the call (only this domain writes the signals)
    uint8_t *req = island_spec_req(isl);
    for (uint32_t j = 0; j < dom->n_write_sigs; j++)
@@ -5713,6 +6076,9 @@ static void island_spec_rt_setup(rt_island_t *isl)
       return;
    rt_island_mgr_t *mgr = isl->mgr;
 
+   if (sp->sv)
+      island_spec_sv_rt_setup(isl);
+
    sp->eval_handle_b = isl->eval_handle;
    sp->stride_b = isl->state_bytes;
    if (isl->nsigs > 0) {
@@ -5738,6 +6104,9 @@ static void island_spec_rt_setup(rt_island_t *isl)
       sp->pinned = true;
       return;
    }
+
+   if (sp->sv)
+      goto enable;
 
    // Both layouts use the same buffer (super-domain entries keep its
    // address): room for two halves of the larger one
@@ -5770,6 +6139,7 @@ static void island_spec_rt_setup(rt_island_t *isl)
       }
    }
 
+enable:
    sp->check_ival = 8;
    sp->next_check = 8;
    if (!mgr->spec_on) {
@@ -5792,13 +6162,15 @@ static void island_spec_rt_report(rt_island_mgr_t *mgr)
 
    static const char *names[RT_ISLAND_DEOPT_COUNT] = {
       "none", "literal", "range", "conv", "report", "state", "input",
-      "put", "stress", "unclean", "row", "novar"
+      "put", "stress", "unclean", "row", "novar", "xstore"
    };
    uint64_t deopts[RT_ISLAND_DEOPT_COUNT] = {}, pins[RT_ISLAND_DEOPT_COUNT] = {};
    uint64_t promotions = 0, failed = 0, ticks_a = 0, holds = 0, unholds = 0;
    uint32_t n_var = 0, n_ever = 0, n_a = 0, n_pinned = 0;
    uint32_t n_a_held = 0, n_held = 0, n_rows = 0, n_cost = 0;
    uint64_t cost_pins = 0, hold_waits = 0;
+   uint32_t n_sv = 0, n_sv_ever = 0, n_sv_a = 0, n_sv_ah = 0, sv_fb = 0;
+   uint64_t sv_checked = 0, sv_unchecked = 0;
    for (unsigned i = 0; i < mgr->islands.count; i++) {
       const rt_island_t *isl = mgr->islands.items[i];
       const rt_island_spec_t *sp = isl->spec;
@@ -5829,18 +6201,36 @@ static void island_spec_rt_report(rt_island_mgr_t *mgr)
          n_held += sp->n_held;
          n_rows += sp->n_held_rows;
       }
+      if (sp->sv) {
+         n_sv++;
+         n_sv_ever += sp->promotions > 0;
+         n_sv_a += isl->spec_a && !sp->checks;
+         n_sv_ah += isl->spec_a && sp->checks;
+         sv_checked += sp->sv_checked;
+         sv_unchecked += sp->sv_unchecked;
+         sv_fb += sp->n_fb_sigs;
+      }
       if (atoi(env) >= 2 || env[0] == '/')
          fprintf(f, "ISLAND_SPEC_RT: island=%u mode=%c promotions=%"PRIu64
                  " deopts=%u unclean=%"PRIu64" row=%"PRIu64" held=%u"
                  " held_rows=%u holds=%"PRIu64" unholds=%"PRIu64
                  " ticks_a=%"PRIu64"%s%s scope=%s\n", isl->isl_id,
-                 isl->spec_a ? 'A' : 'B', sp->promotions, sp->n_deopt,
+                 !isl->spec_a ? 'B' : (sp->sv && sp->checks) ? 'H' : 'A',
+                 sp->promotions, sp->n_deopt,
                  sp->deopts[RT_ISLAND_DEOPT_UNCLEAN],
                  sp->deopts[RT_ISLAND_DEOPT_ROW], isl->spec_a ? sp->n_held : 0,
                  isl->spec_a ? sp->n_held_rows : 0, sp->holds, sp->unholds,
                  ta, sp->pinned ? " pinned=" : "",
                  sp->pinned ? names[sp->pin_reason] : "",
                  isl->root_scope != NULL ? istr(isl->root_scope->name) : "?");
+      if (sp->sv && (atoi(env) >= 2 || env[0] == '/'))
+         fprintf(f, "ISLAND_SPEC_RT:   sv island=%u xstore=%"PRIu64
+                 " put=%"PRIu64" stress=%"PRIu64" to_checked=%"PRIu64
+                 " to_unchecked=%"PRIu64" fb_words=%u\n", isl->isl_id,
+                 sp->deopts[RT_ISLAND_DEOPT_XSTORE],
+                 sp->deopts[RT_ISLAND_DEOPT_PUT],
+                 sp->deopts[RT_ISLAND_DEOPT_STRESS], sp->sv_checked,
+                 sp->sv_unchecked, sp->n_fb_sigs);
       if (isl->spec_a && sp->n_held > 0
           && (atoi(env) >= 2 || env[0] == '/')) {
          // Signals held as Mode B bytes
@@ -5877,6 +6267,11 @@ static void island_spec_rt_report(rt_island_mgr_t *mgr)
       fprintf(f, " %s=%"PRIu64, names[k], pins[k]);
    fprintf(f, "\nISLAND_SPEC_RT: cost pinned_by_cost=%u cost_pins=%"PRIu64
            " hold_waits=%"PRIu64, n_cost, cost_pins, hold_waits);
+   if (n_sv > 0)
+      fprintf(f, "\nISLAND_SPEC_RT: sv variants=%u promoted=%u in_a=%u"
+              " in_ah=%u to_checked=%"PRIu64" to_unchecked=%"PRIu64
+              " fb_words=%u", n_sv, n_sv_ever, n_sv_a, n_sv_ah, sv_checked,
+              sv_unchecked, sv_fb);
    fprintf(f, "\nISLAND_SPEC_RT: in_a_at_tick");
    for (uint32_t k = 0; k < mgr->n_spec_timeline; k++)
       fprintf(f, " %"PRIu64":%u", UINT64_C(1) << k, mgr->spec_timeline[k]);
@@ -5898,7 +6293,13 @@ static void island_spec_reset(rt_island_mgr_t *mgr)
       rt_island_t *isl = mgr->islands.items[i];
       if (isl->spec == NULL)
          continue;
-      if (isl->spec_a) {
+      if (isl->spec_a && isl->spec->sv) {
+         isl->spec_a = false;
+         isl->spec_sv = 0;
+         isl->spec->checks = false;
+         island_spec_set_handles(isl);
+      }
+      else if (isl->spec_a) {
          island_spec_set_layout(isl, false);
          island_spec_refresh_in_descs(isl);
       }
@@ -8643,6 +9044,8 @@ static bool island_call_comb_slow(jit_t *jit, rt_model_t *m, rt_island_t *isl,
 static inline bool island_call_comb_raw(jit_t *jit, rt_model_t *m,
                                         rt_island_t *isl, tlab_t *tlab)
 {
+   if (unlikely(isl->spec_sv & RT_ISLAND_SPEC_SV_FB))
+      island_spec_sv_save(isl);
    if (likely(island_batch_args != NULL && isl->eval_fn != NULL
               && tlab != NULL && !isl->has_forces)) {
       jit_scalar_t *args = island_batch_args;
@@ -9820,7 +10223,8 @@ static bool island_sample_domain(jit_t *jit, rt_island_domain_t *dom,
            || unlikely(tlab->alloc != 0 || tlab->mem_dirty != 0)))
       tlab_reset(tlab);
    if (unlikely(isl->spec_a) && ok
-       && unlikely(!(result.integer & (INT64_C(1) << 63))))
+       && unlikely(isl->spec->sv ? result.integer != 0
+                   : !(result.integer & (INT64_C(1) << 63))))
       return island_spec_ff_deopt(jit, dom, tlab, result.integer);
    if (ok)
       dom->ff_dirty_mask |= (uint64_t)result.integer;
@@ -11328,7 +11732,7 @@ void rt_island_on_ext_deposit(rt_model_t *m, rt_signal_t *sig)
    if (mgr == NULL || mgr->sig_map == NULL || sig == NULL)
       return;
 
-   island_spec_pin_sig(mgr, sig, RT_ISLAND_DEOPT_PUT);
+   island_spec_put_sig(mgr, sig, false);
    island_wb_cur = WB_EXT_DEPOSIT;
    island_break_aliases(m, mgr, sig);
    island_clk_copy_break(mgr, sig);
@@ -11581,6 +11985,8 @@ static void island_write_bits_slice(rt_island_t *isl, rt_island_sig_t *s,
             nbp[widx] = (nbp[widx] & ~bit) | (b ? bit : 0);
       }
    }
+
+   island_spec_sv_check_in(isl, s);
 }
 
 bool rt_island_vpi_put(rt_model_t *m, rt_signal_t *sig,
@@ -11591,7 +11997,7 @@ bool rt_island_vpi_put(rt_model_t *m, rt_signal_t *sig,
    if (mgr == NULL || mgr->sig_map == NULL || sig == NULL)
       return false;
 
-   island_spec_pin_sig(mgr, sig, RT_ISLAND_DEOPT_PUT);
+   island_spec_put_sig(mgr, sig, is_force);
    island_wb_cur = WB_VPI_PUT;
    island_break_aliases(m, mgr, sig);
    island_clk_copy_break(mgr, sig);
@@ -11760,7 +12166,7 @@ bool rt_island_put_bytes(rt_model_t *m, rt_signal_t *sig,
    if (mgr == NULL || mgr->sig_map == NULL || sig == NULL || count == 0)
       return false;
 
-   island_spec_pin_sig(mgr, sig, RT_ISLAND_DEOPT_PUT);
+   island_spec_put_sig(mgr, sig, is_force);
    island_wb_cur = WB_VPI_PUT;
    island_break_aliases(m, mgr, sig);
    island_clk_copy_break(mgr, sig);
@@ -11851,7 +12257,7 @@ bool rt_island_put_packed(rt_model_t *m, rt_signal_t *sig,
    if (mgr == NULL || mgr->sig_map == NULL || sig == NULL || count == 0)
       return false;
 
-   island_spec_pin_sig(mgr, sig, RT_ISLAND_DEOPT_PUT);
+   island_spec_put_sig(mgr, sig, is_force);
    island_wb_cur = WB_VPI_PUT;
    island_break_aliases(m, mgr, sig);
    island_clk_copy_break(mgr, sig);

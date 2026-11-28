@@ -56,6 +56,7 @@ typedef enum {
    RT_ISIG_GLITCH_LOG     = (1u << 27),   // SV register: overwritten NBA log
    RT_ISIG_DIRECT_PUB     = (1u << 28),   // Direct source also published
    RT_ISIG_CLK_FANOUT     = (1u << 29),   // Leader copy of a clock copy group
+   RT_ISIG_SPEC_FB        = (1u << 30),   // SV: kept to undo a variant call
 } rt_island_sig_flags_t;
 
 // Speculative Mode A clean tracking (NVC_ISLAND_SPEC).  The Mode A state of
@@ -173,6 +174,8 @@ typedef struct {
 #define RT_IDIR_ACT         (1u << 2)   // Set the change byte (flags >> 8)
 #define RT_IDIR_MIX         (1u << 3)   // With STD_LOGIC9: Mode A <-> Mode B
 #define RT_IDIR_PUB         (1u << 4)   // Source is RT_ISIG_DIRECT_PUB
+#define RT_IDIR_SPEC_SV     (1u << 5)   // With MIX: target has SV variants
+#define RT_IDIR_NOWAKE      (1u << 6)   // With SPEC_SV: comb does not read it
 #define RT_IDIR_IDX_SHIFT   8u
 
 typedef struct {
@@ -396,10 +399,17 @@ typedef struct _rt_island {
    rt_island_copy_t      *copies;
    uint32_t               n_copies;
    struct _island_clk_group *clk_fanout;   // RT_ISIG_CLK_FANOUT
+   uint8_t                spec_sv;   // RT_ISLAND_SPEC_SV_* (SV variants)
 } rt_island_t;
 
+// rt_island_t.spec_sv: a SystemVerilog island running a speculative variant
+#define RT_ISLAND_SPEC_SV_A    (1u << 0)   // "$a": state must stay all 0/1
+#define RT_ISLAND_SPEC_SV_FB   (1u << 1)   // Keep RT_ISIG_SPEC_FB signals
+
 // Speculative Mode A (NVC_ISLAND_SPEC): a VHDL island lowered in Mode B
-// can also carry a packed two-state variant of its functions.  The variant
+// can also carry a packed two-state variant of its functions (and a
+// SystemVerilog island two-state variants on its four-state layout, which
+// complete with 0 like the four-state functions).  The variant
 // returns one of these codes instead of computing a value that two-state
 // storage cannot hold (the comb function returns 0 and a flip-flop function
 // a mask with bit 63 set when it completed).  It writes nothing visible
@@ -418,6 +428,7 @@ typedef enum {
    RT_ISLAND_DEOPT_UNCLEAN = 9,   // load or store of a held signal
    RT_ISLAND_DEOPT_ROW     = 10,  // load or partial store of a held row
    RT_ISLAND_DEOPT_NOVAR   = 11,  // Mode A function could not be lowered
+   RT_ISLAND_DEOPT_XSTORE  = 12,  // SV "$a": store of a value not all 0/1
    RT_ISLAND_DEOPT_COUNT
 } rt_island_deopt_t;
 
@@ -473,6 +484,15 @@ struct _rt_island_spec {
    bool          cost_pinned;     // Retried only every ISLAND_SPEC_COST_RETRY
    uint64_t      cost_pins;
    uint64_t      hold_waits;      // Checks that waited before holding
+   // SystemVerilog islands: the variants use the four-state layout (see
+   // "Speculative variants of SystemVerilog islands" in island.c)
+   bool          sv;
+   bool          force_sv;        // NVC_ISLAND_SPEC_FORCE=A
+   uint32_t     *fb_sigs;         // Offsets of the RT_ISIG_SPEC_FB words
+   uint32_t      n_fb_sigs;       // Number of words
+   uint8_t      *fb_buf;          // Their values before the call
+   uint64_t      sv_checked;      // Switches from "$a" to "$ah"
+   uint64_t      sv_unchecked;    // Switches from "$ah" to "$a"
 };
 
 typedef struct _rt_island_mgr rt_island_mgr_t;

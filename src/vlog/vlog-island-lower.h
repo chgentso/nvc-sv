@@ -27,6 +27,8 @@ typedef struct {
    uint32_t  n_write_sigs;
    uint32_t  n_fused_ff;
    ident_t   ff_sym;
+   ident_t   ff_sym_a;     // Speculative variants (NVC_ISLAND_SPEC)
+   ident_t   ff_sym_ah;
    bool      shared;
    bool      emit_fn;
 } vlog_island_dom_m3_t;
@@ -51,12 +53,17 @@ typedef struct {
    bool                  reset_comb_shared;
    bool                  emit_reset_comb;
    bool                  skip_sv_reset;
+   bool                  spec;         // Speculative two-state variants
+   ident_t               eval_sym_a;
+   ident_t               eval_sym_ah;
+   bool                 *sig_spec_fb;  // [isl->nsigs] RT_ISIG_SPEC_FB
 } vlog_island_m2_t;
 
 typedef struct {
    vlog_island_plan_t *plan;
    vlog_island_m2_t   *islands;       // [plan->nislands]
    hset_t             *fused_stmts;
+   unsigned            refs;          // Deferred speculative variants + 1
 } vlog_island_lower_ctx_t;
 
 vlog_island_lower_ctx_t *vlog_island_lower_prepare(vlog_node_t body,
