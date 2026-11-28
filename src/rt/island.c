@@ -342,6 +342,12 @@ struct _rt_island_mgr {
    uint32_t                spec_timeline[40];   // spec_n_a at tick 2^k
    uint32_t                spec_held_timeline[40];   // Of them holding
    uint32_t                n_spec_timeline;
+   // Arena for the island objects made before the first reset (see
+   // island_arena_alloc)
+   A(uint8_t *)            arena_chunks;
+   uint8_t                *arena_next;
+   uint8_t                *arena_end;
+   bool                    arena_on;
 };
 
 // Direct-wire diagnostics: NVC_ISLAND_WIRE_STATS=1 prints, at the end of the
@@ -1223,6 +1229,97 @@ static inline bool island_sig_observed(const rt_island_sig_t *s)
    return false;
 }
 
+// Island objects made at elaboration (rt_island_t, its signal and domain
+// tables, small states, descriptors, clusters) come from 2 MB chunks
+// backed by transparent huge pages where the system has them instead of
+// thousands of small heap blocks: an evaluation pass then touches a few
+// large pages and far fewer TLB entries.  The chunks live until the
+// manager is freed; objects made after the first reset (rebuilds when an
+// observer attaches or a force is added) and large ones use the heap, so
+// a long run cannot grow the arena.  Off under ASan so every object keeps
+// its own red zones, and with NVC_ISLAND_ARENA=0.
+#define ISLAND_ARENA_CHUNK    (2u << 20)
+#define ISLAND_ARENA_MAX_OBJ  (64u << 10)
+
+static void *island_arena_alloc(rt_island_mgr_t *mgr, size_t bytes)
+{
+   bytes = ALIGN_UP(MAX(bytes, 1u), 64u);
+   if (!mgr->arena_on || mgr->reset_done || bytes > ISLAND_ARENA_MAX_OBJ)
+      return NULL;
+
+   if (mgr->arena_next == NULL || mgr->arena_next + bytes > mgr->arena_end) {
+      uint8_t *chunk = map_huge_pages(ISLAND_ARENA_CHUNK, ISLAND_ARENA_CHUNK);
+      APUSH(mgr->arena_chunks, chunk);
+      mgr->arena_next = chunk;
+      mgr->arena_end = chunk + ISLAND_ARENA_CHUNK;
+   }
+
+   void *p = mgr->arena_next;
+   mgr->arena_next += bytes;
+   return p;   // Fresh pages are zero
+}
+
+static bool island_in_arena(const rt_island_mgr_t *mgr, const void *p)
+{
+   for (unsigned i = 0; i < mgr->arena_chunks.count; i++) {
+      const uint8_t *c = mgr->arena_chunks.items[i];
+      if ((const uint8_t *)p >= c && (const uint8_t *)p < c + ISLAND_ARENA_CHUNK)
+         return true;
+   }
+   return false;
+}
+
+// Zeroed array from the arena or the heap
+static void *island_acalloc(rt_island_mgr_t *mgr, size_t n, size_t size)
+{
+   void *p = island_arena_alloc(mgr, n * size);
+   return p != NULL ? p : xcalloc_array(n, size);
+}
+
+static void island_afree(rt_island_mgr_t *mgr, void *p)
+{
+   if (p != NULL && !island_in_arena(mgr, p))
+      free(p);
+}
+
+// Zeroed island state, 64-byte aligned
+static void *island_state_alloc(rt_island_mgr_t *mgr, size_t bytes,
+                                const char *what)
+{
+   void *buf = island_arena_alloc(mgr, bytes);
+   if (buf != NULL)
+      return buf;
+#ifdef __MINGW32__
+   buf = _aligned_malloc(bytes, 64);
+   if (buf == NULL)
+      fatal("failed to allocate %zu bytes for %s", bytes, what);
+#else
+   if (posix_memalign(&buf, 64, bytes) != 0)
+      fatal("failed to allocate %zu bytes for %s", bytes, what);
+#endif
+   memset(buf, 0, bytes);
+   return buf;
+}
+
+static void island_state_free(rt_island_mgr_t *mgr, void *p)
+{
+   if (p == NULL || island_in_arena(mgr, p))
+      return;
+#ifdef __MINGW32__
+   _aligned_free(p);
+#else
+   free(p);
+#endif
+}
+
+static void island_arena_free(rt_island_mgr_t *mgr)
+{
+   for (unsigned i = 0; i < mgr->arena_chunks.count; i++)
+      nvc_munmap(mgr->arena_chunks.items[i], ISLAND_ARENA_CHUNK);
+   ACLEAR(mgr->arena_chunks);
+   mgr->arena_next = mgr->arena_end = NULL;
+}
+
 static void island_add_obs_sig(rt_island_t *isl, uint32_t sig_idx)
 {
    for (uint32_t i = 0; i < isl->n_obs_sigs; i++) {
@@ -1239,14 +1336,14 @@ static void island_add_obs_sig(rt_island_t *isl, uint32_t sig_idx)
 
 static void island_refresh_ext_out_descs(rt_island_t *isl)
 {
-   free(isl->ext_out_descs);
+   island_afree(isl->mgr, isl->ext_out_descs);
    isl->ext_out_descs = NULL;
    isl->n_ext_out_descs = 0;
    if (isl->n_ext_out_sigs == 0)
       return;
 
-   isl->ext_out_descs = xcalloc_array(isl->n_ext_out_sigs,
-                                      sizeof(rt_island_ext_out_desc_t));
+   isl->ext_out_descs = island_acalloc(isl->mgr, isl->n_ext_out_sigs,
+                                       sizeof(rt_island_ext_out_desc_t));
    for (uint32_t j = 0; j < isl->n_ext_out_sigs; j++) {
       const uint32_t sidx = isl->ext_out_sigs[j];
       const rt_island_sig_t *os = &(isl->sigs[sidx]);
@@ -1708,6 +1805,12 @@ rt_island_mgr_t *rt_island_mgr_new(rt_model_t *m)
    mgr->alias_map = hash_new(64);
    mgr->fast = !!opt_get_int(OPT_ISLAND_FAST);
    {
+#if ASAN_ENABLED
+      mgr->arena_on = false;
+#else
+      const char *arena = getenv("NVC_ISLAND_ARENA");
+      mgr->arena_on = arena == NULL || atoi(arena) != 0;
+#endif
       const char *ws = getenv("NVC_ISLAND_WIRE_STATS");
       island_wstats_level = ws != NULL ? atoi(ws) : 0;
       island_wstats_on = island_wstats_level > 0;
@@ -1798,14 +1901,14 @@ void rt_island_mgr_free(rt_island_mgr_t *mgr)
    for (unsigned i = 0; i < mgr->clusters.count; i++) {
       rt_super_island_t *cl = mgr->clusters.items[i];
       free(cl->comb_deps);
-      free(cl->dirty_in_list);
-      free(cl->islands);
-      free(cl);
+      island_afree(mgr, cl->dirty_in_list);
+      island_afree(mgr, cl->islands);
+      island_afree(mgr, cl);
    }
    for (unsigned i = 0; i < mgr->super_domains.count; i++) {
       rt_super_domain_t *sd = mgr->super_domains.items[i];
       free(sd->doms);
-      free(sd->ff_entries);
+      island_afree(mgr, sd->ff_entries);
       free(sd->clusters);
       free(sd->solo_islands);
       free(sd);
@@ -1814,12 +1917,12 @@ void rt_island_mgr_free(rt_island_mgr_t *mgr)
       rt_island_t *isl = mgr->islands.items[i];
       for (uint32_t d = 0; d < isl->ndomains; d++) {
          free(isl->domains[d].write_sigs);
-         free(isl->domains[d].ff_descs);
-         free(isl->domains[d].ff_runs);
+         island_afree(mgr, isl->domains[d].ff_descs);
+         island_afree(mgr, isl->domains[d].ff_runs);
          free(isl->domains[d].glitch_resets);
          free(isl->domains[d].arm_words);
       }
-      free(isl->domains);
+      island_afree(mgr, isl->domains);
       for (uint32_t f = 0; f < isl->n_forces; f++)
          free(isl->forces[f].mask);
       free(isl->forces);
@@ -1830,20 +1933,16 @@ void rt_island_mgr_free(rt_island_mgr_t *mgr)
       }
       free(isl->comb_deps);
       free(isl->copies);
-#ifdef __MINGW32__
-      _aligned_free(isl->state);
-#else
-      free(isl->state);
-#endif
-      free(isl->sigs);
+      island_state_free(mgr, isl->state);
+      island_afree(mgr, isl->sigs);
       free(isl->in_sigs);
-      free(isl->in_descs);
+      island_afree(mgr, isl->in_descs);
       free(isl->dirty_in_words);
       free(isl->out_sigs);
       free(isl->ext_out_sigs);
-      free(isl->ext_out_descs);
+      island_afree(mgr, isl->ext_out_descs);
       free(isl->direct_comb_outs);
-      free(isl->direct_comb_descs);
+      island_afree(mgr, isl->direct_comb_descs);
       free(isl->obs_sigs);
       free(isl->scratch);
       free(isl->fb_sigs);
@@ -1855,7 +1954,7 @@ void rt_island_mgr_free(rt_island_mgr_t *mgr)
          free(isl->spec->ff_handles_b);
       }
       island_spec_free(isl);
-      free(isl);
+      island_afree(mgr, isl);
    }
    hash_free(mgr->sig_map);
    hash_free(mgr->alias_map);
@@ -1889,6 +1988,7 @@ void rt_island_mgr_free(rt_island_mgr_t *mgr)
    ACLEAR(mgr->mt_cl_rem_q);
    ACLEAR(mgr->mt_cl_safe_q);
    ACLEAR(mgr->mt_sva_ptrs);
+   island_arena_free(mgr);
    free(mgr);
 }
 
@@ -1929,7 +2029,7 @@ void *rt_island_begin(rt_model_t *m, rt_island_mgr_t **mgr_p,
    if (*mgr_p == NULL)
       *mgr_p = rt_island_mgr_new(m);
 
-   rt_island_t *isl = xcalloc(sizeof(rt_island_t));
+   rt_island_t *isl = island_acalloc(*mgr_p, 1, sizeof(rt_island_t));
    isl->model = m;
    isl->mgr = *mgr_p;
    isl->root_scope = rt_island_model_active_scope(m);
@@ -1943,24 +2043,15 @@ void *rt_island_begin(rt_model_t *m, rt_island_mgr_t **mgr_p,
 
    const size_t total_bytes = ndomains > 0
       ? (size_t)isl->state_bytes * 2u : (size_t)isl->state_bytes;
-   void *buf = NULL;
-#ifdef __MINGW32__
-   buf = _aligned_malloc(total_bytes, 64);
-   if (buf == NULL)
-      fatal("failed to allocate %zu bytes for island state", total_bytes);
-#else
-   if (posix_memalign(&buf, 64, total_bytes) != 0)
-      fatal("failed to allocate %zu bytes for island state", total_bytes);
-#endif
-   isl->state = buf;
+   isl->state = island_state_alloc(isl->mgr, total_bytes, "island state");
    isl->next_state = ndomains > 0 ? isl->state + isl->state_bytes : NULL;
    isl->total_state_bytes = (uint32_t)total_bytes;
-   memset(isl->state, 0, total_bytes);
 
    if (nsigs > 0)
-      isl->sigs = xcalloc_array(nsigs, sizeof(rt_island_sig_t));
+      isl->sigs = island_acalloc(isl->mgr, nsigs, sizeof(rt_island_sig_t));
    if (ndomains > 0) {
-      isl->domains = xcalloc_array(ndomains, sizeof(rt_island_domain_t));
+      isl->domains = island_acalloc(isl->mgr, ndomains,
+                                    sizeof(rt_island_domain_t));
       for (uint32_t d = 0; d < ndomains; d++) {
          isl->domains[d].isl = isl;
          isl->domains[d].dom_idx = d;
@@ -1998,18 +2089,9 @@ void rt_island_set_sparse(void *handle, uint32_t sparse_log_off,
    assert(total_state_bytes >= sparse_log_off + sizeof(rt_island_sparse_log_t));
 
    const size_t aligned_total = ALIGN_UP((size_t)total_state_bytes, 64u);
-   void *buf = NULL;
-#ifdef __MINGW32__
-   buf = _aligned_malloc(aligned_total, 64);
-   if (buf == NULL)
-      fatal("failed to allocate %zu bytes for sparse island state", aligned_total);
-   _aligned_free(isl->state);
-#else
-   if (posix_memalign(&buf, 64, aligned_total) != 0)
-      fatal("failed to allocate %zu bytes for sparse island state", aligned_total);
-   free(isl->state);
-#endif
-   memset(buf, 0, aligned_total);
+   void *buf = island_state_alloc(isl->mgr, aligned_total,
+                                  "sparse island state");
+   island_state_free(isl->mgr, isl->state);
    isl->state = buf;
    isl->next_state = isl->ndomains > 0 ? isl->state + isl->state_bytes : NULL;
    isl->sparse_log_off = sparse_log_off;
@@ -2525,8 +2607,8 @@ static int island_ff_desc_cmp(const void *a, const void *b)
 static void island_merge_ff_runs(rt_island_domain_t *dom)
 {
    if (dom->ff_runs == NULL)
-      dom->ff_runs = xmalloc_array(MAX(dom->n_write_sigs, 1),
-                                   sizeof(rt_island_ff_desc_t));
+      dom->ff_runs = island_acalloc(dom->isl->mgr, MAX(dom->n_write_sigs, 1),
+                                    sizeof(rt_island_ff_desc_t));
 
    // The other descriptors keep their order; the runs follow them, merged
    // in state order as the registers are written in statement order
@@ -2572,8 +2654,8 @@ static void island_refresh_domain_descs(rt_island_t *isl)
       if (dom->n_write_sigs == 0)
          continue;
       if (dom->ff_descs == NULL)
-         dom->ff_descs = xmalloc_array(dom->n_write_sigs,
-                                       sizeof(rt_island_ff_desc_t));
+         dom->ff_descs = island_acalloc(isl->mgr, dom->n_write_sigs,
+                                        sizeof(rt_island_ff_desc_t));
       if (dom->glitch_resets == NULL)
          dom->glitch_resets = xmalloc_array(dom->n_write_sigs,
                                             sizeof(uint32_t));
@@ -2700,7 +2782,8 @@ void rt_island_finish(void *handle)
    isl->n_in_sigs = n_in;
    if (n_in > 0) {
       isl->in_sigs = xmalloc_array(n_in, sizeof(uint32_t));
-      isl->in_descs = xcalloc_array(n_in, sizeof(rt_island_in_desc_t));
+      isl->in_descs = island_acalloc(isl->mgr, n_in,
+                                     sizeof(rt_island_in_desc_t));
       if (n_in > 64) {
          isl->dirty_in_nwords = (n_in + 63u) / 64u;
          isl->dirty_in_words = xcalloc_array(isl->dirty_in_nwords,
@@ -4884,13 +4967,13 @@ static void island_refresh_direct_comb_descs(rt_island_t *isl)
    // Rebuilt in place when the number is unchanged: a speculative Mode A
    // switch (island_spec_rebuild) may happen while they are walked
    if (total != isl->n_direct_comb_descs || total == 0) {
-      free(isl->direct_comb_descs);
+      island_afree(isl->mgr, isl->direct_comb_descs);
       isl->direct_comb_descs = NULL;
       isl->n_direct_comb_descs = 0;
       if (total == 0)
          return;
-      isl->direct_comb_descs = xmalloc_array(total,
-                                             sizeof(rt_island_direct_desc_t));
+      isl->direct_comb_descs = island_acalloc(isl->mgr, total,
+                                              sizeof(rt_island_direct_desc_t));
    }
    uint32_t pos = 0;
    for (uint32_t j = 0; j < isl->n_direct_comb_outs; j++) {
@@ -6364,18 +6447,8 @@ static void island_spec_rt_setup(rt_island_t *isl)
                            * (size_t)MAX(sp->stride_b, sp->stride),
                            (size_t)sp->total_bytes);
    if (need > isl->total_state_bytes) {
-      void *buf = NULL;
-#ifdef __MINGW32__
-      buf = _aligned_malloc(need, 64);
-      if (buf == NULL)
-         fatal("failed to allocate %zu bytes for island state", need);
-      _aligned_free(isl->state);
-#else
-      if (posix_memalign(&buf, 64, need) != 0)
-         fatal("failed to allocate %zu bytes for island state", need);
-      free(isl->state);
-#endif
-      memset(buf, 0, need);
+      void *buf = island_state_alloc(isl->mgr, need, "island state");
+      island_state_free(isl->mgr, isl->state);
       isl->state = buf;
       isl->next_state = isl->ndomains > 0 ? isl->state + isl->state_bytes
          : NULL;
@@ -8300,10 +8373,12 @@ static void island_build_hier(rt_island_mgr_t *mgr)
       if (uf_sz[r] < 2)
          continue;
       if (root_to_cl[r] == NULL) {
-         rt_super_island_t *cl = xcalloc(sizeof(rt_super_island_t));
+         rt_super_island_t *cl =
+            island_acalloc(mgr, 1, sizeof(rt_super_island_t));
          cl->id = mgr->clusters.count;
-         cl->islands = xmalloc_array(uf_sz[r], sizeof(rt_island_t *));
-         cl->dirty_in_list = xmalloc_array(uf_sz[r], sizeof(rt_island_t *));
+         cl->islands = island_acalloc(mgr, uf_sz[r], sizeof(rt_island_t *));
+         cl->dirty_in_list =
+            island_acalloc(mgr, uf_sz[r], sizeof(rt_island_t *));
          cl->min_dirty_pos = UINT32_MAX;
          root_to_cl[r] = cl;
          APUSH(mgr->clusters, cl);
@@ -8396,8 +8471,8 @@ static void island_build_hier(rt_island_mgr_t *mgr)
             APUSH(g->clk_group->sds, sd);
          sd->doms           = xmalloc_array(sd->n_doms,
                                             sizeof(rt_island_domain_t *));
-         sd->ff_entries     = xcalloc_array(sd->n_doms,
-                                            sizeof(rt_sdom_ff_entry_t));
+         sd->ff_entries     = island_acalloc(mgr, sd->n_doms,
+                                             sizeof(rt_sdom_ff_entry_t));
 
          A(rt_super_island_t *) cls = AINIT;
          A(rt_island_t *) solos = AINIT;
