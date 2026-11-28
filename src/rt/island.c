@@ -1561,6 +1561,7 @@ void rt_island_mgr_free(rt_island_mgr_t *mgr)
 
    island_spec_report(mgr);
    island_spec_rt_report(mgr);
+   island_clk_copy_free(mgr);   // Its report reads the kept copies' islands
    free(island_spec_tmp);
    island_spec_tmp = NULL;
    island_spec_tmp_size = 0;
@@ -1629,7 +1630,6 @@ void rt_island_mgr_free(rt_island_mgr_t *mgr)
    }
    hash_free(mgr->sig_map);
    hash_free(mgr->alias_map);
-   island_clk_copy_free(mgr);
    for (uint32_t i = 0; i < mgr->n_act_info; i++) {
       free(mgr->act_info[i].sigs);
       free(mgr->act_info[i].shadow);
