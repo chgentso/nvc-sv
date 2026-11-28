@@ -6,6 +6,7 @@ set -xe
 # reads a register that is never written, waits before it is promoted
 # holding it (checks at growing intervals) and deopts when the x reaches
 # its output.  The waits must not visit the other 64 islands each time.
+# A run this short promotes nothing unless NVC_ISLAND_SPEC_START says so.
 # Output must be that of --rtl-islands=off in every mode.
 
 cat >sweep1.sv <<'SV_EOF'
@@ -60,6 +61,7 @@ SV_EOF
 
 unset NVC_ISLAND_SPEC NVC_ISLAND_SPEC_FORCE NVC_ISLAND_SPEC_STATS
 unset NVC_ISLAND_SPEC_STRESS NVC_ISLAND_SPEC_HOLD_WAIT NVC_RTL_ISLANDS
+export NVC_ISLAND_SPEC_START=0   # Short run: promote from the start
 
 nodebug() { grep -v '^\*\* Debug' || true; }   # Debug builds: JIT footprint
 
@@ -86,3 +88,8 @@ visits=$(sed -n 's/^ISLAND_SPEC_RT: sweeps=\([0-9]*\) visits=\([0-9]*\) .*/\2/p'
 sweeps=$(sed -n 's/^ISLAND_SPEC_RT: sweeps=\([0-9]*\) .*/\1/p' s_default.log)
 [ "$sweeps" -ge 5 ]
 [ "$visits" -lt 132 ]
+# Without NVC_ISLAND_SPEC_START nothing is promoted in so short a run
+env -u NVC_ISLAND_SPEC_START NVC_ISLAND_SPEC_STATS=1 nvc --work=w_s -r sweep1 \
+    2>&1 | nodebug > s_raw.log
+diff -u off.log <(grep -v '^ISLAND_SPEC' s_raw.log)
+grep -q '^ISLAND_SPEC_RT: ticks=[0-9]* variants=66 promoted=0 ' s_raw.log

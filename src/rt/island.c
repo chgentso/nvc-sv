@@ -4779,6 +4779,14 @@ static void island_refresh_direct_comb_descs(rt_island_t *isl)
 #define ISLAND_SPEC_COST_PIN     4u
 #define ISLAND_SPEC_COST_RETRY   (UINT64_C(1) << 20)
 #define ISLAND_SPEC_MAX_IVAL     (UINT32_C(1) << 14)
+
+// Promoting an island lowers its variants and runs them interpreted until
+// the JIT compiles them: the cost of thousands of evaluations, which a
+// short run never gets back (VeeR hello: 16k ticks, 1,752 islands, 18%
+// slower when they are all promoted).  No island is promoted before
+// ISLAND_SPEC_START ticks; reset and initialisation settle meanwhile, and a
+// long run loses only the start of its time in Mode A.
+#define ISLAND_SPEC_START        (UINT64_C(1) << 17)
 #define ISLAND_SPEC_TIMELINE     40u
 
 static int island_spec_stress = -1;
@@ -4806,6 +4814,20 @@ static uint64_t island_spec_hold_wait(void)
          env != NULL ? MAX(0, atoi(env)) : ISLAND_SPEC_HOLD_WAIT;
    }
    return (uint64_t)island_spec_hold_wait_env;
+}
+
+static int64_t island_spec_start_env = -1;
+
+// Tick of the first promotion check; NVC_ISLAND_SPEC_START=N overrides it
+// (test knob)
+static uint64_t island_spec_start(void)
+{
+   if (island_spec_start_env < 0) {
+      const char *env = getenv("NVC_ISLAND_SPEC_START");
+      island_spec_start_env =
+         env != NULL ? MAX(8, atoll(env)) : (int64_t)ISLAND_SPEC_START;
+   }
+   return (uint64_t)island_spec_start_env;
 }
 
 static uint8_t *island_spec_scratch(size_t n)
@@ -6322,7 +6344,9 @@ enable:
       const char *env = getenv("NVC_ISLAND_SPEC_STATS");
       mgr->spec_trace = env != NULL && atoi(env) >= 3;
    }
-   island_spec_schedule(isl, 8);
+   // NVC_ISLAND_SPEC_FORCE and NVC_ISLAND_SPEC_STRESS switch from the start
+   const bool now = island_spec_force_a() || island_spec_stress_n() > 0;
+   island_spec_schedule(isl, now ? 8 : island_spec_start());
 }
 
 static void island_spec_rt_report(rt_island_mgr_t *mgr)
