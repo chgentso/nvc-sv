@@ -3514,3 +3514,4 @@ vlog_island_spec_gen1 shell
 vhdl_island_spec_warn1 shell
 vhdl_island_spec_warn2 shell
 vhdl_island_spec_mix1 shell
+vhdl_island_spec_reduce1 shell
