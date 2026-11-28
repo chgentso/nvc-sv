@@ -9107,6 +9107,25 @@ static mir_value_t vi_emit_bytes_differ_at(vi_lower_t *l, mir_value_t any,
    return mir_build_load(mu, any_v);
 }
 
+// True when the change byte of ISIG is set or every signal counts as
+// changed (RT_ISLAND_ACT_ALL), or the null value if ISIG has no change byte
+static mir_value_t vi_guard_changed(vi_lower_t *l, const vhdl_isl_sig_t *isig)
+{
+   if (!l->isl->has_act || !(isig->rt_flags & RT_ISIG_ACT))
+      return MIR_NULL_VALUE;
+   mir_unit_t *mu = l->mu;
+   const uint32_t idx = (uint32_t)(isig - l->isl->sigs);
+   mir_value_t chg = mir_build_load(mu, vi_state_ptr_at(l, idx));
+   mir_value_t all = mir_build_load(
+      mu, vi_state_ptr_at(l, RT_ISLAND_ACT_ALL(l->isl->n_sigs)));
+   return mir_build_or(mu, mir_build_cmp(mu, MIR_CMP_NEQ, chg, vi_u8(mu, 0)),
+                       mir_build_cmp(mu, MIR_CMP_NEQ, all, vi_u8(mu, 0)));
+}
+
+// Copies longer than this are compared and updated only when the change
+// byte of their signal is set
+#define VI_GUARD_GATE_BYTES 16
+
 // Where the process reads ISIG from (at byte PART_OFF): a signal that a
 // process inside a combinational loop may already have assigned in this
 // call is read from its copy taken when the island function started (see
@@ -9129,7 +9148,8 @@ static bool vi_emit_report_guard(vi_lower_t *l, const vhdl_iproc_t *p,
 {
    mir_unit_t *mu = l->mu;
    mir_value_t ran = mir_build_load(mu, vi_state_ptr_at(l, p->evt_flag_off));
-   mir_value_t any = mir_build_cmp(mu, MIR_CMP_EQ, ran, vi_u8(mu, 0));
+   mir_value_t first = mir_build_cmp(mu, MIR_CMP_EQ, ran, vi_u8(mu, 0));
+   mir_value_t any = first, any_v = MIR_NULL_VALUE;
    for (uint32_t i = 0; i < p->n_evt_sigs; i++) {
       const vhdl_isl_sig_t *isig = vhdl_island_find_sig(l->isl, p->evt_sigs[i]);
       const uint32_t nbytes = p->evt_copy_bytes[i];
@@ -9149,24 +9169,35 @@ static bool vi_emit_report_guard(vi_lower_t *l, const vhdl_iproc_t *p,
          // sparse RAM, which is not copied: run it when the change byte
          // of the signal is set (an input sync may set it without a
          // change), or always without one
-         if (l->isl->has_act && (isig->rt_flags & RT_ISIG_ACT)) {
-            const uint32_t idx = (uint32_t)(isig - l->isl->sigs);
-            mir_value_t chg = mir_build_load(mu, vi_state_ptr_at(l, idx));
-            mir_value_t all = mir_build_load(
-               mu, vi_state_ptr_at(l, RT_ISLAND_ACT_ALL(l->isl->n_sigs)));
-            any = mir_build_or(
-               mu, any, mir_build_or(
-                  mu, mir_build_cmp(mu, MIR_CMP_NEQ, chg, vi_u8(mu, 0)),
-                  mir_build_cmp(mu, MIR_CMP_NEQ, all, vi_u8(mu, 0))));
-         }
-         else
+         mir_value_t chg = vi_guard_changed(l, isig);
+         if (mir_is_null(chg))
             any = mir_const(mu, mir_bool_type(mu), 1);
+         else
+            any = mir_build_or(mu, any, chg);
          continue;
       }
       if (isig == NULL || nbytes == 0) {
          l->reason = "comb: report process sensitive to a sparse RAM";
          return false;
       }
+      // A long copy is compared only when the change byte of its signal
+      // is set: a signal without it has not changed since the previous
+      // call, so its copy still holds the value of the last run
+      mir_block_t next_bb = MIR_NULL_BLOCK;
+      mir_value_t chg = MIR_NULL_VALUE;
+      if (nbytes > VI_GUARD_GATE_BYTES)
+         chg = vi_guard_changed(l, isig);
+      if (!mir_is_null(chg)) {
+         if (mir_is_null(any_v))
+            any_v = mir_add_var(mu, mir_bool_type(mu), MIR_NULL_STAMP,
+                                ident_uniq("evany"), MIR_VAR_TEMP);
+         mir_build_store(mu, any_v, any);
+         mir_block_t cmp_bb = mir_add_block(mu);
+         next_bb = mir_add_block(mu);
+         mir_build_cond(mu, chg, cmp_bb, next_bb);
+         mir_set_cursor(mu, cmp_bb, MIR_APPEND);
+      }
+
       if (src % 8 == 0 && nbytes % 8 == 0)
          any = vi_emit_words_differ_at(l, any, base, src, p->evt_copy_off[i],
                                        nbytes / 8);
@@ -9183,6 +9214,13 @@ static bool vi_emit_report_guard(vi_lower_t *l, const vhdl_iproc_t *p,
       else
          any = vi_emit_bytes_differ_at(l, any, base, src, p->evt_copy_off[i],
                                        nbytes);
+
+      if (!mir_is_null(chg)) {
+         mir_build_store(mu, any_v, any);
+         mir_build_jump(mu, next_bb);
+         mir_set_cursor(mu, next_bb, MIR_APPEND);
+         any = mir_build_load(mu, any_v);
+      }
    }
 
    mir_block_t run_bb = mir_add_block(mu);
@@ -9197,9 +9235,27 @@ static bool vi_emit_report_guard(vi_lower_t *l, const vhdl_iproc_t *p,
       const uint32_t nbytes = p->evt_copy_bytes[i];
       if (nbytes == 0)
          continue;   // Not copied, see above
+
+      mir_block_t next_bb = MIR_NULL_BLOCK;
+      mir_value_t chg = MIR_NULL_VALUE;
+      if (nbytes > VI_GUARD_GATE_BYTES)
+         chg = vi_guard_changed(l, isig);
+      if (!mir_is_null(chg)) {
+         chg = mir_build_or(mu, chg, first);   // No copy taken yet
+         mir_block_t copy_bb = mir_add_block(mu);
+         next_bb = mir_add_block(mu);
+         mir_build_cond(mu, chg, copy_bb, next_bb);
+         mir_set_cursor(mu, copy_bb, MIR_APPEND);
+      }
+
       mir_build_copy(mu, vi_state_ptr_at(l, p->evt_copy_off[i]),
                      mir_build_array_ref(mu, base, vi_off(mu, src)),
-                     vi_off(mu, p->evt_copy_bytes[i]));
+                     vi_off(mu, nbytes));
+
+      if (!mir_is_null(chg)) {
+         mir_build_jump(mu, next_bb);
+         mir_set_cursor(mu, next_bb, MIR_APPEND);
+      }
    }
    return true;
 }
