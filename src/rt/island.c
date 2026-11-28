@@ -7251,6 +7251,14 @@ static int8_t island_clk_cand_valid(const rt_model_t *m,
    return c->valid;
 }
 
+// An SV island with speculative variants can lead or be kept: they use
+// the four-state layout, so the words the leader reads and writes are the
+// same in every mode (island_clk_fanout keeps a "$a" member's mode right)
+static inline bool island_clk_spec_ok(const rt_island_t *isl)
+{
+   return isl->spec == NULL || isl->spec->sv;
+}
+
 // A copy whose island need not run when its input changes: the leader of
 // its group keeps its input and output equal to the leader's
 static bool island_clk_elidable(const rt_island_sig_t *src,
@@ -7261,7 +7269,7 @@ static bool island_clk_elidable(const rt_island_sig_t *src,
       && !(src->flags & (RT_ISIG_DIRECT_LINK | RT_ISIG_STD_LOGIC9))
       && !(dst->flags & (RT_ISIG_DIRECT_LINK | RT_ISIG_CLK_FANOUT))
       && dst->ext_write_watch == NULL
-      && (dst->flags & RT_ISIG_OUT) && isl->spec == NULL;
+      && (dst->flags & RT_ISIG_OUT) && island_clk_spec_ok(isl);
 }
 
 // Removes S from the targets of the RT_ISIG_DIRECT_PUB source that feeds
@@ -7440,7 +7448,7 @@ static void island_build_clk_copies(rt_island_mgr_t *mgr)
          const island_clk_cand_t *lc =
             &(cands.items[grps.items[c->group].leader]);
          if (elide && c == lc && !(c->src->flags & RT_ISIG_DIRECT_LINK)
-             && c->dst->isl->spec == NULL) {
+             && island_clk_spec_ok(c->dst->isl)) {
             g->leader = c->dst->isl;
             g->leader_dst = c->dst->sig_idx;
          }
@@ -7709,6 +7717,10 @@ static void island_clk_fanout(rt_model_t *m, rt_island_t *isl,
       if (!two) {
          *mb->si_b = b;
          *mb->so_b = b;
+         // As an input sync would: a "$a" member runs "$ah" when it next
+         // runs, and a sweep switches it back once the value is 0/1
+         if (b != 0 && (mb->isl->spec_sv & RT_ISLAND_SPEC_SV_A))
+            island_spec_sv_unclean_in(mb->isl);
       }
       if (!(mb->so->flags & RT_ISIG_PRUNED))
          island_sync_out_sig(m, mb->isl, mb->so);
