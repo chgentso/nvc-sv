@@ -3505,3 +3505,4 @@ vhdl_island_spec_guard1 shell
 vlog_island_clkcopy_spec1 shell
 vlog_island_spec_sweep1 shell
 vlog_island_spec_mem1 shell
+vlog_island_spec_flip1 shell

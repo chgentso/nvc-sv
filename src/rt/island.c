@@ -6020,6 +6020,7 @@ static void island_spec_sv_recheck(rt_island_t *isl)
       sp->sv_unchecked++;
       sp->n_held = 0;
       sp->check_ival = 16;
+      sp->tick_unchecked = mgr->spec_tick;
       return;
    }
    sp->check_ival = MIN(MAX(sp->check_ival, 16u) * 2u, ISLAND_SPEC_MAX_IVAL);
@@ -6046,7 +6047,16 @@ static void island_spec_sv_unclean_in(rt_island_t *isl)
    assert(isl->spec_a && sp->sv && !sp->checks);
    island_spec_sv_set_mode(isl, true);
    sp->sv_checked++;
-   sp->check_ival = 16;
+   // Values with unknown bits that keep arriving (a bus that is x while
+   // idle) would switch the island back and forth at every recheck: when
+   // it ran "$a" only briefly, it stays in "$ah" twice as long as the last
+   // time before the next recheck
+   const uint64_t ran = mgr->spec_tick - sp->tick_unchecked;
+   if (ran < 2u * (uint64_t)sp->sv_ah_ival)
+      sp->sv_ah_ival = MIN(MAX(sp->sv_ah_ival, 16u) * 2u, ISLAND_SPEC_MAX_IVAL);
+   else
+      sp->sv_ah_ival = 16;
+   sp->check_ival = sp->sv_ah_ival;
    island_spec_schedule(isl, mgr->spec_tick + sp->check_ival);
 }
 
