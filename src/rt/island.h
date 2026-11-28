@@ -496,6 +496,8 @@ struct _rt_island_spec {
    uint8_t      *fb_buf;          // Their values before the call
    uint64_t      sv_checked;      // Switches from "$a" to "$ah"
    uint64_t      sv_unchecked;    // Switches from "$ah" to "$a"
+   uint32_t      x_hint_sig;      // Where an unknown bit was last found
+   uint64_t      x_hint_word;
 };
 
 typedef struct _rt_island_mgr rt_island_mgr_t;

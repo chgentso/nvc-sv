@@ -5916,16 +5916,49 @@ static inline bool island_spec_sv_sig_clean(const rt_island_sig_t *s,
    return any == 0;
 }
 
-// Live four-state signals of SV island ISL with an unknown bit
-static uint32_t island_spec_sv_unclean(const rt_island_t *isl)
+// Words [FROM, TO) of the unknown plane of signal S hold an unknown bit:
+// the index of the first such word, or TO
+static size_t island_spec_sv_find_x(const rt_island_t *isl,
+                                    const rt_island_sig_t *s,
+                                    size_t from, size_t to)
 {
-   uint32_t n = 0;
-   for (uint32_t i = 0; i < isl->nsigs; i++) {
-      const rt_island_sig_t *s = &(isl->sigs[i]);
-      if (island_spec_sig_live(s) && !island_spec_sv_sig_clean(s, isl->state))
-         n++;
+   const uint64_t *b = (const uint64_t *)(isl->state + s->b_off);
+   for (size_t w = from; w < to; w++) {
+      if (b[w] != 0)
+         return w;
    }
-   return n;
+   return to;
+}
+
+// Some live four-state signal of SV island ISL has an unknown bit.  The
+// search starts at the word where the last one was found: a value that is
+// not '0'/'1' (an uninitialised memory row, a floating bus) mostly stays,
+// and a big memory is then not scanned again at every check.
+static bool island_spec_sv_unclean(rt_island_t *isl)
+{
+   rt_island_spec_t *sp = isl->spec;
+   const uint32_t n = isl->nsigs;
+   if (n == 0)
+      return false;
+   for (uint32_t k = 0; k <= n; k++) {
+      // The hinted signal from the hinted word, every other signal, then
+      // the words of the hinted signal before the hinted word
+      const uint32_t i = (sp->x_hint_sig + k) % n;
+      const rt_island_sig_t *s = &(isl->sigs[i]);
+      if (!island_spec_sig_live(s) || (s->flags & RT_ISIG_TWO_STATE))
+         continue;
+      const size_t nw = (size_t)s->nwords * s->nelems;
+      const size_t hint = MIN(sp->x_hint_word, nw);
+      const size_t from = k == 0 ? hint : 0;
+      const size_t to = k == n ? hint : nw;
+      const size_t w = island_spec_sv_find_x(isl, s, from, to);
+      if (w < to) {
+         sp->x_hint_sig = i;
+         sp->x_hint_word = w;
+         return true;
+      }
+   }
+   return false;
 }
 
 static void island_spec_sv_set_mode(rt_island_t *isl, bool checks)
@@ -5942,7 +5975,7 @@ static bool island_spec_sv_try_promote(rt_island_t *isl)
    rt_island_spec_t *sp = isl->spec;
    rt_island_mgr_t *mgr = isl->mgr;
 
-   const uint32_t n_unclean = island_spec_sv_unclean(isl);
+   const uint32_t n_unclean = island_spec_sv_unclean(isl);   // 0 or 1
    if (n_unclean == 0)
       sp->unclean_since = 0;
    else if (!sp->force_sv && island_spec_stress_n() == 0) {
@@ -5982,7 +6015,7 @@ static void island_spec_sv_recheck(rt_island_t *isl)
    rt_island_mgr_t *mgr = isl->mgr;
    assert(isl->spec_a && sp->checks);
 
-   if (island_spec_safe(isl) && island_spec_sv_unclean(isl) == 0) {
+   if (island_spec_safe(isl) && !island_spec_sv_unclean(isl)) {
       island_spec_sv_set_mode(isl, false);
       sp->sv_unchecked++;
       sp->n_held = 0;
@@ -6046,6 +6079,27 @@ static void island_spec_sv_restore(rt_island_t *isl)
 static inline uint64_t *island_glitch_log(rt_island_t *isl,
                                           const rt_island_sig_t *s);
 
+// The elements of memory S in its write log get back their value in the
+// current state
+static void island_spec_sv_undo_touched(rt_island_t *isl,
+                                        const rt_island_sig_t *s,
+                                        const uint64_t *log)
+{
+   const uint32_t nwords = s->nwords;
+   const bool two_state = !!(s->flags & RT_ISIG_TWO_STATE);
+   for (uint64_t k = 0; k < log[0]; k++) {
+      const uint64_t e = log[1 + k];
+      if (e >= s->nelems)
+         continue;
+      const size_t off = (size_t)e * nwords * 8u;
+      memcpy(isl->next_state + s->a_off + off, isl->state + s->a_off + off,
+             nwords * 8u);
+      if (!two_state)
+         memcpy(isl->next_state + s->b_off + off,
+                isl->state + s->b_off + off, nwords * 8u);
+   }
+}
+
 // A flip-flop variant of DOM returned a deopt code: drop what it wrote
 // into the next state (outside a call the next state of the signals a
 // domain writes equals the state and their logs are empty)
@@ -6054,9 +6108,18 @@ static void island_spec_sv_ff_undo(rt_island_domain_t *dom)
    rt_island_t *isl = dom->isl;
    for (uint32_t j = 0; j < dom->n_write_sigs; j++) {
       const rt_island_sig_t *s = &(isl->sigs[dom->write_sigs[j]]);
-      island_copy_sig_buf(isl->next_state, isl->state, s);
-      if (s->flags & RT_ISIG_TOUCH_LOG)
-         *island_touch_log(isl, s) = 0;
+      if (s->flags & RT_ISIG_TOUCH_LOG) {
+         // Only the logged elements of a memory can differ (a store that
+         // is not logged overflows the log)
+         uint64_t *log = island_touch_log(isl, s);
+         if (log[0] <= RT_ISLAND_TOUCH_CAP)
+            island_spec_sv_undo_touched(isl, s, log);
+         else
+            island_copy_sig_buf(isl->next_state, isl->state, s);
+         log[0] = 0;
+      }
+      else
+         island_copy_sig_buf(isl->next_state, isl->state, s);
       if (s->flags & RT_ISIG_GLITCH_LOG)
          *island_glitch_log(isl, s) = 0;
    }
