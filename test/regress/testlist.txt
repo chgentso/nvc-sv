@@ -3517,3 +3517,4 @@ island_stats1 shell
 island_arena1 shell
 vlog_island_pack1 shell
 vlog_island_pack2 shell
+vlog_island_pack3 shell

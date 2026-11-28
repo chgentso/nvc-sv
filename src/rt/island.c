@@ -247,6 +247,57 @@ typedef struct {
    uint64_t             dirty_mask;
 } rt_sdom_ff_entry_t;
 
+// Packed commit program of a SystemVerilog super-domain
+// (island_sdom_prog_build): the register runs of its plain domains as flat
+// records grouped by size, the domains that need island_commit_domain in
+// their order.  BIT is the domain whose island a change of the run marks
+// dirty, or the spare bit n_doms.
+typedef struct {
+   uint64_t *dst;
+   uint32_t  delta;    // Bytes from state to next_state
+   uint32_t  bit;
+} rt_sdom_run_t;
+
+typedef struct {
+   uint64_t *dst;
+   uint32_t  delta;
+   uint32_t  bit;
+   uint32_t  nwords;
+} rt_sdom_runn_t;
+
+typedef struct {
+   uint64_t *word;
+   uint32_t  bit;
+} rt_sdom_arm_t;
+
+// A descriptor other than a run of a plain domain, committed in domain
+// order, or with DESC NULL a domain committed by island_commit_domain
+typedef struct {
+   const rt_island_ff_desc_t *desc;
+   uint32_t                   k;
+} rt_sdom_item_t;
+
+typedef struct {
+   uint32_t        gen;        // rt_island_mgr_t.dom_prog_gen when built
+   uint32_t        n_doms;
+   uint32_t        n_plain;
+   rt_sdom_run_t  *run1;       // One word
+   uint32_t        n_run1;
+   rt_sdom_run_t  *run2;       // Two words
+   uint32_t        n_run2;
+   rt_sdom_runn_t *runn;
+   uint32_t        n_runn;
+   uint64_t      **resets;     // Glitch log counts to clear
+   uint32_t        n_resets;
+   rt_sdom_arm_t  *arms;       // RT_ISIG_ARM_EVT words
+   uint32_t        n_arms;
+   rt_sdom_item_t *items;      // In domain order
+   uint32_t        n_items;
+   rt_island_t   **isls;       // Island of each plain domain
+   uint64_t       *bits;       // n_doms + 1 bits
+   uint32_t        n_words;
+} rt_sdom_prog_t;
+
 struct _rt_super_domain {
    rt_island_mgr_t     *mgr;
    rt_signal_t         *clk_sig;
@@ -274,7 +325,11 @@ struct _rt_super_domain {
    uint32_t             n_solo_islands;
    struct _island_clk_group *clk_group;   // Clocked through a copy group
    uint32_t             n_orphans;   // Dissolved with a callback pending
+   rt_sdom_prog_t      *prog;        // SV: packed commit program or NULL
+   uint32_t             entries_gen; // SV: dom_prog_gen of ff_entries
 };
+
+static void island_sdom_prog_free(rt_super_domain_t *sd);
 
 // A change of island state made by a VHDL force or release that the island
 // processes must only see from the next delta cycle on
@@ -333,6 +388,8 @@ struct _rt_island_mgr {
    uint32_t                mt_wave_tag;
    uint32_t                eval_epoch;
    uint32_t                n_forced_islands;
+   uint32_t                dom_prog_gen;   // Bumped when a commit program
+                                           // may be stale (rt_sdom_prog_t)
    bool                    hier_built;
    bool                    reset_done;
    bool                    late_pending;
@@ -607,6 +664,8 @@ typedef struct {
    uint64_t        sd_samples;    // Super-domain edges sampled
    uint64_t        dom_samples;   // Island domains sampled
    uint64_t        dom_commits;   // Island domains committed
+   uint64_t        dom_fast;      // Of them sampled from a packed entry
+   uint64_t        dom_packed;    // Committed by a packed program
    int64_t         now;
    uint32_t        delta;
    island_istat_t *isl;
@@ -783,6 +842,9 @@ static void island_stats_report(rt_island_mgr_t *mgr)
           st->dom_samples, st->dom_commits,
           (st->evals - st->rep_delta - st->rep_step) / steps,
           st->dom_samples / steps);
+   printf("ISLAND_STATS: packed domains: %.1f%% of samples, %.1f%% of commits\n",
+          100.0 * st->dom_fast / MAX(st->dom_samples, 1u),
+          100.0 * st->dom_packed / MAX(st->dom_commits, 1u));
 
    qsort(bodies, n_bodies, sizeof(island_istat_body_t), island_istat_body_cmp);
    jit_t *jit = rt_island_model_jit(mgr->model);
@@ -818,6 +880,10 @@ static bool island_direct_pub_on = true;
 // (island_eval_cluster_bits)
 static bool island_pack_on = true;
 
+// NVC_ISLAND_PACK_DOM=0 turns the packed SV super-domain sample entries and
+// commit programs off (rt_sdom_prog_t)
+static bool island_pack_dom_on = true;
+
 static inline bool island_is_hier_mode(void)
 {
    return opt_get_int(OPT_RTL_ISLANDS) == RTL_ISLANDS_HIER;
@@ -826,6 +892,13 @@ static inline bool island_is_hier_mode(void)
 static inline uint64_t island_top_mask(uint32_t width)
 {
    return (width & 63u) ? ((UINT64_C(1) << (width & 63u)) - 1u) : ~UINT64_C(0);
+}
+
+// A packed commit program of a super-domain may hold stale addresses or
+// domain kinds (rt_sdom_prog_t)
+static inline void island_dom_prog_stale(rt_island_mgr_t *mgr)
+{
+   mgr->dom_prog_gen++;
 }
 
 static inline void island_mark_dirty(rt_island_t *isl)
@@ -1847,6 +1920,9 @@ rt_island_mgr_t *rt_island_mgr_new(rt_model_t *m)
       // readers in the cluster directly
       const char *pack = getenv("NVC_ISLAND_PACK");
       island_pack_on = pack == NULL || atoi(pack) != 0;
+      const char *pdom = getenv("NVC_ISLAND_PACK_DOM");
+      island_pack_dom_on = (pdom == NULL || atoi(pdom) != 0)
+         && opt_get_int(OPT_SIM_THREADS) <= 1;
       const char *dpub = getenv("NVC_ISLAND_DIRECT_PUB");
       island_direct_pub_on = (dpub == NULL || atoi(dpub) != 0)
          && opt_get_int(OPT_SIM_THREADS) <= 1;
@@ -1938,6 +2014,7 @@ void rt_island_mgr_free(rt_island_mgr_t *mgr)
       rt_super_domain_t *sd = mgr->super_domains.items[i];
       free(sd->doms);
       island_afree(mgr, sd->ff_entries);
+      island_sdom_prog_free(sd);
       free(sd->clusters);
       free(sd->solo_islands);
       free(sd);
@@ -2122,6 +2199,7 @@ void rt_island_set_sparse(void *handle, uint32_t sparse_log_off,
                                   "sparse island state");
    island_state_free(isl->mgr, isl->state);
    isl->state = buf;
+   island_dom_prog_stale(isl->mgr);
    isl->next_state = isl->ndomains > 0 ? isl->state + isl->state_bytes : NULL;
    isl->sparse_log_off = sparse_log_off;
    isl->total_state_bytes = (uint32_t)aligned_total;
@@ -2678,6 +2756,7 @@ static void island_merge_ff_runs(rt_island_domain_t *dom)
 
 static void island_refresh_domain_descs(rt_island_t *isl)
 {
+   island_dom_prog_stale(isl->mgr);
    for (uint32_t d = 0; d < isl->ndomains; d++) {
       rt_island_domain_t *dom = &(isl->domains[d]);
       if (dom->n_write_sigs == 0)
@@ -2883,6 +2962,7 @@ void rt_island_finish(void *handle)
          continue;
 
       dom->needs_presync = false;
+      island_dom_prog_stale(isl->mgr);
       for (uint32_t w = 0; w < dom->n_write_sigs; w++) {
          const uint32_t sidx = dom->write_sigs[w];
          const rt_island_sig_t *ws = &(isl->sigs[sidx]);
@@ -5434,6 +5514,7 @@ static void island_spec_rebuild(rt_island_t *isl)
       for (uint32_t j = 0; j < dom->n_write_sigs; j++)
          dom->spec_held_w |= !!held[dom->write_sigs[j]];
    }
+   island_dom_prog_stale(isl->mgr);
    if (checks != sp->checks) {
       sp->checks = checks;
       island_spec_set_handles(isl);
@@ -6696,6 +6777,7 @@ static void island_spec_rt_setup(rt_island_t *isl)
       void *buf = island_state_alloc(isl->mgr, need, "island state");
       island_state_free(isl->mgr, isl->state);
       isl->state = buf;
+      island_dom_prog_stale(isl->mgr);
       isl->next_state = isl->ndomains > 0 ? isl->state + isl->state_bytes
          : NULL;
       isl->total_state_bytes = (uint32_t)need;
@@ -8933,6 +9015,7 @@ void rt_island_reset_all(rt_island_mgr_t *mgr)
 
    mgr->fast = !!opt_get_int(OPT_ISLAND_FAST);
    mgr->n_forced_islands = 0;
+   island_dom_prog_stale(mgr);
    island_spec_reset(mgr);
    mgr->late_pending = false;
    mgr->dirty_q.count = 0;
@@ -10950,6 +11033,89 @@ static bool island_sample_domain(jit_t *jit, rt_island_domain_t *dom,
    return ok;
 }
 
+// The result of a flip-flop function of an SV domain sampled from its
+// super-domain entry other than 0, as island_sample_domain takes it
+__attribute__((noinline))
+static bool island_sample_sdom_result(jit_t *jit, rt_island_domain_t *dom,
+                                      tlab_t *tlab, int64_t r)
+{
+   rt_island_t *isl = dom->isl;
+   if (unlikely(isl->spec_a) && (isl->spec_sv & RT_ISLAND_SPEC_SV_ON))
+      return island_spec_ff_deopt(jit, dom, tlab, r);
+   assert(!isl->spec_a);
+   dom->ff_dirty_mask |= (uint64_t)r;
+   return true;
+}
+
+static inline bool island_sdom_inputs_clean(const rt_super_domain_t *sd)
+{
+   for (uint32_t c = 0; c < sd->n_clusters; c++) {
+      if (sd->clusters[c]->has_dirty_inputs)
+         return false;
+   }
+   for (uint32_t s = 0; s < sd->n_solo_islands; s++) {
+      if (sd->solo_islands[s]->has_dirty_inputs)
+         return false;
+   }
+   return true;
+}
+
+// Samples the domains of an SV super-domain as island_sample_domain does
+// with fast islands after the reset, no forces and no dirty inputs left,
+// calling the flip-flop functions from the packed entries (filled the
+// first time a domain is sampled the usual way, emptied when its function
+// changes)
+static bool island_sample_sdom_packed(jit_t *jit, rt_super_domain_t *sd,
+                                      tlab_t *tlab)
+{
+   rt_island_mgr_t *mgr = sd->mgr;
+   rt_sdom_ff_entry_t *entries = sd->ff_entries;
+   const uint32_t n_doms = sd->n_doms;
+   if (unlikely(sd->entries_gen != mgr->dom_prog_gen)) {
+      for (uint32_t d = 0; d < n_doms; d++)
+         entries[d].ff_fn = NULL;
+      sd->entries_gen = mgr->dom_prog_gen;
+   }
+
+   jit_scalar_t *args = island_batch_args;
+   tlab_t null_tlab;
+   tlab_t *use_tlab = tlab;
+   if (unlikely(use_tlab == NULL)) {
+      null_tlab = jit_null_tlab(jit);
+      use_tlab = &null_tlab;
+   }
+   for (uint32_t d = 0; d < n_doms; d++) {
+      rt_sdom_ff_entry_t *e = &(entries[d]);
+      if (likely(e->ff_fn != NULL)) {
+         args[0].pointer = e->inst_ctx;
+         args[1].pointer = e->state;
+         (*e->ff_fn)(e->ff_func, NULL, args, use_tlab);
+         if (tlab != NULL
+             && unlikely(tlab->alloc != 0 || tlab->mem_dirty != 0))
+            tlab_reset(tlab);
+         const int64_t r = args[0].integer;
+         if (unlikely(r != 0)
+             && !island_sample_sdom_result(jit, e->dom, tlab, r))
+            return false;
+         ISTAT(island_stats.dom_fast++);
+      }
+      else {
+         rt_island_domain_t *dom = e->dom;
+         if (!island_sample_domain(jit, dom, tlab))
+            return false;
+         const rt_island_t *isl = dom->isl;
+         if (dom->ff_fn != NULL && !dom->needs_presync
+             && (isl->spec == NULL || isl->spec->sv)) {
+            e->inst_ctx = isl->inst_ctx;
+            e->state    = isl->state;
+            e->ff_func  = dom->ff_func;
+            e->ff_fn    = dom->ff_fn;
+         }
+      }
+   }
+   return true;
+}
+
 static bool island_eval_ff_pre_sync(jit_t *jit, rt_model_t *m,
                                     rt_island_mgr_t *mgr, tlab_t *tlab,
                                     unsigned n_ff, unsigned n_sd)
@@ -11722,6 +11888,14 @@ static bool rt_island_eval_ff_inner(jit_t *jit, rt_model_t *m,
                   }
                }
             }
+            else if (!island_edge_is_vhdl(sd->edge_flags)
+                     && island_pack_dom_on && mgr->fast
+                     && likely(island_batch_args != NULL) && mgr->reset_done
+                     && likely(mgr->n_forced_islands == 0)
+                     && island_sdom_inputs_clean(sd)) {
+               sd->used_fast_sample = false;
+               ok = island_sample_sdom_packed(jit, sd, tlab);
+            }
             else {
                sd->used_fast_sample = false;
                for (uint32_t d = 0; d < sd->n_doms; d++) {
@@ -12017,6 +12191,65 @@ static inline bool island_commit_run(rt_island_t *isl,
    return true;
 }
 
+// Commit of one descriptor of a domain other than a run
+static inline void island_commit_desc(rt_model_t *m, rt_island_t *isl,
+                                      const rt_island_ff_desc_t *d,
+                                      bool has_forces, bool act,
+                                      bool *comb_need_eval)
+{
+   if (unlikely(d->flags & RT_IFF_SPARSE_RAM)) {
+      island_commit_sparse_log(m, isl, has_forces, comb_need_eval);
+      return;
+   }
+   bool whole = true;
+   if (unlikely(d->flags & RT_IFF_TOUCH_LOG)) {
+      bool changed = false;
+      if (island_commit_touch(m, isl, d, has_forces, &changed)) {
+         if (!changed)
+            return;
+         whole = false;   // Changed elements are already published
+      }
+   }
+
+   uint64_t *glog;
+   if (unlikely(d->flags & RT_IFF_GLITCH)
+       && unlikely(*(glog = island_glitch_log(isl, &(isl->sigs[d->sig_idx])))
+                   != 0)
+       && island_commit_glitch(m, isl, d, glog)) {
+      if (unlikely(act) && (d->flags & RT_IFF_ACT))
+         isl->state[d->sig_idx] = 1;
+      if (d->flags & RT_IFF_COMB_READ)
+         *comb_need_eval = true;
+   }
+
+   if (whole) {
+      if (unlikely(has_forces)) {
+         rt_island_force_t *f =
+            (rt_island_force_t *)island_find_force(isl, d->sig_idx);
+         if (f != NULL)
+            island_apply_force_entry(isl->next_state,
+                                     &(isl->sigs[d->sig_idx]), f, true);
+      }
+
+      if (!island_commit_desc_buf(isl, d))
+         return;
+   }
+
+   if (unlikely(act) && (d->flags & RT_IFF_ACT))
+      isl->state[d->sig_idx] = 1;
+
+   if (d->flags & RT_IFF_COMB_READ)
+      *comb_need_eval = true;
+
+   if (unlikely(d->flags & RT_IFF_HAS_NOTIFY)) {
+      rt_island_sig_t *s = &(isl->sigs[d->sig_idx]);
+      if (d->flags & RT_IFF_DIRECT_LINK)
+         island_publish_direct(s);
+      else if (whole)
+         island_sync_out_sig(m, isl, s);
+   }
+}
+
 static void island_commit_domain(rt_model_t *m, rt_island_domain_t *dom)
 {
    rt_island_t *isl = dom->isl;
@@ -12040,57 +12273,7 @@ static void island_commit_domain(rt_model_t *m, rt_island_domain_t *dom)
             comb_need_eval = true;
          continue;
       }
-      if (unlikely(d->flags & RT_IFF_SPARSE_RAM)) {
-         island_commit_sparse_log(m, isl, has_forces, &comb_need_eval);
-         continue;
-      }
-      bool whole = true;
-      if (unlikely(d->flags & RT_IFF_TOUCH_LOG)) {
-         bool changed = false;
-         if (island_commit_touch(m, isl, d, has_forces, &changed)) {
-            if (!changed)
-               continue;
-            whole = false;   // Changed elements are already published
-         }
-      }
-
-      uint64_t *glog;
-      if (unlikely(d->flags & RT_IFF_GLITCH)
-          && unlikely(*(glog = island_glitch_log(isl, &(isl->sigs[d->sig_idx])))
-                      != 0)
-          && island_commit_glitch(m, isl, d, glog)) {
-         if (unlikely(act) && (d->flags & RT_IFF_ACT))
-            isl->state[d->sig_idx] = 1;
-         if (d->flags & RT_IFF_COMB_READ)
-            comb_need_eval = true;
-      }
-
-      if (whole) {
-         if (unlikely(has_forces)) {
-            rt_island_force_t *f =
-               (rt_island_force_t *)island_find_force(isl, d->sig_idx);
-            if (f != NULL)
-               island_apply_force_entry(isl->next_state,
-                                        &(isl->sigs[d->sig_idx]), f, true);
-         }
-
-         if (!island_commit_desc_buf(isl, d))
-            continue;
-      }
-
-      if (unlikely(act) && (d->flags & RT_IFF_ACT))
-         isl->state[d->sig_idx] = 1;
-
-      if (d->flags & RT_IFF_COMB_READ)
-         comb_need_eval = true;
-
-      if (unlikely(d->flags & RT_IFF_HAS_NOTIFY)) {
-         rt_island_sig_t *s = &(isl->sigs[d->sig_idx]);
-         if (d->flags & RT_IFF_DIRECT_LINK)
-            island_publish_direct(s);
-         else if (whole)
-            island_sync_out_sig(m, isl, s);
-      }
+      island_commit_desc(m, isl, d, has_forces, act, &comb_need_eval);
    }
 
    // A flip-flop process assigned a value an always @(...) block still
@@ -12105,6 +12288,236 @@ static void island_commit_domain(rt_model_t *m, rt_island_domain_t *dom)
 
    if (comb_need_eval && isl->eval_handle != JIT_HANDLE_INVALID)
       island_mark_dirty(isl);
+}
+
+static void island_sdom_prog_clear(rt_sdom_prog_t *p)
+{
+   free(p->run1);
+   free(p->run2);
+   free(p->runn);
+   free(p->resets);
+   free(p->arms);
+   free(p->items);
+   free(p->isls);
+   free(p->bits);
+   memset(p, 0, sizeof(rt_sdom_prog_t));
+}
+
+static void island_sdom_prog_free(rt_super_domain_t *sd)
+{
+   if (sd->prog != NULL) {
+      island_sdom_prog_clear(sd->prog);
+      free(sd->prog);
+      sd->prog = NULL;
+   }
+}
+
+// The commit of a "plain" domain is split: its register runs (RT_IFF_RUN),
+// glitch log count resets and arm word tests only change its own registers,
+// which nothing the other domains' commits do reads, so they are done first
+// for all plain domains; its other descriptors (published registers, logs,
+// memories) and the island's dirty mark follow in domain order between the
+// commits of the domains that are not plain (forces, held signals, a
+// register an input sync or another domain also writes).
+static bool island_sdom_dom_plain(const rt_island_domain_t *dom)
+{
+   const rt_island_t *isl = dom->isl;
+   if (isl->is_vhdl || isl->has_forces || isl->spec_held || dom->spec_held_w
+       || dom->needs_presync || isl->next_state == NULL)
+      return false;
+   if (dom->n_write_sigs > 0 && dom->ff_runs == NULL)
+      return false;
+   for (uint32_t j = 0; j < dom->n_write_sigs; j++) {
+      if (isl->sigs[dom->write_sigs[j]].flags & RT_ISIG_IN)
+         return false;
+   }
+   return true;
+}
+
+static void island_sdom_prog_build(rt_super_domain_t *sd)
+{
+   rt_island_mgr_t *mgr = sd->mgr;
+   if (sd->prog == NULL)
+      sd->prog = xcalloc(sizeof(rt_sdom_prog_t));
+   rt_sdom_prog_t *p = sd->prog;
+   island_sdom_prog_clear(p);
+   p->gen = mgr->dom_prog_gen;
+   const uint32_t n = sd->n_doms;
+   p->n_doms = n;
+   if (n == 0)
+      return;
+   p->n_words = (n + 1u + 63u) / 64u;
+   p->bits = xcalloc_array(p->n_words, sizeof(uint64_t));
+   p->isls = xcalloc_array(n, sizeof(rt_island_t *));
+
+   A(rt_sdom_run_t) run1 = AINIT;
+   A(rt_sdom_run_t) run2 = AINIT;
+   A(rt_sdom_runn_t) runn = AINIT;
+   A(uint64_t *) resets = AINIT;
+   A(rt_sdom_arm_t) arms = AINIT;
+   A(rt_sdom_item_t) items = AINIT;
+
+   for (uint32_t k = 0; k < n; k++) {
+      const rt_island_domain_t *dom = sd->doms[k];
+      rt_island_t *isl = dom->isl;
+      if (!island_sdom_dom_plain(dom)) {
+         APUSH(items, ((rt_sdom_item_t){ NULL, k }));
+         continue;
+      }
+
+      p->isls[k] = isl;
+      p->n_plain++;
+      const uint32_t delta = (uint32_t)(isl->next_state - isl->state);
+      for (uint32_t j = 0; j < dom->n_glitch_resets; j++)
+         APUSH(resets, (uint64_t *)(isl->next_state + dom->glitch_resets[j]));
+      for (uint32_t j = 0; j < dom->n_ff_runs; j++) {
+         const rt_island_ff_desc_t *d = &(dom->ff_runs[j]);
+         if (!(d->flags & RT_IFF_RUN)) {
+            APUSH(items, ((rt_sdom_item_t){ d, k }));
+            continue;
+         }
+         const uint32_t bit = (d->flags & RT_IFF_COMB_READ) ? k : n;
+         uint64_t *dst = (uint64_t *)(isl->state + d->a_off);
+         if (d->count == 1)
+            APUSH(run1, ((rt_sdom_run_t){ dst, delta, bit }));
+         else if (d->count == 2)
+            APUSH(run2, ((rt_sdom_run_t){ dst, delta, bit }));
+         else if (d->count > 0)
+            APUSH(runn, ((rt_sdom_runn_t){ dst, delta, bit, d->count }));
+      }
+      for (uint32_t j = 0; j < dom->n_arm_words; j++)
+         APUSH(arms, ((rt_sdom_arm_t){
+                  (uint64_t *)(isl->state + dom->arm_words[j]), k }));
+   }
+
+   p->run1 = run1.items;     p->n_run1 = run1.count;
+   p->run2 = run2.items;     p->n_run2 = run2.count;
+   p->runn = runn.items;     p->n_runn = runn.count;
+   p->resets = resets.items; p->n_resets = resets.count;
+   p->arms = arms.items;     p->n_arms = arms.count;
+   p->items = items.items;   p->n_items = items.count;
+}
+
+static inline void island_sdom_prog_mark(rt_island_t *isl)
+{
+   if (isl->eval_handle != JIT_HANDLE_INVALID)
+      island_mark_dirty(isl);
+}
+
+// Next set bit at or after position *W * 64 of P->bits (cleared as they
+// are read), UINT32_MAX when there is none
+static inline uint32_t island_sdom_next_bit(rt_sdom_prog_t *p, uint32_t *w,
+                                            uint64_t *msk)
+{
+   while (*msk == 0) {
+      if (++(*w) >= p->n_words)
+         return UINT32_MAX;
+      *msk = p->bits[*w];
+      p->bits[*w] = 0;
+   }
+   const uint32_t k = (*w << 6) + (uint32_t)__builtin_ctzll(*msk);
+   *msk &= *msk - 1u;
+   return k;
+}
+
+// The same as island_commit_domain for each domain of the super-domain in
+// turn (see island_sdom_dom_plain)
+static void island_commit_sdom_prog(rt_model_t *m, rt_super_domain_t *sd)
+{
+   rt_sdom_prog_t *p = sd->prog;
+   uint64_t *restrict bits = p->bits;
+
+   for (uint32_t i = 0; i < p->n_resets; i++) {
+      if (unlikely(*p->resets[i] != 0))
+         *p->resets[i] = 0;
+   }
+
+   for (uint32_t i = 0; i < p->n_run1; i++) {
+      const rt_sdom_run_t *r = &(p->run1[i]);
+      uint64_t *dst = r->dst;
+      const uint64_t *src = (const uint64_t *)((uint8_t *)dst + r->delta);
+      const uint64_t x = dst[0] ^ src[0];
+      dst[0] = src[0];
+      bits[r->bit >> 6] |= (uint64_t)(x != 0) << (r->bit & 63);
+   }
+
+   for (uint32_t i = 0; i < p->n_run2; i++) {
+      const rt_sdom_run_t *r = &(p->run2[i]);
+      uint64_t *dst = r->dst;
+      const uint64_t *src = (const uint64_t *)((uint8_t *)dst + r->delta);
+      const uint64_t x = (dst[0] ^ src[0]) | (dst[1] ^ src[1]);
+      dst[0] = src[0];
+      dst[1] = src[1];
+      bits[r->bit >> 6] |= (uint64_t)(x != 0) << (r->bit & 63);
+   }
+
+   for (uint32_t i = 0; i < p->n_runn; i++) {
+      const rt_sdom_runn_t *r = &(p->runn[i]);
+      uint64_t *dst = r->dst;
+      const uint64_t *src = (const uint64_t *)((uint8_t *)dst + r->delta);
+      const size_t nbytes = (size_t)r->nwords * sizeof(uint64_t);
+      if (memcmp(dst, src, nbytes) != 0) {
+         memcpy(dst, src, nbytes);
+         bits[r->bit >> 6] |= UINT64_C(1) << (r->bit & 63);
+      }
+   }
+
+   for (uint32_t i = 0; i < p->n_arms; i++) {
+      uint64_t *word = p->arms[i].word;
+      if (unlikely(*word == 2)) {
+         *word = 1;
+         bits[p->arms[i].bit >> 6] |= UINT64_C(1) << (p->arms[i].bit & 63);
+      }
+   }
+
+   // The other descriptors, domain commits and dirty marks in domain order
+   const uint32_t n = p->n_doms;
+   bits[n >> 6] &= ~(UINT64_C(1) << (n & 63));
+   if (p->n_items == 0) {
+      for (uint32_t w = 0; w < p->n_words; w++) {
+         uint64_t msk = bits[w];
+         if (msk == 0)
+            continue;
+         bits[w] = 0;
+         do {
+            const uint32_t k = (w << 6) + (uint32_t)__builtin_ctzll(msk);
+            msk &= msk - 1u;
+            island_sdom_prog_mark(p->isls[k]);
+         } while (msk != 0);
+      }
+      return;
+   }
+
+   uint32_t w = 0;
+   uint64_t msk = bits[0];
+   bits[0] = 0;
+   uint32_t kb = island_sdom_next_bit(p, &w, &msk);
+   const rt_sdom_item_t *it = p->items, *end = p->items + p->n_items;
+   while (it < end || kb != UINT32_MAX) {
+      if (it == end || kb < it->k) {
+         island_sdom_prog_mark(p->isls[kb]);
+         kb = island_sdom_next_bit(p, &w, &msk);
+         continue;
+      }
+      const uint32_t k = it->k;
+      if (it->desc == NULL) {
+         assert(kb != k);
+         island_commit_domain(m, sd->doms[k]);
+         it++;
+         continue;
+      }
+      rt_island_t *isl = p->isls[k];
+      const bool act = isl->act_on;
+      bool comb_need_eval = false;
+      for (; it < end && it->k == k; it++)
+         island_commit_desc(m, isl, it->desc, false, act, &comb_need_eval);
+      if (kb == k) {
+         comb_need_eval = true;
+         kb = island_sdom_next_bit(p, &w, &msk);
+      }
+      if (comb_need_eval)
+         island_sdom_prog_mark(isl);
+   }
 }
 
 static void island_eval_clusters_tramp(void *arg)
@@ -12133,10 +12546,23 @@ void rt_island_commit_ff(rt_model_t *m, rt_island_mgr_t *mgr, tlab_t *tlab)
    }
    mgr->ff_commit_q.count = 0;
 
+   const bool packed = island_pack_dom_on && mgr->fast
+      && mgr->n_forced_islands == 0;
    for (unsigned i = 0; i < mgr->super_commit_q.count; i++) {
       rt_super_domain_t *sd = mgr->super_commit_q.items[i];
       sd->in_commit_q = false;
       ISTAT(island_stats.dom_commits += sd->n_doms);
+      if (packed && !island_edge_is_vhdl(sd->edge_flags)) {
+         rt_sdom_prog_t *p = sd->prog;
+         if (p == NULL || p->gen != mgr->dom_prog_gen
+             || p->n_doms != sd->n_doms) {
+            island_sdom_prog_build(sd);
+            p = sd->prog;
+         }
+         ISTAT(island_stats.dom_packed += p->n_plain);
+         island_commit_sdom_prog(m, sd);
+         continue;
+      }
       for (uint32_t d = 0; d < sd->n_doms; d++)
          island_commit_domain(m, sd->doms[d]);
    }
