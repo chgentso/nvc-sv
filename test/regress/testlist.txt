@@ -3499,3 +3499,4 @@ vlog_island_clkcopy1 shell
 vlog_island_spec_lower1 shell
 vlog_island_spec_rt1 shell
 island_arm1 shell
+vhdl_island_spec_resize1 shell

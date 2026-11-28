@@ -3260,8 +3260,10 @@ static bool vi_lower_std_fcall(vi_lower_t *l, tree_t fcall, tree_t decl,
          mir_value_t src = (a.is_signed != sg)
             ? mir_build_cast(mu, mir_vec2_type(mu, a.width, sg), a.val) : a.val;
          mir_value_t res = mir_build_cast(mu, tv, src);
-         if (sg && nw < a.width && nw > 1) {
-            // Preserve sign bit at MSB (pos 0) per IEEE numeric_std RESIZE(SIGNED)
+         if (sg && nw < a.width) {
+            // Preserve sign bit at MSB (pos 0) per IEEE numeric_std
+            // RESIZE(SIGNED): also for a new size of one bit, which keeps
+            // only the sign bit
             mir_value_t sbit = mir_build_extract(mu, mir_vec2_type(mu, 1, false),
                                                  src, vi_off(mu, 0));
             res = mir_build_insert(mu, sbit, res, vi_off(mu, 0));
