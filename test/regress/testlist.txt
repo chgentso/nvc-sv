@@ -3505,3 +3505,5 @@ vhdl_island_spec_guard1 shell
 vlog_island_clkcopy_spec1 shell
 island_stats1 shell
 island_arena1 shell
+vlog_island_pack1 shell
+vlog_island_pack2 shell

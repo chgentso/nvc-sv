@@ -234,6 +234,8 @@ struct _rt_super_island {
    bool                mt_eval_on_main;
    bool                mt_requeue;
    bool                is_vhdl;
+   uint64_t           *dirty_bits;   // Bit per topo_pos: islands[k]->dirty
+   uint32_t            n_dirty_words; // (see island_eval_cluster_bits)
 };
 
 typedef struct {
@@ -799,6 +801,10 @@ static inline bool island_sig_published(uint32_t flags)
 // NVC_ISLAND_DIRECT_PUB=0 turns RT_ISIG_DIRECT_PUB wires off (diagnosis)
 static bool island_direct_pub_on = true;
 
+// NVC_ISLAND_PACK=0 turns the packed cluster representation off
+// (island_eval_cluster_bits)
+static bool island_pack_on = true;
+
 static inline bool island_is_hier_mode(void)
 {
    return opt_get_int(OPT_RTL_ISLANDS) == RTL_ISLANDS_HIER;
@@ -818,6 +824,8 @@ static inline void island_mark_dirty(rt_island_t *isl)
    if (isl->cluster != NULL) {
       rt_super_island_t *cl = isl->cluster;
       cl->dirty_count++;
+      if (cl->dirty_bits != NULL)
+         cl->dirty_bits[isl->topo_pos >> 6] |= UINT64_C(1) << (isl->topo_pos & 63);
       if (isl->topo_pos < cl->min_dirty_pos)
          cl->min_dirty_pos = isl->topo_pos;
       if (!cl->has_dirty) {
@@ -838,8 +846,12 @@ static inline void island_clear_dirty(rt_island_t *isl)
 
    isl->dirty = false;
    if (isl->cluster != NULL) {
-      assert(isl->cluster->dirty_count > 0);
-      isl->cluster->dirty_count--;
+      rt_super_island_t *cl = isl->cluster;
+      assert(cl->dirty_count > 0);
+      cl->dirty_count--;
+      if (cl->dirty_bits != NULL)
+         cl->dirty_bits[isl->topo_pos >> 6] &=
+            ~(UINT64_C(1) << (isl->topo_pos & 63));
    }
 }
 
@@ -1820,6 +1832,8 @@ rt_island_mgr_t *rt_island_mgr_new(rt_model_t *m)
       island_act_enabled = act == NULL || atoi(act) != 0;
       // Off with simulation threads: island_eval_cluster_mt marks the
       // readers in the cluster directly
+      const char *pack = getenv("NVC_ISLAND_PACK");
+      island_pack_on = pack == NULL || atoi(pack) != 0;
       const char *dpub = getenv("NVC_ISLAND_DIRECT_PUB");
       island_direct_pub_on = (dpub == NULL || atoi(dpub) != 0)
          && opt_get_int(OPT_SIM_THREADS) <= 1;
@@ -1901,6 +1915,7 @@ void rt_island_mgr_free(rt_island_mgr_t *mgr)
    for (unsigned i = 0; i < mgr->clusters.count; i++) {
       rt_super_island_t *cl = mgr->clusters.items[i];
       free(cl->comb_deps);
+      island_afree(mgr, cl->dirty_bits);
       island_afree(mgr, cl->dirty_in_list);
       island_afree(mgr, cl->islands);
       island_afree(mgr, cl);
@@ -8707,6 +8722,8 @@ void rt_island_reset_all(rt_island_mgr_t *mgr)
       cl->mt_sync_start = 0;
       cl->mt_sync_end = 0;
       cl->pending_vhdl_ff = 0;
+      if (cl->dirty_bits != NULL)
+         memset(cl->dirty_bits, 0, cl->n_dirty_words * sizeof(uint64_t));
    }
 
    for (unsigned i = 0; i < mgr->islands.count; i++) {
@@ -8840,6 +8857,8 @@ void rt_island_reset_all(rt_island_mgr_t *mgr)
          }
       }
 
+      const bool use_bits = island_pack_on && mgr->fast
+         && opt_get_int(OPT_SIM_THREADS) <= 1;
       for (unsigned i = 0; i < mgr->clusters.count; i++) {
          rt_super_island_t *cl = mgr->clusters.items[i];
          cl->is_vhdl = false;
@@ -8847,6 +8866,21 @@ void rt_island_reset_all(rt_island_mgr_t *mgr)
             if (cl->islands[k]->is_vhdl) {
                cl->is_vhdl = true;
                break;
+            }
+         }
+         // VHDL clusters and simulation threads keep the island scan
+         if (cl->is_vhdl || !use_bits) {
+            island_afree(mgr, cl->dirty_bits);
+            cl->dirty_bits = NULL;
+            cl->n_dirty_words = 0;
+         }
+         else if (cl->dirty_bits == NULL) {
+            cl->n_dirty_words = (cl->n_islands + 63u) / 64u;
+            cl->dirty_bits = island_acalloc(mgr, cl->n_dirty_words,
+                                            sizeof(uint64_t));
+            for (uint32_t k = 0; k < cl->n_islands; k++) {
+               if (cl->islands[k]->dirty)
+                  cl->dirty_bits[k >> 6] |= UINT64_C(1) << (k & 63);
             }
          }
       }
@@ -9516,10 +9550,104 @@ static inline void island_flush_ext_outs(rt_model_t *m, rt_island_t *isl)
    }
 }
 
+// One evaluation of a dirty cluster member (island_eval_cluster)
+static inline bool island_eval_cluster_member(jit_t *jit, rt_model_t *m,
+                                              rt_island_t *isl, tlab_t *tlab)
+{
+   if (isl->has_dirty_inputs) {
+      isl->has_dirty_inputs = false;
+      island_sync_dirty_inputs(isl);
+   }
+
+   if (isl->eval_handle == JIT_HANDLE_INVALID)
+      return true;
+
+   if (!island_call_comb(jit, m, isl, tlab))
+      return false;
+
+   island_after_comb(isl);
+   if (isl->n_direct_comb_descs > 0)
+      island_comb_direct_outs(isl);
+
+   island_flush_ext_outs(m, isl);
+   if (unlikely(isl->n_obs_sigs > 0)) {
+      for (uint32_t j = 0; j < isl->n_obs_sigs; j++)
+         island_flush_comb_out_sig(m, isl, &(isl->sigs[isl->obs_sigs[j]]));
+   }
+   return true;
+}
+
+// island_eval_cluster on the cluster's dirty bitmap: the same members in
+// the same order, found without reading the header of every clean member
+// between the dirty ones (the bitmap mirrors islands[k]->dirty through
+// island_mark_dirty and island_clear_dirty).  A member marked dirty at a
+// later position while the pass runs is evaluated in this pass, one at an
+// earlier position (or itself) in the next, as in the island scan.
+static bool island_eval_cluster_bits(jit_t *jit, rt_model_t *m,
+                                     rt_super_island_t *cl, tlab_t *tlab)
+{
+   uint64_t *const bits = cl->dirty_bits;
+   const uint32_t nw = cl->n_dirty_words;
+   bool ok = true;
+   uint32_t k = cl->min_dirty_pos;
+   for (;;) {
+      uint32_t w = k >> 6;
+      if (w >= nw)
+         break;
+      uint64_t word = bits[w] & (~UINT64_C(0) << (k & 63));
+      while (word == 0 && ++w < nw)
+         word = bits[w];
+      if (word == 0)
+         break;
+      k = (w << 6) + __builtin_ctzll(word);
+      bits[w] &= ~(UINT64_C(1) << (k & 63));
+
+      rt_island_t *isl = cl->islands[k];
+      assert(isl->topo_pos == k);
+      if (unlikely(!isl->dirty)) {   // Cleared without island_clear_dirty
+         k++;
+         continue;
+      }
+      cl->dirty_count--;
+      isl->dirty = false;
+      if (!island_eval_cluster_member(jit, m, isl, tlab)) {
+         ok = false;
+         break;
+      }
+      k++;
+   }
+
+   if (ok) {
+      uint32_t min_pos = UINT32_MAX;
+      if (unlikely(cl->dirty_count > 0)) {
+         for (uint32_t i = 0; i < nw; i++) {
+            if (bits[i] != 0) {
+               min_pos = (i << 6) + __builtin_ctzll(bits[i]);
+               break;
+            }
+         }
+      }
+      if (min_pos < cl->n_islands) {
+         cl->min_dirty_pos = min_pos;
+         cl->has_dirty = true;
+         APUSH(cl->islands[0]->mgr->dirty_clusters, cl);
+      }
+      else {
+         cl->has_dirty = false;
+         cl->min_dirty_pos = UINT32_MAX;
+         cl->dirty_count = 0;
+      }
+   }
+   return ok;
+}
+
 static bool island_eval_cluster(jit_t *jit, rt_model_t *m,
                                 rt_super_island_t *cl, tlab_t *tlab)
 {
    ISTAT(island_stats.cl_evals++);
+   if (likely(cl->dirty_bits != NULL))
+      return island_eval_cluster_bits(jit, m, cl, tlab);
+
    bool ok = true;
    for (uint32_t k = cl->min_dirty_pos;
         k < cl->n_islands && cl->dirty_count > 0; k++) {
