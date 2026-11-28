@@ -5502,6 +5502,17 @@ void vhdl_island_rebuild(vhdl_island_ctx_t *ctx)
             if (p->kind == VIPROC_FF && j < p->n_body_reads)
                loc_flags[loc] |= LOC_BODY_READ;
          }
+         // A combinational process that may warn runs on every event on
+         // its sensitivity list, also on a signal it does not read
+         // (vi_emit_report_guard): the island must wake for it like for a
+         // signal a combinational process reads, and the change byte lets
+         // the guard skip it when it did not change
+         for (uint32_t j = 0; p->kind == VIPROC_COMB
+                 && (p->has_report || p->has_warn) && j < p->n_evt_sigs; j++) {
+            const int32_t loc = gid_to_loc[p->evt_sigs[j]];
+            if (loc >= 0)
+               loc_flags[loc] |= LOC_COMB_READ;
+         }
          for (uint32_t j = 0; j < p->n_writes; j++) {
             const int32_t loc = gid_to_loc[p->writes[j]];
             assert(loc >= 0);
