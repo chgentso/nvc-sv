@@ -140,6 +140,8 @@ typedef struct {
    // Likewise a Mode B process that calls a function that may report a
    // warning (an IEEE metavalue warning)
    bool              has_warn;
+   // Every such call only warns when IEEE warnings are on
+   bool              warn_ieee_only;
    uint32_t         *evt_sigs;
    uint32_t          n_evt_sigs;
    uint32_t         *evt_part_off;    // Byte range of a signal element or

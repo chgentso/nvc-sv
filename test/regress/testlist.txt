@@ -3505,3 +3505,4 @@ vhdl_island_spec_guard1 shell
 vhdl_island_warn3 shell
 vhdl_island_warn4 shell
 vhdl_island_warn5 shell
+vhdl_island_warn6 shell

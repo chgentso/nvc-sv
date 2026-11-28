@@ -4500,6 +4500,33 @@ static void island_init_feedback(rt_island_t *isl)
 // first call) set the run-all byte instead.  NVC_ISLAND_ACT_CHECK (on by
 // default in debug builds) keeps a copy of the state and checks that no
 // change was missed.
+// True when no IEEE package warning can be reported for the rest of the
+// run: --ieee-warnings=off (not off-at-0, which turns them on after time
+// 0), for the native implementations, and the constant the VHDL package
+// bodies test, which an option given after the packages were initialised
+// does not change
+static bool island_ieee_warnings_off(rt_island_t *isl)
+{
+   if (opt_get_int(OPT_IEEE_WARNINGS) != IEEE_WARNINGS_OFF)
+      return false;
+
+   jit_t *jit = rt_island_model_jit(isl->mgr->model);
+   if (jit == NULL)
+      return false;
+
+   jit_handle_t handle = jit_lazy_compile(jit, ident_new("NVC.SIM_PKG"));
+   if (handle == JIT_HANDLE_INVALID)
+      return false;
+
+   void *pkg = jit_link(jit, handle);
+   if (pkg == NULL)
+      return false;
+
+   const uint8_t *no_warning =
+      jit_get_frame_var(jit, handle, pkg, ident_new("IEEE_NO_WARNING"));
+   return no_warning != NULL && *no_warning != 0;
+}
+
 static void island_init_act(rt_island_t *isl)
 {
    rt_island_mgr_t *mgr = isl->mgr;
@@ -4555,6 +4582,8 @@ static void island_init_act(rt_island_t *isl)
    }
 
    assert(RT_ISLAND_ACT_BYTES(isl->nsigs) <= isl->state_bytes);
+   isl->state[RT_ISLAND_ACT_NOWARN(isl->nsigs)] =
+      island_ieee_warnings_off(isl);
    if (island_act_check) {
       ai->shadow = xmalloc(MAX(1u, isl->state_bytes));
       memcpy(ai->shadow, isl->state, isl->state_bytes);

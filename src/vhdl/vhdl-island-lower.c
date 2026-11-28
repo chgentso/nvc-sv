@@ -9297,6 +9297,21 @@ static bool vi_emit_report_guard(vi_lower_t *l, const vhdl_iproc_t *p,
                                  mir_block_t skip_bb)
 {
    mir_unit_t *mu = l->mu;
+
+   mir_block_t body_bb = MIR_NULL_BLOCK;
+   if (!p->has_report && p->warn_ieee_only && l->isl->has_act) {
+      // The process can only warn through IEEE package warnings: when they
+      // are off for the whole run, running it more often than unfused does
+      // not change its outputs, and the activity test is enough
+      body_bb = mir_add_block(mu);
+      mir_block_t guard_bb = mir_add_block(mu);
+      mir_value_t nowarn = mir_build_load(
+         mu, vi_state_ptr_at(l, RT_ISLAND_ACT_NOWARN(l->isl->n_sigs)));
+      mir_build_cond(mu, mir_build_cmp(mu, MIR_CMP_NEQ, nowarn, vi_u8(mu, 0)),
+                     body_bb, guard_bb);
+      mir_set_cursor(mu, guard_bb, MIR_APPEND);
+   }
+
    mir_value_t ran = mir_build_load(mu, vi_state_ptr_at(l, p->evt_flag_off));
    mir_value_t first = mir_build_cmp(mu, MIR_CMP_EQ, ran, vi_u8(mu, 0));
    mir_value_t any = first, any_v = MIR_NULL_VALUE;
@@ -9357,6 +9372,10 @@ static bool vi_emit_report_guard(vi_lower_t *l, const vhdl_iproc_t *p,
 
    mir_set_cursor(mu, run_bb, MIR_APPEND);
    mir_build_store(mu, vi_state_ptr_at(l, p->evt_flag_off), vi_u8(mu, 1));
+   if (!mir_is_null(body_bb)) {
+      mir_build_jump(mu, body_bb);
+      mir_set_cursor(mu, body_bb, MIR_APPEND);
+   }
    return true;
 }
 
